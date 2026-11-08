@@ -43,17 +43,76 @@ namespace CompetitiveRounds
             // team, so a death can credit a kill in every mode.
             public int damagerActor;
             public int damagerTeam;
+            // Round 1 F1: the frame it was written in. The death callback's
+            // frame is compared with it for IDENTITY (KillCreditRules.Credit):
+            // a lethal DoDamage runs RPCA_Die synchronously from its own body,
+            // so the record of the same frame is the lethal event's.
+            public int frame;
         }
         internal static readonly Dictionary<int, DamageStamp> LastDamageByView =
             new Dictionary<int, DamageStamp>();
 
-        // How fresh a stamp must be to explain a death. OOB kills apply damage
-        // and die in the same call chain; DOT deaths tick within 1s windows.
+        // How fresh a stamp must be to explain a death's KIND (boundary, own
+        // bullet) for the self-death statistics. OOB kills apply damage and die
+        // in the same call chain; DOT deaths tick within 1s windows. The KILL
+        // CREDIT never reads this window (round 1 F1): it reads the frame.
         private const float STAMP_FRESH_SECONDS = 2f;
+
+        // Round 1 F1 / round 2 HIGH 1: the views whose DoDamage is applying right
+        // now (KillCreditRules.ApplyingState: depth and frame per view id; a
+        // dealer's effects may nest a call for another view). A death callback
+        // that runs while the victim's own call is applying belongs to THAT
+        // event: a lethal DoDamage sends RPCA_Die(All) from inside its body and
+        // PUN runs an All RPC locally at once. Entered by the stamp patch's
+        // prefix, left by its FINALIZER (which runs whether or not the body
+        // throws, so no depth leaks); a depth left from an earlier frame is
+        // healed at the next call (a damage call never spans frames). Cleared
+        // with the stamps.
+        internal static readonly KillCreditRules.ApplyingState Applying = new KillCreditRules.ApplyingState();
+
+        /// <summary>The fighters' actors and teams for KillCreditRules.SoleOpponent
+        /// (round 1 F5, round 2 HIGH 2): only in a plain 1v1 room (not a 1v2
+        /// "ovt_" room, not FFA, not a 2v2 team room), where the inference is
+        /// the server's own 1v1 rule; a team room's unattributed death credits
+        /// nobody (a duo's friendly-fire kill, a held seat's absence). The rules
+        /// also need exactly two fighters.</summary>
+        private static readonly List<int> soleActors = new List<int>(), soleTeams = new List<int>();
+        private static bool OneVsOneRoom()
+        {
+            try
+            {
+                if (Diag2v2.IsOvt() || Diag2v2.IsFfa()) return false;
+                var room = PhotonNetwork.InRoom ? PhotonNetwork.CurrentRoom : null;
+                var props = room != null ? room.CustomProperties : null;
+                // The 2v2 team rooms carry cr_ff (TeamGameLifecycle.InTeamRoom's
+                // marker), read here without that gate's spectator clause.
+                return props == null || !props.ContainsKey("cr_ff");
+            }
+            catch { return false; }
+        }
+        private static int SoleOpponentOf(int victimActor, int victimTeam)
+        {
+            try
+            {
+                if (!OneVsOneRoom()) return -1;
+                var pm = PlayerManager.instance;
+                if (pm == null || pm.players == null) return -1;
+                soleActors.Clear(); soleTeams.Clear();
+                for (int i = 0; i < pm.players.Count; i++)
+                {
+                    var p = pm.players[i];
+                    if (p == null || p.data == null || p.data.view == null) continue;
+                    soleActors.Add(p.data.view.OwnerActorNr);
+                    soleTeams.Add(p.TeamID);
+                }
+                return KillCreditRules.SoleOpponent(soleActors, soleTeams, victimActor, victimTeam);
+            }
+            catch { return -1; }
+        }
 
         internal static void ClearMatchState()
         {
-            try { LastDamageByView.Clear(); } catch { }
+            try { LastDamageByView.Clear(); Applying.Clear(); } catch { }
         }
 
         // ─────────────────────────────────────────────────────────────────
@@ -162,6 +221,9 @@ namespace CompetitiveRounds
                     var data = __instance != null ? __instance.data : null;
                     if (data == null || data.view == null) return;
                     __state = data.health;
+                    // Round 1 F1: this view's damage call is applying until the
+                    // finalizer below (paired through __state; round 2 HIGH 1).
+                    Applying.Enter(data.view.ViewID, Time.frameCount);
                     if (!VanillaFixSupport.AnyGameScope()) return;
                     var victim = data.player;
                     int kind = 0;
@@ -179,6 +241,7 @@ namespace CompetitiveRounds
                         time = Time.unscaledTime,
                         damagerActor = dActor,
                         damagerTeam = dTeam,
+                        frame = Time.frameCount,
                     };
                 }
                 catch { }
@@ -200,6 +263,26 @@ namespace CompetitiveRounds
                         LastDamageByView.Remove(data.view.ViewID);
                 }
                 catch { }
+            }
+
+            /// <summary>Round 2 HIGH 1: the applying depth is released here, not
+            /// in the postfix, because a finalizer runs whether or not the
+            /// original body throws (DoDamage runs its on-dealt-damage effects
+            /// unguarded, HealthHandler.cs:281): exactly once per call the
+            /// prefix entered (__state), and the original exception is kept.</summary>
+            [HarmonyFinalizer]
+            private static Exception Finalizer(HealthHandler __instance, float __state, Exception __exception)
+            {
+                try
+                {
+                    if (__state != float.MinValue)
+                    {
+                        var data = __instance != null ? __instance.data : null;
+                        if (data != null && data.view != null) Applying.Exit(data.view.ViewID);
+                    }
+                }
+                catch { }
+                return __exception;
             }
         }
 
@@ -239,19 +322,28 @@ namespace CompetitiveRounds
 
                     int kind = 0;
                     DamageStamp stamp;
-                    bool fresh = LastDamageByView.TryGetValue(data.view.ViewID, out stamp)
-                        && Time.unscaledTime - stamp.time < STAMP_FRESH_SECONDS;
+                    bool has = LastDamageByView.TryGetValue(data.view.ViewID, out stamp);
+                    bool fresh = has && Time.unscaledTime - stamp.time < STAMP_FRESH_SECONDS;
                     if (fresh) kind = stamp.kind;
                     GameStateWatcher.RecordDeathObserved(data.view.IsMine, kind);
                     // Ask 9 stage B: the per-seat ledger the team-mode reports
-                    // read. A kind-0 death credits the fresh damager of another
-                    // team; a boundary or own-bullet death credits nobody (the
-                    // server's 1v1 convention, so `kills` means one thing).
+                    // read. Round 1 F1: the kill credit is bound to the damage
+                    // event that took the health to zero - the victim's record
+                    // of THIS frame whose DoDamage is still applying (a lethal
+                    // DoDamage sends RPCA_Die(All) from inside its own body,
+                    // HealthHandler.cs:294, and this prefix runs there at once;
+                    // RPCA_Die itself carries no source, :366) - never a time
+                    // window. F5: an unattributed normal death credits the
+                    // victim's sole opponent in a plain 1v1 room (the server's
+                    // own 1v1 rule); in a team room it credits nobody (round 2
+                    // HIGH 2). Both in KillCreditRules, which the client
+                    // harness executes (suite killcredit).
                     var victim = data.player;
-                    int killer = -1;
-                    if (kind == 0 && fresh && stamp.damagerActor >= 0
-                        && victim != null && stamp.damagerTeam != victim.TeamID)
-                        killer = stamp.damagerActor;
+                    int victimTeam = victim != null ? victim.TeamID : -1;
+                    bool applying = has && Applying.IsApplying(data.view.ViewID, Time.frameCount);
+                    int sole = SoleOpponentOf(data.view.OwnerActorNr, victimTeam);
+                    int killer = KillCreditRules.Credit(kind, has, stamp.frame, Time.frameCount, applying,
+                                                        stamp.damagerActor, stamp.damagerTeam, victimTeam, sole);
                     CombatLedger.RecordDeath(data.view.OwnerActorNr, killer);
 
                 }

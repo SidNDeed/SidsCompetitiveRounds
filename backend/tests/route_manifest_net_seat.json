@@ -259,7 +259,7 @@
           ],
           "main",
           "admin_quarantine_triage_group",
-          "14e1370c02e635866d4e7fa00bea8521257f3b56"
+          "a8faa818fffd0a9392e1815e842c0f2f54e48f3a"
         ],
         [
           "/api/v1/admin/quarantine/{qid}/accept",
@@ -520,7 +520,7 @@
           ],
           "main",
           "submit_ffa_match",
-          "64e2c4fb329345bec5c87cf46ed1637025128f3c"
+          "89d1ea53a8382e287f5f1841d26b27c03aee155d"
         ],
         [
           "/api/v1/h2h/{steam_id}/{opponent_steam_id}",
@@ -655,7 +655,7 @@
           ],
           "main",
           "submit_ovt_match",
-          "5d5db1de47ba21a579a2b1ce6f907e8770f6f660"
+          "b8faa8812364401266464a5809d4e2e6e203509d"
         ],
         [
           "/api/v1/ovt/series/active",
@@ -1186,7 +1186,7 @@
           ],
           "main",
           "submit_team_match",
-          "b1f0f2a7cf07cfc987902fce198815455722271f"
+          "768c439322dbdbcb61c046044d06c2e838659526"
         ],
         [
           "/api/v1/team/players/{steam_id}/team-matches",
@@ -1867,7 +1867,7 @@
           ],
           "main",
           "health_check",
-          "24555bdccffe305e4ceb789739bc96ce3ecdbbf8"
+          "5996995dfca134400f29272067d7c2b3dba4d69a"
         ],
         [
           "/api/v1/i18n/approved",
@@ -3188,7 +3188,7 @@
           ],
           "main",
           "get_set_report",
-          "0d6e98cf103219c4b08ccec5b0494d7838d7f459"
+          "64bd12e7b1748986d739fe589bccb8f4d67be5d1"
         ],
         [
           "/api/v1/admin/pc/portrait/clear",
@@ -3869,7 +3869,7 @@
           ],
           "match_hold",
           "match_hold_entered",
-          "570502ae1e024693de67207eab8153da26279f72"
+          "5fb8659d263f791e70604f662f14ad4388c0e69d"
         ],
         [
           "/api/v1/match/hold/{hold_id}/state",
@@ -4017,7 +4017,7 @@
       [
         "main",
         "lifespan",
-        "924b708d4ed7fe9b8c393bddfee372bb655b4a76"
+        "e576c03eedafc4b7629efe743618047c0ef97395"
       ]
     ]
   },

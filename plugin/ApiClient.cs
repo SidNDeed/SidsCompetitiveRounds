@@ -18022,19 +18022,22 @@ namespace CompetitiveRounds
             // An empty string is stored as NULL server-side, so an old/unwired
             // caller costs nothing beyond two bytes on the wire.
             sb.Append($"\"damage_dealt_timeline\":\"{Escape(ClampTimeline(t.damageTimeline, 1024))}\",");
+            // Round 1 F2 (ask 9 stage B): every counter is clamped to the schema's upper bound
+            // (TeamPlayerTelemetry: 1,000,000 shots and blocks, 10,000,000 keys, 86,400 s), here and
+            // in the FFA inline blob, so one wild peer counter cannot reject the whole report.
             // null, not 0, when the peer predates the epoch: the server column is `int | None` so "not recorded" survives the wire, and a real 0 would read as "fired no shots".
             sb.Append(t.bulletStatsKnown
-                ? $"\"bullets_fired\":{Math.Max(0, t.bulletsFired)},"
+                ? $"\"bullets_fired\":{Math.Min(1000000, Math.Max(0, t.bulletsFired))},"
                 : "\"bullets_fired\":null,");
             // null, not 0, when the peer predates the epoch: the server column is `int | None` so "not recorded" survives the wire, and a real 0 would read as "fired no shots".
             sb.Append(t.bulletStatsKnown
-                ? $"\"bullets_hit\":{Math.Max(0, t.bulletsHit)},"
+                ? $"\"bullets_hit\":{Math.Min(1000000, Math.Max(0, t.bulletsHit))},"
                 : "\"bullets_hit\":null,");
-            sb.Append($"\"blocks_activated\":{Math.Max(0, t.blocksActivated)},");
-            sb.Append($"\"blocks_successful\":{Math.Max(0, t.blocksSuccessful)},");
-            sb.Append($"\"keys_pressed\":{Math.Max(0, t.keysPressed)},");
+            sb.Append($"\"blocks_activated\":{Math.Min(1000000, Math.Max(0, t.blocksActivated))},");
+            sb.Append($"\"blocks_successful\":{Math.Min(1000000, Math.Max(0, t.blocksSuccessful))},");
+            sb.Append($"\"keys_pressed\":{Math.Min(10000000, Math.Max(0, t.keysPressed))},");
             AppendCombatFacts(sb, t);   // ask 9 stage B
-            sb.Append($"\"active_seconds\":{Math.Max(0f, t.activeSeconds).ToString("F1", System.Globalization.CultureInfo.InvariantCulture)}");
+            sb.Append($"\"active_seconds\":{Math.Min(86400f, Math.Max(0f, t.activeSeconds)).ToString("F1", System.Globalization.CultureInfo.InvariantCulture)}");
             sb.Append("},");
         }
 
@@ -24222,17 +24225,17 @@ namespace CompetitiveRounds
                     sb.Append($"\"block_timeline\":\"{Escape(ClampTimeline(t.blockTimeline, 1024))}\",");
                     // null, not 0, when the peer predates the epoch: the server column is `int | None` so "not recorded" survives the wire, and a real 0 would read as "fired no shots".
                     sb.Append(t.bulletStatsKnown
-                        ? $"\"bullets_fired\":{Math.Max(0, t.bulletsFired)},"
+                        ? $"\"bullets_fired\":{Math.Min(1000000, Math.Max(0, t.bulletsFired))},"
                         : "\"bullets_fired\":null,");
                     // null, not 0, when the peer predates the epoch: the server column is `int | None` so "not recorded" survives the wire, and a real 0 would read as "fired no shots".
                     sb.Append(t.bulletStatsKnown
-                        ? $"\"bullets_hit\":{Math.Max(0, t.bulletsHit)},"
+                        ? $"\"bullets_hit\":{Math.Min(1000000, Math.Max(0, t.bulletsHit))},"
                         : "\"bullets_hit\":null,");
-                    sb.Append($"\"blocks_activated\":{Math.Max(0, t.blocksActivated)},");
-                    sb.Append($"\"blocks_successful\":{Math.Max(0, t.blocksSuccessful)},");
-                    sb.Append($"\"keys_pressed\":{Math.Max(0, t.keysPressed)},");
+                    sb.Append($"\"blocks_activated\":{Math.Min(1000000, Math.Max(0, t.blocksActivated))},");
+                    sb.Append($"\"blocks_successful\":{Math.Min(1000000, Math.Max(0, t.blocksSuccessful))},");
+                    sb.Append($"\"keys_pressed\":{Math.Min(10000000, Math.Max(0, t.keysPressed))},");
                     AppendCombatFacts(sb, t);   // ask 9 stage B: deaths and death marks (the ledger fills only those for FFA)
-                    sb.Append($"\"active_seconds\":{Math.Max(0f, t.activeSeconds).ToString("F1", System.Globalization.CultureInfo.InvariantCulture)}");
+                    sb.Append($"\"active_seconds\":{Math.Min(86400f, Math.Max(0f, t.activeSeconds)).ToString("F1", System.Globalization.CultureInfo.InvariantCulture)}");
                     sb.Append("}");
                 }
                 // Aug 12 item 1 — end-of-game build. Last field of the entry so

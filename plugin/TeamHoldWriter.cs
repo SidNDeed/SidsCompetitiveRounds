@@ -589,6 +589,8 @@ namespace CompetitiveRounds
                             // S3 steps 4, 7 and 8: the hand-over over this
                             // client's own verified read.
                             try { TeamHoldReturn.OnVerifiedBound(cut, k, _server); } catch (Exception ex) { Plugin.Log.LogWarning(TeamHold.TAG + " hand-over: " + ex.Message); }
+                            // Ask 9 stage B round 1 F3: the combat ledger follows the seat to its new actor.
+                            try { CombatLedger.Rebind(cut.Actor, k.BoundActor); } catch { }
                             try { SurvivorReplay(cut, k); } catch { }
                             // KX3 (S3 step 5): once per hold, the latches the
                             // roster now covers are released at the bind.

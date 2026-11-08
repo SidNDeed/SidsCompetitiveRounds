@@ -12,9 +12,14 @@ namespace CompetitiveRounds
     /// CombatTelemetry.DeathClassifierPatch) for deaths, death marks and kill
     /// credit; CharacterStatModifiers.DealtDamage (runs on every client for
     /// every dealer, #127/#130) for foe damage. A kill is a kind-0 death
-    /// credited to the FRESH damager of another team; a boundary or own-bullet
-    /// death credits nobody, which is the server's 1v1 convention
-    /// (_report_1v1_kills), so `kills` reads the same in every mode.
+    /// credited by KillCreditRules (rounds 1 and 2): the damage record of the
+    /// health-zero event itself, else (in a plain 1v1 room only) the victim's
+    /// sole opponent, else nobody;
+    /// a boundary or own-bullet death credits nobody, which is the server's
+    /// 1v1 convention (_report_1v1_kills), so `kills` reads the same in every
+    /// mode. A held seat's return moves its facts to the new actor (Rebind,
+    /// round 1 F3); every seat samples every tick from the first, a seat
+    /// created later backfilled to the shared origin (round 1 F4).
     ///
     /// The cumulative kills series rides the 3 s telemetry tick with the other
     /// seat series (one x-axis, #318 decimation); the death marks are seconds
@@ -33,17 +38,56 @@ namespace CompetitiveRounds
 
         private const int DEATH_MARKS_CAP = 64;   // the point markers' cap
         private static readonly Dictionary<int, Seat> seats = new Dictionary<int, Seat>();
+        private static int ticks;                 // samples taken since Reset: the shared origin
 
         internal static void Reset()
         {
-            try { seats.Clear(); } catch { }
+            try { seats.Clear(); ticks = 0; } catch { }
         }
 
         private static Seat SeatFor(int actor)
         {
             Seat s;
-            if (!seats.TryGetValue(actor, out s)) { s = new Seat(); seats[actor] = s; }
+            if (!seats.TryGetValue(actor, out s))
+            {
+                s = new Seat();
+                // Round 1 F4: a seat first seen after the first tick (a late
+                // Player object, a mid-game join) is backfilled with zeros, one
+                // per tick already taken, so every series shares one origin and
+                // one length and the loader never stretches a short one. The
+                // decimation is by count (DecimatedList), so the backfill lands
+                // on the same stride as the seats sampled from the start.
+                for (int i = 0; i < ticks; i++) s.KillTimeline.Add(0);
+                seats[actor] = s;
+            }
             return s;
+        }
+
+        /// <summary>A held seat's return (TeamHoldLoop, state 'b'): the facts
+        /// recorded under the seat's old Photon actor move to the actor that
+        /// now holds it, merged with anything recorded under the new actor
+        /// since it joined (round 1 F3: a return stranded the earlier kills,
+        /// deaths and marks under an actor no builder reads).</summary>
+        internal static void Rebind(int oldActor, int newActor)
+        {
+            try
+            {
+                Seat old;
+                // Photon actors are positive; the hold key's "no actor" is 0.
+                if (oldActor <= 0 || newActor <= 0 || oldActor == newActor || !seats.TryGetValue(oldActor, out old)) return;
+                Seat cur;
+                if (seats.TryGetValue(newActor, out cur) && !ReferenceEquals(cur, old))
+                {
+                    old.Kills += cur.Kills;
+                    old.Deaths += cur.Deaths;
+                    old.DamageDealt += cur.DamageDealt;
+                    for (int i = 0; i < cur.DeathTimes.Count && old.DeathTimes.Count < DEATH_MARKS_CAP; i++) old.DeathTimes.Add(cur.DeathTimes[i]);
+                    old.DeathTimes.Sort();
+                }
+                seats.Remove(oldActor);
+                seats[newActor] = old;
+            }
+            catch { }
         }
 
         /// <summary>A death this client simulated. killerActor is the fresh
@@ -75,22 +119,25 @@ namespace CompetitiveRounds
             catch { }
         }
 
-        /// <summary>One cumulative kills sample per present player on the 3 s
-        /// tick. Every player in the room samples from the first tick, so the
-        /// series share one x-axis whatever the kill order.</summary>
+        /// <summary>One cumulative kills sample per SEAT on the 3 s tick: a
+        /// seat for every present player first (a new one backfilled to the
+        /// shared origin), then every seat samples, present or not, so the
+        /// series share one x-axis and one length whatever the kill order and
+        /// whenever a Player object appears or goes (round 1 F4).</summary>
         internal static void Sample()
         {
             try
             {
                 var pm = PlayerManager.instance;
-                if (pm == null || pm.players == null) return;
-                for (int i = 0; i < pm.players.Count; i++)
-                {
-                    var p = pm.players[i];
-                    if (p == null || p.data == null || p.data.view == null) continue;
-                    var s = SeatFor(p.data.view.OwnerActorNr);
-                    s.KillTimeline.Add(s.Kills);
-                }
+                if (pm != null && pm.players != null)
+                    for (int i = 0; i < pm.players.Count; i++)
+                    {
+                        var p = pm.players[i];
+                        if (p == null || p.data == null || p.data.view == null) continue;
+                        SeatFor(p.data.view.OwnerActorNr);
+                    }
+                foreach (var kv in seats) kv.Value.KillTimeline.Add(kv.Value.Kills);
+                ticks++;
             }
             catch { }
         }
