@@ -512,6 +512,7 @@
   "ASYNC (6-week)",
   "ASYNC MATCH DEADLINE",
   "AUTO-BALANCE",
+  "AVATAR PRESETS",
   "About",
   "About this library",
   "Abyss",
@@ -620,6 +621,7 @@
   "Avatar auto-switch: <color=#88CCFF>OFF</color>",
   "Avatar auto-switch: <color=#88CCFF>ON</color>",
   "Avatar defaults",
+  "Avatar presets",
   "Avatar swap",
   "Average FPS",
   "Average game",
@@ -1209,6 +1211,7 @@
   "Emerald Name",
   "Emote dances for the hold-{0} wheel. Your character busts the move for everyone running the mod - but your own controls lock until the dance ends, so dance wisely.",
   "Empower",
+  "Empty",
   "Empty Power main",
   "Enable",
   "Enable Ranked first - the RLFP ping is for ranked matches.",
@@ -1467,6 +1470,7 @@
   "Hard to hit",
   "Hare Apparent",
   "Harlequin",
+  "Has modded items",
   "Hasty",
   "Hatchling",
   "He/him",
@@ -1789,6 +1793,7 @@
   "Mirrored chrome with a soft shifting tint.",
   "Mod controls",
   "Mod display language. Machine-translated drafts until community moderators review them — card text in matches follows ROUNDS' own language setting.",
+  "Modded",
   "Modded avatar",
   "Modded avatar: <color=#88CCFF>{0}</color>",
   "Modded eyes, mouths and details are drawn by the mod. A player without the mod sees an empty slot where each one should be. This picks the plain preset for you in games where that would happen, and gives you your own face back when you leave.",
@@ -3117,6 +3122,7 @@
   "VANILLA GROW: FRAME RATE CHANGES DAMAGE",
   "VOTING / SIGNUPS OPEN",
   "Valid upload_request_id is required",
+  "Vanilla",
   "Vanilla avatar",
   "Vanilla avatar: <color=#88CCFF>{0}</color>",
   "Vanilla stays vanilla",
@@ -6337,6 +6343,11 @@
    "location": "BuildTeamFormat",
    "kind": "Tr"
   },
+  "AVATAR PRESETS": {
+   "surface": "AvatarPresetPicker",
+   "location": "PlaceRow, Start",
+   "kind": "Tr"
+  },
   "About": {
    "surface": "NativeUI",
    "location": "GetOrCreateArtistRow",
@@ -6863,19 +6874,24 @@
    "kind": "TrF"
   },
   "Avatar auto-switch: <color=#88CCFF>OFF</color>": {
-   "surface": "NativeUI",
-   "location": "PaintAvatarAuto",
-   "kind": "SetText"
+   "surface": "AvatarPresetPicker, NativeUI",
+   "location": "PaintAvatarAuto, Rebuild",
+   "kind": "CreateButton, SetText"
   },
   "Avatar auto-switch: <color=#88CCFF>ON</color>": {
-   "surface": "NativeUI",
-   "location": "PaintAvatarAuto",
-   "kind": "SetText"
+   "surface": "AvatarPresetPicker, NativeUI",
+   "location": "PaintAvatarAuto, Rebuild",
+   "kind": "CreateButton, SetText"
   },
   "Avatar defaults": {
    "surface": "AvatarDefaults",
    "location": "PaintLegend",
    "kind": "Tr"
+  },
+  "Avatar presets": {
+   "surface": "AvatarPresetPicker",
+   "location": "Rebuild",
+   "kind": "CreateText"
   },
   "Avatar swap": {
    "surface": "NativeUI.Keybinds",
@@ -6983,8 +6999,8 @@
    "kind": "shop"
   },
   "Back": {
-   "surface": "CompetitiveUI, MailUI, PlayerCardsUI",
-   "location": "BuildCompose, BuildReaderView, DrawConsentDeclineConfirm",
+   "surface": "AvatarPresetPicker, CompetitiveUI, MailUI +1",
+   "location": "BuildCompose, BuildReaderView, DrawConsentDeclineConfirm +1",
    "kind": "CreateButton, Tr"
   },
   "Back in the Quick Match queue — searching for an opponent.": {
@@ -7373,8 +7389,8 @@
    "kind": "shop"
   },
   "Blue ring: your vanilla default": {
-   "surface": "AvatarDefaults",
-   "location": "PaintLegend",
+   "surface": "AvatarDefaults, AvatarPresetPicker",
+   "location": "PaintLegend, Rebuild",
    "kind": "Tr"
   },
   "Body colors": {
@@ -7423,8 +7439,8 @@
    "kind": "ShowNotification"
   },
   "Both rings: this preset is both of your defaults": {
-   "surface": "AvatarDefaults",
-   "location": "PaintLegend",
+   "surface": "AvatarDefaults, AvatarPresetPicker",
+   "location": "PaintLegend, Rebuild",
    "kind": "Tr"
   },
   "Bottomless": {
@@ -8193,8 +8209,8 @@
    "kind": "shop"
   },
   "Clear": {
-   "surface": "NativeUI, NativeUI.Keybinds",
-   "location": "BuildCompareTab, BuildInfoTab, BuildLeaderboardTab +2",
+   "surface": "AvatarPresetPicker, NativeUI, NativeUI.Keybinds",
+   "location": "BuildCompareTab, BuildInfoTab, BuildLeaderboardTab +3",
    "kind": "CreateButton, Tr"
   },
   "Clear Search": {
@@ -9822,6 +9838,11 @@
    "location": "cosmetic name/description",
    "kind": "shop"
   },
+  "Empty": {
+   "surface": "AvatarPresetPicker",
+   "location": "BuildTile",
+   "kind": "SetText"
+  },
   "Empty Power main": {
    "surface": "shop catalog",
    "location": "cosmetic name/description",
@@ -10873,8 +10894,8 @@
    "kind": "Tr"
   },
   "Gold ring: your modded default": {
-   "surface": "AvatarDefaults",
-   "location": "PaintLegend",
+   "surface": "AvatarDefaults, AvatarPresetPicker",
+   "location": "PaintLegend, Rebuild",
    "kind": "Tr"
   },
   "Gold this set": {
@@ -11111,6 +11132,11 @@
    "surface": "shop catalog",
    "location": "cosmetic name/description",
    "kind": "shop"
+  },
+  "Has modded items": {
+   "surface": "AvatarPresetPicker",
+   "location": "BuildTile",
+   "kind": "SetText"
   },
   "Hasty": {
    "surface": "shop catalog",
@@ -12722,14 +12748,19 @@
    "location": "BuildSettingsTab",
    "kind": "Tr"
   },
+  "Modded": {
+   "surface": "AvatarPresetPicker",
+   "location": "BuildTile",
+   "kind": "CreateButton"
+  },
   "Modded avatar": {
    "surface": "NativeUI",
    "location": "BuildSettingsTab",
    "kind": "Tr"
   },
   "Modded avatar: <color=#88CCFF>{0}</color>": {
-   "surface": "NativeUI",
-   "location": "PaintAvatarModded",
+   "surface": "AvatarPresetPicker, NativeUI",
+   "location": "PaintAvatarModded, Rebuild",
    "kind": "TrF"
   },
   "Modded eyes, mouths and details are drawn by the mod. A player without the mod sees an empty slot where each one should be. This picks the plain preset for you in games where that would happen, and gives you your own face back when you leave.": {
@@ -15558,8 +15589,8 @@
    "kind": "shop"
   },
   "Red ring: this preset has items an unmodded player cannot see, so it cannot be your vanilla default": {
-   "surface": "AvatarDefaults",
-   "location": "PaintLegend",
+   "surface": "AvatarDefaults, AvatarPresetPicker",
+   "location": "PaintLegend, Rebuild",
    "kind": "Tr"
   },
   "Redrawn from Spirit's diagram: Conditional damage never Refreshes twice in a row.": {
@@ -19362,14 +19393,19 @@
    "location": "TrRefusalDetail",
    "kind": "Tr"
   },
+  "Vanilla": {
+   "surface": "AvatarPresetPicker",
+   "location": "BuildTile",
+   "kind": "CreateButton"
+  },
   "Vanilla avatar": {
    "surface": "NativeUI",
    "location": "BuildSettingsTab",
    "kind": "Tr"
   },
   "Vanilla avatar: <color=#88CCFF>{0}</color>": {
-   "surface": "NativeUI",
-   "location": "PaintAvatarVanilla",
+   "surface": "AvatarPresetPicker, NativeUI",
+   "location": "PaintAvatarVanilla, Rebuild",
    "kind": "TrF"
   },
   "Vanilla stays vanilla": {

@@ -4077,6 +4077,12 @@ namespace CompetitiveRounds
             // now names the availability-check DM as the post-lock way out.
             ["Couldn't leave the tournament - it may have locked or started"] = "No se pudo abandonar el torneo - puede que las inscripciones ya estén cerradas o que haya empezado",
             ["Tournament info is refreshing - try again in a moment"] = "La información del torneo se está actualizando - vuelve a intentarlo en un momento",
+            ["AVATAR PRESETS"] = "PRESETS DE AVATAR",
+            ["Avatar presets"] = "Presets de avatar",
+            ["Empty"] = "Vacío",
+            ["Has modded items"] = "Tiene objetos con mod",
+            ["Modded"] = "Con mod",
+            ["Vanilla"] = "Vanilla",
         };
 
         private static readonly Dictionary<string, string> RU = new Dictionary<string, string>
@@ -8116,6 +8122,12 @@ namespace CompetitiveRounds
             // now names the availability-check DM as the post-lock way out.
             ["Couldn't leave the tournament - it may have locked or started"] = "Не удалось покинуть турнир - возможно, запись уже закрыта или он начался",
             ["Tournament info is refreshing - try again in a moment"] = "Информация о турнире обновляется - попробуйте ещё раз через пару секунд",
+            ["AVATAR PRESETS"] = "ПРЕСЕТЫ АВАТАРА",
+            ["Avatar presets"] = "Пресеты аватара",
+            ["Empty"] = "Пусто",
+            ["Has modded items"] = "Есть модовые предметы",
+            ["Modded"] = "Модовый",
+            ["Vanilla"] = "Ванильный",
         };
 
         private static readonly Dictionary<string, string> UK = new Dictionary<string, string>
@@ -12082,6 +12094,12 @@ namespace CompetitiveRounds
             // now names the availability-check DM as the post-lock way out.
             ["Couldn't leave the tournament - it may have locked or started"] = "Не вдалося покинути турнір - можливо, запис уже закрито або він розпочався",
             ["Tournament info is refreshing - try again in a moment"] = "Інформація про турнір оновлюється - спробуйте ще раз за кілька секунд",
+            ["AVATAR PRESETS"] = "ПРЕСЕТИ АВАТАРА",
+            ["Avatar presets"] = "Пресети аватара",
+            ["Empty"] = "Порожньо",
+            ["Has modded items"] = "Є модові предмети",
+            ["Modded"] = "Модовий",
+            ["Vanilla"] = "Ванільний",
         };
 
         private static readonly Dictionary<string, string> SV = new Dictionary<string, string>
@@ -16048,6 +16066,12 @@ namespace CompetitiveRounds
             // now names the availability-check DM as the post-lock way out.
             ["Couldn't leave the tournament - it may have locked or started"] = "Det gick inte att lämna turneringen - anmälan kan ha låsts eller så har den startat",
             ["Tournament info is refreshing - try again in a moment"] = "Turneringsinformationen uppdateras - försök igen om en stund",
+            ["AVATAR PRESETS"] = "AVATARFÖRINSTÄLLNINGAR",
+            ["Avatar presets"] = "Avatarförinställningar",
+            ["Empty"] = "Tom",
+            ["Has modded items"] = "Har moddade föremål",
+            ["Modded"] = "Moddad",
+            ["Vanilla"] = "Vanilla",
         };
     }
 }

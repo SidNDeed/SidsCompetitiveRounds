@@ -169,6 +169,10 @@ FILES = [
     # Recent Series FFA labels, all I18n.Tr/TrF sites in a Unity-free rules
     # file the client rules harness executes.
     "ServerTextRules.cs",
+    # Ask 5 (avatar presets chosen in the main menu): the row label, the
+    # picker title, the tile buttons and hints, through CreateText,
+    # CreateButton and SetText, and its I18n.Tr/TrF sites.
+    "AvatarPresetPicker.cs",
 ]
 
 # call(...) sites and which ARGUMENT POSITIONS carry display text (wave-2
