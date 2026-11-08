@@ -1895,6 +1895,7 @@ FIX5_ENDS = [
     ('reflection-CombatEvidenceCore.cs-TargetBounce', 'reflection:CombatEvidenceCore.cs:TargetBounce', 'CombatEvidenceCore.cs:TargetBounce'),
     ('reflection-Plugin.cs-OnJoinedRoom', 'reflection:Plugin.cs:OnJoinedRoom', 'Plugin.cs:OnJoinedRoom'),
     ('reflection-Plugin.cs-OnPlayerEnteredRoom', 'reflection:Plugin.cs:OnPlayerEnteredRoom', 'Plugin.cs:OnPlayerEnteredRoom'),
+    ('unity-AvatarPresetPicker.cs-AvatarPickerEscape.Update', 'unity:AvatarPresetPicker.cs:AvatarPickerEscape.Update', 'AvatarPresetPicker.cs:Update'),
     ('unity-DamageNumbers.cs-DamageNumberDriver.Update', 'unity:DamageNumbers.cs:DamageNumberDriver.Update', 'DamageNumbers.cs:Update'),
     ('unity-HealBarOverlay.cs-HealBarOverlay.LateUpdate', 'unity:HealBarOverlay.cs:HealBarOverlay.LateUpdate', 'HealBarOverlay.cs:LateUpdate'),
     ('unity-HealBarOverlay.cs-HealBarOverlay.OnEnable', 'unity:HealBarOverlay.cs:HealBarOverlay.OnEnable', 'HealBarOverlay.cs:OnEnable'),
@@ -1919,7 +1920,7 @@ PIN5 = "backend/tests/test_keybind_surfaces.py::test_h1_fix5_each_unresolved_end
 def test_h1_fix5_the_end_table_is_every_unresolved_end_beyond_the_four(attach4):
     st, cman, att, aman = attach4
     names = [n for i, n, m in FIX5_ENDS]
-    assert len(names) == len(set(names)) == len({i for i, n, m in FIX5_ENDS}) == 1142
+    assert len(names) == len(set(names)) == len({i for i, n, m in FIX5_ENDS}) == 1143
     extra = set(att["unresolved"]) - set(names)
     assert len(extra) == 4 and RESET_MENU in extra, sorted(extra)
     assert set(names) <= set(att["unresolved"]), sorted(set(names) - set(att["unresolved"]))

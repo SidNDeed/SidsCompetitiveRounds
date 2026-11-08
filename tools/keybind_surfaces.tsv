@@ -564,6 +564,7 @@ ff88c6a1299ead41	N	rule:N1	ASYNC
 7c4bd3155e01af46	N	rule:N1	ASYNC (6-week)
 246386952c55f6e0	N	rule:N1	ASYNC MATCH DEADLINE
 d8796d7466c24ad7	N	rule:N1	AUTO-BALANCE
+53ae262a3a74b38e	N	rule:N1	AVATAR PRESETS
 6b21fb791ac05170	N	rule:N1	About
 4e66bcda284b43d3	N	rev:60e0da73a32ae137 a page or section title of the info library (InfoLibrary's file scope is binding-dependent: its pages name keys through KeybindRowFace); names no key	About this library
 030d9312f32b7841	N	rule:N1	Abyss
@@ -673,6 +674,7 @@ eeee9b76ec5d1cfa	N	rule:N1	Aurora
 4b223773afab914d	N	rule:N1	Avatar auto-switch: <color=#88CCFF>OFF</color>
 bea9ed715393b1ce	N	rule:N1	Avatar auto-switch: <color=#88CCFF>ON</color>
 d6c1ae4f4abe4b83	N	rule:N1	Avatar defaults
+35415ff54b940b9b	N	rule:N1	Avatar presets
 5055532922ff4f34	N	rule:N1	Avatar swap
 54f2de771fcc83e1	N	rule:N1	Average FPS
 275e87e442eacff8	N	rule:N1	Average game
@@ -948,7 +950,7 @@ c725f01d52c785df	N	rule:N1	Clavar la Bala
 7889f8417d64298a	N	rule:N1	Clean House
 a3b330fc7dec25ff	N	rule:N1	Clean Trail
 b9a010b399b7896b	N	rule:N1	Clean white body color.
-719ea396ad92e01b	K	rev:6c048c3d9557194e shared: the Clear buttons of the search boxes and the Compare tab; KeybindKeyName also returns it for the Clear key	Clear
+719ea396ad92e01b	K	rev:62aa076a1bfb7651 shared: the Clear buttons of the search boxes, the Compare tab and the avatar-preset picker's two readouts (AvatarPresetPicker.cs Rebuild); KeybindKeyName also returns it for the Clear key	Clear
 87e328dc94be6ee1	N	rule:N1	Clear Search
 99767352d7331ce5	N	rev:cc2c97575b030f24 a click or press on one of the mod's own buttons, rows, tiles or links; names no key	Click <b>Search Random</b> to start finding a 2v2.
 956d1978dd0405a6	N	rev:26368c6b559a7a8e a click or press on one of the mod's own buttons, rows, tiles or links; names no key	Click Discard again to discard that card for shards
@@ -1285,6 +1287,7 @@ a58ad4865dc2d5fd	N	rule:N1	Emerald Gradient
 2c9dde1029ae34d4	N	rule:N1	Emerald Name
 703e3963264dc8f1	P	rule:P	Emote dances for the hold-{0} wheel. Your character busts the move for everyone running the mod - bu
 9d76f86189d7828f	N	rule:N1	Empower
+3159fe421b322138	N	rule:N1	Empty
 83bdd3b5230da997	N	rule:N1	Empty Power main
 20063ad9053289ce	N	rule:N1	Enable
 feb0e5bf902bee5c	N	rule:N1	Enable Ranked first - the RLFP ping is for ranked matches.
@@ -1552,6 +1555,7 @@ f3681d8bf1896923	N	rule:N1	Halo
 6ce2c7378614f190	N	rule:N1	Hard to hit
 2d9cac34c9968365	N	rule:N1	Hare Apparent
 a4830d21a06a1fed	N	rule:N1	Harlequin
+15226c979afa3a2d	N	rule:N1	Has modded items
 06e27642e791a899	N	rule:N1	Hasty
 9c0c49c5aac5b27e	N	rule:N1	Hatchling
 67cc0b8a50586de3	N	rule:N1	He/him
@@ -1886,6 +1890,7 @@ aaa70f58c89e3972	N	rule:N1	Mint
 b6af76411b6d6bc9	N	rule:N1	Mirrored chrome with a soft shifting tint.
 ed2905c870344322	N	rev:181359aaab7cedae Controls-page text (a row's help, a refusal, an outcome or a button) that names no key; the bound key is drawn beside it by the row's own face	Mod controls
 2f86234d58aeb5c4	N	rule:N1	Mod display language. Machine-translated drafts until community moderators review them — card text i
+da62751bd7e88846	N	rule:N1	Modded
 7d964946d68e74c4	N	rule:N1	Modded avatar
 5ebe5e74f19b27b2	N	rule:N1	Modded avatar: <color=#88CCFF>{0}</color>
 641fb99253912601	N	rule:N1	Modded eyes, mouths and details are drawn by the mod. A player without the mod sees an empty slot wh
@@ -3738,6 +3743,7 @@ c955f9a5060f3c7c	N	rule:N1	V:UK_GAME:StringTableDefault/PROMPT_WAITING#0 = Waiti
 e3b2c4d88bb44675	N	rule:N1	VANILLA GROW: FRAME RATE CHANGES DAMAGE
 67e7a92881ae1200	N	rule:N1	VOTING / SIGNUPS OPEN
 745d33e62f2847bc	N	rule:N1	Valid upload_request_id is required
+bd1a4899e9820777	N	rule:N1	Vanilla
 5cf3af41da08fc16	N	rule:N1	Vanilla avatar
 e3274ead58dddc83	N	rule:N1	Vanilla avatar: <color=#88CCFF>{0}</color>
 722b8253ed5d9130	N	rev:11590853417f3465 a page or section title of the info library (InfoLibrary's file scope is binding-dependent: its pages name keys through KeybindRowFace); names no key	Vanilla stays vanilla
