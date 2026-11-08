@@ -3263,7 +3263,7 @@ def test_the_lease_gate_is_never_wrapped_in_a_swallowing_scope(site):
 # commitment point by definition, whether or not anyone remembered to list it.
 #
 # The walk is interprocedural because the code is: team_lobby_start and
-# ovt_lobby_start acquire in their OWN bodies (team_lobby_start's one _lease_acquire_many call at main.py:59084, ovt_lobby_start's at main.py:59220) while the gate
+# ovt_lobby_start acquire in their OWN bodies (team_lobby_start's one _lease_acquire_many call at main.py:59137, ovt_lobby_start's at main.py:59273) while the gate
 # that covers them lives in _lobby_start_common, which they call. A per-function
 # pass calls those two ungated and is simply wrong, which is the kind of
 # false positive that gets a test deleted rather than fixed.
