@@ -1540,6 +1540,48 @@ def test_each_avatar_claim_has_its_mutation_and_its_control(harness_run, cid):
             "the case printed no measurement: " + l)
 
 
+# -- ask 5: the avatar-preset picker's pure rules (suite avatarpicker) -------
+#
+# AvatarPickerRules.cs decides a tile's label, ring and live buttons, what a
+# click does and where a composed face part sits; AvatarPickerRulesSelfTest.cs
+# executes it. Every case prints its measurement, so a wrong ring or rect is
+# red by its value (design ai-collab/seat-b/ASK5-DESIGN.md section 2.5).
+_PICKER_CASES = [
+    "tile: the eight labels count presets from one",
+    "tile: an absent or never-authored slot is empty, wears no ring and has no live button",
+    "tile: the modded choice wears the gold ring, the vanilla choice the blue, the others none",
+    "tile: a slot that is both choices wears both rings",
+    "tile: a slot with items an unmodded player cannot see wears the red ring, its vanilla button dead and its modded button live",
+    "tile: a dirty slot that is the modded choice keeps the gold ring over the red",
+    "click: modded on a fresh slot sets it, on the current choice clears it, on an empty slot is refused",
+    "click: vanilla on a clean slot sets it, on the current choice clears it, on a dirty or empty slot is refused",
+    "layout: calibration follows a live portrait's scale and background width, else the fallback",
+    "layout: a part's rect is vanilla's SpawnItem math, the face offset added to the item offset and everything scaled by k",
+    "layout: a bottom-pivoted sprite is shifted so its pivot, not its centre, sits on the part's point",
+    "layout: eight tiles fill four columns and two rows in slot order",
+]
+
+
+def test_the_avatar_picker_suite_ran_every_case_and_none_failed(harness_run):
+    suites = _suites(harness_run)
+    assert "avatarpicker" in suites, "the AvatarPickerRules suite did not report"
+    run, fail, verdict = suites["avatarpicker"]
+    assert fail == 0 and verdict == "PASS", harness_run.stdout[-4000:]
+    printed = len(re.findall(r"^\[avatarpicker\] (PASS|FAIL) ", harness_run.stdout, re.M))
+    assert printed == run, (
+        "the suite declared run=%d but printed %d case lines" % (run, printed))
+    assert run == len(_PICKER_CASES), (
+        "the suite has %d cases, this pin names %d" % (run, len(_PICKER_CASES)))
+
+
+@pytest.mark.parametrize("name", _PICKER_CASES)
+def test_each_avatar_picker_case_passes_with_a_measurement(harness_run, name):
+    line = _named_case(harness_run, name, "avatarpicker")
+    assert line.startswith("[avatarpicker] PASS"), line
+    assert " | got=" in line and not line.rstrip().endswith("| got="), (
+        "the case printed no measurement: " + line)
+
+
 # -- server text: refusals read structurally, the FFA series labels ----------
 
 def test_the_server_text_suite_ran_every_case_and_none_failed(harness_run):
