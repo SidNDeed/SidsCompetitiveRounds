@@ -82,12 +82,15 @@ def _masked(text):
     return _memo(_MASK, mask_code, text)
 
 
-def _one(text, sig, base=0):
-    """The single brace-balanced block after `sig`, over the masked text."""
+def _one(text, sig, base=0, raw=False):
+    """The single brace-balanced block after `sig`, over the masked text. With
+    `raw` the signature is sought in the raw text (for one whose identity is a
+    string literal, which the mask blanks); the braces are balanced masked."""
     masked = _masked(text)
+    hay = text if raw else masked
     spans, search = [], 0
     while True:
-        start = masked.find(sig, search)
+        start = hay.find(sig, search)
         if start == -1:
             break
         ob = masked.find("{", start + len(sig))
@@ -111,11 +114,11 @@ def _one(text, sig, base=0):
     return base + a, base + b
 
 
-def _span(text, sig, within=None):
+def _span(text, sig, within=None, raw=False):
     if within is None:
-        return _one(text, sig)
+        return _one(text, sig, raw=raw)
     a, b = _one(text, within)
-    return _one(text[a:b], sig, base=a)
+    return _one(text[a:b], sig, base=a, raw=raw)
 
 
 def _raw(text, sig, within=None):
@@ -253,11 +256,11 @@ def _resub(src, fname, pattern, repl):
     return s
 
 
-def _insert_after_open(src, fname, sig, text, within=None):
+def _insert_after_open(src, fname, sig, text, within=None, raw=False):
     """Insert `text` right after the opening brace of the block after `sig`."""
     s = dict(src)
     t = s[fname]
-    a, _ = _span(t, sig, within)
+    a, _ = _span(t, sig, within, raw=raw)
     s[fname] = t[:a + 1] + "\n" + text + "\n" + t[a + 1:]
     return s
 
@@ -842,7 +845,8 @@ def test_i2_the_extractor_harvests_the_rules_tables_and_the_registry_carries_the
 # -- I3 the harness suite is registered and compiled ---------------------------------------------
 
 def _i3(src):
-    main = _body(src[MAIN], 'RunSuite("adminmenu"')
+    a, b = _span(src[MAIN], 'RunSuite("adminmenu"', raw=True)
+    main = _code(src[MAIN][a:b])
     assert "var r = AdminMenuRules.SelfTest();" in main
     assert "return new Suite(r.Passed + r.Failed, r.Failed, r.Report.ToString());" in main
     csproj = src[CSPROJ]
@@ -858,7 +862,7 @@ def _i3(src):
 def test_i3_the_adminmenu_suite_is_registered_and_its_files_compiled():
     _check(_i3,
            lambda s: _replace(s, CSPROJ, '    <Compile Include="AdminMenuRulesSelfTest.cs" />\n', ""),
-           lambda s: _insert_after_open(s, MAIN, 'RunSuite("adminmenu"', "                              // control"))
+           lambda s: _insert_after_open(s, MAIN, 'RunSuite("adminmenu"', "                              // control", raw=True))
 
 
 # -- the census: every claim above ran three ways ---------------------------------------------------
@@ -868,5 +872,5 @@ CLAIMS = [k for k in sorted(globals()) if re.match(r"^_(h\d+b?|i\d+)$", k)]
 
 def test_every_claim_has_its_test():
     tests = [k for k in globals() if k.startswith("test_") and k != "test_every_claim_has_its_test"]
-    assert len(CLAIMS) == 21, CLAIMS
+    assert len(CLAIMS) == 22, CLAIMS
     assert len(tests) == len(CLAIMS), (len(tests), len(CLAIMS))
