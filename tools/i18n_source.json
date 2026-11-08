@@ -527,6 +527,7 @@
   "Action",
   "Action Log",
   "Action Log...",
+  "Actions",
   "Active",
   "Actually Good",
   "Add a subject.",
@@ -536,11 +537,11 @@
   "Add recipient",
   "Adjust Placement...",
   "Admin",
+  "Admin Roster...",
   "Admin action",
   "Admin action log ({0}-{1} of {2})",
   "Admins - type to search",
   "Admins can't be kicked.",
-  "Admins...",
   "Advanced",
   "After 60s unfocused at the menu, drops the engine to 15 FPS. Never active in online rooms or when a match is found; wakes instantly on focus.",
   "After a game you played in, this sends the same logs the bug-report form sends, so a problem can be looked at without you filing a report. Also sent: your Steam ID and name, your opponent's Steam ID when the game had one, the room name, the game mode, the series ID, and the mod and game version. Removed first: every path through a Users folder, however the slashes are written, and this PC's own profile folder; and this PC's Windows account name where it stands on its own in a line, when it is three characters or longer. The Steam login ticket the game writes into its log is replaced by its length and a short fingerprint. Nothing else is removed - the same name inside a path we did not recognise, or in an e-mail address, stays. At most one upload every five minutes. Nothing new is sent while this is off, and turning it off cuts off an upload already in progress - though any part of it that had already reached the server stays there.",
@@ -653,6 +654,7 @@
   "Ban {0}",
   "Banned",
   "Banned Players",
+  "Banned Players ({0})",
   "Banned players - type to search",
   "Be right back",
   "Bear",
@@ -841,10 +843,10 @@
   "Charcoal walls rimmed with corona amber on a true black sky.",
   "Charred timber — warm dark brown verging on black.",
   "Chase",
+  "Chat",
   "Chat  <color=#888>(press {0} to chat)</color>",
   "Chat & mail",
   "Chat Lockdown...",
-  "Chat Mutes...",
   "Chat [{0}]  —  Enter to send, Esc keeps your draft, {1} switches channel",
   "Chat fade after: <color=#88CCFF>{0}</color>",
   "Chat fade after: <color=#FF9966>Off (chat hidden in game)</color>",
@@ -1297,6 +1299,7 @@
   "Few reach it. Fewer afford the title.",
   "Field Medic",
   "Final score",
+  "Find and Unban...",
   "Fine",
   "Finish a game with the exact same 5 cards (and copies) as your opponent",
   "Finish or leave your current game before joining the 1v2 queue.",
@@ -1347,7 +1350,7 @@
   "From {0}",
   "From:",
   "Frost",
-  "Full log...",
+  "Full Log...",
   "Full music albums that replace ROUNDS' combat soundtrack for you. Click an album row for 30-second track previews; after buying, pick tracks and control playback in the Music tab.",
   "GAME ENDS",
   "GAMEPLAY",
@@ -2229,6 +2232,7 @@
   "QShoot",
   "QUICK SHOTS INSIDE THE 0.35 SECOND WINDOW",
   "Queue games (ranked 1v1, and 2v2 / 1v2 auto-queue) deal everyone the same cards when every player in the room has this on. Applies from your next game.",
+  "Queues",
   "Quick Reload",
   "Quick Reload main",
   "Quick Shot",
@@ -2407,6 +2411,7 @@
   "Return",
   "Return to menu",
   "Revenue",
+  "Reverse",
   "Reverse Series...",
   "Reverse a ranked 1v1 series",
   "Reverse {0}",
@@ -2495,7 +2500,6 @@
   "Search cards",
   "Search for a player by name",
   "Search players",
-  "Search...",
   "Searching for ranked match...",
   "Searching... {0}m {1}s  +/-{2}",
   "Searching... {0}s  +/-{1}",
@@ -2541,6 +2545,7 @@
   "Series {0} {1}  vs {2}",
   "Series {0}-{1}",
   "Series: {0}",
+  "Server",
   "Server Alert...",
   "Server alert",
   "Session",
@@ -3083,6 +3088,7 @@
   "Unknown player",
   "Unlock chat everywhere",
   "Unlocked by achievement, not purchasable",
+  "Unmute Player...",
   "Unnamed player",
   "Unnamed player\u0004pc.unnamed",
   "Unranked",
@@ -3129,6 +3135,7 @@
   "Vivid orange neon name with a soft glow halo. Visible to everyone; modded players also see the glow.",
   "Void",
   "Void Ripple",
+  "Void Series",
   "Voidshot",
   "W-L and WR count completed series. XP and Gold accrue per player slot; 1v1 rating never moves.",
   "WALL JUMP",
@@ -3203,6 +3210,8 @@
   "Win 5-0 with Phoenix without losing a life",
   "Win 50 ranked series in a row",
   "Win 500 casual games in a row",
+  "Win T1",
+  "Win T2",
   "Win a 2v2 game 5-0",
   "Win a game 5-0 with Barrage in your build",
   "Win a game 5-0 with Burst in your build",
@@ -6353,9 +6362,9 @@
    "kind": "shop"
   },
   "Accept": {
-   "surface": "NativeUI, PlayerCardsUI",
-   "location": "BuildAdminQuarantineRow, CreateTradeRow, FillTradeRow",
-   "kind": "CreateButton, SetText"
+   "surface": "AdminMenuRules, NativeUI, PlayerCardsUI",
+   "location": "AdminMenuRules.Verdicts, BuildAdminQuarantineRow, CreateTradeRow +1",
+   "kind": "CreateButton, SetText, Tr +1"
   },
   "Account changed — message not sent.": {
    "surface": "CompetitiveUI",
@@ -6408,9 +6417,14 @@
    "kind": "CreateText, SetText"
   },
   "Action Log...": {
-   "surface": "NativeUI",
-   "location": "BuildAdminTab",
-   "kind": "CreateButton"
+   "surface": "AdminMenuRules, NativeUI",
+   "location": "AdminMenuRules.Launchers, BuildAdminTab",
+   "kind": "CreateButton, table"
+  },
+  "Actions": {
+   "surface": "AdminMenuRules",
+   "location": "AdminMenuRules.PageLabels",
+   "kind": "table"
   },
   "Active": {
    "surface": "shop catalog",
@@ -6457,6 +6471,11 @@
    "location": "(file scope), OpenAdminRosterPicker, UpdateTabBarVisual",
    "kind": "SetText, ShowInfoPopup, Tr"
   },
+  "Admin Roster...": {
+   "surface": "AdminMenuRules, NativeUI",
+   "location": "AdminMenuRules.Launchers, BuildAdminTab",
+   "kind": "CreateButton, table"
+  },
   "Admin action": {
    "surface": "NativeUI",
    "location": "OpenAdminActionLogPicker",
@@ -6476,11 +6495,6 @@
    "surface": "ApiClient",
    "location": "KickRefusalText",
    "kind": "Tr"
-  },
-  "Admins...": {
-   "surface": "NativeUI",
-   "location": "BuildAdminTab",
-   "kind": "CreateButton"
   },
   "Advanced": {
    "surface": "InfoViz",
@@ -6758,9 +6772,9 @@
    "kind": "shop"
   },
   "Approved Update Queue...": {
-   "surface": "NativeUI",
-   "location": "BuildAdminTab",
-   "kind": "CreateButton"
+   "surface": "AdminMenuRules, NativeUI",
+   "location": "AdminMenuRules.Launchers, BuildAdminTab",
+   "kind": "CreateButton, table"
   },
   "Are you good at this game?": {
    "surface": "QuickChat",
@@ -7018,9 +7032,9 @@
    "kind": "Tr"
   },
   "Ban Steam ID...": {
-   "surface": "NativeUI",
-   "location": "BuildAdminTab",
-   "kind": "CreateButton"
+   "surface": "AdminMenuRules, NativeUI",
+   "location": "AdminMenuRules.Launchers, BuildAdminTab",
+   "kind": "CreateButton, table"
   },
   "Ban a player": {
    "surface": "NativeUI",
@@ -7041,6 +7055,11 @@
    "surface": "NativeUI",
    "location": "BuildBannedTab",
    "kind": "CreateText"
+  },
+  "Banned Players ({0})": {
+   "surface": "NativeUI",
+   "location": "RefreshBannedTab",
+   "kind": "TrF"
   },
   "Banned players - type to search": {
    "surface": "NativeUI",
@@ -7523,9 +7542,9 @@
    "kind": "shop"
   },
   "Bug Reports...": {
-   "surface": "NativeUI",
-   "location": "BuildAdminTab",
-   "kind": "CreateButton"
+   "surface": "AdminMenuRules, NativeUI",
+   "location": "AdminMenuRules.Launchers, BuildAdminTab",
+   "kind": "CreateButton, table"
   },
   "Bug fixes the mod ships": {
    "surface": "InfoLibrary",
@@ -7982,6 +8001,11 @@
    "location": "cosmetic name/description",
    "kind": "shop"
   },
+  "Chat": {
+   "surface": "AdminMenuRules",
+   "location": "AdminMenuRules.GroupCaptions",
+   "kind": "table"
+  },
   "Chat  <color=#888>(press {0} to chat)</color>": {
    "surface": "NativeUI",
    "location": "BuildHomeTab",
@@ -7993,14 +8017,9 @@
    "kind": "Tr"
   },
   "Chat Lockdown...": {
-   "surface": "NativeUI",
-   "location": "BuildAdminTab",
-   "kind": "CreateButton"
-  },
-  "Chat Mutes...": {
-   "surface": "NativeUI",
-   "location": "BuildAdminTab",
-   "kind": "CreateButton"
+   "surface": "AdminMenuRules, NativeUI",
+   "location": "AdminMenuRules.Launchers, BuildAdminTab",
+   "kind": "CreateButton, table"
   },
   "Chat [{0}]  —  Enter to send, Esc keeps your draft, {1} switches channel": {
    "surface": "CompetitiveUI",
@@ -8523,9 +8542,9 @@
    "kind": "Tr"
   },
   "Cosmetic Reviews...": {
-   "surface": "NativeUI",
-   "location": "BuildAdminTab",
-   "kind": "CreateButton"
+   "surface": "AdminMenuRules, NativeUI",
+   "location": "AdminMenuRules.Launchers, BuildAdminTab",
+   "kind": "CreateButton, table"
   },
   "Cosmetic slot does not match its catalog SKU": {
    "surface": "ServerTextRules",
@@ -9203,9 +9222,9 @@
    "kind": "Tr"
   },
   "Delete Chat Message...": {
-   "surface": "NativeUI",
-   "location": "BuildAdminTab",
-   "kind": "CreateButton"
+   "surface": "AdminMenuRules, NativeUI",
+   "location": "AdminMenuRules.Launchers, BuildAdminTab",
+   "kind": "CreateButton, table"
   },
   "Delete My Data": {
    "surface": "NativeUI, NativeUI.Settings",
@@ -9358,9 +9377,9 @@
    "kind": "shop"
   },
   "Details": {
-   "surface": "NativeUI",
-   "location": "BuildAdminFlagRow",
-   "kind": "CreateButton"
+   "surface": "AdminMenuRules, NativeUI",
+   "location": "AdminMenuRules.Verdicts, BuildAdminFlagRow",
+   "kind": "CreateButton, Tr, table"
   },
   "Details (optional)": {
    "surface": "MailUI",
@@ -9393,9 +9412,9 @@
    "kind": "CreateButton"
   },
   "Discard": {
-   "surface": "MailUI, NativeUI, PlayerCardsUI",
-   "location": "BuildAdminQuarantineRow, BuildComposerView, CreateTile +1",
-   "kind": "CreateButton, SetText, Tr"
+   "surface": "AdminMenuRules, MailUI, NativeUI +1",
+   "location": "AdminMenuRules.Verdicts, BuildAdminQuarantineRow, BuildComposerView +2",
+   "kind": "CreateButton, SetText, Tr +1"
   },
   "Discard this draft?": {
    "surface": "MailUI",
@@ -9843,9 +9862,9 @@
    "kind": "Tr"
   },
   "End Alert...": {
-   "surface": "NativeUI",
-   "location": "BuildAdminTab",
-   "kind": "CreateButton"
+   "surface": "AdminMenuRules, NativeUI",
+   "location": "AdminMenuRules.Launchers, BuildAdminTab",
+   "kind": "CreateButton, table"
   },
   "Energy Orbs": {
    "surface": "shop catalog",
@@ -10262,6 +10281,11 @@
    "location": "BuildTotalsPages",
    "kind": "Tr"
   },
+  "Find and Unban...": {
+   "surface": "AdminMenuRules, NativeUI",
+   "location": "AdminMenuRules.HeaderLaunchers, BuildBannedTab",
+   "kind": "CreateButton, table"
+  },
   "Fine": {
    "surface": "shop catalog",
    "location": "cosmetic name/description",
@@ -10512,10 +10536,10 @@
    "location": "cosmetic name/description",
    "kind": "shop"
   },
-  "Full log...": {
-   "surface": "NativeUI",
-   "location": "BuildAdminTab",
-   "kind": "CreateButton"
+  "Full Log...": {
+   "surface": "AdminMenuRules, NativeUI",
+   "location": "AdminMenuRules.HeaderLaunchers, BuildAdminTab",
+   "kind": "CreateButton, table"
   },
   "Full music albums that replace ROUNDS' combat soundtrack for you. Click an album row for 30-second track previews; after buying, pick tracks and control playback in the Music tab.": {
    "surface": "NativeUI",
@@ -10948,19 +10972,19 @@
    "kind": "Tr"
   },
   "Grant Achievement...": {
-   "surface": "NativeUI",
-   "location": "BuildAdminTab",
-   "kind": "CreateButton"
+   "surface": "AdminMenuRules, NativeUI",
+   "location": "AdminMenuRules.Launchers, BuildAdminTab",
+   "kind": "CreateButton, table"
   },
   "Grant Artist...": {
-   "surface": "NativeUI",
-   "location": "BuildAdminTab",
-   "kind": "CreateButton"
+   "surface": "AdminMenuRules, NativeUI",
+   "location": "AdminMenuRules.Launchers, BuildAdminTab",
+   "kind": "CreateButton, table"
   },
   "Grant Translator...": {
-   "surface": "NativeUI",
-   "location": "BuildAdminTab",
-   "kind": "CreateButton"
+   "surface": "AdminMenuRules, NativeUI",
+   "location": "AdminMenuRules.Launchers, BuildAdminTab",
+   "kind": "CreateButton, table"
   },
   "Grant a translation role - find the player": {
    "surface": "NativeUI",
@@ -13028,14 +13052,14 @@
    "kind": "shop"
   },
   "Mute From Message...": {
-   "surface": "NativeUI",
-   "location": "BuildAdminTab",
-   "kind": "CreateButton"
+   "surface": "AdminMenuRules, NativeUI",
+   "location": "AdminMenuRules.Launchers, BuildAdminTab",
+   "kind": "CreateButton, table"
   },
   "Mute Player...": {
-   "surface": "NativeUI",
-   "location": "BuildAdminTab",
-   "kind": "CreateButton"
+   "surface": "AdminMenuRules, NativeUI",
+   "location": "AdminMenuRules.Launchers, BuildAdminTab",
+   "kind": "CreateButton, table"
   },
   "Mute a player in chat - find the player": {
    "surface": "NativeUI",
@@ -14538,9 +14562,9 @@
    "kind": "TrF"
   },
   "Players": {
-   "surface": "NativeUI",
-   "location": "BuildCompareTab, BuildHomeTab",
-   "kind": "CreateButton, CreateText"
+   "surface": "AdminMenuRules, NativeUI",
+   "location": "AdminMenuRules.GroupCaptions, BuildCompareTab, BuildHomeTab",
+   "kind": "CreateButton, CreateText, table"
   },
   "Point to the sky, point to the floor, sway those hips. Dancing locks your controls for the duration.": {
    "surface": "shop catalog",
@@ -14921,6 +14945,11 @@
    "surface": "NativeUI",
    "location": "BuildSettingsTab",
    "kind": "Tr"
+  },
+  "Queues": {
+   "surface": "AdminMenuRules",
+   "location": "AdminMenuRules.PageLabels",
+   "kind": "table"
   },
   "Quick Reload": {
    "surface": "shop catalog",
@@ -15578,9 +15607,9 @@
    "kind": "shop"
   },
   "Refresh": {
-   "surface": "CompetitiveUI, InfoViz, NativeUI +1",
-   "location": "BuildAdminTab, BuildPage, DrawLogViewerModal +3",
-   "kind": "CreateButton, Tr, shop"
+   "surface": "AdminMenuRules, CompetitiveUI, InfoViz +2",
+   "location": "AdminMenuRules.HeaderLaunchers, BuildAdminTab, BuildPage +4",
+   "kind": "CreateButton, Tr, shop +1"
   },
   "Refresh?": {
    "surface": "InfoViz",
@@ -15812,10 +15841,15 @@
    "location": "BuildCompareShopSalesPanel",
    "kind": "Tr"
   },
+  "Reverse": {
+   "surface": "AdminMenuRules, NativeUI",
+   "location": "AdminMenuRules.Verdicts, BuildAdminSeriesRow, FillAdminSeriesRow",
+   "kind": "Tr, table"
+  },
   "Reverse Series...": {
-   "surface": "NativeUI",
-   "location": "BuildAdminTab",
-   "kind": "CreateButton"
+   "surface": "AdminMenuRules, NativeUI",
+   "location": "AdminMenuRules.HeaderLaunchers, BuildAdminTab",
+   "kind": "CreateButton, table"
   },
   "Reverse a ranked 1v1 series": {
    "surface": "NativeUI",
@@ -15833,14 +15867,14 @@
    "kind": "Tr"
   },
   "Revoke Artist...": {
-   "surface": "NativeUI",
-   "location": "BuildAdminTab",
-   "kind": "CreateButton"
+   "surface": "AdminMenuRules, NativeUI",
+   "location": "AdminMenuRules.Launchers, BuildAdminTab",
+   "kind": "CreateButton, table"
   },
   "Revoke Translator...": {
-   "surface": "NativeUI",
-   "location": "BuildAdminTab",
-   "kind": "CreateButton"
+   "surface": "AdminMenuRules, NativeUI",
+   "location": "AdminMenuRules.Launchers, BuildAdminTab",
+   "kind": "CreateButton, table"
   },
   "Revoke which alert?": {
    "surface": "NativeUI",
@@ -16252,11 +16286,6 @@
    "location": "BuildCompareTab, RefreshCompare",
    "kind": "Tr"
   },
-  "Search...": {
-   "surface": "NativeUI",
-   "location": "BuildBannedTab",
-   "kind": "CreateButton"
-  },
   "Searching for ranked match...": {
    "surface": "ApiClient",
    "location": "JoinQueue",
@@ -16482,10 +16511,15 @@
    "location": "ReportMatch, ReportTeamMatch",
    "kind": "TrF"
   },
+  "Server": {
+   "surface": "AdminMenuRules",
+   "location": "AdminMenuRules.GroupCaptions",
+   "kind": "table"
+  },
   "Server Alert...": {
-   "surface": "NativeUI",
-   "location": "BuildAdminTab",
-   "kind": "CreateButton"
+   "surface": "AdminMenuRules, NativeUI",
+   "location": "AdminMenuRules.Launchers, BuildAdminTab",
+   "kind": "CreateButton, table"
   },
   "Server alert": {
    "surface": "NativeUI",
@@ -19078,9 +19112,9 @@
    "kind": "Tr"
   },
   "Unban": {
-   "surface": "NativeUI",
-   "location": "BuildAdminBanRow",
-   "kind": "CreateButton"
+   "surface": "AdminMenuRules, NativeUI",
+   "location": "AdminMenuRules.Verdicts, BuildAdminBanRow",
+   "kind": "CreateButton, Tr, table"
   },
   "Unblock": {
    "surface": "NativeUI",
@@ -19191,6 +19225,11 @@
    "surface": "ServerTextRules",
    "location": "TrRefusalDetail",
    "kind": "Tr"
+  },
+  "Unmute Player...": {
+   "surface": "AdminMenuRules, NativeUI",
+   "location": "AdminMenuRules.Launchers, BuildAdminTab",
+   "kind": "CreateButton, table"
   },
   "Unnamed player": {
    "surface": "PcLabels, PlayerCardsUI",
@@ -19421,6 +19460,11 @@
    "surface": "shop catalog",
    "location": "cosmetic name/description",
    "kind": "shop"
+  },
+  "Void Series": {
+   "surface": "AdminMenuRules, NativeUI",
+   "location": "AdminMenuRules.Verdicts, BuildAdminSeriesRow, FillAdminSeriesRow",
+   "kind": "Tr, table"
   },
   "Voidshot": {
    "surface": "shop catalog",
@@ -19791,6 +19835,16 @@
    "surface": "ApiClient",
    "location": "AchievementDefs",
    "kind": "table"
+  },
+  "Win T1": {
+   "surface": "AdminMenuRules, NativeUI",
+   "location": "AdminMenuRules.Verdicts, BuildAdminSeriesRow, FillAdminSeriesRow",
+   "kind": "Tr, table"
+  },
+  "Win T2": {
+   "surface": "AdminMenuRules, NativeUI",
+   "location": "AdminMenuRules.Verdicts, BuildAdminSeriesRow, FillAdminSeriesRow",
+   "kind": "Tr, table"
   },
   "Win a 2v2 game 5-0": {
    "surface": "ApiClient",

@@ -229,6 +229,16 @@ namespace CompetitiveRounds.Harness
                           }))
                 return 2;
 
+            // Ask 15 (the admin menu reorganised): button widths from translated
+            // labels, row packing, pages, scope and colour slots, over every locale.
+            if (!RunSuite("adminmenu", quiet, ref totalRun, ref totalFail, ref suites,
+                          () =>
+                          {
+                              var r = AdminMenuRules.SelfTest();
+                              return new Suite(r.Passed + r.Failed, r.Failed, r.Report.ToString());
+                          }))
+                return 2;
+
             string verdict = suites > 0 && totalRun > 0 && totalFail == 0 ? "PASS" : "FAIL";
             Console.WriteLine("client-rules-harness suites=" + suites
                               + " run=" + totalRun + " fail=" + totalFail

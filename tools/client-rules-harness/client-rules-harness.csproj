@@ -191,6 +191,8 @@
     <Compile Include="../../plugin/ReadGateRules.cs" />
     <Compile Include="ReadGateRulesSelfTest.cs" />
     <Compile Include="FfaLeaveFigureRefusalCases.cs" />
+    <Compile Include="../../plugin/AdminMenuRules.cs" />
+    <Compile Include="AdminMenuRulesSelfTest.cs" />
   </ItemGroup>
 
 </Project>

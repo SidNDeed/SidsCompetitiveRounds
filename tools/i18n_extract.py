@@ -71,6 +71,11 @@ FILES = [
     "MatchTracker.cs", "VanillaFixes.cs", "QuickChat.cs",
     # Player Cards (Sept 10): the Collection tab + Settings rows.
     "PlayerCardsUI.cs", "PcLabels.cs",
+    # Ask 15 (the admin menu reorganised): the launcher, verdict, page and
+    # caption labels live in table initializers (harvested below), never at
+    # a call site — NativeUI passes them to CreateButton/CreateText as
+    # variables.
+    "AdminMenuRules.cs",
     # Spectator mode (Aug 6 item 13) — new files with user-visible Tr() text.
     "SpectatorHud.cs", "SpectatorJoiner.cs", "SpectatorSync.cs",
     # Esc-menu leave confirm (Aug 12, DC #1).
@@ -807,6 +812,29 @@ def harvest_source(fn: str, src: str, found: dict, sites: dict) -> None:
                 # $-string body, so the hole is the catalogue key's own.
                 if looks_translatable(s, allow_braces=True):
                     note_table(s, "SHOP_TAB_DESCS")
+
+    # Ask 15 (AdminMenuRules.cs): the admin menu's labels live in initializer
+    # tables — new Launcher(id, LABEL, ...), new Verdict(LABEL, ...) and the
+    # string arrays HeaderLaunchers / PageLabels / GroupCaptions — and reach
+    # I18n.Tr through variables in NativeUI (Tr(variable) is invisible to
+    # call-site harvesting, #295a). Harvest the literals, the SHOP_TAB_DESCS
+    # pattern; the Launcher's FIRST literal is a GameObject id, skipped.
+    if fn == "AdminMenuRules.cs":
+        for m in re.finditer(r'new Launcher\(\s*"(?:[^"\\]|\\.)*"\s*,\s*"((?:[^"\\]|\\.)*)"', src):
+            s = lf(unescape(m.group(1)))
+            if looks_translatable(s):
+                note_table(s, "AdminMenuRules.Launchers")
+        for m in re.finditer(r'new Verdict\(\s*"((?:[^"\\]|\\.)*)"', src):
+            s = lf(unescape(m.group(1)))
+            if looks_translatable(s):
+                note_table(s, "AdminMenuRules.Verdicts")
+        for name in ("HeaderLaunchers", "PageLabels", "GroupCaptions"):
+            block = re.search(name + r"\s*=\s*\{(.*?)\};", src, re.S)
+            if block:
+                for x in STR_LIT.finditer(block.group(1)):
+                    s = lf(unescape(x.group(1)))
+                    if looks_translatable(s):
+                        note_table(s, "AdminMenuRules." + name)
 
 
 def extract():

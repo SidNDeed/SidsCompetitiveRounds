@@ -4077,6 +4077,20 @@ namespace CompetitiveRounds
             // now names the availability-check DM as the post-lock way out.
             ["Couldn't leave the tournament - it may have locked or started"] = "No se pudo abandonar el torneo - puede que las inscripciones ya estén cerradas o que haya empezado",
             ["Tournament info is refreshing - try again in a moment"] = "La información del torneo se está actualizando - vuelve a intentarlo en un momento",
+            // Ask 15: the admin menu's pages, captions, relabels and series verdicts.
+            ["Actions"] = "Acciones",
+            ["Queues"] = "Colas",
+            ["Chat"] = "Chat",
+            ["Server"] = "Servidor",
+            ["Unmute Player..."] = "Quitar silencio a jugador...",
+            ["Admin Roster..."] = "Lista de administradores...",
+            ["Find and Unban..."] = "Buscar y desbanear...",
+            ["Full Log..."] = "Registro completo...",
+            ["Banned Players ({0})"] = "Baneados ({0})",
+            ["Win T1"] = "Gana E1",
+            ["Win T2"] = "Gana E2",
+            ["Void Series"] = "Anular serie",
+            ["Reverse"] = "Revertir",
         };
 
         private static readonly Dictionary<string, string> RU = new Dictionary<string, string>
@@ -8116,6 +8130,20 @@ namespace CompetitiveRounds
             // now names the availability-check DM as the post-lock way out.
             ["Couldn't leave the tournament - it may have locked or started"] = "Не удалось покинуть турнир - возможно, запись уже закрыта или он начался",
             ["Tournament info is refreshing - try again in a moment"] = "Информация о турнире обновляется - попробуйте ещё раз через пару секунд",
+            // Ask 15: the admin menu's pages, captions, relabels and series verdicts.
+            ["Actions"] = "Действия",
+            ["Queues"] = "Очереди",
+            ["Chat"] = "Чат",
+            ["Server"] = "Сервер",
+            ["Unmute Player..."] = "Снять мут с игрока...",
+            ["Admin Roster..."] = "Список админов...",
+            ["Find and Unban..."] = "Найти и разбанить...",
+            ["Full Log..."] = "Полный лог...",
+            ["Banned Players ({0})"] = "Забаненные ({0})",
+            ["Win T1"] = "Победа К1",
+            ["Win T2"] = "Победа К2",
+            ["Void Series"] = "Аннулировать",
+            ["Reverse"] = "Отменить",
         };
 
         private static readonly Dictionary<string, string> UK = new Dictionary<string, string>
@@ -12082,6 +12110,20 @@ namespace CompetitiveRounds
             // now names the availability-check DM as the post-lock way out.
             ["Couldn't leave the tournament - it may have locked or started"] = "Не вдалося покинути турнір - можливо, запис уже закрито або він розпочався",
             ["Tournament info is refreshing - try again in a moment"] = "Інформація про турнір оновлюється - спробуйте ще раз за кілька секунд",
+            // Ask 15: the admin menu's pages, captions, relabels and series verdicts.
+            ["Actions"] = "Дії",
+            ["Queues"] = "Черги",
+            ["Chat"] = "Чат",
+            ["Server"] = "Сервер",
+            ["Unmute Player..."] = "Зняти мют з гравця...",
+            ["Admin Roster..."] = "Список адмінів...",
+            ["Find and Unban..."] = "Знайти й розбанити...",
+            ["Full Log..."] = "Повний лог...",
+            ["Banned Players ({0})"] = "Забанені ({0})",
+            ["Win T1"] = "Перемога К1",
+            ["Win T2"] = "Перемога К2",
+            ["Void Series"] = "Анулювати",
+            ["Reverse"] = "Відкотити",
         };
 
         private static readonly Dictionary<string, string> SV = new Dictionary<string, string>
@@ -16048,6 +16090,20 @@ namespace CompetitiveRounds
             // now names the availability-check DM as the post-lock way out.
             ["Couldn't leave the tournament - it may have locked or started"] = "Det gick inte att lämna turneringen - anmälan kan ha låsts eller så har den startat",
             ["Tournament info is refreshing - try again in a moment"] = "Turneringsinformationen uppdateras - försök igen om en stund",
+            // Ask 15: the admin menu's pages, captions, relabels and series verdicts.
+            ["Actions"] = "Åtgärder",
+            ["Queues"] = "Köer",
+            ["Chat"] = "Chatt",
+            ["Server"] = "Server",
+            ["Unmute Player..."] = "Avtysta spelare...",
+            ["Admin Roster..."] = "Adminlista...",
+            ["Find and Unban..."] = "Sök och avbanna...",
+            ["Full Log..."] = "Fullständig logg...",
+            ["Banned Players ({0})"] = "Bannade spelare ({0})",
+            ["Win T1"] = "Vinst L1",
+            ["Win T2"] = "Vinst L2",
+            ["Void Series"] = "Annullera serie",
+            ["Reverse"] = "Ångra",
         };
     }
 }

@@ -1667,3 +1667,54 @@ def test_the_read_gate_guarantees_each_have_a_case(harness_run, name):
     assert line.startswith("[readgate] PASS"), line
     assert " | got=" in line and not line.rstrip().endswith("| got="), (
         "the case printed no measurement: " + line)
+
+# -- ask 15: the admin menu's layout rules (suite adminmenu) ------------
+#
+# AdminMenuRules.cs decides each admin button's width from its translated label,
+# how a group's buttons pack into rows, which page and group a launcher sits in,
+# who sees it and which colour slot it wears; AdminMenuRulesSelfTest.cs executes
+# it over every locale. Every case prints its measurement, so a label that
+# outgrows its box in one locale is red by its value (design
+# ai-collab/seat-b/ASK15-DESIGN.md sections 3, 4 and 7).
+_ADMIN_CASES = [
+    'width: a Latin glyph is 8.5 px at 13 pt, Cyrillic 9.5, a period or space 4.5, and 11 pt scales by 11/13',
+    'width: Refresh floors at 90, Ban Steam ID... is 130, Delete Chat Message... 205; Accept floors at 70, Discard is 75, a nine-letter Cyrillic verdict 95',
+    'width: verdicts that sit together share the widest width (Accept+Discard 75), a lone short one floors at 70, an empty set floors at 70',
+    'pack: 600+8+600+8+600 overruns 1812 so the third starts row 2; 900+8+904 is exactly 1812 and stays; 900+8+905 wraps; an empty set has no rows',
+    'pack: the widest packed row is 1208 over 2 rows and fits; a 2000 px button has its own row, is 2000 wide and does not fit',
+    'table: 18 packed launchers with distinct ids and every label ending in ..., plus 4 header launchers and 8 verdicts',
+    'table: AMutes looks up to Unmute Player... and an unknown id to null; Chat is the one group a moderator shares, Players, Server and Queues hide whole',
+    "layout: the Actions page is Chat, Players, Server in that order and Queues is the second page's only group",
+    'layout: Chat is Mute Player, Mute From Message, Delete Chat Message, Unmute Player, Chat Lockdown',
+    'layout: Players is Ban Steam ID, Grant Achievement, Grant Artist, Revoke Artist, Grant Translator, Revoke Translator',
+    'layout: Server is Server Alert, End Alert, Admin Roster, Action Log; Queues is Bug Reports, Cosmetic Reviews, Approved Update Queue',
+    'scope: a moderator sees Mute Player, Mute From Message, Delete Chat Message and Unmute Player, nothing else, one page and no bar; an admin sees two pages and the bar',
+    'scope: a moderator is always on page 0; an admin keeps page 1 and any other value is page 0',
+    'colour: a launcher is Launcher, a positive verdict Positive, a negative one Negative, any disabled button Disabled, navigation Nav or NavActive',
+    'colour: Accept, Unban, Win T1 and Win T2 are Positive; Discard, Void Series and Reverse Negative; Details and an unknown label Launcher',
+    "fit: in every locale each group packs within 1812 px in at most two rows (the Players row's width per locale printed)",
+    'fit: on each page in each locale the widest translated label gets a button at least its text plus padding and at most 400 px (each named with text width -> button width)',
+    'fit: Actions and Queues fit their 180 px page tabs at 14 pt in every locale (text plus padding per locale printed)',
+    'fit: in every locale the quarantine and series verdict widths stay at or under 140 px (quarantine/series per locale printed)',
+    'i18n: every launcher, header-launcher, verdict, page and caption key has a translation in es, ru, uk and sv (allowed to equal English: es Chat, sv Server)',
+]
+
+
+def test_the_admin_menu_suite_ran_every_case_and_none_failed(harness_run):
+    suites = _suites(harness_run)
+    assert "adminmenu" in suites, "the AdminMenuRules suite did not report"
+    run, fail, verdict = suites["adminmenu"]
+    assert fail == 0 and verdict == "PASS", harness_run.stdout[-4000:]
+    printed = len(re.findall(r"^\[adminmenu\] (PASS|FAIL) ", harness_run.stdout, re.M))
+    assert printed == run, (
+        "the suite declared run=%d but printed %d case lines" % (run, printed))
+    assert run == len(_ADMIN_CASES), (
+        "the suite has %d cases, this pin names %d" % (run, len(_ADMIN_CASES)))
+
+
+@pytest.mark.parametrize("name", _ADMIN_CASES)
+def test_each_admin_menu_case_passes_with_a_measurement(harness_run, name):
+    line = _named_case(harness_run, name, "adminmenu")
+    assert line.startswith("[adminmenu] PASS"), line
+    assert " | got=" in line and not line.rstrip().endswith("| got="), (
+        "the case printed no measurement: " + line)

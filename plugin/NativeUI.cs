@@ -22935,6 +22935,8 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
             UIFactory.SetText(txtAdminPanelHdr, full
                 ? "<b>Admin Panel</b>  <color=#888>(admins only)</color>"
                 : "<b>Chat Moderation</b>  <color=#888>(your granted channels only)</color>");
+            // Ask 15: the page a role may stand on; a moderator has one page.
+            SetAdminPage(adminPage);
         }
 
         /* Supported translation languages, mirroring the server's I18N_LANGS —
@@ -23014,6 +23016,136 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
             return sb.ToString();
         }
 
+        // ---- Ask 15: the admin menu's two in-panel pages -------------------------
+        // Layout, grouping, labels, order and colour come from AdminMenuRules
+        // (ai-collab/seat-b/ASK15-DESIGN.md); every button keeps the handler,
+        // call, confirm step and gate it had. The page index outlives rebuilds
+        // (a language switch re-runs BuildPage) the way shopCategoryFilter does.
+        private static int adminPage;
+        private static GameObject adminPageBar, adminPageActions, adminPageQueues;
+        private static GameObject[] adminPageBtns;
+        private static object[] adminPageTexts;
+
+        /// <summary>The rule's three verdict colours: one green for grant or
+        /// restore, one red for remove or revert, one grey for disabled. With
+        /// C_BTN for every launcher the admin region draws exactly four button
+        /// colours; navigation is C_TAB/C_TABACT like every bar in this UI.</summary>
+        private static readonly Color C_ADMIN_POS = new Color(0.2f, 0.45f, 0.2f, 0.9f);
+        private static readonly Color C_ADMIN_NEG = new Color(0.5f, 0.25f, 0.16f, 0.9f);
+        private static readonly Color C_ADMIN_OFF = new Color(0.18f, 0.18f, 0.18f, 0.75f);
+
+        private static Color AdminToneColour(AdminMenuRules.Tone tone)
+        {
+            switch (tone)
+            {
+                case AdminMenuRules.Tone.NavActive: return C_TABACT;
+                case AdminMenuRules.Tone.Nav: return C_TAB;
+                case AdminMenuRules.Tone.Positive: return C_ADMIN_POS;
+                case AdminMenuRules.Tone.Negative: return C_ADMIN_NEG;
+                case AdminMenuRules.Tone.Disabled: return C_ADMIN_OFF;
+                default: return C_BTN;
+            }
+        }
+
+        /// <summary>A verdict button's colour from its label's kind and its state.</summary>
+        private static Color AdminVerdictColour(string label, bool enabled)
+        {
+            return AdminToneColour(AdminMenuRules.ToneFor(AdminMenuRules.KindOfVerdict(label), enabled));
+        }
+
+        /// <summary>A launcher's size: the width its translated label needs by the
+        /// rule, at the launcher height. Callers pass the same literal their
+        /// CreateButton translates, so box and text agree in every locale.</summary>
+        private static Vector2 AdminLauncherSize(string label)
+        {
+            return new Vector2(AdminMenuRules.LauncherWidth(I18n.Tr(label)), 26);
+        }
+
+        /// <summary>Shows one page and paints the bar. A moderator is clamped to
+        /// Actions, so the Queues page is admin scope twice over (the clamp and
+        /// adminOnlySections). Called from ApplyAdminPanelScope, at build and on
+        /// every refresh because the authority resolves asynchronously, and by
+        /// the bar's buttons.</summary>
+        private static void SetAdminPage(int page)
+        {
+            adminPage = AdminMenuRules.ClampPage(page, ApiClient.IsAdmin);
+            if (adminPageActions != null) adminPageActions.SetActive(adminPage == 0);
+            if (adminPageQueues != null) adminPageQueues.SetActive(adminPage == 1);
+            if (adminPageBtns == null) return;
+            for (int i = 0; i < adminPageBtns.Length; i++)
+            {
+                if (adminPageBtns[i] == null) continue;
+                bool active = i == adminPage;
+                UIFactory.SetImageColor(adminPageBtns[i], AdminToneColour(AdminMenuRules.NavTone(active)));
+                if (adminPageTexts != null && i < adminPageTexts.Length && adminPageTexts[i] != null)
+                {
+                    UIFactory.SetColor(adminPageTexts[i], active ? C_WHITE : C_LABEL);
+                    UIFactory.SetBold(adminPageTexts[i], active);
+                }
+            }
+        }
+
+        private static GameObject NewAdminBlock(string name, Transform parent, int spacing)
+        {
+            var go = new GameObject(name); go.transform.SetParent(parent, false); go.AddComponent<RectTransform>();
+            UIFactory.AddVLG(go, spacing: spacing);
+            return go;
+        }
+
+        /// <summary>One group's block under `parent`: its caption (when it has one)
+        /// and the rows the rule packs its launchers into from each translated
+        /// label's width, in the table's order. The buttons come after: each
+        /// AdminLauncher call places its own in the row recorded here for its id.
+        /// A group whose launchers are all admin scope joins adminOnlySections as
+        /// one block, exactly the scope its buttons had.</summary>
+        private static void BuildAdminGroupRows(Transform parent, AdminMenuRules.Group group, string caption, Dictionary<string, Transform> slots)
+        {
+            var ls = AdminMenuRules.GroupLaunchers(group, true);
+            var widths = new int[ls.Length];
+            for (int i = 0; i < ls.Length; i++) widths[i] = AdminMenuRules.LauncherWidth(I18n.Tr(ls[i].Label));
+            var rows = AdminMenuRules.PackRows(widths, AdminMenuRules.RowSpacing, AdminMenuRules.ContentWidth);
+            var block = NewAdminBlock("AG" + group, parent, 4);
+            UIFactory.AddLE(block, flexH: 0);
+            if (AdminMenuRules.GroupIsAdminOnly(group)) adminOnlySections.Add(block);
+            if (caption != null)
+                UIFactory.CreateText("AGC" + group, block.transform, caption, 12f, C_LABEL, UIFactory.AlignMidLeft, sizeDelta: new Vector2(300, 16));
+            GameObject row = null;
+            int cur = -1;
+            for (int i = 0; i < ls.Length; i++)
+            {
+                if (rows[i] != cur)
+                {
+                    cur = rows[i];
+                    row = new GameObject("AGR" + group + cur); row.transform.SetParent(block.transform, false); row.AddComponent<RectTransform>();
+                    UIFactory.AddHLG(row, spacing: AdminMenuRules.RowSpacing); UIFactory.AddLE(row, prefH: 30, flexH: 0);
+                }
+                slots[ls[i].Id] = row.transform;
+            }
+        }
+
+        /// <summary>One launcher by its table row: label, group and scope come from
+        /// AdminMenuRules, the handler from the call site, main's unchanged. The
+        /// box is sized from the translated label CreateButton draws (CreateText
+        /// calls I18n.Tr; the global overflow mode truncates), so box and text
+        /// agree in every locale; every launcher wears the one launcher colour.
+        /// Call sites run in the table's order, which is a row's left-to-right
+        /// order.</summary>
+        private static GameObject AdminLauncher(Dictionary<string, Transform> slots, string id, UnityEngine.Events.UnityAction onClick)
+        {
+            var l = AdminMenuRules.LauncherById(id);
+            Transform row;
+            if (l == null || !slots.TryGetValue(id, out row) || row == null)
+            {
+                Plugin.Log.LogWarning("[AdminMenu] no table row for launcher " + id);
+                return null;
+            }
+            var btn = UIFactory.CreateButton(id, row, l.Label, 13f, C_WHITE, AdminToneColour(AdminMenuRules.Tone.Launcher), onClick, sizeDelta: AdminLauncherSize(l.Label));
+            // An admin-scope button inside a group a moderator shares hides alone;
+            // a whole-admin group's block is already in the set (BuildAdminGroupRows).
+            if (!l.ModeratorVisible && !AdminMenuRules.GroupIsAdminOnly(l.Group)) adminOnlySections.Add(btn);
+            return btn;
+        }
+
         private static GameObject BuildAdminTab(Transform parent)
         {
             var panel = new GameObject("AdminPanel");
@@ -23029,11 +23161,12 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
             // BuildPage re-runs on a language switch, so the collected set has to
             // start empty or it accumulates destroyed objects across rebuilds.
             adminOnlySections.Clear();
+            var launcherCol = AdminToneColour(AdminMenuRules.Tone.Launcher);
 
             var hdrRow = new GameObject("AHdr"); hdrRow.transform.SetParent(panel.transform, false); hdrRow.AddComponent<RectTransform>();
             UIFactory.AddHLG(hdrRow, spacing: 8); UIFactory.AddLE(hdrRow, prefH: 32, flexH: 0);
             txtAdminPanelHdr = UIFactory.CreateText("AT", hdrRow.transform, "<b>Admin Panel</b>  <color=#888>(admins only)</color>", 18f, new Color(1f, 0.7f, 0.3f), UIFactory.AlignMidLeft, sizeDelta: new Vector2(600, 28));
-            UIFactory.CreateButton("ARefresh", hdrRow.transform, "Refresh", 13f, C_WHITE, C_BTN, () =>
+            UIFactory.CreateButton("ARefresh", hdrRow.transform, "Refresh", 13f, C_WHITE, launcherCol, () =>
             {
                 var sid = MatchTracker.LocalSteamId;
                 if (string.IsNullOrEmpty(sid)) return;
@@ -23042,35 +23175,76 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
                 // read instead — the mute list is the only live data on their view.
                 if (!ApiClient.IsAdmin) { ApiClient.FetchChatMutes(sid); return; }
                 ApiClient.FetchFlaggedMatches(sid); ApiClient.FetchBannedUsers(sid); ApiClient.FetchAdminRecentSeries(sid); ApiClient.FetchAdminQuarantine(sid);
-            }, sizeDelta: new Vector2(90, 26));
+            }, sizeDelta: AdminLauncherSize("Refresh"));
 
-            var actionRow = new GameObject("AAct"); actionRow.transform.SetParent(panel.transform, false); actionRow.AddComponent<RectTransform>();
-            adminOnlySections.Add(actionRow);
-            UIFactory.AddHLG(actionRow, spacing: 8); UIFactory.AddLE(actionRow, prefH: 30, flexH: 0);
-            UIFactory.CreateButton("ABan", actionRow.transform, "Ban Steam ID...", 13f, C_WHITE, new Color(0.55f, 0.15f, 0.15f, 0.9f), () =>
-                StartAdminBanFlow(), sizeDelta: new Vector2(140, 26));
-            UIFactory.CreateButton("AGrant", actionRow.transform, "Grant Achievement...", 13f, C_WHITE, new Color(0.2f, 0.45f, 0.2f, 0.9f), () =>
-                CompetitiveUI.OpenAdminPrompt("grant"), sizeDelta: new Vector2(170, 26));
-            UIFactory.CreateButton("ARev", actionRow.transform, "Reverse Series...", 13f, C_WHITE, new Color(0.45f, 0.3f, 0.55f, 0.9f), () =>
-                StartAdminReverseFlow(), sizeDelta: new Vector2(150, 26));
-            UIFactory.CreateButton("ABugRpt", actionRow.transform, "Bug Reports...", 13f, C_WHITE, new Color(0.2f, 0.3f, 0.5f, 0.9f), () =>
-                CompetitiveUI.OpenBugReportAdminViewer(), sizeDelta: new Vector2(150, 26));
-            var artistActionRow = new GameObject("AArtistAct");
-            artistActionRow.transform.SetParent(panel.transform, false);
-            artistActionRow.AddComponent<RectTransform>();
-            adminOnlySections.Add(artistActionRow);
-            UIFactory.AddHLG(artistActionRow, spacing: 8);
-            UIFactory.AddLE(artistActionRow, prefH: 30, flexH: 0);
+            /* Ask 15: two pages inside the one tab, the shop's own page pattern
+             * (shopCategoryFilter and its ShTab bar): Actions holds the launchers
+             * in three captioned groups, Queues the viewers and the lists. The bar
+             * and the Queues page are admin scope: a moderator has exactly one
+             * visible page, the outer sub-tab bar's own rule. Grouping, order,
+             * width and colour come from AdminMenuRules (design note
+             * ai-collab/seat-b/ASK15-DESIGN.md); every handler below is main's. */
+            adminPageBar = new GameObject("APages"); adminPageBar.transform.SetParent(panel.transform, false); adminPageBar.AddComponent<RectTransform>();
+            UIFactory.AddHLG(adminPageBar, spacing: 6); UIFactory.AddLE(adminPageBar, prefH: 28, flexH: 0);
+            adminOnlySections.Add(adminPageBar);
+            adminPageBtns = new GameObject[AdminMenuRules.PageLabels.Length];
+            adminPageTexts = new object[AdminMenuRules.PageLabels.Length];
+            for (int p = 0; p < AdminMenuRules.PageLabels.Length; p++)
+            {
+                int pi = p;
+                var pb = UIFactory.CreateButton("APage" + p, adminPageBar.transform, AdminMenuRules.PageLabels[p], AdminMenuRules.PageTabPt, C_LABEL,
+                    AdminToneColour(AdminMenuRules.NavTone(false)), () => SetAdminPage(pi), sizeDelta: new Vector2(AdminMenuRules.PageTabWidth, 26));
+                adminPageBtns[p] = pb;
+                adminPageTexts[p] = UIFactory.GetButtonText(pb);
+            }
+            adminPageActions = NewAdminBlock("APageActions", panel.transform, 8);
+            UIFactory.AddLE(adminPageActions, flexH: 1);
+            adminPageQueues = NewAdminBlock("APageQueues", panel.transform, 6);
+            UIFactory.AddLE(adminPageQueues, flexH: 1);
+            adminOnlySections.Add(adminPageQueues);
+
+            // The rows each group's launchers go in, packed by the rule from the
+            // translated labels; slots maps a launcher's id to its row.
+            var slots = new Dictionary<string, Transform>(StringComparer.Ordinal);
+            for (int g = 0; g < AdminMenuRules.ActionsGroups.Length; g++)
+                BuildAdminGroupRows(adminPageActions.transform, AdminMenuRules.ActionsGroups[g], AdminMenuRules.GroupCaptions[g], slots);
+            BuildAdminGroupRows(adminPageQueues.transform, AdminMenuRules.Group.Queues, null, slots);
+
+            // The launchers, in the table's order (a row's left-to-right order), each
+            // by the handler main had for it.
+            // Chat: the four controls a moderator is here for (Aug 7 item 4), then the
+            // channel lockdown. The mute list opens to unmute, so its label says so.
+            AdminLauncher(slots, "AMuteNew", () =>
+                StartChatMuteFlow());
+            // Mute-by-message (design v3 S6): works on BRIDGED chatters too
+            // (Twitch/YouTube/Discord), which the player-search flow above
+            // structurally cannot reach — they have no players row. Left
+            // un-wrapped like its three siblings: the server scopes language
+            // moderators to their own rows and refuses the rest verbatim.
+            AdminLauncher(slots, "AMuteMsg", () =>
+                OpenChatMuteFromMessagePicker());
+            AdminLauncher(slots, "AChatDel", () =>
+                OpenChatDeletePicker());
+            AdminLauncher(slots, "AMutes", () =>
+                OpenChatMutePicker());
+            // Whole-channel lockdown (design v3 S7) — the biggest hammer, so
+            // admin HMAC only: admin scope by the table, alone in the Chat group.
+            AdminLauncher(slots, "ALockdown", () =>
+                StartChatLockdownFlow());
+            // Players: bans, grants and the two role pairs.
+            AdminLauncher(slots, "ABan", () =>
+                StartAdminBanFlow());
+            AdminLauncher(slots, "AGrant", () =>
+                CompetitiveUI.OpenAdminPrompt("grant"));
             // Item 1 (v1.30): artist-role management. Assigning ITEMS to an
-            // artist lives on the shop rows (admin-only "Artist" button there).
-            UIFactory.CreateButton("AArtG", artistActionRow.transform, "Grant Artist...", 13f, C_WHITE, new Color(0.3f, 0.45f, 0.35f, 0.9f), () =>
+            // artist lives on the shop rows (the admin-only Artist button there).
+            AdminLauncher(slots, "AArtG", () =>
                 // Grant targets someone who ISN'T an artist yet, so the roster
                 // can't offer them — use the name search (elo disambiguates).
                 CompetitiveUI.OpenPlayerSearch("Grant the artist role - find the player",
                     (sid, pname) => { if (!string.IsNullOrEmpty(sid)) ApiClient.AdminSetArtist(MatchTracker.LocalSteamId, sid, true,
-                        (ok, resp) => ShowArtistResult(ok, ok ? $"Artist role granted to {pname}." : resp)); }),
-                sizeDelta: new Vector2(130, 26));
-            UIFactory.CreateButton("AArtR", artistActionRow.transform, "Revoke Artist...", 13f, C_WHITE, new Color(0.45f, 0.3f, 0.3f, 0.9f), () =>
+                        (ok, resp) => ShowArtistResult(ok, ok ? $"Artist role granted to {pname}." : resp)); }));
+            AdminLauncher(slots, "AArtR", () =>
                 // Bug batch item 5: revoking should list the CURRENT artists, not
                 // ask for a raw Steam64.
                 ApiClient.FetchArtistsList(ok =>
@@ -23089,18 +23263,11 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
                         picked => { if (!string.IsNullOrEmpty(picked)) ApiClient.AdminSetArtist(MatchTracker.LocalSteamId, picked, false,
                             (ok2, resp) => ShowArtistResult(ok2, ok2 ? "Artist revoked." : resp)); },
                         actionLabel: "Revoke", showClear: false);
-                }),
-                sizeDelta: new Vector2(135, 26));
-            // Round 3 item 2: review queue for artist-submitted cosmetics.
-            UIFactory.CreateButton("ACosR", artistActionRow.transform, "Cosmetic Reviews...", 13f, C_WHITE, new Color(0.3f, 0.4f, 0.55f, 0.9f), () =>
-                CompetitiveUI.OpenCosmeticReview(), sizeDelta: new Vector2(150, 26));
-            /* Bug #158: translation-moderator roles. Rebuilt — the server half
-             * has been live since the i18n infrastructure shipped, but the
-             * client half was absent from the entire repo when the report
-             * arrived. Same two-button shape as the artist roles directly
-             * above (search to grant, roster-pick to revoke) because a grant
-             * targets someone who by definition is NOT on the roster yet. */
-            UIFactory.CreateButton("ATrG", artistActionRow.transform, "Grant Translator...", 13f, C_WHITE, new Color(0.28f, 0.42f, 0.5f, 0.9f), () =>
+                }));
+            /* Bug #158: translation-moderator roles. Same two-button shape as the
+             * artist roles (search to grant, roster-pick to revoke) because a
+             * grant targets someone who by definition is NOT on the roster yet. */
+            AdminLauncher(slots, "ATrG", () =>
                 CompetitiveUI.OpenPlayerSearch(I18n.Tr("Grant a translation role - find the player"),
                     (sid, pname) =>
                     {
@@ -23118,9 +23285,8 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
                                         : resp));
                             },
                             actionLabel: I18n.Tr("Grant"), showClear: false, itemNoun: "");
-                    }),
-                sizeDelta: new Vector2(155, 26));
-            UIFactory.CreateButton("ATrR", artistActionRow.transform, "Revoke Translator...", 13f, C_WHITE, new Color(0.45f, 0.3f, 0.3f, 0.9f), () =>
+                    }));
+            AdminLauncher(slots, "ATrR", () =>
                 ApiClient.FetchI18nGrants(MatchTracker.LocalSteamId, ok =>
                 {
                     var roster = ApiClient.CachedI18nGrants;
@@ -23159,37 +23325,11 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
                                 (ok2, resp) => ShowArtistResult(ok2, ok2 ? I18n.Tr("Translation role revoked.") : resp));
                         },
                         actionLabel: I18n.Tr("Revoke"), showClear: false, itemNoun: "");
-                }),
-                sizeDelta: new Vector2(160, 26));
-            UIFactory.CreateButton("ACosQ", artistActionRow.transform, "Approved Update Queue...", 13f, C_WHITE, new Color(0.35f, 0.3f, 0.6f, 0.95f), () =>
-                CompetitiveUI.OpenCosmeticReleaseQueue(), sizeDelta: new Vector2(190, 26));
-
-            /* Aug 7 item 4: the four moderation surfaces that had no client code
-             * at all. Width budget for this row: 130+165+165+185+235 = 880 plus
-             * 4 gaps of 8 = 912, against the ~1828px the panel's content width
-             * gives an HLG at the 1920-unit canvas — half of it spare, so nothing
-             * here compresses a neighbour (#199/#245).
-             * Each button is sized for a TRANSLATED label, not the English one:
-             * CreateButton routes its text through CreateText, which calls
-             * I18n.Tr, and the global Truncate default would drop the tail of a
-             * ~30%-longer ru/es label in an English-sized box (#292). At 13pt
-             * Gravity averages ~8px per glyph, so 235px carries ~29 characters
-             * against "Delete Chat Message..."'s 22. */
-            var modActionRow = new GameObject("AModAct");
-            modActionRow.transform.SetParent(panel.transform, false);
-            modActionRow.AddComponent<RectTransform>();
-            UIFactory.AddHLG(modActionRow, spacing: 8);
-            UIFactory.AddLE(modActionRow, prefH: 30, flexH: 0);
-            // The roster and the audit log are admin-HMAC endpoints, so they join
-            // the admin-only set even though they share this row with the three
-            // controls a moderator is here for.
-            adminOnlySections.Add(UIFactory.CreateButton("AAdmins", modActionRow.transform, "Admins...", 13f, C_WHITE, new Color(0.28f, 0.38f, 0.5f, 0.9f), () =>
-                OpenAdminRosterPicker(), sizeDelta: new Vector2(130, 26)));
-            adminOnlySections.Add(UIFactory.CreateButton("AActions", modActionRow.transform, "Action Log...", 13f, C_WHITE, new Color(0.3f, 0.34f, 0.42f, 0.9f), () =>
-                OpenAdminActionLogPicker(0), sizeDelta: new Vector2(165, 26)));
+                }));
+            // Server: alerts, the roster and the audit log.
             /* Aug 7 item 1: standing server alerts — compose (category picker →
              * message prompt → confirm) and revoke (recent-alert picker). */
-            adminOnlySections.Add(UIFactory.CreateButton("AAlertNew", modActionRow.transform, "Server Alert...", 13f, C_WHITE, new Color(0.55f, 0.38f, 0.12f, 0.9f), () =>
+            AdminLauncher(slots, "AAlertNew", () =>
                 CompetitiveUI.OpenArtistPicker(I18n.Tr("Alert category"),
                     new[] { "Outage", "Issue", "Update", "Info" },
                     new[] { "outage", "issue", "update", "info" },
@@ -23206,9 +23346,8 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
                                         (ok, resp) => ShowArtistResult(ok, ok ? I18n.Tr("Alert is live.") : resp)));
                             });
                     },
-                    actionLabel: I18n.Tr("Pick"), showClear: false, itemNoun: ""),
-                sizeDelta: new Vector2(150, 26)));
-            adminOnlySections.Add(UIFactory.CreateButton("AAlertEnd", modActionRow.transform, "End Alert...", 13f, C_WHITE, new Color(0.42f, 0.3f, 0.3f, 0.9f), () =>
+                    actionLabel: I18n.Tr("Pick"), showClear: false, itemNoun: ""));
+            AdminLauncher(slots, "AAlertEnd", () =>
                 ApiClient.FetchAdminAlerts(() =>
                 {
                     var alerts = ApiClient.CachedAdminAlerts;
@@ -23229,34 +23368,36 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
                                 (ok, resp) => ShowArtistResult(ok, ok ? I18n.Tr("Alert revoked.") : resp));
                         },
                         actionLabel: I18n.Tr("Revoke"), showClear: false, itemNoun: "");
-                }),
-                sizeDelta: new Vector2(135, 26)));
-            UIFactory.CreateButton("AMutes", modActionRow.transform, "Chat Mutes...", 13f, C_WHITE, new Color(0.34f, 0.32f, 0.45f, 0.9f), () =>
-                OpenChatMutePicker(), sizeDelta: new Vector2(165, 26));
-            UIFactory.CreateButton("AMuteNew", modActionRow.transform, "Mute Player...", 13f, C_WHITE, new Color(0.5f, 0.33f, 0.2f, 0.9f), () =>
-                StartChatMuteFlow(), sizeDelta: new Vector2(185, 26));
-            UIFactory.CreateButton("AChatDel", modActionRow.transform, "Delete Chat Message...", 13f, C_WHITE, new Color(0.5f, 0.22f, 0.22f, 0.9f), () =>
-                OpenChatDeletePicker(), sizeDelta: new Vector2(235, 26));
-            // Mute-by-message (design v3 S6): works on BRIDGED chatters too
-            // (Twitch/YouTube/Discord), which the player-search flow above
-            // structurally cannot reach — they have no players row. Left
-            // un-wrapped like its three siblings: the server scopes language
-            // moderators to their own rows and refuses the rest verbatim.
-            UIFactory.CreateButton("AMuteMsg", modActionRow.transform, "Mute From Message...", 13f, C_WHITE, new Color(0.55f, 0.3f, 0.35f, 0.9f), () =>
-                OpenChatMuteFromMessagePicker(), sizeDelta: new Vector2(215, 26));
-            // Whole-channel lockdown (design v3 S7) — the biggest hammer, so
-            // admin HMAC only (wrapped like the other admin-only buttons).
-            adminOnlySections.Add(UIFactory.CreateButton("ALockdown", modActionRow.transform, "Chat Lockdown...", 13f, C_WHITE, new Color(0.45f, 0.2f, 0.2f, 0.9f), () =>
-                StartChatLockdownFlow(), sizeDelta: new Vector2(175, 26)));
+                }));
+            // The roster and the audit log are admin-HMAC endpoints: admin scope by
+            // the table (the Server group hides whole).
+            AdminLauncher(slots, "AAdmins", () =>
+                OpenAdminRosterPicker());
+            AdminLauncher(slots, "AActions", () =>
+                OpenAdminActionLogPicker(0));
+            // Queues: the three viewers, on the second page above the lists.
+            AdminLauncher(slots, "ABugRpt", () =>
+                CompetitiveUI.OpenBugReportAdminViewer());
+            // Round 3 item 2: review queue for artist-submitted cosmetics.
+            AdminLauncher(slots, "ACosR", () =>
+                CompetitiveUI.OpenCosmeticReview());
+            AdminLauncher(slots, "ACosQ", () =>
+                CompetitiveUI.OpenCosmeticReleaseQueue());
 
-            // Recent Ranked Series — the main series-management section (Award/Void/Reverse).
-            var seriesHdrRow = new GameObject("ASHRow"); seriesHdrRow.transform.SetParent(panel.transform, false); seriesHdrRow.AddComponent<RectTransform>();
-            adminOnlySections.Add(seriesHdrRow);
-            UIFactory.AddHLG(seriesHdrRow, spacing: 8); UIFactory.AddLE(seriesHdrRow, prefH: 24, flexH: 0);
-            txtAdminSeriesHdr = UIFactory.CreateText("ASH", seriesHdrRow.transform, "Recent Ranked Series", 16f, new Color(0.6f, 0.85f, 1f), UIFactory.AlignMidLeft, sizeDelta: new Vector2(700, 22));
+            // Recent Ranked Series — the main series-management section (Award/Void/Reverse);
+            // Reverse Series by id sits on its header row, the Full Log pattern.
+            var seriesHdrRow = new GameObject("ASHRow"); seriesHdrRow.transform.SetParent(adminPageQueues.transform, false); seriesHdrRow.AddComponent<RectTransform>();
+            UIFactory.AddHLG(seriesHdrRow, spacing: 8); UIFactory.AddLE(seriesHdrRow, prefH: 26, flexH: 0);
+            txtAdminSeriesHdr = UIFactory.CreateText("ASH", seriesHdrRow.transform, "Recent Ranked Series", 16f, C_SUB, UIFactory.AlignMidLeft, sizeDelta: new Vector2(700, 22));
             UIFactory.SetBold(txtAdminSeriesHdr, true);
-            var seriesSV = UIFactory.CreateScrollView("ASSV", panel.transform, spacing: 3);
-            adminOnlySections.Add(seriesSV.scrollGO);
+            {
+                var hdrGO = (txtAdminSeriesHdr as Component)?.gameObject;
+                if (hdrGO != null) UIFactory.AddLE(hdrGO, minW: 300, prefW: 700, flexW: 1, flexH: 0);
+            }
+            var revBtn = UIFactory.CreateButton("ARev", seriesHdrRow.transform, "Reverse Series...", 13f, C_WHITE, launcherCol, () =>
+                StartAdminReverseFlow(), sizeDelta: AdminLauncherSize("Reverse Series..."));
+            UIFactory.AddLE(revBtn, prefW: AdminLauncherSize("Reverse Series...").x, prefH: 26, flexW: 0, flexH: 0);
+            var seriesSV = UIFactory.CreateScrollView("ASSV", adminPageQueues.transform, spacing: 3);
             // Responsive 1:2 split: enough series space to operate at 1024x576,
             // while Flagged Matches receives the larger share at every height.
             UIFactory.AddLE(seriesSV.scrollGO, minH: 80, flexH: 1);
@@ -23265,24 +23406,21 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
             // Rejected reports are independently scrollable and client-capped:
             // the Admin panel's outer VLG cannot absorb an unbounded fixed-height
             // list on wide monitors (#199/#245). Each child has prefH (#63).
-            var quarantineHdrRow = new GameObject("AQHRow"); quarantineHdrRow.transform.SetParent(panel.transform, false); quarantineHdrRow.AddComponent<RectTransform>();
-            adminOnlySections.Add(quarantineHdrRow);
+            var quarantineHdrRow = new GameObject("AQHRow"); quarantineHdrRow.transform.SetParent(adminPageQueues.transform, false); quarantineHdrRow.AddComponent<RectTransform>();
             UIFactory.AddHLG(quarantineHdrRow, spacing: 8); UIFactory.AddLE(quarantineHdrRow, prefH: 24, flexH: 0);
-            txtAdminQuarantineHdr = UIFactory.CreateText("AQH", quarantineHdrRow.transform, "Rejected Reports", 16f, new Color(1f, 0.65f, 0.35f), UIFactory.AlignMidLeft, sizeDelta: new Vector2(700, 22));
+            txtAdminQuarantineHdr = UIFactory.CreateText("AQH", quarantineHdrRow.transform, "Rejected Reports", 16f, C_SUB, UIFactory.AlignMidLeft, sizeDelta: new Vector2(700, 22));
             UIFactory.SetBold(txtAdminQuarantineHdr, true);
-            var quarantineSV = UIFactory.CreateScrollView("AQSV", panel.transform, spacing: 3);
-            adminOnlySections.Add(quarantineSV.scrollGO);
+            var quarantineSV = UIFactory.CreateScrollView("AQSV", adminPageQueues.transform, spacing: 3);
             UIFactory.AddLE(quarantineSV.scrollGO, minH: 72, flexH: 1);
             adminQuarantineContainer = quarantineSV.content;
 
-            var split = new GameObject("ASplit"); split.transform.SetParent(panel.transform, false); split.AddComponent<RectTransform>();
-            adminOnlySections.Add(split);
+            var split = new GameObject("ASplit"); split.transform.SetParent(adminPageQueues.transform, false); split.AddComponent<RectTransform>();
             UIFactory.AddHLG(split, spacing: 8); UIFactory.AddLE(split, minH: 140, flexH: 2);
 
             // Left column: flagged matches.
             var leftCol = new GameObject("AFLeft"); leftCol.transform.SetParent(split.transform, false); leftCol.AddComponent<RectTransform>();
             UIFactory.AddVLG(leftCol, spacing: 4); UIFactory.AddLE(leftCol, flexW: 1, flexH: 1);
-            txtAdminFlagsHdr = UIFactory.CreateText("AFH", leftCol.transform, "Flagged Matches", 16f, new Color(1f, 0.55f, 0.3f), sizeDelta: new Vector2(500, 24));
+            txtAdminFlagsHdr = UIFactory.CreateText("AFH", leftCol.transform, "Flagged Matches", 16f, C_SUB, sizeDelta: new Vector2(500, 24));
             UIFactory.SetBold(txtAdminFlagsHdr, true);
             var flagSV = UIFactory.CreateScrollView("AFSV", leftCol.transform, spacing: 2);
             UIFactory.AddLE(flagSV.scrollGO, flexH: 1);
@@ -23296,15 +23434,15 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
             UIFactory.AddVLG(rightCol, spacing: 4); UIFactory.AddLE(rightCol, prefW: 360, flexH: 1);
             var actHdrRow = new GameObject("AALRow"); actHdrRow.transform.SetParent(rightCol.transform, false); actHdrRow.AddComponent<RectTransform>();
             UIFactory.AddHLG(actHdrRow, spacing: 6); UIFactory.AddLE(actHdrRow, prefH: 26, flexH: 0);
-            txtAdminActLogHdr = UIFactory.CreateText("AALH", actHdrRow.transform, "Action Log", 16f, new Color(0.72f, 0.80f, 1f), UIFactory.AlignMidLeft, sizeDelta: new Vector2(232, 24));
+            txtAdminActLogHdr = UIFactory.CreateText("AALH", actHdrRow.transform, "Action Log", 16f, C_SUB, UIFactory.AlignMidLeft, sizeDelta: new Vector2(232, 24));
             UIFactory.SetBold(txtAdminActLogHdr, true);
             {
                 var hdrGO = (txtAdminActLogHdr as Component)?.gameObject;
                 if (hdrGO != null) UIFactory.AddLE(hdrGO, minW: 180, prefW: 232, flexW: 1, flexH: 0);
             }
-            var actFullBtn = UIFactory.CreateButton("AALFull", actHdrRow.transform, "Full log...", 12f, C_WHITE,
-                new Color(0.28f, 0.30f, 0.38f, 0.95f), () => OpenAdminActionLogPicker(0), sizeDelta: new Vector2(100, 24));
-            UIFactory.AddLE(actFullBtn, prefW: 100, prefH: 24, flexW: 0, flexH: 0);
+            var actFullBtn = UIFactory.CreateButton("AALFull", actHdrRow.transform, "Full Log...", 13f, C_WHITE,
+                launcherCol, () => OpenAdminActionLogPicker(0), sizeDelta: AdminLauncherSize("Full Log..."));
+            UIFactory.AddLE(actFullBtn, prefW: AdminLauncherSize("Full Log...").x, prefH: 26, flexW: 0, flexH: 0);
             var actSV = UIFactory.CreateScrollView("AALSV", rightCol.transform, spacing: 2);
             UIFactory.AddLE(actSV.scrollGO, flexH: 1);
             adminActLogContainer = actSV.content;
@@ -23328,15 +23466,17 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
 
             var bansHdrRow = new GameObject("ABHRow"); bansHdrRow.transform.SetParent(panel.transform, false); bansHdrRow.AddComponent<RectTransform>();
             UIFactory.AddHLG(bansHdrRow, spacing: 6); UIFactory.AddLE(bansHdrRow, prefH: 28, flexH: 0);
-            txtAdminBansHdr = UIFactory.CreateText("ABH", bansHdrRow.transform, "Banned Players", 17f, new Color(1f, 0.45f, 0.45f), UIFactory.AlignMidLeft, sizeDelta: new Vector2(400, 26));
+            txtAdminBansHdr = UIFactory.CreateText("ABH", bansHdrRow.transform, "Banned Players", 17f, C_SUB, UIFactory.AlignMidLeft, sizeDelta: new Vector2(400, 26));
             UIFactory.SetBold(txtAdminBansHdr, true);
             {
                 var hdrGO = (txtAdminBansHdr as Component)?.gameObject;
                 if (hdrGO != null) UIFactory.AddLE(hdrGO, minW: 200, prefW: 400, flexW: 1, flexH: 0);
             }
-            var banSearchBtn = UIFactory.CreateButton("ABSearch", bansHdrRow.transform, "Search...", 13f, C_WHITE,
-                new Color(0.28f, 0.30f, 0.38f, 0.95f), OpenBanSearchPicker, sizeDelta: new Vector2(110, 26));
-            UIFactory.AddLE(banSearchBtn, prefW: 110, prefH: 26, flexW: 0, flexH: 0);
+            // Ask 15: the label says what the picker does (it ends in ConfirmUnban);
+            // a launcher, so the launcher colour, sized from its translated label.
+            var banSearchBtn = UIFactory.CreateButton("ABSearch", bansHdrRow.transform, "Find and Unban...", 13f, C_WHITE,
+                AdminToneColour(AdminMenuRules.Tone.Launcher), OpenBanSearchPicker, sizeDelta: AdminLauncherSize("Find and Unban..."));
+            UIFactory.AddLE(banSearchBtn, prefW: AdminLauncherSize("Find and Unban...").x, prefH: 26, flexW: 0, flexH: 0);
             var banSV = UIFactory.CreateScrollView("ABSV", panel.transform, spacing: 2);
             UIFactory.AddLE(banSV.scrollGO, flexH: 1);
             adminBansContainer = banSV.content;
@@ -23349,7 +23489,7 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
             // but the authority resolves asynchronously — mirror RefreshAdmin.
             if (!ApiClient.IsAdmin) return;
             var bans = ApiClient.CachedBannedUsers ?? new List<ApiClient.BannedUserEntry>();
-            UIFactory.SetText(txtAdminBansHdr, $"Banned Users ({bans.Count})");
+            UIFactory.SetText(txtAdminBansHdr, I18n.TrF("Banned Players ({0})", bans.Count));
             for (int i = bans.Count; i < adminBanRowPool.Count; i++) adminBanRowPool[i].SetActive(false);
             for (int i = 0; i < bans.Count; i++)
             {
@@ -23446,7 +23586,7 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
         private static GameObject BuildAdminQuarantineRow(Transform parent, int idx)
         {
             while (adminQuarantineRowBindings.Count <= idx) adminQuarantineRowBindings.Add(null);
-            var row = UIFactory.CreatePanel($"AQ{idx}", parent, new Color(0.19f, 0.14f, 0.11f, 0.9f));
+            var row = UIFactory.CreatePanel($"AQ{idx}", parent, C_PANEL);
             UIFactory.AddHLG(row, spacing: 6, padL: 6, padR: 6, padT: 4, padB: 4);
             UIFactory.AddLE(row, prefH: 128, flexH: 0);
 
@@ -23466,13 +23606,15 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
 
             var actions = new GameObject("AQActions"); actions.transform.SetParent(row.transform, false); actions.AddComponent<RectTransform>();
             UIFactory.AddVLG(actions, spacing: 4);
-            UIFactory.AddLE(actions, prefW: 88, prefH: 60, flexW: 0, flexH: 0);
+            // Ask 15: the pair shares the wider of its two translated labels.
+            int verdictW = AdminMenuRules.SharedVerdictWidth(new[] { I18n.Tr("Accept"), I18n.Tr("Discard") });
+            UIFactory.AddLE(actions, prefW: verdictW + AdminMenuRules.VerdictColumnPad, prefH: 60, flexW: 0, flexH: 0);
             UIFactory.CreateButton($"AQA{idx}", actions.transform, "Accept", 11f, C_WHITE,
-                new Color(0.2f, 0.45f, 0.2f, 0.9f),
-                () => OnAdminQuarantineAction(idx, true), sizeDelta: new Vector2(84, 27));
+                AdminVerdictColour("Accept", true),
+                () => OnAdminQuarantineAction(idx, true), sizeDelta: new Vector2(verdictW, 27));
             UIFactory.CreateButton($"AQD{idx}", actions.transform, "Discard", 11f, C_WHITE,
-                new Color(0.5f, 0.25f, 0.16f, 0.9f),
-                () => OnAdminQuarantineAction(idx, false), sizeDelta: new Vector2(84, 27));
+                AdminVerdictColour("Discard", true),
+                () => OnAdminQuarantineAction(idx, false), sizeDelta: new Vector2(verdictW, 27));
             row.SetActive(false);
             return row;
         }
@@ -23519,9 +23661,7 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
             if (accept != null)
             {
                 SetButtonInteractable(accept, e.can_accept);
-                UIFactory.SetImageColor(accept, e.can_accept
-                    ? new Color(0.2f, 0.45f, 0.2f, 0.9f)
-                    : new Color(0.18f, 0.18f, 0.18f, 0.75f));
+                UIFactory.SetImageColor(accept, AdminVerdictColour("Accept", e.can_accept));
                 UIFactory.SetColor(UIFactory.GetButtonText(accept), e.can_accept ? C_WHITE : C_DIM);
             }
         }
@@ -23635,7 +23775,7 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
 
         private static GameObject BuildAdminFlagRow(Transform parent, int idx)
         {
-            var row = UIFactory.CreatePanel($"AF{idx}", parent, new Color(0.18f, 0.13f, 0.13f, 0.85f));
+            var row = UIFactory.CreatePanel($"AF{idx}", parent, C_PANEL);
             UIFactory.AddHLG(row, spacing: 6, padL: 6, padR: 6, padT: 4, padB: 4);
             UIFactory.AddLE(row, prefH: 38, flexH: 0);
             var txt = UIFactory.CreateText("AFT", row.transform, "", 13f, C_WHITE, UIFactory.AlignMidLeft, sizeDelta: new Vector2(420, 30));
@@ -23660,8 +23800,8 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
             // Decisions live in the evidence viewer so admins see the telemetry
             // before choosing Cheat or False positive.
             UIFactory.CreateButton($"AFDT{idx}", row.transform, "Details", 11f, C_WHITE,
-                new Color(0.25f, 0.38f, 0.55f, 0.95f), () => { },
-                sizeDelta: new Vector2(76, 26));
+                AdminVerdictColour("Details", true), () => { },
+                sizeDelta: new Vector2(AdminMenuRules.VerdictWidth(I18n.Tr("Details")), 26));
             row.SetActive(false);
             return row;
         }
@@ -23697,11 +23837,11 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
 
         private static GameObject BuildAdminBanRow(Transform parent, int idx)
         {
-            var row = UIFactory.CreatePanel($"AB{idx}", parent, new Color(0.2f, 0.13f, 0.13f, 0.85f));
+            var row = UIFactory.CreatePanel($"AB{idx}", parent, C_PANEL);
             UIFactory.AddHLG(row, spacing: 6, padL: 6, padR: 6, padT: 4, padB: 4);
             UIFactory.AddLE(row, prefH: 32, flexH: 0);
             UIFactory.CreateText("ABT", row.transform, "", 13f, C_WHITE, UIFactory.AlignMidLeft, sizeDelta: new Vector2(220, 26));
-            UIFactory.CreateButton($"ABU{idx}", row.transform, "Unban", 11f, C_WHITE, new Color(0.2f, 0.45f, 0.2f, 0.9f), () => { }, sizeDelta: new Vector2(70, 24));
+            UIFactory.CreateButton($"ABU{idx}", row.transform, "Unban", 11f, C_WHITE, AdminVerdictColour("Unban", true), () => { }, sizeDelta: new Vector2(AdminMenuRules.VerdictWidth(I18n.Tr("Unban")), 24));
             row.SetActive(false);
             return row;
         }
@@ -24571,7 +24711,7 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
         // -- Admin recent-series rows -------------------------------------
         private static GameObject BuildAdminSeriesRow(Transform parent, int idx)
         {
-            var row = UIFactory.CreatePanel($"AS{idx}", parent, new Color(0.13f, 0.15f, 0.19f, 0.9f));
+            var row = UIFactory.CreatePanel($"AS{idx}", parent, C_PANEL);
             UIFactory.AddVLG(row, spacing: 2, padL: 6, padR: 6, padT: 4, padB: 4);
             UIFactory.AddLE(row, prefH: 52, flexH: 0);
 
@@ -24581,9 +24721,12 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
             UIFactory.SetWordWrap(info, false);
             var infoGO = top.transform.Find($"ASI{idx}")?.gameObject;
             if (infoGO != null) UIFactory.AddLE(infoGO, flexW: 1, flexH: 0);
-            UIFactory.CreateButton($"ASB1{idx}", top.transform, "", 11f, C_WHITE, new Color(0.2f, 0.45f, 0.2f, 0.9f), () => { }, sizeDelta: new Vector2(78, 24));
-            UIFactory.CreateButton($"ASB2{idx}", top.transform, "", 11f, C_WHITE, new Color(0.2f, 0.45f, 0.2f, 0.9f), () => { }, sizeDelta: new Vector2(78, 24));
-            UIFactory.CreateButton($"ASB3{idx}", top.transform, "", 11f, C_WHITE, new Color(0.5f, 0.35f, 0.15f, 0.9f), () => { }, sizeDelta: new Vector2(78, 24));
+            // Ask 15: the three share the widest of the four translated verdict
+            // labels FillAdminSeriesRow may put on them; colours follow the kind.
+            int verdictW = AdminMenuRules.SharedVerdictWidth(new[] { I18n.Tr("Win T1"), I18n.Tr("Win T2"), I18n.Tr("Void Series"), I18n.Tr("Reverse") });
+            UIFactory.CreateButton($"ASB1{idx}", top.transform, "", 11f, C_WHITE, AdminVerdictColour("Win T1", true), () => { }, sizeDelta: new Vector2(verdictW, 24));
+            UIFactory.CreateButton($"ASB2{idx}", top.transform, "", 11f, C_WHITE, AdminVerdictColour("Win T2", true), () => { }, sizeDelta: new Vector2(verdictW, 24));
+            UIFactory.CreateButton($"ASB3{idx}", top.transform, "", 11f, C_WHITE, AdminVerdictColour("Void Series", true), () => { }, sizeDelta: new Vector2(verdictW, 24));
 
             var cards = UIFactory.CreateText($"ASC{idx}", row.transform, "", 11f, new Color(0.6f, 0.6f, 0.62f), UIFactory.AlignMidLeft, sizeDelta: new Vector2(760, 18));
             UIFactory.SetWordWrap(cards, false);
@@ -24673,13 +24816,14 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
 
             if (e.ladder == "2v2" && e.incomplete)
             {
-                setBtn(b1, true, "Win T1", new Color(0.2f, 0.45f, 0.2f, 0.9f), () => ConfirmResolveTeam(e, "complete", 1));
-                setBtn(b2, true, "Win T2", new Color(0.2f, 0.45f, 0.2f, 0.9f), () => ConfirmResolveTeam(e, "complete", 2));
-                setBtn(b3, true, "Void", new Color(0.5f, 0.35f, 0.15f, 0.9f), () => ConfirmResolveTeam(e, "void", 0));
+                // Ask 15: translated labels (SetText does not translate) and the rule's colours.
+                setBtn(b1, true, I18n.Tr("Win T1"), AdminVerdictColour("Win T1", true), () => ConfirmResolveTeam(e, "complete", 1));
+                setBtn(b2, true, I18n.Tr("Win T2"), AdminVerdictColour("Win T2", true), () => ConfirmResolveTeam(e, "complete", 2));
+                setBtn(b3, true, I18n.Tr("Void Series"), AdminVerdictColour("Void Series", true), () => ConfirmResolveTeam(e, "void", 0));
             }
             else if (e.status == "completed")
             {
-                setBtn(b1, true, "Reverse", new Color(0.55f, 0.2f, 0.5f, 0.9f), () => ConfirmReverseSeries(e));
+                setBtn(b1, true, I18n.Tr("Reverse"), AdminVerdictColour("Reverse", true), () => ConfirmReverseSeries(e));
                 setBtn(b2, false, "", C_BTN, null);
                 setBtn(b3, false, "", C_BTN, null);
             }
