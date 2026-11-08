@@ -426,6 +426,9 @@ def _p11(src):
     t = _body(pp, TRY)
     for bad in ("Rebuild(", "Compose(", "GetItem("):
         assert bad not in t, "the row poll does %s" % bad
+    rf = _body(pp, REFRESH)
+    g = rf.find(GEN_GUARD)
+    assert g != -1 and g < rf.find("Rebuild();"), "the per-frame tick's refresh rebuilds without a catalogue change"
     code = _code(pp)
     assert code.count("Compose(area, face, k)") == 1, "the face is composed from more than one site"
     assert "AvatarPickerRules.PartRect(" in _body(pp, COMPOSE), "the composition does not use the rules' rect"
@@ -528,7 +531,7 @@ def _p16(src):
     assert '<Compile Include="../../plugin/AvatarPickerRules.cs" />' in c, "the harness does not compile the rules"
     assert '<Compile Include="AvatarPickerRulesSelfTest.cs" />' in c, "the harness does not compile the self-test"
     st = _code(src[SELFTEST])
-    assert st.count("Check(r, ") == 12, "the suite does not have twelve cases"
+    assert st.count("Check(r, ") == 13, "the suite does not have thirteen cases"
     assert '"PASS" : "FAIL"' in st and '" | got="' in st, "a case prints no verdict or no measurement"
 
 
@@ -536,3 +539,177 @@ def test_p16_the_harness_runs_the_suite():
     _check(_p16,
            lambda s: _replace(s, MAIN, 'RunSuite("avatarpicker"', 'RunSuite("avatarpickr"'),
            lambda s: _replace(s, MAIN, 'RunSuite("avatarpicker"', 'RunSuite("avatarpicker" /* control */'))
+
+
+# -- Codex r1 fixes: H1 the live write gate, H2 the menu exclusion, H3 the camera
+#    handles, M1 the row wiring, L1 the catalogue generation ------------------------
+
+CU = "CompetitiveUI.cs"
+GATE = "private static bool WriteGateOpen(string what)"
+TOGGLE_AUTO = "private static void ToggleAuto()"
+REFRESH = "internal static void RefreshIfStale()"
+OPEN = "internal static void Open()"
+TRY_WIRE = "private bool TryWire()"
+START = "private void Start()"
+LATE = "private void LateUpdate()"
+RESOLVE = "private void ResolveCamera()"
+INIT_TYPES = "public static bool InitTypes()"
+WRITE_ALLOWED = "internal static bool WriteAllowed(bool inRoom, bool roomUnreadable, int heldHome)"
+GATE_APPLY = 'if (!WriteGateOpen("nomination")) { Close(); return; }'
+GATE_AUTO = 'if (!WriteGateOpen("auto toggle")) { Close(); return; }'
+MENU_TERM = "            || AvatarPresetPicker.IsOpen"
+YIELD_OPEN = "if (NativeUI.IsOpen) return;"
+YIELD_TICK = "if (NativeUI.IsOpen) { AvatarPresetPicker.Close(); return; }"
+TYPES_PRE = "if (UIFactory.tButton == null && !UIFactory.InitTypes()) return;"
+GEN_GUARD = "if (I18n.CatalogueGeneration == openGeneration) return;"
+GEN_LABEL = "if (gen != labelGeneration) { labelGeneration = gen; label = RowLabel(); }"
+SETTERS = ("AvatarDefaults.SetModded(", "AvatarDefaults.SetVanilla(", "AvatarDefaults.SetAuto(")
+
+
+def _p17(src):
+    a = _body(src[PP], APPLY)
+    g = a.find(GATE_APPLY)
+    assert g != -1 and g < a.find("switch (action)"), "a nomination reaches a setter before the live gate"
+    t = _body(src[PP], TOGGLE_AUTO)
+    assert t.find(GATE_AUTO) != -1 and t.find(GATE_AUTO) < t.find("AvatarDefaults.SetAuto("), \
+        "the auto toggle reaches SetAuto before the live gate"
+    assert "() => ToggleAuto()" in _body(src[PP], REBUILD), "the auto-switch button does not go through ToggleAuto"
+    gb = _body(src[PP], GATE)
+    for term in ("GameStateWatcher.IsInOnlineRoom", "Plugin.AvatarHomeSlot", "AvatarPickerRules.WriteAllowed("):
+        assert term in gb, "the gate no longer reads %s" % term
+    assert "unreadable = true" in gb, "an unreadable room state does not fail closed"
+    assert "return !inRoom && !roomUnreadable && heldHome < 0;" in _body(src[RL], WRITE_ALLOWED), "the gate rule changed"
+    # every setter call sits inside one of the two gated bodies
+    raw = src[PP]
+    ga, gt = _span(raw, APPLY), _span(raw, TOGGLE_AUTO)
+    for setter in SETTERS:
+        hits = [m.start() for m in re.finditer(re.escape(setter), raw)]
+        assert hits, "%s is no longer called" % setter
+        for h in hits:
+            assert ga[0] <= h < ga[1] or gt[0] <= h < gt[1], "%s is called outside the gated bodies" % setter
+
+
+def test_p17_a_nomination_passes_the_live_gate():
+    _check(_p17,
+           lambda s: _replace(s, PP, "            " + GATE_APPLY + "\n", ""),
+           _control_comment(PP, APPLY))
+
+
+def test_p17_the_auto_toggle_passes_the_live_gate():
+    _check(_p17,
+           lambda s: _replace(s, PP, "            " + GATE_AUTO + "\n", ""),
+           _control_comment(PP, TOGGLE_AUTO))
+
+
+def test_p17_the_gate_rule_refuses_a_held_home_face():
+    _check(_p17,
+           lambda s: _replace(s, RL, "return !inRoom && !roomUnreadable && heldHome < 0;",
+                              "return !inRoom && !roomUnreadable;"),
+           _control_comment(RL, WRITE_ALLOWED))
+
+
+def _p18(src):
+    t = src[CU]
+    m = re.search(r"OtherModalOwnsInput\s*=>", t)
+    assert m, "the modal-ownership term is gone"
+    expr = t[m.end():t.index(";", m.end())]
+    assert "AvatarPresetPicker.IsOpen" in _code(expr), "the open picker does not own the raw click handlers' input"
+
+
+def test_p18_the_open_picker_owns_the_raw_click_input():
+    _check(_p18,
+           lambda s: _replace(s, CU, MENU_TERM + "\n", ""),
+           lambda s: _replace(s, CU, "// Ask 5 (Codex r1 H2): the avatar-preset picker",
+                              "// control: the avatar-preset picker"))
+
+
+def _p19(src):
+    o = _body(src[PP], OPEN)
+    y = o.find(YIELD_OPEN)
+    assert y != -1 and y < o.find("EnsureCanvas();"), "the picker opens over the menu"
+    u = _body(src[PP], "private void Update()", within=ESC)
+    assert YIELD_TICK in u, "the picker stays open when the menu opens"
+
+
+def test_p19_the_picker_refuses_to_open_over_the_menu():
+    _check(_p19,
+           lambda s: _replace(s, PP, YIELD_OPEN, "if (false) return;"),
+           _control_comment(PP, OPEN, indent="                "))
+
+
+def test_p19_the_picker_closes_when_the_menu_opens():
+    _check(_p19,
+           lambda s: _replace(s, PP, "            " + YIELD_TICK + "\n", ""),
+           _control_comment(PP, "private void Update()", within=ESC))
+
+
+def _p20(src):
+    r = _body(src[NU], RESOLVE)
+    assert "GetProperty(" not in r and "GetMethod(" not in r, \
+        "ResolveCamera does a reflection lookup in the click handler's Update path"
+    assert "UIFactory.pCanvasRenderMode" in r and "UIFactory.pCanvasWorldCamera" in r, \
+        "ResolveCamera does not read the cached canvas handles"
+    i = _body(src[NU], INIT_TYPES)
+    assert 'pCanvasRenderMode=tCanvas?.GetProperty("renderMode",bf)' in i, "InitTypes no longer resolves the render-mode handle"
+    assert 'pCanvasWorldCamera=tCanvas?.GetProperty("worldCamera",bf)' in i, "InitTypes no longer resolves the camera handle"
+
+
+def test_p20_the_click_handler_resolves_its_camera_without_a_lookup():
+    _check(_p20,
+           lambda s: _replace(s, NU, "var rmP=UIFactory.pCanvasRenderMode;int rm=rmP!=null?(int)rmP.GetValue(cc):0;",
+                              'int rm=(int)UIFactory.tCanvas.GetProperty("renderMode",BindingFlags.Public|BindingFlags.Instance).GetValue(cc);'),
+           _control_comment(NU, RESOLVE))
+
+
+def _p21(src):
+    t = _body(src[PP], TRY)
+    pre = t.find(TYPES_PRE)
+    assert pre != -1 and pre < t.find("FindAnchorRow()"), "the row is placed before the factory's types are resolved"
+    assert pre < t.find("retryCount++"), "the types precondition costs a retry"
+    st = _body(src[PP], START, within=ROW_BUTTON)
+    w = st.find("if (!TryWire())")
+    assert w != -1 and st.find("UnityEngine.Object.Destroy(gameObject);", w) != -1, \
+        "a row whose wiring failed is kept as if complete"
+    tw = _body(src[PP], TRY_WIRE, within=ROW_BUTTON)
+    for term in ("if (bt == null) return false;", "if (btn == null) return false;",
+                 "if (onClick == null) return false;", "if (add == null) return false;", "return true;"):
+        assert term in tw, "TryWire lost %s" % term
+    assert "addedRow == null" in t, "a destroyed row is not placed again"
+
+
+def test_p21_the_row_waits_for_the_factory_types():
+    _check(_p21,
+           lambda s: _replace(s, PP, "            " + TYPES_PRE + "\n", ""),
+           _control_comment(PP, TRY))
+
+
+def test_p21_a_row_whose_wiring_failed_is_placed_again():
+    _check(_p21,
+           lambda s: _replace(s, PP, "                UnityEngine.Object.Destroy(gameObject);\n", ""),
+           _control_comment(PP, START, within=ROW_BUTTON))
+
+
+def _p22(src):
+    l = _body(src[PP], LATE, within=ROW_BUTTON)
+    assert "int gen = I18n.CatalogueGeneration;" in l and GEN_LABEL in l, \
+        "the row's label does not follow the catalogue generation"
+    assert "I18n.Tr(" not in l, "the row translates on every tick"
+    rf = _body(src[PP], REFRESH)
+    g = rf.find(GEN_GUARD)
+    assert g != -1 and g < rf.find("Rebuild();"), "the open picker rebuilds without a catalogue change"
+    assert "openGeneration = I18n.CatalogueGeneration;" in _body(src[PP], REBUILD), \
+        "Rebuild does not record the catalogue generation"
+    u = _body(src[PP], "private void Update()", within=ESC)
+    assert "AvatarPresetPicker.RefreshIfStale();" in u, "the per-frame tick does not refresh a stale picker"
+
+
+def test_p22_the_row_label_follows_a_language_change():
+    _check(_p22,
+           lambda s: _replace(s, PP, "                " + GEN_LABEL + "   // L1: a language change re-translates the label\n", ""),
+           _control_comment(PP, LATE, within=ROW_BUTTON))
+
+
+def test_p22_a_stale_picker_rebuilds_once_per_catalogue_change_only():
+    _check(_p22,
+           lambda s: _replace(s, PP, "            " + GEN_GUARD + "\n", ""),
+           _control_comment(PP, REFRESH))

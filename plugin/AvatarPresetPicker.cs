@@ -92,6 +92,12 @@ namespace CompetitiveRounds
                 retryCount = 0;
             }
 
+            // Codex r1 M1: the row's Button is rewired through UIFactory's cached
+            // Button type, and the menu can be up before InitTypes runs (~3 s
+            // after start); until the types resolve the row is not placed. A
+            // precondition like the anchor's: no retry spent.
+            if (UIFactory.tButton == null && !UIFactory.InitTypes()) return;
+
             ListMenuButton anchor = FindAnchorRow();
             if (anchor == null) return;    // the precondition: no retry spent
 
@@ -232,6 +238,8 @@ namespace CompetitiveRounds
         private static readonly Color Blue = new Color(0.498f, 0.831f, 1f, 1f);    // #7FD4FF, its blue ring
         private static readonly Color Red = new Color(1f, 0.42f, 0.42f, 1f);       // #FF6B6B, its red ring
 
+        private static int openGeneration;   // the catalogue generation the open picker's text was built from (L1)
+
         internal static bool IsOpen { get { return canvasGO != null && canvasGO.activeSelf; } }
 
         internal static void Toggle()
@@ -243,12 +251,23 @@ namespace CompetitiveRounds
         {
             try
             {
+                if (NativeUI.IsOpen) return;              // Codex r1 H2: the menu owns the screen; the two surfaces never overlap
                 EnsureCanvas();
                 if (canvasGO == null) return;
                 canvasGO.SetActive(true);
                 Rebuild();
             }
             catch (Exception ex) { Plugin.Log.LogWarning("[AVATARPICK] open failed: " + ex.Message); }
+        }
+
+        /// <summary>L1: the open picker's text follows the catalogue. Called from
+        /// the per-frame tick: one int compare per frame, a Rebuild once per
+        /// catalogue change and never otherwise.</summary>
+        internal static void RefreshIfStale()
+        {
+            if (!IsOpen) return;
+            if (I18n.CatalogueGeneration == openGeneration) return;
+            Rebuild();
         }
 
         internal static void Close()
@@ -325,6 +344,7 @@ namespace CompetitiveRounds
         /// state: once per open and once per write. Never from an Update.</summary>
         private static void Rebuild()
         {
+            openGeneration = I18n.CatalogueGeneration;
             if (rootPanel == null) return;
             ClearContent();
             var setting = AvatarDefaults.ReadSetting();
@@ -339,7 +359,7 @@ namespace CompetitiveRounds
             bool auto = setting.Auto;
             UIFactory.CreateButton("AutoToggle", header.transform,
                 auto ? "Avatar auto-switch: <color=#88CCFF>ON</color>" : "Avatar auto-switch: <color=#88CCFF>OFF</color>",
-                20f, Color.white, ButtonColor, () => { AvatarDefaults.SetAuto(!AvatarDefaults.ReadSetting().Auto); Rebuild(); }, new Vector2(360f, 44f));
+                20f, Color.white, ButtonColor, () => ToggleAuto(), new Vector2(360f, 44f));
             var spacer = UIFactory.CreatePanel("Spacer", header.transform, new Color(0f, 0f, 0f, 0f));
             UIFactory.AddLE(spacer, flexW: 1f);
             UIFactory.CreateButton("Back", header.transform, "Back", 22f, Color.white, ButtonColor, () => Close(), new Vector2(140f, 44f));
@@ -468,8 +488,33 @@ namespace CompetitiveRounds
 
         /// <summary>The writes: item 19's three setters and nothing else, then a
         /// rebuild so the rings, readouts and buttons follow the new state.</summary>
+        /// <summary>Codex r1 H1: the live gate before every write. Item 19's
+        /// setters each evaluate E8, and E8 applies a face in an online room or
+        /// while the player's own face is held in Home for a restoration; the
+        /// picker writes only when neither holds, read HERE at the click (the
+        /// one-second poll is stale for a join that landed after it). A refusal
+        /// closes the picker: it never changes the worn face (D5).</summary>
+        private static bool WriteGateOpen(string what)
+        {
+            bool inRoom = false, unreadable = false;
+            try { inRoom = GameStateWatcher.IsInOnlineRoom; } catch { unreadable = true; }
+            int heldHome = -1;
+            try { if (Plugin.AvatarHomeSlot != null) heldHome = Plugin.AvatarHomeSlot.Value; } catch { unreadable = true; }
+            if (AvatarPickerRules.WriteAllowed(inRoom, unreadable, heldHome)) return true;
+            Plugin.Log.LogInfo("[AVATARPICK] " + what + " refused: " + (inRoom ? "in a room" : unreadable ? "room state unreadable" : "a restoration of the home face is owed") + "; the picker closes");
+            return false;
+        }
+
+        private static void ToggleAuto()
+        {
+            if (!WriteGateOpen("auto toggle")) { Close(); return; }
+            AvatarDefaults.SetAuto(!AvatarDefaults.ReadSetting().Auto);
+            Rebuild();
+        }
+
         private static void Apply(PickerAction action, int slot)
         {
+            if (!WriteGateOpen("nomination")) { Close(); return; }
             switch (action)
             {
                 case PickerAction.SetModded: AvatarDefaults.SetModded(slot); break;
@@ -592,6 +637,7 @@ namespace CompetitiveRounds
         private PropertyInfo textProp;
         private string label;
         private float enforceTimer;
+        private int labelGeneration;
 
         private void Start()
         {
@@ -605,32 +651,46 @@ namespace CompetitiveRounds
                 }
             }
             catch { }
-            label = I18n.Tr("AVATAR PRESETS");
+            labelGeneration = I18n.CatalogueGeneration;
+            label = RowLabel();
+            // Codex r1 M1: a row whose Button could not be rewired is not a row; it
+            // goes away and TryPlaceRow places it again on its next tick (bounded
+            // by its retry budget), with no lookup in any per-frame path.
+            if (!TryWire())
+            {
+                Plugin.Log.LogWarning("[AVATARPICK] row wiring incomplete; the row is removed and placed again");
+                UnityEngine.Object.Destroy(gameObject);
+            }
+        }
+
+        private static string RowLabel()
+        {
+            return I18n.Tr("AVATAR PRESETS");
+        }
+
+        /// <summary>The clone's Button.onClick loses the template's listener and
+        /// gains OnClick, through UIFactory's cached Button type. False when
+        /// anything along that path is missing.</summary>
+        private bool TryWire()
+        {
             try
             {
                 var bt = UIFactory.tButton;
-                if (bt != null)
-                {
-                    var btn = GetComponent(bt);
-                    if (btn != null)
-                    {
-                        var onClickProp = bt.GetProperty("onClick", BindingFlags.Public | BindingFlags.Instance);
-                        var onClick = onClickProp != null ? onClickProp.GetValue(btn) : null;
-                        if (onClick != null)
-                        {
-                            var removeAll = onClick.GetType().GetMethod("RemoveAllListeners");
-                            if (removeAll != null) removeAll.Invoke(onClick, null);
-                            var add = onClick.GetType().GetMethod("AddListener");
-                            if (add != null)
-                            {
-                                UnityEngine.Events.UnityAction action = OnClick;
-                                add.Invoke(onClick, new object[] { action });
-                            }
-                        }
-                    }
-                }
+                if (bt == null) return false;
+                var btn = GetComponent(bt);
+                if (btn == null) return false;
+                var onClickProp = bt.GetProperty("onClick", BindingFlags.Public | BindingFlags.Instance);
+                var onClick = onClickProp != null ? onClickProp.GetValue(btn) : null;
+                if (onClick == null) return false;
+                var removeAll = onClick.GetType().GetMethod("RemoveAllListeners");
+                if (removeAll != null) removeAll.Invoke(onClick, null);
+                var add = onClick.GetType().GetMethod("AddListener");
+                if (add == null) return false;
+                UnityEngine.Events.UnityAction action = OnClick;
+                add.Invoke(onClick, new object[] { action });
+                return true;
             }
-            catch (Exception ex) { Plugin.Log.LogWarning("[AVATARPICK] row wiring failed: " + ex.Message); }
+            catch (Exception ex) { Plugin.Log.LogWarning("[AVATARPICK] row wiring failed: " + ex.Message); return false; }
         }
 
         private void LateUpdate()
@@ -641,6 +701,8 @@ namespace CompetitiveRounds
             enforceTimer = 0f;
             try
             {
+                int gen = I18n.CatalogueGeneration;
+                if (gen != labelGeneration) { labelGeneration = gen; label = RowLabel(); }   // L1: a language change re-translates the label
                 if ((textProp.GetValue(tmp) as string) != label) textProp.SetValue(tmp, label);
             }
             catch { }
@@ -653,12 +715,16 @@ namespace CompetitiveRounds
         }
     }
 
-    /// <summary>Escape closes the picker. Input only; nothing else per frame.</summary>
+    /// <summary>The open picker's per-frame tick: Escape closes it; the F5 menu
+    /// opening closes it too (Codex r1 H2: the two surfaces never overlap); a
+    /// catalogue change repaints it once (L1). Three reads per frame, no lookup.</summary>
     internal sealed class AvatarPickerEscape : MonoBehaviour
     {
         private void Update()
         {
-            if (Input.GetKeyDown(KeyCode.Escape)) AvatarPresetPicker.Close();
+            if (NativeUI.IsOpen) { AvatarPresetPicker.Close(); return; }
+            if (Input.GetKeyDown(KeyCode.Escape)) { AvatarPresetPicker.Close(); return; }
+            AvatarPresetPicker.RefreshIfStale();
         }
     }
 }

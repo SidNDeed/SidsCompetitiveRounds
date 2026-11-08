@@ -346,6 +346,12 @@ namespace CompetitiveRounds
             // click that dismissed it ALSO reached the armed Discard on the
             // tile beneath, in the same click (#141/#200).
             || PlayerCardsUI.CardPopupOpen
+            // Ask 5 (Codex r1 H2): the avatar-preset picker is a uGUI surface over
+            // the main menu. The F5 menu's rows are raw ClickHandlers that hit-test
+            // rectangles without a raycast, so they stay live under the picker
+            // unless this term owns the clicks. The picker itself yields to the
+            // menu: it closes when the menu opens and refuses to open over it.
+            || AvatarPresetPicker.IsOpen
             // (The title ladders' tier popup was a term here until the
             // five-tier build replaced it with a dropdown inside the Shop's
             // own list: no backdrop, nothing to own input for.)

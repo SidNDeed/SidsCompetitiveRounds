@@ -115,6 +115,17 @@ namespace CompetitiveRounds
             y = (itemOffY + faceOffY) * k + (0.5f - pivotFracY) * h;
         }
 
+        /// <summary>The write gate (Codex r1 H1). Item 19's three setters each
+        /// evaluate edge E8, and E8 applies a face in an online room (the room's
+        /// nominee) or while the player's own face is held in Home for a
+        /// restoration; so the picker runs a setter only in a confirmed menu
+        /// state with no restoration owed, read live at the click. Fail closed:
+        /// an unreadable room state refuses.</summary>
+        internal static bool WriteAllowed(bool inRoom, bool roomUnreadable, int heldHome)
+        {
+            return !inRoom && !roomUnreadable && heldHome < 0;
+        }
+
         internal static int Row(int slot) { return slot / Columns; }
         internal static int Column(int slot) { return slot % Columns; }
     }

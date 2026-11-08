@@ -606,6 +606,7 @@ namespace CompetitiveRounds
         public static Type tListMenu, tListMenuPage, tGoBack;
         private static PropertyInfo pTmpText, pTmpFontSize, pTmpColor, pTmpAlignment, pTmpFont, pTmpOverflow, pTmpRichText, pTmpFontStyle, pTmpRaycastTarget, pTmpCharSpacing;
         private static PropertyInfo pImgColor, pImgRaycastTarget;
+        internal static PropertyInfo pCanvasRenderMode,pCanvasWorldCamera; // ask 5 (Codex r1 H3): resolved once in InitTypes so ClickHandler.ResolveCamera does no lookup in its Update path
         private static PropertyInfo pBtnOnClick; private static MethodInfo mOnClickAdd;
         private static PropertyInfo pSRContent, pSRViewport, pSRVertical, pSRHorizontal, pSRMovementType, pSRScrollSensitivity;
         private static PropertyInfo pVLGSpacing, pVLGPadding, pVLGChildForceW, pVLGChildForceH, pVLGChildControlW, pVLGChildControlH;
@@ -634,7 +635,7 @@ namespace CompetitiveRounds
             pTmpText=tTMP.GetProperty("text",bf);pTmpFontSize=tTMP.GetProperty("fontSize",bf);pTmpColor=tTMP.GetProperty("color",bf);
             pTmpAlignment=tTMP.GetProperty("alignment",bf);pTmpFont=tTMP.GetProperty("font",bf);pTmpOverflow=tTMP.GetProperty("overflowMode",bf);
             pTmpRichText=tTMP.GetProperty("richText",bf);pTmpFontStyle=tTMP.GetProperty("fontStyle",bf);pTmpRaycastTarget=tTMP.GetProperty("raycastTarget",bf);pTmpCharSpacing=tTMP.GetProperty("characterSpacing",bf);
-            pImgColor=tImage.GetProperty("color",bf);pImgRaycastTarget=tImage.GetProperty("raycastTarget",bf);
+            pImgColor=tImage.GetProperty("color",bf);pImgRaycastTarget=tImage.GetProperty("raycastTarget",bf);pCanvasRenderMode=tCanvas?.GetProperty("renderMode",bf);pCanvasWorldCamera=tCanvas?.GetProperty("worldCamera",bf);
             pBtnOnClick=tButton.GetProperty("onClick",bf); if(pBtnOnClick!=null)mOnClickAdd=pBtnOnClick.PropertyType.GetMethod("AddListener",new Type[]{typeof(UnityEngine.Events.UnityAction)});
             pSRContent=tScrollRect?.GetProperty("content",bf);pSRViewport=tScrollRect?.GetProperty("viewport",bf);pSRVertical=tScrollRect?.GetProperty("vertical",bf);pSRHorizontal=tScrollRect?.GetProperty("horizontal",bf);pSRMovementType=tScrollRect?.GetProperty("movementType",bf);pSRScrollSensitivity=tScrollRect?.GetProperty("scrollSensitivity",bf);
             if(tVLG!=null){pVLGSpacing=tVLG.GetProperty("spacing",bf);pVLGPadding=tVLG.GetProperty("padding",bf);pVLGChildForceW=tVLG.GetProperty("childForceExpandWidth",bf);pVLGChildForceH=tVLG.GetProperty("childForceExpandHeight",bf);pVLGChildControlW=tVLG.GetProperty("childControlWidth",bf);pVLGChildControlH=tVLG.GetProperty("childControlHeight",bf);}
@@ -1262,7 +1263,7 @@ namespace CompetitiveRounds
         private void ResolveCamera()
         {
             cameraResolved=true;canvasCamera=null;Transform t=transform;
-            while(t!=null){var cc=t.GetComponent(UIFactory.tCanvas);if(cc!=null){try{var bf=BindingFlags.Public|BindingFlags.Instance;int rm=(int)UIFactory.tCanvas.GetProperty("renderMode",bf).GetValue(cc);if(rm!=0){canvasCamera=UIFactory.tCanvas.GetProperty("worldCamera",bf)?.GetValue(cc) as Camera;if(canvasCamera==null)canvasCamera=Camera.main;}}catch{}break;}t=t.parent;}
+            while(t!=null){var cc=t.GetComponent(UIFactory.tCanvas);if(cc!=null){try{var rmP=UIFactory.pCanvasRenderMode;int rm=rmP!=null?(int)rmP.GetValue(cc):0;if(rm!=0){canvasCamera=UIFactory.pCanvasWorldCamera?.GetValue(cc) as Camera;if(canvasCamera==null)canvasCamera=Camera.main;}}catch{}break;}t=t.parent;}
         }
         // When true, ClickHandlers ignore clicks — an IMGUI modal owns the screen.
         // Bug #75: the uGUI click-blocker only stops EventSystem raycasts, but

@@ -114,6 +114,15 @@ namespace CompetitiveRounds
                 Near(w2, 100f) && Near(h2, 100f) && Near(x2, 0f) && Near(y2, 50f),
                 "w=" + F(w2) + " h=" + F(h2) + " x=" + F(x2) + " y=" + F(y2));
 
+            // 12b. The write gate (H1).
+            bool g1 = WriteAllowed(false, false, -1);
+            bool g2 = WriteAllowed(true, false, -1);
+            bool g3 = WriteAllowed(false, true, -1);
+            bool g4 = WriteAllowed(false, false, 3);
+            Check(r, "gate: a nomination runs only in a confirmed menu state with no restoration owed; a room, an unreadable room state or a held home face refuses",
+                g1 && !g2 && !g3 && !g4,
+                "menu=" + g1 + " room=" + g2 + " unreadable=" + g3 + " heldHome=" + g4);
+
             // 12. The grid.
             var grid = new StringBuilder();
             for (int s = 0; s < Tiles; s++)
