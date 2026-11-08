@@ -428,7 +428,7 @@ def _p11(src):
         assert bad not in t, "the row poll does %s" % bad
     rf = _body(pp, REFRESH)
     g = rf.find(GEN_GUARD)
-    assert g != -1 and g < rf.find("Rebuild();"), "the per-frame tick's refresh rebuilds without a catalogue change"
+    assert g != -1 and g < rf.find("Close();"), "the per-frame tick's staleness check closes without a catalogue change"
     code = _code(pp)
     assert code.count("Compose(area, face, k)") == 1, "the face is composed from more than one site"
     assert "AvatarPickerRules.PartRect(" in _body(pp, COMPOSE), "the composition does not use the rules' rect"
@@ -547,7 +547,7 @@ def test_p16_the_harness_runs_the_suite():
 CU = "CompetitiveUI.cs"
 GATE = "private static bool WriteGateOpen(string what)"
 TOGGLE_AUTO = "private static void ToggleAuto()"
-REFRESH = "internal static void RefreshIfStale()"
+REFRESH = "internal static void CloseIfStale()"
 OPEN = "internal static void Open()"
 TRY_WIRE = "private bool TryWire()"
 START = "private void Start()"
@@ -557,13 +557,18 @@ INIT_TYPES = "public static bool InitTypes()"
 WRITE_ALLOWED = "internal static bool WriteAllowed(bool inRoom, bool roomUnreadable, int heldHome)"
 GATE_APPLY = 'if (!WriteGateOpen("nomination")) { Close(); return; }'
 GATE_AUTO = 'if (!WriteGateOpen("auto toggle")) { Close(); return; }'
-MENU_TERM = "            || AvatarPresetPicker.IsOpen"
-YIELD_OPEN = "if (NativeUI.IsOpen) return;"
-YIELD_TICK = "if (NativeUI.IsOpen) { AvatarPresetPicker.Close(); return; }"
+MENU_TERM = "ModalOwnsInputBesidesAvatarPicker || AvatarPresetPicker.IsOpen"
+YIELD_OPEN = "if (CompetitiveUI.InputOwnedBesidesAvatarPicker) return;"
+YIELD_TICK = "if (CompetitiveUI.InputOwnedBesidesAvatarPicker) { AvatarPresetPicker.Close(); return; }"
 TYPES_PRE = "if (UIFactory.tButton == null && !UIFactory.InitTypes()) return;"
 GEN_GUARD = "if (I18n.CatalogueGeneration == openGeneration) return;"
 GEN_LABEL = "if (gen != labelGeneration) { labelGeneration = gen; label = RowLabel(); }"
 SETTERS = ("AvatarDefaults.SetModded(", "AvatarDefaults.SetVanilla(", "AvatarDefaults.SetAuto(")
+GATE_LIVE = "try { inRoom = Photon.Pun.PhotonNetwork.InRoom && !Photon.Pun.PhotonNetwork.OfflineMode; } catch { unreadable = true; }"
+GATE_CALL = "AvatarPickerRules.WriteAllowed(inRoom, unreadable, heldHome)"
+CLOSE = "internal static void Close()"
+CLEAR = "private static void ClearContent()"
+TICK_BAD = ("Rebuild(", "Compose(", "Open(", "Toggle(", "RefreshIfStale")
 
 
 def _p17(src):
@@ -575,8 +580,9 @@ def _p17(src):
         "the auto toggle reaches SetAuto before the live gate"
     assert "() => ToggleAuto()" in _body(src[PP], REBUILD), "the auto-switch button does not go through ToggleAuto"
     gb = _body(src[PP], GATE)
-    for term in ("GameStateWatcher.IsInOnlineRoom", "Plugin.AvatarHomeSlot", "AvatarPickerRules.WriteAllowed("):
+    for term in (GATE_LIVE, "Plugin.AvatarHomeSlot", GATE_CALL):
         assert term in gb, "the gate no longer reads %s" % term
+    assert "GameStateWatcher" not in gb, "the gate reads the watcher's polled room flag (Codex r2 H1)"
     assert "unreadable = true" in gb, "an unreadable room state does not fail closed"
     assert "return !inRoom && !roomUnreadable && heldHome < 0;" in _body(src[RL], WRITE_ALLOWED), "the gate rule changed"
     # every setter call sits inside one of the two gated bodies
@@ -618,7 +624,7 @@ def _p18(src):
 
 def test_p18_the_open_picker_owns_the_raw_click_input():
     _check(_p18,
-           lambda s: _replace(s, CU, MENU_TERM + "\n", ""),
+           lambda s: _replace(s, CU, MENU_TERM, "ModalOwnsInputBesidesAvatarPicker"),
            lambda s: _replace(s, CU, "// Ask 5 (Codex r1 H2): the avatar-preset picker",
                               "// control: the avatar-preset picker"))
 
@@ -696,11 +702,12 @@ def _p22(src):
     assert "I18n.Tr(" not in l, "the row translates on every tick"
     rf = _body(src[PP], REFRESH)
     g = rf.find(GEN_GUARD)
-    assert g != -1 and g < rf.find("Rebuild();"), "the open picker rebuilds without a catalogue change"
+    assert g != -1 and g < rf.find("Close();"), "the open picker closes without a catalogue change"
+    assert "Rebuild(" not in rf and "Compose(" not in rf, "a catalogue change composes from the per-frame tick (Codex r2 H3)"
     assert "openGeneration = I18n.CatalogueGeneration;" in _body(src[PP], REBUILD), \
         "Rebuild does not record the catalogue generation"
     u = _body(src[PP], "private void Update()", within=ESC)
-    assert "AvatarPresetPicker.RefreshIfStale();" in u, "the per-frame tick does not refresh a stale picker"
+    assert "AvatarPresetPicker.CloseIfStale();" in u, "the per-frame tick does not close a stale picker"
 
 
 def test_p22_the_row_label_follows_a_language_change():
@@ -709,7 +716,106 @@ def test_p22_the_row_label_follows_a_language_change():
            _control_comment(PP, LATE, within=ROW_BUTTON))
 
 
-def test_p22_a_stale_picker_rebuilds_once_per_catalogue_change_only():
+def test_p22_a_stale_picker_closes_once_per_catalogue_change_only():
     _check(_p22,
            lambda s: _replace(s, PP, "            " + GEN_GUARD + "\n", ""),
            _control_comment(PP, REFRESH))
+
+
+
+# -- Codex r2 fixes: H1 the live room read, H2 the shared yield predicate, H3 no rebuild
+#    on the per-frame path ----------------------------------------------------------------
+
+def _p23(src):
+    gb = _body(src[PP], GATE)
+    assert GATE_LIVE in gb, "the gate does not read Photon's two flags live, failing closed on a throw"
+    assert "GameStateWatcher" not in gb, "the gate reads the watcher's polled room flag"
+    assert GATE_CALL in gb, "the gate does not pass its three live readings to the rule"
+    # the poll keeps its own live read: the two sites agree on the source
+    assert "Photon.Pun.PhotonNetwork.InRoom && !Photon.Pun.PhotonNetwork.OfflineMode" in _body(src[PP], TRY), \
+        "the row poll no longer reads Photon live"
+
+
+def test_p23_the_gate_reads_the_room_live():
+    _check(_p23,
+           lambda s: _replace(s, PP, GATE_LIVE, "try { inRoom = GameStateWatcher.IsInOnlineRoom; } catch { unreadable = true; }"),
+           _control_comment(PP, GATE))
+
+
+def test_p23_the_gate_passes_the_held_home_face_it_read():
+    _check(_p23,
+           lambda s: _replace(s, PP, GATE_CALL, "AvatarPickerRules.WriteAllowed(inRoom, unreadable, -1)"),
+           _control_comment(PP, GATE))
+
+
+def _expr(t, name):
+    m = re.search(re.escape(name) + r"\s*=>", t)
+    assert m, "%s is gone" % name
+    return t[m.end():t.index(";", m.end())]
+
+
+def _p24(src):
+    t = _code(src[CU])
+    other = _expr(t, "OtherModalOwnsInput")
+    assert "ModalOwnsInputBesidesAvatarPicker" in other and "AvatarPresetPicker.IsOpen" in other, \
+        "the modal term is not the shared predicate plus the picker"
+    shared = _expr(t, "ModalOwnsInputBesidesAvatarPicker")
+    for term in ("BackdroplessModalOpen", "NativeUI.InfoPopupOpen", "NativeUI.PickerOpen", "NativeUI.LangPromptOpen",
+                 "NativeUI.CardPreviewOpen", "PlayerCardsUI.CardPopupOpen", "!Plugin.DataConsentAsked"):
+        assert term in shared, "the shared predicate lost %s" % term
+    assert "AvatarPresetPicker" not in shared, "the shared predicate names the picker"
+    yld = _expr(t, "InputOwnedBesidesAvatarPicker")
+    for term in ("NativeUI.IsOpen", "ModalOwnsInputBesidesAvatarPicker", "NativeUI.UtilityPopupOpen"):
+        assert term in yld, "the picker's yield predicate lost %s" % term
+    assert "AvatarPresetPicker" not in yld, "the picker would yield to itself"
+    pp = src[PP]
+    assert "CompetitiveUI.InputOwnedBesidesAvatarPicker" in _body(pp, OPEN), "Open does not read the yield predicate"
+    assert "CompetitiveUI.InputOwnedBesidesAvatarPicker" in _body(pp, "private void Update()", within=ESC), \
+        "the tick does not read the yield predicate"
+
+
+def test_p24_a_popup_is_an_owner_the_picker_yields_to():
+    _check(_p24,
+           lambda s: _replace(s, CU, "            || NativeUI.PickerOpen || NativeUI.LangPromptOpen\n",
+                              "            || NativeUI.LangPromptOpen\n"),
+           lambda s: _replace(s, CU, "Ask 5 (Codex r2 H2): what the avatar-preset picker yields to:",
+                              "control: what the avatar-preset picker yields to:"))
+
+
+def test_p24_the_yield_predicate_carries_every_other_modal_term():
+    _check(_p24,
+           lambda s: _replace(s, CU, "               NativeUI.IsOpen || ModalOwnsInputBesidesAvatarPicker\n",
+                              "               NativeUI.IsOpen || BackdroplessModalOpen\n"),
+           lambda s: _replace(s, CU, "Ask 5 (Codex r2 H2): what the avatar-preset picker yields to:",
+                              "control: what the avatar-preset picker yields to:"))
+
+
+def _p25(src):
+    pp = src[PP]
+    rf = _body(pp, REFRESH)
+    assert GEN_GUARD in rf and "Close();" in rf, "a stale picker is not closed"
+    for bad in PER_FRAME_BAD + TICK_BAD:
+        assert bad not in rf, "the staleness check does %s" % bad
+    for sig in (CLOSE, CLEAR):
+        b = _body(pp, sig)
+        for bad in PER_FRAME_BAD + TICK_BAD:
+            assert bad not in b, "%s does %s on the per-frame path" % (sig, bad)
+    u = _body(pp, "private void Update()", within=ESC)
+    for bad in PER_FRAME_BAD + TICK_BAD:
+        assert bad not in u, "the per-frame tick does %s" % bad
+    calls = set(re.findall(r"AvatarPresetPicker\.(\w+)\(", u))
+    assert calls == {"Close", "CloseIfStale"}, "the per-frame tick reaches %s" % sorted(calls)
+    assert "openGeneration = I18n.CatalogueGeneration;" in _body(pp, REBUILD), "Rebuild does not record the catalogue generation"
+
+
+def test_p25_a_catalogue_change_closes_the_picker_without_a_rebuild():
+    _check(_p25,
+           lambda s: _replace_within(s, PP, REFRESH, "Close();", "Rebuild();"),
+           _control_comment(PP, REFRESH))
+
+
+def test_p25_the_tick_reaches_nothing_that_composes():
+    _check(_p25,
+           lambda s: _replace(s, PP, "            AvatarPresetPicker.CloseIfStale();\n",
+                              "            AvatarPresetPicker.CloseIfStale();\n            AvatarPresetPicker.Open();\n"),
+           _control_comment(PP, "private void Update()", within=ESC))

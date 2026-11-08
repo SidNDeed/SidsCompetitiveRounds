@@ -332,7 +332,17 @@ namespace CompetitiveRounds
         // guards. OtherModalOwnsInput is the same set WITHOUT the popup's own
         // term: NativeUI.OpenUtilityPopup refuses while it is true, so a modal
         // raised elsewhere never sits under a popup.
-        internal static bool OtherModalOwnsInput =>
+        // Ask 5 (Codex r1 H2): the avatar-preset picker is a uGUI surface over
+        // the main menu. The F5 menu's rows are raw ClickHandlers that hit-test
+        // rectangles without a raycast, so they stay live under the picker
+        // unless this term owns the clicks. The picker itself yields to every
+        // other owner (InputOwnedBesidesAvatarPicker below).
+        internal static bool OtherModalOwnsInput => ModalOwnsInputBesidesAvatarPicker || AvatarPresetPicker.IsOpen;
+
+        /// <summary>Every modal term but the avatar-preset picker's own (Codex r2
+        /// H2). The picker yields to these, so it never shares the screen with one
+        /// of them, not even a popup a delayed response raises after the menu closed.</summary>
+        internal static bool ModalOwnsInputBesidesAvatarPicker =>
                BackdroplessModalOpen
             || NativeUI.InfoPopupOpen || NativeUI.TournBetsPopupOpen
             || NativeUI.RecentTournPopupOpen
@@ -346,17 +356,18 @@ namespace CompetitiveRounds
             // click that dismissed it ALSO reached the armed Discard on the
             // tile beneath, in the same click (#141/#200).
             || PlayerCardsUI.CardPopupOpen
-            // Ask 5 (Codex r1 H2): the avatar-preset picker is a uGUI surface over
-            // the main menu. The F5 menu's rows are raw ClickHandlers that hit-test
-            // rectangles without a raycast, so they stay live under the picker
-            // unless this term owns the clicks. The picker itself yields to the
-            // menu: it closes when the menu opens and refuses to open over it.
-            || AvatarPresetPicker.IsOpen
             // (The title ladders' tier popup was a term here until the
             // five-tier build replaced it with a dropdown inside the Shop's
             // own list: no backdrop, nothing to own input for.)
             || !Plugin.DataConsentAsked;
         private static bool AnyModalOwnsInput => OtherModalOwnsInput || NativeUI.UtilityPopupOpen;
+
+        /// <summary>Ask 5 (Codex r2 H2): what the avatar-preset picker yields to: the F5
+        /// menu and every input owner but itself. The picker refuses to open while this
+        /// is true and closes the frame it turns true.</summary>
+        internal static bool InputOwnedBesidesAvatarPicker =>
+               NativeUI.IsOpen || ModalOwnsInputBesidesAvatarPicker
+            || NativeUI.UtilityPopupOpen || quickChatOpen || danceWheelOpen;
 
         /// <summary>Item 13: the raw-keystroke gate, named ONCE. It is what
         /// ClickHandler.ModalBlockInput is written from, and it is the first

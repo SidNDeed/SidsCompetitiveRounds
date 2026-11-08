@@ -251,7 +251,7 @@ namespace CompetitiveRounds
         {
             try
             {
-                if (NativeUI.IsOpen) return;              // Codex r1 H2: the menu owns the screen; the two surfaces never overlap
+                if (CompetitiveUI.InputOwnedBesidesAvatarPicker) return;   // Codex r1/r2 H2: the menu or any other input owner has the screen; the surfaces never overlap
                 EnsureCanvas();
                 if (canvasGO == null) return;
                 canvasGO.SetActive(true);
@@ -260,14 +260,15 @@ namespace CompetitiveRounds
             catch (Exception ex) { Plugin.Log.LogWarning("[AVATARPICK] open failed: " + ex.Message); }
         }
 
-        /// <summary>L1: the open picker's text follows the catalogue. Called from
-        /// the per-frame tick: one int compare per frame, a Rebuild once per
-        /// catalogue change and never otherwise.</summary>
-        internal static void RefreshIfStale()
+        /// <summary>L1 (Codex r2 H3): the open picker's text follows the catalogue by
+        /// CLOSING. A Rebuild from the per-frame tick would put the preview composition
+        /// and its lookups on that path, so a catalogue change closes the picker and the
+        /// next Open composes from the new catalogue. One int compare per frame.</summary>
+        internal static void CloseIfStale()
         {
             if (!IsOpen) return;
             if (I18n.CatalogueGeneration == openGeneration) return;
-            Rebuild();
+            Close();
         }
 
         internal static void Close()
@@ -497,7 +498,10 @@ namespace CompetitiveRounds
         private static bool WriteGateOpen(string what)
         {
             bool inRoom = false, unreadable = false;
-            try { inRoom = GameStateWatcher.IsInOnlineRoom; } catch { unreadable = true; }
+            // Codex r2 H1: GameStateWatcher.IsInOnlineRoom is a flag its 0.1 s poll writes, so it
+            // can say "menu" for a join that landed since the last poll; E8 reads Photon itself
+            // (AvatarDefaults.cs), so the gate reads the same two live flags, failing closed on a throw.
+            try { inRoom = Photon.Pun.PhotonNetwork.InRoom && !Photon.Pun.PhotonNetwork.OfflineMode; } catch { unreadable = true; }
             int heldHome = -1;
             try { if (Plugin.AvatarHomeSlot != null) heldHome = Plugin.AvatarHomeSlot.Value; } catch { unreadable = true; }
             if (AvatarPickerRules.WriteAllowed(inRoom, unreadable, heldHome)) return true;
@@ -715,16 +719,17 @@ namespace CompetitiveRounds
         }
     }
 
-    /// <summary>The open picker's per-frame tick: Escape closes it; the F5 menu
-    /// opening closes it too (Codex r1 H2: the two surfaces never overlap); a
-    /// catalogue change repaints it once (L1). Three reads per frame, no lookup.</summary>
+    /// <summary>The open picker's per-frame tick: Escape closes it; the F5 menu or
+    /// any other input owner appearing closes it too (Codex r1/r2 H2: the surfaces
+    /// never overlap); a catalogue change closes it (L1, Codex r2 H3: no rebuild on
+    /// this path). Three reads per frame, no lookup, no composition.</summary>
     internal sealed class AvatarPickerEscape : MonoBehaviour
     {
         private void Update()
         {
-            if (NativeUI.IsOpen) { AvatarPresetPicker.Close(); return; }
+            if (CompetitiveUI.InputOwnedBesidesAvatarPicker) { AvatarPresetPicker.Close(); return; }
             if (Input.GetKeyDown(KeyCode.Escape)) { AvatarPresetPicker.Close(); return; }
-            AvatarPresetPicker.RefreshIfStale();
+            AvatarPresetPicker.CloseIfStale();
         }
     }
 }

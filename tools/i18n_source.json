@@ -6345,7 +6345,7 @@
   },
   "AVATAR PRESETS": {
    "surface": "AvatarPresetPicker",
-   "location": "PlaceRow, Start",
+   "location": "PlaceRow, RowLabel",
    "kind": "Tr"
   },
   "About": {
