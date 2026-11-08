@@ -535,7 +535,8 @@ namespace CompetitiveRounds
         /// (GameStateWatcher's recorder; the mod does not change it).</summary>
         internal const int POINTS_PER_ROUND = 2;
 
-        /// <summary>A 1v1 game's point events replayed: who scored first, each
+        /// <summary>A two-sided game's point events replayed (1v1, and since ask 9
+        /// 2v2 and 1v2, whose recorder writes the same pairs): who scored first, each
         /// side's longest run of consecutive points, its worst deficit in rounds,
         /// the seconds it led in rounds, how often the lead changed hands, and
         /// the rounds race itself. The recorder writes each side's value as
@@ -557,7 +558,7 @@ namespace CompetitiveRounds
             public readonly List<Pt>[] Rounds = { new List<Pt>(), new List<Pt>() };
         }
 
-        internal static Momentum Replay1v1(List<Pt> a, List<Pt> b, int roundsA, int roundsB, float durationS)
+        internal static Momentum ReplayTwoSided(List<Pt> a, List<Pt> b, int roundsA, int roundsB, float durationS)
         {
             if (a == null || b == null || a.Count == 0 || a.Count != b.Count) return new Momentum();
             var m = new Momentum();
@@ -628,6 +629,7 @@ namespace CompetitiveRounds
             public int? Gold, Xp;
             public readonly List<float?> DamageByGame = new List<float?>();
             public readonly List<float?> KillsByGame = new List<float?>();
+            public readonly List<float?> DeathsByGame = new List<float?>();
             public readonly List<float?> HitPctByGame = new List<float?>();
             public readonly List<float?> BlockPctByGame = new List<float?>();
             public readonly List<float?> GoldByGame = new List<float?>();
@@ -648,7 +650,7 @@ namespace CompetitiveRounds
             /// <summary>Per player: games won (a 2v2 / 1v2 player carries the
             /// side's wins; an FFA game is won by its unique top score).</summary>
             public int[] Wins = new int[0];
-            /// <summary>1v1 when every game replays exactly, else -1.</summary>
+            /// <summary>Two-sided sets whose every game replays exactly, else -1.</summary>
             public int LeadChanges = -1;
         }
 
@@ -656,11 +658,144 @@ namespace CompetitiveRounds
         {
             public readonly SetLine Set = new SetLine();
             public readonly List<PlayerLine> Players = new List<PlayerLine>();
-            /// <summary>Per game; null outside 1v1.</summary>
+            /// <summary>Per game; null when the set is not two-sided (FFA).</summary>
             public readonly List<Momentum> Moments = new List<Momentum>();
+            /// <summary>The set's sides (ask 9 stage C: Sides), in side order.</summary>
+            public readonly List<Side> Sides = new List<Side>();
         }
 
         internal static bool IsTwoSided(string kind) => kind == "team" || kind == "ovt";
+
+        // -- ask 9 stage C: sides (pure) -------------------------------------------
+
+        /// <summary>One side of a set: the roster indices of its players, in
+        /// roster order. Every score the server records is a SIDE's (each
+        /// player of a side carries the side's rounds, points and `score`
+        /// stream), so the race, the labels and the momentum numbers read a
+        /// side, never players[0] / players[1].</summary>
+        internal sealed class Side
+        {
+            /// <summary>1 or 2 in a two-sided set (2v2: the teams; 1v2: solo 1,
+            /// duo 2; 1v1: roster order); the roster index + 1 otherwise.</summary>
+            public int Team;
+            public readonly List<int> Slots = new List<int>();
+        }
+
+        /// <summary>The sides of a set, derived the way the server derives the
+        /// score streams (backend/api/main.py _report_sides): every player
+        /// carries team 1 or 2 and both teams are present - two sides by team;
+        /// else exactly two players of a kind that is not FFA - two sides of
+        /// one; else one side per player (FFA, whose streams are per player,
+        /// and any roster the kind cannot pair). An FFA of two is NOT a 1v1:
+        /// its streams are half points, not the recorder's pairs.</summary>
+        internal static List<Side> Sides(string kind, IList<Player> players)
+        {
+            var sides = new List<Side>();
+            int n = players == null ? 0 : players.Count;
+            if (n == 0) return sides;
+            bool teams = kind != "ffa";
+            for (int i = 0; teams && i < n; i++) teams = players[i].Team == 1 || players[i].Team == 2;
+            if (teams)
+            {
+                var one = new Side { Team = 1 };
+                var two = new Side { Team = 2 };
+                for (int i = 0; i < n; i++) (players[i].Team == 1 ? one : two).Slots.Add(i);
+                if (one.Slots.Count > 0 && two.Slots.Count > 0)
+                {
+                    sides.Add(one);
+                    sides.Add(two);
+                    return sides;
+                }
+            }
+            if (kind != "ffa" && n == 2)
+            {
+                var a = new Side { Team = 1 };
+                a.Slots.Add(0);
+                var b = new Side { Team = 2 };
+                b.Slots.Add(1);
+                sides.Add(a);
+                sides.Add(b);
+                return sides;
+            }
+            for (int i = 0; i < n; i++)
+            {
+                var s = new Side { Team = i + 1 };
+                s.Slots.Add(i);
+                sides.Add(s);
+            }
+            return sides;
+        }
+
+        /// <summary>Whether the set is a race of two sides (1v1, 2v2, 1v2):
+        /// the replay, points lost and the two-score labels apply. Never FFA.</summary>
+        internal static bool TwoSided(string kind, IList<Side> sides)
+        {
+            return kind != "ffa" && sides != null && sides.Count == 2;
+        }
+
+        /// <summary>Roster index -> index into `sides` (-1 for a player on no side).</summary>
+        internal static int[] SideIndex(IList<Side> sides, int players)
+        {
+            var at = new int[players];
+            for (int i = 0; i < players; i++) at[i] = -1;
+            if (sides != null)
+                for (int si = 0; si < sides.Count; si++)
+                    foreach (int pi in sides[si].Slots)
+                        if (pi >= 0 && pi < players) at[pi] = si;
+            return at;
+        }
+
+        /// <summary>A side's stream in game g: the first member's that has one
+        /// (the server puts the side's stream on every member); null when none.</summary>
+        internal static List<Pt> SideStream(Game g, IList<Player> players, Side side, string name)
+        {
+            if (g == null || players == null || side == null) return null;
+            foreach (int pi in side.Slots)
+            {
+                if (pi < 0 || pi >= players.Count) continue;
+                var s = Stream(g, players[pi].Id, name);
+                if (s != null && s.Count > 0) return s;
+            }
+            return null;
+        }
+
+        /// <summary>A side's recorded score in g: the key of its first member who
+        /// played g (every member carries the side's rounds), `at` that member's
+        /// roster index; -1 and at = -1 when no member has a key (round 2 M1: a
+        /// missing key is never a 0).</summary>
+        internal static int SideScoreOf(Game g, IList<Player> players, Side side, out int at)
+        {
+            at = -1;
+            if (g == null || players == null || side == null) return -1;
+            foreach (int pi in side.Slots)
+            {
+                int v;
+                if (pi < 0 || pi >= players.Count || !g.Scores.TryGetValue(players[pi].Id, out v)) continue;
+                at = pi;
+                return v;
+            }
+            return -1;
+        }
+
+        /// <summary>The deaths the members of `side` recorded in g, summed; NaN
+        /// when a member who played g has no deaths counter (then nothing can be
+        /// derived from them) or none played.</summary>
+        private static float SideDeaths(Game g, IList<Player> players, Side side)
+        {
+            float sum = 0f;
+            int counted = 0;
+            foreach (int pi in side.Slots)
+            {
+                string id = players[pi].Id;
+                if (!g.Scores.ContainsKey(id)) continue;
+                Dictionary<string, float> tot;
+                float d;
+                if (!g.Totals.TryGetValue(id, out tot) || tot == null || !tot.TryGetValue("deaths", out d)) return float.NaN;
+                sum += d;
+                counted++;
+            }
+            return counted > 0 ? sum : float.NaN;
+        }
 
         /// <summary>The Totals pages' numbers for `players` (the de-duplicated
         /// roster, in order) over every game of the envelope.</summary>
@@ -669,7 +804,10 @@ namespace CompetitiveRounds
             var d = new Derived();
             int n = players.Count;
             string kind = env.Kind ?? "";
-            bool v1 = n == 2 && !IsTwoSided(kind) && kind != "ffa";
+            var sides = Sides(kind, players);
+            d.Sides.AddRange(sides);
+            bool twoSided = TwoSided(kind, sides);
+            var sideOf = SideIndex(sides, n);
             var set = d.Set;
             set.Games = env.Games.Count;
             set.Wins = new int[n];
@@ -684,20 +822,30 @@ namespace CompetitiveRounds
                     if (g.DurationS < set.ShortestS) { set.ShortestS = g.DurationS; set.ShortestGame = gi; }
                     if (g.DurationS > set.LongestS) { set.LongestS = g.DurationS; set.LongestGame = gi; }
                 }
-                CountWins(kind, g, players, set.Wins);
+                CountWins(kind, g, players, sides, set.Wins);
             }
             if (set.Timed > 0) set.AverageS = set.TotalS / set.Timed;
             else set.ShortestS = 0f;
 
-            bool allExact = v1 && env.Games.Count > 0;
+            // The two sides' point events replayed per game - every two-sided
+            // kind since ask 9 (the 2v2 / 1v2 recorder writes the same pairs), not
+            // 1v1 alone. A game whose side streams do not replay exactly into its
+            // recorded rounds, or where a side has no key, leaves every momentum
+            // number of the set unset: a derived number is shown only when the
+            // events prove it.
+            bool allExact = twoSided && env.Games.Count > 0;
             for (int gi = 0; gi < env.Games.Count; gi++)
             {
                 Momentum mo = null;
-                if (v1)
+                if (twoSided)
                 {
                     var g = env.Games[gi];
-                    mo = Replay1v1(Stream(g, players[0].Id, "score"), Stream(g, players[1].Id, "score"),
-                                   Score(g, players[0].Id), Score(g, players[1].Id), g.DurationS);
+                    int ia, ib;
+                    int ra = SideScoreOf(g, players, sides[0], out ia), rb = SideScoreOf(g, players, sides[1], out ib);
+                    mo = ia >= 0 && ib >= 0
+                        ? ReplayTwoSided(SideStream(g, players, sides[0], "score"), SideStream(g, players, sides[1], "score"),
+                                         ra, rb, g.DurationS)
+                        : new Momentum();
                     if (!mo.Exact) allExact = false;
                 }
                 d.Moments.Add(mo);
@@ -711,6 +859,12 @@ namespace CompetitiveRounds
             for (int pi = 0; pi < n; pi++)
             {
                 string pid = players[pi].Id;
+                int si = sideOf[pi];
+                // The lone fighter of a side (a 1v1 fighter, the 1v2 solo) made
+                // every kill on the other side, so with no kills counter of its
+                // own its kills are the opponents' recorded deaths. A member of a
+                // side of two cannot be told apart from its partner that way.
+                Side opponents = twoSided && si >= 0 && sides[si].Slots.Count == 1 ? sides[1 - si] : null;
                 var line = new PlayerLine();
                 bool killsRecorded = false, killsDerived = false, capped = false;
                 float kills = 0f, derivedKills = 0f;
@@ -722,7 +876,7 @@ namespace CompetitiveRounds
                     bool played = g.Scores.ContainsKey(pid);
                     Dictionary<string, float> tot;
                     g.Totals.TryGetValue(pid, out tot);
-                    float? gKills = null, gDmg = null, gHit = null, gBlock = null;
+                    float? gKills = null, gDeaths = null, gDmg = null, gHit = null, gBlock = null;
                     if (played)
                     {
                         line.Games++;
@@ -736,6 +890,7 @@ namespace CompetitiveRounds
                             }
                             float v;
                             if (tot.TryGetValue("damage", out v)) gDmg = v;
+                            if (tot.TryGetValue("deaths", out v)) gDeaths = v;
                             if (tot.TryGetValue("kills", out v)) { gKills = v; kills += v; killsRecorded = true; }
                             float shots, hits, blocks, ok;
                             if (tot.TryGetValue("shots", out shots) && tot.TryGetValue("hits", out hits) && shots > 0f)
@@ -743,13 +898,10 @@ namespace CompetitiveRounds
                             if (tot.TryGetValue("blocks", out blocks) && tot.TryGetValue("blocks_ok", out ok) && blocks > 0f)
                                 gBlock = 100f * ok / blocks;
                         }
-                        if (v1 && gKills == null)
+                        if (gKills == null && opponents != null)
                         {
-                            // 1v1: a fighter's kill is the other fighter's recorded death
-                            Dictionary<string, float> other;
-                            float od;
-                            if (g.Totals.TryGetValue(players[1 - pi].Id, out other) && other != null
-                                && other.TryGetValue("deaths", out od))
+                            float od = SideDeaths(g, players, opponents);
+                            if (!float.IsNaN(od))
                             {
                                 gKills = od;
                                 derivedKills += od;
@@ -762,12 +914,13 @@ namespace CompetitiveRounds
                         if (g.Points.TryGetValue(pid, out pts)) { won += pts; wonKnown = true; }
                         if (lostKnown)
                         {
-                            int opp = OpponentPoints(kind, g, players, pi);
+                            int opp = OpponentPoints(kind, g, players, sides, si);
                             if (opp < 0) lostKnown = false; else lost += opp;
                         }
                     }
                     line.DamageByGame.Add(gDmg);
                     line.KillsByGame.Add(gKills);
+                    line.DeathsByGame.Add(gDeaths);
                     line.HitPctByGame.Add(gHit);
                     line.BlockPctByGame.Add(gBlock);
                     int gv;
@@ -779,19 +932,22 @@ namespace CompetitiveRounds
                 if (line.Games > 0 && !capped) line.CardsPicked = picks;
                 if (wonKnown) line.PointsWon = won;
                 if (lostKnown && line.Games > 0) line.PointsLost = lost;
-                if (allExact)
+                if (allExact && si >= 0)
                 {
+                    // Side numbers: every member of a side carries them (a
+                    // teammate's first blood is the side's).
                     int fb = 0, streak = 0, comeback = 0;
                     float lead = 0f;
                     for (int gi = 0; gi < d.Moments.Count; gi++)
                     {
                         var mo = d.Moments[gi];
-                        if (mo.FirstScorer == pi) fb++;
-                        streak = Math.Max(streak, mo.LongestStreak[pi]);
-                        lead += mo.LeadS[pi];
+                        if (mo.FirstScorer == si) fb++;
+                        streak = Math.Max(streak, mo.LongestStreak[si]);
+                        lead += mo.LeadS[si];
                         var g = env.Games[gi];
-                        if (Score(g, pid) > Score(g, players[1 - pi].Id))
-                            comeback = Math.Max(comeback, mo.WorstDeficit[pi]);
+                        int ia, ib;
+                        if (SideScoreOf(g, players, sides[si], out ia) > SideScoreOf(g, players, sides[1 - si], out ib))
+                            comeback = Math.Max(comeback, mo.WorstDeficit[si]);
                     }
                     line.FirstBloods = fb;
                     line.LongestStreak = streak;
@@ -810,22 +966,19 @@ namespace CompetitiveRounds
             return d;
         }
 
-        private static void CountWins(string kind, Game g, IList<Player> players, int[] wins)
+        /// <summary>Who won game g: in a two-sided set the side with the higher
+        /// recorded score (every member who played it gets the win; no win on a
+        /// tie or when a side has no key), else the unique top score (FFA).</summary>
+        private static void CountWins(string kind, Game g, IList<Player> players, IList<Side> sides, int[] wins)
         {
             int n = players.Count;
-            if (IsTwoSided(kind))
+            if (TwoSided(kind, sides))
             {
-                int s1 = -1, s2 = -1;
-                for (int i = 0; i < n; i++)
-                {
-                    int v;
-                    if (!g.Scores.TryGetValue(players[i].Id, out v)) continue;
-                    if (players[i].Team == 1 && s1 < 0) s1 = v;
-                    else if (players[i].Team == 2 && s2 < 0) s2 = v;
-                }
-                if (s1 < 0 || s2 < 0 || s1 == s2) return;
-                int side = s1 > s2 ? 1 : 2;
-                for (int i = 0; i < n; i++) if (players[i].Team == side && g.Scores.ContainsKey(players[i].Id)) wins[i]++;
+                int ia, ib;
+                int s1 = SideScoreOf(g, players, sides[0], out ia), s2 = SideScoreOf(g, players, sides[1], out ib);
+                if (ia < 0 || ib < 0 || s1 == s2) return;
+                var winner = s1 > s2 ? sides[0] : sides[1];
+                foreach (int pi in winner.Slots) if (g.Scores.ContainsKey(players[pi].Id)) wins[pi]++;
                 return;
             }
             int best = int.MinValue, at = -1;
@@ -840,26 +993,18 @@ namespace CompetitiveRounds
             if (at >= 0 && !tie) wins[at]++;
         }
 
-        /// <summary>The points scored against player `pi` in game g: the other
-        /// fighter's in 1v1, the other side's in 2v2 / 1v2; -1 when the game
-        /// does not say (FFA has no "against").</summary>
-        private static int OpponentPoints(string kind, Game g, IList<Player> players, int pi)
+        /// <summary>The points scored against the player on side `si` in game g:
+        /// the other side's points (its first member with a key); -1 when the
+        /// game does not say, and always for FFA (no "against").</summary>
+        private static int OpponentPoints(string kind, Game g, IList<Player> players, IList<Side> sides, int si)
         {
-            if (kind == "ffa") return -1;
-            if (IsTwoSided(kind))
+            if (!TwoSided(kind, sides) || si < 0 || si > 1) return -1;
+            foreach (int oi in sides[1 - si].Slots)
             {
-                int mine = players[pi].Team;
-                for (int i = 0; i < players.Count; i++)
-                {
-                    int v;
-                    if (players[i].Team != mine && players[i].Team > 0 && g.Points.TryGetValue(players[i].Id, out v))
-                        return v;
-                }
-                return -1;
+                int v;
+                if (g.Points.TryGetValue(players[oi].Id, out v)) return v;
             }
-            if (players.Count != 2) return -1;
-            int o;
-            return g.Points.TryGetValue(players[1 - pi].Id, out o) ? o : -1;
+            return -1;
         }
 
         /// <summary>A 1v1 fighter's rounds for the replay maths, where both
@@ -910,14 +1055,23 @@ namespace CompetitiveRounds
             return -1;
         }
 
-        /// <summary>A two-player game's pair of scores, only when BOTH players
-        /// have a key in g; false otherwise (the caller then lists the
-        /// standings, which omit the one who did not play).</summary>
-        internal static bool PairScores(Game g, IList<Player> players, out int a, out int b)
+        /// <summary>A two-sided game's pair of scores - side 1's, then side 2's -
+        /// only when EACH side has a member with a key in g (a missing key is
+        /// never a 0, round 2 M1); `ia` and `ib` are the roster indices of the
+        /// members whose keys were read (each side's first playing member), for
+        /// the label's colour. False for FFA and for a roster the kind cannot
+        /// pair: the caller lists the standings instead.</summary>
+        internal static bool SideScores(string kind, Game g, IList<Player> players, IList<Side> sides,
+                                        out int sa, out int sb, out int ia, out int ib)
         {
-            a = b = 0;
-            return g != null && players != null && players.Count == 2
-                   && g.Scores.TryGetValue(players[0].Id, out a) && g.Scores.TryGetValue(players[1].Id, out b);
+            sa = sb = 0;
+            ia = ib = -1;
+            if (g == null || players == null || !TwoSided(kind, sides)) return false;
+            sa = SideScoreOf(g, players, sides[0], out ia);
+            sb = SideScoreOf(g, players, sides[1], out ib);
+            if (ia >= 0 && ib >= 0) return true;
+            sa = sb = 0;
+            return false;
         }
 
         internal static List<Pt> Stream(Game g, string id, string name)
@@ -970,14 +1124,15 @@ namespace CompetitiveRounds
             return (float)Math.Ceiling(top);
         }
 
-        /// <summary>A score stream's value per round won: 2 in 1v1 (the
-        /// recorder writes rounds * 2 + points in the round), 1 in FFA (rounds
-        /// plus half a point per live half-point); 0 for 2v2 and 1v2, whose
-        /// games carry no point events - their race is the recorded end score.</summary>
+        /// <summary>A score stream's value per round won: 2 in 1v1, 2v2 and 1v2
+        /// (the recorder's TimelineAppend writes rounds * 2 + points for both
+        /// sides; since ask 9 a 2v2 / 1v2 match uploads the pairs too and the
+        /// server carries each side's stream, so every two-sided kind races - a
+        /// game recorded before that has no stream and shows its end score as
+        /// the race's dot), 1 in FFA (rounds plus half a point per live half-point).</summary>
         internal static float RaceDivisor(string kind)
         {
-            if (kind == "ffa") return 1f;
-            return IsTwoSided(kind) ? 0f : POINTS_PER_ROUND;
+            return kind == "ffa" ? 1f : POINTS_PER_ROUND;
         }
 
         /// <summary>The rounds won at every sample of a score stream:
@@ -1210,6 +1365,20 @@ namespace CompetitiveRounds
             return s[s.Count - 1].Y;
         }
 
+        /// <summary>At(s, x) for a NON-DECREASING run of x: `j` is the first
+        /// sample at or after the previous x and only advances, so a pass over a
+        /// series costs O(n) where At from the start costs O(n^2) (ask 9 stage C;
+        /// the self-test holds the two equal on a grid).</summary>
+        private static float AtFrom(List<Pt> s, float x, ref int j)
+        {
+            if (s == null || s.Count == 0 || x <= 0f) return 0f;
+            while (j < s.Count && s[j].X < x) j++;
+            if (j >= s.Count) return s[s.Count - 1].Y;
+            float px = j > 0 ? s[j - 1].X : 0f, pv = j > 0 ? s[j - 1].Y : 0f;
+            float span = s[j].X - px;
+            return span <= 0f ? s[j].Y : pv + (s[j].Y - pv) * ((x - px) / span);
+        }
+
         /// <summary>Rate over the trailing window at each sample time:
         /// (v(t) - v(t - w)) / w, clamped at 0 (a counter reset is not a
         /// negative rate). Needs two samples to mean anything.</summary>
@@ -1217,10 +1386,11 @@ namespace CompetitiveRounds
         {
             var out_ = new List<Pt>();
             if (cum == null || cum.Count < 2 || window <= 0f) return out_;
+            int j = 0;
             for (int i = 0; i < cum.Count; i++)
             {
                 float t = cum[i].X;
-                float d = cum[i].Y - At(cum, t - window);
+                float d = cum[i].Y - AtFrom(cum, t - window, ref j);
                 float w = Math.Min(window, Math.Max(t, 1f));
                 out_.Add(new Pt(t, Math.Max(0f, d / w)));
             }
@@ -1235,15 +1405,190 @@ namespace CompetitiveRounds
         {
             var out_ = new List<Pt>();
             if (num == null || den == null || den.Count < 2 || window <= 0f) return out_;
+            int jd = 0, jn0 = 0, jn1 = 0;
             for (int i = 0; i < den.Count; i++)
             {
                 float t = den[i].X;
-                float dd = den[i].Y - At(den, t - window);
+                float dd = den[i].Y - AtFrom(den, t - window, ref jd);
                 if (dd < minDen) continue;
-                float dn = At(num, t) - At(num, t - window);
+                float dn = AtFrom(num, t, ref jn1) - AtFrom(num, t - window, ref jn0);
                 out_.Add(new Pt(t, Math.Max(0f, Math.Min(100f, 100f * dn / dd))));
             }
             return out_;
+        }
+
+        /// <summary>The rolling window for a stream the server decimated (lesson
+        /// 318: the sample stride doubles with the cap, so a long game's samples
+        /// are sparser): at least `minWindow`, and at least five median sample
+        /// spacings, so a window always spans several samples and a long game's
+        /// rate line does not turn into a comb of single-sample spikes.</summary>
+        internal static float StrideWindow(List<Pt> s, float minWindow)
+        {
+            if (s == null || s.Count < 3) return minWindow;
+            var gaps = new List<float>(s.Count - 1);
+            for (int i = 1; i < s.Count; i++) gaps.Add(Math.Max(0f, s[i].X - s[i - 1].X));
+            gaps.Sort();
+            return Math.Max(minWindow, 5f * gaps[gaps.Count / 2]);
+        }
+
+        // -- ask 9 stage C: colour, Unity-free (OKLab) ------------------------------
+
+        /// <summary>The report's categorical slots for a player whose in-game
+        /// colour the server does not send: the dataviz skill's validated dark
+        /// set (on the report's backdrop every adjacent pair passes the
+        /// colour-vision and normal-vision separation checks and 3:1 contrast).
+        /// Never cycled: a ninth such player takes MUTED_HEX and is told apart by
+        /// its label (the validator's rule for a palette past eight).</summary>
+        internal static readonly string[] SLOT_HEX =
+            { "#3987e5", "#d95926", "#199e70", "#c98500", "#d55181", "#008300", "#9085e9", "#e66767" };
+        /// <summary>The ink tokens: values and captions wear these, never a series colour.</summary>
+        internal const string INK_HEX = "#f0efec", INK2_HEX = "#c3c2b7", MUTED_HEX = "#898781";
+        /// <summary>The band a series colour is held to on the dark backdrop (the
+        /// validator's dark-mode lightness band and chroma floor, OKLab): a
+        /// player's in-game HUE is kept - it is the identity players already
+        /// know - its lightness clamped into the band and a faint colour
+        /// deepened to the chroma floor, so a white or pastel in-game colour
+        /// still reads as a line. A grey (chroma under TINT_C_GREY: no hue to
+        /// keep) only has its lightness fixed.</summary>
+        internal const float TINT_L_MIN = 0.48f, TINT_L_MAX = 0.67f, TINT_C_MIN = 0.10f, TINT_C_GREY = 0.02f;
+
+        /// <summary>The stat tint's thirteen steps, worst (step -6, index 0)
+        /// through the neutral ink (step 0, index 6) to best (step +6, index 12):
+        /// OKLab interpolation from INK_HEX to the good pole #0ca30c and to the
+        /// red pole #da5f59 (one step short of the status palette's critical
+        /// #d03b3b, whose 4.0:1 fails as small text). Every step is at least
+        /// 5.3:1 on the backdrop and lightness falls monotonically from the middle
+        /// outwards. The number is always printed beside its tint: the colour
+        /// never carries the meaning alone.</summary>
+        internal static readonly string[] DIVERGE_HEX =
+        {
+            "#da5f59", "#e17971", "#e69189", "#eba9a1", "#eec1ba", "#f0d8d3",
+            "#f0efec",
+            "#d1e3cc", "#b2d7ac", "#93cb8c", "#72be6a", "#4cb146", "#0ca30c",
+        };
+        internal const int DIVERGE_STEPS = 6;
+
+        /// <summary>"#rrggbb" (a leading '#' optional, a trailing alpha pair
+        /// ignored, "#rgb" expanded) -> channels in 0..1; false for anything else.</summary>
+        internal static bool ParseHex(string hex, out float r, out float g, out float b)
+        {
+            r = g = b = 0f;
+            if (string.IsNullOrEmpty(hex)) return false;
+            string h = hex.Trim();
+            if (h.StartsWith("#")) h = h.Substring(1);
+            if (h.Length == 3) h = new string(new[] { h[0], h[0], h[1], h[1], h[2], h[2] });
+            if (h.Length == 8) h = h.Substring(0, 6);
+            if (h.Length != 6) return false;
+            int rr, gg, bb;
+            if (!int.TryParse(h.Substring(0, 2), NumberStyles.HexNumber, INV, out rr)
+                || !int.TryParse(h.Substring(2, 2), NumberStyles.HexNumber, INV, out gg)
+                || !int.TryParse(h.Substring(4, 2), NumberStyles.HexNumber, INV, out bb)) return false;
+            r = rr / 255f; g = gg / 255f; b = bb / 255f;
+            return true;
+        }
+
+        internal static string ToHex(float r, float g, float b)
+        {
+            return "#" + ((int)Math.Round(Clamp01(r) * 255f)).ToString("x2", INV)
+                       + ((int)Math.Round(Clamp01(g) * 255f)).ToString("x2", INV)
+                       + ((int)Math.Round(Clamp01(b) * 255f)).ToString("x2", INV);
+        }
+
+        private static float Clamp01(float v) => v < 0f ? 0f : v > 1f ? 1f : v;
+        private static double Lin(double c) => c <= 0.04045 ? c / 12.92 : Math.Pow((c + 0.055) / 1.055, 2.4);
+        private static double Gam(double c) => c <= 0.0031308 ? 12.92 * c : 1.055 * Math.Pow(c, 1.0 / 2.4) - 0.055;
+        private static double Cbrt(double x) => x >= 0 ? Math.Pow(x, 1.0 / 3.0) : -Math.Pow(-x, 1.0 / 3.0);
+
+        /// <summary>sRGB (0..1) -> OKLab (Bjorn Ottosson's matrices).</summary>
+        internal static void ToOklab(float r, float g, float b, out float L, out float a, out float bb)
+        {
+            double rl = Lin(Clamp01(r)), gl = Lin(Clamp01(g)), bl = Lin(Clamp01(b));
+            double l = Cbrt(0.4122214708 * rl + 0.5363325363 * gl + 0.0514459929 * bl);
+            double m = Cbrt(0.2119034982 * rl + 0.6806995451 * gl + 0.1073969566 * bl);
+            double s = Cbrt(0.0883024619 * rl + 0.2817188376 * gl + 0.6299787005 * bl);
+            L = (float)(0.2104542553 * l + 0.7936177850 * m - 0.0040720468 * s);
+            a = (float)(1.9779984951 * l - 2.4285922050 * m + 0.4505937099 * s);
+            bb = (float)(0.0259040371 * l + 0.7827717662 * m - 0.8086757660 * s);
+        }
+
+        /// <summary>OKLab -> sRGB (0..1), unclamped: a channel outside 0..1 means
+        /// the colour is out of the sRGB gamut.</summary>
+        internal static void FromOklab(float L, float a, float bb, out float r, out float g, out float b)
+        {
+            double l_ = L + 0.3963377774 * a + 0.2158037573 * bb;
+            double m_ = L - 0.1055613458 * a - 0.0638541728 * bb;
+            double s_ = L - 0.0894841775 * a - 1.2914855480 * bb;
+            double l = l_ * l_ * l_, m = m_ * m_ * m_, s = s_ * s_ * s_;
+            r = (float)Gam(4.0767416621 * l - 3.3077115913 * m + 0.2309699292 * s);
+            g = (float)Gam(-1.2684380046 * l + 2.6097574011 * m - 0.3413193965 * s);
+            b = (float)Gam(-0.0041960863 * l - 0.7034186147 * m + 1.7076147010 * s);
+        }
+
+        /// <summary>Holds a series colour to the dark band (TINT_*): hue kept,
+        /// lightness clamped, chroma raised to the floor, then chroma eased back
+        /// until the colour is inside the sRGB gamut. A colour already in the
+        /// band is a fixed point (the eight SLOT_HEX are).</summary>
+        internal static void SnapTint(ref float r, ref float g, ref float b)
+        {
+            float L, a, bb;
+            ToOklab(r, g, b, out L, out a, out bb);
+            double C = Math.Sqrt((double)a * a + (double)b * bb), h = Math.Atan2(bb, a);
+            L = L < TINT_L_MIN ? TINT_L_MIN : L > TINT_L_MAX ? TINT_L_MAX : L;
+            if (C >= TINT_C_GREY && C < TINT_C_MIN) C = TINT_C_MIN;
+            for (int k = 0; k < 24; k++)
+            {
+                float rr, gg, b2;
+                FromOklab(L, (float)(C * Math.Cos(h)), (float)(C * Math.Sin(h)), out rr, out gg, out b2);
+                if (rr >= -0.002f && rr <= 1.002f && gg >= -0.002f && gg <= 1.002f && b2 >= -0.002f && b2 <= 1.002f)
+                {
+                    r = Clamp01(rr); g = Clamp01(gg); b = Clamp01(b2);
+                    return;
+                }
+                C *= 0.92;
+            }
+            float r3, g3, b3;
+            FromOklab(L, 0f, 0f, out r3, out g3, out b3);
+            r = Clamp01(r3); g = Clamp01(g3); b = Clamp01(b3);
+        }
+
+        /// <summary>The discovered range of one statistic over a page's values
+        /// (every player, every game): a value's tint step is its distance from
+        /// the average in sixths of the way to the discovered extreme on its
+        /// side - DIVERGE_STEPS (the best) .. 0 (the average: ink) .. -DIVERGE_STEPS
+        /// (the worst), the index into DIVERGE_HEX being step + DIVERGE_STEPS. A
+        /// small spread stays near ink: the distance is measured against the
+        /// larger of the spread and half the average, so 10 kills against 11 do
+        /// not read as a rout. `lowerIsBetter` (deaths, ping) flips the sign.</summary>
+        internal sealed class StatScale
+        {
+            public int Count;
+            public float Sum, Min = float.MaxValue, Max = float.MinValue;
+
+            public void Add(float v)
+            {
+                if (float.IsNaN(v) || float.IsInfinity(v)) return;
+                Count++;
+                Sum += v;
+                if (v < Min) Min = v;
+                if (v > Max) Max = v;
+            }
+
+            public void Add(float? v) { if (v.HasValue) Add(v.Value); }
+
+            public float Avg => Count > 0 ? Sum / Count : 0f;
+
+            public int Step(float v, bool lowerIsBetter)
+            {
+                if (Count < 2 || float.IsNaN(v) || float.IsInfinity(v)) return 0;
+                float avg = Avg, floor = 0.5f * Math.Abs(avg), dv = v - avg;
+                float span = Math.Max(dv >= 0f ? Max - avg : avg - Min, floor);
+                if (span <= 0f) return 0;
+                int step = (int)Math.Round(DIVERGE_STEPS * dv / span, MidpointRounding.AwayFromZero);
+                step = Math.Max(-DIVERGE_STEPS, Math.Min(DIVERGE_STEPS, step));
+                return lowerIsBetter ? -step : step;
+            }
+
+            public int Step(float? v, bool lowerIsBetter) => v.HasValue ? Step(v.Value, lowerIsBetter) : 0;
         }
     }
 }

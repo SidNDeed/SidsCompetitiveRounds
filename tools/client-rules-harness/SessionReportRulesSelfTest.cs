@@ -68,6 +68,8 @@ namespace CompetitiveRounds
             DeriveCases(r);
             RaceCases(r);
             BroadcastCases(r);
+            SidesCases(r);
+            ColourCases(r);
             return r;
         }
 
@@ -201,10 +203,12 @@ namespace CompetitiveRounds
             var p = Parse(RANKED_SERIES);
             var lone = new Game();
             lone.Scores[A] = 5;
-            int a, b;
-            bool full = p != null && p.Games.Count > 0 && PairScores(p.Games[0], p.Players, out a, out b);
-            bool one = p != null && PairScores(lone, p.Players, out a, out b);
-            Check(r, "presence: a two-player score line needs both keys", full && !one,
+            int a, b, ia, ib;
+            var ps = p == null ? new List<Side>() : Sides(p.Kind, p.Players);
+            bool full = p != null && p.Games.Count > 0 && SideScores(p.Kind, p.Games[0], p.Players, ps, out a, out b, out ia, out ib)
+                        && ia == 0 && ib == 1 && a + b > 0;
+            bool one = p != null && SideScores(p.Kind, lone, p.Players, ps, out a, out b, out ia, out ib);
+            Check(r, "presence: a two-sided score line needs a key on each side", full && !one,
                   "both keyed -> " + full + ", one keyed -> " + one);
         }
 
@@ -468,8 +472,8 @@ namespace CompetitiveRounds
                   ld.Players[0].Gold == 12 && ld.Players[0].Xp == null && td.Players[0].Gold == 20 && td.Players[0].Xp == 70,
                   "legacy " + ld.Players[0].Gold + "g " + (ld.Players[0].Xp == null ? "no xp" : "xp") + "; totals " + td.Players[0].Gold + "g " + td.Players[0].Xp + "xp");
 
-            var ok = Replay1v1(new List<Pt> { new Pt(6f, 1f), new Pt(12f, 2f) }, new List<Pt> { new Pt(6f, 0f), new Pt(12f, 0f) }, 1, 0, 20f);
-            var bad = Replay1v1(new List<Pt> { new Pt(6f, 1f), new Pt(12f, 4f) }, new List<Pt> { new Pt(6f, 0f), new Pt(12f, 0f) }, 2, 0, 20f);
+            var ok = ReplayTwoSided(new List<Pt> { new Pt(6f, 1f), new Pt(12f, 2f) }, new List<Pt> { new Pt(6f, 0f), new Pt(12f, 0f) }, 1, 0, 20f);
+            var bad = ReplayTwoSided(new List<Pt> { new Pt(6f, 1f), new Pt(12f, 4f) }, new List<Pt> { new Pt(6f, 0f), new Pt(12f, 0f) }, 2, 0, 20f);
             Check(r, "derive (control): a stream that skips a point is not replayed", ok.Exact && !bad.Exact && bad.FirstScorer == -1,
                   "one point per event: " + ok.Exact + "; a two-point jump: " + bad.Exact);
 
@@ -480,7 +484,7 @@ namespace CompetitiveRounds
                   && td2.Players[2].PointsLost == 20,
                   "team 1 " + td2.Players[0].PointsWon + "/" + td2.Players[0].PointsLost + ", team 2 "
                   + td2.Players[2].PointsWon + "/" + td2.Players[2].PointsLost);
-            Check(r, "derive: 2v2 has no first blood, streak, comeback or lead (no point events)",
+            Check(r, "derive: a 2v2 series captured before its point streams has no first blood, streak, comeback or lead",
                   td2.Players[0].FirstBloods == null && td2.Players[0].LongestStreak == null && td2.Players[0].BiggestComeback == null
                   && td2.Players[0].LeadS == null && td2.Set.LeadChanges == -1 && td2.Set.Wins[0] == 2 && td2.Set.Wins[2] == 0,
                   "first blood " + (td2.Players[0].FirstBloods == null ? "omitted" : "shown") + ", wins " + td2.Set.Wins[0] + "-" + td2.Set.Wins[2]);
@@ -539,10 +543,11 @@ namespace CompetitiveRounds
             Check(r, "race: a 1v1 value of rounds*2+points plots its rounds, FFA floors its half points",
                   sv == "0,1,1,2,4" && sf == "0,1,1,3" && st == "0.5,1.5",
                   "1v1 " + sv + " ffa " + sf + " thin " + st);
-            Check(r, "race (control): 2v2 and 1v2 streams are not raced (no point events)",
-                  RaceDivisor("team") == 0f && RaceDivisor("ovt") == 0f && RoundsSeries(new List<Pt> { new Pt(1f, 2f) }, RaceDivisor("team"), false).Count == 0
+            var teamRounds = RoundsSeries(new List<Pt> { new Pt(1f, 2f), new Pt(2f, 3f) }, RaceDivisor("team"), false);
+            Check(r, "race: 2v2 and 1v2 streams race as 1v1's (ask 9: the recorder's rounds*2+points pairs)",
+                  RaceDivisor("team") == 2f && RaceDivisor("ovt") == 2f && teamRounds.Count == 2 && teamRounds[0].Y == 1f && teamRounds[1].Y == 1f
                   && RaceDivisor("ranked") == 2f && RaceDivisor("ffa") == 1f,
-                  "team " + RaceDivisor("team").ToString(INV) + ", ovt " + RaceDivisor("ovt").ToString(INV));
+                  "team " + RaceDivisor("team").ToString(INV) + ", ovt " + RaceDivisor("ovt").ToString(INV) + ", team rounds " + teamRounds.Count);
             var e = Parse(RANKED_SERIES);
             bool ends = e.Games.Count == 3;
             var got = new List<string>();
@@ -696,6 +701,221 @@ namespace CompetitiveRounds
             var g = new AnchorGame { Id = id, End = end };
             g.Played.AddRange(played);
             return g;
+        }
+
+        // -- ask 9 stage C: sides, the two-sided replay, the rolling window --------
+
+        private static string Env(string kind, string players, string games) =>
+            @"{""v"":1,""kind"":""" + kind + @""",""players"":[" + players + @"],""games"":[" + games + "]}";
+
+        private static string Pl(string id, string name, int team) =>
+            @"{""id"":""" + id + @""",""name"":""" + name + @""",""color"":""#99B3E6"",""team"":" + (team > 0 ? team.ToString(INV) : "null") + "}";
+
+        // A 2v2 game of 110 s, side 1 (Alpha, Charlie) over side 2 (Bravo, Delta)
+        // 3-2: the recorder's pairs, one per point, side 1's stream on Alpha only
+        // and side 2's on Delta only (the first member with a stream carries it).
+        private const string TEAM_PAIRS_1 = "[[10,1],[20,2],[30,2],[40,2],[50,2],[60,2],[70,3],[80,4],[90,5],[100,6]]";
+        private const string TEAM_PAIRS_2 = "[[10,0],[20,0],[30,1],[40,2],[50,3],[60,4],[70,4],[80,4],[90,4],[100,4]]";
+        private static readonly string TEAM_STREAMED = Env("team",
+            Pl(A, "Alpha", 1) + "," + Pl(C, "Charlie", 1) + "," + Pl(B, "Bravo", 2) + "," + Pl(D, "Delta", 2),
+            @"{""match_id"":""t1"",""duration_s"":110,""scores"":{""" + A + @""":3,""" + C + @""":3,""" + B + @""":2,""" + D + @""":2},"
+            + @"""points"":{""" + A + @""":6,""" + C + @""":6,""" + B + @""":4,""" + D + @""":4},""available"":[""score""],"
+            + @"""timelines"":{""" + A + @""":{""score"":" + TEAM_PAIRS_1 + @"},""" + C + @""":{},""" + B + @""":{},""" + D + @""":{""score"":" + TEAM_PAIRS_2 + "}},"
+            + @"""totals"":{""" + A + @""":{""kills"":5,""deaths"":2},""" + C + @""":{""kills"":3,""deaths"":4},"
+            + @"""" + B + @""":{""kills"":4,""deaths"":3},""" + D + @""":{""kills"":2,""deaths"":5}}}");
+
+        // A 1v2 game with deaths but no kills counters: the solo's kills are the
+        // duo's deaths; a duo member's cannot be told from its partner's.
+        private static readonly string OVT_DEATHS = Env("ovt",
+            Pl(A, "Alpha", 1) + "," + Pl(B, "Bravo", 2) + "," + Pl(C, "Charlie", 2),
+            @"{""match_id"":""o1"",""duration_s"":90,""scores"":{""" + A + @""":5,""" + B + @""":2,""" + C + @""":2},"
+            + @"""totals"":{""" + A + @""":{""deaths"":4},""" + B + @""":{""deaths"":3},""" + C + @""":{""deaths"":2}}}");
+
+        private static string SideText(IList<Side> sides)
+        {
+            var parts = new List<string>();
+            foreach (var s in sides)
+            {
+                var slots = new List<string>();
+                foreach (int pi in s.Slots) slots.Add(pi.ToString(INV));
+                parts.Add(s.Team.ToString(INV) + ":" + string.Join("+", slots.ToArray()));
+            }
+            return string.Join(" ", parts.ToArray());
+        }
+
+        private static void SidesCases(SelfTestResult r)
+        {
+            var ranked = Parse(RANKED_SERIES);
+            var team = Parse(TEAM_SERIES);
+            var ovt = Parse(OVT_SERIES);
+            var ffa = Parse(FFA_LOBBY);
+            if (ranked == null || team == null || ovt == null || ffa == null) { Check(r, "sides: the fixtures parse", false, "null"); return; }
+            string sr = SideText(Sides(ranked.Kind, ranked.Players)), st = SideText(Sides(team.Kind, team.Players)),
+                   so = SideText(Sides(ovt.Kind, ovt.Players)), sf = SideText(Sides(ffa.Kind, ffa.Players));
+            Check(r, "sides: a 1v1 is two sides of one, 2v2 two teams of two, 1v2 the solo and the duo, FFA one side per player",
+                  sr == "1:0 2:1" && st == "1:0+1 2:2+3" && so == "1:0 2:1+2" && sf == "1:0 2:1 3:2 4:3 5:4",
+                  "1v1 [" + sr + "] 2v2 [" + st + "] 1v2 [" + so + "] ffa [" + sf + "]");
+            var ffa2 = Parse(Env("ffa", Pl(A, "Alpha", 0) + "," + Pl(B, "Bravo", 0), @"{""match_id"":""f"",""scores"":{""" + A + @""":3,""" + B + @""":1}}"));
+            bool pairNotSides = ffa2 != null && !TwoSided(ffa2.Kind, Sides(ffa2.Kind, ffa2.Players))
+                                && TwoSided(ranked.Kind, Sides(ranked.Kind, ranked.Players)) && TwoSided(team.Kind, Sides(team.Kind, team.Players))
+                                && TwoSided(ovt.Kind, Sides(ovt.Kind, ovt.Players)) && !TwoSided(ffa.Kind, Sides(ffa.Kind, ffa.Players));
+            Check(r, "sides: an FFA of two is not two-sided; 1v1, 2v2 and 1v2 are", pairNotSides,
+                  ffa2 == null ? "ffa pair unparsed" : "ffa pair two-sided " + TwoSided(ffa2.Kind, Sides(ffa2.Kind, ffa2.Players)));
+            var idx = SideIndex(Sides(team.Kind, team.Players), team.Players.Count);
+            Check(r, "sides: the roster-to-side map", idx.Length == 4 && idx[0] == 0 && idx[1] == 0 && idx[2] == 1 && idx[3] == 1,
+                  string.Join(",", Array.ConvertAll(idx, x => x.ToString(INV))));
+
+            var e = Parse(TEAM_STREAMED);
+            if (e == null || e.Games.Count != 1) { Check(r, "sides: the streamed 2v2 parses", false, "null"); return; }
+            var sides = Sides(e.Kind, e.Players);
+            var g = e.Games[0];
+            var s1 = SideStream(g, e.Players, sides[0], "score");
+            var s2 = SideStream(g, e.Players, sides[1], "score");
+            Check(r, "sides: a side's stream is its first member's that has one", s1 != null && s1.Count == 10 && s2 != null && s2.Count == 10
+                  && s1[1].Y == 2f && s2[9].Y == 4f,
+                  "side 1 " + (s1 == null ? "none" : s1.Count.ToString(INV)) + ", side 2 " + (s2 == null ? "none" : s2.Count.ToString(INV)));
+            int a1, a2, ia, ib;
+            bool both = SideScores(e.Kind, g, e.Players, sides, out a1, out a2, out ia, out ib);
+            Check(r, "sides: a 2v2 game's pair of scores names each side's first playing member", both && a1 == 3 && a2 == 2 && ia == 0 && ib == 2,
+                  a1 + "-" + a2 + " at " + ia + "/" + ib);
+            var d = Derive(e, e.Players);
+            var al = d.Players[0];
+            var br = d.Players[2];
+            Check(r, "sides: a 2v2 replays its point events - first blood, streaks, lead and comeback per side, shared by teammates",
+                  d.Set.LeadChanges == 2 && al.FirstBloods == 1 && br.FirstBloods == 0 && al.LongestStreak == 4 && br.LongestStreak == 4
+                  && Near(al.LeadS, 30f) && Near(br.LeadS, 20f) && al.BiggestComeback == 1 && br.BiggestComeback == 0
+                  && d.Players[1].FirstBloods == 1 && Near(d.Players[1].LeadS, 30f),
+                  "changes " + d.Set.LeadChanges + " fb " + al.FirstBloods + "/" + br.FirstBloods + " streak " + al.LongestStreak + "/" + br.LongestStreak
+                  + " lead " + F(al.LeadS) + "/" + F(br.LeadS) + " comeback " + al.BiggestComeback + "/" + br.BiggestComeback);
+            Check(r, "sides: 2v2 kills and deaths per player come from the totals",
+                  Near(al.Kills, 5f) && Seq(al.KillsByGame) == "5" && Seq(al.DeathsByGame) == "2" && Near(d.Players[3].Kills, 2f) && Seq(d.Players[3].DeathsByGame) == "5",
+                  "Alpha " + F(al.Kills) + "k " + Seq(al.DeathsByGame) + "d, Delta " + F(d.Players[3].Kills) + "k " + Seq(d.Players[3].DeathsByGame) + "d");
+            Check(r, "sides: 2v2 wins, points won and lost per side", d.Set.Wins[0] == 1 && d.Set.Wins[1] == 1 && d.Set.Wins[2] == 0 && d.Set.Wins[3] == 0
+                  && al.PointsWon == 6 && al.PointsLost == 4 && br.PointsWon == 4 && br.PointsLost == 6,
+                  "wins " + d.Set.Wins[0] + d.Set.Wins[1] + d.Set.Wins[2] + d.Set.Wins[3] + " Alpha " + al.PointsWon + "/" + al.PointsLost + " Bravo " + br.PointsWon + "/" + br.PointsLost);
+            var mo = d.Moments[0];
+            Check(r, "sides: the 2v2 rounds race ends on each side's recorded rounds", mo != null && mo.Exact
+                  && mo.Rounds[0][mo.Rounds[0].Count - 1].Y == 3f && mo.Rounds[1][mo.Rounds[1].Count - 1].Y == 2f,
+                  mo == null ? "null" : mo.Exact ? mo.Rounds[0][mo.Rounds[0].Count - 1].Y.ToString(INV) + "-" + mo.Rounds[1][mo.Rounds[1].Count - 1].Y.ToString(INV) : "inexact");
+
+            var o = Parse(OVT_DEATHS);
+            var od = o == null ? null : Derive(o, o.Players);
+            Check(r, "sides: a 1v2 solo's kills are the duo's deaths; a duo member's are not derivable",
+                  od != null && Near(od.Players[0].Kills, 5f) && Seq(od.Players[0].KillsByGame) == "5" && od.Players[1].Kills == null
+                  && Seq(od.Players[1].KillsByGame) == "-" && Seq(od.Players[1].DeathsByGame) == "3",
+                  od == null ? "unparsed" : "solo " + F(od.Players[0].Kills) + ", duo " + F(od.Players[1].Kills) + " deaths " + Seq(od.Players[1].DeathsByGame));
+
+            // The O(n) rolling pass equals the sample-by-sample definition.
+            var cum = new List<Pt>();
+            float acc = 0f;
+            for (int i = 0; i < 40; i++) { acc += (i * 7) % 11; cum.Add(new Pt(3f * (i + 1), acc)); }
+            var fast = Rolling(cum, 15f);
+            bool rollOk = fast.Count == cum.Count;
+            for (int i = 0; rollOk && i < cum.Count; i++)
+            {
+                float t = cum[i].X;
+                float want = Math.Max(0f, (cum[i].Y - At(cum, t - 15f)) / Math.Min(15f, Math.Max(t, 1f)));
+                rollOk = Math.Abs(fast[i].Y - want) < 1e-3f && fast[i].X == t;
+            }
+            var hits = new List<Pt>();
+            float hc = 0f;
+            for (int i = 0; i < 40; i++) { hc += (i % 3 == 0) ? 1f : 0f; hits.Add(new Pt(3f * (i + 1), hc)); }
+            var ratio = RollingRatio(hits, cum, 15f, 3f);
+            bool ratioOk = ratio.Count > 0;
+            int k = 0;
+            for (int i = 0; ratioOk && i < cum.Count; i++)
+            {
+                float t = cum[i].X, dd = cum[i].Y - At(cum, t - 15f);
+                if (dd < 3f) continue;
+                float want = Math.Max(0f, Math.Min(100f, 100f * (At(hits, t) - At(hits, t - 15f)) / dd));
+                ratioOk = k < ratio.Count && Math.Abs(ratio[k].Y - want) < 1e-2f && ratio[k].X == t;
+                k++;
+            }
+            ratioOk &= k == ratio.Count;
+            Check(r, "rolling: the one-pass window equals the per-sample definition for rates and ratios", rollOk && ratioOk,
+                  "rates " + rollOk + " (" + fast.Count + ") ratios " + ratioOk + " (" + ratio.Count + ")");
+            var sparse = new List<Pt> { new Pt(6f, 1f), new Pt(12f, 2f), new Pt(18f, 3f), new Pt(24f, 4f) };
+            Check(r, "rolling: the window follows a decimated stride (five median gaps) and never shrinks below the minimum",
+                  StrideWindow(cum, 15f) == 15f && StrideWindow(sparse, 15f) == 30f && StrideWindow(new List<Pt> { new Pt(1f, 1f) }, 15f) == 15f,
+                  "3 s grid " + StrideWindow(cum, 15f).ToString(INV) + ", 6 s grid " + StrideWindow(sparse, 15f).ToString(INV));
+        }
+
+        private static void ColourCases(SelfTestResult r)
+        {
+            // The validated slots are fixed points of the snap; a pastel keeps its
+            // hue and lands in the band; white stays a grey; a hex parses both ways.
+            bool fixedPoints = true;
+            var moved = new List<string>();
+            foreach (var hex in SLOT_HEX)
+            {
+                float cr, cg, cb;
+                if (!ParseHex(hex, out cr, out cg, out cb)) { fixedPoints = false; moved.Add(hex + " unparsed"); continue; }
+                float r2 = cr, g2 = cg, b2 = cb;
+                SnapTint(ref r2, ref g2, ref b2);
+                if (Math.Abs(r2 - cr) > 2.5f / 255f || Math.Abs(g2 - cg) > 2.5f / 255f || Math.Abs(b2 - cb) > 2.5f / 255f)
+                {
+                    fixedPoints = false;
+                    moved.Add(hex + "->" + ToHex(r2, g2, b2));
+                }
+            }
+            Check(r, "colour: the eight validated slots are fixed points of the band snap", fixedPoints && SLOT_HEX.Length == 8,
+                  moved.Count == 0 ? "all eight unchanged" : string.Join(" ", moved.ToArray()));
+            float pr, pg, pb;
+            ParseHex("#99B3E6", out pr, out pg, out pb);
+            float L0, a0, b0;
+            ToOklab(pr, pg, pb, out L0, out a0, out b0);
+            SnapTint(ref pr, ref pg, ref pb);
+            float L1, a1, b1;
+            ToOklab(pr, pg, pb, out L1, out a1, out b1);
+            double h0 = Math.Atan2(b0, a0) * 180.0 / Math.PI, h1 = Math.Atan2(b1, a1) * 180.0 / Math.PI;
+            double c1 = Math.Sqrt((double)a1 * a1 + (double)b1 * b1);
+            Check(r, "colour: the old pastel keeps its hue and is pulled into the band (lightness and chroma)",
+                  L0 > TINT_L_MAX && L1 <= TINT_L_MAX + 0.005f && L1 >= TINT_L_MIN - 0.005f && c1 >= TINT_C_MIN - 0.01 && Math.Abs(h1 - h0) < 3.0,
+                  "L " + L0.ToString("F3", INV) + "->" + L1.ToString("F3", INV) + " C " + c1.ToString("F3", INV) + " hue " + h0.ToString("F1", INV) + "->" + h1.ToString("F1", INV) + " " + ToHex(pr, pg, pb));
+            float wr = 1f, wg = 1f, wb = 1f;
+            SnapTint(ref wr, ref wg, ref wb);
+            float Lw, aw, bw;
+            ToOklab(wr, wg, wb, out Lw, out aw, out bw);
+            Check(r, "colour: white has no hue to keep - it becomes the band's lightest grey",
+                  Math.Abs(Lw - TINT_L_MAX) < 0.01f && Math.Sqrt((double)aw * aw + (double)bw * bw) < 0.01 && Math.Abs(wr - wg) < 0.02f && Math.Abs(wg - wb) < 0.02f,
+                  ToHex(wr, wg, wb) + " L " + Lw.ToString("F3", INV));
+            float xr, xg, xb;
+            bool parse = ParseHex("#3987e5", out xr, out xg, out xb) && Math.Abs(xr - 0x39 / 255f) < 1e-4f && Math.Abs(xb - 0xe5 / 255f) < 1e-4f
+                         && ParseHex("3987e5", out xr, out xg, out xb) && ParseHex("#fff", out xr, out xg, out xb) && xr == 1f
+                         && ParseHex("#3987e5ff", out xr, out xg, out xb) && !ParseHex("nope", out xr, out xg, out xb) && !ParseHex("", out xr, out xg, out xb)
+                         && ToHex(0x39 / 255f, 0x87 / 255f, 0xe5 / 255f) == "#3987e5";
+            Check(r, "colour: hex parses with or without '#', short form and alpha, and round-trips", parse, "parse " + parse);
+            bool lut = DIVERGE_HEX.Length == 2 * DIVERGE_STEPS + 1 && DIVERGE_HEX[DIVERGE_STEPS] == INK_HEX;
+            float prevL = 2f;
+            for (int i = DIVERGE_STEPS; lut && i >= 0; i--)
+            {
+                float cr, cg, cb, L, a, b;
+                lut = ParseHex(DIVERGE_HEX[i], out cr, out cg, out cb);
+                ToOklab(cr, cg, cb, out L, out a, out b);
+                lut &= L < prevL;
+                prevL = L;
+            }
+            prevL = 2f;
+            for (int i = DIVERGE_STEPS; lut && i < DIVERGE_HEX.Length; i++)
+            {
+                float cr, cg, cb, L, a, b;
+                lut = ParseHex(DIVERGE_HEX[i], out cr, out cg, out cb);
+                ToOklab(cr, cg, cb, out L, out a, out b);
+                lut &= L < prevL;
+                prevL = L;
+            }
+            Check(r, "colour: the stat tint has thirteen steps, ink in the middle, lightness falling to both poles", lut, "steps " + DIVERGE_HEX.Length);
+            var sc = new StatScale();
+            sc.Add(10f); sc.Add(20f); sc.Add(30f);
+            var small = new StatScale();
+            small.Add(10f); small.Add(11f);
+            var single = new StatScale();
+            single.Add(42f);
+            Check(r, "colour: a stat's step is its distance from the average towards the discovered extreme; a small spread stays near ink; one value is ink",
+                  sc.Step(30f, false) == 6 && sc.Step(10f, false) == -6 && sc.Step(20f, false) == 0 && sc.Step(25f, false) == 3 && sc.Step(30f, true) == -6
+                  && small.Step(11f, false) == 1 && small.Step(10f, false) == -1 && single.Step(42f, false) == 0 && sc.Step((float?)null, false) == 0,
+                  "30:" + sc.Step(30f, false) + " 10:" + sc.Step(10f, false) + " 20:" + sc.Step(20f, false) + " 25:" + sc.Step(25f, false)
+                  + " small 11:" + small.Step(11f, false) + " 10:" + small.Step(10f, false) + " single:" + single.Step(42f, false));
         }
 
         // -- helpers -------------------------------------------------------------
