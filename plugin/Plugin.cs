@@ -3554,6 +3554,8 @@ namespace CompetitiveRounds
 
             // Menu injection runs independently
             try { MainMenuInjector.TryInject(); } catch { }
+            // Ask 5: the AVATAR PRESETS row under the mod's row (AvatarPresetPicker.cs).
+            try { AvatarPresetPicker.TryPlaceRow(); } catch { }
 
             // Base-game locale injector (uk/sv) state machine. Static and
             // lifecycle-durable (localization-design §6.3, r2 find 8):
@@ -4090,6 +4092,7 @@ namespace CompetitiveRounds
             }
             Plugin.Log.LogWarning("[PERSIST] Destroyed! Attempting respawn...");
             MainMenuInjector.Reset();
+            AvatarPresetPicker.Reset();
 
             try
             {
