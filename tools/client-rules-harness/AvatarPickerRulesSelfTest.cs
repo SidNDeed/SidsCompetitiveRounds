@@ -114,6 +114,13 @@ namespace CompetitiveRounds
                 Near(w2, 100f) && Near(h2, 100f) && Near(x2, 0f) && Near(y2, 50f),
                 "w=" + F(w2) + " h=" + F(h2) + " x=" + F(x2) + " y=" + F(y2));
 
+            // 11b. A sprite pivoted at its left edge is shifted right by half its width.
+            float w3, h3, x3, y3;
+            PartRect(1.0f, 1.0f, 0f, 0.5f, 1f, 0f, 0f, 0f, 0f, 100f, out w3, out h3, out x3, out y3);
+            Check(r, "layout: a left-pivoted sprite is shifted so its pivot, not its centre, sits on the part's point",
+                Near(w3, 100f) && Near(h3, 100f) && Near(x3, 50f) && Near(y3, 0f),
+                "w=" + F(w3) + " h=" + F(h3) + " x=" + F(x3) + " y=" + F(y3));
+
             // 12b. The write gate (H1).
             bool g1 = WriteAllowed(false, false, -1);
             bool g2 = WriteAllowed(true, false, -1);

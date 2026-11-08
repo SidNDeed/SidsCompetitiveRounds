@@ -1558,6 +1558,7 @@ _PICKER_CASES = [
     "layout: calibration follows a live portrait's scale and background width, else the fallback",
     "layout: a part's rect is vanilla's SpawnItem math, the face offset added to the item offset and everything scaled by k",
     "layout: a bottom-pivoted sprite is shifted so its pivot, not its centre, sits on the part's point",
+    "layout: a left-pivoted sprite is shifted so its pivot, not its centre, sits on the part's point",
     "layout: eight tiles fill four columns and two rows in slot order",
     "gate: a nomination runs only in a confirmed menu state with no restoration owed; a room, an unreadable room state or a held home face refuses",
 ]

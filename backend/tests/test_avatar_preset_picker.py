@@ -221,6 +221,9 @@ def _p1(src):
     assert "GetComponent<QuitButton>()" in b, "the template is not found by its QuitButton component"
     assert '== "QUIT"' in b, "the TMP text QUIT fallback is gone"
     assert "tmpTextProp.GetValue(" in b, "the fallback does not read the TMP text through reflection"
+    assert "b.transform.parent == anchor.transform.parent && b.GetComponent<QuitButton>() != null" in b, \
+        "the template is not required to share the anchor's container"
+    assert "b.transform.parent != anchor.transform.parent) continue;" in b, "the TMP fallback leaves the anchor's container"
 
 
 def test_p1_the_template_is_the_quit_button_with_the_tmp_text_fallback():
@@ -235,6 +238,8 @@ def _p2(src):
     assert "anchor.transform.GetSiblingIndex() + 1" in b, "the row does not sit right under the anchor row"
     for bad in ("SetAsLastSibling", "SetAsFirstSibling", "anchoredPosition", "localPosition", ".SetParent("):
         assert bad not in b, "the row is positioned by %s, not by its sibling index" % bad
+    assert "var container = template.transform.parent;" in b and "Instantiate(template.gameObject, container)" in b, \
+        "the clone is not born under the template's container"
 
 
 def test_p2_the_sibling_index_is_the_only_placement():
@@ -249,6 +254,8 @@ def _p3(src):
     assert "GetComponent<QuitButton>()" in b and "Destroy(quit)" in b, "the clone keeps its QuitButton"
     assert "GetComponent<GoBack>()" in b and "Destroy(back)" in b, "the clone keeps its GoBack"
     assert "AddComponent<AvatarPresetsMenuButton>()" in b, "the clone gets no click component"
+    assert "clone.GetComponent<QuitButton>()" in b and "clone.GetComponent<GoBack>()" in b, \
+        "the components destroyed are not the clone's"
 
 
 def test_p3_the_clone_loses_quit_button_and_go_back():
@@ -267,6 +274,7 @@ def _p4(src):
     assert room != -1 and room < tick, "a room costs a retry"
     assert "addedRow == null" in b, "a destroyed row is not placed again"
     assert "retryCount % 10" in b, "the exhausted budget stops trying instead of slowing down"
+    assert re.search(r"if \(inRoom\)\s*\{[^}]*\breturn;", b), "a room does not end the poll"
 
 
 def test_p4_the_precondition_and_the_room_cost_no_retry():
@@ -280,6 +288,7 @@ def test_p4_the_precondition_and_the_room_cost_no_retry():
 def _p5(src):
     b = _body(src[PP], ONCLICK, within=ROW_BUTTON)
     assert "ClickGuard.Claim(this)" in b, "the row's click is not behind ClickGuard"
+    assert "if (!ClickGuard.Claim(this)) return;" in b, "the row's click guard is not the house form"
     code = _code(src[PP])
     assert code.count("UIFactory.CreateButton(") >= 6, "the picker's buttons are not all UIFactory buttons"
     assert "AddComponent<ClickHandler>" not in code and "onClick.AddListener" not in code, \
@@ -314,6 +323,7 @@ def _p6(src):
     assert alpha > 0, "a transparent background takes no raycast"
     cp = _body(src[NU], CREATE_PANEL)
     assert "pImgRaycastTarget?.SetValue(img,true)" in cp, "CreatePanel no longer makes its image a raycast target"
+    assert "canvasGO.AddComponent(UIFactory.tGR)" in b, "the picker's canvas has no raycaster of its own"
 
 
 def test_p6_the_overlay_canvas_sits_at_30000_over_a_raycast_background():
@@ -329,6 +339,10 @@ def _p7(src):
             assert bad not in code, "%s carries %s" % (f, bad)
     for f in (RL, SELFTEST):
         assert "using UnityEngine" not in _code(src[f]), "%s is not Unity-free" % f
+    pp = src[PP]
+    ea, ez = _span(pp, ENSURE)
+    for m in re.finditer(r"UIFactory\.tGR", pp):
+        assert ea <= m.start() < ez, "a raycaster is added outside EnsureCanvas (offset %d)" % m.start()
 
 
 def test_p7_no_ui_assembly_reference_no_event_system_no_menu_group():
@@ -349,6 +363,7 @@ def _p8(src):
     assert {"SetModded", "SetVanilla", "SetAuto"} <= used, "a setter is no longer called"
     for bad in ("PlayerPrefs", "SelectFace(", "ClickButton(", ".Value =", "Config.Bind", "Config["):
         assert bad not in code, "the picker writes through %s" % bad
+    assert not re.search(r"\.Value\s*=[^=]", code), "the picker assigns a config value"
     b = _body(src[PP], APPLY)
     for call in ("AvatarDefaults.SetModded(slot)", "AvatarDefaults.SetModded(-1)",
                  "AvatarDefaults.SetVanilla(slot)", "AvatarDefaults.SetVanilla(-1)"):
@@ -379,6 +394,9 @@ def _p9(src):
     assert "AvatarPickerRules.Row(s)" in rb, "a tile is not placed by the rules' row"
     assert "AvatarPickerRules.Tile(s, present, authored, clean, setting.Modded, setting.Vanilla)" in rb, \
         "a tile's state is not the rules' decision"
+    loop = _body(src[PP], "for (int s = 0; s < AvatarPickerRules.Tiles; s++)", within=REBUILD)
+    assert "continue" not in loop and "break" not in loop, "a tile is skipped inside the eight-slot loop"
+    assert not re.search(r"\bs\s*(==|!=|<=|>=|<|>)\s*\d", loop), "a slot is singled out inside the eight-slot loop"
 
 
 def test_p9_eight_tiles_in_four_columns():
@@ -399,6 +417,9 @@ def _p10(src):
     assert "CharacterCreatorItemLoader.instance" in cp, "the loader is not the game's singleton"
     assert cp.count("AddPart(parts, loader,") == 4, "a face has four parts"
     assert "parts.Sort(" in cp, "the parts are not ordered by sorting order"
+    for idn, off in (("face.eyeID", "face.eyeOffset"), ("face.mouthID", "face.mouthOffset"),
+                     ("face.detailID", "face.detailOffset"), ("face.detail2ID", "face.detail2Offset")):
+        assert cp.count(idn + ",") == 1 and cp.count(off) == 1, "the part %s is not composed exactly once with its offset" % idn
 
 
 def test_p10_get_item_is_the_only_part_source():
@@ -416,7 +437,8 @@ PER_FRAME_BAD = ("Rebuild(", "Compose(", "GetItem(", "FindObjectsOfType", "GetPr
 def _p11(src):
     b = _body(src[RL], PART_RECT)
     for term in ("w = spriteW * itemScale * k;", "h = spriteH * itemScale * k;",
-                 "x = (itemOffX + faceOffX) * k", "y = (itemOffY + faceOffY) * k"):
+                 "x = (itemOffX + faceOffX) * k + (0.5f - pivotFracX) * w;",
+                 "y = (itemOffY + faceOffY) * k + (0.5f - pivotFracY) * h;"):
         assert term in b, "the SpawnItem term %r is gone" % term
     pp = src[PP]
     for sig, within in (("private void Update()", ESC), ("private void LateUpdate()", ROW_BUTTON)):
@@ -451,6 +473,28 @@ def test_p11_nothing_composes_per_frame():
 def _p12(src):
     code = _code(src[PP])
     lines = code.splitlines()
+    # every literal a SetTextRaw call carries is markup, whitespace or an escape: the words come through Tr/TrF
+    pos = 0
+    while True:
+        i0 = code.find("UIFactory.SetTextRaw(", pos)
+        if i0 == -1:
+            break
+        j0 = code.index("(", i0)
+        depth, k0 = 0, j0
+        while k0 < len(code):
+            ch = code[k0]
+            if ch == "(":
+                depth += 1
+            elif ch == ")":
+                depth -= 1
+                if depth == 0:
+                    break
+            k0 += 1
+        args = re.sub(r'I18n\.TrF?\(\s*"(?:[^"\\]|\\.)*"', "I18n.Tr(", code[j0 + 1:k0])
+        for lit in re.findall(r'"((?:[^"\\]|\\.)*)"', args):
+            bare = re.sub(r"\\.", "", re.sub(r"<[^>]*>", "", lit))
+            assert not re.search(r"[A-Za-z]", bare), "SetTextRaw carries the untranslated literal %r" % lit
+        pos = k0
     for key in NEW_KEYS + REUSED_KEYS:
         lit = '"%s"' % key
         hits = [i for i, l in enumerate(lines) if lit in l]
@@ -479,6 +523,9 @@ def _p13(src):
     # Only live entries count: a commented-out name is still a substring of the block.
     live = [ln.split("#", 1)[0] for ln in t[m.end():end].splitlines()]
     assert any('"AvatarPresetPicker.cs"' in ln for ln in live), "the picker is not a live entry of the extractor's FILES list"
+    out = src[SOURCE_JSON]
+    for key in NEW_KEYS:
+        assert '"%s"' % key in out, "the extractor's output lacks %r" % key
 
 
 def test_p13_the_extractor_scans_the_picker():
@@ -512,6 +559,11 @@ def _p15(src):
     i = code.index("MainMenuInjector.TryInject();")
     j = code.index("AvatarPresetPicker.TryPlaceRow();")
     assert 0 < j - i < 300, "the picker's poll does not sit beside the injector's"
+    masked = _masked(src[PL])
+    mi = masked.index("MainMenuInjector.TryInject();")
+    mj = masked.index("AvatarPresetPicker.TryPlaceRow();")
+    assert masked.count("{", 0, mi) - masked.count("}", 0, mi) == masked.count("{", 0, mj) - masked.count("}", 0, mj), \
+        "the picker's poll is nested deeper than the injector's"
     k = code.index("MainMenuInjector.Reset();")
     l = code.index("AvatarPresetPicker.Reset();")
     assert 0 < l - k < 200, "the picker's reset does not sit beside the injector's"
@@ -525,13 +577,13 @@ def test_p15_the_poll_and_the_reset_sit_beside_the_injectors():
 
 
 def _p16(src):
-    m = src[MAIN]
+    m = _code(src[MAIN])
     assert 'RunSuite("avatarpicker"' in m and "AvatarPickerRules.SelfTest()" in m, "the suite is not registered"
     c = src[CSPROJ]
     assert '<Compile Include="../../plugin/AvatarPickerRules.cs" />' in c, "the harness does not compile the rules"
     assert '<Compile Include="AvatarPickerRulesSelfTest.cs" />' in c, "the harness does not compile the self-test"
     st = _code(src[SELFTEST])
-    assert st.count("Check(r, ") == 13, "the suite does not have thirteen cases"
+    assert st.count("Check(r, ") == 14, "the suite does not have fourteen cases"
     assert '"PASS" : "FAIL"' in st and '" | got="' in st, "a case prints no verdict or no measurement"
 
 
@@ -620,6 +672,13 @@ def _p18(src):
     assert m, "the modal-ownership term is gone"
     expr = t[m.end():t.index(";", m.end())]
     assert "AvatarPresetPicker.IsOpen" in _code(expr), "the open picker does not own the raw click handlers' input"
+    code = _code(t)
+    writes = re.findall(r"ClickHandler\.ModalBlockInput\s*=[^=]", code)
+    assert len(writes) == 1, "ModalBlockInput is written %d times in CompetitiveUI" % len(writes)
+    assert "ClickHandler.ModalBlockInput = KeyboardInputOwnedByModal || Keybinds.CaptureOwnsInput;" in code, \
+        "the raw-click block is not written from the keyboard gate"
+    assert "AnyModalOwnsInput" in _expr(code, "KeyboardInputOwnedByModal") and "OtherModalOwnsInput" in _expr(code, "AnyModalOwnsInput"), \
+        "the chain from the modal term to the raw-click block is broken"
 
 
 def test_p18_the_open_picker_owns_the_raw_click_input():
@@ -633,6 +692,7 @@ def _p19(src):
     o = _body(src[PP], OPEN)
     y = o.find(YIELD_OPEN)
     assert y != -1 and y < o.find("EnsureCanvas();"), "the picker opens over the menu"
+    assert re.match(r"\{\s*try\s*\{\s*" + re.escape(YIELD_OPEN), o), "something runs in Open before the yield"
     u = _body(src[PP], "private void Update()", within=ESC)
     assert YIELD_TICK in u, "the picker stays open when the menu opens"
 
@@ -653,6 +713,8 @@ def _p20(src):
     r = _body(src[NU], RESOLVE)
     assert "GetProperty(" not in r and "GetMethod(" not in r, \
         "ResolveCamera does a reflection lookup in the click handler's Update path"
+    for bad in ("GetType(", "GetField(", "GetMembers(", "InvokeMember("):
+        assert bad not in r, "ResolveCamera does %s in the click handler's Update path" % bad
     assert "UIFactory.pCanvasRenderMode" in r and "UIFactory.pCanvasWorldCamera" in r, \
         "ResolveCamera does not read the cached canvas handles"
     i = _body(src[NU], INIT_TYPES)
@@ -680,6 +742,8 @@ def _p21(src):
     for term in ("if (bt == null) return false;", "if (btn == null) return false;",
                  "if (onClick == null) return false;", "if (add == null) return false;", "return true;"):
         assert term in tw, "TryWire lost %s" % term
+    assert "add.Invoke(onClick, new object[] { action });" in tw, "TryWire reports success without adding the listener"
+    assert tw.find("add.Invoke(") < tw.find("return true;"), "TryWire returns before the listener is added"
     assert "addedRow == null" in t, "a destroyed row is not placed again"
 
 
@@ -700,6 +764,9 @@ def _p22(src):
     assert "int gen = I18n.CatalogueGeneration;" in l and GEN_LABEL in l, \
         "the row's label does not follow the catalogue generation"
     assert "I18n.Tr(" not in l, "the row translates on every tick"
+    assert "textProp.SetValue(tmp, label)" in l, "the row caches a new label but never shows it"
+    assert 'return I18n.Tr("AVATAR PRESETS");' in _body(src[PP], ROW_LABEL, within=ROW_BUTTON), \
+        "the row's label is not the whole key through Tr"
     rf = _body(src[PP], REFRESH)
     g = rf.find(GEN_GUARD)
     assert g != -1 and g < rf.find("Close();"), "the open picker closes without a catalogue change"
@@ -819,3 +886,147 @@ def test_p25_the_tick_reaches_nothing_that_composes():
            lambda s: _replace(s, PP, "            AvatarPresetPicker.CloseIfStale();\n",
                               "            AvatarPresetPicker.CloseIfStale();\n            AvatarPresetPicker.Open();\n"),
            _control_comment(PP, "private void Update()", within=ESC))
+
+
+
+# -- Codex r1's blind spots: one mutant per route with its control (test-only hardening) -------
+
+READOUT_LINE = ('            var modded = UIFactory.CreateText("ModdedReadout", choices.transform, "", 20f, Color.white, '
+                'UIFactory.AlignMidLeft, new Vector2(340f, 44f));')
+
+
+def test_b1_the_template_shares_the_anchor_container():
+    _check(_p1,
+           lambda s: _replace(s, PP, "b.transform.parent == anchor.transform.parent && b.GetComponent<QuitButton>() != null",
+                              "b.transform.parent != anchor.transform.parent && b.GetComponent<QuitButton>() != null"),
+           _control_comment(PP, FIND_TEMPLATE))
+
+
+def test_b2_the_clone_is_born_under_the_template_container():
+    _check(_p2,
+           lambda s: _replace(s, PP, "Instantiate(template.gameObject, container)", "Instantiate(template.gameObject, anchor.transform)"),
+           _control_comment(PP, PLACE))
+
+
+def test_b3_the_destroyed_components_are_the_clones():
+    _check(_p3,
+           lambda s: _replace(s, PP, "var quit = clone.GetComponent<QuitButton>();", "var quit = template.GetComponent<QuitButton>();"),
+           _control_comment(PP, PLACE))
+
+
+def test_b4_a_room_ends_the_poll():
+    _check(_p4,
+           lambda s: _replace(s, PP, "                if (IsOpen) Close();\n                return;\n", "                if (IsOpen) Close();\n"),
+           _control_comment(PP, TRY))
+
+
+def test_b5_the_row_guard_is_not_reversed():
+    _check(_p5,
+           lambda s: _replace(s, PP, "if (!ClickGuard.Claim(this)) return;", "if (ClickGuard.Claim(this)) return;"),
+           _control_comment(PP, ONCLICK, within=ROW_BUTTON))
+
+
+def test_b6_the_picker_canvas_keeps_its_raycaster():
+    _check(_p6,
+           lambda s: _replace(s, PP, "            if (UIFactory.tGR != null) canvasGO.AddComponent(UIFactory.tGR);\n", ""),
+           _control_comment(PP, ENSURE))
+
+
+def test_b7_no_raycaster_outside_the_picker_canvas():
+    _check(_p7,
+           lambda s: _replace(s, PP, "            var container = template.transform.parent;\n",
+                              "            var container = template.transform.parent;\n"
+                              "            container.gameObject.AddComponent(UIFactory.tGR);\n"),
+           _control_comment(PP, PLACE))
+
+
+def test_b8_no_config_assignment_however_spaced():
+    _check(_p8,
+           lambda s: _replace(s, PP, '            if (!WriteGateOpen("nomination")) { Close(); return; }\n',
+                              '            if (!WriteGateOpen("nomination")) { Close(); return; }\n'
+                              '            Plugin.AvatarModdedPreset.Value=slot;\n'),
+           _control_comment(PP, APPLY))
+
+
+def test_b9_no_slot_is_skipped_inside_the_loop():
+    _check(_p9,
+           lambda s: _insert_after_open(s, PP, "for (int s = 0; s < AvatarPickerRules.Tiles; s++)",
+                                        "                if (s == 7) continue;", within=REBUILD),
+           _control_comment(PP, REBUILD))
+
+
+def test_b10_each_part_is_composed_once():
+    _check(_p10,
+           lambda s: _replace(s, PP, "AddPart(parts, loader, face.detail2ID, CharacterItemType.Detail, face.detail2Offset);",
+                              "AddPart(parts, loader, face.detailID, CharacterItemType.Detail, face.detailOffset);"),
+           _control_comment(PP, COMPOSE))
+
+
+def test_b11_the_horizontal_pivot_term_stays():
+    _check(_p11,
+           lambda s: _replace(s, RL, "x = (itemOffX + faceOffX) * k + (0.5f - pivotFracX) * w;", "x = (itemOffX + faceOffX) * k;"),
+           _control_comment(RL, PART_RECT))
+
+
+def test_b12_no_raw_literal_reaches_set_text_raw():
+    _check(_p12,
+           lambda s: _replace(s, PP, READOUT_LINE, READOUT_LINE + '\n            UIFactory.SetTextRaw(modded, "Presets");'),
+           _control_comment(PP, REBUILD))
+
+
+def test_b15_the_poll_is_not_nested_away():
+    _check(_p15,
+           lambda s: _replace(s, PL, "try { AvatarPresetPicker.TryPlaceRow(); } catch { }",
+                              "if (false) { try { AvatarPresetPicker.TryPlaceRow(); } catch { } }"),
+           lambda s: _replace(s, PL, "// Ask 5: the AVATAR PRESETS row under the mod's row (AvatarPresetPicker.cs).",
+                              "// control: the AVATAR PRESETS row under the mod's row (AvatarPresetPicker.cs)."))
+
+
+def test_b16_a_commented_registration_reads_red():
+    _check(_p16,
+           lambda s: _replace(s, MAIN, 'RunSuite("avatarpicker"', '/* RunSuite("avatarpicker" */'),
+           lambda s: _replace(s, MAIN, "// Ask 5 (avatar presets in the main menu): the picker's tile",
+                              "// control (avatar presets in the main menu): the picker's tile"))
+
+
+# -- the round-2 table: the P17 to P22 blind spots and the RowLabel split --------------------
+
+ROW_LABEL = "private static string RowLabel()"
+
+
+def test_b17_the_raw_click_block_has_one_writer():
+    _check(_p18,
+           lambda s: _replace(s, CU, "            ClickHandler.ModalBlockInput = KeyboardInputOwnedByModal || Keybinds.CaptureOwnsInput;\n",
+                              "            ClickHandler.ModalBlockInput = KeyboardInputOwnedByModal || Keybinds.CaptureOwnsInput;\n"
+                              "            ClickHandler.ModalBlockInput = false;\n"),
+           lambda s: _replace(s, CU, "// Ask 5 (Codex r1 H2): the avatar-preset picker", "// control: the avatar-preset picker"))
+
+
+def test_b18_nothing_runs_in_open_before_the_yield():
+    _check(_p19,
+           lambda s: _insert_after_open(s, PP, OPEN, "            if (canvasGO != null) canvasGO.SetActive(true);"),
+           _control_comment(PP, OPEN, indent="                "))
+
+
+def test_b19_resolve_camera_takes_no_type_either():
+    _check(_p20,
+           lambda s: _insert_after_open(s, NU, RESOLVE, "var tt=cc.GetType();"),
+           _control_comment(NU, RESOLVE))
+
+
+def test_b20_try_wire_adds_the_listener_it_reports():
+    _check(_p21,
+           lambda s: _replace(s, PP, "                add.Invoke(onClick, new object[] { action });\n", ""),
+           _control_comment(PP, TRY_WIRE, within=ROW_BUTTON))
+
+
+def test_b21_the_row_shows_the_label_it_caches():
+    _check(_p22,
+           lambda s: _replace(s, PP, "                if ((textProp.GetValue(tmp) as string) != label) textProp.SetValue(tmp, label);\n", ""),
+           _control_comment(PP, LATE, within=ROW_BUTTON))
+
+
+def test_b22_the_row_label_is_the_whole_key():
+    _check(_p22,
+           lambda s: _replace(s, PP, 'return I18n.Tr("AVATAR PRESETS");', 'return I18n.Tr("AVATAR " + "PRESETS");'),
+           _control_comment(PP, ROW_LABEL, within=ROW_BUTTON))
