@@ -425,6 +425,8 @@ CREATE TABLE @S@.ffa_match_players (
     color_name VARCHAR(40),
     color_hex VARCHAR(9),
     left_early_involuntary BOOLEAN NOT NULL DEFAULT false,
+    deaths SMALLINT,
+    death_times VARCHAR(512),
     PRIMARY KEY (match_id, player_id)
 )
 ;;
