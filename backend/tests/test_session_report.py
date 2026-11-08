@@ -2908,7 +2908,8 @@ def test_a_team_or_1v2_set_without_scores_reads_not_recorded_for_this_set(monkey
     race = _cs_body(PLUGIN / "SessionReportModel.cs",
                     "private static void FinishRace(Model m, Envelope env, string missing)")
     assert "if (p.Lines.Count == 0 && p.Dots.Count == 0) { p.Missing = missing; return; }" in race
-    assert "g.Scores.TryGetValue(pid, out v)" in race, "the dots are the games' end scores"
+    # ask 9 stage C: one dot per SIDE, from the side's recorded score (SideScoreOf), in every two-sided kind
+    assert "SideScoreOf(g, m.Players, m.Sides[si], out at)" in race, "the dots are the sides' end scores"
 
 
 # ── ask 9: one data model for every mode (migration 403) ─────────────────────

@@ -1206,11 +1206,9 @@ def test_the_race_axis_is_the_modes_win_target(harness_run, name):
     assert line.startswith("[sessionreport] PASS"), line
 
 @pytest.mark.parametrize("name", [
-    "sides: the fixtures parse",
     "sides: a 1v1 is two sides of one, 2v2 two teams of two, 1v2 the solo and the duo, FFA one side per player",
     "sides: an FFA of two is not two-sided; 1v1, 2v2 and 1v2 are",
     "sides: the roster-to-side map",
-    "sides: the streamed 2v2 parses",
     "sides: a side's stream is its first member's that has one",
     "sides: a 2v2 game's pair of scores names each side's first playing member",
     "sides: a 2v2 replays its point events - first blood, streaks, lead and comeback per side, shared by teammates",

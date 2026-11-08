@@ -1359,28 +1359,12 @@ namespace CompetitiveRounds
 
         // -- series maths (pure) -----------------------------------------------
 
-        /// <summary>Value of a cumulative series at time x: 0 at or before the
-        /// origin, linear between samples, held after the last one.</summary>
-        internal static float At(List<Pt> s, float x)
-        {
-            if (s == null || s.Count == 0 || x <= 0f) return 0f;
-            float px = 0f, pv = 0f;
-            for (int i = 0; i < s.Count; i++)
-            {
-                if (x <= s[i].X)
-                {
-                    float span = s[i].X - px;
-                    return span <= 0f ? s[i].Y : pv + (s[i].Y - pv) * ((x - px) / span);
-                }
-                px = s[i].X; pv = s[i].Y;
-            }
-            return s[s.Count - 1].Y;
-        }
-
-        /// <summary>At(s, x) for a NON-DECREASING run of x: `j` is the first
-        /// sample at or after the previous x and only advances, so a pass over a
-        /// series costs O(n) where At from the start costs O(n^2) (ask 9 stage C;
-        /// the self-test holds the two equal on a grid).</summary>
+        /// <summary>Value of a cumulative series at time x (0 at or before the
+        /// origin, linear between samples, held after the last one) for a
+        /// NON-DECREASING run of x: `j` is the first sample at or after the
+        /// previous x and only advances, so a pass over a series costs O(n)
+        /// where a search from the start costs O(n^2) (ask 9 stage C; the
+        /// self-test holds it equal to the per-sample definition on a grid).</summary>
         private static float AtFrom(List<Pt> s, float x, ref int j)
         {
             if (s == null || s.Count == 0 || x <= 0f) return 0f;

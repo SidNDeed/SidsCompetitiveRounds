@@ -849,6 +849,26 @@ namespace CompetitiveRounds
                   "3 s grid " + StrideWindow(cum, 15f).ToString(INV) + ", 6 s grid " + StrideWindow(sparse, 15f).ToString(INV));
         }
 
+        /// <summary>The per-sample definition the rules' one-pass AtFrom is held
+        /// to: value of a cumulative series at time x, 0 at or before the origin,
+        /// linear between samples, held after the last one (ask 9 stage C; a test
+        /// oracle, so it lives in the harness half).</summary>
+        private static float At(List<Pt> s, float x)
+        {
+            if (s == null || s.Count == 0 || x <= 0f) return 0f;
+            float px = 0f, pv = 0f;
+            for (int i = 0; i < s.Count; i++)
+            {
+                if (x <= s[i].X)
+                {
+                    float span = s[i].X - px;
+                    return span <= 0f ? s[i].Y : pv + (s[i].Y - pv) * ((x - px) / span);
+                }
+                px = s[i].X; pv = s[i].Y;
+            }
+            return s[s.Count - 1].Y;
+        }
+
         private static void ColourCases(SelfTestResult r)
         {
             // The validated slots are fixed points of the snap; a pastel keeps its

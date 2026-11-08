@@ -754,6 +754,7 @@ cee82537870ea52d	N	rule:N1	Black Cursor
 7d9195d66f77729f	N	rule:N1	Blk {0}%
 82dd2cdf36f9436d	N	rule:N1	Block
 3dbed7ad205139f8	N	rule:N1	Block %
+3febbab614433c6f	N	rule:N1	Block % per game
 dae5a0121abb5fa0	N	rev:c2b7a39e7f9e9212 a live-scoreboard stat label (TabStatsOverlay.EnsureLocaleStrings is binding-dependent: it names the scoreboard key through KeybindRowFace); names no key	Block CD
 8c8871a730c2975c	N	rule:N1	Block a Player...
 2ec6291912590a82	O	rule:O	Block a buyer - find the player
@@ -1134,6 +1135,7 @@ e530201df3b466b7	N	rev:de8cbc9ff18255ea a page or section title of the info libr
 d6c04483c4b6c468	N	rule:N1	Deal Conditional damage
 c16670c41d27246a	N	rule:N1	Deal damage
 41cd883d2e19f7e1	N	rule:N1	Deaths
+fefa7eaa9bbb5fda	N	rule:N1	Deaths per game
 423840285bb24d59	N	rule:N1	Decay
 a10292c3bb3a1332	N	rule:N1	Decent
 58eca18787c3b157	P	rule:P	Decimals on the HP readout in the hold-{0} board, the spectator seat and the broadcaster HUD. Both h
@@ -1463,8 +1465,8 @@ e7a9b89520887cc2	N	rule:N1	Game over - {0} wins
 0b9ce69dc04eeb6c	N	rule:N1	Game {0} - {1} players
 9cd9695a45e37941	N	rule:N1	Game {0} of {1}
 4200a0fa64073d82	N	rule:N1	Game {0} score progression
-5da06bf7bb67a08a	N	rule:N1	Game {0}: solo {1}-{2} duo
-158534c6676ad9ae	N	rule:N1	Game {0}: team 1 {1}-{2} team 2
+5da06bf7bb67a08a	O	rule:O	Game {0}: solo {1}-{2} duo
+158534c6676ad9ae	O	rule:O	Game {0}: team 1 {1}-{2} team 2
 a3143c792dd243b3	N	rule:N1	Game {0}: {1}
 fd70315e6afaa97d	N	rule:N1	Game {0}: {1}-{2}
 398ed32981497751	N	rule:N1	Games
@@ -1575,6 +1577,7 @@ d1a8bbfa7d6b6795	N	rule:N1	Held by the top 3 on the FFA leaderboard
 69342c5c39e5ae5f	N	rule:N1	Hello!
 665bfd72831ac982	N	rule:N1	Help translate the mod - opens the web portal in your browser. An admin has to give you translator a
 d393cc8c5a9dfa38	N	rule:N1	Hide Gold
+3a21eb74304a11cb	N	rule:N1	Hide card art
 a14b11926312cad5	N	rev:347a428372d0026c 'tab' is a tab of the mod's menu; names no key	Hide your gold balance from everyone on the leaderboard. Toggle it on or off any time from the Other
 391e23160a547aa2	N	rev:232000dd72ed6e81 'tab' is a tab of the mod's menu; names no key	Hides you from the Home tab's online and recently-online lists.
 5e5ecdae06109711	N	rule:N1	Higher placement takes a bigger share of the pot; the pot itself scales with lobby size, battles pla
@@ -1584,6 +1587,7 @@ a14b11926312cad5	N	rev:347a428372d0026c 'tab' is a tab of the mod's menu; names 
 3d54b658e24e84cb	N	rev:173380f8524f9082 a dance's shop description: 'locks your controls' means the dancer cannot move; names no key	Hips one way, arms the other - the classic. Dancing locks your controls for the duration.
 ea490aaa629a0704	N	rule:N1	Hit
 48a77eef568007e3	N	rule:N1	Hit %
+6167e181bc0d27ec	N	rule:N1	Hit % per game
 c93d8b77434bdab2	N	rule:N1	Hit % vs Block %
 bfa62d12f6552fa0	N	rule:N1	Hit / Block %
 ad63b1980e7f9c3b	N	rule:N1	Hit rate - {0}
@@ -2546,9 +2550,12 @@ e1b5767fcb7ecce9	K	rule:K	Right Mouse
 f2f5d68e6499e7ed	N	rule:N1	Rising Star
 c3916b69a2b9f6d2	N	rev:bed7ddda8f1df9bd a single capital that is a possessive or a shape (OPPONENT'S, SID'S, a T-slit visor); names no key	Riveted steel great-helm with a T-slit visor.
 0db60afc565e9771	N	rule:N1	Roc
-b1f400711752a533	N	rule:N1	Rolling DPS (15 s window)
-9c7dd1d11383f735	N	rule:N1	Rolling block % (15 s window)
-0c9e1f450655084f	N	rule:N1	Rolling hit % (15 s window)
+6122a2d62ded625c	N	rule:N1	Rolling DPS
+b1f400711752a533	O	rule:O	Rolling DPS (15 s window)
+ed8ebd9774cd98f2	N	rule:N1	Rolling block %
+9c7dd1d11383f735	O	rule:O	Rolling block % (15 s window)
+b2aebd26183a9db0	N	rule:N1	Rolling hit %
+0c9e1f450655084f	O	rule:O	Rolling hit % (15 s window)
 08ce8ad5d440205c	N	rule:N1	Room code: <color=#C0E0FF>{0}</color>{1}  <color=#888>(if auto-connect fails, Reconnect or join via Private Lobby)</color>
 14d5d902774479f1	N	rule:N1	Room rule: same cards for everyone
 6998e9a3275acd08	N	rule:N1	Room rule: same cards is off this game
@@ -2718,6 +2725,7 @@ da679c68be32dbac	N	rule:N1	Show Discord on leaderboard: <color=#888>link Discord
 0b42ec74cc3cc659	N	rule:N1	Show Discord on leaderboard: <color=#88FF88>ON</color>
 4d9856099b56f185	N	rule:N1	Show Discord on leaderboard: <color=#FF9966>OFF</color>
 b76e070645519586	N	rule:N1	Show Gold
+a1aab0e4d99ebaec	N	rule:N1	Show card art
 41743cdddfa06dda	N	rule:N1	Show inactive players ({0}d+): <color=#88FF88>ON</color>
 3957743fc4987882	N	rule:N1	Show inactive players ({0}d+): <color=#FF9966>OFF</color>
 0f368c6f7044d2e8	N	rule:N1	Show inactive players: <color=#88FF88>ON</color>
@@ -3979,6 +3987,7 @@ ec27f4e8a660e892	N	rule:N1	artist sets price + stock
 8833ad12d379ff3f	N	rule:N1	as DUO (w/ {0}) vs {1}
 1bd88366f34ba7f1	N	rule:N1	as SOLO vs {0} + {1}
 8b665bae87464c9d	N	rule:N1	assigned by the server
+fae84bf977827e13	N	rule:N1	avg {0}
 b1fae58e612a8574	N	rule:N1	bad frame PNG: {0}
 d4935ba458a53152	N	rev:52e2e41a64d43e09 a keyboard-guide label at a fixed physical cap, or the guide's heading and legend; the Fill producer colours each cap from the bindings, the label names the cap itself	base game
 30cb48da002c0263	N	rule:N1	before asking in Discord
@@ -4000,6 +4009,7 @@ f2d2f8cbf273a810	N	rule:N1	chat muted: {0}
 8ab345f9f512c744	N	rule:N1	chat muted: {0} and {1} more
 85b95acdb74387a1	N	rule:N1	cleared - flags alone never punish
 16f5853cbde985dc	N	rev:55ee221386950405 a click or press on one of the mod's own buttons, rows, tiles or links; names no key	click Preview again to stop
+4dbc9864e1b448ac	N	rev:0c57c136ed231d44 a click on one of the report's own legend buttons (the name tags that hide a player's lines); names no key	click a name to hide its lines
 1a2420720ae16deb	F	rev:8016d1300fa46be0 fixed:Esc Escape cancels and closes; not rebindable	click a phrase - Esc closes
 91960f92069cca3c	N	rev:7b16388294f3f3d0 a click or press on one of the mod's own buttons, rows, tiles or links; names no key	click to close
 6dd0fe8001145bec	N	rule:N1	color
@@ -4015,6 +4025,7 @@ f250a0eee4006971	N	rule:N1	could not process GIF: {0}
 d317f861f54f6c4a	N	rule:N1	custom 2v2 lobby
 bbe8e50ce0d4d8b4	N	rule:N1	date ->
 141d8664db867feb	N	rule:N1	days since first rating update ->
+cbd430d0b7dd4530	N	rule:N1	deaths
 7505d64a54e061b7	N	rule:N1	default
 a7eaf6bc6f5bfd2e	N	rule:N1	default orange / blue
 38238831b07e80bc	N	rule:N1	dimmed: rolled out of the build
@@ -4242,7 +4253,7 @@ b3c59914fd28d4ba	N	rule:N1	sharding...
 46ec2f98b00b79b2	N	rule:N1	showing {0} of {1}
 6d9703a3413d93d6	N	rule:N1	signed up
 9d2b2048aa49b564	N	rule:N1	slot must be eyes, mouth or detail
-2129f0c7ad5dbb9c	N	rule:N1	solo {0}-{1} duo
+2129f0c7ad5dbb9c	O	rule:O	solo {0}-{1} duo
 c78fc60f816f6151	N	rule:N1	solo: the outer-left point
 bea1572501beca2e	N	rule:N1	stackable
 1f1d4bcb3f24405d	N	rule:N1	stops null-reference spam and changes nothing visible
@@ -4254,7 +4265,7 @@ a93191a69804a4cc	N	rule:N1	submission_id and frame_no are required
 59567f73ed8c4e9c	N	rule:N1	sudden death
 0acc4f3fc2963bfc	N	rule:N1	swallows the one null reference a destroyed bullet raises at a screen edge
 d397949e66cc7fa8	N	rule:N1	swallows the one null reference the hit sound raises when its parent is gone
-9c84c6a903d31152	N	rule:N1	team 1 {0}-{1} team 2
+9c84c6a903d31152	O	rule:O	team 1 {0}-{1} team 2
 e0ceea83304b3811	N	rule:N1	tells you which region you are on
 b7cc486b61767945	N	rev:51af7edfb8348be7 names the Chat overlay mode control by its name, not its key	the Chat overlay mode control cycles the same state in game; Muted also tells the room you cannot re
 09112c22a004bb1a	N	rule:N1	the Home chat log updates either way; this is the pop-up
@@ -4392,6 +4403,7 @@ d77462714935d504	N	rule:N1	{0} players could not connect. Re-forming the lobby w
 18b717861013be8d	N	rule:N1	{0} players online now
 65d4768dbb287c5c	N	rule:N1	{0} players ranked
 62abf774b7f12a08	N	rule:N1	{0} ready! Joining...
+d595ebb54c6031b1	N	rule:N1	{0} s window
 e515dbabaae121a1	N	rule:N1	{0} searching
 222835a0e60f0877	N	rule:N1	{0} series
 335a965db1fd7a02	O	rule:O	{0} series - top of the line.
