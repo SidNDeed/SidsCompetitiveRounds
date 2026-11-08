@@ -1258,8 +1258,8 @@ hop	AvatarDefaults.cs:VanillaOptionIds	dd28c924a0f56428	AvatarDefaults.cs:Vanill
 hop	AvatarDefaults.cs:VanillaOptionNames	7af6c917a2e8a4bc	NativeUI.cs:BuildSettingsTab	delegate[SettingsDropdown(#6)/&]>NativeUI.cs:BuildSettingsTab
 hop	AvatarPickerRules.cs:Tile	0ae012aa30ea18f5	AvatarPresetPicker.cs:Rebuild	ref>AvatarPresetPicker.cs:Rebuild
 hop	AvatarPresetPicker.cs:AddPart	f2b67bc84be1c2ae	AvatarPresetPicker.cs:Compose	ref>AvatarPresetPicker.cs:Compose
-hop	AvatarPresetPicker.cs:Apply	299da7bfda574481	AvatarPresetPicker.cs:Rebuild	delegate[UIFactory.CreateButton(#6)/new UnityEngine.Events.UnityAction(#0=>)]>AvatarPresetPicker.cs:Rebuild
 hop	AvatarPresetPicker.cs:Apply	8274b1165ed3349a	AvatarPresetPicker.cs:BuildTile	delegate[UIFactory.CreateButton(#6)/new UnityEngine.Events.UnityAction(#0=>)]>AvatarPresetPicker.cs:BuildTile
+hop	AvatarPresetPicker.cs:Apply	e34f8a055d6011b1	AvatarPresetPicker.cs:Rebuild	delegate[UIFactory.CreateButton(#6)/new UnityEngine.Events.UnityAction(#0=>)]>AvatarPresetPicker.cs:Rebuild
 hop	AvatarPresetPicker.cs:BuildTile	622a61a83719c396	AvatarPresetPicker.cs:Rebuild	ref>AvatarPresetPicker.cs:Rebuild
 hop	AvatarPresetPicker.cs:CalibrateK	fee64957568fb17c	AvatarPresetPicker.cs:Rebuild	ref>AvatarPresetPicker.cs:Rebuild
 hop	AvatarPresetPicker.cs:ClearContent	0870a6944f7813fd	AvatarPresetPicker.cs:Close	ref>AvatarPresetPicker.cs:Close
@@ -1271,7 +1271,7 @@ hop	AvatarPresetPicker.cs:Close	f72bb57af8172727	AvatarPresetPicker.cs:Update	re
 hop	AvatarPresetPicker.cs:Compose	07f69c15b2ed814a	AvatarPresetPicker.cs:BuildTile	ref>AvatarPresetPicker.cs:BuildTile
 hop	AvatarPresetPicker.cs:OnClick	c69142dce303de2b	AvatarPresetPicker.cs:Start	delegate[&]>AvatarPresetPicker.cs:Start
 hop	AvatarPresetPicker.cs:Open	22c231c67df1f35b	AvatarPresetPicker.cs:Toggle	ref>AvatarPresetPicker.cs:Toggle
-hop	AvatarPresetPicker.cs:Panel	267cadd22ab82efc	AvatarPresetPicker.cs:Rebuild	ref>AvatarPresetPicker.cs:Rebuild
+hop	AvatarPresetPicker.cs:Panel	ca940a9bf0814a99	AvatarPresetPicker.cs:Rebuild	ref>AvatarPresetPicker.cs:Rebuild
 hop	AvatarPresetPicker.cs:PlaceRow	5156cc0f81af76d6	AvatarPresetPicker.cs:TryPlaceRow	ref>AvatarPresetPicker.cs:TryPlaceRow
 hop	AvatarPresetPicker.cs:Rebuild	0704a6d6fce70965	AvatarPresetPicker.cs:Open	ref>AvatarPresetPicker.cs:Open
 hop	AvatarPresetPicker.cs:Rebuild	e26e9f4d9b69b1fa	AvatarPresetPicker.cs:Apply	ref>AvatarPresetPicker.cs:Apply
@@ -27239,7 +27239,6 @@ hop	NativeUI.cs:CreateButton	6e24a0e429f86577	NativeUI.cs:BuildAchievementsTab	r
 hop	NativeUI.cs:CreateButton	6f1cdd1b61b35e02	NativeUI.cs:RebuildPickerList	ref>NativeUI.cs:RebuildPickerList
 hop	NativeUI.cs:CreateButton	6fcfa214c32f6ff0	NativeUI.cs:BuildLeaderboardTab	ref>NativeUI.cs:BuildLeaderboardTab
 hop	NativeUI.cs:CreateButton	700dad9e16ba3b54	NativeUI.cs:CreateTeamHistRow	ref>NativeUI.cs:CreateTeamHistRow
-hop	NativeUI.cs:CreateButton	714a00d2d165e860	AvatarPresetPicker.cs:Rebuild	ref>AvatarPresetPicker.cs:Rebuild
 hop	NativeUI.cs:CreateButton	73eac92236c5ea95	TitleLaddersUI.cs:BuildEntry	ref>TitleLaddersUI.cs:BuildEntry
 hop	NativeUI.cs:CreateButton	746b3e947927e353	NativeUI.cs:AddBetButton	ref>NativeUI.cs:AddBetButton
 hop	NativeUI.cs:CreateButton	772e71e4b9914740	NativeUI.Keybinds.cs:KeybindBuildFooter	ref>NativeUI.Keybinds.cs:KeybindBuildFooter
@@ -27274,6 +27273,7 @@ hop	NativeUI.cs:CreateButton	b9beef006a842d36	NativeUI.cs:CreateFfaBrowserRow	re
 hop	NativeUI.cs:CreateButton	c58fda4df553f027	NativeUI.cs:BuildAdminTab	ref[adminOnlySections.Add(#0)]>NativeUI.cs:BuildAdminTab
 hop	NativeUI.cs:CreateButton	d575a921c336c188	NativeUI.cs:BuildAdminQuarantineRow	ref>NativeUI.cs:BuildAdminQuarantineRow
 hop	NativeUI.cs:CreateButton	d7605da6f18ce583	NativeUI.cs:AddCustomBetButton	ref>NativeUI.cs:AddCustomBetButton
+hop	NativeUI.cs:CreateButton	d943c8e33b450c1c	AvatarPresetPicker.cs:Rebuild	ref>AvatarPresetPicker.cs:Rebuild
 hop	NativeUI.cs:CreateButton	de7010f72dab3e4f	NativeUI.cs:BuildAdminTab	ref>NativeUI.cs:BuildAdminTab
 hop	NativeUI.cs:CreateButton	e5cc93b5c7982a1b	NativeUI.cs:AddTeamBetButton	ref>NativeUI.cs:AddTeamBetButton
 hop	NativeUI.cs:CreateButton	e603da37bbb2e3cb	NativeUI.cs:BuildUtilityPopup	ref>NativeUI.cs:BuildUtilityPopup
@@ -27409,6 +27409,7 @@ hop	NativeUI.cs:CreateText	ce1bb30672d212f4	NativeUI.cs:ExportTierListCoroutine	
 hop	NativeUI.cs:CreateText	d1456438f56f6b10	NativeUI.cs:ApplyBetRow	ref>NativeUI.cs:ApplyBetRow
 hop	NativeUI.cs:CreateText	d2946d401a3ecc96	NativeUI.cs:CreateBracketCellRow	ref>NativeUI.cs:CreateBracketCellRow
 hop	NativeUI.cs:CreateText	d2e801864d367fe4	NativeUI.Keybinds.cs:KeybindHeading	ref>NativeUI.Keybinds.cs:KeybindHeading
+hop	NativeUI.cs:CreateText	d64842bdba4a29b4	AvatarPresetPicker.cs:Rebuild	ref>AvatarPresetPicker.cs:Rebuild
 hop	NativeUI.cs:CreateText	d71d8be843c895ae	PlayerCardsUI.cs:BuildCompose	ref>PlayerCardsUI.cs:BuildCompose
 hop	NativeUI.cs:CreateText	dabe4b13102a302e	NativeUI.cs:CreateSectionHeader	ref>NativeUI.cs:CreateSectionHeader
 hop	NativeUI.cs:CreateText	dd221c6ee8fe8a2b	NativeUI.cs:CreateFfaTextCell	ref>NativeUI.cs:CreateFfaTextCell
@@ -27424,7 +27425,6 @@ hop	NativeUI.cs:CreateText	e761e99f4d37dc1a	PlayerCardsUI.cs:ShowCard	ref>Player
 hop	NativeUI.cs:CreateText	ecedfcb7951643c4	NativeUI.cs:ShowInfoPopup#2	ref>NativeUI.cs:ShowInfoPopup#2
 hop	NativeUI.cs:CreateText	ee74b16e3f034d51	NativeUI.cs:BuildInfoTab	ref>NativeUI.cs:BuildInfoTab
 hop	NativeUI.cs:CreateText	f106b18683c98b4c	TitleLaddersUI.cs:BuildTierRow	ref>TitleLaddersUI.cs:BuildTierRow
-hop	NativeUI.cs:CreateText	f61c63293f775a87	AvatarPresetPicker.cs:Rebuild	ref>AvatarPresetPicker.cs:Rebuild
 hop	NativeUI.cs:CreateText	f6aa4cf9d72d8c1a	NativeUI.cs:RefreshOvtRecent	ref>NativeUI.cs:RefreshOvtRecent
 hop	NativeUI.cs:CreateText	f7ca74b4a5a8f7f3	NativeUI.cs:CreateFfaBetLobbyRow	ref>NativeUI.cs:CreateFfaBetLobbyRow
 hop	NativeUI.cs:CreateText	f9c62f8b2f2e8c74	PlayerCardsUI.cs:SideStrip	ref>PlayerCardsUI.cs:SideStrip
@@ -58665,8 +58665,8 @@ cycle	AvatarDefaults.cs:SwitchedMessage	2e0ad6d458881e8c	AvatarDefaults.cs:Evalu
 cycle	AvatarDefaults.cs:UnusableMessage	27a198431b45e25a	AvatarDefaults.cs:Evaluate
 cycle	AvatarPickerRules.cs:Tile	0ae012aa30ea18f5	AvatarPresetPicker.cs:Rebuild
 cycle	AvatarPresetPicker.cs:AddPart	f2b67bc84be1c2ae	AvatarPresetPicker.cs:Compose
-cycle	AvatarPresetPicker.cs:Apply	299da7bfda574481	AvatarPresetPicker.cs:Rebuild
 cycle	AvatarPresetPicker.cs:Apply	8274b1165ed3349a	AvatarPresetPicker.cs:BuildTile
+cycle	AvatarPresetPicker.cs:Apply	e34f8a055d6011b1	AvatarPresetPicker.cs:Rebuild
 cycle	AvatarPresetPicker.cs:BuildTile	622a61a83719c396	AvatarPresetPicker.cs:Rebuild
 cycle	AvatarPresetPicker.cs:CalibrateK	fee64957568fb17c	AvatarPresetPicker.cs:Rebuild
 cycle	AvatarPresetPicker.cs:ClearContent	0870a6944f7813fd	AvatarPresetPicker.cs:Close
@@ -58676,7 +58676,7 @@ cycle	AvatarPresetPicker.cs:Close	732dca5da5000a7a	AvatarPresetPicker.cs:Rebuild
 cycle	AvatarPresetPicker.cs:Compose	07f69c15b2ed814a	AvatarPresetPicker.cs:BuildTile
 cycle	AvatarPresetPicker.cs:OnClick	c69142dce303de2b	AvatarPresetPicker.cs:Start
 cycle	AvatarPresetPicker.cs:Open	22c231c67df1f35b	AvatarPresetPicker.cs:Toggle
-cycle	AvatarPresetPicker.cs:Panel	267cadd22ab82efc	AvatarPresetPicker.cs:Rebuild
+cycle	AvatarPresetPicker.cs:Panel	ca940a9bf0814a99	AvatarPresetPicker.cs:Rebuild
 cycle	AvatarPresetPicker.cs:Rebuild	0704a6d6fce70965	AvatarPresetPicker.cs:Open
 cycle	AvatarPresetPicker.cs:Rebuild	e26e9f4d9b69b1fa	AvatarPresetPicker.cs:Apply
 cycle	AvatarPresetPicker.cs:Start	0ae916fbd379349a	FfaNumberingRules.cs:StepPhase
@@ -61850,11 +61850,11 @@ cycle	NativeUI.cs:Close	70936786fa907737	NativeUI.cs:Toggle
 cycle	NativeUI.cs:CloseUtilityPopup	b4f6c90361aa9f90	NativeUI.cs:TeardownOverlaySurfaces
 cycle	NativeUI.cs:CreateButton	0df0b9c0dbd0bf4c	AvatarPresetPicker.cs:BuildTile
 cycle	NativeUI.cs:CreateButton	253d63a634894907	NativeUI.cs:MaybeShowLanguagePrompt
-cycle	NativeUI.cs:CreateButton	714a00d2d165e860	AvatarPresetPicker.cs:Rebuild
+cycle	NativeUI.cs:CreateButton	d943c8e33b450c1c	AvatarPresetPicker.cs:Rebuild
 cycle	NativeUI.cs:CreateText	11f1d686974848f1	NativeUI.cs:MaybeShowLanguagePrompt
 cycle	NativeUI.cs:CreateText	82b7ab5136cf2479	NativeUI.cs:CreateButton
 cycle	NativeUI.cs:CreateText	84232a2ec5d24c7b	AvatarPresetPicker.cs:BuildTile
-cycle	NativeUI.cs:CreateText	f61c63293f775a87	AvatarPresetPicker.cs:Rebuild
+cycle	NativeUI.cs:CreateText	d64842bdba4a29b4	AvatarPresetPicker.cs:Rebuild
 cycle	NativeUI.cs:DevOpenTab#1	84cc0f47e956705f	NativeUI.SettingsDrive.cs:DriveT4
 cycle	NativeUI.cs:DevOpenTab#1	f28f0f552ad5121c	NativeUI.SettingsDrive.cs:DriveT4
 cycle	NativeUI.cs:DevOpenTab#1	fbe6569fe82ce876	NativeUI.SettingsDrive.cs:DrvOpenSettings
@@ -65578,7 +65578,7 @@ member	AvatarPresetPicker.cs:OnClick	581a5da048ee3128
 member	AvatarPresetPicker.cs:Open	3cc1e03e2c977aef
 member	AvatarPresetPicker.cs:Panel	5c10dca35b732016
 member	AvatarPresetPicker.cs:PlaceRow	02b837988d1e3f8e
-member	AvatarPresetPicker.cs:Rebuild	1c180b491c8d3e3a
+member	AvatarPresetPicker.cs:Rebuild	8636897e0e3ca1db
 member	AvatarPresetPicker.cs:Start	b72fb4691a485068
 member	AvatarPresetPicker.cs:Toggle	7ccde4e222d44336
 member	AvatarPresetPicker.cs:TryPlaceRow	842c9a1ea0405090
@@ -70856,12 +70856,12 @@ sink	CompetitiveUI.cs:DrawChatInput	2	1	f2b16c849c09700e	attached	CompetitiveUI.
 sink	CompetitiveUI.cs:DrawDanceWheel	2	1	75517cbac7d14c37	attached	CompetitiveUI.cs:DrawUI
 sink	CompetitiveUI.cs:DrawInputOverlay	2	1	5412be93d9435cb0	attached	CompetitiveUI.cs:DrawUI
 sink	CompetitiveUI.cs:DrawQuickChat	2	1	e23b05213e46a588	attached	CompetitiveUI.cs:DrawUI
-sink	InfoLibrary.cs:ControlsOutro	5937	57549	27ef264d553828b9	attached	BroadcastHud.cs:Draw,CompetitiveUI.cs:DrawUI,GameStateWatcher.cs:PollMatchState,Keybinds.cs:CommitRows,NativeUI.Keybinds.cs:KeybindPaintAll,NativeUI.Settings.cs:SettingsRenderPane,NativeUI.Settings.cs:SettingsShowExtras,NativeUI.cs:BuildPage,NativeUI.cs:RefreshCurrentTab,NativeUI.cs:SelectInfoArticle
-sink	InfoLibrary.cs:Cosmetics	5937	57549	27ef264d553828b9	attached	BroadcastHud.cs:Draw,CompetitiveUI.cs:DrawUI,GameStateWatcher.cs:PollMatchState,Keybinds.cs:CommitRows,NativeUI.Keybinds.cs:KeybindPaintAll,NativeUI.Settings.cs:SettingsRenderPane,NativeUI.Settings.cs:SettingsShowExtras,NativeUI.cs:BuildPage,NativeUI.cs:RefreshCurrentTab,NativeUI.cs:SelectInfoArticle
-sink	InfoLibrary.cs:Spectating	5937	57549	27ef264d553828b9	attached	BroadcastHud.cs:Draw,CompetitiveUI.cs:DrawUI,GameStateWatcher.cs:PollMatchState,Keybinds.cs:CommitRows,NativeUI.Keybinds.cs:KeybindPaintAll,NativeUI.Settings.cs:SettingsRenderPane,NativeUI.Settings.cs:SettingsShowExtras,NativeUI.cs:BuildPage,NativeUI.cs:RefreshCurrentTab,NativeUI.cs:SelectInfoArticle
-sink	InfoLibrary.cs:StartHere	5937	57549	27ef264d553828b9	attached	BroadcastHud.cs:Draw,CompetitiveUI.cs:DrawUI,GameStateWatcher.cs:PollMatchState,Keybinds.cs:CommitRows,NativeUI.Keybinds.cs:KeybindPaintAll,NativeUI.Settings.cs:SettingsRenderPane,NativeUI.Settings.cs:SettingsShowExtras,NativeUI.cs:BuildPage,NativeUI.cs:RefreshCurrentTab,NativeUI.cs:SelectInfoArticle
-sink	InfoLibrary.cs:VanillaBugs	5937	57549	27ef264d553828b9	attached	BroadcastHud.cs:Draw,CompetitiveUI.cs:DrawUI,GameStateWatcher.cs:PollMatchState,Keybinds.cs:CommitRows,NativeUI.Keybinds.cs:KeybindPaintAll,NativeUI.Settings.cs:SettingsRenderPane,NativeUI.Settings.cs:SettingsShowExtras,NativeUI.cs:BuildPage,NativeUI.cs:RefreshCurrentTab,NativeUI.cs:SelectInfoArticle
-sink	InfoViz.cs:BuildKeyboard	5937	57549	27ef264d553828b9	attached	BroadcastHud.cs:Draw,CompetitiveUI.cs:DrawUI,GameStateWatcher.cs:PollMatchState,Keybinds.cs:CommitRows,NativeUI.Keybinds.cs:KeybindPaintAll,NativeUI.Settings.cs:SettingsRenderPane,NativeUI.Settings.cs:SettingsShowExtras,NativeUI.cs:BuildPage,NativeUI.cs:RefreshCurrentTab,NativeUI.cs:SelectInfoArticle
+sink	InfoLibrary.cs:ControlsOutro	5937	57549	7e00715f12535be8	attached	BroadcastHud.cs:Draw,CompetitiveUI.cs:DrawUI,GameStateWatcher.cs:PollMatchState,Keybinds.cs:CommitRows,NativeUI.Keybinds.cs:KeybindPaintAll,NativeUI.Settings.cs:SettingsRenderPane,NativeUI.Settings.cs:SettingsShowExtras,NativeUI.cs:BuildPage,NativeUI.cs:RefreshCurrentTab,NativeUI.cs:SelectInfoArticle
+sink	InfoLibrary.cs:Cosmetics	5937	57549	7e00715f12535be8	attached	BroadcastHud.cs:Draw,CompetitiveUI.cs:DrawUI,GameStateWatcher.cs:PollMatchState,Keybinds.cs:CommitRows,NativeUI.Keybinds.cs:KeybindPaintAll,NativeUI.Settings.cs:SettingsRenderPane,NativeUI.Settings.cs:SettingsShowExtras,NativeUI.cs:BuildPage,NativeUI.cs:RefreshCurrentTab,NativeUI.cs:SelectInfoArticle
+sink	InfoLibrary.cs:Spectating	5937	57549	7e00715f12535be8	attached	BroadcastHud.cs:Draw,CompetitiveUI.cs:DrawUI,GameStateWatcher.cs:PollMatchState,Keybinds.cs:CommitRows,NativeUI.Keybinds.cs:KeybindPaintAll,NativeUI.Settings.cs:SettingsRenderPane,NativeUI.Settings.cs:SettingsShowExtras,NativeUI.cs:BuildPage,NativeUI.cs:RefreshCurrentTab,NativeUI.cs:SelectInfoArticle
+sink	InfoLibrary.cs:StartHere	5937	57549	7e00715f12535be8	attached	BroadcastHud.cs:Draw,CompetitiveUI.cs:DrawUI,GameStateWatcher.cs:PollMatchState,Keybinds.cs:CommitRows,NativeUI.Keybinds.cs:KeybindPaintAll,NativeUI.Settings.cs:SettingsRenderPane,NativeUI.Settings.cs:SettingsShowExtras,NativeUI.cs:BuildPage,NativeUI.cs:RefreshCurrentTab,NativeUI.cs:SelectInfoArticle
+sink	InfoLibrary.cs:VanillaBugs	5937	57549	7e00715f12535be8	attached	BroadcastHud.cs:Draw,CompetitiveUI.cs:DrawUI,GameStateWatcher.cs:PollMatchState,Keybinds.cs:CommitRows,NativeUI.Keybinds.cs:KeybindPaintAll,NativeUI.Settings.cs:SettingsRenderPane,NativeUI.Settings.cs:SettingsShowExtras,NativeUI.cs:BuildPage,NativeUI.cs:RefreshCurrentTab,NativeUI.cs:SelectInfoArticle
+sink	InfoViz.cs:BuildKeyboard	5937	57549	7e00715f12535be8	attached	BroadcastHud.cs:Draw,CompetitiveUI.cs:DrawUI,GameStateWatcher.cs:PollMatchState,Keybinds.cs:CommitRows,NativeUI.Keybinds.cs:KeybindPaintAll,NativeUI.Settings.cs:SettingsRenderPane,NativeUI.Settings.cs:SettingsShowExtras,NativeUI.cs:BuildPage,NativeUI.cs:RefreshCurrentTab,NativeUI.cs:SelectInfoArticle
 sink	Keybinds.cs:ApplyJoin	5	4	116d269dcc76ee4c	attached	Keybinds.cs:CommitRows
 sink	Keybinds.cs:ApplyReady	5	4	3bb007885d986e1f	attached	Keybinds.cs:CommitRows
 sink	Keybinds.cs:OnRoundStart	9	9	96e6c342df2cc141	attached	GameStateWatcher.cs:PollMatchState
