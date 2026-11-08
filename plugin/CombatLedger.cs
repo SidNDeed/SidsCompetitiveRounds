@@ -12,8 +12,9 @@ namespace CompetitiveRounds
     /// CombatTelemetry.DeathClassifierPatch) for deaths, death marks and kill
     /// credit; CharacterStatModifiers.DealtDamage (runs on every client for
     /// every dealer, #127/#130) for foe damage. A kill is a kind-0 death
-    /// credited by KillCreditRules (round 1 F1/F5): the damage record of the
-    /// health-zero frame itself, else the victim's sole opponent, else nobody;
+    /// credited by KillCreditRules (rounds 1 and 2): the damage record of the
+    /// health-zero event itself, else (in a plain 1v1 room only) the victim's
+    /// sole opponent, else nobody;
     /// a boundary or own-bullet death credits nobody, which is the server's
     /// 1v1 convention (_report_1v1_kills), so `kills` reads the same in every
     /// mode. A held seat's return moves its facts to the new actor (Rebind,

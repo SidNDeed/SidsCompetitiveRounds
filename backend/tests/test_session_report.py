@@ -3120,13 +3120,22 @@ def test_the_combat_ledger_credits_kills_the_way_the_server_derives_1v1_kills():
     die = _cs_body(PLUGIN / "CombatTelemetry.cs", "private static void Prefix(HealthHandler __instance)")
     assert "CombatLedger.RecordDeath(data.view.OwnerActorNr, killer);" in die
     assert "KillCreditRules.Credit(kind, has, stamp.frame, Time.frameCount, applying," in die
-    assert "bool applying = has && ApplyingByView.TryGetValue(data.view.ViewID, out depth) && depth > 0;" in die
+    assert "bool applying = has && Applying.IsApplying(data.view.ViewID, Time.frameCount);" in die
     assert "fresh && stamp.damagerActor" not in die, "no time-window credit (round 1 F1)"
-    assert "int sole = FfaMode.InFfaMatch ? -1 : SoleOpponentOf(data.view.OwnerActorNr, victimTeam);" in die
+    assert "int sole = SoleOpponentOf(data.view.OwnerActorNr, victimTeam);" in die
+    tele = (PLUGIN / "CombatTelemetry.cs").read_text(encoding="utf-8")
+    sole = _cs_body(PLUGIN / "CombatTelemetry.cs", "private static int SoleOpponentOf(int victimActor, int victimTeam)")
+    assert "if (!OneVsOneRoom()) return -1;" in sole, "the inference runs in a plain 1v1 room only (round 2 HIGH 2)"
+    assert "if (Plugin.IsOvt() || Plugin.IsFfa()) return false;" in tele
+    assert 'return props == null || !props.ContainsKey("cr_ff");' in tele, "a 2v2 team room (cr_ff) is not a 1v1 room"
     rules = (PLUGIN / "KillCreditRules.cs").read_text(encoding="utf-8")
     assert "if (hasRecord && recordApplying && recordFrame == deathFrame && recordActor >= 0)" in rules
     assert "return recordTeam != victimTeam ? recordActor : -1;" in rules
     assert "return soleOpponentActor;" in rules
+    assert "if (fighters != 2 || !victimSeen || foe < 0 || foeTeam == victimTeam) return -1;" in rules, \
+        "the sole opponent needs exactly two fighters (round 2 HIGH 2)"
+    assert "if (byView.TryGetValue(view, out e) && e.Frame != frame) e.Depth = 0;" in rules, \
+        "a depth left from an earlier frame heals at the next call (round 2 HIGH 1)"
     ledger = (PLUGIN / "CombatLedger.cs").read_text(encoding="utf-8")
     assert "DeathTimes.Add(GameStateWatcher.SecondsSinceMatchStart())" in ledger
     assert "if (killerActor >= 0 && killerActor != victimActor) SeatFor(killerActor).Kills++;" in ledger
@@ -3142,9 +3151,14 @@ def test_the_combat_ledger_credits_kills_the_way_the_server_derives_1v1_kills():
                      "private static void Prefix(HealthHandler __instance, Player damagingPlayer,")
     assert "damagerActor = dActor," in stamp and "damagerTeam = dTeam," in stamp
     assert "frame = Time.frameCount," in stamp, "the record carries its frame (round 1 F1)"
-    assert "ApplyingByView[data.view.ViewID] = depth + 1;" in stamp, "the call is applying from the prefix (round 1 F1)"
+    assert "Applying.Enter(data.view.ViewID, Time.frameCount);" in stamp, "the call is applying from the prefix (round 1 F1)"
     post = _cs_body(PLUGIN / "CombatTelemetry.cs", "private static void Postfix(HealthHandler __instance, float __state)")
-    assert "if (depth <= 1) ApplyingByView.Remove(data.view.ViewID);" in post, "and finished at the postfix"
+    assert "Applying.Exit(" not in post, "the release is not the postfix's (round 2 HIGH 1)"
+    fin = _cs_body(PLUGIN / "CombatTelemetry.cs",
+                   "private static Exception Finalizer(HealthHandler __instance, float __state, Exception __exception)")
+    assert "if (data != null && data.view != null) Applying.Exit(data.view.ViewID);" in fin
+    assert "return __exception;" in fin, "the finalizer keeps the original exception"
+    assert "[HarmonyFinalizer]" in tele
 
 
 def test_the_telemetry_counters_are_clamped_to_the_schemas_upper_bounds():

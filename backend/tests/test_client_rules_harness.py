@@ -1673,17 +1673,23 @@ def test_the_read_gate_guarantees_each_have_a_case(harness_run, name):
 @pytest.mark.parametrize("name", [
     "credit: the health-zero frame's own foe record is the kill",
     "credit: two sources - an earlier frame's record does not credit its author (the bystander stays unnamed)",
+    "credit: an old-frame record still applying credits nobody (the frame lock alone)",
     "credit: a same-frame record by a teammate or the victim credits nobody and does not fall through",
-    "credit: a same-frame record without a source is unattributed: the sole opponent, or nobody",
-    "credit: no record at all credits the sole opponent (1v1, the 1v2 duo's deaths) and nobody facing two",
+    "credit: a same-frame record without a source is unattributed: the 1v1 opponent, else nobody",
+    "credit: no record at all credits the 1v1 opponent and nobody in a 1v2 or 2v2",
     "credit: a boundary or own-bullet death credits nobody whatever the record",
-    "credit: the sole opponent ignores the victim, negative actors and repeats of one actor",
+    "credit: the sole opponent needs exactly two fighters on two teams, the victim among them",
+    "applying: a call left open by an exception is healed at the next call in a later frame, and a death that frame credits nobody",
+    "applying: a nested call for another view keeps the victim's call applying until its own exit",
+    "credit: after a held 2v2 departure an unattributed death credits nobody (the remainder is still a 2v2)",
 ])
 def test_the_kill_credit_is_bound_to_the_lethal_frame(harness_run, name):
-    """Ask 9 stage B round 1 F1 and F5: KillCreditRules (the credit bound to the
-    health-zero frame's own damage record, never a time window; an unattributed
-    normal death to the victim's sole opponent), executed by the client harness
-    as suite killcredit. The two-source case is the round's witness: a wrong
-    credit prints the credited name in got=."""
+    """Ask 9 stage B rounds 1 and 2: KillCreditRules (the credit bound to the
+    health-zero event's own damage record - its frame AND its call still
+    applying - never a time window; an unattributed normal death to the
+    opponent only in the 1v1 shape), executed by the client harness as suite
+    killcredit. The witnesses: the two-source negative, the frame lock alone,
+    the exception-then-later-hit case; a wrong credit prints the credited name
+    in got=."""
     line = _named_case(harness_run, name, "killcredit")
     assert line.startswith("[killcredit] PASS"), line
