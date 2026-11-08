@@ -1241,8 +1241,8 @@ hop	AvatarDefaults.cs:PresetLabel	eac03168756a73f3	SettingsDescriptorWriters.g.c
 hop	AvatarDefaults.cs:ReadFacing	795da2bcc53d4fb0	AvatarDefaults.cs:Evaluate	ref>AvatarDefaults.cs:Evaluate
 hop	AvatarDefaults.cs:RecoveryInstruction	6fcebb111504d163	AvatarDefaults.cs:UnusableMessage	ref>AvatarDefaults.cs:UnusableMessage
 hop	AvatarDefaults.cs:RingSprite	f0a507cd8da8924f	AvatarDefaults.cs:EnsureRings	ref>AvatarDefaults.cs:EnsureRings
+hop	AvatarDefaults.cs:SetAuto	1939f00a6d76979b	AvatarPresetPicker.cs:ToggleAuto	ref>AvatarPresetPicker.cs:ToggleAuto
 hop	AvatarDefaults.cs:SetAuto	21e424156622d9d7	NativeUI.cs:BuildSettingsTab	delegate[SettingsSwitch(#4=>)/=>{}]>NativeUI.cs:BuildSettingsTab
-hop	AvatarDefaults.cs:SetAuto	7940f77c3fcab4b3	AvatarPresetPicker.cs:Rebuild	delegate[UIFactory.CreateButton(#6=>)/=>{}]>AvatarPresetPicker.cs:Rebuild
 hop	AvatarDefaults.cs:SetModded	a025241f4abb1a05	AvatarPresetPicker.cs:Apply	ref[case PickerAction.ClearModded]>AvatarPresetPicker.cs:Apply
 hop	AvatarDefaults.cs:SetModded	ad75f4ba2c104be2	AvatarPresetPicker.cs:Apply	ref[case PickerAction.SetModded]>AvatarPresetPicker.cs:Apply
 hop	AvatarDefaults.cs:SetModded	d91002d3bc23aad1	NativeUI.cs:BuildSettingsTab	delegate[SettingsDropdown(#5=>)/=>{}]>NativeUI.cs:BuildSettingsTab
@@ -1265,16 +1265,23 @@ hop	AvatarPresetPicker.cs:CalibrateK	fee64957568fb17c	AvatarPresetPicker.cs:Rebu
 hop	AvatarPresetPicker.cs:ClearContent	0870a6944f7813fd	AvatarPresetPicker.cs:Close	ref>AvatarPresetPicker.cs:Close
 hop	AvatarPresetPicker.cs:ClearContent	698ee86bbc08273e	AvatarPresetPicker.cs:Rebuild	ref>AvatarPresetPicker.cs:Rebuild
 hop	AvatarPresetPicker.cs:Close	1fe6c9a3a4550c13	AvatarPresetPicker.cs:Toggle	ref>AvatarPresetPicker.cs:Toggle
+hop	AvatarPresetPicker.cs:Close	2ccbdb6c1c191425	AvatarPresetPicker.cs:ToggleAuto	ref>AvatarPresetPicker.cs:ToggleAuto
+hop	AvatarPresetPicker.cs:Close	448783758028dac8	AvatarPresetPicker.cs:Update	ref>AvatarPresetPicker.cs:Update
+hop	AvatarPresetPicker.cs:Close	4c1c69d81d7caef3	AvatarPresetPicker.cs:Apply	ref>AvatarPresetPicker.cs:Apply
 hop	AvatarPresetPicker.cs:Close	61e6ba9f35931a1a	AvatarPresetPicker.cs:TryPlaceRow	ref>AvatarPresetPicker.cs:TryPlaceRow
 hop	AvatarPresetPicker.cs:Close	732dca5da5000a7a	AvatarPresetPicker.cs:Rebuild	delegate[UIFactory.CreateButton(#6=>)]>AvatarPresetPicker.cs:Rebuild
-hop	AvatarPresetPicker.cs:Close	f72bb57af8172727	AvatarPresetPicker.cs:Update	ref>AvatarPresetPicker.cs:Update
 hop	AvatarPresetPicker.cs:Compose	07f69c15b2ed814a	AvatarPresetPicker.cs:BuildTile	ref>AvatarPresetPicker.cs:BuildTile
-hop	AvatarPresetPicker.cs:OnClick	c69142dce303de2b	AvatarPresetPicker.cs:Start	delegate[&]>AvatarPresetPicker.cs:Start
+hop	AvatarPresetPicker.cs:OnClick	2be198e1696810e8	AvatarPresetPicker.cs:TryWire	delegate[&]>AvatarPresetPicker.cs:TryWire
 hop	AvatarPresetPicker.cs:Open	22c231c67df1f35b	AvatarPresetPicker.cs:Toggle	ref>AvatarPresetPicker.cs:Toggle
 hop	AvatarPresetPicker.cs:Panel	ca940a9bf0814a99	AvatarPresetPicker.cs:Rebuild	ref>AvatarPresetPicker.cs:Rebuild
 hop	AvatarPresetPicker.cs:PlaceRow	5156cc0f81af76d6	AvatarPresetPicker.cs:TryPlaceRow	ref>AvatarPresetPicker.cs:TryPlaceRow
 hop	AvatarPresetPicker.cs:Rebuild	0704a6d6fce70965	AvatarPresetPicker.cs:Open	ref>AvatarPresetPicker.cs:Open
+hop	AvatarPresetPicker.cs:Rebuild	10948588396a9cc5	AvatarPresetPicker.cs:ToggleAuto	ref>AvatarPresetPicker.cs:ToggleAuto
+hop	AvatarPresetPicker.cs:Rebuild	8885d2cfbb08dea4	AvatarPresetPicker.cs:RefreshIfStale	ref>AvatarPresetPicker.cs:RefreshIfStale
 hop	AvatarPresetPicker.cs:Rebuild	e26e9f4d9b69b1fa	AvatarPresetPicker.cs:Apply	ref>AvatarPresetPicker.cs:Apply
+hop	AvatarPresetPicker.cs:RefreshIfStale	78374970b38627b0	AvatarPresetPicker.cs:Update	ref>AvatarPresetPicker.cs:Update
+hop	AvatarPresetPicker.cs:RowLabel	a0a893acf098faa1	AvatarPresetPicker.cs:LateUpdate	ref>AvatarPresetPicker.cs:LateUpdate
+hop	AvatarPresetPicker.cs:RowLabel	a0de69532a4d4658	AvatarPresetPicker.cs:Start	ref>AvatarPresetPicker.cs:Start
 hop	AvatarPresetPicker.cs:Start	0ae916fbd379349a	FfaNumberingRules.cs:StepPhase	delegate[&]>FfaNumberingRules.cs:StepPhase
 hop	AvatarPresetPicker.cs:Start	1934cbc83630b5a0	FfaNumberingRules.cs:WaitBody	delegate[&]>FfaNumberingRules.cs:WaitBody
 hop	AvatarPresetPicker.cs:Start	1e58dfc92f3f31cb	AutoLogUpload.cs:StartBundleWorker	ref>AutoLogUpload.cs:StartBundleWorker
@@ -1307,7 +1314,9 @@ hop	AvatarPresetPicker.cs:Start	efdbd1e440b74c5d	JoinTimeline.cs:Seen	ref>JoinTi
 hop	AvatarPresetPicker.cs:Start	f525612fbe3c0c6a	Keybinds.cs:Actions	entry[[7]/&]>Keybinds.cs:Actions
 hop	AvatarPresetPicker.cs:Start	f62a1ccb103a0ad8	PortraitRenderDance.cs:DanceUpload	ref>PortraitRenderDance.cs:DanceUpload
 hop	AvatarPresetPicker.cs:Toggle	1e9d633e360600cd	AvatarPresetPicker.cs:OnClick	ref>AvatarPresetPicker.cs:OnClick
+hop	AvatarPresetPicker.cs:ToggleAuto	8eb31ca4cd8089be	AvatarPresetPicker.cs:Rebuild	delegate[UIFactory.CreateButton(#6=>)]>AvatarPresetPicker.cs:Rebuild
 hop	AvatarPresetPicker.cs:TryPlaceRow	9bcf94c76538d50b	Plugin.cs:Update#2	ref>Plugin.cs:Update#2
+hop	AvatarPresetPicker.cs:TryWire	27189ecff5d451e4	AvatarPresetPicker.cs:Start	ref>AvatarPresetPicker.cs:Start
 hop	BinderSortRules.cs:Check	7fc3eddbbc7188fa	BinderSortRules.cs:SelfTest	ref>BinderSortRules.cs:SelfTest
 hop	BinderSortRules.cs:Compare	023c907f8d220f0d	BinderSortRules.cs:SelfTest	ref[Check(#2)/Sign(#0)]>BinderSortRules.cs:SelfTest
 hop	BinderSortRules.cs:Compare	149204ac3b2675c5	PlayerCardsUI.cs:CompareForBinder	ref>PlayerCardsUI.cs:CompareForBinder
@@ -1538,7 +1547,6 @@ hop	CardDrawEvidenceCore.cs:Close	4108f1f90932e2c6	PcTradeRules.cs:SelfTest	entr
 hop	CardDrawEvidenceCore.cs:Close	54f7b2e8071e2ed7	ApiClient.cs:ArmFfaLock	ref>ApiClient.cs:ArmFfaLock
 hop	CardDrawEvidenceCore.cs:Close	64b282d309986cb2	RegionPingSweep.cs:Close	ref>RegionPingSweep.cs:Close
 hop	CardDrawEvidenceCore.cs:Close	67dd0e996593053c	OverlayIdleClose.cs:CloseIdle	ref>OverlayIdleClose.cs:CloseIdle
-hop	CardDrawEvidenceCore.cs:Close	7be888e5e8be6dd9	AvatarPresetPicker.cs:Update	ref>AvatarPresetPicker.cs:Update
 hop	CardDrawEvidenceCore.cs:Close	7ca144b26021d1f1	SpectatorJoiner.cs:ConnectAndJoin	ref>SpectatorJoiner.cs:ConnectAndJoin
 hop	CardDrawEvidenceCore.cs:Close	7dc7866baecd077c	CardDrawEvidence.cs:SealGame	ref>CardDrawEvidence.cs:SealGame
 hop	CardDrawEvidenceCore.cs:Close	81b91521b085f071	GameStateWatcher.cs:OnFfaMatchStarted	ref>GameStateWatcher.cs:OnFfaMatchStarted
@@ -1549,6 +1557,7 @@ hop	CardDrawEvidenceCore.cs:Close	8b6cae3edcfd6681	CompetitiveUI.cs:CloseTopStri
 hop	CardDrawEvidenceCore.cs:Close	8cfec9dfa415d896	SpectatorSync.cs:PlayPointSequence	ref>SpectatorSync.cs:PlayPointSequence
 hop	CardDrawEvidenceCore.cs:Close	99193d6ff04a31de	SpectatorSync.cs:RetireBoundaryPickDisplay	ref>SpectatorSync.cs:RetireBoundaryPickDisplay
 hop	CardDrawEvidenceCore.cs:Close	9927cfcccc5343b3	MusicAssets.cs:DownloadWithCap	ref>MusicAssets.cs:DownloadWithCap
+hop	CardDrawEvidenceCore.cs:Close	9c33fc7d0bfd0110	AvatarPresetPicker.cs:Update	ref>AvatarPresetPicker.cs:Update
 hop	CardDrawEvidenceCore.cs:Close	a5705140ffa1e6fa	GameStateWatcher.cs:TickRequeueMachine	ref[case RqPhase.Queue]>GameStateWatcher.cs:TickRequeueMachine
 hop	CardDrawEvidenceCore.cs:Close	af1e9843ccd10b4a	ApiClient.cs:UpdateOvtQueuePoll	delegate[Plugin.Instance.StartCoroutine(#0)/GetRequest(#1=>)/=>{}]>ApiClient.cs:UpdateOvtQueuePoll
 hop	CardDrawEvidenceCore.cs:Close	bb629dae2b660b18	GameStateWatcher.cs:OnUnityLog	ref>GameStateWatcher.cs:OnUnityLog
@@ -16298,6 +16307,7 @@ hop	I18n.cs:Tr	2655456ad07ceceb	NativeUI.cs:LobbyBetDisclaimer	ref>NativeUI.cs:L
 hop	I18n.cs:Tr	26fb461878533274	NativeUI.cs:TrRarity	dispatch[case "legendary"]{legendary}>NativeUI.cs:TrRarity
 hop	I18n.cs:Tr	27083ee420c6da13	NativeUI.cs:TrMetric	dispatch[case "Top Streaks"]{Top Streaks}>NativeUI.cs:TrMetric
 hop	I18n.cs:Tr	275ae8a3a0952292	SessionReportModel.cs:FinishRace	ref>SessionReportModel.cs:FinishRace
+hop	I18n.cs:Tr	27d6f1f282cecdf5	AvatarPresetPicker.cs:RowLabel	ref>AvatarPresetPicker.cs:RowLabel
 hop	I18n.cs:Tr	27d7afb614228712	NativeUI.cs:CreateSectionHeader	ref[UIFactory.CreateText(#2)]>NativeUI.cs:CreateSectionHeader
 hop	I18n.cs:Tr	284f166e11f62852	InfoViz.cs:BuildSeriesFormat	ref[Lbl(#1)]>InfoViz.cs:BuildSeriesFormat
 hop	I18n.cs:Tr	287a36487c8881b5	NativeUI.cs:BuildCompareSimilarPanel	ref[MakeGraphLabel(#1)]>NativeUI.cs:BuildCompareSimilarPanel
@@ -17045,7 +17055,6 @@ hop	I18n.cs:Tr	b46e8c712920269a	SessionReportModel.cs:Build	ref>SessionReportMod
 hop	I18n.cs:Tr	b46f46d8c31567bc	PostSessionReport.cs:ComposePlayerPanelCompact	ref[AddLabel(#5)]>PostSessionReport.cs:ComposePlayerPanelCompact
 hop	I18n.cs:Tr	b47d92224f0d718d	CompetitiveUI.cs:DrawConfirm	ref[GUI.Button(#1)]>CompetitiveUI.cs:DrawConfirm
 hop	I18n.cs:Tr	b4f5c8247123f489	InfoLibrary.cs:Categories	entry[[4]/Category.Articles/Article{rewards}.Title=>]>InfoLibrary.cs:Categories
-hop	I18n.cs:Tr	b513f9f888fa459d	AvatarPresetPicker.cs:Start	ref>AvatarPresetPicker.cs:Start
 hop	I18n.cs:Tr	b596267797da703d	CompetitiveUI.cs:DrawLogViewerModal	ref[GUI.Label(#1)]>CompetitiveUI.cs:DrawLogViewerModal
 hop	I18n.cs:Tr	b59a82009336fbf8	InfoViz.cs:BuildGrowCurve	entry[[1]]>InfoViz.cs:BuildGrowCurve
 hop	I18n.cs:Tr	b5beb3e9126270ea	AvatarDefaults.cs:PresetLabel	ref>AvatarDefaults.cs:PresetLabel
@@ -22534,6 +22543,7 @@ hop	InboundStallCore.cs:Close	18393f63379e639f	ApiClient.cs:ParseTeamQueuePoll	r
 hop	InboundStallCore.cs:Close	209ce44b03c7a48f	RegionPingSweep.cs:Close	ref>RegionPingSweep.cs:Close
 hop	InboundStallCore.cs:Close	236fe71adbc2992b	SpectatorJoiner.cs:ConnectAndJoin	ref>SpectatorJoiner.cs:ConnectAndJoin
 hop	InboundStallCore.cs:Close	2a66b13a72fe51f7	PcTradeRules.cs:SelfTest	entry[RunEdge(#0)/[3]]>PcTradeRules.cs:SelfTest
+hop	InboundStallCore.cs:Close	2e4138ca0e1539ff	AvatarPresetPicker.cs:Update	ref>AvatarPresetPicker.cs:Update
 hop	InboundStallCore.cs:Close	3481cd6a85ea8083	NativeUI.cs:TeardownOverlaySurfaces	ref>NativeUI.cs:TeardownOverlaySurfaces
 hop	InboundStallCore.cs:Close	3663fa8b3c7fc48e	GameStateWatcher.cs:TickRequeueMachine	ref[case RqPhase.Queue]>GameStateWatcher.cs:TickRequeueMachine
 hop	InboundStallCore.cs:Close	4a100aa72509c2d6	ApiClient.cs:UpdateOvtQueuePoll	delegate[Plugin.Instance.StartCoroutine(#0)/GetRequest(#1=>)/=>{}]>ApiClient.cs:UpdateOvtQueuePoll
@@ -22544,7 +22554,6 @@ hop	InboundStallCore.cs:Close	84830f168749ea34	InboundStallCore.cs:Flush	ref>Inb
 hop	InboundStallCore.cs:Close	8eca274304bbf31f	PortraitRenderDance.cs:DanceRun	ref>PortraitRenderDance.cs:DanceRun
 hop	InboundStallCore.cs:Close	91aa79dd39fb65ab	RegionPingSweep.cs:StartPing	ref>RegionPingSweep.cs:StartPing
 hop	InboundStallCore.cs:Close	959d2aaf3eb864ec	GameStateWatcher.cs:OnFfaMatchStarted	ref>GameStateWatcher.cs:OnFfaMatchStarted
-hop	InboundStallCore.cs:Close	9d8f541666f2125e	AvatarPresetPicker.cs:Update	ref>AvatarPresetPicker.cs:Update
 hop	InboundStallCore.cs:Close	ab60482619316f0a	SpectatorSync.cs:PlayPointSequence	ref>SpectatorSync.cs:PlayPointSequence
 hop	InboundStallCore.cs:Close	ac2e356b0095e53a	SpectatorSync.cs:RetireBoundaryPickDisplay	ref>SpectatorSync.cs:RetireBoundaryPickDisplay
 hop	InboundStallCore.cs:Close	c55c9b328f161005	Plugin.cs:StartNCHConnect	ref>Plugin.cs:StartNCHConnect
@@ -27235,6 +27244,7 @@ hop	NativeUI.cs:CreateButton	634e24da2eddd476	NativeUI.cs:CreateLobbyMemberRow	r
 hop	NativeUI.cs:CreateButton	651a74c185da8ec5	NativeUI.cs:SortHeaderBtn	ref>NativeUI.cs:SortHeaderBtn
 hop	NativeUI.cs:CreateButton	6ac4094fea1ac91c	NativeUI.cs:BuildTeamTab	ref>NativeUI.cs:BuildTeamTab
 hop	NativeUI.cs:CreateButton	6bb5323e66f63d43	NativeUI.cs:DrawCompareAxisControls	ref>NativeUI.cs:DrawCompareAxisControls
+hop	NativeUI.cs:CreateButton	6d916bfb6cc4b441	AvatarPresetPicker.cs:Rebuild	ref>AvatarPresetPicker.cs:Rebuild
 hop	NativeUI.cs:CreateButton	6e24a0e429f86577	NativeUI.cs:BuildAchievementsTab	ref>NativeUI.cs:BuildAchievementsTab
 hop	NativeUI.cs:CreateButton	6f1cdd1b61b35e02	NativeUI.cs:RebuildPickerList	ref>NativeUI.cs:RebuildPickerList
 hop	NativeUI.cs:CreateButton	6fcfa214c32f6ff0	NativeUI.cs:BuildLeaderboardTab	ref>NativeUI.cs:BuildLeaderboardTab
@@ -27273,7 +27283,6 @@ hop	NativeUI.cs:CreateButton	b9beef006a842d36	NativeUI.cs:CreateFfaBrowserRow	re
 hop	NativeUI.cs:CreateButton	c58fda4df553f027	NativeUI.cs:BuildAdminTab	ref[adminOnlySections.Add(#0)]>NativeUI.cs:BuildAdminTab
 hop	NativeUI.cs:CreateButton	d575a921c336c188	NativeUI.cs:BuildAdminQuarantineRow	ref>NativeUI.cs:BuildAdminQuarantineRow
 hop	NativeUI.cs:CreateButton	d7605da6f18ce583	NativeUI.cs:AddCustomBetButton	ref>NativeUI.cs:AddCustomBetButton
-hop	NativeUI.cs:CreateButton	d943c8e33b450c1c	AvatarPresetPicker.cs:Rebuild	ref>AvatarPresetPicker.cs:Rebuild
 hop	NativeUI.cs:CreateButton	de7010f72dab3e4f	NativeUI.cs:BuildAdminTab	ref>NativeUI.cs:BuildAdminTab
 hop	NativeUI.cs:CreateButton	e5cc93b5c7982a1b	NativeUI.cs:AddTeamBetButton	ref>NativeUI.cs:AddTeamBetButton
 hop	NativeUI.cs:CreateButton	e603da37bbb2e3cb	NativeUI.cs:BuildUtilityPopup	ref>NativeUI.cs:BuildUtilityPopup
@@ -43115,8 +43124,8 @@ hop	RegionPingSweep.cs:Close	81748766a07f2a8a	SpectatorSync.cs:PlayPointSequence
 hop	RegionPingSweep.cs:Close	96d3fb69fffb9813	TopStripBand.cs:SelfTest	ref>TopStripBand.cs:SelfTest
 hop	RegionPingSweep.cs:Close	9f4492c33acdacbb	RegionPingSweep.cs:Dispose	ref>RegionPingSweep.cs:Dispose
 hop	RegionPingSweep.cs:Close	a18f3767ec34a355	GameStateWatcher.cs:TickRequeueMachine	ref[case RqPhase.Queue]>GameStateWatcher.cs:TickRequeueMachine
-hop	RegionPingSweep.cs:Close	af92d003b7f98e95	AvatarPresetPicker.cs:Update	ref>AvatarPresetPicker.cs:Update
 hop	RegionPingSweep.cs:Close	b27c4a09f4951a65	RegionPingSweep.cs:Done	ref>RegionPingSweep.cs:Done
+hop	RegionPingSweep.cs:Close	b359733a8120f5d3	AvatarPresetPicker.cs:Update	ref>AvatarPresetPicker.cs:Update
 hop	RegionPingSweep.cs:Close	d2586529f5976463	SpectatorSync.cs:RetireBoundaryPickDisplay	ref>SpectatorSync.cs:RetireBoundaryPickDisplay
 hop	RegionPingSweep.cs:Close	de1fc54790a47ae7	IdentityClockCore.cs:ClosePoint	ref>IdentityClockCore.cs:ClosePoint
 hop	RegionPingSweep.cs:Close	ee8527861338ccf3	ApiClient.cs:UpdateOvtQueuePoll	delegate[Plugin.Instance.StartCoroutine(#0)/GetRequest(#1=>)/=>{}]>ApiClient.cs:UpdateOvtQueuePoll
@@ -57783,6 +57792,7 @@ end	AvatarDefaultRules.cs:SwapPermitted	unreferenced
 end	AvatarDefaults.cs:Postfix#1	unresolved:harmony:AvatarDefaults.cs:AvatarLoadFacesPatch.Postfix#1(CharacterCreatorHandler.LoadFaces)
 end	AvatarDefaults.cs:Postfix#2	unresolved:harmony:AvatarDefaults.cs:AvatarSelectFacePatch.Postfix#2(CharacterCreatorHandler.SelectFace)
 end	AvatarDefaults.cs:Prefix	unresolved:harmony:AvatarDefaults.cs:AvatarCreatePlayerPatch.Prefix(PlayerAssigner.CreatePlayer)
+end	AvatarPresetPicker.cs:LateUpdate	unresolved:unity:AvatarPresetPicker.cs:AvatarPresetsMenuButton.LateUpdate
 end	AvatarPresetPicker.cs:Update	unresolved:unity:AvatarPresetPicker.cs:AvatarPickerEscape.Update
 end	BinderSortRules.cs:SelfTest	unreferenced
 end	BroadcastHud.cs:Draw	root:BroadcastHud.cs:Draw
@@ -58656,7 +58666,7 @@ cycle	AvatarDefaults.cs:OtherFighterCount	00624e9b6f7da4c5	AvatarDefaults.cs:Eva
 cycle	AvatarDefaults.cs:PresetLabel	03c7b4bec7ac1854	AvatarPresetPicker.cs:Rebuild
 cycle	AvatarDefaults.cs:ReadFacing	795da2bcc53d4fb0	AvatarDefaults.cs:Evaluate
 cycle	AvatarDefaults.cs:RecoveryInstruction	6fcebb111504d163	AvatarDefaults.cs:UnusableMessage
-cycle	AvatarDefaults.cs:SetAuto	7940f77c3fcab4b3	AvatarPresetPicker.cs:Rebuild
+cycle	AvatarDefaults.cs:SetAuto	1939f00a6d76979b	AvatarPresetPicker.cs:ToggleAuto
 cycle	AvatarDefaults.cs:SetModded	a025241f4abb1a05	AvatarPresetPicker.cs:Apply
 cycle	AvatarDefaults.cs:SetModded	ad75f4ba2c104be2	AvatarPresetPicker.cs:Apply
 cycle	AvatarDefaults.cs:SetVanilla	a826146a6b4e633c	AvatarPresetPicker.cs:Apply
@@ -58672,13 +58682,17 @@ cycle	AvatarPresetPicker.cs:CalibrateK	fee64957568fb17c	AvatarPresetPicker.cs:Re
 cycle	AvatarPresetPicker.cs:ClearContent	0870a6944f7813fd	AvatarPresetPicker.cs:Close
 cycle	AvatarPresetPicker.cs:ClearContent	698ee86bbc08273e	AvatarPresetPicker.cs:Rebuild
 cycle	AvatarPresetPicker.cs:Close	1fe6c9a3a4550c13	AvatarPresetPicker.cs:Toggle
+cycle	AvatarPresetPicker.cs:Close	2ccbdb6c1c191425	AvatarPresetPicker.cs:ToggleAuto
+cycle	AvatarPresetPicker.cs:Close	4c1c69d81d7caef3	AvatarPresetPicker.cs:Apply
 cycle	AvatarPresetPicker.cs:Close	732dca5da5000a7a	AvatarPresetPicker.cs:Rebuild
 cycle	AvatarPresetPicker.cs:Compose	07f69c15b2ed814a	AvatarPresetPicker.cs:BuildTile
-cycle	AvatarPresetPicker.cs:OnClick	c69142dce303de2b	AvatarPresetPicker.cs:Start
+cycle	AvatarPresetPicker.cs:OnClick	2be198e1696810e8	AvatarPresetPicker.cs:TryWire
 cycle	AvatarPresetPicker.cs:Open	22c231c67df1f35b	AvatarPresetPicker.cs:Toggle
 cycle	AvatarPresetPicker.cs:Panel	ca940a9bf0814a99	AvatarPresetPicker.cs:Rebuild
 cycle	AvatarPresetPicker.cs:Rebuild	0704a6d6fce70965	AvatarPresetPicker.cs:Open
+cycle	AvatarPresetPicker.cs:Rebuild	10948588396a9cc5	AvatarPresetPicker.cs:ToggleAuto
 cycle	AvatarPresetPicker.cs:Rebuild	e26e9f4d9b69b1fa	AvatarPresetPicker.cs:Apply
+cycle	AvatarPresetPicker.cs:RowLabel	a0de69532a4d4658	AvatarPresetPicker.cs:Start
 cycle	AvatarPresetPicker.cs:Start	0ae916fbd379349a	FfaNumberingRules.cs:StepPhase
 cycle	AvatarPresetPicker.cs:Start	1934cbc83630b5a0	FfaNumberingRules.cs:WaitBody
 cycle	AvatarPresetPicker.cs:Start	26999b462b2d1fa4	MusicAssets.cs:RunTierInstall
@@ -58689,6 +58703,8 @@ cycle	AvatarPresetPicker.cs:Start	892085b43548fe89	PortraitRenderDance.cs:Begin
 cycle	AvatarPresetPicker.cs:Start	a0255225696d7748	LogBundleCore.cs:Start
 cycle	AvatarPresetPicker.cs:Start	ab631c9cc94a8a5a	FfaNumberingRules.cs:BeginResult
 cycle	AvatarPresetPicker.cs:Toggle	1e9d633e360600cd	AvatarPresetPicker.cs:OnClick
+cycle	AvatarPresetPicker.cs:ToggleAuto	8eb31ca4cd8089be	AvatarPresetPicker.cs:Rebuild
+cycle	AvatarPresetPicker.cs:TryWire	27189ecff5d451e4	AvatarPresetPicker.cs:Start
 cycle	CardDrawEvidenceCore.cs:Apply	0afed9cae67be42a	AvatarDefaultRules.cs:ClassificationLine
 cycle	CardDrawEvidenceCore.cs:Apply	2db4f84675417126	AvatarDefaultRules.cs:HomeAfterApply
 cycle	CardDrawEvidenceCore.cs:Apply	7c18c40406c6a07f	AvatarDefaults.cs:Evaluate
@@ -60436,6 +60452,7 @@ cycle	I18n.cs:Tr	1ffccc04f8f5a065	InfoLibrary.cs:Categories
 cycle	I18n.cs:Tr	20e59163582605bc	InfoLibrary.cs:Netcode
 cycle	I18n.cs:Tr	2521e0249871453c	NativeUI.cs:GROUP_LABELS
 cycle	I18n.cs:Tr	25d658d05c832d0c	PlayerCardsUI.cs:ReasonText
+cycle	I18n.cs:Tr	27d6f1f282cecdf5	AvatarPresetPicker.cs:RowLabel
 cycle	I18n.cs:Tr	289797439f8a0ce3	InfoLibrary.cs:Categories
 cycle	I18n.cs:Tr	29de8d0d53e40c10	InfoLibrary.cs:TournForfeits
 cycle	I18n.cs:Tr	2a389052e6eb873d	CompetitiveUI.cs:ShowNotification
@@ -60554,7 +60571,6 @@ cycle	I18n.cs:Tr	b1c62d861e29d527	NativeUI.Keybinds.cs:KeybindKeyName
 cycle	I18n.cs:Tr	b2da646453eb8d8b	InfoLibrary.cs:Categories
 cycle	I18n.cs:Tr	b37f90fee135c8a1	InfoLibrary.cs:Categories
 cycle	I18n.cs:Tr	b4f5c8247123f489	InfoLibrary.cs:Categories
-cycle	I18n.cs:Tr	b513f9f888fa459d	AvatarPresetPicker.cs:Start
 cycle	I18n.cs:Tr	b5beb3e9126270ea	AvatarDefaults.cs:PresetLabel
 cycle	I18n.cs:Tr	b5ec3e36c7bbe3e5	PlayerCardsUI.cs:ReasonText
 cycle	I18n.cs:Tr	b5fd276596c625da	InfoLibrary.cs:Ranked1v1
@@ -61850,7 +61866,7 @@ cycle	NativeUI.cs:Close	70936786fa907737	NativeUI.cs:Toggle
 cycle	NativeUI.cs:CloseUtilityPopup	b4f6c90361aa9f90	NativeUI.cs:TeardownOverlaySurfaces
 cycle	NativeUI.cs:CreateButton	0df0b9c0dbd0bf4c	AvatarPresetPicker.cs:BuildTile
 cycle	NativeUI.cs:CreateButton	253d63a634894907	NativeUI.cs:MaybeShowLanguagePrompt
-cycle	NativeUI.cs:CreateButton	d943c8e33b450c1c	AvatarPresetPicker.cs:Rebuild
+cycle	NativeUI.cs:CreateButton	6d916bfb6cc4b441	AvatarPresetPicker.cs:Rebuild
 cycle	NativeUI.cs:CreateText	11f1d686974848f1	NativeUI.cs:MaybeShowLanguagePrompt
 cycle	NativeUI.cs:CreateText	82b7ab5136cf2479	NativeUI.cs:CreateButton
 cycle	NativeUI.cs:CreateText	84232a2ec5d24c7b	AvatarPresetPicker.cs:BuildTile
@@ -65568,21 +65584,26 @@ member	AvatarDefaults.cs:VanillaOptionIds	f04da68602cb4c06
 member	AvatarDefaults.cs:VanillaOptionNames	0e8bf4371769c860
 member	AvatarPickerRules.cs:Tile	304fc2feca5631bb
 member	AvatarPresetPicker.cs:AddPart	0316e860ff179cfa
-member	AvatarPresetPicker.cs:Apply	52f2d9b599ae09ab
+member	AvatarPresetPicker.cs:Apply	2f83caec2747b5f6
 member	AvatarPresetPicker.cs:BuildTile	f937d5b391bfd0a7
 member	AvatarPresetPicker.cs:CalibrateK	8141614c590951da
 member	AvatarPresetPicker.cs:ClearContent	30f2a4575fc9f1f1
 member	AvatarPresetPicker.cs:Close	2986f3884726c975
 member	AvatarPresetPicker.cs:Compose	d1d9c6a5adb6ec14
+member	AvatarPresetPicker.cs:LateUpdate	aa0d0b64854d34b6
 member	AvatarPresetPicker.cs:OnClick	581a5da048ee3128
-member	AvatarPresetPicker.cs:Open	3cc1e03e2c977aef
+member	AvatarPresetPicker.cs:Open	847fd7a94d152688
 member	AvatarPresetPicker.cs:Panel	5c10dca35b732016
 member	AvatarPresetPicker.cs:PlaceRow	02b837988d1e3f8e
-member	AvatarPresetPicker.cs:Rebuild	8636897e0e3ca1db
-member	AvatarPresetPicker.cs:Start	b72fb4691a485068
+member	AvatarPresetPicker.cs:Rebuild	fdfa80852f72c778
+member	AvatarPresetPicker.cs:RefreshIfStale	cbf390c7a1b0df2f
+member	AvatarPresetPicker.cs:RowLabel	c7c8840d37762b7f
+member	AvatarPresetPicker.cs:Start	c91c778516108825
 member	AvatarPresetPicker.cs:Toggle	7ccde4e222d44336
-member	AvatarPresetPicker.cs:TryPlaceRow	842c9a1ea0405090
-member	AvatarPresetPicker.cs:Update	f9c6b08ecb1310e6
+member	AvatarPresetPicker.cs:ToggleAuto	f052d2b1f0f1179a
+member	AvatarPresetPicker.cs:TryPlaceRow	d705f1a0d449be09
+member	AvatarPresetPicker.cs:TryWire	0f9c9ffaad25b290
+member	AvatarPresetPicker.cs:Update	406a22cc7771263e
 member	BinderSortRules.cs:Check	52e3dba3d662b06c
 member	BinderSortRules.cs:Compare	96c3d58ce4c4b802
 member	BinderSortRules.cs:NameOf	0c975f2faff80a63
@@ -70856,12 +70877,12 @@ sink	CompetitiveUI.cs:DrawChatInput	2	1	f2b16c849c09700e	attached	CompetitiveUI.
 sink	CompetitiveUI.cs:DrawDanceWheel	2	1	75517cbac7d14c37	attached	CompetitiveUI.cs:DrawUI
 sink	CompetitiveUI.cs:DrawInputOverlay	2	1	5412be93d9435cb0	attached	CompetitiveUI.cs:DrawUI
 sink	CompetitiveUI.cs:DrawQuickChat	2	1	e23b05213e46a588	attached	CompetitiveUI.cs:DrawUI
-sink	InfoLibrary.cs:ControlsOutro	5937	57549	7e00715f12535be8	attached	BroadcastHud.cs:Draw,CompetitiveUI.cs:DrawUI,GameStateWatcher.cs:PollMatchState,Keybinds.cs:CommitRows,NativeUI.Keybinds.cs:KeybindPaintAll,NativeUI.Settings.cs:SettingsRenderPane,NativeUI.Settings.cs:SettingsShowExtras,NativeUI.cs:BuildPage,NativeUI.cs:RefreshCurrentTab,NativeUI.cs:SelectInfoArticle
-sink	InfoLibrary.cs:Cosmetics	5937	57549	7e00715f12535be8	attached	BroadcastHud.cs:Draw,CompetitiveUI.cs:DrawUI,GameStateWatcher.cs:PollMatchState,Keybinds.cs:CommitRows,NativeUI.Keybinds.cs:KeybindPaintAll,NativeUI.Settings.cs:SettingsRenderPane,NativeUI.Settings.cs:SettingsShowExtras,NativeUI.cs:BuildPage,NativeUI.cs:RefreshCurrentTab,NativeUI.cs:SelectInfoArticle
-sink	InfoLibrary.cs:Spectating	5937	57549	7e00715f12535be8	attached	BroadcastHud.cs:Draw,CompetitiveUI.cs:DrawUI,GameStateWatcher.cs:PollMatchState,Keybinds.cs:CommitRows,NativeUI.Keybinds.cs:KeybindPaintAll,NativeUI.Settings.cs:SettingsRenderPane,NativeUI.Settings.cs:SettingsShowExtras,NativeUI.cs:BuildPage,NativeUI.cs:RefreshCurrentTab,NativeUI.cs:SelectInfoArticle
-sink	InfoLibrary.cs:StartHere	5937	57549	7e00715f12535be8	attached	BroadcastHud.cs:Draw,CompetitiveUI.cs:DrawUI,GameStateWatcher.cs:PollMatchState,Keybinds.cs:CommitRows,NativeUI.Keybinds.cs:KeybindPaintAll,NativeUI.Settings.cs:SettingsRenderPane,NativeUI.Settings.cs:SettingsShowExtras,NativeUI.cs:BuildPage,NativeUI.cs:RefreshCurrentTab,NativeUI.cs:SelectInfoArticle
-sink	InfoLibrary.cs:VanillaBugs	5937	57549	7e00715f12535be8	attached	BroadcastHud.cs:Draw,CompetitiveUI.cs:DrawUI,GameStateWatcher.cs:PollMatchState,Keybinds.cs:CommitRows,NativeUI.Keybinds.cs:KeybindPaintAll,NativeUI.Settings.cs:SettingsRenderPane,NativeUI.Settings.cs:SettingsShowExtras,NativeUI.cs:BuildPage,NativeUI.cs:RefreshCurrentTab,NativeUI.cs:SelectInfoArticle
-sink	InfoViz.cs:BuildKeyboard	5937	57549	7e00715f12535be8	attached	BroadcastHud.cs:Draw,CompetitiveUI.cs:DrawUI,GameStateWatcher.cs:PollMatchState,Keybinds.cs:CommitRows,NativeUI.Keybinds.cs:KeybindPaintAll,NativeUI.Settings.cs:SettingsRenderPane,NativeUI.Settings.cs:SettingsShowExtras,NativeUI.cs:BuildPage,NativeUI.cs:RefreshCurrentTab,NativeUI.cs:SelectInfoArticle
+sink	InfoLibrary.cs:ControlsOutro	5942	57558	983490c5a9516158	attached	BroadcastHud.cs:Draw,CompetitiveUI.cs:DrawUI,GameStateWatcher.cs:PollMatchState,Keybinds.cs:CommitRows,NativeUI.Keybinds.cs:KeybindPaintAll,NativeUI.Settings.cs:SettingsRenderPane,NativeUI.Settings.cs:SettingsShowExtras,NativeUI.cs:BuildPage,NativeUI.cs:RefreshCurrentTab,NativeUI.cs:SelectInfoArticle
+sink	InfoLibrary.cs:Cosmetics	5942	57558	983490c5a9516158	attached	BroadcastHud.cs:Draw,CompetitiveUI.cs:DrawUI,GameStateWatcher.cs:PollMatchState,Keybinds.cs:CommitRows,NativeUI.Keybinds.cs:KeybindPaintAll,NativeUI.Settings.cs:SettingsRenderPane,NativeUI.Settings.cs:SettingsShowExtras,NativeUI.cs:BuildPage,NativeUI.cs:RefreshCurrentTab,NativeUI.cs:SelectInfoArticle
+sink	InfoLibrary.cs:Spectating	5942	57558	983490c5a9516158	attached	BroadcastHud.cs:Draw,CompetitiveUI.cs:DrawUI,GameStateWatcher.cs:PollMatchState,Keybinds.cs:CommitRows,NativeUI.Keybinds.cs:KeybindPaintAll,NativeUI.Settings.cs:SettingsRenderPane,NativeUI.Settings.cs:SettingsShowExtras,NativeUI.cs:BuildPage,NativeUI.cs:RefreshCurrentTab,NativeUI.cs:SelectInfoArticle
+sink	InfoLibrary.cs:StartHere	5942	57558	983490c5a9516158	attached	BroadcastHud.cs:Draw,CompetitiveUI.cs:DrawUI,GameStateWatcher.cs:PollMatchState,Keybinds.cs:CommitRows,NativeUI.Keybinds.cs:KeybindPaintAll,NativeUI.Settings.cs:SettingsRenderPane,NativeUI.Settings.cs:SettingsShowExtras,NativeUI.cs:BuildPage,NativeUI.cs:RefreshCurrentTab,NativeUI.cs:SelectInfoArticle
+sink	InfoLibrary.cs:VanillaBugs	5942	57558	983490c5a9516158	attached	BroadcastHud.cs:Draw,CompetitiveUI.cs:DrawUI,GameStateWatcher.cs:PollMatchState,Keybinds.cs:CommitRows,NativeUI.Keybinds.cs:KeybindPaintAll,NativeUI.Settings.cs:SettingsRenderPane,NativeUI.Settings.cs:SettingsShowExtras,NativeUI.cs:BuildPage,NativeUI.cs:RefreshCurrentTab,NativeUI.cs:SelectInfoArticle
+sink	InfoViz.cs:BuildKeyboard	5942	57558	983490c5a9516158	attached	BroadcastHud.cs:Draw,CompetitiveUI.cs:DrawUI,GameStateWatcher.cs:PollMatchState,Keybinds.cs:CommitRows,NativeUI.Keybinds.cs:KeybindPaintAll,NativeUI.Settings.cs:SettingsRenderPane,NativeUI.Settings.cs:SettingsShowExtras,NativeUI.cs:BuildPage,NativeUI.cs:RefreshCurrentTab,NativeUI.cs:SelectInfoArticle
 sink	Keybinds.cs:ApplyJoin	5	4	116d269dcc76ee4c	attached	Keybinds.cs:CommitRows
 sink	Keybinds.cs:ApplyReady	5	4	3bb007885d986e1f	attached	Keybinds.cs:CommitRows
 sink	Keybinds.cs:OnRoundStart	9	9	96e6c342df2cc141	attached	GameStateWatcher.cs:PollMatchState
@@ -72008,6 +72029,7 @@ unresolved	reflection:CombatEvidenceCore.cs:TargetBounce	backend/tests/test_keyb
 unresolved	reflection:Plugin.cs:OnJoinedRoom	backend/tests/test_keybind_surfaces.py::test_h1_fix5_each_unresolved_end_is_pinned_in_source[reflection-Plugin.cs-OnJoinedRoom]	the member's name is a string literal in plugin/ (Plugin.cs:OnJoinedRoom): a call by reflection or by name (a Photon callback, an Invoke), not resolved from source. The control pins the member and the literal
 unresolved	reflection:Plugin.cs:OnPlayerEnteredRoom	backend/tests/test_keybind_surfaces.py::test_h1_fix5_each_unresolved_end_is_pinned_in_source[reflection-Plugin.cs-OnPlayerEnteredRoom]	the member's name is a string literal in plugin/ (Plugin.cs:OnPlayerEnteredRoom): a call by reflection or by name (a Photon callback, an Invoke), not resolved from source. The control pins the member and the literal
 unresolved	unity:AvatarPresetPicker.cs:AvatarPickerEscape.Update	backend/tests/test_keybind_surfaces.py::test_h1_fix5_each_unresolved_end_is_pinned_in_source[unity-AvatarPresetPicker.cs-AvatarPickerEscape.Update]	Unity delivers this message (AvatarPresetPicker.cs:AvatarPickerEscape.Update): the call is the engine's, not the source's. Reached through the reference rule (receiver not resolved). The control pins the class and the message member in source; the delivery at run time is not proven here
+unresolved	unity:AvatarPresetPicker.cs:AvatarPresetsMenuButton.LateUpdate	backend/tests/test_keybind_surfaces.py::test_h1_fix5_each_unresolved_end_is_pinned_in_source[unity-AvatarPresetPicker.cs-AvatarPresetsMenuButton.LateUpdate]	Unity delivers this message (AvatarPresetPicker.cs:AvatarPresetsMenuButton.LateUpdate): the call is the engine's, not the source's. Reached through the reference rule (receiver not resolved). The control pins the class and the message member in source; the delivery at run time is not proven here
 unresolved	unity:DamageNumbers.cs:DamageNumberDriver.Update	backend/tests/test_keybind_surfaces.py::test_h1_fix5_each_unresolved_end_is_pinned_in_source[unity-DamageNumbers.cs-DamageNumberDriver.Update]	Unity delivers this message (DamageNumbers.cs:DamageNumberDriver.Update): the call is the engine's, not the source's. Reached through the reference rule (receiver not resolved). The control pins the class and the message member in source; the delivery at run time is not proven here
 unresolved	unity:HealBarOverlay.cs:HealBarOverlay.LateUpdate	backend/tests/test_keybind_surfaces.py::test_h1_fix5_each_unresolved_end_is_pinned_in_source[unity-HealBarOverlay.cs-HealBarOverlay.LateUpdate]	Unity delivers this message (HealBarOverlay.cs:HealBarOverlay.LateUpdate): the call is the engine's, not the source's. Reached through the reference rule (receiver not resolved). The control pins the class and the message member in source; the delivery at run time is not proven here
 unresolved	unity:HealBarOverlay.cs:HealBarOverlay.OnEnable	backend/tests/test_keybind_surfaces.py::test_h1_fix5_each_unresolved_end_is_pinned_in_source[unity-HealBarOverlay.cs-HealBarOverlay.OnEnable]	Unity delivers this message (HealBarOverlay.cs:HealBarOverlay.OnEnable): the call is the engine's, not the source's. Reached through the reference rule (receiver not resolved). The control pins the class and the message member in source; the delivery at run time is not proven here
