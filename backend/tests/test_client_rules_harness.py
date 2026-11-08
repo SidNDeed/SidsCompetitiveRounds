@@ -1693,3 +1693,5 @@ def test_the_kill_credit_is_bound_to_the_lethal_frame(harness_run, name):
     in got=."""
     line = _named_case(harness_run, name, "killcredit")
     assert line.startswith("[killcredit] PASS"), line
+    assert " | got=" in line and not line.rstrip().endswith("| got="), (
+        "the case printed no measurement: " + line)
