@@ -579,6 +579,7 @@ a50b9dbf33783b0f	N	rule:N1	Achievements unlocked
 97c89a4d6630adeb	N	rule:N1	Action
 be93470195f3332d	N	rule:N1	Action Log
 1f50d36eaab8e0a9	N	rule:N1	Action Log...
+c3cd636a585b20c4	N	rule:N1	Actions
 a733b809d2f12334	N	rule:N1	Active
 74872dbbc2af46be	N	rule:N1	Actually Good
 16ecfef56ef460e9	N	rule:N1	Add a subject.
@@ -588,6 +589,7 @@ a733b809d2f12334	N	rule:N1	Active
 a989d1f178daf162	N	rule:N1	Add recipient
 6c8fc4ba295689e9	N	rule:N1	Adjust Placement...
 4e7afebcfbae000b	N	rule:N1	Admin
+9bc01523463ed0ea	N	rule:N1	Admin Roster...
 53acd6e7e3c30fdf	N	rule:N1	Admin action
 3db1798f11598eed	N	rule:N1	Admin action log ({0}-{1} of {2})
 d565f607bd7cf6e7	N	rule:N1	Admins - type to search
@@ -707,6 +709,7 @@ d8bb8f01ecddcbb6	N	rule:N1	Ban a player
 eb7f64cd8b72a17b	N	rule:N1	Ban {0}
 c8cd83f62e9d6c90	N	rule:N1	Banned
 82dc4c9ba2d0d389	N	rule:N1	Banned Players
+0a7c863a8a6acb17	N	rule:N1	Banned Players ({0})
 2b1074ee9054cc37	N	rule:N1	Banned players - type to search
 3f16022a617b9c28	N	rule:N1	Be right back
 7b9f56b445e86e6a	N	rule:N1	Bear
@@ -900,6 +903,7 @@ c81e2a08f7e0b5c4	N	rule:N1	Charcoal
 0da332b305a13200	N	rule:N1	Charcoal walls rimmed with corona amber on a true black sky.
 6fdc92710bf9a1c3	N	rule:N1	Charred timber — warm dark brown verging on black.
 0911174c41cf26b8	N	rule:N1	Chase
+2ced57f125910a9e	N	rule:N1	Chat
 4bf1b342b634b8cc	P	rule:P	Chat  <color=#888>(press {0} to chat)</color>
 cd0a753cedf7d0e9	O	rule:O	Chat  —  Enter to send, Esc to cancel
 3c36f21e8126daea	N	rule:N1	Chat & mail
@@ -1377,6 +1381,7 @@ fabb304f63738fae	N	rule:N1	Fast Forward main
 9c456cc81aecc69b	N	rule:N1	Field Medic
 ddcd5e6fa8ad7a0e	N	rule:N1	Final score
 699484ab4b5ed928	O	rule:O	Find Custom Lobby
+bf66f26c6c84ea0d	N	rule:N1	Find and Unban...
 226d7ec9afb2799e	N	rule:N1	Fine
 4731820fcd676f53	N	rule:N1	Finish a game with the exact same 5 cards (and copies) as your opponent
 53a962a3ba05b581	N	rule:N1	Finish or leave your current game before joining the 1v2 queue.
@@ -1429,6 +1434,7 @@ cf9480db8e8c2876	N	rule:N1	Friendly fire: OFF
 957db23d1cf5f7a8	N	rule:N1	From {0}
 c4d63e4c56f1d2b7	N	rule:N1	From:
 6032a672e309a4df	N	rule:N1	Frost
+51305535ddebf94f	N	rule:N1	Full Log...
 b13b4fc382a1c06e	N	rule:N1	Full log...
 090784407ecb4e04	N	rev:4a3cbf0bd7c75940 a click or press on one of the mod's own buttons, rows, tiles or links; names no key	Full music albums that replace ROUNDS' combat soundtrack for you. Click an album row for 30-second t
 256eaeedbdddb39d	N	rule:N1	GAME ENDS
@@ -2336,6 +2342,7 @@ dcc6f8c98198485d	N	rev:b468e99e86b3aef6 a bracket slot label (quarter- and semi-
 9c38e7ed34d17340	N	rule:N1	QShoot
 b7d4d9f0f1bf5f98	N	rule:N1	QUICK SHOTS INSIDE THE 0.35 SECOND WINDOW
 d48c8a8cba6937ed	N	rule:N1	Queue games (ranked 1v1, and 2v2 / 1v2 auto-queue) deal everyone the same cards when every player in
+83dbc32040459c6d	N	rule:N1	Queues
 0d605504a7573fae	N	rule:N1	Quick Reload
 fa664531b4a41c61	N	rule:N1	Quick Reload main
 100ef149a6e54103	N	rule:N1	Quick Shot
@@ -2523,6 +2530,7 @@ f2772649a524f4d2	N	rev:63d3ec9fd7342f14 'tab' is a tab of the mod's menu; names 
 24f096b221f9534b	K	rule:K	Return
 9c3fe9f3b161a19b	N	rev:1de96406baddd545 the match-found stuck overlay's own text (DrawMatchFoundStuckOverlay is binding-dependent: it names the Jump key through KeybindRowFace); names no key	Return to menu
 35cf82f9d2a9c8ba	N	rule:N1	Revenue
+57f9933768794f84	N	rule:N1	Reverse
 583d156c59fe2e53	N	rule:N1	Reverse Series...
 ec6c6716f30d035b	N	rule:N1	Reverse a ranked 1v1 series
 36d3898776980bed	N	rule:N1	Reverse {0}
@@ -2660,6 +2668,7 @@ d285ca1b47468299	N	rule:N1	Series streak: them x{0}
 cbf8b1e916830877	N	rule:N1	Series {0} {1}  vs {2}
 353a9486426bb0d1	N	rule:N1	Series {0}-{1}
 7d8e33e493d338e3	N	rule:N1	Series: {0}
+cb0cb170d106f8e8	N	rule:N1	Server
 43e806fad57a21d2	N	rule:N1	Server Alert...
 acd13dafca8e5749	N	rule:N1	Server alert
 f7f1997c6cd1aa05	N	rule:N1	Session
@@ -3220,6 +3229,7 @@ cba56bc5bb2f58f1	N	rule:N1	Unknowncard rarity
 bd7fbc1b4636f43e	N	rule:N1	Unknown player
 0c02be9dbb6c822f	N	rule:N1	Unlock chat everywhere
 cb2751b310d1c126	N	rule:N1	Unlocked by achievement, not purchasable
+d3c12575b960da11	N	rule:N1	Unmute Player...
 206f671f32f526fd	N	rule:N1	Unnamed player
 ed80cf7cf86e1366	N	rule:N1	Unnamed playerpc.unnamed
 af211a25fedbe2df	N	rule:N1	Unranked
@@ -3751,6 +3761,7 @@ ed706f2149025b47	N	rev:38d0cb92400f973c rules prose: its input words are actions
 9a39b423a562fe49	N	rule:N1	Vivid orange neon name with a soft glow halo. Visible to everyone; modded players also see the glow.
 207c7c00630b836d	N	rule:N1	Void
 ec5f447f3fa0edd8	N	rule:N1	Void Ripple
+bfc6d991448dd5ce	N	rule:N1	Void Series
 d44941df851133e2	N	rule:N1	Voidshot
 9413f2a8d079b061	N	rev:9279de1039276bef W and L are the win and loss counts of a record, not keys	W-L and WR count completed series. XP and Gold accrue per player slot; 1v1 rating never moves.
 f81fae96e119e012	N	rule:N1	WALL JUMP
@@ -3825,6 +3836,8 @@ a62db852b1d4fd67	N	rule:N1	Win 100 casual games in a row
 c35aa7a4bc541855	N	rule:N1	Win 5-0 with Phoenix without losing a life
 7f8c92d2df2ed7b9	N	rule:N1	Win 50 ranked series in a row
 4d2a378dce953a82	N	rule:N1	Win 500 casual games in a row
+c5c6f71393ada69f	N	rule:N1	Win T1
+d903cb1c94b11e4b	N	rule:N1	Win T2
 52c738eb71779ebe	N	rule:N1	Win a 2v2 game 5-0
 0dc10933da1d6d92	N	rule:N1	Win a game 5-0 with Barrage in your build
 a00c23aea46eb757	N	rule:N1	Win a game 5-0 with Burst in your build
