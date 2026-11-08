@@ -700,6 +700,7 @@
   "Blk {0}%",
   "Block",
   "Block %",
+  "Block % per game",
   "Block CD",
   "Block a Player...",
   "Block debug overlay (corner): blocks you started vs blocks that actually absorbed a hit, plus why each one missed (too early / too slow / unblockable).",
@@ -1064,6 +1065,7 @@
   "Deal Conditional damage",
   "Deal damage",
   "Deaths",
+  "Deaths per game",
   "Decay",
   "Decent",
   "Decimals on the HP readout in the hold-{0} board, the spectator seat and the broadcaster HUD. Both halves of \"current/max\" follow it, so a card that leaves max health on a fraction stops reading as a whole number too. Local display only - nothing stored or sent changes.",
@@ -1381,8 +1383,6 @@
   "Game {0} - {1} players",
   "Game {0} of {1}",
   "Game {0} score progression",
-  "Game {0}: solo {1}-{2} duo",
-  "Game {0}: team 1 {1}-{2} team 2",
   "Game {0}: {1}",
   "Game {0}: {1}-{2}",
   "Games",
@@ -1489,6 +1489,7 @@
   "Hello!",
   "Help translate the mod - opens the web portal in your browser. An admin has to give you translator access before you can submit.",
   "Hide Gold",
+  "Hide card art",
   "Hide your gold balance from everyone on the leaderboard. Toggle it on or off any time from the Other tab.",
   "Hides you from the Home tab's online and recently-online lists.",
   "Higher placement takes a bigger share of the pot; the pot itself scales with lobby size, battles played and opponent tier.",
@@ -1498,6 +1499,7 @@
   "Hips one way, arms the other - the classic. Dancing locks your controls for the duration.",
   "Hit",
   "Hit %",
+  "Hit % per game",
   "Hit % vs Block %",
   "Hit / Block %",
   "Hit rate - {0}",
@@ -2429,9 +2431,9 @@
   "Rising Star",
   "Riveted steel great-helm with a T-slit visor.",
   "Roc",
-  "Rolling DPS (15 s window)",
-  "Rolling block % (15 s window)",
-  "Rolling hit % (15 s window)",
+  "Rolling DPS",
+  "Rolling block %",
+  "Rolling hit %",
   "Room code: <color=#C0E0FF>{0}</color>{1}  <color=#888>(if auto-connect fails, Reconnect or join via Private Lobby)</color>",
   "Room rule: same cards for everyone",
   "Room rule: same cards is off this game",
@@ -2597,6 +2599,7 @@
   "Show Discord on leaderboard: <color=#88FF88>ON</color>",
   "Show Discord on leaderboard: <color=#FF9966>OFF</color>",
   "Show Gold",
+  "Show card art",
   "Show inactive players ({0}d+): <color=#88FF88>ON</color>",
   "Show inactive players ({0}d+): <color=#FF9966>OFF</color>",
   "Show inactive players: <color=#88FF88>ON</color>",
@@ -3355,6 +3358,7 @@
   "as DUO (w/ {0}) vs {1}",
   "as SOLO vs {0} + {1}",
   "assigned by the server",
+  "avg {0}",
   "bad frame PNG: {0}",
   "base game",
   "before asking in Discord",
@@ -3376,6 +3380,7 @@
   "chat muted: {0} and {1} more",
   "cleared - flags alone never punish",
   "click Preview again to stop",
+  "click a name to hide its lines",
   "click a phrase - Esc closes",
   "click to close",
   "color",
@@ -3390,6 +3395,7 @@
   "custom 2v2 lobby",
   "date ->",
   "days since first rating update ->",
+  "deaths",
   "default",
   "default orange / blue",
   "dimmed: rolled out of the build",
@@ -3610,7 +3616,6 @@
   "showing {0} of {1}",
   "signed up",
   "slot must be eyes, mouth or detail",
-  "solo {0}-{1} duo",
   "solo: the outer-left point",
   "stackable",
   "stops null-reference spam and changes nothing visible",
@@ -3622,7 +3627,6 @@
   "sudden death",
   "swallows the one null reference a destroyed bullet raises at a screen edge",
   "swallows the one null reference the hit sound raises when its parent is gone",
-  "team 1 {0}-{1} team 2",
   "tells you which region you are on",
   "the Chat overlay mode control cycles the same state in game; Muted also tells the room you cannot read chat",
   "the Home chat log updates either way; this is the pop-up",
@@ -3756,6 +3760,7 @@
   "{0} players online now",
   "{0} players ranked",
   "{0} ready! Joining...",
+  "{0} s window",
   "{0} searching",
   "{0} series",
   "{0} series played",
@@ -7277,6 +7282,11 @@
    "location": "BuildTotalsPages",
    "kind": "Tr"
   },
+  "Block % per game": {
+   "surface": "SessionReportModel",
+   "location": "BuildTotalsPages",
+   "kind": "Tr"
+  },
   "Block CD": {
    "surface": "TabStatsOverlay",
    "location": "EnsureLocaleStrings",
@@ -9097,6 +9107,11 @@
    "location": "BuildTotalsPages",
    "kind": "Tr"
   },
+  "Deaths per game": {
+   "surface": "SessionReportModel",
+   "location": "BuildTotalsPages",
+   "kind": "Tr"
+  },
   "Decay": {
    "surface": "shop catalog",
    "location": "cosmetic name/description",
@@ -10654,7 +10669,7 @@
   },
   "Game {0}": {
    "surface": "NativeUI, PostSessionReport, SessionReportModel",
-   "location": "BuildBracketHoverBody, BuildFfaRecentRowText, BuildOvtRecentRowText +4",
+   "location": "BuildBracketHoverBody, BuildFfaRecentRowText, BuildOvtRecentRowText +3",
    "kind": "TrF"
   },
   "Game {0}   {1} players": {
@@ -10680,16 +10695,6 @@
   "Game {0} score progression": {
    "surface": "NativeUI",
    "location": "ParseFfaTimeline",
-   "kind": "TrF"
-  },
-  "Game {0}: solo {1}-{2} duo": {
-   "surface": "SessionReportModel",
-   "location": "TeamScoreLabel",
-   "kind": "TrF"
-  },
-  "Game {0}: team 1 {1}-{2} team 2": {
-   "surface": "SessionReportModel",
-   "location": "TeamScoreLabel",
    "kind": "TrF"
   },
   "Game {0}: {1}": {
@@ -11222,6 +11227,11 @@
    "location": "ApplyShopRow, cosmetic name/description",
    "kind": "SetText, shop"
   },
+  "Hide card art": {
+   "surface": "SessionReportView",
+   "location": "DrawBuilds",
+   "kind": "Tr"
+  },
   "Hide your gold balance from everyone on the leaderboard. Toggle it on or off any time from the Other tab.": {
    "surface": "shop catalog",
    "location": "cosmetic name/description",
@@ -11263,6 +11273,11 @@
    "kind": "Tr"
   },
   "Hit %": {
+   "surface": "SessionReportModel",
+   "location": "BuildTotalsPages",
+   "kind": "Tr"
+  },
+  "Hit % per game": {
    "surface": "SessionReportModel",
    "location": "BuildTotalsPages",
    "kind": "Tr"
@@ -15922,17 +15937,17 @@
    "location": "cosmetic name/description",
    "kind": "shop"
   },
-  "Rolling DPS (15 s window)": {
+  "Rolling DPS": {
    "surface": "SessionReportModel",
    "location": "Build",
    "kind": "Tr"
   },
-  "Rolling block % (15 s window)": {
+  "Rolling block %": {
    "surface": "SessionReportModel",
    "location": "Build",
    "kind": "Tr"
   },
-  "Rolling hit % (15 s window)": {
+  "Rolling hit %": {
    "surface": "SessionReportModel",
    "location": "Build",
    "kind": "Tr"
@@ -16209,7 +16224,7 @@
   },
   "Score race": {
    "surface": "SessionReportView",
-   "location": "DrawSetPage",
+   "location": "DrawSetRace",
    "kind": "Tr"
   },
   "Score race (rounds won per game)": {
@@ -16761,6 +16776,11 @@
    "surface": "NativeUI",
    "location": "ApplyShopRow",
    "kind": "SetText"
+  },
+  "Show card art": {
+   "surface": "SessionReportView",
+   "location": "DrawBuilds",
+   "kind": "Tr"
   },
   "Show inactive players ({0}d+): <color=#88FF88>ON</color>": {
    "surface": "NativeUI",
@@ -20552,6 +20572,11 @@
    "location": "BuildOvtFormat",
    "kind": "Tr"
   },
+  "avg {0}": {
+   "surface": "SessionReportModel",
+   "location": "Compose, ComposeBars",
+   "kind": "TrF"
+  },
   "bad frame PNG: {0}": {
    "surface": "ServerTextRules",
    "location": "TrRefusalDetail",
@@ -20657,6 +20682,11 @@
    "location": "DrawDancePreview",
    "kind": "Tr"
   },
+  "click a name to hide its lines": {
+   "surface": "SessionReportModel",
+   "location": "Build",
+   "kind": "Tr"
+  },
   "click a phrase - Esc closes": {
    "surface": "CompetitiveUI",
    "location": "DrawQuickChat",
@@ -20725,6 +20755,11 @@
   "days since first rating update ->": {
    "surface": "RatingGraphAxis",
    "location": "Caption",
+   "kind": "Tr"
+  },
+  "deaths": {
+   "surface": "SessionReportModel",
+   "location": "BuildTotalsPages",
    "kind": "Tr"
   },
   "default": {
@@ -21308,8 +21343,8 @@
    "kind": "Tr"
   },
   "no rating, gold or XP recorded for this set": {
-   "surface": "SessionReportView",
-   "location": "DrawProgressPage",
+   "surface": "SessionReportModel",
+   "location": "BuildTotalsPages",
    "kind": "Tr"
   },
   "nobody - your screen only, never networked": {
@@ -21827,11 +21862,6 @@
    "location": "TrRefusalDetail",
    "kind": "Tr"
   },
-  "solo {0}-{1} duo": {
-   "surface": "SessionReportModel",
-   "location": "FinalScore",
-   "kind": "TrF"
-  },
   "solo: the outer-left point": {
    "surface": "InfoViz",
    "location": "BuildOvtFormat",
@@ -21886,11 +21916,6 @@
    "surface": "SettingsDescriptors.g",
    "location": "ReasonTr",
    "kind": "Tr"
-  },
-  "team 1 {0}-{1} team 2": {
-   "surface": "SessionReportModel",
-   "location": "FinalScore",
-   "kind": "TrF"
   },
   "tells you which region you are on": {
    "surface": "SettingsDescriptors.g",
@@ -22555,6 +22580,11 @@
   "{0} ready! Joining...": {
    "surface": "NativeUI",
    "location": "RefreshQueueUI",
+   "kind": "TrF"
+  },
+  "{0} s window": {
+   "surface": "SessionReportModel",
+   "location": "Build",
    "kind": "TrF"
   },
   "{0} searching": {

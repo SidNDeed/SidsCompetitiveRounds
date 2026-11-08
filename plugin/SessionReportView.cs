@@ -64,14 +64,24 @@ namespace CompetitiveRounds
         private static int PageCount() => SessionReportModel.FIXED_PAGES + Mathf.Max(1, buildPages);
 
         private static bool stylesReady;
-        private static GUIStyle stTitle, stHeader, stBody, stSmall, stSmallR, stBtn, stCell, stCellHead, stCenter, stTiny, stChip, stTinyC, stWrap;
+        private static GUIStyle stTitle, stHeader, stBody, stSmall, stSmallR, stBtn, stBtnSmall, stCell, stCellHead, stCenter, stTiny, stChip, stTinyC, stHint;
         private static readonly Color BACKDROP = new Color(0.04f, 0.05f, 0.08f, 0.95f);
         private static readonly Color PANEL = new Color(1f, 1f, 1f, 0.05f);
         private static readonly Color GRID = new Color(1f, 1f, 1f, 0.08f);
         private static readonly Color DIVIDER = new Color(1f, 1f, 1f, 0.40f);
         private static readonly Color ROW = new Color(1f, 1f, 1f, 0.04f);
         private static readonly Color STRIP_PLAIN = new Color(0.55f, 0.62f, 0.72f);
+        // ask 9 stage C: a reference line (the set's own average), the crosshair
+        // and its readout's backdrop
+        private static readonly Color HAIR = new Color(0.94f, 0.94f, 0.92f, 0.45f);
+        private static readonly Color CROSS = new Color(0.94f, 0.94f, 0.92f, 0.30f);
+        private static readonly Color READOUT = new Color(0.04f, 0.05f, 0.08f, 0.92f);
         private static readonly CultureInfo INV = CultureInfo.InvariantCulture;
+
+        /// <summary>True while the F5 view draws (buttons, keys, the legend
+        /// toggles, the crosshair, the card-art button); false during the
+        /// broadcast seat's playback, which nobody sits at.</summary>
+        private static bool interactive;
 
         /// <summary>Open (or re-target) the view on one set. `selector` is
         /// series / match / session and `key` the UUID the history row carries;
@@ -203,6 +213,7 @@ namespace CompetitiveRounds
             try
             {
                 EnsureStyles();
+                interactive = true;
                 if (ev.type == EventType.KeyDown)
                 {
                     HandleKey(ev);
@@ -318,7 +329,7 @@ namespace CompetitiveRounds
 
         /// <summary>The page line: page k of n and the page's title; a builds
         /// page names the games it holds, from the same page breaks the draw
-        /// path measured.</summary>
+        /// path measured. Composed once per page turn, not per frame (lesson 162).</summary>
         private static string PageLine(SessionReportModel.Model m, int pg, int pages)
         {
             int first = 0, last = 0;
@@ -328,8 +339,18 @@ namespace CompetitiveRounds
                 first = buildStarts[sub];
                 last = (sub + 1 < buildStarts.Count ? buildStarts[sub + 1] : m.Builds.Count) - 1;
             }
-            return I18n.TrF("Page {0}/{1}", pg + 1, pages) + "  -  " + m.PageTitle(pg, first, last);
+            if (!ReferenceEquals(m, pageLineModel) || pg != pageLinePg || pages != pageLinePages
+                || first != pageLineFirst || last != pageLineLast)
+            {
+                pageLineModel = m; pageLinePg = pg; pageLinePages = pages; pageLineFirst = first; pageLineLast = last;
+                pageLineCache = I18n.TrF("Page {0}/{1}", pg + 1, pages) + "  -  " + m.PageTitle(pg, first, last);
+            }
+            return pageLineCache;
         }
+
+        private static string pageLineCache = "";
+        private static int pageLinePg = -1, pageLinePages = -1, pageLineFirst = -1, pageLineLast = -1;
+        private static SessionReportModel.Model pageLineModel;
 
         private static Rect ContentRect()
         {
@@ -340,14 +361,89 @@ namespace CompetitiveRounds
         private static Rect BodyRect(Rect content)
             => new Rect(content.x, content.y + 90f, content.width, content.height - 90f - 50f);
 
-        /// <summary>Header block: title, player-neutral score line, legend, sub-line.</summary>
+        /// <summary>Header block: title, the sides' score line, the legend (as
+        /// toggles on the timeline and rate pages), sub-line.</summary>
         private static void DrawHeader(Rect content, SessionReportModel.Model m)
         {
             GUI.Label(new Rect(content.x, content.y, content.width * 0.6f, 30f), I18n.Tr("Session report"), stTitle);
             GUI.Label(new Rect(content.x, content.y + 30f, content.width, 30f), m != null ? m.Header : "", stHeader);
-            GUI.Label(new Rect(content.x, content.y + 60f, content.width * 0.6f, 22f), m != null ? m.Legend : "", stBody);
+            var legend = new Rect(content.x, content.y + 60f, content.width * 0.6f, 22f);
+            if (m != null && interactive && page <= 1) DrawToggles(legend, m);
+            else GUI.Label(legend, m != null ? m.Legend : "", stBody);
             GUI.Label(new Rect(content.x + content.width * 0.6f, content.y, content.width * 0.4f, 22f), m != null ? m.Sub : "", stSmallR);
             GUI.Label(new Rect(content.x + content.width * 0.6f, content.y + 22f, content.width * 0.4f, 22f), m != null ? m.Note : "", stSmallR);
+        }
+
+        // -- the legend toggles (ask 9 stage C) ------------------------------------
+
+        // One flag per roster slot: a hidden player's lines, death marks and pick
+        // ticks are skipped on the timeline and rate pages, and a side's race
+        // line hides when every member of the side is hidden. Reset when the
+        // model changes (a new set, or the broadcast's own model). The names'
+        // widths are measured once per model, with the style that draws them.
+        private static readonly List<bool> hidden = new List<bool>();
+        private static readonly List<float> tagW = new List<float>();
+        private static SessionReportModel.Model hiddenModel;
+        private static int toggleGen;      // bumps on every click: the crosshair's cache key
+
+        private static void SyncToggles(SessionReportModel.Model m)
+        {
+            if (ReferenceEquals(m, hiddenModel) && hidden.Count == m.Players.Count) return;
+            hiddenModel = m;
+            hidden.Clear();
+            tagW.Clear();
+            for (int i = 0; i < m.Players.Count; i++)
+            {
+                hidden.Add(false);
+                tagW.Add(Mathf.Ceil(stSmall.CalcSize(new GUIContent(m.NameTags[i])).x));
+            }
+            toggleGen++;
+        }
+
+        /// <summary>The legend as toggles: a swatch and the name per player; a
+        /// click hides or shows that player's lines. A hidden player keeps an
+        /// outlined swatch and a muted name, so the roster never looks shorter
+        /// than it is; the hint beside the names says what a click does.</summary>
+        private static void DrawToggles(Rect r, SessionReportModel.Model m)
+        {
+            SyncToggles(m);
+            float x = r.x;
+            for (int i = 0; i < m.Players.Count && i < tagW.Count && i < m.NameTags.Count; i++)
+            {
+                float w = 18f + tagW[i];
+                if (x + w > r.xMax) break;
+                if (GUI.Button(new Rect(x, r.y, w, r.height), GUIContent.none, GUIStyle.none))
+                {
+                    hidden[i] = !hidden[i];
+                    toggleGen++;
+                }
+                var sw = new Rect(x, r.y + 5f, 12f, 12f);
+                var tint = i < m.Tints.Count ? m.Tints[i] : SessionReportModel.MUTED;
+                if (hidden[i])
+                {
+                    Fill(sw, new Color(tint.r, tint.g, tint.b, 0.3f));
+                    Fill(new Rect(sw.x + 2f, sw.y + 2f, 8f, 8f), BACKDROP);
+                }
+                else Fill(sw, tint);
+                GUI.Label(new Rect(x + 16f, r.y, tagW[i] + 4f, r.height), hidden[i] ? m.NameTagsMuted[i] : m.NameTags[i], stSmall);
+                x += w + 14f;
+            }
+            if (r.xMax - x > 120f) GUI.Label(new Rect(x, r.y, r.xMax - x, r.height), m.ToggleHint, stHint);
+        }
+
+        private static bool SlotHidden(int pi) => pi >= 0 && pi < hidden.Count && hidden[pi];
+
+        /// <summary>A side's line hides when every member of the side is hidden;
+        /// a player's line with its player.</summary>
+        private static bool IsHidden(SessionReportModel.Model m, SessionReportModel.Poly line)
+        {
+            if (line.Side >= 0 && line.Side < m.Sides.Count)
+            {
+                var slots = m.Sides[line.Side].Slots;
+                for (int k = 0; k < slots.Count; k++) if (!SlotHidden(slots[k])) return false;
+                return slots.Count > 0;
+            }
+            return SlotHidden(line.Player);
         }
 
         // -- broadcast playback (board row 30g) ------------------------------------
@@ -366,6 +462,7 @@ namespace CompetitiveRounds
         {
             if (m == null) return 0;
             EnsureStyles();
+            interactive = false;
             Fill(new Rect(0f, 0f, Screen.width, Screen.height), BACKDROP);
             var content = ContentRect();
             DrawHeader(content, m);
@@ -420,31 +517,31 @@ namespace CompetitiveRounds
             GUI.Label(new Rect(r.xMax - r.width * 0.3f - 8f, r.y + 2f, r.width * 0.3f, 22f), p.Unit, stSmallR);
             if (p.Missing != null)
             {
-                GUI.Label(r, "<color=#8FA3B8>" + p.Missing + "</color>", stCenter);
+                GUI.Label(r, p.MissingRich, stCenter);
                 return;
             }
-            // A panel note (round 2 M2: the race's target is not recorded) sits
-            // under the title and pushes the plot down by its line.
+            // A panel note (round 2 M2: the race's target is not recorded; the
+            // rate panels' window) sits under the title and pushes the plot down
+            // by its line. Every string here was composed by the model (lesson 162).
             float noteH = 0f;
             if (!string.IsNullOrEmpty(p.Note))
             {
                 noteH = 16f;
-                GUI.Label(new Rect(r.x + 8f, r.y + 22f, r.width - 16f, 18f), "<color=#8FA3B8>" + p.Note + "</color>", stTiny);
+                GUI.Label(new Rect(r.x + 8f, r.y + 22f, r.width - 16f, 18f), p.NoteRich, stTiny);
             }
             var plot = new Rect(r.x + 60f, r.y + 28f + noteH, r.width - 76f, r.height - 28f - 22f - noteH);
             if (plot.width < 20f || plot.height < 10f) return;
 
             // Horizontal grid with axis values: one line per round on a rounds
             // race (its top is the rounds the mode is played to, board row
-            // 30e), quarters of the NiceCeil top elsewhere.
+            // 30e), quarters of the NiceCeil top elsewhere; the model composed
+            // the labels for these same steps.
             int steps = p.Rounds ? Mathf.Max(1, Mathf.RoundToInt(p.MaxY)) : 4;
             for (int k = 0; k <= steps; k++)
             {
                 float y = plot.yMax - plot.height * k / steps;
                 CompetitiveUI.GuiLine(new Vector2(plot.xMin, y), new Vector2(plot.xMax, y), GRID, 1f);
-                float v = p.MaxY * k / steps;
-                string lab = p.Percent ? v.ToString("F0", INV) + "%" : v.ToString(v >= 100f ? "F0" : "0.#", INV);
-                GUI.Label(new Rect(r.x + 4f, y - 10f, 52f, 20f), "<color=#8FA3B8>" + lab + "</color>", stSmallR);
+                if (k < p.AxisLabels.Length) GUI.Label(new Rect(r.x + 4f, y - 10f, 52f, 20f), p.AxisLabels[k], stSmallR);
             }
             // Game dividers, labels and end-time ticks (time space, per-game offsets — C-6).
             float scale = plot.width / Mathf.Max(1f, m.TotalS);
@@ -456,8 +553,7 @@ namespace CompetitiveRounds
                 float segW = x1 - x0;
                 string lab = segW >= 150f ? sp.LabelLong : (segW >= 34f ? sp.LabelShort : "");
                 if (lab.Length > 0) GUI.Label(new Rect(x0 + 3f, plot.yMin - 2f, segW - 4f, 18f), lab, stTiny);
-                GUI.Label(new Rect(x1 - 44f, plot.yMax + 2f, 44f, 18f),
-                    "<color=#8FA3B8>" + SessionReportModel.Clock(sp.X1) + "</color>", stSmallR);
+                GUI.Label(new Rect(x1 - 44f, plot.yMax + 2f, 44f, 18f), sp.ClockLabel, stSmallR);
                 if (marks)
                 {
                     // Card picks: ticks on the divider, stacked by pick order.
@@ -465,9 +561,17 @@ namespace CompetitiveRounds
                     {
                         float ty = plot.yMin + 18f + i * 5f;
                         if (ty > plot.yMax - 12f) break;
+                        if (SlotHidden(sp.Picks[i].Lane)) continue;
                         Fill(new Rect(x0 + 1f, ty, 7f, 3f), sp.Picks[i].Tint);
                     }
                 }
+            }
+            // The set's own ratio as a reference line (the rate panels).
+            if (!float.IsNaN(p.Avg) && p.MaxY > 0f)
+            {
+                float ay = plot.yMax - Mathf.Clamp01(p.Avg / p.MaxY) * plot.height;
+                CompetitiveUI.GuiLine(new Vector2(plot.xMin, ay), new Vector2(plot.xMax, ay), HAIR, 1f);
+                GUI.Label(new Rect(plot.xMax - 100f, ay - 18f, 100f, 18f), p.AvgLabel, stSmallR);
             }
             // The race's thin within-round lines first (under the rounds steps),
             // and only where they are legible: at least 24 px per round and a
@@ -477,16 +581,18 @@ namespace CompetitiveRounds
             {
                 var line = p.Thin[li];
                 var pts = line.Pts;
-                if (pts.Count < 2 || (pts[pts.Count - 1].x - pts[0].x) * scale < 90f) continue;
+                if (pts.Count < 2 || (pts[pts.Count - 1].x - pts[0].x) * scale < 90f || IsHidden(m, line)) continue;
                 var tint = new Color(line.Tint.r, line.Tint.g, line.Tint.b, 0.55f);
                 for (int i = 1; i < pts.Count; i++)
                     CompetitiveUI.GuiLine(Map(pts[i - 1], plot, scale, p.MaxY), Map(pts[i], plot, scale, p.MaxY), tint, 1f);
             }
-            // Polylines: one per player per game, in the player's colour; a
-            // count (rounds won) is drawn as steps.
+            // Polylines: one per player (the race: one per SIDE) per game, in
+            // the player's colour; a count (rounds won) is drawn as steps. A
+            // line the legend toggles hid is skipped.
             for (int li = 0; li < p.Lines.Count; li++)
             {
                 var line = p.Lines[li];
+                if (IsHidden(m, line)) continue;
                 var pts = line.Pts;
                 for (int i = 1; i < pts.Count; i++)
                 {
@@ -515,11 +621,85 @@ namespace CompetitiveRounds
                 for (int i = 0; i < m.Deaths.Count; i++)
                 {
                     var d = m.Deaths[i];
+                    if (SlotHidden(d.Lane)) continue;
                     float x = plot.x + Mathf.Clamp(d.X, 0f, m.TotalS) * scale;
                     float y = plot.yMax - 5f - d.Lane * 7f;
                     Fill(new Rect(x - 3f, y - 3f, 6f, 6f), d.Tint);
                 }
             }
+            if (interactive) DrawCrosshair(plot, p, m, scale);
+        }
+
+        // -- the crosshair readout (ask 9 stage C) ----------------------------------
+
+        // Repaint-only: the second under the cursor as a hairline, a marker on
+        // every visible line at that second and a readout of their values. The
+        // strings are composed when the cursor enters a new second of the set
+        // (or a toggle flips), not per frame (lesson 162).
+        private static SessionReportModel.Panel crossPanel;
+        private static int crossSnap = int.MinValue, crossGen = -1;
+        private static string crossClock = "";
+        private static readonly List<string> crossVals = new List<string>();
+        private static readonly List<float> crossY = new List<float>();
+        private static readonly List<int> crossLine = new List<int>();
+
+        private static void DrawCrosshair(Rect plot, SessionReportModel.Panel p, SessionReportModel.Model m, float scale)
+        {
+            var ev = Event.current;
+            if (ev == null || ev.type != EventType.Repaint) return;
+            var mouse = ev.mousePosition;
+            if (!plot.Contains(mouse)) return;
+            int snap = Mathf.RoundToInt((mouse.x - plot.x) / Mathf.Max(1e-3f, scale));
+            if (!ReferenceEquals(p, crossPanel) || snap != crossSnap || toggleGen != crossGen)
+            {
+                crossPanel = p; crossSnap = snap; crossGen = toggleGen;
+                crossClock = SessionReportModel.Clock(snap);
+                crossVals.Clear(); crossY.Clear(); crossLine.Clear();
+                for (int li = 0; li < p.Lines.Count; li++)
+                {
+                    var line = p.Lines[li];
+                    if (IsHidden(m, line)) continue;
+                    float v = ValueAt(line.Pts, snap, line.Step);
+                    if (float.IsNaN(v)) continue;
+                    crossLine.Add(li);
+                    crossY.Add(v);
+                    crossVals.Add(p.Percent ? v.ToString("F0", INV) + "%" : p.Rounds ? v.ToString("F0", INV) : v.ToString("0.#", INV));
+                }
+            }
+            CompetitiveUI.GuiLine(new Vector2(mouse.x, plot.yMin), new Vector2(mouse.x, plot.yMax), CROSS, 1f);
+            for (int k = 0; k < crossLine.Count; k++)
+            {
+                var c = Map(new Vector2(snap, crossY[k]), plot, scale, p.MaxY);
+                Fill(new Rect(c.x - 4f, c.y - 4f, 8f, 8f), p.Lines[crossLine[k]].Tint);
+            }
+            float h = 20f + 16f * crossLine.Count, w = 104f;
+            float bx = mouse.x + 14f + w > plot.xMax ? mouse.x - 14f - w : mouse.x + 14f;
+            float by = Mathf.Clamp(mouse.y - h / 2f, plot.yMin, Mathf.Max(plot.yMin, plot.yMax - h));
+            Fill(new Rect(bx, by, w, h), READOUT);
+            GUI.Label(new Rect(bx + 6f, by + 1f, w - 12f, 18f), crossClock, stHint);
+            for (int k = 0; k < crossLine.Count; k++)
+            {
+                float ly = by + 20f + 16f * k;
+                Fill(new Rect(bx + 6f, ly + 3f, 10f, 10f), p.Lines[crossLine[k]].Tint);
+                GUI.Label(new Rect(bx + 20f, ly, w - 26f, 16f), crossVals[k], stHint);
+            }
+        }
+
+        /// <summary>A line's value at x: the sample's value held until the next
+        /// (a step line) or interpolated; NaN outside the line's span.</summary>
+        private static float ValueAt(List<Vector2> pts, float x, bool step)
+        {
+            int n = pts.Count;
+            if (n == 0 || x < pts[0].x || x > pts[n - 1].x) return float.NaN;
+            int lo = 0, hi = n - 1;
+            while (hi - lo > 1)
+            {
+                int mid = (lo + hi) >> 1;
+                if (pts[mid].x <= x) lo = mid; else hi = mid;
+            }
+            if (step || pts[hi].x <= pts[lo].x) return pts[lo].y;
+            float f = (x - pts[lo].x) / (pts[hi].x - pts[lo].x);
+            return pts[lo].y + f * (pts[hi].y - pts[lo].y);
         }
 
         private static Vector2 Map(Vector2 pt, Rect plot, float scale, float maxY)
@@ -532,19 +712,80 @@ namespace CompetitiveRounds
         // -- the Totals pages (board row 30d) ---------------------------------------
 
         /// <summary>Set: the tiles (games, time, shortest, longest, average,
-        /// final score), the game-length strip, and the score race summary.</summary>
+        /// final score), the game-length strip, and the score race figure.</summary>
         private static void DrawSetPage(Rect body, SessionReportModel.Model m)
         {
             const float gap = 10f, tilesH = 86f, stripH = 118f;
             DrawTiles(new Rect(body.x, body.y, body.width, tilesH), m.SetTiles);
             DrawStrip(new Rect(body.x, body.y + tilesH + gap, body.width, stripH), m);
-            var race = new Rect(body.x, body.y + tilesH + stripH + 2f * gap, body.width, body.height - tilesH - stripH - 2f * gap);
-            Fill(race, PANEL);
-            GUI.Label(new Rect(race.x + 8f, race.y + 2f, race.width - 16f, 22f), I18n.Tr("Score race"), stBody);
-            float noteH = m.RaceNote.Length > 0 ? 24f : 0f;
-            if (noteH > 0f)
-                GUI.Label(new Rect(race.x + 8f, race.y + 26f, race.width - 16f, 22f), m.RaceNote, stSmall);
-            GUI.Label(new Rect(race.x + 8f, race.y + 28f + noteH, race.width - 16f, race.height - 32f - noteH), m.RaceLine, stWrap);
+            DrawSetRace(new Rect(body.x, body.y + tilesH + stripH + 2f * gap, body.width, body.height - tilesH - stripH - 2f * gap), m);
+        }
+
+        /// <summary>The set's score race as a figure (ask 9 stage C): games won
+        /// after each game, one step line per side (FFA: per player), each
+        /// game's score as a pill under its column - in place of the wrapped
+        /// text line that was the page's one unstyled element.</summary>
+        private static void DrawSetRace(Rect r, SessionReportModel.Model m)
+        {
+            Fill(r, PANEL);
+            GUI.Label(new Rect(r.x + 8f, r.y + 2f, r.width - 16f, 22f), I18n.Tr("Score race"), stBody);
+            float noteH = 0f;
+            if (m.RaceNote.Length > 0)
+            {
+                noteH = 16f;
+                GUI.Label(new Rect(r.x + 8f, r.y + 22f, r.width - 16f, 18f), m.RaceNoteRich, stTiny);
+            }
+            var sr = m.SetRace;
+            if (sr == null || sr.Lines.Count == 0 || sr.Pills.Count == 0) return;
+            var plot = new Rect(r.x + 60f, r.y + 30f + noteH, r.width - 76f, r.height - 30f - noteH - 48f);
+            if (plot.width < 20f || plot.height < 10f) return;
+            int steps = Mathf.Max(1, Mathf.RoundToInt(sr.MaxY));
+            for (int k = 0; k <= steps; k++)
+            {
+                float y = plot.yMax - plot.height * k / steps;
+                CompetitiveUI.GuiLine(new Vector2(plot.xMin, y), new Vector2(plot.xMax, y), GRID, 1f);
+                if (k < sr.AxisLabels.Length) GUI.Label(new Rect(r.x + 4f, y - 10f, 52f, 20f), sr.AxisLabels[k], stSmallR);
+            }
+            int games = sr.Pills.Count;
+            float colW = plot.width / games;
+            for (int gi = 0; gi < games; gi++)
+            {
+                float x0 = plot.x + gi * colW;
+                if (gi > 0) CompetitiveUI.GuiLine(new Vector2(x0, plot.yMin), new Vector2(x0, plot.yMax), DIVIDER, 1f);
+                // the game's score as a pill, its number under it
+                if (colW >= 30f)
+                {
+                    float pw = Mathf.Min(colW - 4f, 72f);
+                    var pill = new Rect(x0 + (colW - pw) / 2f, plot.yMax + 4f, pw, 18f);
+                    Fill(pill, ROW);
+                    GUI.Label(pill, sr.Pills[gi], stTinyC);
+                }
+                if (colW >= 14f && gi < sr.Labels.Count)
+                    GUI.Label(new Rect(x0, plot.yMax + 26f, colW, 18f), sr.Labels[gi], stTinyC);
+            }
+            // The step lines (x = games played, 0 before game 1; y = games won);
+            // lines sharing a value are nudged a pixel apart so neither hides the
+            // other, and each ends on a dot.
+            for (int li = 0; li < sr.Lines.Count; li++)
+            {
+                var line = sr.Lines[li];
+                var pts = line.Pts;
+                float nudge = (li - (sr.Lines.Count - 1) * 0.5f) * 2f;
+                for (int i = 1; i < pts.Count; i++)
+                {
+                    var a = new Vector2(plot.x + pts[i - 1].x * colW, plot.yMax - pts[i - 1].y / sr.MaxY * plot.height + nudge);
+                    var b = new Vector2(plot.x + pts[i].x * colW, plot.yMax - pts[i].y / sr.MaxY * plot.height + nudge);
+                    var corner = new Vector2(b.x, a.y);
+                    CompetitiveUI.GuiLine(a, corner, line.Tint, 2.5f);
+                    CompetitiveUI.GuiLine(corner, b, line.Tint, 2.5f);
+                }
+                if (pts.Count > 0)
+                {
+                    var e = pts[pts.Count - 1];
+                    var c = new Vector2(plot.x + e.x * colW, plot.yMax - e.y / sr.MaxY * plot.height + nudge);
+                    Fill(new Rect(c.x - 4f, c.y - 4f, 8f, 8f), line.Tint);
+                }
+            }
         }
 
         /// <summary>Players: the combat table, then cards, points and momentum.</summary>
@@ -552,17 +793,24 @@ namespace CompetitiveRounds
         {
             const float gap = 10f;
             float h1 = (body.height - gap) * 0.5f;
-            DrawTable(new Rect(body.x, body.y, body.width, h1), m.Combat, m.Combat.Missing);
-            DrawTable(new Rect(body.x, body.y + h1 + gap, body.width, body.height - h1 - gap), m.Play, m.Play.Missing);
+            DrawTable(new Rect(body.x, body.y, body.width, h1), m.Combat, m.Combat.MissingRich);
+            DrawTable(new Rect(body.x, body.y + h1 + gap, body.width, body.height - h1 - gap), m.Play, m.Play.MissingRich);
         }
 
-        /// <summary>Per game: damage and kills, one bar per player per game.</summary>
+        /// <summary>Per game: damage, kills and deaths, then hit and block rate
+        /// against the set's own ratio - one bar per player per game, in every
+        /// mode the server carries them for (ask 9).</summary>
         private static void DrawPerGamePage(Rect body, SessionReportModel.Model m)
         {
             const float gap = 10f;
-            float h1 = (body.height - gap) * 0.5f;
-            DrawBars(new Rect(body.x, body.y, body.width, h1), m.DamageBars, m);
-            DrawBars(new Rect(body.x, body.y + h1 + gap, body.width, body.height - h1 - gap), m.KillsBars, m);
+            float h1 = (body.height - gap) * 0.52f, h2 = body.height - gap - h1;
+            float third = (body.width - 2f * gap) / 3f, half = (body.width - gap) / 2f;
+            DrawBars(new Rect(body.x, body.y, third, h1), m.DamageBars, m);
+            DrawBars(new Rect(body.x + third + gap, body.y, third, h1), m.KillsBars, m);
+            DrawBars(new Rect(body.x + 2f * (third + gap), body.y, third, h1), m.DeathsBars, m);
+            float y2 = body.y + h1 + gap;
+            DrawBars(new Rect(body.x, y2, half, h2), m.HitBars, m);
+            DrawBars(new Rect(body.x + half + gap, y2, half, h2), m.BlockBars, m);
         }
 
         /// <summary>Progress: rating before / after / change, gold and XP this
@@ -571,7 +819,7 @@ namespace CompetitiveRounds
         {
             const float gap = 10f;
             float h1 = Mathf.Min(body.height * 0.45f, 60f + 28f * (m.Players.Count + 1));
-            DrawTable(new Rect(body.x, body.y, body.width, h1), m.Progress, I18n.Tr("no rating, gold or XP recorded for this set"));
+            DrawTable(new Rect(body.x, body.y, body.width, h1), m.Progress, m.Progress.MissingRich);
             float y = body.y + h1 + gap, h2 = body.height - h1 - gap, half = (body.width - gap) / 2f;
             DrawBars(new Rect(body.x, y, half, h2), m.GoldBars, m);
             DrawBars(new Rect(body.x + half + gap, y, half, h2), m.XpBars, m);
@@ -589,10 +837,10 @@ namespace CompetitiveRounds
                 float w = i == tiles.Count - 1 ? r.xMax - x : unit;
                 var t = new Rect(x, r.y, w, r.height);
                 Fill(t, PANEL);
-                GUI.Label(new Rect(t.x + 10f, t.y + 4f, t.width - 20f, 20f), "<color=#8FA3B8>" + tiles[i].Label + "</color>", stSmall);
+                GUI.Label(new Rect(t.x + 10f, t.y + 4f, t.width - 20f, 20f), tiles[i].LabelRich, stSmall);
                 GUI.Label(new Rect(t.x + 10f, t.y + 26f, t.width - 20f, 30f), tiles[i].Value, stHeader);
                 if (tiles[i].Sub.Length > 0)
-                    GUI.Label(new Rect(t.x + 10f, t.y + 58f, t.width - 20f, 20f), "<color=#8FA3B8>" + tiles[i].Sub + "</color>", stTiny);
+                    GUI.Label(new Rect(t.x + 10f, t.y + 58f, t.width - 20f, 20f), tiles[i].SubRich, stTiny);
                 x += w + gap;
             }
         }
@@ -606,7 +854,7 @@ namespace CompetitiveRounds
             GUI.Label(new Rect(r.x + r.width * 0.5f, r.y + 2f, r.width * 0.5f - 8f, 22f), m.StripKey, stSmallR);
             if (m.Strip.Count == 0 || m.StripTotal <= 0f)
             {
-                GUI.Label(r, "<color=#8FA3B8>" + m.StripMissing + "</color>", stCenter);
+                GUI.Label(r, m.StripMissingRich, stCenter);
                 return;
             }
             var bar = new Rect(r.x + 8f, r.y + 32f, r.width - 16f, 40f);
@@ -622,11 +870,12 @@ namespace CompetitiveRounds
                 x += w;
             }
             if (m.StripNote.Length > 0)
-                GUI.Label(new Rect(r.x + 8f, bar.yMax + 6f, r.width - 16f, 20f), "<color=#8FA3B8>" + m.StripNote + "</color>", stTiny);
+                GUI.Label(new Rect(r.x + 8f, bar.yMax + 6f, r.width - 16f, 20f), m.StripNoteRich, stTiny);
         }
 
         /// <summary>A Totals table: the columns the model kept (a stat nobody
-        /// recorded is not a column), one row per player.</summary>
+        /// recorded is not a column), one row per player; `missing` is the
+        /// composed line for a table with no column.</summary>
         private static void DrawTable(Rect r, SessionReportModel.Table t, string missing)
         {
             Fill(r, PANEL);
@@ -634,16 +883,16 @@ namespace CompetitiveRounds
             int cols = t.Header.Count;
             if (cols == 0)
             {
-                GUI.Label(r, "<color=#8FA3B8>" + missing + "</color>", stCenter);
+                GUI.Label(r, missing, stCenter);
                 return;
             }
             float nameW = Mathf.Min(240f, r.width * 0.22f);
             float otherW = (r.width - nameW - 16f) / Mathf.Max(1, cols - 1);
             float rowH = 28f, y = r.y + 28f;
-            for (int c = 0; c < cols; c++)
+            for (int c = 0; c < cols && c < t.HeaderRich.Count; c++)
             {
                 float x = r.x + 8f + (c == 0 ? 0f : nameW + (c - 1) * otherW);
-                GUI.Label(new Rect(x, y, c == 0 ? nameW : otherW, rowH), "<color=#8FA3B8>" + t.Header[c] + "</color>", stCellHead);
+                GUI.Label(new Rect(x, y, c == 0 ? nameW : otherW, rowH), t.HeaderRich[c], stCellHead);
             }
             y += rowH;
             for (int ri = 0; ri < t.Rows.Count; ri++)
@@ -661,8 +910,10 @@ namespace CompetitiveRounds
         }
 
         /// <summary>Per-game grouped bars on a fixed grid: one group per game
-        /// (numbered), one bar per player in the player's colour, the value
-        /// above the bar where it fits.</summary>
+        /// (numbered), one bar per player in the player's colour with a surface
+        /// gap between bars, the value above the bar where it fits (tinted by the
+        /// model against the set's average), and the set's own ratio as a
+        /// reference line where the bars are rates.</summary>
         private static void DrawBars(Rect r, SessionReportModel.Bars b, SessionReportModel.Model m)
         {
             Fill(r, PANEL);
@@ -670,7 +921,7 @@ namespace CompetitiveRounds
             GUI.Label(new Rect(r.xMax - r.width * 0.3f - 8f, r.y + 2f, r.width * 0.3f, 22f), b.Unit, stSmallR);
             if (b.Missing != null)
             {
-                GUI.Label(r, "<color=#8FA3B8>" + b.Missing + "</color>", stCenter);
+                GUI.Label(r, b.MissingRich, stCenter);
                 return;
             }
             var plot = new Rect(r.x + 60f, r.y + 44f, r.width - 76f, r.height - 44f - 22f);
@@ -679,9 +930,7 @@ namespace CompetitiveRounds
             {
                 float y = plot.yMax - plot.height * k / 4f;
                 CompetitiveUI.GuiLine(new Vector2(plot.xMin, y), new Vector2(plot.xMax, y), GRID, 1f);
-                float v = b.MaxY * k / 4f;
-                GUI.Label(new Rect(r.x + 4f, y - 10f, 52f, 20f),
-                    "<color=#8FA3B8>" + v.ToString(v >= 100f ? "F0" : "0.#", INV) + "</color>", stSmallR);
+                if (k < b.AxisLabels.Length) GUI.Label(new Rect(r.x + 4f, y - 10f, 52f, 20f), b.AxisLabels[k], stSmallR);
             }
             int games = b.Values.Count, n = m.Players.Count;
             float groupW = plot.width / Mathf.Max(1, games);
@@ -694,13 +943,19 @@ namespace CompetitiveRounds
                 {
                     if (!row[pi].HasValue) continue;
                     float hgt = Mathf.Clamp01(Mathf.Max(0f, row[pi].Value) / Mathf.Max(1e-3f, b.MaxY)) * plot.height;
-                    var bar = new Rect(gx + pi * barW, plot.yMax - hgt, Mathf.Max(1f, barW - 1f), hgt);
-                    Fill(bar, pi < m.Tints.Count ? m.Tints[pi] : Color.white);
-                    if (barW >= 28f && b.Texts[gi][pi] != null)
+                    var bar = new Rect(gx + pi * barW, plot.yMax - hgt, Mathf.Max(1f, barW - 2f), hgt);
+                    Fill(bar, pi < m.Tints.Count ? m.Tints[pi] : SessionReportModel.MUTED);
+                    if (barW >= 28f && gi < b.Texts.Count && b.Texts[gi][pi] != null)
                         GUI.Label(new Rect(bar.x - 6f, bar.y - 18f, barW + 12f, 18f), b.Texts[gi][pi], stTinyC);
                 }
-                if (groupW >= 14f)
+                if (groupW >= 14f && gi < b.Labels.Count)
                     GUI.Label(new Rect(gx, plot.yMax + 2f, groupW - 6f, 18f), b.Labels[gi], stTinyC);
+            }
+            if (!float.IsNaN(b.Avg) && b.MaxY > 0f)
+            {
+                float ay = plot.yMax - Mathf.Clamp01(b.Avg / b.MaxY) * plot.height;
+                CompetitiveUI.GuiLine(new Vector2(plot.xMin, ay), new Vector2(plot.xMax, ay), HAIR, 1f);
+                GUI.Label(new Rect(plot.xMax - 100f, ay - 18f, 100f, 18f), b.AvgLabel, stSmallR);
             }
         }
 
@@ -738,6 +993,14 @@ namespace CompetitiveRounds
         private const float PAGE_HEAD_H = 30f, BLOCK_GAP = 8f, BLOCK_PAD = 6f, BLOCK_HEAD_H = 26f;
         private const float COL_GAP = 12f, MIN_COL_W = 190f, NAME_H = 20f;
         private const float CHIP_H = 20f, CHIP_GAP = 4f, CHIP_ROW_GAP = 3f;
+        // ask 9 stage C: a chip with the card's art is taller and holds a thumb
+        private const float ART_CHIP_H = 44f, THUMB_W = 28f;
+        /// <summary>Card art on the builds pages: on by default, the page's
+        /// header button turns it off for the sitting; the measured pages follow
+        /// (a chip is taller and wider with its thumb).</summary>
+        private static bool showArt = true;
+        private static bool measuredArt = true;
+        private static float ChipH => showArt ? ART_CHIP_H : CHIP_H;
 
         /// <summary>Measures every game's block against the current body and
         /// packs them onto pages: as many blocks per page as fit, a block
@@ -747,12 +1010,12 @@ namespace CompetitiveRounds
         private static void MeasureBuildPages(Rect body, SessionReportModel.Model m)
         {
             if (ReferenceEquals(m, measuredModel) && body.width == measuredW && body.height == measuredH
-                && buildStarts.Count > 0 && blockH.Count == m.Builds.Count)
+                && showArt == measuredArt && buildStarts.Count > 0 && blockH.Count == m.Builds.Count)
                 return;
             buildStarts.Clear();
             blockH.Clear();
             blockLayouts.Clear();
-            measuredModel = m; measuredW = body.width; measuredH = body.height;
+            measuredModel = m; measuredW = body.width; measuredH = body.height; measuredArt = showArt;
             if (m.BuildsMissing != null || m.Builds.Count == 0) { buildStarts.Add(0); buildPages = 1; return; }
             EnsureStyles();
             float innerW = body.width - 16f - 2f * BLOCK_PAD;
@@ -785,7 +1048,7 @@ namespace CompetitiveRounds
                 foreach (var chip in col.Chips) cl.ChipW.Add(ChipWidth(chip, colW));
                 int rows;
                 cl.ChipAt = SessionReportRules.FlowChips(cl.ChipW, colW, CHIP_GAP, out rows);
-                cl.ChipsH = rows > 0 ? rows * CHIP_H + (rows - 1) * CHIP_ROW_GAP : 18f;
+                cl.ChipsH = rows > 0 ? rows * ChipH + (rows - 1) * CHIP_ROW_GAP : 18f;
                 if (col.StatsWire.Length > 0)
                 {
                     // ~7 px per character of the 12 pt stat text: the packer puts
@@ -804,31 +1067,38 @@ namespace CompetitiveRounds
         }
 
         /// <summary>A chip's width: its text measured with the style that
-        /// draws it, plus the colour bar and padding; never wider than the
-        /// column (a chip that wide takes a row of its own).</summary>
+        /// draws it, plus the colour bar, padding and (with art on) the thumb;
+        /// never wider than the column (a chip that wide takes a row of its own).</summary>
         private static float ChipWidth(SessionReportModel.Chip chip, float colW)
         {
-            return Mathf.Min(colW, Mathf.Ceil(stChip.CalcSize(new GUIContent(chip.Text)).x) + 14f);
+            float thumb = showArt && chip.Card.Length > 0 ? THUMB_W + 4f : 0f;
+            return Mathf.Min(colW, Mathf.Ceil(stChip.CalcSize(new GUIContent(chip.Text)).x) + 14f + thumb);
         }
 
         /// <summary>Builds page `sub` (0 = the first): the blocks between two
-        /// measured page breaks, under a header naming the games it holds.</summary>
+        /// measured page breaks, under a header naming the games it holds, the
+        /// chip key and (F5 only) the card-art button.</summary>
         private static void DrawBuilds(Rect body, SessionReportModel.Model m, int sub)
         {
             Fill(body, PANEL);
             if (m.BuildsMissing != null || m.Builds.Count == 0)
             {
-                GUI.Label(body, "<color=#8FA3B8>" + (m.BuildsMissing ?? "") + "</color>", stCenter);
+                GUI.Label(body, m.BuildsMissingRich ?? "", stCenter);
                 return;
             }
-            MeasureBuildPages(body, m);                 // cached unless the model or the body changed
+            MeasureBuildPages(body, m);                 // cached unless the model, the body or the art flag changed
             sub = Mathf.Clamp(sub, 0, buildPages - 1);
             int first = buildStarts[sub], end = sub + 1 < buildStarts.Count ? buildStarts[sub + 1] : m.Builds.Count;
             bool rolled = false;
             for (int i = first; i < end; i++) rolled |= m.Builds[i].HasRolled;
-            GUI.Label(new Rect(body.x + 10f, body.y + 4f, body.width * 0.5f, 22f), m.BuildsRange(first, end - 1), stBody);
-            GUI.Label(new Rect(body.x + body.width * 0.35f, body.y + 4f, body.width * 0.65f - 10f, 22f),
-                rolled ? m.RolledKey + "     " + m.ChipKey : m.ChipKey, stSmallR);
+            const float btnW = 130f;
+            float keyR = interactive ? body.xMax - btnW - 20f : body.xMax - 10f;
+            GUI.Label(new Rect(body.x + 10f, body.y + 4f, body.width * 0.3f, 22f), m.BuildsRange(first, end - 1), stBody);
+            GUI.Label(new Rect(body.x + body.width * 0.3f, body.y + 4f, keyR - body.x - body.width * 0.3f, 22f),
+                rolled ? m.RolledChipKey : m.ChipKey, stSmallR);
+            if (interactive && GUI.Button(new Rect(body.xMax - btnW - 10f, body.y + 4f, btnW, 22f),
+                    showArt ? I18n.Tr("Hide card art") : I18n.Tr("Show card art"), stBtnSmall))
+                showArt = !showArt;
 
             float y = body.y + PAGE_HEAD_H;
             for (int i = first; i < end; i++)
@@ -840,7 +1110,7 @@ namespace CompetitiveRounds
                 float ix = r.x + BLOCK_PAD, iy = r.y + BLOCK_PAD, iw = r.width - 2f * BLOCK_PAD;
                 GUI.Label(new Rect(ix, iy, iw - 140f, 22f), b.Header, stBody);
                 if (b.Length.Length > 0)
-                    GUI.Label(new Rect(ix + iw - 140f, iy, 140f, 22f), "<color=#8FA3B8>" + b.Length + "</color>", stSmallR);
+                    GUI.Label(new Rect(ix + iw - 140f, iy, 140f, 22f), b.LengthRich, stSmallR);
                 for (int c = 0; c < b.Cols.Count && c < lay.Cols.Count; c++)
                 {
                     var col = b.Cols[c];
@@ -848,11 +1118,11 @@ namespace CompetitiveRounds
                     float cx = ix + cl.X, cy = iy + cl.Y, chipsY = cy + NAME_H;
                     GUI.Label(new Rect(cx, cy, cl.W, NAME_H), col.Name, stSmall);
                     if (col.Chips.Count == 0)
-                        GUI.Label(new Rect(cx, chipsY, cl.W, 18f), "<color=#8FA3B8>" + col.Note + "</color>", stSmall);
+                        GUI.Label(new Rect(cx, chipsY, cl.W, 18f), col.NoteRich, stSmall);
                     for (int k = 0; k < col.Chips.Count && k < cl.ChipAt.Count; k++)
                     {
                         var at = cl.ChipAt[k];
-                        DrawChip(new Rect(cx + at.X, chipsY + at.Y * (CHIP_H + CHIP_ROW_GAP), cl.ChipW[k], CHIP_H), col.Chips[k]);
+                        DrawChip(new Rect(cx + at.X, chipsY + at.Y * (ChipH + CHIP_ROW_GAP), cl.ChipW[k], ChipH), col.Chips[k]);
                     }
                     if (cl.Stats.Length > 0)
                         GUI.Label(new Rect(cx, chipsY + cl.ChipsH + 4f, cl.W, cl.StatsH), cl.Stats, stTiny);
@@ -861,18 +1131,77 @@ namespace CompetitiveRounds
             }
         }
 
+        /// <summary>The card art for the builds pages (ask 9 stage C), modelled
+        /// on TabStatsOverlay.GetCardTexture: the native snapshot first (the same
+        /// dictionary hit every call, so a capture that lands later upgrades the
+        /// thumb), else the session cache / PNG through CardImageLoader, a miss
+        /// retried after five seconds; the whole cache drops when CardSnapshot's
+        /// generation changes (a locale switch destroys every native texture).</summary>
+        private static class ReportCards
+        {
+            private static readonly Dictionary<string, Texture2D> cache = new Dictionary<string, Texture2D>();
+            private static readonly Dictionary<string, float> retryAt = new Dictionary<string, float>();
+            private static int generation;
+
+            internal static Texture2D Get(string card)
+            {
+                if (string.IsNullOrEmpty(card)) return null;
+                if (generation != CardSnapshot.Generation)
+                {
+                    generation = CardSnapshot.Generation;
+                    cache.Clear();
+                    retryAt.Clear();
+                }
+                string name = CardRarityLookup.GetCanonicalName(card) ?? card;
+                Sprite snap;
+                if (CardSnapshot.TryGetSprite(name, out snap) && snap != null && snap.texture != null)
+                {
+                    cache[name] = snap.texture;
+                    return snap.texture;
+                }
+                if (!CardSnapshot.IsFailed(name)) CardSnapshot.RequestSnapshot(name);
+                Texture2D tex;
+                if (cache.TryGetValue(name, out tex))
+                {
+                    if (tex != null) return tex;
+                    float at;
+                    if (retryAt.TryGetValue(name, out at) && Time.realtimeSinceStartup < at) return null;
+                }
+                Sprite sprite = CardImageLoader.GetSprite(name, prioritize: true);
+                tex = sprite != null ? sprite.texture : null;
+                cache[name] = tex;
+                if (tex == null) retryAt[name] = Time.realtimeSinceStartup + 5f;
+                return tex;
+            }
+        }
+
         /// <summary>A chip: a faint fill and a bar in the card's rarity colour,
-        /// the name (pre-coloured by the model) beside the bar; a rolled-out
-        /// card is drawn dimmed.</summary>
+        /// the card's art as a thumb (when on and known), the name (pre-coloured
+        /// by the model) beside them; a rolled-out card is drawn dimmed.</summary>
         private static void DrawChip(Rect r, SessionReportModel.Chip chip)
         {
             Color t = chip.Tint;
             Fill(r, new Color(t.r, t.g, t.b, chip.Rolled ? 0.05f : 0.14f));
             Fill(new Rect(r.x, r.y, 3f, r.height), new Color(t.r, t.g, t.b, chip.Rolled ? 0.35f : 1f));
-            GUI.Label(new Rect(r.x + 7f, r.y, r.width - 8f, r.height), chip.Label, stChip);
+            float textX = r.x + 7f;
+            if (showArt && chip.Card.Length > 0)
+            {
+                var thumb = new Rect(r.x + 6f, r.y + 2f, THUMB_W, r.height - 4f);
+                var tex = ReportCards.Get(chip.Card);
+                if (tex != null)
+                {
+                    var was = GUI.color;
+                    if (chip.Rolled) GUI.color = new Color(1f, 1f, 1f, 0.45f);
+                    GUI.DrawTexture(thumb, tex, ScaleMode.ScaleToFit, true);
+                    GUI.color = was;
+                }
+                else Fill(thumb, new Color(t.r, t.g, t.b, 0.12f));
+                textX += THUMB_W + 4f;
+            }
+            GUI.Label(new Rect(textX, r.y, r.xMax - textX - 1f, r.height), chip.Label, stChip);
         }
 
-        // ── primitives / styles ──────────────────────────────────────────────
+        // -- primitives / styles ----------------------------------------------------
 
         private static void Fill(Rect r, Color c)
             => GUI.DrawTexture(r, Texture2D.whiteTexture, ScaleMode.StretchToFill, true, 0f, c, 0f, 0f);
@@ -890,12 +1219,13 @@ namespace CompetitiveRounds
             stChip = Mk(13, TextAnchor.MiddleLeft, FontStyle.Bold);
             stTinyC = Mk(12, TextAnchor.MiddleCenter, FontStyle.Bold);
             stTinyC.wordWrap = false;
-            // The score race summary: a paragraph that wraps (UpperLeft wraps in Mk).
-            stWrap = Mk(15, TextAnchor.UpperLeft, FontStyle.Bold);
+            // The toggles' hint and the crosshair readout: one small line.
+            stHint = Mk(12, TextAnchor.MiddleLeft, FontStyle.Bold);
             stCell = Mk(15, TextAnchor.MiddleLeft, FontStyle.Bold);
             stCellHead = Mk(13, TextAnchor.MiddleLeft, FontStyle.Bold);
             stCenter = Mk(18, TextAnchor.MiddleCenter, FontStyle.Bold);
             stBtn = new GUIStyle(GUI.skin.button) { fontSize = 15, fontStyle = FontStyle.Bold, richText = false };
+            stBtnSmall = new GUIStyle(GUI.skin.button) { fontSize = 13, fontStyle = FontStyle.Bold, richText = false };
             stylesReady = true;
         }
 

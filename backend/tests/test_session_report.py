@@ -1522,9 +1522,11 @@ def test_dividers_and_diagnostics_are_translated():
     model = PLUGIN / "SessionReportModel.cs"
     build = _cs_body(model, "internal static Model Build(Envelope env)")
     assert '"G" + gi.ToString(INV)' not in build, "the bare untranslated G<n> is gone"
-    assert "TeamScoreLabel(" in build and "FfaScoreLabel(" in build
-    team = _cs_body(model, "private static string TeamScoreLabel(Model m, Game g, int gi, bool longForm)")
-    assert "I18n.TrF(" in team
+    assert "ScoreLine(" in build and "FfaScoreLabel(" in build
+    # ask 9 stage C: one score line for every two-sided kind - the sides' own
+    # coloured names (SideNames), the winner's score in the side's tint
+    score = _cs_body(model, "private static string ScoreLine(Model m, int sa, int sb)")
+    assert "m.SideNames" in score and "Tinted(m.SideTints[0], a)" in score and "Tinted(m.SideTints[1], b)" in score
     ffa = _cs_body(model, "private static string FfaScoreLabel(Model m, Game g, int gi, bool longForm)")
     assert "I18n.TrF(" in ffa
     # rolled picks: parsed (the parser lives in the Unity-free rules file since
@@ -1681,7 +1683,7 @@ def test_builds_are_one_block_per_game_with_chips_in_pick_order():
     assert "continue;" not in loop.replace("if (!g.Scores.ContainsKey(pid) && !HasCards(g, pid)) continue;", ""), \
         "no other path skips a game or a player"
     head = _cs_body(model, "private static string BlockHeader(Model m, Game g, int number)")
-    assert "ScoreLine(" in head and "TeamScoreLabel(" in head and "FfaScoreLabel(" in head
+    assert "ScoreLine(" in head and "SideScores(" in head and "FfaScoreLabel(" in head
     assert 'I18n.TrF("length {0}", Clock(g.DurationS))' in build, "the game's length in the block header"
 
 
@@ -1776,7 +1778,8 @@ def test_the_totals_pages_draw_one_element_per_data_type():
     assert "DrawStrip(" in _cs_body(view, "private static void DrawSetPage(Rect body, SessionReportModel.Model m)")
     assert "DrawTiles(" in _cs_body(view, "private static void DrawSetPage(Rect body, SessionReportModel.Model m)")
     assert _cs_body(view, "private static void DrawPlayersPage(Rect body, SessionReportModel.Model m)").count("DrawTable(") == 2
-    assert _cs_body(view, "private static void DrawPerGamePage(Rect body, SessionReportModel.Model m)").count("DrawBars(") == 2
+    # ask 9 stage C: damage, kills, deaths, hit % and block % per game
+    assert _cs_body(view, "private static void DrawPerGamePage(Rect body, SessionReportModel.Model m)").count("DrawBars(") == 5
     prog = _cs_body(view, "private static void DrawProgressPage(Rect body, SessionReportModel.Model m)")
     assert "DrawTable(" in prog and prog.count("DrawBars(") == 2
     model = PLUGIN / "SessionReportModel.cs"
@@ -1829,7 +1832,7 @@ def test_an_unrecorded_race_target_is_unknown_never_guessed():
     assert 'I18n.TrF("race target not recorded for {0} of {1} games", unknown, env.Games.Count)' in race
     panel = _cs_body(PLUGIN / "SessionReportView.cs",
                      "private static void DrawPanel(Rect r, SessionReportModel.Panel p, SessionReportModel.Model m, bool marks)")
-    assert "if (!string.IsNullOrEmpty(p.Note))" in panel and "+ p.Note +" in panel
+    assert "if (!string.IsNullOrEmpty(p.Note))" in panel and "p.NoteRich" in panel
 
 
 def test_the_race_grid_is_one_line_per_round_and_the_thin_line_is_gated():
@@ -1846,7 +1849,7 @@ def test_a_game_names_only_the_players_who_played_it():
     rosters, so a player can have no score key in a game. Every rendered
     score of a game - its timeline divider, its builds block header and the
     set's race line, which reuses the header - comes from the presence rules
-    the client harness executes (SessionReportRules.PairScores, SideScore,
+    the client harness executes (SessionReportRules.SideScores, SideScoreOf,
     Standings), which omit a player with no key; the model keeps no getter
     that reads a missing key as 0. The harness's "presence" cases hold the
     rules; this holds that the model renders through them."""
@@ -1857,12 +1860,13 @@ def test_a_game_names_only_the_players_who_played_it():
     ffa = _cs_body(model, "private static string FfaScoreLabel(Model m, Game g, int gi, bool longForm)")
     assert "var order = Standings(g, m.Players);" in ffa
     assert "m.Players.Count; i++" not in ffa, "the label enumerates the game's standings, not the roster"
-    team = _cs_body(model, "private static string TeamScoreLabel(Model m, Game g, int gi, bool longForm)")
-    assert "SideScore(g, m.Players, 1, out p1)" in team and "SideScore(g, m.Players, 2, out p2)" in team
+    score = _cs_body(model, "private static string ScoreLine(Model m, int sa, int sb)")
+    assert "Scores" not in score, "the score line prints the side scores it is handed; it reads no key itself"
     header = _cs_body(model, "private static string BlockHeader(Model m, Game g, int number)")
-    assert "if (PairScores(g, m.Players, out sa, out sb))" in header
+    assert "if (SideScores(m.Kind, g, m.Players, m.Sides, out sa, out sb, out ia, out ib))" in header
     build = _cs_body(model, "internal static Model Build(Envelope env)")
-    assert build.count("if (PairScores(g, m.Players, out sa, out sb))") == 1
+    assert build.count("if (SideScores(m.Kind, g, m.Players, m.Sides, out sa, out sb, out ia, out ib))") == 1
+    assert "TeamScoreLabel" not in build and "PairScores" not in build, "one presence rule for every two-sided kind (ask 9)"
     assert "if (m.Players.Count == 2)" not in build.split("m.Spans.Add(sp);")[0]
 
 
@@ -2712,9 +2716,12 @@ def test_an_empty_chart_says_whether_the_set_or_the_mode_lacks_it():
     make = _cs_body(model, "private static Bars MakeBars(string title")
     assert "if (!any) b.Missing = missing;" in make
     players = _cs_body(view, "private static void DrawPlayersPage(Rect body, SessionReportModel.Model m)")
-    assert "m.Combat, m.Combat.Missing);" in players and "m.Play, m.Play.Missing);" in players
+    # ask 9 stage C: the view draws the model's composed (muted) copies; the
+    # texts themselves still come from MissingText above
+    assert "m.Combat, m.Combat.MissingRich);" in players and "m.Play, m.Play.MissingRich);" in players
     strip = _cs_body(view, "private static void DrawStrip(Rect r, SessionReportModel.Model m)")
-    assert '"<color=#8FA3B8>" + m.StripMissing + "</color>"' in strip
+    assert "m.StripMissingRich" in strip
+    assert "8FA3B8" not in strip_comments_only(view.read_text(encoding="utf-8")), "the muted ink is the theme token"
 
 
 def _carries_lists():

@@ -793,6 +793,15 @@ namespace CompetitiveRounds
             Check(r, "sides: 2v2 wins, points won and lost per side", d.Set.Wins[0] == 1 && d.Set.Wins[1] == 1 && d.Set.Wins[2] == 0 && d.Set.Wins[3] == 0
                   && al.PointsWon == 6 && al.PointsLost == 4 && br.PointsWon == 4 && br.PointsLost == 6,
                   "wins " + d.Set.Wins[0] + d.Set.Wins[1] + d.Set.Wins[2] + d.Set.Wins[3] + " Alpha " + al.PointsWon + "/" + al.PointsLost + " Bravo " + br.PointsWon + "/" + br.PointsLost);
+            var tie = new Game();
+            tie.Scores[A] = 2; tie.Scores[C] = 2; tie.Scores[B] = 2; tie.Scores[D] = 2;
+            var f0 = Parse(FFA_LOBBY);
+            Check(r, "sides: the winner of a game is the higher side, the unique top scorer in FFA, nobody on a tie",
+                  Winner(e.Kind, g, e.Players, sides) == 0 && Winner(e.Kind, tie, e.Players, sides) == -1
+                  && f0 != null && Winner(f0.Kind, f0.Games[0], f0.Players, Sides(f0.Kind, f0.Players)) == 0
+                  && Winner(f0.Kind, f0.Games[1], f0.Players, Sides(f0.Kind, f0.Players)) == 1,
+                  "2v2 " + Winner(e.Kind, g, e.Players, sides) + " tie " + Winner(e.Kind, tie, e.Players, sides)
+                  + " ffa g1 " + (f0 == null ? -9 : Winner(f0.Kind, f0.Games[0], f0.Players, Sides(f0.Kind, f0.Players))));
             var mo = d.Moments[0];
             Check(r, "sides: the 2v2 rounds race ends on each side's recorded rounds", mo != null && mo.Exact
                   && mo.Rounds[0][mo.Rounds[0].Count - 1].Y == 3f && mo.Rounds[1][mo.Rounds[1].Count - 1].Y == 2f,

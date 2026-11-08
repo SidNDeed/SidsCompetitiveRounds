@@ -1178,7 +1178,7 @@ def test_the_builds_pages_pack_and_flow_by_the_rules(harness_run, name):
     "derive (control): without the totals the legacy gold shows and XP is omitted",
     "derive (control): a stream that skips a point is not replayed",
     "derive: 2v2 points lost are the other side's points",
-    "derive: 2v2 has no first blood, streak, comeback or lead (no point events)",
+    "derive: a 2v2 series captured before its point streams has no first blood, streak, comeback or lead",
     "derive: an FFA player's games count only the games they played",
     "derive: FFA has no points lost and its games are won by the top score",
 ])
@@ -1195,7 +1195,7 @@ def test_the_session_report_derives_every_totals_number(harness_run, name):
     "race: an FFA game with no recorded target draws no race to a guessed number and is counted unknown",
     "race (control): a recorded target is the axis even above the scores",
     "race: a 1v1 value of rounds*2+points plots its rounds, FFA floors its half points",
-    "race (control): 2v2 and 1v2 streams are not raced (no point events)",
+    "race: 2v2 and 1v2 streams race as 1v1's (ask 9: the recorder's rounds*2+points pairs)",
     "race: every 1v1 game's rounds line ends on its recorded rounds",
 ])
 def test_the_race_axis_is_the_modes_win_target(harness_run, name):
@@ -1206,13 +1206,45 @@ def test_the_race_axis_is_the_modes_win_target(harness_run, name):
     assert line.startswith("[sessionreport] PASS"), line
 
 @pytest.mark.parametrize("name", [
+    "sides: the fixtures parse",
+    "sides: a 1v1 is two sides of one, 2v2 two teams of two, 1v2 the solo and the duo, FFA one side per player",
+    "sides: an FFA of two is not two-sided; 1v1, 2v2 and 1v2 are",
+    "sides: the roster-to-side map",
+    "sides: the streamed 2v2 parses",
+    "sides: a side's stream is its first member's that has one",
+    "sides: a 2v2 game's pair of scores names each side's first playing member",
+    "sides: a 2v2 replays its point events - first blood, streaks, lead and comeback per side, shared by teammates",
+    "sides: 2v2 kills and deaths per player come from the totals",
+    "sides: 2v2 wins, points won and lost per side",
+    "sides: the winner of a game is the higher side, the unique top scorer in FFA, nobody on a tie",
+    "sides: the 2v2 rounds race ends on each side's recorded rounds",
+    "sides: a 1v2 solo's kills are the duo's deaths; a duo member's are not derivable",
+    "rolling: the one-pass window equals the per-sample definition for rates and ratios",
+    "rolling: the window follows a decimated stride (five median gaps) and never shrinks below the minimum",
+    "colour: the eight validated slots are fixed points of the band snap",
+    "colour: the old pastel keeps its hue and is pulled into the band (lightness and chroma)",
+    "colour: white has no hue to keep - it becomes the band's lightest grey",
+    "colour: hex parses with or without '#', short form and alpha, and round-trips",
+    "colour: the stat tint has thirteen steps, ink in the middle, lightness falling to both poles",
+    "colour: a stat's step is its distance from the average towards the discovered extreme; a small spread stays near ink; one value is ink",
+])
+def test_the_report_reads_sides_rolls_once_and_snaps_its_colours(harness_run, name):
+    """Ask 9 stage C: SessionReportRules.Sides / SideScores / ReplayTwoSided /
+    Winner (one data model for every mode), the one-pass Rolling / RollingRatio
+    with the stride-following window, and the Unity-free colour maths (SnapTint,
+    the stat tint, StatScale) - all executed by the client harness."""
+    line = _named_case(harness_run, name, "sessionreport")
+    assert line.startswith("[sessionreport] PASS"), line
+
+
+@pytest.mark.parametrize("name", [
     "presence: a fluid lobby's game lists only who played it, best first (Delta joins in game 2)",
     "presence (control): the union roster names two players game 1 does not have",
     "presence: a side's score is its first playing seat's key; a side with no key has none",
-    "presence: a two-player score line needs both keys",
+    "presence: a two-sided score line needs a key on each side",
 ])
 def test_a_game_names_only_the_players_who_played_it(harness_run, name):
-    """Round 2 M1: SessionReportRules.Standings / SideScore / PairScores,
+    """Round 2 M1: SessionReportRules.Standings / SideScoreOf / SideScores,
     executed - a fluid FFA lobby's game omits the players who sat it out and
     a missing score key is never read as a score."""
     line = _named_case(harness_run, name, "sessionreport")

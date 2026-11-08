@@ -966,31 +966,43 @@ namespace CompetitiveRounds
             return d;
         }
 
-        /// <summary>Who won game g: in a two-sided set the side with the higher
-        /// recorded score (every member who played it gets the win; no win on a
-        /// tie or when a side has no key), else the unique top score (FFA).</summary>
-        private static void CountWins(string kind, Game g, IList<Player> players, IList<Side> sides, int[] wins)
+        /// <summary>Who won game g: the index into `sides` of the side with the
+        /// higher recorded score in a two-sided set, else the roster index of
+        /// the unique top score (FFA); -1 on a tie, on a side with no key, or
+        /// with no score at all. The set's wins and its race figure read this.</summary>
+        internal static int Winner(string kind, Game g, IList<Player> players, IList<Side> sides)
         {
-            int n = players.Count;
+            if (g == null || players == null) return -1;
             if (TwoSided(kind, sides))
             {
                 int ia, ib;
                 int s1 = SideScoreOf(g, players, sides[0], out ia), s2 = SideScoreOf(g, players, sides[1], out ib);
-                if (ia < 0 || ib < 0 || s1 == s2) return;
-                var winner = s1 > s2 ? sides[0] : sides[1];
-                foreach (int pi in winner.Slots) if (g.Scores.ContainsKey(players[pi].Id)) wins[pi]++;
-                return;
+                if (ia < 0 || ib < 0 || s1 == s2) return -1;
+                return s1 > s2 ? 0 : 1;
             }
             int best = int.MinValue, at = -1;
             bool tie = false;
-            for (int i = 0; i < n; i++)
+            for (int i = 0; i < players.Count; i++)
             {
                 int v;
                 if (!g.Scores.TryGetValue(players[i].Id, out v)) continue;
                 if (v > best) { best = v; at = i; tie = false; }
                 else if (v == best) tie = true;
             }
-            if (at >= 0 && !tie) wins[at]++;
+            return at >= 0 && !tie ? at : -1;
+        }
+
+        /// <summary>The win of game g on the roster: every member of the winning
+        /// side who played it (two-sided), or the unique top scorer (FFA).</summary>
+        private static void CountWins(string kind, Game g, IList<Player> players, IList<Side> sides, int[] wins)
+        {
+            int w = Winner(kind, g, players, sides);
+            if (w < 0) return;
+            if (TwoSided(kind, sides))
+            {
+                foreach (int pi in sides[w].Slots) if (g.Scores.ContainsKey(players[pi].Id)) wins[pi]++;
+            }
+            else wins[w]++;
         }
 
         /// <summary>The points scored against the player on side `si` in game g:
@@ -1532,7 +1544,7 @@ namespace CompetitiveRounds
         {
             float L, a, bb;
             ToOklab(r, g, b, out L, out a, out bb);
-            double C = Math.Sqrt((double)a * a + (double)b * bb), h = Math.Atan2(bb, a);
+            double C = Math.Sqrt((double)a * a + (double)bb * bb), h = Math.Atan2(bb, a);
             L = L < TINT_L_MIN ? TINT_L_MIN : L > TINT_L_MAX ? TINT_L_MAX : L;
             if (C >= TINT_C_GREY && C < TINT_C_MIN) C = TINT_C_MIN;
             for (int k = 0; k < 24; k++)
