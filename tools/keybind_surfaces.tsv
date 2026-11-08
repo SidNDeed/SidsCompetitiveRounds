@@ -594,7 +594,7 @@ a989d1f178daf162	N	rule:N1	Add recipient
 3db1798f11598eed	N	rule:N1	Admin action log ({0}-{1} of {2})
 d565f607bd7cf6e7	N	rule:N1	Admins - type to search
 978584de4b6f7d4f	N	rule:N1	Admins can't be kicked.
-993ae96a5bc8a29e	N	rule:N1	Admins...
+993ae96a5bc8a29e	O	rule:O	Admins...
 4d064726954a1748	N	rule:N1	Advanced
 2a58a099d42258b3	N	rule:N1	After 60s unfocused at the menu, drops the engine to 15 FPS. Never active in online rooms or when a 
 efbaa99c9e12efda	N	rule:N1	After a game you played in, this sends the same logs the bug-report form sends, so a problem can be 
@@ -908,7 +908,7 @@ c81e2a08f7e0b5c4	N	rule:N1	Charcoal
 cd0a753cedf7d0e9	O	rule:O	Chat  —  Enter to send, Esc to cancel
 3c36f21e8126daea	N	rule:N1	Chat & mail
 c1487c661b3824ed	N	rule:N1	Chat Lockdown...
-545716aba2b183be	N	rule:N1	Chat Mutes...
+545716aba2b183be	O	rule:O	Chat Mutes...
 b986a8e56e3b5c3b	O	rule:O	Chat [{0}]  <color=#888>(press T to chat)</color>
 c6877414da55b264	P	rule:P	Chat [{0}]  —  Enter to send, Esc keeps your draft, {1} switches channel
 671adde235e0b435	O	rule:O	Chat [{0}]  —  Enter to send, Esc to cancel, Alt switches channel
@@ -1435,7 +1435,7 @@ cf9480db8e8c2876	N	rule:N1	Friendly fire: OFF
 c4d63e4c56f1d2b7	N	rule:N1	From:
 6032a672e309a4df	N	rule:N1	Frost
 51305535ddebf94f	N	rule:N1	Full Log...
-b13b4fc382a1c06e	N	rule:N1	Full log...
+b13b4fc382a1c06e	O	rule:O	Full log...
 090784407ecb4e04	N	rev:4a3cbf0bd7c75940 a click or press on one of the mod's own buttons, rows, tiles or links; names no key	Full music albums that replace ROUNDS' combat soundtrack for you. Click an album row for 30-second t
 256eaeedbdddb39d	N	rule:N1	GAME ENDS
 9905006070eedb6a	N	rule:N1	GAMEPLAY
@@ -2264,7 +2264,7 @@ d26d4dc8b8266aa8	N	rule:N1	Player not found — they need to have used the mod o
 6513aeea6e95789c	N	rule:N1	Player removed from the lobby.
 4116a2bca218b61d	N	rule:N1	Player totals
 315b1f52cdff2bd5	N	rule:N1	Player {0}
-392feef07c53c9a7	N	rev:d1f35497e5536993 a Home-tab label (NativeUI.BuildHomeTab is binding-dependent: it names a key through KeybindRowFace); names no key	Players
+392feef07c53c9a7	N	rev:08ca69060e8c585a a Home-tab label (NativeUI.BuildHomeTab is binding-dependent: it names a key through KeybindRowFace) and, since ask 15, the Admin tab's Players group caption (AdminMenuRules.GroupCaptions, drawn by NativeUI.BuildAdminGroupRows through CreateText); names no key	Players
 971b5de3da8d8c6c	O	rule:O	Podium
 fd2f5c58c6a2ab9b	N	rev:e881a2ca37b61f14 a dance's shop description: 'locks your controls' means the dancer cannot move; names no key	Point to the sky, point to the floor, sway those hips. Dancing locks your controls for the duration.
 220529258a903733	N	rule:N1	Points lost
@@ -2621,7 +2621,7 @@ fb043b0389a26d7a	N	rule:N1	Search Random
 580d82bb1d98c79f	N	rule:N1	Search cards
 d8c04e56c607e25c	N	rule:N1	Search for a player by name
 e3799504761fb5e5	N	rule:N1	Search players
-6d7a30a931a35ef0	N	rule:N1	Search...
+6d7a30a931a35ef0	O	rule:O	Search...
 c88d0a58ce821760	N	rule:N1	Searching for ranked match...
 7e0098e5bb901181	N	rule:N1	Searching... {0}m {1}s  +/-{2}
 122661d9a77d8948	N	rule:N1	Searching... {0}s  +/-{1}
