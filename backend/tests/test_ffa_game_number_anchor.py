@@ -5907,7 +5907,7 @@ def test_pg_a_realigned_resubmission_is_echoed_and_never_settled_twice():
 # was never driven at all.
 #
 # So the columns are added, once, on top of the fixture the rest of this file
-# uses. They are the ones 154/156/167/177/206/216/233/324/327/360 declare, at
+# uses. They are the ones 154/156/167/177/206/216/233/324/327/360/403 declare, at
 # the types those migrations declare, because a test table that narrows a
 # column is exercising a different write. Cards, offers, achievements, earned packs and
 # wagers are NOT built here and do not need to be: every one of them is inside
@@ -5959,6 +5959,8 @@ ALTER TABLE ffa_match_players
     ADD COLUMN IF NOT EXISTS kill_timeline VARCHAR(512),
     ADD COLUMN IF NOT EXISTS end_stats TEXT,
     ADD COLUMN IF NOT EXISTS game_points_at_leave SMALLINT,
+    ADD COLUMN IF NOT EXISTS deaths SMALLINT,
+    ADD COLUMN IF NOT EXISTS death_times VARCHAR(512),
     ADD COLUMN IF NOT EXISTS color_name VARCHAR(40),
     ADD COLUMN IF NOT EXISTS color_hex VARCHAR(9);
 

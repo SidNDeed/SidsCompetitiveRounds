@@ -81,5 +81,7 @@ CREATE TABLE ffa_match_players (
     color_hex             VARCHAR(9),
     end_stats             TEXT,
     game_points_at_leave  SMALLINT,
+    deaths                SMALLINT,          -- migration 403 (ask 9): the reporter's
+    death_times           VARCHAR(512),      -- death facts the settlement writes
     PRIMARY KEY (match_id, player_id)
 );
