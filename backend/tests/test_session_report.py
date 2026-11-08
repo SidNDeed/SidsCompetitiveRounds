@@ -3126,7 +3126,7 @@ def test_the_combat_ledger_credits_kills_the_way_the_server_derives_1v1_kills():
     tele = (PLUGIN / "CombatTelemetry.cs").read_text(encoding="utf-8")
     sole = _cs_body(PLUGIN / "CombatTelemetry.cs", "private static int SoleOpponentOf(int victimActor, int victimTeam)")
     assert "if (!OneVsOneRoom()) return -1;" in sole, "the inference runs in a plain 1v1 room only (round 2 HIGH 2)"
-    assert "if (Plugin.IsOvt() || Plugin.IsFfa()) return false;" in tele
+    assert "if (Diag2v2.IsOvt() || Diag2v2.IsFfa()) return false;" in tele
     assert 'return props == null || !props.ContainsKey("cr_ff");' in tele, "a 2v2 team room (cr_ff) is not a 1v1 room"
     rules = (PLUGIN / "KillCreditRules.cs").read_text(encoding="utf-8")
     assert "if (hasRecord && recordApplying && recordFrame == deathFrame && recordActor >= 0)" in rules

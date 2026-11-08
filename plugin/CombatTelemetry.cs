@@ -81,7 +81,7 @@ namespace CompetitiveRounds
         {
             try
             {
-                if (Plugin.IsOvt() || Plugin.IsFfa()) return false;
+                if (Diag2v2.IsOvt() || Diag2v2.IsFfa()) return false;
                 var room = PhotonNetwork.InRoom ? PhotonNetwork.CurrentRoom : null;
                 var props = room != null ? room.CustomProperties : null;
                 // The 2v2 team rooms carry cr_ff (TeamGameLifecycle.InTeamRoom's
