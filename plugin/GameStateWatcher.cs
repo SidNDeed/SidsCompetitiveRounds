@@ -4549,7 +4549,7 @@ namespace CompetitiveRounds
                 // Resolve a display name: styled NickName stripped, then the
                 // cached 1v1 opponent name via u_id, then a neutral fallback.
                 string name = "";
-                try { name = StripRichText(p.NickName ?? ""); } catch { }
+                try { name = CleanPlayerName(p.NickName ?? ""); } catch { }
                 if (string.IsNullOrEmpty(name))
                 {
                     string sid = null;
@@ -4648,7 +4648,7 @@ namespace CompetitiveRounds
                         bool isTrackedOpp =
                             (!string.IsNullOrEmpty(lu) && lu == opponentSteamId)
                             || (!string.IsNullOrEmpty(opponentDisplayName)
-                                && name == StripRichText(opponentDisplayName));
+                                && name == CleanPlayerName(opponentDisplayName));
                         if (!isTrackedOpp) return;
                     }
                     text = $"{whoTag} left — series unfinished ({CurrentSeriesGamesWon}-{CurrentSeriesGamesLost})";
@@ -4697,7 +4697,7 @@ namespace CompetitiveRounds
                     // out before sending leaver_display_name, so it never
                     // becomes a real players row name — change the two
                     // together or that filter goes silently dead.
-                    opponentDisplayName = StripRichText(player.NickName ?? "Opponent");
+                    opponentDisplayName = CleanPlayerName(player.NickName ?? "Opponent");
 
                     var props = player.CustomProperties;
                     if (props != null && props.Count > 0)
@@ -4769,7 +4769,7 @@ namespace CompetitiveRounds
                     // most of them never played again nothing ever healed it.
                     // Keep the name empty rather than store a placeholder — the
                     // poller calls this again, so a real name lands shortly.
-                    string persona = StripRichText(SteamFriends.GetPersonaName() ?? "");
+                    string persona = CleanPlayerName(SteamFriends.GetPersonaName() ?? "");
                     if (!IsPlaceholderName(persona, localSteamId)) localDisplayName = persona;
                     NoteIdentityTransition(prevId, localSteamId);
                     MaybeSyncRankedStateOnce();
@@ -4781,7 +4781,7 @@ namespace CompetitiveRounds
             try
             {
                 localSteamId = PhotonNetwork.LocalPlayer?.UserId ?? "unknown";
-                localDisplayName = StripRichText(PhotonNetwork.LocalPlayer?.NickName ?? "Unknown");
+                localDisplayName = CleanPlayerName(PhotonNetwork.LocalPlayer?.NickName ?? "Unknown");
                 NoteIdentityTransition(prevId, localSteamId);
                 MaybeSyncRankedStateOnce();
             }
@@ -6148,7 +6148,7 @@ namespace CompetitiveRounds
                     var others = new List<string>();
                     foreach (var ppN in RoomActors.ActiveFighters())
                         if (ppN != null && !ppN.IsLocal)
-                            others.Add(StripRichText(ppN.NickName ?? "?"));
+                            others.Add(CleanPlayerName(ppN.NickName ?? "?"));
                     if (others.Count > 0) oppLabel = string.Join(" + ", others);
                 }
             }
@@ -6197,7 +6197,7 @@ namespace CompetitiveRounds
                     if (PhotonNetwork.LocalPlayer != null && pp.ActorNumber == PhotonNetwork.LocalPlayer.ActorNumber) continue;
                     string nm = pp.NickName;
                     if (string.IsNullOrEmpty(nm)) continue;
-                    nm = StripRichText(nm);
+                    nm = CleanPlayerName(nm);
                     int ppTeam = -1;
                     try
                     {
@@ -7021,7 +7021,7 @@ namespace CompetitiveRounds
                 if (pp == null) continue;
                 string sid = ResolvePhotonSteamId(pp);
                 if (string.IsNullOrEmpty(sid) || sid.StartsWith("photon_")) { Plugin.Log.LogWarning($"[1v2-REPORT] couldn't resolve actor {pp.ActorNumber}"); return false; }
-                string name = StripRichText(pp.NickName ?? sid); if (string.IsNullOrEmpty(name)) name = sid; if (name.Length > 60) name = name.Substring(0, 60);
+                string name = CleanPlayerName(pp.NickName ?? sid); if (string.IsNullOrEmpty(name)) name = sid; if (name.Length > 60) name = name.Substring(0, 60);
                 int teamId = -1;
                 foreach (var po in pm.players)
                 {
@@ -7364,7 +7364,7 @@ namespace CompetitiveRounds
                 // "Player" would double-increment one record).
                 string AddName(string raw)
                 {
-                    string nm = StripRichText(raw ?? "");
+                    string nm = CleanPlayerName(raw ?? "");
                     if (string.IsNullOrEmpty(nm)) return null;
                     if (names.Contains(nm))
                     {
@@ -7702,7 +7702,7 @@ namespace CompetitiveRounds
                     Plugin.Log.LogWarning($"[FFA-REPORT] couldn't resolve actor {pp.ActorNumber} — skipping them");
                     continue;
                 }
-                string name = StripRichText(pp.NickName ?? sid);
+                string name = CleanPlayerName(pp.NickName ?? sid);
                 if (string.IsNullOrEmpty(name)) name = sid;
                 if (name.Length > 60) name = name.Substring(0, 60);
                 int teamId = -1;
@@ -7850,7 +7850,7 @@ namespace CompetitiveRounds
                     var gm = ghostRoster[gs];
                     if (gm == null || string.IsNullOrEmpty(gm.steam_id)) continue;
                     if (presentSteams.Contains(gm.steam_id) || FfaMode.Leavers.ContainsKey(gm.steam_id)) continue;
-                    string gName = StripRichText(gm.display_name ?? gm.steam_id);
+                    string gName = CleanPlayerName(gm.display_name ?? gm.steam_id);
                     if (string.IsNullOrEmpty(gName)) gName = gm.steam_id;
                     if (gName.Length > 60) gName = gName.Substring(0, 60);
                     entries.Add(new ApiClient.FfaReportPlayer
@@ -8009,7 +8009,7 @@ namespace CompetitiveRounds
                 // limits display_name to 64 chars; styled nicknames (e.g. neon-pink
                 // wrap with bold/italic/underline/size tags) easily exceed that.
                 // Pydantic rejects with 422 → the entire 2v2 report fails silently.
-                string name = StripRichText(pp.NickName ?? sid);
+                string name = CleanPlayerName(pp.NickName ?? sid);
                 if (string.IsNullOrEmpty(name)) name = sid;
                 if (name.Length > 60) name = name.Substring(0, 60);
                 // Find their Player → TeamID. PlayerManager.players is List<Player>;
@@ -9174,17 +9174,43 @@ namespace CompetitiveRounds
          * name can contain). Lowercase only — the producer emits lowercase
          * constants, and TMP-tag-shaped UPPERCASE literals in a raw Steam
          * name are not ours to delete. If NametagStyler ever gains a new
-         * tag family, extend this regex in the same commit (#279). Existing
-         * StripRichText callers are shipped behaviour and deliberately
-         * unchanged. */
-        private static readonly Regex KnownRichTags = new Regex(
-            @"</?(?:b|i|u|s|allcaps|smallcaps)>|<color=#[0-9A-Fa-f]{6}>|</color>|<size=[0-9]{1,3}%>|</size>|<cspace=[0-9]*\.?[0-9]+em>|</cspace>|<voffset=[0-9]*\.?[0-9]+em>|</voffset>",
-            RegexOptions.Compiled);
+         * tag family, extend this regex in the same commit (#279). Player
+         * names go through CleanPlayerName below; StripRichText stays on text
+         * that is not a player-name field (card names, titles, tiers, logs). */
+        internal const string KnownRichTagPattern =
+            @"</?(?:b|i|u|s|allcaps|smallcaps)>|<color=#[0-9A-Fa-f]{6}>|</color>|<size=[0-9]{1,3}%>|</size>|<cspace=[0-9]*\.?[0-9]+em>|</cspace>|<voffset=[0-9]*\.?[0-9]+em>|</voffset>";
+        private static readonly Regex KnownRichTags = new Regex(KnownRichTagPattern, RegexOptions.Compiled);
 
         internal static string StripKnownRichTags(string input)
         {
             if (string.IsNullOrEmpty(input)) return input;
             return KnownRichTags.Replace(input, "").Trim();
+        }
+
+        /* Player names (bracket names). A Steam name can hold angle brackets
+         * ("<Name>", "AC<DC>Fan", "I <3 U"). StripRichText's blanket <.*?>
+         * deleted everything between them, so "<Name>" read as "":
+         * IdentifyLocalPlayer then kept the player nameless (IsPlaceholderName),
+         * MaybeSyncRankedStateOnce made its first server contact without a
+         * name once the game had run 30 s, and every other client read the
+         * player's name as empty. This removes only the styling tags
+         * NametagStyler publishes (StripKnownRichTags), keeps the raw text when
+         * that would leave nothing, and turns each remaining '<' and '>' into
+         * an ASCII paren, the rule NativeUI.Escape and
+         * CompetitiveUI.SanitizeForImgui already apply at display (ASCII, never
+         * the CJK twins, #47). The result holds no '<', so no TMP or IMGUI
+         * renderer can read rich-text markup in it; and it is idempotent, so a
+         * stored name cleaned again (opponentDisplayName against a fresh
+         * NickName) still compares equal. These display paths use the same
+         * rule: SpectatorHud.PlainName and SanitizeStyledName,
+         * PostSessionReport.PlainPlayerName, CompetitiveUI.StripFfaHudName and
+         * NametagStyler.Wrap. */
+        internal static string CleanPlayerName(string raw)
+        {
+            if (string.IsNullOrEmpty(raw)) return raw;
+            string s = StripKnownRichTags(raw);
+            if (s.Length == 0) s = raw.Trim();
+            return s.Replace("<", "(").Replace(">", ")");
         }
 
         /* Aug 7 item 2 — INVARIANT casing. Twin of CardRarityLookup.ToTitleCase

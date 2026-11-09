@@ -1171,7 +1171,7 @@ namespace CompetitiveRounds
                     {
                         if (pl == null || pl.gameObject == null || pl.data == null) continue;
                         if (pl.TeamID != leadTeam) continue;
-                        who = GameStateWatcher.StripRichText(pl.data.view?.Owner?.NickName ?? who);
+                        who = GameStateWatcher.CleanPlayerName(pl.data.view?.Owner?.NickName ?? who);
                         break;
                     }
                     if (who.Length > 16) who = who.Substring(0, 16);
@@ -1494,26 +1494,6 @@ namespace CompetitiveRounds
         /// current-standing order, deliberately NOT ComparePlacement's
         /// (which uses cumulative pointsTotal). Log/diagnostic display only.
         /// ASCII only (#47).</summary>
-        /// <summary>Log-hygiene tag stripper: removes &lt;...&gt; runs (TMP rich
-        /// text). NOT a security boundary — display surfaces keep their own
-        /// sanitizers; this exists only so diagnostic lines carry names. An
-        /// unmatched '&lt;' eats the remainder, which for a log line is the
-        /// safe direction (truncated name beats markup garbage).</summary>
-        private static string StripRichTags(string s)
-        {
-            if (string.IsNullOrEmpty(s) || s.IndexOf('<') < 0) return s;
-            var sb = new System.Text.StringBuilder(s.Length);
-            bool inTag = false;
-            for (int i = 0; i < s.Length; i++)
-            {
-                char c = s[i];
-                if (inTag) { if (c == '>') inTag = false; continue; }
-                if (c == '<') { inTag = true; continue; }
-                sb.Append(c);
-            }
-            return sb.ToString();
-        }
-
         public static string ScoreLine()
         {
             try
@@ -1529,7 +1509,7 @@ namespace CompetitiveRounds
                     // the 12-char cut used to log "<b><i><u><si" instead of a
                     // name (bug 216/217 triage: the point-over scoreboard is
                     // exactly the line forensics reads). Strip tags FIRST.
-                    nm = StripRichTags(nm);
+                    nm = GameStateWatcher.CleanPlayerName(nm);
                     if (nm.Length > 12) nm = nm.Substring(0, 12);
                     entries.Add((nm, RoundsFor(pl.TeamID), PointsFor(pl.TeamID),
                                  KillsRankFor(pl.TeamID), pl.data.dead));
@@ -4865,13 +4845,13 @@ namespace CompetitiveRounds
             string who = "P" + pid;
             if (!bodiless)
             {
-                try { who = GameStateWatcher.StripRichText(player.data.view?.Owner?.NickName ?? who); } catch { }
+                try { who = GameStateWatcher.CleanPlayerName(player.data.view?.Owner?.NickName ?? who); } catch { }
             }
             else
             {
                 // RJ readmission P2 step 8: an absent seat is named from the
                 // locked roster, the only name every client holds for it.
-                try { who = GameStateWatcher.StripRichText(RosterDisplayName(pid) ?? who); } catch { }
+                try { who = GameStateWatcher.CleanPlayerName(RosterDisplayName(pid) ?? who); } catch { }
             }
             // 10 chars, not 14: a band cell caps at 34, and "{name} picked {card}"
             // is 10 + 8 + 14 = 32 at the longest.

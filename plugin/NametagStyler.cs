@@ -24,6 +24,7 @@ namespace CompetitiveRounds
         // per session the first time we see LocalPlayer.NickName — so repeated PublishToPhoton
         // calls don't double-wrap ("<b><b>Name</b></b>") or lose the original text.
         private static string _baseName;
+        private static string _lastPublished;
 
         private static readonly Dictionary<string, (string open, string close)> _tagsBySku =
             new Dictionary<string, (string, string)>(StringComparer.OrdinalIgnoreCase)
@@ -269,7 +270,9 @@ namespace CompetitiveRounds
 
 
         /// <summary>Strip existing rich-text tags from an incoming nickname and return the
-        /// bare display name. Safe on null/empty input.</summary>
+        /// bare display name. Safe on null/empty input. A blanket strip: kept for the glow
+        /// and font renderers' nameplate match, which runs it on both sides. Player-name
+        /// reads use GameStateWatcher.CleanPlayerName, which keeps bracketed text.</summary>
         public static string Clean(string name)
         {
             if (string.IsNullOrEmpty(name)) return name;
@@ -306,7 +309,9 @@ namespace CompetitiveRounds
         /// the name doesn't flicker across stat-refresh orderings.</summary>
         public static string Wrap(string name, List<string> activeSkus)
         {
-            string clean = Clean(name);
+            // CleanPlayerName keeps bracketed name text ("<Name>" -> "(Name)");
+            // the blanket Clean deleted it.
+            string clean = GameStateWatcher.CleanPlayerName(name);
             if (string.IsNullOrEmpty(clean)) return clean;
             if (activeSkus == null || activeSkus.Count == 0) return clean;
 
@@ -407,15 +412,21 @@ namespace CompetitiveRounds
                 if (RoomActors.LocalIsSpectator) return;
                 if (!PhotonNetwork.IsConnected || PhotonNetwork.LocalPlayer == null) return;
 
-                // Capture the base name once per session. On subsequent calls the LocalPlayer
-                // NickName will already be tag-wrapped by us, so stripping catches the raw
-                // Steam name from the first call.
-                if (string.IsNullOrEmpty(_baseName))
-                    _baseName = Clean(PhotonNetwork.LocalPlayer.NickName);
-
-                string cleanBase = Clean(PhotonNetwork.LocalPlayer.NickName);
-                if (!string.IsNullOrEmpty(cleanBase))
-                    _baseName = cleanBase;  // keep fresh if Steam persona changed
+                // The base name is read only from a NickName this method did not write
+                // (the raw Steam name ROUNDS sets, or a later rename), through
+                // GameStateWatcher.CleanPlayerName, which keeps bracketed name text
+                // ("<Name>" -> "(Name)"; the blanket Clean deleted it, so such a player
+                // was never styled and "AC<DC>Fan" was published as "ACFan"). Our own
+                // published string is never parsed back: a NickName equal to
+                // _lastPublished keeps the base it was built from, so a style tag that
+                // CleanPlayerName does not know can never be carried into the base.
+                string nick = PhotonNetwork.LocalPlayer.NickName;
+                if (nick != _lastPublished)
+                {
+                    string cleanBase = GameStateWatcher.CleanPlayerName(nick ?? "");
+                    if (!string.IsNullOrEmpty(cleanBase))
+                        _baseName = cleanBase;  // keep fresh if Steam persona changed
+                }
                 if (string.IsNullOrEmpty(_baseName)) return;
 
                 var skus = ApiClient.CachedPlayerStats?.active_nametag_skus;
@@ -426,6 +437,7 @@ namespace CompetitiveRounds
                     PhotonNetwork.LocalPlayer.NickName = styled;
                     Plugin.Log.LogInfo($"[NAMETAG] Published '{styled}' ({(skus == null ? 0 : skus.Count)} style(s))");
                 }
+                _lastPublished = styled;
 
                 // Separate custom props for the two local-only effects (glow, typeface). Only
                 // modded clients read them — non-modded players see an unstyled name with no

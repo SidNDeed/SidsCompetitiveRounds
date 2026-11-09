@@ -20300,7 +20300,7 @@ int cW=s.casual_wins,cL=s.casual_losses,sweepG=s.sweeps_given,sweepT=s.sweeps_ta
                             string body = BuildRecordHoverBody(d, r, isMatchBoard);
                             if (!string.IsNullOrEmpty(body))
                                 RegisterHoverRectFor(nameLbl, "", false,
-                                    GameStateWatcher.StripRichText(d.names[r] ?? ""), body);
+                                    GameStateWatcher.CleanPlayerName(d.names[r] ?? ""), body);
                         }
                     }
                 }
@@ -25920,11 +25920,11 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
                 // tooltip's fixed title band (round-2 f14).
                 if (p1Txt != null && !string.IsNullOrEmpty(m.p1_display_name))
                     RegisterHoverRectFor(p1Txt, "", false,
-                        GameStateWatcher.StripRichText(m.p1_display_name),
+                        GameStateWatcher.CleanPlayerName(m.p1_display_name),
                         BuildBracketHoverBody(det, true));
                 if (p2Txt != null && !string.IsNullOrEmpty(m.p2_display_name))
                     RegisterHoverRectFor(p2Txt, "", true,
-                        GameStateWatcher.StripRichText(m.p2_display_name),
+                        GameStateWatcher.CleanPlayerName(m.p2_display_name),
                         BuildBracketHoverBody(det, false));
             }
 

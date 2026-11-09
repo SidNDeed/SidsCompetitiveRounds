@@ -1095,7 +1095,7 @@ namespace CompetitiveRounds
                     if (!LateArmed)
                     {
                         string who = "P" + I(rslot);
-                        try { who = GameStateWatcher.StripRichText(FfaMode.SeatName(rslot) ?? who); } catch { }
+                        try { who = GameStateWatcher.CleanPlayerName(FfaMode.SeatName(rslot) ?? who); } catch { }
                         try { CompetitiveUI.ShowNotification(I18n.TrF("{0} is back", who), new Color(0.6f, 0.9f, 1f), 5f); } catch { }
                     }
                 }

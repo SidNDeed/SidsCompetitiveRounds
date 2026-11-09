@@ -252,7 +252,7 @@ namespace CompetitiveRounds
                 if (_bestByTeam.TryGetValue(team, out cur) && cur != null && cur.Actor <= actor) continue;
 
                 string ownerName = null;
-                try { ownerName = NametagStyler.Clean(pv.Owner != null ? pv.Owner.NickName : null); }
+                try { ownerName = GameStateWatcher.CleanPlayerName(pv.Owner != null ? pv.Owner.NickName : null); }
                 catch { }
                 if (string.IsNullOrEmpty(ownerName)) ownerName = "P" + p.PlayerID;
                 if (ownerName.Length > 14) ownerName = ownerName.Substring(0, 14);

@@ -94,8 +94,11 @@ namespace CompetitiveRounds
         internal static string PlainName(string styled)
         {
             if (string.IsNullOrEmpty(styled)) return "";
-            try { return _allTagStrip.Replace(styled, ""); }
-            catch { return styled; }
+            // Bracket names: drop only the tags NametagStyler publishes and show every
+            // other angle bracket as a paren ("<Name>" -> "(Name)"), the rule of
+            // GameStateWatcher.CleanPlayerName; the blanket strip deleted the text.
+            try { return GameStateWatcher.CleanPlayerName(styled) ?? ""; }
+            catch { return styled.Replace("<", "(").Replace(">", ")"); }
         }
 
         // ── item 8: the connect state, made COHERENT ─────────────────────
@@ -858,6 +861,50 @@ namespace CompetitiveRounds
             catch { return _allTagStrip.Replace(s, ""); }
         }
 
+        /* Bracket names: the player-name twin of SanitizeStyled. A name keeps
+         * the <b>, <i>, <color=#RRGGBB> and </color> tags NametagStyler
+         * publishes, drops its other tags, and shows every other angle bracket
+         * as an ASCII paren, so "<Name>" reads "(Name)" and "AC<DC>Fan" reads
+         * "AC(DC)Fan" instead of losing the bracketed text (the rule of
+         * GameStateWatcher.CleanPlayerName, whose tag pattern this reads). A
+         * name that is only tags or whitespace, or whose kept tags open and
+         * close a different number of times, shows the plain CleanPlayerName
+         * form. Titles and rank names keep SanitizeStyled. The token pattern
+         * is a compile-time constant passed to the static Regex.Replace, not
+         * held in a static field. */
+        internal static string SanitizeStyledName(string s)
+        {
+            if (string.IsNullOrEmpty(s)) return "";
+            string plain = GameStateWatcher.CleanPlayerName(s) ?? "";
+            try
+            {
+                if (string.IsNullOrEmpty(GameStateWatcher.StripKnownRichTags(s))) return plain;
+                string kept = System.Text.RegularExpressions.Regex.Replace(s,
+                    "(?:" + GameStateWatcher.KnownRichTagPattern + ")|[<>]", tok =>
+                {
+                    string v = tok.Value;
+                    if (v == "<") return "(";
+                    if (v == ">") return ")";
+                    if (v == "<b>" || v == "</b>" || v == "<i>" || v == "</i>" || v == "</color>"
+                        || v.StartsWith("<color=", StringComparison.Ordinal)) return v;
+                    return "";
+                });
+                int color = 0, bold = 0, italic = 0;
+                foreach (System.Text.RegularExpressions.Match m in _allTagStrip.Matches(kept))
+                {
+                    string t = m.Value;
+                    if (t == "</color>") color--;
+                    else if (t.StartsWith("<color=", StringComparison.Ordinal)) color++;
+                    else if (t == "<b>") bold++;
+                    else if (t == "</b>") bold--;
+                    else if (t == "<i>") italic++;
+                    else if (t == "</i>") italic--;
+                }
+                return color == 0 && bold == 0 && italic == 0 ? kept : plain;
+            }
+            catch { return plain; }
+        }
+
         /// <summary>Aug 12 item 9b: THE one place a spectator surface renders a
         /// title, in the same shape every other title surface in the mod uses —
         /// a bold bracketed span in the title's OWN colour (NativeUI's Home,
@@ -933,7 +980,7 @@ namespace CompetitiveRounds
         private static void AppendFighter(int i, int decorLevel)
         {
             var names = SpectatorSync.FighterNames;
-            _sb.Append(SanitizeStyled(names[i]));
+            _sb.Append(SanitizeStyledName(names[i]));
             if (decorLevel < 2) _sb.Append(DecorFor(i, decorLevel < 1));
         }
 

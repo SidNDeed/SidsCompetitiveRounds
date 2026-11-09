@@ -5328,7 +5328,7 @@ namespace CompetitiveRounds
                 // Steam can legitimately return the reserved literal as a person's real
                 // display name. It is indistinguishable from vanilla's placeholder, but
                 // the platform lookup succeeded, so preserve it and avoid 14 useless calls.
-                if (string.Equals(NametagStyler.Clean(persona), VanillaPlaceholder,
+                if (string.Equals(GameStateWatcher.CleanPlayerName(persona), VanillaPlaceholder,
                     StringComparison.Ordinal))
                 {
                     _repairAttempts = MaxRepairAttemptsPerRoom;
@@ -5361,7 +5361,7 @@ namespace CompetitiveRounds
         private static bool NeedsRepair(string nickname)
         {
             if (string.IsNullOrWhiteSpace(nickname)) return true;
-            string clean = NametagStyler.Clean(nickname);
+            string clean = GameStateWatcher.CleanPlayerName(nickname);
             return string.IsNullOrWhiteSpace(clean) ||
                    string.Equals(clean, VanillaPlaceholder, StringComparison.Ordinal);
         }

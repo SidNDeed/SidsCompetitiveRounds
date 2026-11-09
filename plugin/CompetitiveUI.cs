@@ -906,18 +906,16 @@ namespace CompetitiveRounds
 
         private static string StripFfaHudName(string input, int slot)
         {
-            if (string.IsNullOrEmpty(input)) return ffaHudFallbackNames[slot];
+            // Bracket names: only the tags NametagStyler publishes are dropped and
+            // every other angle bracket shows as a paren, so "<Name>" reads "(Name)"
+            // here instead of the slot fallback (GameStateWatcher.CleanPlayerName).
+            // Runs on the 0.5 s row refresh, not per frame.
+            string clean = GameStateWatcher.CleanPlayerName(input);
+            if (string.IsNullOrEmpty(clean)) return ffaHudFallbackNames[slot];
             int count = 0;
-            bool inTag = false;
-            for (int i = 0; i < input.Length && count < FfaHudNameChars; i++)
+            for (int i = 0; i < clean.Length && count < FfaHudNameChars; i++)
             {
-                char c = input[i];
-                if (c == '<') { inTag = true; continue; }
-                if (inTag)
-                {
-                    if (c == '>') inTag = false;
-                    continue;
-                }
+                char c = clean[i];
                 ffaHudNameBuffer[count++] = c < ' ' ? ' ' : c;
             }
             while (count > 0 && ffaHudNameBuffer[count - 1] == ' ') count--;
@@ -1242,14 +1240,14 @@ namespace CompetitiveRounds
                     // Control characters are hostile input for a GUI label (#100).
                     var sb = new System.Text.StringBuilder(raw.Length);
                     foreach (char c in raw) sb.Append(c < ' ' ? ' ' : c);
-                    string safe = SpectatorHud.SanitizeStyled(sb.ToString());
+                    string safe = SpectatorHud.SanitizeStyledName(sb.ToString());
                     if (string.IsNullOrWhiteSpace(safe))
                     {
-                        safe = NametagStyler.Clean(raw) ?? "";
+                        safe = GameStateWatcher.CleanPlayerName(raw) ?? "";
                         if (string.IsNullOrWhiteSpace(safe)) return "?";
                     }
                     if (safe.Length <= 64) return safe;
-                    string clean = NametagStyler.Clean(safe) ?? "";
+                    string clean = GameStateWatcher.CleanPlayerName(safe) ?? "";
                     if (clean.Length > 16) clean = clean.Substring(0, 16);
                     return clean.Length == 0 ? "P" + (teamId + 1) : clean;
                 }
@@ -4534,7 +4532,7 @@ namespace CompetitiveRounds
                     // brackets in names ("AC<DC>Fan" -> "ACFan"), which the
                     // paren-sanitiser below has always rendered as
                     // "AC(DC)Fan". Strip, then sanitise, then truncate.
-                    string n = SanitizeForImgui(GameStateWatcher.StripKnownRichTags(p.NickName ?? ""));
+                    string n = SanitizeForImgui(GameStateWatcher.CleanPlayerName(p.NickName ?? ""));
                     if (n.Length == 0) n = "?";
                     if (n.Length > 14) n = n.Substring(0, 14);
                     names = shown == 0 ? n : names + ", " + n;
@@ -9572,7 +9570,7 @@ namespace CompetitiveRounds
                     foreach (var pp in RoomActors.ActiveFighters())   // census: a spectator is neither mate nor foe
                     {
                         if (pp == null || pp.IsLocal) continue;
-                        string nm = GameStateWatcher.StripRichText(pp.NickName ?? "?");
+                        string nm = GameStateWatcher.CleanPlayerName(pp.NickName ?? "?");
                         if (string.IsNullOrEmpty(nm)) nm = "?";
                         if (nm.Length > 14) nm = nm.Substring(0, 14);
                         int t = -1;
