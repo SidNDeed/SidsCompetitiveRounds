@@ -1861,12 +1861,19 @@ def test_every_answer_the_server_gives_a_submit_has_a_row_that_closes_something(
     for key, row in rows[:len(answers)]:
         assert not row.endswith(">Nothing") and not row.startswith("NotSent"), (key, row)
     rest = dict(rows[len(answers):])
-    assert list(rest) == ["426", "418", "429", "404", "500", "502", "0"], rows
+    assert list(rest) == ["503/read_replica", "503", "426", "418", "429", "404", "500", "502", "0"], rows
     # The version answer closes the run and has a line of its own; a refusal
     # the table does not name closes the identical request; a failing server
     # or no answer closes nothing, and nothing is sent again without a press.
-    assert (rest["426"], rest["418"], rest["500"], rest["0"]) == (
-        "NeedsUpdate>Run", "NotAccepted>Same", "NotSent>Nothing", "NotSent>Nothing"), rest
+    assert (rest["503/read_replica"], rest["503"], rest["426"], rest["418"], rest["500"], rest["0"]) == (
+        "Unavailable>Run", "Unavailable>Run", "NeedsUpdate>Run", "NotAccepted>Same", "NotSent>Nothing",
+        "NotSent>Nothing"), rest
+    # The standby's 503 is the route's own answer, not a rule's: the submit
+    # refuses to write on a read replica (backend/api/player_reports.py).
+    routes_src = (REPO / "backend" / "api" / "player_reports.py").read_text(encoding="utf-8")
+    submit = routes_src[routes_src.index("async def submit_player_report("):]
+    submit = submit[:submit.index(chr(10) + "@plr_router")]
+    assert 'status_code=503, detail={"error": "read_replica"}' in submit, "the submit's standby answer moved"
     said = _got(_named_case(harness_run, "each outcome has a line of its own", "playerreport"))
     assert said.startswith("outcomes=13 lines=13 blank=0 "), said
 

@@ -87,16 +87,20 @@ ENV_ALLOWED = {"PGCLIENTENCODING": "UTF8"}
 # it (two _connect opens, _snap and _internal_not_enabled). Neither file has
 # a d2_seed prerequisite. So _connect 1114 -> 1118, record 426 -> 427, run
 # 377 -> 378, test_zz 22 -> 23; every other count is unchanged.
+# Re-frozen on ask 14 (claude/ask14-player-report): the lane's only backend/sql change is migration 404
+# and its rollback file, and the whole-module run on seat-3 at the lane's 1ad7974b
+# differs from this table at exactly the four sites the B10 note above names, each by one file's cost:
+# _connect 1118 -> 1122, record 427 -> 428, run 378 -> 379, test_zz 23 -> 24; every other count is unchanged.
 OPEN_COUNTS = {
-    "_admin": 315, "_clone_with_oid": 2, "_connect": 1118, "_fetchval": 6, "_orm": 1,
+    "_admin": 315, "_clone_with_oid": 2, "_connect": 1122, "_fetchval": 6, "_orm": 1,
     "_probe_problems": 2, "_r10_authid_reading": 1, "_r10_inplace_bound": 1,
     "_r10_outside_across_drop": 2, "_r10_routes": 1, "_r10_settings": 2, "_r9_databases": 1,
     "_template_problem": 3, "_whoami": 3}
 START_COUNTS = {
-    "_apply_tail": 2, "_blobs": 1, "_build": 1, "_build.<locals>.record": 427,
-    "_build.<locals>.run": 378, "_git": 2, "_route_run": 56,
+    "_apply_tail": 2, "_blobs": 1, "_build": 1, "_build.<locals>.record": 428,
+    "_build.<locals>.run": 379, "_git": 2, "_route_run": 56,
     "test_migrations_are_applied_from_the_object_store": 2,
-    "test_zz_rollback_and_resume_files_do_not_change_mail_inbox_rev": 23}
+    "test_zz_rollback_and_resume_files_do_not_change_mail_inbox_rev": 24}
 
 REUSE_REFUSAL = ("D2_REUSE_DB is set: the chain was not built in this run, so the run is not "
                  "one the packet cites (ruling FOUR-R11-A17 (g))")

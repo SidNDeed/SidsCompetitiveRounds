@@ -1262,9 +1262,12 @@ async def _bulk(conn):
         " ended_at) SELECT gen_random_uuid(), p0.id, p1.id, p2.id, 3, 1, 1, " + _WHEN + " FROM g"
         " JOIN p p0 ON p0.n = 1 + g.x JOIN p p1 ON p1.n = 1 + (g.x + 1) % $2::bigint"
         " JOIN p p2 ON p2.n = 1 + (g.x + 2) % $2::bigint", PLAN_ROWS["ovt_matches"], n)
+    # Each row carries its game_number: the numbering trigger of migration
+    # 327 numbers an unnumbered row inside its lobby, and one lobby (here
+    # NULL) holds the 999 numbers 1..999 only.
     await conn.execute(
-        "INSERT INTO ffa_matches (id, photon_room_id, player_count, ended_at)"
-        " SELECT gen_random_uuid(), 'ffa_bulk_' || g.i, 6, " + _WHEN +
+        "INSERT INTO ffa_matches (id, photon_room_id, player_count, ended_at, game_number)"
+        " SELECT gen_random_uuid(), 'ffa_bulk_' || g.i, 6, " + _WHEN + ", (1 + g.i % 999)::smallint"
         " FROM (SELECT i FROM generate_series(1, $1::int) i) g", PLAN_ROWS["ffa_matches"])
     await conn.execute(
         _NUMBERED + ", m AS (SELECT id, split_part(photon_room_id, '_', 3)::bigint AS i FROM ffa_matches)"

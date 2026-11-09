@@ -84,15 +84,18 @@ namespace CompetitiveRounds
         // ---- the answer table ------------------------------------------------------
 
         /// <summary>Every answer the server's rules give a submit ("status
-        /// code"), then the answers that are not the rules' own: the limiter's
-        /// 429, a missing route's 404, a failing server, no answer.</summary>
+        /// code"), then the answers that are not the rules' own: the route's
+        /// 503 on the standby (read_replica), a 503 whose detail names no code
+        /// (the identity locks' queue_contended), the version gate's 426, a
+        /// proxy's own 4xx, the limiter's 429, a missing route's 404, a failing
+        /// server, no answer.</summary>
         private static readonly string[] ServerAnswers =
         {
             "401 session_required", "503 player_reports_off", "400 bad_length", "413 body_too_large",
             "403 no_player", "404 game_not_found", "422 player_not_in_game", "409 already_reported",
             "429 report_limit", "422 bad_body", "422 bad_game_kind", "422 bad_game_id", "422 bad_player",
             "422 bad_reason", "422 bad_details", "422 details_too_long", "422 details_required", "422 bad_log",
-            "426 ", "418 ", "429 ", "404 ", "500 ", "502 ", "0 ",
+            "503 read_replica", "503 ", "426 ", "418 ", "429 ", "404 ", "500 ", "502 ", "0 ",
         };
 
         private static void AnswerCases(SelfTestResult r)
@@ -150,7 +153,8 @@ namespace CompetitiveRounds
                       + "429/report_limit=DailyLimit>Run;422/bad_body=NotAccepted>Same;422/bad_game_kind=NotAccepted>Same;"
                       + "422/bad_game_id=NotAccepted>Same;422/bad_player=NotAccepted>Same;422/bad_reason=NotAccepted>Same;"
                       + "422/bad_details=NotAccepted>Same;422/details_too_long=NotAccepted>Same;"
-                      + "422/details_required=NotAccepted>Same;422/bad_log=NotAccepted>Same;426=NeedsUpdate>Run;"
+                      + "422/details_required=NotAccepted>Same;422/bad_log=NotAccepted>Same;"
+                      + "503/read_replica=Unavailable>Run;503=Unavailable>Run;426=NeedsUpdate>Run;"
                       + "418=NotAccepted>Same;429=Unavailable>Run;"
                       + "404=Unavailable>Run;500=NotSent>Nothing;502=NotSent>Nothing;0=NotSent>Nothing", got);
         }
@@ -217,22 +221,34 @@ namespace CompetitiveRounds
             After(r, 0, "", ExpAll("NotSent", N));
 
             // The sweep behind the table: whatever the server answers a
-            // submit with, the request it answered is closed afterwards.
-            int resend = 0, swept = 0;
+            // submit with, the request it answered is closed afterwards. The
+            // answers swept are exactly those the table judges (FindAnswer
+            // gives a row other than NoAnswerRow), and every row of the table
+            // but the success's is reached by one of them.
+            int resend = 0, swept = 0, judged = 0;
             var open = new StringBuilder();
+            var reached = new List<AnswerRow>();
             foreach (string c in ServerAnswers)
             {
                 int sp = c.IndexOf(' ');
                 int status = int.Parse(c.Substring(0, sp), CultureInfo.InvariantCulture);
+                string code = c.Substring(sp + 1);
+                AnswerRow row = FindAnswer(status, code);
+                if (!ReferenceEquals(row, NoAnswerRow)) { judged++; if (!reached.Contains(row)) reached.Add(row); }
                 if (status == 0 || (status >= 500 && status != 503)) continue;   // not judged: nothing closes, and nothing is sent again without a press
                 var st = new FormState();
                 Game g1 = G1();
-                Apply(st, status, c.Substring(sp + 1), true, g1, g1.Others[0], "other", " he left ", true, Key1);
+                Apply(st, status, code, true, g1, g1.Others[0], "other", " he left ", true, Key1);
                 swept++;
                 if (Told(st, g1, g1.Others[0], "other", "he left", true, Key1) == "None") { resend++; open.Append(c).Append(';'); }
             }
-            Case(r, "a refused request is never sent again", swept == 20 && resend == 0,
-                 "answers=" + swept + " open_again=" + resend + (open.Length > 0 ? " " + open : ""));
+            var unswept = new StringBuilder();
+            foreach (AnswerRow row in Answers)
+                if (row.Status != 200 && !reached.Contains(row)) unswept.Append(row.Status).Append('/').Append(row.Code).Append(';');
+            Case(r, "a refused request is never sent again",
+                 swept > 0 && swept == judged && resend == 0 && unswept.Length == 0,
+                 "answers=" + swept + " judged=" + judged + " open_again=" + resend
+                 + " rows_unswept=" + (unswept.Length > 0 ? unswept.ToString() : "0") + (open.Length > 0 ? " " + open : ""));
         }
 
         // ---- before a press ----------------------------------------------------------
