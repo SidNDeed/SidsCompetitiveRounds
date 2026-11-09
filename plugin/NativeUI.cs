@@ -7886,7 +7886,12 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
         // click on it closes the popup and opens the modal (see OnBugIcon).
         internal enum UtilKind { None, Mail, Music }
         private static UtilKind utilKind = UtilKind.None;
-        private static GameObject utilStripGO, utilMailIconGO, utilMusicIconGO, utilBugIconGO, utilBadgeGO;
+        private static GameObject utilStripGO, utilMailIconGO, utilMusicIconGO, utilBugIconGO, utilReportIconGO, utilBadgeGO;
+        /// <summary>The strip's icon size and pitch. Ask 14 made it four icons
+        /// at pitch 47; 36f is the smaller size kept ready, and neither the
+        /// pitch nor a slot changes with it.</summary>
+        private const float UtilIconSize = 40f;
+        private const float UtilIconPitch = 47f;
         private static object utilBadgeTxt, utilTitleTxt;
         private static GameObject utilPopupGO, utilBoxGO, utilBodyGO, mailBodyGO, musicBodyGO;
         private static RectTransform utilBoxRT;
@@ -7901,7 +7906,7 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             get { try { return MailUI.ModalOpen || CompetitiveUI.PromptOpen; } catch { return false; } }
         }
 
-        /// <summary>BuildPage: the three 40 px icon buttons in the title row's
+        /// <summary>BuildPage: the four 40 px icon buttons in the title row's
         /// 195 px balancer slot, plus the unread badge on the mail icon.</summary>
         private static void BuildUtilityStrip(Transform titleRow)
         {
@@ -7914,25 +7919,28 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             // keep 40x40, overhanging the row by 5 px top and bottom (nothing
             // masks the header). CreateIconButton: sprite + preserveAspect, no
             // hover tint; the pressed feedback is the popup opening.
-            utilMusicIconGO = UIFactory.CreateIconButton(utilStripGO.transform, "UtilMusic", "ic_music.png", 40f, () => OpenUtilityPopup(UtilKind.Music));
-            utilMailIconGO = UIFactory.CreateIconButton(utilStripGO.transform, "UtilMail", "ic_mail.png", 40f, () => OpenUtilityPopup(UtilKind.Mail));
-            utilBugIconGO = UIFactory.CreateIconButton(utilStripGO.transform, "UtilBug", "ic_bug.png", 40f, OnBugIcon);
+            utilMusicIconGO = UIFactory.CreateIconButton(utilStripGO.transform, "UtilMusic", "ic_music.png", UtilIconSize, () => OpenUtilityPopup(UtilKind.Music));
+            utilMailIconGO = UIFactory.CreateIconButton(utilStripGO.transform, "UtilMail", "ic_mail.png", UtilIconSize, () => OpenUtilityPopup(UtilKind.Mail));
+            utilBugIconGO = UIFactory.CreateIconButton(utilStripGO.transform, "UtilBug", "ic_bug.png", UtilIconSize, OnBugIcon);
+            utilReportIconGO = UIFactory.CreateIconButton(utilStripGO.transform, "UtilReport", "ic_report.png", UtilIconSize, OnReportIcon);
             // Right inset 14 keeps the badge's overhang short of the BACK button,
             // so Mail keeps that slot: the badge reaches 19 px right of its
             // icon's right edge (anchor (1,1), offset 6, half of 26), which from
-            // -14 stops 5 px past the strip edge, while from -66 it would reach
-            // -47 and collide with the 12 px gap and the icon beyond it. Bug
-            // takes the slot Music held and Music moves one pitch further left;
-            // 118 + 40 = 158 is still inside the 195 px balancer and prefW is
-            // unchanged, so the title's optical centre does not move.
-            const float utilPitch = 40f + 12f;
+            // -14 stops 5 px past the strip edge, while from the next slot it
+            // would lie over the gap and the icon beyond it. Ask 14 adds a
+            // fourth icon: four at pitch 47 fill the 195 px balancer to the last
+            // pixel (14 + 3 * 47 + 40 = 195), with 7 px between icons where there
+            // were 12, and prefW is unchanged, so the title's optical centre does
+            // not move. From the right: Mail, Bug, Report, Music.
             PlaceUtilIcon(utilMailIconGO, -14f);
-            PlaceUtilIcon(utilBugIconGO, -14f - utilPitch);
-            PlaceUtilIcon(utilMusicIconGO, -14f - 2f * utilPitch);
+            PlaceUtilIcon(utilBugIconGO, -14f - UtilIconPitch);
+            PlaceUtilIcon(utilReportIconGO, -14f - 2f * UtilIconPitch);
+            PlaceUtilIcon(utilMusicIconGO, -14f - 3f * UtilIconPitch);
             var tint = new Color(0.85f, 0.87f, 0.92f, 1f);
             UIFactory.SetImageColor(utilMusicIconGO, tint);
             UIFactory.SetImageColor(utilMailIconGO, tint);
             UIFactory.SetImageColor(utilBugIconGO, tint);
+            UIFactory.SetImageColor(utilReportIconGO, tint);
             // The bug icon's click has to survive the mail/music popup's own
             // ModalBlockInput, so its ClickHandler carries bypassModalBlock;
             // OnBugIcon re-checks WHICH surface is blocking (see there).
@@ -7940,6 +7948,13 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             {
                 var bugClick = utilBugIconGO.GetComponent<ClickHandler>();
                 if (bugClick != null) bugClick.bypassModalBlock = true;
+            }
+            // The report icon sits under the same popup, so it carries the same
+            // flag, and OnReportIcon repeats OnBugIcon's first line.
+            if (utilReportIconGO != null)
+            {
+                var reportClick = utilReportIconGO.GetComponent<ClickHandler>();
+                if (reportClick != null) reportClick.bypassModalBlock = true;
             }
             if (utilMailIconGO != null)
             {
@@ -7976,7 +7991,8 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             // for nothing else, so no feature can quietly capture it (#306).
             // GetEmbeddedSprite caches by suffix, so this read costs a dictionary
             // hit and reports what CreateIconButton actually got.
-            Plugin.Log.LogInfo("[UTIL-STRIP] icons=3 bug=" + (GetEmbeddedSprite("ic_bug.png") != null ? 1 : 0));
+            Plugin.Log.LogInfo("[UTIL-STRIP] icons=4 bug=" + (GetEmbeddedSprite("ic_bug.png") != null ? 1 : 0)
+                               + " report=" + (GetEmbeddedSprite("ic_report.png") != null ? 1 : 0));
         }
 
         /// <summary>Bug icon: raises the IMGUI bug-report modal, closing the
@@ -8003,6 +8019,22 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             CompetitiveUI.OpenBugReportModal();
         }
 
+        /// <summary>Report icon (ask 14): raises the IMGUI player report form by
+        /// OnBugIcon's rule and for its reason. The handler carries
+        /// bypassModalBlock so it is alive under the mail/music popup, and the
+        /// first line narrows that back to the popup. The form's own flag is in
+        /// BackdroplessModalOpen (PlayerReportUI.AnyOpen), so the handler
+        /// refuses at ClickHandler.Update once the form is up.</summary>
+        private static void OnReportIcon()
+        {
+            if (ClickHandler.ModalBlockInput && !UtilityPopupOpen) return;
+            if (UtilityPopupOpen) CloseUtilityPopup();
+            // Emitted only here: its presence says a click at this icon reached
+            // the body (the bug icon's line, for the same reason).
+            Plugin.Log.LogInfo("[UTIL-STRIP] report icon -> player report form");
+            PlayerReportUI.Open();
+        }
+
         private static void PlaceUtilIcon(GameObject go, float right)
         {
             if (go == null) return;
@@ -8010,7 +8042,7 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             rt.anchorMin = rt.anchorMax = new Vector2(1f, 0.5f);
             rt.pivot = new Vector2(1f, 0.5f);
             rt.anchoredPosition = new Vector2(right, 0f);
-            rt.sizeDelta = new Vector2(40f, 40f);
+            rt.sizeDelta = new Vector2(UtilIconSize, UtilIconSize);
         }
 
         /// <summary>64x64 antialiased disc (4x4 supersampled coverage), cached
@@ -23146,6 +23178,64 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
             return btn;
         }
 
+        // Ask 14: the count of open player reports, on the launcher's corner.
+        private static GameObject playerReportBadgeGO;
+        private static object playerReportBadgeTxt;
+        private static int playerReportOpen;
+
+        /// <summary>The badge of the Player Reports launcher: the mail badge's
+        /// disc at 20 px, anchored on the button's top right corner. It is a
+        /// child of the button, so it takes no width and the packed row does not
+        /// move, and it takes no clicks.</summary>
+        private static void BuildPlayerReportBadge(GameObject launcher)
+        {
+            playerReportBadgeGO = null; playerReportBadgeTxt = null;
+            if (launcher == null) return;
+            var badge = new GameObject("APlrRptBadge");
+            badge.transform.SetParent(launcher.transform, false);
+            var brt = badge.AddComponent<RectTransform>();
+            brt.anchorMin = brt.anchorMax = new Vector2(1f, 1f);
+            brt.pivot = new Vector2(0.5f, 0.5f);
+            brt.anchoredPosition = new Vector2(-4f, -4f);
+            brt.sizeDelta = new Vector2(20f, 20f);
+            if (UIFactory.tImage != null)
+            {
+                var bimg = badge.AddComponent(UIFactory.tImage);
+                try
+                {
+                    var bf = BindingFlags.Public | BindingFlags.Instance;
+                    UIFactory.tImage.GetProperty("sprite", bf)?.SetValue(bimg, GetUtilBadgeSprite());
+                    UIFactory.tImage.GetProperty("preserveAspect", bf)?.SetValue(bimg, true);
+                    UIFactory.tImage.GetProperty("raycastTarget", bf)?.SetValue(bimg, false);
+                    UIFactory.tImage.GetProperty("color", bf)?.SetValue(bimg, new Color(0.898f, 0.224f, 0.208f, 1f));   // #E53935, the mail badge's red
+                }
+                catch { }
+            }
+            playerReportBadgeTxt = UIFactory.CreateText("APlrRptBadgeTxt", badge.transform, "", 12f, C_WHITE, UIFactory.AlignMidCenter, sizeDelta: new Vector2(20, 20));
+            var tgo = (playerReportBadgeTxt as Component)?.gameObject;
+            if (tgo != null) { var trt = tgo.GetComponent<RectTransform>(); trt.anchorMin = Vector2.zero; trt.anchorMax = Vector2.one; trt.offsetMin = Vector2.zero; trt.offsetMax = Vector2.zero; }
+            UIFactory.SetBold(playerReportBadgeTxt, true);
+            UIFactory.FitOneLine(playerReportBadgeTxt);
+            playerReportBadgeGO = badge;
+            SetPlayerReportBadge(playerReportOpen);
+        }
+
+        /// <summary>The count of open reports as the last admin read gave it
+        /// (PlayerReportUI). The badge hides at 0 and reads "99+" past 99.</summary>
+        internal static void SetPlayerReportBadge(int open)
+        {
+            playerReportOpen = open < 0 ? 0 : open;
+            try
+            {
+                if (playerReportBadgeGO == null) return;
+                string t = PlayerReportRules.CountText(playerReportOpen);
+                bool show = t.Length > 0;
+                if (playerReportBadgeGO.activeSelf != show) playerReportBadgeGO.SetActive(show);
+                if (show && playerReportBadgeTxt != null) UIFactory.SetTextRaw(playerReportBadgeTxt, t);
+            }
+            catch { }
+        }
+
         private static GameObject BuildAdminTab(Transform parent)
         {
             var panel = new GameObject("AdminPanel");
@@ -23378,6 +23468,10 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
             // Queues: the three viewers, on the second page above the lists.
             AdminLauncher(slots, "ABugRpt", () =>
                 CompetitiveUI.OpenBugReportAdminViewer());
+            // Ask 14: the player reports' viewer. The badge on its corner is the
+            // count of open reports (SetPlayerReportBadge; hidden at 0).
+            BuildPlayerReportBadge(AdminLauncher(slots, "APlrRpt", () =>
+                PlayerReportUI.OpenAdmin()));
             // Round 3 item 2: review queue for artist-submitted cosmetics.
             AdminLauncher(slots, "ACosR", () =>
                 CompetitiveUI.OpenCosmeticReview());
@@ -23509,6 +23603,10 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
             // Everything below renders into a container that is now hidden, and
             // every list it reads is admin-only data a moderator never fetches.
             if (!ApiClient.IsAdmin) return;
+            // Ask 14: the open player reports' count for the launcher's badge. One
+            // admin read per opening of the menu and never two inside a minute
+            // (PlayerReportRules.MayAskCount, through PlayerReportUI).
+            PlayerReportUI.RefreshOpenCount();
 
             // Flag rows
             var flags = ApiClient.CachedFlaggedMatches ?? new List<ApiClient.FlaggedMatchEntry>();

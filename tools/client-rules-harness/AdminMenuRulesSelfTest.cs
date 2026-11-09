@@ -71,8 +71,8 @@ namespace CompetitiveRounds
                     if (!ids.Add(Launchers[i].Id)) dupId = true;
                     if (!Launchers[i].Label.EndsWith("...", StringComparison.Ordinal)) badEllipsis = true;
                 }
-                Check(r, "table: 18 packed launchers with distinct ids and every label ending in ..., plus 4 header launchers and 8 verdicts",
-                    Launchers.Length == 18 && !dupId && !badEllipsis && HeaderLaunchers.Length == 4 && Verdicts.Length == 8,
+                Check(r, "table: 19 packed launchers with distinct ids and every label ending in ..., plus 4 header launchers and 8 verdicts",
+                    Launchers.Length == 19 && !dupId && !badEllipsis && HeaderLaunchers.Length == 4 && Verdicts.Length == 8,
                     "launchers=" + Launchers.Length + " dupId=" + dupId + " badEllipsis=" + badEllipsis + " header=" + HeaderLaunchers.Length + " verdicts=" + Verdicts.Length);
 
                 // 6b. The lookups NativeUI builds from: a launcher by its id, a group's scope.
@@ -94,8 +94,8 @@ namespace CompetitiveRounds
                     chat == "Mute Player...;Mute From Message...;Delete Chat Message...;Unmute Player...;Chat Lockdown...", chat);
                 Check(r, "layout: Players is Ban Steam ID, Grant Achievement, Grant Artist, Revoke Artist, Grant Translator, Revoke Translator",
                     players == "Ban Steam ID...;Grant Achievement...;Grant Artist...;Revoke Artist...;Grant Translator...;Revoke Translator...", players);
-                Check(r, "layout: Server is Server Alert, End Alert, Admin Roster, Action Log; Queues is Bug Reports, Cosmetic Reviews, Approved Update Queue",
-                    server == "Server Alert...;End Alert...;Admin Roster...;Action Log..." && queues == "Bug Reports...;Cosmetic Reviews...;Approved Update Queue...",
+                Check(r, "layout: Server is Server Alert, End Alert, Admin Roster, Action Log; Queues is Bug Reports, Player Reports, Cosmetic Reviews, Approved Update Queue",
+                    server == "Server Alert...;End Alert...;Admin Roster...;Action Log..." && queues == "Bug Reports...;Player Reports...;Cosmetic Reviews...;Approved Update Queue...",
                     server + " | " + queues);
 
                 // 8. Who sees what: a moderator keeps main's four chat buttons and no bar.

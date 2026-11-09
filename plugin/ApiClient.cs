@@ -8916,6 +8916,208 @@ namespace CompetitiveRounds
                 (ok, resp) => callback?.Invoke(ok, resp)));
         }
 
+        // ── Ask 14: player reports ────────────────────────────────────────
+        // What a press may send and what each answer closes are
+        // PlayerReportRules' (executed by the client-rules harness); these five
+        // calls only carry. The submit's body has no field for who reports:
+        // the server takes the reporter from the session StampVersionHeader
+        // attaches and from nothing else. Each callback's first argument is
+        // the HTTP status, 0 when no answer reached this process.
+
+        /// <summary>GET /api/v1/player-reports/games: the caller's own recent
+        /// games, each with its other players, and what is left of the day's
+        /// limit (-1 when the answer does not say).</summary>
+        internal static void FetchReportableGames(Action<int, string, List<PlayerReportRules.Game>, int> done)
+        {
+            if (Plugin.Instance == null) { done(0, "", null, -1); return; }
+            long code = 0;
+            Plugin.Instance.StartCoroutine(GetRequest($"{baseUrl}/api/v1/player-reports/games", (ok, text) =>
+            {
+                if (!ok)
+                {
+                    int status = code > 0 ? (int)code : PlayerReportRules.StatusOf(false, text);
+                    Plugin.Log.LogWarning("[PLAYER-REPORT] the games read failed: status " + status);
+                    done(status, PlayerReportRules.ErrorCode(text), null, -1);
+                    return;
+                }
+                List<PlayerReportRules.Game> games = null;
+                int remaining = -1;
+                try { games = ParseReportableGames(text, out remaining); }
+                catch (Exception ex) { Plugin.Log.LogWarning("[PLAYER-REPORT] games parse: " + ex.GetType().Name); }
+                if (games == null) done(0, "", null, -1);
+                else done(200, "", games, remaining);
+            }, detailedErrors: true, sessionAware: true, onResponseCode: c => code = c));
+        }
+
+        /// <summary>The games answer. Names are other players' text, so the
+        /// array and each object are cut by the string-aware slicers, and a
+        /// game's own keys are read from the part before its players.</summary>
+        private static List<PlayerReportRules.Game> ParseReportableGames(string json, out int remaining)
+        {
+            var list = new List<PlayerReportRules.Game>();
+            remaining = -1;
+            if (string.IsNullOrEmpty(json)) return list;
+            if (json.IndexOf("\"remaining\":", StringComparison.Ordinal) >= 0)
+                remaining = Math.Max(0, ExtractJsonInt(json, "remaining"));
+            int key = json.IndexOf("\"games\":", StringComparison.Ordinal);
+            int open = key >= 0 ? json.IndexOf('[', key) : -1;
+            int close = open >= 0 ? FindMatchingBracketStringAware(json, open) : -1;
+            if (open < 0 || close <= open) return list;
+            foreach (string g in SliceTopLevelObjects(json.Substring(open + 1, close - open - 1)))
+            {
+                var others = new List<PlayerReportRules.Other>();
+                int oKey = g.IndexOf("\"others\":", StringComparison.Ordinal);
+                int oOpen = oKey >= 0 ? g.IndexOf('[', oKey) : -1;
+                int oClose = oOpen >= 0 ? FindMatchingBracketStringAware(g, oOpen) : -1;
+                if (oOpen >= 0 && oClose > oOpen)
+                {
+                    foreach (string o in SliceTopLevelObjects(g.Substring(oOpen + 1, oClose - oOpen - 1)))
+                    {
+                        string steam = ExtractJsonString(o, "steam_id");
+                        if (steam.Length == 0) continue;
+                        others.Add(new PlayerReportRules.Other(steam, ExtractJsonString(o, "name"), ExtractJsonBool(o, "reported")));
+                    }
+                }
+                string head = oKey > 0 ? g.Substring(0, oKey) : g;
+                string id = ExtractJsonString(head, "id");
+                if (id.Length == 0 || others.Count == 0) continue;
+                list.Add(new PlayerReportRules.Game(ExtractJsonString(head, "kind"), id,
+                                                    ExtractJsonString(head, "ended_at"), others.ToArray()));
+            }
+            return list;
+        }
+
+        /// <summary>POST /api/v1/player-reports with a body PlayerReportRules.BuildBody
+        /// made on the form's worker. <paramref name="sensitiveProbe"/> is
+        /// SensitiveBodyProbe of that body, computed where it was built.</summary>
+        internal static void SubmitPlayerReportBody(byte[] body, string sensitiveProbe, Action<int, string, bool> done)
+        {
+            if (Plugin.Instance == null) { done(0, "", false); return; }
+            Plugin.Instance.StartCoroutine(PostRequestRaw(
+                $"{baseUrl}/api/v1/player-reports", body,
+                (ok, response) =>
+                {
+                    int status = PlayerReportRules.StatusOf(ok, response);
+                    if (ok) Plugin.Log.LogInfo("[PLAYER-REPORT] submitted");
+                    else Plugin.Log.LogWarning("[PLAYER-REPORT] submit answered status " + status);
+                    done(status, ok ? "" : PlayerReportRules.ErrorCode(response), ok && PlayerReportRules.LogStored(response));
+                },
+                sensitiveProbe: sensitiveProbe ?? ""));
+        }
+
+        /// <summary>GET /api/v1/admin/player-reports: the reports (open first)
+        /// and the count of open ones. Signed with this lane's own action
+        /// word, immediately before the dispatch (ComputeAdminHmacHex).</summary>
+        internal static void FetchPlayerReports(string adminSteamId, string statusFilter, int limit,
+                                                Action<int, string, List<PlayerReportRules.Report>, int> done)
+        {
+            if (Plugin.Instance == null || string.IsNullOrEmpty(adminSteamId)) { done(0, "", null, 0); return; }
+            string sig = ComputeAdminHmacHex(PlayerReportRules.AdminCanonical(
+                adminSteamId, PlayerReportRules.ActionList, PlayerReportRules.TargetList));
+            string url = $"{baseUrl}/api/v1/admin/player-reports?admin_steam_id={adminSteamId}&hmac_signature={sig}&limit={limit}";
+            if (!string.IsNullOrEmpty(statusFilter)) url += "&status=" + statusFilter;
+            long code = 0;
+            Plugin.Instance.StartCoroutine(GetRequest(url, (ok, text) =>
+            {
+                if (!ok)
+                {
+                    int status = code > 0 ? (int)code : PlayerReportRules.StatusOf(false, text);
+                    Plugin.Log.LogWarning("[PLAYER-REPORT] the admin list failed: status " + status);
+                    done(status, PlayerReportRules.ErrorCode(text), null, 0);
+                    return;
+                }
+                List<PlayerReportRules.Report> reports = null;
+                int openTotal = 0, leftOut = 0;
+                try { reports = ParsePlayerReports(text, out leftOut); openTotal = Math.Max(0, ExtractJsonInt(text, "open_total")); }
+                catch (Exception ex) { Plugin.Log.LogWarning("[PLAYER-REPORT] list parse: " + ex.GetType().Name); }
+                if (reports == null) { done(0, "", null, 0); return; }
+                // One line per list read, and it carries counts only.
+                Plugin.Log.LogInfo("[PLAYER-REPORT] the admin list: " + reports.Count + " rows, " + leftOut + " left out for the form of the id");
+                done(200, "", reports, openTotal);
+            }, detailedErrors: true, onResponseCode: c => code = c));
+        }
+
+        /// <summary>The admin list. Details and names are players' text: the
+        /// array and its objects are cut by the string-aware slicers, and
+        /// every row is flat (no key repeats inside a nested object).
+        /// <paramref name="leftOut"/> counts the rows whose id is not in the
+        /// form the server writes.</summary>
+        private static List<PlayerReportRules.Report> ParsePlayerReports(string json, out int leftOut)
+        {
+            var list = new List<PlayerReportRules.Report>();
+            leftOut = 0;
+            if (string.IsNullOrEmpty(json)) return list;
+            int key = json.IndexOf("\"reports\":", StringComparison.Ordinal);
+            int open = key >= 0 ? json.IndexOf('[', key) : -1;
+            int close = open >= 0 ? FindMatchingBracketStringAware(json, open) : -1;
+            if (open < 0 || close <= open) return list;
+            foreach (string o in SliceTopLevelObjects(json.Substring(open + 1, close - open - 1)))
+            {
+                var r = new PlayerReportRules.Report();
+                r.Id = ExtractJsonString(o, "id");
+                // The id goes into a URL: the server's form or no row. A row left
+                // out is counted, and its id is written nowhere.
+                if (!PlayerReportRules.IsReportId(r.Id)) { leftOut++; continue; }
+                r.CreatedAt = ExtractJsonString(o, "created_at");
+                r.Status = ExtractJsonString(o, "status");
+                r.Reason = ExtractJsonString(o, "reason");
+                r.Details = ExtractJsonString(o, "details");
+                r.GameKind = ExtractJsonString(o, "game_kind");
+                r.GameId = ExtractJsonString(o, "game_id");
+                r.GameEndedAt = ExtractJsonString(o, "game_ended_at");
+                r.ReporterSteamId = ExtractJsonString(o, "reporter_steam_id");
+                r.ReporterName = ExtractJsonString(o, "reporter_name");
+                r.ReportedSteamId = ExtractJsonString(o, "reported_steam_id");
+                r.ReportedName = ExtractJsonString(o, "reported_name");
+                r.Reporters30d = ExtractJsonInt(o, "reporters_30d");
+                r.HasLog = ExtractJsonBool(o, "has_log");
+                r.ClosedAt = ExtractJsonString(o, "closed_at");
+                r.ClosedBy = ExtractJsonString(o, "closed_by");
+                r.CloseNote = ExtractJsonString(o, "close_note");
+                list.Add(r);
+            }
+            return list;
+        }
+
+        /// <summary>GET /api/v1/admin/player-reports/{id}/log: the stored log as
+        /// text (the server scrubs it again on the way out).</summary>
+        internal static void FetchPlayerReportLog(string adminSteamId, string reportId, Action<int, string, string> done)
+        {
+            if (Plugin.Instance == null || string.IsNullOrEmpty(adminSteamId) || !PlayerReportRules.IsReportId(reportId))
+            { done(0, "", null); return; }
+            string sig = ComputeAdminHmacHex(PlayerReportRules.AdminCanonical(adminSteamId, PlayerReportRules.ActionLog, reportId));
+            string url = $"{baseUrl}/api/v1/admin/player-reports/{reportId}/log?admin_steam_id={adminSteamId}&hmac_signature={sig}";
+            long code = 0;
+            Plugin.Instance.StartCoroutine(GetRequest(url, (ok, text) =>
+            {
+                int status = ok ? 200 : (code > 0 ? (int)code : PlayerReportRules.StatusOf(false, text));
+                done(status, ok ? "" : PlayerReportRules.ErrorCode(text), ok ? (text ?? "") : null);
+            }, detailedErrors: true, onResponseCode: c => code = c));
+        }
+
+        /// <summary>POST /api/v1/admin/player-reports/{id}/close. The signature
+        /// covers the report AND the verdict, so one made to dismiss a report
+        /// does not verify for marking it actioned.</summary>
+        internal static void ClosePlayerReport(string adminSteamId, string reportId, string verdict, string note,
+                                               Action<int, string> done)
+        {
+            if (Plugin.Instance == null || string.IsNullOrEmpty(adminSteamId) || !PlayerReportRules.IsReportId(reportId)
+                || !PlayerReportRules.IsVerdict(verdict))
+            { done(0, ""); return; }
+            string sig = ComputeAdminHmacHex(PlayerReportRules.AdminCanonical(
+                adminSteamId, PlayerReportRules.ActionClose, PlayerReportRules.CloseTarget(reportId, verdict)));
+            var sb = new System.Text.StringBuilder();
+            sb.Append("{\"admin_steam_id\":").Append(PlayerReportRules.JsonText(adminSteamId));
+            sb.Append(",\"hmac_signature\":").Append(PlayerReportRules.JsonText(sig));
+            sb.Append(",\"verdict\":").Append(PlayerReportRules.JsonText(verdict));
+            if (!string.IsNullOrEmpty(note))
+                sb.Append(",\"note\":").Append(PlayerReportRules.JsonText(PlayerReportRules.Cut(note, PlayerReportRules.NoteMax)));
+            sb.Append("}");
+            Plugin.Instance.StartCoroutine(PostRequest(
+                $"{baseUrl}/api/v1/admin/player-reports/{reportId}/close", sb.ToString(),
+                (ok, resp) => done(PlayerReportRules.StatusOf(ok, resp), ok ? "" : PlayerReportRules.ErrorCode(resp))));
+        }
+
         // Manual JSON parsers (the existing pattern in this file: JsonUtility silently fails on nested arrays).
         private static List<FlaggedMatchEntry> ParseFlaggedMatches(string json)
         {

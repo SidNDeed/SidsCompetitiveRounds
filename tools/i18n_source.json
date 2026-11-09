@@ -160,6 +160,7 @@
   "<b>Recent Ranked FFAs</b>  <color=#888>- none yet</color>",
   "<b>Start (need {0})</b>",
   "<b>Start Game ({0}/{1})</b>",
+  "<b>What happened?</b> <color=#888>(optional)</color>",
   "<b>What happened?</b> <color=#FF9966>(required)</color>",
   "<b>You</b>",
   "<b>Your 2v2 Lobby</b>",
@@ -527,6 +528,7 @@
   "Action",
   "Action Log",
   "Action Log...",
+  "Actioned",
   "Actions",
   "Active",
   "Actually Good",
@@ -864,9 +866,13 @@
   "Chat overlay: MUTED - hidden, and the room is told",
   "Chat overlay: NORMAL - messages fade out",
   "Chat overlay: PINNED - messages stay on screen",
+  "Cheating or exploiting",
   "Checking the secure connection...",
   "Checking whether {0} can rejoin",
+  "Choose a game",
   "Choose a metric",
+  "Choose a player",
+  "Choose a reason",
   "Choose cards (left) to compare {0}.",
   "Choose up to {0} of their cards",
   "Choose up to {0} of your cards",
@@ -900,6 +906,7 @@
   "Click cards to select them for shards",
   "Clock:",
   "Close",
+  "Closed by {0}",
   "Clown",
   "Clutch",
   "Cobalt",
@@ -1120,6 +1127,7 @@
   "Detail: heavy is the head. Equip in the Character editor.",
   "Details",
   "Details (optional)",
+  "Details:",
   "Detected: {0}",
   "Devil Horns",
   "Diagram of Spirit's research, 'On Damage Types and Buff Activation'.",
@@ -1137,7 +1145,10 @@
   "Discord relay: <color=#AAAAAA>checking...</color>",
   "Discord relay: <color=#AAAAAA>link Discord first</color>",
   "Discord relay: <color=#FF9966>Off</color>",
+  "Dismiss",
   "Dismiss (1 min)",
+  "Dismiss this report?",
+  "Dismissed",
   "Displays your live rank tier (updates automatically as you rank up or down)",
   "Dmg/game",
   "Do nothing",
@@ -1388,6 +1399,7 @@
   "Game {0}: team 1 {1}-{2} team 2",
   "Game {0}: {1}",
   "Game {0}: {1}-{2}",
+  "Game:",
   "Games",
   "Games {0}-{1} of {2}",
   "Gentle soap bubbles float up around you.",
@@ -1449,6 +1461,7 @@
   "Green Cursor",
   "Green Name",
   "Grey Cat",
+  "Griefing or throwing",
   "Grinder",
   "Grizzly",
   "Grounded",
@@ -1467,6 +1480,7 @@
   "HUMAN REVIEW",
   "Halo",
   "Harassment",
+  "Harassment or abuse",
   "Hard to hit",
   "Hare Apparent",
   "Harlequin",
@@ -1658,6 +1672,7 @@
   "Leave your current game first.",
   "Leave your custom 1v2 lobby first.",
   "Leaves every queue this client believes it is in - ranked, casual and tournament - and clears the local queue state with them. It is safe to press when you are not queued.",
+  "Leaving games",
   "Leaving queue...",
   "Leech",
   "Left 1v1 queue - you joined a game",
@@ -1718,6 +1733,7 @@
   "Locks the map to ROUNDS' Sky palette (light blue).",
   "Locks the map to ROUNDS' Soviet palette (deep red).",
   "Locks the map to ROUNDS' Sweden palette (blue + yellow).",
+  "Log attached",
   "Longest Game",
   "Longest game",
   "Longest point streak",
@@ -1760,6 +1776,8 @@
   "Map skin cycle",
   "Map skins",
   "Maps",
+  "Mark Actioned",
+  "Mark this report as actioned?",
   "Marked false positive. You still need to repair the rewards and series by hand.",
   "Marksman",
   "Maroon",
@@ -1923,6 +1941,7 @@
   "No games together yet",
   "No ladder yet - buy a title line in the Shop to start one.",
   "No leaderboard data",
+  "No log is stored for this report.",
   "No longer possible",
   "No mail yet.",
   "No matches.",
@@ -1931,6 +1950,7 @@
   "No preset is free of modded items yet.",
   "No ranked 1v1 series recorded for the selected players yet.",
   "No recent series",
+  "No reports.",
   "No server-issued chat lines are in this session's log.\n\nOnly messages this client received from the server can be deleted - the request keys on the server's row id, which a local echo does not carry.",
   "No server-issued chat lines are in this session's log.\n\nPick a message the author sent; the mute lands on whatever platform identity wrote it (Steam, Discord, Twitch or YouTube).",
   "No tiers listed",
@@ -1959,6 +1979,8 @@
   "Not started - buy {0} in the Shop to begin this ladder.",
   "Not started.",
   "Not your item",
+  "Note (optional):",
+  "Note:",
   "Nothing playing",
   "Nothing sent yet.",
   "Now Playing: {0} - {1}",
@@ -1976,6 +1998,7 @@
   "Obsidian",
   "Ocean Gradient",
   "Odds are set when the lobby starts. Refunded if the exact person/team you bet on is not in the game.",
+  "Offensive name",
   "Offer in a trade",
   "Older >",
   "Olive",
@@ -2097,6 +2120,7 @@
   "Paused: {0} - {1}",
   "Peak Elo",
   "Peak {0}",
+  "Pending",
   "Per game",
   "Per-letter bright cyan → deep indigo gradient. Surface to trench.",
   "Per-letter bright red → dark wine gradient.",
@@ -2149,12 +2173,17 @@
   "Player Cards are not open yet - no edition is running",
   "Player Cards need your Steam sign-in - try again in a moment",
   "Player Nemesis",
+  "Player Reports",
+  "Player Reports...",
   "Player not found",
   "Player not found — they need to have used the mod once",
   "Player opted out",
   "Player removed from the lobby.",
+  "Player reports are turned off right now.",
+  "Player reports are unavailable right now.",
   "Player totals",
   "Player {0}",
+  "Player:",
   "Players",
   "Point to the sky, point to the floor, sway those hips. Dancing locks your controls for the duration.",
   "Points lost",
@@ -2337,6 +2366,7 @@
   "Ready-up failed — retrying search",
   "Reason",
   "Reason (optional)",
+  "Reason:",
   "Rebirth",
   "Reborn after defeat",
   "Recent",
@@ -2392,11 +2422,20 @@
   "Reply all is not available for this message.",
   "Reply to all",
   "Report",
+  "Report a Player",
   "Report approved for recovery - an ordered replay is still required.",
+  "Report closed.",
   "Report dismissed for good.",
   "Report failed to send - try again in a moment.",
+  "Report sent. Thank you.",
+  "Report sent. The log could not be attached.",
   "Report this message",
   "Reported - thank you. A moderator will review it.",
+  "Reported player:",
+  "Reporter:",
+  "Reporters in the last 30 days: {0}",
+  "Reports go to the mod team. Pick the game, the player and a reason.",
+  "Reports need a verified Steam sign-in.",
   "Request failed - try again.",
   "Requeue",
   "Reset all controls",
@@ -2704,6 +2743,7 @@
   "Starts: <color=#FFDE88>{0}</color>",
   "Stats and profiles need the secure connection. Retrying every 5 minutes.",
   "Stats still loading - try again in a moment.",
+  "Status:",
   "Status: <color=#88FF88>Allowed</color> - match data and linking are active.",
   "Status: <color=#DDDD66>Unset</color> - the consent prompt will appear on next launch.",
   "Status: <color=#FF9966>Denied</color> - mod runs offline. No data leaves your machine.",
@@ -2822,6 +2862,7 @@
   "That change could not be applied, and some controls could not be put back as they were. Restart the game before you play.",
   "That change could not be applied, so every control was put back as it was.",
   "That control could not be saved to your settings, so nothing was changed.",
+  "That game can no longer be reported.",
   "That game is no longer live.",
   "That game is not ready to watch yet.",
   "That key is already used by another control.",
@@ -2838,8 +2879,11 @@
   "That player declined your last proposal - wait before proposing to them again",
   "That player has card trading turned off",
   "That player has too many proposals waiting - try again later",
+  "That player was not in that game.",
   "That player's binder is private - they can still propose a trade to you",
   "That preset has never been customised, so your avatar was not switched.",
+  "That report is already closed.",
+  "That report no longer exists.",
   "That shard was already done with other cards - your binder has been refreshed",
   "That trade has changed - check it again before answering",
   "That trade has expired",
@@ -2898,10 +2942,14 @@
   "The preset you wear in Quick Match and in any game where somebody does not have the mod. Only presets a base-game player's own game can load are offered here, because those are the only ones an unmodded opponent can actually see. To make a preset an unmodded opponent can see: open the character menu, choose an empty preset, and build the face from base-game eyes, mouths and details only.",
   "The purple the Demonic Pact card is drawn in.",
   "The report could not be read",
+  "The report could not be sent. Try again later.",
   "The report details are too long.",
   "The report details contain characters that are not allowed.",
   "The report details repeat one character too many times.",
+  "The report is too large. Send it without the log.",
   "The report request could not be started",
+  "The report was not accepted.",
+  "The request failed. Try again later.",
   "The rule book for what gets recorded and what gets thrown away: games, series, disconnects, bets. If a result looks missing, the reason is almost always on this page.\n\n<color=#FFD94D><b>NEVER RECORDED AT ALL</b></color>\n\n- Data consent off: the mod runs fully offline. Nothing is ever sent except a version check.\n- Offline, practice and sandbox games: never reported by the client, and refused by the server as a backstop.\n- Spectator seats submit no match record and no persistent stats. (The mod keeps local diagnostics in its own log — frames, connection facts — and sends nothing automatically; they leave your PC only inside a bug report you choose to attach logs to.)\n\n<color=#FFD94D><b>RANKED OR CASUAL</b></color>\n\n- Either player's Ranked toggle off in a room-code game - it plays as CASUAL. Still fully recorded with stats and XP; it never touches rating (see <color=#7FD4FF>How games are tracked</color>).\n- Opponent has never run the mod - always casual, never upgraded. (A live unfinished series from an earlier sitting is the one thing that keeps ranked status across a gap.)\n- Toggling Ranked off MID-SERIES does not void the series. The running best-of-3 is your consent record; its games stay ranked.\n- A game reported as casual is UPGRADED to ranked when the server can see both players are modded, both have Ranked on, and the sitting is live.\n- A ranked-banned participant forces a 1v1 casual at report time - even in a queue room, even mid-series. (The other modes shut banned players out at the door instead.)\n- Mod-issued rooms are consented by definition; queueing is consent. The ranked queue, 2v2 and tournaments rate; ranked FFA lobbies rate while casual ones don't; 1v2 records without rating.\n\n<color=#FFD94D><b>DISCONNECTS - 1V1</b></color>\n\n- You leave a game to join a queued ranked match - the game you left is canceled: nothing recorded, no leave logged.\n- Opponent DCs at 4-4 - you get the win, recorded 5-4.\n- Opponent DCs while you hold 4 rounds - you get the win at the standing score.\n- Any other DC - <color=#FF6666>the game is canceled and no result is recorded</color>, even when the leaver was ahead. Nobody gets a free win and nobody eats an unfair loss (the leave itself can still be logged - see below).\n- Ranked leave %: a DC is logged against the leaver when the CURRENT game had meaningful play (2 or more points scored, or a completed round) and neither side was at 4 rounds. One DC per player per series. The stat is your DCs divided by your ranked series played plus your DCs.\n- Casual rage quits: ANY mid-game leave in a casual 1v1 is logged, even at 4-0. It feeds the Rage Quit % stat (how often opponents walk out on you) - never rating. (A survivor already at 4 rounds still takes the casual win and its XP.)\n\n<color=#FFD94D><b>DISCONNECTS - 2V2 AND FFA</b></color>\n\n- 2v2: a team DCs while the other team leads the series and the abandoned game had 2 or more points - the leading team takes the whole series, with full ratings and rewards.\n- Any other 2v2 DC - the series PAUSES for manual admin resolution instead of auto-deciding. If the same four re-queue within about 30 minutes, the matcher puts them back on the same series with the score kept.\n- FFA keeps playing when someone leaves, as long as 2 or more remain (a game that drops under 3 players before the field scored 2 half points is cancelled instead). The leaver's tallies are frozen, and they are still placed and rated for the game they left during - <color=#FF6666>leaving at 0 points does not dodge the loss</color>.\n- FFA early-leave grace: a leaver who left before the field had scored four half points in total, whether or not any became a full point, is unrated for that game and receives no game Gold or XP from it. Achievements can still be earned and pay as usual, but an unrated game earns no title-ladder progress.\n- An FFA player who left in an EARLIER game rides later reports as absent, excluded from those games' ratings and rewards.\n\n<color=#FFD94D><b>SERIES: RESUME, STALL, EXPIRE</b></color>\n\n- <color=#7FE87F>An undecided best-of-3 resumes with no time limit.</color> Meet the same opponent tomorrow or next week and game 1 still stands. An expiry existed once - leavers waited it out to bank rating, so it was removed.\n- Rating moves ONLY when a series completes (first to 2 game wins). Games of a series that never completes keep their match rows, XP and gold; the rating change just never happens.\n- A series with no game recorded 30 minutes after it was created is abandoned and its bets are refunded.\n- A mid-series stall of an hour refunds the bets, but the series itself stays active and resumable.\n- Tournament series are exempt from this pruning - the bracket owns their lifecycle. A tournament match decided by forfeit can't be bet on.\n\n<color=#FFD94D><b>THROWN OUT AFTER THE FACT</b></color>\n\n- The one AUTOMATIC invalidation in the whole mod: a repeated pattern of implausibly short matches between the same two players inside a short window. The current match AND the earlier short ones are invalidated together, their gold and XP reversed, their series voided.\n- Admin reversal: an admin can void a series - rating changes subtracted, gold clawed back, every match in it invalidated, unsettled bets refunded. Invalidated matches disappear from every board and stat.\n- Quarantine (2v2 and FFA): a report that arrives for a lobby that's no longer active isn't deleted - it's held for admin review, and an admin can still accept it into the record or discard it.\n\n<color=#FFD94D><b>IF THE REPORT CAN'T SEND</b></color>\n\n- A failed report goes to a persistent outbox: retried in the background and saved to disk, so it's re-sent on your next launch even if you quit right after the game. You'll see 'Couldn't record the match - retrying in the background', then 'Match recorded' when it lands.\n- 1v1 reporter crashes before the report exists - the surviving opponent's disconnect path usually records the result instead.\n- FFA elects its reporter among the players still present, so a crashed reporter is never elected. A winner who quits before the report is still recorded from their frozen tallies.\n- A 2v2 game that ends without its series id retries the lookup and defers the send; if that also fails, the game is not recorded.",
   "The same actions in a different order",
   "The seat was released before you returned",
@@ -3110,6 +3158,7 @@
   "Update required",
   "Update the mod first",
   "Update the mod to use mail.",
+  "Update the mod to use player reports.",
   "Update the mod to watch this game.",
   "Updates",
   "Upgrade",
@@ -3128,6 +3177,7 @@
   "Vanilla stays vanilla",
   "Velvet",
   "Verified movement tech: the shield edge bounce, wall jumps, and the flying bounce. Every rule on this page comes straight from the game's code.\n\n<color=#FFD94D><b>THE SHIELD EDGE BOUNCE</b></color>\n\nThe arena has a hard kill boundary just off-screen. While you are past it, the game checks you every 0.1 seconds:\n\n- <color=#FF6666>Not blocking:</color> you take a 51-damage lethal hit and an impulse back toward the arena. At 100 HP, two unshielded edge hits kill you.\n- <color=#7FE87F>Blocking:</color> no damage at all, and the return impulse is twice as strong. Your old velocity is zeroed first, so the bounce is clean and predictable no matter how fast you were flying out.\n\nThe block window is 0.3 seconds and the edge check ticks every 0.1 seconds, so the press can slightly TRAIL your exit and still count. Getting launched off-screen is survivable on demand: block as you cross the edge and you come back harder, for free. In a knockback war this is the difference between a lost point and a return volley.\n\n<color=#FFD94D><b>WALL JUMPS AND JUMP REFRESH</b></color>\n\n- Touching a wall in the air while holding movement INTO it counts as a wall grab. Unless you jumped within the last 0.15 seconds, <color=#7FE87F>a wall touch refreshes ALL of your jumps</color>.\n- Pressing jump within 0.1 seconds of a wall touch performs a wall jump: up and away from the wall instead of straight up.\n- Ground jumps add extra horizontal push proportional to how fast you were already moving sideways; wall jumps skip that bonus.\n- Holding jump keeps adding upward force for a short moment after takeoff - tap for a short hop, hold for full height.\n- While hanging close to a wall, your time-in-air counts more slowly for game systems that care about air time.\n\n<color=#FFD94D><b>THE FLYING BOUNCE</b></color>\n\nA hit big enough to set you 'flying' changes how walls treat you: while flying, hitting map geometry reflects your velocity off the surface, stuns you for 0.2 seconds, and deals a 5-damage self-hit. The reflected launch comes out after a quarter-second hold.\n\nThat self-hit is an ordinary blockable hit: <color=#7FE87F>blocking at the moment of wall impact negates the 5 damage</color>.\n\n<color=#FFD94D><b>MYTHS THE CODE SAYS NO TO</b></color>\n\n- <color=#8A8A93>Wall sliding is real, but not where you'd think: pressing into a wall damps your speed a little and keeps resetting the gravity ramp, so you do fall slower - while the stat actually named 'wall grab drag' does nothing at all.</color>\n- <color=#8A8A93>Cards that advertise a self-push on block do nothing on a normal block press - the game's own block window suppresses the push before it can apply. Do not draft them for movement.</color>\n\n<color=#FFD94D><b>SHIELD CHARGE IS THE REAL BLOCK MOVEMENT</b></color>\n\nShield Charge launches you along your AIM direction on any block press, and the launch works during your own block window. Hitting a player cancels the launch, damages and knocks them back, and grants a bonus block. It also combos with the wall rules above: charge into a wall, get your jumps refreshed, wall-jump out.",
+  "View Log",
   "View channel",
   "Viewing: {0}  <color=#888>(press {1} to chat)</color>",
   "Village Idiot",
@@ -3281,6 +3331,7 @@
   "Yin & Yang",
   "You",
   "You already have an open trade with that player",
+  "You already reported this player for this game.",
   "You are back in the match",
   "You are in another queue",
   "You are muted - mail is unavailable while the mute lasts.",
@@ -3296,6 +3347,8 @@
   "You get",
   "You give",
   "You have made all the trades allowed today - try again after midnight UTC",
+  "You have no recent games to report.",
+  "You have reached today's limit of reports.",
   "You have sent all the proposals allowed today - try again after midnight UTC",
   "You have too many proposals waiting - cancel one first",
   "You joined the match in progress. This game is unrated for you.",
@@ -3321,6 +3374,7 @@
   "Your card trading is off - turn it on in Settings",
   "Your controls changed: {0}",
   "Your game is dropping frames (worst {0} ms)",
+  "Your games could not be loaded. Try again later.",
   "Your last pack ({0}) - {1}",
   "Your match (R{0}{1}): vs <color=#FFDE88>{2}</color>",
   "Your match is still running. Rejoin? {0}",
@@ -3697,6 +3751,7 @@
   "your trail",
   "{0:N0} XP",
   "{0}  {1}%  ({2} picks)",
+  "{0} (already reported)",
   "{0} (away) got {1}",
   "{0} (hold) - dance wheel; dancing locks your controls",
   "{0} (hold) - quick-chat wheel, release to send",
@@ -3765,6 +3820,7 @@
   "{0} players online now",
   "{0} players ranked",
   "{0} ready! Joining...",
+  "{0} reported {1}",
   "{0} searching",
   "{0} series",
   "{0} series played",
@@ -4586,9 +4642,14 @@
    "location": "RenderHostLobbySection",
    "kind": "TrF"
   },
+  "<b>What happened?</b> <color=#888>(optional)</color>": {
+   "surface": "PlayerReportUI",
+   "location": "Draw",
+   "kind": "Tr"
+  },
   "<b>What happened?</b> <color=#FF9966>(required)</color>": {
-   "surface": "CompetitiveUI",
-   "location": "DrawBugReportModal",
+   "surface": "CompetitiveUI, PlayerReportUI",
+   "location": "Draw, DrawBugReportModal",
    "kind": "Tr"
   },
   "<b>You</b>": {
@@ -6417,9 +6478,14 @@
    "kind": "CreateText, SetText"
   },
   "Action Log...": {
-   "surface": "AdminMenuRules, NativeUI",
-   "location": "AdminMenuRules.Launchers, BuildAdminTab",
-   "kind": "CreateButton, table"
+   "surface": "AdminMenuRules",
+   "location": "AdminMenuRules.Launchers",
+   "kind": "table"
+  },
+  "Actioned": {
+   "surface": "PlayerReportRules",
+   "location": "StatusText",
+   "kind": "Tr"
   },
   "Actions": {
    "surface": "AdminMenuRules",
@@ -6472,9 +6538,9 @@
    "kind": "SetText, ShowInfoPopup, Tr"
   },
   "Admin Roster...": {
-   "surface": "AdminMenuRules, NativeUI",
-   "location": "AdminMenuRules.Launchers, BuildAdminTab",
-   "kind": "CreateButton, table"
+   "surface": "AdminMenuRules",
+   "location": "AdminMenuRules.Launchers",
+   "kind": "table"
   },
   "Admin action": {
    "surface": "NativeUI",
@@ -6547,8 +6613,8 @@
    "kind": "shop"
   },
   "All": {
-   "surface": "NativeUI",
-   "location": "(file scope), BuildCardStatsTab, SyncShopArtistFilterButtons",
+   "surface": "NativeUI, PlayerReportUI",
+   "location": "(file scope), BuildCardStatsTab, DrawAdmin +1",
    "kind": "SetText, Tr"
   },
   "All (merged)": {
@@ -6772,9 +6838,9 @@
    "kind": "shop"
   },
   "Approved Update Queue...": {
-   "surface": "AdminMenuRules, NativeUI",
-   "location": "AdminMenuRules.Launchers, BuildAdminTab",
-   "kind": "CreateButton, table"
+   "surface": "AdminMenuRules",
+   "location": "AdminMenuRules.Launchers",
+   "kind": "table"
   },
   "Are you good at this game?": {
    "surface": "QuickChat",
@@ -6847,8 +6913,8 @@
    "kind": "TrF"
   },
   "Attach game logs (recommended)": {
-   "surface": "CompetitiveUI",
-   "location": "DrawBugReportModal",
+   "surface": "CompetitiveUI, PlayerReportUI",
+   "location": "Draw, DrawBugReportModal",
    "kind": "Tr"
   },
   "Attack spd": {
@@ -7032,9 +7098,9 @@
    "kind": "Tr"
   },
   "Ban Steam ID...": {
-   "surface": "AdminMenuRules, NativeUI",
-   "location": "AdminMenuRules.Launchers, BuildAdminTab",
-   "kind": "CreateButton, table"
+   "surface": "AdminMenuRules",
+   "location": "AdminMenuRules.Launchers",
+   "kind": "table"
   },
   "Ban a player": {
    "surface": "NativeUI",
@@ -7542,9 +7608,9 @@
    "kind": "shop"
   },
   "Bug Reports...": {
-   "surface": "AdminMenuRules, NativeUI",
-   "location": "AdminMenuRules.Launchers, BuildAdminTab",
-   "kind": "CreateButton, table"
+   "surface": "AdminMenuRules",
+   "location": "AdminMenuRules.Launchers",
+   "kind": "table"
   },
   "Bug fixes the mod ships": {
    "surface": "InfoLibrary",
@@ -7732,8 +7798,8 @@
    "kind": "TrF"
   },
   "Cancel": {
-   "surface": "CompetitiveUI, MailUI, NativeUI +3",
-   "location": "BuildRankedRow, BuildSettingsChrome, CreateTradeRow +11",
+   "surface": "CompetitiveUI, MailUI, NativeUI +4",
+   "location": "BuildRankedRow, BuildSettingsChrome, CreateTradeRow +12",
    "kind": "CreateButton, SetText, Tr"
   },
   "Cannot spectate: {0}": {
@@ -8017,9 +8083,9 @@
    "kind": "Tr"
   },
   "Chat Lockdown...": {
-   "surface": "AdminMenuRules, NativeUI",
-   "location": "AdminMenuRules.Launchers, BuildAdminTab",
-   "kind": "CreateButton, table"
+   "surface": "AdminMenuRules",
+   "location": "AdminMenuRules.Launchers",
+   "kind": "table"
   },
   "Chat [{0}]  —  Enter to send, Esc keeps your draft, {1} switches channel": {
    "surface": "CompetitiveUI",
@@ -8106,6 +8172,11 @@
    "location": "SetChatOverlayMode",
    "kind": "ShowNotification"
   },
+  "Cheating or exploiting": {
+   "surface": "PlayerReportRules",
+   "location": "ReasonText",
+   "kind": "Tr"
+  },
   "Checking the secure connection...": {
    "surface": "SecureRouteText",
    "location": "Checking",
@@ -8116,9 +8187,24 @@
    "location": "Line",
    "kind": "TrF"
   },
+  "Choose a game": {
+   "surface": "PlayerReportUI",
+   "location": "Draw, PickGame",
+   "kind": "Tr"
+  },
   "Choose a metric": {
    "surface": "NativeUI",
    "location": "OpenMetricPicker",
+   "kind": "Tr"
+  },
+  "Choose a player": {
+   "surface": "PlayerReportUI",
+   "location": "Draw, PickPlayer",
+   "kind": "Tr"
+  },
+  "Choose a reason": {
+   "surface": "PlayerReportUI",
+   "location": "Draw, PickReason",
    "kind": "Tr"
   },
   "Choose cards (left) to compare {0}.": {
@@ -8282,9 +8368,14 @@
    "kind": "CreateText"
   },
   "Close": {
-   "surface": "CompetitiveUI, NativeUI, SessionReportView",
-   "location": "BuildUtilityPopup, DrawFooter, DrawLogViewerModal +3",
+   "surface": "CompetitiveUI, NativeUI, PlayerReportUI +1",
+   "location": "BuildUtilityPopup, Draw, DrawAdmin +6",
    "kind": "CreateButton, Tr"
+  },
+  "Closed by {0}": {
+   "surface": "PlayerReportUI",
+   "location": "DrawDetail",
+   "kind": "TrF"
   },
   "Clown": {
    "surface": "shop catalog",
@@ -8542,9 +8633,9 @@
    "kind": "Tr"
   },
   "Cosmetic Reviews...": {
-   "surface": "AdminMenuRules, NativeUI",
-   "location": "AdminMenuRules.Launchers, BuildAdminTab",
-   "kind": "CreateButton, table"
+   "surface": "AdminMenuRules",
+   "location": "AdminMenuRules.Launchers",
+   "kind": "table"
   },
   "Cosmetic slot does not match its catalog SKU": {
    "surface": "ServerTextRules",
@@ -9222,9 +9313,9 @@
    "kind": "Tr"
   },
   "Delete Chat Message...": {
-   "surface": "AdminMenuRules, NativeUI",
-   "location": "AdminMenuRules.Launchers, BuildAdminTab",
-   "kind": "CreateButton, table"
+   "surface": "AdminMenuRules",
+   "location": "AdminMenuRules.Launchers",
+   "kind": "table"
   },
   "Delete My Data": {
    "surface": "NativeUI, NativeUI.Settings",
@@ -9386,6 +9477,11 @@
    "location": "DrawReportModal",
    "kind": "Tr"
   },
+  "Details:": {
+   "surface": "PlayerReportUI",
+   "location": "DrawDetail",
+   "kind": "Tr"
+  },
   "Detected: {0}": {
    "surface": "NativeUI.Settings, NativeUI.SettingsDrive",
    "location": "DriveL11, SettingsRenderPane",
@@ -9471,9 +9567,24 @@
    "location": "PaintMailRelay",
    "kind": "Tr"
   },
+  "Dismiss": {
+   "surface": "PlayerReportUI",
+   "location": "DrawDetail",
+   "kind": "Tr"
+  },
   "Dismiss (1 min)": {
    "surface": "CompetitiveUI",
    "location": "DrawMatchFoundStuckOverlay",
+   "kind": "Tr"
+  },
+  "Dismiss this report?": {
+   "surface": "PlayerReportRules",
+   "location": "VerdictQuestion",
+   "kind": "Tr"
+  },
+  "Dismissed": {
+   "surface": "PlayerReportRules",
+   "location": "StatusText",
    "kind": "Tr"
   },
   "Displays your live rank tier (updates automatically as you rank up or down)": {
@@ -9862,9 +9973,9 @@
    "kind": "Tr"
   },
   "End Alert...": {
-   "surface": "AdminMenuRules, NativeUI",
-   "location": "AdminMenuRules.Launchers, BuildAdminTab",
-   "kind": "CreateButton, table"
+   "surface": "AdminMenuRules",
+   "location": "AdminMenuRules.Launchers",
+   "kind": "table"
   },
   "Energy Orbs": {
    "surface": "shop catalog",
@@ -10047,7 +10158,7 @@
    "kind": "Tr"
   },
   "FFA": {
-   "surface": "InfoLibrary, NativeUI, PlayerCardsUI +2",
+   "surface": "InfoLibrary, NativeUI, PlayerCardsUI +3",
    "location": "(file scope), KindLabel, ModeLabel +1",
    "kind": "Tr"
   },
@@ -10726,6 +10837,11 @@
    "location": "Compose2v2",
    "kind": "TrF"
   },
+  "Game:": {
+   "surface": "PlayerReportUI",
+   "location": "Draw, DrawDetail",
+   "kind": "Tr"
+  },
   "Games": {
    "surface": "NativeUI, SessionReportModel",
    "location": "BuildFfaTab, BuildTotalsPages, RefreshFfaTab",
@@ -10972,19 +11088,19 @@
    "kind": "Tr"
   },
   "Grant Achievement...": {
-   "surface": "AdminMenuRules, NativeUI",
-   "location": "AdminMenuRules.Launchers, BuildAdminTab",
-   "kind": "CreateButton, table"
+   "surface": "AdminMenuRules",
+   "location": "AdminMenuRules.Launchers",
+   "kind": "table"
   },
   "Grant Artist...": {
-   "surface": "AdminMenuRules, NativeUI",
-   "location": "AdminMenuRules.Launchers, BuildAdminTab",
-   "kind": "CreateButton, table"
+   "surface": "AdminMenuRules",
+   "location": "AdminMenuRules.Launchers",
+   "kind": "table"
   },
   "Grant Translator...": {
-   "surface": "AdminMenuRules, NativeUI",
-   "location": "AdminMenuRules.Launchers, BuildAdminTab",
-   "kind": "CreateButton, table"
+   "surface": "AdminMenuRules",
+   "location": "AdminMenuRules.Launchers",
+   "kind": "table"
   },
   "Grant a translation role - find the player": {
    "surface": "NativeUI",
@@ -11030,6 +11146,11 @@
    "surface": "shop catalog",
    "location": "cosmetic name/description",
    "kind": "shop"
+  },
+  "Griefing or throwing": {
+   "surface": "PlayerReportRules",
+   "location": "ReasonText",
+   "kind": "Tr"
   },
   "Grinder": {
    "surface": "shop catalog",
@@ -11119,6 +11240,11 @@
   "Harassment": {
    "surface": "MailUI",
    "location": "DrawReportModal",
+   "kind": "Tr"
+  },
+  "Harassment or abuse": {
+   "surface": "PlayerReportRules",
+   "location": "ReasonText",
    "kind": "Tr"
   },
   "Hard to hit": {
@@ -12076,6 +12202,11 @@
    "location": "HelpBodyTr",
    "kind": "Tr"
   },
+  "Leaving games": {
+   "surface": "PlayerReportRules",
+   "location": "ReasonText",
+   "kind": "Tr"
+  },
   "Leaving queue...": {
    "surface": "NativeUI",
    "location": "RefreshQueueUI",
@@ -12337,8 +12468,8 @@
    "kind": "Tr"
   },
   "Loading...": {
-   "surface": "MailUI, NativeUI, PlayerCardsUI +2",
-   "location": "BuildCompareCardLeaders, BuildCompareCardMetric, BuildCompareCardPickers +25",
+   "surface": "MailUI, NativeUI, PlayerCardsUI +4",
+   "location": "BuildCompareCardLeaders, BuildCompareCardMetric, BuildCompareCardPickers +28",
    "kind": "CreateButton, CreateText, SetText +1"
   },
   "Locked": {
@@ -12375,6 +12506,11 @@
    "surface": "shop catalog",
    "location": "cosmetic name/description",
    "kind": "shop"
+  },
+  "Log attached": {
+   "surface": "PlayerReportUI",
+   "location": "DrawAdmin",
+   "kind": "Tr"
   },
   "Longest Game": {
    "surface": "NativeUI",
@@ -12584,6 +12720,16 @@
   "Maps": {
    "surface": "NativeUI",
    "location": "(file scope)",
+   "kind": "Tr"
+  },
+  "Mark Actioned": {
+   "surface": "PlayerReportUI",
+   "location": "DrawDetail",
+   "kind": "Tr"
+  },
+  "Mark this report as actioned?": {
+   "surface": "PlayerReportRules",
+   "location": "VerdictQuestion",
    "kind": "Tr"
   },
   "Marked false positive. You still need to repair the rewards and series by hand.": {
@@ -13052,14 +13198,14 @@
    "kind": "shop"
   },
   "Mute From Message...": {
-   "surface": "AdminMenuRules, NativeUI",
-   "location": "AdminMenuRules.Launchers, BuildAdminTab",
-   "kind": "CreateButton, table"
+   "surface": "AdminMenuRules",
+   "location": "AdminMenuRules.Launchers",
+   "kind": "table"
   },
   "Mute Player...": {
-   "surface": "AdminMenuRules, NativeUI",
-   "location": "AdminMenuRules.Launchers, BuildAdminTab",
-   "kind": "CreateButton, table"
+   "surface": "AdminMenuRules",
+   "location": "AdminMenuRules.Launchers",
+   "kind": "table"
   },
   "Mute a player in chat - find the player": {
    "surface": "NativeUI",
@@ -13401,6 +13547,11 @@
    "location": "RefreshLeaderboard",
    "kind": "SetText"
   },
+  "No log is stored for this report.": {
+   "surface": "PlayerReportRules",
+   "location": "AdminAnswerText",
+   "kind": "Tr"
+  },
   "No longer possible": {
    "surface": "PlayerCardsUI",
    "location": "FillTradeRow, RecentLine",
@@ -13440,6 +13591,11 @@
    "surface": "NativeUI",
    "location": "RefreshRecentSeries",
    "kind": "SetText"
+  },
+  "No reports.": {
+   "surface": "PlayerReportUI",
+   "location": "DrawAdmin",
+   "kind": "Tr"
   },
   "No server-issued chat lines are in this session's log.\n\nOnly messages this client received from the server can be deleted - the request keys on the server's row id, which a local echo does not carry.": {
    "surface": "NativeUI",
@@ -13482,8 +13638,8 @@
    "kind": "shop"
   },
   "Not allowed.": {
-   "surface": "MailClient",
-   "location": "ErrorDetail",
+   "surface": "MailClient, PlayerReportRules, PlayerReportUI",
+   "location": "AdminAnswerText, ErrorDetail, LoadAdmin",
    "kind": "Tr"
   },
   "Not an artist account": {
@@ -13581,6 +13737,16 @@
    "location": "TrRefusalDetail",
    "kind": "Tr"
   },
+  "Note (optional):": {
+   "surface": "PlayerReportUI",
+   "location": "DrawDetail",
+   "kind": "Tr"
+  },
+  "Note:": {
+   "surface": "PlayerReportUI",
+   "location": "DrawDetail",
+   "kind": "Tr"
+  },
   "Nothing playing": {
    "surface": "NativeUI",
    "location": "RefreshMusicTab",
@@ -13664,6 +13830,11 @@
   "Odds are set when the lobby starts. Refunded if the exact person/team you bet on is not in the game.": {
    "surface": "NativeUI",
    "location": "LobbyBetDisclaimer",
+   "kind": "Tr"
+  },
+  "Offensive name": {
+   "surface": "PlayerReportRules",
+   "location": "ReasonText",
    "kind": "Tr"
   },
   "Offer in a trade": {
@@ -13922,8 +14093,8 @@
    "kind": "shop"
   },
   "Other": {
-   "surface": "InfoViz, MailUI, NativeUI",
-   "location": "(file scope), BuildCompareGenericPie, DrawReportModal +1",
+   "surface": "InfoViz, MailUI, NativeUI +1",
+   "location": "(file scope), BuildCompareGenericPie, DrawReportModal +2",
    "kind": "Tr, TrC fallback"
   },
   "Other\u0004report reason": {
@@ -14271,6 +14442,11 @@
    "location": "ComposeFfaMiniPanel",
    "kind": "TrF"
   },
+  "Pending": {
+   "surface": "PlayerReportRules, PlayerReportUI",
+   "location": "DrawAdmin, StatusText",
+   "kind": "Tr"
+  },
   "Per game": {
    "surface": "SessionReportModel",
    "location": "Build",
@@ -14531,6 +14707,16 @@
    "location": "TrMetric",
    "kind": "Tr"
   },
+  "Player Reports": {
+   "surface": "PlayerReportUI",
+   "location": "DrawAdmin",
+   "kind": "Tr"
+  },
+  "Player Reports...": {
+   "surface": "AdminMenuRules",
+   "location": "AdminMenuRules.Launchers",
+   "kind": "table"
+  },
   "Player not found": {
    "surface": "ServerTextRules",
    "location": "TrRefusalDetail",
@@ -14551,6 +14737,16 @@
    "location": "FfaKickFromLobby, Kick",
    "kind": "Tr"
   },
+  "Player reports are turned off right now.": {
+   "surface": "PlayerReportRules",
+   "location": "AnswerText",
+   "kind": "Tr"
+  },
+  "Player reports are unavailable right now.": {
+   "surface": "PlayerReportRules",
+   "location": "AnswerText",
+   "kind": "Tr"
+  },
   "Player totals": {
    "surface": "SessionReportModel",
    "location": "Build",
@@ -14560,6 +14756,11 @@
    "surface": "TabStatsOverlay",
    "location": "PlayerName",
    "kind": "TrF"
+  },
+  "Player:": {
+   "surface": "PlayerReportUI",
+   "location": "Draw",
+   "kind": "Tr"
   },
   "Players": {
    "surface": "AdminMenuRules, NativeUI",
@@ -14742,8 +14943,8 @@
    "kind": "ShowNotification"
   },
   "Preview logs": {
-   "surface": "CompetitiveUI",
-   "location": "DrawBugReportModal",
+   "surface": "CompetitiveUI, PlayerReportUI",
+   "location": "Draw, DrawBugReportModal",
    "kind": "Tr"
   },
   "Preview: {0}": {
@@ -15471,6 +15672,11 @@
    "location": "ChatMuteMsgDuration, StartAdminBanFlow, StartAdminReverseFlow +1",
    "kind": "Tr"
   },
+  "Reason:": {
+   "surface": "PlayerReportUI",
+   "location": "Draw, DrawDetail",
+   "kind": "Tr"
+  },
   "Rebirth": {
    "surface": "shop catalog",
    "location": "cosmetic name/description",
@@ -15607,8 +15813,8 @@
    "kind": "shop"
   },
   "Refresh": {
-   "surface": "AdminMenuRules, CompetitiveUI, InfoViz +2",
-   "location": "AdminMenuRules.HeaderLaunchers, BuildAdminTab, BuildPage +4",
+   "surface": "AdminMenuRules, CompetitiveUI, InfoViz +3",
+   "location": "AdminMenuRules.HeaderLaunchers, BuildAdminTab, BuildPage +5",
    "kind": "CreateButton, Tr, shop +1"
   },
   "Refresh?": {
@@ -15746,10 +15952,20 @@
    "location": "BuildReaderView",
    "kind": "Tr"
   },
+  "Report a Player": {
+   "surface": "PlayerReportUI",
+   "location": "Draw",
+   "kind": "Tr"
+  },
   "Report approved for recovery - an ordered replay is still required.": {
    "surface": "NativeUI",
    "location": "OnAdminQuarantineAction",
    "kind": "ShowNotification"
+  },
+  "Report closed.": {
+   "surface": "PlayerReportUI",
+   "location": "CloseReport",
+   "kind": "Tr"
   },
   "Report dismissed for good.": {
    "surface": "NativeUI",
@@ -15761,6 +15977,16 @@
    "location": "HandleReportCommand",
    "kind": "AppendSystemChatLine"
   },
+  "Report sent. Thank you.": {
+   "surface": "PlayerReportRules",
+   "location": "AnswerText",
+   "kind": "Tr"
+  },
+  "Report sent. The log could not be attached.": {
+   "surface": "PlayerReportRules",
+   "location": "AnswerText",
+   "kind": "Tr"
+  },
   "Report this message": {
    "surface": "MailUI",
    "location": "DrawReportModal",
@@ -15769,6 +15995,31 @@
   "Reported - thank you. A moderator will review it.": {
    "surface": "MailUI",
    "location": "SubmitReport",
+   "kind": "Tr"
+  },
+  "Reported player:": {
+   "surface": "PlayerReportUI",
+   "location": "DrawDetail",
+   "kind": "Tr"
+  },
+  "Reporter:": {
+   "surface": "PlayerReportUI",
+   "location": "DrawDetail",
+   "kind": "Tr"
+  },
+  "Reporters in the last 30 days: {0}": {
+   "surface": "PlayerReportUI",
+   "location": "DrawDetail",
+   "kind": "TrF"
+  },
+  "Reports go to the mod team. Pick the game, the player and a reason.": {
+   "surface": "PlayerReportUI",
+   "location": "Draw",
+   "kind": "Tr"
+  },
+  "Reports need a verified Steam sign-in.": {
+   "surface": "PlayerReportRules",
+   "location": "AnswerText",
    "kind": "Tr"
   },
   "Request failed - try again.": {
@@ -15867,14 +16118,14 @@
    "kind": "Tr"
   },
   "Revoke Artist...": {
-   "surface": "AdminMenuRules, NativeUI",
-   "location": "AdminMenuRules.Launchers, BuildAdminTab",
-   "kind": "CreateButton, table"
+   "surface": "AdminMenuRules",
+   "location": "AdminMenuRules.Launchers",
+   "kind": "table"
   },
   "Revoke Translator...": {
-   "surface": "AdminMenuRules, NativeUI",
-   "location": "AdminMenuRules.Launchers, BuildAdminTab",
-   "kind": "CreateButton, table"
+   "surface": "AdminMenuRules",
+   "location": "AdminMenuRules.Launchers",
+   "kind": "table"
   },
   "Revoke which alert?": {
    "surface": "NativeUI",
@@ -16342,8 +16593,8 @@
    "kind": "shop"
   },
   "Select": {
-   "surface": "PlayerCardsUI",
-   "location": "BuildBinderView, RefreshSelectRow",
+   "surface": "PlayerCardsUI, PlayerReportUI",
+   "location": "BuildBinderView, PickGame, PickPlayer +2",
    "kind": "CreateButton, Tr"
   },
   "Select 2-12 players (left) to see who beats each of them most.": {
@@ -16437,8 +16688,8 @@
    "kind": "Tr"
   },
   "Sending...": {
-   "surface": "MailUI",
-   "location": "DrawReportModal, SendCurrent",
+   "surface": "MailUI, PlayerReportRules",
+   "location": "BlockText, DrawReportModal, SendCurrent",
    "kind": "Tr"
   },
   "Sent": {
@@ -16517,9 +16768,9 @@
    "kind": "table"
   },
   "Server Alert...": {
-   "surface": "AdminMenuRules, NativeUI",
-   "location": "AdminMenuRules.Launchers, BuildAdminTab",
-   "kind": "CreateButton, table"
+   "surface": "AdminMenuRules",
+   "location": "AdminMenuRules.Launchers",
+   "kind": "table"
   },
   "Server alert": {
    "surface": "NativeUI",
@@ -17306,6 +17557,11 @@
    "location": "OnLfpButton",
    "kind": "ShowNotification"
   },
+  "Status:": {
+   "surface": "PlayerReportUI",
+   "location": "DrawDetail",
+   "kind": "Tr"
+  },
   "Status: <color=#88FF88>Allowed</color> - match data and linking are active.": {
    "surface": "NativeUI",
    "location": "RefreshSettings",
@@ -17507,13 +17763,13 @@
    "kind": "Tr"
   },
   "Submit Report": {
-   "surface": "CompetitiveUI",
-   "location": "DrawBugReportModal",
+   "surface": "CompetitiveUI, PlayerReportUI",
+   "location": "Draw, DrawBugReportModal",
    "kind": "Tr"
   },
   "Submitting...": {
-   "surface": "CompetitiveUI",
-   "location": "DrawBugReportModal, SubmitBugReportNow",
+   "surface": "CompetitiveUI, PlayerReportUI",
+   "location": "Draw, DrawBugReportModal, SubmitBugReportNow",
    "kind": "Tr"
   },
   "Sunburst Halo": {
@@ -17896,6 +18152,11 @@
    "location": "KeybindNotSavedText",
    "kind": "Tr"
   },
+  "That game can no longer be reported.": {
+   "surface": "PlayerReportRules",
+   "location": "AnswerText",
+   "kind": "Tr"
+  },
   "That game is no longer live.": {
    "surface": "ApiClient",
    "location": "SpectateReason, SpectateReasonExact",
@@ -17976,6 +18237,11 @@
    "location": "ReasonText",
    "kind": "Tr"
   },
+  "That player was not in that game.": {
+   "surface": "PlayerReportRules",
+   "location": "AnswerText",
+   "kind": "Tr"
+  },
   "That player's binder is private - they can still propose a trade to you": {
    "surface": "PlayerCardsUI",
    "location": "ReasonText",
@@ -17984,6 +18250,16 @@
   "That preset has never been customised, so your avatar was not switched.": {
    "surface": "AvatarDefaults",
    "location": "UnusableMessage",
+   "kind": "Tr"
+  },
+  "That report is already closed.": {
+   "surface": "PlayerReportRules",
+   "location": "AdminAnswerText",
+   "kind": "Tr"
+  },
+  "That report no longer exists.": {
+   "surface": "PlayerReportRules",
+   "location": "AdminAnswerText",
    "kind": "Tr"
   },
   "That shard was already done with other cards - your binder has been refreshed": {
@@ -18276,6 +18552,11 @@
    "location": "ErrorMessage",
    "kind": "Tr"
   },
+  "The report could not be sent. Try again later.": {
+   "surface": "PlayerReportRules",
+   "location": "AnswerText",
+   "kind": "Tr"
+  },
   "The report details are too long.": {
    "surface": "MailClient",
    "location": "ErrorDetail",
@@ -18291,9 +18572,24 @@
    "location": "ErrorDetail",
    "kind": "Tr"
   },
+  "The report is too large. Send it without the log.": {
+   "surface": "PlayerReportRules",
+   "location": "AnswerText",
+   "kind": "Tr"
+  },
   "The report request could not be started": {
    "surface": "SessionReportView",
    "location": "ErrorMessage",
+   "kind": "Tr"
+  },
+  "The report was not accepted.": {
+   "surface": "PlayerReportRules",
+   "location": "AnswerText",
+   "kind": "Tr"
+  },
+  "The request failed. Try again later.": {
+   "surface": "PlayerReportRules",
+   "location": "AdminAnswerText",
    "kind": "Tr"
   },
   "The rule book for what gets recorded and what gets thrown away: games, series, disconnects, bets. If a result looks missing, the reason is almost always on this page.\n\n<color=#FFD94D><b>NEVER RECORDED AT ALL</b></color>\n\n- Data consent off: the mod runs fully offline. Nothing is ever sent except a version check.\n- Offline, practice and sandbox games: never reported by the client, and refused by the server as a backstop.\n- Spectator seats submit no match record and no persistent stats. (The mod keeps local diagnostics in its own log — frames, connection facts — and sends nothing automatically; they leave your PC only inside a bug report you choose to attach logs to.)\n\n<color=#FFD94D><b>RANKED OR CASUAL</b></color>\n\n- Either player's Ranked toggle off in a room-code game - it plays as CASUAL. Still fully recorded with stats and XP; it never touches rating (see <color=#7FD4FF>How games are tracked</color>).\n- Opponent has never run the mod - always casual, never upgraded. (A live unfinished series from an earlier sitting is the one thing that keeps ranked status across a gap.)\n- Toggling Ranked off MID-SERIES does not void the series. The running best-of-3 is your consent record; its games stay ranked.\n- A game reported as casual is UPGRADED to ranked when the server can see both players are modded, both have Ranked on, and the sitting is live.\n- A ranked-banned participant forces a 1v1 casual at report time - even in a queue room, even mid-series. (The other modes shut banned players out at the door instead.)\n- Mod-issued rooms are consented by definition; queueing is consent. The ranked queue, 2v2 and tournaments rate; ranked FFA lobbies rate while casual ones don't; 1v2 records without rating.\n\n<color=#FFD94D><b>DISCONNECTS - 1V1</b></color>\n\n- You leave a game to join a queued ranked match - the game you left is canceled: nothing recorded, no leave logged.\n- Opponent DCs at 4-4 - you get the win, recorded 5-4.\n- Opponent DCs while you hold 4 rounds - you get the win at the standing score.\n- Any other DC - <color=#FF6666>the game is canceled and no result is recorded</color>, even when the leaver was ahead. Nobody gets a free win and nobody eats an unfair loss (the leave itself can still be logged - see below).\n- Ranked leave %: a DC is logged against the leaver when the CURRENT game had meaningful play (2 or more points scored, or a completed round) and neither side was at 4 rounds. One DC per player per series. The stat is your DCs divided by your ranked series played plus your DCs.\n- Casual rage quits: ANY mid-game leave in a casual 1v1 is logged, even at 4-0. It feeds the Rage Quit % stat (how often opponents walk out on you) - never rating. (A survivor already at 4 rounds still takes the casual win and its XP.)\n\n<color=#FFD94D><b>DISCONNECTS - 2V2 AND FFA</b></color>\n\n- 2v2: a team DCs while the other team leads the series and the abandoned game had 2 or more points - the leading team takes the whole series, with full ratings and rewards.\n- Any other 2v2 DC - the series PAUSES for manual admin resolution instead of auto-deciding. If the same four re-queue within about 30 minutes, the matcher puts them back on the same series with the score kept.\n- FFA keeps playing when someone leaves, as long as 2 or more remain (a game that drops under 3 players before the field scored 2 half points is cancelled instead). The leaver's tallies are frozen, and they are still placed and rated for the game they left during - <color=#FF6666>leaving at 0 points does not dodge the loss</color>.\n- FFA early-leave grace: a leaver who left before the field had scored four half points in total, whether or not any became a full point, is unrated for that game and receives no game Gold or XP from it. Achievements can still be earned and pay as usual, but an unrated game earns no title-ladder progress.\n- An FFA player who left in an EARLIER game rides later reports as absent, excluded from those games' ratings and rewards.\n\n<color=#FFD94D><b>SERIES: RESUME, STALL, EXPIRE</b></color>\n\n- <color=#7FE87F>An undecided best-of-3 resumes with no time limit.</color> Meet the same opponent tomorrow or next week and game 1 still stands. An expiry existed once - leavers waited it out to bank rating, so it was removed.\n- Rating moves ONLY when a series completes (first to 2 game wins). Games of a series that never completes keep their match rows, XP and gold; the rating change just never happens.\n- A series with no game recorded 30 minutes after it was created is abandoned and its bets are refunded.\n- A mid-series stall of an hour refunds the bets, but the series itself stays active and resumable.\n- Tournament series are exempt from this pruning - the bracket owns their lifecycle. A tournament match decided by forfeit can't be bet on.\n\n<color=#FFD94D><b>THROWN OUT AFTER THE FACT</b></color>\n\n- The one AUTOMATIC invalidation in the whole mod: a repeated pattern of implausibly short matches between the same two players inside a short window. The current match AND the earlier short ones are invalidated together, their gold and XP reversed, their series voided.\n- Admin reversal: an admin can void a series - rating changes subtracted, gold clawed back, every match in it invalidated, unsettled bets refunded. Invalidated matches disappear from every board and stat.\n- Quarantine (2v2 and FFA): a report that arrives for a lobby that's no longer active isn't deleted - it's held for admin review, and an admin can still accept it into the record or discard it.\n\n<color=#FFD94D><b>IF THE REPORT CAN'T SEND</b></color>\n\n- A failed report goes to a persistent outbox: retried in the background and saved to disk, so it's re-sent on your next launch even if you quit right after the game. You'll see 'Couldn't record the match - retrying in the background', then 'Match recorded' when it lands.\n- 1v1 reporter crashes before the report exists - the surviving opponent's disconnect path usually records the result instead.\n- FFA elects its reporter among the players still present, so a crashed reporter is never elected. A winner who quits before the report is still recorded from their frozen tallies.\n- A 2v2 game that ends without its series id retries the lookup and defers the send; if that also fails, the game is not recorded.": {
@@ -19227,9 +19523,9 @@
    "kind": "Tr"
   },
   "Unmute Player...": {
-   "surface": "AdminMenuRules, NativeUI",
-   "location": "AdminMenuRules.Launchers, BuildAdminTab",
-   "kind": "CreateButton, table"
+   "surface": "AdminMenuRules",
+   "location": "AdminMenuRules.Launchers",
+   "kind": "table"
   },
   "Unnamed player": {
    "surface": "PcLabels, PlayerCardsUI",
@@ -19336,6 +19632,11 @@
    "location": "ErrorDetail",
    "kind": "Tr"
   },
+  "Update the mod to use player reports.": {
+   "surface": "PlayerReportRules",
+   "location": "AdminAnswerText, AnswerText",
+   "kind": "Tr"
+  },
   "Update the mod to watch this game.": {
    "surface": "ApiClient",
    "location": "SpectateReason, SpectateReasonExact",
@@ -19424,6 +19725,11 @@
   "Verified movement tech: the shield edge bounce, wall jumps, and the flying bounce. Every rule on this page comes straight from the game's code.\n\n<color=#FFD94D><b>THE SHIELD EDGE BOUNCE</b></color>\n\nThe arena has a hard kill boundary just off-screen. While you are past it, the game checks you every 0.1 seconds:\n\n- <color=#FF6666>Not blocking:</color> you take a 51-damage lethal hit and an impulse back toward the arena. At 100 HP, two unshielded edge hits kill you.\n- <color=#7FE87F>Blocking:</color> no damage at all, and the return impulse is twice as strong. Your old velocity is zeroed first, so the bounce is clean and predictable no matter how fast you were flying out.\n\nThe block window is 0.3 seconds and the edge check ticks every 0.1 seconds, so the press can slightly TRAIL your exit and still count. Getting launched off-screen is survivable on demand: block as you cross the edge and you come back harder, for free. In a knockback war this is the difference between a lost point and a return volley.\n\n<color=#FFD94D><b>WALL JUMPS AND JUMP REFRESH</b></color>\n\n- Touching a wall in the air while holding movement INTO it counts as a wall grab. Unless you jumped within the last 0.15 seconds, <color=#7FE87F>a wall touch refreshes ALL of your jumps</color>.\n- Pressing jump within 0.1 seconds of a wall touch performs a wall jump: up and away from the wall instead of straight up.\n- Ground jumps add extra horizontal push proportional to how fast you were already moving sideways; wall jumps skip that bonus.\n- Holding jump keeps adding upward force for a short moment after takeoff - tap for a short hop, hold for full height.\n- While hanging close to a wall, your time-in-air counts more slowly for game systems that care about air time.\n\n<color=#FFD94D><b>THE FLYING BOUNCE</b></color>\n\nA hit big enough to set you 'flying' changes how walls treat you: while flying, hitting map geometry reflects your velocity off the surface, stuns you for 0.2 seconds, and deals a 5-damage self-hit. The reflected launch comes out after a quarter-second hold.\n\nThat self-hit is an ordinary blockable hit: <color=#7FE87F>blocking at the moment of wall impact negates the 5 damage</color>.\n\n<color=#FFD94D><b>MYTHS THE CODE SAYS NO TO</b></color>\n\n- <color=#8A8A93>Wall sliding is real, but not where you'd think: pressing into a wall damps your speed a little and keeps resetting the gravity ramp, so you do fall slower - while the stat actually named 'wall grab drag' does nothing at all.</color>\n- <color=#8A8A93>Cards that advertise a self-push on block do nothing on a normal block press - the game's own block window suppresses the push before it can apply. Do not draft them for movement.</color>\n\n<color=#FFD94D><b>SHIELD CHARGE IS THE REAL BLOCK MOVEMENT</b></color>\n\nShield Charge launches you along your AIM direction on any block press, and the launch works during your own block window. Hitting a player cancels the launch, damages and knocks them back, and grants a bonus block. It also combos with the wall rules above: charge into a wall, get your jumps refreshed, wall-jump out.": {
    "surface": "InfoLibrary",
    "location": "(file scope)",
+   "kind": "Tr"
+  },
+  "View Log": {
+   "surface": "PlayerReportUI",
+   "location": "DrawDetail",
    "kind": "Tr"
   },
   "View channel": {
@@ -20172,8 +20478,8 @@
    "kind": "shop"
   },
   "Yes": {
-   "surface": "FfaReadmit, InfoViz",
-   "location": "BuildDamageMatrix, BuildRefreshFlow, BuildRefreshGate +2",
+   "surface": "FfaReadmit, InfoViz, PlayerReportUI",
+   "location": "BuildDamageMatrix, BuildRefreshFlow, BuildRefreshGate +3",
    "kind": "Tr"
   },
   "Yin & Yang": {
@@ -20189,6 +20495,11 @@
   "You already have an open trade with that player": {
    "surface": "PlayerCardsUI",
    "location": "ReasonText",
+   "kind": "Tr"
+  },
+  "You already reported this player for this game.": {
+   "surface": "PlayerReportRules",
+   "location": "AnswerText",
    "kind": "Tr"
   },
   "You are back in the match": {
@@ -20264,6 +20575,16 @@
   "You have made all the trades allowed today - try again after midnight UTC": {
    "surface": "PlayerCardsUI",
    "location": "ReasonText",
+   "kind": "Tr"
+  },
+  "You have no recent games to report.": {
+   "surface": "PlayerReportRules",
+   "location": "ListText",
+   "kind": "Tr"
+  },
+  "You have reached today's limit of reports.": {
+   "surface": "PlayerReportRules",
+   "location": "AnswerText",
    "kind": "Tr"
   },
   "You have sent all the proposals allowed today - try again after midnight UTC": {
@@ -20390,6 +20711,11 @@
    "surface": "LagNotices",
    "location": "LineFor",
    "kind": "TrF"
+  },
+  "Your games could not be loaded. Try again later.": {
+   "surface": "PlayerReportRules",
+   "location": "ListText",
+   "kind": "Tr"
   },
   "Your last pack ({0}) - {1}": {
    "surface": "PlayerCardsUI",
@@ -22271,6 +22597,11 @@
    "location": "FavCardLine",
    "kind": "TrF"
   },
+  "{0} (already reported)": {
+   "surface": "PlayerReportRules",
+   "location": "OtherLabel",
+   "kind": "TrF"
+  },
   "{0} (away) got {1}": {
    "surface": "FfaMode",
    "location": "ApplyManifestPick",
@@ -22397,8 +22728,8 @@
    "kind": "TrF"
   },
   "{0} and {1} more": {
-   "surface": "CompetitiveUI",
-   "location": "RefreshFfaMatchPointBanner",
+   "surface": "CompetitiveUI, PlayerReportRules",
+   "location": "NamesLine, RefreshFfaMatchPointBanner",
    "kind": "TrF"
   },
   "{0} can now translate {1}.": {
@@ -22609,6 +22940,11 @@
   "{0} ready! Joining...": {
    "surface": "NativeUI",
    "location": "RefreshQueueUI",
+   "kind": "TrF"
+  },
+  "{0} reported {1}": {
+   "surface": "PlayerReportRules",
+   "location": "ReportLine",
    "kind": "TrF"
   },
   "{0} searching": {

@@ -179,6 +179,7 @@ namespace CompetitiveRounds
             new Launcher("AAdmins",   "Admin Roster...",           Group.Server,   false),
             new Launcher("AActions",  "Action Log...",             Group.Server,   false),
             new Launcher("ABugRpt",   "Bug Reports...",            Group.Queues,   false),
+            new Launcher("APlrRpt",   "Player Reports...",         Group.Queues,   false),
             new Launcher("ACosR",     "Cosmetic Reviews...",       Group.Queues,   false),
             new Launcher("ACosQ",     "Approved Update Queue...",  Group.Queues,   false),
         };

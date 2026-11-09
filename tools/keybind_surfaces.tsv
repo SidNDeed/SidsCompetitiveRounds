@@ -169,6 +169,7 @@ aed453ecdecb7d98	N	rule:N1	<b>Recent Casual FFAs</b>  <color=#888>- none yet</co
 c655a4e371ec3c52	N	rule:N1	<b>Recent Ranked FFAs</b>  <color=#888>- none yet</color>
 2ae94b94fa1cb8b9	N	rule:N1	<b>Start (need {0})</b>
 60e8be4e971f1fed	N	rule:N1	<b>Start Game ({0}/{1})</b>
+03a59da1c500b421	N	rule:N1	<b>What happened?</b> <color=#888>(optional)</color>
 8500bc4d384b9f21	N	rule:N1	<b>What happened?</b> <color=#FF9966>(required)</color>
 dbc49e21b64e298c	N	rule:N1	<b>You</b>
 738d870e4c7f52b3	N	rule:N1	<b>Your 2v2 Lobby</b>
@@ -579,6 +580,7 @@ a50b9dbf33783b0f	N	rule:N1	Achievements unlocked
 97c89a4d6630adeb	N	rule:N1	Action
 be93470195f3332d	N	rule:N1	Action Log
 1f50d36eaab8e0a9	N	rule:N1	Action Log...
+0abfbac521883a9c	N	rule:N1	Actioned
 c3cd636a585b20c4	N	rule:N1	Actions
 a733b809d2f12334	N	rule:N1	Active
 74872dbbc2af46be	N	rule:N1	Actually Good
@@ -931,9 +933,13 @@ e80e0bab92e8d072	N	rule:N1	Chat overlay mode
 ea95f55d84ec2572	N	rule:N1	Chat overlay: MUTED - hidden, and the room is told
 f960a3c53bbd484f	N	rule:N1	Chat overlay: NORMAL - messages fade out
 f8143ac3985dcfb6	N	rule:N1	Chat overlay: PINNED - messages stay on screen
+76061978254a7900	N	rule:N1	Cheating or exploiting
 5c05b0ae062af07a	N	rule:N1	Checking the secure connection...
 6ef502c0684ae18a	N	rule:N1	Checking whether {0} can rejoin
+6fa9f39381f6747a	N	rule:N1	Choose a game
 f9491ed1720722bc	N	rule:N1	Choose a metric
+659d2ced7cbb23ca	N	rule:N1	Choose a player
+b6b0ebb301f680af	N	rule:N1	Choose a reason
 745fffa486b3d6bc	N	rule:N1	Choose cards (left) to compare {0}.
 20e26e2d014fa87e	N	rule:N1	Choose up to {0} of their cards
 6a2eb4de7f686687	N	rule:N1	Choose up to {0} of your cards
@@ -967,6 +973,7 @@ cdd0bc23bbc50f96	N	rev:bbca28b99f8a38b9 a click or press on one of the mod's own
 b04f8c027f466662	N	rev:e4d16c7c5d680637 a click or press on one of the mod's own buttons, rows, tiles or links; names no key	Click cards to select them for shards
 4665f476a8337513	N	rule:N1	Clock:
 bbfa773e5a63a5ea	N	rule:N1	Close
+c521a937a84d673e	N	rule:N1	Closed by {0}
 58d28d96646957ac	N	rule:N1	Clown
 4c26512201170dc2	N	rule:N1	Clutch
 c509eac2111b5bd8	N	rule:N1	Cobalt
@@ -1194,6 +1201,7 @@ e4c85cd992a342d9	N	rule:N1	Detail: green tear streaks running down both cheeks. 
 d35ece05488a58ed	N	rule:N1	Detail: heavy is the head. Equip in the Character editor.
 dc3decbb93847518	N	rule:N1	Details
 138a572192dc8587	N	rule:N1	Details (optional)
+1daaad0084c26041	N	rule:N1	Details:
 3c78aabd881815a2	N	rule:N1	Detected: {0}
 0f2a3d6e36b590db	N	rule:N1	Devil Horns
 7c6f286eedfab90b	N	rule:N1	Diagram of Spirit's research, 'On Damage Types and Buff Activation'.
@@ -1211,7 +1219,10 @@ bccc14ee7da1d20f	N	rule:N1	Discord
 b01de5583efdec82	N	rule:N1	Discord relay: <color=#AAAAAA>checking...</color>
 8fe6f989784d0e7d	N	rule:N1	Discord relay: <color=#AAAAAA>link Discord first</color>
 2e5678587b78883f	N	rule:N1	Discord relay: <color=#FF9966>Off</color>
+70afe9eff3f28884	N	rule:N1	Dismiss
 170d1f2f961db1e8	N	rev:64eb515cf5d566f3 the match-found stuck overlay's own text (DrawMatchFoundStuckOverlay is binding-dependent: it names the Jump key through KeybindRowFace); names no key	Dismiss (1 min)
+ec356c9d332eb9df	N	rule:N1	Dismiss this report?
+e8db5f4582e50590	N	rule:N1	Dismissed
 b7453a2df406d0e7	N	rule:N1	Displays your live rank tier (updates automatically as you rank up or down)
 698ebe34accf7b9d	N	rule:N1	Dmg/game
 d268ba5209c487d7	N	rule:N1	Do nothing
@@ -1330,7 +1341,7 @@ fbe1ede71827fb41	N	rule:N1	Eyes: big round eyes with lashes and a bright shine. 
 8cd24e52796e469a	N	rule:N1	Eyes: red and yellow goggles marked with the radiation symbol. Equip in the Character editor.
 8b337be2a4359861	N	rule:N1	Eyes: two green curves for calm, closed eyes. Equip in the Character editor.
 1a2139886b9f4ea1	F	rev:eb7810a3cb854bb5 fixed:F5 F5 always opens the mod menu; no Controls row moves it	F5 stays on the menu control.
-90ce5340a6531dab	N	rev:5f606b65f39cd1fb a page or section title of the info library (InfoLibrary's file scope is binding-dependent: its pages name keys through KeybindRowFace); names no key	FFA
+90ce5340a6531dab	N	rev:ab9edc94b1923e0f a page or section title of the info library (InfoLibrary's file scope is binding-dependent: its pages name keys through KeybindRowFace) and, since ask 14, the player report form's game kind label (PlayerReportRules.KindLabel, drawn by PlayerReportUI); names no key	FFA
 87f5c954be7baafd	N	rule:N1	FFA (placed above / below)
 bc6c4123d4239b8e	N	rule:N1	FFA - How It Works
 67a5c91fdef543bc	N	rule:N1	FFA - {0} players - first to {1} points!
@@ -1473,6 +1484,7 @@ e7a9b89520887cc2	N	rule:N1	Game over - {0} wins
 158534c6676ad9ae	N	rule:N1	Game {0}: team 1 {1}-{2} team 2
 a3143c792dd243b3	N	rule:N1	Game {0}: {1}
 fd70315e6afaa97d	N	rule:N1	Game {0}: {1}-{2}
+b0087a865cdc0615	N	rule:N1	Game:
 398ed32981497751	N	rule:N1	Games
 642808bcd1846300	N	rule:N1	Games {0}-{1} of {2}
 f75572ef86d5cfae	N	rule:N1	Gentle soap bubbles float up around you.
@@ -1536,6 +1548,7 @@ d5763ca42b2baa62	N	rule:N1	Great White
 3ff31ec176822ae0	N	rule:N1	Green Cursor
 3f508506b3bbc0e0	N	rule:N1	Green Name
 82974e1f3b7ac1ae	N	rule:N1	Grey Cat
+3d52d25cf20621ef	N	rule:N1	Griefing or throwing
 88557672dea96c8c	N	rule:N1	Grinder
 fb6b5ac45eccb137	N	rule:N1	Grizzly
 d5580b73bfb2949a	N	rule:N1	Grounded
@@ -1555,6 +1568,7 @@ a40abb2e44a56072	N	rule:N1	HP decimals: <color=#FF9966>ROUNDED</color>
 99cf818cabe3e480	N	rule:N1	HUMAN REVIEW
 f3681d8bf1896923	N	rule:N1	Halo
 8fddd79e1918745f	N	rule:N1	Harassment
+26238348890d3dba	N	rule:N1	Harassment or abuse
 6ce2c7378614f190	N	rule:N1	Hard to hit
 2d9cac34c9968365	N	rule:N1	Hare Apparent
 a4830d21a06a1fed	N	rule:N1	Harlequin
@@ -1755,6 +1769,7 @@ b184a204463eaea7	N	rule:N1	Leave Signup
 62820e3a31c40e97	N	rule:N1	Leave your current game first.
 3a727fff861b7155	N	rule:N1	Leave your custom 1v2 lobby first.
 cfb9bd3cdf1d880a	N	rev:30f64057728d5a24 a click or press on one of the mod's own buttons, rows, tiles or links; names no key	Leaves every queue this client believes it is in - ranked, casual and tournament - and clears the lo
+a3615c1c56167192	N	rule:N1	Leaving games
 02dceaeb2b12aa88	N	rule:N1	Leaving queue...
 c92a20f9bc034746	N	rule:N1	Leech
 2aa0b0b1a20afa22	N	rule:N1	Left 1v1 queue - you joined a game
@@ -1808,7 +1823,7 @@ cbda8c4ca3faccb0	N	rule:N1	Loading your card...
 1ee7469705bf8cf5	P	rule:P	Loading your dances - try {0} again in a second.
 13c6b6b00c3614b6	N	rule:N1	Loading your dances...
 06763d5bb728c2a4	N	rule:N1	Loading your packs...
-b04ba49f848624bb	N	rev:a0dceb19c09749d7 a Home-tab label (NativeUI.BuildHomeTab is binding-dependent: it names a key through KeybindRowFace); names no key	Loading...
+b04ba49f848624bb	N	rev:190870b082a062ce a Home-tab label (NativeUI.BuildHomeTab is binding-dependent: it names a key through KeybindRowFace) and, since ask 14, the loading line of the player report form and of the admins' report viewer (PlayerReportRules.ListText; PlayerReportUI.DrawAdmin and DrawLog); names no key	Loading...
 a798882f1c31099b	N	rule:N1	Locked
 7ecb9e49219df7f9	N	rule:N1	Locks the map to ROUNDS' Gold palette (warm yellow).
 1ca68d13c18e8e43	N	rule:N1	Locks the map to ROUNDS' Poison palette (acid green).
@@ -1816,6 +1831,7 @@ a798882f1c31099b	N	rule:N1	Locked
 e07f293196ef7e09	N	rule:N1	Locks the map to ROUNDS' Sky palette (light blue).
 2dc9a74a3d4c4d45	N	rule:N1	Locks the map to ROUNDS' Soviet palette (deep red).
 c2cb065aefa60150	N	rule:N1	Locks the map to ROUNDS' Sweden palette (blue + yellow).
+bd9e28e1338a48be	N	rule:N1	Log attached
 9f9866e25ae0c786	N	rule:N1	Longest Game
 62a0c4924d330166	N	rule:N1	Longest game
 689f66917a28e83a	N	rule:N1	Longest point streak
@@ -1858,6 +1874,8 @@ aea9c61229fe7166	N	rule:N1	Map shadows: <color=#FF9966>OFF</color>
 4191ab33cd5ddde5	N	rule:N1	Map skin cycle
 3f5e663ffe952706	N	rule:N1	Map skins
 80071cd75107cd5c	N	rule:N1	Maps
+5816c67fe5a4e22e	N	rule:N1	Mark Actioned
+b904680a9a43758e	N	rule:N1	Mark this report as actioned?
 8605f969b685627b	N	rule:N1	Marked false positive. You still need to repair the rewards and series by hand.
 bcece088df9e0ede	O	rule:O	Marked false positive. You still need to repair the rewards and series.
 e7361836c8cf99f0	N	rule:N1	Marksman
@@ -2024,6 +2042,7 @@ dd08cb0724fcf19d	N	rule:N1	No data from the match server for {0}s - you may be d
 63d1b18a4ec7db0e	N	rule:N1	No ladder yet - buy a title line in the Shop to start one.
 eddf8963477756fa	N	rule:N1	No leaderboard data
 478ea3e7fb37dee4	O	rule:O	No line started yet.
+7a47d99bd0426246	N	rule:N1	No log is stored for this report.
 24649514990a1d7a	N	rule:N1	No longer possible
 d5204921aec730c6	N	rule:N1	No mail yet.
 0be6a25758e1f32b	N	rule:N1	No matches.
@@ -2032,6 +2051,7 @@ d1a321b6ff6c3937	N	rule:N1	No opponent has enough ranked series against this gro
 6043e614319ca2a3	N	rule:N1	No preset is free of modded items yet.
 7b6404043fbac559	N	rule:N1	No ranked 1v1 series recorded for the selected players yet.
 29ac10d1f29b9a81	N	rule:N1	No recent series
+17deffb03ebdcf32	N	rule:N1	No reports.
 31c3631d596f2157	N	rev:a99af20110a01b73 'keys on the server's row id' is database keying; names no key	No server-issued chat lines are in this session's log.\n\nOnly messages this client received from th
 29873ae5ee306392	N	rule:N1	No server-issued chat lines are in this session's log.\n\nPick a message the author sent; the mute l
 528174ae3a6de863	N	rule:N1	No tiers listed
@@ -2061,6 +2081,8 @@ db2c45d557936743	N	rule:N1	Not started
 36f5d5d080194460	O	rule:O	Not started - buy {0} in the Shop to begin this line.
 9b90736b58dc8af3	N	rule:N1	Not started.
 8778c01f304ebf4f	N	rule:N1	Not your item
+271c81df5d7eb3ea	N	rule:N1	Note (optional):
+83423c198b6099ed	N	rule:N1	Note:
 13ae374e9d0eb2c2	N	rule:N1	Nothing playing
 6fa60471c5d8a896	N	rule:N1	Nothing sent yet.
 182fb22139d51c8a	N	rule:N1	Now Playing: {0} - {1}
@@ -2078,6 +2100,7 @@ dcf9125b0badf4d4	N	rule:N1	OOB bullet despawn
 24c869802c3e242e	N	rule:N1	Obsidian
 7e4c3a7dbaa079df	N	rule:N1	Ocean Gradient
 169b553fcca1b1d0	N	rule:N1	Odds are set when the lobby starts. Refunded if the exact person/team you bet on is not in the game.
+b9862209d03855f3	N	rule:N1	Offensive name
 37ca1c9a97619051	N	rule:N1	Offer in a trade
 48f932335abd4b7a	N	rule:N1	Older >
 8f62f4336f1907e6	N	rule:N1	Olive
@@ -2204,6 +2227,7 @@ d0cfb954a9334a6c	N	rule:N1	Pass%
 672504530777b1b6	N	rule:N1	Paused: {0} - {1}
 5a581465bae3c00c	N	rule:N1	Peak Elo
 692b07e24b3da4d3	N	rule:N1	Peak {0}
+96f608c16cef16ca	N	rule:N1	Pending
 773ae9253d2188c6	N	rule:N1	Per game
 f08ec7ca421c33b8	N	rule:N1	Per-letter bright cyan → deep indigo gradient. Surface to trench.
 7fd885137d973cf1	N	rule:N1	Per-letter bright red → dark wine gradient.
@@ -2258,12 +2282,17 @@ f66cedfaedf49313	O	rule:O	Player Cards are collectible cards of the people who p
 68083ab99d56ac88	N	rule:N1	Player Cards are not open yet - no edition is running
 ba5ee5c074ee898b	N	rule:N1	Player Cards need your Steam sign-in - try again in a moment
 15353c406b7afd58	N	rule:N1	Player Nemesis
+4250efaf7d92e96f	N	rule:N1	Player Reports
+9bb83a84bb0e02bf	N	rule:N1	Player Reports...
 9cfe6ceb8c4b47dc	N	rule:N1	Player not found
 d26d4dc8b8266aa8	N	rule:N1	Player not found — they need to have used the mod once
 7fd409f1368984a0	N	rule:N1	Player opted out
 6513aeea6e95789c	N	rule:N1	Player removed from the lobby.
+864e0516016ae123	N	rule:N1	Player reports are turned off right now.
+3b7d6e50c4562545	N	rule:N1	Player reports are unavailable right now.
 4116a2bca218b61d	N	rule:N1	Player totals
 315b1f52cdff2bd5	N	rule:N1	Player {0}
+42153ed0bae278f3	N	rule:N1	Player:
 392feef07c53c9a7	N	rev:08ca69060e8c585a a Home-tab label (NativeUI.BuildHomeTab is binding-dependent: it names a key through KeybindRowFace) and, since ask 15, the Admin tab's Players group caption (AdminMenuRules.GroupCaptions, drawn by NativeUI.BuildAdminGroupRows through CreateText); names no key	Players
 971b5de3da8d8c6c	O	rule:O	Podium
 fd2f5c58c6a2ab9b	N	rev:e881a2ca37b61f14 a dance's shop description: 'locks your controls' means the dancer cannot move; names no key	Point to the sky, point to the floor, sway those hips. Dancing locks your controls for the duration.
@@ -2451,6 +2480,7 @@ ea1e194a903d0c5f	N	rev:8a3f00c495d08e30 a page or section title of the info libr
 164da91182aa67ab	N	rule:N1	Ready-up failed — retrying search
 f219cc0614ae6860	N	rule:N1	Reason
 f6826f8fc9b458f2	N	rule:N1	Reason (optional)
+2c25e64f53a5c729	N	rule:N1	Reason:
 89992da5b314fd67	N	rule:N1	Rebirth
 c4097eedd44962a5	N	rule:N1	Reborn after defeat
 76eec760c9b6e63e	N	rule:N1	Recent
@@ -2509,13 +2539,22 @@ f8f842c1e0272e41	N	rule:N1	Render your name at 130% size.
 82727ae5be7bff2b	N	rule:N1	Reply all is not available for this message.
 df424aaa0ba06e96	N	rule:N1	Reply to all
 ee45c30326b75038	N	rule:N1	Report
+b03a225d34a3aade	N	rule:N1	Report a Player
 fbb446a61a4468f5	O	rule:O	Report a bug
 025d23a1daab37a0	N	rule:N1	Report approved for recovery - an ordered replay is still required.
+e1b13e3d19089000	N	rule:N1	Report closed.
 699209ea2c9bafab	N	rule:N1	Report dismissed for good.
 cb3df1b14988aa02	N	rule:N1	Report failed to send - try again in a moment.
 b702c754b815b4a2	O	rule:O	Report restored to the queue.
+eea896bb4f890a22	N	rule:N1	Report sent. Thank you.
+a498cfaf1cfa3963	N	rule:N1	Report sent. The log could not be attached.
 080b46978fbe937f	N	rule:N1	Report this message
 61835ff8c458f274	N	rule:N1	Reported - thank you. A moderator will review it.
+b055e9ba646998f3	N	rule:N1	Reported player:
+35fa569af87dd802	N	rule:N1	Reporter:
+f0bc75c85ccd4987	N	rule:N1	Reporters in the last 30 days: {0}
+495a5d7647190d73	N	rule:N1	Reports go to the mod team. Pick the game, the player and a reason.
+4df1252fbc5a40be	N	rule:N1	Reports need a verified Steam sign-in.
 48336ec0bad6a9a4	N	rule:N1	Request failed - try again.
 e37b50a99f9235f1	N	rev:a875e48d26ee5165 the match-found stuck overlay's own text (DrawMatchFoundStuckOverlay is binding-dependent: it names the Jump key through KeybindRowFace); names no key	Requeue
 787da19d9c98597e	N	rev:015eab313e177dea Controls-page text (a row's help, a refusal, an outcome or a button) that names no key; the bound key is drawn beside it by the row's own face	Reset all controls
@@ -2838,6 +2877,7 @@ e3c95802a4529c0f	N	rule:N1	Starts: <color=#FFDE88>{0}</color>
 be763e9aba2af6b8	O	rule:O	Stats
 0e3a877944567241	N	rule:N1	Stats and profiles need the secure connection. Retrying every 5 minutes.
 638ae8141a106560	N	rule:N1	Stats still loading - try again in a moment.
+11dc9e1952928d4c	N	rule:N1	Status:
 084282a69463a804	N	rule:N1	Status: <color=#88FF88>Allowed</color> - match data and linking are active.
 1701a52158cb5b8e	N	rule:N1	Status: <color=#DDDD66>Unset</color> - the consent prompt will appear on next launch.
 593dddce7c4ef2c4	N	rule:N1	Status: <color=#FF9966>Denied</color> - mod runs offline. No data leaves your machine.
@@ -2958,6 +2998,7 @@ d9077ef0f07dec9c	N	rev:0915679eca09214d info-library prose (InfoLibrary's file s
 fd8923a0ee4ad7bb	N	rev:efae304172391103 Controls-page text (a row's help, a refusal, an outcome or a button) that names no key; the bound key is drawn beside it by the row's own face	That change could not be applied, and some controls could not be put back as they were. Restart the 
 2beb4760b9d4ae32	N	rev:1e2da62a0dd68d6c Controls-page text (a row's help, a refusal, an outcome or a button) that names no key; the bound key is drawn beside it by the row's own face	That change could not be applied, so every control was put back as it was.
 be3c67e92c1f475d	N	rev:1746619385be51d0 Controls-page text (a row's help, a refusal, an outcome or a button) that names no key; the bound key is drawn beside it by the row's own face	That control could not be saved to your settings, so nothing was changed.
+5e01842c4b003c7b	N	rule:N1	That game can no longer be reported.
 f336e5fc9ed94a2e	N	rule:N1	That game is no longer live.
 76bc0d691ad98e46	N	rule:N1	That game is not ready to watch yet.
 305633f7eec553c6	N	rev:325dea07ee5f9745 Controls-page text (a row's help, a refusal, an outcome or a button) that names no key; the bound key is drawn beside it by the row's own face	That key is already used by another control.
@@ -2974,8 +3015,11 @@ a844ef80805e9e2d	N	rule:N1	That player could not be found.
 dc7165ddbbc4df8b	N	rule:N1	That player declined your last proposal - wait before proposing to them again
 4e0dde2bc3badc04	N	rule:N1	That player has card trading turned off
 42a8864092d52b31	N	rule:N1	That player has too many proposals waiting - try again later
+82bbe59a8371fec7	N	rule:N1	That player was not in that game.
 570b6a22ef8b60e4	N	rule:N1	That player's binder is private - they can still propose a trade to you
 229053b95f5d9a16	N	rule:N1	That preset has never been customised, so your avatar was not switched.
+c8614b69dff280b7	N	rule:N1	That report is already closed.
+e0d0e66146c90f08	N	rule:N1	That report no longer exists.
 d143a158719cef2e	N	rule:N1	That shard was already done with other cards - your binder has been refreshed
 9caa66931c9f06f0	N	rule:N1	That trade has changed - check it again before answering
 feb0073d2b8d34a5	N	rule:N1	That trade has expired
@@ -3034,10 +3078,14 @@ a9e422da77adf45b	N	rule:N1	The pack price changed - check the new price and try 
 6457b33d171ff055	N	rule:N1	The preset you wear in Quick Match and in any game where somebody does not have the mod. Only preset
 50a9d67312296bed	N	rule:N1	The purple the Demonic Pact card is drawn in.
 5a7fbd2ce825994a	N	rule:N1	The report could not be read
+93dd0b93b25135d0	N	rule:N1	The report could not be sent. Try again later.
 6f43b8da2c4d3c96	N	rule:N1	The report details are too long.
 5a09ef793c04d82a	N	rule:N1	The report details contain characters that are not allowed.
 54b495e75060e8c4	N	rule:N1	The report details repeat one character too many times.
+a9d5b6d5e4d8d4b6	N	rule:N1	The report is too large. Send it without the log.
 d2ba265f2e2a73f9	N	rule:N1	The report request could not be started
+c42da62ce3d3dd2f	N	rule:N1	The report was not accepted.
+1210d832153e4556	N	rule:N1	The request failed. Try again later.
 64065114ecebfc53	N	rev:981029023ea95a3f rules prose: its input words are actions (press block, hold jump), the mod's own buttons and tabs, possession (hold a rung) or articles, numerals and variables; it names no rebindable key	The rule book for what gets recorded and what gets thrown away: games, series, disconnects, bets. If
 c56bfd5ef74259ff	O	rule:O	The rule book for what gets recorded and what gets thrown away: games, series, disconnects, bets. If
 8a37ccdd1183d3dc	N	rule:N1	The same actions in a different order
@@ -3251,6 +3299,7 @@ ba7ee6a74491308d	N	rule:N1	Update failed — couldn't start the updater. Update 
 f440d8803b105e07	N	rule:N1	Update required
 48a4d199e3576dd1	N	rule:N1	Update the mod first
 0b4257d9a89e14f4	N	rule:N1	Update the mod to use mail.
+9f26493f22346885	N	rule:N1	Update the mod to use player reports.
 456115cee506f55c	N	rule:N1	Update the mod to watch this game.
 c76d18079a076ee3	N	rule:N1	Updates
 a6f47e00e036c558	N	rule:N1	Upgrade
@@ -3753,6 +3802,7 @@ e3274ead58dddc83	N	rule:N1	Vanilla avatar: <color=#88CCFF>{0}</color>
 722b8253ed5d9130	N	rev:11590853417f3465 a page or section title of the info library (InfoLibrary's file scope is binding-dependent: its pages name keys through KeybindRowFace); names no key	Vanilla stays vanilla
 50c8e9195e5ecd57	N	rule:N1	Velvet
 ed706f2149025b47	N	rev:38d0cb92400f973c rules prose: its input words are actions (press block, hold jump), the mod's own buttons and tabs, possession (hold a rung) or articles, numerals and variables; it names no rebindable key	Verified movement tech: the shield edge bounce, wall jumps, and the flying bounce. Every rule on thi
+a4409cbdda93dfb5	N	rule:N1	View Log
 3cf575503d0141f8	N	rule:N1	View channel
 148886cba3727dba	P	rule:P	Viewing: {0}  <color=#888>(press {1} to chat)</color>
 6bae2b3c94856afd	N	rule:N1	Village Idiot
@@ -3908,6 +3958,7 @@ ee87adceb5e62cb4	N	rule:N1	Yellow Cursor
 89ffbc49c5cd513f	N	rule:N1	Yin & Yang
 905cb326c779f012	N	rule:N1	You
 6dedde4e05ca9340	N	rule:N1	You already have an open trade with that player
+24df64ea46280fb4	N	rule:N1	You already reported this player for this game.
 812fabb863224450	N	rule:N1	You are back in the match
 dbfce522b1a9fd91	N	rule:N1	You are in another queue
 3116b2c0ca286eb2	N	rule:N1	You are muted - mail is unavailable while the mute lasts.
@@ -3923,6 +3974,8 @@ f3dbe5f67e8948cd	N	rev:7da211c1ebd615f4 the dance wheel's own text (CompetitiveU
 53eb1352da0ffb51	N	rule:N1	You get
 0f0c1f054257fa71	N	rule:N1	You give
 4501a63a09393399	N	rule:N1	You have made all the trades allowed today - try again after midnight UTC
+dbd97be8021c962e	N	rule:N1	You have no recent games to report.
+8fefa81f678e5adf	N	rule:N1	You have reached today's limit of reports.
 2c03ffc19cad63fd	N	rule:N1	You have sent all the proposals allowed today - try again after midnight UTC
 3744760206c9232c	N	rule:N1	You have too many proposals waiting - cancel one first
 628d45b2a5677a7d	N	rule:N1	You joined the match in progress. This game is unrated for you.
@@ -3949,6 +4002,7 @@ ef6344b64f474181	N	rule:N1	Your block list is full - unblock someone first.
 b94232afdb4a102e	N	rule:N1	Your card trading is off - turn it on in Settings
 1fe5b3e9abf3ace9	P	rule:P	Your controls changed: {0}
 586d2a346956f0f8	N	rule:N1	Your game is dropping frames (worst {0} ms)
+f9008161f2f7c5b2	N	rule:N1	Your games could not be loaded. Try again later.
 a2e51f8d50cb3129	N	rule:N1	Your last pack ({0}) - {1}
 c2c4b1271a540c47	N	rule:N1	Your match (R{0}{1}): vs <color=#FFDE88>{2}</color>
 3bddba2aa07f0439	N	rule:N1	Your match is still running. Rejoin? {0}
@@ -4334,6 +4388,7 @@ eeb8efa38b04f779	N	rule:N1	your aura
 6287c791cf7634cf	N	rule:N1	your trail
 8fa729e9316bef96	N	rule:N1	{0:N0} XP
 f6150e902e7ef2d4	N	rule:N1	{0}  {1}%  ({2} picks)
+4200f18cc0ae98b1	N	rule:N1	{0} (already reported)
 0afb928a9a1a63e4	N	rule:N1	{0} (away) got {1}
 a6bf4f2389295dfd	P	rule:P	{0} (hold) - dance wheel; dancing locks your controls
 affafc49cfe48945	P	rule:P	{0} (hold) - quick-chat wheel, release to send
@@ -4405,6 +4460,7 @@ d77462714935d504	N	rule:N1	{0} players could not connect. Re-forming the lobby w
 18b717861013be8d	N	rule:N1	{0} players online now
 65d4768dbb287c5c	N	rule:N1	{0} players ranked
 62abf774b7f12a08	N	rule:N1	{0} ready! Joining...
+8c84550e3a48dec0	N	rule:N1	{0} reported {1}
 e515dbabaae121a1	N	rule:N1	{0} searching
 222835a0e60f0877	N	rule:N1	{0} series
 335a965db1fd7a02	O	rule:O	{0} series - top of the line.

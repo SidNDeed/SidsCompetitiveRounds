@@ -239,6 +239,16 @@ namespace CompetitiveRounds.Harness
                           }))
                 return 2;
 
+            // Ask 14 (the player report form): what a press may send, what each
+            // answer closes, the request's body, and the rows in every locale.
+            if (!RunSuite("playerreport", quiet, ref totalRun, ref totalFail, ref suites,
+                          () =>
+                          {
+                              var r = PlayerReportRules.SelfTest();
+                              return new Suite(r.Passed + r.Failed, r.Failed, r.Report.ToString());
+                          }))
+                return 2;
+
             string verdict = suites > 0 && totalRun > 0 && totalFail == 0 ? "PASS" : "FAIL";
             Console.WriteLine("client-rules-harness suites=" + suites
                               + " run=" + totalRun + " fail=" + totalFail

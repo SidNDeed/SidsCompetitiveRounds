@@ -314,7 +314,10 @@ namespace CompetitiveRounds
             // Sept 6 mail: the report-reason picker (IMGUI, backdrop-less).
             || MailUI.ModalOpen
             // Sept 6 item c: the full-screen IMGUI session report over the F5 page.
-            || SessionReportView.Active;
+            || SessionReportView.Active
+            // Ask 14: the player report form and the admins' report viewer (IMGUI,
+            // backdrop-less).
+            || PlayerReportUI.AnyOpen;
 
         // AnyModalOwnsInput — the above PLUS every modal that raises its own
         // uGUI backdrop. A backdrop absorbs EventSystem clicks; NOTHING absorbs
@@ -440,6 +443,10 @@ namespace CompetitiveRounds
             DrawConfirm();
             DrawBugReportModal();
             DrawBugReportAdminViewer();
+            // Ask 14: ahead of the log preview and the list picker, which the
+            // form opens and which therefore have to draw on top of it.
+            PlayerReportUI.Draw();
+            PlayerReportUI.DrawAdmin();
             DrawLogViewerModal();
             DrawBlockDebug();  // debug-only; toggle via BlockDebugEnabled below
             DrawInputOverlay();
@@ -6714,6 +6721,9 @@ namespace CompetitiveRounds
         // (LogBundleCore.OffMainJob), and only the lines inside the scroll
         // viewport are drawn, so a frame's cost no longer scales with the log.
         private static bool logViewerOpen = false;
+        /// <summary>Ask 14: the player report form opens this preview and leaves
+        /// Escape and the mouse to it while it is up.</summary>
+        internal static bool LogViewerOpen { get { return logViewerOpen; } }
         private static int logViewerTab = 0;     // 0=BepInEx, 1=BepInEx-prev, 2=Unity
         private static Vector2 logViewerScroll;
         private static string[][] logViewerLines = new string[3][];
@@ -6735,7 +6745,7 @@ namespace CompetitiveRounds
         private static readonly LogBundleCore.ReadRequestLatch _logViewerRequests =
             new LogBundleCore.ReadRequestLatch();
 
-        private static void OpenLogViewer()
+        internal static void OpenLogViewer()
         {
             logViewerOpen = true;
             StartLogViewerRead();

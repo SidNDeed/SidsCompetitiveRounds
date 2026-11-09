@@ -193,6 +193,8 @@
     <Compile Include="FfaLeaveFigureRefusalCases.cs" />
     <Compile Include="../../plugin/AdminMenuRules.cs" />
     <Compile Include="AdminMenuRulesSelfTest.cs" />
+    <Compile Include="../../plugin/PlayerReportRules.cs" />
+    <Compile Include="PlayerReportRulesSelfTest.cs" />
   </ItemGroup>
 
 </Project>

@@ -3755,6 +3755,9 @@ namespace CompetitiveRounds
             // handed to the request here, on the always-on tick, so a report
             // whose page closed while it was building is still sent.
             try { CompetitiveUI.PumpBugFormBundle(); } catch { }
+            // Ask 14: the same hand-over for a player report's body, and the
+            // admins' log view's line split.
+            try { PlayerReportUI.Pump(); } catch { }
             // [CLOCK]: one time line a minute, so every mod line can be placed
             // within a minute and two seats aligned on the Photon server clock.
             try { LogClock.Tick(); } catch { }

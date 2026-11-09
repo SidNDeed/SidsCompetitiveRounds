@@ -58,7 +58,9 @@ merged round 3 tree, with the RJ Stage 2 and readmission ends; 1137 at
 the round 3 refit tree, with the autolog fold's LogBundleCore.cs field end;
 1141 at the round 3 fold tree, with the net-stall lane's three
 using-directive ends and the stall detector's stream-snapshot field;
-1142 with the late i18n lane's ServerTextRules.cs using-directive end).
+1142 with the late i18n lane's ServerTextRules.cs using-directive end;
+1148 with ask 14's player report form: PlayerReportRules.StatusText's three
+case labels and three file-scope field ends).
 """
 from __future__ import annotations
 
@@ -1278,6 +1280,9 @@ FIX5_ENDS = [
     ('dispatch-PlayerCardsUI.cs-RecentLine-executed', 'dispatch:PlayerCardsUI.cs:RecentLine[executed]', 'I18n.cs:Tr'),
     ('dispatch-PlayerCardsUI.cs-RecentLine-expired', 'dispatch:PlayerCardsUI.cs:RecentLine[expired]', 'I18n.cs:Tr'),
     ('dispatch-PlayerCardsUI.cs-RecentLine-reversed', 'dispatch:PlayerCardsUI.cs:RecentLine[reversed]', 'PlayerCardsUI.cs:ReasonText'),
+    ('dispatch-PlayerReportRules.cs-StatusText-actioned', 'dispatch:PlayerReportRules.cs:StatusText[actioned]', 'I18n.cs:Tr'),
+    ('dispatch-PlayerReportRules.cs-StatusText-dismissed', 'dispatch:PlayerReportRules.cs:StatusText[dismissed]', 'I18n.cs:Tr'),
+    ('dispatch-PlayerReportRules.cs-StatusText-open', 'dispatch:PlayerReportRules.cs:StatusText[open]', 'I18n.cs:Tr'),
     ('dispatch-ProfileCard.cs-ModeName-casual_1v1', 'dispatch:ProfileCard.cs:ModeName[casual_1v1]', 'I18n.cs:Tr'),
     ('dispatch-ProfileCard.cs-ModeName-ffa', 'dispatch:ProfileCard.cs:ModeName[ffa]', 'I18n.cs:Tr'),
     ('dispatch-ProfileCard.cs-ModeName-ovt', 'dispatch:ProfileCard.cs:ModeName[ovt]', 'I18n.cs:Tr'),
@@ -1527,6 +1532,9 @@ FIX5_ENDS = [
     ('field-PlayerCardsUI.cs-ShardUuid', 'field:PlayerCardsUI.cs:ShardUuid', 'DamageNumberRules.cs:Text#1'),
     ('field-PlayerCardsUI.cs-binderSort', 'field:PlayerCardsUI.cs:binderSort', 'IdentityClockCore.cs:Name'),
     ('field-PlayerCardsUI.cs-view', 'field:PlayerCardsUI.cs:view', 'IdentityClockCore.cs:Open#1'),
+    ('field-PlayerReportRules.cs', 'field:PlayerReportRules.cs:?', 'DamageNumberRules.cs:Text#1'),
+    ('field-PlayerReportUI.cs', 'field:PlayerReportUI.cs:?', 'FfaNumberingRules.cs:Report'),
+    ('field-PlayerReportUI.cs-_reports', 'field:PlayerReportUI.cs:_reports', 'FfaNumberingRules.cs:Report'),
     ('field-PortraitGrade.cs', 'field:PortraitGrade.cs:?', 'DamageNumberRules.cs:Text#1'),
     ('field-PortraitRender.cs', 'field:PortraitRender.cs:?', 'DamageNumberRules.cs:Text#1'),
     ('field-PortraitRenderDance.cs', 'field:PortraitRenderDance.cs:?', 'DamageNumberRules.cs:Text#1'),
@@ -1919,7 +1927,7 @@ PIN5 = "backend/tests/test_keybind_surfaces.py::test_h1_fix5_each_unresolved_end
 def test_h1_fix5_the_end_table_is_every_unresolved_end_beyond_the_four(attach4):
     st, cman, att, aman = attach4
     names = [n for i, n, m in FIX5_ENDS]
-    assert len(names) == len(set(names)) == len({i for i, n, m in FIX5_ENDS}) == 1142
+    assert len(names) == len(set(names)) == len({i for i, n, m in FIX5_ENDS}) == 1148
     extra = set(att["unresolved"]) - set(names)
     assert len(extra) == 4 and RESET_MENU in extra, sorted(extra)
     assert set(names) <= set(att["unresolved"]), sorted(set(names) - set(att["unresolved"]))

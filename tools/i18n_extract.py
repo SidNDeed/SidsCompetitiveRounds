@@ -76,6 +76,9 @@ FILES = [
     # a call site — NativeUI passes them to CreateButton/CreateText as
     # variables.
     "AdminMenuRules.cs",
+    # Ask 14 (the player report form): the form, the admins' viewer and their
+    # rules file. Every text is an I18n.Tr or I18n.TrF literal.
+    "PlayerReportRules.cs", "PlayerReportUI.cs",
     # Spectator mode (Aug 6 item 13) — new files with user-visible Tr() text.
     "SpectatorHud.cs", "SpectatorJoiner.cs", "SpectatorSync.cs",
     # Esc-menu leave confirm (Aug 12, DC #1).
