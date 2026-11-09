@@ -405,7 +405,7 @@ def _table_labels(src):
     labels = [r[1] for r in _launchers(src)] + [r[0] for r in _verdicts(src)]
     for sig in (HEADER_TABLE, PAGES_TABLE, CAPTIONS_TABLE):
         labels += _strings(src, sig)
-    assert len(labels) >= 18 + 8 + 4 + 2 + 3, labels
+    assert len(labels) >= 19 + 8 + 4 + 2 + 3, labels
     return labels
 
 
@@ -452,7 +452,7 @@ def test_h2_launchers_are_created_in_the_tables_order():
 def _h3(src):
     table = [r[0] for r in _launchers(src)]
     sites = _launcher_sites(src)
-    assert len(set(table)) == len(table) == 18, table
+    assert len(set(table)) == len(table) == 19, table
     assert sorted(sites) == sorted(table), "sites %r vs table %r" % (sorted(sites), sorted(table))
     nu = src[NU]
     strays = [i for i in table if ('UIFactory.CreateButton("%s"' % i) in nu]

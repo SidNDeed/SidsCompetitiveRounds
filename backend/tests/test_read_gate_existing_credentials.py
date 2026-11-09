@@ -37,6 +37,8 @@ PORTAL_TOKEN = "rg-portal-token-" + "a" * 32
 FILL = {
     "/api/v1/bug-reports/{report_id}": ({"report_id": "00000000-0000-4000-8000-000000000001"}, {}),
     "/api/v1/bug-reports/{report_id}/log": ({"report_id": "00000000-0000-4000-8000-000000000001"}, {}),
+    "/api/v1/admin/player-reports/{report_id}/log": (
+        {"report_id": "00000000-0000-4000-8000-000000000003"}, {}),
     "/api/v1/admin/quarantine/triage/{mode}/{group_id}": (
         {"mode": "ffa", "group_id": "00000000-0000-4000-8000-000000000002"}, {}),
     "/api/v1/admin/pc/trades": ({}, {"steam_id": PLAYER_ID}),
@@ -53,6 +55,8 @@ FILL = {
 NON_AUTH_ANSWER = {
     "/api/v1/bug-reports/{report_id}": 404,
     "/api/v1/bug-reports/{report_id}/log": 404,
+    # the player report's log view (ask 14): signed for a report this schema does not hold
+    "/api/v1/admin/player-reports/{report_id}/log": 404,
     "/api/v1/i18n/history": 404,
     # the four admin evidence views (admin evidence report landing, 2026-10-29):
     # signed with no target, the handler's one-of answer follows the signature
@@ -184,9 +188,11 @@ def test_portal_class_requires_token(client, route):
 
 
 def test_every_class_member_was_exercised():
-    """The parametrisation is the class list: 26 + 7, none dropped."""
+    """The parametrisation is the class list: 28 + 7, none dropped."""
     # admin evidence report re-land (2026-10-29): the four admin evidence views
     # (seat, card, combat, identity-clock) join ADMIN_SIGNED; 22 before.
-    assert len(ADMIN_ROUTES) == len(read_gate.ADMIN_SIGNED) == 26
+    # ask 14 (the player report form): the admin list and the log view join
+    # ADMIN_SIGNED; 26 before.
+    assert len(ADMIN_ROUTES) == len(read_gate.ADMIN_SIGNED) == 28
     assert len(PORTAL_ROUTES) == len(read_gate.PORTAL) == 7
     assert set(NON_AUTH_ANSWER) <= set(read_gate.ADMIN_SIGNED) | set(read_gate.PORTAL)

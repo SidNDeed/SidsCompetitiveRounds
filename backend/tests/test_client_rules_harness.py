@@ -1682,12 +1682,12 @@ _ADMIN_CASES = [
     'width: verdicts that sit together share the widest width (Accept+Discard 75), a lone short one floors at 70, an empty set floors at 70',
     'pack: 600+8+600+8+600 overruns 1812 so the third starts row 2; 900+8+904 is exactly 1812 and stays; 900+8+905 wraps; an empty set has no rows',
     'pack: the widest packed row is 1208 over 2 rows and fits; a 2000 px button has its own row, is 2000 wide and does not fit',
-    'table: 18 packed launchers with distinct ids and every label ending in ..., plus 4 header launchers and 8 verdicts',
+    'table: 19 packed launchers with distinct ids and every label ending in ..., plus 4 header launchers and 8 verdicts',
     'table: AMutes looks up to Unmute Player... and an unknown id to null; Chat is the one group a moderator shares, Players, Server and Queues hide whole',
     "layout: the Actions page is Chat, Players, Server in that order and Queues is the second page's only group",
     'layout: Chat is Mute Player, Mute From Message, Delete Chat Message, Unmute Player, Chat Lockdown',
     'layout: Players is Ban Steam ID, Grant Achievement, Grant Artist, Revoke Artist, Grant Translator, Revoke Translator',
-    'layout: Server is Server Alert, End Alert, Admin Roster, Action Log; Queues is Bug Reports, Cosmetic Reviews, Approved Update Queue',
+    'layout: Server is Server Alert, End Alert, Admin Roster, Action Log; Queues is Bug Reports, Player Reports, Cosmetic Reviews, Approved Update Queue',
     'scope: a moderator sees Mute Player, Mute From Message, Delete Chat Message and Unmute Player, nothing else, one page and no bar; an admin sees two pages and the bar',
     'scope: a moderator is always on page 0; an admin keeps page 1 and any other value is page 0',
     'colour: a launcher is Launcher, a positive verdict Positive, a negative one Negative, any disabled button Disabled, navigation Nav or NavActive',
@@ -1718,3 +1718,194 @@ def test_each_admin_menu_case_passes_with_a_measurement(harness_run, name):
     assert line.startswith("[adminmenu] PASS"), line
     assert " | got=" in line and not line.rstrip().endswith("| got="), (
         "the case printed no measurement: " + line)
+
+
+# -- ask 14: the player report form's rules (suite playerreport) --------
+#
+# PlayerReportRules.cs decides what a press on Send may send, what each of the
+# server's answers closes (so a request the server refused is never sent a
+# second time), the request's body, and the rows the form and the admins'
+# viewer draw; PlayerReportRulesSelfTest.cs executes it. The closed lists and
+# the submit's answer codes are held against the server's own module below, so
+# the two sides cannot drift apart unnoticed (the ask 14 design note, sections
+# 5, 6 and 14).
+_PLAYER_REPORT_CASES = [
+    'closed lists and caps',
+    'the answer table',
+    'every row of the table closes something',
+    'each outcome has a line of its own',
+    'each server answer finds its row',
+    'a refused request is never sent again',
+    'what is still to choose, in order',
+    "the day's limit closes Send without asking",
+    'a report sent without its log says so',
+    'a request in flight, then the closed run, come before anything else',
+    'after 401 a press stays closed until the next sign-in, then goes out',
+    'the player row marks what this run already sent',
+    'what the form says while Send is closed',
+    'whether opening the form may ask for the games',
+    'each answer to the games read and the next opening',
+    'what the form says about its list',
+    "the status out of the transport's text",
+    'the error code out of a refusal',
+    'whether the log was stored',
+    "the server's stamp as UTC",
+    'the game and player rows in English',
+    "another player's text is never markup",
+    'the rows in the four locales',
+    'the body, with quotes and control characters',
+    'the body names no reporter',
+    "the log's tail",
+    'every control character is escaped',
+    'details are cut to what the server keeps',
+    "a sign-in's fingerprint",
+    'what each admin request signs',
+    'the two verdicts',
+    'a report id is the 36 characters the server writes',
+    'what the viewer says after each answer',
+    "which answers end the viewer's requests for the run",
+    "the admin list's texts",
+    'the open count on the launcher',
+    'when the admin tab asks for the open count',
+    '31 new keys in four catalogues',
+    'after 200',
+    'after 400 bad_length',
+    'after 401 session_required',
+    'after 403 no_player',
+    'after 404 game_not_found',
+    'after 404',
+    'after 409 already_reported',
+    'after 413 body_too_large',
+    'after 422 player_not_in_game',
+    'after 422 bad_reason',
+    'after 426',
+    'after 418',
+    'after 429 report_limit',
+    'after 429',
+    'after 503 player_reports_off',
+    'after 503',
+    'after 500',
+    'after 0',
+]
+
+
+def test_the_player_report_suite_ran_every_case_and_none_failed(harness_run):
+    suites = _suites(harness_run)
+    assert "playerreport" in suites, "the PlayerReportRules suite did not report"
+    run, fail, verdict = suites["playerreport"]
+    assert fail == 0 and verdict == "PASS", harness_run.stdout[-4000:]
+    printed = len(re.findall(r"^\[playerreport\] (PASS|FAIL) ", harness_run.stdout, re.M))
+    assert printed == run, (
+        "the suite declared run=%d but printed %d case lines" % (run, printed))
+    assert run == len(_PLAYER_REPORT_CASES), (
+        "the suite has %d cases, this pin names %d" % (run, len(_PLAYER_REPORT_CASES)))
+
+
+@pytest.mark.parametrize("name", _PLAYER_REPORT_CASES)
+def test_each_player_report_case_passes_with_a_measurement(harness_run, name):
+    line = _named_case(harness_run, name, "playerreport")
+    assert line.startswith("[playerreport] PASS"), line
+    assert " | got=" in line and not line.rstrip().endswith("| got="), (
+        "the case printed no measurement: " + line)
+
+
+def _player_report_server_rules():
+    """The server's rules module, read as text and loaded under a name of its own."""
+    import sys
+    import types
+    api = REPO / "backend" / "api"
+    if str(api) not in sys.path:
+        sys.path.insert(0, str(api))
+    src = (api / "player_report_rules.py").read_text(encoding="utf-8")
+    mod = types.ModuleType("player_report_rules_for_the_harness_pin")
+    exec(compile(src, "player_report_rules.py", "exec"), mod.__dict__)
+    return mod, src
+
+
+def _got(line):
+    return line.split(" | got=", 1)[1].rstrip("\n")
+
+
+def test_the_client_and_the_server_hold_the_same_closed_lists_and_caps(harness_run):
+    """The client refuses nothing by these lists that the server accepts and
+    offers nothing the server refuses: one line of the suite, field by field."""
+    rules, _ = _player_report_server_rules()
+    got = dict(part.split("=", 1) for part in _got(_named_case(harness_run, "closed lists and caps", "playerreport")).split(" "))
+    assert got == {
+        "reasons": ",".join(rules.REASONS), "needs": rules.REASON_NEEDS_DETAILS,
+        "kinds": ",".join(rules.GAME_KINDS), "verdicts": ",".join(rules.VERDICTS),
+        "details": str(rules.DETAILS_MAX), "note": str(rules.NOTE_MAX),
+        "log": str(rules.LOG_MAX_CHARS), "body": str(rules.BODY_MAX),
+        "actions": ",".join((rules.ACTION_LIST, rules.ACTION_LOG, rules.ACTION_CLOSE)), "target": rules.TARGET_LIST,
+    }, got
+
+
+def test_every_answer_the_server_gives_a_submit_has_a_row_that_closes_something(harness_run):
+    """Condition C4: each answer code has its row. The codes are read out of the
+    server's module (the named refusals a submit can meet, then the 422 codes of
+    its body parser, in source order) and must be exactly the first answers the
+    suite swept; none of them may leave the answered request open."""
+    _, src = _player_report_server_rules()
+    viewer = src[src.index("\ndef parse_close("):]
+    named = re.findall(r'^([A-Z_]+) = ReportRefusal\((\d+), "([a-z_]+)"\)$', src, re.M)
+    assert len(named) == 12, named
+    answers = ["%s/%s" % (status, code) for name, status, code in named if name not in viewer]
+    parser = src[src.index("\ndef parse_submit("):]
+    parser = parser[:parser.index("\nclass ")]
+    for code in re.findall(r'ReportRefusal\(422, "([a-z_]+)"\)', parser):
+        if "422/" + code not in answers:
+            answers.append("422/" + code)
+    assert len(answers) == 18, answers
+    rows = [p.split("=", 1) for p in _got(_named_case(harness_run, "each server answer finds its row", "playerreport")).split(";")]
+    assert [k for k, _ in rows][:len(answers)] == answers, (answers, rows)
+    for key, row in rows[:len(answers)]:
+        assert not row.endswith(">Nothing") and not row.startswith("NotSent"), (key, row)
+    rest = dict(rows[len(answers):])
+    assert list(rest) == ["426", "418", "429", "404", "500", "502", "0"], rows
+    # The version answer closes the run and has a line of its own; a refusal
+    # the table does not name closes the identical request; a failing server
+    # or no answer closes nothing, and nothing is sent again without a press.
+    assert (rest["426"], rest["418"], rest["500"], rest["0"]) == (
+        "NeedsUpdate>Run", "NotAccepted>Same", "NotSent>Nothing", "NotSent>Nothing"), rest
+    said = _got(_named_case(harness_run, "each outcome has a line of its own", "playerreport"))
+    assert said.startswith("outcomes=13 lines=13 blank=0 "), said
+
+
+def test_the_client_signs_what_the_server_verifies(harness_run):
+    """Each admin request is signed over admin:<steam>:<action>:<target> with
+    this lane's own action word; the close's target names the report AND the
+    verdict. The words and the target form are the server module's own."""
+    rules, _ = _player_report_server_rules()
+    got = _got(_named_case(harness_run, "what each admin request signs", "playerreport")).split("|")
+    assert got == [
+        "admin:S_ADM:%s:%s" % (rules.ACTION_LIST, rules.TARGET_LIST),
+        "admin:S_ADM:%s:r-1" % rules.ACTION_LOG,
+        "admin:S_ADM:%s:%s" % (rules.ACTION_CLOSE, rules.close_target("r-1", "actioned")),
+    ], got
+    assert len({rules.ACTION_LIST, rules.ACTION_LOG, rules.ACTION_CLOSE}) == 3
+
+
+def test_the_player_report_rules_are_compiled_into_the_harness_and_their_cases_never_ship():
+    csproj = HARNESS.read_text(encoding="utf-8")
+    included = re.findall(r'<Compile Include="([^"]+)"', csproj)
+    assert any(p.endswith("plugin/PlayerReportRules.cs") for p in included), included
+    assert "PlayerReportRulesSelfTest.cs" in included
+    assert not any(p.endswith("PlayerReportUI.cs") for p in included), "the form needs Unity and is not a rule file"
+    plugin_proj = (REPO / "plugin" / "CompetitiveRounds.csproj").read_text(encoding="utf-8")
+    assert "PlayerReportRulesSelfTest" not in plugin_proj
+    assert not (REPO / "plugin" / "PlayerReportRulesSelfTest.cs").exists()
+    rules = (REPO / "plugin" / "PlayerReportRules.cs").read_text(encoding="utf-8")
+    assert "using UnityEngine" not in rules and "UnityEngine." not in rules, "the rules file must build without Unity"
+
+
+def test_the_body_carries_the_fields_the_server_reads_and_no_other(harness_run):
+    """The keys of a built body, as the suite printed them, are the keys the
+    server's parser reads, in its order (the log's key only when a log is
+    attached), and none of them says who reports: that is the session's."""
+    _, src = _player_report_server_rules()
+    parser = src[src.index("\ndef parse_submit("):]
+    parser = parser[:parser.index("\nclass ")]
+    read = re.findall(r'obj\.get\("([a-z_]+)"\)', parser)
+    assert read and read[-1] == "log_text" and not [k for k in read if "reporter" in k], read
+    got = dict(part.split("=", 1) for part in _got(_named_case(harness_run, "the body names no reporter", "playerreport")).split(" "))
+    assert got == {"keys": ",".join(read[:-1]), "with_log": ",".join(read), "names_a_reporter": "False"}, (got, read)

@@ -1,0 +1,1006 @@
+"""Ask 14 (the player report form): the design note's claims over the plugin's
+C# sources, each pinned to the code term it names.
+
+Same family as test_admin_menu.py (ask 15) and test_avatar_preset_picker.py
+(ask 5). Every claim is a function over the sources that raises AssertionError
+when the claim is false, and runs three ways: against the tree (must pass),
+against an in-memory MUTATION of the tree (must red) and against an in-memory
+negative CONTROL edit (must stay green). Every scope is a brace-balanced span,
+never the whole file, unless the claim is a census over a file or the tree.
+
+What a press may send and what each answer closes are EXECUTED, not read: the
+client rules harness suite "playerreport", pinned case by case in
+test_client_rules_harness.py. This file pins what only the Unity side can get
+wrong: that the form draws through the rules and asks them before every
+request, that nothing is sent except by the one press the rules allowed, that
+another person's text is never drawn as rich text, that every word goes through
+I18n, and that the mark which tells one sign-in from another stays in memory.
+"""
+import io
+import json
+import os
+import re
+import struct
+from pathlib import Path
+
+from _cs_structure import CsParseError, mask_code, strip_comments_only
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+REPO = os.path.abspath(os.path.join(HERE, "..", ".."))
+PLUGIN = Path(REPO) / "plugin"
+BS = chr(92)
+
+NU = "NativeUI.cs"
+CU = "CompetitiveUI.cs"
+PL = "Plugin.cs"
+AC = "ApiClient.cs"
+RL = "PlayerReportRules.cs"
+UI = "PlayerReportUI.cs"
+AR = "AdminMenuRules.cs"
+CAT = "I18nCatalogues.cs"
+GEN = "I18nSourceKeys.g.cs"
+# Files outside plugin/*.cs, keyed by their repo-relative path.
+PROJ = "plugin/CompetitiveRounds.csproj"
+EXTRACT = "tools/i18n_extract.py"
+SOURCE_JSON = "tools/i18n_source.json"
+MAIN = "tools/client-rules-harness/Main.cs"
+CSPROJ = "tools/client-rules-harness/client-rules-harness.csproj"
+SELFTEST = "tools/client-rules-harness/PlayerReportRulesSelfTest.cs"
+EXTRA = (PROJ, EXTRACT, SOURCE_JSON, MAIN, CSPROJ, SELFTEST)
+
+_CACHE = {}
+
+
+def _tree():
+    if not _CACHE:
+        for p in sorted(PLUGIN.glob("*.cs")):
+            with io.open(str(p), encoding="utf-8") as fh:
+                _CACHE[p.name] = fh.read()
+        for rel in EXTRA:
+            with io.open(os.path.join(REPO, rel), encoding="utf-8") as fh:
+                _CACHE[rel] = fh.read()
+    return dict(_CACHE)
+
+
+# -- span helpers (test_admin_menu.py's, kept to this file as that file keeps its own) --
+
+_MASK = {}
+_STRIP = {}
+
+
+def _memo(cache, fn, text):
+    """Memoise only the tree's own file texts (identity, not equality):
+    mutated copies and spans are computed fresh and never retained."""
+    if not any(text is t for t in _CACHE.values()):
+        return fn(text)
+    k = id(text)
+    if k not in cache:
+        cache[k] = fn(text)
+    return cache[k]
+
+
+def _masked(text):
+    return _memo(_MASK, mask_code, text)
+
+
+def _one(text, sig, base=0, raw=False):
+    """The single brace-balanced block after `sig`, over the masked text. With
+    `raw` the signature is sought in the raw text (for one whose identity is a
+    string literal, which the mask blanks); the braces are balanced masked."""
+    masked = _masked(text)
+    hay = text if raw else masked
+    spans, search = [], 0
+    while True:
+        start = hay.find(sig, search)
+        if start == -1:
+            break
+        ob = masked.find("{", start + len(sig))
+        if ob == -1:
+            raise CsParseError("no block opens after %r" % sig)
+        depth, end = 0, None
+        for i in range(ob, len(masked)):
+            if masked[i] == "{":
+                depth += 1
+            elif masked[i] == "}":
+                depth -= 1
+                if depth == 0:
+                    end = i + 1
+                    break
+        if end is None:
+            raise CsParseError("unbalanced braces after %r" % sig)
+        spans.append((ob, end))
+        search = end
+    assert len(spans) == 1, "%d blocks match %r" % (len(spans), sig)
+    a, b = spans[0]
+    return base + a, base + b
+
+
+def _span(text, sig, within=None, raw=False):
+    if within is None:
+        return _one(text, sig, raw=raw)
+    a, b = _one(text, within)
+    return _one(text[a:b], sig, base=a, raw=raw)
+
+
+def _raw(text, sig, within=None):
+    a, b = _span(text, sig, within)
+    return text[a:b]
+
+
+def _body(text, sig, within=None):
+    return _code(_raw(text, sig, within))
+
+
+def _code(text):
+    return _memo(_STRIP, strip_comments_only, text)
+
+
+def _fold(text):
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _lines(code):
+    """The non-empty lines of a stretch of code, each without its indent."""
+    return [l.strip() for l in code.splitlines() if l.strip()]
+
+
+def _call_args(text, open_idx):
+    """The top-level arguments of the call whose '(' is at open_idx, raw text
+    kept; strings, chars and comments are opaque, brackets track depth."""
+    assert text[open_idx] == "(", text[open_idx:open_idx + 20]
+    i, depth, args, cur, n = open_idx + 1, 1, [], [], len(text)
+    while i < n:
+        c = text[i]
+        if c == '"':
+            j = i + 1
+            while j < n and text[j] != '"':
+                if text[j] == BS:
+                    j += 1
+                j += 1
+            cur.append(text[i:j + 1])
+            i = j + 1
+            continue
+        if c == "'":
+            j = i + 1
+            if j < n and text[j] == BS:
+                j += 1
+            j += 1
+            cur.append(text[i:j + 1])
+            i = j + 1
+            continue
+        if text.startswith("//", i):
+            j = text.find("\n", i)
+            j = n if j == -1 else j
+            cur.append(text[i:j])
+            i = j
+            continue
+        if text.startswith("/*", i):
+            j = text.find("*/", i) + 2
+            cur.append(text[i:j])
+            i = j
+            continue
+        if c in "([{":
+            depth += 1
+        elif c in ")]}":
+            depth -= 1
+            if depth == 0:
+                args.append("".join(cur))
+                return args
+        if c == "," and depth == 1:
+            args.append("".join(cur))
+            cur = []
+            i += 1
+            continue
+        cur.append(c)
+        i += 1
+    raise CsParseError("unterminated call at %d" % open_idx)
+
+
+def _calls(text, name):
+    """Every call `name(...)` in `text` (raw), as argument lists, in source order."""
+    out, search = [], 0
+    while True:
+        at = text.find(name + "(", search)
+        if at == -1:
+            return out
+        out.append(_call_args(text, at + len(name)))
+        search = at + len(name)
+
+
+def _literals(text):
+    """Every string literal of a C# text as (index of its opening quote, its
+    content). Comments and char literals are stepped over, so a quote inside
+    either opens nothing. The lane's files hold no verbatim or interpolated
+    string outside ApiClient.cs, of which only the arguments of log calls are
+    scanned with this (R16), and those are plain literals."""
+    out, i, n = [], 0, len(text)
+    while i < n:
+        c = text[i]
+        if text.startswith("//", i):
+            j = text.find("\n", i)
+            i = n if j == -1 else j
+            continue
+        if text.startswith("/*", i):
+            j = text.find("*/", i)
+            i = n if j == -1 else j + 2
+            continue
+        if c == "'":
+            j = i + 1
+            if j < n and text[j] == BS:
+                j += 1
+            i = j + 2
+            continue
+        if c == '"':
+            j = i + 1
+            while j < n and text[j] != '"':
+                if text[j] == BS:
+                    j += 1
+                j += 1
+            out.append((i, text[i + 1:j]))
+            i = j + 1
+            continue
+        i += 1
+    return out
+
+
+def _is_tr_argument(text, at):
+    before = text[max(0, at - 10):at]
+    return before.endswith("I18n.Tr(") or before.endswith("I18n.TrF(")
+
+
+def _tr_keys(text):
+    """The literals handed straight to I18n.Tr or I18n.TrF: the keys a file draws."""
+    return set(lit for at, lit in _literals(text) if _is_tr_argument(text, at))
+
+
+def _untranslated(text):
+    """The literals a reader could take for words (a letter, and a capital or
+    a space) that are NOT the argument of I18n.Tr or I18n.TrF."""
+    out = set()
+    for at, lit in _literals(text):
+        if re.search("[A-Za-z]", lit) and re.search("[A-Z ]", lit) and not _is_tr_argument(text, at):
+            out.add(lit)
+    return out
+
+
+def _sites(src, needle):
+    """Where `needle` stands in the plugin's code (comments stripped), as
+    {file: count}: a census over every plugin/*.cs."""
+    out = {}
+    for name, text in src.items():
+        if "/" in name or not name.endswith(".cs") or needle not in text:
+            continue
+        n = _code(text).count(needle)
+        if n:
+            out[name] = n
+    return out
+
+
+# -- edit helpers (mutations and controls) ---------------------------------
+
+def _replace(src, fname, old, new):
+    s = dict(src)
+    t = s[fname]
+    assert t.count(old) == 1, "edit anchor %r occurs %d times in %s" % (old, t.count(old), fname)
+    s[fname] = t.replace(old, new, 1)
+    assert s[fname] != t
+    return s
+
+
+def _replace_within(src, fname, sig, old, new, within=None):
+    """`_replace`, but the anchor is sought only inside the block after `sig`."""
+    s = dict(src)
+    t = s[fname]
+    a, b = _span(t, sig, within)
+    block = t[a:b]
+    assert block.count(old) == 1, "edit anchor %r occurs %d times inside %r in %s" % (old, block.count(old), sig, fname)
+    s[fname] = t[:a] + block.replace(old, new, 1) + t[b:]
+    assert s[fname] != t
+    return s
+
+
+def _insert_after_open(src, fname, sig, text, within=None, raw=False):
+    """Insert `text` right after the opening brace of the block after `sig`."""
+    s = dict(src)
+    t = s[fname]
+    a, _ = _span(t, sig, within, raw=raw)
+    s[fname] = t[:a + 1] + "\n" + text + "\n" + t[a + 1:]
+    return s
+
+
+def _check(claim, mutation, control):
+    """The three-way run. A parse failure never counts as the mutation's red."""
+    src = _tree()
+    claim(src)
+    m = mutation(src)
+    assert m != src, "the mutation changed nothing"
+    try:
+        claim(m)
+    except CsParseError as e:
+        raise AssertionError("the mutation broke parsing instead of the claim: %s" % e)
+    except AssertionError:
+        pass
+    else:
+        raise AssertionError("the mutation STAYED GREEN")
+    c = control(src)
+    assert c != src, "the control changed nothing"
+    claim(c)
+
+
+def _control_comment(fname, sig, within=None, indent="            "):
+    return lambda s: _insert_after_open(s, fname, sig, indent + "// control", within)
+
+
+# -- the spans the claims scope on -----------------------------------------
+
+# NativeUI.cs
+STRIP = "private static void BuildUtilityStrip(Transform titleRow)"
+PLACE = "private static void PlaceUtilIcon(GameObject go, float right)"
+ON_BUG = "private static void OnBugIcon()"
+ON_REPORT = "private static void OnReportIcon()"
+BUILD = "private static GameObject BuildAdminTab(Transform parent)"
+BADGE = "private static void BuildPlayerReportBadge(GameObject launcher)"
+SET_BADGE = "internal static void SetPlayerReportBadge(int open)"
+REFRESH_ADMIN = "private static void RefreshAdmin()"
+# PlayerReportUI.cs
+OPEN = "internal static void Open()"
+STYLES = "private static void EnsureStyles()"
+DRAW = "internal static void Draw()"
+SEND = "private static void Send()"
+PUMP = "internal static void Pump()"
+FINISH = "private static void Finish(int status, string code, bool logStored)"
+ADMIN_ANSWERED = "private static void AdminAnswered(int status, string code)"
+LOAD_ADMIN = "private static void LoadAdmin("
+COUNT = "internal static void RefreshOpenCount()"
+CLOSE_REPORT = "private static void CloseReport(PlayerReportRules.Report r, string verdict)"
+VIEW_LOG = "private static void ViewLog(PlayerReportRules.Report r)"
+DRAW_ADMIN = "internal static void DrawAdmin()"
+LINE = "private static float Line(float x, float y, float w, string label, string value)"
+DETAIL = "private static void DrawDetail(PlayerReportRules.Report r, float x, float y, float w, float h, bool can)"
+# PlayerReportRules.cs
+CHECK = "internal static Block Check(FormState st, Game game, Other other, string reason, string details,"
+APPLY = "internal static Outcome Apply(FormState st, int status, string code, bool logStored, Game game, Other other,"
+BEFORE_LIST = "internal static ListState BeforeList(FormState st, string sessionKey)"
+APPLY_LIST = "internal static ListState ApplyList(FormState st, int status, string code, string sessionKey)"
+BUILD_BODY = "internal static string BuildBody(string kind, string gameId, string reportedSteamId, string reason,"
+# ApiClient.cs
+SUBMIT = "internal static void SubmitPlayerReportBody(byte[] body, string sensitiveProbe, Action<int, string, bool> done)"
+FETCH_REPORTS = "internal static void FetchPlayerReports(string adminSteamId, string statusFilter, int limit,"
+PARSE_REPORTS = "private static List<PlayerReportRules.Report> ParsePlayerReports(string json, out int leftOut)"
+FETCH_LOG = "internal static void FetchPlayerReportLog(string adminSteamId, string reportId, Action<int, string, string> done)"
+CLOSE = "internal static void ClosePlayerReport(string adminSteamId, string reportId, string verdict, string note,"
+# AdminMenuRules.cs, I18nCatalogues.cs, the suite
+LAUNCHERS_TABLE = "internal static readonly Launcher[] Launchers = new[]"
+DECL = "private static readonly Dictionary<string, string> %s = new Dictionary<string, string>"
+LOCALES = ("ES", "RU", "UK", "SV")
+NEW_KEYS_DECL = "internal static readonly string[] NewKeys ="
+SHARED_KEYS_DECL = "internal static readonly string[] SharedKeys ="
+_STR = re.compile('"((?:[^"' + BS + BS + ']|' + BS + BS + '.)*)"')
+_LAUNCHER = re.compile(r'new Launcher\(\s*"([^"]+)",\s*"([^"]+)",\s*Group\.(\w+),\s*(true|false)\s*\)')
+
+
+# -- R1 four icons stand inside the strip's slot --------------------------------
+
+def _r1(src):
+    nu = _code(src[NU])
+    size = re.findall(r"private const float UtilIconSize = (\d+)f;", nu)
+    pitch = re.findall(r"private const float UtilIconPitch = (\d+)f;", nu)
+    assert len(size) == 1 and len(pitch) == 1, (size, pitch)
+    size, pitch = int(size[0]), int(pitch[0])
+    strip = _body(src[NU], STRIP)
+    slot = re.findall(r"UIFactory\.AddLE\(utilStripGO, prefW: (\d+), flexW: 0\);", strip)
+    assert len(slot) == 1, slot
+    icons = [tuple(_fold(a) for a in args[1:4]) for args in _calls(strip, "UIFactory.CreateIconButton")]
+    assert icons == [('"UtilMusic"', '"ic_music.png"', "UtilIconSize"), ('"UtilMail"', '"ic_mail.png"', "UtilIconSize"),
+                     ('"UtilBug"', '"ic_bug.png"', "UtilIconSize"),
+                     ('"UtilReport"', '"ic_report.png"', "UtilIconSize")], icons
+    places = [tuple(_fold(a) for a in args) for args in _calls(strip, "PlaceUtilIcon")]
+    assert places == [("utilMailIconGO", "-14f"), ("utilBugIconGO", "-14f - UtilIconPitch"),
+                      ("utilReportIconGO", "-14f - 2f * UtilIconPitch"),
+                      ("utilMusicIconGO", "-14f - 3f * UtilIconPitch")], places
+    assert pitch > size, "the icons would overlap: pitch %d, size %d" % (pitch, size)
+    # From the strip's right edge: the inset, three pitches and the last
+    # icon's own width. At 40 px that is the slot to the last pixel; the
+    # 36 px fallback (one constant) leaves 4 px.
+    assert 14 + 3 * pitch + size <= int(slot[0]), (pitch, size, slot)
+    assert "rt.sizeDelta = new Vector2(UtilIconSize, UtilIconSize);" in _body(src[NU], PLACE)
+
+
+def test_r1_four_icons_stand_inside_the_strips_slot():
+    _check(_r1,
+           lambda s: _replace(s, NU, "private const float UtilIconPitch = 47f;", "private const float UtilIconPitch = 48f;"),
+           _control_comment(NU, STRIP))
+
+
+# -- R2 the report icon opens the form by the bug icon's rule --------------------
+
+GUARD = ["if (ClickHandler.ModalBlockInput && !UtilityPopupOpen) return;", "if (UtilityPopupOpen) CloseUtilityPopup();"]
+
+
+def _r2(src):
+    nu = src[NU]
+    bug, rep = _lines(_body(nu, ON_BUG)), _lines(_body(nu, ON_REPORT))
+    assert bug[1:3] == GUARD, bug[:4]
+    assert rep == ["{"] + GUARD + ['Plugin.Log.LogInfo("[UTIL-STRIP] report icon -> player report form");',
+                                   "PlayerReportUI.Open();", "}"], rep
+    strip = _fold(_body(nu, STRIP))
+    assert ("var reportClick = utilReportIconGO.GetComponent<ClickHandler>(); "
+            "if (reportClick != null) reportClick.bypassModalBlock = true;") in strip
+    # The form opens from this handler and from nowhere else in the plugin.
+    assert _sites(src, "PlayerReportUI.Open()") == {NU: 1}, _sites(src, "PlayerReportUI.Open()")
+
+
+def test_r2_the_report_icon_opens_the_form_by_the_bug_icons_rule():
+    _check(_r2,
+           lambda s: _replace_within(s, NU, ON_REPORT, GUARD[0], "if (ClickHandler.ModalBlockInput) return;"),
+           _control_comment(NU, ON_REPORT))
+
+
+# -- R3 the form and the viewer are modals of the menu, drawn under their pickers --
+
+def _r3(src):
+    cu = _code(src[CU])
+    m = re.search(r"private static bool BackdroplessModalOpen =>(.*?);", cu, re.S)
+    assert m, "BackdroplessModalOpen not found"
+    assert _fold(m.group(1)).endswith("|| PlayerReportUI.AnyOpen"), _fold(m.group(1))[-90:]
+    ui = src[UI]
+    assert "internal static bool AnyOpen { get { return _open || _adminOpen; } }" in _code(ui)
+    folded = _fold(cu)
+    assert ("DrawBugReportAdminViewer(); PlayerReportUI.Draw(); PlayerReportUI.DrawAdmin(); "
+            "DrawLogViewerModal();") in folded
+    assert folded.count("DrawLogViewerModal();") == 1 and folded.count("DrawArtistPicker();") == 1
+    form, picker = folded.find("PlayerReportUI.DrawAdmin();"), folded.find("DrawArtistPicker();")
+    assert 0 <= form < picker, "the list picker has to draw after the form: %r" % ((form, picker),)
+    assert _sites(src, "PlayerReportUI.Draw()") == {CU: 1}, _sites(src, "PlayerReportUI.Draw()")
+    assert _sites(src, "PlayerReportUI.DrawAdmin()") == {CU: 1}, _sites(src, "PlayerReportUI.DrawAdmin()")
+    # Neither outlives the menu it belongs to.
+    assert _lines(_body(ui, DRAW))[1:3] == ["if (!_open) return;", "if (!NativeUI.IsOpen) { _open = false; return; }"]
+    assert _lines(_body(ui, DRAW_ADMIN))[1:3] == ["if (!_adminOpen) return;",
+                                                  "if (!NativeUI.IsOpen) { _adminOpen = false; return; }"]
+
+
+def test_r3_the_form_and_the_viewer_are_modals_of_the_menu():
+    _check(_r3,
+           lambda s: _replace(s, CU, "            || PlayerReportUI.AnyOpen;", "            ;"),
+           lambda s: _replace(s, CU, "            PlayerReportUI.Draw();\n", "            PlayerReportUI.Draw();   // control\n"))
+
+
+# -- R4 a covered form takes no press, and Send opens only when the rules say so --
+
+_ENABLED = re.compile(r"GUI\.enabled = ([^;]+);")
+_CONTROLS = ("GUI.Button", "GUI.TextArea", "GUI.TextField")
+SEND_GATE = "!covered && loaded && block == PlayerReportRules.Block.None"
+
+
+def _gates(body):
+    """Each control drawn in `body`, in source order, with the GUI.enabled
+    value that stands when it is drawn."""
+    events = [(m.start(), "", _fold(m.group(1))) for m in _ENABLED.finditer(body)]
+    for name in _CONTROLS:
+        at = body.find(name + "(")
+        while at != -1:
+            events.append((at, name, ""))
+            at = body.find(name + "(", at + 1)
+    out, gate = [], "true"
+    for at, name, value in sorted(events):
+        if name:
+            out.append((name, gate))
+        else:
+            gate = value
+    return out
+
+
+def _r4(src):
+    draw = _body(src[UI], DRAW)
+    folded = _fold(draw)
+    for needle in ("bool covered = CompetitiveUI.ArtistPromptOpen || CompetitiveUI.LogViewerOpen;",
+                   "if (!covered && ev != null && ev.type == EventType.KeyDown && ev.keyCode == KeyCode.Escape)",
+                   "bool loaded = _list == PlayerReportRules.ListState.Loaded;",
+                   "bool free = !covered && !_sending;",
+                   "PlayerReportRules.Block block = PlayerReportRules.Check(_state, _game, _other, _reason, _details, "
+                   "_withLog, _sending, key, out why);",
+                   'I18n.Tr("Submit Report"), _buttonStyle)) Send();'):
+        assert needle in folded, needle
+    gates = _gates(draw)
+    assert gates == [("GUI.Button", "free && loaded && _games.Count > 0"),       # the game
+                     ("GUI.Button", "free && loaded && _game != null"),          # the player
+                     ("GUI.Button", "free"),                                     # the reason
+                     ("GUI.TextArea", "free"),                                   # what happened
+                     ("GUI.Button", "free"),                                     # the log tick box
+                     ("GUI.Button", "!covered"),                                 # the log preview
+                     ("GUI.Button", "!covered"),                                 # Close
+                     ("GUI.Button", SEND_GATE)], gates                           # Send
+    # The viewer's own requests: every control that starts one is closed
+    # while a request is out or after a refusal closed the viewer.
+    admin = _fold(_body(src[UI], DRAW_ADMIN))
+    assert "bool can = !_adminClosed && !_adminLoading && !_closing;" in admin
+    assert _gates(_body(src[UI], DRAW_ADMIN)) == [("GUI.Button", "can")] * 3 + [("GUI.Button", "true")] * 2, \
+        _gates(_body(src[UI], DRAW_ADMIN))
+
+
+def test_r4_a_covered_form_takes_no_press_and_send_opens_only_by_the_rules():
+    _check(_r4,
+           lambda s: _replace_within(s, UI, DRAW, "GUI.enabled = %s;" % SEND_GATE, "GUI.enabled = !covered && loaded;"),
+           _control_comment(UI, DRAW))
+
+
+# -- R5 one press, one request ----------------------------------------------------
+
+def _r5(src):
+    ui = src[UI]
+    send = _lines(_body(ui, SEND))
+    assert send[1:7] == ["string key = SessionKeyNow();", "PlayerReportRules.Outcome why;",
+                         "if (PlayerReportRules.Check(_state, _game, _other, _reason, _details, _withLog, _sending, key, out why)",
+                         "!= PlayerReportRules.Block.None)", "return;",
+                         "if (_job.Busy || _pending != null) return;"], send[1:7]
+    callers = re.findall(r"(?<![\w.])Send\(\);", _code(ui))
+    assert len(callers) == 1, "Send is called from %d places" % len(callers)
+    assert _sites(src, "SubmitPlayerReportBody(") == {AC: 1, UI: 1}, _sites(src, "SubmitPlayerReportBody(")
+    assert _sites(src, "FetchReportableGames(") == {AC: 1, UI: 1}, _sites(src, "FetchReportableGames(")
+    assert "ApiClient.FetchReportableGames(" in _body(ui, OPEN)
+    # The body goes out from the plugin's tick, after the size the server
+    # reads at most, and the hand-over is the pump's last statement.
+    pump = _fold(_body(ui, PUMP))
+    refuse = pump.find('if (r.Body.Length > PlayerReportRules.BodyMax) { Finish(413, "body_too_large", false); return; }')
+    post = pump.find("ApiClient.SubmitPlayerReportBody(r.Body, r.Probe, Finish); }")
+    assert 0 <= refuse < post and post + len("ApiClient.SubmitPlayerReportBody(r.Body, r.Probe, Finish); }") == len(pump), \
+        (refuse, post, len(pump))
+    assert _sites(src, "PlayerReportUI.Pump()") == {PL: 1}, _sites(src, "PlayerReportUI.Pump()")
+    assert "try { PlayerReportUI.Pump(); } catch { }" in _code(src[PL])
+    # An answer, or none, ends the press before anything else happens.
+    assert _lines(_body(ui, FINISH))[1:5] == ["Pending p = _pending;", "_pending = null;", "_sending = false;",
+                                              "if (p == null) return;"], _lines(_body(ui, FINISH))[1:5]
+    # The transport sends a body once: one coroutine, no loop around it.
+    submit = _body(src[AC], SUBMIT)
+    assert submit.count("StartCoroutine(") == 1 and submit.count("PostRequestRaw(") == 1, submit[:200]
+    for loop in ("for (", "foreach (", "while ("):
+        assert loop not in submit, loop
+
+
+def test_r5_one_press_one_request():
+    _check(_r5,
+           lambda s: _replace_within(s, UI, FINISH, "if (p == null) return;", "if (p == null) return; if (status == 0) Send();"),
+           _control_comment(UI, SEND))
+
+
+# -- R6 the body is the rules', carries the bug form's log bundle, names no reporter --
+
+def _r6(src):
+    ui = src[UI]
+    send = _fold(_body(ui, SEND))
+    for needle in ("CompetitiveUI.LogBundleInputs inputs = withLog ? CompetitiveUI.CaptureLogBundleInputs() : null;",
+                   "log = CompetitiveUI.ComposeLogBundle(inputs, info);",
+                   "string body = PlayerReportRules.BuildBody(game.Kind, game.Id, other.SteamId, reason, details, log);",
+                   "r.Body = System.Text.Encoding.UTF8.GetBytes(body);",
+                   "r.Probe = ApiClient.SensitiveBodyProbe(body);"):
+        assert needle in send, needle
+    fields = re.findall(r'Field\(sb, "([a-z_]+)"', _body(src[RL], BUILD_BODY))
+    assert fields == ["game_kind", "game_id", "reported_steam_id", "reason", "details", "log_text"], fields
+    # Who reports is the session's to say: no part of the form's path reads
+    # the local account's id.
+    for sig in (OPEN, DRAW, SEND, PUMP, FINISH):
+        body = _body(ui, sig)
+        assert "LocalSteamId" not in body and "reporter" not in body.lower(), sig
+    submit = _fold(_body(src[AC], SUBMIT))
+    assert 'PostRequestRaw( $"{baseUrl}/api/v1/player-reports", body,' in submit, submit[:260]
+    assert 'sensitiveProbe: sensitiveProbe ?? ""' in submit
+
+
+def test_r6_the_body_is_the_rules_and_names_no_reporter():
+    _check(_r6,
+           lambda s: _replace_within(s, RL, BUILD_BODY, 'Field(sb, "reason", reason)', 'Field(sb, "reporter_steam_id", reason)'),
+           _control_comment(RL, BUILD_BODY))
+
+
+# -- R7 every word the lane writes goes through I18n -------------------------------
+
+# What may stand outside I18n although it has a capital or a space: colours,
+# formats, thread names, one log line and the tick box's mark.
+NOT_WORDS = {
+    UI: {"#88FF88", "#FFCC66", "<color=#AAAAAA>", "<color=#FFCC66>", "<color=#FFE580>", "HH:mm", "X",
+         "SCR-PlayerReportBundle", "SCR-PlayerReportLog", "[PLAYER-REPORT] the report could not be built (", "no body"},
+    RL: {"HTTP ", "yyyy-MM-dd'T'HH:mm:ss'Z'"},
+}
+
+
+def _r7(src):
+    for f in (UI, RL):
+        stray = _untranslated(src[f]) - NOT_WORDS[f]
+        assert not stray, "%s holds text outside I18n: %r" % (f, sorted(stray))
+        assert len(_tr_keys(src[f])) >= 20, "the scanner found %d keys in %s" % (len(_tr_keys(src[f])), f)
+
+
+def test_r7_every_word_the_lane_writes_goes_through_i18n():
+    _check(_r7,
+           lambda s: _replace(s, UI, 'I18n.Tr("Preview logs")', '"Preview logs"'),
+           _control_comment(UI, DRAW))
+
+
+# -- R8 another person's text is never drawn as rich text --------------------------
+
+PLAIN_STYLES = ("_plainStyle", "_areaStyle", "_selectStyle", "_fieldStyle", "_tickStyle", "_rowStyle", "_rowDimStyle",
+                "_logStyle")
+RICH_STYLES = ("_titleStyle", "_labelStyle", "_noteStyle", "_buttonStyle",
+               '_adminFilter == "open" ? _pickedStyle : _buttonStyle',
+               "_adminFilter.Length == 0 ? _pickedStyle : _buttonStyle")
+_TR_CALL = re.compile(r"I18n\.Tr\(" + _STR.pattern + r"\)")
+# What a rich style may draw, with T for I18n.Tr("...") and S for a literal:
+# the mod's own words, and four values whose every source is pinned below.
+OWN_SHAPES = ("T", "S + T + S", "_sending ? T : T", "_reason == PlayerReportRules.ReasonNeedsDetails ? T : T",
+              "S + label + S", "S + note + S", "S + (good ? S : S) + S + line + S",
+              "S + PlayerReportRules.VerdictQuestion(_confirm) + S")
+_OWN_VALUE = re.compile(r'I18n\.Tr\("[^"]*"\)|""')
+
+
+def _draws(code):
+    """Every text the code draws, as (content, style): the second and the
+    last argument of each IMGUI control call."""
+    out = []
+    for name in ("GUI.Label",) + _CONTROLS:
+        for args in _calls(code, name):
+            out.append((_fold(args[1]), _fold(args[-1])))
+    return out
+
+
+def _r8(src):
+    ui = _code(src[UI])
+    styles = _body(src[UI], STYLES)
+    assert ui.count("richText") == styles.count("richText") and ".richText" not in ui, "a style's flag is set outside EnsureStyles"
+    for name in PLAIN_STYLES:
+        made = re.findall(r"%s = new GUIStyle\(([^)]*)\)\s*(\{[^}]*\})?;" % name, styles)
+        assert len(made) == 1, (name, made)
+        assert "richText = false" in made[0][1] or made[0][0] in PLAIN_STYLES, (name, made)
+    stray = []
+    for content, style in _draws(ui):
+        if style in PLAIN_STYLES or (style, content) == ("GUIStyle.none", "GUIContent.none"):
+            continue
+        shape = _STR.sub("S", _TR_CALL.sub("T", content))
+        if style not in RICH_STYLES or shape not in OWN_SHAPES:
+            stray.append((content, style))
+    assert not stray, "rich-text draws of text this claim does not know: %r" % stray
+    # label: the detail pane's own captions.
+    captions = [_fold(a[3]) for a in _calls(ui, "= Line")]
+    assert len(captions) >= 7 and all(_OWN_VALUE.fullmatch(c) for c in captions), captions
+    # note and line: what the rules said, and nothing a player wrote.
+    assert re.findall(r"\bnote = ([^;]+);", ui) == ['_adminLoading ? I18n.Tr("Loading...") : _adminStatus'], \
+        re.findall(r"\bnote = ([^;]+);", ui)
+    assert re.findall(r"\bline = ([^;]+);", ui) == ["PlayerReportRules.ListText(_list, _state, _games.Count)", "_status",
+                                                    "PlayerReportRules.BlockText(block, why)"], re.findall(r"\bline = ([^;]+);", ui)
+    said = set(re.findall(r"\b_status = ([^;]+);", ui))
+    assert said == {'""', "PlayerReportRules.AnswerText(said)"}, said
+    told = set(re.findall(r"\b_adminStatus = ([^;]+);", ui))
+    assert told == {'""', "said", "PlayerReportRules.AdminAnswerText(status, code)", 'I18n.Tr("Not allowed.")',
+                    'I18n.Tr("Report closed.")'}, told
+    assert set(re.findall(r"(?<![\w.])LoadAdmin\(([^)]*)\)", ui)) == {"", "_adminStatus", 'string said = ""'}
+
+
+def test_r8_another_persons_text_is_never_drawn_as_rich_text():
+    _check(_r8,
+           lambda s: _replace(s, UI, "PlayerReportRules.ReportLine(r, When(r.CreatedAt)), _rowStyle);",
+                              "PlayerReportRules.ReportLine(r, When(r.CreatedAt)), _labelStyle);"),
+           _control_comment(UI, DRAW_ADMIN))
+
+
+# -- R9 the mark that tells one sign-in from another stays in memory -----------------
+
+# Every line of the rules file that names the mark (the state's field or the
+# parameter that carries it), in source order, with the function a body line
+# stands in. Two lines READ the field (Check, BeforeList); two WRITE it
+# (Apply, ApplyList); the other five declare.
+MARK_RULES = (
+    (None, 'internal string RefusedSignIn = "";'),
+    (None, "bool withLog, bool sending, string sessionKey, out Outcome why)"),
+    (CHECK, "if (string.IsNullOrEmpty(sessionKey) || sessionKey == st.RefusedSignIn) { why = Outcome.SignIn; return Block.SignIn; }"),
+    (None, "string reason, string details, bool withLog, string sessionKey)"),
+    (APPLY, 'case Closes.Auth: st.RefusedSignIn = sessionKey ?? ""; break;'),
+    (None, BEFORE_LIST),
+    (BEFORE_LIST, "if (string.IsNullOrEmpty(sessionKey) || sessionKey == st.RefusedSignIn) return ListState.SignIn;"),
+    (None, APPLY_LIST),
+    (APPLY_LIST, 'if (status == 401) { st.RefusedSignIn = sessionKey ?? ""; return ListState.SignIn; }'),
+)
+# Every line of the form that names the mark, in source order: where it is
+# made, the three places that make it fresh, and the four rules it goes to.
+MARK_UI = (
+    "private static string SessionKeyNow()",
+    "return PlayerReportRules.SessionKey(SteamAuth.SessionToken);",
+    "string key = SessionKeyNow();",                                                    # Open
+    "_list = PlayerReportRules.BeforeList(_state, key);",
+    "PlayerReportRules.ListState answered = PlayerReportRules.ApplyList(_state, status, code, key);",
+    "string key = SessionKeyNow();",                                                    # Draw
+    "_sending, key, out why);",
+    "internal string Reason, Details, Key;",                                            # what a press was sent under
+    "string key = SessionKeyNow();",                                                    # Send
+    "if (PlayerReportRules.Check(_state, _game, _other, _reason, _details, _withLog, _sending, key, out why)",
+    "_pending = new Pending { Game = game, Other = other, Reason = reason, Details = details, Key = key, WithLog = withLog };",
+    "p.Reason, p.Details, p.WithLog, p.Key);",                                          # Finish, into Apply
+)
+_MARK_IN_RULES = re.compile(r"\b(sessionKey|RefusedSignIn)\b")
+_MARK_IN_UI = re.compile(r"\b(key|Key|SessionKeyNow|SessionKey|SessionToken|sessionKey|RefusedSignIn)\b")
+
+
+def _r9(src):
+    rl, ui = src[RL], src[UI]
+    named = [l for l in _lines(_code(rl)) if _MARK_IN_RULES.search(l)]
+    assert named == [l for _, l in MARK_RULES], named
+    for sig, line in MARK_RULES:
+        if sig is not None:
+            assert line in _lines(_body(rl, sig)), (sig, line)
+    # The field is the rules file's alone, and the rules file has no log
+    # call, no file, no setting and no request to put it in.
+    assert _sites(src, "RefusedSignIn") == {RL: 5}, _sites(src, "RefusedSignIn")
+    for word in ("Plugin.", "System.IO", "File.", "Config", "PlayerPrefs", "UnityEngine", "ApiClient"):
+        assert word not in _code(rl), "the rules file reaches %s" % word
+    # The form: the mark is made from the token in one place, and every line
+    # that holds it is one of these twelve. None is a log call, a file, a
+    # setting or a request, so it reaches none.
+    got = [l for l in _lines(_code(ui)) if _MARK_IN_UI.search(l)]
+    assert got == list(MARK_UI), got
+    assert _sites(src, "PlayerReportRules.SessionKey(") == {UI: 1}, _sites(src, "PlayerReportRules.SessionKey(")
+    assert _sites(src, "SessionKeyNow()") == {UI: 4}, _sites(src, "SessionKeyNow()")
+
+
+def test_r9_the_sign_in_mark_stays_in_memory():
+    _check(_r9,
+           lambda s: _replace(s, UI, '            _status = "";\n            bool started',
+                              '            Plugin.Log.LogInfo("k " + key);\n            _status = "";\n            bool started'),
+           _control_comment(UI, SEND))
+
+
+# -- R10 the admins' three requests ----------------------------------------------------
+
+def _nospace(text):
+    return re.sub(r"\s+", "", text)
+
+
+CANON = "PlayerReportRules.AdminCanonical(adminSteamId,PlayerReportRules.%s)"
+SIGNED = ((FETCH_REPORTS, CANON % "ActionList,PlayerReportRules.TargetList"),
+          (FETCH_LOG, CANON % "ActionLog,reportId"),
+          (CLOSE, CANON % "ActionClose,PlayerReportRules.CloseTarget(reportId,verdict)"))
+ADMIN_CLOSES = "if (PlayerReportRules.AdminCloses(status)) _adminClosed = true;"
+
+
+def _r10(src):
+    ac, ui = src[AC], src[UI]
+    # Each request is signed over its own action word, and the close's
+    # signature names the report and the verdict.
+    for sig, want in SIGNED:
+        signs = _calls(_body(ac, sig), "ComputeAdminHmacHex")
+        assert len(signs) == 1 and len(signs[0]) == 1, (sig, signs)
+        assert _nospace(signs[0][0]) == want, (sig, signs[0][0])
+    # A report's id reaches a URL only in the server's own form.
+    assert "!PlayerReportRules.IsReportId(reportId)" in _body(ac, FETCH_LOG)
+    assert "!PlayerReportRules.IsReportId(reportId)" in _body(ac, CLOSE)
+    assert "!PlayerReportRules.IsVerdict(verdict)" in _body(ac, CLOSE)
+    assert "if (!PlayerReportRules.IsReportId(r.Id)) { leftOut++; continue; }" in _body(ac, PARSE_REPORTS)
+    # The viewer is the only caller, and each call stands behind the flag a
+    # refusal sets.
+    assert _sites(src, "FetchPlayerReports(") == {AC: 1, UI: 2}, _sites(src, "FetchPlayerReports(")
+    assert _sites(src, "FetchPlayerReportLog(") == {AC: 1, UI: 1}, _sites(src, "FetchPlayerReportLog(")
+    assert _sites(src, "ClosePlayerReport(") == {AC: 1, UI: 1}, _sites(src, "ClosePlayerReport(")
+    assert _lines(_body(ui, LOAD_ADMIN))[1] == "if (_adminClosed || _adminLoading) return;"
+    assert _lines(_body(ui, CLOSE_REPORT))[1] == "if (_adminClosed || _closing || r == null) return;"
+    assert _lines(_body(ui, VIEW_LOG))[1] == "if (_adminClosed || _logLoading || r == null || !r.HasLog) return;"
+    assert _lines(_body(ui, COUNT))[2] == ("if (!PlayerReportRules.MayAskCount(ApiClient.IsAdmin, _adminClosed, _countAsked, "
+                                           "now, _countAskedAt)) return;"), _lines(_body(ui, COUNT))[:4]
+    # Every answer goes through the rule that sets the flag.
+    assert _code(ui).count("AdminAnswered(status, code);") == 3, _code(ui).count("AdminAnswered(status, code);")
+    assert _lines(_body(ui, ADMIN_ANSWERED))[1] == ADMIN_CLOSES, _lines(_body(ui, ADMIN_ANSWERED))
+    assert ADMIN_CLOSES in _lines(_body(ui, COUNT)), _lines(_body(ui, COUNT))
+    assert _code(ui).count("_adminClosed = ") == 2, "the flag is written somewhere else"
+
+
+def test_r10_the_admins_requests_are_signed_apart_and_stop_after_a_refusal():
+    _check(_r10,
+           lambda s: _replace_within(s, AC, FETCH_LOG, "PlayerReportRules.ActionLog", "PlayerReportRules.ActionList"),
+           _control_comment(AC, FETCH_LOG))
+
+
+# -- R11 a verdict is never one press ---------------------------------------------------
+
+YES = 'if (GUI.Button(new Rect(x + w - 220, cy, 100, 26), I18n.Tr("Yes"), _buttonStyle)) CloseReport(r, _confirm);'
+
+
+def _r11(src):
+    ui = src[UI]
+    callers = [l for l in _lines(_code(ui)) if "CloseReport(" in l]
+    assert callers == [CLOSE_REPORT, YES], callers
+    detail = _fold(_body(ui, DETAIL))
+    ask = detail.find("if (_confirm.Length == 0) {")
+    back = detail.find("GUI.enabled = true; return; }", ask)
+    yes = detail.find("CloseReport(r, _confirm);")
+    assert 0 <= ask < back < yes, "Yes is drawn while no verdict waits: %r" % ((ask, back, yes),)
+    for needle in ('I18n.Tr("Dismiss"), _buttonStyle)) _confirm = "dismissed";',
+                   'I18n.Tr("Mark Actioned"), _buttonStyle)) _confirm = "actioned";',
+                   'GUI.enabled = can && r.Status == "open";',
+                   "PlayerReportRules.VerdictQuestion(_confirm)"):
+        assert needle in detail, needle
+    # The viewer applies no sanction: closing a report is its only write.
+    for other in ("Ban", "Mute", "Kick"):
+        assert other not in _code(ui), other
+
+
+def test_r11_a_verdict_is_never_one_press():
+    _check(_r11,
+           lambda s: _replace_within(s, UI, DETAIL, '_confirm = "dismissed";', 'CloseReport(r, "dismissed");'),
+           _control_comment(UI, DETAIL))
+
+
+# -- R12 the launcher, its badge and the one count read -----------------------------------
+
+def _r12(src):
+    nu = src[NU]
+    rows = _LAUNCHER.findall(_body(src[AR], LAUNCHERS_TABLE))
+    ids = [r[0] for r in rows]
+    assert ("APlrRpt", "Player Reports...", "Queues", "false") in rows, rows
+    assert "ABugRpt" in ids and ids.index("APlrRpt") == ids.index("ABugRpt") + 1, ids
+    build = _fold(_body(nu, BUILD))
+    assert 'BuildPlayerReportBadge(AdminLauncher(slots, "APlrRpt", () => PlayerReportUI.OpenAdmin()));' in build
+    assert _sites(src, "PlayerReportUI.OpenAdmin()") == {NU: 1}, _sites(src, "PlayerReportUI.OpenAdmin()")
+    # The count is an admin's read: asked after the tab's own admin gate,
+    # from one place, and the rule decides whether it goes out (R10).
+    refresh = _fold(_body(nu, REFRESH_ADMIN))
+    gate, ask = refresh.find("if (!ApiClient.IsAdmin) return;"), refresh.find("PlayerReportUI.RefreshOpenCount();")
+    assert 0 <= gate < ask, (gate, ask)
+    assert _sites(src, "PlayerReportUI.RefreshOpenCount()") == {NU: 1}, _sites(src, "PlayerReportUI.RefreshOpenCount()")
+    # The badge shows what the rule gives (digits, so no catalogue row), is
+    # hidden when that is empty, belongs to the button and takes no click.
+    shown = _fold(_body(nu, SET_BADGE))
+    for needle in ("string t = PlayerReportRules.CountText(playerReportOpen);", "bool show = t.Length > 0;",
+                   "if (playerReportBadgeGO.activeSelf != show) playerReportBadgeGO.SetActive(show);",
+                   "if (show && playerReportBadgeTxt != null) UIFactory.SetTextRaw(playerReportBadgeTxt, t);"):
+        assert needle in shown, needle
+    badge = _fold(_body(nu, BADGE))
+    for needle in ("badge.transform.SetParent(launcher.transform, false);",
+                   'UIFactory.tImage.GetProperty("raycastTarget", bf)?.SetValue(bimg, false);',
+                   "SetPlayerReportBadge(playerReportOpen);"):
+        assert needle in badge, needle
+    assert _sites(src, "SetPlayerReportBadge(") == {NU: 2, UI: 2}, _sites(src, "SetPlayerReportBadge(")
+
+
+def test_r12_the_launcher_its_badge_and_the_one_count_read():
+    gate = "            if (!ApiClient.IsAdmin) return;\n"
+    _check(_r12,
+           lambda s: _replace_within(s, NU, REFRESH_ADMIN, gate, "            PlayerReportUI.RefreshOpenCount();\n" + gate),
+           _control_comment(NU, REFRESH_ADMIN))
+
+
+# -- R13 the four catalogues carry every key the lane draws --------------------------------
+
+def _lane_keys(src):
+    return _tr_keys(src[RL]) | _tr_keys(src[UI]) | {"Player Reports..."}
+
+
+def _r13(src):
+    keys = sorted(_lane_keys(src))
+    assert len(keys) >= 50, "the scanner found %d keys" % len(keys)
+    missing = []
+    for loc in LOCALES:
+        block = _body(src[CAT], DECL % loc)
+        missing += [(loc, k) for k in keys if '["%s"]' % k not in block]
+    assert not missing, "catalogue rows missing: %r" % missing
+    # The suite's two lists (it runs every key of the first through every
+    # locale) are the rules file's own texts, no fewer and no more.
+    new = set(_STR.findall(_body(src[SELFTEST], NEW_KEYS_DECL)))
+    shared = set(_STR.findall(_body(src[SELFTEST], SHARED_KEYS_DECL)))
+    assert new and shared and not (new & shared), sorted(new & shared)
+    mine = _tr_keys(src[RL])
+    assert new | shared == mine, "the suite's key lists against the rules file: %r" % sorted((new | shared) ^ mine)
+
+
+def test_r13_the_four_catalogues_carry_every_key_the_lane_draws():
+    _check(_r13,
+           lambda s: _replace(s, CAT, '            ["Report a Player"] = "Reportar a un jugador",\n', ""),
+           lambda s: _insert_after_open(s, CAT, DECL % "ES", "            // control"))
+
+
+# -- R14 the extractor reads both files and the registries carry the keys ------------------
+
+FILES_ROW = '"PlayerReportRules.cs", "PlayerReportUI.cs",'
+
+
+def _r14(src):
+    assert FILES_ROW in src[EXTRACT], "the two files are not in the extractor's FILES"
+    strings = json.loads(src[SOURCE_JSON])["strings"]
+    have = set(x if isinstance(x, str) else x.get("s", x.get("key", "")) for x in strings)
+    want = _lane_keys(src)
+    assert want <= have, "source strings missing: %r" % sorted(want - have)
+    gone = [k for k in sorted(want) if '"%s",' % k not in src[GEN]]
+    assert not gone, "I18nSourceKeys.g.cs lacks %r" % gone
+
+
+def test_r14_the_extractor_reads_both_files_and_the_registries_carry_the_keys():
+    _check(_r14,
+           lambda s: _replace(s, EXTRACT, "    " + FILES_ROW + "\n", ""),
+           lambda s: _replace(s, EXTRACT, "    " + FILES_ROW + "\n", "    " + FILES_ROW + "  # control\n"))
+
+
+# -- R15 the suite is registered and compiled; the icon ships ---------------------------------
+
+ICON_ROW = '    <EmbeddedResource Include="assets' + BS + 'ic_report.png" />\n'
+
+
+def _r15(src):
+    a, b = _span(src[MAIN], 'RunSuite("playerreport"', raw=True)
+    main = _code(src[MAIN][a:b])
+    assert "var r = PlayerReportRules.SelfTest();" in main
+    assert "return new Suite(r.Passed + r.Failed, r.Failed, r.Report.ToString());" in main
+    csproj = src[CSPROJ]
+    assert '<Compile Include="../../plugin/PlayerReportRules.cs" />' in csproj
+    assert '<Compile Include="PlayerReportRulesSelfTest.cs" />' in csproj
+    assert "PlayerReportUI.cs" not in csproj, "the form needs Unity and is no rule file"
+    st = _code(src[SELFTEST])
+    assert "internal static SelfTestResult SelfTest()" in st
+    assert "I18nCatalogues.Install();" in st
+    assert ICON_ROW in src[PROJ], "ic_report.png is not an embedded resource"
+    assert "PlayerReportRulesSelfTest" not in src[PROJ]
+
+
+def test_r15_the_suite_is_registered_and_compiled_and_the_icon_ships():
+    _check(_r15,
+           lambda s: _replace(s, PROJ, ICON_ROW, ""),
+           lambda s: _insert_after_open(s, MAIN, 'RunSuite("playerreport"', "                              // control", raw=True))
+
+
+# -- R16 a list row left out is counted, and no log line of the admin calls carries an id ----
+
+LEFT_OUT = "if (!PlayerReportRules.IsReportId(r.Id)) { leftOut++; continue; }"
+LIST_LINE = ('Plugin.Log.LogInfo("[PLAYER-REPORT] the admin list: " + reports.Count + " rows, " + leftOut '
+             '+ " left out for the form of the id");')
+LOGGED_NAMES = re.compile(r"[.]Id|[bB]ody|[tT]ext|[rR]esp|[sS]team|[uU]rl|[jJ]son|[sS]ig|reportId|[nN]ote"
+                          r"|Reporter|Reported|Details|[.]Message")
+
+
+def _logged(body):
+    """What each log call of a stretch of code is given, its string literals taken out."""
+    out = []
+    for kind in ("LogInfo", "LogWarning", "LogError", "LogDebug", "LogMessage"):
+        for args in _calls(body, "Plugin.Log." + kind):
+            said = ", ".join(args)
+            for at, lit in sorted(_literals(said), reverse=True):
+                said = said[:at] + said[at + len(lit) + 2:]
+            out.append(_fold(said))
+    return out
+
+
+def _r16(src):
+    ac = src[AC]
+    parse, fetch = _body(ac, PARSE_REPORTS), _body(ac, FETCH_REPORTS)
+    # The parser counts each row it leaves out, and counts nothing else.
+    counted = [l for l in _lines(parse) if "leftOut" in l]
+    assert counted == ["leftOut = 0;", LEFT_OUT], counted
+    # One line per list read, after the parse and before the answer is handed on.
+    lines = _lines(fetch)
+    assert lines.count(LIST_LINE) == 1, [l for l in lines if "Plugin.Log" in l]
+    at = lines.index(LIST_LINE)
+    assert lines[at - 1] == 'if (reports == null) { done(0, "", null, 0); return; }', lines[at - 1]
+    assert lines[at + 1] == 'done(200, "", reports, openTotal);', lines[at + 1]
+    # No log call of the three admin requests or of the parser is given an
+    # id, a Steam id, a signature, a URL, a note or the answer's text.
+    said = []
+    for sig in (FETCH_REPORTS, PARSE_REPORTS, FETCH_LOG, CLOSE):
+        said += _logged(_raw(ac, sig))
+    assert said, "no log call was read"
+    assert not [x for x in said if LOGGED_NAMES.search(x)], said
+    assert "+ reports.Count + + leftOut +" in said, said
+
+
+def test_r16_a_list_row_left_out_is_counted_and_no_log_line_carries_an_id():
+    _check(_r16,
+           lambda s: _replace_within(s, AC, PARSE_REPORTS, "{ leftOut++; continue; }", "continue;"),
+           _control_comment(AC, PARSE_REPORTS))
+
+
+def _ihdr(name):
+    with open(str(PLUGIN / "assets" / name), "rb") as fh:
+        head = fh.read(29)
+    assert head[:8] == b"\x89PNG\r\n\x1a\n" and head[12:16] == b"IHDR", name
+    return struct.unpack(">IIBBBBB", head[16:29])   # width, height, depth, colour type, compression, filter, interlace
+
+
+def test_the_report_icon_is_an_image_like_its_three_neighbours():
+    """The strip tints its icons through the Image colour, so each is a
+    white shape on a clear ground: 64x64, eight bits, RGBA."""
+    want = _ihdr("ic_bug.png")
+    assert want[:4] == (64, 64, 8, 6), want
+    for name in ("ic_report.png", "ic_mail.png", "ic_music.png"):
+        assert _ihdr(name) == want, (name, _ihdr(name))

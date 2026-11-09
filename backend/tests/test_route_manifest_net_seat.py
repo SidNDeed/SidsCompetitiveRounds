@@ -766,7 +766,8 @@ def test_route_manifest_net_seat_is_exhaustive_and_fails_closed_on_drift():
     # mail relay routes, the pending-DM recheck, the face preview, the batch discard) plus main's 6
     # verified-reads control routes; the auto-log upload and prune, added on both sides, count once.
     # The two sides' own histories follow: the lane's on the assertion, main's below it.
-    assert len(manifest) == 430   # admin evidence report re-land (2026-10-29), claude/admin-evidence-server refit onto main 3fc331e2: main's 426 plus the lane's 4 (the four GET report routes under /api/v1/internal/evidence-report/: game, series, pair and player, the admin-authorized-consumer class), confirmed by the re-pin dry run
+    assert len(manifest) == 435   # ask 14, the player report form (2026-11-09), claude/ask14-player-report: the base's 430 plus the lane's 5 (the report's submit and games read, the admin list, the log view and the close), measured by the re-pin dry run
+    # admin evidence report re-land (2026-10-29), claude/admin-evidence-server refit onto main 3fc331e2: main's 426 plus the lane's 4 (the four GET report routes under /api/v1/internal/evidence-report/: game, series, pair and player, the admin-authorized-consumer class), confirmed by the re-pin dry run
     # combat evidence re-land (2026-10-29), claude/combat-evidence-server refit onto main 3f4c9fc9: main's 424 plus the lane's 2 (the combat record route and the admin combat-evidence view), confirmed by the re-pin dry run
     # card draw evidence re-land (2026-10-29), claude/card-draw-server refit onto main 15da9a83: main's 421 plus the lane's 3 (the card record route, the admin card-evidence view and the card-pool census registration), measured by the step 5 dry re-pin of the refit (424 live) and written by its commit (b)
     # identity-clock evidence re-land (2026-10-29), claude/identity-clock-server refit onto main a38a6b5a: main's 418 plus the lane's 3 (the identity-clock record route, the admin identity-clock view and the game-file digest registration), confirmed by the re-pin dry run
@@ -819,7 +820,8 @@ def test_route_manifest_net_seat_is_exhaustive_and_fails_closed_on_drift():
     # trunk fold (2026-10-15): the union of the lane's 395 and main's 395 over their shared 387 is
     # 401: the lane's 6 plus main's 6 plus the 2 auto-log routes both sides added (all
     # statically-nonconsumer). The lane's history is on the assertion, main's below it.
-    assert len(static) == 425   # combat evidence re-land (2026-10-29): main's 423 plus the lane's 2, both statically-nonconsumer (426 rows, one sentinel-exercised)
+    assert len(static) == 430   # ask 14 (2026-11-09): the base's 425 plus the lane's 5, all statically-nonconsumer (435 rows; 4 admin-authorized-consumer, 1 sentinel-exercised)
+    # combat evidence re-land (2026-10-29): main's 423 plus the lane's 2, both statically-nonconsumer (426 rows, one sentinel-exercised)
     # card draw evidence re-land (2026-10-29): main's 420 plus the lane's 3, all statically-nonconsumer (424 rows, one sentinel-exercised; measured by the step 5 dry re-pin of the refit, written by its commit (b))
     # identity-clock evidence re-land (2026-10-29): main's 417 plus the lane's 3, all statically-nonconsumer (421 rows, one sentinel-exercised)
     # RJ server re-land (2026-10-28): main's 405 plus the lane's 12, all statically-nonconsumer (418 rows, one sentinel-exercised)
