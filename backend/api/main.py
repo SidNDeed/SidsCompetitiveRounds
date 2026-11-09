@@ -6137,6 +6137,11 @@ app.include_router(tournaments_router)
 # module rebinds the one name.
 import match_hold as _match_hold
 app.include_router(_match_hold.router)
+# Ask 14 (the player report form): the five player-report routes. The module
+# reaches main's session readers, admin checks, identity locks and log
+# helpers by late imports inside its functions, as match_hold does.
+import player_reports as _player_reports
+app.include_router(_player_reports.plr_router)
 
 # Mail <-> Discord relay (v1.41.0 item 5). Importing here is safe because
 # mail_discord imports nothing from main; the reverse dependency is supplied
@@ -6731,6 +6736,14 @@ _RL_SENSITIVE_PREFIXES = (
     # same class of near-miss as the /bug-reports/ trailing slash above, in
     # the harmless direction here).
     "/api/v1/music/rate",
+    # Player reports (ask 14). The submit can carry megabytes of log and the
+    # games read runs one statement over four tables; the admin log download
+    # returns megabytes, as /bug-reports/ does. The first entry has NO
+    # trailing slash on purpose: it covers the submit route itself and the
+    # games route under it. The second keeps its slash so the admin list
+    # stays in the ordinary bucket.
+    "/api/v1/player-reports",
+    "/api/v1/admin/player-reports/",
 )
 _RL_MAX_BODY = 16 * 1024 * 1024   # 16 MB hard cap (log clamp is 12 MB)
 _RL_LAST_PRUNE = [0.0]
@@ -45051,6 +45064,14 @@ async def delete_player_data(steam_id: str, request: Request, sig: str = Query(.
     await db.execute(text("SELECT pg_advisory_xact_lock(hashtext(:sid))"), {"sid": steam_id})
     await db.execute(text("DELETE FROM steam_sessions WHERE steam_id = :sid"), {"sid": steam_id})
     await db.execute(text("DELETE FROM player_blocks WHERE blocker_id = :pid OR blocked_id = :pid"), {"pid": pid})
+    # Player reports (ask 14, migration 404). Every report this account filed
+    # or is named in goes, and its attached log with it (ON DELETE CASCADE
+    # from the report row). A report this account closed as an admin keeps
+    # its verdict and loses its closer. Handled by name, both sides, in the
+    # form of player_blocks above: the players row is anonymised and never
+    # deleted, so no foreign key action fires for it (#437).
+    await db.execute(text("DELETE FROM player_reports WHERE reporter_id = :pid OR reported_id = :pid"), {"pid": pid})
+    await db.execute(text("UPDATE player_reports SET closed_by = NULL WHERE closed_by = :pid"), {"pid": pid})
     # In-game mail (Sept 6 item b, B-8; migration 297). The player row is
     # ANONYMISED, so mail_blocks' ON DELETE CASCADE never fires (#437) — every
     # mail table is handled by name. The inbox and addressee envelopes go

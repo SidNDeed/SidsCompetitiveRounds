@@ -323,6 +323,8 @@ ADMIN_SIGNED: frozenset = frozenset({
     "/api/v1/admin/i18n/grants/list",
     "/api/v1/admin/moderation-cases",
     "/api/v1/admin/pc/trades",
+    "/api/v1/admin/player-reports",
+    "/api/v1/admin/player-reports/{report_id}/log",
     "/api/v1/admin/quarantine",
     "/api/v1/admin/quarantine/triage",
     "/api/v1/admin/quarantine/triage/{mode}/{group_id}",
@@ -394,6 +396,7 @@ PLAYER: frozenset = frozenset({
     "/api/v1/pc/me",
     "/api/v1/pc/packs",
     "/api/v1/pc/trades",
+    "/api/v1/player-reports/games",
     "/api/v1/report",
 })
 
