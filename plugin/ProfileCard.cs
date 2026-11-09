@@ -744,7 +744,7 @@ namespace CompetitiveRounds
                 if (rebuilt || txtName == null) BuildChildren();
 
                 // Header: the name in the title colour, then title / tier / rating / level.
-                string name = GameStateWatcher.StripRichText(d.displayName ?? "").Trim();
+                string name = GameStateWatcher.CleanPlayerName(d.displayName ?? "").Trim();
                 if (string.IsNullOrEmpty(name)) name = I18n.Tr("Unknown player");
                 UIFactory.SetColor(txtName, ParseHex(d.titleColor, Color.white));
                 UIFactory.SetTextRaw(txtName, TmpOverlayPanel.FitOneLine(txtName, name, CardW - 2f * PAD));

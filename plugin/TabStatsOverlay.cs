@@ -1075,7 +1075,7 @@ namespace CompetitiveRounds
                 // renders as literal broken tags AND eats the whole name
                 // budget — strip to the plain name.
                 var nick = p.data.view?.Owner?.NickName;
-                if (!string.IsNullOrEmpty(nick)) return NametagStyler.Clean(nick);
+                if (!string.IsNullOrEmpty(nick)) return GameStateWatcher.CleanPlayerName(nick);
             }
             catch { }
             return I18n.TrF("Player {0}", p.PlayerID + 1);

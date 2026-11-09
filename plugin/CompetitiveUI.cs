@@ -1245,7 +1245,7 @@ namespace CompetitiveRounds
                     string safe = SpectatorHud.SanitizeStyled(sb.ToString());
                     if (string.IsNullOrWhiteSpace(safe))
                     {
-                        safe = NametagStyler.Clean(raw) ?? "";
+                        safe = GameStateWatcher.CleanPlayerName(raw) ?? "";
                         if (string.IsNullOrWhiteSpace(safe)) return "?";
                     }
                     if (safe.Length <= 64) return safe;
@@ -4534,7 +4534,7 @@ namespace CompetitiveRounds
                     // brackets in names ("AC<DC>Fan" -> "ACFan"), which the
                     // paren-sanitiser below has always rendered as
                     // "AC(DC)Fan". Strip, then sanitise, then truncate.
-                    string n = SanitizeForImgui(GameStateWatcher.StripKnownRichTags(p.NickName ?? ""));
+                    string n = SanitizeForImgui(GameStateWatcher.CleanPlayerName(p.NickName ?? ""));
                     if (n.Length == 0) n = "?";
                     if (n.Length > 14) n = n.Substring(0, 14);
                     names = shown == 0 ? n : names + ", " + n;
@@ -9572,7 +9572,7 @@ namespace CompetitiveRounds
                     foreach (var pp in RoomActors.ActiveFighters())   // census: a spectator is neither mate nor foe
                     {
                         if (pp == null || pp.IsLocal) continue;
-                        string nm = GameStateWatcher.StripRichText(pp.NickName ?? "?");
+                        string nm = GameStateWatcher.CleanPlayerName(pp.NickName ?? "?");
                         if (string.IsNullOrEmpty(nm)) nm = "?";
                         if (nm.Length > 14) nm = nm.Substring(0, 14);
                         int t = -1;
