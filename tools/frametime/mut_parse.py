@@ -2,8 +2,11 @@
 # Usage: python -I -B mut_parse.py <worktree> <outdir>; writes outdir/mut-<k>/ and runs pytest in each.
 # Uncontaminated by construction (round-1 MEDIUM, mut_parse.py:64): every copy mirrors the worktree layout for each
 # file the suite reads (FIXTURES), mutant 0 is the unchanged copy and must be GREEN before any mutant counts, and a
-# mutant counts as red only when its failures are assertion failures that include the tests named in its row (KILLS),
-# never a collection error or a missing file.
+# mutant runs exactly the node ids its row names (KILLS) and counts as red only when each of them failed in its call
+# phase with no error in any phase, as the per-node record pytest writes shows (ruling R6-A3.11.95), never a
+# collection error, a skip or a missing file. Options: --jobs=N, --cap=SECONDS (default 3600), --discover,
+# --stub-check [--stub-refuse] [--stub-refuse-param] [--stub-slow-collect] [--stub-only=i,j] (the harness's own proof).
+import json
 import os
 import re
 import shutil
@@ -172,8 +175,9 @@ MUTS = [
      'if dep and peer_recs is None:\n        peer_recs = recs\n        Refused('),
     ('M2: report gives a verdict from one seat\'s log', 'raise Refused("a verdict needs both seats\' logs:',
      'peer = text; Refused("a verdict needs both seats\' logs:'),
-    ('M2: report regains a bypass parameter', 'def report(text, peer=None):',
-     'def report(text, peer=None, require_peer=True):'),
+    # re-anchored on report's src/peer_src parameters (brief PARSER-FIX-1109); the mutation is unchanged
+    ('M2: report regains a bypass parameter', 'def report(text, peer=None, src="log", peer_src="peer"):',
+     'def report(text, peer=None, src="log", peer_src="peer", require_peer=True):'),
     ('R5: a dependent row keeps the retired scratch proof', 'if kind == "dependent" and proof != LIVE_PROOF:',
      'if kind == "dependent" and proof not in (LIVE_PROOF, ""):'),
     ('live row executed reads not matched to its a3 line', 'if len(a3l) != 1 or a3l[0].get("reads_on") != r["reads"]:',
@@ -214,7 +218,49 @@ MUTS = [
     ('menu frame rate closing target unchecked',
      'if (o.get("target"), o.get("vsync")) != (c.get("target"), c.get("vsync")):', 'if False:'),
     ('menu frame rate segment floor dropped', 'low = [s for s in fr if fr[s] * MENU_SEG_FLOOR < fr[s0]]', 'low = []'),
+    # brief PARSER-FIX-1109: the census summary as its own checked kind, and the read-time required-keys test
+    ('census summary not told apart', '            kind = rec["kind"] = sub', '            pass'),
+    ('read-time key test removed', '            if gone:\n                raise RecordRefused(r["kind"], src, n, gone)',
+     '            if False:\n                raise RecordRefused(r["kind"], src, n, gone)'),
+    ('census summary missing not tested', 'if v["missing"] != 0:', 'if False:'),
+    # ruling R6-A3.11.92 (3): the churn failure event and the raw-text failure route
+    ('churn freeze not a failure event',
+     '    ("churn", "freeze", "FtRoomGate: the churn-timer freeze threw (\'churn freeze failed\')"),\n', ''),
+    ('raw failures not read in the report', '    miss += raw_failure_events(text)\n', ''),
+    ('raw failures not read in the menu check', '        ok, bad = ok and not rawf, bad + rawf\n', ''),
+    # ruling R6-A3.11.92 (4): every calibration consumer skips a failed line
+    ('complete counts a failed calibration line', 'and not r.get("failed"))\n    for name, have in', ')\n    for name, have in'),
+    ('D_up reads a failed disp line', 'r.get("ckind") == "disp" and not r.get("failed"):', 'r.get("ckind") == "disp":'),
+    ('stamp estimate reads a failed span line',
+     'str(r.get("why", "")).startswith("game")\n                and not r.get("failed")):',
+     'str(r.get("why", "")).startswith("game")):'),
+    ('menu cycle count reads a failed fhat line', 'startswith("menu") and not r.get("failed")]', 'startswith("menu")]'),
+    # Codex PARSER-FIX-R1 MEDIUM: the census summary's non-integer route
+    ('census summary non-integer accepted', 'bad.append("census summary %s=%s is not an integer" % (k, r[k]))', 'pass'),
+    # Codex PARSER-FIX-R1 HIGH 2 and its sweep: the peer's failure events, disarm and unreadable log
+    ('peer raw failures not read', '        miss += ["peer seat: " + w for w in raw_failure_events(peer)]\n', ''),
+    ('peer parsed failures not read', '            miss += ["peer seat: " + w for w in failure_events(peer_recs)]\n',
+     '            pass\n'),
+    ('unreadable peer not withheld', '            miss.append("peer seat: its failure events not read (%s)" % peer_err)\n',
+     '            pass\n'),
+    ('peer disarm ignored', '        if pdis:\n', '        if False:\n'),
+    # Codex PARSER-FIX-R1 HIGH 1: the required-key rows its fixture sweep found
+    ('answer_replay g not required', '    ("answer_replay", None, None, ("g",), "f18"),', ''),
+    ('p span_g not required', '"span_u", "pred",\n      "span_g"),', '"span_u", "pred"),'),
+    ('live calibration fields not required',
+     '("reads", "scopes", "ticks", "tmax", "unscoped", "depth_err"),\n     "a3_live"),', '(),\n     "a3_live"),'),
 ]
+
+def _ids(test, *params):
+    """Exact node ids of a parametrised test's cases (ruling R6-A3.11.95 (4)(f)): a kill names the cases its
+    mutant's code reaches, never the bare name, which resolves to several ids and is refused."""
+    return ["test_ft_parse.py::%s[%s]" % (test, p) for p in params]
+
+
+ABS = "test_each_absent_record_fails_the_run"
+DEL = "test_deleting_each_record_kind_withholds"
+DEL_SITTING = "-sitting-_g16-^VERDICT B1 withheld: sitting incomplete"
+
 
 # the tests each mutant must turn red (taken from a --discover run on a green baseline, then pinned)
 KILLS = {
@@ -330,19 +376,21 @@ KILLS = {
     'A3 drained starts not matched to the points':
         ['test_a3_drained_starts_equal_the_games_point_count'],
     'absent-record sweep left out of complete()':
-        ['test_each_absent_record_fails_the_run'],
+        _ids(ABS, "flushed-kw0", "flushed-kw1", "between-kw2", "between-kw3", "heavy-kw4", "heavy-kw5", "offthread-kw6",
+             "window-kw7", "refusals-kw8", "between-kw9", "answer_replay-kw10", "answer_replay-kw11", "counters-kw12",
+             "counters-kw13"),
     'absent flushed line passes':
-        ['test_each_absent_record_fails_the_run'],
+        _ids(ABS, "flushed-kw0", "flushed-kw1"),
     'absent between line passes':
-        ['test_each_absent_record_fails_the_run'],
+        _ids(ABS, "between-kw2", "between-kw3", "between-kw9"),
     'absent heavy line passes the sweep':
-        ['test_each_absent_record_fails_the_run'],
+        _ids(ABS, "heavy-kw4", "heavy-kw5"),
     'absent offthread line passes the sweep':
-        ['test_each_absent_record_fails_the_run'],
+        _ids(ABS, "offthread-kw6"),
     'absent window line passes':
-        ['test_each_absent_record_fails_the_run'],
+        _ids(ABS, "window-kw7"),
     'absent refusals line passes':
-        ['test_each_absent_record_fails_the_run'],
+        _ids(ABS, "refusals-kw8"),
     'B3 passes on an absent heavy line':
         ['test_b3_requires_complete_records'],
     'B3 passes on an absent offthread line':
@@ -364,11 +412,13 @@ KILLS = {
     'zero proof naming no evidence passes':
         ['test_a3_probe_proofs_need_their_records_and_contrary_ones_fail'],
     'proof records never checked':
-        ['test_a3_probe_proofs_need_their_records_and_contrary_ones_fail', 'test_deleting_each_record_kind_withholds'],
+        ['test_a3_probe_proofs_need_their_records_and_contrary_ones_fail']
+        + _ids(DEL, "a3zero-a3zero-_g16-probe:a3zero needs one a3zero line in game 16"),
     'contrary live writes for a zero row pass':
         ['test_a3_probe_proofs_need_their_records_and_contrary_ones_fail'],
     'probe:a3zero evidence not required':
-        ['test_a3_probe_proofs_need_their_records_and_contrary_ones_fail', 'test_deleting_each_record_kind_withholds'],
+        ['test_a3_probe_proofs_need_their_records_and_contrary_ones_fail']
+        + _ids(DEL, "a3zero-a3zero-_g16-probe:a3zero needs one a3zero line in game 16"),
     'a3zero written count not checked':
         ['test_a3_probe_proofs_need_their_records_and_contrary_ones_fail'],
     'VR2 counters values not judged':
@@ -378,13 +428,14 @@ KILLS = {
     'VR2 point missing_end passes':
         ['test_vr2_judges_the_last_games_counters_and_every_point_stamp'],
     'absent answer_replay passes the sweep':
-        ['test_each_absent_record_fails_the_run', 'test_deleting_each_record_kind_withholds'],
+        _ids(ABS, "answer_replay-kw10", "answer_replay-kw11") + _ids(DEL, "answer_replay" + DEL_SITTING),
     'absent counters line passes the sweep':
-        ['test_each_absent_record_fails_the_run', 'test_deleting_each_record_kind_withholds'],
+        _ids(ABS, "counters-kw12", "counters-kw13") + _ids(DEL, "counters" + DEL_SITTING),
     'F18 does not guard B1':
         ['test_f18_failure_guards_b1'],
     'menu cycle calibrations not required':
-        ['test_menu_check_needs_every_cycle_calibration_and_the_terminal_snapshot', 'test_deleting_each_record_kind_withholds'],
+        ['test_menu_check_needs_every_cycle_calibration_and_the_terminal_snapshot']
+        + _ids(DEL, "cal-menu-<lambda>-menu"),
     'menu terminal snapshot read anywhere':
         ['test_menu_check_needs_every_cycle_calibration_and_the_terminal_snapshot'],
     'menu terminal snapshot counters not judged':
@@ -463,18 +514,140 @@ KILLS = {
     'menu frame rate any cap line admitted as a release': ['test_menu_framerate_c5_shape_fails_on_each_named_reason'],
     'menu frame rate closing target unchecked': ['test_menu_framerate_c5_shape_fails_on_each_named_reason'],
     'menu frame rate segment floor dropped': ['test_menu_framerate_c5_shape_fails_on_each_named_reason'],
+    'census summary not told apart': ['test_census_summary_is_its_own_kind_and_passes_beside_census_lines']
+                                     + _ids("test_census_summary_failing_forms_fail_the_check", "registered_not_expected",
+                                            "expected_not_derived", "missing_1", "duplicates_1", "two_lines")
+                                     + ['test_census_summary_failure_withholds_the_verdicts_on_either_seat'],
+    'read-time key test removed': _ids("test_record_lacking_a_required_key_is_a_named_refusal",
+                                       "p_None_pt", "p_None_arm", "p_None_gate", "p_None_n", "p_None_sF", "p_None_sS",
+                                       "p_None_sC", "p_None_maxF", "p_None_pn", "p_None_psF", "p_None_psS", "p_None_psC",
+                                       "p_None_live_frames", "p_None_span_u", "p_None_pred", "p_None_span_g",
+                                       "p_span_g_present_span_gn", "p_span_g_present_on_calls",
+                                       "p_span_g_present_guarded", "p_t0_present_t1", "w_None_pt", "w_None_arm",
+                                       "w_None_n", "w_None_sC", "w_partial_0_e4", "w_partial_0_e8", "w_partial_0_e16",
+                                       "settled_None_g", "settled_None_freq", "settled_None_f_hat", "census_None_g",
+                                       "census_None_entry", "census_None_shape", "census_None_on", "census_None_guarded",
+                                       "census_summary_None_registered", "census_summary_None_expected",
+                                       "census_summary_None_missing", "census_summary_None_duplicates", "cal_None_i",
+                                       "cal_kind_disp_span__not_failed_shape", "cal_kind_disp_span__not_failed_n",
+                                       "cal_kind_disp_span__not_failed_u", "cal_kind_disp_span__not_failed_p",
+                                       "cal_kind_fhat__not_failed_f_hat", "cal_live_present_reads",
+                                       "cal_live_present_scopes", "cal_live_present_ticks", "cal_live_present_tmax",
+                                       "cal_live_present_unscoped", "cal_live_present_depth_err", "heavy_None_op",
+                                       "heavy_None_at_call", "heavy_None_edge", "heavy_None_off", "heavy_None_live",
+                                       "offthread_None_span_off", "offthread_None_hash_t0", "offthread_None_hash_t1",
+                                       "plant_None_c_plant", "a3_None_g", "a3_None_reads_win", "answer_replay_None_g",
+                                       "answer_replay_result_settled_ticks", "between_after_ON_ticks", "menu_None_seg",
+                                       "menu_None_pair", "menu_None_arm", "menu_None_gate", "menu_c_plant_0_level")
+                                  + ['test_census_line_without_g_is_a_named_refusal',
+                                   'test_refusals_through_the_script_main_path'],
+    'churn freeze not a failure event': ['test_failure_events_make_the_run_incomplete',
+                                         'test_churn_freeze_failed_withholds_the_verdicts_and_its_trace_does_not'],
+    'raw failures not read in the report': ['test_raw_failure_lines_withhold_the_verdicts_and_their_traces_do_not'],
+    'raw failures not read in the menu check': ['test_raw_failure_lines_withhold_the_verdicts_and_their_traces_do_not'],
+    'complete counts a failed calibration line': ['test_failed_cal_lines_are_skipped_by_the_calibration_consumers'],
+    'D_up reads a failed disp line': ['test_failed_cal_lines_are_skipped_by_the_calibration_consumers'],
+    'stamp estimate reads a failed span line': ['test_failed_cal_lines_are_skipped_by_the_calibration_consumers'],
+    'menu cycle count reads a failed fhat line': ['test_failed_cal_lines_are_skipped_by_the_calibration_consumers'],
+    'census summary missing not tested': _ids("test_census_summary_failing_forms_fail_the_check", "missing_1")
+                                         + ['test_census_summary_failure_withholds_the_verdicts_on_either_seat'],
+    'census summary non-integer accepted': ['test_census_summary_non_integer_value_fails_the_check'],
+    'peer raw failures not read': _ids("test_a_failure_line_in_the_peer_log_alone_withholds_the_verdicts",
+                                       "ft_room", "ft_gate"),
+    'peer parsed failures not read': _ids("test_a_failure_line_in_the_peer_log_alone_withholds_the_verdicts", "churn"),
+    'unreadable peer not withheld': ['test_an_unreadable_peer_log_withholds_the_verdicts'],
+    'peer disarm ignored': ['test_a_disarm_in_the_peer_log_alone_fails_vr6'],
+    'answer_replay g not required': _ids("test_every_fixture_key_dropped_ends_in_the_report_or_a_named_refusal",
+                                         "answer_replay-g"),
+    'p span_g not required': _ids("test_every_fixture_key_dropped_ends_in_the_report_or_a_named_refusal", "p-span_g"),
+    'live calibration fields not required': _ids("test_a_live_calibration_line_lacking_a_field_is_refused_when_read",
+                                                 "reads", "scopes", "ticks", "tmax", "unscoped", "depth_err"),
 }
 t0 = open(os.path.join(src, "ft_parse.py"), encoding="utf-8", newline="").read()
 DISCOVER = "--discover" in sys.argv[3:]
-# a parametrised test's id ([...]) is part of its FAILED line: read past it, or its failures are never seen
-FAILED = re.compile(r"^FAILED \S+::(\w+)(?:\[[^\]]*\])?(?: - (.*))?$")
-for _ln, _want in (("FAILED test_ft_parse.py::test_x - AssertionError: y", "test_x"),
-                   ("FAILED test_ft_parse.py::test_each[flushed-kw0] - AssertionError: y", "test_each"),
-                   ("FAILED test_ft_parse.py::test_each[heavy-kw4]", "test_each")):
-    _m = FAILED.match(_ln)
-    if not _m or _m.group(1) != _want:
-        sys.exit("REFUSED: the FAILED reader does not read %r" % _ln)
+# each pytest run is capped at --cap=N seconds (default 3600); a run past it is a TIMEOUT verdict, never red
+CAP = int(next((x.split("=", 1)[1] for x in sys.argv[3:] if x.startswith("--cap=")), "3600"))
+# --stub-check proves the harness itself: stub rows against a stub suite instead of the parser's rows
+STUB = "--stub-check" in sys.argv[3:]
+STUB_FILE = "tools/frametime/test_harness_stub.py"
+STUB_SRC = ("import sys\nimport time\n\nimport pytest\n\n"
+            "SLEEP = 0\nFAIL = False\nBREAK = ''\nSETUP_BREAK = False\nTEARDOWN_BREAK = False\nCOLLECT_SLEEP = 0\n"
+            "if COLLECT_SLEEP and '--collect-only' in sys.argv:\n    time.sleep(COLLECT_SLEEP)\n\n\n"
+            "def test_stub_sleeps():\n    time.sleep(SLEEP)\n\n\n"
+            "def test_stub_fails():\n    assert not FAIL, 'stub failure'\n\n\n"
+            "def test_stub_named():\n    pass\n\n\n"
+            "@pytest.mark.parametrize('case', ['a', 'b', 'c'])\n"
+            "def test_stub_param(case):\n    assert case != BREAK, 'stub case broken'\n\n\n"
+            "@pytest.fixture\ndef stub_teardown():\n    yield\n    if TEARDOWN_BREAK:\n"
+            "        raise RuntimeError('stub teardown broke')\n\n\n"
+            "@pytest.fixture\ndef stub_setup():\n    if SETUP_BREAK:\n        raise RuntimeError('stub setup broke')\n"
+            "    yield\n\n\n"
+            "def test_stub_teardown(stub_teardown):\n    assert not TEARDOWN_BREAK, 'stub failure'\n\n\n"
+            "def test_stub_setup(stub_setup):\n    pass\n")
+if "--stub-slow-collect" in sys.argv[3:]:
+    # the baseline's whole-suite run is quick, its --collect-only sleeps past the cap (Codex PARSER-FIX-R2 MEDIUM)
+    STUB_SRC = STUB_SRC.replace("COLLECT_SLEEP = 0", "COLLECT_SLEEP = 30")
+SUITE = "test_harness_stub.py" if STUB else "test_ft_parse.py"
+if STUB:
+    _P = "test_harness_stub.py::test_stub_param[%s]"
+    STUB_ROWS = [
+        ("stub: sleeps past the cap", "\nSLEEP = 0\n", "\nSLEEP = 30\n", ["test_stub_sleeps"]),          # TIMEOUT
+        ("stub: fails at once", "FAIL = False", "FAIL = True", ["test_stub_fails"]),                      # RED
+        ("stub: its kill renamed away", "def test_stub_named():", "def test_stub_other():",
+         ["test_stub_named"]),                                                                           # ERROR
+        ("stub: one case broken, its id named", "BREAK = ''", "BREAK = 'b'", [_P % "b"]),                 # RED
+        ("stub: one case broken, all three ids named", "BREAK = ''", "BREAK = 'b'",
+         [_P % "a", _P % "b", _P % "c"]),                                                                # SURVIVED
+        ("stub: an explicit node id", "FAIL = False", "FAIL = True",
+         ["test_harness_stub.py::test_stub_fails"]),                                                     # RED
+        ("stub: a failing kill with a teardown error", "TEARDOWN_BREAK = False", "TEARDOWN_BREAK = True",
+         ["test_stub_teardown"]),                                                                        # ERROR
+        ("stub: a setup error on a named kill", "SETUP_BREAK = False", "SETUP_BREAK = True",
+         ["test_stub_setup"]),                                                                           # ERROR
+    ]
+    if "--stub-refuse" in sys.argv[3:]:
+        # a kill the baseline never collects: its row is refused by name before any mutant runs
+        STUB_ROWS.append(("stub: its kill never collected", "\nSLEEP = 0\n", "\nSLEEP = 0 \n", ["test_stub_absent"]))
+    if "--stub-refuse-param" in sys.argv[3:]:
+        # the bare name of a parametrised test maps to three ids: its row is refused by name
+        STUB_ROWS.append(("stub: a parametrised test's bare name", "BREAK = ''", "BREAK = 'b'", ["test_stub_param"]))
+    _only = next((x.split("=", 1)[1] for x in sys.argv[3:] if x.startswith("--stub-only=")), None)
+    if _only:
+        STUB_ROWS = [STUB_ROWS[int(n) - 1] for n in _only.split(",")]
+    MUTS = [(n, a, b, STUB_FILE) for n, a, b, _ in STUB_ROWS]
+    KILLS = {n: ks for n, _, _, ks in STUB_ROWS}
 UNRELATED = ("FileNotFoundError", "ModuleNotFoundError", "ImportError", "No such file")
+# Outcomes are read per exact node id and per phase from a record pytest writes (ruling R6-A3.11.95 (4)(c)), never
+# from summary text: every copy carries this conftest.py, which appends one JSON row per collected node, per failed
+# collector and per setup, call and teardown report to the file SCR_MUT_RECORD names.
+RECORD_ENV = "SCR_MUT_RECORD"
+RECORD_SRC = '''import json
+import os
+
+_PATH = os.environ.get("SCR_MUT_RECORD")
+
+
+def _put(row):
+    if _PATH:
+        with open(_PATH, "a", encoding="utf-8") as f:
+            f.write(json.dumps(row) + "\\n")
+
+
+def pytest_collection_finish(session):
+    for item in session.items:
+        _put({"collected": item.nodeid})
+
+
+def pytest_collectreport(report):
+    if report.failed:
+        _put({"collect_error": report.nodeid})
+
+
+def pytest_runtest_logreport(report):
+    crash = getattr(report.longrepr, "reprcrash", None)
+    _put({"node": report.nodeid, "when": report.when, "outcome": report.outcome,
+          "xfail": hasattr(report, "wasxfail"), "msg": getattr(crash, "message", "") or ""})
+'''
 
 
 def make_copy(d):
@@ -482,31 +655,142 @@ def make_copy(d):
         p = os.path.join(d, *rel.split("/"))
         os.makedirs(os.path.dirname(p), exist_ok=True)
         shutil.copy(os.path.join(W, *rel.split("/")), p)
-    return os.path.join(d, "tools", "frametime")
+    td = os.path.join(d, "tools", "frametime")
+    open(os.path.join(td, "conftest.py"), "w", encoding="utf-8", newline="").write(RECORD_SRC)
+    if STUB:
+        open(os.path.join(d, *STUB_FILE.split("/")), "w", encoding="utf-8", newline="").write(STUB_SRC)
+    return td
 
 
-def run_suite(td):
-    r = subprocess.run([sys.executable, "-I", "-B", "-m", "pytest", "test_ft_parse.py", "-q", "-rf", "-p", "no:cacheprovider"],
-                       cwd=td, capture_output=True, text=True, timeout=1800)
-    lines = [ln for ln in r.stdout.splitlines() if ln.strip()]
-    failed = {}
-    for ln in lines:
-        m = FAILED.match(ln)
-        if m:
-            failed[m.group(1)] = m.group(2) or ""
-    return r.returncode, (lines[-1] if lines else "(no output)"), failed, r.stdout
+def say(s):
+    print(s, flush=True)
 
 
-# mutant 0: the unchanged copy must be green, or no mutant below is evidence
+def pytest_run(td, args, tag):
+    """One capped pytest run: (returncode or None past CAP seconds, stdout, the per-node record rows). The record is
+    <copy>/record-<tag>.jsonl, beside the copy's tools folder, so no test reads it."""
+    path = os.path.join(os.path.dirname(os.path.dirname(td)), "record-%s.jsonl" % tag)
+    if os.path.exists(path):
+        os.remove(path)
+    env = dict(os.environ)
+    env[RECORD_ENV] = path
+    try:
+        r = subprocess.run([sys.executable, "-I", "-B", "-u", "-m", "pytest", "-p", "no:cacheprovider"] + args,
+                           cwd=td, capture_output=True, text=True, timeout=CAP, env=env)
+        rc, out = r.returncode, r.stdout
+    except subprocess.TimeoutExpired as e:
+        rc = None
+        out = e.stdout if isinstance(e.stdout, str) else (e.stdout or b"").decode("utf-8", "replace")
+    rows = []
+    if os.path.exists(path):
+        for ln in open(path, encoding="utf-8"):
+            try:
+                rows.append(json.loads(ln))
+            except ValueError:
+                if rc is not None:
+                    raise           # a torn row is possible only from a run stopped at the cap
+    return rc, out, rows
+
+
+def ident(nodeid):
+    """Route 1 (Codex PARSER-FIX-R2 HIGH 1): a node is its exact id, parameter suffix kept."""
+    return nodeid
+
+
+def out_key(nodeid):
+    """The key a record row is read under: the exact node id (route 1)."""
+    return nodeid
+
+
+def want_key(kill, nid):
+    """The key a named kill is looked up under: its resolved exact node id (route 1)."""
+    return nid
+
+
+def failed_in_call(calls):
+    """A named id is killed only when its one call report failed (route 1: one node, one outcome)."""
+    return calls == ["failed"]
+
+
+def read_outcomes(rows, out, ids):
+    """Route 2 (Codex PARSER-FIX-R2 HIGH 2): each node's setup, call and teardown outcomes from the record, and every
+    error in any phase: a failed collector, a failed setup or teardown, a skip, an xfail."""
+    by, errs = {}, []
+    for r in rows:
+        if "collect_error" in r:
+            errs.append("collection error in %s" % (r["collect_error"] or "(session)"))
+        if "node" not in r:
+            continue
+        o = by.setdefault(out_key(r["node"]), {"setup": [], "call": [], "teardown": [], "xfail": False, "msg": []})
+        o[r["when"]].append(r["outcome"])
+        o["xfail"] = o["xfail"] or r["xfail"]
+        if r["msg"]:
+            o["msg"].append(r["msg"])
+        if r["when"] != "call" and r["outcome"] == "failed":
+            errs.append("error in %s of %s" % (r["when"], r["node"]))
+        if r["outcome"] == "skipped":
+            errs.append("%s skipped in %s" % (r["node"], r["when"]))
+        if r["xfail"]:
+            errs.append("%s xfailed in %s" % (r["node"], r["when"]))
+    return by, errs
+
+
+def last_line(out):
+    lines = [ln for ln in out.splitlines() if ln.strip()]
+    return lines[-1] if lines else "(no output)"
+
+
+def fail_baseline(line):
+    say(line)
+    say("PARSER MUTANTS FAIL (no green baseline)")
+    sys.exit(1)
+
+
+# mutant 0: the unchanged copy must be green, or no mutant below is evidence; it keeps the whole suite. GREEN is exit
+# 0, every collected node passed in setup, call and teardown, no error in any phase, and its collection complete
 d0 = os.path.join(OUT, "mut-0")
 os.makedirs(d0, exist_ok=False)
-rc0, last0, failed0, _ = run_suite(make_copy(d0))
-print("baseline (unchanged copy): rc=%d %s -> %s" % (rc0, last0, "GREEN" if rc0 == 0 else "RED (baseline FAILED)"))
-if rc0 != 0:
-    for n, why in sorted(failed0.items()):
-        print("  baseline failure: %s - %s" % (n, why))
-    print("PARSER MUTANTS FAIL (no green baseline)")
-    sys.exit(1)
+td0 = make_copy(d0)
+rc0, out0, rows0 = pytest_run(td0, [SUITE, "-q", "-rf"], "run")
+if rc0 is None:
+    fail_baseline("baseline (unchanged copy): TIMEOUT %ds (not proven green: control FAILED)" % CAP)
+run_ids = [r["collected"] for r in rows0 if "collected" in r]
+by0, errs0 = read_outcomes(rows0, out0, run_ids)
+bad0 = list(errs0) + ([] if rc0 == 0 else ["pytest exit %d" % rc0]) + ([] if run_ids else ["no node collected"])
+bad0 += ["%s did not pass (%s)" % (i, by0.get(out_key(i))) for i in run_ids
+         if {p: v for p, v in by0.get(out_key(i), {}).items() if p in ("setup", "call", "teardown")}
+         != {"setup": ["passed"], "call": ["passed"], "teardown": ["passed"]}]
+# the listing every kill resolves against: the baseline's --collect-only, which must be the run's own collection
+rcc, outc, rowsc = pytest_run(td0, [SUITE, "--collect-only", "-q"], "collect")
+if rcc is None:
+    fail_baseline("baseline collection (unchanged copy): TIMEOUT %ds (not proven complete: control FAILED)" % CAP)
+listing = [r["collected"] for r in rowsc if "collected" in r]
+_, errsc = read_outcomes(rowsc, outc, [])
+bad0 += errsc + ([] if rcc == 0 else ["--collect-only exit %d" % rcc])
+if sorted(listing) != sorted(run_ids):
+    bad0.append("--collect-only lists %d ids, the run collected %d" % (len(listing), len(run_ids)))
+if bad0:
+    for why in bad0[:20]:
+        say("  baseline problem: %s" % why)
+    fail_baseline("baseline (unchanged copy): rc=%d %s -> RED (baseline FAILED, %d problems)"
+                  % (rc0, last_line(out0), len(bad0)))
+say("baseline (unchanged copy): rc=%d %s; %d nodes passed in every phase, collection complete -> GREEN"
+    % (rc0, last_line(out0), len(run_ids)))
+base_ids = {ident(i) for i in listing}
+
+
+def resolve(k, name, kill):
+    """(4)(a): an entry with "::" equals one listed id exactly; a bare name is the one id whose test it names
+    (parameter suffix aside); zero ids or several refuse the table by row name before any mutant runs."""
+    if "::" in kill:
+        hits = sorted(i for i in base_ids if i == kill)
+    else:
+        hits = sorted(i for i in base_ids if i.split("::")[-1].split("[", 1)[0] == kill)
+    if len(hits) != 1:
+        sys.exit("REFUSED: mutant %d (%s) kill %s maps to %d node ids %s" % (k, name, kill, len(hits), hits[:6]))
+    return hits[0]
+
+
 bad = 0
 jobs = []
 for k, row in enumerate(MUTS, 1):
@@ -515,8 +799,9 @@ for k, row in enumerate(MUTS, 1):
     d = os.path.join(OUT, "mut-%d" % k)
     os.makedirs(d, exist_ok=False)
     td = make_copy(d)
+    ids = [resolve(k, name, x) for x in kills]
     if len(row) == 4:
-        if row[3] not in FIXTURES:
+        if row[3] not in FIXTURES + ([STUB_FILE] if STUB else []):
             sys.exit("REFUSED: mutant %d targets %s, not a fixture" % (k, row[3]))
         fp = os.path.join(d, *row[3].split("/"))
         f0 = open(fp, encoding="utf-8", newline="").read()
@@ -537,21 +822,92 @@ for k, row in enumerate(MUTS, 1):
                       "    off = [p['sC'] / p['n'] for p in points if p['arm'] == 'OFF' and p['n']]\n"
                       "    return sum(on) / len(on) - sum(off) / len(off), sum(p['n'] for p in points)\n\n") + t0[j:]
     open(os.path.join(td, "ft_parse.py"), "w", encoding="utf-8", newline="").write(t)
-    jobs.append((k, name, kills, td))
-# the copies are independent directories, so their suites run side by side (--jobs N); results print in mutant order
+    jobs.append((k, name, kills, td, d, ids))
+
+
+def run_mutant(job):
+    """(4)(b): a mutant's pytest gets exactly its resolved node ids, each first proven collected under the mutant
+    (its own --collect-only record). A row with no kills (--discover) keeps the whole suite.
+    Returns (not-collected ids, (rc or None, stdout, record rows))."""
+    k, name, kills, td, d, ids = job
+    if not ids:
+        res = pytest_run(td, [SUITE, "-q", "-rf"], "run")
+    else:
+        rcc, outc, rowsc = pytest_run(td, [SUITE, "--collect-only", "-q"], "collect")
+        if rcc is None:
+            res = (None, outc, [])
+        else:
+            have = {ident(r["collected"]) for r in rowsc if "collected" in r}
+            gone = [i for i in ids if i not in have]
+            if gone:
+                return gone, None
+            res = pytest_run(td, ids + ["-q", "-rf"], "run")
+    if res[0] is None:
+        open(os.path.join(d, "timeout-stdout.txt"), "w", encoding="utf-8").write(res[1])
+    return [], res
+
+
+def verdict(kills, ids, rc, out, rows):
+    """(4)(d), after TIMEOUT and KILL-NOT-COLLECTED: ERROR when a named id was skipped, xfailed or not run, when any
+    node errored in any phase, when pytest's exit is neither 0 nor 1, or when a named failure is UNRELATED (a file or
+    import failure); otherwise RED when every named id failed in its call phase; SURVIVED in every other case."""
+    by, errs = read_outcomes(rows, out, ids)
+    why = list(errs)
+    if rc not in (0, 1):
+        why.append("pytest exit %d is neither 0 nor 1" % rc)
+    calls = []
+    for kill, i in zip(kills, ids):
+        o = by.get(want_key(kill, i))
+        if not o or not o["call"]:
+            why.append("%s not run" % i)
+            continue
+        calls.append(o["call"])
+        if failed_in_call(o["call"]) and any(u in m for m in o["msg"] for u in UNRELATED):
+            why.append("%s failed on an unrelated error: %s" % (i, o["msg"][-1]))
+    if not ids:
+        if not DISCOVER:
+            why.append("no named kills")
+        elif not any("failed" in o["call"] for o in by.values()):
+            return "SURVIVED", "nothing failed"
+    if why:
+        return "ERROR", "; ".join(why[:6])
+    if all(failed_in_call(c) for c in calls):
+        return "RED", "every named id failed in its call phase"
+    return "SURVIVED", "named ids whose call did not fail: %s" % [i for i, c in zip(ids, calls) if not failed_in_call(c)]
+
+
+# the copies are independent directories, so their runs go side by side (--jobs N); results print in mutant order
 import concurrent.futures  # noqa: E402
+import time  # noqa: E402
 JOBS = int(next((x.split("=", 1)[1] for x in sys.argv[3:] if x.startswith("--jobs=")), "1"))
+results = {}
 with concurrent.futures.ThreadPoolExecutor(max_workers=JOBS) as ex:
-    results = list(ex.map(lambda j: run_suite(j[3]), jobs))
-for (k, name, kills, td), (rc, last, failed, out) in zip(jobs, results):
-    unrelated = sorted(n for n, why in failed.items() if any(u in why for u in UNRELATED))
-    missing = sorted(set(kills) - set(failed))
-    red = rc == 1 and failed and not unrelated and not missing and (kills or DISCOVER)
-    why = ("RED" if red else "GREEN (control FAILED)" if rc == 0 else
-           "rc=%d not a test failure (control FAILED)" % rc if rc != 1 else
-           "unrelated failure %s (control FAILED)" % unrelated if unrelated else
-           "named kills did not fail: %s (control FAILED)" % missing if missing else "no named kills (control FAILED)")
-    print("mutant %d (%s): rc=%d %s; failed: %s -> %s" % (k, name, rc, last, " ".join(sorted(failed)), why))
-    bad += 0 if red else 1
-print("PARSER MUTANTS %s (%d mutants, baseline green)" % ("PASS" if bad == 0 else "FAIL", len(MUTS)))
+    futs = {ex.submit(run_mutant, j): j[0] for j in jobs}
+    for f in concurrent.futures.as_completed(futs):
+        results[futs[f]] = f.result()
+        say("progress: mutant %d finished (%d/%d) at %s" % (futs[f], len(results), len(jobs),
+                                                              time.strftime("%H:%M:%SZ", time.gmtime())))
+count = dict.fromkeys(("RED", "SURVIVED", "TIMEOUT", "ERROR"), 0)
+for (k, name, kills, td, d, ids) in jobs:
+    gone, res = results[k]
+    if gone:
+        for i in gone:
+            say("KILL-NOT-COLLECTED %s" % i)
+        say("mutant %d (%s): -> ERROR (a named kill is not collected under the mutant: control FAILED)" % (k, name))
+        count["ERROR"] += 1
+        continue
+    rc, out, rows = res
+    if rc is None:
+        say("mutant %d (%s): TIMEOUT %ds (not proven red: control FAILED)" % (k, name, CAP))
+        say("  output read before the cap: %s; its last line: %s"
+            % (os.path.join(d, "timeout-stdout.txt"), last_line(out)))
+        count["TIMEOUT"] += 1
+        continue
+    v, why = verdict(kills, ids, rc, out, rows)
+    say("mutant %d (%s): rc=%d %s; %d named ids -> %s (%s)%s" % (k, name, rc, last_line(out), len(ids), v, why,
+                                                               "" if v == "RED" else ": control FAILED"))
+    count[v] += 1
+bad = len(jobs) - count["RED"]
+say("PARSER MUTANTS %s (%d mutants: red %d, survived %d, TIMEOUT %d, ERROR %d; baseline green)"
+    % ("PASS" if bad == 0 else "FAIL", len(jobs), count["RED"], count["SURVIVED"], count["TIMEOUT"], count["ERROR"]))
 sys.exit(0 if bad == 0 else 1)

@@ -418,6 +418,8 @@ A3_SITES = ["CombatEvidence.cs", "SeatEvidence.cs", "IdentityClockEvidence.cs", 
 
 
 FPSCAP_HOLD_LINE = "[Info   :Competitive ROUNDS] [FPSCAP] held by frame-time calibration"
+# FtE.RegisterAll's census summary, as plugin/FtEntries.cs writes it (registered, expected, missing, duplicates)
+CENSUS_SUMMARY = "[FRAME-TIME] census registered=%d expected=%d missing=%d duplicates=%d"
 
 
 def _log(carry_us=0.0, cost_us=80.0, games=17, seed=7, heavy_live=0, hash_at=(10, 20), f18="A", replay="settled", heavy_edge=0,
@@ -427,14 +429,18 @@ def _log(carry_us=0.0, cost_us=80.0, games=17, seed=7, heavy_live=0, hash_at=(10
          drop_p=(), drop_replay=(), replay_bad=None, drop_counters=(), counters_bad=None, point_missing_end=None,
          a3_withheld=None, a3zero_lines=None, live_planning=None, live_beside=None, live_drop=(), live_bad=None,
          live_ticks=30, live_peak=None, fhat_fail=(), fhat_extra_fail=(), fhat_zero=(), disp_fail=None,
-         live_game=None, live_tail=None):
+         live_game=None, live_tail=None, census_summary=None):
     """A synthetic sitting, every line as FtFrames, FtCalib, FtCensus and FtDrive write it. Point costs: ON adds
     cost_us of C per frame; a first-in-round ON point after an ON round end carries carry_us more (the predecessor
-    case). The drop_* and shut_ic arguments remove or spoil records for the completeness controls."""
+    case). The drop_* and shut_ic arguments remove or spoil records for the completeness controls. census_summary
+    is the census summary lines FtE.RegisterAll writes (None: the one clean line; a list of lines replaces it)."""
     import random
     rng = random.Random(seed)
     clock = [10 ** 6]
-    L = ["[FRAME-TIME] settled g=-1 seed=1 c_plant=-1 W=120 vsync=0 target=-1 freq=%d hires=1 f_hat=%d" % (FREQ, FHAT),
+    if census_summary is None:
+        census_summary = [CENSUS_SUMMARY % (len(ENTRIES), len(ENTRIES), 0, 0)]
+    L = list(census_summary)
+    L += ["[FRAME-TIME] settled g=-1 seed=1 c_plant=-1 W=120 vsync=0 target=-1 freq=%d hires=1 f_hat=%d" % (FREQ, FHAT),
          "%s" % FPSCAP_HOLD_LINE,
          "[FRAME-TIME] plant c_plant=80 ticks=800 from=0.1.2"]
     for g in range(games):
@@ -835,6 +841,7 @@ DELETIONS = (
     ("w", "sitting", _g16, INCOMPLETE),
     ("cal", "sitting", _g16, INCOMPLETE),
     ("census", "sitting", _g16, INCOMPLETE),
+    ("census_summary", "sitting", None, INCOMPLETE),
     ("opened", "sitting", _g16, r"^VERDICT B1 INVALID: VR5 failed"),
     ("heavy", "sitting", _g16, INCOMPLETE),
     ("offthread", "sitting", _g16, INCOMPLETE),
@@ -908,23 +915,38 @@ def test_every_emitted_kind_is_read_or_named():
     # the parser reads is called unread; every RECORDS kind but a3zero (no build writes it today) is written
     here = os.path.dirname(os.path.abspath(__file__))
     plug = os.path.join(here, "..", "..", "plugin")
-    emitted = set()
+    plug_src = ""
     for fn in sorted(os.listdir(plug)):
         if fn.endswith(".cs"):
-            emitted |= set(re.findall(r'"\[FRAME-TIME\] (\w+)', open(os.path.join(plug, fn), encoding="utf-8").read()))
+            plug_src += open(os.path.join(plug, fn), encoding="utf-8").read()
+    emitted = set(re.findall(r'"\[FRAME-TIME\] (\w+)', plug_src))
     src = open(os.path.join(here, "ft_parse.py"), encoding="utf-8").read()
-    used = set(re.findall(r'\["kind"\] [!=]= "(\w+)"', src)) | set(k for k, _, _ in P.FAILURE_EVENTS)
+    # a FAILURE_EVENTS row on a whole kind (head None) reads the kind; one scoped by its head reads only that failure
+    # line, so its kind's other lines may be unread (ruling R6-A3.11.92 (3): churn), the reason naming the row
+    used = set(re.findall(r'\["kind"\] [!=]= "(\w+)"', src)) | set(k for k, h, _ in P.FAILURE_EVENTS if h is None)
     assert emitted <= set(P.RECORDS) | set(P.EMITTED_UNREAD), sorted(emitted - set(P.RECORDS) - set(P.EMITTED_UNREAD))
     assert not set(P.EMITTED_UNREAD) & used, sorted(set(P.EMITTED_UNREAD) & used)
+    for k, h, _ in P.FAILURE_EVENTS:
+        assert k in P.RECORDS or (k in P.EMITTED_UNREAD and "FAILURE_EVENTS" in P.EMITTED_UNREAD[k]), (k, h)
+    # every RAW_FAILURES text is one the build writes
+    for t, _ in P.RAW_FAILURES:
+        assert ('"%s' % t) in plug_src, t
     assert not set(P.EMITTED_UNREAD) & set(P.RECORDS)
     assert set(P.EMITTED_UNREAD) <= emitted, sorted(set(P.EMITTED_UNREAD) - emitted)
-    assert set(P.RECORDS) - emitted == {"a3zero"}, sorted(set(P.RECORDS) - emitted)
+    # a SUBKINDS record is a line of an emitted kind told apart by its first word: its parent is emitted, it is not
+    assert all(parent in emitted for parent, _ in P.SUBKINDS.values()), P.SUBKINDS
+    assert set(P.RECORDS) - emitted == {"a3zero"} | set(P.SUBKINDS), sorted(set(P.RECORDS) - emitted)
 
 
 FAILURE_LINES = ("[Warning:CompetitiveRounds] [FRAME-TIME] game over failed: boom",
                  "[Warning:CompetitiveRounds] [FRAME-TIME] game start failed: boom",
                  "[Warning:CompetitiveRounds] [FRAME-TIME] start failed: boom",
-                 "[Warning:CompetitiveRounds] [FRAME-TIME] clock refused: player-loop phase missing (EarlyUpdate 1)")
+                 "[Warning:CompetitiveRounds] [FRAME-TIME] clock refused: player-loop phase missing (EarlyUpdate 1)",
+                 # ruling R6-A3.11.92 (3)
+                 "[Warning:CompetitiveRounds] [FRAME-TIME] churn freeze failed: boom")
+# the failure warnings _LINE cannot match, read in the raw lines (RAW_FAILURES); ruling R6-A3.11.92 (3)
+RAW_FAILURE_LINES = ("[Warning:CompetitiveRounds] [FRAME-TIME] FT-ROOM read failed: boom",
+                     "[Warning:CompetitiveRounds] [FRAME-TIME] FT-GATE report failed: boom")
 
 
 def test_failure_events_make_the_run_incomplete():
@@ -1713,3 +1735,375 @@ def test_tb_tot_from_retained_point_rows():
     j = src.find('r["tb_tot"] = E.TbTot(tb, g.BaseChanges, g.Points)')
     assert src.count("var tb = g.Tb.Rows();") == 1 and src.count("E.TbTot(") == 1, "the tb_tot anchors moved"
     assert 0 <= i < j and src[i:j].count("\n") <= 2, "tb_tot is not built from the retained rows"
+
+
+# ------------------------------------------------------------------ the census summary and the required-keys table
+
+FT_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ft_parse.py")
+LOG_PREFIX = "[Info   :CompetitiveRounds] "
+# a token that makes each REQUIRED_KEYS condition hold (a new conditional row needs its token here)
+WHEN_TOKENS = {"span_g present": "span_g=1", "t0 present": "t0=1", "partial=0": "partial=0",
+               "kind=disp|span, not failed": "kind=disp", "kind=fhat, not failed": "kind=fhat",
+               "result=settled": "result=settled", "after=ON": "after=ON", "c_plant>0": "c_plant=5",
+               "live present": "live=1"}
+SAMPLE_VALUES = {"pt": "1.1.1", "e4": "0,0", "e8": "0,0", "e16": "0,0", "u": "1,1", "p": "1,1"}
+
+
+def _summary_log(lines):
+    return "\n".join(LOG_PREFIX + x for x in lines)
+
+
+def test_census_summary_is_its_own_kind_and_passes_beside_census_lines():
+    # the bug: the summary line was read as a census record without g, and complete() stopped with KeyError 'g'
+    r = P.parse_line(LOG_PREFIX + CENSUS_SUMMARY % (44, 44, 0, 0))
+    assert r["kind"] == "census_summary" and r["head"] == "registered=44", r
+    assert P.parse_line(LOG_PREFIX + "[FRAME-TIME] census g=3 entry=E comp=X shape=S on=1 guarded=0 outside=0")["kind"] \
+        == "census"
+    recs = P.read(_log())
+    assert sum(1 for q in recs if q["kind"] == "census_summary") == 1
+    assert all("g" in q for q in recs if q["kind"] == "census")
+    assert sum(1 for q in recs if q["kind"] == "census") == 17 * len(ENTRIES)
+    ok, reading, bad = P.census_summary(recs)
+    assert ok and not bad, bad
+    assert reading == "1 line [registered=%d expected=%d missing=0 duplicates=0]; entries.py derives %d" % (
+        len(ENTRIES), len(ENTRIES), len(ENTRIES)), reading
+    assert P.complete(recs) == []
+
+
+N_E = len(ENTRIES)
+SUMMARY_FAILS = [
+    ("registered not expected", [CENSUS_SUMMARY % (N_E - 1, N_E, 0, 0)], "differs from expected"),
+    ("expected not derived", [CENSUS_SUMMARY % (N_E + 1, N_E + 1, 0, 0)], "entries gate_specs/entries.py derives"),
+    ("missing 1", [CENSUS_SUMMARY % (N_E, N_E, 1, 0)], "missing=1 (needs 0)"),
+    ("duplicates 1", [CENSUS_SUMMARY % (N_E, N_E, 0, 1)], "duplicates=1 (needs 0)"),
+    ("two lines", [CENSUS_SUMMARY % (N_E, N_E, 0, 0)] * 2, "2 census summary lines (needs exactly 1)"),
+    ("absent", [], "0 census summary lines (needs exactly 1)"),
+]
+
+
+@pytest.mark.parametrize("name,lines,why", SUMMARY_FAILS, ids=[x[0].replace(" ", "_") for x in SUMMARY_FAILS])
+def test_census_summary_failing_forms_fail_the_check(name, lines, why):
+    ok, _, bad = P.census_summary(P.read(_summary_log(lines)))
+    assert not ok and [b for b in bad if why in b] and len(bad) == 1, bad
+    # complete() carries the miss, so the verdicts are withheld as for every completeness miss
+    assert [m for m in P.complete(P.read(_log(census_summary=lines))) if why in m], name
+
+
+def test_census_summary_failure_withholds_the_verdicts_on_either_seat():
+    bad_lines = [CENSUS_SUMMARY % (N_E, N_E, 1, 0)]
+    out = _report(_log(census_summary=bad_lines))
+    assert "CENSUS summary this seat FAIL" in out and "SITTING INCOMPLETE: " in out, out
+    assert "VERDICT B1 withheld: sitting incomplete" in out, out
+    out = _report(_log(), peer=_log(seed=9, census_summary=bad_lines))
+    assert "CENSUS summary this seat PASS" in out and "CENSUS summary peer seat FAIL" in out, out
+    assert "peer seat: census summary missing=1 (needs 0)" in out, out
+    assert "VERDICT B1 withheld: sitting incomplete" in out, out
+
+
+def _keyed_line(row, drop):
+    """A line of row's kind making its condition hold and carrying every required key of the kind but drop."""
+    kind, when = row[0], row[1]
+    keys = []
+    for k2, _, _, ks, _ in P.REQUIRED_KEYS:
+        if k2 == kind:
+            keys += [k for k in ks if k not in keys]
+    word = P.SUBKINDS[kind][0] if kind in P.SUBKINDS else kind
+    toks = ["%s=%s" % (k, SAMPLE_VALUES.get(k, "1")) for k in keys if k != drop]
+    if when is not None:
+        toks.append(WHEN_TOKENS[when])
+    return "[FRAME-TIME] %s %s" % (word, " ".join(toks))
+
+
+def _refusal_cases():
+    out = []
+    for row in P.REQUIRED_KEYS:
+        for k in row[3]:
+            out.append((row, k))
+    return out
+
+
+def _expect(row, drop):
+    """The refusal the line lacking drop must give: (kind, lacks). A SUBKINDS line without its first word is a line
+    of the parent kind, refused for the parent's keys."""
+    kind = row[0]
+    if kind in P.SUBKINDS and drop == P.REQUIRED_KEYS[[r[0] for r in P.REQUIRED_KEYS].index(kind)][3][0]:
+        parent = P.SUBKINDS[kind][0]
+        return parent, P.lacks_keys(dict(P.parse_line(_keyed_line(row, drop)), kind=parent))
+    return kind, [drop]
+
+
+def test_required_keys_table_is_complete_and_known():
+    # every row names a known record kind, every condition has its sample token, a kind's rows hold disjoint keys,
+    # and every required key is indexed in ft_parse.py as ["key"] (the table is derived from the code)
+    src = open(FT_SCRIPT, encoding="utf-8").read()
+    seen = {}
+    for kind, when, cond, keys, users in P.REQUIRED_KEYS:
+        assert kind in P.RECORDS, kind
+        assert (when is None) == (cond is None) and (when is None or when in WHEN_TOKENS), (kind, when)
+        assert not set(keys) & seen.get(kind, set()), (kind, keys)
+        seen.setdefault(kind, set()).update(keys)
+        for k in keys:
+            # hitch indexes the three e<H> keys as r["e%d" % h]
+            assert '["%s"]' % k in src or (re.fullmatch(r"e\d+", k) and 'r["e%d" % h]' in src), (kind, k)
+
+
+@pytest.mark.parametrize("row,drop", _refusal_cases(),
+                         ids=[re.sub(r"\W", "_", "%s_%s_%s" % (r[0], r[1], k)) for r, k in _refusal_cases()])
+def test_record_lacking_a_required_key_is_a_named_refusal(row, drop):
+    good = _summary_log(["[FRAME-TIME] sitting complete g=16", _keyed_line(row, None)])
+    recs = P.read(good, "good.log")
+    assert recs[1]["kind"] == row[0] and P.lacks_keys(recs[1]) == []      # the negative control: nothing lacking
+    text = _summary_log(["[FRAME-TIME] sitting complete g=16", _keyed_line(row, drop)])
+    kind, lacks = _expect(row, drop)
+    with pytest.raises(P.RecordRefused) as ei:
+        P.read(text, "seat.log")
+    e = ei.value
+    assert (e.kind, e.src, e.line, e.lacks) == (kind, "seat.log", 2, lacks), str(e)
+    assert str(e) == "FT-PARSE REFUSED: kind=%s file=seat.log line=2 lacks %s" % (kind, ",".join(lacks))
+    with pytest.raises(P.RecordRefused):
+        P.report(text, peer=_peer_text())
+
+
+def test_census_line_without_g_is_a_named_refusal():
+    text = _summary_log(["[FRAME-TIME] census entry=E comp=X shape=S on=1 guarded=0 outside=0"])
+    with pytest.raises(P.RecordRefused) as ei:
+        P.read(text, "seat.log")
+    assert str(ei.value) == "FT-PARSE REFUSED: kind=census file=seat.log line=1 lacks g"
+
+
+def _run_script(*paths):
+    import subprocess
+    r = subprocess.run([sys.executable, "-I", "-B", FT_SCRIPT] + [str(p) for p in paths],
+                       capture_output=True, text=True, timeout=600)
+    return r.returncode, r.stdout, r.stderr
+
+
+def test_refusal_exit_code_is_its_own():
+    src = open(FT_SCRIPT, encoding="utf-8").read()
+    codes = re.findall(r"sys\.exit\(([^)]*)\)", src)
+    assert sorted(codes) == ["3", "REFUSED_RECORD_EXIT"], codes
+    assert P.REFUSED_RECORD_EXIT not in (0, 1, 2, 3)
+
+
+def test_refusals_through_the_script_main_path(tmp_path):
+    # the census line without g, and one line per REQUIRED_KEYS row (its first key dropped), through the script
+    cases = [("census-no-g", "[FRAME-TIME] census entry=E comp=X shape=S on=1 guarded=0 outside=0", "census", ["g"])]
+    for i, row in enumerate(P.REQUIRED_KEYS):
+        kind, lacks = _expect(row, row[3][0])
+        cases.append(("row%d" % i, _keyed_line(row, row[3][0]), kind, lacks))
+    for name, line, kind, lacks in cases:
+        f = tmp_path / ("%s.log" % name)
+        f.write_text(_summary_log(["[FRAME-TIME] sitting complete g=16", line]) + "\n", encoding="utf-8")
+        rc, out, err = _run_script(f)
+        assert rc == P.REFUSED_RECORD_EXIT and not err.strip(), (name, rc, out, err)
+        assert out.strip() == "FT-PARSE REFUSED: kind=%s file=%s line=2 lacks %s" % (kind, f, ",".join(lacks)), (name, out)
+    # the peer's input is named as the peer's
+    good = tmp_path / "good.log"
+    good.write_text(_log() + "\n", encoding="utf-8")
+    bad = tmp_path / "census-no-g.log"
+    rc, out, err = _run_script(good, bad)
+    assert rc == P.REFUSED_RECORD_EXIT and out.strip() == \
+        "FT-PARSE REFUSED: kind=census file=%s line=2 lacks g" % bad, (rc, out, err)
+
+
+# ------------------------------------------------------------------ ruling R6-A3.11.92: room-gate lines, failed cal lines
+
+def _insert_before(log, anchor, line):
+    i = log.index(anchor)
+    return log[:i] + line + "\n" + log[i:]
+
+
+def test_churn_freeze_failed_withholds_the_verdicts_and_its_trace_does_not():
+    trace = _insert_before(_log(), "[FRAME-TIME] flushed g=9", LOG_PREFIX + "[FRAME-TIME] churn timer frozen room=R")
+    assert P.complete(P.read(trace)) == []
+    log = _insert_before(_log(), "[FRAME-TIME] flushed g=9", FAILURE_LINES[-1])
+    assert [m for m in P.complete(P.read(log)) if m.startswith("failure event: churn freeze")], log
+    assert re.search(r"^VERDICT B1 withheld: sitting incomplete", _report(log), re.M)
+
+
+def test_raw_failure_lines_withhold_the_verdicts_and_their_traces_do_not():
+    traces = (LOG_PREFIX + "[FRAME-TIME] FT-ROOM joined offline=0 name=R",
+              LOG_PREFIX + "[FRAME-TIME] FT-GATE patched 5 entry points expected=5 excluded=")
+    assert all(P.raw_failure_events(t) == [] for t in traces)
+    base = _log()
+    for ln in RAW_FAILURE_LINES:
+        assert P.parse_line(ln) is None                     # _LINE unchanged: the line is no record
+        log = _insert_before(base, "[FRAME-TIME] flushed g=9", ln)
+        assert len(P.read(log)) == len(P.read(base))
+        want = "failure event: " + ln[ln.index("FT-"):ln.index(" failed") + len(" failed")]
+        assert [m for m in P.raw_failure_events(log) if m.startswith(want)], (want, P.raw_failure_events(log))
+        out = _report(log)
+        assert re.search(r"^SITTING INCOMPLETE: .*" + re.escape(want), out, re.M), out
+        assert re.search(r"^VERDICT B1 withheld: sitting incomplete", out, re.M), out
+        menu = _menu_log() + "\n" + ln
+        assert "MENU PASS" in P.report(_menu_log()) and re.search(r"^MENU FAIL: .*" + re.escape(want), P.report(menu),
+                                                                  re.M), P.report(menu)
+
+
+def test_census_summary_non_integer_value_fails_the_check():
+    # Codex PARSER-FIX-R1 MEDIUM: the non-integer route names the value and no comparison passes it
+    for k in P.CENSUS_SUMMARY_KEYS:
+        v = dict(registered=N_E, expected=N_E, missing=0, duplicates=0)
+        v[k] = "bogus"
+        line = "[FRAME-TIME] census registered=%(registered)s expected=%(expected)s missing=%(missing)s " \
+               "duplicates=%(duplicates)s" % v
+        ok, _, bad = P.census_summary(P.read(_summary_log([line])))
+        assert not ok and bad == ["census summary %s=bogus is not an integer" % k], (k, bad)
+
+
+PEER_FAILURE_LINES = (FAILURE_LINES[-1],) + RAW_FAILURE_LINES     # churn freeze failed, FT-ROOM, FT-GATE
+
+
+@pytest.mark.parametrize("line", PEER_FAILURE_LINES, ids=["churn", "ft_room", "ft_gate"])
+def test_a_failure_line_in_the_peer_log_alone_withholds_the_verdicts(line):
+    # Codex PARSER-FIX-R1 HIGH 2: failure events are collected from the peer's log too, parsed and raw
+    peer = _insert_before(_peer_text(), "[FRAME-TIME] flushed g=9", line)
+    out = _report(_log(), peer=peer)
+    want = "peer seat: failure event: " + line[line.index("[FRAME-TIME] ") + 13:line.index(" failed")]
+    assert re.search(r"^SITTING INCOMPLETE: .*" + re.escape(want), out, re.M), (want, out)
+    for v in ("B1", "B2", "B3"):
+        assert re.search(r"^VERDICT %s withheld: sitting incomplete" % v, out, re.M), out
+
+
+def test_a_disarm_in_the_peer_log_alone_fails_vr6():
+    # Codex PARSER-FIX-R1 HIGH 2's sweep: a disarm on either seat makes the sitting INVALID
+    peer = _insert_before(_peer_text(), "[FRAME-TIME] flushed g=9",
+                          LOG_PREFIX + "[FRAME-TIME] disarmed input=room pt=9.3.1")
+    out = _report(_log(), peer=peer)
+    assert "VR6 build half FAIL: peer seat disarmed: room at 9.3.1" in out, out
+    assert re.search(r"^VERDICT B1 INVALID: VR6 failed", out, re.M), out
+
+
+def test_an_unreadable_peer_log_withholds_the_verdicts():
+    # Codex PARSER-FIX-R1 HIGH 2's sweep: a peer log whose records cannot be read cannot be swept for failure events
+    peer = _peer_text().replace("[FRAME-TIME] flushed g=9 why=next_game", "[FRAME-TIME] flushed g=9.5 why=next_game")
+    assert peer != _peer_text()
+    out = _report(_log(), peer=peer)
+    assert "peer seat: its failure events not read (non-integer value g=9.5)" in out, out
+    assert re.search(r"^VERDICT B2 withheld: sitting incomplete", out, re.M), out
+
+
+LIVE_FIELDS = ("reads", "scopes", "ticks", "tmax", "unscoped", "depth_err")     # FtA3.LogGame's executed line
+
+
+@pytest.mark.parametrize("field", LIVE_FIELDS)
+def test_a_live_calibration_line_lacking_a_field_is_refused_when_read(field):
+    # Codex PARSER-FIX-R1 HIGH 1: a live row's executed line is refused by name as it is read (before this, a3_live's
+    # own check refused it later, inside the U block); the fields are FtA3.cs's writer's, not REQUIRED_KEYS'
+    base = _sweep_base("log")
+    i = base.index(" live=1 ")
+    s = base.rindex("\n", 0, i) + 1
+    e = base.index("\n", i)
+    line = base[s:e]
+    toks = line.split(" ")
+    cut = " ".join(t for t in toks if not t.startswith(field + "="))
+    assert cut != line
+    n = base[:s].count("\n") + 1
+    with pytest.raises(P.RecordRefused) as ei:
+        P.read(base[:s] + cut + base[e:], "seat.log")
+    assert (ei.value.kind, ei.value.line, ei.value.lacks) == ("cal", n, [field]), str(ei.value)
+
+
+def _record_keys(text):
+    """{kind: sorted keys} over every record line of text, each key as its raw token spells it (the part before the
+    token's last '=' for a refusals line, before its first '=' otherwise); taken from the log, never from REQUIRED_KEYS."""
+    out = {}
+    for ln in text.splitlines():
+        r = P.parse_line(ln)
+        if r is not None:
+            out.setdefault(r["kind"], set()).update(_tok_key(r["kind"], t) for t in ln.split() if "=" in t)
+    out = {k: sorted(v - {""}) for k, v in out.items()}
+    return out
+
+
+def _tok_key(kind, tok):
+    return tok.rpartition("=")[0] if kind == "refusals" else tok.partition("=")[0]
+
+
+def _drop_key(text, kind, key):
+    """text with the token of key removed from every line of kind (the whole report then reads that kind without it)."""
+    out = []
+    for ln in text.splitlines():
+        r = P.parse_line(ln)
+        if r is not None and r["kind"] == kind:
+            i = ln.index("[FRAME-TIME] ")
+            ln = ln[:i] + " ".join(t for t in ln[i:].split(" ") if not ("=" in t and _tok_key(kind, t) == key))
+        out.append(ln)
+    return "\n".join(out)
+
+
+_SWEEP = {}
+
+
+def _sweep_base(name):
+    """The clean fixture a sweep case drops a key from, built once: this seat's log, the peer's, a menu run's."""
+    if name not in _SWEEP:
+        _SWEEP[name] = {"log": _log, "peer": _peer_text, "menu": _menu_log}[name]()
+    return _SWEEP[name]
+
+
+def _sitting_cases():
+    return [(k, key) for k, keys in sorted(_record_keys(_sweep_base("log")).items()) for key in keys]
+
+
+def _menu_cases():
+    return [(k, key) for k, keys in sorted(_record_keys(_sweep_base("menu")).items()) for key in keys]
+
+
+def _ends_named(fn):
+    """'report' when fn returns, the refusal's class name when it raises RecordRefused or Refused; any other exception
+    propagates (a traceback, the defect this sweep looks for). A report holding a KeyError's text in a 'not
+    computable' line (report() catches KeyError there) is the same defect swallowed, and fails here by name."""
+    try:
+        out = fn()
+        swallowed = re.findall(r"^.*not computable: '\w+'$", out, re.M)
+        assert not swallowed, swallowed
+        return "report"
+    except P.RecordRefused:
+        return "RecordRefused"
+    except P.Refused:
+        return "Refused"
+
+
+@pytest.mark.parametrize("kind,key", _sitting_cases(), ids=["%s-%s" % c for c in _sitting_cases()])
+def test_every_fixture_key_dropped_ends_in_the_report_or_a_named_refusal(kind, key):
+    # Codex PARSER-FIX-R1 HIGH 1: the cases come from the fixture's own records (every kind, every key it carries),
+    # not from REQUIRED_KEYS; each key is dropped from every line of its kind, in both seats' logs, and the whole
+    # report runs. It ends in the report or in a named refusal (the script exits 0, 4 or 3), never a traceback.
+    text = _drop_key(_sweep_base("log"), kind, key)
+    peer = _drop_key(_sweep_base("peer"), kind, key)
+    assert text != _sweep_base("log")
+    assert _ends_named(lambda: P.report(text, peer=peer)) in ("report", "RecordRefused", "Refused")
+
+
+@pytest.mark.parametrize("kind,key", _menu_cases(), ids=["%s-%s" % c for c in _menu_cases()])
+def test_every_menu_fixture_key_dropped_ends_in_the_report_or_a_named_refusal(kind, key):
+    # the same sweep over the menu run's fixture (menu_report's path)
+    text = _drop_key(_sweep_base("menu"), kind, key)
+    assert text != _sweep_base("menu")
+    assert _ends_named(lambda: P.report(text)) in ("report", "RecordRefused", "Refused")
+
+
+def test_failed_cal_lines_are_skipped_by_the_calibration_consumers():
+    # ruling R6-A3.11.92 (4): a failed disp or span line beside good ones is read without a KeyError and moves nothing
+    base = _log()
+    s = sorted(SHAPES)[0]
+    bad = _insert_before(base, "[FRAME-TIME] cal i=6 why=game5 kind=span",
+                         LOG_PREFIX + "[FRAME-TIME] cal i=6 why=game5 kind=disp shape=%s failed: no calls" % s)
+    bad = _insert_before(bad, "[FRAME-TIME] cal i=6 why=game5 kind=span",
+                         LOG_PREFIX + "[FRAME-TIME] cal i=6 why=game5 kind=span shape=span.empty failed: boom")
+    assert P.d_up(P.read(bad)) == P.d_up(P.read(base))
+    assert P.stamps_estimate(P.read(bad)) == P.stamps_estimate(P.read(base))
+    # complete(): a game whose only calibration line failed has no calibration
+    # (the game's live a3 executed lines carry why=game5 too, so they go with its start run)
+    gone = _insert_before(_log(drop_cal={5}, live_drop={(5, k) for k in A3_LIVE}), "[FRAME-TIME] opened g=5",
+                          LOG_PREFIX + "[FRAME-TIME] cal i=6 why=game5 kind=disp shape=%s failed: no calls" % s)
+    assert "no calibration for games [5]" in P.complete(P.read(gone)), P.complete(P.read(gone))
+    # menu_check: a failed menu fhat line counts as no calibration cycle (its failure warning is named apart)
+    m = _menu_log()
+    i = m.index("[FRAME-TIME] cal i=1 why=menu1 kind=fhat f_hat=")
+    j = m.index("\n", i)
+    m = m[:j] + "\n" + LOG_PREFIX + "[FRAME-TIME] cal i=1 why=menu1 kind=fhat failed: overflow" + m[j:]
+    ok, _, why = P.menu_check(P.read(m))
+    assert not ok and any("failure warnings" in w for w in why), why
+    assert not any(w.startswith("menu calibrations") for w in why), why
