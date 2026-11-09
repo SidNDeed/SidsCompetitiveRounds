@@ -20,7 +20,7 @@ namespace CompetitiveRounds
         /// Negative, Disabled); Nav and NavActive are the page bar's.</summary>
         internal enum Tone { Nav, NavActive, Launcher, Positive, Negative, Disabled }
 
-        internal enum Group { Chat, Players, Server, Queues }
+        internal enum Group { Chat, Accounts, Server, Queues }   // Accounts is the group captioned "Players" (GroupCaptions); the kept-view census counts a member access named Players as a room-player consumer
         internal enum Page { Actions, Queues }
 
         internal sealed class Launcher
@@ -163,24 +163,24 @@ namespace CompetitiveRounds
         /// are not packed here.</summary>
         internal static readonly Launcher[] Launchers = new[]
         {
-            new Launcher("AMuteNew",  "Mute Player...",            Group.Chat,    true),
-            new Launcher("AMuteMsg",  "Mute From Message...",      Group.Chat,    true),
-            new Launcher("AChatDel",  "Delete Chat Message...",    Group.Chat,    true),
-            new Launcher("AMutes",    "Unmute Player...",          Group.Chat,    true),
-            new Launcher("ALockdown", "Chat Lockdown...",          Group.Chat,    false),
-            new Launcher("ABan",      "Ban Steam ID...",           Group.Players, false),
-            new Launcher("AGrant",    "Grant Achievement...",      Group.Players, false),
-            new Launcher("AArtG",     "Grant Artist...",           Group.Players, false),
-            new Launcher("AArtR",     "Revoke Artist...",          Group.Players, false),
-            new Launcher("ATrG",      "Grant Translator...",       Group.Players, false),
-            new Launcher("ATrR",      "Revoke Translator...",      Group.Players, false),
-            new Launcher("AAlertNew", "Server Alert...",           Group.Server,  false),
-            new Launcher("AAlertEnd", "End Alert...",              Group.Server,  false),
-            new Launcher("AAdmins",   "Admin Roster...",           Group.Server,  false),
-            new Launcher("AActions",  "Action Log...",             Group.Server,  false),
-            new Launcher("ABugRpt",   "Bug Reports...",            Group.Queues,  false),
-            new Launcher("ACosR",     "Cosmetic Reviews...",       Group.Queues,  false),
-            new Launcher("ACosQ",     "Approved Update Queue...",  Group.Queues,  false),
+            new Launcher("AMuteNew",  "Mute Player...",            Group.Chat,     true),
+            new Launcher("AMuteMsg",  "Mute From Message...",      Group.Chat,     true),
+            new Launcher("AChatDel",  "Delete Chat Message...",    Group.Chat,     true),
+            new Launcher("AMutes",    "Unmute Player...",          Group.Chat,     true),
+            new Launcher("ALockdown", "Chat Lockdown...",          Group.Chat,     false),
+            new Launcher("ABan",      "Ban Steam ID...",           Group.Accounts, false),
+            new Launcher("AGrant",    "Grant Achievement...",      Group.Accounts, false),
+            new Launcher("AArtG",     "Grant Artist...",           Group.Accounts, false),
+            new Launcher("AArtR",     "Revoke Artist...",          Group.Accounts, false),
+            new Launcher("ATrG",      "Grant Translator...",       Group.Accounts, false),
+            new Launcher("ATrR",      "Revoke Translator...",      Group.Accounts, false),
+            new Launcher("AAlertNew", "Server Alert...",           Group.Server,   false),
+            new Launcher("AAlertEnd", "End Alert...",              Group.Server,   false),
+            new Launcher("AAdmins",   "Admin Roster...",           Group.Server,   false),
+            new Launcher("AActions",  "Action Log...",             Group.Server,   false),
+            new Launcher("ABugRpt",   "Bug Reports...",            Group.Queues,   false),
+            new Launcher("ACosR",     "Cosmetic Reviews...",       Group.Queues,   false),
+            new Launcher("ACosQ",     "Approved Update Queue...",  Group.Queues,   false),
         };
 
         /// <summary>The header-row launchers: the same kind and width rule, placed
@@ -205,7 +205,7 @@ namespace CompetitiveRounds
 
         /// <summary>The Actions page's groups in display order; Queues is the
         /// second page's only group.</summary>
-        internal static readonly Group[] ActionsGroups = { Group.Chat, Group.Players, Group.Server };
+        internal static readonly Group[] ActionsGroups = { Group.Chat, Group.Accounts, Group.Server };
 
         internal static readonly string[] PageLabels = { "Actions", "Queues" };
         internal static readonly string[] GroupCaptions = { "Chat", "Players", "Server" };

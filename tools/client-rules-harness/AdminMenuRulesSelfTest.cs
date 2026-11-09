@@ -78,16 +78,16 @@ namespace CompetitiveRounds
                 // 6b. The lookups NativeUI builds from: a launcher by its id, a group's scope.
                 var byId = LauncherById("AMutes");
                 string lookups = (byId == null ? "null" : byId.Label) + "," + (LauncherById("nope") == null)
-                    + "," + GroupIsAdminOnly(Group.Chat) + "," + GroupIsAdminOnly(Group.Players) + "," + GroupIsAdminOnly(Group.Server) + "," + GroupIsAdminOnly(Group.Queues);
+                    + "," + GroupIsAdminOnly(Group.Chat) + "," + GroupIsAdminOnly(Group.Accounts) + "," + GroupIsAdminOnly(Group.Server) + "," + GroupIsAdminOnly(Group.Queues);
                 Check(r, "table: AMutes looks up to Unmute Player... and an unknown id to null; Chat is the one group a moderator shares, Players, Server and Queues hide whole",
                     lookups == "Unmute Player...,True,False,True,True,True", lookups);
 
                 // 7. Groups and pages in display order.
-                string groups = string.Join(",", GroupNames(ActionsGroups)) + "|" + PageOf(Group.Chat) + "," + PageOf(Group.Players) + "," + PageOf(Group.Server) + "," + PageOf(Group.Queues);
+                string groups = string.Join(",", GroupNames(ActionsGroups)) + "=" + string.Join(",", GroupCaptions) + "|" + PageOf(Group.Chat) + "," + PageOf(Group.Accounts) + "," + PageOf(Group.Server) + "," + PageOf(Group.Queues);
                 Check(r, "layout: the Actions page is Chat, Players, Server in that order and Queues is the second page's only group",
-                    groups == "Chat,Players,Server|Actions,Actions,Actions,Queues", groups);
+                    groups == "Chat,Accounts,Server=Chat,Players,Server|Actions,Actions,Actions,Queues", groups);
                 string chat = Labels(GroupLaunchers(Group.Chat, true));
-                string players = Labels(GroupLaunchers(Group.Players, true));
+                string players = Labels(GroupLaunchers(Group.Accounts, true));
                 string server = Labels(GroupLaunchers(Group.Server, true));
                 string queues = Labels(GroupLaunchers(Group.Queues, true));
                 Check(r, "layout: Chat is Mute Player, Mute From Message, Delete Chat Message, Unmute Player, Chat Lockdown",
@@ -100,7 +100,7 @@ namespace CompetitiveRounds
 
                 // 8. Who sees what: a moderator keeps main's four chat buttons and no bar.
                 string modChat = Labels(GroupLaunchers(Group.Chat, false));
-                int modOthers = GroupLaunchers(Group.Players, false).Length + GroupLaunchers(Group.Server, false).Length + GroupLaunchers(Group.Queues, false).Length;
+                int modOthers = GroupLaunchers(Group.Accounts, false).Length + GroupLaunchers(Group.Server, false).Length + GroupLaunchers(Group.Queues, false).Length;
                 Check(r, "scope: a moderator sees Mute Player, Mute From Message, Delete Chat Message and Unmute Player, nothing else, one page and no bar; an admin sees two pages and the bar",
                     modChat == "Mute Player...;Mute From Message...;Delete Chat Message...;Unmute Player..." && modOthers == 0
                     && VisiblePages(false) == 1 && !PageBarShown(false) && VisiblePages(true) == 2 && PageBarShown(true),
@@ -123,7 +123,7 @@ namespace CompetitiveRounds
                 foreach (var loc in Locales)
                 {
                     I18n.HarnessLocale = loc;
-                    foreach (var g in new[] { Group.Chat, Group.Players, Group.Server, Group.Queues })
+                    foreach (var g in new[] { Group.Chat, Group.Accounts, Group.Server, Group.Queues })
                     {
                         var ls = GroupLaunchers(g, true);
                         var ws = new int[ls.Length];
@@ -131,7 +131,7 @@ namespace CompetitiveRounds
                         var rows = PackRows(ws, RowSpacing, ContentWidth);
                         int wr = WidestRow(ws, rows, RowSpacing);
                         if (wr > ContentWidth || RowCount(rows) > 2) over.Append(loc).Append(':').Append(g).Append(' ');
-                        if (g == Group.Players) widest.Append(loc).Append('=').Append(wr).Append(' ');
+                        if (g == Group.Accounts) widest.Append(loc).Append('=').Append(wr).Append(' ');
                     }
                 }
                 Check(r, "fit: in every locale each group packs within 1812 px in at most two rows (the Players row's width per locale printed)",
