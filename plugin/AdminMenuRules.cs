@@ -7,7 +7,7 @@ namespace CompetitiveRounds
     /// harness can run them over every locale. What a button is for (its kind),
     /// where it sits (its group and page), who sees it, how wide its label makes
     /// it and how a group's buttons pack into rows are all decided here; NativeUI
-    /// only draws the answer. Design: ai-collab/seat-b/ASK15-DESIGN.md.</summary>
+    /// only draws the answer; the ask 15 design note states each rule.</summary>
     internal static partial class AdminMenuRules
     {
         /// <summary>What a click does. Colour follows the kind, never the thing

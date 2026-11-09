@@ -1674,8 +1674,8 @@ def test_the_read_gate_guarantees_each_have_a_case(harness_run, name):
 # how a group's buttons pack into rows, which page and group a launcher sits in,
 # who sees it and which colour slot it wears; AdminMenuRulesSelfTest.cs executes
 # it over every locale. Every case prints its measurement, so a label that
-# outgrows its box in one locale is red by its value (design
-# ai-collab/seat-b/ASK15-DESIGN.md sections 3, 4 and 7).
+# outgrows its box in one locale is red by its value (the ask 15
+# design note, sections 3, 4 and 7).
 _ADMIN_CASES = [
     'width: a Latin glyph is 8.5 px at 13 pt, Cyrillic 9.5, a period or space 4.5, and 11 pt scales by 11/13',
     'width: Refresh floors at 90, Ban Steam ID... is 130, Delete Chat Message... 190; Accept floors at 70, Discard is 75, a nine-letter Cyrillic verdict 95',

@@ -23018,7 +23018,7 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
 
         // ---- Ask 15: the admin menu's two in-panel pages -------------------------
         // Layout, grouping, labels, order and colour come from AdminMenuRules
-        // (ai-collab/seat-b/ASK15-DESIGN.md); every button keeps the handler,
+        // (the ask 15 design note); every button keeps the handler,
         // call, confirm step and gate it had. The page index outlives rebuilds
         // (a language switch re-runs BuildPage) the way shopCategoryFilter does.
         private static int adminPage;
@@ -23183,7 +23183,7 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
              * and the Queues page are admin scope: a moderator has exactly one
              * visible page, the outer sub-tab bar's own rule. Grouping, order,
              * width and colour come from AdminMenuRules (design note
-             * ai-collab/seat-b/ASK15-DESIGN.md); every handler below is main's. */
+             * for ask 15); every handler below is main's. */
             adminPageBar = new GameObject("APages"); adminPageBar.transform.SetParent(panel.transform, false); adminPageBar.AddComponent<RectTransform>();
             UIFactory.AddHLG(adminPageBar, spacing: 6); UIFactory.AddLE(adminPageBar, prefH: 28, flexH: 0);
             adminOnlySections.Add(adminPageBar);

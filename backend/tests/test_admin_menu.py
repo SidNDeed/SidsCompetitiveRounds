@@ -1,6 +1,6 @@
 """Ask 15 (the admin menu reorganised): the design note's claims over the plugin's
 C# sources, each pinned to the code term it names, plus the i18n and harness
-obligations of its section 7 (ai-collab/seat-b/ASK15-DESIGN.md).
+obligations of its section 7 (the ask 15 design note).
 
 Same family as test_avatar_preset_picker.py (ask 5). Every claim is a function
 over the sources that raises AssertionError when the claim is false, and runs
