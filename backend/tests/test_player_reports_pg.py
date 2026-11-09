@@ -1225,9 +1225,17 @@ def test_c1_the_migration_writes_the_switch_on_runs_twice_rolls_back_and_runs_ag
 
 PLAN_ROWS = {"players": 4000, "matches": 60000, "team_matches": 20000, "ovt_matches": 6000, "ffa_matches": 12000}
 PLAN_TABLES = ("matches", "team_matches", "ovt_matches", "ffa_match_players", "ffa_matches")
-# The index names each table is read through at the row counts above: read
-# from the plan on the seat's PostgreSQL, never typed. Empty until that run.
-PLAN_INDEXES = {}
+# The index names each table is read through at the row counts above, as EXPLAIN gave them on seat-4's
+# PostgreSQL at a8895123 (rows: players 4000, matches 59982, team_matches 20000, ovt_matches 6000,
+# ffa_match_players 72000, ffa_matches 12000). Written from that run's assertion message by a script,
+# never typed.
+PLAN_INDEXES = {
+    "matches": ["idx_matches_p1_order", "idx_matches_p2_order"],
+    "team_matches": ["idx_team_matches_t1a", "idx_team_matches_t1b", "idx_team_matches_t2a", "idx_team_matches_t2b"],
+    "ovt_matches": ["idx_ovt_matches_duo_a", "idx_ovt_matches_duo_b", "idx_ovt_matches_solo"],
+    "ffa_match_players": ["ffa_match_players_pkey", "idx_ffa_match_players_player"],
+    "ffa_matches": ["ffa_matches_pkey"],
+}
 _NUMBERED = "WITH p AS (SELECT id, (row_number() OVER (ORDER BY steam_id))::bigint AS n FROM players)"
 _WHEN = "now() - (g.i % 400) * INTERVAL '24 hours' - (g.i % 1440) * INTERVAL '1 minute'"
 _SERIES = "(SELECT i::bigint AS i, (i::bigint * 7919) % $2::bigint AS x FROM generate_series(1, $1::int) i)"
