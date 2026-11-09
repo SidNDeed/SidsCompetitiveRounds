@@ -6417,9 +6417,9 @@
    "kind": "CreateText, SetText"
   },
   "Action Log...": {
-   "surface": "AdminMenuRules, NativeUI",
-   "location": "AdminMenuRules.Launchers, BuildAdminTab",
-   "kind": "CreateButton, table"
+   "surface": "AdminMenuRules",
+   "location": "AdminMenuRules.Launchers",
+   "kind": "table"
   },
   "Actions": {
    "surface": "AdminMenuRules",
@@ -6472,9 +6472,9 @@
    "kind": "SetText, ShowInfoPopup, Tr"
   },
   "Admin Roster...": {
-   "surface": "AdminMenuRules, NativeUI",
-   "location": "AdminMenuRules.Launchers, BuildAdminTab",
-   "kind": "CreateButton, table"
+   "surface": "AdminMenuRules",
+   "location": "AdminMenuRules.Launchers",
+   "kind": "table"
   },
   "Admin action": {
    "surface": "NativeUI",
@@ -6772,9 +6772,9 @@
    "kind": "shop"
   },
   "Approved Update Queue...": {
-   "surface": "AdminMenuRules, NativeUI",
-   "location": "AdminMenuRules.Launchers, BuildAdminTab",
-   "kind": "CreateButton, table"
+   "surface": "AdminMenuRules",
+   "location": "AdminMenuRules.Launchers",
+   "kind": "table"
   },
   "Are you good at this game?": {
    "surface": "QuickChat",
@@ -7032,9 +7032,9 @@
    "kind": "Tr"
   },
   "Ban Steam ID...": {
-   "surface": "AdminMenuRules, NativeUI",
-   "location": "AdminMenuRules.Launchers, BuildAdminTab",
-   "kind": "CreateButton, table"
+   "surface": "AdminMenuRules",
+   "location": "AdminMenuRules.Launchers",
+   "kind": "table"
   },
   "Ban a player": {
    "surface": "NativeUI",
@@ -7542,9 +7542,9 @@
    "kind": "shop"
   },
   "Bug Reports...": {
-   "surface": "AdminMenuRules, NativeUI",
-   "location": "AdminMenuRules.Launchers, BuildAdminTab",
-   "kind": "CreateButton, table"
+   "surface": "AdminMenuRules",
+   "location": "AdminMenuRules.Launchers",
+   "kind": "table"
   },
   "Bug fixes the mod ships": {
    "surface": "InfoLibrary",
@@ -8017,9 +8017,9 @@
    "kind": "Tr"
   },
   "Chat Lockdown...": {
-   "surface": "AdminMenuRules, NativeUI",
-   "location": "AdminMenuRules.Launchers, BuildAdminTab",
-   "kind": "CreateButton, table"
+   "surface": "AdminMenuRules",
+   "location": "AdminMenuRules.Launchers",
+   "kind": "table"
   },
   "Chat [{0}]  —  Enter to send, Esc keeps your draft, {1} switches channel": {
    "surface": "CompetitiveUI",
@@ -8542,9 +8542,9 @@
    "kind": "Tr"
   },
   "Cosmetic Reviews...": {
-   "surface": "AdminMenuRules, NativeUI",
-   "location": "AdminMenuRules.Launchers, BuildAdminTab",
-   "kind": "CreateButton, table"
+   "surface": "AdminMenuRules",
+   "location": "AdminMenuRules.Launchers",
+   "kind": "table"
   },
   "Cosmetic slot does not match its catalog SKU": {
    "surface": "ServerTextRules",
@@ -9222,9 +9222,9 @@
    "kind": "Tr"
   },
   "Delete Chat Message...": {
-   "surface": "AdminMenuRules, NativeUI",
-   "location": "AdminMenuRules.Launchers, BuildAdminTab",
-   "kind": "CreateButton, table"
+   "surface": "AdminMenuRules",
+   "location": "AdminMenuRules.Launchers",
+   "kind": "table"
   },
   "Delete My Data": {
    "surface": "NativeUI, NativeUI.Settings",
@@ -9862,9 +9862,9 @@
    "kind": "Tr"
   },
   "End Alert...": {
-   "surface": "AdminMenuRules, NativeUI",
-   "location": "AdminMenuRules.Launchers, BuildAdminTab",
-   "kind": "CreateButton, table"
+   "surface": "AdminMenuRules",
+   "location": "AdminMenuRules.Launchers",
+   "kind": "table"
   },
   "Energy Orbs": {
    "surface": "shop catalog",
@@ -10972,19 +10972,19 @@
    "kind": "Tr"
   },
   "Grant Achievement...": {
-   "surface": "AdminMenuRules, NativeUI",
-   "location": "AdminMenuRules.Launchers, BuildAdminTab",
-   "kind": "CreateButton, table"
+   "surface": "AdminMenuRules",
+   "location": "AdminMenuRules.Launchers",
+   "kind": "table"
   },
   "Grant Artist...": {
-   "surface": "AdminMenuRules, NativeUI",
-   "location": "AdminMenuRules.Launchers, BuildAdminTab",
-   "kind": "CreateButton, table"
+   "surface": "AdminMenuRules",
+   "location": "AdminMenuRules.Launchers",
+   "kind": "table"
   },
   "Grant Translator...": {
-   "surface": "AdminMenuRules, NativeUI",
-   "location": "AdminMenuRules.Launchers, BuildAdminTab",
-   "kind": "CreateButton, table"
+   "surface": "AdminMenuRules",
+   "location": "AdminMenuRules.Launchers",
+   "kind": "table"
   },
   "Grant a translation role - find the player": {
    "surface": "NativeUI",
@@ -13052,14 +13052,14 @@
    "kind": "shop"
   },
   "Mute From Message...": {
-   "surface": "AdminMenuRules, NativeUI",
-   "location": "AdminMenuRules.Launchers, BuildAdminTab",
-   "kind": "CreateButton, table"
+   "surface": "AdminMenuRules",
+   "location": "AdminMenuRules.Launchers",
+   "kind": "table"
   },
   "Mute Player...": {
-   "surface": "AdminMenuRules, NativeUI",
-   "location": "AdminMenuRules.Launchers, BuildAdminTab",
-   "kind": "CreateButton, table"
+   "surface": "AdminMenuRules",
+   "location": "AdminMenuRules.Launchers",
+   "kind": "table"
   },
   "Mute a player in chat - find the player": {
    "surface": "NativeUI",
@@ -15867,14 +15867,14 @@
    "kind": "Tr"
   },
   "Revoke Artist...": {
-   "surface": "AdminMenuRules, NativeUI",
-   "location": "AdminMenuRules.Launchers, BuildAdminTab",
-   "kind": "CreateButton, table"
+   "surface": "AdminMenuRules",
+   "location": "AdminMenuRules.Launchers",
+   "kind": "table"
   },
   "Revoke Translator...": {
-   "surface": "AdminMenuRules, NativeUI",
-   "location": "AdminMenuRules.Launchers, BuildAdminTab",
-   "kind": "CreateButton, table"
+   "surface": "AdminMenuRules",
+   "location": "AdminMenuRules.Launchers",
+   "kind": "table"
   },
   "Revoke which alert?": {
    "surface": "NativeUI",
@@ -16517,9 +16517,9 @@
    "kind": "table"
   },
   "Server Alert...": {
-   "surface": "AdminMenuRules, NativeUI",
-   "location": "AdminMenuRules.Launchers, BuildAdminTab",
-   "kind": "CreateButton, table"
+   "surface": "AdminMenuRules",
+   "location": "AdminMenuRules.Launchers",
+   "kind": "table"
   },
   "Server alert": {
    "surface": "NativeUI",
@@ -19227,9 +19227,9 @@
    "kind": "Tr"
   },
   "Unmute Player...": {
-   "surface": "AdminMenuRules, NativeUI",
-   "location": "AdminMenuRules.Launchers, BuildAdminTab",
-   "kind": "CreateButton, table"
+   "surface": "AdminMenuRules",
+   "location": "AdminMenuRules.Launchers",
+   "kind": "table"
   },
   "Unnamed player": {
    "surface": "PcLabels, PlayerCardsUI",
