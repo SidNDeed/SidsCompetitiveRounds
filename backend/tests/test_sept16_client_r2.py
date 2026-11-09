@@ -6515,8 +6515,19 @@ def test_r5_the_status_channel_reports_before_every_callback():
 
     # the default keeps every other caller exactly as it was
     assert "Action<long> onResponseCode = null)" in api
-    # and exactly one caller passes it
-    assert api.count("onResponseCode: ") == 1
+    # and the callers that pass it are named, in file order: the team series
+    # poll, and since ask 14 the player report form's three reads (the games
+    # list, the admin list and the log view), whose answer row depends on the
+    # code (PlayerReportRules.FindAnswer).
+    owners, member = [], "<file scope>"
+    for line in api.split("\n"):
+        m = _CS_MEMBER.match(line)
+        if m:
+            member = m.group(1)
+        if "onResponseCode: " in line:
+            owners.append(member)
+    assert owners == ["FetchReportableGames", "FetchPlayerReports", "FetchPlayerReportLog",
+                      "PollTeamSeriesStatusReadOnly"], owners
     assert _member_owning(api, "onResponseCode: code =>") == "PollTeamSeriesStatusReadOnly"
 
     # MUTATION: the report on the answered exit goes, so the status the banner
