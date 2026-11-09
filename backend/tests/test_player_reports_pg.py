@@ -1310,5 +1310,8 @@ def test_c5_each_branch_of_the_games_statement_reads_its_table_through_an_index(
             assert not [k for k, index in kinds if index is None and k != "Bitmap Heap Scan"], (
                 table, "is read without an index", kinds)
         used = {t: sorted({index for _, index in scans[t] if index}) for t in PLAN_TABLES}
-        assert used == PLAN_INDEXES, ("measured at %r" % (counts,), used)
+        every = {str(t): sorted({"%s/%s" % k for k in v}) for t, v in scans.items()}
+        # A str message: pytest prints it whole, where a tuple is cut at 240 characters.
+        assert used == PLAN_INDEXES, "C5-PLAN rows %s used %s scans %s" % (
+            json.dumps(counts, sort_keys=True), json.dumps(used, sort_keys=True), json.dumps(every, sort_keys=True))
     _private_case(body, "plrplan")
