@@ -905,6 +905,28 @@ def test_h19_the_rule_measures_each_label_at_the_size_the_text_factory_draws():
            _control_comment(RL, RULES, indent="        "))
 
 
+# -- H20 a group caption is a one-line cell ------------------------------------------------
+
+FIT_ONE_LINE = "public static void FitOneLine(object t)"
+CAPTION = ('UIFactory.CreateText("AGC" + group, block.transform, caption, 12f, C_LABEL, UIFactory.AlignMidLeft, '
+           "sizeDelta: new Vector2(300, 16))")
+
+
+def _h20(src):
+    nu = src[NU]
+    rows = _body(nu, GROUPROWS)
+    assert "UIFactory.FitOneLine(" + CAPTION + ");" in rows
+    assert rows.count('"AGC" + group') == 1, rows.count('"AGC" + group')
+    fit = _body(nu, FIT_ONE_LINE)
+    assert fit == "{SetOverflowMode(t,0);SetWordWrap(t,false);}", fit
+
+
+def test_h20_a_group_caption_is_drawn_as_a_one_line_cell():
+    _check(_h20,
+           lambda s: _replace_within(s, NU, GROUPROWS, "UIFactory.FitOneLine(" + CAPTION + ");", CAPTION + ";"),
+           _control_comment(NU, GROUPROWS))
+
+
 # -- the census: every claim above ran three ways ---------------------------------------------------
 
 CLAIMS = [k for k in sorted(globals()) if re.match(r"^_(h\d+b?|i\d+)$", k)]
@@ -912,5 +934,5 @@ CLAIMS = [k for k in sorted(globals()) if re.match(r"^_(h\d+b?|i\d+)$", k)]
 
 def test_every_claim_has_its_test():
     tests = [k for k in globals() if k.startswith("test_") and k != "test_every_claim_has_its_test"]
-    assert len(CLAIMS) == 23, CLAIMS
+    assert len(CLAIMS) == 24, CLAIMS
     assert len(tests) == len(CLAIMS), (len(tests), len(CLAIMS))

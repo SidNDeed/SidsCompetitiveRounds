@@ -23107,8 +23107,8 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
             var block = NewAdminBlock("AG" + group, parent, 4);
             UIFactory.AddLE(block, flexH: 0);
             if (AdminMenuRules.GroupIsAdminOnly(group)) adminOnlySections.Add(block);
-            if (caption != null)
-                UIFactory.CreateText("AGC" + group, block.transform, caption, 12f, C_LABEL, UIFactory.AlignMidLeft, sizeDelta: new Vector2(300, 16));
+            if (caption != null)   // one line in a 16-unit cell: FitOneLine, so the taller line box of the Cyrillic fallback face cannot make the truncating default drop the caption
+                UIFactory.FitOneLine(UIFactory.CreateText("AGC" + group, block.transform, caption, 12f, C_LABEL, UIFactory.AlignMidLeft, sizeDelta: new Vector2(300, 16)));
             GameObject row = null;
             int cur = -1;
             for (int i = 0; i < ls.Length; i++)
