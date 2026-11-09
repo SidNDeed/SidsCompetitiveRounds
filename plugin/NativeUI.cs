@@ -24816,7 +24816,7 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
 
             if (e.ladder == "2v2" && e.incomplete)
             {
-                // Ask 15: translated labels (SetText does not translate) and the rule's colours.
+                // Ask 15: the labels are source keys now (the rule's Verdicts table; Void Series is a key of its own, apart from the noun Void) and the colours are the rule's. setBtn's UIFactory.SetText translates as well, as it did on main.
                 setBtn(b1, true, I18n.Tr("Win T1"), AdminVerdictColour("Win T1", true), () => ConfirmResolveTeam(e, "complete", 1));
                 setBtn(b2, true, I18n.Tr("Win T2"), AdminVerdictColour("Win T2", true), () => ConfirmResolveTeam(e, "complete", 2));
                 setBtn(b3, true, I18n.Tr("Void Series"), AdminVerdictColour("Void Series", true), () => ConfirmResolveTeam(e, "void", 0));

@@ -865,6 +865,46 @@ def test_i3_the_adminmenu_suite_is_registered_and_its_files_compiled():
            lambda s: _insert_after_open(s, MAIN, 'RunSuite("adminmenu"', "                              // control", raw=True))
 
 
+# -- H19 the rule measures a label at the size the text factory draws ---------------------
+
+CREATE_TEXT = "public static object CreateText(string name,Transform parent,string text,float fontSize,Color color,"
+VERDICT_SITE = re.compile(r'UIFactory\.CreateButton\(\$"A(QA|QD|FDT|BU|SB1|SB2|SB3)\{idx\}", \w+\.transform, "[^"]*", (\d+)f, C_WHITE,')
+HEADER_SITE = re.compile(r'UIFactory\.CreateButton\("(ARefresh|ARev|AALFull|ABSearch)", \w+\.transform, "[^"]*", (\d+)f, C_WHITE,')
+
+
+def _h19(src):
+    nu, rl = src[NU], src[RL]
+    floors = re.findall(r"fontSize=Mathf\.Max\(fontSize,(\d+)f\);", _body(nu, CREATE_TEXT))
+    assert len(floors) == 1, floors
+    floor = int(floors[0])
+    pts = {k: int(v) for k, v in re.findall(r"internal const int (LauncherPt|VerdictPt|PageTabPt) = (\d+);", _code(rl))}
+    assert sorted(pts) == ["LauncherPt", "PageTabPt", "VerdictPt"], pts
+    verdicts = {}
+    for sig in (Q_ROW, F_ROW, B_ROW, S_ROW):
+        for m in VERDICT_SITE.finditer(_body(nu, sig)):
+            verdicts[m.group(1)] = int(m.group(2))
+    assert sorted(verdicts) == ["BU", "FDT", "QA", "QD", "SB1", "SB2", "SB3"], verdicts
+    for name, asked in sorted(verdicts.items()):
+        assert max(asked, floor) == pts["VerdictPt"], (name, asked, floor, pts["VerdictPt"])
+    headers = {}
+    for sig in (BUILD, BANNED):
+        for m in HEADER_SITE.finditer(_body(nu, sig)):
+            headers[m.group(1)] = int(m.group(2))
+    assert sorted(headers) == ["AALFull", "ABSearch", "ARefresh", "ARev"], headers
+    packed = re.findall(r"UIFactory\.CreateButton\(id, row, l\.Label, (\d+)f, C_WHITE,", _body(nu, LAUNCHER))
+    assert len(packed) == 1, packed
+    for name, asked in sorted(headers.items()) + [("packed", int(packed[0]))]:
+        assert max(asked, floor) == pts["LauncherPt"], (name, asked, floor, pts["LauncherPt"])
+    assert "AdminMenuRules.PageLabels[p], AdminMenuRules.PageTabPt, C_LABEL," in _body(nu, BUILD)
+    assert pts["PageTabPt"] >= floor, (pts["PageTabPt"], floor)
+
+
+def test_h19_the_rule_measures_each_label_at_the_size_the_text_factory_draws():
+    _check(_h19,
+           lambda s: _replace(s, RL, "internal const int VerdictPt = 12;", "internal const int VerdictPt = 11;"),
+           _control_comment(RL, RULES, indent="        "))
+
+
 # -- the census: every claim above ran three ways ---------------------------------------------------
 
 CLAIMS = [k for k in sorted(globals()) if re.match(r"^_(h\d+b?|i\d+)$", k)]
@@ -872,5 +912,5 @@ CLAIMS = [k for k in sorted(globals()) if re.match(r"^_(h\d+b?|i\d+)$", k)]
 
 def test_every_claim_has_its_test():
     tests = [k for k in globals() if k.startswith("test_") and k != "test_every_claim_has_its_test"]
-    assert len(CLAIMS) == 22, CLAIMS
+    assert len(CLAIMS) == 23, CLAIMS
     assert len(tests) == len(CLAIMS), (len(tests), len(CLAIMS))

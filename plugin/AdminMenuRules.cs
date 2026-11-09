@@ -42,12 +42,12 @@ namespace CompetitiveRounds
 
         // ---- geometry -----------------------------------------------------
 
-        /// <summary>The Admin panel's row budget: the ~1828 px an HLG gets at the
-        /// 1920-unit canvas (NativeUI's own figure) minus the panel's 8+8 padding.</summary>
+        /// <summary>The Admin panel's row budget. At the 1920-unit canvas a row is 1828 units wide (the content
+        /// rect's 30+30 inset, its 8+8 padding and the panel's 8+8); the rule packs into 1812 and keeps 16 as headroom.</summary>
         internal const int ContentWidth = 1812;
         internal const int RowSpacing = 8;
         internal const int LauncherPt = 13;
-        internal const int VerdictPt = 11;
+        internal const int VerdictPt = 12;     // the size DRAWN: the row builders ask for 11 pt and UIFactory.CreateText raises any size below 12 to 12
         internal const int LauncherFloor = 90;
         internal const int VerdictFloor = 70;
         internal const int HPad = 10;          // each side, inside the button

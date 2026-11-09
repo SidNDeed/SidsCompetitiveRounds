@@ -44,8 +44,8 @@ namespace CompetitiveRounds
 
                 // 2. Button widths: text plus 2 x 10 px padding, rounded up to 5, floored.
                 string widths = LauncherWidth("Refresh") + "," + LauncherWidth("Ban Steam ID...") + "," + LauncherWidth("Delete Chat Message...") + "," + VerdictWidth("Accept") + "," + VerdictWidth("Discard") + "," + VerdictWidth("Отклонить");
-                Check(r, "width: Refresh floors at 90, Ban Steam ID... is 130, Delete Chat Message... 190; Accept floors at 70, Discard is 75, a nine-letter Cyrillic verdict 95",
-                    widths == "90,130,190,70,75,95", widths);
+                Check(r, "width: Refresh floors at 90, Ban Steam ID... is 130, Delete Chat Message... 190; at the 12 pt a verdict is drawn at, Accept is 70, Discard 75, a nine-letter Cyrillic verdict 100",
+                    widths == "90,130,190,70,75,100", widths);
 
                 // 3. Shared verdict widths: the widest of the set, never below the floor.
                 string shared = SharedVerdictWidth(new[] { "Accept", "Discard" }) + "," + SharedVerdictWidth(new[] { "Void" }) + "," + SharedVerdictWidth(new string[0]);

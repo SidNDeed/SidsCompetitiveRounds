@@ -1678,7 +1678,7 @@ def test_the_read_gate_guarantees_each_have_a_case(harness_run, name):
 # design note, sections 3, 4 and 7).
 _ADMIN_CASES = [
     'width: a Latin glyph is 8.5 px at 13 pt, Cyrillic 9.5, a period or space 4.5, and 11 pt scales by 11/13',
-    'width: Refresh floors at 90, Ban Steam ID... is 130, Delete Chat Message... 190; Accept floors at 70, Discard is 75, a nine-letter Cyrillic verdict 95',
+    'width: Refresh floors at 90, Ban Steam ID... is 130, Delete Chat Message... 190; at the 12 pt a verdict is drawn at, Accept is 70, Discard 75, a nine-letter Cyrillic verdict 100',
     'width: verdicts that sit together share the widest width (Accept+Discard 75), a lone short one floors at 70, an empty set floors at 70',
     'pack: 600+8+600+8+600 overruns 1812 so the third starts row 2; 900+8+904 is exactly 1812 and stays; 900+8+905 wraps; an empty set has no rows',
     'pack: the widest packed row is 1208 over 2 rows and fits; a 2000 px button has its own row, is 2000 wide and does not fit',
