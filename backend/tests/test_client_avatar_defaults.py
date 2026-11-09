@@ -985,9 +985,9 @@ NT = "NametagStyler.cs"
 
 def _s30(src):
     lines = src[NT].split("\n")
-    assert lines[421].strip() == "string styled = Wrap(_baseName, skus);", "line 422: %r" % lines[421]
-    assert lines[422].strip() == "", "line 423: %r" % lines[422]
-    assert lines[425].strip() == "PhotonNetwork.LocalPlayer.NickName = styled;", "line 426: %r" % lines[425]
+    assert lines[432].strip() == "string styled = Wrap(_baseName, skus);", "line 433: %r" % lines[432]
+    assert lines[433].strip() == "", "line 434: %r" % lines[433]
+    assert lines[436].strip() == "PhotonNetwork.LocalPlayer.NickName = styled;", "line 437: %r" % lines[436]
 
 
 def test_s30_the_broadcast_assignment_is_at_the_cited_line():

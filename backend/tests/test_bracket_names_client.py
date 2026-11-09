@@ -132,7 +132,8 @@ def test_csharp_bodies_match_these_ports():
         "try",
         "{",
         "if (string.IsNullOrEmpty(GameStateWatcher.StripKnownRichTags(s))) return plain;",
-        "string kept = _nameToken.Replace(s, tok =>",
+        "string kept = System.Text.RegularExpressions.Regex.Replace(s,",
+        '"(?:" + GameStateWatcher.KnownRichTagPattern + ")|[<>]", tok =>',
         "{",
         "string v = tok.Value;",
         'if (v == "<") return "(";',
@@ -156,7 +157,9 @@ def test_csharp_bodies_match_these_ports():
         "}",
         "catch { return plain; }",
     ]
-    assert '"(?:" + GameStateWatcher.KnownRichTagPattern + ")|[<>]",' in sph
+    # The token pattern NAME_TOKEN ports is the body's own argument, held in no field.
+    assert sph.count('"(?:" + GameStateWatcher.KnownRichTagPattern + ")|[<>]"') == 1
+    assert "_nameToken" not in sph
     assert re.search(r'_allTagStrip =\s*new System\.Text\.RegularExpressions\.Regex\("<\[\^>\]\*>"', sph)
 
 

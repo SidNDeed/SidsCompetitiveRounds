@@ -869,12 +869,9 @@ namespace CompetitiveRounds
          * GameStateWatcher.CleanPlayerName, whose tag pattern this reads). A
          * name that is only tags or whitespace, or whose kept tags open and
          * close a different number of times, shows the plain CleanPlayerName
-         * form. Titles and rank names keep SanitizeStyled. */
-        private static readonly System.Text.RegularExpressions.Regex _nameToken =
-            new System.Text.RegularExpressions.Regex(
-                "(?:" + GameStateWatcher.KnownRichTagPattern + ")|[<>]",
-                System.Text.RegularExpressions.RegexOptions.Compiled);
-
+         * form. Titles and rank names keep SanitizeStyled. The token pattern
+         * is a compile-time constant passed to the static Regex.Replace, not
+         * held in a static field. */
         internal static string SanitizeStyledName(string s)
         {
             if (string.IsNullOrEmpty(s)) return "";
@@ -882,7 +879,8 @@ namespace CompetitiveRounds
             try
             {
                 if (string.IsNullOrEmpty(GameStateWatcher.StripKnownRichTags(s))) return plain;
-                string kept = _nameToken.Replace(s, tok =>
+                string kept = System.Text.RegularExpressions.Regex.Replace(s,
+                    "(?:" + GameStateWatcher.KnownRichTagPattern + ")|[<>]", tok =>
                 {
                     string v = tok.Value;
                     if (v == "<") return "(";
