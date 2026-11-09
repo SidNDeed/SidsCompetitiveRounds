@@ -270,7 +270,9 @@ namespace CompetitiveRounds
 
 
         /// <summary>Strip existing rich-text tags from an incoming nickname and return the
-        /// bare display name. Safe on null/empty input.</summary>
+        /// bare display name. Safe on null/empty input. A blanket strip: kept for the glow
+        /// and font renderers' nameplate match, which runs it on both sides. Player-name
+        /// reads use GameStateWatcher.CleanPlayerName, which keeps bracketed text.</summary>
         public static string Clean(string name)
         {
             if (string.IsNullOrEmpty(name)) return name;
@@ -307,7 +309,9 @@ namespace CompetitiveRounds
         /// the name doesn't flicker across stat-refresh orderings.</summary>
         public static string Wrap(string name, List<string> activeSkus)
         {
-            string clean = Clean(name);
+            // CleanPlayerName keeps bracketed name text ("<Name>" -> "(Name)");
+            // the blanket Clean deleted it.
+            string clean = GameStateWatcher.CleanPlayerName(name);
             if (string.IsNullOrEmpty(clean)) return clean;
             if (activeSkus == null || activeSkus.Count == 0) return clean;
 

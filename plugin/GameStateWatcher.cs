@@ -9177,9 +9177,9 @@ namespace CompetitiveRounds
          * tag family, extend this regex in the same commit (#279). Player
          * names go through CleanPlayerName below; StripRichText stays on text
          * that is not a player-name field (card names, titles, tiers, logs). */
-        private static readonly Regex KnownRichTags = new Regex(
-            @"</?(?:b|i|u|s|allcaps|smallcaps)>|<color=#[0-9A-Fa-f]{6}>|</color>|<size=[0-9]{1,3}%>|</size>|<cspace=[0-9]*\.?[0-9]+em>|</cspace>|<voffset=[0-9]*\.?[0-9]+em>|</voffset>",
-            RegexOptions.Compiled);
+        internal const string KnownRichTagPattern =
+            @"</?(?:b|i|u|s|allcaps|smallcaps)>|<color=#[0-9A-Fa-f]{6}>|</color>|<size=[0-9]{1,3}%>|</size>|<cspace=[0-9]*\.?[0-9]+em>|</cspace>|<voffset=[0-9]*\.?[0-9]+em>|</voffset>";
+        private static readonly Regex KnownRichTags = new Regex(KnownRichTagPattern, RegexOptions.Compiled);
 
         internal static string StripKnownRichTags(string input)
         {
@@ -9201,7 +9201,10 @@ namespace CompetitiveRounds
          * the CJK twins, #47). The result holds no '<', so no TMP or IMGUI
          * renderer can read rich-text markup in it; and it is idempotent, so a
          * stored name cleaned again (opponentDisplayName against a fresh
-         * NickName) still compares equal. */
+         * NickName) still compares equal. These display paths use the same
+         * rule: SpectatorHud.PlainName and SanitizeStyledName,
+         * PostSessionReport.PlainPlayerName, CompetitiveUI.StripFfaHudName and
+         * NametagStyler.Wrap. */
         internal static string CleanPlayerName(string raw)
         {
             if (string.IsNullOrEmpty(raw)) return raw;

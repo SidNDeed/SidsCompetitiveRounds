@@ -2141,7 +2141,7 @@ namespace CompetitiveRounds
         private static string SlotPlainName(ApiClient.TeamSeriesSlot sl, string fallback)
         {
             string nm = sl != null && !string.IsNullOrEmpty(sl.name) ? sl.name : fallback;
-            return Trunc(StripTags(nm ?? "?"), 14);
+            return Trunc(PlainPlayerName(nm ?? "?"), 14);
         }
 
         /// <summary>One slot's elo/gold/xp delta chip (empty when all zero).</summary>
@@ -2517,7 +2517,7 @@ namespace CompetitiveRounds
 
         private static string FfaPlayerLine(ApiClient.FfaRecentPlayer pl)
         {
-            string nm = Trunc(StripTags(pl.display_name ?? "?"), 16);
+            string nm = Trunc(PlainPlayerName(pl.display_name ?? "?"), 16);
             string nmCol = pl.placement == 1 ? "#00FF00" : "#B9C4D0";
             string dmg = pl.damage_dealt >= 0 ? pl.damage_dealt.ToString(INV) : "-";
             string line = "<color=#C48CFF>#" + pl.placement.ToString(INV) + "</color> "
@@ -2577,7 +2577,7 @@ namespace CompetitiveRounds
                 {
                     var pl = byPlace[p];
                     if (pl == null) continue;
-                    string nm = Trunc(StripTags(pl.display_name ?? "?"), 14);
+                    string nm = Trunc(PlainPlayerName(pl.display_name ?? "?"), 14);
                     switch (kindPass)
                     {
                         case 0:
@@ -2762,7 +2762,7 @@ namespace CompetitiveRounds
             int used = 0;
             for (int i = 0; i < e.names.Length; i++)
             {
-                string nm = Trunc(StripTags(e.names[i] ?? "?"), 14);
+                string nm = Trunc(PlainPlayerName(e.names[i] ?? "?"), 14);
                 if (used + nm.Length + 3 > budgetChars)
                 {
                     s += " <color=#888>+" + (e.names.Length - i).ToString(INV) + "</color>";
@@ -3047,7 +3047,7 @@ namespace CompetitiveRounds
         private static string PlainName(ApiClient.PlayerStatsData s, string fallback)
         {
             string nm = s != null && !string.IsNullOrEmpty(s.display_name) ? s.display_name : fallback;
-            return Trunc(StripTags(nm ?? "?"), 16);
+            return Trunc(PlainPlayerName(nm ?? "?"), 16);
         }
 
         /// <summary>Styled header name: NametagStyler.Wrap over the active
@@ -3059,9 +3059,9 @@ namespace CompetitiveRounds
         private static string StyledHeaderName(ApiClient.PlayerStatsData s, string fallbackName, float entryRating)
         {
             string display = s != null && !string.IsNullOrEmpty(s.display_name) ? s.display_name : (fallbackName ?? "?");
-            string plain = StripTags(display);
+            string plain = PlainPlayerName(display);
             string styled = "";
-            try { styled = SanitizeStyled(NametagStyler.Wrap(display, s != null ? s.active_nametag_skus : null)); }
+            try { styled = SpectatorHud.SanitizeStyledName(NametagStyler.Wrap(display, s != null ? s.active_nametag_skus : null)); }
             catch { }
             if (string.IsNullOrEmpty(styled) || plain.Length > 24)
                 styled = Trunc(plain, 24);
@@ -3123,11 +3123,24 @@ namespace CompetitiveRounds
             catch { return _allTagStrip.Replace(s, ""); }
         }
 
+        /// <summary>Card names and other text that is not a player name; player
+        /// names use PlainPlayerName.</summary>
         private static string StripTags(string s)
         {
             if (string.IsNullOrEmpty(s)) return "";
             try { return _allTagStrip.Replace(s, "").Trim(); }
             catch { return s; }
+        }
+
+        /// <summary>Bracket names: a player name for a plain surface. Drops only
+        /// the tags NametagStyler publishes and shows every other angle bracket as
+        /// a paren (GameStateWatcher.CleanPlayerName), so "&lt;Name&gt;" reads
+        /// "(Name)" instead of an empty name.</summary>
+        private static string PlainPlayerName(string s)
+        {
+            if (string.IsNullOrEmpty(s)) return "";
+            try { return GameStateWatcher.CleanPlayerName(s) ?? ""; }
+            catch { return s.Replace("<", "(").Replace(">", ")"); }
         }
 
         /// <summary>Replica of SpectatorHud.SafeHex (private there): #RGB /
