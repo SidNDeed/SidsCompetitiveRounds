@@ -43,7 +43,9 @@ from test_admin_evidence_phase3 import P2_BASE, _strip3  # noqa: E402
 from test_admin_evidence_sections import REPO  # noqa: E402
 
 HEADER = {ae.SECTIONS_HEADER: ae.SECTIONS_PHASE}
-HEADER3 = dict(HEADER, **{ae.PHASE3_HEADER: ae.PHASE3_VALUE})
+# literal, so the module collects on main (the negative control runs every
+# test there); P3-1 asserts it equals the api's own words
+HEADER3 = dict(HEADER, **{"X-Evidence-Phase": "3"})
 _FINDINGS_STMT = re.compile(
     r"CREATE TABLE IF NOT EXISTS seat_evidence_findings \(.*?\n\);"
     r"|ALTER TABLE seat_evidence_findings\s+ADD COLUMN IF NOT EXISTS[^;]*;"
@@ -97,6 +99,8 @@ def _details(row):
 # ── P3-1: every report kind with both headers ─────────────────────────────
 
 def test_p3_every_report_kind_shows_findings_and_ranks_with_both_headers(rig):
+    assert HEADER3 == dict(HEADER, **{ae.PHASE3_HEADER: ae.PHASE3_VALUE})
+
     async def go():
         admin, a, sa, b, sb, s, g1, flag = await _world3(rig)
         out = {}
