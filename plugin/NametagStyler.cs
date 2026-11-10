@@ -453,10 +453,10 @@ namespace CompetitiveRounds
                 bool propsSent = false;
                 try
                 {
-                    // Ask 3 R2 (HIGH): both fields on every publish. The local player's
-                    // properties change only when the server echoes a send (the room
-                    // broadcasts property changes), so a comparison with them skipped a
-                    // field whose earlier send was still to land and overwrite it.
+                    // Ask 3 R2 (HIGH): both fields on every publish. In a room that broadcasts
+                    // property changes to all (Photon's default, kept by ROUNDS and the mod; see
+                    // FfaMapScale.cs:28-40), the local properties change only on the server's echo,
+                    // so comparing with them skipped a field an earlier send in flight then overwrote.
                     var upd = new ExitGames.Client.Photon.Hashtable();
                     upd["cr_nametag_glow"] = glowSku;
                     upd["cr_nametag_typeface"] = typefaceSku;
