@@ -719,3 +719,30 @@ def test_r1h4_a_row_with_no_hand_in_its_expectation_has_no_rarity_measure():
     summed, = ae.ev_daily_sum("card", [dict(notrun, games=1)])
     assert {ae.EV_REGISTRY[ki].var for ki, _s, _v in ae.ev_row_facts("card", summed, "daily")} \
         == {"b4.rar.hands", "b4.rar.slots", "b4.rar.notrun"}
+
+
+def test_r2_a_truncated_section_records_no_findings_count():
+    """B10-P3-R2 sweep: a section whose capped read stopped at its LIMIT
+    records `findings` as not recorded (None) and no other count, on the
+    game section and on the summary; the same rows untruncated count (the
+    control)."""
+    a, b = _pair()
+    g1, g2 = _game(a, b, room="room-1"), _game(a, b, room="room-2")
+    data = _with_findings(
+        _data(records=[_rec("card", "k1", a, b, "room-1"), _rec("card", "k2", a, b, "room-2")],
+              games=[_grow("card", "k1", a, b, g1["id"]), _grow("card", "k2", a, b, g2["id"])]),
+        [_finding("card", "k1", a, b, g1["id"], "zz-r1"),
+         _finding("card", "k2", a, b, g2["id"], "zz-r1"),
+         _finding("card", "k2", a, b, None, "zz-r2")])
+    out = {}
+    for cut in (False, True):
+        d = dict(data, truncated=cut)
+        summ = dict(ae.phase3_summary_section(ae.summary_section("card", d, [g1, g2], a, 0),
+                                              "card", d, [g1, g2])["facts"])
+        game = dict(_p3_section("card", d, g2, {a: 0, b: 1})["game"])
+        out[cut] = (summ, game)
+    assert out[False][0]["findings"] == "2" and out[False][0]["findings_unattributed"] == "1"
+    assert out[False][1]["findings"] == "1" and out[False][1]["findings_unattributed"] == "1"
+    for facts in out[True]:
+        assert facts["findings"] is None and "findings_unattributed" not in facts, facts
+        assert "findings_more" not in facts, facts

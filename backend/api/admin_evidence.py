@@ -2574,7 +2574,8 @@ def phase3_game_section(sec, src, data, game):
     order), and the game facts `findings` (the count listed or past the
     cap), `findings_more` (past the cap) and `findings_unattributed` (under
     the game's identity, another or no match). An unavailable section gets
-    an empty list and no fact."""
+    an empty list and no fact. A truncated section (a capped read stopped at
+    its LIMIT) records `findings` as None and no other count."""
     if data is None:
         sec["findings"] = []
         return sec
@@ -2582,6 +2583,12 @@ def phase3_game_section(sec, src, data, game):
     listed = sorted(listed, key=_finding_order)
     cap = AER_CONTRACT_BOUNDS["FINDINGS_MAX"]
     sec["findings"] = [_finding_row(f) for f in listed[:cap]]
+    if data["truncated"]:
+        # a capped read of the section stopped at its LIMIT: the counts may be
+        # short, so they are not recorded (B10-P3-R2 sweep); the rows read are
+        # still listed under the section's `truncated`
+        sec["game"] = sec["game"] + [_fact("findings", None)]
+        return sec
     extra = [_fact("findings", len(listed))]
     if listed[cap:]:
         extra.append(_fact("findings_more", len(listed[cap:])))
@@ -2594,7 +2601,8 @@ def phase3_game_section(sec, src, data, game):
 def phase3_summary_section(sec, src, data, games):
     """Add the phase-3 counts to one summary section: `findings`, the
     distinct findings listed on a covered game, and `findings_unattributed`,
-    the distinct ones under a covered game's identity listed on none."""
+    the distinct ones under a covered game's identity listed on none. A
+    truncated section records `findings` as None and no other count."""
     if data is None:
         return sec
     listed, held = set(), set()
@@ -2605,6 +2613,11 @@ def phase3_summary_section(sec, src, data, games):
         for f in data.get("findings", ()):
             if _finding_ident(src, f["dedup_key"]) in idents:
                 held.add(f["dedup_key"] + "|" + "%s" % f["rule_id"])
+    if data["truncated"]:
+        # a capped read stopped at its LIMIT: the counts may be short and are
+        # not recorded (B10-P3-R2 sweep)
+        sec["facts"] = sec["facts"] + [_fact("findings", None)]
+        return sec
     extra = [_fact("findings", len(listed))]
     if held - listed:
         extra.append(_fact("findings_unattributed", len(held - listed)))
