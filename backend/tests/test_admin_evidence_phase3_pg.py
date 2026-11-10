@@ -579,3 +579,74 @@ def test_r2_a_window_stratum_the_cap_cuts_is_left_out_whole(rig, monkeypatch):
     assert cut["truncated"] is True and cut["partial"] >= 1, cut
     assert all(c == [] for c in [w["cells"] for w in cut["windows"]]) or WIN_MAX not in _cells(cut)
     print("GATE p3-r2-3: a window stratum the cap cuts: left out whole and counted; whole: 3 over 3")
+
+
+# ── B10-P3-R9: a truncated section through the routes ────────────────────
+
+def test_r9_a_truncated_section_is_null_on_phase3_and_main_s_bytes_on_phase2(rig, monkeypatch):
+    """R9: a game whose card section's display read is cut (511 rows under its
+    stable key sort first). With both headers the game page's card game and
+    seat facts (switch words excepted) and the summary's card facts (`games`
+    excepted) and days30 are null, state words as on phase 2; with the
+    sections header alone both pages are main's bytes and audit rows."""
+    base = _p2_module()
+    monkeypatch.setattr(base, "_CACHE", ae._CACHE)
+    tip_serve = ae._aer_serve
+
+    async def go():
+        await p2._up(rig)
+        await _up3(rig)
+        admin = await _admin(rig)
+        a, sa, _d = await rig.player()
+        b, _sb, _d = await rig.player()
+        m = await rig.match(a, b, NOW - dt.timedelta(hours=2), photon_room_id="room-t9")
+        await p2.rec(rig, "card", "k1", a, b, "room-t9")
+        await p2.contrib(rig, "card", "k1", a, b, a, hands=3, match_id=m)
+        await _daily(rig, a, NOW.date(), 4)
+        await _sort_first(rig, a)
+        await rig.commit()
+        out = {}
+        for shape, path in (("game", "%s/game/%s" % (ROOT, m.hex)),
+                            ("player1", "%s/player/%s?games=1" % (ROOT, sa))):
+            n0 = len(await p2._audit_rows(rig))
+            three = await p2.get(rig, path, admin, HEADER3)
+            tip = await p2.get(rig, path, admin, HEADER)
+            monkeypatch.setattr(ae, "_aer_serve", base._aer_serve)
+            try:
+                old = await p2.get(rig, path, admin, HEADER)
+            finally:
+                monkeypatch.setattr(ae, "_aer_serve", tip_serve)
+            out[shape] = (three, tip, old, (await p2._audit_rows(rig))[n0:])
+        return out
+
+    out = rig.run(go())
+    for shape, ((s3, c3), (st, ct), (so, co), rows) in out.items():
+        assert (s3, st, so) == (200, 200, 200), (shape, c3[:200], ct[:200], co[:200])
+        assert ct == co, (shape, len(ct), len(co))                  # phase 2: main's bytes
+        assert rows[1] == rows[2], shape
+        three, two = _body(c3), _body(ct)
+        if shape == "game":
+            sec3, sec2 = p2._section(three, 0, "card"), p2._section(two, 0, "card")
+            assert sec3["truncated"] is True and sec3["state"] == sec2["state"]
+            names2 = [n for n, _v in sec2["game"]]
+            assert [n for n, _v in sec3["game"]][:len(names2)] == names2
+            for (n, v3), (_n, v2) in zip(sec3["game"], sec2["game"]):
+                assert v3 == (v2 if n in ae.SECTION_SWITCHES else None), (n, v3, v2)
+            assert any(v is not None for _n, v in sec2["game"] if _n not in ae.SECTION_SWITCHES)
+            for st3, st2 in zip(sec3["seats"], sec2["seats"]):
+                assert st3["state"] == st2["state"]
+                assert [n for n, _v in st3["facts"]] == [n for n, _v in st2["facts"]]
+                assert all(v is None for _n, v in st3["facts"]), st3
+            assert any(v is not None for st2 in sec2["seats"] for _n, v in st2["facts"])
+        else:
+            e3 = next(e for e in three["sections_summary"] if e["src"] == "card")
+            e2 = next(e for e in two["sections_summary"] if e["src"] == "card")
+            assert e3["truncated"] is True and e3["state"] == e2["state"]
+            f3 = dict(e3["facts"])
+            assert f3["games"] == "1" == dict(e2["facts"])["games"]
+            assert all(v is None for n, v in e3["facts"] if n != "games"), e3["facts"]
+            assert [n for n, _v in e3["days30"]] == [n for n, _v in e2["days30"]]
+            assert e3["days30"] and all(v is None for _n, v in e3["days30"])
+            assert all(v is not None for _n, v in e2["days30"])
+    print("GATE p3-r9: a truncated card section: null on phase 3 (games and switch words kept), "
+          "main's bytes and audit rows on phase 2")

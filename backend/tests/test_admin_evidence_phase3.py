@@ -746,3 +746,118 @@ def test_r2_a_truncated_section_records_no_findings_count():
     for facts in out[True]:
         assert facts["findings"] is None and "findings_unattributed" not in facts, facts
         assert "findings_more" not in facts, facts
+
+
+# ── B10-P3-R9: a truncated section on the phase-3 path ────────────────────
+
+def _r9_data(truncated):
+    """One covered game with a record per seat, a games row, an attributed
+    contribution and a daily row about seat a, three switch words and a
+    finding; `truncated` as a capped read would set it."""
+    a, b = "00000000-0000-4000-8000-00000000000a", "00000000-0000-4000-8000-00000000000b"
+    g = _game(a, b, room="room-9", mid="00000000-0000-4000-8000-000000000009")
+    daily = dict({c: 2 for c in ae._CARD_COUNTERS}, subject_player_id=a, source="self",
+                 coverage="one", games=1, deal_profile="prof")
+    data = _with_findings(
+        _data(records=[_rec("card", "k9", a, b, "room-9"), _rec("card", "k9", b, a, "room-9")],
+              games=[_grow("card", "k9", a, b, g["id"])],
+              contrib=[_contrib("card", "k9", a, b, a, match_id=g["id"], hands=3,
+                                deal_profile="prof")],
+              switches={"card_evidence_%s" % w: "1" for w in ae.SECTION_SWITCHES},
+              daily={a: [daily]}, truncated=truncated),
+        [_finding("card", "k9", a, b, g["id"], "zz-r9")])
+    return a, b, g, data
+
+
+def _r9_sections(api, phase3, truncated):
+    a, b, g, data = _r9_data(truncated)
+    game = api.game_section("card", copy.deepcopy(data), g, {a: 0, b: 1})
+    summ = api.summary_section("card", copy.deepcopy(data), [g], a, 0)
+    if phase3:
+        api.phase3_game_section(game, "card", data, g)
+        api.phase3_summary_section(summ, "card", data, [g])
+    return game, summ
+
+
+def _p2_api():
+    out = subprocess.run(["git", "-C", REPO, "show", P2_BASE + ":backend/api/admin_evidence.py"],
+                         capture_output=True, timeout=60)
+    if out.returncode:
+        pytest.fail("the base api source is not readable here: %s"
+                    % out.stderr.decode("utf-8", "replace")[:200])
+    import types
+    mod = types.ModuleType("admin_evidence_p2_unit")
+    mod.__file__ = os.path.join(HERE, "..", "api", "admin_evidence_p2_unit.py")
+    sys.modules[mod.__name__] = mod
+    try:
+        exec(compile(out.stdout.decode("utf-8"), mod.__file__, "exec"), mod.__dict__)
+    finally:
+        sys.modules.pop(mod.__name__, None)
+    return mod
+
+
+def test_r9_a_truncated_phase3_section_publishes_no_value_from_its_capped_reads():
+    """R9 (2): on the phase-3 path a truncated game section's game facts
+    (the switch words excepted) and seat facts, and a truncated summary
+    section's facts (`games` excepted) and days30, are null, with names,
+    order and state words unchanged; the same rows untruncated publish their
+    values (the control)."""
+    whole_game, whole_summ = _r9_sections(ae, True, False)
+    cut_game, cut_summ = _r9_sections(ae, True, True)
+    p2_names = [n for n, _v in _r9_sections(ae, False, True)[0]["game"]]
+    assert [n for n, _v in cut_game["game"]][:len(p2_names)] == p2_names
+    switches = set(ae.SECTION_SWITCHES)
+    for name, value in cut_game["game"]:
+        assert (value == "1") if name in switches else (value is None), (name, value)
+    assert [s["state"] for s in cut_game["seats"]] == [s["state"] for s in whole_game["seats"]]
+    for cut, whole in zip(cut_game["seats"], whole_game["seats"]):
+        assert [n for n, _v in cut["facts"]] == [n for n, _v in whole["facts"]]
+        assert all(v is None for _n, v in cut["facts"]), cut
+    assert cut_game["state"] == whole_game["state"] and cut_game["truncated"] is True
+    facts = dict(cut_summ["facts"])
+    assert facts["games"] == "1" and all(v is None for n, v in cut_summ["facts"] if n != "games")
+    assert [n for n, _v in cut_summ["days30"]] == [n for n, _v in whole_summ["days30"]]
+    assert cut_summ["days30"] and all(v is None for _n, v in cut_summ["days30"])
+    assert cut_summ["state"] == whole_summ["state"]
+    # the control: the same rows untruncated carry their values
+    assert dict(whole_game["game"])["paired"] == "attached"
+    assert any(v is not None for _n, v in whole_game["seats"][0]["facts"])
+    wf = dict(whole_summ["facts"])
+    assert wf["games"] == "1" and wf["with_record"] == "1" and wf["self.hands"] == "3"
+    assert all(v is not None for _n, v in whole_summ["days30"])
+
+
+def test_r9_the_phase2_path_builds_main_s_sections_truncated_or_not():
+    """R9 (1): the phase-2 builders give main's sections for the same rows,
+    truncated and not (P3-2's comparison, at the builders)."""
+    base = _p2_api()
+    for truncated in (True, False):
+        assert _r9_sections(ae, False, truncated) == _r9_sections(base, False, truncated)
+
+
+def test_r9_the_bot_decodes_and_renders_a_truncated_phase3_page(bot):
+    """R9 (3): a phase-3 game page and summary page whose card section is
+    truncated decode, keep the plan's bijection, and render each null value
+    as `-` beside `truncated=yes`."""
+    a, b, g, data = _r9_data(True)
+    body = game_body()
+    body["games"][0]["sections"] = [_p3_section(src, data if src == "card" else None, g,
+                                                {a: 0, b: 1}) for src in ae.SECTION_SOURCES]
+    sbody = summary_body(shape="player")
+    sbody["sections_summary"] = [
+        ae.phase3_summary_section(ae.summary_section(src, data if src == "card" else None,
+                                                     [g], a, 0), src,
+                                  data if src == "card" else None, [g])
+        for src in ae.SECTION_SOURCES]
+    sbody["evidence"] = _evidence("player")
+    for page_body in (body, sbody):
+        check_plan(bot, copy.deepcopy(page_body))
+        page = bot["_aer_decode_response"](copy.deepcopy(page_body), "1a")
+        text, files = bot["_aer_fallback"]("H", bot["_aer_plan"](page), "g", 1)
+        shown = text if not files else files[0].data.decode("utf-8")
+        assert "truncated=yes" in shown, shown[:400]
+        assert "findings=-" in shown, shown[:600]
+        if page_body is sbody:
+            assert "games=1" in shown and "with_record=-" in shown, shown[:600]
+        else:
+            assert "paired=-" in shown, shown[:600]

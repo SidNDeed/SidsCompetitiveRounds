@@ -2568,6 +2568,17 @@ def _finding_order(f):
     return ("%s" % f["rule_id"], "%s" % f["scope"], _iso(f["computed_at"]) or "")
 
 
+# The game facts a truncated section keeps (B10-P3-R9): the switch words come
+# from their own read of three named keys under LIMIT 3, never a cut.
+_CUT_KEEPS_GAME = frozenset(SECTION_SWITCHES)
+
+
+def _cut_facts(facts, keep=()):
+    """`facts` with every value null except the names in `keep`: names and
+    order unchanged (B10-P3-R9, the phase-3 path's truncated section)."""
+    return [[name, value] if name in keep else [name, None] for name, value in facts]
+
+
 def phase3_game_section(sec, src, data, game):
     """Add the phase-3 findings to one game section built by `game_section`:
     the key `findings` (at most FINDINGS_MAX rows, `_finding_row`, in rule
@@ -2575,7 +2586,10 @@ def phase3_game_section(sec, src, data, game):
     cap), `findings_more` (past the cap) and `findings_unattributed` (under
     the game's identity, another or no match). An unavailable section gets
     an empty list and no fact. A truncated section (a capped read stopped at
-    its LIMIT) records `findings` as None and no other count."""
+    its LIMIT) records `findings` as None and no other count, and every game
+    fact (the switch words excepted: their read is never cut) and seat fact
+    value is null, names, order and state words unchanged (B10-P3-R9). The
+    phase-2 path never calls this, so its bytes stay main's."""
     if data is None:
         sec["findings"] = []
         return sec
@@ -2583,6 +2597,12 @@ def phase3_game_section(sec, src, data, game):
     listed = sorted(listed, key=_finding_order)
     cap = AER_CONTRACT_BOUNDS["FINDINGS_MAX"]
     sec["findings"] = [_finding_row(f) for f in listed[:cap]]
+    if data["truncated"]:
+        # B10-P3-R9: on the phase-3 path a truncated section publishes no value
+        # derived from its capped reads; names, order and state words stay
+        sec["game"] = _cut_facts(sec["game"], _CUT_KEEPS_GAME)
+        for seat in sec["seats"]:
+            seat["facts"] = _cut_facts(seat["facts"])
     if data["truncated"]:
         # a capped read of the section stopped at its LIMIT: the counts may be
         # short, so they are not recorded (B10-P3-R2 sweep); the rows read are
@@ -2602,7 +2622,10 @@ def phase3_summary_section(sec, src, data, games):
     """Add the phase-3 counts to one summary section: `findings`, the
     distinct findings listed on a covered game, and `findings_unattributed`,
     the distinct ones under a covered game's identity listed on none. A
-    truncated section records `findings` as None and no other count."""
+    truncated section records `findings` as None and no other count, and
+    every fact value but `games` (the covered games the selector chose) and
+    every days30 value is null, names, order and state words unchanged
+    (B10-P3-R9)."""
     if data is None:
         return sec
     listed, held = set(), set()
@@ -2613,6 +2636,11 @@ def phase3_summary_section(sec, src, data, games):
         for f in data.get("findings", ()):
             if _finding_ident(src, f["dedup_key"]) in idents:
                 held.add(f["dedup_key"] + "|" + "%s" % f["rule_id"])
+    if data["truncated"]:
+        # B10-P3-R9: no value from the capped reads; `games` counts the
+        # covered games the selector chose, so it keeps its number
+        sec["facts"] = _cut_facts(sec["facts"], ("games",))
+        sec["days30"] = _cut_facts(sec["days30"])
     if data["truncated"]:
         # a capped read stopped at its LIMIT: the counts may be short and are
         # not recorded (B10-P3-R2 sweep)
