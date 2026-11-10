@@ -397,32 +397,6 @@ namespace CompetitiveRounds
             return "";
         }
 
-        // Ask 3 R2: Photon's own send of the local name. Player.SetPlayerNameProperty
-        // (private in the game's PhotonRealtime.dll) sends actor property 255 with
-        // the local NickName through OpSetPropertiesOfActor and answers whether it
-        // was sent; outside an online room it sends nothing and answers false. The
-        // NickName setter calls it only when the local name changes and drops the
-        // answer, and SetCustomProperties cannot carry the name (it keeps only
-        // string keys).
-        private static System.Reflection.MethodInfo _sendName;
-        private static bool _sendNameResolved;
-        private static bool SendLocalName(Photon.Realtime.Player local)
-        {
-            try
-            {
-                if (!_sendNameResolved)
-                {
-                    _sendNameResolved = true;
-                    _sendName = HarmonyLib.AccessTools.Method(typeof(Photon.Realtime.Player), "SetPlayerNameProperty");
-                    if (_sendName == null)
-                        Plugin.Log.LogWarning("[NAMETAG] Player.SetPlayerNameProperty not found; no name send is confirmed");
-                }
-                if (_sendName == null || local == null) return false;
-                return (bool)_sendName.Invoke(local, null);
-            }
-            catch { return false; }
-        }
-
         /// <summary>Push the current styled nickname to PhotonNetwork.LocalPlayer so it
         /// broadcasts to every client in the room. Also publishes the glow sku via a
         /// separate "cr_nametag_glow" custom property so modded opponents can apply the
@@ -507,6 +481,32 @@ namespace CompetitiveRounds
                     Plugin.Log.LogWarning($"[NAMETAG] not recorded (props sent={propsSent}, name sent={nameSent}); the next refresh owes them");
             }
             catch (Exception ex) { Plugin.Log.LogWarning($"[NAMETAG] Publish failed: {ex.Message}"); }
+        }
+
+        // Ask 3 R2: Photon's own send of the local name. Player.SetPlayerNameProperty
+        // (private in the game's PhotonRealtime.dll) sends actor property 255 with
+        // the local NickName through OpSetPropertiesOfActor and answers whether it
+        // was sent; outside an online room it sends nothing and answers false. The
+        // NickName setter calls it only when the local name changes and drops the
+        // answer, and SetCustomProperties cannot carry the name (it keeps only
+        // string keys).
+        private static System.Reflection.MethodInfo _sendName;
+        private static bool _sendNameResolved;
+        private static bool SendLocalName(Photon.Realtime.Player local)
+        {
+            try
+            {
+                if (!_sendNameResolved)
+                {
+                    _sendNameResolved = true;
+                    _sendName = HarmonyLib.AccessTools.Method(typeof(Photon.Realtime.Player), "SetPlayerNameProperty");
+                    if (_sendName == null)
+                        Plugin.Log.LogWarning("[NAMETAG] Player.SetPlayerNameProperty not found; no name send is confirmed");
+                }
+                if (_sendName == null || local == null) return false;
+                return (bool)_sendName.Invoke(local, null);
+            }
+            catch { return false; }
         }
 
         /// <summary>Ask 3: this carrier's value in the cache, as PublishToPhoton writes it.</summary>
