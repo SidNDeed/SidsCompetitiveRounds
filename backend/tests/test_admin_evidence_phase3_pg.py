@@ -431,14 +431,15 @@ def test_p3_statements_plan_on_their_named_indexes(rig):
         assert scans, name
         assert all(n["Node Type"] in p2.PERMITTED_SCANS for n in scans), (name, [
             (n["Node Type"], n.get("Relation Name"), n.get("Index Name")) for n in scans])
-        assert {n["Index Name"] for n in scans if "Index Name" in n} == want[name], name
+        # a Bitmap Index Scan names its index but no relation: it is read too
+        probes = [n for n in nodes if n["Node Type"] == "Bitmap Index Scan"]
+        named = {n["Index Name"]: n.get("Index Cond", "") for n in scans + probes
+                 if "Index Name" in n}
+        assert set(named) == want[name], (name, named)
         # each index is searched by its key column, not only a prefix or a filter
-        evidence_conds = " ".join(n.get("Index Cond", "") for n in scans
-                                  if n.get("Relation Name") != "matches")
-        assert key_col[name[0]] in evidence_conds, (name, evidence_conds)
-        if name[0] in ("pop", "dup"):
-            m = [n for n in scans if n.get("Relation Name") == "matches"]
-            assert m and all("ended_at" in n.get("Index Cond", "") for n in m), (name, m)
+        for index, cond in named.items():
+            col = "ended_at" if index == "idx_matches_ended" else key_col[name[0]]
+            assert col in cond, (name, index, cond)
     print("GATE p3-4 plans: %d phase-3 statements on their named indexes, each searched by its "
           "key column; the window games by idx_matches_ended on ended_at; the population read "
           "returns the %d eligible games only, %d distractor rows" % (

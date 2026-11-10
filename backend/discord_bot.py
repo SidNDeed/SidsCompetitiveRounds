@@ -17648,6 +17648,7 @@ def _aer_evidence(value, windows):
                                                          for w in wins)):
         raise AerSchemaError("evidence without ranks")
     return {"state": ev["state"], "rows": ev["rows"], "truncated": ev["truncated"],
+            "partial": ev["partial"],
             "fingerprint": ev["fingerprint"], "census": dict(census), "catalog": catalog,
             "strata": strata, "windows": tuple(wins)}
 

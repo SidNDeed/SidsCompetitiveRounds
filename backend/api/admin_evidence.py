@@ -2998,8 +2998,10 @@ def _ev_pop_sql(src):
     """The population rows of one family (design 2.6's game window: every
     game not invalidated, ended within `:pop_days` days and at least `:lag_s`
     seconds ago, by idx_matches_ended), joined to the contributions whose
-    STORED match_id is a window game (ix_<contrib>_match, migration 401),
-    newest game first, LIMITed (one more than EV_POP_ROWS_MAX tells a cut)."""
+    STORED match_id is a window game, read by the window's game ids through
+    ix_<contrib>_match (migration 401; the id array keeps the planner on the
+    index whatever its estimate of the window's size), newest game first,
+    LIMITed (one more than EV_POP_ROWS_MAX tells a cut)."""
     spec = _SECTION_SPEC[src]
     return """
 WITH g AS MATERIALIZED (
@@ -3011,6 +3013,7 @@ WITH g AS MATERIALIZED (
 SELECT c.match_id, g.ended_at, g.player1_id, g.player2_id, c.pair_lo, c.pair_hi,
        c.subject_player_id, c.source, c.coverage, %(cols)s
   FROM g JOIN %(contrib)s c ON c.match_id = g.id
+ WHERE c.match_id = ANY(ARRAY(SELECT w.id FROM g w))
  ORDER BY g.ended_at DESC, g.id DESC, c.subject_player_id, c.source, c.coverage
  LIMIT CAST(:n AS integer)""" % {
         "cols": ", ".join("c." + c for c in spec["contrib_cols"]),
@@ -3049,7 +3052,8 @@ WITH g AS MATERIALIZED (
      AND m.ended_at <= now() - make_interval(secs => CAST(:lag_s AS integer)))
 SELECT c.match_id
   FROM g JOIN %(contrib)s c ON c.match_id = g.id
- WHERE c.pair_lo = LEAST(g.player1_id, g.player2_id)
+ WHERE c.match_id = ANY(ARRAY(SELECT w.id FROM g w))
+   AND c.pair_lo = LEAST(g.player1_id, g.player2_id)
    AND c.pair_hi = GREATEST(g.player1_id, g.player2_id)
    AND c.subject_player_id IN (g.player1_id, g.player2_id)
    AND c.source = ANY(CAST(:sources AS text[]))
