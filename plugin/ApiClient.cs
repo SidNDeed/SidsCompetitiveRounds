@@ -25081,6 +25081,18 @@ namespace CompetitiveRounds
         /// exchanging one: one rule, asked at both ends.</summary>
         internal static bool TicketExchangeAllowed() => CredentialedTransportAllowed(baseUrl);
 
+        /// <summary>The session token a request to the current base would
+        /// carry if StampVersionHeader stamped it now: "" when there is none,
+        /// or when the transport withholds it (CredentialedTransportAllowed,
+        /// the stamp's own rule). The player report form marks the sign-in it
+        /// holds by this reading, so that mark and the one its requests report
+        /// through onTokenSent name the same thing, what a request carries.</summary>
+        internal static string SessionTokenToStamp()
+        {
+            string tok = SteamAuth.SessionToken;
+            return !string.IsNullOrEmpty(tok) && CredentialedTransportAllowed(baseUrl) ? tok : "";
+        }
+
         /// <summary>The refusal notice, once per session: a log line and a
         /// toast. "Until it is back", not "this session": on the backup
         /// connection a secure-route check can restore signed-in features

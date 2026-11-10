@@ -704,7 +704,7 @@ MARK_RULES = (
 # answers that bring the carried token back, and the four rules it goes to.
 MARK_UI = (
     "private static string SessionKeyNow()",
-    "return MarkOf(SteamAuth.SessionToken);",
+    "return MarkOf(ApiClient.SessionTokenToStamp());",
     "private static string MarkOf(string token)",
     "return PlayerReportRules.SessionKey(token);",
     "string key = SessionKeyNow();",                                                    # Open
@@ -1092,3 +1092,30 @@ def test_r18_the_forms_three_reads_take_one_attempt_and_no_other_caller_changes(
            lambda s: _replace(s, AC, "if (rgv.Next == ReadGateRules.Next.Deliver || singleAttempt)",
                               "if (rgv.Next == ReadGateRules.Next.Deliver)"),
            _control_comment(AC, GET_REQUEST))
+
+
+# -- R19: the mark held now is what a request would carry -----------------------
+
+STAMP_NOW = "internal static string SessionTokenToStamp()"
+STAMP = "private static void StampVersionHeader(UnityWebRequest req)"
+
+
+def _r19(src):
+    ac, ui = src[AC], src[UI]
+    # The form marks the sign-in it holds by the token a request would carry
+    # now, by the stamp's own rule: while the transport withholds the token,
+    # the mark is "", the mark a refused request reported, so Send stays closed.
+    assert "{ return MarkOf(ApiClient.SessionTokenToStamp()); }" == _fold(_body(ui, "private static string SessionKeyNow()"))
+    assert _fold(_body(ac, STAMP_NOW)) == (
+        '{ string tok = SteamAuth.SessionToken; return !string.IsNullOrEmpty(tok)'
+        ' && CredentialedTransportAllowed(baseUrl) ? tok : ""; }'), _fold(_body(ac, STAMP_NOW))
+    stamp = _fold(_body(ac, STAMP))
+    assert ('if (!string.IsNullOrEmpty(SteamAuth.SessionToken)) { if (CredentialedTransportAllowed(req.url))'
+            ' req.SetRequestHeader("X-Session-Token", SteamAuth.SessionToken);') in stamp, stamp
+    assert _sites(src, "SessionTokenToStamp()") == {AC: 1, UI: 1}, _sites(src, "SessionTokenToStamp()")
+
+
+def test_r19_the_mark_held_now_is_the_token_a_request_would_carry():
+    _check(_r19,
+           lambda s: _replace(s, UI, "return MarkOf(ApiClient.SessionTokenToStamp());", "return MarkOf(SteamAuth.SessionToken);"),
+           _control_comment(AC, STAMP_NOW))

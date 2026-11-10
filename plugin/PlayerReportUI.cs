@@ -42,13 +42,16 @@ namespace CompetitiveRounds
 
         private static string SessionKeyNow()
         {
-            return MarkOf(SteamAuth.SessionToken);
+            return MarkOf(ApiClient.SessionTokenToStamp());
         }
 
         /// <summary>The mark of a token ("" = none), the one place the form
-        /// makes it: from the token held now (SessionKeyNow), and from the one
-        /// a request carried as its transport stamped it, which a refresh while
-        /// the body was built or the read was held makes newer (ask 14 R1 H1).</summary>
+        /// makes it: from the token a request would carry now (SessionKeyNow;
+        /// "" while the transport withholds it), and from the one a request
+        /// carried as its transport stamped it, which a refresh while the body
+        /// was built or the read was held makes newer (ask 14 R1 H1). Both are
+        /// what a request carries, so a 401 closes Send for the sign-in the
+        /// next press would send.</summary>
         private static string MarkOf(string token)
         {
             return PlayerReportRules.SessionKey(token);
