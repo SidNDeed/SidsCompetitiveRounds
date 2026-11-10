@@ -116,11 +116,25 @@ def api_fields(body):
                 out += [at + ("seats", si, "subject"), at + ("seats", si, "state")]
                 out += [at + ("seats", si, "facts", i, j)
                         for i in range(len(seat["facts"])) for j in (0, 1)]
+            # Phase 3 (B10): each stored finding's four values.
+            out += [at + ("findings", fi, j) for fi, row in enumerate(sec.get("findings", []))
+                    for j in range(len(row))]
     for xi, sec in enumerate(body.get("sections_summary", [])):
         at = ("sections_summary", xi)
         out += [at + (k,) for k in ("oi", "src", "state", "truncated")]
         out += [at + (part, i, j) for part in ("facts", "days30")
                 for i in range(len(sec[part])) for j in (0, 1)]
+    # Phase 3b (B10): every leaf of the evidence block, census whole.
+    ev = body.get("evidence")
+    if ev is not None:
+        out += [("evidence", k) for k in ("state", "rows", "truncated", "fingerprint", "census")]
+        out += [("evidence", "strata", i) for i in range(len(ev["strata"]))]
+        for row in ev["catalog"]:
+            out += [("evidence", "catalog", row["ki"], k) for k in row]
+        for wi, w in enumerate(ev["windows"]):
+            out += [("evidence", "windows", wi, "oi"), ("evidence", "windows", wi, "more")]
+            out += [("evidence", "windows", wi, "cells", ci, j)
+                    for ci, cell in enumerate(w["cells"]) for j in range(len(cell))]
     for wi, w in enumerate(body.get("windows", [])):
         out += [("windows", wi, k) for k in w]
     for si, s in enumerate(body.get("summary", [])):
@@ -139,6 +153,8 @@ def lookup(body, path):
         return body["rules"]["report"]
     if path[0] == "catalog":
         return next(r for r in body["catalog"] if r["ki"] == path[1])[path[2]]
+    if path[:2] == ("evidence", "catalog"):
+        return next(r for r in body["evidence"]["catalog"] if r["ki"] == path[2])[path[3]]
     node = body
     for i, step in enumerate(path):
         if isinstance(node, list) and isinstance(step, str):
