@@ -3557,7 +3557,7 @@
           ],
           "admin_evidence",
           "evidence_report_game",
-          "c9d919b3d6519fee62954ae245079bbc02f66eac"
+          "f8eb2d7d71fff22bb04be44fef9b87b9e2470660"
         ],
         [
           "/api/v1/internal/evidence-report/series/{code}",
@@ -3566,7 +3566,7 @@
           ],
           "admin_evidence",
           "evidence_report_series",
-          "b6cc1aa8e0ca8f9d503900a2a370e50747632c7a"
+          "55a923377cf8563870a9d6b6a5051de6d29eab71"
         ],
         [
           "/api/v1/internal/evidence-report/pair",
@@ -3575,7 +3575,7 @@
           ],
           "admin_evidence",
           "evidence_report_pair",
-          "b44608614bafc703d794111c3a5dc73ce7badf6a"
+          "f49acb0ccc1c08a25caa9ec4759b573ae380de7f"
         ],
         [
           "/api/v1/internal/evidence-report/player/{steam_id}",
@@ -3584,7 +3584,7 @@
           ],
           "admin_evidence",
           "evidence_report_player",
-          "e028ce4642a5c3874d3beed149792f204a6394d0"
+          "4e0bb84b0b7dc8034935a88e409c0d110f0cf701"
         ]
       ]
     },
