@@ -18228,7 +18228,7 @@ def _aer_game_section_items(at, sec):
     state and facts."""
     out = [_aer_item("section", "EVIDENCE", _aer_section_head(at, sec, ()))]
     out.extend(_aer_fact_items(at + ("game",), "", sec["game"]))
-    for fi, row in enumerate(sec.get("findings", ())):
+    for fi, row in enumerate(sec["findings"]):
         out.append(_aer_item("facts", "FINDING", tuple(
             (at + ("findings", fi, j), label, _aer_txt(row[j]))
             for j, label in enumerate(("rule_id=", "scope=", "at=", "flag=")))))
