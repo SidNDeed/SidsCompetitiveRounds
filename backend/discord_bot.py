@@ -17413,12 +17413,31 @@ _AER_SECTION_KEYS = frozenset({"src", "state", "truncated", "game", "seats"})
 _AER_SECTION_SEAT_KEYS = frozenset({"subject", "state", "facts"})
 _AER_SECTION_SUMMARY_KEYS = frozenset({"oi", "src", "state", "truncated", "facts", "days30"})
 _AER_FACT_NAME = re.compile(r"[a-z0-9_.]{1,%d}" % AER_FACT_NAME_MAX)
+# Phase 3 (B10): each section's stored findings (`findings`, rows of rule_id,
+# scope, computed_at and flag id) and page 1's `evidence` block (families K
+# and X ranked over stored contribution and daily rows). Asked for by a
+# second header beside the sections header, so a phase-2 bot keeps its
+# phase-2 page; both keys are optional here, so a phase-2 api's page decodes
+# too. The words and the header equal the api's under an equality test.
+AER_PHASE3_HEADER = "X-Evidence-Phase"
+AER_PHASE3_VALUE = "3"
+AER_FINDING_WIDTH = 4
+AER_EV_STATES = ("ok", "not_derived", "unavailable")
+AER_EV_CELL_SLOTS = ("ki", "stratum", "basis", "n", "val", "pop_rank", "pop_n", "pop_p50",
+                     "pop_p90", "pop_p99")
+AER_EV_SOURCES = ("card_record", "card_daily", "combat_contrib", "combat_player_daily")
+AER_EV_AGGS = ("win_median.cell", "win_max.cell", "window")
+AER_EV_STRATA = ("profile", "consts")
+_AER_EV_KEYS = frozenset({"state", "rows", "truncated", "fingerprint", "census", "catalog",
+                          "strata", "windows"})
+_AER_EV_CATALOG_KEYS = frozenset({"ki", "key", "unit"})
+_AER_EV_WINDOW_KEYS = frozenset({"oi", "cells", "more"})
 
 # The decoded page (design 3.3): immutable, built only from a response that
 # passed the 1a closed schema. Cells are tuples in their AER_WIRE slot order.
 BotPage = collections.namedtuple("BotPage", (
     "shape", "page", "pages", "subjects", "population", "baseline", "registry",
-    "catalog", "games", "windows", "summary", "sections"), defaults=((),))
+    "catalog", "games", "windows", "summary", "sections", "evidence"), defaults=((), None))
 
 
 class AerSchemaError(ValueError):
@@ -17532,10 +17551,13 @@ def _aer_game_sections(value, seat_subjects):
         raise AerSchemaError("sections")
     out = []
     for src, s in zip(AER_SECTION_SOURCES, value):
-        _aer_keys(s, _AER_SECTION_KEYS)
+        _aer_keys(s, _AER_SECTION_KEYS, frozenset({"findings"}))
         if s["src"] != src or s["state"] not in AER_SECTION_STATES or not isinstance(
                 s["truncated"], bool) or not isinstance(s["seats"], list):
             raise AerSchemaError("section")
+        findings = _aer_findings(s["findings"]) if "findings" in s else ()
+        if s["state"] == "unavailable" and findings:
+            raise AerSchemaError("unavailable section with findings")
         game = _aer_facts(s["game"])
         seats = []
         for seat in s["seats"]:
@@ -17550,8 +17572,83 @@ def _aer_game_sections(value, seat_subjects):
         elif tuple(seat[0] for seat in seats) != tuple(seat_subjects):
             raise AerSchemaError("section seats")
         out.append({"src": src, "state": s["state"], "truncated": s["truncated"],
-                    "game": game, "seats": tuple(seats)})
+                    "game": game, "seats": tuple(seats), "findings": findings})
     return tuple(out)
+
+
+def _aer_findings(value):
+    """A section's `findings` (phase 3): rows of AER_FINDING_WIDTH encoded
+    texts (rule_id, scope, computed_at, flag id); only the flag may be null."""
+    if not isinstance(value, list):
+        raise AerSchemaError("findings")
+    out = []
+    for row in value:
+        row = _aer_check_list(row, AER_FINDING_WIDTH)
+        for i in range(AER_FINDING_WIDTH):
+            _aer_check_text(row[i], nullable=i == AER_FINDING_WIDTH - 1)
+        out.append(tuple(row))
+    return tuple(out)
+
+
+def _aer_evidence(value, windows):
+    """Page 1's `evidence` (phase 3b), checked whole: a state word, the rows
+    read, truncated, the evidence registry's fingerprint and census, the
+    catalog of the keys its cells name, the strata, and one entry per window
+    in order whose cells are AER_EV_CELL_SLOTS rows naming a catalog key and
+    a stratum. A block that is not `ok` carries no cell, key or stratum."""
+    ev = _aer_keys(value, _AER_EV_KEYS)
+    if ev["state"] not in AER_EV_STATES or not isinstance(ev["truncated"], bool):
+        raise AerSchemaError("evidence state")
+    _aer_check_int(ev["rows"], 0)
+    if not isinstance(ev["fingerprint"], str) or not re.fullmatch(r"[0-9a-f]{8}",
+                                                                   ev["fingerprint"]):
+        raise AerSchemaError("evidence fingerprint")
+    census = _aer_keys(ev["census"], frozenset({"K", "X"}))
+    for row in census.values():
+        for count in _aer_check_list(row, 3):
+            _aer_check_int(count, 0)
+    if not isinstance(ev["catalog"], list) or not isinstance(ev["strata"], list):
+        raise AerSchemaError("evidence catalog")
+    catalog = {}
+    for row in ev["catalog"]:
+        _aer_keys(row, _AER_EV_CATALOG_KEYS)
+        ki = _aer_check_int(row["ki"], 0)
+        fields = _aer_check_text(row["key"]).split("|")
+        _aer_check_text(row["unit"])
+        if (ki in catalog or len(fields) != 7 or not _AER_FACT_NAME.fullmatch(fields[0])
+                or fields[1] not in ("SELF", "MEAS") or fields[2] != "seat"
+                or fields[3] not in AER_EV_SOURCES or fields[4] not in ("one", "paired")
+                or fields[5] not in AER_EV_AGGS or fields[6] not in AER_EV_STRATA):
+            raise AerSchemaError("evidence key")
+        catalog[ki] = dict(row)
+    strata = tuple(_aer_check_text(s) for s in ev["strata"])
+    if not isinstance(ev["windows"], list) or len(ev["windows"]) != len(windows):
+        raise AerSchemaError("evidence windows")
+    wins = []
+    for position, w in enumerate(ev["windows"]):
+        _aer_keys(w, _AER_EV_WINDOW_KEYS)
+        if _aer_check_int(w["oi"], 0) != position or not isinstance(w["cells"], list):
+            raise AerSchemaError("evidence window")
+        _aer_check_int(w["more"], 0)
+        cells = []
+        for row in w["cells"]:
+            c = dict(zip(AER_EV_CELL_SLOTS, _aer_check_list(row, len(AER_EV_CELL_SLOTS))))
+            if (_aer_check_int(c["ki"], 0) not in catalog
+                    or _aer_check_int(c["stratum"], 0) >= len(strata)
+                    or c["basis"] not in ("player", "pair") or c["val"] is None):
+                raise AerSchemaError("evidence cell")
+            _aer_check_int(c["n"], 0)
+            _aer_check_int(c["pop_n"], 0)
+            for slot in ("val", "pop_rank", "pop_p50", "pop_p90", "pop_p99"):
+                _aer_check_number(c[slot])
+            cells.append(tuple(row))
+        wins.append({"oi": position, "cells": tuple(cells), "more": w["more"]})
+    if ev["state"] != "ok" and (catalog or strata or any(w["cells"] or w["more"]
+                                                         for w in wins)):
+        raise AerSchemaError("evidence without ranks")
+    return {"state": ev["state"], "rows": ev["rows"], "truncated": ev["truncated"],
+            "fingerprint": ev["fingerprint"], "census": dict(census), "catalog": catalog,
+            "strata": strata, "windows": tuple(wins)}
 
 
 def _aer_summary_sections(value, windows):
@@ -17591,7 +17688,7 @@ def _aer_decode_response(body, phase="1a", *, expected=None):
     page = _aer_check_int(body.get("page"), 1)
     summary_page = shape in ("pair", "player") and page == 1
     _aer_keys(body, _AER_TOP_KEYS | (_AER_SUMMARY_KEYS if summary_page else frozenset()),
-              frozenset({"sections_summary"}) if summary_page else frozenset())
+              frozenset({"sections_summary", "evidence"}) if summary_page else frozenset())
     pages = _aer_check_int(body["pages"], 1)
     if page > pages or body["rules"] != {"report": "absent"}:
         raise AerSchemaError("page or rules")
@@ -17776,9 +17873,10 @@ def _aer_decode_response(body, phase="1a", *, expected=None):
         windows, summary = tuple(wins), tuple(cells)
     sections = (_aer_summary_sections(body["sections_summary"], windows)
                 if "sections_summary" in body else ())
+    evidence = _aer_evidence(body["evidence"], windows) if "evidence" in body else None
     return BotPage(shape, page, pages, tuple(subjects), dict(body["population"]),
                    dict(body["baseline"]), dict(body["registry"]), catalog, tuple(games),
-                   windows, summary, sections)
+                   windows, summary, sections, evidence)
 
 
 def _aer_word(status, body, headers=None):
@@ -17923,7 +18021,8 @@ async def _aer_fetch(path, actor_id):
                 API_BASE_URL + path,
                 headers={"X-Internal-Key": API_SECRET_KEY,
                          "X-Actor-Discord-Id": str(actor_id),
-                         AER_SECTIONS_HEADER: AER_SECTIONS_PHASE},
+                         AER_SECTIONS_HEADER: AER_SECTIONS_PHASE,
+                         AER_PHASE3_HEADER: AER_PHASE3_VALUE},
                 timeout=aiohttp.ClientTimeout(total=AER_TIMEOUT_S)) as resp:
             raw = await resp.read()
             headers = {str(k): str(v) for k, v in resp.headers.items()}
@@ -18129,6 +18228,10 @@ def _aer_game_section_items(at, sec):
     state and facts."""
     out = [_aer_item("section", "EVIDENCE", _aer_section_head(at, sec, ()))]
     out.extend(_aer_fact_items(at + ("game",), "", sec["game"]))
+    for fi, row in enumerate(sec.get("findings", ())):
+        out.append(_aer_item("facts", "FINDING", tuple(
+            (at + ("findings", fi, j), label, _aer_txt(row[j]))
+            for j, label in enumerate(("rule_id=", "scope=", "at=", "flag=")))))
     seats = sec["seats"]
     for si in range(len(seats)):
         subject, state, facts = seats[si]
@@ -18147,6 +18250,48 @@ def _aer_summary_section_items(at, sec):
     out.extend(_aer_fact_items(at + ("facts",), "", sec["facts"]))
     out.extend(_aer_fact_items(at + ("days30",), "30D", sec["days30"]))
     return out
+
+
+def _aer_evidence_items(ev):
+    """Page 1's evidence block (phase 3b) as plan lines: its state line (a
+    block that is not `ok` says why in words), each stratum, each key its
+    cells name, then per window its line and two lines per cell (key slot,
+    stratum, basis, n and value; then the population's rank, size and three
+    quantiles), in the api's order."""
+    at = ("evidence",)
+    note = {"not_derived": "EVIDENCE RANKS (no stored contribution yet)",
+            "unavailable": "EVIDENCE RANKS (not shown)"}.get(ev["state"], "EVIDENCE RANKS")
+    out = [_aer_item("section", note, (
+        (at + ("state",), "", _aer_txt(ev["state"])),
+        (at + ("rows",), "rows=", _aer_txt(ev["rows"])),
+        (at + ("truncated",), "truncated=", _aer_txt(ev["truncated"])),
+        (at + ("fingerprint",), "evidence registry ", _aer_txt(ev["fingerprint"])),
+        (at + ("census",), "", _aer_free(ev["census"]))))]
+    for si in range(len(ev["strata"])):
+        out.append(_aer_item("label", "STRATUM #%d" % si, (
+            (at + ("strata", si), "", _aer_txt(ev["strata"][si])),)))
+    for ki in sorted(ev["catalog"]):
+        row = ev["catalog"][ki]
+        out.append(_aer_item("label", "EVKEY", tuple(
+            (at + ("catalog", ki, k), lbl, _aer_txt(row[k]))
+            for k, lbl in (("ki", "#"), ("key", ""), ("unit", "unit=")))))
+    for wi, w in enumerate(ev["windows"]):
+        wat = at + ("windows", wi)
+        out.append(_aer_item("summary_head", "EVIDENCE WINDOW", (
+            (wat + ("oi",), "#", _aer_txt(w["oi"])),
+            (wat + ("more",), "more=", _aer_txt(w["more"])))))
+        for ci, cell in enumerate(w["cells"]):
+            cat = at + ("windows", wi, "cells", ci)
+            key = str(ev["catalog"][cell[0]]["key"]).split("|")
+            head = " ".join((AER_PROV_LETTER.get(key[1], "?"), key[0], key[4], key[5]))
+            for first, part in ((True, (0, 1, 2, 3, 4)), (False, (5, 6, 7, 8, 9))):
+                out.append(_aer_item("facts", head if first else "", tuple(
+                    (cat + (j,), _AER_EV_CELL_LABELS[j], _aer_txt(cell[j])) for j in part)))
+    return out
+
+
+_AER_EV_CELL_LABELS = ("#", "s=", "basis=", "n=", "val=", "pop_rank=", "pop_n=", "p50=",
+                       "p90=", "p99=")
 
 
 def _aer_plan(page, phase="1a"):
@@ -18203,6 +18348,8 @@ def _aer_plan(page, phase="1a"):
             add(_aer_cell_item(page, ("summary", si, "cells", ci), "summary", cell, phase))
     for xi in range(len(page.sections)):
         items.extend(_aer_summary_section_items(("sections_summary", xi), page.sections[xi]))
+    if page.evidence is not None:
+        items.extend(_aer_evidence_items(page.evidence))
     for ki in sorted(page.catalog):
         row = page.catalog[ki]
         add(_aer_item("label", "KEY", tuple(
