@@ -195,6 +195,8 @@
     <Compile Include="BoundedDealRulesCases.cs" />
     <Compile Include="../../plugin/LimitlessBounds.cs" />
     <Compile Include="LimitlessBoundsCases.cs" />
+    <Compile Include="../../plugin/LimitlessFenceRules.cs" />
+    <Compile Include="LimitlessFenceRulesCases.cs" />
   </ItemGroup>
 
 </Project>

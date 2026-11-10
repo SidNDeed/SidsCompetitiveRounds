@@ -249,6 +249,17 @@ namespace CompetitiveRounds.Harness
                           }))
                 return 2;
 
+            // Ask 16(a) lane 2: the continuation fence's pure rules (identity, the
+            // record's carrier, MaySend, MayResume, the decision, the handler and
+            // the end target), with a mutant per rule.
+            if (!RunSuite("fencerules", quiet, ref totalRun, ref totalFail, ref suites,
+                          () =>
+                          {
+                              var r = LimitlessFenceRulesCases.Run();
+                              return new Suite(r.Run, r.Fail, r.Report.ToString());
+                          }))
+                return 2;
+
             string verdict = suites > 0 && totalRun > 0 && totalFail == 0 ? "PASS" : "FAIL";
             Console.WriteLine("client-rules-harness suites=" + suites
                               + " run=" + totalRun + " fail=" + totalFail
