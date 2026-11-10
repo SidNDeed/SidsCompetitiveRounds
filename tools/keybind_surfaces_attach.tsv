@@ -4830,8 +4830,8 @@ hop	CompetitiveUI.cs:ToggleOverlay	66e4768ac40d05c3	Plugin.cs:Update#2	ref>Plugi
 hop	CompetitiveUI.cs:UnityLogPath	25e794ee2ebf9d67	CompetitiveUI.cs:DispatchLogViewerRead	ref>CompetitiveUI.cs:DispatchLogViewerRead
 hop	CompetitiveUI.cs:UnityLogPath	cbcd3a6c2ecae610	CompetitiveUI.cs:CaptureLogBundleInputs	ref>CompetitiveUI.cs:CaptureLogBundleInputs
 hop	CosmeticCarrierLedger.cs:ColorValue	94fc2ef7902f6408	PlayerColorCosmetic.cs:CarrierValue	ref>PlayerColorCosmetic.cs:CarrierValue
-hop	CosmeticCarrierLedger.cs:CursorValue	75556521a84bfadc	CursorColorCosmetic.cs:ApplyFromStats	ref[CosmeticCarrierLedger.Shared.Wrote(#1)]>CursorColorCosmetic.cs:ApplyFromStats
 hop	CosmeticCarrierLedger.cs:CursorValue	b27b955024d082a9	CursorColorCosmetic.cs:CarrierValue	ref>CursorColorCosmetic.cs:CarrierValue
+hop	CosmeticCarrierLedger.cs:CursorValue	f8aa24991d41f4c8	CursorColorCosmetic.cs:ApplyFromStats	ref[CosmeticCarrierLedger.Shared.Wrote(#1)]>CursorColorCosmetic.cs:ApplyFromStats
 hop	CosmeticCarrierLedger.cs:Join	110353e9727fb039	CosmeticCarrierLedger.cs:ColorValue	ref>CosmeticCarrierLedger.cs:ColorValue
 hop	CosmeticCarrierLedger.cs:Join	57ff1d4184905a79	CosmeticCarrierLedger.cs:TrailValue	ref>CosmeticCarrierLedger.cs:TrailValue
 hop	CosmeticCarrierLedger.cs:Join	6d0fc01085af9d55	CosmeticCarrierLedger.cs:NametagValue	ref>CosmeticCarrierLedger.cs:NametagValue
@@ -4839,7 +4839,7 @@ hop	CosmeticCarrierLedger.cs:Join	e89e134d18752384	CosmeticCarrierLedger.cs:Curs
 hop	CosmeticCarrierLedger.cs:NametagValue	269fcae666564afa	NametagStyler.cs:PublishToPhoton	ref[CosmeticCarrierLedger.Shared.Wrote(#1)]>NametagStyler.cs:PublishToPhoton
 hop	CosmeticCarrierLedger.cs:NametagValue	54136a6f0e6cf660	NametagStyler.cs:CarrierValue	ref>NametagStyler.cs:CarrierValue
 hop	CosmeticCarrierLedger.cs:TrailValue	e59803363459059e	TrailRenderer.cs:CarrierValue	ref>TrailRenderer.cs:CarrierValue
-hop	CursorColorCosmetic.cs:Apply	fc831f1a96d5a7ee	CursorColorCosmetic.cs:ApplyFromStats	ref>CursorColorCosmetic.cs:ApplyFromStats
+hop	CursorColorCosmetic.cs:Apply	da11367444cb3c1b	CursorColorCosmetic.cs:ApplyFromStats	ref>CursorColorCosmetic.cs:ApplyFromStats
 hop	CursorColorCosmetic.cs:ApplyFromStats	a06c5d18b7629661	NativeUI.cs:CreateShopRow	delegate[UIFactory.CreateButton(#6=>)/=>{}/=>{}]>NativeUI.cs:CreateShopRow
 hop	CursorColorCosmetic.cs:ApplyFromStats	d7d58195a75d3f5f	ApiClient.cs:FetchPlayerStats	delegate[Plugin.Instance.StartCoroutine(#0)/GetRequest(#1=>)/=>{}]>ApiClient.cs:FetchPlayerStats
 hop	CursorColorCosmetic.cs:ApplyFromStats	dfd4b8d0c646d6ad	CursorColorCosmetic.cs:SetShape	ref>CursorColorCosmetic.cs:SetShape
@@ -35404,7 +35404,7 @@ hop	Plugin.cs:OnPickerPropertiesChanged	0cf1f0292a391c19	PlayerColorCosmetic.cs:
 hop	Plugin.cs:OnPlayerLeftRoom	4736cf66d84ee524	TeamHoldExpiry.cs:VanillaLeave	ref>TeamHoldExpiry.cs:VanillaLeave
 hop	Plugin.cs:OnSpectatorSessionEnd	600c40ba44acdb8f	SpectatorSession.cs:EndSession	ref>SpectatorSession.cs:EndSession
 hop	Plugin.cs:Paint	21a592ec98f6bff3	Plugin.cs:RetintAfterChildrenSpawn	ref>Plugin.cs:RetintAfterChildrenSpawn
-hop	Plugin.cs:Paint	d0db49a47a6b61c1	Plugin.cs:OnPickerPropertiesChanged	ref>Plugin.cs:OnPickerPropertiesChanged
+hop	Plugin.cs:Paint	3aec685d5f00072c	Plugin.cs:OnPickerPropertiesChanged	ref>Plugin.cs:OnPickerPropertiesChanged
 hop	Plugin.cs:PaintFlatBackdrop	269de237e59eae13	Plugin.cs:ApplyBackdropNow	ref>Plugin.cs:ApplyBackdropNow
 hop	Plugin.cs:PickNow	0d7cc45b0ac80e87	Plugin.cs:PublishLocal#2	ref>Plugin.cs:PublishLocal#2
 hop	Plugin.cs:PickNow	447d49acf72f5d09	Plugin.cs:ForShow	ref>Plugin.cs:ForShow
@@ -35432,6 +35432,7 @@ hop	Plugin.cs:QuitThenKill	bf535f29cea4453f	Plugin.cs:TickTestQuit	ref>Plugin.cs
 hop	Plugin.cs:RawNamesFor	242bd5a309b7038e	CardSnapshot.cs:ResolveCard	ref>CardSnapshot.cs:ResolveCard
 hop	Plugin.cs:RawNamesFor	79d3177d93e5212e	NativeUI.cs:BuildCellStatLine	ref>NativeUI.cs:BuildCellStatLine
 hop	Plugin.cs:RawNamesFor	db91479e804bf4c3	NativeUI.cs:ShowCardPreview	ref>NativeUI.cs:ShowCardPreview
+hop	Plugin.cs:RecolourLiveParticles	5a1e5c8946e3e776	Plugin.cs:Paint	ref>Plugin.cs:Paint
 hop	Plugin.cs:RegionCheck	25fa800e0411a838	Plugin.cs:IssueJoinOrCreate	ref>Plugin.cs:IssueJoinOrCreate
 hop	Plugin.cs:RepeatedCompetitiveCosmeticReapply	a9a52e2ed65abf6e	Plugin.cs:OnJoinedRoom	ref[Plugin.Instance.StartCoroutine(#0)]>Plugin.cs:OnJoinedRoom
 hop	Plugin.cs:ResendLocalFaceForSpectator	af5569ac974dde4d	Plugin.cs:OnPlayerEnteredRoom	ref[Plugin.Instance.StartCoroutine(#0)]>Plugin.cs:OnPlayerEnteredRoom
@@ -35442,7 +35443,7 @@ hop	Plugin.cs:RestoreVanillaBackdrop	473c84ea22c95e80	Plugin.cs:Postfix#21	ref>P
 hop	Plugin.cs:RestoreVanillaBackdrop	d1a44a6e42bca73e	Plugin.cs:Prefix#26	ref>Plugin.cs:Prefix#26
 hop	Plugin.cs:RestoreVanillaSky	a41f9468332aaa13	Plugin.cs:DelayedRestoreVanillaSky	ref>Plugin.cs:DelayedRestoreVanillaSky
 hop	Plugin.cs:RestoreVanillaSky	d233165351463056	Plugin.cs:ApplyBackdropNow	ref>Plugin.cs:ApplyBackdropNow
-hop	Plugin.cs:RetintAfterChildrenSpawn	290dd6e6cc8c5e4b	Plugin.cs:Postfix#8	ref[Plugin.Instance.StartCoroutine(#0)]>Plugin.cs:Postfix#8
+hop	Plugin.cs:RetintAfterChildrenSpawn	efe280bfab76eab6	Plugin.cs:Postfix#8	ref[Plugin.Instance.StartCoroutine(#0)]>Plugin.cs:Postfix#8
 hop	Plugin.cs:RetintLiveParticles	1b8f1c690ec72e19	Plugin.cs:ApplyPhysicalTintsForSku	ref>Plugin.cs:ApplyPhysicalTintsForSku
 hop	Plugin.cs:RetintLiveParticles	4c468a490d051117	Plugin.cs:RestoreVanillaSky	ref>Plugin.cs:RestoreVanillaSky
 hop	Plugin.cs:RetintLiveParticles	933b3238d9575c09	Plugin.cs:RestoreVanillaArtParts	ref>Plugin.cs:RestoreVanillaArtParts
@@ -42517,6 +42518,7 @@ hop	PortraitRenderDance.cs:Max	89f0929f3448b8f4	CompetitiveUI.cs:EnsureTipLayout
 hop	PortraitRenderDance.cs:Max	8a67f611aa25b9e3	ApiClient.cs:FetchFfaLobbies	entry[Plugin.Instance.StartCoroutine(#0)/GetRequest(#1=>)/=>{}/FfaOpenLobbyEntry.max_players]>ApiClient.cs:FetchFfaLobbies
 hop	PortraitRenderDance.cs:Max	8bc963c438ff1c5a	DanceStep0Probe.cs:BodyProbe	ref[Mathf.Max(#1)]>DanceStep0Probe.cs:BodyProbe
 hop	PortraitRenderDance.cs:Max	8c49ecbf24795b5d	CardSnapshot.cs:TryComputeBandBounds	ref>CardSnapshot.cs:TryComputeBandBounds
+hop	PortraitRenderDance.cs:Max	8cc189d9fe3484ba	Plugin.cs:RecolourLiveParticles	ref>Plugin.cs:RecolourLiveParticles
 hop	PortraitRenderDance.cs:Max	8e11484160e0ea5f	FfaLateEntry.cs:OnSelfKept	ref[FfaReadmit.PostEntered(#0)]>FfaLateEntry.cs:OnSelfKept
 hop	PortraitRenderDance.cs:Max	8e4a30cfa8e10d7c	MailUI.cs:OnStatus	ref>MailUI.cs:OnStatus
 hop	PortraitRenderDance.cs:Max	91162cac2e50974f	TeamColorIdentity.cs:ReadableOnDark	ref[Mathf.Max(#1)]>TeamColorIdentity.cs:ReadableOnDark
@@ -64992,8 +64994,8 @@ member	CosmeticCarrierLedger.cs:CursorValue	d46dcee0a03fe69d
 member	CosmeticCarrierLedger.cs:Join	274eb0fb0951b0f7
 member	CosmeticCarrierLedger.cs:NametagValue	04b3f0a30d9f8f0c
 member	CosmeticCarrierLedger.cs:TrailValue	1ff37c50d32896c3
-member	CursorColorCosmetic.cs:Apply	e8ab037f3c1f3dd3
-member	CursorColorCosmetic.cs:ApplyFromStats	be1dbd53a77e9f78
+member	CursorColorCosmetic.cs:Apply	8afe14df2a1c6603
+member	CursorColorCosmetic.cs:ApplyFromStats	d79257d9a0d53ffc
 member	CursorColorCosmetic.cs:BuildArrowTex	114a592e1cd3496a
 member	CursorColorCosmetic.cs:BuildFromMask	20c0c8ecec3d4ca7
 member	CursorColorCosmetic.cs:CarrierValue	059b020cfeaca00a
@@ -66857,7 +66859,7 @@ member	NametagGlowRenderer.cs:PollLoop	72d4a89909330aef
 member	NametagGlowRenderer.cs:RestoreAllLabels	6511f7bac7139de9
 member	NametagGlowRenderer.cs:ScanAndApply	b2eac5e58a1e026a
 member	NametagStyler.cs:CarrierValue	fd1230ee92a0fd97
-member	NametagStyler.cs:PublishToPhoton	5d20e9c1eb3542e4
+member	NametagStyler.cs:PublishToPhoton	460a0d78c392688b
 member	NametagStyler.cs:Wrap	6f187c04ab5c1402
 member	NametagStyler.cs:WrapForSku	adf77499bf055c64
 member	NametagStyler.cs:_BuildGradientLerp	dd3d59f395aaad00
@@ -68074,7 +68076,7 @@ member	PlayerColorCosmetic.cs:OnPlayerPropertiesChanged	b6c7d29f022b0b11
 member	PlayerColorCosmetic.cs:OnRoundStart	40477a791b5bf743
 member	PlayerColorCosmetic.cs:OnShowPlayerColorsToggled	df3d1ed5a1c46f85
 member	PlayerColorCosmetic.cs:PortraitFrameReady	44de526179fe78e5
-member	PlayerColorCosmetic.cs:PublishLocalProps	9fa4b05730c8706c
+member	PlayerColorCosmetic.cs:PublishLocalProps	f566af34bc9439ae
 member	PlayerColorCosmetic.cs:ReapplyForActor	9e15ac7c1c472a63
 member	PlayerColorCosmetic.cs:RevertOnState	08131eefd084beb7
 member	PlayerColorCosmetic.cs:RevertPlayer	e0089c9da1488cbe
@@ -68176,13 +68178,13 @@ member	Plugin.cs:OnJoinedRoom	a87e8adc209328bb
 member	Plugin.cs:OnLeftRoom	4fcffc01a3b6a3e4
 member	Plugin.cs:OnMasterClientSwitched	9ad17aa991871e47
 member	Plugin.cs:OnPickPhaseObserved	01d538c233e477fc
-member	Plugin.cs:OnPickerPropertiesChanged	858d399578741bdc
+member	Plugin.cs:OnPickerPropertiesChanged	45cba00292e25653
 member	Plugin.cs:OnPlayerEnteredRoom	e0675394cba2b6d1
 member	Plugin.cs:OnPlayerLeftRoom	b2f16b0a251aa4d9
 member	Plugin.cs:OnPlayerPropertiesUpdate	e28688928f455d17
 member	Plugin.cs:OnRoomPropertiesUpdate	96a8bdb376460c92
 member	Plugin.cs:OnSpectatorSessionEnd	ce0a70b8fe4d1e7c
-member	Plugin.cs:Paint	69116410bfc49ee3
+member	Plugin.cs:Paint	f26d2b355c42c9e5
 member	Plugin.cs:PaintFlatBackdrop	6910d26941d4eb39
 member	Plugin.cs:PickNow	3953148d7870d7e7
 member	Plugin.cs:PlayersNeeded	0476f27f6fc93995
@@ -68203,8 +68205,8 @@ member	Plugin.cs:Postfix#3	5af5c7f905d6177e
 member	Plugin.cs:Postfix#4	540c21f965945bc2
 member	Plugin.cs:Postfix#6	9ac1c527b1d0a259
 member	Plugin.cs:Postfix#7	a5d5bd38a2ecd99f
-member	Plugin.cs:Postfix#8	0c69aa191d33912e
-member	Plugin.cs:Postfix#9	2ed67bab39eca80a
+member	Plugin.cs:Postfix#8	722f001a79f1eee6
+member	Plugin.cs:Postfix#9	330507e0ec586bb2
 member	Plugin.cs:Prefix#1	0dcb4114b5e541c6
 member	Plugin.cs:Prefix#10	b72e82f645c4420d
 member	Plugin.cs:Prefix#11	5f3478cb9b473a3d
@@ -68228,6 +68230,7 @@ member	Plugin.cs:PublishLocal#1	a5df75d9d1df95f6
 member	Plugin.cs:PublishLocal#2	edead0a396d30700
 member	Plugin.cs:QuitThenKill	c3206103500d15da
 member	Plugin.cs:RawNamesFor	7a3707127dd95667
+member	Plugin.cs:RecolourLiveParticles	a24300597f4f0736
 member	Plugin.cs:RegionCheck	534d3e4847b60710
 member	Plugin.cs:RepeatedCompetitiveCosmeticReapply	44c7c500a48e644c
 member	Plugin.cs:ResendLocalFaceForSpectator	10621521d2ac988e
@@ -68235,7 +68238,7 @@ member	Plugin.cs:ResolveTestSkin	a9fab9fa0ebf59ad
 member	Plugin.cs:RestoreVanillaArtParts	a78e37b0ebbd9b90
 member	Plugin.cs:RestoreVanillaBackdrop	c553704ead04d5ea
 member	Plugin.cs:RestoreVanillaSky	cf248177d15d26e3
-member	Plugin.cs:RetintAfterChildrenSpawn	83986805b7f8cf21
+member	Plugin.cs:RetintAfterChildrenSpawn	c1a90e5573766612
 member	Plugin.cs:RetintLiveParticles	5920c88a55d6d7dc
 member	Plugin.cs:Run	807fafc50b0b7afc
 member	Plugin.cs:RunSweep	ace8d9be5c76a162
@@ -69611,7 +69614,7 @@ member	TrailRenderer.cs:OnMatchEnd	af426ead422163b0
 member	TrailRenderer.cs:OnMatchStart	04b122766f6086fd
 member	TrailRenderer.cs:OnPlayerPropertiesChanged	ad70649d829d9da5
 member	TrailRenderer.cs:OnPlayerPropertiesUpdate	63d7f9b515d58e4f
-member	TrailRenderer.cs:PublishLocalProps	1d48f72577d154e7
+member	TrailRenderer.cs:PublishLocalProps	e099bcbf7636706b
 member	TrailRenderer.cs:ReattachForActor	43b3bb40c3778b99
 member	TrailRenderer.cs:SetShowTrails	1a70055acb5ec98a
 member	UnicodeFallback.cs:AddAssets	f2a3671316133da6
@@ -69677,7 +69680,7 @@ member	VanillaFixes.cs:BeforeToggle	4b19549aedc383e6
 member	VanillaFixes.cs:BeforeTransitionDamage	aeb45294f38bf646
 member	VanillaFixes.cs:BeforeTransitionPlayerDied	557b1ccf8b27ec43
 member	VanillaFixes.cs:BeforeUpdate	78a43e6b344af849
-member	VanillaFixes.cs:CheckLocalNickname	7a411f2e69b34dd6
+member	VanillaFixes.cs:CheckLocalNickname	b8f0fa70f481fb2b
 member	VanillaFixes.cs:ClassifyLoopVoice	bc717c9725afeff2
 member	VanillaFixes.cs:Cleanup#1	58faaa7f9a985f3b
 member	VanillaFixes.cs:Cleanup#10	9915dbd0264ab2fd
@@ -69792,12 +69795,12 @@ sink	CompetitiveUI.cs:DrawChatInput	2	1	f2b16c849c09700e	attached	CompetitiveUI.
 sink	CompetitiveUI.cs:DrawDanceWheel	2	1	75517cbac7d14c37	attached	CompetitiveUI.cs:DrawUI
 sink	CompetitiveUI.cs:DrawInputOverlay	2	1	5412be93d9435cb0	attached	CompetitiveUI.cs:DrawUI
 sink	CompetitiveUI.cs:DrawQuickChat	2	1	e23b05213e46a588	attached	CompetitiveUI.cs:DrawUI
-sink	InfoLibrary.cs:ControlsOutro	5931	57438	c9375245cbf6aad2	attached	BroadcastHud.cs:Draw,CompetitiveUI.cs:DrawUI,GameStateWatcher.cs:PollMatchState,Keybinds.cs:CommitRows,NativeUI.Keybinds.cs:KeybindPaintAll,NativeUI.Settings.cs:SettingsRenderPane,NativeUI.Settings.cs:SettingsShowExtras,NativeUI.cs:BuildPage,NativeUI.cs:RefreshCurrentTab,NativeUI.cs:SelectInfoArticle
-sink	InfoLibrary.cs:Cosmetics	5931	57438	c9375245cbf6aad2	attached	BroadcastHud.cs:Draw,CompetitiveUI.cs:DrawUI,GameStateWatcher.cs:PollMatchState,Keybinds.cs:CommitRows,NativeUI.Keybinds.cs:KeybindPaintAll,NativeUI.Settings.cs:SettingsRenderPane,NativeUI.Settings.cs:SettingsShowExtras,NativeUI.cs:BuildPage,NativeUI.cs:RefreshCurrentTab,NativeUI.cs:SelectInfoArticle
-sink	InfoLibrary.cs:Spectating	5931	57438	c9375245cbf6aad2	attached	BroadcastHud.cs:Draw,CompetitiveUI.cs:DrawUI,GameStateWatcher.cs:PollMatchState,Keybinds.cs:CommitRows,NativeUI.Keybinds.cs:KeybindPaintAll,NativeUI.Settings.cs:SettingsRenderPane,NativeUI.Settings.cs:SettingsShowExtras,NativeUI.cs:BuildPage,NativeUI.cs:RefreshCurrentTab,NativeUI.cs:SelectInfoArticle
-sink	InfoLibrary.cs:StartHere	5931	57438	c9375245cbf6aad2	attached	BroadcastHud.cs:Draw,CompetitiveUI.cs:DrawUI,GameStateWatcher.cs:PollMatchState,Keybinds.cs:CommitRows,NativeUI.Keybinds.cs:KeybindPaintAll,NativeUI.Settings.cs:SettingsRenderPane,NativeUI.Settings.cs:SettingsShowExtras,NativeUI.cs:BuildPage,NativeUI.cs:RefreshCurrentTab,NativeUI.cs:SelectInfoArticle
-sink	InfoLibrary.cs:VanillaBugs	5931	57438	c9375245cbf6aad2	attached	BroadcastHud.cs:Draw,CompetitiveUI.cs:DrawUI,GameStateWatcher.cs:PollMatchState,Keybinds.cs:CommitRows,NativeUI.Keybinds.cs:KeybindPaintAll,NativeUI.Settings.cs:SettingsRenderPane,NativeUI.Settings.cs:SettingsShowExtras,NativeUI.cs:BuildPage,NativeUI.cs:RefreshCurrentTab,NativeUI.cs:SelectInfoArticle
-sink	InfoViz.cs:BuildKeyboard	5931	57438	c9375245cbf6aad2	attached	BroadcastHud.cs:Draw,CompetitiveUI.cs:DrawUI,GameStateWatcher.cs:PollMatchState,Keybinds.cs:CommitRows,NativeUI.Keybinds.cs:KeybindPaintAll,NativeUI.Settings.cs:SettingsRenderPane,NativeUI.Settings.cs:SettingsShowExtras,NativeUI.cs:BuildPage,NativeUI.cs:RefreshCurrentTab,NativeUI.cs:SelectInfoArticle
+sink	InfoLibrary.cs:ControlsOutro	5932	57440	8fe755442792617d	attached	BroadcastHud.cs:Draw,CompetitiveUI.cs:DrawUI,GameStateWatcher.cs:PollMatchState,Keybinds.cs:CommitRows,NativeUI.Keybinds.cs:KeybindPaintAll,NativeUI.Settings.cs:SettingsRenderPane,NativeUI.Settings.cs:SettingsShowExtras,NativeUI.cs:BuildPage,NativeUI.cs:RefreshCurrentTab,NativeUI.cs:SelectInfoArticle
+sink	InfoLibrary.cs:Cosmetics	5932	57440	8fe755442792617d	attached	BroadcastHud.cs:Draw,CompetitiveUI.cs:DrawUI,GameStateWatcher.cs:PollMatchState,Keybinds.cs:CommitRows,NativeUI.Keybinds.cs:KeybindPaintAll,NativeUI.Settings.cs:SettingsRenderPane,NativeUI.Settings.cs:SettingsShowExtras,NativeUI.cs:BuildPage,NativeUI.cs:RefreshCurrentTab,NativeUI.cs:SelectInfoArticle
+sink	InfoLibrary.cs:Spectating	5932	57440	8fe755442792617d	attached	BroadcastHud.cs:Draw,CompetitiveUI.cs:DrawUI,GameStateWatcher.cs:PollMatchState,Keybinds.cs:CommitRows,NativeUI.Keybinds.cs:KeybindPaintAll,NativeUI.Settings.cs:SettingsRenderPane,NativeUI.Settings.cs:SettingsShowExtras,NativeUI.cs:BuildPage,NativeUI.cs:RefreshCurrentTab,NativeUI.cs:SelectInfoArticle
+sink	InfoLibrary.cs:StartHere	5932	57440	8fe755442792617d	attached	BroadcastHud.cs:Draw,CompetitiveUI.cs:DrawUI,GameStateWatcher.cs:PollMatchState,Keybinds.cs:CommitRows,NativeUI.Keybinds.cs:KeybindPaintAll,NativeUI.Settings.cs:SettingsRenderPane,NativeUI.Settings.cs:SettingsShowExtras,NativeUI.cs:BuildPage,NativeUI.cs:RefreshCurrentTab,NativeUI.cs:SelectInfoArticle
+sink	InfoLibrary.cs:VanillaBugs	5932	57440	8fe755442792617d	attached	BroadcastHud.cs:Draw,CompetitiveUI.cs:DrawUI,GameStateWatcher.cs:PollMatchState,Keybinds.cs:CommitRows,NativeUI.Keybinds.cs:KeybindPaintAll,NativeUI.Settings.cs:SettingsRenderPane,NativeUI.Settings.cs:SettingsShowExtras,NativeUI.cs:BuildPage,NativeUI.cs:RefreshCurrentTab,NativeUI.cs:SelectInfoArticle
+sink	InfoViz.cs:BuildKeyboard	5932	57440	8fe755442792617d	attached	BroadcastHud.cs:Draw,CompetitiveUI.cs:DrawUI,GameStateWatcher.cs:PollMatchState,Keybinds.cs:CommitRows,NativeUI.Keybinds.cs:KeybindPaintAll,NativeUI.Settings.cs:SettingsRenderPane,NativeUI.Settings.cs:SettingsShowExtras,NativeUI.cs:BuildPage,NativeUI.cs:RefreshCurrentTab,NativeUI.cs:SelectInfoArticle
 sink	Keybinds.cs:ApplyJoin	5	4	116d269dcc76ee4c	attached	Keybinds.cs:CommitRows
 sink	Keybinds.cs:ApplyReady	5	4	3bb007885d986e1f	attached	Keybinds.cs:CommitRows
 sink	Keybinds.cs:OnRoundStart	9	9	fc1f4abd24c0772a	attached	GameStateWatcher.cs:PollMatchState
