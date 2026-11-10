@@ -259,6 +259,7 @@ def test_p3_statements_plan_on_their_named_indexes(rig):
 
     plans = rig.run(go())
     want = {("findings", "-"): "seat_evidence_findings_once"}
+    KEY_COL = {"findings": "dedup_key", "pop": "match_id", "daily": "subject_player_id"}
     for src in ae.EV_SOURCES:
         spec = ae._SECTION_SPEC[src]
         want[("pop", src)] = "ix_%s_match" % spec["contrib"]
@@ -271,5 +272,8 @@ def test_p3_statements_plan_on_their_named_indexes(rig):
         assert all(n["Node Type"] in p2.PERMITTED_SCANS for n in scans), (name, [
             (n["Node Type"], n.get("Relation Name"), n.get("Index Name")) for n in scans])
         assert {n["Index Name"] for n in scans if "Index Name" in n} == {want[name]}, name
+        # the index is searched by the statement's key column, not only its prefix
+        conds = " ".join(n.get("Index Cond", "") for n in scans)
+        assert KEY_COL[name[0]] in conds, (name, conds)
     print("GATE p3-4 plans: %d phase-3 statements on their named indexes, no Seq Scan of an "
           "evidence table, %d distractor rows" % (len(plans), p2.DISTRACTORS))
