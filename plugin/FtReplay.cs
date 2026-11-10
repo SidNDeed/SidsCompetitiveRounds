@@ -5,7 +5,8 @@ using System.IO;
 namespace CompetitiveRounds
 {
     /// <summary>FrameTime F18, the named switch (build brief section 5). Under reading A (the sentinel's f18=A,
-    /// the default), at each game over, outside live combat, one recorded server answer is fed to SeatEvidence's
+    /// the default), once per game over, from FtSchedule at a frame boundary that read the frame not live (or from
+    /// FtSchedule.GameStart in a frame that started not live), one recorded server answer is fed to SeatEvidence's
     /// Answer path against a scratch copy of the queue file under BepInEx/frametime/replay/, and the answer's
     /// handling is timed in its own span of kind REPLAY, reported apart from the between-point figure (the
     /// answer_replay line and the census span rows). While Running, SeatEvidence's QueuePath names the scratch
@@ -39,6 +40,14 @@ namespace CompetitiveRounds
             catch (Exception ex) { result = "error_" + ex.GetType().Name; }
             finally { Running = false; }
             Plugin.Log.LogInfo("[FRAME-TIME] answer_replay g=" + game + " ticks=" + ticks + " result=" + result);
+        }
+
+        /// <summary>FtSchedule.GameStart found this game's replay still owed in a frame that started live: no replay
+        /// call is made, and the game's line says so (F18 reads any result other than settled as a failure).</summary>
+        internal static void Skip(int game)
+        {
+            if (FtConfig.F18 != "A" || !FtConfig.Present) return;
+            Plugin.Log.LogInfo("[FRAME-TIME] answer_replay g=" + game + " ticks=0 result=skipped_live");
         }
     }
 }

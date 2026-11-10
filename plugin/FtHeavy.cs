@@ -14,7 +14,7 @@ namespace CompetitiveRounds
     /// whatever the frame's moment says (a stale non-live moment cannot hide a live call): at_call
     /// counts calls with combat live at the call; edge counts calls in a frame that started live and
     /// whose combat ended before the call, read from FtSchedule.FrameLive (set at the frame's boundary and never
-    /// rewritten inside it: GameOver sets Moment before its own heavy calls, round-2 MEDIUM, FtHeavy.cs:44). V4 3.9's rule is that no heavy work runs in a live-combat
+    /// rewritten inside it: FtSchedule.GameOver sets Moment before OnGameOver's heavy calls, round-2 MEDIUM, FtHeavy.cs:44). V4 3.9's rule is that no heavy work runs in a live-combat
     /// frame, so B3 judges both (round-1 MEDIUM, FtHeavy.cs:39). The
     /// hashing thread's run is stamped (Stopwatch ticks) so the parser can test its interval against
     /// every point's live interval. Main thread only; a call from another thread is counted as off.</summary>

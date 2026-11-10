@@ -506,8 +506,9 @@ def records_missing(recs, last_game=LAST_GAME):
             if n != q.get("windows", -1):
                 miss.append("point %s: %d window lines, the point line counts %s" % (q["pt"], n, q.get("windows")))
                 break
-    # answer_replay (round-3 MEDIUM ft_parse.py:1461): under reading A, FtSchedule.GameOver runs FtReplay for every
-    # game, so each game 0..last has exactly one replay line; under reading B there is none
+    # answer_replay (round-3 MEDIUM ft_parse.py:1461): under reading A, FtSchedule writes one replay line after a game
+    # over, at the next boundary that reads not live or at the next game start (FtReplay.Run, or FtReplay.Skip's
+    # result=skipped_live, which f18 fails), so each game 0..last needs exactly one; under reading B there is none
     readings = set(r.get("f18") for r in recs if r["kind"] == "settled" and r.get("g", -1) >= 0)
     for g in range(0, last_game + 1):
         n = sum(1 for r in recs if r["kind"] == "answer_replay" and r.get("g") == g)

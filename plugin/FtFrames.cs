@@ -15,8 +15,8 @@ namespace CompetitiveRounds
     /// <summary>FrameTime M2 and M7 (METHOD-V4.md 3.1), first form: per-point and
     /// per-window integer sums of the measured live frames. A point's measured frames
     /// start at its second live frame (the first carries the arm switch and the zero-state
-    /// check) and end at its last full live frame: the frame in which combat ended is excluded
-    /// and counted (excl on the point line). sP and psP are the process's cycles over all threads
+    /// check) and end at its last full live frame: the point's closing frame (combat ended, or
+    /// FtSchedule.GameOver ran, inside it; FtSchedule.ClosingFrame) is excluded and counted (excl on the point line). sP and psP are the process's cycles over all threads
     /// (unplanted and planted frames). At the next point's start in the same game a between line
     /// gives the between-point spans' ticks and calls since this point ended, with this point's arm
     /// (V4 3.9: between-point costs are reported from transitions after ON points). Every 120 measured frames a window line;
