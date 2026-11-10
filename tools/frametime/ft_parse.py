@@ -506,9 +506,11 @@ def records_missing(recs, last_game=LAST_GAME):
             if n != q.get("windows", -1):
                 miss.append("point %s: %d window lines, the point line counts %s" % (q["pt"], n, q.get("windows")))
                 break
-    # answer_replay (round-3 MEDIUM ft_parse.py:1461): under reading A, FtSchedule writes one replay line after a game
-    # over, at the next boundary that reads not live or at the next game start (FtReplay.Run, or FtReplay.Skip's
-    # result=skipped_live, which f18 fails), so each game 0..last needs exactly one; under reading B there is none
+    # answer_replay (round-3 MEDIUM ft_parse.py:1461): under reading A, FtSchedule writes one replay line per game
+    # over: a replay call (FtReplay.Run) at the next boundary that reads not live or at the next game start, or a skip
+    # line (FtReplay.Skip, result=skipped_live or skipped_quit) where no call may run. Each game 0..last needs exactly
+    # one; f18() fails a skip only for a game it reads (g >= first_game), so game 0's counts here only. Under reading
+    # B there is none
     readings = set(r.get("f18") for r in recs if r["kind"] == "settled" and r.get("g", -1) >= 0)
     for g in range(0, last_game + 1):
         n = sum(1 for r in recs if r["kind"] == "answer_replay" and r.get("g") == g)
@@ -555,7 +557,7 @@ RECORDS = {
     "menu": "menu_check(): one per segment 1..of, and no menu point line without one (menu runs only)",
     "menu_done": "menu_check(): exactly one, its cycles each with a menu fhat calibration, one settled line after it",
     "disarmed": "event: its presence fails VR6; its absence is normal and is judged on a complete log",
-    "game": "event (FAILURE_EVENTS): a game start or game over failure; its presence makes the sitting incomplete",
+    "game": "event (FAILURE_EVENTS): a game start, game over or game end failure; its presence makes the sitting incomplete",
     "start": "event (FAILURE_EVENTS): the FrameTime start failed; its presence makes the run incomplete",
     "clock": "event (FAILURE_EVENTS) when refused: the clock never installed; 'clock installed' is informational",
 }
@@ -564,7 +566,8 @@ RECORDS = {
 # incomplete (records_missing) and fails the menu check, so a run whose game start or game over threw midway is never
 # judged on what it happened to write. (kind, head or None for every line of the kind, the writer)
 FAILURE_EVENTS = (
-    ("game", None, "GameStateWatcher: FtSchedule.GameStart or GameOver threw ('game start failed', 'game over failed')"),
+    ("game", None, "GameStateWatcher: FtSchedule.GameStart, GameOver or MatchEnded threw ('game start failed', "
+                   "'game over failed', 'game end failed')"),
     ("start", None, "Plugin: the FrameTime start threw ('start failed')"),
     ("clock", "refused:", "FtClock: a player-loop phase was missing, so the clock never installed ('clock refused')"),
     # ruling R6-A3.11.92 (3): the room gate's churn-timer step threw, so the sitting's isolation is not proven

@@ -940,6 +940,8 @@ def test_every_emitted_kind_is_read_or_named():
 
 FAILURE_LINES = ("[Warning:CompetitiveRounds] [FRAME-TIME] game over failed: boom",
                  "[Warning:CompetitiveRounds] [FRAME-TIME] game start failed: boom",
+                 # ruling R6-A3.11.100 (3)(b): GameStateWatcher's MatchEnded hooks
+                 "[Warning:CompetitiveRounds] [FRAME-TIME] game end failed: boom",
                  "[Warning:CompetitiveRounds] [FRAME-TIME] start failed: boom",
                  "[Warning:CompetitiveRounds] [FRAME-TIME] clock refused: player-loop phase missing (EarlyUpdate 1)",
                  # ruling R6-A3.11.92 (3)
@@ -1454,6 +1456,23 @@ def test_f18_reading_a_needs_a_settled_replay_per_game():
     assert not ok and any("result kept" in w for w in why), why
     ok, _, why, _ = P.f18(P.read(_log(games=4, replay=None)))
     assert not ok and any("no answer_replay line" in w for w in why), why
+
+
+@pytest.mark.parametrize("result", ["skipped_quit", "skipped_live"])
+def test_f18_fails_a_skipped_replay_that_records_missing_counts(result):
+    # ruling R6-A3.11.100 (3)(a)1: the quit flush (or the settle cap in a live frame) writes FtReplay.Skip's line, one
+    # answer_replay line for the game: records_missing() is satisfied by it and f18() fails it
+    good = _log(games=4)
+    old = re.search(r"\[FRAME-TIME\] answer_replay g=2 ticks=\d+ result=settled", good).group(0)
+    log = good.replace(old, "[FRAME-TIME] answer_replay g=2 ticks=0 result=" + result)
+    assert log != good and log.count("answer_replay g=2 ") == 1
+    ok, _, why, _ = P.f18(P.read(log))
+    assert not ok and "game 2 replay result %s" % result in why, why
+    assert not [m for m in P.records_missing(P.read(log), last_game=3) if "answer_replay" in m]
+    assert not [m for m in P.records_missing(P.read(good), last_game=3) if "answer_replay" in m]
+    dropped = good.replace(old + "\n", "")
+    assert [m for m in P.records_missing(P.read(dropped), last_game=3) if "answer_replay" in m]
+    assert P.f18(P.read(good))[0]
 
 
 def test_f18_reading_b_has_no_replay_and_says_unmeasured():

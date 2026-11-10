@@ -15,7 +15,7 @@ namespace CompetitiveRounds
     /// does [F04]. Lesson 221: the loop exists only in this configuration, draws a banner every frame while it
     /// drives, logs at arming and disarming, keeps its schedule on Stopwatch time (never the scaled Time.time),
     /// drives only while FtArm.Armed holds, disarms on Escape, and after game LAST_GAME disarms, leaves the room
-    /// and logs "sitting complete". Its own cost runs in both arms (base load, not a component).</summary>
+    /// and, once that game's lines are flushed, logs "sitting complete". Its own cost runs in both arms (base load, not a component).</summary>
     internal static class FtDrive
     {
         internal const int LAST_GAME = 16;
@@ -152,13 +152,27 @@ namespace CompetitiveRounds
             catch (Exception ex) { Plugin.Log.LogWarning("[FRAME-TIME] self-drive spawn tick failed: " + ex.Message); }
         }
 
-        /// <summary>FtSchedule.GameOver: after the last measured game the sitting ends.</summary>
+        /// <summary>FtSchedule.GameOver: after the last measured game the sitting ends. Complete is set here, where
+        /// FtRematch.Hold reads it at the Continue prompt; the "sitting complete" line waits for the game's flush
+        /// (LogComplete, ruling R6-A3.11.100 (3)(a)2).</summary>
         internal static void GameOver(int game)
         {
             if (game < LAST_GAME || Complete) return;
             Complete = true;
-            Plugin.Log.LogInfo("[FRAME-TIME] sitting complete g=" + game);
+            CompleteGame = game;
             try { NetworkConnectionHandler.instance?.NetworkRestart(); } catch { }
+        }
+
+        internal static int CompleteGame = int.MinValue;
+        private static bool _completeLogged;
+
+        /// <summary>FtSchedule.FlushGame, after the flush of CompleteGame: the line the laptop seat's script waits
+        /// for (frame_time_seat.ps1), written once.</summary>
+        internal static void LogComplete(int game)
+        {
+            if (_completeLogged) return;
+            _completeLogged = true;
+            Plugin.Log.LogInfo("[FRAME-TIME] sitting complete g=" + game);
         }
 
         internal static void Banner()

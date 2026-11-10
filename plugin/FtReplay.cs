@@ -5,9 +5,10 @@ using System.IO;
 namespace CompetitiveRounds
 {
     /// <summary>FrameTime F18, the named switch (build brief section 5). Under reading A (the sentinel's f18=A,
-    /// the default), once per game over, from FtSchedule at a frame boundary that read the frame not live (or from
-    /// FtSchedule.GameStart in a frame that started not live), one recorded server answer is fed to SeatEvidence's
-    /// Answer path against a scratch copy of the queue file under BepInEx/frametime/replay/, and the answer's
+    /// the default), each game over gets one answer_replay line: either a replay call, made from FtSchedule at a
+    /// frame boundary that read the frame not live (or from FtSchedule.GameStart in a frame that started not live),
+    /// or a skip line (Skip) where FtSchedule may make no call. A replay call feeds one recorded server answer to
+    /// SeatEvidence's Answer path against a scratch copy of the queue file under BepInEx/frametime/replay/, and the answer's
     /// handling is timed in its own span of kind REPLAY, reported apart from the between-point figure (the
     /// answer_replay line and the census span rows). While Running, SeatEvidence's QueuePath names the scratch
     /// copy, its Load and Enqueue refusals let the scratch through, and PromoteSpool is held off, so the real
@@ -42,12 +43,15 @@ namespace CompetitiveRounds
             Plugin.Log.LogInfo("[FRAME-TIME] answer_replay g=" + game + " ticks=" + ticks + " result=" + result);
         }
 
-        /// <summary>FtSchedule.GameStart found this game's replay still owed in a frame that started live: no replay
-        /// call is made, and the game's line says so (F18 reads any result other than settled as a failure).</summary>
-        internal static void Skip(int game)
+        /// <summary>FtSchedule drains a game's owed replay where no replay call may run: GameStart or the settle cap in
+        /// a frame that started live (result skipped_live), or the quit flush (skipped_quit). No call is made, and the
+        /// game's line says why. As f18() reads it, a measured game's line (g at or above its first_game, 1 by
+        /// default) whose result is not settled fails F18; a game-0 line counts only toward records_missing()'s one
+        /// line per game.</summary>
+        internal static void Skip(int game, string result)
         {
             if (FtConfig.F18 != "A" || !FtConfig.Present) return;
-            Plugin.Log.LogInfo("[FRAME-TIME] answer_replay g=" + game + " ticks=0 result=skipped_live");
+            Plugin.Log.LogInfo("[FRAME-TIME] answer_replay g=" + game + " ticks=0 result=" + result);
         }
     }
 }

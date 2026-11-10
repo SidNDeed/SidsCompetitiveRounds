@@ -7484,6 +7484,10 @@ namespace CompetitiveRounds
             if (gameOverReported) return;
             gameOverReported = true;
             isTracking = false;    // the next game re-arms via OnFfaMatchStarted
+#if SCR_FRAMETIME
+            // a tracked match ends here with no OnGameOver (the FFA engine's game over): so does the instrument's game
+            try { FtSchedule.MatchEnded(); } catch (Exception ex) { Plugin.Log.LogWarning("[FRAME-TIME] game end failed: " + ex.Message); }
+#endif
             sessionMatchCount++;
             // FIRST, before the election, before the census, before anything
             // that can await: freeze the game number this report will be filed
@@ -9221,6 +9225,10 @@ namespace CompetitiveRounds
         private static void ResetMatchState()
         {
             isTracking = false;
+#if SCR_FRAMETIME
+            // a tracked match ends here with no OnGameOver (room exit, spectator quiesce): so does the instrument's game
+            try { FtSchedule.MatchEnded(); } catch (Exception ex) { Plugin.Log.LogWarning("[FRAME-TIME] game end failed: " + ex.Message); }
+#endif
             gameOverReported = false;
             oneVOneMatchAtStart = false;
             macroEvidenceDispatched = false;
