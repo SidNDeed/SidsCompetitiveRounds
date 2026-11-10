@@ -104,6 +104,21 @@ def _run(coro):
 # a prerequisite block that drifts into being a copy of the whole schema is a
 # second source of truth for it.
 
+def _findings_table_prereq():
+    """402's prerequisite: seat_evidence_findings exactly as 368 creates it
+    (its CREATE TABLE statement read out of that file, not retyped), with one
+    game-scope row and one sitting-scope row, so the second run is measured
+    beside rows the partial index covers and rows it does not."""
+    text = (SQL_DIR / "368_seat_evidence.sql").read_text(encoding="utf-8")
+    found = re.search(r"CREATE TABLE IF NOT EXISTS seat_evidence_findings \(.*?\n\);", text, re.S)
+    assert found
+    return "\n".join([
+        found.group(0),
+        "INSERT INTO seat_evidence_findings (scope, dedup_key, rule_id, rules_rev, match_id) "
+        "VALUES ('game', 'card k402|a|b', 'zz-r1', 'zz-rev', gen_random_uuid()), "
+        "('sitting', 'card w402', 'zz-r2', 'zz-rev', NULL);"])
+
+
 def _contrib_tables_prereq():
     """401's prerequisites: `players` and the two contribution tables exactly
     as 370 and 390 create them (their CREATE TABLE statements read out of
@@ -263,6 +278,8 @@ PREREQ = {
     # 401 adds a column to combat_contrib and indexes both contribution
     # tables on match_id (_contrib_tables_prereq).
     "401": _contrib_tables_prereq(),
+    # 402 indexes seat_evidence_findings on match_id (_findings_table_prereq).
+    "402": _findings_table_prereq(),
 }
 
 # The tables whose CONTENT this file is responsible for. Fingerprinted
@@ -281,6 +298,7 @@ TABLES = {
     "391": ("dc_events",),
     "396": ("i18n_keys", "i18n_entries", "i18n_proposals"),
     "401": ("card_contrib", "combat_contrib"),
+    "402": ("seat_evidence_findings",),
 }
 
 MIGRATION_FILES = {
@@ -295,6 +313,7 @@ MIGRATION_FILES = {
     "391": "391_dc_events_leave_anchor.sql",
     "396": "396_faq_early_leave_keys.sql",
     "401": "401_contrib_match_provenance.sql",
+    "402": "402_seat_evidence_findings_match.sql",
 }
 
 
