@@ -23,6 +23,7 @@ import gzip
 import hashlib
 import hmac
 import io
+import itertools
 import json
 import os
 import re
@@ -42,6 +43,7 @@ sys.path.insert(0, HERE)
 import asyncpg  # noqa: E402
 import cf_asm  # noqa: E402
 import cf_pg  # noqa: E402
+import discord_collection_harness as dch  # noqa: E402
 import httpx  # noqa: E402
 from fastapi import FastAPI  # noqa: E402
 from sqlalchemy import event  # noqa: E402
@@ -92,6 +94,16 @@ def code(r):
 def sig(steam, action, target):
     return hmac.new(ADMIN_SECRET.encode(), main._admin_canonical(steam, action, str(target)).encode(),
                     hashlib.sha256).hexdigest()
+
+
+# Every Steam id this file makes is synthetic: discord_collection_harness's
+# block (steam_of: account type 0, so never an individual SteamID64, whatever
+# Steam has allocated), one serial per id, so no two meet in a case.
+_STEAM_SERIAL = itertools.count(1)
+
+
+def synthetic_steam():
+    return dch.steam_of(next(_STEAM_SERIAL))
 
 
 class P:
@@ -220,7 +232,7 @@ class Env:
     async def players(self, n, name="plr"):
         out = []
         for i in range(n):
-            steam = "7656119" + ("%010d" % (uuid.uuid4().int % 10 ** 10))
+            steam = synthetic_steam()
             shown = "%s %02d" % (name, i)
             pid = await self.conn.fetchval(
                 "INSERT INTO players (id, steam_id, display_name) VALUES ($3, $1, $2) RETURNING id",
@@ -232,7 +244,7 @@ class Env:
         if with_player:
             p = (await self.players(1, "adm"))[0]
         else:
-            p = P(None, "7656119" + ("%010d" % (uuid.uuid4().int % 10 ** 10)), "")
+            p = P(None, synthetic_steam(), "")
         await self.conn.execute("INSERT INTO admin_users (steam_id, granted_at) VALUES ($1, now())", p.steam)
         return p
 
@@ -513,7 +525,7 @@ def test_r5_r6_r7_what_the_form_is_not_offered_the_submit_refuses(monkeypatch):
         await refused("1v1", plain, bo.steam, (404, "game_not_found"))
         await refused("ffa", ffa, cy.steam, (422, "player_not_in_game"))
         # Rule 5 and ruling (e): a session whose account has no players row lists nothing and reports nothing.
-        nobody = await env.session("7656119" + "9" * 10)
+        nobody = await env.session(synthetic_steam())
         r = await env.games(nobody)
         assert r.status_code == 200 and r.json() == {"games": [], "remaining": rules.REPORTS_PER_DAY}, r.text
         assert code(await env.submit(nobody, "1v1", edge, ann.steam)) == (403, "no_player")
@@ -1030,9 +1042,13 @@ def test_m2_the_log_route_redacts_what_a_stored_log_still_holds(monkeypatch):
     async def body(env):
         adm = await env.admin()
         a, b = await env.players(2)
-        # The scrub asks about public individual SteamID64s alone (account
-        # number below 2**32); the fixture's random ids are one only by chance.
-        steam = str(main._sid64.INDIVIDUAL_MIN + uuid.uuid4().int % 2 ** 32)
+        # A synthetic id, which the production rule refuses. The redaction asks
+        # the database only about ids its rule admits, so the case re-points
+        # that rule at the synthetic block for its own span, as the harness's
+        # cases do (discord_collection_harness.inject_pool_predicate).
+        steam = synthetic_steam()
+        assert not main._sid64.is_individual_id(steam)
+        dch.inject_pool_predicate(monkeypatch)
         assert main._sid64.is_individual_id(steam)
         gone = P(await env.conn.fetchval(
             "INSERT INTO players (id, steam_id, display_name) VALUES ($3, $1, $2) RETURNING id",
