@@ -445,6 +445,7 @@ namespace CompetitiveRounds
                 // most a single Photon roundtrip per PublishToPhoton invocation.
                 string glowSku = GetActiveGlowSku(skus);
                 string typefaceSku = GetActiveTypefaceSku(skus);
+                bool propsWritten = false;
                 try
                 {
                     var props = PhotonNetwork.LocalPlayer.CustomProperties;
@@ -460,10 +461,20 @@ namespace CompetitiveRounds
                         if (fontChanged) upd["cr_nametag_typeface"] = typefaceSku;
                         PhotonNetwork.LocalPlayer.SetCustomProperties(upd);
                     }
+                    propsWritten = true;
                 }
                 catch { }
+                // Ask 3: record what was written (the style list the NickName and
+                // the two props now carry), an empty cache's included, so the next
+                // stats refresh republishes when the cache differs.
+                if (propsWritten)
+                    CosmeticCarrierLedger.Shared.Wrote(CosmeticCarrier.Nametag, CosmeticCarrierLedger.NametagValue(skus));
             }
             catch (Exception ex) { Plugin.Log.LogWarning($"[NAMETAG] Publish failed: {ex.Message}"); }
         }
+
+        /// <summary>Ask 3: this carrier's value in the cache, as PublishToPhoton writes it.</summary>
+        internal static string CarrierValue(ApiClient.PlayerStatsData s) =>
+            CosmeticCarrierLedger.NametagValue(s?.active_nametag_skus);
     }
 }

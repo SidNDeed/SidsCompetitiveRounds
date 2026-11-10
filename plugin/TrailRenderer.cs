@@ -57,6 +57,10 @@ namespace CompetitiveRounds
         // actorNumber → trail GameObject (one per player currently carrying a trail).
         private static readonly Dictionary<int, GameObject> attached = new Dictionary<int, GameObject>();
 
+        /// <summary>Ask 3: this carrier's value in the cache, as PublishLocalProps writes it.</summary>
+        internal static string CarrierValue(ApiClient.PlayerStatsData s) =>
+            CosmeticCarrierLedger.TrailValue(s?.active_trail_sku, s?.active_trail_color, s?.active_trail_price ?? 0);
+
         /// <summary>Publish our own trail selection to Photon so opponents can render it.
         /// Called whenever the local stats refresh, on consent flip, and on room join.</summary>
         public static void PublishLocalProps()
@@ -73,6 +77,9 @@ namespace CompetitiveRounds
                 props[PROP_PRICE] = s?.active_trail_price ?? 0;
                 PhotonNetwork.LocalPlayer.SetCustomProperties(props);
                 Plugin.Log.LogInfo($"[TRAIL] Published local props sku={props[PROP_SKU]} color={props[PROP_COLOR]} price={props[PROP_PRICE]}");
+                // Ask 3: record what was written, an empty cache's "" included,
+                // so the next stats refresh republishes when the cache differs.
+                CosmeticCarrierLedger.Shared.Wrote(CosmeticCarrier.Trail, CarrierValue(s));
             }
             catch (Exception ex) { Plugin.Log.LogWarning($"[TRAIL] PublishLocalProps failed: {ex.Message}"); }
         }

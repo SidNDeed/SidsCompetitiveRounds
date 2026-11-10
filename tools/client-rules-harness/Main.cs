@@ -229,6 +229,16 @@ namespace CompetitiveRounds.Harness
                           }))
                 return 2;
 
+            // Ask 3: what each cosmetic carrier last wrote, and the pick
+            // body's repaint on a colour change.
+            if (!RunSuite("cosmeticcarrier", quiet, ref totalRun, ref totalFail, ref suites,
+                          () =>
+                          {
+                              var r = CosmeticCarrierLedgerCases.SelfTest();
+                              return new Suite(r.Passed + r.Failed, r.Failed, r.Report.ToString());
+                          }))
+                return 2;
+
             string verdict = suites > 0 && totalRun > 0 && totalFail == 0 ? "PASS" : "FAIL";
             Console.WriteLine("client-rules-harness suites=" + suites
                               + " run=" + totalRun + " fail=" + totalFail

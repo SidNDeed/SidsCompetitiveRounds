@@ -7245,6 +7245,14 @@ namespace CompetitiveRounds
         private static string ColorHex(Color c) =>
             $"#{(int)(c.r * 255):X2}{(int)(c.g * 255):X2}{(int)(c.b * 255):X2}";
 
+        // Ask 3 (S2): the pick body on screen, so that a colour property
+        // change landing while the popup is up repaints it. One body exists at
+        // a time: vanilla destroys currentSkin on every Show.
+        private static GameObject _shownBody;
+        private static int _shownTeam, _shownPickerID, _shownActor = -1;
+        private static bool _firstPaintDone;
+        private static Color? _paintedCustom;
+
         public static IEnumerator RetintAfterChildrenSpawn(GameObject visualizer, int pickerTeamID, int pickerID, int pickerActor = -1)
         {
             // NO position mutation here — ever. The clone lives under
@@ -7266,6 +7274,55 @@ namespace CompetitiveRounds
             }
             if (visualizer == null) yield break;
 
+            // Ask 3 (S2): this body is the one on screen until the next Show.
+            _shownBody = visualizer;
+            _shownTeam = pickerTeamID;
+            _shownPickerID = pickerID;
+            _shownActor = pickerActor;
+            _paintedCustom = null;
+            _firstPaintDone = false;
+            Paint(visualizer, pickerTeamID, pickerID, pickerActor, "show");
+            _firstPaintDone = true;
+
+            // v1.30 (#58 "no body, cosmetics still show"): the picker's body IS the
+            // clone's root particle system (learning #96 — vanilla Play()s exactly
+            // one PS at Show-time, before children spawn). If it isn't emitting by
+            // now, kick it — and ALWAYS log its state so the next report tells us
+            // which layer failed instead of guessing. Never Pause/Stop/Clear (#96/#108).
+            try
+            {
+                var bodyPs = visualizer.GetComponent<ParticleSystem>() ?? visualizer.GetComponentInChildren<ParticleSystem>(true);
+                if (bodyPs != null)
+                {
+                    bool wasPlaying = bodyPs.isPlaying;
+                    if (!wasPlaying) bodyPs.Play(true);
+                    Plugin.Log.LogInfo($"[CARDPICK-BODY] pickerID={pickerID} ps={bodyPs.gameObject.name} wasPlaying={wasPlaying} count={bodyPs.particleCount} activeInHierarchy={bodyPs.gameObject.activeInHierarchy} worldPos={bodyPs.transform.position}");
+                }
+                else
+                {
+                    Plugin.Log.LogWarning($"[CARDPICK-BODY] pickerID={pickerID} NO ParticleSystem found on visualizer — body cannot render");
+                }
+            }
+            catch (Exception ex) { Plugin.Log.LogWarning($"[CARDPICK-BODY] check failed: {ex.Message}"); }
+
+        }
+
+        /// <summary>Ask 3 (S2): a player's properties changed. When the change
+        /// carries their colour and their body is the pick body on screen,
+        /// repaint it from the property, as the in-match bodies already do
+        /// (PlayerColorCosmetic.OnPlayerPropertiesChanged calls this). The local
+        /// picker's own republish counts: the pick body shows what the room shows.</summary>
+        internal static void OnPickerPropertiesChanged(int actor, bool colourKeyChanged)
+        {
+            bool alive = _shownBody != null;
+            if (!PickBodyRepaintRules.ShouldRepaint(_shownActor, alive, _firstPaintDone, actor, colourKeyChanged)) return;
+            Paint(_shownBody, _shownTeam, _shownPickerID, _shownActor, "property");
+        }
+
+        /// <summary>Paint the pick body from the picker's colour property (or
+        /// the team colour), at Show and again on a colour property change.</summary>
+        private static void Paint(GameObject visualizer, int pickerTeamID, int pickerID, int pickerActor, string why)
+        {
             TryResolveTeamColors();
             Color desired = (pickerTeamID == 1) ? teamColor1 : teamColor0;
             Color wrongTeam = (pickerTeamID == 1) ? teamColor0 : teamColor1;
@@ -7306,9 +7363,14 @@ namespace CompetitiveRounds
             int sprites = 0, particles = 0, skinFields = 0;
             try
             {
+                // Ask 3 (S2): a repaint also replaces the custom colour this
+                // body's last paint applied, so one custom colour can follow
+                // another and an emptied property restores the team colour.
+                Color? before = _paintedCustom;
                 Func<Color, bool> looksWrong = c =>
-                    hasCustom ? (IsCloseHue(c, teamColor0) || IsCloseHue(c, teamColor1))
-                              : IsCloseHue(c, wrongTeam);
+                    (hasCustom ? (IsCloseHue(c, teamColor0) || IsCloseHue(c, teamColor1))
+                               : IsCloseHue(c, wrongTeam))
+                    || (before.HasValue && IsCloseHue(c, before.Value));
 
                 // 1) Replace SpriteRenderer colors that look like the WRONG team's hue.
                 var sprs = visualizer.GetComponentsInChildren<SpriteRenderer>(true);
@@ -7370,29 +7432,9 @@ namespace CompetitiveRounds
             // resolution, filter miss) indistinguishable from "retint never
             // ran" — the #83/#286 prove-the-surface-is-reached rule. One line
             // per pick, alongside the existing [CARDPICK-DIAG]/[CARDPICK-BODY].
-            Plugin.Log.LogInfo($"[CARDPICK-TINT] pickerID={pickerID} team={pickerTeamID} custom={hasCustom} retinted: sprites={sprites} particles={particles} skinFields={skinFields}");
-
-            // v1.30 (#58 "no body, cosmetics still show"): the picker's body IS the
-            // clone's root particle system (learning #96 — vanilla Play()s exactly
-            // one PS at Show-time, before children spawn). If it isn't emitting by
-            // now, kick it — and ALWAYS log its state so the next report tells us
-            // which layer failed instead of guessing. Never Pause/Stop/Clear (#96/#108).
-            try
-            {
-                var bodyPs = visualizer.GetComponent<ParticleSystem>() ?? visualizer.GetComponentInChildren<ParticleSystem>(true);
-                if (bodyPs != null)
-                {
-                    bool wasPlaying = bodyPs.isPlaying;
-                    if (!wasPlaying) bodyPs.Play(true);
-                    Plugin.Log.LogInfo($"[CARDPICK-BODY] pickerID={pickerID} ps={bodyPs.gameObject.name} wasPlaying={wasPlaying} count={bodyPs.particleCount} activeInHierarchy={bodyPs.gameObject.activeInHierarchy} worldPos={bodyPs.transform.position}");
-                }
-                else
-                {
-                    Plugin.Log.LogWarning($"[CARDPICK-BODY] pickerID={pickerID} NO ParticleSystem found on visualizer — body cannot render");
-                }
-            }
-            catch (Exception ex) { Plugin.Log.LogWarning($"[CARDPICK-BODY] check failed: {ex.Message}"); }
-
+            string lead = why == "show" ? "" : "repaint after a colour change ";
+            Plugin.Log.LogInfo($"[CARDPICK-TINT] {lead}pickerID={pickerID} team={pickerTeamID} custom={hasCustom} retinted: sprites={sprites} particles={particles} skinFields={skinFields}");
+            _paintedCustom = hasCustom ? desired : (Color?)null;
         }
 
         // RGB distance — works for any hue without needing to convert to HSV.

@@ -10313,32 +10313,6 @@ namespace CompetitiveRounds
             ));
         }
 
-        // Signature of the last cosmetic set we pushed to Photon — publish only on change.
-        private static string _lastPublishedCosmeticSig;
-
-        private static string BuildCosmeticSig(PlayerStatsData s)
-        {
-            if (s == null) return "";
-            try
-            {
-                return string.Join("|", new[]
-                {
-                    s.active_trail_sku ?? "", s.active_trail_color ?? "",
-                    s.active_player_color_sku ?? "", s.active_player_color_hex ?? "",
-                    s.active_player_effect_sku ?? "",
-                    s.active_cursor_color_sku ?? "", s.active_cursor_color_hex ?? "",
-                    s.active_title ?? "", s.active_title_color ?? "",
-                    s.display_name ?? "",
-                    s.active_nametag_skus != null ? string.Join(",", s.active_nametag_skus) : "",
-                });
-            }
-            catch { return Guid.NewGuid().ToString(); } // never block a publish on a sig failure
-        }
-
-        /// <summary>Force the next stats refresh to republish cosmetics (used by the
-        /// shop equip paths so a just-equipped item still pushes immediately).</summary>
-        public static void InvalidateCosmeticSig() { _lastPublishedCosmeticSig = null; }
-
         public static void FetchPlayerStats(string steamId, bool force = false)
         {
             if (string.IsNullOrEmpty(steamId) || steamId == "unknown") return;
@@ -10380,21 +10354,40 @@ namespace CompetitiveRounds
                             // player props persist for the room lifetime and the
                             // room-join hooks republish on entry, so identical
                             // re-publishes add nothing.
+                            // Ask 3: the decision is per carrier, against what that
+                            // carrier last WROTE, whichever route wrote it: each
+                            // publisher records in CosmeticCarrierLedger. The old gate
+                            // compared a signature that only this refresh recorded, so
+                            // a room join or a pre-join publish from an empty cache
+                            // left "" in the room, and the refill, matching the
+                            // signature, never replaced it.
                             // Spectator: publishes NOTHING to the watched room
                             // (Codex r1 find 13 — a stats refresh mid-session
-                            // was re-publishing cosmetic props).
-                            string cosmeticSig = RoomActors.LocalIsSpectator
-                                ? _lastPublishedCosmeticSig
-                                : BuildCosmeticSig(CachedPlayerStats);
-                            if (cosmeticSig != _lastPublishedCosmeticSig)
+                            // was re-publishing cosmetic props); the ledger owes a
+                            // spectator no room carrier.
+                            var ledger = CosmeticCarrierLedger.Shared;
+                            bool spectator = RoomActors.LocalIsSpectator;
+                            var cached = CachedPlayerStats;
+                            if (ledger.Owes(CosmeticCarrier.Trail, TrailCosmetic.CarrierValue(cached), spectator))
                             {
-                                _lastPublishedCosmeticSig = cosmeticSig;
                                 try { TrailCosmetic.PublishLocalProps(); } catch { }
+                            }
+                            if (ledger.Owes(CosmeticCarrier.Color, PlayerColorCosmetic.CarrierValue(cached), spectator))
+                            {
                                 try { PlayerColorCosmetic.PublishLocalProps(); } catch { }
+                            }
+                            if (ledger.Owes(CosmeticCarrier.Effect, PlayerEffectCosmetic.CarrierValue(cached), spectator))
+                            {
                                 try { PlayerEffectCosmetic.PublishLocalProps(); } catch { }
-                                // Cursor color is local-only — re-apply the tinted hardware cursor.
+                            }
+                            // Cursor color is local-only — re-apply the tinted hardware cursor.
+                            if (ledger.Owes(CosmeticCarrier.Cursor, CursorColorCosmetic.CarrierValue(cached), spectator))
+                            {
                                 try { CursorColorCosmetic.ApplyFromStats(); } catch { }
-                                // Re-publish nametag styles into LocalPlayer.NickName too.
+                            }
+                            // Re-publish nametag styles into LocalPlayer.NickName too.
+                            if (ledger.Owes(CosmeticCarrier.Nametag, NametagStyler.CarrierValue(cached), spectator))
+                            {
                                 try { NametagStyler.PublishToPhoton(); } catch { }
                             }
                         }

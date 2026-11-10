@@ -1667,3 +1667,72 @@ def test_the_read_gate_guarantees_each_have_a_case(harness_run, name):
     assert line.startswith("[readgate] PASS"), line
     assert " | got=" in line and not line.rstrip().endswith("| got="), (
         "the case printed no measurement: " + line)
+
+
+# -- ask 3: what each cosmetic carrier last wrote (suite cosmeticcarrier) ----
+#
+# CosmeticCarrierLedger.cs records, per carrier, the value its publisher last
+# wrote, so a stats refresh republishes a carrier whenever the cache differs
+# from it, whichever route wrote it; PickBodyRepaintRules decides when a colour
+# change repaints the card-pick body on screen. CosmeticCarrierLedgerSelfTest.cs
+# executes both (the ask 3 design note, sections 3 to 5).
+_COSMETIC_CARRIER_CASES = [
+    'trail: a write from an empty cache, then the refill of the same value, is owed',
+    'color: a write from an empty cache, then the refill of the same value, is owed',
+    'effect: a write from an empty cache, then the refill of the same value, is owed',
+    'nametag: a write from an empty cache, then the refill of the same value, is owed',
+    'cursor: a write from an empty cache, then the refill of the same value, is owed',
+    'trail: the same value after a full write owes nothing',
+    'color: the same value after a full write owes nothing',
+    'effect: the same value after a full write owes nothing',
+    'nametag: the same value after a full write owes nothing',
+    'cursor: the same value after a full write owes nothing',
+    'trail: a changed value is owed',
+    'color: a changed value is owed',
+    'effect: a changed value is owed',
+    'nametag: a changed value is owed',
+    'cursor: a changed value is owed',
+    'trail: nothing written yet is owed, an empty value included',
+    'color: nothing written yet is owed, an empty value included',
+    'effect: nothing written yet is owed, an empty value included',
+    'nametag: nothing written yet is owed, an empty value included',
+    'cursor: nothing written yet is owed, an empty value included',
+    'trail: a spectator owes nothing, written or not',
+    'color: a spectator owes nothing, written or not',
+    'effect: a spectator owes nothing, written or not',
+    'nametag: a spectator owes nothing, written or not',
+    "cursor: a spectator's cursor is local, so it is still owed",
+    "an account switch through an empty cache is owed, even when the new account's value equals the old one's",
+    'an account switch with no write while empty owes nothing when the values are equal',
+    "a clear of the room carriers makes each one owed again, and leaves the cursor's record",
+    "the trail's value changes with its price",
+    'two different field lists never join to the same value',
+    'a missing field reads as the empty string the publisher writes',
+    'the old rule (only the refresh records) misses the found sequence, and the ledger does not',
+    'a colour change of the picker on screen repaints the pick body, whoever wrote it',
+    "another player's colour change does not repaint the pick body",
+    'a change with no colour key does not repaint the pick body',
+    'a change before the first paint does not repaint: the first paint reads the newest value',
+    'a change after the popup closed or moved on does not repaint',
+    'no picker on screen repaints nothing',
+]
+
+
+def test_the_cosmetic_carrier_suite_ran_every_case_and_none_failed(harness_run):
+    suites = _suites(harness_run)
+    assert "cosmeticcarrier" in suites, "the CosmeticCarrierLedger suite did not report"
+    run, fail, verdict = suites["cosmeticcarrier"]
+    assert fail == 0 and verdict == "PASS", harness_run.stdout[-4000:]
+    printed = len(re.findall(r"^\[cosmeticcarrier\] (PASS|FAIL) ", harness_run.stdout, re.M))
+    assert printed == run, (
+        "the suite declared run=%d but printed %d case lines" % (run, printed))
+    assert run == len(_COSMETIC_CARRIER_CASES), (
+        "the suite has %d cases, this pin names %d" % (run, len(_COSMETIC_CARRIER_CASES)))
+
+
+@pytest.mark.parametrize("name", _COSMETIC_CARRIER_CASES)
+def test_each_cosmetic_carrier_case_passes_with_a_measurement(harness_run, name):
+    line = _named_case(harness_run, name, "cosmeticcarrier")
+    assert line.startswith("[cosmeticcarrier] PASS"), line
+    assert " | got=" in line and not line.rstrip().endswith("| got="), (
+        "the case printed no measurement: " + line)

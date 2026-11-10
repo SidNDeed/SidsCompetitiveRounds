@@ -104,7 +104,14 @@ namespace CompetitiveRounds
             string sku = s?.active_cursor_color_sku ?? "";
             string hex = s?.active_cursor_color_hex ?? "";
             Apply(sku, hex);
+            // Ask 3: the cursor is the ledger's local carrier, recorded like the
+            // room carriers so a refresh re-applies it when the cache differs.
+            CosmeticCarrierLedger.Shared.Wrote(CosmeticCarrier.Cursor, CosmeticCarrierLedger.CursorValue(sku, hex));
         }
+
+        /// <summary>Ask 3: this carrier's value in the cache, as ApplyFromStats applies it.</summary>
+        internal static string CarrierValue(ApiClient.PlayerStatsData s) =>
+            CosmeticCarrierLedger.CursorValue(s?.active_cursor_color_sku, s?.active_cursor_color_hex);
 
         /// <summary>Apply the cursor: the chosen SHAPE drawn in the equipped color. Shape
         /// "default" restores ROUNDS' own cursor (no override). Color is optional — a shape

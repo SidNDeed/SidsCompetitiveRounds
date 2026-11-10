@@ -153,6 +153,10 @@ namespace CompetitiveRounds
             catch (Exception ex) { Plugin.Log.LogWarning($"[PCOLOR] anim loop restart failed: {ex.Message}"); }
         }
 
+        /// <summary>Ask 3: this carrier's value in the cache, as PublishLocalProps writes it.</summary>
+        internal static string CarrierValue(ApiClient.PlayerStatsData s) =>
+            CosmeticCarrierLedger.ColorValue(s?.active_player_color_sku, s?.active_player_color_hex);
+
         /// <summary>Publish our own player-color selection so other mod clients can render it.</summary>
         public static void PublishLocalProps()
         {
@@ -167,6 +171,9 @@ namespace CompetitiveRounds
                 props[PROP_COLOR] = s?.active_player_color_hex ?? "";
                 PhotonNetwork.LocalPlayer.SetCustomProperties(props);
                 Plugin.Log.LogInfo($"[PCOLOR] Published sku={props[PROP_SKU]} color={props[PROP_COLOR]}");
+                // Ask 3: record what was written, an empty cache's "" included,
+                // so the next stats refresh republishes when the cache differs.
+                CosmeticCarrierLedger.Shared.Wrote(CosmeticCarrier.Color, CarrierValue(s));
             }
             catch (Exception ex) { Plugin.Log.LogWarning($"[PCOLOR] PublishLocalProps failed: {ex.Message}"); }
         }
@@ -334,7 +341,13 @@ namespace CompetitiveRounds
         public static void OnPlayerPropertiesChanged(Photon.Realtime.Player target, ExitGames.Client.Photon.Hashtable changed)
         {
             if (target == null || changed == null) return;
-            if (!changed.ContainsKey(PROP_SKU) && !changed.ContainsKey(PROP_COLOR)) return;
+            bool colourChanged = changed.ContainsKey(PROP_SKU) || changed.ContainsKey(PROP_COLOR);
+            // Ask 3 (S2): the card-pick body on screen takes this path too, the
+            // local picker's own write included (the pick body shows what the
+            // room shows), so a republish that lands while the popup is up
+            // repaints it.
+            try { CardPickBodyTinter.OnPickerPropertiesChanged(target.ActorNumber, colourChanged); } catch { }
+            if (!colourChanged) return;
             // No reaction needed for our own writes — local apply already ran via OnMatchStart.
             if (PhotonNetwork.LocalPlayer != null && target.ActorNumber == PhotonNetwork.LocalPlayer.ActorNumber) return;
             ReapplyForActor(target.ActorNumber);

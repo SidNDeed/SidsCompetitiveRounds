@@ -451,6 +451,9 @@ namespace CompetitiveRounds
                     props[capabilityKey] = null;
                 if (!string.IsNullOrEmpty(localSteamId)) props["u_id"] = localSteamId;
                 PhotonNetwork.LocalPlayer.SetCustomProperties(props);
+                // Ask 3: the cosmetic carriers were just removed, so the ledger
+                // forgets them, and the first refresh after the session owes each.
+                CosmeticCarrierLedger.Shared.ForgetRoomCarriers();
                 Plugin.Log?.LogInfo($"[SPECTATE] staged role pre-join (protocol {PROTOCOL}, capability {CAPABILITY}, state {state})");
                 return true;
             }

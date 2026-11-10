@@ -68,6 +68,10 @@ namespace CompetitiveRounds
         private static bool _baseMatSearched;
 
         // ── Publish ─────────────────────────────────────────────────
+        /// <summary>Ask 3: this carrier's value in the cache, as PublishLocalProps writes it.</summary>
+        internal static string CarrierValue(ApiClient.PlayerStatsData s) =>
+            CosmeticCarrierLedger.EffectValue(s?.active_player_effect_sku);
+
         public static void PublishLocalProps()
         {
             try
@@ -80,6 +84,9 @@ namespace CompetitiveRounds
                 props[PROP_SKU] = s?.active_player_effect_sku ?? "";
                 PhotonNetwork.LocalPlayer.SetCustomProperties(props);
                 Plugin.Log.LogInfo($"[EFFECT] Published sku={props[PROP_SKU]}");
+                // Ask 3: record what was written, an empty cache's "" included,
+                // so the next stats refresh republishes when the cache differs.
+                CosmeticCarrierLedger.Shared.Wrote(CosmeticCarrier.Effect, CarrierValue(s));
             }
             catch (Exception ex) { Plugin.Log.LogWarning($"[EFFECT] PublishLocalProps failed: {ex.Message}"); }
         }
