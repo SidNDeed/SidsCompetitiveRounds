@@ -100,9 +100,9 @@ namespace CompetitiveRounds
 
         internal static string CursorValue(string sku, string hex) => Join(sku, hex);
 
-        // The unit separator: no sku, hex or price contains it, so two
-        // different field lists never join to the same value.
-        private static readonly string Sep = ((char)0x1f).ToString();
+        // The unit separator (U+001F): no sku, hex or price contains it, so
+        // two different field lists never join to the same value.
+        private const string Sep = "\u001f";
 
         private static string Join(params string[] parts)
         {
