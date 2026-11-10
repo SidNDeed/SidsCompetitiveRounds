@@ -84,6 +84,15 @@ AER_CONTRACT_BOUNDS = {
     "SECTION_CONTRIB_MAX": 4,
     "SECTION_DAILY_ROWS_MAX": 512,
     "FACT_NAME_MAX": 48,
+    # Phase 3 (B10): the stored findings listed per section of a game, the
+    # rows each evidence population statement reads (one more tells a cut),
+    # the evidence cells shown per window, and card_measures' fixed point
+    # (W["fixed_point"], under an equality test), by which card_contrib and
+    # card_player_daily store the expected counts and variances.
+    "FINDINGS_MAX": 8,
+    "EV_POP_ROWS_MAX": 20000,
+    "EV_CELLS_MAX": 400,
+    "CARD_FIXED_POINT": 1000000,
 }
 
 DISPLAY_DEFAULTS = {
@@ -2035,7 +2044,7 @@ async def _section_rows(db, sql, params):
     return [dict(r) for r in result.mappings().all()]
 
 
-async def _section_read(db, src, games, accounts, day0):
+async def _section_read(db, src, games, accounts, day0, phase3=False):
     """One source's stored rows for the page's games and, on a summary page,
     the subjects' daily rows. The stable keys come from three lookups: the
     records naming a game's room and seat (`keys`), the games rows attached
@@ -2072,6 +2081,9 @@ async def _section_read(db, src, games, accounts, day0):
                                                    "n": b["SECTION_ROWS_MAX"]})
             data[part] = rows
             data["truncated"] |= len(rows) == b["SECTION_ROWS_MAX"]
+    if phase3:
+        data["findings"] = await _findings_read(db, src, data)
+        data["truncated"] |= len(data["findings"]) == b["SECTION_ROWS_MAX"]
     names = ["%s_evidence_%s" % (src, w) for w in SECTION_SWITCHES]
     data["switches"] = {r["key"]: r["value"] for r in await _section_rows(
         db, sql["switches"], {"keys": names, "n": len(names)})}
@@ -2084,15 +2096,18 @@ async def _section_read(db, src, games, accounts, day0):
     return data
 
 
-async def read_sections(db, games, accounts=()):
+async def read_sections(db, games, accounts=(), phase3=False):
     """Every source's data for `games` (`_section_games` dicts), or None for a
-    source whose read failed: that section alone reads `unavailable`."""
+    source whose read failed: that section alone reads `unavailable`. With
+    `phase3` each source's data also carries its stored findings
+    (`_findings_read`), read inside the same savepoint."""
     day0 = _section_day0()
     out = {}
     for src in SECTION_SOURCES:
         try:
             async with db.begin_nested():
-                out[src] = await _section_read(db, src, games, [str(a) for a in accounts], day0)
+                out[src] = await _section_read(db, src, games, [str(a) for a in accounts], day0,
+                                               phase3)
         except Exception as exc:  # noqa: BLE001 -- the section says so; the page answers
             _aer_log.warning("admin_evidence section %s unavailable: %s", src,
                              type(exc).__name__)
@@ -2163,6 +2178,30 @@ def _stored_ident(row):
     return row["stable_game_key"], str(row["pair_lo"]), str(row["pair_hi"])
 
 
+def _game_idents(data, game):
+    """The identity selection of `_game_records` (its docstring states the
+    rule), shared with the phase-3 findings: the game's sorted pair, room,
+    the pair's records and games rows with their identities, the roomed and
+    elsewhere identity sets, the selected identities and the pairing word."""
+    pair = tuple(sorted((game["p1"], game["p2"])))
+    room = game["room"]
+    recs = [(_record_ident(r), r) for r in data["records"]]
+    recs = [(i, r) for i, r in recs if i[1:] == pair]
+    allrows = [(_stored_ident(g), g) for g in data["games"]]
+    grows = [(i, g) for i, g in allrows if i[1:] == pair]
+    attached = {i for i, g in grows
+                if g["match_id"] is not None and str(g["match_id"]) == game["id"]}
+    elsewhere = {i for i, g in grows
+                 if g["match_id"] is not None and str(g["match_id"]) != game["id"]}
+    roomed = {i for i, r in recs if r["attach_key"] == room}
+    if attached:
+        idents, paired = attached, "attached"
+    else:
+        idents = roomed - elsewhere
+        paired = "waiting" if idents else None
+    return pair, room, recs, grows, roomed, elsewhere, idents, paired
+
+
 def _game_records(src, data, game):
     """The source's records, games rows and contributions that belong to
     `game`, associated by stored identity (stable_game_key, pair_lo,
@@ -2181,22 +2220,7 @@ def _game_records(src, data, game):
     under any stable key of the game's pair; `loose` the combat ones under a
     selected identity whose stored match_id is not; each seat takes those
     whose subject it is."""
-    pair = tuple(sorted((game["p1"], game["p2"])))
-    room = game["room"]
-    recs = [(_record_ident(r), r) for r in data["records"]]
-    recs = [(i, r) for i, r in recs if i[1:] == pair]
-    allrows = [(_stored_ident(g), g) for g in data["games"]]
-    grows = [(i, g) for i, g in allrows if i[1:] == pair]
-    attached = {i for i, g in grows
-                if g["match_id"] is not None and str(g["match_id"]) == game["id"]}
-    elsewhere = {i for i, g in grows
-                 if g["match_id"] is not None and str(g["match_id"]) != game["id"]}
-    roomed = {i for i, r in recs if r["attach_key"] == room}
-    if attached:
-        idents, paired = attached, "attached"
-    else:
-        idents = roomed - elsewhere
-        paired = "waiting" if idents else None
+    pair, room, recs, grows, roomed, elsewhere, idents, paired = _game_idents(data, game)
     rows = [g for i, g in grows if i in idents]
     shown = [r for i, r in recs if i in idents and r["attach_key"] == room]
     other = [r for i, r in recs if (i in idents and r["attach_key"] != room)
@@ -2433,25 +2457,656 @@ def summary_section(src, data, games, account, oi):
             "truncated": data["truncated"], "facts": facts, "days30": days}
 
 
-async def _page_sections(db, body, rows, subjects, accounts, summary_page):
+# ── Phase 3 (B10): stored findings and evidence ranks ─────────────────────
+#
+# Asked for by a second header beside SECTIONS_HEADER. A phase-2 caller (an
+# older bot) sends only SECTIONS_HEADER and receives the phase-2 body and a
+# phase-2 audit row; a phase-2 api ignores PHASE3_HEADER and serves phase 2,
+# which the new bot decodes (both phase-3 keys are optional there). Shown as
+# stored, uncolored: no class, no mark, no rule, no rules revision, and no
+# finding's details object (which a rule writes).
+PHASE3_HEADER = "X-Evidence-Phase"
+PHASE3_VALUE = "3"
+# Each source's namespace in seat_evidence_findings (scope game): the stored
+# dedup key is the prefix, then `<stable_game_key>|<lo>|<hi>`, the games row's
+# identity (card_evidence.game_key, combat_evidence.dedup_key,
+# identity_clock_evidence.ice_dedup_key; an equality test reads all three).
+FINDING_PREFIX = {"card": "card ", "combat": "combat ", "identity_clock": "identity "}
+FINDINGS_SQL = ("SELECT f.dedup_key, f.rule_id, f.scope, f.computed_at, f.flag_id, f.match_id "
+                "FROM seat_evidence_findings f WHERE f.scope = 'game' "
+                "AND f.dedup_key = ANY(CAST(:keys AS varchar[])) "
+                "ORDER BY f.dedup_key, f.rule_id LIMIT CAST(:n AS integer)")
+
+
+def _finding_keys(src, data):
+    """The dedup keys of every identity the source's rows name: each record's
+    (stable key and its two seats, lower first), each games row's and each
+    contribution's stored identity. Sorted."""
+    idents = {_record_ident(r) for r in data["records"]}
+    idents |= {_stored_ident(g) for g in data["games"]}
+    idents |= {_stored_ident(c) for c in data["contrib"]}
+    return sorted("%s%s|%s|%s" % ((FINDING_PREFIX[src],) + i) for i in idents)
+
+
+async def _findings_read(db, src, data):
+    """The stored game-scope findings under the source's identities, by the
+    unique index's prefix (scope, dedup_key), LIMITed by SECTION_ROWS_MAX."""
+    keys = _finding_keys(src, data)
+    if not keys:
+        return []
+    return await _section_rows(db, FINDINGS_SQL, {
+        "keys": keys, "n": AER_CONTRACT_BOUNDS["SECTION_ROWS_MAX"]})
+
+
+def _finding_ident(src, dedup_key):
+    """A stored dedup key's (stable key, lo, hi) in the source's namespace,
+    or None for a key of another namespace or form."""
+    prefix = FINDING_PREFIX[src]
+    if not isinstance(dedup_key, str) or not dedup_key.startswith(prefix):
+        return None
+    parts = dedup_key[len(prefix):].rsplit("|", 2)
+    return tuple(parts) if len(parts) == 3 else None
+
+
+def _game_findings(src, data, game):
+    """`game`'s stored findings for the source, `(listed, other)`. Listed:
+    every finding whose dedup key names the game's pair (the stored key's
+    two ids equal the game's sorted pair) and whose stored match_id is this
+    game's match (`_derived_for`), whatever match the games row is attached
+    to now. `other` counts the findings under one of the game's selected
+    identities (`_game_idents`) whose stored match_id is another match's or
+    NULL: not listed on this game."""
+    pair, _room, _recs, _grows, _roomed, _elsewhere, idents, _paired = _game_idents(data, game)
+    listed, other = [], 0
+    for f in data.get("findings", ()):
+        ident = _finding_ident(src, f["dedup_key"])
+        if ident is None:
+            continue
+        if ident[1:] == pair and _derived_for(f, game):
+            listed.append(f)
+        elif ident in idents:
+            other += 1
+    return listed, other
+
+
+def _finding_row(f):
+    """One listed finding as stored: rule_id, scope, computed_at, and the
+    flag it was posted as (flagged_matches.id), or None when not posted."""
+    return [_section_enc("%s" % f["rule_id"]), _section_enc("%s" % f["scope"]),
+            _iso(f["computed_at"]), None if f["flag_id"] is None else str(f["flag_id"])]
+
+
+def _finding_order(f):
+    return ("%s" % f["rule_id"], "%s" % f["scope"], _iso(f["computed_at"]) or "")
+
+
+def phase3_game_section(sec, src, data, game):
+    """Add the phase-3 findings to one game section built by `game_section`:
+    the key `findings` (at most FINDINGS_MAX rows, `_finding_row`, in rule
+    order), and the game facts `findings` (the count listed or past the
+    cap), `findings_more` (past the cap) and `findings_unattributed` (under
+    the game's identity, another or no match). An unavailable section gets
+    an empty list and no fact."""
+    if data is None:
+        sec["findings"] = []
+        return sec
+    listed, other = _game_findings(src, data, game)
+    listed = sorted(listed, key=_finding_order)
+    cap = AER_CONTRACT_BOUNDS["FINDINGS_MAX"]
+    sec["findings"] = [_finding_row(f) for f in listed[:cap]]
+    extra = [_fact("findings", len(listed))]
+    if listed[cap:]:
+        extra.append(_fact("findings_more", len(listed[cap:])))
+    if other:
+        extra.append(_fact("findings_unattributed", other))
+    sec["game"] = sec["game"] + extra
+    return sec
+
+
+def phase3_summary_section(sec, src, data, games):
+    """Add the phase-3 counts to one summary section: `findings`, the
+    distinct findings listed on a covered game, and `findings_unattributed`,
+    the distinct ones under a covered game's identity listed on none."""
+    if data is None:
+        return sec
+    listed, held = set(), set()
+    for game in games:
+        mine, _other = _game_findings(src, data, game)
+        listed.update(f["dedup_key"] + "|" + "%s" % f["rule_id"] for f in mine)
+        idents = _game_idents(data, game)[6]
+        for f in data.get("findings", ()):
+            if _finding_ident(src, f["dedup_key"]) in idents:
+                held.add(f["dedup_key"] + "|" + "%s" % f["rule_id"])
+    extra = [_fact("findings", len(listed))]
+    if held - listed:
+        extra.append(_fact("findings_unattributed", len(held - listed)))
+    sec["facts"] = sec["facts"] + extra
+    return sec
+
+
+# ── Phase 3b: the evidence registry, families K and X (design 2.11) ──────
+#
+# Public arithmetic over stored contribution and daily rows: no threshold,
+# weight or rule. Family K (card draw) ranks card_contrib's counters per game
+# and card_player_daily's over the account's `pop_days` days, as
+# card_measures.window_row names them; family X (combat) ranks each stored
+# sums set's plain total. Each ranked per-game base key has its two window
+# keys (design 2.1); each also has one daily key (agg `window`). The stratum
+# is family-declared (`profile`: the stored deal_profile; `consts`: the
+# stored consts_version); a cell carries its stored stratum value, and no
+# population pools two strata.
+EV_RARITIES = ("common", "uncommon", "rare")   # card_measures.RARITIES, under an equality test
+EV_CARD_VARS = (("b4.rar.hands", "count"), ("b4.rar.slots", "count"),
+                ("b4.rar.notrun", "count")) + tuple(
+    ("b4.rar.%s.%s" % (m, r), unit) for m, unit in (("obs", "count"), ("exp", "count"),
+                                                    ("var", "count2"), ("dev", "sd"))
+    for r in EV_RARITIES)
+# combat_measures.contributions' sets per stored source, under an equality test.
+EV_COMBAT_SETS = (("self", ("a1s", "a1p")),
+                  ("meas", ("a1m", "a1n", "p3dp0", "p3an0", "p3dp1", "p3an1")))
+EV_PROV = {"self": "SELF", "meas": "MEAS"}
+EV_COVERAGES = ("one", "paired")
+EV_SPEC = {"card": {"fam": "K", "rec": "card_record", "daily": "card_daily",
+                    "stratum": "profile", "col": "deal_profile", "day_col": "deal_profile"},
+           "combat": {"fam": "X", "rec": "combat_contrib", "daily": "combat_player_daily",
+                      "stratum": "consts", "col": "consts_version",
+                      "day_col": "consts_version"}}
+EV_SOURCES = ("card", "combat")
+EV_DAILY_AGG = "window"
+EV_STATES = ("ok", "not_derived", "unavailable")
+EV_CELL_SLOTS = ("ki", "stratum", "basis", "n", "val", "pop_rank", "pop_n", "pop_p50",
+                 "pop_p90", "pop_p99")
+
+
+def _ev_vars(src):
+    """`(var, unit, prov)` per base variable of the source's family."""
+    if src == "card":
+        return [(v, unit, prov) for v, unit in EV_CARD_VARS for prov in ("SELF", "MEAS")]
+    return [("%s.total" % s, "count", EV_PROV[source])
+            for source, sets in EV_COMBAT_SETS for s in sets]
+
+
+def _expand_evidence():
+    """Families K and X expanded: per variable, provenance and coverage one
+    per-game base key; then exactly two window keys per base key; then one
+    daily key per base key."""
+    rows = []
+    for src in EV_SOURCES:
+        spec = EV_SPEC[src]
+        for var, unit, prov in _ev_vars(src):
+            for cov in EV_COVERAGES:
+                rows.append(dict(fam=spec["fam"], var=var, prov=prov, scope="seat",
+                                 source=spec["rec"], coverage=cov, agg="cell",
+                                 stratum=spec["stratum"], unit=unit, kind="R"))
+    entries = [AerEntry(ki=i, key=aer_key_id(r["var"], r["prov"], "seat", r["source"],
+                                             r["coverage"], "cell", r["stratum"]),
+                        base=None, decl=None, **r) for i, r in enumerate(rows)]
+    bases = list(entries)
+    for b in bases:
+        for agg in WINDOW_AGGS:
+            wagg = "%s.%s" % (agg, b.agg)
+            entries.append(AerEntry(
+                ki=len(entries), key=aer_key_id(b.var, b.prov, b.scope, b.source, b.coverage,
+                                                wagg, b.stratum),
+                fam=b.fam, var=b.var, prov=b.prov, scope=b.scope, source=b.source,
+                coverage=b.coverage, agg=wagg, stratum=b.stratum, unit=b.unit, kind=b.kind,
+                base=b.ki, decl=None))
+    for b in bases:
+        daily = EV_SPEC["card" if b.fam == "K" else "combat"]["daily"]
+        entries.append(AerEntry(
+            ki=len(entries), key=aer_key_id(b.var, b.prov, b.scope, daily, b.coverage,
+                                            EV_DAILY_AGG, b.stratum),
+            fam=b.fam, var=b.var, prov=b.prov, scope=b.scope, source=daily,
+            coverage=b.coverage, agg=EV_DAILY_AGG, stratum=b.stratum, unit=b.unit,
+            kind=b.kind, base=None, decl=None, bases=("player",)))
+    return tuple(entries)
+
+
+EV_REGISTRY = _expand_evidence()
+EV_BASE_KI = {(e.source, e.var, e.prov, e.coverage): e.ki for e in EV_REGISTRY
+              if not e.is_window}
+
+
+def ev_census(entries=None):
+    """Per family `[base, window, daily]` counts, from the registry itself."""
+    entries = EV_REGISTRY if entries is None else entries
+    out = {}
+    for e in entries:
+        row = out.setdefault(e.fam, [0, 0, 0])
+        row[1 if e.is_window else (2 if e.agg == EV_DAILY_AGG else 0)] += 1
+    return out
+
+
+def ev_registry_problems(entries):
+    """Every way `entries` departs from `_expand_evidence()`: an omitted,
+    extra or duplicated entry, `ki` not each entry's position, a base key
+    without exactly its two window keys and its one daily key."""
+    problems = []
+    keys = [e.key for e in entries]
+    dupes = sorted({k for k in keys if keys.count(k) > 1})
+    if dupes:
+        problems.append("duplicated entries: %s" % ", ".join(dupes))
+    want = [e.key for e in _expand_evidence()]
+    if [k for k in want if k not in keys]:
+        problems.append("omitted entries")
+    if [k for k in keys if k not in want]:
+        problems.append("entries no declaration expands to")
+    for i, e in enumerate(entries):
+        if e.ki != i:
+            problems.append("%s: ki %d at position %d" % (e.key, e.ki, i))
+    for b in entries:
+        if b.is_window or b.agg != "cell":
+            continue
+        aggs = sorted(w.agg.split(".")[0] for w in entries if w.base == b.ki)
+        if aggs != sorted(WINDOW_AGGS):
+            problems.append("%s: window aggregations %r" % (b.key, aggs))
+        daily = [d for d in entries if d.agg == EV_DAILY_AGG and (d.var, d.prov, d.coverage,
+                                                                  d.fam) == (
+            b.var, b.prov, b.coverage, b.fam)]
+        if len(daily) != 1:
+            problems.append("%s: %d daily keys" % (b.key, len(daily)))
+    return problems
+
+
+def ev_fingerprint(entries=None):
+    entries = EV_REGISTRY if entries is None else entries
+    return hashlib.sha256("\n".join(e.key for e in entries).encode("utf-8")).hexdigest()[:8]
+
+
+def _ev_num(value):
+    """A stored number as a float, or None (not recorded; never a 0)."""
+    if value is None or isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return float(value)
+
+
+def _card_values(c):
+    """card_measures.window_row's measures over one row of stored counters
+    (a contribution, or a sum of daily rows): the counts, and per rarity the
+    observed count, the expected count and variance out of fixed point, and
+    the standardized deviation (unknown when the variance is not positive)."""
+    fix = float(AER_CONTRACT_BOUNDS["CARD_FIXED_POINT"])
+    out = {"b4.rar.hands": _ev_num(c.get("hands")), "b4.rar.slots": _ev_num(c.get("slots")),
+           "b4.rar.notrun": _ev_num(c.get("notrun_hands"))}
+    for r in EV_RARITIES:
+        obs, exp, var = (_ev_num(c.get("%s_%s" % (m, r))) for m in ("obs", "exp", "var"))
+        exp = None if exp is None else exp / fix
+        var = None if var is None else var / fix
+        out["b4.rar.obs." + r], out["b4.rar.exp." + r], out["b4.rar.var." + r] = obs, exp, var
+        dev = None
+        if obs is not None and exp is not None and var is not None and var > 0:
+            dev = (obs - exp) / math.sqrt(var)
+        out["b4.rar.dev." + r] = dev
+    return out
+
+
+def _combat_values(source, sums):
+    """Each of the stored source's sets' plain total from a sums object; a
+    set that is not a list of numbers is not recorded."""
+    sets = dict(EV_COMBAT_SETS).get(source, ())
+    out = {}
+    for s in sets:
+        v = sums.get(s)
+        if isinstance(v, list) and all(
+                isinstance(x, (int, float)) and not isinstance(x, bool) for x in v):
+            out["%s.total" % s] = float(sum(v))
+    return out
+
+
+def _ev_stratum(src, row):
+    value = row.get(EV_SPEC[src]["col"])
+    return None if value is None else "%s" % value
+
+
+def ev_row_facts(src, row, source_kind="rec"):
+    """One stored row's facts `(ki, stratum, value)`: every admitted base
+    key (`rec`) or daily key (`daily`) with a value. A row whose source or
+    coverage word is not a registered one, or with no stratum, has none."""
+    prov = EV_PROV.get(row.get("source"))
+    cov = row.get("coverage")
+    stratum = _ev_stratum(src, row)
+    if prov is None or cov not in EV_COVERAGES or stratum is None:
+        return []
+    spec = EV_SPEC[src]
+    values = (_card_values(row) if src == "card"
+              else _combat_values(row["source"], _jsonb(row.get("sums"))))
+    out = []
+    for var, value in values.items():
+        ki = EV_BASE_KI.get((spec["rec"], var, prov, cov))
+        if ki is None or value is None:
+            continue
+        if source_kind == "daily":
+            ki = EV_DAILY_KI[ki]
+        out.append((ki, stratum, value))
+    return out
+
+
+def _ev_daily_map():
+    """Each per-game base key's daily key."""
+    out = {}
+    for d in EV_REGISTRY:
+        if d.agg == EV_DAILY_AGG:
+            src = "card" if d.fam == "K" else "combat"
+            out[EV_BASE_KI[(EV_SPEC[src]["rec"], d.var, d.prov, d.coverage)]] = d.ki
+    return out
+
+
+EV_DAILY_KI = _ev_daily_map()
+
+
+def ev_daily_sum(src, rows):
+    """A subject's daily rows summed per (source, coverage, stratum): the
+    counters (card) or each set's bins (combat), and `games`."""
+    groups = collections.OrderedDict()
+    for row in rows:
+        k = (row.get("source"), row.get("coverage"), _ev_stratum(src, row))
+        g = groups.setdefault(k, {"source": k[0], "coverage": k[1],
+                                  EV_SPEC[src]["col"]: row.get(EV_SPEC[src]["col"]),
+                                  "games": 0, "sums": {}})
+        g["games"] += row.get("games") or 0
+        if src == "card":
+            for col in _CARD_COUNTERS:
+                v = row.get(col)
+                if v is not None:
+                    g[col] = g.get(col, 0) + v
+        else:
+            for s, v in _jsonb(row.get("sums")).items():
+                if isinstance(v, list) and all(
+                        isinstance(x, (int, float)) and not isinstance(x, bool) for x in v):
+                    g["sums"][s] = g["sums"].get(s, []) + [sum(v)]
+    return list(groups.values())
+
+
+class EvidenceDuplicate(Exception):
+    """Two stored facts for one `(ki, stratum, match, subject)`: no evidence
+    rank publishes (design 2.6's one fact per identity)."""
+
+
+def ev_population(src, pop_rows):
+    """The window population source of one family from its population rows
+    (contributions whose stored match is a window game, `EV_POP_SQL`): per
+    `(ki, stratum, basis)` the kept units' values newest first, packed as
+    `window_source_sql` packs them (units by newest game, then unit id, kept
+    whole while the key's values fit WIN_VALUES_MAX, each unit's newest
+    WIN_UNIT_DEPTH values), and the truncated keys. A row whose stored pair
+    is not its match's sorted pair, or whose subject is not one of them, is
+    no fact. A repeated `(ki, stratum, match, subject)` raises
+    EvidenceDuplicate."""
+    b = AER_CONTRACT_BOUNDS
+    seen = set()
+    facts = []
+    for row in pop_rows:
+        pair = tuple(sorted((str(row["player1_id"]), str(row["player2_id"]))))
+        if (str(row["pair_lo"]), str(row["pair_hi"])) != pair:
+            continue
+        subject = str(row["subject_player_id"])
+        if subject not in pair:
+            continue
+        partner = pair[1] if subject == pair[0] else pair[0]
+        mid = str(row["match_id"])
+        for ki, stratum, value in ev_row_facts(src, row):
+            ident = (ki, stratum, mid, subject)
+            if ident in seen:
+                raise EvidenceDuplicate("%s population: repeated fact" % src)
+            seen.add(ident)
+            facts.append((ki, stratum, row["ended_at"], mid, subject, partner, value))
+    out, truncated = {}, set()
+    for basis in ("player", "pair"):
+        units = collections.defaultdict(list)
+        for ki, stratum, ended, mid, subject, partner, value in facts:
+            unit = (subject, partner if basis == "pair" else "")
+            units[(ki, stratum, unit)].append((ended, mid, value))
+        per_key = collections.defaultdict(list)
+        for (ki, stratum, unit), vals in units.items():
+            vals.sort(key=lambda t: (t[0], t[1]), reverse=True)
+            vals = vals[:b["WIN_UNIT_DEPTH"]]
+            per_key[(ki, stratum)].append((vals[0][0], vals[0][1], unit, vals))
+        for key, us in per_key.items():
+            us.sort(key=lambda u: u[2])
+            us.sort(key=lambda u: (u[0], u[1]), reverse=True)
+            values, offsets, total = array("d"), array("i", [0]), 0
+            for _ne, _nid, _unit, vals in us:
+                total += len(vals)
+                if total > b["WIN_VALUES_MAX"]:
+                    truncated.add(key + (basis,))
+                    break
+                values.extend(v for _e, _m, v in vals)
+                offsets.append(len(values))
+            out[key + (basis,)] = (values, offsets)
+    return out, truncated
+
+
+def ev_daily_population(src, rows):
+    """The daily population of one family: per `(daily ki, stratum)` every
+    subject's summed value over its daily rows, ascending. A subject holds one
+    value per key and stratum by construction (`ev_daily_sum`)."""
+    by_subject = collections.defaultdict(list)
+    for row in rows:
+        by_subject[str(row["subject_player_id"])].append(row)
+    out = collections.defaultdict(list)
+    for subject in sorted(by_subject):
+        for g in ev_daily_sum(src, by_subject[subject]):
+            for ki, stratum, value in ev_row_facts(src, _ev_daily_row(src, g), "daily"):
+                out[(ki, stratum)].append(value)
+    return {k: array("d", sorted(v)) for k, v in out.items()}
+
+
+def _ev_daily_row(src, g):
+    """A summed daily group as a row `ev_row_facts` reads: combat sums as
+    one-bin lists of each set's summed total."""
+    if src == "card":
+        return g
+    row = dict(g)
+    row["sums"] = {s: [sum(v)] for s, v in g["sums"].items()}
+    return row
+
+
+def ev_window_cells(src, data, games, account, basis, pops, daily_pops):
+    """One window subject's evidence cells for one family: per base key and
+    stratum with a value on a covered game, its two window keys' cells (the
+    aggregation over the covered games' attributed contributions about the
+    account, newest first; comparability `(window key, basis, n)`, ranked in
+    the population's units with at least `n` values; on basis `pair` the
+    covered games are the pair's, so are the contributions), then per daily
+    key and stratum the account's summed daily value ranked among the
+    population's subjects; each part in (key, stratum) order. Raises
+    EvidenceDuplicate on two facts for one key, stratum and game."""
+    vals = collections.defaultdict(list)
+    for game in games:
+        _paired, _recs, _rows, _other, contrib, _loose = _game_records(src, data, game)
+        seen = set()
+        for c in contrib:
+            if str(c["subject_player_id"]) != account:
+                continue
+            for ki, stratum, value in ev_row_facts(src, c):
+                if (ki, stratum) in seen:
+                    raise EvidenceDuplicate("%s window: repeated fact" % src)
+                seen.add((ki, stratum))
+                vals[(ki, stratum)].append(value)
+    cells = []
+    for (ki, stratum) in sorted(vals, key=lambda k: (k[0], k[1])):
+        vs = vals[(ki, stratum)]
+        for w in (e for e in EV_REGISTRY if e.base == ki):
+            agg = w.agg.split(".")[0]
+            val = window_stat(agg, vs)
+            source = pops.get((ki, stratum, basis))
+            dist = (window_population(source[0], source[1], agg, len(vs))
+                    if source is not None else array("d"))
+            cells.append(_ev_cell(w.ki, stratum, basis, len(vs), val, dist))
+    days = []
+    for g in ev_daily_sum(src, data["daily"].get(account, ())):
+        for ki, stratum, value in ev_row_facts(src, _ev_daily_row(src, g), "daily"):
+            days.append(_ev_cell(ki, stratum, "player", g["games"], value,
+                                 daily_pops.get((ki, stratum), array("d"))))
+    return cells + sorted(days, key=lambda c: (c["ki"], c["stratum"]))
+
+
+def _ev_cell(ki, stratum, basis, n, val, dist):
+    pm = pop_measures(dist, val)
+    return {"ki": ki, "stratum": stratum, "basis": basis, "n": n, "val": val,
+            "pop_rank": pm["pop_rank"], "pop_n": pm["pop_n"], "pop_p50": pm["pop_p50"],
+            "pop_p90": pm["pop_p90"], "pop_p99": pm["pop_p99"]}
+
+
+def _ev_pop_sql(src):
+    """The population rows of one family (design 2.6's game window: every
+    game not invalidated, ended within `:pop_days` days and at least `:lag_s`
+    seconds ago, by idx_matches_ended), joined to the contributions whose
+    STORED match_id is a window game (ix_<contrib>_match, migration 401),
+    newest game first, LIMITed (one more than EV_POP_ROWS_MAX tells a cut)."""
+    spec = _SECTION_SPEC[src]
+    return """
+WITH g AS MATERIALIZED (
+  SELECT m.id, m.ended_at, m.player1_id, m.player2_id
+    FROM matches m
+   WHERE m.invalidated_at IS NULL
+     AND m.ended_at >= now() - make_interval(days => CAST(:pop_days AS integer))
+     AND m.ended_at <= now() - make_interval(secs => CAST(:lag_s AS integer)))
+SELECT c.match_id, g.ended_at, g.player1_id, g.player2_id, c.pair_lo, c.pair_hi,
+       c.subject_player_id, c.source, c.coverage, %(cols)s
+  FROM g JOIN %(contrib)s c ON c.match_id = g.id
+ ORDER BY g.ended_at DESC, g.id DESC, c.subject_player_id, c.source, c.coverage
+ LIMIT CAST(:n AS integer)""" % {
+        "cols": ", ".join("c." + c for c in spec["contrib_cols"]),
+        "contrib": spec["contrib"]}
+
+
+def _ev_daily_sql(src):
+    """The daily rows of the population's subjects over the `pop_days` UTC
+    days (the primary key's prefix: subject, day), LIMITed as EV_POP_SQL."""
+    spec = _SECTION_SPEC[src]
+    return ("SELECT d.subject_player_id, d.source, d.coverage, %s FROM %s d "
+            "WHERE d.subject_player_id = ANY(CAST(:subjects AS uuid[])) "
+            "AND d.%s >= CAST(:d0 AS date) "
+            "ORDER BY d.subject_player_id, d.%s DESC, d.source, d.coverage "
+            "LIMIT CAST(:n AS integer)"
+            % (", ".join("d." + c for c in spec["daily_cols"] + (EV_SPEC[src]["col"],)),
+               spec["daily"], spec["day"], spec["day"]))
+
+
+EV_POP_SQL = {src: _ev_pop_sql(src) for src in EV_SOURCES}
+EV_DAILY_SQL = {src: _ev_daily_sql(src) for src in EV_SOURCES}
+
+
+async def read_evidence_populations(db, accounts):
+    """Each family's population rows and its subjects' daily rows: `(pop,
+    daily, rows, truncated)`. One statement each, LIMITed by EV_POP_ROWS_MAX
+    plus one; a statement that returns the extra row is cut there and the
+    block says truncated."""
+    cap = AER_CONTRACT_BOUNDS["EV_POP_ROWS_MAX"]
+    pop, daily, rows, truncated = {}, {}, 0, False
+    for src in EV_SOURCES:
+        got = await _section_rows(db, EV_POP_SQL[src], {
+            "pop_days": DISPLAY_DEFAULTS["pop_days"], "lag_s": DISPLAY_DEFAULTS["lag_s"],
+            "n": cap + 1})
+        truncated |= len(got) > cap
+        pop[src] = got[:cap]
+        rows += len(pop[src])
+        subjects = sorted({str(r["subject_player_id"]) for r in pop[src]}
+                          | {str(a) for a in accounts})
+        got = await _section_rows(db, EV_DAILY_SQL[src], {
+            "subjects": subjects, "d0": _section_day0(), "n": cap + 1})
+        truncated |= len(got) > cap
+        daily[src] = got[:cap]
+    return pop, daily, rows, truncated
+
+
+async def evidence_block(db, data, games, accounts):
+    """Page 1's `evidence` (phase 3b): the families' ranks for each window
+    subject. `state` is `unavailable` when a family's section data or the
+    population read is unavailable or a fact repeats, `not_derived` when no
+    stored contribution or daily row reaches a window or a population, else
+    `ok`; only `ok` carries cells. Cells are the windows' (`ev_window_cells`),
+    at most EV_CELLS_MAX per window, the rest counted in `more`."""
+    block = {"state": "unavailable", "rows": 0, "truncated": False,
+             "fingerprint": ev_fingerprint(), "census": ev_census(), "catalog": [],
+             "strata": [], "windows": [{"oi": oi, "cells": [], "more": 0}
+                                       for oi in range(len(accounts))]}
+    if any(data.get(src) is None for src in EV_SOURCES):
+        return block
+    plan = ([(str(accounts[0]), None, "player")] if len(accounts) == 1 else
+            [(str(accounts[0]), str(accounts[1]), "pair"),
+             (str(accounts[1]), str(accounts[0]), "pair")])
+    try:
+        async with db.begin_nested():
+            pop, daily, rows, truncated = await read_evidence_populations(db, accounts)
+        sources = {}
+        for src in EV_SOURCES:
+            pops, cut = ev_population(src, pop[src])
+            truncated |= bool(cut)
+            sources[src] = (pops, ev_daily_population(src, daily[src]))
+        made = []
+        for acc, _partner, basis in plan:
+            cells = []
+            for src in EV_SOURCES:
+                cells += ev_window_cells(src, data[src], games, acc, basis, *sources[src])
+            made.append(cells)
+    except EvidenceDuplicate as exc:
+        _aer_log.warning("admin_evidence evidence ranks unavailable: %s", exc)
+        return block
+    except Exception as exc:  # noqa: BLE001 -- the block says so; the page answers
+        _aer_log.warning("admin_evidence evidence ranks unavailable: %s", type(exc).__name__)
+        return block
+    block.update(rows=rows, truncated=truncated)
+    if not rows and not any(made):
+        block["state"] = "not_derived"
+        return block
+    block["state"] = "ok"
+    strata = sorted({c["stratum"] for cells in made for c in cells})
+    kis = sorted({c["ki"] for cells in made for c in cells})
+    block["strata"] = [_section_enc(s) for s in strata]
+    block["catalog"] = [{"ki": ki, "key": EV_REGISTRY[ki].key, "unit": EV_REGISTRY[ki].unit}
+                        for ki in kis]
+    cap = AER_CONTRACT_BOUNDS["EV_CELLS_MAX"]
+    for oi, cells in enumerate(made):
+        rows_out = [[c["ki"], strata.index(c["stratum"]), c["basis"], c["n"], c["val"],
+                     c["pop_rank"], c["pop_n"], c["pop_p50"], c["pop_p90"], c["pop_p99"]]
+                    for c in cells]
+        block["windows"][oi] = {"oi": oi, "cells": rows_out[:cap], "more": len(rows_out[cap:])}
+    return block
+
+
+async def _page_sections(db, body, rows, subjects, accounts, summary_page, phase3=False):
     """Add the page's evidence sections to `body` (each game's `sections`, or
-    page 1's `sections_summary`) and return the audit's state counts."""
+    page 1's `sections_summary`) and return the audit's state counts. With
+    `phase3`, also each section's findings (`phase3_game_section`,
+    `phase3_summary_section`) and page 1's `evidence` block."""
     games = _section_games(rows)
     index = {pid: s["i"] for pid, s in subjects.items()}
     if summary_page:
-        data = await read_sections(db, games, accounts)
+        data = await read_sections(db, games, accounts, phase3)
         body["sections_summary"] = [summary_section(src, data[src], games, str(acc), oi)
                                     for oi, acc in enumerate(accounts)
                                     for src in SECTION_SOURCES]
+        if phase3:
+            for sec in body["sections_summary"]:
+                phase3_summary_section(sec, sec["src"], data[sec["src"]], games)
+            body["evidence"] = await evidence_block(db, data, games, accounts)
         return section_audit(body["sections_summary"])
-    data = await read_sections(db, games)
+    data = await read_sections(db, games, (), phase3)
     by_id = {g["id"]: g for g in games}
     made = []
     for g in body["games"]:
         g["sections"] = [game_section(src, data[src], by_id[g["match_id"]], index)
                          for src in SECTION_SOURCES]
+        if phase3:
+            for sec in g["sections"]:
+                phase3_game_section(sec, sec["src"], data[sec["src"]], by_id[g["match_id"]])
         made += g["sections"]
     return section_audit(made)
+
+
+def phase3_audit(body):
+    """A phase-3 page's audit additions: schema "3", the findings listed per
+    source on the page, and on page 1 the evidence block's state word."""
+    listed = {src: 0 for src in SECTION_SOURCES}
+    for g in body.get("games", ()):
+        for sec in g.get("sections", ()):
+            listed[sec["src"]] += len(sec.get("findings", ()))
+    out = {"schema": PHASE3_VALUE, "findings": listed}
+    if "evidence" in body:
+        out["evidence"] = body["evidence"]["state"]
+    return out
 
 
 def section_audit(sections):
@@ -2498,6 +3153,7 @@ async def _aer_serve(shape, request, db, actor):
     gmax = AER_CONTRACT_BOUNDS["GAMES_MAX"]
     page = _aer_int(request, "page", 1, 1, 10 ** 6)
     sections_on = request.headers.get(SECTIONS_HEADER) == SECTIONS_PHASE
+    phase3 = sections_on and request.headers.get(PHASE3_HEADER) == PHASE3_VALUE
     games_arg = None
     if shape in ("game", "series"):
         ident = _aer_ident(request.path_params.get("code"))
@@ -2586,7 +3242,7 @@ async def _aer_serve(shape, request, db, actor):
         audit_sections = None
         if sections_on:
             audit_sections = await _page_sections(db, body, rows, subjects, accounts,
-                                                  summary_page)
+                                                  summary_page, phase3)
         encoded = json.dumps(body, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
         if len(encoded) > AER_CONTRACT_BOUNDS["RESPONSE_BYTES_MAX"]:
             _aer_fail(500, "too_large")
@@ -2598,6 +3254,8 @@ async def _aer_serve(shape, request, db, actor):
                    "codes": [_code(i) for i in (page_ids or ids)], "via": "discord"}
         if sections_on:
             details["sections"] = audit_sections
+        if phase3:
+            details.update(phase3_audit(body))
         if _aer_clock() > deadline:
             _aer_fail(503, "deadline")
         await _audit(db, actor, shape, target, details)
