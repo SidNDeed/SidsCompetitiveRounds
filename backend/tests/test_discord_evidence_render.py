@@ -127,7 +127,8 @@ def api_fields(body):
     # Phase 3b (B10): every leaf of the evidence block, census whole.
     ev = body.get("evidence")
     if ev is not None:
-        out += [("evidence", k) for k in ("state", "rows", "truncated", "fingerprint", "census")]
+        out += [("evidence", k) for k in ("state", "rows", "truncated", "partial", "fingerprint",
+                                                  "census")]
         out += [("evidence", "strata", i) for i in range(len(ev["strata"]))]
         for row in ev["catalog"]:
             out += [("evidence", "catalog", row["ki"], k) for k in row]

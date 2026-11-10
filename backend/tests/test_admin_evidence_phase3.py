@@ -273,8 +273,8 @@ def test_k2_units_take_their_newest_values_and_ranks_are_mid_ranks():
         for j in range(3):
             rows.append(_prow("card", str(uuid.uuid4()), T0 - dt.timedelta(hours=10 * i + j),
                               acc, opp, acc, hands=10 * i + j))
-    pops, cut = ae.ev_population("card", rows)
-    assert cut == set()
+    pops, cut, left = ae.ev_population("card", rows)
+    assert cut == set() and left == 0
     values, offsets = pops[(_hands_ki(), "p1", "player")]
     assert list(offsets) == [0, 3, 6, 9, 12, 15]
     assert list(values[:3]) == [0.0, 1.0, 2.0]       # unit 0, newest first
@@ -296,7 +296,7 @@ def test_k2_depth_and_value_caps_drop_the_crossing_unit_whole(monkeypatch):
         for j in range(3):
             rows.append(_prow("card", str(uuid.uuid4()), T0 - dt.timedelta(hours=10 * i + j),
                               acc, opp, acc, hands=j))
-    pops, cut = ae.ev_population("card", rows)
+    pops, cut, _left = ae.ev_population("card", rows)
     values, offsets = pops[(_hands_ki(), "p1", "player")]
     assert list(offsets) == [0, 2, 4]                 # depth 2; the third unit crosses 5
     assert (_hands_ki(), "p1", "player") in cut
@@ -307,7 +307,7 @@ def test_k2_strata_never_pool_and_a_reversed_stored_pair_is_no_fact():
     rows = [_prow("card", "m1", T0, a, b, a, hands=1, deal_profile="p1"),
             _prow("card", "m2", T0, a, b, a, hands=2, deal_profile="p2"),
             dict(_prow("card", "m3", T0, a, b, a, hands=3), pair_lo=b, pair_hi=a)]
-    pops, _cut = ae.ev_population("card", rows)
+    pops, _cut, _left = ae.ev_population("card", rows)
     assert list(pops[(_hands_ki(), "p1", "player")][0]) == [1.0]
     assert list(pops[(_hands_ki(), "p2", "player")][0]) == [2.0]
 
@@ -411,7 +411,8 @@ def _evidence(shape, cells=True):
     nwin = 1 if shape == "player" else 2
     w = next(e for e in ae.EV_REGISTRY if e.agg == "win_median.cell")
     d = next(e for e in ae.EV_REGISTRY if e.agg == "window")
-    ev = {"state": "ok", "rows": 7, "truncated": False, "fingerprint": ae.ev_fingerprint(),
+    ev = {"state": "ok", "rows": 7, "truncated": False, "partial": 0,
+          "fingerprint": ae.ev_fingerprint(),
           "census": ae.ev_census(),
           "catalog": [{"ki": e.ki, "key": e.key, "unit": e.unit} for e in (w, d)],
           "strata": ["p1", "3"],
@@ -503,6 +504,7 @@ def _p3_breaks():
             x, ("games", 0, "sections", 1, "findings"), [["zz", "game", "t", None]])),
         ("evidence key extra", "s", lambda x: fset(x, ev + ("extra",), 1)),
         ("evidence state", "s", lambda x: fset(x, ev + ("state",), "armed")),
+        ("evidence partial", "s", lambda x: fset(x, ev + ("partial",), -1)),
         ("evidence fingerprint", "s", lambda x: fset(x, ev + ("fingerprint",), "XYZ")),
         ("evidence census", "s", lambda x: fset(x, ev + ("census", "K"), [1, 2])),
         ("evidence key fields", "s", lambda x: fset(x, ev + ("catalog", 0, "key"), "a|b")),
@@ -609,3 +611,111 @@ def test_b2_deploy_order_both_ways(bot):
         page, word = bot["_aer_outcome"](200, copy.deepcopy(p2))
         assert word is None and page.evidence == ()
         assert all(s["findings"] == () for g in page.games for s in g["sections"])
+
+
+# ── B10-P3-R1: the round-1 fixes ──────────────────────────────────────────
+
+def test_r1h1_a_finding_no_row_names_is_listed_by_its_stored_match():
+    """H1: the finding's key is named by no record, games row or
+    contribution the page read; its stored match is the game's and its pair
+    the game's, so the game lists it. Its twin for another match is neither
+    listed nor counted (no row of the game names its identity)."""
+    a, b = _pair()
+    g = _game(a, b)
+    data = _with_findings(_data(records=[_rec("card", "k1", a, b, "room-1")]),
+                          [_finding("card", "k-gone", a, b, g["id"], "zz-r1"),
+                           _finding("card", "k-gone", a, b, str(uuid.uuid4()), "zz-r2")])
+    lo, hi = sorted((a, b))
+    assert "card k-gone|%s|%s" % (lo, hi) not in ae._finding_keys("card", data)
+    sec = _p3_section("card", data, g, {a: 0, b: 1})
+    assert [r[0] for r in sec["findings"]] == ["zz-r1"]
+    assert dict(sec["game"])["findings"] == "1" and "findings_unattributed" not in dict(sec["game"])
+
+
+def test_r1h1_findings_are_read_by_match_and_by_identity_merged_once(monkeypatch):
+    a, b = _pair()
+    g = _game(a, b)
+    f1 = _finding("card", "k1", a, b, g["id"], "zz-r1")
+    f2 = _finding("card", "k1", a, b, None, "zz-r2")
+    calls = []
+
+    async def rows(db, sql, params):
+        calls.append((sql, dict(params)))
+        return [f1] if sql == ae.FINDINGS_MATCH_SQL else [f1, f2]
+
+    monkeypatch.setattr(ae, "_section_rows", rows)
+    data = _data(records=[_rec("card", "k1", a, b, "room-1")])
+    got, cut = asyncio.run(ae._findings_read(None, "card", data, [g]))
+    assert [f["rule_id"] for f in got] == ["zz-r1", "zz-r2"] and cut is False
+    n = ae.AER_CONTRACT_BOUNDS["SECTION_ROWS_MAX"]
+    assert calls[0] == (ae.FINDINGS_MATCH_SQL, {"ids": [g["id"]], "prefix": "card ", "n": n})
+    assert calls[1][0] == ae.FINDINGS_SQL
+    sql = ae.FINDINGS_MATCH_SQL
+    assert "f.scope = 'game'" in sql and "f.match_id = ANY(CAST(:ids AS uuid[]))" in sql
+    assert "LIMIT CAST(:n AS integer)" in sql and "details" not in sql and "rules_rev" not in sql
+
+
+def test_r1h1_the_match_index_migration_is_the_statement_s_predicate():
+    import re
+    path = os.path.join(HERE, "..", "sql", "402_seat_evidence_findings_match.sql")
+    with open(path, encoding="utf-8") as fh:
+        text = fh.read()
+    assert re.search(r"CREATE INDEX IF NOT EXISTS ix_seat_evidence_findings_game_match\s+"
+                     r"ON seat_evidence_findings \(match_id\) WHERE scope = 'game';", text)
+    assert os.path.exists(os.path.join(HERE, "..", "sql",
+                                       "rollback_402_seat_evidence_findings_match.sql"))
+
+
+def test_r1h3_a_daily_subject_the_cap_cuts_is_left_out_and_counted():
+    """H3, Codex's scenario: rows of smaller subject ids, then the account's
+    two rows in one stratum (hands 1 newest, then 100). A cap that cuts the
+    second leaves the account out whole and counts its group; whole, the
+    account's daily value is 101 over 2 games, never 1 over 1."""
+    small = ["00000000-0000-0000-0000-%012d" % i for i in range(3)]
+    acc = "ffffffff-0000-0000-0000-000000000000"
+    day = dict({c: 0 for c in ae._CARD_COUNTERS}, source="self", coverage="one",
+               deal_profile="p1", games=1)
+    rows = [dict(day, subject_player_id=s) for s in small] + [
+        dict(day, subject_player_id=acc, hands=1), dict(day, subject_player_id=acc, hands=100)]
+    kept, left = ae.ev_complete_daily("card", rows, 4)
+    assert [r["subject_player_id"] for r in kept] == small and left == 1
+    kept, left = ae.ev_complete_daily("card", rows, 5)
+    assert kept == rows and left == 0
+    g, = ae.ev_daily_sum("card", rows[3:])
+    facts = {ae.EV_REGISTRY[ki].var: v for ki, _s, v in ae.ev_row_facts("card", g, "daily")}
+    assert facts["b4.rar.hands"] == 101.0 and g["games"] == 2
+
+
+def test_r1h3_a_cut_population_leaves_short_units_out_whole(monkeypatch):
+    monkeypatch.setitem(ae.AER_CONTRACT_BOUNDS, "WIN_UNIT_DEPTH", 2)
+    a, b, c = (str(uuid.uuid4()) for _ in range(3))
+    rows = [_prow("card", "m1", T0, a, b, a, hands=1),
+            _prow("card", "m2", T0 - dt.timedelta(hours=1), a, b, a, hands=2),
+            _prow("card", "m3", T0 - dt.timedelta(hours=2), a, c, c, hands=3)]
+    whole, _t, left = ae.ev_population("card", rows)
+    assert left == 0 and list(whole[(_hands_ki(), "p1", "player")][1]) == [0, 2, 3]
+    cut, trunc, left = ae.ev_population("card", rows, cut=True)
+    values, offsets = cut[(_hands_ki(), "p1", "player")]
+    assert list(values) == [1.0, 2.0] and list(offsets) == [0, 2]
+    assert left >= 1 and (_hands_ki(), "p1", "player") in trunc
+
+
+def test_r1h4_a_row_with_no_hand_in_its_expectation_has_no_rarity_measure():
+    """H4, Codex's scenario: a NOT-RUN row (hands 0, notrun 1, zero
+    counters) and a valid row observing one rare card: the NOT-RUN row keeps
+    its counts and has no rarity fact, so the valid subject ranks 0.5 among
+    itself alone, not 0.75 over [0, 1]."""
+    x, y, o = (str(uuid.uuid4()) for _ in range(3))
+    notrun = _prow("card", "m1", T0, x, o, x, hands=0, notrun_hands=1)
+    valid = _prow("card", "m2", T0, y, o, y, hands=1, obs_rare=1)
+    vx = {ae.EV_REGISTRY[ki].var for ki, _s, _v in ae.ev_row_facts("card", notrun)}
+    assert vx == {"b4.rar.hands", "b4.rar.slots", "b4.rar.notrun"}
+    pops, _t, _l = ae.ev_population("card", [notrun, valid])
+    rare = ae.EV_BASE_KI[("card_record", "b4.rar.obs.rare", "SELF", "one")]
+    values, offsets = pops[(rare, "p1", "player")]
+    assert list(values) == [1.0]
+    dist = ae.window_population(values, offsets, "win_max", 1)
+    assert ae.pop_measures(dist, 1.0)["pop_rank"] == pytest.approx(0.5)
+    summed, = ae.ev_daily_sum("card", [dict(notrun, games=1)])
+    assert {ae.EV_REGISTRY[ki].var for ki, _s, _v in ae.ev_row_facts("card", summed, "daily")} \
+        == {"b4.rar.hands", "b4.rar.slots", "b4.rar.notrun"}
