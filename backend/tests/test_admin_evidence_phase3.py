@@ -464,7 +464,7 @@ def test_b1_plan_shows_every_phase3_leaf_once(bot):
         for cells in (True, False):
             sbody = _p3_summary_body(shape, cells)
             spage, splan = check_plan(bot, sbody)
-            assert spage.evidence["state"] == ("ok" if cells else "not_derived")
+            assert spage.evidence[0]["state"] == ("ok" if cells else "not_derived")
             texts = [i.text for i in splan]
             assert any(t.startswith("EVIDENCE RANKS") for t in texts)
             if not cells:
@@ -607,5 +607,5 @@ def test_b2_deploy_order_both_ways(bot):
         assert word is None and page is not None
         assert old["_aer_outcome"](200, copy.deepcopy(body)) == (None, SCHEMA)
         page, word = bot["_aer_outcome"](200, copy.deepcopy(p2))
-        assert word is None and page.evidence is None
+        assert word is None and page.evidence == ()
         assert all(s["findings"] == () for g in page.games for s in g["sections"])

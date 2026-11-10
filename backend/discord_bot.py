@@ -17437,7 +17437,7 @@ _AER_EV_WINDOW_KEYS = frozenset({"oi", "cells", "more"})
 # passed the 1a closed schema. Cells are tuples in their AER_WIRE slot order.
 BotPage = collections.namedtuple("BotPage", (
     "shape", "page", "pages", "subjects", "population", "baseline", "registry",
-    "catalog", "games", "windows", "summary", "sections", "evidence"), defaults=((), None))
+    "catalog", "games", "windows", "summary", "sections", "evidence"), defaults=((), ()))
 
 
 class AerSchemaError(ValueError):
@@ -17873,7 +17873,8 @@ def _aer_decode_response(body, phase="1a", *, expected=None):
         windows, summary = tuple(wins), tuple(cells)
     sections = (_aer_summary_sections(body["sections_summary"], windows)
                 if "sections_summary" in body else ())
-    evidence = _aer_evidence(body["evidence"], windows) if "evidence" in body else None
+    # a tuple of at most one block, so the plan iterates it (a structural loop)
+    evidence = (_aer_evidence(body["evidence"], windows),) if "evidence" in body else ()
     return BotPage(shape, page, pages, tuple(subjects), dict(body["population"]),
                    dict(body["baseline"]), dict(body["registry"]), catalog, tuple(games),
                    windows, summary, sections, evidence)
@@ -18348,8 +18349,8 @@ def _aer_plan(page, phase="1a"):
             add(_aer_cell_item(page, ("summary", si, "cells", ci), "summary", cell, phase))
     for xi in range(len(page.sections)):
         items.extend(_aer_summary_section_items(("sections_summary", xi), page.sections[xi]))
-    if page.evidence is not None:
-        items.extend(_aer_evidence_items(page.evidence))
+    for ev in page.evidence:
+        items.extend(_aer_evidence_items(ev))
     for ki in sorted(page.catalog):
         row = page.catalog[ki]
         add(_aer_item("label", "KEY", tuple(
