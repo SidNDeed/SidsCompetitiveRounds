@@ -392,13 +392,15 @@ def test_p3_statements_plan_on_their_named_indexes(rig):
         await rig.conn.commit()
         params = {"keys": ["card k-x|a|b"], "n": 64, "pop_days": 30, "lag_s": 120,
                   "subjects": [str(players[0])], "d0": NOW.date() - dt.timedelta(days=29),
-                  "ids": [str(uuid.uuid4())], "prefix": "card ",
+                  "ids": [str(uuid.uuid4())], "prefix": "card ", "s": str(players[0]),
                   "sources": sorted(ae.EV_PROV), "coverages": list(ae.EV_COVERAGES)}
         stmts = {("findings", "-"): ae.FINDINGS_SQL, ("by_match", "-"): ae.FINDINGS_MATCH_SQL}
         for src in ae.EV_SOURCES:
             stmts[("pop", src)] = ae.EV_POP_SQL[src]
             stmts[("dup", src)] = ae.EV_DUP_SQL[src]
             stmts[("daily", src)] = ae.EV_DAILY_SQL[src]
+            stmts[("win", src)] = ae.EV_WIN_SQL[src]
+            stmts[("windup", src)] = ae.EV_WIN_DUP_SQL[src]
         plans, got = {}, {}
         for name, sql in stmts.items():
             bind = {k: params[k] for k in set(re.findall(r":(\w+)", sql))}
@@ -418,9 +420,12 @@ def test_p3_statements_plan_on_their_named_indexes(rig):
     want = {("findings", "-"): {"seat_evidence_findings_once"},
             ("by_match", "-"): {MATCH_INDEX}}
     key_col = {"findings": "dedup_key", "by_match": "match_id", "pop": "match_id",
-               "dup": "match_id", "daily": "subject_player_id"}
+               "dup": "match_id", "daily": "subject_player_id", "win": "match_id",
+               "windup": "match_id"}
     for src in ae.EV_SOURCES:
         spec = ae._SECTION_SPEC[src]
+        want[("win", src)] = {"ix_%s_match" % spec["contrib"]}
+        want[("windup", src)] = {"ix_%s_match" % spec["contrib"]}
         want[("pop", src)] = {"ix_%s_match" % spec["contrib"], "idx_matches_ended"}
         want[("dup", src)] = {"ix_%s_match" % spec["contrib"], "idx_matches_ended"}
         want[("daily", src)] = {"%s_pk" % spec["daily"]}
@@ -444,3 +449,133 @@ def test_p3_statements_plan_on_their_named_indexes(rig):
           "key column; the window games by idx_matches_ended on ended_at; the population read "
           "returns the %d eligible games only, %d distractor rows" % (
               len(plans), len(eligible), p2.DISTRACTORS))
+
+
+# ── B10-P3-R2 H1: the window cells' own complete read ─────────────────────
+
+WIN_MAX = ("b4.rar.hands|SELF|seat|card_record|one|win_max.cell|profile", "prof")
+# Card contributions under stable key `k1` whose stored pairs sort before any
+# real pair (pair_lo 00000000-0000-0000-0000-...), on an old match of two other
+# players: they fill the section's display read before the requested game's.
+_SORT_FIRST = (
+    "INSERT INTO card_contrib (stable_game_key, pair_lo, pair_hi, recorder_player_id, "
+    "subject_player_id, source, coverage, deal_profile, rules_rev, utc_day, match_id, hands) "
+    "SELECT 'k1', CAST('00000000-0000-0000-0000-' || lpad(to_hex(i), 12, '0') AS uuid), "
+    "CAST('00000000-0000-0000-0001-000000000000' AS uuid), CAST(:a AS uuid), CAST(:a AS uuid), "
+    "'self', 'one', 'prof', 'r1', CAST(:day AS date), CAST(:m AS uuid), 1 "
+    "FROM generate_series(0, CAST(:n AS integer) - 1) AS i")
+
+
+async def _sort_first(rig, subject):
+    """SECTION_ROWS_MAX - 1 contributions about `subject` under `k1` that sort
+    first in the section's display read, on a 45-day-old match of two other
+    players."""
+    from sqlalchemy import text
+    c, _sc, _d = await rig.player()
+    d, _sd, _d = await rig.player()
+    old = await rig.match(c, d, NOW - dt.timedelta(days=45), photon_room_id="room-sf")
+    await rig.conn.execute(text(_SORT_FIRST), {
+        "a": str(subject), "m": str(old), "day": NOW.date(),
+        "n": ae.AER_CONTRACT_BOUNDS["SECTION_ROWS_MAX"] - 1})
+
+
+def test_r2_window_cells_read_every_covered_contribution_past_the_section_cap(rig):
+    """R2-H1, the report's first scenario: the account's two covered games M1
+    (k1, hands 1) and M2 (k2, hands 100) and 511 contributions under k1 that
+    sort first. The section's display read stops at its cap of 512 before
+    M2's row; the cells come from the window read and give 100 over 2, never
+    1 over 1, with nothing cut or left out."""
+    async def go():
+        await p2._up(rig)
+        await _up3(rig)
+        admin = await _admin(rig)
+        a, sa, _d = await rig.player()
+        b, _sb, _d = await rig.player()
+        m1 = await rig.match(a, b, NOW - dt.timedelta(hours=3), photon_room_id="room-w1")
+        m2 = await rig.match(a, b, NOW - dt.timedelta(hours=2), photon_room_id="room-w2")
+        await p2.contrib(rig, "card", "k1", a, b, a, hands=1, match_id=m1)
+        await p2.contrib(rig, "card", "k2", a, b, a, hands=100, match_id=m2)
+        await _sort_first(rig, a)
+        await rig.commit()
+        return await p2.get(rig, "%s/player/%s?games=2" % (ROOT, sa), admin, HEADER3)
+
+    status, content = rig.run(go())
+    assert status == 200, content[:300]
+    body = _body(content)
+    card = [e for e in body["sections_summary"] if e["src"] == "card"]
+    assert card and all(e["truncated"] for e in card), card      # the display read was cut
+    ev = body["evidence"]
+    assert ev["state"] == "ok" and ev["truncated"] is False and ev["partial"] == 0, ev
+    cell = _cells(ev)[WIN_MAX]
+    assert (cell[3], cell[4]) == (2, 100.0), cell
+    print("GATE p3-r2-1: past the section's display cap the window cell is 100 over 2")
+
+
+def test_r2_a_window_repeat_on_an_old_game_refuses_and_its_control_is_ok(rig, monkeypatch):
+    """R2-H1, the report's second scenario: the account's one covered game,
+    older than the population window, with two facts under k1 and k2 for one
+    (match, subject, source, coverage, stratum), and 511 contributions under
+    k1 that sort first. The block is `unavailable` at the shipped caps and
+    with a window cap of one row (where only the repeat check over the
+    complete relation can see the second fact); without the second fact,
+    `ok` with its one cell."""
+    async def go(repeat, cap):
+        if cap is not None:
+            monkeypatch.setitem(ae.AER_CONTRACT_BOUNDS, "EV_POP_ROWS_MAX", cap)
+        await p2._up(rig)
+        await _up3(rig)
+        admin = await _admin(rig)
+        a, sa, _d = await rig.player()
+        b, _sb, _d = await rig.player()
+        g = await rig.match(a, b, NOW - dt.timedelta(days=40), photon_room_id="room-r2")
+        await p2.contrib(rig, "card", "k1", a, b, a, hands=1, match_id=g)
+        if repeat:
+            await p2.contrib(rig, "card", "k2", a, b, a, hands=7, match_id=g)
+        await _sort_first(rig, a)
+        await rig.commit()
+        return await p2.get(rig, "%s/player/%s?games=1" % (ROOT, sa), admin, HEADER3)
+
+    seen = {}
+    for repeat, cap in ((True, None), (True, 1), (False, 1)):
+        status, content = rig.run(go(repeat, cap))
+        assert status == 200, content[:300]
+        seen[(repeat, cap)] = _body(content)["evidence"]
+    for case in ((True, None), (True, 1)):
+        assert seen[case]["state"] == "unavailable", (case, seen[case])
+        assert seen[case]["windows"][0]["cells"] == [], case
+    control = seen[(False, 1)]
+    assert control["state"] == "ok" and control["partial"] == 0, control
+    cell = _cells(control)[WIN_MAX]
+    assert (cell[3], cell[4]) == (1, 1.0), cell
+    print("GATE p3-r2-2: a window repeat on an old game: unavailable; its control: ok, 1 over 1")
+
+
+def test_r2_a_window_stratum_the_cap_cuts_is_left_out_whole(rig, monkeypatch):
+    """R2-H1, the window read's own cap: three covered games older than the
+    population window, hands 1, 2 and 3 in one stratum. With room for the
+    three rows the cell is 3 over 3; with a window cap of two rows the
+    stratum is left out whole and counted, never 2 over 2."""
+    async def go(cap):
+        monkeypatch.setitem(ae.AER_CONTRACT_BOUNDS, "EV_POP_ROWS_MAX", cap)
+        await p2._up(rig)
+        await _up3(rig)
+        admin = await _admin(rig)
+        a, sa, _d = await rig.player()
+        b, _sb, _d = await rig.player()
+        for i in range(3):
+            g = await rig.match(a, b, NOW - dt.timedelta(days=40 + i), photon_room_id="room-c%d" % i)
+            await p2.contrib(rig, "card", "k-c%d" % i, a, b, a, hands=1 + i, match_id=g)
+        await rig.commit()
+        return await p2.get(rig, "%s/player/%s?games=3" % (ROOT, sa), admin, HEADER3)
+
+    seen = {}
+    for cap in (3, 2):
+        status, content = rig.run(go(cap))
+        assert status == 200, content[:300]
+        seen[cap] = _body(content)["evidence"]
+    whole = _cells(seen[3])[WIN_MAX]
+    assert (whole[3], whole[4]) == (3, 3.0), whole
+    cut = seen[2]
+    assert cut["truncated"] is True and cut["partial"] >= 1, cut
+    assert all(c == [] for c in [w["cells"] for w in cut["windows"]]) or WIN_MAX not in _cells(cut)
+    print("GATE p3-r2-3: a window stratum the cap cuts: left out whole and counted; whole: 3 over 3")

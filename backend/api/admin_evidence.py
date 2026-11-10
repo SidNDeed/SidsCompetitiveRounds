@@ -2956,10 +2956,15 @@ def ev_window_cells(src, data, games, account, basis, pops, daily_pops, days_row
     population's subjects (`days_rows`: the account's rows of EV_DAILY_SQL,
     which reads the stratum column the phase-2 daily read does not); each
     part in (key, stratum) order. Raises EvidenceDuplicate on two facts for
-    one key, stratum and game."""
+    one key, stratum and game. `data["contrib"]` is the window read's rows
+    (`read_evidence_windows`: complete for the cells it publishes, its
+    repeat check taken before its cap), never the section's display read
+    (B10-P3-R2 H1); a game's contributions are `_game_contrib`'s (stored
+    match_id the game's, the game's exact pair)."""
     vals = collections.defaultdict(list)
     for game in games:
-        _paired, _recs, _rows, _other, contrib, _loose = _game_records(src, data, game)
+        pair = tuple(sorted((game["p1"], game["p2"])))
+        contrib, _loose = _game_contrib(src, data, game, pair, frozenset())
         seen = set()
         for c in contrib:
             if str(c["subject_player_id"]) != account:
@@ -3064,9 +3069,53 @@ HAVING count(*) > 1
  LIMIT 1""" % {"contrib": spec["contrib"], "col": col}
 
 
+def _ev_win_sql(src):
+    """A window subject's contributions on the covered games (B10-P3-R2 H1):
+    every row whose STORED match_id is one of `:ids` and whose subject is
+    `:s`, through ix_<contrib>_match, whatever stable key or pair it is
+    stored under (the cells keep the game's exact pair, `_game_contrib`).
+    This read, not the section's display read, is the cells' input. Ordered
+    stratum first and LIMITed at EV_POP_ROWS_MAX plus one, so a cut can split
+    only the stratum of the first row past the cap (`ev_complete_window`)."""
+    spec = _SECTION_SPEC[src]
+    col = EV_SPEC[src]["col"]
+    return ("SELECT c.stable_game_key, c.pair_lo, c.pair_hi, c.subject_player_id, c.source, "
+            "c.coverage, %(cols)s FROM %(contrib)s c "
+            "WHERE c.match_id = ANY(CAST(:ids AS uuid[])) "
+            "AND c.subject_player_id = CAST(:s AS uuid) "
+            "ORDER BY c.%(col)s, c.source, c.coverage, c.match_id, c.stable_game_key, "
+            "c.pair_lo, c.pair_hi LIMIT CAST(:n AS integer)") % {
+        "cols": ", ".join("c." + c for c in spec["provenance"] + spec["contrib_cols"]),
+        "contrib": spec["contrib"], "col": col}
+
+
+def _ev_win_dup_sql(src):
+    """Whether any fact identity repeats in a window subject's COMPLETE
+    relation on the covered games (B10-P3-R2 H1), before any cap: the rows
+    `_ev_win_sql` reads with a registered source and coverage word and a
+    stratum, grouped by (match, stored pair, subject, source, coverage,
+    stratum). The stable key is not grouped: two stable keys of one game's
+    pair are one game's facts. A repeat under a pair that is not the game's
+    refuses too (the conservative side). LIMIT 1, no row cap before the
+    grouping."""
+    spec = _SECTION_SPEC[src]
+    col = EV_SPEC[src]["col"]
+    return ("SELECT c.match_id FROM %(contrib)s c "
+            "WHERE c.match_id = ANY(CAST(:ids AS uuid[])) "
+            "AND c.subject_player_id = CAST(:s AS uuid) "
+            "AND c.source = ANY(CAST(:sources AS text[])) "
+            "AND c.coverage = ANY(CAST(:coverages AS text[])) "
+            "AND c.%(col)s IS NOT NULL "
+            "GROUP BY c.match_id, c.pair_lo, c.pair_hi, c.subject_player_id, c.source, "
+            "c.coverage, c.%(col)s HAVING count(*) > 1 LIMIT 1") % {
+        "contrib": spec["contrib"], "col": col}
+
+
 EV_POP_SQL = {src: _ev_pop_sql(src) for src in EV_SOURCES}
 EV_DAILY_SQL = {src: _ev_daily_sql(src) for src in EV_SOURCES}
 EV_DUP_SQL = {src: _ev_dup_sql(src) for src in EV_SOURCES}
+EV_WIN_SQL = {src: _ev_win_sql(src) for src in EV_SOURCES}
+EV_WIN_DUP_SQL = {src: _ev_win_dup_sql(src) for src in EV_SOURCES}
 
 
 def ev_complete_daily(src, rows, cap):
@@ -3083,6 +3132,49 @@ def ev_complete_daily(src, rows, cap):
     groups = {(r.get("source"), r.get("coverage"), _ev_stratum(src, r))
               for r in rows[:cap] if str(r["subject_player_id"]) == edge}
     return kept, len(groups)
+
+
+def ev_complete_window(src, rows, cap):
+    """A window subject's rows of whole strata only, and the count of
+    (source, coverage, stratum) groups left out: `rows` is one EV_WIN_SQL
+    read LIMITed at `cap` plus one, ordered by stratum first, so when it
+    returned more than `cap` rows only the stratum of the first row past the
+    cap can be cut, and every row of that stratum is left out (its groups
+    counted), never aggregated short (B10-P3-R2 H1). A cell is one key and
+    stratum, so leaving the stratum out leaves each of its cells out whole."""
+    if len(rows) <= cap:
+        return list(rows), 0
+    edge = _ev_stratum(src, rows[cap])
+    kept = [r for r in rows[:cap] if _ev_stratum(src, r) != edge]
+    groups = {(r.get("source"), r.get("coverage"))
+              for r in rows[:cap] if _ev_stratum(src, r) == edge}
+    return kept, len(groups)
+
+
+async def read_evidence_windows(db, games, accounts):
+    """Each family's window rows per account on the covered games:
+    `(win, truncated, partial)`, `win[src][account]` the account's rows.
+    Per family and account, first the repeat check over the complete
+    relation (`EV_WIN_DUP_SQL`; a repeat raises EvidenceDuplicate before any
+    cap applies), then EV_WIN_SQL LIMITed at EV_POP_ROWS_MAX plus one: a cut
+    says truncated and leaves its edge stratum out whole
+    (`ev_complete_window`; its groups count in `partial`)."""
+    cap = AER_CONTRACT_BOUNDS["EV_POP_ROWS_MAX"]
+    ids = [g["id"] for g in games]
+    win, truncated, partial = {}, False, 0
+    for src in EV_SOURCES:
+        win[src] = {}
+        for acc in sorted({str(a) for a in accounts}):
+            dup = await _section_rows(db, EV_WIN_DUP_SQL[src], {
+                "ids": ids, "s": acc, "sources": sorted(EV_PROV),
+                "coverages": list(EV_COVERAGES)})
+            if dup:
+                raise EvidenceDuplicate("%s window: repeated fact" % src)
+            got = await _section_rows(db, EV_WIN_SQL[src], {"ids": ids, "s": acc, "n": cap + 1})
+            truncated |= len(got) > cap
+            win[src][acc], left = ev_complete_window(src, got, cap)
+            partial += left
+    return win, truncated, partial
 
 
 async def read_evidence_populations(db, accounts):
@@ -3131,9 +3223,13 @@ async def evidence_block(db, data, games, accounts):
     and no contribution or daily row gives a window cell, else `ok` (a
     window with daily rows alone is `ok` with daily cells only); only `ok`
     carries cells. Cells are the windows' (`ev_window_cells`), at most
-    EV_CELLS_MAX per window, the rest counted in `more`. `partial` counts
-    what a row cap could have cut and was left out whole: population units
-    and daily (subject, source, coverage, stratum) groups."""
+    EV_CELLS_MAX per window, the rest counted in `more`. The window cells
+    take their contributions from `read_evidence_windows` (complete for the
+    covered games and the account, repeat-checked before its cap), never
+    from the section's display read. `partial` counts what a row cap could
+    have cut and was left out whole: population units, daily (subject,
+    source, coverage, stratum) groups and window (source, coverage) groups
+    of a cut stratum."""
     block = {"state": "unavailable", "rows": 0, "truncated": False, "partial": 0,
              "fingerprint": ev_fingerprint(), "census": ev_census(), "catalog": [],
              "strata": [], "windows": [{"oi": oi, "cells": [], "more": 0}
@@ -3147,6 +3243,9 @@ async def evidence_block(db, data, games, accounts):
         async with db.begin_nested():
             pop, daily, own, rows, truncated, partial = await read_evidence_populations(
                 db, accounts)
+            win, wcut, wleft = await read_evidence_windows(db, games, accounts)
+        truncated |= wcut
+        partial += wleft
         sources = {}
         for src in EV_SOURCES:
             pops, cut, left = ev_population(src, *pop[src])
@@ -3158,7 +3257,8 @@ async def evidence_block(db, data, games, accounts):
             cells = []
             for src in EV_SOURCES:
                 mine = [r for r in own[src] if str(r["subject_player_id"]) == acc]
-                cells += ev_window_cells(src, data[src], games, acc, basis, *sources[src], mine)
+                cells += ev_window_cells(src, {"contrib": win[src][acc]}, games, acc, basis,
+                                         *sources[src], mine)
             made.append(cells)
     except EvidenceDuplicate as exc:
         _aer_log.warning("admin_evidence evidence ranks unavailable: %s", exc)
