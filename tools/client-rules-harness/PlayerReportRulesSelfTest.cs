@@ -51,6 +51,7 @@ namespace CompetitiveRounds
                 StateCases(r);
                 PressCases(r);
                 ListCases(r);
+                OverlapCases(r);
                 ParseCases(r);
                 LabelCases(r);
                 BodyCases(r);
@@ -160,6 +161,15 @@ namespace CompetitiveRounds
         }
 
         // ---- the state table: what a press is told after each answer -----------------
+
+        /// <summary>Whether the state holds anything but one fingerprint of a
+        /// refused sign-in (16 hex characters, never the token's text).</summary>
+        private static bool HoldsToken(FormState st)
+        {
+            foreach (string k in st.RefusedSignIns)
+                if (k.Length != 16 || k.Contains("token")) return true;
+            return st.RefusedSignIns.Count != 1;
+        }
 
         private static string Told(FormState st, Game g, Other o, string reason, string details, bool withLog, string key)
         {
@@ -307,7 +317,7 @@ namespace CompetitiveRounds
                 + " press_after_refresh=" + Told(st, g1, g1.Others[0], "cheating", "", true, minted)
                 + " list_after=" + BeforeList(st, minted)
                 + " no_sign_in=" + Told(st, g1, g1.Others[0], "cheating", "", true, "")
-                + " state_holds_the_token=" + (st.RefusedSignIn.Length != 16 || st.RefusedSignIn.Contains("token"));
+                + " state_holds_the_token=" + HoldsToken(st);
             Case(r, "after 401 a press stays closed until the next sign-in, then goes out",
                  got == "press_before_refresh=SignIn(SignIn) list_before=SignIn press_after_refresh=None list_after=Loading"
                       + " no_sign_in=SignIn(SignIn) state_holds_the_token=False", got);
@@ -333,7 +343,7 @@ namespace CompetitiveRounds
         {
             var st = new FormState();
             string got = "fresh=" + BeforeList(st, Key1) + " none=" + BeforeList(st, "");
-            st.RefusedSignIn = Key1;
+            st.RefusedSignIns.Add(Key1);
             got += " refused=" + BeforeList(st, Key1) + " renewed=" + BeforeList(st, Key2);
             st.RunClosed = true;
             got += " closed=" + BeforeList(st, Key2);
@@ -350,7 +360,7 @@ namespace CompetitiveRounds
                 if (sb.Length > 0) sb.Append(';');
                 sb.Append(a.Substring(0, sp)).Append('=').Append(ls);
                 if (s2.RunClosed) sb.Append("/run:").Append(s2.RunOutcome);
-                if (s2.RefusedSignIn.Length > 0) sb.Append("/signin");
+                if (s2.RefusedSignIns.Count > 0) sb.Append("/signin");
                 sb.Append('>').Append(BeforeList(s2, Key1));     // what the next opening does
             }
             got = sb.ToString();
@@ -385,6 +395,110 @@ namespace CompetitiveRounds
                 else sb.Append(Bs).Append('u').Append(((int)c).ToString("x4", CultureInfo.InvariantCulture));
             }
             return sb.ToString();
+        }
+
+        // ---- answers to overlapping requests (ask 14 R2 H1 and its sweep) ----------
+        //
+        // An earlier opening's games read, a later opening's, and the submit in
+        // flight can answer in any order. Each case lands the answers in the
+        // order that once undid a closure; a closer that keeps one slot fails it.
+
+        private static void OverlapCases(SelfTestResult r)
+        {
+            Game g1 = G1();
+            string a = SessionKey("the token the first opening's read carried");
+            string b = SessionKey("the token minted before the second opening");
+            var st = new FormState();
+            string got = "open1=" + BeforeList(st, a) + " open2=" + BeforeList(st, b)
+                + " list2=" + ApplyList(st, 200, "", b);
+            Apply(st, 401, "session_required", false, g1, g1.Others[0], "cheating", "", false, b);
+            got += " late1=" + ApplyList(st, 401, "session_required", a)
+                + " press_b=" + Told(st, g1, g1.Others[0], "cheating", "", false, b)
+                + " list_b=" + BeforeList(st, b) + " list_a=" + BeforeList(st, a) + " marks=" + st.RefusedSignIns.Count;
+            Case(r, "a late 401 to an earlier read keeps the refused sign-in closed (read, then submit)",
+                 got == "open1=Loading open2=Loading list2=Loaded late1=SignIn press_b=SignIn(SignIn) list_b=SignIn"
+                      + " list_a=SignIn marks=2", got);
+
+            st = new FormState();
+            string c = SessionKey("the token minted after both");
+            got = "open1=" + BeforeList(st, a) + " open2=" + BeforeList(st, b)
+                + " list2=" + ApplyList(st, 401, "session_required", b)
+                + " late1=" + ApplyList(st, 401, "session_required", a)
+                + " open3_b=" + BeforeList(st, b) + " open3_a=" + BeforeList(st, a) + " open3_c=" + BeforeList(st, c);
+            Case(r, "a late 401 to an earlier read keeps the refused sign-in closed (read, then read)",
+                 got == "open1=Loading open2=Loading list2=SignIn late1=SignIn open3_b=SignIn open3_a=SignIn open3_c=Loading", got);
+
+            st = new FormState();
+            ApplyList(st, 401, "session_required", a);
+            Apply(st, 401, "session_required", false, g1, g1.Others[0], "cheating", "", false, b);
+            got = "late_200_a=" + ApplyList(st, 200, "", a) + " late_200_b=" + ApplyList(st, 200, "", b)
+                + " list_a=" + BeforeList(st, a) + " list_b=" + BeforeList(st, b)
+                + " press_a=" + Told(st, g1, g1.Others[0], "cheating", "", false, a)
+                + " press_b=" + Told(st, g1, g1.Others[0], "cheating", "", false, b);
+            Case(r, "a late 200 reopens no refused sign-in",
+                 got == "late_200_a=Loaded late_200_b=Loaded list_a=SignIn list_b=SignIn press_a=SignIn(SignIn)"
+                      + " press_b=SignIn(SignIn)", got);
+
+            st = new FormState();
+            got = "list=" + ApplyList(st, 503, "player_reports_off", Key1);
+            Apply(st, 429, "report_limit", false, g1, g1.Others[0], "cheating", "", false, Key1);
+            Apply(st, 426, "", false, g1, g1.Others[1], "cheating", "", false, Key1);
+            got += " press=" + Told(st, g1, g1.Others[0], "cheating", "", false, Key1) + " next=" + BeforeList(st, Key1);
+            Case(r, "the first answer that closes the run keeps its line",
+                 got == "list=Closed press=RunClosed(TurnedOff) next=Closed", got);
+
+            st = new FormState();
+            NoteRemaining(st, 1, st.Accepted);                      // the opening's read: one left
+            int asked = st.Accepted;                                // a later read goes out
+            Apply(st, 200, "", true, g1, g1.Others[0], "cheating", "", false, Key1);
+            got = "after_send=" + st.Remaining + " accepted=" + st.Accepted;
+            NoteRemaining(st, 1, asked);                            // its answer, older than the acceptance
+            got += " after_late=" + st.Remaining + " press=" + Told(st, g1, g1.Others[1], "cheating", "", false, Key1);
+            NoteRemaining(st, 2, st.Accepted);                      // a read sent after it: older reports aged out
+            got += " fresh=" + st.Remaining + " press2=" + Told(st, g1, g1.Others[1], "cheating", "", false, Key1);
+            var s3 = new FormState();
+            Apply(s3, 200, "", true, g1, g1.Others[0], "cheating", "", false, Key1);
+            NoteRemaining(s3, 1, 0);
+            got += " unknown=" + s3.Remaining;
+            NoteRemaining(s3, -1, s3.Accepted);
+            got += " none=" + s3.Remaining;
+            Case(r, "a count read before an accepted report does not raise what is left",
+                 got == "after_send=0 accepted=1 after_late=0 press=NoneLeft(DailyLimit) fresh=2 press2=None"
+                      + " unknown=-1 none=-1", got);
+
+            int shown = 0;
+            got = "second_first=" + NewerAnswer(ref shown, 2) + " first_late=" + NewerAnswer(ref shown, 1)
+                + " again=" + NewerAnswer(ref shown, 2) + " third=" + NewerAnswer(ref shown, 3) + " shown=" + shown;
+            Case(r, "only the newer read's count reaches the badge",
+                 got == "second_first=True first_late=False again=False third=True shown=3", got);
+
+            var verdicts = new[]
+            {
+                new ReadGateRules.Verdict { Next = ReadGateRules.Next.ResessionRetry, Refusal = "read_credential_required" },
+                new ReadGateRules.Verdict { Next = ReadGateRules.Next.DelayRetry, ReplicationRetry = 1, Delay = 2, Refusal = "session_replication_pending" },
+                new ReadGateRules.Verdict { Next = ReadGateRules.Next.DelayRetry, Delay = 5, Refusal = "read_gate_unavailable" },
+                new ReadGateRules.Verdict { Next = ReadGateRules.Next.Deliver, Refusal = "read_credential_required" },
+                new ReadGateRules.Verdict { Next = ReadGateRules.Next.Deliver, Refusal = "" },
+            };
+            var lb = new StringBuilder();
+            foreach (bool retries in new[] { true, false })
+                foreach (ReadGateRules.Verdict v in verdicts)
+                {
+                    bool warn;
+                    string line = ReadGateRules.VerdictLine(v, retries, out warn);
+                    lb.Append(retries ? "R" : "1").Append(warn ? "W:" : "I:").Append(line ?? "none").Append('|');
+                }
+            got = lb.ToString();
+            const string Once = "); one attempt, delivered to its owner without a retry|";
+            Case(r, "a single-attempt read logs one line for a refusal",
+                 got == "RI:[READ-GATE] retried after refusal (read_credential_required)|"
+                      + "RI:[READ-GATE] replication pending, retry 1|"
+                      + "RI:[READ-GATE] gate unavailable, retry once after 5 s|"
+                      + "RW:[READ-GATE] refused again (read_credential_required); reported as a failure|RI:none|"
+                      + "1I:[READ-GATE] refused (read_credential_required" + Once
+                      + "1I:[READ-GATE] refused (session_replication_pending" + Once
+                      + "1I:[READ-GATE] refused (read_gate_unavailable" + Once
+                      + "1W:[READ-GATE] refused again (read_credential_required); reported as a failure|1I:none|", got);
         }
 
         private static void ParseCases(SelfTestResult r)

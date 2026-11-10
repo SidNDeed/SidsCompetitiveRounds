@@ -236,6 +236,30 @@ namespace CompetitiveRounds
             internal string Refusal;
         }
 
+        /// <summary>The log line a verdict calls for, or null, and whether it
+        /// is a warning. <paramref name="retries"/> is the caller's policy: a
+        /// caller that takes one attempt (ApiClient.GetRequest's singleAttempt)
+        /// hands a retrying verdict to its owner, so its one line says that,
+        /// not a retry that never comes (ask 14 R2 L1). With retries the lines
+        /// are the ones ApiClient.ReadGateVerdict wrote before, word for word.</summary>
+        internal static string VerdictLine(Verdict v, bool retries, out bool warning)
+        {
+            warning = false;
+            if (v.Next != Next.Deliver && !retries)
+                return "[READ-GATE] refused (" + v.Refusal + "); one attempt, delivered to its owner without a retry";
+            if (v.Next == Next.ResessionRetry)
+                return "[READ-GATE] retried after refusal (" + v.Refusal + ")";
+            if (v.Next == Next.DelayRetry && v.ReplicationRetry > 0)
+                return "[READ-GATE] replication pending, retry "
+                       + v.ReplicationRetry.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            if (v.Next == Next.DelayRetry)
+                return "[READ-GATE] gate unavailable, retry once after "
+                       + v.Delay.ToString("0", System.Globalization.CultureInfo.InvariantCulture) + " s";
+            if (string.IsNullOrEmpty(v.Refusal)) return null;
+            warning = true;
+            return "[READ-GATE] refused again (" + v.Refusal + "); reported as a failure";
+        }
+
         /// <summary>The gate's refusal word a 401 carries, or null.
         /// `read_credential_required` and `player_session_required` are the
         /// gate's alone. `session_required` is ALSO what the server's

@@ -72,14 +72,15 @@ namespace CompetitiveRounds
             _list = PlayerReportRules.BeforeList(_state, key);
             int mine = ++_opening;
             if (_list != PlayerReportRules.ListState.Loading) return;
+            int accepted = _state.Accepted;
             ApiClient.FetchReportableGames((status, code, games, remaining, carried) =>
             {
                 // A refusal closes the sign-in the GET carried; key stands in
                 // only when nothing went out, and such an answer closes none.
                 PlayerReportRules.ListState answered = PlayerReportRules.ApplyList(_state, status, code,
                                                                                    carried == null ? key : MarkOf(carried));
-                if (status == 200 && remaining >= 0) _state.Remaining = remaining;
                 if (mine != _opening) return;
+                if (status == 200) PlayerReportRules.NoteRemaining(_state, remaining, accepted);
                 _list = answered;
                 if (answered == PlayerReportRules.ListState.Loaded && games != null) _games = games;
             });
@@ -456,6 +457,7 @@ namespace CompetitiveRounds
         private static bool _adminClosed;            // a refusal ended the viewer's requests for this run
         private static bool _adminLoading, _closing, _logLoading;
         private static int _adminLoad;
+        private static int _badgeAsked, _badgeShown;     // the badge's reads, numbered as sent (NewerAnswer)
         private static string _adminFilter = "open";
         private static List<PlayerReportRules.Report> _reports = new List<PlayerReportRules.Report>();
         private static string _selectedId;
@@ -478,9 +480,12 @@ namespace CompetitiveRounds
         }
 
         /// <summary>What every admin answer does first: a refusal that does not
-        /// depend on the report closes the viewer's requests for the run.</summary>
+        /// depend on the report closes the viewer's requests for the run. The
+        /// answer that closed them keeps its line: an answer to an overlapping
+        /// request that lands later writes nothing over it (ask 14 R2's sweep).</summary>
         private static void AdminAnswered(int status, string code)
         {
+            if (_adminClosed) return;
             if (PlayerReportRules.AdminCloses(status)) _adminClosed = true;
             _adminStatus = PlayerReportRules.AdminAnswerText(status, code);
         }
@@ -493,14 +498,15 @@ namespace CompetitiveRounds
             if (!ApiClient.IsAdmin) { _adminStatus = I18n.Tr("Not allowed."); return; }
             _adminLoading = true;
             int mine = ++_adminLoad;
+            int ticket = ++_badgeAsked;
             ApiClient.FetchPlayerReports(MatchTracker.LocalSteamId, _adminFilter, 100, (status, code, reports, openTotal) =>
             {
                 _adminLoading = false;
                 AdminAnswered(status, code);
                 if (status != 200 || mine != _adminLoad) return;
-                _adminStatus = said;
+                if (!_adminClosed) _adminStatus = said;
                 _reports = reports ?? new List<PlayerReportRules.Report>();
-                NativeUI.SetPlayerReportBadge(openTotal);
+                if (PlayerReportRules.NewerAnswer(ref _badgeShown, ticket)) NativeUI.SetPlayerReportBadge(openTotal);
             });
         }
 
@@ -514,10 +520,12 @@ namespace CompetitiveRounds
             if (!PlayerReportRules.MayAskCount(ApiClient.IsAdmin, _adminClosed, _countAsked, now, _countAskedAt)) return;
             _countAsked = true;
             _countAskedAt = now;
+            int ticket = ++_badgeAsked;
             ApiClient.FetchPlayerReports(MatchTracker.LocalSteamId, "open", 1, (status, code, reports, openTotal) =>
             {
                 if (PlayerReportRules.AdminCloses(status)) _adminClosed = true;
-                if (status == 200) NativeUI.SetPlayerReportBadge(openTotal);
+                // The list's answers set the badge too: only the newer read's lands.
+                if (status == 200 && PlayerReportRules.NewerAnswer(ref _badgeShown, ticket)) NativeUI.SetPlayerReportBadge(openTotal);
             });
         }
 
@@ -540,7 +548,7 @@ namespace CompetitiveRounds
                 AdminAnswered(status, code);
                 if (status != 200) return;        // a refusal is shown; the admin presses Refresh
                 _note = "";
-                _adminStatus = I18n.Tr("Report closed.");
+                if (!_adminClosed) _adminStatus = I18n.Tr("Report closed.");
                 LoadAdmin(_adminStatus);
             });
         }

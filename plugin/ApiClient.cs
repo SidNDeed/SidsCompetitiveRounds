@@ -25668,12 +25668,13 @@ namespace CompetitiveRounds
                     }
                     string rgBody = null;
                     try { rgBody = request.downloadHandler?.text; } catch { }
-                    rgv = ReadGateVerdict(request, rgBody, rgAttempts, _rgTok);
+                    rgv = ReadGateVerdict(request, rgBody, rgAttempts, _rgTok, !singleAttempt);
                     // singleAttempt (off by default; only the player report form's
                     // three reads pass it): their owner closes its own requests
                     // after a refusal (C4), so the first answer, a gate refusal
                     // included, is delivered and nothing is sent again (ask 14 R1
-                    // H2). The hold before the send runs as for every caller.
+                    // H2), and the verdict's line says so (R2 L1). The hold
+                    // before the send runs as for every caller.
                     if (rgv.Next == ReadGateRules.Next.Deliver || singleAttempt)
                     {
                         if (sessionAware && rgv.Next == ReadGateRules.Next.Deliver) HandleSessionReject(request, _sentTok);
@@ -25733,9 +25734,11 @@ namespace CompetitiveRounds
         }
 
         /// <summary>The rules' verdict on one answer, with the session reject
-        /// and the log line its retry calls for. Never a toast.</summary>
+        /// and the log line it calls for (ReadGateRules.VerdictLine). A caller
+        /// that does not retry passes <paramref name="retries"/> false, and its
+        /// line says the answer went to its owner. Never a toast.</summary>
         private static ReadGateRules.Verdict ReadGateVerdict(UnityWebRequest req, string body,
-            ReadGateRules.Attempts attempts, string sentToken)
+            ReadGateRules.Attempts attempts, string sentToken, bool retries = true)
         {
             long code = req.responseCode;
             if (code != 401 && code != 503)
@@ -25744,14 +25747,12 @@ namespace CompetitiveRounds
             try { cc = req.GetResponseHeader("Cache-Control"); } catch { }
             var v = ReadGateRules.Current.OnRefusal(code, body, cc, attempts);
             if (v.PassToSessionReject) HandleSessionReject(req, sentToken);
-            if (v.Next == ReadGateRules.Next.ResessionRetry)
-                Plugin.Log.LogInfo($"[READ-GATE] retried after refusal ({v.Refusal})");
-            else if (v.Next == ReadGateRules.Next.DelayRetry && v.ReplicationRetry > 0)
-                Plugin.Log.LogInfo($"[READ-GATE] replication pending, retry {v.ReplicationRetry}");
-            else if (v.Next == ReadGateRules.Next.DelayRetry)
-                Plugin.Log.LogInfo($"[READ-GATE] gate unavailable, retry once after {v.Delay:0} s");
-            else if (v.Refusal.Length > 0)
-                Plugin.Log.LogWarning($"[READ-GATE] refused again ({v.Refusal}); reported as a failure");
+            bool warning;
+            string line = ReadGateRules.VerdictLine(v, retries, out warning);
+            if (line != null)
+            {
+                if (warning) Plugin.Log.LogWarning(line); else Plugin.Log.LogInfo(line);
+            }
             return v;
         }
 

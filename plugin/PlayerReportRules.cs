@@ -291,10 +291,65 @@ namespace CompetitiveRounds
             internal readonly Dictionary<string, Outcome> Choices = new Dictionary<string, Outcome>(StringComparer.Ordinal);
             internal readonly Dictionary<string, Outcome> Games = new Dictionary<string, Outcome>(StringComparer.Ordinal);
             internal readonly Dictionary<string, Outcome> Refused = new Dictionary<string, Outcome>(StringComparer.Ordinal);
-            internal string RefusedSignIn = "";       // SessionKey of the sign-in the server refused
+            // Every sign-in the server refused (SessionKey): answers to
+            // overlapping requests each add theirs, and none removes one.
+            internal readonly HashSet<string> RefusedSignIns = new HashSet<string>(StringComparer.Ordinal);
             internal bool RunClosed;
-            internal Outcome RunOutcome = Outcome.NotSent;
-            internal int Remaining = -1;        // left of today's limit as the server last said; -1 = not known
+            internal Outcome RunOutcome = Outcome.NotSent;   // what the first answer that closed the run said
+            internal int Remaining = -1;        // left of today's limit (NoteRemaining); -1 = not known
+            internal int Accepted;              // reports the server accepted from this run (each 200 to a submit)
+        }
+
+        // The closers. Answers to overlapping requests (an earlier opening's
+        // games read, the submit in flight) land in any order, so each closer
+        // only adds: a later answer never reopens what an earlier one closed,
+        // and never rewrites what the form says about it (ask 14 R2 H1 and
+        // its sweep).
+
+        /// <summary>Whether Send and the games read are closed for this
+        /// sign-in: none is held, or the server refused this one.</summary>
+        internal static bool SignInClosed(FormState st, string sessionKey)
+        {
+            return string.IsNullOrEmpty(sessionKey) || st.RefusedSignIns.Contains(sessionKey);
+        }
+
+        private static void CloseSignIn(FormState st, string sessionKey)
+        {
+            if (!string.IsNullOrEmpty(sessionKey)) st.RefusedSignIns.Add(sessionKey);
+        }
+
+        private static void CloseRun(FormState st, Outcome o)
+        {
+            if (st.RunClosed) return;
+            st.RunClosed = true;
+            st.RunOutcome = o;
+        }
+
+        private static void CloseOnce(Dictionary<string, Outcome> closed, string key, Outcome o)
+        {
+            if (!closed.ContainsKey(key)) closed[key] = o;
+        }
+
+        /// <summary>What a games read says is left of today's limit (the last
+        /// 24 hours, so it can rise). <paramref name="acceptedWhenAsked"/> is
+        /// st.Accepted when the read went out. A report the server accepted
+        /// after that may be missing from the read's number, so the number
+        /// stands only when none was; otherwise the form's own count stands,
+        /// which each acceptance lowered.</summary>
+        internal static void NoteRemaining(FormState st, int remaining, int acceptedWhenAsked)
+        {
+            if (remaining >= 0 && st.Accepted == acceptedWhenAsked) st.Remaining = remaining;
+        }
+
+        /// <summary>Whether an answer may set what the launcher's badge shows:
+        /// only an answer to a request newer than the one whose answer it
+        /// shows. <paramref name="ticket"/> is the request's number, taken
+        /// when it was sent; <paramref name="shown"/> is the shown one's.</summary>
+        internal static bool NewerAnswer(ref int shown, int ticket)
+        {
+            if (ticket <= shown) return false;
+            shown = ticket;
+            return true;
         }
 
         /// <summary>Why Send is closed. None = a press sends one request.</summary>
@@ -346,7 +401,7 @@ namespace CompetitiveRounds
             Outcome closed;
             if (sending) return Block.Sending;
             if (st.RunClosed) { why = st.RunOutcome; return Block.RunClosed; }
-            if (string.IsNullOrEmpty(sessionKey) || sessionKey == st.RefusedSignIn) { why = Outcome.SignIn; return Block.SignIn; }
+            if (SignInClosed(st, sessionKey)) { why = Outcome.SignIn; return Block.SignIn; }
             if (st.Remaining == 0) { why = Outcome.DailyLimit; return Block.NoneLeft; }
             if (game == null) return Block.NoGame;
             if (st.Games.TryGetValue(GameKey(game), out closed)) { why = closed; return Block.GameClosed; }
@@ -372,15 +427,16 @@ namespace CompetitiveRounds
             Outcome o = row.Outcome;
             switch (row.Closes)
             {
-                case Closes.Same: st.Refused[SameKey(game, other, reason, details, withLog)] = o; break;
+                case Closes.Same: CloseOnce(st.Refused, SameKey(game, other, reason, details, withLog), o); break;
                 // A player already reported reads the same whether this run sent the report or the server said so.
-                case Closes.Choice: st.Choices[ChoiceKey(game, other)] = o == Outcome.Sent ? Outcome.AlreadyReported : o; break;
-                case Closes.Game: st.Games[GameKey(game)] = o; break;
-                case Closes.Auth: st.RefusedSignIn = sessionKey ?? ""; break;
-                case Closes.Run: st.RunClosed = true; st.RunOutcome = o; break;
+                case Closes.Choice: CloseOnce(st.Choices, ChoiceKey(game, other), o == Outcome.Sent ? Outcome.AlreadyReported : o); break;
+                case Closes.Game: CloseOnce(st.Games, GameKey(game), o); break;
+                case Closes.Auth: CloseSignIn(st, sessionKey); break;
+                case Closes.Run: CloseRun(st, o); break;
             }
             if (status == 200)
             {
+                st.Accepted++;
                 if (st.Remaining > 0) st.Remaining--;
                 if (withLog && !logStored) o = Outcome.SentWithoutLog;
             }
@@ -413,7 +469,7 @@ namespace CompetitiveRounds
         internal static ListState BeforeList(FormState st, string sessionKey)
         {
             if (st.RunClosed) return ListState.Closed;
-            if (string.IsNullOrEmpty(sessionKey) || sessionKey == st.RefusedSignIn) return ListState.SignIn;
+            if (SignInClosed(st, sessionKey)) return ListState.SignIn;
             return ListState.Loading;
         }
 
@@ -424,12 +480,11 @@ namespace CompetitiveRounds
         internal static ListState ApplyList(FormState st, int status, string code, string sessionKey)
         {
             if (status == 200) return ListState.Loaded;
-            if (status == 401) { st.RefusedSignIn = sessionKey ?? ""; return ListState.SignIn; }
+            if (status == 401) { CloseSignIn(st, sessionKey); return ListState.SignIn; }
             if ((status >= 400 && status < 500) || status == 503)
             {
-                st.RunClosed = true;
-                st.RunOutcome = status == 426 ? Outcome.NeedsUpdate
-                              : code == "player_reports_off" ? Outcome.TurnedOff : Outcome.Unavailable;
+                CloseRun(st, status == 426 ? Outcome.NeedsUpdate
+                             : code == "player_reports_off" ? Outcome.TurnedOff : Outcome.Unavailable);
                 return ListState.Closed;
             }
             return ListState.Failed;

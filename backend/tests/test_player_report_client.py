@@ -16,6 +16,7 @@ request, that nothing is sent except by the one press the rules allowed, that
 another person's text is never drawn as rich text, that every word goes through
 I18n, and that the mark which tells one sign-in from another stays in memory.
 """
+import bisect
 import io
 import json
 import os
@@ -362,6 +363,8 @@ CHECK = "internal static Block Check(FormState st, Game game, Other other, strin
 APPLY = "internal static Outcome Apply(FormState st, int status, string code, bool logStored, Game game, Other other,"
 BEFORE_LIST = "internal static ListState BeforeList(FormState st, string sessionKey)"
 APPLY_LIST = "internal static ListState ApplyList(FormState st, int status, string code, string sessionKey)"
+SIGN_IN_CLOSED = "internal static bool SignInClosed(FormState st, string sessionKey)"
+CLOSE_SIGN_IN = "private static void CloseSignIn(FormState st, string sessionKey)"
 BUILD_BODY = "internal static string BuildBody(string kind, string gameId, string reportedSteamId, string reason,"
 # ApiClient.cs
 SUBMIT = "internal static void SubmitPlayerReportBody(byte[] body, string sensitiveProbe, Action<int, string, bool, string> done)"
@@ -683,20 +686,25 @@ def test_r8_another_persons_text_is_never_drawn_as_rich_text():
 
 # -- R9 the mark that tells one sign-in from another stays in memory -----------------
 
-# Every line of the rules file that names the mark (the state's field or the
-# parameter that carries it), in source order, with the function a body line
-# stands in. Two lines READ the field (Check, BeforeList); two WRITE it
-# (Apply, ApplyList); the other five declare.
+# Every line of the rules file that names the mark (the state's set of
+# refused marks or the parameter that carries it), in source order, with the
+# function a body line stands in. One line READS the set (SignInClosed, which
+# Check and BeforeList call) and one ADDS to it (CloseSignIn, which Apply and
+# ApplyList call); the rest declare (ask 14 R2 H1).
 MARK_RULES = (
-    (None, 'internal string RefusedSignIn = "";'),
+    (None, "internal readonly HashSet<string> RefusedSignIns = new HashSet<string>(StringComparer.Ordinal);"),
+    (None, SIGN_IN_CLOSED),
+    (SIGN_IN_CLOSED, "return string.IsNullOrEmpty(sessionKey) || st.RefusedSignIns.Contains(sessionKey);"),
+    (None, CLOSE_SIGN_IN),
+    (CLOSE_SIGN_IN, "if (!string.IsNullOrEmpty(sessionKey)) st.RefusedSignIns.Add(sessionKey);"),
     (None, "bool withLog, bool sending, string sessionKey, out Outcome why)"),
-    (CHECK, "if (string.IsNullOrEmpty(sessionKey) || sessionKey == st.RefusedSignIn) { why = Outcome.SignIn; return Block.SignIn; }"),
+    (CHECK, "if (SignInClosed(st, sessionKey)) { why = Outcome.SignIn; return Block.SignIn; }"),
     (None, "string reason, string details, bool withLog, string sessionKey)"),
-    (APPLY, 'case Closes.Auth: st.RefusedSignIn = sessionKey ?? ""; break;'),
+    (APPLY, "case Closes.Auth: CloseSignIn(st, sessionKey); break;"),
     (None, BEFORE_LIST),
-    (BEFORE_LIST, "if (string.IsNullOrEmpty(sessionKey) || sessionKey == st.RefusedSignIn) return ListState.SignIn;"),
+    (BEFORE_LIST, "if (SignInClosed(st, sessionKey)) return ListState.SignIn;"),
     (None, APPLY_LIST),
-    (APPLY_LIST, 'if (status == 401) { st.RefusedSignIn = sessionKey ?? ""; return ListState.SignIn; }'),
+    (APPLY_LIST, "if (status == 401) { CloseSignIn(st, sessionKey); return ListState.SignIn; }"),
 )
 # Every line of the form that names the mark or the token it is made from, in
 # source order: where it is made (from the token held now, and from the one a
@@ -720,7 +728,7 @@ MARK_UI = (
     "private static void Finish(int status, string code, bool logStored, string carried = null)",
     "carried == null ? p.Key : MarkOf(carried));",                                      # Finish, into Apply
 )
-_MARK_IN_RULES = re.compile(r"\b(sessionKey|RefusedSignIn)\b")
+_MARK_IN_RULES = re.compile(r"\b(sessionKey|RefusedSignIns)\b")
 _MARK_IN_UI = re.compile(r"\b(key|Key|SessionKeyNow|SessionKey|SessionToken|sessionKey|RefusedSignIn|MarkOf|carried)\b")
 
 
@@ -731,9 +739,9 @@ def _r9(src):
     for sig, line in MARK_RULES:
         if sig is not None:
             assert line in _lines(_body(rl, sig)), (sig, line)
-    # The field is the rules file's alone, and the rules file has no log
+    # The set is the rules file's alone, and the rules file has no log
     # call, no file, no setting and no request to put it in.
-    assert _sites(src, "RefusedSignIn") == {RL: 5}, _sites(src, "RefusedSignIn")
+    assert _sites(src, "RefusedSignIn") == {RL: 3}, _sites(src, "RefusedSignIn")
     for word in ("Plugin.", "System.IO", "File.", "Config", "PlayerPrefs", "UnityEngine", "ApiClient"):
         assert word not in _code(rl), "the rules file reaches %s" % word
     # The form: the mark is made from the token in one place, and every line
@@ -790,7 +798,8 @@ def _r10(src):
                                            "now, _countAskedAt)) return;"), _lines(_body(ui, COUNT))[:4]
     # Every answer goes through the rule that sets the flag.
     assert _code(ui).count("AdminAnswered(status, code);") == 3, _code(ui).count("AdminAnswered(status, code);")
-    assert _lines(_body(ui, ADMIN_ANSWERED))[1] == ADMIN_CLOSES, _lines(_body(ui, ADMIN_ANSWERED))
+    answered = _lines(_body(ui, ADMIN_ANSWERED))
+    assert answered[1:3] == ["if (_adminClosed) return;", ADMIN_CLOSES], answered
     assert ADMIN_CLOSES in _lines(_body(ui, COUNT)), _lines(_body(ui, COUNT))
     assert _code(ui).count("_adminClosed = ") == 2, "the flag is written somewhere else"
 
@@ -1066,14 +1075,95 @@ def test_r17_a_refusal_closes_the_sign_in_the_request_carried():
            _control_comment(AC, FETCH_GAMES))
 
 
+# R18 reads every call of GetRequest in the plugin by what it binds, in each
+# form a C# call can take: a named argument with any spacing, and a
+# positional one at the parameter's place in the signature (ask 14 R2 M1).
+_CALL_GET = re.compile(r"\bGetRequest\s*\(")
+_NAMED_ARG = re.compile(r"^\s*([A-Za-z_][A-Za-z_0-9]*)\s*:(?!:)")
+BIND_HOLD_CALL = "GetRequest(url, (ok, text) => answer(ok, text), detailedErrors: true, sessionAware: true));"
+
+
+def _params(text, sig):
+    """The parameter names of the declaration `sig` begins, in order; a
+    generic's commas stay inside its type."""
+    i = text.index("(", text.index(sig)) + 1
+    depth, cur, out = 0, [], []
+    while True:
+        c = text[i]
+        if c in "<([":
+            depth += 1
+        elif c in ">)]":
+            if depth == 0:
+                break
+            depth -= 1
+        if c == "," and depth == 0:
+            out.append("".join(cur))
+            cur = []
+        else:
+            cur.append(c)
+        i += 1
+    out.append("".join(cur))
+    return [p.split("=")[0].split()[-1] for p in out]
+
+
+def _members(code):
+    """(offset, member) at each member line of the code (_CS_MEMBER), in order."""
+    out, off = [], 0
+    for line in code.split("\n"):
+        m = _CS_MEMBER.match(line)
+        if m:
+            out.append((off, m.group(1)))
+        off += len(line) + 1
+    return out
+
+
+def _get_request_calls(src):
+    """Every call of GetRequest in the plugin's code (the declaration left
+    out), as (file, member, its arguments folded), in file order."""
+    out = []
+    for name in sorted(src):
+        if "/" in name or not name.endswith(".cs"):
+            continue
+        text = src[name]
+        masked, code = _masked(text), _code(text)
+        hits = [m for m in _CALL_GET.finditer(masked)
+                if not masked[max(0, m.start() - 40):m.start()].rstrip().endswith("IEnumerator")]
+        if not hits:
+            continue
+        members = _members(code)
+        offs = [o for o, _ in members]
+        for m in hits:
+            k = bisect.bisect_right(offs, m.start()) - 1
+            out.append((name, members[k][1] if k >= 0 else "<file scope>",
+                        [_fold(a) for a in _call_args(code, m.end() - 1)]))
+    return out
+
+
+def _binds(args, name, place):
+    """What a call binds to the parameter `name` at `place`: the named
+    argument's value, else the positional one at that place, else None."""
+    for a in args:
+        n = _NAMED_ARG.match(a)
+        if n and n.group(1) == name:
+            return a[n.end():].strip()
+    if len(args) > place and not _NAMED_ARG.match(args[place]):
+        return args[place].strip()
+    return None
+
+
 def _r18(src):
     ac = src[AC]
     # Off by default, so every other caller of GetRequest keeps its loop, and
-    # passed by the form's three reads alone.
+    # bound to true by the form's three reads alone, whatever form the call
+    # takes. The census reads every call in the plugin (over a hundred).
     assert "bool singleAttempt = false, Action<string> onTokenSent = null," in _code(ac)
-    assert _owners(ac, "singleAttempt: ") == ["FetchReportableGames", "FetchPlayerReports", "FetchPlayerReportLog"], \
-        _owners(ac, "singleAttempt: ")
-    assert _owners(ac, "singleAttempt: true") == _owners(ac, "singleAttempt: ")
+    place = _params(ac, GET_REQUEST).index("singleAttempt")
+    calls = _get_request_calls(src)
+    assert len(calls) > 100, len(calls)
+    bound = [(f, member, _binds(args, "singleAttempt", place)) for f, member, args in calls]
+    bound = [b for b in bound if b[2] is not None]
+    assert bound == [(AC, "FetchReportableGames", "true"), (AC, "FetchPlayerReports", "true"),
+                     (AC, "FetchPlayerReportLog", "true")], bound
     # With it, the first answer leaves through the delivering branch whatever
     # the gate's verdict, and nothing reaches the retry after it.
     body = _fold(_body(ac, GET_REQUEST))
@@ -1082,16 +1172,27 @@ def _r18(src):
     assert 0 <= deliver < retry, (deliver, retry)
     branch = body[deliver:retry]
     assert branch.count("yield break;") == 1 and "callback(success, success" in branch, branch[:300]
-    assert body.count("singleAttempt") == 1, "singleAttempt is read in more than one place"
+    # It is read in two places: that branch, and the verdict's line (R21).
+    assert body.count("singleAttempt") == 2, "singleAttempt is read in a third place"
+    assert body.count("rgv = ReadGateVerdict(request, rgBody, rgAttempts, _rgTok, !singleAttempt);") == 1
     # The hold before the send is the same for every caller.
     assert body.find("yield return ReadGateHold(url, w => rgFail = w);") < body.find("StampVersionHeader(request);")
 
 
+R18_MUTANTS = (
+    lambda s: _replace(s, AC, "if (rgv.Next == ReadGateRules.Next.Deliver || singleAttempt)",
+                       "if (rgv.Next == ReadGateRules.Next.Deliver)"),
+    # another caller binds it, in each form a call can take (R2 M1)
+    lambda s: _replace(s, AC, BIND_HOLD_CALL, BIND_HOLD_CALL[:-3] + ", singleAttempt:true));"),
+    lambda s: _replace(s, AC, BIND_HOLD_CALL, BIND_HOLD_CALL[:-3] + ",\n                singleAttempt  :  true));"),
+    lambda s: _replace(s, AC, BIND_HOLD_CALL,
+                       "GetRequest(url, (ok, text) => answer(ok, text), true, true, null, null, null, null, true));"),
+)
+
+
 def test_r18_the_forms_three_reads_take_one_attempt_and_no_other_caller_changes():
-    _check(_r18,
-           lambda s: _replace(s, AC, "if (rgv.Next == ReadGateRules.Next.Deliver || singleAttempt)",
-                              "if (rgv.Next == ReadGateRules.Next.Deliver)"),
-           _control_comment(AC, GET_REQUEST))
+    for mutation in R18_MUTANTS:
+        _check(_r18, mutation, _control_comment(AC, GET_REQUEST))
 
 
 # -- R19: the mark held now is what a request would carry -----------------------
@@ -1119,3 +1220,200 @@ def test_r19_the_mark_held_now_is_the_token_a_request_would_carry():
     _check(_r19,
            lambda s: _replace(s, UI, "return MarkOf(ApiClient.SessionTokenToStamp());", "return MarkOf(SteamAuth.SessionToken);"),
            _control_comment(AC, STAMP_NOW))
+
+
+# -- R20 ask 14 R2 H1: every refused sign-in stays refused ------------------------
+#
+# Answers to overlapping requests (an earlier opening's games read, a later
+# one's, the submit in flight) land in any order. The H1 class: one slot that
+# two closers overwrite. R20 to R25 pin each such write as add-only, guarded
+# or ordered; the harness's overlap cases run the orders.
+
+SET_LINES = ("internal readonly HashSet<string> RefusedSignIns = new HashSet<string>(StringComparer.Ordinal);",
+             "return string.IsNullOrEmpty(sessionKey) || st.RefusedSignIns.Contains(sessionKey);",
+             "if (!string.IsNullOrEmpty(sessionKey)) st.RefusedSignIns.Add(sessionKey);")
+
+
+def _r20(src):
+    rl = src[RL]
+    # The form keeps every refused mark for the run, in a set: one line adds
+    # to it, never an empty mark (an empty key is closed already), and one
+    # line tests membership. Nothing else names it, so nothing removes one.
+    named = [l for l in _lines(_code(rl)) if "RefusedSignIns" in l]
+    assert named == list(SET_LINES), named
+    assert _lines(_body(rl, SIGN_IN_CLOSED)) == ["{", SET_LINES[1], "}"], _lines(_body(rl, SIGN_IN_CLOSED))
+    assert _lines(_body(rl, CLOSE_SIGN_IN)) == ["{", SET_LINES[2], "}"], _lines(_body(rl, CLOSE_SIGN_IN))
+    assert _sites(src, "RefusedSignIns") == {RL: 3}, _sites(src, "RefusedSignIns")
+    # Both closers add through it, and both checks ask it.
+    assert _sites(src, "CloseSignIn(") == {RL: 3}, _sites(src, "CloseSignIn(")
+    assert _sites(src, "SignInClosed(") == {RL: 3}, _sites(src, "SignInClosed(")
+    assert "case Closes.Auth: CloseSignIn(st, sessionKey); break;" in _lines(_body(rl, APPLY))
+    assert "if (status == 401) { CloseSignIn(st, sessionKey); return ListState.SignIn; }" in _lines(_body(rl, APPLY_LIST))
+    assert "if (SignInClosed(st, sessionKey)) { why = Outcome.SignIn; return Block.SignIn; }" in _lines(_body(rl, CHECK))
+    assert "if (SignInClosed(st, sessionKey)) return ListState.SignIn;" in _lines(_body(rl, BEFORE_LIST))
+
+
+def test_r20_every_refused_sign_in_stays_refused():
+    _check(_r20,
+           lambda s: _replace(s, RL, SET_LINES[2], "st.RefusedSignIns.Clear(); " + SET_LINES[2]),
+           _control_comment(RL, CLOSE_SIGN_IN))
+
+
+# -- R21 ask 14 R2 L1: a read that takes one attempt says so ----------------------
+
+RG = "ReadGateRules.cs"
+VERDICT = "private static ReadGateRules.Verdict ReadGateVerdict(UnityWebRequest req, string body,"
+VERDICT_LINE = "internal static string VerdictLine(Verdict v, bool retries, out bool warning)"
+OTHER_VERDICT = "rgv = ReadGateVerdict(request, ReadGateBody(request, handler), rgAttempts, _rgTok);"
+GET_VERDICT = "rgv = ReadGateVerdict(request, rgBody, rgAttempts, _rgTok, !singleAttempt);"
+
+
+def _r21(src):
+    ac, rg = src[AC], src[RG]
+    # The verdict's line follows the caller's policy. GetRequest says whether
+    # it retries; the other two callers keep the default, so their lines are
+    # the old ones (the harness pins every line, both ways).
+    assert _code(ac).count("ReadGateVerdict(") == 4, _code(ac).count("ReadGateVerdict(")
+    assert _code(ac).count(OTHER_VERDICT) == 2, _code(ac).count(OTHER_VERDICT)
+    assert _fold(_body(ac, GET_REQUEST)).count(GET_VERDICT) == 1
+    assert "ReadGateRules.Attempts attempts, string sentToken, bool retries = true)" in _code(ac)
+    # It writes the one line the rules give, and no other.
+    body = _fold(_body(ac, VERDICT))
+    assert "string line = ReadGateRules.VerdictLine(v, retries, out warning);" in body, body
+    assert body.count("Plugin.Log.") == 2 and "[READ-GATE]" not in body, body
+    # Without retries, a verdict that would retry says the answer went to its owner.
+    assert _lines(_body(rg, VERDICT_LINE))[1:4] == [
+        "warning = false;", "if (v.Next != Next.Deliver && !retries)",
+        'return "[READ-GATE] refused (" + v.Refusal + "); one attempt, delivered to its owner without a retry";'], \
+        _lines(_body(rg, VERDICT_LINE))[:5]
+
+
+def test_r21_a_single_attempt_read_logs_no_retry():
+    _check(_r21,
+           lambda s: _replace(s, AC, GET_VERDICT, "rgv = ReadGateVerdict(request, rgBody, rgAttempts, _rgTok);"),
+           _control_comment(AC, VERDICT))
+
+
+# -- R22 the run's closer and the three maps close once ----------------------------
+
+CLOSE_RUN = "private static void CloseRun(FormState st, Outcome o)"
+CLOSE_ONCE = "private static void CloseOnce(Dictionary<string, Outcome> closed, string key, Outcome o)"
+_MAP_USE = re.compile(r"(CloseOnce\()?\bst\.(Refused|Choices|Games)\b(\.TryGetValue\()?")
+
+
+def _r22(src):
+    rl = src[RL]
+    # The first answer that closes the run keeps its line; a later one finds
+    # it closed and changes nothing. Each map keeps the first outcome a key
+    # was closed with. These two are the only writers.
+    assert _lines(_body(rl, CLOSE_RUN)) == ["{", "if (st.RunClosed) return;", "st.RunClosed = true;",
+                                            "st.RunOutcome = o;", "}"], _lines(_body(rl, CLOSE_RUN))
+    assert _lines(_body(rl, CLOSE_ONCE)) == ["{", "if (!closed.ContainsKey(key)) closed[key] = o;", "}"], \
+        _lines(_body(rl, CLOSE_ONCE))
+    assert _sites(src, "RunClosed = ") == {RL: 1}, _sites(src, "RunClosed = ")
+    assert _sites(src, "RunOutcome = ") == {RL: 2}, _sites(src, "RunOutcome = ")   # the field's start and CloseRun
+    assert _sites(src, "CloseRun(") == {RL: 3}, _sites(src, "CloseRun(")           # Apply, ApplyList
+    # Every use of a map is a read or a write through CloseOnce, one per map.
+    uses = _MAP_USE.findall(_code(rl))
+    assert uses and all(bool(w) != bool(r) for w, _, r in uses), uses
+    assert sorted(m for w, m, _ in uses if w) == ["Choices", "Games", "Refused"], uses
+
+
+def test_r22_the_run_and_each_choice_close_once():
+    _check(_r22,
+           lambda s: _replace_within(s, RL, CLOSE_RUN, "if (st.RunClosed) return;\n", ""),
+           _control_comment(RL, CLOSE_RUN))
+
+
+# -- R23 the day's count: no older read raises it ----------------------------------
+
+NOTE_REMAINING = "internal static void NoteRemaining(FormState st, int remaining, int acceptedWhenAsked)"
+_COUNT = re.compile(r"\b(Remaining|Accepted)\b")
+COUNT_RULES = ("internal int Remaining = -1;", "internal int Accepted;",
+               "if (remaining >= 0 && st.Accepted == acceptedWhenAsked) st.Remaining = remaining;",
+               "if (st.Remaining == 0) { why = Outcome.DailyLimit; return Block.NoneLeft; }",
+               "st.Accepted++;", "if (st.Remaining > 0) st.Remaining--;")
+COUNT_READ = "if (status == 200) PlayerReportRules.NoteRemaining(_state, remaining, accepted);"
+
+
+def _r23(src):
+    rl, ui = src[RL], src[UI]
+    # A games read's count stands only when the server accepted no report
+    # after the read went out; each acceptance lowers the form's own count.
+    got = [l for l in _lines(_code(rl)) if _COUNT.search(l)]
+    assert got == list(COUNT_RULES), got
+    assert _lines(_body(rl, NOTE_REMAINING)) == ["{", COUNT_RULES[2], "}"], _lines(_body(rl, NOTE_REMAINING))
+    assert [l for l in _lines(_body(rl, APPLY)) if _COUNT.search(l)] == list(COUNT_RULES[4:])
+    # The form takes the number of acceptances when the read goes out, and
+    # only the newest opening's answer gives the count.
+    assert [l for l in _lines(_code(ui)) if _COUNT.search(l)] == ["int accepted = _state.Accepted;"]
+    body = _fold(_body(ui, OPEN))
+    at = [body.find(x) for x in ("int accepted = _state.Accepted;", "ApiClient.FetchReportableGames(",
+                                 "if (mine != _opening) return;", COUNT_READ)]
+    assert 0 <= at[0] < at[1] < at[2] < at[3], at
+    assert _sites(src, "NoteRemaining(") == {RL: 1, UI: 1}, _sites(src, "NoteRemaining(")
+
+
+def test_r23_no_older_read_raises_the_days_count():
+    for mutation in (
+            lambda s: _replace(s, UI, "if (mine != _opening) return;\n                " + COUNT_READ,
+                               COUNT_READ + "\n                if (mine != _opening) return;"),
+            lambda s: _replace(s, RL, COUNT_RULES[2], "if (remaining >= 0) st.Remaining = remaining;")):
+        _check(_r23, mutation, _control_comment(RL, NOTE_REMAINING))
+
+
+# -- R24 the viewer keeps the line of the answer that closed it --------------------
+
+STATUS_WRITES = ('private static string _adminStatus = "";',
+                 '_selectedId = null; _confirm = ""; _note = ""; _adminStatus = "";',              # OpenAdmin
+                 "_adminStatus = PlayerReportRules.AdminAnswerText(status, code);",                 # AdminAnswered
+                 'if (!ApiClient.IsAdmin) { _adminStatus = I18n.Tr("Not allowed."); return; }',      # LoadAdmin, no request
+                 "if (!_adminClosed) _adminStatus = said;",                                          # the list's answer
+                 'if (!_adminClosed) _adminStatus = I18n.Tr("Report closed.");')                     # the close's answer
+
+
+def _r24(src):
+    ui = src[UI]
+    # Once a refusal closed the viewer, no later answer writes its line:
+    # AdminAnswered returns first, and the two success lines stand back.
+    assert _lines(_body(ui, ADMIN_ANSWERED)) == ["{", "if (_adminClosed) return;", ADMIN_CLOSES, STATUS_WRITES[2], "}"], \
+        _lines(_body(ui, ADMIN_ANSWERED))
+    writes = [l for l in _lines(_code(ui)) if "_adminStatus = " in l]
+    assert writes == list(STATUS_WRITES), writes
+    assert STATUS_WRITES[4] in _lines(_body(ui, LOAD_ADMIN))
+    assert STATUS_WRITES[5] in _lines(_body(ui, CLOSE_REPORT))
+
+
+def test_r24_the_viewer_keeps_the_line_that_closed_it():
+    _check(_r24,
+           lambda s: _replace_within(s, UI, ADMIN_ANSWERED, "if (_adminClosed) return;\n", ""),
+           _control_comment(UI, ADMIN_ANSWERED))
+
+
+# -- R25 the badge shows the newest read's count -----------------------------------
+
+NEWER = "internal static bool NewerAnswer(ref int shown, int ticket)"
+BADGE_SETS = ("if (PlayerReportRules.NewerAnswer(ref _badgeShown, ticket)) NativeUI.SetPlayerReportBadge(openTotal);",
+              "if (status == 200 && PlayerReportRules.NewerAnswer(ref _badgeShown, ticket)) "
+              "NativeUI.SetPlayerReportBadge(openTotal);")
+
+
+def _r25(src):
+    rl, ui = src[RL], src[UI]
+    # Two answers set the badge, the list's and the count's. Each request
+    # takes its number when it is sent, and only an answer to a newer request
+    # than the shown one's sets the badge.
+    assert _lines(_body(rl, NEWER)) == ["{", "if (ticket <= shown) return false;", "shown = ticket;", "return true;", "}"]
+    assert [l for l in _lines(_code(ui)) if "SetPlayerReportBadge(" in l] == list(BADGE_SETS)
+    for sig, line in ((LOAD_ADMIN, BADGE_SETS[0]), (COUNT, BADGE_SETS[1])):
+        body = _fold(_body(ui, sig))
+        at = (body.find("int ticket = ++_badgeAsked;"), body.find("ApiClient.FetchPlayerReports("), body.find(line))
+        assert 0 <= at[0] < at[1] < at[2] and body.count("++_badgeAsked") == 1, (sig, at)
+    assert _code(ui).count("_badgeAsked") == 3 and _code(ui).count("_badgeShown") == 3
+    assert _sites(src, "NewerAnswer(") == {RL: 1, UI: 2}, _sites(src, "NewerAnswer(")
+
+
+def test_r25_the_badge_shows_the_newest_reads_count():
+    _check(_r25,
+           lambda s: _replace(s, UI, BADGE_SETS[1], "if (status == 200) NativeUI.SetPlayerReportBadge(openTotal);"),
+           _control_comment(UI, COUNT))
