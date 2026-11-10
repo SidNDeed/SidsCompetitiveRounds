@@ -144,7 +144,7 @@ DUPLICATE_SQL = ("SELECT 1 FROM player_reports WHERE reporter_id = :rp AND game_
 RECENT_SQL = ("SELECT COUNT(*) FROM player_reports WHERE reporter_id = :rp"
               " AND created_at > now() - INTERVAL '24 hours'")
 MY_REPORTS_SQL = ("SELECT game_kind, game_id, reported_id FROM player_reports WHERE reporter_id = :rp"
-                  " AND game_ended_at > now() - " + _DAYS % (_plr.GAME_WINDOW_DAYS + 1))
+                  " AND game_ended_at > now() - " + _WINDOW)       # the games statement's own window
 
 # The UNIQUE constraint is the backstop of rule 8: a second row for the same
 # reporter, game and player inserts nothing and returns nothing.
@@ -479,6 +479,13 @@ async def admin_close_player_report(
     if refusal is not None:
         _plr_refuse(refusal)
     verdict, note = parsed
+    # The closer's identity lock before the closer is looked up: the lock
+    # account deletion takes (main._identity_lock_many, the same key), then the
+    # report's row, the order deletion takes them in. A deletion of the closer
+    # that holds it first commits, and the lookup below then finds no player,
+    # so no closer is written; one that comes second waits for this commit and
+    # its sweep then clears the closer written here (ask 14 R1 M1).
+    await main._identity_lock_many(db, [req.admin_steam_id])
     admin_id = (await db.execute(_plr_sql(PLAYER_SQL), {"s": req.admin_steam_id})).scalar()
     closed = (await db.execute(_plr_sql(CLOSE_SQL), {
         "id": rid, "v": verdict, "adm": admin_id, "n": note})).first()

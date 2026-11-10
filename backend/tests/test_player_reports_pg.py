@@ -1022,6 +1022,36 @@ def test_the_log_route_serves_a_stored_log_as_text_through_the_scrub(monkeypatch
     run_env(monkeypatch, body, prefix="plrread")
 
 
+def test_m2_the_log_route_redacts_what_a_stored_log_still_holds(monkeypatch):
+    """Ask 14 R1 M2. The log route redacts what it reads back, whatever
+    ingestion did: a log seeded straight into the table with a session ticket
+    and the id of an account deleted since is stored as written, and the
+    route's answer carries neither."""
+    async def body(env):
+        adm = await env.admin()
+        a, b, gone = await env.players(3)
+        rid = await seed_report(env.conn, a.pid, b.pid)
+        said = NL.join(["the first line", TICKET, "joined by " + gone.steam, "the last line"])
+        await seed_log(env.conn, rid, said)
+        await env.delete_account(gone)
+        gz = await env.conn.fetchval("SELECT gz FROM player_report_logs WHERE report_id = $1", rid)
+        assert gzip.decompress(gz).decode("utf-8") == said, "the seeded log is not stored as written"
+        r = await env.log(adm, rid)
+        assert r.status_code == 200, r.text
+        assert "AB12" * 16 not in r.text and gone.steam not in r.text, r.text
+        assert r.text.startswith("the first line") and "[DELETED-USER]" in r.text, r.text
+        assert r.text.endswith("the last line"), r.text
+    run_env(monkeypatch, body, prefix="plrscrub")
+
+
+def test_l1_the_reported_mark_reads_the_games_statements_window():
+    """Ask 14 R1 L1. The caller's own reports (a player's reported mark) are
+    read over the one window the games statement's four branches read."""
+    assert routes._WINDOW == routes._DAYS % rules.GAME_WINDOW_DAYS
+    assert routes.GAMES_SQL.count("ended_at > now() - " + routes._WINDOW) == 4, routes.GAMES_SQL
+    assert routes.MY_REPORTS_SQL.endswith(" AND game_ended_at > now() - " + routes._WINDOW), routes.MY_REPORTS_SQL
+
+
 def test_a_read_replica_refuses_both_posts_and_still_answers_the_gets(monkeypatch):
     async def body(env):
         adm = await env.admin()
@@ -1075,6 +1105,43 @@ def test_account_deletion_removes_the_reports_on_both_sides_and_clears_the_close
         assert r.status_code == 200 and r.json()["games"] == [], r.text
         assert code(await env.submit(token_a, "1v1", g, b.steam)) == (404, "game_not_found")
     run_env(monkeypatch, body, prefix="plrdelete")
+
+
+@pytest.mark.parametrize("first", ("the close", "the deletion"))
+def test_m1_a_close_and_the_closers_deletion_queue_on_one_identity_lock(monkeypatch, first):
+    """Ask 14 R1 M1. The close takes the closer's identity lock, the key
+    account deletion takes, before it looks the closer up. Held here on a
+    second connection, both requests queue behind it in the order this case
+    starts them, and run in that order once it is released: a close that runs
+    first writes its closer and the deletion's sweep clears it; a close that
+    runs second finds no live closer and writes none. Either way no row names
+    the deleted account."""
+    async def body(env):
+        adm = await env.admin()
+        a, b = await env.players(2)
+        rid = await seed_report(env.conn, a.pid, b.pid)
+        monkeypatch.setattr(main, "FORMATION_LOCK_TIMEOUT_MS", 30000)     # the close may wait out a whole deletion
+        steps = {"the close": lambda: env.shut(adm, rid, "dismissed"), "the deletion": lambda: env.delete_account(adm)}
+        order = [first] + [k for k in steps if k != first]
+        tasks = {}
+        blocker, held = await held_identity(env, adm.steam)
+        try:
+            for n, k in enumerate(order, 1):
+                tasks[k] = asyncio.ensure_future(steps[k]())
+                waiting = await lock_waiters(env, blocker.get_server_pid(), n)
+                assert len(waiting) == n, "%s did not queue on the closer's identity lock: %r" % (k, waiting)
+            assert not any(t.done() for t in tasks.values())
+        finally:
+            await held.rollback()
+            await blocker.close()
+        closed = await tasks["the close"]
+        await tasks["the deletion"]
+        assert closed.status_code == 200 and closed.json() == {"ok": True, "status": "dismissed"}, closed.text
+        row = await env.conn.fetchrow(
+            "SELECT status, closed_by, closed_at IS NOT NULL AS closed FROM player_reports WHERE id = $1", rid)
+        assert tuple(row) == ("dismissed", None, True), tuple(row)
+        assert await env.conn.fetchval("SELECT count(*) FROM player_reports WHERE closed_by = $1", adm.pid) == 0
+    run_env(monkeypatch, body, prefix="plrcloser")
 
 
 # -- condition C1 and the migration ----------------------------------------------------
