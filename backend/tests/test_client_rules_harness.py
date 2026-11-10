@@ -1715,6 +1715,13 @@ _COSMETIC_CARRIER_CASES = [
     'a change before the first paint does not repaint: the first paint reads the newest value',
     'a change after the popup closed or moved on does not repaint',
     'no picker on screen repaints nothing',
+    "a Show's own coroutine binds its body, and after the first paint a colour change repaints it",
+    "a colour change while the Show's coroutine waits repaints nothing: nothing is bound yet",
+    'a later Show unbinds the earlier body at once, and the earlier coroutine binds nothing',
+    'a Hide unbinds the body, and a later colour change repaints nothing',
+    'a coroutine still waiting when the popup is hidden binds nothing',
+    "a superseded Show's first paint marks nothing; the current one's does",
+    "the bound picker is the current binding's, and none after a Show or a Hide",
 ]
 
 

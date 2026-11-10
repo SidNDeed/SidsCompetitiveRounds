@@ -7247,13 +7247,34 @@ namespace CompetitiveRounds
 
         // Ask 3 (S2): the pick body on screen, so that a colour property
         // change landing while the popup is up repaints it. One body exists at
-        // a time: vanilla destroys currentSkin on every Show.
+        // a time: vanilla destroys currentSkin on every Show. R1 (H2): the
+        // binding decides which body a paint may touch. A Show resets it at
+        // once, a Hide invalidates it, and its generation keeps a superseded
+        // coroutine or a late callback off a replaced or hidden body.
+        internal static readonly PickBodyBinding Binding = new PickBodyBinding();
         private static GameObject _shownBody;
-        private static int _shownTeam, _shownPickerID, _shownActor = -1;
-        private static bool _firstPaintDone;
+        private static int _shownTeam, _shownPickerID;
         private static Color? _paintedCustom;
 
-        public static IEnumerator RetintAfterChildrenSpawn(GameObject visualizer, int pickerTeamID, int pickerID, int pickerActor = -1)
+        /// <summary>Ask 3 R1 (H2): a Show replaces the body. Called first in the
+        /// Show postfix, before any return and before the coroutine starts;
+        /// returns the Show's generation.</summary>
+        internal static int BeginShow()
+        {
+            _shownBody = null;
+            _paintedCustom = null;
+            return Binding.BeginShow();
+        }
+
+        /// <summary>Ask 3 R1 (H2): a Hide closes the popup, so nothing stays bound.</summary>
+        internal static void OnHidden()
+        {
+            Binding.Hide();
+            _shownBody = null;
+            _paintedCustom = null;
+        }
+
+        public static IEnumerator RetintAfterChildrenSpawn(GameObject visualizer, int pickerTeamID, int pickerID, int pickerActor, int binding)
         {
             // NO position mutation here — ever. The clone lives under
             // CardChoiceVisuals' root, which vanilla scales to 33x when shown
@@ -7275,14 +7296,15 @@ namespace CompetitiveRounds
             if (visualizer == null) yield break;
 
             // Ask 3 (S2): this body is the one on screen until the next Show.
+            // R1 (H2): unless a later Show or a Hide superseded this Show during
+            // the wait; then this body is not on screen, and nothing is painted.
+            if (!Binding.TryBind(binding, pickerActor)) yield break;
             _shownBody = visualizer;
             _shownTeam = pickerTeamID;
             _shownPickerID = pickerID;
-            _shownActor = pickerActor;
             _paintedCustom = null;
-            _firstPaintDone = false;
             Paint(visualizer, pickerTeamID, pickerID, pickerActor, "show");
-            _firstPaintDone = true;
+            Binding.FirstPaintFinished(binding);
 
             // v1.30 (#58 "no body, cosmetics still show"): the picker's body IS the
             // clone's root particle system (learning #96 — vanilla Play()s exactly
@@ -7315,8 +7337,40 @@ namespace CompetitiveRounds
         internal static void OnPickerPropertiesChanged(int actor, bool colourKeyChanged)
         {
             bool alive = _shownBody != null;
-            if (!PickBodyRepaintRules.ShouldRepaint(_shownActor, alive, _firstPaintDone, actor, colourKeyChanged)) return;
-            Paint(_shownBody, _shownTeam, _shownPickerID, _shownActor, "property");
+            if (!Binding.ShouldRepaint(alive, actor, colourKeyChanged)) return;
+            Paint(_shownBody, _shownTeam, _shownPickerID, Binding.BoundActor, "property");
+        }
+
+        // Ask 3 R1 (M2): the live particles of a tinted body system, recoloured
+        // in place as MapPhysicalColorPatch.RetintLiveParticles does (#108). Each
+        // particle keeps its alpha, position and lifetime; only the ones whose
+        // colour looks wrong change. Nothing is paused, stopped or cleared (#96).
+        // The caller never runs it inside the MapTransition window (#45/#85).
+        private static ParticleSystem.Particle[] _liveBuf;
+        private static int RecolourLiveParticles(ParticleSystem ps, Color desired, Func<Color, bool> looksWrong)
+        {
+            try
+            {
+                int live = ps.particleCount;
+                if (live <= 0) return 0;
+                if (_liveBuf == null || _liveBuf.Length < live)
+                    _liveBuf = new ParticleSystem.Particle[Mathf.Max(live, 256)];
+                int n = ps.GetParticles(_liveBuf);
+                byte r = (byte)Mathf.Clamp(Mathf.RoundToInt(desired.r * 255f), 0, 255);
+                byte g = (byte)Mathf.Clamp(Mathf.RoundToInt(desired.g * 255f), 0, 255);
+                byte b = (byte)Mathf.Clamp(Mathf.RoundToInt(desired.b * 255f), 0, 255);
+                int changed = 0;
+                for (int i = 0; i < n; i++)
+                {
+                    Color32 cur = _liveBuf[i].startColor;
+                    if (!looksWrong(cur)) continue;
+                    _liveBuf[i].startColor = new Color32(r, g, b, cur.a);
+                    changed++;
+                }
+                if (changed > 0) ps.SetParticles(_liveBuf, n);
+                return changed;
+            }
+            catch { return 0; }
         }
 
         /// <summary>Paint the pick body from the picker's colour property (or
@@ -7360,7 +7414,7 @@ namespace CompetitiveRounds
             }
             catch { }
 
-            int sprites = 0, particles = 0, skinFields = 0;
+            int sprites = 0, particles = 0, skinFields = 0, liveParticles = 0;
             try
             {
                 // Ask 3 (S2): a repaint also replaces the custom colour this
@@ -7397,6 +7451,14 @@ namespace CompetitiveRounds
                         sc.color = new Color(desired.r, desired.g, desired.b, current.a);
                         main.startColor = sc;
                         particles++;
+                        // Ask 3 R1 (M2): startColor covers the particles emitted from
+                        // now on, so the live ones are recoloured in place (#108),
+                        // each keeping its alpha and lifetime, and no mixture of the
+                        // old colour and the new one lingers. Never inside the
+                        // MapTransition window (#45/#85); there the start colour alone
+                        // applies, and the old particles run out.
+                        if (!MapPhysicalColorPatch.InMapTransition())
+                            liveParticles += RecolourLiveParticles(ps, desired, looksWrong);
                     }
                 }
 
@@ -7433,7 +7495,8 @@ namespace CompetitiveRounds
             // ran" — the #83/#286 prove-the-surface-is-reached rule. One line
             // per pick, alongside the existing [CARDPICK-DIAG]/[CARDPICK-BODY].
             string lead = why == "show" ? "" : "repaint after a colour change ";
-            Plugin.Log.LogInfo($"[CARDPICK-TINT] {lead}pickerID={pickerID} team={pickerTeamID} custom={hasCustom} retinted: sprites={sprites} particles={particles} skinFields={skinFields}");
+            string live = why == "show" ? "" : $" live={liveParticles}";
+            Plugin.Log.LogInfo($"[CARDPICK-TINT] {lead}pickerID={pickerID} team={pickerTeamID} custom={hasCustom} retinted: sprites={sprites} particles={particles} skinFields={skinFields}{live}");
             _paintedCustom = hasCustom ? desired : (Color?)null;
         }
 
@@ -7492,6 +7555,9 @@ namespace CompetitiveRounds
         static void Postfix(CardChoiceVisuals __instance, int pickerID)
         {
             LastShownPickerIndex = pickerID;
+            // Ask 3 R1 (H2): this Show replaces the pick body, so the tinter's
+            // binding resets before any return below.
+            int tintBinding = CardPickBodyTinter.BeginShow();
             // Item 19 fix pass 3 (H3): set once this Show reached the carrier
             // ledger as a REMOTE picker's popup; every other Show (the local
             // picker, offline, or any early return or fault below) ends the
@@ -7582,7 +7648,7 @@ namespace CompetitiveRounds
                         if (Plugin.Instance != null && skin != null)
                         {
                             Plugin.Instance.StartCoroutine(
-                                CardPickBodyTinter.RetintAfterChildrenSpawn(skin, picker.TeamID, pickerID, pv.Owner.ActorNumber));
+                                CardPickBodyTinter.RetintAfterChildrenSpawn(skin, picker.TeamID, pickerID, pv.Owner.ActorNumber, tintBinding));
                         }
                     }
                     Plugin.Log.LogInfo($"[CARDPICK-DIAG] pickerID={pickerID} actor={pv.Owner.ActorNumber} pid={picker.PlayerID} team={picker.TeamID} isLocal={picker.IsLocal} currentSkin: {skinDesc}");
@@ -7613,6 +7679,10 @@ namespace CompetitiveRounds
         {
             try { PopupCarriers.Ended(); }
             catch (Exception ex) { Plugin.Log.LogWarning($"[POPUP] Hide postfix error: {ex.Message}"); }
+            // Ask 3 R1 (H2): a hidden popup shows no pick body, so the tinter's
+            // binding ends here and no later colour change paints the hidden one.
+            try { CardPickBodyTinter.OnHidden(); }
+            catch (Exception ex) { Plugin.Log.LogWarning($"[CARDPICK-TINT] Hide reset failed: {ex.Message}"); }
         }
     }
 

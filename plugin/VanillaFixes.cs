@@ -5253,6 +5253,10 @@ namespace CompetitiveRounds
 
             Photon.Realtime.Player localPlayer = PhotonNetwork.LocalPlayer;
             if (localPlayer == null) return;
+            // Ask 3 R1 (H1): a spectator writes no cosmetic carrier into the
+            // watched room, and the NickName carries the nametag, so the repair
+            // leaves a spectator's name as it is, as PublishToPhoton does.
+            if (RoomActors.LocalIsSpectator) return;
 
             string currentNickname = PhotonNetwork.NickName;
             if (!NeedsRepair(currentNickname)) return;

@@ -459,9 +459,10 @@ namespace CompetitiveRounds
                         var upd = new ExitGames.Client.Photon.Hashtable();
                         if (glowChanged) upd["cr_nametag_glow"] = glowSku;
                         if (fontChanged) upd["cr_nametag_typeface"] = typefaceSku;
-                        PhotonNetwork.LocalPlayer.SetCustomProperties(upd);
+                        // Ask 3 R1 (M1): recorded only when Photon could send it.
+                        propsWritten = PhotonNetwork.LocalPlayer.SetCustomProperties(upd);
                     }
-                    propsWritten = true;
+                    else propsWritten = true;   // the room already carries both values
                 }
                 catch { }
                 // Ask 3: record what was written (the style list the NickName and
@@ -469,6 +470,8 @@ namespace CompetitiveRounds
                 // stats refresh republishes when the cache differs.
                 if (propsWritten)
                     CosmeticCarrierLedger.Shared.Wrote(CosmeticCarrier.Nametag, CosmeticCarrierLedger.NametagValue(skus));
+                else
+                    Plugin.Log.LogWarning("[NAMETAG] style props not sent; the next refresh owes them");
             }
             catch (Exception ex) { Plugin.Log.LogWarning($"[NAMETAG] Publish failed: {ex.Message}"); }
         }

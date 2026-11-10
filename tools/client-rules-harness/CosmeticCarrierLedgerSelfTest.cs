@@ -139,6 +139,76 @@ namespace CompetitiveRounds
             Repaint(res, "a change after the popup closed or moved on does not repaint", 7, false, true, 7, true, false);
             Repaint(res, "no picker on screen repaints nothing", -1, true, true, -1, true, false);
 
+            // -- R1 (H2): the binding a Show starts, and a Show or a Hide ends --
+            {
+                var b = new PickBodyBinding();
+                int g = b.BeginShow();
+                bool bound = b.TryBind(g, 7);
+                b.FirstPaintFinished(g);
+                bool got = b.ShouldRepaint(true, 7, true);
+                Check(res, "a Show's own coroutine binds its body, and after the first paint a colour change repaints it", bound && got, "bound=" + bound + " repaint=" + got);
+            }
+            {
+                var b = new PickBodyBinding();
+                b.BeginShow();
+                bool got = b.ShouldRepaint(true, 7, true);
+                Check(res, "a colour change while the Show's coroutine waits repaints nothing: nothing is bound yet", !got, "repaint=" + got);
+            }
+            {
+                var b = new PickBodyBinding();
+                int g1 = b.BeginShow();
+                b.TryBind(g1, 7);
+                b.FirstPaintFinished(g1);
+                b.BeginShow();
+                bool old = b.ShouldRepaint(true, 7, true);
+                bool rebound = b.TryBind(g1, 7);
+                Check(res, "a later Show unbinds the earlier body at once, and the earlier coroutine binds nothing", !old && !rebound, "old repaint=" + old + " old coroutine binds=" + rebound);
+            }
+            {
+                var b = new PickBodyBinding();
+                int g = b.BeginShow();
+                b.TryBind(g, 7);
+                b.FirstPaintFinished(g);
+                b.Hide();
+                bool got = b.ShouldRepaint(true, 7, true);
+                Check(res, "a Hide unbinds the body, and a later colour change repaints nothing", !got, "repaint=" + got);
+            }
+            {
+                var b = new PickBodyBinding();
+                int g = b.BeginShow();
+                b.Hide();
+                bool binds = b.TryBind(g, 7);
+                bool got = b.ShouldRepaint(true, 7, true);
+                Check(res, "a coroutine still waiting when the popup is hidden binds nothing", !binds && !got, "binds=" + binds + " repaint=" + got);
+            }
+            {
+                var b = new PickBodyBinding();
+                int g1 = b.BeginShow();
+                b.TryBind(g1, 7);
+                int g2 = b.BeginShow();
+                b.TryBind(g2, 8);
+                b.FirstPaintFinished(g1);
+                bool early = b.ShouldRepaint(true, 8, true);
+                b.FirstPaintFinished(g2);
+                bool late = b.ShouldRepaint(true, 8, true);
+                Check(res, "a superseded Show's first paint marks nothing; the current one's does", !early && late, "after the old paint=" + early + " after its own=" + late);
+            }
+            {
+                var b = new PickBodyBinding();
+                int g = b.BeginShow();
+                int none = b.BoundActor;
+                b.TryBind(g, 7);
+                int bound = b.BoundActor;
+                b.BeginShow();
+                int afterShow = b.BoundActor;
+                int g2 = b.BeginShow();
+                b.TryBind(g2, 9);
+                b.Hide();
+                int afterHide = b.BoundActor;
+                Check(res, "the bound picker is the current binding's, and none after a Show or a Hide", none == -1 && bound == 7 && afterShow == -1 && afterHide == -1,
+                      "before=" + none + " bound=" + bound + " after Show=" + afterShow + " after Hide=" + afterHide);
+            }
+
             return res;
         }
 

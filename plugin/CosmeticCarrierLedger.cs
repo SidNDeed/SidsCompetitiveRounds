@@ -136,4 +136,68 @@ namespace CompetitiveRounds
             return shownActor > 0 && changedActor == shownActor;
         }
     }
+
+    /// <summary>Ask 3 R1 (H2): which pick body a paint may touch. A Show replaces
+    /// the body and a Hide closes the popup, and each starts a new generation,
+    /// so neither a Show's pending coroutine nor a property callback acts on a
+    /// body that a later Show or a Hide superseded. Pure: the tinter keeps the
+    /// body object, this keeps the decisions.</summary>
+    internal sealed class PickBodyBinding
+    {
+        private int _generation;
+        private int _boundGeneration = -1;
+        private int _actor = -1;
+        private bool _firstPaintDone;
+
+        /// <summary>A Show: nothing is bound until this Show's own coroutine
+        /// binds. Returns the Show's generation.</summary>
+        internal int BeginShow()
+        {
+            unchecked { _generation++; }
+            Unbind();
+            return _generation;
+        }
+
+        /// <summary>A Hide: the popup shows no body, so nothing stays bound.</summary>
+        internal void Hide()
+        {
+            unchecked { _generation++; }
+            Unbind();
+        }
+
+        /// <summary>The Show's coroutine, after its wait: it binds only when no
+        /// later Show or Hide came.</summary>
+        internal bool TryBind(int generation, int actor)
+        {
+            if (generation != _generation) return false;
+            _boundGeneration = generation;
+            _actor = actor;
+            _firstPaintDone = false;
+            return true;
+        }
+
+        /// <summary>The bound body's first paint finished; a superseded Show's
+        /// report changes nothing.</summary>
+        internal void FirstPaintFinished(int generation)
+        {
+            if (generation == _generation && generation == _boundGeneration) _firstPaintDone = true;
+        }
+
+        /// <summary>The bound body's picker, or -1 when nothing is bound.</summary>
+        internal int BoundActor => _boundGeneration == _generation ? _actor : -1;
+
+        /// <summary>Whether a property change repaints the bound body.</summary>
+        internal bool ShouldRepaint(bool bodyAlive, int changedActor, bool colourKeyChanged)
+        {
+            if (_boundGeneration != _generation) return false;
+            return PickBodyRepaintRules.ShouldRepaint(_actor, bodyAlive, _firstPaintDone, changedActor, colourKeyChanged);
+        }
+
+        private void Unbind()
+        {
+            _boundGeneration = -1;
+            _actor = -1;
+            _firstPaintDone = false;
+        }
+    }
 }

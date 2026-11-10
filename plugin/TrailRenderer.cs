@@ -75,7 +75,14 @@ namespace CompetitiveRounds
                 props[PROP_SKU]   = s?.active_trail_sku ?? "";
                 props[PROP_COLOR] = s?.active_trail_color ?? "";
                 props[PROP_PRICE] = s?.active_trail_price ?? 0;
-                PhotonNetwork.LocalPlayer.SetCustomProperties(props);
+                // Ask 3 R1 (M1): Photon answers false when it could not send the
+                // write (leaving, or no connection to the room). Then nothing is
+                // recorded, and the next stats refresh still owes this carrier.
+                if (!PhotonNetwork.LocalPlayer.SetCustomProperties(props))
+                {
+                    Plugin.Log.LogWarning("[TRAIL] Publish not sent (Photon refused it); the next refresh owes it");
+                    return;
+                }
                 Plugin.Log.LogInfo($"[TRAIL] Published local props sku={props[PROP_SKU]} color={props[PROP_COLOR]} price={props[PROP_PRICE]}");
                 // Ask 3: record what was written, an empty cache's "" included,
                 // so the next stats refresh republishes when the cache differs.

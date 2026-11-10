@@ -103,10 +103,12 @@ namespace CompetitiveRounds
             var s = ApiClient.CachedPlayerStats;
             string sku = s?.active_cursor_color_sku ?? "";
             string hex = s?.active_cursor_color_hex ?? "";
-            Apply(sku, hex);
             // Ask 3: the cursor is the ledger's local carrier, recorded like the
             // room carriers so a refresh re-applies it when the cache differs.
-            CosmeticCarrierLedger.Shared.Wrote(CosmeticCarrier.Cursor, CosmeticCarrierLedger.CursorValue(sku, hex));
+            // R1 (M1): recorded only when Apply completed; a failure it caught
+            // leaves the debt, and the next refresh applies it again.
+            if (Apply(sku, hex))
+                CosmeticCarrierLedger.Shared.Wrote(CosmeticCarrier.Cursor, CosmeticCarrierLedger.CursorValue(sku, hex));
         }
 
         /// <summary>Ask 3: this carrier's value in the cache, as ApplyFromStats applies it.</summary>
@@ -116,7 +118,8 @@ namespace CompetitiveRounds
         /// <summary>Apply the cursor: the chosen SHAPE drawn in the equipped color. Shape
         /// "default" restores ROUNDS' own cursor (no override). Color is optional — a shape
         /// shows in white when no cursor color is equipped.</summary>
-        public static void Apply(string sku, string hex)
+        /// <returns>Ask 3 R1 (M1): true when the cursor was applied, false when it was not.</returns>
+        public static bool Apply(string sku, string hex)
         {
             try
             {
@@ -130,7 +133,7 @@ namespace CompetitiveRounds
                         // No color equipped: hand the cursor back to ROUNDS/OS.
                         _activeSku = ""; _activeTex = null;
                         Cursor.SetCursor(null, Vector2.zero, CursorMode.Auto);
-                        return;
+                        return true;
                     }
                     // July 12 round 4 item 1: ROUNDS' original cursor is the Unity
                     // PLAYER-SETTINGS default cursor — no SetCursor call exists in
@@ -151,7 +154,7 @@ namespace CompetitiveRounds
                         // top-left corner.
                         _activeHotspot = new Vector2(vanillaTinted.width / 2f, vanillaTinted.height / 2f);
                         Cursor.SetCursor(_activeTex, _activeHotspot, CursorMode.Auto);
-                        return;
+                        return true;
                     }
                     // Couldn't locate the vanilla texture this session — fall back
                     // to the drawn arrow so the color still shows SOMEWHERE.
@@ -166,8 +169,10 @@ namespace CompetitiveRounds
                 _activeHotspot = shape == "arrow" ? new Vector2(1f, 1f) : new Vector2(SZ / 2f, SZ / 2f);
                 if (_activeTex != null)
                     Cursor.SetCursor(_activeTex, _activeHotspot, CursorMode.Auto);
+                return _activeTex != null;
             }
             catch (Exception ex) { Plugin.Log.LogWarning($"[CURSOR] Apply failed: {ex.Message}"); }
+            return false;
         }
 
         // Re-assert our cursor periodically. ROUNDS (and some menu transitions) can reset

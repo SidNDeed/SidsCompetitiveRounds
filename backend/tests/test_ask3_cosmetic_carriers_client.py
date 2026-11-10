@@ -93,42 +93,55 @@ def _expr(text, sig):
 
 PUBLISHERS = {
     "Color": ("PlayerColorCosmetic.cs", "public static void PublishLocalProps()",
-              "PhotonNetwork.LocalPlayer.SetCustomProperties(props);",
               "CosmeticCarrierLedger.Shared.Wrote(CosmeticCarrier.Color, CarrierValue(s));"),
     "Trail": ("TrailRenderer.cs", "public static void PublishLocalProps()",
-              "PhotonNetwork.LocalPlayer.SetCustomProperties(props);",
               "CosmeticCarrierLedger.Shared.Wrote(CosmeticCarrier.Trail, CarrierValue(s));"),
     "Effect": ("PlayerEffectCosmetic.cs", "public static void PublishLocalProps()",
-               "PhotonNetwork.LocalPlayer.SetCustomProperties(props);",
                "CosmeticCarrierLedger.Shared.Wrote(CosmeticCarrier.Effect, CarrierValue(s));"),
     "Nametag": ("NametagStyler.cs", "public static void PublishToPhoton()",
-                "PhotonNetwork.LocalPlayer.SetCustomProperties(upd);",
                 "CosmeticCarrierLedger.Shared.Wrote(CosmeticCarrier.Nametag, CosmeticCarrierLedger.NametagValue(skus));"),
     "Cursor": ("CursorColorCosmetic.cs", "public static void ApplyFromStats()",
-               "Apply(sku, hex);",
                "CosmeticCarrierLedger.Shared.Wrote(CosmeticCarrier.Cursor, CosmeticCarrierLedger.CursorValue(sku, hex));"),
 }
+# R1 (M1): a record follows confirmed completion only. The props publishers
+# return before it when Photon refuses the write; the nametag's flag is the
+# props call's own answer (or true when nothing needed writing); the cursor
+# records only when Apply answers true, and Apply answers false on failure.
+REFUSAL = re.compile(r"if \(!PhotonNetwork\.LocalPlayer\.SetCustomProperties\(props\)\)\s*\{[^{}]*?\breturn;\s*\}")
+NAMETAG_ASSIGNS = ["bool propsWritten = false;",
+                   "propsWritten = PhotonNetwork.LocalPlayer.SetCustomProperties(upd);",
+                   "else propsWritten = true;"]
+CURSOR_APPLY_SIG = "public static bool Apply(string sku, string hex)"
 
 
 def claim_publishers_record(files):
     out = []
-    for carrier, (fname, sig, write, record) in PUBLISHERS.items():
+    for carrier, (fname, sig, record) in PUBLISHERS.items():
         body = _code(files[fname], sig)
         if body.count(record) != 1:
             out.append("%s: the publisher records %d times" % (carrier, body.count(record)))
             continue
-        if body.count(write) != 1 or body.index(write) > body.index(record):
-            out.append("%s: the record does not follow the one write" % carrier)
+        at = body.index(record)
         if carrier in ("Color", "Trail", "Effect"):
+            refusals = list(REFUSAL.finditer(body))
+            if len(refusals) != 1 or body.count("SetCustomProperties(") != 1 or refusals[0].end() > at:
+                out.append("%s: the record does not follow the one write, behind its refusal's return" % carrier)
             if body.count("var s = ApiClient.CachedPlayerStats;") != 1:
                 out.append("%s: the record's snapshot is not the one the write reads" % carrier)
         if carrier == "Nametag":
-            flag = body.find("propsWritten = true;")
+            assigns = re.findall(r"(?:bool |else )?propsWritten = [^;]*;", body)
             guard = body.find("if (propsWritten)")
-            if not (body.index(write) < flag < guard < body.index(record)):
-                out.append("Nametag: the record is not behind a completed props write")
+            if assigns != NAMETAG_ASSIGNS or not (body.index(NAMETAG_ASSIGNS[1]) < guard < at):
+                out.append("Nametag: the record is not behind a props write that Photon sent")
+        if carrier == "Cursor":
+            if not re.search(r"if \(Apply\(sku, hex\)\)\s*" + re.escape(record), body):
+                out.append("Cursor: the record does not follow a completed Apply")
+            apply = _code(files[fname], CURSOR_APPLY_SIG).rstrip()
+            tail = apply[:-1].rstrip()
+            if not tail.endswith("return false;") or apply.count("return _activeTex != null;") != 1:
+                out.append("Cursor: Apply does not answer false when it did not apply")
         needle = "Wrote(CosmeticCarrier.%s," % carrier
-        writers = [n for n, t in files.items() if needle in _masks(t)[1]]
+        writers = [n for n, txt in files.items() if needle in _masks(txt)[1]]
         if writers != [fname]:
             out.append("%s: recorded from %s" % (carrier, writers))
     return out
@@ -142,7 +155,7 @@ def _fields(text):
 
 def claim_values_match_the_writes(files):
     out = []
-    for carrier, (fname, sig, _w, _r) in PUBLISHERS.items():
+    for carrier, (fname, sig, _r) in PUBLISHERS.items():
         wrote = _fields(_code(files[fname], sig))
         value = _fields(_expr(files[fname], "internal static string CarrierValue(ApiClient.PlayerStatsData s)"))
         if not wrote or wrote != value:
@@ -265,19 +278,45 @@ def claim_pick_body_repaints(files):
     tin = files["Plugin.cs"]
     entry = _code(tin, "internal static void OnPickerPropertiesChanged(int actor, bool colourKeyChanged)")
     if not _in_order(entry, ["bool alive = _shownBody != null;",
-                             "PickBodyRepaintRules.ShouldRepaint(_shownActor, alive, _firstPaintDone, actor, colourKeyChanged)",
-                             'Paint(_shownBody, _shownTeam, _shownPickerID, _shownActor, "property");']):
-        out.append("the repaint entry does not ask the rule before it paints")
+                             "if (!Binding.ShouldRepaint(alive, actor, colourKeyChanged)) return;",
+                             'Paint(_shownBody, _shownTeam, _shownPickerID, Binding.BoundActor, "property");']):
+        out.append("the repaint entry does not ask the binding before it paints")
     show = _code(tin, "public static IEnumerator RetintAfterChildrenSpawn(")
-    if not _in_order(show, ["_shownBody = visualizer;", "_shownActor = pickerActor;", "_firstPaintDone = false;",
+    if not _in_order(show, ["if (!Binding.TryBind(binding, pickerActor)) yield break;", "_shownBody = visualizer;",
                             'Paint(visualizer, pickerTeamID, pickerID, pickerActor, "show");',
-                            "_firstPaintDone = true;"]):
-        out.append("the Show coroutine does not record the body on screen around its first paint")
+                            "Binding.FirstPaintFinished(binding);"]):
+        out.append("the Show coroutine does not bind its own body around its first paint")
+    # R1 (H2): a Show resets the binding before any return of its postfix, and
+    # schedules its paint with that Show's generation; a Hide ends the binding.
+    begin = _code(tin, "internal static int BeginShow()")
+    if "_shownBody = null;" not in begin or "return Binding.BeginShow();" not in begin:
+        out.append("a Show does not reset the binding")
+    hidden = _code(tin, "internal static void OnHidden()")
+    if "Binding.Hide();" not in hidden or "_shownBody = null;" not in hidden:
+        out.append("a Hide does not end the binding")
+    post = _code(tin, "class CardChoiceVisuals_Show_Competitive_Patch")
+    sig = post.find("static void Postfix(CardChoiceVisuals __instance, int pickerID)")
+    first = post.find("int tintBinding = CardPickBodyTinter.BeginShow();")
+    ret = post.find("return;", sig)
+    launch = re.search(r"StartCoroutine\(\s*CardPickBodyTinter\.RetintAfterChildrenSpawn\(skin, picker\.TeamID, "
+                       r"pickerID, pv\.Owner\.ActorNumber, tintBinding\)\)", post)
+    if not (-1 < sig < first < ret) or launch is None or launch.start() < first:
+        out.append("the Show postfix does not reset the binding before its returns and schedule its paint with it")
+    if "CardPickBodyTinter.OnHidden();" not in _code(tin, "class CardChoiceVisuals_Hide_PopupCarrier_Patch"):
+        out.append("the Hide postfix does not end the binding")
     paint = _code(tin, PAINT_SIG)
     if not _in_order(paint, ["Color? before = _paintedCustom;",
                              "|| (before.HasValue && IsCloseHue(c, before.Value));",
+                             "main.startColor = sc;",
+                             "if (!MapPhysicalColorPatch.InMapTransition())",
+                             "liveParticles += RecolourLiveParticles(ps, desired, looksWrong);",
                              "_paintedCustom = hasCustom ? desired : (Color?)null;"]):
-        out.append("a repaint does not replace the colour the last paint applied")
+        out.append("a repaint does not replace the last paint's colour, live particles included, outside the transition")
+    # R1 (M2): the live particles are rewritten in place with their own alpha (#108), never cleared (#96).
+    live = _code(tin, "private static int RecolourLiveParticles(ParticleSystem ps, Color desired, Func<Color, bool> looksWrong)")
+    if ("_liveBuf[i].startColor = new Color32(r, g, b, cur.a);" not in live or "ps.SetParticles(_liveBuf, n);" not in live
+            or any(x in live for x in (".Clear(", ".Stop(", ".Pause(", ".Simulate("))):
+        out.append("the live recolour does not rewrite the particles in place with their own alpha")
     return out
 
 
@@ -294,6 +333,30 @@ def claim_pick_reads_the_room_for_every_picker(files):
     return out
 
 
+# -- C7 (R1 H1, M3): a spectator writes no carrier, on any route --
+
+SPECTATOR_GUARD = "if (RoomActors.LocalIsSpectator) return;"
+SPECTATOR_ROUTES = {
+    "colour": ("PlayerColorCosmetic.cs", "public static void PublishLocalProps()", "SetCustomProperties(props)"),
+    "trail": ("TrailRenderer.cs", "public static void PublishLocalProps()", "SetCustomProperties(props)"),
+    "effect": ("PlayerEffectCosmetic.cs", "public static void PublishLocalProps()", "SetCustomProperties(props)"),
+    "nametag": ("NametagStyler.cs", "public static void PublishToPhoton()", "PhotonNetwork.LocalPlayer.NickName = styled;"),
+    "name repair": ("VanillaFixes.cs", "private void CheckLocalNickname()", "PhotonNetwork.NickName = persona;"),
+}
+
+
+def claim_spectators_write_nothing(files):
+    out = []
+    for route, (fname, sig, write) in SPECTATOR_ROUTES.items():
+        body = _code(files[fname], sig)
+        w, g = body.find(write), body.find(SPECTATOR_GUARD)
+        if w == -1:
+            out.append("%s: its write is not in %s" % (route, fname))
+        elif g == -1 or g > w:
+            out.append("%s: no spectator guard before its write" % route)
+    return out
+
+
 CLAIMS = {
     "publishers_record": claim_publishers_record,
     "values_match_the_writes": claim_values_match_the_writes,
@@ -301,6 +364,7 @@ CLAIMS = {
     "only_the_publishers_write": claim_only_the_publishers_write,
     "pick_body_repaints": claim_pick_body_repaints,
     "pick_reads_the_room_for_every_picker": claim_pick_reads_the_room_for_every_picker,
+    "spectators_write_nothing": claim_spectators_write_nothing,
 }
 
 
@@ -316,6 +380,18 @@ DIRECT = 'var h = new ExitGames.Client.Photon.Hashtable(); h["%s"] = ""; PhotonN
 LOCAL_RETURN = ("            if (PhotonNetwork.LocalPlayer != null && target.ActorNumber == "
                 "PhotonNetwork.LocalPlayer.ActorNumber) return;\n")
 
+REFUSED_BLOCK = ("                if (!PhotonNetwork.LocalPlayer.SetCustomProperties(props))\n                {\n"
+                 '                    Plugin.Log.LogWarning("%s Publish not sent (Photon refused it); the next refresh owes it");\n'
+                 "                    return;\n                }\n")
+WRITE_PROPS = "                PhotonNetwork.LocalPlayer.SetCustomProperties(props);\n"
+OFFLINE_RETURN = ("                if (PhotonNetwork.OfflineMode || !PhotonNetwork.InRoom) return;\n"
+                  "                var pm = PlayerManager.instance;\n")
+LIVE_CALL = ("                        if (!MapPhysicalColorPatch.InMapTransition())\n"
+             "                            liveParticles += RecolourLiveParticles(ps, desired, looksWrong);\n")
+GUARD16 = "                if (RoomActors.LocalIsSpectator) return;\n"
+REPAIR_GUARD = ("            // leaves a spectator's name as it is, as PublishToPhoton does.\n"
+                "            if (RoomActors.LocalIsSpectator) return;\n")
+
 MUTANTS = [
     # C1: one per publisher, and a record without a write
     ("publishers_record", "the colour publisher does not record", _drop("PlayerColorCosmetic.cs", REC_COLOR)),
@@ -326,15 +402,16 @@ MUTANTS = [
     ("publishers_record", "the nametag publisher does not record", _drop(
         "NametagStyler.cs", "                    CosmeticCarrierLedger.Shared.Wrote(CosmeticCarrier.Nametag, "
                             "CosmeticCarrierLedger.NametagValue(skus));\n")),
-    ("publishers_record", "the nametag records though its props write did not finish", _drop(
-        "NametagStyler.cs", "                    propsWritten = true;\n")),
+    ("publishers_record", "the nametag records though Photon refused its props write", [
+        ("NametagStyler.cs", "                        propsWritten = PhotonNetwork.LocalPlayer.SetCustomProperties(upd);\n",
+         "                        PhotonNetwork.LocalPlayer.SetCustomProperties(upd);\n                        propsWritten = true;\n")]),
     ("publishers_record", "the cursor does not record", _drop(
-        "CursorColorCosmetic.cs", "            CosmeticCarrierLedger.Shared.Wrote(CosmeticCarrier.Cursor, "
+        "CursorColorCosmetic.cs", "                CosmeticCarrierLedger.Shared.Wrote(CosmeticCarrier.Cursor, "
                                   "CosmeticCarrierLedger.CursorValue(sku, hex));\n")),
     ("publishers_record", "the colour publisher records before it writes", [
         ("PlayerColorCosmetic.cs", REC_COLOR, ""),
-        ("PlayerColorCosmetic.cs", "                PhotonNetwork.LocalPlayer.SetCustomProperties(props);\n",
-         REC_COLOR + "                PhotonNetwork.LocalPlayer.SetCustomProperties(props);\n")]),
+        ("PlayerColorCosmetic.cs", "                if (!PhotonNetwork.LocalPlayer.SetCustomProperties(props))\n",
+         REC_COLOR + "                if (!PhotonNetwork.LocalPlayer.SetCustomProperties(props))\n")]),
     ("publishers_record", "the room join records without writing", [
         ("GameStateWatcher.cs", JOIN_COLOR,
          JOIN_COLOR + '                CosmeticCarrierLedger.Shared.Wrote(CosmeticCarrier.Color, "");\n')]),
@@ -400,9 +477,9 @@ MUTANTS = [
         ("PlayerColorCosmetic.cs", LOCAL_RETURN, LOCAL_RETURN + "            " + SUB + "\n")]),
     ("pick_body_repaints", "the Photon callback stops before the colour path", _drop(
         "TrailRenderer.cs", "            try { PlayerColorCosmetic.OnPlayerPropertiesChanged(target, changedProps); } catch { }\n")),
-    ("pick_body_repaints", "the first paint is never marked done", _drop("Plugin.cs", "            _firstPaintDone = true;\n")),
+    ("pick_body_repaints", "the first paint is never marked done", _drop("Plugin.cs", "            Binding.FirstPaintFinished(binding);\n")),
     ("pick_body_repaints", "the repaint skips the rule", [
-        ("Plugin.cs", "            if (!PickBodyRepaintRules.ShouldRepaint(_shownActor, alive, _firstPaintDone, actor, colourKeyChanged)) return;\n",
+        ("Plugin.cs", "            if (!Binding.ShouldRepaint(alive, actor, colourKeyChanged)) return;\n",
          "            if (!alive) return;\n")]),
     ("pick_body_repaints", "a repaint leaves the last paint's custom colour", [
         ("Plugin.cs", "\n                    || (before.HasValue && IsCloseHue(c, before.Value));", ";")]),
@@ -411,6 +488,53 @@ MUTANTS = [
         ("Plugin.cs", "                        if (pl == null || pl.ActorNumber != pickerActor) continue;\n",
          "                        if (pl == null || pl.ActorNumber != pickerActor) continue;\n"
          "                        if (pl.IsLocal && ApiClient.CachedPlayerStats != null) hasCustom = true;\n")]),
+    # R1 (M1): a record after a refused or failed write, one per route
+    ("publishers_record", "the colour publisher records after a refused write", [
+        ("PlayerColorCosmetic.cs", REFUSED_BLOCK % "[PCOLOR]", WRITE_PROPS)]),
+    ("publishers_record", "the trail publisher records after a refused write", [
+        ("TrailRenderer.cs", REFUSED_BLOCK % "[TRAIL]", WRITE_PROPS)]),
+    ("publishers_record", "the effect publisher records after a refused write", [
+        ("PlayerEffectCosmetic.cs", REFUSED_BLOCK % "[EFFECT]", WRITE_PROPS)]),
+    ("publishers_record", "the cursor records after a failed Apply", [
+        ("CursorColorCosmetic.cs", "            if (Apply(sku, hex))\n", "            Apply(sku, hex);\n")]),
+    ("publishers_record", "the cursor's Apply answers true after a failure it caught", [
+        ("CursorColorCosmetic.cs", 'Apply failed: {ex.Message}"); }\n            return false;\n',
+         'Apply failed: {ex.Message}"); }\n            return true;\n')]),
+    ("publishers_record", "the cursor's Apply answers true without a texture", [
+        ("CursorColorCosmetic.cs", "return _activeTex != null;", "return true;")]),
+    # R1 (H2, M2, M3): the binding's lifecycle, the guard's polarity, the live particles
+    ("pick_body_repaints", "the repaint guard's polarity is reversed", [
+        ("Plugin.cs", "if (!Binding.ShouldRepaint(alive, actor, colourKeyChanged)) return;",
+         "if (Binding.ShouldRepaint(alive, actor, colourKeyChanged)) return;")]),
+    ("pick_body_repaints", "the Show never schedules its paint", [
+        ("Plugin.cs", "                            Plugin.Instance.StartCoroutine(\n                                CardPickBodyTinter"
+                      ".RetintAfterChildrenSpawn(skin, picker.TeamID, pickerID, pv.Owner.ActorNumber, tintBinding));\n", "")]),
+    ("pick_body_repaints", "a Show leaves the old binding in place", [
+        ("Plugin.cs", "            int tintBinding = CardPickBodyTinter.BeginShow();\n",
+         "            int tintBinding = CardPickBodyTinter.Binding.BoundActor;\n")]),
+    ("pick_body_repaints", "the binding resets only after the postfix's first return", [
+        ("Plugin.cs", "            int tintBinding = CardPickBodyTinter.BeginShow();\n", ""),
+        ("Plugin.cs", OFFLINE_RETURN, OFFLINE_RETURN + "                int tintBinding = CardPickBodyTinter.BeginShow();\n")]),
+    ("pick_body_repaints", "a superseded coroutine still binds and paints", [
+        ("Plugin.cs", "            if (!Binding.TryBind(binding, pickerActor)) yield break;\n",
+         "            Binding.TryBind(binding, pickerActor);\n")]),
+    ("pick_body_repaints", "the Hide postfix leaves the binding", [
+        ("Plugin.cs", "            try { CardPickBodyTinter.OnHidden(); }\n            catch (Exception ex) { Plugin.Log.LogWarning("
+                      '$"[CARDPICK-TINT] Hide reset failed: {ex.Message}"); }\n', "")]),
+    ("pick_body_repaints", "a Hide resets the body but not the binding", _drop("Plugin.cs", "            Binding.Hide();\n")),
+    ("pick_body_repaints", "the live particles keep the old colour", [
+        ("Plugin.cs", LIVE_CALL, "")]),
+    ("pick_body_repaints", "the live recolour runs inside the transition window", [
+        ("Plugin.cs", LIVE_CALL, "                        liveParticles += RecolourLiveParticles(ps, desired, looksWrong);\n")]),
+    ("pick_body_repaints", "the live recolour drops the particles' alpha", [
+        ("Plugin.cs", "new Color32(r, g, b, cur.a);", "new Color32(r, g, b, 255);")]),
+    # C7 (R1 H1, M3): a spectator guard dropped, one per route
+    ("spectators_write_nothing", "the colour publisher writes for a spectator", _drop("PlayerColorCosmetic.cs", GUARD16)),
+    ("spectators_write_nothing", "the trail publisher writes for a spectator", _drop("TrailRenderer.cs", GUARD16)),
+    ("spectators_write_nothing", "the effect publisher writes for a spectator", _drop("PlayerEffectCosmetic.cs", GUARD16)),
+    ("spectators_write_nothing", "the nametag publisher writes for a spectator", _drop("NametagStyler.cs", GUARD16)),
+    ("spectators_write_nothing", "the name repair writes for a spectator", [
+        ("VanillaFixes.cs", REPAIR_GUARD, "            // leaves a spectator's name as it is, as PublishToPhoton does.\n")]),
 ]
 
 CONTROLS = [
@@ -423,6 +547,7 @@ CONTROLS = [
     ("pick_body_repaints", [("PlayerColorCosmetic.cs", "            " + SUB + "\n", "            // control\n            " + SUB + "\n")]),
     ("pick_reads_the_room_for_every_picker", [("Plugin.cs", "            Color? before = _paintedCustom;\n",
                                                "            // control: the local player is not read here\n            Color? before = _paintedCustom;\n")]),
+    ("spectators_write_nothing", [("PlayerColorCosmetic.cs", GUARD16, "                // control: a neutral line\n" + GUARD16)]),
 ]
 
 

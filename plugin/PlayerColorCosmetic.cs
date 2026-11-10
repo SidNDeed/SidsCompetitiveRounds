@@ -169,7 +169,14 @@ namespace CompetitiveRounds
                 var props = new ExitGames.Client.Photon.Hashtable();
                 props[PROP_SKU]   = s?.active_player_color_sku ?? "";
                 props[PROP_COLOR] = s?.active_player_color_hex ?? "";
-                PhotonNetwork.LocalPlayer.SetCustomProperties(props);
+                // Ask 3 R1 (M1): Photon answers false when it could not send the
+                // write (leaving, or no connection to the room). Then nothing is
+                // recorded, and the next stats refresh still owes this carrier.
+                if (!PhotonNetwork.LocalPlayer.SetCustomProperties(props))
+                {
+                    Plugin.Log.LogWarning("[PCOLOR] Publish not sent (Photon refused it); the next refresh owes it");
+                    return;
+                }
                 Plugin.Log.LogInfo($"[PCOLOR] Published sku={props[PROP_SKU]} color={props[PROP_COLOR]}");
                 // Ask 3: record what was written, an empty cache's "" included,
                 // so the next stats refresh republishes when the cache differs.
