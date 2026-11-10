@@ -1029,7 +1029,14 @@ def test_m2_the_log_route_redacts_what_a_stored_log_still_holds(monkeypatch):
     route's answer carries neither."""
     async def body(env):
         adm = await env.admin()
-        a, b, gone = await env.players(3)
+        a, b = await env.players(2)
+        # The scrub asks about public individual SteamID64s alone (account
+        # number below 2**32); the fixture's random ids are one only by chance.
+        steam = str(main._sid64.INDIVIDUAL_MIN + uuid.uuid4().int % 2 ** 32)
+        assert main._sid64.is_individual_id(steam)
+        gone = P(await env.conn.fetchval(
+            "INSERT INTO players (id, steam_id, display_name) VALUES ($3, $1, $2) RETURNING id",
+            steam, "plr gone", uuid.uuid4()), steam, "plr gone")
         rid = await seed_report(env.conn, a.pid, b.pid)
         said = NL.join(["the first line", TICKET, "joined by " + gone.steam, "the last line"])
         await seed_log(env.conn, rid, said)
