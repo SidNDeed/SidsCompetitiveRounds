@@ -2267,6 +2267,9 @@ namespace CompetitiveRounds
                 // room stamps it and late joiners read one truth.
                 if (is1v2 && ApiClient.OvtSoloExtraPick) roomProps["cr_ovt_xp"] = true;
                 if (isFfa) roomProps["cr_ffa_n"] = ffaCount;
+                // Ask 16(a) lane 2 (v4 4.2): the game's identity rides the
+                // room's initial properties, so no write races its first value.
+                LimitlessFence.StampInitialGid(roomProps);
                 // Spectator seats (design §4.1): server-issued rooms
                 // reserve SEAT_CAP extra Photon actors above the
                 // fighter count. Vanilla match-found fires on a
@@ -5611,6 +5614,9 @@ namespace CompetitiveRounds
         }
         public void OnRoomPropertiesUpdate(ExitGames.Client.Photon.Hashtable propertiesThatChanged)
         {
+            // Ask 16(a) lane 2 (v4 4.2): a gid becomes live only as the server
+            // relays it, the minter's own echo included (lesson 428).
+            try { LimitlessFence.NoteRoomProps(propertiesThatChanged); } catch { }
             // Item 19 edge E12: cr_ff (read by IsModIssuedRoom) is a ROOM
             // property that can land after the join. It triggers a fresh
             // evaluation and is logged; it never decides the face (fix pass 1,
@@ -5622,6 +5628,11 @@ namespace CompetitiveRounds
         }
         public void OnMasterClientSwitched(Photon.Realtime.Player newMasterClient)
         {
+            // Ask 16(a) lane 2 (v4 4.3): the handoff count rises before
+            // anything else here, so no work scheduled under the previous
+            // master period acts in this one. A new master that holds no live
+            // gid after its own game start mints (4.2).
+            try { LimitlessFence.NoteMasterSwitched(newMasterClient); } catch { }
             // Bug #269: a handoff revokes our authority to speak for the room,
             // so any unconsumed map-scale publish ticket dies here — before
             // the spectator-transfer block below, which can return early.
@@ -5799,6 +5810,9 @@ namespace CompetitiveRounds
                 if (tgnLine != null) Plugin.Log.LogInfo(tgnLine);
             }
             catch { }
+            // Ask 16(a) lane 2 (v4 4.2): the joiner adopts the room's gid as
+            // the join delivered it.
+            try { LimitlessFence.NoteJoinedRoom(); } catch { }
             // Item 19 edge E2: the join. The room's facing is derived from the
             // room and its fighters' published properties, on every edge.
             AvatarDefaults.Evaluate("E2-joined");
@@ -6537,6 +6551,9 @@ namespace CompetitiveRounds
             try { WeaponCooldownReset.ResetForRoomChange(); } catch { }
             try { VanillaFixSupport.ResetDiag(BoundedDeal.DiagKey); } catch { }
             try { BoundedDeal.ResetForRoomChange(); } catch { }
+            // Ask 16(a) lane 2 (v4 5.3): room exit ends the gid and raises the
+            // epoch, on the reliable edge.
+            try { LimitlessFence.NoteLeftRoom(); } catch { }
             // A ghost loop at the MENU is the most audible variant of the
             // sound leak — sweep once on the reliable exit edge (Aug 22).
             try { RoundSoundSweep.Schedule("room-leave"); } catch { }

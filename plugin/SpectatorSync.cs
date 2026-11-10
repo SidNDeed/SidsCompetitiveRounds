@@ -1090,6 +1090,10 @@ namespace CompetitiveRounds
             // find 8): the generation fence only covers coroutines that
             // already started, not a call-in queued during the exit window.
             if (SpectatorSession.LeaveRequested) return;
+            // Ask 16(a) lane 2 (v4 4.3, 5.3): the first call-in after the
+            // terminal score is this seat's next game, before anything of it
+            // runs: the epoch rises and the next gid is adopted.
+            try { LimitlessFence.NoteSpectatorCallIn(); } catch { }
             // A call-in ends the observed round-transition: re-open the
             // round-observation latch (find 9's dedupe window) and, if the
             // join-replay window was somehow still armed, close it — live map
@@ -1335,6 +1339,9 @@ namespace CompetitiveRounds
             try
             {
                 if (!SpectatorSession.IsLocalSpectator || SpectatorSession.LeaveRequested) return;
+                // Ask 16(a) lane 2 (v4 5.3): the terminal score ends the
+                // observed game's gid; the next call-in opens the next game.
+                try { LimitlessFence.NoteSpectatorGameOver("gm"); } catch { }
                 // c1 M1: the observed game boundary — the per-game rules
                 // counters roll over here for this seat (see the entry hook).
                 try { RoomRules.OnGameStart(); } catch { }

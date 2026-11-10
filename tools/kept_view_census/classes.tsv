@@ -229,6 +229,7 @@ IdentityClockEvidence.cs	IdentityClockEvidence	MovePlayers	players	R	the identit
 IdentityClockEvidence.cs	IdentityClockEvidence	ReadPubFps	GetPlayer	R	the identity clock record: a raw fact written into the record the server judges; it decides no count, send gate, damage, pick or result (the followed actor's Photon player, read for its published frame rate, cr_gstats field 7)	
 IdentityClockEvidence.cs	IdentityClockEvidence	Slice	players	R	the identity clock record: a raw fact written into the record the server judges; it decides no count, send gate, damage, pick or result (every body each tick: the own body for its isPlaying edges and input, and whether any body is dead, for the point's timing)	
 Keybinds.cs	Keybinds	LocalCharacter	players	N	finds the local body (IsMine) only; the item 17 achievement combat gate and the action terms of the local input predicates	
+LimitlessFence.cs	LimitlessFence	TryMint	IsMasterClient	R	who mints the game's gid (cr_lgid): the write is a compare-and-set that expects the value it replaces, so a seat that has lost the role lands at most one value, which every seat adopts as the server relays it; it decides no count, send gate, damage, pick or result	
 NametagFontRenderer.cs	NametagFontRenderer	ScanAndApply	ActiveFighters	N	cosmetic; reads ActiveFighters(), so a quarantined body gets no nametag	
 NametagGlowRenderer.cs	NametagGlowRenderer	ScanAndApply	ActiveFighters	N	cosmetic; reads ActiveFighters(), so a quarantined body gets no glow	
 NativeUI.cs	NativeUI	BuildComparePlayerNemesisPanel	players	N	JSON record field	

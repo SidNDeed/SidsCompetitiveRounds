@@ -24,7 +24,7 @@ namespace CompetitiveRounds
         internal const int WireVersion = 1;
 
         /// <summary>4.3: the states go one way, live, then terminating, then ended.</summary>
-        internal enum State { Live = 0, Terminating = 1, Ended = 2 }
+        internal enum FencePhase { PhaseLive = 0, PhaseTerminating = 1, PhaseEnded = 2 }
 
         // ------------------------------------------------------------------ identity (4.2)
 
@@ -57,30 +57,33 @@ namespace CompetitiveRounds
         /// <summary>
         /// One seat's gids (4.2): a gid is live from its adoption until the seat
         /// runs a terminal path for it; an ended gid is never live again on this
-        /// seat. Cleared at room exit, where every gid of the room is gone.
+        /// seat. Room exit ends the current gid, and the ended set lasts the
+        /// session, so a rejoin of the same room never revives one.
         /// </summary>
         internal sealed class GidLedger
         {
             private readonly HashSet<string> _ended = new HashSet<string>(StringComparer.Ordinal);
 
             /// <summary>The seat's current gid, or null while it holds none.</summary>
-            internal string Current { get; private set; }
+            internal string CurrentGid { get; private set; }
 
             internal bool HasEnded(string gid) { return gid != null && _ended.Contains(gid); }
 
             /// <summary>Live: current, and not ended on this seat.</summary>
             internal bool IsLiveGid(string gid)
             {
-                return IsGid(gid) && string.Equals(gid, Current, StringComparison.Ordinal) && !_ended.Contains(gid);
+                return IsGid(gid) && string.Equals(gid, CurrentGid, StringComparison.Ordinal) && !_ended.Contains(gid);
             }
 
             /// <summary>Adoption, only from a relayed property value (the
             /// writer's own echo included). An ended or malformed value is not
-            /// adopted. Answers whether the value is now the live gid.</summary>
+            /// adopted. A gid it replaces ends: a record of any other gid is dead
+            /// (4.3). Answers whether the value is now the live gid.</summary>
             internal bool AdoptRelayed(string relayed)
             {
                 if (!IsGid(relayed) || _ended.Contains(relayed)) return false;
-                Current = relayed;
+                if (CurrentGid != null && !string.Equals(CurrentGid, relayed, StringComparison.Ordinal)) _ended.Add(CurrentGid);
+                CurrentGid = relayed;
                 return true;
             }
 
@@ -89,36 +92,54 @@ namespace CompetitiveRounds
             {
                 if (!IsGid(gid)) return;
                 _ended.Add(gid);
-                if (string.Equals(gid, Current, StringComparison.Ordinal)) Current = null;
+                if (string.Equals(gid, CurrentGid, StringComparison.Ordinal)) CurrentGid = null;
             }
 
             /// <summary>At the seat's own game start: its previous gid ends, then
             /// it adopts the room's value unless it has ended that value.</summary>
             internal bool AtOwnGameStart(string roomValue)
             {
-                if (Current != null) EndGid(Current);
+                if (CurrentGid != null) EndGid(CurrentGid);
                 return AdoptRelayed(roomValue);
             }
 
+            /// <summary>Room exit is a terminal path (5.3): the current gid ends.</summary>
             internal void ExitRoom()
             {
-                _ended.Clear();
-                Current = null;
+                if (CurrentGid != null) EndGid(CurrentGid);
+                CurrentGid = null;
             }
         }
 
         /// <summary>
         /// Who mints (4.2, F1): the master, at its own game start or when it
         /// becomes master after that start while it holds no live gid, and only
-        /// when the room's value is one this seat has ended (or none). A value
-        /// it has not ended is adopted instead: a master that left between two
-        /// seats' starts may have minted it.
+        /// when the room's value is one this seat has ended. A value it has not
+        /// ended is adopted instead: a master that left between two seats'
+        /// starts may have minted it. A room created without a gid never runs
+        /// the feature, so nothing mints there.
         /// </summary>
         internal static bool ShouldMint(bool isMaster, bool afterOwnStart, string roomValue, GidLedger ledger)
         {
             if (!isMaster || !afterOwnStart || ledger == null) return false;
-            if (ledger.IsLiveGid(ledger.Current)) return false;
-            return !IsGid(roomValue) || ledger.HasEnded(roomValue);
+            if (ledger.IsLiveGid(ledger.CurrentGid)) return false;
+            return IsGid(roomValue) && ledger.HasEnded(roomValue);
+        }
+
+        /// <summary>
+        /// 4.2: who adopts a value when its change arrives. A seat that awaits
+        /// one (after its own game start or at its join, holding no live gid)
+        /// adopts it, and so does a spectator: it never mints or opts in, and its
+        /// game opens at its first call-in after the terminal score. A fighter
+        /// that is not awaiting keeps its gid. A value that arrives before its
+        /// own next start belongs to that game, and the start reads it from the
+        /// room.
+        /// </summary>
+        internal static bool AdoptOnArrival(bool awaiting, bool spectator, string value, GidLedger ledger)
+        {
+            if (ledger == null || !IsGid(value) || ledger.HasEnded(value)) return false;
+            if (string.Equals(value, ledger.CurrentGid, StringComparison.Ordinal)) return false;
+            return awaiting || spectator;
         }
 
         // ------------------------------------------------------------------ the record and its carriers (4.3, F11)
@@ -128,11 +149,11 @@ namespace CompetitiveRounds
         /// base result is the winner, the winner's rounds, the most rounds of
         /// any other side (GM: the loser's; FFA: the runner-up's) and the base
         /// target.</summary>
-        internal struct Record
+        internal struct FenceRecord
         {
             internal string Gid;
-            internal int Target;
-            internal bool End;
+            internal int TargetRounds;
+            internal bool EndFlag;
             internal int BaseWinner;
             internal int BaseWinnerRounds;
             internal int BaseOtherRounds;
@@ -148,20 +169,20 @@ namespace CompetitiveRounds
         /// roster, round arguments]. A round message carries the round's six
         /// arguments; the decision also carries its roster; the mirror and the
         /// snapshot carry neither (empty arrays).</summary>
-        internal static object[] EncodeRecord(Record r, int[] roster, int[] args)
+        internal static object[] EncodeRecord(FenceRecord r, int[] roster, int[] args)
         {
             return new object[]
             {
-                WireVersion, r.Gid, r.Target, r.End, r.BaseWinner, r.BaseWinnerRounds, r.BaseOtherRounds,
+                WireVersion, r.Gid, r.TargetRounds, r.EndFlag, r.BaseWinner, r.BaseWinnerRounds, r.BaseOtherRounds,
                 r.BaseTarget, r.Spectatable, roster ?? new int[0], args ?? new int[0],
             };
         }
 
         /// <summary>Every slot is required and typed; a carrier missing any
         /// field of 4.3 is refused whole (F11).</summary>
-        internal static bool TryDecodeRecord(object[] o, out Record r, out int[] roster, out int[] args)
+        internal static bool TryDecodeRecord(object[] o, out FenceRecord r, out int[] roster, out int[] args)
         {
-            r = default(Record);
+            r = default(FenceRecord);
             roster = null;
             args = null;
             if (o == null || o.Length != WireSlots) return false;
@@ -182,9 +203,9 @@ namespace CompetitiveRounds
             var seen = new HashSet<int>();
             foreach (var a in ro)
                 if (a <= 0 || !seen.Add(a)) return false;
-            r = new Record
+            r = new FenceRecord
             {
-                Gid = gid, Target = (int)o[2], End = (bool)o[3], BaseWinner = (int)o[4], BaseWinnerRounds = (int)o[5],
+                Gid = gid, TargetRounds = (int)o[2], EndFlag = (bool)o[3], BaseWinner = (int)o[4], BaseWinnerRounds = (int)o[5],
                 BaseOtherRounds = (int)o[6], BaseTarget = (int)o[7], Spectatable = (bool)o[8],
             };
             roster = ro;
@@ -212,11 +233,11 @@ namespace CompetitiveRounds
         }
 
         /// <summary>4.3: live, then terminating, then ended; never back.</summary>
-        internal static State NextState(State current, bool endFlag)
+        internal static FencePhase NextState(FencePhase current, bool endFlag)
         {
-            if (current == State.Ended) return State.Ended;
-            if (current == State.Terminating || endFlag) return State.Terminating;
-            return State.Live;
+            if (current == FencePhase.PhaseEnded) return FencePhase.PhaseEnded;
+            if (current == FencePhase.PhaseTerminating || endFlag) return FencePhase.PhaseTerminating;
+            return FencePhase.PhaseLive;
         }
 
         // ------------------------------------------------------------------ authority (4.4, 4.5)
@@ -250,14 +271,14 @@ namespace CompetitiveRounds
         /// <summary>4.4, F3: while a seat holds a live or terminating record,
         /// every vanilla round call the fence's handler did not make is refused,
         /// by every sibling that changes state on that call.</summary>
-        internal static bool RefuseRawRound(bool hasRecord, State state, bool fenceCall)
+        internal static bool RefuseRawRound(bool hasRecord, FencePhase state, bool fenceCall)
         {
-            return hasRecord && state != State.Ended && !fenceCall;
+            return hasRecord && state != FencePhase.PhaseEnded && !fenceCall;
         }
 
         // ------------------------------------------------------------------ the decision (4.7)
 
-        internal enum Decision { Continue, NotMaySend, NoLiveGid, HasRecord, NoFighters, OptIn, Capability, Hold, Series }
+        internal enum Decision { Continue, NotMaySend, NoLiveGid, HasRecord, NoFighters, OptIn, Capability, Hold, SeriesNext }
 
         /// <summary>The master's inputs at the round that would end the game at
         /// the base. Every list is read from replicated room state.</summary>
@@ -283,7 +304,7 @@ namespace CompetitiveRounds
             var why = ContinuationQuorum(d.FighterOptIns, d.LiveGid, d.ActorCapabilities, d.MasterVersion);
             if (why != Decision.Continue) return why;
             if (d.HoldHasHeldSeat || d.HoldHasPendingCut) return Decision.Hold;
-            if (d.SeriesFollows) return Decision.Series;
+            if (d.SeriesFollows) return Decision.SeriesNext;
             return Decision.Continue;
         }
 
@@ -315,7 +336,7 @@ namespace CompetitiveRounds
 
         // ------------------------------------------------------------------ the handler (4.7)
 
-        internal enum Outcome { RefuseNotMaster, RefuseUncovered, DropTransition, ApplyAsVanilla, Create, Update }
+        internal enum HandlerOutcome { RefuseNotMaster, RefuseUncovered, DropTransition, ApplyAsVanilla, CreateRecord, UpdateRecord }
 
         internal sealed class HandlerInputs
         {
@@ -338,14 +359,14 @@ namespace CompetitiveRounds
         /// roster: equal creates the record, unequal applies vanilla's round at
         /// the base. A seat with no record and no roster is not covered.
         /// </summary>
-        internal static Outcome HandleFenceMessage(HandlerInputs h)
+        internal static HandlerOutcome HandleFenceMessage(HandlerInputs h)
         {
-            if (h == null || !h.SenderIsMasterNow) return Outcome.RefuseNotMaster;
-            if (h.Ledger == null || !h.Ledger.IsLiveGid(h.MessageGid) || h.RecordEnded) return Outcome.RefuseUncovered;
-            if (h.TransitionGuardDrops) return Outcome.DropTransition;
-            if (h.HasRecord) return Outcome.Update;
-            if (h.DecisionRoster == null || h.DecisionRoster.Length == 0) return Outcome.RefuseUncovered;
-            return RosterMatches(h.DecisionRoster, h.OwnFighterRoster) ? Outcome.Create : Outcome.ApplyAsVanilla;
+            if (h == null || !h.SenderIsMasterNow) return HandlerOutcome.RefuseNotMaster;
+            if (h.Ledger == null || !h.Ledger.IsLiveGid(h.MessageGid) || h.RecordEnded) return HandlerOutcome.RefuseUncovered;
+            if (h.TransitionGuardDrops) return HandlerOutcome.DropTransition;
+            if (h.HasRecord) return HandlerOutcome.UpdateRecord;
+            if (h.DecisionRoster == null || h.DecisionRoster.Length == 0) return HandlerOutcome.RefuseUncovered;
+            return RosterMatches(h.DecisionRoster, h.OwnFighterRoster) ? HandlerOutcome.CreateRecord : HandlerOutcome.ApplyAsVanilla;
         }
 
         /// <summary>F4: the decision roster against the seat's own replicated

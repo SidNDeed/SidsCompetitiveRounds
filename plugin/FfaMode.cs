@@ -1140,6 +1140,8 @@ namespace CompetitiveRounds
                 }
                 if (spectatorGameOverAnnounced) return;
                 spectatorGameOverAnnounced = true;
+                // Ask 16(a) lane 2 (v4 5.3): the FFA observer's terminal score.
+                try { LimitlessFence.NoteSpectatorGameOver("ffa"); } catch { }
                 // Goal item 9a, FFA half. SpectatorSync's between-games flush
                 // is wired from the GM-mode observer path, which returns into
                 // THIS method before reaching it — so without an equivalent

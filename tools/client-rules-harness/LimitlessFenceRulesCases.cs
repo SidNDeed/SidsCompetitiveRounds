@@ -26,15 +26,18 @@ namespace CompetitiveRounds
             internal Func<int, int, string, R.GidLedger, bool, bool> MayResume = R.MayResume;
             internal Func<R.DecisionInputs, R.Decision> Decide = R.DecideContinuation;
             internal Func<IList<string>, string, IList<string>, string, int, int, bool> MustEnd = R.MustEnd;
-            internal Func<R.HandlerInputs, R.Outcome> Handle = R.HandleFenceMessage;
+            internal Func<R.HandlerInputs, R.HandlerOutcome> Handle = R.HandleFenceMessage;
             internal Func<int[], IList<int>, bool> RosterMatches = R.RosterMatches;
             internal Func<IList<int>, int> EndTarget = R.EndTarget;
-            internal Func<R.State, bool, R.State> NextState = R.NextState;
-            internal Func<bool, R.State, bool, bool> RefuseRawRound = R.RefuseRawRound;
-            internal Func<R.Record, int[], int[], object[]> Encode = R.EncodeRecord;
+            internal Func<R.FencePhase, bool, R.FencePhase> NextState = R.NextState;
+            internal Func<bool, R.FencePhase, bool, bool> RefuseRawRound = R.RefuseRawRound;
+            internal Func<R.FenceRecord, int[], int[], object[]> Encode = R.EncodeRecord;
             internal Func<bool, bool, string, R.GidLedger, bool> ShouldMint = R.ShouldMint;
             internal Action<R.GidLedger, string> End = (l, g) => l.EndGid(g);
             internal Func<R.GidLedger, string, bool> StartGame = (l, g) => l.AtOwnGameStart(g);
+            internal Func<R.GidLedger, string, R.GidLedger> Adopt = (l, g) => { l.AdoptRelayed(g); return l; };
+            internal Func<R.GidLedger, R.GidLedger> ExitRoom = l => { l.ExitRoom(); return l; };
+            internal Func<bool, bool, string, R.GidLedger, bool> AdoptOnArrival = R.AdoptOnArrival;
         }
 
         private const string G1 = "0123456789abcdef";
@@ -42,11 +45,11 @@ namespace CompetitiveRounds
         private const string V1 = "1-4e4806419fa25528";
         private const string V0 = "1-0000000000000000";
 
-        private static R.Record Rec()
+        private static R.FenceRecord Rec()
         {
-            return new R.Record
+            return new R.FenceRecord
             {
-                Gid = G1, Target = 55, End = true, BaseWinner = 1, BaseWinnerRounds = 5, BaseOtherRounds = 3,
+                Gid = G1, TargetRounds = 55, EndFlag = true, BaseWinner = 1, BaseWinnerRounds = 5, BaseOtherRounds = 3,
                 BaseTarget = 5, Spectatable = true,
             };
         }
@@ -63,7 +66,7 @@ namespace CompetitiveRounds
 
         private static bool Decodes(object[] o)
         {
-            R.Record r;
+            R.FenceRecord r;
             int[] ro, ar;
             return R.TryDecodeRecord(o, out r, out ro, out ar);
         }
@@ -120,7 +123,7 @@ namespace CompetitiveRounds
             var led = new R.GidLedger();
             bool adopted = led.AdoptRelayed(G1);
             f.End(led, G1);
-            add("ledger: an ended gid is never live again", adopted && !led.IsLiveGid(G1) && !led.AdoptRelayed(G1) && led.Current == null);
+            add("ledger: an ended gid is never live again", adopted && !led.IsLiveGid(G1) && !led.AdoptRelayed(G1) && led.CurrentGid == null);
             var led2 = new R.GidLedger();
             led2.AdoptRelayed(G1);
             bool second = f.StartGame(led2, G2);
@@ -129,30 +132,42 @@ namespace CompetitiveRounds
             var led3 = new R.GidLedger();
             led3.AdoptRelayed(G1);
             f.End(led3, G1);
-            add("ledger: a start finds only a value it ended and holds no gid", !f.StartGame(led3, G1) && led3.Current == null);
-            var led4 = LiveLedger(G1);
-            led4.ExitRoom();
-            add("ledger: room exit forgets every gid", led4.Current == null && led4.AdoptRelayed(G1));
+            add("ledger: a start finds only a value it ended and holds no gid", !f.StartGame(led3, G1) && led3.CurrentGid == null);
+            var held = LiveLedger(G1);
+            add("ledger: a start ends the gid it held, even while the room still names it",
+                !f.StartGame(held, G1) && held.CurrentGid == null && held.HasEnded(G1));
+            var led4 = f.ExitRoom(LiveLedger(G1));
+            add("ledger: room exit ends the current gid, and a rejoin never revives it",
+                led4.CurrentGid == null && led4.HasEnded(G1) && !led4.AdoptRelayed(G1) && led4.AdoptRelayed(G2));
+            var led5 = f.Adopt(LiveLedger(G1), G2);
+            add("ledger: adopting a new gid ends the one it replaces",
+                led5.IsLiveGid(G2) && led5.HasEnded(G1) && !led5.AdoptRelayed(G1));
             var ended = new R.GidLedger();
             ended.AdoptRelayed(G1);
             f.End(ended, G1);
             add("mint: the master mints over a value it has ended", f.ShouldMint(true, true, G1, ended));
             add("mint: a value this seat has not ended is adopted, not replaced", !f.ShouldMint(true, true, G2, ended));
-            add("mint: a malformed or absent room value is minted over",
-                f.ShouldMint(true, true, null, new R.GidLedger()) && f.ShouldMint(true, true, "x", new R.GidLedger()));
+            add("mint: a room without a gid never mints (the feature does not run there)",
+                !f.ShouldMint(true, true, null, new R.GidLedger()) && !f.ShouldMint(true, true, "x", new R.GidLedger()));
             add("mint: never by a seat that is not master, nor before its own start",
                 !f.ShouldMint(false, true, G1, ended) && !f.ShouldMint(true, false, G1, ended));
             add("mint: never while the seat holds a live gid", !f.ShouldMint(true, true, G2, LiveLedger(G1)));
+            add("arrival: a seat that awaits adopts a new value", f.AdoptOnArrival(true, false, G2, new R.GidLedger()));
+            add("arrival: a fighter that holds its gid keeps it until its own start", !f.AdoptOnArrival(false, false, G2, LiveLedger(G1)));
+            add("arrival: a spectator adopts a new value at any time", f.AdoptOnArrival(false, true, G2, LiveLedger(G1)));
+            add("arrival: a value this seat has ended is never adopted", !f.AdoptOnArrival(true, true, G1, ended));
+            add("arrival: the value it holds, or a malformed one, changes nothing",
+                !f.AdoptOnArrival(true, true, G1, LiveLedger(G1)) && !f.AdoptOnArrival(true, true, "x", new R.GidLedger()));
 
             // the carrier (F11)
             var enc = f.Encode(Rec(), Roster, Args);
-            R.Record back;
+            R.FenceRecord back;
             int[] bro, bar;
             bool dec = R.TryDecodeRecord(enc, out back, out bro, out bar);
             var want = Rec();
             add("carrier: the gid round-trips", dec && back.Gid == want.Gid);
-            add("carrier: the target round-trips", dec && back.Target == want.Target);
-            add("carrier: the end flag round-trips", dec && back.End == want.End);
+            add("carrier: the target round-trips", dec && back.TargetRounds == want.TargetRounds);
+            add("carrier: the end flag round-trips", dec && back.EndFlag == want.EndFlag);
             add("carrier: the base winner round-trips", dec && back.BaseWinner == want.BaseWinner);
             add("carrier: the winner's rounds round-trip", dec && back.BaseWinnerRounds == want.BaseWinnerRounds);
             add("carrier: the other side's rounds round-trip", dec && back.BaseOtherRounds == want.BaseOtherRounds);
@@ -191,11 +206,11 @@ namespace CompetitiveRounds
                     if (n + 1 < t) everySideEnds = false;
             }
             add("end target: whichever side completes the next round reaches it", everySideEnds);
-            add("state: live with the end flag becomes terminating", f.NextState(R.State.Live, true) == R.State.Terminating);
-            add("state: live without it stays live", f.NextState(R.State.Live, false) == R.State.Live);
-            add("state: terminating never goes back to live", f.NextState(R.State.Terminating, false) == R.State.Terminating);
-            add("state: ended stays ended", f.NextState(R.State.Ended, false) == R.State.Ended
-                                           && f.NextState(R.State.Ended, true) == R.State.Ended);
+            add("state: live with the end flag becomes terminating", f.NextState(R.FencePhase.PhaseLive, true) == R.FencePhase.PhaseTerminating);
+            add("state: live without it stays live", f.NextState(R.FencePhase.PhaseLive, false) == R.FencePhase.PhaseLive);
+            add("state: terminating never goes back to live", f.NextState(R.FencePhase.PhaseTerminating, false) == R.FencePhase.PhaseTerminating);
+            add("state: ended stays ended", f.NextState(R.FencePhase.PhaseEnded, false) == R.FencePhase.PhaseEnded
+                                           && f.NextState(R.FencePhase.PhaseEnded, true) == R.FencePhase.PhaseEnded);
 
             // authority (4.4, 4.5)
             add("MaySend: master, live gid, open record, same epoch and handoff count", f.MaySend(true, true, false, 4, 4, 2, 2));
@@ -210,11 +225,11 @@ namespace CompetitiveRounds
             add("MayResume: an ended record refuses", !f.MayResume(4, 4, G1, LiveLedger(G1), true));
             add("MayResume: an item with no gid runs without one", f.MayResume(4, 4, null, new R.GidLedger(), false));
             add("MayClean: cleanup reads the epoch only", R.MayClean(4, 4) && !R.MayClean(5, 4));
-            add("raw round: a live record refuses a call the fence did not make", f.RefuseRawRound(true, R.State.Live, false));
-            add("raw round: a terminating record refuses it too", f.RefuseRawRound(true, R.State.Terminating, false));
-            add("raw round: the fence's own call passes", !f.RefuseRawRound(true, R.State.Live, true));
+            add("raw round: a live record refuses a call the fence did not make", f.RefuseRawRound(true, R.FencePhase.PhaseLive, false));
+            add("raw round: a terminating record refuses it too", f.RefuseRawRound(true, R.FencePhase.PhaseTerminating, false));
+            add("raw round: the fence's own call passes", !f.RefuseRawRound(true, R.FencePhase.PhaseLive, true));
             add("raw round: with no record, or an ended one, raw calls run as today",
-                !f.RefuseRawRound(false, R.State.Live, false) && !f.RefuseRawRound(true, R.State.Ended, false));
+                !f.RefuseRawRound(false, R.FencePhase.PhaseLive, false) && !f.RefuseRawRound(true, R.FencePhase.PhaseEnded, false));
 
             // the decision (4.7)
             add("decision: all five hold, so the game continues", f.Decide(Ok()) == R.Decision.Continue);
@@ -230,25 +245,25 @@ namespace CompetitiveRounds
                 f.Decide(Edit(d => d.ActorCapabilities = new[] { V1, null, V1 })) == R.Decision.Capability);
             add("decision: a held seat decides no", f.Decide(Edit(d => d.HoldHasHeldSeat = true)) == R.Decision.Hold);
             add("decision: a pending cut decides no", f.Decide(Edit(d => d.HoldHasPendingCut = true)) == R.Decision.Hold);
-            add("decision: a following rated game decides no (D5)", f.Decide(Edit(d => d.SeriesFollows = true)) == R.Decision.Series);
+            add("decision: a following rated game decides no (D5)", f.Decide(Edit(d => d.SeriesFollows = true)) == R.Decision.SeriesNext);
             add("re-read: unchanged inputs do not end", !f.MustEnd(new[] { G1, G1 }, G1, new[] { V1, V1 }, V1, 2, 2));
             add("re-read: a handoff since the decision ends", f.MustEnd(new[] { G1, G1 }, G1, new[] { V1, V1 }, V1, 3, 2));
             add("re-read: a cleared opt-in ends", f.MustEnd(new[] { G1, null }, G1, new[] { V1, V1 }, V1, 2, 2));
             add("re-read: a changed capability ends", f.MustEnd(new[] { G1, G1 }, G1, new[] { V1, V0 }, V1, 2, 2));
 
             // the handler (4.7)
-            add("handler: a valid decision on a seat with no record creates it", f.Handle(H(h => { })) == R.Outcome.Create);
+            add("handler: a valid decision on a seat with no record creates it", f.Handle(H(h => { })) == R.HandlerOutcome.CreateRecord);
             add("handler: the sender test comes first",
-                f.Handle(H(h => { h.SenderIsMasterNow = false; h.TransitionGuardDrops = true; h.RecordEnded = true; })) == R.Outcome.RefuseNotMaster);
-            add("handler: another gid is not covered", f.Handle(H(h => h.MessageGid = G2)) == R.Outcome.RefuseUncovered);
-            add("handler: an ended record is not covered", f.Handle(H(h => { h.HasRecord = true; h.RecordEnded = true; })) == R.Outcome.RefuseUncovered);
+                f.Handle(H(h => { h.SenderIsMasterNow = false; h.TransitionGuardDrops = true; h.RecordEnded = true; })) == R.HandlerOutcome.RefuseNotMaster);
+            add("handler: another gid is not covered", f.Handle(H(h => h.MessageGid = G2)) == R.HandlerOutcome.RefuseUncovered);
+            add("handler: an ended record is not covered", f.Handle(H(h => { h.HasRecord = true; h.RecordEnded = true; })) == R.HandlerOutcome.RefuseUncovered);
             add("handler: the transition guard drops before the record changes",
-                f.Handle(H(h => { h.HasRecord = true; h.TransitionGuardDrops = true; })) == R.Outcome.DropTransition);
-            add("handler: a seat with a record updates it", f.Handle(H(h => h.HasRecord = true)) == R.Outcome.Update);
+                f.Handle(H(h => { h.HasRecord = true; h.TransitionGuardDrops = true; })) == R.HandlerOutcome.DropTransition);
+            add("handler: a seat with a record updates it", f.Handle(H(h => h.HasRecord = true)) == R.HandlerOutcome.UpdateRecord);
             add("handler: a roster that differs applies vanilla's round",
-                f.Handle(H(h => h.OwnFighterRoster = new[] { 1, 2 })) == R.Outcome.ApplyAsVanilla);
+                f.Handle(H(h => h.OwnFighterRoster = new[] { 1, 2 })) == R.HandlerOutcome.ApplyAsVanilla);
             add("handler: no record and no roster is not covered",
-                f.Handle(H(h => h.DecisionRoster = new int[0])) == R.Outcome.RefuseUncovered);
+                f.Handle(H(h => h.DecisionRoster = new int[0])) == R.HandlerOutcome.RefuseUncovered);
             add("roster: the same set in another order matches", f.RosterMatches(new[] { 1, 2, 3 }, new[] { 3, 1, 2 }));
             add("roster: a subset or a superset does not match",
                 !f.RosterMatches(new[] { 1, 2 }, new[] { 1, 2, 3 }) && !f.RosterMatches(new[] { 1, 2, 3, 4 }, new[] { 1, 2, 3 }));
@@ -300,7 +315,7 @@ namespace CompetitiveRounds
                     Cases(new Fns { MayResume = (en, ec, cg, l, e) => en == ec }),
                     "MayResume: a replaced gid refuses", "MayResume: an ended record refuses");
             Control(r, "MayResume waits for a gid",
-                    Cases(new Fns { MayResume = (en, ec, cg, l, e) => cg == null ? (en == ec && l != null && l.IsLiveGid(l.Current)) : R.MayResume(en, ec, cg, l, e) }),
+                    Cases(new Fns { MayResume = (en, ec, cg, l, e) => cg == null ? (en == ec && l != null && l.IsLiveGid(l.CurrentGid)) : R.MayResume(en, ec, cg, l, e) }),
                     "MayResume: an item with no gid runs without one");
             Control(r, "the decision ignores the capability",
                     Cases(new Fns { Decide = d => { d.ActorCapabilities = new[] { d.MasterVersion }; return R.DecideContinuation(d); } }),
@@ -318,13 +333,13 @@ namespace CompetitiveRounds
                     Cases(new Fns { MustEnd = (o, g, c, v, hn, hd) => R.MustEnd(o, g, c, v, hd, hd) }),
                     "re-read: a handoff since the decision ends");
             Control(r, "the handler tests the transition guard first",
-                    Cases(new Fns { Handle = h => h.TransitionGuardDrops ? R.Outcome.DropTransition : R.HandleFenceMessage(h) }),
+                    Cases(new Fns { Handle = h => h.TransitionGuardDrops ? R.HandlerOutcome.DropTransition : R.HandleFenceMessage(h) }),
                     "handler: the sender test comes first");
             Control(r, "the handler creates without the roster comparison",
-                    Cases(new Fns { Handle = h => { var o = R.HandleFenceMessage(h); return o == R.Outcome.ApplyAsVanilla ? R.Outcome.Create : o; } }),
+                    Cases(new Fns { Handle = h => { var o = R.HandleFenceMessage(h); return o == R.HandlerOutcome.ApplyAsVanilla ? R.HandlerOutcome.CreateRecord : o; } }),
                     "handler: a roster that differs applies vanilla's round");
             Control(r, "the handler takes a message without a roster as a decision",
-                    Cases(new Fns { Handle = h => { var o = R.HandleFenceMessage(h); return o == R.Outcome.RefuseUncovered && !h.HasRecord && h.Ledger.IsLiveGid(h.MessageGid) && !h.RecordEnded ? R.Outcome.Create : o; } }),
+                    Cases(new Fns { Handle = h => { var o = R.HandleFenceMessage(h); return o == R.HandlerOutcome.RefuseUncovered && !h.HasRecord && h.Ledger.IsLiveGid(h.MessageGid) && !h.RecordEnded ? R.HandlerOutcome.CreateRecord : o; } }),
                     "handler: no record and no roster is not covered");
             Control(r, "the handler applies an ended record's message",
                     Cases(new Fns { Handle = h => { h.RecordEnded = false; return R.HandleFenceMessage(h); } }),
@@ -359,20 +374,41 @@ namespace CompetitiveRounds
                     Cases(new Fns { EndTarget = s => s == null || s.Count == 0 ? 0 : R.EndTarget(s) }),
                     "end target: no sides reads 1");
             Control(r, "terminating goes back to live",
-                    Cases(new Fns { NextState = (s, e) => s == R.State.Ended ? s : (e ? R.State.Terminating : R.State.Live) }),
+                    Cases(new Fns { NextState = (s, e) => s == R.FencePhase.PhaseEnded ? s : (e ? R.FencePhase.PhaseTerminating : R.FencePhase.PhaseLive) }),
                     "state: terminating never goes back to live");
             Control(r, "a terminating record lets raw calls through",
-                    Cases(new Fns { RefuseRawRound = (h, s, fc) => h && s == R.State.Live && !fc }),
+                    Cases(new Fns { RefuseRawRound = (h, s, fc) => h && s == R.FencePhase.PhaseLive && !fc }),
                     "raw round: a terminating record refuses it too");
             Control(r, "the mint ignores the ended test",
-                    Cases(new Fns { ShouldMint = (m, a, v, l) => m && a && !(l != null && l.IsLiveGid(l.Current)) }),
+                    Cases(new Fns { ShouldMint = (m, a, v, l) => m && a && !(l != null && l.IsLiveGid(l.CurrentGid)) }),
                     "mint: a value this seat has not ended is adopted, not replaced");
             Control(r, "the terminal path forgets the gid",
                     Cases(new Fns { End = (l, g) => { } }),
                     "ledger: an ended gid is never live again");
             Control(r, "a game start keeps the previous gid",
                     Cases(new Fns { StartGame = (l, g) => l.AdoptRelayed(g) }),
-                    "ledger: a game start ends the previous gid and adopts the room's");
+                    "ledger: a start ends the gid it held, even while the room still names it");
+            Control(r, "room exit forgets the ended gids",
+                    Cases(new Fns { ExitRoom = l => new R.GidLedger() }),
+                    "ledger: room exit ends the current gid, and a rejoin never revives it");
+            Control(r, "room exit keeps the current gid",
+                    Cases(new Fns { ExitRoom = l => l }),
+                    "ledger: room exit ends the current gid, and a rejoin never revives it");
+            Control(r, "adoption forgets the gid it replaces",
+                    Cases(new Fns { Adopt = (l, g) => { var n = new R.GidLedger(); n.AdoptRelayed(g); return n; } }),
+                    "ledger: adopting a new gid ends the one it replaces");
+            Control(r, "the mint runs in a room without a gid",
+                    Cases(new Fns { ShouldMint = (m, a, v, l) => m && a && l != null && !l.IsLiveGid(l.CurrentGid) && (!R.IsGid(v) || l.HasEnded(v)) }),
+                    "mint: a room without a gid never mints (the feature does not run there)");
+            Control(r, "every fighter adopts on arrival",
+                    Cases(new Fns { AdoptOnArrival = (a, s, v, l) => R.AdoptOnArrival(true, s, v, l) }),
+                    "arrival: a fighter that holds its gid keeps it until its own start");
+            Control(r, "a spectator waits like a fighter",
+                    Cases(new Fns { AdoptOnArrival = (a, s, v, l) => R.AdoptOnArrival(a, false, v, l) }),
+                    "arrival: a spectator adopts a new value at any time");
+            Control(r, "arrival ignores the ended set",
+                    Cases(new Fns { AdoptOnArrival = (a, s, v, l) => R.IsGid(v) && v != l.CurrentGid && (a || s) }),
+                    "arrival: a value this seat has ended is never adopted");
             for (int i = 1; i < R.WireSlots; i++)
             {
                 int slot = i;
