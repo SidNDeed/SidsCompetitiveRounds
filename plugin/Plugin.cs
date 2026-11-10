@@ -5809,6 +5809,11 @@ namespace CompetitiveRounds
         }
         public void OnJoinedRoom()
         {
+#if SCR_FRAMETIME
+            // the reliable room edge: a leave and a join inside one 10 Hz poll tick skip GameStateWatcher's
+            // room-exit ResetMatchState, so the instrument's game ends here too (ruling R6-A3.11.101 (2)(a))
+            try { FtSchedule.MatchEnded(); } catch (Exception ex) { Plugin.Log.LogWarning("[FRAME-TIME] game end failed: " + ex.Message); }
+#endif
             // v1.41.0 beta round 7, finding F29: every join, a rejoin of the
             // same room included, breaks the physical-game ordinal and the
             // game token this seat held (the poll can miss a leave+join inside
@@ -6477,6 +6482,11 @@ namespace CompetitiveRounds
         public void OnJoinRandomFailed(short returnCode, string message) { }
         public void OnLeftRoom()
         {
+#if SCR_FRAMETIME
+            // the reliable room edge: a leave and a join inside one 10 Hz poll tick skip GameStateWatcher's
+            // room-exit ResetMatchState, so the instrument's game ends here too (ruling R6-A3.11.101 (2)(a))
+            try { FtSchedule.MatchEnded(); } catch (Exception ex) { Plugin.Log.LogWarning("[FRAME-TIME] game end failed: " + ex.Message); }
+#endif
             // Bug 392 item B: a silence notice belongs to the room it was
             // raised in. On a clean leave the sample loop stops without ever
             // seeing a recovered sample, so the notice would sit in the MENU

@@ -508,7 +508,8 @@ def records_missing(recs, last_game=LAST_GAME):
                 break
     # answer_replay (round-3 MEDIUM ft_parse.py:1461): under reading A, FtSchedule writes one replay line per game
     # over: a replay call (FtReplay.Run) at the next boundary that reads not live or at the next game start, or a skip
-    # line (FtReplay.Skip, result=skipped_live or skipped_quit) where no call may run. Each game 0..last needs exactly
+    # line (FtReplay.Skip, result=skipped_live, skipped_quit or skipped_absent) where no call may run, decided owed at
+    # the game over (reading A with the sentinel present there). Each game 0..last needs exactly
     # one; f18() fails a skip only for a game it reads (g >= first_game), so game 0's counts here only. Under reading
     # B there is none
     readings = set(r.get("f18") for r in recs if r["kind"] == "settled" and r.get("g", -1) >= 0)

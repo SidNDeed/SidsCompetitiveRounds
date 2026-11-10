@@ -135,15 +135,18 @@ namespace CompetitiveRounds
             FtFrames.GameBoundary();
         }
 
-        /// <summary>All owed game-over work, in GameOver's order: the point end, then the replay line. skip null makes
-        /// the replay call, which only a boundary that read the frame not live, or GameStart in a frame that started
-        /// not live, passes; any other caller names the reason no call is made (FtReplay.Skip).</summary>
+        /// <summary>All owed game-over work, in GameOver's order: the point end, then the replay line. skip null asks
+        /// for the replay call, which only a boundary that read the frame not live, or GameStart in a frame that
+        /// started not live, passes; any other caller names the reason no call is made (FtReplay.Skip). A replay
+        /// owed at GameOver gets exactly one line here whatever the sentinel reads now: the call while the sentinel
+        /// is present, and result=skipped_absent once it is gone (ruling R6-A3.11.101 (2)(b)).</summary>
         private static void DrainOwed(bool atBoundary, string skip)
         {
             EndOwedPoint(atBoundary);
             if (_replayOwed == NoReplay) return;
             int g = _replayOwed;
             _replayOwed = NoReplay;
+            if (skip == null && !FtConfig.Present) skip = "skipped_absent";
             if (skip == null) FtReplay.Run(g);
             else FtReplay.Skip(g, skip);
         }
@@ -186,9 +189,16 @@ namespace CompetitiveRounds
         /// clears InGame (GameOver, MatchEnded), so a point is open here only when that end ran in this frame. A
         /// replay still owed runs here if this frame started not live; otherwise no replay call is made, and its
         /// line says result=skipped_live. Then the previous game's accounting is finalised, after that game-over work
-        /// (round-1 MEDIUM, GameStateWatcher.cs:6079).</summary>
+        /// (round-1 MEDIUM, GameStateWatcher.cs:6079). In a menu=1 process (the menu self-check, which holds no room
+        /// and never arms the sitting) a game start is a failure: its line is written and nothing resets, so FtMenu
+        /// keeps sole ownership of its segments (ruling R6-A3.11.101 (2)(e)).</summary>
         internal static void GameStart()
         {
+            if (FtConfig.Menu)
+            {
+                Plugin.Log.LogWarning("[FRAME-TIME] game start failed: menu=1 process");
+                return;
+            }
             if (Live) { FtFrames.EndPoint(); Live = false; }
             DrainOwed(false, FrameLive ? "skipped_live" : null);
             FlushGame("next_game");
@@ -227,7 +237,9 @@ namespace CompetitiveRounds
             FtSpan.Moment = FtSpan.GameOver;
             InGame = false;
             _overOwed = true;
-            _replayOwed = Game;
+            // whether this game owes a replay line is decided here, once, by the F18 reading (reading A of a present
+            // sentinel); DrainOwed then writes exactly one line for it (ruling R6-A3.11.101 (2)(b))
+            _replayOwed = FtConfig.F18 == "A" && FtConfig.Present ? Game : NoReplay;
             _owed = Game;
             FtDrive.GameOver(Game);
             if (FtDrive.Complete && _flushAt == 0)
@@ -239,7 +251,8 @@ namespace CompetitiveRounds
         private static long _flushAt;
 
         /// <summary>GameStateWatcher, where it ends a tracked match with no OnGameOver (ResetMatchState: a room exit
-        /// or a spectator quiesce; OnFfaGameOver), each right after its isTracking = false: InGame clears, and a game
+        /// or a spectator quiesce; OnFfaGameOver), each right after its isTracking = false, and Plugin's Photon
+        /// room callbacks (OnJoinedRoom, OnLeftRoom), first, for a leave and join the poll misses: InGame clears, and a game
         /// GameStart started owes its point end as after GameOver (the next boundary runs EndPoint, then the game
         /// boundary). No game over was reported, so it owes no replay line and no flush. Outside a game it does
         /// nothing.</summary>

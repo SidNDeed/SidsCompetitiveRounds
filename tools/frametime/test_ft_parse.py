@@ -942,6 +942,8 @@ FAILURE_LINES = ("[Warning:CompetitiveRounds] [FRAME-TIME] game over failed: boo
                  "[Warning:CompetitiveRounds] [FRAME-TIME] game start failed: boom",
                  # ruling R6-A3.11.100 (3)(b): GameStateWatcher's MatchEnded hooks
                  "[Warning:CompetitiveRounds] [FRAME-TIME] game end failed: boom",
+                 # ruling R6-A3.11.101 (2)(e): FtSchedule.GameStart in a menu=1 process
+                 "[Warning:CompetitiveRounds] [FRAME-TIME] game start failed: menu=1 process",
                  "[Warning:CompetitiveRounds] [FRAME-TIME] start failed: boom",
                  "[Warning:CompetitiveRounds] [FRAME-TIME] clock refused: player-loop phase missing (EarlyUpdate 1)",
                  # ruling R6-A3.11.92 (3)
@@ -1458,7 +1460,7 @@ def test_f18_reading_a_needs_a_settled_replay_per_game():
     assert not ok and any("no answer_replay line" in w for w in why), why
 
 
-@pytest.mark.parametrize("result", ["skipped_quit", "skipped_live"])
+@pytest.mark.parametrize("result", ["skipped_quit", "skipped_live", "skipped_absent"])
 def test_f18_fails_a_skipped_replay_that_records_missing_counts(result):
     # ruling R6-A3.11.100 (3)(a)1: the quit flush (or the settle cap in a live frame) writes FtReplay.Skip's line, one
     # answer_replay line for the game: records_missing() is satisfied by it and f18() fails it

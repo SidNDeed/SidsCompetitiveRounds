@@ -19,7 +19,12 @@ Assertions, each run on the tip's order (must hold) and on a mutant (must fail):
      replay line;
   A6 the frame in which GameOver or MatchEnded ran inside an open point is that point's closing frame;
   A7 the "sitting complete" line: exactly one when the sitting completed, after its last game's flush and replay line;
-  A8 the settle cap: the last game is flushed by the boundary SETTLE_S past the settle's due time at the latest.
+  A8 the settle cap: the last game is flushed by the boundary SETTLE_S past the settle's due time at the latest;
+  A9 every opened point has exactly one end record, before its game's next boundary and its game's flush (N4);
+  A10 in a menu=1 process GameStart writes its failure line and resets nothing (ruling R6-A3.11.101 (2)(e)).
+A3 counts the games that owe a replay (reading A with the sentinel present at GameOver), and admits skipped_absent
+where a call was allowed but the sentinel had gone (N2). Plugin's Photon room callbacks end the game as a match end
+(N1); the caller sets of ResetMatchState and MatchEnded are pinned, and no match end is reachable from a start (N3).
 GameStateWatcher (F2): every isTracking = false is an OnGameOver after FtSchedule.GameOver, or a hooked
 FtSchedule.MatchEnded; OnMatchStarted runs only with isTracking false; a port of those guards, enumerated over every
 event sequence of length 5, keeps InGame equal to "a match OnMatchStarted started is being tracked".
@@ -199,10 +204,16 @@ TIP = {
         'if (_replayOwed == NoReplay) return;',
         'int g = _replayOwed;',
         '_replayOwed = NoReplay;',
+        'if (skip == null && !FtConfig.Present) skip = "skipped_absent";',
         'if (skip == null) FtReplay.Run(g);',
         'else FtReplay.Skip(g, skip);',
     ],
     SIG_GAMESTART: [
+        'if (FtConfig.Menu)',
+        '{',
+        'Plugin.Log.LogWarning("[FRAME-TIME] game start failed: menu=1 process");',
+        'return;',
+        '}',
         'if (Live) { FtFrames.EndPoint(); Live = false; }',
         'DrainOwed(false, FrameLive ? "skipped_live" : null);',
         'FlushGame("next_game");',
@@ -226,7 +237,9 @@ TIP = {
         'FtSpan.Moment = FtSpan.GameOver;',
         'InGame = false;',
         '_overOwed = true;',
-        '_replayOwed = Game;',
+        '// whether this game owes a replay line is decided here, once, by the F18 reading (reading A of a present',
+        '// sentinel); DrainOwed then writes exactly one line for it (ruling R6-A3.11.101 (2)(b))',
+        '_replayOwed = FtConfig.F18 == "A" && FtConfig.Present ? Game : NoReplay;',
         '_owed = Game;',
         'FtDrive.GameOver(Game);',
         'if (FtDrive.Complete && _flushAt == 0)',
@@ -490,6 +503,214 @@ def gsw_violations(src):
     return bad
 
 
+def _code_only(text):
+    """text with comments and string/char literal contents blanked (offsets and newlines kept)."""
+    out = list(text)
+    i, n = 0, len(text)
+
+    def blank(a, b):
+        for k in range(a, min(b, n)):
+            if out[k] != "\n":
+                out[k] = " "
+
+    while i < n:
+        c = text[i]
+        if text.startswith("//", i):
+            j = text.find("\n", i)
+            j = n if j < 0 else j
+            blank(i, j)
+            i = j
+            continue
+        if text.startswith("/*", i):
+            j = text.find("*/", i + 2)
+            j = n if j < 0 else j + 2
+            blank(i, j)
+            i = j
+            continue
+        if c == '"':
+            verbatim = (i > 0 and text[i - 1] == "@") or (i > 1 and text[i - 2:i] in ("$@", "@$"))
+            j = i + 1
+            while j < n:
+                if verbatim:
+                    if text[j] == '"':
+                        if j + 1 < n and text[j + 1] == '"':
+                            j += 2
+                            continue
+                        break
+                else:
+                    if text[j] == "\\":
+                        j += 2
+                        continue
+                    if text[j] in '"\n':
+                        break
+                j += 1
+            blank(i + 1, j)
+            i = j + 1
+            continue
+        if c == "'":
+            j = i + 2 if i + 1 < n and text[i + 1] == "\\" else i + 1
+            j += 1
+            if j < n and text[j] == "'":
+                blank(i + 1, j)
+                i = j + 1
+                continue
+        i += 1
+    return "".join(out)
+
+
+_SIG_RE = re.compile(r"(?m)^[ \t]*(?:(?:public|private|internal|protected|static|override|virtual|async|unsafe)\s+)+"
+                     r"[\w<>\[\],.?]+\s+(\w+)\s*\((?:[^()]|\([^()]*\))*\)\s*\{")
+
+
+def _methods(code):
+    """[(name, open-brace offset, end offset)] of the methods in a comment- and string-blanked text."""
+    out = []
+    for m in _SIG_RE.finditer(code):
+        j, k = _block(code, m.end() - 1)
+        out.append((m.group(1), j, k))
+    return out
+
+
+def _enclosing(methods, off):
+    best = None
+    for name, j, k in methods:
+        if j < off < k and (best is None or j > best[1]):
+            best = (name, j, k)
+    return best
+
+
+def _inside_if(code, off, cond):
+    """off lies inside the braced block of an `if` whose condition text is cond."""
+    for m in re.finditer(re.escape(cond), code):
+        if m.start() < off:
+            try:
+                j, k = _block(code, m.end())
+            except (AssertionError, ValueError):
+                continue
+            if code[m.end():j].strip() == "" and j < off < k:
+                return True
+    return False
+
+
+_RESET_CALL = re.compile(r"(?<![\w.])(?<!void )ResetMatchState\(\)|(?<=GameStateWatcher\.)ResetMatchState\(\)")
+_TRAIL_CALL = re.compile(r"(?<![\w.])(?<!void )ResetMatchStateWithTrail\(\)|(?<=GameStateWatcher\.)ResetMatchStateWithTrail\(\)")
+_END_CALL = re.compile(r"(?<![\w.])(?<!void )MatchEnded\(\)|(?<=FtSchedule\.)MatchEnded\(\)")
+# the pinned caller sets (ruling R6-A3.11.101 (2)(c)): (file, enclosing method) -> the guard each site sits under
+RESET_CALLERS = {("GameStateWatcher.cs", "Poll"): ("if (RoomActors.LocalIsSpectator)", "if (!spectatorQuiesced)"),
+                 ("GameStateWatcher.cs", "PollRoomState"): ("if (!inRoom && wasInRoom)",),
+                 ("GameStateWatcher.cs", "ResetMatchStateWithTrail"): ()}
+END_CALLERS = {("GameStateWatcher.cs", "ResetMatchState"), ("GameStateWatcher.cs", "OnFfaGameOver"),
+               ("Plugin.cs", "OnJoinedRoom"), ("Plugin.cs", "OnLeftRoom")}
+# where a match end can be reached from: none of these may be reachable from a start
+END_ROOTS = {"ResetMatchState", "ResetMatchStateWithTrail", "MatchEnded", "OnFfaGameOver", "OnJoinedRoom",
+             "OnLeftRoom", "Poll", "PollRoomState"}
+GRAPH_FILES = {"GameStateWatcher": "GameStateWatcher.cs", "FtSchedule": "FtSchedule.cs", "Plugin": "Plugin.cs"}
+
+
+def _all_sources():
+    return {f.name: f.read_text(encoding="utf-8-sig") for f in sorted(PLUGIN.glob("*.cs"))}
+
+
+def caller_violations(srcs):
+    """N3 (ruling R6-A3.11.101 (2)(c)): the exact caller sets of ResetMatchState and MatchEnded, each site with its
+    guard; ResetMatchStateWithTrail has no caller; Plugin's two room-callback hooks are each the callback's first
+    statement; and no match end is reachable from OnMatchStarted or FtSchedule.GameStart (a name-resolved call graph
+    over GameStateWatcher, FtSchedule and Plugin, followed to its closure)."""
+    bad = []
+    code = {n: _code_only(t) for n, t in srcs.items()
+            if "ResetMatchState" in t or "MatchEnded" in t or n in GRAPH_FILES.values()}
+    meth = {n: _methods(c) for n, c in code.items()}
+    resets, ends, trails = [], [], 0
+    for n, c in code.items():
+        for m in _RESET_CALL.finditer(c):
+            e = _enclosing(meth[n], m.start())
+            resets.append((n, e[0] if e else None, m.start()))
+        for m in _END_CALL.finditer(c):
+            e = _enclosing(meth[n], m.start())
+            ends.append((n, e[0] if e else None, m.start()))
+        trails += len(_TRAIL_CALL.findall(c))
+    if sorted((n, e) for n, e, _ in resets) != sorted(RESET_CALLERS):
+        bad.append("ResetMatchState callers %s, pinned %s" % (sorted((n, e) for n, e, _ in resets), sorted(RESET_CALLERS)))
+    for n, e, off in resets:
+        for cond in RESET_CALLERS.get((n, e), ()):
+            if not _inside_if(code[n], off, cond):
+                bad.append("ResetMatchState in %s is not under %s" % (e, cond))
+    if trails:
+        bad.append("ResetMatchStateWithTrail has %d callers (pinned none)" % trails)
+    if sorted((n, e) for n, e, _ in ends) != sorted(END_CALLERS):
+        bad.append("MatchEnded callers %s, pinned %s" % (sorted((n, e) for n, e, _ in ends), sorted(END_CALLERS)))
+    for n, e, off in ends:
+        if n == "Plugin.cs":
+            body = [s for _, s in _code_lines(srcs[n][_enclosing(meth[n], off)[1]:])][1:3]
+            if body != ["#if SCR_FRAMETIME", HOOK]:
+                bad.append("Plugin.%s: the hook is not the first statement: %s" % (e, body))
+        if e == "OnFfaGameOver":
+            j = _enclosing(meth[n], off)[1]
+            if "if (gameOverReported) return;" not in srcs[n][j:off]:
+                bad.append("OnFfaGameOver's hook is not under its gameOverReported guard")
+    # the call graph: bare names resolve in the same file, Class.Name( in that class's file
+    index = {}
+    for cls, fname in GRAPH_FILES.items():
+        for name, j, k in meth.get(fname, []):
+            index.setdefault((fname, name), []).append((j, k))
+    starts = [("GameStateWatcher.cs", "OnMatchStarted"), ("FtSchedule.cs", "GameStart")]
+    seen, todo = set(starts), list(starts)
+    while todo:
+        fname, name = todo.pop()
+        if name in END_ROOTS:
+            bad.append("%s.%s, a match end, is reachable from a start" % (fname, name))
+            continue
+        for j, k in index.get((fname, name), []):
+            body = code[fname][j:k]
+            nxt = [(fname, m.group(1)) for m in re.finditer(r"(?<![\w.])(\w+)\s*\(", body)]
+            nxt += [(GRAPH_FILES[m.group(1)], m.group(2))
+                    for m in re.finditer(r"\b(GameStateWatcher|FtSchedule|Plugin)\.(\w+)\s*\(", body)]
+            for node in nxt:
+                if node[1] in END_ROOTS or (node in index and node not in seen):
+                    if node not in seen:
+                        seen.add(node)
+                        todo.append(node)
+    return bad
+
+
+def test_callers_hold():
+    assert caller_violations(_all_sources()) == []
+
+
+_OMS_TRACK = "            isTracking = true;\n            gameOverReported = false;\n"
+_HOOK_LINE = "            " + HOOK + "\n"
+CALLER_MUTANTS = {
+    # Codex's N3 mutant: ResetMatchState() appended to OnMatchStarted
+    "n3_reset_in_oms": ("GameStateWatcher.cs", SIG_OMS, _OMS_TRACK, _OMS_TRACK + "            ResetMatchState();\n"),
+    # a MatchEnded call at a start: in FtSchedule.GameStart, and in OnMatchStarted
+    "n3_matchended_in_gamestart": ("FtSchedule.cs", SIG_GAMESTART, "            InGame = true;\n",
+                                   "            InGame = true;\n            MatchEnded();\n"),
+    "n3_matchended_in_oms": ("GameStateWatcher.cs", SIG_OMS, _OMS_TRACK,
+                             _OMS_TRACK + "            try { FtSchedule.MatchEnded(); } catch { }\n"),
+    # N1: a room-callback hook removed
+    "n1_join_hook_removed": ("Plugin.cs", "        public void OnJoinedRoom()", _HOOK_LINE, ""),
+    "n1_leave_hook_removed": ("Plugin.cs", "        public void OnLeftRoom()", _HOOK_LINE, ""),
+}
+
+
+def _mut_after(srcs, name, within, old, new):
+    """srcs with the first `old` after `within` in file `name` replaced by `new`."""
+    s = dict(srcs)
+    text = s[name]
+    i = text.index(old, text.index(within))
+    s[name] = text[:i] + new + text[i + len(old):]
+    return s
+
+
+@pytest.mark.parametrize("name", sorted(CALLER_MUTANTS))
+def test_caller_mutant_fails(name):
+    fname, within, old, new = CALLER_MUTANTS[name]
+    srcs = _all_sources()
+    mutated = _mut_after(srcs, fname, within, old, new)
+    assert mutated[fname] != srcs[fname]
+    assert caller_violations(mutated) != []
+
+
 @pytest.mark.parametrize("sig", sorted(TIP))
 def test_tip_bodies_are_the_port(sig):
     assert _body(_src("FtSchedule.cs"), sig) == TIP[sig]
@@ -595,12 +816,15 @@ def test_the_port_s_neighbours_are_pinned():
     i = clock.index("FtSchedule.ClosingFrame(live)")
     j = clock.index("FtSchedule.Boundary(live);")
     assert i < j and clock.count("FtSchedule.Boundary(live);") == 1
+    # N2: Skip writes for every owed game, and Run has no sentinel guard of its own (DrainOwed decides)
     assert _body(_src("FtReplay.cs"), "internal static void Skip(int game, string result)") == [
-        'if (FtConfig.F18 != "A" || !FtConfig.Present) return;',
         'Plugin.Log.LogInfo("[FRAME-TIME] answer_replay g=" + game + " ticks=0 result=" + result);']
+    run_body = "\n".join(_body(_src("FtReplay.cs"), "internal static void Run(int game)"))
+    assert "FtConfig" not in run_body and "return" not in run_body
     gsw = _src("GameStateWatcher.cs")
     assert gsw.count("FtSchedule.GameStart();") == 1 and gsw.count("FtSchedule.GameOver();") == 1
     assert gsw.count("FtSchedule.MatchEnded();") == 2
+    assert _src("Plugin.cs").count("FtSchedule.MatchEnded();") == 2
     sched = _src("FtSchedule.cs")
     assert sched.count("FtReplay.Run(") == 1 and sched.count("FtReplay.Skip(") == 1
     assert sched.count("FtFrames.StartPoint();") == 1 and sched.count("FtFrames.EndPoint();") == 3
@@ -619,13 +843,19 @@ class Sched:
     is one tick of the Stopwatch, so SETTLE_S is settle_frames. Each knob is 'tip' or a mutant: 'old' is c28259c1's
     body; open_ 'old' is open = live; settle 'old' is c28259c1's settle line, 'nocap' the tip without its cap;
     flush 'old' is FlushGame without the drain; sitting 'old' writes the completion line in FtDrive.GameOver;
-    matchend 'none' is MatchEnded doing nothing."""
+    matchend 'none' is MatchEnded doing nothing; photon 'none' is the room callbacks without their hook (N1);
+    replay 'old' is 8905732e's replay accounting (owed always, and no line once the sentinel is gone, N2);
+    endowed 'noop' is EndOwedPoint's boundary arm doing nothing (N4); menu_guard 'none' is GameStart without its
+    menu=1 refusal. present is FtConfig.Present; menu is FtConfig.Menu."""
 
     def __init__(self, boundary="tip", gamestart="tip", gameover="tip", closing="tip", open_="tip", settle="tip",
-                 flush="tip", sitting="tip", matchend="tip", last_game=99, settle_frames=3):
+                 flush="tip", sitting="tip", matchend="tip", photon="tip", replay="tip", endowed="tip",
+                 menu_guard="tip", last_game=99, settle_frames=3, menu=False):
         self.v = dict(boundary=boundary, gamestart=gamestart, gameover=gameover, closing=closing, open_=open_,
-                      settle=settle, flush=flush, sitting=sitting, matchend=matchend)
+                      settle=settle, flush=flush, sitting=sitting, matchend=matchend, photon=photon, replay=replay,
+                      endowed=endowed, menu_guard=menu_guard)
         self.last_game, self.settle_frames = last_game, settle_frames
+        self.present, self.menu = True, menu
         self.Game, self.Round, self.PointInRound = -1, 0, 0
         self.Live = self.FrameLive = self.InGame = self.over_owed = self.gate = self.ArmOn = False
         self.RoundOver = True
@@ -752,7 +982,8 @@ class Sched:
         self.over_owed = False
         if self.Live:
             if at_boundary:
-                self.end_point()
+                if self.v["endowed"] == "tip":
+                    self.end_point()
             else:
                 self.frames_end_point()
             self.Live = False
@@ -765,6 +996,10 @@ class Sched:
             return
         g = self.replay_owed
         self.replay_owed = NO
+        if self.v["replay"] == "old" and not self.present:
+            return                         # 8905732e: Run and Skip returned with no line
+        if skip is None and not self.present:
+            skip = "skipped_absent"
         if skip is None:
             self.replay_run(g)
         else:
@@ -772,6 +1007,9 @@ class Sched:
 
     # SIG_GAMESTART
     def game_start(self):
+        if self.menu and self.v["menu_guard"] == "tip":
+            self.ev("game_start_failed")
+            return
         if self.v["gamestart"] == "old":
             return self._game_start_old()
         if self.Live:
@@ -809,7 +1047,7 @@ class Sched:
         else:
             self.InGame = False
             self.over_owed = True
-            self.replay_owed = self.Game
+            self.replay_owed = self.Game if (self.present or self.v["replay"] == "old") else NO
         self.owed = self.Game
         if self.Game >= self.last_game and not self.complete:
             self.complete = True
@@ -830,7 +1068,7 @@ class Sched:
         self.over_owed = True
 
     def replay_run(self, g):
-        self.ev("replay", g, self.FrameLive)
+        self.ev("replay", g, self.FrameLive, self.present)
 
     # SIG_FLUSH (OLD[SIG_FLUSH] under flush='old'); FtDrive.LogComplete inline
     def flush_game(self, why):
@@ -854,7 +1092,9 @@ class Sched:
 def drive(s, frames):
     """FtClock.OnStart per frame (the closed frame's ClosingFrame, then Boundary), the frame's live spans (one per
     frame with the moment live), then the frame's mid-frame calls in order (OnMatchStarted, OnGameOver, a match end
-    with no OnGameOver, the quit handler)."""
+    with no OnGameOver, Plugin's Photon room callbacks, the sentinel going absent, the quit handler)."""
+    if s.menu:
+        s.ev("menu")
     for i, (live, calls, pick) in enumerate(frames):
         s.now = i
         s.ev("frame", i, s.closing_frame(live), s.Live)
@@ -869,15 +1109,22 @@ def drive(s, frames):
                 s.ev("gamestart", s.Live)
                 s.game_start()
             elif c == "GameOver":
-                s.ev("gameover", s.Live, i, s.Game)
+                s.ev("gameover", s.Live, i, s.Game, s.present)
                 s.game_over()
             elif c == "MatchEnded":
                 s.ev("matchend", s.Live, i)
                 s.match_ended()
+            elif c in ("Leave", "Join"):     # Plugin.OnLeftRoom / OnJoinedRoom: the room changed, the game ended
+                s.ev("matchend", s.Live, i)
+                if s.v["photon"] == "tip":
+                    s.match_ended()
+            elif c == "Absent":              # FtConfig's refresh finds the sentinel gone
+                s.present = False
+                s.ev("absent", i)
             else:
                 s.ev("quit", i)
                 s.quit()
-    s.ev("frames", len(frames))
+    s.ev("frames", len(frames), s.Live)
     return s.events
 
 
@@ -920,12 +1167,23 @@ SEQS = {
     # quit with the point end and the replay still owed
     "quit_owed": opening() + [F(True, "GameOver", "Quit")],
     "quit_after": opening() + END_AFTER + QUIT,
+    # N1: a leave and a join inside one poll tick (GameStateWatcher's poll sees no room exit and keeps tracking, so
+    # room B's combat gets no OnMatchStarted), in a live frame and in a quiet one
+    "fast_rejoin": opening() + [F(True, "Leave", "Join")] + [F(False)] + [F(True)] * 5 + [F(False)] + QUIT,
+    "fast_rejoin_quiet": opening() + [F(False), F(False, "Leave", "Join")] + [F(True)] * 5 + [F(False)] + QUIT,
+    # N2: the sentinel goes absent after GameOver, before the replay drains: at a boundary, at quit, at the settle cap
+    "absent_boundary": opening() + [F(True, "GameOver"), F(True, "Absent"), F(False), F(False)] + QUIT,
+    "absent_quit": opening() + [F(True, "GameOver", "Absent", "Quit")],
+    "absent_settle": opening() + [F(True, "GameOver"), F(True, "Absent")] + [F(True)] * 4 + [F(False)] * 2 + QUIT,
+    # (2)(e): a menu=1 process (MENU below) sees a game start
+    "menu_start": opening() + [F(False)] * 2 + QUIT,
 }
-LAST = {"settle": 0, "settle_stuck": 0}
+LAST = {"settle": 0, "settle_stuck": 0, "absent_settle": 0}
+MENU = {"menu_start"}
 
 
 def run(seq, **variant):
-    s = Sched(last_game=LAST.get(seq, 99), **variant)
+    s = Sched(last_game=LAST.get(seq, 99), menu=seq in MENU, **variant)
     return drive(s, SEQS[seq])
 
 
@@ -956,20 +1214,25 @@ def a2_stale_baselines(ev):
 def a3_replays(ev):
     bad = []
     overs, lines = {}, {}
-    quitting = False
+    quitting = absent = False
     for i, e in enumerate(ev):
         if e[0] == "quit":
             quitting = True
-        if e[0] == "gameover":
+        if e[0] == "absent":
+            absent = True
+        if e[0] == "gameover" and e[4]:     # a replay is owed: reading A with the sentinel present at GameOver
             overs.setdefault(e[3], []).append(i)
         elif e[0] == "replay":
             lines.setdefault(e[1], []).append(i)
             if e[2]:
                 bad.append("replay call g=%d in a frame that started live" % e[1])
+            if not e[3]:
+                bad.append("replay call g=%d with the sentinel absent" % e[1])
         elif e[0] == "replay_skip":
             lines.setdefault(e[1], []).append(i)
             why = e[3]
-            if not ((why == "skipped_live" and e[2]) or (why == "skipped_quit" and quitting)):
+            if not ((why == "skipped_live" and e[2]) or (why == "skipped_quit" and quitting)
+                    or (why == "skipped_absent" and absent and not e[2])):
                 bad.append("replay g=%d skipped (%s) where a call may run" % (e[1], why))
     for g, idx in overs.items():
         ls = lines.get(g, [])
@@ -1001,6 +1264,7 @@ def a4_outside_game(ev):
 def a5_flushes(ev):
     bad = []
     overs = set(e[3] for e in ev if e[0] == "gameover")
+    owing = set(e[3] for e in ev if e[0] == "gameover" and e[4])
     for g in sorted(overs):
         fl = [i for i, e in enumerate(ev) if e[0] == "flush" and e[1] == g]
         if len(fl) != 1:
@@ -1010,7 +1274,7 @@ def a5_flushes(ev):
         if ends and max(ends) > fl[0]:
             bad.append("game %d flushed before its point end" % g)
         rep = [i for i, e in enumerate(ev) if e[0] in ("replay", "replay_skip") and e[1] == g]
-        if not rep or rep[0] > fl[0]:
+        if g in owing and (not rep or rep[0] > fl[0]):
             bad.append("game %d flushed before its replay line" % g)
     for e in ev:
         if e[0] == "flush" and e[1] not in overs:
@@ -1064,8 +1328,44 @@ def a8_settle_cap(ev, settle_frames=3):
     return bad
 
 
+def a9_point_ends(ev):
+    """N4: every opened point has exactly one end record, written before its game's next boundary and before its
+    game's flush; only a point still open when the trace ends (the last event says Live) may have none."""
+    bad = []
+    tail_live = ev[-1][-1] if ev and ev[-1][0] in ("frames", "end_of_trace") else False
+    starts = [(i, e[1]) for i, e in enumerate(ev) if e[0] == "start"]
+    for n, (i, lab) in enumerate(starts):
+        ends = [j for j, e in enumerate(ev) if e[0] == "end" and e[1] == lab and j > i]
+        gb = [j for j in range(i, len(ev)) if ev[j][0] == "game_boundary"]
+        fl = [j for j in range(i, len(ev)) if ev[j][0] == "flush" and ev[j][1] == int(lab.split(".")[0])]
+        if not ends:
+            if not (n == len(starts) - 1 and tail_live and not gb and not fl):
+                bad.append("point %s has no end record" % lab)
+            continue
+        if len(ends) != 1:
+            bad.append("point %s has %d end records" % (lab, len(ends)))
+        if gb and gb[0] < ends[0]:
+            bad.append("point %s ends after its game's boundary" % lab)
+        if fl and fl[0] < ends[0]:
+            bad.append("point %s ends after its game's flush" % lab)
+    return bad
+
+
+def a10_menu(ev):
+    """(2)(e): in a menu=1 process GameStart writes its failure line and resets nothing; no point opens."""
+    if not any(e[0] == "menu" for e in ev):
+        return []
+    bad = ["%s in a menu=1 process" % e[0] for e in ev if e[0] in ("reset", "calib", "start", "game_boundary")]
+    starts = sum(1 for e in ev if e[0] == "gamestart")
+    fails = sum(1 for e in ev if e[0] == "game_start_failed")
+    if starts != fails:
+        bad.append("%d game starts, %d failure lines" % (starts, fails))
+    return bad
+
+
 CHECKS = {"A1": a1_straddles, "A2": a2_stale_baselines, "A3": a3_replays, "A4": a4_outside_game,
-          "A5": a5_flushes, "A6": a6_end_frame_not_closing, "A7": a7_sitting, "A8": a8_settle_cap}
+          "A5": a5_flushes, "A6": a6_end_frame_not_closing, "A7": a7_sitting, "A8": a8_settle_cap,
+          "A9": a9_point_ends, "A10": a10_menu}
 
 OLD_ALL = dict(boundary="old", gamestart="old", gameover="old", closing="old", flush="old", sitting="old",
                settle="old")
@@ -1080,6 +1380,10 @@ MUTANTS = {
     "c28259c1_sitting": dict(sitting="old"),                   # the completion line in FtDrive.GameOver
     "no_cap": dict(settle="nocap"),                            # the settle wait without its cap
     "no_matchend": dict(matchend="none"),                      # MatchEnded doing nothing
+    "no_room_hook": dict(photon="none"),                       # N1: the room callbacks without their hook
+    "replay_8905732e": dict(replay="old"),                     # N2: 8905732e's replay accounting
+    "endowed_noop": dict(endowed="noop"),                      # N4: EndOwedPoint's boundary arm a no-op
+    "no_menu_guard": dict(menu_guard="none"),                  # (2)(e): GameStart without its menu=1 refusal
 }
 
 # (assertion, mutant, sequence): each must fail
@@ -1095,6 +1399,12 @@ MUST_FAIL = [
     ("A6", "c28259c1_closing", "over_inside_live"), ("A6", "c28259c1_closing", "exit_mid_point"),
     ("A7", "c28259c1", "settle"), ("A7", "c28259c1_sitting", "settle"),
     ("A8", "no_cap", "settle_stuck"),
+    ("A4", "no_room_hook", "fast_rejoin"), ("A4", "no_room_hook", "fast_rejoin_quiet"),
+    ("A3", "replay_8905732e", "absent_boundary"), ("A3", "replay_8905732e", "absent_quit"),
+    ("A3", "replay_8905732e", "absent_settle"),
+    ("A9", "endowed_noop", "over_inside"), ("A9", "endowed_noop", "exit_mid_point"),
+    ("A9", "endowed_noop", "fast_rejoin"),
+    ("A10", "no_menu_guard", "menu_start"),
 ]
 
 
@@ -1120,18 +1430,26 @@ _END_G0 = ("end", "0.1.1", "0.1.1", 0, 1, 1, 0)
 
 def test_f4_counterexamples_fail():
     # g0's replay twice, none for g1, all frames not live
-    ce1 = [("gameover", False, 0, 0), ("replay", 0, False), ("gameover", False, 1, 1), ("replay", 0, False)]
+    ce1 = [("gameover", False, 0, 0, True), ("replay", 0, False, True), ("gameover", False, 1, 1, True),
+           ("replay", 0, False, True)]
     assert a3_replays(ce1) != []
     # a flush before EndPoint
-    ce2 = [("gameover", True, 0, 0), ("replay", 0, False), ("flush", 0, "settle", 4), _END_G0]
+    ce2 = [("gameover", True, 0, 0, True), ("replay", 0, False, True), ("flush", 0, "settle", 4), _END_G0]
     assert a5_flushes(ce2) != []
     # no flush at all
-    ce3 = [("gameover", False, 0, 0), ("replay", 0, False), _END_G0]
+    ce3 = [("gameover", False, 0, 0, True), ("replay", 0, False, True), _END_G0]
     assert a5_flushes(ce3) != []
+    # N4: a point opened and never ended, its game's boundary and flush written anyway
+    ce4 = [("start", "0.1.1"), ("gameover", True, 0, 0, True), ("game_boundary",), ("replay", 0, False, True),
+           ("flush", 0, "settle", 4), ("frames", 9, False)]
+    assert a9_point_ends(ce4) != []
     # the controls the other way: the same streams in the tip's order pass
-    assert a3_replays([("gameover", False, 0, 0), ("replay", 0, False), ("gameover", False, 1, 1),
-                       ("replay", 1, False)]) == []
-    assert a5_flushes([("gameover", True, 0, 0), _END_G0, ("replay", 0, False), ("flush", 0, "settle", 4)]) == []
+    assert a3_replays([("gameover", False, 0, 0, True), ("replay", 0, False, True), ("gameover", False, 1, 1, True),
+                       ("replay", 1, False, True)]) == []
+    assert a5_flushes([("gameover", True, 0, 0, True), _END_G0, ("replay", 0, False, True),
+                       ("flush", 0, "settle", 4)]) == []
+    assert a9_point_ends([("start", "0.1.1"), ("gameover", True, 0, 0, True), _END_G0, ("game_boundary",),
+                          ("replay", 0, False, True), ("flush", 0, "settle", 4), ("frames", 9, False)]) == []
 
 
 def test_old_port_reproduces_the_measured_symptoms():
@@ -1171,6 +1489,22 @@ def test_tip_labels_replays_and_drains():
     ex = run("exit_mid_point")
     assert not [e for e in ex if e[0] in ("replay", "replay_skip") and e[1] == 0]   # MatchEnded owes no replay
     assert not [e for e in ex if e[0] == "flush" and e[1] == 0]                     # ...and no flush
+    # N1: after the leave and join no point opens, under the old game's label or any other, until a GameStart
+    for seq in ("fast_rejoin", "fast_rejoin_quiet"):
+        ev = run(seq)
+        i_leave = next(i for i, e in enumerate(ev) if e[0] == "matchend")
+        assert not [e for e in ev[i_leave:] if e[0] == "start"], seq
+        assert [e for e in run(seq, photon="none")[i_leave:] if e[0] == "start"], seq   # the mutant opens one
+    # N2: one line per owed game whatever the sentinel reads at drain time
+    assert [e[3] for e in run("absent_boundary") if e[0] == "replay_skip"] == ["skipped_absent"]
+    assert [e[3] for e in run("absent_quit") if e[0] == "replay_skip"] == ["skipped_quit"]
+    assert [e[3] for e in run("absent_settle") if e[0] == "replay_skip"] == ["skipped_absent"]
+    for seq in ("absent_boundary", "absent_quit", "absent_settle"):
+        assert not [e for e in run(seq, replay="old") if e[0] in ("replay", "replay_skip")], seq
+    # (2)(e): the menu process writes the failure line and stays at game -1 with no point
+    menu = run("menu_start")
+    assert [e[0] for e in menu].count("game_start_failed") == 1
+    assert not [e for e in menu if e[0] in ("reset", "start")]
 
 
 # ------------------------------------------------------------------ F2: GameStateWatcher's guards, enumerated
@@ -1181,8 +1515,8 @@ class GSW:
     and OnFfaGameOver write isTracking = false and then call the hook; OnFfaMatchStarted re-arms tracking without
     GameStart. 'started' is the truth the instrument must follow: a match OnMatchStarted started and nothing ended."""
 
-    def __init__(self, s, hook_reset="tip", hook_ffa="tip"):
-        self.s, self.hook_reset, self.hook_ffa = s, hook_reset, hook_ffa
+    def __init__(self, s, hook_reset="tip", hook_ffa="tip", hook_photon="tip"):
+        self.s, self.hook_reset, self.hook_ffa, self.hook_photon = s, hook_reset, hook_ffa, hook_photon
         self.tracking = self.reported = self.started = False
         self.bad = []
 
@@ -1206,7 +1540,7 @@ class GSW:
         if not self.tracking or self.reported:
             return
         self.reported = True
-        self.s.ev("gameover", self.s.Live, self.s.now, self.s.Game)
+        self.s.ev("gameover", self.s.Live, self.s.now, self.s.Game, self.s.present)
         self.s.game_over()
         self.started = False
         if not keep:
@@ -1229,6 +1563,12 @@ class GSW:
         self._hook(self.hook_ffa)
         self.started = False
 
+    def photon(self):
+        """Plugin.OnLeftRoom or OnJoinedRoom with GameStateWatcher's poll missing the exit (N1): tracking is left as
+        it was, and the room's game has ended."""
+        self._hook(self.hook_photon)
+        self.started = False
+
     def check(self, step):
         if self.s.InGame and not (self.tracking and not self.reported):
             self.bad.append("step %d: InGame with no tracked, unreported match" % step)
@@ -1236,11 +1576,12 @@ class GSW:
             self.bad.append("step %d: InGame %s, a started match %s" % (step, self.s.InGame, self.started))
 
 
-EVENTS = ("oms", "ogo", "ogo_keep", "reset", "ffa_start", "ffa_over", "live", "quiet")
+EVENTS = ("oms", "ogo", "ogo_keep", "reset", "ffa_start", "ffa_over", "photon", "live", "quiet")
 
 
 def enumerate_gsw(length=5, **hooks):
-    """Every event sequence of the given length; returns (sequences with an invariant violated, with A1/A2/A4 failed)."""
+    """Every event sequence of the given length; returns (sequences with an invariant violated, with A1/A2/A4/A9
+    failed)."""
     inv, acc = [], []
     for seq in itertools.product(EVENTS, repeat=length):
         s = Sched()
@@ -1255,9 +1596,11 @@ def enumerate_gsw(length=5, **hooks):
             else:
                 getattr(g, e)()
             g.check(i)
+        s.ev("end_of_trace", s.Live)
         if g.bad:
             inv.append((seq, g.bad[0]))
-        if a1_straddles(s.events) or a2_stale_baselines(s.events) or a4_outside_game(s.events):
+        if a1_straddles(s.events) or a2_stale_baselines(s.events) or a4_outside_game(s.events) \
+                or a9_point_ends(s.events):
             acc.append(seq)
     return inv, acc
 
@@ -1267,8 +1610,23 @@ def test_gsw_sequences_hold():
     assert inv == [] and acc == [], (inv[:3], acc[:3])
 
 
+def test_gsw_endowed_noop_fails_behaviourally():
+    """N4 in the enumeration: EndOwedPoint's boundary arm as a no-op leaves a point with no end record."""
+    s = Sched(endowed="noop")
+    g = GSW(s)
+    for e in ("oms", "live", "ogo", "quiet"):
+        if e in ("live", "quiet"):
+            s.now += 1
+            s.boundary(e == "live")
+        else:
+            getattr(g, e)()
+    s.ev("end_of_trace", s.Live)
+    assert a9_point_ends(s.events) != []
+
+
 @pytest.mark.parametrize("hooks", [dict(hook_reset="none"), dict(hook_reset="start"),
-                                   dict(hook_ffa="none"), dict(hook_ffa="start")])
+                                   dict(hook_ffa="none"), dict(hook_ffa="start"),
+                                   dict(hook_photon="none"), dict(hook_photon="start")])
 def test_gsw_hook_mutant_fails(hooks):
     inv, _ = enumerate_gsw(**hooks)
     assert inv != []
