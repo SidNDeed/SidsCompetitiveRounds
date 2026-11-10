@@ -20,10 +20,15 @@ script refuses when that file is missing or names another digest. Six steps:
      in log-lines.txt), "=== VR6" (VR6's second listing), then "=== restored" (step 5);
   5. the sitting's logs moved into runs/<stamp>/sitting/, the pre-image copies put back, their sha256s printed and
      compared; LogOutput-prev.log must not change during the sitting (this build makes no prev copy); a cfg that
-     differs from its pre-image is first copied to runs/<stamp>/sitting/ for a by-kind comparison against pre/
-     (ft_cfg_compare.py, run on the VM) and "kept cfg <sha256>" printed, which equals VR6's after digest; that keep
-     sits in a try of its own, so a failed keep prints "kept cfg error: ..." and the cfg is still put back. The keep
-     changes no verdict and no exit code: VR6 still fails on the changed cfg (exit 4);
+     differs from its pre-image is first copied to runs/<stamp>/sitting/ and "kept cfg <sha256>" printed, which
+     equals VR6's after digest. The kept copy stays on the laptop: no cfg value leaves it (the cfg carries
+     AdminSecret). The by-kind verdict is made here, by CfgKind, a port of ft_cfg_compare.py's rule (every line that
+     is not a comment line, with its line ending, and the BOM byte-identical and in the same order), and printed as
+     exactly one line, "kept cfg kind RESTORED-KIND" or "kept cfg kind NOT-RESTORED-KIND" (a refusal of the rule,
+     a line not UTF-8 or of no kind of the file's grammar, prints NOT-RESTORED-KIND); the line carries no value, and
+     it is what the VM reads. The keep sits in a try of its own, so a failed keep prints "kept cfg error: ..." and
+     no kind line, and the cfg is still put back. The keep changes no verdict and no exit code: VR6 still fails on
+     the changed cfg (exit 4);
   6. not here: the Release DLL goes back by `laptop_push.sh release-restore-<sha8>` (or the backup install_remote.sh
      made), and the sitting counts as complete only when the installed sha256 equals the pre-sitting one.
 The cleanups are independent (function Sitting): the shutdown runs in its own finally around the launch and the wait,
@@ -35,12 +40,18 @@ folder of fixtures (no launch, no game file touched), once clean and once for ea
 writes LogOutput-prev.log) and closing_file (the sitting writes a closing file) must fail VR6; no_component_slice
 (step 4 drops "=== component slice") must fail the component check; throw_in_wait (the wait throws) and
 throw_in_step4 (step 4 throws) must still print the shutdown marker, remove the sentinel, print "=== restored" with
-every sha256 equal, and end with exit code 3 and 4; cfg_comment (the sitting appends a comment line to the cfg) must
-fail VR6 with exit code 4, print one "kept cfg <sha256>" equal to VR6's after digest, leave that copy in sitting/,
-differ from pre/ in comment lines only, and still restore the cfg equal; cfg_keep_fails (the same write, and the
-keep's destination held open by the self-test) must print "kept cfg error", still restore the cfg equal, and end
-with exit code 4, not 5; the clean run must print no "kept cfg" line and leave no cfg in sitting/. It prints
-SELFTEST PASS only when the clean run passes and every mutant behaves as wanted.
+every sha256 equal, and end with exit code 3 and 4. The cfg mutants ($CfgCases) each rewrite the cfg during the
+sitting and must fail VR6 with exit code 4 and still restore the cfg equal: cfg_comment (a comment line appended)
+must print one "kept cfg <sha256>" equal to VR6's after digest and to the copy left in sitting/, a copy that differs
+from pre/ in comment lines only, and "kept cfg kind RESTORED-KIND"; cfg_value, cfg_key_added, cfg_key_removed,
+cfg_keys_swapped, cfg_blank_added, cfg_crlf_lf, cfg_bom_removed, cfg_section_renamed and cfg_non_grammar must print
+one kept line and "kept cfg kind NOT-RESTORED-KIND"; cfg_keep_fails (a comment line appended, and the keep's
+destination held open by the self-test) must print "kept cfg error" and no kind line, and end with exit code 4, not
+5; the clean run must print no "kept cfg" line and leave no cfg in sitting/. It prints SELFTEST PASS only when the
+clean run passes and every mutant behaves as wanted.
+-CfgKindList <file> prints CfgKind's verdict (RESTORED-KIND, NOT-RESTORED-KIND or REFUSED) as "CFG-KIND <n> <verdict>"
+for each line "<pre-image cfg><TAB><sitting cfg>" of the file, and exits 0 (2 when the file is unreadable); it reads
+only, and is how ft_cfg_kind_agree.py proves the port agrees with ft_cfg_compare.py on its corpus.
 Exit codes: 0 pass, 2 refused before the launch (a step-1 error included), 3 the sitting did not complete (a launch,
 wait or shutdown error included), 4 VR6 failed (a step-4 error included), 5 a restore mismatch (a step-5 error
 included), 6 the self-test failed.
@@ -48,6 +59,7 @@ included), 6 the self-test failed.
 [CmdletBinding()]
 param(
     [switch]$SelfTest,
+    [string]$CfgKindList = '',
     [int]$TimeoutS = 7200,
     [int]$Seed = 1,
     [ValidateSet('A', 'B')][string]$F18 = 'A',
@@ -76,6 +88,61 @@ function Print([string]$s) { [Console]::Out.WriteLine($s) }
 function Sha([string]$p) {
     if (Test-Path -LiteralPath $p -PathType Leaf) { return (Get-FileHash -Algorithm SHA256 -LiteralPath $p).Hash.ToLowerInvariant() }
     return 'absent'
+}
+
+# ---- the cfg's restored kind: a port of ft_cfg_compare.py's rule (ruling R6-A3.11.105 (3)). The lines are cut as
+# that file cuts them (at CR LF, at LF and at a lone CR, each keeping its terminator; a last line without one is a
+# line); each is decoded as strict UTF-8 (the first line's U+FEFF dropped) and trimmed of what Python's str.strip()
+# trims (an explicit set: .NET's Trim() leaves U+001C to U+001F); its kind is blank, comment ("#"), section ("[" and
+# "]") or key (holds "="), and any other line is REFUSED. RESTORED-KIND when the two files differ, their lines that are
+# not comment lines are byte-identical and in the same order, and both or neither start with the BOM;
+# NOT-RESTORED-KIND otherwise (the two files byte-identical included)
+$CfgSpace = [char[]](@(9, 10, 11, 12, 13, 28, 29, 30, 31, 32, 0x85, 0xA0, 0x1680) + @(0x2000..0x200A) + @(0x2028, 0x2029, 0x202F, 0x205F, 0x3000))
+$CfgUtf8 = New-Object System.Text.UTF8Encoding($false, $true)
+
+function CfgShape([byte[]]$raw) {
+    # $null when a line is not UTF-8 or of no kind (REFUSED); else "L:" and the hex of every line that is not a
+    # comment line, its terminator included, joined by "|"
+    $kept = New-Object System.Collections.Generic.List[string]
+    $start = 0
+    $n = $raw.Length
+    for ($i = 0; $i -lt $n; $i++) {
+        $end = -1
+        if ($raw[$i] -eq 13) { if ($i + 1 -lt $n -and $raw[$i + 1] -eq 10) { $i++ }; $end = $i }
+        elseif ($raw[$i] -eq 10) { $end = $i }
+        elseif ($i -eq $n - 1) { $end = $i }
+        if ($end -lt 0) { continue }
+        $len = $end - $start + 1
+        try { $t = $CfgUtf8.GetString($raw, $start, $len) } catch { return $null }
+        if ($start -eq 0 -and $t.Length -gt 0 -and [int]$t[0] -eq 0xFEFF) { $t = $t.Substring(1) }
+        $s = $t.Trim($CfgSpace)
+        $k = ''
+        if ($s.Length -eq 0) { $k = 'blank' }
+        elseif ([int]$s[0] -eq 35) { $k = 'comment' }
+        elseif ([int]$s[0] -eq 91 -and [int]$s[$s.Length - 1] -eq 93) { $k = 'section' }
+        elseif ($s.IndexOf([char]61) -ge 0) { $k = 'key' }
+        if ($k -eq '') { return $null }
+        if ($k -ne 'comment') { $kept.Add([BitConverter]::ToString($raw, $start, $len)) }
+        $start = $end + 1
+    }
+    return 'L:' + ($kept -join '|')
+}
+
+function HasBom([byte[]]$r) { return $r.Length -ge 3 -and $r[0] -eq 0xEF -and $r[1] -eq 0xBB -and $r[2] -eq 0xBF }
+
+function CfgKind([string]$a, [string]$b) {
+    # <pre-image cfg> <sitting cfg>: RESTORED-KIND, NOT-RESTORED-KIND or REFUSED; never throws
+    try {
+        $ra = [System.IO.File]::ReadAllBytes($a)
+        $rb = [System.IO.File]::ReadAllBytes($b)
+        $sa = CfgShape $ra
+        $sb = CfgShape $rb
+        if ($null -eq $sa -or $null -eq $sb) { return 'REFUSED' }
+        if ([Convert]::ToBase64String($ra) -ceq [Convert]::ToBase64String($rb)) { return 'NOT-RESTORED-KIND' }
+        if ($sa -ceq $sb -and (HasBom $ra) -eq (HasBom $rb)) { return 'RESTORED-KIND' }
+        return 'NOT-RESTORED-KIND'
+    }
+    catch { return 'REFUSED' }
 }
 
 function ReadShared([string]$p) {
@@ -225,6 +292,9 @@ function Step5($C, $p) {
                     New-Item -ItemType Directory -Force -Path $sit | Out-Null
                     Copy-Item -LiteralPath $C.Cfg -Destination (Join-Path $sit 'com.competitiverounds.mod.cfg') -Force
                     Say ("kept cfg {0}" -f (Sha (Join-Path $sit 'com.competitiverounds.mod.cfg')))
+                    # the by-kind verdict, made here: the kept copy and its values stay on the laptop
+                    $kind = CfgKind (Join-Path $pre 'com.competitiverounds.mod.cfg') (Join-Path $sit 'com.competitiverounds.mod.cfg')
+                    Say ("kept cfg kind {0}" -f $(if ($kind -ceq 'RESTORED-KIND') { 'RESTORED-KIND' } else { 'NOT-RESTORED-KIND' }))
                 }
                 catch { Say ("kept cfg error: {0}" -f $_.Exception.Message) }
                 Copy-Item -LiteralPath (Join-Path $pre 'com.competitiverounds.mod.cfg') -Destination $C.Cfg -Force
@@ -291,8 +361,9 @@ function Sitting($C, $p, [scriptblock]$Launch, [scriptblock]$Wait, [scriptblock]
 
 # ---- the self-test
 # the self-test's own reading of the kept copy: it differs from the pre-image, and their lines that are not comment
-# lines (trimmed, starting with "#") are equal and in the same order. The binding by-kind comparison is
-# ft_cfg_compare.py on the VM; this reading only proves the self-test's fixture
+# lines (trimmed, starting with "#") are equal and in the same order. It is not the binding comparison (that is
+# CfgKind, whose agreement with ft_cfg_compare.py ft_cfg_kind_agree.py proves); this reading only proves the
+# self-test's fixture
 function CommentOnlyDiff([string]$a, [string]$b) {
     if ((Sha $a) -eq 'absent' -or (Sha $b) -eq 'absent' -or (Sha $a) -eq (Sha $b)) { return $false }
     $x = @([System.IO.File]::ReadAllLines($a) | Where-Object { -not $_.Trim().StartsWith('#') })
@@ -302,13 +373,44 @@ function CommentOnlyDiff([string]$a, [string]$b) {
     return $true
 }
 
+# the self-test's cfg: its bytes from a BOM flag and lines that carry their own terminators
+function CfgFixture([bool]$bom, [string[]]$lines) {
+    $b = [System.Text.Encoding]::UTF8.GetBytes((-join $lines))
+    if ($bom) { $b = [byte[]](@(0xEF, 0xBB, 0xBF) + $b) }
+    return , $b
+}
+$CfgBase = @("## Settings file was created by plugin Competitive Rounds`r`n", "## Plugin GUID: com.competitiverounds.mod`r`n",
+    "`r`n", "[Data]`r`n", "`r`n", "AutoLogUpload = true`r`n", "KeyA = 1`r`n", "KeyB = 2`r`n", "`r`n", "[Other]`r`n", "`r`n", "KeyC = 3`r`n")
+function CfgEdit([int]$at, [int]$drop, [string[]]$add) {
+    # $CfgBase with $drop lines from index $at replaced by $add
+    $r = @()
+    if ($at -gt 0) { $r += $CfgBase[0..($at - 1)] }
+    $r += $add
+    if ($at + $drop -lt $CfgBase.Count) { $r += $CfgBase[($at + $drop)..($CfgBase.Count - 1)] }
+    return , $r
+}
+# the cfg mutants: the in-sitting cfg each writes, and the kind line wanted ('' = no kind line: the keep fails)
+$CfgCases = [ordered]@{
+    cfg_comment         = @{ Bom = $true; Lines = (CfgEdit 12 0 @("## a comment line the sitting wrote`r`n")); Want = 'RESTORED-KIND' }
+    cfg_keep_fails      = @{ Bom = $true; Lines = (CfgEdit 12 0 @("## a comment line the sitting wrote`r`n")); Want = '' }
+    cfg_value           = @{ Bom = $true; Lines = (CfgEdit 6 1 @("KeyA = 9`r`n")); Want = 'NOT-RESTORED-KIND' }
+    cfg_key_added       = @{ Bom = $true; Lines = (CfgEdit 8 0 @("KeyD = 4`r`n")); Want = 'NOT-RESTORED-KIND' }
+    cfg_key_removed     = @{ Bom = $true; Lines = (CfgEdit 7 1 @()); Want = 'NOT-RESTORED-KIND' }
+    cfg_keys_swapped    = @{ Bom = $true; Lines = (CfgEdit 6 2 @("KeyB = 2`r`n", "KeyA = 1`r`n")); Want = 'NOT-RESTORED-KIND' }
+    cfg_blank_added     = @{ Bom = $true; Lines = (CfgEdit 8 0 @("`r`n")); Want = 'NOT-RESTORED-KIND' }
+    cfg_crlf_lf         = @{ Bom = $true; Lines = (CfgEdit 6 1 @("KeyA = 1`n")); Want = 'NOT-RESTORED-KIND' }
+    cfg_bom_removed     = @{ Bom = $false; Lines = $CfgBase; Want = 'NOT-RESTORED-KIND' }
+    cfg_section_renamed = @{ Bom = $true; Lines = (CfgEdit 9 1 @("[Renamed]`r`n")); Want = 'NOT-RESTORED-KIND' }
+    cfg_non_grammar     = @{ Bom = $true; Lines = (CfgEdit 8 0 @("a line of no kind`r`n")); Want = 'NOT-RESTORED-KIND' }
+}
+
 function SelfTestOne([string]$root, [string]$mutant) {
     $script:Out = New-Object System.Collections.Generic.List[string]
     $game = Join-Path $root 'game'; $seat = Join-Path $root 'seat'; $low = Join-Path $root 'LocalLow'
     foreach ($d in @("$game\BepInEx\config", "$game\BepInEx\plugins\CompetitiveRounds", "$low\Landfall Games\ROUNDS",
             "$seat\incoming\frametime-0badc0de", "$seat\runs")) { New-Item -ItemType Directory -Force -Path $d | Out-Null }
     $C = NewCtx $game $seat $low
-    Set-Content -LiteralPath $C.Cfg -Value @('[Data]', 'AutoLogUpload = true') -Encoding ascii
+    [System.IO.File]::WriteAllBytes($C.Cfg, (CfgFixture $true $CfgBase))
     Set-Content -LiteralPath $C.Logs['LogOutput.log'] -Value 'previous session' -Encoding ascii
     Set-Content -LiteralPath $C.Logs['LogOutput-prev.log'] -Value 'session before that' -Encoding ascii
     Set-Content -LiteralPath $C.Logs['Player.log'] -Value 'unity log' -Encoding ascii
@@ -331,7 +433,10 @@ function SelfTestOne([string]$root, [string]$mutant) {
         Set-Content -LiteralPath $C.Logs['LogOutput.log'] -Value $sim -Encoding ascii
         if ($script:Mutant -eq 'keep_prev_copy') { Copy-Item -LiteralPath $C.Logs['LogOutput.log'] -Destination $C.Logs['LogOutput-prev.log'] -Force }
         if ($script:Mutant -eq 'closing_file') { Set-Content -LiteralPath (Join-Path $C.Config 'CompetitiveRounds.seat-evidence.closing-1') -Value 'x' -Encoding ascii }
-        if ($script:Mutant -in @('cfg_comment', 'cfg_keep_fails')) { Add-Content -LiteralPath $C.Cfg -Value '## a comment line the sitting wrote' -Encoding ascii }
+        if ($CfgCases.Contains($script:Mutant)) {
+            $cc = $CfgCases[$script:Mutant]
+            [System.IO.File]::WriteAllBytes($C.Cfg, (CfgFixture $cc.Bom $cc.Lines))
+        }
         return [pscustomobject]@{ Id = 0; HasExited = $false }
     }
     $wait = {
@@ -382,6 +487,7 @@ function SelfTestOne([string]$root, [string]$mutant) {
     $keptShas = @($o | ForEach-Object { $mm = [regex]::Match($_, '^kept cfg ([0-9a-f]{64})$'); if ($mm.Success) { $mm.Groups[1].Value } })
     $vr6Cfg = @($o | ForEach-Object { $mm = [regex]::Match($_, '^vr6 com\.competitiverounds\.mod\.cfg \S+ -> (\S+)'); if ($mm.Success) { $mm.Groups[1].Value } })
     $keptErr = @($o | Where-Object { $_ -like 'kept cfg error: *' }).Count
+    $kinds = @($o | Where-Object { $_ -like 'kept cfg kind *' } | ForEach-Object { $_.Substring(14) })
     $cfgRestored = (Sha $C.Cfg) -eq $p.Cfg -and @($o | Where-Object { $_ -like 'restored cfg * equal' }).Count -eq 1
     return @{ Vr6 = $(if ($st) { $st.V } else { $false }); Restored = $(if ($st) { $st.R } else { $false }) -and $restoredAll
         Order = $order; Headers = $headers; AllSeen = $allSeen; NoWindow = $noWindow; Lane = $p.LaneOk; Component = $component
@@ -389,21 +495,32 @@ function SelfTestOne([string]$root, [string]$mutant) {
         KeptLines = $keptShas.Count; KeptSha = $(if ($keptShas.Count) { $keptShas[0] } else { '' })
         Vr6CfgAfter = $(if ($vr6Cfg.Count) { $vr6Cfg[0] } else { '' }); KeptErr = $keptErr; KeptFile = (Sha $keep)
         ByKind = (CommentOnlyDiff (Join-Path (Join-Path $run 'pre') 'com.competitiverounds.mod.cfg') $keep); CfgRestored = $cfgRestored
+        KindLines = $kinds.Count; Kind = $(if ($kinds.Count) { $kinds -join ',' } else { '' })
     }
+}
+
+if ($CfgKindList -ne '') {
+    try { $pairs = [System.IO.File]::ReadAllLines($CfgKindList) }
+    catch { Print ('CFG-KIND REFUSED: the list is unreadable: ' + $_.Exception.Message); exit 2 }
+    for ($i = 0; $i -lt $pairs.Count; $i++) {
+        $ab = $pairs[$i].Split([char]9)
+        if ($ab.Count -ne 2) { Print ("CFG-KIND {0} REFUSED" -f $i); continue }
+        Print ("CFG-KIND {0} {1}" -f $i, (CfgKind $ab[0] $ab[1]))
+    }
+    exit 0
 }
 
 if ($SelfTest) {
     $base = Join-Path ([System.IO.Path]::GetTempPath()) ('ft-seat-selftest-' + (Get-Date).ToUniversalTime().ToString('yyyyMMddHHmmss'))
     $fail = @()
-    foreach ($m in @('none', 'keep_prev_copy', 'closing_file', 'no_component_slice', 'throw_in_wait', 'throw_in_step4',
-            'cfg_comment', 'cfg_keep_fails')) {
+    foreach ($m in (@('none', 'keep_prev_copy', 'closing_file', 'no_component_slice', 'throw_in_wait', 'throw_in_step4') + @($CfgCases.Keys))) {
         Print "=== self-test run: mutant $m"
         $r = SelfTestOne (Join-Path $base $m) $m
         Print ("self-test {0}: order {1}, slice headers {2}, every class seen {3}, no window line {4}, lane {5}, VR6 {6}, component slice {7}, shutdown {8}, sentinel removed {9}, restored {10}, exit code {11}, threw '{12}'" -f
             $m, $r.Order, $r.Headers, $r.AllSeen, $r.NoWindow, $r.Lane, $r.Vr6, $r.Component, $r.Shutdown, $r.SentinelGone,
             $r.Restored, $r.Code, $r.Threw)
-        Print ("self-test {0} cfg: kept cfg lines {1} ({2}), VR6 after {3}, kept cfg errors {4}, sitting cfg {5}, comment lines only {6}, cfg restored {7}" -f
-            $m, $r.KeptLines, $r.KeptSha, $r.Vr6CfgAfter, $r.KeptErr, $r.KeptFile, $r.ByKind, $r.CfgRestored)
+        Print ("self-test {0} cfg: kept cfg lines {1} ({2}), VR6 after {3}, kept cfg errors {4}, sitting cfg {5}, comment lines only {6}, cfg restored {7}, kind lines {8} ({9})" -f
+            $m, $r.KeptLines, $r.KeptSha, $r.Vr6CfgAfter, $r.KeptErr, $r.KeptFile, $r.ByKind, $r.CfgRestored, $r.KindLines, $r.Kind)
         # every run, the mutants that throw included: no error escapes, the game is shut down, the sentinel is removed,
         # the restore runs with every sha256 equal
         $cleanup = $r.Threw -eq '' -and $r.Shutdown -and $r.SentinelGone -and $r.Restored -and $r.Lane
@@ -415,23 +532,25 @@ if ($SelfTest) {
                 if (-not $r.Vr6) { $fail += 'clean run: VR6 failed' }
                 if (-not $r.Component) { $fail += 'clean run: the component slice is missing or incomplete' }
                 if ($r.Code -ne 0) { $fail += "clean run: exit code $($r.Code)" }
-                if ($r.KeptLines -ne 0 -or $r.KeptErr -ne 0 -or $r.KeptFile -ne 'absent') { $fail += 'clean run: a kept cfg line, or a cfg in sitting/, with the cfg unchanged' }
+                if ($r.KeptLines -ne 0 -or $r.KeptErr -ne 0 -or $r.KeptFile -ne 'absent' -or $r.KindLines -ne 0) { $fail += 'clean run: a kept cfg line, or a cfg in sitting/, with the cfg unchanged' }
             }
-            'cfg_comment' {
+            { $CfgCases.Contains($_) } {
+                $want = $CfgCases[$m].Want
                 if (-not ($full -and $r.Component)) { $fail += "$m (order, headers, window lines or component slice)" }
                 if ($r.Vr6) { $fail += "mutant ${m}: VR6 passed (control FAILED)" }
                 if ($r.Code -ne 4) { $fail += "mutant ${m}: exit code $($r.Code), not 4" }
-                if ($r.KeptLines -ne 1 -or $r.KeptErr -ne 0) { $fail += "mutant ${m}: $($r.KeptLines) kept cfg lines and $($r.KeptErr) kept cfg errors, not 1 and 0" }
-                if ($r.KeptSha -eq '' -or $r.KeptSha -ne $r.Vr6CfgAfter -or $r.KeptFile -ne $r.KeptSha) { $fail += "mutant ${m}: the kept cfg '$($r.KeptSha)' is not VR6's after digest '$($r.Vr6CfgAfter)' and the sitting copy '$($r.KeptFile)'" }
-                if (-not $r.ByKind) { $fail += "mutant ${m}: the sitting copy does not differ from pre/ in comment lines only" }
-                if (-not $r.CfgRestored) { $fail += "mutant ${m}: the cfg is not restored equal" }
-            }
-            'cfg_keep_fails' {
-                if (-not ($full -and $r.Component)) { $fail += "$m (order, headers, window lines or component slice)" }
-                if ($r.Vr6) { $fail += "mutant ${m}: VR6 passed (control FAILED)" }
-                if ($r.Code -ne 4) { $fail += "mutant ${m}: exit code $($r.Code), not 4" }
-                if ($r.KeptErr -ne 1 -or $r.KeptLines -ne 0) { $fail += "mutant ${m}: $($r.KeptErr) kept cfg errors and $($r.KeptLines) kept cfg lines, not 1 and 0" }
-                if (-not $r.CfgRestored) { $fail += "mutant ${m}: the cfg is not restored equal after the failed keep" }
+                if ($want -eq '') {
+                    if ($r.KeptErr -ne 1 -or $r.KeptLines -ne 0) { $fail += "mutant ${m}: $($r.KeptErr) kept cfg errors and $($r.KeptLines) kept cfg lines, not 1 and 0" }
+                    if ($r.KindLines -ne 0) { $fail += "mutant ${m}: $($r.KindLines) kept cfg kind lines after the failed keep, not 0" }
+                    if (-not $r.CfgRestored) { $fail += "mutant ${m}: the cfg is not restored equal after the failed keep" }
+                }
+                else {
+                    if ($r.KeptLines -ne 1 -or $r.KeptErr -ne 0) { $fail += "mutant ${m}: $($r.KeptLines) kept cfg lines and $($r.KeptErr) kept cfg errors, not 1 and 0" }
+                    if ($r.KeptSha -eq '' -or $r.KeptSha -ne $r.Vr6CfgAfter -or $r.KeptFile -ne $r.KeptSha) { $fail += "mutant ${m}: the kept cfg '$($r.KeptSha)' is not VR6's after digest '$($r.Vr6CfgAfter)' and the sitting copy '$($r.KeptFile)'" }
+                    if ($r.KindLines -ne 1 -or $r.Kind -cne $want) { $fail += "mutant ${m}: kept cfg kind '$($r.Kind)' in $($r.KindLines) lines, not one $want" }
+                    if (-not $r.CfgRestored) { $fail += "mutant ${m}: the cfg is not restored equal" }
+                }
+                if ($m -eq 'cfg_comment' -and -not $r.ByKind) { $fail += "mutant ${m}: the sitting copy does not differ from pre/ in comment lines only" }
             }
             { $_ -in @('keep_prev_copy', 'closing_file') } {
                 if (-not ($full -and $r.Component)) { $fail += "$m (order, headers, window lines or component slice)" }
