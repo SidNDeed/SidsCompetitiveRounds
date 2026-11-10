@@ -327,7 +327,7 @@ namespace CompetitiveRounds
             {
                 var p = pm.players[i];
                 if (p == null || p.data == null || p.data.currentCards == null) continue;
-                sb.Append(n++ == 0 ? " " : ", ").Append('p').Append(p.playerID.ToString(CultureInfo.InvariantCulture))
+                sb.Append(n++ == 0 ? " " : ", ").Append('p').Append(p.PlayerID.ToString(CultureInfo.InvariantCulture))
                   .Append('=').Append(p.data.currentCards.Count.ToString(CultureInfo.InvariantCulture));
             }
             if (n == 0) sb.Append(" none");
