@@ -7,12 +7,13 @@ namespace CompetitiveRounds
     /// starts at the first frame boundary that reads live combat (SeatEvidence.CombatLive,
     /// the components' own predicate) while InGame holds (GameStart has run for the game and
     /// GameOver has not). It ends at the first boundary that reads combat over, or at the
-    /// first boundary after GameOver, or (for a point whose game ended without GameOver) in
-    /// GameStart (ruling R6-A3.11.99 (2)). Live frames outside InGame belong to no point.
-    /// Each round's first point takes a seeded coin, and the arms alternate after that.
-    /// A card pick ends a round. At an OFF point's first live frame the gate is set. A frame
-    /// whose boundary opens no point starts with the gate clear, so it runs every component in
-    /// both arms (FtCalib's own loops and the menu self-check's segments aside). The gate sets only while FtArm.Armed holds (part 4 supplies the full arming
+    /// first boundary after GameOver, or in GameStart when one is still open there (ruling
+    /// R6-A3.11.99 (2)). Live frames outside InGame belong to no point. Each round's first
+    /// point takes a seeded coin, and the arms alternate after that. A card pick ends a
+    /// round. At an OFF point's first live frame the gate is set. A frame whose boundary
+    /// opens no point starts with the gate clear, so it runs every component in both arms
+    /// (FtCalib's own loops and the menu self-check's segments aside). The gate sets only
+    /// while FtArm.Armed holds (part 4 supplies the full arming
     /// predicate; until then Armed is false and the schedule only logs). Boundary() runs at
     /// FT_Start after the previous frame closed, so frame f's sums carry frame f's state.</summary>
     internal static class FtSchedule
@@ -32,7 +33,7 @@ namespace CompetitiveRounds
         internal static bool ArmOn;
         internal static int PrevArm = -1;          // -1 none, 0 OFF, 1 ON: the previous point's arm (VR8's predecessor check)
         internal static bool RoundOver = true;
-        internal static long LiveFrame;            // 1 at a point's first live frame, 0 outside a point
+        internal static long LiveFrame;            // 1 at a point's first live frame; 0 from each boundary that opens no point
         internal static bool GateThisPoint;
         internal static bool InGame;               // GameStart ran and GameOver has not: only then does Boundary open a point
         private static bool _overOwed;             // GameOver ran and no boundary has followed: its point end is owed
@@ -151,11 +152,12 @@ namespace CompetitiveRounds
         /// call opens no point, and Boundary opens none until InGame holds, which this call sets last. So the
         /// resets, the fixture read and the calibration below run with no point open, and this game's first point,
         /// and its FtZero.Early read, start at the first boundary after this call that reads live combat. On entry,
-        /// work a previous game still owes runs first: a point still open (its game ended without GameOver) has its
-        /// line written here, before the game boundary and the resets, with the gate left as it is until the next
-        /// boundary writes it; and when GameOver ran with no boundary since, its replay runs here if this frame started not live,
-        /// and otherwise only its answer_replay line is written (result=skipped_live). Then the previous game's
-        /// accounting is finalised, after that game-over work (round-1 MEDIUM, GameStateWatcher.cs:6079).</summary>
+        /// work a previous game still owes runs first. A point still open (its game ended without GameOver, or
+        /// GameOver ran with no boundary since) has its line written here, before the game boundary and the resets,
+        /// with the gate left as it is until the next boundary writes it. When GameOver ran with no boundary since,
+        /// its replay runs here if this frame started not live, and otherwise no replay call is made (under reading
+        /// A its answer_replay line says result=skipped_live). Then the previous game's accounting is finalised,
+        /// after that game-over work (round-1 MEDIUM, GameStateWatcher.cs:6079).</summary>
         internal static void GameStart()
         {
             if (Live) { FtFrames.EndPoint(); Live = false; }
@@ -188,11 +190,11 @@ namespace CompetitiveRounds
         /// <summary>GameStateWatcher.OnGameOver, at its start: records that the game is over. The game-over moment
         /// begins, InGame clears so no further point opens, and the point open now, if any, is not ended here: the
         /// next boundary ends it (EndPoint, this frame left out as its closing frame) and then takes the game
-        /// boundary (FtFrames.GameBoundary). FtReplay runs at the first boundary from that one on that reads the
-        /// frame not live (or at GameStart, as stated there). The one call this makes is FtDrive.GameOver,
-        /// unchanged in place, so what it sets (FtDrive.Complete after the last game) is set within this call; the
-        /// network restart it then requests is the self-drive's, not the instrument's. The game's census, heavy and refusal lines are NOT written
-        /// here: OnGameOver's own work (the collectors' Dispatch, builds, queue writes) runs after this call, and the
+        /// boundary (FtFrames.GameBoundary), unless GameStart runs first and does both, as stated there. FtReplay
+        /// runs at the first boundary from that one on that reads the frame not live (or at GameStart, as stated
+        /// there). The one call this makes is FtDrive.GameOver, unchanged in place, so what it sets (FtDrive.Complete
+        /// after the last game) is set within this call; the network restart it then requests is the self-drive's,
+        /// not the instrument's. The game's census, heavy and refusal lines are NOT written here: OnGameOver's own work (the collectors' Dispatch, builds, queue writes) runs after this call, and the
         /// work it defers runs in the frames that follow, so the lines are written by FlushGame once that work is in
         /// the sums (round-1 MEDIUM, GameStateWatcher.cs:6079): at the next game's start, at quit, or for the
         /// sitting's last game at the first boundary SETTLE_S seconds after it ends at which no point end or replay
