@@ -53,6 +53,12 @@ M390_NAME = "390_combat_evidence.sql"
 # on match_id, so it cannot replay before 370 and 390 have run; held out with
 # them, and applied whole by the combat evidence build after 390.
 M401_NAME = "401_contrib_match_provenance.sql"
+# 402 indexes 368's seat_evidence_findings on match_id, so it cannot replay
+# before 368 has run; held out with it, and applied whole (twice) by build
+# after 368's own two applies and their snapshots.
+M402_NAME = "402_seat_evidence_findings_match.sql"
+M402 = os.path.join(cf_pg.SQL_DIR, M402_NAME)
+M402_INDEX = "ix_seat_evidence_findings_game_match"
 SEV_TABLES = frozenset({"seat_evidence", "seat_evidence_games", "seat_evidence_findings",
                         "mod_release_digests", "client_compat_events",
                         "review_sitting_dirty", "review_cursor", "review_seen",
@@ -85,7 +91,7 @@ def ddl_statements():
     evidence build applies 370 itself, after; the combat evidence build
     applies 370 and then 390."""
     saved = cf_pg.HELD_OUT
-    cf_pg.HELD_OUT = frozenset(saved | {M368_NAME, M370_NAME, M390_NAME, M401_NAME})
+    cf_pg.HELD_OUT = frozenset(saved | {M368_NAME, M370_NAME, M390_NAME, M401_NAME, M402_NAME})
     try:
         return cf_pg.ddl_statements()
     finally:
@@ -157,7 +163,20 @@ async def build(case, dsn):
     first = await snapshot(conn)
     await conn.execute(read_368())
     again = await snapshot(conn)
+    # 402 after 368 (both snapshots are 368's alone, which the rollback case
+    # compares against), twice: the second apply changes no index.
+    await conn.execute(io.open(M402, encoding="utf-8").read())
+    m402 = await _index_rows(conn)
+    await conn.execute(io.open(M402, encoding="utf-8").read())
+    assert await _index_rows(conn) == m402, "a second apply of 402 changed an index"
+    assert M402_INDEX in {r[0] for r in m402}, "402 did not create its index"
     return first, again
+
+
+async def _index_rows(conn):
+    return [tuple(r) for r in await conn.fetch(
+        "SELECT indexname, indexdef FROM pg_indexes WHERE schemaname = current_schema() "
+        "ORDER BY indexname")]
 
 
 @contextlib.asynccontextmanager
