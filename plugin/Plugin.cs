@@ -3739,6 +3739,8 @@ namespace CompetitiveRounds
             // one-shot, compat-gated, idle-states-only staging the two above
             // use, on the same always-on tick for the same reason.
             try { WeaponCooldownReset.StageCapability("tick"); } catch { }
+            // Ask 16(a) R4: the deal's bound stages cr_deal1 the same way.
+            try { BoundedDeal.StageCapability("tick"); } catch { }
             // Same one-shot pre-join stage for the saw-targeting capability
             // (bug #380's gated half). Self-guarded, so this is free once staged.
             try { SawTargetSync.StageCapability("tick"); } catch { }
@@ -3860,6 +3862,7 @@ namespace CompetitiveRounds
                         // disable produces.
                         try { ProximityVictimGate.RepublishCapability(); } catch { }
                         try { WeaponCooldownReset.RevokeCapability(); } catch { }
+                        try { BoundedDeal.RevokeCapability(); } catch { }
                         try { SawTargetSync.RevokeCapability(); } catch { }
                         // Same for the DC-election capability: a disabled mod runs no
                         // election at all, and a peer counting us as a census seat
@@ -6532,6 +6535,8 @@ namespace CompetitiveRounds
             try { VanillaFixSupport.ResetDiag(WeaponCooldownReset.DiagKey); } catch { }
             try { VanillaFixSupport.ResetDiag(WeaponCooldownReset.PhoenixDiagKey); } catch { }
             try { WeaponCooldownReset.ResetForRoomChange(); } catch { }
+            try { VanillaFixSupport.ResetDiag(BoundedDeal.DiagKey); } catch { }
+            try { BoundedDeal.ResetForRoomChange(); } catch { }
             // A ghost loop at the MENU is the most audible variant of the
             // sound leak — sweep once on the reliable exit edge (Aug 22).
             try { RoundSoundSweep.Schedule("room-leave"); } catch { }

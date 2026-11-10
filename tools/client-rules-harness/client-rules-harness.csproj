@@ -191,6 +191,10 @@
     <Compile Include="../../plugin/ReadGateRules.cs" />
     <Compile Include="ReadGateRulesSelfTest.cs" />
     <Compile Include="FfaLeaveFigureRefusalCases.cs" />
+    <Compile Include="../../plugin/BoundedDealRules.cs" />
+    <Compile Include="BoundedDealRulesCases.cs" />
+    <Compile Include="../../plugin/LimitlessBounds.cs" />
+    <Compile Include="LimitlessBoundsCases.cs" />
   </ItemGroup>
 
 </Project>

@@ -229,6 +229,26 @@ namespace CompetitiveRounds.Harness
                           }))
                 return 2;
 
+            // Ask 16(a) lane 1, R4: the bounded deal decides its relaxation
+            // level and its pick by vanilla's weights, with a mutant per rule.
+            if (!RunSuite("dealbound", quiet, ref totalRun, ref totalFail, ref suites,
+                          () =>
+                          {
+                              var r = BoundedDealRulesCases.Run();
+                              return new Suite(r.Run, r.Fail, r.Report.ToString());
+                          }))
+                return 2;
+
+            // Ask 16(a) lane 1, D2: the clamp table is the census tool's, its
+            // digest moves with every bound, and the clamp rules hold.
+            if (!RunSuite("limitbounds", quiet, ref totalRun, ref totalFail, ref suites,
+                          () =>
+                          {
+                              var r = LimitlessBoundsCases.Run();
+                              return new Suite(r.Run, r.Fail, r.Report.ToString());
+                          }))
+                return 2;
+
             string verdict = suites > 0 && totalRun > 0 && totalFail == 0 ? "PASS" : "FAIL";
             Console.WriteLine("client-rules-harness suites=" + suites
                               + " run=" + totalRun + " fail=" + totalFail

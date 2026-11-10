@@ -37,13 +37,13 @@ namespace CompetitiveRounds
         /// <summary>The keys whose values are printed: the build statement and
         /// every capability key the plugin declares (PoisonSync v2 and v3,
         /// ProximityVictim, DcReportSync x2, SawTargetSync, GrowNormalize,
-        /// WeaponCooldownReset, FfaMapScale, FfaCardSequence, the shared game
+        /// WeaponCooldownReset, BoundedDeal, FfaMapScale, FfaCardSequence, the shared game
         /// token's version). test_peer_build_and_evidence_gates_client.py holds
         /// this list equal to the plugin's cr_ constants whose name says
         /// capability (Capability or CAP).</summary>
         internal static readonly string[] ValueKeys =
         {
-            BuildProp, "cr_dc2", "cr_dc3", "cr_ffacfg", "cr_game_token_v", "cr_grow2", "cr_msv2",
+            BuildProp, "cr_dc2", "cr_dc3", "cr_deal1", "cr_ffacfg", "cr_game_token_v", "cr_grow2", "cr_msv2",
             "cr_pois2", "cr_pois3", "cr_prox1", "cr_saw1", "cr_wcd1",
         };
 

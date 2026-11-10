@@ -3608,6 +3608,7 @@ namespace CompetitiveRounds
                 // first — the fence is a property of the join op, not of a
                 // feature.
                 WeaponCooldownReset.StageCapability("pre-join");
+                BoundedDeal.StageCapability("pre-join");
             }
             catch (Exception ex) { VanillaFixSupport.LogError("GrowPreJoinSync", ex); }
         }
