@@ -29,7 +29,9 @@ those lines exist, report() states U as not computable rather than computing it 
 
 Usage: python -I -B ft_parse.py <LogOutput.log> [<second seat's log>]
 Exit: 0 the report printed; 3 REFUSED (a check refused the input); 4 FT-PARSE REFUSED (a record lacks a key
-REQUIRED_KEYS names: one line names its kind, file, line and keys).
+REQUIRED_KEYS names: one line names its kind, file, line and keys; or an input holds a line "withheld <class> <n>",
+n >= 1, of a class in READ_CLASSES: the laptop seat script's export rule held back n lines of a class this parse
+reads, so the record is not whole, and the one line names the class, the count, the file and the line).
 """
 import math
 import os
@@ -78,6 +80,32 @@ class RecordRefused(Exception):
 
 
 REFUSED_RECORD_EXIT = 4     # the exit code of a RecordRefused; no other path of the script uses it (Refused exits 3)
+
+# ruling R6-A3.11.113 (2)(a): the slice classes (frame_time_seat.ps1's $SliceClasses) whose lines this parse reads. The
+# laptop seat script exports a selected line only when the whole line matches one of its forms, and counts the rest
+# as one "withheld <class> <n>" line per class; a withheld line of a class read here would otherwise read as absence.
+# A test holds every bracketed class word of $SliceClasses that occurs in this source to this tuple.
+READ_CLASSES = ("FRAME-TIME", "FPSCAP")
+_WITHHELD = re.compile(r"withheld (%s) ([0-9]+)" % "|".join(re.escape(c) for c in READ_CLASSES))
+
+
+class WithheldRefused(RecordRefused):
+    """An input holds a line that is exactly "withheld <class> <n>", n >= 1, <class> in READ_CLASSES: the record is
+    refused as a whole, before any record of it is read (exit REFUSED_RECORD_EXIT), never read as absence."""
+
+    def __init__(self, cls, count, src, line):
+        self.kind, self.src, self.line, self.lacks = "withheld", src, line, []
+        self.cls, self.count = cls, count
+        Exception.__init__(self, "FT-PARSE REFUSED: withheld class=%s count=%d file=%s line=%d" % (cls, count, src, line))
+
+
+def refuse_withheld(text, src="input"):
+    """Raise WithheldRefused at the first line of text that is exactly "withheld <class> <n>" with <class> in
+    READ_CLASSES and n >= 1; a count of 0, another class, or any other text on the line is not this refusal."""
+    for n, ln in enumerate(text.splitlines(), 1):
+        m = _WITHHELD.fullmatch(ln)
+        if m and int(m.group(2)) >= 1:
+            raise WithheldRefused(m.group(1), int(m.group(2)), src, n)
 
 
 # ----------------------------------------------------------------------------- statistics (ported from the control)
@@ -365,7 +393,9 @@ def lacks_keys(r):
 
 def read(text, src="input"):
     """The [FRAME-TIME] records of a log, each tested against REQUIRED_KEYS as it is read; src names the input in a
-    RecordRefused (its 1-based line number is the line's in text)."""
+    RecordRefused (its 1-based line number is the line's in text). A withheld line of a read class refuses the whole
+    input first (refuse_withheld)."""
+    refuse_withheld(text, src)
     recs = []
     for n, ln in enumerate(text.splitlines(), 1):
         r = parse_line(ln)
@@ -1966,6 +1996,11 @@ def report(text, peer=None, src="log", peer_src="peer"):
     Round-5 MEDIUM (ft_parse.py:1643): no verdict is produced from one seat's log; without the peer's, while the
     inventory has a dependent row, the report is Refused (no bypass parameter). A menu run's check is a one-seat
     report and produces no verdict."""
+    # ruling R6-A3.11.113 (2)(a): both inputs are checked for a withheld line of a read class before any record of
+    # either is read
+    refuse_withheld(text, src)
+    if peer is not None:
+        refuse_withheld(peer, peer_src)
     recs = read(text, src)
     if any(r["kind"] in ("menu", "menu_done") for r in recs):
         return menu_report(recs, text)

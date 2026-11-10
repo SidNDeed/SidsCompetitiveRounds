@@ -2128,3 +2128,69 @@ def test_failed_cal_lines_are_skipped_by_the_calibration_consumers():
     ok, _, why = P.menu_check(P.read(m))
     assert not ok and any("failure warnings" in w for w in why), why
     assert not any(w.startswith("menu calibrations") for w in why), why
+
+
+# ------------------------------------------------------------------ ruling R6-A3.11.113 (2)(a)(b): withheld read classes
+
+SEAT_PS1 = os.path.join(os.path.dirname(os.path.abspath(__file__)), "frame_time_seat.ps1")
+
+
+def _slice_class_words():
+    """the bracketed class words of the laptop seat script's $SliceClasses, its list of selected classes"""
+    t = open(SEAT_PS1, encoding="utf-8").read()
+    m = re.search(r"^\$SliceClasses = @\((.*?)\)$", t, re.M | re.S)
+    assert m, "no $SliceClasses in the seat script"
+    return re.findall(r"'\[([A-Z0-9-]+)\]'", m.group(1))
+
+
+def _check_read_classes(path):
+    """every bracketed class word of $SliceClasses that occurs in the parse source at path is in that source's own
+    READ_CLASSES"""
+    import ast
+    src = open(path, encoding="utf-8").read()
+    m = re.search(r"^READ_CLASSES = (\(.*\))$", src, re.M)
+    assert m, "no READ_CLASSES in %s" % path
+    read = ast.literal_eval(m.group(1))
+    words = _slice_class_words()
+    assert "FRAME-TIME" in words and "COMBAT-PERF" in words and len(words) >= 12, words
+    gaps = [w for w in words if "[%s]" % w in src and w not in read]
+    assert gaps == [], "slice classes this parse reads but READ_CLASSES lacks: %s" % gaps
+
+
+def test_every_slice_class_the_parse_reads_is_a_read_class():
+    _check_read_classes(FT_SCRIPT)
+    assert P.READ_CLASSES == ("FRAME-TIME", "FPSCAP")
+
+
+def test_read_class_check_turns_red_on_a_planted_class_literal(tmp_path):
+    # the control: a copy of the parse with a planted [COMBAT-PERF] literal fails the check above
+    src = open(FT_SCRIPT, encoding="utf-8").read()
+    planted = tmp_path / "ft_parse.py"
+    planted.write_text(src + '\n_PLANTED = "[COMBAT-PERF] mode="\n', encoding="utf-8")
+    with pytest.raises(AssertionError) as ei:
+        _check_read_classes(str(planted))
+    assert "COMBAT-PERF" in str(ei.value), ei.value
+
+
+@pytest.mark.parametrize("cls", ["FRAME-TIME", "FPSCAP"])
+@pytest.mark.parametrize("where", ["log", "peer"])
+def test_a_withheld_read_class_line_is_the_record_refusal(tmp_path, cls, where):
+    good = _log()
+    bad = good + "\n=== component slice\nwithheld %s 3\n" % cls
+    g = tmp_path / "good.log"
+    b = tmp_path / "bad.log"
+    g.write_text(good + "\n", encoding="utf-8")
+    b.write_text(bad, encoding="utf-8")
+    rc, out, err = _run_script(b, g) if where == "log" else _run_script(g, b)
+    n = bad.splitlines().index("withheld %s 3" % cls) + 1
+    assert rc == P.REFUSED_RECORD_EXIT and not err.strip(), (rc, out, err)
+    assert out.strip() == "FT-PARSE REFUSED: withheld class=%s count=3 file=%s line=%d" % (cls, b, n), out
+    with pytest.raises(P.RecordRefused):
+        P.read(bad)
+
+
+@pytest.mark.parametrize("line", ["withheld FRAME-TIME 0", "withheld COMBAT-PERF 3", "withheld refused 2",
+                                  " withheld FRAME-TIME 3", "withheld FRAME-TIME 3 ", "withheld [FRAME-TIME] 3",
+                                  LOG_PREFIX + "withheld FRAME-TIME 3"])
+def test_other_withheld_lines_are_not_the_refusal(line):
+    P.refuse_withheld(_log() + "\n" + line + "\n")

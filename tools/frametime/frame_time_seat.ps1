@@ -13,11 +13,16 @@ script refuses when that file is missing or names another digest. Six steps:
   3. a wait for "[FRAME-TIME] sitting complete" until its own deadline (TimeoutS minus 600 s), then a graceful quit,
      and a kill by the captured pid only when the game still runs 60 s later;
   4. in every outcome the sentinel removed, then printed in this order: the runs/<stamp> token (UTC), "=== log lines"
-     (every [FRAME-TIME] line but the window lines), "=== saved slice" (the slice's class headers, METHOD-V4.md 3.11;
-     the slice itself is saved whole in the run folder with its line count and sha256), "=== component slice" (every
-     saved-slice line that carries no [FRAME-TIME] tag, verbatim: queue writes, builds, voids, refusals, the
-     component tags, Failed to patch, the BepInEx banner; it sits after "=== log lines", so pull_result.py keeps it
-     in log-lines.txt), "=== VR6" (VR6's second listing), then "=== restored" (step 5);
+     (the [FRAME-TIME] lines but the window lines, under the export rule), "=== saved slice" (the slice's class
+     headers, METHOD-V4.md 3.11; the slice itself is saved whole in the run folder with its line count and sha256),
+     "=== component slice" (the saved-slice lines that carry no [FRAME-TIME] tag, under the export rule: queue
+     writes, builds, refusals, the component tags, the BepInEx banner; it sits after "=== log lines", so
+     pull_result.py keeps it in log-lines.txt), "=== VR6" (VR6's second listing), then "=== restored" (step 5).
+     The export rule (ruling R6-A3.11.112 F2, function SliceExport): a selected line is printed only when the whole
+     line matches one form of $FormText, the text of one log call of plugin/*.cs whose variable fields are closed
+     sets (digits, hex, the ft_ room form, actor numbers, fixed tokens, the generated sets); a cfg-derived field
+     leaves only as a token of a closed set the form names. Any other selected line is withheld: never printed,
+     counted as one "withheld <class> <n>" line per class with n > 0 at the end of its section;
   5. the sitting's logs moved into runs/<stamp>/sitting/, the pre-image copies put back, their sha256s printed and
      compared; LogOutput-prev.log must not change during the sitting (this build makes no prev copy); a cfg that
      differs from its pre-image is first copied to runs/<stamp>/sitting/ and "kept cfg <sha256>" printed, which
@@ -28,7 +33,9 @@ script refuses when that file is missing or names another digest. Six steps:
      a line not UTF-8 or of no kind of the file's grammar, prints NOT-RESTORED-KIND); the line carries no value, and
      it is what the VM reads. The keep sits in a try of its own, so a failed keep prints "kept cfg error: ..." and
      no kind line, and the cfg is still put back. The keep changes no verdict and no exit code: VR6 still fails on
-     the changed cfg (exit 4);
+     the changed cfg (exit 4). After step 5 the sitting prints exactly one line: "RESTORE-PROOF ok <n>" (n = the
+     "restored ... equal" lines, one per log and one for the cfg) when Step5 proved every log and the cfg equal to
+     their pre-image, else "RESTORE-PROOF FAILED";
   6. not here: the Release DLL goes back by `laptop_push.sh release-restore-<sha8>` (or the backup install_remote.sh
      made), and the sitting counts as complete only when the installed sha256 equals the pre-sitting one.
 The cleanups are independent (function Sitting): the shutdown runs in its own finally around the launch and the wait,
@@ -47,19 +54,32 @@ from pre/ in comment lines only, and "kept cfg kind RESTORED-KIND"; cfg_value, c
 cfg_keys_swapped, cfg_blank_added, cfg_crlf_lf, cfg_bom_removed, cfg_section_renamed and cfg_non_grammar must print
 one kept line and "kept cfg kind NOT-RESTORED-KIND"; cfg_keep_fails (a comment line appended, and the keep's
 destination held open by the self-test) must print "kept cfg error" and no kind line, and end with exit code 4, not
-5; the clean run must print no "kept cfg" line and leave no cfg in sitting/. It prints SELFTEST PASS only when the
-clean run passes and every mutant behaves as wanted.
+5; the clean run must print no "kept cfg" line and leave no cfg in sitting/. Every run but the three below must print
+one "RESTORE-PROOF ok 6" and no FAILED line. The restore failures, each with VR6 failing too ($RestoreFailCases):
+cfg_restore_locked (the cfg rewritten, then held by a handle that permits reading and hashing it but refuses the copy
+of the pre-image back), log_restore_fails (a closing file, and a log's pre-image copy gone) and wait_restore_fails (the
+same, and the wait throws) must print "RESTORE-PROOF FAILED", no ok line, and end with exit code 5. The simulated log
+($SimFt, $SimForm, $SimNoForm, $SimPlant) holds lines in the mod's forms, lines of formless classes, and planted
+cfg-like values holding each class word (the BaseUrl's startup line, the COMBAT-PERF probe mode, a route host): in
+every run that prints both sections no planted value may be printed, every form line must be exported in its section,
+and the withheld lines must be exactly the fixture's counts; export_all (every selected line exported, the old
+selection) is that check's negative control and must fail it. It prints SELFTEST PASS only when the clean run passes
+and every mutant behaves as wanted.
+-SliceOf <log> prints step 4's two exported sections for a log file ("=== log lines", "=== component slice") and
+exits 0 (2 when unreadable); it reads only, and is how ft_slice_identity.py proves the parse identity of the rule.
 -CfgKindList <file> prints CfgKind's verdict (RESTORED-KIND, NOT-RESTORED-KIND or REFUSED) as "CFG-KIND <n> <verdict>"
 for each line "<pre-image cfg><TAB><sitting cfg>" of the file, and exits 0 (2 when the file is unreadable); it reads
 only, and is how ft_cfg_kind_agree.py proves the port agrees with ft_cfg_compare.py on its corpus.
 Exit codes: 0 pass, 2 refused before the launch (a step-1 error included), 3 the sitting did not complete (a launch,
-wait or shutdown error included), 4 VR6 failed (a step-4 error included), 5 a restore mismatch (a step-5 error
-included), 6 the self-test failed.
+wait or shutdown error included), 4 VR6 failed (a step-4 error included), 5 the restore is not proven (a mismatch or
+a step-5 error; ruling R6-A3.11.112 F1), 6 the self-test failed. 5 overrides 3 and 4: the job ends 0 or 4 only with
+"RESTORE-PROOF ok <n>", and 3 only when the restore is proven too.
 #>
 [CmdletBinding()]
 param(
     [switch]$SelfTest,
     [string]$CfgKindList = '',
+    [string]$SliceOf = '',
     [int]$TimeoutS = 7200,
     [int]$Seed = 1,
     [ValidateSet('A', 'B')][string]$F18 = 'A',
@@ -79,6 +99,258 @@ $Vr6Named = @('CompetitiveRounds.seat-evidence.jsonl', 'CompetitiveRounds.seat-e
 $Vr6Patterns = @('CompetitiveRounds.seat-evidence.*', 'CompetitiveRounds.pending-reports.*', 'CompetitiveRounds.refused-reports.*')
 # the self-test's mutant; only -SelfTest sets anything but 'none'
 $script:Mutant = 'none'
+$script:RestoredEqual = 0
+
+# ---- the export rule of the slice (ruling R6-A3.11.112 F2; it refines R6-A3.11.105: no cfg file and no free cfg
+# value leaves the laptop). $SliceClasses still SELECTS: a line holding a class word goes to slice.log, which stays on
+# the laptop, and is counted in its class header. A selected line is EXPORTED (printed under "=== log lines" or
+# "=== component slice", and so part of the job's result) only when the WHOLE line matches one form below. Each form
+# is the BepInEx line prefix and the text of one log call in plugin/*.cs, its variable fields written as closed
+# placeholders: digits, hex, the ft_ room form, actor numbers, fixed tokens and the named closed sets ($FormSets); a
+# cfg-derived field is a closed token set the form names (the route host, the COMBAT-PERF probe mode). Exception
+# messages, peer-chosen text and every other free field have no placeholder, so a line carrying one matches no form.
+# Every other selected line is WITHHELD: never printed, only counted, as one "withheld <class> <n>" line per class
+# with n > 0 at the end of the section that would have printed it (a line holding two class words counts in both).
+# The FrameTime window lines ("[FRAME-TIME] w ") are not exported at all and are not counted as withheld.
+$FormSets = [ordered]@{
+    # generated from the source tables (ft_slice_identity.py --sets prints these lines, and its identity run refuses a
+    # difference): gate_specs/entries.py (entry, shape), gate_specs/a3.py (a3k), every class named *Patch in
+    # plugin/*.cs (patch) and every path segment of an /api/v1/ url there (seg)
+    entry  = 'HE-p1:PhotonNetwork.ExecuteRpc HE-p2:HealthHandler.RPCA_SendTakeDamage HE-p3:HealthHandler.RPCA_SendTakeForce HE-p4:HealthHandler.DoDamage HE-p5:Block.RPCA_DoBlock HE-p6:ProjectileInit.RPCA_Init HE-p7:ProjectileInit.RPCA_Init_noAmmoUse HE-p8:ProjectileInit.RPCA_Init_SeparateGun HE-p9:ProjectileHit.RPCA_DoHit CE-c7:CombatEvidence.Tick CE-p1:Gun.Attack CE-p2:ProjectileInit.RPCA_Init CE-p3:ProjectileInit.RPCA_Init_noAmmoUse CE-p4:ProjectileInit.RPCA_Init_SeparateGun CE-p5:GunAmmo.ReloadAmmo CE-p6:ProjectileHit.RPCA_DoHit CE-p7:ProjectileHit.Hit CE-p8:Block.RPCA_DoBlock CE-p9:Block.TryBlock CE-p10:CharacterStatModifiers.DealtDamage CE-p11:BounceEffectRetarget.SetNewVel CE-p12:ScreenEdgeBounce.DoHit CE-p13:SyncProjectile.OnPhotonSerializeView CE-p14:HealthHandler.RPCA_SendTakeForce CE-p15:HealthHandler.RPCA_SendTakeDamage CE-p16:HealthHandler.RPCA_Die CE-p17:HealthHandler.RPCA_Die_Phoenix CE-p18:BounceEffectRetarget.FindTarget CE-p19:MoveTransform.Update SE-c50:SeatEvidence.NoteView SE-c52:SeatEvidence.CompatTick SE-c53:SeatEvidence.Tick SE-p1:PhotonNetwork.RPC SE-p2:Block.DoBlock SE-p3:Block.TryBlockMe PT-c5:PointEvidence.Drain PT-p1:Saw.Update IC-c6:IdentityClockEvidence.Tick IC-p1:PhotonNetwork.ExecuteRpc IC-p4:SyncPlayerMovement.OnPhotonSerializeView CD-c6:CardDrawEvidence.Tick CD-c7:CardDrawEvidence.EnsureCensusDump PB-c2:PeerBuild.StageBuildProp PB-c3:PeerBuild.Tick'
+    shape  = 'CE_p1 CE_p10 CE_p11 CE_p12 CE_p13 CE_p14 CE_p15 CE_p16 CE_p17 CE_p18 CE_p19 CE_p2 CE_p3 CE_p4 CE_p5 CE_p6 CE_p7 CE_p8 CE_p9 HE_p1 HE_p2 HE_p3 HE_p4 HE_p5 HE_p6 HE_p7 HE_p8 HE_p9 IC_p1 IC_p4 PT_p1 SE_p1 SE_p2 SE_p3 call span.empty'
+    a3k    = 'CE_Top CE_Ht CE_Ping CE_lhat_cache CE_Pos CE_Recent CE_Wait CE_Rings CE_anchor CE_Gun CE_B5c CE_counters CE_scratch CE_gun_scalars CE_gun_account CE_aimset CE_capture CE_perf_probe SE_Hw SE_Logs SE_ordinals SE_frames SE_scalars HE_Flush HE_game HE_point HE_sender PE_Rec PE_map IC_Rpc IC_Clock IC_scalars IC_point IC_game CD_notes PB_printed HE_hitset'
+    patch  = 'AbyssalCountdown_Activate_DeepEnd_Patch Arm_DancePatch ArtHandlerAwakePatch ArtHandlerNextArtPatch AvatarCreatePlayerPatch AvatarLoadFacesPatch AvatarSelectFacePatch BlockDoBlockCounterPatch BlockRpcaDoBlockChainClassifierPatch BlockRpcaDoBlockZombieScrubPatch BlockTriggerDoBlockNullSafetyPatch BlockTryBlockCounterPatch BlockTryBlockOnF5Patch Block_FfaSpawnGrace_Patch Broadcast_BlockPress_Patch Broadcast_ShotActivation_Patch BulletPoolReleaseGuardPatch CardBarHandler_AddCard_Ffa_Patch CardChoiceEndPickPatch CardChoicePickPatch CardChoiceStaleSpawnedCardsPatch CardChoiceVisuals_Hide_PopupCarrier_Patch CardChoiceVisuals_SetSelected_Instinct_Patch CardChoiceVisuals_Show_Competitive_Patch CardChoice_DoPick_SameCards_Patch CardChoice_ReplaceCards_SameCards_Patch CardChoice_SpawnUniqueCard_SameCards_Patch CardDrawEvidenceTestDealer_SpawnPatch CardDrawEvidence_CardAwakePatch CardDrawEvidence_DonePickingPatch CardDrawEvidence_EndPickPatch CardDrawEvidence_OfflinePickPatch CardDrawEvidence_PickPatch CardDrawEvidence_StartPickPatch CardPickChatInputGuardPatch CharacterReadyPatch CharacterSelectionMenu_PlayerJoined_2v2_Patch ChaseCardTextPatch CodeAnimStartRestorePatch CombatEvidence_AttackPatch CombatEvidence_BlockPatch CombatEvidence_ContactPatch CombatEvidence_DamagePatch CombatEvidence_DealtPatch CombatEvidence_DiePatch CombatEvidence_DiePhoenixPatch CombatEvidence_EdgeBouncePatch CombatEvidence_FindTargetPatch CombatEvidence_ForcePatch CombatEvidence_HitPatch CombatEvidence_InitAmmoPatch CombatEvidence_InitNoAmmoPatch CombatEvidence_InitSeparatePatch CombatEvidence_MovePatch CombatEvidence_ReloadPatch CombatEvidence_SyncPatch CombatEvidence_TargetBouncePatch CombatEvidence_TryBlockPatch CosmeticButtonSpawnerPatch CosmeticGetItemIdPatch CosmeticGetItemPatch CosmeticSelectButtonPatch DamageDealtLocalTrackerPatch DamageStampPatch Dance_BlockTryBlock_Patch Dance_GeneralInput_Patch Dance_GunAttack_Patch Dance_ProjectileInit_Patch DeadPlayerForcePatch DeadPlayerForcePointPatch DealDamageToPlayerFreshVictimPatch DealtDamageGuardPatch DeathClassifierPatch DemonicPactSprayPatch DevConsoleToggleGuardPatch DrillVisibilityPatch EndScreenKillPatch EscToggleDiagPatch ExplosionPerColliderIsolationPatch FfaAssembly_LoadGate_Patch FfaDamageDealtTrackerPatch FfaLate_CallInHold_Patch FfaLate_ForceQuarantine_Patch FfaLate_NoMapReport_Patch FfaLate_NoSyncReply_Patch FfaLate_PickQuarantine_Patch FfaLate_Register_Patch FfaLate_Simulated_Patch FfaLate_Visible_Patch FfaReadmit_RegisterOrder_Patch FtChurnFreezePatch FtDrive_InputPatch FtDrive_PickPatch FtRoomGateNchRoutinePatch FtRoomGateNchVoidPatch FtRoomGatePunPatch FtRoute_SendPatch GMArmsRaceAwakePatch GMArmsRaceOnEnable_4Player_Patch GMArmsRaceStartGameBlockResetPatch GMArmsRace_DoStartGame_Ffa_Patch GMArmsRace_DoStartGame_PopupCarrier_Patch GMArmsRace_DoStartGame_SameCards_Patch GMArmsRace_NextRound_Ffa_Patch GMArmsRace_PlayerDied_Ffa_Patch GMArmsRace_PlayerJoined_Diag_Patch GMArmsRace_StartGame_Diag_Patch GameCrownHandler2v2Patch GameLocaleOptionsInitPatch GameOverTextTeamColorPatch GeneralInput_FfaSpawnGrace_Patch GetColorFromTeamEmptyTeamPatch GetFirstPlayerInTeamEmptyTeamPatch GrowFpsNormalizePatch GrowPreJoinSyncPatch GunApplyPlayerStuffProvenancePatch GunAttackBlockOnF5Patch GunAttackIntentCapturePatch GunDoAttacksIntentPatch GunFireBurstProvenancePatch HealSoundGuardPatch HealthBar_AttachHealOverlay_Patch HealthHandlerTakeDamageCounterPatch HealthHandler_HealOverlayReviveReset_Patch HitEvidence_BlockPatch HitEvidence_DamagePatch HitEvidence_DotPatch HitEvidence_ExecuteRpcPatch HitEvidence_FfaDoStartGamePatch HitEvidence_ForcePatch HitEvidence_ImpactPatch HitEvidence_SpawnAmmoPatch HitEvidence_SpawnNoAmmoPatch HitEvidence_SpawnSeparatePatch HitEvidence_StartGamePatch HostRoomCodeClipboardPatch IdentityClock_ExecuteRpcPatch IdentityClock_MovePlayersPatch IdentityClock_MovementPatch IdentityClock_PointStartPatch InRangeIndicatorRadiusPatch InactiveVisualsHidePatch JumpDustTeamColorPatch KeyboardFactoryPatch LandDustTeamColorPatch LineRangeEffect_FfaOwnerExclusion_Patch LobbyReadyPatch LobbyRedirectPatch LocalPlayerIdPublishPatch LocalTookDamageTrackerPatch MapArtPatch MapManager_GetSpawnPoints_2v2_Patch MapManager_GetSpawnPoints_FfaShuffle_Patch MapManager_UnloadAfterSeconds_Diag_Patch MapPhysicalColorPatch MapTransition_SetStartPos_FfaScale_Patch ModRoomChurnFreezePatch MultiPickerShowVisualsPatch MusicAdmission_SteamLobbyLatchPatch MusicSuppressionPatch NCHConnectToRegionDiagPatch NCH_OnPlayerLeftRoom_Ffa_Patch NCH_OnPlayerLeftRoom_Hold_Patch NetworkConnectionHandler_NetworkRestart_Diag_Patch NetworkConnectionHandler_OnJoinedRoom_RestyleNick_Patch NetworkReplicaSerializationObserverPatch NetworkReplicaSpectatorActivationPatch NetworkReplicaSpectatorBoundaryPatch NetworkReplicaSpectatorFfaTerminalPatch NetworkReplicaSpectatorGmTerminalPatch NetworkReplicaSpectatorRoundEndPatch NetworkReplicaSpectatorSnapshotPatch NetworkSeat_DispatchDepthPatch NetworkSeat_LifecycleDiePatch NetworkSeat_LifecyclePhoenixPatch NetworkSeat_LifecycleRevivePatch NetworkSeat_MovementCapturePatch NetworkSeat_OnSerializeWritePatch NetworkSeat_RaiseEventInternalPatch NetworkSeat_RunViewUpdatePatch NetworkSeat_SendOutgoingDepthPatch OnEnablePatch OutOfBoundsHandler_FfaScale_Patch OverlayGate_ArmsRaceDebugKeys_Patch OverlayGate_ArtHandler_Patch OverlayGate_ButtonJoinRoom_Patch OverlayGate_CharacterSelect_Patch OverlayGate_CreatorDragging_Patch OverlayGate_CreatorNavigation_Patch OverlayGate_CreatorPortrait_Patch OverlayGate_DevConsoleDialog_Patch OverlayGate_EscapeMenu_Patch OverlayGate_FriendInvite_Patch OverlayGate_GeneralInput_Patch OverlayGate_GoBack_Patch OverlayGate_MultiOptions_Patch OverlayGate_PlayerAssigner_Patch OverlayGate_PopUp_Patch OverlayGate_RemoteControl_Patch OverlayGate_UIBlockList_Patch OverlayGate_UIBlockPlayer_Patch OverpowerNonPlayerTargetPatch OvtExtraPickPatch OvtExtraPickRestorePickerPatch PhoenixRespawnPatch PhotonMapObject_Start_FfaScale_Patch PhotonNetwork_LeaveRoom_Diag_Patch PlayerAssigner_CreatePlayer_2v2_Patch PlayerManagerResetCharactersBlockResetPatch PlayerManagerRevivePlayersWeaponCooldownPatch PlayerManager_GetClosestPlayerInTeam_Ffa_Patch PlayerManager_GetOtherPlayer_Ffa_Patch PlayerManager_MovePlayers_FfaScale_Patch PlayerManager_PlayerDied_Ffa_Patch PlayerNameTeamColorPatch PlayerNicknameLabelRefreshPatch PlayerNicknameRepairPatch PlayerSkinBank_GetPlayerSkinColors_2v2_Patch PlayerVelocity_TeardownDrive_Patch Player_FullReset_CardBaseline_Patch Player_Start_Diag_Patch PointEndEvidencePatch PointVisualizerTeamColorPatch PoisonArmPatch PoisonDeathFlushPatch PoisonDotSchedulerPatch PoisonEffectRegistrationPatch PoisonGhostPatch PoisonHitBracketPatch PoisonPhoenixBoundaryPatch PoisonPointBoundaryPatch PoisonReviveFencePatch PoisonRpcStampPatch PopUpHandler_StartPicking_Competitive_Patch ProjectileHit_DirectHitCounter_Patch QuickplayChurnAbandonGuardPatch QuickplayChurnFreezePatch RadarVisualLifetimePatch ReadyUpPatch RematchTextTeamColorPatch RemotePlayerIdOrderPatch ResetMenuPatch RosterCensus_MapBoundary_Patch RoundCounterTeamColorPatch RpcDispatchGuardPatch RpcLocalSendDepthPatch SawDeadTargetPatch SawLiveTargetPatch SawPointEvidencePatch ScreenshakerDisablePatch SeatEvidence_DoBlockPatch SeatEvidence_RpcSendPatch SeatEvidence_TryBlockMePatch ShotProvenanceEpochPatch SilenceDisableCapturePatch SilenceStartPatch SilenceStartRewirePatch SonigonPlayGuardPatch SonigonVoiceUpdateGuardPatch SpawnOnImpactFieldDiagPatch Spectator_BoundaryObserver_Patch Spectator_EntryIsNotMatchFound_Patch Spectator_LeaveIsInvisible_Patch Spectator_MapLoadCompleted_Patch Spectator_MapLoadGate_Patch Spectator_NoAssignerPoll_Patch Spectator_NoCardPickRpc_Patch Spectator_NoCreatePlayer_Patch Spectator_NoDoStartGame_Patch Spectator_NoGameOverTransition_Patch Spectator_NoGmPlayerDied_Patch Spectator_NoGmPlayerJoined_Patch Spectator_NoGmTest_Patch Spectator_NoInboundMapReports_Patch Spectator_NoJoinPrompt_Patch Spectator_NoMapAuthority_CallInBare_Patch Spectator_NoMapAuthority_CallIn_Patch Spectator_NoMapAuthority_Load_Patch Spectator_NoMapObjectAuthority_Patch Spectator_NoMapReport_Patch Spectator_NoPlatformProgress_Patch Spectator_NoPlatformUnlock_Patch Spectator_NoStartGame_Patch Spectator_NoSyncReply_Patch Spectator_NoVanillaEscMenu_Patch Spectator_NonLethalDamage_Patch Spectator_ObserveNextRound_Patch Spectator_OrphanSerializationMute_Patch Spectator_PreActivationPickQuarantine_Patch Spectator_RegistrationFirewall_Patch Spectator_ReplayQuarantine_Patch Spectator_ReplayTag_Patch Spectator_SyncUpNoWait_Patch StaleProjectileSweepPatch StartPickingPatch StunDisableCapturePatch StunPlayerFreshVictimPatch StunStartPatch TeamGameLifecycle_DoStartGame_Patch TeamGameLifecycle_GameOverTransition_Patch TeamHold_DoPickPatch TeamHold_GameOverPatch TeamHold_GameStartPatch TeamHold_OfflinePickPatch TeamHold_PhoenixClaimPatch TeamHold_PickSeamPatch TeamHold_PointTransitionPatch TeamHold_RematchFencePatch TeamHold_RoundTransitionPatch TeleportToOpponentFreshVictimPatch WeaponCooldownPhoenixDiagPatch WeaponHandlerAttackIntentPatch WeaponHandler_FfaSpawnGrace_Patch Wobble_DancePatch'
+    seg    = 'abc achievements actions active active-color active-cursor-color active-player-color active-player-effect active-title active-trail admin admins alerts all-series-paged allow-spectators api appear-offline artist artists auth auto ban banned-users beat bets bettable block blocks bracket-detail bridge-unmute broadcast bug-reports build-type by-room cancel card-evidence card-tiers cards casual-dc catalog-cosmetic-placement chat check check-status client close color-toggle combat-evidence comment compare compat-outcome continuation cosmetic-frames cosmetic-placement cosmetic-preview cosmetic-release-candidates cosmetic-review cosmetic-submissions count create current data decline delete earners escape exclude ffa ffa-history flagged-matches force-start-vote forfeit full game games gift gold-sources grant grant-achievement grants health heartbeat hide-gold history history-detail hold identity-clock-evidence inbox inventory items join kick leaderboard leaders-summary leave lfp-ping link-code list live-points lobbies lobby lobby-bets lockdown logs macro-evidence mail mailbox maintenance manual-pick-toggle match matches mine mod mod-version moderate motion music mute mute-by-message mutes my-active-matches my-submissions nametag-toggle nemesis newest offer online open ovt ovt-history pack participant-attest pc pc-face ping play-now player-nemesis players poll portal-session pref-same-cards preferred-team preflight prefs presence purchase quarantine queue queues rank-tiers ranked-friends rate ratings read readmit ready recent recent-multimode recent-series records release-notes releases reply report report-dc report-disconnect report-status resolve resolve-flag-restoration reverse-series review-flag revoke sales sales-board search seat-evidence series set set-artist set-desc set-name set-price set-stock settings shop show-discord signup similar spawn-confirm spectate start state status steam submit-cosmetic submit-cosmetic-finalize submit-cosmetic-frame submit-cosmetic-gif summary target team team-bets team-history team-matches team-stats time-vote title-ladders toggle-ranked top-pickers tournaments unban unblock unlock unmute unsignup validate ws'
+    comp     = 'CombatEvidence HitEvidence SeatEvidence IdentityClockEvidence CardDrawEvidence PointEvidence PeerBuild Cal'
+    op       = 'ce_build se_build cd_build ic_build enqueue spool pump answer hash_start hash_now'
+    input    = 'none sentinel sentinel_changed sentinel_problems clock perf_probe ic_fixture in_room game_started complete escape rematch_timeout menu_mode room own_sha room_name region fighters peer matchIsRanked'
+    problem  = 'stat bad-line bad-seed bad-force bad-f18 bad-plant_us bad-menu bad-menu_segments'
+    region   = 'asia au cae cn eu hk in jp kr ru rue sa tr uae us usw ussc za'
+    roomop   = 'JoinRoom JoinOrCreateRoom JoinRandomRoom JoinRandomOrCreateRoom CreateRoom RejoinRoom ReconnectAndRejoin JoinLobby'
+    gateex   = 'JoinLobby LoadOrCreateSettings'
+    method   = 'GET POST PUT DELETE PATCH HEAD ?'
+    # the route's host is cfg-derived for the mod's own server (the cfg's BaseUrl): it leaves only as one of these
+    host     = 'competitive-rounds.duckdns.org 192.168.72.102 192.168.72.199 192.168.72.90 rounds-serversettings.s3.eu-central-1.amazonaws.com player-auth.services.api.unity.com'
+    segx     = '{n} translate rounds-serversettings.txt authentication external-token steampowered.com'
+    cardhook = 'CardChoice.StartPick CardInfo.Awake CardChoice.RPCA_DoEndPick CardChoice.RPCA_DonePicking ApplyCardStats.RPCA_Pick ApplyCardStats.OFFLINE_Pick'
+    combhook = 'Gun.Attack ProjectileInit.RPCA_Init ProjectileInit.RPCA_Init_noAmmoUse ProjectileInit.RPCA_Init_SeparateGun GunAmmo.ReloadAmmo ProjectileHit.RPCA_DoHit ProjectileHit.Hit Block.RPCA_DoBlock Block.TryBlock CharacterStatModifiers.DealtDamage BounceEffectRetarget.SetNewVel ScreenEdgeBounce.DoHit SyncProjectile.OnPhotonSerializeView HealthHandler.RPCA_SendTakeForce HealthHandler.RPCA_SendTakeDamage HealthHandler.RPCA_Die HealthHandler.RPCA_Die_Phoenix BounceEffectRetarget.FindTarget MoveTransform.Update'
+    producer = 'push vchg chain death'
+    ichook   = 'IdentityClock_ExecuteRpcPatch IdentityClock_PointStartPatch IdentityClock_MovePlayersPatch IdentityClock_MovementPatch'
+    pstate   = 'PeerCreated Authenticating Authenticated JoiningLobby JoinedLobby DisconnectingFromMasterServer ConnectingToGameServer ConnectedToGameServer Joining Joined Leaving DisconnectingFromGameServer ConnectingToMasterServer Disconnecting Disconnected ConnectedToMasterServer ConnectingToNameServer ConnectedToNameServer DisconnectingFromNameServer ConnectWithFallbackProtocol'
+    pkey     = 'cr_build cr_cmute cr_dc2 cr_dc3 cr_effect_sku cr_ffa_gw cr_ffa_pe cr_ffa_pk cr_ffacfg cr_game_token_v cr_grow2 cr_grow_rnk cr_msv2 cr_nametag_glow cr_nametag_typeface cr_pcolor_color cr_pcolor_sku cr_pois2 cr_pois3 cr_prox1 cr_saw1 cr_trail_color cr_trail_price cr_trail_sku cr_wcd1 ft_dll ft_rm'
+}
+$FormPh = @{
+    n = '-?[0-9]{1,19}'; u = '[0-9]{1,19}'; b = '[01]'; nl = '-?[0-9]{1,19}(?:,-?[0-9]{1,19})*'; x8 = '[0-9a-f]{8}'; x = '[0-9a-f]{1,64}'
+    room = 'ft_[0-9a-f]{8}'; actor = '[0-9]{1,4}'; pt = '-?[0-9]{1,6}\.-?[0-9]{1,6}\.-?[0-9]{1,6}'; bool = '(?:True|False)'
+    spins = '[0-9]{1,19}/[0-9]{1,19}(?:,[0-9]{1,19}/[0-9]{1,19})*'; f2 = '-?[0-9]{1,9}\.[0-9]{2}'
+    why = '(?:start|patches|game[0-9]{1,6}|menu[0-9]{1,6})'
+    build = '[0-9]{1,4}(?:\.[0-9]{1,4}){1,3}\|(?:standalone|thunderstore)\|(?:nosha|[0-9a-f]{12})'
+}
+function FormSet([string]$name) { return '(?:' + ((@($FormSets[$name] -split ' ') | ForEach-Object { [regex]::Escape($_) }) -join '|') + ')' }
+$FormPh.shape = '(?:' + (FormSet 'shape').Substring(3).TrimEnd(')') + '|entry[0-9]{1,3})'
+$FormPh.input = FormSet 'input'
+$FormPh.region = FormSet 'region'
+$FormPh.roomname = '(?:' + $FormPh.room + '|\(none\)|\(empty\))'
+$FormPh.route = '(?:' + (FormSet 'method') + '_(?:local|other|cosmetics-zip|emoji-sheet|music-asset|' + (FormSet 'host') +
+    '(?:/(?:' + (FormSet 'seg') + '|' + (FormSet 'segx') + '))*/?)|unparsed)'
+# FtUpload's count keys (what:route): one closed alternation per what, the routes of FtRoute and of each Refuse site
+$FormPairs = [ordered]@{
+    route = $FormPh.route; sent = $FormPh.route; dispatched = $FormPh.route; outbox = '(?:enqueue|persist|load)'
+    autolog = 'room-left'; chat = 'connect'; log = 'prev-copy'; closing = '[ekcxi]'; queue = '[ekcxi]'; load = '-'
+}
+$FormPh.pair = '(?:' + ((@($FormPairs.Keys) | ForEach-Object { $_ + ':' + $FormPairs[$_] }) -join '|') + ')'
+$FormPh.refpair = '(?:' + ((@($FormPairs.Keys) | ForEach-Object { 'what=' + $_ + ' route=' + $FormPairs[$_] }) -join '|') + ')'
+$FormPh.capwhy = '(?:unfocused cap|broadcast seat render cap \([0-9]{1,4} fps\)|deep idle \(broadcast seat 16min\+ idle\)|deep idle \(60s\+ unfocused, out of room\))'
+$FormPh.pkeys = '(?:-|' + (FormSet 'pkey') + '(?:,' + (FormSet 'pkey') + ')*)'
+$FormPh.pvals = ((@('cr_build', 'cr_dc2', 'cr_dc3', 'cr_ffacfg', 'cr_game_token_v', 'cr_grow2', 'cr_msv2', 'cr_pois2', 'cr_pois3',
+    'cr_prox1', 'cr_saw1', 'cr_wcd1') | ForEach-Object { $_ + '=(?:-|[0-9]{1,9}|' + $FormPh.build + '|' + $FormPh.room + ':[0-9]{1,9})' }) -join ' ')
+# the forms; "<x>" is placeholder x of $FormPh, "<@x>" the closed set x of $FormSets, "<=a|b>" a fixed choice; a form
+# starting "^" has no BepInEx prefix (BepInEx's own banner; a log call's continuation line)
+$FormText = @(
+    '[FRAME-TIME] a3rows registered=<u> expected=<u> missing=<u> duplicates=<u>'
+    '[FRAME-TIME] a3drain g=<n> k=<@a3k> starts=<n> nonempty=<n> faults=<n>'
+    '[FRAME-TIME] a3 g=<n> k=<@a3k> cap=<n> steady=<b> reads_on=<n> reads_win=<n> writes_on=<n>'
+    '[FRAME-TIME] cal i=<n> why=game<u> kind=a3 k=<@a3k> live=1 reads=<n> scopes=<n> ticks=<n> tmax=<n> unscoped=<n> depth_err=<n>'
+    '[FRAME-TIME] cal i=<n> why=<why> kind=a3 k=<@a3k> withheld=1'
+    '[FRAME-TIME] cal i=<n> why=<why> kind=a3 k=<@a3k> failed: no calibration'
+    '[FRAME-TIME] cal i=<n> why=<why> kind=a3 k=<@a3k> n=<n> u=<nl> p=<nl>'
+    '[FRAME-TIME] cal i=<n> why=<why> kind=fhat f_hat=<n> spins=<spins>'
+    '[FRAME-TIME] cal i=<n> why=<why> kind=<=span|disp> shape=<shape> n=<n> u=<nl> p=<nl>'
+    '[FRAME-TIME] cal i=<n> why=<why> kind=entries built=0 own_patches=not-applied'
+    '[FRAME-TIME] cal i=<n> why=<why> kind=entries failed: the built table holds no patched entry'
+    '[FRAME-TIME] cal i=<n> why=<why> kind=disp shape=<shape> failed: InvalidOperationException: <@patch> is not attached: no target patched by com.competitiverounds.mod (lesson #83)'
+    '[FRAME-TIME] cal i=<n> why=<why> kind=disp shape=<shape> failed: InvalidOperationException: <@patch> has a transpiler'
+    # the text of the same failure in the lane's builds before c8e0dfed (their VM-seat logs are the identity corpus)
+    '[FRAME-TIME] cal i=<n> why=<why> kind=disp shape=<shape> failed: InvalidOperationException: no patched target for <@patch>'
+    '[FRAME-TIME] cal i=-1 why=patches kind=entries built=1 own_owner=com.competitiverounds.mod own_targets=<u> entries=<u> errors=<u>'
+    '[FRAME-TIME] settled g=<n> seed=<n> c_plant=<n> W=120 vsync=<n> target=<n> freq=<n> hires=<b> f_hat=<n> gc_incremental=<b> gc_slice_ns=<n> f18=<=A|B> answer=<=replay|unmeasured> armfile=<b> force=<=ON|OFF|none><problems> clock=<b> frames=<n> missing_end=<n> cycle_failures=<n> span_depth_violations=<n>'
+    '[FRAME-TIME] census g=<n> entry=<@entry> comp=<@comp> shape=<shape> on=<n> guarded=<n> outside=<n>'
+    '[FRAME-TIME] spans g=<n> comp=<@comp><spans>'
+    '[FRAME-TIME] clock refused: player-loop phase missing (EarlyUpdate <bool>, PreLateUpdate <bool>, Update <bool>)'
+    '[FRAME-TIME] clock installed freq=<n> hires=<b> cycles=<b>'
+    '[FRAME-TIME] self-drive armed: inputs are automated'
+    '[FRAME-TIME] self-drive disarmed: <=escape|sitting complete|rematch timeout>'
+    '[FRAME-TIME] self-drive disarmed: input=<input>'
+    '[FRAME-TIME] self-drive join room=<room> region=us'
+    '[FRAME-TIME] self-drive spawn try=<n> master=<b> actors=<n>'
+    '[FRAME-TIME] self-drive spawn result created=<b> players=<n>'
+    '[FRAME-TIME] self-drive spawn waiting why=peer'
+    '[FRAME-TIME] self-drive spawn waiting why=<=assigner|actors|full|game-manager|join-closed|playing> actors=<n>'
+    '[FRAME-TIME] self-drive spawn refused why=spectator'
+    '[FRAME-TIME] self-drive spawn gave up tries=<n>'
+    '[FRAME-TIME] self-drive pick index=<n>'
+    '[FRAME-TIME] sitting complete g=<n>'
+    '[FRAME-TIME] census registered=<u> expected=<u> missing=<u> duplicates=<u>'
+    '[FRAME-TIME] between g=<n> after=<=ON|OFF|> ticks=<n> calls=<n>'
+    '[FRAME-TIME] p pt=<pt> arm=<=ON|OFF> gate=<b> pred=<=none|ON|OFF> n=<n> sF=<n> sS=<n> sC=<n> maxF=<n> pn=<n> psF=<n> psS=<n> psC=<n> sP=<n> psP=<n> excl=<n> plant_mixed=<n> windows=<n> live_frames=<n> missing_end=<n> span_g=<n> span_gn=<n> span_u=<n> span_un=<n> on_calls=<n> guarded=<n> zs=<n> zl=<n> t0=<n> t1=<n> answer=<=replay|unmeasured>'
+    '[FRAME-TIME] heavy g=<n> op=<@op> live=<n> between=<n> pick=<n> over=<n> menu=<n> at_call=<n> edge=<n> off=<n>'
+    '[FRAME-TIME] offthread g=<n> span_off=<n> hash_t0=<n> hash_t1=<n>'
+    '[FRAME-TIME] menu_wait input=<input>'
+    '[FRAME-TIME] menu_armed segments=<n> seg_s=10 settle_s=20 force=<=ON|OFF|none> seed=<n>'
+    '[FRAME-TIME] menu seg=<n> pair=<n> arm=<=ON|OFF> gate=<b> level=<=0|3|5> c_plant=<n> base_us=<n>'
+    # the menu line of the lane's earlier builds, whose level was a percentage with a decimal point
+    '[FRAME-TIME] menu seg=<n> pair=<n> arm=<=ON|OFF> gate=<b> level=<u>.<u> c_plant=<n> base_us=<n>'
+    '[FRAME-TIME] menu_base base_us=<n> seg=<n>'
+    '[FRAME-TIME] menu_done why=<input> segs=<n> of=<n> base_us=<n> cycles=<n>'
+    '[FRAME-TIME] game start failed: menu=1 process'
+    '[FRAME-TIME] counters g=<n> frames=<n> missing_end=<n> cycle_failures=<n> span_depth_violations=<n>'
+    '[FRAME-TIME] flushed g=<n> why=<=next_game|settle|quit>'
+    '[FRAME-TIME] opened g=<n> se=<b> ce=<b> ic=<b>'
+    '[FRAME-TIME] staged ft_dll=<x8> <=in-room|pre-join>'
+    '[FRAME-TIME] room name=<room> region=<region> cloud_region=<region><cloudtail>'
+    '[FRAME-TIME] ended why=complete pt=<pt>'
+    '[FRAME-TIME] disarmed input=<input> pt=<pt>'
+    '[FRAME-TIME] armed room=<room> region=<region>'
+    '[FRAME-TIME] not armed input=<input>'
+    '[FRAME-TIME] peer unknown actor=<actor> (no matching ft_dll)'
+    '[FRAME-TIME] peer known actor=<actor> ft_dll=<x8>'
+    '[FRAME-TIME] room call refused op=<@roomop> name=<roomname> n=<u>'
+    '[FRAME-TIME] FT-GATE patched <u> entry points expected=<u> excluded=<gateex>'
+    '[FRAME-TIME] FT-ROOM joined offline=<b> name=<roomname>'
+    '[FRAME-TIME] churn timer frozen room=<room>'
+    '[FRAME-TIME] rematch mutant: answered Yes at once'
+    '[FRAME-TIME] rematch not answered (sitting over)'
+    '[FRAME-TIME] rematch held: published ft_rm=<n>'
+    '[FRAME-TIME] rematch yes g=<n> after <u> ms'
+    '[FRAME-TIME] rematch timeout g=<n> own=<n> peer=<n>'
+    '[FRAME-TIME] ft room options max=2 visible=0 room=<room>'
+    '[FRAME-TIME] ranked-check skipped'
+    '[FRAME-TIME] ranked-check test hook answered true'
+    '[FRAME-TIME] steam ticket withheld route=<route>'
+    '[FRAME-TIME] refused <refpair> n=<u>'
+    '[FRAME-TIME] refusals why=<rwhy> pairs=<u><pairs>'
+    '[FRAME-TIME] plant c_plant=<n> ticks=<n> from=<pt>'
+    '[FRAME-TIME] answer_replay g=<n> ticks=<n> result=<=settled|kept|enqueue_failed|not_running|e>'
+    '[FPSCAP] held by frame-time calibration'
+    '[FPSCAP] hold released'
+    '[FPSCAP] released (restored target=<n> vsync=<n>, focused=<bool>)'
+    '[FPSCAP] engaged <capwhy>: target=<n> (baseline target=<n> vsync=<n>)'
+    '[FPSCAP] re-asserted <capwhy> over an external change (target=<n> vsync=<n>)'
+    '[FPSCAP] released (external video-settings change adopted: target=<n> vsync=<n>)'
+    '[FPSCAP] <capwhy>: target=<n>'
+    '[COMBAT-PERF] probe on, mode <=menu|match>, windows of <u> frames'
+    '[COMBAT-PERF] window <u> <=AA1|AA2|PLANT|A|B> frames=<n> p50_us=<n> p99_us=<n> max_us=<n>'
+    '[COMBAT-PERF] A/A: |d p50|=<n>us |d p99|=<n>us; longest hitch <n>us'
+    '[COMBAT-PERF] planted control: <n>us per frame, p50 rise <n>us, detected=<=yes|no>'
+    '[COMBAT-PERF] menu run complete (collectors idle outside a game; the A/B in a ranked match remains)'
+    '[HIT-EVIDENCE] <u> flushes not logged: every slot was waiting'
+    '[HIT-EVIDENCE] keys refused at the caps: <u> point tally actor(s), <u> game tally actor(s) (cap <u>), <u> projectile(s) (cap <u>)'
+    '[HP-POINT-END] point=<n> spectator=<b><hprows>'
+    '[HP-POINT-END] <u> point ends not logged: every slot was waiting'
+    '[SAW-POINT] point=<n> frames=<n> lost<sawrows>'
+    '[SAW-POINT] <u> player id(s) not kept: the saw maps hold <u> / <u>'
+    '[CARD-EV] card draw evidence patches attached <u>/<u>: <cardhooks>'
+    '[CARD-EV] census: <u> cards, digest <x>, pool class <=DefaultPool|unset><=|, CATEGORY NAME COLLISION (records read pool state collision)>'
+    '[SEAT-EV] <=record|identity-clock record|compat outcome|card record|combat record> settled: <=recorded|already_recorded> (HTTP <u>, attempt <u>)'
+    '[SEAT-EV] session ready: queued requests send while the mod stays disabled'
+    '[SEAT-EV] no session within <u> s: queued requests kept for the next launch'
+    '[SEAT-EV] queued requests not sent: no data consent'
+    '[SEAT-EV] <u> closing file(s) moved into the queue'
+    '[SEAT-EV] queue full: the oldest queued request was dropped'
+    '[COMBAT-EV] combat evidence patches attached <u>/<u>: <combhooks>; frame <u>/<u>; producers<producers>'
+    '[IDENTITY-CLOCK] patches attached <u>/<u>: <ichooks>'
+    '[IDENTITY-CLOCK] quit flush ran: <u> capture(s), <u> kept for the next launch'
+    '[BUILD-PROP] staged cr_build=<build> pre-join (tick, state=<@pstate>)'
+    '[BUILD-PROP] not staged: the build tuple is outside its limits (<u> chars)'
+    '[PEER-BUILD] actor=<actor> keys=<u> ours=<=none|><ours> list=<pkeys><plines> <pvals>'
+    '^[PEER-BUILD] actor=<actor> list(<u>/<u>)=<pkeys>'
+    '^[Message:   BepInEx] BepInEx <ver> - ROUNDS (<date>)'
+)
+function FormList([string]$set, [string]$sep) { $s = FormSet $set; return '(?:' + $s + '(?:' + [regex]::Escape($sep) + $s + ')*)' }
+$FormPh.problems = '(?: problems=' + (FormList 'problem' ',') + ')?'
+$FormPh.spans = '(?: (?:live|between|pick|over|menu)\.(?:in|out)\.(?:gated|upkeep|replay)=[0-9]{1,19}/[0-9]{1,19})*'
+$FormPh.cloudtail = '(?:/\*)?'
+$FormPh.gateex = '(?:' + (FormList 'gateex' ',') + ')?'
+$FormPh.rwhy = '(?:quit|game-?[0-9]{1,6})'
+$FormPh.pairs = '(?: ' + $FormPh.pair + '=[0-9]{1,19})*'
+$FormPh.hprows = '(?: p[0-9]{1,4}\(team -?[0-9]{1,4}\)=' + $FormPh.f2 + '/' + $FormPh.f2 + '(?: dead)?)*'
+$FormPh.sawrows = '(?: p[0-9]{1,4}=' + $FormPh.f2 + ')*'
+$FormPh.cardhooks = '(?:C[0-9]{1,2} ' + (FormSet 'cardhook') + '(?:, C[0-9]{1,2} ' + (FormSet 'cardhook') + ')*)?'
+$FormPh.combhooks = '(?:' + (FormList 'combhook' ', ') + ')?'
+$FormPh.producers = '(?: ' + (FormSet 'producer') + ')*'
+$FormPh.ichooks = '(?:' + (FormList 'ichook' ', ') + ')?'
+$FormPh.ours = '(?:[0-9]{1,4})?'
+$FormPh.plines = '(?: lines=[0-9]{1,4})?'
+$FormPh.ver = '[0-9]{1,4}(?:\.[0-9]{1,4}){1,3}'
+$FormPh.date = '[0-9]{1,4}[/.-][0-9]{1,4}[/.-][0-9]{1,4} [0-9]{1,2}:[0-9]{2}:[0-9]{2}(?: [AP]M)?'
+$FormPrefix = '\[(?:Info   |Message|Warning|Error  |Debug  |Fatal  ):(?:Competitive ROUNDS|CompetitiveRounds)\] '
+
+function FormRegex([string]$t) {
+    # one form's text to its anchored regex: literal text escaped, each placeholder replaced by its closed pattern
+    $bare = $t.StartsWith('^')
+    if ($bare) { $t = $t.Substring(1) }
+    $sb = New-Object System.Text.StringBuilder
+    $pos = 0
+    foreach ($m in [regex]::Matches($t, '<(@?)([a-z0-9]+)>|<=([^>]*)>')) {
+        [void]$sb.Append([regex]::Escape($t.Substring($pos, $m.Index - $pos)))
+        if ($m.Groups[3].Success) { [void]$sb.Append('(?:' + ((@($m.Groups[3].Value -split '\|', -1) | ForEach-Object { [regex]::Escape($_) }) -join '|') + ')') }
+        elseif ($m.Groups[1].Value -eq '@') { [void]$sb.Append((FormSet $m.Groups[2].Value)) }
+        else {
+            if (-not $FormPh.ContainsKey($m.Groups[2].Value)) { throw "form placeholder <$($m.Groups[2].Value)> is not defined" }
+            [void]$sb.Append($FormPh[$m.Groups[2].Value])
+        }
+        $pos = $m.Index + $m.Length
+    }
+    [void]$sb.Append([regex]::Escape($t.Substring($pos)))
+    return New-Object System.Text.RegularExpressions.Regex(('^' + $(if ($bare) { '' } else { $FormPrefix }) + $sb.ToString() + '$'),
+        [System.Text.RegularExpressions.RegexOptions]::CultureInvariant)
+}
+$Forms = @($FormText | ForEach-Object { FormRegex $_ })
+
+function Exportable([string]$ln) {
+    # the export rule: true only when the whole line matches one form (the self-test's export_all mutant is the
+    # negative control: it exports every selected line, as the substring selection did)
+    if ($script:Mutant -eq 'export_all') { return $true }
+    foreach ($f in $Forms) { if ($f.IsMatch($ln)) { return $true } }
+    return $false
+}
+
+function SliceExport([string[]]$lines) {
+    # the selection and the export of step 4, on the log's lines: Slice (every selected line, for slice.log), Count
+    # (per class), Log (the "=== log lines" section's lines: exported [FRAME-TIME] lines, no window line, then its
+    # withheld counts), Comp (the component slice's exported lines, then its withheld counts) and CompAll (the number
+    # of selected lines without [FRAME-TIME])
+    $r = @{ Slice = New-Object System.Collections.Generic.List[string]; Count = [ordered]@{}
+        Log = New-Object System.Collections.Generic.List[string]; Comp = New-Object System.Collections.Generic.List[string]; CompAll = 0 }
+    $wLog = [ordered]@{}; $wComp = [ordered]@{}
+    foreach ($cls in $SliceClasses) { $r.Count[$cls] = 0; $wLog[$cls] = 0; $wComp[$cls] = 0 }
+    foreach ($ln in $lines) {
+        $hit = @($SliceClasses | Where-Object { $ln.Contains($_) })
+        if ($hit.Count -eq 0) { continue }
+        foreach ($cls in $hit) { $r.Count[$cls]++ }
+        $r.Slice.Add($ln)
+        $ft = $ln.Contains('[FRAME-TIME]')
+        if ($ft -and $ln.Contains('[FRAME-TIME] w ')) { continue }
+        if (-not $ft) { $r.CompAll++ }
+        if (Exportable $ln) { if ($ft) { $r.Log.Add($ln) } else { $r.Comp.Add($ln) } }
+        else { foreach ($cls in $hit) { if ($ft) { $wLog[$cls]++ } else { $wComp[$cls]++ } } }
+    }
+    foreach ($cls in $SliceClasses) {
+        if ($wLog[$cls] -gt 0) { $r.Log.Add(("withheld {0} {1}" -f $cls.Trim('[', ']'), $wLog[$cls])) }
+        if ($wComp[$cls] -gt 0) { $r.Comp.Add(("withheld {0} {1}" -f $cls.Trim('[', ']'), $wComp[$cls])) }
+    }
+    return $r
+}
 
 $script:Out = New-Object System.Collections.Generic.List[string]
 # Console.Out, never the output stream: a function's output-stream writes would become part of its return value
@@ -221,29 +493,24 @@ function Step1($C, [string]$run) {
 # ---- step 4
 function Step4($C, $p) {
     $lines = ReadShared $C.Logs['LogOutput.log']
+    $sel = SliceExport $lines
     Say '=== log lines'
-    foreach ($ln in $lines) { if ($ln.Contains('[FRAME-TIME]') -and -not $ln.Contains('[FRAME-TIME] w ')) { Say $ln } }
+    foreach ($ln in $sel.Log) { Say $ln }
     if ($script:Mutant -eq 'throw_in_step4') { throw 'mutant throw_in_step4: an error inside step 4' }
-    $slice = New-Object System.Collections.Generic.List[string]
-    $count = [ordered]@{}
-    foreach ($cls in $SliceClasses) { $count[$cls] = 0 }
-    foreach ($ln in $lines) {
-        $hit = $false
-        foreach ($cls in $SliceClasses) { if ($ln.Contains($cls)) { $count[$cls]++; $hit = $true } }
-        if ($hit) { $slice.Add($ln) }
-    }
+    $slice = $sel.Slice
+    $count = $sel.Count
     $sp = Join-Path $p.Run 'slice.log'
     [System.IO.File]::WriteAllLines($sp, $slice)
     Say '=== saved slice'
     foreach ($cls in $SliceClasses) { Say ("slice class {0}: {1} lines" -f $cls.Trim('[', ']'), $count[$cls]) }
     Say ("slice saved: {0} lines, sha256 {1}" -f $slice.Count, (Sha $sp))
-    # the component evidence itself (3.11): every slice line without [FRAME-TIME], whose lines are under "=== log lines"
-    # already (the window lines stay in slice.log on the laptop, F05)
-    $comp = @($slice | Where-Object { -not $_.Contains('[FRAME-TIME]') })
+    # the component evidence itself (3.11): the saved-slice lines without [FRAME-TIME] that the export rule admits
+    # (the [FRAME-TIME] lines are under "=== log lines" already; the window lines stay in slice.log on the laptop, F05)
     if ($script:Mutant -ne 'no_component_slice') {
         Say '=== component slice'
-        Say ("component slice: {0} lines, every saved-slice line without [FRAME-TIME]" -f $comp.Count)
-        foreach ($ln in $comp) { Say $ln }
+        $nw = @($sel.Comp | Where-Object { $_.StartsWith('withheld ') }).Count
+        Say ("component slice: {0} of {1} saved-slice lines without [FRAME-TIME] exported, the rest withheld by class" -f ($sel.Comp.Count - $nw), $sel.CompAll)
+        foreach ($ln in $sel.Comp) { Say $ln }
     }
     Say '=== VR6'
     $after = Vr6Listing $C
@@ -267,6 +534,7 @@ function Step5($C, $p) {
     $sit = Join-Path $p.Run 'sitting'
     Say '=== restored'
     $ok = $true
+    $script:RestoredEqual = 0
     try {
         New-Item -ItemType Directory -Force -Path $sit | Out-Null
         foreach ($k in $C.Logs.Keys) {
@@ -277,7 +545,7 @@ function Step5($C, $p) {
                 if ($p.Logs[$k] -ne 'absent') { Copy-Item -LiteralPath (Join-Path $pre $k) -Destination $path }
                 $r = Sha $path
                 $eq = $r -eq $p.Logs[$k]
-                if (-not $eq) { $ok = $false }
+                if (-not $eq) { $ok = $false } else { $script:RestoredEqual++ }
                 Say ("restored {0} {1} pre {2} {3}" -f $k, $r, $p.Logs[$k], $(if ($eq) { 'equal' } else { 'DIFFERENT' }))
             }
             catch { $ok = $false; Say ("restored {0} error: {1} DIFFERENT" -f $k, $_.Exception.Message) }
@@ -300,12 +568,13 @@ function Step5($C, $p) {
                 Copy-Item -LiteralPath (Join-Path $pre 'com.competitiverounds.mod.cfg') -Destination $C.Cfg -Force
             }
             $rc = Sha $C.Cfg
-            if ($rc -ne $p.Cfg) { $ok = $false }
+            if ($rc -ne $p.Cfg) { $ok = $false } else { $script:RestoredEqual++ }
             Say ("restored cfg {0} pre {1} {2}" -f $rc, $p.Cfg, $(if ($rc -eq $p.Cfg) { 'equal' } else { 'DIFFERENT' }))
         }
         catch { $ok = $false; Say ("restored cfg error: {0} DIFFERENT" -f $_.Exception.Message) }
     }
-    return $ok
+    # the positive proof: no failure seen AND one "equal" line for every log and for the cfg
+    return $ok -and $script:RestoredEqual -eq ($C.Logs.Count + 1)
 }
 
 function NewRun([string]$seat) {
@@ -354,8 +623,13 @@ function Sitting($C, $p, [scriptblock]$Launch, [scriptblock]$Wait, [scriptblock]
         try { $st.R = Step5 $C $p }
         catch { Say ('step 5 error: ' + $_.Exception.Message); $st.R = $false }
     }
-    if ($st.Code -eq 0 -and -not $st.V) { $st.Code = 4 }
-    if ($st.Code -eq 0 -and -not $st.R) { $st.Code = 5 }
+    # the restore proof (ruling R6-A3.11.112 F1): one line, printed whatever step 5 did. Step5 returns true only when
+    # every log and the cfg printed a "restored ... equal" line and nothing failed, so exit 4 (and 0) need that
+    # positive proof; a failed or unproven restore is exit 5, which also replaces 3 (no reader of the job's result
+    # tells 3 from 5: both are refused, and 5 names the state that needs action, files not put back)
+    if ($st.R) { Say ("RESTORE-PROOF ok {0}" -f $script:RestoredEqual) } else { Say 'RESTORE-PROOF FAILED' }
+    if (-not $st.R) { $st.Code = 5 }
+    elseif ($st.Code -eq 0 -and -not $st.V) { $st.Code = 4 }
     return $st
 }
 
@@ -404,6 +678,42 @@ $CfgCases = [ordered]@{
     cfg_non_grammar     = @{ Bom = $true; Lines = (CfgEdit 8 0 @("a line of no kind`r`n")); Want = 'NOT-RESTORED-KIND' }
 }
 
+# the self-test's LogOutput.log of the sitting (F2): [FRAME-TIME] lines and one line per other class in the forms the
+# mod writes (each must be exported in its section), a window line (never exported), lines of the classes no form
+# admits (each withheld), and planted cfg-like values holding each class word, the BaseUrl's startup line, the
+# COMBAT-PERF probe mode and a route host among them (each withheld: no ".example" may be printed anywhere)
+$SimPre = '[Info   :CompetitiveRounds] '
+$SimFt = @(
+    ($SimPre + '[FRAME-TIME] settled g=-1 seed=1 c_plant=-1 W=120 vsync=0 target=-1 freq=10000000 hires=1 f_hat=2978789260 gc_incremental=1 gc_slice_ns=3000000 f18=A answer=replay armfile=1 force=none clock=1 frames=0 missing_end=0 cycle_failures=0 span_depth_violations=0'),
+    ($SimPre + '[FRAME-TIME] p pt=1.1.1 arm=ON gate=0 pred=none n=500 sF=1 sS=1 sC=1 maxF=1 pn=0 psF=0 psS=0 psC=0 sP=1 psP=0 excl=0 plant_mixed=0 windows=4 live_frames=501 missing_end=0 span_g=0 span_gn=0 span_u=0 span_un=0 on_calls=0 guarded=0 zs=0 zl=1 t0=1 t1=2 answer=replay'),
+    ($SimPre + '[FRAME-TIME] refusals why=quit pairs=2 closing:e=1 route:GET_192.168.72.102/api/{n}/mod-version=1'))
+$SimWindow = @($SimPre + '[FRAME-TIME] w pt=1.1.1 arm=ON plant=0 partial=0 n=120')
+$SimForm = @(
+    '[Message:   BepInEx] BepInEx 5.4.22.0 - ROUNDS (11/10/2026 7:38:18 AM)',
+    ($SimPre + '[FPSCAP] held by frame-time calibration'),
+    ($SimPre + '[COMBAT-PERF] probe on, mode menu, windows of 600 frames'),
+    ($SimPre + '[HIT-EVIDENCE] keys refused at the caps: 1 point tally actor(s), 2 game tally actor(s) (cap 8), 3 projectile(s) (cap 64)'),
+    ($SimPre + '[SEAT-EV] session ready: queued requests send while the mod stays disabled'),
+    ($SimPre + '[HP-POINT-END] point=3 spectator=0 p1(team 0)=100.00/100.00 p2(team 1)=0.00/100.00 dead'),
+    ($SimPre + '[SAW-POINT] point=3 frames=120 lost p1=0.50'),
+    ($SimPre + '[IDENTITY-CLOCK] quit flush ran: 0 capture(s), 0 kept for the next launch'),
+    ($SimPre + '[CARD-EV] census: 312 cards, digest 0123456789abcdef0123456789abcdef, pool class DefaultPool'),
+    ($SimPre + '[COMBAT-EV] combat evidence patches attached 2/19: Gun.Attack, Block.TryBlock; frame 2/2; producers push death'),
+    ($SimPre + '[PEER-BUILD] actor=2 keys=2 ours=2 list=cr_build,ft_dll cr_build=1.41.0|standalone|nosha cr_dc2=- cr_dc3=- cr_ffacfg=- cr_game_token_v=ft_a974aac8:1 cr_grow2=1 cr_msv2=- cr_pois2=1 cr_pois3=1 cr_prox1=- cr_saw1=1 cr_wcd1=1'),
+    ($SimPre + '[BUILD-PROP] staged cr_build=1.41.0|standalone|nosha pre-join (tick, state=PeerCreated)'))
+$SimNoForm = @(
+    ($SimPre + '[SEAT-EV] record queued: 812 bytes, lists 1/2/3/4, unpaired 0/0, t0 m, end game_over'),
+    ($SimPre + '[IDENTITY-CLOCK] record kept for the next launch: 3 captures'),
+    ($SimPre + '[HARMONY] Failed to patch SomePatch: the target method is missing'),
+    ($SimPre + 'series state: physical game 1 of this series was voided'))
+$SimPlant = @($SliceClasses | ForEach-Object { $SimPre + 'API client initialized: https://' + $_ + '.example:8444' }) + @(
+    ($SimPre + '[COMBAT-PERF] probe on, mode https://refused.example, windows of 600 frames'),
+    ($SimPre + '[FRAME-TIME] refused what=route route=GET_refused.example/api/{n}/mod-version n=1'),
+    ($SimPre + '[FRAME-TIME] refusals why=quit pairs=1 route:GET_voided.example/api/{n}/mod-version=1'))
+# F1's combined cases: VR6 fails and the restore fails; each must end exit 5 with "RESTORE-PROOF FAILED"
+$RestoreFailCases = @('cfg_restore_locked', 'log_restore_fails', 'wait_restore_fails')
+$CfgLocked = @{ Bom = $true; Lines = (CfgEdit 12 0 @("## a comment line the sitting wrote`r`n")); Want = 'RESTORED-KIND' }
+
 function SelfTestOne([string]$root, [string]$mutant) {
     $script:Out = New-Object System.Collections.Generic.List[string]
     $game = Join-Path $root 'game'; $seat = Join-Path $root 'seat'; $low = Join-Path $root 'LocalLow'
@@ -425,23 +735,26 @@ function SelfTestOne([string]$root, [string]$mutant) {
         param($C)
         Move-Item -LiteralPath $C.Logs['Player.log'] -Destination $C.Logs['Player-prev.log'] -Force
         Set-Content -LiteralPath $C.Logs['Player.log'] -Value 'unity log of the sitting' -Encoding ascii
-        $sim = @('[Message:   BepInEx] BepInEx 5.4.19 - ROUNDS', '[Info   :CompetitiveRounds] [FRAME-TIME] settled g=-1 seed=1',
-            '[Info   :CompetitiveRounds] [FRAME-TIME] w pt=1.1.1 arm=ON plant=0 partial=0 n=120',
-            '[Info   :CompetitiveRounds] [FRAME-TIME] p pt=1.1.1 arm=ON gate=0 n=500',
-            '[Info   :CompetitiveRounds] [FRAME-TIME] refusals why=quit pairs=1 closing:/api/v1/x=1')
-        foreach ($cls in $SliceClasses) { if ($cls -notmatch 'FRAME-TIME|BepInEx') { $sim += "[Info   :CompetitiveRounds] fixture line $cls" } }
+        $sim = @($SimFt) + @($SimWindow) + @($SimForm) + @($SimNoForm) + @($SimPlant)
         Set-Content -LiteralPath $C.Logs['LogOutput.log'] -Value $sim -Encoding ascii
         if ($script:Mutant -eq 'keep_prev_copy') { Copy-Item -LiteralPath $C.Logs['LogOutput.log'] -Destination $C.Logs['LogOutput-prev.log'] -Force }
-        if ($script:Mutant -eq 'closing_file') { Set-Content -LiteralPath (Join-Path $C.Config 'CompetitiveRounds.seat-evidence.closing-1') -Value 'x' -Encoding ascii }
+        if ($script:Mutant -in @('closing_file', 'log_restore_fails', 'wait_restore_fails')) { Set-Content -LiteralPath (Join-Path $C.Config 'CompetitiveRounds.seat-evidence.closing-1') -Value 'x' -Encoding ascii }
+        # F1's restore failures: a log's pre-image copy gone (its copy back throws), or the cfg held by a handle that
+        # lets VR6 and the keep read and hash it but refuses the copy of the pre-image back onto it
+        if ($script:Mutant -in @('log_restore_fails', 'wait_restore_fails')) { Remove-Item -LiteralPath (Join-Path (Join-Path $run 'pre') 'Player.log') -Force }
         if ($CfgCases.Contains($script:Mutant)) {
             $cc = $CfgCases[$script:Mutant]
             [System.IO.File]::WriteAllBytes($C.Cfg, (CfgFixture $cc.Bom $cc.Lines))
+        }
+        if ($script:Mutant -eq 'cfg_restore_locked') {
+            [System.IO.File]::WriteAllBytes($C.Cfg, (CfgFixture $CfgLocked.Bom $CfgLocked.Lines))
+            $script:Hold = [System.IO.File]::Open($C.Cfg, 'Open', 'Read', 'Read')
         }
         return [pscustomobject]@{ Id = 0; HasExited = $false }
     }
     $wait = {
         param($C, $proc)
-        if ($script:Mutant -eq 'throw_in_wait') { throw 'mutant throw_in_wait: an error inside the wait' }
+        if ($script:Mutant -in @('throw_in_wait', 'wait_restore_fails')) { throw 'mutant throw_in_wait: an error inside the wait' }
         Say 'wait ended: complete True, exited False'
         return $true
     }
@@ -454,12 +767,36 @@ function SelfTestOne([string]$root, [string]$mutant) {
         $hold = [System.IO.File]::Open($keep, 'CreateNew', 'ReadWrite', 'None')
     }
     $script:Mutant = $mutant
+    $script:Hold = $null
     $threw = ''
     $st = $null
     try { $st = Sitting $C $p $launch $wait $shutdown }
     catch { $threw = $_.Exception.Message }
-    finally { $script:Mutant = 'none'; if ($hold) { $hold.Dispose() } }
+    finally { $script:Mutant = 'none'; if ($hold) { $hold.Dispose() }; if ($script:Hold) { $script:Hold.Dispose(); $script:Hold = $null } }
     $o = @($script:Out)
+    # the restore proof (F1): its lines, and the count named by an ok line
+    $proofOk = @($o | Where-Object { $_ -match '^RESTORE-PROOF ok [0-9]+$' })
+    $proofFailed = @($o | Where-Object { $_ -ceq 'RESTORE-PROOF FAILED' }).Count
+    $proofN = if ($proofOk.Count -eq 1) { [int]($proofOk[0].Substring(17)) } else { -1 }
+    $restoredEqualLines = @($o | Where-Object { $_ -like 'restored * equal' }).Count
+    # the export rule (F2): no planted value printed anywhere; every form fixture line printed in its section; the
+    # withheld lines of each section exactly the counts the fixture's withheld lines give
+    $secLog = @(); $secComp = @()
+    $iL = [array]::IndexOf($o, '=== log lines'); $iS = [array]::IndexOf($o, '=== saved slice')
+    $iC = [array]::IndexOf($o, '=== component slice'); $iV = [array]::IndexOf($o, '=== VR6')
+    if ($iL -ge 0 -and $iS -gt $iL + 1) { $secLog = @($o[($iL + 1)..($iS - 1)]) }
+    if ($iC -ge 0 -and $iV -gt $iC + 1) { $secComp = @($o[($iC + 1)..($iV - 1)] | Where-Object { $_ -notlike 'component slice: *' }) }
+    $planted = @($o | Where-Object { $_.Contains('.example') }).Count
+    $formOut = @(@($SimFt) + @($SimForm) | Where-Object { $sec = if ($_.Contains('[FRAME-TIME]')) { $secLog } else { $secComp }; -not ($sec -ccontains $_) }).Count
+    $wantW = @()
+    foreach ($sec in @('log', 'comp')) {
+        foreach ($cls in $SliceClasses) {
+            $nw = @(@($SimNoForm) + @($SimPlant) | Where-Object { $_.Contains($cls) -and ($_.Contains('[FRAME-TIME]') -eq ($sec -eq 'log')) }).Count
+            if ($nw -gt 0) { $wantW += ("{0} withheld {1} {2}" -f $sec, $cls.Trim('[', ']'), $nw) }
+        }
+    }
+    $haveWs = @(@($secLog | Where-Object { $_ -like 'withheld *' } | ForEach-Object { 'log ' + $_ }) + @($secComp | Where-Object { $_ -like 'withheld *' } | ForEach-Object { 'comp ' + $_ }))
+    $withheldOk = ($wantW -join '|') -ceq ($haveWs -join '|')
     $iTok = [array]::IndexOf($o, ($o | Where-Object { $_ -like 'runs/*' } | Select-Object -First 1))
     $iLog = [array]::IndexOf($o, '=== log lines'); $iVr6 = [array]::IndexOf($o, '=== VR6'); $iRes = [array]::IndexOf($o, '=== restored')
     $iSav = [array]::IndexOf($o, '=== saved slice'); $iComp = [array]::IndexOf($o, '=== component slice')
@@ -496,7 +833,21 @@ function SelfTestOne([string]$root, [string]$mutant) {
         Vr6CfgAfter = $(if ($vr6Cfg.Count) { $vr6Cfg[0] } else { '' }); KeptErr = $keptErr; KeptFile = (Sha $keep)
         ByKind = (CommentOnlyDiff (Join-Path (Join-Path $run 'pre') 'com.competitiverounds.mod.cfg') $keep); CfgRestored = $cfgRestored
         KindLines = $kinds.Count; Kind = $(if ($kinds.Count) { $kinds -join ',' } else { '' })
+        ProofOk = $proofOk.Count; ProofN = $proofN; ProofFailed = $proofFailed; EqualLines = $restoredEqualLines
+        Planted = $planted; FormMissing = $formOut; WithheldOk = $withheldOk; Withheld = ($haveWs -join ';')
     }
+}
+
+if ($SliceOf -ne '') {
+    # step 4's two exported sections for a log file, as the sitting prints them; reads only
+    [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
+    try { $sl = ReadShared $SliceOf } catch { Print ('SLICE-OF REFUSED: the log is unreadable: ' + $_.Exception.Message); exit 2 }
+    $sel = SliceExport $sl
+    Print '=== log lines'
+    foreach ($ln in $sel.Log) { Print $ln }
+    Print '=== component slice'
+    foreach ($ln in $sel.Comp) { Print $ln }
+    exit 0
 }
 
 if ($CfgKindList -ne '') {
@@ -513,7 +864,8 @@ if ($CfgKindList -ne '') {
 if ($SelfTest) {
     $base = Join-Path ([System.IO.Path]::GetTempPath()) ('ft-seat-selftest-' + (Get-Date).ToUniversalTime().ToString('yyyyMMddHHmmss'))
     $fail = @()
-    foreach ($m in (@('none', 'keep_prev_copy', 'closing_file', 'no_component_slice', 'throw_in_wait', 'throw_in_step4') + @($CfgCases.Keys))) {
+    foreach ($m in (@('none', 'keep_prev_copy', 'closing_file', 'no_component_slice', 'throw_in_wait', 'throw_in_step4', 'export_all') +
+            @($CfgCases.Keys) + @($RestoreFailCases))) {
         Print "=== self-test run: mutant $m"
         $r = SelfTestOne (Join-Path $base $m) $m
         Print ("self-test {0}: order {1}, slice headers {2}, every class seen {3}, no window line {4}, lane {5}, VR6 {6}, component slice {7}, shutdown {8}, sentinel removed {9}, restored {10}, exit code {11}, threw '{12}'" -f
@@ -521,12 +873,39 @@ if ($SelfTest) {
             $r.Restored, $r.Code, $r.Threw)
         Print ("self-test {0} cfg: kept cfg lines {1} ({2}), VR6 after {3}, kept cfg errors {4}, sitting cfg {5}, comment lines only {6}, cfg restored {7}, kind lines {8} ({9})" -f
             $m, $r.KeptLines, $r.KeptSha, $r.Vr6CfgAfter, $r.KeptErr, $r.KeptFile, $r.ByKind, $r.CfgRestored, $r.KindLines, $r.Kind)
-        # every run, the mutants that throw included: no error escapes, the game is shut down, the sentinel is removed,
-        # the restore runs with every sha256 equal
-        $cleanup = $r.Threw -eq '' -and $r.Shutdown -and $r.SentinelGone -and $r.Restored -and $r.Lane
-        if (-not $cleanup) { $fail += "$m (an error escaped, or the shutdown, sentinel removal or restore did not happen)" }
+        Print ("self-test {0} restore proof: ok lines {1} (n {2}), FAILED lines {3}, equal lines {4}; export: planted values printed {5}, form lines missing {6}, withheld as wanted {7} ({8})" -f
+            $m, $r.ProofOk, $r.ProofN, $r.ProofFailed, $r.EqualLines, $r.Planted, $r.FormMissing, $r.WithheldOk, $r.Withheld)
+        $restoreFails = $m -in $RestoreFailCases
+        # every run, the mutants that throw included: no error escapes, the game is shut down, the sentinel is removed;
+        # the restore runs with every sha256 equal and its one proof line names them all, except in the cases that make
+        # the restore fail, which must print "RESTORE-PROOF FAILED", no ok line, and end exit 5 whatever VR6 said (F1)
+        $cleanup = $r.Threw -eq '' -and $r.Shutdown -and $r.SentinelGone -and $r.Lane
+        if (-not $cleanup) { $fail += "$m (an error escaped, or the shutdown or sentinel removal did not happen)" }
+        if ($restoreFails) {
+            if ($r.Restored) { $fail += "mutant ${m}: the restore passed (control FAILED)" }
+            if ($r.ProofFailed -ne 1 -or $r.ProofOk -ne 0) { $fail += "mutant ${m}: $($r.ProofFailed) RESTORE-PROOF FAILED and $($r.ProofOk) ok lines, not 1 and 0" }
+            if ($r.Code -ne 5) { $fail += "mutant ${m}: exit code $($r.Code), not 5" }
+            if ($r.Vr6) { $fail += "mutant ${m}: VR6 passed, so the case does not combine a VR6 failure with the restore failure" }
+        }
+        else {
+            if (-not $r.Restored) { $fail += "$m (the restore did not happen with every sha256 equal)" }
+            if ($r.ProofOk -ne 1 -or $r.ProofFailed -ne 0 -or $r.ProofN -ne $r.EqualLines -or $r.ProofN -ne 6) { $fail += "mutant ${m}: restore proof $($r.ProofOk) ok lines (n $($r.ProofN)) and $($r.ProofFailed) FAILED lines, not one 'RESTORE-PROOF ok 6' for $($r.EqualLines) equal lines" }
+        }
+        # the export rule (F2), in every run whose step 4 prints both sections: nothing planted printed, every form line
+        # exported, and the withheld counts exactly the fixture's
+        if ($m -notin @('throw_in_step4', 'no_component_slice', 'export_all')) {
+            if ($r.Planted -ne 0) { $fail += "mutant ${m}: $($r.Planted) printed lines carry a planted value" }
+            if ($r.FormMissing -ne 0) { $fail += "mutant ${m}: $($r.FormMissing) form lines not exported" }
+            if (-not $r.WithheldOk) { $fail += "mutant ${m}: the withheld counts are not the fixture's ($($r.Withheld))" }
+        }
         $full = $r.Order -and $r.Headers -and $r.AllSeen -and $r.NoWindow
         switch ($m) {
+            'export_all' {
+                # the negative control of the export rule: every selected line exported, as the substring selection did
+                if ($r.Planted -eq 0) { $fail += 'mutant export_all: no planted value printed (control FAILED)' }
+                if ($r.WithheldOk) { $fail += 'mutant export_all: the withheld counts still match (control FAILED)' }
+            }
+            { $_ -in $RestoreFailCases } { }
             'none' {
                 if (-not $full) { $fail += 'clean run: order, headers or window lines' }
                 if (-not $r.Vr6) { $fail += 'clean run: VR6 failed' }
@@ -561,8 +940,7 @@ if ($SelfTest) {
                 if (-not ($full -and $r.Vr6)) { $fail += "$m (order, headers, window lines or VR6)" }
                 if ($r.Component) { $fail += "mutant ${m}: the component check passed (control FAILED)" }
             }
-            'throw_in_wait' { if ($r.Code -ne 3) { $fail += "mutant ${m}: exit code $($r.Code), not 3" } }
-            'throw_in_step4' { if ($r.Code -ne 4) { $fail += "mutant ${m}: exit code $($r.Code), not 4" } }
+            'throw_in_wait' { if ($r.Code -ne 3) { $fail += "mutant ${m}: exit code $($r.Code), not 3" } }            'throw_in_step4' { if ($r.Code -ne 4) { $fail += "mutant ${m}: exit code $($r.Code), not 4" } }
         }
     }
     Print "self-test scratch: $base"
