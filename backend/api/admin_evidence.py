@@ -2082,8 +2082,8 @@ async def _section_read(db, src, games, accounts, day0, phase3=False):
             data[part] = rows
             data["truncated"] |= len(rows) == b["SECTION_ROWS_MAX"]
     if phase3:
-        data["findings"] = await _findings_read(db, src, data)
-        data["truncated"] |= len(data["findings"]) == b["SECTION_ROWS_MAX"]
+        data["findings"], cut = await _findings_read(db, src, data, games)
+        data["truncated"] |= cut
     names = ["%s_evidence_%s" % (src, w) for w in SECTION_SWITCHES]
     data["switches"] = {r["key"]: r["value"] for r in await _section_rows(
         db, sql["switches"], {"keys": names, "n": len(names)})}
@@ -2472,6 +2472,18 @@ PHASE3_VALUE = "3"
 # identity (card_evidence.game_key, combat_evidence.dedup_key,
 # identity_clock_evidence.ice_dedup_key; an equality test reads all three).
 FINDING_PREFIX = {"card": "card ", "combat": "combat ", "identity_clock": "identity "}
+# Two reads (B10-P3-R1 H1). By stored match: every game-scope finding whose
+# stored match_id is one of the page's games, in the source's namespace, by
+# the partial index ix_seat_evidence_findings_game_match (migration 402):
+# these are the findings a game LISTS, whichever rows of the source the page
+# read. By identity: the findings under the identities the page's rows name,
+# by the unique index's (scope, dedup_key) prefix: these find the findings
+# under a game's identity for another or no match, which are COUNTED.
+FINDINGS_MATCH_SQL = ("SELECT f.dedup_key, f.rule_id, f.scope, f.computed_at, f.flag_id, f.match_id "
+                      "FROM seat_evidence_findings f WHERE f.scope = 'game' "
+                      "AND f.match_id = ANY(CAST(:ids AS uuid[])) "
+                      "AND starts_with(f.dedup_key, CAST(:prefix AS text)) "
+                      "ORDER BY f.match_id, f.dedup_key, f.rule_id LIMIT CAST(:n AS integer)")
 FINDINGS_SQL = ("SELECT f.dedup_key, f.rule_id, f.scope, f.computed_at, f.flag_id, f.match_id "
                 "FROM seat_evidence_findings f WHERE f.scope = 'game' "
                 "AND f.dedup_key = ANY(CAST(:keys AS varchar[])) "
@@ -2488,14 +2500,30 @@ def _finding_keys(src, data):
     return sorted("%s%s|%s|%s" % ((FINDING_PREFIX[src],) + i) for i in idents)
 
 
-async def _findings_read(db, src, data):
-    """The stored game-scope findings under the source's identities, by the
-    unique index's prefix (scope, dedup_key), LIMITed by SECTION_ROWS_MAX."""
+async def _findings_read(db, src, data, games):
+    """The source's stored game-scope findings for the page: those whose
+    stored match_id is one of `games` (`FINDINGS_MATCH_SQL`) and those under
+    the identities the source's rows name (`FINDINGS_SQL`), each read
+    LIMITed by SECTION_ROWS_MAX, merged once per (dedup_key, rule_id) (the
+    unique index's key within scope game). Returns `(rows, truncated)`:
+    truncated when either read returned exactly its LIMIT."""
+    n = AER_CONTRACT_BOUNDS["SECTION_ROWS_MAX"]
+    found, cut = [], False
+    ids = [g["id"] for g in games]
+    if ids:
+        rows = await _section_rows(db, FINDINGS_MATCH_SQL, {
+            "ids": ids, "prefix": FINDING_PREFIX[src], "n": n})
+        found += rows
+        cut |= len(rows) == n
     keys = _finding_keys(src, data)
-    if not keys:
-        return []
-    return await _section_rows(db, FINDINGS_SQL, {
-        "keys": keys, "n": AER_CONTRACT_BOUNDS["SECTION_ROWS_MAX"]})
+    if keys:
+        rows = await _section_rows(db, FINDINGS_SQL, {"keys": keys, "n": n})
+        found += rows
+        cut |= len(rows) == n
+    merged = {}
+    for f in found:
+        merged.setdefault((f["dedup_key"], "%s" % f["rule_id"]), f)
+    return [merged[k] for k in sorted(merged)], cut
 
 
 def _finding_ident(src, dedup_key):
@@ -2724,10 +2752,16 @@ def _card_values(c):
     """card_measures.window_row's measures over one row of stored counters
     (a contribution, or a sum of daily rows): the counts, and per rarity the
     observed count, the expected count and variance out of fixed point, and
-    the standardized deviation (unknown when the variance is not positive)."""
+    the standardized deviation (unknown when the variance is not positive).
+    A row with no hand in its expectation (`hands` 0 or not recorded: every
+    hand it saw was NOT-RUN) has no rarity measure at all, design 2.11's
+    NOT-RUN exclusion; its counts (hands, slots, notrun) stay."""
     fix = float(AER_CONTRACT_BOUNDS["CARD_FIXED_POINT"])
-    out = {"b4.rar.hands": _ev_num(c.get("hands")), "b4.rar.slots": _ev_num(c.get("slots")),
+    hands = _ev_num(c.get("hands"))
+    out = {"b4.rar.hands": hands, "b4.rar.slots": _ev_num(c.get("slots")),
            "b4.rar.notrun": _ev_num(c.get("notrun_hands"))}
+    if hands is None or hands <= 0:
+        return out
     for r in EV_RARITIES:
         obs, exp, var = (_ev_num(c.get("%s_%s" % (m, r))) for m in ("obs", "exp", "var"))
         exp = None if exp is None else exp / fix
@@ -2822,16 +2856,22 @@ class EvidenceDuplicate(Exception):
     rank publishes (design 2.6's one fact per identity)."""
 
 
-def ev_population(src, pop_rows):
+def ev_population(src, pop_rows, cut=False):
     """The window population source of one family from its population rows
     (contributions whose stored match is a window game, `EV_POP_SQL`): per
     `(ki, stratum, basis)` the kept units' values newest first, packed as
     `window_source_sql` packs them (units by newest game, then unit id, kept
     whole while the key's values fit WIN_VALUES_MAX, each unit's newest
-    WIN_UNIT_DEPTH values), and the truncated keys. A row whose stored pair
-    is not its match's sorted pair, or whose subject is not one of them, is
-    no fact. A repeated `(ki, stratum, match, subject)` raises
-    EvidenceDuplicate."""
+    WIN_UNIT_DEPTH values), the truncated keys, and the count of units left
+    out as incomplete. A row whose stored pair is not its match's sorted
+    pair, or whose subject is not one of them, is no fact. A repeated
+    `(ki, stratum, match, subject)` raises EvidenceDuplicate.
+
+    `cut`: the read stopped at its row cap. The rows are newest game first,
+    so each unit holds its newest values; a unit with WIN_UNIT_DEPTH of them
+    is complete for every window, and any other unit may have older values
+    past the cap: it is left out whole and counted, never ranked short
+    (B10-P3-R1 H3)."""
     b = AER_CONTRACT_BOUNDS
     seen = set()
     facts = []
@@ -2850,7 +2890,7 @@ def ev_population(src, pop_rows):
                 raise EvidenceDuplicate("%s population: repeated fact" % src)
             seen.add(ident)
             facts.append((ki, stratum, row["ended_at"], mid, subject, partner, value))
-    out, truncated = {}, set()
+    out, truncated, partial = {}, set(), 0
     for basis in ("player", "pair"):
         units = collections.defaultdict(list)
         for ki, stratum, ended, mid, subject, partner, value in facts:
@@ -2859,6 +2899,10 @@ def ev_population(src, pop_rows):
         per_key = collections.defaultdict(list)
         for (ki, stratum, unit), vals in units.items():
             vals.sort(key=lambda t: (t[0], t[1]), reverse=True)
+            if cut and len(vals) < b["WIN_UNIT_DEPTH"]:
+                partial += 1
+                truncated.add((ki, stratum, basis))
+                continue
             vals = vals[:b["WIN_UNIT_DEPTH"]]
             per_key[(ki, stratum)].append((vals[0][0], vals[0][1], unit, vals))
         for key, us in per_key.items():
@@ -2873,7 +2917,7 @@ def ev_population(src, pop_rows):
                 values.extend(v for _e, _m, v in vals)
                 offsets.append(len(values))
             out[key + (basis,)] = (values, offsets)
-    return out, truncated
+    return out, truncated, partial
 
 
 def ev_daily_population(src, rows):
@@ -2986,41 +3030,107 @@ def _ev_daily_sql(src):
                spec["daily"], spec["day"], spec["day"]))
 
 
+def _ev_dup_sql(src):
+    """Whether any fact identity repeats over the COMPLETE eligible relation
+    (B10-P3-R1 H2): the population's own game window and join (as
+    `_ev_pop_sql`), the rows `ev_population` admits (the stored pair is the
+    match's sorted pair, the subject is one of the two, a registered source
+    and coverage word, a stratum), grouped by (match, subject, source,
+    coverage, stratum), the columns a fact identity is a function of. One
+    row back means a repeat; LIMIT 1, no row cap before the grouping."""
+    spec = _SECTION_SPEC[src]
+    col = EV_SPEC[src]["col"]
+    return """
+WITH g AS MATERIALIZED (
+  SELECT m.id, m.player1_id, m.player2_id
+    FROM matches m
+   WHERE m.invalidated_at IS NULL
+     AND m.ended_at >= now() - make_interval(days => CAST(:pop_days AS integer))
+     AND m.ended_at <= now() - make_interval(secs => CAST(:lag_s AS integer)))
+SELECT c.match_id
+  FROM g JOIN %(contrib)s c ON c.match_id = g.id
+ WHERE c.pair_lo = LEAST(g.player1_id, g.player2_id)
+   AND c.pair_hi = GREATEST(g.player1_id, g.player2_id)
+   AND c.subject_player_id IN (g.player1_id, g.player2_id)
+   AND c.source = ANY(CAST(:sources AS text[]))
+   AND c.coverage = ANY(CAST(:coverages AS text[]))
+   AND c.%(col)s IS NOT NULL
+ GROUP BY c.match_id, c.subject_player_id, c.source, c.coverage, c.%(col)s
+HAVING count(*) > 1
+ LIMIT 1""" % {"contrib": spec["contrib"], "col": col}
+
+
 EV_POP_SQL = {src: _ev_pop_sql(src) for src in EV_SOURCES}
 EV_DAILY_SQL = {src: _ev_daily_sql(src) for src in EV_SOURCES}
+EV_DUP_SQL = {src: _ev_dup_sql(src) for src in EV_SOURCES}
+
+
+def ev_complete_daily(src, rows, cap):
+    """The daily rows of whole subjects only, and the count of
+    (subject, source, coverage, stratum) groups left out: `rows` is one
+    EV_DAILY_SQL read LIMITed at `cap` plus one, ordered by subject first, so
+    when it returned more than `cap` rows only the subject of the first row
+    past the cap can be cut, and every row of that subject is left out (its
+    groups counted), never summed short (B10-P3-R1 H3)."""
+    if len(rows) <= cap:
+        return list(rows), 0
+    edge = str(rows[cap]["subject_player_id"])
+    kept = [r for r in rows[:cap] if str(r["subject_player_id"]) != edge]
+    groups = {(r.get("source"), r.get("coverage"), _ev_stratum(src, r))
+              for r in rows[:cap] if str(r["subject_player_id"]) == edge}
+    return kept, len(groups)
 
 
 async def read_evidence_populations(db, accounts):
-    """Each family's population rows and its subjects' daily rows: `(pop,
-    daily, rows, truncated)`. One statement each, LIMITed by EV_POP_ROWS_MAX
-    plus one; a statement that returns the extra row is cut there and the
-    block says truncated."""
+    """Each family's population rows, its subjects' daily rows and the
+    window accounts' own daily rows: `(pop, daily, own, rows, truncated,
+    partial)`. First the repeat check over the complete eligible relation
+    (`EV_DUP_SQL`; a repeat raises EvidenceDuplicate before any cap applies);
+    then one statement each, LIMITed by EV_POP_ROWS_MAX plus one: a
+    statement that returns the extra row is cut there, the block says
+    truncated, and the subject the cut can split is left out whole
+    (`ev_complete_daily`; its groups count in `partial`). `pop` keeps the
+    cut flag per family (`ev_population` leaves out the units it may split)."""
     cap = AER_CONTRACT_BOUNDS["EV_POP_ROWS_MAX"]
-    pop, daily, rows, truncated = {}, {}, 0, False
+    win = {"pop_days": DISPLAY_DEFAULTS["pop_days"], "lag_s": DISPLAY_DEFAULTS["lag_s"]}
+    pop, daily, own, rows, truncated, partial = {}, {}, {}, 0, False, 0
     for src in EV_SOURCES:
-        got = await _section_rows(db, EV_POP_SQL[src], {
-            "pop_days": DISPLAY_DEFAULTS["pop_days"], "lag_s": DISPLAY_DEFAULTS["lag_s"],
-            "n": cap + 1})
-        truncated |= len(got) > cap
-        pop[src] = got[:cap]
-        rows += len(pop[src])
-        subjects = sorted({str(r["subject_player_id"]) for r in pop[src]}
+        dup = await _section_rows(db, EV_DUP_SQL[src], dict(
+            win, sources=sorted(EV_PROV), coverages=list(EV_COVERAGES)))
+        if dup:
+            raise EvidenceDuplicate("%s population: repeated fact" % src)
+        got = await _section_rows(db, EV_POP_SQL[src], dict(win, n=cap + 1))
+        cut = len(got) > cap
+        truncated |= cut
+        pop[src] = (got[:cap], cut)
+        rows += len(got[:cap])
+        subjects = sorted({str(r["subject_player_id"]) for r in got[:cap]}
                           | {str(a) for a in accounts})
         got = await _section_rows(db, EV_DAILY_SQL[src], {
             "subjects": subjects, "d0": _section_day0(), "n": cap + 1})
         truncated |= len(got) > cap
-        daily[src] = got[:cap]
-    return pop, daily, rows, truncated
+        daily[src], left = ev_complete_daily(src, got, cap)
+        partial += left
+        got = await _section_rows(db, EV_DAILY_SQL[src], {
+            "subjects": sorted({str(a) for a in accounts}), "d0": _section_day0(), "n": cap + 1})
+        truncated |= len(got) > cap
+        own[src], left = ev_complete_daily(src, got, cap)
+        partial += left
+    return pop, daily, own, rows, truncated, partial
 
 
 async def evidence_block(db, data, games, accounts):
     """Page 1's `evidence` (phase 3b): the families' ranks for each window
     subject. `state` is `unavailable` when a family's section data or the
-    population read is unavailable or a fact repeats, `not_derived` when no
-    stored contribution or daily row reaches a window or a population, else
-    `ok`; only `ok` carries cells. Cells are the windows' (`ev_window_cells`),
-    at most EV_CELLS_MAX per window, the rest counted in `more`."""
-    block = {"state": "unavailable", "rows": 0, "truncated": False,
+    population read is unavailable or a fact repeats anywhere in the eligible
+    relation, `not_derived` when no stored contribution reaches a population
+    and no contribution or daily row gives a window cell, else `ok` (a
+    window with daily rows alone is `ok` with daily cells only); only `ok`
+    carries cells. Cells are the windows' (`ev_window_cells`), at most
+    EV_CELLS_MAX per window, the rest counted in `more`. `partial` counts
+    what a row cap could have cut and was left out whole: population units
+    and daily (subject, source, coverage, stratum) groups."""
+    block = {"state": "unavailable", "rows": 0, "truncated": False, "partial": 0,
              "fingerprint": ev_fingerprint(), "census": ev_census(), "catalog": [],
              "strata": [], "windows": [{"oi": oi, "cells": [], "more": 0}
                                        for oi in range(len(accounts))]}
@@ -3031,18 +3141,20 @@ async def evidence_block(db, data, games, accounts):
              (str(accounts[1]), str(accounts[0]), "pair")])
     try:
         async with db.begin_nested():
-            pop, daily, rows, truncated = await read_evidence_populations(db, accounts)
+            pop, daily, own, rows, truncated, partial = await read_evidence_populations(
+                db, accounts)
         sources = {}
         for src in EV_SOURCES:
-            pops, cut = ev_population(src, pop[src])
+            pops, cut, left = ev_population(src, *pop[src])
             truncated |= bool(cut)
+            partial += left
             sources[src] = (pops, ev_daily_population(src, daily[src]))
         made = []
         for acc, _partner, basis in plan:
             cells = []
             for src in EV_SOURCES:
-                own = [r for r in daily[src] if str(r["subject_player_id"]) == acc]
-                cells += ev_window_cells(src, data[src], games, acc, basis, *sources[src], own)
+                mine = [r for r in own[src] if str(r["subject_player_id"]) == acc]
+                cells += ev_window_cells(src, data[src], games, acc, basis, *sources[src], mine)
             made.append(cells)
     except EvidenceDuplicate as exc:
         _aer_log.warning("admin_evidence evidence ranks unavailable: %s", exc)
@@ -3050,7 +3162,7 @@ async def evidence_block(db, data, games, accounts):
     except Exception as exc:  # noqa: BLE001 -- the block says so; the page answers
         _aer_log.warning("admin_evidence evidence ranks unavailable: %s", type(exc).__name__)
         return block
-    block.update(rows=rows, truncated=truncated)
+    block.update(rows=rows, truncated=truncated, partial=partial)
     if not rows and not any(made):
         block["state"] = "not_derived"
         return block

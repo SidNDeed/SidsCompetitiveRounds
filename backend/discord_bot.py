@@ -17428,8 +17428,8 @@ AER_EV_CELL_SLOTS = ("ki", "stratum", "basis", "n", "val", "pop_rank", "pop_n", 
 AER_EV_SOURCES = ("card_record", "card_daily", "combat_contrib", "combat_player_daily")
 AER_EV_AGGS = ("win_median.cell", "win_max.cell", "window")
 AER_EV_STRATA = ("profile", "consts")
-_AER_EV_KEYS = frozenset({"state", "rows", "truncated", "fingerprint", "census", "catalog",
-                          "strata", "windows"})
+_AER_EV_KEYS = frozenset({"state", "rows", "truncated", "partial", "fingerprint", "census",
+                          "catalog", "strata", "windows"})
 _AER_EV_CATALOG_KEYS = frozenset({"ki", "key", "unit"})
 _AER_EV_WINDOW_KEYS = frozenset({"oi", "cells", "more"})
 
@@ -17600,6 +17600,7 @@ def _aer_evidence(value, windows):
     if ev["state"] not in AER_EV_STATES or not isinstance(ev["truncated"], bool):
         raise AerSchemaError("evidence state")
     _aer_check_int(ev["rows"], 0)
+    _aer_check_int(ev["partial"], 0)
     if not isinstance(ev["fingerprint"], str) or not re.fullmatch(r"[0-9a-f]{8}",
                                                                    ev["fingerprint"]):
         raise AerSchemaError("evidence fingerprint")
@@ -18266,6 +18267,7 @@ def _aer_evidence_items(ev):
         (at + ("state",), "", _aer_txt(ev["state"])),
         (at + ("rows",), "rows=", _aer_txt(ev["rows"])),
         (at + ("truncated",), "truncated=", _aer_txt(ev["truncated"])),
+        (at + ("partial",), "left out whole=", _aer_txt(ev["partial"])),
         (at + ("fingerprint",), "evidence registry ", _aer_txt(ev["fingerprint"])),
         (at + ("census",), "", _aer_free(ev["census"]))))]
     for si, stratum in enumerate(ev["strata"]):
