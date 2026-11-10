@@ -339,13 +339,13 @@ def test_k3_window_cells_aggregate_attributed_contributions_and_rank_them():
                for i, (g, h) in enumerate(zip(games, (4, 1, 7)))]
     contrib.append(_contrib("card", "k9", a, b, a, match_id=str(uuid.uuid4()), hands=99,
                             deal_profile="p1"))         # another match's: not in the window
-    data = _data(contrib=contrib, daily={a: [
-        {"source": "self", "coverage": "one", "deal_profile": "p1", "games": 2,
-         **dict({c: 0 for c in ae._CARD_COUNTERS}, hands=6)}]})
+    data = _data(contrib=contrib)
+    days = [{"subject_player_id": a, "source": "self", "coverage": "one", "deal_profile": "p1",
+             "games": 2, **dict({c: 0 for c in ae._CARD_COUNTERS}, hands=6)}]
     pops = {(_hands_ki(), "p1", "player"): (array("d", [1, 2, 3, 9, 9, 9]),
                                             array("i", [0, 3, 6]))}
     daily = {(ae.EV_DAILY_KI[_hands_ki()], "p1"): array("d", [1.0, 6.0, 8.0])}
-    cells = ae.ev_window_cells("card", data, games, a, "player", pops, daily)
+    cells = ae.ev_window_cells("card", data, games, a, "player", pops, daily, days)
     hands = [c for c in cells if ae.EV_REGISTRY[c["ki"]].var == "b4.rar.hands"]
     by_agg = {ae.EV_REGISTRY[c["ki"]].agg: c for c in hands}
     assert by_agg["win_median.cell"]["val"] == 4.0 and by_agg["win_median.cell"]["n"] == 3
@@ -356,6 +356,8 @@ def test_k3_window_cells_aggregate_attributed_contributions_and_rank_them():
     assert by_agg["window"]["pop_rank"] == pytest.approx(0.5)
     assert by_agg["window"]["basis"] == "player"
     assert ae.ev_window_cells("card", data, games, b, "player", pops, daily) == []
+    assert [c for c in ae.ev_window_cells("card", data, games, a, "player", pops, daily)
+            if ae.EV_REGISTRY[c["ki"]].agg == "window"] == []
 
 
 def test_k3_two_facts_for_one_key_in_one_game_refuse():

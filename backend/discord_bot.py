@@ -18267,9 +18267,9 @@ def _aer_evidence_items(ev):
         (at + ("truncated",), "truncated=", _aer_txt(ev["truncated"])),
         (at + ("fingerprint",), "evidence registry ", _aer_txt(ev["fingerprint"])),
         (at + ("census",), "", _aer_free(ev["census"]))))]
-    for si in range(len(ev["strata"])):
+    for si, stratum in enumerate(ev["strata"]):
         out.append(_aer_item("label", "STRATUM #%d" % si, (
-            (at + ("strata", si), "", _aer_txt(ev["strata"][si])),)))
+            (at + ("strata", si), "", _aer_txt(stratum)),)))
     for ki in sorted(ev["catalog"]):
         row = ev["catalog"][ki]
         out.append(_aer_item("label", "EVKEY", tuple(

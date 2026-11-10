@@ -2901,7 +2901,7 @@ def _ev_daily_row(src, g):
     return row
 
 
-def ev_window_cells(src, data, games, account, basis, pops, daily_pops):
+def ev_window_cells(src, data, games, account, basis, pops, daily_pops, days_rows=()):
     """One window subject's evidence cells for one family: per base key and
     stratum with a value on a covered game, its two window keys' cells (the
     aggregation over the covered games' attributed contributions about the
@@ -2909,8 +2909,10 @@ def ev_window_cells(src, data, games, account, basis, pops, daily_pops):
     the population's units with at least `n` values; on basis `pair` the
     covered games are the pair's, so are the contributions), then per daily
     key and stratum the account's summed daily value ranked among the
-    population's subjects; each part in (key, stratum) order. Raises
-    EvidenceDuplicate on two facts for one key, stratum and game."""
+    population's subjects (`days_rows`: the account's rows of EV_DAILY_SQL,
+    which reads the stratum column the phase-2 daily read does not); each
+    part in (key, stratum) order. Raises EvidenceDuplicate on two facts for
+    one key, stratum and game."""
     vals = collections.defaultdict(list)
     for game in games:
         _paired, _recs, _rows, _other, contrib, _loose = _game_records(src, data, game)
@@ -2934,7 +2936,7 @@ def ev_window_cells(src, data, games, account, basis, pops, daily_pops):
                     if source is not None else array("d"))
             cells.append(_ev_cell(w.ki, stratum, basis, len(vs), val, dist))
     days = []
-    for g in ev_daily_sum(src, data["daily"].get(account, ())):
+    for g in ev_daily_sum(src, days_rows):
         for ki, stratum, value in ev_row_facts(src, _ev_daily_row(src, g), "daily"):
             days.append(_ev_cell(ki, stratum, "player", g["games"], value,
                                  daily_pops.get((ki, stratum), array("d"))))
@@ -3039,7 +3041,8 @@ async def evidence_block(db, data, games, accounts):
         for acc, _partner, basis in plan:
             cells = []
             for src in EV_SOURCES:
-                cells += ev_window_cells(src, data[src], games, acc, basis, *sources[src])
+                own = [r for r in daily[src] if str(r["subject_player_id"]) == acc]
+                cells += ev_window_cells(src, data[src], games, acc, basis, *sources[src], own)
             made.append(cells)
     except EvidenceDuplicate as exc:
         _aer_log.warning("admin_evidence evidence ranks unavailable: %s", exc)
