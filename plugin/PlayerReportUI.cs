@@ -42,7 +42,16 @@ namespace CompetitiveRounds
 
         private static string SessionKeyNow()
         {
-            return PlayerReportRules.SessionKey(SteamAuth.SessionToken);
+            return MarkOf(SteamAuth.SessionToken);
+        }
+
+        /// <summary>The mark of a token ("" = none), the one place the form
+        /// makes it: from the token held now (SessionKeyNow), and from the one
+        /// a request carried as its transport stamped it, which a refresh while
+        /// the body was built or the read was held makes newer (ask 14 R1 H1).</summary>
+        private static string MarkOf(string token)
+        {
+            return PlayerReportRules.SessionKey(token);
         }
 
         /// <summary>Opens the form and asks once for the caller's games, when
@@ -60,9 +69,12 @@ namespace CompetitiveRounds
             _list = PlayerReportRules.BeforeList(_state, key);
             int mine = ++_opening;
             if (_list != PlayerReportRules.ListState.Loading) return;
-            ApiClient.FetchReportableGames((status, code, games, remaining) =>
+            ApiClient.FetchReportableGames((status, code, games, remaining, carried) =>
             {
-                PlayerReportRules.ListState answered = PlayerReportRules.ApplyList(_state, status, code, key);
+                // A refusal closes the sign-in the GET carried; key stands in
+                // only when nothing went out, and such an answer closes none.
+                PlayerReportRules.ListState answered = PlayerReportRules.ApplyList(_state, status, code,
+                                                                                   carried == null ? key : MarkOf(carried));
                 if (status == 200 && remaining >= 0) _state.Remaining = remaining;
                 if (mine != _opening) return;
                 _list = answered;
@@ -395,15 +407,20 @@ namespace CompetitiveRounds
         }
 
         /// <summary>The answer to a press (or the reason there was none): into
-        /// the state by the rules' table, then onto the status line.</summary>
-        private static void Finish(int status, string code, bool logStored)
+        /// the state by the rules' table, then onto the status line. A 401
+        /// closes the sign-in the request carried (<paramref name="carried"/>,
+        /// stamped at dispatch, after the worker built the body); the press's
+        /// mark stands in only when nothing went out, and such an answer closes
+        /// no sign-in.</summary>
+        private static void Finish(int status, string code, bool logStored, string carried = null)
         {
             Pending p = _pending;
             _pending = null;
             _sending = false;
             if (p == null) return;
             PlayerReportRules.Outcome said = PlayerReportRules.Apply(_state, status, code, logStored, p.Game, p.Other,
-                                                                      p.Reason, p.Details, p.WithLog, p.Key);
+                                                                      p.Reason, p.Details, p.WithLog,
+                                                                      carried == null ? p.Key : MarkOf(carried));
             _status = PlayerReportRules.AnswerText(said);
             _statusGood = said == PlayerReportRules.Outcome.Sent || said == PlayerReportRules.Outcome.SentWithoutLog;
             if (!_statusGood) return;

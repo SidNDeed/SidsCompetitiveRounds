@@ -8926,27 +8926,32 @@ namespace CompetitiveRounds
 
         /// <summary>GET /api/v1/player-reports/games: the caller's own recent
         /// games, each with its other players, and what is left of the day's
-        /// limit (-1 when the answer does not say).</summary>
-        internal static void FetchReportableGames(Action<int, string, List<PlayerReportRules.Game>, int> done)
+        /// limit (-1 when the answer does not say). One attempt: a refusal
+        /// reaches the form as it came. The last argument of
+        /// <paramref name="done"/> is the session token the GET carried as its
+        /// transport stamped it, null when nothing went out.</summary>
+        internal static void FetchReportableGames(Action<int, string, List<PlayerReportRules.Game>, int, string> done)
         {
-            if (Plugin.Instance == null) { done(0, "", null, -1); return; }
+            if (Plugin.Instance == null) { done(0, "", null, -1, null); return; }
             long code = 0;
+            string carried = null;
             Plugin.Instance.StartCoroutine(GetRequest($"{baseUrl}/api/v1/player-reports/games", (ok, text) =>
             {
                 if (!ok)
                 {
                     int status = code > 0 ? (int)code : PlayerReportRules.StatusOf(false, text);
                     Plugin.Log.LogWarning("[PLAYER-REPORT] the games read failed: status " + status);
-                    done(status, PlayerReportRules.ErrorCode(text), null, -1);
+                    done(status, PlayerReportRules.ErrorCode(text), null, -1, carried);
                     return;
                 }
                 List<PlayerReportRules.Game> games = null;
                 int remaining = -1;
                 try { games = ParseReportableGames(text, out remaining); }
                 catch (Exception ex) { Plugin.Log.LogWarning("[PLAYER-REPORT] games parse: " + ex.GetType().Name); }
-                if (games == null) done(0, "", null, -1);
-                else done(200, "", games, remaining);
-            }, detailedErrors: true, sessionAware: true, onResponseCode: c => code = c));
+                if (games == null) done(0, "", null, -1, carried);
+                else done(200, "", games, remaining, carried);
+            }, detailedErrors: true, sessionAware: true, singleAttempt: true,
+               onTokenSent: tok => carried = tok, onResponseCode: c => code = c));
         }
 
         /// <summary>The games answer. Names are other players' text, so the
@@ -8989,10 +8994,13 @@ namespace CompetitiveRounds
 
         /// <summary>POST /api/v1/player-reports with a body PlayerReportRules.BuildBody
         /// made on the form's worker. <paramref name="sensitiveProbe"/> is
-        /// SensitiveBodyProbe of that body, computed where it was built.</summary>
-        internal static void SubmitPlayerReportBody(byte[] body, string sensitiveProbe, Action<int, string, bool> done)
+        /// SensitiveBodyProbe of that body, computed where it was built. The
+        /// last argument of <paramref name="done"/> is the session token the POST
+        /// carried as its transport stamped it, null when nothing went out.</summary>
+        internal static void SubmitPlayerReportBody(byte[] body, string sensitiveProbe, Action<int, string, bool, string> done)
         {
-            if (Plugin.Instance == null) { done(0, "", false); return; }
+            if (Plugin.Instance == null) { done(0, "", false, null); return; }
+            string carried = null;
             Plugin.Instance.StartCoroutine(PostRequestRaw(
                 $"{baseUrl}/api/v1/player-reports", body,
                 (ok, response) =>
@@ -9000,9 +9008,10 @@ namespace CompetitiveRounds
                     int status = PlayerReportRules.StatusOf(ok, response);
                     if (ok) Plugin.Log.LogInfo("[PLAYER-REPORT] submitted");
                     else Plugin.Log.LogWarning("[PLAYER-REPORT] submit answered status " + status);
-                    done(status, ok ? "" : PlayerReportRules.ErrorCode(response), ok && PlayerReportRules.LogStored(response));
+                    done(status, ok ? "" : PlayerReportRules.ErrorCode(response), ok && PlayerReportRules.LogStored(response),
+                         carried);
                 },
-                sensitiveProbe: sensitiveProbe ?? ""));
+                sensitiveProbe: sensitiveProbe ?? "", onTokenSent: tok => carried = tok));
         }
 
         /// <summary>GET /api/v1/admin/player-reports: the reports (open first)
@@ -9034,7 +9043,7 @@ namespace CompetitiveRounds
                 // One line per list read, and it carries counts only.
                 Plugin.Log.LogInfo("[PLAYER-REPORT] the admin list: " + reports.Count + " rows, " + leftOut + " left out for the form of the id");
                 done(200, "", reports, openTotal);
-            }, detailedErrors: true, onResponseCode: c => code = c));
+            }, detailedErrors: true, singleAttempt: true, onResponseCode: c => code = c));
         }
 
         /// <summary>The admin list. Details and names are players' text: the
@@ -9092,7 +9101,7 @@ namespace CompetitiveRounds
             {
                 int status = ok ? 200 : (code > 0 ? (int)code : PlayerReportRules.StatusOf(false, text));
                 done(status, ok ? "" : PlayerReportRules.ErrorCode(text), ok ? (text ?? "") : null);
-            }, detailedErrors: true, onResponseCode: c => code = c));
+            }, detailedErrors: true, singleAttempt: true, onResponseCode: c => code = c));
         }
 
         /// <summary>POST /api/v1/admin/player-reports/{id}/close. The signature
@@ -25580,6 +25589,7 @@ namespace CompetitiveRounds
             bool detailedErrors = false, bool sessionAware = false,
             string extraHeaderName = null, string extraHeaderValue = null,
             string extraHeader2Name = null, string extraHeader2Value = null,
+            bool singleAttempt = false, Action<string> onTokenSent = null,
             Action<long> onResponseCode = null)
         {
             // Both pre-wire refusals report 0 before the callback they hand back.
@@ -25625,6 +25635,16 @@ namespace CompetitiveRounds
                     // session was already minted.
                     string _sentTok = sessionAware ? SteamAuth.SessionToken : null;
                     string _rgTok = SteamAuth.SessionToken;
+                    // onTokenSent: the token this attempt carries, as stamped above
+                    // ("" when none was, or the transport withheld it). An owner
+                    // that closes something for a sign-in keys it by this token,
+                    // not by the one it held when it asked (ask 14 R1 H1).
+                    if (onTokenSent != null)
+                    {
+                        string stamped = "";
+                        try { stamped = request.GetRequestHeader("X-Session-Token") ?? ""; } catch { }
+                        try { onTokenSent(stamped); } catch { }
+                    }
                     request.timeout = 20;
                     yield return request.SendWebRequest();
 
@@ -25637,9 +25657,14 @@ namespace CompetitiveRounds
                     string rgBody = null;
                     try { rgBody = request.downloadHandler?.text; } catch { }
                     rgv = ReadGateVerdict(request, rgBody, rgAttempts, _rgTok);
-                    if (rgv.Next == ReadGateRules.Next.Deliver)
+                    // singleAttempt (off by default; only the player report form's
+                    // three reads pass it): their owner closes its own requests
+                    // after a refusal (C4), so the first answer, a gate refusal
+                    // included, is delivered and nothing is sent again (ask 14 R1
+                    // H2). The hold before the send runs as for every caller.
+                    if (rgv.Next == ReadGateRules.Next.Deliver || singleAttempt)
                     {
-                        if (sessionAware) HandleSessionReject(request, _sentTok);
+                        if (sessionAware && rgv.Next == ReadGateRules.Next.Deliver) HandleSessionReject(request, _sentTok);
                         bool success = request.result == UnityWebRequest.Result.Success;
                         NoteResult(success, request.responseCode);
                         if (onResponseCode != null) onResponseCode(request.responseCode);
@@ -25817,13 +25842,18 @@ namespace CompetitiveRounds
         /// this client SENDING the rest of a body — it cannot recall bytes the
         /// server has already read, which is why the consent caption promises
         /// the first and not the second.</param>
+        /// <param name="onTokenSent">Called once, before the send, with the
+        /// session token the request carries as stamped ("" when none was, or
+        /// the transport withheld it). Null for every caller but the player
+        /// report form's submit, which keys a 401 by it (ask 14 R1 H1).</param>
         private static IEnumerator PostRequestRaw(string url, byte[] bodyRaw,
                                                   Action<bool, string> callback,
                                                   string sensitiveProbe = null,
                                                   Func<bool> abortIf = null,
                                                   Action<bool> onTokenStamped = null,
                                                   int timeoutSeconds = 20,
-                                                  bool redactErrorText = false)
+                                                  bool redactErrorText = false,
+                                                  Action<string> onTokenSent = null)
         {
             if (ConsentBlocksRequest(url)) { callback(false, "no-consent"); yield break; }
             if (SensitiveTransportBlocked(url, sensitiveProbe, callback)) yield break;
@@ -25848,6 +25878,12 @@ namespace CompetitiveRounds
                     bool stamped = false;
                     try { stamped = !string.IsNullOrEmpty(request.GetRequestHeader("X-Session-Token")); } catch { }
                     try { onTokenStamped(stamped); } catch { }
+                }
+                if (onTokenSent != null)
+                {
+                    string carried = "";
+                    try { carried = request.GetRequestHeader("X-Session-Token") ?? ""; } catch { }
+                    try { onTokenSent(carried); } catch { }
                 }
 
                 if (abortIf == null)

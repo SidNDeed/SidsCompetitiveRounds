@@ -348,7 +348,7 @@ STYLES = "private static void EnsureStyles()"
 DRAW = "internal static void Draw()"
 SEND = "private static void Send()"
 PUMP = "internal static void Pump()"
-FINISH = "private static void Finish(int status, string code, bool logStored)"
+FINISH = "private static void Finish(int status, string code, bool logStored, string carried = null)"
 ADMIN_ANSWERED = "private static void AdminAnswered(int status, string code)"
 LOAD_ADMIN = "private static void LoadAdmin("
 COUNT = "internal static void RefreshOpenCount()"
@@ -364,7 +364,7 @@ BEFORE_LIST = "internal static ListState BeforeList(FormState st, string session
 APPLY_LIST = "internal static ListState ApplyList(FormState st, int status, string code, string sessionKey)"
 BUILD_BODY = "internal static string BuildBody(string kind, string gameId, string reportedSteamId, string reason,"
 # ApiClient.cs
-SUBMIT = "internal static void SubmitPlayerReportBody(byte[] body, string sensitiveProbe, Action<int, string, bool> done)"
+SUBMIT = "internal static void SubmitPlayerReportBody(byte[] body, string sensitiveProbe, Action<int, string, bool, string> done)"
 FETCH_REPORTS = "internal static void FetchPlayerReports(string adminSteamId, string statusFilter, int limit,"
 PARSE_REPORTS = "private static List<PlayerReportRules.Report> ParsePlayerReports(string json, out int leftOut)"
 FETCH_LOG = "internal static void FetchPlayerReportLog(string adminSteamId, string reportId, Action<int, string, string> done)"
@@ -698,24 +698,30 @@ MARK_RULES = (
     (None, APPLY_LIST),
     (APPLY_LIST, 'if (status == 401) { st.RefusedSignIn = sessionKey ?? ""; return ListState.SignIn; }'),
 )
-# Every line of the form that names the mark, in source order: where it is
-# made, the three places that make it fresh, and the four rules it goes to.
+# Every line of the form that names the mark or the token it is made from, in
+# source order: where it is made (from the token held now, and from the one a
+# request carried, ask 14 R1 H1), the three places that make it fresh, the two
+# answers that bring the carried token back, and the four rules it goes to.
 MARK_UI = (
     "private static string SessionKeyNow()",
-    "return PlayerReportRules.SessionKey(SteamAuth.SessionToken);",
+    "return MarkOf(SteamAuth.SessionToken);",
+    "private static string MarkOf(string token)",
+    "return PlayerReportRules.SessionKey(token);",
     "string key = SessionKeyNow();",                                                    # Open
     "_list = PlayerReportRules.BeforeList(_state, key);",
-    "PlayerReportRules.ListState answered = PlayerReportRules.ApplyList(_state, status, code, key);",
+    "ApiClient.FetchReportableGames((status, code, games, remaining, carried) =>",
+    "carried == null ? key : MarkOf(carried));",                                        # into ApplyList
     "string key = SessionKeyNow();",                                                    # Draw
     "_sending, key, out why);",
     "internal string Reason, Details, Key;",                                            # what a press was sent under
     "string key = SessionKeyNow();",                                                    # Send
     "if (PlayerReportRules.Check(_state, _game, _other, _reason, _details, _withLog, _sending, key, out why)",
     "_pending = new Pending { Game = game, Other = other, Reason = reason, Details = details, Key = key, WithLog = withLog };",
-    "p.Reason, p.Details, p.WithLog, p.Key);",                                          # Finish, into Apply
+    "private static void Finish(int status, string code, bool logStored, string carried = null)",
+    "carried == null ? p.Key : MarkOf(carried));",                                      # Finish, into Apply
 )
 _MARK_IN_RULES = re.compile(r"\b(sessionKey|RefusedSignIn)\b")
-_MARK_IN_UI = re.compile(r"\b(key|Key|SessionKeyNow|SessionKey|SessionToken|sessionKey|RefusedSignIn)\b")
+_MARK_IN_UI = re.compile(r"\b(key|Key|SessionKeyNow|SessionKey|SessionToken|sessionKey|RefusedSignIn|MarkOf|carried)\b")
 
 
 def _r9(src):
@@ -731,7 +737,7 @@ def _r9(src):
     for word in ("Plugin.", "System.IO", "File.", "Config", "PlayerPrefs", "UnityEngine", "ApiClient"):
         assert word not in _code(rl), "the rules file reaches %s" % word
     # The form: the mark is made from the token in one place, and every line
-    # that holds it is one of these twelve. None is a log call, a file, a
+    # that holds it is one of these sixteen. None is a log call, a file, a
     # setting or a request, so it reaches none.
     got = [l for l in _lines(_code(ui)) if _MARK_IN_UI.search(l)]
     assert got == list(MARK_UI), got
@@ -1004,3 +1010,85 @@ def test_the_report_icon_is_an_image_like_its_three_neighbours():
     assert want[:4] == (64, 64, 8, 6), want
     for name in ("ic_report.png", "ic_mail.png", "ic_music.png"):
         assert _ihdr(name) == want, (name, _ihdr(name))
+
+
+# -- R17, R18 ask 14 R1's H1 and H2: the sign-in a refusal closes, and one attempt ----
+
+GET_REQUEST = "private static IEnumerator GetRequest(string url, Action<bool, string> callback,"
+POST_RAW = "private static IEnumerator PostRequestRaw(string url, byte[] bodyRaw,"
+FETCH_GAMES = "internal static void FetchReportableGames(Action<int, string, List<PlayerReportRules.Game>, int, string> done)"
+_CS_MEMBER = re.compile(r"^ {8}(?:internal|private|public|protected)\s+[^;{}]*?\b([A-Za-z_0-9]+)\s*\(")   # test_sept16's
+
+
+def _owners(text, needle):
+    """The member each code line holding `needle` stands in, in file order."""
+    out, member = [], "<file scope>"
+    for line in _code(text).split("\n"):
+        m = _CS_MEMBER.match(line)
+        if m:
+            member = m.group(1)
+        if needle in line:
+            out.append(member)
+    return out
+
+
+def _r17(src):
+    ac, ui = src[AC], src[UI]
+    # Both transports tell their owner the token they stamped, after the
+    # stamp and before the send, so a refresh in between is what they report.
+    told = 'try { %s = request.GetRequestHeader("X-Session-Token") ?? ""; } catch { } try { onTokenSent(%s); } catch { }'
+    for sig, name in ((GET_REQUEST, "stamped"), (POST_RAW, "carried")):
+        body = _fold(_body(ac, sig))
+        at = (body.find("StampVersionHeader(request);"), body.find(told % (name, name)),
+              body.find("request.SendWebRequest()"))
+        assert 0 <= at[0] < at[1] < at[2], (sig, at)
+    # Only the form's games read and its submit ask for it, and every answer
+    # each gives carries the token back (null where nothing went out).
+    assert _owners(ac, "onTokenSent: ") == ["FetchReportableGames", "SubmitPlayerReportBody"], _owners(ac, "onTokenSent: ")
+    for sig, gone in ((FETCH_GAMES, 'done(0, "", null, -1, null);'), (SUBMIT, 'done(0, "", false, null);')):
+        body = _fold(_body(ac, sig))
+        assert "onTokenSent: tok => carried = tok" in body, sig
+        dones = re.findall(r"done\(([^;]*)\);", body)
+        assert dones and all(d.endswith(", carried") or d.endswith(", null") for d in dones), (sig, dones)
+        assert body.count(gone) == 1, (sig, gone)
+    # The form keys the closure by that token; its own mark stands in only
+    # when nothing went out.
+    assert ("PlayerReportRules.ApplyList(_state, status, code, carried == null ? key : MarkOf(carried));"
+            in _fold(_body(ui, OPEN))), "the games read closes the opening's sign-in"
+    assert ("p.Reason, p.Details, p.WithLog, carried == null ? p.Key : MarkOf(carried));"
+            in _fold(_body(ui, FINISH))), "the submit closes the press's sign-in"
+    assert "ApiClient.SubmitPlayerReportBody(r.Body, r.Probe, Finish);" in _fold(_body(ui, PUMP))
+
+
+def test_r17_a_refusal_closes_the_sign_in_the_request_carried():
+    _check(_r17,
+           lambda s: _replace(s, UI, "carried == null ? p.Key : MarkOf(carried));", "p.Key);"),
+           _control_comment(AC, FETCH_GAMES))
+
+
+def _r18(src):
+    ac = src[AC]
+    # Off by default, so every other caller of GetRequest keeps its loop, and
+    # passed by the form's three reads alone.
+    assert "bool singleAttempt = false, Action<string> onTokenSent = null," in _code(ac)
+    assert _owners(ac, "singleAttempt: ") == ["FetchReportableGames", "FetchPlayerReports", "FetchPlayerReportLog"], \
+        _owners(ac, "singleAttempt: ")
+    assert _owners(ac, "singleAttempt: true") == _owners(ac, "singleAttempt: ")
+    # With it, the first answer leaves through the delivering branch whatever
+    # the gate's verdict, and nothing reaches the retry after it.
+    body = _fold(_body(ac, GET_REQUEST))
+    deliver = body.find("if (rgv.Next == ReadGateRules.Next.Deliver || singleAttempt) {")
+    retry = body.find("if (rgv.Next == ReadGateRules.Next.DelayRetry) yield return new WaitForSecondsRealtime((float)rgv.Delay);")
+    assert 0 <= deliver < retry, (deliver, retry)
+    branch = body[deliver:retry]
+    assert branch.count("yield break;") == 1 and "callback(success, success" in branch, branch[:300]
+    assert body.count("singleAttempt") == 1, "singleAttempt is read in more than one place"
+    # The hold before the send is the same for every caller.
+    assert body.find("yield return ReadGateHold(url, w => rgFail = w);") < body.find("StampVersionHeader(request);")
+
+
+def test_r18_the_forms_three_reads_take_one_attempt_and_no_other_caller_changes():
+    _check(_r18,
+           lambda s: _replace(s, AC, "if (rgv.Next == ReadGateRules.Next.Deliver || singleAttempt)",
+                              "if (rgv.Next == ReadGateRules.Next.Deliver)"),
+           _control_comment(AC, GET_REQUEST))
