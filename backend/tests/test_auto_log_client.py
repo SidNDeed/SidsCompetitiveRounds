@@ -229,7 +229,8 @@ def test_the_bug_form_pending_lifecycle_survives_reopen():
 
 def test_the_log_viewer_latches_requests_and_consumes_before_dispatch():
     """Open and Refresh share the request latch exercised by the harness."""
-    opened = mask_code(cs_block(COMPETITIVE_UI, "private static void OpenLogViewer()"))
+    # Internal since ask 14: the player report form's Preview logs button opens this same viewer.
+    opened = mask_code(cs_block(COMPETITIVE_UI, "internal static void OpenLogViewer()"))
     assert opened.count("StartLogViewerRead();") == 1
     request = mask_code(cs_block(COMPETITIVE_UI, "private static void StartLogViewerRead()"))
     assert "_logViewerRequests.Request();" in request
