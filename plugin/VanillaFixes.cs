@@ -5312,6 +5312,12 @@ namespace CompetitiveRounds
                     return;
                 }
 
+                // Ask 3 R2 (MEDIUM): the setter below drops Photon's answer, and the
+                // nametag's record (a style list) does not hold the base name this
+                // repair changes. So the record is forgotten first: the restyle below
+                // records it again only when its sends were sent, and otherwise the
+                // next refresh owes the nametag and publishes it again.
+                CosmeticCarrierLedger.Shared.Forget(CosmeticCarrier.Nametag);
                 // Verified against installed PhotonRealtime.Player.NickName:
                 // for the local actor in an online room this sends property key 255.
                 PhotonNetwork.NickName = persona;

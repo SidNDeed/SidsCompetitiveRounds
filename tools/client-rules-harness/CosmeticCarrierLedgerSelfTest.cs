@@ -209,6 +209,50 @@ namespace CompetitiveRounds
                       "before=" + none + " bound=" + bound + " after Show=" + afterShow + " after Hide=" + afterHide);
             }
 
+            // -- R2: negative inputs through the binding itself, after a bind and a first paint --
+            {
+                var b = new PickBodyBinding();
+                int g = b.BeginShow();
+                b.TryBind(g, 7);
+                b.FirstPaintFinished(g);
+                bool other = b.ShouldRepaint(true, 8, true);
+                Check(res, "a bound, painted body does not repaint for another player's colour change", !other, "repaint=" + other);
+            }
+            {
+                var b = new PickBodyBinding();
+                int g = b.BeginShow();
+                b.TryBind(g, 7);
+                b.FirstPaintFinished(g);
+                bool noKey = b.ShouldRepaint(true, 7, false);
+                Check(res, "a bound, painted body does not repaint for a change with no colour key", !noKey, "repaint=" + noKey);
+            }
+            {
+                var b = new PickBodyBinding();
+                int g = b.BeginShow();
+                b.TryBind(g, 7);
+                b.FirstPaintFinished(g);
+                bool gone = b.ShouldRepaint(false, 7, true);
+                Check(res, "a bound, painted body that is gone does not repaint", !gone, "repaint=" + gone);
+            }
+            {
+                var b = new PickBodyBinding();
+                int g = b.BeginShow();
+                b.TryBind(g, 7);
+                bool early = b.ShouldRepaint(true, 7, true);
+                Check(res, "a bound body before its first paint does not repaint", !early, "repaint=" + early);
+            }
+
+            // -- R2: one carrier forgotten --
+            {
+                var l = new CosmeticCarrierLedger();
+                l.Wrote(CosmeticCarrier.Nametag, NametagFull);
+                l.Wrote(CosmeticCarrier.Color, ColorFull);
+                l.Forget(CosmeticCarrier.Nametag);
+                bool owed = l.Owes(CosmeticCarrier.Nametag, NametagFull, false);
+                bool kept = !l.Owes(CosmeticCarrier.Color, ColorFull, false);
+                Check(res, "a forgotten carrier is owed though the cache equals its old record, and the others keep theirs", owed && kept, "nametag owed=" + owed + " colour kept=" + kept);
+            }
+
             return res;
         }
 

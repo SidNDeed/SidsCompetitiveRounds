@@ -65,6 +65,11 @@ namespace CompetitiveRounds
                 if (IsRoomCarrier((CosmeticCarrier)i)) _written[i] = null;
         }
 
+        /// <summary>Ask 3 R2: one carrier's record is gone, so the next refresh
+        /// owes it. The raw-name repair forgets the nametag's: the NickName it
+        /// carries holds the base name, which the style list does not.</summary>
+        internal void Forget(CosmeticCarrier c) => _written[Index(c)] = null;
+
         /// <summary>The value last written, or null when none is known.</summary>
         internal string Written(CosmeticCarrier c) => _written[Index(c)];
 

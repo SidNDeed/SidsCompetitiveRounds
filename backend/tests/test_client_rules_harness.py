@@ -1722,6 +1722,11 @@ _COSMETIC_CARRIER_CASES = [
     'a coroutine still waiting when the popup is hidden binds nothing',
     "a superseded Show's first paint marks nothing; the current one's does",
     "the bound picker is the current binding's, and none after a Show or a Hide",
+    "a bound, painted body does not repaint for another player's colour change",
+    'a bound, painted body does not repaint for a change with no colour key',
+    'a bound, painted body that is gone does not repaint',
+    'a bound body before its first paint does not repaint',
+    'a forgotten carrier is owed though the cache equals its old record, and the others keep theirs',
 ]
 
 

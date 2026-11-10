@@ -397,6 +397,32 @@ namespace CompetitiveRounds
             return "";
         }
 
+        // Ask 3 R2: Photon's own send of the local name. Player.SetPlayerNameProperty
+        // (private in the game's PhotonRealtime.dll) sends actor property 255 with
+        // the local NickName through OpSetPropertiesOfActor and answers whether it
+        // was sent; outside an online room it sends nothing and answers false. The
+        // NickName setter calls it only when the local name changes and drops the
+        // answer, and SetCustomProperties cannot carry the name (it keeps only
+        // string keys).
+        private static System.Reflection.MethodInfo _sendName;
+        private static bool _sendNameResolved;
+        private static bool SendLocalName(Photon.Realtime.Player local)
+        {
+            try
+            {
+                if (!_sendNameResolved)
+                {
+                    _sendNameResolved = true;
+                    _sendName = HarmonyLib.AccessTools.Method(typeof(Photon.Realtime.Player), "SetPlayerNameProperty");
+                    if (_sendName == null)
+                        Plugin.Log.LogWarning("[NAMETAG] Player.SetPlayerNameProperty not found; no name send is confirmed");
+                }
+                if (_sendName == null || local == null) return false;
+                return (bool)_sendName.Invoke(local, null);
+            }
+            catch { return false; }
+        }
+
         /// <summary>Push the current styled nickname to PhotonNetwork.LocalPlayer so it
         /// broadcasts to every client in the room. Also publishes the glow sku via a
         /// separate "cr_nametag_glow" custom property so modded opponents can apply the
@@ -438,6 +464,11 @@ namespace CompetitiveRounds
                     Plugin.Log.LogInfo($"[NAMETAG] Published '{styled}' ({(skus == null ? 0 : skus.Count)} style(s))");
                 }
                 _lastPublished = styled;
+                // Ask 3 R2 (MEDIUM): the name's own send, and its answer, on every
+                // publish. The setter above sends only when the local name changes and
+                // drops the answer, so a refused send was never retried. (When the
+                // setter just sent, this sends the same value a second time.)
+                bool nameSent = SendLocalName(PhotonNetwork.LocalPlayer);
 
                 // Separate custom props for the two local-only effects (glow, typeface). Only
                 // modded clients read them — non-modded players see an unstyled name with no
@@ -445,33 +476,35 @@ namespace CompetitiveRounds
                 // most a single Photon roundtrip per PublishToPhoton invocation.
                 string glowSku = GetActiveGlowSku(skus);
                 string typefaceSku = GetActiveTypefaceSku(skus);
-                bool propsWritten = false;
+                bool propsSent = false;
                 try
                 {
-                    var props = PhotonNetwork.LocalPlayer.CustomProperties;
-                    object existingGlow, existingFont;
-                    bool glowChanged = !props.TryGetValue("cr_nametag_glow", out existingGlow)
-                        || (existingGlow?.ToString() ?? "") != glowSku;
-                    bool fontChanged = !props.TryGetValue("cr_nametag_typeface", out existingFont)
-                        || (existingFont?.ToString() ?? "") != typefaceSku;
-                    if (glowChanged || fontChanged)
-                    {
-                        var upd = new ExitGames.Client.Photon.Hashtable();
-                        if (glowChanged) upd["cr_nametag_glow"] = glowSku;
-                        if (fontChanged) upd["cr_nametag_typeface"] = typefaceSku;
-                        // Ask 3 R1 (M1): recorded only when Photon could send it.
-                        propsWritten = PhotonNetwork.LocalPlayer.SetCustomProperties(upd);
-                    }
-                    else propsWritten = true;   // the room already carries both values
+                    // Ask 3 R2 (HIGH): both fields on every publish. The local player's
+                    // properties change only when the server echoes a send (the room
+                    // broadcasts property changes), so a comparison with them skipped a
+                    // field whose earlier send was still to land and overwrite it.
+                    var upd = new ExitGames.Client.Photon.Hashtable();
+                    upd["cr_nametag_glow"] = glowSku;
+                    upd["cr_nametag_typeface"] = typefaceSku;
+                    // Ask 3 R1 (M1): recorded only when Photon could send it.
+                    propsSent = PhotonNetwork.LocalPlayer.SetCustomProperties(upd);
                 }
                 catch { }
                 // Ask 3: record what was written (the style list the NickName and
                 // the two props now carry), an empty cache's included, so the next
-                // stats refresh republishes when the cache differs.
-                if (propsWritten)
+                // stats refresh republishes when the cache differs. R2: only when
+                // every send was sent. In an online room both answers are Photon's
+                // send (OpSetPropertiesOfActor). Outside one, SetCustomProperties
+                // merges locally and answers true, the name's send answers false,
+                // and the next join carries both (its player properties are the
+                // local ones plus the NickName); a rejoin carries none, and the
+                // join's republish covers it.
+                var room = PhotonNetwork.CurrentRoom;
+                bool online = room != null && !PhotonNetwork.OfflineMode;
+                if (propsSent && (nameSent || !online))
                     CosmeticCarrierLedger.Shared.Wrote(CosmeticCarrier.Nametag, CosmeticCarrierLedger.NametagValue(skus));
                 else
-                    Plugin.Log.LogWarning("[NAMETAG] style props not sent; the next refresh owes them");
+                    Plugin.Log.LogWarning($"[NAMETAG] not recorded (props sent={propsSent}, name sent={nameSent}); the next refresh owes them");
             }
             catch (Exception ex) { Plugin.Log.LogWarning($"[NAMETAG] Publish failed: {ex.Message}"); }
         }

@@ -105,12 +105,10 @@ PUBLISHERS = {
 }
 # R1 (M1): a record follows confirmed completion only. The props publishers
 # return before it when Photon refuses the write; the nametag's flag is the
-# props call's own answer (or true when nothing needed writing); the cursor
+# props call's and the name's answers together (R2; claim C8 holds the sends); the cursor
 # records only when Apply answers true, and Apply answers false on failure.
 REFUSAL = re.compile(r"if \(!PhotonNetwork\.LocalPlayer\.SetCustomProperties\(props\)\)\s*\{[^{}]*?\breturn;\s*\}")
-NAMETAG_ASSIGNS = ["bool propsWritten = false;",
-                   "propsWritten = PhotonNetwork.LocalPlayer.SetCustomProperties(upd);",
-                   "else propsWritten = true;"]
+NAMETAG_GATE = "if (propsSent && (nameSent || !online))"
 CURSOR_APPLY_SIG = "public static bool Apply(string sku, string hex)"
 
 
@@ -129,10 +127,8 @@ def claim_publishers_record(files):
             if body.count("var s = ApiClient.CachedPlayerStats;") != 1:
                 out.append("%s: the record's snapshot is not the one the write reads" % carrier)
         if carrier == "Nametag":
-            assigns = re.findall(r"(?:bool |else )?propsWritten = [^;]*;", body)
-            guard = body.find("if (propsWritten)")
-            if assigns != NAMETAG_ASSIGNS or not (body.index(NAMETAG_ASSIGNS[1]) < guard < at):
-                out.append("Nametag: the record is not behind a props write that Photon sent")
+            if not re.search(re.escape(NAMETAG_GATE) + r"\s*" + re.escape(record), body):
+                out.append("Nametag: the record is not behind both sends' answers")
         if carrier == "Cursor":
             if not re.search(r"if \(Apply\(sku, hex\)\)\s*" + re.escape(record), body):
                 out.append("Cursor: the record does not follow a completed Apply")
@@ -283,6 +279,7 @@ def claim_pick_body_repaints(files):
         out.append("the repaint entry does not ask the binding before it paints")
     show = _code(tin, "public static IEnumerator RetintAfterChildrenSpawn(")
     if not _in_order(show, ["if (!Binding.TryBind(binding, pickerActor)) yield break;", "_shownBody = visualizer;",
+                            "_shownTeam = pickerTeamID;", "_shownPickerID = pickerID;",
                             'Paint(visualizer, pickerTeamID, pickerID, pickerActor, "show");',
                             "Binding.FirstPaintFinished(binding);"]):
         out.append("the Show coroutine does not bind its own body around its first paint")
@@ -312,12 +309,33 @@ def claim_pick_body_repaints(files):
                              "liveParticles += RecolourLiveParticles(ps, desired, looksWrong);",
                              "_paintedCustom = hasCustom ? desired : (Color?)null;"]):
         out.append("a repaint does not replace the last paint's colour, live particles included, outside the transition")
+    # R2 (MEDIUM): the transition guard governs the live recolour itself, not an empty block.
+    if not re.search(r"if \(!MapPhysicalColorPatch\.InMapTransition\(\)\)\s*"
+                     r"liveParticles \+= RecolourLiveParticles\(ps, desired, looksWrong\);", paint):
+        out.append("the transition guard does not govern the live recolour")
     # R1 (M2): the live particles are rewritten in place with their own alpha (#108), never cleared (#96).
     live = _code(tin, "private static int RecolourLiveParticles(ParticleSystem ps, Color desired, Func<Color, bool> looksWrong)")
     if ("_liveBuf[i].startColor = new Color32(r, g, b, cur.a);" not in live or "ps.SetParticles(_liveBuf, n);" not in live
             or any(x in live for x in (".Clear(", ".Stop(", ".Pause(", ".Simulate("))):
         out.append("the live recolour does not rewrite the particles in place with their own alpha")
+    # R2 (MEDIUM): the buffer holds every live particle, the loop and the write use GetParticles'
+    # own count, and only the particles whose colour looks wrong change.
+    if not _in_order(live, LIVE_STEPS):
+        out.append("the live recolour does not read, filter and write back GetParticles' own count")
     return out
+
+
+LIVE_STEPS = ["int live = ps.particleCount;",
+              "if (_liveBuf == null || _liveBuf.Length < live)",
+              "_liveBuf = new ParticleSystem.Particle[Mathf.Max(live, 256)];",
+              "int n = ps.GetParticles(_liveBuf);",
+              "for (int i = 0; i < n; i++)",
+              "Color32 cur = _liveBuf[i].startColor;",
+              "if (!looksWrong(cur)) continue;",
+              "_liveBuf[i].startColor = new Color32(r, g, b, cur.a);",
+              "changed++;",
+              "if (changed > 0) ps.SetParticles(_liveBuf, n);",
+              "return changed;"]
 
 
 # -- C6 (F2 not taken): the pick body reads the room property for every picker --
@@ -357,6 +375,46 @@ def claim_spectators_write_nothing(files):
     return out
 
 
+# -- C8 (R2 HIGH, MEDIUM): every nametag publish sends the name and both fields, compares with no
+#    local property, and records only on both answers; the raw repair forgets the nametag's record --
+
+NAMETAG_SENDS = ["bool nameSent = SendLocalName(PhotonNetwork.LocalPlayer);",
+                 "var upd = new ExitGames.Client.Photon.Hashtable();",
+                 'upd["cr_nametag_glow"] = glowSku;',
+                 'upd["cr_nametag_typeface"] = typefaceSku;',
+                 "propsSent = PhotonNetwork.LocalPlayer.SetCustomProperties(upd);",
+                 "bool online = room != null && !PhotonNetwork.OfflineMode;",
+                 NAMETAG_GATE]
+NAME_SEND_SIG = "private static bool SendLocalName(Photon.Realtime.Player local)"
+REPAIR_STEPS = ["CosmeticCarrierLedger.Shared.Forget(CosmeticCarrier.Nametag);",
+                "PhotonNetwork.NickName = persona;",
+                "NametagStyler.PublishToPhoton();"]
+
+
+def claim_nametag_sends_are_confirmed(files):
+    out = []
+    body = _code(files["NametagStyler.cs"], "public static void PublishToPhoton()")
+    if not _in_order(body, NAMETAG_SENDS):
+        out.append("the publisher does not send the name and both fields, then record on both answers")
+    else:
+        seg = body[body.index(NAMETAG_SENDS[1]):body.index(NAMETAG_SENDS[4])]
+        stmts = [s.strip() for s in seg.split(";") if s.strip()]
+        if stmts != [x.rstrip(";") for x in NAMETAG_SENDS[1:4]]:
+            out.append("the publisher narrows the fields it sends")
+    if re.search(r"\.CustomProperties\b", body):
+        out.append("the publisher compares with the local player's properties")
+    send = _code(files["NametagStyler.cs"], NAME_SEND_SIG).rstrip()
+    if ('AccessTools.Method(typeof(Photon.Realtime.Player), "SetPlayerNameProperty")' not in send
+            or "if (_sendName == null || local == null) return false;" not in send
+            or "return (bool)_sendName.Invoke(local, null);" not in send
+            or not send[:-1].rstrip().endswith("catch { return false; }")):
+        out.append("the name's send does not answer from Photon's own send")
+    repair = _code(files["VanillaFixes.cs"], "private void CheckLocalNickname()")
+    if not _in_order(repair, REPAIR_STEPS):
+        out.append("the raw repair does not forget the nametag's record before its write and restyle")
+    return out
+
+
 CLAIMS = {
     "publishers_record": claim_publishers_record,
     "values_match_the_writes": claim_values_match_the_writes,
@@ -365,6 +423,7 @@ CLAIMS = {
     "pick_body_repaints": claim_pick_body_repaints,
     "pick_reads_the_room_for_every_picker": claim_pick_reads_the_room_for_every_picker,
     "spectators_write_nothing": claim_spectators_write_nothing,
+    "nametag_sends_are_confirmed": claim_nametag_sends_are_confirmed,
 }
 
 
@@ -392,6 +451,12 @@ GUARD16 = "                if (RoomActors.LocalIsSpectator) return;\n"
 REPAIR_GUARD = ("            // leaves a spectator's name as it is, as PublishToPhoton does.\n"
                 "            if (RoomActors.LocalIsSpectator) return;\n")
 
+GLOW_LINE = "                    upd[\"cr_nametag_glow\"] = glowSku;\n"
+NAME_LINE = "                bool nameSent = SendLocalName(PhotonNetwork.LocalPlayer);\n"
+GATE_LINE = "                if (propsSent && (nameSent || !online))\n"
+FORGET_LINE = "                CosmeticCarrierLedger.Shared.Forget(CosmeticCarrier.Nametag);\n"
+RESTYLE_LINE = "                NametagStyler.PublishToPhoton();\n"
+
 MUTANTS = [
     # C1: one per publisher, and a record without a write
     ("publishers_record", "the colour publisher does not record", _drop("PlayerColorCosmetic.cs", REC_COLOR)),
@@ -402,9 +467,9 @@ MUTANTS = [
     ("publishers_record", "the nametag publisher does not record", _drop(
         "NametagStyler.cs", "                    CosmeticCarrierLedger.Shared.Wrote(CosmeticCarrier.Nametag, "
                             "CosmeticCarrierLedger.NametagValue(skus));\n")),
-    ("publishers_record", "the nametag records though Photon refused its props write", [
-        ("NametagStyler.cs", "                        propsWritten = PhotonNetwork.LocalPlayer.SetCustomProperties(upd);\n",
-         "                        PhotonNetwork.LocalPlayer.SetCustomProperties(upd);\n                        propsWritten = true;\n")]),
+    ("nametag_sends_are_confirmed", "the nametag records though Photon refused its props write", [
+        ("NametagStyler.cs", "                    propsSent = PhotonNetwork.LocalPlayer.SetCustomProperties(upd);\n",
+         "                    PhotonNetwork.LocalPlayer.SetCustomProperties(upd);\n                    propsSent = true;\n")]),
     ("publishers_record", "the cursor does not record", _drop(
         "CursorColorCosmetic.cs", "                CosmeticCarrierLedger.Shared.Wrote(CosmeticCarrier.Cursor, "
                                   "CosmeticCarrierLedger.CursorValue(sku, hex));\n")),
@@ -535,6 +600,55 @@ MUTANTS = [
     ("spectators_write_nothing", "the nametag publisher writes for a spectator", _drop("NametagStyler.cs", GUARD16)),
     ("spectators_write_nothing", "the name repair writes for a spectator", [
         ("VanillaFixes.cs", REPAIR_GUARD, "            // leaves a spectator's name as it is, as PublishToPhoton does.\n")]),
+    # R2 (HIGH, MEDIUM): the nametag's sends, answers and record; the raw repair's forget
+    ("nametag_sends_are_confirmed", "the nametag skips a field the local properties already hold", [
+        ("NametagStyler.cs", GLOW_LINE, "                    if (!Equals(PhotonNetwork.LocalPlayer.CustomProperties"
+                                        "[\"cr_nametag_glow\"], glowSku)) upd[\"cr_nametag_glow\"] = glowSku;\n")]),
+    ("nametag_sends_are_confirmed", "the nametag narrows a field by a condition", [
+        ("NametagStyler.cs", GLOW_LINE, "                    if (!string.IsNullOrEmpty(glowSku)) upd[\"cr_nametag_glow\"] = glowSku;\n")]),
+    ("nametag_sends_are_confirmed", "the nametag sends one field", _drop(
+        "NametagStyler.cs", "                    upd[\"cr_nametag_typeface\"] = typefaceSku;\n")),
+    ("nametag_sends_are_confirmed", "the nametag never sends the name", [
+        ("NametagStyler.cs", NAME_LINE, "                bool nameSent = true;\n")]),
+    ("nametag_sends_are_confirmed", "the nametag records without the name's answer", [
+        ("NametagStyler.cs", GATE_LINE, "                if (propsSent)\n")]),
+    ("nametag_sends_are_confirmed", "the nametag records without the props' answer", [
+        ("NametagStyler.cs", GATE_LINE, "                if (nameSent || !online)\n")]),
+    ("nametag_sends_are_confirmed", "the nametag treats every room as offline", [
+        ("NametagStyler.cs", "bool online = room != null && !PhotonNetwork.OfflineMode;", "bool online = false;")]),
+    ("nametag_sends_are_confirmed", "the name's send answers true when Photon refuses", [
+        ("NametagStyler.cs", "return (bool)_sendName.Invoke(local, null);", "_sendName.Invoke(local, null); return true;")]),
+    ("nametag_sends_are_confirmed", "the name's send answers true on a failure it caught", [
+        ("NametagStyler.cs", "catch { return false; }", "catch { return true; }")]),
+    ("nametag_sends_are_confirmed", "the name's send answers true without Photon's method", [
+        ("NametagStyler.cs", "if (_sendName == null || local == null) return false;",
+         "if (_sendName == null || local == null) return true;")]),
+    ("nametag_sends_are_confirmed", "the raw repair keeps the nametag's record", _drop("VanillaFixes.cs", FORGET_LINE)),
+    ("nametag_sends_are_confirmed", "the raw repair forgets after its restyle", [
+        ("VanillaFixes.cs", FORGET_LINE, ""),
+        ("VanillaFixes.cs", RESTYLE_LINE, RESTYLE_LINE + FORGET_LINE)]),
+    ("nametag_sends_are_confirmed", "the raw repair forgets between its write and its restyle", [
+        ("VanillaFixes.cs", FORGET_LINE, ""),
+        ("VanillaFixes.cs", RESTYLE_LINE, FORGET_LINE + RESTYLE_LINE)]),
+    # R2 (MEDIUM): the tinter's saved context, the guard's scope, the live recolour's count, filter and write
+    ("pick_body_repaints", "the bound body is not saved", _drop("Plugin.cs", "            _shownBody = visualizer;\n")),
+    ("pick_body_repaints", "the bound team is not saved", _drop("Plugin.cs", "            _shownTeam = pickerTeamID;\n")),
+    ("pick_body_repaints", "the bound picker is not saved", _drop("Plugin.cs", "            _shownPickerID = pickerID;\n")),
+    ("pick_body_repaints", "the transition guard governs an empty block", [
+        ("Plugin.cs", LIVE_CALL, "                        if (!MapPhysicalColorPatch.InMapTransition()) { }\n"
+                                 "                            liveParticles += RecolourLiveParticles(ps, desired, looksWrong);\n")]),
+    ("pick_body_repaints", "the live recolour discards GetParticles' count", [
+        ("Plugin.cs", "int n = ps.GetParticles(_liveBuf);", "ps.GetParticles(_liveBuf); int n = 0;")]),
+    ("pick_body_repaints", "the live recolour drops its filter", _drop(
+        "Plugin.cs", "                    if (!looksWrong(cur)) continue;\n")),
+    ("pick_body_repaints", "the live recolour writes back the stale count", [
+        ("Plugin.cs", "if (changed > 0) ps.SetParticles(_liveBuf, n);", "if (changed > 0) ps.SetParticles(_liveBuf, live);")]),
+    ("pick_body_repaints", "the live recolour loops past GetParticles' count", [
+        ("Plugin.cs", "for (int i = 0; i < n; i++)\n                {\n                    Color32 cur = _liveBuf[i].startColor;",
+         "for (int i = 0; i < live; i++)\n                {\n                    Color32 cur = _liveBuf[i].startColor;")]),
+    ("pick_body_repaints", "the live recolour never grows its buffer", [
+        ("Plugin.cs", "_liveBuf = new ParticleSystem.Particle[Mathf.Max(live, 256)];",
+         "_liveBuf = _liveBuf ?? new ParticleSystem.Particle[256];")]),
 ]
 
 CONTROLS = [
@@ -548,6 +662,7 @@ CONTROLS = [
     ("pick_reads_the_room_for_every_picker", [("Plugin.cs", "            Color? before = _paintedCustom;\n",
                                                "            // control: the local player is not read here\n            Color? before = _paintedCustom;\n")]),
     ("spectators_write_nothing", [("PlayerColorCosmetic.cs", GUARD16, "                // control: a neutral line\n" + GUARD16)]),
+    ("nametag_sends_are_confirmed", [("NametagStyler.cs", NAME_LINE, "                // control: a neutral line\n" + NAME_LINE)]),
 ]
 
 
