@@ -249,7 +249,7 @@ Plugin.cs	BlockTryBlockCounterPatch	Postfix	IsMasterClient	N	log field only (Plu
 Plugin.cs	CardChoiceEndPickPatch	Prefix	GetPlayerWithID	N	local picker (IsMine) only	
 Plugin.cs	CardChoiceVisuals_Show_Competitive_Patch	Postfix	players	N	pick visuals UI	
 Plugin.cs	CardChoiceVisuals_Show_Competitive_Patch	Prefix	players	N	pick visuals UI	
-Plugin.cs	CardPickBodyTinter	RetintAfterChildrenSpawn	ActiveFighters	N	cosmetic tint	
+Plugin.cs	CardPickBodyTinter	Paint	ActiveFighters	N	cosmetic tint; ask 3 moved the picker's colour read from RetintAfterChildrenSpawn into Paint, which the Show coroutine and the colour-change repaint both call	
 Plugin.cs	CharacterSelectionMenu_PlayerJoined_2v2_Patch	Prefix	players	N	2v2 lobby	
 Plugin.cs	CompetitiveRoundsBehaviour	MaybeRigDump	players	N	dev diagnostics	
 Plugin.cs	CompetitiveRoundsBehaviour	ProbeDancePose	players	N	dev diagnostics	
