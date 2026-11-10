@@ -20,8 +20,12 @@ namespace CompetitiveRounds
         /// from RandomNumberGenerator).</summary>
         internal const int GidLength = 16;
 
-        /// <summary>The wire format's own version (index 0 of every carrier).</summary>
-        internal const int WireVersion = 1;
+        /// <summary>The wire format's version (index 0 of every carrier): the
+        /// feature's protocol, LimitlessBounds.Protocol, which cr_lim1 carries
+        /// in its value. A change to the format bumps the protocol, so the
+        /// decision's capability quorum never continues with a seat on another
+        /// format.</summary>
+        internal const int WireVersion = LimitlessBounds.Protocol;
 
         /// <summary>4.3: the states go one way, live, then terminating, then ended.</summary>
         internal enum FencePhase { PhaseLive = 0, PhaseTerminating = 1, PhaseEnded = 2 }
@@ -162,29 +166,32 @@ namespace CompetitiveRounds
         }
 
         /// <summary>The number of slots in every carrier.</summary>
-        internal const int WireSlots = 11;
+        internal const int WireSlots = 12;
 
         /// <summary>One format for every carrier: [version, gid, target, end,
         /// winner, winner's rounds, other rounds, base target, spectatable,
-        /// roster, round arguments]. A round message carries the round's six
-        /// arguments; the decision also carries its roster; the mirror and the
-        /// snapshot carry neither (empty arrays).</summary>
-        internal static object[] EncodeRecord(FenceRecord r, int[] roster, int[] args)
+        /// roster, round arguments, send stamp]. A round message carries the
+        /// round's six arguments and its sender's ServerTimestamp at the raise
+        /// (the value PUN writes into an RPC as key 2), so every seat applies
+        /// the round under one stamp; the decision also carries its roster;
+        /// the mirror and the snapshot carry neither (empty arrays, stamp 0).</summary>
+        internal static object[] EncodeRecord(FenceRecord r, int[] roster, int[] args, int stamp)
         {
             return new object[]
             {
                 WireVersion, r.Gid, r.TargetRounds, r.EndFlag, r.BaseWinner, r.BaseWinnerRounds, r.BaseOtherRounds,
-                r.BaseTarget, r.Spectatable, roster ?? new int[0], args ?? new int[0],
+                r.BaseTarget, r.Spectatable, roster ?? new int[0], args ?? new int[0], stamp,
             };
         }
 
         /// <summary>Every slot is required and typed; a carrier missing any
         /// field of 4.3 is refused whole (F11).</summary>
-        internal static bool TryDecodeRecord(object[] o, out FenceRecord r, out int[] roster, out int[] args)
+        internal static bool TryDecodeRecord(object[] o, out FenceRecord r, out int[] roster, out int[] args, out int stamp)
         {
             r = default(FenceRecord);
             roster = null;
             args = null;
+            stamp = 0;
             if (o == null || o.Length != WireSlots) return false;
             if (!(o[0] is int) || (int)o[0] != WireVersion) return false;
             var gid = o[1] as string;
@@ -200,6 +207,7 @@ namespace CompetitiveRounds
             var ar = o[10] as int[];
             if (ro == null || ar == null) return false;
             if (ar.Length != 0 && ar.Length != 6) return false;
+            if (!(o[11] is int)) return false;
             var seen = new HashSet<int>();
             foreach (var a in ro)
                 if (a <= 0 || !seen.Add(a)) return false;
@@ -210,6 +218,7 @@ namespace CompetitiveRounds
             };
             roster = ro;
             args = ar;
+            stamp = (int)o[11];
             return true;
         }
 

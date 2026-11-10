@@ -3744,6 +3744,10 @@ namespace CompetitiveRounds
             try { WeaponCooldownReset.StageCapability("tick"); } catch { }
             // Ask 16(a) R4: the deal's bound stages cr_deal1 the same way.
             try { BoundedDeal.StageCapability("tick"); } catch { }
+            // Ask 16(a) lane 2: the fence's event hook, then cr_lim1 staged the
+            // same one-shot pre-join way (the staging needs the hook).
+            try { LimitlessFence.HookFenceEvents(); } catch { }
+            try { LimitlessFence.StageFenceCapability("tick"); } catch { }
             // Same one-shot pre-join stage for the saw-targeting capability
             // (bug #380's gated half). Self-guarded, so this is free once staged.
             try { SawTargetSync.StageCapability("tick"); } catch { }
@@ -3866,6 +3870,7 @@ namespace CompetitiveRounds
                         try { ProximityVictimGate.RepublishCapability(); } catch { }
                         try { WeaponCooldownReset.RevokeCapability(); } catch { }
                         try { BoundedDeal.RevokeCapability(); } catch { }
+                        try { LimitlessFence.RevokeFenceCapability(); } catch { }
                         try { SawTargetSync.RevokeCapability(); } catch { }
                         // Same for the DC-election capability: a disabled mod runs no
                         // election at all, and a peer counting us as a census seat

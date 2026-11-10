@@ -1688,7 +1688,10 @@ FIX5_ENDS = [
     ('harmony-Keybinds.cs-ReadyUpPatch.Cleanup-8-CharacterSelectionInstance.ReadyUp', 'harmony:Keybinds.cs:ReadyUpPatch.Cleanup#8(CharacterSelectionInstance.ReadyUp)', 'Keybinds.cs:Cleanup#8'),
     ('harmony-Keybinds.cs-ResetMenuPatch.Cleanup-5-CharacterSelectionInstance.ResetMenu', 'harmony:Keybinds.cs:ResetMenuPatch.Cleanup#5(CharacterSelectionInstance.ResetMenu)', 'Keybinds.cs:Cleanup#5'),
     ('harmony-Keybinds.cs-StartPickingPatch.Cleanup-7-CharacterSelectionInstance.StartPicking', 'harmony:Keybinds.cs:StartPickingPatch.Cleanup#7(CharacterSelectionInstance.StartPicking)', 'Keybinds.cs:Cleanup#7'),
-    ('harmony-LimitlessFence.cs-LimitlessFence_GameStart_Patch.Prefix-GM_ArmsRace.DoStartGame', 'harmony:LimitlessFence.cs:LimitlessFence_GameStart_Patch.Prefix(GM_ArmsRace.DoStartGame)', 'LimitlessFence.cs:Prefix'),
+    ('harmony-LimitlessFence.cs-LimitlessFence_GameStart_Patch.Cleanup-1-GM_ArmsRace.DoStartGame', 'harmony:LimitlessFence.cs:LimitlessFence_GameStart_Patch.Cleanup#1(GM_ArmsRace.DoStartGame)', 'LimitlessFence.cs:Cleanup#1'),
+    ('harmony-LimitlessFence.cs-LimitlessFence_GameStart_Patch.Prefix-1-GM_ArmsRace.DoStartGame', 'harmony:LimitlessFence.cs:LimitlessFence_GameStart_Patch.Prefix#1(GM_ArmsRace.DoStartGame)', 'LimitlessFence.cs:Prefix#1'),
+    ('harmony-LimitlessFence.cs-LimitlessFence_RawRound_Patch.Cleanup-2-GM_ArmsRace.RPCA_NextRound', 'harmony:LimitlessFence.cs:LimitlessFence_RawRound_Patch.Cleanup#2(GM_ArmsRace.RPCA_NextRound)', 'LimitlessFence.cs:Cleanup#2'),
+    ('harmony-LimitlessFence.cs-LimitlessFence_RawRound_Patch.Prefix-2-GM_ArmsRace.RPCA_NextRound', 'harmony:LimitlessFence.cs:LimitlessFence_RawRound_Patch.Prefix#2(GM_ArmsRace.RPCA_NextRound)', 'LimitlessFence.cs:Prefix#2'),
     ('harmony-MusicEngine.cs-MusicSuppressionPatch.PlayIngamePrefix', 'harmony:MusicEngine.cs:MusicSuppressionPatch.PlayIngamePrefix(?)', 'MusicEngine.cs:PlayIngamePrefix'),
     ('harmony-MusicEngine.cs-MusicSuppressionPatch.PlayMainMenuPrefix', 'harmony:MusicEngine.cs:MusicSuppressionPatch.PlayMainMenuPrefix(?)', 'MusicEngine.cs:PlayMainMenuPrefix'),
     ('harmony-NetworkReplicaDiagnostics.cs-NetworkReplicaSerializationObserverPatch.AfterSpectatorMute', 'harmony:NetworkReplicaDiagnostics.cs:NetworkReplicaSerializationObserverPatch.AfterSpectatorMute(?)', 'NetworkReplicaDiagnostics.cs:AfterSpectatorMute'),
@@ -1927,7 +1930,7 @@ PIN5 = "backend/tests/test_keybind_surfaces.py::test_h1_fix5_each_unresolved_end
 def test_h1_fix5_the_end_table_is_every_unresolved_end_beyond_the_four(attach4):
     st, cman, att, aman = attach4
     names = [n for i, n, m in FIX5_ENDS]
-    assert len(names) == len(set(names)) == len({i for i, n, m in FIX5_ENDS}) == 1148
+    assert len(names) == len(set(names)) == len({i for i, n, m in FIX5_ENDS}) == 1151
     extra = set(att["unresolved"]) - set(names)
     assert len(extra) == 4 and RESET_MENU in extra, sorted(extra)
     assert set(names) <= set(att["unresolved"]), sorted(set(names) - set(att["unresolved"]))

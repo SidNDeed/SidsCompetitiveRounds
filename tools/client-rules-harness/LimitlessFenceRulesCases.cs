@@ -31,13 +31,14 @@ namespace CompetitiveRounds
             internal Func<IList<int>, int> EndTarget = R.EndTarget;
             internal Func<R.FencePhase, bool, R.FencePhase> NextState = R.NextState;
             internal Func<bool, R.FencePhase, bool, bool> RefuseRawRound = R.RefuseRawRound;
-            internal Func<R.FenceRecord, int[], int[], object[]> Encode = R.EncodeRecord;
+            internal Func<R.FenceRecord, int[], int[], int, object[]> Encode = R.EncodeRecord;
             internal Func<bool, bool, string, R.GidLedger, bool> ShouldMint = R.ShouldMint;
             internal Action<R.GidLedger, string> End = (l, g) => l.EndGid(g);
             internal Func<R.GidLedger, string, bool> StartGame = (l, g) => l.AtOwnGameStart(g);
             internal Func<R.GidLedger, string, R.GidLedger> Adopt = (l, g) => { l.AdoptRelayed(g); return l; };
             internal Func<R.GidLedger, R.GidLedger> ExitRoom = l => { l.ExitRoom(); return l; };
             internal Func<bool, bool, string, R.GidLedger, bool> AdoptOnArrival = R.AdoptOnArrival;
+            internal Action<Func<int>, Action<int>, int, Action> RunInFrame = ScopedFrame.RunInFrame<int>;
         }
 
         private const string G1 = "0123456789abcdef";
@@ -56,6 +57,7 @@ namespace CompetitiveRounds
 
         private static readonly int[] Args = { 0, 1, 2, 3, 4, 5 };
         private static readonly int[] Roster = { 3, 1, 2 };
+        private const int Stamp = -1234567;   // any int is a stamp
 
         private static object[] With(object[] o, int slot, object value)
         {
@@ -68,7 +70,8 @@ namespace CompetitiveRounds
         {
             R.FenceRecord r;
             int[] ro, ar;
-            return R.TryDecodeRecord(o, out r, out ro, out ar);
+            int st;
+            return R.TryDecodeRecord(o, out r, out ro, out ar, out st);
         }
 
         private static R.DecisionInputs Ok()
@@ -160,10 +163,11 @@ namespace CompetitiveRounds
                 !f.AdoptOnArrival(true, true, G1, LiveLedger(G1)) && !f.AdoptOnArrival(true, true, "x", new R.GidLedger()));
 
             // the carrier (F11)
-            var enc = f.Encode(Rec(), Roster, Args);
+            var enc = f.Encode(Rec(), Roster, Args, Stamp);
             R.FenceRecord back;
             int[] bro, bar;
-            bool dec = R.TryDecodeRecord(enc, out back, out bro, out bar);
+            int bst;
+            bool dec = R.TryDecodeRecord(enc, out back, out bro, out bar, out bst);
             var want = Rec();
             add("carrier: the gid round-trips", dec && back.Gid == want.Gid);
             add("carrier: the target round-trips", dec && back.TargetRounds == want.TargetRounds);
@@ -175,7 +179,8 @@ namespace CompetitiveRounds
             add("carrier: the spectatable flag round-trips", dec && back.Spectatable == want.Spectatable);
             add("carrier: the roster round-trips", dec && bro != null && bro.Length == 3 && bro[0] == 3 && bro[2] == 2);
             add("carrier: the round's arguments round-trip", dec && bar != null && bar.Length == 6 && bar[5] == 5);
-            var good = R.EncodeRecord(Rec(), Roster, Args);
+            add("carrier: the send stamp round-trips", dec && bst == Stamp);
+            var good = R.EncodeRecord(Rec(), Roster, Args, Stamp);
             bool everyNullRefused = true, everyTypeRefused = true;
             for (int i = 0; i < R.WireSlots; i++)
             {
@@ -191,7 +196,7 @@ namespace CompetitiveRounds
             add("carrier: five arguments, or a roster with 0, a negative or a repeated actor, is refused",
                 !Decodes(With(good, 10, new int[5])) && !Decodes(With(good, 9, new[] { 0 }))
                 && !Decodes(With(good, 9, new[] { -2 })) && !Decodes(With(good, 9, new[] { 4, 4 })));
-            add("carrier: the mirror's form (no roster, no arguments) decodes", Decodes(R.EncodeRecord(Rec(), null, null)));
+            add("carrier: the mirror's form (no roster, no arguments) decodes", Decodes(R.EncodeRecord(Rec(), null, null, 0)));
 
             // targets and states (5.1, 4.3)
             add("target: a live record plays to base + 50", R.ContinueTarget(5) == 55);
@@ -269,13 +274,30 @@ namespace CompetitiveRounds
                 !f.RosterMatches(new[] { 1, 2 }, new[] { 1, 2, 3 }) && !f.RosterMatches(new[] { 1, 2, 3, 4 }, new[] { 1, 2, 3 }));
             add("roster: a duplicate entry never matches", !f.RosterMatches(new[] { 1, 1 }, new[] { 1, 2 }));
             add("roster: an empty roster never matches", !f.RosterMatches(new int[0], new int[0]));
+            // the scoped frame (4.7 step 5): PoisonRpcStampPatch.RunStamped
+            int rpcFrame = 3, seenInside = 0;
+            f.RunInFrame(() => rpcFrame, v => rpcFrame = v, 5, () => { seenInside = rpcFrame; });
+            add("frame: inside an RPC's frame the call sees its own, and the RPC's comes back", seenInside == 5 && rpcFrame == 3);
+            int depth = 0, seenInner = 0, afterInner = 0;
+            f.RunInFrame(() => depth, v => depth = v, 1, () =>
+            {
+                f.RunInFrame(() => depth, v => depth = v, 2, () => { seenInner = depth; });
+                afterInner = depth;
+            });
+            add("frame: a frame nested in another restores each level", seenInner == 2 && afterInner == 1 && depth == 0);
+            int thrownFrame = 4;
+            bool propagated = false;
+            try { f.RunInFrame(() => thrownFrame, v => thrownFrame = v, 8, () => { throw new InvalidOperationException("inside"); }); }
+            catch (InvalidOperationException) { propagated = true; }
+            add("frame: an exception inside the call restores the frame", thrownFrame == 4);
+            add("frame: the exception still reaches the caller", propagated);
             return c;
         }
 
         private static readonly string[] SlotName =
         {
             null, "the gid", "the target", "the end flag", "the base winner", "the winner's rounds",
-            "the other side's rounds", "the base target", "the spectatable flag", "the roster", "the round's arguments",
+            "the other side's rounds", "the base target", "the spectatable flag", "the roster", "the round's arguments", "the send stamp",
         };
 
         private static readonly string[] SlotCase =
@@ -284,7 +306,7 @@ namespace CompetitiveRounds
             "carrier: the base winner round-trips", "carrier: the winner's rounds round-trip",
             "carrier: the other side's rounds round-trip", "carrier: the base target round-trips",
             "carrier: the spectatable flag round-trips", "carrier: the roster round-trips",
-            "carrier: the round's arguments round-trip",
+            "carrier: the round's arguments round-trip", "carrier: the send stamp round-trips",
         };
 
         /// <summary>A carrier that loses one field: the slot keeps a valid value
@@ -292,7 +314,7 @@ namespace CompetitiveRounds
         /// can see the loss.</summary>
         private static object[] Omit(object[] o, int slot)
         {
-            object[] lost = { null, "0000000000000000", 1, false, 0, 0, 0, 1, false, new int[0], new int[0] };
+            object[] lost = { null, "0000000000000000", 1, false, 0, 0, 0, 1, false, new int[0], new int[0], 0 };
             return With(o, slot, lost[slot]);
         }
 
@@ -409,11 +431,25 @@ namespace CompetitiveRounds
             Control(r, "arrival ignores the ended set",
                     Cases(new Fns { AdoptOnArrival = (a, s, v, l) => R.IsGid(v) && v != l.CurrentGid && (a || s) }),
                     "arrival: a value this seat has ended is never adopted");
+            Control(r, "the frame is never set",
+                    Cases(new Fns { RunInFrame = (g, s, v, call) => call() }),
+                    "frame: inside an RPC's frame the call sees its own, and the RPC's comes back",
+                    "frame: a frame nested in another restores each level");
+            Control(r, "the frame is restored without a finally",
+                    Cases(new Fns { RunInFrame = (g, s, v, call) => { var sv = g(); s(v); call(); s(sv); } }),
+                    "frame: an exception inside the call restores the frame");
+            Control(r, "the frame is cleared, not restored",
+                    Cases(new Fns { RunInFrame = (g, s, v, call) => { s(v); try { call(); } finally { s(0); } } }),
+                    "frame: inside an RPC's frame the call sees its own, and the RPC's comes back",
+                    "frame: a frame nested in another restores each level");
+            Control(r, "the exception is swallowed",
+                    Cases(new Fns { RunInFrame = (g, s, v, call) => { var sv = g(); s(v); try { call(); } catch (Exception) { } finally { s(sv); } } }),
+                    "frame: the exception still reaches the caller");
             for (int i = 1; i < R.WireSlots; i++)
             {
                 int slot = i;
                 Control(r, "the carrier drops " + SlotName[slot],
-                        Cases(new Fns { Encode = (rec, ro, ar) => Omit(R.EncodeRecord(rec, ro, ar), slot) }),
+                        Cases(new Fns { Encode = (rec, ro, ar, st) => Omit(R.EncodeRecord(rec, ro, ar, st), slot) }),
                         SlotCase[slot]);
             }
             return r;

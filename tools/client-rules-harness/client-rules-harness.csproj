@@ -196,6 +196,7 @@
     <Compile Include="../../plugin/LimitlessBounds.cs" />
     <Compile Include="LimitlessBoundsCases.cs" />
     <Compile Include="../../plugin/LimitlessFenceRules.cs" />
+    <Compile Include="../../plugin/ScopedFrame.cs" />
     <Compile Include="LimitlessFenceRulesCases.cs" />
   </ItemGroup>
 

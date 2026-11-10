@@ -232,6 +232,9 @@ namespace CompetitiveRounds
                                    int p1PointsSet, int p2PointsSet,
                                    int p1RoundsSet, int p2RoundsSet)
         {
+            // Ask 16(a) lane 2 (v4 4.4, F3): the fence's raw-round refusal comes first.
+            // A refused call tears nothing down, so it opens no probe window.
+            if (LimitlessFence.RawRoundRefused("spectator prefix")) return false;
             // Measurement window for the round-teardown question, opened
             // ABOVE the gate on purpose: the seat under suspicion is the one
             // this prefix suppresses, and a diagnostic placed inside the

@@ -1,4 +1,6 @@
 using System;
+using System.Collections.Generic;
+using System.Reflection;
 using System.Security.Cryptography;
 using HarmonyLib;
 using Photon.Pun;
@@ -6,10 +8,11 @@ using Photon.Pun;
 namespace CompetitiveRounds
 {
     /// <summary>
-    /// Ask 16(a) lane 2, design v4 (md5 4283f353) 4.2 and 4.3: the game's
-    /// identity, the seat's epoch and its handoff count, wired to Photon's
-    /// edges. The rules are LimitlessFenceRules; this class holds the seat's
-    /// state and reads the room.
+    /// Ask 16(a) lane 2, design v4 (md5 4283f353) 4.2 to 4.7: the game's
+    /// identity, the seat's epoch and its handoff count, the capability, the
+    /// record and the fence's message, wired to Photon's edges. The rules are
+    /// LimitlessFenceRules; this class holds the seat's state and reads the
+    /// room.
     /// - The gid is the room property cr_lgid. The creating seat stamps a first
     ///   value into the room's initial properties. Each physical game mints a
     ///   new one by compare-and-set, in the game-start prefix below.
@@ -25,6 +28,12 @@ namespace CompetitiveRounds
     internal static class LimitlessFence
     {
         internal const string GidKey = "cr_lgid";
+
+        /// <summary>4.3, F2: the mirror for joiners, holding the whole record.</summary>
+        internal const string RecordKey = "cr_lrec";
+
+        /// <summary>4.7, R2: a fighter's opt-in, holding the gid it opts into.</summary>
+        internal const string OptInKey = "cr_limitless";
 
         private static readonly LimitlessFenceRules.GidLedger _ledger = new LimitlessFenceRules.GidLedger();
         private static int _epoch;
@@ -85,6 +94,8 @@ namespace CompetitiveRounds
         /// room's properties.</summary>
         internal static void NoteJoinedRoom()
         {
+            RetireRecord("join");
+            _uncoveredLeaving = false;
             _startedInRoom = false;
             _spectatorBoundaryDue = false;
             _awaiting = true;
@@ -97,6 +108,8 @@ namespace CompetitiveRounds
         {
             _epoch++;
             _ledger.ExitRoom();
+            RetireRecord("room exit");
+            _uncoveredLeaving = false;
             _awaiting = false;
             _startedInRoom = false;
             _spectatorBoundaryDue = false;
@@ -118,6 +131,7 @@ namespace CompetitiveRounds
         /// Then the master mints over a value it has ended.</summary>
         internal static void NoteOwnGameStart()
         {
+            RetireRecord("game start");
             _epoch++;
             _startedInRoom = true;
             _spectatorBoundaryDue = false;
@@ -149,6 +163,7 @@ namespace CompetitiveRounds
             if (!_spectatorBoundaryDue) return;
             _spectatorBoundaryDue = false;
             _epoch++;
+            RetireRecord("spectator boundary");
             TryAdopt(RoomGid(), "spectator boundary");
             Plugin.Log.LogInfo("[LIMIT] spectator next game: epoch=" + _epoch + " gid=" + GidPrefix(CurrentLiveGid));
         }
@@ -165,6 +180,7 @@ namespace CompetitiveRounds
             if (!LimitlessFenceRules.AdoptOnArrival(_awaiting, RoomActors.LocalIsSpectator, value, _ledger)) return;
             if (!_ledger.AdoptRelayed(value)) return;
             _awaiting = false;
+            RetireRecord("new gid");
             Plugin.Log.LogInfo("[LIMIT] adopted gid " + GidPrefix(value) + " (" + why + ")");
         }
 
@@ -190,6 +206,367 @@ namespace CompetitiveRounds
             {
                 Plugin.Log.LogWarning("[LIMIT] mint (" + why + ") failed: " + ex.Message);
             }
+        }
+
+        // ------------------------------------------------------------------ the capability (4.7)
+
+        /// <summary>The capability: the pre-join player property cr_lim1,
+        /// holding section 2's version (LimitlessBounds.Version). It is staged
+        /// out of a room only and never changed in one, so it arrives with the
+        /// join (lesson 287). Spectators stage it too. A key is never reused for
+        /// changed semantics: a change to the fence's protocol takes cr_lim2.</summary>
+        internal const string CapabilityProp = "cr_lim1";
+
+        /// <summary>Set by each patch's Harmony cleanup, and only when it
+        /// attached. A client never advertises a rule it cannot run (#83).</summary>
+        internal static bool GameStartLive;
+        internal static bool RawRoundLive;
+        internal static bool FencePatchesLive { get { return GameStartLive && RawRoundLive && _hooked; } }
+
+        private static bool _staged;
+        private static bool _stageFailedPermanently;
+
+        /// <summary>BoundedDeal.StageCapability's state rules: refuse in a room,
+        /// merge only from an idle client state, one-shot, retried from the
+        /// persistent tick, and only after the compat verdict.</summary>
+        internal static void StageFenceCapability(string source)
+        {
+            try
+            {
+                if (_staged || _stageFailedPermanently) return;
+                if (!GameStartLive || !RawRoundLive)
+                {
+                    _stageFailedPermanently = true;
+                    Plugin.Log.LogError("[LIMIT] a fence patch did NOT attach - the continuation is disabled for this session");
+                    return;
+                }
+                if (!_hooked) return;   // the tick retries the hook first
+                if (!Plugin.compatCheckComplete) return;
+                if (Plugin.modDisabled) { _stageFailedPermanently = true; return; }
+                if (PhotonNetwork.InRoom)
+                {
+                    Plugin.Log.LogError("[LIMIT] refusing to stage while in a room (" + source
+                        + ") - an in-room write is the racy path this protocol forbids");
+                    return;
+                }
+                var st = PhotonNetwork.NetworkClientState;
+                if (st != Photon.Realtime.ClientState.Disconnected
+                    && st != Photon.Realtime.ClientState.PeerCreated
+                    && st != Photon.Realtime.ClientState.ConnectedToMasterServer
+                    && st != Photon.Realtime.ClientState.JoinedLobby)
+                    return;   // connecting or joining: a merge here can go undelivered
+                var local = PhotonNetwork.LocalPlayer;
+                if (local == null) return;
+                string version = LimitlessBounds.Version;
+                local.SetCustomProperties(new ExitGames.Client.Photon.Hashtable { { CapabilityProp, version } });
+                _staged = true;
+                Plugin.Log.LogInfo("[LIMIT] staged " + CapabilityProp + "=" + version + " pre-join (" + source + ", state=" + st + ")");
+            }
+            catch (Exception ex)
+            {
+                _stageFailedPermanently = true;
+                Plugin.Log.LogError("[LIMIT] staging failed, the continuation is disabled for this session: " + ex.Message);
+            }
+        }
+
+        /// <summary>Withdraw on compat-disable: peers must not count this seat
+        /// capable when the fence will not run.</summary>
+        internal static void RevokeFenceCapability()
+        {
+            try
+            {
+                if (!_staged) return;
+                _staged = false;
+                _stageFailedPermanently = true;   // never re-stage this session
+                var local = PhotonNetwork.LocalPlayer;
+                if (local == null) return;
+                local.SetCustomProperties(new ExitGames.Client.Photon.Hashtable { { CapabilityProp, "" } });
+                Plugin.Log.LogWarning("[LIMIT] revoked " + CapabilityProp + " - mod disabled, every game ends at its base");
+            }
+            catch (Exception ex) { Plugin.Log.LogWarning("[LIMIT] revoke failed: " + ex.Message); }
+        }
+
+        // ------------------------------------------------------------------ replicated reads (4.7, F4)
+
+        /// <summary>The fighters' actor numbers, from replicated inputs only:
+        /// the raw PhotonNetwork.PlayerList filtered by the replicated spectator
+        /// role, as the capability quorums read it (VanillaFixes.cs:3807), never
+        /// RoomActors.ActiveFighters, whose frozen roster is local state.</summary>
+        internal static List<int> ReplicatedFighters()
+        {
+            var o = new List<int>();
+            var list = PhotonNetwork.PlayerList;
+            if (list == null) return o;
+            for (int i = 0; i < list.Length; i++)
+            {
+                var a = list[i];
+                if (a != null && !RoomActors.IsSpectatorReplicated(a)) o.Add(a.ActorNumber);
+            }
+            return o;
+        }
+
+        /// <summary>Every fighter's opt-in (cr_limitless), as replicated. A
+        /// missing or non-string value reads null, which matches no gid.</summary>
+        internal static List<string> FighterOptIns()
+        {
+            var o = new List<string>();
+            var list = PhotonNetwork.PlayerList;
+            if (list == null) return o;
+            for (int i = 0; i < list.Length; i++)
+            {
+                var a = list[i];
+                if (a == null || RoomActors.IsSpectatorReplicated(a)) continue;
+                object v = null;
+                if (a.CustomProperties != null) a.CustomProperties.TryGetValue(OptInKey, out v);
+                o.Add(v as string);
+            }
+            return o;
+        }
+
+        /// <summary>Every actor's capability, spectators included (4.7, 3).</summary>
+        internal static List<string> ActorCapabilities()
+        {
+            var o = new List<string>();
+            var list = PhotonNetwork.PlayerList;
+            if (list == null) return o;
+            for (int i = 0; i < list.Length; i++)
+            {
+                var a = list[i];
+                if (a == null) continue;
+                object v = null;
+                if (a.CustomProperties != null) a.CustomProperties.TryGetValue(CapabilityProp, out v);
+                o.Add(v as string);
+            }
+            return o;
+        }
+
+        // ------------------------------------------------------------------ the record (4.3)
+
+        private static bool _hasRecord;
+        private static LimitlessFenceRules.FenceRecord _record;
+        private static LimitlessFenceRules.FencePhase _state;
+        private static bool _fenceCall;
+        private static readonly HashSet<string> _refusalLogged = new HashSet<string>(StringComparer.Ordinal);
+
+        internal static bool HasRecord { get { return _hasRecord; } }
+        internal static LimitlessFenceRules.FencePhase RecordState { get { return _state; } }
+        internal static LimitlessFenceRules.FenceRecord CurrentRecord { get { return _record; } }
+
+        /// <summary>Live or terminating: the state every refusal reads.</summary>
+        internal static bool RecordOpen
+        {
+            get { return _hasRecord && _state != LimitlessFenceRules.FencePhase.PhaseEnded; }
+        }
+
+        /// <summary>4.3: retired before anything of the next physical game runs
+        /// (the game-start prefix, a spectator's boundary), when the seat adopts
+        /// a new gid, and at room exit.</summary>
+        internal static void RetireRecord(string why)
+        {
+            _refusalLogged.Clear();
+            if (!_hasRecord) return;
+            _hasRecord = false;
+            _state = LimitlessFenceRules.FencePhase.PhaseLive;
+            _record = default(LimitlessFenceRules.FenceRecord);
+            Plugin.Log.LogInfo("[LIMIT] record retired (" + why + ")");
+        }
+
+        /// <summary>4.4, F3: while this seat holds a live or terminating record,
+        /// every call of RPCA_NextRound that the fence's handler did not make is
+        /// refused. Every sibling that changes state on that call reads this as
+        /// its first statement.</summary>
+        internal static bool RawRoundRefused(string site)
+        {
+            if (!LimitlessFenceRules.RefuseRawRound(_hasRecord, _state, _fenceCall)) return false;
+            if (_refusalLogged.Add(site))
+                Plugin.Log.LogWarning("[LIMIT] a raw round call was refused (" + site + "): the record is " + _state);
+            return true;
+        }
+
+        // ------------------------------------------------------------------ the message (4.4, 4.7)
+
+        /// <summary>The fence's message: a raised event (47, 49 and 51-58 are
+        /// the mod's other codes).</summary>
+        internal const byte EvtFence = 59;
+
+        private static bool _hooked;
+
+        internal static void HookFenceEvents()
+        {
+            if (_hooked) return;
+            try
+            {
+                if (PhotonNetwork.NetworkingClient == null) return;
+                PhotonNetwork.NetworkingClient.EventReceived += OnFenceEvent;
+                _hooked = true;
+            }
+            catch { }
+        }
+
+        /// <summary>4.4, F9: ReceiverGroup.All, so the sender applies its own
+        /// message as the server relays it, in the same order as every other
+        /// seat; reliable, on channel 0 (SendOptions.SendReliable's channel).</summary>
+        internal static bool RaiseFence(object[] payload)
+        {
+            var opts = new Photon.Realtime.RaiseEventOptions { Receivers = Photon.Realtime.ReceiverGroup.All };
+            return PhotonNetwork.RaiseEvent(EvtFence, payload, opts, ExitGames.Client.Photon.SendOptions.SendReliable);
+        }
+
+        private static void OnFenceEvent(ExitGames.Client.Photon.EventData ev)
+        {
+            if (ev == null || ev.Code != EvtFence) return;
+            try { HandleFenceEvent(ev.Sender, ev.CustomData as object[]); }
+            catch (Exception ex) { Plugin.Log.LogWarning("[LIMIT] fence message: " + ex.Message); }
+        }
+
+        /// <summary>
+        /// 4.7's handler, on every seat, the sender's echo included. The order is
+        /// LimitlessFenceRules.HandleFenceMessage's:
+        /// 1. the sender is the master now;
+        /// 2. the gid is live here and its record is not ended;
+        /// 3. vanilla's own transition guard drops before the record changes;
+        /// 4. a seat with no record compares the decision roster with its own
+        ///    replicated roster.
+        /// Then come the record, the target and the master's mirror. Only after
+        /// them does the round apply, through vanilla's RPCA_NextRound with the
+        /// fence's flag set.
+        /// </summary>
+        internal static void HandleFenceEvent(int sender, object[] data)
+        {
+            LimitlessFenceRules.FenceRecord rec;
+            int[] roster, args;
+            int stamp;
+            if (!LimitlessFenceRules.TryDecodeRecord(data, out rec, out roster, out args, out stamp) || args.Length != 6)
+            {
+                // F11: a message without every field is refused whole. One from
+                // the current master is a case the fence does not cover (4.7), so
+                // this seat takes its terminal path; one from any other seat
+                // applies nothing, as at step 1. A build on another wire format
+                // never passes the decision: WireVersion is the feature's protocol,
+                // which cr_lim1 carries.
+                var m = PhotonNetwork.MasterClient;
+                bool fromMaster = m != null && m.ActorNumber == sender;
+                Plugin.Log.LogWarning("[LIMIT] a fence message without every field was refused whole (F11), from "
+                    + (fromMaster ? "the master: an uncovered case" : "a seat that is not the master"));
+                if (fromMaster) TakeUncoveredPath();
+                return;
+            }
+            var gm = GM_ArmsRace.instance;
+            bool ffa = FfaMode.EngineActive();
+            var master = PhotonNetwork.MasterClient;
+            bool same = _hasRecord && string.Equals(_record.Gid, rec.Gid, StringComparison.Ordinal);
+            var h = new LimitlessFenceRules.HandlerInputs
+            {
+                SenderIsMasterNow = master != null && master.ActorNumber == sender,
+                MessageGid = rec.Gid,
+                Ledger = _ledger,
+                HasRecord = same,
+                RecordEnded = same && _state == LimitlessFenceRules.FencePhase.PhaseEnded,
+                TransitionGuardDrops = gm == null || (ffa ? FfaMode.FenceTransitionGuard() : gm.isTransitioning),
+                DecisionRoster = roster,
+                OwnFighterRoster = ReplicatedFighters(),
+            };
+            var outcome = LimitlessFenceRules.HandleFenceMessage(h);
+            switch (outcome)
+            {
+                case LimitlessFenceRules.HandlerOutcome.RefuseNotMaster:
+                    Plugin.Log.LogWarning("[LIMIT] refused a fence message: its sender is not the master now");
+                    return;
+                case LimitlessFenceRules.HandlerOutcome.RefuseUncovered:
+                    Plugin.Log.LogWarning("[LIMIT] refused the master's fence message: gid " + GidPrefix(rec.Gid)
+                        + " is not live here, or its record ended");
+                    TakeUncoveredPath();
+                    return;
+                case LimitlessFenceRules.HandlerOutcome.DropTransition:
+                    Plugin.Log.LogInfo("[LIMIT] dropped a fence message at vanilla's transition guard");
+                    return;
+                case LimitlessFenceRules.HandlerOutcome.ApplyAsVanilla:
+                    Plugin.Log.LogWarning("[LIMIT] the decision roster differs from this seat's: the round applies at the base");
+                    ApplyFenceRound(gm, args, stamp);
+                    return;
+            }
+            InstallRecord(rec, outcome == LimitlessFenceRules.HandlerOutcome.CreateRecord);
+            SetRecordTarget(gm, ffa, rec.TargetRounds);
+            if (PhotonNetwork.IsMasterClient) WriteRecordMirror(rec);
+            ApplyFenceRound(gm, args, stamp);
+        }
+
+        private static void InstallRecord(LimitlessFenceRules.FenceRecord rec, bool create)
+        {
+            var before = _state;
+            _state = LimitlessFenceRules.NextState(create ? LimitlessFenceRules.FencePhase.PhaseLive : _state, rec.EndFlag);
+            _record = rec;
+            _hasRecord = true;
+            if (create)
+                Plugin.Log.LogInfo("[LIMIT] record created: gid=" + GidPrefix(rec.Gid) + " target=" + rec.TargetRounds
+                    + " base=" + rec.BaseWinner + ":" + rec.BaseWinnerRounds + "-" + rec.BaseOtherRounds + "/" + rec.BaseTarget);
+            else if (_state != before)
+                Plugin.Log.LogInfo("[LIMIT] record " + _state + ": target=" + rec.TargetRounds);
+        }
+
+        /// <summary>Step 4's target: GM's roundsToWinGame or FFA's RoundsToWin.
+        /// The round pips keep the base count (lane 1's RoundPipClamp answers a
+        /// pip past the last).</summary>
+        private static void SetRecordTarget(GM_ArmsRace gm, bool ffa, int target)
+        {
+            if (ffa) FfaMode.RoundsToWin = target;
+            else if (gm != null) gm.roundsToWinGame = target;
+        }
+
+        /// <summary>4.3, F2: the mirror for joiners, written by the master only
+        /// after its own handler accepted. The write is a compare-and-set that
+        /// expects cr_lgid to hold the record's gid and the master key (248) to
+        /// hold the writer, so a write made after a mint or a handoff does not
+        /// land.</summary>
+        private static void WriteRecordMirror(LimitlessFenceRules.FenceRecord rec)
+        {
+            try
+            {
+                var room = PhotonNetwork.CurrentRoom;
+                var me = PhotonNetwork.LocalPlayer;
+                if (room == null || me == null) return;
+                room.SetCustomProperties(
+                    new ExitGames.Client.Photon.Hashtable { { RecordKey, LimitlessFenceRules.EncodeRecord(rec, null, null, 0) } },
+                    new ExitGames.Client.Photon.Hashtable
+                    {
+                        { GidKey, rec.Gid },
+                        { Photon.Realtime.GamePropertyKey.MasterClientId, me.ActorNumber },
+                    });
+            }
+            catch (Exception ex) { Plugin.Log.LogWarning("[LIMIT] mirror write failed: " + ex.Message); }
+        }
+
+        /// <summary>Step 5: the round, through vanilla's own method, marked as
+        /// the fence's call for the raw-round refusals. The call runs under the
+        /// stamp its message carries (the sender's ServerTimestamp at the
+        /// raise, one value on every seat), which PoisonRpcStampPatch reports
+        /// for the GM's view as it does an RPC's, so poison v3's point boundary
+        /// records the same stamp on every seat.</summary>
+        private static void ApplyFenceRound(GM_ArmsRace gm, int[] a, int stamp)
+        {
+            if (gm == null || a == null || a.Length != 6) return;
+            int view = gm.view != null ? gm.view.ViewID : 0;
+            _fenceCall = true;
+            try { PoisonRpcStampPatch.RunStamped(view, stamp, () => gm.RPCA_NextRound(a[0], a[1], a[2], a[3], a[4], a[5])); }
+            finally { _fenceCall = false; }
+        }
+
+        /// <summary>4.6, Table B: a refusal of the current master's message is a
+        /// case the fence does not cover. The seat leaves: a fighter through
+        /// vanilla's restart (every other seat sees a departure), a spectator by
+        /// the path a room-rules mismatch takes.</summary>
+        private static bool _uncoveredLeaving;
+
+        private static void TakeUncoveredPath()
+        {
+            if (_uncoveredLeaving) return;   // one leave; the room exit clears this
+            _uncoveredLeaving = true;
+            try
+            {
+                if (RoomActors.LocalIsSpectator) SpectatorSync.LeaveToMenu("limitless: an uncovered fence message");
+                else if (NetworkConnectionHandler.instance != null) NetworkConnectionHandler.instance.NetworkRestart();
+            }
+            catch (Exception ex) { Plugin.Log.LogWarning("[LIMIT] uncovered path: " + ex.Message); }
         }
     }
 
@@ -218,6 +595,47 @@ namespace CompetitiveRounds
             {
                 Plugin.Log.LogWarning("[LIMIT] game start: " + ex.Message);
             }
+        }
+
+        /// <summary>#83: the fence advertises its capability only while this
+        /// prefix attached (LimitlessFence.GameStartLive).</summary>
+        [HarmonyCleanup]
+        private static Exception Cleanup(MethodBase original, Exception exception)
+        {
+            if (original != null) return exception;
+            if (exception == null) LimitlessFence.GameStartLive = true;
+            return VanillaFixSupport.Cleanup("LimitlessFence game start", exception);
+        }
+    }
+
+    /// <summary>
+    /// v4 4.4, F3: while this seat holds a live or terminating record, a call of
+    /// RPCA_NextRound that the fence's handler did not make is refused. At
+    /// Priority.First this skips vanilla's body. HarmonyX runs every sibling
+    /// prefix and every postfix whatever this returns (#352), so each sibling
+    /// that changes state on the call reads the same predicate as its first
+    /// statement: FFA's prefix and HandleNextRound, the spectator prefix and
+    /// SpectatorObserveRound, PoisonSync's point boundary and the stale
+    /// projectile sweep. PointEndEvidencePatch needs none: on a refused call no
+    /// count moves and the original did not run, so PointTaken is false.
+    /// </summary>
+    [HarmonyPatch(typeof(GM_ArmsRace), "RPCA_NextRound")]
+    internal static class LimitlessFence_RawRound_Patch
+    {
+        [HarmonyPriority(Priority.First)]
+        private static bool Prefix()
+        {
+            return !LimitlessFence.RawRoundRefused("gm");
+        }
+
+        /// <summary>#83: the fence advertises its capability only while this
+        /// prefix attached (LimitlessFence.RawRoundLive).</summary>
+        [HarmonyCleanup]
+        private static Exception Cleanup(MethodBase original, Exception exception)
+        {
+            if (original != null) return exception;
+            if (exception == null) LimitlessFence.RawRoundLive = true;
+            return VanillaFixSupport.Cleanup("LimitlessFence raw round", exception);
         }
     }
 }

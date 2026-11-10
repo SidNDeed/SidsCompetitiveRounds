@@ -1638,6 +1638,9 @@ namespace CompetitiveRounds
         /// recording it retires every held v3 record now.</summary>
         internal static void NotePointBoundary(GM_ArmsRace gm)
         {
+            // Ask 16(a) lane 2 (v4 4.4, F3): a raw round the fence refused ends no point.
+            // HarmonyX runs the postfix that calls this whatever a prefix returned.
+            if (LimitlessFence.RawRoundRefused("point boundary")) return;
             bool inRoom = true;   // a fault reading the room state still records (or breaks): fail closed
             try { inRoom = PhotonNetwork.InRoom && !PhotonNetwork.OfflineMode; } catch { }
             if (!inRoom) return;
@@ -3442,6 +3445,19 @@ namespace CompetitiveRounds
         {
             ts = _cur.Ts;
             return _cur.Has && _cur.View == viewId;
+        }
+
+        /// <summary>Ask 16(a) lane 2 (v4 4.7 step 5): the continuation fence
+        /// applies a round by a direct call of RPCA_NextRound, outside any RPC.
+        /// It runs that call here, under the stamp its message carries (the
+        /// sender's ServerTimestamp at the raise: one value on every seat, as
+        /// key 2 is for an RPC), so the point boundary records the same stamp
+        /// on every seat. ScopedFrame restores the enclosing frame in a
+        /// finally, as the finalizer restores it for nested RPCs, so an
+        /// exception inside the call leaves no frame behind.</summary>
+        internal static void RunStamped(int viewId, int ts, Action call)
+        {
+            ScopedFrame.RunInFrame<Frame>(() => _cur, f => _cur = f, new Frame { Has = true, View = viewId, Ts = ts }, call);
         }
 
         private static MethodBase TargetMethod()

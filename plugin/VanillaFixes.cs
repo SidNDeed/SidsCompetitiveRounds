@@ -4103,6 +4103,7 @@ namespace CompetitiveRounds
             })]
         private static void AfterNextRound()
         {
+            if (LimitlessFence.RawRoundRefused("projectile sweep")) return;   // Ask 16(a) lane 2 (v4 4.4, F3): the fence's raw-round refusal
             // Runs in FFA too: FfaMode's prefix replaces the body (returns
             // false) but Harmony still runs postfixes, and the RPC itself is
             // the round-decided broadcast in every mode.

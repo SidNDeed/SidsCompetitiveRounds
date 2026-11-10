@@ -257,6 +257,10 @@ namespace CompetitiveRounds
         private static bool isTransitioning = false;
         private static bool pointLatched = false;      // master's point-resolution latch (find 17)
         private static bool gameOverFired = false;
+        /// <summary>Ask 16(a) lane 2 (v4 4.7 step 3): HandleNextRound's own
+        /// transition guard, read by the fence's handler, which drops a message
+        /// there before the record changes.</summary>
+        internal static bool FenceTransitionGuard() { return isTransitioning || gameOverFired; }
         /// <summary>Evidence only (merge pass 6, G1-L1): how many
         /// RPCA_NextRound calls HandleNextRound took past its gate on this
         /// seat. Never reset; PointEndEvidencePatch compares it before and
@@ -2124,6 +2128,7 @@ namespace CompetitiveRounds
         /// own MapManager RPCs; nothing else is needed.</summary>
         internal static void SpectatorObserveRound(int winnerTeam)
         {
+            if (LimitlessFence.RawRoundRefused("ffa observer")) return;   // Ask 16(a) lane 2 (v4 4.4, F3): the fence's raw-round refusal
             try
             {
                 if (!RoomActors.LocalIsSpectator) return;
@@ -2180,6 +2185,7 @@ namespace CompetitiveRounds
         /// every client from the winner id alone.</summary>
         public static void HandleNextRound(GM_ArmsRace gm, int winnerTeam)
         {
+            if (LimitlessFence.RawRoundRefused("ffa round")) return;   // Ask 16(a) lane 2 (v4 4.4, F3): the fence's raw-round refusal
             // Bug 203 funnel guard (#338): an OBSERVER seat must never run the
             // participant transition engine, whatever path called in — the
             // gameOver branch below starts vanilla GameOverTransition (the
@@ -5738,6 +5744,9 @@ namespace CompetitiveRounds
         static bool Prefix(GM_ArmsRace __instance, int losingTeamID, int winningTeamID,
                            int p1PointsSet, int p2PointsSet, int p1RoundsSet, int p2RoundsSet)
         {
+            // Ask 16(a) lane 2 (v4 4.4, F3): the fence's raw-round refusal comes first,
+            // ahead of the engine and spectator returns below.
+            if (LimitlessFence.RawRoundRefused("ffa prefix")) return false;
             if (!FfaMode.EngineActive()) return true;
             // Bug 203: HarmonyX runs EVERY prefix even after a higher-priority
             // one returns false (proven live — the spectator seat logged
