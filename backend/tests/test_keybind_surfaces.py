@@ -58,7 +58,9 @@ merged round 3 tree, with the RJ Stage 2 and readmission ends; 1137 at
 the round 3 refit tree, with the autolog fold's LogBundleCore.cs field end;
 1141 at the round 3 fold tree, with the net-stall lane's three
 using-directive ends and the stall detector's stream-snapshot field;
-1142 with the late i18n lane's ServerTextRules.cs using-directive end).
+1142 with the late i18n lane's ServerTextRules.cs using-directive end;
+1147 with ask 16(a) lane 1's three BoundedDeal.cs Harmony ends, the
+RoundPipClamp.cs prefix end and the LimitlessBounds.cs using-directive end).
 """
 from __future__ import annotations
 
@@ -1496,6 +1498,7 @@ FIX5_ENDS = [
     ('field-Keybinds.cs-MenuToggle', 'field:Keybinds.cs:MenuToggle', 'SeatEvidenceCore.cs:Block'),
     ('field-LagNotices.cs', 'field:LagNotices.cs:?', 'DamageNumberRules.cs:Text#1'),
     ('field-LetterboxClear.cs', 'field:LetterboxClear.cs:?', 'DamageNumberRules.cs:Text#1'),
+    ('field-LimitlessBounds.cs', 'field:LimitlessBounds.cs:?', 'DamageNumberRules.cs:Text#1'),
     ('field-LogBundleCore.cs', 'field:LogBundleCore.cs:?', 'DamageNumberRules.cs:Text#1'),
     ('field-LogScrub.cs', 'field:LogScrub.cs:?', 'DamageNumberRules.cs:Text#1'),
     ('field-LogScrub.cs-SepAny', 'field:LogScrub.cs:SepAny', 'LogScrub.cs:BuildSepAny'),
@@ -1568,6 +1571,9 @@ FIX5_ENDS = [
     ('harmony-AvatarDefaults.cs-AvatarCreatePlayerPatch.Prefix-PlayerAssigner.CreatePlayer', 'harmony:AvatarDefaults.cs:AvatarCreatePlayerPatch.Prefix(PlayerAssigner.CreatePlayer)', 'AvatarDefaults.cs:Prefix'),
     ('harmony-AvatarDefaults.cs-AvatarLoadFacesPatch.Postfix-1-CharacterCreatorHandler.LoadFaces', 'harmony:AvatarDefaults.cs:AvatarLoadFacesPatch.Postfix#1(CharacterCreatorHandler.LoadFaces)', 'AvatarDefaults.cs:Postfix#1'),
     ('harmony-AvatarDefaults.cs-AvatarSelectFacePatch.Postfix-2-CharacterCreatorHandler.SelectFace', 'harmony:AvatarDefaults.cs:AvatarSelectFacePatch.Postfix#2(CharacterCreatorHandler.SelectFace)', 'AvatarDefaults.cs:Postfix#2'),
+    ('harmony-BoundedDeal.cs-CardChoiceSpawnUniqueCardBoundedDealPatch.BeforeSpawnUniqueCard-CardChoice.SpawnUniqueCard', 'harmony:BoundedDeal.cs:CardChoiceSpawnUniqueCardBoundedDealPatch.BeforeSpawnUniqueCard(CardChoice.SpawnUniqueCard)', 'BoundedDeal.cs:BeforeSpawnUniqueCard'),
+    ('harmony-BoundedDeal.cs-CardChoiceSpawnUniqueCardBoundedDealPatch.Cleanup-CardChoice.SpawnUniqueCard', 'harmony:BoundedDeal.cs:CardChoiceSpawnUniqueCardBoundedDealPatch.Cleanup(CardChoice.SpawnUniqueCard)', 'BoundedDeal.cs:Cleanup'),
+    ('harmony-BoundedDeal.cs-GMArmsRaceDoStartGameBoundedDealLogPatch.BeforeDoStartGame-GM_ArmsRace.DoStartGame', 'harmony:BoundedDeal.cs:GMArmsRaceDoStartGameBoundedDealLogPatch.BeforeDoStartGame(GM_ArmsRace.DoStartGame)', 'BoundedDeal.cs:BeforeDoStartGame'),
     ('harmony-CardDrawEvidence.cs-CardDrawEvidence_CardAwakePatch.Postfix-2-CardInfo.Awake', 'harmony:CardDrawEvidence.cs:CardDrawEvidence_CardAwakePatch.Postfix#2(CardInfo.Awake)', 'CardDrawEvidence.cs:Postfix#2'),
     ('harmony-CardDrawEvidence.cs-CardDrawEvidence_DonePickingPatch.Prefix-2-CardChoice.RPCA_DonePicking', 'harmony:CardDrawEvidence.cs:CardDrawEvidence_DonePickingPatch.Prefix#2(CardChoice.RPCA_DonePicking)', 'CardDrawEvidence.cs:Prefix#2'),
     ('harmony-CardDrawEvidence.cs-CardDrawEvidence_EndPickPatch.Prefix-1-CardChoice.RPCA_DoEndPick', 'harmony:CardDrawEvidence.cs:CardDrawEvidence_EndPickPatch.Prefix#1(CardChoice.RPCA_DoEndPick)', 'CardDrawEvidence.cs:Prefix#1'),
@@ -1773,6 +1779,7 @@ FIX5_ENDS = [
     ('harmony-ProximityVictimPatches.cs-DealDamageToPlayerFreshVictimPatch.BeforeGo-1-DealDamageToPlayer.Go', 'harmony:ProximityVictimPatches.cs:DealDamageToPlayerFreshVictimPatch.BeforeGo#1(DealDamageToPlayer.Go)', 'ProximityVictimPatches.cs:BeforeGo#1'),
     ('harmony-ProximityVictimPatches.cs-StunPlayerFreshVictimPatch.BeforeGo-2-StunPlayer.Go', 'harmony:ProximityVictimPatches.cs:StunPlayerFreshVictimPatch.BeforeGo#2(StunPlayer.Go)', 'ProximityVictimPatches.cs:BeforeGo#2'),
     ('harmony-ProximityVictimPatches.cs-TeleportToOpponentFreshVictimPatch.BeforeGo-3-TeleportToOpponent.Go', 'harmony:ProximityVictimPatches.cs:TeleportToOpponentFreshVictimPatch.BeforeGo#3(TeleportToOpponent.Go)', 'ProximityVictimPatches.cs:BeforeGo#3'),
+    ('harmony-RoundPipClamp.cs-RoundCounterGetPointPosClampPatch.BeforeGetPointPos-RoundCounter.GetPointPos', 'harmony:RoundPipClamp.cs:RoundCounterGetPointPosClampPatch.BeforeGetPointPos(RoundCounter.GetPointPos)', 'RoundPipClamp.cs:BeforeGetPointPos'),
     ('harmony-SeatEvidence.cs-SeatEvidence_RpcSendPatch.Postfix', 'harmony:SeatEvidence.cs:SeatEvidence_RpcSendPatch.Postfix(?)', 'SeatEvidence.cs:Postfix'),
     ('harmony-SpectatorPatches.cs-Spectator_BoundaryObserver_Patch.Postfix-3-MapManager.RPCA_CallInNewMapAndMovePlayers', 'harmony:SpectatorPatches.cs:Spectator_BoundaryObserver_Patch.Postfix#3(MapManager.RPCA_CallInNewMapAndMovePlayers)', 'SpectatorPatches.cs:Postfix#3'),
     ('harmony-SpectatorPatches.cs-Spectator_EntryIsNotMatchFound_Patch.Prefix-23-NetworkConnectionHandler.OnPlayerEnteredRoom', 'harmony:SpectatorPatches.cs:Spectator_EntryIsNotMatchFound_Patch.Prefix#23(NetworkConnectionHandler.OnPlayerEnteredRoom)', 'SpectatorPatches.cs:Prefix#23'),
@@ -1919,7 +1926,7 @@ PIN5 = "backend/tests/test_keybind_surfaces.py::test_h1_fix5_each_unresolved_end
 def test_h1_fix5_the_end_table_is_every_unresolved_end_beyond_the_four(attach4):
     st, cman, att, aman = attach4
     names = [n for i, n, m in FIX5_ENDS]
-    assert len(names) == len(set(names)) == len({i for i, n, m in FIX5_ENDS}) == 1142
+    assert len(names) == len(set(names)) == len({i for i, n, m in FIX5_ENDS}) == 1147
     extra = set(att["unresolved"]) - set(names)
     assert len(extra) == 4 and RESET_MENU in extra, sorted(extra)
     assert set(names) <= set(att["unresolved"]), sorted(set(names) - set(att["unresolved"]))

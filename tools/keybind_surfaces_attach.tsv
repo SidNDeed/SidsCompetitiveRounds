@@ -184,6 +184,7 @@ hop	ApiClient.cs:Create	a1c9c6010c707c79	IdentityClockCore.cs:GdigUnit	ref>Ident
 hop	ApiClient.cs:Create	a3f6e838f1ed566e	MusicAssets.cs:ExtractAndVerify	ref>MusicAssets.cs:ExtractAndVerify
 hop	ApiClient.cs:Create	a51d451095e3c5d6	PortraitRenderDanceDev.cs:DanceMultiCheck	ref>PortraitRenderDanceDev.cs:DanceMultiCheck
 hop	ApiClient.cs:Create	a7ebd52844d43253	FfaMode.cs:OpenOnPromotion	ref>FfaMode.cs:OpenOnPromotion
+hop	ApiClient.cs:Create	b82ba56413f79d24	LimitlessBounds.cs:DigestOf	ref>LimitlessBounds.cs:DigestOf
 hop	ApiClient.cs:Create	bc25b53de155c5dd	CustomCosmetics.cs:LoadCosmeticSprite	ref>CustomCosmetics.cs:LoadCosmeticSprite
 hop	ApiClient.cs:Create	beab4943d049f274	EmojiSprites.cs:Sha256Hex	ref>EmojiSprites.cs:Sha256Hex
 hop	ApiClient.cs:Create	c0fe3d183ae68116	PortraitRenderDance.cs:DanceTarget	ref>PortraitRenderDance.cs:DanceTarget
@@ -1268,6 +1269,12 @@ hop	BinderSortRules.cs:Parse	aff2eb4a9a85e8c6	BinderSortRules.cs:SelfTest	ref[Ch
 hop	BinderSortRules.cs:Resolve	23a191bc177e53b4	BinderSortRules.cs:SelfTest	ref[Check(#3)]>BinderSortRules.cs:SelfTest
 hop	BinderSortRules.cs:Resolve	d2b06a5c3b1947d2	PlayerCardsUI.cs:RefreshBinder	ref>PlayerCardsUI.cs:RefreshBinder
 hop	BinderSortRules.cs:Resolve	ff5ebd38ce752c63	BinderSortRules.cs:SelfTest	ref[Check(#2)]>BinderSortRules.cs:SelfTest
+hop	BoundedDeal.cs:Describe	1cc6b2af3f7914e8	BoundedDeal.cs:TrySpawnBounded	ref>BoundedDeal.cs:TrySpawnBounded
+hop	BoundedDeal.cs:LogHeldCards	d26a39180511da1d	BoundedDeal.cs:BeforeDoStartGame	ref>BoundedDeal.cs:BeforeDoStartGame
+hop	BoundedDeal.cs:ShouldApply	f0719315645b2816	BoundedDeal.cs:TrySpawnBounded	ref>BoundedDeal.cs:TrySpawnBounded
+hop	BoundedDeal.cs:TrySpawnBounded	a1fb8c1aecb39968	BoundedDeal.cs:BeforeSpawnUniqueCard	ref>BoundedDeal.cs:BeforeSpawnUniqueCard
+hop	BoundedDealRules.cs:Decide	d708cb5276cac046	BoundedDeal.cs:TrySpawnBounded	ref>BoundedDeal.cs:TrySpawnBounded
+hop	BoundedDealRules.cs:Pick	d117a41de1df27f8	BoundedDeal.cs:TrySpawnBounded	ref>BoundedDeal.cs:TrySpawnBounded
 hop	BroadcastHud.cs:CardAbbrev	47ee831f02a35708	BroadcastHud.cs:RefreshCaches	ref>BroadcastHud.cs:RefreshCaches
 hop	BroadcastHud.cs:Draw1v1Panels	a6e6fde4056bcbd3	BroadcastHud.cs:Draw	ref>BroadcastHud.cs:Draw
 hop	BroadcastHud.cs:DrawActionRow	c3195a7b612b1a92	BroadcastHud.cs:DrawPanel	ref>BroadcastHud.cs:DrawPanel
@@ -1540,6 +1547,7 @@ hop	CardDrawEvidenceCore.cs:Record#2	a978b2f7ebad1124	FfaReadmit.cs:KindRCount	d
 hop	CardDrawEvidenceCore.cs:Record#2	ca46e094fc8469b2	RoomActors.cs:IsUnauthorized	delegate[FfaReadmitEntryRules.KindRUnauthorized(#2)/&]>RoomActors.cs:IsUnauthorized
 hop	CardDrawEvidenceCore.cs:Record#2	df44d3c898806ccf	NetworkReplicaDiagnostics.cs:Record	ref>NetworkReplicaDiagnostics.cs:Record
 hop	CardDrawEvidenceCore.cs:SamePrefix	a3e9acc2d94b4b39	CardDrawEvidenceCore.cs:CloseHand	ref>CardDrawEvidenceCore.cs:CloseHand
+hop	CardDrawEvidenceCore.cs:Spawn	2da73c1f3d6add93	BoundedDeal.cs:TrySpawnBounded	ref>BoundedDeal.cs:TrySpawnBounded
 hop	CardDrawEvidenceCore.cs:Spawn	66722cbcb9281c38	VanillaCardSequence.cs:TrySpawnShared	ref>VanillaCardSequence.cs:TrySpawnShared
 hop	CardDrawEvidenceCore.cs:Spawn	6f02046fa3b880e1	CardDrawEvidence.cs:Take	ref[case EV_SPAWN]>CardDrawEvidence.cs:Take
 hop	CardDrawEvidenceCore.cs:Spawn	fb41a885a04c01e5	CardDrawEvidenceTestDealer.cs:TryRepeat	ref>CardDrawEvidenceTestDealer.cs:TryRepeat
@@ -2315,6 +2323,7 @@ hop	CombatEvidenceCore.cs:Add#1	7d6341de25581ee4	Plugin.cs:LogBackgroundLayerSta
 hop	CombatEvidenceCore.cs:Add#1	7d66b57352918470	MusicEngine.cs:PollClipLoads	ref>MusicEngine.cs:PollClipLoads
 hop	CombatEvidenceCore.cs:Add#1	7db53cca6a994020	IdentityClockCore.cs:FlushBucket	ref>IdentityClockCore.cs:FlushBucket
 hop	CombatEvidenceCore.cs:Add#1	7e0c00bd39fbfbe6	TeamGameNumber.cs:Fetch	ref>TeamGameNumber.cs:Fetch
+hop	CombatEvidenceCore.cs:Add#1	7e12af8920b0f182	BoundedDeal.cs:Describe	ref>BoundedDeal.cs:Describe
 hop	CombatEvidenceCore.cs:Add#1	7e1bd0b0b9f2f719	FfaLateRules.cs:StampOf	ref>FfaLateRules.cs:StampOf
 hop	CombatEvidenceCore.cs:Add#1	7e2f2c14907fff38	CardDrawEvidenceCore.cs:Envelope	ref>CardDrawEvidenceCore.cs:Envelope
 hop	CombatEvidenceCore.cs:Add#1	7e35be6762a6c741	KeybindRules.cs:BuildStaticKeyScan	ref>KeybindRules.cs:BuildStaticKeyScan
@@ -2342,6 +2351,7 @@ hop	CombatEvidenceCore.cs:Add#1	84932eb536e367e5	ApiClient.cs:FetchPlayerTeamHis
 hop	CombatEvidenceCore.cs:Add#1	84bcae4707fca9bb	ApiClient.cs:ExtractJsonNumberArray	ref>ApiClient.cs:ExtractJsonNumberArray
 hop	CombatEvidenceCore.cs:Add#1	84f66ad75beae5aa	NativeUI.cs:BuildCompareBarChart	ref>NativeUI.cs:BuildCompareBarChart
 hop	CombatEvidenceCore.cs:Add#1	853df337c94fad98	CardSnapshot.cs:ResolveCard	ref>CardSnapshot.cs:ResolveCard
+hop	CombatEvidenceCore.cs:Add#1	85884551d9509aa0	LimitlessBounds.cs:DigestInput	ref>LimitlessBounds.cs:DigestInput
 hop	CombatEvidenceCore.cs:Add#1	85b08a131a07696c	NativeUI.cs:GroupBySeries	ref>NativeUI.cs:GroupBySeries
 hop	CombatEvidenceCore.cs:Add#1	85f3935d40c4ef94	MusicEngine.cs:TsRunS4Neg	ref[case 1]>MusicEngine.cs:TsRunS4Neg
 hop	CombatEvidenceCore.cs:Add#1	862d576c62a1b5fe	UnicodeFallback.cs:AddAssets	ref>UnicodeFallback.cs:AddAssets
@@ -2859,6 +2869,7 @@ hop	CombatEvidenceCore.cs:Add#2	063577e99403b2b9	SeatEvidence.cs:Adopt	ref>SeatE
 hop	CombatEvidenceCore.cs:Add#2	06f82474e9337faa	PostSessionReport.cs:Compose2v2	ref>PostSessionReport.cs:Compose2v2
 hop	CombatEvidenceCore.cs:Add#2	0733ad1be66dbbdc	PlayerCardMotionCore.cs:OnAnswer	ref>PlayerCardMotionCore.cs:OnAnswer
 hop	CombatEvidenceCore.cs:Add#2	076c0e9aa0a7a603	SessionReportView.cs:MeasureBlock	ref>SessionReportView.cs:MeasureBlock
+hop	CombatEvidenceCore.cs:Add#2	07835441e2f43868	BoundedDeal.cs:Describe	ref>BoundedDeal.cs:Describe
 hop	CombatEvidenceCore.cs:Add#2	07a7b63442c4917a	PoisonLedgerCore.cs:Begin	ref>PoisonLedgerCore.cs:Begin
 hop	CombatEvidenceCore.cs:Add#2	07b7a3bafa09af48	KeybindRules.cs:BuildStaticKeyScan	ref>KeybindRules.cs:BuildStaticKeyScan
 hop	CombatEvidenceCore.cs:Add#2	07da37f75e0232b2	KeybindRules.cs:Run	ref>KeybindRules.cs:Run
@@ -2926,6 +2937,7 @@ hop	CombatEvidenceCore.cs:Add#2	140fed95895e6619	NativeUI.cs:SubmitLfpPing	ref>N
 hop	CombatEvidenceCore.cs:Add#2	14127b90bf635bd5	PerfPatches.cs:Prefix#3	ref>PerfPatches.cs:Prefix#3
 hop	CombatEvidenceCore.cs:Add#2	146f197705d913cc	CompetitiveUI.cs:ParsePairSeries	ref>CompetitiveUI.cs:ParsePairSeries
 hop	CombatEvidenceCore.cs:Add#2	14a10ec2dcbb5ef4	DanceEmotes.cs:OwnedDanceIndexes	ref>DanceEmotes.cs:OwnedDanceIndexes
+hop	CombatEvidenceCore.cs:Add#2	14f077280e20f4ff	LimitlessBounds.cs:DigestInput	ref>LimitlessBounds.cs:DigestInput
 hop	CombatEvidenceCore.cs:Add#2	150f4a6d77269d25	DanceMotionCore.cs:Finish	ref>DanceMotionCore.cs:Finish
 hop	CombatEvidenceCore.cs:Add#2	151b423c8ac146d4	NativeUI.cs:StartCosmeticUpload	ref>NativeUI.cs:StartCosmeticUpload
 hop	CombatEvidenceCore.cs:Add#2	152603293b13fe1b	PoisonSync.cs:Fighters	ref>PoisonSync.cs:Fighters
@@ -5117,6 +5129,7 @@ hop	DamageNumberRules.cs:Count	2a1e41fb68f8db35	Plugin.cs:Prefix#8	ref>Plugin.cs
 hop	DamageNumberRules.cs:Count	2a453ce7c8f7138a	MusicEngine.cs:TsOpenAllOnly	ref>MusicEngine.cs:TsOpenAllOnly
 hop	DamageNumberRules.cs:Count	2a4c23642b095dd2	PoisonSync.cs:DrainRetired	ref[Plugin.Log.LogInfo(#0)]>PoisonSync.cs:DrainRetired
 hop	DamageNumberRules.cs:Count	2a577b0337fec828	MusicEngine.cs:MusicStatusLine	ref[I18n.TrF(#1)]>MusicEngine.cs:MusicStatusLine
+hop	DamageNumberRules.cs:Count	2a69f52094958f39	BoundedDealRules.cs:Decide	ref>BoundedDealRules.cs:Decide
 hop	DamageNumberRules.cs:Count	2a94a1008ee0207a	LagNotices.cs:RebuildLines	ref>LagNotices.cs:RebuildLines
 hop	DamageNumberRules.cs:Count	2af62e2126942ffe	NativeUI.SettingsDrive.cs:DriveW3	ref[Mathf.Max(#1)]>NativeUI.SettingsDrive.cs:DriveW3
 hop	DamageNumberRules.cs:Count	2b061bb460e1acd1	ApiClient.cs:FetchRecordsBoard	delegate[FetchCompareBoard(#2=>)/=>{}/ArraysAligned(#2)]>ApiClient.cs:FetchRecordsBoard
@@ -5157,6 +5170,7 @@ hop	DamageNumberRules.cs:Count	2fa1baf28fb6a169	NativeUI.cs:BuildAdminTab	delega
 hop	DamageNumberRules.cs:Count	2fa2a721532f732c	DamageNumberRules.cs:SelfTest	delegate[drive(#0=>)/=>{}]>DamageNumberRules.cs:SelfTest
 hop	DamageNumberRules.cs:Count	2fd8da71249d5291	ApiClient.cs:FetchOvtLeaderboard	delegate[Plugin.Instance.StartCoroutine(#0)/GetRequest(#1=>)/=>{}/Plugin.Log.LogInfo(#0)]>ApiClient.cs:FetchOvtLeaderboard
 hop	DamageNumberRules.cs:Count	2fdec1410e8017f6	NativeUI.cs:BuildLobbyMemberLine	ref>NativeUI.cs:BuildLobbyMemberLine
+hop	DamageNumberRules.cs:Count	2ff793a631181b21	BoundedDeal.cs:LogHeldCards	ref>BoundedDeal.cs:LogHeldCards
 hop	DamageNumberRules.cs:Count	2ffafe2116c5a91c	ApiClient.cs:FetchSimilarPlayers	delegate[FetchCompareBoard(#2=>)/=>{}/ArraysAligned(#0)]>ApiClient.cs:FetchSimilarPlayers
 hop	DamageNumberRules.cs:Count	309fc3f1909c076f	CompetitiveUI.cs:DrawBugReportAdminViewer	ref>CompetitiveUI.cs:DrawBugReportAdminViewer
 hop	DamageNumberRules.cs:Count	30a005b32f94f1c9	NativeUI.cs:CreateLBRow	delegate[=>{}]>NativeUI.cs:CreateLBRow
@@ -5366,6 +5380,7 @@ hop	DamageNumberRules.cs:Count	50dc7d1e9ee786cf	BroadcastHud.cs:RefreshCaches	re
 hop	DamageNumberRules.cs:Count	50ed4dac74960cb3	FfaReadmitRules.cs:FirstOf	ref>FfaReadmitRules.cs:FirstOf
 hop	DamageNumberRules.cs:Count	516ee53931434cc7	IdentityClockCore.cs:Add#1	ref>IdentityClockCore.cs:Add#1
 hop	DamageNumberRules.cs:Count	518409a1c826b9bb	CardDrawEvidenceCore.cs:SamePrefix	ref>CardDrawEvidenceCore.cs:SamePrefix
+hop	DamageNumberRules.cs:Count	5196b7d53bfc8b7e	BoundedDeal.cs:Describe	ref>BoundedDeal.cs:Describe
 hop	DamageNumberRules.cs:Count	51bbbada9cc0419d	ApiClient.cs:FetchShopSalesBoard	delegate[FetchCompareBoard(#2=>)/=>{}/ArraysAligned(#3)]>ApiClient.cs:FetchShopSalesBoard
 hop	DamageNumberRules.cs:Count	51ca1166fe28851b	PostSessionReport.cs:BuildCells1v1	ref>PostSessionReport.cs:BuildCells1v1
 hop	DamageNumberRules.cs:Count	51efc46bd5430fb6	PortraitGrade.cs:DestroyGradeObjects	ref>PortraitGrade.cs:DestroyGradeObjects
@@ -5717,6 +5732,7 @@ hop	DamageNumberRules.cs:Count	84ca3dc51eac4a73	Plugin.cs:ScanAll	ref>Plugin.cs:
 hop	DamageNumberRules.cs:Count	84e6805d6709e36d	MusicEngine.cs:VanillaTrackCount	ref>MusicEngine.cs:VanillaTrackCount
 hop	DamageNumberRules.cs:Count	8529bb67ffdf341e	VanillaFixes.cs:SweepNow#2	ref>VanillaFixes.cs:SweepNow#2
 hop	DamageNumberRules.cs:Count	852eca88f86edd6f	NativeUI.cs:BuildSeriesCards	ref[Math.Max(#1)]>NativeUI.cs:BuildSeriesCards
+hop	DamageNumberRules.cs:Count	8537125154da4e42	BoundedDeal.cs:LogHeldCards	ref[.Append(#0)]>BoundedDeal.cs:LogHeldCards
 hop	DamageNumberRules.cs:Count	857bc99c9816f86e	NativeUI.cs:RefreshMyBetsLedger	ref>NativeUI.cs:RefreshMyBetsLedger
 hop	DamageNumberRules.cs:Count	8583e60fc335dfeb	NativeUI.cs:BuildCompareGraph	ref>NativeUI.cs:BuildCompareGraph
 hop	DamageNumberRules.cs:Count	859dc04462108fc1	MusicEngine.cs:TsRestore	ref[SafeLog(#1)]>MusicEngine.cs:TsRestore
@@ -5779,6 +5795,7 @@ hop	DamageNumberRules.cs:Count	8e86a16976d0dd3b	PortraitRender.cs:SweepRefusal	r
 hop	DamageNumberRules.cs:Count	8e9651da8659c170	MailUI.cs:AddresseeNames	ref[Math.Min(#1)]>MailUI.cs:AddresseeNames
 hop	DamageNumberRules.cs:Count	8ef9f70a24cf56a4	NativeUI.cs:JoinTeamCards	ref[sb.Append(#0)/string.Join(#1)/bCards.GetRange(#1)/Math.Min(#0)]>NativeUI.cs:JoinTeamCards
 hop	DamageNumberRules.cs:Count	8efd5ca8897bdfc4	IdleShowcase.cs:ViewDataReady	ref[case ShowcaseRules.KIND_COMPARE]>IdleShowcase.cs:ViewDataReady
+hop	DamageNumberRules.cs:Count	8f051b24f52dc169	BoundedDeal.cs:TrySpawnBounded	ref>BoundedDeal.cs:TrySpawnBounded
 hop	DamageNumberRules.cs:Count	8f07b61c22025d36	IdentityClockCore.cs:SurveyFields	ref>IdentityClockCore.cs:SurveyFields
 hop	DamageNumberRules.cs:Count	8f1602b7c926e0ac	MailUI.cs:PaintChips	ref[UIFactory.SetTextRaw(#1)/San(#0)/Trunc(#1)]>MailUI.cs:PaintChips
 hop	DamageNumberRules.cs:Count	8f1fbd54cd1e241c	SpectatorSync.cs:ApplyDecks	ref[.LogWarning(#0)]>SpectatorSync.cs:ApplyDecks
@@ -6039,6 +6056,7 @@ hop	DamageNumberRules.cs:Count	b65b9c3ab54507a4	PoisonSync.cs:DrainRetired	ref>P
 hop	DamageNumberRules.cs:Count	b660134fb7dd060e	NativeUI.SettingsDrive.cs:DriveW10	ref[DrvBad(#0)]>NativeUI.SettingsDrive.cs:DriveW10
 hop	DamageNumberRules.cs:Count	b66369a79519ab47	IdleShowcase.cs:TickView	ref>IdleShowcase.cs:TickView
 hop	DamageNumberRules.cs:Count	b7268bf4a6646efd	CardTextLocalizer.cs:ScanIfNeeded	ref[Plugin.Log.LogInfo(#0)]>CardTextLocalizer.cs:ScanIfNeeded
+hop	DamageNumberRules.cs:Count	b72f8da26f5c83dc	BoundedDealRules.cs:Pick	ref>BoundedDealRules.cs:Pick
 hop	DamageNumberRules.cs:Count	b7ad034928b21523	PlayerCardsUI.cs:DrawReceived	ref[Plugin.Log.LogInfo(#0)]>PlayerCardsUI.cs:DrawReceived
 hop	DamageNumberRules.cs:Count	b825951b8cf3521d	NativeUI.cs:RefreshRecentSeries	ref>NativeUI.cs:RefreshRecentSeries
 hop	DamageNumberRules.cs:Count	b85b4f251a8143c3	ApiClient.cs:FetchBlockedPlayers	delegate[Plugin.Instance.StartCoroutine(#0)/GetRequest(#1=>)/=>{}/Plugin.Log.LogInfo(#0)]>ApiClient.cs:FetchBlockedPlayers
@@ -6404,6 +6422,7 @@ hop	DamageNumberRules.cs:Count	f63cdb0abe202c95	CardDrawEvidenceCore.cs:Budget	e
 hop	DamageNumberRules.cs:Count	f64ff9b4f10e7f48	NativeUI.cs:FfaSettingsSummaryBits	ref>NativeUI.cs:FfaSettingsSummaryBits
 hop	DamageNumberRules.cs:Count	f6ac3fa98f286232	I18n.cs:StripNamedHoles	ref>I18n.cs:StripNamedHoles
 hop	DamageNumberRules.cs:Count	f6ce6d2905e08277	ApiClient.cs:FetchAdminActions	delegate[Plugin.Instance.StartCoroutine(#0)/GetRequest(#1=>)/=>{}/Plugin.Log.LogInfo(#0)]>ApiClient.cs:FetchAdminActions
+hop	DamageNumberRules.cs:Count	f75e087098d32236	BoundedDeal.cs:TrySpawnBounded	ref[VanillaFixSupport.DiagLimited(#1)]>BoundedDeal.cs:TrySpawnBounded
 hop	DamageNumberRules.cs:Count	f7fb0a6bf0b0212d	PortraitRender.cs:BuildRig	ref[.Append(#0)]>PortraitRender.cs:BuildRig
 hop	DamageNumberRules.cs:Count	f878e8f4ab000823	NativeUI.cs:ShowRecentSeriesRows	ref[UIFactory.CreateText(#0)]>NativeUI.cs:ShowRecentSeriesRows
 hop	DamageNumberRules.cs:Count	f8b60178e70734a0	SessionReportView.cs:DrawBuilds	ref>SessionReportView.cs:DrawBuilds
@@ -6648,6 +6667,7 @@ hop	DamageNumberRules.cs:Text#1	3a920e8a5cbf1c32	AudioSelfCheck.cs:Snapshot	dele
 hop	DamageNumberRules.cs:Text#1	3ad77f72e8dafe34	field:PeerBuildCore.cs:?	field[?]>PeerBuildCore.cs:(file scope)
 hop	DamageNumberRules.cs:Text#1	3b4a439d0f899399	SecureRouteRules.cs:ReadString	delegate[&]>SecureRouteRules.cs:ReadString
 hop	DamageNumberRules.cs:Text#1	3c136e706296f6dd	FfaMode.cs:FfaPickPhase	delegate[&]>FfaMode.cs:FfaPickPhase
+hop	DamageNumberRules.cs:Text#1	3e447891bf5ee346	BoundedDeal.cs:LogHeldCards	delegate[&]>BoundedDeal.cs:LogHeldCards
 hop	DamageNumberRules.cs:Text#1	3e5b03bca6428b14	field:KeybindRules.cs:?	field[?]>KeybindRules.cs:(file scope)
 hop	DamageNumberRules.cs:Text#1	3f82c7d73ba652f2	GameStateWatcher.cs:MacroTimelineForPeer	delegate[&]>GameStateWatcher.cs:MacroTimelineForPeer
 hop	DamageNumberRules.cs:Text#1	4045f59c19df226b	field:EmojiSprites.cs:?	field[?]>EmojiSprites.cs:(file scope)
@@ -6741,6 +6761,7 @@ hop	DamageNumberRules.cs:Text#1	c40a8f1a77a8628b	PostSessionReport.cs:SanitizeSt
 hop	DamageNumberRules.cs:Text#1	c95eb07898a9f384	Plugin.cs:LogBackgroundLayerState	delegate[&]>Plugin.cs:LogBackgroundLayerState
 hop	DamageNumberRules.cs:Text#1	c9c03330c2b9ecd0	FfaMode.cs:ApplyManifestPick	delegate[&]>FfaMode.cs:ApplyManifestPick
 hop	DamageNumberRules.cs:Text#1	c9cfeb8d5f77b64b	field:NativeUI.Keybinds.cs:?	field[?]>NativeUI.Keybinds.cs:(file scope)
+hop	DamageNumberRules.cs:Text#1	ccde9cfb0b531378	field:LimitlessBounds.cs:?	field[?]>LimitlessBounds.cs:(file scope)
 hop	DamageNumberRules.cs:Text#1	cd1718d584c09241	field:TeamHoldRules.cs:?	field[?]>TeamHoldRules.cs:(file scope)
 hop	DamageNumberRules.cs:Text#1	d38d1151e48372f8	field:IdentityClockCore.cs:?	field[?]>IdentityClockCore.cs:(file scope)
 hop	DamageNumberRules.cs:Text#1	d51139b9ad496e53	NativeUI.SettingsDrive.cs:DrvPrefHash	delegate[&]>NativeUI.SettingsDrive.cs:DrvPrefHash
@@ -7991,6 +8012,7 @@ hop	FfaLateRules.cs:Add	348ee3620818e66a	Keybinds.cs:ApplyAction	ref>Keybinds.cs
 hop	FfaLateRules.cs:Add	3531e9b66745d53d	PerfPatches.cs:Hit	ref>PerfPatches.cs:Hit
 hop	FfaLateRules.cs:Add	35befe8afb6b21a9	FfaCardSequence.cs:SeedReadmit	ref>FfaCardSequence.cs:SeedReadmit
 hop	FfaLateRules.cs:Add	35eacc686ff8220f	I18n.cs:LogGameLocaleMissOnce	ref>I18n.cs:LogGameLocaleMissOnce
+hop	FfaLateRules.cs:Add	3629fdb39601c025	BoundedDeal.cs:Describe	ref>BoundedDeal.cs:Describe
 hop	FfaLateRules.cs:Add	369a6c5377cf3a9c	FfaLateRules.cs:Run	ref>FfaLateRules.cs:Run
 hop	FfaLateRules.cs:Add	36d1fb645e1f17fa	MusicEntitlements.cs:ApplyShopSnapshot	ref>MusicEntitlements.cs:ApplyShopSnapshot
 hop	FfaLateRules.cs:Add	37086a947a5631d4	ApiClient.cs:FetchFfaBettable	delegate[Plugin.Instance.StartCoroutine(#0)/GetRequest(#1=>)/=>{}]>ApiClient.cs:FetchFfaBettable
@@ -8108,6 +8130,7 @@ hop	FfaLateRules.cs:Add	55c188442f60cf1c	NativeUI.SettingsDrive.cs:DrvPrefRestor
 hop	FfaLateRules.cs:Add	55f6aceb484b0d3b	ApiClient.cs:ExtractStringListStringAware	ref>ApiClient.cs:ExtractStringListStringAware
 hop	FfaLateRules.cs:Add	5629af5f0712e461	FfaReadmitEntryRules.cs:EncodePicks	ref>FfaReadmitEntryRules.cs:EncodePicks
 hop	FfaLateRules.cs:Add	56d07fdb84dbdebb	NativeUI.cs:RefreshOvtRecent	ref>NativeUI.cs:RefreshOvtRecent
+hop	FfaLateRules.cs:Add	576010eebdfd1d72	LimitlessBounds.cs:DigestInput	ref>LimitlessBounds.cs:DigestInput
 hop	FfaLateRules.cs:Add	5764d3248d3bdb8d	CompetitiveUI.cs:ParseFpsSeries	ref>CompetitiveUI.cs:ParseFpsSeries
 hop	FfaLateRules.cs:Add	57718d27a2400040	ApiClient.cs:FetchCompareBoard	ref>ApiClient.cs:FetchCompareBoard
 hop	FfaLateRules.cs:Add	588f7a30d00272d7	CompetitiveUI.cs:DrawBugReportAdminViewer	ref>CompetitiveUI.cs:DrawBugReportAdminViewer
@@ -8818,6 +8841,7 @@ hop	FfaLateRules.cs:Answer	8bd9a6c0e6bf0016	field:DanceMotionCore.cs:?	field[?]>
 hop	FfaLateRules.cs:Answer	8df8612bba188dc2	FfaReadmit.cs:Act	delegate[case FfaReadmitEntryRules.RdmNext.ArmLate/FfaLateEntry.OnAdmittedLate(#0)/&]>FfaReadmit.cs:Act
 hop	FfaLateRules.cs:Answer	93864afd79e7d985	DanceMotionCore.cs:OnStill	delegate[OnStill(#0)/&]>DanceMotionCore.cs:OnStill
 hop	FfaLateRules.cs:Answer	952212737ae9fda3	CompetitiveUI.cs:OnBugReportAnswer	ref>CompetitiveUI.cs:OnBugReportAnswer
+hop	FfaLateRules.cs:Answer	998de4b7e9b5d667	BoundedDeal.cs:TrySpawnBounded	delegate[&]>BoundedDeal.cs:TrySpawnBounded
 hop	FfaLateRules.cs:Answer	9df99d20d2514c77	FfaLateRules.cs:N9Receiver	ref>FfaLateRules.cs:N9Receiver
 hop	FfaLateRules.cs:Answer	a462e316ac63fe08	DanceMotionCore.cs:LastAnswer	delegate[&]>DanceMotionCore.cs:LastAnswer
 hop	FfaLateRules.cs:Answer	a91b4074f1edbb2e	FfaLateEntry.cs:AdmittedLateRun	delegate[AdmittedLateRun(#0)/&]>FfaLateEntry.cs:AdmittedLateRun
@@ -10561,6 +10585,7 @@ hop	FfaNumberingRules.cs:ParseCyc	50f3d31feee17d54	FfaNumberingRules.cs:Publishe
 hop	FfaNumberingRules.cs:ParseCyc	7803857557c98f32	FfaNumberingRules.cs:ReadCycleManifest	ref>FfaNumberingRules.cs:ReadCycleManifest
 hop	FfaNumberingRules.cs:ParseCyc	b5960a57d6ee8509	FfaNumberingRules.cs:EnterPhase	ref>FfaNumberingRules.cs:EnterPhase
 hop	FfaNumberingRules.cs:ParseCyc	c71ba511fc7600c7	FfaNumberingRules.cs:DetectAhead	entry[Votes.Id]>FfaNumberingRules.cs:DetectAhead
+hop	FfaNumberingRules.cs:Pick	02d4e862329fbdc1	BoundedDeal.cs:TrySpawnBounded	ref>BoundedDeal.cs:TrySpawnBounded
 hop	FfaNumberingRules.cs:Pick	03b568db53d78190	AvatarDefaultRules.cs:Arrived	delegate[ComparePicks(#0)/&]>AvatarDefaultRules.cs:Arrived
 hop	FfaNumberingRules.cs:Pick	06251d1e8ff1c1c1	FfaMode.cs:FfaLocalPickUI	ref>FfaMode.cs:FfaLocalPickUI
 hop	FfaNumberingRules.cs:Pick	1933c60a5ccd0e76	NativeUI.Settings.cs:SettingsPickValue	ref>NativeUI.Settings.cs:SettingsPickValue
@@ -11643,6 +11668,7 @@ hop	FfaReadmitRules.cs:Add	72331bb48351a48e	NativeUI.cs:ExportTierListCoroutine	
 hop	FfaReadmitRules.cs:Add	72437029023b7e0f	PortraitRenderDance.cs:DanceFinished	ref[case default]>PortraitRenderDance.cs:DanceFinished
 hop	FfaReadmitRules.cs:Add	729288a4a142db08	RoomActors.cs:ActiveFighters	ref>RoomActors.cs:ActiveFighters
 hop	FfaReadmitRules.cs:Add	7313970c5c5fdbcb	PostSessionReport.cs:BuildCells2v2Game	ref[case 4]>PostSessionReport.cs:BuildCells2v2Game
+hop	FfaReadmitRules.cs:Add	73413a212a295ab6	LimitlessBounds.cs:DigestInput	ref>LimitlessBounds.cs:DigestInput
 hop	FfaReadmitRules.cs:Add	735f6f200d7ba4c4	TeamGameNumber.cs:Over#2	ref>TeamGameNumber.cs:Over#2
 hop	FfaReadmitRules.cs:Add	737b3d300c7793f8	PortraitRender.cs:CompareRoots	ref>PortraitRender.cs:CompareRoots
 hop	FfaReadmitRules.cs:Add	738235e0018c8bcb	IdentityClockCore.cs:Envelope	ref[C.Json(#0)]>IdentityClockCore.cs:Envelope
@@ -11730,6 +11756,7 @@ hop	FfaReadmitRules.cs:Add	8a7eb3d5aebd8de9	KeybindRules.cs:ResolveLoaded	ref>Ke
 hop	FfaReadmitRules.cs:Add	8a80e4debea4a7f0	GameStateWatcher.cs:HeldCensusSid	ref>GameStateWatcher.cs:HeldCensusSid
 hop	FfaReadmitRules.cs:Add	8a9a33ec60f02041	ApiClient.cs:JsonFloatArrayByKey	ref>ApiClient.cs:JsonFloatArrayByKey
 hop	FfaReadmitRules.cs:Add	8ab4e82c6f7097bc	IdentityClockEvidence.cs:Dispatch	ref>IdentityClockEvidence.cs:Dispatch
+hop	FfaReadmitRules.cs:Add	8adc98ac566945b8	BoundedDeal.cs:Describe	ref>BoundedDeal.cs:Describe
 hop	FfaReadmitRules.cs:Add	8ae5626a4e78c307	MailClient.cs:ParseMessage	ref>MailClient.cs:ParseMessage
 hop	FfaReadmitRules.cs:Add	8af5be0a6be57213	CompetitiveUI.cs:RegisterDpsGraphRegion	ref>CompetitiveUI.cs:RegisterDpsGraphRegion
 hop	FfaReadmitRules.cs:Add	8b4c88a1e001ea9f	CompetitiveUI.cs:ParsePairSeries	ref>CompetitiveUI.cs:ParsePairSeries
@@ -12961,6 +12988,7 @@ hop	GameStateWatcher.cs:Add	39d05b6d8f1054da	PoisonLedgerCore.cs:Begin	ref>Poiso
 hop	GameStateWatcher.cs:Add	3a5865d2ef1fc9f8	TeamHoldWriter.cs:NoteEnded	ref>TeamHoldWriter.cs:NoteEnded
 hop	GameStateWatcher.cs:Add	3ae2819e0ca34159	NativeUI.cs:BuildMusicTab	ref>NativeUI.cs:BuildMusicTab
 hop	GameStateWatcher.cs:Add	3b2314c1eb76a69b	FfaNumberingRules.cs:DetectAhead	ref>FfaNumberingRules.cs:DetectAhead
+hop	GameStateWatcher.cs:Add	3b2982e2ea8d5034	BoundedDeal.cs:Describe	ref>BoundedDeal.cs:Describe
 hop	GameStateWatcher.cs:Add	3b306076c85413b9	ApiClient.cs:JsonIntArrayByKey	ref>ApiClient.cs:JsonIntArrayByKey
 hop	GameStateWatcher.cs:Add	3b874f3cbd148b72	FfaLateEntry.cs:CheckPendingSnapshot	ref>FfaLateEntry.cs:CheckPendingSnapshot
 hop	GameStateWatcher.cs:Add	3b8894e62bfc6e5b	ApiClient.cs:PcBatchResults	ref>ApiClient.cs:PcBatchResults
@@ -13213,6 +13241,7 @@ hop	GameStateWatcher.cs:Add	77f615dc4aa06535	TeamHoldReturn.cs:Gate	ref>TeamHold
 hop	GameStateWatcher.cs:Add	7893c1193a1ed7dd	FfaLateRules.cs:K45xiN7	ref>FfaLateRules.cs:K45xiN7
 hop	GameStateWatcher.cs:Add	78d054b6e74b76c5	TeamHoldRules.cs:PinRoom	ref>TeamHoldRules.cs:PinRoom
 hop	GameStateWatcher.cs:Add	790b9fe7a4693e87	NativeUI.cs:RefreshLeaderboard	ref>NativeUI.cs:RefreshLeaderboard
+hop	GameStateWatcher.cs:Add	7976b4dd8a5a235a	LimitlessBounds.cs:DigestInput	ref>LimitlessBounds.cs:DigestInput
 hop	GameStateWatcher.cs:Add	79d2e207e51161cf	FfaLateRules.cs:StartLag	ref>FfaLateRules.cs:StartLag
 hop	GameStateWatcher.cs:Add	7a2e45fe62e8a2f9	FfaNumberingRules.cs:Send	ref>FfaNumberingRules.cs:Send
 hop	GameStateWatcher.cs:Add	7a6b09a1eca9c547	PortraitRenderDance.cs:Summary#2	ref>PortraitRenderDance.cs:Summary#2
@@ -14147,6 +14176,7 @@ hop	GameStateWatcher.cs:Count	043c0f0b5c3162f9	DamageNumberRules.cs:SelfTest	ref
 hop	GameStateWatcher.cs:Count	043df139945e2b42	CardDrawEvidence.cs:TakeCensus	ref>CardDrawEvidence.cs:TakeCensus
 hop	GameStateWatcher.cs:Count	046bb675c76d9482	ApiClient.cs:FetchShopSalesBoard	delegate[FetchCompareBoard(#2=>)/=>{}/ArraysAligned(#4)]>ApiClient.cs:FetchShopSalesBoard
 hop	GameStateWatcher.cs:Count	04807957668fafd5	MusicEngine.cs:HasRootedRecord	ref>MusicEngine.cs:HasRootedRecord
+hop	GameStateWatcher.cs:Count	04deaaff66510a43	BoundedDealRules.cs:Decide	ref>BoundedDealRules.cs:Decide
 hop	GameStateWatcher.cs:Count	050b11c81225152e	ShowcaseRules.cs:Script	ref>ShowcaseRules.cs:Script
 hop	GameStateWatcher.cs:Count	051cd22881d8d7c4	FfaAssembly.cs:ShortStart	ref>FfaAssembly.cs:ShortStart
 hop	GameStateWatcher.cs:Count	05287591a84100d0	NativeUI.cs:CountCardChipLines	ref>NativeUI.cs:CountCardChipLines
@@ -14641,6 +14671,7 @@ hop	GameStateWatcher.cs:Count	522d1ff0a44765a8	PortraitRenderDance.cs:DanceFitDr
 hop	GameStateWatcher.cs:Count	52400cb1b1675e75	ApiClient.cs:FetchReleaseNotes	delegate[Plugin.Instance.StartCoroutine(#0)/GetRequest(#1=>)/=>{}]>ApiClient.cs:FetchReleaseNotes
 hop	GameStateWatcher.cs:Count	524635a1cbc2dbac	ApiClient.cs:FetchAchievements	delegate[Plugin.Instance.StartCoroutine(#0)/GetRequest(#1=>)/=>{}]>ApiClient.cs:FetchAchievements
 hop	GameStateWatcher.cs:Count	5291f207f506aa68	TeamHoldRules.cs:TryParseSnapshot	ref>TeamHoldRules.cs:TryParseSnapshot
+hop	GameStateWatcher.cs:Count	52966a70c99e880d	BoundedDeal.cs:LogHeldCards	ref[.Append(#0)]>BoundedDeal.cs:LogHeldCards
 hop	GameStateWatcher.cs:Count	52a0336e1f98e31a	MusicEntitlements.cs:ApplyShopSnapshot	ref>MusicEntitlements.cs:ApplyShopSnapshot
 hop	GameStateWatcher.cs:Count	52e55967d1623788	ApiClient.cs:FetchShopSalesBoard	delegate[FetchCompareBoard(#2=>)/=>{}]>ApiClient.cs:FetchShopSalesBoard
 hop	GameStateWatcher.cs:Count	52eb88785c58bbfd	MusicAssets.cs:ValidateTierTree	ref>MusicAssets.cs:ValidateTierTree
@@ -14791,6 +14822,7 @@ hop	GameStateWatcher.cs:Count	6b1e3111bb7b8719	PlayerCardMotionCore.cs:Admit	ref
 hop	GameStateWatcher.cs:Count	6b8913bf6afd134c	MusicEngine.cs:TsRestore	ref[SafeLog(#1)]>MusicEngine.cs:TsRestore
 hop	GameStateWatcher.cs:Count	6baed4c1a8f89a50	PortraitRender.cs:SweepRefusal	ref>PortraitRender.cs:SweepRefusal
 hop	GameStateWatcher.cs:Count	6bbd57f489982294	TeamGameNumber.cs:NoteAttestationRefused	ref>TeamGameNumber.cs:NoteAttestationRefused
+hop	GameStateWatcher.cs:Count	6bc0f4fc4e055320	BoundedDeal.cs:TrySpawnBounded	ref[VanillaFixSupport.DiagLimited(#1)]>BoundedDeal.cs:TrySpawnBounded
 hop	GameStateWatcher.cs:Count	6bca4042df5e6857	DamageNumberRules.cs:Count	ref>DamageNumberRules.cs:Count
 hop	GameStateWatcher.cs:Count	6c59182ee44d13bf	VanillaCardSequence.cs:RecordDeal	ref>VanillaCardSequence.cs:RecordDeal
 hop	GameStateWatcher.cs:Count	6cc294a06b3c78d2	GameStateWatcher.cs:Add	ref>GameStateWatcher.cs:Add
@@ -14879,6 +14911,7 @@ hop	GameStateWatcher.cs:Count	78f5ec8f9c54d24e	BroadcastHud.cs:DrawFfaStrip	ref[
 hop	GameStateWatcher.cs:Count	7924198305b308c0	NativeUI.cs:RebuildPickerList	ref>NativeUI.cs:RebuildPickerList
 hop	GameStateWatcher.cs:Count	79750aca19de7a93	PlayerCardsUI.cs:RefreshShardPackButton	ref>PlayerCardsUI.cs:RefreshShardPackButton
 hop	GameStateWatcher.cs:Count	79b0b72c86c2dbcc	ApiClient.cs:FetchRecentSeries	delegate[Plugin.Instance.StartCoroutine(#0)/GetRequest(#1=>)/=>{}]>ApiClient.cs:FetchRecentSeries
+hop	GameStateWatcher.cs:Count	7a192c6cdac0ac43	BoundedDealRules.cs:Pick	ref>BoundedDealRules.cs:Pick
 hop	GameStateWatcher.cs:Count	7a228268568e97a7	NativeUI.cs:RefreshBannedTab	ref>NativeUI.cs:RefreshBannedTab
 hop	GameStateWatcher.cs:Count	7a4f2e8647a5d5e9	CombatEvidenceCore.cs:Check	ref[case W.K_ROWS]>CombatEvidenceCore.cs:Check
 hop	GameStateWatcher.cs:Count	7a63aa6f29a10553	PlayerCardsUI.cs:SendShard	ref[Plugin.Log.LogInfo(#0)]>PlayerCardsUI.cs:SendShard
@@ -15277,6 +15310,7 @@ hop	GameStateWatcher.cs:Count	b74067b38e22885f	CompetitiveUI.cs:DrawNotification
 hop	GameStateWatcher.cs:Count	b79d26ff256b9af5	FfaMode.cs:ResolveFighter	ref>FfaMode.cs:ResolveFighter
 hop	GameStateWatcher.cs:Count	b7ca1f50c9e16994	NativeUI.cs:CopyChatTail	ref>NativeUI.cs:CopyChatTail
 hop	GameStateWatcher.cs:Count	b7d5f62fdce25a6c	NativeUI.cs:GetOrCreateArtistRow	ref[new GameObject(#0)]>NativeUI.cs:GetOrCreateArtistRow
+hop	GameStateWatcher.cs:Count	b8192be3d94b2c9b	BoundedDeal.cs:LogHeldCards	ref>BoundedDeal.cs:LogHeldCards
 hop	GameStateWatcher.cs:Count	b872a15a3179e247	UnicodeFallback.cs:RegisterFallbacks	ref[AddAssets(#2)]>UnicodeFallback.cs:RegisterFallbacks
 hop	GameStateWatcher.cs:Count	b88288e4e7e79b59	MailUI.cs:OpenReply	ref[Math.Max(#1)]>MailUI.cs:OpenReply
 hop	GameStateWatcher.cs:Count	b893add7e6eef206	SessionReportView.cs:MeasureBlock	ref>SessionReportView.cs:MeasureBlock
@@ -15307,6 +15341,7 @@ hop	GameStateWatcher.cs:Count	bce24f597f72737a	FfaReportRules.cs:ElectReporter	r
 hop	GameStateWatcher.cs:Count	bd187fa3c1d007db	IdentityClockCore.cs:Entries	ref>IdentityClockCore.cs:Entries
 hop	GameStateWatcher.cs:Count	bd5930188e2e2c28	PortraitRenderDance.cs:Summary#2	ref[Math.Min(#1)/Math.Ceiling(#0)]>PortraitRenderDance.cs:Summary#2
 hop	GameStateWatcher.cs:Count	bd80190c4b8189fc	ApiClient.cs:FetchReleaseNotes	delegate[Plugin.Instance.StartCoroutine(#0)/GetRequest(#1=>)/=>{}/Plugin.Instance.StartCoroutine(#0)/GetRequest(#1=>)/=>{}]>ApiClient.cs:FetchReleaseNotes
+hop	GameStateWatcher.cs:Count	bd81ea406afb4ce8	BoundedDeal.cs:Describe	ref>BoundedDeal.cs:Describe
 hop	GameStateWatcher.cs:Count	bd923cc7fb4dd54a	PostSessionReport.cs:Compose2v2	ref[new List(#0)]>PostSessionReport.cs:Compose2v2
 hop	GameStateWatcher.cs:Count	bd94b631fe594157	GameLocaleInjector.cs:IsOurLocale	ref>GameLocaleInjector.cs:IsOurLocale
 hop	GameStateWatcher.cs:Count	bdde5b6fc72a94b8	FfaLateEntry.cs:PrepareReadmitEpochCore	ref[Math.Min(#1)]>FfaLateEntry.cs:PrepareReadmitEpochCore
@@ -15318,6 +15353,7 @@ hop	GameStateWatcher.cs:Count	bea1232e29cd378d	SpectatorHud.cs:BuildTerminalLine
 hop	GameStateWatcher.cs:Count	beb8c4537b41b5dd	PoisonSync.cs:RetireOpenV3	ref>PoisonSync.cs:RetireOpenV3
 hop	GameStateWatcher.cs:Count	bee1931ad86ec4a8	DanceMotionCore.cs:BuildContainer	ref[header.Contains(#0)]>DanceMotionCore.cs:BuildContainer
 hop	GameStateWatcher.cs:Count	bee731a555b7baf7	NativeUI.cs:BuildCompareRecordsPanel	ref>NativeUI.cs:BuildCompareRecordsPanel
+hop	GameStateWatcher.cs:Count	bef08179e0d616b9	BoundedDeal.cs:TrySpawnBounded	ref>BoundedDeal.cs:TrySpawnBounded
 hop	GameStateWatcher.cs:Count	bf1c94f069057867	CardDrawEvidence.cs:FirstPhase	ref>CardDrawEvidence.cs:FirstPhase
 hop	GameStateWatcher.cs:Count	bf4c73b95d7ca30c	TitleLaddersUI.cs:PlanShopSection	ref[TitleLadderRules.PlanSection(#2)]>TitleLaddersUI.cs:PlanShopSection
 hop	GameStateWatcher.cs:Count	bfc51fe69f00337f	ApiClient.cs:ParseMatchHistoryForViewChunked	ref>ApiClient.cs:ParseMatchHistoryForViewChunked
@@ -17968,6 +18004,7 @@ hop	IdentityClockCore.cs:Add#1	26c7f9c00b8a8f2b	PlayerCardMotion.cs:UploadBands	
 hop	IdentityClockCore.cs:Add#1	26f04a62048fc499	DanceEmotes.cs:Tick	ref>DanceEmotes.cs:Tick
 hop	IdentityClockCore.cs:Add#1	2704e3317a2c1fd0	TabStatsOverlay.cs:RefreshSnapshot	ref>TabStatsOverlay.cs:RefreshSnapshot
 hop	IdentityClockCore.cs:Add#1	281f7f7371c66c88	DanceEmotes.cs:SweepDeadKeys	ref>DanceEmotes.cs:SweepDeadKeys
+hop	IdentityClockCore.cs:Add#1	283b1673cb4a9c54	LimitlessBounds.cs:DigestInput	ref>LimitlessBounds.cs:DigestInput
 hop	IdentityClockCore.cs:Add#1	284a0cfc7cfbe610	SessionReportModel.cs:BuildTotalsPages	ref>SessionReportModel.cs:BuildTotalsPages
 hop	IdentityClockCore.cs:Add#1	2883e15f67a0b7c7	FfaLateRules.cs:N9Receiver	ref>FfaLateRules.cs:N9Receiver
 hop	IdentityClockCore.cs:Add#1	289cb9fcd4d34051	ApiClient.cs:ParseCardCatalogBody	ref>ApiClient.cs:ParseCardCatalogBody
@@ -18186,6 +18223,7 @@ hop	IdentityClockCore.cs:Add#1	5add573778c30756	NativeUI.SettingsDrive.cs:DrvPre
 hop	IdentityClockCore.cs:Add#1	5b12c139f24240db	FfaMode.cs:HandleNextRound	ref>FfaMode.cs:HandleNextRound
 hop	IdentityClockCore.cs:Add#1	5b82a8b01050bb4b	CardDrawEvidence.cs:SealGame	ref>CardDrawEvidence.cs:SealGame
 hop	IdentityClockCore.cs:Add#1	5b956aac750a592d	ApiClient.cs:FetchCosmeticReleaseCandidatesAdmin	delegate[Plugin.Instance.StartCoroutine(#0)/GetRequest(#1=>)/=>{}]>ApiClient.cs:FetchCosmeticReleaseCandidatesAdmin
+hop	IdentityClockCore.cs:Add#1	5bb544621373a9fb	BoundedDeal.cs:Describe	ref>BoundedDeal.cs:Describe
 hop	IdentityClockCore.cs:Add#1	5bf6c5f8a172ff91	PoisonSync.cs:Fighters	ref>PoisonSync.cs:Fighters
 hop	IdentityClockCore.cs:Add#1	5c41d8cfefcb861d	SeatEvidenceCore.cs:Envelope	ref>SeatEvidenceCore.cs:Envelope
 hop	IdentityClockCore.cs:Add#1	5c7facbd6654f560	SeatEvidenceCore.cs:CompatPlugins	ref>SeatEvidenceCore.cs:CompatPlugins
@@ -19292,6 +19330,7 @@ hop	IdentityClockCore.cs:Add#2	67e9adb207c8a576	Keybinds.cs:PollCapture	ref>Keyb
 hop	IdentityClockCore.cs:Add#2	6883ed7f078411c6	FfaMode.cs:ScoreLine	ref>FfaMode.cs:ScoreLine
 hop	IdentityClockCore.cs:Add#2	68882547461fa6a6	NativeUI.cs:RefreshFfaTab	ref>NativeUI.cs:RefreshFfaTab
 hop	IdentityClockCore.cs:Add#2	68e3a653bc3bd6a2	MusicEngine.cs:RootFailed	ref>MusicEngine.cs:RootFailed
+hop	IdentityClockCore.cs:Add#2	699d09288df24cf9	LimitlessBounds.cs:DigestInput	ref>LimitlessBounds.cs:DigestInput
 hop	IdentityClockCore.cs:Add#2	69a846c6828c1348	ApiClient.cs:FetchPlayerFfaHistory	delegate[Plugin.Instance.StartCoroutine(#0)/GetRequest(#1=>)/=>{}]>ApiClient.cs:FetchPlayerFfaHistory
 hop	IdentityClockCore.cs:Add#2	69ab6196d31cd4b5	FfaMode.cs:CollectMatchPointTeams	ref>FfaMode.cs:CollectMatchPointTeams
 hop	IdentityClockCore.cs:Add#2	69b4984a81c00f77	SessionReportModel.cs:FinishRace	ref>SessionReportModel.cs:FinishRace
@@ -19907,6 +19946,7 @@ hop	IdentityClockCore.cs:Add#2	fdf8712df9ac5f14	MusicEngine.cs:PollClipLoads	ref
 hop	IdentityClockCore.cs:Add#2	fe05975581edfb36	SeatEvidenceCore.cs:Add#3	ref>SeatEvidenceCore.cs:Add#3
 hop	IdentityClockCore.cs:Add#2	fe33e849eae5fbbc	CustomCosmetics.cs:ArtDownloadWorker	ref>CustomCosmetics.cs:ArtDownloadWorker
 hop	IdentityClockCore.cs:Add#2	fe37eae10eb66f13	PcQuickShardRules.cs:AllLivePrints	ref>PcQuickShardRules.cs:AllLivePrints
+hop	IdentityClockCore.cs:Add#2	ff320a1ae72fd067	BoundedDeal.cs:Describe	ref>BoundedDeal.cs:Describe
 hop	IdentityClockCore.cs:Add#2	ff494c7e643d49c4	NativeUI.cs:BuildMusicTab	ref>NativeUI.cs:BuildMusicTab
 hop	IdentityClockCore.cs:Add#2	ff49df55f1aa3386	NativeUI.cs:RenderHostLobbySection	ref>NativeUI.cs:RenderHostLobbySection
 hop	IdentityClockCore.cs:Add#2	ff91be7a328fa005	TeamHoldRules.cs:Tick#1	ref>TeamHoldRules.cs:Tick#1
@@ -20169,6 +20209,8 @@ hop	IdentityClockCore.cs:Count	21f17657790a6cb4	DanceEmotes.cs:ObservableCancelS
 hop	IdentityClockCore.cs:Count	22023266756e189d	CompetitiveUI.cs:OpenCosmeticReview	delegate[ApiClient.FetchCosmeticSubmissionsAdmin(#1=>)/=>{}/&]>CompetitiveUI.cs:OpenCosmeticReview
 hop	IdentityClockCore.cs:Count	22071c77e8c01b04	NativeUI.SettingsDrive.cs:DriveW3	delegate[Mathf.Max(#0)/&]>NativeUI.SettingsDrive.cs:DriveW3
 hop	IdentityClockCore.cs:Count	2275f8e7cb334aa2	CardDrawEvidence.cs:Facts	delegate[&]>CardDrawEvidence.cs:Facts
+hop	IdentityClockCore.cs:Count	227d32090c123c51	BoundedDeal.cs:TrySpawnBounded	delegate[VanillaFixSupport.DiagLimited(#1)/&]>BoundedDeal.cs:TrySpawnBounded
+hop	IdentityClockCore.cs:Count	2286d3f6961057de	BoundedDeal.cs:LogHeldCards	delegate[.Append(#0)/&]>BoundedDeal.cs:LogHeldCards
 hop	IdentityClockCore.cs:Count	22a7c753920fba1b	EmojiSprites.cs:Build	delegate[.LogInfo(#0)/&]>EmojiSprites.cs:Build
 hop	IdentityClockCore.cs:Count	22ae3e20b8a298f1	Keybinds.cs:RewritePairs	delegate[&]>Keybinds.cs:RewritePairs
 hop	IdentityClockCore.cs:Count	231397b66b8bdee4	NativeUI.cs:RefreshTournamentBets	delegate[&]>NativeUI.cs:RefreshTournamentBets
@@ -20609,6 +20651,7 @@ hop	IdentityClockCore.cs:Count	6af62eec4c850b9d	Plugin.cs:Postfix#1	delegate[&]>
 hop	IdentityClockCore.cs:Count	6b306674c1ece79f	CardDrawEvidenceCore.cs:Budget	delegate[case 2/&]>CardDrawEvidenceCore.cs:Budget
 hop	IdentityClockCore.cs:Count	6b44dffb931e2196	NativeUI.cs:FillLobbyMemberRows	delegate[&]>NativeUI.cs:FillLobbyMemberRows
 hop	IdentityClockCore.cs:Count	6b6ce79fd9054fa3	SpectatorSync.cs:AppendCurrentDeck	delegate[&]>SpectatorSync.cs:AppendCurrentDeck
+hop	IdentityClockCore.cs:Count	6b7259b01fc2a4ab	BoundedDeal.cs:TrySpawnBounded	delegate[&]>BoundedDeal.cs:TrySpawnBounded
 hop	IdentityClockCore.cs:Count	6b7fd508e4168b61	NativeUI.cs:RefreshShopMusicExpansion	delegate[Plugin.Log.LogWarning(#0)/&]>NativeUI.cs:RefreshShopMusicExpansion
 hop	IdentityClockCore.cs:Count	6b99c6dd7df9e70e	IdentityClockEvidence.cs:ArmFromFile	delegate[&]>IdentityClockEvidence.cs:ArmFromFile
 hop	IdentityClockCore.cs:Count	6bfb5ef96c0c0097	MusicEngine.cs:ScanHasReadyTrack	delegate[&]>MusicEngine.cs:ScanHasReadyTrack
@@ -21101,6 +21144,7 @@ hop	IdentityClockCore.cs:Count	bd21e184ffae8c63	NativeUI.SettingsDrive.cs:DriveW
 hop	IdentityClockCore.cs:Count	bd21f2304e71ca6c	CardDrawEvidenceCore.cs:Budget	delegate[case 2/addRef(#0)/&]>CardDrawEvidenceCore.cs:Budget
 hop	IdentityClockCore.cs:Count	bd2265ecae3d63f7	CardDrawEvidenceCore.cs:Budget	entry[[4]/&]>CardDrawEvidenceCore.cs:Budget
 hop	IdentityClockCore.cs:Count	bd3d96a12ab5d277	MusicEngine.cs:BuildAlbumBlockCycle	delegate[new List(#0)/&]>MusicEngine.cs:BuildAlbumBlockCycle
+hop	IdentityClockCore.cs:Count	bd4b042c67cbe419	BoundedDealRules.cs:Decide	delegate[&]>BoundedDealRules.cs:Decide
 hop	IdentityClockCore.cs:Count	bd6340d18c90b613	SeatEvidence.cs:Adopt	delegate[&]>SeatEvidence.cs:Adopt
 hop	IdentityClockCore.cs:Count	bd6363e753c5308a	CombatEvidence.cs:SyncRead	delegate[&]>CombatEvidence.cs:SyncRead
 hop	IdentityClockCore.cs:Count	bd8fb3e4e16aff87	RegionPingSweep.cs:PollHeaderValue	delegate[&]>RegionPingSweep.cs:PollHeaderValue
@@ -21195,6 +21239,7 @@ hop	IdentityClockCore.cs:Count	ce8e593cc959986b	Keybinds.cs:ResetRow	delegate[Pl
 hop	IdentityClockCore.cs:Count	ce9ca6ed22d95b98	ShowcaseRules.cs:Next	delegate[&]>ShowcaseRules.cs:Next
 hop	IdentityClockCore.cs:Count	cec37908694727d2	ApiClient.cs:FetchFfaRecent	delegate[Plugin.Instance.StartCoroutine(#0)/GetRequest(#1=>)/=>{}/Plugin.Log.LogInfo(#0)]>ApiClient.cs:FetchFfaRecent
 hop	IdentityClockCore.cs:Count	cedb128f38f99343	Plugin.cs:Prefix#26	delegate[Plugin.Log.LogInfo(#0)/&]>Plugin.cs:Prefix#26
+hop	IdentityClockCore.cs:Count	cee2c2da7abbf862	BoundedDeal.cs:Describe	delegate[&]>BoundedDeal.cs:Describe
 hop	IdentityClockCore.cs:Count	cef40e721fb9fe6b	SeatEvidence.cs:Enqueue	delegate[&]>SeatEvidence.cs:Enqueue
 hop	IdentityClockCore.cs:Count	cefd3221d3ba5d19	GameStateWatcher.cs:DevGstatsSentinelTest	delegate[&]>GameStateWatcher.cs:DevGstatsSentinelTest
 hop	IdentityClockCore.cs:Count	cf199efdcc06477b	NativeUI.cs:ClickLobbyBet	delegate[&]>NativeUI.cs:ClickLobbyBet
@@ -21404,6 +21449,7 @@ hop	IdentityClockCore.cs:Count	ec14558430ae22fe	SeatEvidenceCore.cs:Add#2	delega
 hop	IdentityClockCore.cs:Count	ec4a1891d00d038b	DanceEmotes.cs:Prefix#2	delegate[&]>DanceEmotes.cs:Prefix#2
 hop	IdentityClockCore.cs:Count	ec58881224321d65	PostSessionReport.cs:BuildGraphPages	delegate[cells.RemoveRange(#1)/&]>PostSessionReport.cs:BuildGraphPages
 hop	IdentityClockCore.cs:Count	ec85985e96a504fa	NametagStyler.cs:PublishToPhoton	delegate[Plugin.Log.LogInfo(#0)/styled(#0)/&]>NametagStyler.cs:PublishToPhoton
+hop	IdentityClockCore.cs:Count	eca6676a3aa98383	BoundedDeal.cs:LogHeldCards	delegate[&]>BoundedDeal.cs:LogHeldCards
 hop	IdentityClockCore.cs:Count	ecd31c3b924d0124	CompetitiveUI.cs:FlowTipColumns	delegate[Math.Min(#1)/Math.Max(#1)/&]>CompetitiveUI.cs:FlowTipColumns
 hop	IdentityClockCore.cs:Count	ece76f704970a272	SessionReportRules.cs:SideScore	delegate[&]>SessionReportRules.cs:SideScore
 hop	IdentityClockCore.cs:Count	ed0448ce88609a0d	ApiClient.cs:FfaHistoryForViewLeg	delegate[=>{}/Plugin.Instance.StartCoroutine(#0)/GetRequest(#1=>)/=>{}/&]>ApiClient.cs:FfaHistoryForViewLeg
@@ -21429,6 +21475,7 @@ hop	IdentityClockCore.cs:Count	f00d14b18550fe9d	ApiClient.cs:ArtistSubmitCosmeti
 hop	IdentityClockCore.cs:Count	f03f36dfe585c5b2	DanceEmotes.cs:SweepDeadKeys	delegate[&]>DanceEmotes.cs:SweepDeadKeys
 hop	IdentityClockCore.cs:Count	f0401ec8cb1362a9	CardDrawEvidenceCore.cs:CloseHand	delegate[&]>CardDrawEvidenceCore.cs:CloseHand
 hop	IdentityClockCore.cs:Count	f054a96569035ab0	TitleLaddersUI.cs:PaintShopEntries	delegate[&]>TitleLaddersUI.cs:PaintShopEntries
+hop	IdentityClockCore.cs:Count	f0573f5112ba03f0	BoundedDealRules.cs:Pick	delegate[&]>BoundedDealRules.cs:Pick
 hop	IdentityClockCore.cs:Count	f057b67771ce9434	CardDrawEvidenceCore.cs:Budget	delegate[case 2/h0.RemoveAt(#0)/&]>CardDrawEvidenceCore.cs:Budget
 hop	IdentityClockCore.cs:Count	f0789668096994ac	FfaNumberingRules.cs:EdgeChecks	delegate[Fail(#0)/I(#0)/&]>FfaNumberingRules.cs:EdgeChecks
 hop	IdentityClockCore.cs:Count	f084bf73e55fc9d8	NetworkSeatTelemetry.cs:Postfix#6	delegate[&]>NetworkSeatTelemetry.cs:Postfix#6
@@ -21649,6 +21696,7 @@ hop	IdentityClockCore.cs:LdirUnit	08c999a7061daf13	IdentityClockCore.cs:Unit	ref
 hop	IdentityClockCore.cs:List#1	103af1b0109e1cb4	VanillaFixes.cs:RepairPoisonRegistration	ref>VanillaFixes.cs:RepairPoisonRegistration
 hop	IdentityClockCore.cs:List#1	197712bdf9c325d4	IdentityClockCore.cs:LdirUnit	ref>IdentityClockCore.cs:LdirUnit
 hop	IdentityClockCore.cs:List#1	1f4ed03d10713d4c	FfaMapScale.cs:Prefix#1	delegate[&]>FfaMapScale.cs:Prefix#1
+hop	IdentityClockCore.cs:List#1	30f8a6968a106018	LimitlessBounds.cs:DigestInput	ref>LimitlessBounds.cs:DigestInput
 hop	IdentityClockCore.cs:List#1	3403e9519f745208	SpectatorPatches.cs:TargetMethods	delegate[&]>SpectatorPatches.cs:TargetMethods
 hop	IdentityClockCore.cs:List#1	59d1ec2889c1c162	IdentityClockCore.cs:List#2	ref>IdentityClockCore.cs:List#2
 hop	IdentityClockCore.cs:List#1	62f6b498f0227fef	Plugin.cs:ScrubChildRpcDictionaries	delegate[&]>Plugin.cs:ScrubChildRpcDictionaries
@@ -21677,6 +21725,7 @@ hop	IdentityClockCore.cs:List#2	978419496971d3bb	MusicLevels.cs:LeaveAloneFailur
 hop	IdentityClockCore.cs:List#2	d369e8d3cf17edf2	FfaMapScale.cs:Prefix#1	delegate[&]>FfaMapScale.cs:Prefix#1
 hop	IdentityClockCore.cs:List#2	f0b058dda6562ecd	Plugin.cs:OnFriendListUpdate	delegate[OnFriendListUpdate(#0)/&]>Plugin.cs:OnFriendListUpdate
 hop	IdentityClockCore.cs:List#2	f36153bc5b7d8bd9	FfaMapScale.cs:PairIndicesFor	delegate[PairIndicesFor(#0)/&]>FfaMapScale.cs:PairIndicesFor
+hop	IdentityClockCore.cs:List#2	f72ea52047aaca8f	LimitlessBounds.cs:DigestInput	ref>LimitlessBounds.cs:DigestInput
 hop	IdentityClockCore.cs:Name	0279f891e3af1015	PoisonSync.cs:Tick	delegate[&]>PoisonSync.cs:Tick
 hop	IdentityClockCore.cs:Name	02cc2192dbde0b9c	Plugin.cs:BuildDcPlan	delegate[&]>Plugin.cs:BuildDcPlan
 hop	IdentityClockCore.cs:Name	02eb714cad538d65	GameStateWatcher.cs:PollRoomlessGameScene	delegate[&]>GameStateWatcher.cs:PollRoomlessGameScene
@@ -23350,6 +23399,7 @@ hop	KeybindRules.cs:ToString	3b6f3678fa6ec7e8	PortraitGrade.cs:Clean	ref>Portrai
 hop	KeybindRules.cs:ToString	3b8089d9448f2f12	NativeUI.SettingsDrive.cs:DrvScreenPrefs	ref>NativeUI.SettingsDrive.cs:DrvScreenPrefs
 hop	KeybindRules.cs:ToString	3b9378b25eaf11cb	MusicEngine.cs:OpenStreamedClip	ref[SafeLog(#1)]>MusicEngine.cs:OpenStreamedClip
 hop	KeybindRules.cs:ToString	3c65ec93e719377c	IdentityClockCore.cs:Hex	ref[sb.Append(#0)]>IdentityClockCore.cs:Hex
+hop	KeybindRules.cs:ToString	3cbfa451ae061472	BoundedDeal.cs:LogHeldCards	ref[.Append(#0)]>BoundedDeal.cs:LogHeldCards
 hop	KeybindRules.cs:ToString	3d194ed3bd7b7285	FfaLateRules.cs:ScaleTag	ref>FfaLateRules.cs:ScaleTag
 hop	KeybindRules.cs:ToString	3d47ebc45fbf7686	MailUI.cs:SaveBaseline	ref[PlayerPrefs.SetString(#1)]>MailUI.cs:SaveBaseline
 hop	KeybindRules.cs:ToString	3d63254a8b1a6263	SpectatorSync.cs:FighterNamesForTeam	ref>SpectatorSync.cs:FighterNamesForTeam
@@ -23424,6 +23474,7 @@ hop	KeybindRules.cs:ToString	50ee884b595721d7	SeatEvidenceCore.cs:DetailField	re
 hop	KeybindRules.cs:ToString	50f7df643f6b5985	Plugin.cs:OnDisconnected	ref>Plugin.cs:OnDisconnected
 hop	KeybindRules.cs:ToString	513ae0053ae5153e	NativeUI.Settings.cs:SettingsAsStr	ref>NativeUI.Settings.cs:SettingsAsStr
 hop	KeybindRules.cs:ToString	5143216b837e780a	SeatDeckLog.cs:Tuple	ref>SeatDeckLog.cs:Tuple
+hop	KeybindRules.cs:ToString	51eeac8a3e7eb57d	BoundedDeal.cs:TrySpawnBounded	ref[VanillaFixSupport.DiagLimited(#1)]>BoundedDeal.cs:TrySpawnBounded
 hop	KeybindRules.cs:ToString	5211a6f68150daa4	PortraitRenderDance.cs:Top	ref>PortraitRenderDance.cs:Top
 hop	KeybindRules.cs:ToString	5239d89067724d87	PortraitRender.cs:ParticlePinReport	ref>PortraitRender.cs:ParticlePinReport
 hop	KeybindRules.cs:ToString	5266c1e0a0191ea3	TeamGameNumber.cs:ObserveRoomToken	ref>TeamGameNumber.cs:ObserveRoomToken
@@ -23839,6 +23890,7 @@ hop	KeybindRules.cs:ToString	bf161c8baca2513c	PortraitGrade.cs:OnLightProbe	ref[
 hop	KeybindRules.cs:ToString	bf645fce7e7709be	SeatEvidence.cs:BuildCaptures	ref[Plugin.Log.LogInfo(#0)]>SeatEvidence.cs:BuildCaptures
 hop	KeybindRules.cs:ToString	c00bca45ede914a6	FfaAssembly.cs:CensusBody	ref>FfaAssembly.cs:CensusBody
 hop	KeybindRules.cs:ToString	c0759c8187a68a99	Plugin.cs:FloorCensus	ref>Plugin.cs:FloorCensus
+hop	KeybindRules.cs:ToString	c0b48f74aae54257	LimitlessBounds.cs:Version	ref>LimitlessBounds.cs:Version
 hop	KeybindRules.cs:ToString	c0ffccbdae1620ba	NativeUI.SettingsDrive.cs:DrvPrefHash	ref[DrvHex(#0)/System.Text.Encoding.UTF8.GetBytes(#0)]>NativeUI.SettingsDrive.cs:DrvPrefHash
 hop	KeybindRules.cs:ToString	c109b5c742942766	NativeUI.cs:BuildCompareBarChart	ref[MakeGraphLabel(#1)]>NativeUI.cs:BuildCompareBarChart
 hop	KeybindRules.cs:ToString	c13df8cada243002	SessionReportModel.cs:BuildTotalsPages	delegate[Column(#3=>)]>SessionReportModel.cs:BuildTotalsPages
@@ -23905,6 +23957,7 @@ hop	KeybindRules.cs:ToString	cec38ea3c708652e	PortraitGrade.cs:Fmt	ref[Clean(#0)
 hop	KeybindRules.cs:ToString	cf446208db65c6e8	H2HRules.cs:Series	ref>H2HRules.cs:Series
 hop	KeybindRules.cs:ToString	cfc9fee48478be1a	DanceStep0Probe.cs:P	ref>DanceStep0Probe.cs:P
 hop	KeybindRules.cs:ToString	cfcc161434f19981	GameStateWatcher.cs:BothPlayersSupportSharedGameToken	ref>GameStateWatcher.cs:BothPlayersSupportSharedGameToken
+hop	KeybindRules.cs:ToString	d05f6bf545bf6491	BoundedDeal.cs:LogHeldCards	ref[Plugin.Log.LogInfo(#0)]>BoundedDeal.cs:LogHeldCards
 hop	KeybindRules.cs:ToString	d094a525e21a410e	PortraitRenderDanceDev.cs:DanceDevReport	ref[File.WriteAllText(#1)]>PortraitRenderDanceDev.cs:DanceDevReport
 hop	KeybindRules.cs:ToString	d10366f88ce486b0	ApiClient.cs:ParseSteamStringMap	ref>ApiClient.cs:ParseSteamStringMap
 hop	KeybindRules.cs:ToString	d27d4d17cdfbe7c0	DamageNumberRules.cs:SelfTest	delegate[=>{}/.Append(#0)]>DamageNumberRules.cs:SelfTest
@@ -24029,6 +24082,7 @@ hop	KeybindRules.cs:ToString	f1d7283930c26e7e	H2HRules.cs:Buckets	ref>H2HRules.c
 hop	KeybindRules.cs:ToString	f1e003f81393d51a	NetworkReplicaDiagnostics.cs:ActorSummary	ref[.Append(#0)]>NetworkReplicaDiagnostics.cs:ActorSummary
 hop	KeybindRules.cs:ToString	f2af31ebd0603cb2	LagNotices.cs:GateLine	ref>LagNotices.cs:GateLine
 hop	KeybindRules.cs:ToString	f2d312bbce0fb3f6	NativeUI.cs:RefreshUtilityStrip	ref[UIFactory.SetTextRaw(#1)]>NativeUI.cs:RefreshUtilityStrip
+hop	KeybindRules.cs:ToString	f31cfc0b23e354ff	LimitlessBounds.cs:DigestOf	ref[sb.Append(#0)]>LimitlessBounds.cs:DigestOf
 hop	KeybindRules.cs:ToString	f336e8db95958a82	FfaNumberingRules.cs:LegacyPickValue	ref>FfaNumberingRules.cs:LegacyPickValue
 hop	KeybindRules.cs:ToString	f3708ae39e30eafa	EmojiSprites.cs:Substitute#2	ref>EmojiSprites.cs:Substitute#2
 hop	KeybindRules.cs:ToString	f425ff8e78f9a4cf	PeerFreezeStats.cs:RunSentinel	entry[[3]/Payload(#1)]>PeerFreezeStats.cs:RunSentinel
@@ -24050,6 +24104,7 @@ hop	KeybindRules.cs:ToString	f7f17c7ab95d7d87	NetworkSeatTelemetry.cs:BuildTags	
 hop	KeybindRules.cs:ToString	f7ff040c4137c9b3	SessionReportModel.cs:Clock	ref>SessionReportModel.cs:Clock
 hop	KeybindRules.cs:ToString	f86035939c56bdf9	GameStateWatcher.cs:TryResolveOpponent	ref>GameStateWatcher.cs:TryResolveOpponent
 hop	KeybindRules.cs:ToString	f8f09d54e2a33542	CombatEvidenceCore.cs:Num	ref[sb.Append(#0)]>CombatEvidenceCore.cs:Num
+hop	KeybindRules.cs:ToString	f9710ee9f7287eae	LimitlessBounds.cs:DigestOf	ref>LimitlessBounds.cs:DigestOf
 hop	KeybindRules.cs:ToString	f98aa200b72e54e5	MusicEngine.cs:TsRunOpenAll	ref[case 3]>MusicEngine.cs:TsRunOpenAll
 hop	KeybindRules.cs:ToString	fa0a19e4c03599a2	ShowcaseRules.cs:SelfTest	ref>ShowcaseRules.cs:SelfTest
 hop	KeybindRules.cs:ToString	fa6e25054e1902d1	NetworkReplicaDiagnostics.cs:LogGameLine	ref[VanillaFixSupport.DiagLimited(#1)]>NetworkReplicaDiagnostics.cs:LogGameLine
@@ -24268,6 +24323,7 @@ hop	Keybinds.cs:ToString	0e72c6b15d9ec783	MusicStreamProbe.cs:Mb	ref>MusicStream
 hop	Keybinds.cs:ToString	0e9af052ee7ddc75	DamageNumberRules.cs:SelfTest	delegate[=>{}]>DamageNumberRules.cs:SelfTest
 hop	Keybinds.cs:ToString	0eaa43d965026d54	ServerTextRules.cs:RefusalTemplate	ref[Regex.Match(#1)]>ServerTextRules.cs:RefusalTemplate
 hop	Keybinds.cs:ToString	0f18bfe270fdd5af	NativeUI.SettingsDrive.cs:DrvR4Sweep	ref>NativeUI.SettingsDrive.cs:DrvR4Sweep
+hop	Keybinds.cs:ToString	0f2e863e64a17418	LimitlessBounds.cs:DigestOf	ref>LimitlessBounds.cs:DigestOf
 hop	Keybinds.cs:ToString	0f3fc8e010b9ddad	PlayerCardMotionDev.cs:DevEnsureSeed	ref>PlayerCardMotionDev.cs:DevEnsureSeed
 hop	Keybinds.cs:ToString	0f98129eafbd03a3	StatusIndicatorGuard.cs:DumpIndicatorOnce	ref[.LogInfo(#0)]>StatusIndicatorGuard.cs:DumpIndicatorOnce
 hop	Keybinds.cs:ToString	0fc01dbc9ee11bae	VanillaFixes.cs:Float	ref>VanillaFixes.cs:Float
@@ -24293,6 +24349,7 @@ hop	Keybinds.cs:ToString	15b6e5ff6e60867a	NativeUI.cs:BuildLobbyMemberLine	ref>N
 hop	Keybinds.cs:ToString	163d952e45e0878c	TeamHoldRules.cs:TokenOk	ref[sb.Append(#0)]>TeamHoldRules.cs:TokenOk
 hop	Keybinds.cs:ToString	165e2edacce227ce	NativeUI.cs:FitNameList	ref[Trunc(#0)]>NativeUI.cs:FitNameList
 hop	Keybinds.cs:ToString	169bc71036a3a3b4	NativeUI.SettingsDrive.cs:DrvHex	ref>NativeUI.SettingsDrive.cs:DrvHex
+hop	Keybinds.cs:ToString	16cba13dadfd2c94	BoundedDeal.cs:LogHeldCards	ref[.Append(#0)]>BoundedDeal.cs:LogHeldCards
 hop	Keybinds.cs:ToString	1702cedd3507d35d	FfaNumberingRules.cs:FrozeLine	ref>FfaNumberingRules.cs:FrozeLine
 hop	Keybinds.cs:ToString	172ab2844e9af57f	PostSessionReport.cs:MakeReportId	ref>PostSessionReport.cs:MakeReportId
 hop	Keybinds.cs:ToString	1781b056ba632e6d	PcQuickShardRules.cs:OwnershipCases	ref[Check(#3)]>PcQuickShardRules.cs:OwnershipCases
@@ -24492,6 +24549,7 @@ hop	Keybinds.cs:ToString	49af1dc019d65f8a	ApiClient.cs:AdminChatDelete	ref>ApiCl
 hop	Keybinds.cs:ToString	49dabfe5ec9754a0	GameStateWatcher.cs:PollRoomState	ref>GameStateWatcher.cs:PollRoomState
 hop	Keybinds.cs:ToString	49f15f4377a5eba2	ApiClient.cs:ReportFfaMatch	ref[sb.Append(#0)/ComputeHmacHex(#0)]>ApiClient.cs:ReportFfaMatch
 hop	Keybinds.cs:ToString	4a0dada96b234707	FfaNumberingRules.cs:StartNew	ref[_trace.Add(#0)]>FfaNumberingRules.cs:StartNew
+hop	Keybinds.cs:ToString	4a544df8332225ce	BoundedDeal.cs:TrySpawnBounded	ref[VanillaFixSupport.DiagLimited(#1)]>BoundedDeal.cs:TrySpawnBounded
 hop	Keybinds.cs:ToString	4a58b263fda73e8b	PlayerCardMotionDev.cs:DevF3	ref>PlayerCardMotionDev.cs:DevF3
 hop	Keybinds.cs:ToString	4a66acabae39a177	VanillaFixes.cs:AfterStart#1	ref[VanillaFixSupport.DiagLimited(#1)]>VanillaFixes.cs:AfterStart#1
 hop	Keybinds.cs:ToString	4aa92214ee21ecdd	PeerBuild.cs:Tick	ref>PeerBuild.cs:Tick
@@ -24502,6 +24560,7 @@ hop	Keybinds.cs:ToString	4c070e78b342c59c	LagNotices.cs:Render	ref[.Append(#0)]>
 hop	Keybinds.cs:ToString	4ca2bb68f048598f	PortraitRenderDance.cs:Top	ref[.Append(#0)]>PortraitRenderDance.cs:Top
 hop	Keybinds.cs:ToString	4d09cb29cd14c41c	MusicAssets.cs:ToHex	ref>MusicAssets.cs:ToHex
 hop	Keybinds.cs:ToString	4d0e9d00a71dde3e	NativeUI.cs:BuildSettingsTab	delegate[SettingsSegmented(#4=>)]>NativeUI.cs:BuildSettingsTab
+hop	Keybinds.cs:ToString	4d9c8dcb71de222c	LimitlessBounds.cs:DigestOf	ref[sb.Append(#0)]>LimitlessBounds.cs:DigestOf
 hop	Keybinds.cs:ToString	4e661071ca1de4ef	ApiClient.cs:ReportMacroEvidence	ref>ApiClient.cs:ReportMacroEvidence
 hop	Keybinds.cs:ToString	4ea08e83cbd711f7	Plugin.cs:PublishLocal#2	entry[string.Join(#1)/[7]]>Plugin.cs:PublishLocal#2
 hop	Keybinds.cs:ToString	4ec873868e8d49d9	DateFmt.cs:MonthDay	dispatch[case "YMD"]{YMD}>DateFmt.cs:MonthDay
@@ -24630,6 +24689,7 @@ hop	Keybinds.cs:ToString	6ac2747f2c6241b4	MusicEngine.cs:DeliveryStalled	ref>Mus
 hop	Keybinds.cs:ToString	6b0d1371b445da91	FfaReadmitEntryRules.cs:ReadmitDigest	ref[FfaLateRules.Hex16(#0)/FfaLateRules.Fnv64(#0)]>FfaReadmitEntryRules.cs:ReadmitDigest
 hop	Keybinds.cs:ToString	6b2ff32cbf7374c0	TeamHoldNet.cs:TryParseBind	ref>TeamHoldNet.cs:TryParseBind
 hop	Keybinds.cs:ToString	6b51c54ed1436576	CombatEvidenceCore.cs:Widest	ref>CombatEvidenceCore.cs:Widest
+hop	Keybinds.cs:ToString	6b94977eb36e73f8	BoundedDeal.cs:LogHeldCards	ref[Plugin.Log.LogInfo(#0)]>BoundedDeal.cs:LogHeldCards
 hop	Keybinds.cs:ToString	6b9853f48a544a52	DateFmt.cs:FullShortYear	ref[case default]>DateFmt.cs:FullShortYear
 hop	Keybinds.cs:ToString	6be2946a76f1b184	PortraitGrade.cs:Fmt	ref[Clean(#0)]>PortraitGrade.cs:Fmt
 hop	Keybinds.cs:ToString	6c490425d3677b08	LogScrub.cs:JoinUsers	ref>LogScrub.cs:JoinUsers
@@ -25043,6 +25103,7 @@ hop	Keybinds.cs:ToString	e063b80723566116	Plugin.cs:SteamIdOf	ref>Plugin.cs:Stea
 hop	Keybinds.cs:ToString	e11e80d16e3ca511	Keybinds.cs:StMutationVerdict	ref[Plugin.Log.LogInfo(#0)]>Keybinds.cs:StMutationVerdict
 hop	Keybinds.cs:ToString	e1e60c357fcc0192	SeatEvidence.cs:SpoolClosing	ref>SeatEvidence.cs:SpoolClosing
 hop	Keybinds.cs:ToString	e204cf6684348a0d	H2HRules.cs:Describe	ref>H2HRules.cs:Describe
+hop	Keybinds.cs:ToString	e20f9a99948acbd8	LimitlessBounds.cs:Version	ref>LimitlessBounds.cs:Version
 hop	Keybinds.cs:ToString	e210dd2553ef0a54	NativeUI.cs:_FmtSlot	dispatch[case "ISO"]{ISO}>NativeUI.cs:_FmtSlot
 hop	Keybinds.cs:ToString	e2158d07509d4a57	PostSessionReport.cs:ModeLine	ref>PostSessionReport.cs:ModeLine
 hop	Keybinds.cs:ToString	e2923cdbd795052c	IdentityClockEvidence.cs:RecordLine	ref>IdentityClockEvidence.cs:RecordLine
@@ -25236,6 +25297,8 @@ hop	LetterboxClear.cs:AdaptClearDepth	c82d8403b1883140	LetterboxClear.cs:Upkeep	
 hop	LetterboxClear.cs:CreateClearCamera	ae27f74641bfb91e	LetterboxClear.cs:Upkeep	ref>LetterboxClear.cs:Upkeep
 hop	LetterboxClear.cs:CreateClearCamera	f73a040afef9c6c1	Plugin.cs:AttachPersistentCompanions	ref>Plugin.cs:AttachPersistentCompanions
 hop	LetterboxClear.cs:Upkeep	4d294a6beec5dad7	Plugin.cs:Update#2	ref>Plugin.cs:Update#2
+hop	LimitlessBounds.cs:DigestInput	d690342730a032a2	LimitlessBounds.cs:DigestOf	ref[sha.ComputeHash(#0)]>LimitlessBounds.cs:DigestOf
+hop	LimitlessBounds.cs:DigestOf	3239ec9772a5019f	LimitlessBounds.cs:Version	ref>LimitlessBounds.cs:Version
 hop	LogBundleCore.cs:Assemble	52a0e05ee08b585c	LogBundleCore.cs:Compose	delegate>LogBundleCore.cs:Compose
 hop	LogBundleCore.cs:CapMarkerLine	fcb78047863a4245	LogBundleCore.cs:Render	ref>LogBundleCore.cs:Render
 hop	LogBundleCore.cs:CaptureAtLength	7798edadb276db57	LogBundleCore.cs:CaptureFile	ref>LogBundleCore.cs:CaptureFile
@@ -29335,10 +29398,12 @@ hop	PcQuickShardRules.cs:Count	092aeb9569aa7e2c	BroadcastHud.cs:SizeCache	ref[ca
 hop	PcQuickShardRules.cs:Count	0960708f9418298b	NativeUI.cs:HandleReportCommand	ref>NativeUI.cs:HandleReportCommand
 hop	PcQuickShardRules.cs:Count	0974983fa9a3a52a	NativeUI.cs:DevSetCompareMetricByName	ref>NativeUI.cs:DevSetCompareMetricByName
 hop	PcQuickShardRules.cs:Count	09756250c6505325	SeatEvidenceCore.cs:QueueText	ref>SeatEvidenceCore.cs:QueueText
+hop	PcQuickShardRules.cs:Count	097c59aa080e4f35	BoundedDeal.cs:Describe	ref>BoundedDeal.cs:Describe
 hop	PcQuickShardRules.cs:Count	09aeecdd023a5527	TitleLadderRules.cs:Decide	ref>TitleLadderRules.cs:Decide
 hop	PcQuickShardRules.cs:Count	09af09789f1cce37	DamageNumberRules.cs:SelfTest	delegate>DamageNumberRules.cs:SelfTest
 hop	PcQuickShardRules.cs:Count	09c83ecbeaa45466	ApiClient.cs:FetchFfaLeaderboard	delegate[Plugin.Instance.StartCoroutine(#0)/GetRequest(#1=>)/=>{}/Plugin.Log.LogInfo(#0)]>ApiClient.cs:FetchFfaLeaderboard
 hop	PcQuickShardRules.cs:Count	09cd283c22740038	GameStateWatcher.cs:Emit	ref>GameStateWatcher.cs:Emit
+hop	PcQuickShardRules.cs:Count	09e0dbd0f6192711	BoundedDeal.cs:LogHeldCards	ref[.Append(#0)]>BoundedDeal.cs:LogHeldCards
 hop	PcQuickShardRules.cs:Count	09e9607fafc2a316	CardTextLocalizer.cs:ScanIfNeeded	ref[Plugin.Log.LogInfo(#0)]>CardTextLocalizer.cs:ScanIfNeeded
 hop	PcQuickShardRules.cs:Count	09f7a5e0f6ae3559	PostSessionReport.cs:Compose1v1	ref[I18n.TrF(#1)]>PostSessionReport.cs:Compose1v1
 hop	PcQuickShardRules.cs:Count	0a095d2cf29cfd93	FfaMode.cs:ResolveFighter	ref>FfaMode.cs:ResolveFighter
@@ -29454,6 +29519,7 @@ hop	PcQuickShardRules.cs:Count	1ceb3514503a1f82	ApiClient.cs:ParseMatchHistoryFo
 hop	PcQuickShardRules.cs:Count	1d0276bda1b9d507	ApiClient.cs:FetchAchievements	delegate[Plugin.Instance.StartCoroutine(#0)/GetRequest(#1=>)/=>{}]>ApiClient.cs:FetchAchievements
 hop	PcQuickShardRules.cs:Count	1d0c4d57a4dd9234	PostSessionReport.cs:ApplyStatus	ref>PostSessionReport.cs:ApplyStatus
 hop	PcQuickShardRules.cs:Count	1d2767cf491a6ff1	SeatEvidenceCore.cs:Write	ref>SeatEvidenceCore.cs:Write
+hop	PcQuickShardRules.cs:Count	1d40b0e9a02c768a	BoundedDealRules.cs:Decide	ref>BoundedDealRules.cs:Decide
 hop	PcQuickShardRules.cs:Count	1d525407443a68dc	IdentityClockCore.cs:PointStart	ref>IdentityClockCore.cs:PointStart
 hop	PcQuickShardRules.cs:Count	1d5453df7b60f3c1	ApiClient.cs:FetchCardLeaders	delegate[FetchCompareBoard(#2=>)/=>{}]>ApiClient.cs:FetchCardLeaders
 hop	PcQuickShardRules.cs:Count	1d5622fe193b5ccc	PlayerCardMotion.cs:CachedCount	ref>PlayerCardMotion.cs:CachedCount
@@ -29569,6 +29635,7 @@ hop	PcQuickShardRules.cs:Count	2e12a9d19901c071	TeamColorIdentity.cs:Rebuild	ref
 hop	PcQuickShardRules.cs:Count	2e1da32ad50724a8	NativeUI.cs:RenderFfaBettingSection	ref[ffaBetLobbyRows.Add(#0)/CreateFfaBetLobbyRow(#1)]>NativeUI.cs:RenderFfaBettingSection
 hop	PcQuickShardRules.cs:Count	2eaa525844228277	FfaReadmitRules.cs:PlanApply	ref>FfaReadmitRules.cs:PlanApply
 hop	PcQuickShardRules.cs:Count	2eacdfeb2faa351d	PlayerCardMotionDev.cs:DevT49	ref>PlayerCardMotionDev.cs:DevT49
+hop	PcQuickShardRules.cs:Count	2ec6ffd6c733bca2	BoundedDeal.cs:TrySpawnBounded	ref>BoundedDeal.cs:TrySpawnBounded
 hop	PcQuickShardRules.cs:Count	2edcaf4c042e2620	FfaReadmitRules.cs:FirstOf	ref>FfaReadmitRules.cs:FirstOf
 hop	PcQuickShardRules.cs:Count	2f02d9b15a1f0e90	MailUI.cs:PaintChips	ref[UIFactory.SetTextRaw(#1)/San(#0)/Trunc(#1)]>MailUI.cs:PaintChips
 hop	PcQuickShardRules.cs:Count	2f0fa2d697464e82	CompetitiveUI.cs:DrawDanceWheel	ref>CompetitiveUI.cs:DrawDanceWheel
@@ -30023,6 +30090,7 @@ hop	PcQuickShardRules.cs:Count	7651cb7bfa625e13	FfaCardSequence.cs:DryRun	ref>Ff
 hop	PcQuickShardRules.cs:Count	767bb9a7a4b89a33	CardDrawEvidenceCore.cs:Budget	ref[case 3/lenPh.RemoveAt(#0)]>CardDrawEvidenceCore.cs:Budget
 hop	PcQuickShardRules.cs:Count	76acb23a143209ef	NativeUI.cs:BuildOvtRecentRowText	ref>NativeUI.cs:BuildOvtRecentRowText
 hop	PcQuickShardRules.cs:Count	76cf36efaefdfeaf	BroadcastHud.cs:DrawPanel	ref>BroadcastHud.cs:DrawPanel
+hop	PcQuickShardRules.cs:Count	7700a04d6053dc33	BoundedDealRules.cs:Pick	ref>BoundedDealRules.cs:Pick
 hop	PcQuickShardRules.cs:Count	773df03e6d1a19ba	ApiClient.cs:FetchCardCatalogRanked	delegate[FetchCompareBoard(#2=>)/=>{}]>ApiClient.cs:FetchCardCatalogRanked
 hop	PcQuickShardRules.cs:Count	776ee6d4588fcac6	CardDrawEvidenceCore.cs:Budget	ref[case 3/ph.RemoveAt(#0)]>CardDrawEvidenceCore.cs:Budget
 hop	PcQuickShardRules.cs:Count	7772f70421bf0c93	NativeUI.cs:AppendCardList	ref>NativeUI.cs:AppendCardList
@@ -30655,6 +30723,7 @@ hop	PcQuickShardRules.cs:Count	dfa8c8cbe4c83c61	TeamHoldNet.cs:BeatBody	ref>Team
 hop	PcQuickShardRules.cs:Count	dfc2feb829679cc8	ApiClient.cs:FetchChatMutes	delegate[Plugin.Instance.StartCoroutine(#0)/GetRequest(#1=>)/=>{}/Plugin.Log.LogInfo(#0)]>ApiClient.cs:FetchChatMutes
 hop	PcQuickShardRules.cs:Count	dfc580cba70d5c4d	IdentityClockEvidence.cs:ArmFromFile	ref[Plugin.Log.LogInfo(#0)]>IdentityClockEvidence.cs:ArmFromFile
 hop	PcQuickShardRules.cs:Count	dfd4022124e08f99	CardDrawEvidence.cs:SealGame	ref>CardDrawEvidence.cs:SealGame
+hop	PcQuickShardRules.cs:Count	dfebecf5159307e6	BoundedDeal.cs:TrySpawnBounded	ref[VanillaFixSupport.DiagLimited(#1)]>BoundedDeal.cs:TrySpawnBounded
 hop	PcQuickShardRules.cs:Count	e000132eae346e46	IdentityClockCore.cs:ChkAndPlug	ref>IdentityClockCore.cs:ChkAndPlug
 hop	PcQuickShardRules.cs:Count	e004ebdc28e5b65b	CompetitiveUI.cs:ShowNotificationSet	ref>CompetitiveUI.cs:ShowNotificationSet
 hop	PcQuickShardRules.cs:Count	e01ee58cf2d78ac4	EmojiSprites.cs:DestroyRuntimeObjects	ref>EmojiSprites.cs:DestroyRuntimeObjects
@@ -30824,6 +30893,7 @@ hop	PcQuickShardRules.cs:Count	fb6cd0fa964cddd6	NativeUI.cs:TrackWeightLabel	ref
 hop	PcQuickShardRules.cs:Count	fb7ddaee7f22a3bc	FfaMode.cs:RoomCount	ref>FfaMode.cs:RoomCount
 hop	PcQuickShardRules.cs:Count	fbc8697bc2f8c031	NetworkReplicaDiagnostics.cs:EmitGameTailSummary	ref>NetworkReplicaDiagnostics.cs:EmitGameTailSummary
 hop	PcQuickShardRules.cs:Count	fbcc64cf082d8027	ApiClient.cs:EnrollResult	ref>ApiClient.cs:EnrollResult
+hop	PcQuickShardRules.cs:Count	fbe7b4e8c0ccbc5f	BoundedDeal.cs:LogHeldCards	ref>BoundedDeal.cs:LogHeldCards
 hop	PcQuickShardRules.cs:Count	fbf326ee24f75f26	CardDrawEvidence.cs:Rounds	ref>CardDrawEvidence.cs:Rounds
 hop	PcQuickShardRules.cs:Count	fc21c2d66cfa1a45	ApiClient.cs:FetchRecentSeries	delegate[Plugin.Instance.StartCoroutine(#0)/GetRequest(#1=>)/=>{}]>ApiClient.cs:FetchRecentSeries
 hop	PcQuickShardRules.cs:Count	fc2f3f02d6bf2cde	NativeUI.SettingsDrive.cs:DrvCfgRestored	ref[DrvNote(#0)]>NativeUI.SettingsDrive.cs:DrvCfgRestored
@@ -31647,6 +31717,7 @@ hop	PlayerCardMotionCore.cs:Count#1	1d59439507d1e76d	SessionReportRules.cs:FlowC
 hop	PlayerCardMotionCore.cs:Count#1	1d7a8da37dc85ece	NativeUI.cs:RefreshBannedTab	ref[UIFactory.SetText(#1)]>NativeUI.cs:RefreshBannedTab
 hop	PlayerCardMotionCore.cs:Count#1	1dbc084dfe61f3de	FfaMode.cs:ReadmitReplayDeckCurrent	ref>FfaMode.cs:ReadmitReplayDeckCurrent
 hop	PlayerCardMotionCore.cs:Count#1	1dedfea6d06b32e7	SessionReportView.cs:DrawBars	ref[Fill(#1)]>SessionReportView.cs:DrawBars
+hop	PlayerCardMotionCore.cs:Count#1	1e05e6ba87eb65c2	BoundedDealRules.cs:Decide	ref>BoundedDealRules.cs:Decide
 hop	PlayerCardMotionCore.cs:Count#1	1e2bbaa6c16b9dd4	HitEvidence.cs:HoldPoint	ref>HitEvidence.cs:HoldPoint
 hop	PlayerCardMotionCore.cs:Count#1	1e78080cc12a75f9	SessionReportModel.cs:LongestT	ref>SessionReportModel.cs:LongestT
 hop	PlayerCardMotionCore.cs:Count#1	1e97c125bcb0b78d	ApiClient.cs:FetchCardCatalogRanked	delegate[FetchCompareBoard(#2=>)/=>{}]>ApiClient.cs:FetchCardCatalogRanked
@@ -31825,6 +31896,7 @@ hop	PlayerCardMotionCore.cs:Count#1	38a4bd56255bd5d5	MusicEntitlements.cs:ApplyS
 hop	PlayerCardMotionCore.cs:Count#1	38bc1527dd97881b	MailUI.cs:OnStatus	delegate[MailClient.FetchInbox(#1=>)/=>{}]>MailUI.cs:OnStatus
 hop	PlayerCardMotionCore.cs:Count#1	38fcf9f2d9975297	SpectatorSync.cs:CurrentDeckNames	ref>SpectatorSync.cs:CurrentDeckNames
 hop	PlayerCardMotionCore.cs:Count#1	390172c24cda389f	CardDrawEvidenceCore.cs:Budget	ref[case 2/h0.RemoveAt(#0)]>CardDrawEvidenceCore.cs:Budget
+hop	PlayerCardMotionCore.cs:Count#1	39541575a9043e67	BoundedDeal.cs:TrySpawnBounded	ref[VanillaFixSupport.DiagLimited(#1)]>BoundedDeal.cs:TrySpawnBounded
 hop	PlayerCardMotionCore.cs:Count#1	3996f42ecbe4b1b5	ApiClient.cs:PcTradePropose	ref[Plugin.Log.LogInfo(#0)]>ApiClient.cs:PcTradePropose
 hop	PlayerCardMotionCore.cs:Count#1	39b61c059fc89724	NativeUI.cs:BuildComparePieChart	ref[Mathf.Ceil(#0)]>NativeUI.cs:BuildComparePieChart
 hop	PlayerCardMotionCore.cs:Count#1	39c7aae9886a98e0	PoisonLedgerCore.cs:Count#2	ref>PoisonLedgerCore.cs:Count#2
@@ -31849,6 +31921,7 @@ hop	PlayerCardMotionCore.cs:Count#1	3dc92f45b4d9113d	DamageNumberRules.cs:Show	r
 hop	PlayerCardMotionCore.cs:Count#1	3df050fbab2c8d4a	ApiClient.cs:FetchCosmeticFrames	delegate[Plugin.Instance.StartCoroutine(#0)/GetRequest(#1=>)/=>{}]>ApiClient.cs:FetchCosmeticFrames
 hop	PlayerCardMotionCore.cs:Count#1	3dfad192d794e6a5	SessionReportModel.cs:Build	ref>SessionReportModel.cs:Build
 hop	PlayerCardMotionCore.cs:Count#1	3e0142d665637869	CombatEvidenceCore.cs:Trace	ref>CombatEvidenceCore.cs:Trace
+hop	PlayerCardMotionCore.cs:Count#1	3e143a9d6cdd9fb4	BoundedDeal.cs:LogHeldCards	ref>BoundedDeal.cs:LogHeldCards
 hop	PlayerCardMotionCore.cs:Count#1	3e1cd14954706076	RosterCensus.cs:Field	ref>RosterCensus.cs:Field
 hop	PlayerCardMotionCore.cs:Count#1	3e31338d1244c373	SeatEvidenceCore.cs:Five	ref>SeatEvidenceCore.cs:Five
 hop	PlayerCardMotionCore.cs:Count#1	3e42fe520ce27d41	TeamHoldPatches.cs:BootLine	ref>TeamHoldPatches.cs:BootLine
@@ -31899,6 +31972,7 @@ hop	PlayerCardMotionCore.cs:Count#1	450ef12e77cb3e1b	FfaReadmitRules.cs:FirstOf	
 hop	PlayerCardMotionCore.cs:Count#1	4511f965d4716a99	NativeUI.cs:BuildFfaRecentRowText	ref>NativeUI.cs:BuildFfaRecentRowText
 hop	PlayerCardMotionCore.cs:Count#1	45381acd5d4ebb24	VanillaFixes.cs:ApplyToAll	ref>VanillaFixes.cs:ApplyToAll
 hop	PlayerCardMotionCore.cs:Count#1	4553b2900164b2d5	GameStateWatcher.cs:LocalOffersPickedIn	ref>GameStateWatcher.cs:LocalOffersPickedIn
+hop	PlayerCardMotionCore.cs:Count#1	455830eec8f9c4cd	BoundedDeal.cs:TrySpawnBounded	ref>BoundedDeal.cs:TrySpawnBounded
 hop	PlayerCardMotionCore.cs:Count#1	455e18f2780f2208	PostSessionReport.cs:ComposeGameRows1v1	ref[AddLabel(#5)/I18n.TrF(#1)]>PostSessionReport.cs:ComposeGameRows1v1
 hop	PlayerCardMotionCore.cs:Count#1	4562a28d94d74d21	CardDrawEvidence.cs:Facts	ref>CardDrawEvidence.cs:Facts
 hop	PlayerCardMotionCore.cs:Count#1	458ed39fc740ade0	MusicEngine.cs:BuildAlbumBlockCycle	ref[new List(#0)]>MusicEngine.cs:BuildAlbumBlockCycle
@@ -32790,6 +32864,7 @@ hop	PlayerCardMotionCore.cs:Count#1	d61f29d4f5e42341	NativeUI.cs:RefreshCompare	
 hop	PlayerCardMotionCore.cs:Count#1	d694b20f54d81fd3	CompetitiveUI.cs:NotificationSetLift	ref>CompetitiveUI.cs:NotificationSetLift
 hop	PlayerCardMotionCore.cs:Count#1	d6a0cf0ef3592c01	PlayerCardMotion.cs:OnRead	ref[Plugin.Log.LogInfo(#0)]>PlayerCardMotion.cs:OnRead
 hop	PlayerCardMotionCore.cs:Count#1	d6db54b7ee45852c	PlayerCardsUI.cs:HistoryInsertHead	ref>PlayerCardsUI.cs:HistoryInsertHead
+hop	PlayerCardMotionCore.cs:Count#1	d6ed0e0cd8e4aeaf	BoundedDealRules.cs:Pick	ref>BoundedDealRules.cs:Pick
 hop	PlayerCardMotionCore.cs:Count#1	d7ae212591a92783	PlayerCardsUI.cs:RefreshOpen	ref[Math.Max(#1)]>PlayerCardsUI.cs:RefreshOpen
 hop	PlayerCardMotionCore.cs:Count#1	d7e0a64ebd9ab01d	PlayerCardMotionCore.cs:Count#2	ref>PlayerCardMotionCore.cs:Count#2
 hop	PlayerCardMotionCore.cs:Count#1	d7e7763531239455	NativeUI.cs:BuildLobbyMemberLine	ref[.Append(#0)/I18n.TrF(#1)]>NativeUI.cs:BuildLobbyMemberLine
@@ -32914,6 +32989,7 @@ hop	PlayerCardMotionCore.cs:Count#1	e9e6407ca983a8ea	ApiClient.cs:ParkRefusedRep
 hop	PlayerCardMotionCore.cs:Count#1	e9f8c1fc2b146a0c	ApiClient.cs:FetchAchievementEarners	delegate[Plugin.Instance.StartCoroutine(#0)/GetRequest(#1=>)/=>{}/Plugin.Log.LogInfo(#0)]>ApiClient.cs:FetchAchievementEarners
 hop	PlayerCardMotionCore.cs:Count#1	ea44feb33c081653	ShowcaseRules.cs:Describe	ref>ShowcaseRules.cs:Describe
 hop	PlayerCardMotionCore.cs:Count#1	ea5a3247f68e5068	MusicEngine.cs:TsState	ref>MusicEngine.cs:TsState
+hop	PlayerCardMotionCore.cs:Count#1	eae90c80904cd870	BoundedDeal.cs:Describe	ref>BoundedDeal.cs:Describe
 hop	PlayerCardMotionCore.cs:Count#1	eb20de80db20fe25	NativeUI.cs:BuildCompareCardGrid	ref>NativeUI.cs:BuildCompareCardGrid
 hop	PlayerCardMotionCore.cs:Count#1	eb2d6c0a52ba1510	SpectatorTeardownProbe.cs:CloseWindow	ref[Math.Min(#0)]>SpectatorTeardownProbe.cs:CloseWindow
 hop	PlayerCardMotionCore.cs:Count#1	eb2e91e8d87fb00c	PoisonLedgerCore.cs:SaturatedState	ref[ClaimLine.N(#0)]>PoisonLedgerCore.cs:SaturatedState
@@ -33019,6 +33095,7 @@ hop	PlayerCardMotionCore.cs:Count#1	fbb7516cf0788487	BinderSortRules.cs:SelfTest
 hop	PlayerCardMotionCore.cs:Count#1	fbbedc5cb3caddd1	PcQuickShardRules.cs:TombstoneOnEveryOrder	ref>PcQuickShardRules.cs:TombstoneOnEveryOrder
 hop	PlayerCardMotionCore.cs:Count#1	fbe1d02a736bcf7e	SessionReportView.cs:PageLine	ref[Mathf.Clamp(#2)]>SessionReportView.cs:PageLine
 hop	PlayerCardMotionCore.cs:Count#1	fc0069bcecdf18a7	FfaNumberingRules.cs:Run#1	ref>FfaNumberingRules.cs:Run#1
+hop	PlayerCardMotionCore.cs:Count#1	fc37159c8a115bef	BoundedDeal.cs:LogHeldCards	ref[.Append(#0)]>BoundedDeal.cs:LogHeldCards
 hop	PlayerCardMotionCore.cs:Count#1	fc3bf30313e1ccb4	NativeUI.cs:RefreshRecentSeries	ref[Math.Min(#1)]>NativeUI.cs:RefreshRecentSeries
 hop	PlayerCardMotionCore.cs:Count#1	fc6a2da300416fb7	PlayerCardsUI.cs:OnShardDupesClick	ref>PlayerCardsUI.cs:OnShardDupesClick
 hop	PlayerCardMotionCore.cs:Count#1	fcb418f462102f41	Plugin.cs:Auto2v2SpawnCoroutine	ref>Plugin.cs:Auto2v2SpawnCoroutine
@@ -33267,6 +33344,7 @@ hop	PlayerCardMotionCore.cs:Count#2	1de7b09f3442ec37	PortraitRender.cs:RunPreset
 hop	PlayerCardMotionCore.cs:Count#2	1e2a5d4714b24a28	SessionReportModel.cs:Finish	ref>SessionReportModel.cs:Finish
 hop	PlayerCardMotionCore.cs:Count#2	1e3463eb0ef84063	NativeUI.Settings.cs:SelfTestA2a	ref>NativeUI.Settings.cs:SelfTestA2a
 hop	PlayerCardMotionCore.cs:Count#2	1e741c01ed80ac33	PoisonLedgerCore.cs:ViewsWithPending	ref>PoisonLedgerCore.cs:ViewsWithPending
+hop	PlayerCardMotionCore.cs:Count#2	1e8778cf2e8765a2	BoundedDeal.cs:TrySpawnBounded	ref[VanillaFixSupport.DiagLimited(#1)]>BoundedDeal.cs:TrySpawnBounded
 hop	PlayerCardMotionCore.cs:Count#2	1e955749ad4d95b4	ApiClient.cs:NemesisKeyFor	ref>ApiClient.cs:NemesisKeyFor
 hop	PlayerCardMotionCore.cs:Count#2	1e98890a0db420c8	DamageNumberRules.cs:Show	ref>DamageNumberRules.cs:Show
 hop	PlayerCardMotionCore.cs:Count#2	1ebbe34f80ea09f7	NativeUI.SettingsDrive.cs:DriveT5h	ref>NativeUI.SettingsDrive.cs:DriveT5h
@@ -33279,6 +33357,7 @@ hop	PlayerCardMotionCore.cs:Count#2	1f40d83906ddda4d	TeamColorIdentity.cs:Tint	r
 hop	PlayerCardMotionCore.cs:Count#2	1f4c93d510ddf7b2	FfaLateRules.cs:Indices	ref>FfaLateRules.cs:Indices
 hop	PlayerCardMotionCore.cs:Count#2	1fa44eb8aa013ade	CompetitiveUI.cs:DrawPlayerSearch	delegate[ApiClient.SearchPlayers(#1=>)/=>{}]>CompetitiveUI.cs:DrawPlayerSearch
 hop	PlayerCardMotionCore.cs:Count#2	20052dbfb2631531	NativeUI.cs:RenderFfaBettingSection	ref[ffaBetLobbyRows.Add(#0)/CreateFfaBetLobbyRow(#1)]>NativeUI.cs:RenderFfaBettingSection
+hop	PlayerCardMotionCore.cs:Count#2	205a216856e01027	BoundedDeal.cs:LogHeldCards	ref>BoundedDeal.cs:LogHeldCards
 hop	PlayerCardMotionCore.cs:Count#2	20a719cc4ef63aaf	IdentityClockCore.cs:TrimOne	ref[l.RemoveAt(#0)]>IdentityClockCore.cs:TrimOne
 hop	PlayerCardMotionCore.cs:Count#2	20cbfa604348805f	GameStateWatcher.cs:TryRequestOvtContinuationSeries	ref>GameStateWatcher.cs:TryRequestOvtContinuationSeries
 hop	PlayerCardMotionCore.cs:Count#2	20d014e8e36d4e16	TeamGameNumber.cs:SimulateF31#2	ref>TeamGameNumber.cs:SimulateF31#2
@@ -33628,6 +33707,7 @@ hop	PlayerCardMotionCore.cs:Count#2	5cce5d235f9c4bdb	MusicEngine.cs:TsRestore	re
 hop	PlayerCardMotionCore.cs:Count#2	5cd026426f687b80	TabStatsOverlay.cs:BroadcastFighterName	ref>TabStatsOverlay.cs:BroadcastFighterName
 hop	PlayerCardMotionCore.cs:Count#2	5cdaaa5b797ca719	ProfileCard.cs:HitTest	ref>ProfileCard.cs:HitTest
 hop	PlayerCardMotionCore.cs:Count#2	5d3f029e6eca9a6b	ApiClient.cs:FetchRecordsBoard	delegate[FetchCompareBoard(#2=>)/=>{}/ArraysAligned(#2)]>ApiClient.cs:FetchRecordsBoard
+hop	PlayerCardMotionCore.cs:Count#2	5d68a10a9c4140d5	BoundedDealRules.cs:Pick	ref>BoundedDealRules.cs:Pick
 hop	PlayerCardMotionCore.cs:Count#2	5d89c9cf19d038e8	NativeUI.cs:SyncShopArtistFilterButtons	ref>NativeUI.cs:SyncShopArtistFilterButtons
 hop	PlayerCardMotionCore.cs:Count#2	5df75ca67b7a2bf7	AvatarDefaults.cs:OtherFighterCount	ref>AvatarDefaults.cs:OtherFighterCount
 hop	PlayerCardMotionCore.cs:Count#2	5e3701e60bb938bb	IdentityClockCore.cs:Add#2	ref>IdentityClockCore.cs:Add#2
@@ -33655,6 +33735,7 @@ hop	PlayerCardMotionCore.cs:Count#2	61aacdbc0bf07c4a	CompetitiveUI.cs:ShowNotifi
 hop	PlayerCardMotionCore.cs:Count#2	61bee6bd085be376	CombatEvidenceCore.cs:TrimOne	ref[RemoveAtIndex(#2)]>CombatEvidenceCore.cs:TrimOne
 hop	PlayerCardMotionCore.cs:Count#2	61cbc323cb9b81a3	SessionReportRules.cs:ParseGame	dispatch[case "timelines"]{timelines}>SessionReportRules.cs:ParseGame
 hop	PlayerCardMotionCore.cs:Count#2	61d618174e597ea2	ApiClient.cs:FetchShopItems	delegate[Plugin.Instance.StartCoroutine(#0)/GetRequest(#1=>)/=>{}/Plugin.Log.LogInfo(#0)]>ApiClient.cs:FetchShopItems
+hop	PlayerCardMotionCore.cs:Count#2	61eb8111d6bd5a56	BoundedDeal.cs:LogHeldCards	ref[.Append(#0)]>BoundedDeal.cs:LogHeldCards
 hop	PlayerCardMotionCore.cs:Count#2	62097bc9f9a9f771	PlayerCardsUI.cs:NotifyNew	ref[Plugin.Log.LogInfo(#0)]>PlayerCardsUI.cs:NotifyNew
 hop	PlayerCardMotionCore.cs:Count#2	621fafc86e836734	NativeUI.cs:RefreshFfaTab	ref[ffaRecentRows.Add(#0)/CreateFfaRecentMatchRow(#1)]>NativeUI.cs:RefreshFfaTab
 hop	PlayerCardMotionCore.cs:Count#2	62265dee9512e75e	FfaLateEntry.cs:OnEpochAnswer	ref[JoinTimeline.Step(#1)/I(#0)]>FfaLateEntry.cs:OnEpochAnswer
@@ -33741,6 +33822,7 @@ hop	PlayerCardMotionCore.cs:Count#2	6e984042aa24a0e9	OverlayInputGate.cs:Postfix
 hop	PlayerCardMotionCore.cs:Count#2	6ec0cdc3a01c1498	NativeUI.cs:RefreshCompareCardsTab	ref>NativeUI.cs:RefreshCompareCardsTab
 hop	PlayerCardMotionCore.cs:Count#2	6ed3c8795516fedb	SessionReportView.cs:MeasureBlock	ref>SessionReportView.cs:MeasureBlock
 hop	PlayerCardMotionCore.cs:Count#2	6ee10feeb26ee4a6	VanillaFixes.cs:RestoreOrder	ref[VanillaFixSupport.DiagLimited(#1)]>VanillaFixes.cs:RestoreOrder
+hop	PlayerCardMotionCore.cs:Count#2	6ee50207b36de7cd	BoundedDeal.cs:Describe	ref>BoundedDeal.cs:Describe
 hop	PlayerCardMotionCore.cs:Count#2	6f44624e6441cfaa	PlayerCardsUI.cs:RefreshSelectRow	ref[UIFactory.SetImageColor(#1)]>PlayerCardsUI.cs:RefreshSelectRow
 hop	PlayerCardMotionCore.cs:Count#2	6f8258329134fe8a	PoisonSync.cs:FlushOpenV3	ref>PoisonSync.cs:FlushOpenV3
 hop	PlayerCardMotionCore.cs:Count#2	6f8b1a554f9f3066	NativeUI.cs:RefreshHomeTab	ref>NativeUI.cs:RefreshHomeTab
@@ -34092,6 +34174,7 @@ hop	PlayerCardMotionCore.cs:Count#2	a7f830c4fd1166ca	FfaLateRules.cs:IsKindS	ref
 hop	PlayerCardMotionCore.cs:Count#2	a81b305bcfe515fd	PostSessionReport.cs:ComposePlayerPanelCompact	ref>PostSessionReport.cs:ComposePlayerPanelCompact
 hop	PlayerCardMotionCore.cs:Count#2	a8b495974b8697ff	VanillaFixes.cs:Prefix#2	ref>VanillaFixes.cs:Prefix#2
 hop	PlayerCardMotionCore.cs:Count#2	a8efca69fa5e2799	DanceEmotes.cs:SweepDeadKeys	ref>DanceEmotes.cs:SweepDeadKeys
+hop	PlayerCardMotionCore.cs:Count#2	a90fb5e613da483c	BoundedDeal.cs:TrySpawnBounded	ref>BoundedDeal.cs:TrySpawnBounded
 hop	PlayerCardMotionCore.cs:Count#2	a9719edaf83076f9	NativeUI.cs:ExportTierListCoroutine	ref>NativeUI.cs:ExportTierListCoroutine
 hop	PlayerCardMotionCore.cs:Count#2	a99425077cb52d81	PlayerCardsUI.cs:SettleFaceRefetches	ref>PlayerCardsUI.cs:SettleFaceRefetches
 hop	PlayerCardMotionCore.cs:Count#2	a9a2f4fc8cdf1c17	TabStatsOverlay.cs:BroadcastFighterBody	ref>TabStatsOverlay.cs:BroadcastFighterBody
@@ -34252,6 +34335,7 @@ hop	PlayerCardMotionCore.cs:Count#2	c19ea19b6058df42	IdentityClockEvidence.cs:Mo
 hop	PlayerCardMotionCore.cs:Count#2	c1fe18938ae69e19	PostSessionReport.cs:ApplyRosterFromStatus	ref>PostSessionReport.cs:ApplyRosterFromStatus
 hop	PlayerCardMotionCore.cs:Count#2	c23b634d33f1af4d	PoisonSync.cs:V3PatchesMissing	ref>PoisonSync.cs:V3PatchesMissing
 hop	PlayerCardMotionCore.cs:Count#2	c241773382aa6164	PlayerCardsUI.cs:DrawReceived	ref[Plugin.Log.LogInfo(#0)]>PlayerCardsUI.cs:DrawReceived
+hop	PlayerCardMotionCore.cs:Count#2	c25df8e999352111	BoundedDealRules.cs:Decide	ref>BoundedDealRules.cs:Decide
 hop	PlayerCardMotionCore.cs:Count#2	c2860cf019f03293	GameStateWatcher.cs:OnOpponentCardPicked	entry[preMatchOpponentCards.Add(#0)/MatchTracker.CardPickData.PickOrder]>GameStateWatcher.cs:OnOpponentCardPicked
 hop	PlayerCardMotionCore.cs:Count#2	c2ae286ccc77ecc5	NativeUI.Settings.cs:SelfTestA2aChrome	ref>NativeUI.Settings.cs:SelfTestA2aChrome
 hop	PlayerCardMotionCore.cs:Count#2	c2b5b0de828dd548	TitleLadderRules.cs:Progress	ref>TitleLadderRules.cs:Progress
@@ -37401,6 +37485,7 @@ hop	PoisonLedgerCore.cs:Count#1	16104993a1e67ae4	NativeUI.cs:CountCardLines	ref>
 hop	PoisonLedgerCore.cs:Count#1	163a5ca465960099	TitleLaddersUI.cs:ProgressText	ref>TitleLaddersUI.cs:ProgressText
 hop	PoisonLedgerCore.cs:Count#1	16414338996ed1fb	GameStateWatcher.cs:OnUnityLog	ref>GameStateWatcher.cs:OnUnityLog
 hop	PoisonLedgerCore.cs:Count#1	1644ac6c25e734b9	ApiClient.cs:PcDiscardBatch	ref>ApiClient.cs:PcDiscardBatch
+hop	PoisonLedgerCore.cs:Count#1	166a31763e19ae82	BoundedDeal.cs:TrySpawnBounded	ref>BoundedDeal.cs:TrySpawnBounded
 hop	PoisonLedgerCore.cs:Count#1	16d2e3cc86d00cc0	FfaMode.cs:RebuildDeckViews	ref[Plugin.Log.LogInfo(#0)]>FfaMode.cs:RebuildDeckViews
 hop	PoisonLedgerCore.cs:Count#1	172a6611439f6113	ApiClient.cs:ParseCardCatalogBody	ref>ApiClient.cs:ParseCardCatalogBody
 hop	PoisonLedgerCore.cs:Count#1	172dfe3efe5771c9	ApiClient.cs:JsonIntArrayByKey	ref[new List(#0)]>ApiClient.cs:JsonIntArrayByKey
@@ -37557,6 +37642,7 @@ hop	PoisonLedgerCore.cs:Count#1	2f1207573097495c	NativeUI.cs:RefreshMyStats	ref>
 hop	PoisonLedgerCore.cs:Count#1	2f5ecca706177508	NativeUI.cs:CalcStreak	ref>NativeUI.cs:CalcStreak
 hop	PoisonLedgerCore.cs:Count#1	2f83bd235c9f61c8	ProfileCard.cs:RegisterNameHover	ref>ProfileCard.cs:RegisterNameHover
 hop	PoisonLedgerCore.cs:Count#1	2f90b0ef3777130d	RegionPingSweep.cs:TryStart	ref[.LogInfo(#0)]>RegionPingSweep.cs:TryStart
+hop	PoisonLedgerCore.cs:Count#1	2f92c477f4504481	BoundedDeal.cs:LogHeldCards	ref>BoundedDeal.cs:LogHeldCards
 hop	PoisonLedgerCore.cs:Count#1	2fab3cae668943f6	FfaLateEntry.cs:PrepareReadmitEpochCore	ref[Math.Min(#1)]>FfaLateEntry.cs:PrepareReadmitEpochCore
 hop	PoisonLedgerCore.cs:Count#1	2ff01531aa51330f	TitleLaddersUI.cs:PaintEntry	ref>TitleLaddersUI.cs:PaintEntry
 hop	PoisonLedgerCore.cs:Count#1	3027bc55578dbe01	FfaLateEntry.cs:ReadmitActorPrepared	ref[Math.Min(#1)]>FfaLateEntry.cs:ReadmitActorPrepared
@@ -37590,6 +37676,7 @@ hop	PoisonLedgerCore.cs:Count#1	340e122dde07a4f6	RoomRulesStrip.cs:SelfTest	ref[
 hop	PoisonLedgerCore.cs:Count#1	340f84b472394c11	ApiClient.cs:FetchCardCatalogRanked	delegate[FetchCompareBoard(#2=>)/=>{}]>ApiClient.cs:FetchCardCatalogRanked
 hop	PoisonLedgerCore.cs:Count#1	3413c8dc61e61e47	NativeUI.Settings.cs:SelfTestA2b	ref>NativeUI.Settings.cs:SelfTestA2b
 hop	PoisonLedgerCore.cs:Count#1	3416528610f648d4	GameStateWatcher.cs:PollOpponentFps	ref>GameStateWatcher.cs:PollOpponentFps
+hop	PoisonLedgerCore.cs:Count#1	342d47e444dfe68d	BoundedDeal.cs:TrySpawnBounded	ref[VanillaFixSupport.DiagLimited(#1)]>BoundedDeal.cs:TrySpawnBounded
 hop	PoisonLedgerCore.cs:Count#1	343517d540523987	IdentityClockCore.cs:Budget	ref[omit.Set(#1)]>IdentityClockCore.cs:Budget
 hop	PoisonLedgerCore.cs:Count#1	3444ac9b9cdd7240	CompetitiveUI.cs:DrawNotification	ref>CompetitiveUI.cs:DrawNotification
 hop	PoisonLedgerCore.cs:Count#1	3455ea7a58c4b6ad	CombatEvidence.cs:SyncRead	ref>CombatEvidence.cs:SyncRead
@@ -37672,6 +37759,7 @@ hop	PoisonLedgerCore.cs:Count#1	417f0bb21a073de0	PlayerCardsUI.cs:FaceRefetchWai
 hop	PoisonLedgerCore.cs:Count#1	418356e6082cd688	NativeUI.cs:OpenTeamLobbyBetPicker	delegate[ShowPicker(#5=>)/=>{}]>NativeUI.cs:OpenTeamLobbyBetPicker
 hop	PoisonLedgerCore.cs:Count#1	419039432eced06e	GameStateWatcher.cs:EvaluateAchievements	ref>GameStateWatcher.cs:EvaluateAchievements
 hop	PoisonLedgerCore.cs:Count#1	41c147055063030c	NativeUI.cs:OpenChatMuteFromMessagePicker	ref>NativeUI.cs:OpenChatMuteFromMessagePicker
+hop	PoisonLedgerCore.cs:Count#1	41d68c232f96b592	BoundedDeal.cs:Describe	ref>BoundedDeal.cs:Describe
 hop	PoisonLedgerCore.cs:Count#1	41efb29cd07027a7	NativeUI.cs:RenderTeamQueueSection	ref>NativeUI.cs:RenderTeamQueueSection
 hop	PoisonLedgerCore.cs:Count#1	420af82ef7a80264	FfaMode.cs:FfaPickPhase	ref>FfaMode.cs:FfaPickPhase
 hop	PoisonLedgerCore.cs:Count#1	4217a7dd60edcd77	MusicEngine.cs:TsRunS3	ref[case 4]>MusicEngine.cs:TsRunS3
@@ -38522,6 +38610,7 @@ hop	PoisonLedgerCore.cs:Count#1	ca5a3b2e67fe1ddb	NativeUI.cs:CopyChatTail	ref>Na
 hop	PoisonLedgerCore.cs:Count#1	cac7d4a45ee86ecc	GameStateWatcher.cs:RecordFfaLocalPick	entry[localCards.Add(#0)/MatchTracker.CardPickData.PickOrder]>GameStateWatcher.cs:RecordFfaLocalPick
 hop	PoisonLedgerCore.cs:Count#1	cad83cd2eb2f0633	DanceMotionCore.cs:BuildContainer	ref[header.Contains(#0)]>DanceMotionCore.cs:BuildContainer
 hop	PoisonLedgerCore.cs:Count#1	caf6da1651380ca2	ApiClient.cs:FetchRankedFriends	delegate[FetchCompareBoard(#2=>)/=>{}/ArraysAligned(#1)]>ApiClient.cs:FetchRankedFriends
+hop	PoisonLedgerCore.cs:Count#1	cb3594f555f82019	BoundedDealRules.cs:Pick	ref>BoundedDealRules.cs:Pick
 hop	PoisonLedgerCore.cs:Count#1	cb3cd176ea38d034	PlayerCardsUI.cs:IncomingOpenCount	ref>PlayerCardsUI.cs:IncomingOpenCount
 hop	PoisonLedgerCore.cs:Count#1	cb5d2eefe0d7974e	PlayerCardsUI.cs:TickTrades	ref>PlayerCardsUI.cs:TickTrades
 hop	PoisonLedgerCore.cs:Count#1	cbc89e3a1e34c0f1	IdentityClockCore.cs:List#1	ref>IdentityClockCore.cs:List#1
@@ -38623,6 +38712,7 @@ hop	PoisonLedgerCore.cs:Count#1	dbc615a80b123e7f	I18n.cs:TryApplyRoundsLocale	re
 hop	PoisonLedgerCore.cs:Count#1	dbd85b2d609e413f	GameStateWatcher.cs:SeedFromHold	ref[Plugin.Log.LogInfo(#0)]>GameStateWatcher.cs:SeedFromHold
 hop	PoisonLedgerCore.cs:Count#1	dbee2ad799c8dedb	DamageNumbers.cs:ResolveLocalView	ref>DamageNumbers.cs:ResolveLocalView
 hop	PoisonLedgerCore.cs:Count#1	dc04ee102259bf58	CardDrawEvidenceCore.cs:Budget	entry[[4]]>CardDrawEvidenceCore.cs:Budget
+hop	PoisonLedgerCore.cs:Count#1	dc38b81bebc1a4be	BoundedDeal.cs:LogHeldCards	ref[.Append(#0)]>BoundedDeal.cs:LogHeldCards
 hop	PoisonLedgerCore.cs:Count#1	dc52a257b8990b00	FfaLateRules.cs:ReadyEpoch	ref>FfaLateRules.cs:ReadyEpoch
 hop	PoisonLedgerCore.cs:Count#1	dc5c68322d3f2eab	PostSessionReport.cs:CountSessionSeries	ref>PostSessionReport.cs:CountSessionSeries
 hop	PoisonLedgerCore.cs:Count#1	dc5e6afd244a58dc	NativeUI.cs:BuildTournamentsTab	delegate[=>{}]>NativeUI.cs:BuildTournamentsTab
@@ -38670,6 +38760,7 @@ hop	PoisonLedgerCore.cs:Count#1	e2a693860dea0fa9	NativeUI.cs:ValidateAndNameCosm
 hop	PoisonLedgerCore.cs:Count#1	e2a9895595fcce08	PlayerCardsUI.cs:MotionAdd	ref>PlayerCardsUI.cs:MotionAdd
 hop	PoisonLedgerCore.cs:Count#1	e2c4c5b26bbb6b79	TitleLaddersUI.cs:PaintDrop	ref[new List(#0)]>TitleLaddersUI.cs:PaintDrop
 hop	PoisonLedgerCore.cs:Count#1	e3016edd84f7a4db	CombatEvidenceCore.cs:TopByPerp	ref[new List(#0)/Math.Min(#1)]>CombatEvidenceCore.cs:TopByPerp
+hop	PoisonLedgerCore.cs:Count#1	e32fffc6ee869d82	BoundedDealRules.cs:Decide	ref>BoundedDealRules.cs:Decide
 hop	PoisonLedgerCore.cs:Count#1	e34bd4b6e214f393	EmojiSprites.cs:Detach	ref>EmojiSprites.cs:Detach
 hop	PoisonLedgerCore.cs:Count#1	e38bcb0ff50a62c8	MusicEngine.cs:ResolveTrackGain	ref>MusicEngine.cs:ResolveTrackGain
 hop	PoisonLedgerCore.cs:Count#1	e3bdf91787736c69	CombatEvidenceCore.cs:Budget	ref>CombatEvidenceCore.cs:Budget
@@ -39035,10 +39126,12 @@ hop	PoisonLedgerCore.cs:Count#2	1eda8239ecbf57ba	InfoViz.cs:BuildGoldSourcesChar
 hop	PoisonLedgerCore.cs:Count#2	1ee1aaaf5f3e7363	ApiClient.cs:ArtistSubmitCosmeticAnimated	ref>ApiClient.cs:ArtistSubmitCosmeticAnimated
 hop	PoisonLedgerCore.cs:Count#2	1ee1c8ccfa606864	MusicEngine.cs:TryDescribeTrack	ref>MusicEngine.cs:TryDescribeTrack
 hop	PoisonLedgerCore.cs:Count#2	1f34cda49bc4c027	GameStateWatcher.cs:TryReportFfaMatch	entry[ApiClient.TeamTelemetry.blockTimeline]>GameStateWatcher.cs:TryReportFfaMatch
+hop	PoisonLedgerCore.cs:Count#2	1f4be5a1dcae16d9	BoundedDeal.cs:LogHeldCards	ref[.Append(#0)]>BoundedDeal.cs:LogHeldCards
 hop	PoisonLedgerCore.cs:Count#2	1fd012f7e50aebdd	NativeUI.cs:FfaSettingsSummaryBits	ref>NativeUI.cs:FfaSettingsSummaryBits
 hop	PoisonLedgerCore.cs:Count#2	200eabe6fe64b90b	NativeUI.cs:RefreshTeamTab	ref[UIFactory.SetText(#1)/I18n.TrF(#1)]>NativeUI.cs:RefreshTeamTab
 hop	PoisonLedgerCore.cs:Count#2	20200e6c05b6d390	Plugin.cs:Prefix#10	ref>Plugin.cs:Prefix#10
 hop	PoisonLedgerCore.cs:Count#2	2053d220f84991da	PlayerCardsUI.cs:RefreshSelectRow	ref[btnSelect.SetActive(#0)]>PlayerCardsUI.cs:RefreshSelectRow
+hop	PoisonLedgerCore.cs:Count#2	207a681dabbc9250	BoundedDeal.cs:TrySpawnBounded	ref[VanillaFixSupport.DiagLimited(#1)]>BoundedDeal.cs:TrySpawnBounded
 hop	PoisonLedgerCore.cs:Count#2	20a86718490c67ed	NativeUI.cs:RefreshFfaTab	ref[ffaRecentCasRows.Add(#0)/CreateFfaRecentMatchRow(#1)]>NativeUI.cs:RefreshFfaTab
 hop	PoisonLedgerCore.cs:Count#2	20d4a61ca23eeec0	PoisonLedgerCore.cs:TryStart	ref>PoisonLedgerCore.cs:TryStart
 hop	PoisonLedgerCore.cs:Count#2	217af53feb2890a4	ApiClient.cs:FetchBuildType	delegate[FetchCompareBoard(#2=>)/=>{}/ArraysAligned(#0)]>ApiClient.cs:FetchBuildType
@@ -39182,6 +39275,7 @@ hop	PoisonLedgerCore.cs:Count#2	378008d96ef13257	RosterCensusRules.cs:SelfTest	r
 hop	PoisonLedgerCore.cs:Count#2	37acfd4de8a1aaba	NativeUI.cs:RefreshMusicTab	ref[Plugin.Log.LogWarning(#0)]>NativeUI.cs:RefreshMusicTab
 hop	PoisonLedgerCore.cs:Count#2	37c9382d25684b2c	PlayerCardsUI.cs:DevSeedMotionPrints	ref>PlayerCardsUI.cs:DevSeedMotionPrints
 hop	PoisonLedgerCore.cs:Count#2	37eaf181577a9bb3	FfaMode.cs:HandleNextRound	ref>FfaMode.cs:HandleNextRound
+hop	PoisonLedgerCore.cs:Count#2	381aa546c79d3f06	BoundedDeal.cs:TrySpawnBounded	ref>BoundedDeal.cs:TrySpawnBounded
 hop	PoisonLedgerCore.cs:Count#2	3821a56739ec5a1b	ApiClient.cs:ParseMatchHistoryForViewChunked	ref>ApiClient.cs:ParseMatchHistoryForViewChunked
 hop	PoisonLedgerCore.cs:Count#2	3829bf564478972c	NativeUI.cs:FillFfaDotPool	ref>NativeUI.cs:FillFfaDotPool
 hop	PoisonLedgerCore.cs:Count#2	382e49ba590071f2	NativeUI.cs:InfoLinkSelfTest	ref[Plugin.Log.LogInfo(#0)]>NativeUI.cs:InfoLinkSelfTest
@@ -39314,6 +39408,7 @@ hop	PoisonLedgerCore.cs:Count#2	4b38cd53b51732ae	NativeUI.cs:DrawWideTooltip	ref
 hop	PoisonLedgerCore.cs:Count#2	4b419d9e7de90e1f	CardDrawEvidenceCore.cs:Budget	ref[case 2/addRef(#0)]>CardDrawEvidenceCore.cs:Budget
 hop	PoisonLedgerCore.cs:Count#2	4b5020c4daee7e8e	GameStateWatcher.cs:TryRequestOvtContinuationSeries	ref>GameStateWatcher.cs:TryRequestOvtContinuationSeries
 hop	PoisonLedgerCore.cs:Count#2	4b6dc8fb93cf10ee	FfaLateEntry.cs:OnEpochAnswer	ref[FfaLateRules.ChainOf(#2)/Math.Min(#1)]>FfaLateEntry.cs:OnEpochAnswer
+hop	PoisonLedgerCore.cs:Count#2	4bcfe6967bbed89e	BoundedDeal.cs:Describe	ref>BoundedDeal.cs:Describe
 hop	PoisonLedgerCore.cs:Count#2	4bec81f24aff8b4c	NativeUI.cs:DrawWideTooltip	ref[lines.RemoveRange(#0)]>NativeUI.cs:DrawWideTooltip
 hop	PoisonLedgerCore.cs:Count#2	4c4f0e77c55e11b7	NativeUI.cs:BuildCompareCardMetric	ref>NativeUI.cs:BuildCompareCardMetric
 hop	PoisonLedgerCore.cs:Count#2	4c6ef0bb435ff80e	CombatEvidenceCore.cs:Protected	ref>CombatEvidenceCore.cs:Protected
@@ -39372,6 +39467,7 @@ hop	PoisonLedgerCore.cs:Count#2	548a9cf082cf8e02	ApiClient.cs:DoAutoUpdate	ref>A
 hop	PoisonLedgerCore.cs:Count#2	54b7e2e327f887e7	PlayerCardMotion.cs:CachedCount	ref>PlayerCardMotion.cs:CachedCount
 hop	PoisonLedgerCore.cs:Count#2	54caf71aebccfe52	GameStateWatcher.cs:RecordFfaLocalPick	entry[localCards.Add(#0)/MatchTracker.CardPickData.PickOrder]>GameStateWatcher.cs:RecordFfaLocalPick
 hop	PoisonLedgerCore.cs:Count#2	55854320e17cdd53	ApiClient.cs:OutboxRouteRestored	ref[Plugin.Log.LogInfo(#0)]>ApiClient.cs:OutboxRouteRestored
+hop	PoisonLedgerCore.cs:Count#2	55ebe65e571e602e	BoundedDealRules.cs:Pick	ref>BoundedDealRules.cs:Pick
 hop	PoisonLedgerCore.cs:Count#2	55f60c3d3df49da3	FfaLateRules.cs:ReadyEpoch	ref>FfaLateRules.cs:ReadyEpoch
 hop	PoisonLedgerCore.cs:Count#2	55f81e7c9d8a1752	CompetitiveUI.cs:DrawCosmeticReleaseQueue	ref>CompetitiveUI.cs:DrawCosmeticReleaseQueue
 hop	PoisonLedgerCore.cs:Count#2	5632284a847afcb0	RoomRulesStrip.cs:SelfTest	ref[Check(#3)]>RoomRulesStrip.cs:SelfTest
@@ -39648,6 +39744,7 @@ hop	PoisonLedgerCore.cs:Count#2	8057713fcee60761	VanillaFixes.cs:DedupeEffectsAf
 hop	PoisonLedgerCore.cs:Count#2	807e4dc7c27f7ccb	PlayerCardsUI.cs:DevTrade	dispatch[case "accept"]{accept}>PlayerCardsUI.cs:DevTrade
 hop	PoisonLedgerCore.cs:Count#2	809ca889ef925fd7	FfaLateRules.cs:BarrierSet	ref>FfaLateRules.cs:BarrierSet
 hop	PoisonLedgerCore.cs:Count#2	80b0af10127f1496	TeamColorIdentity.cs:Tick	ref>TeamColorIdentity.cs:Tick
+hop	PoisonLedgerCore.cs:Count#2	813b64e58e46644a	BoundedDeal.cs:LogHeldCards	ref>BoundedDeal.cs:LogHeldCards
 hop	PoisonLedgerCore.cs:Count#2	814078c88cdd51c9	Plugin.cs:TwinkleLoop	ref>Plugin.cs:TwinkleLoop
 hop	PoisonLedgerCore.cs:Count#2	81cbc51ce79027da	PlayerCardFaces.cs:GoOutdated	ref[Plugin.Log.LogWarning(#0)]>PlayerCardFaces.cs:GoOutdated
 hop	PoisonLedgerCore.cs:Count#2	81dbcc8cca2f8e0b	MusicEngine.cs:AdvanceToNext	ref>MusicEngine.cs:AdvanceToNext
@@ -40003,6 +40100,7 @@ hop	PoisonLedgerCore.cs:Count#2	bb84eed4674070e0	NativeUI.Settings.cs:SelfTestA2
 hop	PoisonLedgerCore.cs:Count#2	bb8e41d622a8ffe8	NativeUI.cs:BuildComparePlayerNemesisPanel	ref>NativeUI.cs:BuildComparePlayerNemesisPanel
 hop	PoisonLedgerCore.cs:Count#2	bbf5841984ab726e	PoisonSync.cs:FillPendingAll	ref>PoisonSync.cs:FillPendingAll
 hop	PoisonLedgerCore.cs:Count#2	bc02eb0a60157ada	NativeUI.cs:RenderFfaBettingSection	ref>NativeUI.cs:RenderFfaBettingSection
+hop	PoisonLedgerCore.cs:Count#2	bc0df15754080361	BoundedDealRules.cs:Decide	ref>BoundedDealRules.cs:Decide
 hop	PoisonLedgerCore.cs:Count#2	bc1637ebfbc9889d	SessionReportView.cs:DrawTiles	ref>SessionReportView.cs:DrawTiles
 hop	PoisonLedgerCore.cs:Count#2	bc3fd6fd2ad0b1b7	ApiClient.cs:ParkRefusedReport	ref>ApiClient.cs:ParkRefusedReport
 hop	PoisonLedgerCore.cs:Count#2	bc690cb543ff1d2b	NativeUI.Settings.cs:SettingsCheckA5A8	ref>NativeUI.Settings.cs:SettingsCheckA5A8
@@ -40479,6 +40577,7 @@ hop	PoisonLedgerCore.cs:Create	d05e035047f34847	ApiClient.cs:TeamLobbyCreate	ref
 hop	PoisonLedgerCore.cs:Create	d7cb0d952d28809d	NativeUI.cs:GetCircleSprite	ref>NativeUI.cs:GetCircleSprite
 hop	PoisonLedgerCore.cs:Create	d8732d5504c96494	PortraitRender.cs:Sha12	ref>PortraitRender.cs:Sha12
 hop	PoisonLedgerCore.cs:Create	de9b5edd8c3deaad	NativeUI.cs:GetEmbeddedSprite	ref>NativeUI.cs:GetEmbeddedSprite
+hop	PoisonLedgerCore.cs:Create	eccf78788b415bd1	LimitlessBounds.cs:DigestOf	ref>LimitlessBounds.cs:DigestOf
 hop	PoisonLedgerCore.cs:Create	ecd32014922a8e5a	SeatEvidence.cs:Save	delegate[new FileStream(#1)/&]>SeatEvidence.cs:Save
 hop	PoisonLedgerCore.cs:Create	ed50e48dc765f6e5	CardImageLoader.cs:GetSprite	ref>CardImageLoader.cs:GetSprite
 hop	PoisonLedgerCore.cs:Create	f753b52e1284982e	NativeUI.SettingsDrive.cs:DrvHex	ref>NativeUI.SettingsDrive.cs:DrvHex
@@ -40489,6 +40588,7 @@ hop	PoisonLedgerCore.cs:Decide	6cc6cf49aa83182e	PortraitRenderDance.cs:DanceDeci
 hop	PoisonLedgerCore.cs:Decide	779f72d485be0893	PoisonLedgerCore.cs:Handle	ref>PoisonLedgerCore.cs:Handle
 hop	PoisonLedgerCore.cs:Decide	bd9dbe92d51a68a0	SeatEvidence.cs:Answer	ref>SeatEvidence.cs:Answer
 hop	PoisonLedgerCore.cs:Decide	fb1cf5baa0b68aa4	PortraitRenderDanceDev.cs:DanceDevDecide	ref>PortraitRenderDanceDev.cs:DanceDevDecide
+hop	PoisonLedgerCore.cs:Decide	ffe0a7aabb987913	BoundedDeal.cs:TrySpawnBounded	ref>BoundedDeal.cs:TrySpawnBounded
 hop	PoisonLedgerCore.cs:Evaluate	3ef37e7c27f8a527	PoisonSync.cs:V3On	ref>PoisonSync.cs:V3On
 hop	PoisonLedgerCore.cs:Evaluate	75efa66613bd2a98	Plugin.cs:OnDisconnected	ref>Plugin.cs:OnDisconnected
 hop	PoisonLedgerCore.cs:Evaluate	898b8cca7244f013	Plugin.cs:OnPlayerPropertiesUpdate	ref>Plugin.cs:OnPlayerPropertiesUpdate
@@ -40841,6 +40941,7 @@ hop	PoisonLedgerCore.cs:ToString	3a78f7ab8228865d	SeatDeckLog.cs:DriftCheck	ref[
 hop	PoisonLedgerCore.cs:ToString	3aadb8e57f1f4e53	MusicEngine.cs:PlayTrack	ref[StickyTombstones.Contains(#0)]>MusicEngine.cs:PlayTrack
 hop	PoisonLedgerCore.cs:ToString	3ad72260badae112	ApiClient.cs:ExtractJsonString	ref>ApiClient.cs:ExtractJsonString
 hop	PoisonLedgerCore.cs:ToString	3ae3567303107e2b	NativeUI.cs:BuildPingTag	ref>NativeUI.cs:BuildPingTag
+hop	PoisonLedgerCore.cs:ToString	3b15a8303e71a993	BoundedDeal.cs:LogHeldCards	ref[.Append(#0)]>BoundedDeal.cs:LogHeldCards
 hop	PoisonLedgerCore.cs:ToString	3b5dd3df9002d898	SeatEvidence.cs:HoldAbandoned	ref[Plugin.Log.LogInfo(#0)]>SeatEvidence.cs:HoldAbandoned
 hop	PoisonLedgerCore.cs:ToString	3b87c49c461ea345	TeamHoldNet.cs:Q	ref[.Append(#0)]>TeamHoldNet.cs:Q
 hop	PoisonLedgerCore.cs:ToString	3bcc8a0ef53794cf	NametagStyler.cs:PublishToPhoton	ref>NametagStyler.cs:PublishToPhoton
@@ -40863,6 +40964,7 @@ hop	PoisonLedgerCore.cs:ToString	3f806100c1178df0	PortraitRenderDanceDev.cs:Danc
 hop	PoisonLedgerCore.cs:ToString	3f8280a78f0a8296	FfaMode.cs:ApplyManifestPick	ref>FfaMode.cs:ApplyManifestPick
 hop	PoisonLedgerCore.cs:ToString	3ffc4a7b87ac9734	CompetitiveUI.cs:RefreshFfaMatchPointBanner	ref>CompetitiveUI.cs:RefreshFfaMatchPointBanner
 hop	PoisonLedgerCore.cs:ToString	402cd7dd89e38bcc	PortraitGrade.cs:DevGradeTable	ref>PortraitGrade.cs:DevGradeTable
+hop	PoisonLedgerCore.cs:ToString	402d6ca1c9ad2830	LimitlessBounds.cs:Version	ref>LimitlessBounds.cs:Version
 hop	PoisonLedgerCore.cs:ToString	405598f957aff168	FfaMode.cs:FfaPickPhase	ref[WriteResultProp(#0)]>FfaMode.cs:FfaPickPhase
 hop	PoisonLedgerCore.cs:ToString	4090099f4d8a2613	CompetitiveUI.cs:LayoutNotificationSet	ref>CompetitiveUI.cs:LayoutNotificationSet
 hop	PoisonLedgerCore.cs:ToString	40990a4f10128618	NativeUI.cs:RefreshHomeTab	ref[UIFactory.SetTextRaw(#1)]>NativeUI.cs:RefreshHomeTab
@@ -41162,6 +41264,7 @@ hop	PoisonLedgerCore.cs:ToString	8b0ed1e0ca0c2011	GameStateWatcher.cs:TryReportO
 hop	PoisonLedgerCore.cs:ToString	8b754057cfd7f181	VanillaFixes.cs:RemoveHealthRow	ref[VanillaFixSupport.DiagLimited(#1)]>VanillaFixes.cs:RemoveHealthRow
 hop	PoisonLedgerCore.cs:ToString	8c84c9f961584ed1	PortraitRenderDanceDev.cs:DanceDevCorpus	ref[File.WriteAllText(#1)]>PortraitRenderDanceDev.cs:DanceDevCorpus
 hop	PoisonLedgerCore.cs:ToString	8cabe4870e42357e	NativeUI.Settings.cs:SettingsAsStr	ref>NativeUI.Settings.cs:SettingsAsStr
+hop	PoisonLedgerCore.cs:ToString	8d06f32a1ed13211	BoundedDeal.cs:TrySpawnBounded	ref[VanillaFixSupport.DiagLimited(#1)]>BoundedDeal.cs:TrySpawnBounded
 hop	PoisonLedgerCore.cs:ToString	8d392090fe57f839	ApiClient.cs:FfaSetLobbySetting	ref>ApiClient.cs:FfaSetLobbySetting
 hop	PoisonLedgerCore.cs:ToString	8d6aae5e784800fb	RoomActors.cs:ArmFallback	ref[Plugin.Log.LogInfo(#0)]>RoomActors.cs:ArmFallback
 hop	PoisonLedgerCore.cs:ToString	8d6aeca3bcdc7bed	NativeUI.cs:PodiumSparkleSpan	ref>NativeUI.cs:PodiumSparkleSpan
@@ -41319,6 +41422,7 @@ hop	PoisonLedgerCore.cs:ToString	b8d1acb333107276	PlayerCardsUI.cs:DevSeedMotion
 hop	PoisonLedgerCore.cs:ToString	b94d015078a4ecd4	NativeUI.Settings.cs:SettingsRenderDestructivePane	ref[UIFactory.SetTextNoHook(#1)]>NativeUI.Settings.cs:SettingsRenderDestructivePane
 hop	PoisonLedgerCore.cs:ToString	b98195aa1c5ac1ab	SpectatorHud.cs:ComposeCompact	ref>SpectatorHud.cs:ComposeCompact
 hop	PoisonLedgerCore.cs:ToString	b9a54ce0392af0fa	MusicAssets.cs:ToHex	ref[sb.Append(#0)]>MusicAssets.cs:ToHex
+hop	PoisonLedgerCore.cs:ToString	b9b5164c34690b72	LimitlessBounds.cs:DigestOf	ref>LimitlessBounds.cs:DigestOf
 hop	PoisonLedgerCore.cs:ToString	b9c29b007b11e0e4	RosterCensus.cs:Describe	ref>RosterCensus.cs:Describe
 hop	PoisonLedgerCore.cs:ToString	b9d655a157c265d3	GameStateWatcher.cs:DevGstatsSentinelTest	ref>GameStateWatcher.cs:DevGstatsSentinelTest
 hop	PoisonLedgerCore.cs:ToString	ba0e8e673c947b8c	PeerBuildCore.cs:KeyToken	ref[.Append(#0)]>PeerBuildCore.cs:KeyToken
@@ -41375,6 +41479,7 @@ hop	PoisonLedgerCore.cs:ToString	cc84a93357aa422c	MusicEngine.cs:OpenStreamedCli
 hop	PoisonLedgerCore.cs:ToString	ccf25f363085e075	PortraitRenderDance.cs:DanceDrawnSnap	entry[DanceDrawnSys.Mode]>PortraitRenderDance.cs:DanceDrawnSnap
 hop	PoisonLedgerCore.cs:ToString	ccf5e1f6de6adf83	NativeUI.cs:OpenAdminActionLogPicker	delegate[ApiClient.FetchAdminActions(#5=>)/=>{}/ShowPicker(#0)/I18n.TrF(#3)]>NativeUI.cs:OpenAdminActionLogPicker
 hop	PoisonLedgerCore.cs:ToString	cd4cadb428d22b7a	SpectatorHud.cs:ComposeBarLine	ref>SpectatorHud.cs:ComposeBarLine
+hop	PoisonLedgerCore.cs:ToString	cd85ebc2a4d63112	LimitlessBounds.cs:DigestOf	ref[sb.Append(#0)]>LimitlessBounds.cs:DigestOf
 hop	PoisonLedgerCore.cs:ToString	cdb4c6903461affe	NativeUI.cs:RefreshTournaments	ref[I18n.TrF(#1)]>NativeUI.cs:RefreshTournaments
 hop	PoisonLedgerCore.cs:ToString	cea83b72d1d167d2	TeamHoldWriter.cs:Release	ref[Plugin.Log.LogInfo(#0)]>TeamHoldWriter.cs:Release
 hop	PoisonLedgerCore.cs:ToString	ced69a2eec619039	PlayerEffectCosmetic.cs:DelayedApplyAll	ref>PlayerEffectCosmetic.cs:DelayedApplyAll
@@ -41519,6 +41624,7 @@ hop	PoisonLedgerCore.cs:ToString	f3ab219343f6141a	MailUI.cs:SendCurrent	ref>Mail
 hop	PoisonLedgerCore.cs:ToString	f45bdb9343afa798	TeamHoldWriter.cs:Expire	ref[Plugin.Log.LogInfo(#0)]>TeamHoldWriter.cs:Expire
 hop	PoisonLedgerCore.cs:ToString	f49e03bce0e3157c	NativeUI.Settings.cs:SelfTestStatic	ref>NativeUI.Settings.cs:SelfTestStatic
 hop	PoisonLedgerCore.cs:ToString	f4e3928e184c2441	GameStateWatcher.cs:BothPlayersSupportSharedGameToken	ref>GameStateWatcher.cs:BothPlayersSupportSharedGameToken
+hop	PoisonLedgerCore.cs:ToString	f56559473a0b55f4	BoundedDeal.cs:LogHeldCards	ref[Plugin.Log.LogInfo(#0)]>BoundedDeal.cs:LogHeldCards
 hop	PoisonLedgerCore.cs:ToString	f59336ace1184e2d	PortraitRenderDance.cs:UploadStill	ref[ApiClient.PcPortraitUpload(#1)]>PortraitRenderDance.cs:UploadStill
 hop	PoisonLedgerCore.cs:ToString	f5bb272964542c04	Plugin.cs:CstateTick	ref>Plugin.cs:CstateTick
 hop	PoisonLedgerCore.cs:ToString	f5fb39ca915004c5	SeatEvidenceCore.cs:QueueText	ref>SeatEvidenceCore.cs:QueueText
@@ -42390,6 +42496,7 @@ hop	PortraitRenderDance.cs:Max	49a661b597d40490	field:TabStatsOverlay.cs:?	field
 hop	PortraitRenderDance.cs:Max	49ddedd5720e6ee3	FfaNumberingRules.cs:DetectAhead	ref[Math.Min(#1)]>FfaNumberingRules.cs:DetectAhead
 hop	PortraitRenderDance.cs:Max	4b03376876a438c0	TeamHoldBanner.cs:Line	ref[case 'o']>TeamHoldBanner.cs:Line
 hop	PortraitRenderDance.cs:Max	4b5ee8749653b9d3	FfaReadmitEntryRules.cs:RequestBody	ref[.Append(#0)/I(#0)]>FfaReadmitEntryRules.cs:RequestBody
+hop	PortraitRenderDance.cs:Max	4b62755e5dcbffae	LimitlessBounds.cs:Clamp#2	delegate[&]>LimitlessBounds.cs:Clamp#2
 hop	PortraitRenderDance.cs:Max	4b79f353c3dabacc	NativeUI.cs:RefreshHistory	ref>NativeUI.cs:RefreshHistory
 hop	PortraitRenderDance.cs:Max	4c59f8f577f333c1	CompetitiveUI.cs:DrawCosmeticReview	ref[Mathf.Min(#1)]>CompetitiveUI.cs:DrawCosmeticReview
 hop	PortraitRenderDance.cs:Max	4d4e1ef14c2405ae	PoisonSync.cs:AuthoritativeDot	ref>PoisonSync.cs:AuthoritativeDot
@@ -42576,6 +42683,7 @@ hop	PortraitRenderDance.cs:Max	c9adc49b29458ff3	FfaLateRules.cs:OnEpoch	ref>FfaL
 hop	PortraitRenderDance.cs:Max	c9b93320188569f7	PlayerCardMotionDev.cs:DevT51	ref[Mathf.Max(#0)]>PlayerCardMotionDev.cs:DevT51
 hop	PortraitRenderDance.cs:Max	cac3e457ba8ec476	SessionReportRules.cs:FlowChips	ref>SessionReportRules.cs:FlowChips
 hop	PortraitRenderDance.cs:Max	cb3b416aae164dfb	FfaAssembly.cs:Banner	ref>FfaAssembly.cs:Banner
+hop	PortraitRenderDance.cs:Max	cb854dcae2a35106	LimitlessBounds.cs:DigestInput	delegate[o.AddRange(#0)/LittleEndian(#0)/BitConverter.GetBytes(#0)/&]>LimitlessBounds.cs:DigestInput
 hop	PortraitRenderDance.cs:Max	cc5b62decbf471e4	ApiClient.cs:PersistOutbox	ref>ApiClient.cs:PersistOutbox
 hop	PortraitRenderDance.cs:Max	ccb5e280e499f872	NativeUI.cs:BuildCompareGraph	ref>NativeUI.cs:BuildCompareGraph
 hop	PortraitRenderDance.cs:Max	cd0bde2c7eb6e0be	NativeUI.cs:PointerInsideRect	ref[new Vector2(#0)]>NativeUI.cs:PointerInsideRect
@@ -43815,6 +43923,7 @@ hop	SeatEvidenceCore.cs:Add#1	589b369f645b18db	NativeUI.SettingsDrive.cs:DrvFake
 hop	SeatEvidenceCore.cs:Add#1	58a670e35f15b20f	PlayerCardsUI.cs:DrawReceived	ref>PlayerCardsUI.cs:DrawReceived
 hop	SeatEvidenceCore.cs:Add#1	59dbbac574f3127a	ApiClient.cs:RunHeartbeatAbortSentinel	ref>ApiClient.cs:RunHeartbeatAbortSentinel
 hop	SeatEvidenceCore.cs:Add#1	59dc72bca9507a87	ApiClient.cs:FetchPlayerFfaHistory	ref>ApiClient.cs:FetchPlayerFfaHistory
+hop	SeatEvidenceCore.cs:Add#1	59e06ba2a66a6859	BoundedDeal.cs:Describe	ref>BoundedDeal.cs:Describe
 hop	SeatEvidenceCore.cs:Add#1	59e90bd9a08f9fbe	IdentityClockEvidence.cs:PointStart	ref>IdentityClockEvidence.cs:PointStart
 hop	SeatEvidenceCore.cs:Add#1	5a2409815bfed5b5	InfoViz.cs:Lbl	ref>InfoViz.cs:Lbl
 hop	SeatEvidenceCore.cs:Add#1	5a56263a8504efa5	PlayerCardsUI.cs:PackDupeIds	ref>PlayerCardsUI.cs:PackDupeIds
@@ -43860,6 +43969,7 @@ hop	SeatEvidenceCore.cs:Add#1	63fc61cffb65fbe4	VanillaFixes.cs:AddByName	ref>Van
 hop	SeatEvidenceCore.cs:Add#1	6419467a8e385fb6	CompetitiveUI.cs:RegisterDpsGraphRegion	ref>CompetitiveUI.cs:RegisterDpsGraphRegion
 hop	SeatEvidenceCore.cs:Add#1	6422937c8e007c40	NativeUI.cs:ChatDeleteKeys	ref>NativeUI.cs:ChatDeleteKeys
 hop	SeatEvidenceCore.cs:Add#1	64aac6201f4bc334	SeatEvidenceCore.cs:Add#6	ref>SeatEvidenceCore.cs:Add#6
+hop	SeatEvidenceCore.cs:Add#1	64cf1227ed8eedce	LimitlessBounds.cs:DigestInput	ref>LimitlessBounds.cs:DigestInput
 hop	SeatEvidenceCore.cs:Add#1	6514260477d5b22b	NativeUI.cs:BuildMyStatsTab	ref>NativeUI.cs:BuildMyStatsTab
 hop	SeatEvidenceCore.cs:Add#1	65c115893e207720	PlayerCardMotionDev.cs:DevFakeAtlas	ref>PlayerCardMotionDev.cs:DevFakeAtlas
 hop	SeatEvidenceCore.cs:Add#1	6626e77536ab20d8	SessionReportRules.cs:ParseGame	dispatch[case "picks"]{picks}>SessionReportRules.cs:ParseGame
@@ -44700,6 +44810,7 @@ hop	SeatEvidenceCore.cs:Add#2	3096cded568f7646	MusicAssets.cs:PublishOrphan	ref>
 hop	SeatEvidenceCore.cs:Add#2	309d78db85434fa0	VanillaFixes.cs:TargetMethods#4	ref>VanillaFixes.cs:TargetMethods#4
 hop	SeatEvidenceCore.cs:Add#2	30fa9d46057e122b	IdentityClockCore.cs:Copy	ref>IdentityClockCore.cs:Copy
 hop	SeatEvidenceCore.cs:Add#2	313ba92e3a9bec75	NativeUI.cs:OpenAdminRosterPicker	delegate[ApiClient.FetchAdminAdmins(#1=>)/=>{}/ShowPicker(#1=>)/=>{}]>NativeUI.cs:OpenAdminRosterPicker
+hop	SeatEvidenceCore.cs:Add#2	31c2093493990119	BoundedDeal.cs:Describe	ref>BoundedDeal.cs:Describe
 hop	SeatEvidenceCore.cs:Add#2	330d375222f697a0	GameStateWatcher.cs:TryRequestContinuationSeries	ref>GameStateWatcher.cs:TryRequestContinuationSeries
 hop	SeatEvidenceCore.cs:Add#2	3369fabf35d86d1f	ApiClient.cs:FetchArtistSales	delegate[Plugin.Instance.StartCoroutine(#0)/GetRequest(#1=>)/=>{}]>ApiClient.cs:FetchArtistSales
 hop	SeatEvidenceCore.cs:Add#2	338e4dc3f484bb92	MusicStreamProbe.cs:NoteScriptedWindow	ref>MusicStreamProbe.cs:NoteScriptedWindow
@@ -45060,6 +45171,7 @@ hop	SeatEvidenceCore.cs:Add#2	8a835f01dc2ae6a6	ApiClient.cs:UpdateOvtQueuePoll	d
 hop	SeatEvidenceCore.cs:Add#2	8af2efd810d13f78	FfaMode.cs:ReadmitReplayRun	ref>FfaMode.cs:ReadmitReplayRun
 hop	SeatEvidenceCore.cs:Add#2	8bcc2a05d9382379	IdentityClockCore.cs:Count	ref>IdentityClockCore.cs:Count
 hop	SeatEvidenceCore.cs:Add#2	8c3566d169ccecba	NativeUI.SettingsDrive.cs:DrvMeasureA5A8	delegate[SettingsCheckA5A8(#8=>)/=>{}]>NativeUI.SettingsDrive.cs:DrvMeasureA5A8
+hop	SeatEvidenceCore.cs:Add#2	8c3b7f844285840c	LimitlessBounds.cs:DigestInput	ref>LimitlessBounds.cs:DigestInput
 hop	SeatEvidenceCore.cs:Add#2	8c49785ba0e52f91	CompetitiveUI.cs:ParseIntSeriesKeepZeros	ref>CompetitiveUI.cs:ParseIntSeriesKeepZeros
 hop	SeatEvidenceCore.cs:Add#2	8d0f4156b266ff81	Plugin.cs:Tag	ref>Plugin.cs:Tag
 hop	SeatEvidenceCore.cs:Add#2	8d203fb1712cca8f	VanillaFixes.cs:RemoveHealthRow	ref>VanillaFixes.cs:RemoveHealthRow
@@ -46234,6 +46346,7 @@ hop	SeatEvidenceCore.cs:Add#3	a165aad10cdca040	ApiClient.cs:ParseCardCatalogBody
 hop	SeatEvidenceCore.cs:Add#3	a17dbb9c2d5b42c9	SeatEvidence.cs:Dispatch	ref>SeatEvidence.cs:Dispatch
 hop	SeatEvidenceCore.cs:Add#3	a1e77e157b99f607	SeatDeckLog.cs:Commit	ref>SeatDeckLog.cs:Commit
 hop	SeatEvidenceCore.cs:Add#3	a1f11039b6d556b4	FfaCardSequence.cs:SnapshotPool	ref>FfaCardSequence.cs:SnapshotPool
+hop	SeatEvidenceCore.cs:Add#3	a235c07ded4ccd4e	LimitlessBounds.cs:DigestInput	ref>LimitlessBounds.cs:DigestInput
 hop	SeatEvidenceCore.cs:Add#3	a251982ee3001a04	IdentityClockCore.cs:Copy	ref>IdentityClockCore.cs:Copy
 hop	SeatEvidenceCore.cs:Add#3	a269f48892316057	PostSessionReport.cs:BuildCells2v2Game	ref[case 4]>PostSessionReport.cs:BuildCells2v2Game
 hop	SeatEvidenceCore.cs:Add#3	a2bc93a1a466d707	FfaNumberingRules.cs:RunLegacyBridgeUnits	delegate[CollectPicksFrom(#6=>)]>FfaNumberingRules.cs:RunLegacyBridgeUnits
@@ -46467,6 +46580,7 @@ hop	SeatEvidenceCore.cs:Add#3	ddcf568ed9eb261b	ApiClient.cs:FfaPollDrop	ref>ApiC
 hop	SeatEvidenceCore.cs:Add#3	de0b79f47e3588f9	PlayerCardsUI.cs:FailShard	ref>PlayerCardsUI.cs:FailShard
 hop	SeatEvidenceCore.cs:Add#3	de904de4c8008974	CardDrawEvidence.cs:EnsureCensusDump	ref>CardDrawEvidence.cs:EnsureCensusDump
 hop	SeatEvidenceCore.cs:Add#3	df2e5c1a7cd1deac	ApiClient.cs:FetchNewestCosmetics	delegate[Plugin.Instance.StartCoroutine(#0)/GetRequest(#1=>)/=>{}]>ApiClient.cs:FetchNewestCosmetics
+hop	SeatEvidenceCore.cs:Add#3	df318172bb3e29a2	BoundedDeal.cs:Describe	ref>BoundedDeal.cs:Describe
 hop	SeatEvidenceCore.cs:Add#3	df68c363cbeb13cd	DanceStep0Probe.cs:PathOf	ref>DanceStep0Probe.cs:PathOf
 hop	SeatEvidenceCore.cs:Add#3	dfb52be9b6c4d430	SeatEvidenceCore.cs:Budget	ref>SeatEvidenceCore.cs:Budget
 hop	SeatEvidenceCore.cs:Add#3	e036c11aa5f19f44	CardDrawEvidence.cs:Take	ref[case EV_ENDPICK]>CardDrawEvidence.cs:Take
@@ -46996,6 +47110,7 @@ hop	SeatEvidenceCore.cs:Add#4	673d04e147d7d971	TeamHoldRules.cs:ExpiryActions	re
 hop	SeatEvidenceCore.cs:Add#4	679ce19dbe4c5bea	ApiClient.cs:SliceTopLevelObjects	ref>ApiClient.cs:SliceTopLevelObjects
 hop	SeatEvidenceCore.cs:Add#4	680eba095dfa6809	TeamGameNumber.cs:NoteAttestationRefused	ref>TeamGameNumber.cs:NoteAttestationRefused
 hop	SeatEvidenceCore.cs:Add#4	6832d3e80a74a27d	PlayerEffectCosmetic.cs:DrawPreview	ref>PlayerEffectCosmetic.cs:DrawPreview
+hop	SeatEvidenceCore.cs:Add#4	685e3738a17d1dbf	BoundedDeal.cs:Describe	ref>BoundedDeal.cs:Describe
 hop	SeatEvidenceCore.cs:Add#4	689e5ecb915bc7ec	FfaNumberingRules.cs:StartChecks	ref>FfaNumberingRules.cs:StartChecks
 hop	SeatEvidenceCore.cs:Add#4	68d62286e63dba84	FfaMode.cs:FfaPickPhase	ref>FfaMode.cs:FfaPickPhase
 hop	SeatEvidenceCore.cs:Add#4	68ec918904ad9a62	Plugin.cs:LogLiveColorGrading	ref>Plugin.cs:LogLiveColorGrading
@@ -47594,6 +47709,7 @@ hop	SeatEvidenceCore.cs:Add#4	f445fb7e057acaca	CardSnapshot.cs:CaptureOne	ref>Ca
 hop	SeatEvidenceCore.cs:Add#4	f48b7c0622c79f0a	NativeUI.cs:BuildCellStatLine	ref>NativeUI.cs:BuildCellStatLine
 hop	SeatEvidenceCore.cs:Add#4	f4baf5269944d453	ApiClient.cs:UnlockAchievement	delegate[Plugin.Instance.StartCoroutine(#0)/PostRequestWithRetry(#2=>)/=>{}]>ApiClient.cs:UnlockAchievement
 hop	SeatEvidenceCore.cs:Add#4	f4e9954ad241a53c	FfaNumberingRules.cs:RunRoundTwoUnits	delegate[CollectPicksFrom(#6=>)]>FfaNumberingRules.cs:RunRoundTwoUnits
+hop	SeatEvidenceCore.cs:Add#4	f5485a31ac6c5f32	LimitlessBounds.cs:DigestInput	ref>LimitlessBounds.cs:DigestInput
 hop	SeatEvidenceCore.cs:Add#4	f5657a5d315d15be	NativeUI.cs:AppendToFontList	ref>NativeUI.cs:AppendToFontList
 hop	SeatEvidenceCore.cs:Add#4	f5fdb41ceb16364e	CompetitiveUI.cs:RegisterPlayerComboRegion	ref>CompetitiveUI.cs:RegisterPlayerComboRegion
 hop	SeatEvidenceCore.cs:Add#4	f621881b9b494c17	MusicRatings.cs:SendLoop	ref>MusicRatings.cs:SendLoop
@@ -47674,6 +47790,7 @@ hop	SeatEvidenceCore.cs:Add#5	07a0278201c00c01	PortraitRender.cs:ParseInts	ref>P
 hop	SeatEvidenceCore.cs:Add#5	07c53dc4c6365200	ApiClient.cs:PcStrArray	ref>ApiClient.cs:PcStrArray
 hop	SeatEvidenceCore.cs:Add#5	07d9447f72da02a2	CompetitiveUI.cs:ParseFpsSeries	ref>CompetitiveUI.cs:ParseFpsSeries
 hop	SeatEvidenceCore.cs:Add#5	07f64cd8ffa1bb5c	IdentityClockEvidence.cs:CheckRun	ref>IdentityClockEvidence.cs:CheckRun
+hop	SeatEvidenceCore.cs:Add#5	082543157dc4b738	BoundedDeal.cs:Describe	ref>BoundedDeal.cs:Describe
 hop	SeatEvidenceCore.cs:Add#5	08d0a05263daf7de	PostSessionReport.cs:BuildCells2v2Game	ref[case 1]>PostSessionReport.cs:BuildCells2v2Game
 hop	SeatEvidenceCore.cs:Add#5	08fb945e10ad5bee	TeamGameNumber.cs:SimulateF31#2	ref>TeamGameNumber.cs:SimulateF31#2
 hop	SeatEvidenceCore.cs:Add#5	093f134d262a2e97	SeatEvidence.cs:BlockEnter	ref>SeatEvidence.cs:BlockEnter
@@ -48417,6 +48534,7 @@ hop	SeatEvidenceCore.cs:Add#5	bf20131f878e7f67	MusicEngine.cs:PollClipLoads	ref>
 hop	SeatEvidenceCore.cs:Add#5	bf22a0712b42d7d4	NativeUI.cs:BuildSeriesCards	ref>NativeUI.cs:BuildSeriesCards
 hop	SeatEvidenceCore.cs:Add#5	bf6b03065116c985	ApiClient.cs:ParseFlaggedMatches	ref>ApiClient.cs:ParseFlaggedMatches
 hop	SeatEvidenceCore.cs:Add#5	bf8482b5de43862e	MusicEngine.cs:MusicStatusLine	ref>MusicEngine.cs:MusicStatusLine
+hop	SeatEvidenceCore.cs:Add#5	bfb701734508553f	LimitlessBounds.cs:DigestInput	ref>LimitlessBounds.cs:DigestInput
 hop	SeatEvidenceCore.cs:Add#5	bfd8e2fa8e5b037d	TeamHoldRules.cs:DecideDc	ref>TeamHoldRules.cs:DecideDc
 hop	SeatEvidenceCore.cs:Add#5	c04844fdbd8b2f80	PostSessionReport.cs:MaybePollStatus	ref>PostSessionReport.cs:MaybePollStatus
 hop	SeatEvidenceCore.cs:Add#5	c09b81effb52308c	ProfileCard.cs:RegisterNameHover	ref>ProfileCard.cs:RegisterNameHover
@@ -48894,6 +49012,7 @@ hop	SeatEvidenceCore.cs:Add#6	310a74178f02724f	TeamHoldRules.cs:ExpiryActions	re
 hop	SeatEvidenceCore.cs:Add#6	310f37436765c46f	Plugin.cs:BuildDcPlan	ref>Plugin.cs:BuildDcPlan
 hop	SeatEvidenceCore.cs:Add#6	314282db79117a31	PortraitRender.cs:BuildRig	ref>PortraitRender.cs:BuildRig
 hop	SeatEvidenceCore.cs:Add#6	31c9049aabfd86ea	SpectatorSync.cs:CurrentDeckNames	ref>SpectatorSync.cs:CurrentDeckNames
+hop	SeatEvidenceCore.cs:Add#6	31f530e8627301a8	LimitlessBounds.cs:DigestInput	ref>LimitlessBounds.cs:DigestInput
 hop	SeatEvidenceCore.cs:Add#6	322d462ee17f018a	PoisonSync.cs:ResetForView	ref>PoisonSync.cs:ResetForView
 hop	SeatEvidenceCore.cs:Add#6	32aea608fe2e1670	FfaNumberingRules.cs:ActiveFighters	ref>FfaNumberingRules.cs:ActiveFighters
 hop	SeatEvidenceCore.cs:Add#6	32bef6a799a71de8	NativeUI.cs:BuildOvtRecentRowText	ref>NativeUI.cs:BuildOvtRecentRowText
@@ -49720,6 +49839,7 @@ hop	SeatEvidenceCore.cs:Add#6	f85db9a3e5676147	SessionReportRules.cs:Members#1	r
 hop	SeatEvidenceCore.cs:Add#6	f88efbbc7292df72	MusicRatings.cs:OnSendComplete	ref>MusicRatings.cs:OnSendComplete
 hop	SeatEvidenceCore.cs:Add#6	f8c5d0e4c58a4522	ApiClient.cs:ParseQuarantineReports	ref>ApiClient.cs:ParseQuarantineReports
 hop	SeatEvidenceCore.cs:Add#6	f8c8a99de2f6bc3b	GameStateWatcher.cs:OnLocalCardOffered	ref>GameStateWatcher.cs:OnLocalCardOffered
+hop	SeatEvidenceCore.cs:Add#6	f8fc73f9efbd0fdd	BoundedDeal.cs:Describe	ref>BoundedDeal.cs:Describe
 hop	SeatEvidenceCore.cs:Add#6	f97c67dd1732a6e3	MusicEngine.cs:BuildAlbumBlockCycle	ref>MusicEngine.cs:BuildAlbumBlockCycle
 hop	SeatEvidenceCore.cs:Add#6	f99188281bb532f4	VanillaFixes.cs:BeforeUpdate	ref>VanillaFixes.cs:BeforeUpdate
 hop	SeatEvidenceCore.cs:Add#6	f9e6c833cc80484e	ApiClient.cs:FetchCosmeticReleaseCandidatesAdmin	delegate[Plugin.Instance.StartCoroutine(#0)/GetRequest(#1=>)/=>{}]>ApiClient.cs:FetchCosmeticReleaseCandidatesAdmin
@@ -51259,6 +51379,7 @@ hop	SeatEvidenceCore.cs:Count	191f91df3bfd63eb	NativeUI.cs:BuildViewHistoryText	
 hop	SeatEvidenceCore.cs:Count	192eb883e45809ec	ApiClient.cs:FetchAchievementEarners	delegate[Plugin.Instance.StartCoroutine(#0)/GetRequest(#1=>)/=>{}/Plugin.Log.LogInfo(#0)]>ApiClient.cs:FetchAchievementEarners
 hop	SeatEvidenceCore.cs:Count	195c52cf0b3a0e79	CombatEvidenceCore.cs:Copy	ref>CombatEvidenceCore.cs:Copy
 hop	SeatEvidenceCore.cs:Count	198f89e2afe5f79f	NativeUI.cs:RefreshAchievements	ref[Math.Min(#1)]>NativeUI.cs:RefreshAchievements
+hop	SeatEvidenceCore.cs:Count	19ae65c59c75360d	BoundedDealRules.cs:Decide	ref>BoundedDealRules.cs:Decide
 hop	SeatEvidenceCore.cs:Count	19b036ec4946cf67	GameStateWatcher.cs:OnMatchStarted	ref>GameStateWatcher.cs:OnMatchStarted
 hop	SeatEvidenceCore.cs:Count	19ed69b9cac2784a	FfaNumberingRules.cs:DetectAhead	ref>FfaNumberingRules.cs:DetectAhead
 hop	SeatEvidenceCore.cs:Count	1a3a6aa87c128afb	CardSnapshot.cs:CaptureOne	ref>CardSnapshot.cs:CaptureOne
@@ -51443,6 +51564,7 @@ hop	SeatEvidenceCore.cs:Count	368f878bd9298847	NativeUI.cs:ShowRecentSeriesRows	
 hop	SeatEvidenceCore.cs:Count	373bc2feccbb53bc	Plugin.cs:ScrubChildRpcDictionaries	ref>Plugin.cs:ScrubChildRpcDictionaries
 hop	SeatEvidenceCore.cs:Count	3741c84bf1bdb659	IdleShowcase.cs:GatherCandidates	ref>IdleShowcase.cs:GatherCandidates
 hop	SeatEvidenceCore.cs:Count	37453ef7c00f094b	GameStateWatcher.cs:PollRoomState	ref>GameStateWatcher.cs:PollRoomState
+hop	SeatEvidenceCore.cs:Count	3761dcfa5aafe0c8	BoundedDeal.cs:TrySpawnBounded	ref>BoundedDeal.cs:TrySpawnBounded
 hop	SeatEvidenceCore.cs:Count	37653d6b0c70d309	NativeUI.cs:BuildSeriesCards	ref>NativeUI.cs:BuildSeriesCards
 hop	SeatEvidenceCore.cs:Count	3830a9bb7585468f	DanceStep0Probe.cs:BodyProbe	ref[.Append(#0)]>DanceStep0Probe.cs:BodyProbe
 hop	SeatEvidenceCore.cs:Count	38493e9c0f625084	CardDrawEvidenceCore.cs:EndPick#1	ref[EndPick(#1)]>CardDrawEvidenceCore.cs:EndPick#1
@@ -51520,6 +51642,7 @@ hop	SeatEvidenceCore.cs:Count	4300cd30989dc35b	PostSessionReport.cs:ComposeGameR
 hop	SeatEvidenceCore.cs:Count	431aa7f421b60b3b	IdentityClockCore.cs:Budget	ref[l.RemoveRange(#1)]>IdentityClockCore.cs:Budget
 hop	SeatEvidenceCore.cs:Count	4345f52567feddb7	GameStateWatcher.cs:LocalOffersPickedIn	ref>GameStateWatcher.cs:LocalOffersPickedIn
 hop	SeatEvidenceCore.cs:Count	43585b1a0184ac2f	IdentityClockEvidence.cs:EnterRpc	ref>IdentityClockEvidence.cs:EnterRpc
+hop	SeatEvidenceCore.cs:Count	43b07619e9ae6234	BoundedDeal.cs:Describe	ref>BoundedDeal.cs:Describe
 hop	SeatEvidenceCore.cs:Count	43e1ad352e20e73b	NativeUI.cs:OpenAdminActionLogPicker	delegate[ApiClient.FetchAdminActions(#5=>)/=>{}]>NativeUI.cs:OpenAdminActionLogPicker
 hop	SeatEvidenceCore.cs:Count	441e535e0e5b0d9e	VanillaFixes.cs:BeforeUpdate	ref>VanillaFixes.cs:BeforeUpdate
 hop	SeatEvidenceCore.cs:Count	44c0b5729eb2a0b6	VanillaFixes.cs:TargetMethods#4	ref>VanillaFixes.cs:TargetMethods#4
@@ -51563,6 +51686,7 @@ hop	SeatEvidenceCore.cs:Count	4bd468eaf452182d	SessionReportRules.cs:RoundsSerie
 hop	SeatEvidenceCore.cs:Count	4c20e39d9689689b	MusicEngine.cs:ScanHasReadyTrack	ref>MusicEngine.cs:ScanHasReadyTrack
 hop	SeatEvidenceCore.cs:Count	4c2de435328687f2	PortraitRender.cs:PinParticles	ref>PortraitRender.cs:PinParticles
 hop	SeatEvidenceCore.cs:Count	4c45d8f48b6118b9	FfaLateRules.cs:ScaleLoad	ref>FfaLateRules.cs:ScaleLoad
+hop	SeatEvidenceCore.cs:Count	4c5ad86e1eb558f4	BoundedDealRules.cs:Pick	ref>BoundedDealRules.cs:Pick
 hop	SeatEvidenceCore.cs:Count	4c7f75f280fb92b2	TitleLaddersUI.cs:PlanShopSection	ref[TitleLadderRules.PlanSection(#2)]>TitleLaddersUI.cs:PlanShopSection
 hop	SeatEvidenceCore.cs:Count	4c8230c55586c68b	NativeUI.cs:RenderHostLobbySection	ref>NativeUI.cs:RenderHostLobbySection
 hop	SeatEvidenceCore.cs:Count	4cba8021b0422470	NetworkSeatTelemetry.cs:Prefix#7	ref>NetworkSeatTelemetry.cs:Prefix#7
@@ -51613,6 +51737,7 @@ hop	SeatEvidenceCore.cs:Count	538f2e2b3a1013c5	FfaNumberingRules.cs:Run#1	ref>Ff
 hop	SeatEvidenceCore.cs:Count	53b99a5503cd6821	PlayerCardsUI.cs:ProposeNow	delegate[ApiClient.PcTradePropose(#5=>)/=>{}/Plugin.Log.LogInfo(#0)]>PlayerCardsUI.cs:ProposeNow
 hop	SeatEvidenceCore.cs:Count	53d5be4de3e1b8e6	EmojiSprites.cs:Build	ref[new List(#0)]>EmojiSprites.cs:Build
 hop	SeatEvidenceCore.cs:Count	540c028631e574ce	CompetitiveUI.cs:OpenCosmeticReview	delegate[ApiClient.FetchCosmeticSubmissionsAdmin(#1=>)/=>{}]>CompetitiveUI.cs:OpenCosmeticReview
+hop	SeatEvidenceCore.cs:Count	542816b3cf19d2ab	BoundedDeal.cs:TrySpawnBounded	ref[VanillaFixSupport.DiagLimited(#1)]>BoundedDeal.cs:TrySpawnBounded
 hop	SeatEvidenceCore.cs:Count	54b44636c074cf9d	NativeUI.cs:RefreshChatLog	ref>NativeUI.cs:RefreshChatLog
 hop	SeatEvidenceCore.cs:Count	54f1ac57414d1abf	DamageNumberRules.cs:SelfTest	delegate>DamageNumberRules.cs:SelfTest
 hop	SeatEvidenceCore.cs:Count	5509c500bf493826	SpectatorTeardownProbe.cs:NotePhysicsStep	ref>SpectatorTeardownProbe.cs:NotePhysicsStep
@@ -52011,6 +52136,7 @@ hop	SeatEvidenceCore.cs:Count	950a629e9b0fd17c	NetworkReplicaDiagnostics.cs:Emit
 hop	SeatEvidenceCore.cs:Count	9533d5bc8af85c5f	NametagFontRenderer.cs:ScanAndApply	ref>NametagFontRenderer.cs:ScanAndApply
 hop	SeatEvidenceCore.cs:Count	9534a64eccbf9229	RosterCensus.cs:Describe	ref[.Append(#0)]>RosterCensus.cs:Describe
 hop	SeatEvidenceCore.cs:Count	95393e44889e3aec	NativeUI.SettingsDrive.cs:DriveW3	ref[DrvBad(#0)]>NativeUI.SettingsDrive.cs:DriveW3
+hop	SeatEvidenceCore.cs:Count	958aca13d7a9ff37	BoundedDeal.cs:LogHeldCards	ref[.Append(#0)]>BoundedDeal.cs:LogHeldCards
 hop	SeatEvidenceCore.cs:Count	95964e6079bf99cc	MusicEngine.cs:HasRootedRecord	ref>MusicEngine.cs:HasRootedRecord
 hop	SeatEvidenceCore.cs:Count	95e80ed87a790bcd	VanillaFixes.cs:TargetMethods#5	ref>VanillaFixes.cs:TargetMethods#5
 hop	SeatEvidenceCore.cs:Count	96451618020ae025	PlayerCardMotionDev.cs:DevPumpDue	ref>PlayerCardMotionDev.cs:DevPumpDue
@@ -52588,6 +52714,7 @@ hop	SeatEvidenceCore.cs:Count	f0e04de13f33fb83	IdentityClockCore.cs:Add#1	ref>Id
 hop	SeatEvidenceCore.cs:Count	f0edbf3d6d36ca1b	MusicEngine.cs:LiveObjectCount	ref>MusicEngine.cs:LiveObjectCount
 hop	SeatEvidenceCore.cs:Count	f0f9372040bd607e	CardDrawEvidenceCore.cs:SamePrefix	ref>CardDrawEvidenceCore.cs:SamePrefix
 hop	SeatEvidenceCore.cs:Count	f1195d2941db4a7a	MusicEngine.cs:SelectionUniverseEmpty	ref>MusicEngine.cs:SelectionUniverseEmpty
+hop	SeatEvidenceCore.cs:Count	f11f3c9d866e3fd0	BoundedDeal.cs:LogHeldCards	ref>BoundedDeal.cs:LogHeldCards
 hop	SeatEvidenceCore.cs:Count	f134c13973b4d0ec	NativeUI.cs:BuildComparePlayerNemesisPanel	ref>NativeUI.cs:BuildComparePlayerNemesisPanel
 hop	SeatEvidenceCore.cs:Count	f18f02ad2c2321a5	TeamColorIdentity.cs:Rebuild	ref>TeamColorIdentity.cs:Rebuild
 hop	SeatEvidenceCore.cs:Count	f1ba498855b8218f	CombatEvidenceCore.cs:Trace	ref>CombatEvidenceCore.cs:Trace
@@ -54684,6 +54811,7 @@ hop	TeamGameNumber.cs:ToString	23fde83e14795517	LogBundleCore.cs:FormatClockLine
 hop	TeamGameNumber.cs:ToString	243d96af0e67f75b	VanillaFixes.cs:DiagnoseMissingDrillEffect	ref[VanillaFixSupport.DiagLimited(#1)]>VanillaFixes.cs:DiagnoseMissingDrillEffect
 hop	TeamGameNumber.cs:ToString	245de59e3007f582	VanillaFixes.cs:RemoveHealthRow	ref[VanillaFixSupport.DiagLimited(#1)]>VanillaFixes.cs:RemoveHealthRow
 hop	TeamGameNumber.cs:ToString	24849ab2072accd7	AvatarDefaultRules.cs:PopupPick#1	ref>AvatarDefaultRules.cs:PopupPick#1
+hop	TeamGameNumber.cs:ToString	248bf55a24ac4962	LimitlessBounds.cs:Version	ref>LimitlessBounds.cs:Version
 hop	TeamGameNumber.cs:ToString	24a45bf6a2c1a449	ApiClient.cs:PcStr	ref>ApiClient.cs:PcStr
 hop	TeamGameNumber.cs:ToString	24c48740cca61cfc	PortraitRenderDance.cs:Top	ref[.Append(#0)]>PortraitRenderDance.cs:Top
 hop	TeamGameNumber.cs:ToString	25466eef3002ec4b	NetworkReplicaDiagnostics.cs:EmitViewLines	ref[VanillaFixSupport.DiagLimited(#1)]>NetworkReplicaDiagnostics.cs:EmitViewLines
@@ -54828,8 +54956,10 @@ hop	TeamGameNumber.cs:ToString	47de2c7879f5884e	NativeUI.cs:RatingDeltaText	ref>
 hop	TeamGameNumber.cs:ToString	47e23b0a31b8965a	AvatarDefaultRules.cs:Tick	ref[Say(#0)]>AvatarDefaultRules.cs:Tick
 hop	TeamGameNumber.cs:ToString	483f950e81205432	SpectatorHud.cs:TeamScoreInline	ref>SpectatorHud.cs:TeamScoreInline
 hop	TeamGameNumber.cs:ToString	48584912e2c6417e	FfaReadmitEntryRules.cs:RequestBody	ref>FfaReadmitEntryRules.cs:RequestBody
+hop	TeamGameNumber.cs:ToString	4870cb5c9731a5fc	LimitlessBounds.cs:DigestOf	ref>LimitlessBounds.cs:DigestOf
 hop	TeamGameNumber.cs:ToString	487fcbb23150542c	TeamHoldNet.cs:TryParseClaim	ref[SeatDeckLog.Emit(#0)]>TeamHoldNet.cs:TryParseClaim
 hop	TeamGameNumber.cs:ToString	48a4550b85ee4689	ChatClient.cs:Send	ref>ChatClient.cs:Send
+hop	TeamGameNumber.cs:ToString	48ca97ac6253aeb0	BoundedDeal.cs:LogHeldCards	ref[.Append(#0)]>BoundedDeal.cs:LogHeldCards
 hop	TeamGameNumber.cs:ToString	497a9a168a8654ca	Gate0WiringFormat.cs:FormatWiring	ref>Gate0WiringFormat.cs:FormatWiring
 hop	TeamGameNumber.cs:ToString	497c1c0f9879eb83	SeatEvidence.cs:DisabledSeatSession	ref[case C.SendStep.GiveUp/Plugin.Log.LogInfo(#0)]>SeatEvidence.cs:DisabledSeatSession
 hop	TeamGameNumber.cs:ToString	498bdf912727b9d4	SeatEvidenceCore.cs:QueueHash	ref>SeatEvidenceCore.cs:QueueHash
@@ -54841,6 +54971,7 @@ hop	TeamGameNumber.cs:ToString	4b06c741eaa03569	NativeUI.cs:RefreshTeamTab	ref[s
 hop	TeamGameNumber.cs:ToString	4b4a0a4b73c542c8	SeatEvidenceCore.cs:Write	ref[sb.Append(#0)]>SeatEvidenceCore.cs:Write
 hop	TeamGameNumber.cs:ToString	4b8853f8158193b9	FfaNumberingRules.cs:LegacyPickCard	ref>FfaNumberingRules.cs:LegacyPickCard
 hop	TeamGameNumber.cs:ToString	4b97f176e8b1dc0b	ShowcaseRules.cs:SelfTest	ref[metrics.Add(#0)]>ShowcaseRules.cs:SelfTest
+hop	TeamGameNumber.cs:ToString	4c2c81f0f5288c08	LimitlessBounds.cs:DigestOf	ref[sb.Append(#0)]>LimitlessBounds.cs:DigestOf
 hop	TeamGameNumber.cs:ToString	4c51d7a81e970691	PortraitGrade.cs:DevGradeTable	ref>PortraitGrade.cs:DevGradeTable
 hop	TeamGameNumber.cs:ToString	4c633fed1d0b9920	ApiClient.cs:ExtractJsonStringArray	ref[outList.Add(#0)]>ApiClient.cs:ExtractJsonStringArray
 hop	TeamGameNumber.cs:ToString	4c72ebd5970bd882	IdentityClockCore.cs:FlushCaptures	ref[info(#0)]>IdentityClockCore.cs:FlushCaptures
@@ -55011,6 +55142,7 @@ hop	TeamGameNumber.cs:ToString	7eab25cb8a0e8905	VanillaFixes.cs:SweepNow#2	ref[V
 hop	TeamGameNumber.cs:ToString	7ec7c691488759fd	PlayerCardsUI.cs:PresetOptionIds	ref>PlayerCardsUI.cs:PresetOptionIds
 hop	TeamGameNumber.cs:ToString	7f1fcf5946b1aa0c	PlayerCardsUI.cs:DevSeedMotionPrints	entry[ApiClient.PcPrint.print_id]>PlayerCardsUI.cs:DevSeedMotionPrints
 hop	TeamGameNumber.cs:ToString	7f4b39d9b95f6fbd	FfaLateRules.cs:BoundaryDigest	ref[sb.Append(#0)]>FfaLateRules.cs:BoundaryDigest
+hop	TeamGameNumber.cs:ToString	7f8414cf1e2ab686	BoundedDeal.cs:TrySpawnBounded	ref[VanillaFixSupport.DiagLimited(#1)]>BoundedDeal.cs:TrySpawnBounded
 hop	TeamGameNumber.cs:ToString	7f9359bee4c68b55	PcQuickShardRules.cs:DiscardLateCases	ref[Check(#3)]>PcQuickShardRules.cs:DiscardLateCases
 hop	TeamGameNumber.cs:ToString	7fab6aaf2f07e81f	BroadcastMode.cs:SafeRoomDesc	ref>BroadcastMode.cs:SafeRoomDesc
 hop	TeamGameNumber.cs:ToString	7faf2e8d4dbeced2	FfaReadmitEntryRules.cs:Sha256Hex	ref[sb.Append(#0)]>FfaReadmitEntryRules.cs:Sha256Hex
@@ -55366,6 +55498,7 @@ hop	TeamGameNumber.cs:ToString	de8382d34470ec2b	PortraitRenderDanceDev.cs:DanceD
 hop	TeamGameNumber.cs:ToString	df0177fd90fcfce9	ProfileCard.cs:Unescape	ref>ProfileCard.cs:Unescape
 hop	TeamGameNumber.cs:ToString	df1e4a53f197d9c3	SecureRouteRules.cs:ReadString	ref>SecureRouteRules.cs:ReadString
 hop	TeamGameNumber.cs:ToString	df26028e9f65ba9b	ApiClient.cs:ComputeHmacHex	ref[sb.Append(#0)]>ApiClient.cs:ComputeHmacHex
+hop	TeamGameNumber.cs:ToString	df2cde6089112817	BoundedDeal.cs:LogHeldCards	ref[Plugin.Log.LogInfo(#0)]>BoundedDeal.cs:LogHeldCards
 hop	TeamGameNumber.cs:ToString	df4cc2de6a8ad0e8	SpectatorHud.cs:ComposeCompact	ref>SpectatorHud.cs:ComposeCompact
 hop	TeamGameNumber.cs:ToString	df5dd4fcf61424fc	NativeUI.cs:BuildComparePlayerNemesisPanel	ref[UIFactory.CreateText(#2)]>NativeUI.cs:BuildComparePlayerNemesisPanel
 hop	TeamGameNumber.cs:ToString	dfadc6217cd22317	TeamHoldWriter.cs:OnGameStart	delegate[TeamHoldNet.Call(#3=>)/=>{}/Plugin.Log.LogInfo(#0)]>TeamHoldWriter.cs:OnGameStart
@@ -55994,6 +56127,7 @@ hop	TeamHoldRules.cs:ToString	05162813159d6946	ApiClient.cs:DoSubmitAnimated	ref
 hop	TeamHoldRules.cs:ToString	051aec8711eca83d	TeamHoldNet.cs:TryParseBind	ref>TeamHoldNet.cs:TryParseBind
 hop	TeamHoldRules.cs:ToString	052e1bf9d0c5fd05	PortraitRenderDance.cs:UploadStill	ref[ApiClient.PcPortraitUpload(#1)]>PortraitRenderDance.cs:UploadStill
 hop	TeamHoldRules.cs:ToString	05509647a63490ca	MailUI.cs:AddresseeNames	ref>MailUI.cs:AddresseeNames
+hop	TeamHoldRules.cs:ToString	056bee706c13f6b1	LimitlessBounds.cs:Version	ref>LimitlessBounds.cs:Version
 hop	TeamHoldRules.cs:ToString	056d609fa238734c	LogBundleCore.cs:FormatClockLine	ref>LogBundleCore.cs:FormatClockLine
 hop	TeamHoldRules.cs:ToString	059eaacc89fda77e	IdentityClockEvidence.cs:RecordLine	ref>IdentityClockEvidence.cs:RecordLine
 hop	TeamHoldRules.cs:ToString	05b52681adc13535	H2HRules.cs:Retire	ref>H2HRules.cs:Retire
@@ -56031,6 +56165,7 @@ hop	TeamHoldRules.cs:ToString	0c44c0d6c4907c38	Plugin.cs:MaybeRigDump	ref[sb.App
 hop	TeamHoldRules.cs:ToString	0c4afb780581071c	NametagFontRenderer.cs:ScanAndApply	ref>NametagFontRenderer.cs:ScanAndApply
 hop	TeamHoldRules.cs:ToString	0c7c657900fd08aa	PlayerColorCosmetic.cs:ReapplyForActor	ref>PlayerColorCosmetic.cs:ReapplyForActor
 hop	TeamHoldRules.cs:ToString	0c7d1577e9530bf6	SeatEvidenceCore.cs:Hex	ref[sb.Append(#0)]>SeatEvidenceCore.cs:Hex
+hop	TeamHoldRules.cs:ToString	0d8351c4324b80c5	LimitlessBounds.cs:DigestOf	ref>LimitlessBounds.cs:DigestOf
 hop	TeamHoldRules.cs:ToString	0d970b65c492c3d6	NetworkReplicaDiagnostics.cs:ActorSummary	ref[.Append(#0)]>NetworkReplicaDiagnostics.cs:ActorSummary
 hop	TeamHoldRules.cs:ToString	0db8b928e34a26c7	BroadcastHud.cs:RefreshCaches	ref>BroadcastHud.cs:RefreshCaches
 hop	TeamHoldRules.cs:ToString	0e07051878809c24	PcTradeRules.cs:TradeDigest	ref[sb.Append(#0)]>PcTradeRules.cs:TradeDigest
@@ -56076,7 +56211,9 @@ hop	TeamHoldRules.cs:ToString	170c0d0d799ee9ee	AudioSelfCheck.cs:Snapshot	ref[.A
 hop	TeamHoldRules.cs:ToString	17506b51e4cdec2f	Plugin.cs:SteamIdOf	ref>Plugin.cs:SteamIdOf
 hop	TeamHoldRules.cs:ToString	187e8e9cbb89d474	NativeUI.Settings.cs:SelfTestActiveBodies	ref[on.Add(#0)]>NativeUI.Settings.cs:SelfTestActiveBodies
 hop	TeamHoldRules.cs:ToString	18914725d2c0dceb	InfoViz.cs:BuildRankLadder	ref[Lbl(#1)]>InfoViz.cs:BuildRankLadder
+hop	TeamHoldRules.cs:ToString	189fdae3b02499dc	BoundedDeal.cs:TrySpawnBounded	ref[VanillaFixSupport.DiagLimited(#1)]>BoundedDeal.cs:TrySpawnBounded
 hop	TeamHoldRules.cs:ToString	18ec4edc61b7db1a	FfaNumberingRules.cs:L	ref>FfaNumberingRules.cs:L
+hop	TeamHoldRules.cs:ToString	18ecb0e6af989a43	BoundedDeal.cs:LogHeldCards	ref[Plugin.Log.LogInfo(#0)]>BoundedDeal.cs:LogHeldCards
 hop	TeamHoldRules.cs:ToString	19a17af983af8ffa	SessionReportModel.cs:PerGame	ref>SessionReportModel.cs:PerGame
 hop	TeamHoldRules.cs:ToString	1adcd14a252dfe66	MusicStreamProbe.cs:F1	ref>MusicStreamProbe.cs:F1
 hop	TeamHoldRules.cs:ToString	1aeede92598faada	ApiClient.cs:BuildBugReportBody	ref>ApiClient.cs:BuildBugReportBody
@@ -56113,6 +56250,7 @@ hop	TeamHoldRules.cs:ToString	2489517a9daf73db	NativeUI.cs:OpenAdminActionLogPic
 hop	TeamHoldRules.cs:ToString	24bfab1c8bfb5827	GameStateWatcher.cs:LoadSessionStateOrReset	ref[long.Parse(#0)/PlayerPrefs.GetString(#1)]>GameStateWatcher.cs:LoadSessionStateOrReset
 hop	TeamHoldRules.cs:ToString	25167ce835517bd3	NetworkReplicaDiagnostics.cs:EmitRoomSummary	ref[.LogInfo(#0)]>NetworkReplicaDiagnostics.cs:EmitRoomSummary
 hop	TeamHoldRules.cs:ToString	25341484fc10eb24	ApiClient.cs:MarkdownToTmp	ref>ApiClient.cs:MarkdownToTmp
+hop	TeamHoldRules.cs:ToString	2548d0d198442e48	BoundedDeal.cs:LogHeldCards	ref[.Append(#0)]>BoundedDeal.cs:LogHeldCards
 hop	TeamHoldRules.cs:ToString	256644418b68833b	MusicEngine.cs:TsKeysReused	ref>MusicEngine.cs:TsKeysReused
 hop	TeamHoldRules.cs:ToString	2575d996f02e94fd	PortraitGrade.cs:GradeSwatchRun	ref[.Append(#0)]>PortraitGrade.cs:GradeSwatchRun
 hop	TeamHoldRules.cs:ToString	25897f18ebc8222e	Plugin.cs:ProbeDancePose	ref[Plugin.Log.LogInfo(#0)]>Plugin.cs:ProbeDancePose
@@ -56838,6 +56976,7 @@ hop	TeamHoldRules.cs:ToString	e1e4cfbd3b9d1836	MailUI.cs:OpenCompose	ref>MailUI.
 hop	TeamHoldRules.cs:ToString	e1e79626d0632b9f	PortraitRenderDance.cs:Top	ref[.Append(#0)]>PortraitRenderDance.cs:Top
 hop	TeamHoldRules.cs:ToString	e336506483053039	NativeUI.cs:ExtractChatField	ref>NativeUI.cs:ExtractChatField
 hop	TeamHoldRules.cs:ToString	e3bc26466871d3a8	TeamColorIdentity.cs:DisplayNameForSku	ref>TeamColorIdentity.cs:DisplayNameForSku
+hop	TeamHoldRules.cs:ToString	e3f92197738c4db9	LimitlessBounds.cs:DigestOf	ref[sb.Append(#0)]>LimitlessBounds.cs:DigestOf
 hop	TeamHoldRules.cs:ToString	e41c0f78e8fee9b4	IdentityClockEvidence.cs:BootLine	ref>IdentityClockEvidence.cs:BootLine
 hop	TeamHoldRules.cs:ToString	e4260b13c82f41e8	HitEvidenceCore.cs:F	ref>HitEvidenceCore.cs:F
 hop	TeamHoldRules.cs:ToString	e47cef0fcecab234	MusicEngine.cs:DesiredKeys	ref>MusicEngine.cs:DesiredKeys
@@ -57198,6 +57337,7 @@ hop	VanillaFixes.cs:Cleanup#1	36b7400aafcad66c	Keybinds.cs:Cleanup#6	ref>Keybind
 hop	VanillaFixes.cs:Cleanup#1	3895ab32714bb2e5	NetworkReplicaDiagnostics.cs:Cleanup#2	ref>NetworkReplicaDiagnostics.cs:Cleanup#2
 hop	VanillaFixes.cs:Cleanup#1	49e9c4e6cfb7ad44	VanillaFixes.cs:Cleanup#29	ref>VanillaFixes.cs:Cleanup#29
 hop	VanillaFixes.cs:Cleanup#1	4a180c3da02bfaa7	Keybinds.cs:Cleanup#3	ref>Keybinds.cs:Cleanup#3
+hop	VanillaFixes.cs:Cleanup#1	4c4b290edc8d11fa	BoundedDeal.cs:Cleanup	ref>BoundedDeal.cs:Cleanup
 hop	VanillaFixes.cs:Cleanup#1	4d023b2035714692	VanillaFixes.cs:Cleanup#33	ref>VanillaFixes.cs:Cleanup#33
 hop	VanillaFixes.cs:Cleanup#1	55d619bc95eece66	Keybinds.cs:Cleanup#1	ref>Keybinds.cs:Cleanup#1
 hop	VanillaFixes.cs:Cleanup#1	60317defee6545f1	VanillaFixes.cs:Cleanup#11	ref>VanillaFixes.cs:Cleanup#11
@@ -57290,6 +57430,7 @@ hop	VanillaFixes.cs:LogError	468354c9a206a7c5	VanillaFixes.cs:AfterCardChoiceAwa
 hop	VanillaFixes.cs:LogError	49890c1298a83e19	VanillaFixes.cs:CheckLocalNickname	ref>VanillaFixes.cs:CheckLocalNickname
 hop	VanillaFixes.cs:LogError	4d3a0b4d86f6e15a	NetworkReplicaDiagnostics.cs:OnRoomJoined	ref>NetworkReplicaDiagnostics.cs:OnRoomJoined
 hop	VanillaFixes.cs:LogError	4e380f92656b58cc	TeamColorIdentity.cs:BeforeTouchGround	ref>TeamColorIdentity.cs:BeforeTouchGround
+hop	VanillaFixes.cs:LogError	4f0ab38eecb003aa	RoundPipClamp.cs:BeforeGetPointPos	ref>RoundPipClamp.cs:BeforeGetPointPos
 hop	VanillaFixes.cs:LogError	53348e05e5073073	VanillaFixes.cs:Prefix#2	ref>VanillaFixes.cs:Prefix#2
 hop	VanillaFixes.cs:LogError	535fca243016ba9a	VanillaFixes.cs:AfterStart#2	ref>VanillaFixes.cs:AfterStart#2
 hop	VanillaFixes.cs:LogError	557b88ec04467143	VanillaFixes.cs:DedupeEffectsAfterStart	ref>VanillaFixes.cs:DedupeEffectsAfterStart
@@ -57307,6 +57448,7 @@ hop	VanillaFixes.cs:LogError	755167e1a8c61a7c	NetworkReplicaDiagnostics.cs:OnGam
 hop	VanillaFixes.cs:LogError	794f2f122a7ab0c2	NetworkReplicaDiagnostics.cs:SpectatorBattleActive	ref>NetworkReplicaDiagnostics.cs:SpectatorBattleActive
 hop	VanillaFixes.cs:LogError	7961eda8fa14030c	VanillaFixes.cs:BeforeForceOverTime	ref>VanillaFixes.cs:BeforeForceOverTime
 hop	VanillaFixes.cs:LogError	833222ac4323319b	NetworkReplicaDiagnostics.cs:OnRoomLeft	ref>NetworkReplicaDiagnostics.cs:OnRoomLeft
+hop	VanillaFixes.cs:LogError	8e98e9b9bf2de6e9	BoundedDeal.cs:ShouldApply	ref>BoundedDeal.cs:ShouldApply
 hop	VanillaFixes.cs:LogError	8f581392c4e675c7	VanillaFixes.cs:BeforeTransitionDamage	delegate[HookGuard.Prefix(#1=>)/=>{}]>VanillaFixes.cs:BeforeTransitionDamage
 hop	VanillaFixes.cs:LogError	9083fd1e101edaf7	VanillaFixes.cs:AfterDealtDamage	ref>VanillaFixes.cs:AfterDealtDamage
 hop	VanillaFixes.cs:LogError	9318f76a818a15a2	VanillaFixes.cs:ReplayDeferredHit	ref>VanillaFixes.cs:ReplayDeferredHit
@@ -57315,6 +57457,7 @@ hop	VanillaFixes.cs:LogError	993c675ba5fa24c3	VanillaFixes.cs:SyncRankedIntent	r
 hop	VanillaFixes.cs:LogError	99d1b46e78d9f3f3	VanillaFixes.cs:AfterSetRoomCode	ref>VanillaFixes.cs:AfterSetRoomCode
 hop	VanillaFixes.cs:LogError	a4791b19bc280212	VanillaFixes.cs:BeforeCardInfoAwake	ref>VanillaFixes.cs:BeforeCardInfoAwake
 hop	VanillaFixes.cs:LogError	a55727c693c1e7a7	VanillaFixes.cs:GameplayScope	ref>VanillaFixes.cs:GameplayScope
+hop	VanillaFixes.cs:LogError	a863962f95c23dfc	BoundedDeal.cs:BeforeSpawnUniqueCard	ref>BoundedDeal.cs:BeforeSpawnUniqueCard
 hop	VanillaFixes.cs:LogError	aac63714b21346a7	NetworkReplicaDiagnostics.cs:CountAndForwardOrphanWarning	ref>NetworkReplicaDiagnostics.cs:CountAndForwardOrphanWarning
 hop	VanillaFixes.cs:LogError	b027802460ea4855	VanillaFixes.cs:ComputeDecision	ref>VanillaFixes.cs:ComputeDecision
 hop	VanillaFixes.cs:LogError	b0df19c219cf2498	VanillaFixes.cs:RefreshActorLabels	ref>VanillaFixes.cs:RefreshActorLabels
@@ -57338,6 +57481,7 @@ hop	VanillaFixes.cs:LogError	eefdede765cc6c2a	VanillaFixes.cs:Schedule#1	ref>Van
 hop	VanillaFixes.cs:LogError	efa4c7d10bd92cb8	VanillaFixes.cs:AfterResetStats	ref>VanillaFixes.cs:AfterResetStats
 hop	VanillaFixes.cs:LogError	f468eee5c0a41275	NetworkReplicaDiagnostics.cs:FlushOpenArrivalGaps	ref>NetworkReplicaDiagnostics.cs:FlushOpenArrivalGaps
 hop	VanillaFixes.cs:LogError	faf22f24717571e9	VanillaFixes.cs:DiagnoseDroppedDrillStop	ref>VanillaFixes.cs:DiagnoseDroppedDrillStop
+hop	VanillaFixes.cs:LogError	fb75f94f84eb475c	BoundedDeal.cs:BeforeDoStartGame	ref>BoundedDeal.cs:BeforeDoStartGame
 hop	VanillaFixes.cs:LogError	fccfe8252d18ad85	VanillaFixes.cs:Update	ref>VanillaFixes.cs:Update
 hop	VanillaFixes.cs:LogError	fd0b27ce101237bc	VanillaFixes.cs:SweepNow#2	ref>VanillaFixes.cs:SweepNow#2
 hop	VanillaFixes.cs:Note	65f9b95e4dde81fa	VanillaFixes.cs:Compute	ref>VanillaFixes.cs:Compute
@@ -57637,6 +57781,9 @@ end	AvatarDefaults.cs:Postfix#1	unresolved:harmony:AvatarDefaults.cs:AvatarLoadF
 end	AvatarDefaults.cs:Postfix#2	unresolved:harmony:AvatarDefaults.cs:AvatarSelectFacePatch.Postfix#2(CharacterCreatorHandler.SelectFace)
 end	AvatarDefaults.cs:Prefix	unresolved:harmony:AvatarDefaults.cs:AvatarCreatePlayerPatch.Prefix(PlayerAssigner.CreatePlayer)
 end	BinderSortRules.cs:SelfTest	unreferenced
+end	BoundedDeal.cs:BeforeDoStartGame	unresolved:harmony:BoundedDeal.cs:GMArmsRaceDoStartGameBoundedDealLogPatch.BeforeDoStartGame(GM_ArmsRace.DoStartGame)
+end	BoundedDeal.cs:BeforeSpawnUniqueCard	unresolved:harmony:BoundedDeal.cs:CardChoiceSpawnUniqueCardBoundedDealPatch.BeforeSpawnUniqueCard(CardChoice.SpawnUniqueCard)
+end	BoundedDeal.cs:Cleanup	unresolved:harmony:BoundedDeal.cs:CardChoiceSpawnUniqueCardBoundedDealPatch.Cleanup(CardChoice.SpawnUniqueCard)
 end	BroadcastHud.cs:Draw	root:BroadcastHud.cs:Draw
 end	CardDrawEvidence.cs:Finalizer#1	unresolved:harmony:CardDrawEvidence.cs:CardDrawEvidence_PickPatch.Finalizer#1(ApplyCardStats.RPCA_Pick)
 end	CardDrawEvidence.cs:Finalizer#2	unresolved:harmony:CardDrawEvidence.cs:CardDrawEvidence_OfflinePickPatch.Finalizer#2(ApplyCardStats.OFFLINE_Pick)
@@ -57811,6 +57958,8 @@ end	Keybinds.cs:Postfix#5	unresolved:harmony:Keybinds.cs:ReadyUpPatch.Postfix#5(
 end	Keybinds.cs:Transpiler#1	unresolved:harmony:Keybinds.cs:LobbyReadyPatch.Transpiler#1(PlayerAssigner.LateUpdate)
 end	Keybinds.cs:Transpiler#2	unresolved:harmony:Keybinds.cs:CharacterReadyPatch.Transpiler#2(CharacterSelectionInstance.Update)
 end	Keybinds.cs:Transpiler#3	unresolved:harmony:Keybinds.cs:MapArtPatch.Transpiler#3(ArtHandler.Update)
+end	LimitlessBounds.cs:Clamp#2	unreferenced
+end	LimitlessBounds.cs:Version	unreferenced
 end	LogBundleCore.cs:ReadCapped	unreferenced
 end	LogBundleCore.cs:ReadCappedSnapshot	unreferenced
 end	MailClient.cs:ParseSummary	unreferenced
@@ -57970,6 +58119,7 @@ end	ProximityVictimPatches.cs:BeforeGo#3	unresolved:harmony:ProximityVictimPatch
 end	RoomActors.cs:MasterIsSpectator	unreferenced
 end	RoomRulesStrip.cs:SelfTest	unreferenced
 end	RosterCensusRules.cs:SelfTest	unreferenced
+end	RoundPipClamp.cs:BeforeGetPointPos	unresolved:harmony:RoundPipClamp.cs:RoundCounterGetPointPosClampPatch.BeforeGetPointPos(RoundCounter.GetPointPos)
 end	ScrPng.cs:DecodeRgba8	unreferenced
 end	SeatEvidence.cs:Postfix	unresolved:harmony:SeatEvidence.cs:SeatEvidence_RpcSendPatch.Postfix(?)
 end	SeatEvidenceCore.cs:Budget	unreferenced
@@ -58212,6 +58362,7 @@ end	field:Keybinds.cs:HookHeld	unresolved:field:Keybinds.cs:HookHeld
 end	field:Keybinds.cs:MenuToggle	unresolved:field:Keybinds.cs:MenuToggle
 end	field:LagNotices.cs:?	unresolved:field:LagNotices.cs:?
 end	field:LetterboxClear.cs:?	unresolved:field:LetterboxClear.cs:?
+end	field:LimitlessBounds.cs:?	unresolved:field:LimitlessBounds.cs:?
 end	field:LogBundleCore.cs:?	unresolved:field:LogBundleCore.cs:?
 end	field:LogScrub.cs:?	unresolved:field:LogScrub.cs:?
 end	field:LogScrub.cs:SepAny	unresolved:field:LogScrub.cs:SepAny
@@ -64479,6 +64630,15 @@ member	BinderSortRules.cs:NameOf	0c975f2faff80a63
 member	BinderSortRules.cs:Parse	f8817585f6ad4393
 member	BinderSortRules.cs:Resolve	f09756843fd61c5f
 member	BinderSortRules.cs:SelfTest	ad6bb6d93e2b9663
+member	BoundedDeal.cs:BeforeDoStartGame	4964b7d0cd2cd911
+member	BoundedDeal.cs:BeforeSpawnUniqueCard	48b11d7706e7c379
+member	BoundedDeal.cs:Cleanup	001fb5a94b709342
+member	BoundedDeal.cs:Describe	ed4af43e37cc7d22
+member	BoundedDeal.cs:LogHeldCards	e4a3ebe92c2769af
+member	BoundedDeal.cs:ShouldApply	9057ba09d572a662
+member	BoundedDeal.cs:TrySpawnBounded	210bdf68c4b2fedd
+member	BoundedDealRules.cs:Decide	98d69a7532699dc9
+member	BoundedDealRules.cs:Pick	637c7637a65df07e
 member	BroadcastHud.cs:CardAbbrev	73b7be90b4cb9641
 member	BroadcastHud.cs:Draw	1c59cc7d624714bc
 member	BroadcastHud.cs:Draw1v1Panels	ce5054f7f431e75d
@@ -66411,6 +66571,10 @@ member	LagNotices.cs:TransportSilenceLine	40bc60f045a85e88
 member	LetterboxClear.cs:AdaptClearDepth	bc8cde4f5207fd91
 member	LetterboxClear.cs:CreateClearCamera	8ffe222ca0787dc6
 member	LetterboxClear.cs:Upkeep	bbc77a68daa21fba
+member	LimitlessBounds.cs:Clamp#2	580f54b6e8072c24
+member	LimitlessBounds.cs:DigestInput	63cfb7f1fafffcee
+member	LimitlessBounds.cs:DigestOf	465ba0573681ad28
+member	LimitlessBounds.cs:Version	d3ef10d20f315145
 member	LogBundleCore.cs:Assemble	e22e7ba18a1ad5d2
 member	LogBundleCore.cs:CapMarkerLine	caec35cffecd92b6
 member	LogBundleCore.cs:CaptureAtLength	fc43925b8f9381e4
@@ -68092,7 +68256,7 @@ member	Plugin.cs:DelayedRestoreVanillaSky	7503b4a26b95a829
 member	Plugin.cs:DescribeRoom	e462e36c326d0baa
 member	Plugin.cs:DevReporterElectionSentinelTest	7767083d9f8f73d9
 member	Plugin.cs:DevTeamGameNumberSentinelTest	efc883275150f6a5
-member	Plugin.cs:DoInitialize	3bf4783aaacd2977
+member	Plugin.cs:DoInitialize	3c0539eb7a91b158
 member	Plugin.cs:Ended	35ad7d38e9810dc0
 member	Plugin.cs:EnsureTeamColors	1be4555ad8cdacd1
 member	Plugin.cs:EnsureTwinkleLoop	52f14146adb53c47
@@ -68130,7 +68294,7 @@ member	Plugin.cs:OnGUI	264f9497a4dacf60
 member	Plugin.cs:OnJoinRoomFailed	0c22d245e4de87e7
 member	Plugin.cs:OnJoinedRankedRoom	360732ae8dd697c9
 member	Plugin.cs:OnJoinedRoom	a87e8adc209328bb
-member	Plugin.cs:OnLeftRoom	4fcffc01a3b6a3e4
+member	Plugin.cs:OnLeftRoom	267d8b9bae6165e9
 member	Plugin.cs:OnMasterClientSwitched	9ad17aa991871e47
 member	Plugin.cs:OnPickPhaseObserved	01d538c233e477fc
 member	Plugin.cs:OnPlayerEnteredRoom	e0675394cba2b6d1
@@ -68245,7 +68409,7 @@ member	Plugin.cs:TryResolveTeamColors	3692ccdbeffbd5db
 member	Plugin.cs:TrySendLocalFace	e648cddc98cdf1ce
 member	Plugin.cs:TwinkleLoop	01869595154ad335
 member	Plugin.cs:Update#1	f5ac45199ffd7f7f
-member	Plugin.cs:Update#2	8b765c6233010fe1
+member	Plugin.cs:Update#2	19edcafb2d1e5d7f
 member	Plugin.cs:VerifyAndRebake	12f93064c50f0a8c
 member	PoisonLedgerCore.cs:AcceptsAt	b967882b6c2de38f
 member	PoisonLedgerCore.cs:AckedPresent	5ebbd223afd12b26
@@ -68793,6 +68957,7 @@ member	RosterCensusRules.cs:JoinInts	1c88ba3a98c8ac35
 member	RosterCensusRules.cs:LatchesToRelease	6a2ac6a5417997b4
 member	RosterCensusRules.cs:SelfTest	4aaea9321f226e0d
 member	RosterCensusRules.cs:UnionCensus	95bfc14ce7875c77
+member	RoundPipClamp.cs:BeforeGetPointPos	6ef5dd5bcdf9756c
 member	RunInBackgroundLease.cs:Acquire	0dff7ea63437d434
 member	RunInBackgroundLease.cs:Release	ef0294eed3d097c7
 member	ScrPng.cs:DecodeBandsRgba8	82e934b206a76446
@@ -69622,7 +69787,7 @@ member	VanillaFixes.cs:BeforeDrillDeactivate	110319da18544610
 member	VanillaFixes.cs:BeforeForceOverTime	7801e80c8d03c771
 member	VanillaFixes.cs:BeforeForceTowardsPoint	beb8e3728e3f37a8
 member	VanillaFixes.cs:BeforeHide	372ccc9e6307b023
-member	VanillaFixes.cs:BeforeJoin	81668dd052b83788
+member	VanillaFixes.cs:BeforeJoin	7fb8178e4469d81c
 member	VanillaFixes.cs:BeforeMovePlayers	b33cd6919a000d1b
 member	VanillaFixes.cs:BeforeRespawn	c3ee512b43f31087
 member	VanillaFixes.cs:BeforeRevive	5e2e4a55315b5172
@@ -69745,15 +69910,15 @@ sink	CompetitiveUI.cs:DrawChatInput	2	1	f2b16c849c09700e	attached	CompetitiveUI.
 sink	CompetitiveUI.cs:DrawDanceWheel	2	1	75517cbac7d14c37	attached	CompetitiveUI.cs:DrawUI
 sink	CompetitiveUI.cs:DrawInputOverlay	2	1	5412be93d9435cb0	attached	CompetitiveUI.cs:DrawUI
 sink	CompetitiveUI.cs:DrawQuickChat	2	1	e23b05213e46a588	attached	CompetitiveUI.cs:DrawUI
-sink	InfoLibrary.cs:ControlsOutro	5919	57402	cd58e08a6482e3d0	attached	BroadcastHud.cs:Draw,CompetitiveUI.cs:DrawUI,GameStateWatcher.cs:PollMatchState,Keybinds.cs:CommitRows,NativeUI.Keybinds.cs:KeybindPaintAll,NativeUI.Settings.cs:SettingsRenderPane,NativeUI.Settings.cs:SettingsShowExtras,NativeUI.cs:BuildPage,NativeUI.cs:RefreshCurrentTab,NativeUI.cs:SelectInfoArticle
-sink	InfoLibrary.cs:Cosmetics	5919	57402	cd58e08a6482e3d0	attached	BroadcastHud.cs:Draw,CompetitiveUI.cs:DrawUI,GameStateWatcher.cs:PollMatchState,Keybinds.cs:CommitRows,NativeUI.Keybinds.cs:KeybindPaintAll,NativeUI.Settings.cs:SettingsRenderPane,NativeUI.Settings.cs:SettingsShowExtras,NativeUI.cs:BuildPage,NativeUI.cs:RefreshCurrentTab,NativeUI.cs:SelectInfoArticle
-sink	InfoLibrary.cs:Spectating	5919	57402	cd58e08a6482e3d0	attached	BroadcastHud.cs:Draw,CompetitiveUI.cs:DrawUI,GameStateWatcher.cs:PollMatchState,Keybinds.cs:CommitRows,NativeUI.Keybinds.cs:KeybindPaintAll,NativeUI.Settings.cs:SettingsRenderPane,NativeUI.Settings.cs:SettingsShowExtras,NativeUI.cs:BuildPage,NativeUI.cs:RefreshCurrentTab,NativeUI.cs:SelectInfoArticle
-sink	InfoLibrary.cs:StartHere	5919	57402	cd58e08a6482e3d0	attached	BroadcastHud.cs:Draw,CompetitiveUI.cs:DrawUI,GameStateWatcher.cs:PollMatchState,Keybinds.cs:CommitRows,NativeUI.Keybinds.cs:KeybindPaintAll,NativeUI.Settings.cs:SettingsRenderPane,NativeUI.Settings.cs:SettingsShowExtras,NativeUI.cs:BuildPage,NativeUI.cs:RefreshCurrentTab,NativeUI.cs:SelectInfoArticle
-sink	InfoLibrary.cs:VanillaBugs	5919	57402	cd58e08a6482e3d0	attached	BroadcastHud.cs:Draw,CompetitiveUI.cs:DrawUI,GameStateWatcher.cs:PollMatchState,Keybinds.cs:CommitRows,NativeUI.Keybinds.cs:KeybindPaintAll,NativeUI.Settings.cs:SettingsRenderPane,NativeUI.Settings.cs:SettingsShowExtras,NativeUI.cs:BuildPage,NativeUI.cs:RefreshCurrentTab,NativeUI.cs:SelectInfoArticle
-sink	InfoViz.cs:BuildKeyboard	5919	57402	cd58e08a6482e3d0	attached	BroadcastHud.cs:Draw,CompetitiveUI.cs:DrawUI,GameStateWatcher.cs:PollMatchState,Keybinds.cs:CommitRows,NativeUI.Keybinds.cs:KeybindPaintAll,NativeUI.Settings.cs:SettingsRenderPane,NativeUI.Settings.cs:SettingsShowExtras,NativeUI.cs:BuildPage,NativeUI.cs:RefreshCurrentTab,NativeUI.cs:SelectInfoArticle
+sink	InfoLibrary.cs:ControlsOutro	5934	57546	e9d0276bba459a90	attached	BroadcastHud.cs:Draw,CompetitiveUI.cs:DrawUI,GameStateWatcher.cs:PollMatchState,Keybinds.cs:CommitRows,NativeUI.Keybinds.cs:KeybindPaintAll,NativeUI.Settings.cs:SettingsRenderPane,NativeUI.Settings.cs:SettingsShowExtras,NativeUI.cs:BuildPage,NativeUI.cs:RefreshCurrentTab,NativeUI.cs:SelectInfoArticle
+sink	InfoLibrary.cs:Cosmetics	5934	57546	e9d0276bba459a90	attached	BroadcastHud.cs:Draw,CompetitiveUI.cs:DrawUI,GameStateWatcher.cs:PollMatchState,Keybinds.cs:CommitRows,NativeUI.Keybinds.cs:KeybindPaintAll,NativeUI.Settings.cs:SettingsRenderPane,NativeUI.Settings.cs:SettingsShowExtras,NativeUI.cs:BuildPage,NativeUI.cs:RefreshCurrentTab,NativeUI.cs:SelectInfoArticle
+sink	InfoLibrary.cs:Spectating	5934	57546	e9d0276bba459a90	attached	BroadcastHud.cs:Draw,CompetitiveUI.cs:DrawUI,GameStateWatcher.cs:PollMatchState,Keybinds.cs:CommitRows,NativeUI.Keybinds.cs:KeybindPaintAll,NativeUI.Settings.cs:SettingsRenderPane,NativeUI.Settings.cs:SettingsShowExtras,NativeUI.cs:BuildPage,NativeUI.cs:RefreshCurrentTab,NativeUI.cs:SelectInfoArticle
+sink	InfoLibrary.cs:StartHere	5934	57546	e9d0276bba459a90	attached	BroadcastHud.cs:Draw,CompetitiveUI.cs:DrawUI,GameStateWatcher.cs:PollMatchState,Keybinds.cs:CommitRows,NativeUI.Keybinds.cs:KeybindPaintAll,NativeUI.Settings.cs:SettingsRenderPane,NativeUI.Settings.cs:SettingsShowExtras,NativeUI.cs:BuildPage,NativeUI.cs:RefreshCurrentTab,NativeUI.cs:SelectInfoArticle
+sink	InfoLibrary.cs:VanillaBugs	5934	57546	e9d0276bba459a90	attached	BroadcastHud.cs:Draw,CompetitiveUI.cs:DrawUI,GameStateWatcher.cs:PollMatchState,Keybinds.cs:CommitRows,NativeUI.Keybinds.cs:KeybindPaintAll,NativeUI.Settings.cs:SettingsRenderPane,NativeUI.Settings.cs:SettingsShowExtras,NativeUI.cs:BuildPage,NativeUI.cs:RefreshCurrentTab,NativeUI.cs:SelectInfoArticle
+sink	InfoViz.cs:BuildKeyboard	5934	57546	e9d0276bba459a90	attached	BroadcastHud.cs:Draw,CompetitiveUI.cs:DrawUI,GameStateWatcher.cs:PollMatchState,Keybinds.cs:CommitRows,NativeUI.Keybinds.cs:KeybindPaintAll,NativeUI.Settings.cs:SettingsRenderPane,NativeUI.Settings.cs:SettingsShowExtras,NativeUI.cs:BuildPage,NativeUI.cs:RefreshCurrentTab,NativeUI.cs:SelectInfoArticle
 sink	Keybinds.cs:ApplyJoin	5	4	116d269dcc76ee4c	attached	Keybinds.cs:CommitRows
 sink	Keybinds.cs:ApplyReady	5	4	3bb007885d986e1f	attached	Keybinds.cs:CommitRows
-sink	Keybinds.cs:OnRoundStart	9	9	fc1f4abd24c0772a	attached	GameStateWatcher.cs:PollMatchState
+sink	Keybinds.cs:OnRoundStart	9	9	efae9d9508a1c806	attached	GameStateWatcher.cs:PollMatchState
 sink	Keybinds.cs:RefreshAll	2	1	fb6a0440324c0395	attached	Keybinds.cs:CommitRows
 sink	NativeUI.Keybinds.cs:KbRefreshNamedDescs	2	1	302cbc5aa531339f	attached	NativeUI.Keybinds.cs:KeybindPaintAll
 sink	NativeUI.Keybinds.cs:KbRepaintLangNoteIfDue	2	1	9d99563b94be4109	attached	NativeUI.Settings.cs:SettingsShowExtras
@@ -70493,6 +70658,7 @@ unresolved	field:Keybinds.cs:HookHeld	backend/tests/test_keybind_surfaces.py::te
 unresolved	field:Keybinds.cs:MenuToggle	backend/tests/test_keybind_surfaces.py::test_h1_fix5_each_unresolved_end_is_pinned_in_source[field-Keybinds.cs-MenuToggle]	a reference at file scope (Keybinds.cs:MenuToggle): a field initializer holds it, so the path ends where no member is entered. The control pins the field reference in source
 unresolved	field:LagNotices.cs:?	backend/tests/test_keybind_surfaces.py::test_h1_fix5_each_unresolved_end_is_pinned_in_source[field-LagNotices.cs]	a reference at file scope (LagNotices.cs:?): a field initializer holds it, so the path ends where no member is entered. The control pins the field reference in source
 unresolved	field:LetterboxClear.cs:?	backend/tests/test_keybind_surfaces.py::test_h1_fix5_each_unresolved_end_is_pinned_in_source[field-LetterboxClear.cs]	a reference at file scope (LetterboxClear.cs:?): a field initializer holds it, so the path ends where no member is entered. The control pins the field reference in source
+unresolved	field:LimitlessBounds.cs:?	backend/tests/test_keybind_surfaces.py::test_h1_fix5_each_unresolved_end_is_pinned_in_source[field-LimitlessBounds.cs]	a reference at file scope (LimitlessBounds.cs:?): a field initializer holds it, so the path ends where no member is entered. The control pins the field reference in source
 unresolved	field:LogBundleCore.cs:?	backend/tests/test_keybind_surfaces.py::test_h1_fix5_each_unresolved_end_is_pinned_in_source[field-LogBundleCore.cs]	a reference at file scope (LogBundleCore.cs:?): a field initializer holds it, so the path ends where no member is entered. The control pins the field reference in source
 unresolved	field:LogScrub.cs:?	backend/tests/test_keybind_surfaces.py::test_h1_fix5_each_unresolved_end_is_pinned_in_source[field-LogScrub.cs]	a reference at file scope (LogScrub.cs:?): a field initializer holds it, so the path ends where no member is entered. The control pins the field reference in source
 unresolved	field:LogScrub.cs:SepAny	backend/tests/test_keybind_surfaces.py::test_h1_fix5_each_unresolved_end_is_pinned_in_source[field-LogScrub.cs-SepAny]	a reference at file scope (LogScrub.cs:SepAny): a field initializer holds it, so the path ends where no member is entered. The control pins the field reference in source
@@ -70565,6 +70731,9 @@ unresolved	field:TrailRenderer.cs:?	backend/tests/test_keybind_surfaces.py::test
 unresolved	harmony:AvatarDefaults.cs:AvatarCreatePlayerPatch.Prefix(PlayerAssigner.CreatePlayer)	backend/tests/test_keybind_surfaces.py::test_h1_fix5_each_unresolved_end_is_pinned_in_source[harmony-AvatarDefaults.cs-AvatarCreatePlayerPatch.Prefix-PlayerAssigner.CreatePlayer]	the game runs this Harmony patch method on AvatarDefaults.cs:AvatarCreatePlayerPatch.Prefix(PlayerAssigner.CreatePlayer): the call is Harmony's, not the source's, so the end cannot be resolved from source. The complete traversal (fix pass 5) reaches it through the reference rule, whose receiver of an instance member is not resolved (more paths, never fewer). The control pins the patch class and its Harmony attribute in source; Harmony's application at load is not proven here
 unresolved	harmony:AvatarDefaults.cs:AvatarLoadFacesPatch.Postfix#1(CharacterCreatorHandler.LoadFaces)	backend/tests/test_keybind_surfaces.py::test_h1_fix5_each_unresolved_end_is_pinned_in_source[harmony-AvatarDefaults.cs-AvatarLoadFacesPatch.Postfix-1-CharacterCreatorHandler.LoadFaces]	the game runs this Harmony patch method on AvatarDefaults.cs:AvatarLoadFacesPatch.Postfix#1(CharacterCreatorHandler.LoadFaces): the call is Harmony's, not the source's, so the end cannot be resolved from source. The complete traversal (fix pass 5) reaches it through the reference rule, whose receiver of an instance member is not resolved (more paths, never fewer). The control pins the patch class and its Harmony attribute in source; Harmony's application at load is not proven here
 unresolved	harmony:AvatarDefaults.cs:AvatarSelectFacePatch.Postfix#2(CharacterCreatorHandler.SelectFace)	backend/tests/test_keybind_surfaces.py::test_h1_fix5_each_unresolved_end_is_pinned_in_source[harmony-AvatarDefaults.cs-AvatarSelectFacePatch.Postfix-2-CharacterCreatorHandler.SelectFace]	the game runs this Harmony patch method on AvatarDefaults.cs:AvatarSelectFacePatch.Postfix#2(CharacterCreatorHandler.SelectFace): the call is Harmony's, not the source's, so the end cannot be resolved from source. The complete traversal (fix pass 5) reaches it through the reference rule, whose receiver of an instance member is not resolved (more paths, never fewer). The control pins the patch class and its Harmony attribute in source; Harmony's application at load is not proven here
+unresolved	harmony:BoundedDeal.cs:CardChoiceSpawnUniqueCardBoundedDealPatch.BeforeSpawnUniqueCard(CardChoice.SpawnUniqueCard)	backend/tests/test_keybind_surfaces.py::test_h1_fix5_each_unresolved_end_is_pinned_in_source[harmony-BoundedDeal.cs-CardChoiceSpawnUniqueCardBoundedDealPatch.BeforeSpawnUniqueCard-CardChoice.SpawnUniqueCard]	the game runs this Harmony patch method on BoundedDeal.cs:CardChoiceSpawnUniqueCardBoundedDealPatch.BeforeSpawnUniqueCard(CardChoice.SpawnUniqueCard): the call is Harmony's, not the source's, so the end cannot be resolved from source. The complete traversal (fix pass 5) reaches it through the reference rule, whose receiver of an instance member is not resolved (more paths, never fewer). The control pins the patch class and its Harmony attribute in source; Harmony's application at load is not proven here
+unresolved	harmony:BoundedDeal.cs:CardChoiceSpawnUniqueCardBoundedDealPatch.Cleanup(CardChoice.SpawnUniqueCard)	backend/tests/test_keybind_surfaces.py::test_h1_fix5_each_unresolved_end_is_pinned_in_source[harmony-BoundedDeal.cs-CardChoiceSpawnUniqueCardBoundedDealPatch.Cleanup-CardChoice.SpawnUniqueCard]	the game runs this Harmony patch method on BoundedDeal.cs:CardChoiceSpawnUniqueCardBoundedDealPatch.Cleanup(CardChoice.SpawnUniqueCard): the call is Harmony's, not the source's, so the end cannot be resolved from source. The complete traversal (fix pass 5) reaches it through the reference rule, whose receiver of an instance member is not resolved (more paths, never fewer). The control pins the patch class and its Harmony attribute in source; Harmony's application at load is not proven here
+unresolved	harmony:BoundedDeal.cs:GMArmsRaceDoStartGameBoundedDealLogPatch.BeforeDoStartGame(GM_ArmsRace.DoStartGame)	backend/tests/test_keybind_surfaces.py::test_h1_fix5_each_unresolved_end_is_pinned_in_source[harmony-BoundedDeal.cs-GMArmsRaceDoStartGameBoundedDealLogPatch.BeforeDoStartGame-GM_ArmsRace.DoStartGame]	the game runs this Harmony patch method on BoundedDeal.cs:GMArmsRaceDoStartGameBoundedDealLogPatch.BeforeDoStartGame(GM_ArmsRace.DoStartGame): the call is Harmony's, not the source's, so the end cannot be resolved from source. The complete traversal (fix pass 5) reaches it through the reference rule, whose receiver of an instance member is not resolved (more paths, never fewer). The control pins the patch class and its Harmony attribute in source; Harmony's application at load is not proven here
 unresolved	harmony:CardDrawEvidence.cs:CardDrawEvidence_CardAwakePatch.Postfix#2(CardInfo.Awake)	backend/tests/test_keybind_surfaces.py::test_h1_fix5_each_unresolved_end_is_pinned_in_source[harmony-CardDrawEvidence.cs-CardDrawEvidence_CardAwakePatch.Postfix-2-CardInfo.Awake]	the game runs this Harmony patch method on CardDrawEvidence.cs:CardDrawEvidence_CardAwakePatch.Postfix#2(CardInfo.Awake): the call is Harmony's, not the source's, so the end cannot be resolved from source. The complete traversal (fix pass 5) reaches it through the reference rule, whose receiver of an instance member is not resolved (more paths, never fewer). The control pins the patch class and its Harmony attribute in source; Harmony's application at load is not proven here
 unresolved	harmony:CardDrawEvidence.cs:CardDrawEvidence_DonePickingPatch.Prefix#2(CardChoice.RPCA_DonePicking)	backend/tests/test_keybind_surfaces.py::test_h1_fix5_each_unresolved_end_is_pinned_in_source[harmony-CardDrawEvidence.cs-CardDrawEvidence_DonePickingPatch.Prefix-2-CardChoice.RPCA_DonePicking]	the game runs this Harmony patch method on CardDrawEvidence.cs:CardDrawEvidence_DonePickingPatch.Prefix#2(CardChoice.RPCA_DonePicking): the call is Harmony's, not the source's, so the end cannot be resolved from source. The complete traversal (fix pass 5) reaches it through the reference rule, whose receiver of an instance member is not resolved (more paths, never fewer). The control pins the patch class and its Harmony attribute in source; Harmony's application at load is not proven here
 unresolved	harmony:CardDrawEvidence.cs:CardDrawEvidence_EndPickPatch.Prefix#1(CardChoice.RPCA_DoEndPick)	backend/tests/test_keybind_surfaces.py::test_h1_fix5_each_unresolved_end_is_pinned_in_source[harmony-CardDrawEvidence.cs-CardDrawEvidence_EndPickPatch.Prefix-1-CardChoice.RPCA_DoEndPick]	the game runs this Harmony patch method on CardDrawEvidence.cs:CardDrawEvidence_EndPickPatch.Prefix#1(CardChoice.RPCA_DoEndPick): the call is Harmony's, not the source's, so the end cannot be resolved from source. The complete traversal (fix pass 5) reaches it through the reference rule, whose receiver of an instance member is not resolved (more paths, never fewer). The control pins the patch class and its Harmony attribute in source; Harmony's application at load is not proven here
@@ -70774,6 +70943,7 @@ unresolved	harmony:PoisonSync.cs:SawPointEvidencePatch.Before(Saw.Update)	backen
 unresolved	harmony:ProximityVictimPatches.cs:DealDamageToPlayerFreshVictimPatch.BeforeGo#1(DealDamageToPlayer.Go)	backend/tests/test_keybind_surfaces.py::test_h1_fix5_each_unresolved_end_is_pinned_in_source[harmony-ProximityVictimPatches.cs-DealDamageToPlayerFreshVictimPatch.BeforeGo-1-DealDamageToPlayer.Go]	the game runs this Harmony patch method on ProximityVictimPatches.cs:DealDamageToPlayerFreshVictimPatch.BeforeGo#1(DealDamageToPlayer.Go): the call is Harmony's, not the source's, so the end cannot be resolved from source. The complete traversal (fix pass 5) reaches it through the reference rule, whose receiver of an instance member is not resolved (more paths, never fewer). The control pins the patch class and its Harmony attribute in source; Harmony's application at load is not proven here
 unresolved	harmony:ProximityVictimPatches.cs:StunPlayerFreshVictimPatch.BeforeGo#2(StunPlayer.Go)	backend/tests/test_keybind_surfaces.py::test_h1_fix5_each_unresolved_end_is_pinned_in_source[harmony-ProximityVictimPatches.cs-StunPlayerFreshVictimPatch.BeforeGo-2-StunPlayer.Go]	the game runs this Harmony patch method on ProximityVictimPatches.cs:StunPlayerFreshVictimPatch.BeforeGo#2(StunPlayer.Go): the call is Harmony's, not the source's, so the end cannot be resolved from source. The complete traversal (fix pass 5) reaches it through the reference rule, whose receiver of an instance member is not resolved (more paths, never fewer). The control pins the patch class and its Harmony attribute in source; Harmony's application at load is not proven here
 unresolved	harmony:ProximityVictimPatches.cs:TeleportToOpponentFreshVictimPatch.BeforeGo#3(TeleportToOpponent.Go)	backend/tests/test_keybind_surfaces.py::test_h1_fix5_each_unresolved_end_is_pinned_in_source[harmony-ProximityVictimPatches.cs-TeleportToOpponentFreshVictimPatch.BeforeGo-3-TeleportToOpponent.Go]	the game runs this Harmony patch method on ProximityVictimPatches.cs:TeleportToOpponentFreshVictimPatch.BeforeGo#3(TeleportToOpponent.Go): the call is Harmony's, not the source's, so the end cannot be resolved from source. The complete traversal (fix pass 5) reaches it through the reference rule, whose receiver of an instance member is not resolved (more paths, never fewer). The control pins the patch class and its Harmony attribute in source; Harmony's application at load is not proven here
+unresolved	harmony:RoundPipClamp.cs:RoundCounterGetPointPosClampPatch.BeforeGetPointPos(RoundCounter.GetPointPos)	backend/tests/test_keybind_surfaces.py::test_h1_fix5_each_unresolved_end_is_pinned_in_source[harmony-RoundPipClamp.cs-RoundCounterGetPointPosClampPatch.BeforeGetPointPos-RoundCounter.GetPointPos]	the game runs this Harmony patch method on RoundPipClamp.cs:RoundCounterGetPointPosClampPatch.BeforeGetPointPos(RoundCounter.GetPointPos): the call is Harmony's, not the source's, so the end cannot be resolved from source. The complete traversal (fix pass 5) reaches it through the reference rule, whose receiver of an instance member is not resolved (more paths, never fewer). The control pins the patch class and its Harmony attribute in source; Harmony's application at load is not proven here
 unresolved	harmony:SeatEvidence.cs:SeatEvidence_RpcSendPatch.Postfix(?)	backend/tests/test_keybind_surfaces.py::test_h1_fix5_each_unresolved_end_is_pinned_in_source[harmony-SeatEvidence.cs-SeatEvidence_RpcSendPatch.Postfix]	the game runs this Harmony patch method on SeatEvidence.cs:SeatEvidence_RpcSendPatch.Postfix(?): the call is Harmony's, not the source's, so the end cannot be resolved from source. The complete traversal (fix pass 5) reaches it through the reference rule, whose receiver of an instance member is not resolved (more paths, never fewer). The control pins the patch class and its Harmony attribute in source; Harmony's application at load is not proven here
 unresolved	harmony:SpectatorPatches.cs:Spectator_BoundaryObserver_Patch.Postfix#3(MapManager.RPCA_CallInNewMapAndMovePlayers)	backend/tests/test_keybind_surfaces.py::test_h1_fix5_each_unresolved_end_is_pinned_in_source[harmony-SpectatorPatches.cs-Spectator_BoundaryObserver_Patch.Postfix-3-MapManager.RPCA_CallInNewMapAndMovePlayers]	the game runs this Harmony patch method on SpectatorPatches.cs:Spectator_BoundaryObserver_Patch.Postfix#3(MapManager.RPCA_CallInNewMapAndMovePlayers): the call is Harmony's, not the source's, so the end cannot be resolved from source. The complete traversal (fix pass 5) reaches it through the reference rule, whose receiver of an instance member is not resolved (more paths, never fewer). The control pins the patch class and its Harmony attribute in source; Harmony's application at load is not proven here
 unresolved	harmony:SpectatorPatches.cs:Spectator_EntryIsNotMatchFound_Patch.Prefix#23(NetworkConnectionHandler.OnPlayerEnteredRoom)	backend/tests/test_keybind_surfaces.py::test_h1_fix5_each_unresolved_end_is_pinned_in_source[harmony-SpectatorPatches.cs-Spectator_EntryIsNotMatchFound_Patch.Prefix-23-NetworkConnectionHandler.OnPlayerEnteredRoom]	the game runs this Harmony patch method on SpectatorPatches.cs:Spectator_EntryIsNotMatchFound_Patch.Prefix#23(NetworkConnectionHandler.OnPlayerEnteredRoom): the call is Harmony's, not the source's, so the end cannot be resolved from source. The complete traversal (fix pass 5) reaches it through the reference rule, whose receiver of an instance member is not resolved (more paths, never fewer). The control pins the patch class and its Harmony attribute in source; Harmony's application at load is not proven here
