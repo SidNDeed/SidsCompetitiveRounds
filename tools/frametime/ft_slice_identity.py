@@ -2,12 +2,14 @@
 
 Usage: python -I -B ft_slice_identity.py <out dir> <list of raw logs> [<list of exported slices>]
        python -I -B ft_slice_identity.py --sets   (prints the seat script's generated closed-set lines)
+       python -I -B ft_slice_identity.py --wcount <exported log lines>   (the seat self-test's window-count check)
 
 Each list file names one input per line. A raw log is a whole LogOutput.log (a VM-seat run or a dry fixture); an
 exported slice is a log-lines.txt the laptop job printed under the previous selection. For every input it builds
 the two exported sections twice:
   - OLD: the substring selection the seat script used before the rule ("=== log lines": every line holding
-    "[FRAME-TIME]" but the window lines; "=== component slice": every other line holding a class word);
+    "[FRAME-TIME]", the window lines included since ruling R6-A3.11.133 (2); "=== component slice": every other line
+    holding a class word);
   - NEW: frame_time_seat.ps1 -SliceOf <input>, the seat script's own selection code;
 then runs ft_parse.py on each, alone and as the peer of the first raw log, and compares stdout, stderr and exit code
 byte for byte (the old input's path read as the new one's). An exported slice first loses the seat job's own header
@@ -22,6 +24,7 @@ input. Exit 0 when every parse is identical and the sets agree, 1 otherwise, 2 o
 """
 import glob
 import hashlib
+import importlib.util
 import os
 import re
 import runpy
@@ -78,8 +81,8 @@ def old_export(lines):
         if not any(c in ln for c in CLASSES):
             continue
         if "[FRAME-TIME]" in ln:
-            if "[FRAME-TIME] w " not in ln:
-                log.append(ln)
+            # the window lines included: the seat script exports them since ruling R6-A3.11.133 (2)
+            log.append(ln)
         else:
             comp.append(ln)
     return "\n".join(["=== log lines"] + log + ["=== component slice"] + comp) + "\n"
@@ -140,7 +143,29 @@ def sets_agree():
     return bad
 
 
+def wcount(path):
+    """ft_parse.py's window-count rule (records_missing: per point, as many window lines as its point line's
+    windows=) on an exported "=== log lines" section, each line read by ft_parse.parse_line. The section's withheld
+    lines are not judged here (ft_parse.read refuses them before any record; the self-test checks them itself).
+    Prints "WCOUNT misses <k>" and then each miss of that rule."""
+    spec = importlib.util.spec_from_file_location("ft_parse_wcount", PARSE)
+    fp = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(fp)
+    recs = [r for r in (fp.parse_line(ln) for ln in lines_of(path)) if r is not None]
+    miss = [m for m in fp.records_missing(recs) if WCOUNT_MISS.fullmatch(m)]
+    print("WCOUNT misses %d" % len(miss))
+    for m in miss:
+        print(m)
+    return 0
+
+
+#  the miss records_missing() writes for a point whose window lines differ from its point line's windows=
+WCOUNT_MISS = re.compile(r"point \S+: [0-9]+ window lines, the point line counts \S+")
+
+
 def main():
+    if len(sys.argv) == 3 and sys.argv[1] == "--wcount":
+        return wcount(sys.argv[2])
     if sys.argv[1:] == ["--sets"]:
         # the generated lines, as the seat script carries them
         for k, v in derive_sets().items():

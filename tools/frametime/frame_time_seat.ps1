@@ -13,7 +13,7 @@ script refuses when that file is missing or names another digest. Six steps:
   3. a wait for "[FRAME-TIME] sitting complete" until its own deadline (TimeoutS minus 600 s), then a graceful quit,
      and a kill by the captured pid only when the game still runs 60 s later;
   4. in every outcome the sentinel removed, then printed in this order: the runs/<stamp> token (UTC), "=== log lines"
-     (the [FRAME-TIME] lines but the window lines, under the export rule), "=== saved slice" (the slice's class
+     (the [FRAME-TIME] lines, the window lines included, under the export rule), "=== saved slice" (the slice's class
      headers, METHOD-V4.md 3.11; the slice itself is saved whole in the run folder with its line count and sha256),
      "=== component slice" (the saved-slice lines that carry no [FRAME-TIME] tag, under the export rule: queue
      writes, builds, refusals, the component tags, the BepInEx banner; it sits after "=== log lines", so
@@ -63,8 +63,11 @@ same, and the wait throws) must print "RESTORE-PROOF FAILED", no ok line, and en
 cfg-like values holding each class word (the BaseUrl's startup line, the COMBAT-PERF probe mode, a route host): in
 every run that prints both sections no planted value may be printed, every form line must be exported in its section,
 and the withheld lines must be exactly the fixture's counts; export_all (every selected line exported, the old
-selection) is that check's negative control and must fail it. It prints SELFTEST PASS only when the clean run passes
-and every mutant behaves as wanted.
+selection) is that check's negative control and must fail it. The window lines ($SimWindow, as many as the point
+line's windows=) must be exported under "=== log lines", and ft_parse.py's window-count rule (records_missing, through
+ft_slice_identity.py --wcount) run on that section must find no miss; drop_w (the window lines skipped again, as before
+ruling R6-A3.11.133 (2)) must make that rule refuse on the windows= count. It prints SELFTEST PASS only when the clean
+run passes and every mutant behaves as wanted.
 -SliceOf <log> prints step 4's two exported sections for a log file ("=== log lines", "=== component slice") and
 exits 0 (2 when unreadable); it reads only, and is how ft_slice_identity.py proves the parse identity of the rule.
 -CfgKindList <file> prints CfgKind's verdict (RESTORED-KIND, NOT-RESTORED-KIND or REFUSED) as "CFG-KIND <n> <verdict>"
@@ -111,7 +114,9 @@ $script:RestoredEqual = 0
 # messages, peer-chosen text and every other free field have no placeholder, so a line carrying one matches no form.
 # Every other selected line is WITHHELD: never printed, only counted, as one "withheld <class> <n>" line per class
 # with n > 0 at the end of the section that would have printed it (a line holding two class words counts in both).
-# The FrameTime window lines ("[FRAME-TIME] w ") are not exported at all and are not counted as withheld.
+# The FrameTime window lines ("[FRAME-TIME] w ") are exported under the same rule, by their own form (ruling
+# R6-A3.11.133 (2): the laptop's window widths are unidentifiable without them); a window line that matches no form is
+# withheld and counted like any other.
 $FormSets = [ordered]@{
     # generated from the source tables (ft_slice_identity.py --sets prints these lines, and its identity run refuses a
     # difference): gate_specs/entries.py (entry, shape), gate_specs/a3.py (a3k), every class named *Patch in
@@ -203,6 +208,11 @@ $FormText = @(
     '[FRAME-TIME] census registered=<u> expected=<u> missing=<u> duplicates=<u>'
     '[FRAME-TIME] between g=<n> after=<=ON|OFF|> ticks=<n> calls=<n>'
     '[FRAME-TIME] p pt=<pt> arm=<=ON|OFF> gate=<b> pred=<=none|ON|OFF> n=<n> sF=<n> sS=<n> sC=<n> maxF=<n> pn=<n> psF=<n> psS=<n> psC=<n> sP=<n> psP=<n> excl=<n> plant_mixed=<n> windows=<n> live_frames=<n> missing_end=<n> span_g=<n> span_gn=<n> span_u=<n> span_un=<n> on_calls=<n> guarded=<n> zs=<n> zl=<n> t0=<n> t1=<n> answer=<=replay|unmeasured>'
+    # the window line (B11 SHARED.md "The window line"): the fields the line printed before, in place, then the
+    # per-window record; <wplant> and <wpartial> are the contract's second plant= and partial=, optional
+    '[FRAME-TIME] w pt=<pt> arm=<=ON|OFF> plant=<b> partial=<b> n=<n> sF=<n> sS=<n> sC=<n> sP=<n> maxF=<n><wfull> gc=<n> run=<u> pos=<=1|2|3|4> unit=<=P13|P24> coin=<b> wi=<u> f0=<n> pred=<=ON|OFF|none><wplant> res=<b><wpartial> gcn=<u> cG=<cg> cW=<n> cR=<n> cS=<n> cE=<n> q=<n10> r=<n10> qn=<u10> wu=<wu> tok=<tok>'
+    # the window line of the lane's earlier builds (the identity corpus), which ended at gc=
+    '[FRAME-TIME] w pt=<pt> arm=<=ON|OFF> plant=<b> partial=<b> n=<n> sF=<n> sS=<n> sC=<n> sP=<n> maxF=<n><wfull> gc=<n>'
     '[FRAME-TIME] heavy g=<n> op=<@op> live=<n> between=<n> pick=<n> over=<n> menu=<n> at_call=<n> edge=<n> off=<n>'
     '[FRAME-TIME] offthread g=<n> span_off=<n> hash_t0=<n> hash_t1=<n>'
     '[FRAME-TIME] menu_wait input=<input>'
@@ -291,6 +301,16 @@ $FormPh.producers = '(?: ' + (FormSet 'producer') + ')*'
 $FormPh.ichooks = '(?:' + (FormList 'ichook' ', ') + ')?'
 $FormPh.ours = '(?:[0-9]{1,4})?'
 $FormPh.plines = '(?: lines=[0-9]{1,4})?'
+$FormPh.wfull = '(?: medF=-?[0-9]{1,19} e4=-?[0-9]{1,19},-?[0-9]{1,19} e8=-?[0-9]{1,19},-?[0-9]{1,19} e16=-?[0-9]{1,19},-?[0-9]{1,19})?'
+$FormPh.wplant = '(?: plant=[01])?'
+$FormPh.wpartial = '(?: partial=[01])?'
+$FormPh.cg = '(?:-?[0-9]{1,19}|NA)'
+$FormPh.n10 = '(?:-?[0-9]{1,19},){9}-?[0-9]{1,19}'
+$FormPh.u10 = '(?:[0-9]{1,19},){9}[0-9]{1,19}'
+$FormPh.tok = '(?:-?[0-9]{1,19},){6}-?[0-9]{1,19}'
+# wu: type:units:cycles per writer scope, ";"-joined; the type is a token of the closed set op (the scopes that run
+# collector work off the main thread, B3); an empty wu is a window with no writer work
+$FormPh.wu = '(?:' + (FormSet 'op') + ':[0-9]{1,19}:-?[0-9]{1,19}(?:;' + (FormSet 'op') + ':[0-9]{1,19}:-?[0-9]{1,19})*)?'
 $FormPh.ver = '[0-9]{1,4}(?:\.[0-9]{1,4}){1,3}'
 $FormPh.date = '[0-9]{1,4}[/.-][0-9]{1,4}[/.-][0-9]{1,4} [0-9]{1,2}:[0-9]{2}:[0-9]{2}(?: [AP]M)?'
 $FormPrefix = '\[(?:Info   |Message|Warning|Error  |Debug  |Fatal  ):(?:Competitive ROUNDS|CompetitiveRounds)\] '
@@ -327,7 +347,7 @@ function Exportable([string]$ln) {
 
 function SliceExport([string[]]$lines) {
     # the selection and the export of step 4, on the log's lines: Slice (every selected line, for slice.log), Count
-    # (per class), Log (the "=== log lines" section's lines: exported [FRAME-TIME] lines, no window line, then its
+    # (per class), Log (the "=== log lines" section's lines: exported [FRAME-TIME] lines, window lines included, then its
     # withheld counts), Comp (the component slice's exported lines, then its withheld counts) and CompAll (the number
     # of selected lines without [FRAME-TIME])
     $r = @{ Slice = New-Object System.Collections.Generic.List[string]; Count = [ordered]@{}
@@ -340,7 +360,8 @@ function SliceExport([string[]]$lines) {
         foreach ($cls in $hit) { $r.Count[$cls]++ }
         $r.Slice.Add($ln)
         $ft = $ln.Contains('[FRAME-TIME]')
-        if ($ft -and $ln.Contains('[FRAME-TIME] w ')) { continue }
+        # the self-test's drop_w mutant restores the skip the window lines had before ruling R6-A3.11.133 (2)
+        if ($script:Mutant -eq 'drop_w' -and $ft -and $ln.Contains('[FRAME-TIME] w ')) { continue }
         if (-not $ft) { $r.CompAll++ }
         if (Exportable $ln) { if ($ft) { $r.Log.Add($ln) } else { $r.Comp.Add($ln) } }
         else { foreach ($cls in $hit) { if ($ft) { $wLog[$cls]++ } else { $wComp[$cls]++ } } }
@@ -505,7 +526,7 @@ function Step4($C, $p) {
     foreach ($cls in $SliceClasses) { Say ("slice class {0}: {1} lines" -f $cls.Trim('[', ']'), $count[$cls]) }
     Say ("slice saved: {0} lines, sha256 {1}" -f $slice.Count, (Sha $sp))
     # the component evidence itself (3.11): the saved-slice lines without [FRAME-TIME] that the export rule admits
-    # (the [FRAME-TIME] lines are under "=== log lines" already; the window lines stay in slice.log on the laptop, F05)
+    # (the [FRAME-TIME] lines, the window lines among them, are under "=== log lines" already)
     if ($script:Mutant -ne 'no_component_slice') {
         Say '=== component slice'
         $nw = @($sel.Comp | Where-Object { $_.StartsWith('withheld ') }).Count
@@ -679,7 +700,7 @@ $CfgCases = [ordered]@{
 }
 
 # the self-test's LogOutput.log of the sitting (F2): [FRAME-TIME] lines and one line per other class in the forms the
-# mod writes (each must be exported in its section), a window line (never exported), lines of the classes no form
+# mod writes (each must be exported in its section), the point's window lines (exported), lines of the classes no form
 # admits (each withheld), and planted cfg-like values holding each class word, the BaseUrl's startup line, the
 # COMBAT-PERF probe mode and a route host among them (each withheld: no ".example" may be printed anywhere)
 $SimPre = '[Info   :CompetitiveRounds] '
@@ -687,7 +708,14 @@ $SimFt = @(
     ($SimPre + '[FRAME-TIME] settled g=-1 seed=1 c_plant=-1 W=120 vsync=0 target=-1 freq=10000000 hires=1 f_hat=2978789260 gc_incremental=1 gc_slice_ns=3000000 f18=A answer=replay armfile=1 force=none clock=1 frames=0 missing_end=0 cycle_failures=0 span_depth_violations=0'),
     ($SimPre + '[FRAME-TIME] p pt=1.1.1 arm=ON gate=0 pred=none n=500 sF=1 sS=1 sC=1 maxF=1 pn=0 psF=0 psS=0 psC=0 sP=1 psP=0 excl=0 plant_mixed=0 windows=4 live_frames=501 missing_end=0 span_g=0 span_gn=0 span_u=0 span_un=0 on_calls=0 guarded=0 zs=0 zl=1 t0=1 t1=2 answer=replay'),
     ($SimPre + '[FRAME-TIME] refusals why=quit pairs=2 closing:e=1 route:GET_192.168.72.102/api/{n}/mod-version=1'))
-$SimWindow = @($SimPre + '[FRAME-TIME] w pt=1.1.1 arm=ON plant=0 partial=0 n=120')
+# the point's four window lines (its p line counts windows=4), each exported: full and partial, cG measured and NA, a
+# wu with scopes and an empty one, and both readings of the contract's repeated plant= and partial=
+$SimWTail = ' q=5,-1,0,0,0,0,0,0,0,7 r=1,0,0,0,0,0,0,0,0,2 qn=12,12,12,12,12,12,12,12,12,12'
+$SimWindow = @(
+    ($SimPre + '[FRAME-TIME] w pt=1.1.1 arm=ON plant=0 partial=0 n=120 sF=9 sS=1 sC=11 sP=0 maxF=4 medF=1 e4=0,1 e8=0,0 e16=0,0 gc=0 run=0 pos=1 unit=P13 coin=1 wi=0 f0=12 pred=none plant=0 res=0 partial=0 gcn=0 cG=NA cW=0 cR=3 cS=0 cE=0' + $SimWTail + ' wu=ce_build:2:340;spool:1:90 tok=0,1,0,1,0,0,1'),
+    ($SimPre + '[FRAME-TIME] w pt=1.1.1 arm=OFF plant=0 partial=0 n=120 sF=9 sS=1 sC=11 sP=0 maxF=4 medF=1 e4=0,1 e8=0,0 e16=0,0 gc=1 run=0 pos=2 unit=P24 coin=0 wi=1 f0=132 pred=ON plant=0 res=0 partial=0 gcn=1 cG=812 cW=0 cR=3 cS=0 cE=0' + $SimWTail + ' wu= tok=1,1,1,1,1,0,1'),
+    ($SimPre + '[FRAME-TIME] w pt=1.1.1 arm=OFF plant=0 partial=0 n=120 sF=9 sS=1 sC=11 sP=0 maxF=4 medF=1 e4=0,1 e8=0,0 e16=0,0 gc=0 run=0 pos=3 unit=P13 coin=1 wi=2 f0=252 pred=OFF res=0 gcn=0 cG=0 cW=0 cR=3 cS=0 cE=0' + $SimWTail + ' wu=pump:1:12 tok=2,2,1,2,1,0,2'),
+    ($SimPre + '[FRAME-TIME] w pt=1.1.1 arm=ON plant=0 partial=1 n=30 sF=3 sS=1 sC=4 sP=0 maxF=4 gc=0 run=0 pos=4 unit=P24 coin=0 wi=3 f0=372 pred=OFF plant=0 res=0 partial=1 gcn=0 cG=NA cW=0 cR=1 cS=0 cE=0 q=2,1,0,0,0,0,0,0,0,0 r=1,0,0,0,0,0,0,0,0,0 qn=12,12,6,0,0,0,0,0,0,0 wu= tok=3,3,1,3,1,0,3'))
 $SimForm = @(
     '[Message:   BepInEx] BepInEx 5.4.22.0 - ROUNDS (11/10/2026 7:38:18 AM)',
     ($SimPre + '[FPSCAP] held by frame-time calibration'),
@@ -709,7 +737,9 @@ $SimNoForm = @(
 $SimPlant = @($SliceClasses | ForEach-Object { $SimPre + 'API client initialized: https://' + $_ + '.example:8444' }) + @(
     ($SimPre + '[COMBAT-PERF] probe on, mode https://refused.example, windows of 600 frames'),
     ($SimPre + '[FRAME-TIME] refused what=route route=GET_refused.example/api/{n}/mod-version n=1'),
-    ($SimPre + '[FRAME-TIME] refusals why=quit pairs=1 route:GET_voided.example/api/{n}/mod-version=1'))
+    ($SimPre + '[FRAME-TIME] refusals why=quit pairs=1 route:GET_voided.example/api/{n}/mod-version=1'),
+    # a window line whose writer type is no token of the closed set (of another point, so no window count moves)
+    ($SimPre + '[FRAME-TIME] w pt=1.1.2 arm=ON plant=0 partial=1 n=30 sF=3 sS=1 sC=4 sP=0 maxF=4 gc=0 run=1 pos=1 unit=P13 coin=1 wi=4 f0=0 pred=none res=0 gcn=0 cG=NA cW=0 cR=1 cS=0 cE=0 q=2,1,0,0,0,0,0,0,0,0 r=1,0,0,0,0,0,0,0,0,0 qn=12,12,6,0,0,0,0,0,0,0 wu=planted.example:1:1 tok=0,0,0,0,0,0,0'))
 # F1's combined cases: VR6 fails and the restore fails; each must end exit 5 with "RESTORE-PROOF FAILED"
 $RestoreFailCases = @('cfg_restore_locked', 'log_restore_fails', 'wait_restore_fails')
 $CfgLocked = @{ Bom = $true; Lines = (CfgEdit 12 0 @("## a comment line the sitting wrote`r`n")); Want = 'RESTORED-KIND' }
@@ -787,7 +817,7 @@ function SelfTestOne([string]$root, [string]$mutant) {
     if ($iL -ge 0 -and $iS -gt $iL + 1) { $secLog = @($o[($iL + 1)..($iS - 1)]) }
     if ($iC -ge 0 -and $iV -gt $iC + 1) { $secComp = @($o[($iC + 1)..($iV - 1)] | Where-Object { $_ -notlike 'component slice: *' }) }
     $planted = @($o | Where-Object { $_.Contains('.example') }).Count
-    $formOut = @(@($SimFt) + @($SimForm) | Where-Object { $sec = if ($_.Contains('[FRAME-TIME]')) { $secLog } else { $secComp }; -not ($sec -ccontains $_) }).Count
+    $formOut = @(@($SimFt) + @($SimWindow) + @($SimForm) | Where-Object { $sec = if ($_.Contains('[FRAME-TIME]')) { $secLog } else { $secComp }; -not ($sec -ccontains $_) }).Count
     $wantW = @()
     foreach ($sec in @('log', 'comp')) {
         foreach ($cls in $SliceClasses) {
@@ -803,7 +833,25 @@ function SelfTestOne([string]$root, [string]$mutant) {
     $order = $iTok -eq 0 -and $iTok -lt $iLog -and $iLog -lt $iSav -and $iSav -lt $iVr6 -and $iVr6 -lt $iRes
     $headers = @($o | Where-Object { $_ -like 'slice class *' }).Count -eq $SliceClasses.Count
     $allSeen = @($o | Where-Object { $_ -like 'slice class *: 0 lines' }).Count -eq 0
-    $noWindow = @($o | Where-Object { $_.Contains('[FRAME-TIME] w ') }).Count -eq 0
+    # the window lines: exactly the fixture's, in "=== log lines" only, as many as the point line's windows=
+    $wIn = @($secLog | Where-Object { $_.Contains('[FRAME-TIME] w ') })
+    $wAll = @($o | Where-Object { $_.Contains('[FRAME-TIME] w ') })
+    $windowsOk = $wIn.Count -eq $SimWindow.Count -and $wAll.Count -eq $wIn.Count -and
+        @($SimWindow | Where-Object { -not ($wIn -ccontains $_) }).Count -eq 0
+    # the parse's window-count rule (ft_parse.py records_missing, through ft_slice_identity.py --wcount) on the
+    # exported log section: the "point <pt>: <n> window lines, the point line counts <k>" misses; -1 when it did not run
+    $wMiss = -1; $wLines = ''
+    if ($secLog.Count) {
+        $lf = Join-Path $root 'log-lines.txt'
+        [System.IO.File]::WriteAllLines($lf, [string[]]$secLog, (New-Object System.Text.UTF8Encoding($false)))
+        try {
+            $wo = @(& python -I -B (Join-Path $PSScriptRoot 'ft_slice_identity.py') --wcount $lf | ForEach-Object { [string]$_ })
+            $hd = @($wo | Where-Object { $_ -match '^WCOUNT misses [0-9]+$' })
+            if ($LASTEXITCODE -eq 0 -and $hd.Count -eq 1) { $wMiss = [int]($hd[0].Substring(14)) }
+            $wLines = (@($wo | Where-Object { $_ -notmatch '^WCOUNT misses ' }) -join ' | ')
+        }
+        catch { $wLines = 'wcount error: ' + $_.Exception.Message }
+    }
     # the component section: after the class headers, before VR6, non-empty, one line at least per non-FRAME-TIME
     # class, and no [FRAME-TIME] line in it
     $compLines = @()
@@ -827,7 +875,8 @@ function SelfTestOne([string]$root, [string]$mutant) {
     $kinds = @($o | Where-Object { $_ -like 'kept cfg kind *' } | ForEach-Object { $_.Substring(14) })
     $cfgRestored = (Sha $C.Cfg) -eq $p.Cfg -and @($o | Where-Object { $_ -like 'restored cfg * equal' }).Count -eq 1
     return @{ Vr6 = $(if ($st) { $st.V } else { $false }); Restored = $(if ($st) { $st.R } else { $false }) -and $restoredAll
-        Order = $order; Headers = $headers; AllSeen = $allSeen; NoWindow = $noWindow; Lane = $p.LaneOk; Component = $component
+        Order = $order; Headers = $headers; AllSeen = $allSeen; Windows = $windowsOk; WIn = $wIn.Count; WMiss = $wMiss
+        WLines = $wLines; Lane = $p.LaneOk; Component = $component
         Shutdown = $shut; SentinelGone = $sentinelGone; Threw = $threw; Code = $(if ($st) { $st.Code } else { 'none' })
         KeptLines = $keptShas.Count; KeptSha = $(if ($keptShas.Count) { $keptShas[0] } else { '' })
         Vr6CfgAfter = $(if ($vr6Cfg.Count) { $vr6Cfg[0] } else { '' }); KeptErr = $keptErr; KeptFile = (Sha $keep)
@@ -864,13 +913,15 @@ if ($CfgKindList -ne '') {
 if ($SelfTest) {
     $base = Join-Path ([System.IO.Path]::GetTempPath()) ('ft-seat-selftest-' + (Get-Date).ToUniversalTime().ToString('yyyyMMddHHmmss'))
     $fail = @()
-    foreach ($m in (@('none', 'keep_prev_copy', 'closing_file', 'no_component_slice', 'throw_in_wait', 'throw_in_step4', 'export_all') +
+    foreach ($m in (@('none', 'keep_prev_copy', 'closing_file', 'no_component_slice', 'throw_in_wait', 'throw_in_step4', 'export_all', 'drop_w') +
             @($CfgCases.Keys) + @($RestoreFailCases))) {
         Print "=== self-test run: mutant $m"
         $r = SelfTestOne (Join-Path $base $m) $m
-        Print ("self-test {0}: order {1}, slice headers {2}, every class seen {3}, no window line {4}, lane {5}, VR6 {6}, component slice {7}, shutdown {8}, sentinel removed {9}, restored {10}, exit code {11}, threw '{12}'" -f
-            $m, $r.Order, $r.Headers, $r.AllSeen, $r.NoWindow, $r.Lane, $r.Vr6, $r.Component, $r.Shutdown, $r.SentinelGone,
+        Print ("self-test {0}: order {1}, slice headers {2}, every class seen {3}, window lines exported {4}, lane {5}, VR6 {6}, component slice {7}, shutdown {8}, sentinel removed {9}, restored {10}, exit code {11}, threw '{12}'" -f
+            $m, $r.Order, $r.Headers, $r.AllSeen, $r.Windows, $r.Lane, $r.Vr6, $r.Component, $r.Shutdown, $r.SentinelGone,
             $r.Restored, $r.Code, $r.Threw)
+        Print ("self-test {0} windows: {1} window lines under '=== log lines', the parse's window-count misses {2} ({3})" -f
+            $m, $r.WIn, $r.WMiss, $r.WLines)
         Print ("self-test {0} cfg: kept cfg lines {1} ({2}), VR6 after {3}, kept cfg errors {4}, sitting cfg {5}, comment lines only {6}, cfg restored {7}, kind lines {8} ({9})" -f
             $m, $r.KeptLines, $r.KeptSha, $r.Vr6CfgAfter, $r.KeptErr, $r.KeptFile, $r.ByKind, $r.CfgRestored, $r.KindLines, $r.Kind)
         Print ("self-test {0} restore proof: ok lines {1} (n {2}), FAILED lines {3}, equal lines {4}; export: planted values printed {5}, form lines missing {6}, withheld as wanted {7} ({8})" -f
@@ -893,17 +944,27 @@ if ($SelfTest) {
         }
         # the export rule (F2), in every run whose step 4 prints both sections: nothing planted printed, every form line
         # exported, and the withheld counts exactly the fixture's
-        if ($m -notin @('throw_in_step4', 'no_component_slice', 'export_all')) {
+        if ($m -notin @('throw_in_step4', 'no_component_slice', 'export_all', 'drop_w')) {
             if ($r.Planted -ne 0) { $fail += "mutant ${m}: $($r.Planted) printed lines carry a planted value" }
             if ($r.FormMissing -ne 0) { $fail += "mutant ${m}: $($r.FormMissing) form lines not exported" }
             if (-not $r.WithheldOk) { $fail += "mutant ${m}: the withheld counts are not the fixture's ($($r.Withheld))" }
         }
-        $full = $r.Order -and $r.Headers -and $r.AllSeen -and $r.NoWindow
+        # every run whose step 4 prints the log section, export_all included (its window lines are the same): the
+        # parse's window-count rule finds no miss
+        if ($m -notin @('throw_in_step4', 'drop_w') -and $r.WMiss -ne 0) { $fail += "mutant ${m}: the parse's window-count rule gave $($r.WMiss) misses, not 0 ($($r.WLines))" }
+        $full = $r.Order -and $r.Headers -and $r.AllSeen -and $r.Windows
         switch ($m) {
             'export_all' {
                 # the negative control of the export rule: every selected line exported, as the substring selection did
                 if ($r.Planted -eq 0) { $fail += 'mutant export_all: no planted value printed (control FAILED)' }
                 if ($r.WithheldOk) { $fail += 'mutant export_all: the withheld counts still match (control FAILED)' }
+            }
+            'drop_w' {
+                # the negative control of the window export: the skip restored, so no window line leaves and the parse
+                # refuses on the point line's windows= count; the rest of the run is the clean one's
+                if ($r.WIn -ne 0) { $fail += "mutant drop_w: $($r.WIn) window lines exported (control FAILED)" }
+                if ($r.WMiss -ne 1 -or $r.WLines -notmatch '^point 1\.1\.1: 0 window lines, the point line counts 4$') { $fail += "mutant drop_w: the parse's window-count misses $($r.WMiss) ($($r.WLines)), not the one refusal on windows=4 (control FAILED)" }
+                if (-not ($r.Order -and $r.Headers -and $r.AllSeen -and $r.Vr6 -and $r.Component) -or $r.Code -ne 0) { $fail += 'mutant drop_w: order, headers, VR6, component slice or exit code differ from the clean run' }
             }
             { $_ -in $RestoreFailCases } { }
             'none' {
