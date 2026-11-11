@@ -811,7 +811,7 @@ REDRIVE = [
     "if (!FfaLateEntry.MasterMaySend() || pointLatched || isTransitioning) return;",
     "LimitlessFence.NoteFfaPointScheduled();", "pointLatched = true;", "ResolvePointNow(gm);",
 ]
-SWITCH = [
+SETTLED = [
     "LimitlessFence.NoteMasterSwitched(newMasterClient);", "FfaMapScale.OnMasterClientSwitched();",
     "FfaMode.OnMasterClientSwitched();", "FfaLateEntry.OnMasterSwitched(newMasterClient);",
     'SpectatorSync.LeaveToMenu("no fighter to hold master");',
@@ -826,7 +826,7 @@ def claim_the_new_master_redrives(files):
     and its latch."""
     out = []
     if not _in_order(_code(files["Plugin.cs"], "public void OnMasterClientSwitched(Photon.Realtime.Player newMasterClient)"),
-                     SWITCH):
+                     SETTLED):
         out.append("the re-drive does not run once the master is settled")
     if _first(_code(files[LF], "internal static void RedriveAfterHandoff(")) != \
             "if (newMaster == null || !newMaster.IsLocal || !RecordOpen || !FfaMode.EngineActive()) return;":
@@ -924,7 +924,7 @@ MUTANTS = [
     ("handoff_first", "the switch notes the handoff after the map-scale ticket",
      [("Plugin.cs", SWITCH, ""), ("Plugin.cs", MAPSCALE, MAPSCALE + SWITCH)]),
     ("handoff_first", "the switch raises no count", _drop(LF, COUNT)),
-    ("handoff_first", "the count rises after the mint", [(LF, COUNT + MINT_CALL, MINT_CALL + COUNT)]),
+    ("handoff_first", "the count rises after the mint", [(LF, COUNT, ""), (LF, MINT_CALL, MINT_CALL + COUNT)]),
     ("adoption_from_relay", "the mint adopts its own value",
      [(LF, MINT_LOG, "                _ledger.AdoptRelayed(current);\n" + MINT_LOG)]),
     ("adoption_from_relay", "the start adopts a value it made",
