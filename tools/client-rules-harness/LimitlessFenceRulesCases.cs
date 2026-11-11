@@ -39,6 +39,7 @@ namespace CompetitiveRounds
             internal Func<R.FenceRecord, bool, IList<int>, R.FenceRecord> NextSendRecord = R.NextSendRecord;
             internal Func<bool, bool, bool> SeriesFollows = R.SeriesFollows;
             internal Func<string, bool, bool, bool> RatedForSeries = R.RatedForSeries;
+            internal Func<bool, bool, bool> RedriveSendsPoint = R.RedriveSendsPoint;
             internal Func<R.FencePhase, bool, R.FencePhase> NextState = R.NextState;
             internal Func<bool, R.FencePhase, bool, bool> RefuseRawRound = R.RefuseRawRound;
             internal Func<R.FenceRecord, int[], int[], int, object[]> Encode = R.EncodeRecord;
@@ -328,6 +329,9 @@ namespace CompetitiveRounds
             add("rated: the toggle adds to another room", f.RatedForSeries("7f3a", false, true));
             add("rated: a prefix counts only at the start", !f.RatedForSeries("x_ranked_7f3a", false, false));
             add("rated: no room decides closed", f.RatedForSeries(null, false, false) && f.RatedForSeries("", false, false));
+            add("redrive: with no latch the point is sent", f.RedriveSendsPoint(false, false) && f.RedriveSendsPoint(false, true));
+            add("redrive: a latch whose send has not run is sent by the new master", f.RedriveSendsPoint(true, true));
+            add("redrive: a latch whose send ran stays", !f.RedriveSendsPoint(true, false));
             add("MaySend: master, live gid, open record, same epoch and handoff count", f.MaySend(true, true, false, 4, 4, 2, 2));
             add("MaySend: a seat that is no longer master refuses", !f.MaySend(false, true, false, 4, 4, 2, 2));
             add("MaySend: a gid that is not live refuses", !f.MaySend(true, false, false, 4, 4, 2, 2));
@@ -752,6 +756,15 @@ namespace CompetitiveRounds
             Control(r, "a prefix counts anywhere",
                     Cases(new Fns { RatedForSeries = (n, ff, t) => R.RatedForSeries(n, ff, t) || (n != null && n.Contains("ranked_")) }),
                     "rated: a prefix counts only at the start");
+            Control(r, "the re-drive keeps every latch",
+                    Cases(new Fns { RedriveSendsPoint = (l, p) => !l }),
+                    "redrive: a latch whose send has not run is sent by the new master");
+            Control(r, "the re-drive ignores the latch",
+                    Cases(new Fns { RedriveSendsPoint = (l, p) => true }),
+                    "redrive: a latch whose send ran stays");
+            Control(r, "the re-drive reads the pending mark alone",
+                    Cases(new Fns { RedriveSendsPoint = (l, p) => p }),
+                    "redrive: with no latch the point is sent");
             Control(r, "the frame is never set",
                     Cases(new Fns { RunInFrame = (g, s, v, call) => call() }),
                     "frame: inside an RPC's frame the call sees its own, and the RPC's comes back",

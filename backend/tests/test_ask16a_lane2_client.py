@@ -161,6 +161,9 @@ FENCE_RULES = (
     'rated: the toggle adds to another room',
     'rated: a prefix counts only at the start',
     'rated: no room decides closed',
+    'redrive: with no latch the point is sent',
+    'redrive: a latch whose send has not run is sent by the new master',
+    'redrive: a latch whose send ran stays',
     "snapshot: a spectator's 18 fields stay, the late tail's place is padded, and the record takes [28]-[35]",
     "snapshot: a late snapshot's tail stays at [18]-[27], and the record follows it",
     'snapshot: the gid round-trips',
@@ -242,6 +245,9 @@ FENCE_MUTANTS = (
     'cr_ff is not read',
     'no room decides open',
     'a prefix counts anywhere',
+    'the re-drive keeps every latch',
+    'the re-drive ignores the latch',
+    'the re-drive reads the pending mark alone',
     "the snapshot's record skips the late tail's place",
     'the snapshot always reads a record',
     'the base results give no ace',
@@ -291,7 +297,7 @@ def test_the_fence_suite_ran_exactly_its_cases_and_passed(harness_run):
 
 
 def test_the_pinned_names_are_distinct():
-    assert len(set(FENCE_CASES)) == len(FENCE_CASES) == 157 + 64 + 11 + 8
+    assert len(set(FENCE_CASES)) == len(FENCE_CASES) == 160 + 67 + 11 + 8
 
 
 # -- the fence's Unity- and Photon-side lines, as source claims --------------
@@ -707,7 +713,7 @@ def claim_the_ffa_round_send(files):
     ffa, lf = files["FfaMode.cs"], files[LF]
     if not _in_order(_code(ffa, "public static void HandlePlayerDied(GM_ArmsRace gm)"), [
             "if (!FfaLateEntry.MasterMaySend() || pointLatched || isTransitioning) return;",
-            "LimitlessFence.NoteFfaPointScheduled();", "pointLatched = true;", 'StartCoroutine(LimitlessFence.ResumableItem(ResolvePointEndOfFrame(gm), "ffa point"));']):
+            "LimitlessFence.NoteFfaPointScheduled();", "pointLatched = true;", 'StartCoroutine(LimitlessFence.ResumableItem(ResolvePointEndOfFrame(gm, scheduled), "ffa point"));']):
         out.append("the point is not captured where it is scheduled")
     if not _in_order(_code(ffa, "private static void ResolvePointNow(GM_ArmsRace gm)"), [
             "try { FfaMapScale.MasterPublishCount(FfaLateEntry.PointK + 1); } catch { }",
@@ -927,7 +933,7 @@ REDRIVE = [
     "if (gm == null || gameOverFired || GameManager.instance == null || !GameManager.instance.battleOngoing) return;",
     "if (FfaLateEntry.LocalSitsOut() || RoomActors.LocalIsSpectator) return;",
     "if (AlivePlayers().Count > 1) return;",
-    "if (!FfaLateEntry.MasterMaySend() || pointLatched || isTransitioning) return;",
+    "if (!FfaLateEntry.MasterMaySend() || isTransitioning) return;",
     "LimitlessFence.NoteFfaPointScheduled();", "pointLatched = true;", "ResolvePointNow(gm);",
 ]
 SETTLED = [
@@ -942,7 +948,8 @@ def claim_the_new_master_redrives(files):
     """4.6: FFA after a master change. Once the master is settled, the new
     master re-drives a pending point through the fence's sender while a
     record is live or terminating, with HandlePlayerDied's gates, its capture
-    and its latch."""
+    and its latch. The latch's gate is RedriveSendsPoint's (R1 HIGH 2; the
+    claim point_ticket)."""
     out = []
     if not _in_order(_code(files["Plugin.cs"], "public void OnMasterClientSwitched(Photon.Realtime.Player newMasterClient)"),
                      SETTLED):
@@ -952,6 +959,36 @@ def claim_the_new_master_redrives(files):
         out.append("the re-drive is not the new master's, in FFA, with a record open")
     if not _in_order(_code(files["FfaMode.cs"], "internal static void RedrivePendingPoint(GM_ArmsRace gm)"), REDRIVE):
         out.append("the re-drive does not keep HandlePlayerDied's gates, the capture and the latch")
+    return out
+
+
+def claim_one_send_per_point(files):
+    """4.6 at a handoff (R1 HIGH 2). Each point HandlePlayerDied schedules
+    marks its send pending and carries a ticket. The deferred resolution reads
+    its ticket after its yield, and ResolvePointNow clears the mark before
+    anything else. The new master's re-drive reads the latch and the mark
+    through RedriveSendsPoint, retires the ticket still waiting, then sends.
+    Each reset of the latch outside the send clears the mark too."""
+    out = []
+    ffa = files["FfaMode.cs"]
+    if not _in_order(_code(ffa, "public static void HandlePlayerDied(GM_ArmsRace gm)"),
+                     ["pointLatched = true;", "pointSendPending = true;", "int scheduled = ++pointTicket;",
+                      "ResolvePointEndOfFrame(gm, scheduled)"]):
+        out.append("a scheduled point carries no ticket or no pending mark")
+    if not _in_order(_code(ffa, "private static IEnumerator ResolvePointEndOfFrame(GM_ArmsRace gm, int ticket)"),
+                     ["yield return new WaitForEndOfFrame();", "if (ticket != pointTicket) yield break;", "ResolvePointNow(gm);"]):
+        out.append("the deferred resolution does not read its ticket after its yield")
+    if _first(_code(ffa, "private static void ResolvePointNow(GM_ArmsRace gm)")) != "pointSendPending = false;":
+        out.append("the send does not clear its pending mark first")
+    if not _in_order(_code(ffa, "internal static void RedrivePendingPoint(GM_ArmsRace gm)"),
+                     ["if (!LimitlessFenceRules.RedriveSendsPoint(pointLatched, pointSendPending)) return;",
+                      "pointTicket++;", "LimitlessFence.NoteFfaPointScheduled();", "ResolvePointNow(gm);"]):
+        out.append("the re-drive does not retire the waiting ticket before it sends")
+    code = _code(ffa)
+    send = _code(ffa, "private static void ResolvePointNow(GM_ArmsRace gm)")
+    resets = code.count("pointLatched = false;") - send.count("pointLatched = false;")
+    if resets != 3 or code.count("pointLatched = false;\n            pointSendPending = false;") != resets:
+        out.append("a reset of the latch keeps the pending mark")
     return out
 
 
@@ -1043,7 +1080,7 @@ def claim_a_refused_entrant_is_no_departure(files):
 
 RI = "LimitlessFence.ResumableItem("
 RESUME_ROWS = [
-    ("FfaMode.cs", ["StartCoroutine(" + RI + 'ResolvePointEndOfFrame(gm), "ffa point"))'], "FFA's point"),
+    ("FfaMode.cs", ["StartCoroutine(" + RI + 'ResolvePointEndOfFrame(gm, scheduled), "ffa point"))'], "FFA's point"),
     ("FfaMode.cs", ['StartCoroutine(LimitlessFence.CleanupItem(EndSittingBelowMinimum(), "ffa sitting end"))'], "the sitting's end (C)"),
     ("FfaMode.cs", ["gm.StartCoroutine(" + RI + 'FfaTransition(gm, winnerTeam, roundOver), "ffa transition"))'], "FFA's transition"),
     ("FfaMode.cs", ["gm.StartCoroutine(" + RI + 'FfaLocalPickUI(gm, localPlayer, game, cycle, phaseNonce), "ffa pick ui"))'],
@@ -2407,6 +2444,7 @@ CLAIMS = {
     "hold_refusal": claim_the_hold_reads_the_record_first,
     "sender_end": claim_termination_reaches_the_sender,
     "redrive": claim_the_new_master_redrives,
+    "point_ticket": claim_one_send_per_point,
     "no_admission": claim_no_fighter_is_admitted,
     "late_tail": claim_the_late_tail_is_refused,
     "entrant_exit": claim_a_refused_entrant_is_no_departure,
@@ -2713,13 +2751,26 @@ MUTANTS = [
     ("redrive", "the re-drive runs with two fighters alive",
      [("FfaMode.cs", "                if (AlivePlayers().Count > 1) return;\n", "                if (AlivePlayers().Count > 2) return;\n")]),
     ("redrive", "the re-drive sends during a transition",
-     [("FfaMode.cs", "|| pointLatched || isTransitioning) return;\n                LimitlessFence.NoteFfaPointScheduled();   // the re-drive",
-       "|| pointLatched) return;\n                LimitlessFence.NoteFfaPointScheduled();   // the re-drive")]),
+     [("FfaMode.cs", "if (!FfaLateEntry.MasterMaySend() || isTransitioning) return;\n                // R1 HIGH 2: this runs",
+       "if (!FfaLateEntry.MasterMaySend()) return;\n                // R1 HIGH 2: this runs")]),
     ("redrive", "the re-drive sends without the capture",
      _drop("FfaMode.cs", "                LimitlessFence.NoteFfaPointScheduled();   // the re-drive's capture, as HandlePlayerDied's\n")),
     ("redrive", "the re-drive leaves the latch open",
      [("FfaMode.cs", '                pointLatched = true;\n                Plugin.Log.LogInfo("[LIMIT] the new master re-drives',
        '                Plugin.Log.LogInfo("[LIMIT] the new master re-drives')]),
+    ("point_ticket", "the deferred resolution reads no ticket",
+     _drop("FfaMode.cs", "            if (ticket != pointTicket) yield break;   // R1 HIGH 2: a re-drive took this point over\n")),
+    ("point_ticket", "the re-drive retires no ticket",
+     _drop("FfaMode.cs", "                pointTicket++;   // any deferred resolution still waiting does nothing\n")),
+    ("point_ticket", "the re-drive keeps every latch",
+     [("FfaMode.cs", "if (!LimitlessFenceRules.RedriveSendsPoint(pointLatched, pointSendPending)) return;", "if (pointLatched) return;")]),
+    ("point_ticket", "the send does not clear its pending mark",
+     _drop("FfaMode.cs", "            pointSendPending = false;   // R1 HIGH 2: the latched point's send runs now\n")),
+    ("point_ticket", "a scheduled point marks no pending send",
+     _drop("FfaMode.cs", "                pointSendPending = true;\n")),
+    ("point_ticket", "the next round's reset keeps the pending mark",
+     [("FfaMode.cs", "            pointLatched = false;\n            pointSendPending = false;\n            GameManager.instance.battleOngoing = false;\n",
+       "            pointLatched = false;\n            GameManager.instance.battleOngoing = false;\n")]),
     ("no_admission", "the master answers a late request as before",
      _drop("FfaLateEntry.cs", '            if (LimitlessFence.RecordOpen) { Refused("limitless", sender); SendSnapshot(sender, seq, true); return; }\n')),
     ("no_admission", "the master answers a late request with an open snapshot",
@@ -2764,7 +2815,7 @@ MUTANTS = [
        '            _departed = true;\n            if (FfaLateEntry.IsQuarantinedActor(p.ActorNumber)) return;\n'
        '            Terminate("fighter departure");\n')]),
     ("resume_rows", "FFA's point is unguarded",
-     [("FfaMode.cs", 'LimitlessFence.ResumableItem(ResolvePointEndOfFrame(gm), "ffa point")', "ResolvePointEndOfFrame(gm)")]),
+     [("FfaMode.cs", 'LimitlessFence.ResumableItem(ResolvePointEndOfFrame(gm, scheduled), "ffa point")', "ResolvePointEndOfFrame(gm, scheduled)")]),
     ("resume_rows", "the sitting's end is unguarded",
      [("FfaMode.cs", 'LimitlessFence.CleanupItem(EndSittingBelowMinimum(), "ffa sitting end")', "EndSittingBelowMinimum()")]),
     ("resume_rows", "the sitting's end reads the record",
@@ -3335,6 +3386,8 @@ CONTROLS = [
                      NEUTRAL + "            if (RecordOpen && _departed) return WithheldAfterDeparture();\n")]),
     ("redrive", [("FfaMode.cs", "                if (AlivePlayers().Count > 1) return;\n",
                   NEUTRAL + "                if (AlivePlayers().Count > 1) return;\n")]),
+    ("point_ticket", [("FfaMode.cs", "            if (ticket != pointTicket) yield break;",
+                       NEUTRAL + "            if (ticket != pointTicket) yield break;")]),
     ("no_admission", [("FfaLateEntry.cs", "            if (LimitlessFence.RecordOpen) { LateGiveUp(); return; }   // 4.6: no admission\n",
                        NEUTRAL + "            if (LimitlessFence.RecordOpen) { LateGiveUp(); return; }   // 4.6: no admission\n")]),
     ("late_tail", [("FfaReadmit.cs", '                    if (LimitlessFence.RecordOpen) { Refusal("limitless", true); break; }\n',

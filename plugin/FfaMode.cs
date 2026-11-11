@@ -277,6 +277,11 @@ namespace CompetitiveRounds
         private static int cycleNumber = 0;
         private static bool isTransitioning = false;
         private static bool pointLatched = false;      // master's point-resolution latch (find 17)
+        // Ask 16(a) lane 2 (v4 4.6; R1 HIGH 2): each scheduled point's ticket, and
+        // whether the latched point's send has yet to run. A re-drive retires the
+        // ticket still waiting and sends in its place, so one of the two sends runs.
+        private static int pointTicket = 0;
+        private static bool pointSendPending = false;
         private static bool gameOverFired = false;
         /// <summary>Ask 16(a) lane 2 (v4 4.7 step 3): HandleNextRound's own
         /// transition guard, read by the fence's handler, which drops a message
@@ -988,6 +993,7 @@ namespace CompetitiveRounds
                 for (int t = 0; t < killsByTeam.Length; t++) kills[t] = killsByTeam[t];
             isTransitioning = false;
             pointLatched = false;
+            pointSendPending = false;
             gameOverFired = false;
             if (matchStartRealtime <= 0f) matchStartRealtime = Time.realtimeSinceStartup;
             // The card sequence latches lazily per game; this seat never ran
@@ -1762,6 +1768,7 @@ namespace CompetitiveRounds
             }
             isTransitioning = false;
             pointLatched = false;
+            pointSendPending = false;
             gameOverFired = false;
             ClearSpawnGrace();
             freshGameCancelFired = false;
@@ -2079,7 +2086,9 @@ namespace CompetitiveRounds
                 // race in), but decide the winner at end of frame, after every
                 // death in this physics step has landed.
                 pointLatched = true;
-                if (Plugin.Instance != null) Plugin.Instance.StartCoroutine(LimitlessFence.ResumableItem(ResolvePointEndOfFrame(gm), "ffa point"));   // v4 4.5 R
+                pointSendPending = true;
+                int scheduled = ++pointTicket;
+                if (Plugin.Instance != null) Plugin.Instance.StartCoroutine(LimitlessFence.ResumableItem(ResolvePointEndOfFrame(gm, scheduled), "ffa point"));   // v4 4.5 R
                 else ResolvePointNow(gm);
             }
             catch (Exception ex) { Plugin.Log.LogError($"[FFA] HandlePlayerDied: {ex.Message}"); }
@@ -2097,7 +2106,14 @@ namespace CompetitiveRounds
                 if (gm == null || gameOverFired || GameManager.instance == null || !GameManager.instance.battleOngoing) return;
                 if (FfaLateEntry.LocalSitsOut() || RoomActors.LocalIsSpectator) return;
                 if (AlivePlayers().Count > 1) return;
-                if (!FfaLateEntry.MasterMaySend() || pointLatched || isTransitioning) return;
+                if (!FfaLateEntry.MasterMaySend() || isTransitioning) return;
+                // R1 HIGH 2: this runs at a handoff. A latch whose send has not run was set
+                // in an earlier master period, and that send would fail MaySend. The
+                // re-drive retires the deferred resolution's ticket, so it does nothing,
+                // and sends here. A latch whose send ran stays.
+                if (!LimitlessFenceRules.RedriveSendsPoint(pointLatched, pointSendPending)) return;
+                if (pointLatched) Plugin.Log.LogInfo("[LIMIT] the new master retires the point an earlier master period scheduled");
+                pointTicket++;   // any deferred resolution still waiting does nothing
                 LimitlessFence.NoteFfaPointScheduled();   // the re-drive's capture, as HandlePlayerDied's
                 pointLatched = true;
                 Plugin.Log.LogInfo("[LIMIT] the new master re-drives the pending point");
@@ -2113,14 +2129,16 @@ namespace CompetitiveRounds
         /// treating them identically — only the announcement differs.</summary>
         private const int WINNER_DOUBLE_KO = -2;
 
-        private static IEnumerator ResolvePointEndOfFrame(GM_ArmsRace gm)
+        private static IEnumerator ResolvePointEndOfFrame(GM_ArmsRace gm, int ticket)
         {
             yield return new WaitForEndOfFrame();
+            if (ticket != pointTicket) yield break;   // R1 HIGH 2: a re-drive took this point over
             ResolvePointNow(gm);
         }
 
         private static void ResolvePointNow(GM_ArmsRace gm)
         {
+            pointSendPending = false;   // R1 HIGH 2: the latched point's send runs now
             try
             {
                 if (gameOverFired || isTransitioning) { pointLatched = false; return; }
@@ -2260,6 +2278,7 @@ namespace CompetitiveRounds
             // V11 item 13: one more point in this game (the load's k).
             try { FfaLateEntry.OnNextRound(); } catch { }
             pointLatched = false;
+            pointSendPending = false;
             GameManager.instance.battleOngoing = false;
             // A leave in the same physics step as the decisive death would
             // otherwise reach GetPlayersInTeam below with a corpse entry

@@ -542,6 +542,16 @@ namespace CompetitiveRounds
         /// every game start from this seat's RankedEnabled and its opponent
         /// checks, so a mod-issued room can read unrated there. No room decides
         /// closed.</summary>
+        /// <summary>4.6 at a handoff (R1 HIGH 2): whether the new master's re-drive
+        /// sends FFA's pending point. With no latch it does. A latch whose send has
+        /// not run was set in an earlier master period, and that send would fail
+        /// MaySend, so the re-drive sends in its place. A latch whose send ran
+        /// stays, so the point is not sent twice.</summary>
+        internal static bool RedriveSendsPoint(bool latched, bool sendPending)
+        {
+            return !latched || sendPending;
+        }
+
         internal static bool RatedForSeries(string roomName, bool roomHasCrFf, bool matchIsRanked)
         {
             if (matchIsRanked || roomHasCrFf || string.IsNullOrEmpty(roomName)) return true;
