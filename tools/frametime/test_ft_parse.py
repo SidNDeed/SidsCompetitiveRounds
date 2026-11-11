@@ -774,7 +774,10 @@ def test_a3_every_games_calibration_is_required_and_a_dropped_one_never_passes()
     # row's) must withhold the verdict, never fall back to the cheaper games
     big = {8: 2000}
     out = _report(_log(live_game=big))
-    assert "VERDICT B1 FAIL" in out, out
+    # re-pinned (the integrator's ruling on the hand-back (2)): U is in the FAIL band, but A3 is a charge whose lower
+    # end is 0, so the lower bound does not clear 5 percent and the band is WITHHELD
+    m8 = re.search(r"^VERDICT B1 WITHHELD: U ([0-9.]+) us against T_ref ([0-9.]+) us", out, re.M)
+    assert m8 and float(m8.group(1)) > 0.05 * float(m8.group(2)), out
     for drop in ({(8, k) for k in A3_DEP}, {(8, A3_DEP[0])}):
         out2 = _report(_log(live_game=big, live_drop=drop))
         assert "VERDICT B1 withheld" in out2, out2
