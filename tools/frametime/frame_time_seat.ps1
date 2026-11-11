@@ -182,6 +182,11 @@ $FormText = @(
     '[FRAME-TIME] cal i=<n> why=<why> kind=fhat f_hat=<n> spins=<spins>'
     '[FRAME-TIME] cal i=<n> why=<why> kind=<=span|disp> shape=<shape> n=<n> u=<nl> p=<nl>'
     '[FRAME-TIME] cal i=<n> why=<why> kind=entries built=0 own_patches=not-applied'
+    # the FrameTimeRef build (B11 D3): its boot line, its entries line and the patch classes it skipped
+    '[FRAME-TIME] cal i=<n> why=<why> kind=entries reference=1 built=0'
+    '[FRAME-TIME] reference collectors not installed: patch classes skipped=<u> listed=<u>'
+    '[FRAME-TIME] build variant=FrameTime'
+    '[FRAME-TIME] build variant=FrameTimeRef SCR_FT_REF=NOCOLLECTORS'
     '[FRAME-TIME] cal i=<n> why=<why> kind=entries failed: the built table holds no patched entry'
     '[FRAME-TIME] cal i=<n> why=<why> kind=disp shape=<shape> failed: InvalidOperationException: <@patch> is not attached: no target patched by com.competitiverounds.mod (lesson #83)'
     '[FRAME-TIME] cal i=<n> why=<why> kind=disp shape=<shape> failed: InvalidOperationException: <@patch> has a transpiler'
@@ -705,6 +710,8 @@ $CfgCases = [ordered]@{
 # COMBAT-PERF probe mode and a route host among them (each withheld: no ".example" may be printed anywhere)
 $SimPre = '[Info   :CompetitiveRounds] '
 $SimFt = @(
+    ($SimPre + '[FRAME-TIME] build variant=FrameTime'),
+    ($SimPre + '[FRAME-TIME] cal i=0 why=start kind=entries reference=1 built=0'),
     ($SimPre + '[FRAME-TIME] settled g=-1 seed=1 c_plant=-1 W=120 vsync=0 target=-1 freq=10000000 hires=1 f_hat=2978789260 gc_incremental=1 gc_slice_ns=3000000 f18=A answer=replay armfile=1 force=none clock=1 frames=0 missing_end=0 cycle_failures=0 span_depth_violations=0'),
     ($SimPre + '[FRAME-TIME] p pt=1.1.1 arm=ON gate=0 pred=none n=500 sF=1 sS=1 sC=1 maxF=1 pn=0 psF=0 psS=0 psC=0 sP=1 psP=0 excl=0 plant_mixed=0 windows=4 live_frames=501 missing_end=0 span_g=0 span_gn=0 span_u=0 span_un=0 on_calls=0 guarded=0 zs=0 zl=1 t0=1 t1=2 answer=replay'),
     ($SimPre + '[FRAME-TIME] refusals why=quit pairs=2 closing:e=1 route:GET_192.168.72.102/api/{n}/mod-version=1'))

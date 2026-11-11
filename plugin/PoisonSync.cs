@@ -3381,7 +3381,9 @@ namespace CompetitiveRounds
             {
 #endif
             try { DrainOwn(); } catch { }
+#if !SCR_FT_NOCOLLECTORS
             try { HitEvidence.Drain(); } catch { }
+#endif
             try { PoisonSync.DrainLateSilences(); } catch { }
 #if SCR_FRAMETIME
             }
