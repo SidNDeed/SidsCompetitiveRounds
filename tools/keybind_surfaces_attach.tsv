@@ -15879,7 +15879,7 @@ hop	GameStateWatcher.cs:MintSessionUuid	57b6665c3f05370b	GameStateWatcher.cs:Pol
 hop	GameStateWatcher.cs:MintSessionUuid	67ba4a1383bbc76e	Plugin.cs:OnJoinedRoom	ref>Plugin.cs:OnJoinedRoom
 hop	GameStateWatcher.cs:NoteIdentityTransition	5c43317659b5ddd2	GameStateWatcher.cs:IdentifyLocalPlayer	ref>GameStateWatcher.cs:IdentifyLocalPlayer
 hop	GameStateWatcher.cs:NotifyPlayerLeftRoom	4331853c6d5643b9	Plugin.cs:OnPlayerLeftRoom	ref>Plugin.cs:OnPlayerLeftRoom
-hop	GameStateWatcher.cs:OnFfaGameOver	b8c55250f4199dd0	FfaMode.cs:HandleNextRound	ref>FfaMode.cs:HandleNextRound
+hop	GameStateWatcher.cs:OnFfaGameOver	6bb3f7e76513803c	FfaMode.cs:HandleNextRound	ref>FfaMode.cs:HandleNextRound
 hop	GameStateWatcher.cs:OnFfaMatchStarted	6c36ffe2813443b6	FfaMode.cs:OnGameStart	ref>FfaMode.cs:OnGameStart
 hop	GameStateWatcher.cs:OnGameBoundary	77aaca9a01596c52	GameStateWatcher.cs:OnFfaGameOver	ref>GameStateWatcher.cs:OnFfaGameOver
 hop	GameStateWatcher.cs:OnGameBoundary	a33db1fe756e3eea	GameStateWatcher.cs:OnGameOver	ref>GameStateWatcher.cs:OnGameOver
@@ -57712,6 +57712,7 @@ hop	VanillaFixes.cs:BeforeDoDamage#2	d7e5751361716163	VanillaFixes.cs:Refuses	re
 hop	VanillaFixes.cs:CheckLocalNickname	ff4a9975ccd991a3	VanillaFixes.cs:Update	ref>VanillaFixes.cs:Update
 hop	VanillaFixes.cs:ClassifyLoopVoice	74f24fc623ff1f94	VanillaFixes.cs:SweepNow#2	ref>VanillaFixes.cs:SweepNow#2
 hop	VanillaFixes.cs:Cleanup#1	045b03355c6ab0ec	NetworkReplicaDiagnostics.cs:Cleanup#4	ref>NetworkReplicaDiagnostics.cs:Cleanup#4
+hop	VanillaFixes.cs:Cleanup#1	0644bb0f2f839ea2	LimitlessFence.cs:Cleanup#4	ref>LimitlessFence.cs:Cleanup#4
 hop	VanillaFixes.cs:Cleanup#1	072514f3e28999ea	NetworkReplicaDiagnostics.cs:Cleanup#5	ref>NetworkReplicaDiagnostics.cs:Cleanup#5
 hop	VanillaFixes.cs:Cleanup#1	08aa99bf6d9cff39	VanillaFixes.cs:Cleanup#21	ref>VanillaFixes.cs:Cleanup#21
 hop	VanillaFixes.cs:Cleanup#1	0a4f5df97098ea6b	VanillaFixes.cs:Cleanup#35	ref>VanillaFixes.cs:Cleanup#35
@@ -57720,6 +57721,7 @@ hop	VanillaFixes.cs:Cleanup#1	2115f1c4fcc42b73	PoisonSync.cs:Cleanup#2	ref>Poiso
 hop	VanillaFixes.cs:Cleanup#1	258f0bc4d787ba3c	VanillaFixes.cs:Cleanup#14	ref>VanillaFixes.cs:Cleanup#14
 hop	VanillaFixes.cs:Cleanup#1	25d948ee47b6dc44	VanillaFixes.cs:Cleanup#23	ref>VanillaFixes.cs:Cleanup#23
 hop	VanillaFixes.cs:Cleanup#1	2a467edd5e3e9ca9	Keybinds.cs:Cleanup#2	ref>Keybinds.cs:Cleanup#2
+hop	VanillaFixes.cs:Cleanup#1	2fc36bbff08ab582	LimitlessFence.cs:Cleanup#6	ref>LimitlessFence.cs:Cleanup#6
 hop	VanillaFixes.cs:Cleanup#1	336ab04fbea1b88c	VanillaFixes.cs:Cleanup#37	ref>VanillaFixes.cs:Cleanup#37
 hop	VanillaFixes.cs:Cleanup#1	36b7400aafcad66c	Keybinds.cs:Cleanup#6	ref>Keybinds.cs:Cleanup#6
 hop	VanillaFixes.cs:Cleanup#1	38076247f903b0b1	LimitlessFence.cs:Cleanup#3	ref>LimitlessFence.cs:Cleanup#3
@@ -57742,6 +57744,7 @@ hop	VanillaFixes.cs:Cleanup#1	7c488caf6920dac8	TeamColorIdentity.cs:Cleanup#5	re
 hop	VanillaFixes.cs:Cleanup#1	7ee60250063050bc	VanillaFixes.cs:Cleanup#10	ref>VanillaFixes.cs:Cleanup#10
 hop	VanillaFixes.cs:Cleanup#1	8b0037f7480dcbaa	Keybinds.cs:Cleanup#4	ref>Keybinds.cs:Cleanup#4
 hop	VanillaFixes.cs:Cleanup#1	8c3d2cfef38c61a9	VanillaFixes.cs:Cleanup#32	ref>VanillaFixes.cs:Cleanup#32
+hop	VanillaFixes.cs:Cleanup#1	8f17b0771fd46c9b	LimitlessFence.cs:Cleanup#5	ref>LimitlessFence.cs:Cleanup#5
 hop	VanillaFixes.cs:Cleanup#1	9375f9c3e51f0031	VanillaFixes.cs:Cleanup#9	ref>VanillaFixes.cs:Cleanup#9
 hop	VanillaFixes.cs:Cleanup#1	94e8d0b711c38a76	VanillaFixes.cs:Cleanup#15	ref>VanillaFixes.cs:Cleanup#15
 hop	VanillaFixes.cs:Cleanup#1	9b595b20a7cc814c	VanillaFixes.cs:Cleanup#34	ref>VanillaFixes.cs:Cleanup#34
@@ -58353,6 +58356,9 @@ end	LimitlessBounds.cs:Clamp#2	unreferenced
 end	LimitlessFence.cs:Cleanup#1	unresolved:harmony:LimitlessFence.cs:LimitlessFence_GameStart_Patch.Cleanup#1(GM_ArmsRace.DoStartGame)
 end	LimitlessFence.cs:Cleanup#2	unresolved:harmony:LimitlessFence.cs:LimitlessFence_RawRound_Patch.Cleanup#2(GM_ArmsRace.RPCA_NextRound)
 end	LimitlessFence.cs:Cleanup#3	unresolved:harmony:LimitlessFence.cs:LimitlessFence_PlayerDied_Patch.Cleanup#3(GM_ArmsRace.PlayerDied)
+end	LimitlessFence.cs:Cleanup#4	unresolved:harmony:LimitlessFence.cs:LimitlessFence_RealEnd_Patch.Cleanup#4(GM_ArmsRace.GameOver)
+end	LimitlessFence.cs:Cleanup#5	unresolved:harmony:LimitlessFence.cs:LimitlessFence_HeldUnlock_Patch.Cleanup#5(FriendlyFoe.Platform.PlatformManager.UnlockAchievement)
+end	LimitlessFence.cs:Cleanup#6	unresolved:harmony:LimitlessFence.cs:LimitlessFence_HeldProgress_Patch.Cleanup#6(FriendlyFoe.Platform.PlatformManager.ProgressAchievement)
 end	LimitlessFence.cs:Prefix#1	unresolved:harmony:LimitlessFence.cs:LimitlessFence_GameStart_Patch.Prefix#1(GM_ArmsRace.DoStartGame)
 end	LimitlessFence.cs:Prefix#2	unresolved:harmony:LimitlessFence.cs:LimitlessFence_RawRound_Patch.Prefix#2(GM_ArmsRace.RPCA_NextRound)
 end	LimitlessFence.cs:Prefix#3	unresolved:harmony:LimitlessFence.cs:LimitlessFence_PlayerDied_Patch.Prefix#3(GM_ArmsRace.PlayerDied)
@@ -66013,7 +66019,7 @@ member	FfaMode.cs:FfaPickPhase	367067c40de4df41
 member	FfaMode.cs:FfaTransition	3eff6ae4e11f39e9
 member	FfaMode.cs:FreezeReportGameNumber	4c0bdf8c09e3104c
 member	FfaMode.cs:GateNow	fb93958fb4e9c24b
-member	FfaMode.cs:HandleNextRound	dea0c57ee716423f
+member	FfaMode.cs:HandleNextRound	cc83bd5ca2318499
 member	FfaMode.cs:HandlePlayerDied	fb80b841a98ac54a
 member	FfaMode.cs:HasKeptBody	40b80ee01214f205
 member	FfaMode.cs:HeldNow	7be835ad343b4ce0
@@ -66436,7 +66442,7 @@ member	GameStateWatcher.cs:OnGameBoundary	c95591c1b5b88080
 member	GameStateWatcher.cs:OnGameOver	e1685dda52d4f3f9
 member	GameStateWatcher.cs:OnLocalCardOffered	49cb209c5382a27d
 member	GameStateWatcher.cs:OnMapCallIn	98e4590adf6c86e6
-member	GameStateWatcher.cs:OnMatchStarted	93b4dd8645884f3f
+member	GameStateWatcher.cs:OnMatchStarted	36fb609b16fc13ea
 member	GameStateWatcher.cs:OnOpponentCardPicked	4eb1d13fe3268e1c
 member	GameStateWatcher.cs:OnUnityLog	b2961d854dc1f323
 member	GameStateWatcher.cs:OppDamageTimelineCsv	60c8af63f52afc83
@@ -66981,12 +66987,15 @@ member	LimitlessFence.cs:AppendSnapshotRecord	a6c3f8d62a9bf0cc
 member	LimitlessFence.cs:Cleanup#1	af5e9c3eda5473af
 member	LimitlessFence.cs:Cleanup#2	5b0e0e0ed9fe3c99
 member	LimitlessFence.cs:Cleanup#3	d00681e343eb418f
+member	LimitlessFence.cs:Cleanup#4	b10f3766bff59c85
+member	LimitlessFence.cs:Cleanup#5	51d894ee41685465
+member	LimitlessFence.cs:Cleanup#6	9454b658c218e6e1
 member	LimitlessFence.cs:CleanupItem	29476b31abd3ce7a
 member	LimitlessFence.cs:EpochHolds	e17fe01b7867e12f
 member	LimitlessFence.cs:FfaRoundSend	ebd780e2d24dfe88
 member	LimitlessFence.cs:FighterOptIns	4f26df98c2eeff63
 member	LimitlessFence.cs:GmRoundSend	877b98fbe84d1aa3
-member	LimitlessFence.cs:HandleFenceEvent	a7f15a1125d6357d
+member	LimitlessFence.cs:HandleFenceEvent	7f5e61622078acc1
 member	LimitlessFence.cs:HookFenceEvents	c899b9bc21731b9e
 member	LimitlessFence.cs:ItemResumes	220b52d1d3c44fe0
 member	LimitlessFence.cs:NewGid	f6bc633d16149221
@@ -67010,7 +67019,7 @@ member	LimitlessFence.cs:ResumableItem	328cf58c0ed78654
 member	LimitlessFence.cs:RetireRecord	8163bf922316c347
 member	LimitlessFence.cs:SendContinuation	77e104fa912788b0
 member	LimitlessFence.cs:SendDecision	c67b068d4ee42a86
-member	LimitlessFence.cs:StageFenceCapability	c2b912e88f526b5f
+member	LimitlessFence.cs:StageFenceCapability	573e3f72a3155518
 member	LimitlessFence.cs:StampInitialGid	caefd2ad0d7db6aa
 member	LimitlessFence.cs:TakeSnapshotRecord	02845d405cefa4d3
 member	LimitlessFence.cs:TakeUncoveredPath	e65c5b457434beb9
@@ -70371,15 +70380,15 @@ sink	CompetitiveUI.cs:DrawChatInput	2	1	f2b16c849c09700e	attached	CompetitiveUI.
 sink	CompetitiveUI.cs:DrawDanceWheel	2	1	75517cbac7d14c37	attached	CompetitiveUI.cs:DrawUI
 sink	CompetitiveUI.cs:DrawInputOverlay	2	1	5412be93d9435cb0	attached	CompetitiveUI.cs:DrawUI
 sink	CompetitiveUI.cs:DrawQuickChat	2	1	e23b05213e46a588	attached	CompetitiveUI.cs:DrawUI
-sink	InfoLibrary.cs:ControlsOutro	5999	57937	1da9fe511c5a8e59	attached	BroadcastHud.cs:Draw,CompetitiveUI.cs:DrawUI,GameStateWatcher.cs:PollMatchState,Keybinds.cs:CommitRows,NativeUI.Keybinds.cs:KeybindPaintAll,NativeUI.Settings.cs:SettingsRenderPane,NativeUI.Settings.cs:SettingsShowExtras,NativeUI.cs:BuildPage,NativeUI.cs:RefreshCurrentTab,NativeUI.cs:SelectInfoArticle
-sink	InfoLibrary.cs:Cosmetics	5999	57937	1da9fe511c5a8e59	attached	BroadcastHud.cs:Draw,CompetitiveUI.cs:DrawUI,GameStateWatcher.cs:PollMatchState,Keybinds.cs:CommitRows,NativeUI.Keybinds.cs:KeybindPaintAll,NativeUI.Settings.cs:SettingsRenderPane,NativeUI.Settings.cs:SettingsShowExtras,NativeUI.cs:BuildPage,NativeUI.cs:RefreshCurrentTab,NativeUI.cs:SelectInfoArticle
-sink	InfoLibrary.cs:Spectating	5999	57937	1da9fe511c5a8e59	attached	BroadcastHud.cs:Draw,CompetitiveUI.cs:DrawUI,GameStateWatcher.cs:PollMatchState,Keybinds.cs:CommitRows,NativeUI.Keybinds.cs:KeybindPaintAll,NativeUI.Settings.cs:SettingsRenderPane,NativeUI.Settings.cs:SettingsShowExtras,NativeUI.cs:BuildPage,NativeUI.cs:RefreshCurrentTab,NativeUI.cs:SelectInfoArticle
-sink	InfoLibrary.cs:StartHere	5999	57937	1da9fe511c5a8e59	attached	BroadcastHud.cs:Draw,CompetitiveUI.cs:DrawUI,GameStateWatcher.cs:PollMatchState,Keybinds.cs:CommitRows,NativeUI.Keybinds.cs:KeybindPaintAll,NativeUI.Settings.cs:SettingsRenderPane,NativeUI.Settings.cs:SettingsShowExtras,NativeUI.cs:BuildPage,NativeUI.cs:RefreshCurrentTab,NativeUI.cs:SelectInfoArticle
-sink	InfoLibrary.cs:VanillaBugs	5999	57937	1da9fe511c5a8e59	attached	BroadcastHud.cs:Draw,CompetitiveUI.cs:DrawUI,GameStateWatcher.cs:PollMatchState,Keybinds.cs:CommitRows,NativeUI.Keybinds.cs:KeybindPaintAll,NativeUI.Settings.cs:SettingsRenderPane,NativeUI.Settings.cs:SettingsShowExtras,NativeUI.cs:BuildPage,NativeUI.cs:RefreshCurrentTab,NativeUI.cs:SelectInfoArticle
-sink	InfoViz.cs:BuildKeyboard	5999	57937	1da9fe511c5a8e59	attached	BroadcastHud.cs:Draw,CompetitiveUI.cs:DrawUI,GameStateWatcher.cs:PollMatchState,Keybinds.cs:CommitRows,NativeUI.Keybinds.cs:KeybindPaintAll,NativeUI.Settings.cs:SettingsRenderPane,NativeUI.Settings.cs:SettingsShowExtras,NativeUI.cs:BuildPage,NativeUI.cs:RefreshCurrentTab,NativeUI.cs:SelectInfoArticle
+sink	InfoLibrary.cs:ControlsOutro	6002	57940	a311959ed7dc43c7	attached	BroadcastHud.cs:Draw,CompetitiveUI.cs:DrawUI,GameStateWatcher.cs:PollMatchState,Keybinds.cs:CommitRows,NativeUI.Keybinds.cs:KeybindPaintAll,NativeUI.Settings.cs:SettingsRenderPane,NativeUI.Settings.cs:SettingsShowExtras,NativeUI.cs:BuildPage,NativeUI.cs:RefreshCurrentTab,NativeUI.cs:SelectInfoArticle
+sink	InfoLibrary.cs:Cosmetics	6002	57940	a311959ed7dc43c7	attached	BroadcastHud.cs:Draw,CompetitiveUI.cs:DrawUI,GameStateWatcher.cs:PollMatchState,Keybinds.cs:CommitRows,NativeUI.Keybinds.cs:KeybindPaintAll,NativeUI.Settings.cs:SettingsRenderPane,NativeUI.Settings.cs:SettingsShowExtras,NativeUI.cs:BuildPage,NativeUI.cs:RefreshCurrentTab,NativeUI.cs:SelectInfoArticle
+sink	InfoLibrary.cs:Spectating	6002	57940	a311959ed7dc43c7	attached	BroadcastHud.cs:Draw,CompetitiveUI.cs:DrawUI,GameStateWatcher.cs:PollMatchState,Keybinds.cs:CommitRows,NativeUI.Keybinds.cs:KeybindPaintAll,NativeUI.Settings.cs:SettingsRenderPane,NativeUI.Settings.cs:SettingsShowExtras,NativeUI.cs:BuildPage,NativeUI.cs:RefreshCurrentTab,NativeUI.cs:SelectInfoArticle
+sink	InfoLibrary.cs:StartHere	6002	57940	a311959ed7dc43c7	attached	BroadcastHud.cs:Draw,CompetitiveUI.cs:DrawUI,GameStateWatcher.cs:PollMatchState,Keybinds.cs:CommitRows,NativeUI.Keybinds.cs:KeybindPaintAll,NativeUI.Settings.cs:SettingsRenderPane,NativeUI.Settings.cs:SettingsShowExtras,NativeUI.cs:BuildPage,NativeUI.cs:RefreshCurrentTab,NativeUI.cs:SelectInfoArticle
+sink	InfoLibrary.cs:VanillaBugs	6002	57940	a311959ed7dc43c7	attached	BroadcastHud.cs:Draw,CompetitiveUI.cs:DrawUI,GameStateWatcher.cs:PollMatchState,Keybinds.cs:CommitRows,NativeUI.Keybinds.cs:KeybindPaintAll,NativeUI.Settings.cs:SettingsRenderPane,NativeUI.Settings.cs:SettingsShowExtras,NativeUI.cs:BuildPage,NativeUI.cs:RefreshCurrentTab,NativeUI.cs:SelectInfoArticle
+sink	InfoViz.cs:BuildKeyboard	6002	57940	a311959ed7dc43c7	attached	BroadcastHud.cs:Draw,CompetitiveUI.cs:DrawUI,GameStateWatcher.cs:PollMatchState,Keybinds.cs:CommitRows,NativeUI.Keybinds.cs:KeybindPaintAll,NativeUI.Settings.cs:SettingsRenderPane,NativeUI.Settings.cs:SettingsShowExtras,NativeUI.cs:BuildPage,NativeUI.cs:RefreshCurrentTab,NativeUI.cs:SelectInfoArticle
 sink	Keybinds.cs:ApplyJoin	5	4	116d269dcc76ee4c	attached	Keybinds.cs:CommitRows
 sink	Keybinds.cs:ApplyReady	5	4	3bb007885d986e1f	attached	Keybinds.cs:CommitRows
-sink	Keybinds.cs:OnRoundStart	9	9	de165c597a86730f	attached	GameStateWatcher.cs:PollMatchState
+sink	Keybinds.cs:OnRoundStart	9	9	b718ae0e273c3984	attached	GameStateWatcher.cs:PollMatchState
 sink	Keybinds.cs:RefreshAll	2	1	fb6a0440324c0395	attached	Keybinds.cs:CommitRows
 sink	NativeUI.Keybinds.cs:KbRefreshNamedDescs	2	1	302cbc5aa531339f	attached	NativeUI.Keybinds.cs:KeybindPaintAll
 sink	NativeUI.Keybinds.cs:KbRepaintLangNoteIfDue	2	1	9d99563b94be4109	attached	NativeUI.Settings.cs:SettingsShowExtras
@@ -71315,10 +71324,13 @@ unresolved	harmony:Keybinds.cs:StartPickingPatch.Cleanup#7(CharacterSelectionIns
 unresolved	harmony:Keybinds.cs:StartPickingPatch.Postfix#4(CharacterSelectionInstance.StartPicking)	backend/tests/test_client_keybinds.py::test_t8_each_prompt_postfix_has_its_target[StartPickingPatch]	the game's CharacterSelectionInstance.StartPicking runs this Harmony postfix, which paints the ready prompt (ApplyReady): the call is Harmony's, not the source's, so the hop cannot be resolved from source. The control pins the patch class, its HarmonyPatch target, its [HarmonyPostfix] and its one ApplyReady call; that Harmony applies the patch at load is not proven here (the in-game witness's 'Failed to patch' grep is that check, carried to live validation)
 unresolved	harmony:LimitlessFence.cs:LimitlessFence_GameStart_Patch.Cleanup#1(GM_ArmsRace.DoStartGame)	backend/tests/test_keybind_surfaces.py::test_h1_fix5_each_unresolved_end_is_pinned_in_source[harmony-LimitlessFence.cs-LimitlessFence_GameStart_Patch.Cleanup-1-GM_ArmsRace.DoStartGame]	the game runs this Harmony patch method on LimitlessFence.cs:LimitlessFence_GameStart_Patch.Cleanup#1(GM_ArmsRace.DoStartGame): the call is Harmony's, not the source's, so the end cannot be resolved from source. The complete traversal (fix pass 5) reaches it through the reference rule, whose receiver of an instance member is not resolved (more paths, never fewer). The control pins the patch class and its Harmony attribute in source; Harmony's application at load is not proven here
 unresolved	harmony:LimitlessFence.cs:LimitlessFence_GameStart_Patch.Prefix#1(GM_ArmsRace.DoStartGame)	backend/tests/test_keybind_surfaces.py::test_h1_fix5_each_unresolved_end_is_pinned_in_source[harmony-LimitlessFence.cs-LimitlessFence_GameStart_Patch.Prefix-1-GM_ArmsRace.DoStartGame]	the game runs this Harmony patch method on LimitlessFence.cs:LimitlessFence_GameStart_Patch.Prefix#1(GM_ArmsRace.DoStartGame): the call is Harmony's, not the source's, so the end cannot be resolved from source. The complete traversal (fix pass 5) reaches it through the reference rule, whose receiver of an instance member is not resolved (more paths, never fewer). The control pins the patch class and its Harmony attribute in source; Harmony's application at load is not proven here
+unresolved	harmony:LimitlessFence.cs:LimitlessFence_HeldProgress_Patch.Cleanup#6(FriendlyFoe.Platform.PlatformManager.ProgressAchievement)	backend/tests/test_keybind_surfaces.py::test_h1_fix5_each_unresolved_end_is_pinned_in_source[harmony-LimitlessFence.cs-LimitlessFence_HeldProgress_Patch.Cleanup-6-FriendlyFoe.Platform.PlatformManager.ProgressAchievement]	the game runs this Harmony patch method on LimitlessFence.cs:LimitlessFence_HeldProgress_Patch.Cleanup#6(FriendlyFoe.Platform.PlatformManager.ProgressAchievement): the call is Harmony's, not the source's, so the end cannot be resolved from source. The complete traversal (fix pass 5) reaches it through the reference rule, whose receiver of an instance member is not resolved (more paths, never fewer). The control pins the patch class and its Harmony attribute in source; Harmony's application at load is not proven here
+unresolved	harmony:LimitlessFence.cs:LimitlessFence_HeldUnlock_Patch.Cleanup#5(FriendlyFoe.Platform.PlatformManager.UnlockAchievement)	backend/tests/test_keybind_surfaces.py::test_h1_fix5_each_unresolved_end_is_pinned_in_source[harmony-LimitlessFence.cs-LimitlessFence_HeldUnlock_Patch.Cleanup-5-FriendlyFoe.Platform.PlatformManager.UnlockAchievement]	the game runs this Harmony patch method on LimitlessFence.cs:LimitlessFence_HeldUnlock_Patch.Cleanup#5(FriendlyFoe.Platform.PlatformManager.UnlockAchievement): the call is Harmony's, not the source's, so the end cannot be resolved from source. The complete traversal (fix pass 5) reaches it through the reference rule, whose receiver of an instance member is not resolved (more paths, never fewer). The control pins the patch class and its Harmony attribute in source; Harmony's application at load is not proven here
 unresolved	harmony:LimitlessFence.cs:LimitlessFence_PlayerDied_Patch.Cleanup#3(GM_ArmsRace.PlayerDied)	backend/tests/test_keybind_surfaces.py::test_h1_fix5_each_unresolved_end_is_pinned_in_source[harmony-LimitlessFence.cs-LimitlessFence_PlayerDied_Patch.Cleanup-3-GM_ArmsRace.PlayerDied]	the game runs this Harmony patch method on LimitlessFence.cs:LimitlessFence_PlayerDied_Patch.Cleanup#3(GM_ArmsRace.PlayerDied): the call is Harmony's, not the source's, so the end cannot be resolved from source. The complete traversal (fix pass 5) reaches it through the reference rule, whose receiver of an instance member is not resolved (more paths, never fewer). The control pins the patch class and its Harmony attribute in source; Harmony's application at load is not proven here
 unresolved	harmony:LimitlessFence.cs:LimitlessFence_PlayerDied_Patch.Prefix#3(GM_ArmsRace.PlayerDied)	backend/tests/test_keybind_surfaces.py::test_h1_fix5_each_unresolved_end_is_pinned_in_source[harmony-LimitlessFence.cs-LimitlessFence_PlayerDied_Patch.Prefix-3-GM_ArmsRace.PlayerDied]	the game runs this Harmony patch method on LimitlessFence.cs:LimitlessFence_PlayerDied_Patch.Prefix#3(GM_ArmsRace.PlayerDied): the call is Harmony's, not the source's, so the end cannot be resolved from source. The complete traversal (fix pass 5) reaches it through the reference rule, whose receiver of an instance member is not resolved (more paths, never fewer). The control pins the patch class and its Harmony attribute in source; Harmony's application at load is not proven here
 unresolved	harmony:LimitlessFence.cs:LimitlessFence_RawRound_Patch.Cleanup#2(GM_ArmsRace.RPCA_NextRound)	backend/tests/test_keybind_surfaces.py::test_h1_fix5_each_unresolved_end_is_pinned_in_source[harmony-LimitlessFence.cs-LimitlessFence_RawRound_Patch.Cleanup-2-GM_ArmsRace.RPCA_NextRound]	the game runs this Harmony patch method on LimitlessFence.cs:LimitlessFence_RawRound_Patch.Cleanup#2(GM_ArmsRace.RPCA_NextRound): the call is Harmony's, not the source's, so the end cannot be resolved from source. The complete traversal (fix pass 5) reaches it through the reference rule, whose receiver of an instance member is not resolved (more paths, never fewer). The control pins the patch class and its Harmony attribute in source; Harmony's application at load is not proven here
 unresolved	harmony:LimitlessFence.cs:LimitlessFence_RawRound_Patch.Prefix#2(GM_ArmsRace.RPCA_NextRound)	backend/tests/test_keybind_surfaces.py::test_h1_fix5_each_unresolved_end_is_pinned_in_source[harmony-LimitlessFence.cs-LimitlessFence_RawRound_Patch.Prefix-2-GM_ArmsRace.RPCA_NextRound]	the game runs this Harmony patch method on LimitlessFence.cs:LimitlessFence_RawRound_Patch.Prefix#2(GM_ArmsRace.RPCA_NextRound): the call is Harmony's, not the source's, so the end cannot be resolved from source. The complete traversal (fix pass 5) reaches it through the reference rule, whose receiver of an instance member is not resolved (more paths, never fewer). The control pins the patch class and its Harmony attribute in source; Harmony's application at load is not proven here
+unresolved	harmony:LimitlessFence.cs:LimitlessFence_RealEnd_Patch.Cleanup#4(GM_ArmsRace.GameOver)	backend/tests/test_keybind_surfaces.py::test_h1_fix5_each_unresolved_end_is_pinned_in_source[harmony-LimitlessFence.cs-LimitlessFence_RealEnd_Patch.Cleanup-4-GM_ArmsRace.GameOver]	the game runs this Harmony patch method on LimitlessFence.cs:LimitlessFence_RealEnd_Patch.Cleanup#4(GM_ArmsRace.GameOver): the call is Harmony's, not the source's, so the end cannot be resolved from source. The complete traversal (fix pass 5) reaches it through the reference rule, whose receiver of an instance member is not resolved (more paths, never fewer). The control pins the patch class and its Harmony attribute in source; Harmony's application at load is not proven here
 unresolved	harmony:MusicEngine.cs:MusicSuppressionPatch.PlayIngamePrefix(?)	backend/tests/test_keybind_surfaces.py::test_h1_fix5_each_unresolved_end_is_pinned_in_source[harmony-MusicEngine.cs-MusicSuppressionPatch.PlayIngamePrefix]	the game runs this Harmony patch method on MusicEngine.cs:MusicSuppressionPatch.PlayIngamePrefix(?): the call is Harmony's, not the source's, so the end cannot be resolved from source. The complete traversal (fix pass 5) reaches it through the reference rule, whose receiver of an instance member is not resolved (more paths, never fewer). The control pins the patch class and its Harmony attribute in source; Harmony's application at load is not proven here
 unresolved	harmony:MusicEngine.cs:MusicSuppressionPatch.PlayMainMenuPrefix(?)	backend/tests/test_keybind_surfaces.py::test_h1_fix5_each_unresolved_end_is_pinned_in_source[harmony-MusicEngine.cs-MusicSuppressionPatch.PlayMainMenuPrefix]	the game runs this Harmony patch method on MusicEngine.cs:MusicSuppressionPatch.PlayMainMenuPrefix(?): the call is Harmony's, not the source's, so the end cannot be resolved from source. The complete traversal (fix pass 5) reaches it through the reference rule, whose receiver of an instance member is not resolved (more paths, never fewer). The control pins the patch class and its Harmony attribute in source; Harmony's application at load is not proven here
 unresolved	harmony:NetworkReplicaDiagnostics.cs:NetworkReplicaSerializationObserverPatch.AfterSpectatorMute(?)	backend/tests/test_keybind_surfaces.py::test_h1_fix5_each_unresolved_end_is_pinned_in_source[harmony-NetworkReplicaDiagnostics.cs-NetworkReplicaSerializationObserverPatch.AfterSpectatorMute]	the game runs this Harmony patch method on NetworkReplicaDiagnostics.cs:NetworkReplicaSerializationObserverPatch.AfterSpectatorMute(?): the call is Harmony's, not the source's, so the end cannot be resolved from source. The complete traversal (fix pass 5) reaches it through the reference rule, whose receiver of an instance member is not resolved (more paths, never fewer). The control pins the patch class and its Harmony attribute in source; Harmony's application at load is not proven here

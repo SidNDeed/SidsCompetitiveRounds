@@ -1148,6 +1148,76 @@ namespace CompetitiveRounds
     }
 
     /// <summary>
+    /// v4 4.4, F3: while this seat holds a live or terminating record, a call of
+    /// RPCA_NextRound that the fence's handler did not make is refused. At
+    /// Priority.First this skips vanilla's body. HarmonyX runs every sibling
+    /// prefix and every postfix whatever this returns (#352), so each sibling
+    /// that changes state on the call reads the same predicate as its first
+    /// statement: FFA's prefix and HandleNextRound, the spectator prefix and
+    /// SpectatorObserveRound, PoisonSync's point boundary and the stale
+    /// projectile sweep. PointEndEvidencePatch needs none: on a refused call no
+    /// count moves and the original did not run, so PointTaken is false.
+    /// </summary>
+    [HarmonyPatch(typeof(GM_ArmsRace), "RPCA_NextRound")]
+    internal static class LimitlessFence_RawRound_Patch
+    {
+        [HarmonyPriority(Priority.First)]
+        private static bool Prefix()
+        {
+            return !LimitlessFence.RawRoundRefused("gm");
+        }
+
+        /// <summary>#83: the fence advertises its capability only while this
+        /// prefix attached (LimitlessFence.RawRoundLive).</summary>
+        [HarmonyCleanup]
+        private static Exception Cleanup(MethodBase original, Exception exception)
+        {
+            if (original != null) return exception;
+            if (exception == null) LimitlessFence.RawRoundLive = true;
+            return VanillaFixSupport.Cleanup("LimitlessFence raw round", exception);
+        }
+    }
+
+    /// <summary>
+    /// v4 4.7: the GM master's decision at the round that would end the game at
+    /// the base, and every round past it. At Priority.Last it runs after every
+    /// other PlayerDied prefix and acts only when vanilla's body would still run
+    /// (__runOriginal: FFA's engine, the spectator gate or the transition fix may
+    /// have skipped it). When the fence sends or withholds the round, vanilla's
+    /// body is skipped, and this runs that body's one other effect, the
+    /// slow-down (GM_ArmsRace:505-506). A fault runs vanilla's body, as today.
+    /// </summary>
+    [HarmonyPatch(typeof(GM_ArmsRace), "PlayerDied")]
+    internal static class LimitlessFence_PlayerDied_Patch
+    {
+        [HarmonyPriority(Priority.Last)]
+        private static bool Prefix(GM_ArmsRace __instance, bool __runOriginal)
+        {
+            if (!__runOriginal) return false;
+            LimitlessFence.FenceSend sent;
+            try { sent = LimitlessFence.GmRoundSend(__instance); }
+            catch (Exception ex)
+            {
+                Plugin.Log.LogError("[LIMIT] the round send faulted: " + ex.Message);
+                return true;
+            }
+            if (sent == LimitlessFence.FenceSend.Vanilla) return true;
+            try { if (TimeHandler.instance != null) TimeHandler.instance.DoSlowDown(); } catch { }
+            return false;
+        }
+
+        /// <summary>#83: the fence advertises its capability only while this
+        /// prefix attached (LimitlessFence.PlayerDiedLive).</summary>
+        [HarmonyCleanup]
+        private static Exception Cleanup(MethodBase original, Exception exception)
+        {
+            if (original != null) return exception;
+            if (exception == null) LimitlessFence.PlayerDiedLive = true;
+            return VanillaFixSupport.Cleanup("LimitlessFence player died", exception);
+        }
+    }
+
+    /// <summary>
     /// v4 section 6, Table C1 (H7), at the real end. The base already ran
     /// vanilla's GameOver block once (LimitlessFence.RunBaseResults). While this
     /// seat holds a live or terminating record, GameOver's platform calls are
@@ -1233,76 +1303,6 @@ namespace CompetitiveRounds
             if (original != null) return exception;
             if (exception == null) LimitlessFence.HeldProgressLive = true;
             return VanillaFixSupport.Cleanup("LimitlessFence held progress", exception);
-        }
-    }
-
-    /// <summary>
-    /// v4 4.4, F3: while this seat holds a live or terminating record, a call of
-    /// RPCA_NextRound that the fence's handler did not make is refused. At
-    /// Priority.First this skips vanilla's body. HarmonyX runs every sibling
-    /// prefix and every postfix whatever this returns (#352), so each sibling
-    /// that changes state on the call reads the same predicate as its first
-    /// statement: FFA's prefix and HandleNextRound, the spectator prefix and
-    /// SpectatorObserveRound, PoisonSync's point boundary and the stale
-    /// projectile sweep. PointEndEvidencePatch needs none: on a refused call no
-    /// count moves and the original did not run, so PointTaken is false.
-    /// </summary>
-    [HarmonyPatch(typeof(GM_ArmsRace), "RPCA_NextRound")]
-    internal static class LimitlessFence_RawRound_Patch
-    {
-        [HarmonyPriority(Priority.First)]
-        private static bool Prefix()
-        {
-            return !LimitlessFence.RawRoundRefused("gm");
-        }
-
-        /// <summary>#83: the fence advertises its capability only while this
-        /// prefix attached (LimitlessFence.RawRoundLive).</summary>
-        [HarmonyCleanup]
-        private static Exception Cleanup(MethodBase original, Exception exception)
-        {
-            if (original != null) return exception;
-            if (exception == null) LimitlessFence.RawRoundLive = true;
-            return VanillaFixSupport.Cleanup("LimitlessFence raw round", exception);
-        }
-    }
-
-    /// <summary>
-    /// v4 4.7: the GM master's decision at the round that would end the game at
-    /// the base, and every round past it. At Priority.Last it runs after every
-    /// other PlayerDied prefix and acts only when vanilla's body would still run
-    /// (__runOriginal: FFA's engine, the spectator gate or the transition fix may
-    /// have skipped it). When the fence sends or withholds the round, vanilla's
-    /// body is skipped, and this runs that body's one other effect, the
-    /// slow-down (GM_ArmsRace:505-506). A fault runs vanilla's body, as today.
-    /// </summary>
-    [HarmonyPatch(typeof(GM_ArmsRace), "PlayerDied")]
-    internal static class LimitlessFence_PlayerDied_Patch
-    {
-        [HarmonyPriority(Priority.Last)]
-        private static bool Prefix(GM_ArmsRace __instance, bool __runOriginal)
-        {
-            if (!__runOriginal) return false;
-            LimitlessFence.FenceSend sent;
-            try { sent = LimitlessFence.GmRoundSend(__instance); }
-            catch (Exception ex)
-            {
-                Plugin.Log.LogError("[LIMIT] the round send faulted: " + ex.Message);
-                return true;
-            }
-            if (sent == LimitlessFence.FenceSend.Vanilla) return true;
-            try { if (TimeHandler.instance != null) TimeHandler.instance.DoSlowDown(); } catch { }
-            return false;
-        }
-
-        /// <summary>#83: the fence advertises its capability only while this
-        /// prefix attached (LimitlessFence.PlayerDiedLive).</summary>
-        [HarmonyCleanup]
-        private static Exception Cleanup(MethodBase original, Exception exception)
-        {
-            if (original != null) return exception;
-            if (exception == null) LimitlessFence.PlayerDiedLive = true;
-            return VanillaFixSupport.Cleanup("LimitlessFence player died", exception);
         }
     }
 }
