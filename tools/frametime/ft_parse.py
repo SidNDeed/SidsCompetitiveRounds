@@ -291,7 +291,7 @@ INT_KEYS = {"written", "withheld", "seg", "pair", "base_us", "segs", "of", "cycl
             "cap", "steady", "reads_on", "reads_win", "writes_on", "starts", "nonempty", "faults",
             "reads", "scopes", "tmax", "unscoped", "depth_err",
             "run", "pos", "coin", "wi", "f0", "res", "gcn", "cW", "cR", "cS", "cE", "prun", "nm", "cyc", "p90",
-            "own_split"}
+            "own_split", "recv_offmain", "ledger_cycle_miss", "sock_p95", "sock_n"}
 # the B11 window line (ruling R6-A3.11.138, SHARED.md's line contract): the fields it appends to the w line, in order.
 # q = C° by tenth, r = the retained direct execution R by tenth, qn = frames by tenth, prun = the window is in a plant
 # run (spun or not; the w line's own plant= marks a window actually planted, its own partial= is the only partial
@@ -2121,6 +2121,12 @@ def _bins(n):
     return [max(0, min(BIN_FRAMES, n - BIN_FRAMES * j)) for j in range(TENTHS)]
 
 
+# SHARED.md (md5 2119eb2e): the writer types in order (FtLedger.TypeNames). log, hash and sock run off the main thread
+# and add to the writer cost; recv runs on the main thread, its cycles already inside C: never added a second time
+WRITER_TYPES = ("log", "hash", "recv", "sock")
+WRITER_ADDED = ("log", "hash", "sock")
+
+
 def _typed(v, width, na=False):
     """wu (width 2: units, cycles) or tok (width 7) as {type: [ints]}: items type:a:b or type:a,b,...; ';' between
     types. cycles may print NA (na=True), read as None. None when the text is not of that form or names a type twice."""
@@ -2130,7 +2136,8 @@ def _typed(v, width, na=False):
     for item in v.split(";"):
         t, _, rest = item.partition(":")
         xs = rest.split(":") if width == 2 else rest.split(",")
-        ok = len(xs) == width and all(re.fullmatch(r"\d+", x) or (na and i == 1 and x == "NA") for i, x in enumerate(xs))
+        ok = len(xs) == width and all(re.fullmatch(r"-?\d+" if width == 7 else r"\d+", x)
+                                      or (na and i == 1 and x == "NA") for i, x in enumerate(xs))
         if not t or not ok or t in out:
             return None
         out[t] = [None if x == "NA" else int(x) for x in xs]
@@ -2183,12 +2190,15 @@ def window_faults(w):
     if tok is None:
         f.append("%s: tok=%s is not type:open0,enqON,enqOFF,doneON,doneOFF,disc,open1;..." % (tag, w["tok"]))
     else:
+        # SHARED.md (md5 2119eb2e): the conservation sum is an identity of the emitter (open is computed from the
+        # same counters), so the checks are open1 >= 0 here and open0 = the previous window's open1 (window_reconcile)
         for t, x in sorted(tok.items()):
-            if x[0] + x[1] + x[2] != x[3] + x[4] + x[5] + x[6]:
-                f.append("%s: %s's token ledger %s does not reconcile (open0 + enqueues = completions + discards + "
-                         "open1)" % (tag, t, ",".join(map(str, x))))
-    if wu is not None and tok is not None and set(wu) != set(tok):
-        f.append("%s: wu types %s and tok types %s differ" % (tag, ",".join(sorted(wu)), ",".join(sorted(tok))))
+            if x[6] < 0:
+                f.append("%s: %s open1=%d is below 0 (a service counted on the wrong type)" % (tag, t, x[6]))
+    if wu is not None and tuple(wu) != WRITER_TYPES:
+        f.append("%s: wu types %s are not %s" % (tag, ",".join(wu), ",".join(WRITER_TYPES)))
+    if tok is not None and tuple(tok) != WRITER_TYPES:
+        f.append("%s: tok types %s are not %s" % (tag, ",".join(tok), ",".join(WRITER_TYPES)))
     return f
 
 
@@ -2251,6 +2261,12 @@ def window_reconcile(recs):
             want = "none" if prev is None else prev["arm"]
             if w["pred"] != want:
                 miss.append("window %s.%d: pred=%s, the game's previous window is %s" % (w["pt"], w["wi"], w["pred"], want))
+            if prev is not None:
+                t0, t1 = _typed(w["tok"], 7), _typed(prev["tok"], 7)
+                for t in (sorted(set(t0) & set(t1)) if t0 and t1 else ()):
+                    if t0[t][0] != t1[t][6]:
+                        miss.append("window %s.%d: %s open0=%d, the game's previous window's open1=%d"
+                                    % (w["pt"], w["wi"], t, t0[t][0], t1[t][6]))
             res = 1 if prev is not None and prev["prun"] == 1 and w["prun"] == 0 else 0
             if w["res"] != res:
                 miss.append("window %s.%d: res=%d, needs %d (the first window after a plant run)" % (w["pt"], w["wi"],
@@ -2412,6 +2428,11 @@ def b11_terms(recs, first_game=1, beta_us=BETA_US):
                      -share_p * sp * w["n"] * b / (2 * npart))
             _add(hp, g, e2, 0.5 * share_p * sp * sum(y) / npart)
     gna = [w for w in pop if w["cG"] is None]
+    # D_common (the integrator's ruling on the hand-back (4), RUL:3452, 3511-3512): the direct execution of every
+    # scope that runs while the arm is OFF, (cR + cW) per frame, over the ordinary full OFF windows
+    ofw = [w for w in pop if w["arm"] == "OFF" and w["partial"] == 0]
+    dcommon = (sum((w["cR"] + w["cW"]) * 1e6 / fh[w["game"]] for w in ofw) / sum(w["n"] for w in ofw)
+               if ofw else None)
     # plant runs (P1's notes): every prun=1 window is out of the estimate; a run fixed before c_plant is unspun
     # (prun=1, no window planted); the plant control (method-v53.md:162) takes the spun ones only
     pr = {}
@@ -2427,10 +2448,10 @@ def b11_terms(recs, first_game=1, beta_us=BETA_US):
     for w in pop:
         pairs.setdefault(coin_of(w), []).append(w)
     return {"B": B, "c": cs, "d10": d10, "D": D, "hp": hp, "N": N, "Ng": Ng, "nfull": nfull, "npart": npart, "loss": loss,
-            "gna": gna, "rows": rows, "pop": pop, "valid": valid, "byg": byg, "plant_runs": len(pr),
+            "gna": gna, "rows": rows, "pop": pop, "valid": valid, "byg": byg, "plant_runs": len(pr), "fh": fh,
             "unspun": unspun, "wu_na": wu_na,
             "units": (sum(1 for x in pairs.values() if len(x) == 2), sum(1 for x in pairs.values() if len(x) == 1)),
-            "dcommon": sum(w["cW"] * 1e6 / fh[w["game"]] for w in pop) / N}
+            "dcommon": dcommon}
 
 
 def _design_sets(*stats):
@@ -2521,8 +2542,8 @@ def stat_interval(stat, z, Ng, N, sets=None):
 
 
 def _ratio_ub(B, D, Ng, N):
-    """r_U (ruling .136 (5)): the upper bound of the switched scopes' external-to-direct ratio in the pairs contrast,
-    (B - D) / D, by Fieller's construction: the largest r whose B - (1 + r) D keeps its upper bound at or above 0,
+    """r_U (ruling .136 (5), the integrator's ruling on the hand-back (4)): the upper bound of the switched scopes'
+    external-to-direct ratio, (B - D) / D with B the carryover-corrected contrast, by Fieller's construction: the largest r whose B - (1 + r) D keeps its upper bound at or above 0,
     under the joint covariance. Infinite when D is not bounded away from 0."""
     sets = _design_sets(B, D)
     b, vb, pgb = ht_var(B, sets)
@@ -2606,9 +2627,16 @@ def b11_estimate(recs, first_game=1, beta_us=BETA_US, exposure=None):
     # bound stands; a positive one gives the joint bound, never under the contrast's own
     bu = max(ub_b, ub_j) if cub > 0 else ub_b
     joint = cub > 0 and ub_j >= ub_b
-    hw, lb = (hj, j - hjl) if joint else (hb, b - hbl)
+    hw = hj if joint else hb
+    # the lower bound for SID and FAIL (the integrator's ruling on the hand-back (2), RUL:3452-3454): every component at
+    # its lower end, the carryover term without its max(0, .) floor; the GC, writer and R-COMMON charges have no lower
+    # end measured, so they enter it as 0
+    lb = j - hjl
     d10 = dict((a, iv(T["d10"][a], Z_LO)) for a in ("ON", "OFF"))
-    r_hat, r_u = _ratio_ub(B, T["D"], Ng, N)
+    # r_U (ruling (4)): on the carryover-corrected external contrast, the charge at its upper end (none when that end
+    # is not above 0, as in bu)
+    xr = J if cub > 0 else B
+    r_hat, r_u = _ratio_ub(xr, T["D"], Ng, N)
     freq = set(r["freq"] for r in recs if r["kind"] == "settled")
     if len(freq) != 1:
         raise Refused("the exposure diagnostics need one Stopwatch frequency (got %s)" % sorted(freq))
@@ -2694,6 +2722,81 @@ def r_common_check(total_lo, r_u, d_common):
     return total_lo > (1.0 + r_u) * d_common
 
 
+def _wu_cyc(w, types):
+    """The window's wu cycles summed over types (NA as 0; NA withholds elsewhere) and its units, cycles."""
+    d = _typed(w["wu"], 2, na=True) or {}
+    return sum(d[t][1] or 0 for t in types if t in d)
+
+
+def writer_added(T):
+    """The off-main writer cycles per frame by arm, us (SHARED.md md5 2119eb2e): log, hash and sock add to the writer
+    cost; recv's cycles are already inside C and are never added again. The input W_U's construction reads."""
+    out = {}
+    for arm in ("ON", "OFF"):
+        ws = [w for w in T["pop"] if w["arm"] == arm]
+        n = sum(w["n"] for w in ws)
+        out[arm] = (sum(_wu_cyc(w, WRITER_ADDED) * 1e6 / T["fh"][w["game"]] for w in ws) / n) if n else None
+    return out
+
+
+def peer_on_share(peer_recs, first_game=1):
+    """s_peer: the peer's ON-frame share over its ordinary B11 windows of the measured games (SHARED.md D5)."""
+    ws = [w for w in peer_recs if b11_line(w) and w["game"] >= first_game and not w["prun"] and not w["res"]]
+    n = sum(w["n"] for w in ws)
+    if n <= 0:
+        raise Refused("the peer log has no ordinary B11 window")
+    return sum(w["n"] for w in ws if w["arm"] == "ON") / n
+
+
+def peer_driven(recs, T, r_u, peer_recs, first_game=1):
+    """The peer-driven charge (SHARED.md D5, RULED 2026-11-11T11:30:19Z): this seat's work on the peer's collector
+    traffic follows the peer's arm. shortfall = (1 + r_U) x recv cycles per frame in this seat's ON windows x
+    (1/s_peer - 1); sock = recv units per frame / s_peer x the upper 95th percentile of sock cycles per datagram (the
+    largest sock_p95 any point prints). Both are upper ends; the SID/FAIL lower bound takes them as 0. Returns
+    (shortfall, sock, s_peer, why): a term is None, with why, when it cannot be computed."""
+    if peer_recs is None:
+        return None, None, None, "no peer log (--peer)"
+    s_peer = peer_on_share(peer_recs, first_game)
+    if s_peer <= 0:
+        return None, None, s_peer, "the peer's ON-frame share is 0"
+    on = [w for w in T["pop"] if w["arm"] == "ON"]
+    n_on = sum(w["n"] for w in on)
+    recv = sum(_wu_cyc(w, ("recv",)) * 1e6 / T["fh"][w["game"]] for w in on) / n_on if n_on else None
+    short = None if recv is None or r_u == float("inf") else (1.0 + r_u) * recv * (1.0 / s_peer - 1.0)
+    units = sum((_typed(w["wu"], 2, na=True) or {}).get("recv", [0, 0])[0] for w in T["pop"]) / T["N"]
+    p95 = [(q["sock_p95"], q["game"]) for q in recs if q["kind"] == "p" and q["pt"] in T["valid"] and "sock_p95" in q]
+    if not p95:
+        return short, None, s_peer, "no point line prints sock_p95"
+    sock = units / s_peer * max(c * 1e6 / T["fh"][g] for c, g in p95)
+    return short, sock, s_peer, None
+
+
+def own_split_faults(recs, T):
+    """own_split per point (the integrator's ruling on the hand-back (3)): an ownership fault, not a quantity; every
+    point of a measured game whose line counts one or more, or prints none, as (pt, count or None)."""
+    return [(q["pt"], q.get("own_split")) for q in recs
+            if q["kind"] == "p" and q["pt"] in T["valid"] and q.get("own_split", 1) != 0]
+
+
+def b11_seat_withholds(recs, e):
+    """The seat-level reasons B1 is withheld for this seat's log: writer cycles printing NA (P1's notes) and any
+    ownership fault (own_split nonzero or not printed, the integrator's ruling on the hand-back (3))."""
+    why = []
+    if e["T"]["wu_na"]:
+        why.append("writer cycles print NA for %s on this seat (W_U not computable)" % ", ".join(e["T"]["wu_na"]))
+    osp = own_split_faults(recs, e["T"])
+    if osp:
+        why.append("ownership faults (own_split) at %s" % ", ".join(pt for pt, _ in osp))
+    # SHARED.md (md5 2119eb2e): recv_offmain and ledger_cycle_miss must be 0 (or printed) in every point
+    for k in ("recv_offmain", "ledger_cycle_miss"):
+        bad = [q["pt"] for q in recs if q["kind"] == "p" and q["pt"] in e["T"]["valid"] and q.get(k, 1) != 0]
+        if bad:
+            why.append("%s nonzero or not printed at %s" % (k, ", ".join(bad)))
+    if e.get("peer_why") == "no peer log (--peer)":
+        why.append("no peer log: the peer-driven charge is not computable (SHARED.md D5)")
+    return why
+
+
 def b11_transitions(recs, T):
     """The class-transition overhead per arm (SHARED.md, P1's notes): nm times the boot line's median cost, as a share
     of the arm's C. It stays in the charge (method-v53.md:13-48): reported, never subtracted. None, with the reason,
@@ -2709,8 +2812,9 @@ def b11_transitions(recs, T):
     return out, "median %d cycles (p90 %d, n %d)" % (mk[0]["cyc"], mk[0]["p90"], mk[0]["n"])
 
 
-def b11_report(recs, ref_recs=None, first_game=1, exposure=None):
-    """The window design's report lines and its figures (exposure: b11_estimate's hook)."""
+def b11_report(recs, ref_recs=None, first_game=1, exposure=None, peer_recs=None):
+    """The window design's report lines and its figures (exposure: b11_estimate's hook; peer_recs: the peer seat's
+    records, for the peer-driven charge)."""
     e = b11_estimate(recs, first_game, exposure=exposure)
     T = e["T"]
     out = []
@@ -2726,16 +2830,10 @@ def b11_report(recs, ref_recs=None, first_game=1, exposure=None):
     out.append("B11 plant runs: %d, %d unspun (fixed before c_plant: prun=1, nothing planted; out of the estimate, "
                "and the plant control takes the spun runs only)%s" % (T["plant_runs"], len(T["unspun"]), "".join(
                    "; %s run %d" % (pt, run) for g, pt, run in T["unspun"])))
-    osp = {"ON": 0, "OFF": 0}
-    gone = 0
-    for q in recs:
-        if q["kind"] == "p" and q["pt"] in T["valid"]:
-            if "own_split" in q:
-                osp[q["arm"]] = osp.get(q["arm"], 0) + q["own_split"]
-            else:
-                gone += 1
-    out.append("B11 own_split (windows written partial by an owner split), by the point's first-window arm: ON %d, OFF "
-               "%d%s" % (osp["ON"], osp["OFF"], "; %d point lines print no own_split" % gone if gone else ""))
+    osp = own_split_faults(recs, T)
+    out.append("B11 own_split (windows written partial by an owner split, an ownership fault): %s"
+               % ("; ".join("%s %s" % (pt, "not printed" if k is None else k) for pt, k in osp) if osp
+                  else "0 in every point"))
     tx, why = b11_transitions(recs, T)
     if tx is None:
         out.append("B11 class transitions: not computable: %s" % why)
@@ -2766,11 +2864,24 @@ def b11_report(recs, ref_recs=None, first_game=1, exposure=None):
     out.append("R-CARRY falsifier: between-window d_ON,10 %.3f +- %.3f us, d_OFF,10 %.3f +- %.3f us: %s"
                % (e["d10"]["ON"][0], e["d10"]["ON"][1], e["d10"]["OFF"][0], e["d10"]["OFF"][1],
                   "FALSIFIED in %s (lower end above 0)" % "/".join(fals) if fals else "not falsified at this precision"))
-    eu = e["r_u"] * e["dcommon"] if e["r_u"] != float("inf") else None
-    out.append("R-COMMON charge: r_U %s (estimate %.4f), D_common %.3f us per frame, r_U D_common %s"
-               % ("%.4f" % e["r_u"], e["r_hat"], e["dcommon"], "%.3f us" % eu if eu is not None else "not bounded"))
+    eu = (e["r_u"] * e["dcommon"] if e["r_u"] != float("inf") and e["dcommon"] is not None else None)
+    out.append("R-COMMON charge: r_U %s (estimate %.4f), D_common %s per frame, r_U D_common %s"
+               % ("%.4f" % e["r_u"], e["r_hat"], "%.3f us" % e["dcommon"] if e["dcommon"] is not None
+                  else "not computable (no ordinary full OFF window)", "%.3f us" % eu if eu is not None
+                  else "not bounded"))
+    short, sock, s_peer, pwhy = peer_driven(recs, T, e["r_u"], peer_recs, first_game)
+    e["peer"], e["peer_why"] = (None if short is None or sock is None else short + sock), pwhy
+    out.append("B11 peer-driven charge (SHARED.md D5): s_peer %s; recv shortfall %s; sock %s%s"
+               % ("%.4f" % s_peer if s_peer is not None else "not read", "%.3f us" % short if short is not None
+                  else "not computable", "%.3f us" % sock if sock is not None else "not computable",
+                  "" if pwhy is None else " (%s)" % pwhy))
+    wa = writer_added(T)
+    out.append("B11 writers off the main thread (log, hash, sock; recv is inside C): ON %s, OFF %s per frame"
+               % tuple("%.3f us" % wa[a] if wa[a] is not None else "no frames" for a in ("ON", "OFF")))
     if ref_recs is None:
         out.append("R-COMMON UNTESTED: no reference record set")
+    elif e["dcommon"] is None:
+        out.append("R-COMMON comparator not computable: no ordinary full OFF window for D_common")
     else:
         tot, tlo = reference_common_cost(recs, ref_recs, first_game)
         bar = (1.0 + e["r_u"]) * e["dcommon"]
@@ -2792,12 +2903,13 @@ def b11_report(recs, ref_recs=None, first_game=1, exposure=None):
     return out, e
 
 
-def b11_bound(bu, ex, g_u, w_u, e_u):
+def b11_bound(bu, ex, g_u, w_u, e_u, p_u):
     """B_U for the window design (method-v54.md:115-123): the corrected contrast's bound plus the exposure bound, the
-    always-ON GC and writer charges and R-COMMON's charge; None while any term is not computable."""
-    if any(x is None for x in (bu, ex, g_u, w_u, e_u)):
+    always-ON GC and writer charges, R-COMMON's charge and the peer-driven charge (SHARED.md D5), each at its upper
+    end; None while any term is not computable."""
+    if any(x is None for x in (bu, ex, g_u, w_u, e_u, p_u)):
         return None
-    return bu + ex + g_u + w_u + e_u
+    return bu + ex + g_u + w_u + e_u + p_u
 
 
 def classify(u, tref, hw, lb):
@@ -2963,9 +3075,10 @@ def report(text, peer=None, src="log", peer_src="peer", ref=None, ref_src="refer
                    "structures%s" % (a3v, len(a3r), "".join("; %s r_max %.4f d %.4f us" % (k, a3r[k], a3d[k]) for k in sorted(a3r))))
         lead = max(0.0, de + dh) / min(1.0, max(elo2, 1e-9))
         u = lead + ku + du + a3v
-        # the decision's half-width and lower bound for the point design: dC's half-width (VR4's), and U with dC at
-        # its lower end in place of its upper (the other terms are charges with no lower end of their own)
-        hw4, u_lo = dh, u - lead + max(0.0, de - dh)
+        # the decision's half-width and lower bound for the point design (the integrator's ruling on the hand-back
+        # (2), RUL:3452-3454): dC's half-width, and every component at its lower end: dC's, unfloored and unscaled
+        # (e_C <= 1); K_up, D_up and A3 are charges with no lower end measured, so 0
+        hw4, u_lo = dh, de - dh
         out.append("U %.2f us = max(0, dC_up %.2f) / min(1, e_C_lo %.4f) + K_up %.3f + D_up %.3f + A3 %.3f; T_ref %.1f us"
                    % (u, de + dh, elo2, ku, du, a3v, tr))
         out.append("U without D_up %.2f us (reported)" % (lead + ku + a3v))
@@ -3086,19 +3199,18 @@ def report(text, peer=None, src="log", peer_src="peer", ref=None, ref_src="refer
         # the window design (ruling R6-A3.11.138): its own estimator and decision; R-CARRY and R-COMMON beside it
         e11 = None
         try:
-            lines11, e11 = b11_report(recs, ref_recs, exposure=exposure)
+            lines11, e11 = b11_report(recs, ref_recs, exposure=exposure, peer_recs=peer_recs)
             out += lines11
         except (Refused, ZeroDivisionError, ValueError) as e:
             out.append("B11 window estimator not computable: %s" % e)
         if g1 is None and e11 is None:
             g1 = "withheld: the B11 window estimator not computable"
-        if g1 is None and e11["T"]["wu_na"]:
-            g1 = ("withheld: writer cycles print NA for %s on this seat (W_U not computable)"
-                  % ", ".join(e11["T"]["wu_na"]))
+        if g1 is None and b11_seat_withholds(recs, e11):
+            g1 = "withheld: %s" % "; ".join(b11_seat_withholds(recs, e11))
         if g1 is None and e11["ex"] is None:
             g1 = ("WITHHELD: the exposure obligation is not met: neither exposure-equivalence evidence nor a "
                   "discrepancy envelope (method-v53.md:37, ruling R6-A3.11.140 (3))")
-        bu11 = None if e11 is None else b11_bound(e11["bu"], e11["ex"], None, None, e11["eu"])
+        bu11 = None if e11 is None else b11_bound(e11["bu"], e11["ex"], None, None, e11["eu"], e11["peer"])
         if g1 is None and bu11 is None:
             g1 = ("withheld: B_U not computable: G_U (the always-ON GC envelope, or the all-GC fallback) and W_U (the "
                   "writer charge) have no records (method-v54.md:23-41), and D_U has no B11 record")
@@ -3141,6 +3253,12 @@ if __name__ == "__main__":
                 raise Refused("--ref needs a reference log")
             _ref = open(_ref_src, encoding="utf-8", errors="replace").read()
             _args = _args[:_i] + _args[_i + 2:]
+        if "--peer" in _args:
+            # SHARED.md D5: the peer seat's log of the same sitting, named; the second positional form stays
+            _i = _args.index("--peer")
+            if _i + 1 >= len(_args) or len(_args) > 3:
+                raise Refused("--peer needs the peer seat's log (and no second positional log)")
+            _args = _args[:_i] + _args[_i + 2:] + [_args[_i + 1]]
         _peer = open(_args[1], encoding="utf-8", errors="replace").read() if len(_args) > 1 else None
         print(report(open(_args[0], encoding="utf-8", errors="replace").read(), peer=_peer, src=_args[0],
                      peer_src=_args[1] if len(_args) > 1 else "peer", ref=_ref, ref_src=_ref_src or "reference"))
