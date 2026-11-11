@@ -102,12 +102,47 @@ namespace CompetitiveRounds
             _gok = gok;
         }
 
+        /// <summary>Class transitions on the main thread (every Switch): the window line's nm.</summary>
+        internal static long Marks;
+
         private static void Switch(int cls)
         {
+            Marks++;
             long g;
             bool gok = FtClock.GcRead(FtClock.GcFn, out g);
             Mark(FtClock.Cycles(), g, gok);
             _cls = cls;
+        }
+
+        /// <summary>The boot line `[FRAME-TIME] mark cost cyc= p90= n=` (B11 SHARED.md, the window line's nm): n
+        /// back-to-back class transitions (Switch, the code every mark runs, its GC read included) on the main thread,
+        /// each bracketed by two cycle reads, at the first frame boundary (FtClock.OnStart, before game 0). A bracket
+        /// holds one cycle read beyond the transition, so cyc (the lower median) and p90 bound one transition from
+        /// above. Acc, Marks and the class state are restored after, so no class gains or loses cycles: the
+        /// calibration's cycles fall to the class open before it, in that menu frame. It measures the overhead; the
+        /// overhead stays in the charge (method-v53.md:13-48).</summary>
+        internal static void CalibrateMarks(int n)
+        {
+            var acc = (long[])Acc.Clone();
+            int cls = _cls;
+            ulong k = _k;
+            long g = _g, marks = Marks;
+            bool gok = _gok;
+            var s = new long[n];
+            for (int i = 0; i < n; i++)
+            {
+                ulong a = FtClock.Cycles();
+                Switch((i & 1) == 0 ? ClsS : ClsR);
+                s[i] = unchecked((long)(FtClock.Cycles() - a));
+            }
+            System.Array.Copy(acc, Acc, Classes);
+            _cls = cls;
+            _k = k;
+            _g = g;
+            _gok = gok;
+            Marks = marks;
+            System.Array.Sort(s);
+            Plugin.Log.LogInfo("[FRAME-TIME] mark cost cyc=" + s[(n - 1) / 2] + " p90=" + s[(int)((n - 1) * 9L / 10)] + " n=" + n);
         }
 
         /// <summary>FtClock.OnStart, at every frame boundary, with the readings it took for the closing frame: the

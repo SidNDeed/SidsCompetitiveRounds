@@ -260,6 +260,7 @@ namespace CompetitiveRounds
         internal static int EnterRpc(ExitGames.Client.Photon.Hashtable data, Photon.Realtime.Player sender)
         {
 #if SCR_FRAMETIME
+            ulong ftRecv = FtLedger.RecvEnter();   // D5 recv: one inbound message, on the thread that runs it
             int ftScope = FtA3.TEnter(); try {
 #endif
 #if SCR_FRAMETIME
@@ -290,7 +291,7 @@ namespace CompetitiveRounds
             catch { }
             return before;
 #if SCR_FRAMETIME
-            } finally { FtA3.TExit(ftScope); }
+            } finally { FtA3.TExit(ftScope); FtLedger.RecvExit(ftRecv); }
 #endif
         }
 
@@ -306,9 +307,13 @@ namespace CompetitiveRounds
         internal static void ExitRpc(int before)
         {
 #if SCR_FRAMETIME
+            ulong ftRecv = FtClock.Cycles();   // D5 recv: ExitRpc's cycles, no message of its own
             FtA3.Wrote(FtA3.SE_frames);
 #endif
             if (before >= 0) _ctxDepth = before;
+#if SCR_FRAMETIME
+            FtLedger.RecvCycles(ftRecv);
+#endif
         }
 
         /// <summary>Combat evidence: the innermost RPC frame as EnterRpc copied
@@ -1111,8 +1116,23 @@ namespace CompetitiveRounds
             try
             {
                 string s, st;
+#if SCR_FRAMETIME
+                // D5 hash: each job measured on the thread that runs it (FtLedger, type hash)
+                bool ftJob = _dllState == ID_PENDING, ftOk = false;
+                ulong ftK = ftJob ? FtLedger.HashBegin() : 0;
+                try {
+#endif
                 if (_dllState == ID_PENDING) { Hash(_ownPath, out s, out st); _dllSha = s; _dllState = st; }
+#if SCR_FRAMETIME
+                ftOk = true; } finally { if (ftJob) FtLedger.HashEnd(ftK, ftOk); }
+                ftJob = _gameState == ID_PENDING; ftOk = false;
+                ftK = ftJob ? FtLedger.HashBegin() : 0;
+                try {
+#endif
                 if (_gameState == ID_PENDING) { Hash(_gamePath, out s, out st); _gameSha = s; _gameState = st; }
+#if SCR_FRAMETIME
+                ftOk = true; } finally { if (ftJob) FtLedger.HashEnd(ftK, ftOk); }
+#endif
             }
             catch { FailPending(); }
 #if SCR_FRAMETIME

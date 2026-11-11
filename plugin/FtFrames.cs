@@ -259,7 +259,8 @@ namespace CompetitiveRounds
                 + " t0=" + _t0 + " t1=" + System.Diagnostics.Stopwatch.GetTimestamp() + " answer=" + FtReplay.AnswerField
                 + " off_g=" + _offG + " off_gn=" + _offGn + " off_on=" + _offOn + " on_guarded=" + _onGuarded
                 + " own_split=" + _ownSplit + " span_class_overflow=" + FtSpan.ClassOverflow
-                + " gc_read_failures=" + FtSpan.GcReadFailures);
+                + " gc_read_failures=" + FtSpan.GcReadFailures + " recv_offmain=" + FtLedger.RecvOffMain
+                + " ledger_cycle_miss=" + FtLedger.CycleMiss);
             LastN = _pn;
             LastSF = _pF;
             _btT0 = BetweenTicks();
@@ -304,8 +305,8 @@ namespace CompetitiveRounds
             sb.Append(" gc=").Append(_wGc1 - _wGc0);   // first measured frame's start to the last one's end
             sb.Append(" run=").Append(_oRun).Append(" pos=").Append(_oPos).Append(" unit=").Append(_oP24 ? "P24" : "P13")
               .Append(" coin=").Append(_oCoin).Append(" wi=").Append(_oK).Append(" f0=").Append(_oF0)
-              .Append(" pred=").Append(Arm(_oPred)).Append(" plant=").Append(_oPlantRun ? 1 : 0).Append(" res=").Append(_oRes ? 1 : 0)
-              .Append(" partial=").Append(partial ? 1 : 0).Append(" gcn=").Append(_wGc1 - _wGc0).Append(" cG=");
+              .Append(" pred=").Append(Arm(_oPred)).Append(" prun=").Append(_oPlantRun ? 1 : 0).Append(" res=").Append(_oRes ? 1 : 0)
+              .Append(" gcn=").Append(_wGc1 - _wGc0).Append(" cG=");
             if (_wGok) sb.Append(_wG); else sb.Append("NA");
             sb.Append(" cW=").Append(_wW).Append(" cR=").Append(_wR).Append(" cS=").Append(_wS2).Append(" cE=").Append(_wE);
             AppendBins(sb, " q=", _tq);
@@ -315,6 +316,7 @@ namespace CompetitiveRounds
             FtLedger.AppendWu(sb, _lb, _le);
             sb.Append(" tok=");
             FtLedger.AppendTok(sb, _lb, _le);
+            sb.Append(" nm=").Append(FtLedger.Marks(_lb, _le));
             Plugin.Log.LogInfo(sb.ToString());
             Array.Copy(_le, _lb, FtLedger.Fields);
             _wn = 0; _wF = 0; _wS = 0; _wC = 0; _wMaxF = 0; _wP = 0;

@@ -56,67 +56,141 @@ namespace CompetitiveRounds
     }
 
     /// <summary>The writer ledger (ruling R6-A3.11.136 (2)(a); method-v54.md:33-48; B11 SHARED.md D5): tokens and service
-    /// cost for every scope that runs collector-originated work off the main thread in format M. FtUpload's queues are
-    /// closed in this variant (FtUpload above), so two scopes remain:
+    /// cost per writer type, for every scope that runs collector-originated work off the main thread in format M and
+    /// for the receive handlers of the peer's collector traffic. FtUpload's queues are closed in this variant
+    /// (FtUpload above). Three types, keyed in wu and tok by TypeNames:
     ///
-    /// LOG, BepInEx's disk log (BepInEx 5.4.19 DiskLogListener): LogEvent writes each line into LogWriter on the
+    /// log: BepInEx's disk log (BepInEx 5.4.19 DiskLogListener). LogEvent writes each line into LogWriter on the
     /// logging thread, and a thread-pool timer (FlushTimer, every 2 s) flushes LogWriter to the file. Install wraps
     /// LogWriter (Tap). A line written on the main thread while a collector scope is open (FtSpan.CollectorOpen) is a
-    /// token: it is enqueued in the arm of the window it was written in (the gate then), its write into the buffer
-    /// runs as a W scope (FtSpan.PushWriter), and it is done at the next Flush, on whatever thread, in the arm of the
-    /// window open then; the flush's own executed cycles (FtClock.Cycles on the flushing thread) are its service.
-    /// A flush serves every buffered line, so its cycles overstate the collector lines' share.
+    /// token: it is enqueued in the arm of the window it was written in, its write into the buffer runs as a W scope
+    /// (FtSpan.PushWriter), and it is done at the next Flush, on whatever thread, in the arm of the window open then.
+    /// The flush's own executed cycles (FtClock.Cycles on the flushing thread) are charged whole to the tokens it
+    /// carries. A flush serves every buffered line, so this overstates the collector lines' share.
     ///
-    /// HASH, SeatEvidence's identity hash (SeatEvidence.HashPending on its own thread): FtHeavy.HashT0 and HashT1,
-    /// which the hash thread stamps at its start and end, are polled at every frame boundary (PollHash): the job is
-    /// enqueued when HashT0 is first seen and done when HashT1 is. Its executed cycles are not readable here (its
-    /// thread is not the caller's), so its wu cycles print NA.
+    /// hash: SeatEvidence's identity hash. SeatEvidence.HashPending runs its jobs (the mod's DLL, then the game's) on
+    /// the thread StartHashing starts, or on the main thread on the quitting path (CompleteIdentityNow). Each job is
+    /// enqueued as it starts and done as it ends (HashBegin, HashEnd), and its cycles are read on the thread that runs
+    /// it (FtClock.Cycles reads the calling thread's counter). A job that throws is discarded, its cycles still counted.
     ///
-    /// Counters are cumulative and taken under one lock (Take), so a window's tok always reconciles:
-    /// open0 + enqON + enqOFF = doneON + doneOFF + disc + open1. No scope discards (disc 0).</summary>
+    /// recv: the receive handlers of the peer's collector traffic, SeatEvidence.EnterRpc (each inbound RPC's
+    /// envelope, from PhotonNetwork.ExecuteRpc) and PeerBuild's per-seat read of a peer's cr_build (PeerBuild.Tick).
+    /// Each message handled is one unit and one token, enqueued at the handler's entry and done at its exit; its
+    /// cycles are the handler's own, on its thread. SeatEvidence.ExitRpc adds its cycles with no unit. RecvOffMain
+    /// counts handler entries off the main thread. On the main thread these cycles are already inside the frame's C;
+    /// recv names them, it adds nothing to C.
+    ///
+    /// Counters are cumulative and taken under one lock (Take), so every type's tok reconciles in every window:
+    /// open0 + enqON + enqOFF = doneON + doneOFF + disc + open1. An event's arm is FtGate.Off when it happens. Take
+    /// also carries FtSpan.Marks, the window's nm.</summary>
     internal static class FtLedger
     {
-        internal const int Log = 0, Hash = 1, Types = 2;
-        internal static readonly string[] TypeNames = { "log", "hash" };
-        private static readonly bool[] CyclesKnown = { true, false };
+        internal const int Log = 0, Hash = 1, Recv = 2, Types = 3;
+        internal static readonly string[] TypeNames = { "log", "hash", "recv" };
 
-        /// <summary>Take's layout: enqON, enqOFF, doneON, doneOFF, disc, then per type its units and cycles done.</summary>
-        internal const int EnqOn = 0, EnqOff = 1, DoneOn = 2, DoneOff = 3, Disc = 4, Fields = 5 + 2 * Types;
+        /// <summary>Per type t, at t * Per: enqON, enqOFF, doneON, doneOFF, disc, units, cycles. Then FtSpan.Marks.</summary>
+        internal const int EnqOn = 0, EnqOff = 1, DoneOn = 2, DoneOff = 3, Disc = 4, Units = 5, Cyc = 6, Per = 7;
+        internal const int Nm = Types * Per, Fields = Nm + 1;
 
-        private static readonly long[] _c = new long[Fields];
+        private static readonly long[] _c = new long[Nm];
         private static readonly object _lock = new object();
         private static long _pendingLog;
-        private static bool _hashEnq, _hashDone;
         internal static bool LogTapped;
+        internal static long RecvOffMain;   // recv handler entries off the main thread
+        internal static long CycleMiss;     // a scope whose cycle read failed (its cycles are counted as 0)
 
+        /// <summary>Main thread (FtFrames).</summary>
         internal static void Take(long[] into)
         {
-            lock (_lock) System.Array.Copy(_c, into, Fields);
+            lock (_lock) System.Array.Copy(_c, into, Nm);
+            into[Nm] = FtSpan.Marks;
         }
 
-        /// <summary>The inventory in a snapshot: enqueued, not yet done or discarded.</summary>
-        internal static long Level(long[] s)
+        /// <summary>Type t's inventory in a snapshot: enqueued, not yet done or discarded.</summary>
+        internal static long Level(long[] s, int t)
         {
-            return s[EnqOn] + s[EnqOff] - s[DoneOn] - s[DoneOff] - s[Disc];
+            int b = t * Per;
+            return s[b + EnqOn] + s[b + EnqOff] - s[b + DoneOn] - s[b + DoneOff] - s[b + Disc];
         }
 
-        /// <summary>wu=type:units:cycles;... from two snapshots (cycles NA where the scope's cycles are not read).</summary>
+        /// <summary>wu=type:units:cycles;... from two snapshots.</summary>
         internal static void AppendWu(StringBuilder sb, long[] a, long[] b)
         {
             for (int t = 0; t < Types; t++)
             {
+                int o = t * Per;
                 if (t > 0) sb.Append(';');
-                sb.Append(TypeNames[t]).Append(':').Append(b[5 + 2 * t] - a[5 + 2 * t]).Append(':');
-                if (CyclesKnown[t]) sb.Append(b[6 + 2 * t] - a[6 + 2 * t]); else sb.Append("NA");
+                sb.Append(TypeNames[t]).Append(':').Append(b[o + Units] - a[o + Units]).Append(':').Append(b[o + Cyc] - a[o + Cyc]);
             }
         }
 
-        /// <summary>tok=open0,enqON,enqOFF,doneON,doneOFF,disc,open1 from two snapshots.</summary>
+        /// <summary>tok=type:open0,enqON,enqOFF,doneON,doneOFF,disc,open1;... from two snapshots.</summary>
         internal static void AppendTok(StringBuilder sb, long[] a, long[] b)
         {
-            sb.Append(Level(a)).Append(',').Append(b[EnqOn] - a[EnqOn]).Append(',').Append(b[EnqOff] - a[EnqOff])
-              .Append(',').Append(b[DoneOn] - a[DoneOn]).Append(',').Append(b[DoneOff] - a[DoneOff])
-              .Append(',').Append(b[Disc] - a[Disc]).Append(',').Append(Level(b));
+            for (int t = 0; t < Types; t++)
+            {
+                int o = t * Per;
+                if (t > 0) sb.Append(';');
+                sb.Append(TypeNames[t]).Append(':').Append(Level(a, t))
+                  .Append(',').Append(b[o + EnqOn] - a[o + EnqOn]).Append(',').Append(b[o + EnqOff] - a[o + EnqOff])
+                  .Append(',').Append(b[o + DoneOn] - a[o + DoneOn]).Append(',').Append(b[o + DoneOff] - a[o + DoneOff])
+                  .Append(',').Append(b[o + Disc] - a[o + Disc]).Append(',').Append(Level(b, t));
+            }
+        }
+
+        /// <summary>nm: the window's class transitions.</summary>
+        internal static long Marks(long[] a, long[] b) { return b[Nm] - a[Nm]; }
+
+        private static void Enq(int t, long n)
+        {
+            lock (_lock) _c[t * Per + (FtGate.Off ? EnqOff : EnqOn)] += n;
+        }
+
+        /// <summary>n tokens served (done, or discarded when !ok), with their units and the cycles between two reads.</summary>
+        private static void Serve(int t, long n, bool ok, ulong k0, ulong k1)
+        {
+            long c = 0;
+            if (k0 == 0 || k1 == 0) Interlocked.Increment(ref CycleMiss); else c = unchecked((long)(k1 - k0));
+            lock (_lock)
+            {
+                int o = t * Per;
+                if (ok) { _c[o + (FtGate.Off ? DoneOff : DoneOn)] += n; _c[o + Units] += n; }
+                else _c[o + Disc] += n;
+                _c[o + Cyc] += c;
+            }
+        }
+
+        /// <summary>SeatEvidence.HashPending, on the thread that runs the job: one job starts.</summary>
+        internal static ulong HashBegin()
+        {
+            Enq(Hash, 1);
+            return FtClock.Cycles();
+        }
+
+        /// <summary>The job started by HashBegin ended: done when ok, discarded when it threw.</summary>
+        internal static void HashEnd(ulong k0, bool ok)
+        {
+            Serve(Hash, 1, ok, k0, FtClock.Cycles());
+        }
+
+        /// <summary>A recv handler's entry, on its thread: one message.</summary>
+        internal static ulong RecvEnter()
+        {
+            if (Thread.CurrentThread.ManagedThreadId != FtSpan.MainThread) Interlocked.Increment(ref RecvOffMain);
+            Enq(Recv, 1);
+            return FtClock.Cycles();
+        }
+
+        /// <summary>The handler entered by RecvEnter exits (finally): the message is done.</summary>
+        internal static void RecvExit(ulong k0)
+        {
+            Serve(Recv, 1, true, k0, FtClock.Cycles());
+        }
+
+        /// <summary>Recv work with no message of its own (SeatEvidence.ExitRpc): cycles only.</summary>
+        internal static void RecvCycles(ulong k0)
+        {
+            Serve(Recv, 0, true, k0, FtClock.Cycles());
         }
 
         /// <summary>FtClock.Install: wraps the disk log's writer. Logged either way.</summary>
@@ -138,22 +212,7 @@ namespace CompetitiveRounds
                 }
             }
             catch (System.Exception ex) { why = "failed:" + ex.GetType().Name; }
-            Plugin.Log.LogInfo("[FRAME-TIME] ledger log=" + (LogTapped ? 1 : 0) + " why=" + why + " hash=poll");
-        }
-
-        /// <summary>FtClock.OnStart, every frame boundary: the hash job's tokens from the hash thread's stamps.</summary>
-        internal static void PollHash()
-        {
-            if (!_hashEnq && Interlocked.Read(ref FtHeavy.HashT0) != 0)
-            {
-                _hashEnq = true;
-                lock (_lock) _c[FtGate.Off ? EnqOff : EnqOn]++;
-            }
-            if (_hashEnq && !_hashDone && Interlocked.Read(ref FtHeavy.HashT1) != 0)
-            {
-                _hashDone = true;
-                lock (_lock) { _c[FtGate.Off ? DoneOff : DoneOn]++; _c[5 + 2 * Hash]++; }
-            }
+            Plugin.Log.LogInfo("[FRAME-TIME] ledger log=" + (LogTapped ? 1 : 0) + " why=" + why + " types=" + string.Join(",", TypeNames));
         }
 
         private sealed class Tap : System.IO.TextWriter
@@ -179,7 +238,7 @@ namespace CompetitiveRounds
                 try { _in.WriteLine(value); }
                 finally { FtSpan.PopWriter(); }
                 // counted after the write, so a concurrent flush can never mark done a line not yet in the buffer
-                lock (_lock) { _c[FtGate.Off ? EnqOff : EnqOn]++; _pendingLog++; }
+                lock (_lock) { _c[Log * Per + (FtGate.Off ? EnqOff : EnqOn)]++; _pendingLog++; }
             }
 
             public override void Flush()
@@ -187,14 +246,11 @@ namespace CompetitiveRounds
                 ulong k0 = FtClock.Cycles();
                 _in.Flush();
                 ulong k1 = FtClock.Cycles();
-                lock (_lock)
-                {
-                    long n = _pendingLog;
-                    _pendingLog = 0;
-                    _c[FtGate.Off ? DoneOff : DoneOn] += n;
-                    _c[5 + 2 * Log] += n;
-                    _c[6 + 2 * Log] += unchecked((long)(k1 - k0));
-                }
+                long n;
+                lock (_lock) { n = _pendingLog; _pendingLog = 0; }
+                // the whole flush is charged to the lines it carries (ruled conservative, SHARED.md D5); a flush that
+                // carries none charges nothing
+                if (n > 0) Serve(Log, n, true, k0, k1);
             }
 
             protected override void Dispose(bool disposing)

@@ -158,6 +158,9 @@ namespace CompetitiveRounds
             return false;
         }
 
+        private static bool _marksCal;
+        internal const int MarkCalN = 10000;
+
         private static void OnStart()
         {
             long t = Stopwatch.GetTimestamp();
@@ -167,7 +170,6 @@ namespace CompetitiveRounds
             long g;
             bool gok = GcRead(GcFn, out g);
             FtSpan.Cut(k, g, gok);
-            FtLedger.PollHash();
             bool live = FtSchedule.ReadLive();
             if (_open)
             {
@@ -197,6 +199,11 @@ namespace CompetitiveRounds
             _s = 0;
             _ended = false;
             _open = true;
+            if (!_marksCal)
+            {
+                _marksCal = true;   // once, at the first frame boundary: before game 0
+                FtSpan.CalibrateMarks(MarkCalN);
+            }
             if (FtSpan.Depth != 0) DepthViolations++;
             InScript = true;
             FtSchedule.Boundary(live);

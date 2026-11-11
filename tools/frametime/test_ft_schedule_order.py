@@ -350,7 +350,8 @@ TIP_FRAMES = {
         '+ " t0=" + _t0 + " t1=" + System.Diagnostics.Stopwatch.GetTimestamp() + " answer=" + FtReplay.AnswerField',
         '+ " off_g=" + _offG + " off_gn=" + _offGn + " off_on=" + _offOn + " on_guarded=" + _onGuarded',
         '+ " own_split=" + _ownSplit + " span_class_overflow=" + FtSpan.ClassOverflow',
-        '+ " gc_read_failures=" + FtSpan.GcReadFailures);',
+        '+ " gc_read_failures=" + FtSpan.GcReadFailures + " recv_offmain=" + FtLedger.RecvOffMain',
+        '+ " ledger_cycle_miss=" + FtLedger.CycleMiss);',
         'LastN = _pn;',
         'LastSF = _pF;',
         '_btT0 = BetweenTicks();',
@@ -379,14 +380,23 @@ SIG_SP_OPEN = 'internal static bool Open(int component, int kind)'
 SIG_SP_CLOSE = 'internal static void Close(bool opened)'
 SIG_SP_PUSHW = 'internal static void PushWriter()'
 SIG_SP_POPW = 'internal static void PopWriter()'
+SIG_SP_CAL = 'internal static void CalibrateMarks(int n)'
 SIG_CL_START = 'private static void OnStart()'
 SIG_CL_GCREAD = 'internal static bool GcRead(System.Func<long> fn, out long g)'
 SIG_PL_RUN = 'internal static bool RunPlanted(int seed, int game, long run)'
 SIG_LG_WRITELINE = 'public override void WriteLine(string value)'
 SIG_LG_FLUSH = 'public override void Flush()'
-SIG_LG_POLL = 'internal static void PollHash()'
+SIG_LG_TAKE = 'internal static void Take(long[] into)'
+SIG_LG_LEVEL = 'internal static long Level(long[] s, int t)'
+SIG_LG_WU = 'internal static void AppendWu(StringBuilder sb, long[] a, long[] b)'
 SIG_LG_TOK = 'internal static void AppendTok(StringBuilder sb, long[] a, long[] b)'
-SIG_LG_LEVEL = 'internal static long Level(long[] s)'
+SIG_LG_ENQ = 'private static void Enq(int t, long n)'
+SIG_LG_SERVE = 'private static void Serve(int t, long n, bool ok, ulong k0, ulong k1)'
+SIG_LG_HBEGIN = 'internal static ulong HashBegin()'
+SIG_LG_HEND = 'internal static void HashEnd(ulong k0, bool ok)'
+SIG_LG_RENTER = 'internal static ulong RecvEnter()'
+SIG_LG_REXIT = 'internal static void RecvExit(ulong k0)'
+SIG_LG_RCYC = 'internal static void RecvCycles(ulong k0)'
 
 TIP_P1_SCHED = {
     SIG_OPENWIN: [
@@ -513,8 +523,8 @@ TIP_P1_FRAMES = {
         'sb.Append(" gc=").Append(_wGc1 - _wGc0);   // first measured frame\'s start to the last one\'s end',
         'sb.Append(" run=").Append(_oRun).Append(" pos=").Append(_oPos).Append(" unit=").Append(_oP24 ? "P24" : "P13")',
         '.Append(" coin=").Append(_oCoin).Append(" wi=").Append(_oK).Append(" f0=").Append(_oF0)',
-        '.Append(" pred=").Append(Arm(_oPred)).Append(" plant=").Append(_oPlantRun ? 1 : 0).Append(" res=").Append(_oRes ? 1 : 0)',
-        '.Append(" partial=").Append(partial ? 1 : 0).Append(" gcn=").Append(_wGc1 - _wGc0).Append(" cG=");',
+        '.Append(" pred=").Append(Arm(_oPred)).Append(" prun=").Append(_oPlantRun ? 1 : 0).Append(" res=").Append(_oRes ? 1 : 0)',
+        '.Append(" gcn=").Append(_wGc1 - _wGc0).Append(" cG=");',
         'if (_wGok) sb.Append(_wG); else sb.Append("NA");',
         'sb.Append(" cW=").Append(_wW).Append(" cR=").Append(_wR).Append(" cS=").Append(_wS2).Append(" cE=").Append(_wE);',
         'AppendBins(sb, " q=", _tq);',
@@ -524,6 +534,7 @@ TIP_P1_FRAMES = {
         'FtLedger.AppendWu(sb, _lb, _le);',
         'sb.Append(" tok=");',
         'FtLedger.AppendTok(sb, _lb, _le);',
+        'sb.Append(" nm=").Append(FtLedger.Marks(_lb, _le));',
         'Plugin.Log.LogInfo(sb.ToString());',
         'Array.Copy(_le, _lb, FtLedger.Fields);',
         '_wn = 0; _wF = 0; _wS = 0; _wC = 0; _wMaxF = 0; _wP = 0;',
@@ -545,6 +556,7 @@ TIP_P1_SPAN = {
         '_gok = gok;',
     ],
     SIG_SP_SWITCH: [
+        'Marks++;',
         'long g;',
         'bool gok = FtClock.GcRead(FtClock.GcFn, out g);',
         'Mark(FtClock.Cycles(), g, gok);',
@@ -598,6 +610,28 @@ TIP_P1_SPAN = {
         'int d = --_depth;',
         'if (d >= 0 && d < StackCap && _prev[d] != _cls) Switch(_prev[d]);',
     ],
+    SIG_SP_CAL: [
+        'var acc = (long[])Acc.Clone();',
+        'int cls = _cls;',
+        'ulong k = _k;',
+        'long g = _g, marks = Marks;',
+        'bool gok = _gok;',
+        'var s = new long[n];',
+        'for (int i = 0; i < n; i++)',
+        '{',
+        'ulong a = FtClock.Cycles();',
+        'Switch((i & 1) == 0 ? ClsS : ClsR);',
+        's[i] = unchecked((long)(FtClock.Cycles() - a));',
+        '}',
+        'System.Array.Copy(acc, Acc, Classes);',
+        '_cls = cls;',
+        '_k = k;',
+        '_g = g;',
+        '_gok = gok;',
+        'Marks = marks;',
+        'System.Array.Sort(s);',
+        'Plugin.Log.LogInfo("[FRAME-TIME] mark cost cyc=" + s[(n - 1) / 2] + " p90=" + s[(int)((n - 1) * 9L / 10)] + " n=" + n);',
+    ],
 }
 
 TIP_P1_CLOCK = {
@@ -609,7 +643,6 @@ TIP_P1_CLOCK = {
         'long g;',
         'bool gok = GcRead(GcFn, out g);',
         'FtSpan.Cut(k, g, gok);',
-        'FtLedger.PollHash();',
         'bool live = FtSchedule.ReadLive();',
         'if (_open)',
         '{',
@@ -639,6 +672,11 @@ TIP_P1_CLOCK = {
         '_s = 0;',
         '_ended = false;',
         '_open = true;',
+        'if (!_marksCal)',
+        '{',
+        '_marksCal = true;   // once, at the first frame boundary: before game 0',
+        'FtSpan.CalibrateMarks(MarkCalN);',
+        '}',
         'if (FtSpan.Depth != 0) DepthViolations++;',
         'InScript = true;',
         'FtSchedule.Boundary(live);',
@@ -670,43 +708,78 @@ TIP_P1_LEDGER = {
         'try { _in.WriteLine(value); }',
         'finally { FtSpan.PopWriter(); }',
         '// counted after the write, so a concurrent flush can never mark done a line not yet in the buffer',
-        'lock (_lock) { _c[FtGate.Off ? EnqOff : EnqOn]++; _pendingLog++; }',
+        'lock (_lock) { _c[Log * Per + (FtGate.Off ? EnqOff : EnqOn)]++; _pendingLog++; }',
     ],
     SIG_LG_FLUSH: [
         'ulong k0 = FtClock.Cycles();',
         '_in.Flush();',
         'ulong k1 = FtClock.Cycles();',
-        'lock (_lock)',
-        '{',
-        'long n = _pendingLog;',
-        '_pendingLog = 0;',
-        '_c[FtGate.Off ? DoneOff : DoneOn] += n;',
-        '_c[5 + 2 * Log] += n;',
-        '_c[6 + 2 * Log] += unchecked((long)(k1 - k0));',
-        '}',
+        'long n;',
+        'lock (_lock) { n = _pendingLog; _pendingLog = 0; }',
+        '// the whole flush is charged to the lines it carries (ruled conservative, SHARED.md D5); a flush that',
+        '// carries none charges nothing',
+        'if (n > 0) Serve(Log, n, true, k0, k1);',
     ],
-    SIG_LG_POLL: [
-        'if (!_hashEnq && Interlocked.Read(ref FtHeavy.HashT0) != 0)',
+    SIG_LG_TAKE: [
+        'lock (_lock) System.Array.Copy(_c, into, Nm);',
+        'into[Nm] = FtSpan.Marks;',
+    ],
+    SIG_LG_LEVEL: [
+        'int b = t * Per;',
+        'return s[b + EnqOn] + s[b + EnqOff] - s[b + DoneOn] - s[b + DoneOff] - s[b + Disc];',
+    ],
+    SIG_LG_WU: [
+        'for (int t = 0; t < Types; t++)',
         '{',
-        '_hashEnq = true;',
-        'lock (_lock) _c[FtGate.Off ? EnqOff : EnqOn]++;',
-        '}',
-        'if (_hashEnq && !_hashDone && Interlocked.Read(ref FtHeavy.HashT1) != 0)',
-        '{',
-        '_hashDone = true;',
-        'lock (_lock) { _c[FtGate.Off ? DoneOff : DoneOn]++; _c[5 + 2 * Hash]++; }',
+        'int o = t * Per;',
+        "if (t > 0) sb.Append(';');",
+        "sb.Append(TypeNames[t]).Append(':').Append(b[o + Units] - a[o + Units]).Append(':').Append(b[o + Cyc] - a[o + Cyc]);",
         '}',
     ],
     SIG_LG_TOK: [
-        "sb.Append(Level(a)).Append(',').Append(b[EnqOn] - a[EnqOn]).Append(',').Append(b[EnqOff] - a[EnqOff])",
-        ".Append(',').Append(b[DoneOn] - a[DoneOn]).Append(',').Append(b[DoneOff] - a[DoneOff])",
-        ".Append(',').Append(b[Disc] - a[Disc]).Append(',').Append(Level(b));",
+        'for (int t = 0; t < Types; t++)',
+        '{',
+        'int o = t * Per;',
+        "if (t > 0) sb.Append(';');",
+        "sb.Append(TypeNames[t]).Append(':').Append(Level(a, t))",
+        ".Append(',').Append(b[o + EnqOn] - a[o + EnqOn]).Append(',').Append(b[o + EnqOff] - a[o + EnqOff])",
+        ".Append(',').Append(b[o + DoneOn] - a[o + DoneOn]).Append(',').Append(b[o + DoneOff] - a[o + DoneOff])",
+        ".Append(',').Append(b[o + Disc] - a[o + Disc]).Append(',').Append(Level(b, t));",
+        '}',
     ],
-    SIG_LG_LEVEL: [
-        'return s[EnqOn] + s[EnqOff] - s[DoneOn] - s[DoneOff] - s[Disc];',
+    SIG_LG_ENQ: [
+        'lock (_lock) _c[t * Per + (FtGate.Off ? EnqOff : EnqOn)] += n;',
+    ],
+    SIG_LG_SERVE: [
+        'long c = 0;',
+        'if (k0 == 0 || k1 == 0) Interlocked.Increment(ref CycleMiss); else c = unchecked((long)(k1 - k0));',
+        'lock (_lock)',
+        '{',
+        'int o = t * Per;',
+        'if (ok) { _c[o + (FtGate.Off ? DoneOff : DoneOn)] += n; _c[o + Units] += n; }',
+        'else _c[o + Disc] += n;',
+        '_c[o + Cyc] += c;',
+        '}',
+    ],
+    SIG_LG_HBEGIN: [
+        'Enq(Hash, 1);',
+        'return FtClock.Cycles();',
+    ],
+    SIG_LG_HEND: [
+        'Serve(Hash, 1, ok, k0, FtClock.Cycles());',
+    ],
+    SIG_LG_RENTER: [
+        'if (Thread.CurrentThread.ManagedThreadId != FtSpan.MainThread) Interlocked.Increment(ref RecvOffMain);',
+        'Enq(Recv, 1);',
+        'return FtClock.Cycles();',
+    ],
+    SIG_LG_REXIT: [
+        'Serve(Recv, 1, true, k0, FtClock.Cycles());',
+    ],
+    SIG_LG_RCYC: [
+        'Serve(Recv, 0, true, k0, FtClock.Cycles());',
     ],
 }
-
 
 # ------------------------------------------------------------------ the c28259c1 bodies (the mutants mirror these)
 
@@ -2418,6 +2491,7 @@ class SpanPort:
         self.th, self.m = th, mutant
         self.acc, self.cls, self.prev = [0] * 5, CLS_E, []
         self.k, self.g, self.gok = 0, 0, False
+        self.marks = 0
 
     def mark(self, k, g, gok):
         d = k - self.k
@@ -2427,8 +2501,19 @@ class SpanPort:
         self.k, self.g, self.gok = k, g, gok
 
     def switch(self, cls):
+        self.marks += 1
         self.mark(self.th.k, self.th.gc, True)
         self.cls = cls
+
+    def calibrate(self, n, step=7):
+        """CalibrateMarks: n transitions between S and R, then Acc, Marks and the class state restored (mutant
+        'cal_no_restore' keeps what the transitions did)."""
+        saved = (list(self.acc), self.cls, self.k, self.g, self.gok, self.marks)
+        for i in range(n):
+            self.th.k += step
+            self.switch(CLS_S if i % 2 == 0 else CLS_R)
+        if self.m != "cal_no_restore":
+            self.acc, self.cls, self.k, self.g, self.gok, self.marks = saved
 
     def cut(self, k, g, gok):
         self.mark(k, g, gok)
@@ -2704,3 +2789,337 @@ def test_p1_token_without_producer_identity_fails():
     assert abs(recovery(recs) - truth) > 10
     recs, truth = simulate("enqueue_direct", ledger_m="enq_at_service")
     assert abs(recovery(recs) - truth) < 1e-6
+
+
+# ------------------------------------------------------------------ r1 (ftb/to-p1-r1.md; SHARED.md md5 18fdafea)
+
+import hashlib  # noqa: E402
+
+# SHARED.md, the window line: the keys FlushWindow appends after the w line's own fields, in order
+WINDOW_KEYS = ["run", "pos", "unit", "coin", "wi", "f0", "pred", "prun", "res", "gcn", "cG", "cW", "cR", "cS", "cE",
+               "q", "r", "qn", "wu", "tok", "nm"]
+# the writer type keys of wu and tok (FtLedger.TypeNames), in their print order
+LEDGER_TYPES = ["log", "hash", "recv"]
+
+
+def window_keys(src):
+    """Every `" key=` literal FlushWindow prints, in order (AppendBins' " q=" included)."""
+    return re.findall(r'" (\w+)=', "\n".join(_body(src, SIG_FR_FLUSH)))
+
+
+def window_key_violations(src):
+    keys = window_keys(src)
+    bad = []
+    if len(set(keys)) != len(keys):
+        bad.append("duplicate keys: %s" % sorted(k for k in set(keys) if keys.count(k) > 1))
+    tail = keys[keys.index("run"):] if "run" in keys else []
+    if tail != WINDOW_KEYS:
+        bad.append("appended keys %s, SHARED.md %s" % (tail, WINDOW_KEYS))
+    return bad
+
+
+def test_window_keys_are_shared_md():
+    assert window_key_violations(_src("FtFrames.cs")) == []
+
+
+@pytest.mark.parametrize("old,new", [
+    # the 2dcde737 block: plant= and partial= appended a second time
+    ('.Append(" prun=").Append(_oPlantRun ? 1 : 0).Append(" res=").Append(_oRes ? 1 : 0)\n              .Append(" gcn=")',
+     '.Append(" plant=").Append(_oPlantRun ? 1 : 0).Append(" res=").Append(_oRes ? 1 : 0)\n'
+     '              .Append(" partial=").Append(partial ? 1 : 0).Append(" gcn=")'),
+    # nm missing
+    ('            sb.Append(" nm=").Append(FtLedger.Marks(_lb, _le));\n', ''),
+])
+def test_window_keys_mutant_fails(old, new):
+    src = _src("FtFrames.cs")
+    assert window_key_violations(src) == []                     # the negative control
+    old, new = old.replace("\n", "\r\n" if "\r\n" in src else "\n"), new.replace("\n", "\r\n" if "\r\n" in src else "\n")
+    assert src.count(old) == 1
+    assert window_key_violations(src.replace(old, new)) != []
+
+
+def test_ledger_type_keys():
+    src = _src("FtUpload.cs")
+    m = re.search(r'TypeNames = \{ ([^}]*) \};', src)
+    assert [x.strip().strip('"') for x in m.group(1).split(",")] == LEDGER_TYPES
+    assert src.count("internal const int Log = 0, Hash = 1, Recv = 2, Types = 3;") == 1
+
+
+class TypedLedgerPort:
+    """FtLedger per type (TIP_P1_LEDGER: Enq, Serve, Take, Level, AppendWu, AppendTok): enqueued in the gate's arm
+    at the producer; done (or discarded) in the gate's arm at the service, with its units and cycles. mutant
+    'cross_type' books a hash job's service on log: one type loses a token and another gains one."""
+
+    PER = 7
+
+    def __init__(self, mutant="tip"):
+        self.m = mutant
+        self.c = [0] * (len(LEDGER_TYPES) * self.PER)
+        self.marks = 0
+
+    def enq(self, t, on, n=1):
+        self.c[t * self.PER + (0 if on else 1)] += n
+
+    def serve(self, t, n, ok, on, cyc):
+        if self.m == "cross_type" and t == 1:
+            t = 0
+        o = t * self.PER
+        if ok:
+            self.c[o + (2 if on else 3)] += n
+            self.c[o + 5] += n
+        else:
+            self.c[o + 4] += n
+        self.c[o + 6] += cyc
+
+    def take(self):
+        return list(self.c) + [self.marks]
+
+    @classmethod
+    def level(cls, s, t):
+        o = t * cls.PER
+        return s[o] + s[o + 1] - s[o + 2] - s[o + 3] - s[o + 4]
+
+    @classmethod
+    def tok(cls, a, b):
+        out = []
+        for t, name in enumerate(LEDGER_TYPES):
+            o = t * cls.PER
+            out.append("%s:%d,%d,%d,%d,%d,%d,%d" % (name, cls.level(a, t), b[o] - a[o], b[o + 1] - a[o + 1],
+                                                    b[o + 2] - a[o + 2], b[o + 3] - a[o + 3], b[o + 4] - a[o + 4],
+                                                    cls.level(b, t)))
+        return ";".join(out)
+
+    @classmethod
+    def wu(cls, a, b):
+        return ";".join("%s:%d:%d" % (name, b[t * cls.PER + 5] - a[t * cls.PER + 5], b[t * cls.PER + 6] - a[t * cls.PER + 6])
+                        for t, name in enumerate(LEDGER_TYPES))
+
+
+def ledger_windows(mutant="tip", windows=12, frames=10, seed=3):
+    """A sitting's windows with all three types live. log: collector lines on the main thread, flushed every 7th
+    frame on the timer thread; hash: two jobs, each spanning several windows; recv: one message per frame, entered and
+    exited inside it. Returns (tok strings, wu strings, the true per-type inventory at each window's end)."""
+    import random
+    rng = random.Random(seed)
+    L = TypedLedgerPort(mutant)
+    pending = [0, 0, 0]
+    toks, wus, truth = [], [], []
+    hash_jobs = {15: "begin", 40: "end", 41: "begin", 70: "end"}
+    lb = L.take()
+    f = 0
+    for w in range(windows):
+        on = w % 2 == 0
+        for _ in range(frames):
+            for _ in range(rng.randrange(3)):
+                L.enq(0, on)
+                pending[0] += 1
+            if f % 7 == 6 and pending[0]:
+                L.serve(0, pending[0], True, on, 1000)
+                pending[0] = 0
+            if hash_jobs.get(f) == "begin":
+                L.enq(1, on)
+                pending[1] += 1
+            elif hash_jobs.get(f) == "end":
+                L.serve(1, 1, True, on, 50000)
+                pending[1] -= 1
+            L.enq(2, on)
+            L.serve(2, 1, True, on, 300)
+            f += 1
+        le = L.take()
+        toks.append(L.tok(lb, le))
+        wus.append(L.wu(lb, le))
+        truth.append(list(pending))
+        lb = le
+    return toks, wus, truth
+
+
+def _parse_tok(tok):
+    out = []
+    for part in tok.split(";"):
+        k, v = part.split(":")
+        out.append((k, [int(x) for x in v.split(",")]))
+    return out
+
+
+def tok_violations(toks, keys=LEDGER_TYPES, summed=False):
+    """What the parser can check from the lines alone, per type (summed=True: the pre-r1 single sum over the types):
+    the key set, open0 + enqON + enqOFF = doneON + doneOFF + disc + open1, no negative inventory, and each window's
+    open0 equal to the window before's open1."""
+    bad, prev = [], None
+    for i, tok in enumerate(toks):
+        items = _parse_tok(tok)
+        if [k for k, _ in items] != keys:
+            bad.append("window %d: keys %s" % (i, [k for k, _ in items]))
+            continue
+        if summed:
+            items = [("all", [sum(v[j] for _, v in items) for j in range(7)])]
+        for k, (o0, e1, e0, d1, d0, x, o1) in items:
+            if o0 + e1 + e0 != d1 + d0 + x + o1:
+                bad.append("window %d %s: does not reconcile" % (i, k))
+            if o0 < 0 or o1 < 0:
+                bad.append("window %d %s: negative inventory %d,%d" % (i, k, o0, o1))
+        if prev is not None:
+            for (k, v), (_, p) in zip(items, prev):
+                if v[0] != p[6]:
+                    bad.append("window %d %s: open0 %d, previous open1 %d" % (i, k, v[0], p[6]))
+        prev = items
+    return bad
+
+
+def test_tok_per_type_reconciles():
+    toks, wus, truth = ledger_windows()
+    assert tok_violations(toks) == []
+    for tok, inv in zip(toks, truth):                           # the emitted inventory is the true one, per type
+        assert [v[6] for _, v in _parse_tok(tok)] == inv
+    for wu in wus:
+        assert [p.split(":")[0] for p in wu.split(";")] == LEDGER_TYPES
+        assert "NA" not in wu                                    # every type's cycles measured (D5, r1 item 4)
+    assert any(int(p.split(":")[1]) for wu in wus for p in wu.split(";") if p.startswith("hash"))
+
+
+def test_tok_cross_type_offset_fails_per_type_only():
+    toks, _, truth = ledger_windows("cross_type")
+    assert tok_violations(toks) != []                            # per type: log goes negative, hash never drains
+    assert tok_violations(toks, summed=True) == []               # summed over the types the offset is invisible
+    sums = [sum(v[6] for _, v in _parse_tok(t)) for t in toks]
+    assert sums == [sum(inv) for inv in truth]                   # ... the total even matches the truth
+
+
+def test_span_marks_and_calibration_restore():
+    th = Thread()
+    sp = SpanPort(th)
+    sp.open("upkeep"); th.k += 10; sp.close()                   # E -> R -> E: two transitions
+    sp.open("writer"); sp.open("gated"); th.k += 5; sp.close(); sp.close()   # W dominates: E -> W -> E
+    assert sp.marks == 4
+    before = (list(sp.acc), sp.cls, sp.k, sp.marks)
+    sp.calibrate(1000)
+    assert (sp.acc, sp.cls, sp.k, sp.marks) == before            # nothing moved between classes, nm unchanged
+    th.k += 3
+    sp.cut(th.k, th.gc, True)
+    assert sum(sp.acc) == th.k                                   # the calibration's cycles fall to the class open
+    assert sp.acc[CLS_E] == th.k - 15
+    th2 = Thread()
+    bad = SpanPort(th2, mutant="cal_no_restore")
+    bad.calibrate(1000)
+    assert bad.marks != 0 and (bad.acc[CLS_R] or bad.acc[CLS_S])
+
+
+# D5 scopes 2 and 3: FrameTime-only code at the writer sites. The release view (no SCR_FRAMETIME) of each file is
+# the base's (bd673226), byte for byte; each ledger call sits in the method it measures.
+RELEASE_VIEW_SHA = {
+    "SeatEvidence.cs": "19bc0c83188b28d3e7b124b6410b875467ccfa4bad5f1fad7ba395be0790b36a",
+    "PeerBuild.cs": "07588406df16ff6b8329c7419b6135b96489c90804183a914eb116d82d19516d",
+}
+SITE_CALLS = {
+    "SeatEvidence.cs": [
+        ("private static void HashPending()", "FtLedger.HashBegin()", 2),
+        ("private static void HashPending()", "FtLedger.HashEnd(ftK, ftOk)", 2),
+        ("internal static int EnterRpc(ExitGames.Client.Photon.Hashtable data, Photon.Realtime.Player sender)",
+         "FtLedger.RecvEnter()", 1),
+        ("internal static int EnterRpc(ExitGames.Client.Photon.Hashtable data, Photon.Realtime.Player sender)",
+         "FtLedger.RecvExit(ftRecv)", 1),
+        ("internal static void ExitRpc(int before)", "FtLedger.RecvCycles(ftRecv)", 1),
+    ],
+    "PeerBuild.cs": [
+        ("internal static void Tick()", "FtLedger.RecvEnter()", 1),
+        ("internal static void Tick()", "FtLedger.RecvExit(ftRecv)", 1),
+    ],
+}
+
+
+def release_view(text):
+    """The source as a build without SCR_FRAMETIME compiles it: each `#if SCR_FRAMETIME` branch dropped, its `#else`
+    kept, its directives removed; any other directive block kept as written. None when the directives do not nest."""
+    out, stack = [], []
+    for ln in text.replace("\r\n", "\n").split("\n"):
+        d = ln.strip()
+        if d.startswith("#if"):
+            if d == "#if SCR_FRAMETIME":
+                stack.append(["ft", True])
+                continue
+            stack.append(["other", None])
+        elif d.startswith("#elif") or d == "#else":
+            if not stack:
+                return None
+            if stack[-1][0] == "ft":
+                if d != "#else":
+                    return None
+                stack[-1][1] = False
+                continue
+        elif d.startswith("#endif"):
+            if not stack:
+                return None
+            if stack.pop()[0] == "ft":
+                continue
+        if not any(e[0] == "ft" and e[1] for e in stack):
+            out.append(ln)
+    return None if stack else "\n".join(out)
+
+
+def site_violations(srcs):
+    bad = []
+    for f, calls in SITE_CALLS.items():
+        rv = release_view(srcs[f])
+        if rv is None or hashlib.sha256(rv.encode()).hexdigest() != RELEASE_VIEW_SHA[f]:
+            bad.append("%s: the release view differs from bd673226's" % f)
+        for sig, call, n in calls:
+            j, k = _span(srcs[f], sig)
+            got, total = srcs[f][j:k].count(call), srcs[f].count(call)
+            if got != n or total != n:
+                bad.append("%s %s: %s %d in the method, %d in the file, want %d" % (f, sig, call, got, total, n))
+    return bad
+
+
+def _site_sources():
+    return {f: (PLUGIN / f).read_text(encoding="utf-8-sig") for f in SITE_CALLS}
+
+
+SITE_MUTANTS = {
+    # the recv entry moved out of the FrameTime block: the release build changes
+    "recv_in_release": ("SeatEvidence.cs",
+                        "#if SCR_FRAMETIME\n            ulong ftRecv = FtLedger.RecvEnter();",
+                        "            ulong ftRecv = FtLedger.RecvEnter();\n#if SCR_FRAMETIME\n"),
+    # a peer read entered and never exited
+    "peer_no_exit": ("PeerBuild.cs", "finally { FtLedger.RecvExit(ftRecv); }", "finally { }"),
+    # the game DLL's job unmeasured
+    "hash_one_job": ("SeatEvidence.cs", "                ftJob = _gameState == ID_PENDING; ftOk = false;\n"
+                     "                ftK = ftJob ? FtLedger.HashBegin() : 0;\n",
+                     "                ftJob = false; ftOk = false;\n"),
+}
+
+
+def test_site_release_view_and_calls():
+    assert site_violations(_site_sources()) == []
+
+
+@pytest.mark.parametrize("name", sorted(SITE_MUTANTS))
+def test_site_mutant_fails(name):
+    f, old, new = SITE_MUTANTS[name]
+    srcs = _site_sources()
+    assert site_violations(srcs) == []                           # the negative control
+    e = "\r\n" if "\r\n" in srcs[f] else "\n"
+    old, new = old.replace("\n", e), new.replace("\n", e)
+    assert srcs[f].count(old) == 1
+    srcs[f] = srcs[f].replace(old, new)
+    assert site_violations(srcs) != []
+
+
+P1_R1_SOURCE_MUTANTS = {
+    # every type's service booked on one type (the loss-and-surplus offset, in the C#)
+    "serve_one_type": ("FtUpload.cs", "                int o = t * Per;\n                if (ok)", "                int o = 0;\n                if (ok)"),
+    # tok summed over the types (the 2dcde737 form)
+    "level_summed": ("FtUpload.cs", "            int b = t * Per;\n", "            int b = 0;\n"),
+    # nm never counted
+    "nm_dropped": ("FtSpan.cs", "            Marks++;\n", ""),
+    # the calibration leaves its transitions in the classes
+    "cal_no_restore": ("FtSpan.cs", "            System.Array.Copy(acc, Acc, Classes);\n", ""),
+    # the hash thread's cycles back to NA (no job measured on its thread)
+    "hash_cycles_main": ("FtUpload.cs", "            Enq(Hash, 1);\n            return FtClock.Cycles();", "            Enq(Hash, 1);\n            return 0;"),
+}
+
+
+@pytest.mark.parametrize("name", sorted(P1_R1_SOURCE_MUTANTS))
+def test_p1_r1_source_mutant_fails(name):
+    fname, old, new = P1_R1_SOURCE_MUTANTS[name]
+    assert pin_violations(_sources()) == []                       # the negative control: the tip passes
+    assert pin_violations(_mut(_sources(), fname, old, new)) != []

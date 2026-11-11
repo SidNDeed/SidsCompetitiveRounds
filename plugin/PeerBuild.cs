@@ -162,7 +162,9 @@ namespace CompetitiveRounds
                 foreach (var p in others)
                 {
                     if (p == null) continue;
-                    FtPeerLine(_printed, p.ActorNumber, p.CustomProperties, Plugin.Log);
+                    ulong ftRecv = FtLedger.RecvEnter();   // D5 recv: one peer's statement read, on this thread
+                    try { FtPeerLine(_printed, p.ActorNumber, p.CustomProperties, Plugin.Log); }
+                    finally { FtLedger.RecvExit(ftRecv); }
                 }
 #else
                 foreach (var p in others)
