@@ -1777,6 +1777,396 @@ def claim_table_c2_pins_every_tracking_reader(files):
     return out
 
 
+# ---- the sends by route (v4 section 6, M3, M5, M6) and the target's live readers (M4)
+
+FMC = "FfaMode.cs"
+PLG = "Plugin.cs"
+RAC = "RoomActors.cs"
+TGN = "TeamGameNumber.cs"
+APC = "ApiClient.cs"
+SR_OVER = "private static void OnGameOver(int winnerTeam)"
+SR_FFA_OVER = "public static void OnFfaGameOver(int winnerTeam)"
+SR_START = "private static void OnMatchStarted()"
+SR_FFA_START = "public static void OnFfaMatchStarted()"
+SR_RESET = "private static void ResetMatchState()"
+SR_ROOM = "private static void PollRoomState()"
+SR_MATCH = "private static void PollMatchState()"
+SR_ENTRY = "if (inRoom && !wasInRoom)"
+SR_ROOM_EXIT = "else if (isTracking && !gameOverReported)"
+SR_DC_GATE = "if (inRoom && isTracking && !gameOverReported)"
+SR_RECORD_RETURN = "if (LimitlessFence.RecordOpen) return;"
+SR_LIVE = "private static void MaybeSendLivePoints()"
+SR_MACRO_CORE = "private static void DispatchMacroEvidenceCore("
+SR_MACRO_TRY = "private static void TryDispatchMacroEvidence("
+SR_PF1 = "if (inRoom && !seriesPreflightSent"
+SR_PF2 = "if (matchIsRanked && !inCrFf && !inOvtRoom && !seriesPreflightSent"
+SR_EXEC = "internal static void ExecuteDcPlan(DcPlan plan)"
+SR_LEFT = "public void OnPlayerLeftRoom(Photon.Realtime.Player p)"
+SR_BUILD = "private DcPlan BuildDcPlan(Photon.Realtime.Player p, bool leaverIsSpectator)"
+SR_HANDLE = "public static void HandleNextRound(GM_ArmsRace gm, int winnerTeam)"
+SR_OBSERVE = "internal string ObserveRoomToken(string room, string v)"
+SR_STALE = "private void Stale(string v)"
+SR_RESET_TOKEN = "private void ResetToken(string room)"
+SR_REPORT_SITES = (
+    ("ReportMatch", {(GSW, SR_OVER): 1}),
+    ("TryReportOvtMatch", {(GSW, SR_OVER): 1}),
+    ("ReportOvtMatch", {(GSW, "private static bool TryReportOvtMatch(string reportRoomId, int duration)"): 1}),
+    ("TryReportTeamMatch", {(GSW, SR_OVER): 1}),
+    ("SubmitTeamReport", {(GSW, SR_OVER): 1,
+                          (GSW, "private static bool TryReportTeamMatch(string reportRoomId, int duration)"): 1}),
+    ("ReportTeamMatch", {(GSW, "private static void SubmitTeamReport(TeamReportPayload p)"): 1}),
+    ("TryReportFfaMatch", {(GSW, SR_FFA_OVER): 1}),
+    ("ReportFfaMatch", {(GSW, "private static bool TryReportFfaMatch(string reportRoomId, int duration, int winnerTeam)"): 1}),
+    ("EvaluateAchievements", {(GSW, SR_OVER): 5}),
+    ("UnlockAchievement", {(GSW, "private static void EvaluateAchievements(bool localWon)"): 14}),
+)
+SR_WINDOWS = (("SeatEvidence", "SeatEvidence.cs"), ("CombatEvidence", "CombatEvidence.cs"),
+              ("IdentityClockEvidence", "IdentityClockEvidence.cs"))
+SR_LEAVES = {
+    (APC, "private static void FfaEnrollResult("): 1,
+    (APC, "public static void UpdateFfaQueuePoll(bool force)"): 6,
+    (APC, "public static void ArmFfaLock("): 1,
+    (APC, "private static IEnumerator DelayedFfaRoomJoin("): 1,
+    (GSW, SR_ROOM): 3,
+    (FMC, "private static void LeaveBelowMinimum("): 1,
+    (FMC, "private static IEnumerator EndSittingBelowMinimum()"): 1,
+    (FMC, "public static IEnumerator FfaDoStartGame(GM_ArmsRace gm)"): 1,
+    ("FfaReadmit.cs", "private static void Refusal(string reason, bool leave)"): 1,
+    ("FfaAssembly.cs", "internal static void Exit(string why)"): 1,
+    ("NativeUI.cs", "private static GameObject BuildFfaTab(Transform parent,int tabIdx)"): 1,
+    (PLG, "else if (wasFfa)"): 1,
+}
+# The continuation's round-change branch of PollMatchState (Table C2's retint): a
+# mutant that puts a send here puts it where a continuation reaches.
+SR_CONT = ("                try { PlayerEffectCosmetic.OnRoundStart(); } catch { }\n"
+           "            }\n\n            lastP1Points = curP1Points;\n")
+SR_BASE_HOOK = ('                try { GameStateWatcher.OnFfaGameOver(winnerTeam); }\n'
+                '                catch (Exception ex) { Plugin.Log.LogError($"[FFA] base report hook: {ex.Message}"); }\n')
+_SR_DECL = re.compile(r"[ \t]*(?:public|private|internal|protected)\b[^=;(\n]*")
+
+
+def _in_continuation(stmt):
+    head = SR_CONT.split("\n", 1)[0] + "\n"
+    return [(GSW, SR_CONT, head + "                " + stmt + "\n" + SR_CONT[len(head):])]
+
+
+def _seq(body, needles):
+    """Each needle found after the one before it (repeats allowed)."""
+    at = 0
+    for n in needles:
+        at = body.find(n, at)
+        if at == -1:
+            return False
+        at += len(n)
+    return True
+
+
+def _body(text, sig):
+    """_code's block, or "" when `sig` is not in the code exactly once."""
+    try:
+        return _code(text, sig)
+    except AssertionError:
+        return ""
+
+
+def _call_sites(files, name, only=None, qualified=True):
+    """Each code call of `name(` in plugin/*.cs (comments and literals masked,
+    declarations left out), as (file, offset). qualified=False leaves out a call
+    written X.name(."""
+    lead = r"(?<![A-Za-z0-9_])" if qualified else r"(?<![A-Za-z0-9_.])"
+    pat = re.compile(lead + re.escape(name) + r"\s*\(")
+    out = []
+    for fname in sorted(files):
+        if only is not None and fname not in only:
+            continue
+        masked, _ = _masks(files[fname])
+        for m in pat.finditer(masked):
+            start = masked.rfind("\n", 0, m.start()) + 1
+            if not _SR_DECL.fullmatch(masked[start:m.start()]):
+                out.append((fname, m.start()))
+    return out
+
+
+def _writes(files, fname, field, value):
+    """Each statement `field = value;` in fname's code (not the declaration), as
+    (file, offset)."""
+    masked, _ = _masks(files[fname])
+    pat = re.compile(r"(?<![A-Za-z0-9_.])" + re.escape(field) + r"\s*=\s*" + re.escape(value) + r"\s*;")
+    out = []
+    for m in pat.finditer(masked):
+        start = masked.rfind("\n", 0, m.start()) + 1
+        if not _SR_DECL.fullmatch(masked[start:m.start()]):
+            out.append((fname, m.start()))
+    return out
+
+
+def _assignments(files, fname, field):
+    """Every write of `field` in fname's code: =, a compound assignment, ++ or --."""
+    masked, _ = _masks(files[fname])
+    pat = re.compile(r"(?<![A-Za-z0-9_.])" + re.escape(field) + r"\s*(?:[-+*/|&]?=(?!=)|\+\+|--)")
+    return [(fname, m.start()) for m in pat.finditer(masked)]
+
+
+def _block(text, anchor):
+    """(open, close) of the block that opens after the one code occurrence of
+    `anchor`, or None."""
+    masked, _ = _masks(text)
+    at = masked.find(anchor)
+    if at == -1 or masked.find(anchor, at + 1) != -1:
+        return None
+    ob = masked.find("{", at + len(anchor))
+    depth = 0
+    for i in range(ob, len(masked)):
+        depth += {"{": 1, "}": -1}.get(masked[i], 0)
+        if depth == 0:
+            return ob, i + 1
+    return None
+
+
+def _census(files, what, sites, expected):
+    """`sites` against `expected`, {(file, anchor): count}. A site counts in the
+    smallest of the anchors' blocks that holds it; one in none of them counts
+    as (file, "?"), and a missing anchor reads as (file, "missing ...")."""
+    spans, got = {}, {}
+    for k in expected:
+        sp = _block(files.get(k[0], ""), k[1])
+        if sp is None:
+            got[(k[0], "missing " + k[1])] = 0
+        else:
+            spans[k] = sp
+    for fname, at in sites:
+        holders = sorted((b - a, k) for k, (a, b) in spans.items() if k[0] == fname and a <= at < b)
+        key = holders[0][1] if holders else (fname, "?")
+        got[key] = got.get(key, 0) + 1
+    if got == expected:
+        return []
+    return ["%s: %r, not %r" % (what, sorted(got.items()), sorted(expected.items()))]
+
+
+def claim_the_report_latch_holds_through_a_continuation(files):
+    """OnGameOver's latch keeps each base send to one (v4 section 6, the sends by
+    route; finding A). OnGameOver opens with the spectator return, then returns
+    unless tracking and unreported, then sets the latch; OnFfaGameOver returns on
+    the latch and sets it. Only a physical game start arms tracking or clears the
+    latch: OnMatchStarted after the record's return (finding A), and
+    OnFfaMatchStarted, which only FfaMode.OnGameStart calls, from FfaDoStartGame.
+    ResetMatchState clears the latch with tracking off. A continuation runs none
+    of them."""
+    gsw = files[GSW]
+
+    def head(sig):
+        return [l.strip() for l in _body(gsw, sig).split("\n") if l.strip() not in ("", "{")][:3]
+
+    bad = []
+    if head(SR_OVER) != ["if (RoomActors.LocalIsSpectator) return;",
+                         "if (!isTracking || gameOverReported) return;", "gameOverReported = true;"]:
+        bad.append("OnGameOver's head: %r" % head(SR_OVER))
+    if head(SR_FFA_OVER) != ["if (RoomActors.LocalIsSpectator) return;",
+                             "if (gameOverReported) return;", "gameOverReported = true;"]:
+        bad.append("OnFfaGameOver's head: %r" % head(SR_FFA_OVER))
+    bad += _census(files, "the latch set", _writes(files, GSW, "gameOverReported", "true"),
+                   {(GSW, SR_OVER): 1, (GSW, SR_FFA_OVER): 1})
+    bad += _census(files, "the latch cleared", _writes(files, GSW, "gameOverReported", "false"),
+                   {(GSW, SR_START): 1, (GSW, SR_FFA_START): 1, (GSW, SR_RESET): 1})
+    bad += _census(files, "tracking armed", _writes(files, GSW, "isTracking", "true"),
+                   {(GSW, SR_START): 1, (GSW, SR_FFA_START): 1})
+    if not _seq(_body(gsw, SR_START), [SR_RECORD_RETURN, "isTracking = true;", "gameOverReported = false;"]):
+        bad.append("OnMatchStarted arms tracking or clears the latch before the record's return")
+    if not _seq(_body(gsw, SR_RESET), ["isTracking = false;", "gameOverReported = false;"]):
+        bad.append("ResetMatchState clears the latch with tracking on")
+    bad += _census(files, "OnFfaMatchStarted's callers", _call_sites(files, "OnFfaMatchStarted"),
+                   {(FMC, "public static void OnGameStart()"): 1})
+    bad += _census(files, "FfaMode.OnGameStart's callers",
+                   _call_sites(files, "OnGameStart", only=(FMC,), qualified=False)
+                   + _call_sites(files, "FfaMode.OnGameStart"),
+                   {(FMC, "public static IEnumerator FfaDoStartGame(GM_ArmsRace gm)"): 1})
+    return bad
+
+
+def claim_the_reports_go_out_once_from_the_base(files):
+    """The 1v1, team, OVT and FFA reports and the mod achievements (v4 section 6):
+    each goes out only from OnGameOver or OnFfaGameOver, behind the latch, through
+    the one helper chain listed in SR_REPORT_SITES. The team report has its two
+    sites, direct and deferred; the 14 achievement unlocks sit in
+    EvaluateAchievements, which OnGameOver calls 5 times."""
+    bad = []
+    for name, where in SR_REPORT_SITES:
+        bad += _census(files, name, _call_sites(files, name), where)
+    return bad
+
+
+def claim_the_series_sends_stay_at_the_base(files):
+    """The series preflight, the series creation and OnMatchStarted's other series
+    send (v4 section 6). Each preflight site in PollRoomState tests
+    seriesPreflightSent, sets it, then sends; only a room entry and OnMatchStarted
+    (after the record's return) clear it. The team series creation sits in
+    OnMatchStarted after that return and in OnGameOver; the 1v2 series send in
+    OnMatchStarted after it."""
+    gsw = files[GSW]
+    send = "ApiClient.SendSeriesPreflight(localSteamId, opponentSteamId);"
+    bad = []
+    if not _seq(_body(gsw, SR_ROOM), [SR_PF1, "seriesPreflightSent = true;", send,
+                                      SR_PF2, "seriesPreflightSent = true;", send]):
+        bad.append("a preflight site does not test and set its latch before it sends")
+    bad += _census(files, "the preflight", _call_sites(files, "SendSeriesPreflight"), {(GSW, SR_ROOM): 2})
+    bad += _census(files, "the preflight latch cleared", _writes(files, GSW, "seriesPreflightSent", "false"),
+                   {(GSW, SR_ENTRY): 1, (GSW, SR_START): 1})
+    bad += _census(files, "the team series creation", _call_sites(files, "TryRequestContinuationSeries"),
+                   {(GSW, SR_START): 1, (GSW, SR_OVER): 1})
+    bad += _census(files, "its request", _call_sites(files, "RequestContinuationSeries"),
+                   {(GSW, "private static void TryRequestContinuationSeries(Action<bool> onDone = null)"): 1})
+    bad += _census(files, "the 1v2 series send", _call_sites(files, "TryRequestOvtContinuationSeries"),
+                   {(GSW, SR_START): 1})
+    bad += _census(files, "its request", _call_sites(files, "RequestOvtContinuationSeries"),
+                   {(GSW, "private static void TryRequestOvtContinuationSeries()"): 1})
+    if not _seq(_body(gsw, SR_START), [SR_RECORD_RETURN, "seriesPreflightSent = false;",
+                                       "TryRequestContinuationSeries();", "TryRequestOvtContinuationSeries();"]):
+        bad.append("OnMatchStarted re-arms or sends a series request before the record's return")
+    return bad
+
+
+def claim_the_macro_evidence_goes_once(files):
+    """Macro evidence (v4 section 6): ReportMacroEvidence goes out only from
+    DispatchMacroEvidenceCore, after its latch test and set. The core runs only
+    from TryDispatchMacroEvidence, which OnGameOver calls once and PollRoomState's
+    room-exit branch (tracking and unreported) twice. Only a physical game start
+    or ResetMatchState re-arms the latch."""
+    bad = []
+    if not _seq(_body(files[GSW], SR_MACRO_CORE), ["if (macroEvidenceDispatched", "macroEvidenceDispatched = true;",
+                                                   "ApiClient.ReportMacroEvidence("]):
+        bad.append("the dispatch does not test and set its latch before it sends")
+    bad += _census(files, "the macro send", _call_sites(files, "ReportMacroEvidence"), {(GSW, SR_MACRO_CORE): 1})
+    bad += _census(files, "the core", _call_sites(files, "DispatchMacroEvidenceCore"), {(GSW, SR_MACRO_TRY): 1})
+    bad += _census(files, "the dispatch", _call_sites(files, "TryDispatchMacroEvidence"),
+                   {(GSW, SR_OVER): 1, (GSW, SR_ROOM_EXIT): 2})
+    bad += _census(files, "the macro latch re-armed", _writes(files, GSW, "macroEvidenceDispatched", "false"),
+                   {(GSW, SR_START): 1, (GSW, SR_FFA_START): 1, (GSW, SR_RESET): 1})
+    return bad
+
+
+def claim_the_evidence_windows_open_only_at_a_game_start(files):
+    """Evidence uploads (v4 section 6): the seat, combat and identity windows each
+    open only at their BeginGame, which only OnMatchStarted calls, after the
+    record's return, and which no class calls on itself. A continuation reopens
+    none of them. The card-draw window opens at a pick; its own claim covers it."""
+    start = _body(files[GSW], SR_START)
+    bad = []
+    for cls, fname in SR_WINDOWS:
+        bad += _census(files, cls + "'s window", _call_sites(files, cls + ".BeginGame"), {(GSW, SR_START): 1})
+        if _call_sites(files, "BeginGame", only=(fname,), qualified=False):
+            bad.append(cls + " opens its own window")
+        if not _seq(start, [SR_RECORD_RETURN, cls + ".BeginGame("]):
+            bad.append(cls + "'s window opens before the record's return")
+    return bad
+
+
+def claim_the_live_points_stop_at_the_base(files):
+    """Live points (v4 section 6), the 1v1 and team routes: both posts go out
+    only from MaybeSendLivePoints, which returns first unless tracking, and only
+    PollMatchState calls it. Tracking stays off through a continuation (finding
+    A). FFA's route has its own claim."""
+    bad = []
+    first = _first(_body(files[GSW], SR_LIVE))
+    if first != "if (!isTracking || string.IsNullOrEmpty(LocalSteamId)) return;":
+        bad.append("MaybeSendLivePoints does not return first unless tracking: %r" % first)
+    bad += _census(files, "1v1 live points", _call_sites(files, "PostLivePoints"), {(GSW, SR_LIVE): 1})
+    bad += _census(files, "team live points", _call_sites(files, "PostTeamLivePoints"), {(GSW, SR_LIVE): 1})
+    bad += _census(files, "the sender", _call_sites(files, "MaybeSendLivePoints"), {(GSW, SR_MATCH): 1})
+    return bad
+
+
+def claim_the_disconnect_reports_stay_off_in_a_continuation(files):
+    """Disconnect and cancel reports (v4 section 6): the 1v1 and casual DC reports
+    go out only inside PollRoomState's in-room, tracking and unreported branch.
+    The team series DC goes out from ExecuteDcPlan and the fallback's Fire. Fire
+    runs only from DcReportSync.Evaluate, which fires only once ArmFallback armed
+    it, and only ExecuteDcPlan calls ArmFallback. ExecuteDcPlan runs a plan from
+    BuildDcPlan, at once in OnPlayerLeftRoom or held by the team hold and run by
+    its expiry. BuildDcPlan returns nothing while IsInMatch reads false (M4)."""
+    bad = []
+    bad += _census(files, "the 1v1 DC", _call_sites(files, "ReportDisconnect"), {(GSW, SR_DC_GATE): 1})
+    bad += _census(files, "the casual DC", _call_sites(files, "ReportCasualDc"), {(GSW, SR_DC_GATE): 1})
+    bad += _census(files, "the team series DC", _call_sites(files, "ReportTeamSeriesDc"),
+                   {(PLG, SR_EXEC): 1, (RAC, "private static void Fire(string reason)"): 1})
+    bad += _census(files, "the fallback's fire", _call_sites(files, "Fire", only=(RAC,), qualified=False),
+                   {(RAC, "private static void Evaluate(string why)"): 1})
+    bad += _census(files, "the fallback's arming", _call_sites(files, "ArmFallback"), {(PLG, SR_EXEC): 1})
+    bad += _census(files, "the plan's run", _call_sites(files, "ExecuteDcPlan"),
+                   {(PLG, SR_LEFT): 1,
+                    ("TeamHoldExpiry.cs", "internal static void Run(TeamHoldRules.DropCut cut, string reason)"): 1})
+    bad += _census(files, "the plan", _call_sites(files, "BuildDcPlan"), {(PLG, SR_LEFT): 2})
+    return bad
+
+
+def claim_no_ffa_leave_reads_the_base_result(files):
+    """FFA leave (v4 section 6): room and lobby membership, not the result. Its
+    calls sit in the membership paths of SR_LEAVES (v4 named 7 of the 19), none
+    in the base report: OnFfaGameOver, or HandleNextRound's base hook (finding
+    B). The below-minimum end of a sitting starts only in HandleNextRound's real
+    end, after gameOverFired is set and the report hook has run."""
+    bad = _census(files, "the FFA leave", _call_sites(files, "FfaLeaveQueue"), SR_LEAVES)
+    bad += _census(files, "the sitting's end", _call_sites(files, "EndSittingBelowMinimum", only=(FMC,), qualified=False),
+                   {(FMC, SR_HANDLE): 1})
+    if not _seq(_body(files[FMC], SR_HANDLE), ["if (gameOver)", "gameOverFired = true;",
+                                               "GameStateWatcher.OnFfaGameOver(winnerTeam);",
+                                               "EndSittingBelowMinimum()"]):
+        bad.append("the sitting's end does not follow the real end's report")
+    return bad
+
+
+def claim_the_stale_nonce_test_keeps_the_reported_token(files):
+    """M4: TickTeamToken cannot make the reported game's token eligible again.
+    OnTokenGameOver calls EndGameToken, which records the adopted token as stale
+    (Stale adds its nonce) and clears it. ObserveRoomToken returns on a stale
+    nonce before it adopts, and only ResetToken (a room join, exit or change)
+    clears the stale set."""
+    t = files[TGN]
+    bad = []
+    if not _seq(_body(t, SR_OBSERVE), ["if (stale.Contains(nonce)) return null;", "adopted = v;"]):
+        bad.append("ObserveRoomToken can adopt a stale nonce")
+    if not _seq(_body(t, "internal string OnTokenGameOver(string room, string v)"), ["EndGameToken();"]):
+        bad.append("OnTokenGameOver does not end the game token")
+    if not _seq(_body(t, "private void EndGameToken()"), ["Stale(adopted);", 'adopted = "";']):
+        bad.append("EndGameToken does not record the adopted token as stale")
+    if not _seq(_body(t, SR_STALE), ["stale.Add(nonce);"]):
+        bad.append("Stale does not record the nonce")
+    bad += _census(files, "the stale set cleared", _call_sites(files, "stale.Clear", only=(TGN,)),
+                   {(TGN, SR_RESET_TOKEN): 1})
+    return bad
+
+
+def claim_the_epoch_test_outlives_the_nonce_list(files):
+    """M4: the epoch test still holds once the nonce has left the 16-entry list.
+    ObserveRoomToken refuses a token whose epoch is not above epochStale before
+    it adopts. epochStale only rises (Stale) and only ResetToken lowers it."""
+    t = files[TGN]
+    bad = []
+    if not _seq(_body(t, SR_OBSERVE), ["string why = epoch <= epochStale", "adopted = v;"]):
+        bad.append("ObserveRoomToken does not refuse a stale epoch before it adopts")
+    if "if (e > epochStale) epochStale = e;" not in _body(t, SR_STALE):
+        bad.append("Stale does not only raise epochStale")
+    bad += _census(files, "epochStale written", _assignments(files, TGN, "epochStale"),
+                   {(TGN, SR_STALE): 1, (TGN, SR_RESET_TOKEN): 1})
+    if len(_writes(files, TGN, "epochStale", "0")) != 1:
+        bad.append("ResetToken does not reset epochStale to 0")
+    return bad
+
+
+def claim_the_dc_plan_needs_a_tracked_game(files):
+    """M4: the report's token (TeamTokenForReport) is read only in
+    ReportTeamSeriesDc, reached only through BuildDcPlan's plan (the DC claim),
+    and BuildDcPlan returns nothing while IsInMatch reads false. IsInMatch is
+    isTracking, which stays off through a continuation (finding A)."""
+    bad = []
+    if not _seq(_body(files[PLG], SR_BUILD), ["if (!GameStateWatcher.IsInMatch)", "return null;"]):
+        bad.append("BuildDcPlan does not return while IsInMatch reads false")
+    if "public static bool IsInMatch => isTracking;" not in _code(files[GSW]):
+        bad.append("IsInMatch is not isTracking")
+    bad += _census(files, "the report's token", _call_sites(files, "TeamTokenForReport"),
+                   {(APC, "public static void ReportTeamSeriesDc("): 1})
+    return bad
+
+
 CLAIMS = {
     "game_start_prefix": claim_the_game_start_prefix,
     "stamp_before_join": claim_the_gid_is_stamped_before_the_join,
@@ -1829,6 +2219,17 @@ CLAIMS = {
     "real_end_hold": claim_the_real_end_holds_the_platform_results,
     "token_real_end": claim_the_reported_token_stays_ended,
     "table_c2": claim_table_c2_pins_every_tracking_reader,
+    "report_latch": claim_the_report_latch_holds_through_a_continuation,
+    "base_reports": claim_the_reports_go_out_once_from_the_base,
+    "series_sends": claim_the_series_sends_stay_at_the_base,
+    "macro_once": claim_the_macro_evidence_goes_once,
+    "windows": claim_the_evidence_windows_open_only_at_a_game_start,
+    "live_points": claim_the_live_points_stop_at_the_base,
+    "dc_reports": claim_the_disconnect_reports_stay_off_in_a_continuation,
+    "ffa_leave": claim_no_ffa_leave_reads_the_base_result,
+    "stale_nonce": claim_the_stale_nonce_test_keeps_the_reported_token,
+    "epoch_test": claim_the_epoch_test_outlives_the_nonce_list,
+    "dc_plan_gate": claim_the_dc_plan_needs_a_tracked_game,
 }
 
 GATE = "                if (SpectatorPatchSupport.Suppress) return;\n"
@@ -2549,6 +2950,67 @@ MUTANTS = [
      [('GameStateWatcher.cs', ' && !RoomActors.LocalIsSpectator);\n', ');\n')]),
     ('table_c2', "the open record is read without this seat's live gid",
      [('LimitlessFence.cs', 'get { return RecordOpen && _ledger.IsLiveGid(_record.Gid); }', 'get { return RecordOpen; }')]),
+    ('report_latch', "the sends by route: the report latch is cleared in a continuation",
+     _in_continuation("gameOverReported = false;")),
+    ('report_latch', "the sends by route: OnFfaGameOver no longer returns on the latch",
+     [(GSW, "            if (gameOverReported) return;\n            gameOverReported = true;\n", "            gameOverReported = true;\n")]),
+    ('base_reports', "the sends by route: the 1v1 report goes out in a continuation",
+     _in_continuation("ApiClient.ReportMatch(reportRoomId);")),
+    ('base_reports', "the sends by route: the team report's direct site runs in a continuation",
+     _in_continuation("TryReportTeamMatch(reportRoomId, duration);")),
+    ('base_reports', "the sends by route: the team report's deferred site runs in a continuation",
+     _in_continuation("SubmitTeamReport(deferredPayload);")),
+    ('base_reports', "the sends by route: the OVT report goes out in a continuation",
+     _in_continuation("TryReportOvtMatch(reportRoomId, duration);")),
+    ('base_reports', "the sends by route: the FFA report goes out in a continuation",
+     _in_continuation("TryReportFfaMatch(reportRoomId, duration, winnerTeam);")),
+    ('base_reports', "the sends by route: the mod achievements run in a continuation",
+     _in_continuation("EvaluateAchievements(localWon);")),
+    ('base_reports', "the sends by route: an achievement unlocks outside EvaluateAchievements",
+     _in_continuation("ApiClient.UnlockAchievement(LocalSteamId, achievementId);")),
+    ('series_sends', "the sends by route: the preflight's poll site no longer tests its latch",
+     [(GSW, "            if (inRoom && !seriesPreflightSent\n", "            if (inRoom\n")]),
+    ('series_sends', "the sends by route: the preflight's ranked-check site no longer tests its latch",
+     [(GSW, "&& !inOvtRoom && !seriesPreflightSent\n", "&& !inOvtRoom\n")]),
+    ('series_sends', "the sends by route: the team series creation moves ahead of the record's return",
+     [(GSW, "            if (LimitlessFence.RecordOpen) return;\n",
+       "            TryRequestContinuationSeries();\n            if (LimitlessFence.RecordOpen) return;\n")]),
+    ('series_sends', "the sends by route: the team series creation runs in a continuation",
+     _in_continuation("TryRequestContinuationSeries();")),
+    ('series_sends', "the sends by route: the 1v2 series send runs in a continuation",
+     _in_continuation("TryRequestOvtContinuationSeries();")),
+    ('macro_once', "the sends by route: the macro latch is re-armed in a continuation",
+     _in_continuation("macroEvidenceDispatched = false;")),
+    ('windows', "the sends by route: the seat window reopens in a continuation",
+     _in_continuation("try { SeatEvidence.BeginGame(oneVOneMatchAtStart, matchIsRanked); } catch { }")),
+    ('windows', "the sends by route: the combat window reopens in a continuation",
+     _in_continuation("try { CombatEvidence.BeginGame(oneVOneMatchAtStart); } catch { }")),
+    ('windows', "the sends by route: the identity window reopens in a continuation",
+     _in_continuation("try { IdentityClockEvidence.BeginGame(oneVOneMatchAtStart, matchIsRanked); } catch { }")),
+    ('live_points', "the sends by route: the live points sender no longer needs tracking",
+     [(GSW, "            if (!isTracking || string.IsNullOrEmpty(LocalSteamId)) return;\n            int sp1",
+       "            if (string.IsNullOrEmpty(LocalSteamId)) return;\n            int sp1")]),
+    ('live_points', "the sends by route: the 1v1 live points post in a continuation",
+     _in_continuation("ApiClient.PostLivePoints(liveSeriesId, LocalSteamId, sp1, sp2);")),
+    ('live_points', "the sends by route: the team live points post in a continuation",
+     _in_continuation("ApiClient.PostTeamLivePoints(ApiClient.ActiveTeamSeriesId, LocalSteamId, sp1, sp2);")),
+    ('dc_reports', "the sends by route: the 1v1 DC report goes out in a continuation",
+     _in_continuation("ApiClient.ReportDisconnect(localSteamId, opponentSteamId, dcSeriesId);")),
+    ('dc_reports', "the sends by route: the casual DC report goes out in a continuation",
+     _in_continuation("ApiClient.ReportCasualDc(localSteamId, opponentSteamId, _dcRoom);")),
+    ('dc_reports', "the sends by route: the team series DC report goes out in a continuation",
+     _in_continuation("ApiClient.ReportTeamSeriesDc(series, reporter, dc, 0, 0, room, true);")),
+    ('dc_reports', "the sends by route: the fallback fires when the elected seat leaves",
+     [(RAC, '                Evaluate("the elected seat left the room");\n',
+       '                Fire("the elected seat left the room");\n')]),
+    ('ffa_leave', "the sends by route: the below-minimum end moves to the FFA base",
+     [(FMC, SR_BASE_HOOK, SR_BASE_HOOK + "                Plugin.Instance.StartCoroutine(EndSittingBelowMinimum());\n")]),
+    ('stale_nonce', "M4: the stale nonce test is gone",
+     [(TGN, "                if (stale.Contains(nonce)) return null;\n", "")]),
+    ('epoch_test', "M4: the epoch test is gone",
+     [(TGN, "                string why = epoch <= epochStale\n", "                string why = false\n")]),
+    ('dc_plan_gate', "M4: BuildDcPlan no longer needs IsInMatch",
+     [(PLG, "                if (!GameStateWatcher.IsInMatch)\n", "                if (false)\n")]),
 ]
 
 NEUTRAL = "            // control: a neutral line\n"
@@ -2629,6 +3091,18 @@ CONTROLS = [
     ("token_real_end", [("TeamGameNumber.cs", "                if (!inGame || overSeen) return null;\n",
                          NEUTRAL + "                if (!inGame || overSeen) return null;\n")]),
     ('table_c2', [('GameStateWatcher.cs', '        public static bool PhysicalGameLive => isTracking || (LimitlessFence.RecordOpenForCurrentGid && !RoomActors.LocalIsSpectator);\n', NEUTRAL + '        public static bool PhysicalGameLive => isTracking || (LimitlessFence.RecordOpenForCurrentGid && !RoomActors.LocalIsSpectator);\n')]),
+    ('report_latch', _in_continuation("// gameOverReported = false;")),
+    ('base_reports', _in_continuation("// ApiClient.ReportMatch(reportRoomId);")),
+    ('series_sends', _in_continuation("// TryRequestContinuationSeries();")),
+    ('macro_once', _in_continuation("// macroEvidenceDispatched = false;")),
+    ('windows', _in_continuation("// try { SeatEvidence.BeginGame(oneVOneMatchAtStart, matchIsRanked); } catch { }")),
+    ('live_points', _in_continuation("// ApiClient.PostLivePoints(liveSeriesId, LocalSteamId, sp1, sp2);")),
+    ('dc_reports', _in_continuation("// ApiClient.ReportDisconnect(localSteamId, opponentSteamId, dcSeriesId);")),
+    ('ffa_leave', [(FMC, SR_BASE_HOOK, SR_BASE_HOOK + "                // Plugin.Instance.StartCoroutine(EndSittingBelowMinimum());\n")]),
+    ('stale_nonce', [(TGN, "                if (stale.Contains(nonce)) return null;\n",
+                      NEUTRAL + "                if (stale.Contains(nonce)) return null;\n")]),
+    ('epoch_test', [(TGN, "                string why = epoch <= epochStale\n", NEUTRAL + "                string why = epoch <= epochStale\n")]),
+    ('dc_plan_gate', [(PLG, "                if (!GameStateWatcher.IsInMatch)\n", NEUTRAL + "                if (!GameStateWatcher.IsInMatch)\n")]),
 ]
 
 
