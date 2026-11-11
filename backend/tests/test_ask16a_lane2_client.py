@@ -2853,9 +2853,13 @@ MUTANTS = [
     ("observer_apply", "the step after the nested replay reads the session alone",
      [("SpectatorSync.cs", "ticket);\n                    if (ObserverMoved(gen, attemptGen, ticket)) yield break;   // v4 4.5 R (F5)\n",
        "ticket);\n                    if (gen != _boundaryGeneration) yield break;\n")]),
-    ("observer_apply", "the nested replay is not handed the attempt",
-     [("SpectatorSync.cs", "yield return ResetAndReplay(body, actor, target, gen, attemptGen, ticket);",
-       "yield return ResetAndReplay(body, actor, target, gen, _boundaryAttemptGen, ticket);")]),
+    # R1 LOW 6: passing _boundaryAttemptGen at the call passes the value the
+    # actor loop has just compared, with no yield between, so that mutant only
+    # changed spelling. After the child's own yield the live attempt can move,
+    # and reading it there misses the move.
+    ("observer_apply", "the nested replay's resume reads the live attempt",
+     [("SpectatorSync.cs", "            if (ObserverMoved(gen, attemptGen, ticket)) yield break;   // v4 4.5 R (F5): the attempt passed down\n",
+       "            if (ObserverMoved(gen, _boundaryAttemptGen, ticket)) yield break;   // v4 4.5 R (F5): the attempt passed down\n")]),
     ("observer_apply", "the nested replay's first resume reads the session alone",
      [("SpectatorSync.cs", "            if (ObserverMoved(gen, attemptGen, ticket)) yield break;   // v4 4.5 R (F5): the attempt passed down\n",
        "            if (gen != _boundaryGeneration) yield break;\n")]),
