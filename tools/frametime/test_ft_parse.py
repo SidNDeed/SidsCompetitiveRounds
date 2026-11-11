@@ -591,7 +591,8 @@ def _log(carry_us=0.0, cost_us=80.0, games=17, seed=7, heavy_live=0, hash_at=(10
     if "quit" in refusals_why:
         L.append("[FRAME-TIME] refusals why=%s pairs=3 queue:e=3 sent:GET_h/api/v1/mod-version=1 "
              "dispatched:GET_h/api/v1/mod-version=1" % "quit" + routes)
-    return "\n".join("[Info   :CompetitiveRounds] " + x for x in L)
+    # the integrator's marker rule (11 Nov): a measurement input carries the FrameTime build marker exactly once
+    return "\n".join("[Info   :CompetitiveRounds] " + x for x in ["[FRAME-TIME] " + P.MARK_FT] + L)
 
 
 
@@ -633,7 +634,8 @@ def test_report_carries_the_specified_figures():
                  "last four games' mean", "UPKEEP spans per live frame: ON", "format M's own stamps",
                  "between-point spans after ON points", "conditional: U bounds the NET", "PASS <= 3, SID <= 5"):
         assert want in out, (want, out)
-    assert P.classify(2.9, 100) == "PASS" and P.classify(4.0, 100) == "SID" and P.classify(5.1, 100) == "FAIL"
+    assert P.classify(2.9, 100, 9, 0) == "PASS" and P.classify(4.0, 100, 1, 3.1) == "SID" \
+        and P.classify(5.1, 100, 1, 5.05) == "FAIL"
 
 
 def test_a3_is_the_largest_per_game_window_rate_times_the_calibrated_difference():
@@ -861,6 +863,10 @@ DELETIONS = (
     ("menu_done", "menu", None, "menu"),
     ("menu_armed", "menu", None, "menu"),
     ("settled", "menu", None, "menu"),
+    # the integrator's marker rule (11 Nov): a measurement input without its build marker is refused by name
+    ("build", "marker", None, "MARKER-ABSENT"),
+    # SHARED.md: the mark cost boot line; without it the transition overhead is named not computable
+    ("mark", "b11", None, r"^B11 class transitions: not computable: 0 mark cost lines"),
 )
 # the kinds whose PRESENCE is the event (their absence is the normal case): test_failure_events_make_the_run_incomplete
 # and test_vr6_build_fails_on_a_disarm are their controls
@@ -890,6 +896,19 @@ def test_deleting_each_record_kind_withholds(kind, fixture, where, want):
         assert n >= 1
         with pytest.raises(P.Refused, match=want):
             _a3(P.read(log), spec=spec, peer_recs=P.read(log))
+    elif fixture == "b11":
+        base = _b11_text(_one_run_games(), _c2_model)
+        assert re.search(r"^B11 class transitions \(in the charge", P.report(base, peer=base), re.M)
+        log, n = _drop_kind(base, kind, where)
+        assert n == 1
+        assert re.search(want, P.report(log, peer=log), re.M), P.report(log, peer=log)
+    elif fixture == "marker":
+        base = _log()
+        assert re.search(r"^VERDICT B1 SID", _report(base), re.M)
+        log, n = _drop_kind(base, kind, where)
+        assert n == 1
+        with pytest.raises(P.MarkerRefused, match=want):
+            _report(log)
     else:
         base = _menu_log()
         assert P.menu_check(P.read(base))[0]
@@ -935,7 +954,9 @@ def test_every_emitted_kind_is_read_or_named():
     assert set(P.EMITTED_UNREAD) <= emitted, sorted(set(P.EMITTED_UNREAD) - emitted)
     # a SUBKINDS record is a line of an emitted kind told apart by its first word: its parent is emitted, it is not
     assert all(parent in emitted for parent, _ in P.SUBKINDS.values()), P.SUBKINDS
-    assert set(P.RECORDS) - emitted == {"a3zero"} | set(P.SUBKINDS), sorted(set(P.RECORDS) - emitted)
+    # "build" (P3's marker) and "mark" (P1's boot line): written by the other parts of the B11 build and absent from
+    # this branch until the integrator merges them; the merged tree emits both (the integrator tightens this line)
+    assert set(P.RECORDS) - emitted - {"build", "mark"} == {"a3zero"} | set(P.SUBKINDS), sorted(set(P.RECORDS) - emitted)
 
 
 FAILURE_LINES = ("[Warning:CompetitiveRounds] [FRAME-TIME] game over failed: boom",
@@ -1587,7 +1608,7 @@ def _menu_log(segs=34, force="none", aa_us=0.0, ec=None, fhat_last=FHAT, missing
                    % (closing_target, FREQ, FHAT, force, 1 if terminal_bad else 0))
     if terminal_misplaced:
         out.append(done)
-    return "\n".join(out)
+    return "\n".join([LOG_PREFIX + "[FRAME-TIME] " + P.MARK_FT] + out)
 
 
 def test_menu_check_passes_a_clean_run():
@@ -1766,8 +1787,12 @@ LOG_PREFIX = "[Info   :CompetitiveRounds] "
 WHEN_TOKENS = {"span_g present": "span_g=1", "t0 present": "t0=1", "partial=0": "partial=0",
                "kind=disp|span, not failed": "kind=disp", "kind=fhat, not failed": "kind=fhat",
                "result=settled": "result=settled", "after=ON": "after=ON", "c_plant>0": "c_plant=5",
-               "live present": "live=1"}
-SAMPLE_VALUES = {"pt": "1.1.1", "e4": "0,0", "e8": "0,0", "e16": "0,0", "u": "1,1", "p": "1,1"}
+               "live present": "live=1",
+               # the row's own keys make its condition hold, so dropping any one of them leaves it holding
+               "a B11 field present": None}
+SAMPLE_VALUES = {"pt": "1.1.1", "e4": "0,0", "e8": "0,0", "e16": "0,0", "u": "1,1", "p": "1,1", "partial": "0",
+                 "q": ",".join(["1"] * 10), "r": ",".join(["1"] * 10), "qn": ",".join(["12"] * 10),
+                 "tok": "log:0,0,0,0,0,0,0", "unit": "P13", "pred": "none", "wu": "log:0:0"}
 
 
 def _summary_log(lines):
@@ -1830,7 +1855,7 @@ def _keyed_line(row, drop):
             keys += [k for k in ks if k not in keys]
     word = P.SUBKINDS[kind][0] if kind in P.SUBKINDS else kind
     toks = ["%s=%s" % (k, SAMPLE_VALUES.get(k, "1")) for k in keys if k != drop]
-    if when is not None:
+    if when is not None and WHEN_TOKENS[when] is not None:
         toks.append(WHEN_TOKENS[when])
     return "[FRAME-TIME] %s %s" % (word, " ".join(toks))
 
@@ -2194,3 +2219,644 @@ def test_a_withheld_read_class_line_is_the_record_refusal(tmp_path, cls, where):
                                   LOG_PREFIX + "withheld FRAME-TIME 3"])
 def test_other_withheld_lines_are_not_the_refusal(line):
     P.refuse_withheld(_log() + "\n" + line + "\n")
+
+
+# ------------------------------------------------------------------ B11: the interleaved window design (ruling .138/.139)
+# A synthetic record generator with a known truth. Clock unit: f_hat 1e6, so a window's cycles are microseconds; T_ref
+# is B11_T us per frame and one percent of it B11_PC. A game is a list of points; a point is a dict: n, the windows'
+# frame counts in order; coins, one (A, B) per run of four (1 = ON at positions 1 and 2, the complement at 3 and 4);
+# plant, the runs that are plant runs; zs (a void round when nonzero); rnd, its round. model(arm, pred, pos, partial,
+# j) gives the per-frame (S, E, R) cycles of tenth j (0-based), pred the predecessor's arm or "none".
+
+B11_T = 180000
+B11_PC = B11_T // 100
+B11_BASE = 100000
+B11_TICKS = 10                       # Stopwatch ticks per us at FREQ
+
+
+def _b11_arm(coins, wi):
+    run, pos = (wi - 1) // 4 + 1, (wi - 1) % 4 + 1
+    a = coins[run - 1][0 if pos in (1, 3) else 1]
+    return run, pos, ("ON" if a ^ (1 if pos in (3, 4) else 0) else "OFF")
+
+
+B11_TOK0 = "log:0,0,0,0,0,0,0;up:0,0,0,0,0,0,0"
+
+
+def _b11_text(games, model, marker=True, settled=True, first_game=1, edit=None, cg=None, cw=0, mark=True,
+              wu="log:0:0;up:0:0"):
+    """The [FRAME-TIME] lines of B11 games: the marker, the mark cost boot line, settled (f_hat 1e6), the point lines
+    and their window lines in SHARED.md's format. A point's "plant" runs are plant runs (prun=1), "unspun" those of
+    them fixed before c_plant (no window planted); a spun run's OFF windows are planted (plant=1). edit(window dict)
+    may spoil a window's fields before it is written; cg(window) may return None (cG=NA: G stays inside cE and q) or
+    a GC cycle count; cw is common-writer cycles per frame; ON windows mark 4 class transitions, OFF windows 1."""
+    L = ["[FRAME-TIME] " + P.MARK_FT] if marker else []
+    if mark:
+        L.append("[FRAME-TIME] mark cost cyc=50 p90=70 n=1000")
+    for gi, pts in enumerate(games):
+        g = first_game + gi
+        if settled:
+            L.append("[FRAME-TIME] settled g=%d seed=1 c_plant=80 W=120 vsync=0 target=-1 freq=%d hires=1 f_hat=1000000"
+                     % (g, FREQ))
+        prev = None
+        f0 = 0
+        for pi, pt in enumerate(pts):
+            label = "%d.%d.%d" % (g, pt.get("rnd", 1), pt.get("pnum", pi + 1))
+            ws = []
+            for wi, n in enumerate(pt["n"], 1):
+                run, pos, arm = _b11_arm(pt["coins"], wi)
+                prun = 1 if run in pt.get("plant", ()) else 0
+                plant = 1 if prun and arm == "OFF" and run not in pt.get("unspun", ()) else 0
+                pred = "none" if prev is None else prev["arm"]
+                res = 1 if prev is not None and prev["prun"] == 1 and prun == 0 else 0
+                qn = P._bins(n)
+                partial = 1 if n < P.WINDOW_FRAMES else 0
+                S = E = R = 0
+                q, r = [], []
+                for j in range(P.TENTHS):
+                    s_, e_, r_ = model(arm, pred, pos, partial, j)
+                    S += s_ * qn[j]
+                    E += (e_ + B11_BASE) * qn[j]
+                    R += r_ * qn[j]
+                    q.append((s_ + e_ + B11_BASE + r_) * qn[j])
+                    r.append(r_ * qn[j])
+                w = dict(pt=label, arm=arm, plant=plant, prun=prun, partial=partial, n=n, run=run, pos=pos,
+                         unit="P13" if pos in (1, 3) else "P24", coin=pt["coins"][run - 1][0 if pos in (1, 3) else 1],
+                         wi=wi, f0=f0, pred=pred, res=res, gcn=0, cG=0, cW=cw * n, cR=R, cS=S, cE=E, q=q, r=r, qn=qn,
+                         wu=wu, tok=B11_TOK0, nm=4 if arm == "ON" else 1)
+                gv = cg(w) if cg else 0
+                if gv is None:
+                    w["cG"] = None
+                else:
+                    w["cG"] = gv
+                    w["cE"] = E - gv                    # GC executes inside the frame: the partition keeps C
+                    w["q"] = list(q)
+                    w["q"][0] -= gv                     # C° = C - G - W
+                w["sC"] = (w["cG"] or 0) + w["cW"] + w["cR"] + w["cS"] + w["cE"]
+                w["sF"] = n * B11_T * B11_TICKS
+                w["sS"] = 0
+                w["sP"] = w["sC"]
+                if edit:
+                    edit(w)
+                ws.append(w)
+                prev = w
+                f0 += n
+            un = [w for w in ws if not w["plant"]]
+            pl = [w for w in ws if w["plant"]]
+            L.append("[FRAME-TIME] p pt=%s arm=%s gate=0 pred=%s n=%d sF=%d sS=%d sC=%d maxF=1 pn=%d psF=%d psS=%d "
+                     "psC=%d sP=%d psP=%d windows=%d live_frames=%d missing_end=0 span_g=0 span_gn=0 span_u=0 "
+                     "on_calls=0 guarded=0 zs=%d zl=1 own_split=%d"
+                     % (label, ws[0]["arm"], ws[0]["pred"], sum(w["n"] for w in un), sum(w["sF"] for w in un),
+                        sum(w["sS"] for w in un), sum(w["sC"] for w in un), sum(w["n"] for w in pl),
+                        sum(w["sF"] for w in pl), sum(w["sS"] for w in pl), sum(w["sC"] for w in pl),
+                        sum(w["sP"] for w in un), sum(w["sP"] for w in pl), len(ws), sum(w["n"] for w in ws),
+                        pt.get("zs", 0), pt.get("own_split", 0)))
+            for w in ws:
+                L.append(_b11_wline(w))
+    return "\n".join(LOG_PREFIX + x for x in L)
+
+
+def _b11_wline(w):
+    # FtFrames.cs's line: medF and the excess counts only on a full window; then SHARED.md's appended fields
+    full = "" if w["partial"] else "medF=1 e4=0,0 e8=0,0 e16=0,0 "
+    cg = "NA" if w["cG"] is None else str(w["cG"])
+    return ("[FRAME-TIME] w pt=%s arm=%s plant=%d partial=%d n=%d sF=%d sS=%d sC=%d sP=%d maxF=1 %sgc=0 run=%d pos=%d "
+            "unit=%s coin=%d wi=%d f0=%d pred=%s prun=%d res=%d gcn=%d cG=%s cW=%d cR=%d cS=%d cE=%d q=%s r=%s qn=%s "
+            "wu=%s tok=%s nm=%d"
+            % (w["pt"], w["arm"], w["plant"], w["partial"], w["n"], w["sF"], w["sS"], w["sC"], w["sP"], full, w["run"],
+               w["pos"], w["unit"], w["coin"], w["wi"], w["f0"], w["pred"], w["prun"], w["res"], w["gcn"], cg,
+               w["cW"], w["cR"], w["cS"], w["cE"], ",".join(map(str, w["q"])), ",".join(map(str, w["r"])),
+               ",".join(map(str, w["qn"])), w["wu"], w["tok"], w["nm"]))
+
+
+def _enum(k):
+    """Every assignment of k fair coins, so an HT estimate's realised average over the games is its expectation."""
+    return [[(i >> b) & 1 for b in range(k)] for i in range(2 ** k)]
+
+
+def _one_run_games(reps=1):
+    """C2 and C3's design: one point of four full windows per game, every (A, B) once (times reps); cold starts."""
+    return [[{"n": [120] * 4, "coins": [(a, b)]}] for a, b in _enum(2)] * reps
+
+
+def _c2_model(arm, pred, pos, partial, j):
+    # refutation-c2.md:1: ON costs 2.5 percent (1 direct, 1.5 external); second positions after predecessor ON cost
+    # 5/3 percent more in tenths 1 to 9, nothing in tenth 10
+    s, e = (B11_PC, B11_PC * 3 // 2) if arm == "ON" else (0, 0)
+    if pos in (2, 4) and pred == "ON" and j < 9:
+        e += B11_PC * 5 // 3
+    return s, e, 0
+
+
+def _c3_model(arm, pred, pos, partial, j):
+    # refutation-c3.md:16-23: ON switched direct 2.65 percent; retained R 7/18 percent in tenths 1 to 9 after a
+    # predecessor OFF (and cold), none after ON; after ON, 4/9 percent switched-origin external in tenths 1 to 9;
+    # either current arm
+    s = B11_PC * 265 // 100 if arm == "ON" else 0
+    r = B11_PC * 7 // 18 if pred != "ON" and j < 9 else 0
+    e = B11_PC * 4 // 9 if pred == "ON" and j < 9 else 0
+    return s, e, r
+
+
+def _c4_games():
+    """refutation-c4.md (ruling .139 (2)): groups of four points, three of 120 + 60 frames and one of 120 + 120 + 120;
+    each game is one group, every assignment of its eight coins once."""
+    out = []
+    for c in _enum(8):
+        out.append([{"n": [120, 60], "coins": [(c[0], c[1])]}, {"n": [120, 60], "coins": [(c[2], c[3])]},
+                    {"n": [120, 60], "coins": [(c[4], c[5])]}, {"n": [120, 120, 120], "coins": [(c[6], c[7])]}])
+    return out
+
+
+def _c4_model(arm, pred, pos, partial, j):
+    # S 2.5 percent everywhere ON; a terminal partial window costs 5 percent external after a predecessor ON
+    return (B11_PC * 5 // 2 if arm == "ON" else 0), (B11_PC * 5 if partial and pred == "ON" else 0), 0
+
+
+def _pct(x):
+    return x / B11_PC
+
+
+def _est(text, **kw):
+    return P.b11_estimate(P.read(text), **kw)
+
+
+def chk_c2_recovers_3_25(m):
+    # ruling .137 (3)-(4), .138 (2): the interleaved contrast 2.5, both carryover terms 0.75, the corrected 3.25
+    e = m.b11_estimate(m.read(_b11_text(_one_run_games(), _c2_model)))
+    assert _pct(e["B"][0]) == pytest.approx(2.5, abs=1e-9), e["B"]
+    assert _pct(e["c_on"][0]) == pytest.approx(0.75, abs=1e-9) and _pct(e["c_off"][0]) == pytest.approx(0.75, abs=1e-9)
+    assert _pct(e["J"][0]) == pytest.approx(3.25, abs=1e-9), e["J"]
+    assert e["joint"] and e["bu"] >= e["J"][0]
+
+
+def chk_c3_recovers_3_0375(m):
+    # ruling .138 (3): c_ON 0.0375 on C°, c_OFF 0.3 on C° - R_OFF, the charge 0.16875, the corrected 3.0375
+    e = m.b11_estimate(m.read(_b11_text(_one_run_games(), _c3_model)))
+    assert _pct(e["B"][0]) == pytest.approx(2.86875, abs=1e-9), e["B"]
+    assert _pct(e["c_on"][0]) == pytest.approx(0.0375, abs=1e-9), e["c_on"]
+    assert _pct(e["c_off"][0]) == pytest.approx(0.3, abs=1e-9), e["c_off"]
+    assert _pct(e["charge"][0]) == pytest.approx(0.16875, abs=1e-9)
+    assert _pct(e["J"][0]) == pytest.approx(3.0375, abs=1e-9), e["J"]
+
+
+def chk_c4_recovers_3_5(m):
+    # ruling .139 (2): the partial stratum's direct estimate: c_a,P 5 percent, F_P 0.2, the charge 1, corrected 3.5
+    e = m.b11_estimate(m.read(_b11_text(_c4_games(), _c4_model)))
+    T = e["T"]
+    assert T["N"] == 256 * 900 and T["npart"] == 256 * 180
+    assert _pct(e["B"][0]) == pytest.approx(2.5, abs=1e-9), e["B"]
+    assert _pct(e["charge"][0]) == pytest.approx(1.0, abs=1e-9), e["charge"]
+    assert _pct(e["J"][0]) == pytest.approx(3.5, abs=1e-9), e["J"]
+
+
+def _neg_model(arm, pred, pos, partial, j):
+    # a predecessor ON makes every window cheaper by 20 percent in tenths 1 to 9: the carryover is far below 0
+    return (B11_PC * 3 if arm == "ON" else 0), (-B11_PC * 20 if pred == "ON" and j < 9 else 0), 0
+
+
+def chk_charge_never_negative(m):
+    # max(0, .) (ruling .137 (4)): a charge whose upper bound is below 0 charges nothing; the bound is the contrast's
+    e = m.b11_estimate(m.read(_b11_text(_one_run_games(reps=8), _neg_model)))
+    assert e["charge"][0] + e["charge"][1] < 0 and e["charge"][2] == 0.0, e["charge"]
+    assert e["bu"] == pytest.approx(e["B"][0] + e["B"][1], abs=1e-9) and not e["joint"], (e["bu"], e["B"], e["J"])
+    assert e["J"][0] + e["J"][1] < e["bu"]
+
+
+def _flat(arm, pred, pos, partial, j):
+    return (B11_PC * 3 if arm == "ON" else 0), (B11_PC * (pos + j % 3) if arm == "ON" else B11_PC * (j % 2)), 0
+
+
+def _ys(m, text):
+    """Per window: (record, Y in us): C° in ON, C° - R in OFF."""
+    out = []
+    for w in m.read(text):
+        if m.b11_line(w):
+            out.append((w, sum(w["q"]) - (0 if w["arm"] == "ON" else w["cR"])))
+    return out
+
+
+def chk_mates_have_joint_probability_0_or_half(m):
+    # ruling .138 (4), the integrator's D1: mates P(ON, ON) = 0 and P(ON, OFF) = 1/2; other windows 1/4; one 1/2
+    ws = [w for w in m.read(_b11_text([[{"n": [120] * 4, "coins": [(1, 0)]}]], _flat)) if m.b11_line(w)]
+    w1, w2, w3, w4 = ws
+    assert m.arm_prob((w1, "ON")) == 0.5 and m.arm_prob((w3, "OFF")) == 0.5
+    assert m.arm_prob((w1, "ON"), (w3, "ON")) == 0.0 and m.arm_prob((w1, "ON"), (w3, "OFF")) == 0.5
+    assert m.arm_prob((w2, "OFF"), (w4, "OFF")) == 0.0 and m.arm_prob((w2, "ON"), (w4, "OFF")) == 0.5
+    for a in ("ON", "OFF"):
+        for b in ("ON", "OFF"):
+            assert m.arm_prob((w1, a), (w2, b)) == 0.25 and m.arm_prob((w3, a), (w4, b)) == 0.25
+
+
+def chk_a_pair_is_one_variance_unit(m):
+    # ruling .138 (4); refutation-c4.md's V_g = 4 sum over pairs of (X_i - X_j)^2: equal mates' baselines cancel
+    text = _b11_text([[{"n": [120] * 4, "coins": [(1, 0)]}]], _flat)
+    T = m.b11_terms(m.read(text))
+    y = dict((w["wi"], (w["arm"], v)) for w, v in _ys(m, text))
+    N = 480.0
+    want = 0.0
+    for a, b in ((1, 3), (2, 4)):
+        on, off = (a, b) if y[a][0] == "ON" else (b, a)
+        want += (2 * (y[on][1] - y[off][1]) / N) ** 2
+    est, var, _ = m.ht_var(T["B"])
+    assert var == pytest.approx(want, rel=1e-12), (var, want)
+
+
+def chk_a_partial_mate_stays_in_its_pair(m):
+    # ruling .138 (4): a partial window keeps its committed arm, its pair is one variance unit with actual frame
+    # counts and probability 1/2 (the baseline enters as n_i b for each member); a mate that never ran leaves a
+    # singleton; an emitter that gave the partial window its own coin fails the mates' check
+    text = _b11_text([[{"n": [120, 120, 60], "coins": [(1, 1)]}]], _flat)
+    recs = m.read(text)
+    ws = [w for w in recs if m.b11_line(w)]
+    assert m.arm_prob((ws[0], "ON"), (ws[2], "ON")) == 0.0 and m.arm_prob((ws[0], "ON"), (ws[2], "OFF")) == 0.5
+    T = m.b11_terms(recs)
+    assert T["units"] == (1, 1)
+    y = dict((w["wi"], (w["arm"], v, w["n"])) for w, v in _ys(m, text))
+    N, beta = 300.0, m.BETA_US
+    t13 = 2 * ((y[1][1] - y[1][2] * beta) - (y[3][1] - y[3][2] * beta)) / N      # w1 ON, w3 OFF (1 - A)
+    t24 = 2 * (y[2][1] - y[2][2] * beta) / N                                       # w2 ON, its mate never ran
+    est, var, _ = m.ht_var(T["B"])
+    assert est == pytest.approx(t13 + t24, rel=1e-12) and var == pytest.approx(t13 ** 2 + t24 ** 2, rel=1e-12)
+    same = _b11_text([[{"n": [120, 120, 60], "coins": [(1, 1)]}]], _flat,
+                     edit=lambda w: w.update(arm="ON") if w["wi"] == 3 else None)
+    miss = m.window_reconcile(m.read(same))
+    assert [x for x in miss if "do not carry one committed coin" in x], miss
+
+
+def _two_points(**kw):
+    return _b11_text([[{"n": [120, 120, 120, 120, 60], "coins": [(1, 0), (0, 1)]},
+                       {"n": [120, 120, 120], "coins": [(0, 0)]}]], _flat, **kw)
+
+
+def chk_reconcile_reports_every_point(m):
+    # ruling .138, SHARED.md: no early stop; every point's totals and counts are compared, every mismatch named
+    text = _two_points()
+    assert m.window_reconcile(m.read(text)) == []
+    bad = text.replace(" n=540 sF=", " n=541 sF=").replace(" windows=3 ", " windows=4 ")
+    bad = re.sub(r"(p pt=1\.1\.1 .*? sC=)(\d+)", lambda mm: mm.group(1) + str(int(mm.group(2)) + 1), bad)
+    bad = re.sub(r"(p pt=1\.1\.2 .*? sC=)(\d+)", lambda mm: mm.group(1) + str(int(mm.group(2)) + 1), bad)
+    bad = bad.replace(" windows=5 ", " windows=6 ")
+    miss = m.window_reconcile(m.read(bad))
+    tot = [x for x in miss if "unplanted windows'" in x]
+    cnt = [x for x in miss if "window lines, the point line counts" in x]
+    assert len([x for x in tot if x.startswith("point 1.1.1:")]) == 2, miss          # n and sC
+    assert len([x for x in tot if x.startswith("point 1.1.2:")]) == 1, miss          # sC
+    assert len(cnt) == 2, miss                                                         # both points
+
+
+def chk_vr5_window_zero(m):
+    # method-v52.md:87: an OFF window executes no switched scope
+    text = _b11_text(_one_run_games(), _c2_model, edit=lambda w: w.update(cS=7, cE=w["cE"] - 7)
+                     if w["arm"] == "OFF" and w["wi"] == 1 else None)
+    ok, bad = m.vr5_points(m.read(text))
+    assert not ok and len([b for b in bad if " OFF: cS=7" in b]) == 2, bad
+
+
+def chk_classify_half_width_rule(m):
+    # method-v54.md:189: SID and FAIL need half-width <= 1.5 percent and the lower bound past 3 or 5 percent
+    assert m.classify(3.0, 100, 50, 0) == "PASS"
+    assert m.classify(4.0, 100, 1.5, 3.1) == "SID" and m.classify(4.0, 100, 1.6, 3.9) == "WITHHELD"
+    assert m.classify(6.0, 100, 1.4, 5.1) == "FAIL" and m.classify(6.0, 100, 1.6, 5.9) == "WITHHELD"
+
+
+def chk_classify_lower_bound_rule(m):
+    assert m.classify(4.0, 100, 1.0, 3.0) == "WITHHELD" and m.classify(6.0, 100, 1.0, 4.5) == "WITHHELD"
+    assert m.classify(6.0, 100, 1.0, 5.0) == "WITHHELD"
+
+
+def chk_r_common_comparator(m):
+    # ruling .137 (5): total common cost against (1 + r_U) D_common
+    assert m.r_common_check(1.2, 0.3, 1.0) is False and m.r_common_check(1.31, 0.3, 1.0) is True
+
+
+def chk_full_profile_not_applied_to_partials(m):
+    # ruling .139 (1): the partial stratum is estimated directly; the old .138 (5) profile reads 2.5 on C4's case
+    chk_c4_recovers_3_5(m)
+
+
+def _aa(arm, pred, pos, partial, j):
+    # fixed A/A outcomes: nothing depends on either arm
+    return 0, B11_PC * (pos + j % 3), 0
+
+
+def chk_h_p_cross_check(m):
+    # c5.out:51-55, ruling .140: under fixed A/A outcomes the uncentred partial charge is H_P = (2/N) sum over the
+    # ordinary partial windows of S_(i-1) C_i; the general HT (terms aggregated on their signed coins) must give it
+    games = [[{"n": [120, 60], "coins": [(1, 0)]}, {"n": [120] * 5 + [30], "coins": [(0, 1), (1, 1)]},
+              {"n": [120, 120, 90], "coins": [(1, 1)]}],
+             [{"n": [120, 120, 120, 100], "coins": [(0, 0)]}, {"n": [60], "coins": [(1, 0)]}]]
+    recs = m.read(_b11_text(games, _aa))
+    T = m.b11_terms(recs)
+    want = 0.0
+    for w in recs:
+        if m.b11_line(w) and w["partial"] and w["pred"] != "none":
+            want += (1 if w["pred"] == "ON" else -1) * (sum(w["q"]) - (0 if w["arm"] == "ON" else w["cR"]))
+    want *= 2.0 / T["N"]
+    assert want != 0
+    assert m.ht_var(T["hp"])[0] == pytest.approx(want, rel=1e-12), (m.ht_var(T["hp"])[0], want)
+    assert all(len(e) == 2 for evs in T["hp"].values() for e in evs)
+
+
+def _arm_only(arm, pred, pos, partial, j):
+    return (B11_PC * 3 if arm == "ON" else 0), 0, 0
+
+
+def chk_baseline_frozen_q_minus_2(m):
+    # ruling .140 (4): a window of run q is centred only on ordinary windows of runs q-2 and earlier. Here run 2's
+    # partial first window has run 1's last window as predecessor; centred on run q-1 its baseline would be that
+    # predecessor, whose coin moves it, and both carryover estimates would leave their true 0
+    games = [[{"n": [120] * 4 + [60], "coins": [(x[0], x[1]), (x[2], 0)]}] for x in _enum(3)]
+    e = m.b11_estimate(m.read(_b11_text(games, _arm_only)))
+    assert _pct(e["B"][0]) == pytest.approx(3.0, abs=1e-6), e["B"]
+    assert _pct(e["c_on"][0]) == pytest.approx(0.0, abs=1e-6), e["c_on"]
+    assert _pct(e["c_off"][0]) == pytest.approx(0.0, abs=1e-6), e["c_off"]
+
+
+def chk_exposure_hook(m):
+    # ruling .140 (3): the per-point figures are diagnostics only; with neither exposure-equivalence evidence nor an
+    # envelope the window verdict is WITHHELD (B_U is not computable); a supplied envelope's upper bound enters B_U
+    recs = m.read(_b11_text(_one_run_games(), _c2_model))
+    lines, e = m.b11_report(recs)
+    assert e["ex"] is None
+    assert [x for x in lines if x.startswith("B11 exposure obligation") and "the verdict is WITHHELD" in x], lines
+    try:
+        r = m.b11_bound(e["bu"], e["ex"], 0.5, 0.25, 0.125)
+    except TypeError:
+        r = "raised"
+    assert r is None, r
+    lines, e = m.b11_report(recs, exposure=(1.25, "envelope E1"))
+    assert ("B11 exposure obligation: the supplied envelope's upper bound 1.250 us per frame (envelope E1) enters U"
+            in lines), lines
+    assert m.b11_bound(e["bu"], e["ex"], 0.5, 0.25, 0.125) == pytest.approx(e["bu"] + 1.25 + 0.875)
+
+
+def _raises(fn, word):
+    """True when fn() raises MarkerRefused with that word (a check, not pytest.raises, so a mutant's miss is an
+    AssertionError the mutant battery reads)."""
+    try:
+        fn()
+    except Exception as x:          # noqa: BLE001
+        return getattr(x, "word", None) == word
+    return False
+
+
+def chk_marker_whole_line(m):
+    # P3 via the integrator: the FrameTime marker is a prefix of the FrameTimeRef one; each counts only as the whole
+    # line, so a Ref line is never a FrameTime marker
+    text = _b11_text(_one_run_games(), _c2_model)
+    ft = LOG_PREFIX + "[FRAME-TIME] " + m.MARK_FT
+    ref = LOG_PREFIX + "[FRAME-TIME] " + m.MARK_REF
+    only_ref = text.replace(ft, ref)
+    assert _raises(lambda: m.build_marker(only_ref, "measurement", "a"), "MARKER-WRONG-ROLE")
+    assert _raises(lambda: m.build_marker(text + "\n" + ref, "measurement", "a"), "MARKER-WRONG-ROLE")
+    assert _raises(lambda: m.build_marker(text.replace(ft, ft + " SCR_FT_REF=NOCOLLECTORS"), "measurement", "a"),
+                   "MARKER-UNKNOWN")
+    assert _raises(lambda: m.build_marker(text.replace(ft, ft + "Ref"), "measurement", "a"), "MARKER-UNKNOWN")
+    assert _raises(lambda: m.build_marker(text.replace(ft, ft + "Ref"), "reference", "a"), "MARKER-UNKNOWN")
+    assert _raises(lambda: m.build_marker(text.replace(ft, "[FRAME-TIME] " + m.MARK_FT), "measurement", "a"),
+                   "MARKER-UNKNOWN")
+    m.build_marker(text, "measurement", "a")
+    m.build_marker(only_ref, "reference", "a")
+    m.build_marker(text.replace(ft, ft + "  "), "measurement", "a")
+
+
+# the B11 mutants (mut_parse.py's B11_MUTS) are proven here, in process, so a seat's pytest run proves them: each row
+# names the check functions it must turn red; mutant 0, the unchanged parser, keeps every check green
+B11_CHECKS = ["chk_c2_recovers_3_25", "chk_c3_recovers_3_0375", "chk_c4_recovers_3_5", "chk_charge_never_negative",
+              "chk_mates_have_joint_probability_0_or_half", "chk_a_pair_is_one_variance_unit",
+              "chk_a_partial_mate_stays_in_its_pair", "chk_reconcile_reports_every_point", "chk_vr5_window_zero",
+              "chk_classify_half_width_rule", "chk_classify_lower_bound_rule", "chk_r_common_comparator",
+              "chk_full_profile_not_applied_to_partials", "chk_h_p_cross_check", "chk_baseline_frozen_q_minus_2",
+              "chk_exposure_hook", "chk_marker_whole_line"]
+
+
+@pytest.mark.parametrize("name", B11_CHECKS)
+def test_b11_check(name):
+    globals()[name](P)
+
+
+def _b11_mut_rows():
+    import ast
+    src = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "mut_parse.py"), encoding="utf-8").read()
+    tree = ast.parse(src)
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and getattr(node.targets[0], "id", "") == "B11_MUTS":
+            return ast.literal_eval(node.value)
+    raise AssertionError("mut_parse.py has no B11_MUTS")
+
+
+def _mutated(anchor, repl):
+    import types
+    t = open(FT_SCRIPT, encoding="utf-8").read()
+    assert t.count(anchor) == 1, (anchor, t.count(anchor))
+    mod = types.ModuleType("ft_parse_mutant")
+    mod.__file__ = FT_SCRIPT
+    exec(compile(t.replace(anchor, repl), "ft_parse_mutant.py", "exec"), mod.__dict__)
+    return mod
+
+
+def test_b11_mutant_0_keeps_every_check_green():
+    m = _mutated("def classify(u, tref, hw, lb):", "def classify(u, tref, hw, lb):")
+    for name in B11_CHECKS:
+        globals()[name](m)
+
+
+@pytest.mark.parametrize("row", _b11_mut_rows(), ids=[r[0] for r in _b11_mut_rows()])
+def test_b11_mutant_turns_its_checks_red(row):
+    name, anchor, repl, kills = row
+    assert kills and all(k in B11_CHECKS for k in kills), row
+    m = _mutated(anchor, repl)
+    for k in kills:
+        with pytest.raises(AssertionError):
+            globals()[k](m)
+
+
+def test_b11_window_line_reads_every_field_and_refuses_disagreeing_repeats():
+    text = _b11_text(_one_run_games(), _c2_model)
+    w = [r for r in P.read(text) if r["kind"] == "w"][1]
+    assert P.b11_line(w) and P.lacks_keys(w) == [] and w["unit"] == "P24" and w["pred"] in ("ON", "OFF")
+    assert len(w["q"]) == len(w["r"]) == len(w["qn"]) == 10 and w["tok"] == B11_TOK0 and w["cG"] == 0
+    assert w["prun"] == 0 and w["nm"] in (1, 4) and P._typed(w["wu"], 2, na=True) == {"log": [0, 0], "up": [0, 0]}
+    ln = [x for x in text.splitlines() if " w pt=" in x][0]
+    with pytest.raises(P.Refused, match="plant printed twice"):
+        P.parse_line(ln.replace("gcn=", "plant=1 gcn=", 1))
+    assert P.parse_line(ln.replace("gcn=", "plant=0 gcn=", 1))["plant"] == 0
+    with pytest.raises(P.RecordRefused):
+        P.read(LOG_PREFIX + ln.replace(" tok=" + B11_TOK0, ""))
+    with pytest.raises(P.RecordRefused):
+        P.read(LOG_PREFIX + ln.replace(" prun=0", ""))
+
+
+def test_b11_reconcile_clean_and_each_invariant_named():
+    text = _two_points()
+    assert P.window_reconcile(P.read(text)) == []
+    cases = [
+        (lambda w: w.update(cS=w["cS"] + 1), "is not cG+cW+cR+cS+cE"),
+        (lambda w: w.update(q=[w["q"][0] + 1] + w["q"][1:]), "sum(q)="),
+        (lambda w: w.update(r=[w["r"][0] + 1] + w["r"][1:], q=[w["q"][0] + 1] + w["q"][1:]), "sum(r)="),
+        (lambda w: w.update(qn=[11, 13] + w["qn"][2:]), "is not n=120 in 12-frame bins"),
+        (lambda w: w.update(unit="P13"), "unit P13 at position 2"),
+        (lambda w: w.update(tok="log:1,0,0,0,0,0,0;up:0,0,0,0,0,0,0"), "log's token ledger 1,0,0,0,0,0,0"),
+        (lambda w: w.update(tok="log:0,0,0,0,0,0;up:0,0,0,0,0,0,0"), "is not type:open0,enqON"),
+        (lambda w: w.update(wu="log:0:0"), "wu types log and tok types log,up differ"),
+        (lambda w: w.update(wu="log:0:NA;up:0:0"), None),
+        (lambda w: w.update(prun=1), "plant-run and ordinary windows in one run (prun)"),
+        (lambda w: w.update(plant=1, psF=0), "planted (plant=1) with prun=0"),
+        (lambda w: w.update(pred="none"), "the game's previous window is"),
+        (lambda w: w.update(res=1), "res=1, needs 0"),
+        (lambda w: w.update(coin=1 - w["coin"]), "do not carry one committed coin"),
+        (lambda w: w.update(wu="x:1"), "is not type:units:cycles"),
+    ]
+    for fn, want in cases:
+        bad = _two_points(edit=lambda w, fn=fn: fn(w) if w["pt"] == "1.1.1" and w["wi"] == 2 else None)
+        miss = P.window_reconcile(P.read(bad))
+        if want is None:
+            assert miss == [], miss                      # NA cycles are a well-formed wu: they withhold, not fault
+        else:
+            assert [x for x in miss if want in x], (want, miss)
+
+
+def test_b11_ownership_and_ordinals():
+    text = _two_points()
+    lines = text.splitlines()
+    orphan = [x for x in lines if " w pt=1.1.2 " in x][0].replace("pt=1.1.2", "pt=1.1.9")
+    miss = P.window_reconcile(P.read(text + "\n" + orphan))
+    assert "window lines of point 1.1.9: 0 owner point lines (needs exactly 1)" in miss, miss
+    twice = [x for x in lines if " p pt=1.1.2 " in x][0]
+    miss = P.window_reconcile(P.read(text + "\n" + twice))
+    assert "window lines of point 1.1.2: 2 owner point lines (needs exactly 1)" in miss, miss
+    gap = "\n".join(x for x in lines if not (" w pt=1.1.1 " in x and " wi=3 " in x))
+    miss = P.window_reconcile(P.read(gap))
+    assert [x for x in miss if "window ordinals 1,2,4,5 are not 1..4" in x], miss
+    assert [x for x in miss if x.startswith("point 1.1.1: 4 window lines, the point line counts 5")], miss
+
+
+def test_b11_plant_runs_and_res_windows_leave_the_estimate_and_are_counted():
+    games = [[{"n": [120] * 8, "coins": [(1, 0), (0, 1)], "plant": (1,)}]]
+    text = _b11_text(games, _flat)
+    assert P.window_reconcile(P.read(text)) == []
+    T = P.b11_terms(P.read(text))
+    assert T["loss"] == {"plant": 480, "res": 120, "all": 960} and T["N"] == 360
+    lines, e = P.b11_report(P.read(text))
+    assert [x for x in lines if "plant runs 480 frames, res=1 windows 120 frames, 62.50 percent of 960" in x], lines
+    assert "B11 plant runs: 1, 0 unspun" in "\n".join(lines), lines
+    # P1's notes: a plant run fixed before c_plant is unspun (prun=1, nothing planted) and still leaves the estimate
+    un = _b11_text([[{"n": [120] * 8, "coins": [(1, 0), (0, 1)], "plant": (1,), "unspun": (1,)}]], _flat)
+    assert P.window_reconcile(P.read(un)) == []
+    assert not [w for w in P.read(un) if w["kind"] == "w" and w["plant"]]
+    T2 = P.b11_terms(P.read(un))
+    assert T2["N"] == 360 and T2["loss"]["plant"] == 480 and T2["unspun"] == [(1, "1.1.1", 1)]
+    assert [x for x in P.b11_report(P.read(un))[0] if x.startswith("B11 plant runs: 1, 1 unspun") and
+            x.endswith("; 1.1.1 run 1")]
+
+
+def test_b11_transitions_own_split_and_na_writers():
+    # SHARED.md (md5 18fdafea), P1's notes: the class-transition overhead per arm (nm x the boot line's median, as a
+    # share of C; reported, never subtracted), own_split by arm, and NA writer cycles withholding B1 for the seat
+    games = [[{"n": [120] * 4, "coins": [(1, 0)], "own_split": 2}, {"n": [120, 60], "coins": [(0, 0)]}]]
+    recs = P.read(_b11_text(games, _flat))
+    lines, e = P.b11_report(recs)
+    T = e["T"]
+    on = [w for w in T["pop"] if w["arm"] == "ON"]
+    off = [w for w in T["pop"] if w["arm"] == "OFF"]
+    tx, why = P.b11_transitions(recs, T)
+    assert tx["ON"] == (4 * len(on), pytest.approx(4 * len(on) * 50 / sum(w["sC"] for w in on), rel=1e-12))
+    assert tx["OFF"] == (len(off), pytest.approx(len(off) * 50 / sum(w["sC"] for w in off), rel=1e-12))
+    assert [x for x in lines if x.startswith("B11 class transitions (in the charge, reported only): median 50 cycles "
+                                             "(p90 70, n 1000); ON %d marks" % (4 * len(on)))], lines
+    assert "B11 own_split (windows written partial by an owner split), by the point's first-window arm: ON 2, OFF 0" in lines
+    lines0, e0 = P.b11_report(P.read(_b11_text(games, _flat, mark=False)))
+    assert "B11 class transitions: not computable: 0 mark cost lines (needs exactly 1)" in lines0
+    assert e0["bu"] == e["bu"]                       # reported only: the bound does not move with the overhead
+    two = _b11_text(games, _flat).replace("[FRAME-TIME] mark cost", "[FRAME-TIME] mark cost cyc=50 p90=70 n=1000\n"
+                                          + LOG_PREFIX + "[FRAME-TIME] mark cost", 1)
+    assert "B11 class transitions: not computable: 2 mark cost lines (needs exactly 1)" in P.b11_report(P.read(two))[0]
+    na = _b11_text(games, _flat, edit=lambda w: w.update(wu="log:0:0;up:3:NA") if w["wi"] == 2 else None)
+    assert P.window_reconcile(P.read(na)) == []
+    lines, e = P.b11_report(P.read(na))
+    assert e["T"]["wu_na"] == ["up"] and "B11 writers: cycles print NA for up: B1 is withheld for this seat" in lines
+
+
+def test_b11_gc_na_windows_are_checked_without_cg_and_named():
+    # the integrator (11 Nov): cG=NA when the native hook's completeness check fails; the identity drops cG, the
+    # window is flagged, and the GC charge takes the all-GC fallback for the estimate
+    text = _b11_text(_one_run_games(), _c2_model, cg=lambda w: None if w["wi"] == 2 else 30)
+    recs = P.read(text)
+    assert P.window_reconcile(recs) == []
+    lines, e = P.b11_report(recs)
+    gl = [x for x in lines if x.startswith("B11 GC:")]
+    assert gl and "G unavailable (cG=NA) in 4 windows" in gl[0] and "all-GC fallback" in gl[0], gl
+    assert "1.1.1.2" in gl[0] and "2.1.1.2" in gl[0]
+    bad = _b11_text(_one_run_games(), _c2_model, cg=lambda w: None if w["wi"] == 2 else 30,
+                    edit=lambda w: w.update(sC=w["sC"] + 30) if w["cG"] is None else None)
+    assert [x for x in P.window_reconcile(P.read(bad)) if "is not cW+cR+cS+cE" in x]
+    ok = _b11_text(_one_run_games(), _c2_model)
+    assert "B11 GC: G available in every window" in P.b11_report(P.read(ok))[0]
+
+
+def test_b11_report_withholds_b1_and_prints_both_risks():
+    text = _b11_text(_one_run_games(), _c2_model)
+    out = P.report(text, peer=text)
+    assert re.search(r"^VERDICT B1 withheld", out, re.M), out
+    i = out.splitlines().index([x for x in out.splitlines() if x.startswith("VERDICT B1")][0])
+    tail = out.splitlines()[i + 1:i + 4]
+    assert tail[0].strip().startswith("R-CARRY") and tail[1].strip().startswith("R-COMMON"), tail
+    assert "R-COMMON UNTESTED: no reference record set" in out
+    for want in ("B11 contrast", "B11 carryover c_ON", "B11 corrected bound", "R-CARRY falsifier: between-window",
+                 "B11 point 1.1.1: 480 frames, wall 86.400 s, terminal window 120 frames, ON-frame share 0.5000, "
+                 "mean frame time ON 180000.0 us, OFF 180000.0 us (diagnostic)"):
+        assert want in out, (want, out)
+
+
+def test_b11_exposure_diagnostics_per_point():
+    # ruling .140 (3): frames, wall duration, terminal length, ON-frame share and mean frame time by arm, per point
+    e = _est(_b11_text(_one_run_games(), _c2_model))
+    pt, n, wall, last, sh, mon, moff = e["points"][0]
+    assert (pt, n, last, sh) == ("1.1.1", 480, 120, 0.5) and wall == pytest.approx(86.4)
+    assert mon == pytest.approx(B11_T) and moff == pytest.approx(B11_T) and len(e["points"]) == 4
+    games = [[{"n": [120, 60], "coins": [(1, 1)]}]]
+    pt, n, wall, last, sh, mon, moff = _est(_b11_text(games, _flat))["points"][0]
+    assert (n, last, sh, moff) == (180, 60, 1.0, None)
+    with pytest.raises(P.Refused, match="exposure envelope"):
+        _est(_b11_text(_one_run_games(), _c2_model), exposure=(-1, "x"))
+    with pytest.raises(P.Refused, match="exposure envelope"):
+        _est(_b11_text(_one_run_games(), _c2_model), exposure=(1, ""))
+
+
+def test_b11_reference_input_and_markers():
+    # the integrator (11 Nov): each input carries its own build marker exactly once; R-COMMON reads the reference
+    text = _b11_text(_one_run_games(), _c2_model)
+    ref = text.replace(P.MARK_FT, P.MARK_REF)
+    refr = P.read_reference(ref, "ref.log")
+    assert refr and all(r["kind"] in ("w", "settled") for r in refr)
+    out = P.report(text, peer=text, ref=ref)
+    assert "R-COMMON comparator: the reference's total common cost" in out, out
+    with pytest.raises(P.MarkerRefused, match="MARKER-WRONG-ROLE"):
+        P.report(ref, peer=text)
+    with pytest.raises(P.MarkerRefused, match="MARKER-WRONG-ROLE"):
+        P.read_reference(text)
+    with pytest.raises(P.MarkerRefused, match="MARKER-ABSENT"):
+        P.report(_b11_text(_one_run_games(), _c2_model, marker=False), peer=text)
+    with pytest.raises(P.MarkerRefused, match="MARKER-ABSENT"):
+        P.read_reference(_b11_text(_one_run_games(), _c2_model, marker=False))
+    two = LOG_PREFIX + "[FRAME-TIME] " + P.MARK_FT + "\n" + text
+    with pytest.raises(P.MarkerRefused, match="MARKER-REPEATED"):
+        P.report(two, peer=text)
+    with pytest.raises(P.MarkerRefused, match="MARKER-REPEATED"):
+        P.read_reference(LOG_PREFIX + "[FRAME-TIME] " + P.MARK_REF + "\n" + ref)
+    with pytest.raises(P.MarkerRefused, match="MARKER-UNKNOWN"):
+        P.report(LOG_PREFIX + "[FRAME-TIME] build variant=Release\n" + text, peer=text)
+    with pytest.raises(P.MarkerRefused, match="MARKER-ABSENT: the measurement input peer.log"):
+        P.report(text, peer=_b11_text(_one_run_games(), _c2_model, marker=False), peer_src="peer.log")
+
+
+def test_b11_reference_through_the_script(tmp_path):
+    text = _b11_text(_one_run_games(), _c2_model)
+    a, r = tmp_path / "a.log", tmp_path / "r.log"
+    a.write_text(text + "\n", encoding="utf-8")
+    r.write_text(text.replace(P.MARK_FT, P.MARK_REF) + "\n", encoding="utf-8")
+    rc, out, err = _run_script(a, a, "--ref", r)
+    assert rc == 0 and "R-COMMON comparator" in out, (rc, out, err)
+    rc, out, err = _run_script(a, a, "--ref", a)
+    assert rc == 3 and "MARKER-WRONG-ROLE" in out, (rc, out, err)

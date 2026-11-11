@@ -176,8 +176,10 @@ MUTS = [
     ('M2: report gives a verdict from one seat\'s log', 'raise Refused("a verdict needs both seats\' logs:',
      'peer = text; Refused("a verdict needs both seats\' logs:'),
     # re-anchored on report's src/peer_src parameters (brief PARSER-FIX-1109); the mutation is unchanged
-    ('M2: report regains a bypass parameter', 'def report(text, peer=None, src="log", peer_src="peer"):',
-     'def report(text, peer=None, src="log", peer_src="peer", require_peer=True):'),
+    ('M2: report regains a bypass parameter',
+     'def report(text, peer=None, src="log", peer_src="peer", ref=None, ref_src="reference", exposure=None):',
+     'def report(text, peer=None, src="log", peer_src="peer", ref=None, ref_src="reference", exposure=None, '
+     'require_peer=True):'),
     ('R5: a dependent row keeps the retired scratch proof', 'if kind == "dependent" and proof != LIVE_PROOF:',
      'if kind == "dependent" and proof not in (LIVE_PROOF, ""):'),
     ('live row executed reads not matched to its a3 line', 'if len(a3l) != 1 or a3l[0].get("reads_on") != r["reads"]:',
@@ -250,6 +252,86 @@ MUTS = [
     ('live calibration fields not required',
      '("reads", "scopes", "ticks", "tmax", "unscoped", "depth_err"),\n     "a3_live"),', '(),\n     "a3_live"),'),
 ]
+
+# B11, the window design (ruling R6-A3.11.138 as .139 amends it): (name, anchor, replacement, the check functions of
+# test_ft_parse.py it must turn red). test_ft_parse.py's test_b11_mutant_turns_its_checks_red applies each row in
+# process and test_b11_mutant_0_keeps_every_check_green is the negative control, so a seat's pytest run proves them;
+# the rows also join MUTS, with their kills as test_b11_check's node ids.
+B11_MUTS = [
+    ("B11: mates take a product joint probability",
+     'return (w["game"], w["round"], w["point"], w["run"], w["unit"])',
+     'return (w["game"], w["round"], w["point"], w["run"], w["unit"], w["pos"])',
+     ["chk_mates_have_joint_probability_0_or_half", "chk_a_pair_is_one_variance_unit",
+      "chk_a_partial_mate_stays_in_its_pair"]),
+    ("B11: partial windows given singleton coins",
+     'return (w["game"], w["round"], w["point"], w["run"], w["unit"])',
+     'return (w["game"], w["round"], w["point"], w["run"], w["unit"], w["pos"] if w["partial"] else 0)',
+     ["chk_a_partial_mate_stays_in_its_pair"]),
+    ("B11: the tenths summed unweighted (x10)",
+     "prof = (sum(y[:TENTHS - 1]) / TENTHS - (TENTHS - 1) / TENTHS * y[TENTHS - 1]) / ff",
+     "prof = (sum(y[:TENTHS - 1]) - (TENTHS - 1) * y[TENTHS - 1]) / ff",
+     ["chk_c2_recovers_3_25", "chk_c3_recovers_3_0375"]),
+    ("B11: no max(0, .) on the charge",
+     "bu = max(ub_b, ub_j) if cub > 0 else ub_b",
+     "bu = ub_j",
+     ["chk_charge_never_negative"]),
+    ("B11: classify without the half-width rule",
+     'if hw > 0.015 * tref:\n        return "WITHHELD"',
+     'if False:\n        return "WITHHELD"',
+     ["chk_classify_half_width_rule"]),
+    ("B11: R-COMMON against r_U D_common",
+     "return total_lo > (1.0 + r_u) * d_common",
+     "return total_lo > r_u * d_common",
+     ["chk_r_common_comparator"]),
+    ("B11: reconciliation stops at a point's first total",
+     '                                % (pt, "planted" if planted else "unplanted", wk, tot, pk, p.get(pk)))',
+     '                                % (pt, "planted" if planted else "unplanted", wk, tot, pk, p.get(pk)))\n'
+     '                    break',
+     ["chk_reconcile_reports_every_point"]),
+    ("B11: OFF carryover on C-zero, R_OFF not restored",
+     '        if w["partial"] == 0:\n            prof = (',
+     '        if w["partial"] == 0:\n            y = [w["q"][jj] * k for jj in range(TENTHS)]\n            prof = (',
+     ["chk_c3_recovers_3_0375"]),
+    ("B11: the full-window profile charged to partials (.138 (5))",
+     "share_f, share_p = nfull / N, npart / N",
+     "share_f, share_p = 1.0, 0.0",
+     ["chk_c4_recovers_3_5", "chk_full_profile_not_applied_to_partials"]),
+    ("B11: VR5 ignores an OFF window's switched execution",
+     'if b11_line(r) and r["arm"] == "OFF" and r["cS"] != 0:',
+     'if False:',
+     ["chk_vr5_window_zero"]),
+    ("B11: classify without the lower-bound rule",
+     'return "SID" if lb > 0.03 * tref else "WITHHELD"',
+     'return "SID"',
+     ["chk_classify_lower_bound_rule"]),
+    # ruling R6-A3.11.140
+    ("B11: the baseline centred on run q-1",
+     "grun[id(v)] <= grun[id(w)] - 2",
+     "grun[id(v)] <= grun[id(w)] - 1",
+     ["chk_baseline_frozen_q_minus_2"]),
+    ("B11: the carryover exposure drops the predecessor's coin",
+     "e2 = event((coin_of(pw), coin_value(pw)), (c, v))",
+     "e2 = event((c, v))",
+     ["chk_h_p_cross_check", "chk_c4_recovers_3_5"]),
+    ("B11: the exposure envelope left out of B_U",
+     "return bu + ex + g_u + w_u + e_u",
+     "return bu + g_u + w_u + e_u",
+     ["chk_exposure_hook"]),
+    ("B11: B_U computed without the exposure obligation",
+     "if any(x is None for x in (bu, ex, g_u, w_u, e_u)):",
+     "if any(x is None for x in (bu, g_u, w_u, e_u)):",
+     ["chk_exposure_hook"]),
+    # the whole-line marker (P3 via the integrator): FrameTime is a prefix of FrameTimeRef
+    ("B11: the marker matched as a prefix",
+     "        pay = m.group(1) if m else ln\n",
+     "        pay = m.group(1) if m else ln\n        pay = MARK_FT if pay.startswith(MARK_FT) else pay\n",
+     ["chk_marker_whole_line"]),
+    ("B11: the marker matched anywhere in the line",
+     "m = re.fullmatch(r\"\\[[^\\[\\]]*\\] \\[FRAME-TIME\\] (.*?)\\s*\", ln)",
+     "m = re.search(r\"\\[FRAME-TIME\\] (.*?)\\s*$\", ln)",
+     ["chk_marker_whole_line"]),
+]
+MUTS += [r[:3] for r in B11_MUTS]
 
 def _ids(test, *params):
     """Exact node ids of a parametrised test's cases (ruling R6-A3.11.95 (4)(f)): a kill names the cases its
@@ -563,6 +645,7 @@ KILLS = {
     'live calibration fields not required': _ids("test_a_live_calibration_line_lacking_a_field_is_refused_when_read",
                                                  "reads", "scopes", "ticks", "tmax", "unscoped", "depth_err"),
 }
+KILLS.update((r[0], _ids("test_b11_check", *r[3])) for r in B11_MUTS)
 t0 = open(os.path.join(src, "ft_parse.py"), encoding="utf-8", newline="").read()
 DISCOVER = "--discover" in sys.argv[3:]
 # each pytest run is capped at --cap=N seconds (default 3600); a run past it is a TIMEOUT verdict, never red
