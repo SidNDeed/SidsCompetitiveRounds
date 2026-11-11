@@ -546,7 +546,9 @@ namespace CompetitiveRounds
         /// sends FFA's pending point. With no latch it does. A latch whose send has
         /// not run was set in an earlier master period, and that send would fail
         /// MaySend, so the re-drive sends in its place. A latch whose send ran
-        /// stays, so the point is not sent twice.</summary>
+        /// stays, so the point is not sent twice, unless its message came back
+        /// refused (FfaMode.OwnRoundRefused, R2 HIGH): its send is then pending
+        /// again.</summary>
         internal static bool RedriveSendsPoint(bool latched, bool sendPending)
         {
             return !latched || sendPending;

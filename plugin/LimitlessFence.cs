@@ -983,6 +983,9 @@ namespace CompetitiveRounds
             {
                 case LimitlessFenceRules.HandlerOutcome.RefuseNotMaster:
                     Plugin.Log.LogWarning("[LIMIT] refused a fence message: its sender is not the master now");
+                    // R2 HIGH (4.6): this seat's own message, refused here, was refused on every seat,
+                    // since every seat sees the server's order. FFA's point is then owed again.
+                    if (ffa && PhotonNetwork.LocalPlayer != null && sender == PhotonNetwork.LocalPlayer.ActorNumber) FfaMode.OwnRoundRefused();
                     return;
                 case LimitlessFenceRules.HandlerOutcome.RefuseUncovered:
                     Plugin.Log.LogWarning("[LIMIT] refused the master's fence message: gid " + GidPrefix(rec.Gid)

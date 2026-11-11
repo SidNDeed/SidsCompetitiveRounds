@@ -1029,6 +1029,26 @@ def claim_no_record_after_the_real_end(files):
     return out
 
 
+def claim_a_refused_point_is_owed_again(files):
+    """4.6 at a handoff (R2 HIGH). A seat's own round message that comes back
+    refused, because its sender was not the master when the server relayed it,
+    was applied by no seat: every seat sees the server's order, and the echo
+    reaches the seat before any later master change. In FFA the point is then
+    owed again: while the latch holds its send is pending, so the re-drive of
+    the seat's next master period sends it (RedriveSendsPoint)."""
+    out = []
+    body = _code(files[LF], "internal static void HandleFenceEvent(int sender, object[] data)")
+    i = body.find("case LimitlessFenceRules.HandlerOutcome.RefuseNotMaster:")
+    j = body.find("case LimitlessFenceRules.HandlerOutcome.RefuseUncovered:")
+    branch = body[i:j] if -1 < i < j else ""
+    if not _in_order(branch, ["if (ffa && PhotonNetwork.LocalPlayer != null && sender == PhotonNetwork.LocalPlayer.ActorNumber) FfaMode.OwnRoundRefused();", "return;"]):
+        out.append("this seat's refused round message does not re-arm its point")
+    if not _in_order(_code(files["FfaMode.cs"], "internal static void OwnRoundRefused()"),
+                     ["if (!pointLatched) return;", "pointSendPending = true;"]):
+        out.append("the re-arm does not mark the latched point's send pending")
+    return out
+
+
 ADMIT_ENTRANT = [
     ("private static IEnumerator AdmittedLateRun(", "if (body)",
      "if (LimitlessFence.RecordOpen) { LateGiveUp(); yield break; }", "LateArmed = true;", "arming"),
@@ -2483,6 +2503,7 @@ CLAIMS = {
     "redrive": claim_the_new_master_redrives,
     "point_ticket": claim_one_send_per_point,
     "real_end_snapshot": claim_no_record_after_the_real_end,
+    "refused_point": claim_a_refused_point_is_owed_again,
     "no_admission": claim_no_fighter_is_admitted,
     "late_tail": claim_the_late_tail_is_refused,
     "entrant_exit": claim_a_refused_entrant_is_no_departure,
@@ -2818,8 +2839,15 @@ MUTANTS = [
      _drop("FfaMode.cs", '                    try { LimitlessFence.NoteRealEnd("FFA game over"); } catch { }   // R1 HIGH 3\n')),
     ("real_end_snapshot", "the observer's end is not noted", _drop(LF, '            NoteRealEnd("observer game over, " + mode);\n')),
     ("real_end_snapshot", "a retired record keeps the mark", _drop(LF, "            _realEndSeen = false;\n")),
-    ("real_end_snapshot", "a created record keeps the mark",
-     _drop(LF, "            if (create) _realEndSeen = false;   // R1 HIGH 3: a new record has had no real end\n")),
+    # R2 LOW: dropping the clear changed only spelling, since retirement had
+    # cleared the mark. A created record that starts marked changes behaviour:
+    # its snapshot carries no record before any end.
+    ("real_end_snapshot", "a created record starts marked",
+     [(LF, "if (create) _realEndSeen = false;", "if (create) _realEndSeen = true;")]),
+    ("refused_point", "a refused own message re-arms nothing",
+     _drop(LF, "                    if (ffa && PhotonNetwork.LocalPlayer != null && sender == PhotonNetwork.LocalPlayer.ActorNumber) FfaMode.OwnRoundRefused();\n")),
+    ("refused_point", "the re-arm marks nothing",
+     _drop("FfaMode.cs", "            pointSendPending = true;   // R2 HIGH: the point is owed again\n")),
     ("no_admission", "the master answers a late request as before",
      _drop("FfaLateEntry.cs", '            if (LimitlessFence.RecordOpen) { Refused("limitless", sender); SendSnapshot(sender, seq, true); return; }\n')),
     ("no_admission", "the master answers a late request with an open snapshot",
@@ -3439,6 +3467,8 @@ CONTROLS = [
                        NEUTRAL + "            if (ticket != pointTicket) yield break;")]),
     ("real_end_snapshot", [(LF, "            if (_realEndSeen) return snap;",
                             NEUTRAL + "            if (_realEndSeen) return snap;")]),
+    ("refused_point", [("FfaMode.cs", "            if (!pointLatched) return;",
+                        NEUTRAL + "            if (!pointLatched) return;")]),
     ("no_admission", [("FfaLateEntry.cs", "            if (LimitlessFence.RecordOpen) { LateGiveUp(); return; }   // 4.6: no admission\n",
                        NEUTRAL + "            if (LimitlessFence.RecordOpen) { LateGiveUp(); return; }   // 4.6: no admission\n")]),
     ("late_tail", [("FfaReadmit.cs", '                    if (LimitlessFence.RecordOpen) { Refusal("limitless", true); break; }\n',

@@ -280,6 +280,7 @@ namespace CompetitiveRounds
         // Ask 16(a) lane 2 (v4 4.6; R1 HIGH 2): each scheduled point's ticket, and
         // whether the latched point's send has yet to run. A re-drive retires the
         // ticket still waiting and sends in its place, so one of the two sends runs.
+        // R2 HIGH: a send whose message came back refused is pending again (OwnRoundRefused).
         private static int pointTicket = 0;
         private static bool pointSendPending = false;
         private static bool gameOverFired = false;
@@ -2120,6 +2121,19 @@ namespace CompetitiveRounds
                 ResolvePointNow(gm);
             }
             catch (Exception ex) { Plugin.Log.LogError($"[FFA] RedrivePendingPoint: {ex.Message}"); }
+        }
+
+        /// <summary>4.6 at a handoff (R2 HIGH): this seat's own round message came
+        /// back refused, since its sender was not the master when the server
+        /// relayed it. Every seat sees the server's order, so no seat applied it,
+        /// and the echo reaches this seat before any later master change. While
+        /// the latch holds, the point's send is pending again, and the re-drive of
+        /// this seat's next master period sends it (RedriveSendsPoint).</summary>
+        internal static void OwnRoundRefused()
+        {
+            if (!pointLatched) return;
+            pointSendPending = true;   // R2 HIGH: the point is owed again
+            Plugin.Log.LogInfo("[LIMIT] this seat's round message was refused; its point is owed again");
         }
 
         /// <summary>Winner id meaning "nobody survived, because the last
