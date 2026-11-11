@@ -193,6 +193,7 @@ namespace CompetitiveRounds
                 Th = TeamHoldWriter.RoomProp(TeamHoldRules.KEY_TH),
                 VLeave = TeamHoldWriter.PlayerProp(p, TeamHoldRules.KEY_VLEAVE) == "1",
                 SlotMarked = SeatDeckLog.Marked(slot),
+                FenceOpen = LimitlessFence.RecordOpen,   // Ask 16(a) lane 2 (v4 4.6)
                 RoomName = room,
             };
         }
@@ -205,6 +206,9 @@ namespace CompetitiveRounds
             if (p == null) return false;
             try
             {
+                // Ask 16(a) lane 2 (v4 4.6): no hold while a fence record is live
+                // or terminating, ahead of the memo, which is neither read nor written.
+                if (LimitlessFence.RecordOpen) return false;
                 if (!TeamHoldRules.Flagged(TeamHoldWriter.CurrentRoom())) return false;
                 return TeamHoldRules.HoldGate.DecideOnce(p.ActorNumber, () => Read(p));
             }
@@ -231,6 +235,8 @@ namespace CompetitiveRounds
             try
             {
                 if (p == null) return false;
+                // Ask 16(a) lane 2 (v4 4.6): ahead of the held set and the memo.
+                if (LimitlessFence.RecordOpen) return false;
                 if (_held.Contains(p.ActorNumber)) return true;
                 if (_cut != null)
                 {

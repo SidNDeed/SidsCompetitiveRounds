@@ -2060,6 +2060,27 @@ namespace CompetitiveRounds
             catch (Exception ex) { Plugin.Log.LogError($"[FFA] HandlePlayerDied: {ex.Message}"); }
         }
 
+        /// <summary>Ask 16(a) lane 2 (v4 4.6): the new master's re-drive of a
+        /// point in flight at a handoff, while a fence record is live or
+        /// terminating. HandlePlayerDied's own gates without its slow-down, which
+        /// every seat ran at the death; the point goes through the fence's
+        /// sender.</summary>
+        internal static void RedrivePendingPoint(GM_ArmsRace gm)
+        {
+            try
+            {
+                if (gm == null || gameOverFired || GameManager.instance == null || !GameManager.instance.battleOngoing) return;
+                if (FfaLateEntry.LocalSitsOut() || RoomActors.LocalIsSpectator) return;
+                if (AlivePlayers().Count > 1) return;
+                if (!FfaLateEntry.MasterMaySend() || pointLatched || isTransitioning) return;
+                LimitlessFence.NoteFfaPointScheduled();   // the re-drive's capture, as HandlePlayerDied's
+                pointLatched = true;
+                Plugin.Log.LogInfo("[LIMIT] the new master re-drives the pending point");
+                ResolvePointNow(gm);
+            }
+            catch (Exception ex) { Plugin.Log.LogError($"[FFA] RedrivePendingPoint: {ex.Message}"); }
+        }
+
         /// <summary>Winner id meaning "nobody survived, because the last
         /// players alive killed each other". Distinct from -1, which is the
         /// generic no-winner value every other path uses (a leaver ending the
@@ -5901,6 +5922,9 @@ namespace CompetitiveRounds
     {
         static bool Prefix(Photon.Realtime.Player otherPlayer)
         {
+            // Ask 16(a) lane 2 (v4 4.6): termination is this route's first
+            // statement, ahead of its EngineActive branch.
+            try { LimitlessFence.TerminateOnDeparture(otherPlayer); } catch { }
             if (!FfaMode.EngineActive()) return true;
             // Sibling-prefix rule (bug 203 family): the spectator's own leave
             // handling (Spectator_LeaveIsInvisible) owns room-exit semantics

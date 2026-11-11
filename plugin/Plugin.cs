@@ -4962,6 +4962,9 @@ namespace CompetitiveRounds
 
         public void OnPlayerLeftRoom(Photon.Realtime.Player p)
         {
+            // Ask 16(a) lane 2 (v4 4.6): termination is the first statement of
+            // every departure route, ahead of TeamHold.OnLeave below.
+            try { LimitlessFence.TerminateOnDeparture(p); } catch { }
             // Roster changed: same-frame reads must not see the cached view
             // (Codex r3 — two same-frame departures vs the DC reporter).
             try { RoomActors.InvalidateFighterCache(); } catch { }
@@ -5677,6 +5680,11 @@ namespace CompetitiveRounds
                 }
             }
             catch (Exception ex) { Plugin.Log.LogWarning($"[SPECTATE] master handoff: {ex.Message}"); }
+            // Ask 16(a) lane 2 (v4 4.6): FFA after a master change. Once the
+            // master is settled (the tickets above are cleared, and a fenced or
+            // spectator master has handed the role on), the new master re-drives
+            // a pending point through the fence's sender while a record is open.
+            try { LimitlessFence.RedriveAfterHandoff(newMasterClient); } catch { }
 
             if (!Diag2v2.IsActive()) return;
             try { Plugin.Log.LogInfo($"[2v2-DIAG] MasterClientSwitched: new='{newMasterClient?.NickName}' actor={newMasterClient?.ActorNumber}"); }

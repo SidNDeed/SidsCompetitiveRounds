@@ -125,6 +125,7 @@ namespace CompetitiveRounds
         internal static void NoteMasterSwitched(Photon.Realtime.Player newMaster)
         {
             _handoff++;
+            Terminate("master change");   // 4.6: a master change terminates a live record
             if (newMaster != null && newMaster.IsLocal) TryMint("handoff");
         }
 
@@ -372,6 +373,7 @@ namespace CompetitiveRounds
         internal static void RetireRecord(string why)
         {
             _refusalLogged.Clear();
+            _departed = false;
             if (!_hasRecord) return;
             _hasRecord = false;
             _state = LimitlessFenceRules.FencePhase.PhaseLive;
@@ -389,6 +391,42 @@ namespace CompetitiveRounds
             if (_refusalLogged.Add(site))
                 Plugin.Log.LogWarning("[LIMIT] a raw round call was refused (" + site + "): the record is " + _state);
             return true;
+        }
+
+        // ------------------------------------------------------------------ termination (4.6)
+
+        private static bool _departed;
+
+        /// <summary>4.6: the first statement of each departure route (the
+        /// Plugin hook, the hold's NCH prefix and FFA's NCH prefix). The code
+        /// treats their order as undefined, so whichever runs first sets
+        /// termination before any of them classifies. Idempotent. A spectator's
+        /// departure is not a fighter's and sets nothing.</summary>
+        internal static void TerminateOnDeparture(Photon.Realtime.Player p)
+        {
+            if (p == null || !RecordOpen || RoomActors.IsSpectatorReplicated(p)) return;
+            _departed = true;
+            Terminate("fighter departure");
+        }
+
+        /// <summary>Live to terminating; never back (4.3).</summary>
+        private static void Terminate(string why)
+        {
+            if (!RecordOpen) return;
+            var before = _state;
+            _state = LimitlessFenceRules.NextState(_state, true);
+            if (_state != before) Plugin.Log.LogInfo("[LIMIT] record terminating (" + why + ")");
+        }
+
+        /// <summary>4.6: FFA after a master change. The old master's deferred
+        /// point fails MaySend, so while a record is live or terminating the
+        /// new master resolves a pending point through the fence's sender, with
+        /// FfaMode's own gates: no point in transition and at most one fighter
+        /// alive. Plugin calls this once the master is settled.</summary>
+        internal static void RedriveAfterHandoff(Photon.Realtime.Player newMaster)
+        {
+            if (newMaster == null || !newMaster.IsLocal || !RecordOpen || !FfaMode.EngineActive()) return;
+            FfaMode.RedrivePendingPoint(GM_ArmsRace.instance);
         }
 
         // ------------------------------------------------------------------ the opt-in (4.7, D4, D6)
@@ -467,6 +505,7 @@ namespace CompetitiveRounds
             if (pm == null || pm.TeamsAlive() >= 2) return FenceSend.Vanilla;
             int winner = pm.GetLastTeamAlive();
             int[] args = { pm.GetOtherTeam(winner), winner, gm.p1Points, gm.p2Points, gm.p1Rounds, gm.p2Rounds };
+            if (RecordOpen && _departed) return WithheldAfterDeparture();
             if (RecordOpen) return SendContinuation(args, new[] { gm.p1Rounds, gm.p2Rounds }, _epoch, _handoff);
             if (winner != 0 && winner != 1) return FenceSend.Vanilla;
             int ptw = gm.pointsToWinRound; if (ptw <= 0) ptw = 2;
@@ -474,6 +513,16 @@ namespace CompetitiveRounds
             if (!LimitlessFenceRules.RoundEndsGame(winner == 0 ? gm.p1Points : gm.p2Points, wRounds, ptw, gm.roundsToWinGame))
                 return FenceSend.Vanilla;
             return SendDecision(args, gm.roundsToWinGame, winner, wRounds, winner == 0 ? gm.p2Rounds : gm.p1Rounds, _epoch, _handoff);
+        }
+
+        /// <summary>4.6, 4.7: after a fighter's departure in 1v1, 2v2, OVT or
+        /// sct the master sends nothing more for the record. The prefix skips
+        /// vanilla's body, and vanilla's departure handler tears the room down.</summary>
+        private static FenceSend WithheldAfterDeparture()
+        {
+            if (_answerLogged.Add("departed"))
+                Plugin.Log.LogInfo("[LIMIT] no round message after a departure: the room tears down");
+            return FenceSend.Withheld;
         }
 
         /// <summary>4.7 on the FFA master, at FFA's send (ResolvePointNow), after
@@ -556,8 +605,10 @@ namespace CompetitiveRounds
                     Plugin.Log.LogWarning("[LIMIT] a round message was withheld: MaySend refused");
                 return FenceSend.Withheld;
             }
-            bool mustEnd = LimitlessFenceRules.MustEnd(FighterOptIns(), _record.Gid, ActorCapabilities(), OwnCapability(),
-                                                       _handoff, _handoffAtRecord);
+            // 4.6: a terminating record ends at this send (an FFA departure, a master change).
+            bool mustEnd = _state == LimitlessFenceRules.FencePhase.PhaseTerminating
+                           || LimitlessFenceRules.MustEnd(FighterOptIns(), _record.Gid, ActorCapabilities(), OwnCapability(),
+                                                          _handoff, _handoffAtRecord);
             var rec = LimitlessFenceRules.NextSendRecord(_record, mustEnd, sides);
             if (rec.EndFlag && !_record.EndFlag)
                 Plugin.Log.LogInfo("[LIMIT] the master ends the continuation: end target " + rec.TargetRounds);

@@ -188,6 +188,7 @@ namespace CompetitiveRounds
             internal string Th;
             internal bool VLeave;
             internal bool SlotMarked;
+            internal bool FenceOpen;   // Ask 16(a) lane 2 (v4 4.6): a fence record is live or terminating
             // never read
             internal bool QuorumCapable;
             internal bool LocalUnauthorized;
@@ -203,6 +204,7 @@ namespace CompetitiveRounds
             internal static bool Decide(GateInputs i)
             {
                 if (i == null || i.Pin == null || !i.Pin.Hold) return false;
+                if (i.FenceOpen) return false;   // Ask 16(a) lane 2 (v4 4.6): no hold inside a continuation
                 string mode = i.Pin.Mode;
                 if (mode != MODE_TEAM && mode != MODE_OVT) return false;
                 if (i.IsSpec) return false;

@@ -338,8 +338,17 @@ namespace CompetitiveRounds
         [HarmonyPriority(Priority.Low)]
         private static bool Prefix(Photon.Realtime.Player otherPlayer, bool __runOriginal)
         {
+            // Ask 16(a) lane 2 (v4 4.6): termination is this route's first
+            // statement, ahead of Classify, whatever another prefix returned.
+            try { LimitlessFence.TerminateOnDeparture(otherPlayer); } catch { }
             if (!__runOriginal) return false;
-            try { return !TeamHold.Classify(otherPlayer) && !TeamHold.HoldsAnother(otherPlayer); }
+            try
+            {
+                // 4.6: no hold while a fence record is live or terminating; the
+                // memo is neither read nor written.
+                if (LimitlessFence.RecordOpen) return true;
+                return !TeamHold.Classify(otherPlayer) && !TeamHold.HoldsAnother(otherPlayer);
+            }
             catch { return true; }
         }
     }

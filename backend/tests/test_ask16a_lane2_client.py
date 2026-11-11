@@ -669,7 +669,7 @@ CONT = [
     "bool may = LimitlessFenceRules.MaySend(PhotonNetwork.IsMasterClient,",
     "_state == LimitlessFenceRules.FencePhase.PhaseEnded, _epoch, epochCaptured, _handoff, handoffCaptured);",
     "if (!may)", 'MaySend refused");\n                return FenceSend.Withheld;',
-    "bool mustEnd = LimitlessFenceRules.MustEnd(FighterOptIns(), _record.Gid, ActorCapabilities(), OwnCapability(),",
+    "|| LimitlessFenceRules.MustEnd(FighterOptIns(), _record.Gid, ActorCapabilities(), OwnCapability(),",
     "_handoff, _handoffAtRecord);", "var rec = LimitlessFenceRules.NextSendRecord(_record, mustEnd, sides);",
     "if (!RaiseFence(LimitlessFenceRules.EncodeRecord(rec, null, args, PhotonNetwork.ServerTimestamp)))",
 ]
@@ -714,6 +714,128 @@ def claim_the_opt_in_writer(files):
     return out
 
 
+TERM = [
+    "if (p == null || !RecordOpen || RoomActors.IsSpectatorReplicated(p)) return;",
+    "_departed = true;", 'Terminate("fighter departure");',
+]
+
+
+def claim_termination_is_set(files):
+    """4.6: a fighter's departure, never a spectator's, and a master change
+    make a live record terminating; never back. The departure flag lasts as
+    long as its record."""
+    out = []
+    lf = files[LF]
+    if not _in_order(_code(lf, "internal static void TerminateOnDeparture("), TERM):
+        out.append("a departure does not terminate the record as 4.6 reads it")
+    if not _in_order(_code(lf, "private static void Terminate(string why)"),
+                     ["if (!RecordOpen) return;", "_state = LimitlessFenceRules.NextState(_state, true);"]):
+        out.append("termination does not move the record to terminating")
+    if not _in_order(_code(lf, "internal static void NoteMasterSwitched("), ["_handoff++;", 'Terminate("master change");']):
+        out.append("a master change does not terminate the record after the handoff count rises")
+    if not _in_order(_code(lf, "internal static void RetireRecord("), ["_departed = false;", "if (!_hasRecord) return;"]):
+        out.append("the departure flag outlives its record")
+    return out
+
+
+ROUTE_FIRST = "try { LimitlessFence.TerminateOnDeparture(otherPlayer); } catch { }"
+
+
+def claim_every_departure_route_terminates_first(files):
+    """4.6: termination is the first statement of each departure route: the
+    Plugin hook (ahead of TeamHold.OnLeave), the hold's NCH prefix (ahead of
+    Classify, whatever another prefix returned) and FFA's NCH prefix (ahead
+    of its EngineActive branch)."""
+    out = []
+    routes = [
+        (_code(files["Plugin.cs"], "public void OnPlayerLeftRoom(Photon.Realtime.Player p)"),
+         "try { LimitlessFence.TerminateOnDeparture(p); } catch { }", "the Plugin hook"),
+        (_code(_code(files["TeamHoldPatches.cs"], "internal static class NCH_OnPlayerLeftRoom_Hold_Patch"), " Prefix("),
+         ROUTE_FIRST, "the hold's NCH prefix"),
+        (_code(_code(files["FfaMode.cs"], "class NCH_OnPlayerLeftRoom_Ffa_Patch"), " Prefix("),
+         ROUTE_FIRST, "FFA's NCH prefix"),
+    ]
+    for body, want, name in routes:
+        if _first(body) != want:
+            out.append("termination is not the first statement of " + name)
+    return out
+
+
+def claim_the_hold_reads_the_record_first(files):
+    """4.6: the hold's inputs carry the record and its rule refuses a hold
+    while a record is live or terminating. Classify, the leave callback and
+    the cascade prefix read the record first, ahead of the memo and the held
+    set."""
+    out = []
+    tw = files["TeamHoldWriter.cs"]
+    if "FenceOpen = LimitlessFence.RecordOpen," not in _code(tw, "private static TeamHoldRules.GateInputs Read("):
+        out.append("the gate's inputs do not carry the record")
+    if not _in_order(_code(files["TeamHoldRules.cs"], "internal static bool Decide(GateInputs i)"),
+                     ["if (i == null || i.Pin == null || !i.Pin.Hold) return false;", "if (i.FenceOpen) return false;",
+                      "return true;"]):
+        out.append("the hold rule does not refuse inside a continuation")
+    if not _in_order(_code(tw, "internal static bool Classify(Photon.Realtime.Player p)"),
+                     ["if (LimitlessFence.RecordOpen) return false;", "TeamHoldRules.Flagged(", "HoldGate.DecideOnce("]):
+        out.append("Classify reaches the memo during a record")
+    if not _in_order(_code(tw, "internal static bool OnLeave("),
+                     ["if (LimitlessFence.RecordOpen) return false;", "if (_held.Contains(p.ActorNumber)) return true;"]):
+        out.append("the leave callback reads the held set before the record")
+    pre = _code(_code(files["TeamHoldPatches.cs"], "internal static class NCH_OnPlayerLeftRoom_Hold_Patch"), " Prefix(")
+    if not _in_order(pre, ["if (!__runOriginal) return false;", "if (LimitlessFence.RecordOpen) return true;",
+                           "TeamHold.Classify(otherPlayer)"]):
+        out.append("the cascade prefix classifies before reading the record")
+    return out
+
+
+def claim_termination_reaches_the_sender(files):
+    """4.6, 4.7: after a departure in 1v1, 2v2, OVT or sct the GM master sends
+    nothing more for the record; a terminating record ends at the next send."""
+    out = []
+    lf = files[LF]
+    if not _in_order(_code(lf, "internal static FenceSend GmRoundSend(GM_ArmsRace gm)"),
+                     ["if (RecordOpen && _departed) return WithheldAfterDeparture();", "if (RecordOpen) return SendContinuation("]):
+        out.append("the GM master sends after a departure")
+    if _code(lf, "private static FenceSend WithheldAfterDeparture()").count("return FenceSend.Withheld;") != 1:
+        out.append("the departure's answer is not a withheld round")
+    if not _in_order(_code(lf, "private static FenceSend SendContinuation("),
+                     ["bool mustEnd = _state == LimitlessFenceRules.FencePhase.PhaseTerminating",
+                      "|| LimitlessFenceRules.MustEnd("]):
+        out.append("a terminating record goes out without its end")
+    return out
+
+
+REDRIVE = [
+    "if (gm == null || gameOverFired || GameManager.instance == null || !GameManager.instance.battleOngoing) return;",
+    "if (FfaLateEntry.LocalSitsOut() || RoomActors.LocalIsSpectator) return;",
+    "if (AlivePlayers().Count > 1) return;",
+    "if (!FfaLateEntry.MasterMaySend() || pointLatched || isTransitioning) return;",
+    "LimitlessFence.NoteFfaPointScheduled();", "pointLatched = true;", "ResolvePointNow(gm);",
+]
+SWITCH = [
+    "LimitlessFence.NoteMasterSwitched(newMasterClient);", "FfaMapScale.OnMasterClientSwitched();",
+    "FfaMode.OnMasterClientSwitched();", "FfaLateEntry.OnMasterSwitched(newMasterClient);",
+    'SpectatorSync.LeaveToMenu("no fighter to hold master");',
+    "LimitlessFence.RedriveAfterHandoff(newMasterClient);", "if (!Diag2v2.IsActive()) return;",
+]
+
+
+def claim_the_new_master_redrives(files):
+    """4.6: FFA after a master change. Once the master is settled, the new
+    master re-drives a pending point through the fence's sender while a
+    record is live or terminating, with HandlePlayerDied's gates, its capture
+    and its latch."""
+    out = []
+    if not _in_order(_code(files["Plugin.cs"], "public void OnMasterClientSwitched(Photon.Realtime.Player newMasterClient)"),
+                     SWITCH):
+        out.append("the re-drive does not run once the master is settled")
+    if _first(_code(files[LF], "internal static void RedriveAfterHandoff(")) != \
+            "if (newMaster == null || !newMaster.IsLocal || !RecordOpen || !FfaMode.EngineActive()) return;":
+        out.append("the re-drive is not the new master's, in FFA, with a record open")
+    if not _in_order(_code(files["FfaMode.cs"], "internal static void RedrivePendingPoint(GM_ArmsRace gm)"), REDRIVE):
+        out.append("the re-drive does not keep HandlePlayerDied's gates, the capture and the latch")
+    return out
+
+
 CLAIMS = {
     "game_start_prefix": claim_the_game_start_prefix,
     "stamp_before_join": claim_the_gid_is_stamped_before_the_join,
@@ -736,6 +858,11 @@ CLAIMS = {
     "decision_inputs": claim_the_decision_reads_its_inputs,
     "later_rounds": claim_every_later_round_rereads,
     "opt_in": claim_the_opt_in_writer,
+    "termination": claim_termination_is_set,
+    "departure_routes": claim_every_departure_route_terminates_first,
+    "hold_refusal": claim_the_hold_reads_the_record_first,
+    "sender_end": claim_termination_reaches_the_sender,
+    "redrive": claim_the_new_master_redrives,
 }
 
 GATE = "                if (SpectatorPatchSupport.Suppress) return;\n"
@@ -944,6 +1071,59 @@ MUTANTS = [
     ("opt_in", "the radio does not write", _drop(LF, '            WriteOptIn("radio");\n')),
     ("capability", "the capability is staged without the sender's patch",
      [(LF, " || !RawRoundLive || !PlayerDiedLive)", " || !RawRoundLive)")]),
+    ("termination", "a spectator's departure terminates",
+     [(LF, "if (p == null || !RecordOpen || RoomActors.IsSpectatorReplicated(p)) return;", "if (p == null || !RecordOpen) return;")]),
+    ("termination", "a departure leaves the flag clear", _drop(LF, "            _departed = true;\n")),
+    ("termination", "termination keeps the record live",
+     [(LF, "_state = LimitlessFenceRules.NextState(_state, true);", "_state = LimitlessFenceRules.NextState(_state, false);")]),
+    ("termination", "a master change keeps the record live",
+     _drop(LF, '            Terminate("master change");   // 4.6: a master change terminates a live record\n')),
+    ("termination", "the departure flag outlives its record", _drop(LF, "            _departed = false;\n")),
+    ("departure_routes", "the Plugin hook does not terminate",
+     _drop("Plugin.cs", "            try { LimitlessFence.TerminateOnDeparture(p); } catch { }\n")),
+    ("departure_routes", "the hold prefix terminates only when no prefix skipped",
+     [("TeamHoldPatches.cs", "            " + ROUTE_FIRST + "\n            if (!__runOriginal) return false;\n",
+       "            if (!__runOriginal) return false;\n            " + ROUTE_FIRST + "\n")]),
+    ("departure_routes", "FFA's route terminates only in a live FFA",
+     [("FfaMode.cs", "            " + ROUTE_FIRST + "\n            if (!FfaMode.EngineActive()) return true;\n",
+       "            if (!FfaMode.EngineActive()) return true;\n            " + ROUTE_FIRST + "\n")]),
+    ("hold_refusal", "the gate's inputs omit the record",
+     _drop("TeamHoldWriter.cs", "                FenceOpen = LimitlessFence.RecordOpen,   // Ask 16(a) lane 2 (v4 4.6)\n")),
+    ("hold_refusal", "the hold rule holds inside a continuation",
+     _drop("TeamHoldRules.cs", "                if (i.FenceOpen) return false;   // Ask 16(a) lane 2 (v4 4.6): no hold inside a continuation\n")),
+    ("hold_refusal", "Classify reaches the memo during a record",
+     [("TeamHoldWriter.cs", "written.\n                if (LimitlessFence.RecordOpen) return false;\n", "written.\n")]),
+    ("hold_refusal", "the leave callback reads the held set first",
+     [("TeamHoldWriter.cs", "the memo.\n                if (LimitlessFence.RecordOpen) return false;\n", "the memo.\n")]),
+    ("hold_refusal", "the cascade prefix classifies during a record",
+     _drop("TeamHoldPatches.cs", "                if (LimitlessFence.RecordOpen) return true;\n")),
+    ("sender_end", "the GM master sends after a departure",
+     _drop(LF, "            if (RecordOpen && _departed) return WithheldAfterDeparture();\n")),
+    ("sender_end", "the departure's answer is vanilla's",
+     [(LF, 'the room tears down");\n            return FenceSend.Withheld;', 'the room tears down");\n            return FenceSend.Vanilla;')]),
+    ("sender_end", "a terminating record goes out without its end",
+     [(LF, "bool mustEnd = _state == LimitlessFenceRules.FencePhase.PhaseTerminating\n", "bool mustEnd = false\n")]),
+    ("redrive", "no re-drive at a handoff",
+     _drop("Plugin.cs", "            try { LimitlessFence.RedriveAfterHandoff(newMasterClient); } catch { }\n")),
+    ("redrive", "the re-drive runs before the tickets clear",
+     [("Plugin.cs", "            try { LimitlessFence.RedriveAfterHandoff(newMasterClient); } catch { }\n", ""),
+      ("Plugin.cs", "            try { LimitlessFence.NoteMasterSwitched(newMasterClient); } catch { }\n",
+       "            try { LimitlessFence.NoteMasterSwitched(newMasterClient); } catch { }\n"
+       "            try { LimitlessFence.RedriveAfterHandoff(newMasterClient); } catch { }\n")]),
+    ("redrive", "the re-drive ignores the record",
+     [(LF, "!newMaster.IsLocal || !RecordOpen || !FfaMode.EngineActive()) return;", "!newMaster.IsLocal || !FfaMode.EngineActive()) return;")]),
+    ("redrive", "a seat that is not the new master re-drives",
+     [(LF, "if (newMaster == null || !newMaster.IsLocal || !RecordOpen", "if (newMaster == null || !RecordOpen")]),
+    ("redrive", "the re-drive runs with two fighters alive",
+     [("FfaMode.cs", "                if (AlivePlayers().Count > 1) return;\n", "                if (AlivePlayers().Count > 2) return;\n")]),
+    ("redrive", "the re-drive sends during a transition",
+     [("FfaMode.cs", "|| pointLatched || isTransitioning) return;\n                LimitlessFence.NoteFfaPointScheduled();   // the re-drive",
+       "|| pointLatched) return;\n                LimitlessFence.NoteFfaPointScheduled();   // the re-drive")]),
+    ("redrive", "the re-drive sends without the capture",
+     _drop("FfaMode.cs", "                LimitlessFence.NoteFfaPointScheduled();   // the re-drive's capture, as HandlePlayerDied's\n")),
+    ("redrive", "the re-drive leaves the latch open",
+     [("FfaMode.cs", '                pointLatched = true;\n                Plugin.Log.LogInfo("[LIMIT] the new master re-drives',
+       '                Plugin.Log.LogInfo("[LIMIT] the new master re-drives')]),
 ]
 
 NEUTRAL = "            // control: a neutral line\n"
@@ -971,6 +1151,15 @@ CONTROLS = [
                           NEUTRAL + "            var why = LimitlessFenceRules.DecideContinuation(d);\n")]),
     ("later_rounds", [(LF, "            bool mustEnd = ", NEUTRAL + "            bool mustEnd = ")]),
     ("opt_in", [(LF, "            string want = _optInWanted", NEUTRAL + "            string want = _optInWanted")]),
+    ("termination", [(LF, "            _departed = true;\n", NEUTRAL + "            _departed = true;\n")]),
+    ("departure_routes", [("Plugin.cs", "            try { LimitlessFence.TerminateOnDeparture(p); } catch { }\n",
+                           NEUTRAL + "            try { LimitlessFence.TerminateOnDeparture(p); } catch { }\n")]),
+    ("hold_refusal", [("TeamHoldPatches.cs", "                if (LimitlessFence.RecordOpen) return true;\n",
+                       NEUTRAL + "                if (LimitlessFence.RecordOpen) return true;\n")]),
+    ("sender_end", [(LF, "            if (RecordOpen && _departed) return WithheldAfterDeparture();\n",
+                     NEUTRAL + "            if (RecordOpen && _departed) return WithheldAfterDeparture();\n")]),
+    ("redrive", [("FfaMode.cs", "                if (AlivePlayers().Count > 1) return;\n",
+                  NEUTRAL + "                if (AlivePlayers().Count > 1) return;\n")]),
 ]
 
 
