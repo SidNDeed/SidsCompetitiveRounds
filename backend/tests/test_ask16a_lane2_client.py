@@ -457,7 +457,10 @@ def claim_every_raw_round_sibling_refuses_first(files):
     SpectatorObserveRound, and the two postfixes that move state: the stale
     projectile sweep, and PoisonSync's point boundary, where the refusal opens
     NotePointBoundary, the one guarded call its postfix makes (the poison lane's
-    hook rule keeps that postfix's body guarded). Deviation from v4 recorded in
+    hook rule keeps that postfix's body guarded). The point boundary's finalizer
+    reads the refusal before it retires the v3 records, since a sibling's
+    exception on a refused call reaches it too (R1 MEDIUM 4). Deviation from v4
+    recorded in
     the hand-back (integrator, 23:04Z): the sibling list is a class."""
     out = []
     lf, ffa, sp = files[LF], files["FfaMode.cs"], files["SpectatorPatches.cs"]
@@ -488,6 +491,10 @@ def claim_every_raw_round_sibling_refuses_first(files):
     if "HookGuard.Run(() => PoisonSync.NotePointBoundary(__instance));" not in _code(
             files["PoisonSync.cs"], "internal static class PoisonPointBoundaryPatch"):
         out.append("the point boundary postfix does not make its guarded call")
+    if ('HookGuard.Run(() => { if (__exception != null && !LimitlessFence.RawRoundRefused("point boundary finalizer")) '
+            'PoisonSync.FenceNotRecorded("point-over threw"); });') not in _code(
+            files["PoisonSync.cs"], "private static Exception Threw(Exception __exception)"):
+        out.append("the point boundary finalizer retires the v3 records without reading the refusal")
     body = _code(lf, "internal static bool RawRoundRefused(string site)")
     if _first(body) != "if (!LimitlessFenceRules.RefuseRawRound(_hasRecord, _state, _fenceCall)) return false;":
         out.append("the refusal does not read the record, its state and the fence's flag")
@@ -2487,6 +2494,8 @@ MUTANTS = [
     ("raw_round_refusals", "the point boundary postfix calls the boundary bare",
      [("PoisonSync.cs", "HookGuard.Run(() => PoisonSync.NotePointBoundary(__instance));",
        "PoisonSync.NotePointBoundary(__instance);")]),
+    ("raw_round_refusals", "the point boundary finalizer has no refusal",
+     [("PoisonSync.cs", ' && !LimitlessFence.RawRoundRefused("point boundary finalizer")', "")]),
     ("raw_round_refusals", "the projectile sweep has no refusal", [("VanillaFixes.cs", REF_SWEEP, "")]),
     ("raw_round_refusals", "the refusal ignores the fence's flag", [(LF, PRED, PRED.replace("_fenceCall)", "false)"))]),
     ("record_retires", "the game start keeps the record", _drop(LF, '            RetireRecord("game start");\n')),

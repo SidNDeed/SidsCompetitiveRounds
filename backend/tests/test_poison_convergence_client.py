@@ -394,8 +394,10 @@ def check_header_failure_retires(src):
 
 
 FENCE_FINALIZERS = (
+    # Ask 16(a) lane 2 (R1 MEDIUM 4): a refused raw call recorded no point, so
+    # the finalizer reads the fence's refusal before it retires anything.
     ("PoisonPointBoundaryPatch", "private static Exception Threw(Exception __exception)",
-     'if (__exception != null) PoisonSync.FenceNotRecorded("point-over threw");'),
+     'if (__exception != null && !LimitlessFence.RawRoundRefused("point boundary finalizer")) PoisonSync.FenceNotRecorded("point-over threw");'),
     ("PoisonReviveFencePatch", "private static Exception Threw(HealthHandler __instance, Exception __exception)",
      'if (__exception != null) PoisonSync.FenceNotRecorded("revive threw", __instance);'),
     ("PoisonPhoenixBoundaryPatch", "private static Exception Threw(HealthHandler __instance, Exception __exception)",
@@ -772,7 +774,7 @@ MUTANTS = {
     "check_silent_arm": (PS, '" arm=" + SilentArm.Label(armClaim)', '(armClaim > 0 ? " arm=local-only c=" + armClaim : " arm=broadcast-or-direct")'),
     "check_header_failure_retires": (PS, "if (!send.AfterHeader(_retainer, sent)) _openV3.Remove(openKey);",
                                      "send.AfterTick(0, blocked, sent);"),
-    "check_fence_failure_retires": (PS, 'if (__exception != null) PoisonSync.FenceNotRecorded("point-over threw");',
+    "check_fence_failure_retires": (PS, 'if (__exception != null && !LimitlessFence.RawRoundRefused("point boundary finalizer")) PoisonSync.FenceNotRecorded("point-over threw");',
                                     "if (__exception != null) { }"),
     "check_v3_live_names_every_dependency": (PS, "                    && ReviveFenceLive\n", ""),
     "check_claim_dispatch_terminal": (PS, "if (a == null || a.Length < 2) return;", "if (a == null || a.Length < 4) return;"),
@@ -1064,8 +1066,8 @@ HOOK_MUTANTS = {
         "            catch { return true; }\n"
         "            return HookGuard.Prefix(\n                () => !healthRemoval || !RefusesNow(),"),
     "PoisonPointBoundaryPatch.Threw": (
-        PS, 'HookGuard.Run(() => { if (__exception != null) PoisonSync.FenceNotRecorded("point-over threw"); });',
-        'if (__exception != null) PoisonSync.FenceNotRecorded("point-over threw");'),
+        PS, 'HookGuard.Run(() => { if (__exception != null && !LimitlessFence.RawRoundRefused("point boundary finalizer")) PoisonSync.FenceNotRecorded("point-over threw"); });',
+        'if (__exception != null && !LimitlessFence.RawRoundRefused("point boundary finalizer")) PoisonSync.FenceNotRecorded("point-over threw");'),
     "PoisonReviveFencePatch.Threw": (
         PS, 'HookGuard.Run(() => { if (__exception != null) PoisonSync.FenceNotRecorded("revive threw", __instance); });',
         'if (__exception != null) PoisonSync.FenceNotRecorded("revive threw", __instance);'),

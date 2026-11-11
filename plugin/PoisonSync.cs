@@ -3407,11 +3407,14 @@ namespace CompetitiveRounds
         /// <summary>H2: RPCA_NextRound (or a postfix after it) threw, so the
         /// postfix above may not have recorded this seat's point fence: every
         /// held v3 record retires and no v3 record is created again in the
-        /// room. Returns the exception it was given.</summary>
+        /// room. Returns the exception it was given. Ask 16(a) lane 2 (v4 4.4,
+        /// F3; R1 MEDIUM 4): a finalizer runs whatever a prefix returns, so a
+        /// sibling's exception on a refused raw call reaches it too. That call
+        /// recorded no point, so the refusal is read before anything retires.</summary>
         [HarmonyFinalizer]
         private static Exception Threw(Exception __exception)
         {
-            HookGuard.Run(() => { if (__exception != null) PoisonSync.FenceNotRecorded("point-over threw"); });
+            HookGuard.Run(() => { if (__exception != null && !LimitlessFence.RawRoundRefused("point boundary finalizer")) PoisonSync.FenceNotRecorded("point-over threw"); });
             return __exception;
         }
 
