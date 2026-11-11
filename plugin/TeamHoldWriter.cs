@@ -132,6 +132,7 @@ namespace CompetitiveRounds
         internal const string TAG = "[HOLD]";
 
         private static TeamHoldRules.DropCut _cut;
+        private static LimitlessFence.ResumeTicket _cutTicket;   // v4 4.5 R: captured where the cut is latched
         private static float _leaveAt;
         private static bool _purged, _resolved;
         /// <summary>Actors whose departure this client held (the first drop
@@ -166,7 +167,24 @@ namespace CompetitiveRounds
         }
 
         /// <summary>The drop this client holds for, or null.</summary>
-        internal static TeamHoldRules.DropCut Cut { get { return _cut; } }
+        // Ask 16(a) lane 2 (v4 4.5, Table A's hold rows: H, and R guards it anyway):
+        // a cut whose ticket moved belongs to an earlier physical game and reads
+        // as none; TeamHold.Tick drops it, without the today-path.
+        internal static TeamHoldRules.DropCut Cut { get { return _cut != null && LimitlessFence.TicketResumes(_cutTicket) ? _cut : null; } }
+
+        /// <summary>The ticket the present cut was latched under.</summary>
+        internal static LimitlessFence.ResumeTicket CutTicket { get { return _cutTicket; } }
+
+        /// <summary>Ask 16(a) lane 2 (v4 4.5 R): true while a cut remains under its
+        /// ticket; a cut whose ticket moved is dropped, the stop logged once.</summary>
+        internal static bool CutResumes()
+        {
+            if (_cut == null) return false;
+            if (LimitlessFence.ItemResumes(_cutTicket, "hold")) return true;
+            _cut = null;
+            _purged = _resolved = false;
+            return false;
+        }
 
         private static int SlotOf(Photon.Realtime.Player p)
         {
@@ -238,7 +256,7 @@ namespace CompetitiveRounds
                 // Ask 16(a) lane 2 (v4 4.6): ahead of the held set and the memo.
                 if (LimitlessFence.RecordOpen) return false;
                 if (_held.Contains(p.ActorNumber)) return true;
-                if (_cut != null)
+                if (CutResumes())   // v4 4.5 R: an earlier game's cut is dropped first
                 {
                     if (!HoldsAnother(p)) return false;
                     _held.Add(p.ActorNumber);
@@ -252,6 +270,7 @@ namespace CompetitiveRounds
                 // latched first and filled field by field.
                 var cut = new TeamHoldRules.DropCut { Actor = p.ActorNumber, At = Time.unscaledTime, Leaver = p };
                 _cut = cut;
+                _cutTicket = LimitlessFence.CaptureTicket();   // v4 4.5 R
                 _leaveAt = Time.unscaledTime;
                 _purged = _resolved = false;
                 try { Fill(cut, p, buildPlan); }
@@ -335,6 +354,7 @@ namespace CompetitiveRounds
         {
             var cut = _cut;
             if (cut == null) return;
+            if (!CutResumes()) return;   // v4 4.5 R: no today-path for an earlier game's cut
             _cut = null;
             TeamHoldLoop.NoteEnded(cut, reason == "second_departure");
             Plugin.Log.LogInfo(TAG + " ended reason=" + (reason ?? "") + " slot=" + cut.Slot.ToString(CultureInfo.InvariantCulture)
@@ -363,7 +383,7 @@ namespace CompetitiveRounds
         /// arm of vanilla PlayerDied.</summary>
         internal static void Tick()
         {
-            if (_cut == null || _resolved) return;
+            if (!CutResumes() || _resolved) return;   // v4 4.5 R
             if (!string.Equals(TeamHoldWriter.CurrentRoom(), _cut.Room, StringComparison.Ordinal)) return;
             double since = Time.unscaledTime - _leaveAt;
             char observed = ObservedState();
@@ -429,6 +449,7 @@ namespace CompetitiveRounds
         private static TeamHoldRules.Ceilings _ceil = new TeamHoldRules.Ceilings();
         private static string _room;
         private static TeamHoldRules.DropCut _endingCut;
+        private static LimitlessFence.ResumeTicket _endingTicket;   // v4 4.5 R: the ending cut's own ticket
         /// <summary>The cr_th value this master last sent. A compare-and-set
         /// applies on the server before the local cache shows it, so the next
         /// write expects what was sent, not the cache.</summary>
@@ -551,7 +572,7 @@ namespace CompetitiveRounds
             // An expired drop's writer still finishes its end: post, wait up
             // to 3 s, write x (writer step 6).
             if (_writer != null && _endingCut != null && _endingCut != cut && PhotonNetwork.IsMasterClient
-                && _writer.P == TeamHoldRules.Writer.Phase.Ending)
+                && _writer.P == TeamHoldRules.Writer.Phase.Ending && EndingResumes())   // v4 4.5 R
             {
                 try { Perform(_writer.Tick(now), _endingCut); } catch { }
             }
@@ -615,6 +636,15 @@ namespace CompetitiveRounds
             if (_ceil.Passed(now)) EndLocal(now, have ? k : null, "ceiling");
         }
 
+        /// <summary>Ask 16(a) lane 2 (v4 4.5 R): an expired drop's end runs only
+        /// under the ticket its cut was latched under; otherwise it is dropped.</summary>
+        private static bool EndingResumes()
+        {
+            if (LimitlessFence.ItemResumes(_endingTicket, "hold end")) return true;
+            _endingCut = null;
+            return false;
+        }
+
         /// <summary>Every local end reason (writer step 6): this client's own
         /// end post when the hold has an id, the master's x through its
         /// writer, then the expiry on this client.</summary>
@@ -626,6 +656,7 @@ namespace CompetitiveRounds
             if (PhotonNetwork.IsMasterClient && _writer != null)
             {
                 _endingCut = cut;
+                _endingTicket = TeamHold.CutTicket;   // v4 4.5 R
                 try { Perform(_writer.End(now, reason), cut); } catch { }
             }
             else if (!string.IsNullOrEmpty(holdId))
@@ -665,9 +696,10 @@ namespace CompetitiveRounds
             if (now - _lastVerify < VerifyS) return;
             _lastVerify = now;
             int gen = _readGen;
+            var rt = LimitlessFence.CaptureTicket();   // v4 4.5 R: where the read is issued
             TeamHoldNet.Call("GET", TeamHoldNet.PathState(holdId, MatchTracker.LocalSteamId), null, (st, body) =>
             {
-                if (gen != _readGen) return;
+                if (gen != _readGen || !LimitlessFence.ItemResumes(rt, "hold read")) return;
                 TeamHoldNet.StateAnswer a;
                 _server = TeamHoldNet.TryParseState(st, body, out a) ? a : new TeamHoldNet.StateAnswer();
             });
@@ -800,9 +832,10 @@ namespace CompetitiveRounds
                     case TeamHoldRules.Writer.Op.PostEnd:
                     {
                         var w = _writer;
+                        var rt = LimitlessFence.CaptureTicket();   // v4 4.5 R: where the end is posted
                         TeamHoldNet.Call("POST", TeamHoldNet.PathEnd(a.Key.HoldId), TeamHoldNet.EndBody(MatchTracker.LocalSteamId, a.Reason), (st, rb) =>
                         {
-                            if (w == _writer) Perform(w.OnEndAnswer(Now), cut);
+                            if (w == _writer && LimitlessFence.ItemResumes(rt, "hold end answer")) Perform(w.OnEndAnswer(Now), cut);
                         });
                         break;
                     }

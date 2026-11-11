@@ -1179,6 +1179,55 @@ def claim_the_late_sends_answer_to_their_ticket(files):
     return out
 
 
+THW = "TeamHoldWriter.cs"
+
+
+def claim_the_hold_acts_only_under_its_cut_ticket(files):
+    """4.5, Table A's hold rows (H, and R guards them anyway): the cut captures
+    its ticket where it is latched. TeamHold.Cut reads a cut whose ticket moved
+    as none. The point tick, the leave and the expiry drop such a cut first,
+    so the expiry's today-path never runs for an earlier game. An expired
+    drop's end runs under its cut's ticket. The state read's and the end
+    post's answers apply only under the ticket captured where each was issued."""
+    out = []
+    t = files[THW]
+    if not _in_order(_code(t, "internal static bool OnLeave("),
+                     ["if (CutResumes())", "if (!HoldsAnother(p)) return false;", "_cut = cut;",
+                      "_cutTicket = LimitlessFence.CaptureTicket();", "_leaveAt = Time.unscaledTime;"]):
+        out.append("the cut captures no ticket, or the leave keeps an earlier game's cut")
+    if not _in_order(_code(t), ["internal static TeamHoldRules.DropCut Cut { get { return _cut != null"
+                                " && LimitlessFence.TicketResumes(_cutTicket) ? _cut : null; } }"]):
+        out.append("the cut is read without its ticket")
+    if not _in_order(_code(t, "internal static bool CutResumes("),
+                     ["if (_cut == null) return false;", 'if (LimitlessFence.ItemResumes(_cutTicket, "hold")) return true;',
+                      "_cut = null;", "_purged = _resolved = false;"]):
+        out.append("a cut whose ticket moved is kept")
+    if not _in_order(_code(t, "internal static void Expire("),
+                     ["if (cut == null) return;", "if (!CutResumes()) return;", "_cut = null;",
+                      "TeamHoldExpiry.Run(cut, reason);"]):
+        out.append("the expiry runs the today-path for an earlier game's cut")
+    if not _in_order(_code(t), ["if (!CutResumes() || _resolved) return;", "char observed = ObservedState();"]):
+        out.append("the point tick runs without the cut's ticket")
+    loop = _code(t, "internal static class TeamHoldLoop")
+    if not _in_order(loop, ["&& _writer.P == TeamHoldRules.Writer.Phase.Ending && EndingResumes())",
+                            "Perform(_writer.Tick(now), _endingCut);"]):
+        out.append("an expired drop's end runs without its ticket")
+    if not _in_order(loop, ["_endingCut = cut;", "_endingTicket = TeamHold.CutTicket;"]):
+        out.append("the ending cut keeps no ticket")
+    if not _in_order(_code(t, "private static bool EndingResumes("),
+                     ['if (LimitlessFence.ItemResumes(_endingTicket, "hold end")) return true;', "_endingCut = null;"]):
+        out.append("a stopped end is kept")
+    if not _in_order(_code(t, "private static void VerifyRead("),
+                     ["int gen = _readGen;", "var rt = LimitlessFence.CaptureTicket();",
+                      'if (gen != _readGen || !LimitlessFence.ItemResumes(rt, "hold read")) return;', "_server ="]):
+        out.append("the state read's answer applies without its ticket")
+    if not _in_order(_code(t, "private static void Perform("),
+                     ["case TeamHoldRules.Writer.Op.PostEnd:", "var rt = LimitlessFence.CaptureTicket();",
+                      'if (w == _writer && LimitlessFence.ItemResumes(rt, "hold end answer")) Perform(w.OnEndAnswer(Now), cut);']):
+        out.append("the end post's answer applies without its ticket")
+    return out
+
+
 CLAIMS = {
     "game_start_prefix": claim_the_game_start_prefix,
     "stamp_before_join": claim_the_gid_is_stamped_before_the_join,
@@ -1216,6 +1265,7 @@ CLAIMS = {
     "pick_receiver": claim_a_receiver_applies_one_close_per_phase,
     "late_items": claim_the_late_items_resume_under_their_ticket,
     "late_sends": claim_the_late_sends_answer_to_their_ticket,
+    "hold_items": claim_the_hold_acts_only_under_its_cut_ticket,
 }
 
 GATE = "                if (SpectatorPatchSupport.Suppress) return;\n"
@@ -1627,6 +1677,30 @@ MUTANTS = [
      [("FfaLateEntry.cs", "_lateTickets[sender] = LimitlessFence.CaptureTicket();", "")]),
     ("late_sends", "the late tickets outlive their requests",
      [("FfaLateEntry.cs", "            _lateTickets.Clear();\n", "")]),
+    ("hold_items", "the cut captures no ticket",
+     [("TeamHoldWriter.cs", "                _cutTicket = LimitlessFence.CaptureTicket();   // v4 4.5 R\n", "")]),
+    ("hold_items", "the cut is read without its ticket",
+     [("TeamHoldWriter.cs", "return _cut != null && LimitlessFence.TicketResumes(_cutTicket) ? _cut : null;", "return _cut;")]),
+    ("hold_items", "a cut whose ticket moved is kept",
+     [("TeamHoldWriter.cs", 'if (LimitlessFence.ItemResumes(_cutTicket, "hold")) return true;', "return true;")]),
+    ("hold_items", "the leave keeps an earlier game's cut",
+     [("TeamHoldWriter.cs", "if (CutResumes())   // v4 4.5 R: an earlier game's cut is dropped first", "if (_cut != null)")]),
+    ("hold_items", "the expiry runs the today-path for an earlier game's cut",
+     [("TeamHoldWriter.cs", "            if (!CutResumes()) return;   // v4 4.5 R: no today-path for an earlier game's cut\n", "")]),
+    ("hold_items", "the point tick runs without the cut's ticket",
+     [("TeamHoldWriter.cs", "if (!CutResumes() || _resolved) return;", "if (_cut == null || _resolved) return;")]),
+    ("hold_items", "an expired drop's end runs without its ticket",
+     [("TeamHoldWriter.cs", " && EndingResumes())   // v4 4.5 R", ")")]),
+    ("hold_items", "the ending cut keeps no ticket",
+     [("TeamHoldWriter.cs", "                _endingTicket = TeamHold.CutTicket;   // v4 4.5 R\n", "")]),
+    ("hold_items", "a stopped end is kept",
+     [("TeamHoldWriter.cs", 'if (LimitlessFence.ItemResumes(_endingTicket, "hold end")) return true;\n            _endingCut = null;\n',
+       'if (LimitlessFence.ItemResumes(_endingTicket, "hold end")) return true;\n')]),
+    ("hold_items", "the state read's answer applies without its ticket",
+     [("TeamHoldWriter.cs", 'if (gen != _readGen || !LimitlessFence.ItemResumes(rt, "hold read")) return;', "if (gen != _readGen) return;")]),
+    ("hold_items", "the end post's answer applies without its ticket",
+     [("TeamHoldWriter.cs", ' && LimitlessFence.ItemResumes(rt, "hold end answer")) Perform(w.OnEndAnswer(Now), cut);',
+       ") Perform(w.OnEndAnswer(Now), cut);")]),
 ]
 
 NEUTRAL = "            // control: a neutral line\n"
@@ -1683,6 +1757,8 @@ CONTROLS = [
                      NEUTRAL + "            public LimitlessFence.ResumeTicket Ticket = LimitlessFence.CaptureTicket();")]),
     ("late_sends", [("FfaLateEntry.cs", "            var sendTicket = LimitlessFence.CaptureTicket();   // v4 4.4: the stamp's S",
                      NEUTRAL + "            var sendTicket = LimitlessFence.CaptureTicket();   // v4 4.4: the stamp's S")]),
+    ("hold_items", [("TeamHoldWriter.cs", "                _cutTicket = LimitlessFence.CaptureTicket();   // v4 4.5 R",
+                     NEUTRAL + "                _cutTicket = LimitlessFence.CaptureTicket();   // v4 4.5 R")]),
 ]
 
 
