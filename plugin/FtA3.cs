@@ -15,7 +15,9 @@ namespace CompetitiveRounds
     /// reachable live) nor probed drained (ruling FRAME-TIME-ROUND-R2 (1), default-deny). Its live writers call Wrote and
     /// EVERY live reader member calls Read (survivor_sweep.py lists the readers from the sweep and fails when one lacks
     /// it, or when a Read sits anywhere else), inside #if SCR_FRAMETIME at the component's own sites; only main-thread
-    /// calls in the live frames of a point the gate leaves open (an ON point) count. A reader that is cheap whatever the
+    /// calls in the live frames the gate leaves open count. The gate is the window's (ruling R6-A3.11.138 (4)), so
+    /// these are the frames of the point's ON windows; refill still counts from the point's first live frame, and a
+    /// write in an OFF window (a maintained writer's) is not counted, so reads_win can only overstate. A reader that is cheap whatever the
     /// content is still counted: its row's calibration bounds the costliest read, so the count can only overstate. A row with a steady state (steady
     /// true) holds only the current point's content once `refill` writes have happened since the point's first live
     /// frame; reads_win counts its reads before that. A row without one (steady false: it accumulates over the game)
@@ -57,6 +59,12 @@ namespace CompetitiveRounds
         {
             if (_registered) return;
             _registered = true;
+#if SCR_FT_NOCOLLECTORS
+            // the no-collector reference build (B11 SHARED.md D3): no collector is installed, so no row registers
+            // and nothing here reads collector state; LogGame writes one reference line in place of the rows
+            Plugin.Log.LogInfo("[FRAME-TIME] a3rows registered=0 expected=" + Rows + " ref=NA");
+            return;
+#else
             CombatEvidence.FtA3Rows();
             SeatEvidence.FtA3Rows();
             IdentityClockEvidence.FtA3Rows();
@@ -68,6 +76,7 @@ namespace CompetitiveRounds
             for (int k = 0; k < Rows; k++) if (Names[k] == null) missing++;
             Plugin.Log.LogInfo("[FRAME-TIME] a3rows registered=" + Count + " expected=" + Rows + " missing=" + missing
                 + " duplicates=" + Duplicates);
+#endif
         }
 
         /// <summary>One calibration batch: n reads on a scratch structure, empty (full false) or at capacity;
@@ -326,6 +335,9 @@ namespace CompetitiveRounds
 
         internal static void LogGame(int game)
         {
+#if SCR_FT_NOCOLLECTORS
+            Plugin.Log.LogInfo("[FRAME-TIME] a3 g=" + game + " ref=NA rows=" + Rows);
+#else
             for (int k = 0; k < Count; k++)
             {
                 if (Names[k] == null) continue;
@@ -345,6 +357,7 @@ namespace CompetitiveRounds
                     + " reads=" + _lReads[k] + " scopes=" + _lScopes[k] + " ticks=" + _lTicks[k] + " tmax=" + _lMax[k]
                     + " unscoped=" + _lUnscoped[k] + " depth_err=" + _depthErr);
             }
+#endif
         }
 
         /// <summary>Every dependent row's calibration, from FtCalib.Run (outside live combat).</summary>

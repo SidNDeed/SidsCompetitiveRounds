@@ -8,9 +8,18 @@ namespace CompetitiveRounds
     /// the components' own predicate) while InGame holds (GameStart has run for the game and
     /// GameOver has not). It ends at the first boundary that reads combat over, or at the
     /// first boundary after GameOver or MatchEnded, or in GameStart or FlushGame when that
-    /// end is still owed there (rulings R6-A3.11.99 (2), R6-A3.11.100 (3)). Live frames outside InGame belong to no point. Each round's first
-    /// point takes a seeded coin, and the arms alternate after that. A card pick ends a
-    /// round. At an OFF point's first live frame the gate is set. A frame whose boundary
+    /// end is still owed there (rulings R6-A3.11.99 (2), R6-A3.11.100 (3)). Live frames outside InGame belong to no point.
+    /// A card pick ends a round.
+    /// The arm is the WINDOW's (ruling R6-A3.11.138 (4), interleaved pairs of .137 (3)): window k of a point holds
+    /// its live frames 2 + 120k to 121 + 120k, and its first live frame takes window 0's arm. With k = 4q + r, run q
+    /// holds two pairs, positions 1 and 3 (unit P13) and positions 2 and 4 (unit P24); positions 1 and 2 each take a
+    /// fresh coin, Mix(seed, game, round, point, 2q + r, ArmStream), ON when it is 1, and positions 3 and 4 take the
+    /// opposite of their mate (the arms (A, B, 1-A, 1-B)). A window keeps its committed arm whether it ends full or
+    /// partial. pred is the previous window's arm, carried across the points of a game and none at the game's first
+    /// window. A plant run (FtPlant.RunPlanted, one run in five per game, B11 SHARED.md D4) plants its OFF windows,
+    /// and the first window after it carries res=1. At each window's opening boundary the gate is set to
+    /// Armed and OFF (OpenWindow), and it holds for the window unless a disarm opens it. ArmOn, GateThisPoint and
+    /// PrevArm hold the open window's arm, gate and pred (FtMenu writes them per segment). A frame whose boundary
     /// opens no point starts with the gate clear, so it runs every component in both arms
     /// (FtCalib's own loops and the menu self-check's segments aside). The gate sets only
     /// while FtArm.Armed holds (part 4 supplies the full arming
@@ -31,11 +40,21 @@ namespace CompetitiveRounds
         internal static int Points;
         internal static bool Live;
         internal static bool ArmOn;
-        internal static int PrevArm = -1;          // -1 none, 0 OFF, 1 ON: the previous point's arm (VR8's predecessor check)
+        internal static int PrevArm = -1;          // -1 none, 0 OFF, 1 ON: the open window's predecessor's arm
         internal static bool RoundOver = true;
         internal static long LiveFrame;            // 1 at a point's first live frame; 0 from each boundary that opens no point
         internal static bool GateThisPoint;
         internal static bool InGame;               // GameStart ran and GameOver has not: only then does Boundary open a point
+        // The open window (OpenWindow): its index in the point, run q, position 1-4, unit (P24 or P13), coin, plant run
+        // and res; FtFrames captures them when the window's first measured frame closes.
+        internal static long WinK = -1, WinRun;
+        internal static int WinPos, WinCoin;
+        internal static bool WinP24, WinPlant, WinRes;
+        internal const ulong ArmStream = 0xA2A1UL;
+        private static int _histGame = int.MinValue;   // the game _lastArm, _lastPlant and _gameRun belong to
+        private static int _lastArm = -1;              // the previous window's arm in that game (-1 none)
+        private static bool _lastPlant, _runPlant;
+        private static long _gameRun;                  // runs opened in that game
         private static bool _overOwed;             // GameOver or MatchEnded ran and its point end has not drained
         private static int _replayOwed = NoReplay; // the game whose FtReplay waits for a boundary that reads not live
         private const int NoReplay = int.MinValue;
@@ -100,9 +119,11 @@ namespace CompetitiveRounds
             {
                 LiveFrame++;
                 FtSpan.Moment = FtSpan.Live;
-                // round-1 MEDIUM (FtSchedule.cs:55): only a point the armed build actually gated is planted
-                FtPlant.Now = GateThisPoint && FtArm.Armed && FtGate.Off && LiveFrame >= 2 && FtPlant.Us > 0
-                    && FtPlant.Planted(FtConfig.Seed, Game, Round, PointInRound, (LiveFrame - 2) / FtFrames.W);
+                // window k = (LiveFrame - 2) / W opens at its first live frame (window 0 at StartPoint)
+                if (LiveFrame >= 2 && (LiveFrame - 2) / FtFrames.W != WinK) OpenWindow((LiveFrame - 2) / FtFrames.W);
+                // round-1 MEDIUM (FtSchedule.cs:55): only a window the armed build actually gated is planted, and only
+                // inside a plant run (D4)
+                FtPlant.Now = GateThisPoint && WinPlant && FtArm.Armed && FtGate.Off && LiveFrame >= 2 && FtPlant.Us > 0;
                 return;
             }
             LiveFrame = 0;
@@ -158,25 +179,50 @@ namespace CompetitiveRounds
                 Round++;
                 PointInRound = 0;
                 RoundOver = false;
-                ArmOn = Coin(FtConfig.Seed, Game, Round);
             }
-            else ArmOn = !ArmOn;
             PointInRound++;
             Points++;
             FtZero.Early();
             LiveFrame = 0;
+            OpenWindow(0);
+            FtA3.PointStart();
+            FtFrames.StartPoint();
+        }
+
+        /// <summary>Window k of the open point opens at this boundary: its committed arm by position (ruling .138
+        /// (4)), its predecessor's arm, its plant run and res, then the gate.</summary>
+        private static void OpenWindow(long k)
+        {
+            if (_histGame != Game)
+            {
+                _histGame = Game;
+                _lastArm = -1;
+                _lastPlant = false;
+                _gameRun = 0;
+            }
+            long q = k / 4;
+            int r = (int)(k % 4);
+            WinCoin = (int)(Mix(FtConfig.Seed, Game, Round, PointInRound, 2 * q + (r & 1), ArmStream) & 1UL);
+            if (r == 0) _runPlant = FtPlant.RunPlanted(FtConfig.Seed, Game, _gameRun++);
+            WinK = k;
+            WinRun = q;
+            WinPos = r + 1;
+            WinP24 = (r & 1) == 1;
+            WinPlant = _runPlant;
+            WinRes = r == 0 && _lastPlant;
+            PrevArm = _lastArm;
+            ArmOn = r < 2 ? WinCoin == 1 : WinCoin == 0;
+            _lastArm = ArmOn ? 1 : 0;
+            _lastPlant = WinPlant;
             bool off = FtConfig.Force == "OFF" || (FtConfig.Force == "none" && !ArmOn);
             GateThisPoint = FtArm.Armed && off;
             FtGate.Off = GateThisPoint;
-            FtA3.PointStart();
-            FtFrames.StartPoint();
         }
 
         private static void EndPoint()
         {
             FtGate.Off = false;
             FtFrames.EndPoint();
-            PrevArm = ArmOn ? 1 : 0;
         }
 
         /// <summary>GameStateWatcher.OnMatchStarted: a game starts. Combat may already be live in this frame; this
@@ -308,7 +354,7 @@ namespace CompetitiveRounds
             return z ^ (z >> 31);
         }
 
-        /// <summary>The seeded coin for a round's first arm: SplitMix64 over (seed, game, round).</summary>
+        /// <summary>The seeded coin over (seed, game, round): the menu self-check's segment-pair arm (FtMenu).</summary>
         internal static bool Coin(int seed, int game, int round)
         {
             ulong z = unchecked((ulong)(uint)seed * 0x9E3779B97F4A7C15UL + (ulong)(uint)game * 0xBF58476D1CE4E5B9UL

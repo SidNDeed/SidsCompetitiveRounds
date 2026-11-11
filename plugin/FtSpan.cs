@@ -9,12 +9,22 @@ namespace CompetitiveRounds
     /// span only at depth 0, so work one component does inside another's span is counted
     /// once (HIGH 7). Span time (Stopwatch ticks) and calls accumulate per component, per
     /// moment, per phase (inside or outside the script phase FT_Start..FT_End) and per
-    /// kind: GATED (the gate removes it at OFF points), UPKEEP (class iii upkeep, runs in
-    /// both arms, F13) and REPLAY (F18 reading A, reported separately). Stated as elapsed
-    /// time inside the spans: an upper bound on their own CPU time, used for the census,
-    /// absorption (VR9) and placement (B3), never as the B1 estimate.
-    /// Main thread only: the depth counter is one thread's, so a call from any other thread opens
-    /// nothing, leaves the depth alone and is counted in OffThread (the offthread line).
+    /// kind: GATED (the gate removes it at OFF windows), UPKEEP (class iii upkeep, runs in
+    /// both arms, F13), REPLAY (F18 reading A, reported separately) and WRITER (collector
+    /// output service, FtLedger). Stated as elapsed time inside the spans: an upper bound on
+    /// their own CPU time, used for the census, absorption (VR9) and placement (B3), never as
+    /// the B1 estimate.
+    ///
+    /// The partition (method-v54.md (a), ruling R6-A3.11.136 (2)): every Open and Close also moves the main
+    /// thread's executed cycles (FtClock.Cycles) between five exclusive classes, C = G + W + R + S + E. Each scope's
+    /// class is fixed when it opens (Gated is S, switched; Upkeep and Replay are R, retained; Writer is W). A nested
+    /// scope suspends its parent: the cycles between two transitions go to the class on top of the stack. Ownership
+    /// precedence is GC, writer, remaining collector, outside: inside a writer scope every nested scope stays W, and
+    /// main-thread GC (FtClock.GcCycles, when the hook is live) is taken out of whichever class it ran in and counted
+    /// as G by FtClock. E is the class with no scope open. FtClock.OnStart cuts the open class at every frame boundary
+    /// (Cut), so a frame's class sums plus its G equal its C exactly.
+    /// Main thread only: the depth counter and the class stack are one thread's, so a call from any other thread opens
+    /// nothing, leaves both alone and is counted in OffThread (the offthread line).
     /// Use: bool s = FtSpan.Open(FtSpan.Combat, FtSpan.Gated); try { body } finally { FtSpan.Close(s); }</summary>
     internal static class FtSpan
     {
@@ -30,9 +40,14 @@ namespace CompetitiveRounds
         internal static readonly string[] MomentNames = { "live", "between", "pick", "over", "menu" };
 
         // Kinds.
-        internal const int Gated = 0, Upkeep = 1, Replay = 2;
-        internal const int Kinds = 3;
-        internal static readonly string[] KindNames = { "gated", "upkeep", "replay" };
+        internal const int Gated = 0, Upkeep = 1, Replay = 2, Writer = 3;
+        internal const int Kinds = 4;
+        internal static readonly string[] KindNames = { "gated", "upkeep", "replay", "writer" };
+
+        // The partition's classes (method-v54.md:11). G is never a scope's class: FtClock counts it.
+        internal const int ClsG = 0, ClsW = 1, ClsR = 2, ClsS = 3, ClsE = 4;
+        internal const int Classes = 5;
+        private static readonly int[] ClassOfKind = { ClsS, ClsR, ClsR, ClsW };
 
         internal const int Phases = 2; // 0 inside the script phase, 1 outside
 
@@ -41,9 +56,22 @@ namespace CompetitiveRounds
         internal static readonly long[] Ticks = new long[Components * Moments * Phases * Kinds];
         internal static readonly long[] Calls = new long[Components * Moments * Phases * Kinds];
 
+        /// <summary>Exclusive executed cycles per class since install, GC taken out while the hook is live (index
+        /// ClsG unused). Never reset: FtClock takes per-frame differences.</summary>
+        internal static readonly long[] Acc = new long[Classes];
+
         /// <summary>Set by FtClock.Install (Plugin.Awake, the main thread) before anything else.</summary>
         internal static int MainThread = -1;
         internal static long OffThread;
+        internal static long ClassOverflow;   // scopes past the class stack's depth (their class is not pushed)
+        internal static long GcReadFailures;  // a GC hook read that threw inside a frame
+
+        private const int StackCap = 64;
+        private static readonly int[] _prev = new int[StackCap];
+        private static int _cls = ClsE;
+        private static ulong _k;
+        private static long _g;
+        private static bool _gok;
 
         private static int _depth;
         private static int _component;
@@ -55,11 +83,61 @@ namespace CompetitiveRounds
             return ((component * Moments + moment) * Phases + phase) * Kinds + kind;
         }
 
+        /// <summary>The class now running on the main thread (E with no scope open).</summary>
+        internal static int Current => _cls;
+
+        /// <summary>A collector scope is open on the main thread now (its class is R or S): the producer test of
+        /// FtLedger's tokens. Main thread only.</summary>
+        internal static bool CollectorOpen => _depth > 0 && (_cls == ClsR || _cls == ClsS);
+
+        /// <summary>The cycles since the last transition go to the class that ran them, GC taken out when both
+        /// readings of the hook are valid.</summary>
+        private static void Mark(ulong k, long g, bool gok)
+        {
+            long d = unchecked((long)(k - _k));
+            if (gok && _gok) d -= g - _g;
+            Acc[_cls] += d;
+            _k = k;
+            _g = g;
+            _gok = gok;
+        }
+
+        private static void Switch(int cls)
+        {
+            long g;
+            bool gok = FtClock.GcRead(FtClock.GcFn, out g);
+            Mark(FtClock.Cycles(), g, gok);
+            _cls = cls;
+        }
+
+        /// <summary>FtClock.OnStart, at every frame boundary, with the readings it took for the closing frame: the
+        /// open class's cycles up to here are that frame's.</summary>
+        internal static void Cut(ulong k, long g, bool gok)
+        {
+            Mark(k, g, gok);
+        }
+
+        /// <summary>FtClock.OnStart, when the GC hook it reads changed: the next interval's GC base is the new hook's
+        /// reading (no cycles move).</summary>
+        internal static void Rebase(long g, bool gok)
+        {
+            _g = g;
+            _gok = gok;
+        }
+
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         internal static bool Open(int component, int kind)
         {
             if (Thread.CurrentThread.ManagedThreadId != MainThread) { Interlocked.Increment(ref OffThread); return false; }
-            if (_depth++ != 0) return false;
+            int d = _depth++;
+            if (d < StackCap)
+            {
+                _prev[d] = _cls;
+                int cls = _cls == ClsW ? ClsW : ClassOfKind[kind];
+                if (cls != _cls) Switch(cls);
+            }
+            else ClassOverflow++;
+            if (d != 0) return false;
             _component = component;
             _kind = kind;
             _t0 = Stopwatch.GetTimestamp();
@@ -70,12 +148,34 @@ namespace CompetitiveRounds
         internal static void Close(bool opened)
         {
             if (Thread.CurrentThread.ManagedThreadId != MainThread) return;
-            _depth--;
-            if (!opened) return;
-            long dt = Stopwatch.GetTimestamp() - _t0;
-            int i = Index(_component, Moment, FtClock.InScript ? 0 : 1, _kind);
-            Ticks[i] += dt;
-            Calls[i]++;
+            int d = --_depth;
+            if (opened)
+            {
+                long dt = Stopwatch.GetTimestamp() - _t0;
+                int i = Index(_component, Moment, FtClock.InScript ? 0 : 1, _kind);
+                Ticks[i] += dt;
+                Calls[i]++;
+            }
+            if (d >= 0 && d < StackCap && _prev[d] != _cls) Switch(_prev[d]);
+        }
+
+        /// <summary>A writer scope with no tick-ledger cell (FtLedger's service of collector output inside the
+        /// producer's span): the class stack only. Main thread only; pair with PopWriter.</summary>
+        internal static void PushWriter()
+        {
+            int d = _depth++;
+            if (d < StackCap)
+            {
+                _prev[d] = _cls;
+                if (_cls != ClsW) Switch(ClsW);
+            }
+            else ClassOverflow++;
+        }
+
+        internal static void PopWriter()
+        {
+            int d = --_depth;
+            if (d >= 0 && d < StackCap && _prev[d] != _cls) Switch(_prev[d]);
         }
 
         /// <summary>Sum of arr over the seven components (not Cal) and both phases, for one moment and kind.</summary>

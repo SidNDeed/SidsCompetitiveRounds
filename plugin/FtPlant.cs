@@ -3,8 +3,9 @@ using System.Diagnostics;
 
 namespace CompetitiveRounds
 {
-    /// <summary>FrameTime M5 (METHOD-V4.md 3.1 and 3.5): the plant. At OFF points one
-    /// 120-frame window in four runs a busy spin of c_plant microseconds at the start of
+    /// <summary>FrameTime M5 (METHOD-V4.md 3.1 and 3.5): the plant. In a game, the OFF windows of
+    /// a plant run (RunPlanted) run a busy spin; the menu self-check keeps the block-of-four rule
+    /// below (Planted). There, one 120-frame window in four runs a busy spin of c_plant microseconds at the start of
     /// Update, timed by Stopwatch. The windows of a point fall in blocks of four; in each
     /// block the planted slot is a SplitMix64 draw over seed, game, round, point and block,
     /// so exactly one window in four is planted and the choice is reproducible from the
@@ -41,6 +42,20 @@ namespace CompetitiveRounds
             long slot = (long)(FtSchedule.Mix(seed, game, round, point, block, 0x51A7UL) & 3UL);
             return window % 4 == slot;
         }
+
+        /// <summary>Whether run j of game g (its windows' runs of four, counted from the game's first window; B11 SHARED.md
+        /// D4) is a plant run: the runs fall in blocks of five, and in each block the planted slot is a SplitMix64 draw
+        /// over seed, game and block, so exactly one run in five is planted, precommitted per game by the seed. Inside
+        /// a plant run the arms follow the interleaved coins and every gated (OFF) window is planted
+        /// (FtSchedule.Boundary); the first window after it carries res=1.</summary>
+        internal static bool RunPlanted(int seed, int game, long run)
+        {
+            long block = run / 5;
+            long slot = (long)(FtSchedule.Mix(seed, game, 0, 0, block, RunStream) % 5UL);
+            return run % 5 == slot;
+        }
+
+        internal const ulong RunStream = 0x51A75UL;
 
         /// <summary>The menu self-check's level (FtMenu): us >= 0 sets the spin of its planted windows; -1
         /// returns it to the sitting's own c_plant (none while that is unfixed).</summary>

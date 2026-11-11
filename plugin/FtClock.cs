@@ -21,7 +21,12 @@ namespace CompetitiveRounds
     /// FtFrames.cs:63), and whether frame f is a point's partial closing frame. The live state of
     /// frame f+1 is read once, BEFORE frame f is accumulated: the frame in which combat ended is
     /// excluded (round-1 MEDIUM, FtClock.cs:116), and the schedule decides frame f+1 from that same
-    /// read.</summary>
+    /// read.
+    /// The partition (method-v54.md (a)): at the same boundary FtSpan.Cut gives the open class the cycles up to
+    /// k0(f+1), so frame f's class differences (W, R, S, E) plus its G equal C exactly, all in main-thread cycles.
+    /// G is the GC hook's difference over the frame (GcCycles, set by FtGc only while the native hook is live);
+    /// the hook is read here once per frame, and a frame whose G is not known (no hook, a hook that changed at its
+    /// start, or a read that threw) is passed with gok false and G 0, its GC then inside its classes.</summary>
     internal static partial class FtClock
     {
         [DllImport("kernel32.dll")]
@@ -51,6 +56,28 @@ namespace CompetitiveRounds
         internal static long CycleFailures;   // QueryThreadCycleTime returned false (VR2)
         internal static long DepthViolations; // a span still open at a frame boundary (VR2)
         internal static bool InScript;        // between FT_Start and FT_End of the current frame
+
+        /// <summary>The GC hook (B11 SHARED.md, GC interface): the main thread's cumulative GC execution in
+        /// cycles. Null means unavailable: cG prints NA and gcn is still counted. FtGc sets it at init, only while
+        /// its native hook is live.</summary>
+        public static System.Func<long> GcCycles;
+
+        /// <summary>The hook as read at the current frame's start (FtSpan reads GC through it inside the frame).</summary>
+        internal static System.Func<long> GcFn;
+
+        /// <summary>One reading of hook fn: false when it is null or throws (a throw is counted).</summary>
+        internal static bool GcRead(System.Func<long> fn, out long g)
+        {
+            g = 0;
+            if (fn == null) return false;
+            try { g = fn(); return true; }
+            catch { FtSpan.GcReadFailures++; return false; }
+        }
+
+        private static long _gPrev;
+        private static bool _gOk;
+        private static long _gcFail0;
+        private static readonly long[] _acc0 = new long[FtSpan.Classes];
 
         private static long _t0;
         private static ulong _k0;
@@ -98,6 +125,7 @@ namespace CompetitiveRounds
             Installed = true;
             FtPlant.Init();
             FtE.RegisterAll(); FtA3.RegisterAll();
+            FtLedger.Install();
             ulong probe = Cycles();
             Plugin.Log.LogInfo("[FRAME-TIME] clock installed freq=" + Stopwatch.Frequency + " hires=" + (Stopwatch.IsHighResolution ? 1 : 0)
                 + " cycles=" + (probe != 0 ? 1 : 0));
@@ -136,13 +164,32 @@ namespace CompetitiveRounds
             ulong k = Cycles();
             ulong pk = ProcessCycles();
             int gc = GC.CollectionCount(0);
+            long g;
+            bool gok = GcRead(GcFn, out g);
+            FtSpan.Cut(k, g, gok);
+            FtLedger.PollHash();
             bool live = FtSchedule.ReadLive();
             if (_open)
             {
                 Frames++;
                 if (!_ended) MissingEnd++;
-                OnFrameClosed(t - _t0, _ended ? _s : 0, k - _k0, pk - _p0, _gc0, gc, _ended, FtSchedule.ClosingFrame(live));
+                bool fok = gok && _gOk && FtSpan.GcReadFailures == _gcFail0;
+                long[] a = FtSpan.Acc;
+                OnFrameClosed(t - _t0, _ended ? _s : 0, k - _k0, pk - _p0, _gc0, gc, _ended, FtSchedule.ClosingFrame(live),
+                    fok ? g - _gPrev : 0, fok, a[FtSpan.ClsW] - _acc0[FtSpan.ClsW], a[FtSpan.ClsR] - _acc0[FtSpan.ClsR],
+                    a[FtSpan.ClsS] - _acc0[FtSpan.ClsS], a[FtSpan.ClsE] - _acc0[FtSpan.ClsE]);
             }
+            System.Array.Copy(FtSpan.Acc, _acc0, FtSpan.Classes);
+            var fn = GcCycles;   // the hook, read once per frame: a hook set or changed counts from this frame on
+            if (fn != GcFn)
+            {
+                GcFn = fn;
+                gok = GcRead(fn, out g);
+                FtSpan.Rebase(g, gok);
+            }
+            _gPrev = g;
+            _gOk = gok;
+            _gcFail0 = FtSpan.GcReadFailures;
             _t0 = t;
             _k0 = k;
             _p0 = pk;
@@ -163,9 +210,11 @@ namespace CompetitiveRounds
             InScript = false;
         }
 
-        /// <summary>Frame f closed: F and S in Stopwatch ticks, C in cycles. Implemented by
-        /// the window and point lines; without an implementation the call compiles away.</summary>
-        static partial void OnFrameClosed(long f, long s, ulong c, ulong p, int gc0, int gc1, bool ended, bool closing);
+        /// <summary>Frame f closed: F and S in Stopwatch ticks, C in cycles, and C's partition in cycles: G (cg,
+        /// known when gok) and the class differences W, R, S, E. Implemented by the window and point lines; without
+        /// an implementation the call compiles away.</summary>
+        static partial void OnFrameClosed(long f, long s, ulong c, ulong p, int gc0, int gc1, bool ended, bool closing,
+            long cg, bool gok, long cw, long cr, long cs, long ce);
     }
 }
 #endif
