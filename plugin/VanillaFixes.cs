@@ -1717,7 +1717,7 @@ namespace CompetitiveRounds
         {
             try
             {
-                __result = SafeRespawn(__instance, playerIDToRevive);
+                __result = LimitlessFence.ResumableItem(SafeRespawn(__instance, playerIDToRevive), "phoenix revive");   // v4 4.5 R
                 return false;
             }
             catch (Exception ex)

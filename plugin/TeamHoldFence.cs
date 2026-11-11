@@ -130,7 +130,7 @@ namespace CompetitiveRounds
             try
             {
                 if (!HoldFence.Active()) return true;
-                __result = HoldFence.Run(__instance, TeamHoldRules.PointSteps, __0, -1);
+                __result = LimitlessFence.ResumableItem(HoldFence.Run(__instance, TeamHoldRules.PointSteps, __0, -1), "2v2 point transition");   // v4 4.5 R
                 return false;
             }
             catch { return true; }
@@ -146,7 +146,7 @@ namespace CompetitiveRounds
             try
             {
                 if (!HoldFence.Active()) return true;
-                __result = HoldFence.Run(__instance, TeamHoldRules.RoundSteps, __0, __1);
+                __result = LimitlessFence.ResumableItem(HoldFence.Run(__instance, TeamHoldRules.RoundSteps, __0, __1), "2v2 round transition");   // v4 4.5 R
                 return false;
             }
             catch { return true; }

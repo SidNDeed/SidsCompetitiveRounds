@@ -2411,9 +2411,9 @@ namespace CompetitiveRounds
             if (Plugin.Pending2v2Slot >= 0 || Plugin.PendingOvtSlot >= 0 || Plugin.PendingFfaSlot >= 0)
             {
                 if (gatedRoom && FfaAssembly.IsAdmissionRoom(roomName))
-                    StartCoroutine(FfaAssembly.GatedSpawn(Auto2v2SpawnCoroutine));
+                    StartCoroutine(LimitlessFence.ResumableItem(FfaAssembly.GatedSpawn(Auto2v2SpawnCoroutine), "spawn"));   // v4 4.5 R
                 else
-                    StartCoroutine(Auto2v2SpawnCoroutine());
+                    StartCoroutine(LimitlessFence.ResumableItem(Auto2v2SpawnCoroutine(), "spawn"));   // v4 4.5 R
             }
         }
 

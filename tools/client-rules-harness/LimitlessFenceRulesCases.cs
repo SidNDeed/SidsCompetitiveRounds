@@ -24,6 +24,8 @@ namespace CompetitiveRounds
         {
             internal Func<bool, bool, bool, int, int, int, int, bool> MaySend = R.MaySend;
             internal Func<int, int, string, R.GidLedger, bool, bool> MayResume = R.MayResume;
+            internal Func<System.Collections.IEnumerator, Func<bool>, Action, System.Collections.IEnumerator> Guard
+                = R.GuardScheduled;
             internal Func<R.DecisionInputs, R.Decision> Decide = R.DecideContinuation;
             internal Func<IList<string>, string, IList<string>, string, int, int, bool> MustEnd = R.MustEnd;
             internal Func<R.HandlerInputs, R.HandlerOutcome> Handle = R.HandleFenceMessage;
@@ -255,6 +257,45 @@ namespace CompetitiveRounds
             add("MayResume: an ended record refuses", !f.MayResume(4, 4, G1, LiveLedger(G1), true));
             add("MayResume: an item with no gid runs without one", f.MayResume(4, 4, null, new R.GidLedger(), false));
             add("MayClean: cleanup reads the epoch only", R.MayClean(4, 4) && !R.MayClean(5, 4));
+
+            // retained and scheduled work (4.5): the guard every Table A row runs under
+            {
+                var log = new List<string>();
+                int stops = 0;
+                Drive(f.Guard(Steps(log, "a", 2, null), () => true, () => stops++), null, 50);
+                add("guard: an item that may continue runs every step and its end",
+                    string.Join(",", log.ToArray()) == "a0,a1,aend,afinally" && stops == 0);
+            }
+            {
+                var log = new List<string>();
+                bool may = true;
+                int stops = 0;
+                Drive(f.Guard(Steps(log, "a", 2, null), () => may, () => stops++), () => may = false, 50);
+                add("guard: a refusal before a step stops the item there",
+                    log.Count >= 1 && log[0] == "a0" && !log.Contains("a1") && !log.Contains("aend") && stops >= 1);
+                add("guard: a stopped item's finally blocks run", log.Contains("afinally"));
+            }
+            {
+                var log = new List<string>();
+                bool may = true;
+                int steps = 0;
+                Drive(f.Guard(Steps(log, "a", 1, Steps(log, "b", 3, null)), () => may, null),
+                      () => { if (++steps == 3) may = false; }, 50);
+                add("guard: a nested item runs under the same test",
+                    log.Contains("b0") && !log.Contains("b1") && !log.Contains("bend") && !log.Contains("aend")
+                    && log.Contains("bfinally") && log.Contains("afinally"));
+            }
+            {
+                var token = new object();
+                var e = f.Guard(YieldOnce(token), () => true, null);
+                add("guard: a value that is not an enumerator passes through", e.MoveNext() && ReferenceEquals(e.Current, token));
+            }
+            {
+                var log = new List<string>();
+                int stops = 0;
+                Drive(f.Guard(Steps(log, "a", 2, null), () => false, () => stops++), null, 50);
+                add("guard: the test is read before the first step", log.Count == 0 && stops == 1);
+            }
             add("raw round: a live record refuses a call the fence did not make", f.RefuseRawRound(true, R.FencePhase.PhaseLive, false));
             add("raw round: a terminating record refuses it too", f.RefuseRawRound(true, R.FencePhase.PhaseTerminating, false));
             add("raw round: the fence's own call passes", !f.RefuseRawRound(true, R.FencePhase.PhaseLive, true));
@@ -364,6 +405,14 @@ namespace CompetitiveRounds
             Control(r, "MayResume waits for a gid",
                     Cases(new Fns { MayResume = (en, ec, cg, l, e) => cg == null ? (en == ec && l != null && l.IsLiveGid(l.CurrentGid)) : R.MayResume(en, ec, cg, l, e) }),
                     "MayResume: an item with no gid runs without one");
+            Control(r, "the guard reads its test after the step", Cases(new Fns { Guard = GuardAfterStep }),
+                    "guard: a refusal before a step stops the item there", "guard: the test is read before the first step");
+            Control(r, "the guard does not guard nested items", Cases(new Fns { Guard = GuardNotNested }),
+                    "guard: a nested item runs under the same test");
+            Control(r, "the guard leaves a stopped item undisposed", Cases(new Fns { Guard = GuardUndisposed }),
+                    "guard: a stopped item's finally blocks run");
+            Control(r, "the guard drops what the item yields", Cases(new Fns { Guard = GuardDropsValues }),
+                    "guard: a value that is not an enumerator passes through");
             Control(r, "the decision ignores the capability",
                     Cases(new Fns { Decide = d => { d.ActorCapabilities = new[] { d.MasterVersion }; return R.DecideContinuation(d); } }),
                     "decision: a spectator at another version decides no", "decision: an actor without the capability decides no");
@@ -497,6 +546,100 @@ namespace CompetitiveRounds
                         SlotCase[slot]);
             }
             return r;
+        }
+
+        // ------------------------------------------------------------------ the guard's items and mutants (4.5)
+
+        private static System.Collections.IEnumerator Steps(List<string> log, string tag, int n,
+                                                            System.Collections.IEnumerator nested)
+        {
+            try
+            {
+                for (int i = 0; i < n; i++)
+                {
+                    log.Add(tag + i.ToString(System.Globalization.CultureInfo.InvariantCulture));
+                    yield return null;
+                }
+                if (nested != null) yield return nested;
+                log.Add(tag + "end");
+            }
+            finally { log.Add(tag + "finally"); }
+        }
+
+        private static System.Collections.IEnumerator YieldOnce(object value)
+        {
+            yield return value;
+        }
+
+        /// <summary>Unity's coroutine order: a yielded enumerator runs nested
+        /// until it ends, then its parent resumes.</summary>
+        private static void Drive(System.Collections.IEnumerator e, Action afterStep, int max)
+        {
+            var stack = new Stack<System.Collections.IEnumerator>();
+            stack.Push(e);
+            for (int i = 0; i < max && stack.Count > 0; i++)
+            {
+                var top = stack.Peek();
+                if (!top.MoveNext()) { stack.Pop(); continue; }
+                var cur = top.Current as System.Collections.IEnumerator;
+                if (cur != null) stack.Push(cur);
+                if (afterStep != null) afterStep();
+            }
+        }
+
+        private static System.Collections.IEnumerator GuardAfterStep(System.Collections.IEnumerator item, Func<bool> may, Action stop)
+        {
+            try
+            {
+                while (true)
+                {
+                    if (!item.MoveNext()) yield break;
+                    if (!may()) { if (stop != null) stop(); yield break; }
+                    var nested = item.Current as System.Collections.IEnumerator;
+                    yield return nested != null ? GuardAfterStep(nested, may, stop) : item.Current;
+                }
+            }
+            finally { var d = item as IDisposable; if (d != null) d.Dispose(); }
+        }
+
+        private static System.Collections.IEnumerator GuardNotNested(System.Collections.IEnumerator item, Func<bool> may, Action stop)
+        {
+            try
+            {
+                while (true)
+                {
+                    if (!may()) { if (stop != null) stop(); yield break; }
+                    if (!item.MoveNext()) yield break;
+                    yield return item.Current;
+                }
+            }
+            finally { var d = item as IDisposable; if (d != null) d.Dispose(); }
+        }
+
+        private static System.Collections.IEnumerator GuardUndisposed(System.Collections.IEnumerator item, Func<bool> may, Action stop)
+        {
+            while (true)
+            {
+                if (!may()) { if (stop != null) stop(); yield break; }
+                if (!item.MoveNext()) yield break;
+                var nested = item.Current as System.Collections.IEnumerator;
+                yield return nested != null ? GuardUndisposed(nested, may, stop) : item.Current;
+            }
+        }
+
+        private static System.Collections.IEnumerator GuardDropsValues(System.Collections.IEnumerator item, Func<bool> may, Action stop)
+        {
+            try
+            {
+                while (true)
+                {
+                    if (!may()) { if (stop != null) stop(); yield break; }
+                    if (!item.MoveNext()) yield break;
+                    var nested = item.Current as System.Collections.IEnumerator;
+                    yield return nested != null ? GuardDropsValues(nested, may, stop) : null;
+                }
+            }
+            finally { var d = item as IDisposable; if (d != null) d.Dispose(); }
         }
 
         private static void Check(Result r, string name, bool ok, string got)

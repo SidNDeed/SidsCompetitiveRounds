@@ -530,11 +530,12 @@ namespace CompetitiveRounds
                     }
                     return true;
                 };
-                host.StartCoroutine(ReplayRun(work, slots, (slot, name) =>
+                // v4 4.5 R (Table A, H): the replay resumes only under its ticket.
+                host.StartCoroutine(LimitlessFence.ResumableItem(ReplayRun(work, slots, (slot, name) =>
                 {
                     var prefab = ResolveCard(name);
                     return prefab != null && FfaMode.SpectatorApplyCard(bodies[slot], prefab);
-                }));
+                }), "hold replay"));
             }
             catch { work.State = ReplayState.Failed; }
             return work;

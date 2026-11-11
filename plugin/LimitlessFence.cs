@@ -393,6 +393,60 @@ namespace CompetitiveRounds
             return true;
         }
 
+        // ------------------------------------------------------------------ retained and scheduled work (4.5, Table A)
+
+        /// <summary>4.5: what an item captures when it is scheduled: the epoch,
+        /// and the gid while the seat holds an open record.</summary>
+        internal struct ResumeTicket
+        {
+            internal int Epoch;
+            internal string Gid;
+        }
+
+        private static readonly HashSet<string> _stopLogged = new HashSet<string>(StringComparer.Ordinal);
+
+        internal static ResumeTicket CaptureTicket()
+        {
+            return new ResumeTicket { Epoch = _epoch, Gid = RecordOpen ? _record.Gid : null };
+        }
+
+        /// <summary>4.5 (R): at every resume point. A captured gid's record is
+        /// ended once the seat holds no record of that gid, or holds it ended.</summary>
+        internal static bool TicketResumes(ResumeTicket t)
+        {
+            bool ended = t.Gid != null
+                         && (!_hasRecord || _record.Gid != t.Gid || _state == LimitlessFenceRules.FencePhase.PhaseEnded);
+            return LimitlessFenceRules.MayResume(_epoch, t.Epoch, t.Gid, _ledger, ended);
+        }
+
+        /// <summary>4.5 (C, F12): cleanup the game owns reads the epoch only.</summary>
+        internal static bool TicketCleans(ResumeTicket t)
+        {
+            return LimitlessFenceRules.MayClean(_epoch, t.Epoch);
+        }
+
+        /// <summary>4.5 (R) for a coroutine (Table A): the ticket is captured
+        /// here, where the item is scheduled, and TicketResumes runs before every
+        /// step, nested enumerators included (LimitlessFenceRules.GuardScheduled).</summary>
+        internal static System.Collections.IEnumerator ResumableItem(System.Collections.IEnumerator item, string name)
+        {
+            var t = CaptureTicket();
+            return LimitlessFenceRules.GuardScheduled(item, () => TicketResumes(t), () => NoteItemStopped(name, t));
+        }
+
+        /// <summary>4.5 (C) for a coroutine: as ResumableItem, reading the epoch only.</summary>
+        internal static System.Collections.IEnumerator CleanupItem(System.Collections.IEnumerator item, string name)
+        {
+            var t = CaptureTicket();
+            return LimitlessFenceRules.GuardScheduled(item, () => TicketCleans(t), () => NoteItemStopped(name, t));
+        }
+
+        private static void NoteItemStopped(string name, ResumeTicket t)
+        {
+            if (_stopLogged.Add(name + ":" + t.Epoch.ToString(System.Globalization.CultureInfo.InvariantCulture)))
+                Plugin.Log.LogInfo("[LIMIT] " + name + " stops: its epoch or its record moved");
+        }
+
         // ------------------------------------------------------------------ termination (4.6)
 
         private static bool _departed;

@@ -358,7 +358,7 @@ namespace CompetitiveRounds
                 if (!TeamHoldRules.Flagged(TeamHoldWriter.CurrentRoom())) return;
                 var p = PlayerManager.instance != null ? PlayerManager.instance.GetPlayerWithID(picketIDToSet) : null;
                 if (p == null || p.data == null || p.data.view == null || !p.data.view.IsMine) return;
-                __result = TeamHoldPick.WaitRecord(__result, picketIDToSet);
+                __result = LimitlessFence.ResumableItem(TeamHoldPick.WaitRecord(__result, picketIDToSet), "pick wait");   // v4 4.5 R
             }
             catch { }
         }

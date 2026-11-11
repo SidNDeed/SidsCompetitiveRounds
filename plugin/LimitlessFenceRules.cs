@@ -277,6 +277,36 @@ namespace CompetitiveRounds
             return epochNow == epochCaptured;
         }
 
+        /// <summary>4.5 (R, C): a scheduled item runs only while mayContinue
+        /// holds, read before every step, nested enumerators included, which run
+        /// under the same test. An item that fails it stops: onStop runs, and the
+        /// item's finally blocks run (Dispose). Every other yielded value passes
+        /// through unchanged.</summary>
+        internal static System.Collections.IEnumerator GuardScheduled(System.Collections.IEnumerator item,
+                                                                     Func<bool> mayContinue, Action onStop)
+        {
+            if (item == null) yield break;
+            try
+            {
+                while (true)
+                {
+                    if (!mayContinue())
+                    {
+                        if (onStop != null) onStop();
+                        yield break;
+                    }
+                    if (!item.MoveNext()) yield break;
+                    var nested = item.Current as System.Collections.IEnumerator;
+                    yield return nested != null ? GuardScheduled(nested, mayContinue, onStop) : item.Current;
+                }
+            }
+            finally
+            {
+                var d = item as IDisposable;
+                if (d != null) d.Dispose();
+            }
+        }
+
         /// <summary>4.4, F3: while a seat holds a live or terminating record,
         /// every vanilla round call the fence's handler did not make is refused,
         /// by every sibling that changes state on that call.</summary>

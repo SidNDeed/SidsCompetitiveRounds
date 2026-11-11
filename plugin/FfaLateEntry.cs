@@ -1330,7 +1330,7 @@ namespace CompetitiveRounds
         {
             if (_deathScheduled) return;
             _deathScheduled = true;
-            try { Plugin.Instance.StartCoroutine(OwnDeathAfterCallIn()); }
+            try { Plugin.Instance.StartCoroutine(LimitlessFence.ResumableItem(OwnDeathAfterCallIn(), "lag-out death")); }   // v4 4.5 R
             catch { _deathScheduled = false; }
         }
 
@@ -1842,7 +1842,7 @@ namespace CompetitiveRounds
             if (a == null || string.IsNullOrEmpty(a.Lobby) || AdmittedLateLobby == a.Lobby) return;
             AdmittedLateLobby = a.Lobby;
             _lateGame = Math.Max(1, a.Game);
-            try { Plugin.Instance.StartCoroutine(AdmittedLateRun(a)); } catch { }
+            try { Plugin.Instance.StartCoroutine(LimitlessFence.ResumableItem(AdmittedLateRun(a), "late arming")); } catch { }   // v4 4.5 R
         }
 
         /// <summary>I1 late_admitted: go=1 arms the late entry; go=0 is a

@@ -85,6 +85,12 @@ FENCE_RULES = (
     'MayResume: an ended record refuses',
     'MayResume: an item with no gid runs without one',
     'MayClean: cleanup reads the epoch only',
+    'guard: an item that may continue runs every step and its end',
+    'guard: a refusal before a step stops the item there',
+    "guard: a stopped item's finally blocks run",
+    'guard: a nested item runs under the same test',
+    'guard: a value that is not an enumerator passes through',
+    'guard: the test is read before the first step',
     'raw round: a live record refuses a call the fence did not make',
     'raw round: a terminating record refuses it too',
     "raw round: the fence's own call passes",
@@ -140,6 +146,10 @@ FENCE_MUTANTS = (
     'MaySend ignores the epoch',
     "MaySend ignores the record's end",
     'MayResume reads the epoch only',
+    'the guard reads its test after the step',
+    'the guard does not guard nested items',
+    'the guard leaves a stopped item undisposed',
+    'the guard drops what the item yields',
     'MayResume waits for a gid',
     'the decision ignores the capability',
     'the decision ignores the hold',
@@ -213,7 +223,7 @@ def test_the_fence_suite_ran_exactly_its_cases_and_passed(harness_run):
 
 
 def test_the_pinned_names_are_distinct():
-    assert len(set(FENCE_CASES)) == len(FENCE_CASES) == 105 + 39 + 11
+    assert len(set(FENCE_CASES)) == len(FENCE_CASES) == 111 + 43 + 11
 
 
 # -- the fence's Unity- and Photon-side lines, as source claims --------------
@@ -922,6 +932,79 @@ def claim_a_refused_entrant_is_no_departure(files):
     return out
 
 
+RI = "LimitlessFence.ResumableItem("
+RESUME_ROWS = [
+    ("FfaMode.cs", ["StartCoroutine(" + RI + 'ResolvePointEndOfFrame(gm), "ffa point"))'], "FFA's point"),
+    ("FfaMode.cs", ['StartCoroutine(LimitlessFence.CleanupItem(EndSittingBelowMinimum(), "ffa sitting end"))'], "the sitting's end (C)"),
+    ("FfaMode.cs", ["gm.StartCoroutine(" + RI + 'FfaTransition(gm, winnerTeam, roundOver), "ffa transition"))'], "FFA's transition"),
+    ("FfaMode.cs", ["gm.StartCoroutine(" + RI + 'FfaLocalPickUI(gm, localPlayer, game, cycle, phaseNonce), "ffa pick ui"))'],
+     "FFA's pick UI"),
+    ("FfaMode.cs", ["StartCoroutine(" + RI + 'FfaMode.CheckRoundAfterLeave(), "ffa leave"))'], "FFA's leave route"),
+    ("FfaMode.cs", ["__result = " + RI + 'FfaMode.FfaDoStartGame(__instance), "ffa start");'], "FFA's start, its picks and boundary"),
+    ("TeamHoldFence.cs", ["__result = " + RI + 'HoldFence.Run(__instance, TeamHoldRules.PointSteps, __0, -1), "2v2 point transition");'],
+     "2v2's point transition"),
+    ("TeamHoldFence.cs", ["__result = " + RI + 'HoldFence.Run(__instance, TeamHoldRules.RoundSteps, __0, __1), "2v2 round transition");'],
+     "2v2's round transition"),
+    ("VanillaFixes.cs", ["__result = " + RI + 'SafeRespawn(__instance, playerIDToRevive), "phoenix revive");'], "the Phoenix revive"),
+    ("TeamHoldPick.cs", ["__result = " + RI + 'TeamHoldPick.WaitRecord(__result, picketIDToSet), "pick wait");'], "the pick wait"),
+    ("TeamHoldReturn.cs", ["host.StartCoroutine(" + RI + "ReplayRun(work, slots, (slot, name) =>", '}), "hold replay"));'],
+     "the hold's replay"),
+    ("FfaLateEntry.cs", ["StartCoroutine(" + RI + 'OwnDeathAfterCallIn(), "lag-out death"))'], "the lag-out death"),
+    ("FfaLateEntry.cs", ["StartCoroutine(" + RI + 'AdmittedLateRun(a), "late arming"))'], "the late arming"),
+    ("Plugin.cs", ["StartCoroutine(" + RI + 'FfaAssembly.GatedSpawn(Auto2v2SpawnCoroutine), "spawn"))'], "the gated spawn"),
+    ("Plugin.cs", ["StartCoroutine(" + RI + 'Auto2v2SpawnCoroutine(), "spawn"))'], "the spawn"),
+]
+
+
+def claim_every_table_a_row_is_guarded(files):
+    """4.5, Table A: each coroutine row is scheduled through ResumableItem, so
+    it captures its ticket where it is scheduled and runs MayResume before
+    every step, nested items included; the sitting's end (C) goes through
+    CleanupItem, which reads the epoch only."""
+    out = []
+    for fname, needles, name in RESUME_ROWS:
+        if not _in_order(_code(files[fname]), needles):
+            out.append(name + " is not scheduled under its ticket")
+    return out
+
+
+def claim_the_guard_reads_a_ticket_captured_at_schedule(files):
+    """4.5: the guard tests before every step, nested items under the same
+    test, and disposes a stopped item (the harness runs it: suite fencerules,
+    the guard cases). The ticket is captured once, where the item is
+    scheduled; R reads the epoch, the gid and the record's end, C the epoch."""
+    out = []
+    g = _code(files["LimitlessFenceRules.cs"], "internal static System.Collections.IEnumerator GuardScheduled(")
+    if not _in_order(g, ["if (item == null) yield break;", "if (!mayContinue())", "if (onStop != null) onStop();",
+                         "if (!item.MoveNext()) yield break;",
+                         "var nested = item.Current as System.Collections.IEnumerator;",
+                         "yield return nested != null ? GuardScheduled(nested, mayContinue, onStop) : item.Current;",
+                         "if (d != null) d.Dispose();"]):
+        out.append("the guard does not test before every step with nested items guarded and the item disposed")
+    lf = files[LF]
+    checks = [
+        ("internal static ResumeTicket CaptureTicket()",
+         ["return new ResumeTicket { Epoch = _epoch, Gid = RecordOpen ? _record.Gid : null };"], "the ticket"),
+        ("internal static bool TicketResumes(ResumeTicket t)",
+         ["bool ended = t.Gid != null",
+          "(!_hasRecord || _record.Gid != t.Gid || _state == LimitlessFenceRules.FencePhase.PhaseEnded);",
+          "return LimitlessFenceRules.MayResume(_epoch, t.Epoch, t.Gid, _ledger, ended);"], "R"),
+        ("internal static bool TicketCleans(ResumeTicket t)", ["return LimitlessFenceRules.MayClean(_epoch, t.Epoch);"], "C"),
+        ("internal static System.Collections.IEnumerator ResumableItem(",
+         ["var t = CaptureTicket();",
+          "return LimitlessFenceRules.GuardScheduled(item, () => TicketResumes(t), () => NoteItemStopped(name, t));"],
+         "ResumableItem"),
+        ("internal static System.Collections.IEnumerator CleanupItem(",
+         ["var t = CaptureTicket();",
+          "return LimitlessFenceRules.GuardScheduled(item, () => TicketCleans(t), () => NoteItemStopped(name, t));"],
+         "CleanupItem"),
+    ]
+    for sig, needles, name in checks:
+        if not _in_order(_code(lf, sig), needles):
+            out.append(name + " does not read a ticket captured at schedule as 4.5 states")
+    return out
+
+
 CLAIMS = {
     "game_start_prefix": claim_the_game_start_prefix,
     "stamp_before_join": claim_the_gid_is_stamped_before_the_join,
@@ -952,6 +1035,8 @@ CLAIMS = {
     "no_admission": claim_no_fighter_is_admitted,
     "late_tail": claim_the_late_tail_is_refused,
     "entrant_exit": claim_a_refused_entrant_is_no_departure,
+    "resume_rows": claim_every_table_a_row_is_guarded,
+    "guard_wiring": claim_the_guard_reads_a_ticket_captured_at_schedule,
 }
 
 GATE = "                if (SpectatorPatchSupport.Suppress) return;\n"
@@ -1256,6 +1341,58 @@ MUTANTS = [
       (LF, '            _departed = true;\n            Terminate("fighter departure");\n',
        '            _departed = true;\n            if (FfaLateEntry.IsQuarantinedActor(p.ActorNumber)) return;\n'
        '            Terminate("fighter departure");\n')]),
+    ("resume_rows", "FFA's point is unguarded",
+     [("FfaMode.cs", 'LimitlessFence.ResumableItem(ResolvePointEndOfFrame(gm), "ffa point")', "ResolvePointEndOfFrame(gm)")]),
+    ("resume_rows", "the sitting's end is unguarded",
+     [("FfaMode.cs", 'LimitlessFence.CleanupItem(EndSittingBelowMinimum(), "ffa sitting end")', "EndSittingBelowMinimum()")]),
+    ("resume_rows", "the sitting's end reads the record",
+     [("FfaMode.cs", "LimitlessFence.CleanupItem(EndSittingBelowMinimum(),", "LimitlessFence.ResumableItem(EndSittingBelowMinimum(),")]),
+    ("resume_rows", "FFA's transition is unguarded",
+     [("FfaMode.cs", 'LimitlessFence.ResumableItem(FfaTransition(gm, winnerTeam, roundOver), "ffa transition")',
+       "FfaTransition(gm, winnerTeam, roundOver)")]),
+    ("resume_rows", "FFA's pick UI is unguarded",
+     [("FfaMode.cs", 'LimitlessFence.ResumableItem(FfaLocalPickUI(gm, localPlayer, game, cycle, phaseNonce), "ffa pick ui")',
+       "FfaLocalPickUI(gm, localPlayer, game, cycle, phaseNonce)")]),
+    ("resume_rows", "FFA's leave route is unguarded",
+     [("FfaMode.cs", 'LimitlessFence.ResumableItem(FfaMode.CheckRoundAfterLeave(), "ffa leave")', "FfaMode.CheckRoundAfterLeave()")]),
+    ("resume_rows", "FFA's start is unguarded",
+     [("FfaMode.cs", 'LimitlessFence.ResumableItem(FfaMode.FfaDoStartGame(__instance), "ffa start")', "FfaMode.FfaDoStartGame(__instance)")]),
+    ("resume_rows", "2v2's point transition is unguarded",
+     [("TeamHoldFence.cs", 'LimitlessFence.ResumableItem(HoldFence.Run(__instance, TeamHoldRules.PointSteps, __0, -1), "2v2 point transition")',
+       "HoldFence.Run(__instance, TeamHoldRules.PointSteps, __0, -1)")]),
+    ("resume_rows", "2v2's round transition is unguarded",
+     [("TeamHoldFence.cs", 'LimitlessFence.ResumableItem(HoldFence.Run(__instance, TeamHoldRules.RoundSteps, __0, __1), "2v2 round transition")',
+       "HoldFence.Run(__instance, TeamHoldRules.RoundSteps, __0, __1)")]),
+    ("resume_rows", "the Phoenix revive is unguarded",
+     [("VanillaFixes.cs", 'LimitlessFence.ResumableItem(SafeRespawn(__instance, playerIDToRevive), "phoenix revive")',
+       "SafeRespawn(__instance, playerIDToRevive)")]),
+    ("resume_rows", "the pick wait is unguarded",
+     [("TeamHoldPick.cs", 'LimitlessFence.ResumableItem(TeamHoldPick.WaitRecord(__result, picketIDToSet), "pick wait")',
+       "TeamHoldPick.WaitRecord(__result, picketIDToSet)")]),
+    ("resume_rows", "the hold's replay is unguarded",
+     [("TeamHoldReturn.cs", "host.StartCoroutine(LimitlessFence.ResumableItem(ReplayRun(", "host.StartCoroutine(ReplayRun("),
+      ("TeamHoldReturn.cs", '}), "hold replay"));', "}));")]),
+    ("resume_rows", "the lag-out death is unguarded",
+     [("FfaLateEntry.cs", 'LimitlessFence.ResumableItem(OwnDeathAfterCallIn(), "lag-out death")', "OwnDeathAfterCallIn()")]),
+    ("resume_rows", "the late arming is unguarded",
+     [("FfaLateEntry.cs", 'LimitlessFence.ResumableItem(AdmittedLateRun(a), "late arming")', "AdmittedLateRun(a)")]),
+    ("resume_rows", "the gated spawn is unguarded",
+     [("Plugin.cs", 'LimitlessFence.ResumableItem(FfaAssembly.GatedSpawn(Auto2v2SpawnCoroutine), "spawn")',
+       "FfaAssembly.GatedSpawn(Auto2v2SpawnCoroutine)")]),
+    ("resume_rows", "the spawn is unguarded",
+     [("Plugin.cs", 'LimitlessFence.ResumableItem(Auto2v2SpawnCoroutine(), "spawn")', "Auto2v2SpawnCoroutine()")]),
+    ("guard_wiring", "the guard tests after the step",
+     [("LimitlessFenceRules.cs", "                    if (!item.MoveNext()) yield break;\n", ""),
+      ("LimitlessFenceRules.cs", "                    if (!mayContinue())\n",
+       "                    if (!item.MoveNext()) yield break;\n                    if (!mayContinue())\n")]),
+    ("guard_wiring", "a ticket captures no gid",
+     [(LF, "Gid = RecordOpen ? _record.Gid : null };", "Gid = null };")]),
+    ("guard_wiring", "a ticket ignores the record's end",
+     [(LF, " || _state == LimitlessFenceRules.FencePhase.PhaseEnded);", ");")]),
+    ("guard_wiring", "an item captures again at each step",
+     [(LF, "() => TicketResumes(t)", "() => TicketResumes(CaptureTicket())")]),
+    ("guard_wiring", "cleanup reads the record",
+     [(LF, "() => TicketCleans(t)", "() => TicketResumes(t)")]),
 ]
 
 NEUTRAL = "            // control: a neutral line\n"
@@ -1298,6 +1435,10 @@ CONTROLS = [
                     NEUTRAL + '                    if (LimitlessFence.RecordOpen) { Refusal("limitless", true); break; }\n')]),
     ("entrant_exit", [(LF, "            if (FfaLateEntry.IsQuarantinedActor(p.ActorNumber)) return;\n",
                        NEUTRAL + "            if (FfaLateEntry.IsQuarantinedActor(p.ActorNumber)) return;\n")]),
+    ("resume_rows", [("TeamHoldReturn.cs", "                // v4 4.5 R (Table A, H): the replay resumes only under its ticket.\n",
+                      NEUTRAL + "                // v4 4.5 R (Table A, H): the replay resumes only under its ticket.\n")]),
+    ("guard_wiring", [(LF, "            return new ResumeTicket { Epoch = _epoch, Gid = RecordOpen ? _record.Gid : null };\n",
+                       NEUTRAL + "            return new ResumeTicket { Epoch = _epoch, Gid = RecordOpen ? _record.Gid : null };\n")]),
 ]
 
 

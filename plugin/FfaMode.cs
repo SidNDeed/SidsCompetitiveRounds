@@ -2054,7 +2054,7 @@ namespace CompetitiveRounds
                 // race in), but decide the winner at end of frame, after every
                 // death in this physics step has landed.
                 pointLatched = true;
-                if (Plugin.Instance != null) Plugin.Instance.StartCoroutine(ResolvePointEndOfFrame(gm));
+                if (Plugin.Instance != null) Plugin.Instance.StartCoroutine(LimitlessFence.ResumableItem(ResolvePointEndOfFrame(gm), "ffa point"));   // v4 4.5 R
                 else ResolvePointNow(gm);
             }
             catch (Exception ex) { Plugin.Log.LogError($"[FFA] HandlePlayerDied: {ex.Message}"); }
@@ -2340,7 +2340,7 @@ namespace CompetitiveRounds
                         // minimum counts the room, never the empty kept set.
                         int remaining = FfaLateEntry.LocalSitsOut() ? RoomActors.PresentNonSpectators().Count : RoomActors.ActiveFighterCount();
                         if (remaining < 3 && Plugin.Instance != null)
-                            Plugin.Instance.StartCoroutine(EndSittingBelowMinimum());
+                            Plugin.Instance.StartCoroutine(LimitlessFence.CleanupItem(EndSittingBelowMinimum(), "ffa sitting end"));   // v4 4.5 C
                     }
                     catch { }
                 }
@@ -2374,7 +2374,7 @@ namespace CompetitiveRounds
                 isTransitioning = false;  // rematch flow owns state from here
                 return;
             }
-            gm.StartCoroutine(FfaTransition(gm, winnerTeam, roundOver));
+            gm.StartCoroutine(LimitlessFence.ResumableItem(FfaTransition(gm, winnerTeam, roundOver), "ffa transition"));   // v4 4.5 R
         }
 
         // ── Transitions (replaces vanilla Point/RoundTransition) ──
@@ -3080,7 +3080,7 @@ namespace CompetitiveRounds
             bool iPick = FfaNumberingRules.KeyedReadsAllowed(gate, game) && manifest != null && localPlayer != null && manifest.Contains(localPlayer.PlayerID);
             Coroutine localUi = null;
             if (iPick)
-                localUi = gm.StartCoroutine(FfaLocalPickUI(gm, localPlayer, game, cycle, phaseNonce));
+                localUi = gm.StartCoroutine(LimitlessFence.ResumableItem(FfaLocalPickUI(gm, localPlayer, game, cycle, phaseNonce), "ffa pick ui"));   // v4 4.5 R
 
             // Master: collect picks and close the window adaptively — at
             // least PickBase, extended by PickGrace whenever a pick arrives
@@ -5832,7 +5832,7 @@ namespace CompetitiveRounds
             // exactly what the Aug 11 playtest logs show happened. Leave
             // __result untouched on a spectator.
             if (RoomActors.LocalIsSpectator) return false;
-            __result = FfaMode.FfaDoStartGame(__instance);
+            __result = LimitlessFence.ResumableItem(FfaMode.FfaDoStartGame(__instance), "ffa start");   // v4 4.5 R: its picks and boundary
             return false;
         }
 
@@ -5952,7 +5952,7 @@ namespace CompetitiveRounds
                 // RJ readmission P4.7: before the purge, while the body exists.
                 FfaMode.RecordDepartureDeath(otherPlayer);
                 if (Plugin.Instance != null)
-                    Plugin.Instance.StartCoroutine(FfaMode.CheckRoundAfterLeave());
+                    Plugin.Instance.StartCoroutine(LimitlessFence.ResumableItem(FfaMode.CheckRoundAfterLeave(), "ffa leave"));   // v4 4.5 R
                 return false;
             }
             catch { }
