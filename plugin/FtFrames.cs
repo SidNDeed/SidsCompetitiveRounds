@@ -88,6 +88,7 @@ namespace CompetitiveRounds
 
         // the writer ledger: at the window's start, and after its last measured frame
         private static readonly long[] _lb = new long[FtLedger.Fields], _le = new long[FtLedger.Fields];
+        private static readonly long[] _sk0 = new long[FtLedger.SockFields], _sk1 = new long[FtLedger.SockFields];
 
         // the window's owner, captured when its first measured frame closes
         private static string _oPt = "";
@@ -234,6 +235,7 @@ namespace CompetitiveRounds
             _ptLastArm = _ptArm;
             _ptOpen = true;
             FtLedger.Take(_lb);
+            FtLedger.SockTake(_sk0);
             _t0 = System.Diagnostics.Stopwatch.GetTimestamp();
         }
 
@@ -243,6 +245,7 @@ namespace CompetitiveRounds
             _ptOpen = false;
             if (_wn > 0) FlushWindow(true);
             Vr5Take(FtGate.Off);
+            FtLedger.SockTake(_sk1);
             Plugin.Log.LogInfo("[FRAME-TIME] p pt=" + _ptLabel + " arm=" + (_ptArm ? "ON" : "OFF")
                 + " gate=" + (_ptGate ? 1 : 0)
                 + " pred=" + Arm(_ptPred)
@@ -260,7 +263,7 @@ namespace CompetitiveRounds
                 + " off_g=" + _offG + " off_gn=" + _offGn + " off_on=" + _offOn + " on_guarded=" + _onGuarded
                 + " own_split=" + _ownSplit + " span_class_overflow=" + FtSpan.ClassOverflow
                 + " gc_read_failures=" + FtSpan.GcReadFailures + " recv_offmain=" + FtLedger.RecvOffMain
-                + " ledger_cycle_miss=" + FtLedger.CycleMiss);
+                + " ledger_cycle_miss=" + FtLedger.CycleMiss + " " + FtLedger.SockStats(_sk0, _sk1));
             LastN = _pn;
             LastSF = _pF;
             _btT0 = BetweenTicks();

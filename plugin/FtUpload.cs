@@ -1,7 +1,9 @@
 #if SCR_FRAMETIME
 using System.Collections.Generic;
+using System.Reflection;
 using System.Text;
 using System.Threading;
+using HarmonyLib;
 
 namespace CompetitiveRounds
 {
@@ -80,13 +82,19 @@ namespace CompetitiveRounds
     /// counts handler entries off the main thread. On the main thread these cycles are already inside the frame's C;
     /// recv names them, it adds nothing to C.
     ///
+    /// sock: Photon's socket receive thread, one datagram per IPhotonSocket.HandleReceivedDatagram call (FtSockPatch
+    /// below). Each datagram is one unit and one token; its producer's arm is not known here, so every sock token is
+    /// enqueued ON (the conservative side), and done in the arm open when the call returns. Its cycles are the
+    /// call's on its own thread. Per point the p line adds the datagrams' cycle distribution (SockStats). In the
+    /// reference build the patch is absent and sock's wu prints NA.
+    ///
     /// Counters are cumulative and taken under one lock (Take), so every type's tok reconciles in every window:
     /// open0 + enqON + enqOFF = doneON + doneOFF + disc + open1. An event's arm is FtGate.Off when it happens. Take
     /// also carries FtSpan.Marks, the window's nm.</summary>
     internal static class FtLedger
     {
-        internal const int Log = 0, Hash = 1, Recv = 2, Types = 3;
-        internal static readonly string[] TypeNames = { "log", "hash", "recv" };
+        internal const int Log = 0, Hash = 1, Recv = 2, Sock = 3, Types = 4;
+        internal static readonly string[] TypeNames = { "log", "hash", "recv", "sock" };
 
         /// <summary>Per type t, at t * Per: enqON, enqOFF, doneON, doneOFF, disc, units, cycles. Then FtSpan.Marks.</summary>
         internal const int EnqOn = 0, EnqOff = 1, DoneOn = 2, DoneOff = 3, Disc = 4, Units = 5, Cyc = 6, Per = 7;
@@ -120,6 +128,9 @@ namespace CompetitiveRounds
             {
                 int o = t * Per;
                 if (t > 0) sb.Append(';');
+#if SCR_FT_NOCOLLECTORS
+                if (t == Sock) { sb.Append(TypeNames[t]).Append(":NA:NA"); continue; }
+#endif
                 sb.Append(TypeNames[t]).Append(':').Append(b[o + Units] - a[o + Units]).Append(':').Append(b[o + Cyc] - a[o + Cyc]);
             }
         }
@@ -193,6 +204,96 @@ namespace CompetitiveRounds
             Serve(Recv, 0, true, k0, FtClock.Cycles());
         }
 
+        // -- sock: the receive thread's datagrams -----------------------------------------------------------------
+
+        /// <summary>Cycle-per-datagram buckets: bucket i holds [SockEdge[i-1], SockEdge[i]), edges about 2^(1/4) apart
+        /// up to 2^44; the last bucket is open above.</summary>
+        internal const int SockBuckets = 177;
+        internal static readonly long[] SockEdge = SockEdges();
+        private static readonly long[] _sockHist = new long[SockBuckets];
+        internal static long SockMain;       // datagram calls on the main thread
+        internal static long SockSwitches;   // calls on a thread other than the previous call's
+        private static int _sockThread = -1;
+
+        /// <summary>SockTake's layout: the buckets, then SockMain, then SockSwitches.</summary>
+        internal const int SockFields = SockBuckets + 2;
+
+        private static long[] SockEdges()
+        {
+            var e = new long[SockBuckets - 1];
+            long prev = 0;
+            for (int i = 0; i < e.Length; i++)
+            {
+                long v = (long)System.Math.Ceiling(System.Math.Pow(2.0, (i + 1) / 4.0));
+                e[i] = v > prev ? v : prev + 1;
+                prev = e[i];
+            }
+            return e;
+        }
+
+        /// <summary>The bucket of c cycles: the first edge above c.</summary>
+        internal static int SockBucket(long c)
+        {
+            int i = System.Array.BinarySearch(SockEdge, c);
+            return i >= 0 ? i + 1 : ~i;
+        }
+
+        /// <summary>FtSockPatch's prefix, on the receive thread: one datagram enqueued (ON: its producer's arm is not
+        /// known), its start cycles on this thread.</summary>
+        internal static ulong SockEnter()
+        {
+            int id = Thread.CurrentThread.ManagedThreadId;
+            if (id == FtSpan.MainThread) Interlocked.Increment(ref SockMain);
+            if (id != _sockThread)
+            {
+                if (_sockThread != -1) Interlocked.Increment(ref SockSwitches);
+                _sockThread = id;
+            }
+            lock (_lock) _c[Sock * Per + EnqOn]++;
+            return FtClock.Cycles();
+        }
+
+        /// <summary>FtSockPatch's finalizer, on the same thread: the datagram done, its cycles counted and bucketed.</summary>
+        internal static void SockExit(ulong k0)
+        {
+            ulong k1 = FtClock.Cycles();
+            Serve(Sock, 1, true, k0, k1);
+            long c = k0 == 0 || k1 == 0 ? 0 : unchecked((long)(k1 - k0));
+            Interlocked.Increment(ref _sockHist[SockBucket(c)]);
+        }
+
+        /// <summary>Main thread (FtFrames' point bounds): the cumulative buckets and thread counters.</summary>
+        internal static void SockTake(long[] into)
+        {
+            for (int i = 0; i < SockBuckets; i++) into[i] = Interlocked.Read(ref _sockHist[i]);
+            into[SockBuckets] = Interlocked.Read(ref SockMain);
+            into[SockBuckets + 1] = Interlocked.Read(ref SockSwitches);
+        }
+
+        /// <summary>The p line's sock fields between two SockTake snapshots: sock_p95, the upper edge of the bucket
+        /// holding the nearest-rank 95th percentile of cycles per datagram (an upper bound; NA with no datagram, or
+        /// when it falls in the open last bucket), sock_n the datagrams, sock_thr the thread switches, sock_main the
+        /// calls on the main thread.</summary>
+        internal static string SockStats(long[] a, long[] b)
+        {
+            long n = 0;
+            for (int i = 0; i < SockBuckets; i++) n += b[i] - a[i];
+            string p95 = "NA";
+            if (n > 0)
+            {
+                long rank = (95 * n + 99) / 100, cum = 0;
+                for (int i = 0; i < SockBuckets; i++)
+                {
+                    cum += b[i] - a[i];
+                    if (cum < rank) continue;
+                    if (i < SockEdge.Length) p95 = SockEdge[i].ToString();
+                    break;
+                }
+            }
+            return "sock_p95=" + p95 + " sock_n=" + n + " sock_thr=" + (b[SockBuckets + 1] - a[SockBuckets + 1])
+                + " sock_main=" + (b[SockBuckets] - a[SockBuckets]);
+        }
+
         /// <summary>FtClock.Install: wraps the disk log's writer. Logged either way.</summary>
         internal static void Install()
         {
@@ -260,5 +361,38 @@ namespace CompetitiveRounds
             }
         }
     }
+
+#if !SCR_FT_NOCOLLECTORS
+    /// <summary>FtLedger's sock scope (B11 SHARED.md D5; to-p1-r2.md): Photon's per-datagram receive handler,
+    /// IPhotonSocket.HandleReceivedDatagram(byte[], int, bool) in Photon3Unity3D 4.1.7.0. Every transport's receive
+    /// path calls it once per datagram: SocketUdp.ReceiveLoop on the thread SocketUdp.DnsAndConnect starts per
+    /// connection (PhotonPeer's Udp default), and likewise SocketTcp, SocketTcpAsync, SocketUdpAsync,
+    /// SocketUdpBlocking and PhotonClientWebSocket. The call's cycles are read on the thread that runs it. FrameTime
+    /// only; the reference build (SCR_FT_NOCOLLECTORS) leaves it out, and Release and Thunderstore never compile
+    /// this file.</summary>
+    [HarmonyPatch]
+    internal static class FtSockPatch
+    {
+        private static MethodBase TargetMethod()
+        {
+            var m = AccessTools.Method(typeof(ExitGames.Client.Photon.IPhotonSocket), "HandleReceivedDatagram",
+                new[] { typeof(byte[]), typeof(int), typeof(bool) });
+            if (m == null) throw new System.Exception("IPhotonSocket.HandleReceivedDatagram(byte[], int, bool) not found - no sock scope");
+            return m;
+        }
+
+        [HarmonyPrefix]
+        private static void Prefix(out ulong __state)
+        {
+            __state = FtLedger.SockEnter();
+        }
+
+        [HarmonyFinalizer]
+        private static void Finalizer(ulong __state)
+        {
+            FtLedger.SockExit(__state);
+        }
+    }
+#endif
 }
 #endif

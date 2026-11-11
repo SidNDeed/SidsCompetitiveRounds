@@ -327,6 +327,7 @@ TIP_FRAMES = {
         '_ptLastArm = _ptArm;',
         '_ptOpen = true;',
         'FtLedger.Take(_lb);',
+        'FtLedger.SockTake(_sk0);',
         '_t0 = System.Diagnostics.Stopwatch.GetTimestamp();',
     ],
     SIG_FR_END: [
@@ -334,6 +335,7 @@ TIP_FRAMES = {
         '_ptOpen = false;',
         'if (_wn > 0) FlushWindow(true);',
         'Vr5Take(FtGate.Off);',
+        'FtLedger.SockTake(_sk1);',
         'Plugin.Log.LogInfo("[FRAME-TIME] p pt=" + _ptLabel + " arm=" + (_ptArm ? "ON" : "OFF")',
         '+ " gate=" + (_ptGate ? 1 : 0)',
         '+ " pred=" + Arm(_ptPred)',
@@ -351,7 +353,7 @@ TIP_FRAMES = {
         '+ " off_g=" + _offG + " off_gn=" + _offGn + " off_on=" + _offOn + " on_guarded=" + _onGuarded',
         '+ " own_split=" + _ownSplit + " span_class_overflow=" + FtSpan.ClassOverflow',
         '+ " gc_read_failures=" + FtSpan.GcReadFailures + " recv_offmain=" + FtLedger.RecvOffMain',
-        '+ " ledger_cycle_miss=" + FtLedger.CycleMiss);',
+        '+ " ledger_cycle_miss=" + FtLedger.CycleMiss + " " + FtLedger.SockStats(_sk0, _sk1));',
         'LastN = _pn;',
         'LastSF = _pF;',
         '_btT0 = BetweenTicks();',
@@ -397,6 +399,15 @@ SIG_LG_HEND = 'internal static void HashEnd(ulong k0, bool ok)'
 SIG_LG_RENTER = 'internal static ulong RecvEnter()'
 SIG_LG_REXIT = 'internal static void RecvExit(ulong k0)'
 SIG_LG_RCYC = 'internal static void RecvCycles(ulong k0)'
+SIG_LG_SBUCKET = 'internal static int SockBucket(long c)'
+SIG_LG_SENTER = 'internal static ulong SockEnter()'
+SIG_LG_SEXIT = 'internal static void SockExit(ulong k0)'
+SIG_LG_STAKE = 'internal static void SockTake(long[] into)'
+SIG_LG_STATS = 'internal static string SockStats(long[] a, long[] b)'
+SIG_LG_SEDGES = 'private static long[] SockEdges()'
+SIG_SOCK_TARGET = 'private static MethodBase TargetMethod()'
+SIG_SOCK_PRE = 'private static void Prefix(out ulong __state)'
+SIG_SOCK_FIN = 'private static void Finalizer(ulong __state)'
 
 TIP_P1_SCHED = {
     SIG_OPENWIN: [
@@ -733,6 +744,9 @@ TIP_P1_LEDGER = {
         '{',
         'int o = t * Per;',
         "if (t > 0) sb.Append(';');",
+        '#if SCR_FT_NOCOLLECTORS',
+        'if (t == Sock) { sb.Append(TypeNames[t]).Append(":NA:NA"); continue; }',
+        '#endif',
         "sb.Append(TypeNames[t]).Append(':').Append(b[o + Units] - a[o + Units]).Append(':').Append(b[o + Cyc] - a[o + Cyc]);",
         '}',
     ],
@@ -778,6 +792,73 @@ TIP_P1_LEDGER = {
     ],
     SIG_LG_RCYC: [
         'Serve(Recv, 0, true, k0, FtClock.Cycles());',
+    ],
+    SIG_LG_SBUCKET: [
+        'int i = System.Array.BinarySearch(SockEdge, c);',
+        'return i >= 0 ? i + 1 : ~i;',
+    ],
+    SIG_LG_SENTER: [
+        'int id = Thread.CurrentThread.ManagedThreadId;',
+        'if (id == FtSpan.MainThread) Interlocked.Increment(ref SockMain);',
+        'if (id != _sockThread)',
+        '{',
+        'if (_sockThread != -1) Interlocked.Increment(ref SockSwitches);',
+        '_sockThread = id;',
+        '}',
+        'lock (_lock) _c[Sock * Per + EnqOn]++;',
+        'return FtClock.Cycles();',
+    ],
+    SIG_LG_SEXIT: [
+        'ulong k1 = FtClock.Cycles();',
+        'Serve(Sock, 1, true, k0, k1);',
+        'long c = k0 == 0 || k1 == 0 ? 0 : unchecked((long)(k1 - k0));',
+        'Interlocked.Increment(ref _sockHist[SockBucket(c)]);',
+    ],
+    SIG_LG_STAKE: [
+        'for (int i = 0; i < SockBuckets; i++) into[i] = Interlocked.Read(ref _sockHist[i]);',
+        'into[SockBuckets] = Interlocked.Read(ref SockMain);',
+        'into[SockBuckets + 1] = Interlocked.Read(ref SockSwitches);',
+    ],
+    SIG_LG_STATS: [
+        'long n = 0;',
+        'for (int i = 0; i < SockBuckets; i++) n += b[i] - a[i];',
+        'string p95 = "NA";',
+        'if (n > 0)',
+        '{',
+        'long rank = (95 * n + 99) / 100, cum = 0;',
+        'for (int i = 0; i < SockBuckets; i++)',
+        '{',
+        'cum += b[i] - a[i];',
+        'if (cum < rank) continue;',
+        'if (i < SockEdge.Length) p95 = SockEdge[i].ToString();',
+        'break;',
+        '}',
+        '}',
+        'return "sock_p95=" + p95 + " sock_n=" + n + " sock_thr=" + (b[SockBuckets + 1] - a[SockBuckets + 1])',
+        '+ " sock_main=" + (b[SockBuckets] - a[SockBuckets]);',
+    ],
+    SIG_LG_SEDGES: [
+        'var e = new long[SockBuckets - 1];',
+        'long prev = 0;',
+        'for (int i = 0; i < e.Length; i++)',
+        '{',
+        'long v = (long)System.Math.Ceiling(System.Math.Pow(2.0, (i + 1) / 4.0));',
+        'e[i] = v > prev ? v : prev + 1;',
+        'prev = e[i];',
+        '}',
+        'return e;',
+    ],
+    SIG_SOCK_TARGET: [
+        'var m = AccessTools.Method(typeof(ExitGames.Client.Photon.IPhotonSocket), "HandleReceivedDatagram",',
+        'new[] { typeof(byte[]), typeof(int), typeof(bool) });',
+        'if (m == null) throw new System.Exception("IPhotonSocket.HandleReceivedDatagram(byte[], int, bool) not found - no sock scope");',
+        'return m;',
+    ],
+    SIG_SOCK_PRE: [
+        '__state = FtLedger.SockEnter();',
+    ],
+    SIG_SOCK_FIN: [
+        'FtLedger.SockExit(__state);',
     ],
 }
 
@@ -2799,7 +2880,7 @@ import hashlib  # noqa: E402
 WINDOW_KEYS = ["run", "pos", "unit", "coin", "wi", "f0", "pred", "prun", "res", "gcn", "cG", "cW", "cR", "cS", "cE",
                "q", "r", "qn", "wu", "tok", "nm"]
 # the writer type keys of wu and tok (FtLedger.TypeNames), in their print order
-LEDGER_TYPES = ["log", "hash", "recv"]
+LEDGER_TYPES = ["log", "hash", "recv", "sock"]
 
 
 def window_keys(src):
@@ -2842,7 +2923,7 @@ def test_ledger_type_keys():
     src = _src("FtUpload.cs")
     m = re.search(r'TypeNames = \{ ([^}]*) \};', src)
     assert [x.strip().strip('"') for x in m.group(1).split(",")] == LEDGER_TYPES
-    assert src.count("internal const int Log = 0, Hash = 1, Recv = 2, Types = 3;") == 1
+    assert src.count("internal const int Log = 0, Hash = 1, Recv = 2, Sock = 3, Types = 4;") == 1
 
 
 class TypedLedgerPort:
@@ -2902,7 +2983,7 @@ def ledger_windows(mutant="tip", windows=12, frames=10, seed=3):
     import random
     rng = random.Random(seed)
     L = TypedLedgerPort(mutant)
-    pending = [0, 0, 0]
+    pending = [0] * len(LEDGER_TYPES)
     toks, wus, truth = [], [], []
     hash_jobs = {15: "begin", 40: "end", 41: "begin", 70: "end"}
     lb = L.take()
@@ -3123,3 +3204,247 @@ def test_p1_r1_source_mutant_fails(name):
     fname, old, new = P1_R1_SOURCE_MUTANTS[name]
     assert pin_violations(_sources()) == []                       # the negative control: the tip passes
     assert pin_violations(_mut(_sources(), fname, old, new)) != []
+
+
+# ------------------------------------------------------------------ r2 (ftb/to-p1-r2.md; SHARED.md md5 2119eb2e): sock
+
+import bisect  # noqa: E402
+import math  # noqa: E402
+
+# the four builds' define sets: the sock patch may compile only into FrameTime
+BUILDS = {"Release": set(), "Thunderstore": {"THUNDERSTORE"}, "FrameTimeRef": {"SCR_FRAMETIME", "SCR_FT_NOCOLLECTORS"},
+          "FrameTime": {"SCR_FRAMETIME"}}
+SOCK_MARKS = ["class FtSockPatch", '"HandleReceivedDatagram"']
+
+
+def _pp_eval(expr, defines):
+    py = re.sub(r"\b[A-Za-z_]\w*\b", lambda m: {"true": "True", "false": "False"}.get(
+        m.group(0), str(m.group(0) in defines)), expr)
+    py = py.replace("&&", " and ").replace("||", " or ").replace("!", " not ")
+    return bool(eval(py, {"__builtins__": {}}, {}))
+
+
+def build_view(text, defines):
+    """The source as a compiler with these defines sees it (#if, #elif, #else, #endif; ! && || and true). None when
+    the directives do not nest."""
+    out, stack = [], []   # each: [taking now, some branch taken, parent taking]
+    for ln in text.replace("\r\n", "\n").split("\n"):
+        d = ln.strip()
+        live = all(e[0] for e in stack)
+        if d.startswith("#if"):
+            t = _pp_eval(d[3:], defines)
+            stack.append([t, t, live])
+            continue
+        if d.startswith("#elif") or d == "#else":
+            if not stack:
+                return None
+            e = stack[-1]
+            t = (not e[1]) and (True if d == "#else" else _pp_eval(d[5:], defines))
+            e[0], e[1] = t, e[1] or t
+            continue
+        if d.startswith("#endif"):
+            if not stack:
+                return None
+            stack.pop()
+            continue
+        if live:
+            out.append(ln)
+    return None if stack else "\n".join(out)
+
+
+def sock_build_violations(srcs):
+    bad = []
+    for b, defines in BUILDS.items():
+        for f, text in srcs.items():
+            v = build_view(text, defines)
+            if v is None:
+                bad.append("%s %s: directives do not nest" % (b, f))
+                continue
+            for mark in SOCK_MARKS:
+                want = 1 if b == "FrameTime" and f == "FtUpload.cs" else 0
+                if v.count(mark) != want:
+                    bad.append("%s %s: %s %d, want %d" % (b, f, mark, v.count(mark), want))
+    return bad
+
+
+def _plugin_sources():
+    return {p.name: p.read_text(encoding="utf-8-sig") for p in sorted(PLUGIN.glob("*.cs"))}
+
+
+def test_build_view_evaluates_directives():
+    # a check of the checker: nesting, #elif/#else, negation
+    t = "\n".join(["a", "#if SCR_FRAMETIME", "b", "#if !SCR_FT_NOCOLLECTORS", "c", "#endif", "#else", "d", "#endif",
+                   "#if THUNDERSTORE", "e", "#elif X", "f", "#else", "g", "#endif"])
+    assert build_view(t, set()).split("\n") == ["a", "d", "g"]
+    assert build_view(t, {"SCR_FRAMETIME"}).split("\n") == ["a", "b", "c", "g"]
+    assert build_view(t, {"SCR_FRAMETIME", "SCR_FT_NOCOLLECTORS"}).split("\n") == ["a", "b", "g"]
+    assert build_view(t, {"THUNDERSTORE"}).split("\n") == ["a", "d", "e"]
+    assert build_view(t, {"X"}).split("\n") == ["a", "d", "f"]
+    assert build_view(t + "\n#endif", set()) is None
+    for f in SITE_CALLS:                                         # no ledger call in the D5 sites' release view
+        v = build_view((PLUGIN / f).read_text(encoding="utf-8-sig"), set())
+        assert v is not None and "FtLedger." not in v
+
+
+def test_sock_patch_only_in_frametime():
+    assert sock_build_violations(_plugin_sources()) == []
+
+
+def _sock_block(src):
+    i = src.index("#if !SCR_FT_NOCOLLECTORS\n    /// <summary>FtLedger's sock scope")
+    j = src.index("#endif\n", i) + len("#endif\n")
+    return i, j
+
+
+@pytest.mark.parametrize("mutant", ["moved_past_gate", "ref_unguarded"])
+def test_sock_patch_build_mutant_fails(mutant):
+    srcs = _plugin_sources()
+    assert sock_build_violations(srcs) == []                    # the negative control
+    s = srcs["FtUpload.cs"].replace("\r\n", "\n")
+    i, j = _sock_block(s)
+    block = s[i:j]
+    if mutant == "moved_past_gate":                              # the patch after the file's FrameTime #endif
+        s = s[:i] + s[j:] + "namespace CompetitiveRounds\n{\n" + block + "}\n"
+    else:                                                        # the reference build's guard removed
+        inner = block.split("\n", 1)[1].rsplit("#endif\n", 1)[0]
+        s = s[:i] + inner + s[j:]
+    srcs["FtUpload.cs"] = s
+    assert sock_build_violations(srcs) != []
+
+
+def test_sock_target_is_the_per_datagram_handler():
+    # the patch names IPhotonSocket.HandleReceivedDatagram(byte[], int, bool): the one method every Photon3Unity3D
+    # 4.1.7.0 transport's receive loop calls per datagram (SocketUdp.ReceiveLoop and the five other transports)
+    body = "\n".join(_body(_src("FtUpload.cs"), SIG_SOCK_TARGET))
+    assert 'typeof(ExitGames.Client.Photon.IPhotonSocket), "HandleReceivedDatagram",' in body
+    assert "new[] { typeof(byte[]), typeof(int), typeof(bool) });" in body
+    assert "throw new System.Exception(" in body                  # a missing target is a Failed to patch line
+
+
+class RecvThread(Thread):
+    """A thread with its own executed-cycle counter."""
+
+
+SOCK_EDGES = []
+_prev = 0
+for _i in range(176):
+    _v = math.ceil(2.0 ** ((_i + 1) / 4.0))
+    _prev = _v if _v > _prev else _prev + 1
+    SOCK_EDGES.append(_prev)
+del _i, _v, _prev
+
+
+def sock_bucket(c):
+    """FtLedger.SockBucket: the first edge above c."""
+    return bisect.bisect_right(SOCK_EDGES, c)
+
+
+class SockPort:
+    """FtLedger's sock scope (SockEnter, SockExit, SockStats) driven by FtSockPatch on the receive thread: the
+    prefix reads the calling thread's counter, the finalizer reads it again. mutant 'main_clock' reads the main
+    thread's counter; 'double' counts a datagram twice."""
+
+    def __init__(self, main, mutant="tip"):
+        self.main, self.m = main, mutant
+        self.hist = [0] * 177
+        self.units = self.cyc = self.enq_on = self.done = 0
+
+    def handle(self, th, cost, main_drift=0):
+        clock = self.main if self.m == "main_clock" else th
+        self.enq_on += 1
+        k0 = clock.k
+        th.k += cost
+        self.main.k += main_drift
+        k1 = clock.k
+        n = 2 if self.m == "double" else 1
+        self.units += n
+        self.done += n
+        self.cyc += k1 - k0
+        self.hist[sock_bucket(k1 - k0)] += 1
+
+    def stats(self):
+        n = sum(self.hist)
+        rank, cum = (95 * n + 99) // 100, 0
+        for i, h in enumerate(self.hist):
+            cum += h
+            if cum >= rank:
+                return (SOCK_EDGES[i] if i < len(SOCK_EDGES) else None), n
+
+
+def sock_run(mutant="tip", datagrams=400, seed=9):
+    import random
+    rng = random.Random(seed)
+    main, rx = Thread(), RecvThread()
+    port = SockPort(main, mutant)
+    costs = []
+    for _ in range(datagrams):
+        c = rng.choice([800, 1200, 2000, 5000]) + rng.randrange(400)
+        costs.append(c)
+        port.handle(rx, c, main_drift=rng.randrange(20000))
+    return port, costs
+
+
+def sock_violations(port, costs):
+    bad = []
+    if port.units != len(costs):
+        bad.append("units %d, datagrams %d" % (port.units, len(costs)))
+    if port.cyc != sum(costs):
+        bad.append("cycles %d, the receive thread's %d" % (port.cyc, sum(costs)))
+    if port.enq_on + 0 != port.done:
+        bad.append("tok: enqON %d, done %d" % (port.enq_on, port.done))
+    p95, n = port.stats()
+    true95 = sorted(costs)[(95 * len(costs) + 99) // 100 - 1]
+    if n != len(costs) or p95 is None or not (true95 < p95 <= true95 * 2 ** 0.25 + 2):
+        bad.append("sock_p95 %s for a true p95 of %d (n %d)" % (p95, true95, n))
+    return bad
+
+
+def test_sock_port_tip():
+    assert sock_violations(*sock_run()) == []
+
+
+@pytest.mark.parametrize("mutant", ["main_clock", "double"])
+def test_sock_port_mutant_fails(mutant):
+    assert sock_violations(*sock_run()) == []                   # the negative control
+    assert sock_violations(*sock_run(mutant)) != []
+
+
+def test_sock_edges_are_the_csharp_edges():
+    # SockEdges' loop, ported: the same 176 edges, strictly increasing, the last 2^44
+    body = _body(_src("FtUpload.cs"), SIG_LG_SEDGES)
+    assert "long v = (long)System.Math.Ceiling(System.Math.Pow(2.0, (i + 1) / 4.0));" in body
+    assert "e[i] = v > prev ? v : prev + 1;" in body
+    assert _src("FtUpload.cs").count("internal const int SockBuckets = 177;") == 1
+    assert all(b > a for a, b in zip(SOCK_EDGES, SOCK_EDGES[1:])) and SOCK_EDGES[-1] == 2 ** 44
+
+
+P1_R2_SOURCE_MUTANTS = {
+    # a datagram counted twice
+    "sock_double": ("FtUpload.cs", "            Serve(Sock, 1, true, k0, k1);\n", "            Serve(Sock, 2, true, k0, k1);\n"),
+    # the bucket counted twice
+    "sock_hist_double": ("FtUpload.cs", "            Interlocked.Increment(ref _sockHist[SockBucket(c)]);\n",
+                         "            Interlocked.Increment(ref _sockHist[SockBucket(c)]);\n"
+                         "            Interlocked.Increment(ref _sockHist[SockBucket(c)]);\n"),
+    # sock's start cycles read from the main thread's last frame boundary, not the calling thread
+    "sock_main_clock": ("FtUpload.cs", "            lock (_lock) _c[Sock * Per + EnqOn]++;\n            return FtClock.Cycles();",
+                        "            lock (_lock) _c[Sock * Per + EnqOn]++;\n            return (ulong)FtSpan.Acc[FtSpan.ClsE];"),
+    # a sock token enqueued in the gate's arm (the producer's arm is not known here)
+    "sock_enq_gate": ("FtUpload.cs", "            lock (_lock) _c[Sock * Per + EnqOn]++;\n",
+                      "            Enq(Sock, 1);\n"),
+}
+
+
+@pytest.mark.parametrize("name", sorted(P1_R2_SOURCE_MUTANTS))
+def test_p1_r2_source_mutant_fails(name):
+    fname, old, new = P1_R2_SOURCE_MUTANTS[name]
+    assert pin_violations(_sources()) == []                       # the negative control: the tip passes
+    assert pin_violations(_mut(_sources(), fname, old, new)) != []
+
+
+def test_sock_clock_is_the_calling_threads():
+    # FtClock.Cycles reads QueryThreadCycleTime on GetCurrentThread's pseudo-handle: the calling thread, whichever it is
+    clock = _src("FtClock.cs")
+    assert clock.count("private static readonly IntPtr Self = GetCurrentThread();") == 1
+    assert clock.count("if (!QueryThreadCycleTime(Self, out k)) { CycleFailures++; return 0; }") == 1
+    for sig in (SIG_LG_SENTER, SIG_LG_SEXIT):
+        assert "FtClock.Cycles()" in "\n".join(_body(_src("FtUpload.cs"), sig))
