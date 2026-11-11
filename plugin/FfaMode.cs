@@ -960,7 +960,7 @@ namespace CompetitiveRounds
                 // the truth but nothing acted on it). One-shot, shared with
                 // the delta path; a NON-terminal seed re-arms it — that is
                 // the observer's "new game started" signal.
-                SpectatorCheckGameOver();
+                SpectatorCheckGameOver(false);
             }
             catch { }
         }
@@ -1138,7 +1138,7 @@ namespace CompetitiveRounds
             Plugin.Log.LogInfo($"[FFA] spectator between-games flush: cleared {cleared} replica deck(s)");
         }
 
-        private static void SpectatorCheckGameOver()
+        private static void SpectatorCheckGameOver(bool completedRound)
         {
             try
             {
@@ -1147,6 +1147,10 @@ namespace CompetitiveRounds
                 foreach (var kv in rounds)
                     if (kv.Value > leadRounds) { leadRounds = kv.Value; leadTeam = kv.Key; }
                 bool terminal = leadTeam >= 0 && leadRounds >= RoundsToWin;
+                // Ask 16(a) lane 2 (v4 5.1, F6): while the record is terminating its
+                // end target can sit below the lead (8, 3 and 1 against 2), so the
+                // observer ends only on a round that completes, never from a seed.
+                if (terminal && !completedRound && LimitlessFence.RecordTerminating) return;
                 if (!terminal)
                 {
                     // r4 find 1: clear the accumulators AGAIN on the
@@ -2220,7 +2224,7 @@ namespace CompetitiveRounds
                     {
                         rounds[winnerTeam] = RoundsFor(winnerTeam) + 1;
                         points.Clear();
-                        SpectatorCheckGameOver();
+                        SpectatorCheckGameOver(true);
                     }
                 }
                 else if (winnerTeam == WINNER_DOUBLE_KO)

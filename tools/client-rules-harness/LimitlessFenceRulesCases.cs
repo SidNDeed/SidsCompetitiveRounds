@@ -48,6 +48,8 @@ namespace CompetitiveRounds
             internal Func<R.GidLedger, R.GidLedger> ExitRoom = l => { l.ExitRoom(); return l; };
             internal Func<bool, bool, string, R.GidLedger, bool> AdoptOnArrival = R.AdoptOnArrival;
             internal Action<Func<int>, Action<int>, int, Action> RunInFrame = ScopedFrame.RunInFrame<int>;
+            internal Func<object[], R.FenceRecord, object[]> SnapshotWith = R.SnapshotWithRecord;
+            internal Func<object[], R.FenceRecord?> SnapshotRead = SnapRead;
         }
 
         private const string G1 = "0123456789abcdef";
@@ -206,6 +208,24 @@ namespace CompetitiveRounds
                 !Decodes(With(good, 10, new int[5])) && !Decodes(With(good, 9, new[] { 0 }))
                 && !Decodes(With(good, 9, new[] { -2 })) && !Decodes(With(good, 9, new[] { 4, 4 })));
             add("carrier: the mirror's form (no roster, no arguments) decodes", Decodes(R.EncodeRecord(Rec(), null, null, 0)));
+
+            // the master's snapshot (5.2, F11)
+            var spec = SnapBase(18);
+            var late = SnapBase(28);
+            late[18] = "late";
+            var withSpec = f.SnapshotWith(spec, Rec());
+            var withLate = f.SnapshotWith(late, Rec());
+            var sb = withSpec == null || withSpec.Length < 36 ? null : f.SnapshotRead(withSpec);
+            add("snapshot: a spectator's 18 fields stay, the late tail's place is padded, and the record takes [28]-[35]",
+                withSpec != null && withSpec.Length == 36 && SameUpTo(withSpec, spec, 18) && PaddedFrom(withSpec, 18, 28) && sb.HasValue);
+            add("snapshot: a late snapshot's tail stays at [18]-[27], and the record follows it",
+                withLate != null && withLate.Length == 36 && SameUpTo(withLate, late, 28) && f.SnapshotRead(withLate).HasValue);
+            for (int k = 1; k <= R.SnapshotRecordSlots; k++)
+                add(SlotCase[k].Replace("carrier: ", "snapshot: "), sb.HasValue && SameField(sb.Value, Rec(), k));
+            add("snapshot: a snapshot without the record, or with a field missing or mistyped, carries none",
+                !f.SnapshotRead(spec).HasValue && !f.SnapshotRead(late).HasValue
+                && !f.SnapshotRead(With(R.SnapshotWithRecord(spec, Rec()), 29, "55")).HasValue
+                && !f.SnapshotRead(With(R.SnapshotWithRecord(spec, Rec()), 35, null)).HasValue);
 
             // targets and states (5.1, 4.3)
             add("target: a live record plays to base + 50", R.ContinueTarget(5) == 55);
@@ -414,6 +434,67 @@ namespace CompetitiveRounds
             return With(o, slot, lost[slot]);
         }
 
+        /// <summary>The snapshot's record read back, or null (5.2).</summary>
+        private static R.FenceRecord? SnapRead(object[] s)
+        {
+            R.FenceRecord r;
+            return R.TrySnapshotRecord(s, out r) ? r : (R.FenceRecord?)null;
+        }
+
+        /// <summary>A snapshot of n fields, each distinct, the protocol byte first.</summary>
+        private static object[] SnapBase(int n)
+        {
+            var o = new object[n];
+            o[0] = (byte)1;
+            for (int i = 1; i < n; i++) o[i] = "f" + i;
+            return o;
+        }
+
+        private static bool SameUpTo(object[] a, object[] b, int n)
+        {
+            for (int i = 0; i < n; i++) if (!object.Equals(a[i], b[i])) return false;
+            return true;
+        }
+
+        private static bool PaddedFrom(object[] a, int from, int to)
+        {
+            for (int i = from; i < to; i++) if (!object.Equals(a[i], "")) return false;
+            return true;
+        }
+
+        /// <summary>Field k of the record (k as the carrier's slot, 1 to 8).</summary>
+        private static bool SameField(R.FenceRecord a, R.FenceRecord b, int k)
+        {
+            switch (k)
+            {
+                case 1: return a.Gid == b.Gid;
+                case 2: return a.TargetRounds == b.TargetRounds;
+                case 3: return a.EndFlag == b.EndFlag;
+                case 4: return a.BaseWinner == b.BaseWinner;
+                case 5: return a.BaseWinnerRounds == b.BaseWinnerRounds;
+                case 6: return a.BaseOtherRounds == b.BaseOtherRounds;
+                case 7: return a.BaseTarget == b.BaseTarget;
+                default: return a.Spectatable == b.Spectatable;
+            }
+        }
+
+        /// <summary>A snapshot whose record field at `at` keeps a valid value of
+        /// its type but loses the record's, as Omit does for the carrier.</summary>
+        private static object[] OmitAt(object[] o, int at, int slot)
+        {
+            return With(o, at, Omit(new object[R.WireSlots], slot)[slot]);
+        }
+
+        /// <summary>The record placed right after the given fields, with no pad.</summary>
+        private static object[] Unpadded(object[] s, R.FenceRecord rec)
+        {
+            var full = R.SnapshotWithRecord(s, rec);
+            var o = new object[s.Length + R.SnapshotRecordSlots];
+            Array.Copy(s, o, s.Length);
+            Array.Copy(full, R.SnapshotRecordAt, o, s.Length, R.SnapshotRecordSlots);
+            return o;
+        }
+
         internal static Result Run()
         {
             var r = new Result();
@@ -596,6 +677,19 @@ namespace CompetitiveRounds
                         Cases(new Fns { Encode = (rec, ro, ar, st) => Omit(R.EncodeRecord(rec, ro, ar, st), slot) }),
                         SlotCase[slot]);
             }
+            for (int k = 0; k < R.SnapshotRecordSlots; k++)
+            {
+                int at = R.SnapshotRecordAt + k, slot = k + 1;
+                Control(r, "the snapshot drops " + SlotName[slot],
+                        Cases(new Fns { SnapshotWith = (s, rec) => OmitAt(R.SnapshotWithRecord(s, rec), at, slot) }),
+                        SlotCase[slot].Replace("carrier: ", "snapshot: "));
+            }
+            Control(r, "the snapshot's record skips the late tail's place",
+                    Cases(new Fns { SnapshotWith = Unpadded }),
+                    "snapshot: a spectator's 18 fields stay, the late tail's place is padded, and the record takes [28]-[35]");
+            Control(r, "the snapshot always reads a record",
+                    Cases(new Fns { SnapshotRead = s => Rec() }),
+                    "snapshot: a snapshot without the record, or with a field missing or mistyped, carries none");
             return r;
         }
 

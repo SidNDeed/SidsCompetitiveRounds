@@ -222,6 +222,52 @@ namespace CompetitiveRounds
             return true;
         }
 
+        /// <summary>5.2, F11: where the master's snapshot carries the record. A
+        /// spectator's snapshot has 18 fields and a late one adds its tail at
+        /// [18]-[27] (FfaLateEntry), so the record takes [28]-[35]: the gid, the
+        /// target, the state (true while terminating), the base winner, the
+        /// winner's rounds, the other rounds, the base target and the
+        /// spectatable flag.</summary>
+        internal const int SnapshotRecordAt = 28;
+        internal const int SnapshotRecordSlots = 8;
+
+        /// <summary>The snapshot with the record at [28]-[35]. The fields before
+        /// the late tail's place are kept, the tail's place is kept or padded
+        /// with empty strings (no late marker), and the record follows.</summary>
+        internal static object[] SnapshotWithRecord(object[] snap, FenceRecord r)
+        {
+            if (snap == null) return null;
+            var o = new object[SnapshotRecordAt + SnapshotRecordSlots];
+            int keep = Math.Min(snap.Length, SnapshotRecordAt);
+            Array.Copy(snap, o, keep);
+            for (int i = keep; i < SnapshotRecordAt; i++) o[i] = "";
+            o[28] = r.Gid;
+            o[29] = r.TargetRounds;
+            o[30] = r.EndFlag;
+            o[31] = r.BaseWinner;
+            o[32] = r.BaseWinnerRounds;
+            o[33] = r.BaseOtherRounds;
+            o[34] = r.BaseTarget;
+            o[35] = r.Spectatable;
+            return o;
+        }
+
+        /// <summary>The record a snapshot carries, read with the carrier's own
+        /// typed checks (F11): a snapshot without [28]-[35], or with any of them
+        /// missing or mistyped, carries none.</summary>
+        internal static bool TrySnapshotRecord(object[] snap, out FenceRecord r)
+        {
+            r = default(FenceRecord);
+            if (snap == null || snap.Length < SnapshotRecordAt + SnapshotRecordSlots) return false;
+            int[] roster, args;
+            int stamp;
+            return TryDecodeRecord(new object[]
+            {
+                WireVersion, snap[28], snap[29], snap[30], snap[31], snap[32], snap[33], snap[34], snap[35],
+                new int[0], new int[0], 0,
+            }, out r, out roster, out args, out stamp);
+        }
+
         /// <summary>D1: the target while a record is live.</summary>
         internal static int ContinueTarget(int baseTarget)
         {

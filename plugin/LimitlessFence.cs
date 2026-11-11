@@ -95,6 +95,7 @@ namespace CompetitiveRounds
         internal static void NoteJoinedRoom()
         {
             RetireRecord("join");
+            _joinRecordRead = false;
             _uncoveredLeaving = false;
             _startedInRoom = false;
             _spectatorBoundaryDue = false;
@@ -356,6 +357,8 @@ namespace CompetitiveRounds
         private static LimitlessFenceRules.FencePhase _state;
         private static bool _targetRaised;   // R1: SetRecordTarget wrote a target, which the record's retirement puts back
         private static bool _targetFfa;      // the field it wrote: FFA's RoundsToWin, else GM's roundsToWinGame
+        private static bool _unconfirmed;    // 4.3: the joiner's starting value from cr_lrec, until a message or the master's snapshot
+        private static bool _joinRecordRead; // 4.3: a joiner reads cr_lrec once, with the join, before any snapshot
         private static bool _fenceCall;
         private static readonly HashSet<string> _refusalLogged = new HashSet<string>(StringComparer.Ordinal);
 
@@ -377,6 +380,20 @@ namespace CompetitiveRounds
             get { return RecordOpen && _targetRaised && _targetFfa; }
         }
 
+        /// <summary>5.1 (F6): the record is terminating, so its end target can
+        /// sit below the lead.</summary>
+        internal static bool RecordTerminating
+        {
+            get { return _hasRecord && _state == LimitlessFenceRules.FencePhase.PhaseTerminating; }
+        }
+
+        /// <summary>4.3: a record from an accepted continuation message or from
+        /// the master's snapshot, not the join's starting value.</summary>
+        internal static bool RecordConfirmed
+        {
+            get { return _hasRecord && !_unconfirmed; }
+        }
+
         /// <summary>4.3: retired before anything of the next physical game runs
         /// (the game-start prefix, a spectator's boundary), when the seat adopts
         /// a new gid, and at room exit.</summary>
@@ -387,6 +404,7 @@ namespace CompetitiveRounds
             if (!_hasRecord) return;
             RestoreBaseTarget(why);
             _hasRecord = false;
+            _unconfirmed = false;
             _state = LimitlessFenceRules.FencePhase.PhaseLive;
             _record = default(LimitlessFenceRules.FenceRecord);
             Plugin.Log.LogInfo("[LIMIT] record retired (" + why + ")");
@@ -408,6 +426,78 @@ namespace CompetitiveRounds
                 if (gm != null) gm.roundsToWinGame = _record.BaseTarget;
             }
             Plugin.Log.LogInfo("[LIMIT] target back at the base (" + why + ")");
+        }
+
+        /// <summary>4.3, F2 (Table B (a), the join): a joiner reads the mirror
+        /// once, with the join, before any snapshot, and only when its gid is
+        /// the room's cr_lgid and live here. The record it installs is
+        /// unconfirmed: it only raises the target that seeding compares with,
+        /// until a continuation message from the current master confirms it or
+        /// the master's snapshot replaces it (TakeSnapshotRecord).</summary>
+        internal static void ReadJoinRecord(string site)
+        {
+            if (_joinRecordRead) return;
+            _joinRecordRead = true;
+            if (_hasRecord) return;
+            var room = PhotonNetwork.CurrentRoom;
+            object raw = null;
+            if (room == null || room.CustomProperties == null || !room.CustomProperties.TryGetValue(RecordKey, out raw)) return;
+            LimitlessFenceRules.FenceRecord rec;
+            int[] roster, args;
+            int stamp;
+            if (!LimitlessFenceRules.TryDecodeRecord(raw as object[], out rec, out roster, out args, out stamp)) return;
+            if (!string.Equals(rec.Gid, RoomGid(), StringComparison.Ordinal) || !_ledger.IsLiveGid(rec.Gid)) return;
+            _record = rec;
+            _hasRecord = true;
+            _unconfirmed = true;
+            _state = LimitlessFenceRules.NextState(LimitlessFenceRules.FencePhase.PhaseLive, rec.EndFlag);
+            _handoffAtRecord = _handoff;
+            SetRecordTarget(GM_ArmsRace.instance, FfaMode.EngineActive(), rec.TargetRounds);
+            Plugin.Log.LogInfo("[LIMIT] record from the mirror (" + site + ", unconfirmed): gid=" + GidPrefix(rec.Gid)
+                + " target=" + rec.TargetRounds + " " + _state);
+        }
+
+        /// <summary>5.2 (Table B (a), the spectator snapshot): the master's
+        /// snapshot carries its record at [28]-[35] while the record is live or
+        /// terminating and confirmed, with the seat's state, which a local
+        /// termination moves without a message. Without one the snapshot keeps
+        /// today's fields.</summary>
+        internal static object[] AppendSnapshotRecord(object[] snap)
+        {
+            if (snap == null || !RecordOpen || _unconfirmed) return snap;
+            var r = _record;
+            r.EndFlag = _state == LimitlessFenceRules.FencePhase.PhaseTerminating;
+            return LimitlessFenceRules.SnapshotWithRecord(snap, r);
+        }
+
+        /// <summary>5.2 (Table B (a), the spectator snapshot), right after its
+        /// authority check and before any field applies: the master's record
+        /// replaces a joiner's unconfirmed one, or installs where the seat holds
+        /// none, when its gid is the room's cr_lgid and live here. A record from
+        /// an accepted message stays: the messages are server-ordered. A
+        /// snapshot without a record retires an unconfirmed one, since the
+        /// master holds none. After the master's snapshot the mirror is not
+        /// read.</summary>
+        internal static void TakeSnapshotRecord(object[] snap)
+        {
+            _joinRecordRead = true;
+            LimitlessFenceRules.FenceRecord rec;
+            if (!LimitlessFenceRules.TrySnapshotRecord(snap, out rec))
+            {
+                if (_hasRecord && _unconfirmed) RetireRecord("the master's snapshot holds no record");
+                return;
+            }
+            if (_hasRecord && !_unconfirmed) return;
+            if (!string.Equals(rec.Gid, RoomGid(), StringComparison.Ordinal) || !_ledger.IsLiveGid(rec.Gid)) return;
+            bool replaced = _hasRecord;
+            _record = rec;
+            _hasRecord = true;
+            _unconfirmed = false;
+            _state = LimitlessFenceRules.NextState(LimitlessFenceRules.FencePhase.PhaseLive, rec.EndFlag);
+            _handoffAtRecord = _handoff;
+            SetRecordTarget(GM_ArmsRace.instance, FfaMode.EngineActive(), rec.TargetRounds);
+            Plugin.Log.LogInfo("[LIMIT] record from the snapshot (" + (replaced ? "replaces the mirror's" : "new")
+                + "): gid=" + GidPrefix(rec.Gid) + " target=" + rec.TargetRounds + " " + _state);
         }
 
         /// <summary>4.4, F3: while this seat holds a live or terminating record,
@@ -869,6 +959,7 @@ namespace CompetitiveRounds
             _state = LimitlessFenceRules.NextState(create ? LimitlessFenceRules.FencePhase.PhaseLive : _state, rec.EndFlag);
             _record = rec;
             _hasRecord = true;
+            _unconfirmed = false;   // 4.3: an accepted message confirms a joiner's starting value
             if (create) _handoffAtRecord = _handoff;   // MustEnd's handoff count at the decision, on every seat
             if (create)
                 Plugin.Log.LogInfo("[LIMIT] record created: gid=" + GidPrefix(rec.Gid) + " target=" + rec.TargetRounds

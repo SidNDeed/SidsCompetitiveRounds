@@ -152,6 +152,17 @@ FENCE_RULES = (
     'series: an unrated game has no series to follow',
     'series: a rated FFA game keeps no series',
     'series: a rated game of a mode that keeps one is followed, read closed',
+    "snapshot: a spectator's 18 fields stay, the late tail's place is padded, and the record takes [28]-[35]",
+    "snapshot: a late snapshot's tail stays at [18]-[27], and the record follows it",
+    'snapshot: the gid round-trips',
+    'snapshot: the target round-trips',
+    'snapshot: the end flag round-trips',
+    'snapshot: the base winner round-trips',
+    "snapshot: the winner's rounds round-trip",
+    "snapshot: the other side's rounds round-trip",
+    'snapshot: the base target round-trips',
+    'snapshot: the spectatable flag round-trips',
+    'snapshot: a snapshot without the record, or with a field missing or mistyped, carries none',
 )
 
 FENCE_MUTANTS = (
@@ -204,6 +215,8 @@ FENCE_MUTANTS = (
     'a terminating record takes a new end target',
     'a rated game is never followed',
     'the series ignores the mode',
+    "the snapshot's record skips the late tail's place",
+    'the snapshot always reads a record',
 )
 
 CARRIER_FIELDS = (
@@ -226,7 +239,8 @@ def _caught(names):
 
 
 FENCE_CASES = (tuple("real: " + n for n in FENCE_RULES) + _caught(FENCE_MUTANTS)
-               + _caught("the carrier drops " + f for f in CARRIER_FIELDS))
+               + _caught("the carrier drops " + f for f in CARRIER_FIELDS)
+               + _caught("the snapshot drops " + f for f in CARRIER_FIELDS[:8]))
 
 
 def test_the_fence_suite_ran_exactly_its_cases_and_passed(harness_run):
@@ -242,7 +256,7 @@ def test_the_fence_suite_ran_exactly_its_cases_and_passed(harness_run):
 
 
 def test_the_pinned_names_are_distinct():
-    assert len(set(FENCE_CASES)) == len(FENCE_CASES) == 124 + 49 + 11
+    assert len(set(FENCE_CASES)) == len(FENCE_CASES) == 135 + 51 + 11 + 8
 
 
 # -- the fence's Unity- and Photon-side lines, as source claims --------------
@@ -1351,6 +1365,90 @@ def claim_ffa_config_writers_go_through_one_setter(files):
     return out
 
 
+GIDOK = "if (!string.Equals(rec.Gid, RoomGid(), StringComparison.Ordinal) || !_ledger.IsLiveGid(rec.Gid)) return;"
+TARGET_IN = "SetRecordTarget(GM_ArmsRace.instance, FfaMode.EngineActive(), rec.TargetRounds);"
+
+
+def claim_the_joiner_reads_the_mirror_once_unconfirmed(files):
+    """4.3, F2, Table B (a)'s join row: the spectator's join reads cr_lrec in
+    the rules latch's step, once per join and before any snapshot, and only
+    for the room's live gid. The record is unconfirmed: it raises the seeding
+    target only, until an accepted message or the master's snapshot."""
+    out = []
+    lf, s = files[LF], files["SpectatorSync.cs"]
+    if not _in_order(_code(s, "internal static void OnJoinedSpectatorRoom("),
+                     ['rulesVerdict = RoomRules.LatchOnJoin(PhotonNetwork.CurrentRoom, "spectator");',
+                      'LimitlessFence.ReadJoinRecord("spectator join");', "RoomRules.ClearPending();"]):
+        out.append("the join does not read the mirror in the rules latch's step")
+    if not _in_order(_code(lf, "internal static void ReadJoinRecord("),
+                     ["if (_joinRecordRead) return;", "_joinRecordRead = true;", "if (_hasRecord) return;",
+                      "LimitlessFenceRules.TryDecodeRecord(raw as object[]", GIDOK, "_unconfirmed = true;", TARGET_IN]):
+        out.append("the mirror's read is not once, not bound to the gid or not unconfirmed")
+    if not _in_order(_code(lf, "internal static void NoteJoinedRoom("), ['RetireRecord("join");', "_joinRecordRead = false;"]):
+        out.append("a join does not re-arm the read")
+    if not _in_order(_code(lf, "private static void InstallRecord("), ["_hasRecord = true;", "_unconfirmed = false;"]):
+        out.append("an accepted message does not confirm the record")
+    if not _in_order(_code(lf, "internal static void RetireRecord("), ["_hasRecord = false;", "_unconfirmed = false;"]):
+        out.append("the retirement keeps the unconfirmed mark")
+    return out
+
+
+def claim_the_snapshot_carries_and_replaces_the_record(files):
+    """5.2, Table B (a)'s spectator snapshot row: the master's answer carries
+    its open, confirmed record at [28]-[35] with the seat's state. The
+    receiver takes it right after the authority check, before any field,
+    score or seed applies: it replaces an unconfirmed record or installs one
+    for the room's live gid, an accepted message's record stays, a snapshot
+    without one retires an unconfirmed record, and the mirror is then not
+    read."""
+    out = []
+    lf, s = files[LF], files["SpectatorSync.cs"]
+    if "var snap = LimitlessFence.AppendSnapshotRecord(BuildSnapshot(seq));" not in _code(s):
+        out.append("the master's answer carries no record")
+    if not _in_order(_code(lf, "internal static object[] AppendSnapshotRecord("),
+                     ["if (snap == null || !RecordOpen || _unconfirmed) return snap;",
+                      "r.EndFlag = _state == LimitlessFenceRules.FencePhase.PhaseTerminating;",
+                      "return LimitlessFenceRules.SnapshotWithRecord(snap, r);"]):
+        out.append("the answer carries an unconfirmed or closed record, or not the seat's state")
+    if not _in_order(_code(s, "private static void HandleSnapshot("),
+                     ['FfaLateEntry.Refused("authority", e.Sender)', "if (m == null || m.ActorNumber != e.Sender) return;",
+                      "LimitlessFence.TakeSnapshotRecord(a);", 'WatchedMode = a[2] as string ?? "";',
+                      "SpectatorViewState.RecordScore(", "FfaMode.SpectatorSeedScores(rounds, points);"]):
+        out.append("the record is not taken between the authority check and the fields")
+    if not _in_order(_code(lf, "internal static void TakeSnapshotRecord("),
+                     ["_joinRecordRead = true;", "if (!LimitlessFenceRules.TrySnapshotRecord(snap, out rec))",
+                      "if (_hasRecord && _unconfirmed) RetireRecord(", "if (_hasRecord && !_unconfirmed) return;",
+                      GIDOK, "_unconfirmed = false;", TARGET_IN]):
+        out.append("the snapshot's record is not taken as 5.2 says")
+    return out
+
+
+def claim_a_terminating_seed_never_ends_the_observer(files):
+    """5.1 (F6), Table B (b)'s FFA target row: while the record is
+    terminating, the FFA observer's game-over test ends it only on a round
+    that completes, never from seeding, whose end target can sit below the
+    lead. The seed passes false and the completed round true."""
+    out = []
+    f = files["FfaMode.cs"]
+    if not _in_order(_code(f, "private static void SpectatorCheckGameOver("),
+                     ["bool terminal = leadTeam >= 0 && leadRounds >= RoundsToWin;",
+                      "if (terminal && !completedRound && LimitlessFence.RecordTerminating) return;",
+                      "if (!terminal)", 'LimitlessFence.NoteSpectatorGameOver("ffa");']):
+        out.append("a seed can end a terminating observer")
+    if not _in_order(_code(f, "internal static void SpectatorSeedScores("),
+                     ["SpectatorLatchConfigOnce();", "SpectatorCheckGameOver(false);"]):
+        out.append("the seed reads as a completed round")
+    if not _in_order(_code(f), ["rounds[winnerTeam] = RoundsFor(winnerTeam) + 1;\n                        points.Clear();\n"
+                                "                        SpectatorCheckGameOver(true);"]):
+        out.append("a completed round does not reach the test")
+    if _code(f).count("SpectatorCheckGameOver(") != 3:
+        out.append("another caller of the observer's test")
+    if not _in_order(_code(files[LF], "internal static bool RecordTerminating"),
+                     ["get { return _hasRecord && _state == LimitlessFenceRules.FencePhase.PhaseTerminating; }"]):
+        out.append("the terminating test reads another state")
+    return out
+
+
 CLAIMS = {
     "game_start_prefix": claim_the_game_start_prefix,
     "stamp_before_join": claim_the_gid_is_stamped_before_the_join,
@@ -1393,6 +1491,9 @@ CLAIMS = {
     "observer_flush": claim_the_observer_flush_reads_the_epoch,
     "base_target": claim_the_retirement_puts_the_base_target_back,
     "ffa_target_writers": claim_ffa_config_writers_go_through_one_setter,
+    "join_record": claim_the_joiner_reads_the_mirror_once_unconfirmed,
+    "snapshot_record": claim_the_snapshot_carries_and_replaces_the_record,
+    "observer_seed": claim_a_terminating_seed_never_ends_the_observer,
 }
 
 GATE = "                if (SpectatorPatchSupport.Suppress) return;\n"
@@ -1828,7 +1929,7 @@ MUTANTS = [
     ("hold_items", "the end post's answer applies without its ticket",
      [("TeamHoldWriter.cs", ' && LimitlessFence.ItemResumes(rt, "hold end answer")) Perform(w.OnEndAnswer(Now), cut);',
        ") Perform(w.OnEndAnswer(Now), cut);")]),
-    ("observer_apply", "the boundary captures no ticket",
+    ("observer_apply", "the observer's boundary captures no ticket",
      [("SpectatorSync.cs", "            var ticket = LimitlessFence.CaptureTicket();   // v4 4.5 R (F5): where the boundary is scheduled\n", "")]),
     ("observer_apply", "the apply is not handed the boundary's ticket",
      [("SpectatorSync.cs", "yield return ApplyDecks(snap, gen, attemptGen, forceReset, ticket);",
@@ -1899,6 +2000,57 @@ MUTANTS = [
      [(LF, "get { return RecordOpen && _targetRaised && _targetFfa; }", "get { return _targetRaised && _targetFfa; }")]),
     ("ffa_target_writers", "the spectator latch writes the target past the setter",
      [("FfaMode.cs", "if (LatchConfigFromRoom()) spectatorCfgRoom = rn;", "if (LatchConfigFromRoom()) { spectatorCfgRoom = rn; RoundsToWin = 5; }")]),
+    ("join_record", "the join never reads the mirror",
+     [("SpectatorSync.cs", '                try { LimitlessFence.ReadJoinRecord("spectator join"); }\n', "")]),
+    ("join_record", "the mirror is read more than once",
+     [(LF, "            _joinRecordRead = true;\n            if (_hasRecord) return;\n", "            if (_hasRecord) return;\n")]),
+    ("join_record", "the mirror's read overwrites a record",
+     [(LF, "            _joinRecordRead = true;\n            if (_hasRecord) return;\n", "            _joinRecordRead = true;\n")]),
+    ("join_record", "the mirror's read takes any gid",
+     [(LF, "out args, out stamp)) return;\n            if (!string.Equals(rec.Gid, RoomGid(), StringComparison.Ordinal) || !_ledger.IsLiveGid(rec.Gid)) return;\n",
+       "out args, out stamp)) return;\n")]),
+    ("join_record", "the joiner's record counts as confirmed",
+     [(LF, "            _unconfirmed = true;\n", "            _unconfirmed = false;\n")]),
+    ("join_record", "an accepted message leaves the record unconfirmed",
+     [(LF, "            _unconfirmed = false;   // 4.3: an accepted message confirms a joiner's starting value\n", "")]),
+    ("join_record", "a join keeps the read spent",
+     [(LF, "            _joinRecordRead = false;\n", "")]),
+    ("join_record", "the retirement keeps the unconfirmed mark",
+     [(LF, "            _hasRecord = false;\n            _unconfirmed = false;\n", "            _hasRecord = false;\n")]),
+    ("snapshot_record", "the master's answer carries no record",
+     [("SpectatorSync.cs", "var snap = LimitlessFence.AppendSnapshotRecord(BuildSnapshot(seq));", "var snap = BuildSnapshot(seq);")]),
+    ("snapshot_record", "the answer carries a joiner's unconfirmed record",
+     [(LF, "if (snap == null || !RecordOpen || _unconfirmed) return snap;", "if (snap == null || !RecordOpen) return snap;")]),
+    ("snapshot_record", "the answer carries the record's end flag, not the seat's state",
+     [(LF, "            r.EndFlag = _state == LimitlessFenceRules.FencePhase.PhaseTerminating;\n", "")]),
+    ("snapshot_record", "the receiver ignores the snapshot's record",
+     [("SpectatorSync.cs", "            try { LimitlessFence.TakeSnapshotRecord(a); }\n", "")]),
+    ("snapshot_record", "the record is taken after the seed",
+     [("SpectatorSync.cs", "            try { LimitlessFence.TakeSnapshotRecord(a); }\n", ""),
+      ("SpectatorSync.cs", "                        FfaMode.SpectatorSeedScores(rounds, points);\n",
+       "                        FfaMode.SpectatorSeedScores(rounds, points);\n                    LimitlessFence.TakeSnapshotRecord(a);\n")]),
+    ("snapshot_record", "a snapshot without a record keeps the mirror's",
+     [(LF, "if (_hasRecord && _unconfirmed) RetireRecord(", "if (false) RetireRecord(")]),
+    ("snapshot_record", "the snapshot overrides an accepted message's record",
+     [(LF, "            if (_hasRecord && !_unconfirmed) return;\n", "")]),
+    ("snapshot_record", "the snapshot's record takes any gid",
+     [(LF, "            if (_hasRecord && !_unconfirmed) return;\n            if (!string.Equals(rec.Gid, RoomGid(), StringComparison.Ordinal) || !_ledger.IsLiveGid(rec.Gid)) return;\n",
+       "            if (_hasRecord && !_unconfirmed) return;\n")]),
+    ("snapshot_record", "the master's snapshot leaves the mirror readable",
+     [(LF, "            _joinRecordRead = true;\n            LimitlessFenceRules.FenceRecord rec;\n", "            LimitlessFenceRules.FenceRecord rec;\n")]),
+    ("snapshot_record", "the snapshot's record stays unconfirmed",
+     [(LF, "            _unconfirmed = false;\n            _state = LimitlessFenceRules.NextState(LimitlessFenceRules.FencePhase.PhaseLive",
+       "            _state = LimitlessFenceRules.NextState(LimitlessFenceRules.FencePhase.PhaseLive")]),
+    ("observer_seed", "a terminating seed ends the observer",
+     [("FfaMode.cs", "                if (terminal && !completedRound && LimitlessFence.RecordTerminating) return;\n", "")]),
+    ("observer_seed", "the seed reads as a completed round",
+     [("FfaMode.cs", "                SpectatorCheckGameOver(false);\n", "                SpectatorCheckGameOver(true);\n")]),
+    ("observer_seed", "a completed round reads as a seed",
+     [("FfaMode.cs", "                        SpectatorCheckGameOver(true);\n", "                        SpectatorCheckGameOver(false);\n")]),
+    ("observer_seed", "the seed test reads an open record, not a terminating one",
+     [("FfaMode.cs", "LimitlessFence.RecordTerminating) return;", "LimitlessFence.RecordOpen) return;")]),
+    ("observer_seed", "the terminating test reads the record alone",
+     [(LF, "get { return _hasRecord && _state == LimitlessFenceRules.FencePhase.PhaseTerminating; }", "get { return _hasRecord; }")]),
 ]
 
 NEUTRAL = "            // control: a neutral line\n"
@@ -1963,6 +2115,9 @@ CONTROLS = [
                          NEUTRAL + "                Plugin.Instance.StartCoroutine(LimitlessFence.CleanupItem(BetweenGamesFlush(_boundaryGeneration")]),
     ("base_target", [(LF, "            RestoreBaseTarget(why);\n", NEUTRAL + "            RestoreBaseTarget(why);\n")]),
     ("ffa_target_writers", [("FfaMode.cs", "            _configuredTarget = target;\n", NEUTRAL + "            _configuredTarget = target;\n")]),
+    ("join_record", [(LF, "            _unconfirmed = true;\n", NEUTRAL + "            _unconfirmed = true;\n")]),
+    ("snapshot_record", [(LF, "            if (_hasRecord && !_unconfirmed) return;\n", NEUTRAL + "            if (_hasRecord && !_unconfirmed) return;\n")]),
+    ("observer_seed", [("FfaMode.cs", "                if (terminal && !completedRound", NEUTRAL + "                if (terminal && !completedRound")]),
 ]
 
 

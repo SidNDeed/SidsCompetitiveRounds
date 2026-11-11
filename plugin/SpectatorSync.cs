@@ -186,6 +186,10 @@ namespace CompetitiveRounds
                 var rulesVerdict = RoomRules.LatchVerdict.Defaults;
                 try { rulesVerdict = RoomRules.LatchOnJoin(PhotonNetwork.CurrentRoom, "spectator"); }
                 catch (Exception rex) { Plugin.Log?.LogWarning($"[ROOM-RULES] spectator latch: {rex.Message}"); }
+                // Ask 16(a) lane 2 (v4 4.3, Table B (a), the join): the mirror's
+                // record in the same step, before any snapshot, unconfirmed.
+                try { LimitlessFence.ReadJoinRecord("spectator join"); }
+                catch (Exception lex) { Plugin.Log?.LogWarning($"[LIMIT] join record: {lex.Message}"); }
                 RoomRules.ClearPending();
                 if (rulesVerdict == RoomRules.LatchVerdict.Mismatch)
                 {
@@ -2375,7 +2379,7 @@ namespace CompetitiveRounds
                 && Time.unscaledTime - last < 2f) return;
             _lastAnswerAt[e.Sender] = Time.unscaledTime;
 
-            var snap = BuildSnapshot(seq);
+            var snap = LimitlessFence.AppendSnapshotRecord(BuildSnapshot(seq));   // Ask 16(a) lane 2 (v4 5.2): the record at [28]-[35]
             if (snap == null) return;
             try
             {
@@ -2584,6 +2588,11 @@ namespace CompetitiveRounds
                 if (m == null || m.ActorNumber != e.Sender) return;
             }
             catch { return; }
+
+            // Ask 16(a) lane 2 (v4 5.2): the master's record before any field
+            // applies, so a terminating record's seed never ends the observer.
+            try { LimitlessFence.TakeSnapshotRecord(a); }
+            catch (Exception rex) { Plugin.Log?.LogWarning($"[LIMIT] snapshot record: {rex.Message}"); }
 
             int seq;
             try { seq = (int)a[1]; } catch { return; }
