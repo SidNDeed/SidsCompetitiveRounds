@@ -1,7 +1,7 @@
 # tools/keybind_surfaces.py readers (fix pass 2 H1): file	member	root reads	digest	role	via (consumers, self, - for none)	note
 CompetitiveUI.cs	DrawChatInput	2	4be333f13d21acf3	input	-	matches the ChatOpen and ChatOverlayMode key events; decides behaviour, names nothing
 CompetitiveUI.cs	DrawDanceWheel	3	a3b6dcb6d2012b67	input	-	the DanceWheel key event and held state open and keep the wheel; the hint it shows is the KeybindRowFace site of this member
-CompetitiveUI.cs	DrawInputOverlay	7	86fd3e02f1ba9af3	display	self	lights each overlay cap while its bound source is held; the cap labels are this member's KeybindOverlayCap site
+CompetitiveUI.cs	DrawInputOverlay	7	fdaf792c91cb5f1d	display	self	lights each overlay cap while its bound source is held; the cap labels are this member's KeybindOverlayCap site
 CompetitiveUI.cs	DrawQuickChat	3	6ea6e40bf85a9330	input	-	the QuickChat key event and held state open and keep the wheel; the hint it shows is the KeybindRowFace site of this member
 CompetitiveUI.cs	Tick	1	ad1b283fd6ec5433	input	-	a ChatChannel tap cycles the chat send channel
 GameStateWatcher.cs	TickInputSampling	7	bdfd66699fcf5abb	input	-	achievement input sampling: counts bound-row edges, renders nothing

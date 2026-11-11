@@ -299,7 +299,7 @@ namespace CompetitiveRounds
                 }
                 catch (Exception ex) { Plugin.Log.LogWarning($"[PCOLOR] re-bake on toggle-off failed: {ex.Message}"); }
             }
-            else if (GameStateWatcher.IsInMatch)
+            else if (GameStateWatcher.PhysicalGameLive)
             {
                 OnMatchStart();
             }

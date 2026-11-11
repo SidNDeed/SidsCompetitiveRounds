@@ -699,7 +699,7 @@ namespace CompetitiveRounds
             if (string.IsNullOrEmpty(SteamAuth.SessionToken)) return false;
             string sid = MatchTracker.LocalSteamId;
             if (string.IsNullOrEmpty(sid) || sid == "unknown") return false;
-            if (GameStateWatcher.IsTracking) return false;
+            if (GameStateWatcher.PhysicalGameLive) return false;
             return true;
         }
 

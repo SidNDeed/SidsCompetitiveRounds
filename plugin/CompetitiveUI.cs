@@ -4140,7 +4140,7 @@ namespace CompetitiveRounds
         {
             if (Event.current == null || Event.current.type != EventType.Repaint) return;
             if (Plugin.ShowInputOverlay == null || !Plugin.ShowInputOverlay.Value) return;
-            if (!GameStateWatcher.IsInMatch) return;
+            if (!GameStateWatcher.PhysicalGameLive) return;
             if (inputKeyStyle == null)
             {
                 inputKeyStyle = new GUIStyle(GUI.skin.label)
@@ -4237,7 +4237,7 @@ namespace CompetitiveRounds
         {
             if (Event.current == null || Event.current.type != EventType.Repaint) return;
             if (Plugin.ShowBlockDebug == null || !Plugin.ShowBlockDebug.Value) return;
-            if (!GameStateWatcher.IsInMatch) return;
+            if (!GameStateWatcher.PhysicalGameLive) return;
 
             if (blockDbgStyle == null)
             {

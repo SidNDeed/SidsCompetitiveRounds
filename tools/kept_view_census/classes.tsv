@@ -182,6 +182,7 @@ GameStateWatcher.cs	GameStateWatcher	CaptureEndStats	players	N	local end-of-matc
 GameStateWatcher.cs	GameStateWatcher	DetermineLocalTeam	players	N	local team lookup	
 GameStateWatcher.cs	GameStateWatcher	EvaluateAchievements	players	N	local achievement claims; cross-player ones are server-side	
 GameStateWatcher.cs	GameStateWatcher	IsPlainOneVOneForHud	ActiveFighterCount	N	1v1 HUD predicate	
+GameStateWatcher.cs	GameStateWatcher	LocalFighterAliveNow	players	N	local alive state (IsMine) for the chat key and input sampling in a continuation (Table C2)	
 GameStateWatcher.cs	GameStateWatcher	NotifyPlayerLeftRoom	ActiveFighterCount	N	notification text: the banner's fighter count only; the ledger write in the same span is its own row (RecordLeaver, V, row 53)	
 GameStateWatcher.cs	GameStateWatcher	NotifyPlayerLeftRoom	NotifyPlayerLeftRoom	R	the leave relay's own declaration: its banner text is N (ActiveFighterCount) and its ledger write is V (RecordLeaver, row 53)	
 GameStateWatcher.cs	GameStateWatcher	NotifyPlayerLeftRoom	RecordLeaver	V	the actor-left callback's ledger write: in a gated running room it records a leave only for an actor this client keeps, read before the leave changes anything, so an unkept return's leave writes nothing and the entry of the game its seat left stands (V8, V7-F2)		IsKeptActor|IsQuarantinedActor

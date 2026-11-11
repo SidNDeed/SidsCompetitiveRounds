@@ -59,6 +59,13 @@ namespace CompetitiveRounds
         private static bool isTracking = false;
         // Read-only view for patches that gate diagnostics on "a match is live".
         public static bool IsTracking => isTracking;
+        /// <summary>v4 section 6, Table C2 (H8): the physical game is running on
+        /// this fighter seat. isTracking, or a live or terminating record of this
+        /// seat's live gid, because finding A keeps isTracking false through a
+        /// continuation. A spectator never tracks, and this keeps it so. Every
+        /// activity row of Table C2 reads this; every suppression row keeps
+        /// isTracking or IsInMatch.</summary>
+        public static bool PhysicalGameLive => isTracking || (LimitlessFence.RecordOpenForCurrentGid && !RoomActors.LocalIsSpectator);
         private static bool wasGameInProgress = false;
         // Pick-phase color apply latch. Fires once per room as soon as both player
         // GOs exist, so body colors render during the very first pick phase (before
@@ -1549,6 +1556,9 @@ namespace CompetitiveRounds
             {
                 try
                 {
+                    // Table C2: a continuation reads the flag latched at the decision
+                    // (OnGameOver cleared matchIsRanked at the base).
+                    if (!isTracking && PhysicalGameLive) return LimitlessFence.CurrentRecord.Spectatable;
                     if (!matchIsRanked || !isTracking) return false;
                     if (!PhotonNetwork.InRoom || PhotonNetwork.OfflineMode) return false;
                     string rn = PhotonNetwork.CurrentRoom?.Name ?? "";
@@ -1631,7 +1641,7 @@ namespace CompetitiveRounds
                     mode = "1v1";
                     codeRoom = true;
                 }
-                if (!isTracking) return;        // only while a game is live
+                if (!PhysicalGameLive) return;  // only while a game is live (Table C2: a continuation's too)
 
                 // Code rooms are created by VANILLA with MaxPlayers=2 — the
                 // master reserves the spectator seats and hides the room the
@@ -1807,7 +1817,7 @@ namespace CompetitiveRounds
                                 || !string.IsNullOrEmpty(Plugin.PendingRankedRoom)
                                 || Plugin.Pending2v2Slot >= 0 || Plugin.PendingOvtSlot >= 0
                                 || LeavingForRanked
-                                || isTracking;
+                                || PhysicalGameLive;
                 try { excluded = excluded || EscapeMenuHandler.isEscMenu; } catch { }
                 try { excluded = excluded || (NetworkConnectionHandler.instance != null && NetworkConnectionHandler.instance.m_restarting); } catch { }
                 if (excluded) { roomlessSince = -1f; fullRoomNoGameSince = -1f; return; }
@@ -3432,7 +3442,7 @@ namespace CompetitiveRounds
             // the ready prompt), and suppress once combat counters have
             // ticked (isTracking). Threshold bumped to 25s to err on the
             // side of fewer false positives.
-            if (inRoom && !isTracking && !inPickPhase)
+            if (inRoom && !PhysicalGameLive && !inPickPhase)
             {
                 int secs = (int)(DateTime.UtcNow - roomJoinTime).TotalSeconds;
                 SecondsInUnstartedRoom = secs;
@@ -4133,7 +4143,7 @@ namespace CompetitiveRounds
                     if (FfaMode.GameStartedInRoom || FfaLateEntry.GameRunningFor(photonRoomId)) rankedRoomEverFull = true;
                 }
                 else if (bodies >= fullAt) rankedRoomEverFull = true;
-                if (!rankedRoomEverFull && !isTracking)
+                if (!rankedRoomEverFull && !PhysicalGameLive)
                 {
                     double waited = (DateTime.UtcNow - roomJoinTime).TotalSeconds;
                     if (!rankedRoomStallWarned && waited >= warnAfter && !FfaAssembly.SuppressStallWarn)
@@ -4543,7 +4553,7 @@ namespace CompetitiveRounds
                                            && !string.IsNullOrEmpty(ApiClient.ActiveOvt1v2SeriesId)
                                            && ovtSoloWins + ovtDuoWins >= 1
                                            && ovtSoloWins < 2 && ovtDuoWins < 2;
-                bool midGame = isTracking && !gameOverReported;
+                bool midGame = (isTracking && !gameOverReported) || (!isTracking && PhysicalGameLive);   // Table C2: the banner follows the physical game
                 if (!midGame && !seriesInProgress && !ovtSeriesInProgress) return;
 
                 // Resolve a display name: styled NickName stripped, then the
@@ -4609,7 +4619,7 @@ namespace CompetitiveRounds
                                 int.TryParse(p.CustomProperties[Player.VAR_TEAMID]?.ToString(), out luTeam);
                             // V11 item 13 (the leaver ledger): an actor this
                             // client does not keep never overwrites a leave.
-                            if (!string.IsNullOrEmpty(luSid) && luTeam >= 0)
+                            if (isTracking && !string.IsNullOrEmpty(luSid) && luTeam >= 0)   // Table C2: the FFA report's ledger is suppressed in a continuation
                             {
                                 if (!FfaLateEntry.IsQuarantinedActor(p.ActorNumber)) FfaMode.RecordLeaver(luSid, name, luTeam);
                                 else JoinTimeline.Step("ledger_skip", "actor=" + p.ActorNumber + " why=unkept");
@@ -5174,6 +5184,13 @@ namespace CompetitiveRounds
                 // on the POLL, not only on point/round changes. The sent-pair
                 // delta (plus a 20s refresh) makes the per-tick call free.
                 MaybeSendLivePoints();
+            }
+            else if (PhysicalGameLive && (curP1Rounds != lastP1Rounds || curP2Rounds != lastP2Rounds))
+            {
+                // Table C2: the cosmetic retint follows the physical game. A
+                // continuation's round transitions spawn sprites as the base's do.
+                try { PlayerColorCosmetic.OnRoundStart(); } catch { }
+                try { PlayerEffectCosmetic.OnRoundStart(); } catch { }
             }
 
             lastP1Points = curP1Points;
@@ -8304,9 +8321,38 @@ namespace CompetitiveRounds
         public static bool LocalAliveInCombatNow { get; private set; }
 
         // ── Achievement health/death polling ─────────────────────
+        /// <summary>Table C2: the local fighter is alive, read as
+        /// PollAchievementState reads it, without the achievement flags.</summary>
+        private static bool LocalFighterAliveNow()
+        {
+            try
+            {
+                var pm = PlayerManager.instance;
+                if (pm == null || pm.players == null) return false;
+                foreach (var playerObj in pm.players)
+                {
+                    if (playerObj == null) continue;
+                    var pv = playerObj.GetComponent<PhotonView>();
+                    if (pv == null || !pv.IsMine) continue;
+                    var data = playerObj.GetComponent<CharacterData>();
+                    return data != null && !data.dead && data.health > 0;
+                }
+            }
+            catch { }
+            return false;
+        }
+
         private static void PollAchievementState()
         {
-            if (!isTracking) { LocalAliveInCombatNow = false; return; }
+            if (!PhysicalGameLive) { LocalAliveInCombatNow = false; return; }
+            if (!isTracking)
+            {
+                // Table C2: in a continuation the alive state (the chat key, input
+                // sampling) follows the physical game; the achievement flags stay
+                // the reported game's.
+                LocalAliveInCombatNow = LocalFighterAliveNow() && !inPickPhase;
+                return;
+            }
             bool localAliveInCombat = false;
             try
             {
@@ -8425,7 +8471,7 @@ namespace CompetitiveRounds
         {
             try
             {
-                if (!isTracking) return Gate.NotInCombat;
+                if (!PhysicalGameLive) return Gate.NotInCombat;
                 if (inPickPhase) return Gate.NotInCombat;
                 var data = Keybinds.LocalCharacter();
                 if (data == null) return Gate.Unknown;
@@ -8832,7 +8878,7 @@ namespace CompetitiveRounds
 
                 if (string.IsNullOrEmpty(cardName)) return;
 
-                if (!isTracking)
+                if (!PhysicalGameLive)   // Table C2: nothing is kept as a pre-match pick while a record is live
                 {
                     // Store for later \u2014 OnMatchStarted will recover these
                     preMatchPickCount++;
@@ -8967,7 +9013,7 @@ namespace CompetitiveRounds
             cardName = ToTitleCase(cardName);
             cardName = CardRarityLookup.GetCanonicalName(cardName);
 
-            if (!isTracking)
+            if (!PhysicalGameLive)   // Table C2: as above
             {
                 // Buffer for later recovery
                 preMatchOpponentCards.Add(new MatchTracker.CardPickData
@@ -9462,7 +9508,7 @@ namespace CompetitiveRounds
         {
             get
             {
-                try { return isTracking && !RoomActors.LocalIsSpectator && !PhotonNetwork.OfflineMode && PhotonNetwork.InRoom; }
+                try { return PhysicalGameLive && !RoomActors.LocalIsSpectator && !PhotonNetwork.OfflineMode && PhotonNetwork.InRoom; }
                 catch { return false; }
             }
         }

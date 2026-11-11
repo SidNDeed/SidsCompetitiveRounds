@@ -275,7 +275,7 @@ namespace CompetitiveRounds
                  + "|" + PlayerCardsUI.Epoch
                  + "|" + _visitId
                  + "|" + CurrentPreset()
-                 + "|" + (GameStateWatcher.IsInMatch ? 1 : 0)
+                 + "|" + (GameStateWatcher.PhysicalGameLive ? 1 : 0)
                  + "|" + sel.Replace('|', '_') + ":" + DanceEmotes.MOTION_RECIPE
                  + "|" + LiveInputsKey();
         }
@@ -671,7 +671,7 @@ namespace CompetitiveRounds
             EnsureSceneHook();
             Reclaim();
             if (Rendering || UploadInFlight || Plugin.Instance == null) return false;
-            if (GameStateWatcher.IsInMatch) { LastResult = "skipped: in a match"; return false; }
+            if (GameStateWatcher.PhysicalGameLive) { LastResult = "skipped: in a match"; return false; }
             if (PlayerAssigner.instance == null || PlayerAssigner.instance.playerPrefab == null) { LastResult = "skipped: no player prefab yet"; return false; }
             if (string.IsNullOrEmpty(MatchTracker.LocalSteamId) || MatchTracker.LocalSteamId == "unknown") { LastResult = "skipped: no identity"; return false; }
             if (idx < 0 || idx >= DanceEmotes.Defs.Length || !string.Equals(DanceEmotes.Defs[idx].Sku, sku, StringComparison.Ordinal)) return false;
@@ -1646,7 +1646,7 @@ namespace CompetitiveRounds
 
             public bool Holds()
             {
-                return _epoch == ApiClient.IdentityEpoch && _key == DanceStateKey() && !GameStateWatcher.IsInMatch;
+                return _epoch == ApiClient.IdentityEpoch && _key == DanceStateKey() && !GameStateWatcher.PhysicalGameLive;
             }
 
             public void Note(string line) { Plugin.Log.LogInfo("[DANCE] " + line); }

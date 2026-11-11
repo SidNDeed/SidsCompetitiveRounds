@@ -382,6 +382,13 @@ namespace CompetitiveRounds
             get { return _hasRecord && _state != LimitlessFenceRules.FencePhase.PhaseEnded; }
         }
 
+        /// <summary>v4 section 6, Table C2: a live or terminating record of this
+        /// seat's live gid. GameStateWatcher.PhysicalGameLive reads it.</summary>
+        internal static bool RecordOpenForCurrentGid
+        {
+            get { return RecordOpen && _ledger.IsLiveGid(_record.Gid); }
+        }
+
         /// <summary>Table B (a): FFA's RoundsToWin holds the record's target
         /// while the record is live or terminating. FFA's config writers then
         /// keep their value for the next game (FfaMode.SetConfiguredTarget).</summary>

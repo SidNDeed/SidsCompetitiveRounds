@@ -376,7 +376,7 @@ namespace CompetitiveRounds
         public static void TickPending()
         {
             if (pendingToast == null) return;
-            if (GameStateWatcher.IsTracking) return;
+            if (GameStateWatcher.PhysicalGameLive) return;
             bool wanted = true;
             try { wanted = Plugin.ShowNotifications.Value; } catch { }
             if (!wanted) { pendingToast = null; pendingToastTries = 0; return; }   // toasts are off: nothing to wait for

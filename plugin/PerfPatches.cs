@@ -535,7 +535,7 @@ namespace CompetitiveRounds
         {
             if (!PerfGate.Check(Plugin.PerfClampObjectPoolInit)) return;
             // Only clamp during gameplay — preserves snappy menu/lobby load.
-            try { if (!GameStateWatcher.IsInMatch) return; }
+            try { if (!GameStateWatcher.PhysicalGameLive) return; }
             catch { return; }
             if (initSpawn > 4) { initSpawn = 4; PerfGate.Hit("ClampObjectPoolInit"); }
         }
@@ -573,7 +573,7 @@ namespace CompetitiveRounds
             }
             try
             {
-                bool inMatch = GameStateWatcher.IsInMatch;
+                bool inMatch = GameStateWatcher.PhysicalGameLive;
                 bool escOpen = false;
                 try { escOpen = EscapeMenuHandler.isEscMenu; } catch { }
                 bool runOriginal = !inMatch || escOpen;

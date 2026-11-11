@@ -347,7 +347,7 @@ namespace CompetitiveRounds
             try
             {
                 MusicAdmission.Tick();
-                return MusicAdmission.ClickAdmissible(out _, out _) && !GameStateWatcher.IsTracking;
+                return MusicAdmission.ClickAdmissible(out _, out _) && !GameStateWatcher.PhysicalGameLive;
             }
             catch { return false; }
         }

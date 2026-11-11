@@ -42,7 +42,7 @@ namespace CompetitiveRounds
             Plugin.ShowTrails.Value = on;
             if (on)
             {
-                if (GameStateWatcher.IsInMatch) OnMatchStart();
+                if (GameStateWatcher.PhysicalGameLive) OnMatchStart();
             }
             else
             {

@@ -25843,7 +25843,7 @@ hop	ModeInfoText.cs:Team	5df31c0ee301ec72	InfoLibrary.cs:Categories	entry[[2]/Ca
 hop	ModeInfoText.cs:Team	adef5d093c55d4db	InfoLibrary.cs:Categories	entry[[2]/Category.Articles/Article{mode-2v2}.Body=>]>InfoLibrary.cs:Categories
 hop	ModeInfoText.cs:Team	cc2a063a1e199af8	NativeUI.cs:BuildTeamTab	delegate[UIFactory.CreateButton(#6=>)/ShowInfoPopup(#1)]>NativeUI.cs:BuildTeamTab
 hop	ModeInfoText.cs:TeamTitle	73c47dbd654a2703	NativeUI.cs:BuildTeamTab	delegate[UIFactory.CreateButton(#6=>)/ShowInfoPopup(#0)]>NativeUI.cs:BuildTeamTab
-hop	MusicAdmission.cs:ClickAdmissible	17042a09fa5953b2	EmojiSprites.cs:SafeState	ref>EmojiSprites.cs:SafeState
+hop	MusicAdmission.cs:ClickAdmissible	ea28b9ac397c1be9	EmojiSprites.cs:SafeState	ref>EmojiSprites.cs:SafeState
 hop	MusicAdmission.cs:Tick	1f7862c22beac16f	EmojiSprites.cs:SafeState	ref>EmojiSprites.cs:SafeState
 hop	MusicAdmission.cs:Tick	e6ceaf0213bc8fba	MusicEngine.cs:Tick	ref>MusicEngine.cs:Tick
 hop	MusicAssets.cs:BuildManifest	d637bb69584c5430	field:MusicAssets.cs:Manifest	field[Manifest]>MusicAssets.cs:(file scope)
@@ -27409,7 +27409,6 @@ hop	NativeUI.cs:CreateBracketCell	3ecbf317caeef18a	NativeUI.cs:RenderVisualBrack
 hop	NativeUI.cs:CreateBracketCellRow	cbf44ac55b83c6b7	NativeUI.cs:CreateBracketCell	ref>NativeUI.cs:CreateBracketCell
 hop	NativeUI.cs:CreateButton	021376c75fe99a11	NativeUI.cs:BuildCardStatsTab	ref>NativeUI.cs:BuildCardStatsTab
 hop	NativeUI.cs:CreateButton	026e836f75c592ca	NativeUI.cs:ApplySpectateLiveRow	ref>NativeUI.cs:ApplySpectateLiveRow
-hop	NativeUI.cs:CreateButton	05f5ed80a5b019c4	NativeUI.cs:CreateShopRow	ref>NativeUI.cs:CreateShopRow
 hop	NativeUI.cs:CreateButton	06122514408dea3e	NativeUI.cs:CreateMusicTrackRow	ref>NativeUI.cs:CreateMusicTrackRow
 hop	NativeUI.cs:CreateButton	0f3017360b0008ac	NativeUI.cs:BuildBannedTab	ref>NativeUI.cs:BuildBannedTab
 hop	NativeUI.cs:CreateButton	1052cff6afaf73aa	NativeUI.cs:BuildPage	ref[AddFooterBtnIcon(#0)]>NativeUI.cs:BuildPage
@@ -27454,6 +27453,7 @@ hop	NativeUI.cs:CreateButton	772e71e4b9914740	NativeUI.Keybinds.cs:KeybindBuildF
 hop	NativeUI.cs:CreateButton	79e5bbe6e09a7f0d	MailUI.cs:PaintList	ref>MailUI.cs:PaintList
 hop	NativeUI.cs:CreateButton	7d3a9ea43f2a64f2	NativeUI.Settings.cs:SettingsDecorateRow	ref>NativeUI.Settings.cs:SettingsDecorateRow
 hop	NativeUI.cs:CreateButton	8290b0e9dfb440d8	NativeUI.cs:CreateCardRow	ref>NativeUI.cs:CreateCardRow
+hop	NativeUI.cs:CreateButton	8293e49454d08da2	NativeUI.cs:CreateShopRow	ref>NativeUI.cs:CreateShopRow
 hop	NativeUI.cs:CreateButton	85a735c3fce578d3	NativeUI.cs:ShowTournamentBetsPopup	ref>NativeUI.cs:ShowTournamentBetsPopup
 hop	NativeUI.cs:CreateButton	8db1726919027ccf	NativeUI.cs:BuildCompareRecordsPanel	ref>NativeUI.cs:BuildCompareRecordsPanel
 hop	NativeUI.cs:CreateButton	8ef66c099d343db2	NativeUI.cs:BuildRankedRow	ref>NativeUI.cs:BuildRankedRow
@@ -35482,8 +35482,8 @@ hop	PlayerColorCosmetic.cs:OnMatchStart	acbf51547051f883	NativeUI.cs:CreateShopR
 hop	PlayerColorCosmetic.cs:OnMatchStart	d0df6e00121f7b7f	GameStateWatcher.cs:OnMatchStarted	ref>GameStateWatcher.cs:OnMatchStarted
 hop	PlayerColorCosmetic.cs:OnMatchStart	d5b83b86f75e7d19	SpectatorSync.cs:BoundaryAttempt	ref>SpectatorSync.cs:BoundaryAttempt
 hop	PlayerColorCosmetic.cs:OnPlayerPropertiesChanged	619874a54b47ee18	TrailRenderer.cs:OnPlayerPropertiesUpdate	ref>TrailRenderer.cs:OnPlayerPropertiesUpdate
+hop	PlayerColorCosmetic.cs:OnRoundStart	16834dbfefefc552	GameStateWatcher.cs:PollMatchState	ref>GameStateWatcher.cs:PollMatchState
 hop	PlayerColorCosmetic.cs:OnRoundStart	87166b83c0753d9d	Plugin.cs:SweepNextFrame	ref>Plugin.cs:SweepNextFrame
-hop	PlayerColorCosmetic.cs:OnRoundStart	96d5d4f8490c225d	GameStateWatcher.cs:PollMatchState	ref>GameStateWatcher.cs:PollMatchState
 hop	PlayerColorCosmetic.cs:OnShowPlayerColorsToggled	c95d55132d0402b7	PlayerColorCosmetic.cs:SetShowPlayerColors	ref>PlayerColorCosmetic.cs:SetShowPlayerColors
 hop	PlayerColorCosmetic.cs:PortraitFrameReady	09760762817b8ba9	PortraitRender.cs:ColourReady	ref>PortraitRender.cs:ColourReady
 hop	PlayerColorCosmetic.cs:PortraitFrameReady	12a3b613d6c862da	PortraitRender.cs:Run	ref[.Append(#0)]>PortraitRender.cs:Run
@@ -35527,13 +35527,13 @@ hop	PlayerEffectCosmetic.cs:OnAnimatedCosmeticsToggled	33cea157ff85df74	PlayerEf
 hop	PlayerEffectCosmetic.cs:OnMatchEnd	40b645b4ef3776fe	NativeUI.cs:CreateShopRow	delegate[UIFactory.CreateButton(#6=>)/=>{}/=>{}]>NativeUI.cs:CreateShopRow
 hop	PlayerEffectCosmetic.cs:OnMatchEnd	84d3193daad45967	GameStateWatcher.cs:ResetMatchStateWithTrail	ref>GameStateWatcher.cs:ResetMatchStateWithTrail
 hop	PlayerEffectCosmetic.cs:OnMatchEnd	ee3133576bb4a9d9	PlayerEffectCosmetic.cs:OnShowPlayerColorsToggled	ref>PlayerEffectCosmetic.cs:OnShowPlayerColorsToggled
+hop	PlayerEffectCosmetic.cs:OnMatchStart	7428b9e12f96d601	PlayerEffectCosmetic.cs:OnShowPlayerColorsToggled	ref>PlayerEffectCosmetic.cs:OnShowPlayerColorsToggled
 hop	PlayerEffectCosmetic.cs:OnMatchStart	9823851d9b3f9322	NativeUI.cs:CreateShopRow	delegate[UIFactory.CreateButton(#6=>)/=>{}/=>{}]>NativeUI.cs:CreateShopRow
-hop	PlayerEffectCosmetic.cs:OnMatchStart	abab073b42839a80	PlayerEffectCosmetic.cs:OnShowPlayerColorsToggled	ref>PlayerEffectCosmetic.cs:OnShowPlayerColorsToggled
 hop	PlayerEffectCosmetic.cs:OnMatchStart	dc82c91dff77f2d2	GameStateWatcher.cs:OnMatchStarted	ref>GameStateWatcher.cs:OnMatchStarted
 hop	PlayerEffectCosmetic.cs:OnMatchStart	fb57733f0182bac3	SpectatorSync.cs:BoundaryAttempt	ref>SpectatorSync.cs:BoundaryAttempt
 hop	PlayerEffectCosmetic.cs:OnMatchStart	fbed120307039634	GameStateWatcher.cs:PollMatchState	ref>GameStateWatcher.cs:PollMatchState
 hop	PlayerEffectCosmetic.cs:OnPlayerPropertiesChanged	5cd7e4200e11e772	TrailRenderer.cs:OnPlayerPropertiesUpdate	ref>TrailRenderer.cs:OnPlayerPropertiesUpdate
-hop	PlayerEffectCosmetic.cs:OnRoundStart	370ff3600e8c74fa	GameStateWatcher.cs:PollMatchState	ref>GameStateWatcher.cs:PollMatchState
+hop	PlayerEffectCosmetic.cs:OnRoundStart	50e2f8546bb3a0c1	GameStateWatcher.cs:PollMatchState	ref>GameStateWatcher.cs:PollMatchState
 hop	PlayerEffectCosmetic.cs:OnRoundStart	c1c4738f09a8c6a4	Plugin.cs:SweepNextFrame	ref>Plugin.cs:SweepNextFrame
 hop	PlayerEffectCosmetic.cs:OnShowPlayerColorsToggled	c878e44ec1fecc83	PlayerColorCosmetic.cs:SetShowPlayerColors	ref>PlayerColorCosmetic.cs:SetShowPlayerColors
 hop	PlayerEffectCosmetic.cs:ReapplyForActor	97b078f3c61e1493	Plugin.cs:RepeatedCompetitiveCosmeticReapply	ref>Plugin.cs:RepeatedCompetitiveCosmeticReapply
@@ -42181,16 +42181,16 @@ hop	PortraitRender.cs:CompareRoots	56fb668b2ce09620	PortraitRender.cs:ProductRun
 hop	PortraitRender.cs:CompareRoots	7a59caf51f552221	PortraitRender.cs:Run	ref>PortraitRender.cs:Run
 hop	PortraitRender.cs:ComputeBounds	241075108d9e5c13	PortraitRender.cs:Run	ref>PortraitRender.cs:Run
 hop	PortraitRender.cs:ComputeBounds	24538535583f44d3	PortraitRender.cs:ProductRun	ref>PortraitRender.cs:ProductRun
+hop	PortraitRender.cs:CurrentPreset	039311b3646223e2	PortraitRenderDance.cs:DanceStateKey	ref>PortraitRenderDance.cs:DanceStateKey
 hop	PortraitRender.cs:CurrentPreset	05b93723099a4389	PlayerCardsUI.cs:PresetLabel#1	ref[PresetLabel(#0)]>PlayerCardsUI.cs:PresetLabel#1
 hop	PortraitRender.cs:CurrentPreset	1455bae45a2bbf4b	PortraitRender.cs:LiveInputsKey	ref>PortraitRender.cs:LiveInputsKey
 hop	PortraitRender.cs:CurrentPreset	166dc0a9d952fc68	PortraitRender.cs:Tick	ref[BuildDescriptor(#0)]>PortraitRender.cs:Tick
 hop	PortraitRender.cs:CurrentPreset	4b8436c97bc85e29	PlayerCardsUI.cs:BuildSettingsRows	delegate[NativeUI.SettingsDropdown(#4=>)]>PlayerCardsUI.cs:BuildSettingsRows
 hop	PortraitRender.cs:CurrentPreset	7c546c75b6844206	PlayerCardsUI.cs:RefreshPictureRows	ref[PaintPreset(#1)]>PlayerCardsUI.cs:RefreshPictureRows
 hop	PortraitRender.cs:CurrentPreset	7e0e1981fc433aa5	PortraitRenderDance.cs:RefreshStart	ref[BuildDescriptor(#0)]>PortraitRenderDance.cs:RefreshStart
-hop	PortraitRender.cs:CurrentPreset	a04cfda78a6f8401	PortraitRender.cs:StateKey	ref>PortraitRender.cs:StateKey
+hop	PortraitRender.cs:CurrentPreset	8ba62a40aeee6346	PortraitRender.cs:StateKey	ref>PortraitRender.cs:StateKey
 hop	PortraitRender.cs:CurrentPreset	a6391020b2056578	PortraitRenderDance.cs:DanceRun	ref[Capture(#0)]>PortraitRenderDance.cs:DanceRun
 hop	PortraitRender.cs:CurrentPreset	b8ccf219d8092f1d	PortraitRenderDanceDev.cs:DanceDevDecide	ref[BuildDescriptor(#0)]>PortraitRenderDanceDev.cs:DanceDevDecide
-hop	PortraitRender.cs:CurrentPreset	e383f2c2b37dec33	PortraitRenderDance.cs:DanceStateKey	ref>PortraitRenderDance.cs:DanceStateKey
 hop	PortraitRender.cs:CurrentPreset	f39289a5a6e7fb78	PortraitRender.cs:ProductRun	ref>PortraitRender.cs:ProductRun
 hop	PortraitRender.cs:DanceDescriptor	39988df20944dc68	PortraitRenderDanceDev.cs:DanceDevDecide	ref>PortraitRenderDanceDev.cs:DanceDevDecide
 hop	PortraitRender.cs:DanceDescriptor	dcda9f0f9a4d2f93	PortraitRenderDance.cs:DanceRun	ref>PortraitRenderDance.cs:DanceRun
@@ -42241,8 +42241,8 @@ hop	PortraitRender.cs:LegsPlanted	33f3c796fe54b15f	PortraitRenderDance.cs:DanceR
 hop	PortraitRender.cs:LegsPlanted	ba8ed82b405af655	PortraitRender.cs:ProductRun	ref>PortraitRender.cs:ProductRun
 hop	PortraitRender.cs:LegsPlanted	f5fcc278b8390392	PortraitRender.cs:Run	ref[.Append(#0)]>PortraitRender.cs:Run
 hop	PortraitRender.cs:LiveInputsKey	9eda3b6a3dc99c55	PortraitRender.cs:Abandon	ref>PortraitRender.cs:Abandon
-hop	PortraitRender.cs:LiveInputsKey	bc4b89bdc060f5a0	PortraitRenderDance.cs:DanceStateKey	ref>PortraitRenderDance.cs:DanceStateKey
-hop	PortraitRender.cs:LiveInputsKey	ca3fc2f478f266d8	PortraitRender.cs:StateKey	ref>PortraitRender.cs:StateKey
+hop	PortraitRender.cs:LiveInputsKey	b7b57b80f911e686	PortraitRenderDance.cs:DanceStateKey	ref>PortraitRenderDance.cs:DanceStateKey
+hop	PortraitRender.cs:LiveInputsKey	c7db9e3f74ff07da	PortraitRender.cs:StateKey	ref>PortraitRender.cs:StateKey
 hop	PortraitRender.cs:MakeGround	52cfb2f9501a18b5	PortraitRenderDance.cs:DanceRun	ref>PortraitRenderDance.cs:DanceRun
 hop	PortraitRender.cs:MakeGround	ce26d8802fc3d4f3	PortraitRender.cs:Run	ref>PortraitRender.cs:Run
 hop	PortraitRender.cs:MakeGround	f444499c50d38d16	PortraitRender.cs:ProductRun	ref>PortraitRender.cs:ProductRun
@@ -42619,7 +42619,7 @@ hop	PortraitRenderDance.cs:DanceSeatCan	b5502a41ccdc89ef	PortraitRenderDanceDev.
 hop	PortraitRenderDance.cs:DanceSeatWaits	985febab35b8c5d6	PortraitRenderDance.cs:DanceDecision	ref>PortraitRenderDance.cs:DanceDecision
 hop	PortraitRenderDance.cs:DanceSetPreview	64dd7405dd4825a6	PortraitRenderDance.cs:DanceRun	ref>PortraitRenderDance.cs:DanceRun
 hop	PortraitRenderDance.cs:DanceSsTarget	543733ec0e758d77	PortraitRenderDance.cs:DanceRun	ref>PortraitRenderDance.cs:DanceRun
-hop	PortraitRenderDance.cs:DanceStateKey	4b7af280ecc123ae	PortraitRenderDance.cs:Holds	ref>PortraitRenderDance.cs:Holds
+hop	PortraitRenderDance.cs:DanceStateKey	6eaba48515ac531b	PortraitRenderDance.cs:Holds	ref>PortraitRenderDance.cs:Holds
 hop	PortraitRenderDance.cs:DanceStateKey	b869f98d8deb5d2d	PortraitRenderDance.cs:DanceRun	ref>PortraitRenderDance.cs:DanceRun
 hop	PortraitRenderDance.cs:DanceStateKey	d316aecb43e7625d	PortraitRenderDance.cs:DanceGate	ref>PortraitRenderDance.cs:DanceGate
 hop	PortraitRenderDance.cs:DanceStillOnly	186e4a6b354b379f	PortraitRenderDance.cs:DanceVisit	ref>PortraitRenderDance.cs:DanceVisit
@@ -57640,7 +57640,7 @@ hop	TrailRenderer.cs:OnMatchEnd	0c56640bb23498da	TrailRenderer.cs:SetShowTrails	
 hop	TrailRenderer.cs:OnMatchEnd	dc1aa53d9e278e01	GameStateWatcher.cs:ResetMatchStateWithTrail	ref>GameStateWatcher.cs:ResetMatchStateWithTrail
 hop	TrailRenderer.cs:OnMatchStart	392aa23a9d264706	GameStateWatcher.cs:PollMatchState	ref>GameStateWatcher.cs:PollMatchState
 hop	TrailRenderer.cs:OnMatchStart	3de12fbe56506a87	SpectatorSync.cs:BoundaryAttempt	ref>SpectatorSync.cs:BoundaryAttempt
-hop	TrailRenderer.cs:OnMatchStart	51e700c2a241bd6f	TrailRenderer.cs:SetShowTrails	ref>TrailRenderer.cs:SetShowTrails
+hop	TrailRenderer.cs:OnMatchStart	8a578cb4ad5ac2f7	TrailRenderer.cs:SetShowTrails	ref>TrailRenderer.cs:SetShowTrails
 hop	TrailRenderer.cs:OnMatchStart	b793f3a407a7ec0d	GameStateWatcher.cs:OnMatchStarted	ref>GameStateWatcher.cs:OnMatchStarted
 hop	TrailRenderer.cs:OnPlayerPropertiesChanged	56ec8c4e62252e10	TrailRenderer.cs:OnPlayerPropertiesUpdate	ref>TrailRenderer.cs:OnPlayerPropertiesUpdate
 hop	TrailRenderer.cs:ReattachForActor	7647e42eb6fafd7f	Plugin.cs:RepeatedCompetitiveCosmeticReapply	ref>Plugin.cs:RepeatedCompetitiveCosmeticReapply
@@ -63030,9 +63030,9 @@ cycle	PoisonLedgerCore.cs:ToString	ff75f5e9f0a0b4a2	RegionPingSweep.cs:TryStart
 cycle	PoisonLedgerCore.cs:TryStart	6dda03958d30ef73	PoisonLedgerCore.cs:Decide
 cycle	PortraitGrade.cs:Fmt	8fe785029ec3c4df	PortraitGrade.cs:FmtSpline
 cycle	PortraitGrade.cs:FmtSpline	5fd25fac2212cdaa	PortraitGrade.cs:Fmt
+cycle	PortraitRender.cs:CurrentPreset	039311b3646223e2	PortraitRenderDance.cs:DanceStateKey
 cycle	PortraitRender.cs:CurrentPreset	1455bae45a2bbf4b	PortraitRender.cs:LiveInputsKey
-cycle	PortraitRender.cs:CurrentPreset	e383f2c2b37dec33	PortraitRenderDance.cs:DanceStateKey
-cycle	PortraitRender.cs:LiveInputsKey	bc4b89bdc060f5a0	PortraitRenderDance.cs:DanceStateKey
+cycle	PortraitRender.cs:LiveInputsKey	b7b57b80f911e686	PortraitRenderDance.cs:DanceStateKey
 cycle	PortraitRender.cs:Off	b1fdf91da6c9e276	PortraitRender.cs:LiveInputsKey
 cycle	PortraitRender.cs:PresetSlotCount	2d247ece39ff566d	PortraitRender.cs:LiveInputsKey
 cycle	PortraitRender.cs:PresetSlotCount	a8ea190116331e38	PortraitRender.cs:CurrentPreset
@@ -63051,7 +63051,7 @@ cycle	PortraitRender.cs:RetryAfter	ad1491c8fe4bad29	PortraitRender.cs:Upload
 cycle	PortraitRender.cs:Upload	0df49563669f46a6	PortraitRender.cs:RetryAfter
 cycle	PortraitRenderDance.cs:DanceAnswer	448aa728617f7104	PortraitRenderDance.cs:UploadStill
 cycle	PortraitRenderDance.cs:DanceAnswer	4e9cf1772cb24f54	PortraitRenderDance.cs:UploadMotion
-cycle	PortraitRenderDance.cs:DanceStateKey	4b7af280ecc123ae	PortraitRenderDance.cs:Holds
+cycle	PortraitRenderDance.cs:DanceStateKey	6eaba48515ac531b	PortraitRenderDance.cs:Holds
 cycle	PortraitRenderDance.cs:Holds	2192abeac7683d5c	DanceMotionCore.cs:OnMotion
 cycle	PortraitRenderDance.cs:Holds	529d77cc5d7c7e52	DanceMotionCore.cs:OnStill
 cycle	PortraitRenderDance.cs:Holds	5eda149aabc37ae6	DanceMotionCore.cs:OnStill
@@ -65392,7 +65392,7 @@ member	CompetitiveUI.cs:DispatchLogViewerRead	29f9cfec27789471
 member	CompetitiveUI.cs:DrawAdminPrompt	c286c7b611163386
 member	CompetitiveUI.cs:DrawArtistInput	1681c991f3c2da96
 member	CompetitiveUI.cs:DrawArtistPicker	d3dad33950350b15
-member	CompetitiveUI.cs:DrawBlockDebug	6fec4d7e6486e813
+member	CompetitiveUI.cs:DrawBlockDebug	f579d3d51133b782
 member	CompetitiveUI.cs:DrawBugReportAdminViewer	9a0a1405549abda4
 member	CompetitiveUI.cs:DrawBugReportModal	4e3803e10fe55d7e
 member	CompetitiveUI.cs:DrawCardHoverTooltip	bfe3e4d959d7da1d
@@ -65420,7 +65420,7 @@ member	CompetitiveUI.cs:DrawH2HBanner	a509142b3fd2cd94
 member	CompetitiveUI.cs:DrawHistorySearch	4d3aa74c3d921af7
 member	CompetitiveUI.cs:DrawInGameChat	8dd325f4a83611e3
 member	CompetitiveUI.cs:DrawInfoSearch	43394abf500ca860
-member	CompetitiveUI.cs:DrawInputOverlay	955d45237f2bc8c8
+member	CompetitiveUI.cs:DrawInputOverlay	9d72aa9311e61237
 member	CompetitiveUI.cs:DrawLagNotices	51ee1e41a18459b4
 member	CompetitiveUI.cs:DrawLeaderboardSearch	d65cf0a197c6d3fd
 member	CompetitiveUI.cs:DrawLeaverBanner	377c2bf26b3454b6
@@ -65650,7 +65650,7 @@ member	EmojiSprites.cs:ParseSheets	d6cc78a6276897ff
 member	EmojiSprites.cs:Prune	d6c2b2746e9842a5
 member	EmojiSprites.cs:Resolve	335cf1e6549f7662
 member	EmojiSprites.cs:RunSelfTest	bdcf9f99cc4d67f2
-member	EmojiSprites.cs:SafeState	9837c14fdea602c5
+member	EmojiSprites.cs:SafeState	e027b3086c11991b
 member	EmojiSprites.cs:Sha256Hex	df5b74d5100a618b
 member	EmojiSprites.cs:StartDownload	f0bcf6e43d431114
 member	EmojiSprites.cs:Substitute#1	676fcbd60929d1d7
@@ -65662,7 +65662,7 @@ member	EscLeaveRow.cs:ComputeContext	ad1c111262e90e1c
 member	EscLeaveRow.cs:OnRoomJoined	c977ddcb234f5635
 member	EscLeaveRow.cs:OnRoomLeft	5acaa973464e13ee
 member	EscLeaveRow.cs:OnRowClicked	738c90ffc9d49232
-member	EscLeaveRow.cs:Reconcile	bafbc311ddd0a409
+member	EscLeaveRow.cs:Reconcile	9c06ae7c96491418
 member	EscLeaveRow.cs:Request	e25ad9ed891f4659
 member	EscLeaveRow.cs:ResetConfirm	27fa5f5c9c186e9f
 member	EscLeaveRow.cs:SetLabel	79d63daee6b9cfe9
@@ -66435,7 +66435,7 @@ member	GameStateWatcher.cs:MacroTimelineForPeer	fc53baea6ce6a330
 member	GameStateWatcher.cs:MaybeSendLivePoints	3c2f2bcd20d161e0
 member	GameStateWatcher.cs:MintSessionUuid	ae752618fc213ccf
 member	GameStateWatcher.cs:NoteIdentityTransition	494dd99f3763301f
-member	GameStateWatcher.cs:NotifyPlayerLeftRoom	82f38aa317d10bb4
+member	GameStateWatcher.cs:NotifyPlayerLeftRoom	0b68b8057f268cc3
 member	GameStateWatcher.cs:OnFfaGameOver	8d6b55e7fe1a6464
 member	GameStateWatcher.cs:OnFfaMatchStarted	ec1dbc31bfeddaa9
 member	GameStateWatcher.cs:OnGameBoundary	c95591c1b5b88080
@@ -66443,19 +66443,19 @@ member	GameStateWatcher.cs:OnGameOver	e1685dda52d4f3f9
 member	GameStateWatcher.cs:OnLocalCardOffered	49cb209c5382a27d
 member	GameStateWatcher.cs:OnMapCallIn	98e4590adf6c86e6
 member	GameStateWatcher.cs:OnMatchStarted	36fb609b16fc13ea
-member	GameStateWatcher.cs:OnOpponentCardPicked	4eb1d13fe3268e1c
-member	GameStateWatcher.cs:OnUnityLog	b2961d854dc1f323
+member	GameStateWatcher.cs:OnOpponentCardPicked	d5fcb2ef6cf061dc
+member	GameStateWatcher.cs:OnUnityLog	cefa0d6aef7dbee1
 member	GameStateWatcher.cs:OppDamageTimelineCsv	60c8af63f52afc83
 member	GameStateWatcher.cs:OpponentHasMod	2abe79cbd2d48e47
 member	GameStateWatcher.cs:Poll	2c58f8bf3032ac62
 member	GameStateWatcher.cs:PollCardPicks	6769181019868999
-member	GameStateWatcher.cs:PollMatchState	3464b4be1afc5846
+member	GameStateWatcher.cs:PollMatchState	6e890a67afa5fa86
 member	GameStateWatcher.cs:PollOpponentFps	a6ed8486a2e957c1
-member	GameStateWatcher.cs:PollRoomState	dc0feb810343b313
-member	GameStateWatcher.cs:PollRoomlessGameScene	c6e3921fe7002bd6
+member	GameStateWatcher.cs:PollRoomState	dce96758817d572e
+member	GameStateWatcher.cs:PollRoomlessGameScene	b75a97bfffb67757
 member	GameStateWatcher.cs:Postfix	7103ed38c0038e22
 member	GameStateWatcher.cs:PresentFighterIds	11f71605ea8ffab7
-member	GameStateWatcher.cs:RankedCodeRoom1v1InProgress	66b7249fa0b9862d
+member	GameStateWatcher.cs:RankedCodeRoom1v1InProgress	632a7f2db4366c84
 member	GameStateWatcher.cs:ReadFighterCount	bfd4ebabfd1ac541
 member	GameStateWatcher.cs:ReadSeats	e91144e631caf81d
 member	GameStateWatcher.cs:ReadTeamToken	ff30b68941ac31ea
@@ -66494,7 +66494,7 @@ member	GameStateWatcher.cs:TickInputSampling	6a6b20f1582b1104
 member	GameStateWatcher.cs:TickRequeueMachine	8f407b5193cad968
 member	GameStateWatcher.cs:TickRunInBackground	bf17824ccbd3d4b5
 member	GameStateWatcher.cs:TickSettle	7fcd58ecee37d502
-member	GameStateWatcher.cs:TickSpectateAttest	ef327b0b77b07b0e
+member	GameStateWatcher.cs:TickSpectateAttest	f27f9b8f2b541c4b
 member	GameStateWatcher.cs:TickTeamToken	a241a0332a41aa9e
 member	GameStateWatcher.cs:TimelineAppend	48a809777d861d75
 member	GameStateWatcher.cs:ToTitleCase	395b94858a728575
@@ -67161,7 +67161,7 @@ member	MailUI.cs:SetProp	e04e085c17e2e4c1
 member	MailUI.cs:ShowView	038bc84bd3309bef
 member	MailUI.cs:SubmitReport	f84376b9e8aa7ca4
 member	MailUI.cs:TabLabel	613b660fd3a15a4e
-member	MailUI.cs:TickPending	e08b8de44a9e5bc4
+member	MailUI.cs:TickPending	2b5f57dee90f7b54
 member	MailUI.cs:ToggleBlockedList	3028f6f90c361b99
 member	MailUI.cs:ToggleMailRelay	855afb78314964c6
 member	MailUI.cs:Trunc	028136dca50eafa4
@@ -67827,7 +67827,7 @@ member	NativeUI.cs:CreateLobbyMemberRow	6380f949a49e9fde
 member	NativeUI.cs:CreateMusicAlbumHdr	dec22084acab520c
 member	NativeUI.cs:CreateMusicTrackRow	69d516d80e3ac555
 member	NativeUI.cs:CreateSectionHeader	be2347f06e7d8221
-member	NativeUI.cs:CreateShopRow	cabbaea69163f275
+member	NativeUI.cs:CreateShopRow	df0db10d21ee52f8
 member	NativeUI.cs:CreateTeamHistRow	dc4a22414845ab23
 member	NativeUI.cs:CreateTeamLBRow	688d199ff5cf9960
 member	NativeUI.cs:CreateTeamLiveRow	f8012969dab6c518
@@ -68059,7 +68059,7 @@ member	NativeUI.cs:RefreshMyBetsLedger	d273f12af012e0a4
 member	NativeUI.cs:RefreshMyStats	65b445fc79af974e
 member	NativeUI.cs:RefreshOneVTwoTab	6ae4b00fd6c76445
 member	NativeUI.cs:RefreshOvtRecent	1827c38f2c62f861
-member	NativeUI.cs:RefreshQueueUI	cb98df5beb2bffab
+member	NativeUI.cs:RefreshQueueUI	6cae0325b65bdc1c
 member	NativeUI.cs:RefreshRecentSeries	764d538aef197eec
 member	NativeUI.cs:RefreshRecentTournamentPlacements	471a7649bd45389f
 member	NativeUI.cs:RefreshRecentTournamentsPopup	f3e1f357085ae43b
@@ -68369,8 +68369,8 @@ member	PerfPatches.cs:Prefix#1	b75d94587f25bc2e
 member	PerfPatches.cs:Prefix#2	3c1fc79b194fdcc7
 member	PerfPatches.cs:Prefix#3	96123c3682e7c5c0
 member	PerfPatches.cs:Prefix#4	3eb5394d272307a5
-member	PerfPatches.cs:Prefix#5	1e8a136be231cf63
-member	PerfPatches.cs:Prefix#6	c23d2aba1dd77647
+member	PerfPatches.cs:Prefix#5	9a6e49d42d947cd5
+member	PerfPatches.cs:Prefix#6	e8bc032b61eecad9
 member	PerfPatches.cs:Scale	eed1819f4abc3854
 member	PerfPatches.cs:SwallowAndDestroy	b186c90ebd3109eb
 member	PlayerCardFaces.cs:Active	eafa2936ad9594d5
@@ -68661,7 +68661,7 @@ member	PlayerColorCosmetic.cs:OnMatchEnd	9c17d36f75e161b2
 member	PlayerColorCosmetic.cs:OnMatchStart	2a6daa90fc33ea87
 member	PlayerColorCosmetic.cs:OnPlayerPropertiesChanged	77d68ae087e0e4f2
 member	PlayerColorCosmetic.cs:OnRoundStart	40477a791b5bf743
-member	PlayerColorCosmetic.cs:OnShowPlayerColorsToggled	df3d1ed5a1c46f85
+member	PlayerColorCosmetic.cs:OnShowPlayerColorsToggled	f426389f5c9b861a
 member	PlayerColorCosmetic.cs:PortraitFrameReady	44de526179fe78e5
 member	PlayerColorCosmetic.cs:ReapplyForActor	9e15ac7c1c472a63
 member	PlayerColorCosmetic.cs:RevertOnState	08131eefd084beb7
@@ -68687,7 +68687,7 @@ member	PlayerEffectCosmetic.cs:OnMatchEnd	d1dcf8090838d6ed
 member	PlayerEffectCosmetic.cs:OnMatchStart	e21175deadd15806
 member	PlayerEffectCosmetic.cs:OnPlayerPropertiesChanged	79eb1b1d2e6f3de3
 member	PlayerEffectCosmetic.cs:OnRoundStart	769428973ffdf0cb
-member	PlayerEffectCosmetic.cs:OnShowPlayerColorsToggled	850ac992a38b27cd
+member	PlayerEffectCosmetic.cs:OnShowPlayerColorsToggled	671802cb6a38d82f
 member	PlayerEffectCosmetic.cs:ReapplyForActor	6760a4071b90294c
 member	PlayerEffectCosmetic.cs:SetAnimatedCosmetics	db7aca53dc949c15
 member	PlayerEffectCosmetic.cs:StopPreview	f77ab46b7cd92b86
@@ -69080,7 +69080,7 @@ member	PortraitRender.cs:CurrentPreset	a690341e2748d246
 member	PortraitRender.cs:DanceDescriptor	81d03424c6734d8f
 member	PortraitRender.cs:DanceProbeFrames	43c00a38add227e0
 member	PortraitRender.cs:DanceTeardownVerdict	2d3db33638ab5a37
-member	PortraitRender.cs:DevLeverBlocked	da8e0f263950b993
+member	PortraitRender.cs:DevLeverBlocked	5bcfa47c1d15b75f
 member	PortraitRender.cs:DevPresetSlotSentinelTest	43c0aaed3aa9d28c
 member	PortraitRender.cs:DevRun	08a042a7e9ee516f
 member	PortraitRender.cs:DevShot	5d2245e098e913c2
@@ -69147,8 +69147,8 @@ member	PortraitRender.cs:SolidBounds	f39b6e313c1b4692
 member	PortraitRender.cs:SquareFit	cfa98ae940d4aba2
 member	PortraitRender.cs:Stale	b4c71dbcd4f0ee7d
 member	PortraitRender.cs:Start	c65e1b0b217dfc29
-member	PortraitRender.cs:StartProduct	236ad7c1635b3ad2
-member	PortraitRender.cs:StateKey	6e67903517a0204b
+member	PortraitRender.cs:StartProduct	bf674b219507e431
+member	PortraitRender.cs:StateKey	e221d11a8a36aa02
 member	PortraitRender.cs:Summary#1	e7d0c582dfa25a4f
 member	PortraitRender.cs:Summary#2	9819e533d1500572
 member	PortraitRender.cs:Summary#3	3f0ba360bbddbbef
@@ -69185,7 +69185,7 @@ member	PortraitRenderDance.cs:DanceSeatCan	03e9163924cef004
 member	PortraitRenderDance.cs:DanceSeatWaits	bec304f0c9f6363e
 member	PortraitRenderDance.cs:DanceSetPreview	95be00beb8f3d242
 member	PortraitRenderDance.cs:DanceSsTarget	f5dea982f5da9378
-member	PortraitRenderDance.cs:DanceStateKey	c1398f0bee194b71
+member	PortraitRenderDance.cs:DanceStateKey	3ed0228bad4f8834
 member	PortraitRenderDance.cs:DanceStillOnly	6f3bc8b825d3ec6d
 member	PortraitRenderDance.cs:DanceSweepPhotonViews	ec148d36fd5141a6
 member	PortraitRenderDance.cs:DanceTarget	7830ccdd487c09ba
@@ -69195,11 +69195,11 @@ member	PortraitRenderDance.cs:DanceVisit	ee8ea070e65a952d
 member	PortraitRenderDance.cs:DanceWarmTick	574c0c65dd34a8ba
 member	PortraitRenderDance.cs:End	cf6c10452d0daf00
 member	PortraitRenderDance.cs:Free	9896a11f8dba307d
-member	PortraitRenderDance.cs:Holds	0f3ed894689a37af
+member	PortraitRenderDance.cs:Holds	383a356496f15fd8
 member	PortraitRenderDance.cs:Max	0345b18e834b34bf
 member	PortraitRenderDance.cs:RefreshStart	fa1f3e6f59f03d7c
 member	PortraitRenderDance.cs:Rest	d67b776dccb59ab8
-member	PortraitRenderDance.cs:StartDance	5483006f61c8f121
+member	PortraitRenderDance.cs:StartDance	ec87497fa6baae42
 member	PortraitRenderDance.cs:Summary#1	ca5e5fa3600e85b2
 member	PortraitRenderDance.cs:Summary#2	9200a8f7a31f3132
 member	PortraitRenderDance.cs:Top	0e22598cfabf8b5b
@@ -69318,7 +69318,7 @@ member	ProfileCard.cs:Resize	a355abc68801895a
 member	ProfileCard.cs:ResultName	2afc16a480256edb
 member	ProfileCard.cs:RunParseSelfTest	44f6a98fbbd81e93
 member	ProfileCard.cs:Teardown	0eb50b7d45874481
-member	ProfileCard.cs:Tick	06a38467a70ccd93
+member	ProfileCard.cs:Tick	8e3ef8e281a3bcaa
 member	ProfileCard.cs:TopString	6da1a31d4ce8cb88
 member	ProfileCard.cs:Unescape	4106bc2dce49a965
 member	ProximityVictimPatches.cs:BeforeGo#1	c973c8dffe8a120f
@@ -70201,7 +70201,7 @@ member	TrailRenderer.cs:OnMatchStart	04b122766f6086fd
 member	TrailRenderer.cs:OnPlayerPropertiesChanged	ad70649d829d9da5
 member	TrailRenderer.cs:OnPlayerPropertiesUpdate	63d7f9b515d58e4f
 member	TrailRenderer.cs:ReattachForActor	43b3bb40c3778b99
-member	TrailRenderer.cs:SetShowTrails	1a70055acb5ec98a
+member	TrailRenderer.cs:SetShowTrails	fd78d361dc7161c6
 member	UnicodeFallback.cs:AddAssets	f2a3671316133da6
 member	UnicodeFallback.cs:AddCodepoints	8c1f8b3fecfb06f4
 member	UnicodeFallback.cs:AddRanges	605cf7f024905b12
@@ -70378,17 +70378,17 @@ member	VanillaFixes.cs:WaitForStaleListThenDeal	7da1f97861f7df64
 sink	BroadcastHud.cs:DrawActionRow	5	5	e3a6677ace59f9b3	attached	BroadcastHud.cs:Draw
 sink	CompetitiveUI.cs:DrawChatInput	2	1	f2b16c849c09700e	attached	CompetitiveUI.cs:DrawUI
 sink	CompetitiveUI.cs:DrawDanceWheel	2	1	75517cbac7d14c37	attached	CompetitiveUI.cs:DrawUI
-sink	CompetitiveUI.cs:DrawInputOverlay	2	1	5412be93d9435cb0	attached	CompetitiveUI.cs:DrawUI
+sink	CompetitiveUI.cs:DrawInputOverlay	2	1	1dc17b957676caff	attached	CompetitiveUI.cs:DrawUI
 sink	CompetitiveUI.cs:DrawQuickChat	2	1	e23b05213e46a588	attached	CompetitiveUI.cs:DrawUI
-sink	InfoLibrary.cs:ControlsOutro	6002	57940	a311959ed7dc43c7	attached	BroadcastHud.cs:Draw,CompetitiveUI.cs:DrawUI,GameStateWatcher.cs:PollMatchState,Keybinds.cs:CommitRows,NativeUI.Keybinds.cs:KeybindPaintAll,NativeUI.Settings.cs:SettingsRenderPane,NativeUI.Settings.cs:SettingsShowExtras,NativeUI.cs:BuildPage,NativeUI.cs:RefreshCurrentTab,NativeUI.cs:SelectInfoArticle
-sink	InfoLibrary.cs:Cosmetics	6002	57940	a311959ed7dc43c7	attached	BroadcastHud.cs:Draw,CompetitiveUI.cs:DrawUI,GameStateWatcher.cs:PollMatchState,Keybinds.cs:CommitRows,NativeUI.Keybinds.cs:KeybindPaintAll,NativeUI.Settings.cs:SettingsRenderPane,NativeUI.Settings.cs:SettingsShowExtras,NativeUI.cs:BuildPage,NativeUI.cs:RefreshCurrentTab,NativeUI.cs:SelectInfoArticle
-sink	InfoLibrary.cs:Spectating	6002	57940	a311959ed7dc43c7	attached	BroadcastHud.cs:Draw,CompetitiveUI.cs:DrawUI,GameStateWatcher.cs:PollMatchState,Keybinds.cs:CommitRows,NativeUI.Keybinds.cs:KeybindPaintAll,NativeUI.Settings.cs:SettingsRenderPane,NativeUI.Settings.cs:SettingsShowExtras,NativeUI.cs:BuildPage,NativeUI.cs:RefreshCurrentTab,NativeUI.cs:SelectInfoArticle
-sink	InfoLibrary.cs:StartHere	6002	57940	a311959ed7dc43c7	attached	BroadcastHud.cs:Draw,CompetitiveUI.cs:DrawUI,GameStateWatcher.cs:PollMatchState,Keybinds.cs:CommitRows,NativeUI.Keybinds.cs:KeybindPaintAll,NativeUI.Settings.cs:SettingsRenderPane,NativeUI.Settings.cs:SettingsShowExtras,NativeUI.cs:BuildPage,NativeUI.cs:RefreshCurrentTab,NativeUI.cs:SelectInfoArticle
-sink	InfoLibrary.cs:VanillaBugs	6002	57940	a311959ed7dc43c7	attached	BroadcastHud.cs:Draw,CompetitiveUI.cs:DrawUI,GameStateWatcher.cs:PollMatchState,Keybinds.cs:CommitRows,NativeUI.Keybinds.cs:KeybindPaintAll,NativeUI.Settings.cs:SettingsRenderPane,NativeUI.Settings.cs:SettingsShowExtras,NativeUI.cs:BuildPage,NativeUI.cs:RefreshCurrentTab,NativeUI.cs:SelectInfoArticle
-sink	InfoViz.cs:BuildKeyboard	6002	57940	a311959ed7dc43c7	attached	BroadcastHud.cs:Draw,CompetitiveUI.cs:DrawUI,GameStateWatcher.cs:PollMatchState,Keybinds.cs:CommitRows,NativeUI.Keybinds.cs:KeybindPaintAll,NativeUI.Settings.cs:SettingsRenderPane,NativeUI.Settings.cs:SettingsShowExtras,NativeUI.cs:BuildPage,NativeUI.cs:RefreshCurrentTab,NativeUI.cs:SelectInfoArticle
+sink	InfoLibrary.cs:ControlsOutro	6002	57940	78a8f2495499e37c	attached	BroadcastHud.cs:Draw,CompetitiveUI.cs:DrawUI,GameStateWatcher.cs:PollMatchState,Keybinds.cs:CommitRows,NativeUI.Keybinds.cs:KeybindPaintAll,NativeUI.Settings.cs:SettingsRenderPane,NativeUI.Settings.cs:SettingsShowExtras,NativeUI.cs:BuildPage,NativeUI.cs:RefreshCurrentTab,NativeUI.cs:SelectInfoArticle
+sink	InfoLibrary.cs:Cosmetics	6002	57940	78a8f2495499e37c	attached	BroadcastHud.cs:Draw,CompetitiveUI.cs:DrawUI,GameStateWatcher.cs:PollMatchState,Keybinds.cs:CommitRows,NativeUI.Keybinds.cs:KeybindPaintAll,NativeUI.Settings.cs:SettingsRenderPane,NativeUI.Settings.cs:SettingsShowExtras,NativeUI.cs:BuildPage,NativeUI.cs:RefreshCurrentTab,NativeUI.cs:SelectInfoArticle
+sink	InfoLibrary.cs:Spectating	6002	57940	78a8f2495499e37c	attached	BroadcastHud.cs:Draw,CompetitiveUI.cs:DrawUI,GameStateWatcher.cs:PollMatchState,Keybinds.cs:CommitRows,NativeUI.Keybinds.cs:KeybindPaintAll,NativeUI.Settings.cs:SettingsRenderPane,NativeUI.Settings.cs:SettingsShowExtras,NativeUI.cs:BuildPage,NativeUI.cs:RefreshCurrentTab,NativeUI.cs:SelectInfoArticle
+sink	InfoLibrary.cs:StartHere	6002	57940	78a8f2495499e37c	attached	BroadcastHud.cs:Draw,CompetitiveUI.cs:DrawUI,GameStateWatcher.cs:PollMatchState,Keybinds.cs:CommitRows,NativeUI.Keybinds.cs:KeybindPaintAll,NativeUI.Settings.cs:SettingsRenderPane,NativeUI.Settings.cs:SettingsShowExtras,NativeUI.cs:BuildPage,NativeUI.cs:RefreshCurrentTab,NativeUI.cs:SelectInfoArticle
+sink	InfoLibrary.cs:VanillaBugs	6002	57940	78a8f2495499e37c	attached	BroadcastHud.cs:Draw,CompetitiveUI.cs:DrawUI,GameStateWatcher.cs:PollMatchState,Keybinds.cs:CommitRows,NativeUI.Keybinds.cs:KeybindPaintAll,NativeUI.Settings.cs:SettingsRenderPane,NativeUI.Settings.cs:SettingsShowExtras,NativeUI.cs:BuildPage,NativeUI.cs:RefreshCurrentTab,NativeUI.cs:SelectInfoArticle
+sink	InfoViz.cs:BuildKeyboard	6002	57940	78a8f2495499e37c	attached	BroadcastHud.cs:Draw,CompetitiveUI.cs:DrawUI,GameStateWatcher.cs:PollMatchState,Keybinds.cs:CommitRows,NativeUI.Keybinds.cs:KeybindPaintAll,NativeUI.Settings.cs:SettingsRenderPane,NativeUI.Settings.cs:SettingsShowExtras,NativeUI.cs:BuildPage,NativeUI.cs:RefreshCurrentTab,NativeUI.cs:SelectInfoArticle
 sink	Keybinds.cs:ApplyJoin	5	4	116d269dcc76ee4c	attached	Keybinds.cs:CommitRows
 sink	Keybinds.cs:ApplyReady	5	4	3bb007885d986e1f	attached	Keybinds.cs:CommitRows
-sink	Keybinds.cs:OnRoundStart	9	9	b718ae0e273c3984	attached	GameStateWatcher.cs:PollMatchState
+sink	Keybinds.cs:OnRoundStart	9	9	ef7f3af200ac2ddb	attached	GameStateWatcher.cs:PollMatchState
 sink	Keybinds.cs:RefreshAll	2	1	fb6a0440324c0395	attached	Keybinds.cs:CommitRows
 sink	NativeUI.Keybinds.cs:KbRefreshNamedDescs	2	1	302cbc5aa531339f	attached	NativeUI.Keybinds.cs:KeybindPaintAll
 sink	NativeUI.Keybinds.cs:KbRepaintLangNoteIfDue	2	1	9d99563b94be4109	attached	NativeUI.Settings.cs:SettingsShowExtras

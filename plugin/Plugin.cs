@@ -9710,7 +9710,7 @@ namespace CompetitiveRounds
                         break;
                 }
                 if (user) BlockChain.LastUserWindowTime = Time.time;
-                if (GameStateWatcher.IsTracking
+                if (GameStateWatcher.PhysicalGameLive
                     && Plugin.ShowBlockDebug != null && Plugin.ShowBlockDebug.Value)
                     Plugin.Log.LogInfo($"[BLOCK-DBG] WINDOW type={triggerType} first={firstBlock} user={user}");
             }

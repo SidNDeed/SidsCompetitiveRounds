@@ -1,5 +1,5 @@
 # tools/keybind_surfaces.py callers (fix pass 3 H1): source	consumer	references	digest	class	note
-CompetitiveUI.cs:OverlaySmall	CompetitiveUI.cs:DrawInputOverlay	4	86fd3e02f1ba9af3	display	the input overlay's cap font size
+CompetitiveUI.cs:OverlaySmall	CompetitiveUI.cs:DrawInputOverlay	4	fdaf792c91cb5f1d	display	the input overlay's cap font size
 GameStateWatcher.cs:UnionActed	GameStateWatcher.cs:TickAchievementInput	3	09da2d096ee02127	nondisplay	achievement input: whether the player shot, moved or jumped sets an achievement flag; renders nothing
 InfoViz.cs:Cap	InfoViz.cs:BuildKeyboard	12	a9b2796df0c43156	display	the keyboard guide's legend lines name each bound key's cap
 InfoViz.cs:Cap	InfoViz.cs:MoveCaps	4	5d93a93c5cb25d83	producer	the move legend's four caps
@@ -83,7 +83,7 @@ NativeUI.Keybinds.cs:KeybindFace	NativeUI.Keybinds.cs:KeybindRowFace	1	8ad08b4f2
 NativeUI.Keybinds.cs:KeybindJoinPrompt	Keybinds.cs:ApplyJoin	1	299f79c617f04fad	display	writes the join prompt's label
 NativeUI.Keybinds.cs:KeybindKeyName	NativeUI.Keybinds.cs:KeybindFace	1	19f7566b5caf28bc	producer	a key binding's face
 NativeUI.Keybinds.cs:KeybindMouseName	NativeUI.Keybinds.cs:KeybindFace	1	19f7566b5caf28bc	producer	a mouse binding's face
-NativeUI.Keybinds.cs:KeybindOverlayCap	CompetitiveUI.cs:DrawInputOverlay	7	86fd3e02f1ba9af3	display	the input overlay's cap labels
+NativeUI.Keybinds.cs:KeybindOverlayCap	CompetitiveUI.cs:DrawInputOverlay	7	fdaf792c91cb5f1d	display	the input overlay's cap labels
 NativeUI.Keybinds.cs:KeybindOverlayCap	CompetitiveUI.cs:OverlaySmall	1	334e56040f37e9d3	pass	whether an input overlay cap label takes the small font
 NativeUI.Keybinds.cs:KeybindOverlayCap	NativeUI.Keybinds.cs:KeybindSemanticCap	1	2a6753ea506e8ca2	producer	the broadcast HUD's cap label
 NativeUI.Keybinds.cs:KeybindReadyPrompt	Keybinds.cs:ApplyReady	1	af1649f08e31c9bb	display	writes the ready-up prompt's label

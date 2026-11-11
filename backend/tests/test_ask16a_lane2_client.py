@@ -1655,6 +1655,128 @@ def claim_the_real_end_holds_the_platform_results(files):
     return out
 
 
+TRACKING_WORDS = re.compile(r"(?<![A-Za-z0-9_])(isTracking|IsTracking|IsInMatch|PhysicalGameLive)(?![A-Za-z0-9_])")
+PHYSICAL_GAME_LIVE = 'public static bool PhysicalGameLive => isTracking || (LimitlessFence.RecordOpenForCurrentGid && !RoomActors.LocalIsSpectator);'
+
+# v4 section 6, Table C2 (H8): every line of plugin/*.cs that names isTracking,
+# IsTracking, IsInMatch or PhysicalGameLive, comments and literals aside, with its
+# signal: an activity row reads PhysicalGameLive, a suppression row keeps the
+# tracking flag; the definitions and the writes are listed as such.
+TRACKING_READERS = (
+    ('CompetitiveUI.cs', 'if (!GameStateWatcher.PhysicalGameLive) return;', 'activity'),
+    ('CompetitiveUI.cs', 'if (!GameStateWatcher.PhysicalGameLive) return;', 'activity'),
+    ('CompetitiveUI.cs', 'if (!MatchTracker.IsInMatch) return;', 'suppression'),
+    ('EmojiSprites.cs', 'return MusicAdmission.ClickAdmissible(out _, out _) && !GameStateWatcher.PhysicalGameLive;', 'activity'),
+    ('EscLeaveRow.cs', 'try { im = GameStateWatcher.PhysicalGameLive; } catch { }', 'activity'),
+    ('EscLeaveRow.cs', 'try { ranked = GameStateWatcher.MatchIsRanked; inMatch = GameStateWatcher.IsInMatch; } catch { }', 'suppression'),
+    ('GameStateWatcher.cs', 'private static bool isTracking = false;', 'definition'),
+    ('GameStateWatcher.cs', 'public static bool IsTracking => isTracking;', 'definition'),
+    ('GameStateWatcher.cs', 'public static bool PhysicalGameLive => isTracking || (LimitlessFence.RecordOpenForCurrentGid && !RoomActors.LocalIsSpectator);', 'definition'),
+    ('GameStateWatcher.cs', 'if (!isTracking) return;', 'suppression'),
+    ('GameStateWatcher.cs', 'if (!isTracking) return;', 'suppression'),
+    ('GameStateWatcher.cs', 'if (!isTracking || inPickPhase) return;', 'suppression'),
+    ('GameStateWatcher.cs', 'if (!isTracking || inPickPhase) return;', 'suppression'),
+    ('GameStateWatcher.cs', 'if (!isTracking || inPickPhase) return;', 'suppression'),
+    ('GameStateWatcher.cs', 'if (isTracking) TryRefreshSharedGameToken();', 'suppression'),
+    ('GameStateWatcher.cs', 'if (!isTracking && PhysicalGameLive) return LimitlessFence.CurrentRecord.Spectatable;', 'activity'),
+    ('GameStateWatcher.cs', 'if (!matchIsRanked || !isTracking) return false;', 'suppression'),
+    ('GameStateWatcher.cs', 'if (!PhysicalGameLive) return;', 'activity'),
+    ('GameStateWatcher.cs', '|| PhysicalGameLive;', 'activity'),
+    ('GameStateWatcher.cs', 'if (!isTracking) { _lastTickStopwatchMs = -1; return; }', 'suppression'),
+    ('GameStateWatcher.cs', 'if (recentFps > 0 && isTracking)', 'suppression'),
+    ('GameStateWatcher.cs', 'if (inRoom && !PhysicalGameLive && !inPickPhase)', 'activity'),
+    ('GameStateWatcher.cs', 'if (inRoom && isTracking && oneVOneMatchAtStart)', 'suppression'),
+    ('GameStateWatcher.cs', 'if (isTracking && !gameOverReported && RoomModeLabels.SuppressOneVOneOutcome(photonRoomId))', 'suppression'),
+    ('GameStateWatcher.cs', 'else if (isTracking && !gameOverReported)', 'suppression'),
+    ('GameStateWatcher.cs', 'if (!rankedRoomEverFull && !PhysicalGameLive)', 'activity'),
+    ('GameStateWatcher.cs', 'if (inRoom && isTracking && !gameOverReported)', 'suppression'),
+    ('GameStateWatcher.cs', 'bool midGame = (isTracking && !gameOverReported) || (!isTracking && PhysicalGameLive);', 'activity'),
+    ('GameStateWatcher.cs', 'if (isTracking && !string.IsNullOrEmpty(luSid) && luTeam >= 0)', 'suppression'),
+    ('GameStateWatcher.cs', 'if (gameActive && !wasGameInProgress && !isTracking)', 'suppression'),
+    ('GameStateWatcher.cs', 'if (isTracking)', 'suppression'),
+    ('GameStateWatcher.cs', 'else if (PhysicalGameLive && (curP1Rounds != lastP1Rounds || curP2Rounds != lastP2Rounds))', 'activity'),
+    ('GameStateWatcher.cs', 'if (!isTracking || string.IsNullOrEmpty(LocalSteamId)) return;', 'suppression'),
+    ('GameStateWatcher.cs', 'isTracking = true;', 'write'),
+    ('GameStateWatcher.cs', 'if (!isTracking || gameOverReported) return;', 'suppression'),
+    ('GameStateWatcher.cs', 'isTracking = false;', 'write'),
+    ('GameStateWatcher.cs', 'isTracking = false;', 'write'),
+    ('GameStateWatcher.cs', 'isTracking = false;', 'write'),
+    ('GameStateWatcher.cs', 'isTracking = false;', 'write'),
+    ('GameStateWatcher.cs', 'isTracking = false;', 'write'),
+    ('GameStateWatcher.cs', 'isTracking = true;', 'write'),
+    ('GameStateWatcher.cs', 'isTracking = false;', 'write'),
+    ('GameStateWatcher.cs', 'if (!PhysicalGameLive) { LocalAliveInCombatNow = false; return; }', 'activity'),
+    ('GameStateWatcher.cs', 'if (!isTracking)', 'suppression'),
+    ('GameStateWatcher.cs', 'if (!PhysicalGameLive) return Gate.NotInCombat;', 'activity'),
+    ('GameStateWatcher.cs', 'if (!isTracking) return;', 'suppression'),
+    ('GameStateWatcher.cs', 'if (!isTracking)', 'suppression'),
+    ('GameStateWatcher.cs', 'if (!PhysicalGameLive)', 'activity'),
+    ('GameStateWatcher.cs', 'if (!PhysicalGameLive)', 'activity'),
+    ('GameStateWatcher.cs', 'isTracking = false;', 'write'),
+    ('GameStateWatcher.cs', 'public static bool IsInMatch => isTracking;', 'definition'),
+    ('GameStateWatcher.cs', 'if (!isTracking || gameOverReported) return;', 'suppression'),
+    ('GameStateWatcher.cs', 'try { return PhysicalGameLive && !RoomActors.LocalIsSpectator && !PhotonNetwork.OfflineMode && PhotonNetwork.InRoom; }', 'activity'),
+    ('MailClient.cs', 'if (GameStateWatcher.PhysicalGameLive) return false;', 'activity'),
+    ('MailUI.cs', 'if (GameStateWatcher.PhysicalGameLive) return;', 'activity'),
+    ('MatchTracker.cs', 'public static bool IsInMatch => GameStateWatcher.IsInMatch;', 'definition'),
+    ('NativeUI.cs', 'if (GameStateWatcher.PhysicalGameLive)', 'activity'),
+    ('NativeUI.cs', 'if (GameStateWatcher.PhysicalGameLive)', 'activity'),
+    ('NativeUI.cs', 'private static void RefreshQueueUI(){if(txtRankedStatus==null)return;bool ranked=Plugin.RankedEnabled.Value;var qs=ApiClient.CurrentQueueState;UIFactory.SetText(txtRankedStatus,ranked?"RANKED: ON":"RANKED: OFF");UIFactory.SetColor(txtRankedStatus,ranked?C_GREEN:Color.gray);rankOnBtn.SetActive(!ranked);rankOffBtn.SetActive(ranked&&!inGameMode);bool inRankedMatch=GameStateWatcher.PhysicalGameLive&&GameStateWatcher.MatchIsRanked;', 'activity'),
+    ('PerfPatches.cs', 'try { if (!GameStateWatcher.PhysicalGameLive) return; }', 'activity'),
+    ('PerfPatches.cs', 'bool inMatch = GameStateWatcher.PhysicalGameLive;', 'activity'),
+    ('PlayerColorCosmetic.cs', 'else if (GameStateWatcher.PhysicalGameLive)', 'activity'),
+    ('PlayerEffectCosmetic.cs', 'else if (GameStateWatcher.PhysicalGameLive) OnMatchStart();', 'activity'),
+    ('Plugin.cs', 'if (!GameStateWatcher.IsInMatch)', 'suppression'),
+    ('Plugin.cs', 'if (GameStateWatcher.PhysicalGameLive', 'activity'),
+    ('PortraitRender.cs', 'if (GameStateWatcher.PhysicalGameLive) return "a match is tracked";', 'activity'),
+    ('PortraitRender.cs', 'if (GameStateWatcher.PhysicalGameLive) { LastResult = "skipped: in a match"; return false; }', 'activity'),
+    ('PortraitRender.cs', '+ "|" + (GameStateWatcher.PhysicalGameLive ? 1 : 0)', 'activity'),
+    ('PortraitRenderDance.cs', '+ "|" + (GameStateWatcher.PhysicalGameLive ? 1 : 0)', 'activity'),
+    ('PortraitRenderDance.cs', 'if (GameStateWatcher.PhysicalGameLive) { LastResult = "skipped: in a match"; return false; }', 'activity'),
+    ('PortraitRenderDance.cs', 'return _epoch == ApiClient.IdentityEpoch && _key == DanceStateKey() && !GameStateWatcher.PhysicalGameLive;', 'activity'),
+    ('ProfileCard.cs', 'bool blocked = ClickHandler.ModalBlockInput || GameStateWatcher.PhysicalGameLive || CompetitiveUI.PageImguiHidden;', 'activity'),
+    ('TrailRenderer.cs', 'if (GameStateWatcher.PhysicalGameLive) OnMatchStart();', 'activity'),
+)
+
+
+def _tracking_readers(files):
+    got = []
+    for name in sorted(files):
+        masked, stripped = _masks(files[name])
+        for m, s in zip(masked.split("\n"), stripped.split("\n")):
+            if TRACKING_WORDS.search(m):
+                got.append((name, s.strip()))
+    return got
+
+
+def claim_table_c2_pins_every_tracking_reader(files):
+    """Section 6, Table C2 (H8): every line of plugin/*.cs that names
+    isTracking, IsTracking, IsInMatch or PhysicalGameLive, outside comments
+    and literals, is a row of TRACKING_READERS. Every activity row reads
+    PhysicalGameLive, and every suppression row keeps the tracking flag, so a
+    reader the table does not list, or one that reads the other signal, fails.
+    PhysicalGameLive is isTracking, or a fighter's live or terminating record
+    of its live gid."""
+    out = []
+    got = sorted(_tracking_readers(files))
+    want = sorted((f, s) for f, s, _ in TRACKING_READERS)
+    if got != want:
+        extra = [x for x in got if got.count(x) > want.count(x)]
+        gone = [x for x in want if want.count(x) > got.count(x)]
+        out.append("Table C2 does not pin every reader: unpinned %r, gone %r" % (extra[:2], gone[:2]))
+    for f, s, sig in TRACKING_READERS:
+        if sig == "activity" and "PhysicalGameLive" not in s:
+            out.append("an activity row does not read PhysicalGameLive: " + s)
+        if sig == "suppression" and "PhysicalGameLive" in s:
+            out.append("a suppression row reads PhysicalGameLive: " + s)
+    if _code(files["GameStateWatcher.cs"]).count(PHYSICAL_GAME_LIVE) != 1:
+        out.append("PhysicalGameLive is not isTracking or a fighter's open record")
+    if "get { return RecordOpen && _ledger.IsLiveGid(_record.Gid); }" not in _code(
+            files["LimitlessFence.cs"], "internal static bool RecordOpenForCurrentGid"):
+        out.append("the record is read without this seat's live gid")
+    return out
+
+
 CLAIMS = {
     "game_start_prefix": claim_the_game_start_prefix,
     "stamp_before_join": claim_the_gid_is_stamped_before_the_join,
@@ -1706,6 +1828,7 @@ CLAIMS = {
     "base_results": claim_the_base_runs_vanillas_results_once,
     "real_end_hold": claim_the_real_end_holds_the_platform_results,
     "token_real_end": claim_the_reported_token_stays_ended,
+    "table_c2": claim_table_c2_pins_every_tracking_reader,
 }
 
 GATE = "                if (SpectatorPatchSupport.Suppress) return;\n"
@@ -2352,6 +2475,80 @@ MUTANTS = [
     ("token_real_end", "the real end re-arms the token's game",
      [("TeamGameNumber.cs", "                return GmVoid(\"the game itself ended this seat's game\");\n",
        "                inGame = true;\n                return GmVoid(\"the game itself ended this seat's game\");\n")]),
+    ('table_c2', "Table C2: CompetitiveUI.cs's activity reader 1 reads the tracking flag again",
+     [('CompetitiveUI.cs', '            if (Plugin.ShowInputOverlay == null || !Plugin.ShowInputOverlay.Value) return;\n            if (!GameStateWatcher.PhysicalGameLive) return;\n', '            if (Plugin.ShowInputOverlay == null || !Plugin.ShowInputOverlay.Value) return;\n            if (!GameStateWatcher.IsInMatch) return;\n')]),
+    ('table_c2', "Table C2: CompetitiveUI.cs's activity reader 2 reads the tracking flag again",
+     [('CompetitiveUI.cs', '            if (Plugin.ShowBlockDebug == null || !Plugin.ShowBlockDebug.Value) return;\n            if (!GameStateWatcher.PhysicalGameLive) return;\n', '            if (Plugin.ShowBlockDebug == null || !Plugin.ShowBlockDebug.Value) return;\n            if (!GameStateWatcher.IsInMatch) return;\n')]),
+    ('table_c2', "Table C2: EmojiSprites.cs's activity reader 1 reads the tracking flag again",
+     [('EmojiSprites.cs', '                return MusicAdmission.ClickAdmissible(out _, out _) && !GameStateWatcher.PhysicalGameLive;\n', '                return MusicAdmission.ClickAdmissible(out _, out _) && !GameStateWatcher.IsInMatch;\n')]),
+    ('table_c2', "Table C2: EscLeaveRow.cs's activity reader 1 reads the tracking flag again",
+     [('EscLeaveRow.cs', '                try { im = GameStateWatcher.PhysicalGameLive; } catch { }\n', '                try { im = GameStateWatcher.IsInMatch; } catch { }\n')]),
+    ('table_c2', "Table C2: GameStateWatcher.cs's activity reader 1 reads the tracking flag again",
+     [('GameStateWatcher.cs', '                    if (!isTracking && PhysicalGameLive) return LimitlessFence.CurrentRecord.Spectatable;\n', '                    if (!isTracking && isTracking) return LimitlessFence.CurrentRecord.Spectatable;\n')]),
+    ('table_c2', "Table C2: GameStateWatcher.cs's activity reader 2 reads the tracking flag again",
+     [('GameStateWatcher.cs', "                if (!PhysicalGameLive) return;  // only while a game is live (Table C2: a continuation's too)\n", "                if (!isTracking) return;  // only while a game is live (Table C2: a continuation's too)\n")]),
+    ('table_c2', "Table C2: GameStateWatcher.cs's activity reader 3 reads the tracking flag again",
+     [('GameStateWatcher.cs', '                                || PhysicalGameLive;\n', '                                || isTracking;\n')]),
+    ('table_c2', "Table C2: GameStateWatcher.cs's activity reader 4 reads the tracking flag again",
+     [('GameStateWatcher.cs', '            if (inRoom && !PhysicalGameLive && !inPickPhase)\n', '            if (inRoom && !isTracking && !inPickPhase)\n')]),
+    ('table_c2', "Table C2: GameStateWatcher.cs's activity reader 5 reads the tracking flag again",
+     [('GameStateWatcher.cs', '                if (!rankedRoomEverFull && !PhysicalGameLive)\n', '                if (!rankedRoomEverFull && !isTracking)\n')]),
+    ('table_c2', "Table C2: GameStateWatcher.cs's activity reader 6 reads the tracking flag again",
+     [('GameStateWatcher.cs', '                bool midGame = (isTracking && !gameOverReported) || (!isTracking && PhysicalGameLive);   // Table C2: the banner follows the physical game\n', '                bool midGame = (isTracking && !gameOverReported) || (!isTracking && isTracking);   // Table C2: the banner follows the physical game\n')]),
+    ('table_c2', "Table C2: GameStateWatcher.cs's activity reader 7 reads the tracking flag again",
+     [('GameStateWatcher.cs', '            else if (PhysicalGameLive && (curP1Rounds != lastP1Rounds || curP2Rounds != lastP2Rounds))\n', '            else if (isTracking && (curP1Rounds != lastP1Rounds || curP2Rounds != lastP2Rounds))\n')]),
+    ('table_c2', "Table C2: GameStateWatcher.cs's activity reader 8 reads the tracking flag again",
+     [('GameStateWatcher.cs', '            if (!PhysicalGameLive) { LocalAliveInCombatNow = false; return; }\n', '            if (!isTracking) { LocalAliveInCombatNow = false; return; }\n')]),
+    ('table_c2', "Table C2: GameStateWatcher.cs's activity reader 9 reads the tracking flag again",
+     [('GameStateWatcher.cs', '                if (!PhysicalGameLive) return Gate.NotInCombat;\n', '                if (!isTracking) return Gate.NotInCombat;\n')]),
+    ('table_c2', "Table C2: GameStateWatcher.cs's activity reader 10 reads the tracking flag again",
+     [('GameStateWatcher.cs', '                if (!PhysicalGameLive)   // Table C2: nothing is kept as a pre-match pick while a record is live\n', '                if (!isTracking)   // Table C2: nothing is kept as a pre-match pick while a record is live\n')]),
+    ('table_c2', "Table C2: GameStateWatcher.cs's activity reader 11 reads the tracking flag again",
+     [('GameStateWatcher.cs', '            if (!PhysicalGameLive)   // Table C2: as above\n', '            if (!isTracking)   // Table C2: as above\n')]),
+    ('table_c2', "Table C2: GameStateWatcher.cs's activity reader 12 reads the tracking flag again",
+     [('GameStateWatcher.cs', '                try { return PhysicalGameLive && !RoomActors.LocalIsSpectator && !PhotonNetwork.OfflineMode && PhotonNetwork.InRoom; }\n', '                try { return isTracking && !RoomActors.LocalIsSpectator && !PhotonNetwork.OfflineMode && PhotonNetwork.InRoom; }\n')]),
+    ('table_c2', "Table C2: MailClient.cs's activity reader 1 reads the tracking flag again",
+     [('MailClient.cs', '            if (GameStateWatcher.PhysicalGameLive) return false;\n', '            if (GameStateWatcher.IsInMatch) return false;\n')]),
+    ('table_c2', "Table C2: MailUI.cs's activity reader 1 reads the tracking flag again",
+     [('MailUI.cs', '            if (GameStateWatcher.PhysicalGameLive) return;\n', '            if (GameStateWatcher.IsInMatch) return;\n')]),
+    ('table_c2', "Table C2: NativeUI.cs's activity reader 1 reads the tracking flag again",
+     [('NativeUI.cs', '                                try { PlayerColorCosmetic.PublishLocalProps(); } catch { }\n                                if (GameStateWatcher.PhysicalGameLive)\n', '                                try { PlayerColorCosmetic.PublishLocalProps(); } catch { }\n                                if (GameStateWatcher.IsInMatch)\n')]),
+    ('table_c2', "Table C2: NativeUI.cs's activity reader 2 reads the tracking flag again",
+     [('NativeUI.cs', '                                try { PlayerEffectCosmetic.PublishLocalProps(); } catch { }\n                                if (GameStateWatcher.PhysicalGameLive)\n', '                                try { PlayerEffectCosmetic.PublishLocalProps(); } catch { }\n                                if (GameStateWatcher.IsInMatch)\n')]),
+    ('table_c2', "Table C2: NativeUI.cs's activity reader 3 reads the tracking flag again",
+     [('NativeUI.cs', '        private static void RefreshQueueUI(){if(txtRankedStatus==null)return;bool ranked=Plugin.RankedEnabled.Value;var qs=ApiClient.CurrentQueueState;UIFactory.SetText(txtRankedStatus,ranked?"RANKED: ON":"RANKED: OFF");UIFactory.SetColor(txtRankedStatus,ranked?C_GREEN:Color.gray);rankOnBtn.SetActive(!ranked);rankOffBtn.SetActive(ranked&&!inGameMode);bool inRankedMatch=GameStateWatcher.PhysicalGameLive&&GameStateWatcher.MatchIsRanked;\n', '        private static void RefreshQueueUI(){if(txtRankedStatus==null)return;bool ranked=Plugin.RankedEnabled.Value;var qs=ApiClient.CurrentQueueState;UIFactory.SetText(txtRankedStatus,ranked?"RANKED: ON":"RANKED: OFF");UIFactory.SetColor(txtRankedStatus,ranked?C_GREEN:Color.gray);rankOnBtn.SetActive(!ranked);rankOffBtn.SetActive(ranked&&!inGameMode);bool inRankedMatch=GameStateWatcher.IsInMatch&&GameStateWatcher.MatchIsRanked;\n')]),
+    ('table_c2', "Table C2: PerfPatches.cs's activity reader 1 reads the tracking flag again",
+     [('PerfPatches.cs', '            try { if (!GameStateWatcher.PhysicalGameLive) return; }\n', '            try { if (!GameStateWatcher.IsInMatch) return; }\n')]),
+    ('table_c2', "Table C2: PerfPatches.cs's activity reader 2 reads the tracking flag again",
+     [('PerfPatches.cs', '                bool inMatch = GameStateWatcher.PhysicalGameLive;\n', '                bool inMatch = GameStateWatcher.IsInMatch;\n')]),
+    ('table_c2', "Table C2: PlayerColorCosmetic.cs's activity reader 1 reads the tracking flag again",
+     [('PlayerColorCosmetic.cs', '            else if (GameStateWatcher.PhysicalGameLive)\n', '            else if (GameStateWatcher.IsInMatch)\n')]),
+    ('table_c2', "Table C2: PlayerEffectCosmetic.cs's activity reader 1 reads the tracking flag again",
+     [('PlayerEffectCosmetic.cs', '            else if (GameStateWatcher.PhysicalGameLive) OnMatchStart();\n', '            else if (GameStateWatcher.IsInMatch) OnMatchStart();\n')]),
+    ('table_c2', "Table C2: Plugin.cs's activity reader 1 reads the tracking flag again",
+     [('Plugin.cs', '                if (GameStateWatcher.PhysicalGameLive\n', '                if (GameStateWatcher.IsInMatch\n')]),
+    ('table_c2', "Table C2: PortraitRender.cs's activity reader 1 reads the tracking flag again",
+     [('PortraitRender.cs', '                if (GameStateWatcher.PhysicalGameLive) return "a match is tracked";\n', '                if (GameStateWatcher.IsInMatch) return "a match is tracked";\n')]),
+    ('table_c2', "Table C2: PortraitRender.cs's activity reader 2 reads the tracking flag again",
+     [('PortraitRender.cs', '            if (GameStateWatcher.PhysicalGameLive) { LastResult = "skipped: in a match"; return false; }\n', '            if (GameStateWatcher.IsInMatch) { LastResult = "skipped: in a match"; return false; }\n')]),
+    ('table_c2', "Table C2: PortraitRender.cs's activity reader 3 reads the tracking flag again",
+     [('PortraitRender.cs', '                 + "|" + (GameStateWatcher.PhysicalGameLive ? 1 : 0)\n', '                 + "|" + (GameStateWatcher.IsInMatch ? 1 : 0)\n')]),
+    ('table_c2', "Table C2: PortraitRenderDance.cs's activity reader 1 reads the tracking flag again",
+     [('PortraitRenderDance.cs', '                 + "|" + (GameStateWatcher.PhysicalGameLive ? 1 : 0)\n', '                 + "|" + (GameStateWatcher.IsInMatch ? 1 : 0)\n')]),
+    ('table_c2', "Table C2: PortraitRenderDance.cs's activity reader 2 reads the tracking flag again",
+     [('PortraitRenderDance.cs', '            if (GameStateWatcher.PhysicalGameLive) { LastResult = "skipped: in a match"; return false; }\n', '            if (GameStateWatcher.IsInMatch) { LastResult = "skipped: in a match"; return false; }\n')]),
+    ('table_c2', "Table C2: PortraitRenderDance.cs's activity reader 3 reads the tracking flag again",
+     [('PortraitRenderDance.cs', '                return _epoch == ApiClient.IdentityEpoch && _key == DanceStateKey() && !GameStateWatcher.PhysicalGameLive;\n', '                return _epoch == ApiClient.IdentityEpoch && _key == DanceStateKey() && !GameStateWatcher.IsInMatch;\n')]),
+    ('table_c2', "Table C2: ProfileCard.cs's activity reader 1 reads the tracking flag again",
+     [('ProfileCard.cs', '            bool blocked = ClickHandler.ModalBlockInput || GameStateWatcher.PhysicalGameLive || CompetitiveUI.PageImguiHidden;\n', '            bool blocked = ClickHandler.ModalBlockInput || GameStateWatcher.IsInMatch || CompetitiveUI.PageImguiHidden;\n')]),
+    ('table_c2', "Table C2: TrailRenderer.cs's activity reader 1 reads the tracking flag again",
+     [('TrailRenderer.cs', '                if (GameStateWatcher.PhysicalGameLive) OnMatchStart();\n', '                if (GameStateWatcher.IsInMatch) OnMatchStart();\n')]),
+    ('table_c2', 'PhysicalGameLive ignores the record',
+     [('GameStateWatcher.cs', 'public static bool PhysicalGameLive => isTracking || (LimitlessFence.RecordOpenForCurrentGid && !RoomActors.LocalIsSpectator);', 'public static bool PhysicalGameLive => isTracking;')]),
+    ('table_c2', 'PhysicalGameLive admits a spectator',
+     [('GameStateWatcher.cs', ' && !RoomActors.LocalIsSpectator);\n', ');\n')]),
+    ('table_c2', "the open record is read without this seat's live gid",
+     [('LimitlessFence.cs', 'get { return RecordOpen && _ledger.IsLiveGid(_record.Gid); }', 'get { return RecordOpen; }')]),
 ]
 
 NEUTRAL = "            // control: a neutral line\n"
@@ -2431,6 +2628,7 @@ CONTROLS = [
                         NEUTRAL + "                LimitlessFence.PlatformResultsHeld = true;\n")]),
     ("token_real_end", [("TeamGameNumber.cs", "                if (!inGame || overSeen) return null;\n",
                          NEUTRAL + "                if (!inGame || overSeen) return null;\n")]),
+    ('table_c2', [('GameStateWatcher.cs', '        public static bool PhysicalGameLive => isTracking || (LimitlessFence.RecordOpenForCurrentGid && !RoomActors.LocalIsSpectator);\n', NEUTRAL + '        public static bool PhysicalGameLive => isTracking || (LimitlessFence.RecordOpenForCurrentGid && !RoomActors.LocalIsSpectator);\n')]),
 ]
 
 

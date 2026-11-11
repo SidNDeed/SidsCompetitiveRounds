@@ -289,7 +289,7 @@ def test_t4_ReadCombatGate_is_total_and_unknown_on_failure():
     assert len(tries) == 1 and _ws(masked[1:tries[0][0]]) == ""
     catches = _blocks(masked, "catch")
     assert len(catches) == 1 and _ws(body[catches[0][1]:catches[0][2]]) == "{ return Gate.Unknown; }"
-    assert "if (!isTracking) return Gate.NotInCombat;" in body
+    assert "if (!PhysicalGameLive) return Gate.NotInCombat;" in body
     assert "if (inPickPhase) return Gate.NotInCombat;" in body
     assert "return Gate.Unknown;" in _ws(body[tries[0][1]:tries[0][2]])
 

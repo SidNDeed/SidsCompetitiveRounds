@@ -11723,7 +11723,7 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                             if (ok && kind == "player_color")
                             {
                                 try { PlayerColorCosmetic.PublishLocalProps(); } catch { }
-                                if (GameStateWatcher.IsInMatch)
+                                if (GameStateWatcher.PhysicalGameLive)
                                 {
                                     try { PlayerColorCosmetic.OnMatchEnd(); PlayerColorCosmetic.OnMatchStart(); } catch { }
                                 }
@@ -11732,7 +11732,7 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                             if (ok && kind == "player_effect")
                             {
                                 try { PlayerEffectCosmetic.PublishLocalProps(); } catch { }
-                                if (GameStateWatcher.IsInMatch)
+                                if (GameStateWatcher.PhysicalGameLive)
                                 {
                                     try { PlayerEffectCosmetic.OnMatchEnd(); PlayerEffectCosmetic.OnMatchStart(); } catch { }
                                 }
@@ -22650,7 +22650,7 @@ int cW=s.casual_wins,cL=s.casual_losses,sweepG=s.sweeps_given,sweepT=s.sweeps_ta
             return sb.ToString();
         }
 
-        private static void RefreshQueueUI(){if(txtRankedStatus==null)return;bool ranked=Plugin.RankedEnabled.Value;var qs=ApiClient.CurrentQueueState;UIFactory.SetText(txtRankedStatus,ranked?"RANKED: ON":"RANKED: OFF");UIFactory.SetColor(txtRankedStatus,ranked?C_GREEN:Color.gray);rankOnBtn.SetActive(!ranked);rankOffBtn.SetActive(ranked&&!inGameMode);bool inRankedMatch=GameStateWatcher.IsInMatch&&GameStateWatcher.MatchIsRanked;
+        private static void RefreshQueueUI(){if(txtRankedStatus==null)return;bool ranked=Plugin.RankedEnabled.Value;var qs=ApiClient.CurrentQueueState;UIFactory.SetText(txtRankedStatus,ranked?"RANKED: ON":"RANKED: OFF");UIFactory.SetColor(txtRankedStatus,ranked?C_GREEN:Color.gray);rankOnBtn.SetActive(!ranked);rankOffBtn.SetActive(ranked&&!inGameMode);bool inRankedMatch=GameStateWatcher.PhysicalGameLive&&GameStateWatcher.MatchIsRanked;
 /* July 21 item 8: LFP button — visible while ranked and not mid-ranked-match.
  * Cooldown armed from the server-side lfp_seconds_left whenever a FRESH stats
  * object arrives (reference compare — stats are re-fetched on refresh). */

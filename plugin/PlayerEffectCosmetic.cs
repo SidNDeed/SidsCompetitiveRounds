@@ -115,7 +115,7 @@ namespace CompetitiveRounds
         {
             if (Plugin.ShowPlayerColors == null) return;
             if (!Plugin.ShowPlayerColors.Value) OnMatchEnd();
-            else if (GameStateWatcher.IsInMatch) OnMatchStart();
+            else if (GameStateWatcher.PhysicalGameLive) OnMatchStart();
         }
 
         public static void OnAnimatedCosmeticsToggled()

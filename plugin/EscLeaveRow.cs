@@ -124,7 +124,7 @@ namespace CompetitiveRounds
             try
             {
                 bool im = false;
-                try { im = GameStateWatcher.IsInMatch; } catch { }
+                try { im = GameStateWatcher.PhysicalGameLive; } catch { }
                 if (im && !lastInMatch) matchGen++;
                 lastInMatch = im;
                 string ctx = ComputeContext();

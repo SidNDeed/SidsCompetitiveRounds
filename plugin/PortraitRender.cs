@@ -258,7 +258,7 @@ namespace CompetitiveRounds
                 }
                 if (SpectatorSession.IsLocalSpectator) return "spectating";
                 if (SpectatorJoiner.JoinOpUnsettled) return "a spectate join is in flight";
-                if (GameStateWatcher.IsInMatch) return "a match is tracked";
+                if (GameStateWatcher.PhysicalGameLive) return "a match is tracked";
                 var gm = GameManager.instance;
                 if (gm != null && (gm.isPlaying || gm.battleOngoing)) return "a game has started in this scene";
                 var pm = PlayerManager.instance;
@@ -870,7 +870,7 @@ namespace CompetitiveRounds
             EnsureSceneHook();
             Reclaim();
             if (Rendering || Plugin.Instance == null) return false;
-            if (GameStateWatcher.IsInMatch) { LastResult = "skipped: in a match"; return false; }
+            if (GameStateWatcher.PhysicalGameLive) { LastResult = "skipped: in a match"; return false; }
             if (PlayerAssigner.instance == null || PlayerAssigner.instance.playerPrefab == null) { LastResult = "skipped: no player prefab yet"; return false; }
             if (string.IsNullOrEmpty(MatchTracker.LocalSteamId) || MatchTracker.LocalSteamId == "unknown") { LastResult = "skipped: no identity"; return false; }
             int gen = _renderClaim.Take(Plugin.Instance, RENDER_BUDGET);
@@ -904,7 +904,7 @@ namespace CompetitiveRounds
                  + "|" + PlayerCardsUI.Epoch
                  + "|" + _visitId
                  + "|" + CurrentPreset()
-                 + "|" + (GameStateWatcher.IsInMatch ? 1 : 0)
+                 + "|" + (GameStateWatcher.PhysicalGameLive ? 1 : 0)
                  + "|" + LiveInputsKey();
         }
 
