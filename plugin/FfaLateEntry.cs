@@ -2260,6 +2260,9 @@ namespace CompetitiveRounds
         private static void OnSelfKept(int g)
         {
             if (string.IsNullOrEmpty(AdmittedLateLobby) || _lateEntered) return;
+            // Ask 16(a) lane 2 (v4 4.6, F7): no entry while a fence record is live or
+            // terminating; the seat leaves at once (Table A's entered POST).
+            if (LimitlessFence.RecordOpen) { _pendingSelfKeptGame = 0; LateGiveUp(); return; }
             if (!ReadmitEnteredReady(FfaReadmit.ReadmittedInto(AdmittedLateLobby), Kept(OwnActor()),
                                     ReadmitActorPrepared(OwnActor(), PointEpoch))) return;
             _lateEntered = true;

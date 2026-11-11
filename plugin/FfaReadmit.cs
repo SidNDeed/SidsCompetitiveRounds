@@ -433,6 +433,9 @@ namespace CompetitiveRounds
                     }
                     break;
                 case FfaReadmitEntryRules.RdmNext.ArmLate:
+                    // Ask 16(a) lane 2 (v4 4.6, F7): no readmission while a fence record is
+                    // live or terminating; a refused readmission leaves.
+                    if (LimitlessFence.RecordOpen) { Refusal("limitless", true); break; }
                     try
                     {
                         FfaLateEntry.PrepareReadmitEntry();

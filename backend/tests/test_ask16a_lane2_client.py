@@ -879,6 +879,49 @@ def claim_no_fighter_is_admitted(files):
     return out
 
 
+LATE_TAIL = [
+    ("FfaLateEntry.cs", "private static void OnSelfKept(int g)",
+     ["if (string.IsNullOrEmpty(AdmittedLateLobby) || _lateEntered) return;",
+      "if (LimitlessFence.RecordOpen) { _pendingSelfKeptGame = 0; LateGiveUp(); return; }",
+      "if (!ReadmitEnteredReady("], "the entered POST"),
+    ("FfaMode.cs", "internal static ReadmitReplayOutcome ReadmitReplayAtKeep(",
+     ["if (!ReadmitReplayCurrent(replay) || Plugin.Instance == null || LimitlessFence.RecordOpen)",
+      "Plugin.Instance.StartCoroutine(ReadmitReplayRun(replay, cards));"], "the readmit replay's start"),
+    ("FfaMode.cs", "private static IEnumerator ReadmitReplayRun(",
+     ["yield return ReadmitReplaySteps(replay, () => ReadmitReplayCurrent(replay) && !LimitlessFence.RecordOpen,"],
+     "the readmit replay's steps"),
+    ("FfaReadmit.cs", "private static void Act(string step,",
+     ["case FfaReadmitEntryRules.RdmNext.ArmLate:",
+      'if (LimitlessFence.RecordOpen) { Refusal("limitless", true); break; }',
+      "FfaLateEntry.PrepareReadmitEntry();"], "the readmission's arming"),
+]
+
+
+def claim_the_late_tail_is_refused(files):
+    """4.6, F7 (Table A's X rows): the entered POST, the readmit replay's start
+    and each of its steps, and a readmission's arming refuse while a record is
+    live or terminating. A refused seat leaves at once: the entered POST
+    through LateGiveUp, a readmission through its refusal with leave set."""
+    out = []
+    for fname, sig, needles, name in LATE_TAIL:
+        if not _in_order(_code(files[fname], sig), needles):
+            out.append(name + " is not refused during a record")
+    return out
+
+
+def claim_a_refused_entrant_is_no_departure(files):
+    """v4 Table B: a refused entrant was never admitted, so its exit sets no
+    termination. The kept-actor view decides, after the spectator test and
+    before the departure flag."""
+    out = []
+    if not _in_order(_code(files[LF], "internal static void TerminateOnDeparture("),
+                     ["if (p == null || !RecordOpen || RoomActors.IsSpectatorReplicated(p)) return;",
+                      "if (FfaLateEntry.IsQuarantinedActor(p.ActorNumber)) return;",
+                      "_departed = true;"]):
+        out.append("a refused entrant's exit terminates the record")
+    return out
+
+
 CLAIMS = {
     "game_start_prefix": claim_the_game_start_prefix,
     "stamp_before_join": claim_the_gid_is_stamped_before_the_join,
@@ -907,6 +950,8 @@ CLAIMS = {
     "sender_end": claim_termination_reaches_the_sender,
     "redrive": claim_the_new_master_redrives,
     "no_admission": claim_no_fighter_is_admitted,
+    "late_tail": claim_the_late_tail_is_refused,
+    "entrant_exit": claim_a_refused_entrant_is_no_departure,
 }
 
 GATE = "                if (SpectatorPatchSupport.Suppress) return;\n"
@@ -1191,6 +1236,26 @@ MUTANTS = [
     ("no_admission", "the entrant defers instead of leaving",
      [("FfaLateEntry.cs", "            if (LimitlessFence.RecordOpen) { LateGiveUp(); return; }   // 4.6: no request\n",
        "            if (LimitlessFence.RecordOpen) return;   // 4.6: no request\n")]),
+    ("late_tail", "the entered POST runs during a record",
+     _drop("FfaLateEntry.cs", "            if (LimitlessFence.RecordOpen) { _pendingSelfKeptGame = 0; LateGiveUp(); return; }\n")),
+    ("late_tail", "the entered POST defers instead of leaving",
+     [("FfaLateEntry.cs", "if (LimitlessFence.RecordOpen) { _pendingSelfKeptGame = 0; LateGiveUp(); return; }",
+       "if (LimitlessFence.RecordOpen) return;")]),
+    ("late_tail", "a readmit replay starts during a record",
+     [("FfaMode.cs", " || Plugin.Instance == null || LimitlessFence.RecordOpen)", " || Plugin.Instance == null)")]),
+    ("late_tail", "a readmit replay's steps run on during a record",
+     [("FfaMode.cs", "() => ReadmitReplayCurrent(replay) && !LimitlessFence.RecordOpen,", "() => ReadmitReplayCurrent(replay),")]),
+    ("late_tail", "a readmission arms during a record",
+     _drop("FfaReadmit.cs", '                    if (LimitlessFence.RecordOpen) { Refusal("limitless", true); break; }\n')),
+    ("late_tail", "a refused readmission stays",
+     [("FfaReadmit.cs", 'Refusal("limitless", true); break; }', 'Refusal("limitless", false); break; }')]),
+    ("entrant_exit", "a refused entrant's exit terminates",
+     _drop(LF, "            if (FfaLateEntry.IsQuarantinedActor(p.ActorNumber)) return;\n")),
+    ("entrant_exit", "the quarantine test follows the departure flag",
+     [(LF, "            if (FfaLateEntry.IsQuarantinedActor(p.ActorNumber)) return;\n", ""),
+      (LF, '            _departed = true;\n            Terminate("fighter departure");\n',
+       '            _departed = true;\n            if (FfaLateEntry.IsQuarantinedActor(p.ActorNumber)) return;\n'
+       '            Terminate("fighter departure");\n')]),
 ]
 
 NEUTRAL = "            // control: a neutral line\n"
@@ -1229,6 +1294,10 @@ CONTROLS = [
                   NEUTRAL + "                if (AlivePlayers().Count > 1) return;\n")]),
     ("no_admission", [("FfaLateEntry.cs", "            if (LimitlessFence.RecordOpen) { LateGiveUp(); return; }   // 4.6: no admission\n",
                        NEUTRAL + "            if (LimitlessFence.RecordOpen) { LateGiveUp(); return; }   // 4.6: no admission\n")]),
+    ("late_tail", [("FfaReadmit.cs", '                    if (LimitlessFence.RecordOpen) { Refusal("limitless", true); break; }\n',
+                    NEUTRAL + '                    if (LimitlessFence.RecordOpen) { Refusal("limitless", true); break; }\n')]),
+    ("entrant_exit", [(LF, "            if (FfaLateEntry.IsQuarantinedActor(p.ActorNumber)) return;\n",
+                       NEUTRAL + "            if (FfaLateEntry.IsQuarantinedActor(p.ActorNumber)) return;\n")]),
 ]
 
 

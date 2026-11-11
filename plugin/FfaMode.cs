@@ -5268,7 +5268,9 @@ namespace CompetitiveRounds
             {
                 var cards = decks.TryGetValue(slot, out var deck) && deck != null ? new List<CardInfo>(deck) : new List<CardInfo>();
                 replay.Cards = cards;
-                if (!ReadmitReplayCurrent(replay) || Plugin.Instance == null)
+                // Ask 16(a) lane 2 (v4 4.6): no readmit replay starts while a fence
+                // record is live or terminating.
+                if (!ReadmitReplayCurrent(replay) || Plugin.Instance == null || LimitlessFence.RecordOpen)
                 {
                     replay.State = ReadmitReplayState.Failed;
                     return replay;
@@ -5291,7 +5293,8 @@ namespace CompetitiveRounds
             {
                 // The existing reset runs with no cards; the strict replay below
                 // owns every apply and the frame after it, including the last.
-                yield return ReadmitReplaySteps(replay, () => ReadmitReplayCurrent(replay),
+                // Ask 16(a) lane 2 (v4 4.6): each step refuses once a fence record opens.
+                yield return ReadmitReplaySteps(replay, () => ReadmitReplayCurrent(replay) && !LimitlessFence.RecordOpen,
                     RollingResetAndReplay(replay.Body, new List<CardInfo>(), true), cards,
                     card => ApplyCardTo(replay.Body, card), () => RebuildDeckViews(replay.Body, cards));
                 if (replay.State == ReadmitReplayState.Completed)

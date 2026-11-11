@@ -401,10 +401,13 @@ namespace CompetitiveRounds
         /// Plugin hook, the hold's NCH prefix and FFA's NCH prefix). The code
         /// treats their order as undefined, so whichever runs first sets
         /// termination before any of them classifies. Idempotent. A spectator's
-        /// departure is not a fighter's and sets nothing.</summary>
+        /// departure is not a fighter's and sets nothing, nor is a refused
+        /// entrant's: it was never admitted (v4 Table B).</summary>
         internal static void TerminateOnDeparture(Photon.Realtime.Player p)
         {
             if (p == null || !RecordOpen || RoomActors.IsSpectatorReplicated(p)) return;
+            // The kept-actor view still quarantines an entrant that was never admitted.
+            if (FfaLateEntry.IsQuarantinedActor(p.ActorNumber)) return;
             _departed = true;
             Terminate("fighter departure");
         }
