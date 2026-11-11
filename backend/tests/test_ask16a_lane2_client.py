@@ -1449,6 +1449,23 @@ def claim_a_terminating_seed_never_ends_the_observer(files):
     return out
 
 
+def claim_the_gm_observer_ends_at_the_live_target(files):
+    """Table B (b)'s GM target row, the observer's half (F13): the spectator
+    prefix, after the raw-round refusal, computes the terminal score against
+    the live roundsToWinGame, which the fence's handler sets at step 4 before
+    the round applies at step 5 (the handler's claim). It ends only on a
+    round's conversion and dispatches SpectatorSync.OnGameOverObserved, which
+    ends the gid (the spectator boundary's claim)."""
+    out = []
+    body = _code(files["SpectatorPatches.cs"], "internal static class Spectator_ObserveNextRound_Patch")
+    if not _in_order(body, ['if (LimitlessFence.RawRoundRefused("spectator prefix")) return false;',
+                            "int rtw = __instance.roundsToWinGame; if (rtw <= 0) rtw = 5;",
+                            "bool gameOver = conversion\n                    && (winningTeamID == 0 ? p1r : p2r) >= rtw;",
+                            "if (gameOver) SpectatorSync.OnGameOverObserved();"]):
+        out.append("the GM observer's end does not read the live target on a conversion")
+    return out
+
+
 CLAIMS = {
     "game_start_prefix": claim_the_game_start_prefix,
     "stamp_before_join": claim_the_gid_is_stamped_before_the_join,
@@ -1494,6 +1511,7 @@ CLAIMS = {
     "join_record": claim_the_joiner_reads_the_mirror_once_unconfirmed,
     "snapshot_record": claim_the_snapshot_carries_and_replaces_the_record,
     "observer_seed": claim_a_terminating_seed_never_ends_the_observer,
+    "gm_observer_end": claim_the_gm_observer_ends_at_the_live_target,
 }
 
 GATE = "                if (SpectatorPatchSupport.Suppress) return;\n"
@@ -2051,6 +2069,13 @@ MUTANTS = [
      [("FfaMode.cs", "LimitlessFence.RecordTerminating) return;", "LimitlessFence.RecordOpen) return;")]),
     ("observer_seed", "the terminating test reads the record alone",
      [(LF, "get { return _hasRecord && _state == LimitlessFenceRules.FencePhase.PhaseTerminating; }", "get { return _hasRecord; }")]),
+    ("gm_observer_end", "the GM observer's target is not the live field",
+     [("SpectatorPatches.cs", "int rtw = __instance.roundsToWinGame; if (rtw <= 0) rtw = 5;", "int rtw = 5;")]),
+    ("gm_observer_end", "the GM observer ends without a conversion",
+     [("SpectatorPatches.cs", "bool gameOver = conversion\n                    && (winningTeamID == 0 ? p1r : p2r) >= rtw;",
+       "bool gameOver = (winningTeamID == 0 ? p1r : p2r) >= rtw;")]),
+    ("gm_observer_end", "the GM observer's game over is not dispatched",
+     [("SpectatorPatches.cs", "                if (gameOver) SpectatorSync.OnGameOverObserved();\n", "")]),
 ]
 
 NEUTRAL = "            // control: a neutral line\n"
@@ -2118,6 +2143,8 @@ CONTROLS = [
     ("join_record", [(LF, "            _unconfirmed = true;\n", NEUTRAL + "            _unconfirmed = true;\n")]),
     ("snapshot_record", [(LF, "            if (_hasRecord && !_unconfirmed) return;\n", NEUTRAL + "            if (_hasRecord && !_unconfirmed) return;\n")]),
     ("observer_seed", [("FfaMode.cs", "                if (terminal && !completedRound", NEUTRAL + "                if (terminal && !completedRound")]),
+    ("gm_observer_end", [("SpectatorPatches.cs", "                if (gameOver) SpectatorSync.OnGameOverObserved();\n",
+                          NEUTRAL + "                if (gameOver) SpectatorSync.OnGameOverObserved();\n")]),
 ]
 
 
