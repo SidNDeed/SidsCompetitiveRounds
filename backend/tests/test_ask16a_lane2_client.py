@@ -152,6 +152,15 @@ FENCE_RULES = (
     'series: an unrated game has no series to follow',
     'series: a rated FFA game keeps no series',
     'series: a rated game of a mode that keeps one is followed, read closed',
+    'rated: a ranked_ room is rated with the toggle off',
+    'rated: a team_ room is rated with the toggle off',
+    'rated: an sct- room is rated with the toggle off',
+    'rated: an ovt_ room is rated with the toggle off',
+    'rated: a cr_ff room is rated with the toggle off',
+    'rated: another room is unrated with the toggle off',
+    'rated: the toggle adds to another room',
+    'rated: a prefix counts only at the start',
+    'rated: no room decides closed',
     "snapshot: a spectator's 18 fields stay, the late tail's place is padded, and the record takes [28]-[35]",
     "snapshot: a late snapshot's tail stays at [18]-[27], and the record follows it",
     'snapshot: the gid round-trips',
@@ -228,6 +237,11 @@ FENCE_MUTANTS = (
     'a terminating record takes a new end target',
     'a rated game is never followed',
     'the series ignores the mode',
+    'the rated input is the toggle alone',
+    'the toggle cannot add',
+    'cr_ff is not read',
+    'no room decides open',
+    'a prefix counts anywhere',
     "the snapshot's record skips the late tail's place",
     'the snapshot always reads a record',
     'the base results give no ace',
@@ -277,7 +291,7 @@ def test_the_fence_suite_ran_exactly_its_cases_and_passed(harness_run):
 
 
 def test_the_pinned_names_are_distinct():
-    assert len(set(FENCE_CASES)) == len(FENCE_CASES) == 148 + 59 + 11 + 8
+    assert len(set(FENCE_CASES)) == len(FENCE_CASES) == 157 + 64 + 11 + 8
 
 
 # -- the fence's Unity- and Photon-side lines, as source claims --------------
@@ -714,12 +728,46 @@ def claim_the_ffa_round_send(files):
     return out
 
 
+def claim_d5_reads_the_rooms_own_classification(files):
+    """D5's rated input (R1 HIGH 1). The decision passes RatedForSeries the
+    room's name, its cr_ff and this seat's matchIsRanked, which can only add:
+    OnMatchStarted sets matchIsRanked again at every game start from this
+    seat's RankedEnabled. The rule's prefixes are the literals of
+    GameStateWatcher's three isModIssued predicates, each of which reads cr_ff
+    too, so the room the detection step calls mod-issued is the room D5 calls
+    rated (integrator, 10:31Z: checked on both sides). No room decides
+    closed."""
+    out = []
+    rule = _code(files["LimitlessFenceRules.cs"],
+                 "internal static bool RatedForSeries(string roomName, bool roomHasCrFf, bool matchIsRanked)")
+    if "if (matchIsRanked || roomHasCrFf || string.IsNullOrEmpty(roomName)) return true;" not in rule:
+        out.append("the rule's guard lets the toggle, cr_ff or a missing room decide open")
+    ours = set(re.findall(r'roomName\.StartsWith\("([^"]+)", StringComparison\.Ordinal\)', rule))
+    preds = re.findall(r'isModIssued = \(rp != null && rp\.ContainsKey\("cr_ff"\)\)(.*?);',
+                       _code(files["GameStateWatcher.cs"]), re.S)
+    if len(preds) != 3:
+        out.append("GameStateWatcher holds %d isModIssued predicates, not 3" % len(preds))
+    for p in preds:
+        theirs = set(re.findall(r'rname\.StartsWith\("([^"]+)"\)', p))
+        if theirs != ours:
+            out.append("the rule's prefixes %s are not the detection step's %s" % (sorted(ours), sorted(theirs)))
+    send = _code(files[LF], "private static FenceSend SendDecision(")
+    if not _in_order(send, ["var room = PhotonNetwork.CurrentRoom;", RATED_LINE,
+                            "var d = new LimitlessFenceRules.DecisionInputs",
+                            "SeriesFollows = LimitlessFenceRules.SeriesFollows(rated, !FfaMode.EngineActive()),"]):
+        out.append("the decision does not read the room's own classification")
+    return out
+
+
+RATED_LINE = 'bool rated = LimitlessFenceRules.RatedForSeries(room?.Name, room?.CustomProperties != null && room.CustomProperties.ContainsKey("cr_ff"), GameStateWatcher.MatchIsRanked);'
+
+
 DECIDE = [
     "MaySend = LimitlessFenceRules.MaySend(PhotonNetwork.IsMasterClient, _ledger.IsLiveGid(gid), false,",
     "_epoch, epochCaptured, _handoff, handoffCaptured),", "HasRecord = _hasRecord,", "FighterOptIns = FighterOptIns(),",
     "ActorCapabilities = ActorCapabilities(),", "MasterVersion = OwnCapability(),",
     "HoldHasHeldSeat = TeamHoldLoop.FenceHolds(),", "HoldHasPendingCut = TeamHold.Cut != null,",
-    "SeriesFollows = LimitlessFenceRules.SeriesFollows(GameStateWatcher.MatchIsRanked, !FfaMode.EngineActive()),",
+    "SeriesFollows = LimitlessFenceRules.SeriesFollows(rated, !FfaMode.EngineActive()),",
     "var why = LimitlessFenceRules.DecideContinuation(d);", "if (why != LimitlessFenceRules.Decision.Continue)",
     'why + ")");\n                return FenceSend.Vanilla;', "GameStateWatcher.RankedCodeRoom1v1InProgress);", "var roster = ReplicatedFighters().ToArray();",
     "if (!RaiseFence(LimitlessFenceRules.EncodeRecord(rec, roster, args, PhotonNetwork.ServerTimestamp)))",
@@ -2351,6 +2399,7 @@ CLAIMS = {
     "gm_send": claim_the_gm_round_send,
     "ffa_send": claim_the_ffa_round_send,
     "decision_inputs": claim_the_decision_reads_its_inputs,
+    "d5_rated_input": claim_d5_reads_the_rooms_own_classification,
     "later_rounds": claim_every_later_round_rereads,
     "opt_in": claim_the_opt_in_writer,
     "termination": claim_termination_is_set,
@@ -2582,6 +2631,14 @@ MUTANTS = [
     ("decision_inputs", "the decision ignores the cut", [(LF, DECIDE[7], "HoldHasPendingCut = false,")]),
     ("decision_inputs", "the decision ignores a held seat", [(LF, DECIDE[6], "HoldHasHeldSeat = false,")]),
     ("decision_inputs", "the decision ignores the series", [(LF, DECIDE[8], "SeriesFollows = false,")]),
+    ("d5_rated_input", "the decision reads the toggle alone", [(LF, RATED_LINE, "bool rated = GameStateWatcher.MatchIsRanked;")]),
+    ("d5_rated_input", "the rule drops team_",
+     [("LimitlessFenceRules.cs", "\n                || roomName.StartsWith(\"team_\", StringComparison.Ordinal)", "")]),
+    ("d5_rated_input", "no room decides open",
+     [("LimitlessFenceRules.cs", " || string.IsNullOrEmpty(roomName)) return true;", ") return true;")]),
+    ("d5_rated_input", "a detection predicate gains a prefix the rule lacks",
+     [("GameStateWatcher.cs", '                                    || rname.StartsWith("sct-")\n',
+       '                                    || rname.StartsWith("sct-")\n                                    || rname.StartsWith("duo_")\n')]),
     ("decision_inputs", "the decision reads only its own capability",
      [(LF, DECIDE[4], "ActorCapabilities = new[] { OwnCapability() },")]),
     ("decision_inputs", "the decision message carries no roster",
@@ -3244,6 +3301,8 @@ MUTANTS = [
 
 NEUTRAL = "            // control: a neutral line\n"
 CONTROLS = [
+    ("d5_rated_input", [("LimitlessFenceRules.cs", "            if (matchIsRanked || roomHasCrFf",
+                        NEUTRAL + "            if (matchIsRanked || roomHasCrFf")]),
     ("game_start_prefix", [(LF, GATE, NEUTRAL + GATE)]),
     ("stamp_before_join", [("Plugin.cs", STAMP, NEUTRAL + STAMP)]),
     ("handoff_first", [(LF, COUNT, NEUTRAL + COUNT)]),

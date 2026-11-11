@@ -812,6 +812,9 @@ namespace CompetitiveRounds
                                               int epochCaptured, int handoffCaptured)
         {
             string gid = _ledger.CurrentGid;
+            // D5 (R1 HIGH 1): the room's own classification; this seat's toggle only adds.
+            var room = PhotonNetwork.CurrentRoom;
+            bool rated = LimitlessFenceRules.RatedForSeries(room?.Name, room?.CustomProperties != null && room.CustomProperties.ContainsKey("cr_ff"), GameStateWatcher.MatchIsRanked);
             var d = new LimitlessFenceRules.DecisionInputs
             {
                 MaySend = LimitlessFenceRules.MaySend(PhotonNetwork.IsMasterClient, _ledger.IsLiveGid(gid), false,
@@ -823,7 +826,7 @@ namespace CompetitiveRounds
                 MasterVersion = OwnCapability(),
                 HoldHasHeldSeat = TeamHoldLoop.FenceHolds(),
                 HoldHasPendingCut = TeamHold.Cut != null,
-                SeriesFollows = LimitlessFenceRules.SeriesFollows(GameStateWatcher.MatchIsRanked, !FfaMode.EngineActive()),
+                SeriesFollows = LimitlessFenceRules.SeriesFollows(rated, !FfaMode.EngineActive()),
             };
             var why = LimitlessFenceRules.DecideContinuation(d);
             if (why != LimitlessFenceRules.Decision.Continue)

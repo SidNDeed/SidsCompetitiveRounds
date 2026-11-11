@@ -535,6 +535,22 @@ namespace CompetitiveRounds
             return rated && modeKeepsSeries;
         }
 
+        /// <summary>D5's rated input (R1 HIGH 1): the room's own classification,
+        /// which this seat's matchIsRanked can only add to. GameStateWatcher's
+        /// isModIssued predicates call a room mod-issued, and so rated, by these
+        /// prefixes and cr_ff. OnMatchStarted then sets matchIsRanked again at
+        /// every game start from this seat's RankedEnabled and its opponent
+        /// checks, so a mod-issued room can read unrated there. No room decides
+        /// closed.</summary>
+        internal static bool RatedForSeries(string roomName, bool roomHasCrFf, bool matchIsRanked)
+        {
+            if (matchIsRanked || roomHasCrFf || string.IsNullOrEmpty(roomName)) return true;
+            return roomName.StartsWith("ranked_", StringComparison.Ordinal)
+                || roomName.StartsWith("team_", StringComparison.Ordinal)
+                || roomName.StartsWith("sct-", StringComparison.Ordinal)
+                || roomName.StartsWith("ovt_", StringComparison.Ordinal);
+        }
+
         /// <summary>v4 section 2, the broadcast card list in a limitless game:
         /// the reported game's names (the first <paramref name="reported"/>),
         /// then the newest <paramref name="newest"/> of the rest, in order. A

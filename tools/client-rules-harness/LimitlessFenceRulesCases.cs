@@ -38,6 +38,7 @@ namespace CompetitiveRounds
             internal Func<int, int, int, int, bool> RoundEndsGame = R.RoundEndsGame;
             internal Func<R.FenceRecord, bool, IList<int>, R.FenceRecord> NextSendRecord = R.NextSendRecord;
             internal Func<bool, bool, bool> SeriesFollows = R.SeriesFollows;
+            internal Func<string, bool, bool, bool> RatedForSeries = R.RatedForSeries;
             internal Func<R.FencePhase, bool, R.FencePhase> NextState = R.NextState;
             internal Func<bool, R.FencePhase, bool, bool> RefuseRawRound = R.RefuseRawRound;
             internal Func<R.FenceRecord, int[], int[], int, object[]> Encode = R.EncodeRecord;
@@ -318,6 +319,15 @@ namespace CompetitiveRounds
             add("series: an unrated game has no series to follow", !f.SeriesFollows(false, true));
             add("series: a rated FFA game keeps no series", !f.SeriesFollows(true, false));
             add("series: a rated game of a mode that keeps one is followed, read closed", f.SeriesFollows(true, true));
+            add("rated: a ranked_ room is rated with the toggle off", f.RatedForSeries("ranked_7f3a", false, false));
+            add("rated: a team_ room is rated with the toggle off", f.RatedForSeries("team_7f3a", false, false));
+            add("rated: an sct- room is rated with the toggle off", f.RatedForSeries("sct-7f3a", false, false));
+            add("rated: an ovt_ room is rated with the toggle off", f.RatedForSeries("ovt_7f3a", false, false));
+            add("rated: a cr_ff room is rated with the toggle off", f.RatedForSeries("7f3a", true, false));
+            add("rated: another room is unrated with the toggle off", !f.RatedForSeries("7f3a", false, false));
+            add("rated: the toggle adds to another room", f.RatedForSeries("7f3a", false, true));
+            add("rated: a prefix counts only at the start", !f.RatedForSeries("x_ranked_7f3a", false, false));
+            add("rated: no room decides closed", f.RatedForSeries(null, false, false) && f.RatedForSeries("", false, false));
             add("MaySend: master, live gid, open record, same epoch and handoff count", f.MaySend(true, true, false, 4, 4, 2, 2));
             add("MaySend: a seat that is no longer master refuses", !f.MaySend(false, true, false, 4, 4, 2, 2));
             add("MaySend: a gid that is not live refuses", !f.MaySend(true, false, false, 4, 4, 2, 2));
@@ -725,6 +735,23 @@ namespace CompetitiveRounds
             Control(r, "the series ignores the mode",
                     Cases(new Fns { SeriesFollows = (rt, m) => rt }),
                     "series: a rated FFA game keeps no series");
+            Control(r, "the rated input is the toggle alone",
+                    Cases(new Fns { RatedForSeries = (n, ff, t) => t }),
+                    "rated: a ranked_ room is rated with the toggle off", "rated: a team_ room is rated with the toggle off",
+                    "rated: an sct- room is rated with the toggle off", "rated: an ovt_ room is rated with the toggle off",
+                    "rated: a cr_ff room is rated with the toggle off", "rated: no room decides closed");
+            Control(r, "the toggle cannot add",
+                    Cases(new Fns { RatedForSeries = (n, ff, t) => R.RatedForSeries(n, ff, false) }),
+                    "rated: the toggle adds to another room");
+            Control(r, "cr_ff is not read",
+                    Cases(new Fns { RatedForSeries = (n, ff, t) => R.RatedForSeries(n, false, t) }),
+                    "rated: a cr_ff room is rated with the toggle off");
+            Control(r, "no room decides open",
+                    Cases(new Fns { RatedForSeries = (n, ff, t) => !string.IsNullOrEmpty(n) && R.RatedForSeries(n, ff, t) }),
+                    "rated: no room decides closed");
+            Control(r, "a prefix counts anywhere",
+                    Cases(new Fns { RatedForSeries = (n, ff, t) => R.RatedForSeries(n, ff, t) || (n != null && n.Contains("ranked_")) }),
+                    "rated: a prefix counts only at the start");
             Control(r, "the frame is never set",
                     Cases(new Fns { RunInFrame = (g, s, v, call) => call() }),
                     "frame: inside an RPC's frame the call sees its own, and the RPC's comes back",
