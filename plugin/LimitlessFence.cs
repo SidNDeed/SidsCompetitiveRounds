@@ -157,6 +157,7 @@ namespace CompetitiveRounds
         {
             if (_spectatorBoundaryDue) return;
             _spectatorBoundaryDue = true;
+            NoteRealEnd("observer game over, " + mode);
             var g = _ledger.CurrentGid;
             if (g != null) _ledger.EndGid(g);
             Plugin.Log.LogInfo("[LIMIT] spectator game over (" + mode + "): gid " + GidPrefix(g) + " ended");
@@ -381,6 +382,7 @@ namespace CompetitiveRounds
         private static bool _targetFfa;      // the field it wrote: FFA's RoundsToWin, else GM's roundsToWinGame
         private static bool _unconfirmed;    // 4.3: the joiner's starting value from cr_lrec, until a message or the master's snapshot
         private static bool _joinRecordRead; // 4.3: a joiner reads cr_lrec once, with the join, before any snapshot
+        private static bool _realEndSeen;    // R1 HIGH 3: the real end ran for the record this seat holds, until it retires
         private static bool _fenceCall;
         private static readonly HashSet<string> _refusalLogged = new HashSet<string>(StringComparer.Ordinal);
 
@@ -430,6 +432,7 @@ namespace CompetitiveRounds
         {
             _refusalLogged.Clear();
             _departed = false;
+            _realEndSeen = false;
             if (!_hasRecord) return;
             RestoreBaseTarget(why);
             _hasRecord = false;
@@ -486,14 +489,29 @@ namespace CompetitiveRounds
                 + " target=" + rec.TargetRounds + " " + _state);
         }
 
+        /// <summary>R1 HIGH 3: the real end ran while this seat holds a record
+        /// (GM's GameOver, FFA's game over, an observer's terminal score). From
+        /// here until the record retires, this seat's snapshot carries no record.
+        /// The record itself stays open, so every refusal still reads it.</summary>
+        internal static void NoteRealEnd(string site)
+        {
+            if (!_hasRecord || _realEndSeen) return;
+            _realEndSeen = true;
+            Plugin.Log.LogInfo("[LIMIT] the real end ran (" + site + "): the snapshot carries no record until it retires");
+        }
+
         /// <summary>5.2 (Table B (a), the spectator snapshot): the master's
-        /// snapshot carries its record at [28]-[35] while the record is live or
-        /// terminating and confirmed, with the seat's state, which a local
-        /// termination moves without a message. Without one the snapshot keeps
-        /// today's fields.</summary>
+        /// snapshot carries its record at [28]-[35] from the record's creation
+        /// until the real end, while it is confirmed, with the seat's state, which
+        /// a local termination moves without a message. From the real end until
+        /// the record retires it carries none (R1 HIGH 3, a deviation from v4
+        /// 5.2), so a spectator that joins after the end seeds without a
+        /// terminating record and sees the end. Without a record the snapshot
+        /// keeps today's fields.</summary>
         internal static object[] AppendSnapshotRecord(object[] snap)
         {
             if (snap == null || !RecordOpen || _unconfirmed) return snap;
+            if (_realEndSeen) return snap;   // R1 HIGH 3: from the real end until the record retires, none
             var r = _record;
             r.EndFlag = _state == LimitlessFenceRules.FencePhase.PhaseTerminating;
             return LimitlessFenceRules.SnapshotWithRecord(snap, r);
@@ -996,6 +1014,7 @@ namespace CompetitiveRounds
             _hasRecord = true;
             _unconfirmed = false;   // 4.3: an accepted message confirms a joiner's starting value
             if (create) _handoffAtRecord = _handoff;   // MustEnd's handoff count at the decision, on every seat
+            if (create) _realEndSeen = false;   // R1 HIGH 3: a new record has had no real end
             if (create)
                 Plugin.Log.LogInfo("[LIMIT] record created: gid=" + GidPrefix(rec.Gid) + " target=" + rec.TargetRounds
                     + " base=" + rec.BaseWinner + ":" + rec.BaseWinnerRounds + "-" + rec.BaseOtherRounds + "/" + rec.BaseTarget);
@@ -1268,6 +1287,7 @@ namespace CompetitiveRounds
                 __state.WinCount = __instance.m_winCount;
                 __state.Held = true;
                 LimitlessFence.PlatformResultsHeld = true;
+                LimitlessFence.NoteRealEnd("GM game over");
             }
             catch { }
         }

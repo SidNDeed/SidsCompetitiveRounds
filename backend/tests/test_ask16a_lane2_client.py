@@ -992,6 +992,42 @@ def claim_one_send_per_point(files):
     return out
 
 
+def claim_no_record_after_the_real_end(files):
+    """R1 HIGH 3, a deviation from v4 5.2 (integrator, 10:31Z). The master's
+    snapshot carries the record from its creation until the real end. From the
+    real end until the record retires it carries none, so a spectator that
+    joins after the end seeds without a terminating record and sees the end.
+    The real end is GM's GameOver prefix, FFA's game over in HandleNextRound
+    and an observer's terminal score. The mark has one writer, and is cleared
+    when the record retires and when a record is created. The record itself
+    stays open, so every refusal still reads it."""
+    out = []
+    lf = files[LF]
+    if not _in_order(_code(lf, "internal static object[] AppendSnapshotRecord("),
+                     ["if (snap == null || !RecordOpen || _unconfirmed) return snap;", "if (_realEndSeen) return snap;",
+                      "return LimitlessFenceRules.SnapshotWithRecord(snap, r);"]):
+        out.append("the snapshot carries the record after the real end")
+    if not _in_order(_code(lf, "internal static void NoteRealEnd(string site)"),
+                     ["if (!_hasRecord || _realEndSeen) return;", "_realEndSeen = true;"]):
+        out.append("the mark is set without a record")
+    if _code(lf).count("_realEndSeen = true;") != 1:
+        out.append("the mark has another writer")
+    if not _in_order(_code(lf, "private static void Prefix(GM_ArmsRace __instance, out RealEndSaved __state)"),
+                     ["if (!LimitlessFence.RecordOpen || __instance == null) return;", 'LimitlessFence.NoteRealEnd("GM game over");']):
+        out.append("GM's real end is not noted")
+    if not _in_order(_code(files["FfaMode.cs"], "public static void HandleNextRound("),
+                     ["if (gameOver)", "gameOverFired = true;", 'LimitlessFence.NoteRealEnd("FFA game over");']):
+        out.append("FFA's real end is not noted")
+    if not _in_order(_code(lf, "internal static void NoteSpectatorGameOver(string mode)"),
+                     ["_spectatorBoundaryDue = true;", 'NoteRealEnd("observer game over, " + mode);']):
+        out.append("the observer's end is not noted")
+    if not _in_order(_code(lf, "internal static void RetireRecord("), ["_realEndSeen = false;", "if (!_hasRecord) return;"]):
+        out.append("a retired record keeps the mark")
+    if "if (create) _realEndSeen = false;" not in _code(lf, "private static void InstallRecord("):
+        out.append("a created record keeps the mark")
+    return out
+
+
 ADMIT_ENTRANT = [
     ("private static IEnumerator AdmittedLateRun(", "if (body)",
      "if (LimitlessFence.RecordOpen) { LateGiveUp(); yield break; }", "LateArmed = true;", "arming"),
@@ -2445,6 +2481,7 @@ CLAIMS = {
     "sender_end": claim_termination_reaches_the_sender,
     "redrive": claim_the_new_master_redrives,
     "point_ticket": claim_one_send_per_point,
+    "real_end_snapshot": claim_no_record_after_the_real_end,
     "no_admission": claim_no_fighter_is_admitted,
     "late_tail": claim_the_late_tail_is_refused,
     "entrant_exit": claim_a_refused_entrant_is_no_departure,
@@ -2771,6 +2808,17 @@ MUTANTS = [
     ("point_ticket", "the next round's reset keeps the pending mark",
      [("FfaMode.cs", "            pointLatched = false;\n            pointSendPending = false;\n            GameManager.instance.battleOngoing = false;\n",
        "            pointLatched = false;\n            GameManager.instance.battleOngoing = false;\n")]),
+    ("real_end_snapshot", "the snapshot carries the record after the real end",
+     _drop(LF, "            if (_realEndSeen) return snap;   // R1 HIGH 3: from the real end until the record retires, none\n")),
+    ("real_end_snapshot", "the mark is set without a record",
+     [(LF, "if (!_hasRecord || _realEndSeen) return;", "if (_realEndSeen) return;")]),
+    ("real_end_snapshot", "GM's real end is not noted", _drop(LF, '                LimitlessFence.NoteRealEnd("GM game over");\n')),
+    ("real_end_snapshot", "FFA's real end is not noted",
+     _drop("FfaMode.cs", '                    try { LimitlessFence.NoteRealEnd("FFA game over"); } catch { }   // R1 HIGH 3\n')),
+    ("real_end_snapshot", "the observer's end is not noted", _drop(LF, '            NoteRealEnd("observer game over, " + mode);\n')),
+    ("real_end_snapshot", "a retired record keeps the mark", _drop(LF, "            _realEndSeen = false;\n")),
+    ("real_end_snapshot", "a created record keeps the mark",
+     _drop(LF, "            if (create) _realEndSeen = false;   // R1 HIGH 3: a new record has had no real end\n")),
     ("no_admission", "the master answers a late request as before",
      _drop("FfaLateEntry.cs", '            if (LimitlessFence.RecordOpen) { Refused("limitless", sender); SendSnapshot(sender, seq, true); return; }\n')),
     ("no_admission", "the master answers a late request with an open snapshot",
@@ -3388,6 +3436,8 @@ CONTROLS = [
                   NEUTRAL + "                if (AlivePlayers().Count > 1) return;\n")]),
     ("point_ticket", [("FfaMode.cs", "            if (ticket != pointTicket) yield break;",
                        NEUTRAL + "            if (ticket != pointTicket) yield break;")]),
+    ("real_end_snapshot", [(LF, "            if (_realEndSeen) return snap;",
+                            NEUTRAL + "            if (_realEndSeen) return snap;")]),
     ("no_admission", [("FfaLateEntry.cs", "            if (LimitlessFence.RecordOpen) { LateGiveUp(); return; }   // 4.6: no admission\n",
                        NEUTRAL + "            if (LimitlessFence.RecordOpen) { LateGiveUp(); return; }   // 4.6: no admission\n")]),
     ("late_tail", [("FfaReadmit.cs", '                    if (LimitlessFence.RecordOpen) { Refusal("limitless", true); break; }\n',

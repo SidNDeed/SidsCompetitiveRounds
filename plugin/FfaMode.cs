@@ -2387,6 +2387,7 @@ namespace CompetitiveRounds
                 if (!gameOverFired)
                 {
                     gameOverFired = true;
+                    try { LimitlessFence.NoteRealEnd("FFA game over"); } catch { }   // R1 HIGH 3
                     try { GameStateWatcher.OnFfaGameOver(winnerTeam); }
                     catch (Exception ex) { Plugin.Log.LogError($"[FFA] game-over report hook: {ex.Message}"); }
                     // Bug #104: with fewer than 3 members left the sitting
