@@ -18,7 +18,8 @@
 # exactly, and /optimize+ on both. Every configuration then gets the marker scan (lessons 306, 157): the two boot
 # lines' literals as #US heap entries (length, UTF-16LE text, flag byte) and the UTF-16LE SCR_FT_REF=NOCOLLECTORS at
 # any offset. FrameTime holds its own literal and not the marker; the reference holds the marker and its own literal
-# and not FrameTime's; Release, Thunderstore and Debug hold neither. Exit 6 = the marker scan refused.
+# and not FrameTime's; Release, Thunderstore and Debug hold neither. FrameTime and FrameTimeRef must also NOT hold the
+# test dealer's marker SCR_CARD_EVIDENCE_TEST_DEALER_ON (UTF-16LE, any offset). Exit 6 = the marker scan refused.
 # Stamps: take, exit and release, from date -u. Exit 0 = built and checked; 2 = refused before building;
 # 3 = build failed; 4 = compile check refused; 5 = the installed DLL changed.
 set -u
@@ -120,13 +121,19 @@ def us(s):
 ft = us("[FRAME-TIME] build variant=FrameTime")
 ref = us("[FRAME-TIME] build variant=FrameTimeRef SCR_FT_REF=NOCOLLECTORS")
 mark = "SCR_FT_REF=NOCOLLECTORS".encode("utf-16-le") in b
-print("ft=%d ref=%d marker=%d" % (ft, ref, mark))
+dealer = "SCR_CARD_EVIDENCE_TEST_DEALER_ON".encode("utf-16-le") in b
+print("ft=%d ref=%d marker=%d dealer=%d" % (ft, ref, mark, dealer))
 PY
 }
+# the test dealer's absence: CardDrawEvidenceTestDealer.cs compiles only under SCR_CARD_EVIDENCE_TEST_DEALER, which no
+# configuration defines, so FtRefSkip lists none of its classes; FrameTime and FrameTimeRef must not hold its marker
+# SCR_CARD_EVIDENCE_TEST_DEALER_ON (UTF-16LE, any offset). Other configurations print the reading only.
+dealer_ok() { case "$1" in FrameTime|FrameTimeRef) case "$2" in *" dealer=0") return 0;; *) return 1;; esac;; *) return 0;; esac; }
 mk=$(markers "$dll" | tr -d '\r')
 say "markers: $mk"
 case "$CONF" in FrameTime) want="ft=1 ref=0 marker=0";; FrameTimeRef) want="ft=0 ref=1 marker=1";; *) want="ft=0 ref=0 marker=0";; esac
-[ "$mk" = "$want" ] || { say "REFUSED: the marker scan reads '$mk', $CONF needs '$want'"; exit 6; }
+[ "${mk% dealer=*}" = "$want" ] || { say "REFUSED: the marker scan reads '$mk', $CONF needs '$want'"; exit 6; }
+dealer_ok "$CONF" "$mk" || { say "REFUSED: the marker scan reads '$mk': the test dealer's marker is in the $CONF DLL"; exit 6; }
 case "$CONF" in
   FrameTime)
     [ "$opt" = "/optimize+" ] && echo "$defs" | grep -q "SCR_FRAMETIME" || { say "REFUSED: FrameTime compile lacks /optimize+ or SCR_FRAMETIME"; exit 4; }

@@ -6,6 +6,8 @@
 - The two boot lines' literals each occur exactly once in plugin/*.cs, and each under its own variant's branch.
 - ft_build.sh's marker scan finds a #US entry exactly, not as a prefix of the reference's literal, and the marker
   at an odd offset.
+- The test dealer's marker SCR_CARD_EVIDENCE_TEST_DEALER_ON: the scan reads it at any offset (mutant fixtures), and
+  ft_build.sh refuses a FrameTime or FrameTimeRef DLL that holds it (exit 6), each with negative controls.
 """
 import glob
 import os
@@ -148,12 +150,72 @@ def scan(tmp_path, data):
 
 def test_marker_scan(tmp_path):
     pad = b"MZ\x90" + bytes(101)
-    assert scan(tmp_path, pad + us_entry(FT_LIT)) == "ft=1 ref=0 marker=0"
+    assert scan(tmp_path, pad + us_entry(FT_LIT)) == "ft=1 ref=0 marker=0 dealer=0"
     # the reference's literal holds FrameTime's as a prefix: as a #US entry it is the reference's only
-    assert scan(tmp_path, pad + us_entry(REF_LIT)) == "ft=0 ref=1 marker=1"
+    assert scan(tmp_path, pad + us_entry(REF_LIT)) == "ft=0 ref=1 marker=1 dealer=0"
     # odd offset, flag byte 0
-    assert scan(tmp_path, pad + b"\x07" + us_entry(REF_LIT, b"\x00")) == "ft=0 ref=1 marker=1"
-    assert scan(tmp_path, pad + us_entry(FT_LIT) + us_entry(REF_LIT)) == "ft=1 ref=1 marker=1"
+    assert scan(tmp_path, pad + b"\x07" + us_entry(REF_LIT, b"\x00")) == "ft=0 ref=1 marker=1 dealer=0"
+    assert scan(tmp_path, pad + us_entry(FT_LIT) + us_entry(REF_LIT)) == "ft=1 ref=1 marker=1 dealer=0"
     # the text without its #US framing (another heap, or a different length byte) is no entry
-    assert scan(tmp_path, pad + FT_LIT.encode("utf-16-le") + b"\x01") == "ft=0 ref=0 marker=0"
-    assert scan(tmp_path, pad) == "ft=0 ref=0 marker=0"
+    assert scan(tmp_path, pad + FT_LIT.encode("utf-16-le") + b"\x01") == "ft=0 ref=0 marker=0 dealer=0"
+    assert scan(tmp_path, pad) == "ft=0 ref=0 marker=0 dealer=0"
+
+
+DEALER = "SCR_CARD_EVIDENCE_TEST_DEALER_ON"
+
+
+def test_dealer_marker_scan(tmp_path):
+    # the mutant fixtures: the test dealer's marker present, as a #US entry, at an odd offset without framing, and
+    # beside each variant's own literal; each reads dealer=1
+    pad = b"MZ\x90" + bytes(101)
+    assert scan(tmp_path, pad + us_entry(DEALER)) == "ft=0 ref=0 marker=0 dealer=1"
+    assert scan(tmp_path, pad + b"\x07" + DEALER.encode("utf-16-le")) == "ft=0 ref=0 marker=0 dealer=1"
+    assert scan(tmp_path, pad + us_entry(FT_LIT) + us_entry(DEALER)) == "ft=1 ref=0 marker=0 dealer=1"
+    assert scan(tmp_path, pad + us_entry(REF_LIT) + b"\x07" + us_entry(DEALER, b"\x00")) == \
+        "ft=0 ref=1 marker=1 dealer=1"
+    # negative controls: the marker less its last letter, its UTF-8 bytes, and the define's name read dealer=0
+    assert scan(tmp_path, pad + us_entry(FT_LIT) + DEALER[:-1].encode("utf-16-le")) == "ft=1 ref=0 marker=0 dealer=0"
+    assert scan(tmp_path, pad + us_entry(FT_LIT) + DEALER.encode("utf-8")) == "ft=1 ref=0 marker=0 dealer=0"
+    assert scan(tmp_path, pad + us_entry(FT_LIT) + "SCR_CARD_EVIDENCE_TEST_DEALER".encode("utf-16-le")) == \
+        "ft=1 ref=0 marker=0 dealer=0"
+
+
+def test_dealer_marker_is_the_dealer_files_own_literal():
+    # the probe exists for no other purpose: one literal in plugin/*.cs, in the dealer's file, which opens under the
+    # define no configuration sets
+    every = {os.path.basename(f): open(f, encoding="utf-8-sig").read()
+             for f in glob.glob(os.path.join(PLUGIN, "*.cs"))}
+    assert sum(t.count('"' + DEALER + '"') for t in every.values()) == 1
+    d = every["CardDrawEvidenceTestDealer.cs"]
+    assert d.count('"' + DEALER + '"') == 1
+    assert d.split("\n", 1)[0].strip() == "#if SCR_CARD_EVIDENCE_TEST_DEALER"
+    csproj = open(os.path.join(PLUGIN, "CompetitiveRounds.csproj"), encoding="utf-8-sig").read()
+    assert "SCR_CARD_EVIDENCE_TEST_DEALER" not in csproj
+
+
+def gate(conf, mk):
+    """ft_build.sh's marker decisions, its own lines run in bash on one reading: 0 accepted, 6 refused"""
+    t = open(os.path.join(HERE, "ft_build.sh"), encoding="utf-8").read()
+    fn = re.search(r"^dealer_ok\(\) \{.*\}$", t, re.M)
+    want = re.search(r'^case "\$CONF" in FrameTime\) want=.*esac$', t, re.M)
+    chk = re.search(r'^\[ "\$\{mk% dealer=\*\}" = "\$want" \] \|\| .*$', t, re.M)
+    dchk = re.search(r'^dealer_ok "\$CONF" "\$mk" \|\| .*$', t, re.M)
+    assert fn and want and chk and dchk, "ft_build.sh: the marker decisions are not where the test reads them"
+    body = "\n".join(['say() { :; }', 'CONF="$1"; mk="$2"', fn.group(0), want.group(0), chk.group(0), dchk.group(0),
+                      'exit 0'])
+    return subprocess.run(["bash", "-c", body, "gate", conf, mk]).returncode
+
+
+def test_dealer_gate():
+    # mutants: the dealer's marker in FrameTime or FrameTimeRef is refused (exit 6), and so is a reading without the
+    # dealer field; negative controls: the same readings with dealer=0 pass, and Release only prints its reading
+    assert gate("FrameTime", "ft=1 ref=0 marker=0 dealer=1") == 6
+    assert gate("FrameTimeRef", "ft=0 ref=1 marker=1 dealer=1") == 6
+    assert gate("FrameTime", "ft=1 ref=0 marker=0") == 6
+    assert gate("FrameTime", "ft=1 ref=0 marker=0 dealer=0") == 0
+    assert gate("FrameTimeRef", "ft=0 ref=1 marker=1 dealer=0") == 0
+    assert gate("Release", "ft=0 ref=0 marker=0 dealer=0") == 0
+    assert gate("Release", "ft=0 ref=0 marker=0 dealer=1") == 0
+    # the variant markers still decide, dealer=0 or not
+    assert gate("FrameTime", "ft=0 ref=1 marker=1 dealer=0") == 6
+    assert gate("FrameTimeRef", "ft=1 ref=0 marker=0 dealer=0") == 6
