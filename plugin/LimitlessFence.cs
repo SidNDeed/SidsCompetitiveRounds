@@ -489,9 +489,9 @@ namespace CompetitiveRounds
                 foreach (var p in pm.players)
                 {
                     if (p == null) continue;
-                    int r = FfaMode.RoundsFor(p.teamID);
+                    int r = FfaMode.RoundsFor(p.TeamID);
                     sides.Add(r);
-                    if (p.teamID != winnerTeam && r > other) other = r;
+                    if (p.TeamID != winnerTeam && r > other) other = r;
                 }
             if (RecordOpen) return SendContinuation(args, sides, _ffaEpoch, _ffaHandoff);
             if (winnerTeam < 0) return FenceSend.Vanilla;

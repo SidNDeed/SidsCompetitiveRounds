@@ -227,13 +227,13 @@ namespace CompetitiveRounds
             add("decision round: a round short of the target ends nothing", !f.RoundEndsGame(1, 3, 2, 5));
             add("decision round: a side already past the target still ends, as vanilla's test reads", f.RoundEndsGame(1, 6, 2, 5));
             {
-                var dec = R.DecisionRecord(G1, 5, 1, 4, 2, true);
+                var drec = R.DecisionRecord(G1, 5, 1, 4, 2, true);
                 add("decision record: target base + 50, end clear, the base result at the send",
-                    dec.Gid == G1 && dec.TargetRounds == 55 && !dec.EndFlag && dec.BaseWinner == 1 && dec.BaseWinnerRounds == 5
-                    && dec.BaseOtherRounds == 2 && dec.BaseTarget == 5 && dec.Spectatable);
-                var same = f.NextSendRecord(dec, false, new[] { 7, 2 });
-                add("next send: a live record that need not end is unchanged", same.Equals(dec));
-                var end = f.NextSendRecord(dec, true, new[] { 7, 2 });
+                    drec.Gid == G1 && drec.TargetRounds == 55 && !drec.EndFlag && drec.BaseWinner == 1 && drec.BaseWinnerRounds == 5
+                    && drec.BaseOtherRounds == 2 && drec.BaseTarget == 5 && drec.Spectatable);
+                var same = f.NextSendRecord(drec, false, new[] { 7, 2 });
+                add("next send: a live record that need not end is unchanged", same.Equals(drec));
+                var end = f.NextSendRecord(drec, true, new[] { 7, 2 });
                 add("next send: a live record that must end carries the end flag and the end target",
                     end.EndFlag && end.TargetRounds == 3 && end.Gid == G1 && end.BaseWinner == 1 && end.BaseWinnerRounds == 5
                     && end.BaseOtherRounds == 2 && end.BaseTarget == 5 && end.Spectatable);
