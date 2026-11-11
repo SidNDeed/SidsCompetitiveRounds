@@ -2379,7 +2379,7 @@ namespace CompetitiveRounds
                 && Time.unscaledTime - last < 2f) return;
             _lastAnswerAt[e.Sender] = Time.unscaledTime;
 
-            var snap = LimitlessFence.AppendSnapshotRecord(BuildSnapshot(seq));   // Ask 16(a) lane 2 (v4 5.2): the record at [28]-[35]
+            var snap = LimitlessFence.AppendSnapshotRecord(BuildSnapshot(seq));   // Ask 16(a) lane 2 (v4 5.2): the record at [28]-[36]
             if (snap == null) return;
             try
             {

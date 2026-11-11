@@ -501,7 +501,7 @@ namespace CompetitiveRounds
         }
 
         /// <summary>5.2 (Table B (a), the spectator snapshot): the master's
-        /// snapshot carries its record at [28]-[35] from the record's creation
+        /// snapshot carries its record at [28]-[36] from the record's creation
         /// until the real end, while it is confirmed, with the seat's state, which
         /// a local termination moves without a message. From the real end until
         /// the record retires it carries none (R1 HIGH 3, a deviation from v4
@@ -977,6 +977,8 @@ namespace CompetitiveRounds
                 TransitionGuardDrops = gm == null || (ffa ? FfaMode.FenceTransitionGuard() : gm.isTransitioning),
                 DecisionRoster = roster,
                 OwnFighterRoster = ReplicatedFighters(),
+                RecordIndex = same ? _record.PointIndex : 0,   // 4.7a
+                MessageIndex = rec.PointIndex,
             };
             var outcome = LimitlessFenceRules.HandleFenceMessage(h);
             switch (outcome)
@@ -984,8 +986,9 @@ namespace CompetitiveRounds
                 case LimitlessFenceRules.HandlerOutcome.RefuseNotMaster:
                     Plugin.Log.LogWarning("[LIMIT] refused a fence message: its sender is not the master now");
                     // R2 HIGH (4.6): this seat's own message, refused here, was refused on every seat,
-                    // since every seat sees the server's order. FFA's point is then owed again.
-                    if (ffa && PhotonNetwork.LocalPlayer != null && sender == PhotonNetwork.LocalPlayer.ActorNumber) FfaMode.OwnRoundRefused();
+                    // since every seat sees the server's order. FFA's point is then owed again,
+                    // but only while the message's point index is still the record's next (4.7a).
+                    if (ffa && PhotonNetwork.LocalPlayer != null && sender == PhotonNetwork.LocalPlayer.ActorNumber && same && LimitlessFenceRules.IsNextPoint(_record.PointIndex, rec.PointIndex)) FfaMode.OwnRoundRefused();
                     return;
                 case LimitlessFenceRules.HandlerOutcome.RefuseUncovered:
                     Plugin.Log.LogWarning("[LIMIT] refused the master's fence message: gid " + GidPrefix(rec.Gid)
@@ -994,6 +997,12 @@ namespace CompetitiveRounds
                     return;
                 case LimitlessFenceRules.HandlerOutcome.DropTransition:
                     Plugin.Log.LogInfo("[LIMIT] dropped a fence message at vanilla's transition guard");
+                    return;
+                case LimitlessFenceRules.HandlerOutcome.DropStaleIndex:
+                    // 4.7a: not this seat's next point (a delayed original, a repeat, or an
+                    // earlier point's), dropped before the record or a score changes.
+                    Plugin.Log.LogInfo("[LIMIT] dropped a fence message at the point index: " + rec.PointIndex
+                        + (same ? ", this seat's next is " + (_record.PointIndex + 1) : ", a decision must be point 0"));
                     return;
                 case LimitlessFenceRules.HandlerOutcome.ApplyAsVanilla:
                     Plugin.Log.LogWarning("[LIMIT] the decision roster differs from this seat's: the round applies at the base");

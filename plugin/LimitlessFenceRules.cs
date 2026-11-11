@@ -163,24 +163,30 @@ namespace CompetitiveRounds
             internal int BaseOtherRounds;
             internal int BaseTarget;
             internal bool Spectatable;
+            /// <summary>4.7a: the point this carrier names, scoped to the gid. The
+            /// decision is point 0, each later round message carries its record's
+            /// index plus one, and the mirror and the snapshot carry the last point
+            /// the master applied.</summary>
+            internal int PointIndex;
         }
 
         /// <summary>The number of slots in every carrier.</summary>
-        internal const int WireSlots = 12;
+        internal const int WireSlots = 13;
 
         /// <summary>One format for every carrier: [version, gid, target, end,
         /// winner, winner's rounds, other rounds, base target, spectatable,
-        /// roster, round arguments, send stamp]. A round message carries the
+        /// roster, round arguments, send stamp, point index]. A round message carries the
         /// round's six arguments and its sender's ServerTimestamp at the raise
         /// (the value PUN writes into an RPC as key 2), so every seat applies
         /// the round under one stamp; the decision also carries its roster;
-        /// the mirror and the snapshot carry neither (empty arrays, stamp 0).</summary>
+        /// the mirror and the snapshot carry neither (empty arrays, stamp 0).
+        /// Every carrier ends with the record's point index (4.7a).</summary>
         internal static object[] EncodeRecord(FenceRecord r, int[] roster, int[] args, int stamp)
         {
             return new object[]
             {
                 WireVersion, r.Gid, r.TargetRounds, r.EndFlag, r.BaseWinner, r.BaseWinnerRounds, r.BaseOtherRounds,
-                r.BaseTarget, r.Spectatable, roster ?? new int[0], args ?? new int[0], stamp,
+                r.BaseTarget, r.Spectatable, roster ?? new int[0], args ?? new int[0], stamp, r.PointIndex,
             };
         }
 
@@ -208,13 +214,14 @@ namespace CompetitiveRounds
             if (ro == null || ar == null) return false;
             if (ar.Length != 0 && ar.Length != 6) return false;
             if (!(o[11] is int)) return false;
+            if (!(o[12] is int) || (int)o[12] < 0) return false;   // 4.7a: the point index
             var seen = new HashSet<int>();
             foreach (var a in ro)
                 if (a <= 0 || !seen.Add(a)) return false;
             r = new FenceRecord
             {
                 Gid = gid, TargetRounds = (int)o[2], EndFlag = (bool)o[3], BaseWinner = (int)o[4], BaseWinnerRounds = (int)o[5],
-                BaseOtherRounds = (int)o[6], BaseTarget = (int)o[7], Spectatable = (bool)o[8],
+                BaseOtherRounds = (int)o[6], BaseTarget = (int)o[7], Spectatable = (bool)o[8], PointIndex = (int)o[12],
             };
             roster = ro;
             args = ar;
@@ -224,14 +231,14 @@ namespace CompetitiveRounds
 
         /// <summary>5.2, F11: where the master's snapshot carries the record. A
         /// spectator's snapshot has 18 fields and a late one adds its tail at
-        /// [18]-[27] (FfaLateEntry), so the record takes [28]-[35]: the gid, the
+        /// [18]-[27] (FfaLateEntry), so the record takes [28]-[36]: the gid, the
         /// target, the state (true while terminating), the base winner, the
-        /// winner's rounds, the other rounds, the base target and the
-        /// spectatable flag.</summary>
+        /// winner's rounds, the other rounds, the base target, the spectatable
+        /// flag and the point index (4.7a).</summary>
         internal const int SnapshotRecordAt = 28;
-        internal const int SnapshotRecordSlots = 8;
+        internal const int SnapshotRecordSlots = 9;
 
-        /// <summary>The snapshot with the record at [28]-[35]. The fields before
+        /// <summary>The snapshot with the record at [28]-[36]. The fields before
         /// the late tail's place are kept, the tail's place is kept or padded
         /// with empty strings (no late marker), and the record follows.</summary>
         internal static object[] SnapshotWithRecord(object[] snap, FenceRecord r)
@@ -249,11 +256,12 @@ namespace CompetitiveRounds
             o[33] = r.BaseOtherRounds;
             o[34] = r.BaseTarget;
             o[35] = r.Spectatable;
+            o[36] = r.PointIndex;   // 4.7a
             return o;
         }
 
         /// <summary>The record a snapshot carries, read with the carrier's own
-        /// typed checks (F11): a snapshot without [28]-[35], or with any of them
+        /// typed checks (F11): a snapshot without [28]-[36], or with any of them
         /// missing or mistyped, carries none.</summary>
         internal static bool TrySnapshotRecord(object[] snap, out FenceRecord r)
         {
@@ -264,7 +272,7 @@ namespace CompetitiveRounds
             return TryDecodeRecord(new object[]
             {
                 WireVersion, snap[28], snap[29], snap[30], snap[31], snap[32], snap[33], snap[34], snap[35],
-                new int[0], new int[0], 0,
+                new int[0], new int[0], 0, snap[36],
             }, out r, out roster, out args, out stamp);
         }
 
@@ -507,6 +515,7 @@ namespace CompetitiveRounds
                 Gid = gid, TargetRounds = ContinueTarget(baseTarget), EndFlag = false,
                 BaseWinner = winner, BaseWinnerRounds = winnerRounds + 1, BaseOtherRounds = otherRounds,
                 BaseTarget = baseTarget, Spectatable = spectatable,
+                PointIndex = 0,   // 4.7a: the decision is the gid's point 0
             };
         }
 
@@ -514,11 +523,13 @@ namespace CompetitiveRounds
         /// carries. Once an end is decided, every later message carries the same
         /// record. A live record that must end carries the end flag and the end
         /// target from the side rounds the message itself carries. Otherwise the
-        /// record is unchanged.</summary>
+        /// record is unchanged, but for the point index: every message carries
+        /// its record's index plus one (4.7a).</summary>
         internal static FenceRecord NextSendRecord(FenceRecord current, bool mustEnd, IList<int> sideRounds)
         {
-            if (current.EndFlag || !mustEnd) return current;
             var next = current;
+            next.PointIndex = current.PointIndex + 1;   // 4.7a: the point this message applies
+            if (current.EndFlag || !mustEnd) return next;
             next.EndFlag = true;
             next.TargetRounds = EndTarget(sideRounds);
             return next;
@@ -580,7 +591,7 @@ namespace CompetitiveRounds
 
         // ------------------------------------------------------------------ the handler (4.7)
 
-        internal enum HandlerOutcome { RefuseNotMaster, RefuseUncovered, DropTransition, ApplyAsVanilla, CreateRecord, UpdateRecord }
+        internal enum HandlerOutcome { RefuseNotMaster, RefuseUncovered, DropTransition, ApplyAsVanilla, CreateRecord, UpdateRecord, DropStaleIndex }
 
         internal sealed class HandlerInputs
         {
@@ -592,25 +603,40 @@ namespace CompetitiveRounds
             internal bool TransitionGuardDrops;
             internal int[] DecisionRoster;
             internal IList<int> OwnFighterRoster;
+            internal int RecordIndex;    // 4.7a: the point index of the seat's record, with HasRecord
+            internal int MessageIndex;   // 4.7a: the message's point index
         }
 
         /// <summary>
         /// 4.7's order on every seat: (1) the sender is the master now, else
         /// nothing applies; (2) the gid is live here and its record is not ended,
         /// else the fence does not cover it and the seat takes its terminal path;
+        /// (2a, 4.7a) a seat with a record takes only its record's next point
+        /// index, and drops any other before the record or a score changes;
         /// (3) vanilla's transition guard, before the record changes; (4) a seat
         /// with no record compares the decision roster with its own replicated
         /// roster: equal creates the record, unequal applies vanilla's round at
-        /// the base. A seat with no record and no roster is not covered.
+        /// the base. A seat with no record and no roster is not covered, and a
+        /// decision is the gid's point 0: any other index is dropped (4.7a).
         /// </summary>
         internal static HandlerOutcome HandleFenceMessage(HandlerInputs h)
         {
             if (h == null || !h.SenderIsMasterNow) return HandlerOutcome.RefuseNotMaster;
             if (h.Ledger == null || !h.Ledger.IsLiveGid(h.MessageGid) || h.RecordEnded) return HandlerOutcome.RefuseUncovered;
+            if (h.HasRecord && !IsNextPoint(h.RecordIndex, h.MessageIndex)) return HandlerOutcome.DropStaleIndex;   // 4.7a
             if (h.TransitionGuardDrops) return HandlerOutcome.DropTransition;
             if (h.HasRecord) return HandlerOutcome.UpdateRecord;
             if (h.DecisionRoster == null || h.DecisionRoster.Length == 0) return HandlerOutcome.RefuseUncovered;
+            if (h.MessageIndex != 0) return HandlerOutcome.DropStaleIndex;   // 4.7a: a decision is the gid's point 0
             return RosterMatches(h.DecisionRoster, h.OwnFighterRoster) ? HandlerOutcome.CreateRecord : HandlerOutcome.ApplyAsVanilla;
+        }
+
+        /// <summary>4.7a: the message's point index is the one after its record's,
+        /// the only index a seat with a record takes. A seat's own refused message
+        /// re-arms its FFA point only while this holds.</summary>
+        internal static bool IsNextPoint(int recordIndex, int messageIndex)
+        {
+            return messageIndex == recordIndex + 1;
         }
 
         /// <summary>F4: the decision roster against the seat's own replicated

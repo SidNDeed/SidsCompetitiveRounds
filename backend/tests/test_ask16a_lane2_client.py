@@ -146,7 +146,7 @@ FENCE_RULES = (
     'decision round: a round short of the target ends nothing',
     "decision round: a side already past the target still ends, as vanilla's test reads",
     'decision record: target base + 50, end clear, the base result at the send',
-    'next send: a live record that need not end is unchanged',
+    "next send: a live record that need not end keeps every field but the point index",
     'next send: a live record that must end carries the end flag and the end target',
     'next send: a terminating record repeats itself, whatever the re-read finds',
     'series: an unrated game has no series to follow',
@@ -164,7 +164,20 @@ FENCE_RULES = (
     'redrive: with no latch the point is sent',
     'redrive: a latch whose send has not run is sent by the new master',
     'redrive: a latch whose send ran stays',
-    "snapshot: a spectator's 18 fields stay, the late tail's place is padded, and the record takes [28]-[35]",
+    "decision record: the decision is the gid's point index 0",
+    "next send: every send carries the next point index",
+    "carrier: the point index round-trips",
+    "carrier: a negative point index, or a twelve-slot carrier, is refused",
+    "snapshot: the point index round-trips",
+    "point index: R3's trace, a delayed original that lands after its re-drive applied, is dropped",
+    "point index: the same index twice in one master period applies once",
+    "point index: an index from an earlier point is dropped before the record changes",
+    "point index: an index past the next one is dropped",
+    "point index: the index test comes before vanilla's transition guard",
+    "point index: a seat that rejoins reads the index from the snapshot and takes the next one",
+    "point index: a seat with no record takes a decision only at index 0",
+    "point index: a refused own message is owed again only while its index is the next one",
+    "snapshot: a spectator's 18 fields stay, the late tail's place is padded, and the record takes [28]-[36]",
     "snapshot: a late snapshot's tail stays at [18]-[27], and the record follows it",
     'snapshot: the gid round-trips',
     'snapshot: the target round-trips',
@@ -191,6 +204,8 @@ FENCE_RULES = (
 )
 
 FENCE_MUTANTS = (
+    'the handler has no point index test',
+    "every send carries its record's own index",
     'MaySend ignores the handoff count',
     'MaySend ignores the epoch',
     "MaySend ignores the record's end",
@@ -272,6 +287,7 @@ CARRIER_FIELDS = (
     'the roster',
     "the round's arguments",
     "the send stamp",
+    'the point index',
 )
 
 
@@ -281,7 +297,7 @@ def _caught(names):
 
 FENCE_CASES = (tuple("real: " + n for n in FENCE_RULES) + _caught(FENCE_MUTANTS)
                + _caught("the carrier drops " + f for f in CARRIER_FIELDS)
-               + _caught("the snapshot drops " + f for f in CARRIER_FIELDS[:8]))
+               + _caught("the snapshot drops " + f for f in CARRIER_FIELDS[:8] + CARRIER_FIELDS[11:]))
 
 
 def test_the_fence_suite_ran_exactly_its_cases_and_passed(harness_run):
@@ -297,7 +313,7 @@ def test_the_fence_suite_ran_exactly_its_cases_and_passed(harness_run):
 
 
 def test_the_pinned_names_are_distinct():
-    assert len(set(FENCE_CASES)) == len(FENCE_CASES) == 160 + 67 + 11 + 8
+    assert len(set(FENCE_CASES)) == len(FENCE_CASES) == 173 + 69 + 12 + 9
 
 
 # -- the fence's Unity- and Photon-side lines, as source claims --------------
@@ -1041,11 +1057,28 @@ def claim_a_refused_point_is_owed_again(files):
     i = body.find("case LimitlessFenceRules.HandlerOutcome.RefuseNotMaster:")
     j = body.find("case LimitlessFenceRules.HandlerOutcome.RefuseUncovered:")
     branch = body[i:j] if -1 < i < j else ""
-    if not _in_order(branch, ["if (ffa && PhotonNetwork.LocalPlayer != null && sender == PhotonNetwork.LocalPlayer.ActorNumber) FfaMode.OwnRoundRefused();", "return;"]):
+    if not _in_order(branch, ["if (ffa && PhotonNetwork.LocalPlayer != null && sender == PhotonNetwork.LocalPlayer.ActorNumber && same && LimitlessFenceRules.IsNextPoint(_record.PointIndex, rec.PointIndex)) FfaMode.OwnRoundRefused();", "return;"]):
         out.append("this seat's refused round message does not re-arm its point")
     if not _in_order(_code(files["FfaMode.cs"], "internal static void OwnRoundRefused()"),
                      ["if (!pointLatched) return;", "pointSendPending = true;"]):
         out.append("the re-arm does not mark the latched point's send pending")
+    return out
+
+
+def claim_stale_points_are_dropped(files):
+    """4.7a (R3 HIGH): the handler reads the record's and the message's point
+    index, and a message that is not the record's next point is dropped before
+    the record, the target, the mirror or the round changes."""
+    out = []
+    body = _code(files[LF], "internal static void HandleFenceEvent(int sender, object[] data)")
+    if not _in_order(body, ["RecordIndex = same ? _record.PointIndex : 0,", "MessageIndex = rec.PointIndex,",
+                            "var outcome = LimitlessFenceRules.HandleFenceMessage(h);"]):
+        out.append("the handler does not read both point indexes")
+    i = body.find("case LimitlessFenceRules.HandlerOutcome.DropStaleIndex:")
+    k = body.find("InstallRecord(rec, outcome == LimitlessFenceRules.HandlerOutcome.CreateRecord);")
+    block = body[i:k] if -1 < i < k else ""
+    if "return;" not in block or "break;" in block:
+        out.append("a stale message reaches the record, the target, the mirror or the round")
     return out
 
 
@@ -1565,7 +1598,7 @@ def claim_the_joiner_reads_the_mirror_once_unconfirmed(files):
 
 def claim_the_snapshot_carries_and_replaces_the_record(files):
     """5.2, Table B (a)'s spectator snapshot row: the master's answer carries
-    its open, confirmed record at [28]-[35] with the seat's state. The
+    its open, confirmed record at [28]-[36] with the seat's state. The
     receiver takes it right after the authority check, before any field,
     score or seed applies: it replaces an unconfirmed record or installs one
     for the room's live gid, an accepted message's record stays, a snapshot
@@ -2504,6 +2537,7 @@ CLAIMS = {
     "point_ticket": claim_one_send_per_point,
     "real_end_snapshot": claim_no_record_after_the_real_end,
     "refused_point": claim_a_refused_point_is_owed_again,
+    "stale_point": claim_stale_points_are_dropped,
     "no_admission": claim_no_fighter_is_admitted,
     "late_tail": claim_the_late_tail_is_refused,
     "entrant_exit": claim_a_refused_entrant_is_no_departure,
@@ -2845,7 +2879,15 @@ MUTANTS = [
     ("real_end_snapshot", "a created record starts marked",
      [(LF, "if (create) _realEndSeen = false;", "if (create) _realEndSeen = true;")]),
     ("refused_point", "a refused own message re-arms nothing",
-     _drop(LF, "                    if (ffa && PhotonNetwork.LocalPlayer != null && sender == PhotonNetwork.LocalPlayer.ActorNumber) FfaMode.OwnRoundRefused();\n")),
+     _drop(LF, "                    if (ffa && PhotonNetwork.LocalPlayer != null && sender == PhotonNetwork.LocalPlayer.ActorNumber && same && LimitlessFenceRules.IsNextPoint(_record.PointIndex, rec.PointIndex)) FfaMode.OwnRoundRefused();\n")),
+    ("refused_point", "the re-arm ignores the point index",
+     [(LF, " && same && LimitlessFenceRules.IsNextPoint(_record.PointIndex, rec.PointIndex)) FfaMode.OwnRoundRefused();",
+       ") FfaMode.OwnRoundRefused();")]),
+    # 4.7a (R3 HIGH): each mutant lets a stale message reach the record and the round.
+    ("stale_point", "the handler reads no record index",
+     [(LF, "RecordIndex = same ? _record.PointIndex : 0,", "RecordIndex = same ? rec.PointIndex - 1 : 0,")]),
+    ("stale_point", "no case takes a stale message",
+     _drop(LF, "                case LimitlessFenceRules.HandlerOutcome.DropStaleIndex:\n")),
     ("refused_point", "the re-arm marks nothing",
      _drop("FfaMode.cs", "            pointSendPending = true;   // R2 HIGH: the point is owed again\n")),
     ("no_admission", "the master answers a late request as before",
@@ -3467,6 +3509,8 @@ CONTROLS = [
                        NEUTRAL + "            if (ticket != pointTicket) yield break;")]),
     ("real_end_snapshot", [(LF, "            if (_realEndSeen) return snap;",
                             NEUTRAL + "            if (_realEndSeen) return snap;")]),
+    ("stale_point", [(LF, "                case LimitlessFenceRules.HandlerOutcome.DropStaleIndex:",
+                      NEUTRAL + "                case LimitlessFenceRules.HandlerOutcome.DropStaleIndex:")]),
     ("refused_point", [("FfaMode.cs", "            if (!pointLatched) return;",
                         NEUTRAL + "            if (!pointLatched) return;")]),
     ("no_admission", [("FfaLateEntry.cs", "            if (LimitlessFence.RecordOpen) { LateGiveUp(); return; }   // 4.6: no admission\n",

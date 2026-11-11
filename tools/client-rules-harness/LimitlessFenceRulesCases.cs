@@ -97,7 +97,7 @@ namespace CompetitiveRounds
             return new R.FenceRecord
             {
                 Gid = G1, TargetRounds = 55, EndFlag = true, BaseWinner = 1, BaseWinnerRounds = 5, BaseOtherRounds = 3,
-                BaseTarget = 5, Spectatable = true,
+                BaseTarget = 5, Spectatable = true, PointIndex = 7,
             };
         }
 
@@ -150,9 +150,10 @@ namespace CompetitiveRounds
             {
                 SenderIsMasterNow = true, MessageGid = G1, Ledger = LiveLedger(G1), HasRecord = false,
                 RecordEnded = false, TransitionGuardDrops = false, DecisionRoster = new[] { 1, 2, 3 },
-                OwnFighterRoster = new[] { 3, 2, 1 },
+                OwnFighterRoster = new[] { 3, 2, 1 }, RecordIndex = 3, MessageIndex = -1,
             };
             change(h);
+            if (h.MessageIndex < 0) h.MessageIndex = h.HasRecord ? h.RecordIndex + 1 : 0;   // 4.7a: the next index unless a case sets one
             return h;
         }
 
@@ -226,7 +227,12 @@ namespace CompetitiveRounds
             add("carrier: the roster round-trips", dec && bro != null && bro.Length == 3 && bro[0] == 3 && bro[2] == 2);
             add("carrier: the round's arguments round-trip", dec && bar != null && bar.Length == 6 && bar[5] == 5);
             add("carrier: the send stamp round-trips", dec && bst == Stamp);
+            add("carrier: the point index round-trips", dec && back.PointIndex == want.PointIndex);
             var good = R.EncodeRecord(Rec(), Roster, Args, Stamp);
+            var twelve = new object[12];
+            Array.Copy(good, twelve, 12);
+            add("carrier: a negative point index, or a twelve-slot carrier, is refused",
+                Decodes(good) && !Decodes(With(good, 12, -1)) && !Decodes(twelve));
             bool everyNullRefused = true, everyTypeRefused = true;
             for (int i = 0; i < R.WireSlots; i++)
             {
@@ -250,13 +256,13 @@ namespace CompetitiveRounds
             late[18] = "late";
             var withSpec = f.SnapshotWith(spec, Rec());
             var withLate = f.SnapshotWith(late, Rec());
-            var sb = withSpec == null || withSpec.Length < 36 ? null : f.SnapshotRead(withSpec);
-            add("snapshot: a spectator's 18 fields stay, the late tail's place is padded, and the record takes [28]-[35]",
-                withSpec != null && withSpec.Length == 36 && SameUpTo(withSpec, spec, 18) && PaddedFrom(withSpec, 18, 28) && sb.HasValue);
+            var sb = withSpec == null || withSpec.Length < 37 ? null : f.SnapshotRead(withSpec);
+            add("snapshot: a spectator's 18 fields stay, the late tail's place is padded, and the record takes [28]-[36]",
+                withSpec != null && withSpec.Length == 37 && SameUpTo(withSpec, spec, 18) && PaddedFrom(withSpec, 18, 28) && sb.HasValue);
             add("snapshot: a late snapshot's tail stays at [18]-[27], and the record follows it",
-                withLate != null && withLate.Length == 36 && SameUpTo(withLate, late, 28) && f.SnapshotRead(withLate).HasValue);
+                withLate != null && withLate.Length == 37 && SameUpTo(withLate, late, 28) && f.SnapshotRead(withLate).HasValue);
             for (int k = 1; k <= R.SnapshotRecordSlots; k++)
-                add(SlotCase[k].Replace("carrier: ", "snapshot: "), sb.HasValue && SameField(sb.Value, Rec(), k));
+                add(SlotCase[SnapSlot(k)].Replace("carrier: ", "snapshot: "), sb.HasValue && SameField(sb.Value, Rec(), SnapSlot(k)));
             add("snapshot: a snapshot without the record, or with a field missing or mistyped, carries none",
                 !f.SnapshotRead(spec).HasValue && !f.SnapshotRead(late).HasValue
                 && !f.SnapshotRead(With(R.SnapshotWithRecord(spec, Rec()), 29, "55")).HasValue
@@ -308,14 +314,21 @@ namespace CompetitiveRounds
                 add("decision record: target base + 50, end clear, the base result at the send",
                     drec.Gid == G1 && drec.TargetRounds == 55 && !drec.EndFlag && drec.BaseWinner == 1 && drec.BaseWinnerRounds == 5
                     && drec.BaseOtherRounds == 2 && drec.BaseTarget == 5 && drec.Spectatable);
+                add("decision record: the decision is the gid's point index 0", drec.PointIndex == 0);
                 var same = f.NextSendRecord(drec, false, new[] { 7, 2 });
-                add("next send: a live record that need not end is unchanged", same.Equals(drec));
+                add("next send: a live record that need not end keeps every field but the point index", SameBut(same, drec, drec.PointIndex + 1));
                 var end = f.NextSendRecord(drec, true, new[] { 7, 2 });
                 add("next send: a live record that must end carries the end flag and the end target",
                     end.EndFlag && end.TargetRounds == 3 && end.Gid == G1 && end.BaseWinner == 1 && end.BaseWinnerRounds == 5
                     && end.BaseOtherRounds == 2 && end.BaseTarget == 5 && end.Spectatable);
                 add("next send: a terminating record repeats itself, whatever the re-read finds",
-                    f.NextSendRecord(end, true, new[] { 9, 4 }).Equals(end) && f.NextSendRecord(end, false, new[] { 9, 4 }).Equals(end));
+                    SameBut(f.NextSendRecord(end, true, new[] { 9, 4 }), end, end.PointIndex + 1)
+                    && SameBut(f.NextSendRecord(end, false, new[] { 9, 4 }), end, end.PointIndex + 1));
+                var at3 = drec;
+                at3.PointIndex = 3;
+                add("next send: every send carries the next point index",
+                    f.NextSendRecord(at3, false, new[] { 7, 2 }).PointIndex == 4 && f.NextSendRecord(at3, true, new[] { 7, 2 }).PointIndex == 4
+                    && f.NextSendRecord(end, true, new[] { 9, 4 }).PointIndex == end.PointIndex + 1);
             }
             add("series: an unrated game has no series to follow", !f.SeriesFollows(false, true));
             add("series: a rated FFA game keeps no series", !f.SeriesFollows(true, false));
@@ -448,6 +461,34 @@ namespace CompetitiveRounds
                 f.Handle(H(h => h.OwnFighterRoster = new[] { 1, 2 })) == R.HandlerOutcome.ApplyAsVanilla);
             add("handler: no record and no roster is not covered",
                 f.Handle(H(h => h.DecisionRoster = new int[0])) == R.HandlerOutcome.RefuseUncovered);
+            // the point index (4.7a, R3 HIGH)
+            add("point index: R3's trace, a delayed original that lands after its re-drive applied, is dropped",
+                f.Handle(H(h => { h.HasRecord = true; h.RecordIndex = 6; h.MessageIndex = 6; })) == R.HandlerOutcome.DropStaleIndex);
+            {
+                var cur = Rec();
+                cur.PointIndex = 5;
+                var sent = f.NextSendRecord(cur, false, new[] { 7, 2 });
+                var first = f.Handle(H(h => { h.HasRecord = true; h.RecordIndex = cur.PointIndex; h.MessageIndex = sent.PointIndex; }));
+                var again = f.Handle(H(h => { h.HasRecord = true; h.RecordIndex = sent.PointIndex; h.MessageIndex = sent.PointIndex; }));
+                add("point index: the same index twice in one master period applies once", first == R.HandlerOutcome.UpdateRecord && again == R.HandlerOutcome.DropStaleIndex);
+            }
+            add("point index: an index from an earlier point is dropped before the record changes",
+                f.Handle(H(h => { h.HasRecord = true; h.RecordIndex = 6; h.MessageIndex = 4; })) == R.HandlerOutcome.DropStaleIndex);
+            add("point index: an index past the next one is dropped",
+                f.Handle(H(h => { h.HasRecord = true; h.RecordIndex = 6; h.MessageIndex = 8; })) == R.HandlerOutcome.DropStaleIndex);
+            add("point index: the index test comes before vanilla's transition guard",
+                f.Handle(H(h => { h.HasRecord = true; h.RecordIndex = 6; h.MessageIndex = 6; h.TransitionGuardDrops = true; })) == R.HandlerOutcome.DropStaleIndex);
+            {
+                var snapIdx = f.SnapshotWith(SnapBase(18), Rec());
+                var readIdx = snapIdx == null ? null : f.SnapshotRead(snapIdx);
+                int got = readIdx.HasValue ? readIdx.Value.PointIndex : -1;
+                add("point index: a seat that rejoins reads the index from the snapshot and takes the next one", got == 7
+                    && f.Handle(H(h => { h.HasRecord = true; h.RecordIndex = got; h.MessageIndex = 8; })) == R.HandlerOutcome.UpdateRecord
+                    && f.Handle(H(h => { h.HasRecord = true; h.RecordIndex = got; h.MessageIndex = 7; })) == R.HandlerOutcome.DropStaleIndex);
+            }
+            add("point index: a seat with no record takes a decision only at index 0",
+                f.Handle(H(h => h.MessageIndex = 0)) == R.HandlerOutcome.CreateRecord && f.Handle(H(h => h.MessageIndex = 2)) == R.HandlerOutcome.DropStaleIndex);
+            add("point index: a refused own message is owed again only while its index is the next one", R.IsNextPoint(4, 5) && !R.IsNextPoint(5, 5) && !R.IsNextPoint(5, 4));
             add("roster: the same set in another order matches", f.RosterMatches(new[] { 1, 2, 3 }, new[] { 3, 1, 2 }));
             add("roster: a subset or a superset does not match",
                 !f.RosterMatches(new[] { 1, 2 }, new[] { 1, 2, 3 }) && !f.RosterMatches(new[] { 1, 2, 3, 4 }, new[] { 1, 2, 3 }));
@@ -489,6 +530,7 @@ namespace CompetitiveRounds
         {
             null, "the gid", "the target", "the end flag", "the base winner", "the winner's rounds",
             "the other side's rounds", "the base target", "the spectatable flag", "the roster", "the round's arguments", "the send stamp",
+            "the point index",
         };
 
         private static readonly string[] SlotCase =
@@ -498,6 +540,7 @@ namespace CompetitiveRounds
             "carrier: the other side's rounds round-trip", "carrier: the base target round-trips",
             "carrier: the spectatable flag round-trips", "carrier: the roster round-trips",
             "carrier: the round's arguments round-trip", "carrier: the send stamp round-trips",
+            "carrier: the point index round-trips",
         };
 
         /// <summary>A carrier that loses one field: the slot keeps a valid value
@@ -505,7 +548,7 @@ namespace CompetitiveRounds
         /// can see the loss.</summary>
         private static object[] Omit(object[] o, int slot)
         {
-            object[] lost = { null, "0000000000000000", 1, false, 0, 0, 0, 1, false, new int[0], new int[0], 0 };
+            object[] lost = { null, "0000000000000000", 1, false, 0, 0, 0, 1, false, new int[0], new int[0], 0, 0 };
             return With(o, slot, lost[slot]);
         }
 
@@ -549,8 +592,24 @@ namespace CompetitiveRounds
                 case 5: return a.BaseWinnerRounds == b.BaseWinnerRounds;
                 case 6: return a.BaseOtherRounds == b.BaseOtherRounds;
                 case 7: return a.BaseTarget == b.BaseTarget;
+                case 12: return a.PointIndex == b.PointIndex;   // 4.7a
                 default: return a.Spectatable == b.Spectatable;
             }
+        }
+
+        /// <summary>4.7a: the snapshot's record fields 1-8 are the carrier's slots
+        /// 1-8, and its ninth, the point index, is the carrier's slot 12.</summary>
+        private static int SnapSlot(int k)
+        {
+            return k <= 8 ? k : 12;
+        }
+
+        /// <summary>4.7a: got is was with only the point index set to index.</summary>
+        private static bool SameBut(R.FenceRecord got, R.FenceRecord was, int index)
+        {
+            var w = was;
+            w.PointIndex = index;
+            return got.Equals(w);
         }
 
         /// <summary>A snapshot whose record field at `at` keeps a valid value of
@@ -655,6 +714,12 @@ namespace CompetitiveRounds
             Control(r, "the handler applies an ended record's message",
                     Cases(new Fns { Handle = h => { h.RecordEnded = false; return R.HandleFenceMessage(h); } }),
                     "handler: an ended record is not covered");
+            Control(r, "the handler has no point index test",
+                    Cases(new Fns { Handle = h => { h.MessageIndex = h.HasRecord ? h.RecordIndex + 1 : 0; return R.HandleFenceMessage(h); } }),
+                    "point index: R3's trace, a delayed original that lands after its re-drive applied, is dropped", "point index: the same index twice in one master period applies once", "point index: an index from an earlier point is dropped before the record changes", "point index: an index past the next one is dropped", "point index: the index test comes before vanilla's transition guard", "point index: a seat that rejoins reads the index from the snapshot and takes the next one", "point index: a seat with no record takes a decision only at index 0");
+            Control(r, "every send carries its record's own index",
+                    Cases(new Fns { NextSendRecord = (c, m, s) => { var n = R.NextSendRecord(c, m, s); n.PointIndex = c.PointIndex; return n; } }),
+                    "next send: every send carries the next point index", "point index: the same index twice in one master period applies once");
             Control(r, "the roster ignores duplicates",
                     Cases(new Fns
                     {
@@ -788,14 +853,14 @@ namespace CompetitiveRounds
             }
             for (int k = 0; k < R.SnapshotRecordSlots; k++)
             {
-                int at = R.SnapshotRecordAt + k, slot = k + 1;
+                int at = R.SnapshotRecordAt + k, slot = SnapSlot(k + 1);
                 Control(r, "the snapshot drops " + SlotName[slot],
                         Cases(new Fns { SnapshotWith = (s, rec) => OmitAt(R.SnapshotWithRecord(s, rec), at, slot) }),
                         SlotCase[slot].Replace("carrier: ", "snapshot: "));
             }
             Control(r, "the snapshot's record skips the late tail's place",
                     Cases(new Fns { SnapshotWith = Unpadded }),
-                    "snapshot: a spectator's 18 fields stay, the late tail's place is padded, and the record takes [28]-[35]");
+                    "snapshot: a spectator's 18 fields stay, the late tail's place is padded, and the record takes [28]-[36]");
             Control(r, "the snapshot always reads a record",
                     Cases(new Fns { SnapshotRead = s => Rec() }),
                     "snapshot: a snapshot without the record, or with a field missing or mistyped, carries none");
