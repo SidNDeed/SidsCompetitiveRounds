@@ -60,7 +60,10 @@ the round 3 refit tree, with the autolog fold's LogBundleCore.cs field end;
 using-directive ends and the stall detector's stream-snapshot field;
 1142 with the late i18n lane's ServerTextRules.cs using-directive end;
 1147 with ask 16(a) lane 1's three BoundedDeal.cs Harmony ends, the
-RoundPipClamp.cs prefix end and the LimitlessBounds.cs using-directive end).
+RoundPipClamp.cs prefix end and the LimitlessBounds.cs using-directive end;
+1153 with ask 16(a) lane 2's six LimitlessFence.cs Harmony ends, the
+prefix and the cleanup of the game start's, the raw round's and the
+player death's patches).
 """
 from __future__ import annotations
 
@@ -1690,6 +1693,8 @@ FIX5_ENDS = [
     ('harmony-Keybinds.cs-StartPickingPatch.Cleanup-7-CharacterSelectionInstance.StartPicking', 'harmony:Keybinds.cs:StartPickingPatch.Cleanup#7(CharacterSelectionInstance.StartPicking)', 'Keybinds.cs:Cleanup#7'),
     ('harmony-LimitlessFence.cs-LimitlessFence_GameStart_Patch.Cleanup-1-GM_ArmsRace.DoStartGame', 'harmony:LimitlessFence.cs:LimitlessFence_GameStart_Patch.Cleanup#1(GM_ArmsRace.DoStartGame)', 'LimitlessFence.cs:Cleanup#1'),
     ('harmony-LimitlessFence.cs-LimitlessFence_GameStart_Patch.Prefix-1-GM_ArmsRace.DoStartGame', 'harmony:LimitlessFence.cs:LimitlessFence_GameStart_Patch.Prefix#1(GM_ArmsRace.DoStartGame)', 'LimitlessFence.cs:Prefix#1'),
+    ('harmony-LimitlessFence.cs-LimitlessFence_PlayerDied_Patch.Cleanup-3-GM_ArmsRace.PlayerDied', 'harmony:LimitlessFence.cs:LimitlessFence_PlayerDied_Patch.Cleanup#3(GM_ArmsRace.PlayerDied)', 'LimitlessFence.cs:Cleanup#3'),
+    ('harmony-LimitlessFence.cs-LimitlessFence_PlayerDied_Patch.Prefix-3-GM_ArmsRace.PlayerDied', 'harmony:LimitlessFence.cs:LimitlessFence_PlayerDied_Patch.Prefix#3(GM_ArmsRace.PlayerDied)', 'LimitlessFence.cs:Prefix#3'),
     ('harmony-LimitlessFence.cs-LimitlessFence_RawRound_Patch.Cleanup-2-GM_ArmsRace.RPCA_NextRound', 'harmony:LimitlessFence.cs:LimitlessFence_RawRound_Patch.Cleanup#2(GM_ArmsRace.RPCA_NextRound)', 'LimitlessFence.cs:Cleanup#2'),
     ('harmony-LimitlessFence.cs-LimitlessFence_RawRound_Patch.Prefix-2-GM_ArmsRace.RPCA_NextRound', 'harmony:LimitlessFence.cs:LimitlessFence_RawRound_Patch.Prefix#2(GM_ArmsRace.RPCA_NextRound)', 'LimitlessFence.cs:Prefix#2'),
     ('harmony-MusicEngine.cs-MusicSuppressionPatch.PlayIngamePrefix', 'harmony:MusicEngine.cs:MusicSuppressionPatch.PlayIngamePrefix(?)', 'MusicEngine.cs:PlayIngamePrefix'),
@@ -1930,7 +1935,7 @@ PIN5 = "backend/tests/test_keybind_surfaces.py::test_h1_fix5_each_unresolved_end
 def test_h1_fix5_the_end_table_is_every_unresolved_end_beyond_the_four(attach4):
     st, cman, att, aman = attach4
     names = [n for i, n, m in FIX5_ENDS]
-    assert len(names) == len(set(names)) == len({i for i, n, m in FIX5_ENDS}) == 1151
+    assert len(names) == len(set(names)) == len({i for i, n, m in FIX5_ENDS}) == 1153
     extra = set(att["unresolved"]) - set(names)
     assert len(extra) == 4 and RESET_MENU in extra, sorted(extra)
     assert set(names) <= set(att["unresolved"]), sorted(set(names) - set(att["unresolved"]))
