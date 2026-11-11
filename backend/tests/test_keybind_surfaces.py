@@ -65,7 +65,9 @@ RoundPipClamp.cs prefix end and the LimitlessBounds.cs using-directive end;
 prefix and the cleanup of the game start's, the raw round's and the
 player death's patches;
 1156 with lane 2's three real-end hold cleanups, the GameOver patch's and
-the two PlatformManager patches').
+the two PlatformManager patches;
+1187 with lane 2's clamp applier: its two LimitlessApply.cs Harmony ends
+and the 29 case labels of its field switch').
 """
 from __future__ import annotations
 
@@ -1933,6 +1935,37 @@ FIX5_ENDS = [
     ('unity-TeamColorIdentity.cs-TeamColorNametagTint.Update', 'unity:TeamColorIdentity.cs:TeamColorNametagTint.Update', 'TeamColorIdentity.cs:Update'),
     ('unity-VanillaFixes.cs-PlayerNicknameLabelRefresher.OnEnable', 'unity:VanillaFixes.cs:PlayerNicknameLabelRefresher.OnEnable', 'VanillaFixes.cs:OnEnable'),
     ('unity-VanillaFixes.cs-PlayerNicknameRepairDriver.Update', 'unity:VanillaFixes.cs:PlayerNicknameRepairDriver.Update', 'VanillaFixes.cs:Update'),
+    ('dispatch-LimitlessApply.cs-ClampPlayer-Block.additionalBlocks', 'dispatch:LimitlessApply.cs:ClampPlayer[Block.additionalBlocks]', 'LimitlessApply.cs:CapField'),
+    ('dispatch-LimitlessApply.cs-ClampPlayer-Block.cdMultiplier', 'dispatch:LimitlessApply.cs:ClampPlayer[Block.cdMultiplier]', 'LimitlessApply.cs:ClampField'),
+    ('dispatch-LimitlessApply.cs-ClampPlayer-CharacterData.maxHealth', 'dispatch:LimitlessApply.cs:ClampPlayer[CharacterData.maxHealth]', 'LimitlessBounds.cs:Clamp#2'),
+    ('dispatch-LimitlessApply.cs-ClampPlayer-CharacterStatModifiers.jump', 'dispatch:LimitlessApply.cs:ClampPlayer[CharacterStatModifiers.jump]', 'LimitlessApply.cs:ClampField'),
+    ('dispatch-LimitlessApply.cs-ClampPlayer-CharacterStatModifiers.movementSpeed', 'dispatch:LimitlessApply.cs:ClampPlayer[CharacterStatModifiers.movementSpeed]', 'LimitlessApply.cs:ClampField'),
+    ('dispatch-LimitlessApply.cs-ClampPlayer-CharacterStatModifiers.respawns', 'dispatch:LimitlessApply.cs:ClampPlayer[CharacterStatModifiers.respawns]', 'LimitlessApply.cs:CapField'),
+    ('dispatch-LimitlessApply.cs-ClampPlayer-CharacterStatModifiers.sizeMultiplier', 'dispatch:LimitlessApply.cs:ClampPlayer[CharacterStatModifiers.sizeMultiplier]', 'LimitlessApply.cs:ClampField'),
+    ('dispatch-LimitlessApply.cs-ClampPlayer-Gravity.gravityForce', 'dispatch:LimitlessApply.cs:ClampPlayer[Gravity.gravityForce]', 'LimitlessApply.cs:ClampField'),
+    ('dispatch-LimitlessApply.cs-ClampPlayer-Gun.attackSpeed', 'dispatch:LimitlessApply.cs:ClampPlayer[Gun.attackSpeed]', 'LimitlessApply.cs:ClampField'),
+    ('dispatch-LimitlessApply.cs-ClampPlayer-Gun.bodyRecoil', 'dispatch:LimitlessApply.cs:ClampPlayer[Gun.bodyRecoil]', 'LimitlessApply.cs:ClampField'),
+    ('dispatch-LimitlessApply.cs-ClampPlayer-Gun.bulletDamageMultiplier', 'dispatch:LimitlessApply.cs:ClampPlayer[Gun.bulletDamageMultiplier]', 'LimitlessApply.cs:ClampField'),
+    ('dispatch-LimitlessApply.cs-ClampPlayer-Gun.bulletPortal', 'dispatch:LimitlessApply.cs:ClampPlayer[Gun.bulletPortal]', 'LimitlessApply.cs:CapField'),
+    ('dispatch-LimitlessApply.cs-ClampPlayer-Gun.bursts', 'dispatch:LimitlessApply.cs:ClampPlayer[Gun.bursts]', 'LimitlessApply.cs:CapField'),
+    ('dispatch-LimitlessApply.cs-ClampPlayer-Gun.chargeDamageMultiplier', 'dispatch:LimitlessApply.cs:ClampPlayer[Gun.chargeDamageMultiplier]', 'LimitlessApply.cs:ClampField'),
+    ('dispatch-LimitlessApply.cs-ClampPlayer-Gun.damage', 'dispatch:LimitlessApply.cs:ClampPlayer[Gun.damage]', 'LimitlessApply.cs:ClampField'),
+    ('dispatch-LimitlessApply.cs-ClampPlayer-Gun.damageAfterDistanceMultiplier', 'dispatch:LimitlessApply.cs:ClampPlayer[Gun.damageAfterDistanceMultiplier]', 'LimitlessApply.cs:ClampField'),
+    ('dispatch-LimitlessApply.cs-ClampPlayer-Gun.dmgMOnBounce', 'dispatch:LimitlessApply.cs:ClampPlayer[Gun.dmgMOnBounce]', 'LimitlessApply.cs:ClampField'),
+    ('dispatch-LimitlessApply.cs-ClampPlayer-Gun.gravity', 'dispatch:LimitlessApply.cs:ClampPlayer[Gun.gravity]', 'LimitlessApply.cs:ClampField'),
+    ('dispatch-LimitlessApply.cs-ClampPlayer-Gun.knockback', 'dispatch:LimitlessApply.cs:ClampPlayer[Gun.knockback]', 'LimitlessApply.cs:ClampField'),
+    ('dispatch-LimitlessApply.cs-ClampPlayer-Gun.multiplySpread', 'dispatch:LimitlessApply.cs:ClampPlayer[Gun.multiplySpread]', 'LimitlessApply.cs:ClampField'),
+    ('dispatch-LimitlessApply.cs-ClampPlayer-Gun.numberOfProjectiles', 'dispatch:LimitlessApply.cs:ClampPlayer[Gun.numberOfProjectiles]', 'LimitlessApply.cs:CapField'),
+    ('dispatch-LimitlessApply.cs-ClampPlayer-Gun.projectielSimulatonSpeed', 'dispatch:LimitlessApply.cs:ClampPlayer[Gun.projectielSimulatonSpeed]', 'LimitlessApply.cs:ClampField'),
+    ('dispatch-LimitlessApply.cs-ClampPlayer-Gun.projectileSpeed', 'dispatch:LimitlessApply.cs:ClampPlayer[Gun.projectileSpeed]', 'LimitlessApply.cs:ClampField'),
+    ('dispatch-LimitlessApply.cs-ClampPlayer-Gun.randomBounces', 'dispatch:LimitlessApply.cs:ClampPlayer[Gun.randomBounces]', 'LimitlessApply.cs:CapField'),
+    ('dispatch-LimitlessApply.cs-ClampPlayer-Gun.reflects', 'dispatch:LimitlessApply.cs:ClampPlayer[Gun.reflects]', 'LimitlessApply.cs:CapField'),
+    ('dispatch-LimitlessApply.cs-ClampPlayer-Gun.smartBounce', 'dispatch:LimitlessApply.cs:ClampPlayer[Gun.smartBounce]', 'LimitlessApply.cs:CapField'),
+    ('dispatch-LimitlessApply.cs-ClampPlayer-Gun.speedMOnBounce', 'dispatch:LimitlessApply.cs:ClampPlayer[Gun.speedMOnBounce]', 'LimitlessApply.cs:ClampField'),
+    ('dispatch-LimitlessApply.cs-ClampPlayer-Gun.timeToReachFullMovementMultiplier', 'dispatch:LimitlessApply.cs:ClampPlayer[Gun.timeToReachFullMovementMultiplier]', 'LimitlessApply.cs:ClampField'),
+    ('dispatch-LimitlessApply.cs-ClampPlayer-GunAmmo.reloadTimeMultiplier', 'dispatch:LimitlessApply.cs:ClampPlayer[GunAmmo.reloadTimeMultiplier]', 'LimitlessApply.cs:ClampField'),
+    ('harmony-LimitlessApply.cs-LimitlessApply_ApplyStats_Patch.Postfix-1-ApplyCardStats.ApplyStats', 'harmony:LimitlessApply.cs:LimitlessApply_ApplyStats_Patch.Postfix#1(ApplyCardStats.ApplyStats)', 'LimitlessApply.cs:Postfix#1'),
+    ('harmony-LimitlessApply.cs-LimitlessApply_CardBar_Patch.Postfix-2-CardBar.AddCard', 'harmony:LimitlessApply.cs:LimitlessApply_CardBar_Patch.Postfix#2(CardBar.AddCard)', 'LimitlessApply.cs:Postfix#2'),
 ]
 PIN5 = "backend/tests/test_keybind_surfaces.py::test_h1_fix5_each_unresolved_end_is_pinned_in_source[%s]"
 
@@ -1940,7 +1973,7 @@ PIN5 = "backend/tests/test_keybind_surfaces.py::test_h1_fix5_each_unresolved_end
 def test_h1_fix5_the_end_table_is_every_unresolved_end_beyond_the_four(attach4):
     st, cman, att, aman = attach4
     names = [n for i, n, m in FIX5_ENDS]
-    assert len(names) == len(set(names)) == len({i for i, n, m in FIX5_ENDS}) == 1156
+    assert len(names) == len(set(names)) == len({i for i, n, m in FIX5_ENDS}) == 1187
     extra = set(att["unresolved"]) - set(names)
     assert len(extra) == 4 and RESET_MENU in extra, sorted(extra)
     assert set(names) <= set(att["unresolved"]), sorted(set(names) - set(att["unresolved"]))
