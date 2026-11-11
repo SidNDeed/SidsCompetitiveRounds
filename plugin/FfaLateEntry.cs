@@ -651,6 +651,12 @@ namespace CompetitiveRounds
                 int actor = kv.Key;
                 int waits;
                 _lateWaits.TryGetValue(actor, out waits);
+                if (LimitlessFence.RecordOpen)   // Ask 16(a) lane 2 (v4 4.6): closed during a record
+                {
+                    SendSnapshot(actor, kv.Value, true);
+                    _lateRequests.Remove(actor);
+                    continue;
+                }
                 if (waits >= 2)
                 {
                     SendSnapshot(actor, kv.Value, true);
@@ -683,7 +689,9 @@ namespace CompetitiveRounds
                                              + " missing=" + MissingReady(nStar + 1));
 
             // The proposal and its acknowledgements, then the stamp.
-            bool proposed = FfaLateRules.MayPropose(nStar, PointEpoch, selfKindS) && MasterMaySend();
+            // Ask 16(a) lane 2 (v4 4.6): no body is kept while a fence record is live
+            // or terminating, so no new epoch is proposed; the stamp carries the old one.
+            bool proposed = FfaLateRules.MayPropose(nStar, PointEpoch, selfKindS) && MasterMaySend() && !LimitlessFence.RecordOpen;
             bool ackComplete = false;
             var proposal = new FfaLateRules.Proposal { Lobby8 = Lobby8, N = nStar, Chain = ChainAt(nStar), G = g, K = k, From = self };
             if (proposed)
@@ -1860,6 +1868,8 @@ namespace CompetitiveRounds
                 _runningRoom = FfaAssembly.CurrentRoomName();
                 yield break;
             }
+            // Ask 16(a) lane 2 (v4 4.6, F7): the entrant's own refusals give up and leave.
+            if (LimitlessFence.RecordOpen) { LateGiveUp(); yield break; }   // 4.6: no arming
             try { SpectatorSync.PinSpectatorClockAndLifecycle("late_entry"); } catch { }
             LateArmed = true;
             _lateArmedRt = Time.realtimeSinceStartup;
@@ -1888,6 +1898,7 @@ namespace CompetitiveRounds
         internal static void OnBoundaryLoad(string scene)
         {
             if (!LateArmed || _lateEntered) return;
+            if (LimitlessFence.RecordOpen) { LateGiveUp(); return; }   // 4.6: no request
             _lateLoads++;
             JoinTimeline.Step("late_load", "scene=" + scene);
             if (_lateLoads >= 3)
@@ -1903,6 +1914,7 @@ namespace CompetitiveRounds
         private static IEnumerator SendLateRequest()
         {
             yield return null;
+            if (LimitlessFence.RecordOpen) { LateGiveUp(); yield break; }   // 4.6: no request sent
             try
             {
                 Raise(SpectatorSync.EVT_REQUEST, new object[] { (byte)SpectatorSession.PROTOCOL, _requestSeq++, LateMarker },
@@ -1926,6 +1938,9 @@ namespace CompetitiveRounds
         internal static void OnLateRequest(int sender, int seq)
         {
             if (!MasterMaySend() || !AdmissionRoomNow()) return;
+            // Ask 16(a) lane 2 (v4 4.6, F7): no fighter is admitted while a fence
+            // record is live or terminating; the answer is the closed snapshot, at once.
+            if (LimitlessFence.RecordOpen) { Refused("limitless", sender); SendSnapshot(sender, seq, true); return; }
             if (FfaAssembly.ReadmitLobby)
             {
                 // V3 P4.3 step 1 and P4.2 identity: kind l on today's conditions;
@@ -2042,6 +2057,7 @@ namespace CompetitiveRounds
                 LateGiveUp();
                 return;
             }
+            if (LimitlessFence.RecordOpen) { LateGiveUp(); return; }   // 4.6: no admission from a snapshot
             if (a.Length < 28 || S(a, 18) != LateMarker) return;
             int level = N(a, 22, -1);
             int cur = -1;
@@ -2060,6 +2076,7 @@ namespace CompetitiveRounds
         {
             var a = _pendingSnap;
             if (a == null) return;
+            if (LimitlessFence.RecordOpen) { LateGiveUp(); return; }   // 4.6: no admission
             bool callInCame = _callInCount > _pendingCallIns;
             int g = N(a, 21, 0), k = N(a, 25, 0), level = N(a, 22, -1);
             string digest = SnapshotDigest(a, g, k, level);

@@ -836,6 +836,49 @@ def claim_the_new_master_redrives(files):
     return out
 
 
+ADMIT_ENTRANT = [
+    ("private static IEnumerator AdmittedLateRun(", "if (body)",
+     "if (LimitlessFence.RecordOpen) { LateGiveUp(); yield break; }", "LateArmed = true;", "arming"),
+    ("internal static void OnBoundaryLoad(string scene)", "if (!LateArmed || _lateEntered) return;",
+     "if (LimitlessFence.RecordOpen) { LateGiveUp(); return; }", "_lateLoads++;", "request"),
+    ("private static IEnumerator SendLateRequest()", "yield return null;",
+     "if (LimitlessFence.RecordOpen) { LateGiveUp(); yield break; }", "Raise(SpectatorSync.EVT_REQUEST,", "request's send"),
+    ("private static void OnLateSnapshot(EventData e)", "S(a, 2) == LateClosed",
+     "if (LimitlessFence.RecordOpen) { LateGiveUp(); return; }", "_pendingSnap = a;", "snapshot's arrival"),
+    ("private static void CheckPendingSnapshot()", "if (a == null) return;",
+     "if (LimitlessFence.RecordOpen) { LateGiveUp(); return; }", "string digest = SnapshotDigest(", "admission check"),
+]
+
+
+def claim_no_fighter_is_admitted(files):
+    """4.6, F7: while a record is live or terminating no fighter is admitted,
+    and every refusal is a terminal answer. The master answers a late request
+    at once with the closed snapshot and closes every pending one at its
+    boundary. It proposes no new epoch, so no body is kept (a slow starter
+    sits out). The entrant's own arming, request and admission give up and
+    leave."""
+    out = []
+    le = files["FfaLateEntry.cs"]
+    if not _in_order(_code(le, "internal static void OnLateRequest(int sender, int seq)"),
+                     ["if (!MasterMaySend() || !AdmissionRoomNow()) return;",
+                      'if (LimitlessFence.RecordOpen) { Refused("limitless", sender); SendSnapshot(sender, seq, true); return; }',
+                      "if (FfaAssembly.ReadmitLobby)"]):
+        out.append("the master does not close a late request at once")
+    flat = " ".join(_code(le, "internal static IEnumerator MasterBoundary()").split())
+    if not _in_order(flat, ["_lateWaits.TryGetValue(actor, out waits);",
+                            "if (LimitlessFence.RecordOpen) { SendSnapshot(actor, kv.Value, true); "
+                            "_lateRequests.Remove(actor); continue; }",
+                            "if (waits >= 2)"]):
+        out.append("the boundary sends an open snapshot during a record")
+    if ("bool proposed = FfaLateRules.MayPropose(nStar, PointEpoch, selfKindS) && MasterMaySend() "
+            "&& !LimitlessFence.RecordOpen;") not in flat:
+        out.append("the boundary proposes a new epoch during a record")
+    for sig, before, line, after, name in ADMIT_ENTRANT:
+        if not _in_order(_code(le, sig), [before, line, after]):
+            out.append("the entrant's " + name + " does not give up during a record")
+    return out
+
+
 CLAIMS = {
     "game_start_prefix": claim_the_game_start_prefix,
     "stamp_before_join": claim_the_gid_is_stamped_before_the_join,
@@ -863,6 +906,7 @@ CLAIMS = {
     "hold_refusal": claim_the_hold_reads_the_record_first,
     "sender_end": claim_termination_reaches_the_sender,
     "redrive": claim_the_new_master_redrives,
+    "no_admission": claim_no_fighter_is_admitted,
 }
 
 GATE = "                if (SpectatorPatchSupport.Suppress) return;\n"
@@ -1124,6 +1168,29 @@ MUTANTS = [
     ("redrive", "the re-drive leaves the latch open",
      [("FfaMode.cs", '                pointLatched = true;\n                Plugin.Log.LogInfo("[LIMIT] the new master re-drives',
        '                Plugin.Log.LogInfo("[LIMIT] the new master re-drives')]),
+    ("no_admission", "the master answers a late request as before",
+     _drop("FfaLateEntry.cs", '            if (LimitlessFence.RecordOpen) { Refused("limitless", sender); SendSnapshot(sender, seq, true); return; }\n')),
+    ("no_admission", "the master answers a late request with an open snapshot",
+     [("FfaLateEntry.cs", 'Refused("limitless", sender); SendSnapshot(sender, seq, true); return; }',
+       'Refused("limitless", sender); SendSnapshot(sender, seq, false); return; }')]),
+    ("no_admission", "the boundary sends open snapshots during a record",
+     [("FfaLateEntry.cs", "                if (LimitlessFence.RecordOpen)   // Ask 16(a) lane 2 (v4 4.6): closed during a record\n",
+       "                if (false)   // Ask 16(a) lane 2 (v4 4.6): closed during a record\n")]),
+    ("no_admission", "the boundary proposes a new epoch during a record",
+     [("FfaLateEntry.cs", " && MasterMaySend() && !LimitlessFence.RecordOpen;", " && MasterMaySend();")]),
+    ("no_admission", "the entrant arms during a record",
+     _drop("FfaLateEntry.cs", "            if (LimitlessFence.RecordOpen) { LateGiveUp(); yield break; }   // 4.6: no arming\n")),
+    ("no_admission", "the entrant requests during a record",
+     _drop("FfaLateEntry.cs", "            if (LimitlessFence.RecordOpen) { LateGiveUp(); return; }   // 4.6: no request\n")),
+    ("no_admission", "the entrant sends its request during a record",
+     _drop("FfaLateEntry.cs", "            if (LimitlessFence.RecordOpen) { LateGiveUp(); yield break; }   // 4.6: no request sent\n")),
+    ("no_admission", "a snapshot admits during a record",
+     _drop("FfaLateEntry.cs", "            if (LimitlessFence.RecordOpen) { LateGiveUp(); return; }   // 4.6: no admission from a snapshot\n")),
+    ("no_admission", "the admission check admits during a record",
+     _drop("FfaLateEntry.cs", "            if (LimitlessFence.RecordOpen) { LateGiveUp(); return; }   // 4.6: no admission\n")),
+    ("no_admission", "the entrant defers instead of leaving",
+     [("FfaLateEntry.cs", "            if (LimitlessFence.RecordOpen) { LateGiveUp(); return; }   // 4.6: no request\n",
+       "            if (LimitlessFence.RecordOpen) return;   // 4.6: no request\n")]),
 ]
 
 NEUTRAL = "            // control: a neutral line\n"
@@ -1160,6 +1227,8 @@ CONTROLS = [
                      NEUTRAL + "            if (RecordOpen && _departed) return WithheldAfterDeparture();\n")]),
     ("redrive", [("FfaMode.cs", "                if (AlivePlayers().Count > 1) return;\n",
                   NEUTRAL + "                if (AlivePlayers().Count > 1) return;\n")]),
+    ("no_admission", [("FfaLateEntry.cs", "            if (LimitlessFence.RecordOpen) { LateGiveUp(); return; }   // 4.6: no admission\n",
+                       NEUTRAL + "            if (LimitlessFence.RecordOpen) { LateGiveUp(); return; }   // 4.6: no admission\n")]),
 ]
 
 
