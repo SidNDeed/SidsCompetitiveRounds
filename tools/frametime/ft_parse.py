@@ -291,7 +291,8 @@ INT_KEYS = {"written", "withheld", "seg", "pair", "base_us", "segs", "of", "cycl
             "cap", "steady", "reads_on", "reads_win", "writes_on", "starts", "nonempty", "faults",
             "reads", "scopes", "tmax", "unscoped", "depth_err",
             "run", "pos", "coin", "wi", "f0", "res", "gcn", "cW", "cR", "cS", "cE", "prun", "nm", "cyc", "p90",
-            "own_split", "recv_offmain", "ledger_cycle_miss", "sock_p95", "sock_n"}
+            "own_split", "recv_offmain", "ledger_cycle_miss", "sock_p95", "sock_n",
+            "sock_thr", "sock_main"}
 # the B11 window line (ruling R6-A3.11.138, SHARED.md's line contract): the fields it appends to the w line, in order.
 # q = C° by tenth, r = the retained direct execution R by tenth, qn = frames by tenth, prun = the window is in a plant
 # run (spun or not; the w line's own plant= marks a window actually planted, its own partial= is the only partial
@@ -2129,7 +2130,8 @@ WRITER_ADDED = ("log", "hash", "sock")
 
 def _typed(v, width, na=False):
     """wu (width 2: units, cycles) or tok (width 7) as {type: [ints]}: items type:a:b or type:a,b,...; ';' between
-    types. cycles may print NA (na=True), read as None. None when the text is not of that form or names a type twice."""
+    types. With na=True units and cycles may print NA (a FrameTimeRef log prints sock:NA:NA), read as None. None when
+    the text is not of that form or names a type twice."""
     if v == "":
         return {}
     out = {}
@@ -2137,7 +2139,7 @@ def _typed(v, width, na=False):
         t, _, rest = item.partition(":")
         xs = rest.split(":") if width == 2 else rest.split(",")
         ok = len(xs) == width and all(re.fullmatch(r"-?\d+" if width == 7 else r"\d+", x)
-                                      or (na and i == 1 and x == "NA") for i, x in enumerate(xs))
+                                      or (na and x == "NA") for i, x in enumerate(xs))
         if not t or not ok or t in out:
             return None
         out[t] = [None if x == "NA" else int(x) for x in xs]
@@ -2441,7 +2443,9 @@ def b11_terms(recs, first_game=1, beta_us=BETA_US):
             if w["prun"] and w["pt"] in valid:
                 pr.setdefault((g, w["pt"], w["run"]), []).append(w)
     unspun = sorted(k for k, ws in pr.items() if not any(w["plant"] for w in ws))
-    # writer types whose cycles print NA in any window of a measured game withhold B1 for the seat (P1's notes)
+    # writer types whose cycles print NA in any window of a measured game withhold B1 for the seat (P1's notes). A
+    # FrameTimeRef log prints sock:NA:NA, but a Ref log is known only by its build marker (build_marker), never by the
+    # NA: a measurement log printing NA:NA still withholds (to-p2-r4.md (4))
     wu_na = sorted(set(t for g in byg for w in byg[g] if w["pt"] in valid
                        for t, x in (_typed(w["wu"], 2, na=True) or {}).items() if x[1] is None))
     pairs = {}
@@ -2752,7 +2756,8 @@ def peer_driven(recs, T, r_u, peer_recs, first_game=1):
     """The peer-driven charge (SHARED.md D5, RULED 2026-11-11T11:30:19Z): this seat's work on the peer's collector
     traffic follows the peer's arm. shortfall = (1 + r_U) x recv cycles per frame in this seat's ON windows x
     (1/s_peer - 1); sock = recv units per frame / s_peer x the upper 95th percentile of sock cycles per datagram (the
-    largest sock_p95 any point prints). Both are upper ends; the SID/FAIL lower bound takes them as 0. Returns
+    largest sock_p95 any point of THIS seat prints: its socket thread handled the peer's traffic, to-p2-r4.md (3)).
+    Both are upper ends; the SID/FAIL lower bound takes them as 0. Returns
     (shortfall, sock, s_peer, why): a term is None, with why, when it cannot be computed."""
     if peer_recs is None:
         return None, None, None, "no peer log (--peer)"
@@ -2763,7 +2768,7 @@ def peer_driven(recs, T, r_u, peer_recs, first_game=1):
     n_on = sum(w["n"] for w in on)
     recv = sum(_wu_cyc(w, ("recv",)) * 1e6 / T["fh"][w["game"]] for w in on) / n_on if n_on else None
     short = None if recv is None or r_u == float("inf") else (1.0 + r_u) * recv * (1.0 / s_peer - 1.0)
-    units = sum((_typed(w["wu"], 2, na=True) or {}).get("recv", [0, 0])[0] for w in T["pop"]) / T["N"]
+    units = sum((_typed(w["wu"], 2, na=True) or {}).get("recv", [0, 0])[0] or 0 for w in T["pop"]) / T["N"]
     p95 = [(q["sock_p95"], q["game"]) for q in recs if q["kind"] == "p" and q["pt"] in T["valid"] and "sock_p95" in q]
     if not p95:
         return short, None, s_peer, "no point line prints sock_p95"
@@ -2787,8 +2792,9 @@ def b11_seat_withholds(recs, e):
     osp = own_split_faults(recs, e["T"])
     if osp:
         why.append("ownership faults (own_split) at %s" % ", ".join(pt for pt, _ in osp))
-    # SHARED.md (md5 2119eb2e): recv_offmain and ledger_cycle_miss must be 0 (or printed) in every point
-    for k in ("recv_offmain", "ledger_cycle_miss"):
+    # SHARED.md (md5 3ab20794): recv_offmain, ledger_cycle_miss and sock_main (cycles both in C and in sock) must be
+    # printed and 0 in every point; sock_thr is reported only
+    for k in ("recv_offmain", "ledger_cycle_miss", "sock_main"):
         bad = [q["pt"] for q in recs if q["kind"] == "p" and q["pt"] in e["T"]["valid"] and q.get(k, 1) != 0]
         if bad:
             why.append("%s nonzero or not printed at %s" % (k, ", ".join(bad)))

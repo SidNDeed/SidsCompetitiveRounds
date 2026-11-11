@@ -376,6 +376,15 @@ B11_MUTS = [
      "        if bad:\n            why.append(\"%s nonzero",
      "        if False:\n            why.append(\"%s nonzero",
      ["chk_p_line_faults_withhold"]),
+    # to-p2-r4.md (SHARED md5 3ab20794)
+    ("B11: sock_main nonzero but not withheld",
+     'for k in ("recv_offmain", "ledger_cycle_miss", "sock_main"):',
+     'for k in ("recv_offmain", "ledger_cycle_miss"):',
+     ["chk_p_line_faults_withhold"]),
+    ("B11: a non-Ref log with sock:NA:NA read as a Ref log",
+     "for t, x in (_typed(w[\"wu\"], 2, na=True) or {}).items() if x[1] is None))",
+     "for t, x in (_typed(w[\"wu\"], 2, na=True) or {}).items() if x[1] is None and x[0] is not None))",
+     ["chk_ref_known_by_marker_not_by_na"]),
 ]
 MUTS += [r[:3] for r in B11_MUTS]
 

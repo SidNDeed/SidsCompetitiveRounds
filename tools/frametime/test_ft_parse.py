@@ -2248,7 +2248,7 @@ B11_WU0 = "log:0:0;hash:0:0;recv:0:0;sock:0:0"
 
 
 def _b11_text(games, model, marker=True, settled=True, first_game=1, edit=None, cg=None, cw=0, mark=True,
-              wu=B11_WU0, p_extra=""):
+              wu=B11_WU0, p_extra=" sock_p95=0 sock_n=0 sock_thr=0 sock_main=0"):
     """The [FRAME-TIME] lines of B11 games: the marker, the mark cost boot line, settled (f_hat 1e6), the point lines
     and their window lines in SHARED.md's format. A point's "plant" runs are plant runs (prun=1), "unspun" those of
     them fixed before c_plant (no window planted); a spun run's OFF windows are planted (plant=1). edit(window dict)
@@ -2658,7 +2658,7 @@ def chk_writers_recv_never_added(m):
 def chk_peer_driven_charge(m):
     # SHARED.md D5: shortfall (1 + r_U) x recv per frame in ON windows x (1/s_peer - 1); sock recv units per frame /
     # s_peer x sock_p95; s_peer from the peer's log; no peer log withholds
-    text = _b11_text(_one_run_games(), _c2_model, edit=_recv_wu, p_extra=" sock_p95=40 sock_n=9")
+    text = _b11_text(_one_run_games(), _c2_model, edit=_recv_wu, p_extra=" sock_p95=40 sock_n=9 sock_thr=1 sock_main=0")
     recs = m.read(text)
     T = m.b11_terms(recs)
     peer = m.read(_b11_text([[{"n": [120, 120, 120, 120, 120, 120], "coins": [(1, 1), (1, 1)]}]], _c2_model))
@@ -2672,7 +2672,8 @@ def chk_peer_driven_charge(m):
     assert e["peer"] is None and e["peer_why"] == "no peer log (--peer)"
     assert "no peer log: the peer-driven charge is not computable (SHARED.md D5)" in m.b11_seat_withholds(recs, e)
     # eight replicates bound r_U (one replicate's Fieller bound is infinite, which leaves the shortfall uncomputable)
-    recs = m.read(_b11_text(_one_run_games(reps=8), _c2_model, edit=_recv_wu, p_extra=" sock_p95=40 sock_n=9"))
+    recs = m.read(_b11_text(_one_run_games(reps=8), _c2_model, edit=_recv_wu,
+                            p_extra=" sock_p95=40 sock_n=9 sock_thr=1 sock_main=0"))
     lines, e = m.b11_report(recs, peer_recs=peer)
     assert e["peer"] is not None and not [x for x in m.b11_seat_withholds(recs, e) if "peer" in x]
     assert m.b11_bound(1.0, 0.0, 0.0, 0.0, 0.0, e["peer"]) == pytest.approx(1.0 + e["peer"])
@@ -2680,11 +2681,23 @@ def chk_peer_driven_charge(m):
 
 def chk_p_line_faults_withhold(m):
     # SHARED.md (md5 2119eb2e): recv_offmain and ledger_cycle_miss nonzero withhold B1 for the seat
-    for k in ("recv_offmain", "ledger_cycle_miss"):
+    for k in ("recv_offmain", "ledger_cycle_miss", "sock_main"):
         text = _b11_text(_one_run_games(), _flat).replace(" %s=0" % k, " %s=3" % k, 1)
         recs = m.read(text)
         why = m.b11_seat_withholds(recs, m.b11_estimate(recs))
         assert [x for x in why if x.startswith(k + " nonzero")], (k, why)
+
+
+def chk_ref_known_by_marker_not_by_na(m):
+    # to-p2-r4.md (4): a FrameTimeRef log prints sock:NA:NA but is known only by its marker; a measurement log printing
+    # sock:NA:NA is read (not refused as a format fault) and withholds B1 for the seat
+    text = _b11_text(_one_run_games(), _flat, wu="log:0:0;hash:0:0;recv:0:0;sock:NA:NA")
+    recs = m.read(text)
+    m.build_marker(text, "measurement", "a")
+    assert m.window_reconcile(recs) == []
+    e = m.b11_estimate(recs)
+    assert e["T"]["wu_na"] == ["sock"], e["T"]["wu_na"]
+    assert "writer cycles print NA for sock on this seat (W_U not computable)" in m.b11_seat_withholds(recs, e)
 
 
 def chk_v4_lower_bound_at_lower_ends(m):
@@ -2729,7 +2742,8 @@ B11_CHECKS = ["chk_c2_recovers_3_25", "chk_c3_recovers_3_0375", "chk_c4_recovers
               "chk_full_profile_not_applied_to_partials", "chk_h_p_cross_check", "chk_baseline_frozen_q_minus_2",
               "chk_exposure_hook", "chk_marker_whole_line", "chk_v4_lower_bound_at_lower_ends",
               "chk_r_common_d_common_and_corrected_r_u", "chk_own_split_withholds", "chk_token_open1_and_continuity",
-              "chk_writers_recv_never_added", "chk_peer_driven_charge", "chk_p_line_faults_withhold"]
+              "chk_writers_recv_never_added", "chk_peer_driven_charge", "chk_p_line_faults_withhold",
+              "chk_ref_known_by_marker_not_by_na"]
 
 
 @pytest.mark.parametrize("name", B11_CHECKS)
