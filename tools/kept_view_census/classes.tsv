@@ -148,6 +148,7 @@ FfaMode.cs	FfaMode	RedrivePendingPoint	AlivePlayers	V	the new master re-drives a
 FfaMode.cs	FfaMode	RedrivePendingPoint	MasterMaySend	F	the re-drive's authority, HandlePlayerDied's own test; the point then goes through the fence's sender, where MaySend reads the role again at the send (v4 4.6)	
 FfaMode.cs	FfaMode	ResolveFighter	players	R	the beta lane's pid-to-body resolution, vanilla GetPlayerWithID's linear search with holes and destroyed bodies skipped; its four manifest callers (ApplyManifestPick, CollectPicks, CountStillPresent, DetectAheadPickIdentity) each test FfaLateEntry.IsQuarantined on the body it returns (row 50)	
 FfaMode.cs	FfaMode	ResolvePointNow	AlivePlayers	V	alive count via AlivePlayers() (surface 6)	
+FfaMode.cs	FfaMode	RetakeMasterPeriod	MasterMaySend	F	the re-take's authority, the role the republish and the close read; it only drops the held epoch, and the sends then go through TicketSends, where MaySend reads the role and the handoff count again at the send (v4 4.4)	
 FfaMode.cs	FfaMode	RoomCount	ActiveFighterCount	V	RoomCount via ActiveFighterCount(), the kept view; while LocalSitsOut() it counts PresentNonSpectators() (V8, V7-F1)		LocalSitsOut
 FfaMode.cs	FfaMode	RoomCount	PresentNonSpectators	V	LocalSitsOut() selects: a client that sits out counts the present seats, every other the kept view	
 FfaMode.cs	FfaMode	SampleTimelines	players	N	telemetry sampling	
