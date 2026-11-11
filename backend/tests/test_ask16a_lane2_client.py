@@ -1162,8 +1162,8 @@ def claim_the_late_sends_answer_to_their_ticket(files):
                      ["int g = FfaMode.GameNumber, k = PointK, self = OwnActor();",
                       "var sendTicket = LimitlessFence.CaptureTicket();", "int actor = kv.Key;",
                       "if (!LimitlessFence.TicketSends(LateTicket(actor), MasterMaySend()))",
-                      "if (waits >= 2)", "if (!MasterMaySend()) yield break;",
-                      "if (!LimitlessFence.TicketSends(sendTicket, true)) yield break;",
+                      "if (waits >= 2)", "if (!LimitlessFence.TicketSends(sendTicket, MasterMaySend())) yield break;",
+                      "if (!MasterMaySend()) yield break;",
                       "Raise(EVT_CALLIN, new object[] { stamp.Lobby8, g, k, n, stamp.Chain, result },"]):
         out.append("the boundary's sends do not answer to their tickets")
     if not _in_order(_code(fle, "internal static void OnLateRequest(int sender, int seq)"),
@@ -1228,6 +1228,73 @@ def claim_the_hold_acts_only_under_its_cut_ticket(files):
     return out
 
 
+SPS = "SpectatorSync.cs"
+OBS_STEP = "if (ObserverMoved(gen, attemptGen, ticket)) yield break;"
+SESSION_ONLY = "if (gen != _boundaryGeneration) yield break;"
+
+
+def claim_the_observer_apply_reads_its_attempt_and_epoch(files):
+    """4.5, Table A's F5 rows (R): the boundary captures its ticket where it is
+    scheduled and hands it to the deck apply. Every resume check inside the
+    apply's loop and inside the nested reset and replay reads ObserverMoved:
+    the session, the attempt (every boundary raises it) and the epoch. The
+    attempt is passed down, so the nested replay stops without waiting for
+    its parent. The rows read the epoch, not the gid (the game-over flush
+    waits an in-flight apply out), and a stop by the epoch is a later game's
+    boundary, not a failed apply."""
+    out = []
+    s = files[SPS]
+    if not _in_order(_code(s, "private static IEnumerator BoundaryAttempt("),
+                     ["var ticket = LimitlessFence.CaptureTicket();", "var prior = CurrentStage;",
+                      "yield return ApplyDecks(snap, gen, attemptGen, forceReset, ticket);",
+                      "if (attemptGen != _boundaryAttemptGen) { superseded = true; yield break; }",
+                      "if (!LimitlessFence.TicketCleans(ticket)) { superseded = true; yield break; }",
+                      "if (!_lastApplyOk)"]):
+        out.append("the boundary's ticket is not captured, handed down or read after the apply")
+    apply = _code(s, "private static IEnumerator ApplyDecks(")
+    if apply.count(OBS_STEP) != 3 or SESSION_ONLY in apply or not _in_order(apply, [
+            "if (attemptGen != _boundaryAttemptGen) yield break;",
+            "yield return ResetAndReplay(body, actor, target, gen, attemptGen, ticket);"]):
+        out.append("a resume inside the apply's loop reads the session alone")
+    replay = _code(s, "private static IEnumerator ResetAndReplay(")
+    if replay.count(OBS_STEP) != 2 or SESSION_ONLY in replay:
+        out.append("a resume inside the nested replay reads the session alone")
+    if not _in_order(_code(s), ["internal static bool ObserverMoved(int gen, int attemptGen, LimitlessFence.ResumeTicket ticket)",
+                                '=> BoundaryFenceMoved(gen, attemptGen) || !LimitlessFence.EpochHolds(ticket, "observer deck apply");']):
+        out.append("the observer's check skips the attempt or the epoch")
+    if not _in_order(_code(files[LF], "internal static bool EpochHolds("),
+                     ["if (TicketCleans(t)) return true;", "NoteItemStopped(name, t);"]):
+        out.append("the epoch check does not stop")
+    return out
+
+
+def claim_the_observer_flush_reads_the_epoch(files):
+    """4.5, Table A's F5 row for OnGameOverObserved (C), and FFA's twin: the
+    observer's flush at the end runs as a cleanup item, which reads the epoch
+    only, so it cannot act in a later game, whose call-in raises the epoch
+    first. Every start of the GM flush and of its waiter is wrapped."""
+    out = []
+    s = files[SPS]
+    if not _in_order(_code(s, "internal static void OnGameOverObserved("),
+                     ['LimitlessFence.NoteSpectatorGameOver("gm");',
+                      'DeferredGameOverFlush(_boundaryGeneration, _boundaryAttemptGen, _lastSeenEpoch), "observer flush wait"));',
+                      'Plugin.Instance.StartCoroutine(LimitlessFence.CleanupItem(BetweenGamesFlush(_boundaryGeneration, _boundaryAttemptGen), "observer flush"));']):
+        out.append("the game-over flush is not a cleanup item")
+    whole = _code(s)
+    if (whole.count("BetweenGamesFlush(") != 3 or whole.count("LimitlessFence.CleanupItem(BetweenGamesFlush(") != 2
+            or whole.count("DeferredGameOverFlush(") != 2 or whole.count("LimitlessFence.CleanupItem(") != 3):
+        out.append("a start of the observer's flush is not a cleanup item")
+    if not _in_order(_code(s, "private static IEnumerator DeferredGameOverFlush("),
+                     ['Plugin.Instance.StartCoroutine(LimitlessFence.CleanupItem(BetweenGamesFlush(gen, attemptGen), "observer flush"));']):
+        out.append("the waiter's flush is not a cleanup item")
+    f = _code(files["FfaMode.cs"])
+    if f.count("SpectatorBetweenGamesFlush(") != 2 or not _in_order(f, [
+            "Plugin.Instance.StartCoroutine(LimitlessFence.CleanupItem(SpectatorBetweenGamesFlush(",
+            'SpectatorSync.BoundaryAttemptGeneration), "ffa observer flush")); }']):
+        out.append("FFA's observer flush is not a cleanup item")
+    return out
+
+
 CLAIMS = {
     "game_start_prefix": claim_the_game_start_prefix,
     "stamp_before_join": claim_the_gid_is_stamped_before_the_join,
@@ -1266,6 +1333,8 @@ CLAIMS = {
     "late_items": claim_the_late_items_resume_under_their_ticket,
     "late_sends": claim_the_late_sends_answer_to_their_ticket,
     "hold_items": claim_the_hold_acts_only_under_its_cut_ticket,
+    "observer_apply": claim_the_observer_apply_reads_its_attempt_and_epoch,
+    "observer_flush": claim_the_observer_flush_reads_the_epoch,
 }
 
 GATE = "                if (SpectatorPatchSupport.Suppress) return;\n"
@@ -1670,7 +1739,7 @@ MUTANTS = [
     ("late_sends", "the boundary captures no ticket",
      [("FfaLateEntry.cs", "            var sendTicket = LimitlessFence.CaptureTicket();   // v4 4.4: the stamp's S, after the waits\n", "")]),
     ("late_sends", "the stamp sends without the handoff test",
-     [("FfaLateEntry.cs", "if (!LimitlessFence.TicketSends(sendTicket, true)) yield break;", "")]),
+     [("FfaLateEntry.cs", "if (!LimitlessFence.TicketSends(sendTicket, MasterMaySend())) yield break;", "")]),
     ("late_sends", "a stored request is answered without its ticket",
      [("FfaLateEntry.cs", "if (!LimitlessFence.TicketSends(LateTicket(actor), MasterMaySend()))", "if (false)")]),
     ("late_sends", "a late request keeps no ticket",
@@ -1701,6 +1770,53 @@ MUTANTS = [
     ("hold_items", "the end post's answer applies without its ticket",
      [("TeamHoldWriter.cs", ' && LimitlessFence.ItemResumes(rt, "hold end answer")) Perform(w.OnEndAnswer(Now), cut);',
        ") Perform(w.OnEndAnswer(Now), cut);")]),
+    ("observer_apply", "the boundary captures no ticket",
+     [("SpectatorSync.cs", "            var ticket = LimitlessFence.CaptureTicket();   // v4 4.5 R (F5): where the boundary is scheduled\n", "")]),
+    ("observer_apply", "the apply is not handed the boundary's ticket",
+     [("SpectatorSync.cs", "yield return ApplyDecks(snap, gen, attemptGen, forceReset, ticket);",
+       "yield return ApplyDecks(snap, gen, attemptGen, forceReset, LimitlessFence.CaptureTicket());")]),
+    ("observer_apply", "an epoch stop counts as a failed apply",
+     [("SpectatorSync.cs", "                if (!LimitlessFence.TicketCleans(ticket)) { superseded = true; yield break; }\n", "")]),
+    ("observer_apply", "the apply's loop reads the session alone",
+     [("SpectatorSync.cs", "                if (ObserverMoved(gen, attemptGen, ticket)) yield break;   // v4 4.5 R (F5)\n                int actor = actors[i];\n",
+       "                if (gen != _boundaryGeneration) yield break;\n                int actor = actors[i];\n")]),
+    ("observer_apply", "an extension step reads the session alone",
+     [("SpectatorSync.cs", "                        if (ObserverMoved(gen, attemptGen, ticket)) yield break;   // v4 4.5 R (F5)\n                        if (!ApplyOne(body, actor, target[k]))",
+       "                        if (gen != _boundaryGeneration) yield break;\n                        if (!ApplyOne(body, actor, target[k]))")]),
+    ("observer_apply", "the step after the nested replay reads the session alone",
+     [("SpectatorSync.cs", "ticket);\n                    if (ObserverMoved(gen, attemptGen, ticket)) yield break;   // v4 4.5 R (F5)\n",
+       "ticket);\n                    if (gen != _boundaryGeneration) yield break;\n")]),
+    ("observer_apply", "the nested replay is not handed the attempt",
+     [("SpectatorSync.cs", "yield return ResetAndReplay(body, actor, target, gen, attemptGen, ticket);",
+       "yield return ResetAndReplay(body, actor, target, gen, _boundaryAttemptGen, ticket);")]),
+    ("observer_apply", "the nested replay's first resume reads the session alone",
+     [("SpectatorSync.cs", "            if (ObserverMoved(gen, attemptGen, ticket)) yield break;   // v4 4.5 R (F5): the attempt passed down\n",
+       "            if (gen != _boundaryGeneration) yield break;\n")]),
+    ("observer_apply", "the nested replay's steps read the session alone",
+     [("SpectatorSync.cs", "                if (ObserverMoved(gen, attemptGen, ticket)) yield break;   // v4 4.5 R (F5)\n                if (!ApplyOne(body, actor, name)) yield break;",
+       "                if (gen != _boundaryGeneration) yield break;\n                if (!ApplyOne(body, actor, name)) yield break;")]),
+    ("observer_apply", "the observer's check skips the epoch",
+     [("SpectatorSync.cs", '=> BoundaryFenceMoved(gen, attemptGen) || !LimitlessFence.EpochHolds(ticket, "observer deck apply");',
+       "=> BoundaryFenceMoved(gen, attemptGen);")]),
+    ("observer_apply", "the epoch check never stops",
+     [(LF, "if (TicketCleans(t)) return true;", "return true;")]),
+    ("observer_flush", "the deferred flush is not a cleanup item",
+     [("SpectatorSync.cs", "Plugin.Instance.StartCoroutine(LimitlessFence.CleanupItem(   // v4 4.5 C\n"
+       '                        DeferredGameOverFlush(_boundaryGeneration, _boundaryAttemptGen, _lastSeenEpoch), "observer flush wait"));',
+       "Plugin.Instance.StartCoroutine(\n                        DeferredGameOverFlush(_boundaryGeneration, _boundaryAttemptGen, _lastSeenEpoch));")]),
+    ("observer_flush", "the game-over flush is not a cleanup item",
+     [("SpectatorSync.cs", 'Plugin.Instance.StartCoroutine(LimitlessFence.CleanupItem(BetweenGamesFlush(_boundaryGeneration, _boundaryAttemptGen), "observer flush"));',
+       "Plugin.Instance.StartCoroutine(BetweenGamesFlush(_boundaryGeneration, _boundaryAttemptGen));")]),
+    ("observer_flush", "the waiter's flush is not a cleanup item",
+     [("SpectatorSync.cs", 'Plugin.Instance.StartCoroutine(LimitlessFence.CleanupItem(BetweenGamesFlush(gen, attemptGen), "observer flush"));',
+       "Plugin.Instance.StartCoroutine(BetweenGamesFlush(gen, attemptGen));")]),
+    ("observer_flush", "the game-over flush resumes as R",
+     [("SpectatorSync.cs", 'LimitlessFence.CleanupItem(BetweenGamesFlush(_boundaryGeneration, _boundaryAttemptGen), "observer flush")',
+       'LimitlessFence.ResumableItem(BetweenGamesFlush(_boundaryGeneration, _boundaryAttemptGen), "observer flush")')]),
+    ("observer_flush", "FFA's observer flush is not a cleanup item",
+     [("FfaMode.cs", "Plugin.Instance.StartCoroutine(LimitlessFence.CleanupItem(SpectatorBetweenGamesFlush(",
+       "Plugin.Instance.StartCoroutine(SpectatorBetweenGamesFlush("),
+      ("FfaMode.cs", 'SpectatorSync.BoundaryAttemptGeneration), "ffa observer flush")); }', "SpectatorSync.BoundaryAttemptGeneration)); }")]),
 ]
 
 NEUTRAL = "            // control: a neutral line\n"
@@ -1759,6 +1875,10 @@ CONTROLS = [
                      NEUTRAL + "            var sendTicket = LimitlessFence.CaptureTicket();   // v4 4.4: the stamp's S")]),
     ("hold_items", [("TeamHoldWriter.cs", "                _cutTicket = LimitlessFence.CaptureTicket();   // v4 4.5 R",
                      NEUTRAL + "                _cutTicket = LimitlessFence.CaptureTicket();   // v4 4.5 R")]),
+    ("observer_apply", [("SpectatorSync.cs", "            var ticket = LimitlessFence.CaptureTicket();   // v4 4.5 R (F5)",
+                         NEUTRAL + "            var ticket = LimitlessFence.CaptureTicket();   // v4 4.5 R (F5)")]),
+    ("observer_flush", [("SpectatorSync.cs", "                Plugin.Instance.StartCoroutine(LimitlessFence.CleanupItem(BetweenGamesFlush(_boundaryGeneration",
+                         NEUTRAL + "                Plugin.Instance.StartCoroutine(LimitlessFence.CleanupItem(BetweenGamesFlush(_boundaryGeneration")]),
 ]
 
 

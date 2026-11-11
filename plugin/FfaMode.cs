@@ -1167,8 +1167,8 @@ namespace CompetitiveRounds
                 // belongs to, so "has a newer boundary taken over?" is measured
                 // from that instant and not from whenever the coroutine first
                 // gets to look (same capture point as the GM path's).
-                try { if (Plugin.Instance != null) Plugin.Instance.StartCoroutine(SpectatorBetweenGamesFlush(
-                        TransitionGeneration, SpectatorSync.BoundaryGeneration, SpectatorSync.BoundaryAttemptGeneration)); }
+                try { if (Plugin.Instance != null) Plugin.Instance.StartCoroutine(LimitlessFence.CleanupItem(SpectatorBetweenGamesFlush(
+                        TransitionGeneration, SpectatorSync.BoundaryGeneration, SpectatorSync.BoundaryAttemptGeneration), "ffa observer flush")); }   // v4 4.5 C
                 catch (Exception fex) { Plugin.Log.LogWarning($"[FFA] spectator flush: {fex.Message}"); }
                 try
                 {

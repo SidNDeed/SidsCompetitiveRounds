@@ -464,6 +464,15 @@ namespace CompetitiveRounds
             NoteItemStopped(name, t);
             return false;
         }
+        /// <summary>4.5 (R) where Table A's row reads the epoch alone (the
+        /// observer's F5 rows read the attempt generation and the epoch): the
+        /// stop logged once per item and epoch.</summary>
+        internal static bool EpochHolds(ResumeTicket t, string name)
+        {
+            if (TicketCleans(t)) return true;
+            NoteItemStopped(name, t);
+            return false;
+        }
 
         /// <summary>4.5 (R) for a coroutine (Table A): the ticket is captured
         /// here, where the item is scheduled, and TicketResumes runs before every

@@ -100,6 +100,15 @@ namespace CompetitiveRounds
         internal static bool BoundaryFenceMoved(int gen, int attemptGen)
             => gen != _boundaryGeneration || attemptGen != _boundaryAttemptGen;
 
+        /// <summary>Ask 16(a) lane 2 (v4 4.5, Table A's F5 rows): the observer's
+        /// deck apply and its nested replay resume only while the session, the
+        /// attempt (every boundary raises it) and the epoch captured where the
+        /// boundary was scheduled hold. The rows read the epoch, not the gid: the
+        /// terminal score ends the gid while an apply may still own the bodies,
+        /// and DeferredGameOverFlush waits that apply out.</summary>
+        internal static bool ObserverMoved(int gen, int attemptGen, LimitlessFence.ResumeTicket ticket)
+            => BoundaryFenceMoved(gen, attemptGen) || !LimitlessFence.EpochHolds(ticket, "observer deck apply");
+
         /// <summary>Sticky per-session activation flag (Aug 10 design review
         /// find 6): once the first boundary apply succeeds, the fullscreen
         /// blackout and the Synchronizing-stage cache sweeps are RETIRED for
@@ -1363,11 +1372,11 @@ namespace CompetitiveRounds
                 {
                     if (_flushDeferred) return;   // one waiter is enough
                     _flushDeferred = true;
-                    Plugin.Instance.StartCoroutine(
-                        DeferredGameOverFlush(_boundaryGeneration, _boundaryAttemptGen, _lastSeenEpoch));
+                    Plugin.Instance.StartCoroutine(LimitlessFence.CleanupItem(   // v4 4.5 C
+                        DeferredGameOverFlush(_boundaryGeneration, _boundaryAttemptGen, _lastSeenEpoch), "observer flush wait"));
                     return;
                 }
-                Plugin.Instance.StartCoroutine(BetweenGamesFlush(_boundaryGeneration, _boundaryAttemptGen));
+                Plugin.Instance.StartCoroutine(LimitlessFence.CleanupItem(BetweenGamesFlush(_boundaryGeneration, _boundaryAttemptGen), "observer flush"));   // v4 4.5 C
             }
             catch (Exception ex) { Plugin.Log?.LogWarning($"[SPECTATE] game-over flush: {ex.Message}"); }
         }
@@ -1425,7 +1434,7 @@ namespace CompetitiveRounds
                             yield break;
                         }
                         if (Plugin.Instance != null)
-                            Plugin.Instance.StartCoroutine(BetweenGamesFlush(gen, attemptGen));
+                            Plugin.Instance.StartCoroutine(LimitlessFence.CleanupItem(BetweenGamesFlush(gen, attemptGen), "observer flush"));   // v4 4.5 C
                         yield break;
                     }
                     yield return null;
@@ -1527,6 +1536,7 @@ namespace CompetitiveRounds
 
         private static IEnumerator BoundaryAttempt(int mapId, int gen, int attemptGen)
         {
+            var ticket = LimitlessFence.CaptureTicket();   // v4 4.5 R (F5): where the boundary is scheduled
             var prior = CurrentStage;
             CurrentStage = Stage.Applying;
             bool ok = false;
@@ -1695,9 +1705,12 @@ namespace CompetitiveRounds
                 // 7. Apply decks, ALL-OR-NOTHING with post-verification.
                 applied = true;
                 _lastApplyOk = false;
-                yield return ApplyDecks(snap, gen, attemptGen, forceReset);
+                yield return ApplyDecks(snap, gen, attemptGen, forceReset, ticket);
                 if (gen != _boundaryGeneration) yield break;
                 if (attemptGen != _boundaryAttemptGen) { superseded = true; yield break; }
+                // Ask 16(a) lane 2 (v4 4.5 R, F5): a stop by the epoch is a later
+                // game's boundary, not a failed apply.
+                if (!LimitlessFence.TicketCleans(ticket)) { superseded = true; yield break; }
                 if (!_lastApplyOk)
                 {
                     Plugin.Log?.LogWarning("[SPECTATE] deck reconstruction failed — staying dark");
@@ -1870,7 +1883,7 @@ namespace CompetitiveRounds
             return names;
         }
 
-        private static IEnumerator ApplyDecks(object[] snap, int gen, int attemptGen, bool forceReset)
+        private static IEnumerator ApplyDecks(object[] snap, int gen, int attemptGen, bool forceReset, LimitlessFence.ResumeTicket ticket)
         {
             _lastApplyOk = false;
             int[] actors; string[] decksFlat; int[] offsets;
@@ -1956,7 +1969,7 @@ namespace CompetitiveRounds
 
             for (int i = 0; i < actors.Length; i++)
             {
-                if (gen != _boundaryGeneration) yield break;
+                if (ObserverMoved(gen, attemptGen, ticket)) yield break;   // v4 4.5 R (F5)
                 int actor = actors[i];
                 var body = FindBodyByActor(actor);
                 if (body == null)
@@ -2000,7 +2013,7 @@ namespace CompetitiveRounds
                 {
                     for (int k = have.Count; k < target.Count; k++)
                     {
-                        if (gen != _boundaryGeneration) yield break;
+                        if (ObserverMoved(gen, attemptGen, ticket)) yield break;   // v4 4.5 R (F5)
                         if (!ApplyOne(body, actor, target[k])) { applyFailed = true; break; }
                         // #225: NEVER two applies in one frame — 16 vanilla
                         // cards self-destruct when two copies apply same-frame.
@@ -2011,8 +2024,8 @@ namespace CompetitiveRounds
                 {
                     // Deck shrank/reordered (FFA roll-off) or epoch changed
                     // (rematch): full reset+replay with residue restore (#211).
-                    yield return ResetAndReplay(body, actor, target, gen);
-                    if (gen != _boundaryGeneration) yield break;
+                    yield return ResetAndReplay(body, actor, target, gen, attemptGen, ticket);
+                    if (ObserverMoved(gen, attemptGen, ticket)) yield break;   // v4 4.5 R (F5)
                 }
 
                 // An actor who LEFT the room during their own multi-frame
@@ -2157,7 +2170,8 @@ namespace CompetitiveRounds
             catch (Exception ex) { Plugin.Log?.LogWarning($"[SPECTATE] reset actor {actor}: {ex.Message}"); }
         }
 
-        private static IEnumerator ResetAndReplay(Player body, int actor, List<string> target, int gen)
+        private static IEnumerator ResetAndReplay(Player body, int actor, List<string> target, int gen,
+                                                  int attemptGen, LimitlessFence.ResumeTicket ticket)
         {
             ResetBodyToVanilla(body, actor);
 
@@ -2165,12 +2179,12 @@ namespace CompetitiveRounds
             // is END-OF-FRAME; a same-frame scrub sees everything still alive
             // and cleans nothing), then the #92/#103 zombie/ChildRPC sweep.
             yield return null;
-            if (gen != _boundaryGeneration) yield break;
+            if (ObserverMoved(gen, attemptGen, ticket)) yield break;   // v4 4.5 R (F5): the attempt passed down
             try { GMArmsRaceStartGameBlockResetPatch.RunSweep("spectator deck reset"); } catch { }
 
             foreach (var name in target)
             {
-                if (gen != _boundaryGeneration) yield break;
+                if (ObserverMoved(gen, attemptGen, ticket)) yield break;   // v4 4.5 R (F5)
                 if (!ApplyOne(body, actor, name)) yield break;   // all-or-nothing; caller verifies
                 yield return null;   // #225
             }

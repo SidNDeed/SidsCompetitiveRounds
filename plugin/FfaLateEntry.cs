@@ -746,8 +746,8 @@ namespace CompetitiveRounds
             int n;
             bool apply;
             FfaLateRules.MasterStampDecision(proposed, nStar, ackComplete, PointEpoch, out result, out n, out apply);
+            if (!LimitlessFence.TicketSends(sendTicket, MasterMaySend())) yield break;   // v4 4.4 (S): the handoff count too
             if (!MasterMaySend()) yield break;   // the role moved during the waits: the next master stamps
-            if (!LimitlessFence.TicketSends(sendTicket, true)) yield break;   // v4 4.4 (S): the handoff count too
             var stamp = new FfaLateRules.Stamp { Lobby8 = Lobby8, G = g, K = k, N = n, Chain = ChainAt(n), Result = result, From = self };
             Raise(EVT_CALLIN, new object[] { stamp.Lobby8, g, k, n, stamp.Chain, result },
                   new RaiseEventOptions { Receivers = ReceiverGroup.Others });
