@@ -163,6 +163,15 @@ FENCE_RULES = (
     'snapshot: the base target round-trips',
     'snapshot: the spectatable flag round-trips',
     'snapshot: a snapshot without the record, or with a field missing or mistyped, carries none',
+    "base results: team 1's 5-0 win is a victory and an ace",
+    "base results: team 2's 5-3 win is a victory and no ace",
+    "base results: team 1's 0-5 loss is a joker, and a 2-5 loss is nothing",
+    "base results: team 2's 0-5 loss is a joker",
+    'base results: the ace and the joker compare with the base target, not the raised one',
+    'base results: a seat with no local team gets nothing',
+    'base results: a seat on both teams gets what vanilla gives it at 5-0: a victory, an ace and a joker',
+    "base results: the rounds are team 0's then team 1's, from the base winner",
+    'base results: the streak restarts on a new winner and unlocks at 2, as vanilla',
 )
 
 FENCE_MUTANTS = (
@@ -217,6 +226,12 @@ FENCE_MUTANTS = (
     'the series ignores the mode',
     "the snapshot's record skips the late tail's place",
     'the snapshot always reads a record',
+    'the base results give no ace',
+    'the base results give no joker',
+    "the base results compare with the winner's rounds, not the base target",
+    'the base results give the loser a victory',
+    'the base rounds ignore the winner',
+    'the streak never restarts',
 )
 
 CARRIER_FIELDS = (
@@ -256,7 +271,7 @@ def test_the_fence_suite_ran_exactly_its_cases_and_passed(harness_run):
 
 
 def test_the_pinned_names_are_distinct():
-    assert len(set(FENCE_CASES)) == len(FENCE_CASES) == 135 + 51 + 11 + 8
+    assert len(set(FENCE_CASES)) == len(FENCE_CASES) == 144 + 57 + 11 + 8
 
 
 # -- the fence's Unity- and Photon-side lines, as source claims --------------
@@ -415,7 +430,7 @@ def claim_the_spectator_boundary(files):
             "try { LimitlessFence.NoteSpectatorCallIn(); } catch { }",
             "_roundLatched = false;", "ScheduleBoundary(mapId);"]):
         out.append("the call-in does not open the next game first")
-    if not _in_order(_code(files["FfaMode.cs"], "private static void SpectatorCheckGameOver()"), [
+    if not _in_order(_code(files["FfaMode.cs"], "private static void SpectatorCheckGameOver("), [
             "spectatorGameOverAnnounced = true;", 'try { LimitlessFence.NoteSpectatorGameOver("ffa"); } catch { }']):
         out.append("the FFA observer's game over does not end the gid")
     return out
@@ -1525,6 +1540,121 @@ def claim_ffa_reports_at_the_base_and_ends_at_the_real_end(files):
     return out
 
 
+LFN = "LimitlessFence.cs"
+RUN_BASE = "if (outcome == LimitlessFenceRules.HandlerOutcome.CreateRecord && !ffa) RunBaseResults(gm, rec);"
+
+
+def claim_the_base_runs_vanillas_results_once(files):
+    """Section 6, Table C1 (H7), at the base: the seat that created the record
+    runs vanilla's GameOver block once, after the creating round applied, from
+    the base result and the base target, in GM only (vanilla's GameOver never
+    runs in FFA). The six platform calls are vanilla's, in vanilla's order, by
+    name, and the streak moves as vanilla moves it. A missing name is logged."""
+    out = []
+    lf = files[LFN]
+    h = _code(lf, "internal static void HandleFenceEvent(")
+    if h.count(RUN_BASE) != 1 or h.index(RUN_BASE) < h.rindex("ApplyFenceRound(gm, args, stamp);"):
+        out.append("the base's results do not follow the creating round")
+    if _code(lf).count("RunBaseResults(") != 2:
+        out.append("the base's results have another caller")
+    if not _in_order(_code(lf, "private static void RunBaseResults("), [
+            "if (gm == null || SpectatorPatchSupport.Suppress) return;",
+            "LimitlessFenceRules.BaseRounds(rec, out p1, out p2);",
+            "int team = (int)gm.m_localTeam;",
+            "LimitlessFenceRules.BaseGameAwards((team & 1) != 0, (team & 2) != 0, rec.BaseWinner, p1, p2, rec.BaseTarget);",
+            "if (aw.BaseVictory)",
+            'PlatformCall("UnlockAchievement", "Victory");',
+            'PlatformCall("ProgressAchievement", "Winner");',
+            'PlatformCall("ProgressAchievement", "Champion");',
+            "int last = gm.m_lastWinningTeam, count = gm.m_winCount;",
+            "three = LimitlessFenceRules.StreakStep(ref last, ref count, rec.BaseWinner);",
+            "gm.m_lastWinningTeam = last;",
+            "gm.m_winCount = count;",
+            'if (three) PlatformCall("UnlockAchievement", "ThreeInARow");',
+            'if (aw.BaseAce) PlatformCall("UnlockAchievement", "Ace");',
+            'if (aw.BaseJoker) PlatformCall("UnlockAchievement", "Joker");']):
+        out.append("the base's copy is not vanilla's block, in vanilla's order")
+    if not _in_order(_code(lf, "private static void PlatformCall("), [
+            "typeof(FriendlyFoe.Platform.PlatformManager).GetMethod(method, BindingFlags.Public | BindingFlags.Static);",
+            "!Enum.IsDefined(p[0].ParameterType, achievement)", "Plugin.Log.LogWarning(", "return;",
+            "m.Invoke(null, new[] { Enum.Parse(p[0].ParameterType, achievement) });"]):
+        out.append("the platform call is not by name, or a missing name is silent")
+    return out
+
+
+def claim_the_reported_token_stays_ended(files):
+    """Section 6, Table C1, F10: the base's report ends the team token
+    (OnTokenGameOver: EndGameToken, then inGame false). At the real end the
+    token's GameOverTransition prefix reaches GmVoid, which returns while
+    inGame is false, so it neither restores nor reuses the reported token.
+    inGame is set only by BeginGameToken, whose one caller is the watcher's
+    game start, behind finding A's gate."""
+    out = []
+    t = files["TeamGameNumber.cs"]
+    if not _in_order(_code(t, "internal string OnTokenGameOver("), ["EndGameToken();", "inGame = false;"]):
+        out.append("the base's report does not end the token's game")
+    if not _in_order(_code(t, "private string GmVoid("), ["if (!inGame || overSeen) return null;", "EndGameToken();"]):
+        out.append("the real end's void acts on an ended game")
+    if not _in_order(_code(t, "internal string OnGmGameOver("), ["return GmVoid("]):
+        out.append("the real end's token step is not the void")
+    whole = _code(t)
+    if whole.count("inGame = true;") != 1 or "inGame = true;" not in _code(t, "private void BeginGameToken("):
+        out.append("inGame is re-armed outside the game start")
+    if whole.count("BeginGameToken(live);") != 1 or "BeginGameToken(live);" not in _code(t, "internal int OnGameStart("):
+        out.append("the token's game begins outside the watcher's start")
+    calls = sum(_code(x).count("TeamGameNumber.Live.OnGameStart(") for x in files.values())
+    if calls != 1 or not _in_order(_code(files["GameStateWatcher.cs"], "private static void OnMatchStarted("),
+                                   ["if (LimitlessFence.RecordOpen) return;", "TeamGameNumber.Live.OnGameStart("]):
+        out.append("the token's game start is not behind the continuation gate")
+    return out
+
+
+def claim_the_real_end_holds_the_platform_results(files):
+    """Section 6, Table C1 (H7), at the real end: while the seat holds a live
+    or terminating record, a GameOver prefix saves vanilla's two streak
+    counters and sets the hold. The two PlatformManager prefixes refuse every
+    call while it is set. The finalizer, which runs on every exit, puts the
+    counters back, clears the hold and returns the exception it was given. The
+    fence stages its capability only when all three patches attached (#83)."""
+    out = []
+    lf = files[LFN]
+    whole = _code(lf)
+    if '[HarmonyPatch(typeof(GM_ArmsRace), "GameOver")]\n    internal static class LimitlessFence_RealEnd_Patch' not in whole:
+        out.append("the hold is not on vanilla's GameOver")
+    if not _in_order(_code(lf, "internal static class LimitlessFence_RealEnd_Patch"), [
+            "private static void Prefix(GM_ArmsRace __instance, out RealEndSaved __state)",
+            "__state = default(RealEndSaved);",
+            "if (!LimitlessFence.RecordOpen || __instance == null) return;",
+            "__state.LastWinner = __instance.m_lastWinningTeam;",
+            "__state.WinCount = __instance.m_winCount;",
+            "__state.Held = true;",
+            "LimitlessFence.PlatformResultsHeld = true;",
+            "private static Exception Finalizer(GM_ArmsRace __instance, RealEndSaved __state, Exception __exception)",
+            "if (!__state.Held) return __exception;",
+            "__instance.m_lastWinningTeam = __state.LastWinner;",
+            "__instance.m_winCount = __state.WinCount;",
+            "LimitlessFence.PlatformResultsHeld = false;",
+            "if (exception == null) LimitlessFence.RealEndLive = true;"]):
+        out.append("the real end's hold is not set, saved and put back")
+    for m, cls, live in (("UnlockAchievement", "LimitlessFence_HeldUnlock_Patch", "HeldUnlockLive"),
+                         ("ProgressAchievement", "LimitlessFence_HeldProgress_Patch", "HeldProgressLive")):
+        hdr = '[HarmonyPatch(typeof(FriendlyFoe.Platform.PlatformManager), "%s")]\n    internal static class %s' % (m, cls)
+        if hdr not in whole or not _in_order(_code(lf, "internal static class " + cls), [
+                "private static bool Prefix() { return !LimitlessFence.PlatformResultsHeld; }",
+                "if (exception == null) LimitlessFence.%s = true;" % live]):
+            out.append("PlatformManager.%s is not held at the real end" % m)
+    if whole.count("LimitlessFence.PlatformResultsHeld = true;") != 1 or whole.count("PlatformResultsHeld = ") != 2:
+        out.append("the hold has another writer")
+    if "internal static bool RealEndHoldLive { get { return RealEndLive && HeldUnlockLive && HeldProgressLive; } }" not in whole \
+            or "&& PlayerDiedLive && RealEndHoldLive && _hooked" not in whole \
+            or not _in_order(_code(lf, "internal static void StageFenceCapability("), [
+                "if (!GameStartLive || !RawRoundLive || !PlayerDiedLive)",
+                "if (!RealEndHoldLive)\n                {\n                    _stageFailedPermanently = true;",
+                "if (!_hooked) return;"]):
+        out.append("the capability is staged without the hold")
+    return out
+
+
 CLAIMS = {
     "game_start_prefix": claim_the_game_start_prefix,
     "stamp_before_join": claim_the_gid_is_stamped_before_the_join,
@@ -1573,6 +1703,9 @@ CLAIMS = {
     "gm_observer_end": claim_the_gm_observer_ends_at_the_live_target,
     "match_start_gate": claim_the_match_start_is_gated_in_a_continuation,
     "ffa_base_report": claim_ffa_reports_at_the_base_and_ends_at_the_real_end,
+    "base_results": claim_the_base_runs_vanillas_results_once,
+    "real_end_hold": claim_the_real_end_holds_the_platform_results,
+    "token_real_end": claim_the_reported_token_stays_ended,
 }
 
 GATE = "                if (SpectatorPatchSupport.Suppress) return;\n"
@@ -2172,6 +2305,53 @@ MUTANTS = [
     ("ffa_base_report", "FFA's report latch is skipped",
      [("GameStateWatcher.cs", "            if (gameOverReported) return;\n            gameOverReported = true;\n            isTracking = false;    // the next game re-arms",
        "            gameOverReported = true;\n            isTracking = false;    // the next game re-arms")]),
+    ("base_results", "the base copy drops the victory unlock",
+     [("LimitlessFence.cs", '                    PlatformCall("UnlockAchievement", "Victory");\n', "")]),
+    ("base_results", "the base copy drops the winner progress",
+     [("LimitlessFence.cs", '                    PlatformCall("ProgressAchievement", "Winner");\n', "")]),
+    ("base_results", "the base copy drops the champion progress",
+     [("LimitlessFence.cs", '                    PlatformCall("ProgressAchievement", "Champion");\n', "")]),
+    ("base_results", "the base copy drops the streak unlock",
+     [("LimitlessFence.cs", '                    if (three) PlatformCall("UnlockAchievement", "ThreeInARow");\n', "")]),
+    ("base_results", "the base copy drops the ace",
+     [("LimitlessFence.cs", '                if (aw.BaseAce) PlatformCall("UnlockAchievement", "Ace");\n', "")]),
+    ("base_results", "the base copy drops the joker",
+     [("LimitlessFence.cs", '                if (aw.BaseJoker) PlatformCall("UnlockAchievement", "Joker");\n', "")]),
+    ("base_results", "the base copy runs on every accepted message",
+     [("LimitlessFence.cs", "if (outcome == LimitlessFenceRules.HandlerOutcome.CreateRecord && !ffa) RunBaseResults(gm, rec);",
+       "if (!ffa) RunBaseResults(gm, rec);")]),
+    ("base_results", "the base copy runs in FFA",
+     [("LimitlessFence.cs", "CreateRecord && !ffa) RunBaseResults(gm, rec);", "CreateRecord) RunBaseResults(gm, rec);")]),
+    ("base_results", "the base copy reads the raised target",
+     [("LimitlessFence.cs", "rec.BaseWinner, p1, p2, rec.BaseTarget);", "rec.BaseWinner, p1, p2, gm.roundsToWinGame);")]),
+    ("base_results", "the base copy's streak is not written back",
+     [("LimitlessFence.cs", "                    gm.m_winCount = count;\n", "")]),
+    ("base_results", "a platform name the game lacks is silent",
+     [("LimitlessFence.cs", '                Plugin.Log.LogWarning("[LIMIT] PlatformManager." + method + "(" + achievement + ") is not in this build of the game");\n', "")]),
+    ("real_end_hold", "the hold is set without a record",
+     [("LimitlessFence.cs", "if (!LimitlessFence.RecordOpen || __instance == null) return;", "if (__instance == null) return;")]),
+    ("real_end_hold", "the real end's unlock is not held",
+     [("LimitlessFence.cs", "internal static class LimitlessFence_HeldUnlock_Patch\n    {\n        private static bool Prefix() { return !LimitlessFence.PlatformResultsHeld; }",
+       "internal static class LimitlessFence_HeldUnlock_Patch\n    {\n        private static bool Prefix() { return true; }")]),
+    ("real_end_hold", "the real end's progress call is not held",
+     [("LimitlessFence.cs", "internal static class LimitlessFence_HeldProgress_Patch\n    {\n        private static bool Prefix() { return !LimitlessFence.PlatformResultsHeld; }",
+       "internal static class LimitlessFence_HeldProgress_Patch\n    {\n        private static bool Prefix() { return true; }")]),
+    ("real_end_hold", "the finalizer drops the restore",
+     [("LimitlessFence.cs", "                __instance.m_lastWinningTeam = __state.LastWinner;\n                __instance.m_winCount = __state.WinCount;\n", "")]),
+    ("real_end_hold", "the finalizer leaves the hold set",
+     [("LimitlessFence.cs", "            LimitlessFence.PlatformResultsHeld = false;\n", "")]),
+    ("real_end_hold", "the capability is staged without the hold",
+     [("LimitlessFence.cs", "                if (!RealEndHoldLive)\n", "                if (false)\n")]),
+    ("real_end_hold", "the hold's attach skips the progress patch",
+     [("LimitlessFence.cs", "return RealEndLive && HeldUnlockLive && HeldProgressLive;", "return RealEndLive && HeldUnlockLive;")]),
+    ("token_real_end", "the real end's void acts on an ended game",
+     [("TeamGameNumber.cs", "if (!inGame || overSeen) return null;", "if (overSeen) return null;")]),
+    ("token_real_end", "the base's report leaves the token's game armed",
+     [("TeamGameNumber.cs", "                EndGameToken();\n                inGame = false;\n                overSeen = false;\n                boundaryMissed = false;\n                resetOut = false;\n",
+       "                EndGameToken();\n                overSeen = false;\n                boundaryMissed = false;\n                resetOut = false;\n")]),
+    ("token_real_end", "the real end re-arms the token's game",
+     [("TeamGameNumber.cs", "                return GmVoid(\"the game itself ended this seat's game\");\n",
+       "                inGame = true;\n                return GmVoid(\"the game itself ended this seat's game\");\n")]),
 ]
 
 NEUTRAL = "            // control: a neutral line\n"
@@ -2245,6 +2425,12 @@ CONTROLS = [
                            NEUTRAL + "            if (LimitlessFence.RecordOpen) return;\n            try { Keybinds")]),
     ("ffa_base_report", [("FfaMode.cs", "            if (roundOver && !gameOver && winnerTeam >= 0",
                           NEUTRAL + "            if (roundOver && !gameOver && winnerTeam >= 0")]),
+    ("base_results", [("LimitlessFence.cs", "            if (outcome == LimitlessFenceRules.HandlerOutcome.CreateRecord && !ffa) RunBaseResults(gm, rec);\n",
+                       NEUTRAL + "            if (outcome == LimitlessFenceRules.HandlerOutcome.CreateRecord && !ffa) RunBaseResults(gm, rec);\n")]),
+    ("real_end_hold", [("LimitlessFence.cs", "                LimitlessFence.PlatformResultsHeld = true;\n",
+                        NEUTRAL + "                LimitlessFence.PlatformResultsHeld = true;\n")]),
+    ("token_real_end", [("TeamGameNumber.cs", "                if (!inGame || overSeen) return null;\n",
+                         NEUTRAL + "                if (!inGame || overSeen) return null;\n")]),
 ]
 
 

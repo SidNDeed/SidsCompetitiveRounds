@@ -231,7 +231,11 @@ namespace CompetitiveRounds
         internal static bool GameStartLive;
         internal static bool RawRoundLive;
         internal static bool PlayerDiedLive;
-        internal static bool FencePatchesLive { get { return GameStartLive && RawRoundLive && PlayerDiedLive && _hooked; } }
+        internal static bool RealEndLive;
+        internal static bool HeldUnlockLive;
+        internal static bool HeldProgressLive;
+        internal static bool RealEndHoldLive { get { return RealEndLive && HeldUnlockLive && HeldProgressLive; } }
+        internal static bool FencePatchesLive { get { return GameStartLive && RawRoundLive && PlayerDiedLive && RealEndHoldLive && _hooked; } }
 
         private static bool _staged;
         private static bool _stageFailedPermanently;
@@ -248,6 +252,12 @@ namespace CompetitiveRounds
                 {
                     _stageFailedPermanently = true;
                     Plugin.Log.LogError("[LIMIT] a fence patch did NOT attach - the continuation is disabled for this session");
+                    return;
+                }
+                if (!RealEndHoldLive)
+                {
+                    _stageFailedPermanently = true;
+                    Plugin.Log.LogError("[LIMIT] the real end's hold did NOT attach - the continuation is disabled for this session");
                     return;
                 }
                 if (!_hooked) return;   // the tick retries the hook first
@@ -951,6 +961,9 @@ namespace CompetitiveRounds
             SetRecordTarget(gm, ffa, rec.TargetRounds);
             if (PhotonNetwork.IsMasterClient) WriteRecordMirror(rec);
             ApplyFenceRound(gm, args, stamp);
+            // v4 section 6, Table C1 (H7): the round that created the record went
+            // down RoundOver, so vanilla's GameOver block did not run at the base.
+            if (outcome == LimitlessFenceRules.HandlerOutcome.CreateRecord && !ffa) RunBaseResults(gm, rec);
         }
 
         private static void InstallRecord(LimitlessFenceRules.FenceRecord rec, bool create)
@@ -1018,6 +1031,65 @@ namespace CompetitiveRounds
             finally { _fenceCall = false; }
         }
 
+        /// <summary>v4 section 6, Table C1 (H7): set while the real end's GameOver
+        /// runs on a seat that holds a live or terminating record. The two
+        /// platform prefixes refuse every unlock and progress call while it is
+        /// set.</summary>
+        internal static bool PlatformResultsHeld;
+
+        /// <summary>v4 section 6, Table C1 (H7), at the base. The round that
+        /// created the record went down RoundOver, so vanilla's GameOver block
+        /// (GM_ArmsRace:446-495) did not run. This runs it once per record, on
+        /// the seat that created it, from the base result, with the base target
+        /// where vanilla reads roundsToWinGame, and moves vanilla's streak
+        /// counters as vanilla does. A spectator moves nothing: it has no local
+        /// team, and its platform calls are suppressed.</summary>
+        private static void RunBaseResults(GM_ArmsRace gm, LimitlessFenceRules.FenceRecord rec)
+        {
+            if (gm == null || SpectatorPatchSupport.Suppress) return;
+            try
+            {
+                int p1, p2;
+                LimitlessFenceRules.BaseRounds(rec, out p1, out p2);
+                int team = (int)gm.m_localTeam;
+                var aw = LimitlessFenceRules.BaseGameAwards((team & 1) != 0, (team & 2) != 0, rec.BaseWinner, p1, p2, rec.BaseTarget);
+                bool three = false;
+                if (aw.BaseVictory)
+                {
+                    PlatformCall("UnlockAchievement", "Victory");
+                    PlatformCall("ProgressAchievement", "Winner");
+                    PlatformCall("ProgressAchievement", "Champion");
+                    int last = gm.m_lastWinningTeam, count = gm.m_winCount;
+                    three = LimitlessFenceRules.StreakStep(ref last, ref count, rec.BaseWinner);
+                    gm.m_lastWinningTeam = last;
+                    gm.m_winCount = count;
+                    if (three) PlatformCall("UnlockAchievement", "ThreeInARow");
+                }
+                if (aw.BaseAce) PlatformCall("UnlockAchievement", "Ace");
+                if (aw.BaseJoker) PlatformCall("UnlockAchievement", "Joker");
+                Plugin.Log.LogInfo("[LIMIT] the base's platform results ran once: victory=" + aw.BaseVictory
+                    + " streak=" + three + " ace=" + aw.BaseAce + " joker=" + aw.BaseJoker);
+            }
+            catch (Exception ex) { Plugin.Log.LogWarning("[LIMIT] the base's platform results: " + ex.Message); }
+        }
+
+        /// <summary>One of PlatformManager's two calls (decompile
+        /// FriendlyFoe.Platform/PlatformManager.cs:33, :41), by name: the plugin
+        /// does not reference the assembly that defines their Achievements
+        /// parameter. The value is the enum member vanilla's GameOver names. A
+        /// name this build of the game lacks is logged, never silent (#91).</summary>
+        private static void PlatformCall(string method, string achievement)
+        {
+            var m = typeof(FriendlyFoe.Platform.PlatformManager).GetMethod(method, BindingFlags.Public | BindingFlags.Static);
+            var p = m != null ? m.GetParameters() : null;
+            if (p == null || p.Length != 1 || !p[0].ParameterType.IsEnum || !Enum.IsDefined(p[0].ParameterType, achievement))
+            {
+                Plugin.Log.LogWarning("[LIMIT] PlatformManager." + method + "(" + achievement + ") is not in this build of the game");
+                return;
+            }
+            m.Invoke(null, new[] { Enum.Parse(p[0].ParameterType, achievement) });
+        }
+
         /// <summary>4.6, Table B: a refusal of the current master's message is a
         /// case the fence does not cover. The seat leaves: a fighter through
         /// vanilla's restart (every other seat sees a departure), a spectator by
@@ -1072,6 +1144,95 @@ namespace CompetitiveRounds
             if (original != null) return exception;
             if (exception == null) LimitlessFence.GameStartLive = true;
             return VanillaFixSupport.Cleanup("LimitlessFence game start", exception);
+        }
+    }
+
+    /// <summary>
+    /// v4 section 6, Table C1 (H7), at the real end. The base already ran
+    /// vanilla's GameOver block once (LimitlessFence.RunBaseResults). While this
+    /// seat holds a live or terminating record, GameOver's platform calls are
+    /// held by the two prefixes below, and the streak counters it moves
+    /// (m_lastWinningTeam, m_winCount) are put back. The finalizer runs on every
+    /// exit, a throw included, so the hold never outlives the call. HarmonyX runs
+    /// every prefix (#352), so this runs beside any sibling.
+    /// </summary>
+    [HarmonyPatch(typeof(GM_ArmsRace), "GameOver")]
+    internal static class LimitlessFence_RealEnd_Patch
+    {
+        internal struct RealEndSaved
+        {
+            internal bool Held;
+            internal int LastWinner;
+            internal int WinCount;
+        }
+
+        private static void Prefix(GM_ArmsRace __instance, out RealEndSaved __state)
+        {
+            __state = default(RealEndSaved);
+            try
+            {
+                if (!LimitlessFence.RecordOpen || __instance == null) return;
+                __state.LastWinner = __instance.m_lastWinningTeam;
+                __state.WinCount = __instance.m_winCount;
+                __state.Held = true;
+                LimitlessFence.PlatformResultsHeld = true;
+            }
+            catch { }
+        }
+
+        private static Exception Finalizer(GM_ArmsRace __instance, RealEndSaved __state, Exception __exception)
+        {
+            if (!__state.Held) return __exception;
+            try
+            {
+                __instance.m_lastWinningTeam = __state.LastWinner;
+                __instance.m_winCount = __state.WinCount;
+            }
+            catch { }
+            LimitlessFence.PlatformResultsHeld = false;
+            Plugin.Log.LogInfo("[LIMIT] the real end's platform results were held, and the streak counters put back");
+            return __exception;
+        }
+
+        /// <summary>#83: the fence advertises its capability only while the
+        /// hold attached (LimitlessFence.RealEndHoldLive).</summary>
+        [HarmonyCleanup]
+        private static Exception Cleanup(MethodBase original, Exception exception)
+        {
+            if (original != null) return exception;
+            if (exception == null) LimitlessFence.RealEndLive = true;
+            return VanillaFixSupport.Cleanup("LimitlessFence real end", exception);
+        }
+    }
+
+    /// <summary>v4 section 6, Table C1 (H7): the hold's refusal of an unlock.</summary>
+    [HarmonyPatch(typeof(FriendlyFoe.Platform.PlatformManager), "UnlockAchievement")]
+    internal static class LimitlessFence_HeldUnlock_Patch
+    {
+        private static bool Prefix() { return !LimitlessFence.PlatformResultsHeld; }
+
+        [HarmonyCleanup]
+        private static Exception Cleanup(MethodBase original, Exception exception)
+        {
+            if (original != null) return exception;
+            if (exception == null) LimitlessFence.HeldUnlockLive = true;
+            return VanillaFixSupport.Cleanup("LimitlessFence held unlock", exception);
+        }
+    }
+
+    /// <summary>v4 section 6, Table C1 (H7): the hold's refusal of a progress
+    /// call.</summary>
+    [HarmonyPatch(typeof(FriendlyFoe.Platform.PlatformManager), "ProgressAchievement")]
+    internal static class LimitlessFence_HeldProgress_Patch
+    {
+        private static bool Prefix() { return !LimitlessFence.PlatformResultsHeld; }
+
+        [HarmonyCleanup]
+        private static Exception Cleanup(MethodBase original, Exception exception)
+        {
+            if (original != null) return exception;
+            if (exception == null) LimitlessFence.HeldProgressLive = true;
+            return VanillaFixSupport.Cleanup("LimitlessFence held progress", exception);
         }
     }
 

@@ -50,12 +50,44 @@ namespace CompetitiveRounds
             internal Action<Func<int>, Action<int>, int, Action> RunInFrame = ScopedFrame.RunInFrame<int>;
             internal Func<object[], R.FenceRecord, object[]> SnapshotWith = R.SnapshotWithRecord;
             internal Func<object[], R.FenceRecord?> SnapshotRead = SnapRead;
+            internal Func<bool, bool, int, int, int, int, R.BaseAwards> Awards = R.BaseGameAwards;
+            internal Func<R.FenceRecord, int[]> Rounds = RoundsOf;
+            internal Func<int, int, int, int[]> Streak = StreakOf;
         }
 
         private const string G1 = "0123456789abcdef";
         private const string G2 = "fedcba9876543210";
         private const string V1 = "1-4e4806419fa25528";
         private const string V0 = "1-0000000000000000";
+
+        private static int[] RoundsOf(R.FenceRecord x) { int p1, p2; R.BaseRounds(x, out p1, out p2); return new[] { p1, p2 }; }
+
+        private static int[] StreakOf(int last, int count, int winner)
+        {
+            bool three = R.StreakStep(ref last, ref count, winner);
+            return new[] { last, count, three ? 1 : 0 };
+        }
+
+        private static bool AwardsAre(R.BaseAwards a, bool victory, bool ace, bool joker)
+        {
+            return a.BaseVictory == victory && a.BaseAce == ace && a.BaseJoker == joker;
+        }
+
+        private static R.FenceRecord BaseOf(int winner, int winnerRounds, int otherRounds)
+        {
+            var x = Rec();
+            x.BaseWinner = winner;
+            x.BaseWinnerRounds = winnerRounds;
+            x.BaseOtherRounds = otherRounds;
+            return x;
+        }
+
+        private static bool IntsAre(int[] a, params int[] b)
+        {
+            if (a == null || a.Length != b.Length) return false;
+            for (int i = 0; i < a.Length; i++) if (a[i] != b[i]) return false;
+            return true;
+        }
 
         private static R.FenceRecord Rec()
         {
@@ -226,6 +258,22 @@ namespace CompetitiveRounds
                 !f.SnapshotRead(spec).HasValue && !f.SnapshotRead(late).HasValue
                 && !f.SnapshotRead(With(R.SnapshotWithRecord(spec, Rec()), 29, "55")).HasValue
                 && !f.SnapshotRead(With(R.SnapshotWithRecord(spec, Rec()), 35, null)).HasValue);
+
+            // the base's platform results (section 6, Table C1, H7)
+            add("base results: team 1's 5-0 win is a victory and an ace", AwardsAre(f.Awards(true, false, 0, 5, 0, 5), true, true, false));
+            add("base results: team 2's 5-3 win is a victory and no ace", AwardsAre(f.Awards(false, true, 1, 3, 5, 5), true, false, false));
+            add("base results: team 1's 0-5 loss is a joker, and a 2-5 loss is nothing",
+                AwardsAre(f.Awards(true, false, 1, 0, 5, 5), false, false, true) && AwardsAre(f.Awards(true, false, 1, 2, 5, 5), false, false, false));
+            add("base results: team 2's 0-5 loss is a joker", AwardsAre(f.Awards(false, true, 0, 5, 0, 5), false, false, true));
+            add("base results: the ace and the joker compare with the base target, not the raised one",
+                AwardsAre(f.Awards(true, false, 0, 5, 0, 55), true, false, false) && AwardsAre(f.Awards(true, false, 1, 0, 5, 55), false, false, false));
+            add("base results: a seat with no local team gets nothing", AwardsAre(f.Awards(false, false, 0, 5, 0, 5), false, false, false));
+            add("base results: a seat on both teams gets what vanilla gives it at 5-0: a victory, an ace and a joker",
+                AwardsAre(f.Awards(true, true, 0, 5, 0, 5), true, true, true));
+            add("base results: the rounds are team 0's then team 1's, from the base winner",
+                IntsAre(f.Rounds(BaseOf(0, 5, 2)), 5, 2) && IntsAre(f.Rounds(BaseOf(1, 5, 2)), 2, 5));
+            add("base results: the streak restarts on a new winner and unlocks at 2, as vanilla",
+                IntsAre(f.Streak(-1, 0, 0), 0, 1, 0) && IntsAre(f.Streak(0, 1, 0), 0, 2, 1) && IntsAre(f.Streak(1, 3, 0), 0, 1, 0));
 
             // targets and states (5.1, 4.3)
             add("target: a live record plays to base + 50", R.ContinueTarget(5) == 55);
@@ -690,6 +738,24 @@ namespace CompetitiveRounds
             Control(r, "the snapshot always reads a record",
                     Cases(new Fns { SnapshotRead = s => Rec() }),
                     "snapshot: a snapshot without the record, or with a field missing or mistyped, carries none");
+            Control(r, "the base results give no ace",
+                    Cases(new Fns { Awards = (u1, u2, uw, up1, up2, ut) => { var ua = R.BaseGameAwards(u1, u2, uw, up1, up2, ut); ua.BaseAce = false; return ua; } }),
+                    "base results: team 1's 5-0 win is a victory and an ace");
+            Control(r, "the base results give no joker",
+                    Cases(new Fns { Awards = (u1, u2, uw, up1, up2, ut) => { var ua = R.BaseGameAwards(u1, u2, uw, up1, up2, ut); ua.BaseJoker = false; return ua; } }),
+                    "base results: team 1's 0-5 loss is a joker, and a 2-5 loss is nothing", "base results: team 2's 0-5 loss is a joker");
+            Control(r, "the base results compare with the winner's rounds, not the base target",
+                    Cases(new Fns { Awards = (u1, u2, uw, up1, up2, ut) => R.BaseGameAwards(u1, u2, uw, up1, up2, Math.Max(up1, up2)) }),
+                    "base results: the ace and the joker compare with the base target, not the raised one");
+            Control(r, "the base results give the loser a victory",
+                    Cases(new Fns { Awards = (u1, u2, uw, up1, up2, ut) => { var ua = R.BaseGameAwards(u1, u2, uw, up1, up2, ut); ua.BaseVictory = u1 || u2; return ua; } }),
+                    "base results: team 1's 0-5 loss is a joker, and a 2-5 loss is nothing");
+            Control(r, "the base rounds ignore the winner",
+                    Cases(new Fns { Rounds = ux => new[] { ux.BaseWinnerRounds, ux.BaseOtherRounds } }),
+                    "base results: the rounds are team 0's then team 1's, from the base winner");
+            Control(r, "the streak never restarts",
+                    Cases(new Fns { Streak = (sl, sc, sw) => new[] { sw, sc + 1, sc + 1 >= 2 ? 1 : 0 } }),
+                    "base results: the streak restarts on a new winner and unlocks at 2, as vanilla");
             return r;
         }
 

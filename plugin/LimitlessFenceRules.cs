@@ -268,6 +268,59 @@ namespace CompetitiveRounds
             }, out r, out roster, out args, out stamp);
         }
 
+        /// <summary>v4 section 6, Table C1 (H7): the platform results vanilla's
+        /// GameOver block (GM_ArmsRace:446-495) gives one seat, computed as
+        /// vanilla computes them, with the base target where vanilla reads
+        /// roundsToWinGame. team1 and team2 are the seat's local team flags;
+        /// p1Rounds and p2Rounds are team 0's and team 1's rounds at the
+        /// base.</summary>
+        internal struct BaseAwards
+        {
+            internal bool BaseVictory;
+            internal bool BaseAce;
+            internal bool BaseJoker;
+        }
+
+        internal static BaseAwards BaseGameAwards(bool team1, bool team2, int winner, int p1Rounds, int p2Rounds, int target)
+        {
+            var a = new BaseAwards();
+            if (team1 && winner == 0)
+            {
+                a.BaseVictory = true;
+                if (p1Rounds == target && p2Rounds == 0) a.BaseAce = true;
+            }
+            else if (team1 && winner == 1 && p1Rounds == 0 && p2Rounds == target) a.BaseJoker = true;
+            if (team2 && winner == 1)
+            {
+                a.BaseVictory = true;
+                if (p2Rounds == target && p1Rounds == 0) a.BaseAce = true;
+            }
+            else if (team2 && winner == 0 && p1Rounds == target && p2Rounds == 0) a.BaseJoker = true;
+            return a;
+        }
+
+        /// <summary>The base's rounds as vanilla holds them: team 0's, then
+        /// team 1's.</summary>
+        internal static void BaseRounds(FenceRecord r, out int p1Rounds, out int p2Rounds)
+        {
+            p1Rounds = r.BaseWinner == 0 ? r.BaseWinnerRounds : r.BaseOtherRounds;
+            p2Rounds = r.BaseWinner == 0 ? r.BaseOtherRounds : r.BaseWinnerRounds;
+        }
+
+        /// <summary>Vanilla's streak on a victory (GM_ArmsRace:478-486): a new
+        /// winner restarts the count, and ThreeInARow unlocks at a count of 2
+        /// or more. Returns whether it unlocks.</summary>
+        internal static bool StreakStep(ref int lastWinner, ref int count, int winner)
+        {
+            if (winner != lastWinner)
+            {
+                lastWinner = winner;
+                count = 0;
+            }
+            count++;
+            return count >= 2;
+        }
+
         /// <summary>D1: the target while a record is live.</summary>
         internal static int ContinueTarget(int baseTarget)
         {
