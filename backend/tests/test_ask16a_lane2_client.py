@@ -986,7 +986,8 @@ def claim_one_send_per_point(files):
         out.append("the re-drive does not retire the waiting ticket before it sends")
     code = _code(ffa)
     send = _code(ffa, "private static void ResolvePointNow(GM_ArmsRace gm)")
-    resets = code.count("pointLatched = false;") - send.count("pointLatched = false;")
+    # The field's declaration reads "bool pointLatched = false;" too; it resets nothing.
+    resets = code.count("pointLatched = false;") - send.count("pointLatched = false;") - code.count("bool pointLatched = false;")
     if resets != 3 or code.count("pointLatched = false;\n            pointSendPending = false;") != resets:
         out.append("a reset of the latch keeps the pending mark")
     return out
