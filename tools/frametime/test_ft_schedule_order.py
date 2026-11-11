@@ -103,7 +103,7 @@ _FLUSH_TAIL = [
     'Plugin.Log.LogInfo("[FRAME-TIME] flushed g=" + g + " why=" + why);',
 ]
 
-_BOUNDARY_TAIL = [
+_OLD_BOUNDARY_TAIL = [
     'bool open = live && InGame;',
     'if (open && !Live) StartPoint();',
     'else if (!open && Live) EndPoint();',
@@ -129,6 +129,41 @@ _BOUNDARY_TAIL = [
     '}',
     'else if (Game < 0) FtSpan.Moment = FtSpan.Menu;',
     'else if (FtSpan.Moment != FtSpan.GameOver) FtSpan.Moment = FtSpan.Between;',
+]
+
+# B11 P1 (ruling R6-A3.11.138 (4)): the window opens at its first live frame and the plant is the plant run's
+_BOUNDARY_TAIL = _OLD_BOUNDARY_TAIL[:9] + [
+    '// window k = (LiveFrame - 2) / W opens at its first live frame (window 0 at StartPoint)',
+    'if (LiveFrame >= 2 && (LiveFrame - 2) / FtFrames.W != WinK) OpenWindow((LiveFrame - 2) / FtFrames.W);',
+    '// round-1 MEDIUM (FtSchedule.cs:55): only a window the armed build actually gated is planted, and only',
+    '// inside a plant run (D4)',
+    'FtPlant.Now = GateThisPoint && WinPlant && FtArm.Armed && FtGate.Off && LiveFrame >= 2 && FtPlant.Us > 0;',
+] + _OLD_BOUNDARY_TAIL[12:]
+
+# the point start and end as at c28259c1 and bd673226 (point arms; OLD below and the mutants mirror these)
+_OLD_START = [
+    'if (RoundOver)',
+    '{',
+    'Round++;',
+    'PointInRound = 0;',
+    'RoundOver = false;',
+    'ArmOn = Coin(FtConfig.Seed, Game, Round);',
+    '}',
+    'else ArmOn = !ArmOn;',
+    'PointInRound++;',
+    'Points++;',
+    'FtZero.Early();',
+    'LiveFrame = 0;',
+    'bool off = FtConfig.Force == "OFF" || (FtConfig.Force == "none" && !ArmOn);',
+    'GateThisPoint = FtArm.Armed && off;',
+    'FtGate.Off = GateThisPoint;',
+    'FtA3.PointStart();',
+    'FtFrames.StartPoint();',
+]
+_OLD_END = [
+    'FtGate.Off = false;',
+    'FtFrames.EndPoint();',
+    'PrevArm = ArmOn ? 1 : 0;',
 ]
 
 # ------------------------------------------------------------------ the tip's bodies (the port below mirrors each)
@@ -170,23 +205,18 @@ TIP = {
         'Round++;',
         'PointInRound = 0;',
         'RoundOver = false;',
-        'ArmOn = Coin(FtConfig.Seed, Game, Round);',
         '}',
-        'else ArmOn = !ArmOn;',
         'PointInRound++;',
         'Points++;',
         'FtZero.Early();',
         'LiveFrame = 0;',
-        'bool off = FtConfig.Force == "OFF" || (FtConfig.Force == "none" && !ArmOn);',
-        'GateThisPoint = FtArm.Armed && off;',
-        'FtGate.Off = GateThisPoint;',
+        'OpenWindow(0);',
         'FtA3.PointStart();',
         'FtFrames.StartPoint();',
     ],
     SIG_END: [
         'FtGate.Off = false;',
         'FtFrames.EndPoint();',
-        'PrevArm = ArmOn ? 1 : 0;',
     ],
     SIG_ENDOWED: [
         'if (!_overOwed) return;',
@@ -277,6 +307,7 @@ TIP_FRAMES = {
         '+ " calls=" + (BetweenCalls() - _btC0));',
         '_btT0 = -1;',
         '_wn = 0; _wF = 0; _wS = 0; _wC = 0; _wMaxF = 0; _wP = 0;',
+        'ResetPartition();',
         '_pn = 0; _pF = 0; _pS = 0; _pC = 0; _pMaxF = 0; _pMissingEnd = 0; _pP = 0; _excl = 0;',
         '_qn = 0; _qF = 0; _qS = 0; _qC = 0; _plantMixed = 0; _qP = 0;',
         '_g0 = FtSpan.Sum(FtSpan.Ticks, FtSpan.Live, FtSpan.Gated);',
@@ -285,14 +316,27 @@ TIP_FRAMES = {
         '_un0 = FtSpan.Sum(FtSpan.Calls, FtSpan.Live, FtSpan.Upkeep);',
         '_on0 = FtCensus.SumOn();',
         '_guard0 = FtCensus.SumGuarded();',
+        '_vG = _g0; _vGn = _gn0; _vOn = _on0; _vGd = _guard0;',
+        '_offG = 0; _offGn = 0; _offOn = 0; _onGuarded = 0;',
+        '_offN = 0; _offF = 0; _ownSplit = 0;',
         '_windows = 0;',
+        '_ptLabel = FtSchedule.Label();',
+        '_ptArm = FtSchedule.ArmOn;',
+        '_ptGate = FtSchedule.GateThisPoint;',
+        '_ptPred = FtSchedule.PrevArm;',
+        '_ptLastArm = _ptArm;',
+        '_ptOpen = true;',
+        'FtLedger.Take(_lb);',
         '_t0 = System.Diagnostics.Stopwatch.GetTimestamp();',
     ],
     SIG_FR_END: [
+        'if (!_ptOpen) return;',
+        '_ptOpen = false;',
         'if (_wn > 0) FlushWindow(true);',
-        'Plugin.Log.LogInfo("[FRAME-TIME] p pt=" + FtSchedule.Label() + " arm=" + (FtSchedule.ArmOn ? "ON" : "OFF")',
-        '+ " gate=" + (FtSchedule.GateThisPoint ? 1 : 0)',
-        '+ " pred=" + (FtSchedule.PrevArm < 0 ? "none" : FtSchedule.PrevArm == 1 ? "ON" : "OFF")',
+        'Vr5Take(FtGate.Off);',
+        'Plugin.Log.LogInfo("[FRAME-TIME] p pt=" + _ptLabel + " arm=" + (_ptArm ? "ON" : "OFF")',
+        '+ " gate=" + (_ptGate ? 1 : 0)',
+        '+ " pred=" + Arm(_ptPred)',
         '+ " n=" + _pn + " sF=" + _pF + " sS=" + _pS + " sC=" + _pC + " maxF=" + _pMaxF',
         '+ " pn=" + _qn + " psF=" + _qF + " psS=" + _qS + " psC=" + _qC + " sP=" + _pP + " psP=" + _qP',
         '+ " excl=" + _excl + " plant_mixed=" + _plantMixed',
@@ -303,17 +347,366 @@ TIP_FRAMES = {
         '+ " span_un=" + (FtSpan.Sum(FtSpan.Calls, FtSpan.Live, FtSpan.Upkeep) - _un0)',
         '+ " on_calls=" + (FtCensus.SumOn() - _on0) + " guarded=" + (FtCensus.SumGuarded() - _guard0)',
         '+ " zs=" + FtZero.Mask + " zl=" + FtZero.LateSeen',
-        '+ " t0=" + _t0 + " t1=" + System.Diagnostics.Stopwatch.GetTimestamp() + " answer=" + FtReplay.AnswerField);',
+        '+ " t0=" + _t0 + " t1=" + System.Diagnostics.Stopwatch.GetTimestamp() + " answer=" + FtReplay.AnswerField',
+        '+ " off_g=" + _offG + " off_gn=" + _offGn + " off_on=" + _offOn + " on_guarded=" + _onGuarded',
+        '+ " own_split=" + _ownSplit + " span_class_overflow=" + FtSpan.ClassOverflow',
+        '+ " gc_read_failures=" + FtSpan.GcReadFailures);',
         'LastN = _pn;',
         'LastSF = _pF;',
         '_btT0 = BetweenTicks();',
         '_btC0 = BetweenCalls();',
-        '_btArm = FtSchedule.ArmOn ? "ON" : "OFF";',
-        'if (FtPlant.Us < 0 && FtSchedule.Game >= 0 && !FtSchedule.ArmOn && _pn >= W)',
-        'FtPlant.Fix((long)Math.Round(0.03 * _pF * 1000000.0 / ((double)_pn * System.Diagnostics.Stopwatch.Frequency)),',
-        'FtSchedule.Label());',
+        '_btArm = _ptLastArm ? "ON" : "OFF";',
+        'if (FtPlant.Us < 0 && FtSchedule.Game >= 0 && _offN >= W)',
+        'FtPlant.Fix((long)Math.Round(0.03 * _offF * 1000000.0 / ((double)_offN * System.Diagnostics.Stopwatch.Frequency)),',
+        '_ptLabel);',
     ],
 }
+
+# B11 P1: the window schedule, ownership, the partition, the plant run and the writer ledger, whole bodies
+SIG_OPENWIN = 'private static void OpenWindow(long k)'
+SIG_MIX = 'internal static ulong Mix(int seed, int game, int round, int point, long block, ulong stream)'
+SIG_FR_FRAME = 'internal static void Frame(long f, long s, ulong c, ulong p, int gc0, int gc1, bool ended, bool closing,'
+SIG_FR_CURK = 'private static long CurrentK()'
+SIG_FR_OWNER = 'private static void CaptureOwner()'
+SIG_FR_VR5 = 'private static void Vr5Take(bool off)'
+SIG_FR_FLUSH = 'private static void FlushWindow(bool partial)'
+SIG_FR_RESETP = 'private static void ResetPartition()'
+SIG_SP_MARK = 'private static void Mark(ulong k, long g, bool gok)'
+SIG_SP_SWITCH = 'private static void Switch(int cls)'
+SIG_SP_CUT = 'internal static void Cut(ulong k, long g, bool gok)'
+SIG_SP_REBASE = 'internal static void Rebase(long g, bool gok)'
+SIG_SP_OPEN = 'internal static bool Open(int component, int kind)'
+SIG_SP_CLOSE = 'internal static void Close(bool opened)'
+SIG_SP_PUSHW = 'internal static void PushWriter()'
+SIG_SP_POPW = 'internal static void PopWriter()'
+SIG_CL_START = 'private static void OnStart()'
+SIG_CL_GCREAD = 'internal static bool GcRead(System.Func<long> fn, out long g)'
+SIG_PL_RUN = 'internal static bool RunPlanted(int seed, int game, long run)'
+SIG_LG_WRITELINE = 'public override void WriteLine(string value)'
+SIG_LG_FLUSH = 'public override void Flush()'
+SIG_LG_POLL = 'internal static void PollHash()'
+SIG_LG_TOK = 'internal static void AppendTok(StringBuilder sb, long[] a, long[] b)'
+SIG_LG_LEVEL = 'internal static long Level(long[] s)'
+
+TIP_P1_SCHED = {
+    SIG_OPENWIN: [
+        'if (_histGame != Game)',
+        '{',
+        '_histGame = Game;',
+        '_lastArm = -1;',
+        '_lastPlant = false;',
+        '_gameRun = 0;',
+        '}',
+        'long q = k / 4;',
+        'int r = (int)(k % 4);',
+        'WinCoin = (int)(Mix(FtConfig.Seed, Game, Round, PointInRound, 2 * q + (r & 1), ArmStream) & 1UL);',
+        'if (r == 0) _runPlant = FtPlant.RunPlanted(FtConfig.Seed, Game, _gameRun++);',
+        'WinK = k;',
+        'WinRun = q;',
+        'WinPos = r + 1;',
+        'WinP24 = (r & 1) == 1;',
+        'WinPlant = _runPlant;',
+        'WinRes = r == 0 && _lastPlant;',
+        'PrevArm = _lastArm;',
+        'ArmOn = r < 2 ? WinCoin == 1 : WinCoin == 0;',
+        '_lastArm = ArmOn ? 1 : 0;',
+        '_lastPlant = WinPlant;',
+        'bool off = FtConfig.Force == "OFF" || (FtConfig.Force == "none" && !ArmOn);',
+        'GateThisPoint = FtArm.Armed && off;',
+        'FtGate.Off = GateThisPoint;',
+    ],
+    SIG_MIX: [
+        'ulong z = unchecked((ulong)(uint)seed * 0x9E3779B97F4A7C15UL + (ulong)(uint)game * 0xBF58476D1CE4E5B9UL',
+        '+ (ulong)(uint)round * 0x94D049BB133111EBUL + (ulong)(uint)point * 0xD6E8FEB86659FD93UL',
+        '+ (ulong)block * 0xA0761D6478BD642FUL + stream);',
+        'z = unchecked((z ^ (z >> 30)) * 0xBF58476D1CE4E5B9UL);',
+        'z = unchecked((z ^ (z >> 27)) * 0x94D049BB133111EBUL);',
+        'return z ^ (z >> 31);',
+    ],
+}
+
+TIP_P1_FRAMES = {
+    SIG_FR_FRAME: [
+        'if (!FtSchedule.Live) return;',
+        'Vr5Take(FtGate.Off);',
+        'if (FtSchedule.LiveFrame < 2)',
+        '{',
+        "FtLedger.Take(_lb);   // the point's first live frame closed: window 0 starts with the next frame",
+        'return;',
+        '}',
+        'if (closing) { _excl++; return; }   // combat ended inside this frame: partial, never measured',
+        'if (_wn > 0 && (CurrentK() != _oK || FtSchedule.Game != _oGame || FtSchedule.Round != _oRound || FtSchedule.PointInRound != _oPoint))',
+        '{',
+        '_ownSplit++;',
+        'FlushWindow(true);',
+        '}',
+        'if (!ended) _pMissingEnd++;',
+        'if (_wn == 0) { _wGc0 = gc0; _wPlant = FtPlant.Now; CaptureOwner(); }',
+        'else if (FtPlant.Now != _wPlant) _plantMixed++;',
+        '_wGc1 = gc1;',
+        'int bin = _wn / Bin;',
+        'WinF[_wn++] = f;',
+        '_wF += f; _wS += s; _wC += c; _wP += p;',
+        'if (f > _wMaxF) _wMaxF = f;',
+        'if (_wPlant) { _qn++; _qF += f; _qS += s; _qC += c; _qP += p; }',
+        'else { _pn++; _pF += f; _pS += s; _pC += c; _pP += p; }',
+        'if (f > _pMaxF) _pMaxF = f;',
+        'if (!gok) _wGok = false;',
+        '_wG += cg; _wW += cw; _wR += cr; _wS2 += cs; _wE += ce;',
+        '_tq[bin] += unchecked((long)c) - cg - cw;',
+        '_tr[bin] += cr;',
+        '_tn[bin]++;',
+        'FtLedger.Take(_le);',
+        'if (_wn == W) FlushWindow(false);',
+    ],
+    SIG_FR_CURK: [
+        'return FtMenu.Active ? (FtSchedule.LiveFrame - 2) / W : FtSchedule.WinK;',
+    ],
+    SIG_FR_OWNER: [
+        '_oPt = FtSchedule.Label();',
+        '_oGame = FtSchedule.Game; _oRound = FtSchedule.Round; _oPoint = FtSchedule.PointInRound;',
+        '_oK = CurrentK();',
+        '_oF0 = FtSchedule.LiveFrame;',
+        '_oArm = FtSchedule.ArmOn;',
+        'if (FtMenu.Active)',
+        '{',
+        '// a menu segment holds one arm: its windows follow position by index, with no coin of their own',
+        '_oRun = _oK / 4; _oPos = (int)(_oK % 4) + 1; _oP24 = (_oK & 1) == 1; _oCoin = _oArm ? 1 : 0;',
+        '_oPred = _oK == 0 ? FtSchedule.PrevArm : (_oArm ? 1 : 0);',
+        '_oPlantRun = false; _oRes = false;',
+        '}',
+        'else',
+        '{',
+        '_oRun = FtSchedule.WinRun; _oPos = FtSchedule.WinPos; _oP24 = FtSchedule.WinP24; _oCoin = FtSchedule.WinCoin;',
+        '_oPred = FtSchedule.PrevArm; _oPlantRun = FtSchedule.WinPlant; _oRes = FtSchedule.WinRes;',
+        '}',
+        '_ptLastArm = _oArm;',
+    ],
+    SIG_FR_VR5: [
+        'long g = FtSpan.Sum(FtSpan.Ticks, FtSpan.Live, FtSpan.Gated);',
+        'long gn = FtSpan.Sum(FtSpan.Calls, FtSpan.Live, FtSpan.Gated);',
+        'long on = FtCensus.SumOn();',
+        'long gd = FtCensus.SumGuarded();',
+        'if (off) { _offG += g - _vG; _offGn += gn - _vGn; _offOn += on - _vOn; }',
+        'else _onGuarded += gd - _vGd;',
+        '_vG = g; _vGn = gn; _vOn = on; _vGd = gd;',
+    ],
+    SIG_FR_FLUSH: [
+        '_windows++;',
+        'if (!partial && !_oArm && !_wPlant) { _offN += _wn; _offF += _wF; }',
+        'var sb = new StringBuilder(512);',
+        'sb.Append("[FRAME-TIME] w pt=").Append(_oPt).Append(" arm=").Append(_oArm ? "ON" : "OFF")',
+        '.Append(" plant=").Append(_wPlant ? 1 : 0).Append(" partial=").Append(partial ? 1 : 0).Append(" n=").Append(_wn).Append(" sF=").Append(_wF)',
+        '.Append(" sS=").Append(_wS).Append(" sC=").Append(_wC).Append(" sP=").Append(_wP).Append(" maxF=").Append(_wMaxF);',
+        'if (!partial)',
+        '{',
+        'long med = LowerMedian();',
+        'sb.Append(" medF=").Append(med);',
+        'for (int h = 0; h < HMs.Length; h++)',
+        '{',
+        'long ticks = HMs[h] * System.Diagnostics.Stopwatch.Frequency / 1000;',
+        'int kmin, kmax;',
+        'RunBounds(med, ticks, out kmin, out kmax);',
+        'sb.Append(" e").Append(HMs[h]).Append(\'=\').Append(kmin).Append(\',\').Append(kmax);',
+        '}',
+        '}',
+        'sb.Append(" gc=").Append(_wGc1 - _wGc0);   // first measured frame\'s start to the last one\'s end',
+        'sb.Append(" run=").Append(_oRun).Append(" pos=").Append(_oPos).Append(" unit=").Append(_oP24 ? "P24" : "P13")',
+        '.Append(" coin=").Append(_oCoin).Append(" wi=").Append(_oK).Append(" f0=").Append(_oF0)',
+        '.Append(" pred=").Append(Arm(_oPred)).Append(" plant=").Append(_oPlantRun ? 1 : 0).Append(" res=").Append(_oRes ? 1 : 0)',
+        '.Append(" partial=").Append(partial ? 1 : 0).Append(" gcn=").Append(_wGc1 - _wGc0).Append(" cG=");',
+        'if (_wGok) sb.Append(_wG); else sb.Append("NA");',
+        'sb.Append(" cW=").Append(_wW).Append(" cR=").Append(_wR).Append(" cS=").Append(_wS2).Append(" cE=").Append(_wE);',
+        'AppendBins(sb, " q=", _tq);',
+        'AppendBins(sb, " r=", _tr);',
+        'AppendBins(sb, " qn=", _tn);',
+        'sb.Append(" wu=");',
+        'FtLedger.AppendWu(sb, _lb, _le);',
+        'sb.Append(" tok=");',
+        'FtLedger.AppendTok(sb, _lb, _le);',
+        'Plugin.Log.LogInfo(sb.ToString());',
+        'Array.Copy(_le, _lb, FtLedger.Fields);',
+        '_wn = 0; _wF = 0; _wS = 0; _wC = 0; _wMaxF = 0; _wP = 0;',
+        'ResetPartition();',
+    ],
+    SIG_FR_RESETP: [
+        '_wG = 0; _wW = 0; _wR = 0; _wS2 = 0; _wE = 0; _wGok = true;',
+        'for (int j = 0; j < Bins; j++) { _tq[j] = 0; _tr[j] = 0; _tn[j] = 0; }',
+    ],
+}
+
+TIP_P1_SPAN = {
+    SIG_SP_MARK: [
+        'long d = unchecked((long)(k - _k));',
+        'if (gok && _gok) d -= g - _g;',
+        'Acc[_cls] += d;',
+        '_k = k;',
+        '_g = g;',
+        '_gok = gok;',
+    ],
+    SIG_SP_SWITCH: [
+        'long g;',
+        'bool gok = FtClock.GcRead(FtClock.GcFn, out g);',
+        'Mark(FtClock.Cycles(), g, gok);',
+        '_cls = cls;',
+    ],
+    SIG_SP_CUT: [
+        'Mark(k, g, gok);',
+    ],
+    SIG_SP_REBASE: [
+        '_g = g;',
+        '_gok = gok;',
+    ],
+    SIG_SP_OPEN: [
+        'if (Thread.CurrentThread.ManagedThreadId != MainThread) { Interlocked.Increment(ref OffThread); return false; }',
+        'int d = _depth++;',
+        'if (d < StackCap)',
+        '{',
+        '_prev[d] = _cls;',
+        'int cls = _cls == ClsW ? ClsW : ClassOfKind[kind];',
+        'if (cls != _cls) Switch(cls);',
+        '}',
+        'else ClassOverflow++;',
+        'if (d != 0) return false;',
+        '_component = component;',
+        '_kind = kind;',
+        '_t0 = Stopwatch.GetTimestamp();',
+        'return true;',
+    ],
+    SIG_SP_CLOSE: [
+        'if (Thread.CurrentThread.ManagedThreadId != MainThread) return;',
+        'int d = --_depth;',
+        'if (opened)',
+        '{',
+        'long dt = Stopwatch.GetTimestamp() - _t0;',
+        'int i = Index(_component, Moment, FtClock.InScript ? 0 : 1, _kind);',
+        'Ticks[i] += dt;',
+        'Calls[i]++;',
+        '}',
+        'if (d >= 0 && d < StackCap && _prev[d] != _cls) Switch(_prev[d]);',
+    ],
+    SIG_SP_PUSHW: [
+        'int d = _depth++;',
+        'if (d < StackCap)',
+        '{',
+        '_prev[d] = _cls;',
+        'if (_cls != ClsW) Switch(ClsW);',
+        '}',
+        'else ClassOverflow++;',
+    ],
+    SIG_SP_POPW: [
+        'int d = --_depth;',
+        'if (d >= 0 && d < StackCap && _prev[d] != _cls) Switch(_prev[d]);',
+    ],
+}
+
+TIP_P1_CLOCK = {
+    SIG_CL_START: [
+        'long t = Stopwatch.GetTimestamp();',
+        'ulong k = Cycles();',
+        'ulong pk = ProcessCycles();',
+        'int gc = GC.CollectionCount(0);',
+        'long g;',
+        'bool gok = GcRead(GcFn, out g);',
+        'FtSpan.Cut(k, g, gok);',
+        'FtLedger.PollHash();',
+        'bool live = FtSchedule.ReadLive();',
+        'if (_open)',
+        '{',
+        'Frames++;',
+        'if (!_ended) MissingEnd++;',
+        'bool fok = gok && _gOk && FtSpan.GcReadFailures == _gcFail0;',
+        'long[] a = FtSpan.Acc;',
+        'OnFrameClosed(t - _t0, _ended ? _s : 0, k - _k0, pk - _p0, _gc0, gc, _ended, FtSchedule.ClosingFrame(live),',
+        'fok ? g - _gPrev : 0, fok, a[FtSpan.ClsW] - _acc0[FtSpan.ClsW], a[FtSpan.ClsR] - _acc0[FtSpan.ClsR],',
+        'a[FtSpan.ClsS] - _acc0[FtSpan.ClsS], a[FtSpan.ClsE] - _acc0[FtSpan.ClsE]);',
+        '}',
+        'System.Array.Copy(FtSpan.Acc, _acc0, FtSpan.Classes);',
+        'var fn = GcCycles;   // the hook, read once per frame: a hook set or changed counts from this frame on',
+        'if (fn != GcFn)',
+        '{',
+        'GcFn = fn;',
+        'gok = GcRead(fn, out g);',
+        'FtSpan.Rebase(g, gok);',
+        '}',
+        '_gPrev = g;',
+        '_gOk = gok;',
+        '_gcFail0 = FtSpan.GcReadFailures;',
+        '_t0 = t;',
+        '_k0 = k;',
+        '_p0 = pk;',
+        '_gc0 = gc;',
+        '_s = 0;',
+        '_ended = false;',
+        '_open = true;',
+        'if (FtSpan.Depth != 0) DepthViolations++;',
+        'InScript = true;',
+        'FtSchedule.Boundary(live);',
+    ],
+    SIG_CL_GCREAD: [
+        'g = 0;',
+        'if (fn == null) return false;',
+        'try { g = fn(); return true; }',
+        'catch { FtSpan.GcReadFailures++; return false; }',
+    ],
+}
+
+TIP_P1_PLANT = {
+    SIG_PL_RUN: [
+        'long block = run / 5;',
+        'long slot = (long)(FtSchedule.Mix(seed, game, 0, 0, block, RunStream) % 5UL);',
+        'return run % 5 == slot;',
+    ],
+}
+
+TIP_P1_LEDGER = {
+    SIG_LG_WRITELINE: [
+        'if (Thread.CurrentThread.ManagedThreadId != FtSpan.MainThread || !FtSpan.CollectorOpen)',
+        '{',
+        '_in.WriteLine(value);',
+        'return;',
+        '}',
+        'FtSpan.PushWriter();',
+        'try { _in.WriteLine(value); }',
+        'finally { FtSpan.PopWriter(); }',
+        '// counted after the write, so a concurrent flush can never mark done a line not yet in the buffer',
+        'lock (_lock) { _c[FtGate.Off ? EnqOff : EnqOn]++; _pendingLog++; }',
+    ],
+    SIG_LG_FLUSH: [
+        'ulong k0 = FtClock.Cycles();',
+        '_in.Flush();',
+        'ulong k1 = FtClock.Cycles();',
+        'lock (_lock)',
+        '{',
+        'long n = _pendingLog;',
+        '_pendingLog = 0;',
+        '_c[FtGate.Off ? DoneOff : DoneOn] += n;',
+        '_c[5 + 2 * Log] += n;',
+        '_c[6 + 2 * Log] += unchecked((long)(k1 - k0));',
+        '}',
+    ],
+    SIG_LG_POLL: [
+        'if (!_hashEnq && Interlocked.Read(ref FtHeavy.HashT0) != 0)',
+        '{',
+        '_hashEnq = true;',
+        'lock (_lock) _c[FtGate.Off ? EnqOff : EnqOn]++;',
+        '}',
+        'if (_hashEnq && !_hashDone && Interlocked.Read(ref FtHeavy.HashT1) != 0)',
+        '{',
+        '_hashDone = true;',
+        'lock (_lock) { _c[FtGate.Off ? DoneOff : DoneOn]++; _c[5 + 2 * Hash]++; }',
+        '}',
+    ],
+    SIG_LG_TOK: [
+        "sb.Append(Level(a)).Append(',').Append(b[EnqOn] - a[EnqOn]).Append(',').Append(b[EnqOff] - a[EnqOff])",
+        ".Append(',').Append(b[DoneOn] - a[DoneOn]).Append(',').Append(b[DoneOff] - a[DoneOff])",
+        ".Append(',').Append(b[Disc] - a[Disc]).Append(',').Append(Level(b));",
+    ],
+    SIG_LG_LEVEL: [
+        'return s[EnqOn] + s[EnqOff] - s[DoneOn] - s[DoneOff] - s[Disc];',
+    ],
+}
+
 
 # ------------------------------------------------------------------ the c28259c1 bodies (the mutants mirror these)
 
@@ -334,9 +727,9 @@ OLD = {
         'else if (!live && Live) EndPoint();',
         'Live = live;',
         'if (live)',
-    ] + _BOUNDARY_TAIL[6:],
-    SIG_START: TIP[SIG_START],
-    SIG_END: TIP[SIG_END],
+    ] + _OLD_BOUNDARY_TAIL[6:],
+    SIG_START: _OLD_START,
+    SIG_END: _OLD_END,
     SIG_GAMESTART: [
         'FlushGame("next_game");',
         'FtFrames.GameBoundary();',
@@ -387,7 +780,8 @@ SIG_OMS = "private static void OnMatchStarted()"
 
 def _sources():
     return {n: _src(n) for n in ("FtSchedule.cs", "FtDrive.cs", "FtFrames.cs", "FtSpan.cs", "FtCensus.cs",
-                                 "FtReplay.cs", "FtClock.cs", "GameStateWatcher.cs", "FtCalib.cs")}
+                                 "FtReplay.cs", "FtClock.cs", "GameStateWatcher.cs", "FtCalib.cs", "FtPlant.cs",
+                                 "FtUpload.cs")}
 
 
 def pin_violations(srcs):
@@ -395,7 +789,9 @@ def pin_violations(srcs):
     of the span and census sums (the class F3 names: a reset anywhere but GameStart, or an absolute write to those
     sums anywhere but their Reset bodies and FtCalib's two restores, is a violation)."""
     bad = []
-    for name, table in (("FtSchedule.cs", TIP), ("FtDrive.cs", TIP_DRIVE), ("FtFrames.cs", TIP_FRAMES)):
+    for name, table in (("FtSchedule.cs", TIP), ("FtDrive.cs", TIP_DRIVE), ("FtFrames.cs", TIP_FRAMES),
+                        ("FtSchedule.cs", TIP_P1_SCHED), ("FtFrames.cs", TIP_P1_FRAMES), ("FtSpan.cs", TIP_P1_SPAN),
+                        ("FtClock.cs", TIP_P1_CLOCK), ("FtPlant.cs", TIP_P1_PLANT), ("FtUpload.cs", TIP_P1_LEDGER)):
         for sig, want in table.items():
             try:
                 got = _body(srcs[name], sig)
@@ -850,10 +1246,20 @@ class Sched:
 
     def __init__(self, boundary="tip", gamestart="tip", gameover="tip", closing="tip", open_="tip", settle="tip",
                  flush="tip", sitting="tip", matchend="tip", photon="tip", replay="tip", endowed="tip",
-                 menu_guard="tip", last_game=99, settle_frames=3, menu=False):
+                 menu_guard="tip", last_game=99, settle_frames=3, menu=False, schedule="tip", plant="tip",
+                 owner="tip", W=2, seed=7):
         self.v = dict(boundary=boundary, gamestart=gamestart, gameover=gameover, closing=closing, open_=open_,
                       settle=settle, flush=flush, sitting=sitting, matchend=matchend, photon=photon, replay=replay,
-                      endowed=endowed, menu_guard=menu_guard)
+                      endowed=endowed, menu_guard=menu_guard, schedule=schedule, plant=plant)
+        # B11 P1: the window schedule (OpenWindow) and FtFrames' ownership (FramesPort); W is the port's window
+        # length (C#'s 120 is pinned), 2 so the short sequences fill windows
+        self.W, self.seed = W, seed
+        self.WinK, self.WinRun, self.WinPos, self.WinCoin = -1, 0, 0, 0
+        self.WinP24 = self.WinPlant = self.WinRes = False
+        self.PrevArm = -1
+        self.hist_game, self.last_arm, self.last_plant, self.run_plant, self.game_run = None, -1, False, False, 0
+        self.plant_now = False
+        self.fr = FramesPort(W, owner)
         self.last_game, self.settle_frames = last_game, settle_frames
         self.present, self.menu = True, menu
         self.Game, self.Round, self.PointInRound = -1, 0, 0
@@ -913,8 +1319,12 @@ class Sched:
         if open_:
             self.LiveFrame += 1
             self.moment = "live"
+            if self.LiveFrame >= 2 and (self.LiveFrame - 2) // self.W != self.WinK:
+                self.open_window((self.LiveFrame - 2) // self.W)
+            self.plant_now = self.gate and (self.WinPlant or self.v["plant"] == "any") and self.LiveFrame >= 2
             return
         self.LiveFrame = 0
+        self.plant_now = False
         if self.picking:
             self.moment = "pick"
             self.RoundOver = True
@@ -948,30 +1358,56 @@ class Sched:
         elif self.moment != "gameover":
             self.moment = "between"
 
-    # SIG_START (unchanged at the tip); FtZero.Early and FtFrames.StartPoint's baselines are events
+    # SIG_START; FtZero.Early and FtFrames.StartPoint's baselines are events
     def start_point(self):
         if self.RoundOver:
             self.Round += 1
             self.PointInRound = 0
             self.RoundOver = False
-            self.ArmOn = (self.Game + self.Round) % 2 == 0
-        else:
-            self.ArmOn = not self.ArmOn
         self.PointInRound += 1
         self.ev("zero_early", self.Game)
         self.LiveFrame = 0
-        self.gate = not self.ArmOn
+        self.open_window(0)
         self.point = {"label": self.label(), "base": self.span, "epoch": self.epoch, "acc": 0}
+        self.fr.start_point(self)
         self.ev("start", self.label())
+
+    # SIG_OPENWIN (TIP_P1_SCHED); schedule 'adjacent' is the mutant with pairs (1,2),(3,4) and arms (A,1-A,B,1-B)
+    def open_window(self, k):
+        if self.hist_game != self.Game:
+            self.hist_game, self.last_arm, self.last_plant, self.game_run = self.Game, -1, False, 0
+        q, r = k // 4, k % 4
+        if self.v["schedule"] == "adjacent":
+            self.WinCoin = mix(self.seed, self.Game, self.Round, self.PointInRound, 2 * q + (r >> 1), ARM_STREAM) & 1
+            on = self.WinCoin == 1 if r % 2 == 0 else self.WinCoin == 0
+        else:
+            self.WinCoin = mix(self.seed, self.Game, self.Round, self.PointInRound, 2 * q + (r & 1), ARM_STREAM) & 1
+            on = self.WinCoin == 1 if r < 2 else self.WinCoin == 0
+        if r == 0:
+            self.run_plant = run_planted(self.seed, self.Game, self.game_run)
+            self.game_run += 1
+        self.WinK, self.WinRun, self.WinPos, self.WinP24 = k, q, r + 1, (r & 1) == 1
+        self.WinPlant = self.run_plant
+        self.WinRes = (r == 0 and self.last_plant) if self.v["plant"] != "res_last" else (r == 3 and self.WinPlant)
+        self.PrevArm = self.last_arm
+        self.ArmOn = on
+        self.last_arm = 1 if on else 0
+        self.last_plant = self.WinPlant
+        self.gate = not on
+        self.ev("window", self.label(), k, on, self.PrevArm, self.WinPos, self.WinPlant, self.WinRes, self.WinP24)
 
     # SIG_END
     def end_point(self):
         self.gate = False
         self.frames_end_point()
 
-    # FtFrames.EndPoint (TIP_FRAMES): the point line, its deltas against the baselines StartPoint took
+    # FtFrames.EndPoint (TIP_FRAMES): the point line, its deltas against the baselines StartPoint took; a second call
+    # before the next StartPoint writes nothing (_ptOpen)
     def frames_end_point(self):
         p = self.point
+        if p is None:
+            return
+        self.fr.end_point(self)
         self.ev("end", p["label"], self.label(), self.span - p["base"], p["epoch"], self.epoch, p["acc"])
         self.point = None
 
@@ -1095,9 +1531,15 @@ def drive(s, frames):
     with no OnGameOver, Plugin's Photon room callbacks, the sentinel going absent, the quit handler)."""
     if s.menu:
         s.ev("menu")
+    started, on = -1, False         # the truth: games GameStart started, and a started game not yet ended
+    truth = None
     for i, (live, calls, pick) in enumerate(frames):
         s.now = i
-        s.ev("frame", i, s.closing_frame(live), s.Live)
+        closing = s.closing_frame(live)
+        s.ev("frame", i, closing, s.Live)
+        if truth is not None:
+            s.fr.frame(s, i - 1, closing, truth)     # FtClock.OnFrameClosed: frame i-1, before frame i's boundary
+        truth = (started, on)
         s.picking = pick
         s.boundary(live)
         if s.moment == "live":
@@ -1108,13 +1550,18 @@ def drive(s, frames):
             if c == "GameStart":
                 s.ev("gamestart", s.Live)
                 s.game_start()
+                if not s.menu:
+                    started, on = started + 1, True
             elif c == "GameOver":
                 s.ev("gameover", s.Live, i, s.Game, s.present)
                 s.game_over()
+                on = False
             elif c == "MatchEnded":
                 s.ev("matchend", s.Live, i)
                 s.match_ended()
+                on = False
             elif c in ("Leave", "Join"):     # Plugin.OnLeftRoom / OnJoinedRoom: the room changed, the game ended
+                on = False
                 s.ev("matchend", s.Live, i)
                 if s.v["photon"] == "tip":
                     s.match_ended()
@@ -1630,3 +2077,630 @@ def test_gsw_endowed_noop_fails_behaviourally():
 def test_gsw_hook_mutant_fails(hooks):
     inv, _ = enumerate_gsw(**hooks)
     assert inv != []
+
+
+# ================================================================== B11 P1: windows, ownership, records, plants, ledger
+# The window schedule of ruling R6-A3.11.138 (4) (interleaved pairs, ruling .137 (3)), FtFrames' captured ownership,
+# the partition C = G + W + R + S + E with its tenths (method-v54.md (a), ruling .138 (5)), the plant runs (SHARED.md
+# D4) and the writer ledger's tokens (D5). Each port mirrors the C# body pinned beside it in the P1 tables above.
+
+M64 = (1 << 64) - 1
+ARM_STREAM = 0xA2A1
+RUN_STREAM = 0x51A75
+BIN = 12
+
+
+def mix(seed, game, rnd, point, block, stream):
+    """SIG_MIX: SplitMix64 over five integers and a stream constant (C#'s uint and ulong casts as masks)."""
+    u = lambda x: x & 0xFFFFFFFF
+    z = (u(seed) * 0x9E3779B97F4A7C15 + u(game) * 0xBF58476D1CE4E5B9 + u(rnd) * 0x94D049BB133111EB
+         + u(point) * 0xD6E8FEB86659FD93 + (block & M64) * 0xA0761D6478BD642F + stream) & M64
+    z = ((z ^ (z >> 30)) * 0xBF58476D1CE4E5B9) & M64
+    z = ((z ^ (z >> 27)) * 0x94D049BB133111EB) & M64
+    return z ^ (z >> 31)
+
+
+def run_planted(seed, game, run):
+    """SIG_PL_RUN: one run in five, the slot of each block of five drawn per game."""
+    return run % 5 == mix(seed, game, 0, 0, run // 5, RUN_STREAM) % 5
+
+
+def test_p1_constants_are_the_port_s():
+    assert _src("FtSchedule.cs").count("internal const ulong ArmStream = 0x%XUL;" % ARM_STREAM) == 1
+    assert _src("FtPlant.cs").count("internal const ulong RunStream = 0x%XUL;" % RUN_STREAM) == 1
+    fr = _src("FtFrames.cs")
+    assert fr.count("internal const int W = 120;") == 1 and fr.count("internal const int Bin = 12, Bins = W / Bin;") == 1
+    # the plant stream the menu self-check keeps is not the run stream
+    assert _src("FtPlant.cs").count("0x51A7UL") == 1
+
+
+@pytest.mark.parametrize("table", ["TIP_P1_SCHED", "TIP_P1_FRAMES", "TIP_P1_SPAN", "TIP_P1_CLOCK", "TIP_P1_PLANT",
+                                   "TIP_P1_LEDGER"])
+def test_p1_bodies_are_the_port(table):
+    fname = {"TIP_P1_SCHED": "FtSchedule.cs", "TIP_P1_FRAMES": "FtFrames.cs", "TIP_P1_SPAN": "FtSpan.cs",
+             "TIP_P1_CLOCK": "FtClock.cs", "TIP_P1_PLANT": "FtPlant.cs", "TIP_P1_LEDGER": "FtUpload.cs"}[table]
+    for sig, want in globals()[table].items():
+        assert _body(_src(fname), sig) == want, sig
+
+
+P1_SOURCE_MUTANTS = {
+    # the adjacent-pair schedule written into the C# body: the pin refuses it
+    "adjacent_in_source": ("FtSchedule.cs", "2 * q + (r & 1), ArmStream)", "2 * q + (r >> 1), ArmStream)"),
+    # EndPoint without its open flag
+    "endpoint_reentrant": ("FtFrames.cs", "            if (!_ptOpen) return;\n", ""),
+    # the window line labelled at write time (the bd673226 form)
+    "label_at_write": ("FtFrames.cs", 'sb.Append("[FRAME-TIME] w pt=").Append(_oPt)',
+                       'sb.Append("[FRAME-TIME] w pt=").Append(FtSchedule.Label())'),
+    # GC left inside the classes
+    "class_keeps_gc": ("FtSpan.cs", "            if (gok && _gok) d -= g - _g;\n", ""),
+    # the tenths filled from F
+    "q_from_f_source": ("FtFrames.cs", "_tq[bin] += unchecked((long)c) - cg - cw;", "_tq[bin] += f;"),
+    # a token counted before its line is written
+    "tok_before_write": ("FtUpload.cs", "                FtSpan.PushWriter();\n                try { _in.WriteLine(value); }",
+                         "                lock (_lock) { _pendingLog++; }\n                FtSpan.PushWriter();\n"
+                         "                try { _in.WriteLine(value); }"),
+}
+
+
+@pytest.mark.parametrize("name", sorted(P1_SOURCE_MUTANTS))
+def test_p1_source_mutant_fails(name):
+    fname, old, new = P1_SOURCE_MUTANTS[name]
+    assert pin_violations(_sources()) == []                       # the negative control: the tip passes
+    assert pin_violations(_mut(_sources(), fname, old, new)) != []
+
+
+# ------------------------------------------------------------------ the schedule (ruling .138 (4), D1)
+
+def window_events(schedule="tip", plant="tip", seeds=range(60), games=3, points=8):
+    """OpenWindow driven directly over many points: per seed and game, points of 1 to 14 windows each, in order."""
+    out = []
+    for seed in seeds:
+        s = Sched(schedule=schedule, plant=plant, seed=seed)
+        for g in range(games):
+            s.Game = g
+            for p in range(points):
+                s.Round, s.PointInRound = 1 + p // 3, 1 + p % 3
+                n = 1 + mix(seed, g, p, 0, 0, 0x77) % 14
+                for k in range(n):
+                    s.open_window(k)
+                    e = s.events[-1]
+                    out.append(dict(seed=seed, game=g, pt=e[1], k=e[2], on=e[3], pred=e[4], pos=e[5], plant=e[6],
+                                    res=e[7]))
+    return out
+
+
+def joint_violations(ws, positions, lo=0.21, hi=0.29, least=1500):
+    """P(own arm, predecessor arm) at the given positions: each of the four cells in [lo, hi] (the true value is 1/4
+    for any two windows that are not mates, D1)."""
+    cells = {}
+    for w in ws:
+        if w["pos"] in positions and w["pred"] >= 0:
+            key = (w["on"], w["pred"] == 1)
+            cells[key] = cells.get(key, 0) + 1
+    n = sum(cells.values())
+    if n < least:
+        return ["%d windows at positions %s" % (n, sorted(positions))]
+    return ["P(own=%s, pred=%s) = %.3f" % (a, b, cells.get((a, b), 0) / n)
+            for a in (True, False) for b in (True, False) if not lo <= cells.get((a, b), 0) / n <= hi]
+
+
+def mate_violations(ws, mates):
+    """Mates take opposite arms: P(ON, ON) = 0 and P(ON, OFF) = 1/2 (D1)."""
+    bad, by = [], {}
+    for w in ws:
+        by[(w["seed"], w["game"], w["pt"], w["k"])] = w
+    for w in ws:
+        for a, b in mates:
+            if w["pos"] == b:
+                m = by.get((w["seed"], w["game"], w["pt"], w["k"] - (b - a)))
+                if m is not None and m["on"] == w["on"]:
+                    bad.append("%s window %d: mates share arm %s" % (w["pt"], w["k"], w["on"]))
+    return bad
+
+
+def test_p1_interleaved_schedule_holds():
+    ws = window_events()
+    assert joint_violations(ws, {3, 4}) == []              # the second members, (1,3) and (2,4)
+    assert joint_violations(ws, {1, 2}) == []              # and the first members
+    assert mate_violations(ws, [(1, 3), (2, 4)]) == []
+    # the predecessor carries across points within a game and is none only at a game's first window
+    for i, w in enumerate(ws):
+        first = i == 0 or ws[i - 1]["game"] != w["game"] or ws[i - 1]["seed"] != w["seed"]
+        assert (w["pred"] == -1) == first, w
+        if not first:
+            assert w["pred"] == (1 if ws[i - 1]["on"] else 0)
+
+
+def test_p1_adjacent_pairs_fail_the_joint_check():
+    ws = window_events(schedule="adjacent")
+    assert mate_violations(ws, [(1, 2), (3, 4)]) == []     # it is a valid pair schedule...
+    assert joint_violations(ws, {2, 4}) != []              # ...whose second members' predecessor is the mate
+
+
+def test_p1_partial_window_keeps_its_arm():
+    """A window's arm is committed by position before it runs: the same (seed, game, round, point, k) gives the same
+    arm whatever the point's length."""
+    a = window_events(seeds=[3], points=8)
+    s = Sched(seed=3)
+    s.Game, s.Round, s.PointInRound = 0, 1, 1
+    for k in range(3):                                      # the same point cut after three windows
+        s.open_window(k)
+    assert [e[3] for e in s.events if e[0] == "window"] == [w["on"] for w in a if w["pt"] == "0.1.1"][:3]
+
+
+# ------------------------------------------------------------------ plant runs (D4)
+
+def plant_violations(ws):
+    bad = []
+    runs = {}
+    for i, w in enumerate(ws):
+        first_of_game = i == 0 or ws[i - 1]["game"] != w["game"] or ws[i - 1]["seed"] != w["seed"]
+        if w["pos"] == 1:
+            runs.setdefault((w["seed"], w["game"]), []).append(w["plant"])
+        elif not first_of_game and w["plant"] != ws[i - 1]["plant"]:
+            bad.append("%s window %d: plant changes inside a run" % (w["pt"], w["k"]))
+        want_res = (not first_of_game) and w["pos"] == 1 and ws[i - 1]["plant"]
+        if w["res"] != want_res:
+            bad.append("%s window %d: res=%s, the window before it plant=%s" % (w["pt"], w["k"], w["res"],
+                                                                               None if first_of_game else ws[i - 1]["plant"]))
+    for key, flags in runs.items():
+        for b in range(len(flags) // 5):
+            if sum(flags[5 * b:5 * b + 5]) != 1:
+                bad.append("%s block %d: %d plant runs of five" % (key, b, sum(flags[5 * b:5 * b + 5])))
+    return bad
+
+
+def test_p1_plant_runs_hold():
+    assert plant_violations(window_events()) == []
+
+
+def test_p1_res_on_the_last_window_fails():
+    assert plant_violations(window_events(plant="res_last")) != []
+
+
+def spin_frames(plant="tip", frames=600, seed=11):
+    """Boundary over a long point: per live frame (plant_now, gate, WinPlant, LiveFrame)."""
+    s = Sched(plant=plant, seed=seed)
+    s.game_start()
+    out = []
+    for _ in range(frames):
+        s.boundary(True)
+        out.append((s.plant_now, s.gate, s.WinPlant, s.LiveFrame))
+    return out
+
+
+def spin_violations(fs):
+    bad = ["frame %d planted outside a plant run's OFF window" % lf for now, gate, wp, lf in fs if now and not (gate and wp)]
+    bad += ["frame %d: a plant run's OFF window not planted" % lf for now, gate, wp, lf in fs
+            if gate and wp and lf >= 2 and not now]
+    return bad
+
+
+def test_p1_spin_only_in_plant_runs():
+    fs = spin_frames()
+    assert any(f[0] for f in fs) and spin_violations(fs) == []
+    assert spin_violations(spin_frames(plant="any")) != []
+
+
+# ------------------------------------------------------------------ ownership (FtFrames: captured owners)
+
+class FramesPort:
+    """FtFrames' ownership (TIP_P1_FRAMES: Frame, CaptureOwner, FlushWindow; TIP_FRAMES' StartPoint and EndPoint):
+    a window's owner is captured when its first measured frame closes, a frame whose schedule window differs first
+    writes the open window as partial, and lines are written from the captured owner. owner 'emit' reads the owner
+    at write time (bd673226's form); 'relabel' flips the captured arm at write time (the totals unchanged);
+    'reentrant' is EndPoint without its open flag."""
+
+    def __init__(self, W, owner="tip"):
+        self.W, self.mode = W, owner
+        self.wn, self.o, self.oid, self.f0, self.frames = 0, None, None, 0, []
+        self.pt_open, self.pt = False, None
+
+    @staticmethod
+    def owner_of(s):
+        return (s.label(), s.WinK, s.ArmOn, s.PrevArm, s.WinP24, s.WinRun, s.WinPos, s.WinCoin, s.WinPlant, s.WinRes)
+
+    def frame(self, s, fid, closing, truth):
+        if not s.Live or s.LiveFrame < 2 or closing:
+            return
+        if self.wn > 0 and (s.WinK, s.Game, s.Round, s.PointInRound) != self.oid:
+            self.flush(s, True)
+        if self.wn == 0:
+            self.o, self.oid, self.f0 = self.owner_of(s), (s.WinK, s.Game, s.Round, s.PointInRound), s.LiveFrame
+        self.frames.append((fid, self.owner_of(s), truth))
+        self.wn += 1
+        if self.wn == self.W:
+            self.flush(s, False)
+
+    def flush(self, s, partial):
+        owner = self.o
+        if self.mode == "emit":
+            owner = self.owner_of(s)
+        elif self.mode == "relabel":
+            owner = owner[:2] + (not owner[2],) + owner[3:]
+        s.ev("w", owner, self.f0, list(self.frames), self.wn, partial)
+        self.wn, self.frames = 0, []
+
+    def start_point(self, s):
+        self.wn, self.frames, self.pt_open, self.pt = 0, [], True, s.label()
+
+    def end_point(self, s):
+        if not self.pt_open and self.mode != "reentrant":
+            return
+        self.pt_open = False
+        if self.wn > 0:
+            self.flush(s, True)
+        s.ev("p", self.pt)
+
+
+def a11_ownership(ev, W=2):
+    """Every window line's frames were measured under the line's owner, in the game the line names while that game
+    was on; its n is its frames' count, f0 its first frame, a full line holds W frames, and no frame is in two."""
+    bad, seen = [], set()
+    for e in ev:
+        if e[0] != "w":
+            continue
+        _, owner, f0, frames, n, partial = e
+        if n != len(frames):
+            bad.append("%s: n=%d over %d frames" % (owner[0], n, len(frames)))
+        if not partial and n != W:
+            bad.append("%s: a full window of %d frames" % (owner[0], n))
+        if f0 != 2 + W * owner[1]:
+            bad.append("%s window %d: f0=%d" % (owner[0], owner[1], f0))
+        for fid, fo, (started, on) in frames:
+            if fo != owner:
+                bad.append("frame %d measured under %s, written as %s" % (fid, fo, owner))
+            if not on or started != int(owner[0].split(".")[0]):
+                bad.append("frame %d (game %d, on %s) written in %s" % (fid, started, on, owner[0]))
+            if fid in seen:
+                bad.append("frame %d in two lines" % fid)
+            seen.add(fid)
+    return bad
+
+
+@pytest.mark.parametrize("seq", sorted(SEQS))
+def test_p1_ownership_holds(seq):
+    ev = run(seq)
+    assert a11_ownership(ev) == []
+    assert sum(1 for e in ev if e[0] == "p") == sum(1 for e in ev if e[0] == "end")
+
+
+def test_p1_window_lines_are_written():
+    """The control has content: the sequences fill windows, and a game's first point's windows are owned by it."""
+    ev = run("start_after_live")
+    ws = [e for e in ev if e[0] == "w"]
+    assert len(ws) >= 6 and any(not e[5] for e in ws) and any(e[5] for e in ws)
+    assert {e[1][0] for e in ws} >= {"0.1.1", "1.1.1"}
+
+
+def test_p1_c28259c1_ownership_order_refused():
+    for seq in ("start_after_live", "over_inside"):
+        assert a11_ownership(run(seq, owner="emit", **OLD_ALL)) != [], seq
+        assert a11_ownership(run(seq, **OLD_ALL)) != [], seq
+        assert a11_ownership(run(seq, owner="emit")) == [], seq     # the tip's order: write time equals open time
+
+
+def test_p1_relabel_keeping_totals_refused():
+    ev = run("start_after_live", owner="relabel")
+    ws = [e for e in ev if e[0] == "w"]
+    assert ws and all(e[4] == len(e[3]) for e in ws)              # the totals are the tip's
+    assert a11_ownership(ev) != []
+
+
+def test_p1_endpoint_writes_once():
+    for mode, lines in (("tip", 1), ("reentrant", 2)):
+        s = Sched(owner=mode)
+        s.game_start()
+        s.boundary(True)
+        s.fr.end_point(s)
+        s.fr.end_point(s)
+        assert sum(1 for e in s.events if e[0] == "p") == lines, mode
+
+
+# ------------------------------------------------------------------ the partition and its tenths
+
+CLS_G, CLS_W, CLS_R, CLS_S, CLS_E = range(5)
+CLASS_OF_KIND = {"gated": CLS_S, "upkeep": CLS_R, "replay": CLS_R, "writer": CLS_W}
+
+
+class Thread:
+    """The main thread: k its executed cycles, gc the GC hook's cycles, t the Stopwatch."""
+
+    def __init__(self):
+        self.k = self.gc = self.t = 0
+
+
+class SpanPort:
+    """FtSpan's class stack (TIP_P1_SPAN: Mark, Switch, Cut, Open, Close, PushWriter, PopWriter). mutant 'drop_g'
+    leaves GC inside the classes."""
+
+    def __init__(self, th, mutant="tip"):
+        self.th, self.m = th, mutant
+        self.acc, self.cls, self.prev = [0] * 5, CLS_E, []
+        self.k, self.g, self.gok = 0, 0, False
+
+    def mark(self, k, g, gok):
+        d = k - self.k
+        if gok and self.gok and self.m != "drop_g":
+            d -= g - self.g
+        self.acc[self.cls] += d
+        self.k, self.g, self.gok = k, g, gok
+
+    def switch(self, cls):
+        self.mark(self.th.k, self.th.gc, True)
+        self.cls = cls
+
+    def cut(self, k, g, gok):
+        self.mark(k, g, gok)
+
+    def open(self, kind):
+        self.prev.append(self.cls)
+        cls = CLS_W if self.cls == CLS_W else CLASS_OF_KIND[kind]
+        if cls != self.cls:
+            self.switch(cls)
+
+    def close(self):
+        p = self.prev.pop()
+        if p != self.cls:
+            self.switch(p)
+
+    def push_writer(self):
+        self.prev.append(self.cls)
+        if self.cls != CLS_W:
+            self.switch(CLS_W)
+
+    pop_writer = close
+
+
+class LedgerPort:
+    """FtLedger's cumulative counters (Take, Level, AppendTok): an enqueue in the gate's arm when the producer runs,
+    done in the gate's arm when the service runs. mutant 'enq_at_service' loses the producer's identity: the token
+    is counted in the arm of its service."""
+
+    def __init__(self, mutant="tip"):
+        self.m = mutant
+        self.c = dict(enqON=0, enqOFF=0, doneON=0, doneOFF=0, disc=0)
+        self.pending = []
+
+    def enq(self, on):
+        self.pending.append(on)
+        if self.m != "enq_at_service":
+            self.c["enqON" if on else "enqOFF"] += 1
+
+    def done(self, on):
+        n = len(self.pending)
+        if self.m == "enq_at_service":
+            self.c["enqON" if on else "enqOFF"] += n
+        self.c["doneON" if on else "doneOFF"] += n
+        self.pending = []
+        return n
+
+    def take(self):
+        return dict(self.c)
+
+    @staticmethod
+    def level(t):
+        return t["enqON"] + t["enqOFF"] - t["doneON"] - t["doneOFF"] - t["disc"]
+
+
+class RecordsPort:
+    """FtClock.OnStart's per-frame partition and FtFrames' window sums and tenths (TIP_P1_CLOCK, TIP_P1_FRAMES).
+    mutant 'q_from_f' fills q from the frame period."""
+
+    def __init__(self, th, span, ledger, W=24, mutant="tip"):
+        self.th, self.span, self.ledger, self.W, self.m = th, span, ledger, W, mutant
+        self.open, self.acc0, self.gprev, self.k0, self.t0 = False, [0] * 5, 0, 0, 0
+        self.recs, self.arm = [], None
+        self.lb = ledger.take()
+        self._reset()
+
+    def _reset(self):
+        self.w = dict(n=0, sF=0, sC=0, cG=0, cW=0, cR=0, cS=0, cE=0, q=[0] * (self.W // BIN), r=[0] * (self.W // BIN),
+                      qn=[0] * (self.W // BIN))
+
+    def on_start(self, arm):
+        """FT_Start: the closing frame's readings, the cut, the frame's partition, then the next frame's arm."""
+        th, a = self.th, self.span.acc
+        self.span.cut(th.k, th.gc, True)
+        if self.open:
+            self.frame(th.t - self.t0, th.k - self.k0, th.gc - self.gprev, a[CLS_W] - self.acc0[CLS_W],
+                       a[CLS_R] - self.acc0[CLS_R], a[CLS_S] - self.acc0[CLS_S], a[CLS_E] - self.acc0[CLS_E])
+        self.acc0, self.gprev, self.k0, self.t0, self.open = list(a), th.gc, th.k, th.t, True
+        if arm is not None and self.w["n"] == 0:
+            self.arm = arm
+
+    def frame(self, f, c, cg, cw, cr, cs, ce):
+        w, b = self.w, self.w["n"] // BIN
+        w["n"] += 1
+        w["sF"] += f
+        w["sC"] += c
+        w["cG"] += cg
+        w["cW"] += cw
+        w["cR"] += cr
+        w["cS"] += cs
+        w["cE"] += ce
+        w["q"][b] += f if self.m == "q_from_f" else c - cg - cw
+        w["r"][b] += cr
+        w["qn"][b] += 1
+        if w["n"] == self.W:
+            le = self.ledger.take()
+            w["arm"], w["tok"] = self.arm, (LedgerPort.level(self.lb), le["enqON"] - self.lb["enqON"],
+                                            le["enqOFF"] - self.lb["enqOFF"], le["doneON"] - self.lb["doneON"],
+                                            le["doneOFF"] - self.lb["doneOFF"], le["disc"] - self.lb["disc"],
+                                            LedgerPort.level(le))
+            self.recs.append(w)
+            self.lb = le
+            self._reset()
+
+
+def partition_violations(recs):
+    """SHARED.md's invariants: sC = cG + cW + cR + cS + cE; sum(q) = sC - cG - cW; sum(r) = cR; sum(qn) = n; and the
+    tok reconciliation open0 + enqON + enqOFF = doneON + doneOFF + disc + open1."""
+    bad = []
+    for i, w in enumerate(recs):
+        if w["sC"] != w["cG"] + w["cW"] + w["cR"] + w["cS"] + w["cE"]:
+            bad.append("window %d: sC %d, partition %d" % (i, w["sC"], w["cG"] + w["cW"] + w["cR"] + w["cS"] + w["cE"]))
+        if sum(w["q"]) != w["sC"] - w["cG"] - w["cW"]:
+            bad.append("window %d: sum(q) %d, sC - cG - cW %d" % (i, sum(w["q"]), w["sC"] - w["cG"] - w["cW"]))
+        if sum(w["r"]) != w["cR"]:
+            bad.append("window %d: sum(r) %d, cR %d" % (i, sum(w["r"]), w["cR"]))
+        if sum(w["qn"]) != w["n"]:
+            bad.append("window %d: sum(qn) %d, n %d" % (i, sum(w["qn"]), w["n"]))
+        t = w["tok"]
+        if t[0] + t[1] + t[2] != t[3] + t[4] + t[5] + t[6]:
+            bad.append("window %d: tok %s does not reconcile" % (i, t))
+    return bad
+
+
+def arms_for(nwin, seed=5, points=4):
+    """The tip's window arms over consecutive points of one game (Sched.open_window)."""
+    s = Sched(seed=seed)
+    s.Game, s.Round = 0, 1
+    out = []
+    for p in range(points):
+        s.PointInRound = p + 1
+        for k in range(nwin):
+            s.open_window(k)
+            out.append(s.ArmOn)
+    return out
+
+
+def simulate(scenario, span_m="tip", rec_m="tip", ledger_m="tip", W=24, nwin=24, points=4,
+             e0=4000, r0=700, s0=1000, alpha=5, gamma=100, wbuf=60, sigma=240):
+    """Collectors in format M over the tip's window arms: every frame does e0 outside any scope and r0 in an upkeep
+    scope (R, both arms); an ON frame also runs a gated scope (S) of s0 cycles with a nested upkeep read, allocates
+    alpha units (scenarios 'alloc', 'both') and writes one log line as a W scope of wbuf cycles (a token;
+    'enqueue', 'both'). Payment: GC of gamma per unit and the line's service of sigma, as W, at the window's last
+    frame ('direct') or at the next window's first frame (otherwise; the last window pays directly). Returns the
+    window records and the always-ON truth per frame."""
+    th = Thread()
+    span = SpanPort(th, span_m)
+    ledger = LedgerPort(ledger_m)
+    rec = RecordsPort(th, span, ledger, W, rec_m)
+    arms = arms_for(nwin, points=points)
+    alloc = scenario in ("alloc", "both", "alloc_direct", "both_direct")
+    enq = scenario in ("enqueue", "both", "enqueue_direct", "both_direct")
+    direct = scenario.endswith("direct")
+    owed_units = 0
+
+    def work(n, gc=False):
+        th.k += n
+        th.t += n + 37          # the frame period runs past the executed cycles (waits, other threads)
+        if gc:
+            th.gc += n
+
+    def pay(on):
+        nonlocal owed_units
+        if owed_units:
+            work(gamma * owed_units, gc=True)
+            owed_units = 0
+        if ledger.pending:
+            span.push_writer()
+            work(sigma * len(ledger.pending))
+            span.pop_writer()
+            ledger.done(on)
+
+    for wi, on in enumerate(arms):
+        for fi in range(W):
+            rec.on_start(on)
+            last = wi == len(arms) - 1
+            if fi == 0 and not direct and wi > 0:
+                pay(on)
+            work(e0)
+            span.open("upkeep")
+            work(r0)
+            span.close()
+            if on:
+                span.open("gated")
+                work(s0 // 2)
+                span.open("upkeep")                 # a nested retained read stays R and suspends S
+                work(50)
+                span.close()
+                work(s0 // 2 - 50)
+                if alloc:
+                    owed_units += alpha
+                if enq:
+                    span.push_writer()
+                    work(wbuf)
+                    span.pop_writer()
+                    ledger.enq(on)
+                span.close()
+            if fi == W - 1 and (direct or last):
+                pay(on)
+    rec.on_start(None)
+    truth = r0 + s0 + (alpha * gamma if alloc else 0) + (wbuf + sigma if enq else 0)
+    return rec.recs, truth
+
+
+def _means(recs):
+    on = [w for w in recs if w["arm"]]
+    off = [w for w in recs if not w["arm"]]
+    return on, off, sum(w["n"] for w in on), sum(w["n"] for w in off)
+
+
+def recovery(recs):
+    """The contrast on C-degree, R_OFF restored (method-v54.md:17-19), plus the always-ON GC and writer charges once
+    outside it: GC by its frame rate over the ON frames (every collection here is collector-attributable, so this is
+    the envelope), the writer by its service cost per token times the ON windows' tokens per ON frame."""
+    on, off, n1, n0 = _means(recs)
+    contrast = sum(sum(w["q"]) for w in on) / n1 - sum(sum(w["q"]) - sum(w["r"]) for w in off) / n0
+    g = sum(w["cG"] for w in recs) / n1
+    units = sum(w["tok"][1] + w["tok"][2] for w in recs)
+    per_unit = sum(w["cW"] for w in recs) / units if units else 0.0
+    return contrast + g + per_unit * sum(w["tok"][1] for w in recs) / n1
+
+
+def subtraction(recs):
+    """The same contrast on C with no partition: what the records replace."""
+    on, off, n1, n0 = _means(recs)
+    return sum(w["sC"] for w in on) / n1 - sum(w["sC"] - w["cR"] for w in off) / n0
+
+
+SCENARIOS = ["direct", "alloc", "enqueue", "both", "alloc_direct", "enqueue_direct", "both_direct"]
+
+
+@pytest.mark.parametrize("scenario", SCENARIOS)
+def test_p1_partition_identities_hold(scenario):
+    recs, _ = simulate(scenario)
+    assert len(recs) == 96 and {w["arm"] for w in recs} == {True, False}
+    assert partition_violations(recs) == []
+    assert all(w["cS"] > 0 for w in recs if w["arm"]) and all(w["cS"] == 0 for w in recs if not w["arm"])
+
+
+@pytest.mark.parametrize("mutant", ["drop_g", "q_from_f"])
+def test_p1_partition_mutant_breaks_an_identity(mutant):
+    kw = dict(span_m="drop_g") if mutant == "drop_g" else dict(rec_m="q_from_f")
+    recs, _ = simulate("both", **kw)
+    assert partition_violations(recs) != []
+
+
+@pytest.mark.parametrize("scenario", SCENARIOS)
+def test_p1_records_recover_the_always_on_cost(scenario):
+    """Moving payment across a switch does not change recovery (method-v54.md:50)."""
+    recs, truth = simulate(scenario)
+    assert abs(recovery(recs) - truth) < 1e-6, (recovery(recs), truth)
+
+
+@pytest.mark.parametrize("scenario,lost", [("alloc", 500), ("enqueue", 240), ("both", 740)])
+def test_p1_payment_across_a_switch_is_caught(scenario, lost):
+    """Allocate ON, collect OFF and enqueue ON, service OFF (method-v54.md:47-48): subtraction on C misses the payment
+    that lands in the next window, whose arm is independent; the records' recovery does not."""
+    recs, truth = simulate(scenario)
+    assert abs(subtraction(recs) - truth) > 0.3 * lost
+    assert abs(recovery(recs) - truth) < 1e-6
+
+
+@pytest.mark.parametrize("scenario", ["direct", "alloc_direct", "enqueue_direct", "both_direct"])
+def test_p1_direct_timing_passes(scenario):
+    """The negative control: payment in its own window, so subtraction on C is already right."""
+    recs, truth = simulate(scenario)
+    assert abs(subtraction(recs) - truth) < 1e-6 and abs(recovery(recs) - truth) < 1e-6
+
+
+def test_p1_token_without_producer_identity_fails():
+    """The token survives switching (method-v54.md:48): counted in its service window's arm, the writer charge is
+    wrong once service moves across the switch, and right while it does not."""
+    recs, truth = simulate("enqueue", ledger_m="enq_at_service")
+    assert abs(recovery(recs) - truth) > 10
+    recs, truth = simulate("enqueue_direct", ledger_m="enq_at_service")
+    assert abs(recovery(recs) - truth) < 1e-6

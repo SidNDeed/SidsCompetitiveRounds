@@ -9,8 +9,8 @@ namespace CompetitiveRounds
     /// Update, timed by Stopwatch. The windows of a point fall in blocks of four; in each
     /// block the planted slot is a SplitMix64 draw over seed, game, round, point and block,
     /// so exactly one window in four is planted and the choice is reproducible from the
-    /// logged seed. c_plant = round(0.03 x the mean F of the session's first OFF point with
-    /// a full unplanted window), fixed for the process and logged on its own line and on
+    /// logged seed. c_plant = round(0.03 x the mean F of the full unplanted OFF windows of the
+    /// session's first point that has one; FtFrames.EndPoint), fixed for the process and logged on its own line and on
     /// every settled line, unless the sentinel's plant_us names a value (0 turns the plant
     /// off, and with it e_C and U). Until c_plant is fixed nothing is planted. The parser
     /// keeps planted windows out of the OFF means and uses them only for e_C (V4 3.5) and
