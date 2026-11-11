@@ -1466,6 +1466,36 @@ def claim_the_gm_observer_ends_at_the_live_target(files):
     return out
 
 
+GSW = "GameStateWatcher.cs"
+
+
+def claim_the_match_start_is_gated_in_a_continuation(files):
+    """Section 6, finding A: OnMatchStarted returns while a record is live or
+    terminating, before the per-game counters, isTracking and the report
+    latch, so a continuation never re-arms the report. Both triggers, the
+    poll and vanilla's MOVE PLAYERS END line, go through it. The latch's
+    three reset sites stay pinned: the gated one, FFA's game start (from
+    FFA's DoStartGame only) and ResetMatchState."""
+    out = []
+    g = files[GSW]
+    if not _in_order(_code(g, "private static void OnMatchStarted("),
+                     ["if (RoomActors.LocalIsSpectator) return;", "if (LimitlessFence.RecordOpen) return;",
+                      "try { Keybinds.OnRoundStart(); } catch { }", "isTracking = true;", "gameOverReported = false;"]):
+        out.append("the match start re-arms before the continuation gate")
+    whole = _code(g)
+    if not _in_order(whole, ["if (gameActive && !wasGameInProgress && !isTracking)\n            {\n                OnMatchStarted();\n            }"]):
+        out.append("the poll's trigger does not go through the gate")
+    if not _in_order(whole, ["if (!isTracking)\n                {\n                    try { OnMatchStarted(); } catch (Exception ex)"]):
+        out.append("the log line's trigger does not go through the gate")
+    if whole.count("isTracking = true;") != 2 or whole.count("gameOverReported = false;") != 4:
+        out.append("a re-arm outside the gated start, FFA's start and the reset")
+    if "gameOverReported = false;" not in _code(g, "public static void OnFfaMatchStarted("):
+        out.append("FFA's game start does not reset the latch")
+    if sum(_code(t).count("GameStateWatcher.OnFfaMatchStarted()") for t in files.values()) != 1:
+        out.append("FFA's re-arm has another caller")
+    return out
+
+
 CLAIMS = {
     "game_start_prefix": claim_the_game_start_prefix,
     "stamp_before_join": claim_the_gid_is_stamped_before_the_join,
@@ -1512,6 +1542,7 @@ CLAIMS = {
     "snapshot_record": claim_the_snapshot_carries_and_replaces_the_record,
     "observer_seed": claim_a_terminating_seed_never_ends_the_observer,
     "gm_observer_end": claim_the_gm_observer_ends_at_the_live_target,
+    "match_start_gate": claim_the_match_start_is_gated_in_a_continuation,
 }
 
 GATE = "                if (SpectatorPatchSupport.Suppress) return;\n"
@@ -2076,6 +2107,24 @@ MUTANTS = [
        "bool gameOver = (winningTeamID == 0 ? p1r : p2r) >= rtw;")]),
     ("gm_observer_end", "the GM observer's game over is not dispatched",
      [("SpectatorPatches.cs", "                if (gameOver) SpectatorSync.OnGameOverObserved();\n", "")]),
+    ("match_start_gate", "the match start has no continuation gate",
+     [("GameStateWatcher.cs", "            if (LimitlessFence.RecordOpen) return;\n            try { Keybinds.OnRoundStart(); } catch { }",
+       "            try { Keybinds.OnRoundStart(); } catch { }")]),
+    ("match_start_gate", "the gate sits after the re-arm",
+     [("GameStateWatcher.cs", "            if (LimitlessFence.RecordOpen) return;\n            try { Keybinds.OnRoundStart(); } catch { }",
+       "            try { Keybinds.OnRoundStart(); } catch { }"),
+      ("GameStateWatcher.cs", "            isTracking = true;\n            gameOverReported = false;\n",
+       "            isTracking = true;\n            gameOverReported = false;\n            if (LimitlessFence.RecordOpen) return;\n")]),
+    ("match_start_gate", "the poll re-arms around the gate",
+     [("GameStateWatcher.cs", "if (gameActive && !wasGameInProgress && !isTracking)\n            {\n                OnMatchStarted();\n",
+       "if (gameActive && !wasGameInProgress && !isTracking)\n            {\n                isTracking = true; gameOverReported = false;\n")]),
+    ("match_start_gate", "the log line re-arms around the gate",
+     [("GameStateWatcher.cs", '                    try { OnMatchStarted(); } catch (Exception ex) { Plugin.Log.LogWarning($"[ACH] early start hook: {ex.Message}"); }\n',
+       "                    isTracking = true; gameOverReported = false;\n")]),
+    ("match_start_gate", "another site resets the report latch",
+     [("GameStateWatcher.cs", '                    try { OnMatchStarted(); } catch (Exception ex) { Plugin.Log.LogWarning($"[ACH] early start hook: {ex.Message}"); }\n',
+       '                    try { OnMatchStarted(); } catch (Exception ex) { Plugin.Log.LogWarning($"[ACH] early start hook: {ex.Message}"); }\n'
+       "                    gameOverReported = false;\n")]),
 ]
 
 NEUTRAL = "            // control: a neutral line\n"
@@ -2145,6 +2194,8 @@ CONTROLS = [
     ("observer_seed", [("FfaMode.cs", "                if (terminal && !completedRound", NEUTRAL + "                if (terminal && !completedRound")]),
     ("gm_observer_end", [("SpectatorPatches.cs", "                if (gameOver) SpectatorSync.OnGameOverObserved();\n",
                           NEUTRAL + "                if (gameOver) SpectatorSync.OnGameOverObserved();\n")]),
+    ("match_start_gate", [("GameStateWatcher.cs", "            if (LimitlessFence.RecordOpen) return;\n            try { Keybinds",
+                           NEUTRAL + "            if (LimitlessFence.RecordOpen) return;\n            try { Keybinds")]),
 ]
 
 

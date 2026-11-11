@@ -5699,6 +5699,11 @@ namespace CompetitiveRounds
             // Spectator: never tracks a match (defense in depth — the GM
             // lifecycle that fires this is suppressed on a spectator).
             if (RoomActors.LocalIsSpectator) return;
+            // Ask 16(a) lane 2 (v4 section 6, finding A): a continuation is the
+            // game already reported at the base. While a record is live or
+            // terminating, neither trigger (the poll, the log line) re-arms
+            // tracking, the report latch or the per-game counters below.
+            if (LimitlessFence.RecordOpen) return;
             try { Keybinds.OnRoundStart(); } catch { }   // item 17: the first round start of a match
             // Roster census (bug 391 §4.1), BEFORE OnGameStarted: that call
             // resets the per-actor view window, so a census taken after it
