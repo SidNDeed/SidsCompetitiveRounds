@@ -578,7 +578,7 @@
       "also": [
         {
           "file": "plugin/FfaMode.cs",
-          "pattern": "RoundsToWin = Mathf\\.Clamp\\(scoreTarget, (\\d+), \\d+\\);"
+          "pattern": "SetConfiguredTarget\\(Mathf\\.Clamp\\(scoreTarget, (\\d+), \\d+\\)\\);"
         }
       ],
       "surfaces": [
@@ -600,7 +600,7 @@
       "also": [
         {
           "file": "plugin/FfaMode.cs",
-          "pattern": "RoundsToWin = Mathf\\.Clamp\\(scoreTarget, \\d+, (\\d+)\\);"
+          "pattern": "SetConfiguredTarget\\(Mathf\\.Clamp\\(scoreTarget, \\d+, (\\d+)\\)\\);"
         }
       ],
       "surfaces": [
