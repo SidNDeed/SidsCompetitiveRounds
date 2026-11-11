@@ -91,6 +91,19 @@ FENCE_RULES = (
     'guard: a nested item runs under the same test',
     'guard: a value that is not an enumerator passes through',
     'guard: the test is read before the first step',
+    'period: a master whose handoff count moved is in a new period',
+    'period: the same handoff count is the same period',
+    'period: a seat that is not master takes no path',
+    'period: with no gid and no record the role alone decides (F1)',
+    'pick: a seat promoted mid-cycle closes the cycle',
+    'pick: a seat promoted in the manifest wait republishes',
+    'pick: a seat that lost mastership is refused at the republish',
+    'pick: a seat that lost mastership is refused at the close and leaves the loop cardless',
+    'pick: a lost and regained mastership: the old ticket is refused, the re-captured close carries the new epoch',
+    'pick: a lost and regained mastership in the manifest wait republishes under a new epoch',
+    'pick: with no gid and no record, a lost and regained mastership sends as today',
+    'pick: a record opened after the handoff: the next send takes the re-take first',
+    'pick: a receiver drops a second close for the same game:cycle',
     'raw round: a live record refuses a call the fence did not make',
     'raw round: a terminating record refuses it too',
     "raw round: the fence's own call passes",
@@ -150,6 +163,12 @@ FENCE_MUTANTS = (
     'the guard does not guard nested items',
     'the guard leaves a stopped item undisposed',
     'the guard drops what the item yields',
+    'the period is keyed on the role',
+    'the re-take runs in every game',
+    'the promotion keeps its old ticket',
+    'the re-take keeps the held epoch',
+    'the re-take misses a record opened after the capture',
+    "a receiver reads a close without its phase's identity",
     'MayResume waits for a gid',
     'the decision ignores the capability',
     'the decision ignores the hold',
@@ -223,7 +242,7 @@ def test_the_fence_suite_ran_exactly_its_cases_and_passed(harness_run):
 
 
 def test_the_pinned_names_are_distinct():
-    assert len(set(FENCE_CASES)) == len(FENCE_CASES) == 111 + 43 + 11
+    assert len(set(FENCE_CASES)) == len(FENCE_CASES) == 124 + 49 + 11
 
 
 # -- the fence's Unity- and Photon-side lines, as source claims --------------
@@ -632,7 +651,7 @@ def claim_the_ffa_round_send(files):
     ffa, lf = files["FfaMode.cs"], files[LF]
     if not _in_order(_code(ffa, "public static void HandlePlayerDied(GM_ArmsRace gm)"), [
             "if (!FfaLateEntry.MasterMaySend() || pointLatched || isTransitioning) return;",
-            "LimitlessFence.NoteFfaPointScheduled();", "pointLatched = true;", "StartCoroutine(ResolvePointEndOfFrame(gm));"]):
+            "LimitlessFence.NoteFfaPointScheduled();", "pointLatched = true;", 'StartCoroutine(LimitlessFence.ResumableItem(ResolvePointEndOfFrame(gm), "ffa point"));']):
         out.append("the point is not captured where it is scheduled")
     if not _in_order(_code(ffa, "private static void ResolvePointNow(GM_ArmsRace gm)"), [
             "try { FfaMapScale.MasterPublishCount(FfaLateEntry.PointK + 1); } catch { }",
@@ -984,7 +1003,7 @@ def claim_the_guard_reads_a_ticket_captured_at_schedule(files):
     lf = files[LF]
     checks = [
         ("internal static ResumeTicket CaptureTicket()",
-         ["return new ResumeTicket { Epoch = _epoch, Gid = RecordOpen ? _record.Gid : null };"], "the ticket"),
+         ["return new ResumeTicket { Epoch = _epoch, Gid = RecordOpen ? _record.Gid : null, Handoff = _handoff };"], "the ticket"),
         ("internal static bool TicketResumes(ResumeTicket t)",
          ["bool ended = t.Gid != null",
           "(!_hasRecord || _record.Gid != t.Gid || _state == LimitlessFenceRules.FencePhase.PhaseEnded);",
@@ -1002,6 +1021,100 @@ def claim_the_guard_reads_a_ticket_captured_at_schedule(files):
     for sig, needles, name in checks:
         if not _in_order(_code(lf, sig), needles):
             out.append(name + " does not read a ticket captured at schedule as 4.5 states")
+    return out
+
+
+PICK = "private static IEnumerator FfaPickPhase("
+PICK_SENDS = [
+    "float phaseStart = Time.realtimeSinceStartup;",
+    "var sendTicket = LimitlessFence.CaptureTicket();",
+    'if (WriteCycleProp($"{game}:{cycle}:{string.Join(",", pickerIds)}", phaseEpoch)) ArmTicket(game);',
+    'sendTicket = PickTicket("manifest reopen");',
+    'if (RetakeMasterPeriod(sendTicket)) sendTicket = PickTicket("manifest period");',
+    "&& LimitlessFence.TicketSends(sendTicket, FfaLateEntry.MasterMaySend()))",
+    'if (WriteCycleProp($"{game}:{cycle}:{string.Join(",", pickerIds)}", sendEpoch)) ArmTicket(game);',
+    "if (wasMaster && RetakeMasterPeriod(sendTicket)) wasMaster = false;",
+    "if (FfaLateEntry.MasterMaySend() && !wasMaster)",
+    "adoptIdentity(game, cycle, null, true, null);",
+    'sendTicket = PickTicket("promotion");',
+    'sendTicket = PickTicket("pick reopen");',
+    "string closeEpoch = maySend ? EpochForUse() : null;",
+    "maySend = LimitlessFence.TicketSends(sendTicket, maySend);",
+    "if (FfaNumberingRules.AuthoritativeClose(maySend, manifest != null,",
+    "WriteResultProp(sb.ToString(), closeEpoch, grantMarker);",
+]
+
+
+def claim_the_pick_sends_answer_to_their_ticket(files):
+    """4.4 at FFA's pick phase (integrator 01:14Z and 01:29Z): the ticket is
+    captured at the phase's entry, before the entry write. The republish and
+    the close are S rows and send only through TicketSends. A master in a new
+    master period (its handoff count no longer its ticket's) drops its epoch,
+    takes the promotion path and re-captures before the send: in the manifest
+    wait before the republish, in the pick wait at the promotion (the reissue,
+    then the reopen). Each reopen re-captures too. The bail sends nothing (R)."""
+    body = _code(files["FfaMode.cs"], PICK)
+    return [] if _in_order(body, PICK_SENDS) else ["the pick sends do not answer to a ticket re-captured at each promotion"]
+
+
+def claim_a_new_master_period_issues_a_fresh_epoch(files):
+    """RetakeMasterPeriod drops the held epoch for a master whose handoff count
+    moved while the fence applies; the ticket carries the handoff count;
+    TicketSends is MaySend with the count, and the role alone with no gid and
+    no record (F1); the period reads a record opened after the capture."""
+    out = []
+    fm = files["FfaMode.cs"]
+    if not _in_order(_code(fm, "private static bool RetakeMasterPeriod("),
+                     ["if (!LimitlessFence.TicketHandoffMoved(t, FfaLateEntry.MasterMaySend())) return false;",
+                      "phaseEpoch = FfaNumberingRules.HeldEpoch(phaseEpoch, null);", "phaseEpochIssuer = -1;",
+                      "return true;"]):
+        out.append("a new master period does not drop the held epoch")
+    if not _in_order(_code(fm, "private static LimitlessFence.ResumeTicket PickTicket("),
+                     ["var t = LimitlessFence.CaptureTicket();", "return t;"]):
+        out.append("the pick ticket is not a fresh capture")
+    lf = files[LF]
+    checks = [
+        ("internal static ResumeTicket CaptureTicket()",
+         ["return new ResumeTicket { Epoch = _epoch, Gid = RecordOpen ? _record.Gid : null, Handoff = _handoff };"],
+         "the ticket"),
+        ("internal static bool TicketSends(ResumeTicket t, bool masterNow)",
+         ["string gid = TicketGid(t);", "if (gid == null) return masterNow;",
+          "bool live = _ledger.IsLiveGid(gid) && string.Equals(gid, _ledger.CurrentGid, StringComparison.Ordinal);",
+          "bool ended = !_hasRecord || _record.Gid != gid || _state == LimitlessFenceRules.FencePhase.PhaseEnded;",
+          "return LimitlessFenceRules.MaySend(masterNow, live, ended, _epoch, t.Epoch, _handoff, t.Handoff);"],
+         "TicketSends"),
+        ("internal static bool TicketHandoffMoved(ResumeTicket t, bool masterNow)",
+         ["return LimitlessFenceRules.HandoffPeriodMoved(masterNow, TicketGid(t) != null, _handoff, t.Handoff);"],
+         "TicketHandoffMoved"),
+        ("private static string TicketGid(ResumeTicket t)", ["return t.Gid ?? (RecordOpen ? _record.Gid : null);"],
+         "TicketGid"),
+    ]
+    for sig, needles, name in checks:
+        if not _in_order(_code(lf, sig), needles):
+            out.append(name + " does not read the ticket as 4.4 states")
+    if not _in_order(_code(files["LimitlessFenceRules.cs"], "internal static bool HandoffPeriodMoved("),
+                     ["return masterNow && fenceApplies && handoffNow != handoffCaptured;"]):
+        out.append("the master period is not keyed on the handoff count")
+    return out
+
+
+RECEIVER_LEAVES = ('finalizedEpochs, game, cycle, out viaLegacy); if (result != null) { resultApplies = true; '
+                   'if (viaLegacy) Plugin.Log.LogInfo($"[FFA-NUM] legacy result applied {game}:{cycle} '
+                   '({result.Count} cards, older-build form)"); break; }')
+
+
+def claim_a_receiver_applies_one_close_per_phase(files):
+    """Today's behaviour, kept (integrator 01:14Z, test 4): each pick phase
+    counts its own cycle at its entry, reads a result only for its game:cycle
+    and leaves its result loop on the first answer. So a second close for the
+    same game:cycle reaches no seat that applied the first (the envelope rule
+    runs in the harness: suite fencerules, the receiver case)."""
+    body = _code(files["FfaMode.cs"], PICK)
+    out = []
+    if not _in_order(body, ["cycleNumber++;", "int cycle = cycleNumber;", "var sendTicket = LimitlessFence.CaptureTicket();"]):
+        out.append("the phase does not count its cycle at its entry")
+    if RECEIVER_LEAVES not in " ".join(body.split()):
+        out.append("a receiver does not leave its result loop on the first answer")
     return out
 
 
@@ -1037,6 +1150,9 @@ CLAIMS = {
     "entrant_exit": claim_a_refused_entrant_is_no_departure,
     "resume_rows": claim_every_table_a_row_is_guarded,
     "guard_wiring": claim_the_guard_reads_a_ticket_captured_at_schedule,
+    "pick_sends": claim_the_pick_sends_answer_to_their_ticket,
+    "pick_period": claim_a_new_master_period_issues_a_fresh_epoch,
+    "pick_receiver": claim_a_receiver_applies_one_close_per_phase,
 }
 
 GATE = "                if (SpectatorPatchSupport.Suppress) return;\n"
@@ -1386,13 +1502,46 @@ MUTANTS = [
       ("LimitlessFenceRules.cs", "                    if (!mayContinue())\n",
        "                    if (!item.MoveNext()) yield break;\n                    if (!mayContinue())\n")]),
     ("guard_wiring", "a ticket captures no gid",
-     [(LF, "Gid = RecordOpen ? _record.Gid : null };", "Gid = null };")]),
+     [(LF, "Gid = RecordOpen ? _record.Gid : null, Handoff = _handoff };", "Gid = null, Handoff = _handoff };")]),
     ("guard_wiring", "a ticket ignores the record's end",
      [(LF, " || _state == LimitlessFenceRules.FencePhase.PhaseEnded);", ");")]),
     ("guard_wiring", "an item captures again at each step",
      [(LF, "() => TicketResumes(t)", "() => TicketResumes(CaptureTicket())")]),
     ("guard_wiring", "cleanup reads the record",
      [(LF, "() => TicketCleans(t)", "() => TicketResumes(t)")]),
+    ("pick_sends", "the pick phase captures no ticket at its entry",
+     [("FfaMode.cs", "            var sendTicket = LimitlessFence.CaptureTicket();\n", "")]),
+    ("pick_sends", "the manifest wait's reopen keeps the old ticket",
+     [("FfaMode.cs", 'sendTicket = PickTicket("manifest reopen");', "")]),
+    ("pick_sends", "the manifest wait takes no re-take",
+     [("FfaMode.cs", 'if (RetakeMasterPeriod(sendTicket)) sendTicket = PickTicket("manifest period");', "")]),
+    ("pick_sends", "the republish sends without TicketSends",
+     [("FfaMode.cs", "phaseStart > 2f\n                    && LimitlessFence.TicketSends(sendTicket, FfaLateEntry.MasterMaySend()))\n",
+       "phaseStart > 2f)\n")]),
+    ("pick_sends", "the pick wait's promotion is keyed on the role",
+     [("FfaMode.cs", "if (wasMaster && RetakeMasterPeriod(sendTicket)) wasMaster = false;", "")]),
+    ("pick_sends", "the promotion keeps its old ticket",
+     [("FfaMode.cs", 'sendTicket = PickTicket("promotion");', "")]),
+    ("pick_sends", "the pick wait's reopen keeps the old ticket",
+     [("FfaMode.cs", 'sendTicket = PickTicket("pick reopen");', "")]),
+    ("pick_sends", "the close sends without TicketSends",
+     [("FfaMode.cs", "maySend = LimitlessFence.TicketSends(sendTicket, maySend);", "")]),
+    ("pick_period", "the re-take keeps the held epoch",
+     [("FfaMode.cs", "return false;\n            phaseEpoch = FfaNumberingRules.HeldEpoch(phaseEpoch, null);\n", "return false;\n")]),
+    ("pick_period", "a ticket captures no handoff count",
+     [(LF, "Handoff = _handoff };", "Handoff = 0 };")]),
+    ("pick_period", "TicketSends ignores the handoff count",
+     [(LF, "_epoch, t.Epoch, _handoff, t.Handoff);", "_epoch, t.Epoch, t.Handoff, t.Handoff);")]),
+    ("pick_period", "the period misses a record opened after the capture",
+     [(LF, "return t.Gid ?? (RecordOpen ? _record.Gid : null);", "return t.Gid;")]),
+    ("pick_period", "a ticket with no gid sends without the role",
+     [(LF, "if (gid == null) return masterNow;", "if (gid == null) return true;")]),
+    ("pick_period", "the period is keyed on the role",
+     [("LimitlessFenceRules.cs", "return masterNow && fenceApplies && handoffNow != handoffCaptured;", "return false;")]),
+    ("pick_receiver", "a receiver stays in its result loop after an answer",
+     [("FfaMode.cs", 'older-build form)");\n                        break;\n', 'older-build form)");\n')]),
+    ("pick_receiver", "the phase does not count its cycle",
+     [("FfaMode.cs", "            cycleNumber++;\n            int cycle = cycleNumber;\n", "            int cycle = cycleNumber;\n")]),
 ]
 
 NEUTRAL = "            // control: a neutral line\n"
@@ -1437,8 +1586,14 @@ CONTROLS = [
                        NEUTRAL + "            if (FfaLateEntry.IsQuarantinedActor(p.ActorNumber)) return;\n")]),
     ("resume_rows", [("TeamHoldReturn.cs", "                // v4 4.5 R (Table A, H): the replay resumes only under its ticket.\n",
                       NEUTRAL + "                // v4 4.5 R (Table A, H): the replay resumes only under its ticket.\n")]),
-    ("guard_wiring", [(LF, "            return new ResumeTicket { Epoch = _epoch, Gid = RecordOpen ? _record.Gid : null };\n",
-                       NEUTRAL + "            return new ResumeTicket { Epoch = _epoch, Gid = RecordOpen ? _record.Gid : null };\n")]),
+    ("guard_wiring", [(LF, "            return new ResumeTicket { Epoch = _epoch, Gid = RecordOpen ? _record.Gid : null, Handoff = _handoff };\n",
+                       NEUTRAL + "            return new ResumeTicket { Epoch = _epoch, Gid = RecordOpen ? _record.Gid : null, Handoff = _handoff };\n")]),
+    ("pick_sends", [("FfaMode.cs", "            var sendTicket = LimitlessFence.CaptureTicket();\n",
+                     NEUTRAL + "            var sendTicket = LimitlessFence.CaptureTicket();\n")]),
+    ("pick_period", [("FfaMode.cs", "            if (!LimitlessFence.TicketHandoffMoved(t, FfaLateEntry.MasterMaySend())) return false;\n",
+                      NEUTRAL + "            if (!LimitlessFence.TicketHandoffMoved(t, FfaLateEntry.MasterMaySend())) return false;\n")]),
+    ("pick_receiver", [("FfaMode.cs", "            cycleNumber++;\n            int cycle = cycleNumber;\n",
+                        NEUTRAL + "            cycleNumber++;\n            int cycle = cycleNumber;\n")]),
 ]
 
 

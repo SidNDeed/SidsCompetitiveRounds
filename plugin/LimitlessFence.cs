@@ -396,18 +396,20 @@ namespace CompetitiveRounds
         // ------------------------------------------------------------------ retained and scheduled work (4.5, Table A)
 
         /// <summary>4.5: what an item captures when it is scheduled: the epoch,
-        /// and the gid while the seat holds an open record.</summary>
+        /// the gid while the seat holds an open record, and the handoff count
+        /// (4.4: work that sends compares it at the send).</summary>
         internal struct ResumeTicket
         {
             internal int Epoch;
             internal string Gid;
+            internal int Handoff;
         }
 
         private static readonly HashSet<string> _stopLogged = new HashSet<string>(StringComparer.Ordinal);
 
         internal static ResumeTicket CaptureTicket()
         {
-            return new ResumeTicket { Epoch = _epoch, Gid = RecordOpen ? _record.Gid : null };
+            return new ResumeTicket { Epoch = _epoch, Gid = RecordOpen ? _record.Gid : null, Handoff = _handoff };
         }
 
         /// <summary>4.5 (R): at every resume point. A captured gid's record is
@@ -423,6 +425,34 @@ namespace CompetitiveRounds
         internal static bool TicketCleans(ResumeTicket t)
         {
             return LimitlessFenceRules.MayClean(_epoch, t.Epoch);
+        }
+
+        /// <summary>4.4 (S) at a send whose work holds a ticket (FFA's pick
+        /// phase): MaySend, with the role as the caller reads it (FFA's
+        /// MasterMaySend), and the epoch and the handoff count against the
+        /// ticket's. With no gid in the ticket and no record open, the send keeps
+        /// today's test, the role alone (F1).</summary>
+        internal static bool TicketSends(ResumeTicket t, bool masterNow)
+        {
+            string gid = TicketGid(t);
+            if (gid == null) return masterNow;
+            bool live = _ledger.IsLiveGid(gid) && string.Equals(gid, _ledger.CurrentGid, StringComparison.Ordinal);
+            bool ended = !_hasRecord || _record.Gid != gid || _state == LimitlessFenceRules.FencePhase.PhaseEnded;
+            return LimitlessFenceRules.MaySend(masterNow, live, ended, _epoch, t.Epoch, _handoff, t.Handoff);
+        }
+
+        /// <summary>4.4 at FFA's pick phase: a master whose handoff count is no
+        /// longer its ticket's (LimitlessFenceRules.HandoffPeriodMoved).</summary>
+        internal static bool TicketHandoffMoved(ResumeTicket t, bool masterNow)
+        {
+            return LimitlessFenceRules.HandoffPeriodMoved(masterNow, TicketGid(t) != null, _handoff, t.Handoff);
+        }
+
+        /// <summary>The gid a ticket's send answers to: its own, else the open
+        /// record's (a record that opened after the ticket was captured).</summary>
+        private static string TicketGid(ResumeTicket t)
+        {
+            return t.Gid ?? (RecordOpen ? _record.Gid : null);
         }
 
         /// <summary>4.5 (R) for a coroutine (Table A): the ticket is captured

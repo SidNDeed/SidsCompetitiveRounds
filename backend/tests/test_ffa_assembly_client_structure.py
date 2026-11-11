@@ -842,8 +842,12 @@ def test_k08_k33_spawn_sites():
     GatedSpawn(Auto2v2SpawnCoroutine) instead."""
     jr = block("Plugin.cs", "void OnJoinedRankedRoom(")
     g = re.search(r"bool\s+gatedRoom\s*=\s*([^;]*);", kept(jr))
-    direct = offsets(jr, r"StartCoroutine\(\s*Auto2v2SpawnCoroutine\(\)\s*\)")
-    gated = offsets(jr, r"StartCoroutine\(\s*FfaAssembly\.GatedSpawn\(\s*Auto2v2SpawnCoroutine\s*\)\s*\)")
+    # Ask 16(a) lane 2 (v4 4.5, Table A R): either spawn may be scheduled under
+    # its ticket, LimitlessFence.ResumableItem(..., "spawn"); the pins are unchanged.
+    direct = offsets(jr, r'StartCoroutine\(\s*(?:Auto2v2SpawnCoroutine\(\)'
+                         r'|LimitlessFence\.ResumableItem\(\s*Auto2v2SpawnCoroutine\(\)\s*,\s*"spawn"\s*\))\s*\)')
+    gated = offsets(jr, r'StartCoroutine\(\s*(?:FfaAssembly\.GatedSpawn\(\s*Auto2v2SpawnCoroutine\s*\)'
+                        r'|LimitlessFence\.ResumableItem\(\s*FfaAssembly\.GatedSpawn\(\s*Auto2v2SpawnCoroutine\s*\)\s*,\s*"spawn"\s*\))\s*\)')
     arrived = offsets(jr, r"FfaAssembly\.OnArrived\(")
     dconds = conds(jr, direct[0]) if len(direct) == 1 else []
     facts = {

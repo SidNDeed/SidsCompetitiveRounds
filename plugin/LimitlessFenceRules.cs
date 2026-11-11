@@ -307,6 +307,18 @@ namespace CompetitiveRounds
             }
         }
 
+        /// <summary>4.4 at FFA's pick sends (integrator ruling, 01:14Z): a seat
+        /// that is master under a handoff count other than its ticket's is in a
+        /// new master period. It takes the promotion path again, then captures a
+        /// fresh ticket. Keyed on the count, not on a role change, so a lost and
+        /// regained mastership counts. Only while the fence applies, when the
+        /// ticket names a gid or a record is open; otherwise the pick phase runs
+        /// as today (F1).</summary>
+        internal static bool HandoffPeriodMoved(bool masterNow, bool fenceApplies, int handoffNow, int handoffCaptured)
+        {
+            return masterNow && fenceApplies && handoffNow != handoffCaptured;
+        }
+
         /// <summary>4.4, F3: while a seat holds a live or terminating record,
         /// every vanilla round call the fence's handler did not make is refused,
         /// by every sibling that changes state on that call.</summary>

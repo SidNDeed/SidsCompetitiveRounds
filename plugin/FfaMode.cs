@@ -2756,6 +2756,10 @@ namespace CompetitiveRounds
             // anything reads it.
             int game = gameNumber;
             float phaseStart = Time.realtimeSinceStartup;
+            // Ask 16(a) lane 2 (v4 4.4, integrator 01:14Z): the ticket this
+            // phase's master sends are checked against (TicketSends), captured
+            // before the entry write; a new master period re-captures it.
+            var sendTicket = LimitlessFence.CaptureTicket();
             // Room nonce CAPTURED once here, never re-sampled at publish time.
             // The pick prop is a PLAYER property and player properties survive
             // a room change (#182), so a phase coroutine that outlives its room
@@ -2998,12 +3002,18 @@ namespace CompetitiveRounds
                     game = opened.Item1;
                     cycle = opened.Item2;
                     manifest = opened.Item3;
+                    sendTicket = PickTicket("manifest reopen");   // v4 4.4: the reopen's ticket
                     break;
                 }
+                // Ask 16(a) lane 2 (v4 4.4, integrator 01:14Z): a master in a new
+                // master period drops its epoch and re-captures the ticket before
+                // the republish below, an S row (TicketSends).
+                if (RetakeMasterPeriod(sendTicket)) sendTicket = PickTicket("manifest period");
                 // Master migration: if the original master died before
                 // publishing, the new master publishes.
                 // V11 item 13: a master sends only under MasterMaySend().
-                if (FfaLateEntry.MasterMaySend() && FfaNumberingRules.KeyedReadsAllowed(gate, game) && Time.realtimeSinceStartup - phaseStart > 2f)
+                if (FfaLateEntry.MasterMaySend() && FfaNumberingRules.KeyedReadsAllowed(gate, game) && Time.realtimeSinceStartup - phaseStart > 2f
+                    && LimitlessFence.TicketSends(sendTicket, FfaLateEntry.MasterMaySend()))
                 {
                     // N19(a): the held epoch is re-sent; a master holding none
                     // (promoted in this wait) issues a fresh one, and a write
@@ -3328,6 +3338,10 @@ namespace CompetitiveRounds
                     // past OUR cap, and clamping would yank it backward —
                     // potentially behind `now` — closing the window in the
                     // handover instant.
+                    // Ask 16(a) lane 2 (v4 4.4, integrator 01:14Z): the promotion
+                    // is keyed on the master period, the handoff count, so a lost
+                    // and regained mastership takes it again (RetakeMasterPeriod).
+                    if (wasMaster && RetakeMasterPeriod(sendTicket)) wasMaster = false;
                     if (FfaLateEntry.MasterMaySend() && !wasMaster)
                     {
                         wasMaster = true;
@@ -3365,6 +3379,7 @@ namespace CompetitiveRounds
                                 break;
                             }
                         }
+                        sendTicket = PickTicket("promotion");   // v4 4.4: the new master period's ticket
                     }
                     // RJ-DRIFT change 24, N12(f), in the result loop: as in the
                     // wait, plus adoptIdentity's resets, so the adopt-settling
@@ -3378,6 +3393,7 @@ namespace CompetitiveRounds
                         game = opened.Item1;
                         cycle = opened.Item2;
                         manifest = opened.Item3;
+                        sendTicket = PickTicket("pick reopen");   // v4 4.4: the reopen's ticket
                         adoptedAt = Time.realtimeSinceStartup;
                         lastGotCount = 0;
                         lastPublishedPhotonDeadline = -1.0;
@@ -3413,6 +3429,9 @@ namespace CompetitiveRounds
                     // MasterMaySend().
                     bool maySend = FfaLateEntry.MasterMaySend();
                     string closeEpoch = maySend ? EpochForUse() : null;
+                    // Ask 16(a) lane 2 (v4 4.4): the close is an S row, MaySend
+                    // against the ticket in force, the handoff count included.
+                    maySend = LimitlessFence.TicketSends(sendTicket, maySend);
                     // Change 24: no close without a manifest or an epoch (N19(h)).
                     if (FfaNumberingRules.AuthoritativeClose(maySend, manifest != null,
                                                              closeEpoch != null))
@@ -3982,6 +4001,35 @@ namespace CompetitiveRounds
             IssuePhaseEpoch(game, cycle);
             fresh = true;
             return phaseEpoch;
+        }
+
+        /// <summary>Ask 16(a) lane 2 (v4 4.4, integrator 01:14Z): a master in a
+        /// new master period (its handoff count is no longer its ticket's,
+        /// LimitlessFence.TicketHandoffMoved) drops the epoch it held. The
+        /// promotion path's write then issues a fresh one, so the close carries
+        /// the new period's epoch. The caller takes the path and re-captures the
+        /// ticket (PickTicket) before any send, with no yield between.</summary>
+        private static bool RetakeMasterPeriod(LimitlessFence.ResumeTicket t)
+        {
+            if (!LimitlessFence.TicketHandoffMoved(t, FfaLateEntry.MasterMaySend())) return false;
+            phaseEpoch = FfaNumberingRules.HeldEpoch(phaseEpoch, null);
+            phaseEpochIssuer = -1;
+            Plugin.Log.LogInfo("[LIMIT] pick: a new master period (handoff "
+                               + LimitlessFence.HandoffCount.ToString(System.Globalization.CultureInfo.InvariantCulture)
+                               + "); the held epoch is dropped");
+            return true;
+        }
+
+        /// <summary>Ask 16(a) lane 2 (v4 4.4): the pick phase's send ticket,
+        /// re-captured at a promotion point (site). Logged while a record is
+        /// open.</summary>
+        private static LimitlessFence.ResumeTicket PickTicket(string site)
+        {
+            var t = LimitlessFence.CaptureTicket();
+            if (LimitlessFence.RecordOpen)
+                Plugin.Log.LogInfo("[LIMIT] pick: the ticket is re-captured at the " + site + " (handoff "
+                                   + t.Handoff.ToString(System.Globalization.CultureInfo.InvariantCulture) + ")");
+            return t;
         }
 
         /// <summary>Why this seat holds no epoch, for the log.</summary>

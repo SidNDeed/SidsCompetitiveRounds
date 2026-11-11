@@ -26,6 +26,10 @@ namespace CompetitiveRounds
             internal Func<int, int, string, R.GidLedger, bool, bool> MayResume = R.MayResume;
             internal Func<System.Collections.IEnumerator, Func<bool>, Action, System.Collections.IEnumerator> Guard
                 = R.GuardScheduled;
+            internal Func<bool, bool, int, int, bool> PeriodMoved = R.HandoffPeriodMoved;
+            internal Func<string, string, int, int, int, Dictionary<int, string>> Envelope
+                = FfaNumberingRules.ResultFromEnvelope;
+            internal bool PickRecaptures = true, PickDropsEpoch = true, PickSeesLateRecord = true;
             internal Func<R.DecisionInputs, R.Decision> Decide = R.DecideContinuation;
             internal Func<IList<string>, string, IList<string>, string, int, int, bool> MustEnd = R.MustEnd;
             internal Func<R.HandlerInputs, R.HandlerOutcome> Handle = R.HandleFenceMessage;
@@ -296,6 +300,32 @@ namespace CompetitiveRounds
                 Drive(f.Guard(Steps(log, "a", 2, null), () => false, () => stops++), null, 50);
                 add("guard: the test is read before the first step", log.Count == 0 && stops == 1);
             }
+
+            // FFA's pick sends (4.4, integrator 01:14Z): the master period and the ticket
+            add("period: a master whose handoff count moved is in a new period", f.PeriodMoved(true, true, 3, 2));
+            add("period: the same handoff count is the same period", !f.PeriodMoved(true, true, 2, 2));
+            add("period: a seat that is not master takes no path", !f.PeriodMoved(false, true, 3, 2));
+            add("period: with no gid and no record the role alone decides (F1)", !f.PeriodMoved(true, false, 3, 2));
+            add("pick: a seat promoted mid-cycle closes the cycle",
+                Events(PickRun(f, false, P(false, 0, true), P(false, 0, true), P(true, 1, true), P(true, 1, true))) == "refused@0,send@1:1");
+            add("pick: a seat promoted in the manifest wait republishes",
+                Events(PickRun(f, true, P(false, 0, true), P(true, 1, true))) == "send@0:1");
+            add("pick: a seat that lost mastership is refused at the republish",
+                Events(PickRun(f, true, P(true, 0, true), P(false, 1, true), P(false, 1, true))) == "refused@0,refused@1");
+            add("pick: a seat that lost mastership is refused at the close and leaves the loop cardless",
+                Events(PickRun(f, false, P(true, 0, true), P(false, 1, true), P(false, 1, true))) == "refused@0,refused@1,bail");
+            add("pick: a lost and regained mastership: the old ticket is refused, the re-captured close carries the new epoch",
+                !f.MaySend(true, true, false, 0, 0, 2, 0)
+                && Events(PickRun(f, false, P(true, 0, true), P(true, 2, true))) == "send@0:2");
+            add("pick: a lost and regained mastership in the manifest wait republishes under a new epoch",
+                Events(PickRun(f, true, P(true, 0, true), P(true, 2, true))) == "send@0:2");
+            add("pick: with no gid and no record, a lost and regained mastership sends as today",
+                Events(PickRun(f, false, P(true, 0, false), P(true, 2, false))) == "send@0:1");
+            add("pick: a record opened after the handoff: the next send takes the re-take first",
+                Events(PickRun(f, false, P(true, 0, false), P(true, 2, true))) == "send@0:2");
+            add("pick: a receiver drops a second close for the same game:cycle",
+                f.Envelope("eA:1:3:4:1=CardX", "eA", 1, 3, 4) != null
+                && f.Envelope("eB:2:3:4:1=CardY", "eB", 2, 3, 5) == null);
             add("raw round: a live record refuses a call the fence did not make", f.RefuseRawRound(true, R.FencePhase.PhaseLive, false));
             add("raw round: a terminating record refuses it too", f.RefuseRawRound(true, R.FencePhase.PhaseTerminating, false));
             add("raw round: the fence's own call passes", !f.RefuseRawRound(true, R.FencePhase.PhaseLive, true));
@@ -413,6 +443,27 @@ namespace CompetitiveRounds
                     "guard: a stopped item's finally blocks run");
             Control(r, "the guard drops what the item yields", Cases(new Fns { Guard = GuardDropsValues }),
                     "guard: a value that is not an enumerator passes through");
+            Control(r, "the period is keyed on the role", Cases(new Fns { PeriodMoved = (m, a, n, c) => false }),
+                    "period: a master whose handoff count moved is in a new period",
+                    "pick: a lost and regained mastership: the old ticket is refused, the re-captured close carries the new epoch");
+            Control(r, "the re-take runs in every game",
+                    Cases(new Fns { PeriodMoved = (m, a, n, c) => R.HandoffPeriodMoved(m, true, n, c) }),
+                    "period: with no gid and no record the role alone decides (F1)",
+                    "pick: with no gid and no record, a lost and regained mastership sends as today");
+            Control(r, "the promotion keeps its old ticket", Cases(new Fns { PickRecaptures = false }),
+                    "pick: a seat promoted mid-cycle closes the cycle",
+                    "pick: a lost and regained mastership: the old ticket is refused, the re-captured close carries the new epoch");
+            Control(r, "the re-take keeps the held epoch", Cases(new Fns { PickDropsEpoch = false }),
+                    "pick: a lost and regained mastership: the old ticket is refused, the re-captured close carries the new epoch");
+            Control(r, "the re-take misses a record opened after the capture", Cases(new Fns { PickSeesLateRecord = false }),
+                    "pick: a record opened after the handoff: the next send takes the re-take first");
+            Control(r, "a receiver reads a close without its phase's identity",
+                    Cases(new Fns { Envelope = (rep, pe, m, g, c) =>
+                    {
+                        var parts = rep.Split(':');
+                        return FfaNumberingRules.ResultFromEnvelope(rep, pe, m, int.Parse(parts[2]), int.Parse(parts[3]));
+                    } }),
+                    "pick: a receiver drops a second close for the same game:cycle");
             Control(r, "the decision ignores the capability",
                     Cases(new Fns { Decide = d => { d.ActorCapabilities = new[] { d.MasterVersion }; return R.DecideContinuation(d); } }),
                     "decision: a spectator at another version decides no", "decision: an actor without the capability decides no");
@@ -640,6 +691,82 @@ namespace CompetitiveRounds
                 }
             }
             finally { var d = item as IDisposable; if (d != null) d.Dispose(); }
+        }
+
+        // ------------------------------------------------------------------ FFA's pick phase at one seat (4.4)
+
+        private struct PickPass
+        {
+            internal bool Master, Record;
+            internal int Handoff;
+        }
+
+        private static PickPass P(bool master, int handoff, bool record)
+        {
+            return new PickPass { Master = master, Handoff = handoff, Record = record };
+        }
+
+        private static string Events(List<string> log)
+        {
+            return string.Join(",", log.ToArray());
+        }
+
+        /// <summary>One seat's side of FFA's pick phase, in FfaMode's order. The
+        /// entry captures the ticket (a gid when a record is open, and the
+        /// handoff count); a master's entry write issues epoch 1. At each pass:
+        /// a held epoch clears at its use once the seat is not master; a new
+        /// master period drops it (RetakeMasterPeriod). In the pick wait the
+        /// promotion path, keyed on the role, issues an epoch when none is held
+        /// and re-captures; in the manifest wait the re-take re-captures and the
+        /// republish issues the epoch. The send is an S row (TicketSends); the
+        /// close carries the held epoch. A pick wait with no close by its last
+        /// pass bails cardless. Events: "refused@i", "send@i:epoch", "bail".</summary>
+        private static List<string> PickRun(Fns f, bool manifestWait, PickPass entry, params PickPass[] passes)
+        {
+            var log = new List<string>();
+            int issued = 0;
+            int held = entry.Master ? ++issued : 0;
+            int ticketHandoff = entry.Handoff;
+            bool ticketGid = entry.Record;
+            bool wasMaster = entry.Master;
+            for (int i = 0; i < passes.Length; i++)
+            {
+                var p = passes[i];
+                if (!p.Master) held = 0;
+                bool fenced = ticketGid || (f.PickSeesLateRecord && p.Record);
+                bool moved = f.PeriodMoved(p.Master, fenced, p.Handoff, ticketHandoff);
+                if (manifestWait)
+                {
+                    if (moved)
+                    {
+                        if (f.PickDropsEpoch) held = 0;
+                        if (f.PickRecaptures) { ticketGid = p.Record; ticketHandoff = p.Handoff; }
+                    }
+                }
+                else
+                {
+                    if (wasMaster && moved)
+                    {
+                        if (f.PickDropsEpoch) held = 0;
+                        wasMaster = false;
+                    }
+                    if (p.Master && !wasMaster)
+                    {
+                        wasMaster = true;
+                        if (held == 0) held = ++issued;
+                        if (f.PickRecaptures) { ticketGid = p.Record; ticketHandoff = p.Handoff; }
+                    }
+                }
+                fenced = ticketGid || (f.PickSeesLateRecord && p.Record);
+                bool may = fenced ? f.MaySend(p.Master, true, false, 0, 0, p.Handoff, ticketHandoff) : p.Master;
+                if (!may) { log.Add("refused@" + i); continue; }
+                if (manifestWait && held == 0) held = ++issued;   // EpochForWrite: the held epoch, else a fresh one
+                if (held == 0) continue;
+                log.Add("send@" + i + ":" + held);
+                return log;
+            }
+            if (!manifestWait) log.Add("bail");
+            return log;
         }
 
         private static void Check(Result r, string name, bool ok, string got)
