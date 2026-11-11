@@ -53,6 +53,7 @@ namespace CompetitiveRounds
             internal Func<bool, bool, int, int, int, int, R.BaseAwards> Awards = R.BaseGameAwards;
             internal Func<R.FenceRecord, int[]> Rounds = RoundsOf;
             internal Func<int, int, int, int[]> Streak = StreakOf;
+            internal Func<IList<string>, int, int, List<string>> CapCards = R.CappedCards;
         }
 
         private const string G1 = "0123456789abcdef";
@@ -455,6 +456,18 @@ namespace CompetitiveRounds
             catch (InvalidOperationException) { propagated = true; }
             add("frame: an exception inside the call restores the frame", thrownFrame == 4);
             add("frame: the exception still reaches the caller", propagated);
+            // v4 section 2, the broadcast card list in a limitless game
+            var capNames = new List<string>();
+            for (int i = 0; i < 30; i++) capNames.Add("n" + i);
+            Func<List<string>, string> capJoin = l => l == null ? "(null)" : string.Join("|", l.ToArray());
+            add("cards: a list within the cap goes whole",
+                capJoin(f.CapCards(capNames.GetRange(0, 5), 3, 12)) == capJoin(capNames.GetRange(0, 5)));
+            add("cards: past the cap, the reported game's names, then the newest, in order",
+                capJoin(f.CapCards(capNames, 4, 12)) == capJoin(capNames.GetRange(0, 4)) + "|" + capJoin(capNames.GetRange(18, 12)));
+            add("cards: a reported count past the list keeps the whole list",
+                capJoin(f.CapCards(capNames.GetRange(0, 6), 9, 2)) == capJoin(capNames.GetRange(0, 6)));
+            add("cards: with nothing reported, the newest alone",
+                capJoin(f.CapCards(capNames.GetRange(0, 20), 0, 12)) == capJoin(capNames.GetRange(8, 12)));
             return c;
         }
 
@@ -548,6 +561,14 @@ namespace CompetitiveRounds
             var r = new Result();
             foreach (var kv in Cases(new Fns()))
                 Check(r, "real: " + kv.Key, kv.Value, kv.Value ? "holds" : "broken");
+            Control(r, "the cap drops the reported game's names",
+                    Cases(new Fns { CapCards = (a, n, k) => R.CappedCards(a, 0, k) }),
+                    "cards: past the cap, the reported game's names, then the newest, in order",
+                    "cards: a reported count past the list keeps the whole list");
+            Control(r, "the cap keeps the oldest of the rest",
+                    Cases(new Fns { CapCards = (a, n, k) => R.CappedCards(a, a.Count, 0).GetRange(0, Math.Min(a.Count, Math.Min(n, a.Count) + Math.Max(0, k))) }),
+                    "cards: past the cap, the reported game's names, then the newest, in order",
+                    "cards: with nothing reported, the newest alone");
 
             Control(r, "MaySend ignores the handoff count",
                     Cases(new Fns { MaySend = (m, g, e, en, ec, hn, hc) => R.MaySend(m, g, e, en, ec, hc, hc) }),

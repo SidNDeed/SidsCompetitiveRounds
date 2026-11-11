@@ -280,7 +280,14 @@ namespace CompetitiveRounds
             _c1Stage = 0;
             int g = VanillaCardSequence.Game;
             string room = RoomName();
-            if (!_hookOpen || _hookG != g || _hookRoom != room || _hookExited || _hookTaken) HookBegin(g, room);
+            if (!_hookOpen || _hookG != g || _hookRoom != room || _hookExited || _hookTaken)
+            {
+                // ask 16(a) lane 2 (v4 section 6, the sends by route): a pick
+                // while the fence's record is live or terminating opens no
+                // window.
+                if (LimitlessFence.RecordOpen) return;
+                HookBegin(g, room);
+            }
             _c1Stage = 1;
             _hookPhase = true;
             _picker = PlayerById(choice.pickrID);

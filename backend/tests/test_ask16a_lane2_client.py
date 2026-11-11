@@ -172,6 +172,10 @@ FENCE_RULES = (
     'base results: a seat on both teams gets what vanilla gives it at 5-0: a victory, an ace and a joker',
     "base results: the rounds are team 0's then team 1's, from the base winner",
     'base results: the streak restarts on a new winner and unlocks at 2, as vanilla',
+    "cards: a list within the cap goes whole",
+    "cards: past the cap, the reported game's names, then the newest, in order",
+    "cards: a reported count past the list keeps the whole list",
+    "cards: with nothing reported, the newest alone",
 )
 
 FENCE_MUTANTS = (
@@ -232,6 +236,8 @@ FENCE_MUTANTS = (
     'the base results give the loser a victory',
     'the base rounds ignore the winner',
     'the streak never restarts',
+    "the cap drops the reported game's names",
+    'the cap keeps the oldest of the rest',
 )
 
 CARRIER_FIELDS = (
@@ -271,7 +277,7 @@ def test_the_fence_suite_ran_exactly_its_cases_and_passed(harness_run):
 
 
 def test_the_pinned_names_are_distinct():
-    assert len(set(FENCE_CASES)) == len(FENCE_CASES) == 144 + 57 + 11 + 8
+    assert len(set(FENCE_CASES)) == len(FENCE_CASES) == 148 + 59 + 11 + 8
 
 
 # -- the fence's Unity- and Photon-side lines, as source claims --------------
@@ -2167,6 +2173,157 @@ def claim_the_dc_plan_needs_a_tracked_game(files):
     return bad
 
 
+CDE = "CardDrawEvidence.cs"
+LAP = "LimitlessApply.cs"
+LBD = "LimitlessBounds.cs"
+H_C1 = "private static void C1(CardChoice choice)"
+H_C1_TEST = "if (!_hookOpen || _hookG != g || _hookRoom != room || _hookExited || _hookTaken)"
+H_CLAMP_HOOK = "internal static class LimitlessApply_ApplyStats_Patch"
+H_BAR_HOOK = "internal static class LimitlessApply_CardBar_Patch"
+H_CLAMP = "internal static int ClampPlayer(Player player)"
+H_TRIM = "internal static int TrimBar(CardBar bar)"
+H_SEND = "private static void BroadcastCardPick(string cardName)"
+H_TARGET = "private static void SetRecordTarget(GM_ArmsRace gm, bool ffa, int target)"
+H_GUARD = "if (!LimitlessFence.RecordOpen) return;"
+
+
+def _h_first_after(block, marker):
+    """_first_after, or "" when the marker or a block after it is missing."""
+    try:
+        return _first_after(block, marker)
+    except ValueError:
+        return ""
+
+
+def _h_hook(files, attribute, holder, postfix):
+    """The postfix's first statement and body when `holder` carries `attribute`
+    (comments stripped), else ("", "")."""
+    if not re.search(re.escape(attribute) + r"\s*" + re.escape(holder), _code(files.get(LAP, ""))):
+        return "", ""
+    post = _body(_body(files.get(LAP, ""), holder), postfix)
+    return _first(post), post
+
+
+def claim_the_card_draw_window_never_opens_in_a_continuation(files):
+    """The card-draw evidence (v4 section 6, the sends by route): C1 opens a
+    window only through HookBegin, inside its reopen test, and there returns
+    first while the fence's record is live or terminating. HookBegin has no
+    other call."""
+    bad = []
+    body = _body(files.get(CDE, ""), H_C1)
+    first = _h_first_after(body, H_C1_TEST) if H_C1_TEST in body else "(no reopen test)"
+    if first != "if (LimitlessFence.RecordOpen) return;":
+        bad.append("C1's reopen does not return first while the record is open: %r" % first)
+    bad += _census(files, "the window's opening", _call_sites(files, "HookBegin", only=(CDE,), qualified=False),
+                   {(CDE, H_C1): 1})
+    return bad
+
+
+def claim_ffa_live_points_stop_at_the_base(files):
+    """FFA's live points (v4 section 6, the sends by route): the one post sits in
+    HandleNextRound behind the base report's latch (GameStateWatcher.ReportLatched
+    reads gameOverReported), so a continuation posts none."""
+    bad = _census(files, "FFA live points", _call_sites(files, "PostFfaLivePoints"), {(FMC, SR_HANDLE): 1})
+    if not re.search(r"if \(FfaLateEntry\.MasterMaySend\(\)\s*&& !GameStateWatcher\.ReportLatched\s*&&",
+                     _body(files[FMC], SR_HANDLE)):
+        bad.append("FFA's live points are not behind the report latch")
+    if "internal static bool ReportLatched => gameOverReported;" not in _code(files[GSW]):
+        bad.append("ReportLatched does not read the report latch")
+    return bad
+
+
+def claim_the_clamps_follow_every_card_apply(files):
+    """The clamp applier (v4 section 2, lane 1's deferral): a postfix on
+    vanilla's ApplyStats, which runs once per player a card applies to. It
+    returns first unless the fence's record is open, then holds that player's
+    fields: a case for each of the table's 21 ranges and 8 caps, read from the
+    table itself, then bursts against the bullet bound. When a field moved it
+    runs again what ApplyStats ran after MaxHealth: ConfigureMassAndSize,
+    WasUpdated, and Revive's copies of the health and the remaining respawns."""
+    bad = []
+    first, post = _h_hook(files, '[HarmonyPatch(typeof(ApplyCardStats), "ApplyStats")]', H_CLAMP_HOOK,
+                          "private static void Postfix(ApplyCardStats __instance)")
+    if first != H_GUARD or "LimitlessApply.ClampPlayer(__instance.playerToUpgrade);" not in post:
+        bad.append("ApplyStats' postfix does not hold the upgraded player under the record alone: %r" % first)
+    body = _body(files.get(LAP, ""), H_CLAMP)
+    table = sorted(re.findall(r'new (?:Range|Cap)\("([A-Za-z]+\.[A-Za-z]+)"', files.get(LBD, "")))
+    cases = sorted(re.findall(r'case "([A-Za-z]+\.[A-Za-z]+)":', body))
+    if len(table) != 29 or cases != table:
+        bad.append("the cases are not the table's 29 fields: apart %r" % sorted(set(cases) ^ set(table)))
+    if not _seq(body, ["foreach (LimitlessBounds.Range r in LimitlessBounds.Ranges)",
+                       "foreach (LimitlessBounds.Cap c in LimitlessBounds.Caps)",
+                       "int bursts = LimitlessBounds.BurstsWithin(gun.numberOfProjectiles, gun.bursts);",
+                       "if (moved == 0) return 0;", "stats.ConfigureMassAndSize();", "stats.WasUpdated();",
+                       "if (data.MaxHealth != maxBefore) data.health = data.MaxHealth;",
+                       "if (stats.respawns != respawnsBefore) stats.remainingRespawns = stats.respawns;"]):
+        bad.append("the applier is not: the ranges, the caps, the bursts, then the re-runs and Revive's copies")
+    bad += _census(files, "the applier", _call_sites(files, "ClampPlayer"), {(LAP, H_CLAMP_HOOK): 1})
+    return bad
+
+
+def claim_the_card_bar_keeps_the_newest(files):
+    """The card bar (v4 section 2): a postfix on CardBar.AddCard returns first
+    unless the record is open; TrimBar then removes and destroys the oldest icons
+    (vanilla inserts each new icon at m_cards[0], so the oldest is last) until
+    NewestCards remain. The full list stays in Tab stats."""
+    bad = []
+    first, post = _h_hook(files, '[HarmonyPatch(typeof(CardBar), "AddCard")]', H_BAR_HOOK,
+                          "private static void Postfix(CardBar __instance)")
+    if first != H_GUARD or "LimitlessApply.TrimBar(__instance);" not in post:
+        bad.append("AddCard's postfix does not trim the bar under the record alone: %r" % first)
+    if not _seq(_body(files.get(LAP, ""), H_TRIM),
+                ["if (cards == null || cards.Count <= NewestCards) return 0;", "while (cards.Count > NewestCards)",
+                 "int oldest = cards.Count - 1;", "CardBarButton icon = cards[oldest];", "cards.RemoveAt(oldest);",
+                 "UnityEngine.Object.Destroy(icon.gameObject);"]):
+        bad.append("TrimBar does not remove and destroy the oldest icons down to NewestCards")
+    bad += _census(files, "the trim", _call_sites(files, "TrimBar"), {(LAP, H_BAR_HOOK): 1})
+    return bad
+
+
+def claim_the_broadcast_list_is_capped(files):
+    """The broadcast card list (v4 section 2): while the record is open,
+    BroadcastCardPick sends CappedCards: the names the list held at the record's
+    first pick (limitlessCardBase, taken once), then the newest NewestCards.
+    Otherwise it sends the whole list. Each of the list's four clears resets the
+    base, and nothing else writes it."""
+    bad = []
+    if not _seq(_body(files[GSW], H_SEND),
+                ["broadcastCardNames.Add(cardName);", "List<string> sent = broadcastCardNames;",
+                 "if (LimitlessFence.RecordOpen)",
+                 "if (limitlessCardBase < 0) limitlessCardBase = broadcastCardNames.Count - 1;",
+                 "sent = LimitlessFenceRules.CappedCards(broadcastCardNames, limitlessCardBase, LimitlessApply.NewestCards);",
+                 'string cardList = string.Join("|", sent.ToArray());']):
+        bad.append("BroadcastCardPick does not send the capped list while the record is open")
+    code = _code(files[GSW])
+    clears = code.count("broadcastCardNames.Clear();")
+    resets = len(re.findall(r"broadcastCardNames\.Clear\(\);\s*limitlessCardBase = -1;", code))
+    writes = len(_assignments(files, GSW, "limitlessCardBase"))
+    if (clears, resets, writes) != (4, 4, 6):
+        bad.append("the base: %d clears, %d resets after them, %d writes (want the declaration, 4 resets, 1 capture)"
+                   % (clears, resets, writes))
+    return bad
+
+
+def claim_the_pips_keep_the_base_count(files):
+    """The round pips (v4 section 2): the pip count stays the base's. The fence
+    writes the target field alone (SetRecordTarget), and no mod code calls
+    SetNumberOfRounds, DoContinue or GameOverContinue. Vanilla calls
+    SetNumberOfRounds in GM_ArmsRace.Start and in DoContinue, which only
+    GameOverContinue reaches; GameOver takes GameOverTransition
+    (GM_ArmsRace.cs:445), so nothing calls GameOverContinue. Lane 1's
+    RoundPipClamp answers a pip past the last."""
+    bad = []
+    for name in ("SetNumberOfRounds", "DoContinue", "GameOverContinue"):
+        sites = _call_sites(files, name)
+        if sites:
+            bad.append("%s is called: %r" % (name, sites))
+    if not _seq(_body(files[LF], H_TARGET),
+                ["if (ffa) FfaMode.RoundsToWin = target;", "else if (gm != null) gm.roundsToWinGame = target;",
+                 "else return;", "_targetRaised = true;"]):
+        bad.append("SetRecordTarget does not write the target field")
+    return bad
+
+
 CLAIMS = {
     "game_start_prefix": claim_the_game_start_prefix,
     "stamp_before_join": claim_the_gid_is_stamped_before_the_join,
@@ -2230,6 +2387,12 @@ CLAIMS = {
     "stale_nonce": claim_the_stale_nonce_test_keeps_the_reported_token,
     "epoch_test": claim_the_epoch_test_outlives_the_nonce_list,
     "dc_plan_gate": claim_the_dc_plan_needs_a_tracked_game,
+    "card_draw_window": claim_the_card_draw_window_never_opens_in_a_continuation,
+    "ffa_live_points": claim_ffa_live_points_stop_at_the_base,
+    "clamp_applier": claim_the_clamps_follow_every_card_apply,
+    "card_bar": claim_the_card_bar_keeps_the_newest,
+    "broadcast_cap": claim_the_broadcast_list_is_capped,
+    "round_pips": claim_the_pips_keep_the_base_count,
 }
 
 GATE = "                if (SpectatorPatchSupport.Suppress) return;\n"
@@ -3011,6 +3174,59 @@ MUTANTS = [
      [(TGN, "                string why = epoch <= epochStale\n", "                string why = false\n")]),
     ('dc_plan_gate', "M4: BuildDcPlan no longer needs IsInMatch",
      [(PLG, "                if (!GameStateWatcher.IsInMatch)\n", "                if (false)\n")]),
+    ('card_draw_window', "the sends by route: C1's reopen no longer returns while a record is open",
+     [(CDE, "                if (LimitlessFence.RecordOpen) return;\n                HookBegin(g, room);\n", "                HookBegin(g, room);\n")]),
+    ('card_draw_window', "the sends by route: C1 opens the window before the record's return",
+     [(CDE, "                if (LimitlessFence.RecordOpen) return;\n                HookBegin(g, room);\n",
+       "                HookBegin(g, room);\n                if (LimitlessFence.RecordOpen) return;\n")]),
+    ('ffa_live_points', "the sends by route: FFA's live points no longer read the report latch",
+     [(FMC, "                        && !GameStateWatcher.ReportLatched\n", "")]),
+    ('ffa_live_points', "the sends by route: ReportLatched always reads false",
+     [(GSW, "        internal static bool ReportLatched => gameOverReported;\n", "        internal static bool ReportLatched => false;\n")]),
+    ('clamp_applier', "H: the applier runs in a normal game",
+     [(LAP, "            if (!LimitlessFence.RecordOpen) return;\n            try { LimitlessApply.ClampPlayer(",
+       "            try { LimitlessApply.ClampPlayer(")]),
+    ('clamp_applier', "H: the applier hooks RPCA_Pick",
+     [(LAP, '[HarmonyPatch(typeof(ApplyCardStats), "ApplyStats")]', '[HarmonyPatch(typeof(ApplyCardStats), "RPCA_Pick")]')]),
+    ('clamp_applier', "H: a table field has no case",
+     [(LAP, '                    case "Gun.damage": ClampField(r, ref gun.damage, ref moved); break;\n', "")]),
+    ('clamp_applier', "H: the bursts bound is gone",
+     [(LAP, "            int bursts = LimitlessBounds.BurstsWithin(gun.numberOfProjectiles, gun.bursts);\n"
+            "            if (bursts != gun.bursts) { gun.bursts = bursts; moved++; }\n", "")]),
+    ('clamp_applier', "H: mass and size are not configured again",
+     [(LAP, "            stats.ConfigureMassAndSize();\n", "")]),
+    ('clamp_applier', "H: WasUpdated does not run again",
+     [(LAP, "            stats.WasUpdated();\n", "")]),
+    ('clamp_applier', "H: the health keeps the unclamped copy",
+     [(LAP, "            if (data.MaxHealth != maxBefore) data.health = data.MaxHealth;\n", "")]),
+    ('clamp_applier', "H: the remaining respawns keep the unclamped copy",
+     [(LAP, "            if (stats.respawns != respawnsBefore) stats.remainingRespawns = stats.respawns;\n", "")]),
+    ('card_bar', "H: the bar trims in a normal game",
+     [(LAP, "            if (!LimitlessFence.RecordOpen) return;\n            try { LimitlessApply.TrimBar(",
+       "            try { LimitlessApply.TrimBar(")]),
+    ('card_bar', "H: the trim hooks ClearBar",
+     [(LAP, '[HarmonyPatch(typeof(CardBar), "AddCard")]', '[HarmonyPatch(typeof(CardBar), "ClearBar")]')]),
+    ('card_bar', "H: the trim removes the newest icon",
+     [(LAP, "                int oldest = cards.Count - 1;\n", "                int oldest = 0;\n")]),
+    ('card_bar', "H: the trimmed icon is not destroyed",
+     [(LAP, "                if (icon != null) UnityEngine.Object.Destroy(icon.gameObject);\n", "")]),
+    ('broadcast_cap', "H: the broadcast list goes whole in a limitless game",
+     [(GSW, "                if (LimitlessFence.RecordOpen)\n                {\n                    if (limitlessCardBase < 0)",
+       "                if (false)\n                {\n                    if (limitlessCardBase < 0)")]),
+    ('broadcast_cap', "H: the base is taken at every pick",
+     [(GSW, "                    if (limitlessCardBase < 0) limitlessCardBase = broadcastCardNames.Count - 1;\n",
+       "                    limitlessCardBase = broadcastCardNames.Count - 1;\n")]),
+    ('broadcast_cap', "H: the hold's seeding keeps an old base",
+     [(GSW, "            limitlessCardBase = -1;\n            if (names != null) broadcastCardNames.AddRange(names);\n",
+       "            if (names != null) broadcastCardNames.AddRange(names);\n")]),
+    ('round_pips', "H: the fence rebuilds the pips at the raised target",
+     [(LF, "            _targetRaised = true;   // R1: the record's retirement puts the base back\n",
+       "            _targetRaised = true;   // R1: the record's retirement puts the base back\n"
+       "            UIHandler.instance.SetNumberOfRounds(target);\n")]),
+    ('round_pips', "H: a mod path runs vanilla's continue",
+     [(LF, "            _targetRaised = true;   // R1: the record's retirement puts the base back\n",
+       "            _targetRaised = true;   // R1: the record's retirement puts the base back\n"
+       "            gm.GameOverContinue(0);\n")]),
 ]
 
 NEUTRAL = "            // control: a neutral line\n"
@@ -3103,6 +3319,14 @@ CONTROLS = [
                       NEUTRAL + "                if (stale.Contains(nonce)) return null;\n")]),
     ('epoch_test', [(TGN, "                string why = epoch <= epochStale\n", NEUTRAL + "                string why = epoch <= epochStale\n")]),
     ('dc_plan_gate', [(PLG, "                if (!GameStateWatcher.IsInMatch)\n", NEUTRAL + "                if (!GameStateWatcher.IsInMatch)\n")]),
+    ('card_draw_window', [(CDE, "            _c1Stage = 1;\n", NEUTRAL + "            _c1Stage = 1;\n")]),
+    ('ffa_live_points', [(FMC, "                        int lpGame = LivePointsGameNow();\n",
+                          NEUTRAL + "                        int lpGame = LivePointsGameNow();\n")]),
+    ('clamp_applier', [(LAP, "            if (moved == 0) return 0;\n", NEUTRAL + "            if (moved == 0) return 0;\n")]),
+    ('card_bar', [(LAP, "            int removed = 0;\n", NEUTRAL + "            int removed = 0;\n")]),
+    ('broadcast_cap', [(GSW, "                List<string> sent = broadcastCardNames;\n",
+                        NEUTRAL + "                List<string> sent = broadcastCardNames;\n")]),
+    ('round_pips', [(LF, "            if (ffa) FfaMode.RoundsToWin = target;\n", NEUTRAL + "            if (ffa) FfaMode.RoundsToWin = target;\n")]),
 ]
 
 

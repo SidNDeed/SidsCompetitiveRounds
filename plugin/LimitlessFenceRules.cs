@@ -535,6 +535,21 @@ namespace CompetitiveRounds
             return rated && modeKeepsSeries;
         }
 
+        /// <summary>v4 section 2, the broadcast card list in a limitless game:
+        /// the reported game's names (the first <paramref name="reported"/>),
+        /// then the newest <paramref name="newest"/> of the rest, in order. A
+        /// list within that size goes whole.</summary>
+        internal static List<string> CappedCards(IList<string> all, int reported, int newest)
+        {
+            var sent = new List<string>();
+            if (all == null) return sent;
+            int head = Math.Max(0, Math.Min(reported, all.Count));
+            int from = Math.Max(head, all.Count - Math.Max(0, newest));
+            for (int i = 0; i < head; i++) sent.Add(all[i]);
+            for (int i = from; i < all.Count; i++) sent.Add(all[i]);
+            return sent;
+        }
+
         // ------------------------------------------------------------------ the handler (4.7)
 
         internal enum HandlerOutcome { RefuseNotMaster, RefuseUncovered, DropTransition, ApplyAsVanilla, CreateRecord, UpdateRecord }

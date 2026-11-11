@@ -2279,7 +2279,10 @@ namespace CompetitiveRounds
                 // keeps a 10-player lobby from sending ten copies.
                 try
                 {
+                    // ask 16(a) lane 2 (v4 section 6): the base report's latch
+                    // stops the posts, so a continuation posts none.
                     if (FfaLateEntry.MasterMaySend()
+                        && !GameStateWatcher.ReportLatched
                         && !string.IsNullOrEmpty(ApiClient.ActiveFfaLobbyId)
                         && !string.IsNullOrEmpty(MatchTracker.LocalSteamId))
                     {

@@ -457,6 +457,13 @@ namespace CompetitiveRounds
 
         // Game over
         private static bool gameOverReported = false;
+        /// <summary>Ask 16(a) lane 2 (v4 section 6): the report latch, which
+        /// FFA's live points read (FfaMode.HandleNextRound).</summary>
+        internal static bool ReportLatched => gameOverReported;
+        /// <summary>v4 section 2: the names broadcastCardNames held at a
+        /// limitless game's first pick, -1 until then; each clear of the list
+        /// resets it.</summary>
+        private static int limitlessCardBase = -1;
         // Capture the mode while the room is still full. A disconnect can
         // shrink PlayerList before OnGameOver, but it must not erase the
         // surviving participant's exact input evidence.
@@ -5950,6 +5957,7 @@ namespace CompetitiveRounds
 
             // Clear our broadcast for the new match
             broadcastCardNames.Clear();
+            limitlessCardBase = -1;
             try
             {
                 if (PhotonNetwork.InRoom && PhotonNetwork.LocalPlayer != null)
@@ -7312,6 +7320,7 @@ namespace CompetitiveRounds
                 localCards.Clear();
                 localOffers.Clear();
                 broadcastCardNames.Clear();
+                limitlessCardBase = -1;
                 preMatchCards.Clear();
                 preMatchPickCount = 0;
                 pickCountThisMatch = 0;
@@ -8952,7 +8961,17 @@ namespace CompetitiveRounds
                 if (!PhotonNetwork.InRoom) return;
 
                 broadcastCardNames.Add(cardName);
-                string cardList = string.Join("|", broadcastCardNames.ToArray());
+                // ask 16(a) lane 2 (v4 section 2): in a limitless game the list
+                // sent is the reported game's names, those the list held at the
+                // record's first pick, plus the newest LimitlessApply.NewestCards.
+                // This seat keeps the whole list.
+                List<string> sent = broadcastCardNames;
+                if (LimitlessFence.RecordOpen)
+                {
+                    if (limitlessCardBase < 0) limitlessCardBase = broadcastCardNames.Count - 1;
+                    sent = LimitlessFenceRules.CappedCards(broadcastCardNames, limitlessCardBase, LimitlessApply.NewestCards);
+                }
+                string cardList = string.Join("|", sent.ToArray());
 
                 var props = new Hashtable();
                 props[CARD_PROP_KEY] = cardList;
@@ -8982,6 +9001,7 @@ namespace CompetitiveRounds
             liveCumP2 = Math.Min(r1 > 0 ? 2 : p1, 2);
             liveSentTeamP1 = liveCumP1; liveSentTeamP2 = liveCumP2;
             broadcastCardNames.Clear();
+            limitlessCardBase = -1;
             if (names != null) broadcastCardNames.AddRange(names);
             pickCountThisMatch = broadcastCardNames.Count;
             try
@@ -9320,6 +9340,7 @@ namespace CompetitiveRounds
             lastKnownP2CardCount = 0;
             pickCountThisMatch = 0;
             broadcastCardNames.Clear();
+            limitlessCardBase = -1;
             lastKnownOpponentBroadcastCount = 0;
             preMatchCards.Clear();
             preMatchPickCount = 0;
