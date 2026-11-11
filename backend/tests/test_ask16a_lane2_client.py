@@ -1295,6 +1295,62 @@ def claim_the_observer_flush_reads_the_epoch(files):
     return out
 
 
+def claim_the_retirement_puts_the_base_target_back(files):
+    """R1 (section 3): the record's retirement puts the target it raised back
+    at the base before the record is cleared, so nothing of the next game runs
+    at the continuation's target: GM's roundsToWinGame takes the record's base
+    target, FFA's RoundsToWin its config writers' value. SetRecordTarget notes
+    which field it wrote."""
+    out = []
+    lf = files[LF]
+    if not _in_order(_code(lf, "internal static void RetireRecord("),
+                     ["if (!_hasRecord) return;", "RestoreBaseTarget(why);", "_hasRecord = false;",
+                      "_record = default(LimitlessFenceRules.FenceRecord);"]):
+        out.append("the retirement does not put the base back before it clears the record")
+    if not _in_order(_code(lf, "private static void RestoreBaseTarget("),
+                     ["if (!_targetRaised) return;", "_targetRaised = false;",
+                      "if (_targetFfa) FfaMode.RestoreConfiguredTarget();",
+                      "if (gm != null) gm.roundsToWinGame = _record.BaseTarget;"]):
+        out.append("the restore misses a mode or the base")
+    if not _in_order(_code(lf, "private static void SetRecordTarget("),
+                     ["if (ffa) FfaMode.RoundsToWin = target;", "else if (gm != null) gm.roundsToWinGame = target;",
+                      "else return;", "_targetRaised = true;", "_targetFfa = ffa;"]):
+        out.append("the record's target write is not noted for the restore")
+    if not _in_order(_code(files["FfaMode.cs"], "internal static void RestoreConfiguredTarget("),
+                     ["RoundsToWin = _configuredTarget;"]):
+        out.append("FFA's restore does not apply the configured value")
+    return out
+
+
+def claim_ffa_config_writers_go_through_one_setter(files):
+    """Table B (a), FFA's RoundsToWin writers: SetPendingConfig (the poll, the
+    assembly, LatchConfigFromRoom and so the spectator latch) and
+    ResetConfigToDefaults write the target only through SetConfiguredTarget.
+    While a record is live or terminating, the record's target stays and the
+    value waits for the next game. FfaMode writes RoundsToWin nowhere else,
+    and the fence's handler is the one writer outside it."""
+    out = []
+    f = files["FfaMode.cs"]
+    if not _in_order(_code(f, "public static void SetPendingConfig("),
+                     ["SetConfiguredTarget(Mathf.Clamp(scoreTarget, 3, 10));"]):
+        out.append("the pending config writes the target past the setter")
+    if not _in_order(_code(f, "public static void ResetConfigToDefaults("), ["SetConfiguredTarget(5);"]):
+        out.append("the defaults write the target past the setter")
+    if not _in_order(_code(f, "private static void SetConfiguredTarget("),
+                     ["_configuredTarget = target;", "if (LimitlessFence.HoldsFfaTarget) return;", "RoundsToWin = target;"]):
+        out.append("the setter overwrites a record's target")
+    if not _in_order(_code(files[LF], "internal static bool HoldsFfaTarget"),
+                     ["get { return RecordOpen && _targetRaised && _targetFfa; }"]):
+        out.append("the hold does not read the open record's FFA target")
+    if len(re.findall(r"\bRoundsToWin\s*=(?![=>])", _code(f))) != 3:
+        out.append("FfaMode writes RoundsToWin outside the setter and the restore")
+    others = sum(len(re.findall(r"\bFfaMode\.RoundsToWin\s*=(?![=>])", _code(t)))
+                 for n, t in files.items() if n != "FfaMode.cs")
+    if others != 1:
+        out.append("a writer outside FfaMode other than the fence's handler")
+    return out
+
+
 CLAIMS = {
     "game_start_prefix": claim_the_game_start_prefix,
     "stamp_before_join": claim_the_gid_is_stamped_before_the_join,
@@ -1335,6 +1391,8 @@ CLAIMS = {
     "hold_items": claim_the_hold_acts_only_under_its_cut_ticket,
     "observer_apply": claim_the_observer_apply_reads_its_attempt_and_epoch,
     "observer_flush": claim_the_observer_flush_reads_the_epoch,
+    "base_target": claim_the_retirement_puts_the_base_target_back,
+    "ffa_target_writers": claim_ffa_config_writers_go_through_one_setter,
 }
 
 GATE = "                if (SpectatorPatchSupport.Suppress) return;\n"
@@ -1817,6 +1875,30 @@ MUTANTS = [
      [("FfaMode.cs", "Plugin.Instance.StartCoroutine(LimitlessFence.CleanupItem(SpectatorBetweenGamesFlush(",
        "Plugin.Instance.StartCoroutine(SpectatorBetweenGamesFlush("),
       ("FfaMode.cs", 'SpectatorSync.BoundaryAttemptGeneration), "ffa observer flush")); }', "SpectatorSync.BoundaryAttemptGeneration)); }")]),
+    ("base_target", "the retirement keeps the raised target",
+     [(LF, "            RestoreBaseTarget(why);\n", "")]),
+    ("base_target", "the restore runs after the record is cleared",
+     [(LF, "            RestoreBaseTarget(why);\n            _hasRecord = false;\n", "            _hasRecord = false;\n"),
+      (LF, "            _record = default(LimitlessFenceRules.FenceRecord);\n",
+       "            _record = default(LimitlessFenceRules.FenceRecord);\n            RestoreBaseTarget(why);\n")]),
+    ("base_target", "GM's restore keeps the record's target",
+     [(LF, "if (gm != null) gm.roundsToWinGame = _record.BaseTarget;", "if (gm != null) gm.roundsToWinGame = _record.TargetRounds;")]),
+    ("base_target", "the restore skips FFA",
+     [(LF, "            if (_targetFfa) FfaMode.RestoreConfiguredTarget();\n            else\n", "            if (!_targetFfa)\n")]),
+    ("base_target", "the record's target write is not noted",
+     [(LF, "            _targetRaised = true;   // R1: the record's retirement puts the base back\n", "")]),
+    ("base_target", "FFA's restore keeps the record's target",
+     [("FfaMode.cs", "            RoundsToWin = _configuredTarget;\n", "")]),
+    ("ffa_target_writers", "the pending config writes the target directly",
+     [("FfaMode.cs", "SetConfiguredTarget(Mathf.Clamp(scoreTarget, 3, 10));", "RoundsToWin = Mathf.Clamp(scoreTarget, 3, 10);")]),
+    ("ffa_target_writers", "the defaults write the target directly",
+     [("FfaMode.cs", "SetConfiguredTarget(5); CardCandidates = 5;", "RoundsToWin = 5; CardCandidates = 5;")]),
+    ("ffa_target_writers", "the setter overwrites the record's target",
+     [("FfaMode.cs", "            if (LimitlessFence.HoldsFfaTarget) return;\n", "")]),
+    ("ffa_target_writers", "the hold ignores the record's state",
+     [(LF, "get { return RecordOpen && _targetRaised && _targetFfa; }", "get { return _targetRaised && _targetFfa; }")]),
+    ("ffa_target_writers", "the spectator latch writes the target past the setter",
+     [("FfaMode.cs", "if (LatchConfigFromRoom()) spectatorCfgRoom = rn;", "if (LatchConfigFromRoom()) { spectatorCfgRoom = rn; RoundsToWin = 5; }")]),
 ]
 
 NEUTRAL = "            // control: a neutral line\n"
@@ -1879,6 +1961,8 @@ CONTROLS = [
                          NEUTRAL + "            var ticket = LimitlessFence.CaptureTicket();   // v4 4.5 R (F5)")]),
     ("observer_flush", [("SpectatorSync.cs", "                Plugin.Instance.StartCoroutine(LimitlessFence.CleanupItem(BetweenGamesFlush(_boundaryGeneration",
                          NEUTRAL + "                Plugin.Instance.StartCoroutine(LimitlessFence.CleanupItem(BetweenGamesFlush(_boundaryGeneration")]),
+    ("base_target", [(LF, "            RestoreBaseTarget(why);\n", NEUTRAL + "            RestoreBaseTarget(why);\n")]),
+    ("ffa_target_writers", [("FfaMode.cs", "            _configuredTarget = target;\n", NEUTRAL + "            _configuredTarget = target;\n")]),
 ]
 
 

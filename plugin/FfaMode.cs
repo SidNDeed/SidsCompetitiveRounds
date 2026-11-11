@@ -40,6 +40,7 @@ namespace CompetitiveRounds
         // by the master, and reset to defaults on room leave. The server
         // validates reports against ITS row regardless of what we hold.
         public static int RoundsToWin = 5;
+        private static int _configuredTarget = 5;   // Table B (a): the config writers' value; RoundsToWin's while no record holds it
         public const int PointsToWinRound = 2;   // not configurable
         public static int CardCap = 5;
         public static int InitialPicks = 1;      // TOTAL opening draws (base 1 + knob)
@@ -65,7 +66,7 @@ namespace CompetitiveRounds
                                             int cardCap, bool sameCard, bool ranked,
                                             bool suddenDeath = false)
         {
-            RoundsToWin = Mathf.Clamp(scoreTarget, 3, 10);
+            SetConfiguredTarget(Mathf.Clamp(scoreTarget, 3, 10));
             CardCandidates = Mathf.Clamp(candidates, 1, 5);
             InitialPicks = Mathf.Clamp(initialPicks, 1, 6);
             CardCap = Mathf.Clamp(cardCap, 3, 6);
@@ -75,14 +76,34 @@ namespace CompetitiveRounds
             // item 10 (or any config source that does not carry the field) turns
             // sudden death OFF rather than leaving a stale true behind.
             SuddenDeath = suddenDeath;
-            Plugin.Log.LogInfo($"[FFA-CFG] pending config: target={RoundsToWin} cand={CardCandidates} picks={InitialPicks} cap={CardCap} same={SameCardRule} ranked={LobbyRanked} sudden={SuddenDeath}");
+            Plugin.Log.LogInfo($"[FFA-CFG] pending config: target={_configuredTarget} cand={CardCandidates} picks={InitialPicks} cap={CardCap} same={SameCardRule} ranked={LobbyRanked} sudden={SuddenDeath}");
         }
 
         public static void ResetConfigToDefaults()
         {
-            RoundsToWin = 5; CardCandidates = 5; InitialPicks = 1;
+            SetConfiguredTarget(5); CardCandidates = 5; InitialPicks = 1;
             CardCap = 5; SameCardRule = false; LobbyRanked = true;
             SuddenDeath = false;
+        }
+
+        /// <summary>Ask 16(a) lane 2 (v4 Table B (a)): every config writer's
+        /// target goes through here: SetPendingConfig (from the poll, the
+        /// assembly and LatchConfigFromRoom) and ResetConfigToDefaults. While
+        /// a record is live or terminating, RoundsToWin holds the record's
+        /// target, so the value waits for the next game; the record's
+        /// retirement applies it (RestoreConfiguredTarget, R1).</summary>
+        private static void SetConfiguredTarget(int target)
+        {
+            _configuredTarget = target;
+            if (LimitlessFence.HoldsFfaTarget) return;
+            RoundsToWin = target;
+        }
+
+        /// <summary>R1: the fence's retirement of a record that raised
+        /// RoundsToWin puts the configured value back.</summary>
+        internal static void RestoreConfiguredTarget()
+        {
+            RoundsToWin = _configuredTarget;
         }
 
         private static void MasterPublishConfig()

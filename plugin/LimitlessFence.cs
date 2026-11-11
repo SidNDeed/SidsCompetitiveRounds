@@ -354,6 +354,8 @@ namespace CompetitiveRounds
         private static bool _hasRecord;
         private static LimitlessFenceRules.FenceRecord _record;
         private static LimitlessFenceRules.FencePhase _state;
+        private static bool _targetRaised;   // R1: SetRecordTarget wrote a target, which the record's retirement puts back
+        private static bool _targetFfa;      // the field it wrote: FFA's RoundsToWin, else GM's roundsToWinGame
         private static bool _fenceCall;
         private static readonly HashSet<string> _refusalLogged = new HashSet<string>(StringComparer.Ordinal);
 
@@ -367,6 +369,14 @@ namespace CompetitiveRounds
             get { return _hasRecord && _state != LimitlessFenceRules.FencePhase.PhaseEnded; }
         }
 
+        /// <summary>Table B (a): FFA's RoundsToWin holds the record's target
+        /// while the record is live or terminating. FFA's config writers then
+        /// keep their value for the next game (FfaMode.SetConfiguredTarget).</summary>
+        internal static bool HoldsFfaTarget
+        {
+            get { return RecordOpen && _targetRaised && _targetFfa; }
+        }
+
         /// <summary>4.3: retired before anything of the next physical game runs
         /// (the game-start prefix, a spectator's boundary), when the seat adopts
         /// a new gid, and at room exit.</summary>
@@ -375,10 +385,29 @@ namespace CompetitiveRounds
             _refusalLogged.Clear();
             _departed = false;
             if (!_hasRecord) return;
+            RestoreBaseTarget(why);
             _hasRecord = false;
             _state = LimitlessFenceRules.FencePhase.PhaseLive;
             _record = default(LimitlessFenceRules.FenceRecord);
             Plugin.Log.LogInfo("[LIMIT] record retired (" + why + ")");
+        }
+
+        /// <summary>R1 (section 3): the target the record raised goes back to
+        /// the base when the record retires, before anything of the next game
+        /// runs. GM's roundsToWinGame takes the record's base target (vanilla's
+        /// ResetMatch leaves the field alone); FFA's RoundsToWin takes the value
+        /// its config writers hold for the next game (Table B (a)).</summary>
+        private static void RestoreBaseTarget(string why)
+        {
+            if (!_targetRaised) return;
+            _targetRaised = false;
+            if (_targetFfa) FfaMode.RestoreConfiguredTarget();
+            else
+            {
+                var gm = GM_ArmsRace.instance;
+                if (gm != null) gm.roundsToWinGame = _record.BaseTarget;
+            }
+            Plugin.Log.LogInfo("[LIMIT] target back at the base (" + why + ")");
         }
 
         /// <summary>4.4, F3: while this seat holds a live or terminating record,
@@ -855,6 +884,9 @@ namespace CompetitiveRounds
         {
             if (ffa) FfaMode.RoundsToWin = target;
             else if (gm != null) gm.roundsToWinGame = target;
+            else return;
+            _targetRaised = true;   // R1: the record's retirement puts the base back
+            _targetFfa = ffa;
         }
 
         /// <summary>4.3, F2: the mirror for joiners, written by the master only
