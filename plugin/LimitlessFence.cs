@@ -179,8 +179,20 @@ namespace CompetitiveRounds
         /// <summary>A room property change, as the server relays it.</summary>
         internal static void NoteRoomProps(ExitGames.Client.Photon.Hashtable changed)
         {
-            if (changed == null || !changed.ContainsKey(GidKey)) return;
+            if (changed == null) return;
+            if (changed.ContainsKey(RecordKey)) NoteMirrorSeen(changed[RecordKey] as object[]);
+            if (!changed.ContainsKey(GidKey)) return;
             TryAdopt(changed[GidKey] as string, "arrival");
+        }
+
+        /// <summary>The mirror's arrival as the server relays it, on every seat
+        /// and at the writer's own echo. Logs only: it is the positive
+        /// control's line in lane 2's two-seat recipe.</summary>
+        private static void NoteMirrorSeen(object[] o)
+        {
+            bool shaped = o != null && o.Length > 3;
+            Plugin.Log.LogInfo("[LIMIT] mirror seen: gid=" + GidPrefix(shaped ? o[1] as string : null)
+                + " target=" + (shaped ? o[2] : "?") + " end=" + (shaped ? o[3] : "?"));
         }
 
         private static void TryAdopt(string value, string why)
