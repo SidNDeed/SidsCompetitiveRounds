@@ -2046,6 +2046,7 @@ namespace CompetitiveRounds
                 if (RoomActors.LocalIsSpectator) return;
                 TimeHandler.instance.DoSlowDown();
                 if (!FfaLateEntry.MasterMaySend() || pointLatched || isTransitioning) return;
+                LimitlessFence.NoteFfaPointScheduled();   // Ask 16(a) lane 2 (v4 4.4): MaySend at the send compares with this
                 // Review find 5: vanilla invokes PlayerDied per victim, so a
                 // double-KO (same explosion) reaches here on the FIRST death
                 // with the second victim still counted alive — latching them
@@ -2109,6 +2110,19 @@ namespace CompetitiveRounds
                 // makes the publisher agree with the peers; do not assume this
                 // line alone is sufficient.
                 try { FfaMapScale.MasterPublishCount(FfaLateEntry.PointK + 1); } catch { }
+                // Ask 16(a) lane 2 (v4 4.4, 4.7): at the round that would end the game at
+                // the base, and at every round past it, the fence's message goes out in
+                // place of this one, MaySend at the send. When it withholds, nothing goes
+                // out and the latch is released. A fault sends vanilla's, as today.
+                LimitlessFence.FenceSend fence;
+                try { fence = LimitlessFence.FfaRoundSend(winnerTeam); }
+                catch (Exception fx)
+                {
+                    fence = LimitlessFence.FenceSend.Vanilla;
+                    Plugin.Log.LogError("[LIMIT] the FFA round send faulted: " + fx.Message);
+                }
+                if (fence == LimitlessFence.FenceSend.Withheld) pointLatched = false;
+                if (fence != LimitlessFence.FenceSend.Vanilla) return;
                 gm.view.RPC("RPCA_NextRound", RpcTarget.All, winnerTeam, winnerTeam, 0, 0, 0, 0);
             }
             catch (Exception ex)

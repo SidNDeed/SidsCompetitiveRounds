@@ -29,6 +29,9 @@ namespace CompetitiveRounds
             internal Func<R.HandlerInputs, R.HandlerOutcome> Handle = R.HandleFenceMessage;
             internal Func<int[], IList<int>, bool> RosterMatches = R.RosterMatches;
             internal Func<IList<int>, int> EndTarget = R.EndTarget;
+            internal Func<int, int, int, int, bool> RoundEndsGame = R.RoundEndsGame;
+            internal Func<R.FenceRecord, bool, IList<int>, R.FenceRecord> NextSendRecord = R.NextSendRecord;
+            internal Func<bool, bool, bool> SeriesFollows = R.SeriesFollows;
             internal Func<R.FencePhase, bool, R.FencePhase> NextState = R.NextState;
             internal Func<bool, R.FencePhase, bool, bool> RefuseRawRound = R.RefuseRawRound;
             internal Func<R.FenceRecord, int[], int[], int, object[]> Encode = R.EncodeRecord;
@@ -218,6 +221,28 @@ namespace CompetitiveRounds
                                            && f.NextState(R.FencePhase.PhaseEnded, true) == R.FencePhase.PhaseEnded);
 
             // authority (4.4, 4.5)
+            add("decision round: the winner's round point at 4 of 5 rounds ends the game", f.RoundEndsGame(1, 4, 2, 5));
+            add("decision round: one point per round, the round that reaches the target ends it", f.RoundEndsGame(0, 4, 1, 5));
+            add("decision round: a point that completes no round ends nothing", !f.RoundEndsGame(0, 4, 2, 5));
+            add("decision round: a round short of the target ends nothing", !f.RoundEndsGame(1, 3, 2, 5));
+            add("decision round: a side already past the target still ends, as vanilla's test reads", f.RoundEndsGame(1, 6, 2, 5));
+            {
+                var dec = R.DecisionRecord(G1, 5, 1, 4, 2, true);
+                add("decision record: target base + 50, end clear, the base result at the send",
+                    dec.Gid == G1 && dec.TargetRounds == 55 && !dec.EndFlag && dec.BaseWinner == 1 && dec.BaseWinnerRounds == 5
+                    && dec.BaseOtherRounds == 2 && dec.BaseTarget == 5 && dec.Spectatable);
+                var same = f.NextSendRecord(dec, false, new[] { 7, 2 });
+                add("next send: a live record that need not end is unchanged", same.Equals(dec));
+                var end = f.NextSendRecord(dec, true, new[] { 7, 2 });
+                add("next send: a live record that must end carries the end flag and the end target",
+                    end.EndFlag && end.TargetRounds == 3 && end.Gid == G1 && end.BaseWinner == 1 && end.BaseWinnerRounds == 5
+                    && end.BaseOtherRounds == 2 && end.BaseTarget == 5 && end.Spectatable);
+                add("next send: a terminating record repeats itself, whatever the re-read finds",
+                    f.NextSendRecord(end, true, new[] { 9, 4 }).Equals(end) && f.NextSendRecord(end, false, new[] { 9, 4 }).Equals(end));
+            }
+            add("series: an unrated game has no series to follow", !f.SeriesFollows(false, true));
+            add("series: a rated FFA game keeps no series", !f.SeriesFollows(true, false));
+            add("series: a rated game of a mode that keeps one is followed, read closed", f.SeriesFollows(true, true));
             add("MaySend: master, live gid, open record, same epoch and handoff count", f.MaySend(true, true, false, 4, 4, 2, 2));
             add("MaySend: a seat that is no longer master refuses", !f.MaySend(false, true, false, 4, 4, 2, 2));
             add("MaySend: a gid that is not live refuses", !f.MaySend(true, false, false, 4, 4, 2, 2));
@@ -431,6 +456,25 @@ namespace CompetitiveRounds
             Control(r, "arrival ignores the ended set",
                     Cases(new Fns { AdoptOnArrival = (a, s, v, l) => R.IsGid(v) && v != l.CurrentGid && (a || s) }),
                     "arrival: a value this seat has ended is never adopted");
+            Control(r, "a round ends the game only past the target",
+                    Cases(new Fns { RoundEndsGame = (p, w, pr, t) => p + 1 >= pr && w + 1 > t }),
+                    "decision round: the winner's round point at 4 of 5 rounds ends the game",
+                    "decision round: one point per round, the round that reaches the target ends it");
+            Control(r, "a round ends the game without completing a round",
+                    Cases(new Fns { RoundEndsGame = (p, w, pr, t) => w + 1 >= t }),
+                    "decision round: a point that completes no round ends nothing");
+            Control(r, "the end ignores the re-read",
+                    Cases(new Fns { NextSendRecord = (c, m, s) => c }),
+                    "next send: a live record that must end carries the end flag and the end target");
+            Control(r, "a terminating record takes a new end target",
+                    Cases(new Fns { NextSendRecord = (c, m, s) => { if (!m) return c; var n = c; n.EndFlag = true; n.TargetRounds = R.EndTarget(s); return n; } }),
+                    "next send: a terminating record repeats itself, whatever the re-read finds");
+            Control(r, "a rated game is never followed",
+                    Cases(new Fns { SeriesFollows = (rt, m) => false }),
+                    "series: a rated game of a mode that keeps one is followed, read closed");
+            Control(r, "the series ignores the mode",
+                    Cases(new Fns { SeriesFollows = (rt, m) => rt }),
+                    "series: a rated FFA game keeps no series");
             Control(r, "the frame is never set",
                     Cases(new Fns { RunInFrame = (g, s, v, call) => call() }),
                     "frame: inside an RPC's frame the call sees its own, and the RPC's comes back",

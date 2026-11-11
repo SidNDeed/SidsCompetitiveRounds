@@ -343,6 +343,57 @@ namespace CompetitiveRounds
             return ContinuationQuorum(fighterOptIns, gid, actorCapabilities, masterVersion) != Decision.Continue;
         }
 
+        /// <summary>4.7: the round that ends the game at a target
+        /// (GM_ArmsRace:533-585): the winner's point completes its round and
+        /// that round reaches the target. The counts are the master's at the
+        /// send, the ones its message carries; every seat adds the point when it
+        /// applies the round.</summary>
+        internal static bool RoundEndsGame(int winnerPoints, int winnerRounds, int pointsToWinRound, int targetRounds)
+        {
+            return winnerPoints + 1 >= pointsToWinRound && winnerRounds + 1 >= targetRounds;
+        }
+
+        /// <summary>4.7: the decision message's record. The target is base + N
+        /// and the end flag is clear. The base result is the master's at the
+        /// send: the winner, its rounds once this round completes, the other
+        /// side's rounds, and the base target. The spectatable flag is latched
+        /// here (Table C2, GameStateWatcher.cs:1552).</summary>
+        internal static FenceRecord DecisionRecord(string gid, int baseTarget, int winner, int winnerRounds,
+                                                   int otherRounds, bool spectatable)
+        {
+            return new FenceRecord
+            {
+                Gid = gid, TargetRounds = ContinueTarget(baseTarget), EndFlag = false,
+                BaseWinner = winner, BaseWinnerRounds = winnerRounds + 1, BaseOtherRounds = otherRounds,
+                BaseTarget = baseTarget, Spectatable = spectatable,
+            };
+        }
+
+        /// <summary>4.7 and 5.1: the record the master's next round message
+        /// carries. Once an end is decided, every later message carries the same
+        /// record. A live record that must end carries the end flag and the end
+        /// target from the side rounds the message itself carries. Otherwise the
+        /// record is unchanged.</summary>
+        internal static FenceRecord NextSendRecord(FenceRecord current, bool mustEnd, IList<int> sideRounds)
+        {
+            if (current.EndFlag || !mustEnd) return current;
+            var next = current;
+            next.EndFlag = true;
+            next.TargetRounds = EndTarget(sideRounds);
+            return next;
+        }
+
+        /// <summary>D5, read closed (integrator ruling 23:45Z, a deviation from
+        /// D5's stated default, which lets a series' deciding game continue):
+        /// another rated game of this series follows. No input tells the master
+        /// that reliably mid-game (the series counts lag), so a rated game in a
+        /// mode that keeps a series (1v1, 2v2, 1v2) is always followed by
+        /// another. FFA keeps no series, and an unrated game has none.</summary>
+        internal static bool SeriesFollows(bool rated, bool modeKeepsSeries)
+        {
+            return rated && modeKeepsSeries;
+        }
+
         // ------------------------------------------------------------------ the handler (4.7)
 
         internal enum HandlerOutcome { RefuseNotMaster, RefuseUncovered, DropTransition, ApplyAsVanilla, CreateRecord, UpdateRecord }

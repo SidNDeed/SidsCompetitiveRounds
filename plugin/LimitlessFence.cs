@@ -99,7 +99,9 @@ namespace CompetitiveRounds
             _startedInRoom = false;
             _spectatorBoundaryDue = false;
             _awaiting = true;
+            _optInWanted = false;
             TryAdopt(RoomGid(), "join");
+            WriteOptIn("join");   // clears a value the join carried in
         }
 
         /// <summary>Room exit is a terminal path (5.3): the current gid ends,
@@ -110,6 +112,7 @@ namespace CompetitiveRounds
             _ledger.ExitRoom();
             RetireRecord("room exit");
             _uncoveredLeaving = false;
+            _optInWanted = false;
             _awaiting = false;
             _startedInRoom = false;
             _spectatorBoundaryDue = false;
@@ -137,6 +140,9 @@ namespace CompetitiveRounds
             _spectatorBoundaryDue = false;
             bool adopted = _ledger.AtOwnGameStart(RoomGid());
             _awaiting = !adopted;
+            _optInWanted = false;   // D6: the radio resets to off at every game start
+            _answerLogged.Clear();
+            WriteOptIn("game start");
             Plugin.Log.LogInfo("[LIMIT] game start: epoch=" + _epoch + " gid=" + (adopted ? GidPrefix(_ledger.CurrentGid) : "awaiting"));
             TryMint("start");
         }
@@ -181,6 +187,7 @@ namespace CompetitiveRounds
             if (!_ledger.AdoptRelayed(value)) return;
             _awaiting = false;
             RetireRecord("new gid");
+            WriteOptIn("new gid");   // the opt-in follows a gid change
             Plugin.Log.LogInfo("[LIMIT] adopted gid " + GidPrefix(value) + " (" + why + ")");
         }
 
@@ -221,7 +228,8 @@ namespace CompetitiveRounds
         /// attached. A client never advertises a rule it cannot run (#83).</summary>
         internal static bool GameStartLive;
         internal static bool RawRoundLive;
-        internal static bool FencePatchesLive { get { return GameStartLive && RawRoundLive && _hooked; } }
+        internal static bool PlayerDiedLive;
+        internal static bool FencePatchesLive { get { return GameStartLive && RawRoundLive && PlayerDiedLive && _hooked; } }
 
         private static bool _staged;
         private static bool _stageFailedPermanently;
@@ -234,7 +242,7 @@ namespace CompetitiveRounds
             try
             {
                 if (_staged || _stageFailedPermanently) return;
-                if (!GameStartLive || !RawRoundLive)
+                if (!GameStartLive || !RawRoundLive || !PlayerDiedLive)
                 {
                     _stageFailedPermanently = true;
                     Plugin.Log.LogError("[LIMIT] a fence patch did NOT attach - the continuation is disabled for this session");
@@ -383,6 +391,184 @@ namespace CompetitiveRounds
             return true;
         }
 
+        // ------------------------------------------------------------------ the opt-in (4.7, D4, D6)
+
+        private static bool _optInWanted;
+
+        /// <summary>Lane 3's radio calls this: whether this seat opts in to a
+        /// continuation of the current game (D4). The property cr_limitless holds
+        /// the live gid only. It follows a gid change, and it clears at each of
+        /// the seat's own game starts (D6), at the join and at room exit.</summary>
+        internal static void SetOptIn(bool on)
+        {
+            _optInWanted = on;
+            WriteOptIn("radio");
+        }
+
+        internal static bool OptInWanted { get { return _optInWanted; } }
+
+        /// <summary>Writes cr_limitless in a room only when it differs from what
+        /// the server last relayed for this seat: the live gid while the radio
+        /// is on, otherwise nothing (null removes the key).</summary>
+        private static void WriteOptIn(string why)
+        {
+            if (!PhotonNetwork.InRoom || PhotonNetwork.OfflineMode) return;
+            var local = PhotonNetwork.LocalPlayer;
+            if (local == null) return;
+            string gid = _ledger.CurrentGid;
+            string want = _optInWanted && _ledger.IsLiveGid(gid) ? gid : null;
+            object have = null;
+            if (local.CustomProperties != null) local.CustomProperties.TryGetValue(OptInKey, out have);
+            if (string.Equals(have as string, want, StringComparison.Ordinal)) return;
+            local.SetCustomProperties(new ExitGames.Client.Photon.Hashtable { { OptInKey, want } });
+            Plugin.Log.LogInfo("[LIMIT] opt-in " + (want != null ? "written" : "cleared") + " (" + why + ")");
+        }
+
+        // ------------------------------------------------------------------ the sender (4.4, 4.7, 5.1)
+
+        /// <summary>What the master's round end sends: vanilla's own message, the
+        /// fence's message, or nothing (MaySend failed or the raise did not go
+        /// out; vanilla's message would be refused on every seat).</summary>
+        internal enum FenceSend { Vanilla, Sent, Withheld }
+
+        private static int _handoffAtRecord;
+        private static int _ffaEpoch;
+        private static int _ffaHandoff;
+        private static readonly HashSet<string> _answerLogged = new HashSet<string>(StringComparer.Ordinal);
+
+        /// <summary>4.4: FFA's point is scheduled here, before its end-of-frame
+        /// yield. MaySend at the send compares the epoch and the handoff count
+        /// with these.</summary>
+        internal static void NoteFfaPointScheduled()
+        {
+            _ffaEpoch = _epoch;
+            _ffaHandoff = _handoff;
+        }
+
+        /// <summary>The master's own cr_lim1 as the server relayed it: the
+        /// version every actor must advertise (4.7, 3).</summary>
+        private static string OwnCapability()
+        {
+            var local = PhotonNetwork.LocalPlayer;
+            if (local == null || local.CustomProperties == null) return null;
+            object v;
+            return local.CustomProperties.TryGetValue(CapabilityProp, out v) ? v as string : null;
+        }
+
+        /// <summary>4.7 on the GM master, from the PlayerDied prefix: at the round
+        /// that would end the game at the base, the decision; past the base,
+        /// every round. Vanilla's arguments are the ones its own send carries
+        /// (GM_ArmsRace:505-510).</summary>
+        internal static FenceSend GmRoundSend(GM_ArmsRace gm)
+        {
+            if (gm == null || FfaMode.EngineActive()) return FenceSend.Vanilla;
+            if (!PhotonNetwork.InRoom || PhotonNetwork.OfflineMode || !PhotonNetwork.IsMasterClient) return FenceSend.Vanilla;
+            var pm = PlayerManager.instance;
+            if (pm == null || pm.TeamsAlive() >= 2) return FenceSend.Vanilla;
+            int winner = pm.GetLastTeamAlive();
+            int[] args = { pm.GetOtherTeam(winner), winner, gm.p1Points, gm.p2Points, gm.p1Rounds, gm.p2Rounds };
+            if (RecordOpen) return SendContinuation(args, new[] { gm.p1Rounds, gm.p2Rounds }, _epoch, _handoff);
+            if (winner != 0 && winner != 1) return FenceSend.Vanilla;
+            int ptw = gm.pointsToWinRound; if (ptw <= 0) ptw = 2;
+            int wRounds = winner == 0 ? gm.p1Rounds : gm.p2Rounds;
+            if (!LimitlessFenceRules.RoundEndsGame(winner == 0 ? gm.p1Points : gm.p2Points, wRounds, ptw, gm.roundsToWinGame))
+                return FenceSend.Vanilla;
+            return SendDecision(args, gm.roundsToWinGame, winner, wRounds, winner == 0 ? gm.p2Rounds : gm.p1Rounds, _epoch, _handoff);
+        }
+
+        /// <summary>4.7 on the FFA master, at FFA's send (ResolvePointNow), after
+        /// its yield. The arguments are FFA's own (FfaMode.cs:2112).</summary>
+        internal static FenceSend FfaRoundSend(int winnerTeam)
+        {
+            if (!PhotonNetwork.InRoom || PhotonNetwork.OfflineMode) return FenceSend.Vanilla;
+            int[] args = { winnerTeam, winnerTeam, 0, 0, 0, 0 };
+            var sides = new List<int>();
+            int other = 0;
+            var pm = PlayerManager.instance;
+            if (pm != null && pm.players != null)
+                foreach (var p in pm.players)
+                {
+                    if (p == null) continue;
+                    int r = FfaMode.RoundsFor(p.teamID);
+                    sides.Add(r);
+                    if (p.teamID != winnerTeam && r > other) other = r;
+                }
+            if (RecordOpen) return SendContinuation(args, sides, _ffaEpoch, _ffaHandoff);
+            if (winnerTeam < 0) return FenceSend.Vanilla;
+            int wRounds = FfaMode.RoundsFor(winnerTeam);
+            if (!LimitlessFenceRules.RoundEndsGame(FfaMode.PointsFor(winnerTeam), wRounds, FfaMode.PointsToWinRound, FfaMode.RoundsToWin))
+                return FenceSend.Vanilla;
+            return SendDecision(args, FfaMode.RoundsToWin, winnerTeam, wRounds, other, _ffaEpoch, _ffaHandoff);
+        }
+
+        /// <summary>4.7: the decision at the round that would end the game at the
+        /// base. All five tests hold, or vanilla's own message goes out and the
+        /// game ends at the base as today. The record is created by each seat's
+        /// handler when the message arrives, the master's own echo included.</summary>
+        private static FenceSend SendDecision(int[] args, int baseTarget, int winner, int winnerRounds, int otherRounds,
+                                              int epochCaptured, int handoffCaptured)
+        {
+            string gid = _ledger.CurrentGid;
+            var d = new LimitlessFenceRules.DecisionInputs
+            {
+                MaySend = LimitlessFenceRules.MaySend(PhotonNetwork.IsMasterClient, _ledger.IsLiveGid(gid), false,
+                                                      _epoch, epochCaptured, _handoff, handoffCaptured),
+                LiveGid = gid,
+                HasRecord = _hasRecord,
+                FighterOptIns = FighterOptIns(),
+                ActorCapabilities = ActorCapabilities(),
+                MasterVersion = OwnCapability(),
+                HoldHasHeldSeat = TeamHoldLoop.FenceHolds(),
+                HoldHasPendingCut = TeamHold.Cut != null,
+                SeriesFollows = LimitlessFenceRules.SeriesFollows(GameStateWatcher.MatchIsRanked, !FfaMode.EngineActive()),
+            };
+            var why = LimitlessFenceRules.DecideContinuation(d);
+            if (why != LimitlessFenceRules.Decision.Continue)
+            {
+                if (_answerLogged.Add(why.ToString()))
+                    Plugin.Log.LogInfo("[LIMIT] decision: the game ends at the base (" + why + ")");
+                return FenceSend.Vanilla;
+            }
+            var rec = LimitlessFenceRules.DecisionRecord(gid, baseTarget, winner, winnerRounds, otherRounds,
+                                                         GameStateWatcher.RankedCodeRoom1v1InProgress);
+            var roster = ReplicatedFighters().ToArray();
+            if (!RaiseFence(LimitlessFenceRules.EncodeRecord(rec, roster, args, PhotonNetwork.ServerTimestamp)))
+            {
+                Plugin.Log.LogWarning("[LIMIT] decision: the message did not go out; the game ends at the base");
+                return FenceSend.Vanilla;
+            }
+            Plugin.Log.LogInfo("[LIMIT] decision sent: target=" + rec.TargetRounds + " fighters=" + roster.Length);
+            return FenceSend.Sent;
+        }
+
+        /// <summary>4.4 and 4.7: every round past the base. MaySend runs at the
+        /// send. The master re-reads the opt-ins, the capabilities and its
+        /// handoff count (lesson 273): a change in any is an end, and once an end
+        /// is decided every later message carries the same record (5.1).</summary>
+        private static FenceSend SendContinuation(int[] args, IList<int> sides, int epochCaptured, int handoffCaptured)
+        {
+            bool may = LimitlessFenceRules.MaySend(PhotonNetwork.IsMasterClient,
+                _ledger.IsLiveGid(_record.Gid) && string.Equals(_record.Gid, _ledger.CurrentGid, StringComparison.Ordinal),
+                _state == LimitlessFenceRules.FencePhase.PhaseEnded, _epoch, epochCaptured, _handoff, handoffCaptured);
+            if (!may)
+            {
+                if (_answerLogged.Add("withheld"))
+                    Plugin.Log.LogWarning("[LIMIT] a round message was withheld: MaySend refused");
+                return FenceSend.Withheld;
+            }
+            bool mustEnd = LimitlessFenceRules.MustEnd(FighterOptIns(), _record.Gid, ActorCapabilities(), OwnCapability(),
+                                                       _handoff, _handoffAtRecord);
+            var rec = LimitlessFenceRules.NextSendRecord(_record, mustEnd, sides);
+            if (rec.EndFlag && !_record.EndFlag)
+                Plugin.Log.LogInfo("[LIMIT] the master ends the continuation: end target " + rec.TargetRounds);
+            if (!RaiseFence(LimitlessFenceRules.EncodeRecord(rec, null, args, PhotonNetwork.ServerTimestamp)))
+            {
+                Plugin.Log.LogWarning("[LIMIT] a round message did not go out");
+                return FenceSend.Withheld;
+            }
+            return FenceSend.Sent;
+        }
+
         // ------------------------------------------------------------------ the message (4.4, 4.7)
 
         /// <summary>The fence's message: a raised event (47, 49 and 51-58 are
@@ -497,6 +683,7 @@ namespace CompetitiveRounds
             _state = LimitlessFenceRules.NextState(create ? LimitlessFenceRules.FencePhase.PhaseLive : _state, rec.EndFlag);
             _record = rec;
             _hasRecord = true;
+            if (create) _handoffAtRecord = _handoff;   // MustEnd's handoff count at the decision, on every seat
             if (create)
                 Plugin.Log.LogInfo("[LIMIT] record created: gid=" + GidPrefix(rec.Gid) + " target=" + rec.TargetRounds
                     + " base=" + rec.BaseWinner + ":" + rec.BaseWinnerRounds + "-" + rec.BaseOtherRounds + "/" + rec.BaseTarget);
@@ -636,6 +823,45 @@ namespace CompetitiveRounds
             if (original != null) return exception;
             if (exception == null) LimitlessFence.RawRoundLive = true;
             return VanillaFixSupport.Cleanup("LimitlessFence raw round", exception);
+        }
+    }
+
+    /// <summary>
+    /// v4 4.7: the GM master's decision at the round that would end the game at
+    /// the base, and every round past it. At Priority.Last it runs after every
+    /// other PlayerDied prefix and acts only when vanilla's body would still run
+    /// (__runOriginal: FFA's engine, the spectator gate or the transition fix may
+    /// have skipped it). When the fence sends or withholds the round, vanilla's
+    /// body is skipped, and this runs that body's one other effect, the
+    /// slow-down (GM_ArmsRace:505-506). A fault runs vanilla's body, as today.
+    /// </summary>
+    [HarmonyPatch(typeof(GM_ArmsRace), "PlayerDied")]
+    internal static class LimitlessFence_PlayerDied_Patch
+    {
+        [HarmonyPriority(Priority.Last)]
+        private static bool Prefix(GM_ArmsRace __instance, bool __runOriginal)
+        {
+            if (!__runOriginal) return false;
+            LimitlessFence.FenceSend sent;
+            try { sent = LimitlessFence.GmRoundSend(__instance); }
+            catch (Exception ex)
+            {
+                Plugin.Log.LogError("[LIMIT] the round send faulted: " + ex.Message);
+                return true;
+            }
+            if (sent == LimitlessFence.FenceSend.Vanilla) return true;
+            try { if (TimeHandler.instance != null) TimeHandler.instance.DoSlowDown(); } catch { }
+            return false;
+        }
+
+        /// <summary>#83: the fence advertises its capability only while this
+        /// prefix attached (LimitlessFence.PlayerDiedLive).</summary>
+        [HarmonyCleanup]
+        private static Exception Cleanup(MethodBase original, Exception exception)
+        {
+            if (original != null) return exception;
+            if (exception == null) LimitlessFence.PlayerDiedLive = true;
+            return VanillaFixSupport.Cleanup("LimitlessFence player died", exception);
         }
     }
 }

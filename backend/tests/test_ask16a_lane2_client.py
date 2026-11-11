@@ -121,6 +121,18 @@ FENCE_RULES = (
     'frame: a frame nested in another restores each level',
     'frame: an exception inside the call restores the frame',
     'frame: the exception still reaches the caller',
+    "decision round: the winner's round point at 4 of 5 rounds ends the game",
+    'decision round: one point per round, the round that reaches the target ends it',
+    'decision round: a point that completes no round ends nothing',
+    'decision round: a round short of the target ends nothing',
+    "decision round: a side already past the target still ends, as vanilla's test reads",
+    'decision record: target base + 50, end clear, the base result at the send',
+    'next send: a live record that need not end is unchanged',
+    'next send: a live record that must end carries the end flag and the end target',
+    'next send: a terminating record repeats itself, whatever the re-read finds',
+    'series: an unrated game has no series to follow',
+    'series: a rated FFA game keeps no series',
+    'series: a rated game of a mode that keeps one is followed, read closed',
 )
 
 FENCE_MUTANTS = (
@@ -157,6 +169,12 @@ FENCE_MUTANTS = (
     'the frame is restored without a finally',
     'the frame is cleared, not restored',
     'the exception is swallowed',
+    'a round ends the game only past the target',
+    'a round ends the game without completing a round',
+    'the end ignores the re-read',
+    'a terminating record takes a new end target',
+    'a rated game is never followed',
+    'the series ignores the mode',
 )
 
 CARRIER_FIELDS = (
@@ -195,7 +213,7 @@ def test_the_fence_suite_ran_exactly_its_cases_and_passed(harness_run):
 
 
 def test_the_pinned_names_are_distinct():
-    assert len(set(FENCE_CASES)) == len(FENCE_CASES) == 93 + 33 + 11
+    assert len(set(FENCE_CASES)) == len(FENCE_CASES) == 105 + 39 + 11
 
 
 # -- the fence's Unity- and Photon-side lines, as source claims --------------
@@ -518,7 +536,7 @@ def claim_the_capability_is_staged_out_of_a_room(files):
     out = []
     lf = files[LF]
     body = _code(lf, "internal static void StageFenceCapability(string source)")
-    if not _in_order(body, ["if (_staged || _stageFailedPermanently) return;", "if (!GameStartLive || !RawRoundLive)",
+    if not _in_order(body, ["if (_staged || _stageFailedPermanently) return;", "if (!GameStartLive || !RawRoundLive || !PlayerDiedLive)",
                             "if (!_hooked) return;", "if (!Plugin.compatCheckComplete) return;", "if (PhotonNetwork.InRoom)",
                             "string version = LimitlessBounds.Version;",
                             "local.SetCustomProperties(new ExitGames.Client.Photon.Hashtable { { CapabilityProp, version } });"]):
@@ -554,6 +572,148 @@ def claim_an_uncovered_case_leaves_once(files):
     return out
 
 
+def claim_the_gm_decision_prefix(files):
+    """4.7, GM: the master's PlayerDied prefix runs at Priority.Last and acts only
+    when vanilla's body would still run (__runOriginal). When the fence sends or
+    withholds the round, vanilla's body is skipped and its slow-down runs here. A
+    fault runs vanilla's body. The capability needs this patch attached."""
+    out = []
+    lf = files[LF]
+    if ('[HarmonyPatch(typeof(GM_ArmsRace), "PlayerDied")]\n    internal static class LimitlessFence_PlayerDied_Patch\n'
+            '    {\n        [HarmonyPriority(Priority.Last)]') not in _code(lf):
+        out.append("the decision prefix is not PlayerDied at Priority.Last")
+    pre = _code(lf, "private static bool Prefix(GM_ArmsRace __instance, bool __runOriginal)")
+    if not _in_order(pre, ["if (!__runOriginal) return false;", "try { sent = LimitlessFence.GmRoundSend(__instance); }",
+                           'ex.Message);\n                return true;', "if (sent == LimitlessFence.FenceSend.Vanilla) return true;",
+                           "TimeHandler.instance.DoSlowDown(); } catch { }\n            return false;"]):
+        out.append("the prefix does not defer, send, then skip vanilla's body with its slow-down")
+    if _code(lf).count("if (exception == null) LimitlessFence.PlayerDiedLive = true;") != 1:
+        out.append("PlayerDiedLive is not set only by a clean attach")
+    return out
+
+
+GM_SEND = [
+    "if (gm == null || FfaMode.EngineActive()) return FenceSend.Vanilla;",
+    "|| !PhotonNetwork.IsMasterClient) return FenceSend.Vanilla;",
+    "if (pm == null || pm.TeamsAlive() >= 2) return FenceSend.Vanilla;",
+    "int[] args = { pm.GetOtherTeam(winner), winner, gm.p1Points, gm.p2Points, gm.p1Rounds, gm.p2Rounds };",
+    "if (RecordOpen) return SendContinuation(args, new[] { gm.p1Rounds, gm.p2Rounds }, _epoch, _handoff);",
+    "if (!LimitlessFenceRules.RoundEndsGame(winner == 0 ? gm.p1Points : gm.p2Points, wRounds, ptw, gm.roundsToWinGame))",
+    "return SendDecision(args, gm.roundsToWinGame, winner, wRounds, winner == 0 ? gm.p2Rounds : gm.p1Rounds, _epoch, _handoff);",
+]
+
+
+def claim_the_gm_round_send(files):
+    """4.7, GM: on the master only, at a round end, with vanilla's own arguments
+    (GM_ArmsRace:505-510). Past the base every round goes through the fence; at
+    the round that would end the game at the base, the decision; otherwise
+    vanilla's message."""
+    if _in_order(_code(files[LF], "internal static FenceSend GmRoundSend(GM_ArmsRace gm)"), GM_SEND):
+        return []
+    return ["the GM send's tests or arguments are out of order"]
+
+
+def claim_the_ffa_round_send(files):
+    """4.4 and 4.7, FFA: the point is scheduled with the epoch and the handoff
+    count before FFA's yield. At FFA's send, after the map-scale count, the fence
+    sends in place of vanilla's message, MaySend at the send. When it withholds,
+    nothing goes out and the latch is released; a fault sends vanilla's."""
+    out = []
+    ffa, lf = files["FfaMode.cs"], files[LF]
+    if not _in_order(_code(ffa, "public static void HandlePlayerDied(GM_ArmsRace gm)"), [
+            "if (!FfaLateEntry.MasterMaySend() || pointLatched || isTransitioning) return;",
+            "LimitlessFence.NoteFfaPointScheduled();", "pointLatched = true;", "StartCoroutine(ResolvePointEndOfFrame(gm));"]):
+        out.append("the point is not captured where it is scheduled")
+    if not _in_order(_code(ffa, "private static void ResolvePointNow(GM_ArmsRace gm)"), [
+            "try { FfaMapScale.MasterPublishCount(FfaLateEntry.PointK + 1); } catch { }",
+            "try { fence = LimitlessFence.FfaRoundSend(winnerTeam); }", "fence = LimitlessFence.FenceSend.Vanilla;",
+            "if (fence == LimitlessFence.FenceSend.Withheld) pointLatched = false;",
+            "if (fence != LimitlessFence.FenceSend.Vanilla) return;",
+            'gm.view.RPC("RPCA_NextRound", RpcTarget.All, winnerTeam, winnerTeam, 0, 0, 0, 0);']):
+        out.append("FFA's send does not defer to the fence after the map-scale count")
+    if not _in_order(_code(lf, "internal static FenceSend FfaRoundSend(int winnerTeam)"), [
+            "int[] args = { winnerTeam, winnerTeam, 0, 0, 0, 0 };",
+            "if (RecordOpen) return SendContinuation(args, sides, _ffaEpoch, _ffaHandoff);",
+            "if (winnerTeam < 0) return FenceSend.Vanilla;",
+            "if (!LimitlessFenceRules.RoundEndsGame(FfaMode.PointsFor(winnerTeam), wRounds, FfaMode.PointsToWinRound, FfaMode.RoundsToWin))",
+            "return SendDecision(args, FfaMode.RoundsToWin, winnerTeam, wRounds, other, _ffaEpoch, _ffaHandoff);"]):
+        out.append("the FFA fence send's tests or arguments are out of order")
+    if not _in_order(_code(lf, "internal static void NoteFfaPointScheduled()"), ["_ffaEpoch = _epoch;", "_ffaHandoff = _handoff;"]):
+        out.append("the capture does not take the epoch and the handoff count")
+    return out
+
+
+DECIDE = [
+    "MaySend = LimitlessFenceRules.MaySend(PhotonNetwork.IsMasterClient, _ledger.IsLiveGid(gid), false,",
+    "_epoch, epochCaptured, _handoff, handoffCaptured),", "HasRecord = _hasRecord,", "FighterOptIns = FighterOptIns(),",
+    "ActorCapabilities = ActorCapabilities(),", "MasterVersion = OwnCapability(),",
+    "HoldHasHeldSeat = TeamHoldLoop.FenceHolds(),", "HoldHasPendingCut = TeamHold.Cut != null,",
+    "SeriesFollows = LimitlessFenceRules.SeriesFollows(GameStateWatcher.MatchIsRanked, !FfaMode.EngineActive()),",
+    "var why = LimitlessFenceRules.DecideContinuation(d);", "if (why != LimitlessFenceRules.Decision.Continue)",
+    'why + ")");\n                return FenceSend.Vanilla;', "GameStateWatcher.RankedCodeRoom1v1InProgress);", "var roster = ReplicatedFighters().ToArray();",
+    "if (!RaiseFence(LimitlessFenceRules.EncodeRecord(rec, roster, args, PhotonNetwork.ServerTimestamp)))",
+]
+
+
+def claim_the_decision_reads_its_inputs(files):
+    """4.7: the decision's five tests read replicated inputs and the hold writer's
+    state; D5 is read closed (integrator ruling 23:45Z). The message carries the
+    decision record, the decision roster, vanilla's arguments and the sender's
+    ServerTimestamp. A raise that does not go out ends the game at the base."""
+    if _in_order(_code(files[LF], "private static FenceSend SendDecision("), DECIDE):
+        return []
+    return ["the decision's inputs or its message are not as 4.7 reads them"]
+
+
+CONT = [
+    "bool may = LimitlessFenceRules.MaySend(PhotonNetwork.IsMasterClient,",
+    "_state == LimitlessFenceRules.FencePhase.PhaseEnded, _epoch, epochCaptured, _handoff, handoffCaptured);",
+    "if (!may)", 'MaySend refused");\n                return FenceSend.Withheld;',
+    "bool mustEnd = LimitlessFenceRules.MustEnd(FighterOptIns(), _record.Gid, ActorCapabilities(), OwnCapability(),",
+    "_handoff, _handoffAtRecord);", "var rec = LimitlessFenceRules.NextSendRecord(_record, mustEnd, sides);",
+    "if (!RaiseFence(LimitlessFenceRules.EncodeRecord(rec, null, args, PhotonNetwork.ServerTimestamp)))",
+]
+
+
+def claim_every_later_round_rereads(files):
+    """4.4, 4.7 and 5.1: every round past the base. MaySend runs with the
+    captured epoch and handoff count. The master re-reads the opt-ins, the
+    capabilities and its handoff count against the count its own handler took
+    when it created the record; once an end is decided every later message
+    carries the same record. The message carries the sender's stamp."""
+    out = []
+    lf = files[LF]
+    if not _in_order(_code(lf, "private static FenceSend SendContinuation("), CONT):
+        out.append("a later round's send is not MaySend, the re-read, then the record")
+    if "if (create) _handoffAtRecord = _handoff;" not in _code(lf, "private static void InstallRecord("):
+        out.append("the handoff count is not taken when the record is created")
+    return out
+
+
+def claim_the_opt_in_writer(files):
+    """4.7, D4 and D6: lane 3's radio calls SetOptIn. cr_limitless holds the live
+    gid only, and is written only when it differs from the relayed value. It
+    clears at the seat's own game start (the radio resets to off) and at the
+    join, and follows a gid change."""
+    out = []
+    lf = files[LF]
+    if not _in_order(_code(lf, "internal static void SetOptIn(bool on)"), ["_optInWanted = on;", 'WriteOptIn("radio");']):
+        out.append("the radio does not write")
+    if not _in_order(_code(lf, "private static void WriteOptIn(string why)"), [
+            "if (!PhotonNetwork.InRoom || PhotonNetwork.OfflineMode) return;",
+            "string want = _optInWanted && _ledger.IsLiveGid(gid) ? gid : null;",
+            "if (string.Equals(have as string, want, StringComparison.Ordinal)) return;",
+            "local.SetCustomProperties(new ExitGames.Client.Photon.Hashtable { { OptInKey, want } });"]):
+        out.append("the write is not the live gid, in a room, on a change")
+    for sig, steps in (("internal static void NoteOwnGameStart()", ["_optInWanted = false;", 'WriteOptIn("game start");']),
+                       ("internal static void NoteJoinedRoom()", ["_optInWanted = false;", 'TryAdopt(RoomGid(), "join");', 'WriteOptIn("join");']),
+                       ("private static void TryAdopt(string value, string why)", ['RetireRecord("new gid");', 'WriteOptIn("new gid");']),
+                       ("internal static void NoteLeftRoom()", ["_optInWanted = false;"])):
+        if not _in_order(_code(lf, sig), steps):
+            out.append("%s does not reset or rewrite the opt-in" % sig)
+    return out
+
+
 CLAIMS = {
     "game_start_prefix": claim_the_game_start_prefix,
     "stamp_before_join": claim_the_gid_is_stamped_before_the_join,
@@ -570,6 +730,12 @@ CLAIMS = {
     "mirror_cas": claim_the_mirror_is_a_compare_and_set,
     "capability": claim_the_capability_is_staged_out_of_a_room,
     "uncovered_leave": claim_an_uncovered_case_leaves_once,
+    "gm_prefix": claim_the_gm_decision_prefix,
+    "gm_send": claim_the_gm_round_send,
+    "ffa_send": claim_the_ffa_round_send,
+    "decision_inputs": claim_the_decision_reads_its_inputs,
+    "later_rounds": claim_every_later_round_rereads,
+    "opt_in": claim_the_opt_in_writer,
 }
 
 GATE = "                if (SpectatorPatchSupport.Suppress) return;\n"
@@ -611,6 +777,8 @@ OPTS = "            var opts = new Photon.Realtime.RaiseEventOptions"
 ME = "                var me = PhotonNetwork.LocalPlayer;\n"
 ST = "                var st = PhotonNetwork.NetworkClientState;\n"
 LATCH = "            _uncoveredLeaving = true;\n"
+FFA_CAPTURE = "                LimitlessFence.NoteFfaPointScheduled();   // Ask 16(a) lane 2 (v4 4.4): MaySend at the send compares with this\n"
+PUBLISH = "                try { FfaMapScale.MasterPublishCount(FfaLateEntry.PointK + 1); } catch { }\n"
 
 
 def _drop(fname, line):
@@ -698,7 +866,7 @@ MUTANTS = [
      _drop(LF, "                        { Photon.Realtime.GamePropertyKey.MasterClientId, me.ActorNumber },\n")),
     ("mirror_cas", "the mirror does not expect the gid", _drop(LF, "                        { GidKey, rec.Gid },\n")),
     ("capability", "the capability is written in a room", [(LF, "                if (PhotonNetwork.InRoom)\n", "                if (false)\n")]),
-    ("capability", "the capability is staged without its patches", [(LF, "if (!GameStartLive || !RawRoundLive)", "if (false)")]),
+    ("capability", "the capability is staged without its patches", [(LF, "if (!GameStartLive || !RawRoundLive || !PlayerDiedLive)", "if (false)")]),
     ("capability", "a failed attach counts live",
      [(LF, "if (exception == null) LimitlessFence.RawRoundLive = true;", "LimitlessFence.RawRoundLive = true;")]),
     ("capability", "the tick stages before it hooks", [("Plugin.cs", HOOK + STAGE, STAGE + HOOK)]),
@@ -710,6 +878,72 @@ MUTANTS = [
      [(LF, 'if (RoomActors.LocalIsSpectator) SpectatorSync.LeaveToMenu("limitless: an uncovered fence message");', "if (false) { }")]),
     ("uncovered_leave", "room exit keeps the leave latched",
      [(LF, '            RetireRecord("room exit");\n            _uncoveredLeaving = false;\n', '            RetireRecord("room exit");\n')]),
+    ("gm_prefix", "the decision prefix runs at First",
+     [(LF, "    internal static class LimitlessFence_PlayerDied_Patch\n    {\n        [HarmonyPriority(Priority.Last)]\n",
+       "    internal static class LimitlessFence_PlayerDied_Patch\n    {\n        [HarmonyPriority(Priority.First)]\n")]),
+    ("gm_prefix", "the prefix ignores another prefix's skip", _drop(LF, "            if (!__runOriginal) return false;\n")),
+    ("gm_prefix", "vanilla's send also runs when the fence sent",
+     [(LF, "if (sent == LimitlessFence.FenceSend.Vanilla) return true;", "return true;")]),
+    ("gm_prefix", "a fault skips vanilla's body",
+     [(LF, 'faulted: " + ex.Message);\n                return true;\n', 'faulted: " + ex.Message);\n                return false;\n')]),
+    ("gm_prefix", "the take-over skips the slow-down",
+     _drop(LF, "            try { if (TimeHandler.instance != null) TimeHandler.instance.DoSlowDown(); } catch { }\n")),
+    ("gm_prefix", "a failed attach counts the sender live",
+     [(LF, "if (exception == null) LimitlessFence.PlayerDiedLive = true;", "LimitlessFence.PlayerDiedLive = true;")]),
+    ("gm_send", "the GM sender runs off the master",
+     [(LF, "PhotonNetwork.OfflineMode || !PhotonNetwork.IsMasterClient) return FenceSend.Vanilla;",
+       "PhotonNetwork.OfflineMode) return FenceSend.Vanilla;")]),
+    ("gm_send", "a round past the base goes out as vanilla's", [(LF, GM_SEND[4], "")]),
+    ("gm_send", "the GM decision skips the end test", [(LF, GM_SEND[5], "if (false)")]),
+    ("gm_send", "the GM arguments swap the teams",
+     [(LF, "{ pm.GetOtherTeam(winner), winner,", "{ winner, pm.GetOtherTeam(winner),")]),
+    ("ffa_send", "FFA schedules without the capture", _drop("FfaMode.cs", FFA_CAPTURE)),
+    ("ffa_send", "FFA's later rounds compare at the send",
+     [(LF, "return SendContinuation(args, sides, _ffaEpoch, _ffaHandoff);", "return SendContinuation(args, sides, _epoch, _handoff);")]),
+    ("ffa_send", "a withheld round keeps the latch",
+     _drop("FfaMode.cs", "                if (fence == LimitlessFence.FenceSend.Withheld) pointLatched = false;\n")),
+    ("ffa_send", "the fence's message and vanilla's both go out",
+     _drop("FfaMode.cs", "                if (fence != LimitlessFence.FenceSend.Vanilla) return;\n")),
+    ("ffa_send", "the fence sends before the map-scale count",
+     [("FfaMode.cs", PUBLISH + "                // Ask 16(a) lane 2 (v4 4.4, 4.7)", "                // Ask 16(a) lane 2 (v4 4.4, 4.7)"),
+      ("FfaMode.cs", "if (fence != LimitlessFence.FenceSend.Vanilla) return;\n", "if (fence != LimitlessFence.FenceSend.Vanilla) return;\n" + PUBLISH)]),
+    ("ffa_send", "a fault withholds the round",
+     [("FfaMode.cs", "fence = LimitlessFence.FenceSend.Vanilla;", "fence = LimitlessFence.FenceSend.Withheld;")]),
+    ("ffa_send", "the FFA decision skips the end test",
+     [(LF, "if (!LimitlessFenceRules.RoundEndsGame(FfaMode.PointsFor(winnerTeam), wRounds, FfaMode.PointsToWinRound, FfaMode.RoundsToWin))",
+       "if (false)")]),
+    ("decision_inputs", "the decision skips MaySend", [(LF, DECIDE[0], "MaySend = true || " + DECIDE[0][len("MaySend = "):])]),
+    ("decision_inputs", "the decision ignores the cut", [(LF, DECIDE[7], "HoldHasPendingCut = false,")]),
+    ("decision_inputs", "the decision ignores a held seat", [(LF, DECIDE[6], "HoldHasHeldSeat = false,")]),
+    ("decision_inputs", "the decision ignores the series", [(LF, DECIDE[8], "SeriesFollows = false,")]),
+    ("decision_inputs", "the decision reads only its own capability",
+     [(LF, DECIDE[4], "ActorCapabilities = new[] { OwnCapability() },")]),
+    ("decision_inputs", "the decision message carries no roster",
+     [(LF, "EncodeRecord(rec, roster, args, PhotonNetwork.ServerTimestamp)", "EncodeRecord(rec, null, args, PhotonNetwork.ServerTimestamp)")]),
+    ("decision_inputs", "the decision message is stamped 0",
+     [(LF, "EncodeRecord(rec, roster, args, PhotonNetwork.ServerTimestamp)", "EncodeRecord(rec, roster, args, 0)")]),
+    ("decision_inputs", "a declined decision still sends",
+     [(LF, 'the base (" + why + ")");\n                return FenceSend.Vanilla;\n', 'the base (" + why + ")");\n')]),
+    ("later_rounds", "a later round skips MaySend", [(LF, "            if (!may)\n", "            if (false)\n")]),
+    ("later_rounds", "the re-read is skipped", [(LF, CONT[6], "var rec = _record;")]),
+    ("later_rounds", "MustEnd compares the handoff count with itself", [(LF, CONT[5], "_handoff, _handoff);")]),
+    ("later_rounds", "MaySend compares the epoch with itself",
+     [(LF, CONT[1], CONT[1].replace("_epoch, epochCaptured,", "_epoch, _epoch,"))]),
+    ("later_rounds", "the handoff count is retaken at every update",
+     [(LF, "if (create) _handoffAtRecord = _handoff;", "_handoffAtRecord = _handoff;")]),
+    ("later_rounds", "a later round is stamped 0",
+     [(LF, "EncodeRecord(rec, null, args, PhotonNetwork.ServerTimestamp)", "EncodeRecord(rec, null, args, 0)")]),
+    ("opt_in", "the opt-in names any gid",
+     [(LF, "string want = _optInWanted && _ledger.IsLiveGid(gid) ? gid : null;", "string want = _optInWanted ? gid : null;")]),
+    ("opt_in", "the radio survives the game start",
+     _drop(LF, "            _optInWanted = false;   // D6: the radio resets to off at every game start\n")),
+    ("opt_in", "a gid change keeps the old opt-in", _drop(LF, '            WriteOptIn("new gid");   // the opt-in follows a gid change\n')),
+    ("opt_in", "the join keeps a carried-in value", _drop(LF, '            WriteOptIn("join");   // clears a value the join carried in\n')),
+    ("opt_in", "the opt-in is written on every call",
+     _drop(LF, "            if (string.Equals(have as string, want, StringComparison.Ordinal)) return;\n")),
+    ("opt_in", "the radio does not write", _drop(LF, '            WriteOptIn("radio");\n')),
+    ("capability", "the capability is staged without the sender's patch",
+     [(LF, " || !RawRoundLive || !PlayerDiedLive)", " || !RawRoundLive)")]),
 ]
 
 NEUTRAL = "            // control: a neutral line\n"
@@ -729,6 +963,14 @@ CONTROLS = [
     ("mirror_cas", [(LF, ME, NEUTRAL + ME)]),
     ("capability", [(LF, ST, NEUTRAL + ST)]),
     ("uncovered_leave", [(LF, LATCH, NEUTRAL + LATCH)]),
+    ("gm_prefix", [(LF, "            if (!__runOriginal) return false;\n", NEUTRAL + "            if (!__runOriginal) return false;\n")]),
+    ("gm_send", [(LF, "            if (pm == null || pm.TeamsAlive() >= 2) return FenceSend.Vanilla;\n",
+                  NEUTRAL + "            if (pm == null || pm.TeamsAlive() >= 2) return FenceSend.Vanilla;\n")]),
+    ("ffa_send", [("FfaMode.cs", "                LimitlessFence.FenceSend fence;\n", NEUTRAL + "                LimitlessFence.FenceSend fence;\n")]),
+    ("decision_inputs", [(LF, "            var why = LimitlessFenceRules.DecideContinuation(d);\n",
+                          NEUTRAL + "            var why = LimitlessFenceRules.DecideContinuation(d);\n")]),
+    ("later_rounds", [(LF, "            bool mustEnd = ", NEUTRAL + "            bool mustEnd = ")]),
+    ("opt_in", [(LF, "            string want = _optInWanted", NEUTRAL + "            string want = _optInWanted")]),
 ]
 
 
