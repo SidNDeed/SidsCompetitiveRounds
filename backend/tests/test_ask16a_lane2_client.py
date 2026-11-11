@@ -1118,6 +1118,67 @@ def claim_a_receiver_applies_one_close_per_phase(files):
     return out
 
 
+FLE = "FfaLateEntry.cs"
+
+
+def claim_the_late_items_resume_under_their_ticket(files):
+    """4.5 (R), Table A's late-entry rows that a tick resumes: the call-in hold
+    captures its ticket where it is made and CallInHoldTick replays the call-in
+    only under it; the pending snapshot captures its ticket where it is kept and
+    CheckPendingSnapshot runs only under it. A stopped item is dropped."""
+    out = []
+    fle = files[FLE]
+    if not _in_order(_code(fle, "private sealed class Hold"),
+                     ["public float Rt;", "public LimitlessFence.ResumeTicket Ticket = LimitlessFence.CaptureTicket();"]):
+        out.append("the call-in hold captures no ticket")
+    if not _in_order(_code(fle, "private static void CallInHoldTick("),
+                     ["var h = _hold;", "if (h == null) return;",
+                      'if (!LimitlessFence.ItemResumes(h.Ticket, "call-in hold")) { _hold = null; return; }',
+                      "MapManager.instance.RPCA_CallInNewMapAndMovePlayers(h.MapId);"]):
+        out.append("the call-in hold is replayed without its ticket")
+    if not _in_order(_code(fle), ["_pendingSnap = a;", "_pendingSnapTicket = LimitlessFence.CaptureTicket();",
+                                  "_snapK = N(a, 25, -1);"]):
+        out.append("the pending snapshot captures no ticket")
+    if not _in_order(_code(fle, "private static void CheckPendingSnapshot("),
+                     ["if (a == null) return;",
+                      'if (!LimitlessFence.ItemResumes(_pendingSnapTicket, "pending snapshot")) { _pendingSnap = null; return; }',
+                      "string digest = SnapshotDigest(a, g, k, level);"]):
+        out.append("the pending snapshot is checked without its ticket")
+    if not _in_order(_code(files[LF], "internal static bool ItemResumes("),
+                     ["if (TicketResumes(t)) return true;", "NoteItemStopped(name, t);", "return false;"]):
+        out.append("a retained item does not resume under TicketResumes")
+    return out
+
+
+def claim_the_late_sends_answer_to_their_ticket(files):
+    """4.4 (S), Table A's late-entry sends: the call-in stamp, after the
+    boundary's waits, sends only under the ticket MasterBoundary captured at its
+    entry; a stored late request is answered at the boundary only under the
+    ticket it was received under (captured past the record's closed answer),
+    and the tickets clear with the requests."""
+    out = []
+    fle = files[FLE]
+    if not _in_order(_code(fle, "internal static IEnumerator MasterBoundary("),
+                     ["int g = FfaMode.GameNumber, k = PointK, self = OwnActor();",
+                      "var sendTicket = LimitlessFence.CaptureTicket();", "int actor = kv.Key;",
+                      "if (!LimitlessFence.TicketSends(LateTicket(actor), MasterMaySend()))",
+                      "if (waits >= 2)", "if (!MasterMaySend()) yield break;",
+                      "if (!LimitlessFence.TicketSends(sendTicket, true)) yield break;",
+                      "Raise(EVT_CALLIN, new object[] { stamp.Lobby8, g, k, n, stamp.Chain, result },"]):
+        out.append("the boundary's sends do not answer to their tickets")
+    if not _in_order(_code(fle, "internal static void OnLateRequest(int sender, int seq)"),
+                     ['if (LimitlessFence.RecordOpen) { Refused("limitless", sender); SendSnapshot(sender, seq, true); return; }',
+                      "_lateTickets[sender] = LimitlessFence.CaptureTicket();",
+                      "if (verdict == FfaReadmitEntryRules.LateReq.Accept) _lateRequests[sender] = seq;"]):
+        out.append("a stored late request keeps no ticket")
+    if not _in_order(_code(fle, "private static LimitlessFence.ResumeTicket LateTicket("),
+                     ["return _lateTickets.TryGetValue(actor, out t) ? t : LimitlessFence.CaptureTicket();"]):
+        out.append("a stored request is not read with its own ticket")
+    if not _in_order(_code(fle), ["_lateRequests.Clear();", "_lateTickets.Clear();"]):
+        out.append("the late tickets outlive their requests")
+    return out
+
+
 CLAIMS = {
     "game_start_prefix": claim_the_game_start_prefix,
     "stamp_before_join": claim_the_gid_is_stamped_before_the_join,
@@ -1153,6 +1214,8 @@ CLAIMS = {
     "pick_sends": claim_the_pick_sends_answer_to_their_ticket,
     "pick_period": claim_a_new_master_period_issues_a_fresh_epoch,
     "pick_receiver": claim_a_receiver_applies_one_close_per_phase,
+    "late_items": claim_the_late_items_resume_under_their_ticket,
+    "late_sends": claim_the_late_sends_answer_to_their_ticket,
 }
 
 GATE = "                if (SpectatorPatchSupport.Suppress) return;\n"
@@ -1542,6 +1605,28 @@ MUTANTS = [
      [("FfaMode.cs", 'older-build form)");\n                        break;\n', 'older-build form)");\n')]),
     ("pick_receiver", "the phase does not count its cycle",
      [("FfaMode.cs", "            cycleNumber++;\n            int cycle = cycleNumber;\n", "            int cycle = cycleNumber;\n")]),
+    ("late_items", "the call-in hold captures no ticket",
+     [("FfaLateEntry.cs", "public LimitlessFence.ResumeTicket Ticket = LimitlessFence.CaptureTicket();",
+       "public LimitlessFence.ResumeTicket Ticket;")]),
+    ("late_items", "the call-in hold is replayed unguarded",
+     [("FfaLateEntry.cs", 'if (!LimitlessFence.ItemResumes(h.Ticket, "call-in hold")) { _hold = null; return; }', "")]),
+    ("late_items", "the pending snapshot captures no ticket",
+     [("FfaLateEntry.cs", "_pendingSnapTicket = LimitlessFence.CaptureTicket();", "")]),
+    ("late_items", "the pending snapshot is checked unguarded",
+     [("FfaLateEntry.cs", 'if (!LimitlessFence.ItemResumes(_pendingSnapTicket, "pending snapshot")) { _pendingSnap = null; return; }', "")]),
+    ("late_items", "a stopped retained item resumes",
+     [(LF, "            if (TicketResumes(t)) return true;\n            NoteItemStopped(name, t);\n            return false;\n",
+       "            return true;\n")]),
+    ("late_sends", "the boundary captures no ticket",
+     [("FfaLateEntry.cs", "            var sendTicket = LimitlessFence.CaptureTicket();   // v4 4.4: the stamp's S, after the waits\n", "")]),
+    ("late_sends", "the stamp sends without the handoff test",
+     [("FfaLateEntry.cs", "if (!LimitlessFence.TicketSends(sendTicket, true)) yield break;", "")]),
+    ("late_sends", "a stored request is answered without its ticket",
+     [("FfaLateEntry.cs", "if (!LimitlessFence.TicketSends(LateTicket(actor), MasterMaySend()))", "if (false)")]),
+    ("late_sends", "a late request keeps no ticket",
+     [("FfaLateEntry.cs", "_lateTickets[sender] = LimitlessFence.CaptureTicket();", "")]),
+    ("late_sends", "the late tickets outlive their requests",
+     [("FfaLateEntry.cs", "            _lateTickets.Clear();\n", "")]),
 ]
 
 NEUTRAL = "            // control: a neutral line\n"
@@ -1594,6 +1679,10 @@ CONTROLS = [
                       NEUTRAL + "            if (!LimitlessFence.TicketHandoffMoved(t, FfaLateEntry.MasterMaySend())) return false;\n")]),
     ("pick_receiver", [("FfaMode.cs", "            cycleNumber++;\n            int cycle = cycleNumber;\n",
                         NEUTRAL + "            cycleNumber++;\n            int cycle = cycleNumber;\n")]),
+    ("late_items", [("FfaLateEntry.cs", "            public LimitlessFence.ResumeTicket Ticket = LimitlessFence.CaptureTicket();",
+                     NEUTRAL + "            public LimitlessFence.ResumeTicket Ticket = LimitlessFence.CaptureTicket();")]),
+    ("late_sends", [("FfaLateEntry.cs", "            var sendTicket = LimitlessFence.CaptureTicket();   // v4 4.4: the stamp's S",
+                     NEUTRAL + "            var sendTicket = LimitlessFence.CaptureTicket();   // v4 4.4: the stamp's S")]),
 ]
 
 

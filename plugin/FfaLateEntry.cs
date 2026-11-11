@@ -141,6 +141,7 @@ namespace CompetitiveRounds
             _callInMaster.Clear();
             _ownStamp.Clear();
             _lateRequests.Clear();
+            _lateTickets.Clear();
             _lateWaits.Clear();
             _runningRoom = null;
             _knownKept.Clear();
@@ -631,7 +632,18 @@ namespace CompetitiveRounds
         private static readonly Dictionary<long, bool> _ackSent = new Dictionary<long, bool>();
         private static readonly Dictionary<long, FfaLateRules.Stamp> _ownStamp = new Dictionary<long, FfaLateRules.Stamp>();
         private static readonly Dictionary<int, int> _lateRequests = new Dictionary<int, int>();   // actor -> seq
+        private static readonly Dictionary<int, LimitlessFence.ResumeTicket> _lateTickets =
+            new Dictionary<int, LimitlessFence.ResumeTicket>();   // v4 4.4: actor -> its request's ticket
         private static readonly Dictionary<int, int> _lateWaits = new Dictionary<int, int>();
+
+        /// <summary>Ask 16(a) lane 2 (v4 4.4, Table A S): the ticket a stored late
+        /// request was received under; a request with none answers to a ticket
+        /// captured now, today's test.</summary>
+        private static LimitlessFence.ResumeTicket LateTicket(int actor)
+        {
+            LimitlessFence.ResumeTicket t;
+            return _lateTickets.TryGetValue(actor, out t) ? t : LimitlessFence.CaptureTicket();
+        }
 
         /// <summary>Run by a master for which MasterMaySend() holds, immediately
         /// before the call-in (FfaMode.cs:1923 and 1649): the late snapshots,
@@ -641,6 +653,7 @@ namespace CompetitiveRounds
         {
             if (!AdmissionRoomNow() || !MasterMaySend()) yield break;
             int g = FfaMode.GameNumber, k = PointK, self = OwnActor();
+            var sendTicket = LimitlessFence.CaptureTicket();   // v4 4.4: the stamp's S, after the waits
             var grants = FfaAssembly.Granted;
             bool selfKindS = FfaLateRules.IsKindS(self, grants);
 
@@ -649,6 +662,14 @@ namespace CompetitiveRounds
             foreach (var kv in new Dictionary<int, int>(_lateRequests))
             {
                 int actor = kv.Key;
+                // Ask 16(a) lane 2 (v4 4.4, Table A S): a stored request is answered only
+                // under the ticket it was received under, the handoff count included.
+                if (!LimitlessFence.TicketSends(LateTicket(actor), MasterMaySend()))
+                {
+                    Plugin.Log.LogInfo("[LIMIT] a late answer is withheld: its ticket moved");
+                    _lateRequests.Remove(actor);
+                    continue;
+                }
                 int waits;
                 _lateWaits.TryGetValue(actor, out waits);
                 if (LimitlessFence.RecordOpen)   // Ask 16(a) lane 2 (v4 4.6): closed during a record
@@ -726,6 +747,7 @@ namespace CompetitiveRounds
             bool apply;
             FfaLateRules.MasterStampDecision(proposed, nStar, ackComplete, PointEpoch, out result, out n, out apply);
             if (!MasterMaySend()) yield break;   // the role moved during the waits: the next master stamps
+            if (!LimitlessFence.TicketSends(sendTicket, true)) yield break;   // v4 4.4 (S): the handoff count too
             var stamp = new FfaLateRules.Stamp { Lobby8 = Lobby8, G = g, K = k, N = n, Chain = ChainAt(n), Result = result, From = self };
             Raise(EVT_CALLIN, new object[] { stamp.Lobby8, g, k, n, stamp.Chain, result },
                   new RaiseEventOptions { Receivers = ReceiverGroup.Others });
@@ -888,6 +910,7 @@ namespace CompetitiveRounds
             public int K;
             public int CallInMaster;
             public float Rt;
+            public LimitlessFence.ResumeTicket Ticket = LimitlessFence.CaptureTicket();   // v4 4.5 R: where the hold is made
             public bool Done;
             public FfaLateRules.Stamp Paired;
             public FfaLateRules.PairResult Decided;
@@ -1206,6 +1229,7 @@ namespace CompetitiveRounds
         {
             var h = _hold;
             if (h == null) return;
+            if (!LimitlessFence.ItemResumes(h.Ticket, "call-in hold")) { _hold = null; return; }   // v4 4.5 R
             if (FfaAssembly.CurrentRoomName() == "" || !AdmissionRoomNow())
             {
                 _hold = null;
@@ -1941,6 +1965,7 @@ namespace CompetitiveRounds
             // Ask 16(a) lane 2 (v4 4.6, F7): no fighter is admitted while a fence
             // record is live or terminating; the answer is the closed snapshot, at once.
             if (LimitlessFence.RecordOpen) { Refused("limitless", sender); SendSnapshot(sender, seq, true); return; }
+            _lateTickets[sender] = LimitlessFence.CaptureTicket();   // v4 4.4 (S): a stored request answers to it
             if (FfaAssembly.ReadmitLobby)
             {
                 // V3 P4.3 step 1 and P4.2 identity: kind l on today's conditions;
@@ -2064,11 +2089,13 @@ namespace CompetitiveRounds
             try { cur = MapManager.instance != null ? MapManager.instance.currentLevelID : -1; } catch { }
             if (level != cur) return;   // another map: wait for the next boundary
             _pendingSnap = a;
+            _pendingSnapTicket = LimitlessFence.CaptureTicket();   // v4 4.5 R: where the snapshot is kept
             _snapK = N(a, 25, -1);
             CheckPendingSnapshot();
         }
 
         private static float _snapCheckRt;
+        private static LimitlessFence.ResumeTicket _pendingSnapTicket;
 
         /// <summary>The digest check, re-run each time a peer's cr_bd changes,
         /// until this boundary's call-in; then the seed, the scale and the spawn.</summary>
@@ -2077,6 +2104,7 @@ namespace CompetitiveRounds
             var a = _pendingSnap;
             if (a == null) return;
             if (LimitlessFence.RecordOpen) { LateGiveUp(); return; }   // 4.6: no admission
+            if (!LimitlessFence.ItemResumes(_pendingSnapTicket, "pending snapshot")) { _pendingSnap = null; return; }   // v4 4.5 R
             bool callInCame = _callInCount > _pendingCallIns;
             int g = N(a, 21, 0), k = N(a, 25, 0), level = N(a, 22, -1);
             string digest = SnapshotDigest(a, g, k, level);

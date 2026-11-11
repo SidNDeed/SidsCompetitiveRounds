@@ -455,6 +455,16 @@ namespace CompetitiveRounds
             return t.Gid ?? (RecordOpen ? _record.Gid : null);
         }
 
+        /// <summary>4.5 (R) for retained work that a tick or a callback resumes,
+        /// not a coroutine (Table A): TicketResumes, the stop logged once per
+        /// item and epoch.</summary>
+        internal static bool ItemResumes(ResumeTicket t, string name)
+        {
+            if (TicketResumes(t)) return true;
+            NoteItemStopped(name, t);
+            return false;
+        }
+
         /// <summary>4.5 (R) for a coroutine (Table A): the ticket is captured
         /// here, where the item is scheduled, and TicketResumes runs before every
         /// step, nested enumerators included (LimitlessFenceRules.GuardScheduled).</summary>
