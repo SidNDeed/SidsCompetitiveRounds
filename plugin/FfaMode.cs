@@ -2347,6 +2347,19 @@ namespace CompetitiveRounds
             Plugin.Log.LogInfo($"[FFA] point over: winner team={winnerTeam} " +
                                $"roundOver={roundOver} gameOver={gameOver} scores=[{ScoreLine()}]");
 
+            // Ask 16(a) lane 2 (v4 section 6, finding B): the base report. The
+            // record raised RoundsToWin before this round applied (4.7 step 4),
+            // so the round that brings a side to the base target is not the end
+            // here. It reports the base once, from the base result, and leaves
+            // gameOverFired clear, so the rounds run on. The real end sets it
+            // and runs the ending, and OnFfaGameOver returns at its latch there.
+            if (roundOver && !gameOver && winnerTeam >= 0 && LimitlessFence.RecordOpen
+                && rounds[winnerTeam] >= LimitlessFence.CurrentRecord.BaseTarget)
+            {
+                try { GameStateWatcher.OnFfaGameOver(winnerTeam); }
+                catch (Exception ex) { Plugin.Log.LogError($"[FFA] base report hook: {ex.Message}"); }
+            }
+
             if (gameOver)
             {
                 if (!gameOverFired)

@@ -1496,6 +1496,35 @@ def claim_the_match_start_is_gated_in_a_continuation(files):
     return out
 
 
+FFA_BASE = ("if (roundOver && !gameOver && winnerTeam >= 0 && LimitlessFence.RecordOpen\n"
+            "                && rounds[winnerTeam] >= LimitlessFence.CurrentRecord.BaseTarget)")
+
+
+def claim_ffa_reports_at_the_base_and_ends_at_the_real_end(files):
+    """Section 6, finding B, Table C1's FFA row: a base branch reports the
+    game once, when a round brings a side to the record's base target, and
+    leaves gameOverFired clear, so the rounds run on. The ending branch at the
+    real end sets gameOverFired and runs the ending, the sitting end's leave
+    included, and OnFfaGameOver returns at its latch there."""
+    out = []
+    body = _code(files["FfaMode.cs"], "public static void HandleNextRound(")
+    if not _in_order(body, ["gameOver = rounds[winnerTeam] >= RoundsToWin;", FFA_BASE,
+                            "[FFA] base report hook", "if (gameOver)", "gameOverFired = true;",
+                            "[FFA] game-over report hook",
+                            'LimitlessFence.CleanupItem(EndSittingBelowMinimum(), "ffa sitting end")']):
+        out.append("the base does not report, or the ending is not the real end's")
+    elif any(n in body[body.index(FFA_BASE):body.index("if (gameOver)")]
+             for n in ("gameOverFired", "EndSittingBelowMinimum", "isTransitioning")):
+        out.append("the base branch ends the game")
+    if body.count("GameStateWatcher.OnFfaGameOver(winnerTeam);") != 2:
+        out.append("FFA's report has another caller in the round")
+    if not _in_order(_code(files["GameStateWatcher.cs"], "public static void OnFfaGameOver("),
+                     ["if (RoomActors.LocalIsSpectator) return;", "if (gameOverReported) return;",
+                      "gameOverReported = true;", "isTracking = false;"]):
+        out.append("FFA's report is not latched once")
+    return out
+
+
 CLAIMS = {
     "game_start_prefix": claim_the_game_start_prefix,
     "stamp_before_join": claim_the_gid_is_stamped_before_the_join,
@@ -1543,6 +1572,7 @@ CLAIMS = {
     "observer_seed": claim_a_terminating_seed_never_ends_the_observer,
     "gm_observer_end": claim_the_gm_observer_ends_at_the_live_target,
     "match_start_gate": claim_the_match_start_is_gated_in_a_continuation,
+    "ffa_base_report": claim_ffa_reports_at_the_base_and_ends_at_the_real_end,
 }
 
 GATE = "                if (SpectatorPatchSupport.Suppress) return;\n"
@@ -2125,6 +2155,23 @@ MUTANTS = [
      [("GameStateWatcher.cs", '                    try { OnMatchStarted(); } catch (Exception ex) { Plugin.Log.LogWarning($"[ACH] early start hook: {ex.Message}"); }\n',
        '                    try { OnMatchStarted(); } catch (Exception ex) { Plugin.Log.LogWarning($"[ACH] early start hook: {ex.Message}"); }\n'
        "                    gameOverReported = false;\n")]),
+    ("ffa_base_report", "FFA has no base report",
+     [("FfaMode.cs", "if (roundOver && !gameOver && winnerTeam >= 0 && LimitlessFence.RecordOpen\n                && rounds[winnerTeam] >= LimitlessFence.CurrentRecord.BaseTarget)",
+       "if (false)")]),
+    ("ffa_base_report", "the base report sets gameOverFired",
+     [("FfaMode.cs", "                try { GameStateWatcher.OnFfaGameOver(winnerTeam); }\n                catch (Exception ex) { Plugin.Log.LogError($\"[FFA] base report hook",
+       "                gameOverFired = true;\n                try { GameStateWatcher.OnFfaGameOver(winnerTeam); }\n                catch (Exception ex) { Plugin.Log.LogError($\"[FFA] base report hook")]),
+    ("ffa_base_report", "the base report runs without a record",
+     [("FfaMode.cs", "winnerTeam >= 0 && LimitlessFence.RecordOpen\n                && rounds[winnerTeam]", "winnerTeam >= 0\n                && rounds[winnerTeam]")]),
+    ("ffa_base_report", "the base report reads the live target",
+     [("FfaMode.cs", "rounds[winnerTeam] >= LimitlessFence.CurrentRecord.BaseTarget)", "rounds[winnerTeam] >= RoundsToWin)")]),
+    ("ffa_base_report", "the sitting end moves to the base",
+     [("FfaMode.cs", "                catch (Exception ex) { Plugin.Log.LogError($\"[FFA] base report hook: {ex.Message}\"); }\n",
+       "                catch (Exception ex) { Plugin.Log.LogError($\"[FFA] base report hook: {ex.Message}\"); }\n"
+       "                Plugin.Instance.StartCoroutine(LimitlessFence.CleanupItem(EndSittingBelowMinimum(), \"ffa sitting end\"));\n")]),
+    ("ffa_base_report", "FFA's report latch is skipped",
+     [("GameStateWatcher.cs", "            if (gameOverReported) return;\n            gameOverReported = true;\n            isTracking = false;    // the next game re-arms",
+       "            gameOverReported = true;\n            isTracking = false;    // the next game re-arms")]),
 ]
 
 NEUTRAL = "            // control: a neutral line\n"
@@ -2196,6 +2243,8 @@ CONTROLS = [
                           NEUTRAL + "                if (gameOver) SpectatorSync.OnGameOverObserved();\n")]),
     ("match_start_gate", [("GameStateWatcher.cs", "            if (LimitlessFence.RecordOpen) return;\n            try { Keybinds",
                            NEUTRAL + "            if (LimitlessFence.RecordOpen) return;\n            try { Keybinds")]),
+    ("ffa_base_report", [("FfaMode.cs", "            if (roundOver && !gameOver && winnerTeam >= 0",
+                          NEUTRAL + "            if (roundOver && !gameOver && winnerTeam >= 0")]),
 ]
 
 
