@@ -876,6 +876,8 @@ DELETIONS = (
                           r"line out of range \(0 'scope census' lines"),
     ("nest", "v6", None, r"^V6 WITHHELD seat v1: .*control K3 out of range \(0 'nest plant' lines"),
     ("photon", "v6", None, r"^V6 WITHHELD seat v1: .*R-SCOPE's patches line out of range \(0 'photon patches' lines"),
+    # P1's V6 emitter (via the integrator, 12 Nov): a sitting log without its controls line is refused (K-MUTANT)
+    ("controls", "v6", None, "REFUSED:K-MUTANT: the sitting log v1 carries 0 controls lines"),
 )
 # the kinds whose PRESENCE is the event (their absence is the normal case): test_failure_events_make_the_run_incomplete
 # and test_vr6_build_fails_on_a_disarm are their controls
@@ -916,8 +918,12 @@ def test_deleting_each_record_kind_withholds(kind, fixture, where, want):
         assert "V6 WITHHELD seat v1: none" in P.report_on(base, base)[0]
         log, n = _drop_kind(base, kind, where)
         assert n >= 1, kind
-        out = "\n".join(P.report_on(log, log)[0])
-        assert re.search(want, out, re.M), (kind, out)
+        if want.startswith("REFUSED:"):
+            with pytest.raises(P.Refused, match=re.escape(want[len("REFUSED:"):])):
+                P.report_on(log, log)
+        else:
+            out = "\n".join(P.report_on(log, log)[0])
+            assert re.search(want, out, re.M), (kind, out)
     elif fixture == "marker":
         base = _log()
         assert re.search(r"^VERDICT B1 WITHHELD: U", _report(base), re.M)
@@ -973,7 +979,7 @@ def test_every_emitted_kind_is_read_or_named():
     # "build" (P3's marker), "mark" (P1's boot line) and V6's boot lines alloc, scope, nest and photon (ruling
     # R6-A3.11.147 (5), P1's V6 block): written by the other parts of the B11 build and absent from this branch until the
     # integrator merges them; the merged tree emits them all (the integrator tightens this line)
-    assert (set(P.RECORDS) - emitted - {"build", "mark", "alloc", "scope", "nest", "photon"}
+    assert (set(P.RECORDS) - emitted - {"build", "mark", "alloc", "scope", "nest", "photon", "controls"}
             == {"a3zero"} | set(P.SUBKINDS)), sorted(set(P.RECORDS) - emitted)
 
 
@@ -2267,11 +2273,16 @@ V6_BOOT = (("alloc", "alloc pin=ok planted=1048600/1048576 empty=0"),
            ("nest", "nest plant asked=2000 x=2020 e=1990 p=2005"),
            ("photon", "photon patches n=4 names=PhotonPeer.DispatchIncomingCommands,PhotonPeer.SendOutgoingCommands,"
                       "PhotonPeer.SendAcksOnly,PhotonPeer.Service"),
-           ("scope census", "scope census entries=40 wrapped=40"))
+           ("scope census", "scope census entries=40 wrapped=40"),
+           # P1's V6 emitter (via the integrator, 12 Nov): a sitting log's control-mutant line
+           ("controls", "controls k_mutant=none"))
+# the two keys a V6 counters line carries after span_depth_violations (P1's emitter, via the integrator, 12 Nov)
+B11_CTR_V6 = " photon_offmain=0 span_leave_mismatch=0"
 
 
 def _b11_text(games, model, marker=True, settled=True, first_game=1, edit=None, cg=None, cw=0, mark=True,
-              wu=B11_WU0, p_extra=B11_P_EXTRA, force="none", force_arms=True, v6=None, boot=None, fpscap=True):
+              wu=B11_WU0, p_extra=B11_P_EXTRA, force="none", force_arms=True, v6=None, boot=None, fpscap=True,
+              ctr=None):
     """The [FRAME-TIME] lines of B11 games: the marker, the mark cost boot line, the five V6 boot lines (boot: name ->
     replacement line, or None to drop it), the FPSCAP hold, settled (f_hat 1e6, force=), the point lines and their
     window lines in SHARED.md's format. A point's "plant" runs are plant runs (prun=1), "unspun" those of them fixed
@@ -2280,7 +2291,9 @@ def _b11_text(games, model, marker=True, settled=True, first_game=1, edit=None, 
     count; cw is common-writer cycles per frame; ON windows mark 4 class transitions, OFF windows 1. force: the
     settled lines' force= (None prints none); under force=ON every window is ON (sitting V) unless force_arms is
     False. v6(window) may return V6 values: cP_pf and cX_pf (cycles per frame; P leaves q, X stays in it), aC to aX
-    (bytes or None for NA), wa (text) and wu (text); by default no P or X, aC 100000 bytes per frame, no class bytes."""
+    (bytes or None for NA), wa (text) and wu (text); by default no P or X, aC 100000 bytes per frame, no class bytes.
+    Each game ends with its counters line, the three counters 0 and then ctr(g) (B11_CTR_V6 by default; None drops
+    the line)."""
     L = ["[FRAME-TIME] " + P.MARK_FT] if marker else []
     if mark:
         L.append("[FRAME-TIME] mark cost cyc=50 p90=70 n=1000")
@@ -2358,6 +2371,10 @@ def _b11_text(games, model, marker=True, settled=True, first_game=1, edit=None, 
                         pt.get("zs", 0), pt.get("own_split", 0), p_extra))
             for w in ws:
                 L.append(_b11_wline(w))
+        tail = B11_CTR_V6 if ctr is None else ctr(g)
+        if tail is not None:
+            L.append("[FRAME-TIME] counters g=%d frames=%d missing_end=0 cycle_failures=0 span_depth_violations=0%s"
+                     % (g, sum(sum(pt["n"]) for pt in pts), tail))
     return "\n".join(LOG_PREFIX + x for x in L)
 
 
@@ -3024,6 +3041,82 @@ def chk_r_gc_numbers(m):
                      r"30\.000; ", out, re.M), out
 
 
+def _ctr_at(g0, tail):
+    """ctr for _b11_text: game g0's counters line ends with tail (None drops the line), every other game's as built."""
+    return lambda g: tail if g == g0 else B11_CTR_V6
+
+
+def chk_counters_line_v6_keys(m):
+    # P1's V6 emitter (via the integrator, 12 Nov): a V6 counters line carries span_leave_mismatch, which must be 0 (a
+    # nonzero one is VR2's class, as span_depth_violations), and photon_offmain, reported only; a V6 line without
+    # either is faulted as one without span_depth_violations; a key the line carries beyond these is left unjudged
+    games = list(range(1, 7))
+    for text in (_v_text(), _v_text(ctr=_ctr_at(2, " photon_offmain=7 span_leave_mismatch=0")),
+                 _v_text(ctr=_ctr_at(2, B11_CTR_V6 + " zz_unknown=5"))):
+        recs = m.read(text)
+        assert m.counters_faults(recs, games) == [] and _v(m, text)["why"] == [], _v(m, text)["why"]
+    v = _v(m, _v_text(ctr=_ctr_at(2, " photon_offmain=7 span_leave_mismatch=0")))
+    assert v["photon_offmain"] == 7, v["photon_offmain"]
+    for tail, want in ((" photon_offmain=0 span_leave_mismatch=1", "counters g=2 span_leave_mismatch=1"),
+                       (" photon_offmain=0", "counters g=2 span_leave_mismatch not printed"),
+                       (" span_leave_mismatch=0", "counters g=2 photon_offmain not printed"),
+                       (None, "game 2: 0 counters lines (needs 1, written at its flush)")):
+        text = _v_text(ctr=_ctr_at(2, tail))
+        recs = m.read(text)
+        assert [x for x in m.counters_faults(recs, games) if x.startswith(want)], (tail, want)
+        assert [x for x in m.vr2(recs)[1] if x.startswith(want)], (tail, want)
+        assert [x for x in _v(m, text)["why"] if x.startswith("VR2 counters: " + want)], (tail, _v(m, text)["why"])
+    # the same class as span_depth_violations
+    text = _v_text().replace("span_depth_violations=0 photon", "span_depth_violations=2 photon", 1)
+    assert "VR2 counters: counters g=1 span_depth_violations=2" in _v(m, text)["why"]
+    # a log without B11 window lines is no V6 log: its counters line carries the three counters only
+    old = LOG_PREFIX + "[FRAME-TIME] counters g=1 frames=10 missing_end=0 cycle_failures=0 span_depth_violations=0"
+    assert m.counters_faults(m.read(old), [1]) == []
+
+
+def _boot(**kw):
+    """A control run's boot: V6_BOOT with the named lines replaced (keys as V6_BOOT's, spaces as underscores)."""
+    bt = dict(V6_BOOT)
+    bt.update((k.replace("_", " "), v) for k, v in kw.items())
+    return "\n".join(LOG_PREFIX + "[FRAME-TIME] " + x for x in bt.values() if x is not None)
+
+
+K1_OUT = "alloc pin=ok planted=1052673/1048576 empty=0"
+K2_OUT = "scope plant asked=2000 got=2101"
+K3_OUT = "nest plant asked=2000 x=2020 e=1899 p=2005"
+
+
+def chk_k_mutant_sitting_refused_and_controls_proof(m):
+    # P1's V6 emitter (via the integrator, 12 Nov): a sitting log of either sitting whose boot prints another k_mutant
+    # than none (or no controls line, or two) is refused by name; a control run's boot is read by controls_proof, which
+    # reads K1 to K3 from the numbers printed and holds only when exactly the control k_mutant names reads out of range
+    v, c = _v_text(), _b11_text(_one_run_games(), _c_cost(0))
+    m.report_on(v, v)
+    m.cross_check(m.read_sitting(c, "c"))
+    for line in ("controls k_mutant=k1", "controls k_mutant=k2", "controls k_mutant=k3", "controls k_mutant=x", None):
+        bv, bc = _v_text(boot={"controls": line}), _b11_text(_one_run_games(), _c_cost(0), boot={"controls": line})
+        assert _word_refused(lambda: m.report_on(bv, v), "K-MUTANT"), line
+        assert _word_refused(lambda: m.report_on(v, bv), "K-MUTANT"), line
+        assert _word_refused(lambda: m.combine(v, v, bc, c), "K-MUTANT"), line
+        assert _word_refused(lambda: m.report(bc, peer=c), "K-MUTANT"), line
+        assert _word_refused(lambda: m.report(c, peer=bc), "K-MUTANT"), line
+    two = _v_text().replace("[FRAME-TIME] controls k_mutant=none", "[FRAME-TIME] controls k_mutant=none\n" + LOG_PREFIX
+                            + "[FRAME-TIME] controls k_mutant=none", 1)
+    assert _word_refused(lambda: m.report_on(two, v), "carries 2 controls lines")
+    # controls_proof: each mutant's boot breaks its own control alone (PASS); a mutant boot whose numbers read in
+    # range, or that breaks another control too, FAILs; none needs all three in range
+    for kw, ok in ((dict(), True), (dict(controls="controls k_mutant=k1", alloc=K1_OUT), True),
+                   (dict(controls="controls k_mutant=k2", scope_plant=K2_OUT), True),
+                   (dict(controls="controls k_mutant=k3", nest=K3_OUT), True),
+                   (dict(controls="controls k_mutant=k1"), False),
+                   (dict(controls="controls k_mutant=k1", alloc=K1_OUT, nest=K3_OUT), False),
+                   (dict(controls="controls k_mutant=k2", alloc=K1_OUT), False),
+                   (dict(nest=K3_OUT), False), (dict(controls="controls k_mutant=k4", nest=K3_OUT), False),
+                   (dict(controls=None), False)):
+        got, lines = m.controls_proof(_boot(**kw))
+        assert got is ok and lines[-1].startswith("CONTROLS PROOF %s" % ("PASS" if ok else "FAIL")), (kw, lines)
+
+
 # the B11 mutants (mut_parse.py's B11_MUTS) are proven here, in process, so a seat's pytest run proves them: each row
 # names the check functions it must turn red; mutant 0, the unchanged parser, keeps every check green
 B11_CHECKS = ["chk_c2_recovers_3_25", "chk_c3_recovers_3_0375", "chk_c4_recovers_3_5", "chk_charge_never_negative",
@@ -3039,7 +3132,9 @@ B11_CHECKS = ["chk_c2_recovers_3_25", "chk_c3_recovers_3_0375", "chk_c4_recovers
               "chk_p_is_the_larger_of_cp_and_recv", "chk_forced_log_is_no_contrast_input",
               "chk_sitting_v_is_forced_on", "chk_sitting_v_withholds_the_counter_and_controls",
               "chk_t_ref_is_t_on_minus_u_hi", "chk_six_games_at_least", "chk_combine_four_classes",
-              "chk_r_gc_numbers"]
+              "chk_r_gc_numbers",
+              # P1's V6 emitter (via the integrator, 12 Nov): the counters line's two keys and the boot's k_mutant
+              "chk_counters_line_v6_keys", "chk_k_mutant_sitting_refused_and_controls_proof"]
 
 
 @pytest.mark.parametrize("name", B11_CHECKS)
@@ -3302,3 +3397,10 @@ def test_v6_report_on_and_combine_through_the_script(tmp_path):
     assert rc == 0 and _classes(out) == ({"1": "PASS", "2": "PASS"}, [("1", "PASS")]), (rc, out, err)
     rc, out, err = _run_script("--combine", v, v, c)
     assert rc == 3 and "--combine needs exactly 4 logs" in out, (rc, out, err)
+    # a control run's boot: refused as a sitting log, read by --controls
+    k = tmp_path / "k1.log"
+    k.write_text(_v_text(boot={"controls": "controls k_mutant=k1", "alloc": K1_OUT}) + "\n", encoding="utf-8")
+    rc, out, err = _run_script("--on", k, v)
+    assert rc == 3 and "REFUSED: K-MUTANT: the sitting log" in out, (rc, out, err)
+    rc, out, err = _run_script("--controls", k)
+    assert rc == 0 and "CONTROLS PROOF PASS: k_mutant=k1; out of range K1 (needs exactly K1)" in out, (rc, out, err)

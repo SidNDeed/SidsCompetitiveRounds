@@ -28,11 +28,14 @@ those lines exist, report() states U as not computable rather than computing it 
   census registered expected missing duplicates: once per process, the census summary (kind census_summary)
 
   alloc pin= planted= empty=; scope plant asked= got=; nest plant asked= x= e= p=; photon patches n= names=; scope census
-  entries= wrapped=: the five V6 boot lines, once per process (boot_controls)
+  entries= wrapped=: the five V6 boot lines, once per process (boot_controls); controls k_mutant=<none|k1|k2|k3>: a
+  sitting log prints none (refuse_k_mutant), a control run's boot names the control it breaks (controls_proof)
+  counters, in a V6 log: also span_leave_mismatch (0, VR2's class) and photon_offmain (reported only), both printed
 
 Usage: python -I -B ft_parse.py <LogOutput.log> [<second seat's log>]   (sitting C, as built: the cross-check, no B1)
        python -I -B ft_parse.py --on <seat 1's sitting-V log> <seat 2's>  (report_on: U and its terms per seat)
        python -I -B ft_parse.py --combine <V1> <V2> <C1> <C2>              (VERDICT B1 per seat and the worse seat)
+       python -I -B ft_parse.py --controls <a control run's log>           (controls_proof: K1 to K3 under k_mutant)
 Exit: 0 the report printed; 3 REFUSED (a check refused the input); 4 FT-PARSE REFUSED (a record lacks a key
 REQUIRED_KEYS names: one line names its kind, file, line and keys; or an input holds a line "withheld <class> <n>",
 n >= 1, of a class in READ_CLASSES: the laptop seat script's export rule held back n lines of a class this parse
@@ -297,7 +300,7 @@ INT_KEYS = {"written", "withheld", "seg", "pair", "base_us", "segs", "of", "cycl
             "reads", "scopes", "tmax", "unscoped", "depth_err",
             "run", "pos", "coin", "wi", "f0", "res", "gcn", "cW", "cR", "cS", "cE", "prun", "nm", "cyc", "p90",
             "own_split", "recv_offmain", "ledger_cycle_miss", "sock_p95", "sock_n",
-            "sock_thr", "sock_main", "cP", "cX", "ab_back", "ab_retry"}
+            "sock_thr", "sock_main", "cP", "cX", "ab_back", "ab_retry", "span_leave_mismatch", "photon_offmain"}
 # the B11 window line (ruling R6-A3.11.138, SHARED.md's line contract): the fields it appends to the w line, in order.
 # q = C° by tenth, r = the retained direct execution R by tenth, qn = frames by tenth, prun = the window is in a plant
 # run (spun or not; the w line's own plant= marks a window actually planted, its own partial= is the only partial
@@ -634,6 +637,9 @@ RECORDS = {
     "between": "records_missing(): one per point after the game's first",
     "flushed": "records_missing(): one per game",
     "counters": "records_missing() and vr2(): one per game, written at its flush, the three counters 0",
+    # P1's V6 emitter (via the integrator, 12 Nov): the boot's control-mutant line
+    "controls": "refuse_k_mutant(): a V6 sitting log carries exactly one 'controls k_mutant=none' (else K-MUTANT); "
+                "controls_proof() reads a control run's boot",
     "a3zero": "proof_records(): one per measured game for a zero row proved by probe:a3zero (none today)",
     "plant": "e_c(): exactly one",
     "refusals": "records_missing(): one after the last game; vr6_build reads it",
@@ -1538,6 +1544,40 @@ def k_up(recs, z=Z_END, first_game=1):
     return est, hw, est + hw
 
 
+COUNTER_KEYS = ("missing_end", "cycle_failures", "span_depth_violations")
+# P1's V6 emitter (via the integrator, 12 Nov): a V6 log's counters line adds span_leave_mismatch (a Photon scope's
+# finalizer found the class stack at another depth than its prefix left: it must be 0, in VR2's class with
+# span_depth_violations) and photon_offmain (X and listener scopes entered off the main thread: reported only, no rule
+# reads its value). A V6 log's line without either is faulted as one without span_depth_violations is
+COUNTER_KEYS_V6 = ("span_leave_mismatch",)
+COUNTER_REPORTED_V6 = ("photon_offmain",)
+
+
+def counters_faults(recs, games):
+    """VR2's counters half: exactly one counters line per game of games (g >= 0), its three counters printed and 0;
+    in a V6 log (one carrying B11 window lines) also span_leave_mismatch printed and 0 and photon_offmain printed. A key
+    the line carries beyond these is read and left unjudged. Returns the reasons."""
+    v6 = any(b11_line(r) for r in recs)
+    bad = []
+    for g in games:
+        if g < 0:
+            continue
+        cs = [r for r in recs if r["kind"] == "counters" and r.get("g") == g]
+        if len(cs) != 1:
+            bad.append("game %d: %d counters lines (needs 1, written at its flush)" % (g, len(cs)))
+            continue
+        for k in COUNTER_KEYS:
+            if cs[0].get(k, -1) != 0:
+                bad.append("counters g=%d %s=%s" % (g, k, cs[0].get(k)))
+        if v6:
+            for k in COUNTER_KEYS_V6 + COUNTER_REPORTED_V6:
+                if k not in cs[0]:
+                    bad.append("counters g=%d %s not printed (a V6 counters line carries it)" % (g, k))
+            if cs[0].get("span_leave_mismatch", 0) != 0:
+                bad.append("counters g=%d span_leave_mismatch=%s" % (g, cs[0]["span_leave_mismatch"]))
+    return bad
+
+
 def vr2(recs, last_game=None):
     """Instrument (V4 3.7 VR2): every game has a settled line; no frame without FT_End, no cycle-read failure
     and no span open at a frame boundary in any settled line; f_hat within 2 percent; and (round-1 MEDIUM,
@@ -1584,17 +1624,9 @@ def vr2(recs, last_game=None):
                 bad.append("settled g=%d %s=%d" % (r["g"], k, r[k]))
     # round-3 MEDIUM (FtSchedule.cs:140): a game's settled line is written at its start, before its play, so the last
     # game's play had no health snapshot. FtSchedule.FlushGame writes a counters line after every game's work: one
-    # per game is required, each with the three counters at 0, and no point line may carry a missed FT_End stamp
-    for g in games:
-        if g < 0:
-            continue
-        cs = [r for r in recs if r["kind"] == "counters" and r.get("g") == g]
-        if len(cs) != 1:
-            bad.append("game %d: %d counters lines (needs 1, written at its flush)" % (g, len(cs)))
-            continue
-        for k in ("missing_end", "cycle_failures", "span_depth_violations"):
-            if cs[0].get(k, -1) != 0:
-                bad.append("counters g=%d %s=%s" % (g, k, cs[0].get(k)))
+    # per game is required, each with the three counters at 0 (and a V6 log's two more, counters_faults), and no point
+    # line may carry a missed FT_End stamp
+    bad += counters_faults(recs, games)
     for r in recs:
         if r["kind"] == "p" and r["game"] >= 0 and r.get("missing_end", 0) != 0:
             bad.append("point %s: missing_end=%d" % (r["pt"], r["missing_end"]))
@@ -3056,6 +3088,49 @@ def boot_controls(recs):
     return out
 
 
+K_MUTANTS = {"k1": "K1", "k2": "K2", "k3": "K3"}       # P1's control mutants: the control each one breaks
+
+
+def k_mutant(recs):
+    """The boot's '[FRAME-TIME] controls k_mutant=<none|k1|k2|k3>' value, or None with the line's count when the log
+    does not carry exactly one: (value, count)."""
+    ls = [r for r in recs if r["kind"] == "controls"]
+    return (str(ls[0].get("k_mutant")) if len(ls) == 1 else None), len(ls)
+
+
+def refuse_k_mutant(recs, src):
+    """A V6 sitting log (one carrying B11 window lines, either sitting) is no control run: its boot carries exactly
+    one 'controls k_mutant=none'. Any other value, or the line absent or repeated, refuses the input by name
+    (K-MUTANT) before any figure is read from it."""
+    if not any(b11_line(r) for r in recs):
+        return
+    km, n = k_mutant(recs)
+    if km != "none":
+        raise Refused("K-MUTANT: the sitting log %s %s; a sitting log's boot prints exactly one 'controls "
+                      "k_mutant=none' (a control run's boot is read by --controls)"
+                      % (src, "prints k_mutant=%s" % km if km is not None else "carries %d controls lines" % n))
+
+
+def controls_proof(text, src="boot"):
+    """A control run's boot (P1's k_mutant): K1 to K3 are read from the numbers the boot prints (boot_controls), never
+    from k_mutant's name. The proof holds when the controls read out of range are exactly the one k_mutant names (k1,
+    k2 or k3), or none under k_mutant=none. Returns (ok, lines)."""
+    refuse_withheld(text, src)
+    recs = read(text, src)
+    km, n = k_mutant(recs)
+    bc = boot_controls(recs)
+    out = ["CONTROLS %s %s: %s" % (k, "in range" if bc[k][0] else "OUT OF RANGE", bc[k][1]) for k in ("K1", "K2", "K3")]
+    if km != "none" and km not in K_MUTANTS:
+        return False, out + ["CONTROLS PROOF FAIL: %s" % ("k_mutant=%s is not none, k1, k2 or k3" % km if km is not None
+                                                          else "%d controls lines (needs exactly 1)" % n)]
+    want = set() if km == "none" else {K_MUTANTS[km]}
+    got = set(k for k in ("K1", "K2", "K3") if not bc[k][0])
+    ok = got == want
+    out.append("CONTROLS PROOF %s: k_mutant=%s; out of range %s (needs exactly %s)"
+               % ("PASS" if ok else "FAIL", km, ", ".join(sorted(got)) or "none", ", ".join(sorted(want)) or "none"))
+    return ok, out
+
+
 def _bytes_k(w):
     """bK's bytes of one window: the class bytes aW to aX and wa's log, hash and sock (None while any is NA)."""
     wa = _wa(w["wa"]) or {}
@@ -3155,7 +3230,12 @@ def sitting_v(recs, text, peer_recs, first_game=1):
     if back:
         why.append("ab_back above 0 or not printed at %s" % ", ".join(back[:4]))
     why += p_line_faults(recs, set(q["pt"] for q in pts))
-    wna = sorted(set(t for w in meas for t, x in sorted((_typed(w["wu"], 2, na=True) or {}).items())
+    # the counters line's half of VR2 (P1's V6 emitter, via the integrator, 12 Nov: a nonzero span_leave_mismatch
+    # invalidates the seat's sitting in span_depth_violations' class), over the measured games
+    cf = counters_faults(recs, sorted(set(q["game"] for q in pts)))
+    if cf:
+        why.append("VR2 counters: %s" % "; ".join(cf))
+    wna =sorted(set(t for w in meas for t, x in sorted((_typed(w["wu"], 2, na=True) or {}).items())
                      if x[1] is None))
     if wna:
         why.append("a wu type prints NA cycles (%s)" % ", ".join(wna))
@@ -3176,6 +3256,9 @@ def sitting_v(recs, text, peer_recs, first_game=1):
              terms=None, bK=None, heap=None)
     pl = [q for q in recs if q["kind"] == "p"]
     v["heap"] = pl[-1].get("heap") if pl else None
+    # reported only (no rule reads it): X and listener scopes entered off the main thread, over the measured games
+    v["photon_offmain"] = sum(r.get("photon_offmain") or 0 for r in recs
+                              if r["kind"] == "counters" and r.get("g", -1) >= first_game)
     pairs = [(d["u"], d["n"]) for g, d in sorted(ug.items())]
     if not pairs or any(u is None for u, n in pairs):
         why.append("U not computable: a game's G_cap has an NA byte count or bE <= 0" if pairs
@@ -3225,6 +3308,8 @@ def v_lines(label, v):
     out.append("V6 u_g seat %s: %s" % (label, "; ".join("g%d %s (n %d)" % (g, "%.3f" % d["u"] if d["u"] is not None
                                                                          else "NA", d["n"]) for g, d in sorted(ug.items()))
                                       or "none"))
+    out.append("V6 photon_offmain seat %s: %d over the measured games (X and listener scopes entered off the main "
+               "thread; reported only)" % (label, v["photon_offmain"]))
     out.append("V6 WITHHELD seat %s: %s" % (label, "; ".join(v["why"]) if v["why"] else "none"))
     return out
 
@@ -3234,6 +3319,7 @@ def read_sitting(text, src):
     refuse_withheld(text, src)
     recs = read(text, src)
     build_marker(text, "measurement", src)
+    refuse_k_mutant(recs, src)                  # a sitting input of either sitting
     return recs
 
 
@@ -3356,6 +3442,11 @@ def report(text, peer=None, src="log", peer_src="peer", ref=None, ref_src="refer
         except Refused as e:
             peer_err = e
         build_marker(peer, "measurement", peer_src)
+    # P1's V6 emitter (via the integrator, 12 Nov): a window log of either seat whose boot is a control run's is no
+    # sitting log
+    refuse_k_mutant(recs, src)
+    if peer_recs is not None:
+        refuse_k_mutant(peer_recs, peer_src)
     ref_recs = read_reference(ref, ref_src) if ref is not None else None
     out = []
     vr = {}
@@ -3622,14 +3713,17 @@ if __name__ == "__main__":
         _args = sys.argv[1:]
         # SHARED.md V6: --on <seat 1's sitting-V log> <seat 2's>: report_on; --combine <V1> <V2> <C1> <C2>, C1 being
         # V1's seat: VERDICT B1 per seat and the worse seat
-        _mode = _args[0] if _args and _args[0] in ("--on", "--combine") else None
+        _mode = _args[0] if _args and _args[0] in ("--on", "--combine", "--controls") else None
         if _mode is not None:
-            _k = 2 if _mode == "--on" else 4
+            _k = {"--on": 2, "--combine": 4, "--controls": 1}[_mode]
             if len(_args) != _k + 1:
                 raise Refused("%s needs exactly %d logs" % (_mode, _k))
             _t = [open(a, encoding="utf-8", errors="replace").read() for a in _args[1:]]
-            print("\n".join(report_on(_t[0], _t[1], _args[1], _args[2])[0]) if _mode == "--on"
-                  else combine(*_t, srcs=tuple(_args[1:])))
+            if _mode == "--controls":
+                print("\n".join(controls_proof(_t[0], _args[1])[1]))
+            else:
+                print("\n".join(report_on(_t[0], _t[1], _args[1], _args[2])[0]) if _mode == "--on"
+                      else combine(*_t, srcs=tuple(_args[1:])))
         _ref = _ref_src = None
         if _mode is None and "--ref" in _args:
             _i = _args.index("--ref")
