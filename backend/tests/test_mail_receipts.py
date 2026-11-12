@@ -32,6 +32,7 @@ is not found fails the test instead of passing it.
 """
 
 import inspect
+import re
 import textwrap
 import uuid
 from datetime import timedelta
@@ -509,33 +510,90 @@ def test_delete_answers_the_same_for_every_well_formed_id():
 _RATE_FROM = "  FROM mail_send_receipts WHERE sender_id = :sid AND kind = 'direct'"
 
 
-def _rate_after_a_delete(delivery, mutant=False):
+def _rate_with_a_row_gone(gone, mutant=False):
     """Nine sends from A to B 30 s ago; A deletes the first, whose copy to B
-    was `delivery`, and the janitor sweeps; then A sends twice. The tenth
-    send fits the minute's window of 10 and the eleventh does not, in both
-    worlds: the deleted send still counts after its row is purged."""
+    was suppressed, and the janitor sweeps, which keeps a row that young
+    (the age floor). With `gone` the row and its envelopes are then removed
+    as the purge removes them, standing for any way the row could go; then
+    A sends twice. The tenth send fits the minute's window of 10 and the
+    eleventh does not, either way: the window counts the send's receipt."""
     db, ids = tm._world()
-    mids = [db.seed_message(ids[A_SID], [(ids[B_SID], "to", delivery if i == 0 else "delivered")],
+    mids = [db.seed_message(ids[A_SID], [(ids[B_SID], "to", "suppressed" if i == 0 else "delivered")],
                             created_at=NOW - timedelta(seconds=30)) for i in range(9)]
     hits = _rewrite_sql(db, _RATE_FROM, _RATE_FROM.replace("mail_send_receipts", "mail_messages")) \
         if mutant else None
     assert tm._run(main.mail_delete(str(mids[0]), tm._req("tokA"), db))["status"] == "deleted"
     tm._run(main._mail_retention_sweep(db))
-    purged = mids[0] not in db.messages
+    kept = mids[0] in db.messages
+    if gone:
+        _purge(db, mids[0])
     out = [_outcome(tm._send, db, [B_SID]), _outcome(tm._send, db, [B_SID])]
     assert hits is None or hits, "the mutant did not reach the rate query"
-    return purged, [o if isinstance(o, tuple) else "accepted" for o in out]
+    return kept, [o if isinstance(o, tuple) else "accepted" for o in out]
 
 
-def test_the_rate_window_counts_a_deleted_send_whatever_its_delivery():
+def test_the_rate_window_counts_a_send_whose_row_is_gone():
     limited = (429, {"error": "rate_limited", "retry_after": 30})
-    assert _rate_after_a_delete("suppressed") == (True, ["accepted", limited])    # the row was purged
-    assert _rate_after_a_delete("delivered") == (False, ["accepted", limited])    # B's unread copy keeps it
-    # mutant: the window counted on message rows -> the purged send frees a
-    # place, so A's eleventh send in the minute is accepted only when the
-    # deleted message's copy was suppressed
-    assert _rate_after_a_delete("suppressed", mutant=True) == (True, ["accepted", "accepted"])
-    assert _rate_after_a_delete("delivered", mutant=True) == (False, ["accepted", limited])
+    assert _rate_with_a_row_gone(False) == (True, ["accepted", limited])
+    assert _rate_with_a_row_gone(True) == (True, ["accepted", limited])
+    # mutant: the window counted on message rows -> the removed row frees a
+    # place, so A's eleventh send in the minute is accepted
+    assert _rate_with_a_row_gone(True, mutant=True) == (True, ["accepted", "accepted"])
+    assert _rate_with_a_row_gone(False, mutant=True) == (True, ["accepted", limited])
+
+
+# ── the janitor's age floor and the spam check ────────────────────────────
+
+_PURGE_FLOOR = "      AND m.created_at < NOW() - make_interval(days => CAST(:min_age_days AS integer))"
+
+
+def _spam_after_deletes(delivery, mutant=False):
+    """The spam check's same-body count over a day: four sends of one body
+    from A to B two hours ago, which A deleted, B's copies `delivery`
+    (unread); the janitor sweeps; then A sends the same body to C, the
+    fifth in the day. Returns the rows the sweep left and each case's
+    same-body count."""
+    db, ids = tm._world()
+    for _ in range(4):
+        db.seed_message(ids[A_SID], [(ids[B_SID], "to", delivery)], body="Buy gold now",
+                        created_at=NOW - timedelta(hours=2), deleted_by_sender_at=NOW - timedelta(hours=1))
+    hits = _rewrite_sql(db, _PURGE_FLOOR) if mutant else None
+    tm._run(main._mail_retention_sweep(db))
+    left = len(db.messages)
+    tm._send(db, [C_SID], body="buy gold now")
+    assert hits is None or hits, "the mutant did not reach the purge"
+    return left, [c["evidence"]["same_body_day"] for c in db.cases.values()]
+
+
+def test_the_spam_check_counts_a_deleted_send_whatever_its_delivery():
+    assert inspect.getsource(main._mail_retention_sweep).count(_PURGE_FLOOR) == 1
+    assert _spam_after_deletes("suppressed") == (4, [5])
+    assert _spam_after_deletes("delivered") == (4, [5])     # B's unread copies keep the rows anyway
+    # mutant: the purge without its age floor -> the deleted sends whose
+    # copies were suppressed leave the day's count, and no case opens
+    assert _spam_after_deletes("suppressed", mutant=True) == (0, [])
+    assert _spam_after_deletes("delivered", mutant=True) == (4, [5])
+
+
+_SPANS = {"days": 86400, "hours": 3600, "mins": 60, "secs": 1}
+
+
+def _longest_window(src):
+    """The longest make_interval(...) literal in `src`, in seconds; every
+    make_interval in it must be a literal this reads."""
+    found = re.findall(r"make_interval\((days|hours|mins|secs) => (\d+)\)", src)
+    assert found and len(found) == src.count("make_interval("), "a window this check cannot read"
+    return max(_SPANS[unit] * int(n) for unit, n in found)
+
+
+def test_the_age_floor_covers_every_window_the_spam_check_reads():
+    floor = main.MAIL_PURGE_MIN_AGE_DAYS * 86400
+    src = inspect.getsource(main._mail_spam_check)
+    assert _longest_window(src) <= floor
+    # negative controls: a longer window, and one this check cannot read
+    assert _longest_window(src.replace("make_interval(days => 1)", "make_interval(days => 2)")) > floor
+    with pytest.raises(AssertionError, match="a window this check cannot read"):
+        _longest_window(src.replace("make_interval(hours => 1)", "make_interval(hours => CAST(:h AS integer))"))
 
 
 # ── the admin broadcast ───────────────────────────────────────────────────

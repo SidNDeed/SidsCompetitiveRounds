@@ -77819,6 +77819,7 @@ MAIL_ADDRESSEES_MAX = 64           # addressees rendered per message (lists stay
 MAIL_BLOCKS_MAX = 500
 MAIL_BROADCAST_SEEN_DAYS = 180     # system_broadcast targets mod_seen_at within this window (B-12)
 MAIL_RETENTION_DAYS = 180
+MAIL_PURGE_MIN_AGE_DAYS = 1        # the janitor purges no message younger than this: the spam check's longest window
 MAIL_CENSOR_HITS_KEEP_DAYS = 2
 MAIL_SPAM_SAME_BODY = 5            # >= 5 same-body messages in a day (B-14)
 MAIL_SPAM_BULK_MESSAGES = 3        # >= 3 messages each reaching > 20 distinct recipients in an hour
@@ -79700,10 +79701,14 @@ async def _mail_retention_sweep(db: AsyncSession) -> tuple[int, int, int, int]:
     is soft-expired, which keeps the sender's addressee list intact until
     the message itself goes); a message is purged once NO delivered envelope
     is still live AND (the sender deleted it OR it is older than
-    MAIL_RETENTION_DAYS). Unread mail is therefore kept: a live unread
-    envelope blocks the purge. Bounded batches; the cascade removes the
-    envelopes, in_reply_to and moderation_cases.message_id go NULL and the
-    case keeps its snapshot. The censor-hit ledger is pruned after
+    MAIL_RETENTION_DAYS) AND it is at least MAIL_PURGE_MIN_AGE_DAYS old.
+    Unread mail is therefore kept: a live unread envelope blocks the purge.
+    The age floor is migration 404's change: the spam check counts the
+    sender's direct messages of the last day (same body) and hour (bulk)
+    from these rows, so a send the sender deleted stays in both counts for
+    their whole window, whatever its copies' delivery. Bounded batches; the
+    cascade removes the envelopes, in_reply_to and moderation_cases.message_id
+    go NULL and the case keeps its snapshot. The censor-hit ledger is pruned after
     MAIL_CENSOR_HITS_KEEP_DAYS. Send receipts (migration 404) are deleted
     MAIL_RETENTION_DAYS after the send whatever the message's delivery or
     purge: a repeated key is answered from its receipt until then."""
@@ -79724,11 +79729,12 @@ async def _mail_retention_sweep(db: AsyncSession) -> tuple[int, int, int, int]:
         "    WHERE NOT EXISTS (SELECT 1 FROM mail_recipients r"
         "                       WHERE r.message_id = m.id AND r.delivery = 'delivered'"
         "                         AND r.deleted_at IS NULL)"
+        "      AND m.created_at < NOW() - make_interval(days => CAST(:min_age_days AS integer))"
         "      AND (m.deleted_by_sender_at IS NOT NULL"
         "           OR m.created_at < NOW() - make_interval(days => CAST(:days AS integer)))"
         "    LIMIT 500)"
         " RETURNING 1"
-    ), {"days": MAIL_RETENTION_DAYS})).fetchall()
+    ), {"days": MAIL_RETENTION_DAYS, "min_age_days": MAIL_PURGE_MIN_AGE_DAYS})).fetchall()
     hits = (await db.execute(text(
         "DELETE FROM mail_censor_hits"
         " WHERE created_at < NOW() - make_interval(days => CAST(:days AS integer))"

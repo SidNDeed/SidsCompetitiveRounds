@@ -476,8 +476,9 @@ def test_the_rate_window_counts_receipts_whatever_the_purge_removed():
     """_mail_rate_or_raise's statement on PostgreSQL. A's direct sends 10,
     20 and 30 s ago and 2 h ago, one 2 days ago, and a broadcast 5 s ago:
     3 in the minute and 4 in the day. The rows of the 10 s and 20 s sends
-    are then deleted as the janitor's purge deletes them (their receipts
-    have no foreign key and stay): the counts do not move."""
+    are then deleted (the janitor's age floor keeps rows that young; the
+    delete stands for any way a row could go -- their receipts have no
+    foreign key and stay): the counts do not move."""
     stmt = _sql_in(main._mail_rate_or_raise, "SELECT COUNT(*) FILTER")
 
     async def body(stmt):
@@ -509,7 +510,8 @@ def test_the_discord_read_back_follows_the_repliers_own_view():
     named. Once B deleted the reply, or B's own copy of the original is gone
     (and A deleted it), it is named in neither world: not where the
     janitor's purge removed the row (`other` suppressed), and not where an
-    unread delivered copy kept it."""
+    unread delivered copy kept it. Both messages are made past the
+    janitor's age floor, so the purge can remove them."""
     stmt = mail_discord._REPLIED_TO_SQL
     rep_side = stmt[stmt.index("   AND rep.sender_id"):stmt.index("   AND (EXISTS")]
     orig_side = stmt[stmt.index("   AND (EXISTS"):]
@@ -518,12 +520,13 @@ def test_the_discord_read_back_follows_the_repliers_own_view():
     async def body(stmt, other):
         async with _Schema() as conn:
             await conn.execute(M404)
+            at = await conn.fetchval("SELECT NOW()") - timedelta(days=main.MAIL_PURGE_MIN_AGE_DAYS + 1)
             out = {}
             for case in ("reply deleted", "copy deleted"):
-                orig = await _message(conn, sender=A)
+                orig = await _message(conn, sender=A, at=at)
                 await _envelope(conn, orig, B)
                 await _envelope(conn, orig, C, other if case == "copy deleted" else "delivered")
-                rep = await _message(conn, sender=B)
+                rep = await _message(conn, sender=B, at=at)
                 await conn.execute("UPDATE mail_messages SET in_reply_to = $1, thread_id = $1"
                                    " WHERE id = $2", orig, rep)
                 await _envelope(conn, rep, A, other if case == "reply deleted" else "delivered")
@@ -540,7 +543,8 @@ def test_the_discord_read_back_follows_the_repliers_own_view():
                                        " WHERE message_id = $1 AND recipient_id = $2", orig, B)
                     await conn.execute("UPDATE mail_messages SET deleted_by_sender_at = NOW()"
                                        " WHERE id = $1", orig)
-                await conn.execute(*_flat(_bind(purge, {"days": DAYS})))
+                await conn.execute(*_flat(_bind(purge, {
+                    "days": DAYS, "min_age_days": main.MAIL_PURGE_MIN_AGE_DAYS})))
                 out[case] = (fresh, await named())
             return out
     for other in ("delivered", "suppressed"):
@@ -553,6 +557,45 @@ def test_the_discord_read_back_follows_the_repliers_own_view():
     # mutant: the original read without it -> the same split on C's copy
     assert [_run(body(stmt.replace(orig_side, ""), o))["copy deleted"]
             for o in ("delivered", "suppressed")] == [(True, True), (True, False)]
+
+
+def test_the_purge_keeps_a_deleted_send_for_the_spam_checks_windows():
+    """The janitor's purge statement and the spam check's two reads on
+    PostgreSQL. A sent B three messages, 30 minutes, 20 hours and 2 days
+    ago, and deleted all three; B's copies were suppressed. The purge
+    removes only the two-day-old one, so the day's same-body read still
+    returns the other two and the hour's bulk read (bulk_n 0) counts the
+    youngest."""
+    purge = _janitor_purge_sql()
+    bodies = _sql_in(main._mail_spam_check, "SELECT body FROM mail_messages")
+    bulk = _sql_in(main._mail_spam_check, "SELECT  (SELECT COUNT(*)")
+    floor = "      AND m.created_at < NOW() - make_interval(days => CAST(:min_age_days AS integer))"
+    hits_ddl = _from_file("297_mail.sql", r"CREATE TABLE IF NOT EXISTS mail_censor_hits \(.*?\n\);")
+
+    async def body(purge):
+        async with _Schema() as conn:
+            await conn.execute(M404)
+            await conn.execute(hits_ddl)
+            now = await conn.fetchval("SELECT NOW()")
+            made = {}
+            for name, age in (("half hour", timedelta(minutes=30)), ("20 hours", timedelta(hours=20)),
+                              ("2 days", timedelta(days=2))):
+                made[name] = await _message(conn, at=now - age)
+                await _envelope(conn, made[name], B, "suppressed")
+            await conn.execute("UPDATE mail_messages SET deleted_by_sender_at = NOW()")
+            n = len(await conn.fetch(*_flat(_bind(purge, {
+                "days": DAYS, "min_age_days": main.MAIL_PURGE_MIN_AGE_DAYS}))))
+            left = set()
+            for name, mid in made.items():
+                if await conn.fetchval("SELECT 1 FROM mail_messages WHERE id = $1", mid):
+                    left.add(name)
+            same = len(await conn.fetch(*_flat(_bind(bodies, {"sid": A}))))
+            row = await conn.fetchrow(*_flat(_bind(bulk, {"sid": A, "bulk_n": 0})))
+            return n, left, same, row["bulk_hour"]
+    assert _run(body(purge)) == (1, {"half hour", "20 hours"}, 2, 1)
+    # mutant: the purge without its age floor -> all three go, and both
+    # counts lose the sends
+    assert _run(body(_mutated(purge, floor, ""))) == (3, set(), 0, 0)
 
 
 # ── the rollback ──────────────────────────────────────────────────────────

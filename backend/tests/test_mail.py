@@ -847,12 +847,16 @@ class FakeDb:
                     n += 1
             return _Res([(1,)] * n)
         if "DELETE FROM mail_messages" in sql:
+            # migration 404's age floor, read off the statement so a mutant
+            # that drops it reaches this fake
+            floor = "m.created_at < NOW() - make_interval(days => CAST(:min_age_days AS integer))" in sql
             gone = []
             for mid, m in list(self.messages.items()):
                 live = any(env["delivery"] == "delivered" and env["deleted_at"] is None
                            for (mm, _r), env in self.recipients.items() if mm == mid)
-                if not live and (m["deleted_by_sender_at"] is not None
-                                 or m["created_at"] < NOW - timedelta(days=int(params["days"]))):
+                young = floor and m["created_at"] >= NOW - timedelta(days=int(params["min_age_days"]))
+                if not live and not young and (m["deleted_by_sender_at"] is not None
+                                               or m["created_at"] < NOW - timedelta(days=int(params["days"]))):
                     gone.append(mid)
             for mid in gone:
                 self.messages.pop(mid)
@@ -1880,21 +1884,29 @@ def test_janitor_retention_keeps_unread_and_purges_let_go_mail():
     old = NOW - timedelta(days=181)
     old_read = db.seed_message(ids[A_SID], [(ids[B_SID], "to", "delivered")], created_at=old, read=True)
     old_unread = db.seed_message(ids[A_SID], [(ids[B_SID], "to", "delivered")], created_at=old)
-    let_go = db.seed_message(ids[A_SID], [(ids[B_SID], "to", "delivered")], deleted_by_sender_at=NOW)
+    # past migration 404's age floor, so a let-go message can go
+    aged = NOW - timedelta(days=main.MAIL_PURGE_MIN_AGE_DAYS + 1)
+    let_go = db.seed_message(ids[A_SID], [(ids[B_SID], "to", "delivered")], deleted_by_sender_at=NOW,
+                             created_at=aged)
     db.recipients[(let_go, ids[B_SID])]["deleted_at"] = NOW
     half_let_go = db.seed_message(ids[A_SID], [(ids[B_SID], "to", "delivered"), (ids[C_SID], "cc", "delivered")],
-                                  deleted_by_sender_at=NOW)
+                                  deleted_by_sender_at=NOW, created_at=aged)
     db.recipients[(half_let_go, ids[B_SID])]["deleted_at"] = NOW
-    suppressed_only = db.seed_message(ids[A_SID], [(ids[B_SID], "to", "suppressed")], deleted_by_sender_at=NOW)
+    suppressed_only = db.seed_message(ids[A_SID], [(ids[B_SID], "to", "suppressed")], deleted_by_sender_at=NOW,
+                                      created_at=aged)
     kept_suppressed = db.seed_message(ids[A_SID], [(ids[B_SID], "to", "suppressed")])
+    # let go, but younger than the floor: it stays, so the spam check's day still counts it
+    young_let_go = db.seed_message(ids[A_SID], [(ids[B_SID], "to", "suppressed")], deleted_by_sender_at=NOW,
+                                   created_at=NOW - timedelta(days=main.MAIL_PURGE_MIN_AGE_DAYS, hours=-1))
     db.censor_hits = [{"sender_id": ids[A_SID], "created_at": NOW - timedelta(days=3)},
                       {"sender_id": ids[A_SID], "created_at": NOW - timedelta(hours=1)}]
     expired, purged, hits, receipts = _run(main._mail_retention_sweep(db))
     assert (expired, purged, hits, receipts) == (1, 3, 1, 2)
     # migration 404: the two receipts older than MAIL_RETENTION_DAYS go whatever
     # their messages' state; the purged recent messages keep theirs
-    assert {r["message_id"] for r in db.receipts.values()} == {let_go, half_let_go, suppressed_only, kept_suppressed}
-    assert set(db.messages) == {old_unread, half_let_go, kept_suppressed}
+    assert {r["message_id"] for r in db.receipts.values()} == {let_go, half_let_go, suppressed_only, kept_suppressed,
+                                                             young_let_go}
+    assert set(db.messages) == {old_unread, half_let_go, kept_suppressed, young_let_go}
     assert (old_read, ids[B_SID]) not in db.recipients and (let_go, ids[B_SID]) not in db.recipients
     assert suppressed_only not in db.messages
     assert db.recipients[(old_unread, ids[B_SID])]["deleted_at"] is None
