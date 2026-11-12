@@ -78414,7 +78414,7 @@ async def _log_admin_action_strict(db: AsyncSession, *, admin_steam_id: str, act
 # idempotency_key): the message id the send answered with, its kind, a
 # broadcast's recipient count and the request's digest. A repeated key is
 # answered from the receipt ALONE. The message row is no source for that
-# answer: the janitor purges a row once no delivered copy keeps it, which
+# answer: the janitor purges a row only once no delivered copy keeps it, which
 # depends on the recipients' delivery, while the receipt lives until
 # MAIL_RETENTION_DAYS after the send whatever happened to the message
 # (_MAIL_RECEIPT_SWEEP_SQL).
@@ -78558,12 +78558,12 @@ async def _mail_rate_or_raise(db: AsyncSession, sender_id) -> None:
     """10 per minute and 100 per day, counted on the sender's own send
     receipts under the sender lock (B-11). Broadcasts do not count.
 
-    Receipts, not message rows (migration 404's change): the janitor purges
-    a row the sender deleted once no delivered copy is live, so a count of
-    rows would free a place in the window for a deleted message whose copies
-    were suppressed and not for one whose delivered copy keeps its row. A
-    receipt stays MAIL_RETENTION_DAYS after the send whatever happens to the
-    message, so every send counts for its whole window."""
+    Receipts, not message rows (migration 404's change): a receipt stays
+    MAIL_RETENTION_DAYS after the send whatever happens to the message, so
+    every send counts for its whole window whatever its delivery. A row's
+    life depends on delivery (the janitor purges a deleted message only once
+    no delivered copy keeps it), so the window neither counts rows nor
+    relies on how long the janitor keeps them."""
     # Retry-After is the time until the OLDEST send inside the exhausted
     # window leaves it (review r1) — computed in SQL against the same NOW()
     # the counts use, so a limiter that says "retry in N seconds" is telling
@@ -79218,8 +79218,8 @@ async def mail_delete(message_id: str, request: Request, db: AsyncSession = Depe
     Answers {"status": "deleted", "id"} for every well-formed id, whether
     or not the caller holds a live copy of it; a malformed id is 400.
     Whether a message row still exists depends on its recipients' delivery
-    (the janitor purges a message no delivered copy keeps), so the answer
-    does not depend on whether either update matched."""
+    (the janitor purges a message only once no delivered copy keeps it), so
+    the answer does not depend on whether either update matched."""
     me = await _mail_caller(request, db)
     mid = _mail_parse_uuid(message_id, "message_id")
     as_recipient = (await db.execute(text(
