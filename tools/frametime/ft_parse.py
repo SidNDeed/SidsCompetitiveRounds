@@ -805,7 +805,10 @@ ATTACH_ENTRY = r"%s:\d+/\d+" % ATTACH_NAME
 ATTACH_NAMES = r"%s(?:,%s)*" % (ATTACH_ENTRY, ATTACH_ENTRY)
 COUNTER_LINE_KEYS = ("g", "frames", "missing_end", "cycle_failures", "span_depth_violations", "photon_offmain",
                      "span_leave_mismatch")
-_CAL_FAILED = r"cal i=-?\d+(?: [^\s=]+=\S*)* failed: .*"
+# ruling R6-A3.11.152, K-D: FtCalib.Run's failure lines end 'failed: ' + ex.Message (plugin/FtCalib.cs:120-126), and an
+# exception's message may be empty, which the line's trailing space then leaves as a bare 'failed:'; that variant is
+# read too, as every other failure form reads its empty message (_msg)
+_CAL_FAILED = r"cal i=-?\d+(?: [^\s=]+=\S*)* failed:(?: .*)?"
 FORMS = (
     # the lines whose fields this table fixes (the five boot lines, the controls line, the counters line, the census
     # summary, the mark cost and the other boot traces)
@@ -814,8 +817,10 @@ FORMS = (
      ("pin", "planted", "empty")),
     ("alloc_init why=", _kv("alloc_init", ("why",)), ("why",)),
     ("scope plant asked=", _kv("scope plant", ("asked", "got"), {"asked": _I, "got": _INA}), ("asked", "got")),
-    ("scope census entries=", _kv("scope census", ("entries", "wrapped", "failed?"), {"entries": _N, "wrapped": _N}),
-     ("entries", "wrapped", "failed?")),
+    # ruling R6-A3.11.152, G3: FtCensus prints the counts, then exactly one of nothing, ' partial=1' (the type list
+    # came from a ReflectionTypeLoadException) or ' failed=<type>' (the census threw; it replaces partial): never both
+    ("scope census entries=", _kv("scope census", ("entries", "wrapped"), {"entries": _N, "wrapped": _N})
+     + r"(?: partial=1| failed=%s)?" % _FV, ("entries", "wrapped", "partial?", "failed?")),
     ("nest plant asked=", _kv("nest plant", ("asked", "x", "e", "p"), {"asked": _I, "x": _INA, "e": _INA, "p": _INA}),
      ("asked", "x", "e", "p")),
     ("photon patches n=", _kv("photon patches", ("n", "names"), {"n": _N, "names": r"[\w.,]*"}), ("n", "names")),
@@ -848,7 +853,7 @@ FORMS = (
     # FtCalib.Run's entries step failing (plugin/FtCalib.cs:126): the word 'entries' carries no '=', so _CAL_FAILED does
     # not hold it (the integrator's point H). parse_line marks it failed with kind=disp, so VR2 already fails the
     # game's calibration run that prints it ('carries failure warnings for disp') and B1 is WITHHELD
-    ("cal i=", r"cal i=-?\d+ kind=disp entries failed: .*", None),
+    ("cal i=", r"cal i=-?\d+ kind=disp entries failed:(?: .*)?", None),
     ("census g=", _star("census"), None), ("disarmed input=", _star("disarmed"), None),
     ("flushed g=", _star("flushed"), None), ("heavy g=", _star("heavy"), None),
     ("menu seg=", _star("menu"), None), ("menu_armed segments=", _star("menu_armed"), None),
@@ -3324,23 +3329,33 @@ def boot_controls(recs):
     elif "n" not in ph:
         out["patches"] = (False, "the patch report failed (the line prints no n=)")
     else:
-        names = [x for x in str(ph.get("names", "")).split(",") if x]
+        # the names as written (ruling R6-A3.11.152, G1's class: no entry dropped) are PHOTON_ENTRIES exactly, each
+        # once and in the emitter's order (FtPhoton.ReportPatched, plugin/FtPhoton.cs:66-69: the X targets in XNames'
+        # order, then the E targets in ENames'), and n= counts them; the reading names what differs
+        names = str(ph.get("names", "")).split(",")
         gone = [x for x in PHOTON_ENTRIES if x not in names]
-        alien = [x for x in names if x not in PHOTON_ENTRIES]
-        dup = sorted(set(x for x in names if names.count(x) > 1))
-        out["patches"] = (_num(ph.get("n", "")) == len(names) and not gone and not alien and not dup,
-                          "n=%s for %d names%s%s%s" % (ph.get("n"), len(names),
-                                                      "; not attached: %s" % ", ".join(gone) if gone else "",
-                                                      "; not of the ten: %s" % ", ".join(alien) if alien else "",
-                                                      "; named twice: %s" % ", ".join(dup) if dup else ""))
+        alien = [x or "(an empty entry)" for x in names if x not in PHOTON_ENTRIES]
+        dup = sorted(set(x for x in names if x and names.count(x) > 1))
+        order = not gone and not alien and not dup and tuple(names) != PHOTON_ENTRIES
+        out["patches"] = (_num(ph.get("n", "")) == len(names) and tuple(names) == PHOTON_ENTRIES,
+                          "n=%s for %d names%s%s%s%s" % (ph.get("n"), len(names),
+                                                        "; not attached: %s" % ", ".join(gone) if gone else "",
+                                                        "; not of the ten: %s" % ", ".join(alien) if alien else "",
+                                                        "; named twice: %s" % ", ".join(dup) if dup else "",
+                                                        "; not in the emitter's order" if order else ""))
     c, why = one("scope", "census")
     if c is None:
         out["census"] = (False, why)
     else:
         ent, wr = _num(c.get("entries", "")), _num(c.get("wrapped", ""))
-        out["census"] = (ent is not None and ent > 0 and wr == ent and "failed" not in c,
-                         "entries %s, wrapped %s%s" % (ent, wr, "; the census threw (failed=%s)" % c["failed"]
-                                                       if "failed" in c else ""))
+        # ruling R6-A3.11.152, G3: partial=1 (plugin/FtCensus.cs:133, printed at :166) means the type list came from a
+        # ReflectionTypeLoadException and is incomplete: a census of some types proves nothing about the types it did
+        # not read, so the line is out of range whatever its counts
+        out["census"] = (ent is not None and ent > 0 and wr == ent and "failed" not in c and "partial" not in c,
+                         "entries %s, wrapped %s%s%s" % (ent, wr, "; the census threw (failed=%s)" % c["failed"]
+                                                         if "failed" in c else "",
+                                                         "; the census read an incomplete type list (partial=%s)"
+                                                         % c["partial"] if "partial" in c else ""))
     return out
 
 
@@ -3623,29 +3638,28 @@ def ledger_state(recs):
     """The writer ledger's disk-log tap as its one boot line prints it (FtLedger.Install, plugin/FtUpload.cs:368:
     '[FRAME-TIME] ledger log=<0|1> why=<ok|already|no_disk_listener|failed:<type>> types=<list>'; the follow-up to
     ruling .149, A): (ok, reasons, state). ok needs exactly one ledger line, log=1 (the tap installed: without it the
-    log type's writes reach no term of U) and types= exactly the parser's writer types (WRITER_TYPES: the types
-    window_reconcile reads in wu and tok; u_games sums log, hash and sock and P reads recv), none missing and none
-    more. The log=0 reason names
-    why=; state is the line's state as one phrase."""
+    log type's writes reach no term of U) and types= the parser's writer types (WRITER_TYPES: the types
+    window_reconcile reads in wu and tok; u_games sums log, hash and sock and P reads recv). The list is judged as
+    written (ruling R6-A3.11.152, G1; SHARED.md:245-246): its comma-split entries, none dropped, must be WRITER_TYPES
+    exactly, each once and in that order, the order the emitter joins them in (FtUpload.cs:104, joined at :368); a
+    repeated name, an empty entry, another order, a name missing or a name more is not the list. The log=0 reason
+    names why=; state is the line's state as one phrase, its list as written."""
     ls = [r for r in recs if r["kind"] == "ledger"]
     if len(ls) != 1:
         return False, ["%d 'ledger' lines (needs exactly 1): the disk-log tap's state is not read" % len(ls)], (
             "not read (%d ledger lines)" % len(ls))
     r = ls[0]
     log, why = str(r["log"]), str(r["why"])               # REQUIRED_KEYS: read() refuses a line without them
-    types = [t for t in str(r["types"]).split(",") if t]
+    types = str(r["types"])
+    listed = tuple(types.split(","))
     bad = []
     if log != "1":
         bad.append("ledger log=%s why=%s: the disk log is not tapped, so the log type's writes reach no term of U"
                    % (log, why))
-    gone = [t for t in WRITER_TYPES if t not in types]
-    extra = [t for t in types if t not in WRITER_TYPES]
-    if gone:
-        bad.append("ledger types=%s lacks %s, a writer type the parser reads" % (",".join(types), ",".join(gone)))
-    if extra:
-        bad.append("ledger types=%s lists %s, a writer type the parser does not read" % (",".join(types),
-                                                                                          ",".join(extra)))
-    return not bad, bad, "log=%s why=%s types=%s" % (log, why, ",".join(types))
+    if listed != WRITER_TYPES:
+        bad.append("ledger types=%s is not the parser's writer types %s (each once, in that order)"
+                   % (types, ",".join(WRITER_TYPES)))
+    return not bad, bad, "log=%s why=%s types=%s" % (log, why, types)
 
 
 def attach_patch_faults(text):

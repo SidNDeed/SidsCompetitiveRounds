@@ -1040,6 +1040,30 @@ def test_forms_are_every_line_form_the_emitter_prints():
     assert (P.MARK_FT, P.MARK_REF) == ("build variant=FrameTime", "build variant=FrameTimeRef SCR_FT_REF=NOCOLLECTORS")
 
 
+def test_settled_gc_fallback_is_read_and_judged_by_no_rule():
+    # ruling R6-A3.11.152, G2: FtCalib.Settled (plugin/FtCalib.cs:394-407) starts gc_incremental and gc_slice_ns at -1
+    # and sets them inside a try, so a GC property getter that throws prints gc_incremental=-1 gc_slice_ns=-1. That
+    # settled line is a form the parser reads, read() takes it, and no rule judges either field: a sitting-V log whose
+    # every settled line prints the fallback gives the same WITHHELD list and the same U as one printing 1 and a slice
+    # (the control)
+    src = _plugin_src()
+    assert "int incremental = -1;" in src and "long slice = -1;" in src and '" gc_incremental=" + incremental' in src
+    ln = LOG_PREFIX + ("[FRAME-TIME] settled g=1 seed=1 c_plant=80 W=120 vsync=0 target=-1 freq=10000000 hires=1 "
+                       "f_hat=1000000 gc_incremental=-1 gc_slice_ns=-1 f18=A answer=replay armfile=1 force=ON clock=1 "
+                       "frames=10 missing_end=0 cycle_failures=0 span_depth_violations=0")
+    assert P.unknown_forms(ln) == []
+    r = P.parse_line(ln)
+    assert r["kind"] == "settled" and str(r["gc_incremental"]) == "-1" and str(r["gc_slice_ns"]) == "-1", r
+
+    def gc(text, inc, sl):
+        return re.sub(r"(\[FRAME-TIME\] settled g=-?\d+ [^\n]*)",
+                      lambda mm: mm.group(1) + " gc_incremental=%s gc_slice_ns=%s" % (inc, sl), text)
+    fall, ok = gc(_v_text(), -1, -1), gc(_v_text(), 1, 3000000)
+    assert fall.count(" gc_incremental=-1 gc_slice_ns=-1") == ok.count(" gc_incremental=1 gc_slice_ns=3000000") > 2
+    vf, vo = _v(P, fall), _v(P, ok)
+    assert vf["why"] == vo["why"] == [] and vf["U"] == vo["U"] is not None, (vf["why"], vo["why"])
+
+
 def test_p_line_sock_p95_may_print_na_and_heap_is_an_integer():
     # ruling R6-A3.11.149 (6) 10: FtUpload prints sock_p95=NA with no sock sample (plugin/FtUpload.cs:333-345), and
     # FtFrames prints heap= as an integer (plugin/FtFrames.cs:279)
@@ -3178,6 +3202,13 @@ V_SPOILS = (
     ("photon twice", lambda: _v_text(boot={"photon": "photon patches n=11 names=" + ",".join(
         P.PHOTON_ENTRIES + P.PHOTON_ENTRIES[:1])}),
      "R-SCOPE's patches line out of range (n=11 for 11 names; named twice: PhotonPeer.DispatchIncomingCommands)"),
+    # ruling R6-A3.11.152, G1's class: the names as written, in the emitter's order, no entry dropped
+    ("photon reordered", lambda: _v_text(boot={"photon": "photon patches n=10 names=" + ",".join(
+        P.PHOTON_ENTRIES[1:2] + P.PHOTON_ENTRIES[:1] + P.PHOTON_ENTRIES[2:])}),
+     "R-SCOPE's patches line out of range (n=10 for 10 names; not in the emitter's order)"),
+    ("photon empty entry", lambda: _v_text(boot={"photon": "photon patches n=10 names=" + ",".join(
+        P.PHOTON_ENTRIES[:4] + ("",) + P.PHOTON_ENTRIES[4:])}),
+     "R-SCOPE's patches line out of range (n=10 for 11 names; not of the ten: (an empty entry))"),
     ("photon untyped", lambda: _v_text(boot={"photon": "photon patches n=10 names=" + ",".join(
         x.split(".")[1] for x in P.PHOTON_ENTRIES)}),
      "R-SCOPE's patches line out of range (n=10 for 10 names; not attached: PhotonPeer.DispatchIncomingCommands"),
@@ -3739,10 +3770,336 @@ LEDGER_SPOILS = (
     ("failed", "ledger log=0 why=failed:TargetInvocationException types=log,hash,recv,sock",
      "the disk-log tap: ledger log=0 why=failed:TargetInvocationException: the disk log is not tapped"),
     ("type gone", "ledger log=1 why=ok types=log,hash,sock",
-     "the disk-log tap: ledger types=log,hash,sock lacks recv, a writer type the parser reads"),
+     "the disk-log tap: ledger types=log,hash,sock is not the parser's writer types log,hash,recv,sock (each once, in "
+     "that order)"),
     ("type extra", "ledger log=1 why=ok types=log,hash,recv,sock,gc",
-     "the disk-log tap: ledger types=log,hash,recv,sock,gc lists gc, a writer type the parser does not read"),
+     "the disk-log tap: ledger types=log,hash,recv,sock,gc is not the parser's writer types log,hash,recv,sock (each "
+     "once, in that order)"),
 )
+# ruling R6-A3.11.152, G1: ledger_state's reason for a types= list that is not WRITER_TYPES as written
+LEDGER_TYPES_BAD = "ledger types=%s is not the parser's writer types log,hash,recv,sock (each once, in that order)"
+# (what, the types= list as the line prints it): each is not the emitter's list (FtUpload.cs:104, joined at :368)
+LEDGER_LISTS = (
+    ("a name repeated", "log,log,hash,recv,sock"),
+    ("an empty entry leading", ",log,hash,recv,sock"),
+    ("an empty entry in the middle", "log,hash,,recv,sock"),
+    ("an empty entry trailing", "log,hash,recv,sock,"),
+    ("reordered", "log,recv,hash,sock"),
+    ("a name missing", "log,hash,sock"),
+    ("a name more", "log,hash,recv,sock,gc"),
+)
+
+
+def chk_ledger_types_judged_as_written(m):
+    # ruling R6-A3.11.152, G1 (SHARED.md:245-246): the ledger's types= list is WRITER_TYPES exactly, as written: each
+    # name once, in the emitter's order, no entry empty; anything else fails ledger_state with one reason naming the
+    # list as written and the list required, and the state prints the list as written. On the combining path a
+    # sitting-V log whose ledger repeats a name ends B1 WITHHELD for that seat, naming the list. The exact list passes
+    # and the clean pair ends B1 PASS (the controls)
+    clean, c = _v_text(), _c_text()
+    assert m.ledger_state(m.read(clean)) == (True, [], "log=1 why=ok types=log,hash,recv,sock")
+    for what, ts in LEDGER_LISTS:
+        t = _v_text(boot={"ledger": "ledger log=1 why=ok types=" + ts})
+        assert t != clean, what
+        got = m.ledger_state(m.read(t))
+        assert got == (False, [LEDGER_TYPES_BAD % ts], "log=1 why=ok types=" + ts), (what, got)
+    assert _verdict(_comb(m, clean, clean, c, c), "a").startswith("VERDICT B1 seat a PASS: ")
+    rep = _v_text(boot={"ledger": "ledger log=1 why=ok types=log,log,hash,recv,sock"})
+    ln = _verdict(_comb(m, rep, clean, c, c), "a")
+    assert ln.startswith("VERDICT B1 seat a WITHHELD: ") and (LEDGER_TYPES_BAD % "log,log,hash,recv,sock") in ln, ln
+
+
+CENSUS_PARTIAL = "scope census entries=40 wrapped=40 partial=1"
+# ruling R6-A3.11.152, G3: (the census line FtCensus prints, R-SCOPE's census reading): its three emitted variants
+CENSUS_VARIANTS = (
+    ("scope census entries=40 wrapped=40", (True, "entries 40, wrapped 40")),
+    (CENSUS_PARTIAL, (False, "entries 40, wrapped 40; the census read an incomplete type list (partial=1)")),
+    ("scope census entries=40 wrapped=40 failed=TypeLoadException",
+     (False, "entries 40, wrapped 40; the census threw (failed=TypeLoadException)")),
+)
+# lines FtCensus never prints: both suffixes (either order), partial with another value
+CENSUS_NOT_EMITTED = ("scope census entries=40 wrapped=40 partial=1 failed=TypeLoadException",
+                      "scope census entries=40 wrapped=40 failed=TypeLoadException partial=1",
+                      "scope census entries=40 wrapped=40 partial=2", "scope census entries=40 wrapped=40 partial=0")
+
+
+def chk_census_partial_out_of_range(m):
+    # ruling R6-A3.11.152, G3: plugin/FtCensus.cs:133,166 prints the census counts followed by exactly one of nothing,
+    # ' partial=1' (an incomplete type list, from a ReflectionTypeLoadException) or ' failed=<type>'. Each variant is a
+    # form the parser reads; R-SCOPE's census reads the plain one in range (the control), the partial one out of range
+    # naming the incomplete list (it proves nothing about the types it did not read), the failed one as before. A line
+    # with both suffixes, or partial of another value, is no emitted form: an unknown form, and --controls refuses it
+    # as a ruled line out of its form. A partial census withholds sitting V and fails the control proof
+    for line, want in CENSUS_VARIANTS:
+        assert m.unknown_forms(LOG_PREFIX + "[FRAME-TIME] " + line) == [], line
+        got = m.boot_controls(m.read(_boot_full(scope_census=line)))["census"]
+        assert got == want, (line, got, want)
+    for line in CENSUS_NOT_EMITTED:
+        assert m.unknown_forms(LOG_PREFIX + "[FRAME-TIME] " + line) != [], line
+        assert _word_refused(lambda: m.controls_proof(_boot_full(scope_census=line), "boot"),
+                             "the 'scope census entries=' line is not in its form: " + line), line
+    ok, lines = m.controls_proof(_boot_full(scope_census=CENSUS_PARTIAL), "boot")
+    assert not ok and ("CONTROLS R-SCOPE census OUT OF RANGE: " + CENSUS_VARIANTS[1][1][1]) in lines, lines
+    assert "CONTROLS unknown [FRAME-TIME] line forms: 0 (needs 0)" in lines, lines
+    why = _v(m, _v_text(boot={"scope census": CENSUS_PARTIAL}))["why"]
+    assert "R-SCOPE's census line out of range (%s)" % CENSUS_VARIANTS[1][1][1] in why, why
+
+
+def _settled_variant(cp, gi, gs, f18, force, problems):
+    return ("settled g=3 seed=7 c_plant=%s W=120 vsync=0 target=-1 freq=10000000 hires=1 f_hat=1000000 gc_incremental=%s "
+            "gc_slice_ns=%s f18=%s answer=%s armfile=1 force=%s%s clock=1 frames=10 missing_end=0 cycle_failures=0 "
+            "span_depth_violations=0" % (cp, gi, gs, f18, "replay" if f18 == "A" else "unmeasured", force, problems))
+
+
+# an exception type's name may be a generic type's, with a backtick and its arity (the integrator's addition)
+_ARM_INPUTS = ("sentinel", "sentinel_changed", "sentinel_problems", "clock", "perf_probe", "ic_fixture", "escape",
+               "rematch_timeout", "menu_mode", "room", "matchIsRanked", "own_sha", "room_name", "region", "fighters",
+               "peer", "error_NullReferenceException", "error_KeyNotFoundException`1")
+_MENU_INPUTS = ("sentinel", "sentinel_changed", "sentinel_problems", "clock", "perf_probe", "ic_fixture", "in_room",
+                "game_started", "error_NullReferenceException", "error_KeyNotFoundException`1")
+# ruling R6-A3.11.152, K-D (the class of G2 and G3): every emit site of plugin/Ft*.cs (and Plugin.cs's attach warning)
+# whose expression appends a free string operand or a conditional suffix (a), or prints an int or long that starts at a
+# fallback value and is set inside a try (b): (site, a fragment of its statement in the source, one sample payload per
+# variant the expression can print). Each sample is a form the parser reads. The table with each variant's source is
+# the lane's sweep-forms.md
+FORM_VARIANTS = (
+    ("FtA3.cs:345", '"[FRAME-TIME] a3drain g=" + game + " k=" + Names[k]',
+     ("a3drain g=3 k=row1 starts=4 nonempty=3 faults=0",)),
+    ("FtA3.cs:348", '" steady=" + (_steady[k] ? 1 : 0)',
+     ("a3 g=3 k=row1 cap=4 steady=1 reads_on=2 reads_win=2 writes_on=1",
+      "a3 g=3 k=row1 cap=4 steady=0 reads_on=2 reads_win=2 writes_on=1")),
+    ("FtA3.cs:356", '" why=game" + game + " kind=a3 k=" + Names[k]',
+     ("cal i=-1 why=game3 kind=a3 k=row1 live=1 reads=0 scopes=0 ticks=0 tmax=0 unscoped=0 depth_err=0",
+      "cal i=7 why=game3 kind=a3 k=row1 live=1 reads=2 scopes=2 ticks=50 tmax=30 unscoped=0 depth_err=0")),
+    ("FtA3.cs:374", '" kind=a3 k=" + Names[k] + " withheld=1"',
+     tuple("cal i=7 why=%s kind=a3 k=row1 withheld=1" % w for w in ("start", "menu0", "game3"))),
+    ("FtA3.cs:379", '" failed: no calibration"', ("cal i=7 why=game3 kind=a3 k=row1 failed: no calibration",)),
+    ("FtA3.cs:397", '" failed: " + ex.GetType().Name + ": " + ex.Message',
+     ("cal i=7 why=game3 kind=a3 k=row1 failed: InvalidOperationException: a b",
+      "cal i=7 why=game3 kind=a3 k=row1 failed: InvalidOperationException: ",
+      "cal i=7 why=game3 kind=a3 k=row1 failed: KeyNotFoundException`1: a")),
+    ("FtA3.cs:400", '" kind=a3 k=" + Names[k] + " n=" + _calN[k]',
+     ("cal i=7 why=game3 kind=a3 k=row1 n=100 u=1,2 p=3,4", "cal i=7 why=game3 kind=a3 k=row1 n=100 u= p=")),
+    ("FtAlloc.cs:79", '"[FRAME-TIME] alloc_init why=" + Why',
+     tuple("alloc_init why=" + w for w in ("not_init", "no_module", "no_path", "sha", "code", "ok",
+                                           "failed:DllNotFoundException", "failed:KeyNotFoundException`1"))),
+    ("FtAlloc.cs:156", '"[FRAME-TIME] alloc pin=" + (Ok ? "ok" : "differs")',
+     ("alloc pin=ok planted=1048600/1048576 empty=0", "alloc pin=differs planted=NA/1048576 empty=NA")),
+    ("FtArm.cs:52", '(PhotonNetwork.InRoom ? " in-room" : " pre-join")',
+     ("staged ft_dll=0a1b in-room", "staged ft_dll=0a1b pre-join")),
+    ("FtArm.cs:54", '"[FRAME-TIME] ft_dll staging failed: " + ex.Message',
+     ("ft_dll staging failed: a b", "ft_dll staging failed: ")),
+    ("FtArm.cs:117", '" cloud_region=" + (PhotonNetwork.CloudRegion ?? "")',
+     ("room name=FT-1 region=us cloud_region=us/*", "room name=FT-1 region=us cloud_region=us",
+      "room name=FT-1 region= cloud_region=")),
+    ("FtArm.cs:148", '"[FRAME-TIME] ended why=complete pt=" + FtSchedule.Label()', ("ended why=complete pt=16.3.2",)),
+    ("FtArm.cs:149", '"[FRAME-TIME] disarmed input=" + why + " pt="',
+     tuple("disarmed input=%s pt=4.1.2" % w for w in _ARM_INPUTS)),
+    ("FtArm.cs:152", '"[FRAME-TIME] armed room=" + PhotonNetwork.CurrentRoom.Name',
+     ("armed room=FT-1 region=us", "armed room=FT-1 region=")),
+    ("FtArm.cs:154", '"[FRAME-TIME] not armed input=" + why', tuple("not armed input=" + w for w in _ARM_INPUTS)),
+    # the integrator's addition (P5's sweep): UnknownPeer (FtArm.cs:58-73) gives an actor number or its fallbacks none
+    # and null; the known list is ','-joined (one actor while fighters == 2 is checked first)
+    ("FtArm.cs:216", '"unknown actor=" + unknown',
+     tuple("peer unknown actor=%s (no matching ft_dll)" % a for a in ("3", "none", "null"))),
+    ("FtArm.cs:220", '"known actor=" + known + " " + DLL_PROP + "=" + OwnDll()',
+     ("peer known actor=2 ft_dll=0a1b2c3d", "peer known actor=2,3 ft_dll=0a1b2c3d")),
+    ("FtAttach.cs:60", '(missing.Count == 0 ? "none" : string.Join(",", missing.ToArray()))',
+     ("attach n=2 of=2 missing=none names=FtA:1/1,FtB_C:2/2", "attach n=1 of=2 missing=FtB_C names=FtA:1/1,FtB_C:0/0")),
+    ("Plugin.cs:1504", '"[FRAME-TIME] attach report failed: " + ex.Message',
+     ("attach report failed: a b", "attach report failed: ")),
+    ("FtCalib.cs:111", '"[FRAME-TIME] cal i=-1 why=patches kind=entries failed: " + ex.GetType().Name',
+     ("cal i=-1 why=patches kind=entries failed: TypeLoadException: a b",
+      "cal i=-1 why=patches kind=entries failed: TypeLoadException: ")),
+    ("FtCalib.cs:120", '" kind=fhat failed: " + ex.Message', ("cal i=3 kind=fhat failed: a b", "cal i=3 kind=fhat failed: ")),
+    ("FtCalib.cs:122", '" kind=disp failed: " + ex.Message', ("cal i=3 kind=disp failed: a b", "cal i=3 kind=disp failed: ")),
+    ("FtCalib.cs:124", '" kind=a3 failed: " + ex.Message', ("cal i=3 kind=a3 failed: a b", "cal i=3 kind=a3 failed: ")),
+    ("FtCalib.cs:126", '" kind=disp entries failed: " + ex.Message',
+     ("cal i=3 kind=disp entries failed: a b", "cal i=3 kind=disp entries failed: ")),
+    ("FtCalib.cs:149", '" kind=fhat f_hat=" + best',
+     tuple("cal i=3 why=%s kind=fhat f_hat=1000000 spins=5" % w for w in ("start", "menu0", "game3"))),
+    ("FtCalib.cs:192", '" kind=" + (span ? "span" : "disp") + " shape=" + s.Name',
+     ("cal i=3 why=game3 kind=span shape=span.empty n=100 u=1,2 p=3,4",
+      "cal i=3 why=game3 kind=disp shape=call n=100 u=1,2 p=3,4")),
+    ("FtCalib.cs:207", '" kind=entries reference=1 built=0"', ("cal i=3 why=game3 kind=entries reference=1 built=0",)),
+    ("FtCalib.cs:216", '" kind=entries built=0 own_patches=not-applied"',
+     ("cal i=3 why=game3 kind=entries built=0 own_patches=not-applied",)),
+    ("FtCalib.cs:221", '" kind=entries failed: the built table holds no patched entry"',
+     ("cal i=3 why=game3 kind=entries failed: the built table holds no patched entry",)),
+    ("FtCalib.cs:229", '" kind=disp shape=" + c.Name + " failed: " + c.Error',
+     ("cal i=3 why=game3 kind=disp shape=HE_p1 failed: ArgumentException: a b",
+      "cal i=3 why=game3 kind=disp shape=HE_p1 failed: ArgumentException: ")),
+    ("FtCalib.cs:261", '" kind=disp shape=" + c.Name + " failed: " + failed',
+     ("cal i=3 why=game3 kind=disp shape=HE_p1 failed: InvalidProgramException: a",
+      "cal i=3 why=game3 kind=disp shape=HE_p1 failed: InvalidProgramException: a unpatch: b",
+      "cal i=3 why=game3 kind=disp shape=HE_p1 failed:  unpatch: b")),
+    ("FtCalib.cs:264", '" kind=disp shape=" + c.Name + " n=" + EntryCalls',
+     ("cal i=3 why=game3 kind=disp shape=HE_p1 n=100 u=1,2 p=3,4",)),
+    ("FtCalib.cs:404", '" gc_incremental=" + incremental + " gc_slice_ns=" + slice',
+     (_settled_variant(-1, -1, -1, "A", "none", ""), _settled_variant(80, 1, 3000000, "B", "ON", ""),
+      _settled_variant(80, 0, 0, "A", "OFF", " problems=bad-seed,bad-force"))),
+    ("FtCensus.cs:70", '.Append(" shape=").Append(ShapeOf[e])',
+     ("census g=3 entry=HE-p1:PhotonNetwork.ExecuteRpc comp=hit shape=HE_p1 on=1 guarded=0 outside=0",)),
+    ("FtCensus.cs:78", '"[FRAME-TIME] spans g="', ("spans g=3 comp=hit", "spans g=3 comp=hit live.in.gated=10/2 over.out.writer=5/1")),
+    ("FtCensus.cs:166", '" wrapped=" + wrapped + why',
+     tuple(line for line, _ in CENSUS_VARIANTS) + ("scope census entries=40 wrapped=40 failed=KeyNotFoundException`1",)),
+    ("FtClock.cs:128", '"[FRAME-TIME] clock refused: player-loop phase missing (EarlyUpdate " + a',
+     ("clock refused: player-loop phase missing (EarlyUpdate True, PreLateUpdate False, Update True)",)),
+    ("FtClock.cs:140", '" cycles=" + (probe != 0 ? 1 : 0)',
+     ("clock installed freq=10000000 hires=1 cycles=1", "clock installed freq=10000000 hires=0 cycles=0")),
+    ("FtDrive.cs:52", 'Plugin.Log.LogInfo("[FRAME-TIME] self-drive " + what)',
+     ("self-drive spawn waiting why=peer", "self-drive spawn waiting why=actors actors=1", "self-drive ")),
+    ("FtDrive.cs:87", '"[FRAME-TIME] self-drive join room=" + room', ("self-drive join room=FT-1 region=us",)),
+    ("FtDrive.cs:90", '"[FRAME-TIME] self-drive join failed: " + ex.Message',
+     ("self-drive join failed: a b", "self-drive join failed: ")),
+    ("FtDrive.cs:103", 'Plugin.Log.LogWarning("[FRAME-TIME] self-drive " + what)', ("self-drive spawn refused why=spectator",)),
+    ("FtDrive.cs:149", '"[FRAME-TIME] self-drive spawn threw: " + ex.Message',
+     ("self-drive spawn threw: a b", "self-drive spawn threw: ")),
+    ("FtDrive.cs:152", '"[FRAME-TIME] self-drive spawn tick failed: " + ex.Message',
+     ("self-drive spawn tick failed: a b", "self-drive spawn tick failed: ")),
+    ("FtFrames.cs:225", '" after=" + _btArm',
+     ("between g=3 after= ticks=0 calls=0", "between g=3 after=ON ticks=5 calls=1", "between g=3 after=OFF ticks=5 calls=1")),
+    ("FtFrames.cs:260", '" pred=" + Arm(_ptPred)',
+     ("p pt=3.1.1 arm=ON gate=1 pred=none n=120 answer=replay sock_p95=NA sock_n=0 sock_thr=0 sock_main=0 heap=1",
+      "p pt=3.1.1 arm=OFF gate=0 pred=ON n=120 answer=unmeasured sock_p95=4096 sock_n=9 sock_thr=1 sock_main=0 heap=1",
+      "p pt=3.1.1 arm=OFF gate=0 pred=OFF n=120 answer=replay sock_p95=NA sock_n=9 sock_thr=1 sock_main=0 heap=1")),
+    ("FtFrames.cs:306", '.Append(" partial=").Append(partial ? 1 : 0)',
+     ("w pt=3.1.1 arm=ON plant=0 partial=0 n=120 maxF=9 medF=5 e4=0,1 e8=0,0 gc=0 cG=0 aC=0 wu=log:1:2,sock:0:0 "
+      "tok=log:0,0,0,0,0,0,0 wa=0,0,0,0",
+      "w pt=3.1.1 arm=OFF plant=1 partial=1 n=40 maxF=9 gc=0 cG=NA aC=NA aW=NA wu=log:1:2,sock:NA:NA "
+      "tok=log:0,0,0,0,0,0,0 wa=NA,NA,NA,NA")),
+    ("FtHeavy.cs:64", '"[FRAME-TIME] heavy g="',
+     ("heavy g=3 op=hash live=0 between=0 pick=0 over=1 menu=0 at_call=0 edge=0 off=0",)),
+    ("FtMenu.cs:67", '"[FRAME-TIME] menu_wait input=" + why', tuple("menu_wait input=" + w for w in _MENU_INPUTS)),
+    ("FtMenu.cs:78", '" force=" + FtConfig.Force',
+     tuple("menu_armed segments=12 seg_s=10 settle_s=20 force=%s seed=7" % f for f in ("none", "ON", "OFF"))),
+    ("FtMenu.cs:132", '" level=" + _level + " c_plant=" + _levelUs',
+     ("menu seg=1 pair=0 arm=ON gate=1 level=0 c_plant=0 base_us=-1",
+      "menu seg=3 pair=1 arm=OFF gate=0 level=5 c_plant=40 base_us=800")),
+    ("FtMenu.cs:146", '"[FRAME-TIME] menu_base base_us=" + _baseUs',
+     ("menu_base base_us=800 seg=2", "menu_base base_us=-9223372036854775808 seg=2")),
+    ("FtMenu.cs:163", '"[FRAME-TIME] menu_done why=" + why',
+     tuple("menu_done why=%s segs=1 of=12 base_us=-1 cycles=1" % w for w in ("complete",) + _MENU_INPUTS)),
+    ("FtPhoton.cs:69", '"[FRAME-TIME] photon patches n=" + names.Count',
+     ("photon patches n=0 names=", "photon patches n=2 names=A.b,C.d")),
+    ("FtPhoton.cs:121", '" x=" + FtSpan.Us(x)',
+     ("nest plant asked=2000 x=2020 e=1990 p=2005", "nest plant asked=2000 x=NA e=NA p=NA")),
+    ("FtPlant.cs:35", '" from=" + from', ("plant c_plant=80 ticks=800 from=0.1.3",)),
+    ("FtRematch.cs:46", '"[FRAME-TIME] rematch publish failed: " + ex.Message',
+     ("rematch publish failed: a b", "rematch publish failed: ")),
+    ("FtRematch.cs:72", '"[FRAME-TIME] rematch answer failed: " + ex.Message',
+     ("rematch answer failed: a b", "rematch answer failed: ")),
+    ("FtReplay.cs:45", '" ticks=" + ticks + " result=" + result',
+     tuple("answer_replay g=3 ticks=%d result=%s" % (t, w) for t, w in
+           ((90, "settled"), (90, "kept"), (0, "not_running"), (0, "enqueue_failed"), (0, "error_IOException"),
+            (0, "error_KeyNotFoundException`1")))),
+    ("FtReplay.cs:56", '" ticks=0 result=" + result',
+     tuple("answer_replay g=3 ticks=0 result=skipped_" + w for w in ("live", "settle", "next_game", "quit", "absent"))),
+    # the ruling of 12 Nov (08:30Z): a name not of the lane's form reaches the parser as the export's '(not-exported)'
+    ("FtRoomGate.cs:87", '" name=" + shown + " n=" + n',
+     ("room call refused op=JoinRoom name=FT-1 n=1", "room call refused op=CreateRoom name=(none) n=2",
+      "room call refused op=JoinRoom name=(empty) n=1", "room call refused op=JoinRoom name=(not-exported) n=3")),
+    ("FtRoomGate.cs:109", '(missing.Count == 0 ? "" : " missing="',
+     ("FT-GATE patched 6 entry points expected=6 excluded=A.b,C.d",
+      "FT-GATE patched 5 entry points expected=6 excluded= missing=E.f")),
+    ("FtRoomGate.cs:247", '(cur != null ? cur.Name : "(none)")',
+     ("FT-ROOM joined offline=0 name=FT-1", "FT-ROOM joined offline=1 name=(none)",
+      "FT-ROOM joined offline=1 name=(not-exported)")),
+    ("FtRoomGate.cs:250", '"[FRAME-TIME] FT-ROOM read failed: " + ex.Message',
+     ("FT-ROOM read failed: a b", "FT-ROOM read failed: ")),
+    ("FtRoomGate.cs:255", '"[FRAME-TIME] churn timer frozen room=" + room',
+     ("churn timer frozen room=FT-1", "churn timer frozen room=")),
+    ("FtRoomGate.cs:257", '"[FRAME-TIME] churn freeze failed: " + ex.Message',
+     ("churn freeze failed: a b", "churn freeze failed: ")),
+    ("FtSchedule.cs:345", '"[FRAME-TIME] flushed g=" + g + " why=" + why',
+     tuple("flushed g=3 why=" + w for w in ("settle", "next_game", "quit"))),
+    ("FtSchedule.cs:353", '" se=" + (SeatEvidence.FtOpen ? 1 : 0)', ("opened g=3 se=1 ce=1 ic=1", "opened g=3 se=0 ce=0 ic=0")),
+    ("FtSpan.cs:120", '(k == "k1" || k == "k2" || k == "k3" ? k : "none")',
+     tuple("controls k_mutant=" + k for k in ("none", "k1", "k2", "k3"))),
+    ("FtSpan.cs:338", '"[FRAME-TIME] scope plant asked=" + PlantUs + " got=" + Us(got)',
+     ("scope plant asked=2000 got=2010", "scope plant asked=2000 got=NA")),
+    ("FtUpload.cs:30", '" route=" + (route ?? "-") + " n=" + n',
+     ("refused what=load route=- n=2", "refused what=route route=GET_emoji-sheet n=3")),
+    ("FtUpload.cs:36", '" route=" + (route ?? "-") + " n=1"',
+     ("refused what=route route=GET_music-asset n=1", "refused what=load route=- n=1")),
+    ("FtUpload.cs:54", '"[FRAME-TIME] refusals why="',
+     ("refusals why=game3 pairs=0", "refusals why=quit pairs=2 route:GET_emoji-sheet=1 load:-=2")),
+    ("FtUpload.cs:368", '" why=" + why + " types=" + string.Join(",", TypeNames)',
+     tuple("ledger log=%d why=%s types=log,hash,recv,sock" % (1 if w in ("ok", "already") else 0, w)
+           for w in ("ok", "already", "no_disk_listener", "failed:NotSupportedException",
+                     "failed:KeyNotFoundException`1"))),
+    # the failure lines the other plugin files print with ex.Message (P5's list; any text, or empty)
+    ("GameStateWatcher.cs:5703", '"[FRAME-TIME] game start failed: " + ex.Message',
+     ("game start failed: a b", "game start failed: ")),
+    ("GameStateWatcher.cs:5884", '"[FRAME-TIME] opened line failed: " + ex.Message',
+     ("opened line failed: a b", "opened line failed: ")),
+    ("GameStateWatcher.cs:6084", '"[FRAME-TIME] game over failed: " + ex.Message',
+     ("game over failed: a b", "game over failed: ")),
+    ("GameStateWatcher.cs:7491", '"[FRAME-TIME] game end failed: " + ex.Message',
+     ("game end failed: a b", "game end failed: ")),
+    ("Plugin.cs:556", '"[FRAME-TIME] start failed: " + ex.Message', ("start failed: a b", "start failed: ")),
+    ("Plugin.cs:1494", '"[FRAME-TIME] cal i=-1 why=patches kind=entries failed: " + ex.Message',
+     ("cal i=-1 why=patches kind=entries failed: a b", "cal i=-1 why=patches kind=entries failed: ")),
+    ("Plugin.cs:1497", '"[FRAME-TIME] FT-GATE report failed: " + ex.Message',
+     ("FT-GATE report failed: a b", "FT-GATE report failed: ")),
+    ("Plugin.cs:1500", '"[FRAME-TIME] photon patches report failed: " + ex.Message',
+     ("photon patches report failed: a b", "photon patches report failed: ")),
+)
+# lines in a strict form's family that no emitter prints: each refused as an unknown form (the negative controls)
+FORM_NOT_EMITTED = (
+    "controls k_mutant=k4", "controls k_mutant=", "alloc pin=maybe planted=1/1048576 empty=0",
+    "alloc pin=ok planted=-1/1048576 empty=0", "alloc pin=ok planted=1/1048576 empty=", "alloc_init why=",
+    "alloc_init why=a b", "scope plant asked=2000 got=na", "nest plant asked=2000 x=NA e= p=NA",
+    "ledger log=2 why=ok types=log,hash,recv,sock", "ledger log=1 why= types=log,hash,recv,sock",
+    "attach n=0 of=0 missing=none names=", "attach n=1 of=2 missing= names=FtA:1/1",
+    "clock installed freq=10000000 hires=2 cycles=1", "photon patches n=1 names=a b",
+    "cal i=3 kind=fhat broke: a", "cal i=3 kind=disp entries broke: a", "cal i=3 kind=fhat failed",
+    "cal i=3 kind=disp entries failed", "counters g=1 frames=NA missing_end=0 cycle_failures=0 "
+    "span_depth_violations=0 photon_offmain=0 span_leave_mismatch=0") + CENSUS_NOT_EMITTED
+
+
+def chk_emitted_variants_are_forms(m):
+    # ruling R6-A3.11.152, K-D: every variant an emit site of the class prints (FORM_VARIANTS) is a form the parser
+    # reads, the site's statement still in the source; FtCalib.Run's failure lines with an empty exception message
+    # among them (plugin/FtCalib.cs:120-126 print 'failed: ' + ex.Message, a bare 'failed:' once the trailing space is
+    # dropped). The lines no emitter prints in a strict form's family stay refused (FORM_NOT_EMITTED)
+    src = _plugin_src()
+    for site, frag, pays in FORM_VARIANTS:
+        assert frag in src, (site, frag)
+        for pay in pays:
+            assert m.unknown_forms(LOG_PREFIX + "[FRAME-TIME] " + pay) == [], (site, pay)
+    for pay in FORM_NOT_EMITTED:
+        assert m.unknown_forms(LOG_PREFIX + "[FRAME-TIME] " + pay) != [], pay
+    # the bare failure is still read as a failed calibration (VR2 counts it), as the one with a message is
+    for pay in ("cal i=3 kind=fhat failed: ", "cal i=3 kind=disp entries failed: "):
+        r = m.parse_line(LOG_PREFIX + "[FRAME-TIME] " + pay)
+        assert r["kind"] == "cal" and r.get("failed") == 1, (pay, r)
+
+
+# the ruling of 12 Nov (08:30Z): the export prints a room name not of the lane's form (an ft_ name, '(none)' or
+# '(empty)') as '(not-exported)' on these two lines, every other field intact
+ROOM_NAME_REDACTED = ("FT-ROOM joined offline=1 name=(not-exported)",
+                      "room call refused op=JoinRoom name=(not-exported) n=3")
+
+
+@pytest.mark.parametrize("line", ROOM_NAME_REDACTED)
+def test_room_name_redaction_is_read_and_judged_by_no_rule(line):
+    # the line is a form the parser reads, and no rule reads its name: an FT-ROOM line is no record (_LINE does not
+    # match the hyphen; RAW_FAILURES reads only 'FT-ROOM read failed'), and 'room call refused' is a record of kind
+    # room, which EMITTED_UNREAD names (test_every_emitted_kind_is_read_or_named fails if a rule reads that kind). So
+    # nothing can take '(not-exported)' for the lane's room: sitting V with the line added gives the clean log's
+    # verdict, as it does with the same line naming an ft_ room (the control)
+    full = LOG_PREFIX + "[FRAME-TIME] " + line
+    assert P.unknown_forms(full) == []
+    r = P.parse_line(full)
+    assert (r is None) if line.startswith("FT-ROOM") else (r["kind"] == "room" and "room" in P.EMITTED_UNREAD), r
+    assert not [w for w, _ in P.RAW_FAILURES if w in full]
+    v = _v_text()
+    base = _v(P, v)["why"]
+    for name in ("(not-exported)", "ft_0a1b2c3d"):
+        assert _v(P, v + "\n" + full.replace("(not-exported)", name))["why"] == base, name
+    # the negative control: a line a rule does read (the FT-ROOM failure line) changes the verdict when added
+    assert _v(P, v + "\n" + LOG_PREFIX + "[FRAME-TIME] FT-ROOM read failed: x")["why"] != base
 
 
 def _two_ledgers(text):
@@ -4161,18 +4518,136 @@ FAULT_FIELDS = (
      "the per-refusal trace; its counts reach VR6 through the cumulative refusals line"),
     ("room call refused", "n", "FtRoomGate.cs", None,
      "the room gate refusing a room call while it holds a measured boot is its design (FtRoomGate.cs:87)"),
+    # ruling R6-A3.11.152, G5: the fault fields the name scan missed, found by classifying every emitted key
+    ("a3drain", "faults", "FtA3.cs", "a3", '"faults"'),
+    ("a3drain", "nonempty", "FtA3.cs", "a3", '"nonempty"'),
+    ("cal", "withheld", "FtA3.cs", "a3_live", '"withheld"'),
+    ("alloc", "pin", "FtAlloc.cs", "boot_controls", '"pin"'),
+    ("disarmed", "input", "FtArm.cs", "disarms", '"input"'),
+    ("settled", "clock", "FtCalib.cs", None,
+     "clock=0 is FtClock never installed (FtClock.cs:126-131): that boot prints 'clock refused:', a FAILURE_EVENTS "
+     "line that makes the sitting incomplete, and FtArm never arms (its input clock), so no measured game exists"),
+    ("scope census", "partial", "FtCensus.cs", "boot_controls", '"partial"'),
+    ("clock installed", "cycles", "FtClock.cs", None,
+     "cycles=0 is the install probe's QueryThreadCycleTime failing (FtClock.cs:102, 139), which counts a cycle "
+     "failure: every later settled and counters line carries cycle_failures, which vr2 and counters_faults need at 0"),
+    ("self-drive", "tries", "FtDrive.cs", None,
+     "the spawn trace (FtDrive.cs:144): a seat whose spawn gave up has no player and starts no game, so the "
+     "sitting lacks that game's records and complete() fails it; the trace decides nothing itself"),
+    ("self-drive", "try", "FtDrive.cs", None,
+     "the spawn trace's attempt number (FtDrive.cs:147), retried at most 5 times; as tries, a seat left without its "
+     "player starts no game and complete() fails the sitting"),
+    ("self-drive", "created", "FtDrive.cs", None,
+     "the spawn trace's result (FtDrive.cs:150): created=0 is retried (try=) and then given up (tries=); as tries, "
+     "complete() fails the sitting that lacks the game"),
+    ("heavy", "at_call", "FtHeavy.cs", "b3", '"at_call"'),
+    ("heavy", "edge", "FtHeavy.cs", "b3", '"edge"'),
+    ("heavy", "off", "FtHeavy.cs", None,
+     "OPEN, reported to the integrator (no ruling yet): a heavy operation marked off the main thread (FtHeavy.cs:39) "
+     "is counted here, not as at_call or edge; b3 sums it into its operation table and judges only at_call and edge"),
+    ("menu_done", "why", "FtMenu.cs", "menu_check", '"why"'),
+    ("answer_replay", "result", "FtReplay.cs", "f18", '"result"'),
+    ("opened", "se", "FtSchedule.cs", "vr5_records", "OPENED"),
+    ("opened", "ce", "FtSchedule.cs", "vr5_records", "OPENED"),
+    ("opened", "ic", "FtSchedule.cs", "vr5_records", "OPENED"),
+    ("ledger", "log", "FtUpload.cs", "ledger_state", '"log"'),
 )
-# the field names a scan of the emit sites takes as counting a fault (the explicit rows above add the n= and pairs=
-# counts of the refusal lines, which no name tells apart)
+# the second net (ruling .152, G5): field names that read as counting a fault; discovery no longer rests on it (every
+# emitted key is classified, below), but a NOT_FAULT key it matches must carry a reason of its own
 FAULT_WORDS = re.compile(r"\w*(?:fail|miss|overflow|violation|mismatch|refus|err|excl|mixed|offmain|_main|retry|_back"
                          r"|split|problems|duplicates|unscoped|guarded|outside|off_g|off_on|span_off|sock_thr)\w*|zs")
+# ruling R6-A3.11.152, G5: every other key a literal of plugin/Ft*.cs prints, by file, each group with the reason its
+# keys count no fault (read from the emitter); with FAULT_FIELDS this classifies every (file, key) pair the scan finds.
+# A key FAULT_WORDS matches would stand in a group of its own, with its own reason
+NOT_FAULT = {
+    "FtA3.cs": (
+        (("g", "k", "i", "kind", "why", "rows", "ref"),
+         "the lines' identity: game, row name, calibration index, kind and cause, the row count, the reference marker"),
+        (("registered", "expected"), "the row registry's counts; its faults are missing= and duplicates="),
+        (("cap", "steady", "reads_on", "reads_win", "writes_on", "starts"),
+         "a row's measured state per game (FtA3.cs:345-348), what a3() reads as its reads, writes and drain starts"),
+        (("live", "reads", "scopes", "ticks", "tmax", "n", "u", "p"),
+         "a row calibration's measurements: the live marker and executed reads, or the planning n, u and p"),
+    ),
+    "FtAlloc.cs": (
+        (("planted", "empty"), "K1's two allocation medians (NA while the counter is unavailable, which pin= flags)"),
+        (("why",), "alloc_init's cause for pin=differs (FtAlloc.cs:57-78); the flag is pin, which K1 judges"),
+    ),
+    "FtArm.cs": (
+        (("pt", "room", "name", "region", "cloud_region", "actor", "why"),
+         "the room's and point's identity, the peer check's actor numbers, why=complete (the sitting's own end)"),
+    ),
+    "FtAttach.cs": (
+        (("n", "of", "names"), "the attach counts and each class's got/want; missing= names the classes short of want"),
+    ),
+    "FtCalib.cs": (
+        (("g", "i", "kind", "why", "shape", "n", "u", "p", "spins", "f_hat", "c_plant"),
+         "a calibration's identity and measurements, and the settled line's plant and f_hat"),
+        (("seed", "W", "f18", "force", "answer", "vsync", "target", "freq", "hires", "frames"),
+         "the settled line's configuration, platform timer and frame count"),
+        (("entries", "own_owner", "own_targets", "reference", "built", "own_patches"),
+         "the entries table's build state: reference=1 built=0 is the reference build, built=0 own_patches=not-applied "
+         "the process-start run before Plugin.Awake applies the plugin's patches (FtCalib.cs:211-217), by design"),
+        (("armfile",), "whether the arm file was present, a state menu_framerate reads, not a fault"),
+        (("gc_incremental", "gc_slice_ns"),
+         "the GC mode readings, -1 when the getter throws (FtCalib.cs:396-403); judged by no rule (ruling .152, G2)"),
+    ),
+    "FtCensus.cs": (
+        (("g", "entry", "comp", "shape", "on"), "a census entry's identity and its live calls"),
+        (("entries", "wrapped"), "the scope census counts, which boot_controls compares (wrapped needs entries)"),
+    ),
+    "FtClock.cs": (
+        (("freq", "hires"), "the platform timer's frequency and resolution, printed once at install"),
+    ),
+    "FtDrive.cs": (
+        (("g", "index", "room", "region", "why", "actors", "master", "players", "input"),
+         "the self-drive's traces: the pick, the join, the spawn's wait reason and actor and player counts, and the "
+         "stop trace's input (FtArm's, which the disarmed line carries to disarms)"),
+    ),
+    "FtEntries.cs": (
+        (("registered", "expected"), "the census registry's counts; its faults are missing= and duplicates="),
+    ),
+    "FtFrames.cs": (
+        (("g", "pt", "arm", "gate", "pred", "n", "sF", "sS", "sC", "maxF", "pn", "psF", "psS", "psC", "sP", "psP",
+          "windows", "live_frames", "span_g", "span_gn", "span_u", "span_un", "on_calls", "t0", "t1", "answer", "heap",
+          "after", "ticks", "calls"),
+         "the point and between lines' identity and measurements"),
+        (("plant", "partial", "medF", "gc", "run", "pos", "unit", "coin", "wi", "f0", "prun", "res", "gcn", "cG", "cW",
+          "cR", "cS", "cE", "cP", "cX", "aC", "aW", "aR", "aS", "aP", "aX", "q", "r", "qn", "wu", "tok", "nm", "wa"),
+         "the window line's measurements and B11 schedule fields: partial=1 is a window its point's end cut short, by "
+         "design; NA in cG or a* is a counter gc_read_failures or pin= already flags"),
+        (("zl",), "1 when the zero-state mask took a late result from the frame before the boundary (FtZero.cs:49, "
+                  "61): the mechanism at work; zs carries the failing rows"),
+    ),
+    "FtHeavy.cs": (
+        (("g", "op", "hash_t0", "hash_t1"), "the operation's identity and the hashing job's span, which b3 compares"),
+    ),
+    "FtMenu.cs": (
+        (("arm", "base_us", "c_plant", "cycles", "force", "gate", "input", "level", "of", "pair", "seed", "seg",
+          "seg_s", "segments", "segs", "settle_s"),
+         "the menu run's schedule and measurements; menu_wait's input is the arming input it waits on (no run yet)"),
+    ),
+    "FtPhoton.cs": ((("asked", "x", "e", "p", "n", "names"), "the nest plant's reads and the patched method list"),),
+    "FtPlant.cs": ((("c_plant", "from", "ticks"), "the plant's fixed cost and the point it was derived from"),),
+    "FtRematch.cs": ((("g", "own", "peer"), "the rematch timeout's game and the two values it saw; the timeout disarms"),),
+    "FtReplay.cs": ((("g", "ticks"), "the replay's game and its duration (0 until the call returns)"),),
+    "FtRoomGate.cs": (
+        (("expected", "name", "offline", "op", "room"), "the room gate's counts and the joined or refused room's identity"),
+    ),
+    "FtSchedule.cs": (
+        (("g", "frames", "why"), "the counters and flushed lines' game, frame count and flush cause"),
+        (("menu",), "a fixed word of the 'game start failed:' line (FtSchedule.cs:254), a FAILURE_EVENTS line"),
+    ),
+    "FtSpan.cs": ((("asked", "got", "cyc", "p90", "n", "k_mutant"), "the controls' plants and the mark cost"),),
+    "FtUpload.cs": (
+        (("route", "what", "types", "why", "sock_n", "sock_p95"),
+         "the refusal's identity, the ledger's types and cause (log= is its flag), the socket datagrams' count and p95"),
+    ),
+}
 
 
-def test_fault_fields_are_every_emitted_fault_field():
-    # ruling R6-A3.11.151 (2) class B: every field of plugin/Ft*.cs whose name counts a fault is a FAULT_FIELDS row
-    # (by file), every row's key is printed by its file (FtAttach.cs's once merged), and each row names either a rule,
-    # a function of ft_parse whose source holds the row's text (a constant named there holding the key), or a reason
-    import inspect
+def _emitted_keys():
+    """Every (file, key) a literal of plugin/Ft*.cs prints as ' key=' (or at its start)."""
     plug = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "plugin")
     found = set()
     for fn in sorted(os.listdir(plug)):
@@ -4181,15 +4656,52 @@ def test_fault_fields_are_every_emitted_fault_field():
         s = re.sub(r"(?m)^\s*//.*$", "", open(os.path.join(plug, fn), encoding="utf-8").read())
         for lit in re.findall(r'"((?:[^"\\\n]|\\.)*)"', s):
             for k in re.findall(r"(?:^| )(\w+)=", lit):
-                if FAULT_WORDS.fullmatch(k):
-                    found.add((fn, k))
-    rows = set((f, k) for _, k, f, _, _ in FAULT_FIELDS)
-    assert sorted(found - rows) == [], sorted(found - rows)
+                found.add((fn, k))
+    return found
+
+
+def _fault_inventory(found, fault_fields, not_fault):
+    """The fault inventory's defects: a pair neither table classifies, a classified pair no longer emitted, a pair in
+    both, a NOT_FAULT group without a reason, a FAULT_WORDS key sharing a NOT_FAULT group."""
+    rows = set((f, k) for _, k, f, _, _ in fault_fields)
+    nf = [(f, k) for f, groups in not_fault.items() for keys, _ in groups for k in keys]
+    bad = ["unclassified %s %s" % p for p in sorted(found - rows - set(nf))]
+    bad += ["classified, not emitted: %s %s" % p for p in sorted((rows | set(nf)) - found)]
+    bad += ["both tables: %s %s" % p for p in sorted(rows & set(nf))]
+    bad += ["NOT_FAULT twice: %s %s" % p for p in sorted(set(p for p in nf if nf.count(p) > 1))]
+    for f, groups in not_fault.items():
+        for keys, why in groups:
+            if len(why) <= 20:
+                bad.append("NOT_FAULT %s %s: no reason" % (f, ",".join(keys)))
+            if len(keys) > 1 and any(FAULT_WORDS.fullmatch(k) for k in keys):
+                bad.append("NOT_FAULT %s %s: a fault-word key without its own reason" % (f, ",".join(keys)))
+    return bad
+
+
+def test_fault_fields_are_every_emitted_fault_field():
+    # ruling R6-A3.11.151 (2) class B and R6-A3.11.152, G5: every key a literal of plugin/Ft*.cs prints is classified,
+    # by file: a FAULT_FIELDS row (a count or flag of something that went wrong, was refused, missed, dropped, retried,
+    # mismatched, overflowed or ran off its thread) or a NOT_FAULT key with its reason; an unclassified pair fails and
+    # so does a classified pair the source no longer prints. Every row's key is printed by its file, and each row names
+    # either a rule, a function of ft_parse whose source holds the row's text (a constant named there holding the
+    # key), or a reason. Self-checks: one FAULT_FIELDS row removed, one NOT_FAULT key removed, a key no file prints
+    # added: each is a defect
+    import inspect
+    plug = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "plugin")
+    found = _emitted_keys()
+    assert _fault_inventory(found, FAULT_FIELDS, NOT_FAULT) == []
+    drop = [r for r in FAULT_FIELDS if r[:3] == ("a3drain", "faults", "FtA3.cs")]
+    assert len(drop) == 1
+    assert _fault_inventory(found, [r for r in FAULT_FIELDS if r is not drop[0]], NOT_FAULT) == [
+        "unclassified FtA3.cs faults"]
+    less = dict(NOT_FAULT)
+    less["FtHeavy.cs"] = ((("g", "op", "hash_t0"), NOT_FAULT["FtHeavy.cs"][0][1]),)
+    assert _fault_inventory(found, FAULT_FIELDS, less) == ["unclassified FtHeavy.cs hash_t1"]
+    more = dict(NOT_FAULT)
+    more["FtPlant.cs"] = ((("c_plant", "from", "ticks", "gone_key"), NOT_FAULT["FtPlant.cs"][0][1]),)
+    assert _fault_inventory(found, FAULT_FIELDS, more) == ["classified, not emitted: FtPlant.cs gone_key"]
     for line, k, f, rule, how in FAULT_FIELDS:
-        path = os.path.join(plug, f)
-        if f == "FtAttach.cs" and not os.path.exists(path):
-            continue
-        s = open(path, encoding="utf-8").read()
+        s = open(os.path.join(plug, f), encoding="utf-8").read()
         assert re.search(r'"(?:[^"\n]* )?%s=' % k, s), (line, k, f)
         if rule is None:
             assert how and len(how) > 20, (line, k)
@@ -4386,7 +4898,11 @@ B11_CHECKS = ["chk_c2_recovers_3_25", "chk_c3_recovers_3_0375", "chk_c4_recovers
               "chk_controls_ruled_lines_refused", "chk_reported_values_not_computable",
               "chk_r_gc_total_reads_every_measured_window", "chk_cross_risks_beside_the_interval",
               # the integrator's points H, I and J (P3b's end-to-end export test)
-              "chk_cal_entries_failure_form", "chk_malformed_lines_are_refusals", "chk_reference_a3_form"]
+              "chk_cal_entries_failure_form", "chk_malformed_lines_are_refusals", "chk_reference_a3_form",
+              # the confirming round's G1 (ruling R6-A3.11.152): emitted lists judged as written
+              "chk_ledger_types_judged_as_written",
+              # G3: the census's partial variant
+              "chk_census_partial_out_of_range", "chk_emitted_variants_are_forms"]
 
 
 @pytest.mark.parametrize("name", B11_CHECKS)
