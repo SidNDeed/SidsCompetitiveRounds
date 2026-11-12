@@ -3,22 +3,26 @@
 Every test that exports runs the seat script's REAL export code, frame_time_seat.ps1 -SliceOf <log> (function
 SliceExport, the code step 4 runs), in a child PowerShell on a synthetic log in a temp folder:
   (a) LEADS: one line, as the emitter prints it, for every lead of ft_parse.py's FORMS table, the attach line and
-      Harmony's patch failure. Every line is exported (a failure line whose last field is free text as its typed head
-      and "(not-exported)"), nothing is withheld, and every FORMS lead occurs in the export, its line still a line of
-      that lead's FORMS pattern;
+      Harmony's patch failure, with [FPSCAP] lines among them. "=== log lines" is exactly the [FRAME-TIME] and [FPSCAP]
+      lines in the log's order (a failure line whose last field is free text as its typed head and "(not-exported)"),
+      nothing is withheld, and every FORMS lead occurs in the export, its line still a line of that lead's pattern;
   (b) PLANTED: lines outside the forms (a window line with one extra unknown key, at its end or inside it, a fourth wa
-      type, a writer type twice or outside the set, free text in a typed field) are withheld and counted, and no planted
-      text reaches the export;
+      type, a writer type twice or outside the set, free text in a typed field, a failure line whose head carries free
+      text, an [FPSCAP] line of no form) are withheld and counted in their sections, and no planted text is exported;
   (c) IDENTITY: ft_parse.py prints the same lines, with the same exit code, for the export as for the raw log (a
       refusal's line=<n> read as equal): the every-lead log, and test_ft_parse.py's complete sitting-C and sitting-V
       logs, each line put in the emitter's form (the builders' point and settled lines carry fewer keys than the
-      emitter's, and their census lines comp=X). The sitting-V pair (--on) differs by VR1's [FPSCAP] hold line, which
-      the export prints after every [FRAME-TIME] line: a strict expected failure that needs a ruling;
+      emitter's, and their census lines comp=X), and the sitting-V log as a pair (--on, which reads VR1's [FPSCAP]
+      hold against the settled lines);
   -SelfTest: the script's own self-test prints SELFTEST PASS.
-Each mutant is a copy of frame_time_seat.ps1 with one route of the forms changed (the V5 window form only, the writer
-types without sock, the earlier point form only, no attach form, no redaction, a redaction that exports the text, wa
-loosened, the forms unanchored at the end, the window key check skipped), run the same way; each must fail its named
-check. frame_time_seat_v.ps1 holds no form and calls frame_time_seat.ps1, so it inherits them (checked from its text).
+Without PowerShell: the redaction forms are typed (ruling 1: a redacted line carries only fixed text and the mod's own
+identifiers, "(not-exported)" where the text was), and the first section's classes are ft_parse.READ_CLASSES, read
+from the parser, in the seat script ($LogClasses) and in ft_slice_identity.py (FIRST_SECTION).
+Each mutant is a copy of frame_time_seat.ps1 with one route changed (the V5 window form only, the writer types
+without sock, the earlier point form only, no attach form, no redaction, a redaction that exports the text, wa
+loosened, the forms unanchored at the end, the window key check skipped, the [FPSCAP] lines back under the component
+slice), run the same way; each must fail its named check. frame_time_seat_v.ps1 holds no form and calls
+frame_time_seat.ps1, so it inherits them (checked from its text).
 Where neither powershell nor pwsh exists the export tests SKIP with that reason.
 """
 import os
@@ -32,7 +36,8 @@ import pytest
 HERE = os.path.dirname(os.path.abspath(__file__))
 if HERE not in sys.path:
     sys.path.insert(0, HERE)
-import ft_parse as P             # noqa: E402  (read only: FORMS, PHOTON_ENTRIES, expected_entries)
+import ft_parse as P             # noqa: E402  (read only: FORMS, PHOTON_ENTRIES, READ_CLASSES)
+import ft_slice_identity as I    # noqa: E402  (read only: FIRST_SECTION)
 import test_ft_parse as T        # noqa: E402  (read only: the sitting builders)
 
 PS1 = os.path.join(HERE, "frame_time_seat.ps1")
@@ -226,9 +231,26 @@ def lead_of(payload):
     return [(lead, pat) for lead, pat, _ in P.FORMS if payload.startswith(lead) and re.fullmatch(pat, payload)]
 
 
+# [FPSCAP] lines (FpsCap's forms), each after the sample whose payload starts with the key, or at the end (None)
+FPSCAP_AFTER = [("clock installed ", INFO + "[FPSCAP] held by frame-time calibration"),
+                ("settled g=1 ", INFO + "[FPSCAP] engaged unfocused cap: target=30 (baseline target=-1 vsync=0)"),
+                (None, INFO + "[FPSCAP] hold released")]
+
+
 def leads_log():
-    raw = [pre + FT + pay for pre, pay, _ in LEADS] + [HARMONY[0]]
-    log = [pre + FT + exported(pay, red) for pre, pay, red in LEADS]
+    """the raw log, the "=== log lines" section wanted (in order) and the component slice's lines wanted"""
+    raw, log = [], []
+    for pre, pay, red in LEADS:
+        raw.append(pre + FT + pay)
+        log.append(pre + FT + exported(pay, red))
+        for key, cap in FPSCAP_AFTER:
+            if key is not None and pay.startswith(key) and cap not in raw:
+                raw.append(cap)
+                log.append(cap)
+    raw.append(FPSCAP_AFTER[-1][1])
+    log.append(FPSCAP_AFTER[-1][1])
+    assert all(cap in raw for _, cap in FPSCAP_AFTER)
+    raw.append(HARMONY[0])
     return "\n".join(raw) + "\n", log, [HARMONY[1]]
 
 
@@ -252,13 +274,17 @@ PLANTED_FT = [
     (WARN + FT + "alloc_init why=failed:%s" % MARK, "a type name with a hyphen"),
     (INFO + FT + "self-drive %s" % MARK, "a trace of no form"),
     (INFO + FT + P6 + " zz=1", "a point line with one extra unknown key"),
+    (WARN + FT + "FT-GATE patched 6 entry points expected=7 excluded=%s missing=" % MARK + FREE,
+     "a redaction form's head with free text in a typed field"),
 ]
-PLANTED_COMP = [(INFO + "[SEAT-EV] %s" % MARK, "a component line of no form")]
+PLANTED_CAP = [(INFO + "[FPSCAP] %s" % MARK, "an [FPSCAP] line of no form")]
+PLANTED_COMP = [(INFO + "[SEAT-EV] %s" % MARK, "a component line of no form"),
+                (ERR + "[HARMONY] Failed to patch planted/%s: " % MARK + FREE, "a patch failure whose name is a path")]
 PLANTED_REDACT = [(WARN + FT + "start failed: " + FREE, WARN + FT + "start failed: " + RED)]
 
 
 def planted_log():
-    return "\n".join([x for x, _ in PLANTED_FT + PLANTED_COMP] + [x for x, _ in PLANTED_REDACT] +
+    return "\n".join([x for x, _ in PLANTED_FT + PLANTED_CAP + PLANTED_COMP] + [x for x, _ in PLANTED_REDACT] +
                      [INFO + FT + W6]) + "\n"
 
 
@@ -292,13 +318,20 @@ def parse(args):
 
 
 def check_leads(ps1, tmp):
-    """(a) every sample exported in its section, nothing withheld, every FORMS lead in the export"""
+    """(a) "=== log lines" exactly the wanted lines in the log's order, the component slice's lines there, nothing
+    withheld, every FORMS lead in the export, no planted text"""
     raw, want_log, want_comp = leads_log()
     out, log, comp = run_export(ps1, write(os.path.join(tmp, "leads.log"), raw))
     f = []
     for x in want_log:
         if x not in log:
             f.append("not exported under === log lines: %s" % x[:160])
+    if not f and log != want_log:
+        f.append("=== log lines is not the wanted lines in the log's order: %s"
+                 % [(i, a[:80], b[:80]) for i, (a, b) in enumerate(zip(log, want_log)) if a != b][:3])
+    for x in comp:
+        if "[FPSCAP]" in x or FT in x:
+            f.append("a first-section line under === component slice: %s" % x[:160])
     for x in want_comp:
         if x not in comp:
             f.append("not exported under === component slice: %s" % x[:160])
@@ -320,8 +353,14 @@ def check_planted(ps1, tmp):
         f.append("planted text exported: %s" % [x[:160] for x in out.split("\n") if MARK in x])
     if "withheld FRAME-TIME %d" % len(PLANTED_FT) not in log:
         f.append("not 'withheld FRAME-TIME %d': %s" % (len(PLANTED_FT), [x for x in log if x.startswith("withheld")]))
-    if "withheld SEAT-EV %d" % len(PLANTED_COMP) not in comp:
-        f.append("not 'withheld SEAT-EV %d': %s" % (len(PLANTED_COMP), comp))
+    if "withheld FPSCAP %d" % len(PLANTED_CAP) not in log or any("FPSCAP" in x for x in comp):
+        f.append("not 'withheld FPSCAP %d' under === log lines only: %s / %s" % (len(PLANTED_CAP), log[-4:], comp))
+    for want in ("withheld SEAT-EV 1", "withheld Failed to patch 1"):
+        if want not in comp:
+            f.append("not %r under === component slice: %s" % (want, comp))
+    for x in log + comp:
+        if RED in x and not x.endswith(": " + RED) and not x.endswith("=" + RED):
+            f.append("a redacted line with text after the token: %s" % x[:160])
     for _, want in PLANTED_REDACT:
         if want not in log:
             f.append("the redacted line is not exported as %r" % want)
@@ -402,6 +441,11 @@ def check_identity(ps1, tmp, logs=None, on=False):
     return f
 
 
+def check_identity_on_v(ps1, tmp):
+    """(c) the sitting-V log as a pair (--on): the same lines and exit code for the raw log and for its export"""
+    return check_identity(ps1, tmp, [x for x in sitting_logs() if x[2]], on=True)
+
+
 def sitting_logs():
     return [("leads", leads_log()[0], False),
             ("sitting-C", emitter_form(T._c_text()), False),
@@ -461,25 +505,41 @@ def test_parse_identity(tmp_path):
     assert f == [], f
 
 
-class Vr1Order(AssertionError):
-    """the one known difference of (c), raised only when every failure is it"""
-
-
-VR1_HOLD = "no '[FPSCAP] held by frame-time calibration' line: the hold is not proven reached"
-
-
 @need_ps
-@pytest.mark.xfail(raises=Vr1Order, strict=True,
-                   reason="needs a ruling: VR1 (ft_parse.py vr1) reads the [FPSCAP] hold line up to the last settled "
-                          "line, and the export prints [FPSCAP] lines under '=== component slice', after every "
-                          "[FRAME-TIME] line, so --on on an exported sitting-V log withholds what the raw log passes")
 def test_parse_identity_on_v(tmp_path):
-    """(c) for the sitting-V log as a pair (--on): differs only by VR1's hold line (Vr1Order); any other difference
-    fails this test outright, and its disappearance fails it too (strict)"""
-    f = check_identity(PS1, str(tmp_path), [x for x in sitting_logs() if x[2]], on=True)
-    if f and all(" --on differs " in x and VR1_HOLD in x for x in f):
-        raise Vr1Order(f)
+    f = check_identity_on_v(PS1, str(tmp_path))
     assert f == [], f
+
+
+def test_first_section_classes_are_the_parsers():
+    """the seat script's first-section classes ($LogClasses, the one list SliceExport's section choice reads) and
+    ft_slice_identity.py's FIRST_SECTION are ft_parse.READ_CLASSES, read from the parser now"""
+    text = _ps1_text()
+    defs = re.findall(r"^\$LogClasses = @\(([^)]*)\)[ \t]*$", text, re.M)
+    assert len(defs) == 1, defs
+    seat = tuple(re.findall(r"'\[([A-Za-z-]+)\]'", defs[0]))
+    assert seat == tuple(P.READ_CLASSES), (seat, P.READ_CLASSES)
+    assert tuple(c.strip("[]") for c in I.FIRST_SECTION) == tuple(P.READ_CLASSES), I.FIRST_SECTION
+    assert text.count("$first = FirstSection $ln") == 1 and text.count("FirstSection([string]$ln)") == 1
+
+
+# the placeholders a redaction form's head may hold: each a closed pattern of the mod's own identifiers and numbers
+REDACT_TYPED = {"u", "n", "why", "ident", "gateex", "@a3k", "shape"}
+
+
+def test_redaction_forms_are_typed():
+    """ruling 1: every redaction form ends in its one free field <*> (where "(not-exported)" stands), right after ": "
+    or "=", and its head holds fixed text, fixed choices and typed placeholders only"""
+    text = _ps1_text()
+    i, j = text.index("$RedactText = @("), text.index("$Redacts = @(")
+    forms = re.findall(r"^    '([^']*)'$", text[i:j], re.M)
+    assert len(forms) >= 20, forms
+    for form in forms:
+        assert form.endswith("<*>") and form.count("<*>") == 1, form
+        head = form[:-3]
+        assert head.endswith((": ", "=")), form
+        for ph in re.findall(r"<(@?[a-z0-9]+)>", head):
+            assert ph in REDACT_TYPED, (form, ph)
 
 
 @need_ps
@@ -527,6 +587,8 @@ MUTANTS = [
      "    if ($script:Mutant -eq 'no_wkeys') { return $false }\n", "    return $false\n"),
     ("the V5 window form only, read by the parser", check_identity, "line",
      "nm=<u> cP=<n> cX=<n> aC=<ina> aW=<ina> aR=<ina> aS=<ina> aP=<ina> aX=<ina> wa=<wa>'", None),
+    ("the [FPSCAP] lines back under the component slice", check_identity_on_v, "text",
+     "$LogClasses = @('[FRAME-TIME]', '[FPSCAP]')", "$LogClasses = @('[FRAME-TIME]')"),
 ]
 
 

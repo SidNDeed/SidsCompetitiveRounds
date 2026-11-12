@@ -14,11 +14,13 @@ script refuses when that file is missing or names another digest. Six steps:
   3. a wait for "[FRAME-TIME] sitting complete" until its own deadline (TimeoutS minus 600 s), then a graceful quit,
      and a kill by the captured pid only when the game still runs 60 s later;
   4. in every outcome the sentinel removed, then printed in this order: the runs/<stamp> token (UTC), "=== log lines"
-     (the [FRAME-TIME] lines, the window lines included, under the export rule), "=== saved slice" (the slice's class
-     headers, METHOD-V4.md 3.11; the slice itself is saved whole in the run folder with its line count and sha256),
-     "=== component slice" (the saved-slice lines that carry no [FRAME-TIME] tag, under the export rule: queue
-     writes, builds, refusals, the component tags, the BepInEx banner; it sits after "=== log lines", so
-     pull_result.py keeps it in log-lines.txt), "=== VR6" (VR6's second listing), then "=== restored" (step 5).
+     (the lines of every class ft_parse.py reads, $LogClasses = its READ_CLASSES: the [FRAME-TIME] lines, the window
+     lines included, and the [FPSCAP] lines, in the log's own order, under the export rule), "=== saved slice" (the
+     slice's class headers, METHOD-V4.md 3.11; the slice itself is saved whole in the run folder with its line count
+     and sha256), "=== component slice" (the saved-slice lines of no $LogClasses class, under the export rule: queue
+     writes, builds, refusals, the component tags, the BepInEx banner, never an [FPSCAP] line; it sits after "=== log
+     lines", so pull_result.py keeps it in log-lines.txt), "=== VR6" (VR6's second listing), then "=== restored"
+     (step 5).
      The export rule (ruling R6-A3.11.112 F2, function SliceExport): a selected line is printed only when the whole
      line matches one form of $FormText, the text of one log call of plugin/*.cs whose variable fields are closed
      sets (digits, hex, the ft_ room form, actor numbers, fixed tokens, the generated sets); a cfg-derived field
@@ -111,6 +113,12 @@ Set-StrictMode -Version 2
 $SliceClasses = @('[FRAME-TIME]', '[FPSCAP]', '[COMBAT-PERF]', '[HIT-EVIDENCE]', '[SEAT-EV]', '[HP-POINT-END]',
     '[SAW-POINT]', '[IDENTITY-CLOCK]', '[CARD-EV]', '[COMBAT-EV]', '[PEER-BUILD]', '[BUILD-PROP]', 'record queued',
     'record kept for the next launch', 'refused', 'voided', 'Failed to patch', 'BepInEx 5.')
+# the classes of "=== log lines": the classes ft_parse.py reads (its READ_CLASSES; test_ft_seat_export.py holds the two
+# equal), printed there in the log's own order, because the parser reads the order between their lines (VR1 and the
+# menu's frame-rate state read the [FPSCAP] lines against the settled lines). Every other class word's exported lines
+# go to "=== component slice"
+$LogClasses = @('[FRAME-TIME]', '[FPSCAP]')
+function FirstSection([string]$ln) { foreach ($c in $LogClasses) { if ($ln.Contains($c)) { return $true } }; return $false }
 $Vr6Named = @('CompetitiveRounds.seat-evidence.jsonl', 'CompetitiveRounds.seat-evidence.jsonl.tmp',
     'CompetitiveRounds.pending-reports.jsonl', 'CompetitiveRounds.pending-reports.jsonl.tmp',
     'CompetitiveRounds.refused-reports.jsonl', 'com.competitiverounds.mod.cfg')
@@ -526,9 +534,9 @@ function Exportable([string]$ln) { return $null -ne (ExportLine $ln) }
 
 function SliceExport([string[]]$lines) {
     # the selection and the export of step 4, on the log's lines: Slice (every selected line, for slice.log), Count
-    # (per class), Log (the "=== log lines" section's lines: exported [FRAME-TIME] lines, window lines included, then its
-    # withheld counts), Comp (the component slice's exported lines, then its withheld counts) and CompAll (the number
-    # of selected lines without [FRAME-TIME])
+    # (per class), Log (the "=== log lines" section's lines: the exported lines of a $LogClasses class, window lines
+    # included, in the log's order, then its withheld counts), Comp (the component slice's exported lines, then its
+    # withheld counts) and CompAll (the number of selected lines of no $LogClasses class)
     $r = @{ Slice = New-Object System.Collections.Generic.List[string]; Count = [ordered]@{}
         Log = New-Object System.Collections.Generic.List[string]; Comp = New-Object System.Collections.Generic.List[string]; CompAll = 0 }
     $wLog = [ordered]@{}; $wComp = [ordered]@{}
@@ -538,13 +546,13 @@ function SliceExport([string[]]$lines) {
         if ($hit.Count -eq 0) { continue }
         foreach ($cls in $hit) { $r.Count[$cls]++ }
         $r.Slice.Add($ln)
-        $ft = $ln.Contains('[FRAME-TIME]')
+        $first = FirstSection $ln
         # the self-test's drop_w mutant restores the skip the window lines had before ruling R6-A3.11.133 (2)
-        if ($script:Mutant -eq 'drop_w' -and $ft -and $ln.Contains('[FRAME-TIME] w ')) { continue }
-        if (-not $ft) { $r.CompAll++ }
+        if ($script:Mutant -eq 'drop_w' -and $ln.Contains('[FRAME-TIME] w ')) { continue }
+        if (-not $first) { $r.CompAll++ }
         $x = ExportLine $ln
-        if ($null -ne $x) { if ($ft) { $r.Log.Add($x) } else { $r.Comp.Add($x) } }
-        else { foreach ($cls in $hit) { if ($ft) { $wLog[$cls]++ } else { $wComp[$cls]++ } } }
+        if ($null -ne $x) { if ($first) { $r.Log.Add($x) } else { $r.Comp.Add($x) } }
+        else { foreach ($cls in $hit) { if ($first) { $wLog[$cls]++ } else { $wComp[$cls]++ } } }
     }
     foreach ($cls in $SliceClasses) {
         if ($wLog[$cls] -gt 0) { $r.Log.Add(("withheld {0} {1}" -f $cls.Trim('[', ']'), $wLog[$cls])) }
@@ -705,12 +713,12 @@ function Step4($C, $p) {
     Say '=== saved slice'
     foreach ($cls in $SliceClasses) { Say ("slice class {0}: {1} lines" -f $cls.Trim('[', ']'), $count[$cls]) }
     Say ("slice saved: {0} lines, sha256 {1}" -f $slice.Count, (Sha $sp))
-    # the component evidence itself (3.11): the saved-slice lines without [FRAME-TIME] that the export rule admits
-    # (the [FRAME-TIME] lines, the window lines among them, are under "=== log lines" already)
+    # the component evidence itself (3.11): the saved-slice lines of no $LogClasses class that the export rule admits
+    # (the [FRAME-TIME] and [FPSCAP] lines, the window lines among them, are under "=== log lines" already)
     if ($script:Mutant -ne 'no_component_slice') {
         Say '=== component slice'
         $nw = @($sel.Comp | Where-Object { $_.StartsWith('withheld ') }).Count
-        Say ("component slice: {0} of {1} saved-slice lines without [FRAME-TIME] exported, the rest withheld by class" -f ($sel.Comp.Count - $nw), $sel.CompAll)
+        Say ("component slice: {0} of {1} saved-slice lines without {2} exported, the rest withheld by class" -f ($sel.Comp.Count - $nw), $sel.CompAll, ($LogClasses -join ' or '))
         foreach ($ln in $sel.Comp) { Say $ln }
     }
     Say '=== VR6'
@@ -1072,11 +1080,11 @@ function SelfTestOne([string]$root, [string]$mutant) {
     if ($iL -ge 0 -and $iS -gt $iL + 1) { $secLog = @($o[($iL + 1)..($iS - 1)]) }
     if ($iC -ge 0 -and $iV -gt $iC + 1) { $secComp = @($o[($iC + 1)..($iV - 1)] | Where-Object { $_ -notlike 'component slice: *' }) }
     $planted = @($o | Where-Object { $_.Contains('.example') }).Count
-    $formOut = @(@($SimFt) + @($SimWindow) + @($SimForm) + @($SimRedactOut) | Where-Object { $sec = if ($_.Contains('[FRAME-TIME]')) { $secLog } else { $secComp }; -not ($sec -ccontains $_) }).Count
+    $formOut = @(@($SimFt) + @($SimWindow) + @($SimForm) + @($SimRedactOut) | Where-Object { $sec = if (FirstSection $_) { $secLog } else { $secComp }; -not ($sec -ccontains $_) }).Count
     $wantW = @()
     foreach ($sec in @('log', 'comp')) {
         foreach ($cls in $SliceClasses) {
-            $nw = @(@($SimNoForm) + @($SimPlant) | Where-Object { $_.Contains($cls) -and ($_.Contains('[FRAME-TIME]') -eq ($sec -eq 'log')) }).Count
+            $nw = @(@($SimNoForm) + @($SimPlant) | Where-Object { $_.Contains($cls) -and ((FirstSection $_) -eq ($sec -eq 'log')) }).Count
             if ($nw -gt 0) { $wantW += ("{0} withheld {1} {2}" -f $sec, $cls.Trim('[', ']'), $nw) }
         }
     }
@@ -1109,14 +1117,14 @@ function SelfTestOne([string]$root, [string]$mutant) {
         }
         catch { $wLines = 'wcount error: ' + $_.Exception.Message }
     }
-    # the component section: after the class headers, before VR6, non-empty, one line at least per non-FRAME-TIME
-    # class, and no [FRAME-TIME] line in it
+    # the component section: after the class headers, before VR6, non-empty, one line at least per class outside
+    # $LogClasses, and no line of a $LogClasses class in it
     $compLines = @()
     if ($iComp -ge 0 -and $iVr6 -gt $iComp + 1) { $compLines = @($o[($iComp + 1)..($iVr6 - 1)] | Where-Object { $_ -notlike 'component slice: *' }) }
     $component = $iComp -gt $iSav -and $iComp -lt $iVr6 -and $compLines.Count -gt 0 -and
-        @($compLines | Where-Object { $_.Contains('[FRAME-TIME]') }).Count -eq 0
+        @($compLines | Where-Object { FirstSection $_ }).Count -eq 0
     foreach ($cls in $SliceClasses) {
-        if ($cls -eq '[FRAME-TIME]') { continue }
+        if ($LogClasses -contains $cls) { continue }
         if (@($compLines | Where-Object { $_.Contains($cls) }).Count -eq 0) { $component = $false }
     }
     $shut = @($o | Where-Object { $_ -like 'shutdown:*' }).Count -ge 1

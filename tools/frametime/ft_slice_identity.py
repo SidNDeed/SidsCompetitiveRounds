@@ -7,9 +7,11 @@ Usage: python -I -B ft_slice_identity.py <out dir> <list of raw logs> [<list of 
 Each list file names one input per line. A raw log is a whole LogOutput.log (a VM-seat run or a dry fixture); an
 exported slice is a log-lines.txt the laptop job printed under the previous selection. For every input it builds
 the two exported sections twice:
-  - OLD: the substring selection the seat script used before the rule ("=== log lines": every line holding
-    "[FRAME-TIME]", the window lines included since ruling R6-A3.11.133 (2); "=== component slice": every other line
-    holding a class word);
+  - OLD: the substring selection the seat script used before the rule, in the sections the rule prints today
+    ("=== log lines": every line holding a class word of FIRST_SECTION, "[FRAME-TIME]" or "[FPSCAP]", the classes
+    ft_parse.py reads, in the log's own order, the window lines included since ruling R6-A3.11.133 (2);
+    "=== component slice": every other line holding a class word), so the proof compares the anchored selection
+    with the substring selection of the same sections;
   - NEW: frame_time_seat.ps1 -SliceOf <input>, the seat script's own selection code;
 then runs ft_parse.py on each, alone and as the peer of the first raw log, and compares stdout, stderr and exit code
 byte for byte (the old input's path read as the new one's). An exported slice first loses the seat job's own header
@@ -34,6 +36,9 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 PS1 = os.path.join(HERE, "frame_time_seat.ps1")
 PARSE = os.path.join(HERE, "ft_parse.py")
+# the classes of "=== log lines" (frame_time_seat.ps1's $LogClasses): ft_parse.py's READ_CLASSES, bracketed;
+# test_ft_seat_export.py holds the three equal
+FIRST_SECTION = ("[FRAME-TIME]", "[FPSCAP]")
 CLASSES = ["[FRAME-TIME]", "[FPSCAP]", "[COMBAT-PERF]", "[HIT-EVIDENCE]", "[SEAT-EV]", "[HP-POINT-END]", "[SAW-POINT]",
            "[IDENTITY-CLOCK]", "[CARD-EV]", "[COMBAT-EV]", "[PEER-BUILD]", "[BUILD-PROP]", "record queued",
            "record kept for the next launch", "refused", "voided", "Failed to patch", "BepInEx 5."]
@@ -51,8 +56,8 @@ def lines_of(path):
 #  lines a mod log call writes, and absent from a raw log (ruling R6-A3.11.113 (2)(c))
 JOB_HEADER = re.compile(r"slice class (?:%s): [0-9]+ lines|slice saved: [0-9]+ lines, sha256 [0-9a-f]{64}"
                         r"|component slice: [0-9]+ lines, every saved-slice line without \[FRAME-TIME\]"
-                        r"|component slice: [0-9]+ of [0-9]+ saved-slice lines without \[FRAME-TIME\] exported, the rest"
-                        r" withheld by class" % "|".join(re.escape(c.strip("[]")) for c in CLASSES))
+                        r"|component slice: [0-9]+ of [0-9]+ saved-slice lines without \[FRAME-TIME\](?: or \[FPSCAP\])?"
+                        r" exported, the rest withheld by class" % "|".join(re.escape(c.strip("[]")) for c in CLASSES))
 REFUSAL = re.compile(r"FT-PARSE REFUSED: .*\n?")
 
 
@@ -80,8 +85,9 @@ def old_export(lines):
     for ln in lines:
         if not any(c in ln for c in CLASSES):
             continue
-        if "[FRAME-TIME]" in ln:
-            # the window lines included: the seat script exports them since ruling R6-A3.11.133 (2)
+        if any(c in ln for c in FIRST_SECTION):
+            # the window lines included: the seat script exports them since ruling R6-A3.11.133 (2); the [FPSCAP]
+            # lines in the log's order among the [FRAME-TIME] ones (ruling 2 of the class E follow-up)
             log.append(ln)
         else:
             comp.append(ln)
