@@ -532,7 +532,6 @@ namespace CompetitiveRounds
             typeof(SawPointEvidencePatch), typeof(PointEndEvidencePatch),
         };
 #endif
-
         private void Awake()
         {
             Log = Logger;
