@@ -4463,18 +4463,136 @@ FAULT_FIELDS = (
      "the per-refusal trace; its counts reach VR6 through the cumulative refusals line"),
     ("room call refused", "n", "FtRoomGate.cs", None,
      "the room gate refusing a room call while it holds a measured boot is its design (FtRoomGate.cs:87)"),
+    # ruling R6-A3.11.152, G5: the fault fields the name scan missed, found by classifying every emitted key
+    ("a3drain", "faults", "FtA3.cs", "a3", '"faults"'),
+    ("a3drain", "nonempty", "FtA3.cs", "a3", '"nonempty"'),
+    ("cal", "withheld", "FtA3.cs", "a3_live", '"withheld"'),
+    ("alloc", "pin", "FtAlloc.cs", "boot_controls", '"pin"'),
+    ("disarmed", "input", "FtArm.cs", "disarms", '"input"'),
+    ("settled", "clock", "FtCalib.cs", None,
+     "clock=0 is FtClock never installed (FtClock.cs:126-131): that boot prints 'clock refused:', a FAILURE_EVENTS "
+     "line that makes the sitting incomplete, and FtArm never arms (its input clock), so no measured game exists"),
+    ("scope census", "partial", "FtCensus.cs", "boot_controls", '"partial"'),
+    ("clock installed", "cycles", "FtClock.cs", None,
+     "cycles=0 is the install probe's QueryThreadCycleTime failing (FtClock.cs:102, 139), which counts a cycle "
+     "failure: every later settled and counters line carries cycle_failures, which vr2 and counters_faults need at 0"),
+    ("self-drive", "tries", "FtDrive.cs", None,
+     "the spawn trace (FtDrive.cs:144): a seat whose spawn gave up has no player and starts no game, so the "
+     "sitting lacks that game's records and complete() fails it; the trace decides nothing itself"),
+    ("self-drive", "try", "FtDrive.cs", None,
+     "the spawn trace's attempt number (FtDrive.cs:147), retried at most 5 times; as tries, a seat left without its "
+     "player starts no game and complete() fails the sitting"),
+    ("self-drive", "created", "FtDrive.cs", None,
+     "the spawn trace's result (FtDrive.cs:150): created=0 is retried (try=) and then given up (tries=); as tries, "
+     "complete() fails the sitting that lacks the game"),
+    ("heavy", "at_call", "FtHeavy.cs", "b3", '"at_call"'),
+    ("heavy", "edge", "FtHeavy.cs", "b3", '"edge"'),
+    ("heavy", "off", "FtHeavy.cs", None,
+     "OPEN, reported to the integrator (no ruling yet): a heavy operation marked off the main thread (FtHeavy.cs:39) "
+     "is counted here, not as at_call or edge; b3 sums it into its operation table and judges only at_call and edge"),
+    ("menu_done", "why", "FtMenu.cs", "menu_check", '"why"'),
+    ("answer_replay", "result", "FtReplay.cs", "f18", '"result"'),
+    ("opened", "se", "FtSchedule.cs", "vr5_records", "OPENED"),
+    ("opened", "ce", "FtSchedule.cs", "vr5_records", "OPENED"),
+    ("opened", "ic", "FtSchedule.cs", "vr5_records", "OPENED"),
+    ("ledger", "log", "FtUpload.cs", "ledger_state", '"log"'),
 )
-# the field names a scan of the emit sites takes as counting a fault (the explicit rows above add the n= and pairs=
-# counts of the refusal lines, which no name tells apart)
+# the second net (ruling .152, G5): field names that read as counting a fault; discovery no longer rests on it (every
+# emitted key is classified, below), but a NOT_FAULT key it matches must carry a reason of its own
 FAULT_WORDS = re.compile(r"\w*(?:fail|miss|overflow|violation|mismatch|refus|err|excl|mixed|offmain|_main|retry|_back"
                          r"|split|problems|duplicates|unscoped|guarded|outside|off_g|off_on|span_off|sock_thr)\w*|zs")
+# ruling R6-A3.11.152, G5: every other key a literal of plugin/Ft*.cs prints, by file, each group with the reason its
+# keys count no fault (read from the emitter); with FAULT_FIELDS this classifies every (file, key) pair the scan finds.
+# A key FAULT_WORDS matches would stand in a group of its own, with its own reason
+NOT_FAULT = {
+    "FtA3.cs": (
+        (("g", "k", "i", "kind", "why", "rows", "ref"),
+         "the lines' identity: game, row name, calibration index, kind and cause, the row count, the reference marker"),
+        (("registered", "expected"), "the row registry's counts; its faults are missing= and duplicates="),
+        (("cap", "steady", "reads_on", "reads_win", "writes_on", "starts"),
+         "a row's measured state per game (FtA3.cs:345-348), what a3() reads as its reads, writes and drain starts"),
+        (("live", "reads", "scopes", "ticks", "tmax", "n", "u", "p"),
+         "a row calibration's measurements: the live marker and executed reads, or the planning n, u and p"),
+    ),
+    "FtAlloc.cs": (
+        (("planted", "empty"), "K1's two allocation medians (NA while the counter is unavailable, which pin= flags)"),
+        (("why",), "alloc_init's cause for pin=differs (FtAlloc.cs:57-78); the flag is pin, which K1 judges"),
+    ),
+    "FtArm.cs": (
+        (("pt", "room", "name", "region", "cloud_region", "actor", "why"),
+         "the room's and point's identity, the peer check's actor numbers, why=complete (the sitting's own end)"),
+    ),
+    "FtAttach.cs": (
+        (("n", "of", "names"), "the attach counts and each class's got/want; missing= names the classes short of want"),
+    ),
+    "FtCalib.cs": (
+        (("g", "i", "kind", "why", "shape", "n", "u", "p", "spins", "f_hat", "c_plant"),
+         "a calibration's identity and measurements, and the settled line's plant and f_hat"),
+        (("seed", "W", "f18", "force", "answer", "vsync", "target", "freq", "hires", "frames"),
+         "the settled line's configuration, platform timer and frame count"),
+        (("entries", "own_owner", "own_targets", "reference", "built", "own_patches"),
+         "the entries table's build state: reference=1 built=0 is the reference build, built=0 own_patches=not-applied "
+         "the process-start run before Plugin.Awake applies the plugin's patches (FtCalib.cs:211-217), by design"),
+        (("armfile",), "whether the arm file was present, a state menu_framerate reads, not a fault"),
+        (("gc_incremental", "gc_slice_ns"),
+         "the GC mode readings, -1 when the getter throws (FtCalib.cs:396-403); judged by no rule (ruling .152, G2)"),
+    ),
+    "FtCensus.cs": (
+        (("g", "entry", "comp", "shape", "on"), "a census entry's identity and its live calls"),
+        (("entries", "wrapped"), "the scope census counts, which boot_controls compares (wrapped needs entries)"),
+    ),
+    "FtClock.cs": (
+        (("freq", "hires"), "the platform timer's frequency and resolution, printed once at install"),
+    ),
+    "FtDrive.cs": (
+        (("g", "index", "room", "region", "why", "actors", "master", "players", "input"),
+         "the self-drive's traces: the pick, the join, the spawn's wait reason and actor and player counts, and the "
+         "stop trace's input (FtArm's, which the disarmed line carries to disarms)"),
+    ),
+    "FtEntries.cs": (
+        (("registered", "expected"), "the census registry's counts; its faults are missing= and duplicates="),
+    ),
+    "FtFrames.cs": (
+        (("g", "pt", "arm", "gate", "pred", "n", "sF", "sS", "sC", "maxF", "pn", "psF", "psS", "psC", "sP", "psP",
+          "windows", "live_frames", "span_g", "span_gn", "span_u", "span_un", "on_calls", "t0", "t1", "answer", "heap",
+          "after", "ticks", "calls"),
+         "the point and between lines' identity and measurements"),
+        (("plant", "partial", "medF", "gc", "run", "pos", "unit", "coin", "wi", "f0", "prun", "res", "gcn", "cG", "cW",
+          "cR", "cS", "cE", "cP", "cX", "aC", "aW", "aR", "aS", "aP", "aX", "q", "r", "qn", "wu", "tok", "nm", "wa"),
+         "the window line's measurements and B11 schedule fields: partial=1 is a window its point's end cut short, by "
+         "design; NA in cG or a* is a counter gc_read_failures or pin= already flags"),
+        (("zl",), "1 when the zero-state mask took a late result from the frame before the boundary (FtZero.cs:49, "
+                  "61): the mechanism at work; zs carries the failing rows"),
+    ),
+    "FtHeavy.cs": (
+        (("g", "op", "hash_t0", "hash_t1"), "the operation's identity and the hashing job's span, which b3 compares"),
+    ),
+    "FtMenu.cs": (
+        (("arm", "base_us", "c_plant", "cycles", "force", "gate", "input", "level", "of", "pair", "seed", "seg",
+          "seg_s", "segments", "segs", "settle_s"),
+         "the menu run's schedule and measurements; menu_wait's input is the arming input it waits on (no run yet)"),
+    ),
+    "FtPhoton.cs": ((("asked", "x", "e", "p", "n", "names"), "the nest plant's reads and the patched method list"),),
+    "FtPlant.cs": ((("c_plant", "from", "ticks"), "the plant's fixed cost and the point it was derived from"),),
+    "FtRematch.cs": ((("g", "own", "peer"), "the rematch timeout's game and the two values it saw; the timeout disarms"),),
+    "FtReplay.cs": ((("g", "ticks"), "the replay's game and its duration (0 until the call returns)"),),
+    "FtRoomGate.cs": (
+        (("expected", "name", "offline", "op", "room"), "the room gate's counts and the joined or refused room's identity"),
+    ),
+    "FtSchedule.cs": (
+        (("g", "frames", "why"), "the counters and flushed lines' game, frame count and flush cause"),
+        (("menu",), "a fixed word of the 'game start failed:' line (FtSchedule.cs:254), a FAILURE_EVENTS line"),
+    ),
+    "FtSpan.cs": ((("asked", "got", "cyc", "p90", "n", "k_mutant"), "the controls' plants and the mark cost"),),
+    "FtUpload.cs": (
+        (("route", "what", "types", "why", "sock_n", "sock_p95"),
+         "the refusal's identity, the ledger's types and cause (log= is its flag), the socket datagrams' count and p95"),
+    ),
+}
 
 
-def test_fault_fields_are_every_emitted_fault_field():
-    # ruling R6-A3.11.151 (2) class B: every field of plugin/Ft*.cs whose name counts a fault is a FAULT_FIELDS row
-    # (by file), every row's key is printed by its file (FtAttach.cs's once merged), and each row names either a rule,
-    # a function of ft_parse whose source holds the row's text (a constant named there holding the key), or a reason
-    import inspect
+def _emitted_keys():
+    """Every (file, key) a literal of plugin/Ft*.cs prints as ' key=' (or at its start)."""
     plug = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "plugin")
     found = set()
     for fn in sorted(os.listdir(plug)):
@@ -4483,15 +4601,52 @@ def test_fault_fields_are_every_emitted_fault_field():
         s = re.sub(r"(?m)^\s*//.*$", "", open(os.path.join(plug, fn), encoding="utf-8").read())
         for lit in re.findall(r'"((?:[^"\\\n]|\\.)*)"', s):
             for k in re.findall(r"(?:^| )(\w+)=", lit):
-                if FAULT_WORDS.fullmatch(k):
-                    found.add((fn, k))
-    rows = set((f, k) for _, k, f, _, _ in FAULT_FIELDS)
-    assert sorted(found - rows) == [], sorted(found - rows)
+                found.add((fn, k))
+    return found
+
+
+def _fault_inventory(found, fault_fields, not_fault):
+    """The fault inventory's defects: a pair neither table classifies, a classified pair no longer emitted, a pair in
+    both, a NOT_FAULT group without a reason, a FAULT_WORDS key sharing a NOT_FAULT group."""
+    rows = set((f, k) for _, k, f, _, _ in fault_fields)
+    nf = [(f, k) for f, groups in not_fault.items() for keys, _ in groups for k in keys]
+    bad = ["unclassified %s %s" % p for p in sorted(found - rows - set(nf))]
+    bad += ["classified, not emitted: %s %s" % p for p in sorted((rows | set(nf)) - found)]
+    bad += ["both tables: %s %s" % p for p in sorted(rows & set(nf))]
+    bad += ["NOT_FAULT twice: %s %s" % p for p in sorted(set(p for p in nf if nf.count(p) > 1))]
+    for f, groups in not_fault.items():
+        for keys, why in groups:
+            if len(why) <= 20:
+                bad.append("NOT_FAULT %s %s: no reason" % (f, ",".join(keys)))
+            if len(keys) > 1 and any(FAULT_WORDS.fullmatch(k) for k in keys):
+                bad.append("NOT_FAULT %s %s: a fault-word key without its own reason" % (f, ",".join(keys)))
+    return bad
+
+
+def test_fault_fields_are_every_emitted_fault_field():
+    # ruling R6-A3.11.151 (2) class B and R6-A3.11.152, G5: every key a literal of plugin/Ft*.cs prints is classified,
+    # by file: a FAULT_FIELDS row (a count or flag of something that went wrong, was refused, missed, dropped, retried,
+    # mismatched, overflowed or ran off its thread) or a NOT_FAULT key with its reason; an unclassified pair fails and
+    # so does a classified pair the source no longer prints. Every row's key is printed by its file, and each row names
+    # either a rule, a function of ft_parse whose source holds the row's text (a constant named there holding the
+    # key), or a reason. Self-checks: one FAULT_FIELDS row removed, one NOT_FAULT key removed, a key no file prints
+    # added: each is a defect
+    import inspect
+    plug = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "plugin")
+    found = _emitted_keys()
+    assert _fault_inventory(found, FAULT_FIELDS, NOT_FAULT) == []
+    drop = [r for r in FAULT_FIELDS if r[:3] == ("a3drain", "faults", "FtA3.cs")]
+    assert len(drop) == 1
+    assert _fault_inventory(found, [r for r in FAULT_FIELDS if r is not drop[0]], NOT_FAULT) == [
+        "unclassified FtA3.cs faults"]
+    less = dict(NOT_FAULT)
+    less["FtHeavy.cs"] = ((("g", "op", "hash_t0"), NOT_FAULT["FtHeavy.cs"][0][1]),)
+    assert _fault_inventory(found, FAULT_FIELDS, less) == ["unclassified FtHeavy.cs hash_t1"]
+    more = dict(NOT_FAULT)
+    more["FtPlant.cs"] = ((("c_plant", "from", "ticks", "gone_key"), NOT_FAULT["FtPlant.cs"][0][1]),)
+    assert _fault_inventory(found, FAULT_FIELDS, more) == ["classified, not emitted: FtPlant.cs gone_key"]
     for line, k, f, rule, how in FAULT_FIELDS:
-        path = os.path.join(plug, f)
-        if f == "FtAttach.cs" and not os.path.exists(path):
-            continue
-        s = open(path, encoding="utf-8").read()
+        s = open(os.path.join(plug, f), encoding="utf-8").read()
         assert re.search(r'"(?:[^"\n]* )?%s=' % k, s), (line, k, f)
         if rule is None:
             assert how and len(how) > 20, (line, k)
