@@ -4,7 +4,7 @@
 #
 #   ft_vm_install.sh install <proof-outdir>/lane-frametime.dll <lanes-folder>   install the FrameTime DLL
 #   ft_vm_install.sh revert                                                     restore the DLL the install replaced
-#   ft_vm_install.sh arm <menu|match>                                           write the sentinel BepInEx/frametime/arm
+#   ft_vm_install.sh arm <profile>                                              write the sentinel BepInEx/frametime/arm
 #   ft_vm_install.sh disarm                                                     remove the sentinel
 #   ft_vm_install.sh status                                                     installed digest, sentinel, open install
 #
@@ -13,8 +13,10 @@
 # the room), or when ft_absent.py does not find the FrameTime build in it. It backs the installed DLL up into a fresh
 # folder under ai-collab/frame-time/vm-install/ with its digest, copies, and proves the copy by digest. revert copies
 # that backup back, proves the digest, removes the sentinel and closes the record (renamed, never deleted).
-# The match sentinel arms seed 2, f18 A: each seat its own seed (METHOD-V4 3.3; ruling R6-A3.11.54 Q3); the laptop
-# runner keeps frame_time_seat.ps1's defaults, seed 1, f18 A. The menu sentinel is one seat's self-check and keeps seed 1.
+# arm writes exactly what ft_arm_text.sh <profile> prints (that file is the one table of the profiles: menu, match,
+# match-on, the control boots) and refuses, writing nothing, when it refuses. The match profiles arm seed 2, f18 A:
+# each seat its own seed (METHOD-V4 3.3; ruling R6-A3.11.54 Q3); the laptop runner keeps frame_time_seat.ps1's
+# defaults, seed 1, f18 A. The menu and boot profiles are one seat's self-check and keep seed 1.
 # Exit: 0 done; 2 usage or refused; 3 a digest check failed.
 set -u
 R=C:/Users/Sid/Documents/SidsCompetitiveRounds
@@ -70,12 +72,10 @@ case "$cmd" in
     mode="${2:-}"
     [ -e "$CUR" ] || refuse "no open install: the sentinel arms only the lane's FrameTime DLL"
     [ "$(sha "$PLUG")" = "$(cat "$(cat "$CUR")/installed.sha256")" ] && refuse "the installed DLL is the backed-up one, not the lane's"
+    # the text read whole before anything is written; the x keeps its trailing newlines through the substitution
+    txt=$(bash "$HERE/ft_arm_text.sh" "$mode" && printf x) || refuse "usage: arm <profile> (ft_arm_text.sh refused '$mode')"
     mkdir -p "$(dirname "$ARM")"
-    case "$mode" in
-      menu)  printf 'seed=1\nforce=none\nmenu=1\n' > "$ARM";;
-      match) printf 'seed=2\nf18=A\n' > "$ARM";;
-      *) refuse "usage: arm <menu|match>";;
-    esac
+    printf '%s' "${txt%x}" > "$ARM"
     echo "$(st) FT-VM-ARM $mode written: $(tr '\n' ' ' < "$ARM")"
     ;;
   disarm)
