@@ -42,6 +42,12 @@ decimal check dropped, its own-table check dropped, the -CultureGate switch fall
 same way; each must fail its named check. The culture gate (ruling, follow-up 2): its place right after the Codex gate
 (test_culture_gate_before_the_launch), the -CultureGate switch's lines and exit code with nothing created under the
 sitting's roots (test_culture_gate_switch), and the self-test's case table on hand-made number formats (test_culture_cases).
+The keyed operands' values (J1/J2 of the round on f52998b6): each literal a parameter's call sites, a local's
+assignments or a ?? fallback can put on a line leaves the export as written, and a call-site argument that is no
+literal holds a VALUE_ROWS row (test_emitter_values_exported, its control test_emitter_values_control); the roomop
+set's NCH names are the source arrays' (test_nch_names_are_the_arrays); mutants: the NCH names dropped, an NCH name no
+array holds, the NCH refusal through the class reader, unreadable dropped from route and from dispatched, the refused
+line's what= with sent and dispatched again, the plant line's from= without sentinel.
 frame_time_seat_v.ps1 holds no form and calls frame_time_seat.ps1, so it inherits them (checked from its text).
 Where neither powershell nor pwsh exists the export tests SKIP with that reason.
 """
@@ -1126,6 +1132,552 @@ def test_emitter_fallbacks_control():
     assert "hires= operand 'inc'" in miss[0][1] and "prints ['-1', '1']" in miss[1][1] and "['tail']" in miss[2][1], miss
 
 
+# ---- the class by machine, third part (J1 and J2 of the confirming round on f52998b6): the values a keyed operand
+# (one right after a "<key>=" literal) can carry, read from the source and sent through the export:
+#   (a) an operand that is a parameter of the enclosing method: every call site in plugin/*.cs (Class.Method( anywhere,
+#       Method( inside the class), its argument at that position; when several operands are parameters of one method
+#       they are taken per call site together (Refuse("load", null) prints what=load with route=-, never route=-
+#       beside another what);
+#   (b) an operand that is a local of the enclosing method: its initial literal and every literal assigned to it, in
+#       catch blocks too;
+#   (c) a "?? <literal>" on the operand (or on an argument a call site passes into it).
+# Each value expands through parentheses, "c ? a : b", "x ?? lit", a null argument (the ?? literal, else ""), and
+# "lit" + __originalMethod.Name, whose names are the elements of the string arrays the class's TargetMethods passes
+# (FtRoomGate.NchVoid, NchRoutine). Every literal value found is put into a sample line of the same head (the first
+# pool line, BASE_POOL, that holds the keys) and must leave the export exactly as written. A call-site argument that
+# expands to anything else (a field, an expression, a method's name with no source array) needs a row in VALUE_ROWS
+# with its reason; a non-literal assigned to a local is listed, not judged. A row that matches nothing fails.
+# What it cannot see: a value reaching an operand through more than three calls or through a field, a lambda's
+# parameter, a call made by reflection, a guard that keeps a value from the line (a null that only reaches the other
+# branch), and a StringBuilder loop's operands (the refusals line's pairs: J_SAMPLES hold its unreadable keys by hand).
+SIG = re.compile(r"(?:\b(?:internal|private|public|protected|static|override|virtual|unsafe|extern|sealed|async)\s+)+"
+                 r"[A-Za-z_][\w<>\[\],.? ]*?\s+([A-Za-z_]\w*)\s*\(([^(){};]*(?:\([^(){};]*\)[^(){};]*)*)\)\s*\{")
+CLASS_AT = re.compile(r"\b(?:class|struct)\s+([A-Za-z_]\w*)[^{;]*\{")
+ARRAY_DECL = re.compile(r"\bstring\[\]\s+([A-Za-z_]\w*)\s*=\s*(?:new\s*string\[\]\s*)?\{([^}]*)\}")
+IDENT = re.compile(r"[A-Za-z_]\w*")
+STR_LIT = re.compile(r'"((?:[^"\\]|\\.)*)"')
+
+
+def _block_end(src, i):
+    """the index after the brace block whose "{" is at or after i (comments and literals skipped)"""
+    depth, n = 0, len(src)
+    while i < n:
+        if src.startswith(("//", "/*"), i):
+            i = _ws(src, i)
+            continue
+        c = src[i]
+        if c in "\"'" or (c in "$@" and i + 1 < n and src[i + 1] in "\"$@"):
+            got = _lit_at(src, i)
+            if got:
+                i = got[1]
+                continue
+        if c == "{":
+            depth += 1
+        elif c == "}":
+            depth -= 1
+            if depth == 0:
+                return i + 1
+        i += 1
+    return n
+
+
+def _split_top(s, sep=","):
+    """s split at the top-level separators (outside brackets and literals)"""
+    out, depth, start, i = [], 0, 0, 0
+    while i < len(s):
+        c = s[i]
+        if c in "\"'" or (c in "$@" and i + 1 < len(s) and s[i + 1] in "\"$@"):
+            got = _lit_at(s, i)
+            if got:
+                i = got[1]
+                continue
+        if c in "([{":
+            depth += 1
+        elif c in ")]}":
+            depth -= 1
+        elif c == sep and depth == 0:
+            out.append(s[start:i])
+            start = i + 1
+        i += 1
+    out.append(s[start:])
+    return [x.strip() for x in out]
+
+
+def _top(s, op):
+    """the index of the first top-level occurrence of op in s, or -1"""
+    depth, i = 0, 0
+    while i < len(s):
+        c = s[i]
+        if c in "\"'" or (c in "$@" and i + 1 < len(s) and s[i + 1] in "\"$@"):
+            got = _lit_at(s, i)
+            if got:
+                i = got[1]
+                continue
+        if c in "([{":
+            depth += 1
+        elif c in ")]}":
+            depth -= 1
+        elif depth == 0 and s.startswith(op, i):
+            return i
+        i += 1
+    return -1
+
+
+def _mask(src):
+    """src with every comment blanked (its length and line breaks kept); literals as they are"""
+    out, i, n = list(src), 0, len(src)
+    while i < n:
+        if src.startswith("//", i) or src.startswith("/*", i):
+            j = src.find("\n", i) if src[i + 1] == "/" else src.find("*/", i + 2)
+            j = n if j < 0 else (j if src[i + 1] == "/" else j + 2)
+            for k in range(i, j):
+                if out[k] != "\n":
+                    out[k] = " "
+            i = j
+            continue
+        c = src[i]
+        if c in "\"'" or (c in "$@" and i + 1 < n and src[i + 1] in "\"$@"):
+            got = _lit_at(src, i)
+            if got:
+                i = got[1]
+                continue
+        i += 1
+    return "".join(out)
+
+
+class _Src(object):
+    """one source file (comments blanked) and, read when first asked, its methods and classes"""
+
+    def __init__(self, name, raw):
+        self.name, self.raw, self._src, self._methods, self._classes = name, raw, None, None, None
+
+    @property
+    def src(self):
+        if self._src is None:
+            self._src = _mask(self.raw)
+        return self._src
+
+    @property
+    def methods(self):
+        if self._methods is None:
+            self._methods = []
+            for m in SIG.finditer(self.src):
+                ps = [p for p in _split_top(m.group(2)) if p]
+                names = [(IDENT.findall(p.split("=")[0]) or [""])[-1] for p in ps]
+                self._methods.append((m.group(1), names, m.end() - 1, _block_end(self.src, m.end() - 1), m.start()))
+        return self._methods
+
+    @property
+    def classes(self):
+        if self._classes is None:
+            self._classes = [(m.group(1), m.end() - 1, _block_end(self.src, m.end() - 1))
+                             for m in CLASS_AT.finditer(self.src)]
+        return self._classes
+
+    def line(self, at):
+        return self.raw.count("\n", 0, at) + 1
+
+    def method_at(self, at):
+        best = None
+        for m in self.methods:
+            if m[2] <= at < m[3] and (best is None or m[2] > best[2]):
+                best = m
+        return best
+
+    def class_at(self, at):
+        best = None
+        for c in self.classes:
+            if c[1] <= at < c[2] and (best is None or c[1] > best[1]):
+                best = c
+        return best
+
+
+def _arrays(srcs):
+    """the string arrays declared with a literal list in the sources: {name: [elements]}"""
+    out = {}
+    for s in srcs:
+        if "string[]" in s.raw:
+            for m in ARRAY_DECL.finditer(s.src):
+                out[m.group(1)] = [x for x in STR_LIT.findall(m.group(2))]
+    return out
+
+
+def _paren_end(s, i):
+    """the index after the ")" that closes the "(" at s[i] (literals skipped)"""
+    depth, n = 0, len(s)
+    while i < n:
+        c = s[i]
+        if c in "\"'" or (c in "$@" and i + 1 < n and s[i + 1] in "\"$@"):
+            got = _lit_at(s, i)
+            if got:
+                i = got[1]
+                continue
+        if c == "(":
+            depth += 1
+        elif c == ")":
+            depth -= 1
+            if depth == 0:
+                return i + 1
+        i += 1
+    return n
+
+
+def _strip(e):
+    e = e.strip()
+    while e.startswith("(") and _paren_end(e, 0) == len(e):
+        e = e[1:-1].strip()
+    return e
+
+
+def _call_args(s, at):
+    """the arguments of the call whose "(" is at s[at]"""
+    return _split_top(s[at + 1:_paren_end(s, at) - 1])
+
+
+def expand(srcs, s, at, expr, arrays, depth=0):
+    """the values of expr, written in source s at index at: [("lit", value, where) | ("null", None, where) |
+    ("param", (method, index, fallback values), where) | ("other", text, where) | ("local-other", text, where)];
+    a "x ?? lit" puts lit in place of x's nulls (and a parameter's, at each call site)"""
+    e, where = _strip(expr), "%s:%d" % (s.name, s.line(at))
+    if depth > 3:
+        return [("other", e + " (deeper than three calls)", where)]
+    i = _top(e, "??")
+    if i >= 0:
+        fb = expand(srcs, s, at, e[i + 2:], arrays, depth)
+        out = []
+        for a in expand(srcs, s, at, e[:i], arrays, depth):
+            if a[0] == "null":
+                out += fb
+            elif a[0] == "param":
+                out.append(("param", a[1][:3] + (fb,), a[2]))
+            else:
+                out.append(a)
+        return out
+    q = _top(e, "?")
+    if q >= 0:
+        c = _top(e[q + 1:], ":")
+        if c >= 0:
+            return (expand(srcs, s, at, e[q + 1:q + 1 + c], arrays, depth)
+                    + expand(srcs, s, at, e[q + 2 + c:], arrays, depth))
+    if e == "null":
+        return [("null", None, where)]
+    m = re.fullmatch(r'"((?:[^"\\]|\\.)*)"', e)
+    if m:
+        return [("lit", re.sub(r"\\(.)", lambda x: _ESC.get(x.group(1), x.group(1)), m.group(1)), where)]
+    if re.fullmatch(r"-?[0-9]+[LlUu]?", e):
+        return [("lit", e.rstrip("LlUu"), where)]
+    m = re.fullmatch(r'(?:"((?:[^"\\]|\\.)*)"\s*\+\s*)?__originalMethod\.Name', e)
+    if m:
+        cl = s.class_at(at)
+        body = s.src[cl[1]:cl[2]] if cl else ""
+        tm = re.search(r"TargetMethods\(\)\s*\{(.*?)\}", body, re.S)
+        names = [a for a in (IDENT.findall(tm.group(1)) if tm else []) if a in arrays]
+        if not names:
+            return [("other", e + " (TargetMethods passes no source array)", where)]
+        return [("lit", (m.group(1) or "") + x, where + " (" + a + ")") for a in names for x in arrays[a]]
+    if not IDENT.fullmatch(e):
+        return [("other", e, where)]
+    meth = s.method_at(at)
+    if meth is None:
+        return [("other", e + " (no enclosing method read)", where)]
+    name, params, b0, b1, _ = meth
+    if e in params:
+        return [("param", (s, meth, params.index(e), None), where)]
+    body = s.src[b0:b1]
+    out = []
+    for m in re.finditer(r"(?:\b(?:string|var)\s+)?(?<![\w.])%s\s*=(?![=>])\s*" % re.escape(e), body):
+        end = m.end() + _top(body[m.end():], ";")
+        rhs = body[m.end():end]
+        for a in expand(srcs, s, b0 + m.start(), rhs, arrays, depth + 1):
+            out.append(a if a[0] in ("lit", "null") else ("local-other", rhs.strip() if a[0] == "param" else a[1], a[2]))
+    for m in re.finditer(r"\bout\s+(?:string\s+)?%s\b" % re.escape(e), body):
+        out.append(("local-other", "out " + e, "%s:%d" % (s.name, s.line(b0 + m.start()))))
+    return out or [("other", e + " (a field or a property)", where)]
+
+
+def call_sites(srcs, s, meth):
+    """[(source, index of "(", args)] for every call of the method meth of source s: Class.Method( in any source,
+    Method( inside the class (a definition's own header excluded)"""
+    name, _, b0, _, h0 = meth
+    cl = s.class_at(b0)
+    if cl is None:
+        return []
+    out, qual = [], re.compile(r"\b%s\s*\.\s*%s\s*\(" % (re.escape(cl[0]), re.escape(name)))
+    for t in srcs:
+        if name in t.raw and qual.search(t.raw):
+            out += [(t, m.end() - 1) for m in qual.finditer(t.src)]
+    for m in re.finditer(r"(?<![\w.])%s\s*\(" % re.escape(name), s.src[cl[1]:cl[2]]):
+        k = cl[1] + m.end() - 1
+        if not any(mm[0] == name and mm[4] <= k < mm[2] for mm in s.methods):
+            out.append((s, k))
+    return [(t, k, _call_args(t.src, k)) for t, k in out]
+
+
+def _resolve(srcs, arrays, atom, depth):
+    """a "param" atom to the atoms of the arguments its call sites pass ([(atom, call site)]); every other atom as is"""
+    if atom[0] != "param":
+        return [(atom, None)]
+    (s, meth, idx, fb), out = atom[1], []
+    sites = call_sites(srcs, s, meth)
+    if not sites:
+        return [(("other", "parameter %s of %s: no call site read" % (meth[1][idx], meth[0]), atom[2]), None)]
+    for t, k, args in sites:
+        site = "%s:%d" % (t.name, t.line(k))
+        if idx >= len(args):
+            out.append((("other", "%s( with %d arguments" % (meth[0], len(args)), site), site))
+            continue
+        for a in expand(srcs, t, k, args[idx], arrays, depth + 1):
+            if a[0] == "null":
+                for f in (fb or [("lit", "", site)]):
+                    out.append((f, site))
+            elif a[0] == "param" and depth < 3:
+                out += [(b, site) for b, _ in _resolve(srcs, arrays, a, depth + 1)]
+            else:
+                out.append((a, site))
+    return out
+
+
+def emit_values(sources):
+    """the keyed operands' values of every "[FRAME-TIME] " emit expression: (cases, listed). cases:
+    [(where, head, [(key, value)], origin)], one per call site's combination of literal values (the operands that are
+    parameters of one method, taken together) and one per other literal value; listed: [(where, head, key, kind,
+    text, origin)] for every value that is not a literal"""
+    srcs = [_Src(n, t) for n, t in sources if "[FRAME-TIME] " in t]
+    others = [_Src(n, t) for n, t in sources if "[FRAME-TIME] " not in t]
+    allsrc = srcs + others
+    arrays = _arrays(allsrc)
+    cases, listed = [], []
+    for s in srcs:
+        for at, lit in cs_literals(s.src):
+            if not lit.startswith("[FRAME-TIME] "):
+                continue
+            ps = emit_pieces(s.src, at)
+            if not ps or ps[0] != ("L", lit):
+                continue
+            where = "%s:%d" % (s.name, s.line(at))
+            lits = tuple(t for kind, t in ps if kind == "L")
+            keyed, prev = [], None
+            for kind, t in ps:
+                if kind == "L":
+                    prev = t
+                    continue
+                m = KEY_END.search(prev) if prev is not None else None
+                prev = None
+                if m:
+                    keyed.append((m.group(1), t))
+            joint = {}                           # key -> its param atoms (one method's call sites, taken together)
+            for key, t in keyed:
+                for a in expand(allsrc, s, at, t, arrays):
+                    if a[0] == "param":
+                        joint.setdefault(key, []).append(a)
+                    elif a[0] == "lit":
+                        cases.append((where, lit, [(key, a[1])], a[2], lits))
+                    elif a[0] == "null":
+                        cases.append((where, lit, [(key, "")], a[2], lits))
+                    else:
+                        listed.append((where, lit, key, a[0], a[1], a[2]))
+            if not joint:
+                continue
+            per_site = {}                        # call site -> key -> literal values
+            for key, atoms in joint.items():
+                for a in atoms:
+                    for b, site in _resolve(allsrc, arrays, a, 0):
+                        if b[0] == "lit":
+                            per_site.setdefault(site, {}).setdefault(key, []).append(b[1])
+                        else:
+                            listed.append((where, lit, key, "param:" + b[0], b[1], b[2]))
+            for site, kv in sorted(per_site.items(), key=lambda x: str(x[0])):
+                keys = [k for k, _ in keyed if k in kv]
+                combos = [[]]
+                for k in keys:
+                    combos = [c + [(k, v)] for c in combos for v in sorted(set(kv[k]))]
+                for c in combos:
+                    cases.append((where, lit, c, site, lits))
+    return cases, listed
+
+
+# VALUE_ROWS: (head, key, the call-site argument's text, why the form admits what it prints); one per argument a call
+# site passes into an emit's parameter that is not a literal (or a literal joined to a source array's names)
+_IN = "an int: <n> admits it"
+VALUE_ROWS = [
+    ("[FRAME-TIME] cal i=", "why", '"menu" + _cycles++', "menu<cycle count>: <why> admits menu[0-9]{1,6}"),
+    ("[FRAME-TIME] cal i=", "why", '"game" + Game', "game<game number>: <why> admits game[0-9]{1,6}"),
+    ("[FRAME-TIME] settled g=", "g", "Game (a field or a property)", "FtSchedule's game number, " + _IN),
+    ("[FRAME-TIME] settled g=", "c_plant", "FtPlant.Us", "the plant's microseconds, " + _IN),
+    ("[FRAME-TIME] room call refused op=", "op", "__originalMethod.Name (TargetMethods passes no source array)",
+     "a PhotonNetwork entry point that SweepPun collects by reflection, no source array: roomop names the PUN "
+     "operations by hand"),
+    ("[FRAME-TIME] refusals why=", "why", '"game" + g', "game<game number>: <rwhy> admits game-?[0-9]{1,6}"),
+    ("[FRAME-TIME] plant c_plant=", "from", "_ptLabel (a field or a property)", "the frames counter's point label"),
+    ("[FRAME-TIME] plant c_plant=", "c_plant", "FtConfig.PlantUs", "the sentinel's plant microseconds, " + _IN),
+    ("[FRAME-TIME] plant c_plant=", "c_plant", "(long)Math.Round(0.03 * _offF * 1000000.0 / ((double)_offN * "
+     "System.Diagnostics.Stopwatch.Frequency))", "a long computed from the frame counters, " + _IN),
+    ("[FRAME-TIME] mark cost cyc=", "n", "MarkCalN (a field or a property)", "the mark calibration's count, " + _IN),
+    ("[FRAME-TIME] controls k_mutant=", "k_mutant", 'FtConfig.Get("k_mutant", "none")',
+     "the sentinel's k_mutant (default none): its KEYED row holds the set none, k1, k2, k3"),
+    ("[FRAME-TIME] answer_replay g=", "result", '"skipped_" + why',
+     "skipped_<flush why>: replayresult admits skipped_(live|absent|settle|next_game|quit)"),
+    # a literal the reader finds that never reaches the line ("lit:<value>"): a guard it cannot see
+    ("[FRAME-TIME] answer_replay g=", "result", "lit:",
+     "skip's null initial value never reaches Skip: FtSchedule.cs calls FtReplay.Run when skip is null"),
+]
+
+# J1 and J2 (the confirming round on f52998b6): the NCH entry points' refusals (plugin/FtRoomGate.cs:194, :212) and
+# FtRoute's unreadable route (plugin/FtRoute.cs:105, :121; FtUpload.cs:36, :55); and the class reader's third find,
+# the plant line's from=sentinel (plugin/FtPlant.cs:26, :35). (exported as written, withheld)
+J_SAMPLES = (
+    ["room call refused op=NCH.QuickMatch name=(none) n=1", "room call refused op=NCH.JoinRandomRoom name=(none) n=1",
+     "room call refused op=NCH.PlayOnBestActiveRegion name=(none) n=1", "room call refused op=NCH.DoRetry name=(none) n=1",
+     "refused what=route route=unreadable n=1",
+     "refusals why=quit pairs=2 route:unreadable=1 dispatched:unreadable=3",
+     "plant c_plant=80 ticks=10 from=sentinel"],
+    ["room call refused op=NCH.LeaveRoom name=(none) n=1", "room call refused op=NCH. name=(none) n=1",
+     "refused what=sent route=unreadable n=1", "refused what=dispatched route=unreadable n=1",
+     "refused what=outbox route=unreadable n=1", "refusals why=quit pairs=1 sent:unreadable=1",
+     "steam ticket withheld route=unreadable", "plant c_plant=80 ticks=10 from=sentinels"])
+
+
+def base_pool():
+    """payloads (after "[FRAME-TIME] ") of lines this file's other checks export as written: the sample lines a
+    value is put into"""
+    pool = [e[1] for e in LEADS if len(e) == 3 and isinstance(e[1], str) and not e[2]]
+    pool += [tpl.format(vals[0]) for _, _, _, vals, tpl, _ in KEYED_ROWS]
+    pool += [s for r in FREE_ROWS for s in r[3] if isinstance(s, str)]
+    return pool + ROOM_FALLBACK[0] + ROOM_NAMES[0] + IDENT_ROWS[0] + J_SAMPLES[0]
+
+
+def _in_order(p, start, lits):
+    for t in lits:
+        j = p.find(t, start)
+        if j < 0:
+            return False
+        start = j + len(t)
+    return True
+
+
+def _sample(head, kvs, pool, lits=()):
+    """a pool line of the head with each (key, value) put in place of the line's value at key=, or None; a line that
+    holds the emit's literals in their order first, then any line of the head"""
+    hp = head[len(FT):]
+    for p in [x for x in pool if _in_order(x, len(hp), lits[1:])] + pool:
+        if not p.startswith(hp):
+            continue
+        line, pos = p, None
+        for k, v in kvs:
+            start = pos if pos is not None else (len(hp) - len(k) - 1 if hp.endswith(k + "=") else len(hp))
+            m = re.compile(r"(?<![A-Za-z0-9_])%s=" % re.escape(k)).search(line, max(start, 0))
+            if not m:
+                line = None
+                break
+            e = line.find(" ", m.end())
+            e = len(line) if e < 0 else e
+            line, pos = line[:m.end()] + v + line[e:], m.end() + len(v)
+        if line is not None:
+            return line
+    return None
+
+
+def value_misses(ps1, tmp, sources, rows):
+    """(misses, table) of the keyed operands' values against the export: every literal value in a sample line of its
+    head must leave the export as written; every call-site argument that is no literal must have a row; no row stale"""
+    cases, listed = emit_values(sources)
+    pool, used, miss, table, lines = base_pool(), set(), [], [], []
+    keys = set(r[:3] for r in rows)
+    for where, head, key, kind, text, origin in listed:
+        if kind == "param:other":
+            if (head, key, text) in keys:
+                used.add((head, key, text))
+                table.append((origin, "%s=%s" % (key, text), "row: " + next(r[3] for r in rows if r[:3] == (head, key, text))))
+            else:
+                miss.append((where, "the call at %s passes %s=%s: no literal and no VALUE_ROWS row" % (origin, key, text)))
+        else:
+            table.append((origin, "%s=%s" % (key, text), "not a literal (%s): not judged" % kind))
+    for where, head, kvs, origin, lits in cases:
+        lk = (head, kvs[0][0], "lit:" + kvs[0][1]) if len(kvs) == 1 else None
+        if lk in keys:
+            used.add(lk)
+            table.append((origin, "%s=%s" % kvs[0], "row: " + next(r[3] for r in rows if r[:3] == lk)))
+            continue
+        line = _sample(head, kvs, pool, lits)
+        if line is None:
+            miss.append((where, "no pool line of %r holds %s" % (head, [k for k, _ in kvs])))
+            continue
+        lines.append((where, kvs, origin, line))
+    raw = sorted(set(INFO + FT + x[3] for x in lines))
+    _, log, _ = run_export(ps1, write(os.path.join(tmp, "values.log"), "\n".join(raw) + "\n"))
+    for where, kvs, origin, line in lines:
+        ok = INFO + FT + line in log
+        table.append((origin, " ".join("%s=%s" % kv for kv in kvs), "%s: %s" % ("exported" if ok else "WITHHELD", line)))
+        if not ok:
+            miss.append((where, "%s (from %s) leaves the export other than written: %r" % (kvs, origin, line)))
+    miss += [("row", "stale VALUE_ROWS row %s" % (r[:3],)) for r in rows if r[:3] not in used]
+    return miss, table
+
+
+def check_values(ps1, tmp):
+    return value_misses(ps1, tmp, plugin_sources(), VALUE_ROWS)[0]
+
+
+@need_ps
+def test_emitter_values_exported(tmp_path):
+    """(a), (b), (c) above: every literal value a keyed operand can carry leaves the export as written, every call-site
+    argument that is no literal has a row, no row is stale; the table is printed"""
+    miss, table = value_misses(PS1, str(tmp_path), plugin_sources(), VALUE_ROWS)
+    for t in sorted(set(table)):
+        print("VALUE %s | %s | %s" % t)
+    assert miss == [], miss
+
+
+PLANTED_VALUES = ("Planted.cs", '''namespace X { static class PlantedGate {
+    internal static void Say(string op, string name) {
+        Plugin.Log.LogWarning("[FRAME-TIME] room call refused op=" + op + " name=" + (name ?? "(lost)") + " n=" + 1);
+    }
+    internal static void A() { PlantedGate.Say("Bogus", null); PlantedGate.Say("JoinRoom", Other.Field); }
+    internal static void B() {
+        string route = "teapot";
+        try { route = "x"; } catch { route = "brewing"; }
+        Plugin.Log.LogInfo("[FRAME-TIME] refused what=route route=" + route + " n=1");
+    }
+} }
+''')
+
+
+@need_ps
+def test_emitter_values_control(tmp_path):
+    """the negative control of test_emitter_values_exported: a planted source adds exactly its faults, each named: a
+    call site's literal no form admits (op=Bogus with its null name's ?? literal), a call-site argument with no row
+    (Other.Field), and a local's initial literal and catch-block literal no form admits (teapot, x, brewing); with
+    VALUE_ROWS emptied every row's argument is named"""
+    base, _ = value_misses(PS1, str(tmp_path), plugin_sources(), VALUE_ROWS)
+    assert base == [], base
+    miss, _ = value_misses(PS1, str(tmp_path), plugin_sources() + [PLANTED_VALUES], VALUE_ROWS)
+    text = " ".join(w + " " + m for w, m in miss)
+    assert all(w.startswith("Planted.cs:") for w, _ in miss), miss
+    for want in ("'op', 'Bogus'), ('name', '(lost)')", "Other.Field", "'teapot'", "'x'", "'brewing'"):
+        assert want in text, (want, miss)
+    miss, _ = value_misses(PS1, str(tmp_path), plugin_sources(), [])
+    assert len([m for w, m in miss if "no VALUE_ROWS row" in m]) >= len(VALUE_ROWS), miss
+
+
+def check_nch_set(ps1, tmp=None):
+    """J1: the roomop set's NCH. names are exactly the elements of FtRoomGate's NchVoid and NchRoutine, read from the
+    source (each array name admitted, no NCH name the arrays lack)"""
+    with open(os.path.join(PLUGIN, "FtRoomGate.cs"), encoding="utf-8-sig") as f:
+        arrays = _arrays([_Src("FtRoomGate.cs", f.read())])
+    want = set(arrays.get("NchVoid", []) + arrays.get("NchRoutine", []))
+    m = re.search(r"^    roomop   = '([^']*)'", _read(ps1), re.M)
+    have = set(x[4:] for x in (m.group(1).split(" ") if m else []) if x.startswith("NCH."))
+    f = [] if len(want) >= 4 else ["the arrays NchVoid and NchRoutine were not read: %s" % sorted(want)]
+    f += ["NCH.%s is not in the roomop set" % x for x in sorted(want - have)]
+    f += ["NCH.%s is in the roomop set but in neither array" % x for x in sorted(have - want)]
+    return f
+
+
+def test_nch_names_are_the_arrays():
+    f = check_nch_set(PS1)
+    assert f == [], f
+
+
 # the room line's fallback, keyed but not finite (so it holds no row): FtArm prints CloudRegion ?? "" as region= (its
 # part before "/") and as cloud_region= (plugin/FtArm.cs:117-118, :161); (exported, withheld)
 ROOM_FALLBACK = (["room name=ft_0123abcd region=us cloud_region=us/*", "room name=ft_0123abcd region=us cloud_region=us",
@@ -1172,8 +1724,8 @@ def check_rows(ps1, tmp):
     """the rows' sample lines through the export: every KEYED row's template with each value, every FREE row's
     sample, and the [FPSCAP] and type-name samples, exported as they are (or as a FREE row's given export); the template
     with an unlisted value, every FREE row's unlisted lines, and the unlisted [FPSCAP] and type-name lines, withheld"""
-    good = [(p, p) for p in ROOM_FALLBACK[0] + IDENT_ROWS[0]]
-    bad = list(ROOM_FALLBACK[1]) + IDENT_ROWS[1]
+    good = [(p, p) for p in ROOM_FALLBACK[0] + IDENT_ROWS[0] + J_SAMPLES[0]]
+    bad = list(ROOM_FALLBACK[1]) + IDENT_ROWS[1] + J_SAMPLES[1]
     for _, _, _, vals, tpl, _ in KEYED_ROWS:
         good += [(tpl.format(v), tpl.format(v)) for v in vals]
         bad.append(tpl.format(next(x for x in ("2", "X", "x2") if x not in vals)))
@@ -1527,6 +2079,17 @@ MUTANTS = [
     ("a redaction that drops its typed tail (the refused line's n=)", check_room_names, "text",
      "if ($m.Success) { return $m.Groups['keep'].Value + $RedactToken + $m.Groups['tail'].Value }",
      "if ($m.Success) { return $m.Groups['keep'].Value + $RedactToken }"),
+    ("the room operations without the NCH entry points", check_nch_set, "text",
+     " JoinLobby NCH.QuickMatch NCH.JoinRandomRoom NCH.PlayOnBestActiveRegion NCH.DoRetry'", " JoinLobby'"),
+    ("the room operations with an NCH name no array holds", check_nch_set, "text", " NCH.DoRetry'", " NCH.DoRetry NCH.Leave'"),
+    ("the NCH refusal withheld (the class reader)", check_values, "text", " NCH.QuickMatch NCH.JoinRandomRoom", ""),
+    ("the refused route without unreadable", check_rows, "text", "route = '(?:' + $FormPh.route + '|unreadable)'; sent",
+     "route = $FormPh.route; sent"),
+    ("the dispatched count key without unreadable", check_rows, "text",
+     "dispatched = '(?:' + $FormPh.route + '|unreadable)'", "dispatched = $FormPh.route"),
+    ("the refused line's what= with sent and dispatched again", check_rows, "text",
+     " | Where-Object { $_ -cne 'sent' -and $_ -cne 'dispatched' }", ""),
+    ("the plant line's from= without sentinel", check_rows, "text", "'(?:' + $FormPh.pt + '|sentinel)'", "$FormPh.pt"),
     ("the culture gate skipped in the sitting", check_culture_gate_place, "text", CULTURE_SIT, ""),
     ("the culture gate's decimal check dropped", check_culture_cases, "line",
      "$ok = $ok -and [string]::Equals($dec, '.', [System.StringComparison]::Ordinal)", None),

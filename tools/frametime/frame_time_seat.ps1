@@ -177,7 +177,7 @@ $FormSets = [ordered]@{
     input    = 'none sentinel sentinel_changed sentinel_problems clock perf_probe ic_fixture in_room game_started complete escape rematch_timeout menu_mode room own_sha room_name region fighters peer matchIsRanked'
     problem  = 'stat bad-line bad-seed bad-force bad-f18 bad-plant_us bad-menu bad-menu_segments'
     region   = 'asia au cae cn eu hk in jp kr ru rue sa tr uae us usw ussc za'
-    roomop   = 'JoinRoom JoinOrCreateRoom JoinRandomRoom JoinRandomOrCreateRoom CreateRoom RejoinRoom ReconnectAndRejoin JoinLobby'
+    roomop   = 'JoinRoom JoinOrCreateRoom JoinRandomRoom JoinRandomOrCreateRoom CreateRoom RejoinRoom ReconnectAndRejoin JoinLobby NCH.QuickMatch NCH.JoinRandomRoom NCH.PlayOnBestActiveRegion NCH.DoRetry'
     gateex   = 'JoinLobby LoadOrCreateSettings'
     method   = 'GET POST PUT DELETE PATCH HEAD ?'
     # the route's host is cfg-derived for the mod's own server (the cfg's BaseUrl): it leaves only as one of these
@@ -211,17 +211,17 @@ $FormPh.shape = '(?:' + (FormSet 'shape').Substring(3).TrimEnd(')') + '|entry[0-
 # FtArm's reason: a token of the set, error_<exception type name> when its check threw (plugin/FtArm.cs:191, :223),
 # or FtArm.Why's initial "not evaluated" (FtDrive's disarmed line prints FtArm.Why)
 $FormPh.input = '(?:' + (FormSet 'input') + '|error_' + $FormPh.ident + '|not evaluated)'
-$FormPh.region = FormSet 'region'
+$FormPh.region = FormSet 'region'; $FormPh.plantfrom = '(?:' + $FormPh.pt + '|sentinel)'   # plant from=: a point, or the sentinel's plant_us (plugin/FtPlant.cs:26)
 $FormPh.roomname = '(?:' + $FormPh.room + '|\(none\)|\(empty\))'
 $FormPh.route = '(?:' + (FormSet 'method') + '_(?:local|other|cosmetics-zip|emoji-sheet|music-asset|' + (FormSet 'host') +
     '(?:/(?:' + (FormSet 'seg') + '|' + (FormSet 'segx') + '))*/?)|unparsed)'
-# FtUpload's count keys (what:route): one closed alternation per what, the routes of FtRoute and of each Refuse site
+# FtUpload's count keys (what:route): one closed alternation per what, the routes of FtRoute and of each Refuse site; route and dispatched also FtRoute's "unreadable" (a throw while a request is classified: plugin/FtRoute.cs:105, :121), and the refused line's what= only the Refuse sites' (sent and dispatched are counted, never refused)
 $FormPairs = [ordered]@{
-    route = $FormPh.route; sent = $FormPh.route; dispatched = $FormPh.route; outbox = '(?:enqueue|persist|load)'
+    route = '(?:' + $FormPh.route + '|unreadable)'; sent = $FormPh.route; dispatched = '(?:' + $FormPh.route + '|unreadable)'; outbox = '(?:enqueue|persist|load)'
     autolog = 'room-left'; chat = 'connect'; log = 'prev-copy'; closing = '[ekcxi]'; queue = '[ekcxi]'; load = '-'
 }
 $FormPh.pair = '(?:' + ((@($FormPairs.Keys) | ForEach-Object { $_ + ':' + $FormPairs[$_] }) -join '|') + ')'
-$FormPh.refpair = '(?:' + ((@($FormPairs.Keys) | ForEach-Object { 'what=' + $_ + ' route=' + $FormPairs[$_] }) -join '|') + ')'
+$FormPh.refpair = '(?:' + ((@($FormPairs.Keys) | Where-Object { $_ -cne 'sent' -and $_ -cne 'dispatched' } | ForEach-Object { 'what=' + $_ + ' route=' + $FormPairs[$_] }) -join '|') + ')'
 # FpsCap's reason (plugin/Plugin.cs:3447-3486): the render cap's number is the cfg's BroadcastFpsCap, an int with no
 # range check, printed only when above 0, so one to ten digits
 $FormPh.capwhy = '(?:unfocused cap|broadcast seat render cap \([0-9]{1,10} fps\)|deep idle \(broadcast seat 16min\+ idle\)|deep idle \(60s\+ unfocused, out of room\))'
@@ -347,7 +347,7 @@ $FormText = @(
     '[FRAME-TIME] steam ticket withheld route=<route>'
     '[FRAME-TIME] refused <refpair> n=<u>'
     '[FRAME-TIME] refusals why=<rwhy> pairs=<u><pairs>'
-    '[FRAME-TIME] plant c_plant=<n> ticks=<n> from=<pt>'
+    '[FRAME-TIME] plant c_plant=<n> ticks=<n> from=<plantfrom>'
     '[FRAME-TIME] answer_replay g=<n> ticks=<n> result=<replayresult>'
     '[FPSCAP] held by frame-time calibration'
     '[FPSCAP] hold released'
