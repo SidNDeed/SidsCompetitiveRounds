@@ -852,6 +852,10 @@ FREE_ROWS = [
     ("FtRoomGate.cs", "[FRAME-TIME] FT-GATE patched ",
      ("patched", '(missing.Count == 0 ? "" : " missing=" + string.Join(",", missing.ToArray()))'),
      ["FT-GATE patched 7 entry points expected=7 excluded=JoinLobby,LoadOrCreateSettings",
+      # a name repeats when the swept type holds overloads of it: SweepPun adds the name once per method
+      # (FtRoomGate.cs:45-54). The form admits the repeat (FormList), and the parser's gate rule bounds the names,
+      # not their counts (ruling R6-A3.11.154)
+      "FT-GATE patched 13 entry points expected=13 excluded=JoinLobby,JoinLobby,LoadOrCreateSettings",
       "FT-GATE patched 6 entry points expected=7 excluded=JoinLobby missing=NCH.OnJoinedRoom (absent)",
       "FT-GATE patched 6 entry points expected=7 excluded= missing=PhotonNetwork.JoinRoom,NCH.X (absent)"],
      ["FT-GATE patched -1 entry points expected=7 excluded="],
