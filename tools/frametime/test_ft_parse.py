@@ -3103,7 +3103,11 @@ def test_b11_reconcile_clean_and_each_invariant_named():
     text = _two_points()
     assert P.window_reconcile(P.read(text)) == []
     cases = [
-        (lambda w: w.update(cS=w["cS"] + 1), "is not cG+cW+cR+cS+cE"),
+        # SHARED.md V6: the partition holds the classes P and X, and C° leaves P exactly once
+        (lambda w: w.update(cS=w["cS"] + 1), "is not cG+cW+cR+cS+cP+cX+cE"),
+        (lambda w: w.update(cP=w["cP"] + 1), "is not cG+cW+cR+cS+cP+cX+cE"),
+        (lambda w: w.update(cX=w["cX"] + 1), "is not cG+cW+cR+cS+cP+cX+cE"),
+        (lambda w: w.update(cP=w["cP"] + 1, cE=w["cE"] - 1), "is not sC-cG-cW-cP="),     # P moved out of E, kept in q
         (lambda w: w.update(q=[w["q"][0] + 1] + w["q"][1:]), "sum(q)="),
         (lambda w: w.update(r=[w["r"][0] + 1] + w["r"][1:], q=[w["q"][0] + 1] + w["q"][1:]), "sum(r)="),
         (lambda w: w.update(qn=[11, 13] + w["qn"][2:]), "is not n=120 in 12-frame bins"),
@@ -3203,7 +3207,7 @@ def test_b11_gc_na_windows_are_checked_without_cg_and_named():
     assert "1.1.1.2" in gl[0] and "2.1.1.2" in gl[0]
     bad = _b11_text(_one_run_games(), _c2_model, cg=lambda w: None if w["wi"] == 2 else 30,
                     edit=lambda w: w.update(sC=w["sC"] + 30) if w["cG"] is None else None)
-    assert [x for x in P.window_reconcile(P.read(bad)) if "is not cW+cR+cS+cE" in x]
+    assert [x for x in P.window_reconcile(P.read(bad)) if "is not cW+cR+cS+cP+cX+cE" in x]
     ok = _b11_text(_one_run_games(), _c2_model)
     assert "B11 GC: G available in every window" in P.b11_report(P.read(ok))[0]
 
