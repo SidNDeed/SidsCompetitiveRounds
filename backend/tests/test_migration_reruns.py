@@ -133,6 +133,45 @@ def _contrib_tables_prereq():
     return "\n".join(out)
 
 
+def _mail_tables_prereq():
+    """404's prerequisites: `players`, and mail_messages and mail_recipients
+    exactly as 297 creates them (their CREATE TABLE statements read out of
+    that file, not retyped) with 300's recipient_count, and three messages:
+    a direct one, a broadcast with its count, and a broadcast without one
+    (written before 300; two delivered envelopes and one suppressed). The
+    second run is measured beside the receipts the first run's backfill
+    wrote, and beside the dropped constraint."""
+    p = "00000000-0000-0000-0000-000000000%s"
+    out = ["CREATE TABLE players (id UUID PRIMARY KEY);",
+           "INSERT INTO players (id) VALUES ('%s'), ('%s'), ('%s'), ('%s');"
+           % (p % "4a1", p % "4b2", p % "4c3", p % "4d4")]
+    text = (SQL_DIR / "297_mail.sql").read_text(encoding="utf-8")
+    for table in ("mail_messages", "mail_recipients"):
+        found = re.search(r"CREATE TABLE IF NOT EXISTS %s \(.*?\n\);" % table, text, re.S)
+        assert found, ("297_mail.sql", table)
+        out.append(found.group(0))
+    column = "ALTER TABLE mail_messages ADD COLUMN IF NOT EXISTS recipient_count INTEGER NULL;"
+    assert column in (SQL_DIR / "300_mail_inbox_rev.sql").read_text(encoding="utf-8")
+    out.append(column)
+    out.append(
+        "INSERT INTO mail_messages (id, sender_id, kind, thread_id, subject, body, idempotency_key, "
+        "created_at, recipient_count) VALUES "
+        "('%s', '%s', 'direct', '%s', 's', 'b', '%s', TIMESTAMPTZ '2026-11-01 10:00+00', NULL), "
+        "('%s', '%s', 'system_broadcast', '%s', 's', 'b', '%s', TIMESTAMPTZ '2026-11-02 10:00+00', 3), "
+        "('%s', '%s', 'system_broadcast', '%s', 's', 'b', '%s', TIMESTAMPTZ '2026-11-03 10:00+00', NULL);"
+        % (p % "4e1", p % "4a1", p % "4e1", p % "4f1",
+           p % "4e2", p % "4a1", p % "4e2", p % "4f2",
+           p % "4e3", p % "4a1", p % "4e3", p % "4f3"))
+    out.append(
+        "INSERT INTO mail_recipients (message_id, recipient_id, kind, delivery) VALUES "
+        "('%s', '%s', 'to', 'delivered'), "
+        "('%s', '%s', 'to', 'delivered'), ('%s', '%s', 'to', 'delivered'), "
+        "('%s', '%s', 'to', 'suppressed');"
+        % (p % "4e1", p % "4b2",
+           p % "4e3", p % "4b2", p % "4e3", p % "4c3", p % "4e3", p % "4d4"))
+    return "\n".join(out)
+
+
 PREREQ = {
     "331": """
         CREATE TABLE players (
@@ -263,6 +302,10 @@ PREREQ = {
     # 401 adds a column to combat_contrib and indexes both contribution
     # tables on match_id (_contrib_tables_prereq).
     "401": _contrib_tables_prereq(),
+    # 404 creates mail_send_receipts and its index, the trigger on
+    # mail_messages and its function, backfills the receipts and drops 297's
+    # unique constraint (_mail_tables_prereq).
+    "404": _mail_tables_prereq(),
 }
 
 # The tables whose CONTENT this file is responsible for. Fingerprinted
@@ -281,6 +324,7 @@ TABLES = {
     "391": ("dc_events",),
     "396": ("i18n_keys", "i18n_entries", "i18n_proposals"),
     "401": ("card_contrib", "combat_contrib"),
+    "404": ("mail_send_receipts", "mail_messages"),
 }
 
 MIGRATION_FILES = {
@@ -295,6 +339,7 @@ MIGRATION_FILES = {
     "391": "391_dc_events_leave_anchor.sql",
     "396": "396_faq_early_leave_keys.sql",
     "401": "401_contrib_match_provenance.sql",
+    "404": "404_mail_send_receipts.sql",
 }
 
 
@@ -459,7 +504,7 @@ async def _apply_twice(number, *, between=None, prereq_extra="", cleanup=None):
 
 # ── The bar: a second run changes nothing ───────────────────────────────────
 
-@pytest.mark.parametrize("number", ["331", "332", "333", "336", "337", "365", "366", "377", "391", "396", "401"])
+@pytest.mark.parametrize("number", ["331", "332", "333", "336", "337", "365", "366", "377", "391", "396", "401", "404"])
 def test_a_second_run_writes_no_row(number):
     """Applied twice, back to back, on the state the first run left."""
     applied = _run(_apply_twice(number))
@@ -471,7 +516,7 @@ def test_a_second_run_writes_no_row(number):
         % (number, applied.rows_changed_on_second_run))
 
 
-@pytest.mark.parametrize("number", ["331", "332", "333", "336", "337", "365", "366", "377", "391", "396", "401"])
+@pytest.mark.parametrize("number", ["331", "332", "333", "336", "337", "365", "366", "377", "391", "396", "401", "404"])
 def test_a_second_run_leaves_every_row_byte_identical(number):
     """The value half of the bar, stated separately so a failure says which
     of the two properties broke."""
@@ -484,7 +529,7 @@ def test_a_second_run_leaves_every_row_byte_identical(number):
             % (number, table))
 
 
-@pytest.mark.parametrize("number", ["331", "332", "333", "336", "337", "365", "366", "377", "391", "396", "401"])
+@pytest.mark.parametrize("number", ["331", "332", "333", "336", "337", "365", "366", "377", "391", "396", "401", "404"])
 def test_a_second_run_replaces_no_constraint_or_index(number):
     """OIDs, not definitions. A dropped-and-recreated constraint has the same
     definition, a new OID, and cost an ACCESS EXCLUSIVE lock plus a validating
@@ -503,7 +548,7 @@ def test_a_second_run_replaces_no_constraint_or_index(number):
         "migration %s removed %s on its second run" % (number, vanished))
 
 
-@pytest.mark.parametrize("number", ["331", "332", "333", "336", "337", "365", "366", "377", "391", "396", "401"])
+@pytest.mark.parametrize("number", ["331", "332", "333", "336", "337", "365", "366", "377", "391", "396", "401", "404"])
 def test_a_second_run_removes_no_relation_from_the_database(number):
     """THE THIRD MEASUREMENT, AND THE ONE THE OTHER TWO CANNOT MAKE.
 
@@ -987,7 +1032,7 @@ _HOLDERS = {
 }
 
 _LOCK_CASES = [(number, table, who)
-               for number in ("331", "332", "333", "336", "377", "391", "396", "401")
+               for number in ("331", "332", "333", "336", "377", "391", "396", "401", "404")
                for table in TABLES[number]
                for who in sorted(_HOLDERS)]
 

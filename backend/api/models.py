@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 
 from sqlalchemy import (
     BigInteger, Boolean, CheckConstraint, Column, Date, DateTime, Double, FetchedValue, Float, ForeignKey, Index, Integer,
-    SmallInteger, String, Text, UniqueConstraint, text,
+    LargeBinary, SmallInteger, String, Text, UniqueConstraint, text,
 )
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB, UUID
 from sqlalchemy.orm import DeclarativeBase, deferred, relationship
@@ -1402,9 +1402,11 @@ class SpectateLease(Base):
 class MailMessage(Base):
     """One sent message. thread_id is the ROOT message's own id (a new thread
     points at itself), in_reply_to the parent (self-FK, SET NULL on purge).
-    UNIQUE (sender_id, idempotency_key): a retried send finds its original row
-    (B-11). kind 'system_broadcast' is admin-only, audited, and bypasses
-    preferences and blocks (B-12); everything else is 'direct'."""
+    A retried send finds its original through its send receipt
+    (MailSendReceipt, migration 404, which dropped this table's UNIQUE
+    (sender_id, idempotency_key)). kind 'system_broadcast' is admin-only,
+    audited, and bypasses preferences and blocks (B-12); everything else is
+    'direct'."""
     __tablename__ = "mail_messages"
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
@@ -1435,8 +1437,35 @@ class MailMessage(Base):
     via = Column(Text, nullable=False, server_default=FetchedValue())
 
     __table_args__ = (
-        UniqueConstraint("sender_id", "idempotency_key", name="uq_mail_messages_sender_idem"),
         CheckConstraint("kind IN ('direct', 'system_broadcast')", name="ck_mail_messages_kind"),
+    )
+
+
+class MailSendReceipt(Base):
+    """One row per (sender_id, idempotency_key) that a mail send, reply or
+    broadcast committed under (migration 404): the message id it answered
+    with, its kind, a broadcast's recipient count, and the SHA-256 digest of
+    the request (`request_fp`; NULL on rows backfilled by the migration or
+    written by its trigger for a writer that stores none). A repeated key is
+    answered from this row alone (main._mail_prior_send), so the answer does
+    not depend on whether the janitor has purged the message. No foreign
+    keys: message_id outlives that purge, and the janitor and account
+    deletion remove rows by value."""
+    __tablename__ = "mail_send_receipts"
+
+    sender_id = Column(UUID(as_uuid=True), primary_key=True)
+    idempotency_key = Column(UUID(as_uuid=True), primary_key=True)
+    kind = Column(Text, nullable=False)
+    request_fp = Column(LargeBinary, nullable=True)
+    message_id = Column(UUID(as_uuid=True), nullable=False)
+    recipients = Column(Integer, nullable=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+
+    __table_args__ = (
+        CheckConstraint("kind IN ('direct', 'system_broadcast')", name="ck_mail_send_receipts_kind"),
+        CheckConstraint("request_fp IS NULL OR octet_length(request_fp) = 32", name="ck_mail_send_receipts_fp"),
+        CheckConstraint("recipients IS NULL OR recipients >= 0", name="ck_mail_send_receipts_recipients"),
+        Index("ix_mail_send_receipts_created", "created_at"),
     )
 
 

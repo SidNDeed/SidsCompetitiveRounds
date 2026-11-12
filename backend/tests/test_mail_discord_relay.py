@@ -3291,8 +3291,8 @@ def test_a_reply_to_a_thread_whose_mail_is_gone_is_told_it_was_deleted(monkeypat
 # main._MAIL_FANOUT_SQL runs here for real, because its FOR KEY SHARE OF p is
 # the lock the relay-off gate waits on. To plan, it needs players' mail_from
 # and deleted_at, the block table and the four "played together" sources;
-# empty stubs suffice, since every recipient here is 'delivered' through the
-# ELSE branch. steam_sessions (and mod_seen_at) let the in-game settings
+# empty stubs suffice, since every recipient here is passed forced = false
+# (migration 404's flag) and is 'delivered' through the ELSE branch. steam_sessions (and mod_seen_at) let the in-game settings
 # route resolve its caller as it does in production.
 _RACE_TABLES = ("mail_blocks", "matches", "team_matches", "ffa_match_players",
                 "ovt_matches", "steam_sessions")
@@ -3340,8 +3340,8 @@ async def _send_until_commit(conn):
     await conn.execute(
         "INSERT INTO mail_messages (id, sender_id, subject, body)"
         " VALUES ($1, $2, 'raced', 'raced body')", RACED_MAIL, SENDER_PID)
-    await conn.execute(_pg(main._MAIL_FANOUT_SQL, "mid", "sid", "rids", "kinds"),
-                       RACED_MAIL, SENDER_PID, [RACED_PID], ["to"])
+    await conn.execute(_pg(main._MAIL_FANOUT_SQL, "mid", "sid", "rids", "kinds", "forced"),
+                       RACED_MAIL, SENDER_PID, [RACED_PID], ["to"], [False])
     tag = await conn.execute(_asyncpg_sql(), "the raced DM", RACED_MAIL, _code(),
                              SENDER_SID)
     return tr, tag

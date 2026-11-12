@@ -5948,11 +5948,12 @@ async def queue_cleanup_loop():
             if time.monotonic() >= _MAIL_RETENTION_STATE["next"]:
                 _MAIL_RETENTION_STATE["next"] = time.monotonic() + 3600
                 async with async_session() as db:
-                    _expired, _purged, _hits = await _mail_retention_sweep(db)
+                    _expired, _purged, _hits, _receipts = await _mail_retention_sweep(db)
                     await db.commit()
-                    if _expired or _purged or _hits:
+                    if _expired or _purged or _hits or _receipts:
                         print(f"[MAIL-RETENTION] expired {_expired} read envelope(s), "
-                              f"purged {_purged} message(s), pruned {_hits} censor-hit row(s)")
+                              f"purged {_purged} message(s), pruned {_hits} censor-hit row(s), "
+                              f"deleted {_receipts} send receipt(s)")
         except Exception as e:
             print(f"[MAIL-RETENTION] sweep error: {e}")
         # ── FFA readmission (V3 P4.1 lapse, P3 journal windows) ─────────
@@ -45064,6 +45065,10 @@ async def delete_player_data(steam_id: str, request: Request, sig: str = Query(.
     await db.execute(text("UPDATE moderation_cases SET reporter_id = NULL WHERE reporter_id = :pid"), {"pid": pid})
     await db.execute(text("DELETE FROM mail_bulk_grants WHERE steam_id = :sid"), {"sid": steam_id})
     await db.execute(text("DELETE FROM mail_censor_hits WHERE sender_id = :pid"), {"pid": pid})
+    # Send receipts (migration 404): this player's record of what they sent
+    # under which key, with a digest of each request. The account sends
+    # nothing again, so no repeat can need one.
+    await db.execute(text("DELETE FROM mail_send_receipts WHERE sender_id = :pid"), {"pid": pid})
 
     # i18n surfaces (Codex wave-2 round-10 find 2): the portal token and
     # translate grants are LIVE AUTHORITY and must die with the account, and
@@ -77843,6 +77848,7 @@ _MAIL_FANOUT_SQL = (
     "INSERT INTO mail_recipients (message_id, recipient_id, kind, delivery)"
     " SELECT CAST(:mid AS uuid), p.id, a.kind,"
     "        CASE"
+    "          WHEN a.forced THEN 'suppressed'"
     "          WHEN EXISTS (SELECT 1 FROM mail_blocks b"
     "                        WHERE b.blocker_id = p.id AND b.blocked_id = CAST(:sid AS uuid))"
     "            THEN 'suppressed'"
@@ -77863,7 +77869,8 @@ _MAIL_FANOUT_SQL = (
     "               ) THEN 'suppressed'"
     "          ELSE 'delivered'"
     "        END"
-    "   FROM unnest(CAST(:rids AS uuid[]), CAST(:kinds AS text[])) AS a(id, kind)"
+    "   FROM unnest(CAST(:rids AS uuid[]), CAST(:kinds AS text[]), CAST(:forced AS boolean[]))"
+    "        AS a(id, kind, forced)"
     "   JOIN players p ON p.id = a.id AND p.deleted_at IS NULL"
     "    FOR KEY SHARE OF p"
 )
@@ -77875,6 +77882,16 @@ _MAIL_FANOUT_SQL = (
 # mid-deletion is caught there, while a send arriving after the rewrite
 # blocks, re-reads the row and finds deleted_at set. No per-recipient
 # advisory lock is needed for this (a broadcast has hundreds of recipients).
+#
+# `forced` (migration 404's change): one flag per addressee, true only for an
+# addressee of a reply all whose copy of the original was suppressed. A
+# reply all addresses every addressee of the original whatever its delivery,
+# so the replier's answer, the recipient cap and the replier's Sent list read
+# no other player's delivery; a forced addressee's copy is written
+# suppressed, so a player whose copy of the original was suppressed is sent
+# no reply in that thread either (B-9). Every other addressee, and every
+# addressee of a first message, passes false and is judged by the rules
+# above exactly as before.
 
 # The system_broadcast fan-out (B-12): set-wise, preferences and blocks
 # bypassed, accounts that ran the mod inside the window only — never every
@@ -78205,15 +78222,22 @@ def _mail_canonical_steam_ids(sender_steam_id: str, to, cc) -> list:
     return list(out.items())
 
 
-def _mail_canonical_ids(self_id, pairs) -> list:
-    """B-L2 on resolved player ids [(id, kind)] — the reply path's input."""
+def _mail_canonical_ids(self_id, entries) -> list:
+    """B-L2 on resolved player ids — the reply path's input. Each entry is
+    (id, kind, forced); the result is [(id, kind, forced)] in To-then-Cc
+    order, self dropped, each id once. `forced` marks an addressee whose
+    copy of the original was suppressed (see _MAIL_FANOUT_SQL); an id that
+    occurs more than once is forced if any of its entries is."""
+    forced: dict = {}
+    for pid, _kind, f in entries:
+        forced[pid] = forced.get(pid, False) or bool(f)
     out: dict = {}
     for want in ("to", "cc"):
-        for pid, kind in pairs:
+        for pid, kind, _f in entries:
             if kind != want or pid == self_id or pid in out:
                 continue
             out[pid] = kind
-    return list(out.items())
+    return [(pid, kind, forced[pid]) for pid, kind in out.items()]
 
 
 async def _mail_caller(request: Request, db: AsyncSession) -> dict:
@@ -78384,33 +78408,114 @@ async def _log_admin_action_strict(db: AsyncSession, *, admin_steam_id: str, act
         "t": (target_steam_id or None), "d": _json.dumps(details or {})})
 
 
-async def _mail_prior_send(db: AsyncSession, sender_id, key: UUID):
+# Send receipts (migration 404). Every committed mail send, reply and
+# broadcast has one row in mail_send_receipts, keyed (sender_id,
+# idempotency_key): the message id the send answered with, its kind, a
+# broadcast's recipient count and the request's digest. A repeated key is
+# answered from the receipt ALONE. The message row is no source for that
+# answer: the janitor purges a row once no delivered copy keeps it, which
+# depends on the recipients' delivery, while the receipt lives until
+# MAIL_RETENTION_DAYS after the send whatever happened to the message
+# (_MAIL_RECEIPT_SWEEP_SQL).
+_MAIL_PRIOR_SEND_SQL = (
+    "SELECT message_id, kind, recipients, request_fp FROM mail_send_receipts"
+    " WHERE sender_id = :sid AND idempotency_key = :key"
+)
+
+# The api's own write of a receipt, in the sending transaction right after
+# the message row (for a broadcast, after its recipient count). Migration
+# 404's trigger on mail_messages has normally written the row already, with
+# no digest, when the message row was inserted -- the trigger is there for
+# every OTHER writer of mail_messages, such as the previous api build while
+# a deploy is in progress -- so this is an upsert that completes that row.
+# Its WHERE keeps it to the receipt of THIS message: a receipt of the same
+# key for another message is left as it is, RETURNING gives no row, and the
+# send fails before it commits (_mail_write_receipt).
+_MAIL_RECEIPT_SQL = (
+    "INSERT INTO mail_send_receipts"
+    "   (sender_id, idempotency_key, kind, request_fp, message_id, recipients)"
+    " VALUES (CAST(:sid AS uuid), CAST(:key AS uuid), CAST(:kind AS text), CAST(:fp AS bytea),"
+    "         CAST(:mid AS uuid), CAST(:n AS integer))"
+    " ON CONFLICT (sender_id, idempotency_key) DO UPDATE"
+    "   SET request_fp = EXCLUDED.request_fp, recipients = EXCLUDED.recipients"
+    "   WHERE mail_send_receipts.message_id = EXCLUDED.message_id"
+    " RETURNING 1"
+)
+
+# The janitor's receipt arm: a receipt goes MAIL_RETENTION_DAYS after the
+# send, in bounded batches, whatever the message's delivery or purge state.
+_MAIL_RECEIPT_SWEEP_SQL = (
+    "DELETE FROM mail_send_receipts"
+    " WHERE (sender_id, idempotency_key) IN ("
+    "   SELECT sender_id, idempotency_key FROM mail_send_receipts"
+    "    WHERE created_at < NOW() - make_interval(days => CAST(:days AS integer))"
+    "    LIMIT 2000)"
+    " RETURNING 1"
+)
+
+
+def _mail_request_fp(route: str, **fields) -> bytes:
+    """The digest a receipt stores of the request that committed it, and
+    that every repeat of the key is compared with (_mail_prior_send).
+    SHA-256 over the route and the request's own fields as received, before
+    any trimming or canonicalising, as sorted ASCII JSON; the key is not in
+    it.
+
+    The fields are what the request asked to be written: a send's to, cc,
+    subject and body; a reply's body and `all`; a broadcast's subject and
+    body. A reply's target message is NOT a field. The Discord reply route
+    sends one key per Discord message or slash invocation, and a second
+    pick of a thread from its listing reuses that key so that it replays
+    the first reply rather than sending a second one (discord_bot.py, the
+    slash reply's source id; mail_discord.py reads the replayed reply's own
+    parent after the core returns). The in-game client mints a new key
+    whenever the reply's target, `all`, recipients, subject or body change
+    (MailUI.FingerprintOf), so neither caller sends one key with two
+    different bodies."""
+    doc = _json.dumps({"route": route, **fields}, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(doc.encode("ascii")).digest()
+
+
+async def _mail_prior_send(db: AsyncSession, sender_id, key: UUID, request_fp: bytes):
     """A repeated idempotency_key returns the ORIGINAL message id with the
     same 200 body (B-11). Checked first thing under the lock, before every
     gate, so a retry of an accepted send is never told 'muted' or
-    'rate_limited' for a message that already went out."""
-    prior = (await db.execute(text(
-        "SELECT id, kind, recipient_count FROM mail_messages"
-        " WHERE sender_id = :sid AND idempotency_key = :key"
-    ), {"sid": sender_id, "key": key})).mappings().first()
+    'rate_limited' for a message that already went out.
+
+    The answer is read from the key's receipt alone, never from the message
+    row or its envelopes, so it is the same whatever the message's delivery
+    and whether the janitor has purged it. A receipt that stores a digest
+    answers only the request it was written for: the same key with another
+    digest is refused, 409 idempotency_key_reused, and nothing is written. A
+    receipt without one (backfilled by migration 404, or written by a writer
+    without this change) replays as before."""
+    prior = (await db.execute(text(_MAIL_PRIOR_SEND_SQL),
+                              {"sid": sender_id, "key": key})).mappings().first()
     if prior is None:
         return None
-    out = {"id": str(prior["id"]), "accepted": True}
+    stored = prior["request_fp"]
+    if stored is not None and bytes(stored) != request_fp:
+        raise HTTPException(status_code=409, detail="idempotency_key_reused")
+    out = {"id": str(prior["message_id"]), "accepted": True}
     if prior["kind"] == "system_broadcast":
-        # A broadcast's answer carries its recipient count: the count
-        # PERSISTED on the row in the sending transaction (migration 300,
-        # review r2), replayed verbatim — a recipient who deleted their
-        # account between the commit and the retry cannot change it. A row
-        # without one (written before the column existed) falls back to
-        # counting the envelopes it still has.
-        n = prior.get("recipient_count")
-        if n is None:
-            n = (await db.execute(text(
-                "SELECT COUNT(*) FROM mail_recipients"
-                " WHERE message_id = CAST(:mid AS uuid) AND delivery = 'delivered'"
-            ), {"mid": prior["id"]})).scalar() or 0
-        out["recipients"] = int(n)
+        # The count stored in the sending transaction, replayed verbatim: a
+        # recipient who deleted their account between the commit and the
+        # retry cannot change it.
+        out["recipients"] = int(prior["recipients"] or 0)
     return out
+
+
+async def _mail_write_receipt(db: AsyncSession, *, sender_id, key: UUID, kind: str,
+                              request_fp: bytes, message_id, recipients: int | None = None) -> None:
+    """The api's write of a send's receipt, in the sending transaction."""
+    done = (await db.execute(text(_MAIL_RECEIPT_SQL), {
+        "sid": sender_id, "key": key, "kind": kind, "fp": request_fp,
+        "mid": message_id, "n": recipients})).first()
+    if done is None:
+        # A receipt of this key for ANOTHER message. Unreachable while the
+        # replay check runs under the sender lock (it would have answered
+        # from that receipt); failing here rolls the whole send back.
+        raise HTTPException(status_code=500, detail="mail_receipt_conflict")
 
 
 async def _mail_sender_gates(db: AsyncSession, sender: dict) -> None:
@@ -78617,15 +78722,17 @@ async def _mail_spam_check(db: AsyncSession, sender: dict, message_id, subject: 
 
 async def _mail_finish_send(db: AsyncSession, sender: dict, *, subject: str, body: str,
                             addressees: list, thread_id, in_reply_to, idempotency_key: UUID,
-                            cap: int | None = None, via: str = "game") -> dict:
+                            request_fp: bytes, cap: int | None = None, via: str = "game") -> dict:
     """Second half of the send transaction, shared by POST /mail and
     /mail/{id}/reply: plain-text rules (judged on the RAW text, then
-    trimmed), censor, cap, rate window, the message row, the ONE fan-out
-    INSERT ... SELECT, the inbox-revision bump, the spam evaluation, the
-    commit. The caller holds the identity and sender locks and has already
-    answered a repeated idempotency_key. `addressees` = [(player_id,
-    'to'|'cc')], canonical; `cap` is the caller's already-read grant when it
-    checked the list before resolving ids (one grant read per send)."""
+    trimmed), censor, cap, rate window, the message row and its send
+    receipt, the ONE fan-out INSERT ... SELECT, the inbox-revision bump,
+    the spam evaluation, the commit. The caller holds the identity and
+    sender locks and has already answered a repeated idempotency_key.
+    `addressees` = [(player_id, 'to'|'cc', forced)], canonical;
+    `request_fp` is the request's digest (_mail_request_fp), stored on the
+    receipt; `cap` is the caller's already-read grant when it checked the
+    list before resolving ids (one grant read per send)."""
     subject = _mail_text_or_raise(subject, field="subject", subject=True)
     body = _mail_text_or_raise(body, field="body", subject=False)
     await _mail_censor_or_raise(db, sender, subject, body)
@@ -78644,9 +78751,12 @@ async def _mail_finish_send(db: AsyncSession, sender: dict, *, subject: str, bod
     ), {"id": mid, "sid": sender["id"], "tid": thread_id or mid, "irt": in_reply_to,
         "subj": subject, "body": body, "key": idempotency_key,
         "via": via if via in ("game", "discord") else "game"})
+    await _mail_write_receipt(db, sender_id=sender["id"], key=idempotency_key, kind="direct",
+                              request_fp=request_fp, message_id=mid)
     await db.execute(text(_MAIL_FANOUT_SQL), {
         "mid": mid, "sid": sender["id"],
-        "rids": [a[0] for a in addressees], "kinds": [a[1] for a in addressees]})
+        "rids": [a[0] for a in addressees], "kinds": [a[1] for a in addressees],
+        "forced": [bool(a[2]) for a in addressees]})
     await db.execute(text(_MAIL_REV_BUMP_SQL), {"mid": mid})
     await _mail_spam_check(db, sender, mid, subject, body)
     # Item 5: queue the Discord relay LAST, inside this same transaction and
@@ -78704,12 +78814,14 @@ async def mail_send(req: _MailSendReq, request: Request, db: AsyncSession = Depe
     cap is counted after canonicalisation."""
     me = await _mail_caller(request, db)
     key = _mail_parse_uuid(req.idempotency_key, "idempotency_key")
+    fp = _mail_request_fp("send", to=[str(x) for x in req.to], cc=[str(x) for x in req.cc],
+                          subject=req.subject, body=req.body)
     # Lock order everywhere in this block: identity (delete-account's lock)
     # -> per-sender mail lock -> ban-rate. The identity re-read under the
     # lock is what makes the sender row this transaction writes a LIVE one.
     await _mail_lock_identities(db, me["steam_id"], handles={me["steam_id"]: me["id"]})
     await _mail_lock_sender(db, me["id"])
-    prior = await _mail_prior_send(db, me["id"], key)
+    prior = await _mail_prior_send(db, me["id"], key, fp)
     if prior is not None:
         return prior
     await _mail_sender_gates(db, me)
@@ -78729,10 +78841,11 @@ async def mail_send(req: _MailSendReq, request: Request, db: AsyncSession = Depe
     by_sid = {r["steam_id"]: r["id"] for r in rows}
     if any(s not in by_sid for s, _k in wanted):
         raise HTTPException(status_code=400, detail="recipient_unknown")
-    addressees = [(by_sid[s], k) for s, k in wanted]
+    addressees = [(by_sid[s], k, False) for s, k in wanted]
     return await _mail_finish_send(
         db, me, subject=req.subject, body=req.body,
-        addressees=addressees, thread_id=None, in_reply_to=None, idempotency_key=key, cap=cap)
+        addressees=addressees, thread_id=None, in_reply_to=None, idempotency_key=key,
+        request_fp=fp, cap=cap)
 
 
 @app.post("/api/v1/mail/{message_id}/reply", tags=["Mail"])
@@ -78752,9 +78865,14 @@ async def _mail_reply_core(db: AsyncSession, me: dict, *, message_id: str,
                            body: str, reply_all: bool, idempotency_key: str,
                            via: str = "game") -> dict:
     """B-9: recipients are derived SERVER-side from the original's envelope
-    — the original sender, plus every DELIVERED addressee minus self when
-    reply_all (never a suppressed one); reply_all on a system_broadcast is
-    refused. thread_id/in_reply_to are set here; the subject is the
+    — the original sender, plus every addressee of the original minus self
+    when reply_all, delivered or suppressed alike: the replier's answer,
+    recipient cap and Sent list read no other player's delivery, and an
+    addressee whose copy of the original was suppressed is passed `forced`,
+    so their copy of the reply is suppressed too (they are never sent a
+    reply in a thread they were not delivered). reply_all on a
+    system_broadcast is refused. thread_id/in_reply_to are set here; the
+    subject is the
     original's prefixed "Re: " once. The reply then goes through the same
     gates, rules, cap, rate window and fan-out (recipients' preferences and
     blocks apply to replies exactly as to first messages).
@@ -78765,9 +78883,10 @@ async def _mail_reply_core(db: AsyncSession, me: dict, *, message_id: str,
     Everything below this line runs identically for both."""
     mid = _mail_parse_uuid(message_id, "message_id")
     key = _mail_parse_uuid(idempotency_key, "idempotency_key")
+    fp = _mail_request_fp("reply", body=body, all=bool(reply_all))
     await _mail_lock_identities(db, me["steam_id"], handles={me["steam_id"]: me["id"]})
     await _mail_lock_sender(db, me["id"])
-    prior = await _mail_prior_send(db, me["id"], key)
+    prior = await _mail_prior_send(db, me["id"], key, fp)
     if prior is not None:
         return prior
     await _mail_sender_gates(db, me)
@@ -78775,29 +78894,32 @@ async def _mail_reply_core(db: AsyncSession, me: dict, *, message_id: str,
         "SELECT m.id, m.sender_id, m.kind, m.thread_id, m.subject"
         "  FROM mail_messages m"
         " WHERE m.id = :mid"
-        "   AND ((m.sender_id = :me AND m.deleted_by_sender_at IS NULL)"
+        "   AND ((m.sender_id = :me AND m.deleted_by_sender_at IS NULL"
+        "         AND m.created_at > NOW() - make_interval(days => CAST(:ret_days AS integer)))"
         "        OR EXISTS (SELECT 1 FROM mail_recipients r"
         "                    WHERE r.message_id = m.id AND r.recipient_id = :me"
         "                      AND r.delivery = 'delivered' AND r.deleted_at IS NULL))"
-    ), {"mid": mid, "me": me["id"]})).mappings().first()
+    ), {"mid": mid, "me": me["id"], "ret_days": MAIL_RETENTION_DAYS})).mappings().first()
     if orig is None:
         raise HTTPException(status_code=404, detail="not_found")
     if reply_all and orig["kind"] == "system_broadcast":
         raise HTTPException(status_code=400, detail="reply_all_refused")
-    pairs = [(orig["sender_id"], "to")]
+    pairs = [(orig["sender_id"], "to", False)]
     if reply_all:
+        # Every addressee of the original, whatever its delivery; one whose
+        # copy was suppressed is forced suppressed on the reply.
         rows = (await db.execute(text(
-            "SELECT recipient_id, kind FROM mail_recipients"
-            " WHERE message_id = :mid AND delivery = 'delivered'"
+            "SELECT recipient_id, kind, delivery FROM mail_recipients"
+            " WHERE message_id = :mid"
         ), {"mid": mid})).mappings().all()
-        pairs.extend((r["recipient_id"], r["kind"]) for r in rows)
+        pairs.extend((r["recipient_id"], r["kind"], r["delivery"] != "delivered") for r in rows)
     addressees = _mail_canonical_ids(me["id"], pairs)
     subj = orig["subject"] or ""
     subject = subj if subj.startswith("Re: ") else ("Re: " + subj)[:MAIL_SUBJECT_MAX]
     return await _mail_finish_send(
         db, me, subject=subject, body=body, addressees=addressees,
         thread_id=orig["thread_id"], in_reply_to=orig["id"], idempotency_key=key,
-        via=via)
+        request_fp=fp, via=via)
 
 
 # Item 5 wiring. It lives HERE, immediately after the core it binds, rather
@@ -78853,18 +78975,23 @@ async def mail_sent(request: Request, cursor: str = Query(""),
                     db: AsyncSession = Depends(get_db)):
     """The sender's view: addressees WITHOUT delivery state (B-7). A
     broadcast's envelope is the whole community, so its addressee list is
-    empty and `kind` says why."""
+    empty and `kind` says why. A message is listed until its sender deletes
+    it or until MAIL_RETENTION_DAYS after it was sent, whichever is first,
+    whatever its delivery: the janitor's purge depends on the recipients'
+    delivery, so the list never relies on it."""
     me = await _mail_caller(request, db)
     c_at, c_id = _mail_cursor_decode(cursor)
     rows = (await db.execute(text(
         "SELECT m.id, m.thread_id, m.subject, m.created_at, m.kind"
         "  FROM mail_messages m"
         " WHERE m.sender_id = :me AND m.deleted_by_sender_at IS NULL"
+        "   AND m.created_at > NOW() - make_interval(days => CAST(:ret_days AS integer))"
         "   AND (CAST(:c_at AS timestamptz) IS NULL"
         "        OR (m.created_at, m.id) < (CAST(:c_at AS timestamptz), CAST(:c_id AS uuid)))"
         " ORDER BY m.created_at DESC, m.id DESC"
         " LIMIT CAST(:lim AS integer)"
-    ), {"me": me["id"], "c_at": c_at, "c_id": c_id, "lim": limit + 1})).mappings().all()
+    ), {"me": me["id"], "c_at": c_at, "c_id": c_id, "lim": limit + 1,
+        "ret_days": MAIL_RETENTION_DAYS})).mappings().all()
     page, next_cursor = _mail_page(rows, limit)
     addr = await _mail_addressees(db, [r["id"] for r in page if r["kind"] != "system_broadcast"])
     return {"messages": [{
@@ -79011,7 +79138,8 @@ async def mail_settings_put(req: _MailSettingsReq, request: Request,
 
 @app.get("/api/v1/mail/{message_id}", tags=["Mail"])
 async def mail_detail(message_id: str, request: Request, db: AsyncSession = Depends(get_db)):
-    """Full message for its sender (until they delete it) or a delivered,
+    """Full message for its sender (until they delete it, or until
+    MAIL_RETENTION_DAYS after it was sent, as in Sent) or a delivered,
     undeleted recipient. to/cc carry names only — delivery is NOT exposed.
     Marks nothing read (the client posts /read explicitly)."""
     me = await _mail_caller(request, db)
@@ -79030,8 +79158,9 @@ async def mail_detail(message_id: str, request: Request, db: AsyncSession = Depe
         "                             AND r.delivery = 'delivered' AND r.deleted_at IS NULL"
         " WHERE m.id = :mid"
         "   AND (r.recipient_id IS NOT NULL"
-        "        OR (m.sender_id = :me AND m.deleted_by_sender_at IS NULL))"
-    ), {"mid": mid, "me": me["id"]})).mappings().first()
+        "        OR (m.sender_id = :me AND m.deleted_by_sender_at IS NULL"
+        "            AND m.created_at > NOW() - make_interval(days => CAST(:ret_days AS integer))))"
+    ), {"mid": mid, "me": me["id"], "ret_days": MAIL_RETENTION_DAYS})).mappings().first()
     if row is None:
         raise HTTPException(status_code=404, detail="not_found")
     colors = await _mail_sender_colors(db, [row])
@@ -79075,7 +79204,13 @@ async def mail_delete(message_id: str, request: Request, db: AsyncSession = Depe
     """Soft, per party: a recipient's envelope gets deleted_at, the sender's
     message gets deleted_by_sender_at. Other parties keep their copies; the
     janitor purges the row once every party has let go (or after
-    MAIL_RETENTION_DAYS once it is read everywhere)."""
+    MAIL_RETENTION_DAYS once it is read everywhere).
+
+    Answers {"status": "deleted", "id"} for every well-formed id, whether
+    or not the caller holds a live copy of it; a malformed id is 400.
+    Whether a message row still exists depends on its recipients' delivery
+    (the janitor purges a message no delivered copy keeps), so the answer
+    does not depend on whether either update matched."""
     me = await _mail_caller(request, db)
     mid = _mail_parse_uuid(message_id, "message_id")
     as_recipient = (await db.execute(text(
@@ -79088,8 +79223,6 @@ async def mail_delete(message_id: str, request: Request, db: AsyncSession = Depe
         " WHERE id = :mid AND sender_id = :me"
         " RETURNING 1"
     ), {"mid": mid, "me": me["id"]})).first()
-    if as_recipient is None and as_sender is None:
-        raise HTTPException(status_code=404, detail="not_found")
     if as_recipient is not None:
         # A relay DM that has NOT gone out yet is a copy of a mail this
         # player has just deleted, held outside the envelope tables where
@@ -79416,6 +79549,7 @@ async def admin_mail_broadcast(req: _AdminMailBroadcastReq, db: AsyncSession = D
     (exempt by design); idempotent on (sender, idempotency_key) like every
     send. The sender row is the admin's own player row."""
     key = _mail_parse_uuid(req.idempotency_key, "idempotency_key")
+    fp = _mail_request_fp("broadcast", subject=req.subject, body=req.body)
     await _require_admin(db, req.admin_steam_id, "mail_broadcast", str(key), req.hmac_signature)
     if req.actor_steam_id and req.actor_steam_id != req.admin_steam_id:
         raise HTTPException(status_code=400, detail="actor_mismatch")
@@ -79440,7 +79574,7 @@ async def admin_mail_broadcast(req: _AdminMailBroadcastReq, db: AsyncSession = D
     # answer even if the sender has been muted, banned or censored since:
     # the message exists, and telling its sender otherwise is false.
     await _mail_lock_sender(db, sender["id"])
-    prior = await _mail_prior_send(db, sender["id"], key)
+    prior = await _mail_prior_send(db, sender["id"], key, fp)
     if prior is not None:
         return prior
     # The same sender gates as every other send (review r1): an account that
@@ -79462,11 +79596,14 @@ async def admin_mail_broadcast(req: _AdminMailBroadcastReq, db: AsyncSession = D
     delivered = (await db.execute(text(_MAIL_BROADCAST_FANOUT_SQL), {
         "mid": mid, "sid": sender["id"], "days": MAIL_BROADCAST_SEEN_DAYS})).fetchall()
     n = len(delivered)
-    # The answer's recipient count is persisted on the row in this same
-    # transaction (migration 300) and replayed verbatim by _mail_prior_send.
+    # The answer's recipient count is persisted on the row (migration 300)
+    # and on the send's receipt (migration 404) in this same transaction;
+    # _mail_prior_send replays the receipt's verbatim.
     await db.execute(text(
         "UPDATE mail_messages SET recipient_count = CAST(:n AS integer) WHERE id = :mid"
     ), {"n": n, "mid": mid})
+    await _mail_write_receipt(db, sender_id=sender["id"], key=key, kind="system_broadcast",
+                              request_fp=fp, message_id=mid, recipients=n)
     await db.execute(text(_MAIL_REV_BUMP_SQL), {"mid": mid})
     await _log_admin_action_strict(
         db, admin_steam_id=_mail_identity_to_write(rows, req.admin_steam_id), action="mail_broadcast",
@@ -79548,7 +79685,7 @@ async def admin_mail_bulk_grant_revoke(
     return {"status": "ok", "steam_id": sid, "revoked": gone is not None}
 
 
-async def _mail_retention_sweep(db: AsyncSession) -> tuple[int, int, int]:
+async def _mail_retention_sweep(db: AsyncSession) -> tuple[int, int, int, int]:
     """The janitor's mail arm (called hourly from queue_cleanup_loop, so
     every statement here is in the boot-time EXPLAIN inventory). Policy:
     read mail older than MAIL_RETENTION_DAYS leaves the inbox (its envelope
@@ -79559,7 +79696,9 @@ async def _mail_retention_sweep(db: AsyncSession) -> tuple[int, int, int]:
     envelope blocks the purge. Bounded batches; the cascade removes the
     envelopes, in_reply_to and moderation_cases.message_id go NULL and the
     case keeps its snapshot. The censor-hit ledger is pruned after
-    MAIL_CENSOR_HITS_KEEP_DAYS."""
+    MAIL_CENSOR_HITS_KEEP_DAYS. Send receipts (migration 404) are deleted
+    MAIL_RETENTION_DAYS after the send whatever the message's delivery or
+    purge: a repeated key is answered from its receipt until then."""
     expired = (await db.execute(text(
         "UPDATE mail_recipients SET deleted_at = NOW()"
         " WHERE (message_id, recipient_id) IN ("
@@ -79587,7 +79726,9 @@ async def _mail_retention_sweep(db: AsyncSession) -> tuple[int, int, int]:
         " WHERE created_at < NOW() - make_interval(days => CAST(:days AS integer))"
         " RETURNING 1"
     ), {"days": MAIL_CENSOR_HITS_KEEP_DAYS})).fetchall()
-    return len(expired), len(purged), len(hits)
+    receipts = (await db.execute(text(_MAIL_RECEIPT_SWEEP_SQL),
+                                 {"days": MAIL_RETENTION_DAYS})).fetchall()
+    return len(expired), len(purged), len(hits), len(receipts)
 
 
 # -- Verified reads: operator keys, the read-gate stage, census, probe ---------
