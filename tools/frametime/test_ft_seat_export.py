@@ -2,10 +2,11 @@
 
 Every test that exports runs the seat script's REAL export code, frame_time_seat.ps1 -SliceOf <log> (function
 SliceExport, the code step 4 runs), in a child PowerShell on a synthetic log in a temp folder:
-  (a) LEADS: one line, as the emitter prints it, for every lead of ft_parse.py's FORMS table, the attach line and
-      Harmony's patch failure, with [FPSCAP] lines among them. "=== log lines" is exactly the [FRAME-TIME] and [FPSCAP]
-      lines in the log's order (a failure line whose last field is free text as its typed head and "(not-exported)"),
-      nothing is withheld, and every FORMS lead occurs in the export, its line still a line of that lead's pattern;
+  (a) LEADS: one line, as the emitter prints it, for every lead of ft_parse.py's FORMS table, the attach line, the
+      attach report's failure and Harmony's patch failure, with [FPSCAP] lines among them. "=== log lines" is exactly
+      the [FRAME-TIME] and [FPSCAP] lines in the log's order (a failure line whose last field is free text as its typed
+      head and "(not-exported)"), nothing is withheld, and every FORMS lead occurs in the export, its line still a line
+      of that lead's pattern;
   (b) PLANTED: lines outside the forms (a window line with one extra unknown key, at its end or inside it, a fourth wa
       type, a writer type twice or outside the set, free text in a typed field, a failure line whose head carries free
       text, an [FPSCAP] line of no form) are withheld and counted in their sections, and no planted text is exported;
@@ -16,12 +17,14 @@ SliceExport, the code step 4 runs), in a child PowerShell on a synthetic log in 
       hold against the settled lines);
   -SelfTest: the script's own self-test prints SELFTEST PASS.
 Without PowerShell: the redaction forms are typed (ruling 1: a redacted line carries only fixed text and the mod's own
-identifiers, "(not-exported)" where the text was), and the first section's classes are ft_parse.READ_CLASSES, read
-from the parser, in the seat script ($LogClasses) and in ft_slice_identity.py (FIRST_SECTION).
+identifiers, "(not-exported)" where the text was); the first section's classes are ft_parse.READ_CLASSES, read from
+the parser, in the seat script ($LogClasses) and in ft_slice_identity.py (FIRST_SECTION); and every literal of
+plugin/*.cs that begins with "[FRAME-TIME] " or "[FPSCAP] " agrees with the fixed head of a form (the class by machine;
+its limit is in test_emitter_literals_have_a_form, its negative control is test_emitter_literals_control).
 Each mutant is a copy of frame_time_seat.ps1 with one route changed (the V5 window form only, the writer types
-without sock, the earlier point form only, no attach form, no redaction, a redaction that exports the text, wa
-loosened, the forms unanchored at the end, the window key check skipped, the [FPSCAP] lines back under the component
-slice), run the same way; each must fail its named check. frame_time_seat_v.ps1 holds no form and calls
+without sock, the earlier point form only, no attach form, no attach report redaction, no redaction, a redaction that
+exports the text, wa loosened, the forms unanchored at the end, the window key check skipped, the [FPSCAP] lines back
+under the component slice), run the same way; each must fail its named check. frame_time_seat_v.ps1 holds no form and calls
 frame_time_seat.ps1, so it inherits them (checked from its text).
 Where neither powershell nor pwsh exists the export tests SKIP with that reason.
 """
@@ -208,10 +211,12 @@ LEADS = [
     (WARN, "start failed: " + FREE, True),
     (INFO, "steam ticket withheld route=GET_local", False),
     # lines no FORMS lead reads at this tip (findings for the parser's owner): the attach line (ruling R6-A3.11.151
-    # (3), its emitter in the lane's next commit) and FtCalib.cs:126's failure ("kind=disp entries", a word with no =)
+    # (3), plugin/FtAttach.cs), the attach report's failure (plugin/Plugin.cs, redacted) and FtCalib.cs:126's failure
+    # ("kind=disp entries", a word with no =)
     (INFO, "attach n=3 of=4 missing=FtSockPatch names=FtPhotonEPatch:2/2,FtPhotonXPatch:1/1,FtSockPatch:0/1", False),
     (INFO, "attach n=4 of=4 missing=none names=FtPhotonEPatch:2/2,FtPhotonXPatch:1/1,FtSockPatch:1/1,FtRoute_SendPatch:1/1",
      False),
+    (WARN, "attach report failed: " + FREE, True),
     (WARN, "cal i=2 kind=disp entries failed: " + FREE, True),
 ]
 # the component slice's line of the class: Harmony's patch failure (plugin/Plugin.cs:1483), redacted
@@ -464,9 +469,10 @@ def test_fixture_covers_every_forms_lead():
     for _, pay, red in LEADS:
         rows = lead_of(pay)
         if not rows:
-            # the lines the parser reads by no row at this tip: the attach line, FtCalib.cs:126's failure, and the
-            # earlier builds' 5-key counters line (FORMS holds the 7-key one)
-            known = pay.startswith(("attach ", "cal i=2 kind=disp entries failed: ")) or pay == C5
+            # the lines the parser reads by no row at this tip: the attach line and its report's failure,
+            # FtCalib.cs:126's failure, and the earlier builds' 5-key counters line (FORMS holds the 7-key one)
+            known = pay.startswith(("attach n=", "attach report failed: ", "cal i=2 kind=disp entries failed: ")) \
+                or pay == C5
             assert known, "a sample of no FORMS row: " + pay
             continue
         assert lead_of(exported(pay, red)), "the export of %r is read by no FORMS row" % pay
@@ -542,6 +548,176 @@ def test_redaction_forms_are_typed():
             assert ph in REDACT_TYPED, (form, ph)
 
 
+# ---- the class by machine: every literal of the emitter that begins with a first-section class word agrees with the
+# fixed head of a form or a redaction form (ruling R6-A3.11.151 (2) class E)
+
+PLUGIN = os.path.normpath(os.path.join(HERE, os.pardir, os.pardir, "plugin"))
+LIT_CLASSES = ("[FRAME-TIME] ", "[FPSCAP] ")
+PH = re.compile(r"<(@?)([a-z0-9]+)>|<=([^>]*)>")   # FormPattern's placeholder syntax (frame_time_seat.ps1)
+ATTACH_REPORT_FORM = "'[FRAME-TIME] attach report failed: <*>'"
+_ESC = {"n": "\n", "t": "\t", "r": "\r", "0": "\0", "a": "\a", "b": "\b", "f": "\f", "v": "\v"}
+
+
+def cs_literals(src):
+    """[(offset, text)] for every string literal of a C# source, comments and char literals skipped: a regular, verbatim
+    or raw literal's whole text (its escapes read), an interpolated literal's text before its first hole; the literals
+    inside a hole are read as well"""
+    out = []
+    n = len(src)
+
+    def code(i, hole):
+        # scans code from i; in a hole, returns the index after the "}" that closes it, else the source's end
+        depth = 0
+        while i < n:
+            c = src[i]
+            if src.startswith("//", i):
+                j = src.find("\n", i)
+                i = n if j < 0 else j
+            elif src.startswith("/*", i):
+                j = src.find("*/", i + 2)
+                i = n if j < 0 else j + 2
+            elif c == "'":
+                j = i + 1
+                while j < n and src[j] != "'":
+                    j += 2 if src[j] == "\\" else 1
+                i = j + 1
+            elif src.startswith(('$@"', '@$"'), i):
+                i = string(i, i + 3, True, True)
+            elif src.startswith('$"', i):
+                i = string(i, i + 2, False, True)
+            elif src.startswith('@"', i):
+                i = string(i, i + 2, True, False)
+            elif src.startswith('"""', i):
+                j = src.find('"""', i + 3)
+                j = n if j < 0 else j
+                out.append((i, src[i + 3:j]))
+                i = j + 3
+            elif c == '"':
+                i = string(i, i + 1, False, False)
+            elif hole and c == "{":
+                depth += 1
+                i += 1
+            elif hole and c == "}":
+                if depth == 0:
+                    return i + 1
+                depth -= 1
+                i += 1
+            else:
+                i += 1
+        return n
+
+    def string(at, i, verbatim, interp):
+        # one literal whose text starts at i: records (at, its text before its first hole), returns the index after it
+        buf, head = [], True
+        while i < n:
+            c = src[i]
+            if c == "\\" and not verbatim:
+                if head:
+                    buf.append(_ESC.get(src[i + 1], src[i + 1]))
+                i += 2
+            elif c == '"' and verbatim and src.startswith('""', i):
+                if head:
+                    buf.append('"')
+                i += 2
+            elif c == '"':
+                i += 1
+                break
+            elif interp and src.startswith(("{{", "}}"), i):
+                if head:
+                    buf.append(c)
+                i += 2
+            elif interp and c == "{":
+                head = False
+                i = code(i + 1, True)
+            else:
+                if head:
+                    buf.append(c)
+                i += 1
+        out.append((at, "".join(buf)))
+        return i
+
+    code(0, False)
+    return out
+
+
+def emitter_literals():
+    """[(file:line, literal)] for every literal of plugin/*.cs (the tree this test runs in) that begins with a class
+    word of LIT_CLASSES, and the file:line of every source line that holds such a literal's opening by text (outside a
+    line comment), the lexer's cross-check"""
+    names = sorted(f for f in os.listdir(PLUGIN) if f.endswith(".cs"))
+    assert "Plugin.cs" in names, PLUGIN
+    opening = re.compile(r'(?:\$@|@\$|\$|@)?"\[(?:FRAME-TIME|FPSCAP)\] ')
+    lits, grep = [], set()
+    for name in names:
+        with open(os.path.join(PLUGIN, name), encoding="utf-8-sig") as f:
+            src = f.read()
+        for at, lit in cs_literals(src):
+            if lit.startswith(LIT_CLASSES):
+                lits.append(("%s:%d" % (name, src.count("\n", 0, at) + 1), lit))
+        for k, ln in enumerate(src.split("\n"), 1):
+            if opening.search(ln.split("//", 1)[0]) and not ln.lstrip().startswith(("//", "*", "/*")):
+                grep.add("%s:%d" % (name, k))
+    return lits, grep
+
+
+def ps_list(text, name):
+    """the forms of the seat script's list $<name> = @( ... ), one quoted form per line"""
+    m = re.search(r"^\$%s = @\(\n(.*?)^\)" % re.escape(name), text, re.M | re.S)
+    assert m, name
+    return re.findall(r"^    '([^']*)'$", m.group(1), re.M)
+
+
+def form_head(form):
+    """a form's fixed head: its text before its first placeholder (the "^" mark of a form without the BepInEx prefix
+    dropped)"""
+    t = form[1:] if form.startswith("^") else form
+    m = PH.search(t)
+    return t[:m.start()] if m else t
+
+
+def literal_misses(text, lits):
+    """(the literals that are a class word alone, the literals no head agrees with) for the seat script's text: the
+    heads are those of $FormText and $RedactText that begin with a class word of LIT_CLASSES and are longer than it"""
+    heads = [h for h in map(form_head, ps_list(text, "FormText") + ps_list(text, "RedactText"))
+             if h.startswith(LIT_CLASSES) and h not in LIT_CLASSES]
+    bare = [w for w, lit in lits if lit in LIT_CLASSES]
+    miss = [(w, lit) for w, lit in lits
+            if lit not in LIT_CLASSES and not any(lit.startswith(h) or h.startswith(lit) for h in heads)]
+    return bare, miss
+
+
+def test_emitter_literals_have_a_form():
+    """Every string literal of plugin/*.cs, in the tree this test runs in, that begins with "[FRAME-TIME] " or
+    "[FPSCAP] " (an interpolated literal: its text before its first hole) agrees with the fixed head H of a form or a
+    redaction form of the seat script (H: the form's text before its first placeholder): the literal starts with H, or
+    H starts with the literal. A form whose H is the class word alone would agree with every literal, so it counts as
+    no head here. A literal that is the class word alone (a head built wholly from variables) agrees with every head:
+    it passes and is listed in the output.
+    Its limit, in plain words: it catches a line whose head is new. It does not catch a new sub-form under a head that
+    exists (a new key, value or tail after a fixed text that a form already holds), nor a line whose class word is not
+    the start of one literal (held in a variable or a constant and joined to the rest); the forms' own fixtures and
+    mutants cover those. Its negative control is test_emitter_literals_control."""
+    lits, grep = emitter_literals()
+    bare, miss = literal_misses(_ps1_text(), lits)
+    print("LITERALS read=%d class-word-only=%d: %s" % (len(lits), len(bare), ", ".join(bare)))
+    # the lexer's cross-check: every source line that opens such a literal by text yields one
+    assert grep - set(w for w, _ in lits) == set(), sorted(grep - set(w for w, _ in lits))
+    assert miss == [], "emitter literals that agree with no form's head: %s" % miss
+
+
+def test_emitter_literals_control():
+    """the negative control of test_emitter_literals_have_a_form: with the attach report's redaction form taken out of
+    the script's text, the check names exactly Plugin.cs's literal "[FRAME-TIME] attach report failed: ", at the line
+    that holds it (found here by text); with the form, it names none"""
+    lits, _ = emitter_literals()
+    with open(os.path.join(PLUGIN, "Plugin.cs"), encoding="utf-8-sig") as f:
+        at = [k for k, ln in enumerate(f.read().split("\n"), 1) if '"[FRAME-TIME] attach report failed: "' in ln]
+    assert len(at) == 1, at
+    _, miss = literal_misses(mutant_text("line", ATTACH_REPORT_FORM, None), lits)
+    assert miss == [("Plugin.cs:%d" % at[0], "[FRAME-TIME] attach report failed: ")], miss
+    assert literal_misses(_ps1_text(), lits)[1] == []
+
+
 @need_ps
 def test_selftest_passes():
     p = subprocess.run([PS, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", PS1, "-SelfTest"],
@@ -575,6 +751,7 @@ MUTANTS = [
     ("the earlier point form only (V6's dropped)", check_leads, "line", "ab_back=<n> ab_retry=<n> heap=<n>'", None),
     ("no attach form", check_leads, "line", "'[FRAME-TIME] attach n=<u> of=<u> missing=<attmissing> names=<attnames>'",
      None),
+    ("no attach report redaction", check_leads, "line", ATTACH_REPORT_FORM, None),
     ("no redaction", check_leads, "text", "$Redacts = @($RedactText | ForEach-Object { RedactRegex $_ })",
      "$Redacts = @()"),
     ("a redaction that exports the text", check_planted, "text",
