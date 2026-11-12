@@ -2383,9 +2383,13 @@ V6_BOOT = (("alloc", "alloc pin=ok planted=1048600/1048576 empty=0"),
            # P1's V6 emitter (via the integrator, 12 Nov): a sitting log's control-mutant line
            ("controls", "controls k_mutant=none"),
            # the follow-up to ruling .149, A and B: the writer ledger's disk-log tap (FtLedger.Install) and the room
-           # gate's patch-time line (FtRoomGate.ReportPatched: 9 PUN overloads, 2 void and 2 coroutine entry points)
+           # gate's patch-time line as this game prints it (FtRoomGate.ReportPatched; ruling R6-A3.11.154). expected=13
+           # is read from the game's PhotonUnityNetworking.dll metadata: PhotonNetwork's public static join or create
+           # methods are 9 room entries (JoinRandomRoom x3, JoinRandomOrCreateRoom, CreateRoom, JoinOrCreateRoom,
+           # JoinRoom, RejoinRoom, ReconnectAndRejoin), none generic, plus the 2 void and 2 coroutine Nch entry points;
+           # excluded= prints JoinLobby once per overload (two) and LoadOrCreateSettings
            ("ledger", "ledger log=1 why=ok types=log,hash,recv,sock"),
-           ("gate", "FT-GATE patched 13 entry points expected=13 excluded=JoinLobby,LoadOrCreateSettings"),
+           ("gate", "FT-GATE patched 13 entry points expected=13 excluded=JoinLobby,JoinLobby,LoadOrCreateSettings"),
            # ruling R6-A3.11.151 (3): the attach line, after the patch loop and the two patch reports
            ("attach", ATTACH_OK))
 # the two keys a V6 counters line carries after span_depth_violations (P1's emitter, via the integrator, 12 Nov)
@@ -4043,9 +4047,14 @@ FORM_VARIANTS = (
     ("FtRoomGate.cs:87", '" name=" + shown + " n=" + n',
      ("room call refused op=JoinRoom name=FT-1 n=1", "room call refused op=CreateRoom name=(none) n=2",
       "room call refused op=JoinRoom name=(empty) n=1", "room call refused op=JoinRoom name=(not-exported) n=3")),
+    # ruling R6-A3.11.154: the line as this game prints it, shorter lists of the design's names, and one name outside
+    # the design (GATE_EXCLUDED_SAMPLES holds each to its reading)
     ("FtRoomGate.cs:109", '(missing.Count == 0 ? "" : " missing="',
-     ("FT-GATE patched 6 entry points expected=6 excluded=A.b,C.d",
-      "FT-GATE patched 5 entry points expected=6 excluded= missing=E.f")),
+     ("FT-GATE patched 13 entry points expected=13 excluded=JoinLobby,JoinLobby,LoadOrCreateSettings",
+      "FT-GATE patched 13 entry points expected=13 excluded=JoinLobby,LoadOrCreateSettings",
+      "FT-GATE patched 13 entry points expected=13 excluded=",
+      "FT-GATE patched 12 entry points expected=13 excluded=LoadOrCreateSettings missing=JoinRoom",
+      "FT-GATE patched 12 entry points expected=12 excluded=JoinLobby,JoinRoomAsync")),
     ("FtRoomGate.cs:247", '(cur != null ? cur.Name : "(none)")',
      ("FT-ROOM joined offline=0 name=FT-1", "FT-ROOM joined offline=1 name=(none)",
       "FT-ROOM joined offline=1 name=(not-exported)")),
@@ -4195,7 +4204,49 @@ GATE_SPOILS = (
      "FT-GATE patched 0 entry points of 0 expected: the room gate is not attached on every entry point"),
     ("form", "FT-GATE patched many entry points",
      "the FT-GATE patched line is not in its form: FT-GATE patched many entry points"),
+    # ruling R6-A3.11.154: a name outside the design, and an empty entry
+    ("outside the design", "FT-GATE patched 12 entry points expected=12 excluded=JoinLobby,JoinRoomAsync",
+     "the room gate left an entry point outside its design: JoinRoomAsync"),
+    ("an empty entry", "FT-GATE patched 13 entry points expected=13 excluded=JoinLobby,,LoadOrCreateSettings",
+     "the FT-GATE patched line is not in its form (an empty entry in excluded=): FT-GATE patched 13 entry points "
+     "expected=13 excluded=JoinLobby,,LoadOrCreateSettings"),
 )
+# ruling R6-A3.11.154: FtRoomGate.cs:109's samples (FORM_VARIANTS) and what attach_gate_faults reads in each
+GATE_EXCLUDED_SAMPLES = {
+    "FT-GATE patched 13 entry points expected=13 excluded=JoinLobby,JoinLobby,LoadOrCreateSettings": [],
+    "FT-GATE patched 13 entry points expected=13 excluded=JoinLobby,LoadOrCreateSettings": [],
+    "FT-GATE patched 13 entry points expected=13 excluded=": [],
+    "FT-GATE patched 12 entry points expected=13 excluded=LoadOrCreateSettings missing=JoinRoom":
+        ["FT-GATE patched 12 entry points of 13 expected; missing=JoinRoom: the room gate is not attached on every "
+         "entry point"],
+    "FT-GATE patched 12 entry points expected=12 excluded=JoinLobby,JoinRoomAsync":
+        ["the room gate left an entry point outside its design: JoinRoomAsync"],
+}
+
+
+def chk_gate_excluded_held_to_the_design(m):
+    # ruling R6-A3.11.154: every name of excluded= is one of FtRoomGate.NotRoomEntry's (the parser's
+    # GATE_EXCLUDED_DESIGN, held here to the array as the plugin source writes it, so a new name there fails until the
+    # tuple follows); a name outside it is an ATTACH fault naming it, once whatever its count; an empty entry inside a
+    # list is refused as written; names repeated or absent read clean (the design is an upper bound, no count per name)
+    src = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "plugin", "FtRoomGate.cs"),
+               encoding="utf-8").read()
+    arr = re.findall(r"string\[\] NotRoomEntry = \{([^}]*)\};", src)
+    assert len(arr) == 1, arr
+    assert tuple(re.findall(r'"([^"]*)"', arr[0])) == m.GATE_EXCLUDED_DESIGN, (arr, m.GATE_EXCLUDED_DESIGN)
+    rows = [r[2] for r in FORM_VARIANTS if r[0] == "FtRoomGate.cs:109"]
+    assert len(rows) == 1 and sorted(rows[0]) == sorted(GATE_EXCLUDED_SAMPLES), rows
+    for ln, want in GATE_EXCLUDED_SAMPLES.items():
+        got = m.attach_gate_faults(LOG_PREFIX + "[FRAME-TIME] " + ln)
+        assert got == want, (ln, got)
+    two = "FT-GATE patched 13 entry points expected=13 excluded=JoinRoomAsync,JoinLobby,JoinRoomAsync,CreateRoomT"
+    assert m.attach_gate_faults(LOG_PREFIX + "[FRAME-TIME] " + two) == [
+        "the room gate left an entry point outside its design: CreateRoomT",
+        "the room gate left an entry point outside its design: JoinRoomAsync"]
+    for ex in (",JoinLobby", "JoinLobby,", ","):
+        ln = "FT-GATE patched 13 entry points expected=13 excluded=" + ex
+        assert m.attach_gate_faults(LOG_PREFIX + "[FRAME-TIME] " + ln) == [
+            "the FT-GATE patched line is not in its form (an empty entry in excluded=): " + ln], ex
 HARMONY_FAIL = "[Error  :CompetitiveRounds] [HARMONY] Failed to patch %s: Patching exception in method null"
 
 
@@ -4551,8 +4602,7 @@ FAULT_FIELDS = (
      "each errored entry prints its own 'kind=disp shape=<s> failed:' line (FtCalib.cs:229), which VR2 reads as a "
      "calibration carrying failure warnings"),
     ("FT-GATE", "missing", "FtRoomGate.cs", "attach_gate_faults", "missing="),
-    ("FT-GATE", "excluded", "FtRoomGate.cs", None,
-     "the entry points the room gate leaves by design (names, not a count)"),
+    ("FT-GATE", "excluded", "FtRoomGate.cs", "attach_gate_faults", "excluded="),
     ("offthread", "span_off", "FtHeavy.cs", None,
      "component scopes opened off the main thread open nothing (FtSpan.cs:241); reported by report(); ruled "
      "(R6-A3.11.152 (2)(h)) as photon_offmain: reported, it decides nothing"),
@@ -4948,7 +4998,7 @@ B11_CHECKS = ["chk_c2_recovers_3_25", "chk_c3_recovers_3_0375", "chk_c4_recovers
               # the confirming round's G1 (ruling R6-A3.11.152): emitted lists judged as written
               "chk_ledger_types_judged_as_written",
               # ruling R6-A3.11.154: the refusals line of its form, or refused as written
-              "chk_refusals_line_judged_as_written",
+              "chk_refusals_line_judged_as_written", "chk_gate_excluded_held_to_the_design",
               # G3: the census's partial variant
               "chk_census_partial_out_of_range", "chk_emitted_variants_are_forms"]
 

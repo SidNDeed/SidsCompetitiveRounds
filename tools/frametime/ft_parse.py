@@ -3579,6 +3579,9 @@ FAILED_PATCH = "Failed to patch"
 # FtRoomGate.ReportPatched's line (plugin/FtRoomGate.cs:109), counted from Harmony's own patch table
 GATE_LINE = re.compile(r"\[FRAME-TIME\] FT-GATE patched (\d+) entry points expected=(\d+) excluded=(\S*)"
                        r"(?: missing=(.*))?$")
+# ruling R6-A3.11.154: the names the room gate leaves by design, FtRoomGate.NotRoomEntry (plugin/FtRoomGate.cs:31; a
+# test reads the array from the source and holds this tuple to it). excluded= may name only these
+GATE_EXCLUDED_DESIGN = ("JoinLobby", "LoadOrCreateSettings")
 # ruling R6-A3.11.151 (3): the patch classes of the measuring build, one attach entry each, in ordinal order of the
 # name: every class with a class-level [HarmonyPatch] compiled only when SCR_FRAMETIME is defined (the test holds this
 # list equal to the source's set). ATTACH_CLASSES_REF is the reference build's, from P1b's hand-back (commit aa6d99e9,
@@ -3707,17 +3710,31 @@ def attach_gate_faults(text):
     """ATTACH's room gate part over one boot's log text (ruling R6-A3.11.151 (3), F17; first the follow-up to ruling
     .149, B): exactly one FT-GATE patched line (GATE_LINE, FtRoomGate.ReportPatched, plugin/FtRoomGate.cs:109-111), its
     count equal to its expected count, which is above 0, and no missing= list; else the sitting's isolation is not
-    proven. Returns the reasons."""
+    proven. Every name of excluded= is one the design leaves (GATE_EXCLUDED_DESIGN, ruling R6-A3.11.154); an empty
+    entry in it makes the line out of its form. Returns the reasons."""
     ls = [ln.rstrip() for ln in text.splitlines() if "[FRAME-TIME] FT-GATE patched " in ln]
     if len(ls) != 1:
         return ["%d 'FT-GATE patched' lines (needs exactly 1): the room gate's attachment is not read" % len(ls)]
     m = GATE_LINE.search(ls[0])
+    written = ls[0][ls[0].find("FT-GATE"):]
     if m is None:
-        return ["the FT-GATE patched line is not in its form: %s" % ls[0][ls[0].find("FT-GATE"):]]
+        return ["the FT-GATE patched line is not in its form: %s" % written]
+    # ruling R6-A3.11.154: SweepPun (FtRoomGate.cs:45-54) excludes the NotRoomEntry names and any generic method
+    # definition; expected= counts what it kept, so a room-entry method it excluded would leave expected= without it.
+    # The rule is membership, an upper bound: a seat whose Photon lacks one of the design's names is no weaker. This is
+    # not G1's case, where the rule says the list equals one list. A name may be printed more than once (SweepPun adds it
+    # once per method, and JoinLobby has two overloads), so no name is counted. An empty entry inside a non-empty list
+    # is refused as written (the empty list itself, nothing excluded, is of the form)
+    names = m.group(3).split(",") if m.group(3) else []
+    if "" in names:
+        return ["the FT-GATE patched line is not in its form (an empty entry in excluded=): %s" % written]
+    bad = []
     if m.group(1) != m.group(2) or int(m.group(2)) == 0 or m.group(4) is not None:
-        return ["FT-GATE patched %s entry points of %s expected%s: the room gate is not attached on every entry point"
-                % (m.group(1), m.group(2), "; missing=%s" % m.group(4) if m.group(4) is not None else "")]
-    return []
+        bad.append("FT-GATE patched %s entry points of %s expected%s: the room gate is not attached on every entry "
+                   "point" % (m.group(1), m.group(2), "; missing=%s" % m.group(4) if m.group(4) is not None else ""))
+    for n in sorted(set(x for x in names if x not in GATE_EXCLUDED_DESIGN)):
+        bad.append("the room gate left an entry point outside its design: %s" % n)
+    return bad
 
 
 def _ok(bad):
