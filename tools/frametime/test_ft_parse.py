@@ -1040,6 +1040,30 @@ def test_forms_are_every_line_form_the_emitter_prints():
     assert (P.MARK_FT, P.MARK_REF) == ("build variant=FrameTime", "build variant=FrameTimeRef SCR_FT_REF=NOCOLLECTORS")
 
 
+def test_settled_gc_fallback_is_read_and_judged_by_no_rule():
+    # ruling R6-A3.11.152, G2: FtCalib.Settled (plugin/FtCalib.cs:394-407) starts gc_incremental and gc_slice_ns at -1
+    # and sets them inside a try, so a GC property getter that throws prints gc_incremental=-1 gc_slice_ns=-1. That
+    # settled line is a form the parser reads, read() takes it, and no rule judges either field: a sitting-V log whose
+    # every settled line prints the fallback gives the same WITHHELD list and the same U as one printing 1 and a slice
+    # (the control)
+    src = _plugin_src()
+    assert "int incremental = -1;" in src and "long slice = -1;" in src and '" gc_incremental=" + incremental' in src
+    ln = LOG_PREFIX + ("[FRAME-TIME] settled g=1 seed=1 c_plant=80 W=120 vsync=0 target=-1 freq=10000000 hires=1 "
+                       "f_hat=1000000 gc_incremental=-1 gc_slice_ns=-1 f18=A answer=replay armfile=1 force=ON clock=1 "
+                       "frames=10 missing_end=0 cycle_failures=0 span_depth_violations=0")
+    assert P.unknown_forms(ln) == []
+    r = P.parse_line(ln)
+    assert r["kind"] == "settled" and str(r["gc_incremental"]) == "-1" and str(r["gc_slice_ns"]) == "-1", r
+
+    def gc(text, inc, sl):
+        return re.sub(r"(\[FRAME-TIME\] settled g=-?\d+ [^\n]*)",
+                      lambda mm: mm.group(1) + " gc_incremental=%s gc_slice_ns=%s" % (inc, sl), text)
+    fall, ok = gc(_v_text(), -1, -1), gc(_v_text(), 1, 3000000)
+    assert fall.count(" gc_incremental=-1 gc_slice_ns=-1") == ok.count(" gc_incremental=1 gc_slice_ns=3000000") > 2
+    vf, vo = _v(P, fall), _v(P, ok)
+    assert vf["why"] == vo["why"] == [] and vf["U"] == vo["U"] is not None, (vf["why"], vo["why"])
+
+
 def test_p_line_sock_p95_may_print_na_and_heap_is_an_integer():
     # ruling R6-A3.11.149 (6) 10: FtUpload prints sock_p95=NA with no sock sample (plugin/FtUpload.cs:333-345), and
     # FtFrames prints heap= as an integer (plugin/FtFrames.cs:279)
