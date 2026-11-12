@@ -3,7 +3,8 @@
 # restoration that run in the leased script's cleanup after the sitting, taken out of finish() so they run unchanged
 # against a planted tree. The caller sets BEP CONFDIR CFG OUT PRE RUNSTAMP and the arrays LOGN LOGP.
 #   ft_vr6_check        VR6's second listing (the config folder and LogOutput-prev.log as the sitting left them)
-#                       compared with PRE; any change prints "FT-VM-VR6 files FAIL" and sets bad=1
+#                       compared with PRE; any change, or a listing that could not be written, prints
+#                       "FT-VM-VR6 files FAIL" and sets bad=1
 #                       (R6-A3.11.41: the cfg's RESTORED KIND passes, recorded; see ft_cfg_restored_kind)
 #   ft_restore_check    (c) every file the restoration replaces is first MOVED, mtime kept, into
 #                       <outdir>/sitting/<RUNSTAMP>/ (a file already there is never overwritten: refused, bad=1), then
@@ -14,7 +15,7 @@
 #   ft_rc_verdict       (a) bad=1 sets rc 30, whatever the launch code was (0, 5 or any other), and says so
 # CLASS B (R6-A3.11.18): a read that fails never reads as equal. sha prints a token unique to that reading when the
 # digest cannot be read (two failed readings never compare equal); inventory returns 1 when a folder is absent, a
-# listing fails or any digest is unreadable.
+# listing fails, any digest is unreadable or a line of it could not be written.
 st() { date -u +%Y-%m-%dT%H:%M:%SZ; }
 sha() {
   local s
@@ -35,12 +36,12 @@ inventory() {
     while IFS= read -r f; do
       [ -n "$f" ] || continue
       s=$(sha "$f"); case "$s" in unreadable-*) echo "$(st) FT-VM-INVENTORY digest of $f unreadable"; ok=1;; esac
-      echo "$area ${f#"$dir/"} $s" >> "$tmp"
+      echo "$area ${f#"$dir/"} $s" >> "$tmp" || { echo "$(st) FT-VM-INVENTORY write of $tmp FAILED"; return 1; }
     done <<< "$list"
   done
   for i in 0 1 2 3 4; do
     s=$(sha "${LOGP[$i]}"); case "$s" in unreadable-*) echo "$(st) FT-VM-INVENTORY digest of ${LOGN[$i]} unreadable"; ok=1;; esac
-    echo "log ${LOGN[$i]} $s" >> "$tmp"
+    echo "log ${LOGN[$i]} $s" >> "$tmp" || { echo "$(st) FT-VM-INVENTORY write of $tmp FAILED"; return 1; }
   done
   LC_ALL=C sort "$tmp" > "$1" || return 1
   rm -f "$tmp"
@@ -48,8 +49,14 @@ inventory() {
 }
 ft_vr6_check() {
   inventory "$OUT/inventory-sitting.txt" || { echo "$(st) FT-VM-VR6 files FAIL: the sitting's inventory could not be read whole"; bad=1; return 0; }
-  grep -E "^config |^log LogOutput-prev.log " "$OUT/inventory-pre.txt" > "$OUT/vr6-pre.txt"
-  grep -E "^config |^log LogOutput-prev.log " "$OUT/inventory-sitting.txt" > "$OUT/vr6-sitting.txt"
+  # VR6's two listings, each file first proven writable (a redirection that fails also ends 1 in bash): grep then
+  # exits 0 (lines) or 1 (none); 2 is a read or write that failed. Two listings that failed alike never compare equal
+  local g1=2 g2=2
+  : > "$OUT/vr6-pre.txt" && { grep -E "^config |^log LogOutput-prev.log " "$OUT/inventory-pre.txt" > "$OUT/vr6-pre.txt"; g1=$?; }
+  : > "$OUT/vr6-sitting.txt" && { grep -E "^config |^log LogOutput-prev.log " "$OUT/inventory-sitting.txt" > "$OUT/vr6-sitting.txt"; g2=$?; }
+  if [ "$g1" -gt 1 ] || [ "$g2" -gt 1 ]; then
+    echo "$(st) FT-VM-VR6 files FAIL: VR6's listings could not be written (grep rc $g1, $g2)"; bad=1; return 0
+  fi
   if cmp -s "$OUT/vr6-pre.txt" "$OUT/vr6-sitting.txt"; then
     echo "$(st) FT-VM-VR6 files PASS (config folder and LogOutput-prev.log unchanged by the sitting)"
   elif ft_cfg_restored_kind; then

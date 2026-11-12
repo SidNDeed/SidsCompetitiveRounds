@@ -17,7 +17,7 @@
 #   boot-k3    the same at k3                                                    kind menu
 # ft_vm_install.sh arm and ft_vm_leased.sh take their sentinel text and their kind from here and hold no copy.
 # An unknown, empty or missing profile, or an extra argument: nothing on standard output, one line on standard error,
-# exit 2.
+# exit 2. A failed write to standard output: one line on standard error, exit 3.
 set -u
 kind=0
 if [ "${1:-}" = "--kind" ]; then kind=1; shift; fi
@@ -32,5 +32,7 @@ case "$p" in
   boot-k1|boot-k2|boot-k3) k=menu;  L=(seed=1 force=none menu=1 menu_segments=4 "k_mutant=${p#boot-}");;
   *) refuse "unknown profile '$p'";;
 esac
-if [ "$kind" = 1 ]; then printf '%s\n' "$k"; else printf '%s\n' "${L[@]}"; fi
+# the callers read the text from standard output: a write that fails there ends nonzero, never 0
+if [ "$kind" = 1 ]; then printf '%s\n' "$k"; else printf '%s\n' "${L[@]}"; fi \
+  || { echo "ft_arm_text.sh: the write to standard output failed" >&2; exit 3; }
 exit 0
