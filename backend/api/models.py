@@ -8,10 +8,13 @@ from datetime import datetime, timezone
 
 from sqlalchemy import (
     BigInteger, Boolean, CheckConstraint, Column, Date, DateTime, Double, FetchedValue, Float, ForeignKey, Index, Integer,
-    LargeBinary, SmallInteger, String, Text, UniqueConstraint, text,
+    SmallInteger, String, Text, UniqueConstraint, text,
 )
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB, UUID
 from sqlalchemy.orm import DeclarativeBase, deferred, relationship
+# Its own statement: the shared import above is in the fingerprint of every
+# route that reaches a model (learning #537), and only MailSendReceipt uses it.
+from sqlalchemy import LargeBinary
 
 
 class Base(DeclarativeBase):
