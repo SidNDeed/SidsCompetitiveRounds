@@ -45,6 +45,8 @@ Exit: 0 the report printed; 3 REFUSED (a check refused the input); 4 FT-PARSE RE
 REQUIRED_KEYS names: one line names its kind, file, line and keys; or an input holds a line "withheld <class> <n>",
 n >= 1, of a class in READ_CLASSES: the laptop seat script's export rule held back n lines of a class this parse
 reads, so the record is not whole, and the one line names the class, the count, the file and the line).
+Every mode exits 0 when its report printed, whatever that report's verdict (--controls on PROOF FAIL too), so the
+verdict is the report's line, never the exit code alone.
 """
 import math
 import os
