@@ -6,26 +6,36 @@ Usage: python -I -B ft_quiet.py <guest trace> <host trace|-> [--window <utc ms f
          (the guest half alone, printed "QUIET GUEST-HALF <verdict>": never the sitting's verdict)
 
 Inputs: the guest trace ft_quiet_guest.ps1 writes on the VM (one G line a second) and the host trace
-ft_quiet_host.sh writes on the Proxmox host (one group of V and C lines a second, X lines around the contention
-fixture). Both carry utc=<epoch ms>; the window is judged on that clock, each trace's own intervals on its mono=<ns>.
-The window is the given one, or by default the span of guest samples that show the ROUNDS process (calibration
-through terminal drain).
+ft_quiet_host.sh writes on the Proxmox host (a header naming the vCPU threads and the reserved cores, then one group
+of V and C lines a second, X lines around the contention fixture). Both carry utc=<epoch ms>; the window is judged on
+that clock, each trace's own intervals on its mono=<ns>. The window is the given one, or by default the span of guest
+samples that show the ROUNDS process (calibration through terminal drain). Each trace must cover the window: a sample
+before its start, one after its end, and no interval over two seconds from the one to the other.
 
 The rules, every interval of the window:
   guest  non-game cores = total% x ncpu / 100 - ROUNDS cores: p95 <= 0.05 and every interval <= 0.20;
          each physical disk's Avg. Disk Queue Length <= 3; Available MBytes >= 3000; % Committed Bytes In Use <= 85;
-         Pages Input/sec, Page Reads/sec, Pages Output/sec: every rolling ten-second integral (rate x elapsed) <= 10;
+         Pages Input/sec, Page Reads/sec, Pages Output/sec: every rolling ten-second integral <= 10, where a sample's
+         rate holds over the interval ending at it and ten seconds take from each interval the part they overlap;
   host   each vCPU's delay (d wait / d wall, schedstat): <= 1% over the window and <= 5% every interval; each reserved
-         core's non-VM execution (d busy - d run of the vCPUs pinned to it alone) <= 0.05 core;
-  fixture before the window: the X fixture=start..stop span shows run growth and d wait / d wall >= 10% on a vCPU,
-         then at least QUIET_AFTER host intervals between its stop and the window's start, each within the host
-         interval limits (contention removed, quietness regained). Counters frozen at zero fail.
-REFUSED (no verdict): a trace missing or unreadable, no host evidence, a missing or non-numeric field, an interval
-longer than two seconds, the ROUNDS identity (pid and start) changing inside the window or not single (rpid=NA),
-the default window's start or end not observed (the guest trace starting or ending while ROUNDS runs), the vCPU set
-changing, a schedstat counter going backwards.
+         core's non-VM execution (d busy - d run of the vCPUs pinned to it alone) <= 0.05 core; the host intervals
+         judged run from the last host sample before the window to the first one after it;
+  fixture before the window: the X fixture=start..stop span lasts ten seconds or more and host samples cover it (one
+         at or before its start, one at or after its stop, no interval over two seconds between); over those samples
+         a vCPU shows run growth and d wait / d wall >= 10%; then at least QUIET_AFTER host intervals between its stop
+         and the window, each within the host interval limits (contention removed, quietness regained). Counters
+         frozen at zero fail.
+REFUSED (no verdict): a trace missing or unreadable, no host evidence, a line of an unknown kind, a missing,
+non-numeric or negative field, a trace that does not cover the window, an interval longer than two seconds, utc not increasing,
+the ROUNDS identity (pid and start) changing inside the window or not single (rpid=NA), the default window's start or
+end not observed (the guest trace starting or ending while ROUNDS runs), a host header that does not name the vCPU
+threads and the reserved cores (reserved=- names none), a host sample group that lacks a record for one of them or
+holds one twice, no fixture start or stop before the window, a fixture shorter than ten seconds or not covered by host
+samples, a schedstat or busy counter going backwards, a reserved core's busy counter not advancing while the vCPUs
+pinned to it ran.
 Prints one line per rule and "QUIET RESULT PASS|FAIL|REFUSED"; exit 0 PASS, 1 FAIL, 3 REFUSED, 2 usage.
 """
+import bisect
 import math
 import sys
 
@@ -35,12 +45,13 @@ DISKQ_MAX = 3.0
 AVAIL_MIN = 3000.0
 COMMIT_MAX = 85.0
 PAGING_MAX = 10.0          # units in any rolling ten seconds
-PAGING_SPAN_MS = 10000
+PAGING_SPAN_NS = 10000000000
 GAP_NS = 2000000000        # an interval longer than this refuses
 DELAY_ALL = 0.01
 DELAY_EACH = 0.05
 RESERVED_MAX = 0.05        # cores of non-VM execution per reserved core
 FIXTURE_WAIT = 0.10
+FIXTURE_MS = 10000         # the contention fixture's shortest span, start mark to stop mark
 QUIET_AFTER = 3            # quiet host intervals between the fixture's stop and the window
 PAGING = (("pin", "Pages Input/sec"), ("prd", "Page Reads/sec"), ("pout", "Pages Output/sec"))
 G_KEYS = ("utc", "mono", "total", "rpid", "rstart", "rcpu", "dq", "avail", "commit", "pin", "prd", "pout")
@@ -70,6 +81,9 @@ def num(rec, k, what):
         raise Refused("%s: %s=%r is not a number" % (what, k, v))
     if math.isnan(x) or math.isinf(x):
         raise Refused("%s: %s=%r is not finite" % (what, k, v))
+    # every numeric field of both traces is a clock reading, a counter or a rate: none is below zero
+    if x < 0:
+        raise Refused("%s: %s=%r is negative" % (what, k, v))
     return x
 
 
@@ -95,7 +109,7 @@ def read_guest(path):
     recs = []
     for i, ln in enumerate(lines[1:], 2):
         if not ln.startswith("G "):
-            continue
+            raise Refused("guest line %d is not a G record: %r" % (i, ln[:40]))
         r = fields(ln)
         for k in G_KEYS:
             if k not in r:
@@ -116,20 +130,37 @@ def read_guest(path):
     return ncpu, recs
 
 
+def head_set(head, key, what):
+    """the host header's comma list for key; absent, '-', empty or not distinct numbers refuses"""
+    v = head.get(key)
+    if v is None:
+        raise Refused("host header lacks %s= (the %s the capture expects)" % (key, what))
+    if v in ("", "-"):
+        raise Refused("host header names no %s (%s=%s): the rule that needs them has no evidence" % (what, key, v))
+    items = v.split(",")
+    if not all(x.isdigit() for x in items) or len(set(items)) != len(items):
+        raise Refused("host header %s=%r is not a list of distinct numbers" % (key, v))
+    return set(items)
+
+
 def read_host(path):
+    """the host trace's sample groups, sorted by mono, and its fixture marks. Every group holds exactly one V record
+    for each vCPU the header names and one C record for each reserved core it names, or the trace refuses."""
     if path == "-":
         raise Refused("no host evidence (missing host evidence refuses, method-v52.md section 6)")
     lines = read_lines(path)
-    if not lines or not lines[0].startswith("QH v1"):
+    if not lines or lines[0].split()[:2] != ["QH", "v1"]:
         raise Refused("host trace: no 'QH v1' header")
+    head = fields(lines[0][3:])
+    want = {"v": head_set(head, "vcpus", "vCPU threads"), "c": head_set(head, "reserved", "reserved cores")}
     groups = {}       # mono -> {"utc", "v": {tid: rec}, "c": {cpu: busy}}
     marks = []
     for i, ln in enumerate(lines[1:], 2):
         kind = ln.split(" ", 1)[0]
-        if kind not in ("V", "C", "X"):
-            continue
-        r = fields(ln)
         what = "host line %d" % i
+        if kind not in ("V", "C", "X"):
+            raise Refused("%s is not a V, C or X record: %r" % (what, ln[:40]))
+        r = fields(ln)
         utc, mono = num(r, "utc", what), num(r, "mono", what)
         if kind == "X":
             if r.get("fixture") not in ("start", "stop"):
@@ -137,16 +168,40 @@ def read_host(path):
             marks.append((utc, r["fixture"]))
             continue
         g = groups.setdefault(mono, {"utc": utc, "v": {}, "c": {}})
+        if g["utc"] != utc:
+            raise Refused("%s: utc %d differs from the utc %d of its group (mono %d)" % (what, utc, g["utc"], mono))
         if kind == "V":
-            tid = r.get("tid")
-            if not tid:
+            key = r.get("tid")
+            if not key:
                 raise Refused("%s lacks tid" % what)
-            g["v"][tid] = {"cpus": r.get("cpus", ""), "run": num(r, "run", what), "wait": num(r, "wait", what)}
+            if r.get("cpus", "NA") in ("", "NA"):
+                raise Refused("%s lacks cpus (the vCPU's affinity)" % what)
+            rec = {"cpus": r["cpus"], "run": num(r, "run", what), "wait": num(r, "wait", what)}
         else:
-            g["c"][r.get("cpu", "")] = num(r, "busy", what)
+            key = r.get("cpu")
+            if not key:
+                raise Refused("%s lacks cpu" % what)
+            rec = num(r, "busy", what)
+        slot = g[kind.lower()]
+        if key in slot:
+            raise Refused("%s: a second %s record for %s in the group at mono %d" % (what, kind, key, mono))
+        slot[key] = rec
     out = [dict(mono=m, **groups[m]) for m in sorted(groups)]
-    if not out or not any(g["v"] for g in out):
-        raise Refused("no host evidence: the host trace holds no vCPU sample")
+    if not out:
+        raise Refused("no host evidence: the host trace holds no sample group")
+    for a, b in zip(out, out[1:]):
+        if b["utc"] <= a["utc"]:
+            raise Refused("host trace: utc does not increase with mono at utc %d" % b["utc"])
+    names = {"v": "vCPU", "c": "reserved core"}
+    for g in out:
+        for k in ("v", "c"):
+            lack, extra = sorted(want[k] - set(g[k])), sorted(set(g[k]) - want[k])
+            if lack:
+                raise Refused("host trace: the group at utc %d lacks %s %s that the header names"
+                              % (g["utc"], names[k], ",".join(lack)))
+            if extra:
+                raise Refused("host trace: the group at utc %d holds %s %s that the header does not name"
+                              % (g["utc"], names[k], ",".join(extra)))
     return out, marks
 
 
@@ -162,13 +217,56 @@ def intervals(recs, label):
     return out
 
 
+def cover(recs, w0, w1, label):
+    """the samples that cover the window [w0, w1] (utc): every sample inside it, the last one before w0 and the first
+    one after w1. Returns (first index, last index, the intervals between them). Refuses when no sample is inside,
+    when the trace does not reach before w0 or after w1, when utc does not increase from the first to the last, or
+    when any of those intervals is longer than two seconds."""
+    idx = [i for i, r in enumerate(recs) if w0 <= r["utc"] <= w1]
+    if not idx:
+        raise Refused("%s: no sample inside the window (utc %d to %d)" % (label, w0, w1))
+    lo, hi = idx[0] - 1, idx[-1] + 1
+    if lo < 0:
+        raise Refused("%s does not cover the window's start: no sample before utc %d" % (label, w0))
+    if hi >= len(recs):
+        raise Refused("%s does not cover the window's end: no sample after utc %d" % (label, w1))
+    span = recs[lo:hi + 1]
+    for a, b in zip(span, span[1:]):
+        if b["utc"] <= a["utc"]:
+            raise Refused("%s: utc does not increase at %s" % (label, b.get("line", b["utc"])))
+    return lo, hi, intervals(span, label)
+
+
 def p95(xs):
     s = sorted(xs)
     return s[max(0, int(math.ceil(0.95 * len(s))) - 1)]
 
 
+def worst_ten_seconds(iv, k):
+    """the largest integral of rate k over any ten seconds of mono time. A sample's rate holds over the interval that
+    ends at it, so ten seconds take from each interval rate x the part of it they overlap. The integral is linear in
+    the ten seconds' position between the positions where their start or their end meets a sample, so its largest
+    value is at one of those positions. Kept in rate x ns until the end: whole rates times whole ns stay exact in a
+    float below 2**53, so whole-rate traces at the limit read exactly the limit."""
+    xs = [iv[0][0]["mono"]] + [b["mono"] for a, b, d in iv]
+    rate = [b[k] for a, b, d in iv]
+    cum = [0.0]
+    for j, (a, b, d) in enumerate(iv):
+        cum.append(cum[-1] + rate[j] * d)
+
+    def upto(t):
+        if t <= xs[0]:
+            return 0.0
+        if t >= xs[-1]:
+            return cum[-1]
+        j = bisect.bisect_right(xs, t) - 1
+        return cum[j] + rate[j] * (t - xs[j])
+    return max(upto(e) - upto(e - PAGING_SPAN_NS) for e in xs + [x + PAGING_SPAN_NS for x in xs]) / 1e9
+
+
 def guest_rules(ncpu, recs, w0, w1, out):
-    win = [r for r in recs if w0 <= r["utc"] <= w1]
+    lo, hi, _ = cover(recs, w0, w1, "guest trace")
+    win = recs[lo + 1:hi]
     if len(win) < 2:
         raise Refused("guest trace: %d samples in the window" % len(win))
     ids = set((r["rpid"], r["rstart"]) for r in win)
@@ -193,13 +291,7 @@ def guest_rules(ncpu, recs, w0, w1, out):
         out.append("QUIET guest %s %s: %s" % (name, "FAIL" if bad else "PASS", txt))
         ok = ok and not bad
     for k, name in PAGING:
-        # each sample's rate is its interval's average: units = rate x elapsed; the integral over every ten seconds
-        # ending at a sample
-        units = [(b["utc"], b[k] * d / 1e9) for a, b, d in iv]
-        worst = 0.0
-        for t, _ in units:
-            s = sum(u for tt, u in units if t - PAGING_SPAN_MS < tt <= t)
-            worst = max(worst, s)
+        worst = worst_ten_seconds(iv, k)
         bad = worst > PAGING_MAX
         out.append("QUIET guest %s %s: worst ten-second integral %.2f (<= %.0f)"
                    % (name, "FAIL" if bad else "PASS", worst, PAGING_MAX))
@@ -209,9 +301,7 @@ def guest_rules(ncpu, recs, w0, w1, out):
 
 def host_iv_limits(a, b, d):
     """one host interval: each vCPU's delay and each reserved core's non-VM cores; returns (worst delay, worst
-    reserved, the per-vCPU d wait and d run)"""
-    if set(a["v"]) != set(b["v"]):
-        raise Refused("host trace: the vCPU set changes at utc %d" % b["utc"])
+    reserved, the per-vCPU d wait and d run). Both groups come from read_host, so they hold the same vCPUs and cores."""
     worst_d, waits, runs = 0.0, {}, {}
     for tid in b["v"]:
         dw = b["v"][tid]["wait"] - a["v"][tid]["wait"]
@@ -222,27 +312,28 @@ def host_iv_limits(a, b, d):
         worst_d = max(worst_d, dw / d)
     worst_r = 0.0
     for cpu, busy in b["c"].items():
-        if cpu not in a["c"]:
-            raise Refused("host trace: reserved core %s appears at utc %d" % (cpu, b["utc"]))
+        db = busy - a["c"][cpu]
         vm = sum(runs[t] for t in b["v"] if b["v"][t]["cpus"] == cpu)
-        worst_r = max(worst_r, (busy - a["c"][cpu] - vm) / d)
+        if db < 0:
+            raise Refused("host trace: the busy counter of reserved core %s goes backwards at utc %d" % (cpu, b["utc"]))
+        if db == 0 and vm > RESERVED_MAX * d:
+            raise Refused("host trace: the busy counter of reserved core %s does not advance at utc %d while the vCPUs "
+                          "pinned to it ran %.3f core (a frozen counter)" % (cpu, b["utc"], vm / d))
+        worst_r = max(worst_r, (db - vm) / d)
     return worst_d, worst_r, waits, runs
 
 
-def host_rules(groups, marks, w0, w1, out):
-    win = [g for g in groups if w0 <= g["utc"] <= w1]
-    if len(win) < 2:
-        raise Refused("no host evidence in the window (%d host samples)" % len(win))
-    iv = intervals(win, "host trace")
+def host_rules(span, iv, out):
+    """span: the host samples from the last one before the window to the first one after it; iv: its intervals"""
     ok = True
     worst_d = worst_r = 0.0
-    tw, tr = {}, {}
+    tw = {}
     for a, b, d in iv:
         dd, rr, waits, runs = host_iv_limits(a, b, d)
         worst_d, worst_r = max(worst_d, dd), max(worst_r, rr)
         for t in waits:
             tw[t] = tw.get(t, 0) + waits[t]
-    wall = win[-1]["mono"] - win[0]["mono"]
+    wall = span[-1]["mono"] - span[0]["mono"]
     overall = max(tw[t] / wall for t in tw)
     for name, bad, txt in (("vCPU delay every interval", worst_d > DELAY_EACH, "max %.4f (<= %.2f)" % (worst_d, DELAY_EACH)),
                            ("vCPU delay overall", overall > DELAY_ALL, "max %.4f (<= %.2f), %d vCPUs" % (overall, DELAY_ALL, len(tw))),
@@ -252,21 +343,27 @@ def host_rules(groups, marks, w0, w1, out):
     return ok
 
 
-def fixture_rule(groups, marks, w0, out):
+def fixture_rule(groups, marks, w0, ha, out):
+    """ha: the index of the last host sample before the window (cover)"""
     starts = [u for u, m in marks if m == "start" and u < w0]
     if not starts:
-        out.append("QUIET contention fixture FAIL: no fixture before the window")
-        return False
+        raise Refused("no contention fixture before the window: no X fixture=start line before utc %d" % w0)
     s0 = starts[-1]
     stops = [u for u, m in marks if m == "stop" and s0 < u < w0]
     if not stops:
-        out.append("QUIET contention fixture FAIL: the fixture started at %d has no stop before the window" % s0)
-        return False
+        raise Refused("the contention fixture started at utc %d has no X fixture=stop line before the window" % s0)
     s1 = stops[0]
-    fx = [g for g in groups if s0 <= g["utc"] <= s1]
-    if len(fx) < 2:
-        out.append("QUIET contention fixture FAIL: %d host samples inside the fixture" % len(fx))
-        return False
+    if s1 - s0 < FIXTURE_MS:
+        raise Refused("the contention fixture lasted %.1f s (utc %d to %d): it must last ten seconds"
+                      % ((s1 - s0) / 1000.0, s0, s1))
+    upto = [i for i, g in enumerate(groups) if g["utc"] <= s0]
+    after = [i for i, g in enumerate(groups) if g["utc"] >= s1]
+    if not upto:
+        raise Refused("host trace does not cover the contention fixture's start: no sample at or before utc %d" % s0)
+    if not after:
+        raise Refused("host trace does not cover the contention fixture's stop: no sample at or after utc %d" % s1)
+    fa, fb = upto[-1], after[0]
+    fx = groups[fa:fb + 1]
     iv = intervals(fx, "host trace (fixture)")
     tw, tr = {}, {}
     for a, b, d in iv:
@@ -277,17 +374,20 @@ def fixture_rule(groups, marks, w0, out):
     wall = fx[-1]["mono"] - fx[0]["mono"]
     best = max(tw, key=lambda t: (tr[t] > 0, tw[t]))
     grown = tr[best] > 0 and tw[best] / wall >= FIXTURE_WAIT
-    after = [g for g in groups if s1 <= g["utc"] < w0]
+    # from the first sample at or after the stop to the last one before the window: every interval gap-checked, so
+    # the host evidence runs unbroken from the fixture's start to the window's end
+    rest = groups[fb:ha + 1]
     quiet = 0
-    if len(after) >= 2:
-        for a, b, d in intervals(after, "host trace (after the fixture)"):
+    if len(rest) >= 2:
+        for a, b, d in intervals(rest, "host trace (after the fixture)"):
             dd, rr, _, _ = host_iv_limits(a, b, d)
             quiet = quiet + 1 if dd <= DELAY_EACH and rr <= RESERVED_MAX else 0
     regained = quiet >= QUIET_AFTER
     ok = grown and regained
-    out.append("QUIET contention fixture %s: vCPU %s run %.0f ns, wait %.4f of the wall (>= %.2f, run > 0); then %d "
-               "quiet intervals before the window (>= %d)"
-               % ("PASS" if ok else "FAIL", best, tr[best], tw[best] / wall, FIXTURE_WAIT, quiet, QUIET_AFTER))
+    out.append("QUIET contention fixture %s: %.1f s, vCPU %s run %.0f ns, wait %.4f of the wall (>= %.2f, run > 0); "
+               "then %d quiet intervals before the window (>= %d)"
+               % ("PASS" if ok else "FAIL", (s1 - s0) / 1000.0, best, tr[best], tw[best] / wall, FIXTURE_WAIT, quiet,
+                  QUIET_AFTER))
     return ok
 
 
@@ -302,7 +402,8 @@ def judge(guest, host, window=None, guest_only=False):
             live = [r["utc"] for r in recs if r["rpid"] != "-"]
             if not live:
                 raise Refused("guest trace: no sample shows the ROUNDS process")
-            # the span's two ends must be observed: a sample without ROUNDS before it and after it
+            # the span's two ends must be observed: a sample without ROUNDS before it and after it (cover then
+            # holds each of those within two seconds of the span)
             if recs[0]["rpid"] != "-" or recs[-1]["rpid"] != "-":
                 raise Refused("guest trace: it %s while ROUNDS runs (the window's ends are not observed)"
                               % ("starts" if recs[0]["rpid"] != "-" else "ends"))
@@ -312,8 +413,9 @@ def judge(guest, host, window=None, guest_only=False):
             return ("PASS" if guest_rules(ncpu, recs, w0, w1, out) else "FAIL"), out
         groups, marks = read_host(host)
         ok = guest_rules(ncpu, recs, w0, w1, out)
-        ok = host_rules(groups, marks, w0, w1, out) and ok
-        ok = fixture_rule(groups, marks, w0, out) and ok
+        ha, hb, hiv = cover(groups, w0, w1, "host trace")
+        ok = host_rules(groups[ha:hb + 1], hiv, out) and ok
+        ok = fixture_rule(groups, marks, w0, ha, out) and ok
     except Refused as e:
         out.append("QUIET REFUSED: %s" % e)
         return "REFUSED", out

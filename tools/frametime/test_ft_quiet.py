@@ -20,6 +20,7 @@ GAME_AT = 30                # seconds from T0: the guest trace shows ROUNDS from
 GAME_S = 40                 # seconds of game
 TIDS = ("501", "502", "503", "504")
 CPUS = {"501": "2", "502": "3", "503": "4", "504": "5"}
+HEAD = "QH v1 vcpus=501,502,503,504 reserved=2,3,4,5"
 
 
 def guest_trace(path, edit=None, ncpu=4, disks="0_C:,1_D:", n=GAME_AT + GAME_S + 5):
@@ -40,11 +41,11 @@ def guest_trace(path, edit=None, ncpu=4, disks="0_C:,1_D:", n=GAME_AT + GAME_S +
     return path
 
 
-def host_trace(path, edit=None, fixture=(10, 20), fwait=200000000, n=GAME_AT + GAME_S + 5):
+def host_trace(path, edit=None, fixture=(10, 20), fwait=200000000, n=GAME_AT + GAME_S + 5, head=HEAD):
     """one group a second: four vCPUs pinned one to a core, each running 0.9 s a second with 0.1 ms of wait, and
     their four reserved cores busy 0.91 s (0.01 core of non-VM work); inside the fixture vCPU 501 waits 0.2 s a
-    second. edit(i, tid_or_cpu, rec) may change one record of second i."""
-    lines = ["QH v1"]
+    second. edit(i, tid_or_cpu, rec) may change one record of second i (cpu records are keyed "c<cpu>")."""
+    lines = [head]
     run = dict((t, 0) for t in TIDS)
     wait = dict((t, 0) for t in TIDS)
     busy = dict((CPUS[t], 0) for t in TIDS)
@@ -190,15 +191,21 @@ def test_reserved_core_non_vm(tmp_path):
 
 
 def test_fixture_contention_must_end_before_the_window(tmp_path):
-    v, out = verdict(tmp_path, fixture=(20, GAME_AT - 2))      # one interval between its stop and the window
+    v, out = verdict(tmp_path, fixture=(18, GAME_AT - 2))      # one interval between its stop and the window
     assert v == "FAIL" and "QUIET contention fixture FAIL" in out and "then 1 quiet intervals" in out, out
     v, out = verdict(tmp_path, fixture=(16, GAME_AT - 4))      # three
     assert v == "PASS", out
 
 
-def test_fixture_absent_fails(tmp_path):
+def test_fixture_absent_refuses(tmp_path):
     v, out = verdict(tmp_path, fixture=None)
-    assert v == "FAIL" and "no fixture before the window" in out, out
+    assert v == "REFUSED" and "no contention fixture before the window: no X fixture=start line" in out, out
+
+
+def test_fixture_without_stop_refuses(tmp_path):
+    # the stop mark would come after the trace's end: none is before the window
+    v, out = verdict(tmp_path, fixture=(10, GAME_AT + GAME_S + 10))
+    assert v == "REFUSED" and "has no X fixture=stop line before the window" in out, out
 
 
 def test_fixture_wait_below_ten_percent_fails(tmp_path):
@@ -260,7 +267,7 @@ def test_two_rounds_processes_refuse(tmp_path):
 
 def test_vcpu_set_change_refuses(tmp_path):
     v, out = verdict(tmp_path, hedit=lambda i, t, r: r.update(tid="777") if t == "504" and i >= GAME_AT + 5 and "wait" in r else None)
-    assert v == "REFUSED" and "vCPU set changes" in out, out
+    assert v == "REFUSED" and "the group at utc %d lacks vCPU 504 that the header names" % (T0 + 1000 * (GAME_AT + 5)) in out, out
 
 
 def test_counter_backwards_refuses(tmp_path):
@@ -298,7 +305,15 @@ def test_the_cli_and_the_guest_half(tmp_path):
 
 # ---- the host sampler (ft_quiet_host.sh) on a stand-in /proc; it is never run on a host from here
 
-def fake_proc(root, vcpus=(("7001", "CPU 0/KVM", "2"), ("7002", "CPU 1/KVM", "3")), other=("7003", "worker", "0-7")):
+# cpu2: user 100 (90 of them guest), nice 0, system 50, idle 1000, iowait 20, irq 5, softirq 5, steal 0, guest 90,
+# guest_nice 3: busy = 100 + 0 + 50 + 5 + 5 + 0 = 160 ticks; guest and guest_nice are already inside user and nice
+STAT = "cpu  1 1 1 1 1 1 1 1 1 1\ncpu2 100 0 50 1000 20 5 5 0 90 3\ncpu3 10 0 10 1000 0 0 0 0 0 0\n"
+
+
+def fake_proc(root, vcpus=(("7001", "CPU 0/KVM", "2"), ("7002", "CPU 1/KVM", "3")), other=("7003", "worker", "0-7"),
+              stat=STAT):
+    """a stand-in /proc under root: FT_QUIET_PROC_ROOT is the seam through which a test feeds the sampler its own
+    task files and /proc/stat text"""
     base = os.path.join(root, "proc", "4242", "task")
     for tid, comm, cpus in list(vcpus) + ([other] if other else []):
         d = os.path.join(base, tid)
@@ -306,8 +321,12 @@ def fake_proc(root, vcpus=(("7001", "CPU 0/KVM", "2"), ("7002", "CPU 1/KVM", "3"
         open(os.path.join(d, "comm"), "w").write(comm + "\n")
         open(os.path.join(d, "schedstat"), "w").write("%s %s 77\n" % (int(tid) * 1000, int(tid)))
         open(os.path.join(d, "status"), "w").write("Name:\tx\nCpus_allowed_list:\t%s\n" % cpus)
-    open(os.path.join(root, "proc", "stat"), "w").write(
-        "cpu  1 1 1 1 1 1 1 1\ncpu2 100 0 50 1000 20 5 5 0\ncpu3 10 0 10 1000 0 0 0 0\n")
+    os.makedirs(os.path.join(root, "proc"), exist_ok=True)
+    open(os.path.join(root, "proc", "stat"), "w").write(stat)
+
+
+def clk_tck():
+    return int(subprocess.run(["getconf", "CLK_TCK"], stdout=subprocess.PIPE, universal_newlines=True).stdout)
 
 
 def host_sh(root, *args, test=True):
@@ -324,14 +343,42 @@ def test_host_sampler_writes_the_trace_the_checker_reads(tmp_path):
     out = os.path.join(root, "h.txt")
     p = host_sh(root, "4242", out, os.path.join(root, "stop"), "4", "2,3", "2", "1")
     assert p.returncode == 0, p.stderr
+    # the header names the sets every group must hold a record for
+    assert open(out).readline().rstrip("\n") == "QH v1 vcpus=7001,7002 reserved=2,3"
     groups, marks = Q.read_host(out)
     assert [m for _, m in marks] == ["start", "stop"], marks
     assert len(groups) == 4 and all(set(g["v"]) == {"7001", "7002"} for g in groups), groups
     g = groups[0]
     assert g["v"]["7001"] == {"cpus": "2", "run": 7001000.0, "wait": 7001.0}, g
-    hz = int(subprocess.run(["getconf", "CLK_TCK"], stdout=subprocess.PIPE, universal_newlines=True).stdout)
+    hz = clk_tck()
     assert g["c"] == {"2": 160 * 1e9 / hz, "3": 20 * 1e9 / hz}, g["c"]
     assert all(b["mono"] > a["mono"] for a, b in zip(groups, groups[1:]))
+
+
+def test_host_sampler_busy_leaves_guest_time_out(tmp_path):
+    # item 1, on a fixed /proc/stat text: cpu2 ran 0.9 s of VM work (guest 90 ticks, counted inside user 92) and 3
+    # ticks of system; its busy is 95 ticks, so d busy - d run of its vCPU leaves the 5 ticks of other work. Adding
+    # guest again would read 185, the VM's 0.9 core a second time. cpu3's line is short and cpu9 has none: busy=NA.
+    root = str(tmp_path)
+    fake_proc(root, stat="cpu  1 1 1 1 1 1 1 1 1 1\ncpu2 92 0 3 5 0 0 0 0 90 0\ncpu3 10 0 10\n")
+    out = os.path.join(root, "h.txt")
+    p = host_sh(root, "4242", out, os.path.join(root, "stop"), "1", "2,3,9")
+    assert p.returncode == 0, p.stderr
+    c = [ln.split()[3:] for ln in open(out).read().splitlines() if ln.startswith("C ")]
+    assert c == [["cpu=2", "busy=%.0f" % (95 * 1e9 / clk_tck())], ["cpu=3", "busy=NA"], ["cpu=9", "busy=NA"]], c
+    with pytest.raises(Q.Refused, match="busy='NA' is not a number"):
+        Q.read_host(out)
+
+
+def test_host_sampler_unreadable_affinity_refuses_in_the_checker(tmp_path):
+    root = str(tmp_path)
+    fake_proc(root)
+    os.remove(os.path.join(root, "proc", "4242", "task", "7002", "status"))
+    out = os.path.join(root, "h.txt")
+    p = host_sh(root, "4242", out, os.path.join(root, "stop"), "1", "2,3")
+    assert p.returncode == 0 and " tid=7002 cpus=NA " in open(out).read(), p.stderr
+    with pytest.raises(Q.Refused, match="lacks cpus"):
+        Q.read_host(out)
 
 
 def test_host_sampler_refusals(tmp_path):
@@ -340,6 +387,9 @@ def test_host_sampler_refusals(tmp_path):
     assert p.returncode == 2 and "usage" in p.stderr
     p = host_sh(root, "4242", "x", "y", "two", "-")
     assert p.returncode == 2
+    for bad in ("2,,3", "2,x", "2,", ",2"):                          # an empty or non-numeric reserved core
+        p = host_sh(root, "4242", "x", "y", "2", bad)
+        assert p.returncode == 2 and "reserved cpus must be" in p.stderr, bad
     fake_proc(root, vcpus=())
     out = os.path.join(root, "h.txt")
     p = host_sh(root, "4242", out, os.path.join(root, "stop"), "2", "-")
@@ -365,3 +415,214 @@ def test_a_trace_that_ends_or_starts_inside_the_game_refuses(tmp_path):
     g = guest_trace(str(tmp_path / "g2.txt"), lambda i, r: r.update(_drop=1) if i < GAME_AT else None)
     v, lines = Q.judge(g, h)
     assert v == "REFUSED" and "starts while ROUNDS runs" in "\n".join(lines), lines
+
+
+# ---- inputs that are absent, partial or too short: each refuses and names the missing input; the complete trace
+# (test_complete_quiet_trace_passes) is the negative control of every one, and each test holds its own where a
+# near state must still pass
+
+def stretch(s, n, by_ms):
+    """guest samples after second s come by_ms later each, for n samples: n intervals of 1 s + by_ms"""
+    def e(i, r):
+        k = min(max(i - s, 0), n)
+        r["mono"] += by_ms * 1000000 * k
+        r["utc"] += by_ms * k
+    return e
+
+
+def test_paging_integral_weights_intervals_by_their_overlap(tmp_path):
+    # item 2: nine intervals of 1.2 s at one read a second. Every ten seconds hold 10 reads; the nine whole intervals
+    # that end inside one ten-second span hold 10.8
+    s = GAME_AT + 5
+    st = stretch(s, 9, 200)
+    v, out = verdict(tmp_path, gedit=lambda i, r: (st(i, r), r.update(prd="1") if s < i <= s + 9 else None))
+    assert v == "PASS" and "QUIET guest Page Reads/sec PASS: worst ten-second integral 10.00" in out, out
+    # the same intervals at 1.2 reads a second: 12 in ten seconds
+    v, out = verdict(tmp_path, gedit=lambda i, r: (st(i, r), r.update(prd="1.2") if s < i <= s + 9 else None))
+    assert v == "FAIL" and "QUIET guest Page Reads/sec FAIL: worst ten-second integral 12.00" in out, out
+
+
+def test_host_trace_must_cover_the_window(tmp_path):
+    w0, w1 = T0 + 1000 * GAME_AT, T0 + 1000 * (GAME_AT + GAME_S - 1)
+    # item 3: only two host samples inside a forty-second window
+    v, out = verdict(tmp_path, hedit=lambda i, t, r: r.update(_drop=1) if i > GAME_AT + 1 else None)
+    assert v == "REFUSED" and "host trace does not cover the window's end: no sample after utc %d" % w1 in out, out
+    v, out = verdict(tmp_path, hedit=lambda i, t, r: r.update(_drop=1) if i < GAME_AT else None)
+    assert v == "REFUSED" and "host trace does not cover the window's start: no sample before utc %d" % w0 in out, out
+    # a gap across the window's start, then one across its end: the gap limit holds from the last sample before the
+    # window to the first one after it
+    v, out = verdict(tmp_path, hedit=lambda i, t, r: r.update(_drop=1) if GAME_AT - 2 <= i < GAME_AT else None)
+    assert v == "REFUSED" and "host trace: an interval of 3.000 s" in out, out
+    v, out = verdict(tmp_path, hedit=lambda i, t, r: r.update(_drop=1) if GAME_AT + GAME_S <= i < GAME_AT + GAME_S + 2 else None)
+    assert v == "REFUSED" and "host trace: an interval of 3.000 s" in out, out
+    # the negative control: one sample missing at each edge leaves two-second intervals, which pass
+    v, out = verdict(tmp_path, hedit=lambda i, t, r: r.update(_drop=1) if i in (GAME_AT - 1, GAME_AT + GAME_S) else None)
+    assert v == "PASS", out
+
+
+def test_guest_trace_must_cover_an_explicit_window(tmp_path):
+    h = host_trace(str(tmp_path / "h.txt"))
+    part = guest_trace(str(tmp_path / "g.txt"), lambda i, r: r.update(_drop=1) if not GAME_AT <= i < GAME_AT + 20 else None)
+    v, lines = Q.judge(part, h, (T0 + 1000 * (GAME_AT + 1), T0 + 1000 * (GAME_AT + GAME_S - 1)))
+    assert v == "REFUSED" and "guest trace does not cover the window's end: no sample after utc" in "\n".join(lines), lines
+    v, lines = Q.judge(part, h, (T0 + 1000 * (GAME_AT - 5), T0 + 1000 * (GAME_AT + 10)))
+    assert v == "REFUSED" and "guest trace does not cover the window's start: no sample before utc" in "\n".join(lines), lines
+    # the negative control: the same window over the whole trace
+    full = guest_trace(str(tmp_path / "g2.txt"))
+    v, lines = Q.judge(full, h, (T0 + 1000 * (GAME_AT + 1), T0 + 1000 * (GAME_AT + GAME_S - 1)))
+    assert v == "PASS", lines
+
+
+def test_default_window_edges_must_be_observed_within_two_seconds(tmp_path):
+    # ROUNDS's start (then its end) seen only across a four-second gap in the guest trace
+    v, out = verdict(tmp_path, gedit=lambda i, r: r.update(_drop=1) if GAME_AT - 3 <= i < GAME_AT else None)
+    assert v == "REFUSED" and "guest trace: an interval of 4.000 s" in out, out
+    v, out = verdict(tmp_path, gedit=lambda i, r: r.update(_drop=1) if GAME_AT + GAME_S <= i < GAME_AT + GAME_S + 3 else None)
+    assert v == "REFUSED" and "guest trace: an interval of 4.000 s" in out, out
+    v, out = verdict(tmp_path, gedit=lambda i, r: r.update(_drop=1) if i in (GAME_AT - 1, GAME_AT + GAME_S) else None)
+    assert v == "PASS", out
+
+
+def test_guest_utc_must_increase_through_the_window(tmp_path):
+    s = GAME_AT + 7
+    v, out = verdict(tmp_path, gedit=lambda i, r: r.update(utc=T0 + 1000 * (s - 3)) if i == s else None)
+    assert v == "REFUSED" and "guest trace: utc does not increase at %d" % (s + 2) in out, out
+
+
+@pytest.mark.parametrize("head,drop_c,why", [
+    ("QH v1", True, "host header lacks vcpus= (the vCPU threads the capture expects)"),
+    ("QH v1 vcpus=501,502,503,504", True, "host header lacks reserved= (the reserved cores the capture expects)"),
+    ("QH v1 vcpus=501,502,503,504 reserved=-", True, "host header names no reserved cores (reserved=-)"),
+    ("QH v1 vcpus=- reserved=2,3,4,5", False, "host header names no vCPU threads (vcpus=-)"),
+    ("QH v1 vcpus=501,502,503,504 reserved=2,x", False, "host header reserved='2,x' is not a list of distinct numbers"),
+    ("QH v1 vcpus=501,502,503,504 reserved=2,3,4", False, "holds reserved core 5 that the header does not name"),
+])
+def test_host_header_must_name_the_expected_sets(tmp_path, head, drop_c, why):
+    # item 4: the capture's header records the vCPU threads and the reserved cores every group must hold
+    v, out = verdict(tmp_path, head=head, hedit=lambda i, t, r: r.update(_drop=1) if drop_c and t.startswith("c") else None)
+    assert v == "REFUSED" and why in out, out
+
+
+def test_reserved_core_records_removed_refuse(tmp_path):
+    # item 4: every C record removed from a passing trace (the worst reserved-core value would read 0), then one
+    v, out = verdict(tmp_path, hedit=lambda i, t, r: r.update(_drop=1) if t.startswith("c") else None)
+    assert v == "REFUSED" and "the group at utc %d lacks reserved core 2,3,4,5 that the header names" % T0 in out, out
+    s = GAME_AT + 7
+    v, out = verdict(tmp_path, hedit=lambda i, t, r: r.update(_drop=1) if t == "c4" and i == s else None)
+    assert v == "REFUSED" and "the group at utc %d lacks reserved core 4 that" % (T0 + 1000 * s) in out, out
+
+
+def test_vcpu_records_removed_refuse(tmp_path):
+    # a vCPU and its core absent from every group: the trace is consistent with itself, so only the header shows it
+    v, out = verdict(tmp_path, head="QH v1 vcpus=501,502,503,504 reserved=2,3,4",
+                     hedit=lambda i, t, r: r.update(_drop=1) if t in ("504", "c5") else None)
+    assert v == "REFUSED" and "the group at utc %d lacks vCPU 504 that the header names" % T0 in out, out
+
+
+def test_vcpu_affinity_or_core_name_missing_refuses(tmp_path):
+    s = GAME_AT + 7
+    v, out = verdict(tmp_path, hedit=lambda i, t, r: r.update(cpus="NA") if t == "503" and i == s else None)
+    assert v == "REFUSED" and "lacks cpus (the vCPU's affinity)" in out, out
+    v, out = verdict(tmp_path, hedit=lambda i, t, r: r.pop("cpus") if t == "503" and i == s else None)
+    assert v == "REFUSED" and "lacks cpus (the vCPU's affinity)" in out, out
+    v, out = verdict(tmp_path, hedit=lambda i, t, r: r.pop("cpu") if t == "c4" and i == s else None)
+    assert v == "REFUSED" and out.endswith(" lacks cpu"), out
+
+
+def test_host_group_record_twice_or_utc_disagreeing_refuses(tmp_path):
+    # two groups written with one mono would merge, and the second's records would hide the first's
+    s = GAME_AT + 7
+    same = lambda i, t, r: r.update(mono=9000000000 + (s - 1) * 1000000000, utc=T0 + 1000 * (s - 1)) if i == s else None
+    v, out = verdict(tmp_path, hedit=same)
+    assert v == "REFUSED" and "a second V record for 501 in the group at mono" in out, out
+    v, out = verdict(tmp_path, hedit=lambda i, t, r: r.update(utc=r["utc"] + 5) if t == "502" and i == s else None)
+    assert v == "REFUSED" and "differs from the utc %d of its group" % (T0 + 1000 * s) in out, out
+
+
+def test_host_utc_must_increase_with_mono(tmp_path):
+    s = GAME_AT + 7
+    v, out = verdict(tmp_path, hedit=lambda i, t, r: r.update(utc=T0 + 1000 * (s - 2)) if i == s else None)
+    assert v == "REFUSED" and "host trace: utc does not increase with mono at utc %d" % (T0 + 1000 * (s - 2)) in out, out
+
+
+def test_negative_field_refuses(tmp_path):
+    # a negative paging rate would lower a ten-second integral; a negative counter reading has no meaning. Through
+    # the CLI: exit 3 and the field named, while the same trace with the value at zero is judged (exit 0)
+    run = lambda *a: subprocess.run([sys.executable, "-I", "-B", os.path.join(HERE, "ft_quiet.py")] + list(a),
+                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
+    h = host_trace(str(tmp_path / "h.txt"))
+    s = GAME_AT + 7
+    for val, rc in (("-1", 3), ("0", 0)):
+        g = guest_trace(str(tmp_path / "g.txt"), lambda i, r: r.update(prd=val) if i == s else None)
+        p = run(g, h)
+        assert p.returncode == rc, p.stdout
+        assert ("prd='-1' is negative" in p.stdout) == (rc == 3), p.stdout
+    g = guest_trace(str(tmp_path / "g.txt"))
+    for val, rc in ((-1, 3), (0, 0)):
+        h = host_trace(str(tmp_path / "h.txt"), lambda i, t, r: r.update(wait=val) if t == "501" and i == 0 else None)
+        p = run(g, h)
+        assert p.returncode == rc, p.stdout
+        assert ("wait='-1' is negative" in p.stdout) == (rc == 3), p.stdout
+
+
+def test_unknown_record_kinds_refuse(tmp_path):
+    g = guest_trace(str(tmp_path / "g.txt"))
+    h = host_trace(str(tmp_path / "h.txt"))
+    gl = open(g).read().split("\n")
+    gl[1 + GAME_AT + 7] = "g" + gl[1 + GAME_AT + 7][1:]            # a G line inside the window, mis-kinded
+    open(str(tmp_path / "g2.txt"), "w").write("\n".join(gl))
+    v, lines = Q.judge(str(tmp_path / "g2.txt"), h)
+    assert v == "REFUSED" and "is not a G record: 'g utc=" in "\n".join(lines), lines
+    hl = open(h).read().split("\n")
+    k = [j for j, ln in enumerate(hl) if ln.startswith("C utc=%d " % (T0 + 1000 * (GAME_AT + 7)))][0]
+    hl[k] = "c" + hl[k][1:]
+    open(str(tmp_path / "h2.txt"), "w").write("\n".join(hl))
+    v, lines = Q.judge(g, str(tmp_path / "h2.txt"))
+    assert v == "REFUSED" and "is not a V, C or X record: 'c utc=" in "\n".join(lines), lines
+
+
+def test_busy_counter_backwards_refuses(tmp_path):
+    s = GAME_AT + 7
+    v, out = verdict(tmp_path, hedit=lambda i, t, r: r.update(busy=r["busy"] - 1000000000) if t == "c3" and i >= s else None)
+    assert v == "REFUSED" and "the busy counter of reserved core 3 goes backwards at utc %d" % (T0 + 1000 * s) in out, out
+
+
+def test_frozen_busy_counter_refuses(tmp_path):
+    # every reserved core's busy frozen: d busy - d run reads below zero, which is a quiet value
+    v, out = verdict(tmp_path, hedit=lambda i, t, r: r.update(busy=0) if t.startswith("c") else None)
+    assert v == "REFUSED" and "the busy counter of reserved core 2 does not advance at utc" in out, out
+    assert "pinned to it ran 0.900 core (a frozen counter)" in out, out
+
+    # the negative control: a core whose vCPU ran 0.01 core may show no busy tick in an interval
+    def idle5(i, t, r):
+        if t == "504":
+            r["run"] = i * 10000000
+        if t == "c5":
+            r["busy"] = 0
+    v, out = verdict(tmp_path, hedit=idle5)
+    assert v == "PASS", out
+
+
+def test_fixture_must_last_ten_seconds(tmp_path):
+    # item 5: a one-second fixture (two samples with rising runtime and 20 percent wait, then quiet intervals)
+    v, out = verdict(tmp_path, fixture=(10, 11))
+    assert v == "REFUSED" and "the contention fixture lasted 1.0 s (utc %d to %d): it must last ten seconds" \
+        % (T0 + 10000, T0 + 11000) in out, out
+    v, out = verdict(tmp_path, fixture=(10, 19))
+    assert v == "REFUSED" and "the contention fixture lasted 9.0 s" in out, out
+    v, out = verdict(tmp_path, fixture=(10, 20))     # the negative control: ten seconds
+    assert v == "PASS" and "QUIET contention fixture PASS: 10.0 s, vCPU 501" in out, out
+
+
+def test_fixture_must_be_covered_by_host_samples(tmp_path):
+    # item 5: no host sample at or before the fixture's start, then gaps across its start and its stop
+    v, out = verdict(tmp_path, hedit=lambda i, t, r: r.update(_drop=1) if i <= 10 else None)
+    assert v == "REFUSED" and "host trace does not cover the contention fixture's start: no sample at or before " \
+        "utc %d" % (T0 + 10000) in out, out
+    v, out = verdict(tmp_path, hedit=lambda i, t, r: r.update(_drop=1) if 8 <= i <= 10 else None)
+    assert v == "REFUSED" and "host trace (fixture): an interval of 4.000 s" in out, out
+    v, out = verdict(tmp_path, hedit=lambda i, t, r: r.update(_drop=1) if 20 <= i <= 22 else None)
+    assert v == "REFUSED" and "host trace (fixture): an interval of 4.000 s" in out, out
+    # the negative control: one sample missing at the start leaves a two-second interval
+    v, out = verdict(tmp_path, hedit=lambda i, t, r: r.update(_drop=1) if i == 10 else None)
+    assert v == "PASS", out
