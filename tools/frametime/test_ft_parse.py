@@ -3851,11 +3851,12 @@ def _settled_variant(cp, gi, gs, f18, force, problems):
             "span_depth_violations=0" % (cp, gi, gs, f18, "replay" if f18 == "A" else "unmeasured", force, problems))
 
 
+# an exception type's name may be a generic type's, with a backtick and its arity (the integrator's addition)
 _ARM_INPUTS = ("sentinel", "sentinel_changed", "sentinel_problems", "clock", "perf_probe", "ic_fixture", "escape",
                "rematch_timeout", "menu_mode", "room", "matchIsRanked", "own_sha", "room_name", "region", "fighters",
-               "peer", "error_NullReferenceException")
+               "peer", "error_NullReferenceException", "error_KeyNotFoundException`1")
 _MENU_INPUTS = ("sentinel", "sentinel_changed", "sentinel_problems", "clock", "perf_probe", "ic_fixture", "in_room",
-                "game_started", "error_NullReferenceException")
+                "game_started", "error_NullReferenceException", "error_KeyNotFoundException`1")
 # ruling R6-A3.11.152, K-D (the class of G2 and G3): every emit site of plugin/Ft*.cs (and Plugin.cs's attach warning)
 # whose expression appends a free string operand or a conditional suffix (a), or prints an int or long that starts at a
 # fallback value and is set inside a try (b): (site, a fragment of its statement in the source, one sample payload per
@@ -3875,12 +3876,13 @@ FORM_VARIANTS = (
     ("FtA3.cs:379", '" failed: no calibration"', ("cal i=7 why=game3 kind=a3 k=row1 failed: no calibration",)),
     ("FtA3.cs:397", '" failed: " + ex.GetType().Name + ": " + ex.Message',
      ("cal i=7 why=game3 kind=a3 k=row1 failed: InvalidOperationException: a b",
-      "cal i=7 why=game3 kind=a3 k=row1 failed: InvalidOperationException: ")),
+      "cal i=7 why=game3 kind=a3 k=row1 failed: InvalidOperationException: ",
+      "cal i=7 why=game3 kind=a3 k=row1 failed: KeyNotFoundException`1: a")),
     ("FtA3.cs:400", '" kind=a3 k=" + Names[k] + " n=" + _calN[k]',
      ("cal i=7 why=game3 kind=a3 k=row1 n=100 u=1,2 p=3,4", "cal i=7 why=game3 kind=a3 k=row1 n=100 u= p=")),
     ("FtAlloc.cs:79", '"[FRAME-TIME] alloc_init why=" + Why',
      tuple("alloc_init why=" + w for w in ("not_init", "no_module", "no_path", "sha", "code", "ok",
-                                           "failed:DllNotFoundException"))),
+                                           "failed:DllNotFoundException", "failed:KeyNotFoundException`1"))),
     ("FtAlloc.cs:156", '"[FRAME-TIME] alloc pin=" + (Ok ? "ok" : "differs")',
      ("alloc pin=ok planted=1048600/1048576 empty=0", "alloc pin=differs planted=NA/1048576 empty=NA")),
     ("FtArm.cs:52", '(PhotonNetwork.InRoom ? " in-room" : " pre-join")',
@@ -3888,15 +3890,20 @@ FORM_VARIANTS = (
     ("FtArm.cs:54", '"[FRAME-TIME] ft_dll staging failed: " + ex.Message',
      ("ft_dll staging failed: a b", "ft_dll staging failed: ")),
     ("FtArm.cs:117", '" cloud_region=" + (PhotonNetwork.CloudRegion ?? "")',
-     ("room name=FT-1 region=us cloud_region=us/*", "room name=FT-1 region= cloud_region=")),
+     ("room name=FT-1 region=us cloud_region=us/*", "room name=FT-1 region=us cloud_region=us",
+      "room name=FT-1 region= cloud_region=")),
     ("FtArm.cs:148", '"[FRAME-TIME] ended why=complete pt=" + FtSchedule.Label()', ("ended why=complete pt=16.3.2",)),
     ("FtArm.cs:149", '"[FRAME-TIME] disarmed input=" + why + " pt="',
      tuple("disarmed input=%s pt=4.1.2" % w for w in _ARM_INPUTS)),
     ("FtArm.cs:152", '"[FRAME-TIME] armed room=" + PhotonNetwork.CurrentRoom.Name',
      ("armed room=FT-1 region=us", "armed room=FT-1 region=")),
     ("FtArm.cs:154", '"[FRAME-TIME] not armed input=" + why', tuple("not armed input=" + w for w in _ARM_INPUTS)),
-    ("FtArm.cs:216", '" (no matching " + DLL_PROP + ")"', ("peer none (no matching ft_dll)",)),
-    ("FtArm.cs:220", '"[FRAME-TIME] peer " + ok', ("peer ft_dll=0a1b",)),
+    # the integrator's addition (P5's sweep): UnknownPeer (FtArm.cs:58-73) gives an actor number or its fallbacks none
+    # and null; the known list is ','-joined (one actor while fighters == 2 is checked first)
+    ("FtArm.cs:216", '"unknown actor=" + unknown',
+     tuple("peer unknown actor=%s (no matching ft_dll)" % a for a in ("3", "none", "null"))),
+    ("FtArm.cs:220", '"known actor=" + known + " " + DLL_PROP + "=" + OwnDll()',
+     ("peer known actor=2 ft_dll=0a1b2c3d", "peer known actor=2,3 ft_dll=0a1b2c3d")),
     ("FtAttach.cs:60", '(missing.Count == 0 ? "none" : string.Join(",", missing.ToArray()))',
      ("attach n=2 of=2 missing=none names=FtA:1/1,FtB_C:2/2", "attach n=1 of=2 missing=FtB_C names=FtA:1/1,FtB_C:0/0")),
     ("Plugin.cs:1504", '"[FRAME-TIME] attach report failed: " + ex.Message',
@@ -3934,7 +3941,8 @@ FORM_VARIANTS = (
     ("FtCensus.cs:70", '.Append(" shape=").Append(ShapeOf[e])',
      ("census g=3 entry=HE-p1:PhotonNetwork.ExecuteRpc comp=hit shape=HE_p1 on=1 guarded=0 outside=0",)),
     ("FtCensus.cs:78", '"[FRAME-TIME] spans g="', ("spans g=3 comp=hit", "spans g=3 comp=hit live.in.gated=10/2 over.out.writer=5/1")),
-    ("FtCensus.cs:166", '" wrapped=" + wrapped + why', tuple(line for line, _ in CENSUS_VARIANTS)),
+    ("FtCensus.cs:166", '" wrapped=" + wrapped + why',
+     tuple(line for line, _ in CENSUS_VARIANTS) + ("scope census entries=40 wrapped=40 failed=KeyNotFoundException`1",)),
     ("FtClock.cs:128", '"[FRAME-TIME] clock refused: player-loop phase missing (EarlyUpdate " + a',
      ("clock refused: player-loop phase missing (EarlyUpdate True, PreLateUpdate False, Update True)",)),
     ("FtClock.cs:140", '" cycles=" + (probe != 0 ? 1 : 0)',
@@ -3983,16 +3991,20 @@ FORM_VARIANTS = (
      ("rematch answer failed: a b", "rematch answer failed: ")),
     ("FtReplay.cs:45", '" ticks=" + ticks + " result=" + result',
      tuple("answer_replay g=3 ticks=%d result=%s" % (t, w) for t, w in
-           ((90, "settled"), (90, "kept"), (0, "not_running"), (0, "enqueue_failed"), (0, "error_IOException")))),
+           ((90, "settled"), (90, "kept"), (0, "not_running"), (0, "enqueue_failed"), (0, "error_IOException"),
+            (0, "error_KeyNotFoundException`1")))),
     ("FtReplay.cs:56", '" ticks=0 result=" + result',
      tuple("answer_replay g=3 ticks=0 result=skipped_" + w for w in ("live", "settle", "next_game", "quit", "absent"))),
+    # the ruling of 12 Nov (08:30Z): a name not of the lane's form reaches the parser as the export's '(not-exported)'
     ("FtRoomGate.cs:87", '" name=" + shown + " n=" + n',
-     ("room call refused op=JoinRoom name=FT-1 n=1", "room call refused op=CreateRoom name=(none) n=2")),
+     ("room call refused op=JoinRoom name=FT-1 n=1", "room call refused op=CreateRoom name=(none) n=2",
+      "room call refused op=JoinRoom name=(empty) n=1", "room call refused op=JoinRoom name=(not-exported) n=3")),
     ("FtRoomGate.cs:109", '(missing.Count == 0 ? "" : " missing="',
      ("FT-GATE patched 6 entry points expected=6 excluded=A.b,C.d",
       "FT-GATE patched 5 entry points expected=6 excluded= missing=E.f")),
     ("FtRoomGate.cs:247", '(cur != null ? cur.Name : "(none)")',
-     ("FT-ROOM joined offline=0 name=FT-1", "FT-ROOM joined offline=1 name=(none)")),
+     ("FT-ROOM joined offline=0 name=FT-1", "FT-ROOM joined offline=1 name=(none)",
+      "FT-ROOM joined offline=1 name=(not-exported)")),
     ("FtRoomGate.cs:250", '"[FRAME-TIME] FT-ROOM read failed: " + ex.Message',
      ("FT-ROOM read failed: a b", "FT-ROOM read failed: ")),
     ("FtRoomGate.cs:255", '"[FRAME-TIME] churn timer frozen room=" + room',
@@ -4014,7 +4026,24 @@ FORM_VARIANTS = (
      ("refusals why=game3 pairs=0", "refusals why=quit pairs=2 route:GET_emoji-sheet=1 load:-=2")),
     ("FtUpload.cs:368", '" why=" + why + " types=" + string.Join(",", TypeNames)',
      tuple("ledger log=%d why=%s types=log,hash,recv,sock" % (1 if w in ("ok", "already") else 0, w)
-           for w in ("ok", "already", "no_disk_listener", "failed:NotSupportedException"))),
+           for w in ("ok", "already", "no_disk_listener", "failed:NotSupportedException",
+                     "failed:KeyNotFoundException`1"))),
+    # the failure lines the other plugin files print with ex.Message (P5's list; any text, or empty)
+    ("GameStateWatcher.cs:5703", '"[FRAME-TIME] game start failed: " + ex.Message',
+     ("game start failed: a b", "game start failed: ")),
+    ("GameStateWatcher.cs:5884", '"[FRAME-TIME] opened line failed: " + ex.Message',
+     ("opened line failed: a b", "opened line failed: ")),
+    ("GameStateWatcher.cs:6084", '"[FRAME-TIME] game over failed: " + ex.Message',
+     ("game over failed: a b", "game over failed: ")),
+    ("GameStateWatcher.cs:7491", '"[FRAME-TIME] game end failed: " + ex.Message',
+     ("game end failed: a b", "game end failed: ")),
+    ("Plugin.cs:556", '"[FRAME-TIME] start failed: " + ex.Message', ("start failed: a b", "start failed: ")),
+    ("Plugin.cs:1494", '"[FRAME-TIME] cal i=-1 why=patches kind=entries failed: " + ex.Message',
+     ("cal i=-1 why=patches kind=entries failed: a b", "cal i=-1 why=patches kind=entries failed: ")),
+    ("Plugin.cs:1497", '"[FRAME-TIME] FT-GATE report failed: " + ex.Message',
+     ("FT-GATE report failed: a b", "FT-GATE report failed: ")),
+    ("Plugin.cs:1500", '"[FRAME-TIME] photon patches report failed: " + ex.Message',
+     ("photon patches report failed: a b", "photon patches report failed: ")),
 )
 # lines in a strict form's family that no emitter prints: each refused as an unknown form (the negative controls)
 FORM_NOT_EMITTED = (
@@ -4045,6 +4074,32 @@ def chk_emitted_variants_are_forms(m):
     for pay in ("cal i=3 kind=fhat failed: ", "cal i=3 kind=disp entries failed: "):
         r = m.parse_line(LOG_PREFIX + "[FRAME-TIME] " + pay)
         assert r["kind"] == "cal" and r.get("failed") == 1, (pay, r)
+
+
+# the ruling of 12 Nov (08:30Z): the export prints a room name not of the lane's form (an ft_ name, '(none)' or
+# '(empty)') as '(not-exported)' on these two lines, every other field intact
+ROOM_NAME_REDACTED = ("FT-ROOM joined offline=1 name=(not-exported)",
+                      "room call refused op=JoinRoom name=(not-exported) n=3")
+
+
+@pytest.mark.parametrize("line", ROOM_NAME_REDACTED)
+def test_room_name_redaction_is_read_and_judged_by_no_rule(line):
+    # the line is a form the parser reads, and no rule reads its name: an FT-ROOM line is no record (_LINE does not
+    # match the hyphen; RAW_FAILURES reads only 'FT-ROOM read failed'), and 'room call refused' is a record of kind
+    # room, which EMITTED_UNREAD names (test_every_emitted_kind_is_read_or_named fails if a rule reads that kind). So
+    # nothing can take '(not-exported)' for the lane's room: sitting V with the line added gives the clean log's
+    # verdict, as it does with the same line naming an ft_ room (the control)
+    full = LOG_PREFIX + "[FRAME-TIME] " + line
+    assert P.unknown_forms(full) == []
+    r = P.parse_line(full)
+    assert (r is None) if line.startswith("FT-ROOM") else (r["kind"] == "room" and "room" in P.EMITTED_UNREAD), r
+    assert not [w for w, _ in P.RAW_FAILURES if w in full]
+    v = _v_text()
+    base = _v(P, v)["why"]
+    for name in ("(not-exported)", "ft_0a1b2c3d"):
+        assert _v(P, v + "\n" + full.replace("(not-exported)", name))["why"] == base, name
+    # the negative control: a line a rule does read (the FT-ROOM failure line) changes the verdict when added
+    assert _v(P, v + "\n" + LOG_PREFIX + "[FRAME-TIME] FT-ROOM read failed: x")["why"] != base
 
 
 def _two_ledgers(text):
