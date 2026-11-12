@@ -391,6 +391,16 @@ def parse_line(line):
             if k in W_LIST_KEYS:
                 rec[k] = [_int(k, x) for x in v.split(",")]
                 continue
+        if kind == "cal" and k in ("u", "p"):
+            # ruling R6-A3.11.154: u= and p= are 20 batch tick counts joined by ',' (FtCalib.cs:193, :265, FtA3.cs:401;
+            # long values, so the writer prints no empty entry). An empty entry, or a value of another form, makes the
+            # line ill-formed: it is refused as written here, never a ValueError where d_up or stamps_estimate split it
+            # (which a guard would show as not computable)
+            if not re.fullmatch(r"-?\d+(?:,-?\d+)*", v):
+                raise Refused("the cal line is not in its form (%s=%s: an entry is empty or not an integer): cal %s"
+                              % (k, v, rest.strip()))
+            rec[k] = v
+            continue
         if k in NA_KEYS.get(kind, ()):
             # NA: cG, the native GC hook is not built (SHARED.md V6); a*, the allocation counter is unavailable (the
             # pin differs); heap, the same counter's heap figure unread

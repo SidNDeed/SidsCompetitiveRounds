@@ -3813,6 +3813,39 @@ def chk_ledger_types_judged_as_written(m):
     assert ln.startswith("VERDICT B1 seat a WITHHELD: ") and (LEDGER_TYPES_BAD % "log,log,hash,recv,sock") in ln, ln
 
 
+CAL_FORM_BAD = "the cal line is not in its form (%s: an entry is empty or not an integer): %s"
+
+
+def chk_cal_lists_refused_as_written(m):
+    # ruling R6-A3.11.154: an empty entry in a cal line's u= or p= (batch tick counts, FtCalib.cs:193, :265, FtA3.cs:401)
+    # makes the line ill-formed: read() refuses the input as written, naming the field and the line, never a ValueError
+    # where d_up or stamps_estimate split it (NOT_COMPUTABLE); so does an entry of another form, on a disp, span or a3
+    # line. The clean log reads (the control)
+    clean = _v_text()
+    assert [r for r in m.read(clean) if r["kind"] == "cal" and r.get("ckind") == "disp" and "u" in r]
+    spoils = (("u", "an empty entry", lambda s: s.replace(",", ",,", 1)),
+              ("p", "an empty entry", lambda s: s.replace(",", ",,", 1)),
+              ("u", "an empty last entry", lambda s: s + ","), ("p", "an empty first entry", lambda s: "," + s),
+              ("p", "another form", lambda s: "x" + s))
+    # FtA3.Calibrate's line (FtA3.cs:400-401), which the sitting fixture does not print, added to it
+    a3 = clean + "\n" + LOG_PREFIX + ("[FRAME-TIME] cal i=2 why=game1 kind=a3 k=CE_p1 n=1000 u=100000,100000 "
+                                      "p=130000,130000")
+    assert m.read(a3)[-1]["u"] == "100000,100000"
+    for ck, text in (("disp", clean), ("span", clean), ("a3", a3)):
+        lines = text.split("\n")
+        at = [j for j, x in enumerate(lines) if (" kind=%s " % ck) in x and " u=" in x and " p=" in x][0]
+        for key, what, f in spoils:
+            mm = re.search(r" %s=(\S+)" % key, lines[at])
+            v = f(mm.group(1))
+            ln = lines[at][:mm.start(1)] + v + lines[at][mm.end(1):]
+            want = CAL_FORM_BAD % ("%s=%s" % (key, v), ln[ln.index("cal i="):])
+            bad = "\n".join(lines[:at] + [ln] + lines[at + 1:])
+            assert _word_refused(lambda: m.parse_line(ln), want), (ck, key, what)
+            assert _word_refused(lambda: m.read(bad), want), (ck, key, what)
+            if ck == "disp" and what == "an empty entry":
+                assert _word_refused(lambda: m.report_on({"a": bad, "b": clean}), want), (ck, key)
+
+
 REFUSALS_FORM_BAD = "the refusals line is not in its form (%s): %s"
 # ruling R6-A3.11.154: refusals lines out of their form, each with what is out of form (FtUpload.cs:54-55 prints a
 # dictionary's pairs, each key once, and their count); the clean sitting line is 'refusals why=quit pairs=0'
@@ -3927,7 +3960,7 @@ FORM_VARIANTS = (
       "cal i=7 why=game3 kind=a3 k=row1 failed: InvalidOperationException: ",
       "cal i=7 why=game3 kind=a3 k=row1 failed: KeyNotFoundException`1: a")),
     ("FtA3.cs:400", '" kind=a3 k=" + Names[k] + " n=" + _calN[k]',
-     ("cal i=7 why=game3 kind=a3 k=row1 n=100 u=1,2 p=3,4", "cal i=7 why=game3 kind=a3 k=row1 n=100 u= p=")),
+     ("cal i=7 why=game3 kind=a3 k=row1 n=100 u=1,2 p=3,4",)),
     ("FtAlloc.cs:79", '"[FRAME-TIME] alloc_init why=" + Why',
      tuple("alloc_init why=" + w for w in ("not_init", "no_module", "no_path", "sha", "code", "ok",
                                            "failed:DllNotFoundException", "failed:KeyNotFoundException`1"))),
@@ -4999,6 +5032,7 @@ B11_CHECKS = ["chk_c2_recovers_3_25", "chk_c3_recovers_3_0375", "chk_c4_recovers
               "chk_ledger_types_judged_as_written",
               # ruling R6-A3.11.154: the refusals line of its form, or refused as written
               "chk_refusals_line_judged_as_written", "chk_gate_excluded_held_to_the_design",
+              "chk_cal_lists_refused_as_written",
               # G3: the census's partial variant
               "chk_census_partial_out_of_range", "chk_emitted_variants_are_forms"]
 

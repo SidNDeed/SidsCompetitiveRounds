@@ -962,6 +962,16 @@ B11_MUTS = [
      'GATE_EXCLUDED_DESIGN = ("JoinLobby", "LoadOrCreateSettings")',
      'GATE_EXCLUDED_DESIGN = ("JoinLobby", "LoadOrCreateSettings", "JoinRoomAsync")',
      ["chk_gate_excluded_held_to_the_design"]),
+    # ruling R6-A3.11.154: an empty entry in cal u= or p= refused as written
+    ("154 cal lists: an empty entry admitted (d_up's ValueError again)",
+     '            if not re.fullmatch(r"-?\\d+(?:,-?\\d+)*", v):\n                raise Refused("the cal line',
+     '            if False:\n                raise Refused("the cal line',
+     ["chk_cal_lists_refused_as_written"]),
+    ("154 cal lists: empty entries dropped before the check",
+     '            if not re.fullmatch(r"-?\\d+(?:,-?\\d+)*", v):\n                raise Refused("the cal line',
+     '            if not re.fullmatch(r"-?\\d+(?:,-?\\d+)*", ",".join(x for x in v.split(",") if x)):\n'
+     '                raise Refused("the cal line',
+     ["chk_cal_lists_refused_as_written"]),
     ("154 refusals: VR6 reads the pairs of a line out of its form",
      '    if bad:\n        return False, bad + (["disarmed: "',
      '    if False:\n        return False, bad + (["disarmed: "',
