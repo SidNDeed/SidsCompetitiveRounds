@@ -8,8 +8,14 @@ if (-not (Test-Path -LiteralPath $seat -PathType Leaf)) { [Console]::Out.WriteLi
 # The exit code. An error that ends frame_time_seat.ps1 sets no exit code, and sitting V's entry as it was on
 # 12 Nov 2026 ended 0 on one. So 1 is set first (it stands when that script sets no code), an error is printed here
 # and ends this entry 1, and the one-pass loop takes a stray break or continue of that script, which would
-# otherwise end this entry too.
+# otherwise end this entry too. A LABELLED break or continue whose label names no loop passes the loop and the catch
+# and would end this entry without its last line (the host process then ends 0): $seatReturned is set once the loop
+# is left normally, $seatFailed in the catch, and the finally prints a SEAT-SCRIPT-ERROR line and ends the process 1
+# when neither is set.
 $global:LASTEXITCODE = 1
-try { do { & $seat -ArmForce ON -TimeoutS 780 } while ($false) }
-catch { [Console]::Out.WriteLine('SEAT-SCRIPT-ERROR: frame_time_seat.ps1 ended by an error: ' + $_.Exception.Message); exit 1 }
+$seatReturned = $false
+$seatFailed = $false
+try { do { & $seat -ArmForce ON -TimeoutS 780 } while ($false); $seatReturned = $true }
+catch { $seatFailed = $true; [Console]::Out.WriteLine('SEAT-SCRIPT-ERROR: frame_time_seat.ps1 ended by an error: ' + $_.Exception.Message); exit 1 }
+finally { if (-not ($seatReturned -or $seatFailed)) { [Console]::Out.WriteLine('SEAT-SCRIPT-ERROR: frame_time_seat.ps1 ended by a control transfer that left the entry'); [Environment]::Exit(1) } }
 exit $LASTEXITCODE

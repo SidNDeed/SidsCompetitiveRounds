@@ -241,8 +241,8 @@ def check_leased(path):
 
 # -CultureGate (ruling R6-A3.11.154) runs the number-format gate alone: what it prints, its exit code and that it
 # creates nothing under the sitting's roots are held by test_ft_seat_export.py (test_culture_gate_switch)
-SEAT_PARAMS = ["SelfTest", "CultureGate", "CfgKindList", "SliceOf", "TimeoutS", "Seed", "F18", "GameRoot", "SeatRoot",
-               "LocalLow", "ArmForce"]
+SEAT_PARAMS = ["SelfTest", "FlowTest", "CultureGate", "CfgKindList", "SliceOf", "TimeoutS", "Seed", "F18", "GameRoot",
+               "SeatRoot", "LocalLow", "ArmForce"]
 
 
 def check_seat(path):
@@ -272,17 +272,21 @@ def check_seat(path):
     return out
 
 
-SEAT_CATCH = ("catch { [Console]::Out.WriteLine('SEAT-SCRIPT-ERROR: frame_time_seat.ps1 ended by an error: ' + "
-              "$_.Exception.Message); exit 1 }")
+SEAT_CATCH = ("catch { $seatFailed = $true; [Console]::Out.WriteLine('SEAT-SCRIPT-ERROR: frame_time_seat.ps1 ended by "
+              "an error: ' + $_.Exception.Message); exit 1 }")
+SEAT_FINALLY = ("finally { if (-not ($seatReturned -or $seatFailed)) { [Console]::Out.WriteLine('SEAT-SCRIPT-ERROR: "
+                "frame_time_seat.ps1 ended by a control transfer that left the entry'); [Environment]::Exit(1) } }")
 
 
 def check_seat_entry(path, own, call):
-    """a seat entry (sitting V's, or the control run's): ASCII, and its code lines are exactly six: the runner taken
+    """a seat entry (sitting V's, or the control run's): ASCII, and its code lines are exactly nine: the runner taken
     from the entry's own folder; a one-line refusal that names the entry, exit 2, when the runner is not beside it;
-    exit code 1 set before the call (it stands when the runner sets none); the call, with exactly the entry's own
-    arguments, alone in a one-pass loop inside a try (the loop takes a stray break or continue of the runner); a
-    catch that prints one SEAT-SCRIPT-ERROR line and ends 1; the code passed on. The entry of 12 Nov 2026 ended 0
-    on a runner that an error had ended: an error sets no exit code."""
+    exit code 1 set before the call (it stands when the runner sets none); the two flags set false; the call, with
+    exactly the entry's own arguments, alone in a one-pass loop inside a try (the loop takes a stray break or
+    continue of the runner), the returned flag set after the loop; a catch that sets the failed flag, prints one
+    SEAT-SCRIPT-ERROR line and ends 1; a finally that, with neither flag set (a labelled break or continue left the
+    entry), prints one SEAT-SCRIPT-ERROR line and ends the process 1; the code passed on. The entry of 12 Nov 2026
+    ended 0 on a runner that an error had ended: an error sets no exit code."""
     with open(path, "rb") as f:
         raw = f.read()
     out = []
@@ -294,14 +298,20 @@ def check_seat_entry(path, own, call):
             "if (-not (Test-Path -LiteralPath $seat -PathType Leaf)) { [Console]::Out.WriteLine(\"REFUSED: "
             "frame_time_seat.ps1 is not beside %s ($seat)\"); exit 2 }" % own,
             "$global:LASTEXITCODE = 1",
-            "try { do { %s } while ($false) }" % call,
+            "$seatReturned = $false",
+            "$seatFailed = $false",
+            "try { do { %s } while ($false); $seatReturned = $true }" % call,
             SEAT_CATCH,
+            SEAT_FINALLY,
             "exit $LASTEXITCODE"]
     what = ["the runner is not taken from the entry's own folder first",
             "no one-line refusal with exit 2, naming the entry, when frame_time_seat.ps1 is absent",
             "exit code 1 is not set before the call",
-            "the call is not %r alone in a one-pass loop inside a try" % call,
-            "the catch does not print one SEAT-SCRIPT-ERROR line and end 1",
+            "the returned flag is not set false before the call",
+            "the failed flag is not set false before the call",
+            "the call is not %r alone in a one-pass loop inside a try, the returned flag set after the loop" % call,
+            "the catch does not set the failed flag, print one SEAT-SCRIPT-ERROR line and end 1",
+            "the finally does not end the process 1 with a SEAT-SCRIPT-ERROR line when neither flag is set",
             "the call's exit code is not passed on last"]
     for i, (w, msg) in enumerate(zip(want, what)):
         if code[i:i + 1] != [w]:
@@ -475,11 +485,18 @@ TOOL_MUTANTS = [
     ("seat_v: the catch ends 0", SEAT_V, check_seat_v, "frame_time_seat_v.ps1",
      "$_.Exception.Message); exit 1 }", "$_.Exception.Message); exit 0 }"),
     ("seat_v: the entry of 12 Nov (the call outside a try)", SEAT_V, check_seat_v, "frame_time_seat_v.ps1",
-     "try { do { & $seat -ArmForce ON } while ($false) }\n" + SEAT_CATCH + "\n", "& $seat -ArmForce ON\n"),
+     "try { do { & $seat -ArmForce ON } while ($false); $seatReturned = $true }\n" + SEAT_CATCH + "\n" + SEAT_FINALLY
+     + "\n", "& $seat -ArmForce ON\n"),
     ("seat_v: no loop around the call", SEAT_V, check_seat_v, "frame_time_seat_v.ps1",
-     "try { do { & $seat -ArmForce ON } while ($false) }", "try { & $seat -ArmForce ON }"),
+     "try { do { & $seat -ArmForce ON } while ($false); $seatReturned = $true }",
+     "try { & $seat -ArmForce ON; $seatReturned = $true }"),
     ("seat_v: a second statement in the try", SEAT_V, check_seat_v, "frame_time_seat_v.ps1",
-     "} while ($false) }", "} while ($false); $global:LASTEXITCODE = 0 }"),
+     "$seatReturned = $true }", "$seatReturned = $true; $global:LASTEXITCODE = 0 }"),
+    ("seat_v: the returned flag set inside the loop", SEAT_V, check_seat_v, "frame_time_seat_v.ps1",
+     "} while ($false); $seatReturned = $true }", "; $seatReturned = $true } while ($false) }"),
+    ("seat_v: no finally", SEAT_V, check_seat_v, "frame_time_seat_v.ps1", SEAT_FINALLY + "\n", ""),
+    ("seat_v: the finally ends 0", SEAT_V, check_seat_v, "frame_time_seat_v.ps1",
+     "[Environment]::Exit(1)", "[Environment]::Exit(0)"),
     ("trial: the call without -TimeoutS", SEAT_TRIAL, check_seat_trial, "frame_time_seat_trial.ps1",
      "& $seat -ArmForce ON -TimeoutS 780 }", "& $seat -ArmForce ON }"),
     ("trial: the sitting's whole wait", SEAT_TRIAL, check_seat_trial, "frame_time_seat_trial.ps1",
@@ -491,7 +508,11 @@ TOOL_MUTANTS = [
     ("trial: the catch ends 0", SEAT_TRIAL, check_seat_trial, "frame_time_seat_trial.ps1",
      "$_.Exception.Message); exit 1 }", "$_.Exception.Message); exit 0 }"),
     ("trial: no loop around the call", SEAT_TRIAL, check_seat_trial, "frame_time_seat_trial.ps1",
-     "try { do { & $seat -ArmForce ON -TimeoutS 780 } while ($false) }", "try { & $seat -ArmForce ON -TimeoutS 780 }"),
+     "try { do { & $seat -ArmForce ON -TimeoutS 780 } while ($false); $seatReturned = $true }",
+     "try { & $seat -ArmForce ON -TimeoutS 780; $seatReturned = $true }"),
+    ("trial: no finally", SEAT_TRIAL, check_seat_trial, "frame_time_seat_trial.ps1", SEAT_FINALLY + "\n", ""),
+    ("trial: the catch does not set the failed flag", SEAT_TRIAL, check_seat_trial, "frame_time_seat_trial.ps1",
+     "catch { $seatFailed = $true; ", "catch { "),
     ("trial: the refusal names the other entry", SEAT_TRIAL, check_seat_trial, "frame_time_seat_trial.ps1",
      "is not beside frame_time_seat_trial.ps1", "is not beside frame_time_seat_v.ps1"),
 ]
