@@ -303,6 +303,9 @@ if [ "$last" = "$FT_TEST_PLUG" ]; then
 fi
 command -p cp "$@"
 '''
+# the head of a failure that says the check's own machinery did not run (a stand-in that did not act): such a failure
+# is no kill of a mutant (test_mutant_fails)
+HARNESS = "harness: "
 
 
 def _digest(path):
@@ -334,14 +337,16 @@ def check_install_fails_after_record(tmp, edits=()):
     """a failure after CURRENT is written, each way (the stand-in cp, first on PATH, acting only on the plugin DLL's
     path): the copy fails, or it leaves other bytes. Each: FAIL, exit 3, no OK line, the FAIL line naming the open
     record ("the install record stays open: run revert"), CURRENT holding the backup folder. Then revert with the real
-    cp: OK, the plugin DLL's sha256 the prior one, CURRENT gone and closed as CURRENT.reverted-<stamp>"""
+    cp: OK, the plugin DLL's sha256 the prior one, CURRENT gone and closed as CURRENT.reverted-<stamp>. The stand-in is
+    written executable (a POSIX seat's shell passes over a file on PATH without that bit and runs the real cp), and each
+    case proves that it acted"""
     f = []
     for how in ("fail", "corrupt"):
         t = Tree(os.path.join(str(tmp), how), edits)
         dll, lanes = t.lanes()
         prior = _digest(t.plug)
         shim = os.path.join(t.tmp, "shim")
-        write(os.path.join(shim, "cp"), CP_SHIM)
+        _exe(os.path.join(shim, "cp"), CP_SHIM)
         env = dict(os.environ, FT_TEST_PLUG=t.tmp + PLUG_TAIL, FT_TEST_CP=how,
                    PATH=shim + os.pathsep + os.environ.get("PATH", ""))
         rc, out, err = t("install", dll, lanes, env=env)
@@ -351,8 +356,12 @@ def check_install_fails_after_record(tmp, edits=()):
         bk = read(t.cur).strip() if os.path.isfile(t.cur) else ""
         if not bk or not os.path.isfile(os.path.join(bk, "CompetitiveRounds.dll")):
             f.append("install %s after CURRENT: CURRENT does not hold the backup folder (%r)" % (how, bk))
-        if how == "corrupt" and _digest(t.plug) == prior:
-            f.append("install corrupt: the stand-in cp did not act (the plugin DLL is the prior one)")
+        # a refused copy leaves the prior DLL and the stand-in's own line on standard error; a corrupting one leaves
+        # the stand-in's bytes
+        acted = (("stand-in cp: refused" in err and _digest(t.plug) == prior) if how == "fail"
+                 else _digest(t.plug) == sha(b"other bytes"))
+        if not acted:
+            f.append(HARNESS + "the stand-in cp did not act in the %s case" % how)
         rc, out, _ = t("revert")
         done = [x for x in os.listdir(t.rec) if x.startswith("CURRENT.reverted-")]
         if rc != 0 or len(lines(out, "FT-VM-REVERT OK restored %s sentinel absent" % prior)) != 1:
@@ -661,6 +670,8 @@ def test_mutant_fails(tmp_path, name, check, base, old, new):
     fails = check(tmp_path, edits=[(old, new)])
     print("MUTANT %s: %s fails: %s" % (name, check.__name__, fails))
     assert fails, "mutant %s: %s passed" % (name, check.__name__)
+    assert not [x for x in fails if x.startswith(HARNESS)], \
+        "mutant %s: %s did not run: %s" % (name, check.__name__, fails)
 
 
 def test_mutant_anchors_hold():

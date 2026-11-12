@@ -238,8 +238,10 @@ def check_leased(path):
     return out
 
 
-SEAT_PARAMS = ["SelfTest", "CfgKindList", "SliceOf", "TimeoutS", "Seed", "F18", "GameRoot", "SeatRoot", "LocalLow",
-               "ArmForce"]
+# -CultureGate (ruling R6-A3.11.154) runs the number-format gate alone: what it prints, its exit code and that it
+# creates nothing under the sitting's roots are held by test_ft_seat_export.py (test_culture_gate_switch)
+SEAT_PARAMS = ["SelfTest", "CultureGate", "CfgKindList", "SliceOf", "TimeoutS", "Seed", "F18", "GameRoot", "SeatRoot",
+               "LocalLow", "ArmForce"]
 
 
 def check_seat(path):
