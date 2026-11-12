@@ -1582,6 +1582,23 @@ def test_vr6_build_fails_on_a_disarm():
     assert not ok and dis == ["fighters at 3.2.1"], why
 
 
+def test_self_drive_disarmed_trace_is_read_and_no_disarm_record():
+    # ruling R6-A3.11.154, item 6: FtDrive's trace 'self-drive disarmed: input=<FtArm.Why>' (FtDrive.cs:64), "not
+    # evaluated" included, is a form the parser reads (FORM_VARIANTS) and no record: _LINE needs a word and a space
+    # after the tag, and the hyphen breaks it (EMITTED_UNREAD["self"]). disarms() reads FtArm's own line, 'disarmed
+    # input=<why> pt=<label>' (FtArm.cs:149), which the same Evaluate call prints whenever the armed sitting disarms
+    # (Armed and Why are set together, FtArm.cs:155-156): that line is the disarm VR6 fails on. The trace alone fails
+    # nothing; a seat that never armed writes no settled line, which complete() requires per game
+    for why in ("not evaluated", "fighters"):
+        ln = "[FRAME-TIME] self-drive disarmed: input=" + why
+        assert P.parse_line(LOG_PREFIX + ln) is None and P.unknown_forms(LOG_PREFIX + ln) == [], why
+        ok, bad, _, dis = P.vr6_build(P.read(_vr6_log([ln])))
+        assert ok and dis == [] and P.disarms(P.read(_vr6_log([ln]))) == [], (why, bad)
+    both = ["[FRAME-TIME] disarmed input=fighters pt=3.2.1", "[FRAME-TIME] self-drive disarmed: input=fighters"]
+    ok, bad, _, dis = P.vr6_build(P.read(_vr6_log(both)))
+    assert not ok and dis == ["fighters at 3.2.1"], bad
+
+
 def test_vr6_build_refuses_without_a_refusals_line():
     with pytest.raises(P.Refused):
         P.vr6_build(P.read("[Info   :CompetitiveRounds] [FRAME-TIME] refused what=queue route=e n=1"))
@@ -4030,6 +4047,12 @@ FORM_VARIANTS = (
      ("clock installed freq=10000000 hires=1 cycles=1", "clock installed freq=10000000 hires=0 cycles=0")),
     ("FtDrive.cs:52", 'Plugin.Log.LogInfo("[FRAME-TIME] self-drive " + what)',
      ("self-drive spawn waiting why=peer", "self-drive spawn waiting why=actors actors=1", "self-drive ")),
+    # ruling R6-A3.11.154: the drive's own armed and disarmed trace, through Log (:52); its input= is FtArm.Why, whose
+    # first value is "not evaluated" (FtArm.cs:75)
+    ("FtDrive.cs:64", '"input=" + FtArm.Why',
+     ("self-drive armed: inputs are automated", "self-drive disarmed: escape", "self-drive disarmed: sitting complete",
+      "self-drive disarmed: rematch timeout", "self-drive disarmed: input=fighters",
+      "self-drive disarmed: input=not evaluated")),
     ("FtDrive.cs:87", '"[FRAME-TIME] self-drive join room=" + room', ("self-drive join room=FT-1 region=us",)),
     ("FtDrive.cs:90", '"[FRAME-TIME] self-drive join failed: " + ex.Message',
      ("self-drive join failed: a b", "self-drive join failed: ")),
