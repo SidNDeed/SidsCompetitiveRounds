@@ -569,8 +569,8 @@ def _log(carry_us=0.0, cost_us=80.0, games=17, seed=7, heavy_live=0, hash_at=(10
                 L.append("[FRAME-TIME] a3drain g=%d k=%s starts=%d nonempty=%d faults=0"
                          % (g, k, st, 1 if a3_dirty == (g, k) else 0))
         if "game" in refusals_why:
-            L.append("[FRAME-TIME] refusals why=%s pairs=3 queue:e=3 sent:GET_h/api/v1/mod-version=1 "
-             "dispatched:GET_h/api/v1/mod-version=1" % ("game%d" % g) + routes)
+            L.append("[FRAME-TIME] refusals why=%s pairs=%d queue:e=3 sent:GET_h/api/v1/mod-version=1 "
+             "dispatched:GET_h/api/v1/mod-version=1" % ("game%d" % g, 3 + len(routes.split())) + routes)
         if g not in drop_flushed:
             L.append("[FRAME-TIME] flushed g=%d why=%s" % (g, "next_game" if g < games - 1 else "settle"))
         if g not in drop_counters:
@@ -589,8 +589,8 @@ def _log(carry_us=0.0, cost_us=80.0, games=17, seed=7, heavy_live=0, hash_at=(10
     if complete:
         L.append("[FRAME-TIME] sitting complete g=%d" % (games - 1))
     if "quit" in refusals_why:
-        L.append("[FRAME-TIME] refusals why=%s pairs=3 queue:e=3 sent:GET_h/api/v1/mod-version=1 "
-             "dispatched:GET_h/api/v1/mod-version=1" % "quit" + routes)
+        L.append("[FRAME-TIME] refusals why=%s pairs=%d queue:e=3 sent:GET_h/api/v1/mod-version=1 "
+             "dispatched:GET_h/api/v1/mod-version=1" % ("quit", 3 + len(routes.split())) + routes)
     # the integrator's marker rule (11 Nov): a measurement input carries the FrameTime build marker exactly once
     return "\n".join("[Info   :CompetitiveRounds] " + x for x in ["[FRAME-TIME] " + P.MARK_FT] + L)
 
@@ -1569,7 +1569,7 @@ def test_vr6_routes_fail_a_route_refused_and_sent():
 def test_vr6_counts_dispatches_independently():
     # round-1 MEDIUM (FtRoute.cs:97): a refused route the transport still dispatched, or an allowed route dispatched
     # more often than the classifier counted it sent, fails VR6
-    log = _vr6_log(["[FRAME-TIME] refusals why=quit pairs=3 route:GET_h/api/v1/x=2 dispatched:GET_h/api/v1/x=2"])
+    log = _vr6_log(["[FRAME-TIME] refusals why=quit pairs=2 route:GET_h/api/v1/x=2 dispatched:GET_h/api/v1/x=2"])
     ok, why, _, _ = P.vr6_build(P.read(log))
     assert not ok and "route GET_h/api/v1/x dispatched 2 times, sent 0" in why, why
     log = _vr6_log(["[FRAME-TIME] refusals why=quit pairs=2 sent:GET_h/api/v1/y=1 dispatched:GET_h/api/v1/y=3"])
@@ -3809,6 +3809,50 @@ def chk_ledger_types_judged_as_written(m):
     assert ln.startswith("VERDICT B1 seat a WITHHELD: ") and (LEDGER_TYPES_BAD % "log,log,hash,recv,sock") in ln, ln
 
 
+REFUSALS_FORM_BAD = "the refusals line is not in its form (%s): %s"
+# ruling R6-A3.11.154: refusals lines out of their form, each with what is out of form (FtUpload.cs:54-55 prints a
+# dictionary's pairs, each key once, and their count); the clean sitting line is 'refusals why=quit pairs=0'
+REFUSALS_SPOILS = (
+    ("refusals why=quit pairs=2 route:GET_x=1 route:GET_x=2", "route:GET_x printed twice"),
+    ("refusals why=quit pairs=0 why=game3", "why printed twice"),
+    ("refusals why=quit pairs=1 pairs=1 queue:e=1", "pairs printed twice"),
+    ("refusals why=quit pairs=1 queue:e=1 sent:GET_y=1", "pairs=1 for 2 pairs listed"),
+    ("refusals why=quit pairs=3 queue:e=1", "pairs=3 for 1 pairs listed"),
+    ("refusals why=quit queue:e=1", "no pairs= count"),
+    ("refusals why=quit pairs=1 queue:e=1 junk", "junk is not <key>=<value>"),
+)
+
+
+def chk_refusals_line_judged_as_written(m):
+    # ruling R6-A3.11.154: a refusals line is of its form only when no key repeats and pairs= is the number of pairs
+    # listed; otherwise VR6's build half refuses it as written (never last-value-wins, never a silent count), naming
+    # what is out of form and the line, and reads no pair of the sitting. On the single-log path (vr6_build, a seat's
+    # sitting V, report()) and on the combining path (B1 WITHHELD for that seat). The clean lines read (the controls)
+    clean, c = _v_text(), _c_text()
+    ok, why, pairs, _ = m.vr6_build(m.read(clean))
+    assert ok and why == [] and pairs == {}, why
+    for ln, what in REFUSALS_SPOILS:
+        t = _sub1(clean, "[FRAME-TIME] refusals why=quit pairs=0", "[FRAME-TIME] " + ln)
+        want = REFUSALS_FORM_BAD % (what, ln)
+        assert m.vr6_build(m.read(t)) == (False, [want], {}, []), (ln, m.vr6_build(m.read(t)))
+        assert ("VR6 build: " + want) in _v(m, t)["why"], (ln, _v(m, t)["why"])
+    # an earlier game's line is judged too, not only the one VR6 reads its pairs from
+    lg = _log()
+    early = _sub1(lg, "[FRAME-TIME] refusals why=game3 pairs=3 ", "[FRAME-TIME] refusals why=game3 pairs=4 ")
+    out = m.report(early, peer=_peer_text())
+    assert "VR6 build half FAIL: the refusals line is not in its form (pairs=4 for 3 pairs listed): refusals " \
+           "why=game3 pairs=4 " in out and "VERDICT B1 INVALID: VR6 failed" in out, out
+    assert "VR6 build half PASS" in m.report(lg, peer=_peer_text())
+    rep = _sub1(clean, "[FRAME-TIME] refusals why=quit pairs=0", "[FRAME-TIME] " + REFUSALS_SPOILS[0][0])
+    ln = _verdict(_comb(m, rep, clean, c, c), "a")
+    assert ln.startswith("VERDICT B1 seat a WITHHELD: ") and \
+        (REFUSALS_FORM_BAD % (REFUSALS_SPOILS[0][1], REFUSALS_SPOILS[0][0])) in ln, ln
+    cnt = _sub1(clean, "[FRAME-TIME] refusals why=quit pairs=0", "[FRAME-TIME] " + REFUSALS_SPOILS[3][0])
+    ln = _verdict(_comb(m, clean, cnt, c, c), "b")
+    assert ln.startswith("VERDICT B1 seat b WITHHELD: ") and \
+        (REFUSALS_FORM_BAD % (REFUSALS_SPOILS[3][1], REFUSALS_SPOILS[3][0])) in ln, ln
+
+
 CENSUS_PARTIAL = "scope census entries=40 wrapped=40 partial=1"
 # ruling R6-A3.11.152, G3: (the census line FtCensus prints, R-SCOPE's census reading): its three emitted variants
 CENSUS_VARIANTS = (
@@ -4903,6 +4947,8 @@ B11_CHECKS = ["chk_c2_recovers_3_25", "chk_c3_recovers_3_0375", "chk_c4_recovers
               "chk_cal_entries_failure_form", "chk_malformed_lines_are_refusals", "chk_reference_a3_form",
               # the confirming round's G1 (ruling R6-A3.11.152): emitted lists judged as written
               "chk_ledger_types_judged_as_written",
+              # ruling R6-A3.11.154: the refusals line of its form, or refused as written
+              "chk_refusals_line_judged_as_written",
               # G3: the census's partial variant
               "chk_census_partial_out_of_range", "chk_emitted_variants_are_forms"]
 

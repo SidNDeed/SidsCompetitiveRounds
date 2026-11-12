@@ -352,15 +352,32 @@ def parse_line(line):
         if kind == parent and rec["head"].startswith(prefix):
             kind = rec["kind"] = sub
     if kind == "refusals":
-        # what:route=count tokens; route names hold ':' and '/', so split each token at its last '='
-        kv = {}
+        # what:route=count tokens; route names hold ':' and '/', so split each token at its last '='. Ruling
+        # R6-A3.11.154: the line is of its form only when every token is <key>=<value>, no key repeats and pairs= is
+        # the number of pair tokens printed (FtUpload.cs:54-55 prints a dictionary's pairs and its count). A line out
+        # of form keeps its first value of a repeated key and names what is out of form in "form"; vr6_build refuses
+        # it as written, so no value of it is read (never last-value-wins, never a silent count)
+        kv, seen, form, listed = {}, set(), [], 0
         for tok in rest.split():
             k, _, v = tok.rpartition("=")
+            if not k:
+                form.append("%s is not <key>=<value>" % tok)
+                continue
+            listed += k not in ("why", "pairs")
+            if k in seen:
+                if ("%s printed twice" % k) not in form:
+                    form.append("%s printed twice" % k)
+                continue
+            seen.add(k)
             if k in ("why", "pairs"):
                 rec[k] = v if k == "why" else _int(k, v)
-            elif k:
+            else:
                 kv[k] = _int(k, v)
-        rec["pairs_kv"] = kv
+        if "pairs" not in rec:
+            form.append("no pairs= count")
+        elif rec["pairs"] != listed:
+            form.append("pairs=%d for %d pairs listed" % (rec["pairs"], listed))
+        rec["pairs_kv"], rec["form"], rec["written"] = kv, form, "refusals " + rest.strip()
         return rec
     seen = {}
     for k, v in _KV.findall(rest):
@@ -691,7 +708,7 @@ RECORDS = {
                      "ATTACH by its presence",
     "a3zero": "proof_records(): one per measured game for a zero row proved by probe:a3zero (none today)",
     "plant": "e_c(): exactly one",
-    "refusals": "records_missing(): one after the last game; vr6_build reads it",
+    "refusals": "records_missing(): one after the last game; vr6_build reads it and refuses any out of its form",
     "sitting": "complete(): exactly one for the last game",
     "menu": "menu_check(): one per segment 1..of, and no menu point line without one (menu runs only)",
     "menu_done": "menu_check(): exactly one, its cycles each with a menu fhat calibration, one settled line after it",
@@ -1414,7 +1431,9 @@ def disarms(recs):
 def vr6_build(recs):
     """VR6's build half (FORMAT-M-PLAN.md V2 part b): the latest refusals line (why=quit when present, else the
     last game over) gives every refused what:route pair's count and every allowed route's send count; a route that
-    was both refused and sent fails, and any disarmed line makes the sitting INVALID. The file listings before and
+    was both refused and sent fails, and any disarmed line makes the sitting INVALID. A refusals line out of its form
+    (a key printed twice, a token not key=value, pairs= not the pairs listed) fails as written and no pair is read
+    (ruling R6-A3.11.154). The file listings before and
     after are the runner's half. The dispatched and sent counts come from one patch class, FtRoute_SendPatch: when it
     never attached both stay at zero and agree, so this comparison rests on the validity set's ATTACH guard, which
     requires that class's entry fully attached (ruling R6-A3.11.151 (2) class A, F2). Returns (ok, reasons, {pair:
@@ -1423,10 +1442,15 @@ def vr6_build(recs):
     dis = disarms(recs)
     if not lines:
         raise Refused("VR6 needs a refusals line (game over or quit)")
+    # ruling R6-A3.11.154: every refusals line is judged as written; one out of its form (parse_line's "form") is
+    # refused, naming what is out of form and the line, and no count of the sitting's lines is read
+    bad = ["the refusals line is not in its form (%s): %s" % ("; ".join(r["form"]), r["written"])
+           for r in lines if r["form"]]
+    if bad:
+        return False, bad + (["disarmed: " + "; ".join(dis)] if dis else []), {}, dis
     quit_ = [r for r in lines if r.get("why") == "quit"]
     last = (quit_ or lines)[-1]
     pairs = last["pairs_kv"]
-    bad = []
     refused_routes = set(k.split(":", 1)[1] for k in pairs if k.startswith("route:"))
     sent_routes = set(k.split(":", 1)[1] for k in pairs if k.startswith("sent:"))
     for r in sorted(refused_routes & sent_routes):
