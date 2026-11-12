@@ -15,17 +15,25 @@ namespace CompetitiveRounds
     /// their own CPU time, used for the census, absorption (VR9) and placement (B3), never as
     /// the B1 estimate.
     ///
-    /// The partition (method-v54.md (a), ruling R6-A3.11.136 (2)): every Open and Close also moves the main
-    /// thread's executed cycles (FtClock.Cycles) between five exclusive classes, C = G + W + R + S + E. Each scope's
-    /// class is fixed when it opens (Gated is S, switched; Upkeep and Replay are R, retained; Writer is W). A nested
-    /// scope suspends its parent: the cycles between two transitions go to the class on top of the stack. Ownership
-    /// precedence is GC, writer, remaining collector, outside: inside a writer scope every nested scope stays W, and
-    /// main-thread GC (FtClock.GcCycles, when the hook is live) is taken out of whichever class it ran in and counted
-    /// as G by FtClock. E is the class with no scope open. FtClock.OnStart cuts the open class at every frame boundary
-    /// (Cut), so a frame's class sums plus its G equal its C exactly.
-    /// Main thread only: the depth counter and the class stack are one thread's, so a call from any other thread opens
-    /// nothing, leaves both alone and is counted in OffThread (the offthread line).
-    /// Use: bool s = FtSpan.Open(FtSpan.Combat, FtSpan.Gated); try { body } finally { FtSpan.Close(s); }</summary>
+    /// The partition (method-v54.md (a), ruling R6-A3.11.136 (2); V6, rulings R6-A3.11.146 and .147): every scope's
+    /// open and close also moves the main thread's executed cycles (FtClock.Cycles) between seven exclusive classes,
+    /// C = G + W + R + S + E + P + X. A component scope's class is fixed when it opens (Gated is S, switched; Upkeep and
+    /// Replay are R, retained; Writer is W). P is a receive handler of the peer's collector traffic (FtLedger's recv
+    /// scopes, EnterP). X is Photon's own main-thread work, the four PhotonPeer entries FtPhoton patches (EnterX).
+    /// Inside X, each LoadBalancingClient listener callback (EnterListener) returns the class to E, so a game handler
+    /// runs in E and a collector handler opens its own class inside it; a listener callback anywhere else keeps the
+    /// class it found. A nested scope suspends its parent: the cycles between two transitions go to the class on top
+    /// of the class stack. Ownership precedence is GC, writer, the rest: inside a writer scope every nested scope stays
+    /// W, and main-thread GC (FtClock.GcCycles, when the hook is live) is taken out of whichever class it ran in and
+    /// counted as G by FtClock. E is the class with no scope open. FtClock.OnStart cuts the open class at every frame
+    /// boundary (Cut), so a frame's class sums plus its G equal its C exactly.
+    /// The allocation counter (FtAlloc) is read at every transition and every cut, beside the cycle counter, and its
+    /// bytes follow the cycles: AccA holds the bytes allocated while each class ran on the main thread.
+    /// Two depths: the class stack (every scope, _sd) and the component spans (Open/Close only, _depth), so a component
+    /// span inside an X, E or P scope is still an outermost span for the tick ledger.
+    /// Main thread only: the depth counters and the class stack are one thread's, so a call from any other thread opens
+    /// nothing, leaves both alone and is counted (OffThread for component scopes, PhotonOffMain for X and listener
+    /// scopes). Use: bool s = FtSpan.Open(FtSpan.Combat, FtSpan.Gated); try { body } finally { FtSpan.Close(s); }</summary>
     internal static class FtSpan
     {
         // Components, in the census order; Cal is the calibration's own slot, never reported as a component.
@@ -44,9 +52,9 @@ namespace CompetitiveRounds
         internal const int Kinds = 4;
         internal static readonly string[] KindNames = { "gated", "upkeep", "replay", "writer" };
 
-        // The partition's classes (method-v54.md:11). G is never a scope's class: FtClock counts it.
-        internal const int ClsG = 0, ClsW = 1, ClsR = 2, ClsS = 3, ClsE = 4;
-        internal const int Classes = 5;
+        // The partition's classes (method-v54.md:11; V6 adds P and X). G is never a scope's class: FtClock counts it.
+        internal const int ClsG = 0, ClsW = 1, ClsR = 2, ClsS = 3, ClsE = 4, ClsP = 5, ClsX = 6;
+        internal const int Classes = 7;
         private static readonly int[] ClassOfKind = { ClsS, ClsR, ClsR, ClsW };
 
         internal const int Phases = 2; // 0 inside the script phase, 1 outside
@@ -60,23 +68,34 @@ namespace CompetitiveRounds
         /// ClsG unused). Never reset: FtClock takes per-frame differences.</summary>
         internal static readonly long[] Acc = new long[Classes];
 
+        /// <summary>Bytes allocated per class since install, while that class ran on the main thread (FtAlloc; index
+        /// ClsG unused). Never reset.</summary>
+        internal static readonly long[] AccA = new long[Classes];
+
         /// <summary>Set by FtClock.Install (Plugin.Awake, the main thread) before anything else.</summary>
         internal static int MainThread = -1;
         internal static long OffThread;
+        internal static long PhotonOffMain;   // X and listener scopes entered off the main thread (no class moves)
         internal static long ClassOverflow;   // scopes past the class stack's depth (their class is not pushed)
         internal static long GcReadFailures;  // a GC hook read that threw inside a frame
 
         private const int StackCap = 64;
         private static readonly int[] _prev = new int[StackCap];
         private static int _cls = ClsE;
+        private static int _sd;               // the class stack's depth
         private static ulong _k;
         private static long _g;
         private static bool _gok;
+        private static long _a;
+        private static bool _aok;
 
-        private static int _depth;
+        private static int _depth;            // the component spans' depth
         private static int _component;
         private static int _kind;
         private static long _t0;
+
+        /// <summary>K3's mutant (k_mutant=k3): a listener callback inside X keeps X.</summary>
+        internal static bool MutantK3;
 
         internal static int Index(int component, int moment, int phase, int kind)
         {
@@ -86,20 +105,34 @@ namespace CompetitiveRounds
         /// <summary>The class now running on the main thread (E with no scope open).</summary>
         internal static int Current => _cls;
 
-        /// <summary>A collector scope is open on the main thread now (its class is R or S): the producer test of
+        /// <summary>A collector scope is open on the main thread now (its class is R, S or P): the producer test of
         /// FtLedger's tokens. Main thread only.</summary>
-        internal static bool CollectorOpen => _depth > 0 && (_cls == ClsR || _cls == ClsS);
+        internal static bool CollectorOpen => _sd > 0 && (_cls == ClsR || _cls == ClsS || _cls == ClsP);
 
-        /// <summary>The cycles since the last transition go to the class that ran them, GC taken out when both
-        /// readings of the hook are valid.</summary>
-        private static void Mark(ulong k, long g, bool gok)
+        /// <summary>The controls' mutants (FtClock.Install, from the sentinel's k_mutant key): k1 makes every counter
+        /// read allocate, k2 books gated scopes in E, k3 keeps a listener callback inside X in X. Each breaks the rule
+        /// its control checks, for the control's one failing run; none is set in a sitting.</summary>
+        internal static void SetMutants(string k)
+        {
+            FtAlloc.MutantK1 = k == "k1";
+            if (k == "k2") ClassOfKind[Gated] = ClsE;
+            MutantK3 = k == "k3";
+            Plugin.Log.LogInfo("[FRAME-TIME] controls k_mutant=" + (k == "k1" || k == "k2" || k == "k3" ? k : "none"));
+        }
+
+        /// <summary>The cycles and bytes since the last transition go to the class that ran them, GC taken out when
+        /// both readings of the hook are valid, bytes counted when both readings of the counter are.</summary>
+        private static void Mark(ulong k, long g, bool gok, long a, bool aok)
         {
             long d = unchecked((long)(k - _k));
             if (gok && _gok) d -= g - _g;
             Acc[_cls] += d;
+            if (aok && _aok) AccA[_cls] += FtAlloc.Delta(_a, a);
             _k = k;
             _g = g;
             _gok = gok;
+            _a = a;
+            _aok = aok;
         }
 
         /// <summary>Class transitions on the main thread (every Switch): the window line's nm.</summary>
@@ -110,24 +143,52 @@ namespace CompetitiveRounds
             Marks++;
             long g;
             bool gok = FtClock.GcRead(FtClock.GcFn, out g);
-            Mark(FtClock.Cycles(), g, gok);
+            long a;
+            bool aok = FtAlloc.Read(out a);
+            Mark(FtClock.Cycles(), g, gok, a, aok);
             _cls = cls;
         }
 
+        /// <summary>The class state a calibration or a control restores after it ran.</summary>
+        internal struct State
+        {
+            internal long[] Acc, AccA;
+            internal int Cls;
+            internal ulong K;
+            internal long G, A, Marks;
+            internal bool Gok, Aok;
+        }
+
+        internal static State Save()
+        {
+            return new State { Acc = (long[])Acc.Clone(), AccA = (long[])AccA.Clone(), Cls = _cls, K = _k, G = _g, A = _a,
+                Marks = Marks, Gok = _gok, Aok = _aok };
+        }
+
+        /// <summary>No class gains or loses cycles or bytes: what ran since Save falls, at the next transition or cut,
+        /// to the class open at Save. The class stack must be back at its depth at Save.</summary>
+        internal static void Restore(State s)
+        {
+            System.Array.Copy(s.Acc, Acc, Classes);
+            System.Array.Copy(s.AccA, AccA, Classes);
+            _cls = s.Cls;
+            _k = s.K;
+            _g = s.G;
+            _a = s.A;
+            Marks = s.Marks;
+            _gok = s.Gok;
+            _aok = s.Aok;
+        }
+
         /// <summary>The boot line `[FRAME-TIME] mark cost cyc= p90= n=` (B11 SHARED.md, the window line's nm): n
-        /// back-to-back class transitions (Switch, the code every mark runs, its GC read included) on the main thread,
-        /// each bracketed by two cycle reads, at the first frame boundary (FtClock.OnStart, before game 0). A bracket
-        /// holds one cycle read beyond the transition, so cyc (the lower median) and p90 bound one transition from
-        /// above. Acc, Marks and the class state are restored after, so no class gains or loses cycles: the
-        /// calibration's cycles fall to the class open before it, in that menu frame. It measures the overhead; the
-        /// overhead stays in the charge (method-v53.md:13-48).</summary>
+        /// back-to-back class transitions (Switch, the code every mark runs, its GC and counter reads included) on the
+        /// main thread, each bracketed by two cycle reads, at the first frame boundary (FtClock.OnStart, before game 0).
+        /// A bracket holds one cycle read beyond the transition, so cyc (the lower median) and p90 bound one transition
+        /// from above. The class state is restored after (Restore). It measures the overhead; the overhead stays in the
+        /// charge (method-v53.md:13-48).</summary>
         internal static void CalibrateMarks(int n)
         {
-            var acc = (long[])Acc.Clone();
-            int cls = _cls;
-            ulong k = _k;
-            long g = _g, marks = Marks;
-            bool gok = _gok;
+            var st = Save();
             var s = new long[n];
             for (int i = 0; i < n; i++)
             {
@@ -135,21 +196,16 @@ namespace CompetitiveRounds
                 Switch((i & 1) == 0 ? ClsS : ClsR);
                 s[i] = unchecked((long)(FtClock.Cycles() - a));
             }
-            System.Array.Copy(acc, Acc, Classes);
-            _cls = cls;
-            _k = k;
-            _g = g;
-            _gok = gok;
-            Marks = marks;
+            Restore(st);
             System.Array.Sort(s);
             Plugin.Log.LogInfo("[FRAME-TIME] mark cost cyc=" + s[(n - 1) / 2] + " p90=" + s[(int)((n - 1) * 9L / 10)] + " n=" + n);
         }
 
         /// <summary>FtClock.OnStart, at every frame boundary, with the readings it took for the closing frame: the
-        /// open class's cycles up to here are that frame's.</summary>
-        internal static void Cut(ulong k, long g, bool gok)
+        /// open class's cycles and bytes up to here are that frame's.</summary>
+        internal static void Cut(ulong k, long g, bool gok, long a, bool aok)
         {
-            Mark(k, g, gok);
+            Mark(k, g, gok, a, aok);
         }
 
         /// <summary>FtClock.OnStart, when the GC hook it reads changed: the next interval's GC base is the new hook's
@@ -160,19 +216,31 @@ namespace CompetitiveRounds
             _gok = gok;
         }
 
+        /// <summary>One scope enters the class stack with class cls (main thread only).</summary>
+        private static void Push(int cls)
+        {
+            int d = _sd++;
+            if (d < StackCap)
+            {
+                _prev[d] = _cls;
+                if (cls != _cls) Switch(cls);
+            }
+            else ClassOverflow++;
+        }
+
+        /// <summary>The innermost scope leaves: its parent's class runs again.</summary>
+        private static void Pop()
+        {
+            int d = --_sd;
+            if (d >= 0 && d < StackCap && _prev[d] != _cls) Switch(_prev[d]);
+        }
+
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         internal static bool Open(int component, int kind)
         {
             if (Thread.CurrentThread.ManagedThreadId != MainThread) { Interlocked.Increment(ref OffThread); return false; }
-            int d = _depth++;
-            if (d < StackCap)
-            {
-                _prev[d] = _cls;
-                int cls = _cls == ClsW ? ClsW : ClassOfKind[kind];
-                if (cls != _cls) Switch(cls);
-            }
-            else ClassOverflow++;
-            if (d != 0) return false;
+            Push(_cls == ClsW ? ClsW : ClassOfKind[kind]);
+            if (_depth++ != 0) return false;
             _component = component;
             _kind = kind;
             _t0 = Stopwatch.GetTimestamp();
@@ -183,7 +251,7 @@ namespace CompetitiveRounds
         internal static void Close(bool opened)
         {
             if (Thread.CurrentThread.ManagedThreadId != MainThread) return;
-            int d = --_depth;
+            _depth--;
             if (opened)
             {
                 long dt = Stopwatch.GetTimestamp() - _t0;
@@ -191,26 +259,92 @@ namespace CompetitiveRounds
                 Ticks[i] += dt;
                 Calls[i]++;
             }
-            if (d >= 0 && d < StackCap && _prev[d] != _cls) Switch(_prev[d]);
+            Pop();
         }
 
         /// <summary>A writer scope with no tick-ledger cell (FtLedger's service of collector output inside the
         /// producer's span): the class stack only. Main thread only; pair with PopWriter.</summary>
         internal static void PushWriter()
         {
-            int d = _depth++;
-            if (d < StackCap)
-            {
-                _prev[d] = _cls;
-                if (_cls != ClsW) Switch(ClsW);
-            }
-            else ClassOverflow++;
+            Push(ClsW);
         }
 
         internal static void PopWriter()
         {
-            int d = --_depth;
-            if (d >= 0 && d < StackCap && _prev[d] != _cls) Switch(_prev[d]);
+            Pop();
+        }
+
+        /// <summary>A recv scope (FtLedger.RecvEnter, RecvCyclesEnter) on the main thread: class P, W kept inside a
+        /// writer. Pair with LeaveP on the same thread.</summary>
+        internal static void EnterP()
+        {
+            if (Thread.CurrentThread.ManagedThreadId != MainThread) return;
+            Push(_cls == ClsW ? ClsW : ClsP);
+        }
+
+        internal static void LeaveP()
+        {
+            if (Thread.CurrentThread.ManagedThreadId != MainThread) return;
+            Pop();
+        }
+
+        /// <summary>A PhotonPeer entry (FtPhoton's X prefix): class X, W kept inside a writer. Returns the class stack's
+        /// depth to restore (Leave), or -1 off the main thread, where nothing moves.</summary>
+        internal static int EnterX()
+        {
+            if (Thread.CurrentThread.ManagedThreadId != MainThread) { Interlocked.Increment(ref PhotonOffMain); return -1; }
+            int d = _sd;
+            Push(_cls == ClsW ? ClsW : ClsX);
+            return d;
+        }
+
+        /// <summary>A LoadBalancingClient listener callback (FtPhoton's E prefix): E inside X, the class it found
+        /// anywhere else. Returns the depth to restore, or -1 off the main thread.</summary>
+        internal static int EnterListener()
+        {
+            if (Thread.CurrentThread.ManagedThreadId != MainThread) { Interlocked.Increment(ref PhotonOffMain); return -1; }
+            int d = _sd;
+            Push(_cls == ClsX && !MutantK3 ? ClsE : _cls);
+            return d;
+        }
+
+        /// <summary>The finalizer of an X or listener scope: the class stack back to the depth its prefix found.</summary>
+        internal static void Leave(int d)
+        {
+            if (d < 0) return;
+            while (_sd > d) Pop();
+        }
+
+        internal const long PlantUs = 2000;
+
+        /// <summary>K2, the boot line `[FRAME-TIME] scope plant asked=<us> got=<us>`: a spin of PlantUs of Stopwatch time
+        /// inside a gated scope (Open, class S), and the cycles class S gained, in microseconds at f_hat (FtCalib.FHat;
+        /// NA before it is known). The class state is restored after. FtClock.OnStart, at the first frame boundary.</summary>
+        internal static void PlantScope()
+        {
+            var st = Save();
+            long s0 = Acc[ClsS];
+            bool sp = Open(Cal, Gated);
+            Spin(PlantUs);
+            Close(sp);
+            long got = Acc[ClsS] - s0;
+            Restore(st);
+            Plugin.Log.LogInfo("[FRAME-TIME] scope plant asked=" + PlantUs + " got=" + Us(got));
+        }
+
+        /// <summary>Busy-waits us microseconds of Stopwatch time on the calling thread.</summary>
+        internal static void Spin(long us)
+        {
+            long n = us * Stopwatch.Frequency / 1000000;
+            long t0 = Stopwatch.GetTimestamp();
+            while (Stopwatch.GetTimestamp() - t0 < n) { }
+        }
+
+        /// <summary>Cycles as whole microseconds at f_hat, or NA while f_hat is unknown.</summary>
+        internal static string Us(long cyc)
+        {
+            long f = FtCalib.FHat;
+            return f > 0 ? ((long)System.Math.Round(cyc * 1000000.0 / f)).ToString() : "NA";
         }
 
         /// <summary>Sum of arr over the seven components (not Cal) and both phases, for one moment and kind.</summary>
@@ -222,8 +356,8 @@ namespace CompetitiveRounds
             return s;
         }
 
-        /// <summary>Depth must be 0 at every frame boundary; FT_Start checks it (VR2).</summary>
-        internal static int Depth => _depth;
+        /// <summary>The class stack must be empty at every frame boundary; FT_Start checks it (VR2).</summary>
+        internal static int Depth => _sd;
 
         internal static void Reset()
         {

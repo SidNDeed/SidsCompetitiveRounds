@@ -14,7 +14,8 @@ namespace CompetitiveRounds
     /// its live frames 2 + 120k to 121 + 120k, and its first live frame takes window 0's arm. With k = 4q + r, run q
     /// holds two pairs, positions 1 and 3 (unit P13) and positions 2 and 4 (unit P24); positions 1 and 2 each take a
     /// fresh coin, Mix(seed, game, round, point, 2q + r, ArmStream), ON when it is 1, and positions 3 and 4 take the
-    /// opposite of their mate (the arms (A, B, 1-A, 1-B)). A window keeps its committed arm whether it ends full or
+    /// opposite of their mate (the arms (A, B, 1-A, 1-B)); under force=ON or force=OFF every window takes that arm
+    /// instead (ForcedArm), and coin= still names the coin. A window keeps its committed arm whether it ends full or
     /// partial. pred is the previous window's arm, carried across the points of a game and none at the game's first
     /// window. A plant run (FtPlant.RunPlanted, one run in five per game, B11 SHARED.md D4) plants its OFF windows,
     /// and the first window after it carries res=1. At each window's opening boundary the gate is set to
@@ -211,12 +212,20 @@ namespace CompetitiveRounds
             WinPlant = _runPlant;
             WinRes = r == 0 && _lastPlant;
             PrevArm = _lastArm;
-            ArmOn = r < 2 ? WinCoin == 1 : WinCoin == 0;
+            ArmOn = ForcedArm(r < 2 ? WinCoin == 1 : WinCoin == 0);
             _lastArm = ArmOn ? 1 : 0;
             _lastPlant = WinPlant;
-            bool off = FtConfig.Force == "OFF" || (FtConfig.Force == "none" && !ArmOn);
-            GateThisPoint = FtArm.Armed && off;
+            GateThisPoint = FtArm.Armed && !ArmOn;
             FtGate.Off = GateThisPoint;
+        }
+
+        /// <summary>The window's arm under the sentinel's force= (V6, SHARED.md "The window line, V6 additions"): ON
+        /// under force=ON, OFF under force=OFF, the committed arm under force=none. The gate follows it (OpenWindow), so
+        /// arm= is the gate's real state while the sitting is armed. FtConfig.Force is written only by FtConfig.Load,
+        /// which Plugin.Awake runs once per process, so one force= holds for every game of the process.</summary>
+        internal static bool ForcedArm(bool committed)
+        {
+            return FtConfig.Force == "ON" || (FtConfig.Force == "none" && committed);
         }
 
         private static void EndPoint()
@@ -330,7 +339,8 @@ namespace CompetitiveRounds
             // round-3 MEDIUM (FtSchedule.cs:140): the game's settled line is written at its start, before its play;
             // this snapshot, after the game's work, is what VR2 judges for the game's frames (the last game's included)
             Plugin.Log.LogInfo("[FRAME-TIME] counters g=" + g + " frames=" + FtClock.Frames + " missing_end=" + FtClock.MissingEnd
-                + " cycle_failures=" + FtClock.CycleFailures + " span_depth_violations=" + FtClock.DepthViolations);
+                + " cycle_failures=" + FtClock.CycleFailures + " span_depth_violations=" + FtClock.DepthViolations
+                + " photon_offmain=" + System.Threading.Interlocked.Read(ref FtSpan.PhotonOffMain));
             Plugin.Log.LogInfo("[FRAME-TIME] flushed g=" + g + " why=" + why);
             if (FtDrive.Complete && g == FtDrive.CompleteGame) FtDrive.LogComplete(g);
         }

@@ -307,7 +307,7 @@ namespace CompetitiveRounds
         internal static void ExitRpc(int before)
         {
 #if SCR_FRAMETIME
-            ulong ftRecv = FtClock.Cycles();   // D5 recv: ExitRpc's cycles, no message of its own
+            ulong ftRecv = FtLedger.RecvCyclesEnter();   // D5 recv: ExitRpc's cycles, no message of its own (class P)
             FtA3.Wrote(FtA3.SE_frames);
 #endif
             if (before >= 0) _ctxDepth = before;

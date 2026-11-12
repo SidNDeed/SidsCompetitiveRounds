@@ -103,6 +103,13 @@ _FLUSH_TAIL = [
     'Plugin.Log.LogInfo("[FRAME-TIME] flushed g=" + g + " why=" + why);',
 ]
 
+# V6: the tip's counters line also carries photon_offmain (FtSpan.PhotonOffMain); _FLUSH_TAIL stays c28259c1's
+_FLUSH_TAIL_V6 = _FLUSH_TAIL[:-2] + [
+    '+ " cycle_failures=" + FtClock.CycleFailures + " span_depth_violations=" + FtClock.DepthViolations',
+    '+ " photon_offmain=" + System.Threading.Interlocked.Read(ref FtSpan.PhotonOffMain));',
+    _FLUSH_TAIL[-1],
+]
+
 _OLD_BOUNDARY_TAIL = [
     'bool open = live && InGame;',
     'if (open && !Live) StartPoint();',
@@ -280,7 +287,7 @@ TIP = {
         'InGame = false;',
         '_overOwed = true;',
     ],
-    SIG_FLUSH: ['DrainOwed(false, "skipped_" + why);'] + _FLUSH_TAIL + [
+    SIG_FLUSH: ['DrainOwed(false, "skipped_" + why);'] + _FLUSH_TAIL_V6 + [
         'if (FtDrive.Complete && g == FtDrive.CompleteGame) FtDrive.LogComplete(g);',
     ],
 }
@@ -321,7 +328,7 @@ TIP_FRAMES = {
         '_offN = 0; _offF = 0; _ownSplit = 0;',
         '_windows = 0;',
         '_ptLabel = FtSchedule.Label();',
-        '_ptArm = FtSchedule.ArmOn;',
+        '_ptArm = FtSchedule.ForcedArm(FtSchedule.ArmOn);',
         '_ptGate = FtSchedule.GateThisPoint;',
         '_ptPred = FtSchedule.PrevArm;',
         '_ptLastArm = _ptArm;',
@@ -353,7 +360,9 @@ TIP_FRAMES = {
         '+ " off_g=" + _offG + " off_gn=" + _offGn + " off_on=" + _offOn + " on_guarded=" + _onGuarded',
         '+ " own_split=" + _ownSplit + " span_class_overflow=" + FtSpan.ClassOverflow',
         '+ " gc_read_failures=" + FtSpan.GcReadFailures + " recv_offmain=" + FtLedger.RecvOffMain',
-        '+ " ledger_cycle_miss=" + FtLedger.CycleMiss + " " + FtLedger.SockStats(_sk0, _sk1));',
+        '+ " ledger_cycle_miss=" + FtLedger.CycleMiss + " " + FtLedger.SockStats(_sk0, _sk1)',
+        '+ " ab_back=" + Interlocked.Read(ref FtAlloc.AbBack) + " ab_retry=" + Interlocked.Read(ref FtAlloc.AbRetry)',
+        '+ " heap=" + GC.GetTotalMemory(false));',
         'LastN = _pn;',
         'LastSF = _pF;',
         '_btT0 = BetweenTicks();',
@@ -365,8 +374,11 @@ TIP_FRAMES = {
     ],
 }
 
-# B11 P1: the window schedule, ownership, the partition, the plant run and the writer ledger, whole bodies
+# B11 P1: the window schedule, ownership, the partition, the plant run and the writer ledger; V6 (rulings
+# R6-A3.11.146 and .147): classes P and X, the allocation counter, the Photon scopes, the controls and the
+# scope census. Whole bodies.
 SIG_OPENWIN = 'private static void OpenWindow(long k)'
+SIG_FORCED = 'internal static bool ForcedArm(bool committed)'
 SIG_MIX = 'internal static ulong Mix(int seed, int game, int round, int point, long block, ulong stream)'
 SIG_FR_FRAME = 'internal static void Frame(long f, long s, ulong c, ulong p, int gc0, int gc1, bool ended, bool closing,'
 SIG_FR_CURK = 'private static long CurrentK()'
@@ -374,15 +386,29 @@ SIG_FR_OWNER = 'private static void CaptureOwner()'
 SIG_FR_VR5 = 'private static void Vr5Take(bool off)'
 SIG_FR_FLUSH = 'private static void FlushWindow(bool partial)'
 SIG_FR_RESETP = 'private static void ResetPartition()'
-SIG_SP_MARK = 'private static void Mark(ulong k, long g, bool gok)'
+SIG_SP_MUT = 'internal static void SetMutants(string k)'
+SIG_SP_MARK = 'private static void Mark(ulong k, long g, bool gok, long a, bool aok)'
 SIG_SP_SWITCH = 'private static void Switch(int cls)'
-SIG_SP_CUT = 'internal static void Cut(ulong k, long g, bool gok)'
+SIG_SP_SAVE = 'internal static State Save()'
+SIG_SP_RESTORE = 'internal static void Restore(State s)'
+SIG_SP_CUT = 'internal static void Cut(ulong k, long g, bool gok, long a, bool aok)'
 SIG_SP_REBASE = 'internal static void Rebase(long g, bool gok)'
+SIG_SP_PUSH = 'private static void Push(int cls)'
+SIG_SP_POP = 'private static void Pop()'
 SIG_SP_OPEN = 'internal static bool Open(int component, int kind)'
 SIG_SP_CLOSE = 'internal static void Close(bool opened)'
 SIG_SP_PUSHW = 'internal static void PushWriter()'
 SIG_SP_POPW = 'internal static void PopWriter()'
+SIG_SP_ENTERP = 'internal static void EnterP()'
+SIG_SP_LEAVEP = 'internal static void LeaveP()'
+SIG_SP_ENTERX = 'internal static int EnterX()'
+SIG_SP_ENTERL = 'internal static int EnterListener()'
+SIG_SP_LEAVE = 'internal static void Leave(int d)'
 SIG_SP_CAL = 'internal static void CalibrateMarks(int n)'
+SIG_SP_PLANT = 'internal static void PlantScope()'
+SIG_SP_SPIN = 'internal static void Spin(long us)'
+SIG_SP_US = 'internal static string Us(long cyc)'
+SIG_CL_INSTALL = 'internal static void Install()'
 SIG_CL_START = 'private static void OnStart()'
 SIG_CL_GCREAD = 'internal static bool GcRead(System.Func<long> fn, out long g)'
 SIG_PL_RUN = 'internal static bool RunPlanted(int seed, int game, long run)'
@@ -392,12 +418,14 @@ SIG_LG_TAKE = 'internal static void Take(long[] into)'
 SIG_LG_LEVEL = 'internal static long Level(long[] s, int t)'
 SIG_LG_WU = 'internal static void AppendWu(StringBuilder sb, long[] a, long[] b)'
 SIG_LG_TOK = 'internal static void AppendTok(StringBuilder sb, long[] a, long[] b)'
+SIG_LG_WA = 'internal static void AppendWa(StringBuilder sb, long[] a, long[] b, bool ok)'
 SIG_LG_ENQ = 'private static void Enq(int t, long n)'
-SIG_LG_SERVE = 'private static void Serve(int t, long n, bool ok, ulong k0, ulong k1)'
+SIG_LG_SERVE = 'private static void Serve(int t, long n, bool ok, ulong k0, ulong k1, long a0, long a1, bool aok)'
 SIG_LG_HBEGIN = 'internal static ulong HashBegin()'
 SIG_LG_HEND = 'internal static void HashEnd(ulong k0, bool ok)'
 SIG_LG_RENTER = 'internal static ulong RecvEnter()'
 SIG_LG_REXIT = 'internal static void RecvExit(ulong k0)'
+SIG_LG_RCENTER = 'internal static ulong RecvCyclesEnter()'
 SIG_LG_RCYC = 'internal static void RecvCycles(ulong k0)'
 SIG_LG_SBUCKET = 'internal static int SockBucket(long c)'
 SIG_LG_SENTER = 'internal static ulong SockEnter()'
@@ -408,6 +436,24 @@ SIG_LG_SEDGES = 'private static long[] SockEdges()'
 SIG_SOCK_TARGET = 'private static MethodBase TargetMethod()'
 SIG_SOCK_PRE = 'private static void Prefix(out ulong __state)'
 SIG_SOCK_FIN = 'private static void Finalizer(ulong __state)'
+SIG_AL_FN = 'internal static readonly byte[] FnBytes ='
+SIG_AL_INIT = 'internal static void Init()'
+SIG_AL_READ = 'internal static bool Read(out long total)'
+SIG_AL_BACK = 'private static long Back(long t)'
+SIG_AL_DELTA = 'internal static long Delta(long a0, long a1)'
+SIG_AL_CAL = 'internal static void Calibrate()'
+SIG_PH_XNAMES = 'internal static readonly string[] XNames ='
+SIG_PH_ENAMES = 'internal static readonly KeyValuePair<string, Type[]>[] ENames ='
+SIG_PH_X = 'internal static IEnumerable<MethodBase> XTargets()'
+SIG_PH_E = 'internal static IEnumerable<MethodBase> ETargets()'
+SIG_PH_REPORT = 'internal static void ReportPatched()'
+SIG_PH_COUNT = 'private static void Count(List<string> names, Func<IEnumerable<MethodBase>> targets, Type patch)'
+SIG_PH_SAME = 'private static bool Same(MethodInfo a, MethodInfo b)'
+SIG_PH_NEST = 'internal static void PlantNest()'
+SIG_PH_XPATCH = 'internal static class FtPhotonXPatch'
+SIG_PH_EPATCH = 'internal static class FtPhotonEPatch'
+SIG_CE_LOG = 'internal static void LogScopeCensus()'
+SIG_CE_SCAN = 'internal static void ScanIl(byte[] il, int skip, int open, int close, List<int> found, out bool opens, out bool closes)'
 
 TIP_P1_SCHED = {
     SIG_OPENWIN: [
@@ -429,12 +475,14 @@ TIP_P1_SCHED = {
         'WinPlant = _runPlant;',
         'WinRes = r == 0 && _lastPlant;',
         'PrevArm = _lastArm;',
-        'ArmOn = r < 2 ? WinCoin == 1 : WinCoin == 0;',
+        'ArmOn = ForcedArm(r < 2 ? WinCoin == 1 : WinCoin == 0);',
         '_lastArm = ArmOn ? 1 : 0;',
         '_lastPlant = WinPlant;',
-        'bool off = FtConfig.Force == "OFF" || (FtConfig.Force == "none" && !ArmOn);',
-        'GateThisPoint = FtArm.Armed && off;',
+        'GateThisPoint = FtArm.Armed && !ArmOn;',
         'FtGate.Off = GateThisPoint;',
+    ],
+    SIG_FORCED: [
+        'return FtConfig.Force == "ON" || (FtConfig.Force == "none" && committed);',
     ],
     SIG_MIX: [
         'ulong z = unchecked((ulong)(uint)seed * 0x9E3779B97F4A7C15UL + (ulong)(uint)game * 0xBF58476D1CE4E5B9UL',
@@ -473,9 +521,12 @@ TIP_P1_FRAMES = {
         'else { _pn++; _pF += f; _pS += s; _pC += c; _pP += p; }',
         'if (f > _pMaxF) _pMaxF = f;',
         'if (!gok) _wGok = false;',
-        '_wG += cg; _wW += cw; _wR += cr; _wS2 += cs; _wE += ce;',
-        '_tq[bin] += unchecked((long)c) - cg - cw;',
-        '_tr[bin] += cr;',
+        'if (!aok) _wAok = false;',
+        '_wc[FtSpan.ClsG] += cg;',
+        'for (int i = FtSpan.ClsW; i < FtSpan.Classes; i++) { _wc[i] += dc[i]; _wa[i] += da[i]; }',
+        '_wAc += ac;',
+        '_tq[bin] += unchecked((long)c) - cg - dc[FtSpan.ClsW] - dc[FtSpan.ClsP];',
+        '_tr[bin] += dc[FtSpan.ClsR];',
         '_tn[bin]++;',
         'FtLedger.Take(_le);',
         'if (_wn == W) FlushWindow(false);',
@@ -488,11 +539,11 @@ TIP_P1_FRAMES = {
         '_oGame = FtSchedule.Game; _oRound = FtSchedule.Round; _oPoint = FtSchedule.PointInRound;',
         '_oK = CurrentK();',
         '_oF0 = FtSchedule.LiveFrame;',
-        '_oArm = FtSchedule.ArmOn;',
+        '_oArm = FtSchedule.ForcedArm(FtSchedule.ArmOn);',
         'if (FtMenu.Active)',
         '{',
         '// a menu segment holds one arm: its windows follow position by index, with no coin of their own',
-        '_oRun = _oK / 4; _oPos = (int)(_oK % 4) + 1; _oP24 = (_oK & 1) == 1; _oCoin = _oArm ? 1 : 0;',
+        '_oRun = _oK / 4; _oPos = (int)(_oK % 4) + 1; _oP24 = (_oK & 1) == 1; _oCoin = FtSchedule.ArmOn ? 1 : 0;',
         '_oPred = _oK == 0 ? FtSchedule.PrevArm : (_oArm ? 1 : 0);',
         '_oPlantRun = false; _oRes = false;',
         '}',
@@ -536,8 +587,9 @@ TIP_P1_FRAMES = {
         '.Append(" coin=").Append(_oCoin).Append(" wi=").Append(_oK).Append(" f0=").Append(_oF0)',
         '.Append(" pred=").Append(Arm(_oPred)).Append(" prun=").Append(_oPlantRun ? 1 : 0).Append(" res=").Append(_oRes ? 1 : 0)',
         '.Append(" gcn=").Append(_wGc1 - _wGc0).Append(" cG=");',
-        'if (_wGok) sb.Append(_wG); else sb.Append("NA");',
-        'sb.Append(" cW=").Append(_wW).Append(" cR=").Append(_wR).Append(" cS=").Append(_wS2).Append(" cE=").Append(_wE);',
+        'if (_wGok) sb.Append(_wc[FtSpan.ClsG]); else sb.Append("NA");',
+        'sb.Append(" cW=").Append(_wc[FtSpan.ClsW]).Append(" cR=").Append(_wc[FtSpan.ClsR]).Append(" cS=").Append(_wc[FtSpan.ClsS])',
+        '.Append(" cE=").Append(_wc[FtSpan.ClsE]);',
         'AppendBins(sb, " q=", _tq);',
         'AppendBins(sb, " r=", _tr);',
         'AppendBins(sb, " qn=", _tn);',
@@ -546,51 +598,91 @@ TIP_P1_FRAMES = {
         'sb.Append(" tok=");',
         'FtLedger.AppendTok(sb, _lb, _le);',
         'sb.Append(" nm=").Append(FtLedger.Marks(_lb, _le));',
+        'sb.Append(" cP=").Append(_wc[FtSpan.ClsP]).Append(" cX=").Append(_wc[FtSpan.ClsX]);',
+        'bool a = _wAok && FtAlloc.Ok;',
+        'sb.Append(" aC=").Append(a ? _wAc.ToString() : "NA");',
+        'sb.Append(" aW=").Append(a ? _wa[FtSpan.ClsW].ToString() : "NA").Append(" aR=").Append(a ? _wa[FtSpan.ClsR].ToString() : "NA")',
+        '.Append(" aS=").Append(a ? _wa[FtSpan.ClsS].ToString() : "NA").Append(" aP=").Append(a ? _wa[FtSpan.ClsP].ToString() : "NA")',
+        '.Append(" aX=").Append(a ? _wa[FtSpan.ClsX].ToString() : "NA");',
+        'sb.Append(" wa=");',
+        'FtLedger.AppendWa(sb, _lb, _le, a);',
         'Plugin.Log.LogInfo(sb.ToString());',
         'Array.Copy(_le, _lb, FtLedger.Fields);',
         '_wn = 0; _wF = 0; _wS = 0; _wC = 0; _wMaxF = 0; _wP = 0;',
         'ResetPartition();',
     ],
     SIG_FR_RESETP: [
-        '_wG = 0; _wW = 0; _wR = 0; _wS2 = 0; _wE = 0; _wGok = true;',
+        'Array.Clear(_wc, 0, FtSpan.Classes); Array.Clear(_wa, 0, FtSpan.Classes); _wAc = 0; _wGok = true; _wAok = true;',
         'for (int j = 0; j < Bins; j++) { _tq[j] = 0; _tr[j] = 0; _tn[j] = 0; }',
     ],
 }
 
 TIP_P1_SPAN = {
+    SIG_SP_MUT: [
+        'FtAlloc.MutantK1 = k == "k1";',
+        'if (k == "k2") ClassOfKind[Gated] = ClsE;',
+        'MutantK3 = k == "k3";',
+        'Plugin.Log.LogInfo("[FRAME-TIME] controls k_mutant=" + (k == "k1" || k == "k2" || k == "k3" ? k : "none"));',
+    ],
     SIG_SP_MARK: [
         'long d = unchecked((long)(k - _k));',
         'if (gok && _gok) d -= g - _g;',
         'Acc[_cls] += d;',
+        'if (aok && _aok) AccA[_cls] += FtAlloc.Delta(_a, a);',
         '_k = k;',
         '_g = g;',
         '_gok = gok;',
+        '_a = a;',
+        '_aok = aok;',
     ],
     SIG_SP_SWITCH: [
         'Marks++;',
         'long g;',
         'bool gok = FtClock.GcRead(FtClock.GcFn, out g);',
-        'Mark(FtClock.Cycles(), g, gok);',
+        'long a;',
+        'bool aok = FtAlloc.Read(out a);',
+        'Mark(FtClock.Cycles(), g, gok, a, aok);',
         '_cls = cls;',
     ],
+    SIG_SP_SAVE: [
+        'return new State { Acc = (long[])Acc.Clone(), AccA = (long[])AccA.Clone(), Cls = _cls, K = _k, G = _g, A = _a,',
+        'Marks = Marks, Gok = _gok, Aok = _aok };',
+    ],
+    SIG_SP_RESTORE: [
+        'System.Array.Copy(s.Acc, Acc, Classes);',
+        'System.Array.Copy(s.AccA, AccA, Classes);',
+        '_cls = s.Cls;',
+        '_k = s.K;',
+        '_g = s.G;',
+        '_a = s.A;',
+        'Marks = s.Marks;',
+        '_gok = s.Gok;',
+        '_aok = s.Aok;',
+    ],
     SIG_SP_CUT: [
-        'Mark(k, g, gok);',
+        'Mark(k, g, gok, a, aok);',
     ],
     SIG_SP_REBASE: [
         '_g = g;',
         '_gok = gok;',
     ],
-    SIG_SP_OPEN: [
-        'if (Thread.CurrentThread.ManagedThreadId != MainThread) { Interlocked.Increment(ref OffThread); return false; }',
-        'int d = _depth++;',
+    SIG_SP_PUSH: [
+        'int d = _sd++;',
         'if (d < StackCap)',
         '{',
         '_prev[d] = _cls;',
-        'int cls = _cls == ClsW ? ClsW : ClassOfKind[kind];',
         'if (cls != _cls) Switch(cls);',
         '}',
         'else ClassOverflow++;',
-        'if (d != 0) return false;',
+    ],
+    SIG_SP_POP: [
+        'int d = --_sd;',
+        'if (d >= 0 && d < StackCap && _prev[d] != _cls) Switch(_prev[d]);',
+    ],
+    SIG_SP_OPEN: [
+        'if (Thread.CurrentThread.ManagedThreadId != MainThread) { Interlocked.Increment(ref OffThread); return false; }',
+        'Push(_cls == ClsW ? ClsW : ClassOfKind[kind]);',
+        'if (_depth++ != 0) return false;',
         '_component = component;',
         '_kind = kind;',
         '_t0 = Stopwatch.GetTimestamp();',
@@ -598,7 +690,7 @@ TIP_P1_SPAN = {
     ],
     SIG_SP_CLOSE: [
         'if (Thread.CurrentThread.ManagedThreadId != MainThread) return;',
-        'int d = --_depth;',
+        '_depth--;',
         'if (opened)',
         '{',
         'long dt = Stopwatch.GetTimestamp() - _t0;',
@@ -606,27 +698,40 @@ TIP_P1_SPAN = {
         'Ticks[i] += dt;',
         'Calls[i]++;',
         '}',
-        'if (d >= 0 && d < StackCap && _prev[d] != _cls) Switch(_prev[d]);',
+        'Pop();',
     ],
     SIG_SP_PUSHW: [
-        'int d = _depth++;',
-        'if (d < StackCap)',
-        '{',
-        '_prev[d] = _cls;',
-        'if (_cls != ClsW) Switch(ClsW);',
-        '}',
-        'else ClassOverflow++;',
+        'Push(ClsW);',
     ],
     SIG_SP_POPW: [
-        'int d = --_depth;',
-        'if (d >= 0 && d < StackCap && _prev[d] != _cls) Switch(_prev[d]);',
+        'Pop();',
+    ],
+    SIG_SP_ENTERP: [
+        'if (Thread.CurrentThread.ManagedThreadId != MainThread) return;',
+        'Push(_cls == ClsW ? ClsW : ClsP);',
+    ],
+    SIG_SP_LEAVEP: [
+        'if (Thread.CurrentThread.ManagedThreadId != MainThread) return;',
+        'Pop();',
+    ],
+    SIG_SP_ENTERX: [
+        'if (Thread.CurrentThread.ManagedThreadId != MainThread) { Interlocked.Increment(ref PhotonOffMain); return -1; }',
+        'int d = _sd;',
+        'Push(_cls == ClsW ? ClsW : ClsX);',
+        'return d;',
+    ],
+    SIG_SP_ENTERL: [
+        'if (Thread.CurrentThread.ManagedThreadId != MainThread) { Interlocked.Increment(ref PhotonOffMain); return -1; }',
+        'int d = _sd;',
+        'Push(_cls == ClsX && !MutantK3 ? ClsE : _cls);',
+        'return d;',
+    ],
+    SIG_SP_LEAVE: [
+        'if (d < 0) return;',
+        'while (_sd > d) Pop();',
     ],
     SIG_SP_CAL: [
-        'var acc = (long[])Acc.Clone();',
-        'int cls = _cls;',
-        'ulong k = _k;',
-        'long g = _g, marks = Marks;',
-        'bool gok = _gok;',
+        'var st = Save();',
         'var s = new long[n];',
         'for (int i = 0; i < n; i++)',
         '{',
@@ -634,18 +739,59 @@ TIP_P1_SPAN = {
         'Switch((i & 1) == 0 ? ClsS : ClsR);',
         's[i] = unchecked((long)(FtClock.Cycles() - a));',
         '}',
-        'System.Array.Copy(acc, Acc, Classes);',
-        '_cls = cls;',
-        '_k = k;',
-        '_g = g;',
-        '_gok = gok;',
-        'Marks = marks;',
+        'Restore(st);',
         'System.Array.Sort(s);',
         'Plugin.Log.LogInfo("[FRAME-TIME] mark cost cyc=" + s[(n - 1) / 2] + " p90=" + s[(int)((n - 1) * 9L / 10)] + " n=" + n);',
+    ],
+    SIG_SP_PLANT: [
+        'var st = Save();',
+        'long s0 = Acc[ClsS];',
+        'bool sp = Open(Cal, Gated);',
+        'Spin(PlantUs);',
+        'Close(sp);',
+        'long got = Acc[ClsS] - s0;',
+        'Restore(st);',
+        'Plugin.Log.LogInfo("[FRAME-TIME] scope plant asked=" + PlantUs + " got=" + Us(got));',
+    ],
+    SIG_SP_SPIN: [
+        'long n = us * Stopwatch.Frequency / 1000000;',
+        'long t0 = Stopwatch.GetTimestamp();',
+        'while (Stopwatch.GetTimestamp() - t0 < n) { }',
+    ],
+    SIG_SP_US: [
+        'long f = FtCalib.FHat;',
+        'return f > 0 ? ((long)System.Math.Round(cyc * 1000000.0 / f)).ToString() : "NA";',
     ],
 }
 
 TIP_P1_CLOCK = {
+    SIG_CL_INSTALL: [
+        'FtSpan.MainThread = System.Threading.Thread.CurrentThread.ManagedThreadId;',
+        'if (Installed) return;',
+        'var loop = UnityEngine.LowLevel.PlayerLoop.GetCurrentPlayerLoop();',
+        'var start = new UnityEngine.LowLevel.PlayerLoopSystem { type = typeof(FtStart), updateDelegate = OnStart };',
+        'var end = new UnityEngine.LowLevel.PlayerLoopSystem { type = typeof(FtEnd), updateDelegate = OnEnd };',
+        'bool a = Insert(ref loop, typeof(UnityEngine.PlayerLoop.EarlyUpdate), start, true);',
+        'bool b = Insert(ref loop, typeof(UnityEngine.PlayerLoop.PreLateUpdate), end, false);',
+        'var plant = new UnityEngine.LowLevel.PlayerLoopSystem { type = typeof(FtPlantTick), updateDelegate = FtPlant.OnUpdate };',
+        'bool c = Insert(ref loop, typeof(UnityEngine.PlayerLoop.Update), plant, true);',
+        'if (!a || !b || !c)',
+        '{',
+        'Plugin.Log.LogWarning("[FRAME-TIME] clock refused: player-loop phase missing (EarlyUpdate " + a + ", PreLateUpdate " + b',
+        '+ ", Update " + c + ")");',
+        'return;',
+        '}',
+        'UnityEngine.LowLevel.PlayerLoop.SetPlayerLoop(loop);',
+        'Installed = true;',
+        'FtAlloc.Init();',
+        'FtSpan.SetMutants(FtConfig.Get("k_mutant", "none"));',
+        'FtPlant.Init();',
+        'FtE.RegisterAll(); FtA3.RegisterAll();',
+        'FtLedger.Install();',
+        'ulong probe = Cycles();',
+        'Plugin.Log.LogInfo("[FRAME-TIME] clock installed freq=" + Stopwatch.Frequency + " hires=" + (Stopwatch.IsHighResolution ? 1 : 0)',
+        '+ " cycles=" + (probe != 0 ? 1 : 0));',
+    ],
     SIG_CL_START: [
         'long t = Stopwatch.GetTimestamp();',
         'ulong k = Cycles();',
@@ -653,19 +799,28 @@ TIP_P1_CLOCK = {
         'int gc = GC.CollectionCount(0);',
         'long g;',
         'bool gok = GcRead(GcFn, out g);',
-        'FtSpan.Cut(k, g, gok);',
+        'long al;',
+        'bool aok = FtAlloc.Read(out al);',
+        'FtSpan.Cut(k, g, gok, al, aok);',
         'bool live = FtSchedule.ReadLive();',
         'if (_open)',
         '{',
         'Frames++;',
         'if (!_ended) MissingEnd++;',
         'bool fok = gok && _gOk && FtSpan.GcReadFailures == _gcFail0;',
-        'long[] a = FtSpan.Acc;',
+        'bool fa = aok && _aOk;',
+        'for (int i = 0; i < FtSpan.Classes; i++)',
+        '{',
+        '_dc[i] = FtSpan.Acc[i] - _acc0[i];',
+        '_da[i] = FtSpan.AccA[i] - _accA0[i];',
+        '}',
         'OnFrameClosed(t - _t0, _ended ? _s : 0, k - _k0, pk - _p0, _gc0, gc, _ended, FtSchedule.ClosingFrame(live),',
-        'fok ? g - _gPrev : 0, fok, a[FtSpan.ClsW] - _acc0[FtSpan.ClsW], a[FtSpan.ClsR] - _acc0[FtSpan.ClsR],',
-        'a[FtSpan.ClsS] - _acc0[FtSpan.ClsS], a[FtSpan.ClsE] - _acc0[FtSpan.ClsE]);',
+        'fok ? g - _gPrev : 0, fok, _dc, fa ? FtAlloc.Delta(_aPrev, al) : 0, fa, _da);',
         '}',
         'System.Array.Copy(FtSpan.Acc, _acc0, FtSpan.Classes);',
+        'System.Array.Copy(FtSpan.AccA, _accA0, FtSpan.Classes);',
+        '_aPrev = al;',
+        '_aOk = aok;',
         'var fn = GcCycles;   // the hook, read once per frame: a hook set or changed counts from this frame on',
         'if (fn != GcFn)',
         '{',
@@ -687,6 +842,10 @@ TIP_P1_CLOCK = {
         '{',
         '_marksCal = true;   // once, at the first frame boundary: before game 0',
         'FtSpan.CalibrateMarks(MarkCalN);',
+        'FtAlloc.Calibrate();',
+        'FtSpan.PlantScope();',
+        'FtPhoton.PlantNest();',
+        'FtCensus.LogScopeCensus();',
         '}',
         'if (FtSpan.Depth != 0) DepthViolations++;',
         'InScript = true;',
@@ -722,14 +881,17 @@ TIP_P1_LEDGER = {
         'lock (_lock) { _c[Log * Per + (FtGate.Off ? EnqOff : EnqOn)]++; _pendingLog++; }',
     ],
     SIG_LG_FLUSH: [
+        'long a0, a1;',
+        'bool aok = FtAlloc.Read(out a0);',
         'ulong k0 = FtClock.Cycles();',
         '_in.Flush();',
         'ulong k1 = FtClock.Cycles();',
+        'aok = FtAlloc.Read(out a1) && aok;',
         'long n;',
         'lock (_lock) { n = _pendingLog; _pendingLog = 0; }',
         '// the whole flush is charged to the lines it carries (ruled conservative, SHARED.md D5); a flush that',
         '// carries none charges nothing',
-        'if (n > 0) Serve(Log, n, true, k0, k1);',
+        'if (n > 0) Serve(Log, n, true, k0, k1, a0, a1, aok);',
     ],
     SIG_LG_TAKE: [
         'lock (_lock) System.Array.Copy(_c, into, Nm);',
@@ -761,37 +923,62 @@ TIP_P1_LEDGER = {
         ".Append(',').Append(b[o + Disc] - a[o + Disc]).Append(',').Append(Level(b, t));",
         '}',
     ],
+    SIG_LG_WA: [
+        'for (int i = 0; i < WaTypes.Length; i++)',
+        '{',
+        'int t = WaTypes[i], o = t * Per;',
+        "if (i > 0) sb.Append(';');",
+        "sb.Append(TypeNames[t]).Append(':');",
+        '#if SCR_FT_NOCOLLECTORS',
+        'if (t == Sock) { sb.Append("NA"); continue; }',
+        '#endif',
+        'if (ok) sb.Append(b[o + Al] - a[o + Al]); else sb.Append("NA");',
+        '}',
+    ],
     SIG_LG_ENQ: [
         'lock (_lock) _c[t * Per + (FtGate.Off ? EnqOff : EnqOn)] += n;',
     ],
     SIG_LG_SERVE: [
         'long c = 0;',
         'if (k0 == 0 || k1 == 0) Interlocked.Increment(ref CycleMiss); else c = unchecked((long)(k1 - k0));',
+        'long al = aok ? FtAlloc.Delta(a0, a1) : 0;',
         'lock (_lock)',
         '{',
         'int o = t * Per;',
         'if (ok) { _c[o + (FtGate.Off ? DoneOff : DoneOn)] += n; _c[o + Units] += n; }',
         'else _c[o + Disc] += n;',
         '_c[o + Cyc] += c;',
+        '_c[o + Al] += al;',
         '}',
     ],
     SIG_LG_HBEGIN: [
         'Enq(Hash, 1);',
+        '_aHashOk = FtAlloc.Read(out _aHash);',
         'return FtClock.Cycles();',
     ],
     SIG_LG_HEND: [
-        'Serve(Hash, 1, ok, k0, FtClock.Cycles());',
+        'ulong k1 = FtClock.Cycles();',
+        'long a1;',
+        'bool aok = FtAlloc.Read(out a1) && _aHashOk;',
+        'Serve(Hash, 1, ok, k0, k1, _aHash, a1, aok);',
     ],
     SIG_LG_RENTER: [
         'if (Thread.CurrentThread.ManagedThreadId != FtSpan.MainThread) Interlocked.Increment(ref RecvOffMain);',
         'Enq(Recv, 1);',
+        'FtSpan.EnterP();',
         'return FtClock.Cycles();',
     ],
     SIG_LG_REXIT: [
-        'Serve(Recv, 1, true, k0, FtClock.Cycles());',
+        'Serve(Recv, 1, true, k0, FtClock.Cycles(), 0, 0, false);',
+        'FtSpan.LeaveP();',
+    ],
+    SIG_LG_RCENTER: [
+        'FtSpan.EnterP();',
+        'return FtClock.Cycles();',
     ],
     SIG_LG_RCYC: [
-        'Serve(Recv, 0, true, k0, FtClock.Cycles());',
+        'Serve(Recv, 0, true, k0, FtClock.Cycles(), 0, 0, false);',
+        'FtSpan.LeaveP();',
     ],
     SIG_LG_SBUCKET: [
         'int i = System.Array.BinarySearch(SockEdge, c);',
@@ -806,11 +993,14 @@ TIP_P1_LEDGER = {
         '_sockThread = id;',
         '}',
         'lock (_lock) _c[Sock * Per + EnqOn]++;',
+        '_aSockOk = FtAlloc.Read(out _aSock);',
         'return FtClock.Cycles();',
     ],
     SIG_LG_SEXIT: [
         'ulong k1 = FtClock.Cycles();',
-        'Serve(Sock, 1, true, k0, k1);',
+        'long a1;',
+        'bool aok = FtAlloc.Read(out a1) && _aSockOk;',
+        'Serve(Sock, 1, true, k0, k1, _aSock, a1, aok);',
         'long c = k0 == 0 || k1 == 0 ? 0 : unchecked((long)(k1 - k0));',
         'Interlocked.Increment(ref _sockHist[SockBucket(c)]);',
     ],
@@ -859,6 +1049,315 @@ TIP_P1_LEDGER = {
     ],
     SIG_SOCK_FIN: [
         'FtLedger.SockExit(__state);',
+    ],
+}
+
+TIP_P1_ALLOC = {
+    SIG_AL_FN: [
+        '0x48, 0x8b, 0x05, 0x81, 0x3a, 0x28, 0x00, 0x48, 0x03, 0x05, 0x82, 0x3a, 0x28, 0x00, 0xc3',
+    ],
+    SIG_AL_INIT: [
+        'Ok = false;',
+        'try',
+        '{',
+        'IntPtr h = GetModuleHandleW(ModuleName);',
+        'if (h == IntPtr.Zero) { Why = "no_module"; return; }',
+        'var sb = new StringBuilder(1024);',
+        'uint n = GetModuleFileNameW(h, sb, (uint)sb.Capacity);',
+        'if (n == 0 || n >= sb.Capacity) { Why = "no_path"; return; }',
+        'string sha;',
+        'using (var alg = SHA256.Create())',
+        'using (var f = File.OpenRead(sb.ToString(0, (int)n)))',
+        '{',
+        'var d = alg.ComputeHash(f);',
+        'var hex = new StringBuilder(64);',
+        'foreach (byte b in d) hex.Append(b.ToString("x2"));',
+        'sha = hex.ToString();',
+        '}',
+        'if (sha != PinSha256) { Why = "sha"; return; }',
+        'for (int i = 0; i < FnBytes.Length; i++)',
+        'if (Marshal.ReadByte(h, RvaFn + i) != FnBytes[i]) { Why = "code"; return; }',
+        '_wa = new IntPtr(h.ToInt64() + RvaA);',
+        '_wb = new IntPtr(h.ToInt64() + RvaB);',
+        'Ok = true;',
+        'Why = "ok";',
+        '}',
+        'catch (Exception ex) { Why = "failed:" + ex.GetType().Name; Ok = false; }',
+        'finally { Plugin.Log.LogInfo("[FRAME-TIME] alloc_init why=" + Why); }',
+    ],
+    SIG_AL_READ: [
+        'total = 0;',
+        'if (!Ok) return false;',
+        'if (MutantK1) _box = new byte[MutantBytes];',
+        'long a = 0, b = 0;',
+        'for (int i = 0; i < Tries; i++)',
+        '{',
+        'a = Marshal.ReadInt64(_wa);',
+        'b = Marshal.ReadInt64(_wb);',
+        'long a2 = Marshal.ReadInt64(_wa), b2 = Marshal.ReadInt64(_wb);',
+        'if (a == a2 && b == b2)',
+        '{',
+        'total = Back(a + b);',
+        'return true;',
+        '}',
+        'a = a2;',
+        'b = b2;',
+        '}',
+        'Interlocked.Increment(ref AbRetry);',
+        'total = Back(a + b);',
+        'return true;',
+    ],
+    SIG_AL_BACK: [
+        'if (t < _last) Interlocked.Increment(ref AbBack);',
+        '_last = t;',
+        'return t;',
+    ],
+    SIG_AL_DELTA: [
+        'return a1 > a0 ? a1 - a0 : 0;',
+    ],
+    SIG_AL_CAL: [
+        'string planted = "NA", empty = "NA";',
+        'if (Ok)',
+        '{',
+        'var d = new long[PlantN];',
+        'var e = new long[EmptyN];',
+        'for (int i = 0; i < PlantN; i++)',
+        '{',
+        'long a0, a1;',
+        'Read(out a0);',
+        '_plant = new byte[PlantBytes];',
+        'Read(out a1);',
+        'd[i] = Delta(a0, a1);',
+        '}',
+        '_plant = null;',
+        'for (int i = 0; i < EmptyN; i++)',
+        '{',
+        'long a0, a1;',
+        'Read(out a0);',
+        'Read(out a1);',
+        'e[i] = Delta(a0, a1);',
+        '}',
+        'Array.Sort(d);',
+        'Array.Sort(e);',
+        'planted = d[PlantN / 2].ToString();',
+        'empty = e[EmptyN / 2].ToString();',
+        '}',
+        'Plugin.Log.LogInfo("[FRAME-TIME] alloc pin=" + (Ok ? "ok" : "differs") + " planted=" + planted + "/" + PlantBytes',
+        '+ " empty=" + empty);',
+    ],
+}
+
+TIP_P1_PHOTON = {
+    SIG_PH_XNAMES: [
+        '"DispatchIncomingCommands", "SendOutgoingCommands", "SendAcksOnly", "Service"',
+    ],
+    SIG_PH_ENAMES: [
+        'new KeyValuePair<string, Type[]>("OnOperationResponse", new[] { typeof(ExitGames.Client.Photon.OperationResponse) }),',
+        'new KeyValuePair<string, Type[]>("OnEvent", new[] { typeof(ExitGames.Client.Photon.EventData) }),',
+        'new KeyValuePair<string, Type[]>("OnStatusChanged", new[] { typeof(ExitGames.Client.Photon.StatusCode) }),',
+        'new KeyValuePair<string, Type[]>("DebugReturn", new[] { typeof(ExitGames.Client.Photon.DebugLevel), typeof(string) }),',
+        'new KeyValuePair<string, Type[]>("OnMessage", new[] { typeof(object) }),',
+        'new KeyValuePair<string, Type[]>("OnDisconnectMessageReceived", new[] { typeof(ExitGames.Client.Photon.DisconnectMessage) }),',
+    ],
+    SIG_PH_X: [
+        'var list = new List<MethodBase>();',
+        'foreach (string n in XNames)',
+        '{',
+        'var m = AccessTools.Method(typeof(ExitGames.Client.Photon.PhotonPeer), n, Type.EmptyTypes);',
+        'if (m == null || m.DeclaringType != typeof(ExitGames.Client.Photon.PhotonPeer))',
+        'throw new Exception("PhotonPeer." + n + "() not found - no class X scope");',
+        'list.Add(m);',
+        '}',
+        'return list;',
+    ],
+    SIG_PH_E: [
+        'var list = new List<MethodBase>();',
+        'foreach (var kv in ENames)',
+        '{',
+        'var m = AccessTools.Method(typeof(Photon.Realtime.LoadBalancingClient), kv.Key, kv.Value);',
+        'if (m == null || m.DeclaringType != typeof(Photon.Realtime.LoadBalancingClient))',
+        'throw new Exception("LoadBalancingClient." + kv.Key + " not found - no class E scope");',
+        'list.Add(m);',
+        '}',
+        'return list;',
+    ],
+    SIG_PH_REPORT: [
+        'var names = new List<string>();',
+        'Count(names, XTargets, typeof(FtPhotonXPatch));',
+        'Count(names, ETargets, typeof(FtPhotonEPatch));',
+        'Plugin.Log.LogInfo("[FRAME-TIME] photon patches n=" + names.Count + " names=" + string.Join(",", names.ToArray()));',
+    ],
+    SIG_PH_COUNT: [
+        'MethodInfo pre = AccessTools.Method(patch, "Prefix"), fin = AccessTools.Method(patch, "Finalizer");',
+        'IEnumerable<MethodBase> ms;',
+        'try { ms = targets(); }',
+        'catch { return; }',
+        'foreach (var m in ms)',
+        '{',
+        'bool p = false, f = false;',
+        'try',
+        '{',
+        'var info = Harmony.GetPatchInfo(m);',
+        'if (info != null)',
+        '{',
+        'foreach (var x in info.Prefixes) if (Same(x.PatchMethod, pre)) p = true;',
+        'foreach (var x in info.Finalizers) if (Same(x.PatchMethod, fin)) f = true;',
+        '}',
+        '}',
+        'catch { }',
+        'if (p && f) names.Add(m.DeclaringType.Name + "." + m.Name);',
+        '}',
+    ],
+    SIG_PH_SAME: [
+        'return a != null && b != null && a.Module == b.Module && a.MetadataToken == b.MetadataToken;',
+    ],
+    SIG_PH_NEST: [
+        'var st = FtSpan.Save();',
+        'long x0 = FtSpan.Acc[FtSpan.ClsX], p0 = FtSpan.Acc[FtSpan.ClsP];',
+        'int dx = FtSpan.EnterX();',
+        'long e0 = FtSpan.Acc[FtSpan.ClsE];',
+        'FtSpan.Spin(FtSpan.PlantUs);',
+        'int de = FtSpan.EnterListener();',
+        'FtSpan.Spin(FtSpan.PlantUs);',
+        'ulong k = FtLedger.RecvEnter();',
+        'FtSpan.Spin(FtSpan.PlantUs);',
+        'FtLedger.RecvExit(k);',
+        'FtSpan.Leave(de);',
+        'FtSpan.Leave(dx);',
+        'long x = FtSpan.Acc[FtSpan.ClsX] - x0, e = FtSpan.Acc[FtSpan.ClsE] - e0, p = FtSpan.Acc[FtSpan.ClsP] - p0;',
+        'FtSpan.Restore(st);',
+        'Plugin.Log.LogInfo("[FRAME-TIME] nest plant asked=" + FtSpan.PlantUs + " x=" + FtSpan.Us(x) + " e=" + FtSpan.Us(e)',
+        '+ " p=" + FtSpan.Us(p));',
+    ],
+    SIG_PH_XPATCH: [
+        'private static IEnumerable<MethodBase> TargetMethods()',
+        '{',
+        'return FtPhoton.XTargets();',
+        '}',
+        '[HarmonyPrefix]',
+        '[HarmonyPriority(Priority.First)]',
+        'private static void Prefix(out int __state)',
+        '{',
+        '__state = FtSpan.EnterX();',
+        '}',
+        '[HarmonyFinalizer]',
+        '[HarmonyPriority(Priority.Last)]',
+        'private static void Finalizer(int __state)',
+        '{',
+        'FtSpan.Leave(__state);',
+        '}',
+    ],
+    SIG_PH_EPATCH: [
+        'private static IEnumerable<MethodBase> TargetMethods()',
+        '{',
+        'return FtPhoton.ETargets();',
+        '}',
+        '[HarmonyPrefix]',
+        '[HarmonyPriority(Priority.First)]',
+        'private static void Prefix(out int __state)',
+        '{',
+        '__state = FtSpan.EnterListener();',
+        '}',
+        '[HarmonyFinalizer]',
+        '[HarmonyPriority(Priority.Last)]',
+        'private static void Finalizer(int __state)',
+        '{',
+        'FtSpan.Leave(__state);',
+        '}',
+    ],
+}
+
+TIP_P1_CENSUS = {
+    SIG_CE_LOG: [
+        'int entries = 0, wrapped = 0;',
+        'string why = "";',
+        'try',
+        '{',
+        'const BindingFlags All = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static | BindingFlags.Instance',
+        '| BindingFlags.DeclaredOnly;',
+        'int skip = typeof(FtCensus).GetMethod("Skip", BindingFlags.NonPublic | BindingFlags.Static).MetadataToken;',
+        'int open = typeof(FtSpan).GetMethod("Open", BindingFlags.NonPublic | BindingFlags.Static).MetadataToken;',
+        'int close = typeof(FtSpan).GetMethod("Close", BindingFlags.NonPublic | BindingFlags.Static).MetadataToken;',
+        'Module mod = typeof(FtCensus).Module;',
+        'var sites = new int[Capacity];',
+        'var good = new int[Capacity];',
+        'Type[] types;',
+        'try { types = mod.Assembly.GetTypes(); }',
+        'catch (ReflectionTypeLoadException ex) { types = ex.Types; why = " partial=1"; }',
+        'var found = new List<int>();',
+        'foreach (var t in types)',
+        '{',
+        'if (t == null) continue;',
+        'var ms = new List<MethodBase>();',
+        'try { ms.AddRange(t.GetMethods(All)); ms.AddRange(t.GetConstructors(All)); }',
+        'catch { continue; }',
+        'foreach (var m in ms)',
+        '{',
+        'byte[] il;',
+        'try { var body = m.GetMethodBody(); il = body != null ? body.GetILAsByteArray() : null; }',
+        'catch { il = null; }',
+        'if (il == null) continue;',
+        'bool opens, closes;',
+        'found.Clear();',
+        'ScanIl(il, skip, open, close, found, out opens, out closes);',
+        'foreach (int e in found)',
+        '{',
+        'if (e < 0 || e >= Capacity) continue;',
+        'sites[e]++;',
+        'if (opens && closes) good[e]++;',
+        '}',
+        '}',
+        '}',
+        'for (int e = 0; e < Count; e++)',
+        '{',
+        'if (Names[e] == null) continue;',
+        'entries++;',
+        'if (sites[e] > 0 && good[e] == sites[e]) wrapped++;',
+        '}',
+        '}',
+        'catch (System.Exception ex) { why = " failed=" + ex.GetType().Name; }',
+        'Plugin.Log.LogInfo("[FRAME-TIME] scope census entries=" + entries + " wrapped=" + wrapped + why);',
+    ],
+    SIG_CE_SCAN: [
+        'if (_ops == null)',
+        '{',
+        'var d = new Dictionary<short, OpCode>();',
+        'foreach (var f in typeof(OpCodes).GetFields(BindingFlags.Public | BindingFlags.Static))',
+        'if (f.GetValue(null) is OpCode oc) d[oc.Value] = oc;',
+        '_ops = d;',
+        '}',
+        'opens = closes = false;',
+        'int last = int.MinValue;   // the constant the previous instruction pushed, if it was an ldc.i4',
+        'int i = 0;',
+        'while (i < il.Length)',
+        '{',
+        'short v = il[i] == 0xFE && i + 1 < il.Length ? (short)(0xFE00 | il[i + 1]) : il[i];',
+        'i += il[i] == 0xFE ? 2 : 1;',
+        'OpCode oc;',
+        'if (!_ops.TryGetValue(v, out oc)) return;',
+        'int c = int.MinValue;',
+        'if (v >= 0x15 && v <= 0x1E) c = v - 0x16;                     // ldc.i4.m1 to ldc.i4.8',
+        'else if (v == 0x1F) c = (sbyte)il[i];                          // ldc.i4.s',
+        'else if (v == 0x20) c = BitConverter.ToInt32(il, i);           // ldc.i4',
+        'if (oc.OperandType == OperandType.InlineMethod && (v == 0x28 || v == 0x6F))   // call, callvirt',
+        '{',
+        'int tok = BitConverter.ToInt32(il, i);',
+        'if (tok == skip && last != int.MinValue) found.Add(last);',
+        'else if (tok == skip) found.Add(-1);',
+        'if (tok == open) opens = true;',
+        'if (tok == close) closes = true;',
+        '}',
+        'switch (oc.OperandType)',
+        '{',
+        'case OperandType.InlineNone: break;',
+        'case OperandType.ShortInlineBrTarget: case OperandType.ShortInlineI: case OperandType.ShortInlineVar: i += 1; break;',
+        'case OperandType.InlineVar: i += 2; break;',
+        'case OperandType.InlineI8: case OperandType.InlineR: i += 8; break;',
+        'case OperandType.InlineSwitch: i += 4 + 4 * BitConverter.ToInt32(il, i); break;',
+        'default: i += 4; break;',
+        '}',
+        'last = c;',
+        '}',
     ],
 }
 
@@ -935,7 +1434,7 @@ SIG_OMS = "private static void OnMatchStarted()"
 def _sources():
     return {n: _src(n) for n in ("FtSchedule.cs", "FtDrive.cs", "FtFrames.cs", "FtSpan.cs", "FtCensus.cs",
                                  "FtReplay.cs", "FtClock.cs", "GameStateWatcher.cs", "FtCalib.cs", "FtPlant.cs",
-                                 "FtUpload.cs")}
+                                 "FtUpload.cs", "FtAlloc.cs", "FtPhoton.cs")}
 
 
 def pin_violations(srcs):
@@ -945,7 +1444,8 @@ def pin_violations(srcs):
     bad = []
     for name, table in (("FtSchedule.cs", TIP), ("FtDrive.cs", TIP_DRIVE), ("FtFrames.cs", TIP_FRAMES),
                         ("FtSchedule.cs", TIP_P1_SCHED), ("FtFrames.cs", TIP_P1_FRAMES), ("FtSpan.cs", TIP_P1_SPAN),
-                        ("FtClock.cs", TIP_P1_CLOCK), ("FtPlant.cs", TIP_P1_PLANT), ("FtUpload.cs", TIP_P1_LEDGER)):
+                        ("FtClock.cs", TIP_P1_CLOCK), ("FtPlant.cs", TIP_P1_PLANT), ("FtUpload.cs", TIP_P1_LEDGER),
+                        ("FtAlloc.cs", TIP_P1_ALLOC), ("FtPhoton.cs", TIP_P1_PHOTON), ("FtCensus.cs", TIP_P1_CENSUS)):
         for sig, want in table.items():
             try:
                 got = _body(srcs[name], sig)
@@ -1401,10 +1901,13 @@ class Sched:
     def __init__(self, boundary="tip", gamestart="tip", gameover="tip", closing="tip", open_="tip", settle="tip",
                  flush="tip", sitting="tip", matchend="tip", photon="tip", replay="tip", endowed="tip",
                  menu_guard="tip", last_game=99, settle_frames=3, menu=False, schedule="tip", plant="tip",
-                 owner="tip", W=2, seed=7):
+                 owner="tip", W=2, seed=7, force="none", arm="tip", armed=True):
         self.v = dict(boundary=boundary, gamestart=gamestart, gameover=gameover, closing=closing, open_=open_,
                       settle=settle, flush=flush, sitting=sitting, matchend=matchend, photon=photon, replay=replay,
-                      endowed=endowed, menu_guard=menu_guard, schedule=schedule, plant=plant)
+                      endowed=endowed, menu_guard=menu_guard, schedule=schedule, plant=plant, arm=arm)
+        # V6 (K4): FtConfig.Force, read by ForcedArm; armed is FtArm.Armed. arm 'coin' is the pre-V6 OpenWindow: the
+        # window's arm kept the committed coin while force= set only the gate
+        self.force, self.armed = force, armed
         # B11 P1: the window schedule (OpenWindow) and FtFrames' ownership (FramesPort); W is the port's window
         # length (C#'s 120 is pinned), 2 so the short sequences fill windows
         self.W, self.seed = W, seed
@@ -1544,11 +2047,16 @@ class Sched:
         self.WinPlant = self.run_plant
         self.WinRes = (r == 0 and self.last_plant) if self.v["plant"] != "res_last" else (r == 3 and self.WinPlant)
         self.PrevArm = self.last_arm
-        self.ArmOn = on
-        self.last_arm = 1 if on else 0
+        if self.v["arm"] == "coin":
+            self.ArmOn = on
+            self.gate = self.armed and (self.force == "OFF" or (self.force == "none" and not on))
+        else:
+            self.ArmOn = self.force == "ON" or (self.force == "none" and on)     # ForcedArm
+            self.gate = self.armed and not self.ArmOn
+        self.last_arm = 1 if self.ArmOn else 0
         self.last_plant = self.WinPlant
-        self.gate = not on
-        self.ev("window", self.label(), k, on, self.PrevArm, self.WinPos, self.WinPlant, self.WinRes, self.WinP24)
+        self.ev("window", self.label(), k, self.ArmOn, self.PrevArm, self.WinPos, self.WinPlant, self.WinRes,
+                self.WinP24, self.gate)
 
     # SIG_END
     def end_point(self):
@@ -2269,10 +2777,11 @@ def test_p1_constants_are_the_port_s():
 
 
 @pytest.mark.parametrize("table", ["TIP_P1_SCHED", "TIP_P1_FRAMES", "TIP_P1_SPAN", "TIP_P1_CLOCK", "TIP_P1_PLANT",
-                                   "TIP_P1_LEDGER"])
+                                   "TIP_P1_LEDGER", "TIP_P1_ALLOC", "TIP_P1_PHOTON", "TIP_P1_CENSUS"])
 def test_p1_bodies_are_the_port(table):
     fname = {"TIP_P1_SCHED": "FtSchedule.cs", "TIP_P1_FRAMES": "FtFrames.cs", "TIP_P1_SPAN": "FtSpan.cs",
-             "TIP_P1_CLOCK": "FtClock.cs", "TIP_P1_PLANT": "FtPlant.cs", "TIP_P1_LEDGER": "FtUpload.cs"}[table]
+             "TIP_P1_CLOCK": "FtClock.cs", "TIP_P1_PLANT": "FtPlant.cs", "TIP_P1_LEDGER": "FtUpload.cs",
+             "TIP_P1_ALLOC": "FtAlloc.cs", "TIP_P1_PHOTON": "FtPhoton.cs", "TIP_P1_CENSUS": "FtCensus.cs"}[table]
     for sig, want in globals()[table].items():
         assert _body(_src(fname), sig) == want, sig
 
@@ -2288,7 +2797,18 @@ P1_SOURCE_MUTANTS = {
     # GC left inside the classes
     "class_keeps_gc": ("FtSpan.cs", "            if (gok && _gok) d -= g - _g;\n", ""),
     # the tenths filled from F
-    "q_from_f_source": ("FtFrames.cs", "_tq[bin] += unchecked((long)c) - cg - cw;", "_tq[bin] += f;"),
+    "q_from_f_source": ("FtFrames.cs", "_tq[bin] += unchecked((long)c) - cg - dc[FtSpan.ClsW] - dc[FtSpan.ClsP];",
+                        "_tq[bin] += f;"),
+    # V6 (m1's source form): q keeps P
+    "q_keeps_p_source": ("FtFrames.cs", "_tq[bin] += unchecked((long)c) - cg - dc[FtSpan.ClsW] - dc[FtSpan.ClsP];",
+                         "_tq[bin] += unchecked((long)c) - cg - dc[FtSpan.ClsW];"),
+    # V6 (K4's source form): the window's arm back to the committed coin under force= (the pre-V6 OpenWindow)
+    "arm_follows_coin_source": ("FtSchedule.cs", "ArmOn = ForcedArm(r < 2 ? WinCoin == 1 : WinCoin == 0);",
+                                "ArmOn = r < 2 ? WinCoin == 1 : WinCoin == 0;"),
+    # V6: a listener callback inside X keeps X (the k3 switch, written into the source)
+    "listener_keeps_x_source": ("FtSpan.cs", "Push(_cls == ClsX && !MutantK3 ? ClsE : _cls);", "Push(_cls);"),
+    # V6: the counter read once per take (no double take)
+    "alloc_single_take": ("FtAlloc.cs", "                if (a == a2 && b == b2)\n", "                if (true)\n"),
     # a token counted before its line is written
     "tok_before_write": ("FtUpload.cs", "                FtSpan.PushWriter();\n                try { _in.WriteLine(value); }",
                          "                lock (_lock) { _pendingLog++; }\n                FtSpan.PushWriter();\n"
@@ -2305,11 +2825,11 @@ def test_p1_source_mutant_fails(name):
 
 # ------------------------------------------------------------------ the schedule (ruling .138 (4), D1)
 
-def window_events(schedule="tip", plant="tip", seeds=range(60), games=3, points=8):
+def window_events(schedule="tip", plant="tip", seeds=range(60), games=3, points=8, force="none", arm="tip"):
     """OpenWindow driven directly over many points: per seed and game, points of 1 to 14 windows each, in order."""
     out = []
     for seed in seeds:
-        s = Sched(schedule=schedule, plant=plant, seed=seed)
+        s = Sched(schedule=schedule, plant=plant, seed=seed, force=force, arm=arm)
         for g in range(games):
             s.Game = g
             for p in range(points):
@@ -2319,7 +2839,7 @@ def window_events(schedule="tip", plant="tip", seeds=range(60), games=3, points=
                     s.open_window(k)
                     e = s.events[-1]
                     out.append(dict(seed=seed, game=g, pt=e[1], k=e[2], on=e[3], pred=e[4], pos=e[5], plant=e[6],
-                                    res=e[7]))
+                                    res=e[7], gate=e[9]))
     return out
 
 
@@ -2553,69 +3073,143 @@ def test_p1_endpoint_writes_once():
 
 # ------------------------------------------------------------------ the partition and its tenths
 
-CLS_G, CLS_W, CLS_R, CLS_S, CLS_E = range(5)
+CLS_G, CLS_W, CLS_R, CLS_S, CLS_E, CLS_P, CLS_X = range(7)
+NCLS = 7
 CLASS_OF_KIND = {"gated": CLS_S, "upkeep": CLS_R, "replay": CLS_R, "writer": CLS_W}
+A_KEYS = (("aW", CLS_W), ("aR", CLS_R), ("aS", CLS_S), ("aE", CLS_E), ("aP", CLS_P), ("aX", CLS_X))
+C_KEYS = (("cW", CLS_W), ("cR", CLS_R), ("cS", CLS_S), ("cE", CLS_E), ("cP", CLS_P), ("cX", CLS_X))
 
 
 class Thread:
-    """The main thread: k its executed cycles, gc the GC hook's cycles, t the Stopwatch."""
+    """The main thread: k its executed cycles, gc the GC hook's cycles, t the Stopwatch, al the allocation counter
+    (the process's bytes allocated, FtAlloc)."""
 
     def __init__(self):
-        self.k = self.gc = self.t = 0
+        self.k = self.gc = self.t = self.al = 0
 
 
 class SpanPort:
-    """FtSpan's class stack (TIP_P1_SPAN: Mark, Switch, Cut, Open, Close, PushWriter, PopWriter). mutant 'drop_g'
-    leaves GC inside the classes."""
+    """FtSpan's class stack (TIP_P1_SPAN: Mark, Switch, Save, Restore, Cut, Push, Pop, Open, Close, PushWriter,
+    PopWriter, EnterP, LeaveP, EnterX, EnterListener, Leave, CalibrateMarks, PlantScope; FtPhoton.PlantNest). Mutants:
+    'drop_g' leaves GC inside the classes; 'cal_no_restore' keeps the calibration's transitions; 'k2' books a gated
+    scope in E (the k2 switch); 'k3' keeps a listener callback inside X in X (the k3 switch); 'listener_always_e'
+    moves every listener callback to E, inside a collector scope too; 'x_drops_w' opens X inside a writer scope;
+    'p_drops_w' opens P inside a writer scope; 'alloc_lost' never moves bytes to a class."""
 
     def __init__(self, th, mutant="tip"):
         self.th, self.m = th, mutant
-        self.acc, self.cls, self.prev = [0] * 5, CLS_E, []
-        self.k, self.g, self.gok = 0, 0, False
+        self.acc, self.acca, self.cls, self.prev = [0] * NCLS, [0] * NCLS, CLS_E, []
+        self.k, self.g, self.gok, self.a = 0, 0, False, 0
         self.marks = 0
+        self.depth = 0          # the component spans (Open/Close), apart from the class stack
 
-    def mark(self, k, g, gok):
+    def mark(self, k, g, gok, a):
         d = k - self.k
         if gok and self.gok and self.m != "drop_g":
             d -= g - self.g
         self.acc[self.cls] += d
-        self.k, self.g, self.gok = k, g, gok
+        if self.m != "alloc_lost":
+            self.acca[self.cls] += a - self.a if a > self.a else 0
+        self.k, self.g, self.gok, self.a = k, g, gok, a
 
     def switch(self, cls):
         self.marks += 1
-        self.mark(self.th.k, self.th.gc, True)
+        self.mark(self.th.k, self.th.gc, True, self.th.al)
         self.cls = cls
 
+    def save(self):
+        return list(self.acc), list(self.acca), self.cls, self.k, self.g, self.gok, self.a, self.marks
+
+    def restore(self, s):
+        self.acc, self.acca = list(s[0]), list(s[1])
+        self.cls, self.k, self.g, self.gok, self.a, self.marks = s[2:]
+
     def calibrate(self, n, step=7):
-        """CalibrateMarks: n transitions between S and R, then Acc, Marks and the class state restored (mutant
-        'cal_no_restore' keeps what the transitions did)."""
-        saved = (list(self.acc), self.cls, self.k, self.g, self.gok, self.marks)
+        """CalibrateMarks: n transitions between S and R, then the class state restored (Save, Restore)."""
+        saved = self.save()
         for i in range(n):
             self.th.k += step
             self.switch(CLS_S if i % 2 == 0 else CLS_R)
         if self.m != "cal_no_restore":
-            self.acc, self.cls, self.k, self.g, self.gok, self.marks = saved
+            self.restore(saved)
 
-    def cut(self, k, g, gok):
-        self.mark(k, g, gok)
+    def cut(self, k, g, gok, a=None):
+        self.mark(k, g, gok, self.th.al if a is None else a)
 
-    def open(self, kind):
+    def push(self, cls):
         self.prev.append(self.cls)
-        cls = CLS_W if self.cls == CLS_W else CLASS_OF_KIND[kind]
         if cls != self.cls:
             self.switch(cls)
 
-    def close(self):
+    def pop(self):
         p = self.prev.pop()
         if p != self.cls:
             self.switch(p)
 
-    def push_writer(self):
-        self.prev.append(self.cls)
-        if self.cls != CLS_W:
-            self.switch(CLS_W)
+    def open(self, kind):
+        k = CLS_E if self.m == "k2" and kind == "gated" else CLASS_OF_KIND[kind]
+        self.push(CLS_W if self.cls == CLS_W else k)
+        self.depth += 1
 
-    pop_writer = close
+    def close(self):
+        self.depth -= 1
+        self.pop()
+
+    def push_writer(self):
+        self.push(CLS_W)
+
+    pop_writer = pop
+
+    def enter_p(self):
+        self.push(CLS_W if self.cls == CLS_W and self.m != "p_drops_w" else CLS_P)
+
+    leave_p = pop
+
+    def enter_x(self):
+        d = len(self.prev)
+        self.push(CLS_W if self.cls == CLS_W and self.m != "x_drops_w" else CLS_X)
+        return d
+
+    def enter_listener(self):
+        d = len(self.prev)
+        if self.m == "listener_always_e":
+            self.push(CLS_E)
+        else:
+            self.push(CLS_E if self.cls == CLS_X and self.m != "k3" else self.cls)
+        return d
+
+    def leave(self, d):
+        while len(self.prev) > d:
+            self.pop()
+
+    def plant_scope(self, us=2000):
+        """PlantScope (K2): a spin of us inside a gated scope, and the cycles class S gained."""
+        st, s0 = self.save(), self.acc[CLS_S]
+        self.open("gated")
+        self.th.k += us
+        self.close()
+        got = self.acc[CLS_S] - s0
+        self.restore(st)
+        return got
+
+    def plant_nest(self, us=2000):
+        """FtPhoton.PlantNest (K3): X around E around P (RecvEnter, RecvExit), a spin in each before the next opens;
+        each class's gain, E's base read after X opens."""
+        st = self.save()
+        x0, p0 = self.acc[CLS_X], self.acc[CLS_P]
+        dx = self.enter_x()
+        e0 = self.acc[CLS_E]
+        self.th.k += us
+        de = self.enter_listener()
+        self.th.k += us
+        self.enter_p()
+        self.th.k += us
+        self.leave_p()
+        self.leave(de)
+        self.leave(dx)
+        got = (self.acc[CLS_X] - x0, self.acc[CLS_E] - e0, self.acc[CLS_P] - p0)
+        self.restore(st)
+        return got
 
 
 class LedgerPort:
@@ -2650,43 +3244,59 @@ class LedgerPort:
 
 
 class RecordsPort:
-    """FtClock.OnStart's per-frame partition and FtFrames' window sums and tenths (TIP_P1_CLOCK, TIP_P1_FRAMES).
-    mutant 'q_from_f' fills q from the frame period."""
+    """FtClock.OnStart's per-frame partition and FtFrames' window sums and tenths (TIP_P1_CLOCK, TIP_P1_FRAMES), in
+    cycles and in bytes. Mutants: 'q_from_f' fills q from the frame period; 'q_keeps_p' leaves P in q and
+    'q_loses_p_twice' takes it out twice (m1's two forms); 'drop_cx' leaves cX out of the window (m2's form)."""
 
     def __init__(self, th, span, ledger, W=24, mutant="tip"):
         self.th, self.span, self.ledger, self.W, self.m = th, span, ledger, W, mutant
-        self.open, self.acc0, self.gprev, self.k0, self.t0 = False, [0] * 5, 0, 0, 0
+        self.open, self.acc0, self.acca0 = False, [0] * NCLS, [0] * NCLS
+        self.gprev, self.k0, self.t0, self.a0 = 0, 0, 0, 0
         self.recs, self.arm = [], None
         self.lb = ledger.take()
         self._reset()
 
     def _reset(self):
-        self.w = dict(n=0, sF=0, sC=0, cG=0, cW=0, cR=0, cS=0, cE=0, q=[0] * (self.W // BIN), r=[0] * (self.W // BIN),
+        self.w = dict(n=0, sF=0, sC=0, cG=0, aC=0, q=[0] * (self.W // BIN), r=[0] * (self.W // BIN),
                       qn=[0] * (self.W // BIN))
+        for key, _ in C_KEYS + A_KEYS:
+            self.w[key] = 0
 
     def on_start(self, arm):
         """FT_Start: the closing frame's readings, the cut, the frame's partition, then the next frame's arm."""
-        th, a = self.th, self.span.acc
-        self.span.cut(th.k, th.gc, True)
+        th, a, aa = self.th, self.span.acc, self.span.acca
+        self.span.cut(th.k, th.gc, True, th.al)
         if self.open:
-            self.frame(th.t - self.t0, th.k - self.k0, th.gc - self.gprev, a[CLS_W] - self.acc0[CLS_W],
-                       a[CLS_R] - self.acc0[CLS_R], a[CLS_S] - self.acc0[CLS_S], a[CLS_E] - self.acc0[CLS_E])
-        self.acc0, self.gprev, self.k0, self.t0, self.open = list(a), th.gc, th.k, th.t, True
+            dc = [a[i] - self.acc0[i] for i in range(NCLS)]
+            da = [aa[i] - self.acca0[i] for i in range(NCLS)]
+            self.frame(th.t - self.t0, th.k - self.k0, th.gc - self.gprev, dc, th.al - self.a0, da)
+        self.acc0, self.acca0, self.gprev, self.k0, self.t0, self.a0 = list(a), list(aa), th.gc, th.k, th.t, th.al
+        self.open = True
         if arm is not None and self.w["n"] == 0:
             self.arm = arm
 
-    def frame(self, f, c, cg, cw, cr, cs, ce):
+    def frame(self, f, c, cg, dc, ac, da):
         w, b = self.w, self.w["n"] // BIN
         w["n"] += 1
         w["sF"] += f
         w["sC"] += c
         w["cG"] += cg
-        w["cW"] += cw
-        w["cR"] += cr
-        w["cS"] += cs
-        w["cE"] += ce
-        w["q"][b] += f if self.m == "q_from_f" else c - cg - cw
-        w["r"][b] += cr
+        for key, i in C_KEYS:
+            if key != "cX" or self.m != "drop_cx":
+                w[key] += dc[i]
+        w["aC"] += ac
+        for key, i in A_KEYS:
+            w[key] += da[i]
+        if self.m == "q_from_f":
+            q = f
+        elif self.m == "q_keeps_p":
+            q = c - cg - dc[CLS_W]
+        elif self.m == "q_loses_p_twice":
+            q = c - cg - dc[CLS_W] - 2 * dc[CLS_P]
+        else:
+            q = c - cg - dc[CLS_W] - dc[CLS_P]
+        w["q"][b] += q
+        w["r"][b] += dc[CLS_R]
         w["qn"][b] += 1
         if w["n"] == self.W:
             le = self.ledger.take()
@@ -2700,14 +3310,17 @@ class RecordsPort:
 
 
 def partition_violations(recs):
-    """SHARED.md's invariants: sC = cG + cW + cR + cS + cE; sum(q) = sC - cG - cW; sum(r) = cR; sum(qn) = n; and the
-    tok reconciliation open0 + enqON + enqOFF = doneON + doneOFF + disc + open1."""
+    """SHARED.md's invariants (V6): sC = cG + cW + cR + cS + cP + cX + cE; sum(q) = sC - cG - cW - cP; sum(r) = cR;
+    sum(qn) = n; the tok reconciliation open0 + enqON + enqOFF = doneON + doneOFF + disc + open1; and in bytes, which
+    the window line can only bound (aE is not printed), aC >= aW + aR + aS + aP + aX, exactly aC with the port's aE."""
     bad = []
     for i, w in enumerate(recs):
-        if w["sC"] != w["cG"] + w["cW"] + w["cR"] + w["cS"] + w["cE"]:
-            bad.append("window %d: sC %d, partition %d" % (i, w["sC"], w["cG"] + w["cW"] + w["cR"] + w["cS"] + w["cE"]))
-        if sum(w["q"]) != w["sC"] - w["cG"] - w["cW"]:
-            bad.append("window %d: sum(q) %d, sC - cG - cW %d" % (i, sum(w["q"]), w["sC"] - w["cG"] - w["cW"]))
+        part = w["cG"] + w["cW"] + w["cR"] + w["cS"] + w["cP"] + w["cX"] + w["cE"]
+        if w["sC"] != part:
+            bad.append("window %d: sC %d, partition %d" % (i, w["sC"], part))
+        if sum(w["q"]) != w["sC"] - w["cG"] - w["cW"] - w["cP"]:
+            bad.append("window %d: sum(q) %d, sC - cG - cW - cP %d" % (i, sum(w["q"]),
+                                                                       w["sC"] - w["cG"] - w["cW"] - w["cP"]))
         if sum(w["r"]) != w["cR"]:
             bad.append("window %d: sum(r) %d, cR %d" % (i, sum(w["r"]), w["cR"]))
         if sum(w["qn"]) != w["n"]:
@@ -2715,6 +3328,9 @@ def partition_violations(recs):
         t = w["tok"]
         if t[0] + t[1] + t[2] != t[3] + t[4] + t[5] + t[6]:
             bad.append("window %d: tok %s does not reconcile" % (i, t))
+        bk = w["aW"] + w["aR"] + w["aS"] + w["aP"] + w["aX"]
+        if w["aC"] < bk or w["aC"] != bk + w["aE"]:
+            bad.append("window %d: aC %d, classes %d + aE %d" % (i, w["aC"], bk, w["aE"]))
     return bad
 
 
@@ -2732,13 +3348,18 @@ def arms_for(nwin, seed=5, points=4):
 
 
 def simulate(scenario, span_m="tip", rec_m="tip", ledger_m="tip", W=24, nwin=24, points=4,
-             e0=4000, r0=700, s0=1000, alpha=5, gamma=100, wbuf=60, sigma=240):
+             e0=4000, r0=700, s0=1000, alpha=5, gamma=100, wbuf=60, sigma=240, x0=300, e1=200, p0=150,
+             p_arm="both", gated=True, bytes_s=64, bytes_e=32, bytes_p=16):
     """Collectors in format M over the tip's window arms: every frame does e0 outside any scope and r0 in an upkeep
     scope (R, both arms); an ON frame also runs a gated scope (S) of s0 cycles with a nested upkeep read, allocates
     alpha units (scenarios 'alloc', 'both') and writes one log line as a W scope of wbuf cycles (a token;
     'enqueue', 'both'). Payment: GC of gamma per unit and the line's service of sigma, as W, at the window's last
-    frame ('direct') or at the next window's first frame (otherwise; the last window pays directly). Returns the
-    window records and the always-ON truth per frame."""
+    frame ('direct') or at the next window's first frame (otherwise; the last window pays directly). V6: every frame
+    also runs Photon's dispatch, an X scope of x0 cycles, with a listener callback inside it (E, e1 cycles of game
+    code) and inside that the peer's collector message, a P scope of p0 cycles; p_arm 'on' runs the message in the
+    ON frames only (the fixture whose arms differ only in P), and gated False runs no gated scope. Bytes: the gated
+    scope allocates bytes_s, the listener bytes_e, the message bytes_p. Returns the window records and the always-ON
+    truth per frame."""
     th = Thread()
     span = SpanPort(th, span_m)
     ledger = LedgerPort(ledger_m)
@@ -2776,9 +3397,22 @@ def simulate(scenario, span_m="tip", rec_m="tip", ledger_m="tip", W=24, nwin=24,
             span.open("upkeep")
             work(r0)
             span.close()
-            if on:
+            dx = span.enter_x()                     # PhotonPeer.DispatchIncomingCommands
+            work(x0)
+            de = span.enter_listener()              # LoadBalancingClient.OnEvent: the game's handler in E
+            work(e1)
+            th.al += bytes_e
+            if p_arm == "both" or on:
+                span.enter_p()                      # the peer's collector message (FtLedger.RecvEnter)
+                work(p0)
+                th.al += bytes_p
+                span.leave_p()
+            span.leave(de)
+            span.leave(dx)
+            if on and gated:
                 span.open("gated")
                 work(s0 // 2)
+                th.al += bytes_s
                 span.open("upkeep")                 # a nested retained read stays R and suspends S
                 work(50)
                 span.close()
@@ -2794,7 +3428,7 @@ def simulate(scenario, span_m="tip", rec_m="tip", ledger_m="tip", W=24, nwin=24,
             if fi == W - 1 and (direct or last):
                 pay(on)
     rec.on_start(None)
-    truth = r0 + s0 + (alpha * gamma if alloc else 0) + (wbuf + sigma if enq else 0)
+    truth = r0 + (s0 if gated else 0) + (alpha * gamma if alloc else 0) + (wbuf + sigma if enq else 0)
     return rec.recs, truth
 
 
@@ -2872,13 +3506,486 @@ def test_p1_token_without_producer_identity_fails():
     assert abs(recovery(recs) - truth) < 1e-6
 
 
+# ------------------------------------------------------------------ V6 (SHARED.md "V6: the direct bound"; rulings .146, .147)
+
+@pytest.mark.parametrize("scenario", SCENARIOS)
+def test_v6_classes_p_and_x_are_measured(scenario):
+    recs, _ = simulate(scenario)
+    assert all(w["cX"] > 0 and w["cP"] > 0 and w["cE"] > 0 for w in recs)
+    assert all(w["aS"] > 0 for w in recs if w["arm"]) and all(w["aS"] == 0 for w in recs if not w["arm"])
+    assert all(w["aP"] > 0 and w["aX"] == 0 for w in recs)    # X's own work allocates nothing here; E's bytes are E's
+
+
+@pytest.mark.parametrize("mutant", ["q_keeps_p", "q_loses_p_twice", "drop_cx"])
+def test_v6_partition_mutant_breaks_an_identity(mutant):
+    assert partition_violations(simulate("both")[0]) == []                 # the negative control
+    assert partition_violations(simulate("both", rec_m=mutant)[0]) != []
+
+
+def test_v6_alloc_lost_breaks_the_byte_identity():
+    assert partition_violations(simulate("both", span_m="alloc_lost")[0]) != []
+
+
+def _q_contrast(recs):
+    on, off, n1, n0 = _means(recs)
+    return sum(sum(w["q"]) for w in on) / n1 - sum(sum(w["q"]) for w in off) / n0
+
+
+def test_v6_arms_differing_only_in_p_give_contrast_0():
+    """q = C - G - W - P (m1's fixture on the emitter's side): P runs in the ON windows only and nothing else differs
+    between the arms, so the contrast on q is 0; q keeping P shows P as a contrast, and losing it twice its negative."""
+    recs, _ = simulate("direct", gated=False, p_arm="on")
+    assert partition_violations(recs) == []
+    assert abs(_q_contrast(recs)) < 1e-9
+    assert all(w["cP"] > 0 for w in recs if w["arm"]) and all(w["cP"] == 0 for w in recs if not w["arm"])
+    assert abs(_q_contrast(simulate("direct", gated=False, p_arm="on", rec_m="q_keeps_p")[0]) - 150) < 1e-9
+    assert abs(_q_contrast(simulate("direct", gated=False, p_arm="on", rec_m="q_loses_p_twice")[0]) + 150) < 1e-9
+
+
+@pytest.mark.parametrize("mutant,cls", [("x_drops_w", CLS_X), ("p_drops_w", CLS_P)])
+def test_v6_x_and_p_keep_w(mutant, cls):
+    """Inside a writer scope X and P stay W (ownership precedence: GC, writer, the rest)."""
+    for m, want in (("tip", 0), (mutant, 25)):
+        th = Thread()
+        sp = SpanPort(th, m)
+        sp.push_writer()
+        if cls == CLS_X:
+            d = sp.enter_x()
+            th.k += 25
+            sp.leave(d)
+        else:
+            sp.enter_p()
+            th.k += 25
+            sp.leave_p()
+        sp.pop_writer()
+        sp.cut(th.k, 0, True)
+        assert sp.acc[cls] == want and sp.acc[CLS_W] == 25 - want, m
+
+
+def test_v6_listener_is_e_only_inside_x():
+    """A listener callback inside X runs in E; anywhere else it keeps the class it found, so a collector scope stays
+    its own class. 'listener_always_e' moves it to E inside a gated scope; 'k3' keeps X."""
+    def run(m):
+        th = Thread()
+        sp = SpanPort(th, m)
+        sp.open("gated")
+        d = sp.enter_listener()
+        th.k += 10
+        sp.leave(d)
+        sp.close()
+        dx = sp.enter_x()
+        d = sp.enter_listener()
+        th.k += 20
+        sp.leave(d)
+        sp.leave(dx)
+        sp.cut(th.k, 0, True)
+        assert sp.prev == [] and sp.depth == 0
+        return sp.acc
+    a = run("tip")
+    assert a[CLS_S] == 10 and a[CLS_E] == 20 and a[CLS_X] == 0
+    assert run("listener_always_e")[CLS_S] == 0
+    assert run("k3")[CLS_X] == 20 and run("k3")[CLS_E] == 0
+
+
+def test_v6_leave_restores_the_depth_its_prefix_found():
+    """A finalizer pops back to its prefix's depth, so a scope left open inside a Photon call cannot outlive it;
+    an off-main prefix (-1) moves nothing."""
+    th = Thread()
+    sp = SpanPort(th)
+    dx = sp.enter_x()
+    sp.enter_listener()
+    sp.enter_p()                          # a handler that threw before its exit
+    sp.leave(dx)
+    assert sp.prev == [] and sp.cls == CLS_E
+    csharp = TIP_P1_SPAN[SIG_SP_LEAVE]
+    assert csharp == ['if (d < 0) return;', 'while (_sd > d) Pop();']
+
+
+# the controls (SHARED.md "What P1 builds"): each boot line's range, as the parser reads it
+K_TOL = 0.05
+K_ASKED_US = 2000
+PLANT_BYTES = 1 << 20
+
+
+def k1_ok(planted, empty, asked=PLANT_BYTES):
+    return asked <= planted <= asked + 4096 and empty == 0
+
+
+def k2_ok(got, asked=K_ASKED_US):
+    return abs(got - asked) <= K_TOL * asked
+
+
+def k3_ok(x, e, p, asked=K_ASKED_US):
+    return all(abs(v - asked) <= K_TOL * asked for v in (x, e, p))
+
+
+def test_v6_k2_scope_plant_and_its_switch():
+    for m, ok in (("tip", True), ("k2", False)):
+        sp = SpanPort(Thread(), m)
+        before = sp.save()
+        got = sp.plant_scope(K_ASKED_US)
+        assert k2_ok(got) == ok, (m, got)
+        assert sp.save() == before                          # the class state restored
+    assert SpanPort(Thread(), "k2").plant_scope(K_ASKED_US) == 0
+
+
+def test_v6_k3_nest_plant_and_its_switch():
+    sp = SpanPort(Thread())
+    before = sp.save()
+    assert sp.plant_nest(K_ASKED_US) == (K_ASKED_US,) * 3 and k3_ok(*sp.plant_nest(K_ASKED_US))
+    assert sp.save() == before
+    bad = SpanPort(Thread(), "k3").plant_nest(K_ASKED_US)
+    assert bad == (2 * K_ASKED_US, 0, K_ASKED_US) and not k3_ok(*bad)
+
+
+class Words:
+    """bdwgc's two counter words, written by the allocating threads: script maps a load's ordinal (from 1) to the
+    state (a, b) the words hold from that load on."""
+
+    def __init__(self, a=0, b=0, script=None):
+        self.a, self.b, self.n, self.script = a, b, 0, dict(script or {})
+
+    def load(self, which):
+        self.n += 1
+        if self.n in self.script:
+            self.a, self.b = self.script[self.n]
+        return self.a if which == "a" else self.b
+
+
+class AllocPort:
+    """FtAlloc.Read, Back and Delta (TIP_P1_ALLOC). Mutants: 'single_take' stands on the first take; 'no_retry_count'
+    never counts a read that never agreed; 'no_clamp' gives the signed difference; 'k1' allocates MutantBytes at
+    every read (the k1 switch), which the counter sees at once."""
+    TRIES = 4
+
+    def __init__(self, words, mutant="tip", mutant_bytes=4096):
+        self.w, self.m, self.mb = words, mutant, mutant_bytes
+        self.ab_back = self.ab_retry = 0
+        self.last = 0
+
+    def read(self):
+        if self.m == "k1":
+            self.w.a += self.mb
+        a = b = 0
+        for _ in range(self.TRIES):
+            a, b = self.w.load("a"), self.w.load("b")
+            a2, b2 = self.w.load("a"), self.w.load("b")
+            if (a == a2 and b == b2) or self.m == "single_take":
+                return self.back(a + b)
+            a, b = a2, b2
+        if self.m != "no_retry_count":
+            self.ab_retry += 1
+        return self.back(a + b)
+
+    def back(self, t):
+        if t < self.last:
+            self.ab_back += 1
+        self.last = t
+        return t
+
+    def delta(self, a0, a1):
+        if self.m == "no_clamp":
+            return a1 - a0
+        return a1 - a0 if a1 > a0 else 0
+
+
+def _transfer_between_takes():
+    """A collection's transfer (before += allocd, then allocd = 0) lands between the first take's two loads: the
+    first take holds the allocated bytes twice."""
+    return Words(a=5000, b=100000, script={2: (0, 105000)})
+
+
+def test_v6_alloc_double_take_survives_a_torn_read():
+    for m, ok in (("tip", True), ("single_take", False)):
+        p = AllocPort(_transfer_between_takes(), m)
+        t1, t2 = p.read(), p.read()
+        assert ((t1, t2) == (105000, 105000) and p.ab_back == 0) == ok, (m, t1, t2, p.ab_back)
+
+
+def test_v6_alloc_read_that_never_agrees_is_counted():
+    storm = {n: (16 * n, 0) for n in range(1, 64)}         # another thread allocating between every two loads
+    assert AllocPort(Words(script=storm)).read() > 0
+    p = AllocPort(Words(script=storm))
+    p.read()
+    assert p.ab_retry == 1 and p.w.n == 4 * AllocPort.TRIES
+    q = AllocPort(Words(script=storm), "no_retry_count")
+    q.read()
+    assert q.ab_retry == 0
+    calm = AllocPort(Words(a=7, b=9))
+    assert calm.read() == 16 and calm.ab_retry == 0 and calm.w.n == 4
+
+
+def test_v6_alloc_back_is_counted_and_delta_clamps():
+    p = AllocPort(Words())
+    p.back(100)
+    p.back(90)
+    assert p.ab_back == 1 and p.delta(100, 90) == 0 and p.delta(90, 100) == 10
+    assert AllocPort(Words(), "no_clamp").delta(100, 90) == -10
+
+
+def k1_line(port, words, plant_n=21, empty_n=101, header=33, granule=16):
+    """FtAlloc.Calibrate: plant_n arrays of PLANT_BYTES, each between two reads (a large object, its header and the
+    collector's extra byte rounded to granules), and empty_n pairs of reads with nothing between them; medians."""
+    d, e = [], []
+    for _ in range(plant_n):
+        a0 = port.read()
+        words.a += -(-(PLANT_BYTES + header) // granule) * granule
+        d.append(port.delta(a0, port.read()))
+    for _ in range(empty_n):
+        a0 = port.read()
+        e.append(port.delta(a0, port.read()))
+    return sorted(d)[plant_n // 2], sorted(e)[empty_n // 2]
+
+
+def test_v6_k1_counter_control_and_its_switch():
+    w = Words(a=1000, b=50000)
+    planted, empty = k1_line(AllocPort(w), w)
+    assert k1_ok(planted, empty) and planted == PLANT_BYTES + 48 and empty == 0
+    w = Words(a=1000, b=50000)
+    planted, empty = k1_line(AllocPort(w, "k1"), w)
+    assert not k1_ok(planted, empty) and empty == 4096
+    al = _src("FtAlloc.cs")
+    assert al.count("internal const int PlantN = 21, EmptyN = 101, PlantBytes = 1 << 20;") == 1
+    assert al.count("internal const int MutantBytes = 4096;") == 1        # above bdwgc's small-object size (2048)
+    assert al.count("internal const int Tries = %d;" % AllocPort.TRIES) == 1
+
+
+def test_v6_alloc_pin_constants():
+    """The pinned binary (sha256 and GC_get_total_bytes' 15 bytes, checked against the game's mono-2.0-bdwgc.dll when
+    built): the two rip-relative loads land on the two words Read takes."""
+    al = _src("FtAlloc.cs")
+    assert al.count('internal const string PinSha256 = "55dda361039e3af8238b9c57b7af4828401c27b25a0e51bf9eb6c60e99e14c91";') == 1
+    assert al.count("internal const int RvaFn = 0x4eb550, RvaA = 0x76efd8, RvaB = 0x76efe0;") == 1
+    fn = bytes(int(x, 16) for x in TIP_P1_ALLOC[SIG_AL_FN][0].split(", "))
+    assert len(fn) == 15 and fn[:3] == bytes([0x48, 0x8B, 0x05]) and fn[7:10] == bytes([0x48, 0x03, 0x05]) and fn[14] == 0xC3
+    rip1 = 0x4EB550 + 7 + int.from_bytes(fn[3:7], "little", signed=True)
+    rip2 = 0x4EB550 + 14 + int.from_bytes(fn[10:14], "little", signed=True)
+    assert (rip1, rip2) == (0x76EFD8, 0x76EFE0)
+
+
+def test_v6_control_switches_are_wired():
+    """Each control's switch, the sentinel's k_mutant read once at clock install, breaks exactly its own rule (k1 the
+    counter read, k2 the gated class, k3 the listener rule), and nothing else writes those fields."""
+    srcs = _all_sources()
+    assert TIP_P1_SPAN[SIG_SP_MUT][:3] == ['FtAlloc.MutantK1 = k == "k1";', 'if (k == "k2") ClassOfKind[Gated] = ClsE;',
+                                           'MutantK3 = k == "k3";']
+    assert TIP_P1_ALLOC[SIG_AL_READ][2] == 'if (MutantK1) _box = new byte[MutantBytes];'
+    assert TIP_P1_SPAN[SIG_SP_ENTERL][2] == 'Push(_cls == ClsX && !MutantK3 ? ClsE : _cls);'
+    inst = TIP_P1_CLOCK[SIG_CL_INSTALL]
+    assert inst.index('Installed = true;') < inst.index('FtAlloc.Init();') \
+        < inst.index('FtSpan.SetMutants(FtConfig.Get("k_mutant", "none"));')
+    writes = re.compile(r"(?:MutantK1|MutantK3|ClassOfKind\[[^\]]*\])\s*=(?!=)")
+    span = _code_only(srcs["FtSpan.cs"])
+    j, k = _span(span, "internal static void SetMutants(string k)")
+    found = [(f, m.start()) for f, t in srcs.items() for m in writes.finditer(_code_only(t))]
+    assert len(found) == 3 and all(f == "FtSpan.cs" and j < s < k for f, s in found), found
+    assert sum(t.count("SetMutants(") for t in srcs.values()) == 2       # its definition and Install's call
+
+
+def force_violations(srcs):
+    """One force= for the whole process (SHARED.md: the settled line's force= holds for its whole game): FtConfig.Force
+    is written only in FtConfig.Load (and its declaration), and Load runs once, from Plugin.Awake."""
+    bad = []
+    cfg = _code_only(srcs["FtConfig.cs"])
+    j, k = _span(cfg, "internal static void Load()")
+    for name, text in srcs.items():
+        code = _code_only(text)
+        pat = r"(?<![\w.])Force\s*=(?!=)" if name == "FtConfig.cs" else r"\bFtConfig\.Force\s*=(?!=)"
+        for m in re.finditer(pat, code):
+            if name == "FtConfig.cs" and (j < m.start() < k or code[:m.start()].endswith("internal static string ")):
+                continue
+            bad.append("%s:%d: Force written" % (name, code.count("\n", 0, m.start()) + 1))
+    if cfg[j:k].count("Force =") != 1:
+        bad.append("FtConfig.Load: %d writes of Force" % cfg[j:k].count("Force ="))
+    calls = []
+    for name, text in srcs.items():
+        code = _code_only(text)
+        calls += [(name, m.start()) for m in re.finditer(r"\bFtConfig\.Load\(\)", code)]
+        if name == "FtConfig.cs":
+            calls += [(name, m.start()) for m in re.finditer(r"(?<![\w.])Load\(\)", code)
+                      if not code[:m.start()].endswith("internal static void ")]
+    if len(calls) != 1 or calls[0][0] != "Plugin.cs":
+        bad.append("FtConfig.Load calls: %s" % calls)
+    else:
+        code = _code_only(srcs["Plugin.cs"])
+        enc = _enclosing(_methods(code), calls[0][1])
+        if enc is None or enc[0] != "Awake":
+            bad.append("FtConfig.Load called from %s" % (enc[0] if enc else None))
+    return bad
+
+
+FORCE_MUTANTS = {
+    # force= re-read at a frame boundary
+    "force_in_refresh": ("FtConfig.cs", "            if (!Present) return;\n",
+                         '            if (!Present) return;\n            Force = Get("force", "none");\n'),
+    # the sentinel reloaded at each game start
+    "load_at_gamestart": ("FtSchedule.cs", "            Game++;\n", "            Game++;\n            FtConfig.Load();\n"),
+    # another class setting the force
+    "force_written_elsewhere": ("FtMenu.cs", "            FtSchedule.GateThisPoint = FtConfig.Force",
+                                '            FtConfig.Force = "ON";\n            FtSchedule.GateThisPoint = FtConfig.Force'),
+}
+
+
+def test_v6_force_is_read_once_per_process():
+    assert force_violations(_all_sources()) == []
+
+
+@pytest.mark.parametrize("name", sorted(FORCE_MUTANTS))
+def test_v6_force_mutant_fails(name):
+    fname, old, new = FORCE_MUTANTS[name]
+    srcs = _all_sources()
+    assert force_violations(srcs) == []                                   # the negative control
+    e = "\r\n" if "\r\n" in srcs[fname] else "\n"
+    assert force_violations(_mut(srcs, fname, old.replace("\n", e), new.replace("\n", e))) != []
+
+
+def test_v6_k4_force_on_gives_arm_on_on_every_window():
+    """K4: under force=ON every window's arm is ON and its gate clear; under force=OFF every window is OFF and gated;
+    under force=none the arm is the committed one. In each, arm= is the gate's real state (an armed sitting). The
+    pre-V6 OpenWindow (arm 'coin': the arm kept the coin while force= set only the gate) fails it."""
+    for force in ("ON", "OFF", "none"):
+        ws = window_events(force=force, seeds=range(20))
+        assert ws and all(w["on"] == (not w["gate"]) for w in ws), force
+        assert {w["on"] for w in ws} == ({force == "ON"} if force != "none" else {True, False}), force
+    bad = window_events(force="ON", arm="coin", seeds=range(20))
+    assert not all(w["on"] for w in bad) and not any(w["gate"] for w in bad)
+    # the C#: OpenWindow forces the arm and gates on it; both lines' arm read through ForcedArm
+    assert TIP_P1_SCHED[SIG_FORCED] == ['return FtConfig.Force == "ON" || (FtConfig.Force == "none" && committed);']
+    assert 'ArmOn = ForcedArm(r < 2 ? WinCoin == 1 : WinCoin == 0);' in TIP_P1_SCHED[SIG_OPENWIN]
+    assert 'GateThisPoint = FtArm.Armed && !ArmOn;' in TIP_P1_SCHED[SIG_OPENWIN]
+    assert '_oArm = FtSchedule.ForcedArm(FtSchedule.ArmOn);' in TIP_P1_FRAMES[SIG_FR_OWNER]
+    assert '_ptArm = FtSchedule.ForcedArm(FtSchedule.ArmOn);' in TIP_FRAMES[SIG_FR_START]
+
+
+def test_v6_k4_force_on_through_the_point_sequences():
+    """The window lines the frames port writes carry the forced arm under force=ON, for every measured sequence."""
+    seen = 0
+    for name in SEQS:
+        if name in MENU:
+            continue
+        for e in run(name, force="ON"):
+            if e[0] == "w":
+                seen += 1
+                assert e[1][2] is True, name
+    assert seen > 0
+    coin = [e[1][2] for seed in range(10) for name in SEQS if name not in MENU
+            for e in run(name, force="ON", arm="coin", seed=seed) if e[0] == "w"]
+    assert False in coin                                                  # the pre-V6 arm fails it
+
+
+def census_violations(srcs):
+    """R-SCOPE, the static form of the boot line `scope census entries= wrapped=` (FtCensus.LogScopeCensus): every entry
+    FtE registers has a call site of FtCensus.Skip, and every site lies in a method that opens and closes an FtSpan
+    scope after it. Returns (violations, entries, wrapped)."""
+    bad = []
+    ids = re.findall(r"FtCensus\.Set\((\w+),", _code_only(srcs["FtEntries.cs"]))
+    if len(ids) != len(set(ids)):
+        bad.append("an entry registered twice")
+    sites = {}
+    for f, text in srcs.items():
+        code = _code_only(text)
+        ms = _methods(code)
+        for m in re.finditer(r"FtCensus\.Skip\(FtE\.(\w+)\)", code):
+            enc = _enclosing(ms, m.start())
+            tail = code[m.end():enc[2]] if enc else ""
+            sites.setdefault(m.group(1), []).append("FtSpan.Open(" in tail and "FtSpan.Close(" in tail)
+    for i in ids:
+        if not sites.get(i):
+            bad.append("%s: no call site" % i)
+        elif not all(sites[i]):
+            bad.append("%s: a site outside a scope" % i)
+    for i in sites:
+        if i not in ids:
+            bad.append("%s: a site of an unregistered entry" % i)
+    return bad, len(ids), sum(1 for i in ids if sites.get(i) and all(sites[i]))
+
+
+def _unscope_first_site(srcs):
+    s = dict(srcs)
+    for f in sorted(s):
+        i = s[f].find("FtCensus.Skip(FtE.")
+        if i >= 0:
+            j = s[f].index("FtSpan.Open(", i)
+            s[f] = s[f][:j] + "FtSpan.Nope(" + s[f][j + len("FtSpan.Open("):]
+            return s
+    raise AssertionError("no site")
+
+
+def _drop_first_site(srcs):
+    s = dict(srcs)
+    for f in sorted(s):
+        m = re.search(r"FtCensus\.Skip\(FtE\.(\w+)\)", s[f])
+        if m and sum(t.count(m.group(0)) for t in s.values()) == 1:
+            s[f] = s[f][:m.start()] + "false" + s[f][m.end():]
+            return s
+    raise AssertionError("no single site")
+
+
+def test_v6_scope_census_static():
+    bad, entries, wrapped = census_violations(_all_sources())
+    assert bad == [] and entries == wrapped == 44
+
+
+@pytest.mark.parametrize("mutant", [_unscope_first_site, _drop_first_site])
+def test_v6_scope_census_mutant_fails(mutant):
+    srcs = _all_sources()
+    assert census_violations(srcs)[0] == []                               # the negative control
+    bad, entries, wrapped = census_violations(mutant(srcs))
+    assert bad != [] and wrapped < entries
+
+
+BOOT_LINES = {
+    "FtAlloc.cs": ['"[FRAME-TIME] alloc_init why="', '"[FRAME-TIME] alloc pin="', '" planted="', '" empty="'],
+    "FtSpan.cs": ['"[FRAME-TIME] scope plant asked="', '" got="', '"[FRAME-TIME] controls k_mutant="'],
+    "FtPhoton.cs": ['"[FRAME-TIME] nest plant asked="', '" x="', '" e="', '" p="', '"[FRAME-TIME] photon patches n="',
+                    '" names="'],
+    "FtCensus.cs": ['"[FRAME-TIME] scope census entries="', '" wrapped="'],
+}
+
+
+def test_v6_boot_lines_once_each_and_reached():
+    srcs = _all_sources()
+    for f, lits in BOOT_LINES.items():
+        for lit in lits:
+            assert srcs[f].count(lit) == 1, (f, lit)
+    for lit in ('"[FRAME-TIME] alloc pin="', '"[FRAME-TIME] scope plant asked="', '"[FRAME-TIME] nest plant asked="',
+                '"[FRAME-TIME] photon patches n="', '"[FRAME-TIME] scope census entries="'):
+        assert sum(t.count(lit) for t in srcs.values()) == 1, lit
+    start = TIP_P1_CLOCK[SIG_CL_START]
+    i = start.index('_marksCal = true;   // once, at the first frame boundary: before game 0')
+    assert start[i + 1:i + 6] == ['FtSpan.CalibrateMarks(MarkCalN);', 'FtAlloc.Calibrate();', 'FtSpan.PlantScope();',
+                                  'FtPhoton.PlantNest();', 'FtCensus.LogScopeCensus();']
+    plugin = srcs["Plugin.cs"]
+    assert plugin.count("try { FtPhoton.ReportPatched(); }") == 1
+    for build in ("Release", "Thunderstore"):
+        assert "FtPhoton" not in build_view(plugin, BUILDS[build]), build
+    assert "FtPhoton.ReportPatched();" in build_view(plugin, BUILDS["FrameTime"])
+    for f in ("FtAlloc.cs", "FtPhoton.cs"):
+        assert srcs[f].lstrip("﻿").startswith("#if SCR_FRAMETIME") and srcs[f].rstrip().endswith("#endif"), f
+
+
+def test_v6_photon_targets_are_shared_md_s():
+    """The four PhotonPeer entries and the six LoadBalancingClient listener callbacks (confirmed against
+    Photon3Unity3D 4.1.7.0), each patched with a prefix that runs first and a finalizer that runs last."""
+    assert TIP_P1_PHOTON[SIG_PH_XNAMES] == ['"DispatchIncomingCommands", "SendOutgoingCommands", "SendAcksOnly", "Service"']
+    names = re.findall(r'KeyValuePair<string, Type\[\]>\("(\w+)"', "\n".join(TIP_P1_PHOTON[SIG_PH_ENAMES]))
+    assert names == ["OnOperationResponse", "OnEvent", "OnStatusChanged", "DebugReturn", "OnMessage",
+                     "OnDisconnectMessageReceived"]
+    for sig, enter in ((SIG_PH_XPATCH, "FtSpan.EnterX()"), (SIG_PH_EPATCH, "FtSpan.EnterListener()")):
+        b = TIP_P1_PHOTON[sig]
+        assert b.count("[HarmonyPriority(Priority.First)]") == 1 and b.count("[HarmonyPriority(Priority.Last)]") == 1
+        assert "__state = %s;" % enter in b and "FtSpan.Leave(__state);" in b
+
+
 # ------------------------------------------------------------------ r1 (ftb/to-p1-r1.md; SHARED.md md5 18fdafea)
 
 import hashlib  # noqa: E402
 
 # SHARED.md, the window line: the keys FlushWindow appends after the w line's own fields, in order
 WINDOW_KEYS = ["run", "pos", "unit", "coin", "wi", "f0", "pred", "prun", "res", "gcn", "cG", "cW", "cR", "cS", "cE",
-               "q", "r", "qn", "wu", "tok", "nm"]
+               "q", "r", "qn", "wu", "tok", "nm",
+               # V6 (SHARED.md "The window line, V6 additions"), after nm
+               "cP", "cX", "aC", "aW", "aR", "aS", "aP", "aX", "wa"]
 # the writer type keys of wu and tok (FtLedger.TypeNames), in their print order
 LEDGER_TYPES = ["log", "hash", "recv", "sock"]
 
@@ -2910,6 +4017,10 @@ def test_window_keys_are_shared_md():
      '              .Append(" partial=").Append(partial ? 1 : 0).Append(" gcn=")'),
     # nm missing
     ('            sb.Append(" nm=").Append(FtLedger.Marks(_lb, _le));\n', ''),
+    # V6: cX missing (m2's line form)
+    ('.Append(" cX=").Append(_wc[FtSpan.ClsX]);', ';'),
+    # V6: wa missing
+    ('            sb.Append(" wa=");\n', ''),
 ])
 def test_window_keys_mutant_fails(old, new):
     src = _src("FtFrames.cs")
@@ -3099,6 +4210,7 @@ SITE_CALLS = {
          "FtLedger.RecvEnter()", 1),
         ("internal static int EnterRpc(ExitGames.Client.Photon.Hashtable data, Photon.Realtime.Player sender)",
          "FtLedger.RecvExit(ftRecv)", 1),
+        ("internal static void ExitRpc(int before)", "FtLedger.RecvCyclesEnter()", 1),
         ("internal static void ExitRpc(int before)", "FtLedger.RecvCycles(ftRecv)", 1),
     ],
     "PeerBuild.cs": [
@@ -3193,9 +4305,10 @@ P1_R1_SOURCE_MUTANTS = {
     # nm never counted
     "nm_dropped": ("FtSpan.cs", "            Marks++;\n", ""),
     # the calibration leaves its transitions in the classes
-    "cal_no_restore": ("FtSpan.cs", "            System.Array.Copy(acc, Acc, Classes);\n", ""),
+    "cal_no_restore": ("FtSpan.cs", "            Restore(st);\n            System.Array.Sort(s);\n", "            System.Array.Sort(s);\n"),
     # the hash thread's cycles back to NA (no job measured on its thread)
-    "hash_cycles_main": ("FtUpload.cs", "            Enq(Hash, 1);\n            return FtClock.Cycles();", "            Enq(Hash, 1);\n            return 0;"),
+    "hash_cycles_main": ("FtUpload.cs", "            _aHashOk = FtAlloc.Read(out _aHash);\n            return FtClock.Cycles();",
+                         "            _aHashOk = FtAlloc.Read(out _aHash);\n            return 0;"),
 }
 
 
@@ -3420,14 +4533,15 @@ def test_sock_edges_are_the_csharp_edges():
 
 P1_R2_SOURCE_MUTANTS = {
     # a datagram counted twice
-    "sock_double": ("FtUpload.cs", "            Serve(Sock, 1, true, k0, k1);\n", "            Serve(Sock, 2, true, k0, k1);\n"),
+    "sock_double": ("FtUpload.cs", "            Serve(Sock, 1, true, k0, k1, _aSock, a1, aok);\n",
+                    "            Serve(Sock, 2, true, k0, k1, _aSock, a1, aok);\n"),
     # the bucket counted twice
     "sock_hist_double": ("FtUpload.cs", "            Interlocked.Increment(ref _sockHist[SockBucket(c)]);\n",
                          "            Interlocked.Increment(ref _sockHist[SockBucket(c)]);\n"
                          "            Interlocked.Increment(ref _sockHist[SockBucket(c)]);\n"),
     # sock's start cycles read from the main thread's last frame boundary, not the calling thread
-    "sock_main_clock": ("FtUpload.cs", "            lock (_lock) _c[Sock * Per + EnqOn]++;\n            return FtClock.Cycles();",
-                        "            lock (_lock) _c[Sock * Per + EnqOn]++;\n            return (ulong)FtSpan.Acc[FtSpan.ClsE];"),
+    "sock_main_clock": ("FtUpload.cs", "            _aSockOk = FtAlloc.Read(out _aSock);\n            return FtClock.Cycles();",
+                        "            _aSockOk = FtAlloc.Read(out _aSock);\n            return (ulong)FtSpan.Acc[FtSpan.ClsE];"),
     # a sock token enqueued in the gate's arm (the producer's arm is not known here)
     "sock_enq_gate": ("FtUpload.cs", "            lock (_lock) _c[Sock * Per + EnqOn]++;\n",
                       "            Enq(Sock, 1);\n"),

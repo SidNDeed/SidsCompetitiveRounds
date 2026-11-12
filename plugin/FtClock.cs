@@ -22,11 +22,15 @@ namespace CompetitiveRounds
     /// frame f+1 is read once, BEFORE frame f is accumulated: the frame in which combat ended is
     /// excluded (round-1 MEDIUM, FtClock.cs:116), and the schedule decides frame f+1 from that same
     /// read.
-    /// The partition (method-v54.md (a)): at the same boundary FtSpan.Cut gives the open class the cycles up to
-    /// k0(f+1), so frame f's class differences (W, R, S, E) plus its G equal C exactly, all in main-thread cycles.
-    /// G is the GC hook's difference over the frame (GcCycles, set by FtGc only while the native hook is live);
-    /// the hook is read here once per frame, and a frame whose G is not known (no hook, a hook that changed at its
-    /// start, or a read that threw) is passed with gok false and G 0, its GC then inside its classes.</summary>
+    /// The partition (method-v54.md (a); V6, rulings R6-A3.11.146 and .147): at the same boundary FtSpan.Cut gives the
+    /// open class the cycles up to k0(f+1), so frame f's class differences (W, R, S, E, P, X) plus its G equal C
+    /// exactly, all in main-thread cycles. G is the GC hook's difference over the frame (GcCycles, set by FtGc only
+    /// while the native hook is live); the hook is read here once per frame, and a frame whose G is not known (no hook,
+    /// a hook that changed at its start, or a read that threw) is passed with gok false and G 0, its GC then inside its
+    /// classes. The allocation counter (FtAlloc) is read at the same boundary: the frame's bytes (aC) and its class
+    /// differences in bytes follow the cycles. At the first boundary, before game 0, the boot controls run: the mark
+    /// cost, K1 (FtAlloc.Calibrate), K2 (FtSpan.PlantScope), K3 (FtPhoton.PlantNest) and the scope census
+    /// (FtCensus.LogScopeCensus).</summary>
     internal static partial class FtClock
     {
         [DllImport("kernel32.dll")]
@@ -78,6 +82,10 @@ namespace CompetitiveRounds
         private static bool _gOk;
         private static long _gcFail0;
         private static readonly long[] _acc0 = new long[FtSpan.Classes];
+        private static readonly long[] _accA0 = new long[FtSpan.Classes];
+        private static readonly long[] _dc = new long[FtSpan.Classes], _da = new long[FtSpan.Classes];
+        private static long _aPrev;
+        private static bool _aOk;
 
         private static long _t0;
         private static ulong _k0;
@@ -123,6 +131,8 @@ namespace CompetitiveRounds
             }
             UnityEngine.LowLevel.PlayerLoop.SetPlayerLoop(loop);
             Installed = true;
+            FtAlloc.Init();
+            FtSpan.SetMutants(FtConfig.Get("k_mutant", "none"));
             FtPlant.Init();
             FtE.RegisterAll(); FtA3.RegisterAll();
             FtLedger.Install();
@@ -169,19 +179,28 @@ namespace CompetitiveRounds
             int gc = GC.CollectionCount(0);
             long g;
             bool gok = GcRead(GcFn, out g);
-            FtSpan.Cut(k, g, gok);
+            long al;
+            bool aok = FtAlloc.Read(out al);
+            FtSpan.Cut(k, g, gok, al, aok);
             bool live = FtSchedule.ReadLive();
             if (_open)
             {
                 Frames++;
                 if (!_ended) MissingEnd++;
                 bool fok = gok && _gOk && FtSpan.GcReadFailures == _gcFail0;
-                long[] a = FtSpan.Acc;
+                bool fa = aok && _aOk;
+                for (int i = 0; i < FtSpan.Classes; i++)
+                {
+                    _dc[i] = FtSpan.Acc[i] - _acc0[i];
+                    _da[i] = FtSpan.AccA[i] - _accA0[i];
+                }
                 OnFrameClosed(t - _t0, _ended ? _s : 0, k - _k0, pk - _p0, _gc0, gc, _ended, FtSchedule.ClosingFrame(live),
-                    fok ? g - _gPrev : 0, fok, a[FtSpan.ClsW] - _acc0[FtSpan.ClsW], a[FtSpan.ClsR] - _acc0[FtSpan.ClsR],
-                    a[FtSpan.ClsS] - _acc0[FtSpan.ClsS], a[FtSpan.ClsE] - _acc0[FtSpan.ClsE]);
+                    fok ? g - _gPrev : 0, fok, _dc, fa ? FtAlloc.Delta(_aPrev, al) : 0, fa, _da);
             }
             System.Array.Copy(FtSpan.Acc, _acc0, FtSpan.Classes);
+            System.Array.Copy(FtSpan.AccA, _accA0, FtSpan.Classes);
+            _aPrev = al;
+            _aOk = aok;
             var fn = GcCycles;   // the hook, read once per frame: a hook set or changed counts from this frame on
             if (fn != GcFn)
             {
@@ -203,6 +222,10 @@ namespace CompetitiveRounds
             {
                 _marksCal = true;   // once, at the first frame boundary: before game 0
                 FtSpan.CalibrateMarks(MarkCalN);
+                FtAlloc.Calibrate();
+                FtSpan.PlantScope();
+                FtPhoton.PlantNest();
+                FtCensus.LogScopeCensus();
             }
             if (FtSpan.Depth != 0) DepthViolations++;
             InScript = true;
@@ -218,10 +241,11 @@ namespace CompetitiveRounds
         }
 
         /// <summary>Frame f closed: F and S in Stopwatch ticks, C in cycles, and C's partition in cycles: G (cg,
-        /// known when gok) and the class differences W, R, S, E. Implemented by the window and point lines; without
-        /// an implementation the call compiles away.</summary>
+        /// known when gok) and the class differences dc (indexed by FtSpan's classes); the frame's allocated bytes ac
+        /// (known when aok) and their class differences da. dc and da are reused at every boundary. Implemented by the
+        /// window and point lines; without an implementation the call compiles away.</summary>
         static partial void OnFrameClosed(long f, long s, ulong c, ulong p, int gc0, int gc1, bool ended, bool closing,
-            long cg, bool gok, long cw, long cr, long cs, long ce);
+            long cg, bool gok, long[] dc, long ac, bool aok, long[] da);
     }
 }
 #endif

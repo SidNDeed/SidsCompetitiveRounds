@@ -78,9 +78,11 @@ namespace CompetitiveRounds
     /// recv: the receive handlers of the peer's collector traffic, SeatEvidence.EnterRpc (each inbound RPC's
     /// envelope, from PhotonNetwork.ExecuteRpc) and PeerBuild's per-seat read of a peer's cr_build (PeerBuild.Tick).
     /// Each message handled is one unit and one token, enqueued at the handler's entry and done at its exit; its
-    /// cycles are the handler's own, on its thread. SeatEvidence.ExitRpc adds its cycles with no unit. RecvOffMain
-    /// counts handler entries off the main thread. On the main thread these cycles are already inside the frame's C;
-    /// recv names them, it adds nothing to C.
+    /// cycles are the handler's own, on its thread. SeatEvidence.ExitRpc adds its cycles with no unit
+    /// (RecvCyclesEnter, RecvCycles). RecvOffMain counts handler entries off the main thread. On the main thread these
+    /// cycles are already inside the frame's C; recv names them, it adds nothing to C. V6 (rulings R6-A3.11.146 and
+    /// .147): each recv scope on the main thread is also a class-P scope (FtSpan.EnterP, LeaveP), so its cycles and
+    /// bytes are the window line's cP and aP.
     ///
     /// sock: Photon's socket receive thread, one datagram per IPhotonSocket.HandleReceivedDatagram call (FtSockPatch
     /// below). Each datagram is one unit and one token; its producer's arm is not known here, so every sock token is
@@ -90,14 +92,23 @@ namespace CompetitiveRounds
     ///
     /// Counters are cumulative and taken under one lock (Take), so every type's tok reconciles in every window:
     /// open0 + enqON + enqOFF = doneON + doneOFF + disc + open1. An event's arm is FtGate.Off when it happens. Take
-    /// also carries FtSpan.Marks, the window's nm.</summary>
+    /// also carries FtSpan.Marks, the window's nm.
+    ///
+    /// wa (V6): the allocation counter (FtAlloc) is read where each off-thread scope reads its cycles, so a log flush, a
+    /// hash job and a datagram also carry the bytes allocated between their two reads. The counter is the process's,
+    /// so those bytes include what other threads allocated in that time (the wider cap, accepted by ruling .147
+    /// (3)(g)). recv's bytes are class P's on the main thread (aP), not wa's.</summary>
     internal static class FtLedger
     {
         internal const int Log = 0, Hash = 1, Recv = 2, Sock = 3, Types = 4;
         internal static readonly string[] TypeNames = { "log", "hash", "recv", "sock" };
 
-        /// <summary>Per type t, at t * Per: enqON, enqOFF, doneON, doneOFF, disc, units, cycles. Then FtSpan.Marks.</summary>
-        internal const int EnqOn = 0, EnqOff = 1, DoneOn = 2, DoneOff = 3, Disc = 4, Units = 5, Cyc = 6, Per = 7;
+        /// <summary>The writer types wa prints, in order: the off-thread scopes.</summary>
+        internal static readonly int[] WaTypes = { Log, Hash, Sock };
+
+        /// <summary>Per type t, at t * Per: enqON, enqOFF, doneON, doneOFF, disc, units, cycles, bytes. Then
+        /// FtSpan.Marks.</summary>
+        internal const int EnqOn = 0, EnqOff = 1, DoneOn = 2, DoneOff = 3, Disc = 4, Units = 5, Cyc = 6, Al = 7, Per = 8;
         internal const int Nm = Types * Per, Fields = Nm + 1;
 
         private static readonly long[] _c = new long[Nm];
@@ -149,6 +160,21 @@ namespace CompetitiveRounds
             }
         }
 
+        /// <summary>wa=type:bytes;... over WaTypes from two snapshots; every value NA when the counter is not (ok).</summary>
+        internal static void AppendWa(StringBuilder sb, long[] a, long[] b, bool ok)
+        {
+            for (int i = 0; i < WaTypes.Length; i++)
+            {
+                int t = WaTypes[i], o = t * Per;
+                if (i > 0) sb.Append(';');
+                sb.Append(TypeNames[t]).Append(':');
+#if SCR_FT_NOCOLLECTORS
+                if (t == Sock) { sb.Append("NA"); continue; }
+#endif
+                if (ok) sb.Append(b[o + Al] - a[o + Al]); else sb.Append("NA");
+            }
+        }
+
         /// <summary>nm: the window's class transitions.</summary>
         internal static long Marks(long[] a, long[] b) { return b[Nm] - a[Nm]; }
 
@@ -157,51 +183,74 @@ namespace CompetitiveRounds
             lock (_lock) _c[t * Per + (FtGate.Off ? EnqOff : EnqOn)] += n;
         }
 
-        /// <summary>n tokens served (done, or discarded when !ok), with their units and the cycles between two reads.</summary>
-        private static void Serve(int t, long n, bool ok, ulong k0, ulong k1)
+        /// <summary>n tokens served (done, or discarded when !ok), with their units, the cycles between two reads and,
+        /// when both counter reads stood (aok), the bytes between them.</summary>
+        private static void Serve(int t, long n, bool ok, ulong k0, ulong k1, long a0, long a1, bool aok)
         {
             long c = 0;
             if (k0 == 0 || k1 == 0) Interlocked.Increment(ref CycleMiss); else c = unchecked((long)(k1 - k0));
+            long al = aok ? FtAlloc.Delta(a0, a1) : 0;
             lock (_lock)
             {
                 int o = t * Per;
                 if (ok) { _c[o + (FtGate.Off ? DoneOff : DoneOn)] += n; _c[o + Units] += n; }
                 else _c[o + Disc] += n;
                 _c[o + Cyc] += c;
+                _c[o + Al] += al;
             }
         }
+
+        // the counter's reading at the start of the calling thread's open hash job or datagram (each thread runs one at a
+        // time: the hash thread its jobs in turn, a receive thread its datagrams)
+        [System.ThreadStatic] private static long _aHash, _aSock;
+        [System.ThreadStatic] private static bool _aHashOk, _aSockOk;
 
         /// <summary>SeatEvidence.HashPending, on the thread that runs the job: one job starts.</summary>
         internal static ulong HashBegin()
         {
             Enq(Hash, 1);
+            _aHashOk = FtAlloc.Read(out _aHash);
             return FtClock.Cycles();
         }
 
         /// <summary>The job started by HashBegin ended: done when ok, discarded when it threw.</summary>
         internal static void HashEnd(ulong k0, bool ok)
         {
-            Serve(Hash, 1, ok, k0, FtClock.Cycles());
+            ulong k1 = FtClock.Cycles();
+            long a1;
+            bool aok = FtAlloc.Read(out a1) && _aHashOk;
+            Serve(Hash, 1, ok, k0, k1, _aHash, a1, aok);
         }
 
-        /// <summary>A recv handler's entry, on its thread: one message.</summary>
+        /// <summary>A recv handler's entry, on its thread: one message, and on the main thread a class-P scope.</summary>
         internal static ulong RecvEnter()
         {
             if (Thread.CurrentThread.ManagedThreadId != FtSpan.MainThread) Interlocked.Increment(ref RecvOffMain);
             Enq(Recv, 1);
+            FtSpan.EnterP();
             return FtClock.Cycles();
         }
 
-        /// <summary>The handler entered by RecvEnter exits (finally): the message is done.</summary>
+        /// <summary>The handler entered by RecvEnter exits (finally): the message is done, the P scope closed.</summary>
         internal static void RecvExit(ulong k0)
         {
-            Serve(Recv, 1, true, k0, FtClock.Cycles());
+            Serve(Recv, 1, true, k0, FtClock.Cycles(), 0, 0, false);
+            FtSpan.LeaveP();
         }
 
-        /// <summary>Recv work with no message of its own (SeatEvidence.ExitRpc): cycles only.</summary>
+        /// <summary>Recv work with no message of its own (SeatEvidence.ExitRpc) starts: a class-P scope on the main
+        /// thread, and its start cycles. Pair with RecvCycles.</summary>
+        internal static ulong RecvCyclesEnter()
+        {
+            FtSpan.EnterP();
+            return FtClock.Cycles();
+        }
+
+        /// <summary>The work RecvCyclesEnter started ends: cycles only, the P scope closed.</summary>
         internal static void RecvCycles(ulong k0)
         {
-            Serve(Recv, 0, true, k0, FtClock.Cycles());
+            Serve(Recv, 0, true, k0, FtClock.Cycles(), 0, 0, false);
+            FtSpan.LeaveP();
         }
 
         // -- sock: the receive thread's datagrams -----------------------------------------------------------------
@@ -250,6 +299,7 @@ namespace CompetitiveRounds
                 _sockThread = id;
             }
             lock (_lock) _c[Sock * Per + EnqOn]++;
+            _aSockOk = FtAlloc.Read(out _aSock);
             return FtClock.Cycles();
         }
 
@@ -257,7 +307,9 @@ namespace CompetitiveRounds
         internal static void SockExit(ulong k0)
         {
             ulong k1 = FtClock.Cycles();
-            Serve(Sock, 1, true, k0, k1);
+            long a1;
+            bool aok = FtAlloc.Read(out a1) && _aSockOk;
+            Serve(Sock, 1, true, k0, k1, _aSock, a1, aok);
             long c = k0 == 0 || k1 == 0 ? 0 : unchecked((long)(k1 - k0));
             Interlocked.Increment(ref _sockHist[SockBucket(c)]);
         }
@@ -344,14 +396,17 @@ namespace CompetitiveRounds
 
             public override void Flush()
             {
+                long a0, a1;
+                bool aok = FtAlloc.Read(out a0);
                 ulong k0 = FtClock.Cycles();
                 _in.Flush();
                 ulong k1 = FtClock.Cycles();
+                aok = FtAlloc.Read(out a1) && aok;
                 long n;
                 lock (_lock) { n = _pendingLog; _pendingLog = 0; }
                 // the whole flush is charged to the lines it carries (ruled conservative, SHARED.md D5); a flush that
                 // carries none charges nothing
-                if (n > 0) Serve(Log, n, true, k0, k1);
+                if (n > 0) Serve(Log, n, true, k0, k1, a0, a1, aok);
             }
 
             protected override void Dispose(bool disposing)

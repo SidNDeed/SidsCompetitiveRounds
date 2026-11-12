@@ -1,15 +1,16 @@
 #if SCR_FRAMETIME
 using System;
 using System.Text;
+using System.Threading;
 
 namespace CompetitiveRounds
 {
     internal static partial class FtClock
     {
         static partial void OnFrameClosed(long f, long s, ulong c, ulong p, int gc0, int gc1, bool ended, bool closing,
-            long cg, bool gok, long cw, long cr, long cs, long ce)
+            long cg, bool gok, long[] dc, long ac, bool aok, long[] da)
         {
-            FtFrames.Frame(f, s, c, p, gc0, gc1, ended, closing, cg, gok, cw, cr, cs, ce);
+            FtFrames.Frame(f, s, c, p, gc0, gc1, ended, closing, cg, gok, dc, ac, aok, da);
         }
     }
 
@@ -54,11 +55,17 @@ namespace CompetitiveRounds
     /// construction). EndPoint writes a point once: a second call before the next StartPoint does nothing.
     ///
     /// RECORDS (method-v54.md (a); ruling R6-A3.11.138 (5); SHARED.md's window line): the window line appends run,
-    /// pos, unit, coin, wi, f0, pred, plant (the plant run), res, partial, gcn (collections), the partition cG (NA
-    /// unless every frame's G is known), cW, cR, cS, cE, and per 12-frame bin j = floor(i/12) + 1 of the window's frame
-    /// i: q (C - G - W), r (R) and qn (frames), then the writer ledger's wu and tok over the window (FtLedger). Every
-    /// c*, q and r is in main-thread executed cycles (QueryThreadCycleTime). By construction sC = cG + cW + cR + cS +
-    /// cE (cG as 0 when NA), sum(q) = sC - cG - cW, sum(r) = cR, sum(qn) = n.</summary>
+    /// pos, unit, coin, wi, f0, pred, prun (the plant run), res, gcn (collections), the partition cG (NA unless every
+    /// frame's G is known), cW, cR, cS, cE, and per 12-frame bin j = floor(i/12) + 1 of the window's frame i: q
+    /// (C - G - W - P), r (R) and qn (frames), then the writer ledger's wu and tok over the window (FtLedger), nm, and
+    /// the V6 block (rulings R6-A3.11.146 and .147): cP, cX, aC (the bytes allocated over the window's frames, from
+    /// the frame cuts), aW, aR, aS, aP, aX (the bytes allocated while that class ran on the main thread) and wa (the
+    /// bytes allocated during the off-thread scopes of log, hash and sock); every a* and wa prints NA unless the
+    /// counter read in every frame (FtAlloc). Every c*, q and r is in main-thread executed cycles
+    /// (QueryThreadCycleTime); every a* and wa in bytes. By construction sC = cG + cW + cR + cS + cP + cX + cE (cG as
+    /// 0 when NA), sum(q) = sC - cG - cW - cP, sum(r) = cR, sum(qn) = n.
+    /// ARM (V6): arm= is the gate's real state under the sentinel's force= (FtSchedule.ForcedArm): ON on every window
+    /// under force=ON, OFF under force=OFF, the committed arm under force=none; coin= stays the committed coin.</summary>
     internal static class FtFrames
     {
         internal const int W = 120;
@@ -81,9 +88,10 @@ namespace CompetitiveRounds
         private static ulong _qC;
         private static long _g0, _gn0, _u0, _un0, _on0, _guard0;   // span and census sums at the point's start
 
-        // the partition's window sums and bins (cycles)
-        private static long _wG, _wW, _wR, _wS2, _wE;
-        private static bool _wGok;
+        // the partition's window sums (cycles, per class; G at ClsG) and bins (cycles), and the counter's sums (bytes)
+        private static readonly long[] _wc = new long[FtSpan.Classes], _wa = new long[FtSpan.Classes];
+        private static long _wAc;
+        private static bool _wGok, _wAok;
         private static readonly long[] _tq = new long[Bins], _tr = new long[Bins], _tn = new long[Bins];
 
         // the writer ledger: at the window's start, and after its last measured frame
@@ -116,7 +124,7 @@ namespace CompetitiveRounds
 
         /// <summary>Frame f closed; FtSchedule still holds frame f's state, and FtGate.Off frame f's gate.</summary>
         internal static void Frame(long f, long s, ulong c, ulong p, int gc0, int gc1, bool ended, bool closing,
-            long cg, bool gok, long cw, long cr, long cs, long ce)
+            long cg, bool gok, long[] dc, long ac, bool aok, long[] da)
         {
             if (!FtSchedule.Live) return;
             Vr5Take(FtGate.Off);
@@ -143,9 +151,12 @@ namespace CompetitiveRounds
             else { _pn++; _pF += f; _pS += s; _pC += c; _pP += p; }
             if (f > _pMaxF) _pMaxF = f;
             if (!gok) _wGok = false;
-            _wG += cg; _wW += cw; _wR += cr; _wS2 += cs; _wE += ce;
-            _tq[bin] += unchecked((long)c) - cg - cw;
-            _tr[bin] += cr;
+            if (!aok) _wAok = false;
+            _wc[FtSpan.ClsG] += cg;
+            for (int i = FtSpan.ClsW; i < FtSpan.Classes; i++) { _wc[i] += dc[i]; _wa[i] += da[i]; }
+            _wAc += ac;
+            _tq[bin] += unchecked((long)c) - cg - dc[FtSpan.ClsW] - dc[FtSpan.ClsP];
+            _tr[bin] += dc[FtSpan.ClsR];
             _tn[bin]++;
             FtLedger.Take(_le);
             if (_wn == W) FlushWindow(false);
@@ -163,11 +174,11 @@ namespace CompetitiveRounds
             _oGame = FtSchedule.Game; _oRound = FtSchedule.Round; _oPoint = FtSchedule.PointInRound;
             _oK = CurrentK();
             _oF0 = FtSchedule.LiveFrame;
-            _oArm = FtSchedule.ArmOn;
+            _oArm = FtSchedule.ForcedArm(FtSchedule.ArmOn);
             if (FtMenu.Active)
             {
                 // a menu segment holds one arm: its windows follow position by index, with no coin of their own
-                _oRun = _oK / 4; _oPos = (int)(_oK % 4) + 1; _oP24 = (_oK & 1) == 1; _oCoin = _oArm ? 1 : 0;
+                _oRun = _oK / 4; _oPos = (int)(_oK % 4) + 1; _oP24 = (_oK & 1) == 1; _oCoin = FtSchedule.ArmOn ? 1 : 0;
                 _oPred = _oK == 0 ? FtSchedule.PrevArm : (_oArm ? 1 : 0);
                 _oPlantRun = false; _oRes = false;
             }
@@ -229,7 +240,7 @@ namespace CompetitiveRounds
             _offN = 0; _offF = 0; _ownSplit = 0;
             _windows = 0;
             _ptLabel = FtSchedule.Label();
-            _ptArm = FtSchedule.ArmOn;
+            _ptArm = FtSchedule.ForcedArm(FtSchedule.ArmOn);
             _ptGate = FtSchedule.GateThisPoint;
             _ptPred = FtSchedule.PrevArm;
             _ptLastArm = _ptArm;
@@ -263,7 +274,9 @@ namespace CompetitiveRounds
                 + " off_g=" + _offG + " off_gn=" + _offGn + " off_on=" + _offOn + " on_guarded=" + _onGuarded
                 + " own_split=" + _ownSplit + " span_class_overflow=" + FtSpan.ClassOverflow
                 + " gc_read_failures=" + FtSpan.GcReadFailures + " recv_offmain=" + FtLedger.RecvOffMain
-                + " ledger_cycle_miss=" + FtLedger.CycleMiss + " " + FtLedger.SockStats(_sk0, _sk1));
+                + " ledger_cycle_miss=" + FtLedger.CycleMiss + " " + FtLedger.SockStats(_sk0, _sk1)
+                + " ab_back=" + Interlocked.Read(ref FtAlloc.AbBack) + " ab_retry=" + Interlocked.Read(ref FtAlloc.AbRetry)
+                + " heap=" + GC.GetTotalMemory(false));
             LastN = _pn;
             LastSF = _pF;
             _btT0 = BetweenTicks();
@@ -281,7 +294,7 @@ namespace CompetitiveRounds
 
         private static void ResetPartition()
         {
-            _wG = 0; _wW = 0; _wR = 0; _wS2 = 0; _wE = 0; _wGok = true;
+            Array.Clear(_wc, 0, FtSpan.Classes); Array.Clear(_wa, 0, FtSpan.Classes); _wAc = 0; _wGok = true; _wAok = true;
             for (int j = 0; j < Bins; j++) { _tq[j] = 0; _tr[j] = 0; _tn[j] = 0; }
         }
 
@@ -310,8 +323,9 @@ namespace CompetitiveRounds
               .Append(" coin=").Append(_oCoin).Append(" wi=").Append(_oK).Append(" f0=").Append(_oF0)
               .Append(" pred=").Append(Arm(_oPred)).Append(" prun=").Append(_oPlantRun ? 1 : 0).Append(" res=").Append(_oRes ? 1 : 0)
               .Append(" gcn=").Append(_wGc1 - _wGc0).Append(" cG=");
-            if (_wGok) sb.Append(_wG); else sb.Append("NA");
-            sb.Append(" cW=").Append(_wW).Append(" cR=").Append(_wR).Append(" cS=").Append(_wS2).Append(" cE=").Append(_wE);
+            if (_wGok) sb.Append(_wc[FtSpan.ClsG]); else sb.Append("NA");
+            sb.Append(" cW=").Append(_wc[FtSpan.ClsW]).Append(" cR=").Append(_wc[FtSpan.ClsR]).Append(" cS=").Append(_wc[FtSpan.ClsS])
+              .Append(" cE=").Append(_wc[FtSpan.ClsE]);
             AppendBins(sb, " q=", _tq);
             AppendBins(sb, " r=", _tr);
             AppendBins(sb, " qn=", _tn);
@@ -320,6 +334,14 @@ namespace CompetitiveRounds
             sb.Append(" tok=");
             FtLedger.AppendTok(sb, _lb, _le);
             sb.Append(" nm=").Append(FtLedger.Marks(_lb, _le));
+            sb.Append(" cP=").Append(_wc[FtSpan.ClsP]).Append(" cX=").Append(_wc[FtSpan.ClsX]);
+            bool a = _wAok && FtAlloc.Ok;
+            sb.Append(" aC=").Append(a ? _wAc.ToString() : "NA");
+            sb.Append(" aW=").Append(a ? _wa[FtSpan.ClsW].ToString() : "NA").Append(" aR=").Append(a ? _wa[FtSpan.ClsR].ToString() : "NA")
+              .Append(" aS=").Append(a ? _wa[FtSpan.ClsS].ToString() : "NA").Append(" aP=").Append(a ? _wa[FtSpan.ClsP].ToString() : "NA")
+              .Append(" aX=").Append(a ? _wa[FtSpan.ClsX].ToString() : "NA");
+            sb.Append(" wa=");
+            FtLedger.AppendWa(sb, _lb, _le, a);
             Plugin.Log.LogInfo(sb.ToString());
             Array.Copy(_le, _lb, FtLedger.Fields);
             _wn = 0; _wF = 0; _wS = 0; _wC = 0; _wMaxF = 0; _wP = 0;

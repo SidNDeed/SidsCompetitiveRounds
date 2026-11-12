@@ -1445,6 +1445,9 @@ namespace CompetitiveRounds
                 // F8 (ruling R6-A3.11): the room gate's one patch-time line, counted from Harmony's patch table.
                 try { FtRoomGate.ReportPatched(); }
                 catch (Exception ex) { Log.LogWarning("[FRAME-TIME] FT-GATE report failed: " + ex.Message); }
+                // V6 (ruling R6-A3.11.147 (5)): class X's and E's attached patches, from Harmony's patch table.
+                try { FtPhoton.ReportPatched(); }
+                catch (Exception ex) { Log.LogWarning("[FRAME-TIME] photon patches report failed: " + ex.Message); }
 #endif
                 // Card draw evidence (B4): one line naming its six patches as attached.
                 try { CardDrawEvidence.BootLine(); } catch { }

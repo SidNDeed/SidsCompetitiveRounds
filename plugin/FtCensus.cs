@@ -1,4 +1,8 @@
 #if SCR_FRAMETIME
+using System;
+using System.Collections.Generic;
+using System.Reflection;
+using System.Reflection.Emit;
 using System.Runtime.CompilerServices;
 using System.Text;
 
@@ -102,6 +106,111 @@ namespace CompetitiveRounds
         internal static void Reset()
         {
             for (int e = 0; e < Count; e++) { OnLive[e] = 0; Guarded[e] = 0; Outside[e] = 0; }
+        }
+
+        /// <summary>The boot line `[FRAME-TIME] scope census entries=<count> wrapped=<count>` (R-SCOPE, ruling R6-A3.11.147
+        /// (3)(f)): entries counts the census's registered collector entry points; wrapped counts those whose every
+        /// call site of Skip, found in this plugin's compiled IL (a call to Skip right after the constant that names the
+        /// entry), lies in a method that also calls FtSpan.Open and FtSpan.Close, so the entry's work runs inside a
+        /// scope. An entry with no call site is not wrapped. FtClock.OnStart, at the first frame boundary, after
+        /// FtE.RegisterAll.</summary>
+        internal static void LogScopeCensus()
+        {
+            int entries = 0, wrapped = 0;
+            string why = "";
+            try
+            {
+                const BindingFlags All = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static | BindingFlags.Instance
+                    | BindingFlags.DeclaredOnly;
+                int skip = typeof(FtCensus).GetMethod("Skip", BindingFlags.NonPublic | BindingFlags.Static).MetadataToken;
+                int open = typeof(FtSpan).GetMethod("Open", BindingFlags.NonPublic | BindingFlags.Static).MetadataToken;
+                int close = typeof(FtSpan).GetMethod("Close", BindingFlags.NonPublic | BindingFlags.Static).MetadataToken;
+                Module mod = typeof(FtCensus).Module;
+                var sites = new int[Capacity];
+                var good = new int[Capacity];
+                Type[] types;
+                try { types = mod.Assembly.GetTypes(); }
+                catch (ReflectionTypeLoadException ex) { types = ex.Types; why = " partial=1"; }
+                var found = new List<int>();
+                foreach (var t in types)
+                {
+                    if (t == null) continue;
+                    var ms = new List<MethodBase>();
+                    try { ms.AddRange(t.GetMethods(All)); ms.AddRange(t.GetConstructors(All)); }
+                    catch { continue; }
+                    foreach (var m in ms)
+                    {
+                        byte[] il;
+                        try { var body = m.GetMethodBody(); il = body != null ? body.GetILAsByteArray() : null; }
+                        catch { il = null; }
+                        if (il == null) continue;
+                        bool opens, closes;
+                        found.Clear();
+                        ScanIl(il, skip, open, close, found, out opens, out closes);
+                        foreach (int e in found)
+                        {
+                            if (e < 0 || e >= Capacity) continue;
+                            sites[e]++;
+                            if (opens && closes) good[e]++;
+                        }
+                    }
+                }
+                for (int e = 0; e < Count; e++)
+                {
+                    if (Names[e] == null) continue;
+                    entries++;
+                    if (sites[e] > 0 && good[e] == sites[e]) wrapped++;
+                }
+            }
+            catch (System.Exception ex) { why = " failed=" + ex.GetType().Name; }
+            Plugin.Log.LogInfo("[FRAME-TIME] scope census entries=" + entries + " wrapped=" + wrapped + why);
+        }
+
+        private static Dictionary<short, OpCode> _ops;
+
+        /// <summary>One method's IL: the constant before each call to skip (into found), and whether it calls open and
+        /// close. Operand sizes come from System.Reflection.Emit's own opcode table.</summary>
+        internal static void ScanIl(byte[] il, int skip, int open, int close, List<int> found, out bool opens, out bool closes)
+        {
+            if (_ops == null)
+            {
+                var d = new Dictionary<short, OpCode>();
+                foreach (var f in typeof(OpCodes).GetFields(BindingFlags.Public | BindingFlags.Static))
+                    if (f.GetValue(null) is OpCode oc) d[oc.Value] = oc;
+                _ops = d;
+            }
+            opens = closes = false;
+            int last = int.MinValue;   // the constant the previous instruction pushed, if it was an ldc.i4
+            int i = 0;
+            while (i < il.Length)
+            {
+                short v = il[i] == 0xFE && i + 1 < il.Length ? (short)(0xFE00 | il[i + 1]) : il[i];
+                i += il[i] == 0xFE ? 2 : 1;
+                OpCode oc;
+                if (!_ops.TryGetValue(v, out oc)) return;
+                int c = int.MinValue;
+                if (v >= 0x15 && v <= 0x1E) c = v - 0x16;                     // ldc.i4.m1 to ldc.i4.8
+                else if (v == 0x1F) c = (sbyte)il[i];                          // ldc.i4.s
+                else if (v == 0x20) c = BitConverter.ToInt32(il, i);           // ldc.i4
+                if (oc.OperandType == OperandType.InlineMethod && (v == 0x28 || v == 0x6F))   // call, callvirt
+                {
+                    int tok = BitConverter.ToInt32(il, i);
+                    if (tok == skip && last != int.MinValue) found.Add(last);
+                    else if (tok == skip) found.Add(-1);
+                    if (tok == open) opens = true;
+                    if (tok == close) closes = true;
+                }
+                switch (oc.OperandType)
+                {
+                    case OperandType.InlineNone: break;
+                    case OperandType.ShortInlineBrTarget: case OperandType.ShortInlineI: case OperandType.ShortInlineVar: i += 1; break;
+                    case OperandType.InlineVar: i += 2; break;
+                    case OperandType.InlineI8: case OperandType.InlineR: i += 8; break;
+                    case OperandType.InlineSwitch: i += 4 + 4 * BitConverter.ToInt32(il, i); break;
+                    default: i += 4; break;
+                }
+                last = c;
+            }
         }
     }
 }
