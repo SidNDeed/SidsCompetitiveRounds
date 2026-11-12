@@ -1365,7 +1365,9 @@ def b3(recs):
     thread's start, a hash completed on the main thread) ran in a live-combat frame: neither with CombatLive true
     at its call, in any moment (at_call), nor in a frame that started live whose combat ended before the call
     (edge; round-1 MEDIUM, FtHeavy.cs:39); and the hashing job's interval [hash_t0, hash_t1] lies clear of every
-    point's live interval [t0, t1]. Off-thread calls are reported, not judged.
+    point's live interval [t0, t1]. Off-thread calls (off) are reported, not judged (ruled not a fault, ruling
+    R6-A3.11.154): they run in no frame of the main thread, report() prints them, and what they cost the frames is in
+    the measured frame times themselves.
     Returns (ok, reasons, {op: (at_call, edge, off, live-moment calls)})."""
     hv = [r for r in recs if r["kind"] == "heavy"]
     if not hv:

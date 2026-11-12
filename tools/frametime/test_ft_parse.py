@@ -4543,8 +4543,10 @@ FAULT_FIELDS = (
     ("heavy", "at_call", "FtHeavy.cs", "b3", '"at_call"'),
     ("heavy", "edge", "FtHeavy.cs", "b3", '"edge"'),
     ("heavy", "off", "FtHeavy.cs", None,
-     "OPEN, reported to the integrator (no ruling yet): a heavy operation marked off the main thread (FtHeavy.cs:39) "
-     "is counted here, not as at_call or edge; b3 sums it into its operation table and judges only at_call and edge"),
+     "ruled not a fault (ruling R6-A3.11.154): a heavy operation marked off the main thread (FtHeavy.cs:39) runs in "
+     "no frame of the main thread; B3 judges placement in frames (at_call, edge) and the hashing job's interval "
+     "against every point's live interval; report() prints off (reported, not judged, as b3 says) and it decides "
+     "nothing; what an off-thread call costs the frames is in the measured frame times themselves"),
     ("menu_done", "why", "FtMenu.cs", "menu_check", '"why"'),
     ("answer_replay", "result", "FtReplay.cs", "f18", '"result"'),
     ("opened", "se", "FtSchedule.cs", "vr5_records", "OPENED"),
