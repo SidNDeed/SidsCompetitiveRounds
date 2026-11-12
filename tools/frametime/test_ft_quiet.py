@@ -593,14 +593,24 @@ def test_frozen_busy_counter_refuses(tmp_path):
     assert v == "REFUSED" and "the busy counter of reserved core 2 does not advance at utc" in out, out
     assert "pinned to it ran 0.900 core (a frozen counter)" in out, out
 
-    # the negative control: a core whose vCPU ran 0.01 core may show no busy tick in an interval
-    def idle5(i, t, r):
-        if t == "504":
-            r["run"] = i * 10000000
-        if t == "c5":
-            r["busy"] = 0
-    v, out = verdict(tmp_path, hedit=idle5)
+    # THE RULE (ruling R6-A3.11.153 (4)) is per interval, not per window: a reserved core's busy counter that does not
+    # advance in an interval refuses as frozen when the vCPUs pinned to that core ran more than RESERVED_MAX (0.05
+    # core) in the same interval. At or below that runtime a zero reading is inside the counter's own granularity
+    # and is read as it stands. Both sides of the bound, each away from its float edge:
+    def idle5(per_sample_ns):
+        def edit(i, t, r):
+            if t == "504":
+                r["run"] = i * per_sample_ns
+            if t == "c5":
+                r["busy"] = 0
+        return edit
+    v, out = verdict(tmp_path, hedit=idle5(10000000))      # 0.01 core: the counter may show no tick
     assert v == "PASS", out
+    v, out = verdict(tmp_path, hedit=idle5(40000000))      # 0.04 core: still below the bound
+    assert v == "PASS", out
+    v, out = verdict(tmp_path, hedit=idle5(60000000))      # 0.06 core: above it, a live counter must have moved
+    assert v == "REFUSED" and "the busy counter of reserved core 5 does not advance at utc" in out, out
+    assert "pinned to it ran 0.060 core (a frozen counter)" in out, out
 
 
 def test_fixture_must_last_ten_seconds(tmp_path):
