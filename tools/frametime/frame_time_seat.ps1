@@ -335,7 +335,7 @@ $FormText = @(
     # no target name, and that line leaves only by the redaction form below
     '[FRAME-TIME] FT-GATE patched <u> entry points expected=<u> excluded=<gateex> missing=<gatemissing>'
     '[FRAME-TIME] FT-ROOM joined offline=<b> name=<roomname>'
-    '[FRAME-TIME] churn timer frozen room=<room>'
+    '[FRAME-TIME] churn timer frozen room=<roomname>'
     '[FRAME-TIME] rematch mutant: answered Yes at once'
     '[FRAME-TIME] rematch not answered (sitting over)'
     '[FRAME-TIME] rematch held: published ft_rm=<n>'
@@ -507,11 +507,11 @@ $RedactText = @(
     '[FRAME-TIME] photon patches report failed: <*>'
     '[FRAME-TIME] attach report failed: <*>'
     '[FRAME-TIME] FT-GATE patched <u> entry points expected=<u> excluded=<gateex> missing=<*>'
-    # the two room-name lines (plugin/FtRoomGate.cs:87, :247), ruled: a room name that no form above admits (an ft_
-    # room, (none), (empty)) leaves as the token with every other field kept, and the line is never withheld for it.
-    # The refused line's n= after the name is that form's typed tail, cut from the right, so a name holding spaces,
-    # "=" or " n=7" never moves the count
+    # the three room-name lines (plugin/FtRoomGate.cs:87, :247, :255), ruled: a room name that no form above admits
+    # (an ft_ room, (none), (empty)) leaves as the token, every other field kept; no line is withheld for its name.
+    # The refused line's n= after the name is that form's typed tail, cut from the right, so no name moves the count
     '[FRAME-TIME] FT-ROOM joined offline=<b> name=<*>'
+    '[FRAME-TIME] churn timer frozen room=<*>'
     '[FRAME-TIME] room call refused op=<@roomop> name=<*> n=<u>'
     # the calibration's failures (plugin/FtCalib.cs, FtA3.cs, Plugin.cs); the typed failure texts are forms above
     '[FRAME-TIME] cal i=-1 why=patches kind=entries failed: <*>'

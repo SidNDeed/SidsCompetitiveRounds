@@ -39,7 +39,7 @@ Usage: python -I -B ft_parse.py <sitting-C log> --peer <the other seat's sitting
        python -I -B ft_parse.py --combine V:<seat>=<log> V:<seat>=<log> C:<seat>=<log> C:<seat>=<log>
                                    [R:<seat>=<reference log> ...]
                                    (VERDICT B1 and B3 per seat and the worse seat; a seat's logs paired by its name)
-       python -I -B ft_parse.py --controls <a control run's boot log>
+       python -I -B ft_parse.py --controls <profile>=<a control run's boot log>
                                    (controls_proof: K1 to K3 under k_mutant, the unknown line forms, Failed to patch)
 Exit: 0 the report printed; 3 REFUSED (a check refused the input); 4 FT-PARSE REFUSED (a record lacks a key
 REQUIRED_KEYS names: one line names its kind, file, line and keys; or an input holds a line "withheld <class> <n>",

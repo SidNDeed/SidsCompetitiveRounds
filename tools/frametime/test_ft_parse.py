@@ -4117,7 +4117,7 @@ FORM_VARIANTS = (
     ("FtRoomGate.cs:250", '"[FRAME-TIME] FT-ROOM read failed: " + ex.Message',
      ("FT-ROOM read failed: a b", "FT-ROOM read failed: ")),
     ("FtRoomGate.cs:255", '"[FRAME-TIME] churn timer frozen room=" + room',
-     ("churn timer frozen room=FT-1", "churn timer frozen room=")),
+     tuple("churn timer frozen room=" + w for w in ("FT-1", "", "(none)", "(not-exported)"))),
     ("FtRoomGate.cs:257", '"[FRAME-TIME] churn freeze failed: " + ex.Message',
      ("churn freeze failed: a b", "churn freeze failed: ")),
     ("FtSchedule.cs:345", '"[FRAME-TIME] flushed g=" + g + " why=" + why',
@@ -4186,22 +4186,22 @@ def chk_emitted_variants_are_forms(m):
 
 
 # ruling R6-A3.11.154 (12 Nov, 08:30Z): the export prints a room name not of the lane's form (an ft_ name, '(none)' or
-# '(empty)') as '(not-exported)' on these two lines, every other field intact
-ROOM_NAME_REDACTED = ("FT-ROOM joined offline=1 name=(not-exported)",
+# '(empty)') as '(not-exported)' on these three lines, every other field intact
+ROOM_NAME_REDACTED = ("FT-ROOM joined offline=1 name=(not-exported)", "churn timer frozen room=(not-exported)",
                       "room call refused op=JoinRoom name=(not-exported) n=3")
 
 
 @pytest.mark.parametrize("line", ROOM_NAME_REDACTED)
 def test_room_name_redaction_is_read_and_judged_by_no_rule(line):
     # the line is a form the parser reads, and no rule reads its name: an FT-ROOM line is no record (_LINE does not
-    # match the hyphen; RAW_FAILURES reads only 'FT-ROOM read failed'), and 'room call refused' is a record of kind
-    # room, which EMITTED_UNREAD names (test_every_emitted_kind_is_read_or_named fails if a rule reads that kind). So
-    # nothing can take '(not-exported)' for the lane's room: sitting V with the line added gives the clean log's
-    # verdict, as it does with the same line naming an ft_ room (the control)
+    # match the hyphen; RAW_FAILURES reads only 'FT-ROOM read failed'); 'room call refused' is a record of kind room and
+    # the churn trace one of kind churn, both named by EMITTED_UNREAD (of the churn kind a rule reads only the failure
+    # line, 'churn freeze failed', a FAILURE_EVENTS row). So nothing can take '(not-exported)' for the lane's room: sitting
+    # V with the line added gives the clean log's verdict, as with the same line naming an ft_ room (the control)
     full = LOG_PREFIX + "[FRAME-TIME] " + line
     assert P.unknown_forms(full) == []
     r = P.parse_line(full)
-    assert (r is None) if line.startswith("FT-ROOM") else (r["kind"] == "room" and "room" in P.EMITTED_UNREAD), r
+    assert (r is None) if line.startswith("FT-ROOM") else (r["kind"] == line.split()[0] and r["kind"] in P.EMITTED_UNREAD), r
     assert not [w for w, _ in P.RAW_FAILURES if w in full]
     v = _v_text()
     base = _v(P, v)["why"]

@@ -18,8 +18,11 @@ SliceExport, the code step 4 runs), in a child PowerShell on a synthetic log in 
   (d) ROWS: the fallback and free-operand rows' sample lines (KEYED_ROWS, FREE_ROWS, ROOM_FALLBACK), the [FPSCAP]
       lines' swept holes (FPSCAP_ROWS) and the type names with a generic arity suffix (IDENT_ROWS) exported, and
       their unlisted variants withheld;
-  (e) ROOM NAMES: the two room-name lines (ROOM_NAMES) export an admitted name as it is and any other name as
+  (e) ROOM NAMES: the three room-name lines (ROOM_NAMES) export an admitted name as it is and any other name as
       "(not-exported)" with every other field kept, the refused line's n= cut from the right; never withheld for it;
+  (f) VARIANTS: every sample of test_ft_parse.py's FORM_VARIANTS (the parser side's sweep of the emit sites) through
+      the export: a withheld sample is named in VARIANTS_WITHHELD with its reason, and a row names a withheld sample
+      (test_parser_variants_through_the_export; its negative control test_parser_variants_control);
   -SelfTest: the script's own self-test prints SELFTEST PASS (the Codex gate's classification and lines among it).
 Without PowerShell: the conditional and fallback forms of each [FRAME-TIME] emit expression hold a proven shape or a
 row (test_emitter_fallbacks_have_rows; its negative control test_emitter_fallbacks_control); the Codex gate sits once
@@ -33,13 +36,13 @@ without sock, the earlier point form only, no attach form, no attach report reda
 exports the text, wa loosened, the forms unanchored at the end, the window key check skipped, the [FPSCAP] lines back
 under the component slice, the settled gc_incremental back to <b>, the scope census tail without partial=1, the peer
 fallbacks dropped, the room line's empty region dropped, the render cap's number back to four digits, <ident> without
-the arity suffix, the room-name forms admitting any name, either room-name redaction dropped, a redaction that drops
-its typed tail, the culture gate skipped in the sitting, its decimal check dropped, its own-table check dropped, the
--CultureGate switch falling through into the sitting), run the same way; each must fail its named check. The culture
-gate (ruling, follow-up 2): its place right after the Codex gate (test_culture_gate_before_the_launch), the
--CultureGate switch's lines and exit code with nothing created under the sitting's roots (test_culture_gate_switch),
-and the self-test's case table on hand-made number formats (test_culture_cases). frame_time_seat_v.ps1 holds no form and calls
-frame_time_seat.ps1, so it inherits them (checked from its text).
+the arity suffix, the room-name forms admitting any name, a room-name redaction dropped (each of the three lines; the
+churn line's also against the variants check), the churn line's (none) not admitted, a redaction that drops its typed tail, the culture gate skipped in the sitting, its
+decimal check dropped, its own-table check dropped, the -CultureGate switch falling through into the sitting), run the
+same way; each must fail its named check. The culture gate (ruling, follow-up 2): its place right after the Codex gate
+(test_culture_gate_before_the_launch), the -CultureGate switch's lines and exit code with nothing created under the
+sitting's roots (test_culture_gate_switch), and the self-test's case table on hand-made number formats (test_culture_cases).
+frame_time_seat_v.ps1 holds no form and calls frame_time_seat.ps1, so it inherits them (checked from its text).
 Where neither powershell nor pwsh exists the export tests SKIP with that reason.
 """
 import os
@@ -55,7 +58,7 @@ if HERE not in sys.path:
     sys.path.insert(0, HERE)
 import ft_parse as P             # noqa: E402  (read only: FORMS, PHOTON_ENTRIES, READ_CLASSES)
 import ft_slice_identity as I    # noqa: E402  (read only: FIRST_SECTION)
-import test_ft_parse as T        # noqa: E402  (read only: the sitting builders)
+import test_ft_parse as T        # noqa: E402  (read only: the sitting builders, FORM_VARIANTS, LOG_PREFIX)
 
 PS1 = os.path.join(HERE, "frame_time_seat.ps1")
 PS1_V = os.path.join(HERE, "frame_time_seat_v.ps1")
@@ -1197,21 +1200,26 @@ def test_rows_export(tmp_path):
     assert f == [], f
 
 
-# the two room-name lines (plugin/FtRoomGate.cs:87, :247), ruled: a name the forms admit (an ft_ room, (none), (empty))
-# is exported as it is; any other name as "(not-exported)", every other field kept (the refused line's n= after the
-# name, cut from the right), and the line is never withheld for its name. Payloads after "[FRAME-TIME] ":
+# the three room-name lines (plugin/FtRoomGate.cs:87, :247, :255: the refused call, the join and the churn trace, the
+# last two printing one join's name), ruled: a name the forms admit (an ft_ room, (none), (empty)) is exported as it
+# is; any other name as "(not-exported)", every other field kept (the refused line's n= after the name, cut from the
+# right), and no line is withheld for its name. Payloads after "[FRAME-TIME] ":
 # (exported as they are, (raw, its export), withheld for a typed field)
 ROOM_NAMES = (
     ["room call refused op=JoinRoom name=ft_0123abcd n=2", "room call refused op=CreateRoom name=(none) n=1",
      "room call refused op=JoinOrCreateRoom name=(empty) n=12", "FT-ROOM joined offline=0 name=ft_0123abcd",
-     "FT-ROOM joined offline=1 name=(none)", "FT-ROOM joined offline=0 name=(empty)"],
+     "FT-ROOM joined offline=1 name=(none)", "FT-ROOM joined offline=0 name=(empty)",
+     "churn timer frozen room=ft_0123abcd", "churn timer frozen room=(none)", "churn timer frozen room=(empty)"],
     [("room call refused op=JoinRoom name=open room=%s n=7 n=3" % MARK,
       "room call refused op=JoinRoom name=" + RED + " n=3"),
      ("room call refused op=RejoinRoom name=ft_0123abcd n=7 n=12", "room call refused op=RejoinRoom name=" + RED + " n=12"),
      ("room call refused op=JoinLobby name=%s n=0" % MARK, "room call refused op=JoinLobby name=" + RED + " n=0"),
      ("FT-ROOM joined offline=1 name=open room=%s n=7" % MARK, "FT-ROOM joined offline=1 name=" + RED),
      ("FT-ROOM joined offline=0 name=ft_0123ABCD", "FT-ROOM joined offline=0 name=" + RED),
-     ("FT-ROOM joined offline=0 name=", "FT-ROOM joined offline=0 name=" + RED)],
+     ("FT-ROOM joined offline=0 name=", "FT-ROOM joined offline=0 name=" + RED),
+     ("churn timer frozen room=open room=%s n=7" % MARK, "churn timer frozen room=" + RED),
+     ("churn timer frozen room=ft_0123ABCD", "churn timer frozen room=" + RED),
+     ("churn timer frozen room=", "churn timer frozen room=" + RED)],
     ["room call refused op=Leave name=%s n=3" % MARK, "room call refused op=JoinRoom name=%s n=-3" % MARK,
      "room call refused op=JoinRoom name=%s" % MARK, "FT-ROOM joined offline=2 name=%s" % MARK])
 
@@ -1238,6 +1246,88 @@ def check_room_names(ps1, tmp):
 def test_room_names_export(tmp_path):
     f = check_room_names(PS1, str(tmp_path))
     assert f == [], f
+
+
+# ---- the parser side's variant samples through the export (the two sides' sweeps held against each other)
+
+# test_ft_parse.py's FORM_VARIANTS holds, for every emit site of the class, one sample per variant as the parser reads
+# it. Each sample goes through the export and leaves as it is, leaves with the token, or is withheld. A withheld sample
+# must be named here, by its site and a text its payload holds, with the reason it is no gap of the export; a withheld
+# sample that no row names fails, and so does a row that names no withheld sample. So a variant that the parser side
+# lists cannot be withheld unseen (the churn trace's "(none)" was: its operand is a local set in an earlier statement,
+# which test_emitter_fallbacks_have_rows does not see). LIMITS: a row's reason is a recorded judgement, not a proof; and
+# a variant that the parser side does not list is not seen here
+_V_SET = "the sample's value is the parser side's own; the emitter prints one of a closed set, and the form holds the set"
+_V_ROOM = ("the sample's room name is the parser side's own; this line prints the lane's room only (FtArm.ExpectedRoom: "
+           "the name is compared, or is the value joined, before the line is printed), and the lane's room is a form")
+_V_SHORT = ("a shortened line: the sample carries fewer keys than the emitter's line, and its lists are the parser "
+            "side's own; the emitter's full line is exported from the sitting logs (check_identity)")
+VARIANTS_WITHHELD = (
+    ("FtA3.cs:345", "k=row1", _V_SET), ("FtA3.cs:348", "k=row1", _V_SET), ("FtA3.cs:356", "k=row1", _V_SET),
+    ("FtA3.cs:374", "k=row1", _V_SET), ("FtA3.cs:379", "k=row1", _V_SET), ("FtA3.cs:397", "k=row1", _V_SET),
+    ("FtA3.cs:400", "k=row1", _V_SET), ("FtCensus.cs:70", "comp=hit", _V_SET), ("FtCensus.cs:78", "comp=hit", _V_SET),
+    ("FtHeavy.cs:64", "op=hash", _V_SET), ("FtPhoton.cs:69", "names=A.b,C.d", _V_SET),
+    ("FtArm.cs:52", "ft_dll=0a1b", "the sample's digest is four hex digits; the emitter prints eight (<x8>)"),
+    ("FtCalib.cs:149", "spins=5", "the sample's spins is one number; the emitter prints <n>/<n> pairs (<spins>)"),
+    ("FtArm.cs:117", "name=FT-1", _V_ROOM), ("FtDrive.cs:87", "room=FT-1", _V_ROOM),
+    ("FtArm.cs:152", "room=FT-1", _V_ROOM + "; nor is its empty region printed there: the armed line follows the "
+     "region's comparison with the lane's (FtArm.Check)"),
+    ("FtDrive.cs:52", "self-drive ", "the wrapper's bare sample: no caller of FtDrive.Log passes an empty text"),
+    ("FtFrames.cs:260", "p pt=", _V_SHORT), ("FtFrames.cs:306", "w pt=", _V_SHORT),
+    ("FtRoomGate.cs:109", "JoinRoomAsync", "a name outside the room gate's design is withheld by design: the laptop "
+     "seat's read then refuses (exit 4), and the VM seat's raw log gives the ATTACH fault"),
+)
+
+
+def check_variants(ps1, tmp, table=None):
+    """every FORM_VARIANTS sample of the parser side through the export, in order: a withheld sample is named in the
+    table, every row of the table names a withheld sample, the withheld count is the export's own, and every line the
+    export lets out is a form the parser reads"""
+    table = VARIANTS_WITHHELD if table is None else table
+    samples = [(site, pay) for site, _, pays in T.FORM_VARIANTS for pay in pays]
+    os.makedirs(tmp, exist_ok=True)
+    out, log, _ = run_export(ps1, write(os.path.join(tmp, "variants.log"),
+                                        "\n".join(INFO + FT + pay for _, pay in samples) + "\n"))
+    exported = [x for x in log if not x.startswith("withheld ")]
+    i, withheld = 0, []
+    for site, pay in samples:
+        line, x = INFO + FT + pay, exported[i] if i < len(exported) else None
+        # the export keeps the order: the next exported line is this sample as it is, or its typed head, the token and
+        # its typed tail; otherwise the sample was withheld
+        if x is not None and (x == line or (RED in x and line.startswith(x[:x.index(RED)])
+                                            and line.endswith(x[x.index(RED) + len(RED):]))):
+            i += 1
+        else:
+            withheld.append((site, pay))
+    f = ["withheld and not named in VARIANTS_WITHHELD: %s | %s" % (s, p[:160]) for s, p in withheld
+         if not [1 for ts, mark, _ in table if ts == s and mark in p]]
+    f += ["VARIANTS_WITHHELD names no withheld sample: %s | %s" % (ts, mark) for ts, mark, _ in table
+          if not [1 for s, p in withheld if ts == s and mark in p]]
+    if i != len(exported):
+        f.append("%d exported lines matched no sample in order: %s" % (len(exported) - i, exported[i][:160]))
+    if "withheld FRAME-TIME %d" % len(withheld) not in log:
+        f.append("not 'withheld FRAME-TIME %d': %s" % (len(withheld), [x for x in log if x.startswith("withheld")]))
+    f += ["exported and not a form the parser reads: %s" % x[:160] for x in exported
+          if FT in x and P.unknown_forms(T.LOG_PREFIX + x[x.index(FT):])]
+    return f
+
+
+@need_ps
+def test_parser_variants_through_the_export(tmp_path):
+    f = check_variants(PS1, str(tmp_path))
+    assert f == [], f
+
+
+@need_ps
+def test_parser_variants_control(tmp_path):
+    """the table's two rules can fail: a withheld sample whose row is taken out is reported, and so is a row that
+    names no withheld sample"""
+    less = tuple(r for r in VARIANTS_WITHHELD if r[0] != "FtHeavy.cs:64")
+    f = check_variants(PS1, os.path.join(str(tmp_path), "less"), less)
+    assert [x for x in f if x.startswith("withheld and not named") and "FtHeavy.cs:64" in x], f
+    more = VARIANTS_WITHHELD + (("FtHeavy.cs:64", "op=answer", "a row that names nothing"),)
+    f = check_variants(PS1, os.path.join(str(tmp_path), "more"), more)
+    assert [x for x in f if x.startswith("VARIANTS_WITHHELD names no withheld sample") and "op=answer" in x], f
 
 
 # ---- the Codex gate's place in the sitting (its classification and lines are the self-test's)
@@ -1428,6 +1518,12 @@ MUTANTS = [
      "'[FRAME-TIME] room call refused op=<@roomop> name=<*> n=<u>'", None),
     ("the joined room line withheld for a free name", check_room_names, "line",
      "'[FRAME-TIME] FT-ROOM joined offline=<b> name=<*>'", None),
+    ("the churn room line withheld for a free name", check_room_names, "line",
+     "'[FRAME-TIME] churn timer frozen room=<*>'", None),
+    ("the churn room line's (none) and (empty) not admitted as they are", check_room_names, "text",
+     "'[FRAME-TIME] churn timer frozen room=<roomname>'", "'[FRAME-TIME] churn timer frozen room=<room>'"),
+    ("the churn room line withheld for a free name, as the variants check sees it", check_variants, "line",
+     "'[FRAME-TIME] churn timer frozen room=<*>'", None),
     ("a redaction that drops its typed tail (the refused line's n=)", check_room_names, "text",
      "if ($m.Success) { return $m.Groups['keep'].Value + $RedactToken + $m.Groups['tail'].Value }",
      "if ($m.Success) { return $m.Groups['keep'].Value + $RedactToken }"),
