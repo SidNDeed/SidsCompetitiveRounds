@@ -102,8 +102,14 @@ namespace CompetitiveRounds
         internal static void OwnPatchesApplied()
         {
             _ownPatchesApplied = true;
+#if SCR_FT_NOCOLLECTORS
+            // FrameTimeRef: no collector patch is installed, so no entry is calibrated
+            Plugin.Log.LogInfo("[FRAME-TIME] cal i=-1 why=patches kind=entries reference=1 built=0");
+            return;
+#else
             try { Cals(); }
             catch (Exception ex) { Plugin.Log.LogWarning("[FRAME-TIME] cal i=-1 why=patches kind=entries failed: " + ex.GetType().Name + ": " + ex.Message); }
+#endif
         }
 
         /// <summary>One calibration run; why names the moment (start, or game g).</summary>
@@ -197,6 +203,10 @@ namespace CompetitiveRounds
 
         private static void RunEntries(int i, string why)
         {
+#if SCR_FT_NOCOLLECTORS
+            Plugin.Log.LogInfo("[FRAME-TIME] cal i=" + i + " why=" + why + " kind=entries reference=1 built=0");
+            return;
+#else
             EntryCal[] cals = Cals();
             if (!_ownPatchesApplied)
             {
@@ -254,6 +264,7 @@ namespace CompetitiveRounds
                 Plugin.Log.LogInfo("[FRAME-TIME] cal i=" + i + " why=" + why + " kind=disp shape=" + c.Name + " n=" + EntryCalls
                     + " u=" + string.Join(",", u) + " p=" + string.Join(",", p));
             }
+#endif
         }
 
         /// <summary>Every patched entry's calibration. Before Plugin.Awake's signal (OwnPatchesApplied) it returns

@@ -143,7 +143,9 @@ namespace CompetitiveRounds
         private static void CommitTiming(ActorStats actor, int actorNumber, int networkTime, long arrivalTick, out GapSample sample)
         {
             // Seat evidence: the batch's sender stamp, for age, age_b, drift and cadence.
+#if !SCR_FT_NOCOLLECTORS
             try { SeatEvidence.NoteView(actorNumber, networkTime); } catch { }
+#endif
             GapSample roomSample;
             actor.Room.Record(networkTime, arrivalTick, out roomSample);
             sample = roomSample;

@@ -5873,11 +5873,13 @@ namespace CompetitiveRounds
             catch { }
 
             // Seat evidence (contract V2): open this game's window. Contained.
+#if !SCR_FT_NOCOLLECTORS
             try { SeatEvidence.BeginGame(oneVOneMatchAtStart, matchIsRanked); } catch { }
             // Combat evidence (B1-B3, B5): the same window, its own collectors. Contained.
             try { CombatEvidence.BeginGame(oneVOneMatchAtStart); } catch { }
             // Identity-clock evidence: its window, moment 1. Contained.
             try { IdentityClockEvidence.BeginGame(oneVOneMatchAtStart, matchIsRanked); } catch { }
+#endif
 #if SCR_FRAMETIME
             try { FtSchedule.Opened(); } catch (Exception ex) { Plugin.Log.LogWarning("[FRAME-TIME] opened line failed: " + ex.Message); }
 #endif

@@ -106,9 +106,27 @@ PRE_DLL=""
 DLL_EQ=0
 POST_EQ=0
 bad=0
+# the quiet trace's guest half (method-v52.md section 6, ruling R6-A3.11.133 (3) MEDIUM 6): ft_quiet_guest.ps1
+# samples once a second from the leased shutdown on; it is stopped at the run's end, where ROUNDS is gone or the end
+# is HELD, by its stop file and then by its captured pid, and ft_quiet.py --guest prints the guest half's verdict
+# ("QUIET GUEST-HALF ..."). The sitting's quiet verdict needs the host trace too: ft_quiet.py <guest> <host>, at
+# acceptance. A trace that ends while ROUNDS still runs refuses there (the window's end is not observed).
+QTRACE="$OUT/quiet-guest.txt"; QSTOP="$OUT/quiet-guest.stop"; QPID=""
+ft_quiet_stop() {
+  local i
+  [ -n "$QPID" ] || return 0
+  : > "$QSTOP"
+  for i in $(seq 1 15); do kill -0 "$QPID" 2>/dev/null || break; sleep 1; done
+  if kill -0 "$QPID" 2>/dev/null; then echo "$(st) FT-QUIET guest sampler pid $QPID still running 15 s after its stop file: stopped by that pid"; kill "$QPID"; fi
+  wait "$QPID" 2>/dev/null
+  QPID=""
+  echo "$(st) FT-QUIET guest trace $QTRACE: $(grep -c '^G ' "$QTRACE" 2>/dev/null || echo 0) samples"
+  python -I -B "$HERE/ft_quiet.py" --guest "$QTRACE" | tr -d '\r' | sed 's/^/FT-QUIET /'
+}
 # A5: the release and its proof
 ft_release() {
   local rrc srcv out
+  ft_quiet_stop
   echo "$(st) FT-VM-LEASED lease release resume.ps1 -Holder frame-time"
   rig resume -Holder frame-time; rrc=$?
   out=$(rig pause -Status); srcv=$?
@@ -121,6 +139,7 @@ ft_release() {
   fi
 }
 ft_hold() {
+  ft_quiet_stop
   echo "FT-VM-LEASE HELD reason=$1: the lease kept (holder frame-time), the bot stays paused; restore from $PRE and release by hand; at $(st)"
   rc=30
 }
@@ -250,6 +269,13 @@ for i in $(seq 1 20); do [ "$(rounds_state)" = no ] && break; sleep "$NAP"; done
 s=$(rounds_state)
 if [ "$s" != no ]; then echo "$(st) FT-VM-LEASED ROUNDS not proven gone after the leased shutdown (reading: $s); nothing installed"; exit 21; fi
 echo "$(st) FT-VM-LEASED leased shutdown: ROUNDS not running"
+if [ -z "${FT_VM_TEST_DIR:-}" ]; then
+  powershell -NoProfile -ExecutionPolicy Bypass -File "$(cygpath -w "$HERE/ft_quiet_guest.ps1")" -Out "$(cygpath -w "$QTRACE")" -StopFile "$(cygpath -w "$QSTOP")" -MaxSeconds 21600 &
+  QPID=$!
+  echo "$(st) FT-QUIET guest sampler started (pid $QPID): $QTRACE"
+else
+  echo "$(st) FT-QUIET guest sampler not started (test mode)"
+fi
 # FIX-8 (R6-A3.11.10): a reading right after the quit measures the quit's own writes; settle first
 powershell -NoProfile -ExecutionPolicy Bypass -File "$(cygpath -w "$HERE/ft_settle_diskq.ps1")" | tr -d '\r'
 sg=${PIPESTATUS[0]}

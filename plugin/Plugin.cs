@@ -504,6 +504,35 @@ namespace CompetitiveRounds
             LetterboxClear.CreateClearCamera(go);
         }
 
+#if SCR_FRAMETIME
+        private static bool _ftVariantLogged;
+#endif
+#if SCR_FT_NOCOLLECTORS
+        // FrameTimeRef (B11 D3): the evidence collectors' patch classes, never installed in the reference build
+        // (tools/frametime/test_ft_reference.py holds this list equal to the [HarmonyPatch] classes the collectors'
+        // files declare)
+        private static readonly HashSet<Type> FtRefSkip = new HashSet<Type>
+        {
+            typeof(CombatEvidence_AttackPatch), typeof(CombatEvidence_BlockPatch), typeof(CombatEvidence_ContactPatch),
+            typeof(CombatEvidence_DamagePatch), typeof(CombatEvidence_DealtPatch), typeof(CombatEvidence_DiePatch),
+            typeof(CombatEvidence_DiePhoenixPatch), typeof(CombatEvidence_EdgeBouncePatch), typeof(CombatEvidence_FindTargetPatch),
+            typeof(CombatEvidence_ForcePatch), typeof(CombatEvidence_HitPatch), typeof(CombatEvidence_InitAmmoPatch),
+            typeof(CombatEvidence_InitNoAmmoPatch), typeof(CombatEvidence_InitSeparatePatch), typeof(CombatEvidence_MovePatch),
+            typeof(CombatEvidence_ReloadPatch), typeof(CombatEvidence_SyncPatch), typeof(CombatEvidence_TargetBouncePatch),
+            typeof(CombatEvidence_TryBlockPatch),
+            typeof(HitEvidence_BlockPatch), typeof(HitEvidence_DamagePatch), typeof(HitEvidence_DotPatch),
+            typeof(HitEvidence_ExecuteRpcPatch), typeof(HitEvidence_FfaDoStartGamePatch), typeof(HitEvidence_ForcePatch),
+            typeof(HitEvidence_ImpactPatch), typeof(HitEvidence_SpawnAmmoPatch), typeof(HitEvidence_SpawnNoAmmoPatch),
+            typeof(HitEvidence_SpawnSeparatePatch), typeof(HitEvidence_StartGamePatch),
+            typeof(SeatEvidence_DoBlockPatch), typeof(SeatEvidence_RpcSendPatch), typeof(SeatEvidence_TryBlockMePatch),
+            typeof(IdentityClock_ExecuteRpcPatch), typeof(IdentityClock_MovePlayersPatch), typeof(IdentityClock_MovementPatch),
+            typeof(IdentityClock_PointStartPatch),
+            typeof(CardDrawEvidence_CardAwakePatch), typeof(CardDrawEvidence_DonePickingPatch), typeof(CardDrawEvidence_EndPickPatch),
+            typeof(CardDrawEvidence_OfflinePickPatch), typeof(CardDrawEvidence_PickPatch), typeof(CardDrawEvidence_StartPickPatch),
+            typeof(SawPointEvidencePatch), typeof(PointEndEvidencePatch),
+        };
+#endif
+
         private void Awake()
         {
             Log = Logger;
@@ -511,6 +540,16 @@ namespace CompetitiveRounds
             // against: Awake runs on Unity's main thread.
             try { LogBundleCore.RegisterMainThread(); } catch { }
 #if SCR_FRAMETIME
+            // The build's variant, once per process (the parser requires exactly one per log, for its role)
+            if (!_ftVariantLogged)
+            {
+                _ftVariantLogged = true;
+#if SCR_FT_NOCOLLECTORS
+                Log.LogInfo("[FRAME-TIME] build variant=FrameTimeRef SCR_FT_REF=NOCOLLECTORS");
+#else
+                Log.LogInfo("[FRAME-TIME] build variant=FrameTime");
+#endif
+            }
             // FrameTime (B11 format M): settings from BepInEx/frametime/arm, the per-frame
             // clock (M1), the process-start calibration (M6) and settled line (M8).
             try { FtConfig.Load(); FtArm.ReadFixture(); FtClock.Install(); FtCalib.Run("start"); FtCalib.Settled(-1, -1); }
@@ -553,12 +592,14 @@ namespace CompetitiveRounds
                 // frame comes) and sent at the next launch.
                 UnityEngine.Application.quitting += () =>
                 {
+#if !SCR_FT_NOCOLLECTORS
                     try { PointEvidence.Drain(); } catch { }
                     try { GameStateWatcher.SeatEvidenceOnQuit(); } catch { }
                     try { SeatEvidence.FlushOnQuit(); } catch { }
                     try { CardDrawEvidence.FlushOnQuit(); } catch { }
                     try { CombatEvidence.FlushOnQuit(); } catch { }
                     try { IdentityClockEvidence.FlushOnQuit(); } catch { }
+#endif
                 };
             }
             catch (Exception ex) { Log.LogWarning($"[BUG-REPORT] quit hook bind failed: {ex.Message}"); }
@@ -1421,10 +1462,16 @@ namespace CompetitiveRounds
             {
                 HarmonyInstance = new Harmony(ModId);
                 int applied = 0, failed = 0;
+#if SCR_FT_NOCOLLECTORS
+                int ftRefSkipped = 0;
+#endif
                 foreach (var type in Assembly.GetExecutingAssembly().GetTypes())
                 {
                     var attrs = type.GetCustomAttributes(typeof(HarmonyPatch), true);
                     if (attrs == null || attrs.Length == 0) continue;
+#if SCR_FT_NOCOLLECTORS
+                    if (FtRefSkip.Contains(type)) { ftRefSkipped++; continue; }
+#endif
                     try
                     {
                         HarmonyInstance.CreateClassProcessor(type).Patch();
@@ -1437,6 +1484,9 @@ namespace CompetitiveRounds
                     }
                 }
                 Log.LogInfo($"[HARMONY] Patches applied: {applied} ok, {failed} failed");
+#if SCR_FT_NOCOLLECTORS
+                Log.LogInfo("[FRAME-TIME] reference collectors not installed: patch classes skipped=" + ftRefSkipped + " listed=" + FtRefSkip.Count);
+#endif
 #if SCR_FRAMETIME
                 // FrameTime: the positive signal that this plugin's own patches exist; the per-entry
                 // calibration table is built only from here on (ruling FRAME-TIME-ROUND-R6-A1).
@@ -3573,13 +3623,17 @@ namespace CompetitiveRounds
             // setting, lever or room-kind check is in front of it, because
             // evidence a player can dispute ships in every client build. It
             // reads the room and writes only this seat's own statement.
+#if !SCR_FT_NOCOLLECTORS
             try { PeerBuild.StageBuildProp("tick"); PeerBuild.Tick(); } catch { }
+#endif
 
             // Seat evidence: a pending compat outcome is signed and persisted
             // once the Steam id is known. Above the return because a finding
             // is exactly the state that disables the mod; it only writes this
             // seat's own queue file.
+#if !SCR_FT_NOCOLLECTORS
             try { SeatEvidence.CompatTick(); } catch { }
+#endif
             // Evidence work the hooks deferred out of the game's methods: the
             // point-end lines and push counts first (before GameStateWatcher's
             // tick captures a record), then seat evidence's own clocks, the
@@ -3588,11 +3642,13 @@ namespace CompetitiveRounds
             // the return: previously queued evidence sends whatever the mod's
             // state, under consent, a session, retry timing and no live
             // combat. No setting in front of any of it.
+#if !SCR_FT_NOCOLLECTORS
             try { PointEvidence.Drain(); } catch { }
             try { SeatEvidence.Tick(); } catch { }
             try { CardDrawEvidence.Tick(); } catch { }
             try { CombatEvidence.Tick(); } catch { }
             try { IdentityClockEvidence.Tick(); } catch { }
+#endif
 
             if (Plugin.modDisabled) return;
 
@@ -3707,7 +3763,9 @@ namespace CompetitiveRounds
             try { VanillaCardSequence.EnsureSelfTest(); } catch { }
             // [CARD-EV] census dump (B4): this seat's pool census, once per
             // process, only with its cfg lever, never in a room.
+#if !SCR_FT_NOCOLLECTORS
             try { CardDrawEvidence.EnsureCensusDump(); } catch { }
+#endif
 
             // SCR Broadcast director + §2c identity fence (design §3a). Runs
             // from THIS persistent tick — never a coroutine host that
@@ -3850,7 +3908,9 @@ namespace CompetitiveRounds
             Plugin.Log.LogInfo("[PERSIST] Delayed initialization starting...");
 
             // Seat evidence: hash this DLL and the game's off the main thread.
+#if !SCR_FT_NOCOLLECTORS
             try { SeatEvidence.StartHashing(); } catch { }
+#endif
 
             // ── Other mods check (Chainloader is complete by now) ──
             try
@@ -3874,9 +3934,11 @@ namespace CompetitiveRounds
                         {
                             var guids = new List<string>();
                             foreach (var kvp in plugins) if (kvp.Key != Plugin.ModId) guids.Add(kvp.Key);
+#if !SCR_FT_NOCOLLECTORS
                             SeatEvidence.NoteCompat("finding", guids);
                             // Identity-clock evidence: this execution of the gate is one boot occurrence.
                             try { IdentityClockEvidence.BootCheck("finding", guids); } catch { }
+#endif
                         }
                         catch { }
                         Plugin.modDisabled = true;
@@ -3924,15 +3986,19 @@ namespace CompetitiveRounds
                     }
                 }
                 Plugin.Log.LogInfo("[COMPAT] No other mods detected — OK");
+#if !SCR_FT_NOCOLLECTORS
                 try { SeatEvidence.NoteCompat("pass", null); } catch { }
                 try { IdentityClockEvidence.BootCheck("pass", null); } catch { }
+#endif
             }
             catch (Exception ex)
             {
                 Plugin.Log.LogWarning($"[COMPAT] Could not check other mods: {ex.Message}");
                 // A check that threw reports not_run, never pass.
+#if !SCR_FT_NOCOLLECTORS
                 try { SeatEvidence.NoteCompat("not_run", null); } catch { }
                 try { IdentityClockEvidence.BootCheck("not_run", null); } catch { }
+#endif
             }
             Plugin.compatCheckComplete = true;
             // r3 find 4: releases the injector's activation gate. Everything
@@ -5771,7 +5837,9 @@ namespace CompetitiveRounds
             // one series: a watch carried across a room edge would be waiting on an
             // actor number that now names somebody else.
             try { DcReportSync.ResetForRoomChange(); } catch { }
+#if !SCR_FT_NOCOLLECTORS
             try { CardDrawEvidence.FreezeRoomFacts(); } catch { }     // the card record's room facts, before the reset (CD-M2)
+#endif
             try { RoomRules.ResetLatched(); } catch { }              // room rules die with the room (§5.2)
             try { VanillaCardSequence.OnRoomLeft(); } catch { }      // and the vanilla-mode card sequence with them (§6)
             // Item 19 edge E7: a disconnect may produce no OnLeftRoom. Never inside
@@ -6508,7 +6576,9 @@ namespace CompetitiveRounds
             // one series: a watch carried across a room edge would be waiting on an
             // actor number that now names somebody else.
             try { DcReportSync.ResetForRoomChange(); } catch { }
+#if !SCR_FT_NOCOLLECTORS
             try { CardDrawEvidence.FreezeRoomFacts(); } catch { }     // the card record's room facts, before the reset (CD-M2)
+#endif
             try { RoomRules.ResetLatched(); } catch { }              // room rules die with the room (§5.2)
             try { VanillaCardSequence.OnRoomLeft(); } catch { }      // and the vanilla-mode card sequence with them (§6)
             // Item 19 edge E6: never inside an InRoom test - the InRoom poll turns
