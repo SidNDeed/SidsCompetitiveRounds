@@ -414,6 +414,8 @@ REQUIRED_KEYS = (
      "window_reconcile, window_faults, b11_terms, vr5_points, t_ref_windows"),
     # SHARED.md: the boot line giving one class transition's cost, which nm multiplies
     ("mark", None, None, ("cyc", "p90", "n"), "b11_transitions"),
+    # FtLedger.Install's one boot line (plugin/FtUpload.cs:368)
+    ("ledger", None, None, ("log", "why", "types"), "ledger_state"),
     ("settled", None, None, ("g", "freq", "f_hat"),
      "complete, _fhat, d_up, t_ref, vr1, vr9, f18, e_c, match_power, vr2, menu_check, _freq1"),
     ("census", None, None, ("g", "entry", "shape", "on", "guarded"), "complete, d_up, vr5_records, vr5_points, vr2"),
@@ -647,6 +649,9 @@ RECORDS = {
     # P1's V6 emitter (via the integrator, 12 Nov): the boot's control-mutant line
     "controls": "refuse_k_mutant(): a V6 sitting log carries exactly one 'controls k_mutant=none' (else K-MUTANT); "
                 "controls_proof() reads a control run's boot",
+    # the integrator's follow-up to ruling .149, A: the writer ledger's disk-log tap (FtLedger.Install)
+    "ledger": "ledger_state(): exactly one 'ledger log= why= types=' per log, log=1 and types= the parser's writer "
+              "types (sitting_v withholds; sitting C reports it beside R-WORK)",
     "a3zero": "proof_records(): one per measured game for a zero row proved by probe:a3zero (none today)",
     "plant": "e_c(): exactly one",
     "refusals": "records_missing(): one after the last game; vr6_build reads it",
@@ -714,12 +719,11 @@ EMITTED_UNREAD = {
     "ft": "the 'ft room options' trace (Plugin's room options for a frame-time room); no verdict reads it",
     "steam": "SteamAuth's 'steam ticket withheld' trace; FtRoute's refusals reach VR6 through the refusals line",
     "FT": "the FT-GATE and FT-ROOM traces; _LINE does not match them (the hyphen); their two failure lines are "
-          "RAW_FAILURES, read as fixed texts in the raw lines",
+          "RAW_FAILURES, read as fixed texts in the raw lines, and the FT-GATE patched line is read from the raw text "
+          "by the validity set's 'room gate' row (_gate_row; the follow-up to ruling .149, B)",
     # ruling R6-A3.11.149 (6) 9 and 10: the merged tip's other boot traces. Each form is known to unknown_forms (FORMS)
     "alloc_init": "FtAlloc.Init's outcome (why=ok, sha, code or failed:<type>); the alloc boot line's pin= prints ok "
                   "exactly when it is ok, and boot_controls judges that line",
-    "ledger": "FtUpload.Install's disk-log tap (log= why= types=); the window lines' wu and tok carry what the ledger "
-              "counts (window_reconcile, u_games)",
     "reference": "the FrameTimeRef build's 'reference collectors not installed' trace; a reference input is known by "
                  "its marker alone (build_marker)",
     "ft_dll": "FtArm's 'ft_dll staging failed' warning (the kind is FtArm.DLL_PROP); the arming reads the peer's "
@@ -3150,9 +3154,9 @@ def cross_check_line(e, sc):
     built, and the cross-check as built (ruling R6-A3.11.149 (5)(c), (d)): unavailable while a guard of the validity
     set fails, else available and weakened by any two-arm guard that did not pass. It gives no verdict (SHARED.md V6:
     the contrast is a cross-check; the combining step tests it against U_hi)."""
-    weak = [n for n, ok, _ in sc["two"] if not ok]
+    weak = _weak(sc["two"])
     st = ("unavailable (%s)" % ", ".join(sc["unavail"]) if sc["unavail"]
-          else "available%s" % (", weakened by %s" % ", ".join(weak) if weak else ""))
+          else "available%s" % (", weakened by %s" % _weak_text(weak) if weak else ""))
     if e is None:
         return ("B1 CROSS-CHECK not computable (the B11 window estimator above); no B1 verdict here: the combining "
                 "step (--combine) gives it; guards as built: the cross-check is %s" % st)
@@ -3359,9 +3363,87 @@ def _wins(ws):
 FHAT_PAIR = 0.01            # ruling R6-A3.11.149 (6) 6: a seat's sitting-V and sitting-C logs agree in f_hat within 1 percent
 # ruling R6-A3.11.149 (5)(a) and (d): the validity set (the guards that need no second arm) and the two-arm guards
 VALIDITY = ("complete sitting", "census summary", "VR1", "VR2 instrument", "VR5 records", "VR6 build", "F18",
-            "counters line", "line invariants", "p-line faults", "own_split", "build marker")
+            "counters line", "line invariants", "p-line faults", "own_split", "build marker",
+            # the integrator's follow-up to ruling .149, B: the instruments the emitter attaches by Harmony patches
+            "patches attached", "room gate")
 TWO_ARM = ("VR2 e_C_lo", "VR3", "VR4", "VR5 OFF-window rule", "VR7", "VR8 predecessor", "VR9", "R-CARRY", "R-COMMON")
+# the follow-up to ruling .149, C: a two-arm guard's word. NOT TESTED: its input is absent (R-COMMON without a
+# reference log); a guard that cannot be computed although its input is present is FAIL with its reason. FAIL and
+# NOT TESTED both weaken the cross-check.
+TWO_WORDS = ("PASS", "FAIL", "NOT TESTED")
 NOT_COMPUTABLE = (Refused, KeyError, ZeroDivisionError, ValueError)
+FAILED_PATCH = "Failed to patch"
+# FtRoomGate.ReportPatched's line (plugin/FtRoomGate.cs:109), counted from Harmony's own patch table
+GATE_LINE = re.compile(r"\[FRAME-TIME\] FT-GATE patched (\d+) entry points expected=(\d+) excluded=(\S*)"
+                       r"(?: missing=(.*))?$")
+
+
+def ledger_state(recs):
+    """The writer ledger's disk-log tap as its one boot line prints it (FtLedger.Install, plugin/FtUpload.cs:368:
+    '[FRAME-TIME] ledger log=<0|1> why=<ok|already|no_disk_listener|failed:<type>> types=<list>'; the follow-up to
+    ruling .149, A): (ok, reasons, state). ok needs exactly one ledger line, log=1 (the tap installed: without it the
+    log type's writes reach no term of U) and types= exactly the parser's writer types (WRITER_TYPES: the types
+    window_reconcile reads in wu and tok; u_games sums log, hash and sock and P reads recv), none missing and none
+    more. The log=0 reason names
+    why=; state is the line's state as one phrase."""
+    ls = [r for r in recs if r["kind"] == "ledger"]
+    if len(ls) != 1:
+        return False, ["%d 'ledger' lines (needs exactly 1): the disk-log tap's state is not read" % len(ls)], (
+            "not read (%d ledger lines)" % len(ls))
+    r = ls[0]
+    log, why = str(r.get("log")), str(r.get("why"))
+    types = [t for t in str(r.get("types", "")).split(",") if t]
+    bad = []
+    if log != "1":
+        bad.append("ledger log=%s why=%s: the disk log is not tapped, so the log type's writes reach no term of U"
+                   % (log, why))
+    gone = [t for t in WRITER_TYPES if t not in types]
+    extra = [t for t in types if t not in WRITER_TYPES]
+    if gone:
+        bad.append("ledger types=%s lacks %s, a writer type the parser reads" % (",".join(types), ",".join(gone)))
+    if extra:
+        bad.append("ledger types=%s lists %s, a writer type the parser does not read" % (",".join(types),
+                                                                                          ",".join(extra)))
+    return not bad, bad, "log=%s why=%s types=%s" % (log, why, ",".join(types))
+
+
+def _patch_row(text, peer_text):
+    """The class rule over every instrument the emitter attaches by a Harmony patch class (the follow-up to ruling
+    .149, B: the sock hook, the route hook, the photon X and E patches, the room gate, the churn freeze, the
+    self-drive, the recv handlers' patches): neither seat's log holds a line with 'Failed to patch'. Plugin's patch
+    loop prints '[HARMONY] Failed to patch <class>: <message>' (plugin/Plugin.cs:1483) for a class that did not
+    attach; the laptop's slice exports that line as 'withheld Failed to patch <n>' (its message is free text), which
+    holds the same words. Both seats', as the failure events (lesson #83: attached, or never attached)."""
+    bad = []
+    for who, t in (("", text), ("peer seat: ", peer_text)):
+        for i, ln in enumerate((t or "").splitlines(), 1):
+            if FAILED_PATCH in ln:
+                ln = ln.strip()
+                bad.append("%sline %d: %s" % (who, i, ln[ln.find("[HARMONY]"):] if "[HARMONY]" in ln else ln))
+    return _ok(bad)
+
+
+def _gate_row(text, peer_text):
+    """The room gate attached (the follow-up to ruling .149, B): each seat's log carries exactly one FT-GATE patched
+    line (GATE_LINE), its count equal to its expected count, which is above 0, and no missing= list; else the
+    sitting's isolation is not proven. Both seats', as the room gate's failure events."""
+    bad = []
+    for who, t in (("", text), ("peer seat: ", peer_text)):
+        if t is None:
+            continue
+        ls = [ln.rstrip() for ln in t.splitlines() if "[FRAME-TIME] FT-GATE patched " in ln]
+        if len(ls) != 1:
+            bad.append("%s%d 'FT-GATE patched' lines (needs exactly 1): the room gate's attachment is not read"
+                       % (who, len(ls)))
+            continue
+        m = GATE_LINE.search(ls[0])
+        if m is None:
+            bad.append("%sthe FT-GATE patched line is not in its form: %s" % (who, ls[0][ls[0].find("FT-GATE"):]))
+        elif m.group(1) != m.group(2) or int(m.group(2)) == 0 or m.group(4) is not None:
+            bad.append("%sFT-GATE patched %s entry points of %s expected%s: the room gate is not attached on every "
+                       "entry point" % (who, m.group(1), m.group(2), "; missing=%s" % m.group(4)
+                                        if m.group(4) is not None else ""))
+    return _ok(bad)
 
 
 def _ok(bad):
@@ -3438,7 +3520,8 @@ def validity_set(recs, text, peer_recs, peer_text, t_vr1, src, first_game=1, t_n
     as built); VR2's instrument half; VR5's records half; VR6's build half with both seats' disarm lines; F18; the
     counters line of every game 0 to 16 (span_leave_mismatch 0); every line invariant; the p-line faults and own_split
     over the points of the measured games, void rounds kept; the build marker (a failed one withholds here, naming its
-    word; report() still refuses it). Sitting V withholds B1 on any failed row (sitting_v); sitting C has no cross-check
+    word; report() still refuses it); and (the follow-up to ruling .149, B) every Harmony patch class attached and the
+    room gate attached, both seats' (_patch_row, _gate_row). Sitting V withholds B1 on any failed row (sitting_v); sitting C has no cross-check
     while any row fails (sitting_c). (5)(b)'s exception is empty: the one record the emitter writes only after OFF
     windows, the plant line (FtPlant.Fix, plugin/FtPlant.cs:35, called at plugin/FtFrames.cs:285-287 once a game's OFF
     frames reach a window), is not in the sweep (records_missing, complete); e_c, a two-arm guard, reads it. So sitting
@@ -3457,15 +3540,31 @@ def validity_set(recs, text, peer_recs, peer_text, t_vr1, src, first_game=1, t_n
     rows.append(("p-line faults",) + _guard(lambda: _ok(p_line_faults(recs, pts))))
     rows.append(("own_split",) + _guard(lambda: _own_split_row(recs, pts)))
     rows.append(("build marker",) + _guard(lambda: _marker_row(text, src)))
+    rows.append(("patches attached",) + _guard(lambda: _patch_row(text, peer_text)))
+    rows.append(("room gate",) + _guard(lambda: _gate_row(text, peer_text)))
     return rows
 
 
 def _two(name, fn):
+    """One two-arm guard's row (name, word, detail), its word one of TWO_WORDS: fn returns (True, detail) PASS,
+    (False, detail) FAIL or (None, detail) NOT TESTED (its input is absent); a guard that cannot be computed although
+    its input is present is FAIL with its reason."""
     try:
         ok, det = fn()
     except NOT_COMPUTABLE as x:
-        return name, False, "not computable: %s" % x
-    return name, bool(ok), det
+        return name, "FAIL", "not computable: %s" % x
+    return name, "NOT TESTED" if ok is None else ("PASS" if ok else "FAIL"), det
+
+
+def _weak(two):
+    """The two-arm rows that weaken the cross-check: each one not PASS (FAIL or NOT TESTED)."""
+    return [(nm, w, d) for nm, w, d in two if w != "PASS"]
+
+
+def _weak_text(weak):
+    """The weakening guards as the verdict line names them, each with its word: 'R-COMMON (not tested: no reference
+    log)', 'VR7 (fail)'; a FAIL's reason stands on its TWO-ARM line."""
+    return ", ".join("%s (%s)" % (nm, "not tested: %s" % d if w == "NOT TESTED" else "fail") for nm, w, d in weak)
 
 
 def _need_e(e):
@@ -3522,9 +3621,9 @@ def _two_carry(e):
 
 
 def _two_common(recs, e, ref_recs, first_game):
-    e = _need_e(e)
     if ref_recs is None:
-        return False, "UNTESTED: no reference record set"
+        return None, "no reference log"            # the follow-up to ruling .149, C: its input is absent
+    e = _need_e(e)
     if e["dcommon"] is None:
         raise Refused("no ordinary full OFF window for D_common")
     tot, tlo = reference_common_cost(recs, ref_recs, first_game)
@@ -3535,8 +3634,9 @@ def _two_common(recs, e, ref_recs, first_game):
 
 def two_arm(recs, e, ref_recs, first_game=1):
     """Ruling R6-A3.11.149 (5)(d): the guards that need both arms, judged on sitting C as built and printed beside the
-    contrast, each a row (name, ok, detail) in TWO_ARM's order. A guard that cannot be computed (or R-COMMON without a
-    reference) is not passed, and weakens the cross-check as a failed one does; none decides the refutation test
+    contrast, each a row (name, word, detail) in TWO_ARM's order (_two). A guard that cannot be computed is FAIL,
+    R-COMMON without a reference NOT TESTED; either weakens the cross-check as a failed one does (the follow-up to
+    ruling .149, C); none decides the refutation test
     (cross_state). In the window design VR4 reads the cross-check's own half-width against T_ref as built, and VR9's
     bound is the cross-check's corrected upper bound over min(1, e_C_lo); e is the cross-check (None when it did not
     run: the rows that read it are then not computable)."""
@@ -3557,7 +3657,8 @@ def cross_state(unavail, e, u_hi, weak):
     """Ruling R6-A3.11.149 (5)(e): the cross-check's state on the seat's B1 verdict line, and whether it withholds B1.
     'unavailable (<guards>)' when sitting C's validity set failed or its contrast did not run (a log that is not a
     valid measurement refutes nothing); 'REFUTED' when the contrast's lower end is above U_hi; else 'not refuted', or
-    'not refuted, weakened by <guards>' when a two-arm guard did not pass. Unavailable and REFUTED withhold."""
+    'not refuted, weakened by <guard> (<word>), ...' when a two-arm guard did not pass (weak: _weak's rows; the
+    follow-up to ruling .149, C). Unavailable and REFUTED withhold."""
     if unavail:
         return "unavailable (%s)" % ", ".join(unavail), True
     if u_hi is None:
@@ -3565,7 +3666,7 @@ def cross_state(unavail, e, u_hi, weak):
     if e["lb"] > u_hi:
         return "REFUTED", True
     if weak:
-        return "not refuted, weakened by %s" % ", ".join(weak), False
+        return "not refuted, weakened by %s" % _weak_text(weak), False
     return "not refuted", False
 
 
@@ -3612,7 +3713,22 @@ def sitting_c(recs, text, peer_recs, peer_text, ref_recs, src, first_game=1):
         e, ewhy = None, str(x)
         unavail.append("contrast: %s" % x)
     return dict(rows=rows, unavail=unavail, e=e, ewhy=ewhy, two=two_arm(recs, e, ref_recs, first_game), b3=_b3(recs),
-                zero=zero_state(recs), fhat=seat_fhat(recs, first_game))
+                zero=_zero(recs), fhat=seat_fhat(recs, first_game))
+
+
+def _zero(recs):
+    """VR8's zero-state half, reported only: zero_state's tuple, or its reason (a string) when it cannot be computed
+    (the follow-up to ruling .149, D: a reported value never ends the report)."""
+    try:
+        return zero_state(recs)
+    except NOT_COMPUTABLE as x:
+        return "not computable: %s" % x
+
+
+def _pct(u, t):
+    """U_hi as a percent of T_ref, reported: 'not computable' when T_ref is not above 0 (the class reads T_ref
+    itself)."""
+    return "%.3f percent" % (100 * u / t) if t > 0 else "not computable (T_ref %.1f us is not above 0)" % t
 
 
 def sitting_v(recs, text, peer_recs, peer_text, src, first_game=1):
@@ -3646,6 +3762,9 @@ def sitting_v(recs, text, peer_recs, peer_text, src, first_game=1):
     for k in ("patches", "census"):
         if not bc[k][0]:
             why.append("R-SCOPE's %s line out of range (%s)" % (k, bc[k][1]))
+    # the follow-up to ruling .149, A: this seat's disk-log tap installed, its types the parser's
+    lok, lwhy, _ = ledger_state(recs)
+    why += ["the disk-log tap: %s" % w for w in lwhy]
     pts = [q for q in recs if q["kind"] == "p" and q["game"] >= first_game]
     back = [q["pt"] for q in pts if q.get("ab_back", 1) != 0]
     if back:
@@ -3697,7 +3816,7 @@ def sitting_v(recs, text, peer_recs, peer_text, src, first_game=1):
     for name, ok, w in rows:
         if not ok:
             why.append("%s: %s" % (name, _reasons(w)))
-    v.update(validity=rows, zero=zero_state(recs), b3=_b3(recs), fhat=seat_fhat(recs, first_game))
+    v.update(validity=rows, zero=_zero(recs), b3=_b3(recs), fhat=seat_fhat(recs, first_game))
     return v
 
 
@@ -3706,6 +3825,8 @@ def _validity_lines(head, rows):
 
 
 def _zero_line(head, z):
+    if isinstance(z, str):
+        return "%s (reported, not judged; ruling R6-A3.11.149 (5)(f)): %s" % (head, z)
     zok, g0v, g0n, meas, empty = z
     return ("%s (reported, not judged; ruling R6-A3.11.149 (5)(f)): game 0 (the mutant) %d of %d rounds void; the "
             "measured games %d rounds void, kept in the population%s" % (head, g0v, g0n, len(meas),
@@ -3729,7 +3850,7 @@ def v_lines(label, v):
                    % (v["U"], t["D"], t["P"], sum(t["S"].values()), t["S"]["log"], t["S"]["hash"], t["S"]["sock"],
                       t["X"], t["G"], v["hw"], Z_END, v["df"], v["U_hi"]))
         out.append("V6 L %.3f us (cS + cR + cW + cP alone, the interval's lower end); T_on %.1f us; T_ref = T_on - U_hi "
-                   "%.1f us; U_hi %.3f percent of T_ref" % (v["L"], v["T_on"], v["T_ref"], 100 * v["U_hi"] / v["T_ref"]))
+                   "%.1f us; U_hi %s of T_ref" % (v["L"], v["T_on"], v["T_ref"], _pct(v["U_hi"], v["T_ref"])))
         out.append("V6 class %s (classify(U_hi, T_ref, hw, L): PASS <= 3, SID <= 5, FAIL > 5 percent, WITHHELD when "
                    "the band is unresolved)%s" % (v["cls"], "; B1 is WITHHELD for this seat by the list below"
                                                   if v["why"] else ""))
@@ -3835,19 +3956,31 @@ def combine(v_logs, c_logs, refs=None, first_game=1):
             out.append("V6 CROSS-CHECK seat %s: contrast %.3f us per frame, interval %.3f to %.3f; half-width %.3f "
                        "against the band's 3 percent of T_ref as built %.1f us (%.1f us)"
                        % (n, e["center"], e["lb"], e["bu"], e["hw"], e["tref"], 0.03 * e["tref"]))
-        out += ["V6 TWO-ARM seat %s %s %s: %s" % (n, nm, "PASS" if ok else "FAIL", d) for nm, ok, d in sc["two"]]
+        out += ["V6 TWO-ARM seat %s %s %s: %s" % (n, nm, w, d) for nm, w, d in sc["two"]]
+        # the follow-up to ruling .149, D: R-GC's and R-WORK's numbers are reported only, so each is computed inside
+        # its own guard and a value that cannot be computed is printed as such; the verdict lines still follow
         if e is not None:
-            gm = gc_per_mb(e["T"]["pop"])
-            out.append("R-GC (sitting C) seat %s: collections per MB of aC, ON %s, OFF %s"
-                       % (n, *("%.4f" % gm[x] if gm[x] is not None else "not computable" for x in ("ON", "OFF"))))
+            try:
+                gm = gc_per_mb(e["T"]["pop"])
+                gt = "ON %s, OFF %s" % tuple("%.4f" % gm[x] if gm[x] is not None else "not computable"
+                                             for x in ("ON", "OFF"))
+            except NOT_COMPUTABLE as x:
+                gt = "not computable: %s" % x
+            out.append("R-GC (sitting C) seat %s: collections per MB of aC, %s" % (n, gt))
+        try:
             ugc, _ = u_games(crecs[n], first_game, arm="ON")
-            out.append("R-WORK seat %s: u_g sitting V %s; sitting C's ON windows %s" % (
-                n, "; ".join("g%d %s" % (g, "%.3f" % d["u"] if d["u"] is not None else "NA")
-                             for g, d in sorted(v["games"].items())) or "none",
-                "; ".join("g%d %s" % (g, "%.3f" % d["u"] if d["u"] is not None else "NA")
-                          for g, d in sorted(ugc.items())) or "none"))
+            ct = "; ".join("g%d %s" % (g, "%.3f" % d["u"] if d["u"] is not None else "NA")
+                           for g, d in sorted(ugc.items())) or "none"
+        except NOT_COMPUTABLE as x:
+            ct = "not computable: %s" % x
+        # the follow-up to ruling .149, A: sitting C's disk-log tap beside its ON windows' u_g (reported only)
+        lok, lwhy, lst = ledger_state(crecs[n])
+        out.append("R-WORK seat %s: u_g sitting V %s; sitting C's ON windows %s; sitting C's disk-log tap %s%s "
+                   "(reported)" % (n, "; ".join("g%d %s" % (g, "%.3f" % d["u"] if d["u"] is not None else "NA")
+                                                for g, d in sorted(v["games"].items())) or "none", ct, lst,
+                                   "" if lok else ": " + "; ".join(lwhy)))
         out.append(_zero_line("V6 VR8 zero-state sitting C seat %s" % n, sc["zero"]))
-        weak = [nm for nm, ok, d in sc["two"] if not ok]
+        weak = _weak(sc["two"])
         state, wh = cross_state(sc["unavail"], e, v["U_hi"], weak)
         if not paired[n]:
             cls, txt = "WITHHELD", ("WITHHELD: the pairing check fails: the seat's sitting-V and sitting-C logs do not "
@@ -3863,9 +3996,9 @@ def combine(v_logs, c_logs, refs=None, first_game=1):
             cls, txt = "WITHHELD", "WITHHELD: sitting C gives no cross-check until it has run again"
         else:
             cls = v["cls"]
-            txt = "%s: %sU_hi %.2f us against T_ref %.1f us (%.3f percent); the contrast's lower end %.3f us" % (
+            txt = "%s: %sU_hi %.2f us against T_ref %.1f us (%s); the contrast's lower end %.3f us" % (
                 cls, "the band is unresolved (half-width %.3f us, L %.3f us); " % (v["hw"], v["L"])
-                if cls == "WITHHELD" else "", v["U_hi"], v["T_ref"], 100 * v["U_hi"] / v["T_ref"], e["lb"])
+                if cls == "WITHHELD" else "", v["U_hi"], v["T_ref"], _pct(v["U_hi"], v["T_ref"]), e["lb"])
         seats.append((n, cls))
         out.append("VERDICT B1 seat %s %s; cross-check %s" % (n, txt, state))
         b3s = (("V", v["b3"]), ("C", sc["b3"]))         # ruling .149 (5)(g): judged on both sittings
@@ -4168,7 +4301,7 @@ def report(text, peer=None, src="log", peer_src="peer", ref=None, ref_src="refer
         sc = sitting_c(recs, text, peer_recs, peer, ref_recs, src)
         out += _validity_lines("VALIDITY", sc["rows"])
         out.append(cross_check_line(e11, sc))
-        out += ["TWO-ARM %s %s: %s" % (nm, "PASS" if ok else "FAIL", d) for nm, ok, d in sc["two"]]
+        out += ["TWO-ARM %s %s: %s" % (nm, w, d) for nm, w, d in sc["two"]]
         out += ["  " + x for x in CROSS_RISKS]
     else:
         if ref_recs is not None:

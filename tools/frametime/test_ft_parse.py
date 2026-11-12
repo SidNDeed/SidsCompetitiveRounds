@@ -878,6 +878,8 @@ DELETIONS = (
     ("photon", "v6", None, r"^V6 WITHHELD seat a: .*R-SCOPE's patches line out of range \(0 'photon patches' lines"),
     # P1's V6 emitter (via the integrator, 12 Nov): a sitting log without its controls line is refused (K-MUTANT)
     ("controls", "v6", None, "REFUSED:K-MUTANT: the sitting log V:a carries 0 controls lines"),
+    # the follow-up to ruling .149, A: a sitting-V log without its ledger line withholds B1, the tap's state not read
+    ("ledger", "v6", None, r"^V6 WITHHELD seat a: .*the disk-log tap: 0 'ledger' lines \(needs exactly 1\)"),
 )
 # the kinds whose PRESENCE is the event (their absence is the normal case): test_failure_events_make_the_run_incomplete
 # and test_vr6_build_fails_on_a_disarm are their controls
@@ -2314,7 +2316,7 @@ def _b11_arm(coins, wi):
 B11_TOK0 = "log:0,0,0,0,0,0,0;hash:0,0,0,0,0,0,0;recv:0,0,0,0,0,0,0;sock:0,0,0,0,0,0,0"
 B11_WU0 = "log:0:0;hash:0:0;recv:0:0;sock:0:0"
 B11_P_EXTRA = " sock_p95=0 sock_n=0 sock_thr=0 sock_main=0 ab_back=0 ab_retry=0 heap=50000000"
-# ruling R6-A3.11.147 (5): the five V6 boot lines, each in range; _b11_text's boot= replaces (or, with None, drops) one
+# ruling R6-A3.11.147 (5): the V6 boot lines, each in range; _b11_text's boot= replaces (or, with None, drops) one
 V6_BOOT = (("alloc", "alloc pin=ok planted=1048600/1048576 empty=0"),
            ("scope plant", "scope plant asked=2000 got=2010"),
            ("nest", "nest plant asked=2000 x=2020 e=1990 p=2005"),
@@ -2322,7 +2324,11 @@ V6_BOOT = (("alloc", "alloc pin=ok planted=1048600/1048576 empty=0"),
            ("photon", "photon patches n=10 names=" + ",".join(P.PHOTON_ENTRIES)),
            ("scope census", "scope census entries=40 wrapped=40"),
            # P1's V6 emitter (via the integrator, 12 Nov): a sitting log's control-mutant line
-           ("controls", "controls k_mutant=none"))
+           ("controls", "controls k_mutant=none"),
+           # the follow-up to ruling .149, A and B: the writer ledger's disk-log tap (FtLedger.Install) and the room
+           # gate's patch-time line (FtRoomGate.ReportPatched: 9 PUN overloads, 2 void and 2 coroutine entry points)
+           ("ledger", "ledger log=1 why=ok types=log,hash,recv,sock"),
+           ("gate", "FT-GATE patched 13 entry points expected=13 excluded=JoinLobby,LoadOrCreateSettings"))
 # the two keys a V6 counters line carries after span_depth_violations (P1's emitter, via the integrator, 12 Nov)
 B11_CTR_V6 = " photon_offmain=0 span_leave_mismatch=0"
 
@@ -3302,6 +3308,10 @@ VALIDITY_SPOILS = (
     ("p-line faults", lambda t: _p_sub(t, "1.1.1", " recv_offmain=0 ", " recv_offmain=1 ")),
     ("own_split", lambda t: _p_sub(t, "1.1.1", " own_split=0 ", " own_split=1 ")),
     ("build marker", lambda t: _sub1(t, LOG_PREFIX + "[FRAME-TIME] " + P.MARK_FT + "\n", "")),
+    # the follow-up to ruling .149, B: a Harmony patch class that did not attach, and the room gate short of an entry
+    ("patches attached", lambda t: t + "\n[Error  :CompetitiveRounds] [HARMONY] Failed to patch FtSockPatch: boom"),
+    ("room gate", lambda t: _sub1(t, "FT-GATE patched 13 entry points expected=13",
+                                  "FT-GATE patched 12 entry points expected=13")),
 )
 
 
@@ -3364,21 +3374,70 @@ def chk_validity_set_decides_sitting_c(m):
 
 def chk_two_arm_guards_named_on_the_verdict_line(m):
     # ruling R6-A3.11.149 (5)(d), (e) and (7): the two-arm guards are printed beside the contrast, one line each in
-    # TWO_ARM's order, and the verdict line names every one that fails ("not refuted, weakened by ..."), none other;
-    # without a reference R-COMMON is untested and fails; a failing guard leaves the class as it is
+    # TWO_ARM's order, and the verdict line names every one that does not pass ("not refuted, weakened by ..."), none
+    # other; the follow-up to ruling .149, C: each with its word, without a reference R-COMMON NOT TESTED; a guard
+    # that does not pass leaves the class as it is
     v, c = _v_text(), _c_text()
     for refs in (None, {"a": c.replace(P.MARK_FT, P.MARK_REF)}):
         out = _comb(m, v, v, c, c, refs=refs)
-        two = re.findall(r"^V6 TWO-ARM seat a (.+?) (PASS|FAIL): (.*)$", out, re.M)
+        two = re.findall(r"^V6 TWO-ARM seat a (.+?) (PASS|FAIL|NOT TESTED): (.*)$", out, re.M)
         assert [n for n, _, _ in two] == list(P.TWO_ARM), two
-        failing = [n for n, s, _ in two if s == "FAIL"]
-        common = [d for n, _, d in two if n == "R-COMMON"][0]
-        assert ("R-COMMON" in failing and common == "UNTESTED: no reference record set") if refs is None \
-            else not common.startswith("UNTESTED"), (refs is None, common)
+        weak = [(n, s, d) for n, s, d in two if s != "PASS"]
+        common = [(s, d) for n, s, d in two if n == "R-COMMON"][0]
+        assert common == ("NOT TESTED", "no reference log") if refs is None else common[0] != "NOT TESTED", (refs, common)
         ln = _verdict(out, "a")
-        assert ln.endswith("; cross-check not refuted" + (", weakened by %s" % ", ".join(failing) if failing else "")), \
-            (ln, failing)
+        want = ", ".join("%s (%s)" % (n, "not tested: " + d if s == "NOT TESTED" else "fail") for n, s, d in weak)
+        assert ln.endswith("; cross-check not refuted" + (", weakened by %s" % want if weak else "")), (ln, weak)
         assert _classes(out)[0] == {"a": "PASS", "b": "PASS"}, out
+
+
+def chk_two_arm_three_words(m):
+    # the follow-up to ruling .149, C: a two-arm guard's word is PASS, FAIL or NOT TESTED. NOT TESTED when its input is
+    # absent (R-COMMON without a reference log, also when the contrast is missing too); FAIL with its reason when it
+    # cannot be computed although its input is present (no contrast for VR4, VR9, R-CARRY, and R-COMMON with a
+    # reference); FAIL and NOT TESTED both weaken, the verdict line naming each with its word
+    assert tuple(m.TWO_WORDS) == ("PASS", "FAIL", "NOT TESTED")
+    c = _c_text()
+    rc = m.read(c)
+    ref = m.read_reference(c.replace(m.MARK_FT, m.MARK_REF), "R:a")
+    rows = dict((n, (w, d)) for n, w, d in m.sitting_c(rc, c, rc, c, None, "C:a")["two"])
+    assert rows["R-COMMON"] == ("NOT TESTED", "no reference log"), rows["R-COMMON"]
+    assert all(w in m.TWO_WORDS for w, d in rows.values()), rows
+    rows = dict((n, (w, d)) for n, w, d in m.sitting_c(rc, c, rc, c, ref, "C:a")["two"])
+    assert rows["R-COMMON"][0] in ("PASS", "FAIL") and rows["R-COMMON"][1] != "no reference log", rows
+    rows = dict((n, (w, d)) for n, w, d in m.two_arm(rc, None, ref))
+    for n in ("VR4", "VR9", "R-CARRY", "R-COMMON"):
+        assert rows[n] == ("FAIL", "not computable: no contrast"), (n, rows[n])
+    assert dict((n, (w, d)) for n, w, d in m.two_arm(rc, None, None))["R-COMMON"] == ("NOT TESTED", "no reference log")
+    two = [("VR3", "PASS", "lag-1"), ("VR7", "FAIL", "H fails"), ("R-COMMON", "NOT TESTED", "no reference log")]
+    weak = m._weak(two)
+    assert weak == two[1:], weak
+    assert m._weak_text(weak) == "VR7 (fail), R-COMMON (not tested: no reference log)", m._weak_text(weak)
+    assert m.cross_state([], {"lb": 0.0}, 1.0, weak) == (
+        "not refuted, weakened by VR7 (fail), R-COMMON (not tested: no reference log)", False)
+    assert m.cross_state([], {"lb": 0.0}, 1.0, m._weak(two[:1])) == ("not refuted", False)
+    out = _comb(m, _v_text(), _v_text(), c, c)
+    assert "V6 TWO-ARM seat a R-COMMON NOT TESTED: no reference log" in out.splitlines(), out
+    assert "R-COMMON (not tested: no reference log)" in _verdict(out, "a"), _verdict(out, "a")
+
+
+def chk_reported_lines_never_end_the_verdict(m):
+    # the follow-up to ruling .149, D: a reported-only value that cannot be computed prints 'not computable: <reason>'
+    # on its own line and the verdict lines still follow: sitting C's ON-window u_g on the R-WORK line, over a sitting-C
+    # log whose settled lines print two Stopwatch frequencies; the clean log prints the numbers (the control)
+    v, c = _v_text(), _c_text()
+    bad = re.sub(r"(settled g=3 [^\n]*?)freq=\d+", r"\g<1>freq=20000000", c, count=1)
+    assert bad != c
+    try:
+        out = _comb(m, v, v, bad, c)
+    except Exception as x:          # noqa: BLE001
+        raise AssertionError("the combining step ended on a reported value: %s" % x)
+    ln = [x for x in out.splitlines() if x.startswith("R-WORK seat a: ")]
+    assert len(ln) == 1 and "; sitting C's ON windows not computable: V6 needs one Stopwatch frequency (got " in ln[0], ln
+    assert _verdict(out, "a").startswith("VERDICT B1 seat a ") and _verdict(out, "b").startswith("VERDICT B1 seat b ")
+    assert re.search(r"^VERDICT B1 worse seat: seat ", out, re.M), out
+    ln = [x for x in _comb(m, v, v, c, c).splitlines() if x.startswith("R-WORK seat a: ")]
+    assert len(ln) == 1 and "not computable" not in ln[0] and "; sitting C's ON windows g1 " in ln[0], ln
 
 
 def chk_b3_on_both_sittings(m):
@@ -3431,11 +3490,10 @@ def chk_void_rounds_stay_in_sitting_v(m):
 
 
 def _boot_full(**kw):
-    """A control run's whole boot: the marker, the clock, alloc_init, the ledger, the mark cost and the census summary
-    before V6_BOOT's lines (_boot)."""
+    """A control run's whole boot: the marker, the clock, alloc_init, the mark cost and the census summary before
+    V6_BOOT's lines (_boot: the ledger and the room gate among them)."""
     head = ["[FRAME-TIME] " + P.MARK_FT, "[FRAME-TIME] clock installed freq=10000000 hires=1 cycles=1",
-            "[FRAME-TIME] alloc_init why=ok", "[FRAME-TIME] ledger log=1 why=ok types=log,hash,recv,sock",
-            "[FRAME-TIME] mark cost cyc=50 p90=70 n=1000", CENSUS_CLEAN]
+            "[FRAME-TIME] alloc_init why=ok", "[FRAME-TIME] mark cost cyc=50 p90=70 n=1000", CENSUS_CLEAN]
     return "\n".join(LOG_PREFIX + x for x in head) + "\n" + _boot(**kw)
 
 
@@ -3461,6 +3519,261 @@ def chk_controls_forms_and_failed_to_patch(m):
     assert lines[-1].startswith("CONTROLS PROOF FAIL: ") and lines[-1].endswith("'Failed to patch' present"), lines
 
 
+LEDGER_OK = dict(V6_BOOT)["ledger"]
+# the follow-up to ruling .149, A: (what, the boot's ledger line or None, the reason sitting V gives for this seat)
+LEDGER_SPOILS = (
+    ("absent", None, "the disk-log tap: 0 'ledger' lines (needs exactly 1): the disk-log tap's state is not read"),
+    ("no listener", "ledger log=0 why=no_disk_listener types=log,hash,recv,sock",
+     "the disk-log tap: ledger log=0 why=no_disk_listener: the disk log is not tapped, so the log type's writes reach "
+     "no term of U"),
+    ("failed", "ledger log=0 why=failed:TargetInvocationException types=log,hash,recv,sock",
+     "the disk-log tap: ledger log=0 why=failed:TargetInvocationException: the disk log is not tapped"),
+    ("type gone", "ledger log=1 why=ok types=log,hash,sock",
+     "the disk-log tap: ledger types=log,hash,sock lacks recv, a writer type the parser reads"),
+    ("type extra", "ledger log=1 why=ok types=log,hash,recv,sock,gc",
+     "the disk-log tap: ledger types=log,hash,recv,sock,gc lists gc, a writer type the parser does not read"),
+)
+
+
+def _two_ledgers(text):
+    full = LOG_PREFIX + "[FRAME-TIME] " + LEDGER_OK
+    return _sub1(text, full, full + "\n" + full)
+
+
+def chk_ledger_tap_withholds_sitting_v(m):
+    # the follow-up to ruling .149, A: sitting V withholds B1 for a seat whose own log has no ledger line, two, one
+    # with log=0 (the reason naming why=), or one whose types= differs from the parser's writer types either way; the
+    # peer's tap is the peer's. Sitting C prints the same state beside R-WORK's u_g for the ON windows, and it decides
+    # nothing there. The clean log (log=1 why=ok, the four types) is the control
+    clean = _v_text()
+    assert not [x for x in _v(m, clean)["why"] if "disk-log tap" in x], _v(m, clean)["why"]
+    assert m.ledger_state(m.read(clean)) == (True, [], "log=1 why=ok types=log,hash,recv,sock")
+    cases = [(w, _v_text(boot={"ledger": ln}), want) for w, ln, want in LEDGER_SPOILS]
+    cases.append(("twice", _two_ledgers(clean),
+                  "the disk-log tap: 2 'ledger' lines (needs exactly 1): the disk-log tap's state is not read"))
+    for what, bad, want in cases:
+        why = _v(m, bad, clean)["why"]
+        assert [x for x in why if x.startswith(want)], (what, want, why)
+        lines = v_lines_of(m, bad, clean)
+        assert [x for x in lines if x.startswith("V6 WITHHELD seat a: ") and want in x], (what, lines)
+        assert not [x for x in _v(m, clean, bad)["why"] if "disk-log tap" in x], what
+    c = _c_text()
+    out = _comb(m, clean, clean, c, c)
+    ln = [x for x in out.splitlines() if x.startswith("R-WORK seat a: ")]
+    assert len(ln) == 1 and ln[0].endswith("; sitting C's disk-log tap log=1 why=ok types=log,hash,recv,sock "
+                                           "(reported)"), ln
+    for what, line, want in LEDGER_SPOILS:
+        out2 = _comb(m, clean, clean, _c_text(boot={"ledger": line}), c)
+        ln = [x for x in out2.splitlines() if x.startswith("R-WORK seat a: ")]
+        assert len(ln) == 1 and "; sitting C's disk-log tap " in ln[0] and want[len("the disk-log tap: "):] in ln[0] \
+            and ln[0].endswith(" (reported)"), (what, ln)
+        assert _verdict(out2, "a") == _verdict(out, "a"), (what, _verdict(out2, "a"), _verdict(out, "a"))
+
+
+GATE_FULL = LOG_PREFIX + "[FRAME-TIME] " + dict(V6_BOOT)["gate"]
+# the follow-up to ruling .149, B: (what, the boot's FT-GATE patched line or None, the room gate row's reason)
+GATE_SPOILS = (
+    ("absent", None, "0 'FT-GATE patched' lines (needs exactly 1): the room gate's attachment is not read"),
+    ("short", "FT-GATE patched 12 entry points expected=13 excluded=JoinLobby,LoadOrCreateSettings",
+     "FT-GATE patched 12 entry points of 13 expected: the room gate is not attached on every entry point"),
+    ("missing", "FT-GATE patched 12 entry points expected=12 excluded=JoinLobby,LoadOrCreateSettings "
+                "missing=QuickMatch,sweep: boom",
+     "FT-GATE patched 12 entry points of 12 expected; missing=QuickMatch,sweep: boom: the room gate is not attached "
+     "on every entry point"),
+    ("none expected", "FT-GATE patched 0 entry points expected=0 excluded=",
+     "FT-GATE patched 0 entry points of 0 expected: the room gate is not attached on every entry point"),
+    ("form", "FT-GATE patched many entry points",
+     "the FT-GATE patched line is not in its form: FT-GATE patched many entry points"),
+)
+HARMONY_FAIL = "[Error  :CompetitiveRounds] [HARMONY] Failed to patch %s: Patching exception in method null"
+
+
+def chk_patches_and_room_gate_rows(m):
+    # the follow-up to ruling .149, B: the validity set's 'patches attached' row fails on any line holding 'Failed to
+    # patch' in either seat's log (Plugin's '[HARMONY] Failed to patch <class>' line, or the laptop slice's 'withheld
+    # Failed to patch <n>'), naming the seat and the line; its 'room gate' row fails unless each seat's log carries
+    # exactly one FT-GATE patched line in its form, its count equal to its expected count above 0 and no missing=
+    clean = _v_text()
+    rows = dict((n, (ok, w)) for n, ok, w in _v(m, clean)["validity"])
+    assert rows["patches attached"] == (True, []) and rows["room gate"] == (True, []), rows
+    cases = [(w, _v_text(boot={"gate": ln}), want) for w, ln, want in GATE_SPOILS]
+    cases.append(("twice", _sub1(clean, GATE_FULL, GATE_FULL + "\n" + GATE_FULL),
+                  "2 'FT-GATE patched' lines (needs exactly 1): the room gate's attachment is not read"))
+    for what, bad, want in cases:
+        for t, p, who in ((bad, clean, ""), (clean, bad, "peer seat: ")):
+            v = _v(m, t, p)
+            ok, w = dict((n, (ok, w)) for n, ok, w in v["validity"])["room gate"]
+            assert ok is False and w == [who + want], (what, who, w)
+            assert "room gate: " + who + want in v["why"], (what, who, v["why"])
+            assert dict((n, ok) for n, ok, _ in v["validity"])["patches attached"], (what, who)
+    for line, shown in ((HARMONY_FAIL % "FtSockPatch", "[HARMONY] Failed to patch FtSockPatch: Patching exception in "
+                                                       "method null"),
+                        ("withheld Failed to patch 1", "withheld Failed to patch 1")):
+        bad = clean + "\n" + line
+        n = len(bad.splitlines())
+        for t, p, who in ((bad, clean, ""), (clean, bad, "peer seat: ")):
+            v = _v(m, t, p)
+            ok, w = dict((nm, (ok, w)) for nm, ok, w in v["validity"])["patches attached"]
+            assert ok is False and w == ["%sline %d: %s" % (who, n, shown)], (line, who, w)
+            assert "patches attached: %sline %d: %s" % (who, n, shown) in v["why"], (line, who, v["why"])
+            assert dict((nm, ok) for nm, ok, _ in v["validity"])["room gate"], (line, who)
+
+
+def _c_planted():
+    """A clean sitting-C log with the plant's boot line (FtPlant.Fix), which the fixture otherwise leaves out."""
+    mark = "[FRAME-TIME] mark cost cyc=50 p90=70 n=1000"
+    return _sub1(_c_text(), mark, mark + "\n" + LOG_PREFIX + "[FRAME-TIME] plant c_plant=80 ticks=800 from=0.1.2")
+
+
+_DISP0 = "cal i=4 why=game3 kind=disp shape=%s n=100000 u=1000000,1000000 p=1030000,1030000" % sorted(SHAPES)[0]
+_HEAVY0 = "\n" + LOG_PREFIX + ("[FRAME-TIME] heavy g=3 op=%s live=0 between=7 pick=1 over=1 menu=0 at_call=0 edge=0 off=0"
+                               % P.HEAVY_OPS[0])
+# the follow-up to ruling .149, B: every instrument the emitter attaches or arms (plugin/Ft*.cs, and the evidence
+# patches whose sites the ledger reads), as (instrument, what attaches or arms it: the Harmony patch classes, the
+# Harmony.Patch call, the player-loop systems or the writer it wraps; the source text of the line reporting its attach
+# state; the parser rule that withholds or refuses when it is not attached; the sitting the rule is read in, V
+# (sitting_v's WITHHELD list), C (sitting C's two-arm rows) or refuse (read_sitting refuses); a spoil of the clean
+# log; the reason, or the refusal's words, the rule then gives). chk_instruments_not_attached_withhold runs each row;
+# test_every_attached_instrument_has_a_row holds the table to the source
+INSTRUMENTS = (
+    ("the player-loop clock", ("PlayerLoop:FtStart", "PlayerLoop:FtEnd", "PlayerLoop:FtPlantTick"),
+     '"[FRAME-TIME] clock refused: player-loop phase missing (EarlyUpdate "',
+     "validity 'complete sitting': FAILURE_EVENTS 'clock refused:' (no clock, no game line)", "V",
+     lambda t: t + "\n" + LOG_PREFIX + "[FRAME-TIME] clock refused: player-loop phase missing (EarlyUpdate True, "
+                                       "PreLateUpdate True, Update False)",
+     "complete sitting: failure event: clock refused: "),
+    ("the clock's cycle reader", ("FtClock.Cycles",), '"[FRAME-TIME] clock installed freq="',
+     "validity 'VR2 instrument': settled cycle_failures=0 (and the counters line's)", "V",
+     lambda t: _settled_add(t, 3, " cycle_failures=1"), "VR2 instrument: settled g=3 cycle_failures=1"),
+    ("the allocation counter", ("FtAlloc.Init",), '"[FRAME-TIME] alloc pin="',
+     "boot_controls: the pin, and K1", "V",
+     lambda t: _sub1(t, dict(V6_BOOT)["alloc"], "alloc pin=differs planted=1048600/1048576 empty=0"),
+     "the counter's pin differs or is not read (pin=differs)"),
+    ("the writer ledger's disk-log tap", ("DiskLogListener.LogWriter",), '"[FRAME-TIME] ledger log="',
+     "ledger_state: one line, log=1, types= the parser's writer types", "V",
+     lambda t: _sub1(t, LEDGER_OK, "ledger log=0 why=no_disk_listener types=log,hash,recv,sock"),
+     "the disk-log tap: ledger log=0 why=no_disk_listener: "),
+    ("class X's and E's photon patches", ("FtPhotonXPatch", "FtPhotonEPatch"), '"[FRAME-TIME] photon patches n="',
+     "boot_controls: R-SCOPE's patches line (the ten typed names); validity 'patches attached'", "V",
+     lambda t: _sub1(t, dict(V6_BOOT)["photon"], "photon patches n=9 names=" + ",".join(
+         x for x in P.PHOTON_ENTRIES if x != "LoadBalancingClient.OnMessage")),
+     "R-SCOPE's patches line out of range (n=9 for 9 names; not attached: LoadBalancingClient.OnMessage)"),
+    ("the listener scopes", ("FtCensus scope wrap",), '"[FRAME-TIME] scope census entries="',
+     "boot_controls: R-SCOPE's census line (wrapped = entries, not failed)", "V",
+     lambda t: _sub1(t, "scope census entries=40 wrapped=40", "scope census entries=40 wrapped=39"),
+     "R-SCOPE's census line out of range (entries 40, wrapped 39)"),
+    ("the census entry registry", ("FtE.RegisterAll",), '"[FRAME-TIME] census registered="',
+     "validity 'census summary'", "V",
+     lambda t: _sub1(t, CENSUS_CLEAN, CENSUS_SUMMARY % (len(ENTRIES), len(ENTRIES), 1, 0)), "census summary: "),
+    ("the census entry patches", ("FtE.PatchType",), '" kind=disp shape=" + c.Name + " failed: " + c.Error',
+     "validity 'VR2 instrument': a failed disp line, by its shape; validity 'patches attached'", "V",
+     lambda t: _sub1(t, _DISP0, _DISP0.split(" n=")[0] + " failed: PatchException: no target"),
+     "VR2 instrument: game 3: calibration 4 carries failure warnings for disp"),
+    ("the calibration dummies", ("harmony.Patch(c.Dummy",), '" kind=disp shape=" + c.Name + " failed: " + failed',
+     "validity 'VR2 instrument': a failed disp line, by its shape", "V",
+     lambda t: _sub1(t, _DISP0, _DISP0.split(" n=")[0] + " failed: HarmonyException: patch"),
+     "VR2 instrument: game 3: calibration 4 carries failure warnings for disp"),
+    ("the per-game collectors", ("FtSchedule.Open",), '"[FRAME-TIME] opened g="', "validity 'VR5 records'", "V",
+     lambda t: _sub1(t, "opened g=3 se=1 ce=1 ic=1", "opened g=3 se=1 ce=1 ic=0"), "VR5 records: "),
+    ("the K2 scope plant", ("FtSpan.Plant",), '"[FRAME-TIME] scope plant asked="', "boot_controls: K2", "V",
+     lambda t: _sub1(t, "scope plant asked=2000 got=2010", "scope plant asked=2000 got=2101"),
+     "control K2 out of range (asked 2000"),
+    ("the K3 nest plant", ("FtPhoton.Nest",), '"[FRAME-TIME] nest plant asked="', "boot_controls: K3", "V",
+     lambda t: _sub1(t, "nest plant asked=2000 x=2020 e=1990 p=2005", "nest plant asked=2000 x=2020 e=1899 p=2005"),
+     "control K3 out of range (asked 2000 us, read x 2020, e 1899"),
+    ("the control mutant", ("FtSpan.SetMutants",), '"[FRAME-TIME] controls k_mutant="',
+     "refuse_k_mutant: a sitting log with another k_mutant than none is refused", "refuse",
+     lambda t: _sub1(t, "controls k_mutant=none", "controls k_mutant=k1"), "K-MUTANT"),
+    ("the room gate", ("FtRoomGatePunPatch", "FtRoomGateNchVoidPatch", "FtRoomGateNchRoutinePatch"),
+     '"[FRAME-TIME] FT-GATE patched "', "validity 'room gate'; validity 'patches attached'", "V",
+     lambda t: _sub1(t, "FT-GATE patched 13 entry points expected=13", "FT-GATE patched 12 entry points expected=13"),
+     "room gate: FT-GATE patched 12 entry points of 13 expected"),
+    ("the churn-timer freeze", ("FtChurnFreezePatch",), '"[FRAME-TIME] churn freeze failed: "',
+     "validity 'complete sitting': FAILURE_EVENTS 'churn freeze'; validity 'patches attached'", "V",
+     lambda t: t + "\n" + LOG_PREFIX + "[FRAME-TIME] churn freeze failed: boom",
+     "complete sitting: failure event: churn freeze "),
+    ("the socket hook", ("FtSockPatch",), "[HARMONY] Failed to patch {type.Name}", "validity 'patches attached'", "V",
+     lambda t: t + "\n" + HARMONY_FAIL % "FtSockPatch", "patches attached: line "),
+    ("the route hook", ("FtRoute_SendPatch",), "[HARMONY] Failed to patch {type.Name}", "validity 'patches attached'",
+     "V", lambda t: t + "\n" + HARMONY_FAIL % "FtRoute_SendPatch", "patches attached: line "),
+    ("the self-drive", ("FtDrive_InputPatch", "FtDrive_PickPatch"), '"[FRAME-TIME] sitting complete g="',
+     "validity 'complete sitting' (its line proves the drive); validity 'patches attached'", "V",
+     lambda t: t + "\n" + HARMONY_FAIL % "FtDrive_InputPatch", "patches attached: line "),
+    ("the recv scopes' sites", ("HitEvidence_ExecuteRpcPatch",), "[HARMONY] Failed to patch {type.Name}",
+     "validity 'patches attached'", "V", lambda t: t + "\n" + HARMONY_FAIL % "HitEvidence_ExecuteRpcPatch",
+     "patches attached: line "),
+    ("the frame-rate cap hold", ("Plugin FPSCAP hold",), '"[FPSCAP] held by frame-time calibration"',
+     "validity 'VR1': the hold's line", "V",
+     lambda t: t.replace(LOG_PREFIX + "[FPSCAP] held by frame-time calibration\n", "", 1),
+     "VR1: no '[FPSCAP] held by frame-time calibration' line"),
+    ("the arming", ("FtArm.Arm",), '"[FRAME-TIME] armed room="',
+     "sitting V's force=ON condition; validity 'complete sitting' (an unarmed game writes no settled line)", "V",
+     lambda t: re.sub(r"(settled g=3 [^\n]*) force=ON", r"\1 force=none", t, count=1),
+     "sitting V: this seat's settled lines print another force= than ON (g=3 force=none)"),
+    ("the plant", ("FtPlant.Fix",), '"[FRAME-TIME] plant c_plant="',
+     "sitting C's two-arm 'VR2 e_C_lo': FAIL, not computable (it weakens the cross-check)", "C",
+     lambda t: _sub1(t, "\n" + LOG_PREFIX + "[FRAME-TIME] plant c_plant=80 ticks=800 from=0.1.2", ""),
+     "VR2 e_C_lo FAIL: not computable: e_C needs exactly one plant line with c_plant > 0 (got [])"),
+    ("the heavy and off-thread marks", ("FtHeavy.Mark",), '"[FRAME-TIME] heavy g="',
+     "validity 'complete sitting': one heavy line per operation per game", "V",
+     lambda t: _sub1(t, _HEAVY0, ""), "complete sitting: game 3: 0 heavy lines for %s (needs 1)" % P.HEAVY_OPS[0]),
+)
+
+
+def chk_instruments_not_attached_withhold(m):
+    # the follow-up to ruling .149, B: each INSTRUMENTS row's rule on its spoil: the reason in sitting V's WITHHELD
+    # list (and so on the seat's V6 WITHHELD line), the two-arm row in sitting C, or the refusal; the clean log of the
+    # same sitting (the control) gives none of them, and each row's attach-state line is in the source
+    src = _plugin_src()
+    v, c = _v_text(), _c_planted()
+    assert _v(m, v)["why"] == [], _v(m, v)["why"]
+    rc = m.read(c)
+    two_c = ["%s %s: %s" % x for x in m.sitting_c(rc, c, rc, c, None, "C:a")["two"]]
+    m.read_sitting(v, "V:a")
+    for name, by, emit, rule, where, spoil, want in INSTRUMENTS:
+        assert emit in src, (name, emit)
+        if where == "V":
+            bad = spoil(v)
+            assert bad != v, name
+            why = _v(m, bad, v)["why"]
+            assert [x for x in why if x.startswith(want)], (name, want, why)
+        elif where == "C":
+            bad = spoil(c)
+            rb = m.read(bad)
+            two = ["%s %s: %s" % x for x in m.sitting_c(rb, bad, rc, c, None, "C:a")["two"]]
+            assert [x for x in two if x.startswith(want)] and not [x for x in two_c if x.startswith(want)], \
+                (name, want, two, two_c)
+        else:
+            assert _word_refused(lambda: m.read_sitting(spoil(v), "V:a"), want), name
+
+
+def test_every_attached_instrument_has_a_row():
+    # the follow-up to ruling .149, B: every Harmony patch class, Harmony.Patch call and player-loop system in
+    # plugin/Ft*.cs, and the disk-log writer FtLedger wraps, is named by an INSTRUMENTS row; every name a row gives
+    # for a patch class is a class the plugin declares
+    plug = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "plugin")
+    named = set(x for row in INSTRUMENTS for x in row[1])
+    found, every = set(), ""
+    for fn in sorted(os.listdir(plug)):
+        if not fn.endswith(".cs"):
+            continue
+        s = re.sub(r"(?m)^\s*//.*$", "", open(os.path.join(plug, fn), encoding="utf-8").read())
+        every += s
+        if not fn.startswith("Ft"):
+            continue
+        found |= set(re.findall(r"\[HarmonyPatch\b[^\]]*\]\s*(?:\[[^\]]*\]\s*)*(?:\w+\s+)*class (\w+)", s))
+        found |= set(re.findall(r"\b(\w+\.Patch\(\w+\.\w+)", s))
+        found |= set("PlayerLoop:" + x for x in re.findall(r"PlayerLoopSystem \{ type = typeof\((\w+)\)", s))
+        if "new Tap(d.LogWriter)" in s:
+            found.add("DiskLogListener.LogWriter")
+    # 10 patch classes, the dummies' Harmony.Patch call, 3 player-loop systems and the disk-log writer at this tree
+    assert len(found) >= 15, sorted(found)
+    assert sorted(found - named) == [], sorted(found - named)
+    for x in named:
+        if x.endswith("Patch") and "." not in x and ":" not in x:
+            assert re.search(r"\bclass %s\b" % x, every), x
+
+
 # the B11 mutants (mut_parse.py's B11_MUTS) are proven here, in process, so a seat's pytest run proves them: each row
 # names the check functions it must turn red; mutant 0, the unchanged parser, keeps every check green
 B11_CHECKS = ["chk_c2_recovers_3_25", "chk_c3_recovers_3_0375", "chk_c4_recovers_3_5", "chk_charge_never_negative",
@@ -3482,7 +3795,11 @@ B11_CHECKS = ["chk_c2_recovers_3_25", "chk_c3_recovers_3_0375", "chk_c4_recovers
               # ruling R6-A3.11.149 (5) to (8)
               "chk_validity_set_withholds_sitting_v", "chk_vr1_reads_t_on", "chk_validity_set_decides_sitting_c",
               "chk_two_arm_guards_named_on_the_verdict_line", "chk_b3_on_both_sittings", "chk_seats_paired_by_name",
-              "chk_void_rounds_stay_in_sitting_v", "chk_controls_forms_and_failed_to_patch"]
+              "chk_void_rounds_stay_in_sitting_v", "chk_controls_forms_and_failed_to_patch",
+              # the integrator's follow-up to ruling .149, A to D
+              "chk_ledger_tap_withholds_sitting_v", "chk_patches_and_room_gate_rows",
+              "chk_instruments_not_attached_withhold", "chk_two_arm_three_words",
+              "chk_reported_lines_never_end_the_verdict"]
 
 
 @pytest.mark.parametrize("name", B11_CHECKS)
@@ -3669,7 +3986,9 @@ def test_b11_report_withholds_b1_and_prints_both_risks():
     i = out.splitlines().index(ln[0])
     assert [x.split(" ")[0] for x in out.splitlines()[i - len(P.VALIDITY):i]] == ["VALIDITY"] * len(P.VALIDITY)
     two = out.splitlines()[i + 1:i + 1 + len(P.TWO_ARM)]
-    assert [re.match(r"TWO-ARM (.+?) (PASS|FAIL): ", x).group(1) for x in two] == list(P.TWO_ARM), two
+    assert [re.match(r"TWO-ARM (.+?) (PASS|FAIL|NOT TESTED): ", x).group(1) for x in two] == list(P.TWO_ARM), two
+    # the follow-up to ruling .149, C: without a reference R-COMMON's word is NOT TESTED, its input named
+    assert two[-1] == "TWO-ARM R-COMMON NOT TESTED: no reference log", two
     tail = out.splitlines()[i + 1 + len(P.TWO_ARM):i + 7 + len(P.TWO_ARM)]
     assert [x.strip().split(" ")[0] for x in tail] == ["R-CARRY", "R-COMMON", "R-PATH", "R-PREFIX", "R-REST", "these"], tail
     assert "R-COMMON UNTESTED: no reference record set" in out
