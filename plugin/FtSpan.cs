@@ -308,10 +308,16 @@ namespace CompetitiveRounds
             return d;
         }
 
-        /// <summary>The finalizer of an X or listener scope: the class stack back to the depth its prefix found.</summary>
+        /// <summary>Main thread: the X and listener finalizers that found the class stack not exactly one above the depth
+        /// their prefix found (an inner scope left open, or the stack already below the scope's own level).</summary>
+        internal static long LeaveMismatch;
+
+        /// <summary>The finalizer of an X or listener scope: the class stack back to the depth its prefix found; a stack
+        /// at any other height than the scope's own counts once in LeaveMismatch.</summary>
         internal static void Leave(int d)
         {
             if (d < 0) return;
+            if (_sd != d + 1) LeaveMismatch++;
             while (_sd > d) Pop();
         }
 

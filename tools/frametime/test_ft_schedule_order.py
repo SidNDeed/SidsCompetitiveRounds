@@ -106,7 +106,8 @@ _FLUSH_TAIL = [
 # V6: the tip's counters line also carries photon_offmain (FtSpan.PhotonOffMain); _FLUSH_TAIL stays c28259c1's
 _FLUSH_TAIL_V6 = _FLUSH_TAIL[:-2] + [
     '+ " cycle_failures=" + FtClock.CycleFailures + " span_depth_violations=" + FtClock.DepthViolations',
-    '+ " photon_offmain=" + System.Threading.Interlocked.Read(ref FtSpan.PhotonOffMain));',
+    '+ " photon_offmain=" + System.Threading.Interlocked.Read(ref FtSpan.PhotonOffMain)',
+    '+ " span_leave_mismatch=" + FtSpan.LeaveMismatch);',
     _FLUSH_TAIL[-1],
 ]
 
@@ -728,6 +729,7 @@ TIP_P1_SPAN = {
     ],
     SIG_SP_LEAVE: [
         'if (d < 0) return;',
+        'if (_sd != d + 1) LeaveMismatch++;',
         'while (_sd > d) Pop();',
     ],
     SIG_SP_CAL: [
@@ -3102,6 +3104,7 @@ class SpanPort:
         self.k, self.g, self.gok, self.a = 0, 0, False, 0
         self.marks = 0
         self.depth = 0          # the component spans (Open/Close), apart from the class stack
+        self.leave_mismatch = 0  # FtSpan.LeaveMismatch; mutant 'no_leave_count' never counts
 
     def mark(self, k, g, gok, a):
         d = k - self.k
@@ -3179,6 +3182,10 @@ class SpanPort:
         return d
 
     def leave(self, d):
+        if d < 0:
+            return
+        if len(self.prev) != d + 1 and self.m != "no_leave_count":
+            self.leave_mismatch += 1
         while len(self.prev) > d:
             self.pop()
 
@@ -3587,18 +3594,58 @@ def test_v6_listener_is_e_only_inside_x():
     assert run("k3")[CLS_X] == 20 and run("k3")[CLS_E] == 0
 
 
-def test_v6_leave_restores_the_depth_its_prefix_found():
-    """A finalizer pops back to its prefix's depth, so a scope left open inside a Photon call cannot outlive it;
-    an off-main prefix (-1) moves nothing."""
-    th = Thread()
-    sp = SpanPort(th)
+def _leave_balanced(m="tip"):
+    """X around a listener around P, all closed in order, twice; then K3's plant."""
+    sp = SpanPort(Thread(), m)
+    for _ in range(2):
+        dx = sp.enter_x()
+        de = sp.enter_listener()
+        sp.enter_p()
+        sp.leave_p()
+        sp.leave(de)
+        sp.leave(dx)
+    sp.plant_nest()
+    return sp
+
+
+def _leave_leaked(m="tip"):
+    """An inner P scope left open inside X (a handler that threw before its exit), then X's own level popped before
+    its finalizer (the stack below the scope's level): each finalizer counts once."""
+    sp = SpanPort(Thread(), m)
     dx = sp.enter_x()
-    sp.enter_listener()
-    sp.enter_p()                          # a handler that threw before its exit
+    sp.enter_p()
+    sp.leave(dx)
+    assert sp.prev == [] and len(sp.prev) == dx and sp.cls == CLS_E      # back at the prefix's depth
+    dx = sp.enter_x()
+    sp.pop()
     sp.leave(dx)
     assert sp.prev == [] and sp.cls == CLS_E
-    csharp = TIP_P1_SPAN[SIG_SP_LEAVE]
-    assert csharp == ['if (d < 0) return;', 'while (_sd > d) Pop();']
+    return sp
+
+
+def test_v6_leave_mismatch_zero_when_balanced():
+    sp = _leave_balanced()
+    assert sp.leave_mismatch == 0 and sp.prev == []
+
+
+def test_v6_leave_mismatch_counts_an_inner_scope_left_open():
+    assert _leave_leaked().leave_mismatch == 2
+    assert TIP_P1_SPAN[SIG_SP_LEAVE] == ['if (d < 0) return;', 'if (_sd != d + 1) LeaveMismatch++;',
+                                         'while (_sd > d) Pop();']
+    # the counters line prints it directly after photon_offmain
+    flush = TIP[SIG_FLUSH]
+    i = flush.index('+ " photon_offmain=" + System.Threading.Interlocked.Read(ref FtSpan.PhotonOffMain)')
+    assert flush[i + 1] == '+ " span_leave_mismatch=" + FtSpan.LeaveMismatch);'
+
+
+def test_v6_leave_mismatch_mutant_fails():
+    """The increment removed: in the port the leak goes uncounted (the balanced case cannot tell), and in the C# the
+    pin refuses it."""
+    assert _leave_balanced("no_leave_count").leave_mismatch == 0
+    assert _leave_leaked("no_leave_count").leave_mismatch == 0
+    assert _leave_leaked().leave_mismatch == 2                             # the negative control
+    assert pin_violations(_sources()) == []
+    assert pin_violations(_mut(_sources(), "FtSpan.cs", "            if (_sd != d + 1) LeaveMismatch++;\n", "")) != []
 
 
 # the controls (SHARED.md "What P1 builds"): each boot line's range, as the parser reads it
