@@ -3785,6 +3785,42 @@ def chk_ledger_types_judged_as_written(m):
     assert ln.startswith("VERDICT B1 seat a WITHHELD: ") and (LEDGER_TYPES_BAD % "log,log,hash,recv,sock") in ln, ln
 
 
+CENSUS_PARTIAL = "scope census entries=40 wrapped=40 partial=1"
+# ruling R6-A3.11.152, G3: (the census line FtCensus prints, R-SCOPE's census reading): its three emitted variants
+CENSUS_VARIANTS = (
+    ("scope census entries=40 wrapped=40", (True, "entries 40, wrapped 40")),
+    (CENSUS_PARTIAL, (False, "entries 40, wrapped 40; the census read an incomplete type list (partial=1)")),
+    ("scope census entries=40 wrapped=40 failed=TypeLoadException",
+     (False, "entries 40, wrapped 40; the census threw (failed=TypeLoadException)")),
+)
+# lines FtCensus never prints: both suffixes (either order), partial with another value
+CENSUS_NOT_EMITTED = ("scope census entries=40 wrapped=40 partial=1 failed=TypeLoadException",
+                      "scope census entries=40 wrapped=40 failed=TypeLoadException partial=1",
+                      "scope census entries=40 wrapped=40 partial=2", "scope census entries=40 wrapped=40 partial=0")
+
+
+def chk_census_partial_out_of_range(m):
+    # ruling R6-A3.11.152, G3: plugin/FtCensus.cs:133,166 prints the census counts followed by exactly one of nothing,
+    # ' partial=1' (an incomplete type list, from a ReflectionTypeLoadException) or ' failed=<type>'. Each variant is a
+    # form the parser reads; R-SCOPE's census reads the plain one in range (the control), the partial one out of range
+    # naming the incomplete list (it proves nothing about the types it did not read), the failed one as before. A line
+    # with both suffixes, or partial of another value, is no emitted form: an unknown form, and --controls refuses it
+    # as a ruled line out of its form. A partial census withholds sitting V and fails the control proof
+    for line, want in CENSUS_VARIANTS:
+        assert m.unknown_forms(LOG_PREFIX + "[FRAME-TIME] " + line) == [], line
+        got = m.boot_controls(m.read(_boot_full(scope_census=line)))["census"]
+        assert got == want, (line, got, want)
+    for line in CENSUS_NOT_EMITTED:
+        assert m.unknown_forms(LOG_PREFIX + "[FRAME-TIME] " + line) != [], line
+        assert _word_refused(lambda: m.controls_proof(_boot_full(scope_census=line), "boot"),
+                             "the 'scope census entries=' line is not in its form: " + line), line
+    ok, lines = m.controls_proof(_boot_full(scope_census=CENSUS_PARTIAL), "boot")
+    assert not ok and ("CONTROLS R-SCOPE census OUT OF RANGE: " + CENSUS_VARIANTS[1][1][1]) in lines, lines
+    assert "CONTROLS unknown [FRAME-TIME] line forms: 0 (needs 0)" in lines, lines
+    why = _v(m, _v_text(boot={"scope census": CENSUS_PARTIAL}))["why"]
+    assert "R-SCOPE's census line out of range (%s)" % CENSUS_VARIANTS[1][1][1] in why, why
+
+
 def _two_ledgers(text):
     full = LOG_PREFIX + "[FRAME-TIME] " + LEDGER_OK
     return _sub1(text, full, full + "\n" + full)
@@ -4428,7 +4464,9 @@ B11_CHECKS = ["chk_c2_recovers_3_25", "chk_c3_recovers_3_0375", "chk_c4_recovers
               # the integrator's points H, I and J (P3b's end-to-end export test)
               "chk_cal_entries_failure_form", "chk_malformed_lines_are_refusals", "chk_reference_a3_form",
               # the confirming round's G1 (ruling R6-A3.11.152): emitted lists judged as written
-              "chk_ledger_types_judged_as_written"]
+              "chk_ledger_types_judged_as_written",
+              # G3: the census's partial variant
+              "chk_census_partial_out_of_range"]
 
 
 @pytest.mark.parametrize("name", B11_CHECKS)

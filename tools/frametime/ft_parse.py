@@ -814,8 +814,10 @@ FORMS = (
      ("pin", "planted", "empty")),
     ("alloc_init why=", _kv("alloc_init", ("why",)), ("why",)),
     ("scope plant asked=", _kv("scope plant", ("asked", "got"), {"asked": _I, "got": _INA}), ("asked", "got")),
-    ("scope census entries=", _kv("scope census", ("entries", "wrapped", "failed?"), {"entries": _N, "wrapped": _N}),
-     ("entries", "wrapped", "failed?")),
+    # ruling R6-A3.11.152, G3: FtCensus prints the counts, then exactly one of nothing, ' partial=1' (the type list
+    # came from a ReflectionTypeLoadException) or ' failed=<type>' (the census threw; it replaces partial): never both
+    ("scope census entries=", _kv("scope census", ("entries", "wrapped"), {"entries": _N, "wrapped": _N})
+     + r"(?: partial=1| failed=%s)?" % _FV, ("entries", "wrapped", "partial?", "failed?")),
     ("nest plant asked=", _kv("nest plant", ("asked", "x", "e", "p"), {"asked": _I, "x": _INA, "e": _INA, "p": _INA}),
      ("asked", "x", "e", "p")),
     ("photon patches n=", _kv("photon patches", ("n", "names"), {"n": _N, "names": r"[\w.,]*"}), ("n", "names")),
@@ -3343,9 +3345,14 @@ def boot_controls(recs):
         out["census"] = (False, why)
     else:
         ent, wr = _num(c.get("entries", "")), _num(c.get("wrapped", ""))
-        out["census"] = (ent is not None and ent > 0 and wr == ent and "failed" not in c,
-                         "entries %s, wrapped %s%s" % (ent, wr, "; the census threw (failed=%s)" % c["failed"]
-                                                       if "failed" in c else ""))
+        # ruling R6-A3.11.152, G3: partial=1 (plugin/FtCensus.cs:133, printed at :166) means the type list came from a
+        # ReflectionTypeLoadException and is incomplete: a census of some types proves nothing about the types it did
+        # not read, so the line is out of range whatever its counts
+        out["census"] = (ent is not None and ent > 0 and wr == ent and "failed" not in c and "partial" not in c,
+                         "entries %s, wrapped %s%s%s" % (ent, wr, "; the census threw (failed=%s)" % c["failed"]
+                                                         if "failed" in c else "",
+                                                         "; the census read an incomplete type list (partial=%s)"
+                                                         % c["partial"] if "partial" in c else ""))
     return out
 
 
