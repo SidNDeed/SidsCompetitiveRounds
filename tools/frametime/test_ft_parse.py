@@ -3969,6 +3969,35 @@ def chk_nch_room_calls_held_to_the_source(m):
     assert m.parse_line(LOG_PREFIX + "[FRAME-TIME] refused what=route route=unreadable n=1")["route"] == "unreadable"
 
 
+def chk_plant_from_held_to_the_source(m):
+    # the follow-up to the J round: FtPlant.cs:35 prints 'from=' + Fix's second argument; the call sites (read from
+    # plugin/*.cs) pass the literal "sentinel" (FtPlant.cs:26, the sentinel names plant_us) or _ptLabel (FtFrames.cs:287),
+    # which BeginPoint sets to FtSchedule.Label(), 'g.r.p', before the OFF windows that make the call reachable are
+    # counted. Each value is a sample of FtPlant.cs:35's row, reads as a form and as a record, and a sitting-C read
+    # with the sentinel's plant line judges as the g.r.p one does (no rule reads from=)
+    plug = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "plugin")
+    src = {f: open(os.path.join(plug, f), encoding="utf-8").read() for f in sorted(os.listdir(plug)) if f.endswith(".cs")}
+    args = []
+    for f, s in src.items():
+        pat = r"\bFix\(([^;]*)\);" if f == "FtPlant.cs" else r"\bFtPlant\.Fix\(([^;]*)\);"
+        args += [(f, a.rsplit(",", 1)[1].strip()) for a in re.findall(pat, s)]
+    assert sorted(args) == [("FtFrames.cs", "_ptLabel"), ("FtPlant.cs", '"sentinel"')], args
+    assert sorted(re.findall(r"\b_ptLabel = ([^;]*);", src["FtFrames.cs"])) == ['""', "FtSchedule.Label()"]
+    assert 'return Game + "." + Round + "." + PointInRound;' in src["FtSchedule.cs"]
+    rows = [r[2] for r in FORM_VARIANTS if r[0] == "FtPlant.cs:35"]
+    assert len(rows) == 1
+    assert sorted(x.split(" from=")[1] for x in rows[0]) == ["0.1.3", "sentinel"], rows[0]
+    for x in rows[0]:
+        assert m.unknown_forms(LOG_PREFIX + "[FRAME-TIME] " + x) == [], x
+    r = m.parse_line(LOG_PREFIX + "[FRAME-TIME] plant c_plant=80 ticks=10 from=sentinel")
+    assert (r["kind"], r["c_plant"], r["ticks"], r["from"]) == ("plant", 80, 10, "sentinel"), r
+    a = _c_planted()
+    b = _sub1(a, "c_plant=80 ticks=800 from=0.1.2", "c_plant=80 ticks=10 from=sentinel")
+    ra, rb = m.read(a), m.read(b)
+    assert [x for x in rb if x["kind"] == "plant"][0]["from"] == "sentinel"
+    assert m.sitting_c(rb, b, rb, b, None, "C:a") == m.sitting_c(ra, a, ra, a, None, "C:a")
+
+
 REFUSALS_FORM_BAD = "the refusals line is not in its form (%s): %s"
 # ruling R6-A3.11.154: refusals lines out of their form, each with what is out of form (FtUpload.cs:54-55 prints a
 # dictionary's pairs, each key once, and their count); the clean sitting line is 'refusals why=quit pairs=0'
@@ -4194,7 +4223,7 @@ FORM_VARIANTS = (
      ("photon patches n=0 names=", "photon patches n=2 names=A.b,C.d")),
     ("FtPhoton.cs:121", '" x=" + FtSpan.Us(x)',
      ("nest plant asked=2000 x=2020 e=1990 p=2005", "nest plant asked=2000 x=NA e=NA p=NA")),
-    ("FtPlant.cs:35", '" from=" + from', ("plant c_plant=80 ticks=800 from=0.1.3",)),
+    ("FtPlant.cs:35", '" from=" + from', ("plant c_plant=80 ticks=800 from=0.1.3", "plant c_plant=80 ticks=10 from=sentinel")),
     ("FtRematch.cs:46", '"[FRAME-TIME] rematch publish failed: " + ex.Message',
      ("rematch publish failed: a b", "rematch publish failed: ")),
     ("FtRematch.cs:72", '"[FRAME-TIME] rematch answer failed: " + ex.Message',
@@ -5174,7 +5203,7 @@ B11_CHECKS = ["chk_c2_recovers_3_25", "chk_c3_recovers_3_0375", "chk_c4_recovers
               "chk_cal_lists_refused_as_written",
               # the J1 to J4 follow-ups to ruling R6-A3.11.154
               "chk_free_text_never_read_as_fields", "chk_empty_values_refused_as_written",
-              "chk_nch_room_calls_held_to_the_source",
+              "chk_nch_room_calls_held_to_the_source", "chk_plant_from_held_to_the_source",
               # G3 (ruling R6-A3.11.153 (3)): the census's partial variant
               "chk_census_partial_out_of_range", "chk_emitted_variants_are_forms"]
 
