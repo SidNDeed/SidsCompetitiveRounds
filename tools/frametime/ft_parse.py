@@ -27,7 +27,12 @@ those lines exist, report() states U as not computable rather than computing it 
 
   census registered expected missing duplicates: once per process, the census summary (kind census_summary)
 
-Usage: python -I -B ft_parse.py <LogOutput.log> [<second seat's log>]
+  alloc pin= planted= empty=; scope plant asked= got=; nest plant asked= x= e= p=; photon patches n= names=; scope census
+  entries= wrapped=: the five V6 boot lines, once per process (boot_controls)
+
+Usage: python -I -B ft_parse.py <LogOutput.log> [<second seat's log>]   (sitting C, as built: the cross-check, no B1)
+       python -I -B ft_parse.py --on <seat 1's sitting-V log> <seat 2's>  (report_on: U and its terms per seat)
+       python -I -B ft_parse.py --combine <V1> <V2> <C1> <C2>              (VERDICT B1 per seat and the worse seat)
 Exit: 0 the report printed; 3 REFUSED (a check refused the input); 4 FT-PARSE REFUSED (a record lacks a key
 REQUIRED_KEYS names: one line names its kind, file, line and keys; or an input holds a line "withheld <class> <n>",
 n >= 1, of a class in READ_CLASSES: the laptop seat script's export rule held back n lines of a class this parse
@@ -292,15 +297,24 @@ INT_KEYS = {"written", "withheld", "seg", "pair", "base_us", "segs", "of", "cycl
             "reads", "scopes", "tmax", "unscoped", "depth_err",
             "run", "pos", "coin", "wi", "f0", "res", "gcn", "cW", "cR", "cS", "cE", "prun", "nm", "cyc", "p90",
             "own_split", "recv_offmain", "ledger_cycle_miss", "sock_p95", "sock_n",
-            "sock_thr", "sock_main"}
+            "sock_thr", "sock_main", "cP", "cX", "ab_back", "ab_retry"}
 # the B11 window line (ruling R6-A3.11.138, SHARED.md's line contract): the fields it appends to the w line, in order.
 # q = C° by tenth, r = the retained direct execution R by tenth, qn = frames by tenth, prun = the window is in a plant
 # run (spun or not; the w line's own plant= marks a window actually planted, its own partial= is the only partial
 # flag), wu = typed writer units (type:units:cycles;..., cycles NA where unread), tok = each writer type's token ledger
 # (type:open0,enqON,enqOFF,doneON,doneOFF,disc,open1;...), nm = the window's class transitions (FtSpan marks)
+# V6 (SHARED.md "V6: the direct bound", rulings R6-A3.11.146 and .147) appends after nm: cP (the recv scopes, class P),
+# cX (Photon's own main-thread work, class X), aC (the bytes allocated in the window's live frames), aW to aX (the bytes
+# allocated while that class ran on the main thread; NA when the counter is unavailable) and wa (the bytes allocated in
+# the off-thread scopes of log, hash and sock: wa=log:<b>;hash:<b>;sock:<b>, each NA when unavailable)
+V6_FIELDS = ("cP", "cX", "aC", "aW", "aR", "aS", "aP", "aX", "wa")
+A_FIELDS = ("aC", "aW", "aR", "aS", "aP", "aX")
 B11_FIELDS = ("run", "pos", "unit", "coin", "wi", "f0", "pred", "prun", "res", "gcn", "cG", "cW", "cR", "cS", "cE", "q",
-              "r", "qn", "wu", "tok", "nm")
+              "r", "qn", "wu", "tok", "nm") + V6_FIELDS
 W_LIST_KEYS = ("q", "r", "qn")
+# keys that print NA when unread, read as None: a w line's a* bytes (the allocation counter) and cG (the GC hook), a p
+# line's heap (SHARED.md V6: "The p line gains ab_back=, ab_retry= and heap=<bytes in use>")
+NA_KEYS = {"w": ("cG",) + A_FIELDS, "p": ("heap",)}
 
 
 # a line the build writes under an emitted kind that is not that kind's record, told apart by its first word (as
@@ -346,10 +360,11 @@ def parse_line(line):
             if k in W_LIST_KEYS:
                 rec[k] = [_int(k, x) for x in v.split(",")]
                 continue
-            if k == "cG":
-                # NA: the native GC hook's per-window completeness check failed; the window's G is unavailable
-                rec[k] = None if v == "NA" else _int(k, v)
-                continue
+        if k in NA_KEYS.get(kind, ()):
+            # NA: cG, the native GC hook is not built (SHARED.md V6); a*, the allocation counter is unavailable (the
+            # pin differs); heap, the same counter's heap figure unread
+            rec[k] = None if v == "NA" else _int(k, v)
+            continue
         if k in INT_KEYS:
             rec[k] = _int(k, v)
         elif re.fullmatch(r"e\d+", k):
@@ -595,6 +610,12 @@ RECORDS = {
     "w": "records_missing() via window_reconcile(): exactly one owner point per window line, per point as many as the "
          "point line's windows; B11 lines: contiguous ordinals and the point's planted and unplanted totals",
     "mark": "b11_transitions(): the boot line '[FRAME-TIME] mark cost cyc= p90= n=', exactly once (SHARED.md)",
+    # ruling R6-A3.11.147 (5): the five V6 boot lines, each exactly once; a missing one is its control out of range
+    "alloc": "boot_controls(): 'alloc pin= planted=/ empty=' exactly once, K1 and the pin (sitting_v withholds)",
+    "scope": "boot_controls(): 'scope plant asked= got=' (K2) and 'scope census entries= wrapped=' (R-SCOPE), each "
+             "exactly once (sitting_v withholds)",
+    "nest": "boot_controls(): 'nest plant asked= x= e= p=' exactly once, K3 (sitting_v withholds)",
+    "photon": "boot_controls(): 'photon patches n= names=' exactly once, R-SCOPE's patch line (sitting_v withholds)",
     "build": "report(): exactly one FrameTime marker in a measurement input, exactly one FrameTimeRef marker in a "
              "reference input (build_marker())",
     "menu_armed": "menu_check(): one per menu run, the startup snapshot before it and none between it and menu_done",
@@ -2038,8 +2059,19 @@ R_CARRY = ("R-CARRY (accepted risk, rulings R6-A3.11.136 (5), .137 (8)): once GC
 R_COMMON = ("R-COMMON (accepted risk, rulings R6-A3.11.136 (5), .137 (5)): the common scopes' external work is at most "
             "r_U times their direct execution; its falsifier is a no-collector reference whose total common cost "
             "exceeds (1 + r_U) D_common")
-RISKS_NOTE = ("neither risk is measured small: the verdict can read PASS while the true cost is above 3 percent by as "
-              "much as the two terms miss")
+# ruling R6-A3.11.141 (3), stated beside the cross-check's interval since .146 (6): their falsifiers (paired reference
+# replays) belong to the second build wave, which .146 (7) leaves unbuilt, so they are stated, not checked
+R_PATH = ("R-PATH (ruling R6-A3.11.141 (3), cross-check only): from the same start state and inputs, any arm schedule "
+          "gives the same ordered gameplay events and the same point-ending wall time, within declared tolerances; "
+          "its falsifier (paired reference replays) is not built")
+R_PREFIX = ("R-PREFIX (ruling R6-A3.11.141 (3), cross-check only): the cumulative clock displacement over any frame "
+            "prefix k is at most k delta + rho(k), and every frame lasts at least f_min > 0; its falsifier is not built")
+R_REST = ("R-REST (SHARED.md V6): outside every scope the collectors cost the game's code nothing the contrast would "
+          "not show; its check is this interval and its half-width against the band. The contrast cannot see a cost "
+          "that stays in OFF windows")
+RISKS_NOTE = ("these risks bear on the cross-check only: it can refute U (a lower end above U_hi withholds B1), and it "
+              "never confirms it")
+CROSS_RISKS = (R_CARRY, R_COMMON, R_PATH, R_PREFIX, R_REST, RISKS_NOTE)
 
 
 class MarkerRefused(Refused):
@@ -2146,10 +2178,25 @@ def _typed(v, width, na=False):
     return out
 
 
+WA_TYPES = ("log", "hash", "sock")
+
+
+def _wa(v):
+    """wa as {type: bytes or None (NA)}: exactly log, hash and sock in that order, each type:<bytes|NA>; None when the
+    text is not of that form."""
+    out = {}
+    for item in v.split(";"):
+        t, _, b = item.partition(":")
+        if t in out or not (b == "NA" or re.fullmatch(r"\d+", b)):
+            return None
+        out[t] = None if b == "NA" else int(b)
+    return out if tuple(out) == WA_TYPES else None
+
+
 def window_faults(w):
     """One B11 window's own invariants (SHARED.md): the partition, C° and R by tenth, the binning, the unit of its
-    position, its ordinal, the token ledger (method-v54.md:43). A window with G unavailable (cG=NA) is checked with cG
-    left out: its GC execution sits inside cE and its q is C - W."""
+    position, its ordinal, the token ledger (method-v54.md:43), and V6's fields. A window with G unavailable (cG=NA)
+    is checked with cG left out: its GC execution sits inside cE and its q is C - W - P."""
     tag = "window %s.%s" % (w["pt"], w["wi"])
     f = []
     if w["unit"] != UNIT_OF_POS.get(w["pos"]):
@@ -2176,13 +2223,23 @@ def window_faults(w):
         f.append("%s: an unreached tenth holds q or r" % tag)
     if sum(w["r"]) != w["cR"]:
         f.append("%s: sum(r)=%d, cR=%d" % (tag, sum(w["r"]), w["cR"]))
-    rest = w["cW"] + w["cR"] + w["cS"] + w["cE"]
+    # SHARED.md V6, the two changed invariants: the partition holds the classes P and X, and C° leaves P (charged whole
+    # in U, ruling R6-A3.11.146 (7)) exactly once while X stays in it; an NA cG counts 0
+    if w["cP"] < 0 or w["cX"] < 0:
+        f.append("%s: cP=%d cX=%d" % (tag, w["cP"], w["cX"]))
+    rest = w["cW"] + w["cR"] + w["cS"] + w["cP"] + w["cX"] + w["cE"]
     g = 0 if w["cG"] is None else w["cG"]
     if w["sC"] != g + rest:
-        f.append("%s: sC=%d is not %scW+cR+cS+cE=%d" % (tag, w["sC"], "" if w["cG"] is None else "cG+", g + rest))
-    if sum(w["q"]) != w["sC"] - g - w["cW"]:
-        f.append("%s: sum(q)=%d is not sC-%scW=%d" % (tag, sum(w["q"]), "" if w["cG"] is None else "cG-",
-                                                      w["sC"] - g - w["cW"]))
+        f.append("%s: sC=%d is not %scW+cR+cS+cP+cX+cE=%d" % (tag, w["sC"], "" if w["cG"] is None else "cG+",
+                                                            g + rest))
+    if sum(w["q"]) != w["sC"] - g - w["cW"] - w["cP"]:
+        f.append("%s: sum(q)=%d is not sC-%scW-cP=%d" % (tag, sum(w["q"]), "" if w["cG"] is None else "cG-",
+                                                         w["sC"] - g - w["cW"] - w["cP"]))
+    neg = [k for k in A_FIELDS if w[k] is not None and w[k] < 0]
+    if neg:
+        f.append("%s: %s below 0" % (tag, ", ".join("%s=%d" % (k, w[k]) for k in neg)))
+    if _wa(w["wa"]) is None:
+        f.append("%s: wa=%s is not log:<bytes|NA>;hash:<bytes|NA>;sock:<bytes|NA>" % (tag, w["wa"]))
     if w["plant"] == 1 and (w["prun"] != 1 or w["arm"] != "OFF"):
         f.append("%s: planted (plant=1) with prun=%d arm=%s (FtPlant spins a plant run's OFF windows)"
                  % (tag, w["prun"], w["arm"]))
@@ -2256,6 +2313,9 @@ def window_reconcile(recs):
     games = {}
     for w in b11:
         games.setdefault(w["game"], []).append(w)
+    # SHARED.md V6: arm= is the gate's real state, so under force=ON (or OFF) a window's arm no longer carries its
+    # coin; mates are then held to one coin field only
+    forced = set(r["g"] for r in recs if r["kind"] == "settled" and r.get("force") in ("ON", "OFF"))
     for g in sorted(games):
         prev = None
         runs, coins = {}, {}
@@ -2282,7 +2342,8 @@ def window_reconcile(recs):
         for c, ws in sorted(coins.items()):
             if len(ws) > 2 or len(set(w["pos"] for w in ws)) != len(ws):
                 miss.append("point %s run %d %s: %d windows on one pair" % (ws[0]["pt"], c[3], c[4], len(ws)))
-            elif len(set(coin_value(w) for w in ws)) != 1 or len(set(w["coin"] for w in ws)) != 1:
+            elif ((g not in forced and len(set(coin_value(w) for w in ws)) != 1)
+                  or len(set(w["coin"] for w in ws)) != 1):
                 miss.append("point %s run %d %s: mates %s do not carry one committed coin (arms %s, coin %s)"
                             % (ws[0]["pt"], c[3], c[4], ",".join(str(w["wi"]) for w in ws),
                                ",".join(w["arm"] for w in ws), ",".join(str(w["coin"]) for w in ws)))
@@ -2743,39 +2804,6 @@ def writer_added(T):
     return out
 
 
-def peer_on_share(peer_recs, first_game=1):
-    """s_peer: the peer's ON-frame share over its ordinary B11 windows of the measured games (SHARED.md D5)."""
-    ws = [w for w in peer_recs if b11_line(w) and w["game"] >= first_game and not w["prun"] and not w["res"]]
-    n = sum(w["n"] for w in ws)
-    if n <= 0:
-        raise Refused("the peer log has no ordinary B11 window")
-    return sum(w["n"] for w in ws if w["arm"] == "ON") / n
-
-
-def peer_driven(recs, T, r_u, peer_recs, first_game=1):
-    """The peer-driven charge (SHARED.md D5, RULED 2026-11-11T11:30:19Z): this seat's work on the peer's collector
-    traffic follows the peer's arm. shortfall = (1 + r_U) x recv cycles per frame in this seat's ON windows x
-    (1/s_peer - 1); sock = recv units per frame / s_peer x the upper 95th percentile of sock cycles per datagram (the
-    largest sock_p95 any point of THIS seat prints: its socket thread handled the peer's traffic, to-p2-r4.md (3)).
-    Both are upper ends; the SID/FAIL lower bound takes them as 0. Returns
-    (shortfall, sock, s_peer, why): a term is None, with why, when it cannot be computed."""
-    if peer_recs is None:
-        return None, None, None, "no peer log (--peer)"
-    s_peer = peer_on_share(peer_recs, first_game)
-    if s_peer <= 0:
-        return None, None, s_peer, "the peer's ON-frame share is 0"
-    on = [w for w in T["pop"] if w["arm"] == "ON"]
-    n_on = sum(w["n"] for w in on)
-    recv = sum(_wu_cyc(w, ("recv",)) * 1e6 / T["fh"][w["game"]] for w in on) / n_on if n_on else None
-    short = None if recv is None or r_u == float("inf") else (1.0 + r_u) * recv * (1.0 / s_peer - 1.0)
-    units = sum((_typed(w["wu"], 2, na=True) or {}).get("recv", [0, 0])[0] or 0 for w in T["pop"]) / T["N"]
-    p95 = [(q["sock_p95"], q["game"]) for q in recs if q["kind"] == "p" and q["pt"] in T["valid"] and "sock_p95" in q]
-    if not p95:
-        return short, None, s_peer, "no point line prints sock_p95"
-    sock = units / s_peer * max(c * 1e6 / T["fh"][g] for c, g in p95)
-    return short, sock, s_peer, None
-
-
 def own_split_faults(recs, T):
     """own_split per point (the integrator's ruling on the hand-back (3)): an ownership fault, not a quantity; every
     point of a measured game whose line counts one or more, or prints none, as (pt, count or None)."""
@@ -2783,24 +2811,28 @@ def own_split_faults(recs, T):
             if q["kind"] == "p" and q["pt"] in T["valid"] and q.get("own_split", 1) != 0]
 
 
+def p_line_faults(recs, valid):
+    """SHARED.md (md5 3ab20794): recv_offmain, ledger_cycle_miss and sock_main (cycles both in C and in sock) must be
+    printed and 0 in every point of valid (a set of pt); sock_thr is reported only. Returns the reasons."""
+    why = []
+    for k in ("recv_offmain", "ledger_cycle_miss", "sock_main"):
+        bad = [q["pt"] for q in recs if q["kind"] == "p" and q["pt"] in valid and q.get(k, 1) != 0]
+        if bad:
+            why.append("%s nonzero or not printed at %s" % (k, ", ".join(bad)))
+    return why
+
+
 def b11_seat_withholds(recs, e):
-    """The seat-level reasons B1 is withheld for this seat's log: writer cycles printing NA (P1's notes) and any
-    ownership fault (own_split nonzero or not printed, the integrator's ruling on the hand-back (3))."""
+    """The seat-level reasons B1 is withheld for this seat's log as built: writer cycles printing NA (P1's notes), any
+    ownership fault (own_split nonzero or not printed, the integrator's ruling on the hand-back (3)) and the p line's
+    faults (p_line_faults). The peer-driven charge of D5 left with B_U (ruling R6-A3.11.146 (7))."""
     why = []
     if e["T"]["wu_na"]:
         why.append("writer cycles print NA for %s on this seat (W_U not computable)" % ", ".join(e["T"]["wu_na"]))
     osp = own_split_faults(recs, e["T"])
     if osp:
         why.append("ownership faults (own_split) at %s" % ", ".join(pt for pt, _ in osp))
-    # SHARED.md (md5 3ab20794): recv_offmain, ledger_cycle_miss and sock_main (cycles both in C and in sock) must be
-    # printed and 0 in every point; sock_thr is reported only
-    for k in ("recv_offmain", "ledger_cycle_miss", "sock_main"):
-        bad = [q["pt"] for q in recs if q["kind"] == "p" and q["pt"] in e["T"]["valid"] and q.get(k, 1) != 0]
-        if bad:
-            why.append("%s nonzero or not printed at %s" % (k, ", ".join(bad)))
-    if e.get("peer_why") == "no peer log (--peer)":
-        why.append("no peer log: the peer-driven charge is not computable (SHARED.md D5)")
-    return why
+    return why + p_line_faults(recs, e["T"]["valid"])
 
 
 def b11_transitions(recs, T):
@@ -2818,10 +2850,12 @@ def b11_transitions(recs, T):
     return out, "median %d cycles (p90 %d, n %d)" % (mk[0]["cyc"], mk[0]["p90"], mk[0]["n"])
 
 
-def b11_report(recs, ref_recs=None, first_game=1, exposure=None, peer_recs=None):
-    """The window design's report lines and its figures (exposure: b11_estimate's hook; peer_recs: the peer seat's
-    records, for the peer-driven charge)."""
-    e = b11_estimate(recs, first_game, exposure=exposure)
+def b11_report(recs, ref_recs=None, first_game=1):
+    """The window design's report lines and its figures, as built: under V6 (rulings R6-A3.11.146 (6), .147) the
+    contrast is a cross-check that can only refute U, so nothing here is a term of the verdict (B_U's terms, the
+    exposure obligation and the peer-driven charge, left it). A forced log is no contrast input (contrast_input)."""
+    contrast_input(recs)
+    e = b11_estimate(recs, first_game)
     T = e["T"]
     out = []
     tr = t_ref_windows(recs, first_game)
@@ -2875,12 +2909,6 @@ def b11_report(recs, ref_recs=None, first_game=1, exposure=None, peer_recs=None)
                % ("%.4f" % e["r_u"], e["r_hat"], "%.3f us" % e["dcommon"] if e["dcommon"] is not None
                   else "not computable (no ordinary full OFF window)", "%.3f us" % eu if eu is not None
                   else "not bounded"))
-    short, sock, s_peer, pwhy = peer_driven(recs, T, e["r_u"], peer_recs, first_game)
-    e["peer"], e["peer_why"] = (None if short is None or sock is None else short + sock), pwhy
-    out.append("B11 peer-driven charge (SHARED.md D5): s_peer %s; recv shortfall %s; sock %s%s"
-               % ("%.4f" % s_peer if s_peer is not None else "not read", "%.3f us" % short if short is not None
-                  else "not computable", "%.3f us" % sock if sock is not None else "not computable",
-                  "" if pwhy is None else " (%s)" % pwhy))
     wa = writer_added(T)
     out.append("B11 writers off the main thread (log, hash, sock; recv is inside C): ON %s, OFF %s per frame"
                % tuple("%.3f us" % wa[a] if wa[a] is not None else "no frames" for a in ("ON", "OFF")))
@@ -2898,24 +2926,8 @@ def b11_report(recs, ref_recs=None, first_game=1, exposure=None, peer_recs=None)
         out.append("B11 point %s: %d frames, wall %.3f s, terminal window %d frames, ON-frame share %.4f, mean frame "
                    "time ON %s, OFF %s (diagnostic)" % (pt, n, wall, last, sh, "%.1f us" % mon if mon is not None
                                                         else "none", "%.1f us" % moff if moff is not None else "none"))
-    if e["ex"] is None:
-        out.append("B11 exposure obligation (method-v52.md:20-28, method-v53.md:37, ruling R6-A3.11.140 (3)): no "
-                   "frame-indexed exposure-equivalence evidence and no counterfactual discrepancy envelope supplied: "
-                   "the verdict is WITHHELD; the per-point figures above are diagnostics and bound nothing")
-    else:
-        out.append("B11 exposure obligation: the supplied envelope's upper bound %.3f us per frame (%s) enters U"
-                   % (e["ex"], e["ex_src"]))
     e["tref"], e["eu"] = tr, eu
     return out, e
-
-
-def b11_bound(bu, ex, g_u, w_u, e_u, p_u):
-    """B_U for the window design (method-v54.md:115-123): the corrected contrast's bound plus the exposure bound, the
-    always-ON GC and writer charges, R-COMMON's charge and the peer-driven charge (SHARED.md D5), each at its upper
-    end; None while any term is not computable."""
-    if any(x is None for x in (bu, ex, g_u, w_u, e_u, p_u)):
-        return None
-    return bu + ex + g_u + w_u + e_u + p_u
 
 
 def classify(u, tref, hw, lb):
@@ -2932,12 +2944,379 @@ def classify(u, tref, hw, lb):
     return "FAIL" if lb > 0.05 * tref else "WITHHELD"
 
 
-def b11_verdict(d_u, b_u, hw, lb, tref):
-    """U = max(D_U, B_U) and its class; None while either branch is not computable."""
-    if d_u is None or b_u is None:
-        return None
-    u = max(d_u, b_u)
-    return u, classify(u, tref, hw, lb)
+# ----------------------------------------------------------------------------- V6: the direct bound and the combine
+# SHARED.md "V6: the direct bound" (rulings R6-A3.11.146 and .147). Sitting V: both seats forced ON; U, its five terms,
+# U_hi, L, T_ref and the class come from it alone (sitting_v, report_on). Sitting C: both seats alternate as built; its
+# contrast is the cross-check (cross_check). combine() reads both and prints VERDICT B1 per seat and the worse seat.
+
+FORCE_C = "none"                          # sitting C: force=none on every settled line
+FORCE_V = "ON"                            # sitting V: force=ON on every settled line of both seats
+MIN_GAMES_V = 6                           # "fewer than 6 games remain" withholds B1
+K_TOL = 0.05                              # K2 and K3: each spin reads within 5 percent in its own class
+K1_ABOVE = 4096                           # K1: the planted median from the bytes asked to 4096 above
+# the four PhotonPeer entries P1 scopes as class X (Photon3Unity3D 4.1.7.0); the patch line names each attached patch
+PHOTON_ENTRIES = ("DispatchIncomingCommands", "SendOutgoingCommands", "SendAcksOnly", "Service")
+RANK = {"PASS": 0, "SID": 1, "WITHHELD": 2, "FAIL": 3}     # the worse seat: a FAIL is worse than an unresolved seat
+V_RISKS = (
+    "R-GC (SHARED.md V6): the collectors add to collection work at most in proportion to the bytes they allocate, and "
+    "what they keep alive does not lengthen collections; checks: K1, collections per MB in sitting C's ON and OFF "
+    "windows, the collectors' bytes over sitting V against heap= at its end",
+    "R-SCOPE (ruling R6-A3.11.147 (3)(f)): every collector entry point runs inside a scope, on the main thread and off "
+    "it, and Photon moves messages on the main thread only inside the patched entries; checks: the scope census line, "
+    "the photon patch line, the contrast",
+    "R-WORK (SHARED.md V6): sitting V is ordinary play; checks: the census on both seats, and each game's u_g beside U",
+    "R-REST: see the cross-check (its interval and half-width against the band, per seat)")
+
+
+def contrast_input(recs):
+    """SHARED.md V6, The two sittings (m7): the contrast's input is sitting C's, alternating as built, so every settled
+    line prints force=none. A forced log (force=ON or OFF), or one that does not print force=, is refused by name."""
+    bad = [(r["g"], r.get("force")) for r in recs if r["kind"] == "settled" and r.get("force") != FORCE_C]
+    if bad:
+        raise Refused("FORCED-INPUT: a contrast input alternates as built (force=none on every settled line): %s"
+                      % ", ".join("g=%s force=%s" % x for x in bad))
+
+
+def cross_check_line(e, guards):
+    """The as-built report's B1 line for a window log (sitting C): the corrected contrast and its interval, T_ref as
+    built and the guards as built. It gives no verdict (SHARED.md V6: the contrast is a cross-check)."""
+    if e is None:
+        return ("B1 CROSS-CHECK not computable (the B11 window estimator above); no B1 verdict here: the combining "
+                "step (--combine) gives it; guards as built: %s" % (guards or "none withholds"))
+    return ("B1 CROSS-CHECK (sitting C; no B1 verdict here: the combining step, --combine, gives it from sitting V's "
+            "U_hi): contrast %.3f us per frame, interval %.3f to %.3f (lower end at z %.4f, upper at z %.4f), T_ref as "
+            "built %.1f us; guards as built: %s" % (e["center"], e["lb"], e["bu"], Z_LO, Z_UP, e["tref"],
+                                                     guards or "none withholds"))
+
+
+def _num(v):
+    """A boot line's integer value (parse_line keeps keys outside INT_KEYS as text), or None."""
+    return v if isinstance(v, int) else (int(v) if re.fullmatch(r"-?\d+", str(v)) else None)
+
+
+def _within(got, asked):
+    return got is not None and asked is not None and asked > 0 and abs(got - asked) <= K_TOL * asked
+
+
+def boot_controls(recs):
+    """The five V6 boot lines (ruling R6-A3.11.147 (5), SHARED.md V6 What P1 builds), each read exactly once; a
+    missing, repeated or malformed line counts as its control out of range. Returns {name: (ok, reading)} for pin
+    (alloc pin=ok), K1 (the planted median from the bytes asked to 4096 above, the empty median 0), K2 (the scope
+    plant within 5 percent), K3 (each of x, e and p within 5 percent), patches (n equals the names counted and every
+    PhotonPeer entry attached) and census (every census entry point wrapped by a scope)."""
+    def one(kind, head):
+        ls = [r for r in recs if r["kind"] == kind and (head is None or r["head"] == head)]
+        return (ls[0], None) if len(ls) == 1 else (None, "%d '%s%s' lines (needs exactly 1)"
+                                                  % (len(ls), kind, "" if head is None else " " + head))
+    out = {}
+    a, why = one("alloc", None)
+    out["pin"] = (False, why) if a is None else (a.get("pin") == "ok", "pin=%s" % a.get("pin"))
+    if a is None:
+        out["K1"] = (False, why)
+    else:
+        m = re.fullmatch(r"(\d+)/(\d+)", str(a.get("planted", "")))
+        emp = _num(a.get("empty", ""))
+        if m is None or emp is None:
+            out["K1"] = (False, "planted=%s empty=%s is not <median>/<bytes asked> and <median>"
+                         % (a.get("planted"), a.get("empty")))
+        else:
+            med, ask = int(m.group(1)), int(m.group(2))
+            out["K1"] = (ask > 0 and ask <= med <= ask + K1_ABOVE and emp == 0,
+                         "planted median %d for %d asked (needs %d to %d), empty median %d (needs 0)"
+                         % (med, ask, ask, ask + K1_ABOVE, emp))
+    s, why = one("scope", "plant")
+    if s is None:
+        out["K2"] = (False, why)
+    else:
+        ask, got = _num(s.get("asked", "")), _num(s.get("got", ""))
+        out["K2"] = (_within(got, ask), "asked %s us, class S read %s us (within 5 percent)" % (ask, got))
+    t, why = one("nest", "plant")
+    if t is None:
+        out["K3"] = (False, why)
+    else:
+        ask = _num(t.get("asked", ""))
+        rd = dict((c, _num(t.get(c, ""))) for c in ("x", "e", "p"))
+        out["K3"] = (all(_within(v, ask) for v in rd.values()),
+                     "asked %s us, read x %s, e %s, p %s us (each within 5 percent)" % (ask, rd["x"], rd["e"], rd["p"]))
+    ph, why = one("photon", "patches")
+    if ph is None:
+        out["patches"] = (False, why)
+    else:
+        names = [x for x in str(ph.get("names", "")).split(",") if x]
+        gone = [x for x in PHOTON_ENTRIES if x not in set(nm.split(".")[-1] for nm in names)]
+        out["patches"] = (_num(ph.get("n", "")) == len(names) and not gone,
+                          "n=%s for %d names%s" % (ph.get("n"), len(names), "; not attached: %s" % ", ".join(gone)
+                                                   if gone else ""))
+    c, why = one("scope", "census")
+    if c is None:
+        out["census"] = (False, why)
+    else:
+        ent, wr = _num(c.get("entries", "")), _num(c.get("wrapped", ""))
+        out["census"] = (ent is not None and ent > 0 and wr == ent, "entries %s, wrapped %s" % (ent, wr))
+    return out
+
+
+def _bytes_k(w):
+    """bK's bytes of one window: the class bytes aW to aX and wa's log, hash and sock (None while any is NA)."""
+    wa = _wa(w["wa"]) or {}
+    xs = [w["aW"], w["aR"], w["aS"], w["aP"], w["aX"]] + [wa.get(t) for t in WA_TYPES]
+    return None if any(x is None for x in xs) else sum(xs)
+
+
+def _p_cyc(w):
+    """P of one window (SHARED.md V6, ruling R6-A3.11.147 (3)(g)): the larger of cP and wu's recv cycles (NA cycles
+    count 0 here; they withhold the seat)."""
+    return max(w["cP"], _wu_cyc(w, ("recv",)))
+
+
+def u_games(recs, first_game=1, arm=None):
+    """Per game, over its windows with plant=0 and res=0 (SHARED.md V6, The bound), and arm=ON only when arm is given
+    (sitting C's u_g): {g: dict(n, D, P, S, X, G, u, l, T, sF, bK, bE)}. In us per live frame: D = cS + cR + cW; P the
+    windows' P; S the off-thread wu cycles by type (log, hash, sock), charged whole; X = cX; G = G_cap = (bK / bE) x T
+    with bK = aW + aR + aS + aP + aX + wa and bE = aC - bK; u = u_g = D + P + S + X + G; l = cS + cR + cW + cP (L's
+    terms); T the game's mean live frame time. G and u are None while a byte count is NA or bE <= 0. Returns
+    (games, the Stopwatch frequency)."""
+    fh = _fhat(recs)
+    freq = set(r["freq"] for r in recs if r["kind"] == "settled")
+    if len(freq) != 1:
+        raise Refused("V6 needs one Stopwatch frequency (got %s)" % sorted(freq))
+    f = freq.pop()
+    byg = {}
+    for w in recs:
+        if (b11_line(w) and w["game"] >= first_game and w["plant"] == 0 and w["res"] == 0
+                and (arm is None or w["arm"] == arm)):
+            byg.setdefault(w["game"], []).append(w)
+    out = {}
+    for g, ws in sorted(byg.items()):
+        n = sum(w["n"] for w in ws)
+        if n <= 0:
+            continue
+        if fh.get(g, 0) <= 0:
+            raise Refused("no f_hat for game %d" % g)
+        k = 1e6 / fh[g] / n
+        d = sum(w["cS"] + w["cR"] + w["cW"] for w in ws) * k
+        p = sum(_p_cyc(w) for w in ws) * k
+        s = dict((t, sum(_wu_cyc(w, (t,)) for w in ws) * k) for t in WRITER_ADDED)
+        x = sum(w["cX"] for w in ws) * k
+        lo = sum(w["cS"] + w["cR"] + w["cW"] + w["cP"] for w in ws) * k
+        sf = sum(w["sF"] for w in ws)
+        tg = sf * 1e6 / f / n
+        bs, ac = [_bytes_k(w) for w in ws], [w["aC"] for w in ws]
+        bk = None if None in bs else sum(bs)
+        be = None if bk is None or None in ac else sum(ac) - bk
+        gc = bk / be * tg if be is not None and be > 0 else None
+        u = None if gc is None else d + p + sum(s.values()) + x + gc
+        out[g] = dict(n=n, D=d, P=p, S=s, X=x, G=gc, u=u, l=lo, T=tg, sF=sf, bK=bk, bE=be)
+    return out, f
+
+
+def _weighted(ug, key, sub=None):
+    """A term's frame-weighted mean over games (the five terms then sum to U)."""
+    n = sum(d["n"] for d in ug.values())
+    return sum((d[key][sub] if sub else d[key]) * d["n"] for d in ug.values()) / n
+
+
+def _wins(ws):
+    return ", ".join("%s.%d" % (w["pt"], w["wi"]) for w in ws[:4]) + (" and %d more" % (len(ws) - 4) if len(ws) > 4
+                                                                       else "")
+
+
+def sitting_v(recs, text, peer_recs, first_game=1):
+    """One seat's sitting V (SHARED.md V6, The bound; B1 is WITHHELD for a seat when): U and its five terms, hw, df,
+    U_hi = U + hw, L, T_on, T_ref = T_on - U_hi, the class classify(U_hi, T_ref, hw, L), the games' u_g, R-GC's
+    sitting-V figures, and the WITHHELD list. peer_recs is the other seat's sitting-V log: the arm and force
+    conditions hold on either seat. Until the integrator rules on the guard table, sitting V applies VR1 and every
+    line invariant (window_reconcile) beside the V6 list. Returns a dict."""
+    why = []
+    for who, rr in (("this seat", recs), ("the peer seat", peer_recs)):
+        off = [w for w in rr if b11_line(w) and w["arm"] != "ON"]
+        if off:
+            why.append("sitting V: %s prints arm=OFF in %d windows (%s)" % (who, len(off), _wins(off)))
+        nf = [(r["g"], r.get("force")) for r in rr if r["kind"] == "settled" and r.get("force") != FORCE_V]
+        if nf:
+            why.append("sitting V: %s's settled lines print another force= than ON (%s)"
+                       % (who, ", ".join("g=%s force=%s" % x for x in nf)))
+    meas = [w for w in recs if b11_line(w) and w["game"] >= first_game]
+    na = [w for w in meas if any(w[a] is None for a in A_FIELDS) or None in (_wa(w["wa"]) or {}).values()]
+    if na:
+        why.append("an a* or wa value prints NA in %d windows (%s): the allocation counter is unavailable"
+                   % (len(na), _wins(na)))
+    bc = boot_controls(recs)
+    if not bc["pin"][0]:
+        why.append("the counter's pin differs or is not read (%s)" % bc["pin"][1])
+    for k in ("K1", "K2", "K3"):
+        if not bc[k][0]:
+            why.append("control %s out of range (%s)" % (k, bc[k][1]))
+    for k in ("patches", "census"):
+        if not bc[k][0]:
+            why.append("R-SCOPE's %s line out of range (%s)" % (k, bc[k][1]))
+    pts = [q for q in recs if q["kind"] == "p" and q["game"] >= first_game]
+    back = [q["pt"] for q in pts if q.get("ab_back", 1) != 0]
+    if back:
+        why.append("ab_back above 0 or not printed at %s" % ", ".join(back[:4]))
+    why += p_line_faults(recs, set(q["pt"] for q in pts))
+    wna = sorted(set(t for w in meas for t, x in sorted((_typed(w["wu"], 2, na=True) or {}).items())
+                     if x[1] is None))
+    if wna:
+        why.append("a wu type prints NA cycles (%s)" % ", ".join(wna))
+    osp = [q["pt"] for q in pts if q.get("own_split", 1) != 0]
+    if osp:
+        why.append("ownership faults (own_split) at %s" % ", ".join(osp[:4]))
+    miss = window_reconcile(recs)
+    if miss:
+        why.append("line invariants: %s%s" % ("; ".join(miss[:3]), " and %d more" % (len(miss) - 3)
+                                              if len(miss) > 3 else ""))
+    ug, f = u_games(recs, first_game)
+    be = sorted(g for g, d in ug.items() if d["bE"] is not None and d["bE"] <= 0)
+    if be:
+        why.append("bE is 0 or below in games %s" % ", ".join(map(str, be)))
+    if len(ug) < MIN_GAMES_V:
+        why.append("%d games remain (needs at least %d)" % (len(ug), MIN_GAMES_V))
+    v = dict(games=ug, why=why, U=None, hw=None, df=None, U_hi=None, L=None, T_on=None, T_ref=None, cls=None,
+             terms=None, bK=None, heap=None)
+    pl = [q for q in recs if q["kind"] == "p"]
+    v["heap"] = pl[-1].get("heap") if pl else None
+    pairs = [(d["u"], d["n"]) for g, d in sorted(ug.items())]
+    if not pairs or any(u is None for u, n in pairs):
+        why.append("U not computable: a game's G_cap has an NA byte count or bE <= 0" if pairs
+                   else "U not computable: no window with plant=0 and res=0 in a measured game")
+        return v
+    try:
+        U, hw, df = fw_interval(pairs, Z_END)
+        le, lh, _ = fw_interval([(d["l"], d["n"]) for g, d in sorted(ug.items())], Z_END)
+    except (ZeroDivisionError, ValueError) as x:
+        why.append("U not computable: fw_interval over %d games (%s)" % (len(pairs), x))
+        return v
+    N = sum(d["n"] for d in ug.values())
+    t_on = sum(d["sF"] for d in ug.values()) * 1e6 / f / N
+    u_hi = U + hw
+    t_ref = t_on - u_hi
+    v.update(U=U, hw=hw, df=df, U_hi=u_hi, L=le - lh, T_on=t_on, T_ref=t_ref, N=N,
+             cls=classify(u_hi, t_ref, hw, le - lh), bK=sum(d["bK"] for d in ug.values()),
+             terms=dict(D=_weighted(ug, "D"), P=_weighted(ug, "P"), X=_weighted(ug, "X"), G=_weighted(ug, "G"),
+                        S=dict((t, _weighted(ug, "S", t)) for t in WRITER_ADDED)))
+    ok1, why1 = vr1(recs, text, t_ref)
+    if not ok1:
+        why.append("VR1: %s" % "; ".join(why1))
+    return v
+
+
+def v_lines(label, v):
+    """sitting_v's figures as report lines."""
+    out = []
+    ug = v["games"]
+    if v["U"] is None:
+        out.append("V6 SITTING V seat %s: U not computable (%d games)" % (label, len(ug)))
+    else:
+        t = v["terms"]
+        out.append("V6 SITTING V seat %s: %d games, %d live frames (windows with plant=0 and res=0)"
+                   % (label, len(ug), v["N"]))
+        out.append("V6 U %.3f us per live frame = D %.3f + P %.3f + S %.3f (log %.3f, hash %.3f, sock %.3f) + X %.3f + "
+                   "G_cap %.3f; half-width %.3f at z %.4f, df %d; U_hi %.3f us"
+                   % (v["U"], t["D"], t["P"], sum(t["S"].values()), t["S"]["log"], t["S"]["hash"], t["S"]["sock"],
+                      t["X"], t["G"], v["hw"], Z_END, v["df"], v["U_hi"]))
+        out.append("V6 L %.3f us (cS + cR + cW + cP alone, the interval's lower end); T_on %.1f us; T_ref = T_on - U_hi "
+                   "%.1f us; U_hi %.3f percent of T_ref" % (v["L"], v["T_on"], v["T_ref"], 100 * v["U_hi"] / v["T_ref"]))
+        out.append("V6 class %s (classify(U_hi, T_ref, hw, L): PASS <= 3, SID <= 5, FAIL > 5 percent, WITHHELD when "
+                   "the band is unresolved)" % v["cls"])
+        out.append("R-GC (sitting V) seat %s: the collectors' bytes %d over the sitting against heap=%s at its end%s"
+                   % (label, v["bK"], v["heap"] if v["heap"] is not None else "not read",
+                      " (%.4f of it)" % (v["bK"] / v["heap"]) if v["heap"] else ""))
+    out.append("V6 u_g seat %s: %s" % (label, "; ".join("g%d %s (n %d)" % (g, "%.3f" % d["u"] if d["u"] is not None
+                                                                         else "NA", d["n"]) for g, d in sorted(ug.items()))
+                                      or "none"))
+    out.append("V6 WITHHELD seat %s: %s" % (label, "; ".join(v["why"]) if v["why"] else "none"))
+    return out
+
+
+def read_sitting(text, src):
+    """A measurement input of either sitting: the withheld-line refusal, the records, the FrameTime marker."""
+    refuse_withheld(text, src)
+    recs = read(text, src)
+    build_marker(text, "measurement", src)
+    return recs
+
+
+def report_on(text, peer, src="v1", peer_src="v2", first_game=1):
+    """Sitting V's report (SHARED.md V6, What P2 builds): for each seat, U and its five terms, U_hi, L, T_ref and the
+    class, with the WITHHELD list. text and peer are the two seats' sitting-V logs. Returns (lines, [this seat's
+    sitting_v, the peer seat's])."""
+    a, b = read_sitting(text, src), read_sitting(peer, peer_src)
+    va, vb = sitting_v(a, text, b, first_game), sitting_v(b, peer, a, first_game)
+    return v_lines(src, va) + v_lines(peer_src, vb), [va, vb]
+
+
+def gc_per_mb(ws):
+    """R-GC: collections per MB (1e6 bytes) of aC by arm, over windows ws; None for an arm with no bytes or an NA."""
+    out = {}
+    for arm in ("ON", "OFF"):
+        xs = [w for w in ws if w["arm"] == arm]
+        b = None if any(w["aC"] is None for w in xs) else sum(w["aC"] for w in xs)
+        out[arm] = sum(w["gcn"] for w in xs) * 1e6 / b if b else None
+    return out
+
+
+def cross_check(recs, first_game=1):
+    """Sitting C's cross-check for one seat (SHARED.md V6, The two sittings): the as-built estimate with T_ref as
+    built, or the reason it did not run (a forced input, the line invariants, an estimator refusal)."""
+    try:
+        contrast_input(recs)
+        miss = window_reconcile(recs)
+        if miss:
+            return None, "sitting C's line invariants fail: %s" % "; ".join(miss[:3])
+        e = b11_estimate(recs, first_game)
+        e["tref"] = t_ref_windows(recs, first_game)
+        return e, None
+    except (Refused, ZeroDivisionError, ValueError) as x:
+        return None, str(x)
+
+
+def combine(v1, v2, c1, c2, srcs=("v1", "v2", "c1", "c2"), first_game=1):
+    """The combining step (SHARED.md V6, What P2 builds): from sitting V's two logs (v1, v2) and sitting C's two (c1,
+    c2; c1 is v1's seat) it prints VERDICT B1 per seat and the worse seat. A seat is WITHHELD by sitting V's list, by
+    a cross-check that did not run, or by a contrast whose lower end is above that seat's U_hi (U refuted); else it
+    takes sitting V's class. Beside it: the cross-check's interval, R-GC's numbers, and sitting C's u_g from its ON
+    windows next to sitting V's. Returns the report text."""
+    out, vs = report_on(v1, v2, srcs[0], srcs[1], first_game)
+    seats = []
+    for i, (v, c, cs) in enumerate(((vs[0], c1, srcs[2]), (vs[1], c2, srcs[3]))):
+        label = "%d (%s, %s)" % (i + 1, srcs[i], cs)
+        cr = read_sitting(c, cs)
+        e, cwhy = cross_check(cr, first_game)
+        if e is None:
+            out.append("V6 CROSS-CHECK seat %s did not run: %s" % (label, cwhy))
+        else:
+            out.append("V6 CROSS-CHECK seat %s: contrast %.3f us per frame, interval %.3f to %.3f; half-width %.3f "
+                       "against the band's 3 percent of T_ref as built %.1f us (%.1f us)"
+                       % (label, e["center"], e["lb"], e["bu"], e["hw"], e["tref"], 0.03 * e["tref"]))
+            gm = gc_per_mb(e["T"]["pop"])
+            out.append("R-GC (sitting C) seat %s: collections per MB of aC, ON %s, OFF %s"
+                       % (label, *("%.4f" % gm[a] if gm[a] is not None else "not computable" for a in ("ON", "OFF"))))
+            ugc, _ = u_games(cr, first_game, arm="ON")
+            out.append("R-WORK seat %s: u_g sitting V %s; sitting C's ON windows %s" % (
+                label, "; ".join("g%d %s" % (g, "%.3f" % d["u"] if d["u"] is not None else "NA")
+                                 for g, d in sorted(v["games"].items())) or "none",
+                "; ".join("g%d %s" % (g, "%.3f" % d["u"] if d["u"] is not None else "NA")
+                          for g, d in sorted(ugc.items())) or "none"))
+        if v["why"]:
+            cls, txt = "WITHHELD", "WITHHELD: %s" % "; ".join(v["why"])
+        elif v["U_hi"] is None:
+            cls, txt = "WITHHELD", "WITHHELD: U not computable"
+        elif e is None:
+            cls, txt = "WITHHELD", "WITHHELD: the cross-check did not run (%s)" % cwhy
+        elif e["lb"] > v["U_hi"]:
+            cls, txt = "WITHHELD", ("WITHHELD: the contrast's lower end %.3f us is above U_hi %.3f us (U is refuted)"
+                                    % (e["lb"], v["U_hi"]))
+        else:
+            cls = v["cls"]
+            txt = "%s: U_hi %.2f us against T_ref %.1f us (%.3f percent); the contrast's lower end %.3f us" % (
+                cls, v["U_hi"], v["T_ref"], 100 * v["U_hi"] / v["T_ref"], e["lb"])
+        seats.append((label, cls))
+        out.append("VERDICT B1 seat %s %s" % (label, txt))
+    worst = max(range(len(seats)), key=lambda j: RANK[seats[j][1]])
+    out.append("VERDICT B1 worse seat: seat %s %s" % seats[worst])
+    out += ["  " + x for x in V_RISKS]
+    return "\n".join(out)
 
 
 QUALIFY = ("conditional: U bounds the NET main-thread CPU the seven components add per live-combat frame on this "
@@ -2948,14 +3327,14 @@ QUALIFY = ("conditional: U bounds the NET main-thread CPU the seven components a
            "VR6's file-listing half is frame_time_seat.ps1's report")
 
 
-def report(text, peer=None, src="log", peer_src="peer", ref=None, ref_src="reference", exposure=None):
+def report(text, peer=None, src="log", peer_src="peer", ref=None, ref_src="reference"):
     """The verdict report of a two-seat sitting: text is this seat's log, peer the other seat's (rulings
     FRAME-TIME-ROUND-R4 and R5: every dependent row is calibrated by its in-game executed lines, read from both logs).
     Round-5 MEDIUM (ft_parse.py:1643): no verdict is produced from one seat's log; without the peer's, while the
     inventory has a dependent row, the report is Refused (no bypass parameter). A menu run's check is a one-seat
     report and produces no verdict. ref is R-COMMON's reference record set (a FrameTimeRef build's log), read only
     by R-COMMON's comparator; every measurement input carries the FrameTime marker and the reference its own
-    (build_marker). exposure is the B11 exposure obligation's hook (b11_estimate)."""
+    (build_marker). A window log's report is sitting C's cross-check and gives no B1 verdict (SHARED.md V6)."""
     # ruling R6-A3.11.113 (2)(a): both inputs are checked for a withheld line of a read class before any record of
     # either is read
     refuse_withheld(text, src)
@@ -3202,30 +3581,20 @@ def report(text, peer=None, src="log", peer_src="peer", ref=None, ref_src="refer
 
     g1 = gate("B1")
     if any(b11_line(r) for r in recs):
-        # the window design (ruling R6-A3.11.138): its own estimator and decision; R-CARRY and R-COMMON beside it
+        # V6 (rulings R6-A3.11.146 (6), .147 (3)(a)): a window log read here is sitting C's, and its contrast is the
+        # cross-check with its interval, T_ref and the guards as built; R-CARRY, R-COMMON, R-PATH and R-PREFIX beside
+        # it. No B1 verdict is given here: U comes from sitting V only, and the combining step (--combine) gives VERDICT
+        # B1 from both sittings. U = max(D_U, B_U) and B_U's terms left the verdict (SHARED.md V6, What P2 builds)
         e11 = None
         try:
-            lines11, e11 = b11_report(recs, ref_recs, exposure=exposure, peer_recs=peer_recs)
+            lines11, e11 = b11_report(recs, ref_recs)
             out += lines11
         except (Refused, ZeroDivisionError, ValueError) as e:
             out.append("B11 window estimator not computable: %s" % e)
-        if g1 is None and e11 is None:
-            g1 = "withheld: the B11 window estimator not computable"
-        if g1 is None and b11_seat_withholds(recs, e11):
+        if g1 is None and e11 is not None and b11_seat_withholds(recs, e11):
             g1 = "withheld: %s" % "; ".join(b11_seat_withholds(recs, e11))
-        if g1 is None and e11["ex"] is None:
-            g1 = ("WITHHELD: the exposure obligation is not met: neither exposure-equivalence evidence nor a "
-                  "discrepancy envelope (method-v53.md:37, ruling R6-A3.11.140 (3))")
-        bu11 = None if e11 is None else b11_bound(e11["bu"], e11["ex"], None, None, e11["eu"], e11["peer"])
-        if g1 is None and bu11 is None:
-            g1 = ("withheld: B_U not computable: G_U (the always-ON GC envelope, or the all-GC fallback) and W_U (the "
-                  "writer charge) have no records (method-v54.md:23-41), and D_U has no B11 record")
-        v11 = None if g1 else b11_verdict(None, bu11, e11["hw"], e11["lb"], e11["tref"])
-        if g1 is None and v11 is None:
-            g1 = "withheld: D_U not computable"
-        out.append("VERDICT B1 %s" % (g1 if g1 else "%s: U %.2f us against T_ref %.1f us" % (v11[1], v11[0],
-                                                                                         e11["tref"])))
-        out += ["  " + R_CARRY, "  " + R_COMMON, "  " + RISKS_NOTE]
+        out.append(cross_check_line(e11, g1))
+        out += ["  " + x for x in CROSS_RISKS]
     else:
         if ref_recs is not None:
             out.append("R-COMMON reference not read: this log has no B11 window records")
@@ -3251,23 +3620,34 @@ def report(text, peer=None, src="log", peer_src="peer", ref=None, ref_src="refer
 if __name__ == "__main__":
     try:
         _args = sys.argv[1:]
+        # SHARED.md V6: --on <seat 1's sitting-V log> <seat 2's>: report_on; --combine <V1> <V2> <C1> <C2>, C1 being
+        # V1's seat: VERDICT B1 per seat and the worse seat
+        _mode = _args[0] if _args and _args[0] in ("--on", "--combine") else None
+        if _mode is not None:
+            _k = 2 if _mode == "--on" else 4
+            if len(_args) != _k + 1:
+                raise Refused("%s needs exactly %d logs" % (_mode, _k))
+            _t = [open(a, encoding="utf-8", errors="replace").read() for a in _args[1:]]
+            print("\n".join(report_on(_t[0], _t[1], _args[1], _args[2])[0]) if _mode == "--on"
+                  else combine(*_t, srcs=tuple(_args[1:])))
         _ref = _ref_src = None
-        if "--ref" in _args:
+        if _mode is None and "--ref" in _args:
             _i = _args.index("--ref")
             _ref_src = _args[_i + 1] if _i + 1 < len(_args) else None
             if _ref_src is None:
                 raise Refused("--ref needs a reference log")
             _ref = open(_ref_src, encoding="utf-8", errors="replace").read()
             _args = _args[:_i] + _args[_i + 2:]
-        if "--peer" in _args:
-            # SHARED.md D5: the peer seat's log of the same sitting, named; the second positional form stays
+        if _mode is None and "--peer" in _args:
+            # the peer seat's log of the same sitting, named; the second positional form stays
             _i = _args.index("--peer")
             if _i + 1 >= len(_args) or len(_args) > 3:
                 raise Refused("--peer needs the peer seat's log (and no second positional log)")
             _args = _args[:_i] + _args[_i + 2:] + [_args[_i + 1]]
-        _peer = open(_args[1], encoding="utf-8", errors="replace").read() if len(_args) > 1 else None
-        print(report(open(_args[0], encoding="utf-8", errors="replace").read(), peer=_peer, src=_args[0],
-                     peer_src=_args[1] if len(_args) > 1 else "peer", ref=_ref, ref_src=_ref_src or "reference"))
+        if _mode is None:
+            _peer = open(_args[1], encoding="utf-8", errors="replace").read() if len(_args) > 1 else None
+            print(report(open(_args[0], encoding="utf-8", errors="replace").read(), peer=_peer, src=_args[0],
+                         peer_src=_args[1] if len(_args) > 1 else "peer", ref=_ref, ref_src=_ref_src or "reference"))
     except RecordRefused as e:
         print(e)
         sys.exit(REFUSED_RECORD_EXIT)
