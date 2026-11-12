@@ -507,20 +507,23 @@ def check_leased_arm_stop(tmp, edits=(), arm_rc=3):
 SHIM_LAG = SHIM.replace(': > "$T/LAUNCHED"; exit 0;;',
                         ': > "$T/LAUNCHED"; echo "ROUNDS: the closed game, still listed" > "$T/close/procs.txt"; '
                         'exit 0;;')
+NAP_TEST = "0.1"  # ft_vm_leased.sh's NAP under FT_VM_TEST_DIR (its line 72)
 SLEEP_LAG = '''#!/usr/bin/env bash
-# the stand-in sleep of the cleanup-lag check: it notes whether the table listed the game, then the table clears
+# the stand-in sleep of the cleanup-lag check: it notes whether the table listed the game and the time it was asked
+# to wait; the table clears at the third wait that saw the game
 T="$(cd "$(dirname "$0")/.." && pwd)"
-grep -c '^ROUNDS:' "$T/close/procs.txt" >> "$T/sleeps.txt"
-: > "$T/close/procs.txt"
+echo "$(grep -c '^ROUNDS:' "$T/close/procs.txt") $1" >> "$T/sleeps.txt"
+[ "$(grep -c '^1 ' "$T/sleeps.txt")" -lt 3 ] || : > "$T/close/procs.txt"
 exit 0
 '''
 
 
 def check_leased_cleanup_lag(tmp, edits=()):
     """the leased script's dry run through a launch whose stand-in leaves the closed game listed in the process table,
-    with a stand-in sleep that clears the table: the exit chain must wait for the table and prove the exit, and must
-    not take the cleanup route (its reading line, the close by identity, the lever) for a table that only lagged. The
-    harness itself is asserted, not returned: the launch ran, and the first wait saw the game listed"""
+    with a stand-in sleep that notes each wait and clears the table at the third wait that saw the game: the exit
+    chain must wait NAP each time, read again until the table is clear, prove the exit, and must not take the cleanup
+    route (its reading line, the close by identity, the lever) for a table that only lagged. The harness itself is
+    asserted, not returned: the launch ran, and a wait saw the game listed"""
     if not POSIX:
         pytest.skip("the leased script's dry harness compares POSIX paths: run on a POSIX seat")
     assert SHIM_LAG != SHIM, "the stand-in's launch line was not found"
@@ -549,14 +552,16 @@ def check_leased_cleanup_lag(tmp, edits=()):
     assert os.path.exists(os.path.join(T, "LAUNCHED")), \
         "the launch did not run (rc %s, out %r, err %r)" % (rc, out[-2000:], err[-1000:])
     noted = os.path.join(T, "sleeps.txt")
-    sleeps = read(noted).split() if os.path.exists(noted) else []
-    assert sleeps[:1] == ["1"], \
-        "the first wait did not see the game listed (sleeps %r, out %r)" % (sleeps, out[-2000:])
+    sleeps = read(noted).splitlines() if os.path.exists(noted) else []
+    seen = [x for x in sleeps if x.startswith("1 ")]
+    assert seen, "no wait saw the game listed (sleeps %r, out %r)" % (sleeps, out[-2000:])
     f = []
     if "a ROUNDS process may exist at cleanup" in out or "close by identity" in out or "the rig's lever" in out:
         f.append("leased: the cleanup route ran for a table that only lagged (out %r)" % out[-2000:])
     if "FT-VM-LEASED exit proven: no ROUNDS process" not in out:
         f.append("leased: the exit was not proven (out %r)" % out[-2000:])
+    if seen != ["1 " + NAP_TEST] * 3:
+        f.append("leased: the waits that saw the game were not three of NAP (%s) each: %r" % (NAP_TEST, seen))
     return f
 
 
@@ -724,6 +729,11 @@ MUTANTS = [
     ("leased: the cleanup's first reading taken once", check_leased_cleanup_lag, "ft_vm_leased.sh",
      '  s=$(rounds_state); for i in 1 2 3 4 5; do [ "$s" = no ] && break; sleep "$NAP"; s=$(rounds_state); done\n',
      '  s=$(rounds_state)\n'),
+    ("leased: the cleanup's first reading waits no time between its repeats", check_leased_cleanup_lag,
+     "ft_vm_leased.sh", '&& break; sleep "$NAP"; s=$(rounds_state); done\n',
+     '&& break; sleep 0; s=$(rounds_state); done\n'),
+    ("leased: the cleanup's first reading repeated twice only", check_leased_cleanup_lag, "ft_vm_leased.sh",
+     '  s=$(rounds_state); for i in 1 2 3 4 5; do', '  s=$(rounds_state); for i in 1 2; do'),
 ]
 
 

@@ -322,20 +322,20 @@ namespace CompetitiveRounds
         }
 
         internal const long PlantUs = 2000;
-
+        internal const int PlantTries = 3;   // a plant's read pass runs at most this often: again when a spin did not complete
         /// <summary>K2, the boot line `[FRAME-TIME] scope plant asked=<us> got=<us>`: a spin of PlantUs of the main
         /// thread's own cycle time (SpinCycles) inside a gated scope (Open, class S), and the cycles class S gained, in
-        /// microseconds at f_hat (NA before it is known). FtClock.OnStart, at the first frame boundary.</summary>
+        /// microseconds at f_hat (NA: f_hat unknown, or no completed pass). FtClock.OnStart, at the first frame boundary.</summary>
         internal static void PlantScope()
         {
-            // Two passes of ScopeGain (below). The first spins nothing: it runs the path once, so that code compiled
-            // or initialised at its first call is not in the reading. The second is the control's. Its spin is on the
-            // thread's own cycle counter, the clock class S is read in, so the reading does not move with the share
-            // of the wall clock the thread gets (ruling R6-A3.11.162; the numbers are at FtPhoton.PlantNest).
-            ScopeGain(0);
-            long got = ScopeGain(PlantUs);
+            // One unread pass of ScopeGain (below) first, so that code compiled or initialised at its first call is
+            // not in the reading. Then the control's pass, its spin on the thread's own cycle counter, the clock class
+            // S is read in. A pass whose spin did not complete is not read: it is run again, PlantTries passes at
+            // most, and a plant without a completed pass prints NA (R6-A3.11.162; numbers at FtPhoton.PlantNest).
+            bool ok; long got = ScopeGain(0, out ok);
+            for (int t = 0; ; t++) { got = ScopeGain(PlantUs, out ok); if (ok || t + 1 >= PlantTries) break; }
 
-            Plugin.Log.LogInfo("[FRAME-TIME] scope plant asked=" + PlantUs + " got=" + Us(got));
+            Plugin.Log.LogInfo("[FRAME-TIME] scope plant asked=" + PlantUs + " got=" + (ok ? Us(got) : "NA"));
         }
 
         /// <summary>Busy-waits us microseconds of Stopwatch time on the calling thread.</summary>
@@ -347,32 +347,38 @@ namespace CompetitiveRounds
         }
 
         /// <summary>Busy-waits until the calling thread's own cycle counter (FtClock.Cycles, the clock the classes are
-        /// read in) has advanced by us microseconds at f_hat. While f_hat is unknown, or when the first counter read
-        /// fails, it spins us of Stopwatch time (Spin). It ends early when a later read fails, and after 50 times us
-        /// of Stopwatch time, so a counter that stands still cannot hold the frame; such a spin reads short.</summary>
-        internal static void SpinCycles(long us)
+        /// read in) has advanced by us microseconds at f_hat, and returns true when this loop read that advance (also
+        /// for us at or below 0, which spins nothing). In every other case it returns false and the length of the
+        /// spin is not known: f_hat is unknown or the first counter read fails (it then spins us of Stopwatch time,
+        /// Spin); a later read fails or is below the first; us is above one second (nothing is spun); or 50 times us
+        /// of Stopwatch time has passed. The loop checks that limit on each of its own passes, so a counter that
+        /// stands still cannot hold a running thread longer; a thread that is not running does not check.</summary>
+        internal static bool SpinCycles(long us)
         {
-            if (us <= 0) return;
+            if (us <= 0) return true;
+            if (us > 1000000) return false;
             long f = FtCalib.FHat;
             ulong c0 = FtClock.Cycles();
-            if (f <= 0 || c0 == 0) { Spin(us); return; }
+            if (f <= 0 || c0 == 0) { Spin(us); return false; }
             ulong n = (ulong)(us * f / 1000000);
             long t0 = Stopwatch.GetTimestamp(), lim = 50 * us * Stopwatch.Frequency / 1000000;
             for (;;)
             {
                 ulong c = FtClock.Cycles();
-                if (c == 0 || c - c0 >= n || Stopwatch.GetTimestamp() - t0 >= lim) return;
+                if (c == 0 || c < c0) return false;
+                if (c - c0 >= n) return true;
+                if (Stopwatch.GetTimestamp() - t0 >= lim) return false;
             }
         }
 
         /// <summary>One pass of K2's path: a gated scope (Open, class S) around SpinCycles(us), and the cycles class S
-        /// gained. The class state is restored after.</summary>
-        private static long ScopeGain(long us)
+        /// gained; ok is SpinCycles' answer. The class state is restored after.</summary>
+        private static long ScopeGain(long us, out bool ok)
         {
             var st = Save();
             long s0 = Acc[ClsS];
             bool sp = Open(Cal, Gated);
-            SpinCycles(us);
+            ok = SpinCycles(us);
             Close(sp);
             long got = Acc[ClsS] - s0;
             Restore(st);

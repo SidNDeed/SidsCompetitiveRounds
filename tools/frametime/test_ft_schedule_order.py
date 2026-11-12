@@ -408,6 +408,8 @@ SIG_SP_LEAVE = 'internal static void Leave(int d)'
 SIG_SP_CAL = 'internal static void CalibrateMarks(int n)'
 SIG_SP_PLANT = 'internal static void PlantScope()'
 SIG_SP_SPIN = 'internal static void Spin(long us)'
+SIG_SP_SPINC = 'internal static bool SpinCycles(long us)'
+SIG_SP_GAIN = 'private static long ScopeGain(long us, out bool ok)'
 SIG_SP_US = 'internal static string Us(long cyc)'
 SIG_CL_INSTALL = 'internal static void Install()'
 SIG_CL_START = 'private static void OnStart()'
@@ -451,6 +453,7 @@ SIG_PH_REPORT = 'internal static void ReportPatched()'
 SIG_PH_COUNT = 'private static void Count(List<string> names, Func<IEnumerable<MethodBase>> targets, Type patch)'
 SIG_PH_SAME = 'private static bool Same(MethodInfo a, MethodInfo b)'
 SIG_PH_NEST = 'internal static void PlantNest()'
+SIG_PH_NESTP = 'private static bool Nest(long us, out long x, out long e, out long p)'
 SIG_PH_XPATCH = 'internal static class FtPhotonXPatch'
 SIG_PH_EPATCH = 'internal static class FtPhotonEPatch'
 SIG_CE_LOG = 'internal static void LogScopeCensus()'
@@ -746,19 +749,44 @@ TIP_P1_SPAN = {
         'Plugin.Log.LogInfo("[FRAME-TIME] mark cost cyc=" + s[(n - 1) / 2] + " p90=" + s[(int)((n - 1) * 9L / 10)] + " n=" + n);',
     ],
     SIG_SP_PLANT: [
-        'var st = Save();',
-        'long s0 = Acc[ClsS];',
-        'bool sp = Open(Cal, Gated);',
-        'Spin(PlantUs);',
-        'Close(sp);',
-        'long got = Acc[ClsS] - s0;',
-        'Restore(st);',
-        'Plugin.Log.LogInfo("[FRAME-TIME] scope plant asked=" + PlantUs + " got=" + Us(got));',
+        '// One unread pass of ScopeGain (below) first, so that code compiled or initialised at its first call is',
+        "// not in the reading. Then the control's pass, its spin on the thread's own cycle counter, the clock class",
+        '// S is read in. A pass whose spin did not complete is not read: it is run again, PlantTries passes at',
+        '// most, and a plant without a completed pass prints NA (R6-A3.11.162; numbers at FtPhoton.PlantNest).',
+        'bool ok; long got = ScopeGain(0, out ok);',
+        'for (int t = 0; ; t++) { got = ScopeGain(PlantUs, out ok); if (ok || t + 1 >= PlantTries) break; }',
+        'Plugin.Log.LogInfo("[FRAME-TIME] scope plant asked=" + PlantUs + " got=" + (ok ? Us(got) : "NA"));',
     ],
     SIG_SP_SPIN: [
         'long n = us * Stopwatch.Frequency / 1000000;',
         'long t0 = Stopwatch.GetTimestamp();',
         'while (Stopwatch.GetTimestamp() - t0 < n) { }',
+    ],
+    SIG_SP_SPINC: [
+        'if (us <= 0) return true;',
+        'if (us > 1000000) return false;',
+        'long f = FtCalib.FHat;',
+        'ulong c0 = FtClock.Cycles();',
+        'if (f <= 0 || c0 == 0) { Spin(us); return false; }',
+        'ulong n = (ulong)(us * f / 1000000);',
+        'long t0 = Stopwatch.GetTimestamp(), lim = 50 * us * Stopwatch.Frequency / 1000000;',
+        'for (;;)',
+        '{',
+        'ulong c = FtClock.Cycles();',
+        'if (c == 0 || c < c0) return false;',
+        'if (c - c0 >= n) return true;',
+        'if (Stopwatch.GetTimestamp() - t0 >= lim) return false;',
+        '}',
+    ],
+    SIG_SP_GAIN: [
+        'var st = Save();',
+        'long s0 = Acc[ClsS];',
+        'bool sp = Open(Cal, Gated);',
+        'ok = SpinCycles(us);',
+        'Close(sp);',
+        'long got = Acc[ClsS] - s0;',
+        'Restore(st);',
+        'return got;',
     ],
     SIG_SP_US: [
         'long f = FtCalib.FHat;',
@@ -1214,22 +1242,40 @@ TIP_P1_PHOTON = {
         'return a != null && b != null && a.Module == b.Module && a.MetadataToken == b.MetadataToken;',
     ],
     SIG_PH_NEST: [
+        '// One unread pass of Nest (below) first, so that code compiled or initialised at its first call (the',
+        "// listener scope, the ledger's entry and exit, the leaves) is not in a reading. Then the control's pass.",
+        '// Each pass books one recv entry and its done in the ledger.',
+        "// Each spin is FtSpan.SpinCycles: PlantUs of the main thread's own cycle time, the clock the classes are",
+        '// read in, so the reading of a completed spin does not depend on how much of the wall clock the thread',
+        '// got. A pass with a spin that did not complete is not read: it is run again, FtSpan.PlantTries passes at',
+        '// most, and a plant without a completed pass prints NA in all three places. Measured on the VM (ruling',
+        '// R6-A3.11.162, the trial boot of 12 Nov 2026): a first pass booked 283, 411 and 134 us beyond its spins',
+        '// in X, E and P, later passes 2 to 6 us; of 36 spins of 2000 us by the Stopwatch the shortest got 1968 us',
+        "// of thread time. One pass, timed by the Stopwatch, had read x=1978 e=2144 p=1836. E's base: see Nest.",
+        'long x, e, p; bool ok = Nest(0, out x, out e, out p);',
+        'for (int t = 0; ; t++)',
+        '{ ok = Nest(FtSpan.PlantUs, out x, out e, out p); if (ok || t + 1 >= FtSpan.PlantTries) break; }',
+        'Plugin.Log.LogInfo("[FRAME-TIME] nest plant asked=" + FtSpan.PlantUs + " x=" + (ok ? FtSpan.Us(x) : "NA")',
+        '+ " e=" + (ok ? FtSpan.Us(e) : "NA") + " p=" + (ok ? FtSpan.Us(p) : "NA"));',
+    ],
+    SIG_PH_NESTP: [
         'var st = FtSpan.Save();',
         'long x0 = FtSpan.Acc[FtSpan.ClsX], p0 = FtSpan.Acc[FtSpan.ClsP];',
         'int dx = FtSpan.EnterX();',
         'long e0 = FtSpan.Acc[FtSpan.ClsE];',
-        'FtSpan.Spin(FtSpan.PlantUs);',
+        'bool ok = FtSpan.SpinCycles(us);',
         'int de = FtSpan.EnterListener();',
-        'FtSpan.Spin(FtSpan.PlantUs);',
+        'ok &= FtSpan.SpinCycles(us);',
         'ulong k = FtLedger.RecvEnter();',
-        'FtSpan.Spin(FtSpan.PlantUs);',
+        'ok &= FtSpan.SpinCycles(us);',
         'FtLedger.RecvExit(k);',
         'FtSpan.Leave(de);',
         'FtSpan.Leave(dx);',
-        'long x = FtSpan.Acc[FtSpan.ClsX] - x0, e = FtSpan.Acc[FtSpan.ClsE] - e0, p = FtSpan.Acc[FtSpan.ClsP] - p0;',
+        'x = FtSpan.Acc[FtSpan.ClsX] - x0;',
+        'e = FtSpan.Acc[FtSpan.ClsE] - e0;',
+        'p = FtSpan.Acc[FtSpan.ClsP] - p0;',
         'FtSpan.Restore(st);',
-        'Plugin.Log.LogInfo("[FRAME-TIME] nest plant asked=" + FtSpan.PlantUs + " x=" + FtSpan.Us(x) + " e=" + FtSpan.Us(e)',
-        '+ " p=" + FtSpan.Us(p));',
+        'return ok;',
     ],
     SIG_PH_XPATCH: [
         'private static IEnumerable<MethodBase> TargetMethods()',
@@ -2815,6 +2861,22 @@ P1_SOURCE_MUTANTS = {
     "tok_before_write": ("FtUpload.cs", "                FtSpan.PushWriter();\n                try { _in.WriteLine(value); }",
                          "                lock (_lock) { _pendingLog++; }\n                FtSpan.PushWriter();\n"
                          "                try { _in.WriteLine(value); }"),
+    # K2 and K3 without their unread pass (the model has no first-call cost: only the pin can see this)
+    "scope_unread_pass_removed": ("FtSpan.cs", "bool ok; long got = ScopeGain(0, out ok);",
+                                  "bool ok = false; long got = 0;"),
+    "nest_unread_pass_removed": ("FtPhoton.cs", "long x, e, p; bool ok = Nest(0, out x, out e, out p);",
+                                 "long x = 0, e = 0, p = 0; bool ok = false;"),
+    # K2 reads its last pass whatever its spin answered
+    "scope_answer_ignored_source": ("FtSpan.cs", '" got=" + (ok ? Us(got) : "NA")', '" got=" + Us(got)'),
+    # K2 runs one read pass only
+    "scope_one_pass_source": ("FtSpan.cs", "if (ok || t + 1 >= PlantTries) break;", "break;"),
+    # K3 prints e whatever its pass answered (NA in two of its three places)
+    "nest_e_without_na_source": ("FtPhoton.cs", '+ " e=" + (ok ? FtSpan.Us(e) : "NA")', '+ " e=" + FtSpan.Us(e)'),
+    # SpinCycles answers true when its limit ended it, or when a later read failed or went below the first
+    "spin_limit_true_source": ("FtSpan.cs", "if (Stopwatch.GetTimestamp() - t0 >= lim) return false;",
+                               "if (Stopwatch.GetTimestamp() - t0 >= lim) return true;"),
+    "spin_bad_read_true_source": ("FtSpan.cs", "if (c == 0 || c < c0) return false;",
+                                  "if (c == 0 || c < c0) return true;"),
 }
 
 
@@ -3088,11 +3150,17 @@ class Thread:
 
     def __init__(self):
         self.k = self.gc = self.t = self.al = 0
+        self.fhat = 1000000   # FtCalib.FHat, cycles per second: a cycle here is a microsecond (0: f_hat unknown)
+        self.faults = []      # the cycle counter under SpinCycles: one entry per spin that reads it (spin_cycles)
+
+
+PLANT_TRIES = 3   # FtSpan.PlantTries: a plant's read passes at most
 
 
 class SpanPort:
     """FtSpan's class stack (TIP_P1_SPAN: Mark, Switch, Save, Restore, Cut, Push, Pop, Open, Close, PushWriter,
-    PopWriter, EnterP, LeaveP, EnterX, EnterListener, Leave, CalibrateMarks, PlantScope; FtPhoton.PlantNest). Mutants:
+    PopWriter, EnterP, LeaveP, EnterX, EnterListener, Leave, CalibrateMarks, PlantScope, ScopeGain, SpinCycles;
+    FtPhoton.PlantNest, FtPhoton.Nest). Mutants (the plants' at spin_cycles, _plant and plant_nest):
     'drop_g' leaves GC inside the classes; 'cal_no_restore' keeps the calibration's transitions; 'k2' books a gated
     scope in E (the k2 switch); 'k3' keeps a listener callback inside X in X (the k3 switch); 'listener_always_e'
     moves every listener callback to E, inside a collector scope too; 'x_drops_w' opens X inside a writer scope;
@@ -3189,34 +3257,103 @@ class SpanPort:
         while len(self.prev) > d:
             self.pop()
 
-    def plant_scope(self, us=2000):
-        """PlantScope (K2): a spin of us inside a gated scope, and the cycles class S gained."""
+    def spin_cycles(self, us, step=10):
+        """FtSpan.SpinCycles: busy-waits until the counter has advanced us microseconds at f_hat, and answers True when
+        its loop read that advance (also for us <= 0, which spins nothing), False on every other exit. The counter
+        reads th.k + 1000 while it reads clean (above 0, as FtClock.Cycles reads 0 only on a failure, and with room
+        below it for 'back'); one pass of the loop runs
+        step cycles and step microseconds of the Stopwatch (th.t). th.faults, a stand-in for the counter, gives one
+        entry to each spin that reads it: None reads clean; 'first0' reads 0 at the first read (the Stopwatch spin,
+        of which the thread runs half here); 'later0' reads 0, and 'back' one below the first read, once half the
+        advance has been read; 'stall' stands still from half the advance on while the Stopwatch runs, so the limit
+        of 50 times us of the Stopwatch ends the loop. th.fhat <= 0 is f_hat unknown (the Stopwatch spin).
+        Mutants: 'spin_limit_true' answers True when the limit ended the loop, 'spin_zero_true' when a later read
+        was 0, 'spin_back_true' when a later read was below the first."""
+        th = self.th
+        if us <= 0:
+            return True
+        if us > 1000000:
+            return False
+        fault = th.faults.pop(0) if th.faults else None
+        c0 = 0 if fault == "first0" else th.k + 1000
+        if th.fhat <= 0 or c0 == 0:
+            th.t += us
+            th.k += us // 2
+            return False
+        n = us * th.fhat // 1000000
+        t0, lim = th.t, 50 * us
+        while True:
+            half = th.k + 1000 - c0 >= n // 2
+            c = 0 if fault == "later0" and half else c0 - 1 if fault == "back" and half else th.k + 1000
+            if c == 0:
+                return self.m == "spin_zero_true"
+            if c < c0:
+                return self.m == "spin_back_true"
+            if c - c0 >= n:
+                return True
+            if th.t - t0 >= lim:
+                return self.m == "spin_limit_true"
+            th.t += step
+            if not (fault == "stall" and half):
+                th.k += step
+
+    def _plant(self, one_pass, us):
+        """The plants' passes (PlantScope, FtPhoton.PlantNest): one unread pass with us 0, then read passes of us until
+        one's spins completed, PLANT_TRIES passes at most; (the last pass's reading, whether its spins completed).
+        Mutants: 'answer_ignored' takes every pass as completed; 'one_pass' runs no further pass after an
+        incomplete one."""
+        one_pass(0)
+        for _ in range(PLANT_TRIES):
+            got, ok = one_pass(us)
+            ok = ok or self.m == "answer_ignored"
+            if ok or self.m == "one_pass":
+                break
+        return got, ok
+
+    def scope_gain(self, us):
+        """FtSpan.ScopeGain: one pass of K2's path, a spin of us inside a gated scope; (the cycles class S gained, the
+        spin's answer). The class state is restored after."""
         st, s0 = self.save(), self.acc[CLS_S]
         self.open("gated")
-        self.th.k += us
+        ok = self.spin_cycles(us)
         self.close()
         got = self.acc[CLS_S] - s0
         self.restore(st)
-        return got
+        return got, ok
 
-    def plant_nest(self, us=2000):
-        """FtPhoton.PlantNest (K3): X around E around P (RecvEnter, RecvExit), a spin in each before the next opens;
-        each class's gain, E's base read after X opens."""
+    def plant_scope(self, us=2000):
+        """PlantScope (K2): ScopeGain's passes (_plant); the cycles class S gained in the completed pass, or None (the
+        line's NA) when no pass completed."""
+        got, ok = self._plant(self.scope_gain, us)
+        return got if ok else None
+
+    def nest(self, us):
+        """FtPhoton.Nest: one pass of K3's path, X around E around P (RecvEnter, RecvExit), a spin of us in each before
+        the next opens, all three run; ((X's, E's and P's gains, E's base read after X opens), whether all three
+        spins completed). The class state is restored after."""
         st = self.save()
         x0, p0 = self.acc[CLS_X], self.acc[CLS_P]
         dx = self.enter_x()
         e0 = self.acc[CLS_E]
-        self.th.k += us
+        ok = self.spin_cycles(us)
         de = self.enter_listener()
-        self.th.k += us
+        ok &= self.spin_cycles(us)
         self.enter_p()
-        self.th.k += us
+        ok &= self.spin_cycles(us)
         self.leave_p()
         self.leave(de)
         self.leave(dx)
         got = (self.acc[CLS_X] - x0, self.acc[CLS_E] - e0, self.acc[CLS_P] - p0)
         self.restore(st)
-        return got
+        return got, ok
+
+    def plant_nest(self, us=2000):
+        """FtPhoton.PlantNest (K3): Nest's passes (_plant); X's, E's and P's gains in the completed pass, or None in all
+        three places (the line's NA) when no pass completed. Mutant 'nest_na_x_only' leaves None in x alone."""
+        got, ok = self._plant(self.nest, us)
+        if ok:
+            return got
+        return (None,) + (got[1:] if self.m == "nest_na_x_only" else (None, None))
 
 
 class LedgerPort:
@@ -3683,6 +3820,136 @@ def test_v6_k3_nest_plant_and_its_switch():
     assert sp.save() == before
     bad = SpanPort(Thread(), "k3").plant_nest(K_ASKED_US)
     assert bad == (2 * K_ASKED_US, 0, K_ASKED_US) and not k3_ok(*bad)
+
+
+def _us(cyc, fhat=1000000):
+    """FtSpan.Us: cycles as whole microseconds at f_hat; NA while f_hat is unknown, and for a plant without a completed
+    pass (None)."""
+    return "NA" if cyc is None or fhat <= 0 else str(int(round(cyc * 1000000.0 / fhat)))
+
+
+def k2_line(got, asked=K_ASKED_US):
+    """PlantScope's line for the model's reading."""
+    return "[FRAME-TIME] scope plant asked=%d got=%s" % (asked, _us(got))
+
+
+def k3_line(xep, asked=K_ASKED_US):
+    """PlantNest's line for the model's reading."""
+    return "[FRAME-TIME] nest plant asked=%d x=%s e=%s p=%s" % ((asked,) + tuple(_us(v) for v in xep))
+
+
+def _spin(fault, m="tip", us=K_ASKED_US, fhat=1000000):
+    """One SpinCycles of us with the counter fault given: (its answer, the thread's cycles, the Stopwatch)."""
+    th = Thread()
+    th.faults, th.fhat = [fault], fhat
+    ok = SpanPort(th, m).spin_cycles(us)
+    return ok, th.k, th.t
+
+
+def _plant_with(faults, m="tip", nest=False, fhat=1000000):
+    """K2's plant (K3's with nest) with the counter faults given, one per spin that reads the counter: (its reading,
+    the faults no spin took). The class state is the same after."""
+    th = Thread()
+    th.faults, th.fhat = list(faults), fhat
+    sp = SpanPort(th, m)
+    before = sp.save()
+    got = sp.plant_nest(K_ASKED_US) if nest else sp.plant_scope(K_ASKED_US)
+    assert sp.save() == before
+    return got, th.faults
+
+
+def test_v6_plant_constants_and_lines():
+    sp = _src("FtSpan.cs")
+    assert sp.count("internal const long PlantUs = %d;" % K_ASKED_US) == 1
+    assert sp.count("internal const int PlantTries = %d;" % PLANT_TRIES) == 1
+    # each printed place carries its own NA: K2's got, K3's x, e and p
+    assert TIP_P1_SPAN[SIG_SP_PLANT][-1].endswith('" got=" + (ok ? Us(got) : "NA"));')
+    nest = " ".join(TIP_P1_PHOTON[SIG_PH_NEST][-2:])
+    for v in "xep":
+        assert nest.count('" %s=" + (ok ? FtSpan.Us(%s) : "NA")' % (v, v)) == 1, v
+    assert k2_line(K_ASKED_US) == "[FRAME-TIME] scope plant asked=2000 got=2000"
+    assert k3_line((1, 2, 3)) == "[FRAME-TIME] nest plant asked=2000 x=1 e=2 p=3"
+
+
+def test_v6_spin_cycles_answers():
+    """True when the loop read the asked advance, and for us <= 0; False on every other exit."""
+    assert _spin(None) == (True, K_ASKED_US, K_ASKED_US)
+    assert _spin(None, us=0)[:2] == (True, 0) and _spin(None, us=-5)[:2] == (True, 0)
+    assert _spin(None, us=1000001)[:2] == (False, 0)                     # above one second: nothing is spun
+    assert _spin(None, fhat=0) == (False, K_ASKED_US // 2, K_ASKED_US)   # f_hat unknown: the Stopwatch spin
+    assert _spin("first0") == (False, K_ASKED_US // 2, K_ASKED_US)       # the first read failed: the same
+    for f in ("later0", "back"):
+        ok, k, t = _spin(f)
+        assert not ok and k == K_ASKED_US // 2 and t < 50 * K_ASKED_US, f
+    ok, k, t = _spin("stall")
+    assert not ok and k == K_ASKED_US // 2 and t == 50 * K_ASKED_US         # the limit ended it
+
+
+@pytest.mark.parametrize("mutant,fault", [("spin_limit_true", "stall"), ("spin_zero_true", "later0"),
+                                          ("spin_back_true", "back")])
+def test_v6_spin_cycles_mutant_fails(mutant, fault):
+    """Each mutant differs from the tip on its own exit only, where it answers True; K2 then reads that short pass
+    where the tip runs the next pass and reads the asked spin."""
+    for f in (None, "first0", "later0", "back", "stall"):
+        tip, mut = _spin(f), _spin(f, mutant)
+        assert (mut != tip) == (f == fault), f
+        if f == fault:
+            assert mut == (True,) + tip[1:] and tip[0] is False
+    assert _plant_with([fault]) == (K_ASKED_US, [])                       # the negative control
+    got = _plant_with([fault], mutant)[0]
+    assert got == K_ASKED_US // 2 and not k2_ok(got)
+
+
+def test_v6_plants_read_only_a_completed_pass():
+    """A pass whose spin did not complete is not read: the next pass runs, PLANT_TRIES read passes at most, and a plant
+    without a completed pass prints NA (K3: in all three places). k2 and k3 keep their readings on a later pass."""
+    for f in ("first0", "later0", "back", "stall"):
+        assert _plant_with([f]) == (K_ASKED_US, []), f
+        assert _plant_with([None, f, None], nest=True) == ((K_ASKED_US,) * 3, []), f
+    got, left = _plant_with(["stall"] * (PLANT_TRIES + 1))
+    assert got is None and left == ["stall"] and k2_line(got) == "[FRAME-TIME] scope plant asked=2000 got=NA"
+    got, left = _plant_with([None, None, "back"] * PLANT_TRIES + ["back"], nest=True)
+    assert got == (None,) * 3 and left == ["back"]
+    assert k3_line(got) == "[FRAME-TIME] nest plant asked=2000 x=NA e=NA p=NA"
+    assert _plant_with([], fhat=0)[0] is None and _plant_with([], nest=True, fhat=0)[0] == (None,) * 3
+    # the unread pass spins nothing: a clean plant takes one fault entry per read spin
+    assert _plant_with([None, "stall"]) == (K_ASKED_US, ["stall"])
+    assert _plant_with([None] * 3 + ["stall"], nest=True) == ((K_ASKED_US,) * 3, ["stall"])
+    assert _plant_with(["stall"], "k2") == (0, [])
+    assert _plant_with([None, "stall", None], "k3", nest=True) == ((2 * K_ASKED_US, 0, K_ASKED_US), [])
+
+
+def test_v6_plant_answer_ignored_mutant_fails():
+    """'answer_ignored' reads an incomplete pass as a number where the tip prints NA; a first read pass that completes
+    reads alike (the negative control)."""
+    for nest, faults in ((False, ["stall"] * PLANT_TRIES), (True, [None, "stall", None] * PLANT_TRIES)):
+        assert _plant_with([], "answer_ignored", nest=nest) == _plant_with([], nest=nest)
+        tip = _plant_with(faults, nest=nest)[0]
+        mut = _plant_with(faults, "answer_ignored", nest=nest)[0]
+        if nest:
+            assert tip == (None,) * 3 and None not in mut and not k3_ok(*mut)
+        else:
+            assert tip is None and mut is not None and not k2_ok(mut)
+
+
+def test_v6_plant_one_pass_mutant_fails():
+    """'one_pass' runs no further pass after an incomplete one: the tip's second pass completes and is read, the
+    mutant prints NA and leaves that pass's fault entries untaken; a first read pass that completes reads alike."""
+    for nest, first, want in ((False, ["stall"], K_ASKED_US), (True, [None, "stall", None], (K_ASKED_US,) * 3)):
+        second = [None] * len(first)
+        assert _plant_with([], "one_pass", nest=nest) == _plant_with([], nest=nest) == (want, [])
+        assert _plant_with(first + second, nest=nest) == (want, [])
+        got, left = _plant_with(first + second, "one_pass", nest=nest)
+        assert got in (None, (None,) * 3) and left == second
+
+
+def test_v6_k3_na_in_all_three_places_mutant_fails():
+    """'nest_na_x_only' prints NA in x alone when no pass completed: e and p carry a number."""
+    faults = [None, "stall", None] * PLANT_TRIES
+    assert k3_line(_plant_with(faults, nest=True)[0]) == "[FRAME-TIME] nest plant asked=2000 x=NA e=NA p=NA"
+    line = k3_line(_plant_with(faults, "nest_na_x_only", nest=True)[0])
+    assert " x=NA " in line and " e=NA " not in line and not line.endswith(" p=NA"), line
+    assert _plant_with([], "nest_na_x_only", nest=True) == _plant_with([], nest=True)   # completed: alike
 
 
 class Words:

@@ -101,40 +101,41 @@ namespace CompetitiveRounds
         /// opened by the code its patch or site runs (FtSpan.EnterX, FtSpan.EnterListener, FtLedger.RecvEnter), with one
         /// spin of FtSpan.PlantUs in each before the next opens; each class's gain in microseconds at f_hat. E's base is
         /// read after X opens, so the cycles before the plant (which fall to E) are not E's reading. The class state is
-        /// restored after. FtClock.OnStart, at the first frame boundary.</summary>
+        /// restored after. FtClock.OnStart, at the first frame boundary. NA: no pass completed its three spins.</summary>
         internal static void PlantNest()
         {
-            // Two passes of Nest (below). The first spins nothing: it runs the path once, so that code compiled or
-            // initialised at its first call (the listener scope, the ledger's entry and exit, the leaves) is not in
-            // a reading. In the ledger it books what the second pass books: one more recv entry and its done.
-            // The second pass is the control's.
+            // One unread pass of Nest (below) first, so that code compiled or initialised at its first call (the
+            // listener scope, the ledger's entry and exit, the leaves) is not in a reading. Then the control's pass.
+            // Each pass books one recv entry and its done in the ledger.
             // Each spin is FtSpan.SpinCycles: PlantUs of the main thread's own cycle time, the clock the classes are
-            // read in, so a reading does not move with the share of the wall clock the thread gets. Measured on the
-            // VM (ruling R6-A3.11.162, the trial boot of 12 Nov 2026): a first pass booked 283, 411 and 134 us beyond
-            // its spins in X, E and P, later passes 2 to 6 us; of 36 spins of 2000 us by the Stopwatch the shortest
-            // got 1968 us of thread time. One pass, timed by the Stopwatch, had read x=1978 e=2144 p=1836.
-            // E's base is read after X opens, inside Nest, as before.
-            long x, e, p;
-            Nest(0, out x, out e, out p);
-            Nest(FtSpan.PlantUs, out x, out e, out p);
+            // read in, so the reading of a completed spin does not depend on how much of the wall clock the thread
+            // got. A pass with a spin that did not complete is not read: it is run again, FtSpan.PlantTries passes at
+            // most, and a plant without a completed pass prints NA in all three places. Measured on the VM (ruling
+            // R6-A3.11.162, the trial boot of 12 Nov 2026): a first pass booked 283, 411 and 134 us beyond its spins
+            // in X, E and P, later passes 2 to 6 us; of 36 spins of 2000 us by the Stopwatch the shortest got 1968 us
+            // of thread time. One pass, timed by the Stopwatch, had read x=1978 e=2144 p=1836. E's base: see Nest.
+            long x, e, p; bool ok = Nest(0, out x, out e, out p);
+            for (int t = 0; ; t++)
+            { ok = Nest(FtSpan.PlantUs, out x, out e, out p); if (ok || t + 1 >= FtSpan.PlantTries) break; }
 
-            Plugin.Log.LogInfo("[FRAME-TIME] nest plant asked=" + FtSpan.PlantUs + " x=" + FtSpan.Us(x) + " e=" + FtSpan.Us(e)
-                + " p=" + FtSpan.Us(p));
+            Plugin.Log.LogInfo("[FRAME-TIME] nest plant asked=" + FtSpan.PlantUs + " x=" + (ok ? FtSpan.Us(x) : "NA")
+                + " e=" + (ok ? FtSpan.Us(e) : "NA") + " p=" + (ok ? FtSpan.Us(p) : "NA"));
         }
 
         /// <summary>One pass of K3's path with a spin of us in each class (FtSpan.SpinCycles): the cycles X, E and P
-        /// gained. E's base is read after X opens. The class state is restored after.</summary>
-        private static void Nest(long us, out long x, out long e, out long p)
+        /// gained, and whether all three spins completed. E's base is read after X opens. The class state is restored
+        /// after.</summary>
+        private static bool Nest(long us, out long x, out long e, out long p)
         {
             var st = FtSpan.Save();
             long x0 = FtSpan.Acc[FtSpan.ClsX], p0 = FtSpan.Acc[FtSpan.ClsP];
             int dx = FtSpan.EnterX();
             long e0 = FtSpan.Acc[FtSpan.ClsE];
-            FtSpan.SpinCycles(us);
+            bool ok = FtSpan.SpinCycles(us);
             int de = FtSpan.EnterListener();
-            FtSpan.SpinCycles(us);
+            ok &= FtSpan.SpinCycles(us);
             ulong k = FtLedger.RecvEnter();
-            FtSpan.SpinCycles(us);
+            ok &= FtSpan.SpinCycles(us);
             FtLedger.RecvExit(k);
             FtSpan.Leave(de);
             FtSpan.Leave(dx);
@@ -142,6 +143,7 @@ namespace CompetitiveRounds
             e = FtSpan.Acc[FtSpan.ClsE] - e0;
             p = FtSpan.Acc[FtSpan.ClsP] - p0;
             FtSpan.Restore(st);
+            return ok;
         }
     }
 
