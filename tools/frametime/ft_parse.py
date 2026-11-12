@@ -834,7 +834,7 @@ ATTACH_ENTRY = r"%s:\d+/\d+" % ATTACH_NAME
 ATTACH_NAMES = r"%s(?:,%s)*" % (ATTACH_ENTRY, ATTACH_ENTRY)
 COUNTER_LINE_KEYS = ("g", "frames", "missing_end", "cycle_failures", "span_depth_violations", "photon_offmain",
                      "span_leave_mismatch")
-# ruling R6-A3.11.152, K-D: FtCalib.Run's failure lines end 'failed: ' + ex.Message (plugin/FtCalib.cs:120-126), and an
+# ruling R6-A3.11.153 (2), K-D: FtCalib.Run's failure lines end 'failed: ' + ex.Message (plugin/FtCalib.cs:120-126), and an
 # exception's message may be empty, which the line's trailing space then leaves as a bare 'failed:'; that variant is
 # read too, as every other failure form reads its empty message (_msg)
 _CAL_FAILED = r"cal i=-?\d+(?: [^\s=]+=\S*)* failed:(?: .*)?"
@@ -846,7 +846,7 @@ FORMS = (
      ("pin", "planted", "empty")),
     ("alloc_init why=", _kv("alloc_init", ("why",)), ("why",)),
     ("scope plant asked=", _kv("scope plant", ("asked", "got"), {"asked": _I, "got": _INA}), ("asked", "got")),
-    # ruling R6-A3.11.152, G3: FtCensus prints the counts, then exactly one of nothing, ' partial=1' (the type list
+    # ruling R6-A3.11.153 (3), G3: FtCensus prints the counts, then exactly one of nothing, ' partial=1' (the type list
     # came from a ReflectionTypeLoadException) or ' failed=<type>' (the census threw; it replaces partial): never both
     ("scope census entries=", _kv("scope census", ("entries", "wrapped"), {"entries": _N, "wrapped": _N})
      + r"(?: partial=1| failed=%s)?" % _FV, ("entries", "wrapped", "partial?", "failed?")),
@@ -3367,7 +3367,7 @@ def boot_controls(recs):
     elif "n" not in ph:
         out["patches"] = (False, "the patch report failed (the line prints no n=)")
     else:
-        # the names as written (ruling R6-A3.11.152, G1's class: no entry dropped) are PHOTON_ENTRIES exactly, each
+        # the names as written (ruling R6-A3.11.153 (2), G1's class: no entry dropped) are PHOTON_ENTRIES exactly, each
         # once and in the emitter's order (FtPhoton.ReportPatched, plugin/FtPhoton.cs:66-69: the X targets in XNames'
         # order, then the E targets in ENames'), and n= counts them; the reading names what differs
         names = str(ph.get("names", "")).split(",")
@@ -3386,7 +3386,7 @@ def boot_controls(recs):
         out["census"] = (False, why)
     else:
         ent, wr = _num(c.get("entries", "")), _num(c.get("wrapped", ""))
-        # ruling R6-A3.11.152, G3: partial=1 (plugin/FtCensus.cs:133, printed at :166) means the type list came from a
+        # ruling R6-A3.11.153 (2), G3: partial=1 (plugin/FtCensus.cs:133, printed at :166) means the type list came from a
         # ReflectionTypeLoadException and is incomplete: a census of some types proves nothing about the types it did
         # not read, so the line is out of range whatever its counts
         out["census"] = (ent is not None and ent > 0 and wr == ent and "failed" not in c and "partial" not in c,
@@ -3681,7 +3681,7 @@ def ledger_state(recs):
     ruling .149, A): (ok, reasons, state). ok needs exactly one ledger line, log=1 (the tap installed: without it the
     log type's writes reach no term of U) and types= the parser's writer types (WRITER_TYPES: the types
     window_reconcile reads in wu and tok; u_games sums log, hash and sock and P reads recv). The list is judged as
-    written (ruling R6-A3.11.152, G1; SHARED.md:245-246): its comma-split entries, none dropped, must be WRITER_TYPES
+    written (ruling R6-A3.11.153 (2), G1; SHARED.md:245-246): its comma-split entries, none dropped, must be WRITER_TYPES
     exactly, each once and in that order, the order the emitter joins them in (FtUpload.cs:104, joined at :368); a
     repeated name, an empty entry, another order, a name missing or a name more is not the list. The log=0 reason
     names why=; state is the line's state as one phrase, its list as written."""

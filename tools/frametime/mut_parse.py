@@ -594,7 +594,7 @@ B11_MUTS = [
      'out["patches"] = (_num(ph.get("n", "")) == len(names) and tuple(names) == PHOTON_ENTRIES,',
      'out["patches"] = (_num(ph.get("n", "")) == len(names) and set(PHOTON_ENTRIES) <= set(names),',
      ["chk_sitting_v_withholds_the_counter_and_controls"]),
-    # ruling R6-A3.11.152, G1's class: the names as written, in the emitter's order
+    # ruling R6-A3.11.153 (2), G1's class: the names as written, in the emitter's order
     ("G1 photon names: compared as a multiset, the order unchecked",
      'out["patches"] = (_num(ph.get("n", "")) == len(names) and tuple(names) == PHOTON_ENTRIES,',
      'out["patches"] = (_num(ph.get("n", "")) == len(names) and sorted(names) == sorted(PHOTON_ENTRIES),',
@@ -611,7 +611,7 @@ B11_MUTS = [
      'out["census"] = (ent is not None and ent > 0 and wr == ent and "failed" not in c and "partial" not in c,',
      'out["census"] = (ent is not None and ent > 0 and wr == ent and "partial" not in c,',
      ["chk_sitting_v_withholds_the_counter_and_controls"]),
-    # the confirming round's G3 (ruling R6-A3.11.152): the census's partial=1 variant (FtCensus.cs:133, :166)
+    # the confirming round's G3 (ruling R6-A3.11.153 (2) and (3)): the census's partial=1 variant (FtCensus.cs:133, :166)
     ("G3 census: a partial census read in range",
      'out["census"] = (ent is not None and ent > 0 and wr == ent and "failed" not in c and "partial" not in c,',
      'out["census"] = (ent is not None and ent > 0 and wr == ent and "failed" not in c,',
@@ -628,7 +628,7 @@ B11_MUTS = [
      '     + r"(?: partial=1| failed=%s)?" % _FV,',
      '     + r"(?: partial=\\d+| failed=%s)?" % _FV,',
      ["chk_census_partial_out_of_range"]),
-    # ruling .152, K-D: the calibration failure forms read the empty message, and only the word failed
+    # ruling .153 (2), K-D: the calibration failure forms read the empty message, and only the word failed
     ("K-D cal failure: a message required after 'failed:'",
      '_CAL_FAILED = r"cal i=-?\\d+(?: [^\\s=]+=\\S*)* failed:(?: .*)?"',
      '_CAL_FAILED = r"cal i=-?\\d+(?: [^\\s=]+=\\S*)* failed: .*"',
@@ -923,7 +923,7 @@ B11_MUTS = [
      "    if listed != WRITER_TYPES:\n",
      "    if False:\n",
      ["chk_ledger_tap_withholds_sitting_v", "chk_ledger_types_judged_as_written"]),
-    # the confirming round's G1 (ruling R6-A3.11.152): the list as written, one mutant per route back to the defect
+    # the confirming round's G1 (ruling R6-A3.11.153 (2)): the list as written, one mutant per route back to the defect
     ("G1 ledger: the writer list compared by membership",
      "    if listed != WRITER_TYPES:\n",
      "    if set(listed) - {\"\"} != set(WRITER_TYPES):\n",

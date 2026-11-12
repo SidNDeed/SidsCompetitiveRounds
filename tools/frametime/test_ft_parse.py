@@ -666,7 +666,7 @@ def test_a3_refuses_a_missing_line_or_calibration():
     # ruling A1 part 3: the refill window counted from absent records cannot pass, nor a missing calibration
     k = A3_DEP[0]
     # every dependent row is live since ruling R5, so the executed-reads cross-check meets the missing line first
-    with pytest.raises(P.Refused, match="game 5 executed reads [0-9]+, the game's a3 line counts \[\]"):
+    with pytest.raises(P.Refused, match=r"game 5 executed reads [0-9]+, the game's a3 line counts \[\]"):
         _a3(P.read(_log(drop_a3={(5, k)})), last_game=P.LAST_GAME)
     with pytest.raises(P.Refused, match="game 7 has 0 executed calibration lines"):
         _a3(P.read(_log(live_drop={(7, k)})), last_game=P.LAST_GAME)
@@ -1041,7 +1041,7 @@ def test_forms_are_every_line_form_the_emitter_prints():
 
 
 def test_settled_gc_fallback_is_read_and_judged_by_no_rule():
-    # ruling R6-A3.11.152, G2: FtCalib.Settled (plugin/FtCalib.cs:394-407) starts gc_incremental and gc_slice_ns at -1
+    # ruling R6-A3.11.153 (2), G2: FtCalib.Settled (plugin/FtCalib.cs:394-407) starts gc_incremental and gc_slice_ns at -1
     # and sets them inside a try, so a GC property getter that throws prints gc_incremental=-1 gc_slice_ns=-1. That
     # settled line is a form the parser reads, read() takes it, and no rule judges either field: a sitting-V log whose
     # every settled line prints the fallback gives the same WITHHELD list and the same U as one printing 1 and a slice
@@ -3223,7 +3223,7 @@ V_SPOILS = (
     ("photon twice", lambda: _v_text(boot={"photon": "photon patches n=11 names=" + ",".join(
         P.PHOTON_ENTRIES + P.PHOTON_ENTRIES[:1])}),
      "R-SCOPE's patches line out of range (n=11 for 11 names; named twice: PhotonPeer.DispatchIncomingCommands)"),
-    # ruling R6-A3.11.152, G1's class: the names as written, in the emitter's order, no entry dropped
+    # ruling R6-A3.11.153 (2), G1's class: the names as written, in the emitter's order, no entry dropped
     ("photon reordered", lambda: _v_text(boot={"photon": "photon patches n=10 names=" + ",".join(
         P.PHOTON_ENTRIES[1:2] + P.PHOTON_ENTRIES[:1] + P.PHOTON_ENTRIES[2:])}),
      "R-SCOPE's patches line out of range (n=10 for 10 names; not in the emitter's order)"),
@@ -3797,7 +3797,7 @@ LEDGER_SPOILS = (
      "the disk-log tap: ledger types=log,hash,recv,sock,gc is not the parser's writer types log,hash,recv,sock (each "
      "once, in that order)"),
 )
-# ruling R6-A3.11.152, G1: ledger_state's reason for a types= list that is not WRITER_TYPES as written
+# ruling R6-A3.11.153 (2), G1: ledger_state's reason for a types= list that is not WRITER_TYPES as written
 LEDGER_TYPES_BAD = "ledger types=%s is not the parser's writer types log,hash,recv,sock (each once, in that order)"
 # (what, the types= list as the line prints it): each is not the emitter's list (FtUpload.cs:104, joined at :368)
 LEDGER_LISTS = (
@@ -3812,7 +3812,7 @@ LEDGER_LISTS = (
 
 
 def chk_ledger_types_judged_as_written(m):
-    # ruling R6-A3.11.152, G1 (SHARED.md:245-246): the ledger's types= list is WRITER_TYPES exactly, as written: each
+    # ruling R6-A3.11.153 (2), G1 (SHARED.md:245-246): the ledger's types= list is WRITER_TYPES exactly, as written: each
     # name once, in the emitter's order, no entry empty; anything else fails ledger_state with one reason naming the
     # list as written and the list required, and the state prints the list as written. On the combining path a
     # sitting-V log whose ledger repeats a name ends B1 WITHHELD for that seat, naming the list. The exact list passes
@@ -3908,7 +3908,7 @@ def chk_refusals_line_judged_as_written(m):
 
 
 CENSUS_PARTIAL = "scope census entries=40 wrapped=40 partial=1"
-# ruling R6-A3.11.152, G3: (the census line FtCensus prints, R-SCOPE's census reading): its three emitted variants
+# ruling R6-A3.11.153 (3), G3: (the census line FtCensus prints, R-SCOPE's census reading): its three emitted variants
 CENSUS_VARIANTS = (
     ("scope census entries=40 wrapped=40", (True, "entries 40, wrapped 40")),
     (CENSUS_PARTIAL, (False, "entries 40, wrapped 40; the census read an incomplete type list (partial=1)")),
@@ -3922,7 +3922,7 @@ CENSUS_NOT_EMITTED = ("scope census entries=40 wrapped=40 partial=1 failed=TypeL
 
 
 def chk_census_partial_out_of_range(m):
-    # ruling R6-A3.11.152, G3: plugin/FtCensus.cs:133,166 prints the census counts followed by exactly one of nothing,
+    # ruling R6-A3.11.153 (3), G3: plugin/FtCensus.cs:133,166 prints the census counts followed by exactly one of nothing,
     # ' partial=1' (an incomplete type list, from a ReflectionTypeLoadException) or ' failed=<type>'. Each variant is a
     # form the parser reads; R-SCOPE's census reads the plain one in range (the control), the partial one out of range
     # naming the incomplete list (it proves nothing about the types it did not read), the failed one as before. A line
@@ -3955,7 +3955,7 @@ _ARM_INPUTS = ("sentinel", "sentinel_changed", "sentinel_problems", "clock", "pe
                "peer", "error_NullReferenceException", "error_KeyNotFoundException`1")
 _MENU_INPUTS = ("sentinel", "sentinel_changed", "sentinel_problems", "clock", "perf_probe", "ic_fixture", "in_room",
                 "game_started", "error_NullReferenceException", "error_KeyNotFoundException`1")
-# ruling R6-A3.11.152, K-D (the class of G2 and G3): every emit site of plugin/Ft*.cs (and Plugin.cs's attach warning)
+# ruling R6-A3.11.153 (2), K-D (the class of G2 and G3): every emit site of plugin/Ft*.cs (and Plugin.cs's attach warning)
 # whose expression appends a free string operand or a conditional suffix (a), or prints an int or long that starts at a
 # fallback value and is set inside a try (b): (site, a fragment of its statement in the source, one sample payload per
 # variant the expression can print). Each sample is a form the parser reads. The table with each variant's source is
@@ -4099,7 +4099,7 @@ FORM_VARIANTS = (
             (0, "error_KeyNotFoundException`1")))),
     ("FtReplay.cs:56", '" ticks=0 result=" + result',
      tuple("answer_replay g=3 ticks=0 result=skipped_" + w for w in ("live", "settle", "next_game", "quit", "absent"))),
-    # the ruling of 12 Nov (08:30Z): a name not of the lane's form reaches the parser as the export's '(not-exported)'
+    # ruling R6-A3.11.154 (12 Nov, 08:30Z): a name not of the lane's form reaches the parser as the export's '(not-exported)'
     ("FtRoomGate.cs:87", '" name=" + shown + " n=" + n',
      ("room call refused op=JoinRoom name=FT-1 n=1", "room call refused op=CreateRoom name=(none) n=2",
       "room call refused op=JoinRoom name=(empty) n=1", "room call refused op=JoinRoom name=(not-exported) n=3")),
@@ -4168,7 +4168,7 @@ FORM_NOT_EMITTED = (
 
 
 def chk_emitted_variants_are_forms(m):
-    # ruling R6-A3.11.152, K-D: every variant an emit site of the class prints (FORM_VARIANTS) is a form the parser
+    # ruling R6-A3.11.153 (2), K-D: every variant an emit site of the class prints (FORM_VARIANTS) is a form the parser
     # reads, the site's statement still in the source; FtCalib.Run's failure lines with an empty exception message
     # among them (plugin/FtCalib.cs:120-126 print 'failed: ' + ex.Message, a bare 'failed:' once the trailing space is
     # dropped). The lines no emitter prints in a strict form's family stay refused (FORM_NOT_EMITTED)
@@ -4185,7 +4185,7 @@ def chk_emitted_variants_are_forms(m):
         assert r["kind"] == "cal" and r.get("failed") == 1, (pay, r)
 
 
-# the ruling of 12 Nov (08:30Z): the export prints a room name not of the lane's form (an ft_ name, '(none)' or
+# ruling R6-A3.11.154 (12 Nov, 08:30Z): the export prints a room name not of the lane's form (an ft_ name, '(none)' or
 # '(empty)') as '(not-exported)' on these two lines, every other field intact
 ROOM_NAME_REDACTED = ("FT-ROOM joined offline=1 name=(not-exported)",
                       "room call refused op=JoinRoom name=(not-exported) n=3")
@@ -4668,7 +4668,7 @@ FAULT_FIELDS = (
      "the per-refusal trace; its counts reach VR6 through the cumulative refusals line"),
     ("room call refused", "n", "FtRoomGate.cs", None,
      "the room gate refusing a room call while it holds a measured boot is its design (FtRoomGate.cs:87)"),
-    # ruling R6-A3.11.152, G5: the fault fields the name scan missed, found by classifying every emitted key
+    # ruling R6-A3.11.153 (2), G5: the fault fields the name scan missed, found by classifying every emitted key
     ("a3drain", "faults", "FtA3.cs", "a3", '"faults"'),
     ("a3drain", "nonempty", "FtA3.cs", "a3", '"nonempty"'),
     ("cal", "withheld", "FtA3.cs", "a3_live", '"withheld"'),
@@ -4704,11 +4704,11 @@ FAULT_FIELDS = (
     ("opened", "ic", "FtSchedule.cs", "vr5_records", "OPENED"),
     ("ledger", "log", "FtUpload.cs", "ledger_state", '"log"'),
 )
-# the second net (ruling .152, G5): field names that read as counting a fault; discovery no longer rests on it (every
+# the second net (ruling .153 (2), G5): field names that read as counting a fault; discovery no longer rests on it (every
 # emitted key is classified, below), but a NOT_FAULT key it matches must carry a reason of its own
 FAULT_WORDS = re.compile(r"\w*(?:fail|miss|overflow|violation|mismatch|refus|err|excl|mixed|offmain|_main|retry|_back"
                          r"|split|problems|duplicates|unscoped|guarded|outside|off_g|off_on|span_off|sock_thr)\w*|zs")
-# ruling R6-A3.11.152, G5: every other key a literal of plugin/Ft*.cs prints, by file, each group with the reason its
+# ruling R6-A3.11.153 (2), G5: every other key a literal of plugin/Ft*.cs prints, by file, each group with the reason its
 # keys count no fault (read from the emitter); with FAULT_FIELDS this classifies every (file, key) pair the scan finds.
 # A key FAULT_WORDS matches would stand in a group of its own, with its own reason
 NOT_FAULT = {
@@ -4742,7 +4742,7 @@ NOT_FAULT = {
          "the process-start run before Plugin.Awake applies the plugin's patches (FtCalib.cs:211-217), by design"),
         (("armfile",), "whether the arm file was present, a state menu_framerate reads, not a fault"),
         (("gc_incremental", "gc_slice_ns"),
-         "the GC mode readings, -1 when the getter throws (FtCalib.cs:396-403); judged by no rule (ruling .152, G2)"),
+         "the GC mode readings, -1 when the getter throws (FtCalib.cs:396-403); judged by no rule (ruling .153 (2), G2)"),
     ),
     "FtCensus.cs": (
         (("g", "entry", "comp", "shape", "on"), "a census entry's identity and its live calls"),
@@ -4831,7 +4831,7 @@ def _fault_inventory(found, fault_fields, not_fault):
 
 
 def test_fault_fields_are_every_emitted_fault_field():
-    # ruling R6-A3.11.151 (2) class B and R6-A3.11.152, G5: every key a literal of plugin/Ft*.cs prints is classified,
+    # ruling R6-A3.11.151 (2) class B and R6-A3.11.153 (2), G5: every key a literal of plugin/Ft*.cs prints is classified,
     # by file: a FAULT_FIELDS row (a count or flag of something that went wrong, was refused, missed, dropped, retried,
     # mismatched, overflowed or ran off its thread) or a NOT_FAULT key with its reason; an unclassified pair fails and
     # so does a classified pair the source no longer prints. Every row's key is printed by its file, and each row names
@@ -5051,12 +5051,12 @@ B11_CHECKS = ["chk_c2_recovers_3_25", "chk_c3_recovers_3_0375", "chk_c4_recovers
               "chk_r_gc_total_reads_every_measured_window", "chk_cross_risks_beside_the_interval",
               # the integrator's points H, I and J (P3b's end-to-end export test)
               "chk_cal_entries_failure_form", "chk_malformed_lines_are_refusals", "chk_reference_a3_form",
-              # the confirming round's G1 (ruling R6-A3.11.152): emitted lists judged as written
+              # the confirming round's G1 (ruling R6-A3.11.153 (2)): emitted lists judged as written
               "chk_ledger_types_judged_as_written",
               # ruling R6-A3.11.154: the refusals line of its form, or refused as written
               "chk_refusals_line_judged_as_written", "chk_gate_excluded_held_to_the_design",
               "chk_cal_lists_refused_as_written",
-              # G3: the census's partial variant
+              # G3 (ruling R6-A3.11.153 (3)): the census's partial variant
               "chk_census_partial_out_of_range", "chk_emitted_variants_are_forms"]
 
 
