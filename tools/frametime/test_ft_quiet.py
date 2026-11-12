@@ -545,6 +545,26 @@ def test_host_utc_must_increase_with_mono(tmp_path):
     assert v == "REFUSED" and "host trace: utc does not increase with mono at utc %d" % (T0 + 1000 * (s - 2)) in out, out
 
 
+def test_negative_field_refuses(tmp_path):
+    # a negative paging rate would lower a ten-second integral; a negative counter reading has no meaning. Through
+    # the CLI: exit 3 and the field named, while the same trace with the value at zero is judged (exit 0)
+    run = lambda *a: subprocess.run([sys.executable, "-I", "-B", os.path.join(HERE, "ft_quiet.py")] + list(a),
+                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
+    h = host_trace(str(tmp_path / "h.txt"))
+    s = GAME_AT + 7
+    for val, rc in (("-1", 3), ("0", 0)):
+        g = guest_trace(str(tmp_path / "g.txt"), lambda i, r: r.update(prd=val) if i == s else None)
+        p = run(g, h)
+        assert p.returncode == rc, p.stdout
+        assert ("prd='-1' is negative" in p.stdout) == (rc == 3), p.stdout
+    g = guest_trace(str(tmp_path / "g.txt"))
+    for val, rc in ((-1, 3), (0, 0)):
+        h = host_trace(str(tmp_path / "h.txt"), lambda i, t, r: r.update(wait=val) if t == "501" and i == 0 else None)
+        p = run(g, h)
+        assert p.returncode == rc, p.stdout
+        assert ("wait='-1' is negative" in p.stdout) == (rc == 3), p.stdout
+
+
 def test_unknown_record_kinds_refuse(tmp_path):
     g = guest_trace(str(tmp_path / "g.txt"))
     h = host_trace(str(tmp_path / "h.txt"))

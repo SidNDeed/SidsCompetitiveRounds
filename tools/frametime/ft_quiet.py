@@ -25,8 +25,8 @@ The rules, every interval of the window:
          a vCPU shows run growth and d wait / d wall >= 10%; then at least QUIET_AFTER host intervals between its stop
          and the window, each within the host interval limits (contention removed, quietness regained). Counters
          frozen at zero fail.
-REFUSED (no verdict): a trace missing or unreadable, no host evidence, a line of an unknown kind, a missing or
-non-numeric field, a trace that does not cover the window, an interval longer than two seconds, utc not increasing,
+REFUSED (no verdict): a trace missing or unreadable, no host evidence, a line of an unknown kind, a missing,
+non-numeric or negative field, a trace that does not cover the window, an interval longer than two seconds, utc not increasing,
 the ROUNDS identity (pid and start) changing inside the window or not single (rpid=NA), the default window's start or
 end not observed (the guest trace starting or ending while ROUNDS runs), a host header that does not name the vCPU
 threads and the reserved cores (reserved=- names none), a host sample group that lacks a record for one of them or
@@ -81,6 +81,9 @@ def num(rec, k, what):
         raise Refused("%s: %s=%r is not a number" % (what, k, v))
     if math.isnan(x) or math.isinf(x):
         raise Refused("%s: %s=%r is not finite" % (what, k, v))
+    # every numeric field of both traces is a clock reading, a counter or a rate: none is below zero
+    if x < 0:
+        raise Refused("%s: %s=%r is negative" % (what, k, v))
     return x
 
 
