@@ -3863,6 +3863,112 @@ def chk_cal_lists_refused_as_written(m):
                 assert _word_refused(lambda: m.report_on({"a": bad, "b": clean}), want), (ck, key)
 
 
+# the J3 follow-up to ruling R6-A3.11.154: (the line with a plain message or name, the same line whose free text
+# resembles keys), one per FREE_TEXT row and emitter family; each pair must read as the same record
+FREE_TEXT_PAIRS = (
+    ("cal i=3 kind=disp failed: boom", "cal i=3 kind=disp failed: u=x p= n=5 kind=fhat i=9"),
+    ("cal i=3 kind=fhat failed: boom", "cal i=3 kind=fhat failed: f_hat=x i=abc"),
+    ("cal i=-1 why=patches kind=entries failed: InvalidOperationException: boom",
+     "cal i=-1 why=patches kind=entries failed: InvalidOperationException: why=x i=abc u="),
+    ("cal i=4 why=game3 kind=disp shape=CE_p1 failed: boom", "cal i=4 why=game3 kind=disp shape=CE_p1 failed: "
+                                                             "shape=x n=abc u=1,,2"),
+    ("cal i=7 why=game3 kind=a3 k=row1 failed: KeyNotFoundException: boom",
+     "cal i=7 why=game3 kind=a3 k=row1 failed: KeyNotFoundException: k=x n= pt=1"),
+    ("start failed: boom", "start failed: g=x n=abc pt=1.2"),
+    ("game over failed: boom", "game over failed: g=x pt=x"),
+    ("opened line failed: boom", "opened line failed: g=x se="),
+    ("rematch answer failed: boom", "rematch answer failed: g=x n="),
+    ("photon patches report failed: boom", "photon patches report failed: n=10 names=a,b"),
+    ("attach report failed: boom", "attach report failed: n=1 of= names=x"),
+    ("churn freeze failed: boom", "churn freeze failed: room= n=x"),
+    ("ft_dll staging failed: boom", "ft_dll staging failed: n=x ft_dll="),
+    ("room name=FT-1 region=us cloud_region=us", "room name=a n=x pt=y region= cloud_region="),
+    ("room call refused op=JoinRoom name=FT-1 n=1", "room call refused op=JoinRoom name=a op=x n=abc n=1"),
+    ("armed room=FT-1 region=us", "armed room=a g=x region="),
+    ("churn timer frozen room=FT-1", "churn timer frozen room=a n=x pt="),
+    ("ft room options max=2 visible=0 room=FT-1", "ft room options max=2 visible=0 room=a max=9 n=x"),
+)
+
+
+def _no_head(r):
+    return dict((k, v) for k, v in r.items() if k != "head")
+
+
+def chk_free_text_never_read_as_fields(m):
+    # the J3 follow-up to ruling R6-A3.11.154: the structured scan of a record ends where its emitter's free text
+    # begins (FREE_TEXT): a message or a name that resembles the line's own keys is never read as a field, never
+    # overwrites one and never refuses the line by its form; each pair reads as one record (the plain line is the
+    # control), a failed calibration stays marked failed, and a sitting log carrying one reads
+    for plain, spoiled in FREE_TEXT_PAIRS:
+        a = m.parse_line(LOG_PREFIX + "[FRAME-TIME] " + plain)
+        try:
+            b = m.parse_line(LOG_PREFIX + "[FRAME-TIME] " + spoiled)
+        except Exception as x:          # noqa: BLE001
+            raise AssertionError("refused by its free text: %s (%s)" % (spoiled, x))
+        assert a is not None and _no_head(a) == _no_head(b), (plain, a, b)
+        if a["kind"] == "cal":
+            assert a.get("failed") == 1 == b.get("failed"), (plain, b)
+    one = _v_text() + "\n" + LOG_PREFIX + "[FRAME-TIME] cal i=3 kind=disp failed: u=x"
+    assert m.read(one)[-1]["failed"] == 1
+
+
+EMPTY_REFUSED = "the %s line is not in its form (%s= is empty): %s"
+
+
+def chk_empty_values_refused_as_written(m):
+    # the J4 follow-up to ruling R6-A3.11.154 (2)(g): in a record's structured part a key printed with an empty value
+    # refuses the line as written, in the sitting reads and in --controls, except the keys of EMPTY_OK, whose emitters
+    # can print one (each row's file:line holds the key's literal: held to the source here). The table's lines read
+    # and the clean control boot passes (the controls)
+    ln = "cal i=0 why=start kind=a3 k=CE_p1 n=1000 u= p="
+    want = EMPTY_REFUSED % ("cal", "u", ln)
+    assert _word_refused(lambda: m.parse_line(LOG_PREFIX + "[FRAME-TIME] " + ln), want)
+    v = _v_text()
+    assert _word_refused(lambda: m.read(v + "\n" + LOG_PREFIX + "[FRAME-TIME] " + ln), want)
+    assert _word_refused(lambda: m.report_on({"a": v + "\n" + LOG_PREFIX + "[FRAME-TIME] " + ln, "b": v}), want)
+    boot = _boot_full()
+    assert m.controls_proof(boot, "boot")[0], m.controls_proof(boot, "boot")[1]
+    assert _word_refused(lambda: m.controls_proof(boot + "\n" + LOG_PREFIX + "[FRAME-TIME] " + ln, "boot"), want)
+    for other, k in (("disarmed input= pt=3.2.1", "input"), ("ledger log=1 why=ok types=", "types"),
+                     ("settled g=1 freq=1 f_hat=1 problems=", "problems")):
+        assert _word_refused(lambda: m.parse_line(LOG_PREFIX + "[FRAME-TIME] " + other),
+                             EMPTY_REFUSED % (other.split()[0], k, other)), other
+    plug = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "plugin")
+    for (kind, k), site in m.EMPTY_OK.items():
+        f, line = re.match(r"(\w+\.cs):(\d+)", site).groups()
+        src = open(os.path.join(plug, f), encoding="utf-8").read().split("\n")
+        assert ('" %s=" +' % k) in src[int(line) - 1], (kind, k, site)
+    for ok_line in ("between g=3 after= ticks=0 calls=0", "photon patches n=0 names="):
+        assert m.parse_line(LOG_PREFIX + "[FRAME-TIME] " + ok_line) is not None, ok_line
+
+
+def chk_nch_room_calls_held_to_the_source(m):
+    # the J1 follow-up to ruling R6-A3.11.154: the room call refused form admits 'NCH.' + exactly the names of
+    # NchVoid then NchRoutine (read from plugin/FtRoomGate.cs: a name added there is red until NCH_ENTRIES follows, a
+    # name NCH_ENTRIES holds that the arrays lack is red too), each a sample of FtRoomGate.cs:87's row; an NCH. name
+    # outside them is no form, and the other ops read as before. The J2 fallback 'unreadable' reads on both its lines
+    src = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "plugin", "FtRoomGate.cs"),
+               encoding="utf-8").read()
+    names = ()
+    for arr in ("NchVoid", "NchRoutine"):
+        got = re.findall(r"string\[\] %s = \{([^}]*)\};" % arr, src)
+        assert len(got) == 1, (arr, got)
+        names += tuple(re.findall(r'"([^"]*)"', got[0]))
+    assert names == m.NCH_ENTRIES, (names, m.NCH_ENTRIES)
+    rows = [r[2] for r in FORM_VARIANTS if r[0] == "FtRoomGate.cs:87"]
+    assert len(rows) == 1
+    nch = sorted(x.split()[3][len("op=NCH."):] for x in rows[0] if " op=NCH." in x)
+    assert nch == sorted(names), nch
+    for n in names:
+        assert m.unknown_forms(LOG_PREFIX + "[FRAME-TIME] room call refused op=NCH.%s name=(none) n=1" % n) == [], n
+    for bad in ("room call refused op=NCH.Bogus name=(none) n=1", "room call refused op=NCH.QuickMatchX name=(none) n=1"):
+        assert m.unknown_forms(LOG_PREFIX + "[FRAME-TIME] " + bad) != [], bad
+    assert m.unknown_forms(LOG_PREFIX + "[FRAME-TIME] room call refused op=JoinRoom name=FT-1 n=1") == []
+    assert m.parse_line(LOG_PREFIX + "[FRAME-TIME] refusals why=quit pairs=1 route:unreadable=1")["pairs_kv"] == {
+        "route:unreadable": 1}
+    assert m.parse_line(LOG_PREFIX + "[FRAME-TIME] refused what=route route=unreadable n=1")["route"] == "unreadable"
+
+
 REFUSALS_FORM_BAD = "the refusals line is not in its form (%s): %s"
 # ruling R6-A3.11.154: refusals lines out of their form, each with what is out of form (FtUpload.cs:54-55 prints a
 # dictionary's pairs, each key once, and their count); the clean sitting line is 'refusals why=quit pairs=0'
@@ -4102,7 +4208,11 @@ FORM_VARIANTS = (
     # ruling R6-A3.11.154 (12 Nov, 08:30Z): a name not of the lane's form reaches the parser as the export's '(not-exported)'
     ("FtRoomGate.cs:87", '" name=" + shown + " n=" + n',
      ("room call refused op=JoinRoom name=FT-1 n=1", "room call refused op=CreateRoom name=(none) n=2",
-      "room call refused op=JoinRoom name=(empty) n=1", "room call refused op=JoinRoom name=(not-exported) n=3")),
+      "room call refused op=JoinRoom name=(empty) n=1", "room call refused op=JoinRoom name=(not-exported) n=3")
+     # the J1 follow-up to ruling R6-A3.11.154: a NetworkConnectionHandler entry point's refusal (FtRoomGate.cs:194,
+     # :212), one per name of NchVoid and NchRoutine
+     + tuple("room call refused op=NCH.%s name=(none) n=1" % n
+             for n in ("QuickMatch", "JoinRandomRoom", "PlayOnBestActiveRegion", "DoRetry"))),
     # ruling R6-A3.11.154: the line as this game prints it, shorter lists of the design's names, and one name outside
     # the design (GATE_EXCLUDED_SAMPLES holds each to its reading)
     ("FtRoomGate.cs:109", '(missing.Count == 0 ? "" : " missing="',
@@ -4130,9 +4240,12 @@ FORM_VARIANTS = (
     ("FtUpload.cs:30", '" route=" + (route ?? "-") + " n=" + n',
      ("refused what=load route=- n=2", "refused what=route route=GET_emoji-sheet n=3")),
     ("FtUpload.cs:36", '" route=" + (route ?? "-") + " n=1"',
-     ("refused what=route route=GET_music-asset n=1", "refused what=load route=- n=1")),
+     ("refused what=route route=GET_music-asset n=1", "refused what=load route=- n=1",
+      # the J2 follow-up to ruling R6-A3.11.154: FtRoute.cs:105's 'unreadable', left when Allow throws
+      "refused what=route route=unreadable n=1")),
     ("FtUpload.cs:54", '"[FRAME-TIME] refusals why="',
-     ("refusals why=game3 pairs=0", "refusals why=quit pairs=2 route:GET_emoji-sheet=1 load:-=2")),
+     ("refusals why=game3 pairs=0", "refusals why=quit pairs=2 route:GET_emoji-sheet=1 load:-=2",
+      "refusals why=quit pairs=1 route:unreadable=1")),
     ("FtUpload.cs:368", '" why=" + why + " types=" + string.Join(",", TypeNames)',
      tuple("ledger log=%d why=%s types=log,hash,recv,sock" % (1 if w in ("ok", "already") else 0, w)
            for w in ("ok", "already", "no_disk_listener", "failed:NotSupportedException",
@@ -4164,7 +4277,10 @@ FORM_NOT_EMITTED = (
     "clock installed freq=10000000 hires=2 cycles=1", "photon patches n=1 names=a b",
     "cal i=3 kind=fhat broke: a", "cal i=3 kind=disp entries broke: a", "cal i=3 kind=fhat failed",
     "cal i=3 kind=disp entries failed", "counters g=1 frames=NA missing_end=0 cycle_failures=0 "
-    "span_depth_violations=0 photon_offmain=0 span_leave_mismatch=0") + CENSUS_NOT_EMITTED
+    "span_depth_violations=0 photon_offmain=0 span_leave_mismatch=0",
+    # the J1 follow-up to ruling R6-A3.11.154: an NCH. name the arrays lack, and the line without its count
+    "room call refused op=NCH.Bogus name=(none) n=1", "room call refused op=NCH. name=(none) n=1",
+    "room call refused op=NCH.QuickMatch name=(none)") + CENSUS_NOT_EMITTED
 
 
 def chk_emitted_variants_are_forms(m):
@@ -5056,6 +5172,9 @@ B11_CHECKS = ["chk_c2_recovers_3_25", "chk_c3_recovers_3_0375", "chk_c4_recovers
               # ruling R6-A3.11.154: the refusals line of its form, or refused as written
               "chk_refusals_line_judged_as_written", "chk_gate_excluded_held_to_the_design",
               "chk_cal_lists_refused_as_written",
+              # the J1 to J4 follow-ups to ruling R6-A3.11.154
+              "chk_free_text_never_read_as_fields", "chk_empty_values_refused_as_written",
+              "chk_nch_room_calls_held_to_the_source",
               # G3 (ruling R6-A3.11.153 (3)): the census's partial variant
               "chk_census_partial_out_of_range", "chk_emitted_variants_are_forms"]
 
