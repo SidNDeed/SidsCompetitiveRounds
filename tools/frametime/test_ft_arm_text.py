@@ -22,6 +22,7 @@ ARM_TEXT = os.path.join(HERE, "ft_arm_text.sh")
 INSTALL = os.path.join(HERE, "ft_vm_install.sh")
 LEASED = os.path.join(HERE, "ft_vm_leased.sh")
 SEAT = os.path.join(HERE, "frame_time_seat.ps1")
+SEAT_V = os.path.join(HERE, "frame_time_seat_v.ps1")
 PLUGIN = os.path.join(ROOT, "plugin")
 
 # the brief's table (BRIEF-P4 requirement 1): each profile's exact bytes and its launch kind
@@ -268,7 +269,36 @@ def check_seat(path):
     return out
 
 
+def check_seat_v(path):
+    """sitting V's entry: ASCII; frame_time_seat.ps1 from its own folder, called once with exactly -ArmForce ON; that
+    call's exit code passed on; a refusal (one line, exit 2) when the runner is not beside it"""
+    with open(path, "rb") as f:
+        raw = f.read()
+    out = []
+    if any(b > 127 for b in raw):
+        out.append("seat_v: not ASCII")
+    text = raw.decode("ascii", "replace").replace("\r\n", "\n")
+    code = [ln.strip() for ln in text.split("\n") if ln.strip() and not ln.lstrip().startswith("#")]
+    if code.count("$seat = Join-Path $PSScriptRoot 'frame_time_seat.ps1'") != 1:
+        out.append("seat_v: the runner is not taken from its own folder")
+    calls = [ln for ln in code if ln.startswith("&") or "frame_time_seat.ps1 -" in ln or "-File" in ln]
+    if calls != ["& $seat -ArmForce ON"]:
+        out.append("seat_v: the call is %r, not one '& $seat -ArmForce ON'" % calls)
+    if not code or code[-1] != "exit $LASTEXITCODE" or code[-2:-1] != ["& $seat -ArmForce ON"]:
+        out.append("seat_v: the call's exit code is not passed on right after it")
+    ref = [ln for ln in code if ln.startswith("if (-not (Test-Path -LiteralPath $seat -PathType Leaf))")]
+    if len(ref) != 1 or not ref[0].endswith("exit 2 }") or ref[0].count("WriteLine(") != 1:
+        out.append("seat_v: no one-line refusal with exit 2 when frame_time_seat.ps1 is absent")
+    if len(code) != 4:
+        out.append("seat_v: %d code lines, not 4 (no other logic)" % len(code))
+    return out
+
+
 # ---- the tests on the real files
+
+
+def test_seat_v_entry():
+    assert check_seat_v(SEAT_V) == []
 
 
 def test_profile_bytes():
@@ -405,6 +435,10 @@ TOOL_MUTANTS = [
      'PIDF="$OUT/launch-$KIND.pid"', 'PIDF="$OUT/launch-$MODE.pid"'),
     ("seat: force=ON written unconditionally", SEAT, check_seat, "frame_time_seat.ps1",
      "if ($ArmForce -eq 'ON') { $armLines += 'force=ON' }", "$armLines += 'force=ON'"),
+    ("seat_v: the call without -ArmForce", SEAT_V, check_seat_v, "frame_time_seat_v.ps1",
+     "& $seat -ArmForce ON\n", "& $seat\n"),
+    ("seat_v: the call with -ArmForce none", SEAT_V, check_seat_v, "frame_time_seat_v.ps1",
+     "& $seat -ArmForce ON\n", "& $seat -ArmForce none\n"),
 ]
 
 
