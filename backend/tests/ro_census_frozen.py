@@ -3724,3 +3724,20 @@ for _k, _v in B10_MERGE_FROZEN.items():
     FROZEN[_k] = list(FROZEN.get(_k, [])) + list(_v)
 FROZEN_COUNT = (COARSE_COUNT + COMPLETE_COUNT + R10_COUNT + R10_MERGE_COUNT
                 + R11_ID_COUNT + R11_OPEN_COUNT + B10_MERGE_COUNT)
+
+
+# Hand edit for migration 404's change (the mail send receipts): one coarse
+# form it adds to a census file. It is the module-scope
+# `from sqlalchemy import LargeBinary` in models.py, a statement of its own so
+# that the shared sqlalchemy import stays as it was (learning #537).
+# LargeBinary is a column type: the type of MailSendReceipt.request_fp, the
+# digest of a send's request. It reaches no opener, no DSN and no role, and it
+# is an import form, not an identity form. Frozen by hand, not by a
+# re-derivation; FROZEN_COUNT is 856.
+MAIL_SEND_RECEIPTS_FROZEN = {'api/models.py': [('import', 'from sqlalchemy import LargeBinary')]}
+MAIL_SEND_RECEIPTS_COUNT = 1
+for _k, _v in MAIL_SEND_RECEIPTS_FROZEN.items():
+    FROZEN[_k] = list(FROZEN.get(_k, [])) + list(_v)
+FROZEN_COUNT = (COARSE_COUNT + COMPLETE_COUNT + R10_COUNT + R10_MERGE_COUNT
+                + R11_ID_COUNT + R11_OPEN_COUNT + B10_MERGE_COUNT
+                + MAIL_SEND_RECEIPTS_COUNT)
