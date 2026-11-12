@@ -1608,10 +1608,10 @@ $codexGate = CodexGate { CodexRows }
 foreach ($l in $codexGate.Lines) { Say $l }
 if ($codexGate.Refuse) { exit 2 }
 # the number format (CultureGate): the user's settings and the culture's own table must print U+002D and U+002E, or
-# the lane's lines would be withheld at the export; its line, and exit 2 on a REFUSED one
-$cultureGate = CultureGate { CultureRead }
-foreach ($l in $cultureGate.Lines) { Say $l }
-if ($cultureGate.Refuse) { exit 2 }
+# the lane's lines would be withheld at the export; its line, exit 2 if REFUSED. $cultureRes is no parameter's name
+$cultureRes = CultureGate { CultureRead }
+foreach ($l in $cultureRes.Lines) { Say $l }
+if ($cultureRes.Refuse) { exit 2 }
 $launch = {
     param($C)
     Start-Process 'steam://rungameid/1557740'

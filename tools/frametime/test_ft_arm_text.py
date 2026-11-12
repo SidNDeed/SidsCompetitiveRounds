@@ -23,6 +23,7 @@ INSTALL = os.path.join(HERE, "ft_vm_install.sh")
 LEASED = os.path.join(HERE, "ft_vm_leased.sh")
 SEAT = os.path.join(HERE, "frame_time_seat.ps1")
 SEAT_V = os.path.join(HERE, "frame_time_seat_v.ps1")
+SEAT_TRIAL = os.path.join(HERE, "frame_time_seat_trial.ps1")
 PLUGIN = os.path.join(ROOT, "plugin")
 
 # the brief's table (BRIEF-P4 requirement 1): each profile's exact bytes and its launch kind
@@ -271,29 +272,53 @@ def check_seat(path):
     return out
 
 
-def check_seat_v(path):
-    """sitting V's entry: ASCII; frame_time_seat.ps1 from its own folder, called once with exactly -ArmForce ON; that
-    call's exit code passed on; a refusal (one line, exit 2) when the runner is not beside it"""
+SEAT_CATCH = ("catch { [Console]::Out.WriteLine('SEAT-SCRIPT-ERROR: frame_time_seat.ps1 ended by an error: ' + "
+              "$_.Exception.Message); exit 1 }")
+
+
+def check_seat_entry(path, own, call):
+    """a seat entry (sitting V's, or the control run's): ASCII, and its code lines are exactly six: the runner taken
+    from the entry's own folder; a one-line refusal that names the entry, exit 2, when the runner is not beside it;
+    exit code 1 set before the call (it stands when the runner sets none); the call, with exactly the entry's own
+    arguments, alone in a one-pass loop inside a try (the loop takes a stray break or continue of the runner); a
+    catch that prints one SEAT-SCRIPT-ERROR line and ends 1; the code passed on. The entry of 12 Nov 2026 ended 0
+    on a runner that an error had ended: an error sets no exit code."""
     with open(path, "rb") as f:
         raw = f.read()
     out = []
     if any(b > 127 for b in raw):
-        out.append("seat_v: not ASCII")
+        out.append("%s: not ASCII" % own)
     text = raw.decode("ascii", "replace").replace("\r\n", "\n")
     code = [ln.strip() for ln in text.split("\n") if ln.strip() and not ln.lstrip().startswith("#")]
-    if code.count("$seat = Join-Path $PSScriptRoot 'frame_time_seat.ps1'") != 1:
-        out.append("seat_v: the runner is not taken from its own folder")
-    calls = [ln for ln in code if ln.startswith("&") or "frame_time_seat.ps1 -" in ln or "-File" in ln]
-    if calls != ["& $seat -ArmForce ON"]:
-        out.append("seat_v: the call is %r, not one '& $seat -ArmForce ON'" % calls)
-    if not code or code[-1] != "exit $LASTEXITCODE" or code[-2:-1] != ["& $seat -ArmForce ON"]:
-        out.append("seat_v: the call's exit code is not passed on right after it")
-    ref = [ln for ln in code if ln.startswith("if (-not (Test-Path -LiteralPath $seat -PathType Leaf))")]
-    if len(ref) != 1 or not ref[0].endswith("exit 2 }") or ref[0].count("WriteLine(") != 1:
-        out.append("seat_v: no one-line refusal with exit 2 when frame_time_seat.ps1 is absent")
-    if len(code) != 4:
-        out.append("seat_v: %d code lines, not 4 (no other logic)" % len(code))
+    want = ["$seat = Join-Path $PSScriptRoot 'frame_time_seat.ps1'",
+            "if (-not (Test-Path -LiteralPath $seat -PathType Leaf)) { [Console]::Out.WriteLine(\"REFUSED: "
+            "frame_time_seat.ps1 is not beside %s ($seat)\"); exit 2 }" % own,
+            "$global:LASTEXITCODE = 1",
+            "try { do { %s } while ($false) }" % call,
+            SEAT_CATCH,
+            "exit $LASTEXITCODE"]
+    what = ["the runner is not taken from the entry's own folder first",
+            "no one-line refusal with exit 2, naming the entry, when frame_time_seat.ps1 is absent",
+            "exit code 1 is not set before the call",
+            "the call is not %r alone in a one-pass loop inside a try" % call,
+            "the catch does not print one SEAT-SCRIPT-ERROR line and end 1",
+            "the call's exit code is not passed on last"]
+    for i, (w, msg) in enumerate(zip(want, what)):
+        if code[i:i + 1] != [w]:
+            out.append("%s: code line %d: %s" % (own, i + 1, msg))
+    if len(code) != len(want):
+        out.append("%s: %d code lines, not %d (no other logic)" % (own, len(code), len(want)))
     return out
+
+
+def check_seat_v(path):
+    """sitting V's entry: the runner with exactly -ArmForce ON"""
+    return check_seat_entry(path, "frame_time_seat_v.ps1", "& $seat -ArmForce ON")
+
+
+def check_seat_trial(path):
+    """the control run's entry: the runner with -ArmForce ON and a wait of 180 s (-TimeoutS 780), nothing else"""
+    return check_seat_entry(path, "frame_time_seat_trial.ps1", "& $seat -ArmForce ON -TimeoutS 780")
 
 
 # ---- the tests on the real files
@@ -301,6 +326,10 @@ def check_seat_v(path):
 
 def test_seat_v_entry():
     assert check_seat_v(SEAT_V) == []
+
+
+def test_seat_trial_entry():
+    assert check_seat_trial(SEAT_TRIAL) == []
 
 
 def test_profile_bytes():
@@ -438,9 +467,33 @@ TOOL_MUTANTS = [
     ("seat: force=ON written unconditionally", SEAT, check_seat, "frame_time_seat.ps1",
      "if ($ArmForce -eq 'ON') { $armLines += 'force=ON' }", "$armLines += 'force=ON'"),
     ("seat_v: the call without -ArmForce", SEAT_V, check_seat_v, "frame_time_seat_v.ps1",
-     "& $seat -ArmForce ON\n", "& $seat\n"),
+     "& $seat -ArmForce ON }", "& $seat }"),
     ("seat_v: the call with -ArmForce none", SEAT_V, check_seat_v, "frame_time_seat_v.ps1",
-     "& $seat -ArmForce ON\n", "& $seat -ArmForce none\n"),
+     "& $seat -ArmForce ON }", "& $seat -ArmForce none }"),
+    ("seat_v: exit code 1 not set before the call", SEAT_V, check_seat_v, "frame_time_seat_v.ps1",
+     "$global:LASTEXITCODE = 1\n", ""),
+    ("seat_v: the catch ends 0", SEAT_V, check_seat_v, "frame_time_seat_v.ps1",
+     "$_.Exception.Message); exit 1 }", "$_.Exception.Message); exit 0 }"),
+    ("seat_v: the entry of 12 Nov (the call outside a try)", SEAT_V, check_seat_v, "frame_time_seat_v.ps1",
+     "try { do { & $seat -ArmForce ON } while ($false) }\n" + SEAT_CATCH + "\n", "& $seat -ArmForce ON\n"),
+    ("seat_v: no loop around the call", SEAT_V, check_seat_v, "frame_time_seat_v.ps1",
+     "try { do { & $seat -ArmForce ON } while ($false) }", "try { & $seat -ArmForce ON }"),
+    ("seat_v: a second statement in the try", SEAT_V, check_seat_v, "frame_time_seat_v.ps1",
+     "} while ($false) }", "} while ($false); $global:LASTEXITCODE = 0 }"),
+    ("trial: the call without -TimeoutS", SEAT_TRIAL, check_seat_trial, "frame_time_seat_trial.ps1",
+     "& $seat -ArmForce ON -TimeoutS 780 }", "& $seat -ArmForce ON }"),
+    ("trial: the sitting's whole wait", SEAT_TRIAL, check_seat_trial, "frame_time_seat_trial.ps1",
+     "-TimeoutS 780 }", "-TimeoutS 7200 }"),
+    ("trial: the call without -ArmForce", SEAT_TRIAL, check_seat_trial, "frame_time_seat_trial.ps1",
+     "& $seat -ArmForce ON -TimeoutS 780 }", "& $seat -TimeoutS 780 }"),
+    ("trial: exit code 1 not set before the call", SEAT_TRIAL, check_seat_trial, "frame_time_seat_trial.ps1",
+     "$global:LASTEXITCODE = 1\n", ""),
+    ("trial: the catch ends 0", SEAT_TRIAL, check_seat_trial, "frame_time_seat_trial.ps1",
+     "$_.Exception.Message); exit 1 }", "$_.Exception.Message); exit 0 }"),
+    ("trial: no loop around the call", SEAT_TRIAL, check_seat_trial, "frame_time_seat_trial.ps1",
+     "try { do { & $seat -ArmForce ON -TimeoutS 780 } while ($false) }", "try { & $seat -ArmForce ON -TimeoutS 780 }"),
+    ("trial: the refusal names the other entry", SEAT_TRIAL, check_seat_trial, "frame_time_seat_trial.ps1",
+     "is not beside frame_time_seat_trial.ps1", "is not beside frame_time_seat_v.ps1"),
 ]
 
 

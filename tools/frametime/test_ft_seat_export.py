@@ -1908,8 +1908,8 @@ CULTURE_LINE = re.compile(r"culture gate: %s minus U\+002D decimal U\+002E" % _C
 CULTURE_REFUSED = re.compile(r"REFUSED: culture gate: (?:%s prints minus %s decimal %s \((?:the user's settings|the "
                              r"culture's own table)\): the lane's lines need U\+002D and U\+002E; no game launch|the "
                              r"number format was not read \(.+\))" % (_CNAME, _CPS, _CPS))
-CULTURE_SIT = ("$cultureGate = CultureGate { CultureRead }\nforeach ($l in $cultureGate.Lines) { Say $l }\n"
-               "if ($cultureGate.Refuse) { exit 2 }\n")
+CULTURE_SIT = ("$cultureRes = CultureGate { CultureRead }\nforeach ($l in $cultureRes.Lines) { Say $l }\n"
+               "if ($cultureRes.Refuse) { exit 2 }\n")
 
 
 def _read(ps1):
