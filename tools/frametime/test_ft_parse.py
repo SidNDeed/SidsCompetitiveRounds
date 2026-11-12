@@ -871,13 +871,13 @@ DELETIONS = (
     # SHARED.md: the mark cost boot line; without it the transition overhead is named not computable
     ("mark", "b11", None, r"^B11 class transitions: not computable: 0 mark cost lines"),
     # ruling R6-A3.11.147 (5): the five V6 boot lines; a missing one counts as its control out of range (sitting V)
-    ("alloc", "v6", None, r"^V6 WITHHELD seat v1: .*the counter's pin differs or is not read \(0 'alloc' lines"),
-    ("scope", "v6", None, r"^V6 WITHHELD seat v1: .*control K2 out of range \(0 'scope plant' lines.*R-SCOPE's census "
+    ("alloc", "v6", None, r"^V6 WITHHELD seat a: .*the counter's pin differs or is not read \(0 'alloc' lines"),
+    ("scope", "v6", None, r"^V6 WITHHELD seat a: .*control K2 out of range \(0 'scope plant' lines.*R-SCOPE's census "
                           r"line out of range \(0 'scope census' lines"),
-    ("nest", "v6", None, r"^V6 WITHHELD seat v1: .*control K3 out of range \(0 'nest plant' lines"),
-    ("photon", "v6", None, r"^V6 WITHHELD seat v1: .*R-SCOPE's patches line out of range \(0 'photon patches' lines"),
+    ("nest", "v6", None, r"^V6 WITHHELD seat a: .*control K3 out of range \(0 'nest plant' lines"),
+    ("photon", "v6", None, r"^V6 WITHHELD seat a: .*R-SCOPE's patches line out of range \(0 'photon patches' lines"),
     # P1's V6 emitter (via the integrator, 12 Nov): a sitting log without its controls line is refused (K-MUTANT)
-    ("controls", "v6", None, "REFUSED:K-MUTANT: the sitting log v1 carries 0 controls lines"),
+    ("controls", "v6", None, "REFUSED:K-MUTANT: the sitting log V:a carries 0 controls lines"),
 )
 # the kinds whose PRESENCE is the event (their absence is the normal case): test_failure_events_make_the_run_incomplete
 # and test_vr6_build_fails_on_a_disarm are their controls
@@ -915,14 +915,14 @@ def test_deleting_each_record_kind_withholds(kind, fixture, where, want):
         assert re.search(want, P.report(log, peer=log), re.M), P.report(log, peer=log)
     elif fixture == "v6":
         base = _v_text()
-        assert "V6 WITHHELD seat v1: none" in P.report_on(base, base)[0]
+        assert "V6 WITHHELD seat a: none" in _on(P, base, base)[0]
         log, n = _drop_kind(base, kind, where)
         assert n >= 1, kind
         if want.startswith("REFUSED:"):
             with pytest.raises(P.Refused, match=re.escape(want[len("REFUSED:"):])):
-                P.report_on(log, log)
+                _on(P, log, log)
         else:
-            out = "\n".join(P.report_on(log, log)[0])
+            out = "\n".join(_on(P, log, log)[0])
             assert re.search(want, out, re.M), (kind, out)
     elif fixture == "marker":
         base = _log()
@@ -951,15 +951,33 @@ def test_every_record_kind_has_a_deletion_control():
     assert not covered & RECORD_EVENTS
 
 
-def test_every_emitted_kind_is_read_or_named():
-    # every "[FRAME-TIME] <kind>" the build writes is a RECORDS kind or named in EMITTED_UNREAD with its reason; no kind
-    # the parser reads is called unread; every RECORDS kind but a3zero (no build writes it today) is written
-    here = os.path.dirname(os.path.abspath(__file__))
-    plug = os.path.join(here, "..", "..", "plugin")
-    plug_src = ""
+def _plugin_src():
+    """The emitter's source in this tree (plugin/*.cs, its comment lines dropped), each string constant printed after
+    '[FRAME-TIME] ' (FtArm.DLL_PROP) put in place: what the build prints."""
+    plug = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "plugin")
+    src = ""
     for fn in sorted(os.listdir(plug)):
         if fn.endswith(".cs"):
-            plug_src += open(os.path.join(plug, fn), encoding="utf-8").read()
+            src += open(os.path.join(plug, fn), encoding="utf-8").read() + "\n"
+    src = re.sub(r"(?m)^\s*//.*$", "", src)
+    consts = dict(re.findall(r'const string (\w+) = "([^"]*)";', src))
+
+    def put(mm):
+        assert mm.group(1) in consts, "'[FRAME-TIME] ' + %s: not a string constant" % mm.group(1)
+        return '"[FRAME-TIME] ' + consts[mm.group(1)]
+    return re.sub(r'"\[FRAME-TIME\] "\s*\+\s*(\w+)\s*\+\s*"', put, src)
+
+
+# a [FRAME-TIME] line's lead in the source: the literal after '[FRAME-TIME] ' up to its first hole
+SOURCE_LEAD = re.compile(r'"\[FRAME-TIME\] ((?:[^"\\{]|\\.)*)')
+
+
+def test_every_emitted_kind_is_read_or_named():
+    # every "[FRAME-TIME] <kind>" the build writes is a RECORDS kind or named in EMITTED_UNREAD with its reason; no kind
+    # the parser reads is called unread; every RECORDS kind but a3zero (no build writes it today) is written (ruling
+    # R6-A3.11.149 (6) 9: no kind is excluded, the emitter being merged)
+    here = os.path.dirname(os.path.abspath(__file__))
+    plug_src = _plugin_src()
     emitted = set(re.findall(r'"\[FRAME-TIME\] (\w+)', plug_src))
     src = open(os.path.join(here, "ft_parse.py"), encoding="utf-8").read()
     # a FAILURE_EVENTS row on a whole kind (head None) reads the kind; one scoped by its head reads only that failure
@@ -976,11 +994,40 @@ def test_every_emitted_kind_is_read_or_named():
     assert set(P.EMITTED_UNREAD) <= emitted, sorted(set(P.EMITTED_UNREAD) - emitted)
     # a SUBKINDS record is a line of an emitted kind told apart by its first word: its parent is emitted, it is not
     assert all(parent in emitted for parent, _ in P.SUBKINDS.values()), P.SUBKINDS
-    # "build" (P3's marker), "mark" (P1's boot line) and V6's boot lines alloc, scope, nest and photon (ruling
-    # R6-A3.11.147 (5), P1's V6 block): written by the other parts of the B11 build and absent from this branch until the
-    # integrator merges them; the merged tree emits them all (the integrator tightens this line)
-    assert (set(P.RECORDS) - emitted - {"build", "mark", "alloc", "scope", "nest", "photon", "controls"}
-            == {"a3zero"} | set(P.SUBKINDS)), sorted(set(P.RECORDS) - emitted)
+    assert set(P.RECORDS) - emitted == {"a3zero"} | set(P.SUBKINDS), sorted(set(P.RECORDS) - emitted)
+
+
+def test_forms_are_every_line_form_the_emitter_prints():
+    # ruling R6-A3.11.149 (6) 9 and 10: the source's leads are exactly FORMS' leads (a form the source prints and the
+    # parser does not know, or a FORMS row no source prints, fails here); a row whose fields FORMS fixes carries the
+    # keys of its one source statement, in printed order (a key marked '?' is printed by a separate literal, which the
+    # source holds); the markers' rows are MARK_FT's and MARK_REF's texts
+    src = _plugin_src()
+    leads = set(SOURCE_LEAD.findall(src))
+    have = set(lead for lead, _, _ in P.FORMS)
+    assert leads == have, (sorted(leads - have), sorted(have - leads))
+    for lead, pat, keys in P.FORMS:
+        if keys is None:
+            continue
+        at = [mm.start() for mm in re.finditer(re.escape('"[FRAME-TIME] ' + lead), src)]
+        assert len(at) == 1, (lead, len(at))
+        stmt = src[at[0]:src.index(";", at[0])]
+        got = [k for lit in re.findall(r'"((?:[^"\\]|\\.)*)"', stmt) for k in re.findall(r"(?:^| )(\w+)=", lit)]
+        assert got == [k for k in keys if not k.endswith("?")], (lead, got, keys)
+        for k in keys:
+            if k.endswith("?"):
+                assert ('" %s=' % k[:-1]) in src, (lead, k)
+    assert (P.MARK_FT, P.MARK_REF) == ("build variant=FrameTime", "build variant=FrameTimeRef SCR_FT_REF=NOCOLLECTORS")
+
+
+def test_p_line_sock_p95_may_print_na_and_heap_is_an_integer():
+    # ruling R6-A3.11.149 (6) 10: FtUpload prints sock_p95=NA with no sock sample (plugin/FtUpload.cs:333-345), and
+    # FtFrames prints heap= as an integer (plugin/FtFrames.cs:279)
+    text = _b11_text(_one_run_games(), _flat, p_extra=B11_P_EXTRA.replace("sock_p95=0", "sock_p95=NA"))
+    assert [r for r in P.read(text) if r["kind"] == "p"][0]["sock_p95"] is None
+    assert [r for r in P.read(_b11_text(_one_run_games(), _flat)) if r["kind"] == "p"][0]["heap"] == 50000000
+    with pytest.raises((P.Refused, P.RecordRefused)):
+        P.read(_b11_text(_one_run_games(), _flat, p_extra=B11_P_EXTRA.replace("heap=50000000", "heap=NA")))
 
 
 FAILURE_LINES = ("[Warning:CompetitiveRounds] [FRAME-TIME] game over failed: boom",
@@ -2271,8 +2318,8 @@ B11_P_EXTRA = " sock_p95=0 sock_n=0 sock_thr=0 sock_main=0 ab_back=0 ab_retry=0 
 V6_BOOT = (("alloc", "alloc pin=ok planted=1048600/1048576 empty=0"),
            ("scope plant", "scope plant asked=2000 got=2010"),
            ("nest", "nest plant asked=2000 x=2020 e=1990 p=2005"),
-           ("photon", "photon patches n=4 names=PhotonPeer.DispatchIncomingCommands,PhotonPeer.SendOutgoingCommands,"
-                      "PhotonPeer.SendAcksOnly,PhotonPeer.Service"),
+           # ruling R6-A3.11.149 (1): the patch line names ten methods, typed as FtPhoton.ReportPatched prints them
+           ("photon", "photon patches n=10 names=" + ",".join(P.PHOTON_ENTRIES)),
            ("scope census", "scope census entries=40 wrapped=40"),
            # P1's V6 emitter (via the integrator, 12 Nov): a sitting log's control-mutant line
            ("controls", "controls k_mutant=none"))
@@ -2282,7 +2329,7 @@ B11_CTR_V6 = " photon_offmain=0 span_leave_mismatch=0"
 
 def _b11_text(games, model, marker=True, settled=True, first_game=1, edit=None, cg=None, cw=0, mark=True,
               wu=B11_WU0, p_extra=B11_P_EXTRA, force="none", force_arms=True, v6=None, boot=None, fpscap=True,
-              ctr=None):
+              ctr=None, sitting=False, fhat=1000000, t_us=B11_T, heavy=None):
     """The [FRAME-TIME] lines of B11 games: the marker, the mark cost boot line, the five V6 boot lines (boot: name ->
     replacement line, or None to drop it), the FPSCAP hold, settled (f_hat 1e6, force=), the point lines and their
     window lines in SHARED.md's format. A point's "plant" runs are plant runs (prun=1), "unspun" those of them fixed
@@ -2293,20 +2340,39 @@ def _b11_text(games, model, marker=True, settled=True, first_game=1, edit=None, 
     False. v6(window) may return V6 values: cP_pf and cX_pf (cycles per frame; P leaves q, X stays in it), aC to aX
     (bytes or None for NA), wa (text) and wu (text); by default no P or X, aC 100000 bytes per frame, no class bytes.
     Each game ends with its counters line, the three counters 0 and then ctr(g) (B11_CTR_V6 by default; None drops
-    the line)."""
+    the line). sitting=True makes it a complete sitting (ruling R6-A3.11.149 (5)(a): the validity set needs one): game 0,
+    the mutant, every point of the first game again with zs=4 (every round void), before games first_game on; the
+    census summary; per game the settled line under F18 reading A, its replay, its calibration run (fhat, a disp line
+    per shape, span), its opened, census, heavy, offthread, between and flushed lines, and t0 and t1 on every point
+    line; the refusals line at the quit and 'sitting complete'. fhat is every settled and calibration f_hat, t_us every
+    frame's time, heavy(g, op) an optional (live, at_call, edge) for a heavy line."""
     L = ["[FRAME-TIME] " + P.MARK_FT] if marker else []
     if mark:
         L.append("[FRAME-TIME] mark cost cyc=50 p90=70 n=1000")
+    if sitting:
+        L.append(CENSUS_SUMMARY % (len(ENTRIES), len(ENTRIES), 0, 0))
+        games = [[dict(pt, zs=4) for pt in games[0]]] + list(games)
+        first_game -= 1
     bt = dict(V6_BOOT)
     bt.update(boot or {})
     L += ["[FRAME-TIME] " + x for x in bt.values() if x is not None]
     if fpscap:
         L.append("[FPSCAP] held by frame-time calibration")
+    clock = [10 ** 6]
     for gi, pts in enumerate(games):
         g = first_game + gi
         if settled:
-            L.append("[FRAME-TIME] settled g=%d seed=1 c_plant=80 W=120 vsync=0 target=-1 freq=%d hires=1 f_hat=1000000%s"
-                     % (g, FREQ, "" if force is None else " force=%s" % force))
+            L.append("[FRAME-TIME] settled g=%d seed=1 c_plant=80 W=120 vsync=0 target=-1 freq=%d hires=1 f_hat=%d%s%s"
+                     % (g, FREQ, fhat, " f18=A answer=replay" if sitting else "",
+                        "" if force is None else " force=%s" % force))
+        if sitting:
+            L.append("[FRAME-TIME] answer_replay g=%d ticks=4000 result=settled" % g)
+            L.append("[FRAME-TIME] cal i=%d why=game%d kind=fhat f_hat=%d spins=1/1" % (g + 1, g, fhat))
+            L += ["[FRAME-TIME] cal i=%d why=game%d kind=disp shape=%s n=100000 u=1000000,1000000 p=1030000,1030000"
+                  % (g + 1, g, s) for s in SHAPES]
+            L.append("[FRAME-TIME] cal i=%d why=game%d kind=span shape=span.empty n=100000 u=100000,100000 "
+                     "p=150000,150000" % (g + 1, g))
+            L.append("[FRAME-TIME] opened g=%d se=1 ce=1 ic=1" % g)
         prev = None
         f0 = 0
         for pi, pt in enumerate(pts):
@@ -2351,7 +2417,7 @@ def _b11_text(games, model, marker=True, settled=True, first_game=1, edit=None, 
                     w["q"] = list(w["q"])
                     w["q"][0] -= gv                     # C° = C - G - W - P
                 w["sC"] = (w["cG"] or 0) + w["cW"] + w["cR"] + w["cS"] + w["cP"] + w["cX"] + w["cE"]
-                w["sF"] = n * B11_T * B11_TICKS
+                w["sF"] = n * t_us * B11_TICKS
                 w["sS"] = 0
                 w["sP"] = w["sC"]
                 if edit:
@@ -2361,20 +2427,37 @@ def _b11_text(games, model, marker=True, settled=True, first_game=1, edit=None, 
                 f0 += n
             un = [w for w in ws if not w["plant"]]
             pl = [w for w in ws if w["plant"]]
+            t0 = clock[0]
+            clock[0] += sum(w["sF"] for w in ws) + FREQ
             L.append("[FRAME-TIME] p pt=%s arm=%s gate=0 pred=%s n=%d sF=%d sS=%d sC=%d maxF=1 pn=%d psF=%d psS=%d "
                      "psC=%d sP=%d psP=%d windows=%d live_frames=%d missing_end=0 span_g=0 span_gn=0 span_u=0 "
-                     "on_calls=0 guarded=0 zs=%d zl=1 own_split=%d recv_offmain=0 ledger_cycle_miss=0%s"
+                     "on_calls=0 guarded=0 zs=%d zl=1 own_split=%d recv_offmain=0 ledger_cycle_miss=0%s%s"
                      % (label, ws[0]["arm"], ws[0]["pred"], sum(w["n"] for w in un), sum(w["sF"] for w in un),
                         sum(w["sS"] for w in un), sum(w["sC"] for w in un), sum(w["n"] for w in pl),
                         sum(w["sF"] for w in pl), sum(w["sS"] for w in pl), sum(w["sC"] for w in pl),
                         sum(w["sP"] for w in un), sum(w["sP"] for w in pl), len(ws), sum(w["n"] for w in ws),
-                        pt.get("zs", 0), pt.get("own_split", 0), p_extra))
+                        pt.get("zs", 0), pt.get("own_split", 0), p_extra,
+                        " t0=%d t1=%d answer=replay" % (t0, t0 + sum(w["sF"] for w in ws)) if sitting else ""))
+            if sitting and pi > 0:
+                L.append("[FRAME-TIME] between g=%d after=%s ticks=2000 calls=4" % (g, ws[0]["pred"]))
             for w in ws:
                 L.append(_b11_wline(w))
+        if sitting:
+            L += ["[FRAME-TIME] census g=%d entry=%s comp=X shape=%s on=0 guarded=0 outside=0" % (g, e, s)
+                  for e, s in ENTRIES]
+            for op in P.HEAVY_OPS:
+                lv, ac, ed = (heavy and heavy(g, op)) or (0, 0, 0)
+                L.append("[FRAME-TIME] heavy g=%d op=%s live=%d between=7 pick=1 over=1 menu=0 at_call=%d edge=%d off=0"
+                         % (g, op, lv, ac, ed))
+            L.append("[FRAME-TIME] offthread g=%d span_off=0 hash_t0=0 hash_t1=0" % g)
+            L.append("[FRAME-TIME] flushed g=%d why=%s" % (g, "next_game" if gi < len(games) - 1 else "settle"))
         tail = B11_CTR_V6 if ctr is None else ctr(g)
         if tail is not None:
             L.append("[FRAME-TIME] counters g=%d frames=%d missing_end=0 cycle_failures=0 span_depth_violations=0%s"
                      % (g, sum(sum(pt["n"]) for pt in pts), tail))
+    if sitting:
+        L.append("[FRAME-TIME] refusals why=quit pairs=0")
+        L.append("[FRAME-TIME] sitting complete g=%d" % (first_game + len(games) - 1))
     return "\n".join(LOG_PREFIX + x for x in L)
 
 
@@ -2700,13 +2783,20 @@ def chk_writers_recv_never_added(m):
     assert wa["ON"] == pytest.approx(180.0 / 120, rel=1e-12) and wa["OFF"] == pytest.approx(180.0 / 120, rel=1e-12), wa
 
 
+def _rows(m, text, t=None, peer=None, first_game=1):
+    """validity_set of one log (its peer the same log unless given) as {guard: (ok, reasons)}; VR1 at t."""
+    peer = text if peer is None else peer
+    return dict((n, (ok, w)) for n, ok, w in m.validity_set(m.read(text), text, m.read(peer), peer, t, "a",
+                                                            first_game))
+
+
 def chk_p_line_faults_withhold(m):
-    # SHARED.md (md5 2119eb2e): recv_offmain and ledger_cycle_miss nonzero withhold B1 for the seat
+    # SHARED.md (md5 2119eb2e) and ruling R6-A3.11.149 (5)(a): recv_offmain, ledger_cycle_miss and sock_main nonzero
+    # fail the validity set's p-line faults row (which withholds B1 for the seat); printed 0, the row holds
+    assert _rows(m, _b11_text(_one_run_games(), _flat))["p-line faults"] == (True, [])
     for k in ("recv_offmain", "ledger_cycle_miss", "sock_main"):
-        text = _b11_text(_one_run_games(), _flat).replace(" %s=0" % k, " %s=3" % k, 1)
-        recs = m.read(text)
-        why = m.b11_seat_withholds(recs, m.b11_estimate(recs))
-        assert [x for x in why if x.startswith(k + " nonzero")], (k, why)
+        ok, why = _rows(m, _b11_text(_one_run_games(), _flat).replace(" %s=0" % k, " %s=3" % k, 1))["p-line faults"]
+        assert not ok and why == ["%s nonzero or not printed at 1.1.1" % k], (k, why)
 
 
 def chk_ref_known_by_marker_not_by_na(m):
@@ -2718,7 +2808,10 @@ def chk_ref_known_by_marker_not_by_na(m):
     assert m.window_reconcile(recs) == []
     e = m.b11_estimate(recs)
     assert e["T"]["wu_na"] == ["sock"], e["T"]["wu_na"]
-    assert "writer cycles print NA for sock on this seat (W_U not computable)" in m.b11_seat_withholds(recs, e)
+    # in sitting V (SHARED.md V6) NA writer cycles withhold B1 for the seat
+    v = _v(m, _v_text(edit=lambda w: w.update(wu="log:1:0;hash:1:0;recv:2:0;sock:NA:NA")))
+    assert "a wu type prints NA cycles (sock)" in v["why"], v["why"]
+    assert _v(m, _v_text())["why"] == []
 
 
 def chk_v4_lower_bound_at_lower_ends(m):
@@ -2744,14 +2837,11 @@ def chk_r_common_d_common_and_corrected_r_u(m):
 
 
 def chk_own_split_withholds(m):
-    # the integrator's ruling on the hand-back (3): any nonzero own_split withholds B1 for the seat
+    # the integrator's ruling on the hand-back (3) and ruling R6-A3.11.149 (5)(a): any nonzero own_split fails the
+    # validity set's own_split row (which withholds B1 for the seat)
     games = [[{"n": [120] * 4, "coins": [(1, 0)]}, {"n": [120, 60], "coins": [(0, 0)], "own_split": 1}]]
-    recs = m.read(_b11_text(games, _flat))
-    e = m.b11_estimate(recs)
-    why = m.b11_seat_withholds(recs, e)
-    assert why == ["ownership faults (own_split) at 1.1.2"], why
-    clean = m.read(_b11_text([[{"n": [120] * 4, "coins": [(1, 0)]}]], _flat))
-    assert m.b11_seat_withholds(clean, m.b11_estimate(clean)) == []
+    assert _rows(m, _b11_text(games, _flat))["own_split"] == (False, ["ownership faults at 1.1.2"])
+    assert _rows(m, _b11_text([[{"n": [120] * 4, "coins": [(1, 0)]}]], _flat))["own_split"] == (True, [])
 
 
 # ----------------------------------------------------------------------------- V6 (SHARED.md "V6: the direct bound")
@@ -2778,14 +2868,31 @@ def _v_cls(cp=5, recv=1, wlog=2, whash=3, wsock=4, cx=7, bytes_=None):
     return v6
 
 
-def _v_text(games=6, s=30, cls=None, **kw):
-    """A sitting-V log: games of one point of four full windows, force=ON on every settled line and every window ON,
-    S s and R 20 per frame, W 10 per frame, the V6 values of cls (_v_cls())."""
-    return _b11_text([[{"n": [120] * 4, "coins": [(1, 0)]}] for _ in range(games)], _v_model(s), force="ON", cw=10,
-                     v6=cls or _v_cls(), **kw)
+def _v_text(games=P.LAST_GAME, s=30, cls=None, pts=None, **kw):
+    """A complete sitting-V log (ruling R6-A3.11.149 (5)(b): the validity set applies): game 0 and the measured games,
+    each one point of four full windows, force=ON on every settled line and every window ON, S s and R 20 per frame,
+    W 10 per frame, the V6 values of cls (_v_cls()). pts(g) may give a measured game's points instead."""
+    gs = [(pts and pts(g + 1)) or [{"n": [120] * 4, "coins": [(1, 0)]}] for g in range(games)]
+    return _b11_text(gs, _v_model(s), force="ON", cw=10, v6=cls or _v_cls(), sitting=True, **kw)
 
 
-def _v_hand(games=6, s=30, cp=5, recv=1, cx=7):
+def _c_text(model=None, reps=P.LAST_GAME // 4, **kw):
+    """A complete sitting-C log: game 0 and the measured games of _one_run_games (every (A, B) once per four games),
+    alternating as built; model as _b11_text's (_c_cost(0) by default)."""
+    return _b11_text(_one_run_games(reps=reps), model or _c_cost(0), sitting=True, **kw)
+
+
+def _on(m, v1, v2):
+    """report_on of two seats named a and b."""
+    return m.report_on({"a": v1, "b": v2})
+
+
+def _comb(m, v1, v2, c1, c2, **kw):
+    """The combining step for seats a (v1, c1) and b (v2, c2), each paired by its name."""
+    return m.combine({"a": v1, "b": v2}, {"a": c1, "b": c2}, **kw)
+
+
+def _v_hand(games=P.LAST_GAME, s=30, cp=5, recv=1, cx=7):
     """U by hand for _v_text's fixture: per game u_g = D + P + S + X + G_cap with D = S + R + W, P = max(cP, recv), S =
     log + hash + sock, X = cx + g mod 3, G_cap = bK / (aC - bK) x T; and G_cap."""
     wa = 400 + 300 + 300
@@ -2794,9 +2901,26 @@ def _v_hand(games=6, s=30, cp=5, recv=1, cx=7):
     return [(s + 20 + 10) + max(cp, recv) + (2 + 3 + 4) + (cx + g % 3) + gc for g in range(1, games + 1)], gc
 
 
+def _p_sub(text, pt, old, new):
+    """text with old replaced by new on point pt's p line alone (that line must hold old)."""
+    key = "[FRAME-TIME] p pt=%s " % pt
+    lines = text.split("\n")
+    hit = [i for i, x in enumerate(lines) if key in x and old in x]
+    assert len(hit) == 1, (pt, old, hit)
+    lines[hit[0]] = lines[hit[0]].replace(old, new, 1)
+    return "\n".join(lines)
+
+
+def _sub1(text, old, new):
+    """text with its one occurrence of old replaced by new (old must occur exactly once)."""
+    assert text.count(old) == 1, (old, text.count(old))
+    return text.replace(old, new)
+
+
 def _v(m, text, peer=None):
-    """sitting_v of one seat's log, its peer the same log unless given."""
-    return m.sitting_v(m.read(text), text, m.read(text if peer is None else peer))
+    """sitting_v of one seat's log (seat a), its peer the same log unless given."""
+    peer = text if peer is None else peer
+    return m.sitting_v(m.read(text), text, m.read(peer), peer, "V:a")
 
 
 def _c_cost(on=0):
@@ -2810,13 +2934,19 @@ def _c_cost(on=0):
 def _p_only(edit=None):
     # E4's H6: a sitting-C fixture whose arms differ only in P. recv is gated by the seat's own arm, so class P runs
     # in ON windows only; with C° = C - G - W - P the windows' C° is the same in both arms
-    return _b11_text(_one_run_games(reps=2), _c_cost(0), v6=lambda w: {"cP_pf": 50 if w["arm"] == "ON" else 0},
-                     edit=edit)
+    return _c_text(v6=lambda w: {"cP_pf": 50 if w["arm"] == "ON" else 0}, edit=edit)
 
 
 def _classes(out):
-    seats = dict(re.findall(r"^VERDICT B1 seat (\d) \([^)]*\) (\w+)", out, re.M))
-    return seats, re.findall(r"^VERDICT B1 worse seat: seat (\d) \([^)]*\) (\w+)$", out, re.M)
+    seats = dict(re.findall(r"^VERDICT B1 seat (\S+) (\w+)", out, re.M))
+    return seats, re.findall(r"^VERDICT B1 worse seat: seat (\S+) (\w+)$", out, re.M)
+
+
+def _verdict(out, seat):
+    """The seat's VERDICT B1 line."""
+    ln = [x for x in out.splitlines() if x.startswith("VERDICT B1 seat %s " % seat)]
+    assert len(ln) == 1, (seat, out)
+    return ln[0]
 
 
 def _word_refused(fn, word):
@@ -2846,15 +2976,18 @@ def chk_q_leaves_p_once(m):
         # what the invariant keeps out: such a q would move the contrast by the whole P
         assert m.b11_estimate(bad)["B"][0] == pytest.approx(sign * 50, abs=1e-6)
     v = _v_text()
-    out = m.combine(v, v, _p_only(), _p_only())
-    assert re.search(r"^V6 CROSS-CHECK seat 1 \(v1, c1\): contrast -?0\.000 us per frame", out, re.M), out
-    assert _classes(out) == ({"1": "PASS", "2": "PASS"}, [("1", "PASS")]), out
-    # end to end: a sitting-C log whose q keeps P is stopped before its contrast by the invariant
+    out = _comb(m, v, v, _p_only(), _p_only())
+    assert re.search(r"^V6 CROSS-CHECK seat a: contrast -?0\.000 us per frame", out, re.M), out
+    assert _classes(out) == ({"a": "PASS", "b": "PASS"}, [("a", "PASS")]), out
+    # end to end: a sitting-C log whose q keeps P fails the line invariants, so the seat has no cross-check (ruling
+    # R6-A3.11.149 (5)(c)): its contrast refutes nothing and B1 is WITHHELD
     keep = _p_only(edit=lambda w: w.update(q=[w["q"][0] + w["cP"]] + w["q"][1:]) if w["cP"] else None)
-    out = m.combine(v, v, keep, _p_only())
-    assert re.search(r"^VERDICT B1 seat 1 \(v1, c1\) WITHHELD: the cross-check did not run \(sitting C's line "
-                     r"invariants fail: window 1\.1\.1\.\d: sum\(q\)=\d+ is not sC-cG-cW-cP=", out, re.M), out
-    assert _classes(out)[0] == {"1": "WITHHELD", "2": "PASS"}, out
+    out = _comb(m, v, v, keep, _p_only())
+    assert re.search(r"^V6 VALIDITY sitting C seat a line invariants FAIL: window \d+\.1\.1\.\d: sum\(q\)=\d+ is not "
+                     r"sC-cG-cW-cP=", out, re.M), out
+    assert re.search(r"^VERDICT B1 seat a WITHHELD: sitting C gives no cross-check until it has run again; cross-check "
+                     r"unavailable \([^)]*line invariants", _verdict(out, "a")), out
+    assert _classes(out)[0] == {"a": "WITHHELD", "b": "PASS"}, out
 
 
 def chk_class_sum_holds_cp_and_cx(m):
@@ -2871,7 +3004,7 @@ def chk_report_on_hand_computed_u(m):
     # m3, m5, m6 and ruling R6-A3.11.147 (7): report_on gives the hand-computed U on a both-ON fixture; U = D + P + S +
     # X + G_cap per game, through fw_interval at Z_END as built; each term and each S type is nonzero and distinct
     text = _v_text()
-    lines, (va, vb) = m.report_on(text, text)
+    lines, (va, vb) = _on(m, text, text)
     ug, gc = _v_hand()
     U, hw, df = P.fw_interval([(u, 480) for u in ug], P.Z_END)
     assert va["why"] == [] and vb["why"] == [], (va["why"], vb["why"])
@@ -2893,7 +3026,7 @@ def chk_p_is_the_larger_of_cp_and_recv(m):
     # m4, ruling R6-A3.11.147 (3)(g): P is the larger of cP and wu's recv cycles; L takes cP alone
     v = _v(m, _v_text(cls=_v_cls(cp=2, recv=9)))
     ug, _ = _v_hand(cp=2, recv=9)
-    assert v["terms"]["P"] == pytest.approx(9, abs=1e-9) and v["U"] == pytest.approx(sum(ug) / 6, abs=1e-6)
+    assert v["terms"]["P"] == pytest.approx(9, abs=1e-9) and v["U"] == pytest.approx(sum(ug) / len(ug), abs=1e-6)
     assert v["L"] == pytest.approx(62, abs=1e-6)
 
 
@@ -2906,10 +3039,11 @@ def chk_forced_log_is_no_contrast_input(m):
         assert _word_refused(lambda: m.contrast_input(recs), "FORCED-INPUT"), f
         assert _word_refused(lambda: m.b11_report(recs), "FORCED-INPUT"), f
     v = _v_text()
-    forced = _b11_text(_one_run_games(), _c_cost(0), force="ON", force_arms=False)
-    out = m.combine(v, v, forced, _b11_text(_one_run_games(), _c_cost(0)))
-    assert re.search(r"^VERDICT B1 seat 1 \(v1, c1\) WITHHELD: the cross-check did not run \(FORCED-INPUT", out, re.M), out
-    assert _classes(out)[0] == {"1": "WITHHELD", "2": "PASS"}, out
+    forced = _c_text(force="ON", force_arms=False)
+    out = _comb(m, v, v, forced, _c_text())
+    assert re.search(r"WITHHELD: sitting C gives no cross-check until it has run again; cross-check unavailable "
+                     r"\(contrast: FORCED-INPUT", _verdict(out, "a")), out
+    assert _classes(out)[0] == {"a": "WITHHELD", "b": "PASS"}, out
 
 
 def _off_last(w):
@@ -2942,7 +3076,8 @@ V_SPOILS = (
                               ("4.1.1", 2) else None), "an a* or wa value prints NA in 1 windows (4.1.1.2)"),
     ("pin", lambda: _v_text(boot={"alloc": "alloc pin=differs planted=1048600/1048576 empty=0"}),
      "the counter's pin differs or is not read (pin=differs)"),
-    ("ab_back", lambda: _v_text().replace(" ab_back=0 ", " ab_back=2 ", 1), "ab_back above 0 or not printed at 1.1.1"),
+    ("ab_back", lambda: _p_sub(_v_text(), "1.1.1", " ab_back=0 ", " ab_back=2 "),
+     "ab_back above 0 or not printed at 1.1.1"),
     ("K1 planted", lambda: _v_text(boot={"alloc": "alloc pin=ok planted=1052673/1048576 empty=0"}),
      "control K1 out of range (planted median 1052673 for 1048576 asked"),
     ("K1 empty", lambda: _v_text(boot={"alloc": "alloc pin=ok planted=1048600/1048576 empty=8"}),
@@ -2960,19 +3095,37 @@ V_SPOILS = (
      "R-SCOPE's patches line out of range (0 'photon patches' lines (needs exactly 1))"),
     ("census gone", lambda: _v_text(boot={"scope census": None}),
      "R-SCOPE's census line out of range (0 'scope census' lines (needs exactly 1))"),
-    ("photon entry", lambda: _v_text(boot={"photon": "photon patches n=3 names=PhotonPeer.DispatchIncomingCommands,"
-                                                     "PhotonPeer.SendOutgoingCommands,PhotonPeer.Service"}),
-     "R-SCOPE's patches line out of range (n=3 for 3 names; not attached: SendAcksOnly)"),
-    ("photon count", lambda: _v_text(boot={"photon": dict(V6_BOOT)["photon"].replace("n=4", "n=5")}),
-     "R-SCOPE's patches line out of range (n=5 for 4 names)"),
+    # ruling R6-A3.11.149 (1), (6) 4: the ten typed names, each once, and n their count
+    ("photon entry", lambda: _v_text(boot={"photon": "photon patches n=9 names=" + ",".join(
+        x for x in P.PHOTON_ENTRIES if x != "LoadBalancingClient.OnMessage")}),
+     "R-SCOPE's patches line out of range (n=9 for 9 names; not attached: LoadBalancingClient.OnMessage)"),
+    ("photon count", lambda: _v_text(boot={"photon": dict(V6_BOOT)["photon"].replace("n=10", "n=11")}),
+     "R-SCOPE's patches line out of range (n=11 for 10 names)"),
+    ("photon alien", lambda: _v_text(boot={"photon": "photon patches n=11 names=" + ",".join(P.PHOTON_ENTRIES)
+                                            + ",PhotonPeer.EstablishEncryption"}),
+     "R-SCOPE's patches line out of range (n=11 for 11 names; not of the ten: PhotonPeer.EstablishEncryption)"),
+    ("photon twice", lambda: _v_text(boot={"photon": "photon patches n=11 names=" + ",".join(
+        P.PHOTON_ENTRIES + P.PHOTON_ENTRIES[:1])}),
+     "R-SCOPE's patches line out of range (n=11 for 11 names; named twice: PhotonPeer.DispatchIncomingCommands)"),
+    ("photon untyped", lambda: _v_text(boot={"photon": "photon patches n=10 names=" + ",".join(
+        x.split(".")[1] for x in P.PHOTON_ENTRIES)}),
+     "R-SCOPE's patches line out of range (n=10 for 10 names; not attached: PhotonPeer.DispatchIncomingCommands"),
+    ("photon failed", lambda: _v_text(boot={"photon": "photon patches report failed: boom"}),
+     "R-SCOPE's patches line out of range (the patch report failed (the line prints no n=))"),
     ("census wrapped", lambda: _v_text(boot={"scope census": "scope census entries=40 wrapped=39"}),
      "R-SCOPE's census line out of range (entries 40, wrapped 39)"),
+    ("census threw", lambda: _v_text(boot={"scope census": "scope census entries=40 wrapped=40 "
+                                                           "failed=NullReferenceException"}),
+     "R-SCOPE's census line out of range (entries 40, wrapped 40; the census threw (failed=NullReferenceException))"),
     ("bE", lambda: _v_text(cls=_v_cls(bytes_=dict(V6_BYTES, aC=9000))), "bE is 0 or below in games 1, 2, 3, 4, 5, 6"),
-    ("recv_offmain", lambda: _v_text().replace(" recv_offmain=0 ", " recv_offmain=1 ", 1),
-     "recv_offmain nonzero or not printed at 1.1.1"),
+    ("recv_offmain", lambda: _p_sub(_v_text(), "1.1.1", " recv_offmain=0 ", " recv_offmain=1 "),
+     "p-line faults: recv_offmain nonzero or not printed at 1.1.1"),
+    ("sock_main", lambda: _p_sub(_v_text(), "4.1.1", " sock_main=0 ", " sock_main=2 "),
+     "p-line faults: sock_main nonzero or not printed at 4.1.1"),
     ("wu NA", lambda: _v_text(edit=lambda w: w.update(wu="log:1:240;hash:1:360;recv:2:120;sock:3:NA")
                               if (w["pt"], w["wi"]) == ("5.1.1", 1) else None), "a wu type prints NA cycles (sock)"),
-    ("own_split", lambda: _v_text().replace(" own_split=0 ", " own_split=1 ", 1), "ownership faults (own_split) at 1.1.1"),
+    ("own_split", lambda: _p_sub(_v_text(), "1.1.1", " own_split=0 ", " own_split=1 "),
+     "own_split: ownership faults at 1.1.1"),
     ("line invariant", lambda: _v_text(edit=lambda w: w.update(sC=w["sC"] + 1) if (w["pt"], w["wi"]) == ("2.1.1", 3)
                                        else None), "line invariants: window 2.1.1.3: sC="),
     ("VR1", lambda: _v_text(fpscap=False), "VR1: no '[FPSCAP] held by frame-time calibration' line"),
@@ -3008,37 +3161,40 @@ def chk_six_games_at_least(m):
 
 def chk_combine_four_classes(m):
     # m11 and ruling R6-A3.11.147 (7): the combining step's class on four fixtures (PASS, SID, WITHHELD by a contrast
-    # whose lower end is above U_hi, WITHHELD by a missing counter), per seat, and the worse seat
-    c0 = _b11_text(_one_run_games(reps=8), _c_cost(0))
+    # whose lower end is above U_hi, WITHHELD by a missing counter), per seat, and the worse seat; ruling R6-A3.11.149
+    # (5)(e): the cross-check's state on each verdict line
+    c0 = _c_text()
     v = _v_text()
-    assert _classes(m.combine(v, v, c0, c0)) == ({"1": "PASS", "2": "PASS"}, [("1", "PASS")])
-    out = m.combine(_v_text(s=6000), v, c0, c0)
-    assert _classes(out) == ({"1": "SID", "2": "PASS"}, [("1", "SID")]), out
-    out = m.combine(v, v, c0, _b11_text(_one_run_games(reps=8), _c_cost(20000)))
-    assert _classes(out) == ({"1": "PASS", "2": "WITHHELD"}, [("2", "WITHHELD")]), out
-    assert re.search(r"^VERDICT B1 seat 2 \(v2, c2\) WITHHELD: the contrast's lower end [0-9.]+ us is above U_hi "
-                     r"[0-9.]+ us \(U is refuted\)$", out, re.M), out
-    out = m.combine(_v_text(boot={"alloc": None}), v, c0, c0)
-    assert _classes(out) == ({"1": "WITHHELD", "2": "PASS"}, [("1", "WITHHELD")]), out
-    assert "the counter's pin differs or is not read (0 'alloc' lines" in out
-    out = m.combine(v, _v_text(edit=lambda w: w.update(aC=None)), c0, c0)
-    assert _classes(out) == ({"1": "PASS", "2": "WITHHELD"}, [("2", "WITHHELD")]), out
+    out = _comb(m, v, v, c0, c0)
+    assert _classes(out) == ({"a": "PASS", "b": "PASS"}, [("a", "PASS")]), out
+    assert re.search(r"; cross-check not refuted(, weakened by [^;]+)?$", _verdict(out, "a")), out
+    out = _comb(m, _v_text(s=6000), v, c0, c0)
+    assert _classes(out) == ({"a": "SID", "b": "PASS"}, [("a", "SID")]), out
+    out = _comb(m, v, v, c0, _c_text(_c_cost(20000)))
+    assert _classes(out) == ({"a": "PASS", "b": "WITHHELD"}, [("b", "WITHHELD")]), out
+    assert re.search(r"^VERDICT B1 seat b WITHHELD: the contrast's lower end [0-9.]+ us is above U_hi [0-9.]+ us \(U is "
+                     r"refuted\); cross-check REFUTED$", _verdict(out, "b")), out
+    out = _comb(m, _v_text(boot={"alloc": None}), v, c0, c0)
+    assert _classes(out) == ({"a": "WITHHELD", "b": "PASS"}, [("a", "WITHHELD")]), out
+    assert "the counter's pin differs or is not read (0 'alloc' lines" in _verdict(out, "a")
+    out = _comb(m, v, _v_text(edit=lambda w: w.update(aC=None)), c0, c0)
+    assert _classes(out) == ({"a": "PASS", "b": "WITHHELD"}, [("b", "WITHHELD")]), out
 
 
 def chk_r_gc_numbers(m):
     # R-GC's numbers (SHARED.md V6): collections per MB of aC in sitting C's ON and OFF windows; the collectors' bytes
     # over sitting V against heap= at its end; and sitting C's u_g from its ON windows beside sitting V's (R-WORK)
     # sitting C: ON costs 30 us per frame of class S, so its ON windows' u_g is 30 and both arms' would be 15
-    c = _b11_text(_one_run_games(), _c_cost(30), v6=lambda w: {"gcn": 3 if w["arm"] == "ON" else 1, "aC": 1000000})
+    c = _c_text(_c_cost(30), v6=lambda w: {"gcn": 3 if w["arm"] == "ON" else 1, "aC": 1000000})
     v = _v_text()
-    out = m.combine(v, v, c, c)
-    assert "R-GC (sitting C) seat 1 (v1, c1): collections per MB of aC, ON 3.0000, OFF 1.0000" in out, out
+    out = _comb(m, v, v, c, c)
+    assert "R-GC (sitting C) seat a: collections per MB of aC, ON 3.0000, OFF 1.0000" in out, out
     va = _v(m, v)
-    assert va["bK"] == 6 * 4 * 9000 and va["heap"] == 50000000
-    assert ("R-GC (sitting V) seat v1: the collectors' bytes 216000 over the sitting against heap=50000000 at its end "
-            "(0.0043 of it)") in out, out
-    assert re.search(r"^R-WORK seat 1 \(v1, c1\): u_g sitting V g1 [0-9.]+; .*; sitting C's ON windows g1 30\.000; g2 "
-                     r"30\.000; ", out, re.M), out
+    assert va["bK"] == P.LAST_GAME * 4 * 9000 and va["heap"] == 50000000
+    assert ("R-GC (sitting V) seat a: the collectors' bytes 576000 over the sitting against heap=50000000 at its end "
+            "(0.0115 of it)") in out, out
+    assert re.search(r"^R-WORK seat a: u_g sitting V g1 [0-9.]+; .*; sitting C's ON windows g1 30\.000; g2 30\.000; ",
+                     out, re.M), out
 
 
 def _ctr_at(g0, tail):
@@ -3065,10 +3221,11 @@ def chk_counters_line_v6_keys(m):
         recs = m.read(text)
         assert [x for x in m.counters_faults(recs, games) if x.startswith(want)], (tail, want)
         assert [x for x in m.vr2(recs)[1] if x.startswith(want)], (tail, want)
-        assert [x for x in _v(m, text)["why"] if x.startswith("VR2 counters: " + want)], (tail, _v(m, text)["why"])
+        # ruling R6-A3.11.149 (5)(a): the validity set's counters line row withholds B1 in sitting V
+        assert [x for x in _v(m, text)["why"] if x.startswith("counters line: " + want)], (tail, _v(m, text)["why"])
     # the same class as span_depth_violations
-    text = _v_text().replace("span_depth_violations=0 photon", "span_depth_violations=2 photon", 1)
-    assert "VR2 counters: counters g=1 span_depth_violations=2" in _v(m, text)["why"]
+    text = re.sub(r"(counters g=1 [^\n]*)span_depth_violations=0", r"\g<1>span_depth_violations=2", _v_text(), count=1)
+    assert "counters line: counters g=1 span_depth_violations=2" in _v(m, text)["why"], _v(m, text)["why"]
     # a log without B11 window lines is no V6 log: its counters line carries the three counters only
     old = LOG_PREFIX + "[FRAME-TIME] counters g=1 frames=10 missing_end=0 cycle_failures=0 span_depth_violations=0"
     assert m.counters_faults(m.read(old), [1]) == []
@@ -3091,18 +3248,19 @@ def chk_k_mutant_sitting_refused_and_controls_proof(m):
     # than none (or no controls line, or two) is refused by name; a control run's boot is read by controls_proof, which
     # reads K1 to K3 from the numbers printed and holds only when exactly the control k_mutant names reads out of range
     v, c = _v_text(), _b11_text(_one_run_games(), _c_cost(0))
-    m.report_on(v, v)
-    m.cross_check(m.read_sitting(c, "c"))
+    _on(m, v, v)
+    rc = m.read_sitting(c, "C:a")
+    m.sitting_c(rc, c, rc, c, None, "C:a")
     for line in ("controls k_mutant=k1", "controls k_mutant=k2", "controls k_mutant=k3", "controls k_mutant=x", None):
         bv, bc = _v_text(boot={"controls": line}), _b11_text(_one_run_games(), _c_cost(0), boot={"controls": line})
-        assert _word_refused(lambda: m.report_on(bv, v), "K-MUTANT"), line
-        assert _word_refused(lambda: m.report_on(v, bv), "K-MUTANT"), line
-        assert _word_refused(lambda: m.combine(v, v, bc, c), "K-MUTANT"), line
+        assert _word_refused(lambda: _on(m, bv, v), "K-MUTANT"), line
+        assert _word_refused(lambda: _on(m, v, bv), "K-MUTANT"), line
+        assert _word_refused(lambda: _comb(m, v, v, bc, c), "K-MUTANT"), line
         assert _word_refused(lambda: m.report(bc, peer=c), "K-MUTANT"), line
         assert _word_refused(lambda: m.report(c, peer=bc), "K-MUTANT"), line
     two = _v_text().replace("[FRAME-TIME] controls k_mutant=none", "[FRAME-TIME] controls k_mutant=none\n" + LOG_PREFIX
                             + "[FRAME-TIME] controls k_mutant=none", 1)
-    assert _word_refused(lambda: m.report_on(two, v), "carries 2 controls lines")
+    assert _word_refused(lambda: _on(m, two, v), "carries 2 controls lines")
     # controls_proof: each mutant's boot breaks its own control alone (PASS); a mutant boot whose numbers read in
     # range, or that breaks another control too, FAILs; none needs all three in range
     for kw, ok in ((dict(), True), (dict(controls="controls k_mutant=k1", alloc=K1_OUT), True),
@@ -3115,6 +3273,192 @@ def chk_k_mutant_sitting_refused_and_controls_proof(m):
                    (dict(controls=None), False)):
         got, lines = m.controls_proof(_boot(**kw))
         assert got is ok and lines[-1].startswith("CONTROLS PROOF %s" % ("PASS" if ok else "FAIL")), (kw, lines)
+
+
+def _settled_add(text, g, extra):
+    """text with extra appended to game g's settled line."""
+    return re.sub(r"(settled g=%d [^\n]*)" % g, lambda mm: mm.group(1) + extra, text, count=1)
+
+
+def _drop_complete(text):
+    return _sub1(text, "\n" + LOG_PREFIX + "[FRAME-TIME] sitting complete g=%d" % P.LAST_GAME, "")
+
+
+CENSUS_CLEAN = CENSUS_SUMMARY % (len(ENTRIES), len(ENTRIES), 0, 0)
+# ruling R6-A3.11.149 (5)(a): one spoil per validity guard, as (guard, a function of a complete sitting log)
+VALIDITY_SPOILS = (
+    ("complete sitting", _drop_complete),
+    ("census summary", lambda t: _sub1(t, CENSUS_CLEAN, CENSUS_SUMMARY % (len(ENTRIES), len(ENTRIES), 1, 0))),
+    ("VR1", lambda t: t.replace(LOG_PREFIX + "[FPSCAP] held by frame-time calibration\n", "", 1)),
+    ("VR2 instrument", lambda t: _settled_add(t, 3, " missing_end=1")),
+    ("VR5 records", lambda t: _sub1(t, "opened g=3 se=1 ce=1 ic=1", "opened g=3 se=1 ce=1 ic=0")),
+    ("VR6 build", lambda t: t + "\n" + LOG_PREFIX + "[FRAME-TIME] disarmed input=fighters pt=3.1.1"),
+    ("F18", lambda t: _sub1(t, "answer_replay g=3 ticks=4000 result=settled",
+                            "answer_replay g=3 ticks=0 result=skipped_quit")),
+    ("counters line", lambda t: re.sub(r"(counters g=2 [^\n]*)span_leave_mismatch=0", r"\g<1>span_leave_mismatch=1", t,
+                                       count=1)),
+    ("line invariants", lambda t: re.sub(r"(w pt=2\.1\.1 arm=\w+ plant=0 partial=0 n=120 sF=\d+ sS=0 sC=)(\d+)",
+                                         lambda mm: mm.group(1) + str(int(mm.group(2)) + 1), t, count=1)),
+    ("p-line faults", lambda t: _p_sub(t, "1.1.1", " recv_offmain=0 ", " recv_offmain=1 ")),
+    ("own_split", lambda t: _p_sub(t, "1.1.1", " own_split=0 ", " own_split=1 ")),
+    ("build marker", lambda t: _sub1(t, LOG_PREFIX + "[FRAME-TIME] " + P.MARK_FT + "\n", "")),
+)
+
+
+def chk_validity_set_withholds_sitting_v(m):
+    # ruling R6-A3.11.149 (5)(a), (b) and (7): sitting V applies the whole validity set: each guard's spoil fails its
+    # own row, withholds B1 for the seat and names the guard on the WITHHELD list; the clean sitting fails none
+    clean = _v_text()
+    v = _v(m, clean)
+    assert [n for n, _, _ in v["validity"]] == list(P.VALIDITY) and all(ok for _, ok, _ in v["validity"]), v["validity"]
+    assert v["why"] == [] and v["cls"] == "PASS", v["why"]
+    for name, spoil in VALIDITY_SPOILS:
+        bad = spoil(clean)
+        assert bad != clean, name
+        v = _v(m, bad, clean)
+        rows = dict((n, ok) for n, ok, _ in v["validity"])
+        assert rows[name] is False, (name, v["validity"])
+        assert [x for x in v["why"] if x.startswith(name + ": ")], (name, v["why"])
+        lines = v_lines_of(m, bad, clean)
+        assert [x for x in lines if x.startswith("V6 VALIDITY seat a %s FAIL: " % name)], (name, lines)
+        assert [x for x in lines if x.startswith("V6 WITHHELD seat a: ") and (name + ": ") in x], (name, lines)
+
+
+def v_lines_of(m, text, peer):
+    """report_on's lines for seat a (text) beside seat b (peer)."""
+    return [x for x in m.report_on({"a": text, "b": peer})[0] if " seat a" in x]
+
+
+def chk_vr1_reads_t_on(m):
+    # ruling R6-A3.11.149 (6) 3 and (7): sitting V's VR1 reads T_on, the frames' observed mean. Frames on the 60-FPS cap
+    # (t_us 16667) with U_hi near 465 us: T_on is within 2 percent of 1e6/60 and T_on - U_hi (about 16200 us) is not,
+    # so only a VR1 reading T_on finds the cap; frames of B11_T are on no cap
+    v = _v(m, _v_text(s=400, t_us=16667))
+    assert 400 < v["U_hi"] < 600 and abs(v["T_on"] - 1e6 / 60) <= 0.02 * 1e6 / 60, (v["U_hi"], v["T_on"])
+    assert abs(v["T_on"] - v["U_hi"] - 1e6 / 60) > 0.02 * 1e6 / 60
+    row = [(ok, w) for n, ok, w in v["validity"] if n == "VR1"]
+    assert row == [(False, ["T_on 16667.0 us within 2 percent of 1e6/60"])], row
+    assert "VR1: T_on 16667.0 us within 2 percent of 1e6/60" in v["why"], v["why"]
+    assert [ok for n, ok, w in _v(m, _v_text())["validity"] if n == "VR1"] == [True]
+
+
+def chk_validity_set_decides_sitting_c(m):
+    # ruling R6-A3.11.149 (5)(c) and (7): the same validity set decides whether sitting C gives a cross-check: a
+    # sitting-C log that fails a guard is never "not refuted"; its cross-check is unavailable, naming the guard, and
+    # B1 is WITHHELD for that seat; the clean log gives one
+    v, c = _v_text(), _c_text()
+    sc = m.sitting_c(m.read(c), c, m.read(c), c, None, "C:a")
+    assert [n for n, _, _ in sc["rows"]] == list(P.VALIDITY) and sc["unavail"] == [] and sc["e"] is not None, sc["unavail"]
+    assert re.search(r"; cross-check not refuted", _verdict(_comb(m, v, v, c, c), "a")), _comb(m, v, v, c, c)
+    for name in ("complete sitting", "line invariants", "own_split", "build marker", "F18"):
+        bad = dict(VALIDITY_SPOILS)[name](c)
+        sc = m.sitting_c(m.read(bad), bad, m.read(c), c, None, "C:a")
+        assert name in sc["unavail"], (name, sc["unavail"])
+        out = _comb(m, v, v, bad, c)
+        ln = _verdict(out, "a")
+        assert ln.startswith("VERDICT B1 seat a WITHHELD: sitting C gives no cross-check until it has run again; "
+                             "cross-check unavailable (") and name in ln.split("cross-check unavailable (", 1)[1], (name, ln)
+        assert [x for x in out.splitlines() if x.startswith("V6 VALIDITY sitting C seat a %s FAIL: " % name)], (name, out)
+        assert _classes(out)[0] == {"a": "WITHHELD", "b": "PASS"}, (name, out)
+
+
+def chk_two_arm_guards_named_on_the_verdict_line(m):
+    # ruling R6-A3.11.149 (5)(d), (e) and (7): the two-arm guards are printed beside the contrast, one line each in
+    # TWO_ARM's order, and the verdict line names every one that fails ("not refuted, weakened by ..."), none other;
+    # without a reference R-COMMON is untested and fails; a failing guard leaves the class as it is
+    v, c = _v_text(), _c_text()
+    for refs in (None, {"a": c.replace(P.MARK_FT, P.MARK_REF)}):
+        out = _comb(m, v, v, c, c, refs=refs)
+        two = re.findall(r"^V6 TWO-ARM seat a (.+?) (PASS|FAIL): (.*)$", out, re.M)
+        assert [n for n, _, _ in two] == list(P.TWO_ARM), two
+        failing = [n for n, s, _ in two if s == "FAIL"]
+        common = [d for n, _, d in two if n == "R-COMMON"][0]
+        assert ("R-COMMON" in failing and common == "UNTESTED: no reference record set") if refs is None \
+            else not common.startswith("UNTESTED"), (refs is None, common)
+        ln = _verdict(out, "a")
+        assert ln.endswith("; cross-check not refuted" + (", weakened by %s" % ", ".join(failing) if failing else "")), \
+            (ln, failing)
+        assert _classes(out)[0] == {"a": "PASS", "b": "PASS"}, out
+
+
+def chk_b3_on_both_sittings(m):
+    # ruling R6-A3.11.149 (5)(g) and (7): B3 holds only when it holds in both sittings; heavy work with combat live in
+    # either sitting's log is a FAIL naming that sitting, and both clean is a PASS
+    hv = lambda g, op: (1, 1, 0) if (g, op) == (3, P.HEAVY_OPS[0]) else None     # noqa: E731
+    v, c = _v_text(), _c_text()
+    out = _comb(m, v, v, c, c)
+    assert re.search(r"^VERDICT B3 seat a PASS \(", out, re.M), out
+    for vv, cc, which in ((_v_text(heavy=hv), c, "V"), (v, _c_text(heavy=hv), "C")):
+        out = _comb(m, vv, v, cc, c)
+        ln = [x for x in out.splitlines() if x.startswith("VERDICT B3 seat a ")]
+        assert len(ln) == 1 and ln[0].startswith("VERDICT B3 seat a FAIL: sitting %s VIOLATED: %s ran 1 times with "
+                                                 "combat live" % (which, P.HEAVY_OPS[0])), (which, ln)
+        assert re.search(r"^VERDICT B3 seat b PASS \(", out, re.M), out
+
+
+def chk_seats_paired_by_name(m):
+    # ruling R6-A3.11.149 (6) 6 and (7): each seat's two logs are paired by its name, never by position, and checked:
+    # they agree in f_hat within 1 percent, or B1 is WITHHELD for the seat; when the two seats' own f_hat are that close,
+    # the report says the check cannot tell them apart
+    va, vb, ca, cb = _v_text(), _v_text(fhat=1050000), _c_text(), _c_text(fhat=1050000)
+    out = m.combine({"a": va, "b": vb}, {"b": cb, "a": ca})         # sitting C named in the other order
+    assert "PAIRING seat a: f_hat sitting V 1000000, sitting C 1000000: agree within 1 percent" in out, out
+    assert "PAIRING seat b: f_hat sitting V 1050000, sitting C 1050000: agree within 1 percent" in out, out
+    assert "cannot tell the seats apart" not in out and _classes(out)[0] == {"a": "PASS", "b": "PASS"}, out
+    out = m.combine({"a": va, "b": vb}, {"a": cb, "b": ca})         # each seat named with the other's sitting-C log
+    assert "PAIRING seat a: f_hat sitting V 1000000, sitting C 1050000: NOT within 1 percent" in out, out
+    assert _verdict(out, "a").startswith("VERDICT B1 seat a WITHHELD: the pairing check fails"), out
+    assert _classes(out)[0] == {"a": "WITHHELD", "b": "WITHHELD"}, out
+    out = m.combine({"a": va, "b": va}, {"a": ca, "b": ca})
+    assert ("PAIRING: the two seats' own f_hat (a 1000000, b 1000000) are within 1 percent of each other, so the check "
+            "cannot tell the seats apart") in out, out
+
+
+def chk_void_rounds_stay_in_sitting_v(m):
+    # ruling R6-A3.11.149 (5)(f) and (7): VR8's zero-state half is reported in sitting V and its void rounds stay in
+    # the population (game 0 stays out): a measured game whose one round is void still counts its frames in U, and
+    # withholds nothing
+    clean = _v(m, _v_text())
+    text = _v_text(pts=lambda g: [{"n": [120] * 4, "coins": [(1, 0)], "zs": 4}] if g == 2 else None)
+    void = _v(m, text)
+    assert 0 not in void["games"] and void["N"] == clean["N"] == P.LAST_GAME * 480, (void["N"], clean["N"])
+    assert void["games"][2]["n"] == 480 and void["why"] == [], void["why"]
+    assert void["zero"][1:4] == (1, 1, [(2, 1)]), void["zero"]
+    lines = v_lines_of(m, text, _v_text())
+    assert [x for x in lines if x.startswith("V6 VR8 zero-state seat a (reported, not judged; ruling R6-A3.11.149 "
+                                             "(5)(f)): game 0 (the mutant) 1 of 1 rounds void; the measured games 1 "
+                                             "rounds void, kept in the population")], lines
+
+
+def _boot_full(**kw):
+    """A control run's whole boot: the marker, the clock, alloc_init, the ledger, the mark cost and the census summary
+    before V6_BOOT's lines (_boot)."""
+    head = ["[FRAME-TIME] " + P.MARK_FT, "[FRAME-TIME] clock installed freq=10000000 hires=1 cycles=1",
+            "[FRAME-TIME] alloc_init why=ok", "[FRAME-TIME] ledger log=1 why=ok types=log,hash,recv,sock",
+            "[FRAME-TIME] mark cost cyc=50 p90=70 n=1000", CENSUS_CLEAN]
+    return "\n".join(LOG_PREFIX + x for x in head) + "\n" + _boot(**kw)
+
+
+def chk_controls_forms_and_failed_to_patch(m):
+    # ruling R6-A3.11.149 (8): --controls lists every [FRAME-TIME] line whose form the parser does not know (0 for a
+    # pass: a new kind, or a known lead in an unknown form, fails) and fails on a line holding "Failed to patch"
+    boot = _boot_full()
+    ok, lines = m.controls_proof(boot)
+    assert ok and "CONTROLS unknown [FRAME-TIME] line forms: 0 (needs 0)" in lines, lines
+    assert "CONTROLS 'Failed to patch': absent" in lines, lines
+    n = len(boot.splitlines()) + 1
+    for extra, pay in (("[FRAME-TIME] zz frame-time line", "zz frame-time line"),
+                       ("[FRAME-TIME] counters g=1 frames=10 missing_end=0 cycle_failures=0 span_depth_violations=0",
+                        "counters g=1 frames=10 missing_end=0 cycle_failures=0 span_depth_violations=0"),
+                       ("[FRAME-TIME] alloc pin=maybe planted=1048600/1048576 empty=0",
+                        "alloc pin=maybe planted=1048600/1048576 empty=0")):
+        ok, lines = m.controls_proof(boot + "\n" + LOG_PREFIX + extra)
+        assert not ok and "CONTROLS UNKNOWN FORM line %d: %s" % (n, pay) in lines, (extra, lines)
+        assert "CONTROLS unknown [FRAME-TIME] line forms: 1 (needs 0)" in lines and lines[-1].startswith(
+            "CONTROLS PROOF FAIL: "), (extra, lines)
+    ok, lines = m.controls_proof(boot + "\n[Error  :  HarmonyX] Failed to patch void FtSpan::Open(): boom")
+    assert not ok and "CONTROLS 'Failed to patch': PRESENT at lines %d" % n in lines, lines
+    assert lines[-1].startswith("CONTROLS PROOF FAIL: ") and lines[-1].endswith("'Failed to patch' present"), lines
 
 
 # the B11 mutants (mut_parse.py's B11_MUTS) are proven here, in process, so a seat's pytest run proves them: each row
@@ -3134,7 +3478,11 @@ B11_CHECKS = ["chk_c2_recovers_3_25", "chk_c3_recovers_3_0375", "chk_c4_recovers
               "chk_t_ref_is_t_on_minus_u_hi", "chk_six_games_at_least", "chk_combine_four_classes",
               "chk_r_gc_numbers",
               # P1's V6 emitter (via the integrator, 12 Nov): the counters line's two keys and the boot's k_mutant
-              "chk_counters_line_v6_keys", "chk_k_mutant_sitting_refused_and_controls_proof"]
+              "chk_counters_line_v6_keys", "chk_k_mutant_sitting_refused_and_controls_proof",
+              # ruling R6-A3.11.149 (5) to (8)
+              "chk_validity_set_withholds_sitting_v", "chk_vr1_reads_t_on", "chk_validity_set_decides_sitting_c",
+              "chk_two_arm_guards_named_on_the_verdict_line", "chk_b3_on_both_sittings", "chk_seats_paired_by_name",
+              "chk_void_rounds_stay_in_sitting_v", "chk_controls_forms_and_failed_to_patch"]
 
 
 @pytest.mark.parametrize("name", B11_CHECKS)
@@ -3287,7 +3635,8 @@ def test_b11_transitions_own_split_and_na_writers():
                    if w["wi"] == 2 else None)
     assert P.window_reconcile(P.read(na)) == []
     lines, e = P.b11_report(P.read(na))
-    assert e["T"]["wu_na"] == ["sock"] and "B11 writers: cycles print NA for sock: B1 is withheld for this seat" in lines
+    assert e["T"]["wu_na"] == ["sock"] and ("B11 writers: cycles print NA for sock (reported: the writers left the "
+                                            "contrast's verdict with B_U; in sitting V an NA withholds B1)") in lines
 
 
 def test_b11_gc_na_windows_are_checked_without_cg_and_named():
@@ -3309,15 +3658,19 @@ def test_b11_gc_na_windows_are_checked_without_cg_and_named():
 
 def test_b11_report_withholds_b1_and_prints_both_risks():
     # SHARED.md V6, What P2 builds (5): the as-built report prints the contrast as a cross-check with its interval,
-    # T_ref and the guards as built, and gives no B1 verdict of its own; its risks follow it
+    # T_ref and the guards as built, and gives no B1 verdict of its own; ruling R6-A3.11.149 (5)(c), (d): the validity
+    # set before it, the two-arm guards beside it (one line each); its risks follow them
     text = _b11_text(_one_run_games(), _c2_model)
     out = P.report(text, peer=text)
     assert not re.search(r"^VERDICT B1", out, re.M), out
     ln = [x for x in out.splitlines() if x.startswith("B1 CROSS-CHECK")]
     assert len(ln) == 1 and re.search(r"contrast [0-9.]+ us per frame, interval -?[0-9.]+ to [0-9.]+ .*T_ref as built "
-                                      r"[0-9.]+ us; guards as built: ", ln[0]), ln
+                                      r"[0-9.]+ us; guards as built: the cross-check is (available|unavailable)", ln[0]), ln
     i = out.splitlines().index(ln[0])
-    tail = out.splitlines()[i + 1:i + 7]
+    assert [x.split(" ")[0] for x in out.splitlines()[i - len(P.VALIDITY):i]] == ["VALIDITY"] * len(P.VALIDITY)
+    two = out.splitlines()[i + 1:i + 1 + len(P.TWO_ARM)]
+    assert [re.match(r"TWO-ARM (.+?) (PASS|FAIL): ", x).group(1) for x in two] == list(P.TWO_ARM), two
+    tail = out.splitlines()[i + 1 + len(P.TWO_ARM):i + 7 + len(P.TWO_ARM)]
     assert [x.strip().split(" ")[0] for x in tail] == ["R-CARRY", "R-COMMON", "R-PATH", "R-PREFIX", "R-REST", "these"], tail
     assert "R-COMMON UNTESTED: no reference record set" in out
     for want in ("B11 contrast", "B11 carryover c_ON", "B11 corrected bound", "R-CARRY falsifier: between-window",
@@ -3385,22 +3738,33 @@ def test_b11_reference_through_the_script(tmp_path):
 
 
 def test_v6_report_on_and_combine_through_the_script(tmp_path):
-    # SHARED.md V6, What P2 builds: --on <V1> <V2> prints sitting V's figures per seat; --combine <V1> <V2> <C1> <C2>
-    # prints VERDICT B1 per seat and the worse seat; a wrong count of logs is a refusal (exit 3)
+    # SHARED.md V6, What P2 builds, and ruling R6-A3.11.149 (6) 6: --on <seat>=<V log> <seat>=<V log> prints sitting
+    # V's figures per seat; --combine V:<seat>=<log> ... C:<seat>=<log> ... prints VERDICT B1 per seat and the worse
+    # seat, each seat's logs paired by its name; a log given by position, or a seat without both logs, is a refusal
+    # (exit 3)
     v, c = tmp_path / "v.log", tmp_path / "c.log"
     v.write_text(_v_text() + "\n", encoding="utf-8")
-    c.write_text(_b11_text(_one_run_games(reps=8), _c_cost(0)) + "\n", encoding="utf-8")
-    rc, out, err = _run_script("--on", v, v)
+    c.write_text(_c_text() + "\n", encoding="utf-8")
+    rc, out, err = _run_script("--on", "a=%s" % v, "b=%s" % v)
     assert rc == 0 and len(re.findall(r"^V6 U [0-9.]+ us per live frame = D 60\.000 ", out, re.M)) == 2, (rc, out, err)
-    assert "VERDICT B1" not in out and re.search(r"^V6 WITHHELD seat \S+: none$", out, re.M), out
-    rc, out, err = _run_script("--combine", v, v, c, c)
-    assert rc == 0 and _classes(out) == ({"1": "PASS", "2": "PASS"}, [("1", "PASS")]), (rc, out, err)
-    rc, out, err = _run_script("--combine", v, v, c)
-    assert rc == 3 and "--combine needs exactly 4 logs" in out, (rc, out, err)
-    # a control run's boot: refused as a sitting log, read by --controls
+    assert "VERDICT B1" not in out and re.search(r"^V6 WITHHELD seat a: none$", out, re.M), out
+    rc, out, err = _run_script("--on", v, v)
+    assert rc == 3 and "REFUSED: PAIRING: '%s' is not of the form <seat>=<log>" % v in out, (rc, out, err)
+    rc, out, err = _run_script("--combine", "V:a=%s" % v, "V:b=%s" % v, "C:b=%s" % c, "C:a=%s" % c)
+    assert rc == 0 and _classes(out) == ({"a": "PASS", "b": "PASS"}, [("a", "PASS")]), (rc, out, err)
+    rc, out, err = _run_script("--combine", "V:a=%s" % v, "V:b=%s" % v, "C:a=%s" % c)
+    assert rc == 3 and "REFUSED: PAIRING: sitting C's seats ['a'] (and the references' []) are not sitting V's" in out, \
+        (rc, out, err)
+    rc, out, err = _run_script("--combine", "V:a=%s" % v, "V:a=%s" % v, "C:a=%s" % c, "C:b=%s" % c)
+    assert rc == 3 and "REFUSED: PAIRING: seat a is named twice for V" in out, (rc, out, err)
+    # a control run's boot: refused as a sitting log, read by --controls; a whole sitting log's every line is a
+    # known form
     k = tmp_path / "k1.log"
     k.write_text(_v_text(boot={"controls": "controls k_mutant=k1", "alloc": K1_OUT}) + "\n", encoding="utf-8")
-    rc, out, err = _run_script("--on", k, v)
-    assert rc == 3 and "REFUSED: K-MUTANT: the sitting log" in out, (rc, out, err)
+    rc, out, err = _run_script("--on", "a=%s" % k, "b=%s" % v)
+    assert rc == 3 and "REFUSED: K-MUTANT: the sitting log V:a" in out, (rc, out, err)
     rc, out, err = _run_script("--controls", k)
-    assert rc == 0 and "CONTROLS PROOF PASS: k_mutant=k1; out of range K1 (needs exactly K1)" in out, (rc, out, err)
+    assert rc == 0 and "CONTROLS PROOF PASS: k_mutant=k1; out of range K1 (needs exactly K1); 0 unknown line forms; " \
+                       "'Failed to patch' absent" in out, (rc, out, err)
+    rc, out, err = _run_script("--controls", k, k)
+    assert rc == 3 and "REFUSED: --controls needs exactly 1 log" in out, (rc, out, err)

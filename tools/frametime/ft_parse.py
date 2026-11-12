@@ -32,10 +32,15 @@ those lines exist, report() states U as not computable rather than computing it 
   sitting log prints none (refuse_k_mutant), a control run's boot names the control it breaks (controls_proof)
   counters, in a V6 log: also span_leave_mismatch (0, VR2's class) and photon_offmain (reported only), both printed
 
-Usage: python -I -B ft_parse.py <LogOutput.log> [<second seat's log>]   (sitting C, as built: the cross-check, no B1)
-       python -I -B ft_parse.py --on <seat 1's sitting-V log> <seat 2's>  (report_on: U and its terms per seat)
-       python -I -B ft_parse.py --combine <V1> <V2> <C1> <C2>              (VERDICT B1 per seat and the worse seat)
-       python -I -B ft_parse.py --controls <a control run's log>           (controls_proof: K1 to K3 under k_mutant)
+Usage: python -I -B ft_parse.py <sitting-C log> --peer <the other seat's sitting-C log> [--ref <reference log>]
+                                   (sitting C, as built: its validity set, the cross-check and the two-arm guards)
+       python -I -B ft_parse.py --on <seat>=<sitting-V log> <seat>=<sitting-V log>
+                                   (report_on: U, its terms and the validity set per seat, seats named)
+       python -I -B ft_parse.py --combine V:<seat>=<log> V:<seat>=<log> C:<seat>=<log> C:<seat>=<log>
+                                   [R:<seat>=<reference log> ...]
+                                   (VERDICT B1 and B3 per seat and the worse seat; a seat's logs paired by its name)
+       python -I -B ft_parse.py --controls <a control run's boot log>
+                                   (controls_proof: K1 to K3 under k_mutant, the unknown line forms, Failed to patch)
 Exit: 0 the report printed; 3 REFUSED (a check refused the input); 4 FT-PARSE REFUSED (a record lacks a key
 REQUIRED_KEYS names: one line names its kind, file, line and keys; or an input holds a line "withheld <class> <n>",
 n >= 1, of a class in READ_CLASSES: the laptop seat script's export rule held back n lines of a class this parse
@@ -299,7 +304,7 @@ INT_KEYS = {"written", "withheld", "seg", "pair", "base_us", "segs", "of", "cycl
             "cap", "steady", "reads_on", "reads_win", "writes_on", "starts", "nonempty", "faults",
             "reads", "scopes", "tmax", "unscoped", "depth_err",
             "run", "pos", "coin", "wi", "f0", "res", "gcn", "cW", "cR", "cS", "cE", "prun", "nm", "cyc", "p90",
-            "own_split", "recv_offmain", "ledger_cycle_miss", "sock_p95", "sock_n",
+            "own_split", "recv_offmain", "ledger_cycle_miss", "sock_n", "heap",
             "sock_thr", "sock_main", "cP", "cX", "ab_back", "ab_retry", "span_leave_mismatch", "photon_offmain"}
 # the B11 window line (ruling R6-A3.11.138, SHARED.md's line contract): the fields it appends to the w line, in order.
 # q = C° by tenth, r = the retained direct execution R by tenth, qn = frames by tenth, prun = the window is in a plant
@@ -316,8 +321,10 @@ B11_FIELDS = ("run", "pos", "unit", "coin", "wi", "f0", "pred", "prun", "res", "
               "r", "qn", "wu", "tok", "nm") + V6_FIELDS
 W_LIST_KEYS = ("q", "r", "qn")
 # keys that print NA when unread, read as None: a w line's a* bytes (the allocation counter) and cG (the GC hook), a p
-# line's heap (SHARED.md V6: "The p line gains ab_back=, ab_retry= and heap=<bytes in use>")
-NA_KEYS = {"w": ("cG",) + A_FIELDS, "p": ("heap",)}
+# line's sock_p95 (FtUpload.SockStats prints NA when the point had no datagram, or when the percentile falls in the open
+# last bucket). A p line's heap= is always a number (GC.GetTotalMemory, plugin/FtFrames.cs:279; ruling R6-A3.11.149 (6)
+# 9 and 10): it is an INT_KEYS key, and NA there is a non-integer value
+NA_KEYS = {"w": ("cG",) + A_FIELDS, "p": ("sock_p95",)}
 
 
 # a line the build writes under an emitted kind that is not that kind's record, told apart by its first word (as
@@ -708,7 +715,141 @@ EMITTED_UNREAD = {
     "steam": "SteamAuth's 'steam ticket withheld' trace; FtRoute's refusals reach VR6 through the refusals line",
     "FT": "the FT-GATE and FT-ROOM traces; _LINE does not match them (the hyphen); their two failure lines are "
           "RAW_FAILURES, read as fixed texts in the raw lines",
+    # ruling R6-A3.11.149 (6) 9 and 10: the merged tip's other boot traces. Each form is known to unknown_forms (FORMS)
+    "alloc_init": "FtAlloc.Init's outcome (why=ok, sha, code or failed:<type>); the alloc boot line's pin= prints ok "
+                  "exactly when it is ok, and boot_controls judges that line",
+    "ledger": "FtUpload.Install's disk-log tap (log= why= types=); the window lines' wu and tok carry what the ledger "
+              "counts (window_reconcile, u_games)",
+    "reference": "the FrameTimeRef build's 'reference collectors not installed' trace; a reference input is known by "
+                 "its marker alone (build_marker)",
+    "ft_dll": "FtArm's 'ft_dll staging failed' warning (the kind is FtArm.DLL_PROP); the arming reads the peer's "
+              "ft_dll, and a seat that never arms writes no settled line, which complete() requires",
 }
+
+
+# ruling R6-A3.11.149 (6) 9 and 10, (8): every [FRAME-TIME] line form the emitter's source prints (plugin/*.cs at the
+# merged tip), as (lead, payload pattern, keys). lead is the literal the source prints first after "[FRAME-TIME] "
+# (the test holds the set of the source's leads to this table's); the pattern fullmatches the line's payload (the text
+# after "[FRAME-TIME] "); keys, for a line whose fields this table fixes, are its keys in printed order ("?" marks one
+# printed only sometimes), which the test reads from the source statement. unknown_forms() lists every [FRAME-TIME]
+# line whose payload no pattern matches; controls_proof needs 0 of them.
+_FV = r"\S+"
+
+
+def _kv(words, keys, vals=None):
+    """A line of fixed keys: the words, then each key=value in order (a key ending '?' optional)."""
+    p = re.escape(words)
+    for k in keys:
+        name = k.rstrip("?")
+        one = r" %s=(?:%s)" % (name, (vals or {}).get(name, _FV))
+        p += "(?:%s)?" % one if k.endswith("?") else one
+    return p
+
+
+def _star(words):
+    """A line of key=value fields the parser reads by key (REQUIRED_KEYS guards the keys it indexes)."""
+    return re.escape(words) + r"(?: [^\s=]+=\S*)*"
+
+
+def _msg(words):
+    """A trace or failure line: the words, then any text."""
+    return re.escape(words) + r"(?: .*)?"
+
+
+_I, _N, _INA = r"-?\d+", r"\d+", r"-?\d+|NA"
+COUNTER_LINE_KEYS = ("g", "frames", "missing_end", "cycle_failures", "span_depth_violations", "photon_offmain",
+                     "span_leave_mismatch")
+_CAL_FAILED = r"cal i=-?\d+(?: [^\s=]+=\S*)* failed: .*"
+FORMS = (
+    # the lines whose fields this table fixes (the five boot lines, the controls line, the counters line, the census
+    # summary, the mark cost and the other boot traces)
+    ("alloc pin=", _kv("alloc", ("pin", "planted", "empty"),
+                       {"pin": "ok|differs", "planted": r"(?:\d+|NA)/\d+", "empty": r"\d+|NA"}),
+     ("pin", "planted", "empty")),
+    ("alloc_init why=", _kv("alloc_init", ("why",)), ("why",)),
+    ("scope plant asked=", _kv("scope plant", ("asked", "got"), {"asked": _I, "got": _INA}), ("asked", "got")),
+    ("scope census entries=", _kv("scope census", ("entries", "wrapped", "failed?"), {"entries": _N, "wrapped": _N}),
+     ("entries", "wrapped", "failed?")),
+    ("nest plant asked=", _kv("nest plant", ("asked", "x", "e", "p"), {"asked": _I, "x": _INA, "e": _INA, "p": _INA}),
+     ("asked", "x", "e", "p")),
+    ("photon patches n=", _kv("photon patches", ("n", "names"), {"n": _N, "names": r"[\w.,]*"}), ("n", "names")),
+    ("controls k_mutant=", _kv("controls", ("k_mutant",), {"k_mutant": "none|k1|k2|k3"}), ("k_mutant",)),
+    ("counters g=", _kv("counters", COUNTER_LINE_KEYS, dict((k, _I) for k in COUNTER_LINE_KEYS)), COUNTER_LINE_KEYS),
+    ("census registered=", _kv("census", CENSUS_SUMMARY_KEYS, dict((k, _I) for k in CENSUS_SUMMARY_KEYS)),
+     CENSUS_SUMMARY_KEYS),
+    ("mark cost cyc=", _kv("mark cost", ("cyc", "p90", "n"), {"cyc": _I, "p90": _I, "n": _I}), ("cyc", "p90", "n")),
+    ("ledger log=", _kv("ledger", ("log", "why", "types"), {"log": "0|1", "types": r"[\w,]*"}), ("log", "why", "types")),
+    ("clock installed freq=", _kv("clock installed", ("freq", "hires", "cycles"), {"freq": _N, "hires": "0|1",
+                                                                                   "cycles": "0|1"}),
+     ("freq", "hires", "cycles")),
+    ("sitting complete g=", _kv("sitting complete", ("g",), {"g": _I}), ("g",)),
+    # the two build markers (MARK_FT and MARK_REF below; the test holds them equal)
+    ("build variant=FrameTime", re.escape("build variant=FrameTime"), None),
+    ("build variant=FrameTimeRef SCR_FT_REF=NOCOLLECTORS", re.escape("build variant=FrameTimeRef SCR_FT_REF=NOCOLLECTORS"),
+     None),
+    # the records the parser reads by key
+    ("a3 g=", _star("a3"), None), ("a3drain g=", _star("a3drain"), None),
+    ("a3rows registered=", _star("a3rows"), None), ("a3rows registered=0 expected=", _star("a3rows"), None),
+    ("answer_replay g=", _star("answer_replay"), None), ("between g=", _star("between"), None),
+    ("cal i=", _star("cal"), None), ("cal i=", _CAL_FAILED, None),
+    ("cal i=-1 why=patches kind=entries built=1 own_owner=", _star("cal"), None),
+    ("cal i=-1 why=patches kind=entries reference=1 built=0", _star("cal"), None),
+    ("cal i=-1 why=patches kind=entries failed: ", _CAL_FAILED, None),
+    ("census g=", _star("census"), None), ("disarmed input=", _star("disarmed"), None),
+    ("flushed g=", _star("flushed"), None), ("heavy g=", _star("heavy"), None),
+    ("menu seg=", _star("menu"), None), ("menu_armed segments=", _star("menu_armed"), None),
+    ("menu_base base_us=", _star("menu_base"), None), ("menu_done why=", _star("menu_done"), None),
+    ("offthread g=", _star("offthread"), None), ("opened g=", _star("opened"), None),
+    ("p pt=", _star("p"), None), ("plant c_plant=", _star("plant"), None), ("refusals why=", _star("refusals"), None),
+    ("settled g=", _star("settled"), None), ("spans g=", _star("spans"), None), ("w pt=", _star("w"), None),
+    # failure lines (FAILURE_EVENTS, RAW_FAILURES and the other warnings) and traces, read by their words
+    ("FT-GATE patched ", _msg("FT-GATE patched"), None), ("FT-GATE report failed: ", _msg("FT-GATE report failed:"), None),
+    ("FT-ROOM joined offline=", _msg("FT-ROOM joined"), None), ("FT-ROOM read failed: ", _msg("FT-ROOM read failed:"), None),
+    ("armed room=", _msg("armed"), None), ("churn freeze failed: ", _msg("churn freeze failed:"), None),
+    ("churn timer frozen room=", _msg("churn timer frozen"), None),
+    ("clock refused: player-loop phase missing (EarlyUpdate ", _msg("clock refused:"), None),
+    ("ended why=complete pt=", _msg("ended"), None),
+    ("ft room options max=2 visible=0 room=", _msg("ft room options"), None),
+    ("ft_dll staging failed: ", _msg("ft_dll staging failed:"), None),
+    ("game end failed: ", _msg("game end failed:"), None), ("game over failed: ", _msg("game over failed:"), None),
+    ("game start failed: ", _msg("game start failed:"), None),
+    ("game start failed: menu=1 process", _msg("game start failed:"), None),
+    ("menu_wait input=", _msg("menu_wait"), None), ("not armed input=", _msg("not armed"), None),
+    ("opened line failed: ", _msg("opened line failed:"), None), ("peer ", _msg("peer"), None),
+    ("photon patches report failed: ", _msg("photon patches report failed:"), None),
+    ("ranked-check skipped", _msg("ranked-check skipped"), None),
+    ("ranked-check test hook answered true", _msg("ranked-check test hook answered true"), None),
+    ("reference collectors not installed: patch classes skipped=", _msg("reference collectors not installed:"), None),
+    ("refused what=", _msg("refused"), None),
+    ("rematch answer failed: ", _msg("rematch answer failed:"), None),
+    ("rematch held: published ", _msg("rematch held:"), None),
+    ("rematch mutant: answered Yes at once", _msg("rematch mutant: answered Yes at once"), None),
+    ("rematch not answered (sitting over)", _msg("rematch not answered (sitting over)"), None),
+    ("rematch publish failed: ", _msg("rematch publish failed:"), None),
+    ("rematch timeout g=", _msg("rematch timeout"), None), ("rematch yes g=", _msg("rematch yes"), None),
+    ("room call refused op=", _msg("room call refused"), None), ("room name=", _msg("room"), None),
+    ("self-drive ", _msg("self-drive"), None), ("self-drive join failed: ", _msg("self-drive join failed:"), None),
+    ("self-drive join room=", _msg("self-drive join"), None), ("self-drive pick index=", _msg("self-drive pick"), None),
+    ("self-drive spawn threw: ", _msg("self-drive spawn threw:"), None),
+    ("self-drive spawn tick failed: ", _msg("self-drive spawn tick failed:"), None),
+    ("staged ", _msg("staged"), None), ("start failed: ", _msg("start failed:"), None),
+    ("steam ticket withheld route=", _msg("steam ticket withheld"), None),
+)
+_FORMS_RE = [re.compile(p) for _, p, _ in FORMS]
+
+
+def unknown_forms(text):
+    """Every [FRAME-TIME] line of text whose payload (the text after '[FRAME-TIME] ', trailing space dropped) no FORMS
+    pattern matches: [(1-based line number, payload)]."""
+    out = []
+    for n, ln in enumerate(text.splitlines(), 1):
+        i = ln.find("[FRAME-TIME] ")
+        if i < 0:
+            continue
+        pay = ln[i + len("[FRAME-TIME] "):].rstrip()
+        if not any(r.fullmatch(pay) for r in _FORMS_RE):
+            out.append((n, pay))
+    return out
 
 
 def zero_state(recs):
@@ -1082,11 +1223,12 @@ def _until_last_settled(text):
     return ls[:last + 1]
 
 
-def vr1(recs, text, tref):
+def vr1(recs, text, tref, name="T_ref"):
     """VR1, no cap (ruling FRAME-TIME-ROUND-R6-A3): up to the last settled line the log carries the frame-time
     calibration hold's line ("[FPSCAP] held by frame-time calibration": the mod's frame-rate cap held off while the
     armfile is present, proven reached by its own line, lesson #83) and no other [FPSCAP] line; every settled line
-    vsync 0 and target -1 or above 1000; T_ref not within 2 percent of 1e6 / k for k in 60, 75, 120, 144, 165, 240."""
+    vsync 0 and target -1 or above 1000; the frame time tref (named name: T_ref, or T_on in sitting V, ruling
+    R6-A3.11.149 (6) 3) not within 2 percent of 1e6 / k for k in 60, 75, 120, 144, 165, 240."""
     bad = []
     caps = [ln.strip() for ln in _until_last_settled(text) if "[FPSCAP]" in ln]
     if not any(FPSCAP_HOLD in ln for ln in caps):
@@ -1103,7 +1245,7 @@ def vr1(recs, text, tref):
                 bad.append("settled g=%d target=%d" % (r["g"], tg))
     for k in (60, 75, 120, 144, 165, 240):
         if abs(tref - 1e6 / k) <= 0.02 * (1e6 / k):
-            bad.append("T_ref %.1f us within 2 percent of 1e6/%d" % (tref, k))
+            bad.append("%s %.1f us within 2 percent of 1e6/%d" % (name, tref, k))
     return not bad, bad
 
 
@@ -2854,19 +2996,6 @@ def p_line_faults(recs, valid):
     return why
 
 
-def b11_seat_withholds(recs, e):
-    """The seat-level reasons B1 is withheld for this seat's log as built: writer cycles printing NA (P1's notes), any
-    ownership fault (own_split nonzero or not printed, the integrator's ruling on the hand-back (3)) and the p line's
-    faults (p_line_faults). The peer-driven charge of D5 left with B_U (ruling R6-A3.11.146 (7))."""
-    why = []
-    if e["T"]["wu_na"]:
-        why.append("writer cycles print NA for %s on this seat (W_U not computable)" % ", ".join(e["T"]["wu_na"]))
-    osp = own_split_faults(recs, e["T"])
-    if osp:
-        why.append("ownership faults (own_split) at %s" % ", ".join(pt for pt, _ in osp))
-    return why + p_line_faults(recs, e["T"]["valid"])
-
-
 def b11_transitions(recs, T):
     """The class-transition overhead per arm (SHARED.md, P1's notes): nm times the boot line's median cost, as a share
     of the arm's C. It stays in the charge (method-v53.md:13-48): reported, never subtracted. None, with the reason,
@@ -2915,7 +3044,8 @@ def b11_report(recs, ref_recs=None, first_game=1):
                              else "no C", tx["OFF"][0], "%.4f percent" % (100 * tx["OFF"][1])
                              if tx["OFF"][1] is not None else "no C"))
     if T["wu_na"]:
-        out.append("B11 writers: cycles print NA for %s: B1 is withheld for this seat" % ", ".join(T["wu_na"]))
+        out.append("B11 writers: cycles print NA for %s (reported: the writers left the contrast's verdict with B_U; "
+                   "in sitting V an NA withholds B1)" % ", ".join(T["wu_na"]))
     if T["gna"]:
         out.append("B11 GC: G unavailable (cG=NA) in %d windows (%s): their identity is checked without cG, their C° "
                    "keeps their GC, and G_U takes the all-GC fallback (method-v52.md:103) for the estimate"
@@ -2987,7 +3117,13 @@ MIN_GAMES_V = 6                           # "fewer than 6 games remain" withhold
 K_TOL = 0.05                              # K2 and K3: each spin reads within 5 percent in its own class
 K1_ABOVE = 4096                           # K1: the planted median from the bytes asked to 4096 above
 # the four PhotonPeer entries P1 scopes as class X (Photon3Unity3D 4.1.7.0); the patch line names each attached patch
-PHOTON_ENTRIES = ("DispatchIncomingCommands", "SendOutgoingCommands", "SendAcksOnly", "Service")
+#: ruling R6-A3.11.149 (1) and (6) 4: the patch line names ten methods, each as FtPhoton.ReportPatched prints it
+# (DeclaringType.Name + "." + Name, plugin/FtPhoton.cs:93): PhotonPeer's four (class X) and LoadBalancingClient's six
+# listener callbacks (class E)
+PHOTON_ENTRIES = ("PhotonPeer.DispatchIncomingCommands", "PhotonPeer.SendOutgoingCommands", "PhotonPeer.SendAcksOnly",
+                  "PhotonPeer.Service", "LoadBalancingClient.OnOperationResponse", "LoadBalancingClient.OnEvent",
+                  "LoadBalancingClient.OnStatusChanged", "LoadBalancingClient.DebugReturn",
+                  "LoadBalancingClient.OnMessage", "LoadBalancingClient.OnDisconnectMessageReceived")
 RANK = {"PASS": 0, "SID": 1, "WITHHELD": 2, "FAIL": 3}     # the worse seat: a FAIL is worse than an unresolved seat
 V_RISKS = (
     "R-GC (SHARED.md V6): the collectors add to collection work at most in proportion to the bytes they allocate, and "
@@ -3009,16 +3145,21 @@ def contrast_input(recs):
                       % ", ".join("g=%s force=%s" % x for x in bad))
 
 
-def cross_check_line(e, guards):
+def cross_check_line(e, sc):
     """The as-built report's B1 line for a window log (sitting C): the corrected contrast and its interval, T_ref as
-    built and the guards as built. It gives no verdict (SHARED.md V6: the contrast is a cross-check)."""
+    built, and the cross-check as built (ruling R6-A3.11.149 (5)(c), (d)): unavailable while a guard of the validity
+    set fails, else available and weakened by any two-arm guard that did not pass. It gives no verdict (SHARED.md V6:
+    the contrast is a cross-check; the combining step tests it against U_hi)."""
+    weak = [n for n, ok, _ in sc["two"] if not ok]
+    st = ("unavailable (%s)" % ", ".join(sc["unavail"]) if sc["unavail"]
+          else "available%s" % (", weakened by %s" % ", ".join(weak) if weak else ""))
     if e is None:
         return ("B1 CROSS-CHECK not computable (the B11 window estimator above); no B1 verdict here: the combining "
-                "step (--combine) gives it; guards as built: %s" % (guards or "none withholds"))
+                "step (--combine) gives it; guards as built: the cross-check is %s" % st)
     return ("B1 CROSS-CHECK (sitting C; no B1 verdict here: the combining step, --combine, gives it from sitting V's "
             "U_hi): contrast %.3f us per frame, interval %.3f to %.3f (lower end at z %.4f, upper at z %.4f), T_ref as "
-            "built %.1f us; guards as built: %s" % (e["center"], e["lb"], e["bu"], Z_LO, Z_UP, e["tref"],
-                                                     guards or "none withholds"))
+            "built %.1f us; guards as built: the cross-check is %s" % (e["center"], e["lb"], e["bu"], Z_LO, Z_UP,
+                                                                      e["tref"], st))
 
 
 def _num(v):
@@ -3034,8 +3175,9 @@ def boot_controls(recs):
     """The five V6 boot lines (ruling R6-A3.11.147 (5), SHARED.md V6 What P1 builds), each read exactly once; a
     missing, repeated or malformed line counts as its control out of range. Returns {name: (ok, reading)} for pin
     (alloc pin=ok), K1 (the planted median from the bytes asked to 4096 above, the empty median 0), K2 (the scope
-    plant within 5 percent), K3 (each of x, e and p within 5 percent), patches (n equals the names counted and every
-    PhotonPeer entry attached) and census (every census entry point wrapped by a scope)."""
+    plant within 5 percent), K3 (each of x, e and p within 5 percent), patches (n equals the names counted, and the
+    names are exactly PHOTON_ENTRIES' ten, typed, each once; the warning 'photon patches report failed' is its own
+    failure) and census (every census entry point wrapped by a scope, and no failed= printed: the census threw)."""
     def one(kind, head):
         ls = [r for r in recs if r["kind"] == kind and (head is None or r["head"] == head)]
         return (ls[0], None) if len(ls) == 1 else (None, "%d '%s%s' lines (needs exactly 1)"
@@ -3073,18 +3215,26 @@ def boot_controls(recs):
     ph, why = one("photon", "patches")
     if ph is None:
         out["patches"] = (False, why)
+    elif "n" not in ph:
+        out["patches"] = (False, "the patch report failed (the line prints no n=)")
     else:
         names = [x for x in str(ph.get("names", "")).split(",") if x]
-        gone = [x for x in PHOTON_ENTRIES if x not in set(nm.split(".")[-1] for nm in names)]
-        out["patches"] = (_num(ph.get("n", "")) == len(names) and not gone,
-                          "n=%s for %d names%s" % (ph.get("n"), len(names), "; not attached: %s" % ", ".join(gone)
-                                                   if gone else ""))
+        gone = [x for x in PHOTON_ENTRIES if x not in names]
+        alien = [x for x in names if x not in PHOTON_ENTRIES]
+        dup = sorted(set(x for x in names if names.count(x) > 1))
+        out["patches"] = (_num(ph.get("n", "")) == len(names) and not gone and not alien and not dup,
+                          "n=%s for %d names%s%s%s" % (ph.get("n"), len(names),
+                                                      "; not attached: %s" % ", ".join(gone) if gone else "",
+                                                      "; not of the ten: %s" % ", ".join(alien) if alien else "",
+                                                      "; named twice: %s" % ", ".join(dup) if dup else ""))
     c, why = one("scope", "census")
     if c is None:
         out["census"] = (False, why)
     else:
         ent, wr = _num(c.get("entries", "")), _num(c.get("wrapped", ""))
-        out["census"] = (ent is not None and ent > 0 and wr == ent, "entries %s, wrapped %s" % (ent, wr))
+        out["census"] = (ent is not None and ent > 0 and wr == ent and "failed" not in c,
+                         "entries %s, wrapped %s%s" % (ent, wr, "; the census threw (failed=%s)" % c["failed"]
+                                                       if "failed" in c else ""))
     return out
 
 
@@ -3114,20 +3264,30 @@ def refuse_k_mutant(recs, src):
 def controls_proof(text, src="boot"):
     """A control run's boot (P1's k_mutant): K1 to K3 are read from the numbers the boot prints (boot_controls), never
     from k_mutant's name. The proof holds when the controls read out of range are exactly the one k_mutant names (k1,
-    k2 or k3), or none under k_mutant=none. Returns (ok, lines)."""
+    k2 or k3), or none under k_mutant=none; and (ruling R6-A3.11.149 (8)) every [FRAME-TIME] line of the boot is a
+    form the parser knows (unknown_forms: each is listed, and the count must be 0), and no line holds "Failed to
+    patch" (a patch that did not attach, lesson #83). Returns (ok, lines)."""
     refuse_withheld(text, src)
     recs = read(text, src)
     km, n = k_mutant(recs)
     bc = boot_controls(recs)
     out = ["CONTROLS %s %s: %s" % (k, "in range" if bc[k][0] else "OUT OF RANGE", bc[k][1]) for k in ("K1", "K2", "K3")]
+    unk = unknown_forms(text)
+    out += ["CONTROLS UNKNOWN FORM line %d: %s" % (i, pay) for i, pay in unk]
+    out.append("CONTROLS unknown [FRAME-TIME] line forms: %d (needs 0)" % len(unk))
+    ftp = [i for i, ln in enumerate(text.splitlines(), 1) if "Failed to patch" in ln]
+    out.append("CONTROLS 'Failed to patch': %s" % ("absent" if not ftp else "PRESENT at lines %s"
+                                                   % ", ".join(map(str, ftp[:8]))))
     if km != "none" and km not in K_MUTANTS:
         return False, out + ["CONTROLS PROOF FAIL: %s" % ("k_mutant=%s is not none, k1, k2 or k3" % km if km is not None
                                                           else "%d controls lines (needs exactly 1)" % n)]
     want = set() if km == "none" else {K_MUTANTS[km]}
     got = set(k for k in ("K1", "K2", "K3") if not bc[k][0])
     ok = got == want
-    out.append("CONTROLS PROOF %s: k_mutant=%s; out of range %s (needs exactly %s)"
-               % ("PASS" if ok else "FAIL", km, ", ".join(sorted(got)) or "none", ", ".join(sorted(want)) or "none"))
+    ok = ok and not unk and not ftp
+    out.append("CONTROLS PROOF %s: k_mutant=%s; out of range %s (needs exactly %s); %d unknown line forms; 'Failed to "
+               "patch' %s" % ("PASS" if ok else "FAIL", km, ", ".join(sorted(got)) or "none",
+                              ", ".join(sorted(want)) or "none", len(unk), "absent" if not ftp else "present"))
     return ok, out
 
 
@@ -3196,12 +3356,273 @@ def _wins(ws):
                                                                        else "")
 
 
-def sitting_v(recs, text, peer_recs, first_game=1):
-    """One seat's sitting V (SHARED.md V6, The bound; B1 is WITHHELD for a seat when): U and its five terms, hw, df,
-    U_hi = U + hw, L, T_on, T_ref = T_on - U_hi, the class classify(U_hi, T_ref, hw, L), the games' u_g, R-GC's
-    sitting-V figures, and the WITHHELD list. peer_recs is the other seat's sitting-V log: the arm and force
-    conditions hold on either seat. Until the integrator rules on the guard table, sitting V applies VR1 and every
-    line invariant (window_reconcile) beside the V6 list. Returns a dict."""
+FHAT_PAIR = 0.01            # ruling R6-A3.11.149 (6) 6: a seat's sitting-V and sitting-C logs agree in f_hat within 1 percent
+# ruling R6-A3.11.149 (5)(a) and (d): the validity set (the guards that need no second arm) and the two-arm guards
+VALIDITY = ("complete sitting", "census summary", "VR1", "VR2 instrument", "VR5 records", "VR6 build", "F18",
+            "counters line", "line invariants", "p-line faults", "own_split", "build marker")
+TWO_ARM = ("VR2 e_C_lo", "VR3", "VR4", "VR5 OFF-window rule", "VR7", "VR8 predecessor", "VR9", "R-CARRY", "R-COMMON")
+NOT_COMPUTABLE = (Refused, KeyError, ZeroDivisionError, ValueError)
+
+
+def _ok(bad):
+    return not bad, bad
+
+
+def _guard(fn):
+    """One validity guard's (ok, reasons). A guard that cannot be computed fails with its reason: it passes nothing."""
+    try:
+        ok, why = fn()
+    except NOT_COMPUTABLE as x:
+        return False, ["not computable: %s" % x]
+    return bool(ok), list(why)
+
+
+def _reasons(why, k=3):
+    return "; ".join(why[:k]) + (" and %d more" % (len(why) - k) if len(why) > k else "")
+
+
+def _complete_row(recs, text, peer_recs, peer_text):
+    """The complete sitting and the absent-record sweep (complete(), records_missing()), with this seat's failure
+    events and fixed failure texts and the peer seat's, parsed and raw (as report() sweeps them since Codex
+    PARSER-FIX-R1 HIGH 2: a failure event's meaning holds for both seats)."""
+    bad = complete(recs) + raw_failure_events(text)
+    if peer_recs is None:
+        bad.append("peer seat: its records were not read, so its failure events were not swept")
+    else:
+        bad += ["peer seat: " + w for w in failure_events(peer_recs) + raw_failure_events(peer_text or "")]
+    return _ok(bad)
+
+
+def _census_row(recs, peer_recs):
+    bad = census_summary(recs)[2]
+    if peer_recs is not None:
+        bad += ["peer seat: " + w for w in census_summary(peer_recs)[2]]
+    return _ok(bad)
+
+
+def _vr1_row(recs, text, t, name):
+    if t is None:
+        return False, ["%s not computable, so the cap band is not checked" % name]
+    return vr1(recs, text, t, name)
+
+
+def _vr6_row(recs, peer_recs):
+    ok, why, pairs, dis = vr6_build(recs)
+    pdis = disarms(peer_recs) if peer_recs is not None else []
+    return ok and not pdis, why + (["peer seat disarmed: " + "; ".join(pdis)] if pdis else [])
+
+
+def _f18_row(recs, first_game):
+    ok, reading, why, us = f18(recs, first_game)
+    return ok, ["reading %s: %s" % (reading, w) for w in why]
+
+
+def _own_split_row(recs, pts):
+    osp = [q["pt"] for q in recs if q["kind"] == "p" and q["pt"] in pts and q.get("own_split", 1) != 0]
+    return _ok(["ownership faults at %s%s" % (", ".join(osp[:4]), " and %d more" % (len(osp) - 4) if len(osp) > 4
+                                              else "")] if osp else [])
+
+
+def _marker_row(text, src):
+    try:
+        build_marker(text, "measurement", src)
+    except MarkerRefused as x:
+        return False, [str(x)]
+    return True, []
+
+
+def validity_set(recs, text, peer_recs, peer_text, t_vr1, src, first_game=1, t_name="T_ref"):
+    """Ruling R6-A3.11.149 (5)(a): the guards that need no second arm, each a row (name, ok, reasons) in VALIDITY's
+    order: the complete sitting and the absent-record sweep with the failure events and the fixed failure texts (both
+    seats'); the census summary (both seats'); VR1 at t_vr1, named t_name (sitting V: T_on, ruling (6) 3; sitting C: T_ref
+    as built); VR2's instrument half; VR5's records half; VR6's build half with both seats' disarm lines; F18; the
+    counters line of every game 0 to 16 (span_leave_mismatch 0); every line invariant; the p-line faults and own_split
+    over the points of the measured games, void rounds kept; the build marker (a failed one withholds here, naming its
+    word; report() still refuses it). Sitting V withholds B1 on any failed row (sitting_v); sitting C has no cross-check
+    while any row fails (sitting_c). (5)(b)'s exception is empty: the one record the emitter writes only after OFF
+    windows, the plant line (FtPlant.Fix, plugin/FtPlant.cs:35, called at plugin/FtFrames.cs:285-287 once a game's OFF
+    frames reach a window), is not in the sweep (records_missing, complete); e_c, a two-arm guard, reads it. So sitting
+    V's sweep leaves nothing out."""
+    pts = set(q["pt"] for q in recs if q["kind"] == "p" and q["game"] >= first_game)
+    rows = []
+    rows.append(("complete sitting",) + _guard(lambda: _complete_row(recs, text, peer_recs, peer_text)))
+    rows.append(("census summary",) + _guard(lambda: _census_row(recs, peer_recs)))
+    rows.append(("VR1",) + _guard(lambda: _vr1_row(recs, text, t_vr1, t_name)))
+    rows.append(("VR2 instrument",) + _guard(lambda: vr2(recs, LAST_GAME)))
+    rows.append(("VR5 records",) + _guard(lambda: vr5_records(recs, 0, LAST_GAME)))
+    rows.append(("VR6 build",) + _guard(lambda: _vr6_row(recs, peer_recs)))
+    rows.append(("F18",) + _guard(lambda: _f18_row(recs, first_game)))
+    rows.append(("counters line",) + _guard(lambda: _ok(counters_faults(recs, range(0, LAST_GAME + 1)))))
+    rows.append(("line invariants",) + _guard(lambda: _ok(window_reconcile(recs))))
+    rows.append(("p-line faults",) + _guard(lambda: _ok(p_line_faults(recs, pts))))
+    rows.append(("own_split",) + _guard(lambda: _own_split_row(recs, pts)))
+    rows.append(("build marker",) + _guard(lambda: _marker_row(text, src)))
+    return rows
+
+
+def _two(name, fn):
+    try:
+        ok, det = fn()
+    except NOT_COMPUTABLE as x:
+        return name, False, "not computable: %s" % x
+    return name, bool(ok), det
+
+
+def _need_e(e):
+    if e is None:
+        raise Refused("no contrast")
+    return e
+
+
+def _two_ec(recs, first_game):
+    m, hw, df, elo, ng, miss = e_c(recs, first_game=first_game)
+    return elo >= 0.5, "e_C %.4f, lower end %.4f (needs at least 0.5)" % (m, elo)
+
+
+def _two_vr3(recs):
+    est, hw, df, r1 = dC(recs)
+    return r1 <= VR3_MAX, "lag-1 %.3f (max %.3f)" % (r1, VR3_MAX)
+
+
+def _two_vr4(e):
+    e = _need_e(e)
+    return vr4(e["hw"], e["tref"]), ("the contrast's half-width %.3f us against 1.5 percent of T_ref as built, %.2f us"
+                                     % (e["hw"], 0.015 * e["tref"]))
+
+
+def _two_vr5(recs):
+    ok, bad = vr5_points(recs)
+    return ok, _reasons(bad) if bad else "holds"
+
+
+def _two_vr7(recs, first_game):
+    ok, bad = vr7(recs, first_game)
+    return ok, _reasons(bad) if bad else "no H fails"
+
+
+def _two_vr8(recs, first_game):
+    flag, a, b = predecessor(recs, first_game)
+    return not flag, "%s (after ON %d rounds, after OFF %d)" % ("FLAG" if flag else "no flag", len(a), len(b))
+
+
+def _two_vr9(recs, e, first_game):
+    e = _need_e(e)
+    elo = e_c(recs, first_game=first_game)[3]
+    bound = max(0.0, e["bu"]) / min(1.0, max(elo, 1e-9))
+    ok, lo = vr9(recs, bound, first_game)
+    return ok, "gated span time per ON live frame, lower end %.2f us, against %.2f us" % (lo, bound)
+
+
+def _two_carry(e):
+    e = _need_e(e)
+    fals = [a for a in ("ON", "OFF") if e["d10"][a][0] - e["d10"][a][1] > 0]
+    return not fals, "d_ON,10 %.3f +- %.3f us, d_OFF,10 %.3f +- %.3f us%s" % (
+        e["d10"]["ON"][0], e["d10"]["ON"][1], e["d10"]["OFF"][0], e["d10"]["OFF"][1],
+        ": FALSIFIED in %s" % "/".join(fals) if fals else "")
+
+
+def _two_common(recs, e, ref_recs, first_game):
+    e = _need_e(e)
+    if ref_recs is None:
+        return False, "UNTESTED: no reference record set"
+    if e["dcommon"] is None:
+        raise Refused("no ordinary full OFF window for D_common")
+    tot, tlo = reference_common_cost(recs, ref_recs, first_game)
+    bar = (1.0 + e["r_u"]) * e["dcommon"]
+    return not r_common_check(tlo, e["r_u"], e["dcommon"]), (
+        "the reference's total common cost %.3f us (lower end %.3f) against (1 + r_U) D_common %.3f us" % (tot, tlo, bar))
+
+
+def two_arm(recs, e, ref_recs, first_game=1):
+    """Ruling R6-A3.11.149 (5)(d): the guards that need both arms, judged on sitting C as built and printed beside the
+    contrast, each a row (name, ok, detail) in TWO_ARM's order. A guard that cannot be computed (or R-COMMON without a
+    reference) is not passed, and weakens the cross-check as a failed one does; none decides the refutation test
+    (cross_state). In the window design VR4 reads the cross-check's own half-width against T_ref as built, and VR9's
+    bound is the cross-check's corrected upper bound over min(1, e_C_lo); e is the cross-check (None when it did not
+    run: the rows that read it are then not computable)."""
+    rows = []
+    rows.append(_two("VR2 e_C_lo", lambda: _two_ec(recs, first_game)))
+    rows.append(_two("VR3", lambda: _two_vr3(recs)))
+    rows.append(_two("VR4", lambda: _two_vr4(e)))
+    rows.append(_two("VR5 OFF-window rule", lambda: _two_vr5(recs)))
+    rows.append(_two("VR7", lambda: _two_vr7(recs, first_game)))
+    rows.append(_two("VR8 predecessor", lambda: _two_vr8(recs, first_game)))
+    rows.append(_two("VR9", lambda: _two_vr9(recs, e, first_game)))
+    rows.append(_two("R-CARRY", lambda: _two_carry(e)))
+    rows.append(_two("R-COMMON", lambda: _two_common(recs, e, ref_recs, first_game)))
+    return rows
+
+
+def cross_state(unavail, e, u_hi, weak):
+    """Ruling R6-A3.11.149 (5)(e): the cross-check's state on the seat's B1 verdict line, and whether it withholds B1.
+    'unavailable (<guards>)' when sitting C's validity set failed or its contrast did not run (a log that is not a
+    valid measurement refutes nothing); 'REFUTED' when the contrast's lower end is above U_hi; else 'not refuted', or
+    'not refuted, weakened by <guards>' when a two-arm guard did not pass. Unavailable and REFUTED withhold."""
+    if unavail:
+        return "unavailable (%s)" % ", ".join(unavail), True
+    if u_hi is None:
+        return "unavailable (no U_hi to test: U not computable)", True
+    if e["lb"] > u_hi:
+        return "REFUTED", True
+    if weak:
+        return "not refuted, weakened by %s" % ", ".join(weak), False
+    return "not refuted", False
+
+
+def _b3(recs):
+    """B3 on one sitting's log: (True, []) holds, (False, reasons) violated, (None, [reason]) not computable."""
+    try:
+        ok, why, ops = b3(recs)
+    except (Refused, KeyError) as x:
+        return None, ["not computable: %s" % x]
+    return ok, why
+
+
+def _b3_word(b):
+    return "holds" if b[0] else ("VIOLATED: %s" % _reasons(b[1]) if b[0] is False else _reasons(b[1]))
+
+
+def seat_fhat(recs, first_game=1):
+    """The seat's f_hat (ruling R6-A3.11.149 (6) 6, the pairing check): the median over the measured games' settled
+    lines, or None when none prints one."""
+    fs = [r["f_hat"] for r in recs if r["kind"] == "settled" and r["g"] >= first_game and r.get("f_hat", 0) > 0]
+    return statistics.median(fs) if fs else None
+
+
+def sitting_c(recs, text, peer_recs, peer_text, ref_recs, src, first_game=1):
+    """One seat's sitting C (ruling R6-A3.11.149 (5)(c), (d), (g)): the validity set at T_ref as built (any failure
+    makes the cross-check unavailable for this seat), the cross-check (the as-built contrast with T_ref as built; a
+    forced input or an estimator refusal also makes it unavailable), the two-arm guards, B3 and VR8's zero-state half
+    (reported). peer_recs and peer_text are the other seat's sitting-C log, ref_recs this seat's reference record set or
+    None. Returns a dict."""
+    try:
+        t_c = t_ref_windows(recs, first_game)
+    except NOT_COMPUTABLE:
+        t_c = None
+    rows = validity_set(recs, text, peer_recs, peer_text, t_c, src, first_game, "T_ref as built")
+    unavail = [n for n, ok, _ in rows if not ok]
+    e = ewhy = None
+    try:
+        contrast_input(recs)
+        e = b11_estimate(recs, first_game)
+        if t_c is None:
+            raise Refused("T_ref as built not computable")
+        e["tref"] = t_c
+    except NOT_COMPUTABLE as x:
+        e, ewhy = None, str(x)
+        unavail.append("contrast: %s" % x)
+    return dict(rows=rows, unavail=unavail, e=e, ewhy=ewhy, two=two_arm(recs, e, ref_recs, first_game), b3=_b3(recs),
+                zero=zero_state(recs), fhat=seat_fhat(recs, first_game))
+
+
+def sitting_v(recs, text, peer_recs, peer_text, src, first_game=1):
+    """One seat's sitting V (SHARED.md V6, The bound; ruling R6-A3.11.149 (5)(b), (f), (g) and (6) 3): U and its five
+    terms, hw, df, U_hi = U + hw, L, T_on, T_ref = T_on - U_hi, the class classify(U_hi, T_ref, hw, L), the games' u_g,
+    R-GC's sitting-V figures, the validity set (validity_set; VR1 reads T_on), VR8's zero-state half (reported, not
+    judged: void rounds stay in the population, game 0 stays out), B3 on this sitting, the seat's f_hat for the pairing
+    check, and the WITHHELD list: V6's own conditions and each failed validity guard by name. peer_recs and peer_text
+    are the other seat's sitting-V log: the arm and force conditions hold on either seat, and its failure events,
+    census summary and disarm lines join this seat's guards. Returns a dict."""
     why = []
     for who, rr in (("this seat", recs), ("the peer seat", peer_recs)):
         off = [w for w in rr if b11_line(w) and w["arm"] != "ON"]
@@ -3229,63 +3650,72 @@ def sitting_v(recs, text, peer_recs, first_game=1):
     back = [q["pt"] for q in pts if q.get("ab_back", 1) != 0]
     if back:
         why.append("ab_back above 0 or not printed at %s" % ", ".join(back[:4]))
-    why += p_line_faults(recs, set(q["pt"] for q in pts))
-    # the counters line's half of VR2 (P1's V6 emitter, via the integrator, 12 Nov: a nonzero span_leave_mismatch
-    # invalidates the seat's sitting in span_depth_violations' class), over the measured games
-    cf = counters_faults(recs, sorted(set(q["game"] for q in pts)))
-    if cf:
-        why.append("VR2 counters: %s" % "; ".join(cf))
     wna =sorted(set(t for w in meas for t, x in sorted((_typed(w["wu"], 2, na=True) or {}).items())
                      if x[1] is None))
     if wna:
         why.append("a wu type prints NA cycles (%s)" % ", ".join(wna))
-    osp = [q["pt"] for q in pts if q.get("own_split", 1) != 0]
-    if osp:
-        why.append("ownership faults (own_split) at %s" % ", ".join(osp[:4]))
-    miss = window_reconcile(recs)
-    if miss:
-        why.append("line invariants: %s%s" % ("; ".join(miss[:3]), " and %d more" % (len(miss) - 3)
-                                              if len(miss) > 3 else ""))
-    ug, f = u_games(recs, first_game)
-    be = sorted(g for g, d in ug.items() if d["bE"] is not None and d["bE"] <= 0)
-    if be:
-        why.append("bE is 0 or below in games %s" % ", ".join(map(str, be)))
-    if len(ug) < MIN_GAMES_V:
-        why.append("%d games remain (needs at least %d)" % (len(ug), MIN_GAMES_V))
-    v = dict(games=ug, why=why, U=None, hw=None, df=None, U_hi=None, L=None, T_on=None, T_ref=None, cls=None,
-             terms=None, bK=None, heap=None)
+    v = dict(games={}, why=why, U=None, hw=None, df=None, U_hi=None, L=None, T_on=None, T_ref=None, cls=None,
+             terms=None, bK=None, heap=None, N=None)
     pl = [q for q in recs if q["kind"] == "p"]
     v["heap"] = pl[-1].get("heap") if pl else None
     # reported only (no rule reads it): X and listener scopes entered off the main thread, over the measured games
     v["photon_offmain"] = sum(r.get("photon_offmain") or 0 for r in recs
                               if r["kind"] == "counters" and r.get("g", -1) >= first_game)
+    try:
+        ug, f = u_games(recs, first_game)
+    except NOT_COMPUTABLE as x:
+        ug, f = {}, None
+        why.append("U not computable: %s" % x)
+    v["games"] = ug
+    if ug:
+        N = sum(d["n"] for d in ug.values())
+        v.update(N=N, T_on=sum(d["sF"] for d in ug.values()) * 1e6 / f / N)
+    be = sorted(g for g, d in ug.items() if d["bE"] is not None and d["bE"] <= 0)
+    if be:
+        why.append("bE is 0 or below in games %s" % ", ".join(map(str, be)))
+    if len(ug) < MIN_GAMES_V:
+        why.append("%d games remain (needs at least %d)" % (len(ug), MIN_GAMES_V))
     pairs = [(d["u"], d["n"]) for g, d in sorted(ug.items())]
     if not pairs or any(u is None for u, n in pairs):
         why.append("U not computable: a game's G_cap has an NA byte count or bE <= 0" if pairs
                    else "U not computable: no window with plant=0 and res=0 in a measured game")
-        return v
-    try:
-        U, hw, df = fw_interval(pairs, Z_END)
-        le, lh, _ = fw_interval([(d["l"], d["n"]) for g, d in sorted(ug.items())], Z_END)
-    except (ZeroDivisionError, ValueError) as x:
-        why.append("U not computable: fw_interval over %d games (%s)" % (len(pairs), x))
-        return v
-    N = sum(d["n"] for d in ug.values())
-    t_on = sum(d["sF"] for d in ug.values()) * 1e6 / f / N
-    u_hi = U + hw
-    t_ref = t_on - u_hi
-    v.update(U=U, hw=hw, df=df, U_hi=u_hi, L=le - lh, T_on=t_on, T_ref=t_ref, N=N,
-             cls=classify(u_hi, t_ref, hw, le - lh), bK=sum(d["bK"] for d in ug.values()),
-             terms=dict(D=_weighted(ug, "D"), P=_weighted(ug, "P"), X=_weighted(ug, "X"), G=_weighted(ug, "G"),
-                        S=dict((t, _weighted(ug, "S", t)) for t in WRITER_ADDED)))
-    ok1, why1 = vr1(recs, text, t_ref)
-    if not ok1:
-        why.append("VR1: %s" % "; ".join(why1))
+    else:
+        try:
+            U, hw, df = fw_interval(pairs, Z_END)
+            le, lh, _ = fw_interval([(d["l"], d["n"]) for g, d in sorted(ug.items())], Z_END)
+        except (ZeroDivisionError, ValueError) as x:
+            why.append("U not computable: fw_interval over %d games (%s)" % (len(pairs), x))
+        else:
+            u_hi = U + hw
+            t_ref = v["T_on"] - u_hi
+            v.update(U=U, hw=hw, df=df, U_hi=u_hi, L=le - lh, T_ref=t_ref,
+                     cls=classify(u_hi, t_ref, hw, le - lh), bK=sum(d["bK"] for d in ug.values()),
+                     terms=dict(D=_weighted(ug, "D"), P=_weighted(ug, "P"), X=_weighted(ug, "X"), G=_weighted(ug, "G"),
+                                S=dict((t, _weighted(ug, "S", t)) for t in WRITER_ADDED)))
+    t_vr1 = v["T_on"]                   # ruling R6-A3.11.149 (6) 3: VR1 reads T_on, the frames' observed mean
+    rows = validity_set(recs, text, peer_recs, peer_text, t_vr1, src, first_game, "T_on")
+    for name, ok, w in rows:
+        if not ok:
+            why.append("%s: %s" % (name, _reasons(w)))
+    v.update(validity=rows, zero=zero_state(recs), b3=_b3(recs), fhat=seat_fhat(recs, first_game))
     return v
 
 
+def _validity_lines(head, rows):
+    return ["%s %s %s%s" % (head, n, "PASS" if ok else "FAIL", ": " + _reasons(w) if not ok else "") for n, ok, w in rows]
+
+
+def _zero_line(head, z):
+    zok, g0v, g0n, meas, empty = z
+    return ("%s (reported, not judged; ruling R6-A3.11.149 (5)(f)): game 0 (the mutant) %d of %d rounds void; the "
+            "measured games %d rounds void, kept in the population%s" % (head, g0v, g0n, len(meas),
+                                                                      "; games with no valid round %s" % empty
+                                                                      if empty else ""))
+
+
 def v_lines(label, v):
-    """sitting_v's figures as report lines."""
+    """sitting_v's figures as report lines: U and its five terms whenever U is computable, whatever the class (ruling
+    R6-A3.11.149 (8)), each validity guard's result, VR8's zero-state half, B3, and the WITHHELD list last."""
     out = []
     ug = v["games"]
     if v["U"] is None:
@@ -3301,7 +3731,8 @@ def v_lines(label, v):
         out.append("V6 L %.3f us (cS + cR + cW + cP alone, the interval's lower end); T_on %.1f us; T_ref = T_on - U_hi "
                    "%.1f us; U_hi %.3f percent of T_ref" % (v["L"], v["T_on"], v["T_ref"], 100 * v["U_hi"] / v["T_ref"]))
         out.append("V6 class %s (classify(U_hi, T_ref, hw, L): PASS <= 3, SID <= 5, FAIL > 5 percent, WITHHELD when "
-                   "the band is unresolved)" % v["cls"])
+                   "the band is unresolved)%s" % (v["cls"], "; B1 is WITHHELD for this seat by the list below"
+                                                  if v["why"] else ""))
         out.append("R-GC (sitting V) seat %s: the collectors' bytes %d over the sitting against heap=%s at its end%s"
                    % (label, v["bK"], v["heap"] if v["heap"] is not None else "not read",
                       " (%.4f of it)" % (v["bK"] / v["heap"]) if v["heap"] else ""))
@@ -3310,26 +3741,41 @@ def v_lines(label, v):
                                       or "none"))
     out.append("V6 photon_offmain seat %s: %d over the measured games (X and listener scopes entered off the main "
                "thread; reported only)" % (label, v["photon_offmain"]))
+    out.append("V6 f_hat seat %s: %s (the median over the measured games' settled lines; the pairing check reads it)"
+               % (label, "%.0f" % v["fhat"] if v["fhat"] is not None else "not read"))
+    out += _validity_lines("V6 VALIDITY seat %s" % label, v["validity"])
+    out.append(_zero_line("V6 VR8 zero-state seat %s" % label, v["zero"]))
+    out.append("V6 B3 sitting V seat %s: %s" % (label, _b3_word(v["b3"])))
     out.append("V6 WITHHELD seat %s: %s" % (label, "; ".join(v["why"]) if v["why"] else "none"))
     return out
 
 
 def read_sitting(text, src):
-    """A measurement input of either sitting: the withheld-line refusal, the records, the FrameTime marker."""
+    """A measurement input of either sitting: the withheld-line refusal, the records, and the control-mutant refusal.
+    Its build marker is a guard of the validity set (ruling R6-A3.11.149 (5)(a)): a failed one withholds, by name."""
     refuse_withheld(text, src)
     recs = read(text, src)
-    build_marker(text, "measurement", src)
     refuse_k_mutant(recs, src)                  # a sitting input of either sitting
     return recs
 
 
-def report_on(text, peer, src="v1", peer_src="v2", first_game=1):
-    """Sitting V's report (SHARED.md V6, What P2 builds): for each seat, U and its five terms, U_hi, L, T_ref and the
-    class, with the WITHHELD list. text and peer are the two seats' sitting-V logs. Returns (lines, [this seat's
-    sitting_v, the peer seat's])."""
-    a, b = read_sitting(text, src), read_sitting(peer, peer_src)
-    va, vb = sitting_v(a, text, b, first_game), sitting_v(b, peer, a, first_game)
-    return v_lines(src, va) + v_lines(peer_src, vb), [va, vb]
+def _two_seats(seats, what):
+    names = list(seats)
+    if len(names) != 2 or any(not re.fullmatch(r"[A-Za-z0-9][\w.-]*", n) for n in names):
+        raise Refused("PAIRING: %s takes exactly two seats, each by its name (got %s)" % (what, names))
+    return names
+
+
+def report_on(seats, first_game=1):
+    """Sitting V's report (SHARED.md V6, What P2 builds; ruling R6-A3.11.149 (8)): seats is {seat name: its sitting-V
+    log}, two seats. For each seat, U and its five terms, U_hi, L, T_ref and the class (also when B1 is WITHHELD), each
+    validity guard's result, VR8's zero-state half, B3 and the WITHHELD list. Returns (lines, [sitting_v per seat, in
+    the order named])."""
+    a, b = _two_seats(seats, "report_on")
+    ra, rb = read_sitting(seats[a], "V:" + a), read_sitting(seats[b], "V:" + b)
+    va = sitting_v(ra, seats[a], rb, seats[b], "V:" + a, first_game)
+    vb = sitting_v(rb, seats[b], ra, seats[a], "V:" + b, first_game)
+    return v_lines(a, va) + v_lines(b, vb), [va, vb]
 
 
 def gc_per_mb(ws):
@@ -3342,63 +3788,100 @@ def gc_per_mb(ws):
     return out
 
 
-def cross_check(recs, first_game=1):
-    """Sitting C's cross-check for one seat (SHARED.md V6, The two sittings): the as-built estimate with T_ref as
-    built, or the reason it did not run (a forced input, the line invariants, an estimator refusal)."""
-    try:
-        contrast_input(recs)
-        miss = window_reconcile(recs)
-        if miss:
-            return None, "sitting C's line invariants fail: %s" % "; ".join(miss[:3])
-        e = b11_estimate(recs, first_game)
-        e["tref"] = t_ref_windows(recs, first_game)
-        return e, None
-    except (Refused, ZeroDivisionError, ValueError) as x:
-        return None, str(x)
+def _fh(x):
+    return "%.0f" % x if x is not None else "not read"
 
 
-def combine(v1, v2, c1, c2, srcs=("v1", "v2", "c1", "c2"), first_game=1):
-    """The combining step (SHARED.md V6, What P2 builds): from sitting V's two logs (v1, v2) and sitting C's two (c1,
-    c2; c1 is v1's seat) it prints VERDICT B1 per seat and the worse seat. A seat is WITHHELD by sitting V's list, by
-    a cross-check that did not run, or by a contrast whose lower end is above that seat's U_hi (U refuted); else it
-    takes sitting V's class. Beside it: the cross-check's interval, R-GC's numbers, and sitting C's u_g from its ON
-    windows next to sitting V's. Returns the report text."""
-    out, vs = report_on(v1, v2, srcs[0], srcs[1], first_game)
+def combine(v_logs, c_logs, refs=None, first_game=1):
+    """The combining step (SHARED.md V6, What P2 builds; ruling R6-A3.11.149 (5), (6) 6 and 7): v_logs and c_logs are
+    {seat name: its sitting-V log} and {seat name: its sitting-C log} for the same two seats, refs {seat name: its
+    reference log} for any of them. A seat's logs are paired by its NAME, never by position, and the pairing is checked:
+    the seat's two logs agree in f_hat within 1 percent (when the two seats' own values are that close, the check says
+    it cannot tell them apart). Per seat it prints sitting C's validity set, the cross-check, the two-arm guards beside
+    it, R-GC's and R-WORK's numbers, then VERDICT B1 (PASS, SID, FAIL or WITHHELD with its reason) with the cross-check's
+    state, and VERDICT B3 (judged on both sittings, holding only when it holds in both); then the worse seat. Returns
+    the report text."""
+    names = _two_seats(v_logs, "the combining step")
+    if sorted(c_logs) != sorted(names) or any(n not in names for n in (refs or {})):
+        raise Refused("PAIRING: sitting C's seats %s (and the references' %s) are not sitting V's %s"
+                      % (sorted(c_logs), sorted(refs or {}), sorted(names)))
+    out, vl = report_on(v_logs, first_game)
+    vs = dict(zip(names, vl))
+    pair = dict((n, c_logs[n]) for n in names)          # ruling .149 (6) 6: by name, never by position
+    crecs = dict((n, read_sitting(pair[n], "C:" + n)) for n in names)
+    refr = dict((n, read_reference(t, "R:" + n)) for n, t in (refs or {}).items())
+    fc = dict((n, seat_fhat(crecs[n], first_game)) for n in names)
+    paired = {}
+    for n in names:
+        fv = vs[n]["fhat"]
+        paired[n] = fv is not None and fc[n] is not None and abs(fc[n] - fv) <= FHAT_PAIR * fv
+        out.append("PAIRING seat %s: f_hat sitting V %s, sitting C %s: %s" % (
+            n, _fh(fv), _fh(fc[n]), "agree within 1 percent" if paired[n] else "NOT within 1 percent (or not read)"))
+    a, b = names
+    fa, fb = vs[a]["fhat"], vs[b]["fhat"]
+    if fa is not None and fb is not None and abs(fa - fb) <= FHAT_PAIR * max(fa, fb):
+        out.append("PAIRING: the two seats' own f_hat (%s %s, %s %s) are within 1 percent of each other, so the check "
+                   "cannot tell the seats apart; the pairing rests on the names" % (a, _fh(fa), b, _fh(fb)))
     seats = []
-    for i, (v, c, cs) in enumerate(((vs[0], c1, srcs[2]), (vs[1], c2, srcs[3]))):
-        label = "%d (%s, %s)" % (i + 1, srcs[i], cs)
-        cr = read_sitting(c, cs)
-        e, cwhy = cross_check(cr, first_game)
+    for n in names:
+        o = b if n == a else a
+        v = vs[n]
+        sc = sitting_c(crecs[n], pair[n], crecs[o], pair[o], refr.get(n), "C:" + n, first_game)
+        e = sc["e"]
+        out += _validity_lines("V6 VALIDITY sitting C seat %s" % n, sc["rows"])
         if e is None:
-            out.append("V6 CROSS-CHECK seat %s did not run: %s" % (label, cwhy))
+            out.append("V6 CROSS-CHECK seat %s: no contrast (%s)" % (n, sc["ewhy"]))
         else:
             out.append("V6 CROSS-CHECK seat %s: contrast %.3f us per frame, interval %.3f to %.3f; half-width %.3f "
                        "against the band's 3 percent of T_ref as built %.1f us (%.1f us)"
-                       % (label, e["center"], e["lb"], e["bu"], e["hw"], e["tref"], 0.03 * e["tref"]))
+                       % (n, e["center"], e["lb"], e["bu"], e["hw"], e["tref"], 0.03 * e["tref"]))
+        out += ["V6 TWO-ARM seat %s %s %s: %s" % (n, nm, "PASS" if ok else "FAIL", d) for nm, ok, d in sc["two"]]
+        if e is not None:
             gm = gc_per_mb(e["T"]["pop"])
             out.append("R-GC (sitting C) seat %s: collections per MB of aC, ON %s, OFF %s"
-                       % (label, *("%.4f" % gm[a] if gm[a] is not None else "not computable" for a in ("ON", "OFF"))))
-            ugc, _ = u_games(cr, first_game, arm="ON")
+                       % (n, *("%.4f" % gm[x] if gm[x] is not None else "not computable" for x in ("ON", "OFF"))))
+            ugc, _ = u_games(crecs[n], first_game, arm="ON")
             out.append("R-WORK seat %s: u_g sitting V %s; sitting C's ON windows %s" % (
-                label, "; ".join("g%d %s" % (g, "%.3f" % d["u"] if d["u"] is not None else "NA")
-                                 for g, d in sorted(v["games"].items())) or "none",
+                n, "; ".join("g%d %s" % (g, "%.3f" % d["u"] if d["u"] is not None else "NA")
+                             for g, d in sorted(v["games"].items())) or "none",
                 "; ".join("g%d %s" % (g, "%.3f" % d["u"] if d["u"] is not None else "NA")
                           for g, d in sorted(ugc.items())) or "none"))
-        if v["why"]:
+        out.append(_zero_line("V6 VR8 zero-state sitting C seat %s" % n, sc["zero"]))
+        weak = [nm for nm, ok, d in sc["two"] if not ok]
+        state, wh = cross_state(sc["unavail"], e, v["U_hi"], weak)
+        if not paired[n]:
+            cls, txt = "WITHHELD", ("WITHHELD: the pairing check fails: the seat's sitting-V and sitting-C logs do not "
+                                    "agree in f_hat within 1 percent")
+        elif v["why"]:
             cls, txt = "WITHHELD", "WITHHELD: %s" % "; ".join(v["why"])
         elif v["U_hi"] is None:
             cls, txt = "WITHHELD", "WITHHELD: U not computable"
-        elif e is None:
-            cls, txt = "WITHHELD", "WITHHELD: the cross-check did not run (%s)" % cwhy
-        elif e["lb"] > v["U_hi"]:
+        elif state == "REFUTED":
             cls, txt = "WITHHELD", ("WITHHELD: the contrast's lower end %.3f us is above U_hi %.3f us (U is refuted)"
                                     % (e["lb"], v["U_hi"]))
+        elif wh:
+            cls, txt = "WITHHELD", "WITHHELD: sitting C gives no cross-check until it has run again"
         else:
             cls = v["cls"]
-            txt = "%s: U_hi %.2f us against T_ref %.1f us (%.3f percent); the contrast's lower end %.3f us" % (
-                cls, v["U_hi"], v["T_ref"], 100 * v["U_hi"] / v["T_ref"], e["lb"])
-        seats.append((label, cls))
-        out.append("VERDICT B1 seat %s %s" % (label, txt))
+            txt = "%s: %sU_hi %.2f us against T_ref %.1f us (%.3f percent); the contrast's lower end %.3f us" % (
+                cls, "the band is unresolved (half-width %.3f us, L %.3f us); " % (v["hw"], v["L"])
+                if cls == "WITHHELD" else "", v["U_hi"], v["T_ref"], 100 * v["U_hi"] / v["T_ref"], e["lb"])
+        seats.append((n, cls))
+        out.append("VERDICT B1 seat %s %s; cross-check %s" % (n, txt, state))
+        b3s = (("V", v["b3"]), ("C", sc["b3"]))         # ruling .149 (5)(g): judged on both sittings
+        inval = (["sitting V's " + nm for nm, ok, _ in v["validity"] if not ok]
+                 + ["sitting C's " + nm for nm, ok, _ in sc["rows"] if not ok])
+        if inval:
+            c3 = "WITHHELD: the validity set fails (%s)" % ", ".join(inval)
+        elif any(x[0] is None for _, x in b3s):
+            c3 = "WITHHELD: %s" % "; ".join("sitting %s %s" % (s, _reasons(x[1])) for s, x in b3s if x[0] is None)
+        elif all(x[0] for _, x in b3s):
+            c3 = "PASS"
+        else:
+            c3 = "FAIL: %s" % "; ".join("sitting %s %s" % (s, _b3_word(x)) for s, x in b3s if not x[0])
+        out.append("VERDICT B3 seat %s %s (holds only when it holds in both sittings: %s); conditional on VR6's "
+                   "file-listing half from frame_time_seat.ps1's report"
+                   % (n, c3, ", ".join("sitting %s %s" % (s, _b3_word(x)) for s, x in b3s)))
     worst = max(range(len(seats)), key=lambda j: RANK[seats[j][1]])
     out.append("VERDICT B1 worse seat: seat %s %s" % seats[worst])
     out += ["  " + x for x in V_RISKS]
@@ -3672,19 +4155,20 @@ def report(text, peer=None, src="log", peer_src="peer", ref=None, ref_src="refer
 
     g1 = gate("B1")
     if any(b11_line(r) for r in recs):
-        # V6 (rulings R6-A3.11.146 (6), .147 (3)(a)): a window log read here is sitting C's, and its contrast is the
-        # cross-check with its interval, T_ref and the guards as built; R-CARRY, R-COMMON, R-PATH and R-PREFIX beside
-        # it. No B1 verdict is given here: U comes from sitting V only, and the combining step (--combine) gives VERDICT
-        # B1 from both sittings. U = max(D_U, B_U) and B_U's terms left the verdict (SHARED.md V6, What P2 builds)
+        # V6 (rulings R6-A3.11.146 (6), .147 (3)(a), .149 (5)): a window log read here is sitting C's, and its contrast
+        # is the cross-check with its interval and T_ref as built; the validity set decides whether it is available,
+        # the two-arm guards stand beside it, and R-CARRY, R-COMMON, R-PATH and R-PREFIX follow. No B1 verdict is given
+        # here: U comes from sitting V only, and the combining step (--combine) gives VERDICT B1 from both sittings
         e11 = None
         try:
             lines11, e11 = b11_report(recs, ref_recs)
             out += lines11
         except (Refused, ZeroDivisionError, ValueError) as e:
             out.append("B11 window estimator not computable: %s" % e)
-        if g1 is None and e11 is not None and b11_seat_withholds(recs, e11):
-            g1 = "withheld: %s" % "; ".join(b11_seat_withholds(recs, e11))
-        out.append(cross_check_line(e11, g1))
+        sc = sitting_c(recs, text, peer_recs, peer, ref_recs, src)
+        out += _validity_lines("VALIDITY", sc["rows"])
+        out.append(cross_check_line(e11, sc))
+        out += ["TWO-ARM %s %s: %s" % (nm, "PASS" if ok else "FAIL", d) for nm, ok, d in sc["two"]]
         out += ["  " + x for x in CROSS_RISKS]
     else:
         if ref_recs is not None:
@@ -3708,22 +4192,48 @@ def report(text, peer=None, src="log", peer_src="peer", ref=None, ref_src="refer
     return "\n".join(out)
 
 
+def _read_file(path):
+    return open(path, encoding="utf-8", errors="replace").read()
+
+
+_NAMED = re.compile(r"(?:([VCR]):)?([A-Za-z0-9][\w.-]*)=(.+)")
+
+
+def _named_args(args, kinds):
+    """The command line's named logs (ruling R6-A3.11.149 (6) 6: seats by name, never by position): each argument is
+    <kind>:<seat>=<path> for kind in kinds (V, C or R), or <seat>=<path> when kinds is (None,). Returns {kind: {seat:
+    path}} in the order given; a malformed argument, an unknown kind or a seat named twice for one kind refuses."""
+    out = dict((k, {}) for k in kinds)
+    for a in args:
+        m = _NAMED.fullmatch(a)
+        if m is None or m.group(1) not in kinds:
+            raise Refused("PAIRING: '%s' is not of the form %s" % (a, " or ".join(
+                ("%s:<seat>=<log>" % k) if k else "<seat>=<log>" for k in kinds)))
+        if m.group(2) in out[m.group(1)]:
+            raise Refused("PAIRING: seat %s is named twice%s" % (m.group(2), " for %s" % m.group(1) if m.group(1)
+                                                                  else ""))
+        out[m.group(1)][m.group(2)] = m.group(3)
+    return out
+
+
 if __name__ == "__main__":
     try:
         _args = sys.argv[1:]
-        # SHARED.md V6: --on <seat 1's sitting-V log> <seat 2's>: report_on; --combine <V1> <V2> <C1> <C2>, C1 being
-        # V1's seat: VERDICT B1 per seat and the worse seat
+        # SHARED.md V6 and ruling R6-A3.11.149 (6) 6: --on <seat>=<V log> <seat>=<V log>: report_on; --combine
+        # V:<seat>=<log> V:<seat>=<log> C:<seat>=<log> C:<seat>=<log> [R:<seat>=<log> ...]: each seat's logs paired by
+        # its name; --controls <boot log>: controls_proof
         _mode = _args[0] if _args and _args[0] in ("--on", "--combine", "--controls") else None
-        if _mode is not None:
-            _k = {"--on": 2, "--combine": 4, "--controls": 1}[_mode]
-            if len(_args) != _k + 1:
-                raise Refused("%s needs exactly %d logs" % (_mode, _k))
-            _t = [open(a, encoding="utf-8", errors="replace").read() for a in _args[1:]]
-            if _mode == "--controls":
-                print("\n".join(controls_proof(_t[0], _args[1])[1]))
-            else:
-                print("\n".join(report_on(_t[0], _t[1], _args[1], _args[2])[0]) if _mode == "--on"
-                      else combine(*_t, srcs=tuple(_args[1:])))
+        if _mode == "--controls":
+            if len(_args) != 2:
+                raise Refused("--controls needs exactly 1 log")
+            print("\n".join(controls_proof(_read_file(_args[1]), _args[1])[1]))
+        elif _mode == "--on":
+            _n = _named_args(_args[1:], (None,))[None]
+            print("\n".join(report_on(dict((s, _read_file(p)) for s, p in _n.items()))[0]))
+        elif _mode == "--combine":
+            _n = _named_args(_args[1:], ("V", "C", "R"))
+            print(combine(*(dict((s, _read_file(p)) for s, p in _n[k].items()) for k in ("V", "C")),
+                          refs=dict((s, _read_file(p)) for s, p in _n["R"].items()) or None))
         _ref = _ref_src = None
         if _mode is None and "--ref" in _args:
             _i = _args.index("--ref")
