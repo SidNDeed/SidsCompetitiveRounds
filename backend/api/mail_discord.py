@@ -68,7 +68,7 @@ router = APIRouter()
 
 # main.py binds the real implementations here at import time.
 _BOUND: dict = {}
-_REQUIRED = ("reply_core", "discord_safe", "internal_key")
+_REQUIRED = ("reply_core", "discord_safe", "internal_key", "retention_days")
 
 
 def bind(**fns) -> None:
@@ -270,7 +270,21 @@ _REPLIED_TO_SQL = (
     "  FROM mail_messages rep"
     "  JOIN mail_messages m ON m.id = rep.in_reply_to"
     "  JOIN players p ON p.id = m.sender_id"
-    " WHERE rep.id = CAST(:rid AS uuid)")
+    " WHERE rep.id = CAST(:rid AS uuid)"
+    # The replier's own view, as the game gives it (migration 404's change):
+    # the reply while it is in their Sent -- not deleted by them, inside
+    # the sender's clock -- and the thread while they could open it, through
+    # a live delivered copy or as its sender inside the same clock. The
+    # janitor cannot purge a row these admit, so whether a replay names its
+    # thread follows the replier's own deletes and the clock, never whether
+    # an addressee's copy was delivered or suppressed.
+    "   AND rep.sender_id = CAST(:pid AS uuid) AND rep.deleted_by_sender_at IS NULL"
+    "   AND rep.created_at > NOW() - make_interval(days => CAST(:ret_days AS integer))"
+    "   AND (EXISTS (SELECT 1 FROM mail_recipients r"
+    "                 WHERE r.message_id = m.id AND r.recipient_id = CAST(:pid AS uuid)"
+    "                   AND r.delivery = 'delivered' AND r.deleted_at IS NULL)"
+    "        OR (m.sender_id = CAST(:pid AS uuid) AND m.deleted_by_sender_at IS NULL"
+    "            AND m.created_at > NOW() - make_interval(days => CAST(:ret_days AS integer))))")
 
 # The idempotency namespace, and the derivation as a function rather than
 # an expression buried in the route: a structural pin could see a uuid5
@@ -501,7 +515,8 @@ async def mail_reply_from_discord(
         try:
             ctx = (await db.execute(
                 text(_REPLIED_TO_SQL),
-                {"rid": rid, "sid": me["steam_id"]})).mappings().first()
+                {"rid": rid, "sid": me["steam_id"], "pid": str(me["id"]),
+                 "ret_days": _need("retention_days")})).mappings().first()
         except Exception as ex:
             print("[MAIL-RELAY] replied_to lookup failed for %s: %s" % (rid, ex))
     safe = _need("discord_safe")

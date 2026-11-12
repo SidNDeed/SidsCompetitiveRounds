@@ -14,9 +14,12 @@ Runs against SCR_MIGRATION_TEST_PG_DSN and fails, not skips, without it
 unless SCR_MIGRATION_TEST_PG_OPTOUT=1 (test_migration_reruns.py's polarity).
 """
 
+import ast
 import asyncio
+import inspect
 import os
 import re
+import textwrap
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -24,6 +27,7 @@ from pathlib import Path
 import pytest
 
 import main
+import mail_discord
 
 try:
     import asyncpg
@@ -110,6 +114,8 @@ def _base_sql():
         "CREATE TABLE team_matches (t1a_id UUID, t1b_id UUID, t2a_id UUID, t2b_id UUID);",
         "CREATE TABLE ffa_match_players (match_id UUID, player_id UUID);",
         "CREATE TABLE ovt_matches (solo_id UUID, duo_a_id UUID, duo_b_id UUID);",
+        "CREATE TABLE pending_dms (id BIGSERIAL PRIMARY KEY, mail_id UUID, steam_id VARCHAR(32),"
+        " relay_code TEXT, undeliverable BOOLEAN NOT NULL DEFAULT false);",
         _from_file("297_mail.sql", r"CREATE TABLE IF NOT EXISTS mail_messages \(.*?\n\);"),
         _from_file("297_mail.sql", r"CREATE TABLE IF NOT EXISTS mail_recipients \(.*?\n\);"),
         _from_file("300_mail_inbox_rev.sql", re.escape(
@@ -246,10 +252,13 @@ def test_the_trigger_writes_a_receipt_and_the_first_count_wins():
     assert final[bcast][1] == 7
 
 
-def test_the_post_check_accepts_a_matching_table_and_refuses_a_differing_one():
+def test_the_post_check_accepts_matching_objects_and_refuses_differing_ones():
     """A same-named table made before the file (as the api build's own table
     creation would make it, deployed out of order) is accepted when it
-    matches the file's definition; one that differs aborts the whole file."""
+    matches the file's definition; one that differs -- a column's type, or a
+    check's expression under its own name -- aborts the whole file. So does
+    a same-named trigger whose WHEN condition differs, while one made as the
+    file makes it is accepted."""
     same = ("CREATE TABLE mail_send_receipts (sender_id UUID NOT NULL, idempotency_key UUID NOT NULL,"
             " kind TEXT NOT NULL, request_fp BYTEA, message_id UUID NOT NULL, recipients INTEGER,"
             " created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), PRIMARY KEY (sender_id, idempotency_key),"
@@ -271,6 +280,23 @@ def test_the_post_check_accepts_a_matching_table_and_refuses_a_differing_one():
     refused, shape = _run(body(_mutated(same, "created_at TIMESTAMPTZ", "created_at TIMESTAMP")))
     assert refused and "404: mail_send_receipts columns differ" in refused
     assert shape == {"table": True, "function": False, "trigger": False, "uq": True}   # nothing else changed
+    refused, shape = _run(body(_mutated(same, "recipients IS NULL OR recipients >= 0",
+                                        "recipients IS NULL OR recipients >= 1")))
+    assert refused and "404: mail_send_receipts key or checks differ" in refused
+    assert "ck_mail_send_receipts_recipients CHECK" in refused and "recipients >= 1" in refused   # what it found
+    assert shape == {"table": True, "function": False, "trigger": False, "uq": True}
+
+    fn = ("CREATE FUNCTION mail_send_receipt_sync() RETURNS trigger LANGUAGE plpgsql"
+          " AS $f$BEGIN RETURN NULL; END$f$;")
+    trg = ("CREATE TRIGGER trg_mail_send_receipt AFTER INSERT OR UPDATE OF recipient_count"
+           " ON mail_messages FOR EACH ROW WHEN (NEW.kind IN ('direct', 'system_broadcast'))"
+           " EXECUTE FUNCTION mail_send_receipt_sync();")
+    assert _run(body(fn + trg)) == (None, APPLIED)
+    refused, shape = _run(body(fn + _mutated(trg, "NEW.kind IN ('direct', 'system_broadcast')",
+                                             "NEW.kind = 'direct'")))
+    assert refused and "404: trg_mail_send_receipt or its function differs" in refused
+    assert "new.kind = 'direct'" in refused                                  # what it found
+    assert shape == {"table": False, "function": True, "trigger": True, "uq": True}
 
 
 # ── the api's statements ──────────────────────────────────────────────────
@@ -426,6 +452,71 @@ def test_the_senders_three_reads_follow_the_clock(monkeypatch):
     out, old, young = _run(body({k: _mutated(v, SENDER_CLOCK, "") for k, v in reads.items()}))
     assert out == {"sent": {old, young}, "detail": {old, young}, "reply": {old, young},
                    "recipient": {old, young}}
+
+
+def _janitor_purge_sql():
+    """The janitor's purge statement, read out of _mail_retention_sweep."""
+    tree = ast.parse(textwrap.dedent(inspect.getsource(main._mail_retention_sweep)))
+    found = [n.args[0].value for n in ast.walk(tree)
+             if isinstance(n, ast.Call) and getattr(n.func, "id", "") == "text" and n.args
+             and isinstance(n.args[0], ast.Constant)
+             and str(n.args[0].value).startswith("DELETE FROM mail_messages")]
+    assert len(found) == 1, found
+    return found[0]
+
+
+def test_the_discord_read_back_follows_the_repliers_own_view():
+    """mail_discord._REPLIED_TO_SQL: the thread a Discord reply names after
+    its core returns, a replay included. B replies to A's message, which A
+    also sent to C. `other` is the delivery of the one copy B cannot see --
+    A's copy of the reply, or C's copy of the original. Fresh, the thread is
+    named. Once B deleted the reply, or B's own copy of the original is gone
+    (and A deleted it), it is named in neither world: not where the
+    janitor's purge removed the row (`other` suppressed), and not where an
+    unread delivered copy kept it."""
+    stmt = mail_discord._REPLIED_TO_SQL
+    rep_side = stmt[stmt.index("   AND rep.sender_id"):stmt.index("   AND (EXISTS")]
+    orig_side = stmt[stmt.index("   AND (EXISTS"):]
+    purge = _janitor_purge_sql()
+
+    async def body(stmt, other):
+        async with _Schema() as conn:
+            await conn.execute(M404)
+            out = {}
+            for case in ("reply deleted", "copy deleted"):
+                orig = await _message(conn, sender=A)
+                await _envelope(conn, orig, B)
+                await _envelope(conn, orig, C, other if case == "copy deleted" else "delivered")
+                rep = await _message(conn, sender=B)
+                await conn.execute("UPDATE mail_messages SET in_reply_to = $1, thread_id = $1"
+                                   " WHERE id = $2", orig, rep)
+                await _envelope(conn, rep, A, other if case == "reply deleted" else "delivered")
+
+                async def named():
+                    return await conn.fetchrow(*_flat(_bind(stmt, {
+                        "rid": rep, "sid": "2", "pid": B, "ret_days": DAYS}))) is not None
+                fresh = await named()
+                if case == "reply deleted":
+                    await conn.execute("UPDATE mail_messages SET deleted_by_sender_at = NOW()"
+                                       " WHERE id = $1", rep)
+                else:
+                    await conn.execute("UPDATE mail_recipients SET deleted_at = NOW()"
+                                       " WHERE message_id = $1 AND recipient_id = $2", orig, B)
+                    await conn.execute("UPDATE mail_messages SET deleted_by_sender_at = NOW()"
+                                       " WHERE id = $1", orig)
+                await conn.execute(*_flat(_bind(purge, {"days": DAYS})))
+                out[case] = (fresh, await named())
+            return out
+    for other in ("delivered", "suppressed"):
+        assert _run(body(stmt, other)) == {"reply deleted": (True, False),
+                                           "copy deleted": (True, False)}, other
+    # mutant: the reply read without the replier's view -> a deleted reply is
+    # named while A's delivered copy keeps its row, and not once it is purged
+    assert [_run(body(stmt.replace(rep_side, ""), o))["reply deleted"]
+            for o in ("delivered", "suppressed")] == [(True, True), (True, False)]
+    # mutant: the original read without it -> the same split on C's copy
+    assert [_run(body(stmt.replace(orig_side, ""), o))["copy deleted"]
+            for o in ("delivered", "suppressed")] == [(True, True), (True, False)]
 
 
 # ── the rollback ──────────────────────────────────────────────────────────

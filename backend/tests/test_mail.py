@@ -2341,12 +2341,15 @@ def test_fake_db_reads_its_authorisation_off_the_production_sql():
     detail_sql = next(s for s in db.statements if "LEFT JOIN mail_recipients r ON r.message_id = m.id AND r.recipient_id = :me" in s)
     inbox_sql = next(s for s in db.statements if "FROM mail_recipients r" in s and "JOIN players s ON s.id = m.sender_id" in s)
     status_sql = next(s for s in db.statements if "AS unread" in s and "AS revision" in s)
+    # the sender's branch, with its clock (migration 404's change), whole
+    sender_clause = re.search(r"\(m\.sender_id = :me AND m\.deleted_by_sender_at IS NULL\s+"
+                              + re.escape(_SENDER_CLOCK) + r"\)", detail_sql)
+    assert sender_clause is not None, "the detail read's sender clause"
     for needle, sql in (("r.recipient_id IS NOT NULL", detail_sql),
-                        ("(m.sender_id = :me AND m.deleted_by_sender_at IS NULL)", detail_sql),
                         ("AND r.delivery = 'delivered'", inbox_sql), ("AND delivery = 'delivered'", status_sql)):
         assert needle in sql, needle
     naked = detail_sql.replace("r.recipient_id IS NOT NULL", "TRUE") \
-                      .replace("(m.sender_id = :me AND m.deleted_by_sender_at IS NULL)", "TRUE")
+                      .replace(sender_clause.group(0), "TRUE")
     assert db._dispatch(naked, {"mid": UUID(res["id"]), "me": ids[D_SID]}).first() is not None
     listed = db._dispatch(inbox_sql.replace("AND r.delivery = 'delivered'", ""),
                           {"me": ids[B_SID], "c_at": None, "c_id": None, "lim": 25}).all()

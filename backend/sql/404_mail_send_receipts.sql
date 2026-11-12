@@ -89,12 +89,13 @@
 --
 -- POST-CHECK. After the guards, one read compares every object with the
 -- definition this file states: the table's seven columns (type, NOT NULL,
--- created_at's default), its primary key and its three named checks; the
--- index (btree (created_at), valid, not unique); the trigger (AFTER INSERT
--- OR UPDATE OF recipient_count, for each row, with its WHEN, enabled,
+-- created_at's default), its primary key and its three named checks with
+-- their expressions, and no other constraint; the index (btree
+-- (created_at), valid, not unique); the trigger (AFTER INSERT OR UPDATE OF
+-- recipient_count, for each row, with this file's WHEN condition, enabled,
 -- calling this file's function); the function (returns trigger); and 297's
 -- constraint, which must be gone. Any same-named object that differs aborts
--- the file, because a guard alone would accept it.
+-- the file, naming what it found, because a guard alone would accept it.
 
 BEGIN;
 SET LOCAL lock_timeout = '5s';
@@ -212,6 +213,7 @@ END $m404uq$;
 DO $m404check$
 DECLARE
   n integer;
+  total integer;
 BEGIN
   SELECT count(*) INTO n
     FROM pg_attribute a
@@ -243,19 +245,36 @@ BEGIN
   IF n <> 7 THEN
     RAISE EXCEPTION '404: mail_send_receipts columns differ from this file (type, NOT NULL, default)';
   END IF;
-  SELECT count(*) INTO n
+  -- The key and the three checks by their definitions as PostgreSQL prints
+  -- them (pg_get_constraintdef), and no other constraint (NOT NULL is
+  -- checked with the columns above).
+  SELECT count(*) FILTER (
+           WHERE (k.contype = 'p'
+                  AND pg_get_constraintdef(k.oid) = 'PRIMARY KEY (sender_id, idempotency_key)')
+              OR (k.contype = 'c'
+                  AND (k.conname, pg_get_constraintdef(k.oid)) IN (
+                        ('ck_mail_send_receipts_kind',
+                         'CHECK ((kind = ANY (ARRAY[''direct''::text, ''system_broadcast''::text])))'),
+                        ('ck_mail_send_receipts_fp',
+                         'CHECK (((request_fp IS NULL) OR (octet_length(request_fp) = 32)))'),
+                        ('ck_mail_send_receipts_recipients',
+                         'CHECK (((recipients IS NULL) OR (recipients >= 0)))')))),
+         count(*) FILTER (WHERE k.contype <> 'n')
+    INTO n, total
     FROM pg_constraint k
     JOIN pg_class c ON c.oid = k.conrelid
     JOIN pg_namespace ns ON ns.oid = c.relnamespace
    WHERE ns.nspname = current_schema()
-     AND c.relname = 'mail_send_receipts'
-     AND ((k.contype = 'p'
-           AND pg_get_constraintdef(k.oid) = 'PRIMARY KEY (sender_id, idempotency_key)')
-          OR (k.contype = 'c'
-              AND k.conname IN ('ck_mail_send_receipts_kind', 'ck_mail_send_receipts_fp',
-                                'ck_mail_send_receipts_recipients')));
-  IF n <> 4 THEN
-    RAISE EXCEPTION '404: mail_send_receipts key or checks differ from this file';
+     AND c.relname = 'mail_send_receipts';
+  IF n <> 4 OR total <> 4 THEN
+    RAISE EXCEPTION '404: mail_send_receipts key or checks differ from this file (found: %)',
+      (SELECT string_agg(format('%s %s', k.conname, pg_get_constraintdef(k.oid)), '; ' ORDER BY k.conname)
+         FROM pg_constraint k
+         JOIN pg_class c ON c.oid = k.conrelid
+         JOIN pg_namespace ns ON ns.oid = c.relnamespace
+        WHERE ns.nspname = current_schema()
+          AND c.relname = 'mail_send_receipts'
+          AND k.contype <> 'n');
   END IF;
   SELECT count(*) INTO n
     FROM pg_index i
@@ -282,18 +301,34 @@ BEGIN
      AND c.relname = 'mail_messages'
      AND tg.tgname = 'trg_mail_send_receipt'
      AND NOT tg.tgisinternal
-     AND tg.tgtype = 21
+     AND tg.tgtype = 21                         -- for each row, after, insert or update
      AND tg.tgenabled = 'O'
-     AND tg.tgqual IS NOT NULL
-     AND CAST(tg.tgattr AS int2[]) = ARRAY[(SELECT a.attnum FROM pg_attribute a
-                                             WHERE a.attrelid = c.oid
-                                               AND a.attname = 'recipient_count'
-                                               AND NOT a.attisdropped)]
+     -- tgattr is an int2vector, whose subscripts start at 0, and array
+     -- equality compares the start as well: its text form is compared
+     -- instead (one column prints as its number).
+     AND CAST(tg.tgattr AS text) = (SELECT CAST(a.attnum AS text) FROM pg_attribute a
+                                     WHERE a.attrelid = c.oid
+                                       AND a.attname = 'recipient_count'
+                                       AND NOT a.attisdropped)
+     -- the WHEN condition as PostgreSQL prints it (pg_get_triggerdef)
+     AND substring(pg_get_triggerdef(tg.oid) FROM ' WHEN \((.*)\) EXECUTE ')
+         = '(new.kind = ANY (ARRAY[''direct''::text, ''system_broadcast''::text]))'
      AND p.proname = 'mail_send_receipt_sync'
      AND pns.nspname = current_schema()
      AND p.prorettype = 'trigger'::regtype;
   IF n <> 1 THEN
-    RAISE EXCEPTION '404: trg_mail_send_receipt or its function differs from this file';
+    RAISE EXCEPTION '404: trg_mail_send_receipt or its function differs from this file (found: %)',
+      COALESCE((SELECT string_agg(format('%s, enabled %s, function in %s returning %s',
+                                         pg_get_triggerdef(tg.oid), tg.tgenabled, pns.nspname,
+                                         CAST(p.prorettype AS regtype)), '; ')
+                  FROM pg_trigger tg
+                  JOIN pg_class c ON c.oid = tg.tgrelid
+                  JOIN pg_namespace ns ON ns.oid = c.relnamespace
+                  JOIN pg_proc p ON p.oid = tg.tgfoid
+                  JOIN pg_namespace pns ON pns.oid = p.pronamespace
+                 WHERE ns.nspname = current_schema()
+                   AND c.relname = 'mail_messages'
+                   AND tg.tgname = 'trg_mail_send_receipt'), 'no such trigger');
   END IF;
   IF EXISTS (SELECT 1 FROM pg_constraint k
                JOIN pg_class c ON c.oid = k.conrelid

@@ -78930,6 +78930,7 @@ mail_discord.bind(
     reply_core=_mail_reply_core,
     discord_safe=_mail_discord_safe,
     internal_key=lambda: os.getenv("API_SECRET_KEY", ""),
+    retention_days=MAIL_RETENTION_DAYS,
 )
 assert mail_discord.bound_ok(), "mail_discord is not fully bound"
 

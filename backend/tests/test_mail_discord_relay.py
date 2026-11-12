@@ -2152,6 +2152,27 @@ def test_the_thread_the_confirmation_names_is_escaped_for_discord():
     assert info["relay_code"] == CODE_OK
 
 
+def test_the_read_back_is_handed_every_name_its_statement_binds():
+    """The read-back runs inside a try that answers known=False on any
+    failure, so a bind the route forgot would never surface as an error.
+    Migration 404's change gave the statement the replier's own id and the
+    retention clock (test_mail_receipts_pg runs it on PostgreSQL): the route
+    hands it exactly the names it binds, with the replier's id and main's
+    MAIL_RETENTION_DAYS."""
+    req = mail_discord._ReplyFromDiscord(
+        discord_id="d1", relay_code=CODE_OK, body="yes", source_message_id="77")
+    db = _route_db([[{"id": MAIL, "subject": "s", "sender_name": "Bob", "relay_code": CODE_OK}]])
+    out, _seen = _reply_route(db, req)
+    assert out["replied_to"]["known"] is True
+    i = db.sql.index(mail_discord._REPLIED_TO_SQL)
+    names = set(_sql_re.findall(r"(?<!:):([a-z_]+)", mail_discord._REPLIED_TO_SQL))
+    assert set(db.params[i]) == names == {"rid", "sid", "pid", "ret_days"}, db.params[i]
+    assert (db.params[i]["rid"], db.params[i]["pid"], db.params[i]["ret_days"]) == (
+        REPLY_ID, str(PLAYER_ROW["id"]), main.MAIL_RETENTION_DAYS)
+    # negative control: the previous build's two binds leave the new names unbound
+    assert names - {"rid", "sid"} == {"pid", "ret_days"}
+
+
 def test_the_confirmation_does_not_invent_a_thread_it_could_not_read():
     """A confirmation reading `to them - (no subject)` states two facts
     the bot does not have, about a reply that did send."""

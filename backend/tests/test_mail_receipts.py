@@ -177,12 +177,32 @@ def test_the_digest_is_sha256_of_sorted_ascii_json(monkeypatch):
     assert fp("send", to=[B_SID], body="x") != fp("send", body="x", to=[B_SID])
 
 
+_SEND_FIELDS = ("to", "cc", "subject", "body")
+# The fields each route's digest covers, and the model fields no digest
+# covers: the key itself, and the broadcast's admin fields (the admin is the
+# sender the receipt is keyed by, the signature authenticates the request,
+# and the actor must equal the admin). The per-field tests below show each
+# listed field reaching its route's digest.
+_DIGESTED = {"_MailSendReq": set(_SEND_FIELDS), "_MailReplyReq": {"body", "all"},
+             "_AdminMailBroadcastReq": {"subject", "body"}}
+_NOT_DIGESTED = {"idempotency_key", "admin_steam_id", "hmac_signature", "actor_steam_id"}
+
+
+def test_every_request_field_is_in_its_routes_digest():
+    """A field added to a mail request model later fails here until its
+    route's digest takes it (or it joins _NOT_DIGESTED with a reason)."""
+    for name, fields in _DIGESTED.items():
+        assert set(getattr(main, name).model_fields) - _NOT_DIGESTED == fields, name
+    # negative control: a model grown by one field no longer matches its set
+    grown = type("_Grown", (main._MailSendReq,), {"__annotations__": {"via": str}, "via": ""})
+    assert set(grown.model_fields) - _NOT_DIGESTED == _DIGESTED["_MailSendReq"] | {"via"}
+
+
 # ── POST /mail ────────────────────────────────────────────────────────────
 
 _SEND_FIRST = dict(to=[B_SID], cc=[C_SID], subject="Plan", body="Meet at eight.")
 _SEND_CHANGED = (dict(_SEND_FIRST, to=[D_SID]), dict(_SEND_FIRST, cc=[D_SID]),
                  dict(_SEND_FIRST, subject="Plans"), dict(_SEND_FIRST, body="Meet at nine."))
-_SEND_FIELDS = ("to", "cc", "subject", "body")
 
 
 def _send_reuse():
