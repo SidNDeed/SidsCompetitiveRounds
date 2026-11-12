@@ -569,8 +569,8 @@ def _log(carry_us=0.0, cost_us=80.0, games=17, seed=7, heavy_live=0, hash_at=(10
                 L.append("[FRAME-TIME] a3drain g=%d k=%s starts=%d nonempty=%d faults=0"
                          % (g, k, st, 1 if a3_dirty == (g, k) else 0))
         if "game" in refusals_why:
-            L.append("[FRAME-TIME] refusals why=%s pairs=3 queue:e=3 sent:GET_h/api/v1/mod-version=1 "
-             "dispatched:GET_h/api/v1/mod-version=1" % ("game%d" % g) + routes)
+            L.append("[FRAME-TIME] refusals why=%s pairs=%d queue:e=3 sent:GET_h/api/v1/mod-version=1 "
+             "dispatched:GET_h/api/v1/mod-version=1" % ("game%d" % g, 3 + len(routes.split())) + routes)
         if g not in drop_flushed:
             L.append("[FRAME-TIME] flushed g=%d why=%s" % (g, "next_game" if g < games - 1 else "settle"))
         if g not in drop_counters:
@@ -589,8 +589,8 @@ def _log(carry_us=0.0, cost_us=80.0, games=17, seed=7, heavy_live=0, hash_at=(10
     if complete:
         L.append("[FRAME-TIME] sitting complete g=%d" % (games - 1))
     if "quit" in refusals_why:
-        L.append("[FRAME-TIME] refusals why=%s pairs=3 queue:e=3 sent:GET_h/api/v1/mod-version=1 "
-             "dispatched:GET_h/api/v1/mod-version=1" % "quit" + routes)
+        L.append("[FRAME-TIME] refusals why=%s pairs=%d queue:e=3 sent:GET_h/api/v1/mod-version=1 "
+             "dispatched:GET_h/api/v1/mod-version=1" % ("quit", 3 + len(routes.split())) + routes)
     # the integrator's marker rule (11 Nov): a measurement input carries the FrameTime build marker exactly once
     return "\n".join("[Info   :CompetitiveRounds] " + x for x in ["[FRAME-TIME] " + P.MARK_FT] + L)
 
@@ -666,7 +666,7 @@ def test_a3_refuses_a_missing_line_or_calibration():
     # ruling A1 part 3: the refill window counted from absent records cannot pass, nor a missing calibration
     k = A3_DEP[0]
     # every dependent row is live since ruling R5, so the executed-reads cross-check meets the missing line first
-    with pytest.raises(P.Refused, match="game 5 executed reads [0-9]+, the game's a3 line counts \[\]"):
+    with pytest.raises(P.Refused, match=r"game 5 executed reads [0-9]+, the game's a3 line counts \[\]"):
         _a3(P.read(_log(drop_a3={(5, k)})), last_game=P.LAST_GAME)
     with pytest.raises(P.Refused, match="game 7 has 0 executed calibration lines"):
         _a3(P.read(_log(live_drop={(7, k)})), last_game=P.LAST_GAME)
@@ -1041,7 +1041,7 @@ def test_forms_are_every_line_form_the_emitter_prints():
 
 
 def test_settled_gc_fallback_is_read_and_judged_by_no_rule():
-    # ruling R6-A3.11.152, G2: FtCalib.Settled (plugin/FtCalib.cs:394-407) starts gc_incremental and gc_slice_ns at -1
+    # ruling R6-A3.11.153 (2), G2: FtCalib.Settled (plugin/FtCalib.cs:394-407) starts gc_incremental and gc_slice_ns at -1
     # and sets them inside a try, so a GC property getter that throws prints gc_incremental=-1 gc_slice_ns=-1. That
     # settled line is a form the parser reads, read() takes it, and no rule judges either field: a sitting-V log whose
     # every settled line prints the fallback gives the same WITHHELD list and the same U as one printing 1 and a slice
@@ -1569,7 +1569,7 @@ def test_vr6_routes_fail_a_route_refused_and_sent():
 def test_vr6_counts_dispatches_independently():
     # round-1 MEDIUM (FtRoute.cs:97): a refused route the transport still dispatched, or an allowed route dispatched
     # more often than the classifier counted it sent, fails VR6
-    log = _vr6_log(["[FRAME-TIME] refusals why=quit pairs=3 route:GET_h/api/v1/x=2 dispatched:GET_h/api/v1/x=2"])
+    log = _vr6_log(["[FRAME-TIME] refusals why=quit pairs=2 route:GET_h/api/v1/x=2 dispatched:GET_h/api/v1/x=2"])
     ok, why, _, _ = P.vr6_build(P.read(log))
     assert not ok and "route GET_h/api/v1/x dispatched 2 times, sent 0" in why, why
     log = _vr6_log(["[FRAME-TIME] refusals why=quit pairs=2 sent:GET_h/api/v1/y=1 dispatched:GET_h/api/v1/y=3"])
@@ -1580,6 +1580,23 @@ def test_vr6_counts_dispatches_independently():
 def test_vr6_build_fails_on_a_disarm():
     ok, why, _, dis = P.vr6_build(P.read(_vr6_log(["[FRAME-TIME] disarmed input=fighters pt=3.2.1"])))
     assert not ok and dis == ["fighters at 3.2.1"], why
+
+
+def test_self_drive_disarmed_trace_is_read_and_no_disarm_record():
+    # ruling R6-A3.11.154, item 6: FtDrive's trace 'self-drive disarmed: input=<FtArm.Why>' (FtDrive.cs:64), "not
+    # evaluated" included, is a form the parser reads (FORM_VARIANTS) and no record: _LINE needs a word and a space
+    # after the tag, and the hyphen breaks it (EMITTED_UNREAD["self"]). disarms() reads FtArm's own line, 'disarmed
+    # input=<why> pt=<label>' (FtArm.cs:149), which the same Evaluate call prints whenever the armed sitting disarms
+    # (Armed and Why are set together, FtArm.cs:155-156): that line is the disarm VR6 fails on. The trace alone fails
+    # nothing; a seat that never armed writes no settled line, which complete() requires per game
+    for why in ("not evaluated", "fighters"):
+        ln = "[FRAME-TIME] self-drive disarmed: input=" + why
+        assert P.parse_line(LOG_PREFIX + ln) is None and P.unknown_forms(LOG_PREFIX + ln) == [], why
+        ok, bad, _, dis = P.vr6_build(P.read(_vr6_log([ln])))
+        assert ok and dis == [] and P.disarms(P.read(_vr6_log([ln]))) == [], (why, bad)
+    both = ["[FRAME-TIME] disarmed input=fighters pt=3.2.1", "[FRAME-TIME] self-drive disarmed: input=fighters"]
+    ok, bad, _, dis = P.vr6_build(P.read(_vr6_log(both)))
+    assert not ok and dis == ["fighters at 3.2.1"], bad
 
 
 def test_vr6_build_refuses_without_a_refusals_line():
@@ -2383,9 +2400,13 @@ V6_BOOT = (("alloc", "alloc pin=ok planted=1048600/1048576 empty=0"),
            # P1's V6 emitter (via the integrator, 12 Nov): a sitting log's control-mutant line
            ("controls", "controls k_mutant=none"),
            # the follow-up to ruling .149, A and B: the writer ledger's disk-log tap (FtLedger.Install) and the room
-           # gate's patch-time line (FtRoomGate.ReportPatched: 9 PUN overloads, 2 void and 2 coroutine entry points)
+           # gate's patch-time line as this game prints it (FtRoomGate.ReportPatched; ruling R6-A3.11.154). expected=13
+           # is read from the game's PhotonUnityNetworking.dll metadata: PhotonNetwork's public static join or create
+           # methods are 9 room entries (JoinRandomRoom x3, JoinRandomOrCreateRoom, CreateRoom, JoinOrCreateRoom,
+           # JoinRoom, RejoinRoom, ReconnectAndRejoin), none generic, plus the 2 void and 2 coroutine Nch entry points;
+           # excluded= prints JoinLobby once per overload (two) and LoadOrCreateSettings
            ("ledger", "ledger log=1 why=ok types=log,hash,recv,sock"),
-           ("gate", "FT-GATE patched 13 entry points expected=13 excluded=JoinLobby,LoadOrCreateSettings"),
+           ("gate", "FT-GATE patched 13 entry points expected=13 excluded=JoinLobby,JoinLobby,LoadOrCreateSettings"),
            # ruling R6-A3.11.151 (3): the attach line, after the patch loop and the two patch reports
            ("attach", ATTACH_OK))
 # the two keys a V6 counters line carries after span_depth_violations (P1's emitter, via the integrator, 12 Nov)
@@ -3202,7 +3223,7 @@ V_SPOILS = (
     ("photon twice", lambda: _v_text(boot={"photon": "photon patches n=11 names=" + ",".join(
         P.PHOTON_ENTRIES + P.PHOTON_ENTRIES[:1])}),
      "R-SCOPE's patches line out of range (n=11 for 11 names; named twice: PhotonPeer.DispatchIncomingCommands)"),
-    # ruling R6-A3.11.152, G1's class: the names as written, in the emitter's order, no entry dropped
+    # ruling R6-A3.11.153 (2), G1's class: the names as written, in the emitter's order, no entry dropped
     ("photon reordered", lambda: _v_text(boot={"photon": "photon patches n=10 names=" + ",".join(
         P.PHOTON_ENTRIES[1:2] + P.PHOTON_ENTRIES[:1] + P.PHOTON_ENTRIES[2:])}),
      "R-SCOPE's patches line out of range (n=10 for 10 names; not in the emitter's order)"),
@@ -3776,7 +3797,7 @@ LEDGER_SPOILS = (
      "the disk-log tap: ledger types=log,hash,recv,sock,gc is not the parser's writer types log,hash,recv,sock (each "
      "once, in that order)"),
 )
-# ruling R6-A3.11.152, G1: ledger_state's reason for a types= list that is not WRITER_TYPES as written
+# ruling R6-A3.11.153 (2), G1: ledger_state's reason for a types= list that is not WRITER_TYPES as written
 LEDGER_TYPES_BAD = "ledger types=%s is not the parser's writer types log,hash,recv,sock (each once, in that order)"
 # (what, the types= list as the line prints it): each is not the emitter's list (FtUpload.cs:104, joined at :368)
 LEDGER_LISTS = (
@@ -3791,7 +3812,7 @@ LEDGER_LISTS = (
 
 
 def chk_ledger_types_judged_as_written(m):
-    # ruling R6-A3.11.152, G1 (SHARED.md:245-246): the ledger's types= list is WRITER_TYPES exactly, as written: each
+    # ruling R6-A3.11.153 (2), G1 (SHARED.md:245-246): the ledger's types= list is WRITER_TYPES exactly, as written: each
     # name once, in the emitter's order, no entry empty; anything else fails ledger_state with one reason naming the
     # list as written and the list required, and the state prints the list as written. On the combining path a
     # sitting-V log whose ledger repeats a name ends B1 WITHHELD for that seat, naming the list. The exact list passes
@@ -3809,8 +3830,85 @@ def chk_ledger_types_judged_as_written(m):
     assert ln.startswith("VERDICT B1 seat a WITHHELD: ") and (LEDGER_TYPES_BAD % "log,log,hash,recv,sock") in ln, ln
 
 
+CAL_FORM_BAD = "the cal line is not in its form (%s: an entry is empty or not an integer): %s"
+
+
+def chk_cal_lists_refused_as_written(m):
+    # ruling R6-A3.11.154: an empty entry in a cal line's u= or p= (batch tick counts, FtCalib.cs:193, :265, FtA3.cs:401)
+    # makes the line ill-formed: read() refuses the input as written, naming the field and the line, never a ValueError
+    # where d_up or stamps_estimate split it (NOT_COMPUTABLE); so does an entry of another form, on a disp, span or a3
+    # line. The clean log reads (the control)
+    clean = _v_text()
+    assert [r for r in m.read(clean) if r["kind"] == "cal" and r.get("ckind") == "disp" and "u" in r]
+    spoils = (("u", "an empty entry", lambda s: s.replace(",", ",,", 1)),
+              ("p", "an empty entry", lambda s: s.replace(",", ",,", 1)),
+              ("u", "an empty last entry", lambda s: s + ","), ("p", "an empty first entry", lambda s: "," + s),
+              ("p", "another form", lambda s: "x" + s))
+    # FtA3.Calibrate's line (FtA3.cs:400-401), which the sitting fixture does not print, added to it
+    a3 = clean + "\n" + LOG_PREFIX + ("[FRAME-TIME] cal i=2 why=game1 kind=a3 k=CE_p1 n=1000 u=100000,100000 "
+                                      "p=130000,130000")
+    assert m.read(a3)[-1]["u"] == "100000,100000"
+    for ck, text in (("disp", clean), ("span", clean), ("a3", a3)):
+        lines = text.split("\n")
+        at = [j for j, x in enumerate(lines) if (" kind=%s " % ck) in x and " u=" in x and " p=" in x][0]
+        for key, what, f in spoils:
+            mm = re.search(r" %s=(\S+)" % key, lines[at])
+            v = f(mm.group(1))
+            ln = lines[at][:mm.start(1)] + v + lines[at][mm.end(1):]
+            want = CAL_FORM_BAD % ("%s=%s" % (key, v), ln[ln.index("cal i="):])
+            bad = "\n".join(lines[:at] + [ln] + lines[at + 1:])
+            assert _word_refused(lambda: m.parse_line(ln), want), (ck, key, what)
+            assert _word_refused(lambda: m.read(bad), want), (ck, key, what)
+            if ck == "disp" and what == "an empty entry":
+                assert _word_refused(lambda: m.report_on({"a": bad, "b": clean}), want), (ck, key)
+
+
+REFUSALS_FORM_BAD = "the refusals line is not in its form (%s): %s"
+# ruling R6-A3.11.154: refusals lines out of their form, each with what is out of form (FtUpload.cs:54-55 prints a
+# dictionary's pairs, each key once, and their count); the clean sitting line is 'refusals why=quit pairs=0'
+REFUSALS_SPOILS = (
+    ("refusals why=quit pairs=2 route:GET_x=1 route:GET_x=2", "route:GET_x printed twice"),
+    ("refusals why=quit pairs=0 why=game3", "why printed twice"),
+    ("refusals why=quit pairs=1 pairs=1 queue:e=1", "pairs printed twice"),
+    ("refusals why=quit pairs=1 queue:e=1 sent:GET_y=1", "pairs=1 for 2 pairs listed"),
+    ("refusals why=quit pairs=3 queue:e=1", "pairs=3 for 1 pairs listed"),
+    ("refusals why=quit queue:e=1", "no pairs= count"),
+    ("refusals why=quit pairs=1 queue:e=1 junk", "junk is not <key>=<value>"),
+)
+
+
+def chk_refusals_line_judged_as_written(m):
+    # ruling R6-A3.11.154: a refusals line is of its form only when no key repeats and pairs= is the number of pairs
+    # listed; otherwise VR6's build half refuses it as written (never last-value-wins, never a silent count), naming
+    # what is out of form and the line, and reads no pair of the sitting. On the single-log path (vr6_build, a seat's
+    # sitting V, report()) and on the combining path (B1 WITHHELD for that seat). The clean lines read (the controls)
+    clean, c = _v_text(), _c_text()
+    ok, why, pairs, _ = m.vr6_build(m.read(clean))
+    assert ok and why == [] and pairs == {}, why
+    for ln, what in REFUSALS_SPOILS:
+        t = _sub1(clean, "[FRAME-TIME] refusals why=quit pairs=0", "[FRAME-TIME] " + ln)
+        want = REFUSALS_FORM_BAD % (what, ln)
+        assert m.vr6_build(m.read(t)) == (False, [want], {}, []), (ln, m.vr6_build(m.read(t)))
+        assert ("VR6 build: " + want) in _v(m, t)["why"], (ln, _v(m, t)["why"])
+    # an earlier game's line is judged too, not only the one VR6 reads its pairs from
+    lg = _log()
+    early = _sub1(lg, "[FRAME-TIME] refusals why=game3 pairs=3 ", "[FRAME-TIME] refusals why=game3 pairs=4 ")
+    out = m.report(early, peer=_peer_text())
+    assert "VR6 build half FAIL: the refusals line is not in its form (pairs=4 for 3 pairs listed): refusals " \
+           "why=game3 pairs=4 " in out and "VERDICT B1 INVALID: VR6 failed" in out, out
+    assert "VR6 build half PASS" in m.report(lg, peer=_peer_text())
+    rep = _sub1(clean, "[FRAME-TIME] refusals why=quit pairs=0", "[FRAME-TIME] " + REFUSALS_SPOILS[0][0])
+    ln = _verdict(_comb(m, rep, clean, c, c), "a")
+    assert ln.startswith("VERDICT B1 seat a WITHHELD: ") and \
+        (REFUSALS_FORM_BAD % (REFUSALS_SPOILS[0][1], REFUSALS_SPOILS[0][0])) in ln, ln
+    cnt = _sub1(clean, "[FRAME-TIME] refusals why=quit pairs=0", "[FRAME-TIME] " + REFUSALS_SPOILS[3][0])
+    ln = _verdict(_comb(m, clean, cnt, c, c), "b")
+    assert ln.startswith("VERDICT B1 seat b WITHHELD: ") and \
+        (REFUSALS_FORM_BAD % (REFUSALS_SPOILS[3][1], REFUSALS_SPOILS[3][0])) in ln, ln
+
+
 CENSUS_PARTIAL = "scope census entries=40 wrapped=40 partial=1"
-# ruling R6-A3.11.152, G3: (the census line FtCensus prints, R-SCOPE's census reading): its three emitted variants
+# ruling R6-A3.11.153 (3), G3: (the census line FtCensus prints, R-SCOPE's census reading): its three emitted variants
 CENSUS_VARIANTS = (
     ("scope census entries=40 wrapped=40", (True, "entries 40, wrapped 40")),
     (CENSUS_PARTIAL, (False, "entries 40, wrapped 40; the census read an incomplete type list (partial=1)")),
@@ -3824,7 +3922,7 @@ CENSUS_NOT_EMITTED = ("scope census entries=40 wrapped=40 partial=1 failed=TypeL
 
 
 def chk_census_partial_out_of_range(m):
-    # ruling R6-A3.11.152, G3: plugin/FtCensus.cs:133,166 prints the census counts followed by exactly one of nothing,
+    # ruling R6-A3.11.153 (3), G3: plugin/FtCensus.cs:133,166 prints the census counts followed by exactly one of nothing,
     # ' partial=1' (an incomplete type list, from a ReflectionTypeLoadException) or ' failed=<type>'. Each variant is a
     # form the parser reads; R-SCOPE's census reads the plain one in range (the control), the partial one out of range
     # naming the incomplete list (it proves nothing about the types it did not read), the failed one as before. A line
@@ -3857,7 +3955,7 @@ _ARM_INPUTS = ("sentinel", "sentinel_changed", "sentinel_problems", "clock", "pe
                "peer", "error_NullReferenceException", "error_KeyNotFoundException`1")
 _MENU_INPUTS = ("sentinel", "sentinel_changed", "sentinel_problems", "clock", "perf_probe", "ic_fixture", "in_room",
                 "game_started", "error_NullReferenceException", "error_KeyNotFoundException`1")
-# ruling R6-A3.11.152, K-D (the class of G2 and G3): every emit site of plugin/Ft*.cs (and Plugin.cs's attach warning)
+# ruling R6-A3.11.153 (2), K-D (the class of G2 and G3): every emit site of plugin/Ft*.cs (and Plugin.cs's attach warning)
 # whose expression appends a free string operand or a conditional suffix (a), or prints an int or long that starts at a
 # fallback value and is set inside a try (b): (site, a fragment of its statement in the source, one sample payload per
 # variant the expression can print). Each sample is a form the parser reads. The table with each variant's source is
@@ -3879,7 +3977,7 @@ FORM_VARIANTS = (
       "cal i=7 why=game3 kind=a3 k=row1 failed: InvalidOperationException: ",
       "cal i=7 why=game3 kind=a3 k=row1 failed: KeyNotFoundException`1: a")),
     ("FtA3.cs:400", '" kind=a3 k=" + Names[k] + " n=" + _calN[k]',
-     ("cal i=7 why=game3 kind=a3 k=row1 n=100 u=1,2 p=3,4", "cal i=7 why=game3 kind=a3 k=row1 n=100 u= p=")),
+     ("cal i=7 why=game3 kind=a3 k=row1 n=100 u=1,2 p=3,4",)),
     ("FtAlloc.cs:79", '"[FRAME-TIME] alloc_init why=" + Why',
      tuple("alloc_init why=" + w for w in ("not_init", "no_module", "no_path", "sha", "code", "ok",
                                            "failed:DllNotFoundException", "failed:KeyNotFoundException`1"))),
@@ -3949,6 +4047,12 @@ FORM_VARIANTS = (
      ("clock installed freq=10000000 hires=1 cycles=1", "clock installed freq=10000000 hires=0 cycles=0")),
     ("FtDrive.cs:52", 'Plugin.Log.LogInfo("[FRAME-TIME] self-drive " + what)',
      ("self-drive spawn waiting why=peer", "self-drive spawn waiting why=actors actors=1", "self-drive ")),
+    # ruling R6-A3.11.154: the drive's own armed and disarmed trace, through Log (:52); its input= is FtArm.Why, whose
+    # first value is "not evaluated" (FtArm.cs:75)
+    ("FtDrive.cs:64", '"input=" + FtArm.Why',
+     ("self-drive armed: inputs are automated", "self-drive disarmed: escape", "self-drive disarmed: sitting complete",
+      "self-drive disarmed: rematch timeout", "self-drive disarmed: input=fighters",
+      "self-drive disarmed: input=not evaluated")),
     ("FtDrive.cs:87", '"[FRAME-TIME] self-drive join room=" + room', ("self-drive join room=FT-1 region=us",)),
     ("FtDrive.cs:90", '"[FRAME-TIME] self-drive join failed: " + ex.Message',
      ("self-drive join failed: a b", "self-drive join failed: ")),
@@ -3995,13 +4099,18 @@ FORM_VARIANTS = (
             (0, "error_KeyNotFoundException`1")))),
     ("FtReplay.cs:56", '" ticks=0 result=" + result',
      tuple("answer_replay g=3 ticks=0 result=skipped_" + w for w in ("live", "settle", "next_game", "quit", "absent"))),
-    # the ruling of 12 Nov (08:30Z): a name not of the lane's form reaches the parser as the export's '(not-exported)'
+    # ruling R6-A3.11.154 (12 Nov, 08:30Z): a name not of the lane's form reaches the parser as the export's '(not-exported)'
     ("FtRoomGate.cs:87", '" name=" + shown + " n=" + n',
      ("room call refused op=JoinRoom name=FT-1 n=1", "room call refused op=CreateRoom name=(none) n=2",
       "room call refused op=JoinRoom name=(empty) n=1", "room call refused op=JoinRoom name=(not-exported) n=3")),
+    # ruling R6-A3.11.154: the line as this game prints it, shorter lists of the design's names, and one name outside
+    # the design (GATE_EXCLUDED_SAMPLES holds each to its reading)
     ("FtRoomGate.cs:109", '(missing.Count == 0 ? "" : " missing="',
-     ("FT-GATE patched 6 entry points expected=6 excluded=A.b,C.d",
-      "FT-GATE patched 5 entry points expected=6 excluded= missing=E.f")),
+     ("FT-GATE patched 13 entry points expected=13 excluded=JoinLobby,JoinLobby,LoadOrCreateSettings",
+      "FT-GATE patched 13 entry points expected=13 excluded=JoinLobby,LoadOrCreateSettings",
+      "FT-GATE patched 13 entry points expected=13 excluded=",
+      "FT-GATE patched 12 entry points expected=13 excluded=LoadOrCreateSettings missing=JoinRoom",
+      "FT-GATE patched 12 entry points expected=12 excluded=JoinLobby,JoinRoomAsync")),
     ("FtRoomGate.cs:247", '(cur != null ? cur.Name : "(none)")',
      ("FT-ROOM joined offline=0 name=FT-1", "FT-ROOM joined offline=1 name=(none)",
       "FT-ROOM joined offline=1 name=(not-exported)")),
@@ -4059,7 +4168,7 @@ FORM_NOT_EMITTED = (
 
 
 def chk_emitted_variants_are_forms(m):
-    # ruling R6-A3.11.152, K-D: every variant an emit site of the class prints (FORM_VARIANTS) is a form the parser
+    # ruling R6-A3.11.153 (2), K-D: every variant an emit site of the class prints (FORM_VARIANTS) is a form the parser
     # reads, the site's statement still in the source; FtCalib.Run's failure lines with an empty exception message
     # among them (plugin/FtCalib.cs:120-126 print 'failed: ' + ex.Message, a bare 'failed:' once the trailing space is
     # dropped). The lines no emitter prints in a strict form's family stay refused (FORM_NOT_EMITTED)
@@ -4076,7 +4185,7 @@ def chk_emitted_variants_are_forms(m):
         assert r["kind"] == "cal" and r.get("failed") == 1, (pay, r)
 
 
-# the ruling of 12 Nov (08:30Z): the export prints a room name not of the lane's form (an ft_ name, '(none)' or
+# ruling R6-A3.11.154 (12 Nov, 08:30Z): the export prints a room name not of the lane's form (an ft_ name, '(none)' or
 # '(empty)') as '(not-exported)' on these two lines, every other field intact
 ROOM_NAME_REDACTED = ("FT-ROOM joined offline=1 name=(not-exported)",
                       "room call refused op=JoinRoom name=(not-exported) n=3")
@@ -4151,7 +4260,49 @@ GATE_SPOILS = (
      "FT-GATE patched 0 entry points of 0 expected: the room gate is not attached on every entry point"),
     ("form", "FT-GATE patched many entry points",
      "the FT-GATE patched line is not in its form: FT-GATE patched many entry points"),
+    # ruling R6-A3.11.154: a name outside the design, and an empty entry
+    ("outside the design", "FT-GATE patched 12 entry points expected=12 excluded=JoinLobby,JoinRoomAsync",
+     "the room gate left an entry point outside its design: JoinRoomAsync"),
+    ("an empty entry", "FT-GATE patched 13 entry points expected=13 excluded=JoinLobby,,LoadOrCreateSettings",
+     "the FT-GATE patched line is not in its form (an empty entry in excluded=): FT-GATE patched 13 entry points "
+     "expected=13 excluded=JoinLobby,,LoadOrCreateSettings"),
 )
+# ruling R6-A3.11.154: FtRoomGate.cs:109's samples (FORM_VARIANTS) and what attach_gate_faults reads in each
+GATE_EXCLUDED_SAMPLES = {
+    "FT-GATE patched 13 entry points expected=13 excluded=JoinLobby,JoinLobby,LoadOrCreateSettings": [],
+    "FT-GATE patched 13 entry points expected=13 excluded=JoinLobby,LoadOrCreateSettings": [],
+    "FT-GATE patched 13 entry points expected=13 excluded=": [],
+    "FT-GATE patched 12 entry points expected=13 excluded=LoadOrCreateSettings missing=JoinRoom":
+        ["FT-GATE patched 12 entry points of 13 expected; missing=JoinRoom: the room gate is not attached on every "
+         "entry point"],
+    "FT-GATE patched 12 entry points expected=12 excluded=JoinLobby,JoinRoomAsync":
+        ["the room gate left an entry point outside its design: JoinRoomAsync"],
+}
+
+
+def chk_gate_excluded_held_to_the_design(m):
+    # ruling R6-A3.11.154: every name of excluded= is one of FtRoomGate.NotRoomEntry's (the parser's
+    # GATE_EXCLUDED_DESIGN, held here to the array as the plugin source writes it, so a new name there fails until the
+    # tuple follows); a name outside it is an ATTACH fault naming it, once whatever its count; an empty entry inside a
+    # list is refused as written; names repeated or absent read clean (the design is an upper bound, no count per name)
+    src = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "plugin", "FtRoomGate.cs"),
+               encoding="utf-8").read()
+    arr = re.findall(r"string\[\] NotRoomEntry = \{([^}]*)\};", src)
+    assert len(arr) == 1, arr
+    assert tuple(re.findall(r'"([^"]*)"', arr[0])) == m.GATE_EXCLUDED_DESIGN, (arr, m.GATE_EXCLUDED_DESIGN)
+    rows = [r[2] for r in FORM_VARIANTS if r[0] == "FtRoomGate.cs:109"]
+    assert len(rows) == 1 and sorted(rows[0]) == sorted(GATE_EXCLUDED_SAMPLES), rows
+    for ln, want in GATE_EXCLUDED_SAMPLES.items():
+        got = m.attach_gate_faults(LOG_PREFIX + "[FRAME-TIME] " + ln)
+        assert got == want, (ln, got)
+    two = "FT-GATE patched 13 entry points expected=13 excluded=JoinRoomAsync,JoinLobby,JoinRoomAsync,CreateRoomT"
+    assert m.attach_gate_faults(LOG_PREFIX + "[FRAME-TIME] " + two) == [
+        "the room gate left an entry point outside its design: CreateRoomT",
+        "the room gate left an entry point outside its design: JoinRoomAsync"]
+    for ex in (",JoinLobby", "JoinLobby,", ","):
+        ln = "FT-GATE patched 13 entry points expected=13 excluded=" + ex
+        assert m.attach_gate_faults(LOG_PREFIX + "[FRAME-TIME] " + ln) == [
+            "the FT-GATE patched line is not in its form (an empty entry in excluded=): " + ln], ex
 HARMONY_FAIL = "[Error  :CompetitiveRounds] [HARMONY] Failed to patch %s: Patching exception in method null"
 
 
@@ -4507,8 +4658,7 @@ FAULT_FIELDS = (
      "each errored entry prints its own 'kind=disp shape=<s> failed:' line (FtCalib.cs:229), which VR2 reads as a "
      "calibration carrying failure warnings"),
     ("FT-GATE", "missing", "FtRoomGate.cs", "attach_gate_faults", "missing="),
-    ("FT-GATE", "excluded", "FtRoomGate.cs", None,
-     "the entry points the room gate leaves by design (names, not a count)"),
+    ("FT-GATE", "excluded", "FtRoomGate.cs", "attach_gate_faults", "excluded="),
     ("offthread", "span_off", "FtHeavy.cs", None,
      "component scopes opened off the main thread open nothing (FtSpan.cs:241); reported by report(); ruled "
      "(R6-A3.11.152 (2)(h)) as photon_offmain: reported, it decides nothing"),
@@ -4518,7 +4668,7 @@ FAULT_FIELDS = (
      "the per-refusal trace; its counts reach VR6 through the cumulative refusals line"),
     ("room call refused", "n", "FtRoomGate.cs", None,
      "the room gate refusing a room call while it holds a measured boot is its design (FtRoomGate.cs:87)"),
-    # ruling R6-A3.11.152, G5: the fault fields the name scan missed, found by classifying every emitted key
+    # ruling R6-A3.11.153 (2), G5: the fault fields the name scan missed, found by classifying every emitted key
     ("a3drain", "faults", "FtA3.cs", "a3", '"faults"'),
     ("a3drain", "nonempty", "FtA3.cs", "a3", '"nonempty"'),
     ("cal", "withheld", "FtA3.cs", "a3_live", '"withheld"'),
@@ -4543,8 +4693,10 @@ FAULT_FIELDS = (
     ("heavy", "at_call", "FtHeavy.cs", "b3", '"at_call"'),
     ("heavy", "edge", "FtHeavy.cs", "b3", '"edge"'),
     ("heavy", "off", "FtHeavy.cs", None,
-     "OPEN, reported to the integrator (no ruling yet): a heavy operation marked off the main thread (FtHeavy.cs:39) "
-     "is counted here, not as at_call or edge; b3 sums it into its operation table and judges only at_call and edge"),
+     "ruled not a fault (ruling R6-A3.11.154): a heavy operation marked off the main thread (FtHeavy.cs:39) runs in "
+     "no frame of the main thread; B3 judges placement in frames (at_call, edge) and the hashing job's interval "
+     "against every point's live interval; report() prints off (reported, not judged, as b3 says) and it decides "
+     "nothing; what an off-thread call costs the frames is in the measured frame times themselves"),
     ("menu_done", "why", "FtMenu.cs", "menu_check", '"why"'),
     ("answer_replay", "result", "FtReplay.cs", "f18", '"result"'),
     ("opened", "se", "FtSchedule.cs", "vr5_records", "OPENED"),
@@ -4552,11 +4704,11 @@ FAULT_FIELDS = (
     ("opened", "ic", "FtSchedule.cs", "vr5_records", "OPENED"),
     ("ledger", "log", "FtUpload.cs", "ledger_state", '"log"'),
 )
-# the second net (ruling .152, G5): field names that read as counting a fault; discovery no longer rests on it (every
+# the second net (ruling .153 (2), G5): field names that read as counting a fault; discovery no longer rests on it (every
 # emitted key is classified, below), but a NOT_FAULT key it matches must carry a reason of its own
 FAULT_WORDS = re.compile(r"\w*(?:fail|miss|overflow|violation|mismatch|refus|err|excl|mixed|offmain|_main|retry|_back"
                          r"|split|problems|duplicates|unscoped|guarded|outside|off_g|off_on|span_off|sock_thr)\w*|zs")
-# ruling R6-A3.11.152, G5: every other key a literal of plugin/Ft*.cs prints, by file, each group with the reason its
+# ruling R6-A3.11.153 (2), G5: every other key a literal of plugin/Ft*.cs prints, by file, each group with the reason its
 # keys count no fault (read from the emitter); with FAULT_FIELDS this classifies every (file, key) pair the scan finds.
 # A key FAULT_WORDS matches would stand in a group of its own, with its own reason
 NOT_FAULT = {
@@ -4590,7 +4742,7 @@ NOT_FAULT = {
          "the process-start run before Plugin.Awake applies the plugin's patches (FtCalib.cs:211-217), by design"),
         (("armfile",), "whether the arm file was present, a state menu_framerate reads, not a fault"),
         (("gc_incremental", "gc_slice_ns"),
-         "the GC mode readings, -1 when the getter throws (FtCalib.cs:396-403); judged by no rule (ruling .152, G2)"),
+         "the GC mode readings, -1 when the getter throws (FtCalib.cs:396-403); judged by no rule (ruling .153 (2), G2)"),
     ),
     "FtCensus.cs": (
         (("g", "entry", "comp", "shape", "on"), "a census entry's identity and its live calls"),
@@ -4679,7 +4831,7 @@ def _fault_inventory(found, fault_fields, not_fault):
 
 
 def test_fault_fields_are_every_emitted_fault_field():
-    # ruling R6-A3.11.151 (2) class B and R6-A3.11.152, G5: every key a literal of plugin/Ft*.cs prints is classified,
+    # ruling R6-A3.11.151 (2) class B and R6-A3.11.153 (2), G5: every key a literal of plugin/Ft*.cs prints is classified,
     # by file: a FAULT_FIELDS row (a count or flag of something that went wrong, was refused, missed, dropped, retried,
     # mismatched, overflowed or ran off its thread) or a NOT_FAULT key with its reason; an unclassified pair fails and
     # so does a classified pair the source no longer prints. Every row's key is printed by its file, and each row names
@@ -4899,9 +5051,12 @@ B11_CHECKS = ["chk_c2_recovers_3_25", "chk_c3_recovers_3_0375", "chk_c4_recovers
               "chk_r_gc_total_reads_every_measured_window", "chk_cross_risks_beside_the_interval",
               # the integrator's points H, I and J (P3b's end-to-end export test)
               "chk_cal_entries_failure_form", "chk_malformed_lines_are_refusals", "chk_reference_a3_form",
-              # the confirming round's G1 (ruling R6-A3.11.152): emitted lists judged as written
+              # the confirming round's G1 (ruling R6-A3.11.153 (2)): emitted lists judged as written
               "chk_ledger_types_judged_as_written",
-              # G3: the census's partial variant
+              # ruling R6-A3.11.154: the refusals line of its form, or refused as written
+              "chk_refusals_line_judged_as_written", "chk_gate_excluded_held_to_the_design",
+              "chk_cal_lists_refused_as_written",
+              # G3 (ruling R6-A3.11.153 (3)): the census's partial variant
               "chk_census_partial_out_of_range", "chk_emitted_variants_are_forms"]
 
 

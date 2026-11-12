@@ -594,7 +594,7 @@ B11_MUTS = [
      'out["patches"] = (_num(ph.get("n", "")) == len(names) and tuple(names) == PHOTON_ENTRIES,',
      'out["patches"] = (_num(ph.get("n", "")) == len(names) and set(PHOTON_ENTRIES) <= set(names),',
      ["chk_sitting_v_withholds_the_counter_and_controls"]),
-    # ruling R6-A3.11.152, G1's class: the names as written, in the emitter's order
+    # ruling R6-A3.11.153 (2), G1's class: the names as written, in the emitter's order
     ("G1 photon names: compared as a multiset, the order unchecked",
      'out["patches"] = (_num(ph.get("n", "")) == len(names) and tuple(names) == PHOTON_ENTRIES,',
      'out["patches"] = (_num(ph.get("n", "")) == len(names) and sorted(names) == sorted(PHOTON_ENTRIES),',
@@ -611,7 +611,7 @@ B11_MUTS = [
      'out["census"] = (ent is not None and ent > 0 and wr == ent and "failed" not in c and "partial" not in c,',
      'out["census"] = (ent is not None and ent > 0 and wr == ent and "partial" not in c,',
      ["chk_sitting_v_withholds_the_counter_and_controls"]),
-    # the confirming round's G3 (ruling R6-A3.11.152): the census's partial=1 variant (FtCensus.cs:133, :166)
+    # the confirming round's G3 (ruling R6-A3.11.153 (2) and (3)): the census's partial=1 variant (FtCensus.cs:133, :166)
     ("G3 census: a partial census read in range",
      'out["census"] = (ent is not None and ent > 0 and wr == ent and "failed" not in c and "partial" not in c,',
      'out["census"] = (ent is not None and ent > 0 and wr == ent and "failed" not in c,',
@@ -628,7 +628,7 @@ B11_MUTS = [
      '     + r"(?: partial=1| failed=%s)?" % _FV,',
      '     + r"(?: partial=\\d+| failed=%s)?" % _FV,',
      ["chk_census_partial_out_of_range"]),
-    # ruling .152, K-D: the calibration failure forms read the empty message, and only the word failed
+    # ruling .153 (2), K-D: the calibration failure forms read the empty message, and only the word failed
     ("K-D cal failure: a message required after 'failed:'",
      '_CAL_FAILED = r"cal i=-?\\d+(?: [^\\s=]+=\\S*)* failed:(?: .*)?"',
      '_CAL_FAILED = r"cal i=-?\\d+(?: [^\\s=]+=\\S*)* failed: .*"',
@@ -923,7 +923,7 @@ B11_MUTS = [
      "    if listed != WRITER_TYPES:\n",
      "    if False:\n",
      ["chk_ledger_tap_withholds_sitting_v", "chk_ledger_types_judged_as_written"]),
-    # the confirming round's G1 (ruling R6-A3.11.152): the list as written, one mutant per route back to the defect
+    # the confirming round's G1 (ruling R6-A3.11.153 (2)): the list as written, one mutant per route back to the defect
     ("G1 ledger: the writer list compared by membership",
      "    if listed != WRITER_TYPES:\n",
      "    if set(listed) - {\"\"} != set(WRITER_TYPES):\n",
@@ -932,6 +932,50 @@ B11_MUTS = [
      '    listed = tuple(types.split(","))\n',
      '    listed = tuple(t for t in types.split(",") if t)\n',
      ["chk_ledger_types_judged_as_written"]),
+    # ruling R6-A3.11.154: the refusals line of its form, or refused as written; one mutant per route
+    ("154 refusals: a repeated key admitted again",
+     '            if k in seen:\n                if ("%s printed twice" % k) not in form:',
+     '            if False:\n                if ("%s printed twice" % k) not in form:',
+     ["chk_refusals_line_judged_as_written"]),
+    ("154 refusals: pairs= not compared with the pairs listed",
+     '        elif rec["pairs"] != listed:',
+     "        elif False:",
+     ["chk_refusals_line_judged_as_written"]),
+    ("154 refusals: a token not key=value dropped",
+     '            if not k:\n                form.append("%s is not <key>=<value>" % tok)\n                continue',
+     "            if not k:\n                continue",
+     ["chk_refusals_line_judged_as_written"]),
+    # ruling R6-A3.11.154: FT-GATE excluded= held to the design's names (membership, no count per name)
+    ("154 FT-GATE: a name outside the design admitted",
+     "    for n in sorted(set(x for x in names if x not in GATE_EXCLUDED_DESIGN)):",
+     "    for n in []:",
+     ["chk_gate_excluded_held_to_the_design", "chk_attach_guard"]),
+    ("154 FT-GATE: an empty entry in excluded= admitted",
+     '    if "" in names:\n        return ["the FT-GATE patched line is not in its form (an empty entry',
+     '    if False:\n        return ["the FT-GATE patched line is not in its form (an empty entry',
+     ["chk_gate_excluded_held_to_the_design", "chk_attach_guard"]),
+    ("154 FT-GATE: a design name printed twice made a fault",
+     "    for n in sorted(set(x for x in names if x not in GATE_EXCLUDED_DESIGN)):",
+     "    for n in sorted(set(x for x in names if x not in GATE_EXCLUDED_DESIGN or names.count(x) > 1)):",
+     ["chk_gate_excluded_held_to_the_design", "chk_attach_guard"]),
+    ("154 FT-GATE: the design's names not the plugin's NotRoomEntry",
+     'GATE_EXCLUDED_DESIGN = ("JoinLobby", "LoadOrCreateSettings")',
+     'GATE_EXCLUDED_DESIGN = ("JoinLobby", "LoadOrCreateSettings", "JoinRoomAsync")',
+     ["chk_gate_excluded_held_to_the_design"]),
+    # ruling R6-A3.11.154: an empty entry in cal u= or p= refused as written
+    ("154 cal lists: an empty entry admitted (d_up's ValueError again)",
+     '            if not re.fullmatch(r"-?\\d+(?:,-?\\d+)*", v):\n                raise Refused("the cal line',
+     '            if False:\n                raise Refused("the cal line',
+     ["chk_cal_lists_refused_as_written"]),
+    ("154 cal lists: empty entries dropped before the check",
+     '            if not re.fullmatch(r"-?\\d+(?:,-?\\d+)*", v):\n                raise Refused("the cal line',
+     '            if not re.fullmatch(r"-?\\d+(?:,-?\\d+)*", ",".join(x for x in v.split(",") if x)):\n'
+     '                raise Refused("the cal line',
+     ["chk_cal_lists_refused_as_written"]),
+    ("154 refusals: VR6 reads the pairs of a line out of its form",
+     '    if bad:\n        return False, bad + (["disarmed: "',
+     '    if False:\n        return False, bad + (["disarmed: "',
+     ["chk_refusals_line_judged_as_written"]),
     ("V6 ledger: sitting V ignores the disk-log tap",
      '    why += ["the disk-log tap: %s" % w for w in lwhy]',
      "    why += []",

@@ -45,6 +45,8 @@ Exit: 0 the report printed; 3 REFUSED (a check refused the input); 4 FT-PARSE RE
 REQUIRED_KEYS names: one line names its kind, file, line and keys; or an input holds a line "withheld <class> <n>",
 n >= 1, of a class in READ_CLASSES: the laptop seat script's export rule held back n lines of a class this parse
 reads, so the record is not whole, and the one line names the class, the count, the file and the line).
+Every mode exits 0 when its report printed, whatever that report's verdict (--controls on PROOF FAIL too), so the
+verdict is the report's line, never the exit code alone.
 """
 import math
 import os
@@ -352,15 +354,32 @@ def parse_line(line):
         if kind == parent and rec["head"].startswith(prefix):
             kind = rec["kind"] = sub
     if kind == "refusals":
-        # what:route=count tokens; route names hold ':' and '/', so split each token at its last '='
-        kv = {}
+        # what:route=count tokens; route names hold ':' and '/', so split each token at its last '='. Ruling
+        # R6-A3.11.154: the line is of its form only when every token is <key>=<value>, no key repeats and pairs= is
+        # the number of pair tokens printed (FtUpload.cs:54-55 prints a dictionary's pairs and its count). A line out
+        # of form keeps its first value of a repeated key and names what is out of form in "form"; vr6_build refuses
+        # it as written, so no value of it is read (never last-value-wins, never a silent count)
+        kv, seen, form, listed = {}, set(), [], 0
         for tok in rest.split():
             k, _, v = tok.rpartition("=")
+            if not k:
+                form.append("%s is not <key>=<value>" % tok)
+                continue
+            listed += k not in ("why", "pairs")
+            if k in seen:
+                if ("%s printed twice" % k) not in form:
+                    form.append("%s printed twice" % k)
+                continue
+            seen.add(k)
             if k in ("why", "pairs"):
                 rec[k] = v if k == "why" else _int(k, v)
-            elif k:
+            else:
                 kv[k] = _int(k, v)
-        rec["pairs_kv"] = kv
+        if "pairs" not in rec:
+            form.append("no pairs= count")
+        elif rec["pairs"] != listed:
+            form.append("pairs=%d for %d pairs listed" % (rec["pairs"], listed))
+        rec["pairs_kv"], rec["form"], rec["written"] = kv, form, "refusals " + rest.strip()
         return rec
     seen = {}
     for k, v in _KV.findall(rest):
@@ -374,6 +393,16 @@ def parse_line(line):
             if k in W_LIST_KEYS:
                 rec[k] = [_int(k, x) for x in v.split(",")]
                 continue
+        if kind == "cal" and k in ("u", "p"):
+            # ruling R6-A3.11.154: u= and p= are 20 batch tick counts joined by ',' (FtCalib.cs:193, :265, FtA3.cs:401;
+            # long values, so the writer prints no empty entry). An empty entry, or a value of another form, makes the
+            # line ill-formed: it is refused as written here, never a ValueError where d_up or stamps_estimate split it
+            # (which a guard would show as not computable)
+            if not re.fullmatch(r"-?\d+(?:,-?\d+)*", v):
+                raise Refused("the cal line is not in its form (%s=%s: an entry is empty or not an integer): cal %s"
+                              % (k, v, rest.strip()))
+            rec[k] = v
+            continue
         if k in NA_KEYS.get(kind, ()):
             # NA: cG, the native GC hook is not built (SHARED.md V6); a*, the allocation counter is unavailable (the
             # pin differs); heap, the same counter's heap figure unread
@@ -691,7 +720,7 @@ RECORDS = {
                      "ATTACH by its presence",
     "a3zero": "proof_records(): one per measured game for a zero row proved by probe:a3zero (none today)",
     "plant": "e_c(): exactly one",
-    "refusals": "records_missing(): one after the last game; vr6_build reads it",
+    "refusals": "records_missing(): one after the last game; vr6_build reads it and refuses any out of its form",
     "sitting": "complete(): exactly one for the last game",
     "menu": "menu_check(): one per segment 1..of, and no menu point line without one (menu runs only)",
     "menu_done": "menu_check(): exactly one, its cycles each with a menu fhat calibration, one settled line after it",
@@ -805,7 +834,7 @@ ATTACH_ENTRY = r"%s:\d+/\d+" % ATTACH_NAME
 ATTACH_NAMES = r"%s(?:,%s)*" % (ATTACH_ENTRY, ATTACH_ENTRY)
 COUNTER_LINE_KEYS = ("g", "frames", "missing_end", "cycle_failures", "span_depth_violations", "photon_offmain",
                      "span_leave_mismatch")
-# ruling R6-A3.11.152, K-D: FtCalib.Run's failure lines end 'failed: ' + ex.Message (plugin/FtCalib.cs:120-126), and an
+# ruling R6-A3.11.153 (2), K-D: FtCalib.Run's failure lines end 'failed: ' + ex.Message (plugin/FtCalib.cs:120-126), and an
 # exception's message may be empty, which the line's trailing space then leaves as a bare 'failed:'; that variant is
 # read too, as every other failure form reads its empty message (_msg)
 _CAL_FAILED = r"cal i=-?\d+(?: [^\s=]+=\S*)* failed:(?: .*)?"
@@ -817,7 +846,7 @@ FORMS = (
      ("pin", "planted", "empty")),
     ("alloc_init why=", _kv("alloc_init", ("why",)), ("why",)),
     ("scope plant asked=", _kv("scope plant", ("asked", "got"), {"asked": _I, "got": _INA}), ("asked", "got")),
-    # ruling R6-A3.11.152, G3: FtCensus prints the counts, then exactly one of nothing, ' partial=1' (the type list
+    # ruling R6-A3.11.153 (3), G3: FtCensus prints the counts, then exactly one of nothing, ' partial=1' (the type list
     # came from a ReflectionTypeLoadException) or ' failed=<type>' (the census threw; it replaces partial): never both
     ("scope census entries=", _kv("scope census", ("entries", "wrapped"), {"entries": _N, "wrapped": _N})
      + r"(?: partial=1| failed=%s)?" % _FV, ("entries", "wrapped", "partial?", "failed?")),
@@ -1365,7 +1394,9 @@ def b3(recs):
     thread's start, a hash completed on the main thread) ran in a live-combat frame: neither with CombatLive true
     at its call, in any moment (at_call), nor in a frame that started live whose combat ended before the call
     (edge; round-1 MEDIUM, FtHeavy.cs:39); and the hashing job's interval [hash_t0, hash_t1] lies clear of every
-    point's live interval [t0, t1]. Off-thread calls are reported, not judged.
+    point's live interval [t0, t1]. Off-thread calls (off) are reported, not judged (ruled not a fault, ruling
+    R6-A3.11.154): they run in no frame of the main thread, report() prints them, and what they cost the frames is in
+    the measured frame times themselves.
     Returns (ok, reasons, {op: (at_call, edge, off, live-moment calls)})."""
     hv = [r for r in recs if r["kind"] == "heavy"]
     if not hv:
@@ -1412,7 +1443,9 @@ def disarms(recs):
 def vr6_build(recs):
     """VR6's build half (FORMAT-M-PLAN.md V2 part b): the latest refusals line (why=quit when present, else the
     last game over) gives every refused what:route pair's count and every allowed route's send count; a route that
-    was both refused and sent fails, and any disarmed line makes the sitting INVALID. The file listings before and
+    was both refused and sent fails, and any disarmed line makes the sitting INVALID. A refusals line out of its form
+    (a key printed twice, a token not key=value, pairs= not the pairs listed) fails as written and no pair is read
+    (ruling R6-A3.11.154). The file listings before and
     after are the runner's half. The dispatched and sent counts come from one patch class, FtRoute_SendPatch: when it
     never attached both stay at zero and agree, so this comparison rests on the validity set's ATTACH guard, which
     requires that class's entry fully attached (ruling R6-A3.11.151 (2) class A, F2). Returns (ok, reasons, {pair:
@@ -1421,10 +1454,15 @@ def vr6_build(recs):
     dis = disarms(recs)
     if not lines:
         raise Refused("VR6 needs a refusals line (game over or quit)")
+    # ruling R6-A3.11.154: every refusals line is judged as written; one out of its form (parse_line's "form") is
+    # refused, naming what is out of form and the line, and no count of the sitting's lines is read
+    bad = ["the refusals line is not in its form (%s): %s" % ("; ".join(r["form"]), r["written"])
+           for r in lines if r["form"]]
+    if bad:
+        return False, bad + (["disarmed: " + "; ".join(dis)] if dis else []), {}, dis
     quit_ = [r for r in lines if r.get("why") == "quit"]
     last = (quit_ or lines)[-1]
     pairs = last["pairs_kv"]
-    bad = []
     refused_routes = set(k.split(":", 1)[1] for k in pairs if k.startswith("route:"))
     sent_routes = set(k.split(":", 1)[1] for k in pairs if k.startswith("sent:"))
     for r in sorted(refused_routes & sent_routes):
@@ -3329,7 +3367,7 @@ def boot_controls(recs):
     elif "n" not in ph:
         out["patches"] = (False, "the patch report failed (the line prints no n=)")
     else:
-        # the names as written (ruling R6-A3.11.152, G1's class: no entry dropped) are PHOTON_ENTRIES exactly, each
+        # the names as written (ruling R6-A3.11.153 (2), G1's class: no entry dropped) are PHOTON_ENTRIES exactly, each
         # once and in the emitter's order (FtPhoton.ReportPatched, plugin/FtPhoton.cs:66-69: the X targets in XNames'
         # order, then the E targets in ENames'), and n= counts them; the reading names what differs
         names = str(ph.get("names", "")).split(",")
@@ -3348,7 +3386,7 @@ def boot_controls(recs):
         out["census"] = (False, why)
     else:
         ent, wr = _num(c.get("entries", "")), _num(c.get("wrapped", ""))
-        # ruling R6-A3.11.152, G3: partial=1 (plugin/FtCensus.cs:133, printed at :166) means the type list came from a
+        # ruling R6-A3.11.153 (2), G3: partial=1 (plugin/FtCensus.cs:133, printed at :166) means the type list came from a
         # ReflectionTypeLoadException and is incomplete: a census of some types proves nothing about the types it did
         # not read, so the line is out of range whatever its counts
         out["census"] = (ent is not None and ent > 0 and wr == ent and "failed" not in c and "partial" not in c,
@@ -3553,6 +3591,9 @@ FAILED_PATCH = "Failed to patch"
 # FtRoomGate.ReportPatched's line (plugin/FtRoomGate.cs:109), counted from Harmony's own patch table
 GATE_LINE = re.compile(r"\[FRAME-TIME\] FT-GATE patched (\d+) entry points expected=(\d+) excluded=(\S*)"
                        r"(?: missing=(.*))?$")
+# ruling R6-A3.11.154: the names the room gate leaves by design, FtRoomGate.NotRoomEntry (plugin/FtRoomGate.cs:31; a
+# test reads the array from the source and holds this tuple to it). excluded= may name only these
+GATE_EXCLUDED_DESIGN = ("JoinLobby", "LoadOrCreateSettings")
 # ruling R6-A3.11.151 (3): the patch classes of the measuring build, one attach entry each, in ordinal order of the
 # name: every class with a class-level [HarmonyPatch] compiled only when SCR_FRAMETIME is defined (the test holds this
 # list equal to the source's set). ATTACH_CLASSES_REF is the reference build's, from P1b's hand-back (commit aa6d99e9,
@@ -3640,7 +3681,7 @@ def ledger_state(recs):
     ruling .149, A): (ok, reasons, state). ok needs exactly one ledger line, log=1 (the tap installed: without it the
     log type's writes reach no term of U) and types= the parser's writer types (WRITER_TYPES: the types
     window_reconcile reads in wu and tok; u_games sums log, hash and sock and P reads recv). The list is judged as
-    written (ruling R6-A3.11.152, G1; SHARED.md:245-246): its comma-split entries, none dropped, must be WRITER_TYPES
+    written (ruling R6-A3.11.153 (2), G1; SHARED.md:245-246): its comma-split entries, none dropped, must be WRITER_TYPES
     exactly, each once and in that order, the order the emitter joins them in (FtUpload.cs:104, joined at :368); a
     repeated name, an empty entry, another order, a name missing or a name more is not the list. The log=0 reason
     names why=; state is the line's state as one phrase, its list as written."""
@@ -3681,17 +3722,31 @@ def attach_gate_faults(text):
     """ATTACH's room gate part over one boot's log text (ruling R6-A3.11.151 (3), F17; first the follow-up to ruling
     .149, B): exactly one FT-GATE patched line (GATE_LINE, FtRoomGate.ReportPatched, plugin/FtRoomGate.cs:109-111), its
     count equal to its expected count, which is above 0, and no missing= list; else the sitting's isolation is not
-    proven. Returns the reasons."""
+    proven. Every name of excluded= is one the design leaves (GATE_EXCLUDED_DESIGN, ruling R6-A3.11.154); an empty
+    entry in it makes the line out of its form. Returns the reasons."""
     ls = [ln.rstrip() for ln in text.splitlines() if "[FRAME-TIME] FT-GATE patched " in ln]
     if len(ls) != 1:
         return ["%d 'FT-GATE patched' lines (needs exactly 1): the room gate's attachment is not read" % len(ls)]
     m = GATE_LINE.search(ls[0])
+    written = ls[0][ls[0].find("FT-GATE"):]
     if m is None:
-        return ["the FT-GATE patched line is not in its form: %s" % ls[0][ls[0].find("FT-GATE"):]]
+        return ["the FT-GATE patched line is not in its form: %s" % written]
+    # ruling R6-A3.11.154: SweepPun (FtRoomGate.cs:45-54) excludes the NotRoomEntry names and any generic method
+    # definition; expected= counts what it kept, so a room-entry method it excluded would leave expected= without it.
+    # The rule is membership, an upper bound: a seat whose Photon lacks one of the design's names is no weaker. This is
+    # not G1's case, where the rule says the list equals one list. A name may be printed more than once (SweepPun adds it
+    # once per method, and JoinLobby has two overloads), so no name is counted. An empty entry inside a non-empty list
+    # is refused as written (the empty list itself, nothing excluded, is of the form)
+    names = m.group(3).split(",") if m.group(3) else []
+    if "" in names:
+        return ["the FT-GATE patched line is not in its form (an empty entry in excluded=): %s" % written]
+    bad = []
     if m.group(1) != m.group(2) or int(m.group(2)) == 0 or m.group(4) is not None:
-        return ["FT-GATE patched %s entry points of %s expected%s: the room gate is not attached on every entry point"
-                % (m.group(1), m.group(2), "; missing=%s" % m.group(4) if m.group(4) is not None else "")]
-    return []
+        bad.append("FT-GATE patched %s entry points of %s expected%s: the room gate is not attached on every entry "
+                   "point" % (m.group(1), m.group(2), "; missing=%s" % m.group(4) if m.group(4) is not None else ""))
+    for n in sorted(set(x for x in names if x not in GATE_EXCLUDED_DESIGN)):
+        bad.append("the room gate left an entry point outside its design: %s" % n)
+    return bad
 
 
 def _ok(bad):
