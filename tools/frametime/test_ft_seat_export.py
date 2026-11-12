@@ -15,8 +15,12 @@ SliceExport, the code step 4 runs), in a child PowerShell on a synthetic log in 
       logs, each line put in the emitter's form (the builders' point and settled lines carry fewer keys than the
       emitter's, and their census lines comp=X), and the sitting-V log as a pair (--on, which reads VR1's [FPSCAP]
       hold against the settled lines);
-  -SelfTest: the script's own self-test prints SELFTEST PASS.
-Without PowerShell: the redaction forms are typed (ruling 1: a redacted line carries only fixed text and the mod's own
+  (d) ROWS: the fallback and free-operand rows' sample lines (KEYED_ROWS, FREE_ROWS, ROOM_FALLBACK) exported, and
+      their unlisted variants withheld;
+  -SelfTest: the script's own self-test prints SELFTEST PASS (the Codex gate's classification and lines among it).
+Without PowerShell: the conditional and fallback forms of each [FRAME-TIME] emit expression hold a proven shape or a
+row (test_emitter_fallbacks_have_rows; its negative control test_emitter_fallbacks_control); the Codex gate sits once
+in the sitting, after the other refusals and before the launch, its reader failing on a failed read; the redaction forms are typed (ruling 1: a redacted line carries only fixed text and the mod's own
 identifiers, "(not-exported)" where the text was); the first section's classes are ft_parse.READ_CLASSES, read from
 the parser, in the seat script ($LogClasses) and in ft_slice_identity.py (FIRST_SECTION); and every literal of
 plugin/*.cs that begins with "[FRAME-TIME] " or "[FPSCAP] " agrees with the fixed head of a form (the class by machine;
@@ -24,7 +28,8 @@ its limit is in test_emitter_literals_have_a_form, its negative control is test_
 Each mutant is a copy of frame_time_seat.ps1 with one route changed (the V5 window form only, the writer types
 without sock, the earlier point form only, no attach form, no attach report redaction, no redaction, a redaction that
 exports the text, wa loosened, the forms unanchored at the end, the window key check skipped, the [FPSCAP] lines back
-under the component slice), run the same way; each must fail its named check. frame_time_seat_v.ps1 holds no form and calls
+under the component slice, the settled gc_incremental back to <b>, the scope census tail without partial=1, the peer
+fallbacks dropped, the room line's empty region dropped), run the same way; each must fail its named check. frame_time_seat_v.ps1 holds no form and calls
 frame_time_seat.ps1, so it inherits them (checked from its text).
 Where neither powershell nor pwsh exists the export tests SKIP with that reason.
 """
@@ -718,6 +723,427 @@ def test_emitter_literals_control():
     assert literal_misses(_ps1_text(), lits)[1] == []
 
 
+# ---- the class by machine, second half: conditional and fallback forms of emitted lines. The head check above holds
+# every literal head to a form's fixed head; it does not see (a) a value that falls back outside its placeholder's set
+# (the settled line's gc_incremental=-1, G2) nor (b) an optional or variable part appended to the line (the scope
+# census line's " partial=1", G3). This reader reads each emit expression of a "[FRAME-TIME] " line in plugin/*.cs:
+# the one statement that starts with that literal, as the terms of its "+" chain and the arguments of the .Append(
+# chain that continues it. In it:
+#   (a) each operand right after a literal ending "<key>=", where every agreeing form (head check's sense) that holds
+#       <key>= holds a FINITE placeholder there (<b>, <tri>, or a fixed choice <=a|b>), must be a conditional of two
+#       literals whose values the forms admit ("(x ? 1 : 0)"), or have a KEYED row whose values are exactly the
+#       values those forms admit;
+#   (b) each operand NOT right after a "<key>=" literal (after other text, after another operand, or a conditional
+#       suffix) is free: its expression must have a FREE row naming exactly its free operands, with one sample line
+#       per variant (each must be exported) and lines of unlisted variants (each must be withheld). The reader cannot
+#       tell a string from a number, so a positional number ("after " + ms + " ms") needs a row too.
+#   An operand after a literal ending ": ", in a line whose head agrees with a redaction form, is the line's free text:
+#   the redaction exports it as (not-exported), so it needs no row.
+# What it cannot see, in plain words: the later statements of a StringBuilder line (the window line after maxF=, the
+# spans, heavy and refusals lines' loops), text appended by a helper (FtLedger.AppendWu/AppendTok/AppendWa,
+# AppendBins), the arguments a wrapper's callers pass (FtDrive.Log and SpawnSay: their rows list the variants), the
+# [FPSCAP] lines (interpolated literals), and what value an operand really holds: a row's values are a claim the
+# sweep reads from the source, not a proof. A row that matches no emit expression fails (no stale row).
+FINITE = {"b": ("0", "1"), "tri": ("-1", "0", "1")}
+KEY_END = re.compile(r"(?:^|[ (])([A-Za-z_][A-Za-z0-9_]*)=$")
+PROVEN = re.compile(r'^\(?\s*[^?"]+?\s*\?\s*("(?:[^"\\]|\\.)*"|-?[0-9]+)\s*:\s*("(?:[^"\\]|\\.)*"|-?[0-9]+)\s*\)?$')
+APPEND_ON = re.compile(r"\)\s*\.Append\(")
+
+# KEYED rows: (file, head literal, key, the values the emitter can print, a template payload with {} for the value,
+# why). The values must be exactly what the agreeing forms admit at <key>=.
+_S = ("settled g=1 seed=1 c_plant=80 W=120 vsync=0 target=-1 freq=10000000 hires=1 f_hat=1000000 gc_incremental=%s "
+      "gc_slice_ns=%s f18=%s answer=%s armfile=1 force=%s clock=1 frames=0 missing_end=0 cycle_failures=0 "
+      "span_depth_violations=0")
+KEYED_ROWS = [
+    ("FtCalib.cs", "[FRAME-TIME] settled g=", "gc_incremental", ("-1", "0", "1"), _S % ("{}", "-1", "A", "replay", "none"),
+     "starts -1 and is set to (isIncremental ? 1 : 0) inside a try (FtCalib.cs:397-403): -1 when the getter throws"),
+    ("FtCalib.cs", "[FRAME-TIME] settled g=", "f18", ("A", "B"), _S % ("1", "0", "{}", "replay", "none"),
+     "FtConfig.F18 = r == \"B\" ? \"B\" : \"A\" (FtConfig.cs:66)"),
+    ("FtCalib.cs", "[FRAME-TIME] settled g=", "answer", ("replay", "unmeasured"), _S % ("1", "0", "A", "{}", "none"),
+     "FtReplay.AnswerField = F18 == \"A\" ? \"replay\" : \"unmeasured\" (FtReplay.cs:25)"),
+    ("FtCalib.cs", "[FRAME-TIME] settled g=", "force", ("ON", "OFF", "none"), _S % ("1", "0", "A", "replay", "{}"),
+     "FtConfig.Force = f == \"ON\" || f == \"OFF\" ? f : \"none\" (FtConfig.cs:63)"),
+    ("FtFrames.cs", "[FRAME-TIME] p pt=", "pred", ("none", "ON", "OFF"), P6.replace("pred=none", "pred={}"),
+     "Arm(a) = a < 0 ? \"none\" : a == 1 ? \"ON\" : \"OFF\" (FtFrames.cs:290-293)"),
+    ("FtFrames.cs", "[FRAME-TIME] p pt=", "answer", ("replay", "unmeasured"), P6.replace("answer=replay", "answer={}"),
+     "FtReplay.AnswerField (FtReplay.cs:25)"),
+    ("FtFrames.cs", "[FRAME-TIME] between g=", "after", ("ON", "OFF", ""), "between g=1 after={} ticks=5 calls=2",
+     "_btArm starts \"\" and is set to _ptLastArm ? \"ON\" : \"OFF\" (FtFrames.cs:84, :284)"),
+    ("FtSchedule.cs", "[FRAME-TIME] flushed g=", "why", ("next_game", "settle", "quit"), "flushed g=1 why={}",
+     "FlushGame's callers pass \"settle\" (FtSchedule.cs:101, :105), \"next_game\" (:259), \"quit\" (Plugin.cs:575)"),
+    ("FtSpan.cs", "[FRAME-TIME] controls k_mutant=", "k_mutant", ("none", "k1", "k2", "k3"), "controls k_mutant={}",
+     "(k == \"k1\" || k == \"k2\" || k == \"k3\" ? k : \"none\") (FtSpan.cs:120)"),
+    ("FtMenu.cs", "[FRAME-TIME] menu_armed segments=", "force", ("ON", "OFF", "none"),
+     "menu_armed segments=4 seg_s=10 settle_s=20 force={} seed=1", "FtConfig.Force (FtConfig.cs:63)"),
+]
+
+# FREE rows: (file, head literal, the expression's free operands in order, [sample: a payload exported as it is, or
+# (payload, its export)], [unlisted variant payloads, each withheld], why)
+_DRIVE = ["self-drive armed: inputs are automated", "self-drive disarmed: escape", "self-drive disarmed: sitting complete",
+          "self-drive disarmed: rematch timeout", "self-drive disarmed: input=not evaluated",
+          "self-drive disarmed: input=error_NullReferenceException", "self-drive spawn waiting why=peer",
+          "self-drive spawn waiting why=assigner actors=-1", "self-drive spawn waiting why=actors actors=1",
+          "self-drive spawn waiting why=join-closed actors=2", "self-drive spawn waiting why=full actors=2",
+          "self-drive spawn waiting why=game-manager actors=2", "self-drive spawn waiting why=playing actors=2",
+          "self-drive spawn refused why=spectator", "self-drive spawn gave up tries=5",
+          "self-drive spawn try=1 master=1 actors=2", "self-drive spawn result created=1 players=2",
+          "self-drive spawn result created=0 players=-1"]
+_DRIVE_X = ["self-drive spawn waiting why=queue actors=2", "self-drive disarmed: timeout"]
+_DRIVE_WHY = ("FtDrive.Log(what) and SpawnSay(what) print the argument whole; their callers pass exactly these texts "
+              "(FtDrive.cs:63-64, :121-150)")
+FREE_ROWS = [
+    ("FtCensus.cs", "[FRAME-TIME] scope census entries=", ("why",),
+     ["scope census entries=40 wrapped=40", "scope census entries=40 wrapped=38 partial=1",
+      "scope census entries=0 wrapped=0 failed=InvalidOperationException"],
+     ["scope census entries=40 wrapped=38 partial=1 failed=InvalidOperationException",
+      "scope census entries=40 wrapped=38 failed=InvalidOperationException partial=1",
+      "scope census entries=40 wrapped=38 partial=0"],
+     "why starts \"\", is \" partial=1\" after a ReflectionTypeLoadException, and \" failed=<type>\" (replacing it) "
+     "when the census throws (FtCensus.cs:120, :133, :165)"),
+    ("FtCalib.cs", "[FRAME-TIME] settled g=",
+     ('(FtConfig.Problems.Length > 0 ? " problems=" + FtConfig.Problems.Trim().Replace(\' \', \',\') : "")',),
+     [_S % ("1", "0", "A", "replay", "none"),
+      _S.replace("force=%s ", "force=%s problems=stat,bad-line,bad-line,bad-seed,bad-force,bad-f18,bad-plant_us,"
+                 "bad-menu,bad-menu_segments ") % ("1", "0", "A", "replay", "none")],
+     [_S.replace("force=%s ", "force=%s problems=bad-room ") % ("1", "0", "A", "replay", "none")],
+     "FtConfig.Problems is \"\" or \" <token>\" repeated, each token of the problem set (FtConfig.cs:45-78)"),
+    ("FtArm.cs", "[FRAME-TIME] staged ", ("DLL_PROP", "v", '(PhotonNetwork.InRoom ? " in-room" : " pre-join")'),
+     ["staged ft_dll=0123abcd in-room", "staged ft_dll=0123abcd pre-join"],
+     ["staged ft_dll=0123abcd joined", "staged ft_rm=0123abcd in-room"],
+     "DLL_PROP is the constant \"ft_dll\", v = OwnDll(), 8 hex (FtArm.cs:29, :33-37)"),
+    ("FtArm.cs", "[FRAME-TIME] ", ("DLL_PROP",),
+     [("ft_dll staging failed: IOException: " + MARK, "ft_dll staging failed: " + RED)],
+     ["ft_rm staging failed: x"],
+     "DLL_PROP is the constant \"ft_dll\"; the failure text is redacted (FtArm.cs:54)"),
+    ("FtArm.cs", "[FRAME-TIME] peer ", ("said", "DLL_PROP"),
+     ["peer unknown actor=2 (no matching ft_dll)", "peer unknown actor=none (no matching ft_dll)",
+      "peer unknown actor=null (no matching ft_dll)"],
+     ["peer unknown actor=x2 (no matching ft_dll)", "peer unknown actor=2 (no matching ft_rm)"],
+     "said = \"unknown actor=\" + UnknownPeer(), an actor number, \"none\" or \"null\" (FtArm.cs:58-72, :215)"),
+    ("FtArm.cs", "[FRAME-TIME] peer ", ("ok",),
+     ["peer known actor=2 ft_dll=0123abcd", "peer known actor=2,3 ft_dll=0123abcd"],
+     ["peer known actor=2 ft_dll=", "peer known actor= ft_dll=0123abcd"],
+     "ok = \"known actor=\" + the actor numbers \",\"-joined + \" ft_dll=\" + OwnDll() (FtArm.cs:70, :219)"),
+    ("FtDrive.cs", "[FRAME-TIME] self-drive ", ("what",), _DRIVE, _DRIVE_X, _DRIVE_WHY),
+    ("FtRoomGate.cs", "[FRAME-TIME] FT-GATE patched ",
+     ("patched", '(missing.Count == 0 ? "" : " missing=" + string.Join(",", missing.ToArray()))'),
+     ["FT-GATE patched 7 entry points expected=7 excluded=JoinLobby,LoadOrCreateSettings",
+      "FT-GATE patched 6 entry points expected=7 excluded=JoinLobby missing=NCH.OnJoinedRoom (absent)",
+      "FT-GATE patched 6 entry points expected=7 excluded= missing=PhotonNetwork.JoinRoom,NCH.X (absent)"],
+     ["FT-GATE patched -1 entry points expected=7 excluded="],
+     "patched counts the attached entry points; the missing tail is absent or the ','-joined targets "
+     "(FtRoomGate.cs:105-111)"),
+    ("FtRematch.cs", "[FRAME-TIME] rematch held: published ", ("PROP", "_want"),
+     ["rematch held: published ft_rm=2"], ["rematch held: published ft_dll=2"],
+     "PROP is the constant \"ft_rm\", _want = FtSchedule.Game + 1 (FtRematch.cs)"),
+    ("FtRematch.cs", "[FRAME-TIME] rematch yes g=", ("_since.ElapsedMilliseconds",),
+     ["rematch yes g=2 after 0 ms", "rematch yes g=2 after 15003 ms"], ["rematch yes g=2 after -1 ms"],
+     "a Stopwatch's ElapsedMilliseconds, never negative (FtRematch.cs:70)"),
+    ("FtA3.cs", "[FRAME-TIME] cal i=", ("game",),
+     ["cal i=3 why=game0 kind=a3 k=CE_Top live=1 reads=1 scopes=1 ticks=1 tmax=1 unscoped=0 depth_err=0"],
+     ["cal i=3 why=game-1 kind=a3 k=CE_Top live=1 reads=1 scopes=1 ticks=1 tmax=1 unscoped=0 depth_err=0"],
+     "LogGame(g) gets the flushed game, g = _owed >= 0 (FtSchedule.cs:329-337)"),
+    ("FtAlloc.cs", "[FRAME-TIME] alloc pin=", ("PlantBytes",),
+     ["alloc pin=ok planted=1048600/1048576 empty=0"], ["alloc pin=ok planted=1048600/-1 empty=0"],
+     "PlantBytes is the constant 1 << 20 (FtAlloc.cs:121)"),
+    ("FtClock.cs", "[FRAME-TIME] clock refused: player-loop phase missing (EarlyUpdate ", ("a", "b", "c"),
+     ["clock refused: player-loop phase missing (EarlyUpdate True, PreLateUpdate False, Update True)",
+      "clock refused: player-loop phase missing (EarlyUpdate False, PreLateUpdate True, Update False)"],
+     ["clock refused: player-loop phase missing (EarlyUpdate true, PreLateUpdate False, Update True)"],
+     "a, b and c are bools, printed True or False (FtClock.cs:120-128)"),
+    ("FtFrames.cs", "[FRAME-TIME] p pt=", ("FtLedger.SockStats(_sk0, _sk1)",),
+     [P6, P6.replace("sock_p95=NA", "sock_p95=2000")], [P6.replace("sock_p95=NA", "sock_p95=-")],
+     "SockStats: \"sock_p95=\" + (NA or a bucket edge) + sock_n, sock_thr, sock_main (FtUpload.cs:329-347)"),
+]
+
+
+def _lit_at(src, i):
+    """(text, end, interpolated) of the C# string or char literal opening at i; an interpolated literal's text is the
+    text before its first hole; None when no literal opens at i"""
+    n = len(src)
+    if src[i] == "'":
+        j = i + 1
+        c = _ESC.get(src[j + 1], src[j + 1]) if src[j] == "\\" else src[j]
+        j += 2 if src[j] == "\\" else 1
+        return c, j + 1, False
+    m = re.match(r'(\$@|@\$|\$|@)?"', src[i:i + 3])
+    if not m:
+        return None
+    pre = m.group(1) or ""
+    verbatim, interp = "@" in pre, "$" in pre
+    j, buf, head, depth = i + m.end(), [], True, 0
+    while j < n:
+        c = src[j]
+        if depth:
+            if c == "{":
+                depth += 1
+            elif c == "}":
+                depth -= 1
+            j += 1
+            continue
+        if c == "\\" and not verbatim:
+            if head:
+                buf.append(_ESC.get(src[j + 1], src[j + 1]))
+            j += 2
+        elif c == '"' and verbatim and src.startswith('""', j):
+            buf.append('"') if head else None
+            j += 2
+        elif c == '"':
+            return "".join(buf), j + 1, interp
+        elif interp and src.startswith(("{{", "}}"), j):
+            buf.append(c) if head else None
+            j += 2
+        elif interp and c == "{":
+            head, depth = False, 1
+            j += 1
+        else:
+            buf.append(c) if head else None
+            j += 1
+    return "".join(buf), n, interp
+
+
+def _ws(src, i):
+    """the index of the next code after whitespace and comments from i"""
+    while i < len(src):
+        if src[i].isspace():
+            i += 1
+        elif src.startswith("//", i):
+            j = src.find("\n", i)
+            i = len(src) if j < 0 else j
+        elif src.startswith("/*", i):
+            j = src.find("*/", i + 2)
+            i = len(src) if j < 0 else j + 2
+        else:
+            break
+    return i
+
+
+def emit_pieces(src, at):
+    """the pieces of the emit expression whose first literal opens at `at`, in order: ("L", text) for a term that is
+    one literal, ("O", code) for any other term (whitespace collapsed); the terms of the statement's top-level "+" chain
+    and the arguments of a .Append( chain that continues it, up to the end of that one statement"""
+    out, i, n = [], at, len(src)
+    while i < n:
+        i = _ws(src, i)
+        lit = _lit_at(src, i) if src[i] in "\"'$@" else None
+        k = _ws(src, lit[1]) if lit else i
+        if lit and k < n and src[k] in "+),;":
+            out.append(("L", lit[0]) if not lit[2] else ("O", src[i:lit[1]]))
+            i = k
+        else:
+            start, depth = i, 0
+            while i < n:
+                c = src[i]
+                if src.startswith(("//", "/*"), i):
+                    i = _ws(src, i)
+                    continue
+                if c in "\"'" or (c in "$@" and i + 1 < n and src[i + 1] in "\"$@"):
+                    got = _lit_at(src, i)
+                    if got:
+                        i = got[1]
+                        continue
+                if c in "([{":
+                    depth += 1
+                elif c in ")]}":
+                    if depth == 0:
+                        break
+                    depth -= 1
+                elif depth == 0 and c in "+,;":
+                    break
+                i += 1
+            out.append(("O", re.sub(r"\s+", " ", src[start:i]).strip()))
+        if i < n and src[i] == "+":
+            i += 1
+            continue
+        m = APPEND_ON.match(src, i)
+        if m:
+            i = m.end()
+            continue
+        break
+    return out
+
+
+def emit_exprs(sources):
+    """[(file:line, file, pieces, literal)] for every literal of the sources that begins with "[FRAME-TIME] " (sources:
+    [(file name, text)]; the literals found as emitter_literals finds them), with the pieces of the expression it
+    opens"""
+    out = []
+    for name, src in sources:
+        for at, lit in cs_literals(src):
+            if lit.startswith("[FRAME-TIME] "):
+                # pieces whose first is not this literal (an interpolated literal, or one inside a larger term) are
+                # kept as they are: fallback_misses names them unreadable
+                out.append(("%s:%d" % (name, src.count("\n", 0, at) + 1), name, emit_pieces(src, at), lit))
+    return out
+
+
+def plugin_sources():
+    names = sorted(f for f in os.listdir(PLUGIN) if f.endswith(".cs"))
+    res = []
+    for name in names:
+        with open(os.path.join(PLUGIN, name), encoding="utf-8-sig") as f:
+            res.append((name, f.read()))
+    return res
+
+
+def _admitted(ph):
+    """the values a placeholder admits when they are finite (<b>, <tri>, <=a|b>), else None"""
+    m = PH.fullmatch(ph)
+    if m.group(3) is not None:
+        return tuple(m.group(3).split("|"))
+    return FINITE.get(m.group(2)) if m.group(1) == "" else None
+
+
+def fallback_misses(text, sources, keyed_rows, free_rows):
+    """the emit expressions of the sources that break (a) or (b) above against the seat script's text, and the rows
+    that match no expression: [(file:line, what)]"""
+    forms = ps_list(text, "FormText") + ps_list(text, "RedactText")
+    redacts = [form_head(f) for f in ps_list(text, "RedactText")]
+    miss, used_k, used_f = [], set(), set()
+    for where, name, ps, lit in emit_exprs(sources):
+        if not ps or ps[0] != ("L", lit):
+            miss.append((where, "unreadable emit expression %s" % (ps[:2],)))
+            continue
+        head = lit
+        agree = lambda h: h not in LIT_CLASSES and (head.startswith(h) or h.startswith(head))
+        mine = [f for f in forms if agree(form_head(f))]
+        red = any(agree(h) for h in redacts)
+        free, tail, prev = [], False, None
+        for kind, t in ps:
+            if kind == "L":
+                tail = tail or (red and t.endswith(": "))
+                prev = t
+                continue
+            if tail:
+                prev = None
+                continue
+            m = KEY_END.search(prev) if prev is not None else None
+            prev = None
+            if not m:
+                free.append(t)
+                continue
+            key = m.group(1)
+            phs = [x for f in mine for x in re.findall(r"(?<![A-Za-z0-9_])%s=(<[^>]*>)" % re.escape(key), f)]
+            sets = [_admitted(x) for x in phs]
+            if not phs or any(s is None for s in sets):
+                continue                     # no placeholder there, or one that is not finite: the sweep's
+            allowed = set(v for s in sets for v in s)
+            p = PROVEN.match(t)
+            if p:
+                vals = set(v.strip('"') for v in p.groups())
+                if not vals <= allowed:
+                    miss.append((where, "%s= prints %s, the forms admit %s" % (key, sorted(vals), sorted(allowed))))
+                continue
+            rows = [r for r in keyed_rows if r[:3] == (name, head, key)]
+            if not rows:
+                miss.append((where, "%s= operand %r has no proven two-valued shape and no KEYED row" % (key, t)))
+            elif set(rows[0][3]) != allowed:
+                miss.append((where, "%s= row values %s, the forms admit %s" % (key, sorted(rows[0][3]), sorted(allowed))))
+            used_k.add((name, head, key))
+        if free:
+            rows = [r for r in free_rows if r[:3] == (name, head, tuple(free))]
+            if not rows:
+                miss.append((where, "free operands %s have no FREE row" % (free,)))
+            used_f.add((name, head, tuple(free)))
+    miss += [("row", "stale KEYED row %s" % (r[:3],)) for r in keyed_rows if r[:3] not in used_k]
+    miss += [("row", "stale FREE row %s" % (r[:3],)) for r in free_rows if r[:3] not in used_f]
+    return miss
+
+
+def test_emitter_fallbacks_have_rows():
+    """every emit expression of a "[FRAME-TIME] " line in plugin/*.cs passes (a) and (b) of the reader above, and no row
+    is stale; the FINITE values are exactly what the seat script's placeholders admit"""
+    text = _ps1_text()
+    for name, vals in FINITE.items():
+        pat = re.search(r"(?:^|[;{] ?|    )%s = '([^']*)'" % name, text, re.M)
+        assert pat, name
+        probe = set(vals) | {"2", "-2", "", "00", "10", "-0", "x", "-1", "0", "1"}
+        assert set(v for v in probe if re.fullmatch(pat.group(1), v)) == set(vals), (name, pat.group(1))
+    exprs = emit_exprs(plugin_sources())
+    print("EMIT EXPRESSIONS read=%d" % len(exprs))
+    miss = fallback_misses(text, plugin_sources(), KEYED_ROWS, FREE_ROWS)
+    assert miss == [], miss
+
+
+PLANTED_EMIT = ("Planted.cs", '''namespace X { static class P { static void F(int g, int inc, string tail, bool x) {
+    Plugin.Log.LogInfo("[FRAME-TIME] settled g=" + g + " hires=" + inc + " vsync=0");
+    Plugin.Log.LogInfo("[FRAME-TIME] clock installed freq=" + g + " hires=" + (x ? 1 : -1) + " cycles=" + (x ? 1 : 0));
+    Plugin.Log.LogInfo("[FRAME-TIME] scope census entries=" + g + " wrapped=" + g + tail);
+    Plugin.Log.LogInfo("[FRAME-TIME] clock installed freq=" + g + " hires=" + (x ? 1 : 0) + " cycles=" + (x ? "1" : "0"));
+} } }
+''')
+
+
+def test_emitter_fallbacks_control():
+    """the negative controls of test_emitter_fallbacks_have_rows: (1) with the scope census row taken out, the check
+    names exactly FtCensus.cs's census expression (at the line that holds it, found here by text) and that row's
+    absence; (2) a planted source adds exactly its three faults: a <b> key whose operand is a variable, a proven
+    conditional printing a value the form does not admit, and a free operand with no row (its fourth line, proven
+    values the form admits, passes)"""
+    text, src = _ps1_text(), plugin_sources()
+    with open(os.path.join(PLUGIN, "FtCensus.cs"), encoding="utf-8-sig") as f:
+        at = [k for k, ln in enumerate(f.read().split("\n"), 1) if '"[FRAME-TIME] scope census entries="' in ln]
+    assert len(at) == 1, at
+    rows = [r for r in FREE_ROWS if r[0] != "FtCensus.cs"]
+    assert len(rows) == len(FREE_ROWS) - 1
+    miss = fallback_misses(text, src, KEYED_ROWS, rows)
+    assert miss == [("FtCensus.cs:%d" % at[0], "free operands ['why'] have no FREE row")], miss
+    miss = fallback_misses(text, src + [PLANTED_EMIT], KEYED_ROWS, FREE_ROWS)
+    assert [w for w, _ in miss] == ["Planted.cs:2", "Planted.cs:3", "Planted.cs:4"], miss
+    assert "hires= operand 'inc'" in miss[0][1] and "prints ['-1', '1']" in miss[1][1] and "['tail']" in miss[2][1], miss
+
+
+# the room line's fallback, keyed but not finite (so it holds no row): FtArm prints CloudRegion ?? "" as region= (its
+# part before "/") and as cloud_region= (plugin/FtArm.cs:117-118, :161); (exported, withheld)
+ROOM_FALLBACK = (["room name=ft_0123abcd region=us cloud_region=us/*", "room name=ft_0123abcd region=us cloud_region=us",
+                  "room name=ft_0123abcd region= cloud_region="],
+                 ["room name=ft_0123abcd region=xx cloud_region=", "room name=ft_0123abcd region= cloud_region=us/x"])
+
+
+def check_rows(ps1, tmp):
+    """the rows' sample lines through the export: every KEYED row's template with each value, and every FREE row's
+    sample, exported as it is (or as its given export); the template with an unlisted value, and every FREE row's
+    unlisted lines, withheld"""
+    good = [(p, p) for p in ROOM_FALLBACK[0]]
+    bad = list(ROOM_FALLBACK[1])
+    for _, _, _, vals, tpl, _ in KEYED_ROWS:
+        good += [(tpl.format(v), tpl.format(v)) for v in vals]
+        bad.append(tpl.format(next(x for x in ("2", "X", "x2") if x not in vals)))
+    for _, _, _, samples, unlisted, _ in FREE_ROWS:
+        good += [s if isinstance(s, tuple) else (s, s) for s in samples]
+        bad += unlisted
+    raw = [INFO + FT + p for p, _ in good] + [INFO + FT + p for p in bad]
+    out, log, _ = run_export(ps1, write(os.path.join(tmp, "rows.log"), "\n".join(raw) + "\n"))
+    f = ["not exported: %s" % e[:200] for _, e in good if INFO + FT + e not in log]
+    f += ["exported, not withheld: %s" % b[:200] for b in bad if INFO + FT + b in log]
+    if "withheld FRAME-TIME %d" % len(bad) not in log:
+        f.append("not 'withheld FRAME-TIME %d': %s" % (len(bad), [x for x in log if x.startswith("withheld")]))
+    return f
+
+
+@need_ps
+def test_rows_export(tmp_path):
+    f = check_rows(PS1, str(tmp_path))
+    assert f == [], f
+
+
+# ---- the Codex gate's place in the sitting (its classification and lines are the self-test's)
+
+
+def test_codex_gate_before_the_launch():
+    """the sitting reads the Codex gate exactly once, after the last of the other REFUSED checks and before the launch
+    scriptblock, and exits 2 on its refusal; the reader reads the process table with -ErrorAction Stop and nothing
+    turns a failed read into an empty list"""
+    text = _ps1_text()
+    sit = text[text.index("# ---- the sitting\n"):]
+    assert sit.count("CodexGate { CodexRows }") == 1 and text.count("CodexGate { CodexRows }") == 2, "one in the self-test"
+    gate = sit.index("$codexGate = CodexGate { CodexRows }")
+    assert sit.index("'REFUSED: the installed DLL is no staged FrameTime lane") < gate < sit.index("$launch = {")
+    assert "if ($codexGate.Refuse) { exit 2 }" in sit[gate:sit.index("$launch = {")]
+    body = text[text.index("function CodexRows {"):text.index("function CodexGate(")]
+    assert "-ErrorAction Stop" in body and "SilentlyContinue" not in body and "Win32_Process" in body, body
+
+
 @need_ps
 def test_selftest_passes():
     p = subprocess.run([PS, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", PS1, "-SelfTest"],
@@ -766,6 +1192,13 @@ MUTANTS = [
      "nm=<u> cP=<n> cX=<n> aC=<ina> aW=<ina> aR=<ina> aS=<ina> aP=<ina> aX=<ina> wa=<wa>'", None),
     ("the [FPSCAP] lines back under the component slice", check_identity_on_v, "text",
      "$LogClasses = @('[FRAME-TIME]', '[FPSCAP]')", "$LogClasses = @('[FRAME-TIME]')"),
+    ("the settled line's gc_incremental back to <b>", check_rows, "text", "gc_incremental=<tri>", "gc_incremental=<b>"),
+    ("the scope census tail without partial=1", check_rows, "text", "$FormPh.censusfail = '(?: partial=1| failed='",
+     "$FormPh.censusfail = '(?: failed='"),
+    ("the peer line's fallbacks none and null dropped", check_rows, "text", "peeractor = '(?:[0-9]{1,4}|none|null)'",
+     "peeractor = '(?:[0-9]{1,4})'"),
+    ("the room line's empty region dropped", check_rows, "text", "$FormPh.cloudopt = '(?:' + $FormPh.region + '(?:/\\*)?)?'",
+     "$FormPh.cloudopt = $FormPh.region + '(?:/\\*)?'"),
 ]
 
 

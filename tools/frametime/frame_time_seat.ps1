@@ -89,6 +89,12 @@ exits 0 (2 when unreadable); it reads only, and is how ft_slice_identity.py prov
 -CfgKindList <file> prints CfgKind's verdict (RESTORED-KIND, NOT-RESTORED-KIND or REFUSED) as "CFG-KIND <n> <verdict>"
 for each line "<pre-image cfg><TAB><sitting cfg>" of the file, and exits 0 (2 when the file is unreadable); it reads
 only, and is how ft_cfg_kind_agree.py proves the port agrees with ft_cfg_compare.py on its corpus.
+Before the launch the sitting refuses (exit 2) when the script is not the staged one, ROUNDS runs, a sentinel is
+present, step 1 fails or finds no staged lane, and, last, by the Codex gate (function CodexGate, the VM gate
+codexgate_f10.sh's classification): one read of the process table's codex.exe rows prints exactly one line "codex gate:
+live <n> [<pid> <why>, ...]; excluded <n> [<pid> <subcommand>, ...]; codex.exe in all <n>", then a "REFUSED: codex
+gate: ..." line when a row is live; a table that was not read prints only its REFUSED line. The self-test holds the
+classification's case table ($CodexCases, with codex_lax its negative control) and the gate's lines on stand-in reads.
 Exit codes: 0 pass, 2 refused before the launch (a step-1 error included), 3 the sitting did not complete (a launch,
 wait or shutdown error included), 4 VR6 failed (a step-4 error included), 5 the restore is not proven (a mismatch or
 a step-5 error; ruling R6-A3.11.112 F1), 6 the self-test failed. 5 overrides 3 and 4: the job ends 0 or 4 only with
@@ -183,6 +189,12 @@ $FormPh = @{
     # a .NET type or class name as the build prints it (ex.GetType().Name, type.Name): letters, digits, underscore
     ident = '[A-Za-z0-9_]{1,128}'; una = '(?:[0-9]{1,19}|NA)'; ina = '(?:-?[0-9]{1,19}|NA)'
     build = '[0-9]{1,4}(?:\.[0-9]{1,4}){1,3}\|(?:standalone|thunderstore)\|(?:nosha|[0-9a-f]{12})'
+    # the settled line's gc_incremental: FtCalib.Settled starts it -1 and sets it 1 or 0 inside a try, so a getter
+    # that throws prints -1 (plugin/FtCalib.cs:396-403)
+    tri = '(?:-1|0|1)'
+    # FtArm.UnknownPeer's value: an actor number, or its fallbacks "none" (no own digest or no other fighter) and
+    # "null" (a null player); the known peers: the actor numbers ","-joined (plugin/FtArm.cs:58-72, :215, :219)
+    peeractor = '(?:[0-9]{1,4}|none|null)'; actors = '[0-9]{1,4}(?:,[0-9]{1,4})*'
 }
 function FormSet([string]$name) { return '(?:' + ((@($FormSets[$name] -split ' ') | ForEach-Object { [regex]::Escape($_) }) -join '|') + ')' }
 $FormPh.shape = '(?:' + (FormSet 'shape').Substring(3).TrimEnd(')') + '|entry[0-9]{1,3})'
@@ -231,7 +243,7 @@ $FormText = @(
     # the text of the same failure in the lane's builds before c8e0dfed (their VM-seat logs are the identity corpus)
     '[FRAME-TIME] cal i=<n> why=<why> kind=disp shape=<shape> failed: InvalidOperationException: no patched target for <@patch>'
     '[FRAME-TIME] cal i=-1 why=patches kind=entries built=1 own_owner=com.competitiverounds.mod own_targets=<u> entries=<u> errors=<u>'
-    '[FRAME-TIME] settled g=<n> seed=<n> c_plant=<n> W=120 vsync=<n> target=<n> freq=<n> hires=<b> f_hat=<n> gc_incremental=<b> gc_slice_ns=<n> f18=<=A|B> answer=<=replay|unmeasured> armfile=<b> force=<=ON|OFF|none><problems> clock=<b> frames=<n> missing_end=<n> cycle_failures=<n> span_depth_violations=<n>'
+    '[FRAME-TIME] settled g=<n> seed=<n> c_plant=<n> W=120 vsync=<n> target=<n> freq=<n> hires=<b> f_hat=<n> gc_incremental=<tri> gc_slice_ns=<n> f18=<=A|B> answer=<=replay|unmeasured> armfile=<b> force=<=ON|OFF|none><problems> clock=<b> frames=<n> missing_end=<n> cycle_failures=<n> span_depth_violations=<n>'
     '[FRAME-TIME] census g=<n> entry=<@entry> comp=<@comp> shape=<shape> on=<n> guarded=<n> outside=<n>'
     '[FRAME-TIME] spans g=<n> comp=<@comp><spans>'
     '[FRAME-TIME] clock refused: player-loop phase missing (EarlyUpdate <bool>, PreLateUpdate <bool>, Update <bool>)'
@@ -298,13 +310,13 @@ $FormText = @(
     '[FRAME-TIME] flushed g=<n> why=<=next_game|settle|quit>'
     '[FRAME-TIME] opened g=<n> se=<b> ce=<b> ic=<b>'
     '[FRAME-TIME] staged ft_dll=<x8> <=in-room|pre-join>'
-    '[FRAME-TIME] room name=<room> region=<region> cloud_region=<region><cloudtail>'
+    '[FRAME-TIME] room name=<room> region=<regionopt> cloud_region=<cloudopt>'
     '[FRAME-TIME] ended why=complete pt=<pt>'
     '[FRAME-TIME] disarmed input=<input> pt=<pt>'
     '[FRAME-TIME] armed room=<room> region=<region>'
     '[FRAME-TIME] not armed input=<input>'
-    '[FRAME-TIME] peer unknown actor=<actor> (no matching ft_dll)'
-    '[FRAME-TIME] peer known actor=<actor> ft_dll=<x8>'
+    '[FRAME-TIME] peer unknown actor=<peeractor> (no matching ft_dll)'
+    '[FRAME-TIME] peer known actor=<actors> ft_dll=<x8>'
     '[FRAME-TIME] room call refused op=<@roomop> name=<roomname> n=<u>'
     '[FRAME-TIME] FT-GATE patched <u> entry points expected=<u> excluded=<gateex>'
     # the same with the targets it did not find (plugin/FtRoomGate.cs:111, :122, :142); a sweep failure's text is
@@ -364,7 +376,10 @@ function FormList([string]$set, [string]$sep) { $s = FormSet $set; return '(?:' 
 $FormPh.problems = '(?: problems=' + (FormList 'problem' ',') + ')?'
 # FtSpan.MomentNames . in|out . FtSpan.KindNames (plugin/FtSpan.cs:48, :53) = ticks/calls
 $FormPh.spans = '(?: (?:live|between|pick|over|menu)\.(?:in|out)\.(?:gated|upkeep|replay|writer)=[0-9]{1,19}/[0-9]{1,19})*'
-$FormPh.cloudtail = '(?:/\*)?'
+# the room line's region= and cloud_region=: FtArm prints PhotonNetwork.CloudRegion ?? "" (plugin/FtArm.cs:117-118,
+# :161), so each is a region of the set (cloud_region with its "/*" tail or none) or empty
+$FormPh.regionopt = '(?:' + $FormPh.region + ')?'
+$FormPh.cloudopt = '(?:' + $FormPh.region + '(?:/\*)?)?'
 $FormPh.gateex = '(?:' + (FormList 'gateex' ',') + ')?'
 $FormPh.rwhy = '(?:quit|game-?[0-9]{1,6})'
 $FormPh.pairs = '(?: ' + $FormPh.pair + '=[0-9]{1,19})*'
@@ -395,7 +410,9 @@ $FormPh.pnames = '(?:' + (FormList 'pname' ',') + ')?'
 # alloc_init's and the ledger line's why=: the source's tokens, or failed:<exception type name>
 $FormPh.allocwhy = '(?:ok|not_init|no_module|no_path|sha|code|failed:' + $FormPh.ident + ')'
 $FormPh.ledgerwhy = '(?:ok|already|no_disk_listener|failed:' + $FormPh.ident + ')'
-$FormPh.censusfail = '(?: failed=' + $FormPh.ident + ')?'
+# the scope census line's tail (plugin/FtCensus.cs:120, :133, :165): nothing, " partial=1" (a type load that left some
+# types unread), or " failed=<exception type name>", which replaces partial=1; never both
+$FormPh.censusfail = '(?: partial=1| failed=' + $FormPh.ident + ')?'
 # answer_replay's result= (plugin/FtReplay.cs:24, SeatEvidence.FtReplayAnswer, plugin/FtSchedule.cs:104, :171, :328);
 # e is kept from the earlier form
 $FormPh.replayresult = '(?:settled|kept|enqueue_failed|not_running|e|error_' + $FormPh.ident + '|skipped_(?:live|absent|settle|next_game|quit))'
@@ -566,6 +583,89 @@ $script:Out = New-Object System.Collections.Generic.List[string]
 # Console.Out, never the output stream: a function's output-stream writes would become part of its return value
 function Say([string]$s) { $script:Out.Add($s); [Console]::Out.WriteLine($s) }
 function Print([string]$s) { [Console]::Out.WriteLine($s) }
+
+# ---- the Codex gate (the lane's rule: no game launch while a codex.exe process is alive on the seat). Each codex.exe
+# row is classified by the rule of the VM's gate, codexgate_f10.sh: LIVE when its command line is empty or unreadable
+# (cmdline-empty; the reader gives "" for both), when it carries " exec " (exec), or when its subcommand is anything
+# else (unclassified); EXCLUDED only when its subcommand, after the executable (a quoted path, else the text up to and
+# including codex.exe in any case, else the first word) and its "-c <value>" options, is exactly app-server or
+# exec-server (the desktop app's long-running processes). The self-test's codex_lax mutant counts an unclassified row
+# excluded (the negative control of $CodexCases)
+function CodexClass([string]$cmd) {
+    if ([regex]::IsMatch($cmd, '\A[ \t]*\z')) { return 'LIVE cmdline-empty' }
+    if ((' ' + $cmd + ' ').Contains(' exec ')) { return 'LIVE exec' }
+    $s = [regex]::Replace($cmd, '\A[ \t]+', '')
+    $p = $s.ToLowerInvariant().IndexOf('codex.exe', [System.StringComparison]::Ordinal)
+    if ($s.StartsWith('"')) { $s = [regex]::Replace($s, '\A"[^"]*"[ \t]*', '') }
+    elseif ($p -ge 0) { $s = [regex]::Replace($s.Substring($p + 9), '\A[ \t]*', '') }
+    else { $s = [regex]::Replace($s, '\A[^ \t]+[ \t]*', '') }
+    for ($i = 0; $i -ne 64; $i++) {
+        $m = [regex]::Match($s, '\A-c[ \t]+(?:[^ \t"]|"(?:[^"\\]|\\.)*")+[ \t]*')
+        if (-not $m.Success) { break }
+        $s = $s.Substring($m.Length)
+    }
+    $tok = [regex]::Replace($s, '(?s)[ \t].*\z', '')
+    if ($tok -ceq 'app-server' -or $tok -ceq 'exec-server') { return 'EXCLUDED ' + $tok }
+    if ($script:Mutant -eq 'codex_lax') { return 'EXCLUDED ' + $tok }
+    return 'LIVE unclassified'
+}
+
+function CodexRows {
+    # one read of the process table: the codex.exe rows (WQL compares the name without case), each its pid and command
+    # line. A read that fails throws (-ErrorAction Stop): it is never an empty list
+    return @(Get-CimInstance -ClassName Win32_Process -Filter "Name = 'codex.exe'" -ErrorAction Stop |
+        ForEach-Object { [pscustomobject]@{ Id = [int]$_.ProcessId; Cmd = [string]$_.CommandLine } })
+}
+
+function CodexGate([scriptblock]$Read) {
+    # one reading through $Read (CodexRows in the sitting, a stand-in in the self-test) to the gate's lines: the result
+    # line, then "REFUSED: ..." when a row is live; a read that throws, or a row it could not read, gives one REFUSED
+    # line. Refuse is true exactly when a REFUSED line is there
+    try { $rows = @(& $Read) }
+    catch {
+        $msg = (([string]$_.Exception.Message) -split '\r?\n')[0]
+        if ($msg.Length -gt 160) { $msg = $msg.Substring(0, 160) }
+        return @{ Refuse = $true; Lines = @(('REFUSED: codex gate: the process table was not read ({0}: {1})' -f $_.Exception.GetType().Name, $msg)) }
+    }
+    $live = New-Object System.Collections.Generic.List[string]
+    $excluded = New-Object System.Collections.Generic.List[string]
+    foreach ($r in $rows) {
+        if ($null -eq $r -or $null -eq $r.PSObject.Properties['Id'] -or $null -eq $r.PSObject.Properties['Cmd']) {
+            return @{ Refuse = $true; Lines = @(('REFUSED: codex gate: a codex.exe row of the process table was not read ({0} rows)' -f $rows.Count)) }
+        }
+        $c = CodexClass $r.Cmd
+        if ($c.StartsWith('EXCLUDED ')) { $excluded.Add(('{0} {1}' -f $r.Id, $c.Substring(9))) } else { $live.Add(('{0} {1}' -f $r.Id, $c.Substring(5))) }
+    }
+    $lines = @(('codex gate: live {0} [{1}]; excluded {2} [{3}]; codex.exe in all {4}' -f $live.Count, ($live -join ', '),
+        $excluded.Count, ($excluded -join ', '), $rows.Count))
+    if ($live.Count -gt 0) {
+        $lines += ('REFUSED: codex gate: {0} live codex.exe process(es) [{1}]: no game launch while Codex runs' -f $live.Count, ($live -join ', '))
+    }
+    return @{ Refuse = $live.Count -gt 0; Lines = $lines }
+}
+
+# the classification's cases: a quoted executable path with spaces, "-c <value>" options before the subcommand (a
+# quoted value among them), an empty and a blank command line, the exec subcommand, app-server, exec-server, the
+# executable named in upper and in mixed case, no executable suffix, a subcommand in another case or with a suffix,
+# options only, and the executable alone
+$CodexCases = @(
+    @{ Cmd = '"C:\Program Files\Codex App\codex.exe" app-server'; Want = 'EXCLUDED app-server' }
+    @{ Cmd = '"C:\Program Files\Codex App\codex.exe" -c model="a b" -c sandbox=read-only app-server --listen x'; Want = 'EXCLUDED app-server' }
+    @{ Cmd = 'C:\tools\codex.exe -c k=v exec-server'; Want = 'EXCLUDED exec-server' }
+    @{ Cmd = 'C:\tools\codex.exe -c "a b"=1 app-server'; Want = 'EXCLUDED app-server' }
+    @{ Cmd = ''; Want = 'LIVE cmdline-empty' }
+    @{ Cmd = "  `t "; Want = 'LIVE cmdline-empty' }
+    @{ Cmd = 'codex.exe exec --sandbox read-only "review the diff"'; Want = 'LIVE exec' }
+    @{ Cmd = '"C:\Program Files\Codex App\codex.exe" -c k=v exec'; Want = 'LIVE exec' }
+    @{ Cmd = 'C:\TOOLS\CODEX.EXE app-server'; Want = 'EXCLUDED app-server' }
+    @{ Cmd = 'C:\Tools\Codex.Exe -c k=v exec-server'; Want = 'EXCLUDED exec-server' }
+    @{ Cmd = 'codex app-server'; Want = 'EXCLUDED app-server' }
+    @{ Cmd = 'C:\tools\Codex.exe resume'; Want = 'LIVE unclassified' }
+    @{ Cmd = 'C:\tools\codex.exe App-Server'; Want = 'LIVE unclassified' }
+    @{ Cmd = '"C:\Program Files\Codex App\codex.exe" app-server-x'; Want = 'LIVE unclassified' }
+    @{ Cmd = 'C:\tools\codex.exe -c k=v'; Want = 'LIVE unclassified' }
+    @{ Cmd = 'C:\tools\codex.exe'; Want = 'LIVE unclassified' }
+)
 
 function Sha([string]$p) {
     if (Test-Path -LiteralPath $p -PathType Leaf) { return (Get-FileHash -Algorithm SHA256 -LiteralPath $p).Hash.ToLowerInvariant() }
@@ -1200,6 +1300,40 @@ if ($SelfTest) {
     $nCtl = @($WFormCases | Where-Object { -not ($_.Form -or $_.Keys) }).Count
     Print ("self-test window form cases: {0} refused by the form, {1} by the key check alone, {2} controls" -f $nForm, $nKeys, $nCtl)
     if ($nForm -lt 1 -or $nKeys -lt 1 -or $nCtl -lt 1) { $fail += 'window form: the case table lacks a form case, a key case or a control' }
+    # the Codex gate: the classification's case table (none) and its negative control (codex_lax: an unclassified row
+    # counted excluded must make cases differ); then the gate's lines from stand-in readings
+    foreach ($m in @('none', 'codex_lax')) {
+        $script:Mutant = $m
+        try {
+            $diff = @(foreach ($c in $CodexCases) { $got = CodexClass $c.Cmd; if ($got -cne $c.Want) { "[$($c.Cmd)] gave '$got', wanted '$($c.Want)'" } })
+        }
+        finally { $script:Mutant = 'none' }
+        Print ("self-test codex class {0}: {1} cases, {2} differ{3}" -f $m, $CodexCases.Count, $diff.Count, $(if ($diff.Count) { ': ' + ($diff -join '; ') } else { '' }))
+        if ($m -eq 'none' -and $diff.Count) { $fail += "codex class: $($diff -join '; ')" }
+        if ($m -eq 'codex_lax' -and $diff.Count -eq 0) { $fail += 'codex class codex_lax: no case differs (control FAILED)' }
+    }
+    $row = { param($id, $cmd) [pscustomobject]@{ Id = $id; Cmd = $cmd } }
+    $gateCases = @(
+        @{ Name = 'no row'; Read = { @() }; Refuse = $false; Lines = @('codex gate: live 0 []; excluded 0 []; codex.exe in all 0') }
+        @{ Name = 'app-server only'; Read = { @(& $row 1234 '"C:\Program Files\Codex App\codex.exe" app-server') }; Refuse = $false
+            Lines = @('codex gate: live 0 []; excluded 1 [1234 app-server]; codex.exe in all 1') }
+        @{ Name = 'live rows'; Read = { @((& $row 1234 '"C:\Program Files\Codex App\codex.exe" app-server'), (& $row 5678 'codex.exe exec x'), (& $row 91 ''), (& $row 92 'C:\tools\codex.exe -c k=v exec-server')) }
+            Refuse = $true; Lines = @('codex gate: live 2 [5678 exec, 91 cmdline-empty]; excluded 2 [1234 app-server, 92 exec-server]; codex.exe in all 4',
+                'REFUSED: codex gate: 2 live codex.exe process(es) [5678 exec, 91 cmdline-empty]: no game launch while Codex runs') }
+        @{ Name = 'a read that throws'; Read = { throw (New-Object System.UnauthorizedAccessException 'access denied') }; Refuse = $true
+            Lines = @('REFUSED: codex gate: the process table was not read (UnauthorizedAccessException: access denied)') }
+        @{ Name = 'a row not read'; Read = { @((& $row 1234 'codex app-server'), $null) }; Refuse = $true
+            Lines = @('REFUSED: codex gate: a codex.exe row of the process table was not read (2 rows)') }
+    )
+    foreach ($g in $gateCases) {
+        $r = CodexGate $g.Read
+        $ok = ($r.Refuse -eq $g.Refuse) -and (($r.Lines -join "`n") -ceq ($g.Lines -join "`n"))
+        Print ("self-test codex gate {0}: refuse {1}, lines '{2}'" -f $g.Name, $r.Refuse, ($r.Lines -join ' | '))
+        if (-not $ok) { $fail += "codex gate $($g.Name): refuse $($r.Refuse), lines '$($r.Lines -join ' | ')'" }
+    }
+    # this machine's own table, read once by the sitting's reader: printed, not judged (it shows the read works here)
+    $r = CodexGate { CodexRows }
+    Print ("self-test codex gate on this machine (not judged): {0}" -f ($r.Lines -join ' | '))
     # -ArmForce in both values: every run arms with none but arm_force_on, the clean run under -ArmForce ON
     $armForceGiven = $ArmForce
     foreach ($m in (@('none', 'arm_force_on', 'keep_prev_copy', 'closing_file', 'no_component_slice', 'throw_in_wait', 'throw_in_step4', 'export_all', 'drop_w', 'no_wkeys') +
@@ -1332,6 +1466,12 @@ if (Test-Path -LiteralPath $C.Arm) { Say 'REFUSED: a sentinel is already present
 try { $p = Step1 $C $run }
 catch { Say ('REFUSED: step 1 failed: ' + $_.Exception.Message); exit 2 }
 if (-not $p.LaneOk) { Say 'REFUSED: the installed DLL is no staged FrameTime lane (push the lane first)'; exit 2 }
+# the lane's rule: no game launch while a codex.exe process is alive on this seat (CodexGate, the VM gate's
+# classification): one reading of the process table right before the launch, its one result line, and a REFUSED line
+# with exit 2 when a row is live or the table was not read
+$codexGate = CodexGate { CodexRows }
+foreach ($l in $codexGate.Lines) { Say $l }
+if ($codexGate.Refuse) { exit 2 }
 $launch = {
     param($C)
     Start-Process 'steam://rungameid/1557740'
