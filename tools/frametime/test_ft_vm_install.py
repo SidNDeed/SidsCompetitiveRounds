@@ -3,8 +3,11 @@ them (ruling R6-A3.11.151 (2) class C, the write side).
 
 Every case runs a copy of the tool re-rooted in a temp folder (the game, the record folder and the lanes folder under
 it; the process table read as empty), never the real game folder. The members: ft_vm_install.sh's arm (the sentinel
-written, read back and compared before its written line), install (its two records read back), revert (OK only with
-the sentinel gone and the record closed); ft_arm_text.sh's standard output; ft_vm_leased.sh stopping before the launch
+written, read back and compared before its written line), install (its two records read back; CURRENT written
+before the plugin DLL changes, so an unwritable CURRENT leaves the DLL untouched and a failure after it leaves the
+record open for revert, which then restores the prior DLL), revert (its records and the backup proven before it
+writes; OK only with the sentinel gone and the record closed), status (an open install names its prior digest);
+ft_arm_text.sh's standard output; ft_vm_leased.sh stopping before the launch
 when the arm step ends nonzero; ft_vm_restore.sh's inventory lines and VR6's two listings. Each check is run on the
 tool as it is and on a mutant per route, a copy with that route's check removed, which must fail it. The cases that
 need a POSIX file-size limit, a symbolic link to /dev/null or the leased script's dry harness skip, with the reason,
@@ -119,10 +122,12 @@ class Tree:
         return bk
 
     def lanes(self):
-        lanes = os.path.join(self.tmp, "lanes", "frametime-0123abcd")
+        # "/"-joined: the tool's lanes-folder pattern is the re-rooted "<tmp>/lanes/frametime-" (os.path.join's "\"
+        # on Windows matched no pattern, so install refused there before it ran)
+        lanes = self.tmp + "/lanes/frametime-0123abcd"
         write(os.path.join(lanes, "CompetitiveRounds.dll"), b"lane dll")
         write(os.path.join(lanes, "sha256.txt"), sha(b"lane dll") + "  CompetitiveRounds.dll\n")
-        dll = os.path.join(self.tmp, "proof", "lane-frametime.dll")
+        dll = self.tmp + "/proof/lane-frametime.dll"
         write(dll, b"lane dll")
         return dll, lanes
 
@@ -283,6 +288,115 @@ def check_install_records(tmp, edits=()):
         rc, out, _ = t("install", dll, lanes, limit=limit)
         if rc != 3 or lines(out, "INSTALL OK") or len(lines(out, "FT-VM-INSTALL FAIL")) != 1 or want not in out:
             f.append("install limit %d: rc %s, out %r" % (limit, rc, out))
+    return f
+
+
+# the record CURRENT's path: check_install_current_unwritable re-roots it into a folder that does not exist
+CUR_LINE = 'CUR="$REC/CURRENT"\n'
+PLUG_TAIL = "/game/BepInEx/plugins/CompetitiveRounds/CompetitiveRounds.dll"
+# the stand-in cp, first on PATH: the copy onto $FT_TEST_PLUG fails (FT_TEST_CP=fail) or leaves other bytes there
+# (corrupt); every other copy is the real cp
+CP_SHIM = '''#!/usr/bin/env bash
+last="${@: -1}"
+if [ "$last" = "$FT_TEST_PLUG" ]; then
+  case "$FT_TEST_CP" in fail) echo "stand-in cp: refused $last" >&2; exit 1;; corrupt) printf 'other bytes' > "$last"; exit 0;; esac
+fi
+command -p cp "$@"
+'''
+
+
+def _digest(path):
+    with open(path, "rb") as f:
+        return sha(f.read())
+
+
+def check_install_current_unwritable(tmp, edits=()):
+    """the open-install record CURRENT cannot be written (CUR re-rooted into a folder that does not exist, so the
+    redirection fails and nothing else changes): FAIL, exit 3, no OK line, the FAIL line says nothing was installed,
+    the plugin DLL's sha256 unchanged, no record left"""
+    t = Tree(tmp, list(edits) + [(CUR_LINE, 'CUR="$REC/absent-folder/CURRENT"\n')])
+    dll, lanes = t.lanes()
+    before = _digest(t.plug)
+    rc, out, _ = t("install", dll, lanes)
+    f = []
+    fail = lines(out, "FT-VM-INSTALL FAIL")
+    if rc != 3 or lines(out, "INSTALL OK") or len(fail) != 1 or "open-install record" not in fail[0] \
+            or "the plugin DLL is untouched" not in fail[0]:
+        f.append("install, CURRENT unwritable: rc %s, out %r" % (rc, out))
+    if _digest(t.plug) != before:
+        f.append("install, CURRENT unwritable: the plugin DLL changed (%s -> %s)" % (before, _digest(t.plug)))
+    if os.path.exists(os.path.join(t.rec, "absent-folder")):
+        f.append("install, CURRENT unwritable: a record was left")
+    return f
+
+
+def check_install_fails_after_record(tmp, edits=()):
+    """a failure after CURRENT is written, each way (the stand-in cp, first on PATH, acting only on the plugin DLL's
+    path): the copy fails, or it leaves other bytes. Each: FAIL, exit 3, no OK line, the FAIL line naming the open
+    record ("the install record stays open: run revert"), CURRENT holding the backup folder. Then revert with the real
+    cp: OK, the plugin DLL's sha256 the prior one, CURRENT gone and closed as CURRENT.reverted-<stamp>"""
+    f = []
+    for how in ("fail", "corrupt"):
+        t = Tree(os.path.join(str(tmp), how), edits)
+        dll, lanes = t.lanes()
+        prior = _digest(t.plug)
+        shim = os.path.join(t.tmp, "shim")
+        write(os.path.join(shim, "cp"), CP_SHIM)
+        env = dict(os.environ, FT_TEST_PLUG=t.tmp + PLUG_TAIL, FT_TEST_CP=how,
+                   PATH=shim + os.pathsep + os.environ.get("PATH", ""))
+        rc, out, err = t("install", dll, lanes, env=env)
+        fail = lines(out, "FT-VM-INSTALL FAIL")
+        if rc != 3 or lines(out, "INSTALL OK") or len(fail) != 1 or "the install record stays open: run revert" not in fail[0]:
+            f.append("install %s after CURRENT: rc %s, out %r, err %r" % (how, rc, out, err[-400:]))
+        bk = read(t.cur).strip() if os.path.isfile(t.cur) else ""
+        if not bk or not os.path.isfile(os.path.join(bk, "CompetitiveRounds.dll")):
+            f.append("install %s after CURRENT: CURRENT does not hold the backup folder (%r)" % (how, bk))
+        if how == "corrupt" and _digest(t.plug) == prior:
+            f.append("install corrupt: the stand-in cp did not act (the plugin DLL is the prior one)")
+        rc, out, _ = t("revert")
+        done = [x for x in os.listdir(t.rec) if x.startswith("CURRENT.reverted-")]
+        if rc != 0 or len(lines(out, "FT-VM-REVERT OK restored %s sentinel absent" % prior)) != 1:
+            f.append("revert after %s: rc %s, out %r" % (how, rc, out))
+        if _digest(t.plug) != prior:
+            f.append("revert after %s: the plugin DLL is not the prior one" % how)
+        if os.path.exists(t.cur) or len(done) != 1 or read(os.path.join(t.rec, done[0])).strip() != bk:
+            f.append("revert after %s: the record is not closed (%s, %s)" % (how, os.path.exists(t.cur), done))
+    return f
+
+
+def check_revert_proves_first(tmp, edits=()):
+    """revert proves its records and the backup before it writes: with the backup's digest record missing it refuses
+    (exit 2), and with a backup whose bytes differ from the record it FAILs (exit 3); each time the plugin DLL keeps
+    the lane's bytes and CURRENT stays"""
+    f = []
+    for case in ("no record", "backup differs"):
+        t = Tree(os.path.join(str(tmp), case.replace(" ", "-")), edits)
+        bk = t.open_install(record=case != "no record")
+        if case == "backup differs":
+            write(os.path.join(bk, "CompetitiveRounds.dll"), b"other bytes")
+        rc, out, _ = t("revert")
+        # refuse() prints the tool's one refusal head, FT-VM-INSTALL REFUSED, for every subcommand
+        want = ((2, "FT-VM-INSTALL REFUSED: the open install's records are unreadable") if case == "no record"
+                else (3, "FT-VM-REVERT FAIL the backup"))
+        if rc != want[0] or want[1] not in out or lines(out, "REVERT OK") or "nothing restored" not in out:
+            f.append("revert, %s: rc %s, out %r" % (case, rc, out))
+        if _digest(t.plug) != sha(b"lane dll") or not os.path.exists(t.cur):
+            f.append("revert, %s: the plugin DLL changed or the record was closed" % case)
+    return f
+
+
+def check_status_open(tmp, edits=()):
+    """status: with no open install the line ends " open none"; with one, " open <backup> prior <its recorded digest>"
+    """
+    t = Tree(tmp, edits)
+    f = []
+    rc, out, _ = t("status")
+    if rc != 0 or not out.rstrip("\n").endswith(" open none"):
+        f.append("status, none open: rc %s, out %r" % (rc, out))
+    bk = t.open_install()
+    rc, out, _ = t("status")
+    if rc != 0 or not out.rstrip("\n").endswith(" open %s prior %s" % (bk, sha(b"release dll"))):
+        f.append("status, open: rc %s, out %r" % (rc, out))
     return f
 
 
@@ -458,7 +572,8 @@ def check_vr6_listing(tmp, edits=()):
 
 CHECKS = [check_arm_good, check_arm_unwritable, check_arm_no_folder, check_arm_read_back, check_arm_record,
           check_revert, check_revert_sentinel, check_revert_record, check_install_good, check_install_records,
-          check_arm_text_stdout, check_leased_arm_stop, check_inventory_write, check_vr6_listing]
+          check_install_current_unwritable, check_install_fails_after_record, check_revert_proves_first,
+          check_status_open, check_arm_text_stdout, check_leased_arm_stop, check_inventory_write, check_vr6_listing]
 
 
 @pytest.mark.parametrize("check", CHECKS, ids=[c.__name__ for c in CHECKS])
@@ -480,6 +595,25 @@ ARM_READ = ('printf \'%s\' "${txt%x}" | cmp -s - "$ARM" || { echo "FT-VM-ARM FAI
             'read back as the profile\'s text"; exit 3; }')
 ARM_DIR = ('mkdir -p "$(dirname "$ARM")" || { echo "FT-VM-ARM FAIL $mode: the folder of $ARM could not be made"; '
            'exit 3; }')
+# install's order: the record CURRENT, then the copy (the tool's text), and the earlier order, the copy and its digest
+# check first and CURRENT after (the negative control of both order checks)
+INSTALL_ORDER = r'''    printf '%s\n' "$BK" > "$CUR" && [ "$(cat "$CUR" 2>/dev/null)" = "$BK" ] \
+      || { rm -f "$CUR" 2>/dev/null
+           echo "FT-VM-INSTALL FAIL the open-install record $CUR not written (nothing installed: the plugin DLL is untouched; the backup is $BK; $([ -e "$CUR" ] && echo "a partial record remains at $CUR" || echo "no record left"))"; exit 3; }
+    cp "$DLL" "$PLUG" || { echo "FT-VM-INSTALL FAIL copy (the install record stays open: run revert)"; exit 3; }
+    now=$(sha "$PLUG")
+    [ "$now" = "$want" ] || { echo "FT-VM-INSTALL FAIL installed $now, wanted $want (the install record stays open: run revert)"; exit 3; }
+'''
+INSTALL_OLD_ORDER = r'''    cp "$DLL" "$PLUG" || { echo "FT-VM-INSTALL FAIL copy"; exit 3; }
+    now=$(sha "$PLUG")
+    [ "$now" = "$want" ] || { echo "FT-VM-INSTALL FAIL installed $now, wanted $want"; exit 3; }
+    printf '%s\n' "$BK" > "$CUR" && [ "$(cat "$CUR" 2>/dev/null)" = "$BK" ] \
+      || { echo "FT-VM-INSTALL FAIL the open-install record $CUR not written (installed $now; the backup is $BK)"; exit 3; }
+'''
+REVERT_PROOF = r'''    [ -n "$BK" ] && [ "${#want}" = 64 ] || refuse "the open install's records are unreadable ($CUR names '$BK'; its installed.sha256 holds '$want'): nothing restored"
+    [ "$(sha "$BK/CompetitiveRounds.dll" 2>/dev/null)" = "$want" ] \
+      || { echo "FT-VM-REVERT FAIL the backup $BK/CompetitiveRounds.dll does not hold the recorded digest $want (nothing restored; the install stays open)"; exit 3; }
+'''
 MUTANTS = [
     # (name, the check it must fail, the file, old, new)
     ("arm: the write's check removed", check_arm_unwritable, "ft_vm_install.sh", ARM_WRITE,
@@ -499,6 +633,14 @@ MUTANTS = [
     ("install: CURRENT's check removed", check_install_records, "ft_vm_install.sh",
      'printf \'%s\\n\' "$BK" > "$CUR" && [ "$(cat "$CUR" 2>/dev/null)" = "$BK" ]',
      'printf \'%s\\n\' "$BK" > "$CUR"; true'),
+    ("install: the earlier order, CURRENT unwritable", check_install_current_unwritable, "ft_vm_install.sh",
+     INSTALL_ORDER, INSTALL_OLD_ORDER),
+    ("install: the earlier order, a failure after the copy", check_install_fails_after_record, "ft_vm_install.sh",
+     INSTALL_ORDER, INSTALL_OLD_ORDER),
+    ("revert: the records and the backup not proven first", check_revert_proves_first, "ft_vm_install.sh",
+     REVERT_PROOF, ""),
+    ("status: the open install's prior digest not named", check_status_open, "ft_vm_install.sh",
+     '      o="$ob prior $op"\n', '      o="$ob"\n'),
     ("arm text: the standard output's check removed", check_arm_text_stdout, "ft_arm_text.sh",
      ' \\\n  || { echo "ft_arm_text.sh: the write to standard output failed" >&2; exit 3; }', ""),
     ("leased: the arm step's stop removed", check_leased_arm_stop, "ft_vm_leased.sh",

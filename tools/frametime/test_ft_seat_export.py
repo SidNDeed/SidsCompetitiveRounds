@@ -15,8 +15,15 @@ SliceExport, the code step 4 runs), in a child PowerShell on a synthetic log in 
       logs, each line put in the emitter's form (the builders' point and settled lines carry fewer keys than the
       emitter's, and their census lines comp=X), and the sitting-V log as a pair (--on, which reads VR1's [FPSCAP]
       hold against the settled lines);
-  -SelfTest: the script's own self-test prints SELFTEST PASS.
-Without PowerShell: the redaction forms are typed (ruling 1: a redacted line carries only fixed text and the mod's own
+  (d) ROWS: the fallback and free-operand rows' sample lines (KEYED_ROWS, FREE_ROWS, ROOM_FALLBACK), the [FPSCAP]
+      lines' swept holes (FPSCAP_ROWS) and the type names with a generic arity suffix (IDENT_ROWS) exported, and
+      their unlisted variants withheld;
+  (e) ROOM NAMES: the two room-name lines (ROOM_NAMES) export an admitted name as it is and any other name as
+      "(not-exported)" with every other field kept, the refused line's n= cut from the right; never withheld for it;
+  -SelfTest: the script's own self-test prints SELFTEST PASS (the Codex gate's classification and lines among it).
+Without PowerShell: the conditional and fallback forms of each [FRAME-TIME] emit expression hold a proven shape or a
+row (test_emitter_fallbacks_have_rows; its negative control test_emitter_fallbacks_control); the Codex gate sits once
+in the sitting, after the other refusals and before the launch, its reader failing on a failed read; the redaction forms are typed (ruling 1: a redacted line carries only fixed text and the mod's own
 identifiers, "(not-exported)" where the text was); the first section's classes are ft_parse.READ_CLASSES, read from
 the parser, in the seat script ($LogClasses) and in ft_slice_identity.py (FIRST_SECTION); and every literal of
 plugin/*.cs that begins with "[FRAME-TIME] " or "[FPSCAP] " agrees with the fixed head of a form (the class by machine;
@@ -24,7 +31,14 @@ its limit is in test_emitter_literals_have_a_form, its negative control is test_
 Each mutant is a copy of frame_time_seat.ps1 with one route changed (the V5 window form only, the writer types
 without sock, the earlier point form only, no attach form, no attach report redaction, no redaction, a redaction that
 exports the text, wa loosened, the forms unanchored at the end, the window key check skipped, the [FPSCAP] lines back
-under the component slice), run the same way; each must fail its named check. frame_time_seat_v.ps1 holds no form and calls
+under the component slice, the settled gc_incremental back to <b>, the scope census tail without partial=1, the peer
+fallbacks dropped, the room line's empty region dropped, the render cap's number back to four digits, <ident> without
+the arity suffix, the room-name forms admitting any name, either room-name redaction dropped, a redaction that drops
+its typed tail, the culture gate skipped in the sitting, its decimal check dropped, its own-table check dropped, the
+-CultureGate switch falling through into the sitting), run the same way; each must fail its named check. The culture
+gate (ruling, follow-up 2): its place right after the Codex gate (test_culture_gate_before_the_launch), the
+-CultureGate switch's lines and exit code with nothing created under the sitting's roots (test_culture_gate_switch),
+and the self-test's case table on hand-made number formats (test_culture_cases). frame_time_seat_v.ps1 holds no form and calls
 frame_time_seat.ps1, so it inherits them (checked from its text).
 Where neither powershell nor pwsh exists the export tests SKIP with that reason.
 """
@@ -529,23 +543,29 @@ def test_first_section_classes_are_the_parsers():
     assert text.count("$first = FirstSection $ln") == 1 and text.count("FirstSection([string]$ln)") == 1
 
 
-# the placeholders a redaction form's head may hold: each a closed pattern of the mod's own identifiers and numbers
-REDACT_TYPED = {"u", "n", "why", "ident", "gateex", "@a3k", "shape"}
+# the placeholders a redaction form's head and tail may hold: each a closed pattern of the mod's own identifiers and
+# numbers
+REDACT_TYPED = {"u", "n", "b", "why", "ident", "gateex", "@a3k", "@roomop", "shape"}
 
 
 def test_redaction_forms_are_typed():
-    """ruling 1: every redaction form ends in its one free field <*> (where "(not-exported)" stands), right after ": "
-    or "=", and its head holds fixed text, fixed choices and typed placeholders only"""
+    """ruling 1: every redaction form holds its one free field <*> (where "(not-exported)" stands) once, right after
+    ": " or "="; its head holds fixed text, fixed choices and typed placeholders only, and so does its tail (the text
+    after <*>, the line's last fields: empty, or a space and typed fields)"""
     text = _ps1_text()
     i, j = text.index("$RedactText = @("), text.index("$Redacts = @(")
     forms = re.findall(r"^    '([^']*)'$", text[i:j], re.M)
-    assert len(forms) >= 20, forms
+    assert len(forms) >= 22, forms
+    tails = 0
     for form in forms:
-        assert form.endswith("<*>") and form.count("<*>") == 1, form
-        head = form[:-3]
+        assert form.count("<*>") == 1, form
+        head, tail = form.split("<*>")
         assert head.endswith((": ", "=")), form
-        for ph in re.findall(r"<(@?[a-z0-9]+)>", head):
+        assert tail == "" or (tail.startswith(" ") and re.fullmatch(r"(?: [a-z_]+=<@?[a-z0-9]+>)+", tail)), form
+        tails += tail != ""
+        for ph in re.findall(r"<(@?[a-z0-9]+)>", head + tail):
             assert ph in REDACT_TYPED, (form, ph)
+    assert tails == 1, "the refused room line's n= is the one typed tail"
 
 
 # ---- the class by machine: every literal of the emitter that begins with a first-section class word agrees with the
@@ -718,6 +738,626 @@ def test_emitter_literals_control():
     assert literal_misses(_ps1_text(), lits)[1] == []
 
 
+# ---- the class by machine, second half: conditional and fallback forms of emitted lines. The head check above holds
+# every literal head to a form's fixed head; it does not see (a) a value that falls back outside its placeholder's set
+# (the settled line's gc_incremental=-1, G2) nor (b) an optional or variable part appended to the line (the scope
+# census line's " partial=1", G3). This reader reads each emit expression of a "[FRAME-TIME] " line in plugin/*.cs:
+# the one statement that starts with that literal, as the terms of its "+" chain and the arguments of the .Append(
+# chain that continues it. In it:
+#   (a) each operand right after a literal ending "<key>=", where every agreeing form (head check's sense) that holds
+#       <key>= holds a FINITE placeholder there (<b>, <tri>, or a fixed choice <=a|b>), must be a conditional of two
+#       literals whose values the forms admit ("(x ? 1 : 0)"), or have a KEYED row whose values are exactly the
+#       values those forms admit;
+#   (b) each operand NOT right after a "<key>=" literal (after other text, after another operand, or a conditional
+#       suffix) is free: its expression must have a FREE row naming exactly its free operands, with one sample line
+#       per variant (each must be exported) and lines of unlisted variants (each must be withheld). The reader cannot
+#       tell a string from a number, so a positional number ("after " + ms + " ms") needs a row too.
+#   An operand after a literal ending ": ", in a line whose head agrees with a redaction form, is the line's free text:
+#   the redaction exports it as (not-exported), so it needs no row.
+# What it cannot see, in plain words: the later statements of a StringBuilder line (the window line after maxF=, the
+# spans, heavy and refusals lines' loops), text appended by a helper (FtLedger.AppendWu/AppendTok/AppendWa,
+# AppendBins), the arguments a wrapper's callers pass (FtDrive.Log and SpawnSay: their rows list the variants), and
+# what value an operand really holds: a row's values are a claim the sweep reads from the source, not a proof. A row
+# that matches no emit expression fails (no stale row).
+# The [FPSCAP] lines are interpolated literals ($"...{x}..."), and the reader reads no hole of them: FPSCAP_ROWS below
+# are the sweep's samples, written by hand from plugin/Plugin.cs:3421-3584, so a new hole, a new reason text or a new
+# [FPSCAP] line there is unseen by any check here until a row is added (the literal check above still sees a new
+# head). The number format is not the reader's: no culture is set invariant in plugin/, so every negative int and every
+# two-decimal number of these lines prints through the game's current culture, while the forms admit only "-" and
+# "."; the seat's culture gate (CultureGate, before every launch of the sitting, and -CultureGate in the VM seat's step
+# list) refuses a seat whose user settings or whose culture's own table print anything else. What the gate cannot
+# see: the game runtime's own table can differ from Windows' for the same culture name; such a seat passes the gate,
+# its lines are withheld at the export, and the read refuses the input.
+FINITE = {"b": ("0", "1"), "tri": ("-1", "0", "1")}
+KEY_END = re.compile(r"(?:^|[ (])([A-Za-z_][A-Za-z0-9_]*)=$")
+PROVEN = re.compile(r'^\(?\s*[^?"]+?\s*\?\s*("(?:[^"\\]|\\.)*"|-?[0-9]+)\s*:\s*("(?:[^"\\]|\\.)*"|-?[0-9]+)\s*\)?$')
+APPEND_ON = re.compile(r"\)\s*\.Append\(")
+
+# KEYED rows: (file, head literal, key, the values the emitter can print, a template payload with {} for the value,
+# why). The values must be exactly what the agreeing forms admit at <key>=.
+_S = ("settled g=1 seed=1 c_plant=80 W=120 vsync=0 target=-1 freq=10000000 hires=1 f_hat=1000000 gc_incremental=%s "
+      "gc_slice_ns=%s f18=%s answer=%s armfile=1 force=%s clock=1 frames=0 missing_end=0 cycle_failures=0 "
+      "span_depth_violations=0")
+KEYED_ROWS = [
+    ("FtCalib.cs", "[FRAME-TIME] settled g=", "gc_incremental", ("-1", "0", "1"), _S % ("{}", "-1", "A", "replay", "none"),
+     "starts -1 and is set to (isIncremental ? 1 : 0) inside a try (FtCalib.cs:397-403): -1 when the getter throws"),
+    ("FtCalib.cs", "[FRAME-TIME] settled g=", "f18", ("A", "B"), _S % ("1", "0", "{}", "replay", "none"),
+     "FtConfig.F18 = r == \"B\" ? \"B\" : \"A\" (FtConfig.cs:66)"),
+    ("FtCalib.cs", "[FRAME-TIME] settled g=", "answer", ("replay", "unmeasured"), _S % ("1", "0", "A", "{}", "none"),
+     "FtReplay.AnswerField = F18 == \"A\" ? \"replay\" : \"unmeasured\" (FtReplay.cs:25)"),
+    ("FtCalib.cs", "[FRAME-TIME] settled g=", "force", ("ON", "OFF", "none"), _S % ("1", "0", "A", "replay", "{}"),
+     "FtConfig.Force = f == \"ON\" || f == \"OFF\" ? f : \"none\" (FtConfig.cs:63)"),
+    ("FtFrames.cs", "[FRAME-TIME] p pt=", "pred", ("none", "ON", "OFF"), P6.replace("pred=none", "pred={}"),
+     "Arm(a) = a < 0 ? \"none\" : a == 1 ? \"ON\" : \"OFF\" (FtFrames.cs:290-293)"),
+    ("FtFrames.cs", "[FRAME-TIME] p pt=", "answer", ("replay", "unmeasured"), P6.replace("answer=replay", "answer={}"),
+     "FtReplay.AnswerField (FtReplay.cs:25)"),
+    ("FtFrames.cs", "[FRAME-TIME] between g=", "after", ("ON", "OFF", ""), "between g=1 after={} ticks=5 calls=2",
+     "_btArm starts \"\" and is set to _ptLastArm ? \"ON\" : \"OFF\" (FtFrames.cs:84, :284)"),
+    ("FtSchedule.cs", "[FRAME-TIME] flushed g=", "why", ("next_game", "settle", "quit"), "flushed g=1 why={}",
+     "FlushGame's callers pass \"settle\" (FtSchedule.cs:101, :105), \"next_game\" (:259), \"quit\" (Plugin.cs:575)"),
+    ("FtSpan.cs", "[FRAME-TIME] controls k_mutant=", "k_mutant", ("none", "k1", "k2", "k3"), "controls k_mutant={}",
+     "(k == \"k1\" || k == \"k2\" || k == \"k3\" ? k : \"none\") (FtSpan.cs:120)"),
+    ("FtMenu.cs", "[FRAME-TIME] menu_armed segments=", "force", ("ON", "OFF", "none"),
+     "menu_armed segments=4 seg_s=10 settle_s=20 force={} seed=1", "FtConfig.Force (FtConfig.cs:63)"),
+]
+
+# FREE rows: (file, head literal, the expression's free operands in order, [sample: a payload exported as it is, or
+# (payload, its export)], [unlisted variant payloads, each withheld], why)
+_DRIVE = ["self-drive armed: inputs are automated", "self-drive disarmed: escape", "self-drive disarmed: sitting complete",
+          "self-drive disarmed: rematch timeout", "self-drive disarmed: input=not evaluated",
+          "self-drive disarmed: input=error_NullReferenceException", "self-drive spawn waiting why=peer",
+          "self-drive spawn waiting why=assigner actors=-1", "self-drive spawn waiting why=actors actors=1",
+          "self-drive spawn waiting why=join-closed actors=2", "self-drive spawn waiting why=full actors=2",
+          "self-drive spawn waiting why=game-manager actors=2", "self-drive spawn waiting why=playing actors=2",
+          "self-drive spawn refused why=spectator", "self-drive spawn gave up tries=5",
+          "self-drive spawn try=1 master=1 actors=2", "self-drive spawn result created=1 players=2",
+          "self-drive spawn result created=0 players=-1"]
+_DRIVE_X = ["self-drive spawn waiting why=queue actors=2", "self-drive disarmed: timeout"]
+_DRIVE_WHY = ("FtDrive.Log(what) and SpawnSay(what) print the argument whole; their callers pass exactly these texts "
+              "(FtDrive.cs:63-64, :121-150)")
+FREE_ROWS = [
+    ("FtCensus.cs", "[FRAME-TIME] scope census entries=", ("why",),
+     ["scope census entries=40 wrapped=40", "scope census entries=40 wrapped=38 partial=1",
+      "scope census entries=0 wrapped=0 failed=InvalidOperationException"],
+     ["scope census entries=40 wrapped=38 partial=1 failed=InvalidOperationException",
+      "scope census entries=40 wrapped=38 failed=InvalidOperationException partial=1",
+      "scope census entries=40 wrapped=38 partial=0"],
+     "why starts \"\", is \" partial=1\" after a ReflectionTypeLoadException, and \" failed=<type>\" (replacing it) "
+     "when the census throws (FtCensus.cs:120, :133, :165)"),
+    ("FtCalib.cs", "[FRAME-TIME] settled g=",
+     ('(FtConfig.Problems.Length > 0 ? " problems=" + FtConfig.Problems.Trim().Replace(\' \', \',\') : "")',),
+     [_S % ("1", "0", "A", "replay", "none"),
+      _S.replace("force=%s ", "force=%s problems=stat,bad-line,bad-line,bad-seed,bad-force,bad-f18,bad-plant_us,"
+                 "bad-menu,bad-menu_segments ") % ("1", "0", "A", "replay", "none")],
+     [_S.replace("force=%s ", "force=%s problems=bad-room ") % ("1", "0", "A", "replay", "none")],
+     "FtConfig.Problems is \"\" or \" <token>\" repeated, each token of the problem set (FtConfig.cs:45-78)"),
+    ("FtArm.cs", "[FRAME-TIME] staged ", ("DLL_PROP", "v", '(PhotonNetwork.InRoom ? " in-room" : " pre-join")'),
+     ["staged ft_dll=0123abcd in-room", "staged ft_dll=0123abcd pre-join"],
+     ["staged ft_dll=0123abcd joined", "staged ft_rm=0123abcd in-room"],
+     "DLL_PROP is the constant \"ft_dll\", v = OwnDll(), 8 hex (FtArm.cs:29, :33-37)"),
+    ("FtArm.cs", "[FRAME-TIME] ", ("DLL_PROP",),
+     [("ft_dll staging failed: IOException: " + MARK, "ft_dll staging failed: " + RED)],
+     ["ft_rm staging failed: x"],
+     "DLL_PROP is the constant \"ft_dll\"; the failure text is redacted (FtArm.cs:54)"),
+    ("FtArm.cs", "[FRAME-TIME] peer ", ("said", "DLL_PROP"),
+     ["peer unknown actor=2 (no matching ft_dll)", "peer unknown actor=none (no matching ft_dll)",
+      "peer unknown actor=null (no matching ft_dll)"],
+     ["peer unknown actor=x2 (no matching ft_dll)", "peer unknown actor=2 (no matching ft_rm)"],
+     "said = \"unknown actor=\" + UnknownPeer(), an actor number, \"none\" or \"null\" (FtArm.cs:58-72, :215)"),
+    ("FtArm.cs", "[FRAME-TIME] peer ", ("ok",),
+     ["peer known actor=2 ft_dll=0123abcd", "peer known actor=2,3 ft_dll=0123abcd"],
+     ["peer known actor=2 ft_dll=", "peer known actor= ft_dll=0123abcd"],
+     "ok = \"known actor=\" + the actor numbers \",\"-joined + \" ft_dll=\" + OwnDll() (FtArm.cs:70, :219)"),
+    ("FtDrive.cs", "[FRAME-TIME] self-drive ", ("what",), _DRIVE, _DRIVE_X, _DRIVE_WHY),
+    ("FtRoomGate.cs", "[FRAME-TIME] FT-GATE patched ",
+     ("patched", '(missing.Count == 0 ? "" : " missing=" + string.Join(",", missing.ToArray()))'),
+     ["FT-GATE patched 7 entry points expected=7 excluded=JoinLobby,LoadOrCreateSettings",
+      "FT-GATE patched 6 entry points expected=7 excluded=JoinLobby missing=NCH.OnJoinedRoom (absent)",
+      "FT-GATE patched 6 entry points expected=7 excluded= missing=PhotonNetwork.JoinRoom,NCH.X (absent)"],
+     ["FT-GATE patched -1 entry points expected=7 excluded="],
+     "patched counts the attached entry points; the missing tail is absent or the ','-joined targets "
+     "(FtRoomGate.cs:105-111)"),
+    ("FtRematch.cs", "[FRAME-TIME] rematch held: published ", ("PROP", "_want"),
+     ["rematch held: published ft_rm=2"], ["rematch held: published ft_dll=2"],
+     "PROP is the constant \"ft_rm\", _want = FtSchedule.Game + 1 (FtRematch.cs)"),
+    ("FtRematch.cs", "[FRAME-TIME] rematch yes g=", ("_since.ElapsedMilliseconds",),
+     ["rematch yes g=2 after 0 ms", "rematch yes g=2 after 15003 ms"], ["rematch yes g=2 after -1 ms"],
+     "a Stopwatch's ElapsedMilliseconds, never negative (FtRematch.cs:70)"),
+    ("FtA3.cs", "[FRAME-TIME] cal i=", ("game",),
+     ["cal i=3 why=game0 kind=a3 k=CE_Top live=1 reads=1 scopes=1 ticks=1 tmax=1 unscoped=0 depth_err=0"],
+     ["cal i=3 why=game-1 kind=a3 k=CE_Top live=1 reads=1 scopes=1 ticks=1 tmax=1 unscoped=0 depth_err=0"],
+     "LogGame(g) gets the flushed game, g = _owed >= 0 (FtSchedule.cs:329-337)"),
+    ("FtAlloc.cs", "[FRAME-TIME] alloc pin=", ("PlantBytes",),
+     ["alloc pin=ok planted=1048600/1048576 empty=0"], ["alloc pin=ok planted=1048600/-1 empty=0"],
+     "PlantBytes is the constant 1 << 20 (FtAlloc.cs:121)"),
+    ("FtClock.cs", "[FRAME-TIME] clock refused: player-loop phase missing (EarlyUpdate ", ("a", "b", "c"),
+     ["clock refused: player-loop phase missing (EarlyUpdate True, PreLateUpdate False, Update True)",
+      "clock refused: player-loop phase missing (EarlyUpdate False, PreLateUpdate True, Update False)"],
+     ["clock refused: player-loop phase missing (EarlyUpdate true, PreLateUpdate False, Update True)"],
+     "a, b and c are bools, printed True or False (FtClock.cs:120-128)"),
+    ("FtFrames.cs", "[FRAME-TIME] p pt=", ("FtLedger.SockStats(_sk0, _sk1)",),
+     [P6, P6.replace("sock_p95=NA", "sock_p95=2000")], [P6.replace("sock_p95=NA", "sock_p95=-")],
+     "SockStats: \"sock_p95=\" + (NA or a bucket edge) + sock_n, sock_thr, sock_main (FtUpload.cs:329-347)"),
+]
+
+
+def _lit_at(src, i):
+    """(text, end, interpolated) of the C# string or char literal opening at i; an interpolated literal's text is the
+    text before its first hole; None when no literal opens at i"""
+    n = len(src)
+    if src[i] == "'":
+        j = i + 1
+        c = _ESC.get(src[j + 1], src[j + 1]) if src[j] == "\\" else src[j]
+        j += 2 if src[j] == "\\" else 1
+        return c, j + 1, False
+    m = re.match(r'(\$@|@\$|\$|@)?"', src[i:i + 3])
+    if not m:
+        return None
+    pre = m.group(1) or ""
+    verbatim, interp = "@" in pre, "$" in pre
+    j, buf, head, depth = i + m.end(), [], True, 0
+    while j < n:
+        c = src[j]
+        if depth:
+            if c == "{":
+                depth += 1
+            elif c == "}":
+                depth -= 1
+            j += 1
+            continue
+        if c == "\\" and not verbatim:
+            if head:
+                buf.append(_ESC.get(src[j + 1], src[j + 1]))
+            j += 2
+        elif c == '"' and verbatim and src.startswith('""', j):
+            buf.append('"') if head else None
+            j += 2
+        elif c == '"':
+            return "".join(buf), j + 1, interp
+        elif interp and src.startswith(("{{", "}}"), j):
+            buf.append(c) if head else None
+            j += 2
+        elif interp and c == "{":
+            head, depth = False, 1
+            j += 1
+        else:
+            buf.append(c) if head else None
+            j += 1
+    return "".join(buf), n, interp
+
+
+def _ws(src, i):
+    """the index of the next code after whitespace and comments from i"""
+    while i < len(src):
+        if src[i].isspace():
+            i += 1
+        elif src.startswith("//", i):
+            j = src.find("\n", i)
+            i = len(src) if j < 0 else j
+        elif src.startswith("/*", i):
+            j = src.find("*/", i + 2)
+            i = len(src) if j < 0 else j + 2
+        else:
+            break
+    return i
+
+
+def emit_pieces(src, at):
+    """the pieces of the emit expression whose first literal opens at `at`, in order: ("L", text) for a term that is
+    one literal, ("O", code) for any other term (whitespace collapsed); the terms of the statement's top-level "+" chain
+    and the arguments of a .Append( chain that continues it, up to the end of that one statement"""
+    out, i, n = [], at, len(src)
+    while i < n:
+        i = _ws(src, i)
+        lit = _lit_at(src, i) if src[i] in "\"'$@" else None
+        k = _ws(src, lit[1]) if lit else i
+        if lit and k < n and src[k] in "+),;":
+            out.append(("L", lit[0]) if not lit[2] else ("O", src[i:lit[1]]))
+            i = k
+        else:
+            start, depth = i, 0
+            while i < n:
+                c = src[i]
+                if src.startswith(("//", "/*"), i):
+                    i = _ws(src, i)
+                    continue
+                if c in "\"'" or (c in "$@" and i + 1 < n and src[i + 1] in "\"$@"):
+                    got = _lit_at(src, i)
+                    if got:
+                        i = got[1]
+                        continue
+                if c in "([{":
+                    depth += 1
+                elif c in ")]}":
+                    if depth == 0:
+                        break
+                    depth -= 1
+                elif depth == 0 and c in "+,;":
+                    break
+                i += 1
+            out.append(("O", re.sub(r"\s+", " ", src[start:i]).strip()))
+        if i < n and src[i] == "+":
+            i += 1
+            continue
+        m = APPEND_ON.match(src, i)
+        if m:
+            i = m.end()
+            continue
+        break
+    return out
+
+
+def emit_exprs(sources):
+    """[(file:line, file, pieces, literal)] for every literal of the sources that begins with "[FRAME-TIME] " (sources:
+    [(file name, text)]; the literals found as emitter_literals finds them), with the pieces of the expression it
+    opens"""
+    out = []
+    for name, src in sources:
+        for at, lit in cs_literals(src):
+            if lit.startswith("[FRAME-TIME] "):
+                # pieces whose first is not this literal (an interpolated literal, or one inside a larger term) are
+                # kept as they are: fallback_misses names them unreadable
+                out.append(("%s:%d" % (name, src.count("\n", 0, at) + 1), name, emit_pieces(src, at), lit))
+    return out
+
+
+def plugin_sources():
+    names = sorted(f for f in os.listdir(PLUGIN) if f.endswith(".cs"))
+    res = []
+    for name in names:
+        with open(os.path.join(PLUGIN, name), encoding="utf-8-sig") as f:
+            res.append((name, f.read()))
+    return res
+
+
+def _admitted(ph):
+    """the values a placeholder admits when they are finite (<b>, <tri>, <=a|b>), else None"""
+    m = PH.fullmatch(ph)
+    if m is None:
+        return None                          # <*>, a redaction form's free text
+    if m.group(3) is not None:
+        return tuple(m.group(3).split("|"))
+    return FINITE.get(m.group(2)) if m.group(1) == "" else None
+
+
+def fallback_misses(text, sources, keyed_rows, free_rows):
+    """the emit expressions of the sources that break (a) or (b) above against the seat script's text, and the rows
+    that match no expression: [(file:line, what)]"""
+    forms = ps_list(text, "FormText") + ps_list(text, "RedactText")
+    redacts = [form_head(f) for f in ps_list(text, "RedactText")]
+    miss, used_k, used_f = [], set(), set()
+    for where, name, ps, lit in emit_exprs(sources):
+        if not ps or ps[0] != ("L", lit):
+            miss.append((where, "unreadable emit expression %s" % (ps[:2],)))
+            continue
+        head = lit
+        agree = lambda h: h not in LIT_CLASSES and (head.startswith(h) or h.startswith(head))
+        mine = [f for f in forms if agree(form_head(f))]
+        red = any(agree(h) for h in redacts)
+        free, tail, prev = [], False, None
+        for kind, t in ps:
+            if kind == "L":
+                tail = tail or (red and t.endswith(": "))
+                prev = t
+                continue
+            if tail:
+                prev = None
+                continue
+            m = KEY_END.search(prev) if prev is not None else None
+            prev = None
+            if not m:
+                free.append(t)
+                continue
+            key = m.group(1)
+            phs = [x for f in mine for x in re.findall(r"(?<![A-Za-z0-9_])%s=(<[^>]*>)" % re.escape(key), f)]
+            sets = [_admitted(x) for x in phs]
+            if not phs or any(s is None for s in sets):
+                continue                     # no placeholder there, or one that is not finite: the sweep's
+            allowed = set(v for s in sets for v in s)
+            p = PROVEN.match(t)
+            if p:
+                vals = set(v.strip('"') for v in p.groups())
+                if not vals <= allowed:
+                    miss.append((where, "%s= prints %s, the forms admit %s" % (key, sorted(vals), sorted(allowed))))
+                continue
+            rows = [r for r in keyed_rows if r[:3] == (name, head, key)]
+            if not rows:
+                miss.append((where, "%s= operand %r has no proven two-valued shape and no KEYED row" % (key, t)))
+            elif set(rows[0][3]) != allowed:
+                miss.append((where, "%s= row values %s, the forms admit %s" % (key, sorted(rows[0][3]), sorted(allowed))))
+            used_k.add((name, head, key))
+        if free:
+            rows = [r for r in free_rows if r[:3] == (name, head, tuple(free))]
+            if not rows:
+                miss.append((where, "free operands %s have no FREE row" % (free,)))
+            used_f.add((name, head, tuple(free)))
+    miss += [("row", "stale KEYED row %s" % (r[:3],)) for r in keyed_rows if r[:3] not in used_k]
+    miss += [("row", "stale FREE row %s" % (r[:3],)) for r in free_rows if r[:3] not in used_f]
+    return miss
+
+
+def test_emitter_fallbacks_have_rows():
+    """every emit expression of a "[FRAME-TIME] " line in plugin/*.cs passes (a) and (b) of the reader above, and no row
+    is stale; the FINITE values are exactly what the seat script's placeholders admit"""
+    text = _ps1_text()
+    for name, vals in FINITE.items():
+        pat = re.search(r"(?:^|[;{] ?|    )%s = '([^']*)'" % name, text, re.M)
+        assert pat, name
+        probe = set(vals) | {"2", "-2", "", "00", "10", "-0", "x", "-1", "0", "1"}
+        assert set(v for v in probe if re.fullmatch(pat.group(1), v)) == set(vals), (name, pat.group(1))
+    exprs = emit_exprs(plugin_sources())
+    print("EMIT EXPRESSIONS read=%d" % len(exprs))
+    miss = fallback_misses(text, plugin_sources(), KEYED_ROWS, FREE_ROWS)
+    assert miss == [], miss
+
+
+PLANTED_EMIT = ("Planted.cs", '''namespace X { static class P { static void F(int g, int inc, string tail, bool x) {
+    Plugin.Log.LogInfo("[FRAME-TIME] settled g=" + g + " hires=" + inc + " vsync=0");
+    Plugin.Log.LogInfo("[FRAME-TIME] clock installed freq=" + g + " hires=" + (x ? 1 : -1) + " cycles=" + (x ? 1 : 0));
+    Plugin.Log.LogInfo("[FRAME-TIME] scope census entries=" + g + " wrapped=" + g + tail);
+    Plugin.Log.LogInfo("[FRAME-TIME] clock installed freq=" + g + " hires=" + (x ? 1 : 0) + " cycles=" + (x ? "1" : "0"));
+} } }
+''')
+
+
+def test_emitter_fallbacks_control():
+    """the negative controls of test_emitter_fallbacks_have_rows: (1) with the scope census row taken out, the check
+    names exactly FtCensus.cs's census expression (at the line that holds it, found here by text) and that row's
+    absence; (2) a planted source adds exactly its three faults: a <b> key whose operand is a variable, a proven
+    conditional printing a value the form does not admit, and a free operand with no row (its fourth line, proven
+    values the form admits, passes)"""
+    text, src = _ps1_text(), plugin_sources()
+    with open(os.path.join(PLUGIN, "FtCensus.cs"), encoding="utf-8-sig") as f:
+        at = [k for k, ln in enumerate(f.read().split("\n"), 1) if '"[FRAME-TIME] scope census entries="' in ln]
+    assert len(at) == 1, at
+    rows = [r for r in FREE_ROWS if r[0] != "FtCensus.cs"]
+    assert len(rows) == len(FREE_ROWS) - 1
+    miss = fallback_misses(text, src, KEYED_ROWS, rows)
+    assert miss == [("FtCensus.cs:%d" % at[0], "free operands ['why'] have no FREE row")], miss
+    miss = fallback_misses(text, src + [PLANTED_EMIT], KEYED_ROWS, FREE_ROWS)
+    assert [w for w, _ in miss] == ["Planted.cs:2", "Planted.cs:3", "Planted.cs:4"], miss
+    assert "hires= operand 'inc'" in miss[0][1] and "prints ['-1', '1']" in miss[1][1] and "['tail']" in miss[2][1], miss
+
+
+# the room line's fallback, keyed but not finite (so it holds no row): FtArm prints CloudRegion ?? "" as region= (its
+# part before "/") and as cloud_region= (plugin/FtArm.cs:117-118, :161); (exported, withheld)
+ROOM_FALLBACK = (["room name=ft_0123abcd region=us cloud_region=us/*", "room name=ft_0123abcd region=us cloud_region=us",
+                  "room name=ft_0123abcd region= cloud_region="],
+                 ["room name=ft_0123abcd region=xx cloud_region=", "room name=ft_0123abcd region= cloud_region=us/x"])
+
+
+# the [FPSCAP] lines' holes (plugin/Plugin.cs:3421-3584), swept by hand (the reader reads no interpolated hole):
+# why is one of four texts, set with desired and never null when a line prints it; the render cap's number is the
+# cfg's BroadcastFpsCap (an int with no range check, printed only when above 0: one to ten digits); every target and
+# vsync is an int (Unity's targetFrameRate is -1 when uncapped); focused= is a bool, printed True or False.
+# (exported, withheld): payloads after "[FPSCAP] "
+_CAP = ["deep idle (broadcast seat 16min+ idle)", "deep idle (60s+ unfocused, out of room)", "unfocused cap",
+        "broadcast seat render cap (144 fps)", "broadcast seat render cap (10000 fps)",
+        "broadcast seat render cap (2147483647 fps)"]
+FPSCAP_ROWS = (
+    ["held by frame-time calibration", "hold released",
+     "released (restored target=-1 vsync=0, focused=True)", "released (restored target=144 vsync=2, focused=False)",
+     "released (external video-settings change adopted: target=-1 vsync=1)"]
+    + ["engaged %s: target=15 (baseline target=-1 vsync=0)" % w for w in _CAP]
+    + ["re-asserted %s over an external change (target=60 vsync=1)" % w for w in _CAP]
+    + ["%s: target=120" % w for w in _CAP],
+    ["broadcast seat render cap (-5 fps): target=-5", "broadcast seat render cap (12345678901 fps): target=60",
+     "released (restored target=-1 vsync=0, focused=true)", "deep idle (5min+ idle): target=15",
+     "engaged unfocused cap: target=120 (baseline target=-1 vsync=0.5)"])
+
+# the type-name families (failed=, failed:, error_): a generic type's name ends in a backtick and its arity, which
+# <ident> admits at the end only; (exported, withheld): payloads after "[FRAME-TIME] "
+IDENT_ROWS = (
+    ["scope census entries=40 wrapped=38 failed=WrapperException`1",
+     "alloc_init why=failed:WrapperException`2",
+     "ledger log=0 why=failed:WrapperException`1 types=log,hash,recv,sock",
+     "not armed input=error_WrapperException`12",
+     "answer_replay g=2 ticks=0 result=error_WrapperException`1",
+     "self-drive disarmed: input=error_KeyNotFoundException"],
+    ["scope census entries=40 wrapped=38 failed=Wrapper`Exception",
+     "alloc_init why=failed:`1WrapperException",
+     "ledger log=0 why=failed:WrapperException`1`2 types=log,hash,recv,sock",
+     "not armed input=error_WrapperException`123",
+     "answer_replay g=2 ticks=0 result=error_WrapperException`"])
+
+
+def check_rows(ps1, tmp):
+    """the rows' sample lines through the export: every KEYED row's template with each value, every FREE row's
+    sample, and the [FPSCAP] and type-name samples, exported as they are (or as a FREE row's given export); the template
+    with an unlisted value, every FREE row's unlisted lines, and the unlisted [FPSCAP] and type-name lines, withheld"""
+    good = [(p, p) for p in ROOM_FALLBACK[0] + IDENT_ROWS[0]]
+    bad = list(ROOM_FALLBACK[1]) + IDENT_ROWS[1]
+    for _, _, _, vals, tpl, _ in KEYED_ROWS:
+        good += [(tpl.format(v), tpl.format(v)) for v in vals]
+        bad.append(tpl.format(next(x for x in ("2", "X", "x2") if x not in vals)))
+    for _, _, _, samples, unlisted, _ in FREE_ROWS:
+        good += [s if isinstance(s, tuple) else (s, s) for s in samples]
+        bad += unlisted
+    cap = "[FPSCAP] "
+    raw = ([INFO + FT + p for p, _ in good] + [INFO + FT + p for p in bad] + [INFO + cap + p for p in FPSCAP_ROWS[0]]
+           + [INFO + cap + p for p in FPSCAP_ROWS[1]])
+    out, log, _ = run_export(ps1, write(os.path.join(tmp, "rows.log"), "\n".join(raw) + "\n"))
+    f = ["not exported: %s" % e[:200] for _, e in good if INFO + FT + e not in log]
+    f += ["exported, not withheld: %s" % b[:200] for b in bad if INFO + FT + b in log]
+    f += ["[FPSCAP] not exported: %s" % e[:200] for e in FPSCAP_ROWS[0] if INFO + cap + e not in log]
+    f += ["[FPSCAP] exported, not withheld: %s" % b[:200] for b in FPSCAP_ROWS[1] if INFO + cap + b in log]
+    for cls, n in (("FRAME-TIME", len(bad)), ("FPSCAP", len(FPSCAP_ROWS[1]))):
+        if "withheld %s %d" % (cls, n) not in log:
+            f.append("not 'withheld %s %d': %s" % (cls, n, [x for x in log if x.startswith("withheld")]))
+    return f
+
+
+@need_ps
+def test_rows_export(tmp_path):
+    f = check_rows(PS1, str(tmp_path))
+    assert f == [], f
+
+
+# the two room-name lines (plugin/FtRoomGate.cs:87, :247), ruled: a name the forms admit (an ft_ room, (none), (empty))
+# is exported as it is; any other name as "(not-exported)", every other field kept (the refused line's n= after the
+# name, cut from the right), and the line is never withheld for its name. Payloads after "[FRAME-TIME] ":
+# (exported as they are, (raw, its export), withheld for a typed field)
+ROOM_NAMES = (
+    ["room call refused op=JoinRoom name=ft_0123abcd n=2", "room call refused op=CreateRoom name=(none) n=1",
+     "room call refused op=JoinOrCreateRoom name=(empty) n=12", "FT-ROOM joined offline=0 name=ft_0123abcd",
+     "FT-ROOM joined offline=1 name=(none)", "FT-ROOM joined offline=0 name=(empty)"],
+    [("room call refused op=JoinRoom name=open room=%s n=7 n=3" % MARK,
+      "room call refused op=JoinRoom name=" + RED + " n=3"),
+     ("room call refused op=RejoinRoom name=ft_0123abcd n=7 n=12", "room call refused op=RejoinRoom name=" + RED + " n=12"),
+     ("room call refused op=JoinLobby name=%s n=0" % MARK, "room call refused op=JoinLobby name=" + RED + " n=0"),
+     ("FT-ROOM joined offline=1 name=open room=%s n=7" % MARK, "FT-ROOM joined offline=1 name=" + RED),
+     ("FT-ROOM joined offline=0 name=ft_0123ABCD", "FT-ROOM joined offline=0 name=" + RED),
+     ("FT-ROOM joined offline=0 name=", "FT-ROOM joined offline=0 name=" + RED)],
+    ["room call refused op=Leave name=%s n=3" % MARK, "room call refused op=JoinRoom name=%s n=-3" % MARK,
+     "room call refused op=JoinRoom name=%s" % MARK, "FT-ROOM joined offline=2 name=%s" % MARK])
+
+
+def check_room_names(ps1, tmp):
+    """the room-name lines through the export: each admitted name exported as it is; each free name exported as
+    "(not-exported)" with the line's other fields, the true n= kept; no free name anywhere in the output; a line whose
+    typed field is out of its form withheld and counted"""
+    keep, red, bad = ROOM_NAMES
+    raw = [INFO + FT + p for p in keep] + [INFO + FT + r for r, _ in red] + [INFO + FT + b for b in bad]
+    out, log, _ = run_export(ps1, write(os.path.join(tmp, "rooms.log"), "\n".join(raw) + "\n"))
+    f = ["not exported as it is: %s" % p for p in keep if INFO + FT + p not in log]
+    f += ["not exported as %s: %s" % (e, r[:120]) for r, e in red if INFO + FT + e not in log]
+    f += ["exported in the clear: %s" % r[:120] for r, _ in red if INFO + FT + r in log]
+    f += ["exported, not withheld: %s" % b[:120] for b in bad if INFO + FT + b in log]
+    if MARK in out:
+        f.append("a free room name in the output: %s" % [x[:120] for x in out.split("\n") if MARK in x])
+    if "withheld FRAME-TIME %d" % len(bad) not in log:
+        f.append("not 'withheld FRAME-TIME %d': %s" % (len(bad), [x for x in log if x.startswith("withheld")]))
+    return f
+
+
+@need_ps
+def test_room_names_export(tmp_path):
+    f = check_room_names(PS1, str(tmp_path))
+    assert f == [], f
+
+
+# ---- the Codex gate's place in the sitting (its classification and lines are the self-test's)
+
+
+def test_codex_gate_before_the_launch():
+    """the sitting reads the Codex gate exactly once, after the last of the other REFUSED checks and before the launch
+    scriptblock, and exits 2 on its refusal; the reader reads the process table with -ErrorAction Stop and nothing
+    turns a failed read into an empty list"""
+    text = _ps1_text()
+    sit = text[text.index("# ---- the sitting\n"):]
+    assert sit.count("CodexGate { CodexRows }") == 1 and text.count("CodexGate { CodexRows }") == 2, "one in the self-test"
+    gate = sit.index("$codexGate = CodexGate { CodexRows }")
+    assert sit.index("'REFUSED: the installed DLL is no staged FrameTime lane") < gate < sit.index("$launch = {")
+    assert "if ($codexGate.Refuse) { exit 2 }" in sit[gate:sit.index("$launch = {")]
+    body = text[text.index("function CodexRows {"):text.index("function CodexGate(")]
+    assert "-ErrorAction Stop" in body and "SilentlyContinue" not in body and "Win32_Process" in body, body
+
+
+# ---- the culture gate (the integrator's ruling, follow-up 2 of P5): its place in the sitting, the -CultureGate
+# switch, and its case table (the self-test's, on hand-made number formats)
+
+_CNAME = r"(?:[A-Za-z0-9-]{1,32}|\(invariant\)|\(unnamed\))"
+_CPS = r"(?:\(empty\)|U\+[0-9A-F]{4}(?:,U\+[0-9A-F]{4})*)"
+CULTURE_LINE = re.compile(r"culture gate: %s minus U\+002D decimal U\+002E" % _CNAME)
+CULTURE_REFUSED = re.compile(r"REFUSED: culture gate: (?:%s prints minus %s decimal %s \((?:the user's settings|the "
+                             r"culture's own table)\): the lane's lines need U\+002D and U\+002E; no game launch|the "
+                             r"number format was not read \(.+\))" % (_CNAME, _CPS, _CPS))
+CULTURE_SIT = ("$cultureGate = CultureGate { CultureRead }\nforeach ($l in $cultureGate.Lines) { Say $l }\n"
+               "if ($cultureGate.Refuse) { exit 2 }\n")
+
+
+def _read(ps1):
+    with open(ps1, encoding="ascii") as f:
+        return f.read()
+
+
+def check_culture_gate_place(ps1, tmp=None):
+    """the sitting reads the culture gate exactly once, right after the Codex gate's three lines (comment lines between
+    only) and before the launch scriptblock, prints its lines and exits 2 on a refusal; the reader reads the current
+    culture and the same name's table without user overrides, and turns no failed read into a pass"""
+    text = _read(ps1)
+    f = []
+    sit = text[text.index("# ---- the sitting\n"):]
+    if text.count("CultureGate { CultureRead }") != 3 or sit.count("CultureGate { CultureRead }") != 1:
+        f.append("CultureGate { CultureRead } %d times, %d in the sitting (want 3: the self-test, -CultureGate, the "
+                 "sitting)" % (text.count("CultureGate { CultureRead }"), sit.count("CultureGate { CultureRead }")))
+    codex = "if ($codexGate.Refuse) { exit 2 }\n"
+    if sit.count(codex) != 1 or sit.count(CULTURE_SIT) != 1:
+        f.append("the Codex gate's refusal %d times and the culture gate's three lines %d times in the sitting"
+                 % (sit.count(codex), sit.count(CULTURE_SIT)))
+    else:
+        a, b = sit.index(codex) + len(codex), sit.index(CULTURE_SIT)
+        between = [x for x in sit[a:b].split("\n") if x.strip()]
+        if b < a or any(not x.startswith("#") for x in between):
+            f.append("the culture gate does not follow the Codex gate's lines: %s" % between[:4])
+        if "$launch = {" not in sit[b:]:
+            f.append("the culture gate is not before the launch scriptblock")
+    body = text[text.index("function CultureRead {"):text.index("function CodePoints(")]
+    if not ("[System.Globalization.CultureInfo]::CurrentCulture" in body and "@($cur.Name, $false)" in body
+            and "catch" not in body):
+        f.append("CultureRead does not read the current culture and its own table: %s" % body[:300])
+    return f
+
+
+def test_culture_gate_before_the_launch():
+    f = check_culture_gate_place(PS1)
+    assert f == [], f
+
+
+def check_culture_switch(ps1, tmp):
+    """-CultureGate alone: its lines only (the result line, exit 0; or one or two REFUSED lines of its forms, exit 2),
+    and nothing created under the sitting's roots, given here as absent temp folders so that a switch that falls
+    through into the sitting is seen and touches no real seat"""
+    roots = dict((k, os.path.join(tmp, "cg-" + k)) for k in ("game", "seat", "low"))
+    p = subprocess.run([PS, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", ps1, "-CultureGate", "-GameRoot",
+                        roots["game"], "-SeatRoot", roots["seat"], "-LocalLow", roots["low"]],
+                       stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=600)
+    lines = [x for x in p.stdout.decode("utf-8", "replace").replace("\r\n", "\n").split("\n") if x != ""]
+    ok0 = p.returncode == 0 and len(lines) == 1 and CULTURE_LINE.fullmatch(lines[0])
+    ok2 = p.returncode == 2 and 1 <= len(lines) <= 2 and all(CULTURE_REFUSED.fullmatch(x) for x in lines)
+    f = [] if (ok0 or ok2) else ["exit %d, lines %s" % (p.returncode, [x[:160] for x in lines[:6]])]
+    f += ["the sitting's %s root was created" % k for k in sorted(roots) if os.path.exists(roots[k])]
+    return f
+
+
+@need_ps
+def test_culture_gate_switch(tmp_path):
+    """-CultureGate with the sitting's roots planted, then alone (it needs none of the sitting's parameters): the
+    gate's own lines and exit code, this seat's culture read, not judged"""
+    f = check_culture_switch(PS1, str(tmp_path))
+    assert f == [], f
+    p = subprocess.run([PS, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", PS1, "-CultureGate"],
+                       stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=600)
+    lines = [x for x in p.stdout.decode("utf-8", "replace").replace("\r\n", "\n").split("\n") if x != ""]
+    assert (p.returncode == 0 and len(lines) == 1 and CULTURE_LINE.fullmatch(lines[0])) or (
+        p.returncode == 2 and all(CULTURE_REFUSED.fullmatch(x) for x in lines)), (p.returncode, lines)
+
+
+def check_culture_cases(ps1, tmp):
+    """the self-test's culture gate cases (hand-made number formats): every case of the script's table ran, and the
+    failures the self-test reports for them; a self-test that reaches no verdict fails too"""
+    text = _read(ps1)
+    table = text[text.index("    $cultureCases = @(\n"):text.index("    foreach ($g in $cultureCases) {")]
+    want = len(re.findall(r"^        @\{ Name = ", table, re.M))
+    p = subprocess.run([PS, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", ps1, "-SelfTest"],
+                       stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=1800)
+    out = p.stdout.decode("utf-8", "replace").replace("\r\n", "\n").split("\n")
+    verdict = [x for x in out if x == "SELFTEST PASS" or x.startswith("SELFTEST FAIL: ")]
+    if len(verdict) != 1:
+        return ["the self-test reached no verdict (exit %d): %s" % (p.returncode, out[-6:])]
+    ran = len([x for x in out if x.startswith("self-test culture gate ") and "(not judged)" not in x])
+    f = [] if ran == want and want >= 11 else ["%d culture gate cases ran, the table holds %d" % (ran, want)]
+    if verdict[0].startswith("SELFTEST FAIL: "):
+        f += [x for x in verdict[0][len("SELFTEST FAIL: "):].split("; ") if x.startswith("culture gate ")]
+    return f
+
+
+@need_ps
+def test_culture_cases(tmp_path):
+    f = check_culture_cases(PS1, str(tmp_path))
+    assert f == [], f
+
+
 @need_ps
 def test_selftest_passes():
     p = subprocess.run([PS, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", PS1, "-SelfTest"],
@@ -755,7 +1395,8 @@ MUTANTS = [
     ("no redaction", check_leads, "text", "$Redacts = @($RedactText | ForEach-Object { RedactRegex $_ })",
      "$Redacts = @()"),
     ("a redaction that exports the text", check_planted, "text",
-     "if ($m.Success) { return $m.Groups['keep'].Value + $RedactToken }", "if ($m.Success) { return $ln }"),
+     "if ($m.Success) { return $m.Groups['keep'].Value + $RedactToken + $m.Groups['tail'].Value }",
+     "if ($m.Success) { return $ln }"),
     ("wa loosened", check_planted, "text",
      "$FormPh.wa = 'log:' + $FormPh.una + ';hash:' + $FormPh.una + ';sock:' + $FormPh.una", "$FormPh.wa = '[^ ]*'"),
     ("the forms unanchored at the end", check_planted, "text",
@@ -766,6 +1407,33 @@ MUTANTS = [
      "nm=<u> cP=<n> cX=<n> aC=<ina> aW=<ina> aR=<ina> aS=<ina> aP=<ina> aX=<ina> wa=<wa>'", None),
     ("the [FPSCAP] lines back under the component slice", check_identity_on_v, "text",
      "$LogClasses = @('[FRAME-TIME]', '[FPSCAP]')", "$LogClasses = @('[FRAME-TIME]')"),
+    ("the settled line's gc_incremental back to <b>", check_rows, "text", "gc_incremental=<tri>", "gc_incremental=<b>"),
+    ("the scope census tail without partial=1", check_rows, "text", "$FormPh.censusfail = '(?: partial=1| failed='",
+     "$FormPh.censusfail = '(?: failed='"),
+    ("the peer line's fallbacks none and null dropped", check_rows, "text", "peeractor = '(?:[0-9]{1,4}|none|null)'",
+     "peeractor = '(?:[0-9]{1,4})'"),
+    ("the room line's empty region dropped", check_rows, "text", "$FormPh.cloudopt = '(?:' + $FormPh.region + '(?:/\\*)?)?'",
+     "$FormPh.cloudopt = $FormPh.region + '(?:/\\*)?'"),
+    ("the render cap's number back to four digits", check_rows, "text", "broadcast seat render cap \\([0-9]{1,10} fps\\)",
+     "broadcast seat render cap \\([0-9]{1,4} fps\\)"),
+    ("<ident> without the generic arity suffix", check_rows, "text", "ident = '[A-Za-z0-9_]{1,128}(?:`[0-9]{1,2})?'",
+     "ident = '[A-Za-z0-9_]{1,128}'"),
+    ("the room-name forms admit any name (a free name in the clear)", check_room_names, "text",
+     "$FormPh.roomname = '(?:' + $FormPh.room + '|\\(none\\)|\\(empty\\))'", "$FormPh.roomname = '.*'"),
+    ("the refused room line withheld for a free name", check_room_names, "line",
+     "'[FRAME-TIME] room call refused op=<@roomop> name=<*> n=<u>'", None),
+    ("the joined room line withheld for a free name", check_room_names, "line",
+     "'[FRAME-TIME] FT-ROOM joined offline=<b> name=<*>'", None),
+    ("a redaction that drops its typed tail (the refused line's n=)", check_room_names, "text",
+     "if ($m.Success) { return $m.Groups['keep'].Value + $RedactToken + $m.Groups['tail'].Value }",
+     "if ($m.Success) { return $m.Groups['keep'].Value + $RedactToken }"),
+    ("the culture gate skipped in the sitting", check_culture_gate_place, "text", CULTURE_SIT, ""),
+    ("the culture gate's decimal check dropped", check_culture_cases, "line",
+     "$ok = $ok -and [string]::Equals($dec, '.', [System.StringComparison]::Ordinal)", None),
+    ("the culture gate's own-table check dropped", check_culture_cases, "line",
+     "$sides.Add(@{ Why = 'the culture''s own table'; Nf = $r['Table'] })", None),
+    ("the -CultureGate switch falling through into the sitting", check_culture_switch, "line",
+     "exit $(if ($cg.Refuse) { 2 } else { 0 })", None),
 ]
 
 

@@ -89,6 +89,19 @@ exits 0 (2 when unreadable); it reads only, and is how ft_slice_identity.py prov
 -CfgKindList <file> prints CfgKind's verdict (RESTORED-KIND, NOT-RESTORED-KIND or REFUSED) as "CFG-KIND <n> <verdict>"
 for each line "<pre-image cfg><TAB><sitting cfg>" of the file, and exits 0 (2 when the file is unreadable); it reads
 only, and is how ft_cfg_kind_agree.py proves the port agrees with ft_cfg_compare.py on its corpus.
+Before the launch the sitting refuses (exit 2) when the script is not the staged one, ROUNDS runs, a sentinel is
+present, step 1 fails or finds no staged lane, then by the Codex gate (function CodexGate, the VM gate
+codexgate_f10.sh's classification): one read of the process table's codex.exe rows prints exactly one line "codex gate:
+live <n> [<pid> <why>, ...]; excluded <n> [<pid> <subcommand>, ...]; codex.exe in all <n>", then a "REFUSED: codex
+gate: ..." line when a row is live; a table that was not read prints only its REFUSED line. The self-test holds the
+classification's case table ($CodexCases, with codex_lax its negative control) and the gate's lines on stand-in reads.
+Then the culture gate (function CultureGate): the process's current culture (the user's settings) and the culture of
+the same name without user overrides (its own table) must each print the minus sign U+002D and the decimal separator
+U+002E, as the forms admit; it prints "culture gate: <name> minus U+002D decimal U+002E", or one "REFUSED: culture
+gate: <name> prints minus <cp> decimal <cp> (<side>): ..." line per side that does not, or "REFUSED: culture gate: the
+number format was not read (...)". The self-test checks its lines on hand-made number formats.
+-CultureGate runs only that gate, prints its lines and exits 0 or 2; it needs no other parameter and touches no lane,
+job file or game (the VM seat's step list runs it before the VM's launches).
 Exit codes: 0 pass, 2 refused before the launch (a step-1 error included), 3 the sitting did not complete (a launch,
 wait or shutdown error included), 4 VR6 failed (a step-4 error included), 5 the restore is not proven (a mismatch or
 a step-5 error; ruling R6-A3.11.112 F1), 6 the self-test failed. 5 overrides 3 and 4: the job ends 0 or 4 only with
@@ -97,6 +110,7 @@ a step-5 error; ruling R6-A3.11.112 F1), 6 the self-test failed. 5 overrides 3 a
 [CmdletBinding()]
 param(
     [switch]$SelfTest,
+    [switch]$CultureGate,
     [string]$CfgKindList = '',
     [string]$SliceOf = '',
     [int]$TimeoutS = 7200,
@@ -135,7 +149,8 @@ $script:RestoredEqual = 0
 # placeholders: digits, hex, the ft_ room form, actor numbers, fixed tokens and the named closed sets ($FormSets); a
 # cfg-derived field is a closed token set the form names (the route host, the COMBAT-PERF probe mode). Exception
 # messages, peer-chosen text and every other free field have no placeholder, so a line carrying one matches no form.
-# A line of a redaction form ($RedactText, below the forms) is printed as its typed head and the token (not-exported).
+# A line of a redaction form ($RedactText, below the forms) is printed as its typed head, the token (not-exported) and
+# its typed tail, if any.
 # Every other selected line is WITHHELD: never printed, only counted, as one "withheld <class> <n>" line per class
 # with n > 0 at the end of the section that would have printed it (a line holding two class words counts in both).
 # The FrameTime window lines ("[FRAME-TIME] w ") are exported under the same rule, by their own form (ruling
@@ -180,9 +195,16 @@ $FormPh = @{
     room = 'ft_[0-9a-f]{8}'; actor = '[0-9]{1,4}'; pt = '-?[0-9]{1,6}\.-?[0-9]{1,6}\.-?[0-9]{1,6}'; bool = '(?:True|False)'
     spins = '[0-9]{1,19}/[0-9]{1,19}(?:,[0-9]{1,19}/[0-9]{1,19})*'; f2 = '-?[0-9]{1,9}\.[0-9]{2}'
     why = '(?:start|patches|game[0-9]{1,6}|menu[0-9]{1,6})'
-    # a .NET type or class name as the build prints it (ex.GetType().Name, type.Name): letters, digits, underscore
-    ident = '[A-Za-z0-9_]{1,128}'; una = '(?:[0-9]{1,19}|NA)'; ina = '(?:-?[0-9]{1,19}|NA)'
+    # a .NET type or class name as the build prints it (ex.GetType().Name, type.Name): letters, digits, underscore,
+    # and a generic type's arity suffix (a backtick and one or two digits) at its end, nothing else
+    ident = '[A-Za-z0-9_]{1,128}(?:`[0-9]{1,2})?'; una = '(?:[0-9]{1,19}|NA)'; ina = '(?:-?[0-9]{1,19}|NA)'
     build = '[0-9]{1,4}(?:\.[0-9]{1,4}){1,3}\|(?:standalone|thunderstore)\|(?:nosha|[0-9a-f]{12})'
+    # the settled line's gc_incremental: FtCalib.Settled starts it -1 and sets it 1 or 0 inside a try, so a getter
+    # that throws prints -1 (plugin/FtCalib.cs:396-403)
+    tri = '(?:-1|0|1)'
+    # FtArm.UnknownPeer's value: an actor number, or its fallbacks "none" (no own digest or no other fighter) and
+    # "null" (a null player); the known peers: the actor numbers ","-joined (plugin/FtArm.cs:58-72, :215, :219)
+    peeractor = '(?:[0-9]{1,4}|none|null)'; actors = '[0-9]{1,4}(?:,[0-9]{1,4})*'
 }
 function FormSet([string]$name) { return '(?:' + ((@($FormSets[$name] -split ' ') | ForEach-Object { [regex]::Escape($_) }) -join '|') + ')' }
 $FormPh.shape = '(?:' + (FormSet 'shape').Substring(3).TrimEnd(')') + '|entry[0-9]{1,3})'
@@ -200,7 +222,9 @@ $FormPairs = [ordered]@{
 }
 $FormPh.pair = '(?:' + ((@($FormPairs.Keys) | ForEach-Object { $_ + ':' + $FormPairs[$_] }) -join '|') + ')'
 $FormPh.refpair = '(?:' + ((@($FormPairs.Keys) | ForEach-Object { 'what=' + $_ + ' route=' + $FormPairs[$_] }) -join '|') + ')'
-$FormPh.capwhy = '(?:unfocused cap|broadcast seat render cap \([0-9]{1,4} fps\)|deep idle \(broadcast seat 16min\+ idle\)|deep idle \(60s\+ unfocused, out of room\))'
+# FpsCap's reason (plugin/Plugin.cs:3447-3486): the render cap's number is the cfg's BroadcastFpsCap, an int with no
+# range check, printed only when above 0, so one to ten digits
+$FormPh.capwhy = '(?:unfocused cap|broadcast seat render cap \([0-9]{1,10} fps\)|deep idle \(broadcast seat 16min\+ idle\)|deep idle \(60s\+ unfocused, out of room\))'
 $FormPh.pkeys = '(?:-|' + (FormSet 'pkey') + '(?:,' + (FormSet 'pkey') + ')*)'
 $FormPh.pvals = ((@('cr_build', 'cr_dc2', 'cr_dc3', 'cr_ffacfg', 'cr_game_token_v', 'cr_grow2', 'cr_msv2', 'cr_pois2', 'cr_pois3',
     'cr_prox1', 'cr_saw1', 'cr_wcd1') | ForEach-Object { $_ + '=(?:-|[0-9]{1,9}|' + $FormPh.build + '|' + $FormPh.room + ':[0-9]{1,9})' }) -join ' ')
@@ -231,7 +255,7 @@ $FormText = @(
     # the text of the same failure in the lane's builds before c8e0dfed (their VM-seat logs are the identity corpus)
     '[FRAME-TIME] cal i=<n> why=<why> kind=disp shape=<shape> failed: InvalidOperationException: no patched target for <@patch>'
     '[FRAME-TIME] cal i=-1 why=patches kind=entries built=1 own_owner=com.competitiverounds.mod own_targets=<u> entries=<u> errors=<u>'
-    '[FRAME-TIME] settled g=<n> seed=<n> c_plant=<n> W=120 vsync=<n> target=<n> freq=<n> hires=<b> f_hat=<n> gc_incremental=<b> gc_slice_ns=<n> f18=<=A|B> answer=<=replay|unmeasured> armfile=<b> force=<=ON|OFF|none><problems> clock=<b> frames=<n> missing_end=<n> cycle_failures=<n> span_depth_violations=<n>'
+    '[FRAME-TIME] settled g=<n> seed=<n> c_plant=<n> W=120 vsync=<n> target=<n> freq=<n> hires=<b> f_hat=<n> gc_incremental=<tri> gc_slice_ns=<n> f18=<=A|B> answer=<=replay|unmeasured> armfile=<b> force=<=ON|OFF|none><problems> clock=<b> frames=<n> missing_end=<n> cycle_failures=<n> span_depth_violations=<n>'
     '[FRAME-TIME] census g=<n> entry=<@entry> comp=<@comp> shape=<shape> on=<n> guarded=<n> outside=<n>'
     '[FRAME-TIME] spans g=<n> comp=<@comp><spans>'
     '[FRAME-TIME] clock refused: player-loop phase missing (EarlyUpdate <bool>, PreLateUpdate <bool>, Update <bool>)'
@@ -298,13 +322,13 @@ $FormText = @(
     '[FRAME-TIME] flushed g=<n> why=<=next_game|settle|quit>'
     '[FRAME-TIME] opened g=<n> se=<b> ce=<b> ic=<b>'
     '[FRAME-TIME] staged ft_dll=<x8> <=in-room|pre-join>'
-    '[FRAME-TIME] room name=<room> region=<region> cloud_region=<region><cloudtail>'
+    '[FRAME-TIME] room name=<room> region=<regionopt> cloud_region=<cloudopt>'
     '[FRAME-TIME] ended why=complete pt=<pt>'
     '[FRAME-TIME] disarmed input=<input> pt=<pt>'
     '[FRAME-TIME] armed room=<room> region=<region>'
     '[FRAME-TIME] not armed input=<input>'
-    '[FRAME-TIME] peer unknown actor=<actor> (no matching ft_dll)'
-    '[FRAME-TIME] peer known actor=<actor> ft_dll=<x8>'
+    '[FRAME-TIME] peer unknown actor=<peeractor> (no matching ft_dll)'
+    '[FRAME-TIME] peer known actor=<actors> ft_dll=<x8>'
     '[FRAME-TIME] room call refused op=<@roomop> name=<roomname> n=<u>'
     '[FRAME-TIME] FT-GATE patched <u> entry points expected=<u> excluded=<gateex>'
     # the same with the targets it did not find (plugin/FtRoomGate.cs:111, :122, :142); a sweep failure's text is
@@ -364,7 +388,10 @@ function FormList([string]$set, [string]$sep) { $s = FormSet $set; return '(?:' 
 $FormPh.problems = '(?: problems=' + (FormList 'problem' ',') + ')?'
 # FtSpan.MomentNames . in|out . FtSpan.KindNames (plugin/FtSpan.cs:48, :53) = ticks/calls
 $FormPh.spans = '(?: (?:live|between|pick|over|menu)\.(?:in|out)\.(?:gated|upkeep|replay|writer)=[0-9]{1,19}/[0-9]{1,19})*'
-$FormPh.cloudtail = '(?:/\*)?'
+# the room line's region= and cloud_region=: FtArm prints PhotonNetwork.CloudRegion ?? "" (plugin/FtArm.cs:117-118,
+# :161), so each is a region of the set (cloud_region with its "/*" tail or none) or empty
+$FormPh.regionopt = '(?:' + $FormPh.region + ')?'
+$FormPh.cloudopt = '(?:' + $FormPh.region + '(?:/\*)?)?'
 $FormPh.gateex = '(?:' + (FormList 'gateex' ',') + ')?'
 $FormPh.rwhy = '(?:quit|game-?[0-9]{1,6})'
 $FormPh.pairs = '(?: ' + $FormPh.pair + '=[0-9]{1,19})*'
@@ -395,7 +422,9 @@ $FormPh.pnames = '(?:' + (FormList 'pname' ',') + ')?'
 # alloc_init's and the ledger line's why=: the source's tokens, or failed:<exception type name>
 $FormPh.allocwhy = '(?:ok|not_init|no_module|no_path|sha|code|failed:' + $FormPh.ident + ')'
 $FormPh.ledgerwhy = '(?:ok|already|no_disk_listener|failed:' + $FormPh.ident + ')'
-$FormPh.censusfail = '(?: failed=' + $FormPh.ident + ')?'
+# the scope census line's tail (plugin/FtCensus.cs:120, :133, :165): nothing, " partial=1" (a type load that left some
+# types unread), or " failed=<exception type name>", which replaces partial=1; never both
+$FormPh.censusfail = '(?: partial=1| failed=' + $FormPh.ident + ')?'
 # answer_replay's result= (plugin/FtReplay.cs:24, SeatEvidence.FtReplayAnswer, plugin/FtSchedule.cs:104, :171, :328);
 # e is kept from the earlier form
 $FormPh.replayresult = '(?:settled|kept|enqueue_failed|not_running|e|error_' + $FormPh.ident + '|skipped_(?:live|absent|settle|next_game|quit))'
@@ -416,10 +445,15 @@ function FormRegex([string]$t) {
 }
 
 function RedactRegex([string]$t) {
-    # one redaction form's text (ending in <*>) to its regex: group keep is the line up to the text, which matches its
-    # typed head (the BepInEx prefix included) as FormRegex would; the text after it is any text
-    if (-not $t.EndsWith('<*>')) { throw "redaction form '$t' does not end in <*>" }
-    return New-Object System.Text.RegularExpressions.Regex(('^(?<keep>' + (FormPattern $t.Substring(0, $t.Length - 3)) + ').*$'),
+    # one redaction form's text (holding <*> once) to its regex: group keep is the line up to the free text, which
+    # matches its typed head (the BepInEx prefix included) as FormRegex would; group tail is the form's typed text after
+    # <*> (empty when the form ends in <*>), matched at the line's end. The free text is everything between: the greedy
+    # .* cuts it from the RIGHT, so the tail is the last place it matches and the free text may hold the tail's words
+    $i = $t.IndexOf('<*>')
+    if ($i -lt 0 -or $t.IndexOf('<*>', $i + 3) -ge 0) { throw "redaction form '$t' does not hold <*> exactly once" }
+    $tail = $t.Substring($i + 3)
+    $tp = $(if ($tail.Length) { FormPattern ('^' + $tail) } else { '' })
+    return New-Object System.Text.RegularExpressions.Regex(('^(?<keep>' + (FormPattern $t.Substring(0, $i)) + ').*(?<tail>' + $tp + ')$'),
         [System.Text.RegularExpressions.RegexOptions]::CultureInvariant)
 }
 
@@ -448,7 +482,8 @@ $Forms = @($FormText | ForEach-Object { FormRegex $_ })
 # the redaction forms (ruling R6-A3.11.151 (2) class E): the failure warnings whose last field is an exception's
 # message (ex.Message, an unpatch text, a sweep failure) and Harmony's patch failure. That text is free, so it never
 # leaves: a line that matches no form above but one form here is exported as its typed head (the text before <*>,
-# matched as a form) followed by $RedactToken in place of the text. The head keeps the line's kind, so ft_parse.py reads
+# matched as a form) followed by $RedactToken in place of the text, then the form's typed tail after <*> when it has
+# one (the refused room line's n=). The head keeps the line's kind, so ft_parse.py reads
 # the failure from the export as from the raw line (its forms read these lines by their words). Every other line that
 # matches no form is withheld
 $RedactToken = '(not-exported)'
@@ -472,6 +507,12 @@ $RedactText = @(
     '[FRAME-TIME] photon patches report failed: <*>'
     '[FRAME-TIME] attach report failed: <*>'
     '[FRAME-TIME] FT-GATE patched <u> entry points expected=<u> excluded=<gateex> missing=<*>'
+    # the two room-name lines (plugin/FtRoomGate.cs:87, :247), ruled: a room name that no form above admits (an ft_
+    # room, (none), (empty)) leaves as the token with every other field kept, and the line is never withheld for it.
+    # The refused line's n= after the name is that form's typed tail, cut from the right, so a name holding spaces,
+    # "=" or " n=7" never moves the count
+    '[FRAME-TIME] FT-ROOM joined offline=<b> name=<*>'
+    '[FRAME-TIME] room call refused op=<@roomop> name=<*> n=<u>'
     # the calibration's failures (plugin/FtCalib.cs, FtA3.cs, Plugin.cs); the typed failure texts are forms above
     '[FRAME-TIME] cal i=-1 why=patches kind=entries failed: <*>'
     '[FRAME-TIME] cal i=<n> kind=<=fhat|disp|a3|disp entries> failed: <*>'
@@ -526,7 +567,7 @@ function ExportLine([string]$ln) {
     }
     foreach ($f in $Redacts) {
         $m = $f.Match($ln)
-        if ($m.Success) { return $m.Groups['keep'].Value + $RedactToken }
+        if ($m.Success) { return $m.Groups['keep'].Value + $RedactToken + $m.Groups['tail'].Value }
     }
     return $null
 }
@@ -566,6 +607,148 @@ $script:Out = New-Object System.Collections.Generic.List[string]
 # Console.Out, never the output stream: a function's output-stream writes would become part of its return value
 function Say([string]$s) { $script:Out.Add($s); [Console]::Out.WriteLine($s) }
 function Print([string]$s) { [Console]::Out.WriteLine($s) }
+
+# ---- the Codex gate (the lane's rule: no game launch while a codex.exe process is alive on the seat). Each codex.exe
+# row is classified by the rule of the VM's gate, codexgate_f10.sh: LIVE when its command line is empty or unreadable
+# (cmdline-empty; the reader gives "" for both), when it carries " exec " (exec), or when its subcommand is anything
+# else (unclassified); EXCLUDED only when its subcommand, after the executable (a quoted path, else the text up to and
+# including codex.exe in any case, else the first word) and its "-c <value>" options, is exactly app-server or
+# exec-server (the desktop app's long-running processes). The self-test's codex_lax mutant counts an unclassified row
+# excluded (the negative control of $CodexCases)
+function CodexClass([string]$cmd) {
+    if ([regex]::IsMatch($cmd, '\A[ \t]*\z')) { return 'LIVE cmdline-empty' }
+    if ((' ' + $cmd + ' ').Contains(' exec ')) { return 'LIVE exec' }
+    $s = [regex]::Replace($cmd, '\A[ \t]+', '')
+    $p = $s.ToLowerInvariant().IndexOf('codex.exe', [System.StringComparison]::Ordinal)
+    if ($s.StartsWith('"')) { $s = [regex]::Replace($s, '\A"[^"]*"[ \t]*', '') }
+    elseif ($p -ge 0) { $s = [regex]::Replace($s.Substring($p + 9), '\A[ \t]*', '') }
+    else { $s = [regex]::Replace($s, '\A[^ \t]+[ \t]*', '') }
+    for ($i = 0; $i -ne 64; $i++) {
+        $m = [regex]::Match($s, '\A-c[ \t]+(?:[^ \t"]|"(?:[^"\\]|\\.)*")+[ \t]*')
+        if (-not $m.Success) { break }
+        $s = $s.Substring($m.Length)
+    }
+    $tok = [regex]::Replace($s, '(?s)[ \t].*\z', '')
+    if ($tok -ceq 'app-server' -or $tok -ceq 'exec-server') { return 'EXCLUDED ' + $tok }
+    if ($script:Mutant -eq 'codex_lax') { return 'EXCLUDED ' + $tok }
+    return 'LIVE unclassified'
+}
+
+function CodexRows {
+    # one read of the process table: the codex.exe rows (WQL compares the name without case), each its pid and command
+    # line. A read that fails throws (-ErrorAction Stop): it is never an empty list
+    return @(Get-CimInstance -ClassName Win32_Process -Filter "Name = 'codex.exe'" -ErrorAction Stop |
+        ForEach-Object { [pscustomobject]@{ Id = [int]$_.ProcessId; Cmd = [string]$_.CommandLine } })
+}
+
+function CodexGate([scriptblock]$Read) {
+    # one reading through $Read (CodexRows in the sitting, a stand-in in the self-test) to the gate's lines: the result
+    # line, then "REFUSED: ..." when a row is live; a read that throws, or a row it could not read, gives one REFUSED
+    # line. Refuse is true exactly when a REFUSED line is there
+    try { $rows = @(& $Read) }
+    catch {
+        $msg = (([string]$_.Exception.Message) -split '\r?\n')[0]
+        if ($msg.Length -gt 160) { $msg = $msg.Substring(0, 160) }
+        return @{ Refuse = $true; Lines = @(('REFUSED: codex gate: the process table was not read ({0}: {1})' -f $_.Exception.GetType().Name, $msg)) }
+    }
+    $live = New-Object System.Collections.Generic.List[string]
+    $excluded = New-Object System.Collections.Generic.List[string]
+    foreach ($r in $rows) {
+        if ($null -eq $r -or $null -eq $r.PSObject.Properties['Id'] -or $null -eq $r.PSObject.Properties['Cmd']) {
+            return @{ Refuse = $true; Lines = @(('REFUSED: codex gate: a codex.exe row of the process table was not read ({0} rows)' -f $rows.Count)) }
+        }
+        $c = CodexClass $r.Cmd
+        if ($c.StartsWith('EXCLUDED ')) { $excluded.Add(('{0} {1}' -f $r.Id, $c.Substring(9))) } else { $live.Add(('{0} {1}' -f $r.Id, $c.Substring(5))) }
+    }
+    $lines = @(('codex gate: live {0} [{1}]; excluded {2} [{3}]; codex.exe in all {4}' -f $live.Count, ($live -join ', '),
+        $excluded.Count, ($excluded -join ', '), $rows.Count))
+    if ($live.Count -gt 0) {
+        $lines += ('REFUSED: codex gate: {0} live codex.exe process(es) [{1}]: no game launch while Codex runs' -f $live.Count, ($live -join ', '))
+    }
+    return @{ Refuse = $live.Count -gt 0; Lines = $lines }
+}
+
+# the classification's cases: a quoted executable path with spaces, "-c <value>" options before the subcommand (a
+# quoted value among them), an empty and a blank command line, the exec subcommand, app-server, exec-server, the
+# executable named in upper and in mixed case, no executable suffix, a subcommand in another case or with a suffix,
+# options only, and the executable alone
+$CodexCases = @(
+    @{ Cmd = '"C:\Program Files\Codex App\codex.exe" app-server'; Want = 'EXCLUDED app-server' }
+    @{ Cmd = '"C:\Program Files\Codex App\codex.exe" -c model="a b" -c sandbox=read-only app-server --listen x'; Want = 'EXCLUDED app-server' }
+    @{ Cmd = 'C:\tools\codex.exe -c k=v exec-server'; Want = 'EXCLUDED exec-server' }
+    @{ Cmd = 'C:\tools\codex.exe -c "a b"=1 app-server'; Want = 'EXCLUDED app-server' }
+    @{ Cmd = ''; Want = 'LIVE cmdline-empty' }
+    @{ Cmd = "  `t "; Want = 'LIVE cmdline-empty' }
+    @{ Cmd = 'codex.exe exec --sandbox read-only "review the diff"'; Want = 'LIVE exec' }
+    @{ Cmd = '"C:\Program Files\Codex App\codex.exe" -c k=v exec'; Want = 'LIVE exec' }
+    @{ Cmd = 'C:\TOOLS\CODEX.EXE app-server'; Want = 'EXCLUDED app-server' }
+    @{ Cmd = 'C:\Tools\Codex.Exe -c k=v exec-server'; Want = 'EXCLUDED exec-server' }
+    @{ Cmd = 'codex app-server'; Want = 'EXCLUDED app-server' }
+    @{ Cmd = 'C:\tools\Codex.exe resume'; Want = 'LIVE unclassified' }
+    @{ Cmd = 'C:\tools\codex.exe App-Server'; Want = 'LIVE unclassified' }
+    @{ Cmd = '"C:\Program Files\Codex App\codex.exe" app-server-x'; Want = 'LIVE unclassified' }
+    @{ Cmd = 'C:\tools\codex.exe -c k=v'; Want = 'LIVE unclassified' }
+    @{ Cmd = 'C:\tools\codex.exe'; Want = 'LIVE unclassified' }
+)
+
+# ---- the culture gate (the integrator's ruling, follow-up 2 of P5): the plugin prints its ints and its two-decimal
+# numbers through the game process's current culture (no invariant format is set in plugin/), and the forms admit
+# only "-" (U+002D) as the minus sign and "." (U+002E) as the decimal separator. This build does not change the
+# plugin's number formatting; instead the seat proves, before a launch, that its number format prints what the forms
+# admit. It reads two number formats: the process's current culture as Windows gives it (the user's own settings) and
+# the culture of the same name without user overrides (its own table), because the game's runtime reads its own table
+# for that name and knows no user override. Both must print U+002D and U+002E. What it cannot see: the game runtime's
+# own table can differ from Windows' for the same culture name; such a seat passes here, and its lines are withheld at
+# the export, which makes the read refuse the input
+function CultureRead {
+    # one read: the current culture's name, its number format (the user's settings) and the same name's table
+    $cur = [System.Globalization.CultureInfo]::CurrentCulture
+    $own = New-Object System.Globalization.CultureInfo -ArgumentList @($cur.Name, $false)
+    return @{ Name = [string]$cur.Name; User = $cur.NumberFormat; Table = $own.NumberFormat }
+}
+
+function CodePoints([string]$s) {
+    # each character as U+XXXX, ","-joined; (empty) for an empty string
+    if ($s.Length -eq 0) { return '(empty)' }
+    return ((@($s.ToCharArray()) | ForEach-Object { 'U+{0:X4}' -f [int]$_ }) -join ',')
+}
+
+function CultureGate([scriptblock]$Read) {
+    # one reading through $Read (CultureRead in the sitting and under -CultureGate, a stand-in in the self-test) to the
+    # gate's lines: the result line when both formats print U+002D and U+002E; else one REFUSED line per format that
+    # does not (the user's settings first). A read that throws or gives no number format gives one REFUSED line.
+    # Refuse is true exactly when a REFUSED line is there. The comparison is ordinal: a culture comparison ignores
+    # some characters (a direction mark) and would pass a sign that holds one
+    try {
+        $r = & $Read
+        if (-not ($r -is [hashtable]) -or -not ($r['User'] -is [System.Globalization.NumberFormatInfo]) -or
+                -not ($r['Table'] -is [System.Globalization.NumberFormatInfo])) {
+            throw (New-Object System.InvalidOperationException 'the reader gave no number format')
+        }
+    }
+    catch {
+        $msg = (([string]$_.Exception.Message) -split '\r?\n')[0]
+        if ($msg.Length -gt 160) { $msg = $msg.Substring(0, 160) }
+        return @{ Refuse = $true; Lines = @(('REFUSED: culture gate: the number format was not read ({0}: {1})' -f $_.Exception.GetType().Name, $msg)) }
+    }
+    $name = [string]$r['Name']
+    $nm = $(if ($name.Length -eq 0) { '(invariant)' } elseif ($name -cmatch '\A[A-Za-z0-9-]{1,32}\z') { $name } else { '(unnamed)' })
+    $sides = New-Object System.Collections.Generic.List[object]
+    $sides.Add(@{ Why = 'the user''s settings'; Nf = $r['User'] })
+    $sides.Add(@{ Why = 'the culture''s own table'; Nf = $r['Table'] })
+    $bad = @()
+    foreach ($s in $sides) {
+        $neg = [string]$s.Nf.NegativeSign; $dec = [string]$s.Nf.NumberDecimalSeparator
+        $ok = [string]::Equals($neg, '-', [System.StringComparison]::Ordinal)
+        $ok = $ok -and [string]::Equals($dec, '.', [System.StringComparison]::Ordinal)
+        if (-not $ok) {
+            $bad += ('REFUSED: culture gate: {0} prints minus {1} decimal {2} ({3}): the lane''s lines need U+002D and U+002E; no game launch' -f
+                $nm, (CodePoints $neg), (CodePoints $dec), $s.Why)
+        }
+    }
+    if ($bad.Count) { return @{ Refuse = $true; Lines = $bad } }
+    return @{ Refuse = $false; Lines = @(('culture gate: {0} minus U+002D decimal U+002E' -f $nm)) }
+}
 
 function Sha([string]$p) {
     if (Test-Path -LiteralPath $p -PathType Leaf) { return (Get-FileHash -Algorithm SHA256 -LiteralPath $p).Hash.ToLowerInvariant() }
@@ -983,12 +1166,16 @@ $SimRedact = @(
     ('[Warning:CompetitiveRounds] [FRAME-TIME] game over failed: https://failure.example:8444 refused'),
     ('[Warning:CompetitiveRounds] [FRAME-TIME] cal i=3 why=game2 kind=disp shape=CE_p1 failed: unpatch: https://unpatch.example'),
     ('[Warning:CompetitiveRounds] [FRAME-TIME] attach report failed: FileNotFoundException: https://attach.example/FtAttach.dll'),
-    ('[Error  :CompetitiveRounds] [HARMONY] Failed to patch SomePatch: the target method https://patch.example is missing'))
+    ('[Error  :CompetitiveRounds] [HARMONY] Failed to patch SomePatch: the target method https://patch.example is missing'),
+    ($SimPre + '[FRAME-TIME] room call refused op=JoinRoom name=planted.example x=1 n=7 n=3'),
+    ($SimPre + '[FRAME-TIME] FT-ROOM joined offline=0 name=a planted.example room'))
 $SimRedactOut = @(
     ('[Warning:CompetitiveRounds] [FRAME-TIME] game over failed: ' + $RedactToken),
     ('[Warning:CompetitiveRounds] [FRAME-TIME] cal i=3 why=game2 kind=disp shape=CE_p1 failed: ' + $RedactToken),
     ('[Warning:CompetitiveRounds] [FRAME-TIME] attach report failed: ' + $RedactToken),
-    ('[Error  :CompetitiveRounds] [HARMONY] Failed to patch SomePatch: ' + $RedactToken))
+    ('[Error  :CompetitiveRounds] [HARMONY] Failed to patch SomePatch: ' + $RedactToken),
+    ($SimPre + '[FRAME-TIME] room call refused op=JoinRoom name=' + $RedactToken + ' n=3'),
+    ($SimPre + '[FRAME-TIME] FT-ROOM joined offline=0 name=' + $RedactToken))
 $SimPlant = @($SliceClasses | ForEach-Object { $SimPre + 'API client initialized: https://' + $_ + '.example:8444' }) + @(
     ($SimPre + '[COMBAT-PERF] probe on, mode https://refused.example, windows of 600 frames'),
     ($SimPre + '[FRAME-TIME] refused what=route route=GET_refused.example/api/{n}/mod-version n=1'),
@@ -1180,6 +1367,14 @@ if ($CfgKindList -ne '') {
     exit 0
 }
 
+if ($CultureGate) {
+    # the culture gate alone (the VM seat's step list runs it before the VM's launches): its lines, exit 0 or 2. It
+    # reads no parameter of the sitting and touches no lane, job file or game
+    $cg = CultureGate { CultureRead }
+    foreach ($l in $cg.Lines) { Print $l }
+    exit $(if ($cg.Refuse) { 2 } else { 0 })
+}
+
 if ($SelfTest) {
     $base = Join-Path ([System.IO.Path]::GetTempPath()) ('ft-seat-selftest-' + (Get-Date).ToUniversalTime().ToString('yyyyMMddHHmmss'))
     $fail = @()
@@ -1200,6 +1395,80 @@ if ($SelfTest) {
     $nCtl = @($WFormCases | Where-Object { -not ($_.Form -or $_.Keys) }).Count
     Print ("self-test window form cases: {0} refused by the form, {1} by the key check alone, {2} controls" -f $nForm, $nKeys, $nCtl)
     if ($nForm -lt 1 -or $nKeys -lt 1 -or $nCtl -lt 1) { $fail += 'window form: the case table lacks a form case, a key case or a control' }
+    # the Codex gate: the classification's case table (none) and its negative control (codex_lax: an unclassified row
+    # counted excluded must make cases differ); then the gate's lines from stand-in readings
+    foreach ($m in @('none', 'codex_lax')) {
+        $script:Mutant = $m
+        try {
+            $diff = @(foreach ($c in $CodexCases) { $got = CodexClass $c.Cmd; if ($got -cne $c.Want) { "[$($c.Cmd)] gave '$got', wanted '$($c.Want)'" } })
+        }
+        finally { $script:Mutant = 'none' }
+        Print ("self-test codex class {0}: {1} cases, {2} differ{3}" -f $m, $CodexCases.Count, $diff.Count, $(if ($diff.Count) { ': ' + ($diff -join '; ') } else { '' }))
+        if ($m -eq 'none' -and $diff.Count) { $fail += "codex class: $($diff -join '; ')" }
+        if ($m -eq 'codex_lax' -and $diff.Count -eq 0) { $fail += 'codex class codex_lax: no case differs (control FAILED)' }
+    }
+    $row = { param($id, $cmd) [pscustomobject]@{ Id = $id; Cmd = $cmd } }
+    $gateCases = @(
+        @{ Name = 'no row'; Read = { @() }; Refuse = $false; Lines = @('codex gate: live 0 []; excluded 0 []; codex.exe in all 0') }
+        @{ Name = 'app-server only'; Read = { @(& $row 1234 '"C:\Program Files\Codex App\codex.exe" app-server') }; Refuse = $false
+            Lines = @('codex gate: live 0 []; excluded 1 [1234 app-server]; codex.exe in all 1') }
+        @{ Name = 'live rows'; Read = { @((& $row 1234 '"C:\Program Files\Codex App\codex.exe" app-server'), (& $row 5678 'codex.exe exec x'), (& $row 91 ''), (& $row 92 'C:\tools\codex.exe -c k=v exec-server')) }
+            Refuse = $true; Lines = @('codex gate: live 2 [5678 exec, 91 cmdline-empty]; excluded 2 [1234 app-server, 92 exec-server]; codex.exe in all 4',
+                'REFUSED: codex gate: 2 live codex.exe process(es) [5678 exec, 91 cmdline-empty]: no game launch while Codex runs') }
+        @{ Name = 'a read that throws'; Read = { throw (New-Object System.UnauthorizedAccessException 'access denied') }; Refuse = $true
+            Lines = @('REFUSED: codex gate: the process table was not read (UnauthorizedAccessException: access denied)') }
+        @{ Name = 'a row not read'; Read = { @((& $row 1234 'codex app-server'), $null) }; Refuse = $true
+            Lines = @('REFUSED: codex gate: a codex.exe row of the process table was not read (2 rows)') }
+    )
+    foreach ($g in $gateCases) {
+        $r = CodexGate $g.Read
+        $ok = ($r.Refuse -eq $g.Refuse) -and (($r.Lines -join "`n") -ceq ($g.Lines -join "`n"))
+        Print ("self-test codex gate {0}: refuse {1}, lines '{2}'" -f $g.Name, $r.Refuse, ($r.Lines -join ' | '))
+        if (-not $ok) { $fail += "codex gate $($g.Name): refuse $($r.Refuse), lines '$($r.Lines -join ' | ')'" }
+    }
+    # this machine's own table, read once by the sitting's reader: printed, not judged (it shows the read works here)
+    $r = CodexGate { CodexRows }
+    Print ("self-test codex gate on this machine (not judged): {0}" -f ($r.Lines -join ' | '))
+    # the culture gate: its lines from hand-made number formats (never this machine's culture data); then this
+    # machine's own reading, printed, not judged
+    $nfi = { param($neg, $dec) $n = New-Object System.Globalization.NumberFormatInfo; $n.NegativeSign = $neg; $n.NumberDecimalSeparator = $dec; $n }
+    $u2212 = [string][char]0x2212; $u200f = [string][char]0x200F
+    $need = ': the lane''s lines need U+002D and U+002E; no game launch'
+    $cultureCases = @(
+        @{ Name = 'pass'; Read = { @{ Name = 'en-US'; User = (& $nfi '-' '.'); Table = (& $nfi '-' '.') } }; Refuse = $false
+            Lines = @('culture gate: en-US minus U+002D decimal U+002E') }
+        @{ Name = 'the invariant culture'; Read = { @{ Name = ''; User = (& $nfi '-' '.'); Table = (& $nfi '-' '.') } }; Refuse = $false
+            Lines = @('culture gate: (invariant) minus U+002D decimal U+002E') }
+        @{ Name = 'a name outside the form'; Read = { @{ Name = 'x y'; User = (& $nfi '-' '.'); Table = (& $nfi '-' '.') } }; Refuse = $false
+            Lines = @('culture gate: (unnamed) minus U+002D decimal U+002E') }
+        @{ Name = 'minus U+2212'; Read = { @{ Name = 'fi-FI'; User = (& $nfi $u2212 '.'); Table = (& $nfi $u2212 '.') } }; Refuse = $true
+            Lines = @(('REFUSED: culture gate: fi-FI prints minus U+2212 decimal U+002E (the user''s settings)' + $need),
+                ('REFUSED: culture gate: fi-FI prints minus U+2212 decimal U+002E (the culture''s own table)' + $need)) }
+        @{ Name = 'a decimal comma'; Read = { @{ Name = 'de-DE'; User = (& $nfi '-' ','); Table = (& $nfi '-' ',') } }; Refuse = $true
+            Lines = @(('REFUSED: culture gate: de-DE prints minus U+002D decimal U+002C (the user''s settings)' + $need),
+                ('REFUSED: culture gate: de-DE prints minus U+002D decimal U+002C (the culture''s own table)' + $need)) }
+        @{ Name = 'the user''s settings wrong, the table right'; Read = { @{ Name = 'en-US'; User = (& $nfi '-' ','); Table = (& $nfi '-' '.') } }
+            Refuse = $true; Lines = @(('REFUSED: culture gate: en-US prints minus U+002D decimal U+002C (the user''s settings)' + $need)) }
+        @{ Name = 'the table wrong, the user''s settings right'; Read = { @{ Name = 'nb-NO'; User = (& $nfi '-' '.'); Table = (& $nfi $u2212 ',') } }
+            Refuse = $true; Lines = @(('REFUSED: culture gate: nb-NO prints minus U+2212 decimal U+002C (the culture''s own table)' + $need)) }
+        @{ Name = 'a two-character sign'; Read = { @{ Name = 'ar-SA'; User = (& $nfi ($u200f + '-') '.'); Table = (& $nfi ($u200f + '-') '.') } }
+            Refuse = $true; Lines = @(('REFUSED: culture gate: ar-SA prints minus U+200F,U+002D decimal U+002E (the user''s settings)' + $need),
+                ('REFUSED: culture gate: ar-SA prints minus U+200F,U+002D decimal U+002E (the culture''s own table)' + $need)) }
+        @{ Name = 'an empty sign'; Read = { @{ Name = 'en-US'; User = (& $nfi '' '.'); Table = (& $nfi '-' '.') } }
+            Refuse = $true; Lines = @(('REFUSED: culture gate: en-US prints minus (empty) decimal U+002E (the user''s settings)' + $need)) }
+        @{ Name = 'a read that throws'; Read = { throw (New-Object System.InvalidOperationException 'the table is unreadable') }; Refuse = $true
+            Lines = @('REFUSED: culture gate: the number format was not read (InvalidOperationException: the table is unreadable)') }
+        @{ Name = 'a read with no number format'; Read = { @{ Name = 'en-US'; User = $null; Table = (& $nfi '-' '.') } }; Refuse = $true
+            Lines = @('REFUSED: culture gate: the number format was not read (InvalidOperationException: the reader gave no number format)') }
+    )
+    foreach ($g in $cultureCases) {
+        $r = CultureGate $g.Read
+        $ok = ($r.Refuse -eq $g.Refuse) -and (($r.Lines -join "`n") -ceq ($g.Lines -join "`n"))
+        Print ("self-test culture gate {0}: refuse {1}, lines '{2}'" -f $g.Name, $r.Refuse, ($r.Lines -join ' | '))
+        if (-not $ok) { $fail += "culture gate $($g.Name): refuse $($r.Refuse), lines '$($r.Lines -join ' | ')'" }
+    }
+    $r = CultureGate { CultureRead }
+    Print ("self-test culture gate on this machine (not judged): {0}" -f ($r.Lines -join ' | '))
     # -ArmForce in both values: every run arms with none but arm_force_on, the clean run under -ArmForce ON
     $armForceGiven = $ArmForce
     foreach ($m in (@('none', 'arm_force_on', 'keep_prev_copy', 'closing_file', 'no_component_slice', 'throw_in_wait', 'throw_in_step4', 'export_all', 'drop_w', 'no_wkeys') +
@@ -1332,6 +1601,17 @@ if (Test-Path -LiteralPath $C.Arm) { Say 'REFUSED: a sentinel is already present
 try { $p = Step1 $C $run }
 catch { Say ('REFUSED: step 1 failed: ' + $_.Exception.Message); exit 2 }
 if (-not $p.LaneOk) { Say 'REFUSED: the installed DLL is no staged FrameTime lane (push the lane first)'; exit 2 }
+# the lane's rule: no game launch while a codex.exe process is alive on this seat (CodexGate, the VM gate's
+# classification): one reading of the process table right before the launch, its one result line, and a REFUSED line
+# with exit 2 when a row is live or the table was not read
+$codexGate = CodexGate { CodexRows }
+foreach ($l in $codexGate.Lines) { Say $l }
+if ($codexGate.Refuse) { exit 2 }
+# the number format (CultureGate): the user's settings and the culture's own table must print U+002D and U+002E, or
+# the lane's lines would be withheld at the export; its line, and exit 2 on a REFUSED one
+$cultureGate = CultureGate { CultureRead }
+foreach ($l in $cultureGate.Lines) { Say $l }
+if ($cultureGate.Refuse) { exit 2 }
 $launch = {
     param($C)
     Start-Process 'steam://rungameid/1557740'
