@@ -470,6 +470,7 @@ $RedactText = @(
     '[FRAME-TIME] churn freeze failed: <*>'
     '[FRAME-TIME] FT-GATE report failed: <*>'
     '[FRAME-TIME] photon patches report failed: <*>'
+    '[FRAME-TIME] attach report failed: <*>'
     '[FRAME-TIME] FT-GATE patched <u> entry points expected=<u> excluded=<gateex> missing=<*>'
     # the calibration's failures (plugin/FtCalib.cs, FtA3.cs, Plugin.cs); the typed failure texts are forms above
     '[FRAME-TIME] cal i=-1 why=patches kind=entries failed: <*>'
@@ -981,10 +982,12 @@ $SimNoForm = @(
 $SimRedact = @(
     ('[Warning:CompetitiveRounds] [FRAME-TIME] game over failed: https://failure.example:8444 refused'),
     ('[Warning:CompetitiveRounds] [FRAME-TIME] cal i=3 why=game2 kind=disp shape=CE_p1 failed: unpatch: https://unpatch.example'),
+    ('[Warning:CompetitiveRounds] [FRAME-TIME] attach report failed: FileNotFoundException: https://attach.example/FtAttach.dll'),
     ('[Error  :CompetitiveRounds] [HARMONY] Failed to patch SomePatch: the target method https://patch.example is missing'))
 $SimRedactOut = @(
     ('[Warning:CompetitiveRounds] [FRAME-TIME] game over failed: ' + $RedactToken),
     ('[Warning:CompetitiveRounds] [FRAME-TIME] cal i=3 why=game2 kind=disp shape=CE_p1 failed: ' + $RedactToken),
+    ('[Warning:CompetitiveRounds] [FRAME-TIME] attach report failed: ' + $RedactToken),
     ('[Error  :CompetitiveRounds] [HARMONY] Failed to patch SomePatch: ' + $RedactToken))
 $SimPlant = @($SliceClasses | ForEach-Object { $SimPre + 'API client initialized: https://' + $_ + '.example:8444' }) + @(
     ($SimPre + '[COMBAT-PERF] probe on, mode https://refused.example, windows of 600 frames'),
