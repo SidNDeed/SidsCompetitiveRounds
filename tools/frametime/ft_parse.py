@@ -341,6 +341,44 @@ SUBKINDS = {"census_summary": ("census", "registered="),
             "attach_failed": ("attach", "report")}
 
 
+# The J3 follow-up to ruling R6-A3.11.154: where a record's free text begins. An emitter that appends free text (an
+# exception's Message, a name the game supplies) puts it after the line's fields; the structured scan of parse_line
+# ends at the first of these, so that text is never read as a field, never overwrites one, and never refuses the line
+# by its form. (the kind it holds for, or None for every kind; the pattern of where the free text begins; its emitters)
+FREE_TEXT = (
+    (None, r"(?:^|\s)failed:",
+     "'... failed: ' + ex.Message or a failure text: FtCalib.cs:111, :120, :122, :124, :126, :221, :229, :261; "
+     "FtA3.cs:379, :397; FtArm.cs:54; FtRematch.cs:46, :72; FtRoomGate.cs:257; Plugin.cs:556, :1494, :1500, :1504, "
+     ":5890, :6563; GameStateWatcher.cs:5703, :5884, :6084, :7491, :9232"),
+    ("room", r"(?:^|\s)name=", "the room's name: FtArm.cs:117 (name=<Name> region= cloud_region=), FtRoomGate.cs:87 "
+                               "(op=<op> name=<shown> n=<n>)"),
+    ("armed", r"(?:^|\s)room=", "the room's name: FtArm.cs:152 (room=<Name> region=)"),
+    ("churn", r"(?:^|\s)room=", "the room's name: FtRoomGate.cs:255 (timer frozen room=<room>)"),
+    ("ft", r"(?:^|\s)room=", "the room's name: Plugin.cs:2374 (room options max=2 visible=0 room=<room>)"),
+)
+_FREE_TEXT = [(k, re.compile(p)) for k, p, _ in FREE_TEXT]
+
+
+def structured_part(kind, rest):
+    """rest up to where its free text begins (FREE_TEXT), the whole of it when it holds none."""
+    cut = len(rest)
+    for k, pat in _FREE_TEXT:
+        m = pat.search(rest) if k in (None, kind) else None
+        if m is not None:
+            cut = min(cut, m.start())
+    return rest[:cut]
+
+
+# The J4 follow-up to ruling R6-A3.11.154 (2)(g): in a record's structured part a key printed with an empty value
+# ('<key>=' before white space or the line's end), which _KV would skip, refuses the line as written; except these keys,
+# whose emitter can print an empty value: (kind, key) -> the emitter
+EMPTY_OK = {
+    ("between", "after"): "FtFrames.cs:225 ('after=' + _btArm, which starts as \"\" at FtFrames.cs:84)",
+    ("photon", "names"): "FtPhoton.cs:69 (string.Join over the patched methods, empty when none is counted)",
+}
+_EMPTY_KEY = re.compile(r"(?:^|\s)(\w+)=(?=\s|$)")
+
+
 def parse_line(line):
     m = _LINE.search(line)
     if not m:
@@ -382,7 +420,11 @@ def parse_line(line):
         rec["pairs_kv"], rec["form"], rec["written"] = kv, form, "refusals " + rest.strip()
         return rec
     seen = {}
-    for k, v in _KV.findall(rest):
+    struct = structured_part(kind, rest)
+    for k in _EMPTY_KEY.findall(struct):
+        if (kind, k) not in EMPTY_OK:
+            raise Refused("the %s line is not in its form (%s= is empty): %s %s" % (kind, k, kind, rest.strip()))
+    for k, v in _KV.findall(struct):
         if k == "kind":
             k = "ckind"      # a cal line's kind=fhat|disp|span must not overwrite the line kind
         if kind == "w":
@@ -838,6 +880,12 @@ COUNTER_LINE_KEYS = ("g", "frames", "missing_end", "cycle_failures", "span_depth
 # exception's message may be empty, which the line's trailing space then leaves as a bare 'failed:'; that variant is
 # read too, as every other failure form reads its empty message (_msg)
 _CAL_FAILED = r"cal i=-?\d+(?: [^\s=]+=\S*)* failed:(?: .*)?"
+# the J1 follow-up to ruling R6-A3.11.154: FtRoomGate.Admit's line (plugin/FtRoomGate.cs:87). A PUN entry point passes
+# its method's name, a NetworkConnectionHandler one passes 'NCH.' + its name (FtRoomGate.cs:194, :212) for the names
+# of NchVoid then NchRoutine (FtRoomGate.cs:34-35; a test reads both arrays from the source and holds this tuple to
+# them). An op of the NCH. family is one of these exactly; any other op is admitted as before
+NCH_ENTRIES = ("QuickMatch", "JoinRandomRoom", "PlayOnBestActiveRegion", "DoRetry")
+ROOM_CALL_REFUSED = r"room call refused op=(?:NCH\.(?:%s)|(?!NCH\.)\S+) name=\S.* n=\d+" % "|".join(NCH_ENTRIES)
 FORMS = (
     # the lines whose fields this table fixes (the five boot lines, the controls line, the counters line, the census
     # summary, the mark cost and the other boot traces)
@@ -915,7 +963,8 @@ FORMS = (
     ("rematch not answered (sitting over)", _msg("rematch not answered (sitting over)"), None),
     ("rematch publish failed: ", _msg("rematch publish failed:"), None),
     ("rematch timeout g=", _msg("rematch timeout"), None), ("rematch yes g=", _msg("rematch yes"), None),
-    ("room call refused op=", _msg("room call refused"), None), ("room name=", _msg("room"), None),
+    # the J1 follow-up: the room line's form is its own lead (FtArm.cs:117), so it no longer admits a room call line
+    ("room call refused op=", ROOM_CALL_REFUSED, None), ("room name=", r"room name=.*", None),
     ("self-drive ", _msg("self-drive"), None), ("self-drive join failed: ", _msg("self-drive join failed:"), None),
     ("self-drive join room=", _msg("self-drive join"), None), ("self-drive pick index=", _msg("self-drive pick"), None),
     ("self-drive spawn threw: ", _msg("self-drive spawn threw:"), None),
