@@ -161,7 +161,8 @@ async def _message(conn, sender=A, kind="direct", key=None, count=None, at=None,
     await conn.execute(
         "INSERT INTO mail_messages (id, sender_id, kind, thread_id, in_reply_to, subject, body,"
         " idempotency_key, created_at, recipient_count)"
-        " VALUES ($1, $2, $3, COALESCE($7, $1), $8, $9, $10, $4, COALESCE($5, NOW()), $6)",
+        " VALUES (CAST($1 AS uuid), $2, $3, COALESCE(CAST($7 AS uuid), CAST($1 AS uuid)),"
+        "         CAST($8 AS uuid), $9, $10, $4, COALESCE($5, NOW()), $6)",
         mid, sender, kind, key or str(uuid.uuid4()), at, count, thread, parent, subject, body)
     return mid
 
