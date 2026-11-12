@@ -305,7 +305,9 @@ INT_KEYS = {"written", "withheld", "seg", "pair", "base_us", "segs", "of", "cycl
             "reads", "scopes", "tmax", "unscoped", "depth_err",
             "run", "pos", "coin", "wi", "f0", "res", "gcn", "cW", "cR", "cS", "cE", "prun", "nm", "cyc", "p90",
             "own_split", "recv_offmain", "ledger_cycle_miss", "sock_n", "heap",
-            "sock_thr", "sock_main", "cP", "cX", "ab_back", "ab_retry", "span_leave_mismatch", "photon_offmain"}
+            "sock_thr", "sock_main", "cP", "cX", "ab_back", "ab_retry", "span_leave_mismatch", "photon_offmain",
+            # ruling R6-A3.11.151 (2) class B: the p line's fault counters the parser now judges
+            "off_g", "off_gn", "off_on", "on_guarded", "span_class_overflow", "gc_read_failures"}
 # the B11 window line (ruling R6-A3.11.138, SHARED.md's line contract): the fields it appends to the w line, in order.
 # q = C° by tenth, r = the retained direct execution R by tenth, qn = frames by tenth, prun = the window is in a plant
 # run (spun or not; the w line's own plant= marks a window actually planted, its own partial= is the only partial
@@ -332,7 +334,9 @@ NA_KEYS = {"w": ("cG",) + A_FIELDS, "p": ("sock_p95",)}
 # writes the one census summary ("census registered=N expected=N missing=N duplicates=N") beside the per-game
 # census lines, so every consumer of kind "census" sees per-game lines only (bug: the summary read as a census
 # record without g stopped complete() with KeyError 'g')
-SUBKINDS = {"census_summary": ("census", "registered=")}
+SUBKINDS = {"census_summary": ("census", "registered="),
+            # ruling R6-A3.11.151 (3): Plugin's warning when the attach report itself throws, beside the attach line
+            "attach_failed": ("attach", "report")}
 
 
 def parse_line(line):
@@ -378,6 +382,9 @@ def parse_line(line):
         if k in INT_KEYS:
             rec[k] = _int(k, v)
         elif re.fullmatch(r"e\d+", k):
+            # the integrator's point I: a value of another form is the parser's refusal, never a ValueError
+            if v.count(",") != 1:
+                raise Refused("%s=%s is not <count>,<count>" % (k, v))
             a, b = v.split(",")
             rec[k] = (_int(k, a), _int(k, b))
         else:
@@ -387,6 +394,8 @@ def parse_line(line):
     if kind == "cal" and re.search(r"(^|\s)failed:", rest):
         rec["failed"] = 1
     if "pt" in rec:
+        if not re.fullmatch(r"-?\d+\.\d+\.\d+", rec["pt"]):
+            raise Refused("%s line: pt=%s is not <game>.<round>.<point>" % (kind, rec["pt"]))
         g, r, p = rec["pt"].split(".")
         rec["game"], rec["round"], rec["point"] = int(g), int(r), int(p)
     return rec
@@ -416,6 +425,8 @@ REQUIRED_KEYS = (
     ("mark", None, None, ("cyc", "p90", "n"), "b11_transitions"),
     # FtLedger.Install's one boot line (plugin/FtUpload.cs:368)
     ("ledger", None, None, ("log", "why", "types"), "ledger_state"),
+    # ruling R6-A3.11.151 (3): the attach line (FtAttach.Report), the ATTACH guard's
+    ("attach", None, None, ("n", "of", "missing", "names"), "attach_faults"),
     ("settled", None, None, ("g", "freq", "f_hat"),
      "complete, _fhat, d_up, t_ref, vr1, vr9, f18, e_c, match_power, vr2, menu_check, _freq1"),
     ("census", None, None, ("g", "entry", "shape", "on", "guarded"), "complete, d_up, vr5_records, vr5_points, vr2"),
@@ -431,7 +442,11 @@ REQUIRED_KEYS = (
     ("heavy", None, None, ("op", "at_call", "edge", "off", "live"), "b3"),
     ("offthread", None, None, ("span_off", "hash_t0", "hash_t1"), "b3, report"),
     ("plant", None, None, ("c_plant",), "e_c, match_power, e_key"),
-    ("a3", None, None, ("g", "reads_win"), "proof_records, a3"),
+    # the reference build prints 'a3 g=<g> ref=NA rows=0' (no row is measured there) and no reads_win; read() admits
+    # that form in a reference-marked log only (the integrator's point J), and refuses it in any other log as lacking
+    # reads_win, as before
+    ("a3", None, None, ("g",), "proof_records, a3"),
+    ("a3", "not ref=NA", lambda r: r.get("ref") != "NA", ("reads_win",), "proof_records, a3"),
     ("answer_replay", None, None, ("g",), "f18"),       # Codex PARSER-FIX-R1 HIGH 1: f18 keys every replay by g
     ("answer_replay", "result=settled", lambda r: r.get("result") == "settled", ("ticks",), "f18"),
     ("between", "after=ON", lambda r: r.get("after") == "ON", ("ticks",), "between_after"),
@@ -452,17 +467,33 @@ def lacks_keys(r):
 def read(text, src="input"):
     """The [FRAME-TIME] records of a log, each tested against REQUIRED_KEYS as it is read; src names the input in a
     RecordRefused (its 1-based line number is the line's in text). A withheld line of a read class refuses the whole
-    input first (refuse_withheld)."""
+    input first (refuse_withheld). The reference build's a3 form ('a3 g=<g> ref=NA ...', no reads_win) is admitted only
+    in a log that build_marker reads as a reference (exactly one FrameTimeRef marker and no FrameTime one); in any other
+    log it is refused as lacking reads_win (the integrator's point J). A line whose form cannot be read is refused by
+    parse_line (Refused), never a traceback (point I)."""
     refuse_withheld(text, src)
-    recs = []
+    recs, ref_log = [], None
     for n, ln in enumerate(text.splitlines(), 1):
         r = parse_line(ln)
         if r is not None:
             gone = lacks_keys(r)
+            if not gone and r["kind"] == "a3" and r.get("ref") == "NA":
+                if ref_log is None:
+                    ref_log = reference_marked(text)
+                gone = [] if ref_log else ["reads_win"]
             if gone:
                 raise RecordRefused(r["kind"], src, n, gone)
             recs.append(r)
     return recs
+
+
+def reference_marked(text):
+    """True when build_marker reads text as a reference input (one FrameTimeRef marker, no FrameTime one)."""
+    try:
+        build_marker(text, "reference", "text")
+    except MarkerRefused:
+        return False
+    return True
 
 
 # ----------------------------------------------------------------------------- verdicts
@@ -652,6 +683,12 @@ RECORDS = {
     # the integrator's follow-up to ruling .149, A: the writer ledger's disk-log tap (FtLedger.Install)
     "ledger": "ledger_state(): exactly one 'ledger log= why= types=' per log, log=1 and types= the parser's writer "
               "types (sitting_v withholds; sitting C reports it beside R-WORK)",
+    # ruling R6-A3.11.151 (3): the patch classes' attachment, read from Harmony's patch table (FtAttach.Report)
+    "attach": "attach_faults() via the validity set's ATTACH: exactly one 'attach n= of= missing= names=' per boot, n "
+              "= of, missing=none, every entry got = want > 0, the names the parser's list in ordinal order (sitting V "
+              "withholds; sitting C has no cross-check; --controls and read_reference refuse)",
+    "attach_failed": "event: 'attach report failed: <message>' (a SUBKINDS line of the emitted kind attach) fails "
+                     "ATTACH by its presence",
     "a3zero": "proof_records(): one per measured game for a zero row proved by probe:a3zero (none today)",
     "plant": "e_c(): exactly one",
     "refusals": "records_missing(): one after the last game; vr6_build reads it",
@@ -720,7 +757,7 @@ EMITTED_UNREAD = {
     "steam": "SteamAuth's 'steam ticket withheld' trace; FtRoute's refusals reach VR6 through the refusals line",
     "FT": "the FT-GATE and FT-ROOM traces; _LINE does not match them (the hyphen); their two failure lines are "
           "RAW_FAILURES, read as fixed texts in the raw lines, and the FT-GATE patched line is read from the raw text "
-          "by the validity set's 'room gate' row (_gate_row; the follow-up to ruling .149, B)",
+          "by the validity set's ATTACH guard (its room gate part, attach_gate_faults; ruling R6-A3.11.151 (3), F17)",
     # ruling R6-A3.11.149 (6) 9 and 10: the merged tip's other boot traces. Each form is known to unknown_forms (FORMS)
     "alloc_init": "FtAlloc.Init's outcome (why=ok, sha, code or failed:<type>); the alloc boot line's pin= prints ok "
                   "exactly when it is ok, and boot_controls judges that line",
@@ -761,6 +798,11 @@ def _msg(words):
 
 
 _I, _N, _INA = r"-?\d+", r"\d+", r"-?\d+|NA"
+# ruling R6-A3.11.151 (3): the attach line's printed names are letters, digits and the underscore (FtAttach.NameOf)
+ATTACH_NAME = r"[A-Za-z0-9_]+"
+ATTACH_MISSING = r"none|%s(?:,%s)*" % (ATTACH_NAME, ATTACH_NAME)
+ATTACH_ENTRY = r"%s:\d+/\d+" % ATTACH_NAME
+ATTACH_NAMES = r"%s(?:,%s)*" % (ATTACH_ENTRY, ATTACH_ENTRY)
 COUNTER_LINE_KEYS = ("g", "frames", "missing_end", "cycle_failures", "span_depth_violations", "photon_offmain",
                      "span_leave_mismatch")
 _CAL_FAILED = r"cal i=-?\d+(?: [^\s=]+=\S*)* failed: .*"
@@ -783,6 +825,10 @@ FORMS = (
      CENSUS_SUMMARY_KEYS),
     ("mark cost cyc=", _kv("mark cost", ("cyc", "p90", "n"), {"cyc": _I, "p90": _I, "n": _I}), ("cyc", "p90", "n")),
     ("ledger log=", _kv("ledger", ("log", "why", "types"), {"log": "0|1", "types": r"[\w,]*"}), ("log", "why", "types")),
+    ("attach n=", _kv("attach", ("n", "of", "missing", "names"),
+                      {"n": _N, "of": _N, "missing": ATTACH_MISSING, "names": ATTACH_NAMES}),
+     ("n", "of", "missing", "names")),
+    ("attach report failed: ", _msg("attach report failed:"), None),
     ("clock installed freq=", _kv("clock installed", ("freq", "hires", "cycles"), {"freq": _N, "hires": "0|1",
                                                                                    "cycles": "0|1"}),
      ("freq", "hires", "cycles")),
@@ -799,6 +845,10 @@ FORMS = (
     ("cal i=-1 why=patches kind=entries built=1 own_owner=", _star("cal"), None),
     ("cal i=-1 why=patches kind=entries reference=1 built=0", _star("cal"), None),
     ("cal i=-1 why=patches kind=entries failed: ", _CAL_FAILED, None),
+    # FtCalib.Run's entries step failing (plugin/FtCalib.cs:126): the word 'entries' carries no '=', so _CAL_FAILED does
+    # not hold it (the integrator's point H). parse_line marks it failed with kind=disp, so VR2 already fails the
+    # game's calibration run that prints it ('carries failure warnings for disp') and B1 is WITHHELD
+    ("cal i=", r"cal i=-?\d+ kind=disp entries failed: .*", None),
     ("census g=", _star("census"), None), ("disarmed input=", _star("disarmed"), None),
     ("flushed g=", _star("flushed"), None), ("heavy g=", _star("heavy"), None),
     ("menu seg=", _star("menu"), None), ("menu_armed segments=", _star("menu_armed"), None),
@@ -1358,7 +1408,10 @@ def vr6_build(recs):
     """VR6's build half (FORMAT-M-PLAN.md V2 part b): the latest refusals line (why=quit when present, else the
     last game over) gives every refused what:route pair's count and every allowed route's send count; a route that
     was both refused and sent fails, and any disarmed line makes the sitting INVALID. The file listings before and
-    after are the runner's half. Returns (ok, reasons, {pair: count}, [disarm inputs])."""
+    after are the runner's half. The dispatched and sent counts come from one patch class, FtRoute_SendPatch: when it
+    never attached both stay at zero and agree, so this comparison rests on the validity set's ATTACH guard, which
+    requires that class's entry fully attached (ruling R6-A3.11.151 (2) class A, F2). Returns (ok, reasons, {pair:
+    count}, [disarm inputs])."""
     lines = [r for r in recs if r["kind"] == "refusals"]
     dis = disarms(recs)
     if not lines:
@@ -1648,11 +1701,32 @@ def vr5_records(recs, first_game=0, last_game=None):
     return not bad, bad
 
 
+# ruling R6-A3.11.151 (2) class B: the point line's VR5 counters at window granularity (plugin/FtFrames.cs:214-215,
+# printed at :274; attributed under the gate of the frame that closed, FtClock.OnStart calling OnFrameClosed before the
+# boundary moves the gate): off_g and off_gn, gated span ticks and calls while the window's gate was off; off_on,
+# census calls that ran their body while it was off; on_guarded, guarded returns while it was open. Each is 0 when the
+# gate does what it says.
+GATE_COUNTERS = ("off_g", "off_gn", "off_on", "on_guarded")
+
+
+def gate_counter_faults(recs, valid):
+    """The point lines (of valid, a set of pt, or every point line when None) whose GATE_COUNTERS are not printed or
+    not 0, as reasons naming each counter and its points."""
+    why = []
+    for k in GATE_COUNTERS:
+        bad = [q["pt"] for q in recs if q["kind"] == "p" and (valid is None or q["pt"] in valid) and q.get(k, 1) != 0]
+        if bad:
+            why.append("%s above 0 or not printed at %s%s" % (k, ", ".join(bad[:4]),
+                                                               " and %d more" % (len(bad) - 4) if len(bad) > 4 else ""))
+    return why
+
+
 def vr5_points(recs):
     """VR5's rules: every entry that ran in ON live frames shows guarded returns in OFF live frames, per game; and
     per point, a gated point has no gated span time, no gated span call and no census call with the gate clear,
-    an ungated point no guarded return."""
-    bad = []
+    an ungated point no guarded return. In a V6 log (one carrying B11 window lines) every point line also carries
+    the same rules at window granularity (gate_counter_faults)."""
+    bad = gate_counter_faults(recs, None) if any(b11_line(r) for r in recs) else []
     for r in recs:
         if r["kind"] == "census" and r["on"] > 0 and r["guarded"] == 0:
             bad.append("g=%d %s" % (r["g"], r["entry"]))
@@ -2374,7 +2448,12 @@ def _wa(v):
 def window_faults(w):
     """One B11 window's own invariants (SHARED.md): the partition, C° and R by tenth, the binning, the unit of its
     position, its ordinal, the token ledger (method-v54.md:43), and V6's fields. A window with G unavailable (cG=NA)
-    is checked with cG left out: its GC execution sits inside cE and its q is C - W - P."""
+    is checked with cG left out: its GC execution sits inside cE and its q is C - W - P. A record lacking a required
+    key (read() refuses one as it is read; a caller that hands parse_line's record here directly) gives its one fault,
+    naming the keys, never a KeyError (the integrator's point I)."""
+    gone = lacks_keys(w) if b11_line(w) else ["the B11 fields"]
+    if gone:
+        return ["window %s.%s: lacks %s" % (w.get("pt"), w.get("wi"), ", ".join(gone))]
     tag = "window %s.%s" % (w["pt"], w["wi"])
     f = []
     if w["unit"] != UNIT_OF_POS.get(w["pos"]):
@@ -2844,10 +2923,10 @@ def b11_estimate(recs, first_game=1, beta_us=BETA_US, exposure=None):
     """The corrected contrast's bound and its parts (rulings .138 (3), .139 (1)): the contrast B, both arms' carryover
     c_ON and c_OFF over both strata, the charge max(0, the upper bound of (c_ON + c_OFF)/2) under the joint covariance
     with the contrast, R-CARRY's falsifier d_a10, r_U and D_common for R-COMMON, the per-point exposure diagnostics.
-    exposure is the exposure obligation's hook (method-v52.md:20-28, method-v53.md:37, ruling .140 (3)): None while
-    neither frame-indexed exposure-equivalence evidence nor a justified cost-weighted counterfactual discrepancy
-    envelope is supplied (the verdict is then WITHHELD), else (upper bound in us per frame, its source), whose upper
-    bound enters U. The parser constructs no envelope."""
+    exposure is an exposure envelope, (upper bound in us per frame, its source), checked for its form and returned as
+    ex and ex_src, or None (the default: the parser constructs no envelope). Under V6 (SHARED.md:235, ruling
+    R6-A3.11.151 (2) class D, F15) the exposure obligation left the verdict with B_U's terms: the envelope enters no
+    figure of U or of the cross-check, and its absence withholds nothing."""
     T = b11_terms(recs, first_game, beta_us)
     N, Ng = T["N"], T["Ng"]
 
@@ -2912,9 +2991,14 @@ def t_ref_windows(recs, first_game=1):
 def read_reference(text, src="reference"):
     """R-COMMON's reference record set (the integrator, 11 Nov): a FrameTimeRef build's log (no census, no disp lines,
     A3 rows in a reference form), recognised by its marker only. Only the kinds the comparator reads (w, settled) are
-    taken, each tested against REQUIRED_KEYS."""
+    taken, each tested against REQUIRED_KEYS. ATTACH (ruling R6-A3.11.151 (3)) holds for it against the reference
+    build's list (ATTACH_CLASSES_REF), or the input is refused by name: a reference whose patches did not attach is no
+    reference."""
     refuse_withheld(text, src)
     build_marker(text, "reference", src)
+    bad = attach_guard(text, ATTACH_CLASSES_REF)
+    if bad:
+        raise Refused("ATTACH: the reference log %s: %s" % (src, _reasons(bad)))
     recs = []
     for n, ln in enumerate(text.splitlines(), 1):
         r = parse_line(ln)
@@ -2989,11 +3073,19 @@ def own_split_faults(recs, T):
             if q["kind"] == "p" and q["pt"] in T["valid"] and q.get("own_split", 1) != 0]
 
 
+# SHARED.md (md5 3ab20794): recv_offmain, ledger_cycle_miss and sock_main; ruling R6-A3.11.151 (2) class B, F3:
+# span_class_overflow (plugin/FtFrames.cs:275, counted at FtSpan.cs:228: a scope past the class stack's depth whose class
+# is not pushed, so its cycles and bytes land on the class below it)
+P_LINE_FAULTS = ("recv_offmain", "ledger_cycle_miss", "sock_main", "span_class_overflow")
+
+
 def p_line_faults(recs, valid):
-    """SHARED.md (md5 3ab20794): recv_offmain, ledger_cycle_miss and sock_main (cycles both in C and in sock) must be
-    printed and 0 in every point of valid (a set of pt); sock_thr is reported only. Returns the reasons."""
+    """P_LINE_FAULTS must be printed and 0 in every point of valid (a set of pt): recv_offmain, ledger_cycle_miss and
+    sock_main (cycles both in C and in sock; SHARED.md md5 3ab20794) and span_class_overflow (ruling R6-A3.11.151, F3);
+    sock_thr is reported only. The socket counters are zero also when the socket hook never attached; they rest on
+    the validity set's ATTACH guard (its FtSockPatch entry; ruling .151 (2) class A, F1). Returns the reasons."""
     why = []
-    for k in ("recv_offmain", "ledger_cycle_miss", "sock_main"):
+    for k in P_LINE_FAULTS:
         bad = [q["pt"] for q in recs if q["kind"] == "p" and q["pt"] in valid and q.get(k, 1) != 0]
         if bad:
             why.append("%s nonzero or not printed at %s" % (k, ", ".join(bad)))
@@ -3051,9 +3143,11 @@ def b11_report(recs, ref_recs=None, first_game=1):
         out.append("B11 writers: cycles print NA for %s (reported: the writers left the contrast's verdict with B_U; "
                    "in sitting V an NA withholds B1)" % ", ".join(T["wu_na"]))
     if T["gna"]:
-        out.append("B11 GC: G unavailable (cG=NA) in %d windows (%s): their identity is checked without cG, their C° "
-                   "keeps their GC, and G_U takes the all-GC fallback (method-v52.md:103) for the estimate"
-                   % (len(T["gna"]), ", ".join("%s.%d" % (w["pt"], w["wi"]) for w in T["gna"])))
+        # ruling R6-A3.11.151 (2) class D, F15: V6 retired G_U (SHARED.md:235, B_U's terms leave the verdict)
+        out.append("B11 GC: cG prints NA in %d windows (%s): their identity is checked without cG and their C° keeps "
+                   "their GC, which the contrast then carries; V6 has no G_U (B_U's terms left the verdict, SHARED.md "
+                   "V6), and the bound's GC term is sitting V's G_cap" % (len(T["gna"]), ", ".join(
+                       "%s.%d" % (w["pt"], w["wi"]) for w in T["gna"])))
     else:
         out.append("B11 GC: G available in every window")
     b, hb, hbl = e["B"]
@@ -3120,6 +3214,10 @@ FORCE_V = "ON"                            # sitting V: force=ON on every settled
 MIN_GAMES_V = 6                           # "fewer than 6 games remain" withholds B1
 K_TOL = 0.05                              # K2 and K3: each spin reads within 5 percent in its own class
 K1_ABOVE = 4096                           # K1: the planted median from the bytes asked to 4096 above
+# K2 (SHARED.md:223, ruling R6-A3.11.151 (2) class C): a spin of 2000 us read within 5 percent, 1900 to 2100 us; K3
+# spins the same constant (FtSpan.PlantUs = 2000, plugin/FtSpan.cs:324, spun at FtPhoton.cs:111-121)
+K_PLANT_US = 2000
+_K_BAND = "%d to %d" % (K_PLANT_US * (1 - K_TOL), K_PLANT_US * (1 + K_TOL))
 # the four PhotonPeer entries P1 scopes as class X (Photon3Unity3D 4.1.7.0); the patch line names each attached patch
 #: ruling R6-A3.11.149 (1) and (6) 4: the patch line names ten methods, each as FtPhoton.ReportPatched prints it
 # (DeclaringType.Name + "." + Name, plugin/FtPhoton.cs:93): PhotonPeer's four (class X) and LoadBalancingClient's six
@@ -3207,15 +3305,19 @@ def boot_controls(recs):
         out["K2"] = (False, why)
     else:
         ask, got = _num(s.get("asked", "")), _num(s.get("got", ""))
-        out["K2"] = (_within(got, ask), "asked %s us, class S read %s us (within 5 percent)" % (ask, got))
+        # ruling R6-A3.11.151 (2) class C, F5: the spin is SHARED.md's 2000 us, never the log's own asked=
+        out["K2"] = (ask == K_PLANT_US and _within(got, K_PLANT_US),
+                     "asked %s us (needs %d), class S read %s us (needs %s)" % (ask, K_PLANT_US, got, _K_BAND))
     t, why = one("nest", "plant")
     if t is None:
         out["K3"] = (False, why)
     else:
         ask = _num(t.get("asked", ""))
         rd = dict((c, _num(t.get(c, ""))) for c in ("x", "e", "p"))
-        out["K3"] = (all(_within(v, ask) for v in rd.values()),
-                     "asked %s us, read x %s, e %s, p %s us (each within 5 percent)" % (ask, rd["x"], rd["e"], rd["p"]))
+        # F5's sibling: K3 spins the same constant (FtSpan.PlantUs, plugin/FtPhoton.cs:111-121)
+        out["K3"] = (ask == K_PLANT_US and all(_within(v, K_PLANT_US) for v in rd.values()),
+                     "asked %s us (needs %d), read x %s, e %s, p %s us (each needs %s)"
+                     % (ask, K_PLANT_US, rd["x"], rd["e"], rd["p"], _K_BAND))
     ph, why = one("photon", "patches")
     if ph is None:
         out["patches"] = (False, why)
@@ -3265,33 +3367,92 @@ def refuse_k_mutant(recs, src):
                       % (src, "prints k_mutant=%s" % km if km is not None else "carries %d controls lines" % n))
 
 
-def controls_proof(text, src="boot"):
-    """A control run's boot (P1's k_mutant): K1 to K3 are read from the numbers the boot prints (boot_controls), never
-    from k_mutant's name. The proof holds when the controls read out of range are exactly the one k_mutant names (k1,
-    k2 or k3), or none under k_mutant=none; and (ruling R6-A3.11.149 (8)) every [FRAME-TIME] line of the boot is a
-    form the parser knows (unknown_forms: each is listed, and the count must be 0), and no line holds "Failed to
-    patch" (a patch that did not attach, lesson #83). Returns (ok, lines)."""
+# ruling R6-A3.11.151 (2) class C: --controls names the boot's profile, in ft_arm_text.sh's words, and the k_mutant
+# that profile arms
+CONTROL_PROFILES = {"boot": "none", "boot-k1": "k1", "boot-k2": "k2", "boot-k3": "k3"}
+CONTROLS_USAGE = ("usage: ft_parse.py --controls <profile>=<boot log>, the profile one of %s (ft_arm_text.sh's words)"
+                  % ", ".join(CONTROL_PROFILES))
+# every ruled line of a control boot (ruling R6-A3.11.147 (5)'s five boot lines; the controls line; the census summary;
+# the attach line of .151 (3)), as (the FORMS lead whose pattern it must fullmatch, its kind, its head or None). Each
+# must be present exactly once and in its form before any number is judged
+CONTROL_LINES = (("alloc pin=", "alloc", None), ("scope plant asked=", "scope", "plant"),
+                 ("nest plant asked=", "nest", "plant"), ("photon patches n=", "photon", "patches"),
+                 ("scope census entries=", "scope", "census"), ("controls k_mutant=", "controls", None),
+                 ("census registered=", "census_summary", None), ("attach n=", "attach", None))
+
+
+def control_records(text):
+    """CONTROL_LINES over a boot's text: the reasons a ruled line is absent, repeated or not in its form."""
+    pat = dict((lead, re.compile(p)) for lead, p, _ in FORMS)
+    seen = dict((lead, []) for lead, _, _ in CONTROL_LINES)
+    for ln in text.splitlines():
+        r = parse_line(ln)
+        if r is None:
+            continue
+        for lead, kind, head in CONTROL_LINES:
+            if r["kind"] == kind and (head is None or r["head"] == head):
+                seen[lead].append(ln[ln.find("[FRAME-TIME] ") + len("[FRAME-TIME] "):].rstrip())
+    bad = []
+    for lead, kind, head in CONTROL_LINES:
+        ls = seen[lead]
+        if len(ls) != 1:
+            bad.append("%d '%s' lines (needs exactly 1)" % (len(ls), lead))
+        elif pat[lead].fullmatch(ls[0]) is None:
+            bad.append("the '%s' line is not in its form: %s" % (lead, ls[0]))
+    return bad
+
+
+def controls_proof(text, profile, src="boot"):
+    """A control run's boot read as the named profile (ruling R6-A3.11.151 (2) class C; P1's k_mutant). Refused
+    (Refused, 'CONTROLS-REFUSED: ...') before any number is judged when: the profile is not one of CONTROL_PROFILES; the
+    boot's k_mutant is not the profile's (boot reads none); a ruled line (CONTROL_LINES) is absent, repeated or not in
+    its form; the scope plant or the nest plant asked another spin than K_PLANT_US; ATTACH fails (.151 (3)); the census
+    summary fails; or a settled line prints problems= (the arm file not read as written). Then K1 to K3 are read from
+    the numbers the boot prints (boot_controls), never from k_mutant's name: the proof holds when the controls read out
+    of range are exactly the one the profile's k_mutant names (none for boot), R-SCOPE's patches and census lines are
+    in range, and (ruling R6-A3.11.149 (8)) every [FRAME-TIME] line of the boot is a form the parser knows
+    (unknown_forms: each is listed, and the count must be 0). Returns (ok, lines)."""
+    if profile not in CONTROL_PROFILES:
+        raise Refused("CONTROLS-REFUSED: '%s' is not a profile; %s" % (profile, CONTROLS_USAGE))
     refuse_withheld(text, src)
     recs = read(text, src)
     km, n = k_mutant(recs)
+    want_km = CONTROL_PROFILES[profile]
+    if km != want_km:
+        raise Refused("CONTROLS-REFUSED: the boot log %s %s; the profile %s's boot prints k_mutant=%s"
+                      % (src, "prints k_mutant=%s" % km if km is not None else "carries %d controls lines" % n,
+                         profile, want_km))
+    bad = control_records(text)
+    for kind, head, name in (("scope", "plant", "the scope plant"), ("nest", "plant", "the nest plant")):
+        asked = [_num(r.get("asked", "")) for r in recs if r["kind"] == kind and r["head"] == head]
+        if len(asked) == 1 and asked[0] != K_PLANT_US:
+            bad.append("%s asked=%s (the control spins %d us)" % (name, asked[0], K_PLANT_US))
+    bad += ["ATTACH: " + w for w in attach_guard(text)]
+    bad += ["census summary: " + w for w in census_summary(recs)[2]]
+    bad += arm_problems(recs)
+    if bad:
+        raise Refused("CONTROLS-REFUSED: the boot log %s (profile %s): %s" % (src, profile, "; ".join(bad)))
     bc = boot_controls(recs)
-    out = ["CONTROLS %s %s: %s" % (k, "in range" if bc[k][0] else "OUT OF RANGE", bc[k][1]) for k in ("K1", "K2", "K3")]
+    at = [r for r in recs if r["kind"] == "attach"][0]
+    out = ["CONTROLS profile %s: k_mutant=%s, the profile's; every ruled line once and in its form (%s)"
+           % (profile, km, ", ".join(lead.rstrip("=") for lead, _, _ in CONTROL_LINES)),
+           "CONTROLS ATTACH: n=%s of=%s missing=none, no 'Failed to patch' line, the room gate attached"
+           % (at["n"], at["of"])]
+    out += ["CONTROLS %s %s: %s" % (k, "in range" if bc[k][0] else "OUT OF RANGE", bc[k][1]) for k in ("K1", "K2", "K3")]
+    out += ["CONTROLS R-SCOPE %s %s: %s" % (k, "in range" if bc[k][0] else "OUT OF RANGE", bc[k][1])
+            for k in ("patches", "census")]
     unk = unknown_forms(text)
     out += ["CONTROLS UNKNOWN FORM line %d: %s" % (i, pay) for i, pay in unk]
     out.append("CONTROLS unknown [FRAME-TIME] line forms: %d (needs 0)" % len(unk))
-    ftp = [i for i, ln in enumerate(text.splitlines(), 1) if "Failed to patch" in ln]
-    out.append("CONTROLS 'Failed to patch': %s" % ("absent" if not ftp else "PRESENT at lines %s"
-                                                   % ", ".join(map(str, ftp[:8]))))
-    if km != "none" and km not in K_MUTANTS:
-        return False, out + ["CONTROLS PROOF FAIL: %s" % ("k_mutant=%s is not none, k1, k2 or k3" % km if km is not None
-                                                          else "%d controls lines (needs exactly 1)" % n)]
     want = set() if km == "none" else {K_MUTANTS[km]}
     got = set(k for k in ("K1", "K2", "K3") if not bc[k][0])
-    ok = got == want
-    ok = ok and not unk and not ftp
-    out.append("CONTROLS PROOF %s: k_mutant=%s; out of range %s (needs exactly %s); %d unknown line forms; 'Failed to "
-               "patch' %s" % ("PASS" if ok else "FAIL", km, ", ".join(sorted(got)) or "none",
-                              ", ".join(sorted(want)) or "none", len(unk), "absent" if not ftp else "present"))
+    scope = [k for k in ("patches", "census") if not bc[k][0]]
+    ok = got == want and not scope and not unk
+    out.append("CONTROLS PROOF %s: profile %s, k_mutant=%s; out of range %s (needs exactly %s); R-SCOPE's patches and "
+               "census %s; %d unknown line forms" % ("PASS" if ok else "FAIL", profile, km, ", ".join(sorted(got)) or "none",
+                                                    ", ".join(sorted(want)) or "none",
+                                                    "out of range: %s" % ", ".join(scope) if scope else "in range",
+                                                    len(unk)))
     return ok, out
 
 
@@ -3364,8 +3525,9 @@ FHAT_PAIR = 0.01            # ruling R6-A3.11.149 (6) 6: a seat's sitting-V and 
 # ruling R6-A3.11.149 (5)(a) and (d): the validity set (the guards that need no second arm) and the two-arm guards
 VALIDITY = ("complete sitting", "census summary", "VR1", "VR2 instrument", "VR5 records", "VR6 build", "F18",
             "counters line", "line invariants", "p-line faults", "own_split", "build marker",
-            # the integrator's follow-up to ruling .149, B: the instruments the emitter attaches by Harmony patches
-            "patches attached", "room gate")
+            # ruling R6-A3.11.151 (3): every patch class of the measuring build attached (the attach line), no 'Failed
+            # to patch' line and the room gate attached; it folds the follow-up to .149, B's two rows
+            "ATTACH")
 TWO_ARM = ("VR2 e_C_lo", "VR3", "VR4", "VR5 OFF-window rule", "VR7", "VR8 predecessor", "VR9", "R-CARRY", "R-COMMON")
 # the follow-up to ruling .149, C: a two-arm guard's word. NOT TESTED: its input is absent (R-COMMON without a
 # reference log); a guard that cannot be computed although its input is present is FAIL with its reason. FAIL and
@@ -3376,6 +3538,85 @@ FAILED_PATCH = "Failed to patch"
 # FtRoomGate.ReportPatched's line (plugin/FtRoomGate.cs:109), counted from Harmony's own patch table
 GATE_LINE = re.compile(r"\[FRAME-TIME\] FT-GATE patched (\d+) entry points expected=(\d+) excluded=(\S*)"
                        r"(?: missing=(.*))?$")
+# ruling R6-A3.11.151 (3): the patch classes of the measuring build, one attach entry each, in ordinal order of the
+# name: every class with a class-level [HarmonyPatch] compiled only when SCR_FRAMETIME is defined (the test holds this
+# list equal to the source's set). ATTACH_CLASSES_REF is the reference build's, from P1b's hand-back (commit aa6d99e9,
+# via the integrator, 12 Nov): the same without FtSockPatch, which is compiled only without SCR_FT_NOCOLLECTORS
+# (plugin/FtUpload.cs:420); its line prints n=9 of=9
+ATTACH_CLASSES = ("FtChurnFreezePatch", "FtDrive_InputPatch", "FtDrive_PickPatch", "FtPhotonEPatch", "FtPhotonXPatch",
+                  "FtRoomGateNchRoutinePatch", "FtRoomGateNchVoidPatch", "FtRoomGatePunPatch", "FtRoute_SendPatch",
+                  "FtSockPatch")
+ATTACH_CLASSES_REF = tuple(c for c in ATTACH_CLASSES if c != "FtSockPatch")
+_ATTACH_PAYLOAD = re.compile(r"attach n=(\d+) of=(\d+) missing=(%s) names=(%s)" % (ATTACH_MISSING, ATTACH_NAMES))
+
+
+def attach_faults(text, classes=ATTACH_CLASSES):
+    """The attach line's part of ATTACH (ruling R6-A3.11.151 (3)) over one boot's log text, against classes (the
+    build's list): exactly one '[FRAME-TIME] attach n= of= missing= names=' line in its form, each entry Name:got/want
+    with got equal to want and want above 0, the entries' names exactly classes in ordinal order, each once, of the
+    entries' count, n the count of attached entries and equal to of, missing=none; and no 'attach report failed'
+    line. Returns the reasons, each naming the part and the class."""
+    bad, lines = [], []
+    for i, ln in enumerate(text.splitlines(), 1):
+        r = parse_line(ln)
+        if r is None:
+            continue
+        if r["kind"] == "attach_failed":
+            bad.append("attach report failed (line %d): %s" % (i, ln[ln.find("[FRAME-TIME]") + len("[FRAME-TIME] "):]
+                                                                .rstrip()))
+        elif r["kind"] == "attach":
+            lines.append((i, ln[ln.find("[FRAME-TIME]") + len("[FRAME-TIME] "):].rstrip(), r))
+    if len(lines) != 1:
+        return ["%d 'attach' lines (needs exactly 1 per boot): the patch classes' attachment is not read"
+                % len(lines)] + bad
+    i, pay, r = lines[0]
+    if _ATTACH_PAYLOAD.fullmatch(pay) is None:
+        return ["the attach line is not in its form (line %d): %s" % (i, pay)] + bad
+    n, of, missing = int(r["n"]), int(r["of"]), str(r["missing"])
+    ents = [re.fullmatch(r"(%s):(\d+)/(\d+)" % ATTACH_NAME, x).groups() for x in str(r["names"]).split(",")]
+    names = [x for x, _, _ in ents]
+    for x, got, want in ents:
+        if int(want) == 0:
+            bad.append("attach %s %s/%s: want 0, no patch of the class counted" % (x, got, want))
+        elif int(got) != int(want):
+            bad.append("attach %s %s/%s: not every patch of the class attached" % (x, got, want))
+    gone = [x for x in classes if x not in names]
+    alien = [x for x in names if x not in classes]
+    dup = sorted(set(x for x in names if names.count(x) > 1))
+    if gone:
+        bad.append("attach names lack %s (a patch class of the build)" % ",".join(gone))
+    if alien:
+        bad.append("attach names %s, not a patch class of the build" % ",".join(alien))
+    if dup:
+        bad.append("attach names %s twice" % ",".join(dup))
+    if names != sorted(names):
+        bad.append("attach entries not in ordinal order of the name")
+    if of != len(ents):
+        bad.append("attach of=%d for %d entries" % (of, len(ents)))
+    ok = sum(1 for _, got, want in ents if int(want) > 0 and int(got) == int(want))
+    if n != ok:
+        bad.append("attach n=%d for %d entries attached" % (n, ok))
+    if n != of:
+        bad.append("attach n=%d of=%d: not every patch class attached" % (n, of))
+    if missing != "none":
+        bad.append("attach missing=%s" % missing)
+    return bad
+
+
+def attach_guard(text, classes=ATTACH_CLASSES):
+    """ATTACH over one boot's log text (ruling R6-A3.11.151 (3)): the attach line's part (attach_faults, against
+    classes), the 'Failed to patch' part (attach_patch_faults) and the room gate's part (attach_gate_faults, F17).
+    Returns the reasons."""
+    return attach_faults(text, classes) + attach_patch_faults(text) + attach_gate_faults(text)
+
+
+def _attach_row(text, peer_text):
+    """The validity set's ATTACH row: this seat's log and the peer seat's (its reasons marked 'peer seat: '), each a
+    measuring build's boot (ATTACH_CLASSES)."""
+    bad = attach_guard(text)
+    if peer_text is not None:
+        bad += ["peer seat: " + w for w in attach_guard(peer_text)]
+    return _ok(bad)
 
 
 def ledger_state(recs):
@@ -3391,8 +3632,8 @@ def ledger_state(recs):
         return False, ["%d 'ledger' lines (needs exactly 1): the disk-log tap's state is not read" % len(ls)], (
             "not read (%d ledger lines)" % len(ls))
     r = ls[0]
-    log, why = str(r.get("log")), str(r.get("why"))
-    types = [t for t in str(r.get("types", "")).split(",") if t]
+    log, why = str(r["log"]), str(r["why"])               # REQUIRED_KEYS: read() refuses a line without them
+    types = [t for t in str(r["types"]).split(",") if t]
     bad = []
     if log != "1":
         bad.append("ledger log=%s why=%s: the disk log is not tapped, so the log type's writes reach no term of U"
@@ -3407,43 +3648,36 @@ def ledger_state(recs):
     return not bad, bad, "log=%s why=%s types=%s" % (log, why, ",".join(types))
 
 
-def _patch_row(text, peer_text):
-    """The class rule over every instrument the emitter attaches by a Harmony patch class (the follow-up to ruling
-    .149, B: the sock hook, the route hook, the photon X and E patches, the room gate, the churn freeze, the
-    self-drive, the recv handlers' patches): neither seat's log holds a line with 'Failed to patch'. Plugin's patch
-    loop prints '[HARMONY] Failed to patch <class>: <message>' (plugin/Plugin.cs:1483) for a class that did not
-    attach; the laptop's slice exports that line as 'withheld Failed to patch <n>' (its message is free text), which
-    holds the same words. Both seats', as the failure events (lesson #83: attached, or never attached)."""
+def attach_patch_faults(text):
+    """ATTACH's 'Failed to patch' part over one boot's log text (ruling R6-A3.11.151 (3); first the follow-up to
+    ruling .149, B), for every patch class of the plugin, the measuring build's and the product's: no line holds
+    'Failed to patch'. Plugin's patch loop prints '[HARMONY] Failed to patch <class>: <message>' (plugin/Plugin.cs:
+    1483) for a class that did not attach; the laptop's slice exports that line as 'withheld Failed to patch <n>' (its
+    message is free text), which holds the same words (lesson #83: attached, or never attached). Returns the reasons,
+    each naming its line and the class."""
     bad = []
-    for who, t in (("", text), ("peer seat: ", peer_text)):
-        for i, ln in enumerate((t or "").splitlines(), 1):
-            if FAILED_PATCH in ln:
-                ln = ln.strip()
-                bad.append("%sline %d: %s" % (who, i, ln[ln.find("[HARMONY]"):] if "[HARMONY]" in ln else ln))
-    return _ok(bad)
+    for i, ln in enumerate(text.splitlines(), 1):
+        if FAILED_PATCH in ln:
+            ln = ln.strip()
+            bad.append("line %d: %s" % (i, ln[ln.find("[HARMONY]"):] if "[HARMONY]" in ln else ln))
+    return bad
 
 
-def _gate_row(text, peer_text):
-    """The room gate attached (the follow-up to ruling .149, B): each seat's log carries exactly one FT-GATE patched
-    line (GATE_LINE), its count equal to its expected count, which is above 0, and no missing= list; else the
-    sitting's isolation is not proven. Both seats', as the room gate's failure events."""
-    bad = []
-    for who, t in (("", text), ("peer seat: ", peer_text)):
-        if t is None:
-            continue
-        ls = [ln.rstrip() for ln in t.splitlines() if "[FRAME-TIME] FT-GATE patched " in ln]
-        if len(ls) != 1:
-            bad.append("%s%d 'FT-GATE patched' lines (needs exactly 1): the room gate's attachment is not read"
-                       % (who, len(ls)))
-            continue
-        m = GATE_LINE.search(ls[0])
-        if m is None:
-            bad.append("%sthe FT-GATE patched line is not in its form: %s" % (who, ls[0][ls[0].find("FT-GATE"):]))
-        elif m.group(1) != m.group(2) or int(m.group(2)) == 0 or m.group(4) is not None:
-            bad.append("%sFT-GATE patched %s entry points of %s expected%s: the room gate is not attached on every "
-                       "entry point" % (who, m.group(1), m.group(2), "; missing=%s" % m.group(4)
-                                        if m.group(4) is not None else ""))
-    return _ok(bad)
+def attach_gate_faults(text):
+    """ATTACH's room gate part over one boot's log text (ruling R6-A3.11.151 (3), F17; first the follow-up to ruling
+    .149, B): exactly one FT-GATE patched line (GATE_LINE, FtRoomGate.ReportPatched, plugin/FtRoomGate.cs:109-111), its
+    count equal to its expected count, which is above 0, and no missing= list; else the sitting's isolation is not
+    proven. Returns the reasons."""
+    ls = [ln.rstrip() for ln in text.splitlines() if "[FRAME-TIME] FT-GATE patched " in ln]
+    if len(ls) != 1:
+        return ["%d 'FT-GATE patched' lines (needs exactly 1): the room gate's attachment is not read" % len(ls)]
+    m = GATE_LINE.search(ls[0])
+    if m is None:
+        return ["the FT-GATE patched line is not in its form: %s" % ls[0][ls[0].find("FT-GATE"):]]
+    if m.group(1) != m.group(2) or int(m.group(2)) == 0 or m.group(4) is not None:
+        return ["FT-GATE patched %s entry points of %s expected%s: the room gate is not attached on every entry point"
+                % (m.group(1), m.group(2), "; missing=%s" % m.group(4) if m.group(4) is not None else "")]
+    return []
 
 
 def _ok(bad):
@@ -3467,12 +3701,21 @@ def _complete_row(recs, text, peer_recs, peer_text):
     """The complete sitting and the absent-record sweep (complete(), records_missing()), with this seat's failure
     events and fixed failure texts and the peer seat's, parsed and raw (as report() sweeps them since Codex
     PARSER-FIX-R1 HIGH 2: a failure event's meaning holds for both seats)."""
-    bad = complete(recs) + raw_failure_events(text)
+    bad = complete(recs) + raw_failure_events(text) + arm_problems(recs)
     if peer_recs is None:
         bad.append("peer seat: its records were not read, so its failure events were not swept")
     else:
-        bad += ["peer seat: " + w for w in failure_events(peer_recs) + raw_failure_events(peer_text or "")]
+        bad += ["peer seat: " + w for w in failure_events(peer_recs) + raw_failure_events(peer_text or "")
+                + arm_problems(peer_recs)]
     return _ok(bad)
+
+
+def arm_problems(recs):
+    """Ruling R6-A3.11.151 (2) class B: a settled line printing problems= (FtConfig.Load's list, plugin/FtConfig.cs:
+    49-76, printed at FtCalib.cs:409: a line of the arm file that did not parse, or a key that fell back to its default)
+    means the boot did not read the arm file as written. Returns one reason per such line."""
+    return ["settled g=%s problems=%s: the arm file was not read as written" % (r["g"], r["problems"])
+            for r in recs if r["kind"] == "settled" and "problems" in r]
 
 
 def _census_row(recs, peer_recs):
@@ -3520,8 +3763,9 @@ def validity_set(recs, text, peer_recs, peer_text, t_vr1, src, first_game=1, t_n
     as built); VR2's instrument half; VR5's records half; VR6's build half with both seats' disarm lines; F18; the
     counters line of every game 0 to 16 (span_leave_mismatch 0); every line invariant; the p-line faults and own_split
     over the points of the measured games, void rounds kept; the build marker (a failed one withholds here, naming its
-    word; report() still refuses it); and (the follow-up to ruling .149, B) every Harmony patch class attached and the
-    room gate attached, both seats' (_patch_row, _gate_row). Sitting V withholds B1 on any failed row (sitting_v); sitting C has no cross-check
+    word; report() still refuses it); and ATTACH (ruling R6-A3.11.151 (3)): every patch class of the measuring build
+    attached by the attach line, no 'Failed to patch' line and the room gate attached, both seats' (_attach_row).
+    Sitting V withholds B1 on any failed row (sitting_v); sitting C has no cross-check
     while any row fails (sitting_c). (5)(b)'s exception is empty: the one record the emitter writes only after OFF
     windows, the plant line (FtPlant.Fix, plugin/FtPlant.cs:35, called at plugin/FtFrames.cs:285-287 once a game's OFF
     frames reach a window), is not in the sweep (records_missing, complete); e_c, a two-arm guard, reads it. So sitting
@@ -3540,8 +3784,7 @@ def validity_set(recs, text, peer_recs, peer_text, t_vr1, src, first_game=1, t_n
     rows.append(("p-line faults",) + _guard(lambda: _ok(p_line_faults(recs, pts))))
     rows.append(("own_split",) + _guard(lambda: _own_split_row(recs, pts)))
     rows.append(("build marker",) + _guard(lambda: _marker_row(text, src)))
-    rows.append(("patches attached",) + _guard(lambda: _patch_row(text, peer_text)))
-    rows.append(("room gate",) + _guard(lambda: _gate_row(text, peer_text)))
+    rows.append(("ATTACH",) + _guard(lambda: _attach_row(text, peer_text)))
     return rows
 
 
@@ -3674,7 +3917,7 @@ def _b3(recs):
     """B3 on one sitting's log: (True, []) holds, (False, reasons) violated, (None, [reason]) not computable."""
     try:
         ok, why, ops = b3(recs)
-    except (Refused, KeyError) as x:
+    except NOT_COMPUTABLE as x:
         return None, ["not computable: %s" % x]
     return ok, why
 
@@ -3728,7 +3971,7 @@ def _zero(recs):
 def _pct(u, t):
     """U_hi as a percent of T_ref, reported: 'not computable' when T_ref is not above 0 (the class reads T_ref
     itself)."""
-    return "%.3f percent" % (100 * u / t) if t > 0 else "not computable (T_ref %.1f us is not above 0)" % t
+    return "%.3f percent" % (100 * u / t) if t > 0 else "not computable: T_ref %.1f us is not above 0" % t
 
 
 def sitting_v(recs, text, peer_recs, peer_text, src, first_game=1):
@@ -3769,6 +4012,14 @@ def sitting_v(recs, text, peer_recs, peer_text, src, first_game=1):
     back = [q["pt"] for q in pts if q.get("ab_back", 1) != 0]
     if back:
         why.append("ab_back above 0 or not printed at %s" % ", ".join(back[:4]))
+    # ruling R6-A3.11.151 (2) class B: ab_retry counts a read of the allocation counter whose two takes never agreed
+    # (plugin/FtAlloc.cs:102; SHARED.md:57-58), whose bytes may be torn, so it withholds as ab_back does
+    retry = [q["pt"] for q in pts if q.get("ab_retry", 1) != 0]
+    if retry:
+        why.append("ab_retry above 0 or not printed at %s" % ", ".join(retry[:4]))
+    # ruling R6-A3.11.151 (2) class B: sitting V runs every window ON, so the gate is never off (FtSchedule.cs:215-219):
+    # a guarded return in it is a collector that did not run, which no term of U would hold
+    why += ["VR5's window counters: %s" % w for w in gate_counter_faults(recs, set(q["pt"] for q in pts))]
     wna =sorted(set(t for w in meas for t, x in sorted((_typed(w["wu"], 2, na=True) or {}).items())
                      if x[1] is None))
     if wna:
@@ -3777,6 +4028,11 @@ def sitting_v(recs, text, peer_recs, peer_text, src, first_game=1):
              terms=None, bK=None, heap=None, N=None)
     pl = [q for q in recs if q["kind"] == "p"]
     v["heap"] = pl[-1].get("heap") if pl else None
+    # R-GC's sitting-V total (SHARED.md:250-253; ruling R6-A3.11.151 (2) class D, F9): the collectors' bytes over every
+    # measured window of the sitting, planted or not, res or not; the estimator's own filter (u_games) stays its own
+    bs = [_bytes_k(w) for w in meas]
+    v["bK_all"] = None if None in bs else sum(bs)
+    v["bK_windows"] = len(meas)
     # reported only (no rule reads it): X and listener scopes entered off the main thread, over the measured games
     v["photon_offmain"] = sum(r.get("photon_offmain") or 0 for r in recs
                               if r["kind"] == "counters" and r.get("g", -1) >= first_game)
@@ -3802,7 +4058,7 @@ def sitting_v(recs, text, peer_recs, peer_text, src, first_game=1):
         try:
             U, hw, df = fw_interval(pairs, Z_END)
             le, lh, _ = fw_interval([(d["l"], d["n"]) for g, d in sorted(ug.items())], Z_END)
-        except (ZeroDivisionError, ValueError) as x:
+        except NOT_COMPUTABLE as x:
             why.append("U not computable: fw_interval over %d games (%s)" % (len(pairs), x))
         else:
             u_hi = U + hw
@@ -3834,6 +4090,25 @@ def _zero_line(head, z):
                                                                       if empty else ""))
 
 
+def rgc_v_line(label, v):
+    """R-GC's sitting-V line (SHARED.md:250-253; ruling R6-A3.11.151 (2) class D, F9): the collectors' bytes over every
+    measured window against heap= at the sitting's end, reported whether or not U is computable; a total or a share
+    that cannot be computed prints 'not computable' with its reason."""
+    if v["bK_all"] is None:
+        tot = "not computable: an a* or wa value prints NA in a measured window"
+    else:
+        tot = "%d over the sitting's %d measured windows" % (v["bK_all"], v["bK_windows"])
+    if v["heap"] is None:
+        share = "heap= not read"
+    elif v["bK_all"] is None:
+        share = "heap=%d at its end" % v["heap"]
+    elif v["heap"] <= 0:
+        share = "heap=%d at its end; its share not computable: heap= is not above 0" % v["heap"]
+    else:
+        share = "heap=%d at its end (%.4f of it)" % (v["heap"], v["bK_all"] / v["heap"])
+    return "R-GC (sitting V) seat %s: the collectors' bytes %s against %s" % (label, tot, share)
+
+
 def v_lines(label, v):
     """sitting_v's figures as report lines: U and its five terms whenever U is computable, whatever the class (ruling
     R6-A3.11.149 (8)), each validity guard's result, VR8's zero-state half, B3, and the WITHHELD list last."""
@@ -3850,13 +4125,12 @@ def v_lines(label, v):
                    % (v["U"], t["D"], t["P"], sum(t["S"].values()), t["S"]["log"], t["S"]["hash"], t["S"]["sock"],
                       t["X"], t["G"], v["hw"], Z_END, v["df"], v["U_hi"]))
         out.append("V6 L %.3f us (cS + cR + cW + cP alone, the interval's lower end); T_on %.1f us; T_ref = T_on - U_hi "
-                   "%.1f us; U_hi %s of T_ref" % (v["L"], v["T_on"], v["T_ref"], _pct(v["U_hi"], v["T_ref"])))
+                   "%.1f us; U_hi as a percent of T_ref: %s" % (v["L"], v["T_on"], v["T_ref"],
+                                                                _pct(v["U_hi"], v["T_ref"])))
         out.append("V6 class %s (classify(U_hi, T_ref, hw, L): PASS <= 3, SID <= 5, FAIL > 5 percent, WITHHELD when "
                    "the band is unresolved)%s" % (v["cls"], "; B1 is WITHHELD for this seat by the list below"
                                                   if v["why"] else ""))
-        out.append("R-GC (sitting V) seat %s: the collectors' bytes %d over the sitting against heap=%s at its end%s"
-                   % (label, v["bK"], v["heap"] if v["heap"] is not None else "not read",
-                      " (%.4f of it)" % (v["bK"] / v["heap"]) if v["heap"] else ""))
+    out.append(rgc_v_line(label, v))
     out.append("V6 u_g seat %s: %s" % (label, "; ".join("g%d %s (n %d)" % (g, "%.3f" % d["u"] if d["u"] is not None
                                                                          else "NA", d["n"]) for g, d in sorted(ug.items()))
                                       or "none"))
@@ -3957,6 +4231,9 @@ def combine(v_logs, c_logs, refs=None, first_game=1):
                        "against the band's 3 percent of T_ref as built %.1f us (%.1f us)"
                        % (n, e["center"], e["lb"], e["bu"], e["hw"], e["tref"], 0.03 * e["tref"]))
         out += ["V6 TWO-ARM seat %s %s %s: %s" % (n, nm, w, d) for nm, w, d in sc["two"]]
+        # ruling R6-A3.11.151 (2) class D, F16 (SHARED.md:254-261): the cross-check's residual statements beside its
+        # interval, as the as-built report prints them
+        out += ["  " + x for x in CROSS_RISKS]
         # the follow-up to ruling .149, D: R-GC's and R-WORK's numbers are reported only, so each is computed inside
         # its own guard and a value that cannot be computed is printed as such; the verdict lines still follow
         if e is not None:
@@ -4354,12 +4631,15 @@ if __name__ == "__main__":
         _args = sys.argv[1:]
         # SHARED.md V6 and ruling R6-A3.11.149 (6) 6: --on <seat>=<V log> <seat>=<V log>: report_on; --combine
         # V:<seat>=<log> V:<seat>=<log> C:<seat>=<log> C:<seat>=<log> [R:<seat>=<log> ...]: each seat's logs paired by
-        # its name; --controls <boot log>: controls_proof
+        # its name; --controls <profile>=<boot log>: controls_proof (ruling R6-A3.11.151 (2) class C)
         _mode = _args[0] if _args and _args[0] in ("--on", "--combine", "--controls") else None
         if _mode == "--controls":
-            if len(_args) != 2:
-                raise Refused("--controls needs exactly 1 log")
-            print("\n".join(controls_proof(_read_file(_args[1]), _args[1])[1]))
+            _m = re.fullmatch(r"(%s)=(.+)" % "|".join(sorted(map(re.escape, CONTROL_PROFILES), key=len, reverse=True)),
+                              _args[1]) if len(_args) == 2 else None
+            if _m is None:
+                raise Refused("CONTROLS-REFUSED: --controls takes one <profile>=<boot log> (got %s); %s"
+                              % (" ".join("'%s'" % a for a in _args[1:]) or "nothing", CONTROLS_USAGE))
+            print("\n".join(controls_proof(_read_file(_m.group(2)), _m.group(1), _m.group(2))[1]))
         elif _mode == "--on":
             _n = _named_args(_args[1:], (None,))[None]
             print("\n".join(report_on(dict((s, _read_file(p)) for s, p in _n.items()))[0]))
