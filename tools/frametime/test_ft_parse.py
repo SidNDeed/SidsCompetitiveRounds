@@ -3178,6 +3178,13 @@ V_SPOILS = (
     ("photon twice", lambda: _v_text(boot={"photon": "photon patches n=11 names=" + ",".join(
         P.PHOTON_ENTRIES + P.PHOTON_ENTRIES[:1])}),
      "R-SCOPE's patches line out of range (n=11 for 11 names; named twice: PhotonPeer.DispatchIncomingCommands)"),
+    # ruling R6-A3.11.152, G1's class: the names as written, in the emitter's order, no entry dropped
+    ("photon reordered", lambda: _v_text(boot={"photon": "photon patches n=10 names=" + ",".join(
+        P.PHOTON_ENTRIES[1:2] + P.PHOTON_ENTRIES[:1] + P.PHOTON_ENTRIES[2:])}),
+     "R-SCOPE's patches line out of range (n=10 for 10 names; not in the emitter's order)"),
+    ("photon empty entry", lambda: _v_text(boot={"photon": "photon patches n=10 names=" + ",".join(
+        P.PHOTON_ENTRIES[:4] + ("",) + P.PHOTON_ENTRIES[4:])}),
+     "R-SCOPE's patches line out of range (n=10 for 11 names; not of the ten: (an empty entry))"),
     ("photon untyped", lambda: _v_text(boot={"photon": "photon patches n=10 names=" + ",".join(
         x.split(".")[1] for x in P.PHOTON_ENTRIES)}),
      "R-SCOPE's patches line out of range (n=10 for 10 names; not attached: PhotonPeer.DispatchIncomingCommands"),
@@ -3739,10 +3746,43 @@ LEDGER_SPOILS = (
     ("failed", "ledger log=0 why=failed:TargetInvocationException types=log,hash,recv,sock",
      "the disk-log tap: ledger log=0 why=failed:TargetInvocationException: the disk log is not tapped"),
     ("type gone", "ledger log=1 why=ok types=log,hash,sock",
-     "the disk-log tap: ledger types=log,hash,sock lacks recv, a writer type the parser reads"),
+     "the disk-log tap: ledger types=log,hash,sock is not the parser's writer types log,hash,recv,sock (each once, in "
+     "that order)"),
     ("type extra", "ledger log=1 why=ok types=log,hash,recv,sock,gc",
-     "the disk-log tap: ledger types=log,hash,recv,sock,gc lists gc, a writer type the parser does not read"),
+     "the disk-log tap: ledger types=log,hash,recv,sock,gc is not the parser's writer types log,hash,recv,sock (each "
+     "once, in that order)"),
 )
+# ruling R6-A3.11.152, G1: ledger_state's reason for a types= list that is not WRITER_TYPES as written
+LEDGER_TYPES_BAD = "ledger types=%s is not the parser's writer types log,hash,recv,sock (each once, in that order)"
+# (what, the types= list as the line prints it): each is not the emitter's list (FtUpload.cs:104, joined at :368)
+LEDGER_LISTS = (
+    ("a name repeated", "log,log,hash,recv,sock"),
+    ("an empty entry leading", ",log,hash,recv,sock"),
+    ("an empty entry in the middle", "log,hash,,recv,sock"),
+    ("an empty entry trailing", "log,hash,recv,sock,"),
+    ("reordered", "log,recv,hash,sock"),
+    ("a name missing", "log,hash,sock"),
+    ("a name more", "log,hash,recv,sock,gc"),
+)
+
+
+def chk_ledger_types_judged_as_written(m):
+    # ruling R6-A3.11.152, G1 (SHARED.md:245-246): the ledger's types= list is WRITER_TYPES exactly, as written: each
+    # name once, in the emitter's order, no entry empty; anything else fails ledger_state with one reason naming the
+    # list as written and the list required, and the state prints the list as written. On the combining path a
+    # sitting-V log whose ledger repeats a name ends B1 WITHHELD for that seat, naming the list. The exact list passes
+    # and the clean pair ends B1 PASS (the controls)
+    clean, c = _v_text(), _c_text()
+    assert m.ledger_state(m.read(clean)) == (True, [], "log=1 why=ok types=log,hash,recv,sock")
+    for what, ts in LEDGER_LISTS:
+        t = _v_text(boot={"ledger": "ledger log=1 why=ok types=" + ts})
+        assert t != clean, what
+        got = m.ledger_state(m.read(t))
+        assert got == (False, [LEDGER_TYPES_BAD % ts], "log=1 why=ok types=" + ts), (what, got)
+    assert _verdict(_comb(m, clean, clean, c, c), "a").startswith("VERDICT B1 seat a PASS: ")
+    rep = _v_text(boot={"ledger": "ledger log=1 why=ok types=log,log,hash,recv,sock"})
+    ln = _verdict(_comb(m, rep, clean, c, c), "a")
+    assert ln.startswith("VERDICT B1 seat a WITHHELD: ") and (LEDGER_TYPES_BAD % "log,log,hash,recv,sock") in ln, ln
 
 
 def _two_ledgers(text):
@@ -4386,7 +4426,9 @@ B11_CHECKS = ["chk_c2_recovers_3_25", "chk_c3_recovers_3_0375", "chk_c4_recovers
               "chk_controls_ruled_lines_refused", "chk_reported_values_not_computable",
               "chk_r_gc_total_reads_every_measured_window", "chk_cross_risks_beside_the_interval",
               # the integrator's points H, I and J (P3b's end-to-end export test)
-              "chk_cal_entries_failure_form", "chk_malformed_lines_are_refusals", "chk_reference_a3_form"]
+              "chk_cal_entries_failure_form", "chk_malformed_lines_are_refusals", "chk_reference_a3_form",
+              # the confirming round's G1 (ruling R6-A3.11.152): emitted lists judged as written
+              "chk_ledger_types_judged_as_written"]
 
 
 @pytest.mark.parametrize("name", B11_CHECKS)
