@@ -35,8 +35,8 @@
 #     the lease kept, the bot stays paused, "FT-VM-LEASE HELD reason=<r>" and rc 30; the integrator restores from
 #     <outdir>/pre and releases by hand. A VR6 failure is one of those cases (bad=1): HELD, never released.
 # --dry stops after the gate (s0_gate -Dry; nothing inventoried, installed, armed or launched; the release follows).
-# Exit: 0 the launch saw its end line and every check after it held; 2 usage, or a step before the first write
-# refused; 10 gate refused; 20 lease not confirmed; 21 ROUNDS still running after the leased shutdown; 22 the install
+# Exit: 0 the launch saw its end line and every check after it held; 2 usage, a step before the first write
+# refused, or the arm step refused or failed (nothing launched; the exit path below runs); 10 gate refused; 20 lease not confirmed; 21 ROUNDS still running after the leased shutdown; 22 the install
 # refused or an install is already open; 30 HELD; 31 the release unproven; otherwise the launch script's code. Every
 # end prints "FT-VM-LEASED <profile> end rc=<n>" as its last line. A profile ft_arm_text.sh refuses, or a missing
 # one, prints the usage line and exits 2 before anything else.
@@ -313,6 +313,9 @@ echo "$(st) FT-VM-INVENTORY pre written: $(wc -l < "$OUT/inventory-pre.txt") fil
 # A3: the rollback is armed BEFORE the first write; from here every end reverts
 INSTALL_STARTED=1
 bash "$INSTALL" install "$DLL" "$LANES" || exit 22
-bash "$INSTALL" arm "$MODE" || exit 2
+# the launch runs only after the arm step proved its sentinel (its written line, exit 0); a refusal or a FAIL ends the
+# run here, and the exit path reverts the install
+bash "$INSTALL" arm "$MODE"; ar=$?
+if [ "$ar" != 0 ]; then echo "$(st) FT-VM-LEASED the arm step ended rc=$ar: nothing launched"; exit 2; fi
 powershell -NoProfile -ExecutionPolicy Bypass -File "$(cygpath -w "$HERE/ft_vm_launch.ps1")" -Mode "$KIND" -Out "$(cygpath -w "$OUT/LogOutput-$KIND.log")" | tr -d '\r'
 exit "${PIPESTATUS[0]}"

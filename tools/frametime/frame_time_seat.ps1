@@ -22,8 +22,11 @@ script refuses when that file is missing or names another digest. Six steps:
      The export rule (ruling R6-A3.11.112 F2, function SliceExport): a selected line is printed only when the whole
      line matches one form of $FormText, the text of one log call of plugin/*.cs whose variable fields are closed
      sets (digits, hex, the ft_ room form, actor numbers, fixed tokens, the generated sets); a cfg-derived field
-     leaves only as a token of a closed set the form names. Any other selected line is withheld: never printed,
-     counted as one "withheld <class> <n>" line per class with n > 0 at the end of its section;
+     leaves only as a token of a closed set the form names. A failure warning whose last field is an exception's
+     text, and Harmony's patch failure, match a redaction form of $RedactText instead (ruling R6-A3.11.151 (2) class
+     E): the line's typed head is printed with the token (not-exported) in place of that text. Any other selected
+     line is withheld: never printed, counted as one "withheld <class> <n>" line per class with n > 0 at the end of
+     its section;
   5. the sitting's logs moved into runs/<stamp>/sitting/, the pre-image copies put back, their sha256s printed and
      compared; LogOutput-prev.log must not change during the sitting (this build makes no prev copy); a cfg that
      differs from its pre-image is first copied to runs/<stamp>/sitting/ and "kept cfg <sha256>" printed, which
@@ -60,17 +63,19 @@ one "RESTORE-PROOF ok 6" and no FAILED line. The restore failures, each with VR6
 cfg_restore_locked (the cfg rewritten, then held by a handle that permits reading and hashing it but refuses the copy
 of the pre-image back), log_restore_fails (a closing file, and a log's pre-image copy gone) and wait_restore_fails (the
 same, and the wait throws) must print "RESTORE-PROOF FAILED", no ok line, and end with exit code 5. The simulated log
-($SimFt, $SimForm, $SimNoForm, $SimPlant) holds lines in the mod's forms, lines of formless classes, and planted
-cfg-like values holding each class word (the BaseUrl's startup line, the COMBAT-PERF probe mode, a route host): in
-every run that prints both sections no planted value may be printed, every form line must be exported in its section,
-and the withheld lines must be exactly the fixture's counts; export_all (every selected line exported, the old
+($SimFt, $SimForm, $SimNoForm, $SimRedact, $SimPlant) holds lines in the mod's forms, lines of formless classes,
+failure lines a redaction form exports, and planted cfg-like values holding each class word (the BaseUrl's startup
+line, the COMBAT-PERF probe mode, a route host): in every run that prints both sections no planted value may be
+printed, every form line must be exported in its section (a redacted line as $SimRedactOut), and the withheld lines
+must be exactly the fixture's counts; export_all (every selected line exported, the old
 selection) is that check's negative control and must fail it. The window lines ($SimWindow, as many as the point
 line's windows=) must be exported under "=== log lines", and ft_parse.py's window-count rule (records_missing, through
 ft_slice_identity.py --wcount) run on that section must find no miss; drop_w (the window lines skipped again, as before
 ruling R6-A3.11.133 (2)) must make that rule refuse on the windows= count. The window form of B11 (SHARED.md "The
 window line"; function WindowKeysRefused): the case table $WFormCases holds each refused form (the earlier appended
 plant= and partial=, a key twice at the top level or as a writer type inside wu= or tok=, a tok whose writer types
-differ from wu's, a writer type outside $FormSets.wtype) beside its negative control, the same line without the
+differ from wu's, a writer type outside $FormSets.wtype, V6's defects after nm=) beside its negative control, the same
+line without the
 defect, which must be exported; no_wkeys (the key check skipped) must export the cases only that check refuses and
 still refuse the ones the form refuses, and in the simulated sitting must move the withheld counts. It prints
 SELFTEST PASS only when the clean run passes and every mutant behaves as wanted. -ArmForce in both values: every run
@@ -122,6 +127,7 @@ $script:RestoredEqual = 0
 # placeholders: digits, hex, the ft_ room form, actor numbers, fixed tokens and the named closed sets ($FormSets); a
 # cfg-derived field is a closed token set the form names (the route host, the COMBAT-PERF probe mode). Exception
 # messages, peer-chosen text and every other free field have no placeholder, so a line carrying one matches no form.
+# A line of a redaction form ($RedactText, below the forms) is printed as its typed head and the token (not-exported).
 # Every other selected line is WITHHELD: never printed, only counted, as one "withheld <class> <n>" line per class
 # with n > 0 at the end of the section that would have printed it (a line holding two class words counts in both).
 # The FrameTime window lines ("[FRAME-TIME] w ") are exported under the same rule, by their own form (ruling
@@ -134,13 +140,17 @@ $FormSets = [ordered]@{
     entry  = 'HE-p1:PhotonNetwork.ExecuteRpc HE-p2:HealthHandler.RPCA_SendTakeDamage HE-p3:HealthHandler.RPCA_SendTakeForce HE-p4:HealthHandler.DoDamage HE-p5:Block.RPCA_DoBlock HE-p6:ProjectileInit.RPCA_Init HE-p7:ProjectileInit.RPCA_Init_noAmmoUse HE-p8:ProjectileInit.RPCA_Init_SeparateGun HE-p9:ProjectileHit.RPCA_DoHit CE-c7:CombatEvidence.Tick CE-p1:Gun.Attack CE-p2:ProjectileInit.RPCA_Init CE-p3:ProjectileInit.RPCA_Init_noAmmoUse CE-p4:ProjectileInit.RPCA_Init_SeparateGun CE-p5:GunAmmo.ReloadAmmo CE-p6:ProjectileHit.RPCA_DoHit CE-p7:ProjectileHit.Hit CE-p8:Block.RPCA_DoBlock CE-p9:Block.TryBlock CE-p10:CharacterStatModifiers.DealtDamage CE-p11:BounceEffectRetarget.SetNewVel CE-p12:ScreenEdgeBounce.DoHit CE-p13:SyncProjectile.OnPhotonSerializeView CE-p14:HealthHandler.RPCA_SendTakeForce CE-p15:HealthHandler.RPCA_SendTakeDamage CE-p16:HealthHandler.RPCA_Die CE-p17:HealthHandler.RPCA_Die_Phoenix CE-p18:BounceEffectRetarget.FindTarget CE-p19:MoveTransform.Update SE-c50:SeatEvidence.NoteView SE-c52:SeatEvidence.CompatTick SE-c53:SeatEvidence.Tick SE-p1:PhotonNetwork.RPC SE-p2:Block.DoBlock SE-p3:Block.TryBlockMe PT-c5:PointEvidence.Drain PT-p1:Saw.Update IC-c6:IdentityClockEvidence.Tick IC-p1:PhotonNetwork.ExecuteRpc IC-p4:SyncPlayerMovement.OnPhotonSerializeView CD-c6:CardDrawEvidence.Tick CD-c7:CardDrawEvidence.EnsureCensusDump PB-c2:PeerBuild.StageBuildProp PB-c3:PeerBuild.Tick'
     shape  = 'CE_p1 CE_p10 CE_p11 CE_p12 CE_p13 CE_p14 CE_p15 CE_p16 CE_p17 CE_p18 CE_p19 CE_p2 CE_p3 CE_p4 CE_p5 CE_p6 CE_p7 CE_p8 CE_p9 HE_p1 HE_p2 HE_p3 HE_p4 HE_p5 HE_p6 HE_p7 HE_p8 HE_p9 IC_p1 IC_p4 PT_p1 SE_p1 SE_p2 SE_p3 call span.empty'
     a3k    = 'CE_Top CE_Ht CE_Ping CE_lhat_cache CE_Pos CE_Recent CE_Wait CE_Rings CE_anchor CE_Gun CE_B5c CE_counters CE_scratch CE_gun_scalars CE_gun_account CE_aimset CE_capture CE_perf_probe SE_Hw SE_Logs SE_ordinals SE_frames SE_scalars HE_Flush HE_game HE_point HE_sender PE_Rec PE_map IC_Rpc IC_Clock IC_scalars IC_point IC_game CD_notes PB_printed HE_hitset'
-    patch  = 'AbyssalCountdown_Activate_DeepEnd_Patch Arm_DancePatch ArtHandlerAwakePatch ArtHandlerNextArtPatch AvatarCreatePlayerPatch AvatarLoadFacesPatch AvatarSelectFacePatch BlockDoBlockCounterPatch BlockRpcaDoBlockChainClassifierPatch BlockRpcaDoBlockZombieScrubPatch BlockTriggerDoBlockNullSafetyPatch BlockTryBlockCounterPatch BlockTryBlockOnF5Patch Block_FfaSpawnGrace_Patch Broadcast_BlockPress_Patch Broadcast_ShotActivation_Patch BulletPoolReleaseGuardPatch CardBarHandler_AddCard_Ffa_Patch CardChoiceEndPickPatch CardChoicePickPatch CardChoiceStaleSpawnedCardsPatch CardChoiceVisuals_Hide_PopupCarrier_Patch CardChoiceVisuals_SetSelected_Instinct_Patch CardChoiceVisuals_Show_Competitive_Patch CardChoice_DoPick_SameCards_Patch CardChoice_ReplaceCards_SameCards_Patch CardChoice_SpawnUniqueCard_SameCards_Patch CardDrawEvidenceTestDealer_SpawnPatch CardDrawEvidence_CardAwakePatch CardDrawEvidence_DonePickingPatch CardDrawEvidence_EndPickPatch CardDrawEvidence_OfflinePickPatch CardDrawEvidence_PickPatch CardDrawEvidence_StartPickPatch CardPickChatInputGuardPatch CharacterReadyPatch CharacterSelectionMenu_PlayerJoined_2v2_Patch ChaseCardTextPatch CodeAnimStartRestorePatch CombatEvidence_AttackPatch CombatEvidence_BlockPatch CombatEvidence_ContactPatch CombatEvidence_DamagePatch CombatEvidence_DealtPatch CombatEvidence_DiePatch CombatEvidence_DiePhoenixPatch CombatEvidence_EdgeBouncePatch CombatEvidence_FindTargetPatch CombatEvidence_ForcePatch CombatEvidence_HitPatch CombatEvidence_InitAmmoPatch CombatEvidence_InitNoAmmoPatch CombatEvidence_InitSeparatePatch CombatEvidence_MovePatch CombatEvidence_ReloadPatch CombatEvidence_SyncPatch CombatEvidence_TargetBouncePatch CombatEvidence_TryBlockPatch CosmeticButtonSpawnerPatch CosmeticGetItemIdPatch CosmeticGetItemPatch CosmeticSelectButtonPatch DamageDealtLocalTrackerPatch DamageStampPatch Dance_BlockTryBlock_Patch Dance_GeneralInput_Patch Dance_GunAttack_Patch Dance_ProjectileInit_Patch DeadPlayerForcePatch DeadPlayerForcePointPatch DealDamageToPlayerFreshVictimPatch DealtDamageGuardPatch DeathClassifierPatch DemonicPactSprayPatch DevConsoleToggleGuardPatch DrillVisibilityPatch EndScreenKillPatch EscToggleDiagPatch ExplosionPerColliderIsolationPatch FfaAssembly_LoadGate_Patch FfaDamageDealtTrackerPatch FfaLate_CallInHold_Patch FfaLate_ForceQuarantine_Patch FfaLate_NoMapReport_Patch FfaLate_NoSyncReply_Patch FfaLate_PickQuarantine_Patch FfaLate_Register_Patch FfaLate_Simulated_Patch FfaLate_Visible_Patch FfaReadmit_RegisterOrder_Patch FtChurnFreezePatch FtDrive_InputPatch FtDrive_PickPatch FtRoomGateNchRoutinePatch FtRoomGateNchVoidPatch FtRoomGatePunPatch FtRoute_SendPatch GMArmsRaceAwakePatch GMArmsRaceOnEnable_4Player_Patch GMArmsRaceStartGameBlockResetPatch GMArmsRace_DoStartGame_Ffa_Patch GMArmsRace_DoStartGame_PopupCarrier_Patch GMArmsRace_DoStartGame_SameCards_Patch GMArmsRace_NextRound_Ffa_Patch GMArmsRace_PlayerDied_Ffa_Patch GMArmsRace_PlayerJoined_Diag_Patch GMArmsRace_StartGame_Diag_Patch GameCrownHandler2v2Patch GameLocaleOptionsInitPatch GameOverTextTeamColorPatch GeneralInput_FfaSpawnGrace_Patch GetColorFromTeamEmptyTeamPatch GetFirstPlayerInTeamEmptyTeamPatch GrowFpsNormalizePatch GrowPreJoinSyncPatch GunApplyPlayerStuffProvenancePatch GunAttackBlockOnF5Patch GunAttackIntentCapturePatch GunDoAttacksIntentPatch GunFireBurstProvenancePatch HealSoundGuardPatch HealthBar_AttachHealOverlay_Patch HealthHandlerTakeDamageCounterPatch HealthHandler_HealOverlayReviveReset_Patch HitEvidence_BlockPatch HitEvidence_DamagePatch HitEvidence_DotPatch HitEvidence_ExecuteRpcPatch HitEvidence_FfaDoStartGamePatch HitEvidence_ForcePatch HitEvidence_ImpactPatch HitEvidence_SpawnAmmoPatch HitEvidence_SpawnNoAmmoPatch HitEvidence_SpawnSeparatePatch HitEvidence_StartGamePatch HostRoomCodeClipboardPatch IdentityClock_ExecuteRpcPatch IdentityClock_MovePlayersPatch IdentityClock_MovementPatch IdentityClock_PointStartPatch InRangeIndicatorRadiusPatch InactiveVisualsHidePatch JumpDustTeamColorPatch KeyboardFactoryPatch LandDustTeamColorPatch LineRangeEffect_FfaOwnerExclusion_Patch LobbyReadyPatch LobbyRedirectPatch LocalPlayerIdPublishPatch LocalTookDamageTrackerPatch MapArtPatch MapManager_GetSpawnPoints_2v2_Patch MapManager_GetSpawnPoints_FfaShuffle_Patch MapManager_UnloadAfterSeconds_Diag_Patch MapPhysicalColorPatch MapTransition_SetStartPos_FfaScale_Patch ModRoomChurnFreezePatch MultiPickerShowVisualsPatch MusicAdmission_SteamLobbyLatchPatch MusicSuppressionPatch NCHConnectToRegionDiagPatch NCH_OnPlayerLeftRoom_Ffa_Patch NCH_OnPlayerLeftRoom_Hold_Patch NetworkConnectionHandler_NetworkRestart_Diag_Patch NetworkConnectionHandler_OnJoinedRoom_RestyleNick_Patch NetworkReplicaSerializationObserverPatch NetworkReplicaSpectatorActivationPatch NetworkReplicaSpectatorBoundaryPatch NetworkReplicaSpectatorFfaTerminalPatch NetworkReplicaSpectatorGmTerminalPatch NetworkReplicaSpectatorRoundEndPatch NetworkReplicaSpectatorSnapshotPatch NetworkSeat_DispatchDepthPatch NetworkSeat_LifecycleDiePatch NetworkSeat_LifecyclePhoenixPatch NetworkSeat_LifecycleRevivePatch NetworkSeat_MovementCapturePatch NetworkSeat_OnSerializeWritePatch NetworkSeat_RaiseEventInternalPatch NetworkSeat_RunViewUpdatePatch NetworkSeat_SendOutgoingDepthPatch OnEnablePatch OutOfBoundsHandler_FfaScale_Patch OverlayGate_ArmsRaceDebugKeys_Patch OverlayGate_ArtHandler_Patch OverlayGate_ButtonJoinRoom_Patch OverlayGate_CharacterSelect_Patch OverlayGate_CreatorDragging_Patch OverlayGate_CreatorNavigation_Patch OverlayGate_CreatorPortrait_Patch OverlayGate_DevConsoleDialog_Patch OverlayGate_EscapeMenu_Patch OverlayGate_FriendInvite_Patch OverlayGate_GeneralInput_Patch OverlayGate_GoBack_Patch OverlayGate_MultiOptions_Patch OverlayGate_PlayerAssigner_Patch OverlayGate_PopUp_Patch OverlayGate_RemoteControl_Patch OverlayGate_UIBlockList_Patch OverlayGate_UIBlockPlayer_Patch OverpowerNonPlayerTargetPatch OvtExtraPickPatch OvtExtraPickRestorePickerPatch PhoenixRespawnPatch PhotonMapObject_Start_FfaScale_Patch PhotonNetwork_LeaveRoom_Diag_Patch PlayerAssigner_CreatePlayer_2v2_Patch PlayerManagerResetCharactersBlockResetPatch PlayerManagerRevivePlayersWeaponCooldownPatch PlayerManager_GetClosestPlayerInTeam_Ffa_Patch PlayerManager_GetOtherPlayer_Ffa_Patch PlayerManager_MovePlayers_FfaScale_Patch PlayerManager_PlayerDied_Ffa_Patch PlayerNameTeamColorPatch PlayerNicknameLabelRefreshPatch PlayerNicknameRepairPatch PlayerSkinBank_GetPlayerSkinColors_2v2_Patch PlayerVelocity_TeardownDrive_Patch Player_FullReset_CardBaseline_Patch Player_Start_Diag_Patch PointEndEvidencePatch PointVisualizerTeamColorPatch PoisonArmPatch PoisonDeathFlushPatch PoisonDotSchedulerPatch PoisonEffectRegistrationPatch PoisonGhostPatch PoisonHitBracketPatch PoisonPhoenixBoundaryPatch PoisonPointBoundaryPatch PoisonReviveFencePatch PoisonRpcStampPatch PopUpHandler_StartPicking_Competitive_Patch ProjectileHit_DirectHitCounter_Patch QuickplayChurnAbandonGuardPatch QuickplayChurnFreezePatch RadarVisualLifetimePatch ReadyUpPatch RematchTextTeamColorPatch RemotePlayerIdOrderPatch ResetMenuPatch RosterCensus_MapBoundary_Patch RoundCounterTeamColorPatch RpcDispatchGuardPatch RpcLocalSendDepthPatch SawDeadTargetPatch SawLiveTargetPatch SawPointEvidencePatch ScreenshakerDisablePatch SeatEvidence_DoBlockPatch SeatEvidence_RpcSendPatch SeatEvidence_TryBlockMePatch ShotProvenanceEpochPatch SilenceDisableCapturePatch SilenceStartPatch SilenceStartRewirePatch SonigonPlayGuardPatch SonigonVoiceUpdateGuardPatch SpawnOnImpactFieldDiagPatch Spectator_BoundaryObserver_Patch Spectator_EntryIsNotMatchFound_Patch Spectator_LeaveIsInvisible_Patch Spectator_MapLoadCompleted_Patch Spectator_MapLoadGate_Patch Spectator_NoAssignerPoll_Patch Spectator_NoCardPickRpc_Patch Spectator_NoCreatePlayer_Patch Spectator_NoDoStartGame_Patch Spectator_NoGameOverTransition_Patch Spectator_NoGmPlayerDied_Patch Spectator_NoGmPlayerJoined_Patch Spectator_NoGmTest_Patch Spectator_NoInboundMapReports_Patch Spectator_NoJoinPrompt_Patch Spectator_NoMapAuthority_CallInBare_Patch Spectator_NoMapAuthority_CallIn_Patch Spectator_NoMapAuthority_Load_Patch Spectator_NoMapObjectAuthority_Patch Spectator_NoMapReport_Patch Spectator_NoPlatformProgress_Patch Spectator_NoPlatformUnlock_Patch Spectator_NoStartGame_Patch Spectator_NoSyncReply_Patch Spectator_NoVanillaEscMenu_Patch Spectator_NonLethalDamage_Patch Spectator_ObserveNextRound_Patch Spectator_OrphanSerializationMute_Patch Spectator_PreActivationPickQuarantine_Patch Spectator_RegistrationFirewall_Patch Spectator_ReplayQuarantine_Patch Spectator_ReplayTag_Patch Spectator_SyncUpNoWait_Patch StaleProjectileSweepPatch StartPickingPatch StunDisableCapturePatch StunPlayerFreshVictimPatch StunStartPatch TeamGameLifecycle_DoStartGame_Patch TeamGameLifecycle_GameOverTransition_Patch TeamHold_DoPickPatch TeamHold_GameOverPatch TeamHold_GameStartPatch TeamHold_OfflinePickPatch TeamHold_PhoenixClaimPatch TeamHold_PickSeamPatch TeamHold_PointTransitionPatch TeamHold_RematchFencePatch TeamHold_RoundTransitionPatch TeleportToOpponentFreshVictimPatch WeaponCooldownPhoenixDiagPatch WeaponHandlerAttackIntentPatch WeaponHandler_FfaSpawnGrace_Patch Wobble_DancePatch'
+    patch  = 'AbyssalCountdown_Activate_DeepEnd_Patch Arm_DancePatch ArtHandlerAwakePatch ArtHandlerNextArtPatch AvatarCreatePlayerPatch AvatarLoadFacesPatch AvatarSelectFacePatch BlockDoBlockCounterPatch BlockRpcaDoBlockChainClassifierPatch BlockRpcaDoBlockZombieScrubPatch BlockTriggerDoBlockNullSafetyPatch BlockTryBlockCounterPatch BlockTryBlockOnF5Patch Block_FfaSpawnGrace_Patch Broadcast_BlockPress_Patch Broadcast_ShotActivation_Patch BulletPoolReleaseGuardPatch CardBarHandler_AddCard_Ffa_Patch CardChoiceEndPickPatch CardChoicePickPatch CardChoiceStaleSpawnedCardsPatch CardChoiceVisuals_Hide_PopupCarrier_Patch CardChoiceVisuals_SetSelected_Instinct_Patch CardChoiceVisuals_Show_Competitive_Patch CardChoice_DoPick_SameCards_Patch CardChoice_ReplaceCards_SameCards_Patch CardChoice_SpawnUniqueCard_SameCards_Patch CardDrawEvidenceTestDealer_SpawnPatch CardDrawEvidence_CardAwakePatch CardDrawEvidence_DonePickingPatch CardDrawEvidence_EndPickPatch CardDrawEvidence_OfflinePickPatch CardDrawEvidence_PickPatch CardDrawEvidence_StartPickPatch CardPickChatInputGuardPatch CharacterReadyPatch CharacterSelectionMenu_PlayerJoined_2v2_Patch ChaseCardTextPatch CodeAnimStartRestorePatch CombatEvidence_AttackPatch CombatEvidence_BlockPatch CombatEvidence_ContactPatch CombatEvidence_DamagePatch CombatEvidence_DealtPatch CombatEvidence_DiePatch CombatEvidence_DiePhoenixPatch CombatEvidence_EdgeBouncePatch CombatEvidence_FindTargetPatch CombatEvidence_ForcePatch CombatEvidence_HitPatch CombatEvidence_InitAmmoPatch CombatEvidence_InitNoAmmoPatch CombatEvidence_InitSeparatePatch CombatEvidence_MovePatch CombatEvidence_ReloadPatch CombatEvidence_SyncPatch CombatEvidence_TargetBouncePatch CombatEvidence_TryBlockPatch CosmeticButtonSpawnerPatch CosmeticGetItemIdPatch CosmeticGetItemPatch CosmeticSelectButtonPatch DamageDealtLocalTrackerPatch DamageStampPatch Dance_BlockTryBlock_Patch Dance_GeneralInput_Patch Dance_GunAttack_Patch Dance_ProjectileInit_Patch DeadPlayerForcePatch DeadPlayerForcePointPatch DealDamageToPlayerFreshVictimPatch DealtDamageGuardPatch DeathClassifierPatch DemonicPactSprayPatch DevConsoleToggleGuardPatch DrillVisibilityPatch EndScreenKillPatch EscToggleDiagPatch ExplosionPerColliderIsolationPatch FfaAssembly_LoadGate_Patch FfaDamageDealtTrackerPatch FfaLate_CallInHold_Patch FfaLate_ForceQuarantine_Patch FfaLate_NoMapReport_Patch FfaLate_NoSyncReply_Patch FfaLate_PickQuarantine_Patch FfaLate_Register_Patch FfaLate_Simulated_Patch FfaLate_Visible_Patch FfaReadmit_RegisterOrder_Patch FtChurnFreezePatch FtDrive_InputPatch FtDrive_PickPatch FtPhotonEPatch FtPhotonXPatch FtRoomGateNchRoutinePatch FtRoomGateNchVoidPatch FtRoomGatePunPatch FtRoute_SendPatch FtSockPatch GMArmsRaceAwakePatch GMArmsRaceOnEnable_4Player_Patch GMArmsRaceStartGameBlockResetPatch GMArmsRace_DoStartGame_Ffa_Patch GMArmsRace_DoStartGame_PopupCarrier_Patch GMArmsRace_DoStartGame_SameCards_Patch GMArmsRace_NextRound_Ffa_Patch GMArmsRace_PlayerDied_Ffa_Patch GMArmsRace_PlayerJoined_Diag_Patch GMArmsRace_StartGame_Diag_Patch GameCrownHandler2v2Patch GameLocaleOptionsInitPatch GameOverTextTeamColorPatch GeneralInput_FfaSpawnGrace_Patch GetColorFromTeamEmptyTeamPatch GetFirstPlayerInTeamEmptyTeamPatch GrowFpsNormalizePatch GrowPreJoinSyncPatch GunApplyPlayerStuffProvenancePatch GunAttackBlockOnF5Patch GunAttackIntentCapturePatch GunDoAttacksIntentPatch GunFireBurstProvenancePatch HealSoundGuardPatch HealthBar_AttachHealOverlay_Patch HealthHandlerTakeDamageCounterPatch HealthHandler_HealOverlayReviveReset_Patch HitEvidence_BlockPatch HitEvidence_DamagePatch HitEvidence_DotPatch HitEvidence_ExecuteRpcPatch HitEvidence_FfaDoStartGamePatch HitEvidence_ForcePatch HitEvidence_ImpactPatch HitEvidence_SpawnAmmoPatch HitEvidence_SpawnNoAmmoPatch HitEvidence_SpawnSeparatePatch HitEvidence_StartGamePatch HostRoomCodeClipboardPatch IdentityClock_ExecuteRpcPatch IdentityClock_MovePlayersPatch IdentityClock_MovementPatch IdentityClock_PointStartPatch InRangeIndicatorRadiusPatch InactiveVisualsHidePatch JumpDustTeamColorPatch KeyboardFactoryPatch LandDustTeamColorPatch LineRangeEffect_FfaOwnerExclusion_Patch LobbyReadyPatch LobbyRedirectPatch LocalPlayerIdPublishPatch LocalTookDamageTrackerPatch MapArtPatch MapManager_GetSpawnPoints_2v2_Patch MapManager_GetSpawnPoints_FfaShuffle_Patch MapManager_UnloadAfterSeconds_Diag_Patch MapPhysicalColorPatch MapTransition_SetStartPos_FfaScale_Patch ModRoomChurnFreezePatch MultiPickerShowVisualsPatch MusicAdmission_SteamLobbyLatchPatch MusicSuppressionPatch NCHConnectToRegionDiagPatch NCH_OnPlayerLeftRoom_Ffa_Patch NCH_OnPlayerLeftRoom_Hold_Patch NetworkConnectionHandler_NetworkRestart_Diag_Patch NetworkConnectionHandler_OnJoinedRoom_RestyleNick_Patch NetworkReplicaSerializationObserverPatch NetworkReplicaSpectatorActivationPatch NetworkReplicaSpectatorBoundaryPatch NetworkReplicaSpectatorFfaTerminalPatch NetworkReplicaSpectatorGmTerminalPatch NetworkReplicaSpectatorRoundEndPatch NetworkReplicaSpectatorSnapshotPatch NetworkSeat_DispatchDepthPatch NetworkSeat_LifecycleDiePatch NetworkSeat_LifecyclePhoenixPatch NetworkSeat_LifecycleRevivePatch NetworkSeat_MovementCapturePatch NetworkSeat_OnSerializeWritePatch NetworkSeat_RaiseEventInternalPatch NetworkSeat_RunViewUpdatePatch NetworkSeat_SendOutgoingDepthPatch OnEnablePatch OutOfBoundsHandler_FfaScale_Patch OverlayGate_ArmsRaceDebugKeys_Patch OverlayGate_ArtHandler_Patch OverlayGate_ButtonJoinRoom_Patch OverlayGate_CharacterSelect_Patch OverlayGate_CreatorDragging_Patch OverlayGate_CreatorNavigation_Patch OverlayGate_CreatorPortrait_Patch OverlayGate_DevConsoleDialog_Patch OverlayGate_EscapeMenu_Patch OverlayGate_FriendInvite_Patch OverlayGate_GeneralInput_Patch OverlayGate_GoBack_Patch OverlayGate_MultiOptions_Patch OverlayGate_PlayerAssigner_Patch OverlayGate_PopUp_Patch OverlayGate_RemoteControl_Patch OverlayGate_UIBlockList_Patch OverlayGate_UIBlockPlayer_Patch OverpowerNonPlayerTargetPatch OvtExtraPickPatch OvtExtraPickRestorePickerPatch PhoenixRespawnPatch PhotonMapObject_Start_FfaScale_Patch PhotonNetwork_LeaveRoom_Diag_Patch PlayerAssigner_CreatePlayer_2v2_Patch PlayerManagerResetCharactersBlockResetPatch PlayerManagerRevivePlayersWeaponCooldownPatch PlayerManager_GetClosestPlayerInTeam_Ffa_Patch PlayerManager_GetOtherPlayer_Ffa_Patch PlayerManager_MovePlayers_FfaScale_Patch PlayerManager_PlayerDied_Ffa_Patch PlayerNameTeamColorPatch PlayerNicknameLabelRefreshPatch PlayerNicknameRepairPatch PlayerSkinBank_GetPlayerSkinColors_2v2_Patch PlayerVelocity_TeardownDrive_Patch Player_FullReset_CardBaseline_Patch Player_Start_Diag_Patch PointEndEvidencePatch PointVisualizerTeamColorPatch PoisonArmPatch PoisonDeathFlushPatch PoisonDotSchedulerPatch PoisonEffectRegistrationPatch PoisonGhostPatch PoisonHitBracketPatch PoisonPhoenixBoundaryPatch PoisonPointBoundaryPatch PoisonReviveFencePatch PoisonRpcStampPatch PopUpHandler_StartPicking_Competitive_Patch ProjectileHit_DirectHitCounter_Patch QuickplayChurnAbandonGuardPatch QuickplayChurnFreezePatch RadarVisualLifetimePatch ReadyUpPatch RematchTextTeamColorPatch RemotePlayerIdOrderPatch ResetMenuPatch RosterCensus_MapBoundary_Patch RoundCounterTeamColorPatch RpcDispatchGuardPatch RpcLocalSendDepthPatch SawDeadTargetPatch SawLiveTargetPatch SawPointEvidencePatch ScreenshakerDisablePatch SeatEvidence_DoBlockPatch SeatEvidence_RpcSendPatch SeatEvidence_TryBlockMePatch ShotProvenanceEpochPatch SilenceDisableCapturePatch SilenceStartPatch SilenceStartRewirePatch SonigonPlayGuardPatch SonigonVoiceUpdateGuardPatch SpawnOnImpactFieldDiagPatch Spectator_BoundaryObserver_Patch Spectator_EntryIsNotMatchFound_Patch Spectator_LeaveIsInvisible_Patch Spectator_MapLoadCompleted_Patch Spectator_MapLoadGate_Patch Spectator_NoAssignerPoll_Patch Spectator_NoCardPickRpc_Patch Spectator_NoCreatePlayer_Patch Spectator_NoDoStartGame_Patch Spectator_NoGameOverTransition_Patch Spectator_NoGmPlayerDied_Patch Spectator_NoGmPlayerJoined_Patch Spectator_NoGmTest_Patch Spectator_NoInboundMapReports_Patch Spectator_NoJoinPrompt_Patch Spectator_NoMapAuthority_CallInBare_Patch Spectator_NoMapAuthority_CallIn_Patch Spectator_NoMapAuthority_Load_Patch Spectator_NoMapObjectAuthority_Patch Spectator_NoMapReport_Patch Spectator_NoPlatformProgress_Patch Spectator_NoPlatformUnlock_Patch Spectator_NoStartGame_Patch Spectator_NoSyncReply_Patch Spectator_NoVanillaEscMenu_Patch Spectator_NonLethalDamage_Patch Spectator_ObserveNextRound_Patch Spectator_OrphanSerializationMute_Patch Spectator_PreActivationPickQuarantine_Patch Spectator_RegistrationFirewall_Patch Spectator_ReplayQuarantine_Patch Spectator_ReplayTag_Patch Spectator_SyncUpNoWait_Patch StaleProjectileSweepPatch StartPickingPatch StunDisableCapturePatch StunPlayerFreshVictimPatch StunStartPatch TeamGameLifecycle_DoStartGame_Patch TeamGameLifecycle_GameOverTransition_Patch TeamHold_DoPickPatch TeamHold_GameOverPatch TeamHold_GameStartPatch TeamHold_OfflinePickPatch TeamHold_PhoenixClaimPatch TeamHold_PickSeamPatch TeamHold_PointTransitionPatch TeamHold_RematchFencePatch TeamHold_RoundTransitionPatch TeleportToOpponentFreshVictimPatch WeaponCooldownPhoenixDiagPatch WeaponHandlerAttackIntentPatch WeaponHandler_FfaSpawnGrace_Patch Wobble_DancePatch'
     seg    = 'abc achievements actions active active-color active-cursor-color active-player-color active-player-effect active-title active-trail admin admins alerts all-series-paged allow-spectators api appear-offline artist artists auth auto ban banned-users beat bets bettable block blocks bracket-detail bridge-unmute broadcast bug-reports build-type by-room cancel card-evidence card-tiers cards casual-dc catalog-cosmetic-placement chat check check-status client close color-toggle combat-evidence comment compare compat-outcome continuation cosmetic-frames cosmetic-placement cosmetic-preview cosmetic-release-candidates cosmetic-review cosmetic-submissions count create current data decline delete earners escape exclude ffa ffa-history flagged-matches force-start-vote forfeit full game games gift gold-sources grant grant-achievement grants health heartbeat hide-gold history history-detail hold identity-clock-evidence inbox inventory items join kick leaderboard leaders-summary leave lfp-ping link-code list live-points lobbies lobby lobby-bets lockdown logs macro-evidence mail mailbox maintenance manual-pick-toggle match matches mine mod mod-version moderate motion music mute mute-by-message mutes my-active-matches my-submissions nametag-toggle nemesis newest offer online open ovt ovt-history pack participant-attest pc pc-face ping play-now player-nemesis players poll portal-session pref-same-cards preferred-team preflight prefs presence purchase quarantine queue queues rank-tiers ranked-friends rate ratings read readmit ready recent recent-multimode recent-series records release-notes releases reply report report-dc report-disconnect report-status resolve resolve-flag-restoration reverse-series review-flag revoke sales sales-board search seat-evidence series set set-artist set-desc set-name set-price set-stock settings shop show-discord signup similar spawn-confirm spectate start state status steam submit-cosmetic submit-cosmetic-finalize submit-cosmetic-frame submit-cosmetic-gif summary target team team-bets team-history team-matches team-stats time-vote title-ladders toggle-ranked top-pickers tournaments unban unblock unlock unmute unsignup validate ws'
     comp     = 'CombatEvidence HitEvidence SeatEvidence IdentityClockEvidence CardDrawEvidence PointEvidence PeerBuild Cal'
     op       = 'ce_build se_build cd_build ic_build enqueue spool pump answer hash_start hash_now'
-    # the writer types of the window line's wu= and tok= (B11 D5): this ONE constant is the whole set the form admits.
-    # PROVISIONAL until P1 names the set; today it is P1's FtLedger.TypeNames (FtUpload.cs, branch claude/ft-b11-p1)
-    wtype    = 'log hash'
+    # the writer types of the window line's wu= and tok= and of the ledger line's types= (B11 D5): this ONE constant is
+    # the whole set those forms admit; it is FtLedger.TypeNames (plugin/FtUpload.cs:104). wa= prints three of them in a
+    # fixed order and has its own exact placeholder (wa below)
+    wtype    = 'log hash recv sock'
+    # the photon patches line's names= (FtPhoton.ReportPatched): DeclaringType.Name + "." + Name of each target,
+    # XNames on PhotonPeer and ENames on LoadBalancingClient (plugin/FtPhoton.cs:23-34)
+    pname    = 'PhotonPeer.DispatchIncomingCommands PhotonPeer.SendOutgoingCommands PhotonPeer.SendAcksOnly PhotonPeer.Service LoadBalancingClient.OnOperationResponse LoadBalancingClient.OnEvent LoadBalancingClient.OnStatusChanged LoadBalancingClient.DebugReturn LoadBalancingClient.OnMessage LoadBalancingClient.OnDisconnectMessageReceived'
     input    = 'none sentinel sentinel_changed sentinel_problems clock perf_probe ic_fixture in_room game_started complete escape rematch_timeout menu_mode room own_sha room_name region fighters peer matchIsRanked'
     problem  = 'stat bad-line bad-seed bad-force bad-f18 bad-plant_us bad-menu bad-menu_segments'
     region   = 'asia au cae cn eu hk in jp kr ru rue sa tr uae us usw ussc za'
@@ -162,11 +172,15 @@ $FormPh = @{
     room = 'ft_[0-9a-f]{8}'; actor = '[0-9]{1,4}'; pt = '-?[0-9]{1,6}\.-?[0-9]{1,6}\.-?[0-9]{1,6}'; bool = '(?:True|False)'
     spins = '[0-9]{1,19}/[0-9]{1,19}(?:,[0-9]{1,19}/[0-9]{1,19})*'; f2 = '-?[0-9]{1,9}\.[0-9]{2}'
     why = '(?:start|patches|game[0-9]{1,6}|menu[0-9]{1,6})'
+    # a .NET type or class name as the build prints it (ex.GetType().Name, type.Name): letters, digits, underscore
+    ident = '[A-Za-z0-9_]{1,128}'; una = '(?:[0-9]{1,19}|NA)'; ina = '(?:-?[0-9]{1,19}|NA)'
     build = '[0-9]{1,4}(?:\.[0-9]{1,4}){1,3}\|(?:standalone|thunderstore)\|(?:nosha|[0-9a-f]{12})'
 }
 function FormSet([string]$name) { return '(?:' + ((@($FormSets[$name] -split ' ') | ForEach-Object { [regex]::Escape($_) }) -join '|') + ')' }
 $FormPh.shape = '(?:' + (FormSet 'shape').Substring(3).TrimEnd(')') + '|entry[0-9]{1,3})'
-$FormPh.input = FormSet 'input'
+# FtArm's reason: a token of the set, error_<exception type name> when its check threw (plugin/FtArm.cs:191, :223),
+# or FtArm.Why's initial "not evaluated" (FtDrive's disarmed line prints FtArm.Why)
+$FormPh.input = '(?:' + (FormSet 'input') + '|error_' + $FormPh.ident + '|not evaluated)'
 $FormPh.region = FormSet 'region'
 $FormPh.roomname = '(?:' + $FormPh.room + '|\(none\)|\(empty\))'
 $FormPh.route = '(?:' + (FormSet 'method') + '_(?:local|other|cosmetics-zip|emoji-sheet|music-asset|' + (FormSet 'host') +
@@ -188,6 +202,9 @@ $FormText = @(
     '[FRAME-TIME] a3rows registered=<u> expected=<u> missing=<u> duplicates=<u>'
     '[FRAME-TIME] a3drain g=<n> k=<@a3k> starts=<n> nonempty=<n> faults=<n>'
     '[FRAME-TIME] a3 g=<n> k=<@a3k> cap=<n> steady=<b> reads_on=<n> reads_win=<n> writes_on=<n>'
+    # the FrameTimeRef build's a3 lines (plugin/FtA3.cs:65, :339): no row registers
+    '[FRAME-TIME] a3rows registered=0 expected=<u> ref=NA'
+    '[FRAME-TIME] a3 g=<n> ref=NA rows=<u>'
     '[FRAME-TIME] cal i=<n> why=game<u> kind=a3 k=<@a3k> live=1 reads=<n> scopes=<n> ticks=<n> tmax=<n> unscoped=<n> depth_err=<n>'
     '[FRAME-TIME] cal i=<n> why=<why> kind=a3 k=<@a3k> withheld=1'
     '[FRAME-TIME] cal i=<n> why=<why> kind=a3 k=<@a3k> failed: no calibration'
@@ -225,14 +242,36 @@ $FormText = @(
     '[FRAME-TIME] sitting complete g=<n>'
     '[FRAME-TIME] census registered=<u> expected=<u> missing=<u> duplicates=<u>'
     '[FRAME-TIME] between g=<n> after=<=ON|OFF|> ticks=<n> calls=<n>'
+    # the point line as V6 prints it (plugin/FtFrames.cs:260-278): the fields below, then FtLedger.SockStats
+    # (plugin/FtUpload.cs:345) and the allocation and heap fields
+    '[FRAME-TIME] p pt=<pt> arm=<=ON|OFF> gate=<b> pred=<=none|ON|OFF> n=<n> sF=<n> sS=<n> sC=<n> maxF=<n> pn=<n> psF=<n> psS=<n> psC=<n> sP=<n> psP=<n> excl=<n> plant_mixed=<n> windows=<n> live_frames=<n> missing_end=<n> span_g=<n> span_gn=<n> span_u=<n> span_un=<n> on_calls=<n> guarded=<n> zs=<n> zl=<n> t0=<n> t1=<n> answer=<=replay|unmeasured> off_g=<n> off_gn=<n> off_on=<n> on_guarded=<n> own_split=<n> span_class_overflow=<n> gc_read_failures=<n> recv_offmain=<n> ledger_cycle_miss=<n> sock_p95=<una> sock_n=<n> sock_thr=<n> sock_main=<n> ab_back=<n> ab_retry=<n> heap=<n>'
+    # the point line of the lane's earlier builds (the identity corpus), which ended at answer=
     '[FRAME-TIME] p pt=<pt> arm=<=ON|OFF> gate=<b> pred=<=none|ON|OFF> n=<n> sF=<n> sS=<n> sC=<n> maxF=<n> pn=<n> psF=<n> psS=<n> psC=<n> sP=<n> psP=<n> excl=<n> plant_mixed=<n> windows=<n> live_frames=<n> missing_end=<n> span_g=<n> span_gn=<n> span_u=<n> span_un=<n> on_calls=<n> guarded=<n> zs=<n> zl=<n> t0=<n> t1=<n> answer=<=replay|unmeasured>'
-    # the window line (B11 SHARED.md "The window line"): the fields the line printed before, in place, then the
-    # per-window record in the contract's order. prun= is the plant-run flag (the line's own plant= stays the planted
-    # flag) and the line's own partial= is its only partial flag: no key is appended twice. Exportable also refuses a
-    # matched window line that carries a key twice, or whose tok= writer types differ from its wu= ones (WindowKeysRefused)
+    # the window line (B11 SHARED.md "The window line" and "The window line, V6 additions"; plugin/FtFrames.cs:306-344):
+    # the fields the line printed before, in place, then the per-window record in the contract's order, then V6's
+    # fields after nm=. prun= is the plant-run flag (the line's own plant= stays the planted flag) and the line's own
+    # partial= is its only partial flag: no key is appended twice. ExportLine also refuses a matched window line that
+    # carries a key twice, or whose tok= writer types differ from its wu= ones (WindowKeysRefused)
+    '[FRAME-TIME] w pt=<pt> arm=<=ON|OFF> plant=<b> partial=<b> n=<n> sF=<n> sS=<n> sC=<n> sP=<n> maxF=<n><wfull> gc=<n> run=<u> pos=<=1|2|3|4> unit=<=P13|P24> coin=<b> wi=<u> f0=<n> pred=<=ON|OFF|none> prun=<b> res=<b> gcn=<u> cG=<cg> cW=<n> cR=<n> cS=<n> cE=<n> q=<n10> r=<n10> qn=<u10> wu=<wu> tok=<tok> nm=<u> cP=<n> cX=<n> aC=<ina> aW=<ina> aR=<ina> aS=<ina> aP=<ina> aX=<ina> wa=<wa>'
+    # the window line of the lane's V5 builds, which ended at nm=
     '[FRAME-TIME] w pt=<pt> arm=<=ON|OFF> plant=<b> partial=<b> n=<n> sF=<n> sS=<n> sC=<n> sP=<n> maxF=<n><wfull> gc=<n> run=<u> pos=<=1|2|3|4> unit=<=P13|P24> coin=<b> wi=<u> f0=<n> pred=<=ON|OFF|none> prun=<b> res=<b> gcn=<u> cG=<cg> cW=<n> cR=<n> cS=<n> cE=<n> q=<n10> r=<n10> qn=<u10> wu=<wu> tok=<tok> nm=<u>'
     # the boot line that gives the cost of one class transition (FtSpan mark), once per boot
     '[FRAME-TIME] mark cost cyc=<n> p90=<n> n=<u>'
+    # V6's boot lines (ruling R6-A3.11.147 (5)): the allocation counter's init and pin (plugin/FtAlloc.cs:79, :156), the
+    # scope plant and census (plugin/FtSpan.cs:338, plugin/FtCensus.cs:166), the nest plant and the photon patches
+    # (plugin/FtPhoton.cs:121, :69), the control switch (plugin/FtSpan.cs:120) and the disk-log tap
+    # (plugin/FtUpload.cs:368)
+    '[FRAME-TIME] alloc_init why=<allocwhy>'
+    '[FRAME-TIME] alloc pin=<=ok|differs> planted=<una>/<u> empty=<una>'
+    '[FRAME-TIME] scope plant asked=<n> got=<ina>'
+    '[FRAME-TIME] scope census entries=<u> wrapped=<u><censusfail>'
+    '[FRAME-TIME] nest plant asked=<n> x=<ina> e=<ina> p=<ina>'
+    '[FRAME-TIME] photon patches n=<u> names=<pnames>'
+    '[FRAME-TIME] controls k_mutant=<=none|k1|k2|k3>'
+    '[FRAME-TIME] ledger log=<b> why=<ledgerwhy> types=<wtypes>'
+    # the attach line (ruling R6-A3.11.151 (3)): one entry per patch class of the build, a name of letters, digits
+    # and the underscore
+    '[FRAME-TIME] attach n=<u> of=<u> missing=<attmissing> names=<attnames>'
     # the window line of the lane's earlier builds (the identity corpus), which ended at gc=
     '[FRAME-TIME] w pt=<pt> arm=<=ON|OFF> plant=<b> partial=<b> n=<n> sF=<n> sS=<n> sC=<n> sP=<n> maxF=<n><wfull> gc=<n>'
     '[FRAME-TIME] heavy g=<n> op=<@op> live=<n> between=<n> pick=<n> over=<n> menu=<n> at_call=<n> edge=<n> off=<n>'
@@ -245,6 +284,8 @@ $FormText = @(
     '[FRAME-TIME] menu_base base_us=<n> seg=<n>'
     '[FRAME-TIME] menu_done why=<input> segs=<n> of=<n> base_us=<n> cycles=<n>'
     '[FRAME-TIME] game start failed: menu=1 process'
+    # the counters line as V6 prints it (plugin/FtSchedule.cs:341-344), then the one of the lane's earlier builds
+    '[FRAME-TIME] counters g=<n> frames=<n> missing_end=<n> cycle_failures=<n> span_depth_violations=<n> photon_offmain=<n> span_leave_mismatch=<n>'
     '[FRAME-TIME] counters g=<n> frames=<n> missing_end=<n> cycle_failures=<n> span_depth_violations=<n>'
     '[FRAME-TIME] flushed g=<n> why=<=next_game|settle|quit>'
     '[FRAME-TIME] opened g=<n> se=<b> ce=<b> ic=<b>'
@@ -258,6 +299,9 @@ $FormText = @(
     '[FRAME-TIME] peer known actor=<actor> ft_dll=<x8>'
     '[FRAME-TIME] room call refused op=<@roomop> name=<roomname> n=<u>'
     '[FRAME-TIME] FT-GATE patched <u> entry points expected=<u> excluded=<gateex>'
+    # the same with the targets it did not find (plugin/FtRoomGate.cs:111, :122, :142); a sweep failure's text is
+    # no target name, and that line leaves only by the redaction form below
+    '[FRAME-TIME] FT-GATE patched <u> entry points expected=<u> excluded=<gateex> missing=<gatemissing>'
     '[FRAME-TIME] FT-ROOM joined offline=<b> name=<roomname>'
     '[FRAME-TIME] churn timer frozen room=<room>'
     '[FRAME-TIME] rematch mutant: answered Yes at once'
@@ -272,7 +316,7 @@ $FormText = @(
     '[FRAME-TIME] refused <refpair> n=<u>'
     '[FRAME-TIME] refusals why=<rwhy> pairs=<u><pairs>'
     '[FRAME-TIME] plant c_plant=<n> ticks=<n> from=<pt>'
-    '[FRAME-TIME] answer_replay g=<n> ticks=<n> result=<=settled|kept|enqueue_failed|not_running|e>'
+    '[FRAME-TIME] answer_replay g=<n> ticks=<n> result=<replayresult>'
     '[FPSCAP] held by frame-time calibration'
     '[FPSCAP] hold released'
     '[FPSCAP] released (restored target=<n> vsync=<n>, focused=<bool>)'
@@ -310,7 +354,8 @@ $FormText = @(
 )
 function FormList([string]$set, [string]$sep) { $s = FormSet $set; return '(?:' + $s + '(?:' + [regex]::Escape($sep) + $s + ')*)' }
 $FormPh.problems = '(?: problems=' + (FormList 'problem' ',') + ')?'
-$FormPh.spans = '(?: (?:live|between|pick|over|menu)\.(?:in|out)\.(?:gated|upkeep|replay)=[0-9]{1,19}/[0-9]{1,19})*'
+# FtSpan.MomentNames . in|out . FtSpan.KindNames (plugin/FtSpan.cs:48, :53) = ticks/calls
+$FormPh.spans = '(?: (?:live|between|pick|over|menu)\.(?:in|out)\.(?:gated|upkeep|replay|writer)=[0-9]{1,19}/[0-9]{1,19})*'
 $FormPh.cloudtail = '(?:/\*)?'
 $FormPh.gateex = '(?:' + (FormList 'gateex' ',') + ')?'
 $FormPh.rwhy = '(?:quit|game-?[0-9]{1,6})'
@@ -327,17 +372,52 @@ $FormPh.wfull = '(?: medF=-?[0-9]{1,19} e4=-?[0-9]{1,19},-?[0-9]{1,19} e8=-?[0-9
 $FormPh.cg = '(?:-?[0-9]{1,19}|NA)'
 $FormPh.n10 = '(?:-?[0-9]{1,19},){9}-?[0-9]{1,19}'
 $FormPh.u10 = '(?:[0-9]{1,19},){9}[0-9]{1,19}'
-# wu: type:units:cycles per writer type, ";"-joined (cycles NA while a scope's cycles are not measured, B11 D5); tok:
-# type:open0,enqON,enqOFF,doneON,doneOFF,disc,open1 per writer type, ";"-joined. The type of both is a token of the
-# one closed set wtype; an empty wu (and tok) is a window with no writer type
-$FormPh.wu = '(?:' + (FormSet 'wtype') + ':[0-9]{1,19}:(?:-?[0-9]{1,19}|NA)(?:;' + (FormSet 'wtype') + ':[0-9]{1,19}:(?:-?[0-9]{1,19}|NA))*)?'
+# wu: type:units:cycles per writer type, ";"-joined (cycles NA while a scope's cycles are not measured, B11 D5; the
+# reference build prints sock:NA:NA, plugin/FtUpload.cs:143); tok: type:open0,enqON,enqOFF,doneON,doneOFF,disc,open1
+# per writer type, ";"-joined. The type of both is a token of the one closed set wtype; an empty wu (and tok) is a
+# window with no writer type
+$FormPh.wuone = (FormSet 'wtype') + ':(?:[0-9]{1,19}:(?:-?[0-9]{1,19}|NA)|NA:NA)'
+$FormPh.wu = '(?:' + $FormPh.wuone + '(?:;' + $FormPh.wuone + ')*)?'
 $FormPh.tok = '(?:' + (FormSet 'wtype') + ':(?:-?[0-9]{1,19},){6}-?[0-9]{1,19}(?:;' + (FormSet 'wtype') + ':(?:-?[0-9]{1,19},){6}-?[0-9]{1,19})*)?'
+# wa: the bytes of the off-thread scopes, exactly log, hash and sock in that order, each bytes or NA (FtLedger.WaTypes,
+# plugin/FtUpload.cs:107, :164-176)
+$FormPh.wa = 'log:' + $FormPh.una + ';hash:' + $FormPh.una + ';sock:' + $FormPh.una
+$FormPh.wtypes = FormList 'wtype' ','
+$FormPh.pnames = '(?:' + (FormList 'pname' ',') + ')?'
+# alloc_init's and the ledger line's why=: the source's tokens, or failed:<exception type name>
+$FormPh.allocwhy = '(?:ok|not_init|no_module|no_path|sha|code|failed:' + $FormPh.ident + ')'
+$FormPh.ledgerwhy = '(?:ok|already|no_disk_listener|failed:' + $FormPh.ident + ')'
+$FormPh.censusfail = '(?: failed=' + $FormPh.ident + ')?'
+# answer_replay's result= (plugin/FtReplay.cs:24, SeatEvidence.FtReplayAnswer, plugin/FtSchedule.cs:104, :171, :328);
+# e is kept from the earlier form
+$FormPh.replayresult = '(?:settled|kept|enqueue_failed|not_running|e|error_' + $FormPh.ident + '|skipped_(?:live|absent|settle|next_game|quit))'
+# the attach line's missing= and names= (ruling R6-A3.11.151 (3))
+$FormPh.attmissing = '(?:none|' + $FormPh.ident + '(?:,' + $FormPh.ident + ')*)'
+$FormPh.attnames = '(?:' + $FormPh.ident + ':[0-9]{1,9}/[0-9]{1,9}(?:,' + $FormPh.ident + ':[0-9]{1,9}/[0-9]{1,9})*)?'
+# FT-GATE's missing=: NCH.<method> (absent) or <type>.<method>, ","-joined
+$FormPh.gateone = '(?:NCH\.' + $FormPh.ident + ' \(absent\)|' + $FormPh.ident + '\.' + $FormPh.ident + ')'
+$FormPh.gatemissing = $FormPh.gateone + '(?:,' + $FormPh.gateone + ')*'
 $FormPh.ver = '[0-9]{1,4}(?:\.[0-9]{1,4}){1,3}'
 $FormPh.date = '[0-9]{1,4}[/.-][0-9]{1,4}[/.-][0-9]{1,4} [0-9]{1,2}:[0-9]{2}:[0-9]{2}(?: [AP]M)?'
 $FormPrefix = '\[(?:Info   |Message|Warning|Error  |Debug  |Fatal  ):(?:Competitive ROUNDS|CompetitiveRounds)\] '
 
 function FormRegex([string]$t) {
     # one form's text to its anchored regex: literal text escaped, each placeholder replaced by its closed pattern
+    return New-Object System.Text.RegularExpressions.Regex(('^' + (FormPattern $t) + '$'),
+        [System.Text.RegularExpressions.RegexOptions]::CultureInvariant)
+}
+
+function RedactRegex([string]$t) {
+    # one redaction form's text (ending in <*>) to its regex: group keep is the line up to the text, which matches its
+    # typed head (the BepInEx prefix included) as FormRegex would; the text after it is any text
+    if (-not $t.EndsWith('<*>')) { throw "redaction form '$t' does not end in <*>" }
+    return New-Object System.Text.RegularExpressions.Regex(('^(?<keep>' + (FormPattern $t.Substring(0, $t.Length - 3)) + ').*$'),
+        [System.Text.RegularExpressions.RegexOptions]::CultureInvariant)
+}
+
+function FormPattern([string]$t) {
+    # the pattern of a form's text, without the anchors: the BepInEx prefix (none for a form starting "^"), then the
+    # literal text escaped and each placeholder replaced by its closed pattern
     $bare = $t.StartsWith('^')
     if ($bare) { $t = $t.Substring(1) }
     $sb = New-Object System.Text.StringBuilder
@@ -353,10 +433,45 @@ function FormRegex([string]$t) {
         $pos = $m.Index + $m.Length
     }
     [void]$sb.Append([regex]::Escape($t.Substring($pos)))
-    return New-Object System.Text.RegularExpressions.Regex(('^' + $(if ($bare) { '' } else { $FormPrefix }) + $sb.ToString() + '$'),
-        [System.Text.RegularExpressions.RegexOptions]::CultureInvariant)
+    return $(if ($bare) { '' } else { $FormPrefix }) + $sb.ToString()
 }
 $Forms = @($FormText | ForEach-Object { FormRegex $_ })
+
+# the redaction forms (ruling R6-A3.11.151 (2) class E): the failure warnings whose last field is an exception's
+# message (ex.Message, an unpatch text, a sweep failure) and Harmony's patch failure. That text is free, so it never
+# leaves: a line that matches no form above but one form here is exported as its typed head (the text before <*>,
+# matched as a form) followed by $RedactToken in place of the text. The head keeps the line's kind, so ft_parse.py reads
+# the failure from the export as from the raw line (its forms read these lines by their words). Every other line that
+# matches no form is withheld
+$RedactToken = '(not-exported)'
+$RedactText = @(
+    # plugin/Plugin.cs, GameStateWatcher.cs: the FrameTime start and the game's hooks
+    '[FRAME-TIME] start failed: <*>'
+    '[FRAME-TIME] game start failed: <*>'
+    '[FRAME-TIME] game over failed: <*>'
+    '[FRAME-TIME] game end failed: <*>'
+    '[FRAME-TIME] opened line failed: <*>'
+    # plugin/FtArm.cs, FtDrive.cs, FtRematch.cs, FtRoomGate.cs, Plugin.cs (the reports after the patch loop)
+    '[FRAME-TIME] ft_dll staging failed: <*>'
+    '[FRAME-TIME] self-drive join failed: <*>'
+    '[FRAME-TIME] self-drive spawn threw: <*>'
+    '[FRAME-TIME] self-drive spawn tick failed: <*>'
+    '[FRAME-TIME] rematch publish failed: <*>'
+    '[FRAME-TIME] rematch answer failed: <*>'
+    '[FRAME-TIME] FT-ROOM read failed: <*>'
+    '[FRAME-TIME] churn freeze failed: <*>'
+    '[FRAME-TIME] FT-GATE report failed: <*>'
+    '[FRAME-TIME] photon patches report failed: <*>'
+    '[FRAME-TIME] FT-GATE patched <u> entry points expected=<u> excluded=<gateex> missing=<*>'
+    # the calibration's failures (plugin/FtCalib.cs, FtA3.cs, Plugin.cs); the typed failure texts are forms above
+    '[FRAME-TIME] cal i=-1 why=patches kind=entries failed: <*>'
+    '[FRAME-TIME] cal i=<n> kind=<=fhat|disp|a3|disp entries> failed: <*>'
+    '[FRAME-TIME] cal i=<n> why=<why> kind=a3 k=<@a3k> failed: <*>'
+    '[FRAME-TIME] cal i=<n> why=<why> kind=disp shape=<shape> failed: <*>'
+    # the patch loop's failure line (plugin/Plugin.cs, Awake), which ruling R6-A3.11.151 (3)'s guard ATTACH reads
+    '[HARMONY] Failed to patch <ident>: <*>'
+)
+$Redacts = @($RedactText | ForEach-Object { RedactRegex $_ })
 
 function WriterTypes([string]$v) {
     # the writer types of a wu= or tok= value ("type:...;type:..."), sorted and ";"-joined; $null when one is there twice
@@ -391,14 +506,23 @@ function WindowKeysRefused([string]$ln) {
     return ($null -eq $a) -or ($null -eq $b) -or ($a -cne $b)
 }
 
-function Exportable([string]$ln) {
-    # the export rule: true only when the whole line matches one form, and a window line also passes
-    # WindowKeysRefused (the self-test's export_all mutant is the negative control: it exports every selected line,
-    # as the substring selection did)
-    if ($script:Mutant -eq 'export_all') { return $true }
-    foreach ($f in $Forms) { if ($f.IsMatch($ln)) { return -not (WindowKeysRefused $ln) } }
-    return $false
+function ExportLine([string]$ln) {
+    # the export rule: the line itself when the whole line matches one form of $FormText (a window line only when it
+    # also passes WindowKeysRefused); else, when it matches one redaction form, its typed head and $RedactToken; else
+    # $null, withheld (the self-test's export_all mutant is the negative control: it exports every selected line
+    # whole, as the substring selection did)
+    if ($script:Mutant -eq 'export_all') { return $ln }
+    foreach ($f in $Forms) {
+        if ($f.IsMatch($ln)) { if (WindowKeysRefused $ln) { return $null } else { return $ln } }
+    }
+    foreach ($f in $Redacts) {
+        $m = $f.Match($ln)
+        if ($m.Success) { return $m.Groups['keep'].Value + $RedactToken }
+    }
+    return $null
 }
+
+function Exportable([string]$ln) { return $null -ne (ExportLine $ln) }
 
 function SliceExport([string[]]$lines) {
     # the selection and the export of step 4, on the log's lines: Slice (every selected line, for slice.log), Count
@@ -418,7 +542,8 @@ function SliceExport([string[]]$lines) {
         # the self-test's drop_w mutant restores the skip the window lines had before ruling R6-A3.11.133 (2)
         if ($script:Mutant -eq 'drop_w' -and $ft -and $ln.Contains('[FRAME-TIME] w ')) { continue }
         if (-not $ft) { $r.CompAll++ }
-        if (Exportable $ln) { if ($ft) { $r.Log.Add($ln) } else { $r.Comp.Add($ln) } }
+        $x = ExportLine $ln
+        if ($null -ne $x) { if ($ft) { $r.Log.Add($x) } else { $r.Comp.Add($x) } }
         else { foreach ($cls in $hit) { if ($ft) { $wLog[$cls]++ } else { $wComp[$cls]++ } } }
     }
     foreach ($cls in $SliceClasses) {
@@ -767,17 +892,19 @@ $SimFt = @(
     ($SimPre + '[FRAME-TIME] cal i=0 why=start kind=entries reference=1 built=0'),
     ($SimPre + '[FRAME-TIME] mark cost cyc=41 p90=57 n=4096'),
     ($SimPre + '[FRAME-TIME] settled g=-1 seed=1 c_plant=-1 W=120 vsync=0 target=-1 freq=10000000 hires=1 f_hat=2978789260 gc_incremental=1 gc_slice_ns=3000000 f18=A answer=replay armfile=1 force=none clock=1 frames=0 missing_end=0 cycle_failures=0 span_depth_violations=0'),
-    ($SimPre + '[FRAME-TIME] p pt=1.1.1 arm=ON gate=0 pred=none n=500 sF=1 sS=1 sC=1 maxF=1 pn=0 psF=0 psS=0 psC=0 sP=1 psP=0 excl=0 plant_mixed=0 windows=4 live_frames=501 missing_end=0 span_g=0 span_gn=0 span_u=0 span_un=0 on_calls=0 guarded=0 zs=0 zl=1 t0=1 t1=2 answer=replay'),
+    ($SimPre + '[FRAME-TIME] p pt=1.1.1 arm=ON gate=0 pred=none n=500 sF=1 sS=1 sC=1 maxF=1 pn=0 psF=0 psS=0 psC=0 sP=1 psP=0 excl=0 plant_mixed=0 windows=4 live_frames=501 missing_end=0 span_g=0 span_gn=0 span_u=0 span_un=0 on_calls=0 guarded=0 zs=0 zl=1 t0=1 t1=2 answer=replay off_g=0 off_gn=0 off_on=0 on_guarded=0 own_split=0 span_class_overflow=0 gc_read_failures=0 recv_offmain=0 ledger_cycle_miss=0 sock_p95=NA sock_n=0 sock_thr=0 sock_main=0 ab_back=0 ab_retry=0 heap=50000000'),
     ($SimPre + '[FRAME-TIME] refusals why=quit pairs=2 closing:e=1 route:GET_192.168.72.102/api/{n}/mod-version=1'))
 # the point's four window lines (its p line counts windows=4), each exported: full and partial, planted and not, a
 # plant run and not, cG measured and NA, wu cycles measured and NA, both writer types in either order, one type, and an
 # empty wu with its empty tok
 $SimWTail = ' q=5,-1,0,0,0,0,0,0,0,7 r=1,0,0,0,0,0,0,0,0,2 qn=12,12,12,12,12,12,12,12,12,12'
+# V6's fields after nm= (SHARED.md "The window line, V6 additions"): cP, cX and aC here, the class bytes and wa per line
+$SimV6 = ' cP=7 cX=-2 aC=1000'
 $SimWindow = @(
-    ($SimPre + '[FRAME-TIME] w pt=1.1.1 arm=ON plant=0 partial=0 n=120 sF=9 sS=1 sC=11 sP=0 maxF=4 medF=1 e4=0,1 e8=0,0 e16=0,0 gc=0 run=0 pos=1 unit=P13 coin=1 wi=0 f0=12 pred=none prun=0 res=0 gcn=0 cG=NA cW=0 cR=3 cS=0 cE=0' + $SimWTail + ' wu=log:2:340;hash:1:NA tok=log:0,1,0,1,0,0,0;hash:1,0,1,0,1,0,1 nm=4'),
-    ($SimPre + '[FRAME-TIME] w pt=1.1.1 arm=OFF plant=1 partial=0 n=120 sF=9 sS=1 sC=11 sP=0 maxF=4 medF=1 e4=0,1 e8=0,0 e16=0,0 gc=1 run=0 pos=2 unit=P24 coin=0 wi=1 f0=132 pred=ON prun=1 res=0 gcn=1 cG=812 cW=0 cR=3 cS=0 cE=0' + $SimWTail + ' wu= tok= nm=0'),
-    ($SimPre + '[FRAME-TIME] w pt=1.1.1 arm=OFF plant=0 partial=0 n=120 sF=9 sS=1 sC=11 sP=0 maxF=4 medF=1 e4=0,1 e8=0,0 e16=0,0 gc=0 run=0 pos=3 unit=P13 coin=1 wi=2 f0=252 pred=OFF prun=1 res=0 gcn=0 cG=0 cW=0 cR=3 cS=0 cE=0' + $SimWTail + ' wu=hash:1:12;log:3:96 tok=log:1,2,1,2,1,0,1;hash:0,1,0,1,0,0,0 nm=2'),
-    ($SimPre + '[FRAME-TIME] w pt=1.1.1 arm=ON plant=0 partial=1 n=30 sF=3 sS=1 sC=4 sP=0 maxF=4 gc=0 run=0 pos=4 unit=P24 coin=0 wi=3 f0=372 pred=OFF prun=0 res=1 gcn=0 cG=NA cW=0 cR=1 cS=0 cE=0 q=2,1,0,0,0,0,0,0,0,0 r=1,0,0,0,0,0,0,0,0,0 qn=12,12,6,0,0,0,0,0,0,0 wu=log:1:30 tok=log:0,1,0,1,0,0,0 nm=1'))
+    ($SimPre + '[FRAME-TIME] w pt=1.1.1 arm=ON plant=0 partial=0 n=120 sF=9 sS=1 sC=11 sP=0 maxF=4 medF=1 e4=0,1 e8=0,0 e16=0,0 gc=0 run=0 pos=1 unit=P13 coin=1 wi=0 f0=12 pred=none prun=0 res=0 gcn=0 cG=NA cW=0 cR=3 cS=0 cE=0' + $SimWTail + ' wu=log:2:340;hash:1:12;recv:0:0;sock:0:0 tok=log:0,1,0,1,0,0,0;hash:1,0,1,0,1,0,1;recv:0,0,0,0,0,0,0;sock:0,0,0,0,0,0,0 nm=4' + $SimV6 + ' aW=0 aR=0 aS=0 aP=0 aX=0 wa=log:0;hash:0;sock:0'),
+    ($SimPre + '[FRAME-TIME] w pt=1.1.1 arm=OFF plant=1 partial=0 n=120 sF=9 sS=1 sC=11 sP=0 maxF=4 medF=1 e4=0,1 e8=0,0 e16=0,0 gc=1 run=0 pos=2 unit=P24 coin=0 wi=1 f0=132 pred=ON prun=1 res=0 gcn=1 cG=812 cW=0 cR=3 cS=0 cE=0' + $SimWTail + ' wu=log:0:0;hash:0:0;recv:0:0;sock:0:0 tok=log:0,0,0,0,0,0,0;hash:0,0,0,0,0,0,0;recv:0,0,0,0,0,0,0;sock:0,0,0,0,0,0,0 nm=0' + $SimV6 + ' aW=NA aR=NA aS=NA aP=NA aX=NA wa=log:NA;hash:NA;sock:NA'),
+    ($SimPre + '[FRAME-TIME] w pt=1.1.1 arm=OFF plant=0 partial=0 n=120 sF=9 sS=1 sC=11 sP=0 maxF=4 medF=1 e4=0,1 e8=0,0 e16=0,0 gc=0 run=0 pos=3 unit=P13 coin=1 wi=2 f0=252 pred=OFF prun=1 res=0 gcn=0 cG=0 cW=0 cR=3 cS=0 cE=0' + $SimWTail + ' wu=log:3:96;hash:1:12;recv:0:0;sock:0:0 tok=log:1,2,1,2,1,0,1;hash:0,1,0,1,0,0,0;recv:0,0,0,0,0,0,0;sock:0,0,0,0,0,0,0 nm=2' + $SimV6 + ' aW=1 aR=2 aS=3 aP=4 aX=5 wa=log:6;hash:7;sock:8'),
+    ($SimPre + '[FRAME-TIME] w pt=1.1.1 arm=ON plant=0 partial=1 n=30 sF=3 sS=1 sC=4 sP=0 maxF=4 gc=0 run=0 pos=4 unit=P24 coin=0 wi=3 f0=372 pred=OFF prun=0 res=1 gcn=0 cG=NA cW=0 cR=1 cS=0 cE=0 q=2,1,0,0,0,0,0,0,0,0 r=1,0,0,0,0,0,0,0,0,0 qn=12,12,6,0,0,0,0,0,0,0 wu=log:1:30;hash:0:0;recv:0:0;sock:NA:NA tok=log:0,1,0,1,0,0,0;hash:0,0,0,0,0,0,0;recv:0,0,0,0,0,0,0;sock:0,0,0,0,0,0,0 nm=1' + $SimV6 + ' aW=0 aR=0 aS=0 aP=0 aX=0 wa=log:0;hash:0;sock:NA'))
 # the window form's case table (B11 SHARED.md "The window line"): Name, Line, Form (the form itself refuses it) and
 # Keys (only WindowKeysRefused refuses it); each refused case sits beside its negative control (Form and Keys both
 # false: exported), the same line without the defect. Run with the key check (mutant none) every refused case must
@@ -810,6 +937,17 @@ $WFormCases = @(
     @{ Name = 'control_empty'; Form = $false; Keys = $false; Line = $WHead + ' prun=0 res=0' + $WMid + ' wu= tok= nm=0' }
     # a writer type outside the one constant wtype
     @{ Name = 'type_outside'; Form = $true; Keys = $false; Line = $WHead + ' prun=0 res=0' + $WMid + ' wu=spool:2:340 tok=spool:0,1,0,1,0,0,0 nm=4' }
+    # V6's fields after nm= (plugin/FtFrames.cs:337-344): the four writer types of the emitter, the reference build's
+    # sock:NA:NA, and its defects: a key after wa=, a key between nm= and cP=, wa's types in another order, a wa type
+    # that is no token, a V6 field missing, a free value in a V6 field
+    @{ Name = 'control_v6_four'; Form = $false; Keys = $false; Line = $WHead + ' prun=0 res=0' + $WMid + ' wu=log:2:340;hash:1:NA;recv:3:9;sock:4:12 tok=' + $WTokL + ';' + $WTokH + ';recv:0,3,0,3,0,0,0;sock:0,4,0,4,0,0,0 nm=4' + $SimV6 + ' aW=0 aR=0 aS=0 aP=0 aX=0 wa=log:0;hash:0;sock:0' }
+    @{ Name = 'control_v6_ref'; Form = $false; Keys = $false; Line = $WHead + ' prun=0 res=0' + $WMid + ' wu=log:2:340;hash:1:NA;recv:3:9;sock:NA:NA tok=' + $WTokL + ';' + $WTokH + ';recv:0,3,0,3,0,0,0;sock:0,0,0,0,0,0,0 nm=4' + $SimV6 + ' aW=0 aR=0 aS=0 aP=0 aX=0 wa=log:0;hash:0;sock:NA' }
+    @{ Name = 'v6_key_after'; Form = $true; Keys = $false; Line = $WHead + ' prun=0 res=0' + $WMid + ' wu=log:2:340 tok=' + $WTokL + ' nm=4' + $SimV6 + ' aW=0 aR=0 aS=0 aP=0 aX=0 wa=log:0;hash:0;sock:0' + ' zz=1' }
+    @{ Name = 'v6_key_inside'; Form = $true; Keys = $false; Line = $WHead + ' prun=0 res=0' + $WMid + ' wu=log:2:340 tok=' + $WTokL + ' nm=4 zz=1' + $SimV6 + ' aW=0 aR=0 aS=0 aP=0 aX=0 wa=log:0;hash:0;sock:0' }
+    @{ Name = 'v6_wa_order'; Form = $true; Keys = $false; Line = $WHead + ' prun=0 res=0' + $WMid + ' wu=log:2:340 tok=' + $WTokL + ' nm=4' + $SimV6 + ' aW=0 aR=0 aS=0 aP=0 aX=0 wa=hash:0;log:0;sock:0' }
+    @{ Name = 'v6_wa_planted'; Form = $true; Keys = $false; Line = $WHead + ' prun=0 res=0' + $WMid + ' wu=log:2:340 tok=' + $WTokL + ' nm=4' + $SimV6 + ' aW=0 aR=0 aS=0 aP=0 aX=0 wa=log:0;hash:0;planted.example:0' }
+    @{ Name = 'v6_no_ax'; Form = $true; Keys = $false; Line = $WHead + ' prun=0 res=0' + $WMid + ' wu=log:2:340 tok=' + $WTokL + ' nm=4' + $SimV6 + ' aW=0 aR=0 aS=0 aP=0 wa=log:0;hash:0;sock:0' }
+    @{ Name = 'v6_free_value'; Form = $true; Keys = $false; Line = $WHead + ' prun=0 res=0' + $WMid + ' wu=log:2:340 tok=' + $WTokL + ' nm=4 cP=7 cX=-2 aC=planted.example aW=0 aR=0 aS=0 aP=0 aX=0 wa=log:0;hash:0;sock:0' }
     # the mark-cost boot line and a defect of it
     @{ Name = 'control_mark'; Form = $false; Keys = $false; Line = $SimPre + '[FRAME-TIME] mark cost cyc=41 p90=57 n=4096' }
     @{ Name = 'mark_na'; Form = $true; Keys = $false; Line = $SimPre + '[FRAME-TIME] mark cost cyc=NA p90=57 n=4096' })
@@ -829,19 +967,29 @@ $SimForm = @(
 $SimNoForm = @(
     ($SimPre + '[SEAT-EV] record queued: 812 bytes, lists 1/2/3/4, unpaired 0/0, t0 m, end game_over'),
     ($SimPre + '[IDENTITY-CLOCK] record kept for the next launch: 3 captures'),
-    ($SimPre + '[HARMONY] Failed to patch SomePatch: the target method is missing'),
     ($SimPre + 'series state: physical game 1 of this series was voided'))
+# the lines a redaction form exports as their typed head and $RedactToken, the text never printed (the planted values
+# below), and the line each must export
+$SimRedact = @(
+    ('[Warning:CompetitiveRounds] [FRAME-TIME] game over failed: https://failure.example:8444 refused'),
+    ('[Warning:CompetitiveRounds] [FRAME-TIME] cal i=3 why=game2 kind=disp shape=CE_p1 failed: unpatch: https://unpatch.example'),
+    ('[Error  :CompetitiveRounds] [HARMONY] Failed to patch SomePatch: the target method https://patch.example is missing'))
+$SimRedactOut = @(
+    ('[Warning:CompetitiveRounds] [FRAME-TIME] game over failed: ' + $RedactToken),
+    ('[Warning:CompetitiveRounds] [FRAME-TIME] cal i=3 why=game2 kind=disp shape=CE_p1 failed: ' + $RedactToken),
+    ('[Error  :CompetitiveRounds] [HARMONY] Failed to patch SomePatch: ' + $RedactToken))
 $SimPlant = @($SliceClasses | ForEach-Object { $SimPre + 'API client initialized: https://' + $_ + '.example:8444' }) + @(
     ($SimPre + '[COMBAT-PERF] probe on, mode https://refused.example, windows of 600 frames'),
     ($SimPre + '[FRAME-TIME] refused what=route route=GET_refused.example/api/{n}/mod-version n=1'),
     ($SimPre + '[FRAME-TIME] refusals why=quit pairs=1 route:GET_voided.example/api/{n}/mod-version=1'),
-    # window lines of another point (so no window count moves), each withheld: a writer type that is no token of the
+    # window lines of another point (so no window count moves), each in V6's form and withheld: a writer type that is
+    # no token of the
     # closed set, the earlier form's appended plant= and partial=, a writer type twice, and a tok whose writer types
     # differ from wu's (the last two withheld by WindowKeysRefused alone: no_wkeys exports them)
-    ($SimPre + '[FRAME-TIME] w pt=1.1.2 arm=ON plant=0 partial=1 n=30 sF=3 sS=1 sC=4 sP=0 maxF=4 gc=0 run=1 pos=1 unit=P13 coin=1 wi=4 f0=0 pred=none prun=0 res=0 gcn=0 cG=NA cW=0 cR=1 cS=0 cE=0 q=2,1,0,0,0,0,0,0,0,0 r=1,0,0,0,0,0,0,0,0,0 qn=12,12,6,0,0,0,0,0,0,0 wu=planted.example:1:1 tok=planted.example:0,0,0,0,0,0,0 nm=0'),
-    ($SimPre + '[FRAME-TIME] w pt=1.1.2 arm=ON plant=0 partial=1 n=30 sF=3 sS=1 sC=4 sP=0 maxF=4 gc=0 run=1 pos=1 unit=P13 coin=1 wi=4 f0=0 pred=none plant=0 res=0 partial=1 gcn=0 cG=NA cW=0 cR=1 cS=0 cE=0 q=2,1,0,0,0,0,0,0,0,0 r=1,0,0,0,0,0,0,0,0,0 qn=12,12,6,0,0,0,0,0,0,0 wu=log:1:30 tok=log:0,1,0,1,0,0,0 nm=1'),
-    ($SimPre + '[FRAME-TIME] w pt=1.1.2 arm=ON plant=0 partial=1 n=30 sF=3 sS=1 sC=4 sP=0 maxF=4 gc=0 run=1 pos=1 unit=P13 coin=1 wi=4 f0=0 pred=none prun=0 res=0 gcn=0 cG=NA cW=0 cR=1 cS=0 cE=0 q=2,1,0,0,0,0,0,0,0,0 r=1,0,0,0,0,0,0,0,0,0 qn=12,12,6,0,0,0,0,0,0,0 wu=log:1:30;log:1:30 tok=log:0,1,0,1,0,0,0;log:0,1,0,1,0,0,0 nm=1'),
-    ($SimPre + '[FRAME-TIME] w pt=1.1.2 arm=ON plant=0 partial=1 n=30 sF=3 sS=1 sC=4 sP=0 maxF=4 gc=0 run=1 pos=1 unit=P13 coin=1 wi=4 f0=0 pred=none prun=0 res=0 gcn=0 cG=NA cW=0 cR=1 cS=0 cE=0 q=2,1,0,0,0,0,0,0,0,0 r=1,0,0,0,0,0,0,0,0,0 qn=12,12,6,0,0,0,0,0,0,0 wu=log:1:30 tok=hash:0,1,0,1,0,0,0 nm=1'))
+    ($SimPre + '[FRAME-TIME] w pt=1.1.2 arm=ON plant=0 partial=1 n=30 sF=3 sS=1 sC=4 sP=0 maxF=4 gc=0 run=1 pos=1 unit=P13 coin=1 wi=4 f0=0 pred=none prun=0 res=0 gcn=0 cG=NA cW=0 cR=1 cS=0 cE=0 q=2,1,0,0,0,0,0,0,0,0 r=1,0,0,0,0,0,0,0,0,0 qn=12,12,6,0,0,0,0,0,0,0 wu=planted.example:1:1 tok=planted.example:0,0,0,0,0,0,0 nm=0 cP=0 cX=0 aC=0 aW=0 aR=0 aS=0 aP=0 aX=0 wa=log:0;hash:0;sock:0'),
+    ($SimPre + '[FRAME-TIME] w pt=1.1.2 arm=ON plant=0 partial=1 n=30 sF=3 sS=1 sC=4 sP=0 maxF=4 gc=0 run=1 pos=1 unit=P13 coin=1 wi=4 f0=0 pred=none prun=0 plant=0 res=0 partial=1 gcn=0 cG=NA cW=0 cR=1 cS=0 cE=0 q=2,1,0,0,0,0,0,0,0,0 r=1,0,0,0,0,0,0,0,0,0 qn=12,12,6,0,0,0,0,0,0,0 wu=log:1:30 tok=log:0,1,0,1,0,0,0 nm=1 cP=0 cX=0 aC=0 aW=0 aR=0 aS=0 aP=0 aX=0 wa=log:0;hash:0;sock:0'),
+    ($SimPre + '[FRAME-TIME] w pt=1.1.2 arm=ON plant=0 partial=1 n=30 sF=3 sS=1 sC=4 sP=0 maxF=4 gc=0 run=1 pos=1 unit=P13 coin=1 wi=4 f0=0 pred=none prun=0 res=0 gcn=0 cG=NA cW=0 cR=1 cS=0 cE=0 q=2,1,0,0,0,0,0,0,0,0 r=1,0,0,0,0,0,0,0,0,0 qn=12,12,6,0,0,0,0,0,0,0 wu=log:1:30;log:1:30 tok=log:0,1,0,1,0,0,0;log:0,1,0,1,0,0,0 nm=1 cP=0 cX=0 aC=0 aW=0 aR=0 aS=0 aP=0 aX=0 wa=log:0;hash:0;sock:0'),
+    ($SimPre + '[FRAME-TIME] w pt=1.1.2 arm=ON plant=0 partial=1 n=30 sF=3 sS=1 sC=4 sP=0 maxF=4 gc=0 run=1 pos=1 unit=P13 coin=1 wi=4 f0=0 pred=none prun=0 res=0 gcn=0 cG=NA cW=0 cR=1 cS=0 cE=0 q=2,1,0,0,0,0,0,0,0,0 r=1,0,0,0,0,0,0,0,0,0 qn=12,12,6,0,0,0,0,0,0,0 wu=log:1:30 tok=hash:0,1,0,1,0,0,0 nm=1 cP=0 cX=0 aC=0 aW=0 aR=0 aS=0 aP=0 aX=0 wa=log:0;hash:0;sock:0'))
 # of $SimPlant, the lines only WindowKeysRefused withholds (the no_wkeys run exports exactly these)
 $SimKeysOnly = 2
 # F1's combined cases: VR6 fails and the restore fails; each must end exit 5 with "RESTORE-PROOF FAILED"
@@ -871,7 +1019,7 @@ function SelfTestOne([string]$root, [string]$mutant) {
         $script:ArmSeen = [System.Text.Encoding]::ASCII.GetString([System.IO.File]::ReadAllBytes($C.Arm))
         Move-Item -LiteralPath $C.Logs['Player.log'] -Destination $C.Logs['Player-prev.log'] -Force
         Set-Content -LiteralPath $C.Logs['Player.log'] -Value 'unity log of the sitting' -Encoding ascii
-        $sim = @($SimFt) + @($SimWindow) + @($SimForm) + @($SimNoForm) + @($SimPlant)
+        $sim = @($SimFt) + @($SimWindow) + @($SimForm) + @($SimNoForm) + @($SimRedact) + @($SimPlant)
         Set-Content -LiteralPath $C.Logs['LogOutput.log'] -Value $sim -Encoding ascii
         if ($script:Mutant -eq 'keep_prev_copy') { Copy-Item -LiteralPath $C.Logs['LogOutput.log'] -Destination $C.Logs['LogOutput-prev.log'] -Force }
         if ($script:Mutant -in @('closing_file', 'log_restore_fails', 'wait_restore_fails')) { Set-Content -LiteralPath (Join-Path $C.Config 'CompetitiveRounds.seat-evidence.closing-1') -Value 'x' -Encoding ascii }
@@ -924,7 +1072,7 @@ function SelfTestOne([string]$root, [string]$mutant) {
     if ($iL -ge 0 -and $iS -gt $iL + 1) { $secLog = @($o[($iL + 1)..($iS - 1)]) }
     if ($iC -ge 0 -and $iV -gt $iC + 1) { $secComp = @($o[($iC + 1)..($iV - 1)] | Where-Object { $_ -notlike 'component slice: *' }) }
     $planted = @($o | Where-Object { $_.Contains('.example') }).Count
-    $formOut = @(@($SimFt) + @($SimWindow) + @($SimForm) | Where-Object { $sec = if ($_.Contains('[FRAME-TIME]')) { $secLog } else { $secComp }; -not ($sec -ccontains $_) }).Count
+    $formOut = @(@($SimFt) + @($SimWindow) + @($SimForm) + @($SimRedactOut) | Where-Object { $sec = if ($_.Contains('[FRAME-TIME]')) { $secLog } else { $secComp }; -not ($sec -ccontains $_) }).Count
     $wantW = @()
     foreach ($sec in @('log', 'comp')) {
         foreach ($cls in $SliceClasses) {

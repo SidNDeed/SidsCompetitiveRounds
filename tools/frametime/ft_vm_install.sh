@@ -11,13 +11,17 @@
 # install refuses while ROUNDS runs, when an earlier install was never reverted, when the DLL's sha256 differs from the
 # lanes folder's sha256.txt (the bytes the laptop seat receives: both seats must carry the same DLL, whose digest names
 # the room), or when ft_absent.py does not find the FrameTime build in it. It backs the installed DLL up into a fresh
-# folder under ai-collab/frame-time/vm-install/ with its digest, copies, and proves the copy by digest. revert copies
-# that backup back, proves the digest, removes the sentinel and closes the record (renamed, never deleted).
+# folder under ai-collab/frame-time/vm-install/ with its digest, copies, and proves the copy by digest; each record it
+# writes (the digest file, CURRENT) is read back before the OK line. revert copies that backup back, proves the
+# digest, removes the sentinel and closes the record (renamed, never deleted); OK only when the sentinel is gone and
+# the record closed, else FAIL with the install left open.
 # arm writes exactly what ft_arm_text.sh <profile> prints (that file is the one table of the profiles: menu, match,
-# match-on, the control boots) and refuses, writing nothing, when it refuses. The match profiles arm seed 2, f18 A:
+# match-on, the control boots) and refuses, writing nothing, when it refuses; it prints its written line only after
+# the write succeeded and the file's bytes compared equal to that text, else one "FT-VM-ARM FAIL" line and exit 3. It
+# refuses when the open install's digest record is unreadable. The match profiles arm seed 2, f18 A:
 # each seat its own seed (METHOD-V4 3.3; ruling R6-A3.11.54 Q3); the laptop runner keeps frame_time_seat.ps1's
 # defaults, seed 1, f18 A. The menu and boot profiles are one seat's self-check and keep seed 1.
-# Exit: 0 done; 2 usage or refused; 3 a digest check failed.
+# Exit: 0 done; 2 usage or refused; 3 a write, a read-back or a digest check failed.
 set -u
 R=C:/Users/Sid/Documents/SidsCompetitiveRounds
 GAME="C:/Program Files (x86)/Steam/steamapps/common/ROUNDS"
@@ -49,12 +53,15 @@ case "$cmd" in
     mkdir -p "$BK" || refuse "cannot create $BK"
     prior=$(sha "$PLUG")
     cp -p "$PLUG" "$BK/CompetitiveRounds.dll" || refuse "backup copy failed"
-    echo "$prior" > "$BK/installed.sha256"
+    # each record is read back before the next step relies on it (ruling R6-A3.11.151 (2) class C)
+    printf '%s\n' "$prior" > "$BK/installed.sha256" && [ "$(cat "$BK/installed.sha256" 2>/dev/null)" = "$prior" ] \
+      || { echo "FT-VM-INSTALL FAIL backup record $BK/installed.sha256 not written (nothing installed)"; exit 3; }
     [ "$(sha "$BK/CompetitiveRounds.dll")" = "$prior" ] || { echo "FT-VM-INSTALL FAIL backup digest"; exit 3; }
     cp "$DLL" "$PLUG" || { echo "FT-VM-INSTALL FAIL copy"; exit 3; }
     now=$(sha "$PLUG")
     [ "$now" = "$want" ] || { echo "FT-VM-INSTALL FAIL installed $now, wanted $want"; exit 3; }
-    echo "$BK" > "$CUR"
+    printf '%s\n' "$BK" > "$CUR" && [ "$(cat "$CUR" 2>/dev/null)" = "$BK" ] \
+      || { echo "FT-VM-INSTALL FAIL the open-install record $CUR not written (installed $now; the backup is $BK)"; exit 3; }
     echo "$(st) FT-VM-INSTALL OK installed $now prior $prior backup $BK"
     ;;
   revert)
@@ -64,18 +71,29 @@ case "$cmd" in
     cp "$BK/CompetitiveRounds.dll" "$PLUG" || { echo "FT-VM-REVERT FAIL copy"; exit 3; }
     now=$(sha "$PLUG")
     [ "$now" = "$want" ] || { echo "FT-VM-REVERT FAIL restored $now, wanted $want"; exit 3; }
-    [ -e "$ARM" ] && rm -f "$ARM"
-    mv "$CUR" "$REC/CURRENT.reverted-$(date -u +%Y%m%dT%H%M%SZ)"
+    # the revert is OK only with the sentinel gone and the record closed; otherwise the install stays open, so the
+    # status reads it and revert can be run again
+    rm -f "$ARM"
+    [ -e "$ARM" ] && { echo "FT-VM-REVERT FAIL restored $now, but the sentinel $ARM is still present (the install stays open)"; exit 3; }
+    done_rec="$REC/CURRENT.reverted-$(date -u +%Y%m%dT%H%M%SZ)"
+    mv -n -T "$CUR" "$done_rec"
+    [ ! -e "$CUR" ] && [ "$(cat "$done_rec" 2>/dev/null)" = "$BK" ] \
+      || { echo "FT-VM-REVERT FAIL restored $now, sentinel absent, but the record $CUR was not closed as $done_rec"; exit 3; }
     echo "$(st) FT-VM-REVERT OK restored $now sentinel $([ -e "$ARM" ] && echo present || echo absent)"
     ;;
   arm)
     mode="${2:-}"
     [ -e "$CUR" ] || refuse "no open install: the sentinel arms only the lane's FrameTime DLL"
-    [ "$(sha "$PLUG")" = "$(cat "$(cat "$CUR")/installed.sha256")" ] && refuse "the installed DLL is the backed-up one, not the lane's"
+    rec=$(cat "$(cat "$CUR")/installed.sha256" 2>/dev/null)
+    [ "${#rec}" = 64 ] || refuse "the open install's record of the backed-up DLL's digest is unreadable"
+    [ "$(sha "$PLUG")" = "$rec" ] && refuse "the installed DLL is the backed-up one, not the lane's"
     # the text read whole before anything is written; the x keeps its trailing newlines through the substitution
     txt=$(bash "$HERE/ft_arm_text.sh" "$mode" && printf x) || refuse "usage: arm <profile> (ft_arm_text.sh refused '$mode')"
-    mkdir -p "$(dirname "$ARM")"
-    printf '%s' "${txt%x}" > "$ARM"
+    # the write is checked and its bytes read back and compared with the text before the success line (ruling
+    # R6-A3.11.151 (2) class C): a sentinel that could not be written, or holds other bytes, is a FAIL, exit 3
+    mkdir -p "$(dirname "$ARM")" || { echo "FT-VM-ARM FAIL $mode: the folder of $ARM could not be made"; exit 3; }
+    printf '%s' "${txt%x}" > "$ARM" || { echo "FT-VM-ARM FAIL $mode: the sentinel $ARM could not be written"; exit 3; }
+    printf '%s' "${txt%x}" | cmp -s - "$ARM" || { echo "FT-VM-ARM FAIL $mode: the sentinel $ARM does not read back as the profile's text"; exit 3; }
     echo "$(st) FT-VM-ARM $mode written: $(tr '\n' ' ' < "$ARM")"
     ;;
   disarm)
