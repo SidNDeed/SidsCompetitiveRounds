@@ -329,8 +329,10 @@ def test_the_api_upsert_completes_its_own_row_and_refuses_another_message():
     # mutant: the upsert's WHERE taken out -> another message's request
     # replaces the digest on this message's receipt
     where = "   WHERE mail_send_receipts.message_id = EXCLUDED.message_id"
-    _own, _after_own, other, after_other, *_rest = _run(body(_mutated(main._MAIL_RECEIPT_SQL, where, "")))
-    assert other == 1 and after_other[0] == mid and after_other[3] == fp2
+    # (each run makes its own messages: compare with this run's message id)
+    _own, _after_own, other, after_other, _alone, _row2, m_mid, _m_mid2 = _run(
+        body(_mutated(main._MAIL_RECEIPT_SQL, where, "")))
+    assert other == 1 and after_other[0] == m_mid and after_other[3] == fp2
 
 
 def _flat(bound):
