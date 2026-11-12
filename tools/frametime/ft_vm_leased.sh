@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# ft_vm_leased.sh <menu|match> <outdir> <lane-frametime.dll> <lanes-folder> [--dry]: one FrameTime launch on the VM
+# ft_vm_leased.sh <profile> <outdir> <lane-frametime.dll> <lanes-folder> [--dry]: one FrameTime launch on the VM
 # seat UNDER the broadcast pause lease (ruling FRAME-TIME-ROUND-R4), the integrator's to run. Round 6 (ruling
 # FRAME-TIME-ROUND-R5): the INSTALL and its RESTORATION sit inside the lease, and VR6's file inventories are written
 # into <outdir>. Order:
@@ -38,7 +38,8 @@
 # Exit: 0 the launch saw its end line and every check after it held; 2 usage, or a step before the first write
 # refused; 10 gate refused; 20 lease not confirmed; 21 ROUNDS still running after the leased shutdown; 22 the install
 # refused or an install is already open; 30 HELD; 31 the release unproven; otherwise the launch script's code. Every
-# end prints "FT-VM-LEASED <mode> end rc=<n>" as its last line.
+# end prints "FT-VM-LEASED <profile> end rc=<n>" as its last line. A profile ft_arm_text.sh refuses, or a missing
+# one, prints the usage line and exits 2 before anything else.
 #
 # Dry tests only (never set on a real run): FT_VM_TEST_DIR re-roots the game at $FT_VM_TEST_DIR/game, runs the
 # install step from $FT_VM_TEST_DIR/bin/ft_vm_install.sh, reads the process table from $FT_CLOSE_TEST_DIR/procs.txt
@@ -47,14 +48,21 @@
 # first powershell on PATH is $FT_VM_TEST_DIR/shim/powershell (the stand-in dispatcher), so a test run can reach no
 # C:\broadcast lever and no game file.
 set -u
-MODE="${1:?menu|match}"; OUT="${2:?outdir}"; DLL="${3:-}"; LANES="${4:-}"; DRY="${5:-}"
-case "$MODE" in menu) N=1;; match) N=2;; *) echo "usage: ft_vm_leased.sh <menu|match> <outdir> <dll> <lanes> [--dry]"; exit 2;; esac
+# MODE is the PROFILE (ft_arm_text.sh's table; it names the sentinel the install step arms and every printed line,
+# "FT-VM-LEASED <profile> end rc=<n>" included); KIND is its launch kind from ft_arm_text.sh --kind, menu or match,
+# which picks the gate's -Launch number, the launcher's -Mode, the pid file launch-<kind>.pid the launcher writes
+# beside its -Out file, and the copied log LogOutput-<kind>.log. This script holds no list of the profiles.
+HERE="$(cd "$(dirname "$0")" && pwd)"
+USAGE="usage: ft_vm_leased.sh <profile> <outdir> <lane-frametime.dll> <lanes-folder> [--dry] (a profile of ft_arm_text.sh)"
+MODE="${1:-}"
+KIND=$(bash "$HERE/ft_arm_text.sh" --kind "$MODE" 2>/dev/null) || { echo "$USAGE"; exit 2; }
+case "$KIND" in menu) N=1;; match) N=2;; *) echo "$USAGE"; exit 2;; esac
+OUT="${2:?outdir}"; DLL="${3:-}"; LANES="${4:-}"; DRY="${5:-}"
 if [ "$DLL" = "--dry" ]; then DRY="--dry"; DLL=""; LANES=""; fi
 if [ "$DRY" != "--dry" ] && { [ ! -f "$DLL" ] || [ ! -d "$LANES" ]; }; then
-  echo "usage: ft_vm_leased.sh <menu|match> <outdir> <lane-frametime.dll> <lanes-folder> [--dry]"; exit 2
+  echo "$USAGE"; exit 2
 fi
 R=C:/Users/Sid/Documents/SidsCompetitiveRounds
-HERE="$(cd "$(dirname "$0")" && pwd)"
 GAME="C:/Program Files (x86)/Steam/steamapps/common/ROUNDS"
 INSTALL="$HERE/ft_vm_install.sh"
 NAP=3
@@ -99,7 +107,7 @@ table_shown() { printf '%s\n' "$1" | grep -qE '^holders(: none| \([0-9]+\):)$'; 
 [ -e "$OUT" ] && { echo "$(st) FT-VM-LEASED REFUSED: $OUT exists (a fresh folder per run)"; exit 2; }
 mkdir -p "$OUT" || exit 2
 PRE="$OUT/pre"
-PIDF="$OUT/launch-$MODE.pid"
+PIDF="$OUT/launch-$KIND.pid"
 LEASED=0
 INSTALL_STARTED=0
 PRE_DLL=""
@@ -238,7 +246,7 @@ finish() {
   exit "$rc"
 }
 trap finish EXIT
-echo "$(st) FT-VM-LEASED $MODE lease acquire pause.ps1 -Holder frame-time"
+echo "$(st) FT-VM-LEASED $MODE (kind $KIND) lease acquire pause.ps1 -Holder frame-time"
 pout=$(rig pause -Holder frame-time); prc=$?
 printf '%s\n' "$pout"
 if [ "$prc" = 0 ] || printf '%s\n' "$pout" | grep -q 'Broadcast bot PAUSED; holder'; then
@@ -306,5 +314,5 @@ echo "$(st) FT-VM-INVENTORY pre written: $(wc -l < "$OUT/inventory-pre.txt") fil
 INSTALL_STARTED=1
 bash "$INSTALL" install "$DLL" "$LANES" || exit 22
 bash "$INSTALL" arm "$MODE" || exit 2
-powershell -NoProfile -ExecutionPolicy Bypass -File "$(cygpath -w "$HERE/ft_vm_launch.ps1")" -Mode "$MODE" -Out "$(cygpath -w "$OUT/LogOutput-$MODE.log")" | tr -d '\r'
+powershell -NoProfile -ExecutionPolicy Bypass -File "$(cygpath -w "$HERE/ft_vm_launch.ps1")" -Mode "$KIND" -Out "$(cygpath -w "$OUT/LogOutput-$KIND.log")" | tr -d '\r'
 exit "${PIPESTATUS[0]}"

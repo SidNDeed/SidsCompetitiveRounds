@@ -9,7 +9,8 @@ script refuses when that file is missing or names another digest. Six steps:
      (BepInEx/config: the seat-evidence queue, its .tmp, every closing file and its .unverified set-aside, the
      pending and refused report files, the cfg), and the installed DLL's sha256, which must equal one staged FrameTime
      lane's digest (scr-seat/incoming/frametime-*/sha256.txt);
-  2. the sentinel BepInEx/frametime/arm (seed, f18) and the launch; the game's pid is captured;
+  2. the sentinel BepInEx/frametime/arm (seed, f18, and a third line force=ON only under -ArmForce ON, sitting V;
+     -ArmForce none, the default, writes the two lines of sitting C) and the launch; the game's pid is captured;
   3. a wait for "[FRAME-TIME] sitting complete" until its own deadline (TimeoutS minus 600 s), then a graceful quit,
      and a kill by the captured pid only when the game still runs 60 s later;
   4. in every outcome the sentinel removed, then printed in this order: the runs/<stamp> token (UTC), "=== log lines"
@@ -72,7 +73,10 @@ plant= and partial=, a key twice at the top level or as a writer type inside wu=
 differ from wu's, a writer type outside $FormSets.wtype) beside its negative control, the same line without the
 defect, which must be exported; no_wkeys (the key check skipped) must export the cases only that check refuses and
 still refuse the ones the form refuses, and in the simulated sitting must move the withheld counts. It prints
-SELFTEST PASS only when the clean run passes and every mutant behaves as wanted.
+SELFTEST PASS only when the clean run passes and every mutant behaves as wanted. -ArmForce in both values: every run
+arms with none except arm_force_on, the clean run under -ArmForce ON, and each run's sentinel bytes read at the
+simulated launch must be exactly seed and f18 (CRLF lines) plus force=ON only in arm_force_on, with one "sentinel
+written" line naming force=ON only there.
 -SliceOf <log> prints step 4's two exported sections for a log file ("=== log lines", "=== component slice") and
 exits 0 (2 when unreadable); it reads only, and is how ft_slice_identity.py proves the parse identity of the rule.
 -CfgKindList <file> prints CfgKind's verdict (RESTORED-KIND, NOT-RESTORED-KIND or REFUSED) as "CFG-KIND <n> <verdict>"
@@ -93,7 +97,8 @@ param(
     [ValidateSet('A', 'B')][string]$F18 = 'A',
     [string]$GameRoot = 'C:\Program Files (x86)\Steam\steamapps\common\ROUNDS',
     [string]$SeatRoot = (Join-Path $env:USERPROFILE 'scr-seat'),
-    [string]$LocalLow = (Join-Path $env:USERPROFILE 'AppData\LocalLow')
+    [string]$LocalLow = (Join-Path $env:USERPROFILE 'AppData\LocalLow'),
+    [ValidateSet('ON', 'none')][string]$ArmForce = 'none'
 )
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version 2
@@ -666,8 +671,11 @@ function Sitting($C, $p, [scriptblock]$Launch, [scriptblock]$Wait, [scriptblock]
         try {
             try {
                 New-Item -ItemType Directory -Force -Path (Split-Path $C.Arm) | Out-Null
-                Set-Content -LiteralPath $C.Arm -Value @("seed=$Seed", "f18=$F18") -Encoding ascii
-                Say ("sentinel written: seed={0} f18={1}" -f $Seed, $F18)
+                # -ArmForce ON (sitting V) adds a third line force=ON; none keeps the two lines of sitting C
+                $armLines = @("seed=$Seed", "f18=$F18")
+                if ($ArmForce -eq 'ON') { $armLines += 'force=ON' }
+                Set-Content -LiteralPath $C.Arm -Value $armLines -Encoding ascii
+                Say ("sentinel written: seed={0} f18={1}{2}" -f $Seed, $F18, $(if ($ArmForce -eq 'ON') { ' force=ON' } else { '' }))
                 $st.Proc = & $Launch $C
                 if (-not $st.Proc) { Say 'launch: no ROUNDS process within 120 s'; $st.Code = 3 }
                 else {
@@ -859,6 +867,8 @@ function SelfTestOne([string]$root, [string]$mutant) {
     # the simulated sitting: Unity's rotation, the game's own log, and the mutant's write
     $launch = {
         param($C)
+        # the sentinel as the game would read it at its start: its bytes, read back here (the -ArmForce check)
+        $script:ArmSeen = [System.Text.Encoding]::ASCII.GetString([System.IO.File]::ReadAllBytes($C.Arm))
         Move-Item -LiteralPath $C.Logs['Player.log'] -Destination $C.Logs['Player-prev.log'] -Force
         Set-Content -LiteralPath $C.Logs['Player.log'] -Value 'unity log of the sitting' -Encoding ascii
         $sim = @($SimFt) + @($SimWindow) + @($SimForm) + @($SimNoForm) + @($SimPlant)
@@ -894,6 +904,7 @@ function SelfTestOne([string]$root, [string]$mutant) {
     }
     $script:Mutant = $mutant
     $script:Hold = $null
+    $script:ArmSeen = ''
     $threw = ''
     $st = $null
     try { $st = Sitting $C $p $launch $wait $shutdown }
@@ -983,6 +994,7 @@ function SelfTestOne([string]$root, [string]$mutant) {
         KindLines = $kinds.Count; Kind = $(if ($kinds.Count) { $kinds -join ',' } else { '' })
         ProofOk = $proofOk.Count; ProofN = $proofN; ProofFailed = $proofFailed; EqualLines = $restoredEqualLines
         Planted = $planted; FormMissing = $formOut; WithheldOk = $withheldOk; Withheld = ($haveWs -join ';')
+        ArmText = $script:ArmSeen; ArmSaid = @($o | Where-Object { $_ -like 'sentinel written: *' })
     }
 }
 
@@ -1029,10 +1041,23 @@ if ($SelfTest) {
     $nCtl = @($WFormCases | Where-Object { -not ($_.Form -or $_.Keys) }).Count
     Print ("self-test window form cases: {0} refused by the form, {1} by the key check alone, {2} controls" -f $nForm, $nKeys, $nCtl)
     if ($nForm -lt 1 -or $nKeys -lt 1 -or $nCtl -lt 1) { $fail += 'window form: the case table lacks a form case, a key case or a control' }
-    foreach ($m in (@('none', 'keep_prev_copy', 'closing_file', 'no_component_slice', 'throw_in_wait', 'throw_in_step4', 'export_all', 'drop_w', 'no_wkeys') +
+    # -ArmForce in both values: every run arms with none but arm_force_on, the clean run under -ArmForce ON
+    $armForceGiven = $ArmForce
+    foreach ($m in (@('none', 'arm_force_on', 'keep_prev_copy', 'closing_file', 'no_component_slice', 'throw_in_wait', 'throw_in_step4', 'export_all', 'drop_w', 'no_wkeys') +
             @($CfgCases.Keys) + @($RestoreFailCases))) {
         Print "=== self-test run: mutant $m"
-        $r = SelfTestOne (Join-Path $base $m) $m
+        $ArmForce = $(if ($m -eq 'arm_force_on') { 'ON' } else { 'none' })
+        try { $r = SelfTestOne (Join-Path $base $m) $m }
+        finally { $ArmForce = $armForceGiven }
+        # the sentinel's bytes at the launch: seed and f18, each line CRLF-ended, and force=ON as a third line only
+        # under -ArmForce ON; the "sentinel written" line names force=ON only then
+        $armOn = $m -eq 'arm_force_on'
+        $armWant = "seed=$Seed`r`nf18=$F18`r`n" + $(if ($armOn) { "force=ON`r`n" } else { '' })
+        $saidWant = "sentinel written: seed=$Seed f18=$F18" + $(if ($armOn) { ' force=ON' } else { '' })
+        Print ("self-test {0} sentinel: -ArmForce {1}, bytes '{2}', written line '{3}'" -f $m, $(if ($armOn) { 'ON' } else { 'none' }),
+            ($r.ArmText -replace "`r", '\r' -replace "`n", '\n'), ($r.ArmSaid -join '|'))
+        if ($r.ArmText -cne $armWant) { $fail += "mutant ${m}: the sentinel's bytes at the launch are not the -ArmForce $(if ($armOn) { 'ON' } else { 'none' }) text" }
+        if ($r.ArmSaid.Count -ne 1 -or $r.ArmSaid[0] -cne $saidWant) { $fail += "mutant ${m}: the 'sentinel written' line is not '$saidWant'" }
         Print ("self-test {0}: order {1}, slice headers {2}, every class seen {3}, window lines exported {4}, lane {5}, VR6 {6}, component slice {7}, shutdown {8}, sentinel removed {9}, restored {10}, exit code {11}, threw '{12}'" -f
             $m, $r.Order, $r.Headers, $r.AllSeen, $r.Windows, $r.Lane, $r.Vr6, $r.Component, $r.Shutdown, $r.SentinelGone,
             $r.Restored, $r.Code, $r.Threw)
@@ -1092,7 +1117,7 @@ if ($SelfTest) {
                 if (-not ($r.Order -and $r.Headers -and $r.AllSeen -and $r.Vr6 -and $r.Component) -or $r.Code -ne 0) { $fail += 'mutant no_wkeys: order, headers, VR6, component slice or exit code differ from the clean run' }
             }
             { $_ -in $RestoreFailCases } { }
-            'none' {
+            { $_ -in @('none', 'arm_force_on') } {
                 if (-not $full) { $fail += 'clean run: order, headers or window lines' }
                 if (-not $r.Vr6) { $fail += 'clean run: VR6 failed' }
                 if (-not $r.Component) { $fail += 'clean run: the component slice is missing or incomplete' }
