@@ -506,8 +506,16 @@ class FakeDb:
             for needle in ("MIN(created_at) FILTER (WHERE created_at > NOW() - make_interval(mins => 1))",
                            "AS minute_wait", "MIN(created_at) + make_interval(days => 1) - NOW()", "AS day_wait"):
                 assert needle in sql, f"rate query lost: {needle}"
-            mine = [m for m in self.messages.values() if m["sender_id"] == params["sid"]
-                    and m["kind"] == "direct" and m["created_at"] > NOW - timedelta(days=1)]
+            # the window's rows are READ OFF the SQL's source (migration 404's
+            # change): the send receipts, which the janitor's purge leaves, or
+            # the message rows, which it removes
+            if "FROM mail_send_receipts" in sql:
+                mine = [r for (sid, _key), r in self.receipts.items() if sid == params["sid"]
+                        and r["kind"] == "direct" and r["created_at"] > NOW - timedelta(days=1)]
+            else:
+                assert "FROM mail_messages" in sql, sql
+                mine = [m for m in self.messages.values() if m["sender_id"] == params["sid"]
+                        and m["kind"] == "direct" and m["created_at"] > NOW - timedelta(days=1)]
             minute = [m for m in mine if m["created_at"] > NOW - timedelta(minutes=1)]
 
             # the rounding of each wait is READ OFF ITS OWN SQL expression

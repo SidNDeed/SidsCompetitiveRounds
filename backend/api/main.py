@@ -78554,8 +78554,15 @@ async def _mail_recipient_cap(db: AsyncSession, sender: dict) -> int:
 
 
 async def _mail_rate_or_raise(db: AsyncSession, sender_id) -> None:
-    """10 per minute and 100 per day, counted on the sender's own message
-    rows under the sender lock (B-11). Broadcasts do not count."""
+    """10 per minute and 100 per day, counted on the sender's own send
+    receipts under the sender lock (B-11). Broadcasts do not count.
+
+    Receipts, not message rows (migration 404's change): the janitor purges
+    a row the sender deleted once no delivered copy is live, so a count of
+    rows would free a place in the window for a deleted message whose copies
+    were suppressed and not for one whose delivered copy keeps its row. A
+    receipt stays MAIL_RETENTION_DAYS after the send whatever happens to the
+    message, so every send counts for its whole window."""
     # Retry-After is the time until the OLDEST send inside the exhausted
     # window leaves it (review r1) — computed in SQL against the same NOW()
     # the counts use, so a limiter that says "retry in N seconds" is telling
@@ -78567,7 +78574,7 @@ async def _mail_rate_or_raise(db: AsyncSession, sender_id) -> None:
         "            MIN(created_at) FILTER (WHERE created_at > NOW() - make_interval(mins => 1))"
         "            + make_interval(mins => 1) - NOW()))) AS minute_wait,"
         "       CEIL(EXTRACT(EPOCH FROM (MIN(created_at) + make_interval(days => 1) - NOW()))) AS day_wait"
-        "  FROM mail_messages"
+        "  FROM mail_send_receipts"
         " WHERE sender_id = :sid AND kind = 'direct'"
         "   AND created_at > NOW() - make_interval(days => 1)"
     ), {"sid": sender_id})).mappings().first()

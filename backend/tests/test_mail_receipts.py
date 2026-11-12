@@ -504,6 +504,40 @@ def test_delete_answers_the_same_for_every_well_formed_id():
                    {"status": "deleted", "id": mids[3]}, NOT_FOUND]
 
 
+# ── the send rate window ──────────────────────────────────────────────────
+
+_RATE_FROM = "  FROM mail_send_receipts WHERE sender_id = :sid AND kind = 'direct'"
+
+
+def _rate_after_a_delete(delivery, mutant=False):
+    """Nine sends from A to B 30 s ago; A deletes the first, whose copy to B
+    was `delivery`, and the janitor sweeps; then A sends twice. The tenth
+    send fits the minute's window of 10 and the eleventh does not, in both
+    worlds: the deleted send still counts after its row is purged."""
+    db, ids = tm._world()
+    mids = [db.seed_message(ids[A_SID], [(ids[B_SID], "to", delivery if i == 0 else "delivered")],
+                            created_at=NOW - timedelta(seconds=30)) for i in range(9)]
+    hits = _rewrite_sql(db, _RATE_FROM, _RATE_FROM.replace("mail_send_receipts", "mail_messages")) \
+        if mutant else None
+    assert tm._run(main.mail_delete(str(mids[0]), tm._req("tokA"), db))["status"] == "deleted"
+    tm._run(main._mail_retention_sweep(db))
+    purged = mids[0] not in db.messages
+    out = [_outcome(tm._send, db, [B_SID]), _outcome(tm._send, db, [B_SID])]
+    assert hits is None or hits, "the mutant did not reach the rate query"
+    return purged, [o if isinstance(o, tuple) else "accepted" for o in out]
+
+
+def test_the_rate_window_counts_a_deleted_send_whatever_its_delivery():
+    limited = (429, {"error": "rate_limited", "retry_after": 30})
+    assert _rate_after_a_delete("suppressed") == (True, ["accepted", limited])    # the row was purged
+    assert _rate_after_a_delete("delivered") == (False, ["accepted", limited])    # B's unread copy keeps it
+    # mutant: the window counted on message rows -> the purged send frees a
+    # place, so A's eleventh send in the minute is accepted only when the
+    # deleted message's copy was suppressed
+    assert _rate_after_a_delete("suppressed", mutant=True) == (True, ["accepted", "accepted"])
+    assert _rate_after_a_delete("delivered", mutant=True) == (False, ["accepted", limited])
+
+
 # ── the admin broadcast ───────────────────────────────────────────────────
 
 def _bcast_db():

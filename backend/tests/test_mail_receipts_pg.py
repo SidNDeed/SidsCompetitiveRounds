@@ -454,15 +454,49 @@ def test_the_senders_three_reads_follow_the_clock(monkeypatch):
                    "recipient": {old, young}}
 
 
-def _janitor_purge_sql():
-    """The janitor's purge statement, read out of _mail_retention_sweep."""
-    tree = ast.parse(textwrap.dedent(inspect.getsource(main._mail_retention_sweep)))
+def _sql_in(fn, prefix):
+    """The one `text(...)` statement in `fn`'s source that starts with
+    `prefix`, as production passes it."""
+    tree = ast.parse(textwrap.dedent(inspect.getsource(fn)))
     found = [n.args[0].value for n in ast.walk(tree)
              if isinstance(n, ast.Call) and getattr(n.func, "id", "") == "text" and n.args
-             and isinstance(n.args[0], ast.Constant)
-             and str(n.args[0].value).startswith("DELETE FROM mail_messages")]
-    assert len(found) == 1, found
+             and isinstance(n.args[0], ast.Constant) and str(n.args[0].value).startswith(prefix)]
+    assert len(found) == 1, (fn.__name__, prefix, found)
     return found[0]
+
+
+def _janitor_purge_sql():
+    """The janitor's purge statement, read out of _mail_retention_sweep."""
+    return _sql_in(main._mail_retention_sweep, "DELETE FROM mail_messages")
+
+
+def test_the_rate_window_counts_receipts_whatever_the_purge_removed():
+    """_mail_rate_or_raise's statement on PostgreSQL. A's direct sends 10,
+    20 and 30 s ago and 2 h ago, one 2 days ago, and a broadcast 5 s ago:
+    3 in the minute and 4 in the day. The rows of the 10 s and 20 s sends
+    are then deleted as the janitor's purge deletes them (their receipts
+    have no foreign key and stay): the counts do not move."""
+    stmt = _sql_in(main._mail_rate_or_raise, "SELECT COUNT(*) FILTER")
+
+    async def body(stmt):
+        async with _Schema() as conn:
+            await conn.execute(M404)
+            now = await conn.fetchval("SELECT NOW()")
+            sends = [await _message(conn, at=now - timedelta(seconds=s)) for s in (10, 20, 30)]
+            await _message(conn, at=now - timedelta(hours=2))
+            await _message(conn, at=now - timedelta(days=2))
+            await _message(conn, kind="system_broadcast", count=1, at=now - timedelta(seconds=5))
+
+            async def counts():
+                row = await conn.fetchrow(*_flat(_bind(stmt, {"sid": A})))
+                return row["per_minute"], row["per_day"], row["minute_wait"] is not None
+            before = await counts()
+            await conn.execute("DELETE FROM mail_messages WHERE id = ANY($1::uuid[])", sends[:2])
+            return before, await counts()
+    assert _run(body(stmt)) == ((3, 4, True), (3, 4, True))
+    # mutant: the window counted on message rows -> the purged sends leave it
+    assert _run(body(stmt.replace("FROM mail_send_receipts", "FROM mail_messages"))) == (
+        (3, 4, True), (1, 2, True))
 
 
 def test_the_discord_read_back_follows_the_repliers_own_view():
