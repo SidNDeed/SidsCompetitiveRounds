@@ -15,8 +15,11 @@ SliceExport, the code step 4 runs), in a child PowerShell on a synthetic log in 
       logs, each line put in the emitter's form (the builders' point and settled lines carry fewer keys than the
       emitter's, and their census lines comp=X), and the sitting-V log as a pair (--on, which reads VR1's [FPSCAP]
       hold against the settled lines);
-  (d) ROWS: the fallback and free-operand rows' sample lines (KEYED_ROWS, FREE_ROWS, ROOM_FALLBACK) exported, and
+  (d) ROWS: the fallback and free-operand rows' sample lines (KEYED_ROWS, FREE_ROWS, ROOM_FALLBACK), the [FPSCAP]
+      lines' swept holes (FPSCAP_ROWS) and the type names with a generic arity suffix (IDENT_ROWS) exported, and
       their unlisted variants withheld;
+  (e) ROOM NAMES: the two room-name lines (ROOM_NAMES) export an admitted name as it is and any other name as
+      "(not-exported)" with every other field kept, the refused line's n= cut from the right; never withheld for it;
   -SelfTest: the script's own self-test prints SELFTEST PASS (the Codex gate's classification and lines among it).
 Without PowerShell: the conditional and fallback forms of each [FRAME-TIME] emit expression hold a proven shape or a
 row (test_emitter_fallbacks_have_rows; its negative control test_emitter_fallbacks_control); the Codex gate sits once
@@ -29,7 +32,9 @@ Each mutant is a copy of frame_time_seat.ps1 with one route changed (the V5 wind
 without sock, the earlier point form only, no attach form, no attach report redaction, no redaction, a redaction that
 exports the text, wa loosened, the forms unanchored at the end, the window key check skipped, the [FPSCAP] lines back
 under the component slice, the settled gc_incremental back to <b>, the scope census tail without partial=1, the peer
-fallbacks dropped, the room line's empty region dropped), run the same way; each must fail its named check. frame_time_seat_v.ps1 holds no form and calls
+fallbacks dropped, the room line's empty region dropped, the render cap's number back to four digits, <ident> without
+the arity suffix, the room-name forms admitting any name, either room-name redaction dropped, a redaction that drops
+its typed tail), run the same way; each must fail its named check. frame_time_seat_v.ps1 holds no form and calls
 frame_time_seat.ps1, so it inherits them (checked from its text).
 Where neither powershell nor pwsh exists the export tests SKIP with that reason.
 """
@@ -534,23 +539,29 @@ def test_first_section_classes_are_the_parsers():
     assert text.count("$first = FirstSection $ln") == 1 and text.count("FirstSection([string]$ln)") == 1
 
 
-# the placeholders a redaction form's head may hold: each a closed pattern of the mod's own identifiers and numbers
-REDACT_TYPED = {"u", "n", "why", "ident", "gateex", "@a3k", "shape"}
+# the placeholders a redaction form's head and tail may hold: each a closed pattern of the mod's own identifiers and
+# numbers
+REDACT_TYPED = {"u", "n", "b", "why", "ident", "gateex", "@a3k", "@roomop", "shape"}
 
 
 def test_redaction_forms_are_typed():
-    """ruling 1: every redaction form ends in its one free field <*> (where "(not-exported)" stands), right after ": "
-    or "=", and its head holds fixed text, fixed choices and typed placeholders only"""
+    """ruling 1: every redaction form holds its one free field <*> (where "(not-exported)" stands) once, right after
+    ": " or "="; its head holds fixed text, fixed choices and typed placeholders only, and so does its tail (the text
+    after <*>, the line's last fields: empty, or a space and typed fields)"""
     text = _ps1_text()
     i, j = text.index("$RedactText = @("), text.index("$Redacts = @(")
     forms = re.findall(r"^    '([^']*)'$", text[i:j], re.M)
-    assert len(forms) >= 20, forms
+    assert len(forms) >= 22, forms
+    tails = 0
     for form in forms:
-        assert form.endswith("<*>") and form.count("<*>") == 1, form
-        head = form[:-3]
+        assert form.count("<*>") == 1, form
+        head, tail = form.split("<*>")
         assert head.endswith((": ", "=")), form
-        for ph in re.findall(r"<(@?[a-z0-9]+)>", head):
+        assert tail == "" or (tail.startswith(" ") and re.fullmatch(r"(?: [a-z_]+=<@?[a-z0-9]+>)+", tail)), form
+        tails += tail != ""
+        for ph in re.findall(r"<(@?[a-z0-9]+)>", head + tail):
             assert ph in REDACT_TYPED, (form, ph)
+    assert tails == 1, "the refused room line's n= is the one typed tail"
 
 
 # ---- the class by machine: every literal of the emitter that begins with a first-section class word agrees with the
@@ -741,9 +752,15 @@ def test_emitter_literals_control():
 #   the redaction exports it as (not-exported), so it needs no row.
 # What it cannot see, in plain words: the later statements of a StringBuilder line (the window line after maxF=, the
 # spans, heavy and refusals lines' loops), text appended by a helper (FtLedger.AppendWu/AppendTok/AppendWa,
-# AppendBins), the arguments a wrapper's callers pass (FtDrive.Log and SpawnSay: their rows list the variants), the
-# [FPSCAP] lines (interpolated literals), and what value an operand really holds: a row's values are a claim the
-# sweep reads from the source, not a proof. A row that matches no emit expression fails (no stale row).
+# AppendBins), the arguments a wrapper's callers pass (FtDrive.Log and SpawnSay: their rows list the variants), and
+# what value an operand really holds: a row's values are a claim the sweep reads from the source, not a proof. A row
+# that matches no emit expression fails (no stale row).
+# The [FPSCAP] lines are interpolated literals ($"...{x}..."), and the reader reads no hole of them: FPSCAP_ROWS below
+# are the sweep's samples, written by hand from plugin/Plugin.cs:3421-3584, so a new hole, a new reason text or a new
+# [FPSCAP] line there is unseen by any check here until a row is added (the literal check above still sees a new
+# head). Nor can it see the culture an int prints in: no culture is set invariant in plugin/, so a negative target or
+# vsync prints the current culture's minus sign; <n> admits only "-", so a culture whose sign is another character
+# would have its line withheld (the same holds for every int a [FRAME-TIME] line concatenates).
 FINITE = {"b": ("0", "1"), "tri": ("-1", "0", "1")}
 KEY_END = re.compile(r"(?:^|[ (])([A-Za-z_][A-Za-z0-9_]*)=$")
 PROVEN = re.compile(r'^\(?\s*[^?"]+?\s*\?\s*("(?:[^"\\]|\\.)*"|-?[0-9]+)\s*:\s*("(?:[^"\\]|\\.)*"|-?[0-9]+)\s*\)?$')
@@ -989,6 +1006,8 @@ def plugin_sources():
 def _admitted(ph):
     """the values a placeholder admits when they are finite (<b>, <tri>, <=a|b>), else None"""
     m = PH.fullmatch(ph)
+    if m is None:
+        return None                          # <*>, a redaction form's free text
     if m.group(3) is not None:
         return tuple(m.group(3).split("|"))
     return FINITE.get(m.group(2)) if m.group(1) == "" else None
@@ -1100,30 +1119,113 @@ ROOM_FALLBACK = (["room name=ft_0123abcd region=us cloud_region=us/*", "room nam
                  ["room name=ft_0123abcd region=xx cloud_region=", "room name=ft_0123abcd region= cloud_region=us/x"])
 
 
+# the [FPSCAP] lines' holes (plugin/Plugin.cs:3421-3584), swept by hand (the reader reads no interpolated hole):
+# why is one of four texts, set with desired and never null when a line prints it; the render cap's number is the
+# cfg's BroadcastFpsCap (an int with no range check, printed only when above 0: one to ten digits); every target and
+# vsync is an int (Unity's targetFrameRate is -1 when uncapped); focused= is a bool, printed True or False.
+# (exported, withheld): payloads after "[FPSCAP] "
+_CAP = ["deep idle (broadcast seat 16min+ idle)", "deep idle (60s+ unfocused, out of room)", "unfocused cap",
+        "broadcast seat render cap (144 fps)", "broadcast seat render cap (10000 fps)",
+        "broadcast seat render cap (2147483647 fps)"]
+FPSCAP_ROWS = (
+    ["held by frame-time calibration", "hold released",
+     "released (restored target=-1 vsync=0, focused=True)", "released (restored target=144 vsync=2, focused=False)",
+     "released (external video-settings change adopted: target=-1 vsync=1)"]
+    + ["engaged %s: target=15 (baseline target=-1 vsync=0)" % w for w in _CAP]
+    + ["re-asserted %s over an external change (target=60 vsync=1)" % w for w in _CAP]
+    + ["%s: target=120" % w for w in _CAP],
+    ["broadcast seat render cap (-5 fps): target=-5", "broadcast seat render cap (12345678901 fps): target=60",
+     "released (restored target=-1 vsync=0, focused=true)", "deep idle (5min+ idle): target=15",
+     "engaged unfocused cap: target=120 (baseline target=-1 vsync=0.5)"])
+
+# the type-name families (failed=, failed:, error_): a generic type's name ends in a backtick and its arity, which
+# <ident> admits at the end only; (exported, withheld): payloads after "[FRAME-TIME] "
+IDENT_ROWS = (
+    ["scope census entries=40 wrapped=38 failed=WrapperException`1",
+     "alloc_init why=failed:WrapperException`2",
+     "ledger log=0 why=failed:WrapperException`1 types=log,hash,recv,sock",
+     "not armed input=error_WrapperException`12",
+     "answer_replay g=2 ticks=0 result=error_WrapperException`1",
+     "self-drive disarmed: input=error_KeyNotFoundException"],
+    ["scope census entries=40 wrapped=38 failed=Wrapper`Exception",
+     "alloc_init why=failed:`1WrapperException",
+     "ledger log=0 why=failed:WrapperException`1`2 types=log,hash,recv,sock",
+     "not armed input=error_WrapperException`123",
+     "answer_replay g=2 ticks=0 result=error_WrapperException`"])
+
+
 def check_rows(ps1, tmp):
-    """the rows' sample lines through the export: every KEYED row's template with each value, and every FREE row's
-    sample, exported as it is (or as its given export); the template with an unlisted value, and every FREE row's
-    unlisted lines, withheld"""
-    good = [(p, p) for p in ROOM_FALLBACK[0]]
-    bad = list(ROOM_FALLBACK[1])
+    """the rows' sample lines through the export: every KEYED row's template with each value, every FREE row's
+    sample, and the [FPSCAP] and type-name samples, exported as they are (or as a FREE row's given export); the template
+    with an unlisted value, every FREE row's unlisted lines, and the unlisted [FPSCAP] and type-name lines, withheld"""
+    good = [(p, p) for p in ROOM_FALLBACK[0] + IDENT_ROWS[0]]
+    bad = list(ROOM_FALLBACK[1]) + IDENT_ROWS[1]
     for _, _, _, vals, tpl, _ in KEYED_ROWS:
         good += [(tpl.format(v), tpl.format(v)) for v in vals]
         bad.append(tpl.format(next(x for x in ("2", "X", "x2") if x not in vals)))
     for _, _, _, samples, unlisted, _ in FREE_ROWS:
         good += [s if isinstance(s, tuple) else (s, s) for s in samples]
         bad += unlisted
-    raw = [INFO + FT + p for p, _ in good] + [INFO + FT + p for p in bad]
+    cap = "[FPSCAP] "
+    raw = ([INFO + FT + p for p, _ in good] + [INFO + FT + p for p in bad] + [INFO + cap + p for p in FPSCAP_ROWS[0]]
+           + [INFO + cap + p for p in FPSCAP_ROWS[1]])
     out, log, _ = run_export(ps1, write(os.path.join(tmp, "rows.log"), "\n".join(raw) + "\n"))
     f = ["not exported: %s" % e[:200] for _, e in good if INFO + FT + e not in log]
     f += ["exported, not withheld: %s" % b[:200] for b in bad if INFO + FT + b in log]
-    if "withheld FRAME-TIME %d" % len(bad) not in log:
-        f.append("not 'withheld FRAME-TIME %d': %s" % (len(bad), [x for x in log if x.startswith("withheld")]))
+    f += ["[FPSCAP] not exported: %s" % e[:200] for e in FPSCAP_ROWS[0] if INFO + cap + e not in log]
+    f += ["[FPSCAP] exported, not withheld: %s" % b[:200] for b in FPSCAP_ROWS[1] if INFO + cap + b in log]
+    for cls, n in (("FRAME-TIME", len(bad)), ("FPSCAP", len(FPSCAP_ROWS[1]))):
+        if "withheld %s %d" % (cls, n) not in log:
+            f.append("not 'withheld %s %d': %s" % (cls, n, [x for x in log if x.startswith("withheld")]))
     return f
 
 
 @need_ps
 def test_rows_export(tmp_path):
     f = check_rows(PS1, str(tmp_path))
+    assert f == [], f
+
+
+# the two room-name lines (plugin/FtRoomGate.cs:87, :247), ruled: a name the forms admit (an ft_ room, (none), (empty))
+# is exported as it is; any other name as "(not-exported)", every other field kept (the refused line's n= after the
+# name, cut from the right), and the line is never withheld for its name. Payloads after "[FRAME-TIME] ":
+# (exported as they are, (raw, its export), withheld for a typed field)
+ROOM_NAMES = (
+    ["room call refused op=JoinRoom name=ft_0123abcd n=2", "room call refused op=CreateRoom name=(none) n=1",
+     "room call refused op=JoinOrCreateRoom name=(empty) n=12", "FT-ROOM joined offline=0 name=ft_0123abcd",
+     "FT-ROOM joined offline=1 name=(none)", "FT-ROOM joined offline=0 name=(empty)"],
+    [("room call refused op=JoinRoom name=open room=%s n=7 n=3" % MARK,
+      "room call refused op=JoinRoom name=" + RED + " n=3"),
+     ("room call refused op=RejoinRoom name=ft_0123abcd n=7 n=12", "room call refused op=RejoinRoom name=" + RED + " n=12"),
+     ("room call refused op=JoinLobby name=%s n=0" % MARK, "room call refused op=JoinLobby name=" + RED + " n=0"),
+     ("FT-ROOM joined offline=1 name=open room=%s n=7" % MARK, "FT-ROOM joined offline=1 name=" + RED),
+     ("FT-ROOM joined offline=0 name=ft_0123ABCD", "FT-ROOM joined offline=0 name=" + RED),
+     ("FT-ROOM joined offline=0 name=", "FT-ROOM joined offline=0 name=" + RED)],
+    ["room call refused op=Leave name=%s n=3" % MARK, "room call refused op=JoinRoom name=%s n=-3" % MARK,
+     "room call refused op=JoinRoom name=%s" % MARK, "FT-ROOM joined offline=2 name=%s" % MARK])
+
+
+def check_room_names(ps1, tmp):
+    """the room-name lines through the export: each admitted name exported as it is; each free name exported as
+    "(not-exported)" with the line's other fields, the true n= kept; no free name anywhere in the output; a line whose
+    typed field is out of its form withheld and counted"""
+    keep, red, bad = ROOM_NAMES
+    raw = [INFO + FT + p for p in keep] + [INFO + FT + r for r, _ in red] + [INFO + FT + b for b in bad]
+    out, log, _ = run_export(ps1, write(os.path.join(tmp, "rooms.log"), "\n".join(raw) + "\n"))
+    f = ["not exported as it is: %s" % p for p in keep if INFO + FT + p not in log]
+    f += ["not exported as %s: %s" % (e, r[:120]) for r, e in red if INFO + FT + e not in log]
+    f += ["exported in the clear: %s" % r[:120] for r, _ in red if INFO + FT + r in log]
+    f += ["exported, not withheld: %s" % b[:120] for b in bad if INFO + FT + b in log]
+    if MARK in out:
+        f.append("a free room name in the output: %s" % [x[:120] for x in out.split("\n") if MARK in x])
+    if "withheld FRAME-TIME %d" % len(bad) not in log:
+        f.append("not 'withheld FRAME-TIME %d': %s" % (len(bad), [x for x in log if x.startswith("withheld")]))
+    return f
+
+
+@need_ps
+def test_room_names_export(tmp_path):
+    f = check_room_names(PS1, str(tmp_path))
     assert f == [], f
 
 
@@ -1181,7 +1283,8 @@ MUTANTS = [
     ("no redaction", check_leads, "text", "$Redacts = @($RedactText | ForEach-Object { RedactRegex $_ })",
      "$Redacts = @()"),
     ("a redaction that exports the text", check_planted, "text",
-     "if ($m.Success) { return $m.Groups['keep'].Value + $RedactToken }", "if ($m.Success) { return $ln }"),
+     "if ($m.Success) { return $m.Groups['keep'].Value + $RedactToken + $m.Groups['tail'].Value }",
+     "if ($m.Success) { return $ln }"),
     ("wa loosened", check_planted, "text",
      "$FormPh.wa = 'log:' + $FormPh.una + ';hash:' + $FormPh.una + ';sock:' + $FormPh.una", "$FormPh.wa = '[^ ]*'"),
     ("the forms unanchored at the end", check_planted, "text",
@@ -1199,6 +1302,19 @@ MUTANTS = [
      "peeractor = '(?:[0-9]{1,4})'"),
     ("the room line's empty region dropped", check_rows, "text", "$FormPh.cloudopt = '(?:' + $FormPh.region + '(?:/\\*)?)?'",
      "$FormPh.cloudopt = $FormPh.region + '(?:/\\*)?'"),
+    ("the render cap's number back to four digits", check_rows, "text", "broadcast seat render cap \\([0-9]{1,10} fps\\)",
+     "broadcast seat render cap \\([0-9]{1,4} fps\\)"),
+    ("<ident> without the generic arity suffix", check_rows, "text", "ident = '[A-Za-z0-9_]{1,128}(?:`[0-9]{1,2})?'",
+     "ident = '[A-Za-z0-9_]{1,128}'"),
+    ("the room-name forms admit any name (a free name in the clear)", check_room_names, "text",
+     "$FormPh.roomname = '(?:' + $FormPh.room + '|\\(none\\)|\\(empty\\))'", "$FormPh.roomname = '.*'"),
+    ("the refused room line withheld for a free name", check_room_names, "line",
+     "'[FRAME-TIME] room call refused op=<@roomop> name=<*> n=<u>'", None),
+    ("the joined room line withheld for a free name", check_room_names, "line",
+     "'[FRAME-TIME] FT-ROOM joined offline=<b> name=<*>'", None),
+    ("a redaction that drops its typed tail (the refused line's n=)", check_room_names, "text",
+     "if ($m.Success) { return $m.Groups['keep'].Value + $RedactToken + $m.Groups['tail'].Value }",
+     "if ($m.Success) { return $m.Groups['keep'].Value + $RedactToken }"),
 ]
 
 
