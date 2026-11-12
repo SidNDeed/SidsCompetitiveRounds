@@ -90,11 +90,18 @@ exits 0 (2 when unreadable); it reads only, and is how ft_slice_identity.py prov
 for each line "<pre-image cfg><TAB><sitting cfg>" of the file, and exits 0 (2 when the file is unreadable); it reads
 only, and is how ft_cfg_kind_agree.py proves the port agrees with ft_cfg_compare.py on its corpus.
 Before the launch the sitting refuses (exit 2) when the script is not the staged one, ROUNDS runs, a sentinel is
-present, step 1 fails or finds no staged lane, and, last, by the Codex gate (function CodexGate, the VM gate
+present, step 1 fails or finds no staged lane, then by the Codex gate (function CodexGate, the VM gate
 codexgate_f10.sh's classification): one read of the process table's codex.exe rows prints exactly one line "codex gate:
 live <n> [<pid> <why>, ...]; excluded <n> [<pid> <subcommand>, ...]; codex.exe in all <n>", then a "REFUSED: codex
 gate: ..." line when a row is live; a table that was not read prints only its REFUSED line. The self-test holds the
 classification's case table ($CodexCases, with codex_lax its negative control) and the gate's lines on stand-in reads.
+Then the culture gate (function CultureGate): the process's current culture (the user's settings) and the culture of
+the same name without user overrides (its own table) must each print the minus sign U+002D and the decimal separator
+U+002E, as the forms admit; it prints "culture gate: <name> minus U+002D decimal U+002E", or one "REFUSED: culture
+gate: <name> prints minus <cp> decimal <cp> (<side>): ..." line per side that does not, or "REFUSED: culture gate: the
+number format was not read (...)". The self-test checks its lines on hand-made number formats.
+-CultureGate runs only that gate, prints its lines and exits 0 or 2; it needs no other parameter and touches no lane,
+job file or game (the VM seat's step list runs it before the VM's launches).
 Exit codes: 0 pass, 2 refused before the launch (a step-1 error included), 3 the sitting did not complete (a launch,
 wait or shutdown error included), 4 VR6 failed (a step-4 error included), 5 the restore is not proven (a mismatch or
 a step-5 error; ruling R6-A3.11.112 F1), 6 the self-test failed. 5 overrides 3 and 4: the job ends 0 or 4 only with
@@ -103,6 +110,7 @@ a step-5 error; ruling R6-A3.11.112 F1), 6 the self-test failed. 5 overrides 3 a
 [CmdletBinding()]
 param(
     [switch]$SelfTest,
+    [switch]$CultureGate,
     [string]$CfgKindList = '',
     [string]$SliceOf = '',
     [int]$TimeoutS = 7200,
@@ -682,6 +690,65 @@ $CodexCases = @(
     @{ Cmd = 'C:\tools\codex.exe -c k=v'; Want = 'LIVE unclassified' }
     @{ Cmd = 'C:\tools\codex.exe'; Want = 'LIVE unclassified' }
 )
+
+# ---- the culture gate (the integrator's ruling, follow-up 2 of P5): the plugin prints its ints and its two-decimal
+# numbers through the game process's current culture (no invariant format is set in plugin/), and the forms admit
+# only "-" (U+002D) as the minus sign and "." (U+002E) as the decimal separator. This build does not change the
+# plugin's number formatting; instead the seat proves, before a launch, that its number format prints what the forms
+# admit. It reads two number formats: the process's current culture as Windows gives it (the user's own settings) and
+# the culture of the same name without user overrides (its own table), because the game's runtime reads its own table
+# for that name and knows no user override. Both must print U+002D and U+002E. What it cannot see: the game runtime's
+# own table can differ from Windows' for the same culture name; such a seat passes here, and its lines are withheld at
+# the export, which makes the read refuse the input
+function CultureRead {
+    # one read: the current culture's name, its number format (the user's settings) and the same name's table
+    $cur = [System.Globalization.CultureInfo]::CurrentCulture
+    $own = New-Object System.Globalization.CultureInfo -ArgumentList @($cur.Name, $false)
+    return @{ Name = [string]$cur.Name; User = $cur.NumberFormat; Table = $own.NumberFormat }
+}
+
+function CodePoints([string]$s) {
+    # each character as U+XXXX, ","-joined; (empty) for an empty string
+    if ($s.Length -eq 0) { return '(empty)' }
+    return ((@($s.ToCharArray()) | ForEach-Object { 'U+{0:X4}' -f [int]$_ }) -join ',')
+}
+
+function CultureGate([scriptblock]$Read) {
+    # one reading through $Read (CultureRead in the sitting and under -CultureGate, a stand-in in the self-test) to the
+    # gate's lines: the result line when both formats print U+002D and U+002E; else one REFUSED line per format that
+    # does not (the user's settings first). A read that throws or gives no number format gives one REFUSED line.
+    # Refuse is true exactly when a REFUSED line is there. The comparison is ordinal: a culture comparison ignores
+    # some characters (a direction mark) and would pass a sign that holds one
+    try {
+        $r = & $Read
+        if (-not ($r -is [hashtable]) -or -not ($r['User'] -is [System.Globalization.NumberFormatInfo]) -or
+                -not ($r['Table'] -is [System.Globalization.NumberFormatInfo])) {
+            throw (New-Object System.InvalidOperationException 'the reader gave no number format')
+        }
+    }
+    catch {
+        $msg = (([string]$_.Exception.Message) -split '\r?\n')[0]
+        if ($msg.Length -gt 160) { $msg = $msg.Substring(0, 160) }
+        return @{ Refuse = $true; Lines = @(('REFUSED: culture gate: the number format was not read ({0}: {1})' -f $_.Exception.GetType().Name, $msg)) }
+    }
+    $name = [string]$r['Name']
+    $nm = $(if ($name.Length -eq 0) { '(invariant)' } elseif ($name -cmatch '\A[A-Za-z0-9-]{1,32}\z') { $name } else { '(unnamed)' })
+    $sides = New-Object System.Collections.Generic.List[object]
+    $sides.Add(@{ Why = 'the user''s settings'; Nf = $r['User'] })
+    $sides.Add(@{ Why = 'the culture''s own table'; Nf = $r['Table'] })
+    $bad = @()
+    foreach ($s in $sides) {
+        $neg = [string]$s.Nf.NegativeSign; $dec = [string]$s.Nf.NumberDecimalSeparator
+        $ok = [string]::Equals($neg, '-', [System.StringComparison]::Ordinal)
+        $ok = $ok -and [string]::Equals($dec, '.', [System.StringComparison]::Ordinal)
+        if (-not $ok) {
+            $bad += ('REFUSED: culture gate: {0} prints minus {1} decimal {2} ({3}): the lane''s lines need U+002D and U+002E; no game launch' -f
+                $nm, (CodePoints $neg), (CodePoints $dec), $s.Why)
+        }
+    }
+    if ($bad.Count) { return @{ Refuse = $true; Lines = $bad } }
+    return @{ Refuse = $false; Lines = @(('culture gate: {0} minus U+002D decimal U+002E' -f $nm)) }
+}
 
 function Sha([string]$p) {
     if (Test-Path -LiteralPath $p -PathType Leaf) { return (Get-FileHash -Algorithm SHA256 -LiteralPath $p).Hash.ToLowerInvariant() }
@@ -1300,6 +1367,14 @@ if ($CfgKindList -ne '') {
     exit 0
 }
 
+if ($CultureGate) {
+    # the culture gate alone (the VM seat's step list runs it before the VM's launches): its lines, exit 0 or 2. It
+    # reads no parameter of the sitting and touches no lane, job file or game
+    $cg = CultureGate { CultureRead }
+    foreach ($l in $cg.Lines) { Print $l }
+    exit $(if ($cg.Refuse) { 2 } else { 0 })
+}
+
 if ($SelfTest) {
     $base = Join-Path ([System.IO.Path]::GetTempPath()) ('ft-seat-selftest-' + (Get-Date).ToUniversalTime().ToString('yyyyMMddHHmmss'))
     $fail = @()
@@ -1354,6 +1429,46 @@ if ($SelfTest) {
     # this machine's own table, read once by the sitting's reader: printed, not judged (it shows the read works here)
     $r = CodexGate { CodexRows }
     Print ("self-test codex gate on this machine (not judged): {0}" -f ($r.Lines -join ' | '))
+    # the culture gate: its lines from hand-made number formats (never this machine's culture data); then this
+    # machine's own reading, printed, not judged
+    $nfi = { param($neg, $dec) $n = New-Object System.Globalization.NumberFormatInfo; $n.NegativeSign = $neg; $n.NumberDecimalSeparator = $dec; $n }
+    $u2212 = [string][char]0x2212; $u200f = [string][char]0x200F
+    $need = ': the lane''s lines need U+002D and U+002E; no game launch'
+    $cultureCases = @(
+        @{ Name = 'pass'; Read = { @{ Name = 'en-US'; User = (& $nfi '-' '.'); Table = (& $nfi '-' '.') } }; Refuse = $false
+            Lines = @('culture gate: en-US minus U+002D decimal U+002E') }
+        @{ Name = 'the invariant culture'; Read = { @{ Name = ''; User = (& $nfi '-' '.'); Table = (& $nfi '-' '.') } }; Refuse = $false
+            Lines = @('culture gate: (invariant) minus U+002D decimal U+002E') }
+        @{ Name = 'a name outside the form'; Read = { @{ Name = 'x y'; User = (& $nfi '-' '.'); Table = (& $nfi '-' '.') } }; Refuse = $false
+            Lines = @('culture gate: (unnamed) minus U+002D decimal U+002E') }
+        @{ Name = 'minus U+2212'; Read = { @{ Name = 'fi-FI'; User = (& $nfi $u2212 '.'); Table = (& $nfi $u2212 '.') } }; Refuse = $true
+            Lines = @(('REFUSED: culture gate: fi-FI prints minus U+2212 decimal U+002E (the user''s settings)' + $need),
+                ('REFUSED: culture gate: fi-FI prints minus U+2212 decimal U+002E (the culture''s own table)' + $need)) }
+        @{ Name = 'a decimal comma'; Read = { @{ Name = 'de-DE'; User = (& $nfi '-' ','); Table = (& $nfi '-' ',') } }; Refuse = $true
+            Lines = @(('REFUSED: culture gate: de-DE prints minus U+002D decimal U+002C (the user''s settings)' + $need),
+                ('REFUSED: culture gate: de-DE prints minus U+002D decimal U+002C (the culture''s own table)' + $need)) }
+        @{ Name = 'the user''s settings wrong, the table right'; Read = { @{ Name = 'en-US'; User = (& $nfi '-' ','); Table = (& $nfi '-' '.') } }
+            Refuse = $true; Lines = @(('REFUSED: culture gate: en-US prints minus U+002D decimal U+002C (the user''s settings)' + $need)) }
+        @{ Name = 'the table wrong, the user''s settings right'; Read = { @{ Name = 'nb-NO'; User = (& $nfi '-' '.'); Table = (& $nfi $u2212 ',') } }
+            Refuse = $true; Lines = @(('REFUSED: culture gate: nb-NO prints minus U+2212 decimal U+002C (the culture''s own table)' + $need)) }
+        @{ Name = 'a two-character sign'; Read = { @{ Name = 'ar-SA'; User = (& $nfi ($u200f + '-') '.'); Table = (& $nfi ($u200f + '-') '.') } }
+            Refuse = $true; Lines = @(('REFUSED: culture gate: ar-SA prints minus U+200F,U+002D decimal U+002E (the user''s settings)' + $need),
+                ('REFUSED: culture gate: ar-SA prints minus U+200F,U+002D decimal U+002E (the culture''s own table)' + $need)) }
+        @{ Name = 'an empty sign'; Read = { @{ Name = 'en-US'; User = (& $nfi '' '.'); Table = (& $nfi '-' '.') } }
+            Refuse = $true; Lines = @(('REFUSED: culture gate: en-US prints minus (empty) decimal U+002E (the user''s settings)' + $need)) }
+        @{ Name = 'a read that throws'; Read = { throw (New-Object System.InvalidOperationException 'the table is unreadable') }; Refuse = $true
+            Lines = @('REFUSED: culture gate: the number format was not read (InvalidOperationException: the table is unreadable)') }
+        @{ Name = 'a read with no number format'; Read = { @{ Name = 'en-US'; User = $null; Table = (& $nfi '-' '.') } }; Refuse = $true
+            Lines = @('REFUSED: culture gate: the number format was not read (InvalidOperationException: the reader gave no number format)') }
+    )
+    foreach ($g in $cultureCases) {
+        $r = CultureGate $g.Read
+        $ok = ($r.Refuse -eq $g.Refuse) -and (($r.Lines -join "`n") -ceq ($g.Lines -join "`n"))
+        Print ("self-test culture gate {0}: refuse {1}, lines '{2}'" -f $g.Name, $r.Refuse, ($r.Lines -join ' | '))
+        if (-not $ok) { $fail += "culture gate $($g.Name): refuse $($r.Refuse), lines '$($r.Lines -join ' | ')'" }
+    }
+    $r = CultureGate { CultureRead }
+    Print ("self-test culture gate on this machine (not judged): {0}" -f ($r.Lines -join ' | '))
     # -ArmForce in both values: every run arms with none but arm_force_on, the clean run under -ArmForce ON
     $armForceGiven = $ArmForce
     foreach ($m in (@('none', 'arm_force_on', 'keep_prev_copy', 'closing_file', 'no_component_slice', 'throw_in_wait', 'throw_in_step4', 'export_all', 'drop_w', 'no_wkeys') +
@@ -1492,6 +1607,11 @@ if (-not $p.LaneOk) { Say 'REFUSED: the installed DLL is no staged FrameTime lan
 $codexGate = CodexGate { CodexRows }
 foreach ($l in $codexGate.Lines) { Say $l }
 if ($codexGate.Refuse) { exit 2 }
+# the number format (CultureGate): the user's settings and the culture's own table must print U+002D and U+002E, or
+# the lane's lines would be withheld at the export; its line, and exit 2 on a REFUSED one
+$cultureGate = CultureGate { CultureRead }
+foreach ($l in $cultureGate.Lines) { Say $l }
+if ($cultureGate.Refuse) { exit 2 }
 $launch = {
     param($C)
     Start-Process 'steam://rungameid/1557740'

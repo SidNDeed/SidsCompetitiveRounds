@@ -34,7 +34,11 @@ exports the text, wa loosened, the forms unanchored at the end, the window key c
 under the component slice, the settled gc_incremental back to <b>, the scope census tail without partial=1, the peer
 fallbacks dropped, the room line's empty region dropped, the render cap's number back to four digits, <ident> without
 the arity suffix, the room-name forms admitting any name, either room-name redaction dropped, a redaction that drops
-its typed tail), run the same way; each must fail its named check. frame_time_seat_v.ps1 holds no form and calls
+its typed tail, the culture gate skipped in the sitting, its decimal check dropped, its own-table check dropped, the
+-CultureGate switch falling through into the sitting), run the same way; each must fail its named check. The culture
+gate (ruling, follow-up 2): its place right after the Codex gate (test_culture_gate_before_the_launch), the
+-CultureGate switch's lines and exit code with nothing created under the sitting's roots (test_culture_gate_switch),
+and the self-test's case table on hand-made number formats (test_culture_cases). frame_time_seat_v.ps1 holds no form and calls
 frame_time_seat.ps1, so it inherits them (checked from its text).
 Where neither powershell nor pwsh exists the export tests SKIP with that reason.
 """
@@ -758,9 +762,12 @@ def test_emitter_literals_control():
 # The [FPSCAP] lines are interpolated literals ($"...{x}..."), and the reader reads no hole of them: FPSCAP_ROWS below
 # are the sweep's samples, written by hand from plugin/Plugin.cs:3421-3584, so a new hole, a new reason text or a new
 # [FPSCAP] line there is unseen by any check here until a row is added (the literal check above still sees a new
-# head). Nor can it see the culture an int prints in: no culture is set invariant in plugin/, so a negative target or
-# vsync prints the current culture's minus sign; <n> admits only "-", so a culture whose sign is another character
-# would have its line withheld (the same holds for every int a [FRAME-TIME] line concatenates).
+# head). The number format is not the reader's: no culture is set invariant in plugin/, so every negative int and every
+# two-decimal number of these lines prints through the game's current culture, while the forms admit only "-" and
+# "."; the seat's culture gate (CultureGate, before every launch of the sitting, and -CultureGate in the VM seat's step
+# list) refuses a seat whose user settings or whose culture's own table print anything else. What the gate cannot
+# see: the game runtime's own table can differ from Windows' for the same culture name; such a seat passes the gate,
+# its lines are withheld at the export, and the read refuses the input.
 FINITE = {"b": ("0", "1"), "tri": ("-1", "0", "1")}
 KEY_END = re.compile(r"(?:^|[ (])([A-Za-z_][A-Za-z0-9_]*)=$")
 PROVEN = re.compile(r'^\(?\s*[^?"]+?\s*\?\s*("(?:[^"\\]|\\.)*"|-?[0-9]+)\s*:\s*("(?:[^"\\]|\\.)*"|-?[0-9]+)\s*\)?$')
@@ -1246,6 +1253,111 @@ def test_codex_gate_before_the_launch():
     assert "-ErrorAction Stop" in body and "SilentlyContinue" not in body and "Win32_Process" in body, body
 
 
+# ---- the culture gate (the integrator's ruling, follow-up 2 of P5): its place in the sitting, the -CultureGate
+# switch, and its case table (the self-test's, on hand-made number formats)
+
+_CNAME = r"(?:[A-Za-z0-9-]{1,32}|\(invariant\)|\(unnamed\))"
+_CPS = r"(?:\(empty\)|U\+[0-9A-F]{4}(?:,U\+[0-9A-F]{4})*)"
+CULTURE_LINE = re.compile(r"culture gate: %s minus U\+002D decimal U\+002E" % _CNAME)
+CULTURE_REFUSED = re.compile(r"REFUSED: culture gate: (?:%s prints minus %s decimal %s \((?:the user's settings|the "
+                             r"culture's own table)\): the lane's lines need U\+002D and U\+002E; no game launch|the "
+                             r"number format was not read \(.+\))" % (_CNAME, _CPS, _CPS))
+CULTURE_SIT = ("$cultureGate = CultureGate { CultureRead }\nforeach ($l in $cultureGate.Lines) { Say $l }\n"
+               "if ($cultureGate.Refuse) { exit 2 }\n")
+
+
+def _read(ps1):
+    with open(ps1, encoding="ascii") as f:
+        return f.read()
+
+
+def check_culture_gate_place(ps1, tmp=None):
+    """the sitting reads the culture gate exactly once, right after the Codex gate's three lines (comment lines between
+    only) and before the launch scriptblock, prints its lines and exits 2 on a refusal; the reader reads the current
+    culture and the same name's table without user overrides, and turns no failed read into a pass"""
+    text = _read(ps1)
+    f = []
+    sit = text[text.index("# ---- the sitting\n"):]
+    if text.count("CultureGate { CultureRead }") != 3 or sit.count("CultureGate { CultureRead }") != 1:
+        f.append("CultureGate { CultureRead } %d times, %d in the sitting (want 3: the self-test, -CultureGate, the "
+                 "sitting)" % (text.count("CultureGate { CultureRead }"), sit.count("CultureGate { CultureRead }")))
+    codex = "if ($codexGate.Refuse) { exit 2 }\n"
+    if sit.count(codex) != 1 or sit.count(CULTURE_SIT) != 1:
+        f.append("the Codex gate's refusal %d times and the culture gate's three lines %d times in the sitting"
+                 % (sit.count(codex), sit.count(CULTURE_SIT)))
+    else:
+        a, b = sit.index(codex) + len(codex), sit.index(CULTURE_SIT)
+        between = [x for x in sit[a:b].split("\n") if x.strip()]
+        if b < a or any(not x.startswith("#") for x in between):
+            f.append("the culture gate does not follow the Codex gate's lines: %s" % between[:4])
+        if "$launch = {" not in sit[b:]:
+            f.append("the culture gate is not before the launch scriptblock")
+    body = text[text.index("function CultureRead {"):text.index("function CodePoints(")]
+    if not ("[System.Globalization.CultureInfo]::CurrentCulture" in body and "@($cur.Name, $false)" in body
+            and "catch" not in body):
+        f.append("CultureRead does not read the current culture and its own table: %s" % body[:300])
+    return f
+
+
+def test_culture_gate_before_the_launch():
+    f = check_culture_gate_place(PS1)
+    assert f == [], f
+
+
+def check_culture_switch(ps1, tmp):
+    """-CultureGate alone: its lines only (the result line, exit 0; or one or two REFUSED lines of its forms, exit 2),
+    and nothing created under the sitting's roots, given here as absent temp folders so that a switch that falls
+    through into the sitting is seen and touches no real seat"""
+    roots = dict((k, os.path.join(tmp, "cg-" + k)) for k in ("game", "seat", "low"))
+    p = subprocess.run([PS, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", ps1, "-CultureGate", "-GameRoot",
+                        roots["game"], "-SeatRoot", roots["seat"], "-LocalLow", roots["low"]],
+                       stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=600)
+    lines = [x for x in p.stdout.decode("utf-8", "replace").replace("\r\n", "\n").split("\n") if x != ""]
+    ok0 = p.returncode == 0 and len(lines) == 1 and CULTURE_LINE.fullmatch(lines[0])
+    ok2 = p.returncode == 2 and 1 <= len(lines) <= 2 and all(CULTURE_REFUSED.fullmatch(x) for x in lines)
+    f = [] if (ok0 or ok2) else ["exit %d, lines %s" % (p.returncode, [x[:160] for x in lines[:6]])]
+    f += ["the sitting's %s root was created" % k for k in sorted(roots) if os.path.exists(roots[k])]
+    return f
+
+
+@need_ps
+def test_culture_gate_switch(tmp_path):
+    """-CultureGate with the sitting's roots planted, then alone (it needs none of the sitting's parameters): the
+    gate's own lines and exit code, this seat's culture read, not judged"""
+    f = check_culture_switch(PS1, str(tmp_path))
+    assert f == [], f
+    p = subprocess.run([PS, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", PS1, "-CultureGate"],
+                       stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=600)
+    lines = [x for x in p.stdout.decode("utf-8", "replace").replace("\r\n", "\n").split("\n") if x != ""]
+    assert (p.returncode == 0 and len(lines) == 1 and CULTURE_LINE.fullmatch(lines[0])) or (
+        p.returncode == 2 and all(CULTURE_REFUSED.fullmatch(x) for x in lines)), (p.returncode, lines)
+
+
+def check_culture_cases(ps1, tmp):
+    """the self-test's culture gate cases (hand-made number formats): every case of the script's table ran, and the
+    failures the self-test reports for them; a self-test that reaches no verdict fails too"""
+    text = _read(ps1)
+    table = text[text.index("    $cultureCases = @(\n"):text.index("    foreach ($g in $cultureCases) {")]
+    want = len(re.findall(r"^        @\{ Name = ", table, re.M))
+    p = subprocess.run([PS, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", ps1, "-SelfTest"],
+                       stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=1800)
+    out = p.stdout.decode("utf-8", "replace").replace("\r\n", "\n").split("\n")
+    verdict = [x for x in out if x == "SELFTEST PASS" or x.startswith("SELFTEST FAIL: ")]
+    if len(verdict) != 1:
+        return ["the self-test reached no verdict (exit %d): %s" % (p.returncode, out[-6:])]
+    ran = len([x for x in out if x.startswith("self-test culture gate ") and "(not judged)" not in x])
+    f = [] if ran == want and want >= 11 else ["%d culture gate cases ran, the table holds %d" % (ran, want)]
+    if verdict[0].startswith("SELFTEST FAIL: "):
+        f += [x for x in verdict[0][len("SELFTEST FAIL: "):].split("; ") if x.startswith("culture gate ")]
+    return f
+
+
+@need_ps
+def test_culture_cases(tmp_path):
+    f = check_culture_cases(PS1, str(tmp_path))
+    assert f == [], f
+
+
 @need_ps
 def test_selftest_passes():
     p = subprocess.run([PS, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", PS1, "-SelfTest"],
@@ -1315,6 +1427,13 @@ MUTANTS = [
     ("a redaction that drops its typed tail (the refused line's n=)", check_room_names, "text",
      "if ($m.Success) { return $m.Groups['keep'].Value + $RedactToken + $m.Groups['tail'].Value }",
      "if ($m.Success) { return $m.Groups['keep'].Value + $RedactToken }"),
+    ("the culture gate skipped in the sitting", check_culture_gate_place, "text", CULTURE_SIT, ""),
+    ("the culture gate's decimal check dropped", check_culture_cases, "line",
+     "$ok = $ok -and [string]::Equals($dec, '.', [System.StringComparison]::Ordinal)", None),
+    ("the culture gate's own-table check dropped", check_culture_cases, "line",
+     "$sides.Add(@{ Why = 'the culture''s own table'; Nf = $r['Table'] })", None),
+    ("the -CultureGate switch falling through into the sitting", check_culture_switch, "line",
+     "exit $(if ($cg.Refuse) { 2 } else { 0 })", None),
 ]
 
 
