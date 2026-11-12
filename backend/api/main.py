@@ -78419,7 +78419,7 @@ async def _log_admin_action_strict(db: AsyncSession, *, admin_steam_id: str, act
 # MAIL_RETENTION_DAYS after the send whatever happened to the message
 # (_MAIL_RECEIPT_SWEEP_SQL).
 _MAIL_PRIOR_SEND_SQL = (
-    "SELECT message_id, kind, recipients, request_fp FROM mail_send_receipts"
+    "SELECT message_id, kind, recipients, request_fp, message_fp FROM mail_send_receipts"
     " WHERE sender_id = :sid AND idempotency_key = :key"
 )
 
@@ -78431,12 +78431,14 @@ _MAIL_PRIOR_SEND_SQL = (
 # a deploy is in progress -- so this is an upsert that completes that row.
 # Its WHERE keeps it to the receipt of THIS message: a receipt of the same
 # key for another message is left as it is, RETURNING gives no row, and the
-# send fails before it commits (_mail_write_receipt).
+# send fails before it commits (_mail_write_receipt). message_fp is written
+# only when the row is new (no trigger ran); the trigger's row already holds
+# the same digest of the same stored text.
 _MAIL_RECEIPT_SQL = (
     "INSERT INTO mail_send_receipts"
-    "   (sender_id, idempotency_key, kind, request_fp, message_id, recipients)"
+    "   (sender_id, idempotency_key, kind, request_fp, message_fp, message_id, recipients)"
     " VALUES (CAST(:sid AS uuid), CAST(:key AS uuid), CAST(:kind AS text), CAST(:fp AS bytea),"
-    "         CAST(:mid AS uuid), CAST(:n AS integer))"
+    "         CAST(:mfp AS bytea), CAST(:mid AS uuid), CAST(:n AS integer))"
     " ON CONFLICT (sender_id, idempotency_key) DO UPDATE"
     "   SET request_fp = EXCLUDED.request_fp, recipients = EXCLUDED.recipients"
     "   WHERE mail_send_receipts.message_id = EXCLUDED.message_id"
@@ -78445,13 +78447,31 @@ _MAIL_RECEIPT_SQL = (
 
 # The janitor's receipt arm: a receipt goes MAIL_RETENTION_DAYS after the
 # send, in bounded batches, whatever the message's delivery or purge state.
+# The same statement retires the key of every message a deleted receipt
+# answered for that is still kept (an unread delivered copy keeps a row
+# past retention): the key becomes one derived from the message's own id.
+# A key with no receipt is sent as a new message, and 297's UNIQUE
+# (sender_id, idempotency_key), which migration 404 keeps for the previous
+# build, would refuse that insert while the old row still held the key.
+# The new key matches no request (clients send uuid4 keys, the Discord
+# route uuid5 keys), nothing returns a message's key to a caller, and
+# migration 404's trigger does not fire on it (UPDATE OF recipient_count
+# only). One row per deleted receipt is returned.
 _MAIL_RECEIPT_SWEEP_SQL = (
-    "DELETE FROM mail_send_receipts"
-    " WHERE (sender_id, idempotency_key) IN ("
-    "   SELECT sender_id, idempotency_key FROM mail_send_receipts"
-    "    WHERE created_at < NOW() - make_interval(days => CAST(:days AS integer))"
-    "    LIMIT 2000)"
-    " RETURNING 1"
+    "WITH gone AS ("
+    "  DELETE FROM mail_send_receipts"
+    "   WHERE (sender_id, idempotency_key) IN ("
+    "     SELECT sender_id, idempotency_key FROM mail_send_receipts"
+    "      WHERE created_at < NOW() - make_interval(days => CAST(:days AS integer))"
+    "      LIMIT 2000)"
+    "  RETURNING sender_id, idempotency_key),"
+    " retired AS ("
+    "  UPDATE mail_messages m"
+    "     SET idempotency_key = CAST(md5('mail-key-retired:' || CAST(m.id AS text)) AS uuid)"
+    "    FROM gone g"
+    "   WHERE m.sender_id = g.sender_id AND m.idempotency_key = g.idempotency_key"
+    "  RETURNING 1)"
+    " SELECT 1 FROM gone"
 )
 
 
@@ -78477,7 +78497,33 @@ def _mail_request_fp(route: str, **fields) -> bytes:
     return hashlib.sha256(doc.encode("ascii")).digest()
 
 
-async def _mail_prior_send(db: AsyncSession, sender_id, key: UUID, request_fp: bytes):
+def _mail_message_fp(route: str, subject: str, body: str) -> bytes:
+    """The digest of a message's text as its row stores it, on every send
+    receipt (migration 404's message_fp, whose trigger and backfill compute
+    it in SQL from the row): SHA-256 over the route ('send', 'reply' or
+    'broadcast'), the subject (empty for a reply, whose subject is derived
+    from its parent's, not asked for) and the body, UTF-8, each pair
+    separated by one zero byte (text holds no zero byte). It is what a
+    repeated key is compared on when its receipt has no request digest."""
+    parts = (route, "" if route == "reply" else subject, body)
+    return hashlib.sha256(b"\x00".join(p.encode("utf-8") for p in parts)).digest()
+
+
+def _mail_request_message_fp(route: str, *, subject: str, body: str) -> bytes | None:
+    """_mail_message_fp of the text a request would store: the subject and
+    body through the same canonicalising the send applies before it writes
+    the row (_mail_text_or_raise; a reply's subject is not read). None when
+    that refuses the text: it cannot equal any text a row stores."""
+    try:
+        s = "" if route == "reply" else _mail_text_or_raise(subject, field="subject", subject=True)
+        b = _mail_text_or_raise(body, field="body", subject=False)
+    except HTTPException:
+        return None
+    return _mail_message_fp(route, s, b)
+
+
+async def _mail_prior_send(db: AsyncSession, sender_id, key: UUID, request_fp: bytes,
+                           message_fp: bytes | None):
     """A repeated idempotency_key returns the ORIGINAL message id with the
     same 200 body (B-11). Checked first thing under the lock, before every
     gate, so a retry of an accepted send is never told 'muted' or
@@ -78485,17 +78531,23 @@ async def _mail_prior_send(db: AsyncSession, sender_id, key: UUID, request_fp: b
 
     The answer is read from the key's receipt alone, never from the message
     row or its envelopes, so it is the same whatever the message's delivery
-    and whether the janitor has purged it. A receipt that stores a digest
-    answers only the request it was written for: the same key with another
-    digest is refused, 409 idempotency_key_reused, and nothing is written. A
-    receipt without one (backfilled by migration 404, or written by a writer
-    without this change) replays as before."""
+    and whether the janitor has purged it. A receipt that stores a request
+    digest answers only the request it was written for: the same key with
+    another digest is refused, 409 idempotency_key_reused, and nothing is
+    written. A receipt without one (backfilled by migration 404, or written
+    by its trigger for a writer without this change) is compared on
+    message_fp, the digest of the text its message stored: `message_fp` is
+    that digest of this request's text (_mail_request_message_fp, None when
+    the text could not be stored at all), and a difference is refused 409
+    the same way."""
     prior = (await db.execute(text(_MAIL_PRIOR_SEND_SQL),
                               {"sid": sender_id, "key": key})).mappings().first()
     if prior is None:
         return None
     stored = prior["request_fp"]
     if stored is not None and bytes(stored) != request_fp:
+        raise HTTPException(status_code=409, detail="idempotency_key_reused")
+    if stored is None and (message_fp is None or bytes(prior["message_fp"]) != message_fp):
         raise HTTPException(status_code=409, detail="idempotency_key_reused")
     out = {"id": str(prior["message_id"]), "accepted": True}
     if prior["kind"] == "system_broadcast":
@@ -78507,10 +78559,12 @@ async def _mail_prior_send(db: AsyncSession, sender_id, key: UUID, request_fp: b
 
 
 async def _mail_write_receipt(db: AsyncSession, *, sender_id, key: UUID, kind: str,
-                              request_fp: bytes, message_id, recipients: int | None = None) -> None:
-    """The api's write of a send's receipt, in the sending transaction."""
+                              request_fp: bytes, message_fp: bytes, message_id,
+                              recipients: int | None = None) -> None:
+    """The api's write of a send's receipt, in the sending transaction.
+    `message_fp` is _mail_message_fp of the text the message row stores."""
     done = (await db.execute(text(_MAIL_RECEIPT_SQL), {
-        "sid": sender_id, "key": key, "kind": kind, "fp": request_fp,
+        "sid": sender_id, "key": key, "kind": kind, "fp": request_fp, "mfp": message_fp,
         "mid": message_id, "n": recipients})).first()
     if done is None:
         # A receipt of this key for ANOTHER message. Unreachable while the
@@ -78760,7 +78814,10 @@ async def _mail_finish_send(db: AsyncSession, sender: dict, *, subject: str, bod
         "subj": subject, "body": body, "key": idempotency_key,
         "via": via if via in ("game", "discord") else "game"})
     await _mail_write_receipt(db, sender_id=sender["id"], key=idempotency_key, kind="direct",
-                              request_fp=request_fp, message_id=mid)
+                              request_fp=request_fp,
+                              message_fp=_mail_message_fp("send" if thread_id is None else "reply",
+                                                          subject, body),
+                              message_id=mid)
     await db.execute(text(_MAIL_FANOUT_SQL), {
         "mid": mid, "sid": sender["id"],
         "rids": [a[0] for a in addressees], "kinds": [a[1] for a in addressees],
@@ -78824,12 +78881,13 @@ async def mail_send(req: _MailSendReq, request: Request, db: AsyncSession = Depe
     key = _mail_parse_uuid(req.idempotency_key, "idempotency_key")
     fp = _mail_request_fp("send", to=[str(x) for x in req.to], cc=[str(x) for x in req.cc],
                           subject=req.subject, body=req.body)
+    mfp = _mail_request_message_fp("send", subject=req.subject, body=req.body)
     # Lock order everywhere in this block: identity (delete-account's lock)
     # -> per-sender mail lock -> ban-rate. The identity re-read under the
     # lock is what makes the sender row this transaction writes a LIVE one.
     await _mail_lock_identities(db, me["steam_id"], handles={me["steam_id"]: me["id"]})
     await _mail_lock_sender(db, me["id"])
-    prior = await _mail_prior_send(db, me["id"], key, fp)
+    prior = await _mail_prior_send(db, me["id"], key, fp, mfp)
     if prior is not None:
         return prior
     await _mail_sender_gates(db, me)
@@ -78869,9 +78927,9 @@ async def mail_reply(message_id: str, req: _MailReplyReq, request: Request,
         idempotency_key=req.idempotency_key, via="game")
 
 
-async def _mail_reply_core(db: AsyncSession, me: dict, *, message_id: str,
+async def _mail_reply_core(db: AsyncSession, me: dict, *, message_id: str | None = None,
                            body: str, reply_all: bool, idempotency_key: str,
-                           via: str = "game") -> dict:
+                           via: str = "game", resolve_target=None) -> dict:
     """B-9: recipients are derived SERVER-side from the original's envelope
     — the original sender, plus every addressee of the original minus self
     when reply_all, delivered or suppressed alike: the replier's answer,
@@ -78888,15 +78946,28 @@ async def _mail_reply_core(db: AsyncSession, me: dict, *, message_id: str,
     `me` is the ONLY thing a caller supplies about identity, and it is the
     only thing that differs between the in-game route (Steam session) and
     the Discord route (players.discord_id, resolved server-side, #545).
-    Everything below this line runs identically for both."""
-    mid = _mail_parse_uuid(message_id, "message_id")
+    Everything below this line runs identically for both.
+
+    The message replied to comes as `message_id` (the in-game route's path
+    parameter) or from `resolve_target`, an async callable returning its id
+    (the Discord route's relay-code lookup, which may refuse 404). Exactly
+    one is given. The callable runs under the locks AFTER the repeated-key
+    check (migration 404's change): a repeated key is answered from its
+    receipt before anything about the target is read, on both routes, so a
+    retry's answer does not depend on the target's state since the send."""
+    if (message_id is None) == (resolve_target is None):
+        raise TypeError("_mail_reply_core takes exactly one of message_id and resolve_target")
+    mid = None if message_id is None else _mail_parse_uuid(message_id, "message_id")
     key = _mail_parse_uuid(idempotency_key, "idempotency_key")
     fp = _mail_request_fp("reply", body=body, all=bool(reply_all))
+    mfp = _mail_request_message_fp("reply", subject="", body=body)
     await _mail_lock_identities(db, me["steam_id"], handles={me["steam_id"]: me["id"]})
     await _mail_lock_sender(db, me["id"])
-    prior = await _mail_prior_send(db, me["id"], key, fp)
+    prior = await _mail_prior_send(db, me["id"], key, fp, mfp)
     if prior is not None:
         return prior
+    if mid is None:
+        mid = _mail_parse_uuid(await resolve_target(), "message_id")
     await _mail_sender_gates(db, me)
     orig = (await db.execute(text(
         "SELECT m.id, m.sender_id, m.kind, m.thread_id, m.subject"
@@ -79176,6 +79247,9 @@ async def mail_detail(message_id: str, request: Request, db: AsyncSession = Depe
     addr = [] if row["kind"] == "system_broadcast" else (await _mail_addressees(db, [row["id"]])).get(row["id"], [])
     return {
         "id": str(row["id"]), "thread_id": str(row["thread_id"]),
+        # The parent's id also after the janitor has purged the parent: no
+        # foreign key covers the column since migration 404, so the sender
+        # of a reply reads the same value whatever the parent's delivery.
         "in_reply_to": str(row["in_reply_to"]) if row["in_reply_to"] else None,
         "kind": row["kind"],
         "sender": {"steam_id": row["sender_steam_id"], "name": row["sender_name"],
@@ -79559,6 +79633,7 @@ async def admin_mail_broadcast(req: _AdminMailBroadcastReq, db: AsyncSession = D
     send. The sender row is the admin's own player row."""
     key = _mail_parse_uuid(req.idempotency_key, "idempotency_key")
     fp = _mail_request_fp("broadcast", subject=req.subject, body=req.body)
+    mfp = _mail_request_message_fp("broadcast", subject=req.subject, body=req.body)
     await _require_admin(db, req.admin_steam_id, "mail_broadcast", str(key), req.hmac_signature)
     if req.actor_steam_id and req.actor_steam_id != req.admin_steam_id:
         raise HTTPException(status_code=400, detail="actor_mismatch")
@@ -79583,7 +79658,7 @@ async def admin_mail_broadcast(req: _AdminMailBroadcastReq, db: AsyncSession = D
     # answer even if the sender has been muted, banned or censored since:
     # the message exists, and telling its sender otherwise is false.
     await _mail_lock_sender(db, sender["id"])
-    prior = await _mail_prior_send(db, sender["id"], key, fp)
+    prior = await _mail_prior_send(db, sender["id"], key, fp, mfp)
     if prior is not None:
         return prior
     # The same sender gates as every other send (review r1): an account that
@@ -79612,7 +79687,8 @@ async def admin_mail_broadcast(req: _AdminMailBroadcastReq, db: AsyncSession = D
         "UPDATE mail_messages SET recipient_count = CAST(:n AS integer) WHERE id = :mid"
     ), {"n": n, "mid": mid})
     await _mail_write_receipt(db, sender_id=sender["id"], key=key, kind="system_broadcast",
-                              request_fp=fp, message_id=mid, recipients=n)
+                              request_fp=fp, message_fp=_mail_message_fp("broadcast", subject, body),
+                              message_id=mid, recipients=n)
     await db.execute(text(_MAIL_REV_BUMP_SQL), {"mid": mid})
     await _log_admin_action_strict(
         db, admin_steam_id=_mail_identity_to_write(rows, req.admin_steam_id), action="mail_broadcast",
@@ -79707,11 +79783,16 @@ async def _mail_retention_sweep(db: AsyncSession) -> tuple[int, int, int, int]:
     sender's direct messages of the last day (same body) and hour (bulk)
     from these rows, so a send the sender deleted stays in both counts for
     their whole window, whatever its copies' delivery. Bounded batches; the
-    cascade removes the envelopes, in_reply_to and moderation_cases.message_id
-    go NULL and the case keeps its snapshot. The censor-hit ledger is pruned after
+    cascade removes the envelopes, moderation_cases.message_id goes NULL and
+    the case keeps its snapshot. A reply's in_reply_to keeps the purged
+    parent's id: migration 404 dropped the foreign key that set it NULL, so a
+    reply's sender reads the same in_reply_to whatever the parent's delivery
+    kept or released. The censor-hit ledger is pruned after
     MAIL_CENSOR_HITS_KEEP_DAYS. Send receipts (migration 404) are deleted
     MAIL_RETENTION_DAYS after the send whatever the message's delivery or
-    purge: a repeated key is answered from its receipt until then."""
+    purge: a repeated key is answered from its receipt until then, and the
+    key of a message still kept is retired with it
+    (_MAIL_RECEIPT_SWEEP_SQL)."""
     expired = (await db.execute(text(
         "UPDATE mail_recipients SET deleted_at = NOW()"
         " WHERE (message_id, recipient_id) IN ("

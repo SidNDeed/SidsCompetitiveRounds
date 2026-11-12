@@ -457,32 +457,18 @@ async def mail_reply_from_discord(
     # ONE path. The player named a thread or they did not; there is no
     # ladder, no fallback and no third branch, because every additional way
     # of arriving at a target was another way of arriving at the WRONG one.
-    # `_mail_reply_core` is deliberately NOT modified: its envelope check
-    # still answers "may this player write here", which is the only question
-    # it was ever able to answer. Which thread is answered is settled here,
-    # before it is called.
+    # `_mail_reply_core`'s envelope check still answers "may this player
+    # write here", which is the only question it was ever able to answer.
+    # Which thread is answered is settled by `_target` below, which the core
+    # calls under its locks right AFTER the repeated-key check (migration
+    # 404's change): a retry of a reply that was sent is answered from the
+    # reply's receipt even when the code no longer resolves (the player has
+    # deleted their copy of the thread since), as a retry in game is. What
+    # is checked before the core runs is the request alone: a code and
+    # something to key on.
     code = normalize_relay_code(req.relay_code)
     if not code:
         raise HTTPException(status_code=400, detail="target_required")
-    rows = (await db.execute(text(_REPLY_BY_CODE_SQL),
-                             {"c": code, "s": me["steam_id"],
-                              "pid": str(me["id"])})).mappings().all()
-    if len(rows) != 1:
-        # Zero is a code that names no thread of this player's that can still
-        # be answered. Two is unreachable while idx_pending_dms_relay_code
-        # exists, and is refused rather than resolved so that it stays
-        # unreachable instead of silently becoming "pick one".
-        if not rows and (await db.execute(
-                text(_RELAY_GONE_SQL),
-                {"c": code, "s": me["steam_id"], "pid": str(me["id"])},
-        )).first() is not None:
-            # The code WAS this player's and its mail is gone (finding 11;
-            # _RELAY_GONE_SQL says why): the answer a reply in game to that
-            # mail gets, which the bot words as "it was deleted" and not as
-            # "doesn't match any mail sent to you".
-            raise HTTPException(status_code=404, detail="not_found")
-        raise HTTPException(status_code=404, detail="unknown_code")
-    mail_id = str(rows[0]["mail_id"])
 
     key = (req.idempotency_key or "").strip()
     src = (req.source_message_id or "").strip()
@@ -493,9 +479,32 @@ async def mail_reply_from_discord(
         # so the request is refused rather than quietly made unsafe.
         raise HTTPException(status_code=400, detail="idempotency_source_required")
     key = key or reply_idempotency_key(src)
+
+    async def _target() -> str:
+        rows = (await db.execute(text(_REPLY_BY_CODE_SQL),
+                                 {"c": code, "s": me["steam_id"],
+                                  "pid": str(me["id"])})).mappings().all()
+        if len(rows) != 1:
+            # Zero is a code that names no thread of this player's that can
+            # still be answered. Two is unreachable while
+            # idx_pending_dms_relay_code exists, and is refused rather than
+            # resolved so that it stays unreachable instead of silently
+            # becoming "pick one".
+            if not rows and (await db.execute(
+                    text(_RELAY_GONE_SQL),
+                    {"c": code, "s": me["steam_id"], "pid": str(me["id"])},
+            )).first() is not None:
+                # The code WAS this player's and its mail is gone (finding
+                # 11; _RELAY_GONE_SQL says why): the answer a reply in game
+                # to that mail gets, which the bot words as "it was deleted"
+                # and not as "doesn't match any mail sent to you".
+                raise HTTPException(status_code=404, detail="not_found")
+            raise HTTPException(status_code=404, detail="unknown_code")
+        return str(rows[0]["mail_id"])
+
     reply_core = _need("reply_core")
     out = await reply_core(
-        db, me, message_id=mail_id, body=req.body, reply_all=False,
+        db, me, resolve_target=_target, body=req.body, reply_all=False,
         idempotency_key=key, via="discord")
     out = dict(out or {})
     # Read the thread AFTER the send, from the reply's own in_reply_to. The

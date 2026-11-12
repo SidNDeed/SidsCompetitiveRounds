@@ -8,8 +8,14 @@ What each endpoint answers after the change:
   answer, whatever the message's delivery and whether the janitor has
   purged the message row since. A request that differs from the one the
   receipt was written for (its digest, main._mail_request_fp) is refused,
-  409 idempotency_key_reused, and writes nothing. A receipt with no digest
-  (written by migration 404's backfill or by its trigger) replays.
+  409 idempotency_key_reused, and writes nothing. A receipt with no request
+  digest (written by migration 404's backfill or by its trigger) is compared
+  on the digest of the text its message stored (message_fp,
+  main._mail_message_fp): the same text replays, another body (or another
+  subject on a send or a broadcast) is refused the same way.
+- The Discord reply route's target is resolved by the core after the
+  repeated-key check, so a retry of a reply that was sent replays even when
+  its relay code no longer resolves.
 - Reply all addresses the original's sender and every addressee of the
   original, delivered or suppressed alike, so the replier's answer,
   recipient cap and Sent list are the same whatever the other players'
@@ -21,7 +27,9 @@ What each endpoint answers after the change:
 - DELETE /mail/{id} answers 200 {"status": "deleted", "id"} for every
   well-formed id.
 - The janitor deletes a receipt MAIL_RETENTION_DAYS after its send,
-  whatever the state of the message it names.
+  whatever the state of the message it names, and retires the key of a
+  message still kept, so the key can be sent again under 297's UNIQUE
+  (sender_id, idempotency_key), which migration 404 keeps.
 
 Every test runs a control (the code as written) and at least one mutant
 (the code with one rule taken out: the production SQL rewritten on its way
@@ -31,6 +39,7 @@ that the mutant changes the answer the control pins. A mutant whose anchor
 is not found fails the test instead of passing it.
 """
 
+import hashlib
 import inspect
 import re
 import textwrap
@@ -53,13 +62,16 @@ OLD = NOW - timedelta(days=main.MAIL_RETENTION_DAYS + 1)
 YOUNG = NOW - timedelta(days=main.MAIL_RETENTION_DAYS - 1)
 _REPLY_ALL_READ = "SELECT recipient_id, kind, delivery FROM mail_recipients WHERE message_id = :mid"
 _COMPARE = "if stored is not None and bytes(stored) != request_fp:"
+_LEGACY_COMPARE = ('if stored is None and (message_fp is None or bytes(prior["message_fp"])'
+                   ' != message_fp):')
 _REPLY_FP = '_mail_request_fp("reply", body=body, all=bool(reply_all))'
+_REPLY_MFP = '_mail_request_message_fp("reply", subject="", body=body)'
 
 # The functions the mutants are recompiled from, taken before any test can
 # replace one on the module.
 _REAL = {name: getattr(main, name) for name in (
     "_mail_prior_send", "_mail_reply_core", "mail_send", "admin_mail_broadcast", "mail_delete",
-    "_mail_write_receipt", "_mail_request_fp")}
+    "_mail_write_receipt", "_mail_request_fp", "_mail_request_message_fp")}
 
 
 @pytest.fixture(autouse=True)
@@ -79,6 +91,15 @@ def _outcome(fn, *a, **kw):
         return fn(*a, **kw)
     except HTTPException as e:
         return (e.status_code, e.detail)
+
+
+def _outcome_or_23505(fn, *a, **kw):
+    """_outcome, and "23505" when the fake's unique constraint refuses the
+    statement (test_mail.UniqueViolation, PostgreSQL's 23505)."""
+    try:
+        return _outcome(fn, *a, **kw)
+    except tm.UniqueViolation:
+        return "23505"
 
 
 def _shape(ans):
@@ -232,8 +253,12 @@ def test_a_send_key_answers_only_the_request_it_was_written_for(monkeypatch):
 @pytest.mark.parametrize("field, old, new", [
     ("to", "to=[str(x) for x in req.to], ", ""),
     ("cc", "cc=[str(x) for x in req.cc],", ""),
-    ("subject", "subject=req.subject, body=req.body)", "body=req.body)"),
-    ("body", "subject=req.subject, body=req.body)", "subject=req.subject)"),
+    # The digest's own continuation line: the message digest below it names
+    # the same two fields.
+    ("subject", "                          subject=req.subject, body=req.body)",
+     "                          body=req.body)"),
+    ("body", "                          subject=req.subject, body=req.body)",
+     "                          subject=req.subject)"),
 ])
 def test_the_send_digest_covers_each_field(monkeypatch, field, old, new):
     _first, changed, _same, _sent = _send_reuse()
@@ -245,24 +270,54 @@ def test_the_send_digest_covers_each_field(monkeypatch, field, old, new):
     assert changed == [first if f == field else REUSED for f in _SEND_FIELDS]
 
 
-def test_a_receipt_without_a_digest_replays_its_key(monkeypatch):
+def test_a_receipt_without_a_request_digest_answers_on_the_stored_text(monkeypatch):
     """A receipt written by migration 404's backfill or by its trigger (a
-    send the previous api build committed) has no digest: a retry of its
-    key is answered from it, as before the change."""
+    send or a reply the previous api build committed) has no request
+    digest. A retry of its key is compared on the digest of the text the
+    message stored: the same text replays, also when the request's body
+    needs the send's canonicalising to equal it (a trailing CRLF); another
+    body, or another subject on a send, is refused 409 and writes nothing.
+    A reply's subject is derived, so a reply's retry is compared on its
+    body."""
     def run():
         db, ids = tm._world()
         key = uuid.uuid4()
-        mid = db.seed_message(ids[A_SID], [(ids[B_SID], "to", "delivered")], key=key)
-        assert db.receipts[(ids[A_SID], key)]["request_fp"] is None
-        again = _outcome(tm._send, db, to=[B_SID], body="Some other body.", key=str(key))
-        return mid, again, _directs(db, ids[A_SID])
-    mid, again, sent = run()
-    assert again == {"id": str(mid), "accepted": True} and len(sent) == 1
-    # mutant: a missing digest compared as a mismatch -> the retry is refused
-    monkeypatch.setattr(main, "_mail_prior_send", _recompiled(
-        "_mail_prior_send", _COMPARE, "if bytes(stored or b'') != request_fp:"))
-    _mid, again, sent = run()
-    assert again == REUSED and len(sent) == 1
+        mid = db.seed_message(ids[A_SID], [(ids[B_SID], "to", "delivered")], key=key,
+                              subject="Plan", body="Meet at eight.")
+        orig = db.seed_message(ids[B_SID], [(ids[A_SID], "to", "delivered")], subject="Day")
+        rkey = uuid.uuid4()
+        rmid = db.seed_message(ids[A_SID], [(ids[B_SID], "to", "delivered")], key=rkey,
+                               subject="Re: Day", body="Sure.", thread_id=orig, in_reply_to=orig)
+        assert {db.receipts[(ids[A_SID], k)]["request_fp"] for k in (key, rkey)} == {None}
+        sends = [_outcome(tm._send, db, to=[B_SID], subject=s, body=b, key=str(key))
+                 for s, b in (("Plan", "Meet at eight."), ("Plan", "Meet at eight.\r\n"),
+                              ("Plan", "Meet at nine."), ("Plans", "Meet at eight."))]
+        replies = [_outcome(_reply, db, orig, body=b, key=str(rkey), token="tokA")
+                   for b in ("Sure.", "Sure!")]
+        first = {"id": str(mid), "accepted": True}
+        rfirst = {"id": str(rmid), "accepted": True}
+        return sends, replies, first, rfirst, len(_directs(db, ids[A_SID]))
+    sends, replies, first, rfirst, n = run()
+    assert sends == [first, first, REUSED, REUSED] and replies == [rfirst, REUSED] and n == 2
+    # mutant: no comparison where the receipt has no request digest -> the
+    # changed body and the changed subject replay the first answer
+    monkeypatch.setattr(main, "_mail_prior_send", _recompiled("_mail_prior_send", _LEGACY_COMPARE, "if False:"))
+    sends, replies, first, rfirst, n = run()
+    assert sends == [first] * 4 and replies == [rfirst, rfirst] and n == 2
+    monkeypatch.setattr(main, "_mail_prior_send", _REAL["_mail_prior_send"])
+    # mutant: the request's body digested as received, not canonicalised ->
+    # the retry with a trailing CRLF is refused
+    monkeypatch.setattr(main, "_mail_request_message_fp", _recompiled(
+        "_mail_request_message_fp", 'b = _mail_text_or_raise(body, field="body", subject=False)',
+        "b = body"))
+    sends, _replies, first, _rfirst, _n = run()
+    assert sends == [first, REUSED, REUSED, REUSED]
+    monkeypatch.setattr(main, "_mail_request_message_fp", _REAL["_mail_request_message_fp"])
+    # mutant: the reply's request digested as a send -> its own retry is refused
+    monkeypatch.setattr(main, "_mail_reply_core", _recompiled(
+        "_mail_reply_core", _REPLY_MFP, _REPLY_MFP.replace('"reply"', '"send"')))
+    _sends, replies, _first, _rfirst, _n = run()
+    assert replies == [REUSED, REUSED]
 
 
 def test_a_send_replays_from_its_receipt_after_the_message_is_purged():
@@ -641,11 +696,12 @@ def _bcast_reuse():
 def test_a_broadcast_key_answers_only_its_subject_and_body(monkeypatch):
     first, changed, same, live = _bcast_reuse()
     assert changed == [REUSED, REUSED] and same == first and len(live) == 1
-    old = '"broadcast", subject=req.subject, body=req.body)'
+    old = '_mail_request_fp("broadcast", subject=req.subject, body=req.body)'
     for name, mutant, want in (
             ("_mail_prior_send", (_COMPARE, "if False:"), ["first", "first"]),
-            ("admin_mail_broadcast", (old, '"broadcast", body=req.body)'), ["first", REUSED]),
-            ("admin_mail_broadcast", (old, '"broadcast", subject=req.subject)'), [REUSED, "first"])):
+            ("admin_mail_broadcast", (old, '_mail_request_fp("broadcast", body=req.body)'), ["first", REUSED]),
+            ("admin_mail_broadcast", (old, '_mail_request_fp("broadcast", subject=req.subject)'),
+             [REUSED, "first"])):
         monkeypatch.setattr(main, name, _recompiled(name, *mutant))
         first, changed, _same, live = _bcast_reuse()
         assert changed == [first if w == "first" else w for w in want] and len(live) == 1, mutant
@@ -661,12 +717,14 @@ def test_the_receipt_write_completes_only_its_own_messages_receipt(monkeypatch):
         other = db.seed_message(ids[A_SID], [(ids[B_SID], "to", "delivered")], key=key)
         fp = main._mail_request_fp("send", to=[B_SID], cc=[], subject="s", body="b")
         res = _outcome(lambda: tm._run(main._mail_write_receipt(
-            db, sender_id=ids[A_SID], key=key, kind="direct", request_fp=fp, message_id=uuid.uuid4())))
+            db, sender_id=ids[A_SID], key=key, kind="direct", request_fp=fp,
+            message_fp=main._mail_message_fp("send", "s", "b"), message_id=uuid.uuid4())))
         return db, ids, key, other, fp, res
     db, ids, key, other, fp, res = run()
     r = db.receipts[(ids[A_SID], key)]
     assert res == (500, "mail_receipt_conflict") and r["message_id"] == other and r["request_fp"] is None
     tm._run(main._mail_write_receipt(db, sender_id=ids[A_SID], key=key, kind="direct", request_fp=fp,
+                                     message_fp=main._mail_message_fp("send", "s", "b"),
                                      message_id=other))
     assert r["message_id"] == other and r["request_fp"] == fp           # its own message's receipt is completed
     # mutant: the upsert's WHERE taken out -> the receipt of another message
@@ -680,12 +738,15 @@ def test_the_receipt_write_completes_only_its_own_messages_receipt(monkeypatch):
 
 
 def test_without_the_trigger_the_api_writes_the_whole_receipt(monkeypatch):
+    """The api's own receipt carries the request's digest, which covers what
+    the message row does not store: the same key with the same text and
+    another recipient is refused. The retry after the purge replays."""
     def run(trigger):
         db, ids = tm._world()
         db.receipt_trigger = trigger                         # False: a schema without migration 404's trigger
         key = _key()
         first = tm._send(db, [B_SID], body="Meet at eight.", key=key)
-        changed = _outcome(tm._send, db, to=[B_SID], body="Meet at nine.", key=key)
+        changed = _outcome_or_23505(tm._send, db, to=[C_SID], body="Meet at eight.", key=key)
         _purge(db, first["id"])
         again = tm._send(db, [B_SID], body="Meet at eight.", key=key)
         return first, changed, again, _directs(db, ids[A_SID])
@@ -693,11 +754,13 @@ def test_without_the_trigger_the_api_writes_the_whole_receipt(monkeypatch):
         first, changed, again, sent = run(trigger)
         assert changed == REUSED and again == first and sent == [], trigger
     monkeypatch.setattr(main, "_mail_write_receipt", _no_receipt)
-    # mutant, no trigger: nothing records the key -> the changed body is
-    # sent, and the retry after the purge is sent again
+    # mutant, no trigger: nothing records the key -> the changed request
+    # reaches the insert, which 297's unique key refuses while the first row
+    # holds the key, and the retry after the purge is sent again
     first, changed, again, sent = run(False)
-    assert changed != REUSED and again != first and len(sent) == 2
-    # mutant, with the trigger: its receipt has no digest -> the changed body replays
+    assert changed == "23505" and again != first and len(sent) == 1
+    # mutant, with the trigger: its receipt has the message's text digest
+    # only -> the same text to another recipient replays the first send
     first, changed, again, sent = run(True)
     assert changed == first and again == first and sent == []
 
@@ -738,3 +801,74 @@ def test_a_receipt_goes_after_retention_whatever_its_message():
     # mutant: the receipt arm not run -> every receipt stays
     n, left, _row_kept, hits = run(True)
     assert hits and n == 0 and left == {"old_delivered", "old_suppressed", "young_delivered", "young_suppressed"}
+
+
+def test_a_swept_receipt_retires_the_key_of_a_message_still_kept(monkeypatch):
+    """The janitor deletes an old receipt while an unread delivered copy
+    still keeps its message. The same statement gives that message a key
+    derived from its own id, so the old key, which has no receipt now, is
+    sent as a new message instead of being refused by 297's UNIQUE
+    (sender_id, idempotency_key)."""
+    def run():
+        db, _ids, made = _aged_world()
+        row = db.messages[UUID(made["old_delivered"])]
+        key = row["idempotency_key"]
+        tm._run(main._mail_retention_sweep(db))
+        kept = UUID(made["old_delivered"]) in db.messages
+        again = _outcome_or_23505(tm._send, db, to=[B_SID], key=str(key))
+        return kept, row["idempotency_key"], key, again, made
+    kept, now_key, key, again, made = run()
+    assert kept and now_key != key and now_key == UUID(hashlib.md5(
+        ("mail-key-retired:" + made["old_delivered"]).encode("ascii")).hexdigest())
+    assert isinstance(again, dict) and again["accepted"] and again["id"] != made["old_delivered"]
+    # mutant: the retirement leaves the key as it was -> the kept row still
+    # holds it, and the new send under it is refused by the unique key
+    retire = "md5('mail-key-retired:' || CAST(m.id AS text))"
+    assert main._MAIL_RECEIPT_SWEEP_SQL.count(retire) == 1
+    monkeypatch.setattr(main, "_MAIL_RECEIPT_SWEEP_SQL",
+                        main._MAIL_RECEIPT_SWEEP_SQL.replace(retire, "m.idempotency_key"))
+    kept, now_key, key, again, _made = run()
+    assert kept and now_key == key and again == "23505"
+
+
+def test_a_reply_target_is_resolved_only_after_the_receipt_check(monkeypatch):
+    """The Discord route hands the core a resolver for its relay code, not a
+    message id; the core calls it under the locks after the repeated-key
+    check. A retry of a reply that was sent replays even when the code no
+    longer resolves (the replier deleted their copy of the thread since);
+    a new key still resolves it first, and its refusal refuses the reply."""
+    def run():
+        db, ids = tm._world()
+        orig = db.seed_message(ids[B_SID], [(ids[A_SID], "to", "delivered")], subject="Day")
+        me = tm._run(main._mail_caller(tm._req("tokA"), db))
+        calls = []
+
+        async def live():
+            calls.append("resolved")
+            return str(orig)
+
+        async def gone():
+            calls.append("resolved")
+            raise HTTPException(status_code=404, detail="not_found")
+
+        def reply(target, key):
+            return _outcome(lambda: tm._run(main._mail_reply_core(
+                db, me, resolve_target=target, body="Yes.", reply_all=False,
+                idempotency_key=key, via="discord")))
+        key = _key()
+        first = reply(live, key)
+        return first, reply(gone, key), reply(gone, _key()), calls
+    first, again, fresh, calls = run()
+    assert first["accepted"] and again == first and fresh == NOT_FOUND
+    assert calls == ["resolved", "resolved"]                   # the retry never asked
+    # mutant: the target resolved before the repeated-key check -> the retry
+    # of the reply that was sent is refused 404
+    check = ('    prior = await _mail_prior_send(db, me["id"], key, fp, mfp)\n'
+             '    if prior is not None:\n'
+             '        return prior\n')
+    resolve = ('    if mid is None:\n'
+               '        mid = _mail_parse_uuid(await resolve_target(), "message_id")\n')
+    monkeypatch.setattr(main, "_mail_reply_core", _recompiled(
+        "_mail_reply_core", check + resolve, resolve + check))
+    first, again, fresh, calls = run()
+    assert first["accepted"] and again == NOT_FOUND and fresh == NOT_FOUND and len(calls) == 3

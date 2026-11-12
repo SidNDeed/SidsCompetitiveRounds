@@ -137,10 +137,10 @@ def _mail_tables_prereq():
     """404's prerequisites: `players`, and mail_messages and mail_recipients
     exactly as 297 creates them (their CREATE TABLE statements read out of
     that file, not retyped) with 300's recipient_count, and three messages:
-    a direct one, a broadcast with its count, and a broadcast without one
-    (written before 300; two delivered envelopes and one suppressed). The
-    second run is measured beside the receipts the first run's backfill
-    wrote, and beside the dropped constraint."""
+    a direct one and two broadcasts with their counts (the second with two
+    delivered envelopes and one suppressed; 404 refuses a broadcast without
+    a count). The second run is measured beside the receipts the first
+    run's backfill wrote, and beside the dropped foreign key."""
     p = "00000000-0000-0000-0000-000000000%s"
     out = ["CREATE TABLE players (id UUID PRIMARY KEY);",
            "INSERT INTO players (id) VALUES ('%s'), ('%s'), ('%s'), ('%s');"
@@ -158,7 +158,7 @@ def _mail_tables_prereq():
         "created_at, recipient_count) VALUES "
         "('%s', '%s', 'direct', '%s', 's', 'b', '%s', TIMESTAMPTZ '2026-11-01 10:00+00', NULL), "
         "('%s', '%s', 'system_broadcast', '%s', 's', 'b', '%s', TIMESTAMPTZ '2026-11-02 10:00+00', 3), "
-        "('%s', '%s', 'system_broadcast', '%s', 's', 'b', '%s', TIMESTAMPTZ '2026-11-03 10:00+00', NULL);"
+        "('%s', '%s', 'system_broadcast', '%s', 's', 'b', '%s', TIMESTAMPTZ '2026-11-03 10:00+00', 2);"
         % (p % "4e1", p % "4a1", p % "4e1", p % "4f1",
            p % "4e2", p % "4a1", p % "4e2", p % "4f2",
            p % "4e3", p % "4a1", p % "4e3", p % "4f3"))
@@ -304,7 +304,7 @@ PREREQ = {
     "401": _contrib_tables_prereq(),
     # 404 creates mail_send_receipts and its index, the trigger on
     # mail_messages and its function, backfills the receipts and drops 297's
-    # unique constraint (_mail_tables_prereq).
+    # foreign key on in_reply_to (_mail_tables_prereq).
     "404": _mail_tables_prereq(),
 }
 

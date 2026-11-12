@@ -78,6 +78,11 @@ class _Scalars:
         return self._vals[0] if self._vals else None
 
 
+class UniqueViolation(Exception):
+    """The fake's 23505: a statement the real table's unique constraint
+    refuses. Nothing in main catches it, as nothing catches asyncpg's."""
+
+
 class _Res:
     def __init__(self, rows=(), rowcount=0):
         self._rows = list(rows)
@@ -186,9 +191,11 @@ class FakeDb:
                      kind="direct", key=None, read=False, deleted_by_sender_at=None, thread_id=None,
                      in_reply_to=None, via="game"):
         mid = uuid.uuid4()
+        key = key or uuid.uuid4()
+        self.unique_key_or_raise(sender_id, key)
         self.messages[mid] = {"id": mid, "sender_id": sender_id, "kind": kind,
                               "thread_id": thread_id or mid, "in_reply_to": in_reply_to,
-                              "subject": subject, "body": body, "idempotency_key": key or uuid.uuid4(),
+                              "subject": subject, "body": body, "idempotency_key": key,
                               "created_at": created_at or NOW,
                               "deleted_by_sender_at": deleted_by_sender_at,
                               "via": via}      # item 5 / migration 330
@@ -197,14 +204,34 @@ class FakeDb:
                                            "read_at": NOW if read else None, "deleted_at": None}
         if kind in ("direct", "system_broadcast"):
             # Migration 404's backfill: every existing message has a receipt
-            # with no digest; a broadcast's count is frozen from its delivered
-            # envelopes when it has no recipient_count.
+            # with no request digest and the digest of its stored text; a
+            # broadcast's count is the recipient_count the build that sent it
+            # persisted from its delivered envelopes (404 refuses a broadcast
+            # without one).
             n = (sum(1 for (m, _r), e in self.recipients.items() if m == mid and e["delivery"] == "delivered")
                  if kind == "system_broadcast" else None)
-            self.receipts.setdefault((sender_id, self.messages[mid]["idempotency_key"]), {
+            self.receipts.setdefault((sender_id, key), {
                 "message_id": mid, "kind": kind, "recipients": n, "request_fp": None,
+                "message_fp": main._mail_message_fp(self.route_of(mid), subject, body),
                 "created_at": created_at or NOW})
         return mid
+
+    def route_of(self, mid):
+        """Migration 404's route of a stored message, as its trigger and
+        backfill derive it: a broadcast, a send (a thread of its own) or a
+        reply."""
+        m = self.messages[mid]
+        if m["kind"] == "system_broadcast":
+            return "broadcast"
+        return "send" if m["thread_id"] == mid else "reply"
+
+    def unique_key_or_raise(self, sender_id, key):
+        """297's UNIQUE (sender_id, idempotency_key) on mail_messages, which
+        migration 404 keeps: a second row with a sender's key is refused, as
+        PostgreSQL refuses it (23505)."""
+        if any(m["sender_id"] == sender_id and m["idempotency_key"] == key
+               for m in self.messages.values()):
+            raise UniqueViolation("uq_mail_messages_sender_idem")
 
     def scrub(self, sid):
         """delete_player_data's scrub for the tables the identity routes
@@ -486,6 +513,7 @@ class FakeDb:
             if r is None:
                 self.receipts[k] = {"message_id": params["mid"], "kind": params["kind"],
                                     "recipients": params["n"], "request_fp": params["fp"],
+                                    "message_fp": params["mfp"],
                                     "created_at": self.message_created_at}
                 return _Res([(1,)])
             if same_message_only and r["message_id"] != params["mid"]:
@@ -498,6 +526,13 @@ class FakeDb:
                     if r["created_at"] < NOW - timedelta(days=int(params["days"]))]
             for k in gone:
                 self.receipts.pop(k)
+            if "UPDATE mail_messages m" in sql and "md5('mail-key-retired:' || CAST(m.id AS text))" in sql:
+                # the same statement's second arm, READ OFF the SQL: the key of
+                # every kept message a deleted receipt answered for is retired
+                for m in self.messages.values():
+                    if (m["sender_id"], m["idempotency_key"]) in gone:
+                        m["idempotency_key"] = UUID(hashlib.md5(
+                            ("mail-key-retired:" + str(m["id"])).encode("ascii")).hexdigest())
             return _Res([(1,)] * len(gone))
         if "AS per_minute" in sql:
             assert "kind = 'direct'" in sql, "rate window must ignore broadcasts"
@@ -541,6 +576,7 @@ class FakeDb:
             kind = "system_broadcast" if "'system_broadcast'" in sql else "direct"
             mid = params["id"]
             assert mid not in self.messages
+            self.unique_key_or_raise(params["sid"], params["key"])
             self.messages[mid] = {"id": mid, "sender_id": params["sid"], "kind": kind,
                                   "thread_id": params.get("tid", mid) if kind == "direct" else mid,
                                   "in_reply_to": params.get("irt"), "subject": params["subj"],
@@ -552,11 +588,19 @@ class FakeDb:
                                   # column default exactly as the table does.
                                   "via": params.get("via", "game")}
             if self.receipt_trigger:
-                # migration 404's trigger, AFTER INSERT: a receipt with no digest
-                # unless the key already has one
-                self.receipts.setdefault((params["sid"], params["key"]), {
-                    "message_id": mid, "kind": kind, "recipients": None, "request_fp": None,
-                    "created_at": self.message_created_at})
+                # migration 404's trigger, AFTER INSERT: a receipt with no
+                # request digest and the digest of the stored text; a receipt
+                # of the key for ANOTHER message is replaced by this one (the
+                # key sent again once its first message was purged), one of
+                # this message is left as it is
+                k = (params["sid"], params["key"])
+                r = self.receipts.get(k)
+                if r is None or r["message_id"] != mid:
+                    self.receipts[k] = {
+                        "message_id": mid, "kind": kind, "recipients": None, "request_fp": None,
+                        "message_fp": main._mail_message_fp(self.route_of(mid), params["subj"],
+                                                            params["body"]),
+                        "created_at": self.message_created_at}
             return _Res()
         if "UPDATE mail_messages SET recipient_count" in sql:
             m = self.messages[params["mid"]]

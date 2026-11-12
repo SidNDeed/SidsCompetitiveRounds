@@ -1404,19 +1404,22 @@ class SpectateLease(Base):
 
 class MailMessage(Base):
     """One sent message. thread_id is the ROOT message's own id (a new thread
-    points at itself), in_reply_to the parent (self-FK, SET NULL on purge).
-    A retried send finds its original through its send receipt
-    (MailSendReceipt, migration 404, which dropped this table's UNIQUE
-    (sender_id, idempotency_key)). kind 'system_broadcast' is admin-only,
-    audited, and bypasses preferences and blocks (B-12); everything else is
-    'direct'."""
+    points at itself), in_reply_to the parent's id; neither has a foreign
+    key (migration 404 dropped 297's SET NULL self-reference on
+    in_reply_to), so both keep their value after the janitor purges the
+    message they name. A retried send finds its original through its send
+    receipt (MailSendReceipt, migration 404); UNIQUE (sender_id,
+    idempotency_key) stays from 297 for the build before that change, and
+    the janitor retires a kept message's key when it deletes the key's
+    receipt. kind 'system_broadcast' is admin-only, audited, and bypasses
+    preferences and blocks (B-12); everything else is 'direct'."""
     __tablename__ = "mail_messages"
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     sender_id = Column(UUID(as_uuid=True), ForeignKey("players.id"), nullable=False)
     kind = Column(Text, nullable=False, default="direct")
     thread_id = Column(UUID(as_uuid=True), nullable=False)
-    in_reply_to = Column(UUID(as_uuid=True), ForeignKey("mail_messages.id", ondelete="SET NULL"), nullable=True)
+    in_reply_to = Column(UUID(as_uuid=True), nullable=True)
     subject = Column(String(120), nullable=False)
     body = Column(String(2000), nullable=False)
     idempotency_key = Column(UUID(as_uuid=True), nullable=False)
@@ -1447,9 +1450,11 @@ class MailMessage(Base):
 class MailSendReceipt(Base):
     """One row per (sender_id, idempotency_key) that a mail send, reply or
     broadcast committed under (migration 404): the message id it answered
-    with, its kind, a broadcast's recipient count, and the SHA-256 digest of
+    with, its kind, a broadcast's recipient count, the SHA-256 digest of
     the request (`request_fp`; NULL on rows backfilled by the migration or
-    written by its trigger for a writer that stores none). A repeated key is
+    written by its trigger for a writer that stores none), and the SHA-256
+    digest of the message's stored text (`message_fp`, main._mail_message_fp;
+    on every row, compared when `request_fp` is NULL). A repeated key is
     answered from this row alone (main._mail_prior_send), so the answer does
     not depend on whether the janitor has purged the message. No foreign
     keys: message_id outlives that purge, and the janitor and account
@@ -1460,6 +1465,7 @@ class MailSendReceipt(Base):
     idempotency_key = Column(UUID(as_uuid=True), primary_key=True)
     kind = Column(Text, nullable=False)
     request_fp = Column(LargeBinary, nullable=True)
+    message_fp = Column(LargeBinary, nullable=False)
     message_id = Column(UUID(as_uuid=True), nullable=False)
     recipients = Column(Integer, nullable=True)
     created_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
@@ -1467,6 +1473,7 @@ class MailSendReceipt(Base):
     __table_args__ = (
         CheckConstraint("kind IN ('direct', 'system_broadcast')", name="ck_mail_send_receipts_kind"),
         CheckConstraint("request_fp IS NULL OR octet_length(request_fp) = 32", name="ck_mail_send_receipts_fp"),
+        CheckConstraint("octet_length(message_fp) = 32", name="ck_mail_send_receipts_message_fp"),
         CheckConstraint("recipients IS NULL OR recipients >= 0", name="ck_mail_send_receipts_recipients"),
         Index("ix_mail_send_receipts_created", "created_at"),
     )

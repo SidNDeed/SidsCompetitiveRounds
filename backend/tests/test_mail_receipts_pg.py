@@ -16,6 +16,7 @@ unless SCR_MIGRATION_TEST_PG_OPTOUT=1 (test_migration_reruns.py's polarity).
 
 import ast
 import asyncio
+import hashlib
 import inspect
 import os
 import re
@@ -152,12 +153,16 @@ class _Schema:
         return False
 
 
-async def _message(conn, sender=A, kind="direct", key=None, count=None, at=None):
+async def _message(conn, sender=A, kind="direct", key=None, count=None, at=None, thread=None,
+                   parent=None, subject="s", body="b"):
+    """A message row as a writer of mail_messages inserts it: a new thread
+    (thread_id = id) unless `thread` names one, in reply to `parent`."""
     mid = str(uuid.uuid4())
     await conn.execute(
-        "INSERT INTO mail_messages (id, sender_id, kind, thread_id, subject, body, idempotency_key,"
-        " created_at, recipient_count) VALUES ($1, $2, $3, $1, 's', 'b', $4, COALESCE($5, NOW()), $6)",
-        mid, sender, kind, key or str(uuid.uuid4()), at, count)
+        "INSERT INTO mail_messages (id, sender_id, kind, thread_id, in_reply_to, subject, body,"
+        " idempotency_key, created_at, recipient_count)"
+        " VALUES ($1, $2, $3, COALESCE($7, $1), $8, $9, $10, $4, COALESCE($5, NOW()), $6)",
+        mid, sender, kind, key or str(uuid.uuid4()), at, count, thread, parent, subject, body)
     return mid
 
 
@@ -182,7 +187,9 @@ async def _receipt(conn, sid, key):
 
 
 async def _shape(conn):
-    """Which of 404's objects exist, and whether 297's constraint does."""
+    """Which of 404's objects exist, whether a foreign key covers
+    mail_messages.in_reply_to (297's, which 404 drops), and whether 297's
+    unique key exists (404 keeps it)."""
     row = await conn.fetchrow("""
         SELECT EXISTS (SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
                         WHERE n.nspname = current_schema() AND c.relname = 'mail_send_receipts') AS tbl,
@@ -193,40 +200,107 @@ async def _shape(conn):
                         WHERE n.nspname = current_schema() AND t.tgname = 'trg_mail_send_receipt') AS trg,
                EXISTS (SELECT 1 FROM pg_constraint k JOIN pg_class c ON c.oid = k.conrelid
                          JOIN pg_namespace n ON n.oid = c.relnamespace
+                         JOIN pg_attribute a ON a.attrelid = c.oid
+                        WHERE n.nspname = current_schema() AND c.relname = 'mail_messages'
+                          AND k.contype = 'f' AND a.attname = 'in_reply_to'
+                          AND a.attnum = ANY (k.conkey)) AS fk,
+               EXISTS (SELECT 1 FROM pg_constraint k JOIN pg_class c ON c.oid = k.conrelid
+                         JOIN pg_namespace n ON n.oid = c.relnamespace
                         WHERE n.nspname = current_schema()
-                          AND k.conname = 'uq_mail_messages_sender_idem') AS uq""")
-    return {"table": row["tbl"], "function": row["fn"], "trigger": row["trg"], "uq": row["uq"]}
+                          AND k.conname = 'uq_mail_messages_sender_idem'
+                          AND pg_get_constraintdef(k.oid) = 'UNIQUE (sender_id, idempotency_key)') AS uq""")
+    return {"table": row["tbl"], "function": row["fn"], "trigger": row["trg"], "fk": row["fk"],
+            "uq": row["uq"]}
 
 
-APPLIED = {"table": True, "function": True, "trigger": True, "uq": False}
-ROLLED_BACK = {"table": False, "function": False, "trigger": False, "uq": True}
+APPLIED = {"table": True, "function": True, "trigger": True, "fk": False, "uq": True}
+ROLLED_BACK = {"table": False, "function": False, "trigger": False, "fk": True, "uq": True}
+BEFORE = ROLLED_BACK                     # 297's schema: what a refused first run leaves
 
 
 # ── the migration ─────────────────────────────────────────────────────────
 
-def test_the_backfill_gives_every_message_its_receipt_with_the_previous_answer():
-    """A direct message, a broadcast with its count, and a broadcast written
-    before 300 (no count; two delivered envelopes and one suppressed): the
-    receipt replays what the previous build's replay answered for each."""
-    async def body(migration):
+def test_the_backfill_gives_every_message_its_receipt_and_refuses_an_uncounted_broadcast():
+    """A direct message and a broadcast with its count get receipts that
+    replay what the previous build's replay answered. A broadcast written
+    before 300 (no count; two delivered envelopes and one suppressed) aborts
+    the file with nothing changed: the previous build answers its key with a
+    count of its envelopes taken at that moment, which no stored count stays
+    equal to."""
+    async def body(migration, uncounted):
         async with _Schema() as conn:
             t0 = datetime(2026, 11, 1, 10, tzinfo=timezone.utc)
             direct = await _message(conn, at=t0)
             counted = await _message(conn, kind="system_broadcast", count=3, at=t0 + timedelta(days=1))
-            uncounted = await _message(conn, kind="system_broadcast", at=t0 + timedelta(days=2))
-            for rid, delivery in ((B, "delivered"), (C, "delivered"), (D, "suppressed")):
-                await _envelope(conn, uncounted, rid, delivery)
+            late = None
+            if uncounted:
+                late = await _message(conn, kind="system_broadcast", at=t0 + timedelta(days=2))
+                for rid, delivery in ((B, "delivered"), (C, "delivered"), (D, "suppressed")):
+                    await _envelope(conn, late, rid, delivery)
+            try:
+                await conn.execute(migration)
+                refused = None
+            except asyncpg.PostgresError as e:
+                refused = str(e)
+                await conn.execute("ROLLBACK")
+            shape = await _shape(conn)
+            got = await _receipts(conn) if shape["table"] else None
+            return refused, got, (direct, counted, late), shape
+    refused, got, (direct, counted, _late), shape = _run(body(M404, False))
+    assert refused is None and shape == APPLIED
+    assert got == {direct: ("direct", None, None, True), counted: ("system_broadcast", 3, None, True)}
+    refused, got, _made, shape = _run(body(M404, True))
+    assert refused and "404: 1 broadcast row(s) have no recipient_count" in refused
+    assert got is None and shape == BEFORE                      # the whole file rolled back
+    # mutant: the refusal taken out -> the file commits and the broadcast's
+    # receipt holds no count, so its replay answers 0 where the previous
+    # build answered 2
+    refused, got, (_d, _c, late), shape = _run(body(_mutated(M404, "IF uncounted <> 0 THEN", "IF false THEN"),
+                                                  True))
+    assert refused is None and shape == APPLIED and got[late][1] is None
+
+
+def test_the_trigger_and_the_backfill_write_the_digest_the_api_computes():
+    """message_fp, written by the backfill (rows present before the file)
+    and by the trigger (rows written after), equals main._mail_message_fp of
+    the stored text for a send, a reply and a broadcast, with text outside
+    ASCII. A reply's subject is not in it, and a reply is told by its
+    thread_id: the one here has no in_reply_to, as a reply whose parent was
+    purged under 297's ON DELETE SET NULL has none."""
+    async def make(conn):
+        root = await _message(conn, subject="Root", body="r")
+        made = {root: ("send", "Root", "r")}
+        for route, kw in (("send", dict(subject="Plan ü", body="Café \U0001F600")),
+                          ("reply", dict(thread=root, subject="Re: Root", body="Sí.")),
+                          ("broadcast", dict(kind="system_broadcast", count=2, subject="Notice",
+                                             body="Restart ✓"))):
+            made[await _message(conn, **kw)] = (route, kw["subject"], kw["body"])
+        return made
+
+    async def body(migration):
+        async with _Schema() as conn:
+            before = await make(conn)
             await conn.execute(migration)
-            return await _receipts(conn), (direct, counted, uncounted), await _shape(conn)
-    got, (direct, counted, uncounted), shape = _run(body(M404))
-    assert shape == APPLIED
-    assert got == {direct: ("direct", None, None, True), counted: ("system_broadcast", 3, None, True),
-                   uncounted: ("system_broadcast", 2, None, True)}
-    # mutant: the envelope count without its delivery filter -> the receipt
-    # would replay a count the previous build never answered
-    got, (_d, _c, uncounted), _shape_ = _run(body(_mutated(
-        M404, "WHERE r.message_id = m.id AND r.delivery = 'delivered'", "WHERE r.message_id = m.id")))
-    assert got[uncounted][1] == 3
+            after = await make(conn)
+            fps = {r["mid"]: bytes(r["message_fp"]) for r in await conn.fetch(
+                "SELECT message_id::text AS mid, message_fp FROM mail_send_receipts")}
+            return before, after, fps
+
+    def wrong(made, fps):
+        return sorted(route for mid, (route, subject, text_) in made.items()
+                      if fps[mid] != main._mail_message_fp(route, subject, text_))
+    before, after, fps = _run(body(M404))
+    assert len(fps) == 8 and wrong(before, fps) == [] and wrong(after, fps) == []
+    # mutant, backfill: the route read off in_reply_to -> the reply with
+    # none digests as a send
+    before, after, fps = _run(body(_mutated(M404, "WHEN m.thread_id = m.id THEN 'send'",
+                                            "WHEN m.in_reply_to IS NULL THEN 'send'")))
+    assert wrong(before, fps) == ["reply"] and wrong(after, fps) == []
+    # mutant, trigger: a reply's subject digested -> the trigger's reply row
+    # differs from the api's digest
+    before, after, fps = _run(body(_mutated(M404, "THEN '' ELSE NEW.subject END",
+                                            "THEN NEW.subject ELSE NEW.subject END")))
+    assert wrong(before, fps) == [] and wrong(after, fps) == ["reply"]
 
 
 def test_the_trigger_writes_a_receipt_and_the_first_count_wins():
@@ -260,31 +334,67 @@ def test_the_post_check_accepts_matching_objects_and_refuses_differing_ones():
     a same-named trigger whose WHEN condition differs, while one made as the
     file makes it is accepted."""
     same = ("CREATE TABLE mail_send_receipts (sender_id UUID NOT NULL, idempotency_key UUID NOT NULL,"
-            " kind TEXT NOT NULL, request_fp BYTEA, message_id UUID NOT NULL, recipients INTEGER,"
-            " created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), PRIMARY KEY (sender_id, idempotency_key),"
+            " kind TEXT NOT NULL, request_fp BYTEA, message_fp BYTEA NOT NULL, message_id UUID NOT NULL,"
+            " recipients INTEGER, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),"
+            " PRIMARY KEY (sender_id, idempotency_key),"
             " CONSTRAINT ck_mail_send_receipts_kind CHECK (kind IN ('direct', 'system_broadcast')),"
             " CONSTRAINT ck_mail_send_receipts_fp CHECK (request_fp IS NULL OR octet_length(request_fp) = 32),"
+            " CONSTRAINT ck_mail_send_receipts_message_fp CHECK (octet_length(message_fp) = 32),"
             " CONSTRAINT ck_mail_send_receipts_recipients CHECK (recipients IS NULL OR recipients >= 0));")
+    table_only = {"table": True, "function": False, "trigger": False, "fk": True, "uq": True}
 
-    async def body(pre):
+    async def body(pre, migration=M404):
         async with _Schema() as conn:
             await conn.execute(pre)
             try:
-                await conn.execute(M404)
+                await conn.execute(migration)
                 refused = None
             except asyncpg.PostgresError as e:
                 refused = str(e)
                 await conn.execute("ROLLBACK")
             return refused, await _shape(conn)
     assert _run(body(same)) == (None, APPLIED)
-    refused, shape = _run(body(_mutated(same, "created_at TIMESTAMPTZ", "created_at TIMESTAMP")))
-    assert refused and "404: mail_send_receipts columns differ" in refused
-    assert shape == {"table": True, "function": False, "trigger": False, "uq": True}   # nothing else changed
-    refused, shape = _run(body(_mutated(same, "recipients IS NULL OR recipients >= 0",
-                                        "recipients IS NULL OR recipients >= 1")))
-    assert refused and "404: mail_send_receipts key or checks differ" in refused
-    assert "ck_mail_send_receipts_recipients CHECK" in refused and "recipients >= 1" in refused   # what it found
-    assert shape == {"table": True, "function": False, "trigger": False, "uq": True}
+    # Each property the file states, changed alone on a table made before the
+    # file: the whole file aborts (only the table made before it is left),
+    # with the refusal naming what it found.
+    trig = ("CREATE FUNCTION t404_noop() RETURNS trigger LANGUAGE plpgsql AS $f$BEGIN RETURN NEW; END$f$;"
+            " CREATE TRIGGER t404_extra BEFORE INSERT ON mail_send_receipts FOR EACH ROW"
+            " EXECUTE FUNCTION t404_noop();")
+    cases = {
+        "type": (_mutated(same, "created_at TIMESTAMPTZ", "created_at TIMESTAMP"),
+                 "404: mail_send_receipts columns differ", "created_at timestamp without time zone"),
+        # (the constant prints in the session's time zone, so only its start)
+        "default": (_mutated(same, "DEFAULT NOW()", "DEFAULT TIMESTAMPTZ '2000-01-01 00:00+00'"),
+                    "404: mail_send_receipts columns differ",
+                    "created_at timestamp with time zone NOT NULL DEFAULT '"),
+        "modifier": (_mutated(same, "created_at TIMESTAMPTZ", "created_at TIMESTAMPTZ(0)"),
+                     "404: mail_send_receipts columns differ", "timestamp(0) with time zone"),
+        "collation": (_mutated(same, "kind TEXT NOT NULL", 'kind TEXT COLLATE "C" NOT NULL'),
+                      "404: mail_send_receipts columns differ", "COLLATE C"),
+        "check": (_mutated(same, "recipients IS NULL OR recipients >= 0", "recipients IS NULL OR recipients >= 1"),
+                  "404: mail_send_receipts key or checks differ", "recipients >= 1"),
+        "index": (same + " CREATE UNIQUE INDEX t404_extra ON mail_send_receipts (message_id);",
+                  "404: mail_send_receipts indexes differ", "t404_extra"),
+        "unlogged": (_mutated(same, "CREATE TABLE", "CREATE UNLOGGED TABLE"),
+                     "404: mail_send_receipts is not the plain table", ""),
+        "row security": (same + " ALTER TABLE mail_send_receipts ENABLE ROW LEVEL SECURITY;",
+                         "404: mail_send_receipts is not the plain table", ""),
+        "trigger": (same + " " + trig, "404: mail_send_receipts is not the plain table", ""),
+    }
+    for name, (pre, message, found) in cases.items():
+        refused, shape = _run(body(pre))
+        assert refused and message in refused and found in refused, (name, refused)
+        assert shape == table_only, name
+    # mutants: each comparison taken out of the post-check -> its case is
+    # accepted and the file commits over the differing table
+    for name, old, new in (
+            ("default", "     AND pg_get_expr(d.adbin, d.adrelid) IS NOT DISTINCT FROM w.def;", ";"),
+            ("modifier", "     AND a.atttypmod = -1\n", ""),
+            ("index", "IF n <> 1 OR pk <> 1 OR valid <> 2 OR total <> 2 THEN",
+             "IF n <> 1 OR pk <> 1 THEN"),
+            ("unlogged", "     AND c.relpersistence = 'p'\n", "")):
+        refused, shape = _run(body(cases[name][0], _mutated(M404, old, new)))
+        assert refused is None and shape == APPLIED, (name, refused)
 
     fn = ("CREATE FUNCTION mail_send_receipt_sync() RETURNS trigger LANGUAGE plpgsql"
           " AS $f$BEGIN RETURN NULL; END$f$;")
@@ -296,41 +406,59 @@ def test_the_post_check_accepts_matching_objects_and_refuses_differing_ones():
                                              "NEW.kind = 'direct'")))
     assert refused and "404: trg_mail_send_receipt or its function differs" in refused
     assert "new.kind = 'direct'" in refused                                  # what it found
-    assert shape == {"table": False, "function": True, "trigger": True, "uq": True}
+    assert shape == {"table": False, "function": True, "trigger": True, "fk": True, "uq": True}
+    # The foreign key's drop is part of the check: a file that kept 297's
+    # foreign key on in_reply_to is refused by its own post-check.
+    refused, shape = _run(body("SELECT 1;", _mutated(
+        M404, "    EXECUTE format('ALTER TABLE mail_messages DROP CONSTRAINT %I', k.conname);\n",
+        "    NULL;\n")))
+    assert refused and "404: a foreign key still covers mail_messages.in_reply_to" in refused
+    assert shape == BEFORE
 
 
 # ── the api's statements ──────────────────────────────────────────────────
 
 def test_the_api_upsert_completes_its_own_row_and_refuses_another_message():
     fp1, fp2 = bytes(range(32)), bytes(range(1, 33))
+    send_fp, bcast_fp = main._mail_message_fp("send", "s", "b"), main._mail_message_fp("broadcast", "s", "b")
 
     async def body(sql):
         async with _Schema() as conn:
             await conn.execute(M404)
             key = str(uuid.uuid4())
             mid = await _message(conn, key=key)                      # the trigger's row: no digest
-            stmt = lambda **p: _bind(sql, p)                         # noqa: E731
+
+            def stmt(**p):
+                route = "broadcast" if p["kind"] == "system_broadcast" else "send"
+                return _bind(sql, dict(p, mfp=main._mail_message_fp(route, "s", "b")))
+
+            async def stored_fp(k):
+                return bytes(await conn.fetchval("SELECT message_fp FROM mail_send_receipts"
+                                                 " WHERE sender_id = $1 AND idempotency_key = $2", A, k))
             own = await conn.fetchval(*_flat(stmt(sid=A, key=key, kind="direct", fp=fp1, mid=mid, n=None)))
             after_own = await _receipt(conn, A, key)
             other = await conn.fetchval(*_flat(stmt(sid=A, key=key, kind="direct", fp=fp2,
                                                     mid=str(uuid.uuid4()), n=None)))
             after_other = await _receipt(conn, A, key)
+            own_fp = await stored_fp(key)
             # without the trigger, the upsert alone writes the whole row
             await conn.execute("DROP TRIGGER trg_mail_send_receipt ON mail_messages")
             key2 = str(uuid.uuid4())
             mid2 = await _message(conn, kind="system_broadcast", key=key2, count=4)
             alone = await conn.fetchval(*_flat(stmt(sid=A, key=key2, kind="system_broadcast", fp=fp1,
                                                     mid=mid2, n=4)))
-            return (own, after_own, other, after_other, alone, await _receipt(conn, A, key2), mid, mid2)
-    own, after_own, other, after_other, alone, row2, mid, mid2 = _run(body(main._MAIL_RECEIPT_SQL))
+            return (own, after_own, other, after_other, alone, await _receipt(conn, A, key2), mid, mid2,
+                    (own_fp, await stored_fp(key2)))
+    own, after_own, other, after_other, alone, row2, mid, mid2, fps = _run(body(main._MAIL_RECEIPT_SQL))
     assert own == 1 and after_own == (mid, "direct", None, fp1)
     assert other is None and after_other == after_own
     assert alone == 1 and row2 == (mid2, "system_broadcast", 4, fp1)
+    assert fps == (send_fp, bcast_fp)            # the trigger's digest kept; the upsert's own written
     # mutant: the upsert's WHERE taken out -> another message's request
     # replaces the digest on this message's receipt
     where = "   WHERE mail_send_receipts.message_id = EXCLUDED.message_id"
     # (each run makes its own messages: compare with this run's message id)
-    _own, _after_own, other, after_other, _alone, _row2, m_mid, _m_mid2 = _run(
+    _own, _after_own, other, after_other, _alone, _row2, m_mid, _m_mid2, _fps = _run(
         body(_mutated(main._MAIL_RECEIPT_SQL, where, "")))
     assert other == 1 and after_other[0] == m_mid and after_other[3] == fp2
 
@@ -367,9 +495,9 @@ def test_the_sweep_deletes_receipts_older_than_retention_and_no_other():
             await conn.execute(M404)
             for days in (DAYS + 1, DAYS - 1):
                 await conn.execute(
-                    "INSERT INTO mail_send_receipts (sender_id, idempotency_key, kind, message_id, created_at)"
-                    " VALUES ($1, $2, 'direct', $3, NOW() - make_interval(days => $4))",
-                    A, str(uuid.uuid4()), str(uuid.uuid4()), days)
+                    "INSERT INTO mail_send_receipts (sender_id, idempotency_key, kind, message_fp, message_id,"
+                    " created_at) VALUES ($1, $2, 'direct', $3, $4, NOW() - make_interval(days => $5))",
+                    A, str(uuid.uuid4()), bytes(32), str(uuid.uuid4()), days)
             gone = await conn.fetch(*_flat(_bind(sql, {"days": DAYS})))
             left = await conn.fetch("SELECT created_at < NOW() - make_interval(days => $1) AS old"
                                     " FROM mail_send_receipts", DAYS)
@@ -378,6 +506,118 @@ def test_the_sweep_deletes_receipts_older_than_retention_and_no_other():
     # mutant: the comparison turned round -> the young receipt goes instead
     assert _run(body(_mutated(main._MAIL_RECEIPT_SWEEP_SQL, "created_at < NOW()", "created_at > NOW()"))) \
         == (1, [True])
+
+
+def test_the_sweep_retires_the_key_of_a_kept_message_and_no_other():
+    """A's message to B under key K, made DAYS+1 days ago and still unread,
+    so the janitor's purge keeps its row; its receipt is past retention and
+    the sweep deletes it. The message's key becomes one derived from its own
+    id, so K sent again is a new message under 297's unique key, and K's
+    receipt answers for it. A's young message keeps its key."""
+    retire = "CAST(md5('mail-key-retired:' || CAST(m.id AS text)) AS uuid)"
+
+    async def body(sweep):
+        async with _Schema() as conn:
+            await conn.execute(M404)
+            key, young_key = str(uuid.uuid4()), str(uuid.uuid4())
+            now = await conn.fetchval("SELECT NOW()")
+            old = await _message(conn, key=key, at=now - timedelta(days=DAYS + 1))
+            await _envelope(conn, old, B)
+            young = await _message(conn, key=young_key, at=now - timedelta(days=1))
+            swept = len(await conn.fetch(*_flat(_bind(sweep, {"days": DAYS}))))
+            keys = {r["id"]: r["k"] for r in await conn.fetch(
+                "SELECT id::text AS id, idempotency_key::text AS k FROM mail_messages")}
+            derived = str(uuid.UUID(hashlib.md5(("mail-key-retired:" + old).encode()).hexdigest()))
+            try:
+                new = await _message(conn, key=key)
+            except asyncpg.PostgresError as e:
+                return swept, keys[old] == derived, keys[young] == young_key, e.sqlstate
+            return swept, keys[old] == derived, keys[young] == young_key, \
+                (await _receipt(conn, A, key))[0] == new
+    assert _run(body(main._MAIL_RECEIPT_SWEEP_SQL)) == (1, True, True, True)
+    # mutant: the key left as it was -> K sent again breaks 297's unique key
+    assert _run(body(_mutated(main._MAIL_RECEIPT_SWEEP_SQL, retire, "m.idempotency_key"))) == \
+        (1, False, True, "23505")
+    # mutant: the key's match taken out -> every message of the sender is retired
+    assert _run(body(_mutated(main._MAIL_RECEIPT_SWEEP_SQL, " AND m.idempotency_key = g.idempotency_key",
+                              ""))) == (1, True, False, True)
+
+
+def test_a_key_the_previous_build_sends_again_after_a_purge_moves_its_receipt():
+    """The previous build on the migrated schema. A's message under key K,
+    whose receipt the current build completed with its request digest, is
+    deleted (any way a row goes); the previous build answers a retry of K
+    from mail_messages, finds nothing and sends K again as a new message.
+    The trigger moves K's receipt to the new message -- its id and time --
+    and clears the digest of the first request: a replay of K answers the
+    message that exists, by its stored text."""
+    fp = bytes(range(32))
+    conflict = re.compile(r"ON CONFLICT \(sender_id, idempotency_key\) DO UPDATE\n.*?"
+                          r"<> EXCLUDED\.message_id;", re.S)
+
+    async def body(migration):
+        async with _Schema() as conn:
+            await conn.execute(migration)
+            key = str(uuid.uuid4())
+            first = await _message(conn, key=key, at=await conn.fetchval("SELECT NOW()") - timedelta(hours=2))
+            await conn.execute(*_flat(_bind(main._MAIL_RECEIPT_SQL, {
+                "sid": A, "key": key, "kind": "direct", "fp": fp,
+                "mfp": main._mail_message_fp("send", "s", "b"), "mid": first, "n": None})))
+            await conn.execute("DELETE FROM mail_messages WHERE id = $1", first)
+            second = await _message(conn, key=key)
+            return await _receipts(conn), first, second
+    got, _first, second = _run(body(M404))
+    assert got == {second: ("direct", None, None, True)}
+    # mutant: the trigger's conflict arm as DO NOTHING -> K still answers the
+    # deleted message, with the first request's digest and time
+    nothing, n = conflict.subn("ON CONFLICT (sender_id, idempotency_key) DO NOTHING;", M404)
+    assert n == 1
+    got, first, _second = _run(body(nothing))
+    assert got == {first: ("direct", None, fp, None)}
+    # mutant: the digest kept -> the new message answers a changed body by
+    # the first request's digest
+    got, _first, second = _run(body(_mutated(M404, "           request_fp = NULL,\n", "")))
+    assert got == {second: ("direct", None, fp, True)}
+
+
+def test_a_replys_in_reply_to_names_its_parent_whatever_the_parents_purge(monkeypatch):
+    """B replies to A's message, which A also sent to C; A and B then delete
+    their copies of the original, both messages made past the janitor's age
+    floor. `other` is C's copy: delivered and unread, it keeps the
+    original's row through the purge; suppressed, the purge removes it. B's
+    detail read of the reply names the original in both worlds."""
+    detail = _sender_reads(monkeypatch)["detail"]
+    purge = _janitor_purge_sql()
+    keep_fk = (("    EXECUTE format('ALTER TABLE mail_messages DROP CONSTRAINT %I', k.conname);\n", "    NULL;\n"),
+               ("    RAISE EXCEPTION '404: a foreign key still covers mail_messages.in_reply_to';\n",
+                "    NULL;\n"))
+
+    async def body(migration, other):
+        async with _Schema() as conn:
+            await conn.execute(migration)
+            at = await conn.fetchval("SELECT NOW()") - timedelta(days=main.MAIL_PURGE_MIN_AGE_DAYS + 1)
+            orig = await _message(conn, sender=A, at=at)
+            await _envelope(conn, orig, B)
+            await _envelope(conn, orig, C, other)
+            rep = await _message(conn, sender=B, at=at, thread=orig, parent=orig)
+            await _envelope(conn, rep, A)
+            await conn.execute("UPDATE mail_recipients SET deleted_at = NOW()"
+                               " WHERE message_id = $1 AND recipient_id = $2", orig, B)
+            await conn.execute("UPDATE mail_messages SET deleted_by_sender_at = NOW() WHERE id = $1", orig)
+            await conn.execute(*_flat(_bind(purge, {
+                "days": DAYS, "min_age_days": main.MAIL_PURGE_MIN_AGE_DAYS})))
+            kept = await conn.fetchval("SELECT 1 FROM mail_messages WHERE id = $1", orig) is not None
+            row = await conn.fetchrow(*_flat(_bind(detail, {"mid": rep, "me": B, "ret_days": DAYS})))
+            return kept, (str(row["in_reply_to"]) == orig if row["in_reply_to"] else None)
+    assert {o: _run(body(M404, o)) for o in ("delivered", "suppressed")} == {
+        "delivered": (True, True), "suppressed": (False, True)}
+    # mutant: 297's foreign key kept (its drop and its check taken out) ->
+    # the purge empties in_reply_to in the second world only
+    kept_fk = M404
+    for old, new in keep_fk:
+        kept_fk = _mutated(kept_fk, old, new)
+    assert {o: _run(body(kept_fk, o)) for o in ("delivered", "suppressed")} == {
+        "delivered": (True, True), "suppressed": (False, None)}
 
 
 def test_the_fanout_writes_a_forced_addressee_suppressed_whatever_their_settings():
@@ -600,38 +840,64 @@ def test_the_purge_keeps_a_deleted_send_for_the_spam_checks_windows():
 
 # ── the rollback ──────────────────────────────────────────────────────────
 
-def test_the_rollback_restores_297_runs_twice_and_refuses_repeated_keys():
+def test_the_rollback_restores_297s_foreign_key_runs_twice_and_refuses_a_differing_one():
+    """On the migrated schema, B's reply to a message that was then deleted
+    names a row no longer there, and B's reply to a kept message names that
+    one. The rollback drops 404's objects, sets the first reply's in_reply_to
+    to NULL, keeps the second's and restores 297's foreign key; run again it
+    changes nothing, and 297's unique key stays throughout. A foreign key on
+    in_reply_to that differs from 297's -- the same name, ON DELETE CASCADE,
+    NOT VALID -- aborts the whole file, naming what it found."""
+    cascade = ("ALTER TABLE mail_messages ADD CONSTRAINT mail_messages_in_reply_to_fkey"
+               " FOREIGN KEY (in_reply_to) REFERENCES mail_messages(id) ON DELETE CASCADE NOT VALID")
+
     async def body(rollback):
         async with _Schema() as conn:
             await conn.execute(M404)
-            await conn.execute(rollback)
-            first = await _shape(conn)
-            try:
-                await conn.execute(rollback)
-                second = await _shape(conn)
-            except asyncpg.PostgresError as e:
-                await conn.execute("ROLLBACK")
-                return first, e.sqlstate, None, None, None
+            gone, kept = await _message(conn), await _message(conn)
+            replies = [await _message(conn, sender=B, thread=p, parent=p) for p in (gone, kept)]
+            await conn.execute("DELETE FROM mail_messages WHERE id = $1", gone)
+            out = {}
+            for run in ("first", "second"):
+                try:
+                    await conn.execute(rollback)
+                except asyncpg.PostgresError as e:
+                    await conn.execute("ROLLBACK")
+                    out[run] = e.sqlstate
+                    return out
+                parents = [await conn.fetchval("SELECT in_reply_to::text FROM mail_messages WHERE id = $1", r)
+                           for r in replies]
+                out[run] = (await _shape(conn), parents == [None, kept])
             await conn.execute(M404)
-            again = await _shape(conn)
-            # a key sent again after its receipt was swept while the row is kept
-            key = str(uuid.uuid4())
-            await _message(conn, key=key)
-            await conn.execute("DELETE FROM mail_send_receipts")
-            await _message(conn, key=key)
+            await conn.execute(cascade)
             try:
                 await conn.execute(rollback)
-                refused = None
+                out["differing"] = None
             except asyncpg.PostgresError as e:
-                refused = e.sqlstate
                 await conn.execute("ROLLBACK")
-            return first, second, again, refused, await _shape(conn)
-    first, second, again, refused, after = _run(body(R404))
-    assert first == second == ROLLED_BACK and again == APPLIED
-    assert refused == "23505" and after == APPLIED           # the refusal rolled the whole file back
-    # mutant: the constraint added without its guard -> the second run fails
-    bare = "ALTER TABLE mail_messages ADD CONSTRAINT uq_mail_messages_sender_idem UNIQUE (sender_id, idempotency_key);"
-    unguarded, n = re.subn(r"DO \$r404uq\$.*?END \$r404uq\$;", bare, R404, flags=re.S)
-    assert n == 1
-    first, failed, *_rest = _run(body(unguarded))
-    assert first == ROLLED_BACK and failed in ("42P07", "42710")
+                out["differing"] = str(e)
+            out["after"] = await _shape(conn)
+            return out
+    out = _run(body(R404))
+    assert out["first"] == out["second"] == (ROLLED_BACK, True)
+    assert "rollback 404: the foreign key on mail_messages.in_reply_to differs from 297's (found:" \
+        " mail_messages_in_reply_to_fkey FOREIGN KEY (in_reply_to) REFERENCES mail_messages(id)" \
+        " ON DELETE CASCADE NOT VALID)" in out["differing"]
+    assert out["after"] == dict(APPLIED, fk=True)            # the refusal rolled the whole file back
+    # mutant: the definition's comparison taken out -> the differing key is
+    # accepted and the file commits over it
+    out = _run(body(_mutated(R404, "= 'FOREIGN KEY (in_reply_to) REFERENCES mail_messages(id) ON DELETE SET NULL')",
+                             "IS NOT NULL)")))
+    assert out["differing"] is None and out["after"] == ROLLED_BACK
+    # mutant: no reply's in_reply_to set to NULL -> restoring the key fails
+    # on the deleted parent
+    assert _run(body(_mutated(R404, "AND NOT EXISTS (SELECT 1 FROM mail_messages p WHERE p.id = m.in_reply_to);",
+                              "AND false;"))) == {"first": "23503"}
+    # mutant: every reply's in_reply_to set to NULL -> the kept parent's
+    # reply loses it too
+    out = _run(body(_mutated(R404, "\n       AND NOT EXISTS (SELECT 1 FROM mail_messages p WHERE p.id = m.in_reply_to);",
+                             ";")))
+    assert out["first"] == (ROLLED_BACK, False)
+    # mutant: the key added whatever is there -> the second run fails
+    out = _run(body(_mutated(R404, "IF total = 0 THEN", "IF true THEN")))
+    assert out == {"first": (ROLLED_BACK, True), "second": "42710"}

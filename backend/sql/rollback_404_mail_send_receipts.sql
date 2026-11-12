@@ -6,10 +6,11 @@
 -- Removes what 404_mail_send_receipts.sql added: the trigger
 -- trg_mail_send_receipt on mail_messages, its function
 -- mail_send_receipt_sync(), and the table mail_send_receipts with every
--- receipt in it (its index goes with it). Restores 297's constraint
--- uq_mail_messages_sender_idem UNIQUE (sender_id, idempotency_key) on
--- mail_messages. Re-runnable: every DROP is IF EXISTS and the constraint is
--- added only when absent, so a second run changes nothing.
+-- receipt in it (its index goes with it). Restores what 404 dropped: 297's
+-- foreign key on mail_messages.in_reply_to, REFERENCES mail_messages(id) ON
+-- DELETE SET NULL. 297's UNIQUE (sender_id, idempotency_key) is not touched:
+-- 404 keeps it. Re-runnable: every DROP is IF EXISTS and the foreign key is
+-- added only when none covers in_reply_to, so a second run changes nothing.
 --
 -- DEPLOY ORDER: THE API FIRST. Deploy an api build without this change (one
 -- that does not name mail_send_receipts), then run this file. An api that
@@ -18,23 +19,26 @@
 -- message row again, so a key whose message the janitor has purged is no
 -- longer answered from anything.
 --
--- THE CONSTRAINT CAN REFUSE. While 404 is applied, mail_messages has no
--- uniqueness on (sender_id, idempotency_key): a key can repeat for one
--- sender when its receipt has been swept (MAIL_RETENTION_DAYS after the
--- send) while its message row is still kept, and the same key is sent
--- again. If any pair repeats, adding the constraint fails and the whole file
--- rolls back with nothing changed. This read lists the pairs to decide on
--- before running the file again:
+-- THE FOREIGN KEY. While 404 is applied, a reply keeps its parent's id after
+-- the janitor purges the parent. Before the key is added, each such
+-- in_reply_to is set to NULL -- the value 297's ON DELETE SET NULL gave it
+-- at the purge -- so the key validates. When a foreign key already covers
+-- in_reply_to the file adds none: exactly one, with 297's definition as
+-- PostgreSQL prints it (pg_get_constraintdef), is accepted; anything else
+-- aborts the file, naming what it found, with nothing changed.
 --
---   SELECT sender_id, idempotency_key, count(*) FROM mail_messages
---    GROUP BY sender_id, idempotency_key HAVING count(*) > 1;
+-- RETIRED KEYS. A message whose receipt the janitor deleted while the
+-- message was still kept carries a retired idempotency_key, derived from its
+-- own id (main._MAIL_RECEIPT_SWEEP_SQL). The file leaves it: the build
+-- without the change then sends a repeat of the message's original key as a
+-- new message, and that key's answer had ended with its receipt,
+-- MAIL_RETENTION_DAYS after the send.
 --
--- LOCKS. DROP TRIGGER and the constraint's re-creation each take ACCESS
--- EXCLUSIVE on mail_messages until COMMIT; re-creating the constraint
--- builds its unique index over every row, so reads and writes of the table
--- wait for that build. `lock_timeout` bounds how long the file waits to
--- start each step, and a timeout rolls the whole file back with nothing
--- dropped.
+-- LOCKS. DROP TRIGGER takes ACCESS EXCLUSIVE on mail_messages until COMMIT,
+-- so reads and writes of the table wait from there; the in_reply_to update
+-- and the foreign key's validation scan the table under that lock.
+-- `lock_timeout` bounds how long the file waits to start each step, and a
+-- timeout rolls the whole file back with nothing dropped.
 
 BEGIN;
 SET LOCAL lock_timeout = '5s';
@@ -43,17 +47,47 @@ DROP TRIGGER IF EXISTS trg_mail_send_receipt ON mail_messages;
 DROP FUNCTION IF EXISTS mail_send_receipt_sync();
 DROP TABLE IF EXISTS mail_send_receipts;
 
-DO $r404uq$
+DO $r404irt$
+DECLARE
+  total integer;
+  same integer;
 BEGIN
-  IF NOT EXISTS (SELECT 1 FROM pg_constraint k
-                   JOIN pg_class c ON c.oid = k.conrelid
-                   JOIN pg_namespace n ON n.oid = c.relnamespace
-                  WHERE n.nspname = current_schema()
-                    AND c.relname = 'mail_messages'
-                    AND k.conname = 'uq_mail_messages_sender_idem') THEN
+  SELECT count(*),
+         count(*) FILTER (WHERE pg_get_constraintdef(k.oid)
+                                = 'FOREIGN KEY (in_reply_to) REFERENCES mail_messages(id) ON DELETE SET NULL')
+    INTO total, same
+    FROM pg_constraint k
+    JOIN pg_class c ON c.oid = k.conrelid
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+    JOIN pg_attribute a ON a.attrelid = c.oid
+   WHERE n.nspname = current_schema()
+     AND c.relname = 'mail_messages'
+     AND k.contype = 'f'
+     AND a.attname = 'in_reply_to'
+     AND NOT a.attisdropped
+     AND a.attnum = ANY (k.conkey);
+  IF total = 0 THEN
+    UPDATE mail_messages m
+       SET in_reply_to = NULL
+     WHERE m.in_reply_to IS NOT NULL
+       AND NOT EXISTS (SELECT 1 FROM mail_messages p WHERE p.id = m.in_reply_to);
     ALTER TABLE mail_messages
-      ADD CONSTRAINT uq_mail_messages_sender_idem UNIQUE (sender_id, idempotency_key);
+      ADD CONSTRAINT mail_messages_in_reply_to_fkey
+      FOREIGN KEY (in_reply_to) REFERENCES mail_messages(id) ON DELETE SET NULL;
+  ELSIF total <> 1 OR same <> 1 THEN
+    RAISE EXCEPTION 'rollback 404: the foreign key on mail_messages.in_reply_to differs from 297''s (found: %)',
+      (SELECT string_agg(format('%s %s', k.conname, pg_get_constraintdef(k.oid)), '; ' ORDER BY k.conname)
+         FROM pg_constraint k
+         JOIN pg_class c ON c.oid = k.conrelid
+         JOIN pg_namespace n ON n.oid = c.relnamespace
+         JOIN pg_attribute a ON a.attrelid = c.oid
+        WHERE n.nspname = current_schema()
+          AND c.relname = 'mail_messages'
+          AND k.contype = 'f'
+          AND a.attname = 'in_reply_to'
+          AND NOT a.attisdropped
+          AND a.attnum = ANY (k.conkey));
   END IF;
-END $r404uq$;
+END $r404irt$;
 
 COMMIT;
