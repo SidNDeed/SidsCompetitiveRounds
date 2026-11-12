@@ -3845,6 +3845,208 @@ def chk_census_partial_out_of_range(m):
     assert "R-SCOPE's census line out of range (%s)" % CENSUS_VARIANTS[1][1][1] in why, why
 
 
+def _settled_variant(cp, gi, gs, f18, force, problems):
+    return ("settled g=3 seed=7 c_plant=%s W=120 vsync=0 target=-1 freq=10000000 hires=1 f_hat=1000000 gc_incremental=%s "
+            "gc_slice_ns=%s f18=%s answer=%s armfile=1 force=%s%s clock=1 frames=10 missing_end=0 cycle_failures=0 "
+            "span_depth_violations=0" % (cp, gi, gs, f18, "replay" if f18 == "A" else "unmeasured", force, problems))
+
+
+_ARM_INPUTS = ("sentinel", "sentinel_changed", "sentinel_problems", "clock", "perf_probe", "ic_fixture", "escape",
+               "rematch_timeout", "menu_mode", "room", "matchIsRanked", "own_sha", "room_name", "region", "fighters",
+               "peer", "error_NullReferenceException")
+_MENU_INPUTS = ("sentinel", "sentinel_changed", "sentinel_problems", "clock", "perf_probe", "ic_fixture", "in_room",
+                "game_started", "error_NullReferenceException")
+# ruling R6-A3.11.152, K-D (the class of G2 and G3): every emit site of plugin/Ft*.cs (and Plugin.cs's attach warning)
+# whose expression appends a free string operand or a conditional suffix (a), or prints an int or long that starts at a
+# fallback value and is set inside a try (b): (site, a fragment of its statement in the source, one sample payload per
+# variant the expression can print). Each sample is a form the parser reads. The table with each variant's source is
+# the lane's sweep-forms.md
+FORM_VARIANTS = (
+    ("FtA3.cs:345", '"[FRAME-TIME] a3drain g=" + game + " k=" + Names[k]',
+     ("a3drain g=3 k=row1 starts=4 nonempty=3 faults=0",)),
+    ("FtA3.cs:348", '" steady=" + (_steady[k] ? 1 : 0)',
+     ("a3 g=3 k=row1 cap=4 steady=1 reads_on=2 reads_win=2 writes_on=1",
+      "a3 g=3 k=row1 cap=4 steady=0 reads_on=2 reads_win=2 writes_on=1")),
+    ("FtA3.cs:356", '" why=game" + game + " kind=a3 k=" + Names[k]',
+     ("cal i=-1 why=game3 kind=a3 k=row1 live=1 reads=0 scopes=0 ticks=0 tmax=0 unscoped=0 depth_err=0",
+      "cal i=7 why=game3 kind=a3 k=row1 live=1 reads=2 scopes=2 ticks=50 tmax=30 unscoped=0 depth_err=0")),
+    ("FtA3.cs:374", '" kind=a3 k=" + Names[k] + " withheld=1"',
+     tuple("cal i=7 why=%s kind=a3 k=row1 withheld=1" % w for w in ("start", "menu0", "game3"))),
+    ("FtA3.cs:379", '" failed: no calibration"', ("cal i=7 why=game3 kind=a3 k=row1 failed: no calibration",)),
+    ("FtA3.cs:397", '" failed: " + ex.GetType().Name + ": " + ex.Message',
+     ("cal i=7 why=game3 kind=a3 k=row1 failed: InvalidOperationException: a b",
+      "cal i=7 why=game3 kind=a3 k=row1 failed: InvalidOperationException: ")),
+    ("FtA3.cs:400", '" kind=a3 k=" + Names[k] + " n=" + _calN[k]',
+     ("cal i=7 why=game3 kind=a3 k=row1 n=100 u=1,2 p=3,4", "cal i=7 why=game3 kind=a3 k=row1 n=100 u= p=")),
+    ("FtAlloc.cs:79", '"[FRAME-TIME] alloc_init why=" + Why',
+     tuple("alloc_init why=" + w for w in ("not_init", "no_module", "no_path", "sha", "code", "ok",
+                                           "failed:DllNotFoundException"))),
+    ("FtAlloc.cs:156", '"[FRAME-TIME] alloc pin=" + (Ok ? "ok" : "differs")',
+     ("alloc pin=ok planted=1048600/1048576 empty=0", "alloc pin=differs planted=NA/1048576 empty=NA")),
+    ("FtArm.cs:52", '(PhotonNetwork.InRoom ? " in-room" : " pre-join")',
+     ("staged ft_dll=0a1b in-room", "staged ft_dll=0a1b pre-join")),
+    ("FtArm.cs:54", '"[FRAME-TIME] ft_dll staging failed: " + ex.Message',
+     ("ft_dll staging failed: a b", "ft_dll staging failed: ")),
+    ("FtArm.cs:117", '" cloud_region=" + (PhotonNetwork.CloudRegion ?? "")',
+     ("room name=FT-1 region=us cloud_region=us/*", "room name=FT-1 region= cloud_region=")),
+    ("FtArm.cs:148", '"[FRAME-TIME] ended why=complete pt=" + FtSchedule.Label()', ("ended why=complete pt=16.3.2",)),
+    ("FtArm.cs:149", '"[FRAME-TIME] disarmed input=" + why + " pt="',
+     tuple("disarmed input=%s pt=4.1.2" % w for w in _ARM_INPUTS)),
+    ("FtArm.cs:152", '"[FRAME-TIME] armed room=" + PhotonNetwork.CurrentRoom.Name',
+     ("armed room=FT-1 region=us", "armed room=FT-1 region=")),
+    ("FtArm.cs:154", '"[FRAME-TIME] not armed input=" + why', tuple("not armed input=" + w for w in _ARM_INPUTS)),
+    ("FtArm.cs:216", '" (no matching " + DLL_PROP + ")"', ("peer none (no matching ft_dll)",)),
+    ("FtArm.cs:220", '"[FRAME-TIME] peer " + ok', ("peer ft_dll=0a1b",)),
+    ("FtAttach.cs:60", '(missing.Count == 0 ? "none" : string.Join(",", missing.ToArray()))',
+     ("attach n=2 of=2 missing=none names=FtA:1/1,FtB_C:2/2", "attach n=1 of=2 missing=FtB_C names=FtA:1/1,FtB_C:0/0")),
+    ("Plugin.cs:1504", '"[FRAME-TIME] attach report failed: " + ex.Message',
+     ("attach report failed: a b", "attach report failed: ")),
+    ("FtCalib.cs:111", '"[FRAME-TIME] cal i=-1 why=patches kind=entries failed: " + ex.GetType().Name',
+     ("cal i=-1 why=patches kind=entries failed: TypeLoadException: a b",
+      "cal i=-1 why=patches kind=entries failed: TypeLoadException: ")),
+    ("FtCalib.cs:120", '" kind=fhat failed: " + ex.Message', ("cal i=3 kind=fhat failed: a b", "cal i=3 kind=fhat failed: ")),
+    ("FtCalib.cs:122", '" kind=disp failed: " + ex.Message', ("cal i=3 kind=disp failed: a b", "cal i=3 kind=disp failed: ")),
+    ("FtCalib.cs:124", '" kind=a3 failed: " + ex.Message', ("cal i=3 kind=a3 failed: a b", "cal i=3 kind=a3 failed: ")),
+    ("FtCalib.cs:126", '" kind=disp entries failed: " + ex.Message',
+     ("cal i=3 kind=disp entries failed: a b", "cal i=3 kind=disp entries failed: ")),
+    ("FtCalib.cs:149", '" kind=fhat f_hat=" + best',
+     tuple("cal i=3 why=%s kind=fhat f_hat=1000000 spins=5" % w for w in ("start", "menu0", "game3"))),
+    ("FtCalib.cs:192", '" kind=" + (span ? "span" : "disp") + " shape=" + s.Name',
+     ("cal i=3 why=game3 kind=span shape=span.empty n=100 u=1,2 p=3,4",
+      "cal i=3 why=game3 kind=disp shape=call n=100 u=1,2 p=3,4")),
+    ("FtCalib.cs:207", '" kind=entries reference=1 built=0"', ("cal i=3 why=game3 kind=entries reference=1 built=0",)),
+    ("FtCalib.cs:216", '" kind=entries built=0 own_patches=not-applied"',
+     ("cal i=3 why=game3 kind=entries built=0 own_patches=not-applied",)),
+    ("FtCalib.cs:221", '" kind=entries failed: the built table holds no patched entry"',
+     ("cal i=3 why=game3 kind=entries failed: the built table holds no patched entry",)),
+    ("FtCalib.cs:229", '" kind=disp shape=" + c.Name + " failed: " + c.Error',
+     ("cal i=3 why=game3 kind=disp shape=HE_p1 failed: ArgumentException: a b",
+      "cal i=3 why=game3 kind=disp shape=HE_p1 failed: ArgumentException: ")),
+    ("FtCalib.cs:261", '" kind=disp shape=" + c.Name + " failed: " + failed',
+     ("cal i=3 why=game3 kind=disp shape=HE_p1 failed: InvalidProgramException: a",
+      "cal i=3 why=game3 kind=disp shape=HE_p1 failed: InvalidProgramException: a unpatch: b",
+      "cal i=3 why=game3 kind=disp shape=HE_p1 failed:  unpatch: b")),
+    ("FtCalib.cs:264", '" kind=disp shape=" + c.Name + " n=" + EntryCalls',
+     ("cal i=3 why=game3 kind=disp shape=HE_p1 n=100 u=1,2 p=3,4",)),
+    ("FtCalib.cs:404", '" gc_incremental=" + incremental + " gc_slice_ns=" + slice',
+     (_settled_variant(-1, -1, -1, "A", "none", ""), _settled_variant(80, 1, 3000000, "B", "ON", ""),
+      _settled_variant(80, 0, 0, "A", "OFF", " problems=bad-seed,bad-force"))),
+    ("FtCensus.cs:70", '.Append(" shape=").Append(ShapeOf[e])',
+     ("census g=3 entry=HE-p1:PhotonNetwork.ExecuteRpc comp=hit shape=HE_p1 on=1 guarded=0 outside=0",)),
+    ("FtCensus.cs:78", '"[FRAME-TIME] spans g="', ("spans g=3 comp=hit", "spans g=3 comp=hit live.in.gated=10/2 over.out.writer=5/1")),
+    ("FtCensus.cs:166", '" wrapped=" + wrapped + why', tuple(line for line, _ in CENSUS_VARIANTS)),
+    ("FtClock.cs:128", '"[FRAME-TIME] clock refused: player-loop phase missing (EarlyUpdate " + a',
+     ("clock refused: player-loop phase missing (EarlyUpdate True, PreLateUpdate False, Update True)",)),
+    ("FtClock.cs:140", '" cycles=" + (probe != 0 ? 1 : 0)',
+     ("clock installed freq=10000000 hires=1 cycles=1", "clock installed freq=10000000 hires=0 cycles=0")),
+    ("FtDrive.cs:52", 'Plugin.Log.LogInfo("[FRAME-TIME] self-drive " + what)',
+     ("self-drive spawn waiting why=peer", "self-drive spawn waiting why=actors actors=1", "self-drive ")),
+    ("FtDrive.cs:87", '"[FRAME-TIME] self-drive join room=" + room', ("self-drive join room=FT-1 region=us",)),
+    ("FtDrive.cs:90", '"[FRAME-TIME] self-drive join failed: " + ex.Message',
+     ("self-drive join failed: a b", "self-drive join failed: ")),
+    ("FtDrive.cs:103", 'Plugin.Log.LogWarning("[FRAME-TIME] self-drive " + what)', ("self-drive spawn refused why=spectator",)),
+    ("FtDrive.cs:149", '"[FRAME-TIME] self-drive spawn threw: " + ex.Message',
+     ("self-drive spawn threw: a b", "self-drive spawn threw: ")),
+    ("FtDrive.cs:152", '"[FRAME-TIME] self-drive spawn tick failed: " + ex.Message',
+     ("self-drive spawn tick failed: a b", "self-drive spawn tick failed: ")),
+    ("FtFrames.cs:225", '" after=" + _btArm',
+     ("between g=3 after= ticks=0 calls=0", "between g=3 after=ON ticks=5 calls=1", "between g=3 after=OFF ticks=5 calls=1")),
+    ("FtFrames.cs:260", '" pred=" + Arm(_ptPred)',
+     ("p pt=3.1.1 arm=ON gate=1 pred=none n=120 answer=replay sock_p95=NA sock_n=0 sock_thr=0 sock_main=0 heap=1",
+      "p pt=3.1.1 arm=OFF gate=0 pred=ON n=120 answer=unmeasured sock_p95=4096 sock_n=9 sock_thr=1 sock_main=0 heap=1",
+      "p pt=3.1.1 arm=OFF gate=0 pred=OFF n=120 answer=replay sock_p95=NA sock_n=9 sock_thr=1 sock_main=0 heap=1")),
+    ("FtFrames.cs:306", '.Append(" partial=").Append(partial ? 1 : 0)',
+     ("w pt=3.1.1 arm=ON plant=0 partial=0 n=120 maxF=9 medF=5 e4=0,1 e8=0,0 gc=0 cG=0 aC=0 wu=log:1:2,sock:0:0 "
+      "tok=log:0,0,0,0,0,0,0 wa=0,0,0,0",
+      "w pt=3.1.1 arm=OFF plant=1 partial=1 n=40 maxF=9 gc=0 cG=NA aC=NA aW=NA wu=log:1:2,sock:NA:NA "
+      "tok=log:0,0,0,0,0,0,0 wa=NA,NA,NA,NA")),
+    ("FtHeavy.cs:64", '"[FRAME-TIME] heavy g="',
+     ("heavy g=3 op=hash live=0 between=0 pick=0 over=1 menu=0 at_call=0 edge=0 off=0",)),
+    ("FtMenu.cs:67", '"[FRAME-TIME] menu_wait input=" + why', tuple("menu_wait input=" + w for w in _MENU_INPUTS)),
+    ("FtMenu.cs:78", '" force=" + FtConfig.Force',
+     tuple("menu_armed segments=12 seg_s=10 settle_s=20 force=%s seed=7" % f for f in ("none", "ON", "OFF"))),
+    ("FtMenu.cs:132", '" level=" + _level + " c_plant=" + _levelUs',
+     ("menu seg=1 pair=0 arm=ON gate=1 level=0 c_plant=0 base_us=-1",
+      "menu seg=3 pair=1 arm=OFF gate=0 level=5 c_plant=40 base_us=800")),
+    ("FtMenu.cs:146", '"[FRAME-TIME] menu_base base_us=" + _baseUs',
+     ("menu_base base_us=800 seg=2", "menu_base base_us=-9223372036854775808 seg=2")),
+    ("FtMenu.cs:163", '"[FRAME-TIME] menu_done why=" + why',
+     tuple("menu_done why=%s segs=1 of=12 base_us=-1 cycles=1" % w for w in ("complete",) + _MENU_INPUTS)),
+    ("FtPhoton.cs:69", '"[FRAME-TIME] photon patches n=" + names.Count',
+     ("photon patches n=0 names=", "photon patches n=2 names=A.b,C.d")),
+    ("FtPhoton.cs:121", '" x=" + FtSpan.Us(x)',
+     ("nest plant asked=2000 x=2020 e=1990 p=2005", "nest plant asked=2000 x=NA e=NA p=NA")),
+    ("FtPlant.cs:35", '" from=" + from', ("plant c_plant=80 ticks=800 from=0.1.3",)),
+    ("FtRematch.cs:46", '"[FRAME-TIME] rematch publish failed: " + ex.Message',
+     ("rematch publish failed: a b", "rematch publish failed: ")),
+    ("FtRematch.cs:72", '"[FRAME-TIME] rematch answer failed: " + ex.Message',
+     ("rematch answer failed: a b", "rematch answer failed: ")),
+    ("FtReplay.cs:45", '" ticks=" + ticks + " result=" + result',
+     tuple("answer_replay g=3 ticks=%d result=%s" % (t, w) for t, w in
+           ((90, "settled"), (90, "kept"), (0, "not_running"), (0, "enqueue_failed"), (0, "error_IOException")))),
+    ("FtReplay.cs:56", '" ticks=0 result=" + result',
+     tuple("answer_replay g=3 ticks=0 result=skipped_" + w for w in ("live", "settle", "next_game", "quit", "absent"))),
+    ("FtRoomGate.cs:87", '" name=" + shown + " n=" + n',
+     ("room call refused op=JoinRoom name=FT-1 n=1", "room call refused op=CreateRoom name=(none) n=2")),
+    ("FtRoomGate.cs:109", '(missing.Count == 0 ? "" : " missing="',
+     ("FT-GATE patched 6 entry points expected=6 excluded=A.b,C.d",
+      "FT-GATE patched 5 entry points expected=6 excluded= missing=E.f")),
+    ("FtRoomGate.cs:247", '(cur != null ? cur.Name : "(none)")',
+     ("FT-ROOM joined offline=0 name=FT-1", "FT-ROOM joined offline=1 name=(none)")),
+    ("FtRoomGate.cs:250", '"[FRAME-TIME] FT-ROOM read failed: " + ex.Message',
+     ("FT-ROOM read failed: a b", "FT-ROOM read failed: ")),
+    ("FtRoomGate.cs:255", '"[FRAME-TIME] churn timer frozen room=" + room',
+     ("churn timer frozen room=FT-1", "churn timer frozen room=")),
+    ("FtRoomGate.cs:257", '"[FRAME-TIME] churn freeze failed: " + ex.Message',
+     ("churn freeze failed: a b", "churn freeze failed: ")),
+    ("FtSchedule.cs:345", '"[FRAME-TIME] flushed g=" + g + " why=" + why',
+     tuple("flushed g=3 why=" + w for w in ("settle", "next_game", "quit"))),
+    ("FtSchedule.cs:353", '" se=" + (SeatEvidence.FtOpen ? 1 : 0)', ("opened g=3 se=1 ce=1 ic=1", "opened g=3 se=0 ce=0 ic=0")),
+    ("FtSpan.cs:120", '(k == "k1" || k == "k2" || k == "k3" ? k : "none")',
+     tuple("controls k_mutant=" + k for k in ("none", "k1", "k2", "k3"))),
+    ("FtSpan.cs:338", '"[FRAME-TIME] scope plant asked=" + PlantUs + " got=" + Us(got)',
+     ("scope plant asked=2000 got=2010", "scope plant asked=2000 got=NA")),
+    ("FtUpload.cs:30", '" route=" + (route ?? "-") + " n=" + n',
+     ("refused what=load route=- n=2", "refused what=route route=GET_emoji-sheet n=3")),
+    ("FtUpload.cs:36", '" route=" + (route ?? "-") + " n=1"',
+     ("refused what=route route=GET_music-asset n=1", "refused what=load route=- n=1")),
+    ("FtUpload.cs:54", '"[FRAME-TIME] refusals why="',
+     ("refusals why=game3 pairs=0", "refusals why=quit pairs=2 route:GET_emoji-sheet=1 load:-=2")),
+    ("FtUpload.cs:368", '" why=" + why + " types=" + string.Join(",", TypeNames)',
+     tuple("ledger log=%d why=%s types=log,hash,recv,sock" % (1 if w in ("ok", "already") else 0, w)
+           for w in ("ok", "already", "no_disk_listener", "failed:NotSupportedException"))),
+)
+# lines in a strict form's family that no emitter prints: each refused as an unknown form (the negative controls)
+FORM_NOT_EMITTED = (
+    "controls k_mutant=k4", "controls k_mutant=", "alloc pin=maybe planted=1/1048576 empty=0",
+    "alloc pin=ok planted=-1/1048576 empty=0", "alloc pin=ok planted=1/1048576 empty=", "alloc_init why=",
+    "alloc_init why=a b", "scope plant asked=2000 got=na", "nest plant asked=2000 x=NA e= p=NA",
+    "ledger log=2 why=ok types=log,hash,recv,sock", "ledger log=1 why= types=log,hash,recv,sock",
+    "attach n=0 of=0 missing=none names=", "attach n=1 of=2 missing= names=FtA:1/1",
+    "clock installed freq=10000000 hires=2 cycles=1", "photon patches n=1 names=a b",
+    "cal i=3 kind=fhat broke: a", "cal i=3 kind=disp entries broke: a", "cal i=3 kind=fhat failed",
+    "cal i=3 kind=disp entries failed", "counters g=1 frames=NA missing_end=0 cycle_failures=0 "
+    "span_depth_violations=0 photon_offmain=0 span_leave_mismatch=0") + CENSUS_NOT_EMITTED
+
+
+def chk_emitted_variants_are_forms(m):
+    # ruling R6-A3.11.152, K-D: every variant an emit site of the class prints (FORM_VARIANTS) is a form the parser
+    # reads, the site's statement still in the source; FtCalib.Run's failure lines with an empty exception message
+    # among them (plugin/FtCalib.cs:120-126 print 'failed: ' + ex.Message, a bare 'failed:' once the trailing space is
+    # dropped). The lines no emitter prints in a strict form's family stay refused (FORM_NOT_EMITTED)
+    src = _plugin_src()
+    for site, frag, pays in FORM_VARIANTS:
+        assert frag in src, (site, frag)
+        for pay in pays:
+            assert m.unknown_forms(LOG_PREFIX + "[FRAME-TIME] " + pay) == [], (site, pay)
+    for pay in FORM_NOT_EMITTED:
+        assert m.unknown_forms(LOG_PREFIX + "[FRAME-TIME] " + pay) != [], pay
+    # the bare failure is still read as a failed calibration (VR2 counts it), as the one with a message is
+    for pay in ("cal i=3 kind=fhat failed: ", "cal i=3 kind=disp entries failed: "):
+        r = m.parse_line(LOG_PREFIX + "[FRAME-TIME] " + pay)
+        assert r["kind"] == "cal" and r.get("failed") == 1, (pay, r)
+
+
 def _two_ledgers(text):
     full = LOG_PREFIX + "[FRAME-TIME] " + LEDGER_OK
     return _sub1(text, full, full + "\n" + full)
@@ -4490,7 +4692,7 @@ B11_CHECKS = ["chk_c2_recovers_3_25", "chk_c3_recovers_3_0375", "chk_c4_recovers
               # the confirming round's G1 (ruling R6-A3.11.152): emitted lists judged as written
               "chk_ledger_types_judged_as_written",
               # G3: the census's partial variant
-              "chk_census_partial_out_of_range"]
+              "chk_census_partial_out_of_range", "chk_emitted_variants_are_forms"]
 
 
 @pytest.mark.parametrize("name", B11_CHECKS)

@@ -805,7 +805,10 @@ ATTACH_ENTRY = r"%s:\d+/\d+" % ATTACH_NAME
 ATTACH_NAMES = r"%s(?:,%s)*" % (ATTACH_ENTRY, ATTACH_ENTRY)
 COUNTER_LINE_KEYS = ("g", "frames", "missing_end", "cycle_failures", "span_depth_violations", "photon_offmain",
                      "span_leave_mismatch")
-_CAL_FAILED = r"cal i=-?\d+(?: [^\s=]+=\S*)* failed: .*"
+# ruling R6-A3.11.152, K-D: FtCalib.Run's failure lines end 'failed: ' + ex.Message (plugin/FtCalib.cs:120-126), and an
+# exception's message may be empty, which the line's trailing space then leaves as a bare 'failed:'; that variant is
+# read too, as every other failure form reads its empty message (_msg)
+_CAL_FAILED = r"cal i=-?\d+(?: [^\s=]+=\S*)* failed:(?: .*)?"
 FORMS = (
     # the lines whose fields this table fixes (the five boot lines, the controls line, the counters line, the census
     # summary, the mark cost and the other boot traces)
@@ -850,7 +853,7 @@ FORMS = (
     # FtCalib.Run's entries step failing (plugin/FtCalib.cs:126): the word 'entries' carries no '=', so _CAL_FAILED does
     # not hold it (the integrator's point H). parse_line marks it failed with kind=disp, so VR2 already fails the
     # game's calibration run that prints it ('carries failure warnings for disp') and B1 is WITHHELD
-    ("cal i=", r"cal i=-?\d+ kind=disp entries failed: .*", None),
+    ("cal i=", r"cal i=-?\d+ kind=disp entries failed:(?: .*)?", None),
     ("census g=", _star("census"), None), ("disarmed input=", _star("disarmed"), None),
     ("flushed g=", _star("flushed"), None), ("heavy g=", _star("heavy"), None),
     ("menu seg=", _star("menu"), None), ("menu_armed segments=", _star("menu_armed"), None),
