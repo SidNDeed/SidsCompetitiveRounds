@@ -502,6 +502,64 @@ def check_leased_arm_stop(tmp, edits=(), arm_rc=3):
     return f
 
 
+# ---- ft_vm_leased.sh waits for a process table that still lists the closed game (its dry harness)
+
+SHIM_LAG = SHIM.replace(': > "$T/LAUNCHED"; exit 0;;',
+                        ': > "$T/LAUNCHED"; echo "ROUNDS: the closed game, still listed" > "$T/close/procs.txt"; '
+                        'exit 0;;')
+SLEEP_LAG = '''#!/usr/bin/env bash
+# the stand-in sleep of the cleanup-lag check: it notes whether the table listed the game, then the table clears
+T="$(cd "$(dirname "$0")/.." && pwd)"
+grep -c '^ROUNDS:' "$T/close/procs.txt" >> "$T/sleeps.txt"
+: > "$T/close/procs.txt"
+exit 0
+'''
+
+
+def check_leased_cleanup_lag(tmp, edits=()):
+    """the leased script's dry run through a launch whose stand-in leaves the closed game listed in the process table,
+    with a stand-in sleep that clears the table: the exit chain must wait for the table and prove the exit, and must
+    not take the cleanup route (its reading line, the close by identity, the lever) for a table that only lagged. The
+    harness itself is asserted, not returned: the launch ran, and the first wait saw the game listed"""
+    if not POSIX:
+        pytest.skip("the leased script's dry harness compares POSIX paths: run on a POSIX seat")
+    assert SHIM_LAG != SHIM, "the stand-in's launch line was not found"
+    T = str(tmp)
+    src = os.path.join(T, "tools")
+    os.makedirs(src)
+    leased = os.path.join(src, "ft_vm_leased.sh")
+    write(leased, apply(read(LEASED), edits, "ft_vm_leased.sh"))
+    for x in (RESTORE, ARM_TEXT):
+        shutil.copy(x, src)
+    _exe(os.path.join(T, "shim", "powershell"), SHIM_LAG)
+    _exe(os.path.join(T, "shim", "cygpath"), CYGPATH)
+    _exe(os.path.join(T, "shim", "sleep"), SLEEP_LAG)
+    _exe(os.path.join(T, "bin", "ft_vm_install.sh"), STUB_INSTALL)
+    write(os.path.join(T, "game", "BepInEx", "plugins", "CompetitiveRounds", "CompetitiveRounds.dll"), b"release dll")
+    write(os.path.join(T, "game", "BepInEx", "config", "com.competitiverounds.mod.cfg"), b"[A]\nk = 1\n")
+    write(os.path.join(T, "close", "procs.txt"), "")
+    write(os.path.join(T, "lane.dll"), b"lane dll")
+    os.makedirs(os.path.join(T, "lanes"))
+    os.makedirs(os.path.join(T, "low"))
+    env = dict(os.environ, FT_VM_TEST_DIR=T, FT_CLOSE_TEST_DIR=os.path.join(T, "close"),
+               FT_VM_LOCALLOW=os.path.join(T, "low"), ARM_RC="0",
+               PATH=os.path.join(T, "shim") + os.pathsep + os.environ.get("PATH", ""))
+    rc, out, err = run([leased, "boot", os.path.join(T, "out"), os.path.join(T, "lane.dll"), os.path.join(T, "lanes")],
+                       env=env)
+    assert os.path.exists(os.path.join(T, "LAUNCHED")), \
+        "the launch did not run (rc %s, out %r, err %r)" % (rc, out[-2000:], err[-1000:])
+    noted = os.path.join(T, "sleeps.txt")
+    sleeps = read(noted).split() if os.path.exists(noted) else []
+    assert sleeps[:1] == ["1"], \
+        "the first wait did not see the game listed (sleeps %r, out %r)" % (sleeps, out[-2000:])
+    f = []
+    if "a ROUNDS process may exist at cleanup" in out or "close by identity" in out or "the rig's lever" in out:
+        f.append("leased: the cleanup route ran for a table that only lagged (out %r)" % out[-2000:])
+    if "FT-VM-LEASED exit proven: no ROUNDS process" not in out:
+        f.append("leased: the exit was not proven (out %r)" % out[-2000:])
+    return f
+
+
 # ---- ft_vm_restore.sh: the inventory's lines and VR6's listings
 
 HARNESS = r'''#!/usr/bin/env bash
@@ -582,7 +640,8 @@ def check_vr6_listing(tmp, edits=()):
 CHECKS = [check_arm_good, check_arm_unwritable, check_arm_no_folder, check_arm_read_back, check_arm_record,
           check_revert, check_revert_sentinel, check_revert_record, check_install_good, check_install_records,
           check_install_current_unwritable, check_install_fails_after_record, check_revert_proves_first,
-          check_status_open, check_arm_text_stdout, check_leased_arm_stop, check_inventory_write, check_vr6_listing]
+          check_status_open, check_arm_text_stdout, check_leased_arm_stop, check_inventory_write, check_vr6_listing,
+          check_leased_cleanup_lag]
 
 
 @pytest.mark.parametrize("check", CHECKS, ids=[c.__name__ for c in CHECKS])
@@ -662,6 +721,9 @@ MUTANTS = [
      '    echo "log ${LOGN[$i]} $s" >> "$tmp"'),
     ("restore: VR6's listing check removed", check_vr6_listing, "ft_vm_restore.sh",
      '  if [ "$g1" -gt 1 ] || [ "$g2" -gt 1 ]; then', '  if false; then'),
+    ("leased: the cleanup's first reading taken once", check_leased_cleanup_lag, "ft_vm_leased.sh",
+     '  s=$(rounds_state); for i in 1 2 3 4 5; do [ "$s" = no ] && break; sleep "$NAP"; s=$(rounds_state); done\n',
+     '  s=$(rounds_state)\n'),
 ]
 
 

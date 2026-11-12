@@ -104,22 +104,44 @@ namespace CompetitiveRounds
         /// restored after. FtClock.OnStart, at the first frame boundary.</summary>
         internal static void PlantNest()
         {
+            // Two passes of Nest (below). The first spins nothing: it runs the path once, so that code compiled or
+            // initialised at its first call (the listener scope, the ledger's entry and exit, the leaves) is not in
+            // a reading. In the ledger it books what the second pass books: one more recv entry and its done.
+            // The second pass is the control's.
+            // Each spin is FtSpan.SpinCycles: PlantUs of the main thread's own cycle time, the clock the classes are
+            // read in, so a reading does not move with the share of the wall clock the thread gets. Measured on the
+            // VM (ruling R6-A3.11.162, the trial boot of 12 Nov 2026): a first pass booked 283, 411 and 134 us beyond
+            // its spins in X, E and P, later passes 2 to 6 us; of 36 spins of 2000 us by the Stopwatch the shortest
+            // got 1968 us of thread time. One pass, timed by the Stopwatch, had read x=1978 e=2144 p=1836.
+            // E's base is read after X opens, inside Nest, as before.
+            long x, e, p;
+            Nest(0, out x, out e, out p);
+            Nest(FtSpan.PlantUs, out x, out e, out p);
+
+            Plugin.Log.LogInfo("[FRAME-TIME] nest plant asked=" + FtSpan.PlantUs + " x=" + FtSpan.Us(x) + " e=" + FtSpan.Us(e)
+                + " p=" + FtSpan.Us(p));
+        }
+
+        /// <summary>One pass of K3's path with a spin of us in each class (FtSpan.SpinCycles): the cycles X, E and P
+        /// gained. E's base is read after X opens. The class state is restored after.</summary>
+        private static void Nest(long us, out long x, out long e, out long p)
+        {
             var st = FtSpan.Save();
             long x0 = FtSpan.Acc[FtSpan.ClsX], p0 = FtSpan.Acc[FtSpan.ClsP];
             int dx = FtSpan.EnterX();
             long e0 = FtSpan.Acc[FtSpan.ClsE];
-            FtSpan.Spin(FtSpan.PlantUs);
+            FtSpan.SpinCycles(us);
             int de = FtSpan.EnterListener();
-            FtSpan.Spin(FtSpan.PlantUs);
+            FtSpan.SpinCycles(us);
             ulong k = FtLedger.RecvEnter();
-            FtSpan.Spin(FtSpan.PlantUs);
+            FtSpan.SpinCycles(us);
             FtLedger.RecvExit(k);
             FtSpan.Leave(de);
             FtSpan.Leave(dx);
-            long x = FtSpan.Acc[FtSpan.ClsX] - x0, e = FtSpan.Acc[FtSpan.ClsE] - e0, p = FtSpan.Acc[FtSpan.ClsP] - p0;
+            x = FtSpan.Acc[FtSpan.ClsX] - x0;
+            e = FtSpan.Acc[FtSpan.ClsE] - e0;
+            p = FtSpan.Acc[FtSpan.ClsP] - p0;
             FtSpan.Restore(st);
-            Plugin.Log.LogInfo("[FRAME-TIME] nest plant asked=" + FtSpan.PlantUs + " x=" + FtSpan.Us(x) + " e=" + FtSpan.Us(e)
-                + " p=" + FtSpan.Us(p));
         }
     }
 

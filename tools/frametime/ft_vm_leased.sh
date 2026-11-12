@@ -151,10 +151,10 @@ ft_hold() {
   echo "FT-VM-LEASE HELD reason=$1: the lease kept (holder frame-time), the bot stays paused; restore from $PRE and release by hand; at $(st)"
   rc=30
 }
-# A2: no disarm, VR6, revert or restore step runs while any ROUNDS process exists
+# A2: no disarm, VR6, revert or restore step runs while any ROUNDS process exists. The first reading is repeated up to five times, NAP apart: the table can still list the closed game for a moment (R6-A3.11.162: both trial boots of 12 Nov 2026)
 ft_exit_proven() {
   local s crc i
-  s=$(rounds_state)
+  s=$(rounds_state); for i in 1 2 3 4 5; do [ "$s" = no ] && break; sleep "$NAP"; s=$(rounds_state); done
   if [ "$s" != no ]; then
     echo "$(st) FT-VM-LEASED a ROUNDS process may exist at cleanup (reading: $s)"
     crc=7

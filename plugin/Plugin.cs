@@ -531,6 +531,7 @@ namespace CompetitiveRounds
             typeof(CardDrawEvidence_OfflinePickPatch), typeof(CardDrawEvidence_PickPatch), typeof(CardDrawEvidence_StartPickPatch),
             typeof(SawPointEvidencePatch), typeof(PointEndEvidencePatch),
         };
+
 #endif
         private void Awake()
         {

@@ -3307,7 +3307,7 @@ MIN_GAMES_V = 6                           # "fewer than 6 games remain" withhold
 K_TOL = 0.05                              # K2 and K3: each spin reads within 5 percent in its own class
 K1_ABOVE = 4096                           # K1: the planted median from the bytes asked to 4096 above
 # K2 (SHARED.md:223, ruling R6-A3.11.151 (2) class C): a spin of 2000 us read within 5 percent, 1900 to 2100 us; K3
-# spins the same constant (FtSpan.PlantUs = 2000, plugin/FtSpan.cs:324, spun at FtPhoton.cs:111-121)
+# spins the same constant (FtSpan.PlantUs = 2000, plugin/FtSpan.cs:324, passed to K3's spins at FtPhoton.cs:119)
 K_PLANT_US = 2000
 _K_BAND = "%d to %d" % (K_PLANT_US * (1 - K_TOL), K_PLANT_US * (1 + K_TOL))
 # the four PhotonPeer entries P1 scopes as class X (Photon3Unity3D 4.1.7.0); the patch line names each attached patch
@@ -3406,7 +3406,7 @@ def boot_controls(recs):
     else:
         ask = _num(t.get("asked", ""))
         rd = dict((c, _num(t.get(c, ""))) for c in ("x", "e", "p"))
-        # F5's sibling: K3 spins the same constant (FtSpan.PlantUs, plugin/FtPhoton.cs:111-121)
+        # F5's sibling: K3 spins the same constant (FtSpan.PlantUs, passed at plugin/FtPhoton.cs:119)
         out["K3"] = (ask == K_PLANT_US and all(_within(v, K_PLANT_US) for v in rd.values()),
                      "asked %s us (needs %d), read x %s, e %s, p %s us (each needs %s)"
                      % (ask, K_PLANT_US, rd["x"], rd["e"], rd["p"], _K_BAND))

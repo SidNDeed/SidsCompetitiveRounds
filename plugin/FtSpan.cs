@@ -323,18 +323,18 @@ namespace CompetitiveRounds
 
         internal const long PlantUs = 2000;
 
-        /// <summary>K2, the boot line `[FRAME-TIME] scope plant asked=<us> got=<us>`: a spin of PlantUs of Stopwatch time
-        /// inside a gated scope (Open, class S), and the cycles class S gained, in microseconds at f_hat (FtCalib.FHat;
-        /// NA before it is known). The class state is restored after. FtClock.OnStart, at the first frame boundary.</summary>
+        /// <summary>K2, the boot line `[FRAME-TIME] scope plant asked=<us> got=<us>`: a spin of PlantUs of the main
+        /// thread's own cycle time (SpinCycles) inside a gated scope (Open, class S), and the cycles class S gained, in
+        /// microseconds at f_hat (NA before it is known). FtClock.OnStart, at the first frame boundary.</summary>
         internal static void PlantScope()
         {
-            var st = Save();
-            long s0 = Acc[ClsS];
-            bool sp = Open(Cal, Gated);
-            Spin(PlantUs);
-            Close(sp);
-            long got = Acc[ClsS] - s0;
-            Restore(st);
+            // Two passes of ScopeGain (below). The first spins nothing: it runs the path once, so that code compiled
+            // or initialised at its first call is not in the reading. The second is the control's. Its spin is on the
+            // thread's own cycle counter, the clock class S is read in, so the reading does not move with the share
+            // of the wall clock the thread gets (ruling R6-A3.11.162; the numbers are at FtPhoton.PlantNest).
+            ScopeGain(0);
+            long got = ScopeGain(PlantUs);
+
             Plugin.Log.LogInfo("[FRAME-TIME] scope plant asked=" + PlantUs + " got=" + Us(got));
         }
 
@@ -344,6 +344,39 @@ namespace CompetitiveRounds
             long n = us * Stopwatch.Frequency / 1000000;
             long t0 = Stopwatch.GetTimestamp();
             while (Stopwatch.GetTimestamp() - t0 < n) { }
+        }
+
+        /// <summary>Busy-waits until the calling thread's own cycle counter (FtClock.Cycles, the clock the classes are
+        /// read in) has advanced by us microseconds at f_hat. While f_hat is unknown, or when the first counter read
+        /// fails, it spins us of Stopwatch time (Spin). It ends early when a later read fails, and after 50 times us
+        /// of Stopwatch time, so a counter that stands still cannot hold the frame; such a spin reads short.</summary>
+        internal static void SpinCycles(long us)
+        {
+            if (us <= 0) return;
+            long f = FtCalib.FHat;
+            ulong c0 = FtClock.Cycles();
+            if (f <= 0 || c0 == 0) { Spin(us); return; }
+            ulong n = (ulong)(us * f / 1000000);
+            long t0 = Stopwatch.GetTimestamp(), lim = 50 * us * Stopwatch.Frequency / 1000000;
+            for (;;)
+            {
+                ulong c = FtClock.Cycles();
+                if (c == 0 || c - c0 >= n || Stopwatch.GetTimestamp() - t0 >= lim) return;
+            }
+        }
+
+        /// <summary>One pass of K2's path: a gated scope (Open, class S) around SpinCycles(us), and the cycles class S
+        /// gained. The class state is restored after.</summary>
+        private static long ScopeGain(long us)
+        {
+            var st = Save();
+            long s0 = Acc[ClsS];
+            bool sp = Open(Cal, Gated);
+            SpinCycles(us);
+            Close(sp);
+            long got = Acc[ClsS] - s0;
+            Restore(st);
+            return got;
         }
 
         /// <summary>Cycles as whole microseconds at f_hat, or NA while f_hat is unknown.</summary>
