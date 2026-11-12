@@ -10,11 +10,13 @@
 #
 # install refuses while ROUNDS runs, when an earlier install was never reverted, when the DLL's sha256 differs from the
 # lanes folder's sha256.txt (the bytes the laptop seat receives: both seats must carry the same DLL, whose digest names
-# the room), or when ft_absent.py does not find the FrameTime build in it. It backs the installed DLL up into a fresh
-# folder under ai-collab/frame-time/vm-install/ with its digest, copies, and proves the copy by digest; each record it
-# writes (the digest file, CURRENT) is read back before the OK line. revert copies that backup back, proves the
-# digest, removes the sentinel and closes the record (renamed, never deleted); OK only when the sentinel is gone and
-# the record closed, else FAIL with the install left open.
+# the room), or when ft_absent.py does not find the FrameTime build in it. Its order: the installed DLL backed up into
+# a fresh folder under ai-collab/frame-time/vm-install/, the backup's digest record written and read back, the
+# backup's digest proven, the open-install record CURRENT written and read back, and only then the copy and its digest
+# check. A failure before CURRENT stands leaves the plugin DLL untouched; a failure after it leaves the record open
+# (its FAIL line says so) for revert. revert proves the records and the backup's digest before it writes, copies that
+# backup back, proves the digest, removes the sentinel and closes the record (renamed, never deleted); OK only when the
+# sentinel is gone and the record closed, else FAIL with the install left open.
 # arm writes exactly what ft_arm_text.sh <profile> prints (that file is the one table of the profiles: menu, match,
 # match-on, the control boots) and refuses, writing nothing, when it refuses; it prints its written line only after
 # the write succeeded and the file's bytes compared equal to that text, else one "FT-VM-ARM FAIL" line and exit 3. It
@@ -32,7 +34,9 @@ REC="$R/ai-collab/frame-time/vm-install"
 CUR="$REC/CURRENT"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 st() { date -u +%Y-%m-%dT%H:%M:%SZ; }
-sha() { sha256sum "$1" | cut -c1-64; }
+# the digest read from standard input: sha256sum escapes a file NAME holding a backslash (its line then starts "\"),
+# so a "\"-joined path would yield a shifted digest
+sha() { sha256sum < "$1" | cut -c1-64; }
 running() { /c/Windows/System32/tasklist.exe 2>/dev/null | grep -i -q 'ROUNDS.exe'; }
 refuse() { echo "FT-VM-INSTALL REFUSED: $*"; exit 2; }
 
@@ -56,21 +60,30 @@ case "$cmd" in
     # each record is read back before the next step relies on it (ruling R6-A3.11.151 (2) class C)
     printf '%s\n' "$prior" > "$BK/installed.sha256" && [ "$(cat "$BK/installed.sha256" 2>/dev/null)" = "$prior" ] \
       || { echo "FT-VM-INSTALL FAIL backup record $BK/installed.sha256 not written (nothing installed)"; exit 3; }
-    [ "$(sha "$BK/CompetitiveRounds.dll")" = "$prior" ] || { echo "FT-VM-INSTALL FAIL backup digest"; exit 3; }
-    cp "$DLL" "$PLUG" || { echo "FT-VM-INSTALL FAIL copy"; exit 3; }
-    now=$(sha "$PLUG")
-    [ "$now" = "$want" ] || { echo "FT-VM-INSTALL FAIL installed $now, wanted $want"; exit 3; }
+    [ "$(sha "$BK/CompetitiveRounds.dll")" = "$prior" ] || { echo "FT-VM-INSTALL FAIL backup digest (nothing installed)"; exit 3; }
+    # the open-install record is written and read back BEFORE the plugin DLL changes: a record that could not be
+    # written leaves the plugin DLL untouched (a partial record removed), and every failure after it leaves the record
+    # open, so revert restores the backup it names
     printf '%s\n' "$BK" > "$CUR" && [ "$(cat "$CUR" 2>/dev/null)" = "$BK" ] \
-      || { echo "FT-VM-INSTALL FAIL the open-install record $CUR not written (installed $now; the backup is $BK)"; exit 3; }
+      || { rm -f "$CUR" 2>/dev/null
+           echo "FT-VM-INSTALL FAIL the open-install record $CUR not written (nothing installed: the plugin DLL is untouched; the backup is $BK; $([ -e "$CUR" ] && echo "a partial record remains at $CUR" || echo "no record left"))"; exit 3; }
+    cp "$DLL" "$PLUG" || { echo "FT-VM-INSTALL FAIL copy (the install record stays open: run revert)"; exit 3; }
+    now=$(sha "$PLUG")
+    [ "$now" = "$want" ] || { echo "FT-VM-INSTALL FAIL installed $now, wanted $want (the install record stays open: run revert)"; exit 3; }
     echo "$(st) FT-VM-INSTALL OK installed $now prior $prior backup $BK"
     ;;
   revert)
     [ -e "$CUR" ] || refuse "no open install to revert"
     running && refuse "ROUNDS is running"
-    BK=$(cat "$CUR"); want=$(cat "$BK/installed.sha256")
-    cp "$BK/CompetitiveRounds.dll" "$PLUG" || { echo "FT-VM-REVERT FAIL copy"; exit 3; }
+    BK=$(cat "$CUR" 2>/dev/null); want=$(cat "$BK/installed.sha256" 2>/dev/null)
+    # the records and the backup's bytes are proven before the plugin DLL is written: an unreadable record, or a
+    # backup that does not hold the recorded digest, changes nothing
+    [ -n "$BK" ] && [ "${#want}" = 64 ] || refuse "the open install's records are unreadable ($CUR names '$BK'; its installed.sha256 holds '$want'): nothing restored"
+    [ "$(sha "$BK/CompetitiveRounds.dll" 2>/dev/null)" = "$want" ] \
+      || { echo "FT-VM-REVERT FAIL the backup $BK/CompetitiveRounds.dll does not hold the recorded digest $want (nothing restored; the install stays open)"; exit 3; }
+    cp "$BK/CompetitiveRounds.dll" "$PLUG" || { echo "FT-VM-REVERT FAIL copy (the install stays open)"; exit 3; }
     now=$(sha "$PLUG")
-    [ "$now" = "$want" ] || { echo "FT-VM-REVERT FAIL restored $now, wanted $want"; exit 3; }
+    [ "$now" = "$want" ] || { echo "FT-VM-REVERT FAIL restored $now, wanted $want (the install stays open)"; exit 3; }
     # the revert is OK only with the sentinel gone and the record closed; otherwise the install stays open, so the
     # status reads it and revert can be run again
     rm -f "$ARM"
@@ -102,7 +115,16 @@ case "$cmd" in
     [ -e "$ARM" ] && exit 3
     ;;
   status)
-    echo "$(st) FT-VM-STATUS installed $(sha "$PLUG") sentinel $([ -e "$ARM" ] && echo present || echo absent) open $([ -e "$CUR" ] && cat "$CUR" || echo none)"
+    # writes nothing; an open install also names the prior DLL's recorded digest, so a reader sees whether the lane's
+    # DLL is in place (an install that failed after its record was written leaves the record open over the prior DLL).
+    # The line ends "open none" exactly when no install is open (ft_vm_leased.sh reads that)
+    o=none
+    if [ -e "$CUR" ]; then
+      ob=$(cat "$CUR" 2>/dev/null); op=$(cat "$ob/installed.sha256" 2>/dev/null)
+      [ "${#op}" = 64 ] || op=unreadable
+      o="$ob prior $op"
+    fi
+    echo "$(st) FT-VM-STATUS installed $(sha "$PLUG") sentinel $([ -e "$ARM" ] && echo present || echo absent) open $o"
     ;;
   *)
     refuse "usage: install|revert|arm|disarm|status"
