@@ -25597,8 +25597,8 @@ hop	LimitlessFenceRules.cs:NextSendRecord	80688bb417b9d55c	LimitlessFence.cs:Sen
 hop	LimitlessFenceRules.cs:RosterMatches	30c0f99d168f3a5f	LimitlessFenceRules.cs:HandleFenceMessage	ref>LimitlessFenceRules.cs:HandleFenceMessage
 hop	LimitlessFenceRules.cs:SnapshotWithRecord	ad52bbcd624dabcc	LimitlessFence.cs:AppendSnapshotRecord	ref>LimitlessFence.cs:AppendSnapshotRecord
 hop	LimitlessFenceRules.cs:TryDecodeRecord	592734dbda28645f	LimitlessFence.cs:HandleFenceEvent	ref>LimitlessFence.cs:HandleFenceEvent
+hop	LimitlessFenceRules.cs:TryDecodeRecord	6a8b45f6e10f2a49	LimitlessFenceRules.cs:TrySnapshotRecord	ref>LimitlessFenceRules.cs:TrySnapshotRecord
 hop	LimitlessFenceRules.cs:TryDecodeRecord	ae1c689cf4b35fe8	LimitlessFence.cs:ReadJoinRecord	ref>LimitlessFence.cs:ReadJoinRecord
-hop	LimitlessFenceRules.cs:TryDecodeRecord	d8429f8ca9f0416d	LimitlessFenceRules.cs:TrySnapshotRecord	ref>LimitlessFenceRules.cs:TrySnapshotRecord
 hop	LimitlessFenceRules.cs:TrySnapshotRecord	ac67e90f6779c440	LimitlessFence.cs:TakeSnapshotRecord	ref>LimitlessFence.cs:TakeSnapshotRecord
 hop	LogBundleCore.cs:Assemble	52a0e05ee08b585c	LogBundleCore.cs:Compose	delegate>LogBundleCore.cs:Compose
 hop	LogBundleCore.cs:CapMarkerLine	fcb78047863a4245	LogBundleCore.cs:Render	ref>LogBundleCore.cs:Render
@@ -67098,7 +67098,7 @@ member	LimitlessFence.cs:EpochHolds	e17fe01b7867e12f
 member	LimitlessFence.cs:FfaRoundSend	ebd780e2d24dfe88
 member	LimitlessFence.cs:FighterOptIns	4f26df98c2eeff63
 member	LimitlessFence.cs:GmRoundSend	877b98fbe84d1aa3
-member	LimitlessFence.cs:HandleFenceEvent	7f33161c89404d3c
+member	LimitlessFence.cs:HandleFenceEvent	6e185d619bc88e2f
 member	LimitlessFence.cs:HookFenceEvents	c899b9bc21731b9e
 member	LimitlessFence.cs:ItemResumes	220b52d1d3c44fe0
 member	LimitlessFence.cs:NewGid	f6bc633d16149221
@@ -67139,13 +67139,13 @@ member	LimitlessFenceRules.cs:EndGid	a012dcba28c59c40
 member	LimitlessFenceRules.cs:EndTarget	14104e57fc7a9066
 member	LimitlessFenceRules.cs:ExitRoom	20a48dfa0ab5dc26
 member	LimitlessFenceRules.cs:GuardScheduled	3a302e56e7630776
-member	LimitlessFenceRules.cs:HandleFenceMessage	9188064b74653838
+member	LimitlessFenceRules.cs:HandleFenceMessage	401112f79cba1dd6
 member	LimitlessFenceRules.cs:MustEnd	9da8041710fcb8c2
-member	LimitlessFenceRules.cs:NextSendRecord	dad953cda3bb3355
+member	LimitlessFenceRules.cs:NextSendRecord	ceda8ec51587e2cf
 member	LimitlessFenceRules.cs:RosterMatches	3edc151e5acea193
-member	LimitlessFenceRules.cs:SnapshotWithRecord	a394b60b7ca6528c
-member	LimitlessFenceRules.cs:TryDecodeRecord	f0ff133926d57b7d
-member	LimitlessFenceRules.cs:TrySnapshotRecord	8398037ff3cf99ec
+member	LimitlessFenceRules.cs:SnapshotWithRecord	7ef33ae41361ec7a
+member	LimitlessFenceRules.cs:TryDecodeRecord	69a7bd905926eda1
+member	LimitlessFenceRules.cs:TrySnapshotRecord	d820248ce68dbedb
 member	LogBundleCore.cs:Assemble	e22e7ba18a1ad5d2
 member	LogBundleCore.cs:CapMarkerLine	caec35cffecd92b6
 member	LogBundleCore.cs:CaptureAtLength	fc43925b8f9381e4
@@ -70484,12 +70484,12 @@ sink	CompetitiveUI.cs:DrawChatInput	2	1	f2b16c849c09700e	attached	CompetitiveUI.
 sink	CompetitiveUI.cs:DrawDanceWheel	2	1	75517cbac7d14c37	attached	CompetitiveUI.cs:DrawUI
 sink	CompetitiveUI.cs:DrawInputOverlay	2	1	1dc17b957676caff	attached	CompetitiveUI.cs:DrawUI
 sink	CompetitiveUI.cs:DrawQuickChat	2	1	e23b05213e46a588	attached	CompetitiveUI.cs:DrawUI
-sink	InfoLibrary.cs:ControlsOutro	6009	58036	ae3c3e27bc1edaa1	attached	BroadcastHud.cs:Draw,CompetitiveUI.cs:DrawUI,GameStateWatcher.cs:PollMatchState,Keybinds.cs:CommitRows,NativeUI.Keybinds.cs:KeybindPaintAll,NativeUI.Settings.cs:SettingsRenderPane,NativeUI.Settings.cs:SettingsShowExtras,NativeUI.cs:BuildPage,NativeUI.cs:RefreshCurrentTab,NativeUI.cs:SelectInfoArticle
-sink	InfoLibrary.cs:Cosmetics	6009	58036	ae3c3e27bc1edaa1	attached	BroadcastHud.cs:Draw,CompetitiveUI.cs:DrawUI,GameStateWatcher.cs:PollMatchState,Keybinds.cs:CommitRows,NativeUI.Keybinds.cs:KeybindPaintAll,NativeUI.Settings.cs:SettingsRenderPane,NativeUI.Settings.cs:SettingsShowExtras,NativeUI.cs:BuildPage,NativeUI.cs:RefreshCurrentTab,NativeUI.cs:SelectInfoArticle
-sink	InfoLibrary.cs:Spectating	6009	58036	ae3c3e27bc1edaa1	attached	BroadcastHud.cs:Draw,CompetitiveUI.cs:DrawUI,GameStateWatcher.cs:PollMatchState,Keybinds.cs:CommitRows,NativeUI.Keybinds.cs:KeybindPaintAll,NativeUI.Settings.cs:SettingsRenderPane,NativeUI.Settings.cs:SettingsShowExtras,NativeUI.cs:BuildPage,NativeUI.cs:RefreshCurrentTab,NativeUI.cs:SelectInfoArticle
-sink	InfoLibrary.cs:StartHere	6009	58036	ae3c3e27bc1edaa1	attached	BroadcastHud.cs:Draw,CompetitiveUI.cs:DrawUI,GameStateWatcher.cs:PollMatchState,Keybinds.cs:CommitRows,NativeUI.Keybinds.cs:KeybindPaintAll,NativeUI.Settings.cs:SettingsRenderPane,NativeUI.Settings.cs:SettingsShowExtras,NativeUI.cs:BuildPage,NativeUI.cs:RefreshCurrentTab,NativeUI.cs:SelectInfoArticle
-sink	InfoLibrary.cs:VanillaBugs	6009	58036	ae3c3e27bc1edaa1	attached	BroadcastHud.cs:Draw,CompetitiveUI.cs:DrawUI,GameStateWatcher.cs:PollMatchState,Keybinds.cs:CommitRows,NativeUI.Keybinds.cs:KeybindPaintAll,NativeUI.Settings.cs:SettingsRenderPane,NativeUI.Settings.cs:SettingsShowExtras,NativeUI.cs:BuildPage,NativeUI.cs:RefreshCurrentTab,NativeUI.cs:SelectInfoArticle
-sink	InfoViz.cs:BuildKeyboard	6009	58036	ae3c3e27bc1edaa1	attached	BroadcastHud.cs:Draw,CompetitiveUI.cs:DrawUI,GameStateWatcher.cs:PollMatchState,Keybinds.cs:CommitRows,NativeUI.Keybinds.cs:KeybindPaintAll,NativeUI.Settings.cs:SettingsRenderPane,NativeUI.Settings.cs:SettingsShowExtras,NativeUI.cs:BuildPage,NativeUI.cs:RefreshCurrentTab,NativeUI.cs:SelectInfoArticle
+sink	InfoLibrary.cs:ControlsOutro	6009	58036	b9fe7317066b814e	attached	BroadcastHud.cs:Draw,CompetitiveUI.cs:DrawUI,GameStateWatcher.cs:PollMatchState,Keybinds.cs:CommitRows,NativeUI.Keybinds.cs:KeybindPaintAll,NativeUI.Settings.cs:SettingsRenderPane,NativeUI.Settings.cs:SettingsShowExtras,NativeUI.cs:BuildPage,NativeUI.cs:RefreshCurrentTab,NativeUI.cs:SelectInfoArticle
+sink	InfoLibrary.cs:Cosmetics	6009	58036	b9fe7317066b814e	attached	BroadcastHud.cs:Draw,CompetitiveUI.cs:DrawUI,GameStateWatcher.cs:PollMatchState,Keybinds.cs:CommitRows,NativeUI.Keybinds.cs:KeybindPaintAll,NativeUI.Settings.cs:SettingsRenderPane,NativeUI.Settings.cs:SettingsShowExtras,NativeUI.cs:BuildPage,NativeUI.cs:RefreshCurrentTab,NativeUI.cs:SelectInfoArticle
+sink	InfoLibrary.cs:Spectating	6009	58036	b9fe7317066b814e	attached	BroadcastHud.cs:Draw,CompetitiveUI.cs:DrawUI,GameStateWatcher.cs:PollMatchState,Keybinds.cs:CommitRows,NativeUI.Keybinds.cs:KeybindPaintAll,NativeUI.Settings.cs:SettingsRenderPane,NativeUI.Settings.cs:SettingsShowExtras,NativeUI.cs:BuildPage,NativeUI.cs:RefreshCurrentTab,NativeUI.cs:SelectInfoArticle
+sink	InfoLibrary.cs:StartHere	6009	58036	b9fe7317066b814e	attached	BroadcastHud.cs:Draw,CompetitiveUI.cs:DrawUI,GameStateWatcher.cs:PollMatchState,Keybinds.cs:CommitRows,NativeUI.Keybinds.cs:KeybindPaintAll,NativeUI.Settings.cs:SettingsRenderPane,NativeUI.Settings.cs:SettingsShowExtras,NativeUI.cs:BuildPage,NativeUI.cs:RefreshCurrentTab,NativeUI.cs:SelectInfoArticle
+sink	InfoLibrary.cs:VanillaBugs	6009	58036	b9fe7317066b814e	attached	BroadcastHud.cs:Draw,CompetitiveUI.cs:DrawUI,GameStateWatcher.cs:PollMatchState,Keybinds.cs:CommitRows,NativeUI.Keybinds.cs:KeybindPaintAll,NativeUI.Settings.cs:SettingsRenderPane,NativeUI.Settings.cs:SettingsShowExtras,NativeUI.cs:BuildPage,NativeUI.cs:RefreshCurrentTab,NativeUI.cs:SelectInfoArticle
+sink	InfoViz.cs:BuildKeyboard	6009	58036	b9fe7317066b814e	attached	BroadcastHud.cs:Draw,CompetitiveUI.cs:DrawUI,GameStateWatcher.cs:PollMatchState,Keybinds.cs:CommitRows,NativeUI.Keybinds.cs:KeybindPaintAll,NativeUI.Settings.cs:SettingsRenderPane,NativeUI.Settings.cs:SettingsShowExtras,NativeUI.cs:BuildPage,NativeUI.cs:RefreshCurrentTab,NativeUI.cs:SelectInfoArticle
 sink	Keybinds.cs:ApplyJoin	5	4	116d269dcc76ee4c	attached	Keybinds.cs:CommitRows
 sink	Keybinds.cs:ApplyReady	5	4	3bb007885d986e1f	attached	Keybinds.cs:CommitRows
 sink	Keybinds.cs:OnRoundStart	9	9	0511583fb8f527a2	attached	GameStateWatcher.cs:PollMatchState
