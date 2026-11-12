@@ -1498,6 +1498,10 @@ namespace CompetitiveRounds
                 // V6 (ruling R6-A3.11.147 (5)): class X's and E's attached patches, from Harmony's patch table.
                 try { FtPhoton.ReportPatched(); }
                 catch (Exception ex) { Log.LogWarning("[FRAME-TIME] photon patches report failed: " + ex.Message); }
+                // R6-A3.11.151 (3): one entry per measuring patch class, the (target, patch method) pairs Harmony's
+                // patch table lists for it against the pairs its own declaration names.
+                try { FtAttach.Report(); }
+                catch (Exception ex) { Log.LogWarning("[FRAME-TIME] attach report failed: " + ex.Message); }
 #endif
                 // Card draw evidence (B4): one line naming its six patches as attached.
                 try { CardDrawEvidence.BootLine(); } catch { }
