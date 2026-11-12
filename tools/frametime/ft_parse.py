@@ -3074,16 +3074,16 @@ def own_split_faults(recs, T):
 
 
 # SHARED.md (md5 3ab20794): recv_offmain, ledger_cycle_miss and sock_main; ruling R6-A3.11.151 (2) class B, F3:
-# span_class_overflow (plugin/FtFrames.cs:275, counted at FtSpan.cs:228: a scope past the class stack's depth whose class
-# is not pushed, so its cycles and bytes land on the class below it)
-P_LINE_FAULTS = ("recv_offmain", "ledger_cycle_miss", "sock_main", "span_class_overflow")
+# span_class_overflow (FtFrames.cs:275, counted at FtSpan.cs:228: a scope past the class stack's depth, whose cycles and
+# bytes land on the class below it); .152 (2)(h): plant_mixed (FtFrames.cs:144: a frame unlike its window's plant)
+P_LINE_FAULTS = ("recv_offmain", "ledger_cycle_miss", "sock_main", "span_class_overflow", "plant_mixed")
 
 
 def p_line_faults(recs, valid):
     """P_LINE_FAULTS must be printed and 0 in every point of valid (a set of pt): recv_offmain, ledger_cycle_miss and
-    sock_main (cycles both in C and in sock; SHARED.md md5 3ab20794) and span_class_overflow (ruling R6-A3.11.151, F3);
-    sock_thr is reported only. The socket counters are zero also when the socket hook never attached; they rest on
-    the validity set's ATTACH guard (its FtSockPatch entry; ruling .151 (2) class A, F1). Returns the reasons."""
+    sock_main (cycles both in C and in sock; SHARED.md md5 3ab20794), span_class_overflow (ruling R6-A3.11.151, F3) and
+    plant_mixed (ruling .152 (2)(h)); sock_thr is reported only. The socket counters are zero also when the socket hook
+    never attached; they rest on the validity set's ATTACH guard (its FtSockPatch entry; .151 (2) class A, F1)."""
     why = []
     for k in P_LINE_FAULTS:
         bad = [q["pt"] for q in recs if q["kind"] == "p" and q["pt"] in valid and q.get(k, 1) != 0]
@@ -3712,8 +3712,8 @@ def _complete_row(recs, text, peer_recs, peer_text):
 
 def arm_problems(recs):
     """Ruling R6-A3.11.151 (2) class B: a settled line printing problems= (FtConfig.Load's list, plugin/FtConfig.cs:
-    49-76, printed at FtCalib.cs:409: a line of the arm file that did not parse, or a key that fell back to its default)
-    means the boot did not read the arm file as written. Returns one reason per such line."""
+    49-76, printed at FtCalib.cs:409: the file's stat failed, a line has no '=', or a key's value is not valid and its
+    default was taken) means the boot did not read the arm file as written. Returns one reason per such line."""
     return ["settled g=%s problems=%s: the arm file was not read as written" % (r["g"], r["problems"])
             for r in recs if r["kind"] == "settled" and "problems" in r]
 

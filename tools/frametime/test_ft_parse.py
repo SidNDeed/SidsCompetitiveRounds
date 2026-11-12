@@ -3143,6 +3143,9 @@ V_SPOILS = (
      "ab_retry above 0 or not printed at 1.1.1"),
     ("span_class_overflow", lambda: _p_sub(_v_text(), "2.1.1", " span_class_overflow=0 ", " span_class_overflow=1 "),
      "p-line faults: span_class_overflow nonzero or not printed at 2.1.1"),
+    # ruling R6-A3.11.152 (2)(h): a frame whose plant state is not its window's first frame's
+    ("plant_mixed", lambda: _p_sub(_v_text(), "3.1.1", " plant_mixed=0 ", " plant_mixed=1 "),
+     "p-line faults: plant_mixed nonzero or not printed at 3.1.1"),
     ("off_g", lambda: _p_sub(_v_text(), "1.1.1", " off_g=0 ", " off_g=5 "),
      "VR5's window counters: off_g above 0 or not printed at 1.1.1"),
     ("off_gn", lambda: _p_sub(_v_text(), "1.1.1", " off_gn=0 ", " off_gn=1 "),
@@ -4095,13 +4098,9 @@ def test_attach_lists_are_the_source_sets():
 # or a refusal, found at the emit sites: (line, key, the plugin file printing it, the ft_parse function whose rule reads
 # it and the text in that function naming it, or None and the recorded reason the field decides nothing). The lines
 # are in the hand-back and SHARED.md; test_fault_fields_are_every_emitted_fault_field holds the table to both sources
-_NR = "NEEDS A RULING: "
 FAULT_FIELDS = (
     ("p", "excl", "FtFrames.cs", "menu_check", '"excl"'),
-    ("p", "plant_mixed", "FtFrames.cs", None,
-     "frames of a window whose plant state changed inside it (FtFrames.cs:144); a plant run's windows (prun=1) are out "
-     "of the estimate and sitting V plants nothing, so no figure of the verdict reads such a window; " + _NR +
-     "whether a plant run's count must be 0"),
+    ("p", "plant_mixed", "FtFrames.cs", "p_line_faults", "P_LINE_FAULTS"),
     ("p", "missing_end", "FtFrames.cs", "menu_check", '"missing_end"'),
     ("p", "guarded", "FtFrames.cs", "vr5_points", '"guarded"'),
     ("p", "zs", "FtFrames.cs", "void_rounds", '"zs"'),
@@ -4128,7 +4127,8 @@ FAULT_FIELDS = (
     ("counters", "span_leave_mismatch", "FtSchedule.cs", "counters_faults", '"span_leave_mismatch"'),
     ("counters", "photon_offmain", "FtSchedule.cs", None,
      "X and listener scopes entered off the main thread open nothing (FtSpan.cs:295, 305); printed (counters_faults "
-     "needs the key) and reported on the V6 lines (v_lines); " + _NR + "off-main component work is charged in no term"),
+     "needs the key) and reported on the V6 lines (v_lines); ruled (R6-A3.11.152 (2)(h)): such an entry adds no "
+     "collector time to a frame of the main thread, which is what U bounds, so it is reported and decides nothing"),
     ("settled", "problems", "FtCalib.cs", "arm_problems", '"problems"'),
     ("settled", "missing_end", "FtCalib.cs", "vr2", '"missing_end"'),
     ("settled", "cycle_failures", "FtCalib.cs", "vr2", '"cycle_failures"'),
@@ -4153,8 +4153,8 @@ FAULT_FIELDS = (
     ("FT-GATE", "excluded", "FtRoomGate.cs", None,
      "the entry points the room gate leaves by design (names, not a count)"),
     ("offthread", "span_off", "FtHeavy.cs", None,
-     "component scopes opened off the main thread open nothing (FtSpan.cs:241); reported by report(); " + _NR +
-     "as photon_offmain"),
+     "component scopes opened off the main thread open nothing (FtSpan.cs:241); reported by report(); ruled "
+     "(R6-A3.11.152 (2)(h)) as photon_offmain: reported, it decides nothing"),
     ("attach", "missing", "FtAttach.cs", "attach_faults", '"missing"'),
     ("refusals", "pairs", "FtUpload.cs", "vr6_build", '"refusals"'),
     ("refused", "n", "FtUpload.cs", None,

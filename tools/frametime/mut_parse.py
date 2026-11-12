@@ -376,13 +376,18 @@ B11_MUTS = [
      ["chk_p_line_faults_withhold", "chk_sitting_v_withholds_the_counter_and_controls"]),
     # to-p2-r4.md (SHARED md5 3ab20794)
     ("B11: sock_main nonzero but not withheld",
-     'P_LINE_FAULTS = ("recv_offmain", "ledger_cycle_miss", "sock_main", "span_class_overflow")',
-     'P_LINE_FAULTS = ("recv_offmain", "ledger_cycle_miss", "span_class_overflow")',
+     'P_LINE_FAULTS = ("recv_offmain", "ledger_cycle_miss", "sock_main", "span_class_overflow", "plant_mixed")',
+     'P_LINE_FAULTS = ("recv_offmain", "ledger_cycle_miss", "span_class_overflow", "plant_mixed")',
      ["chk_p_line_faults_withhold"]),
     # ruling R6-A3.11.151 (2) class B, F3
     ("V6 class B: span_class_overflow nonzero but not withheld",
+     'P_LINE_FAULTS = ("recv_offmain", "ledger_cycle_miss", "sock_main", "span_class_overflow", "plant_mixed")',
+     'P_LINE_FAULTS = ("recv_offmain", "ledger_cycle_miss", "sock_main", "plant_mixed")',
+     ["chk_sitting_v_withholds_the_counter_and_controls"]),
+    # ruling R6-A3.11.152 (2)(h): a frame whose plant state is not its window's first frame's
+    ("V6 class B: plant_mixed nonzero but not withheld",
+     'P_LINE_FAULTS = ("recv_offmain", "ledger_cycle_miss", "sock_main", "span_class_overflow", "plant_mixed")',
      'P_LINE_FAULTS = ("recv_offmain", "ledger_cycle_miss", "sock_main", "span_class_overflow")',
-     'P_LINE_FAULTS = ("recv_offmain", "ledger_cycle_miss", "sock_main")',
      ["chk_sitting_v_withholds_the_counter_and_controls"]),
     ("B11: a non-Ref log with sock:NA:NA read as a Ref log",
      "for t, x in (_typed(w[\"wu\"], 2, na=True) or {}).items() if x[1] is None))",
