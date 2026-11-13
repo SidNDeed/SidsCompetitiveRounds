@@ -113,9 +113,11 @@ read until none is left, each one still there at the bound is ended by its pid, 
 restore ("game end: processes <n>[ pids ...]", "game end: processes after the restore <n>"). "RESTORE-PROOF ok <n>"
 needs, besides step 5's proof, that a launch that was asked showed a game process (else one may still start), that
 none was left before the files were read, and that none is there after the restore; each miss prints its own "game
-end: ..." line, the proof line reads "RESTORE-PROOF FAILED" and the job ends 5. A console write that fails is
-counted, never thrown, so no print can end a cleanup; with one counted the job ends 3 unless it ends 5.
-The review of 13 Nov 2026: step 4 reads the log only when this run removed the standing log and asked for its launch;
+end: ..." line, the proof line reads "RESTORE-PROOF FAILED" and the job ends 5. A console write that throws is
+counted and not passed on, so no print can end a cleanup; with one counted a sitting ends 3 unless it ends 5 (a
+refusal before step 1 ends 2 either way). A write into a pipe whose reader has gone does not throw under .NET
+Framework, so it is not counted: the lines after that point are not in the output.
+The review of 13 Nov 2026: step 4 reads the log only when this run removed the standing log and requested its launch;
 before that point it prints "log lines: not read (...)" and exports no log line. The log's lines end where the
 parser's do (the set of its text.splitlines(), CRLF as one), in the wait as in step 4. The sentinel is part of the
 proof: after the restore a sentinel still there is removed once more, and one line says "sentinel after the restore:
@@ -635,12 +637,14 @@ function SliceExport([string[]]$lines) {
 
 $script:Out = New-Object System.Collections.Generic.List[string]
 # Console.Out, never the output stream: a function's output-stream writes would become part of its return value
-# a result line: kept in $script:Out and written to the console, the job's output. When the write fails (the reader of
-# the output is gone) the sitting must still close the game and put the files back, so the failure is counted in
-# $script:SayFailed and never thrown: no print can end a cleanup (the review of 12 Nov 2026, D-H4). The sitting's last
-# lines turn a count above 0 into exit 3 unless the code is 5. $script:SayBreaks is the self-test's stand-in for a
-# console that takes no line: 'counted' fails each write as a console would; 'exit_line' fails the sitting's last
-# line alone; 'thrown' lets the failure out, as it left before this rule (the negative control)
+# a result line: kept in $script:Out and written to the console, the job's output. When the write throws (an I/O
+# error of a redirected output, a full disk for one) the sitting must still close the game and put the files back, so
+# the failure is counted in $script:SayFailed and not passed on: no print can end a cleanup (the review of 12 Nov
+# 2026, D-H4). A write into a pipe whose reader has gone does not throw under .NET Framework (its console stream
+# takes a broken pipe as written): it is not counted, and the lines after that point are not in the output. The
+# sitting's last lines turn a count above 0 into exit 3 unless the code is 5. $script:SayBreaks is the self-test's
+# stand-in for a console that takes no line: 'counted' fails each write as a console would; 'exit_line' fails the
+# sitting's last line alone; 'thrown' lets the failure out, as it left before this rule (the negative control)
 function Say([string]$s) {
     $script:Out.Add($s)
     try {
@@ -969,7 +973,7 @@ function FreshLog($C, $p) {
 }
 
 # ---- step 4
-# $fresh: this run removed the standing log and asked for its launch. Before that point the file there is an earlier
+# $fresh: this run removed the standing log and requested its launch. Before that point the file there is an earlier
 # session's and its lines are not this sitting's, so it is not read, and one line says so (the review of 13 Nov 2026,
 # A-H1). The self-test's mutant stale_read reads it whatever happened, as it was read before this rule (the negative
 # control)
@@ -1175,12 +1179,13 @@ function Sitting($C, $p, [scriptblock]$Launch, [scriptblock]$Wait, [scriptblock]
 # the sitting's last line and its exit code. A console write that failed anywhere turns the code into 3 unless it is
 # 5; the last line's own write can fail too, so the count is read again after it: the exit code is the last word (the
 # review of 13 Nov 2026, A-M2). The self-test's mutant exit_unchecked leaves the second reading out, as it was before
-# this rule (the negative control)
+# this rule (the negative control). The code is carried in $exitNow: a parameter's own name is never assigned
 function SeatExit([int]$code) {
-    if ($script:SayFailed -gt 0 -and $code -ne 5) { $code = 3 }
-    Say ("SEAT EXIT {0}" -f $code)
-    if ($script:Mutant -ne 'exit_unchecked' -and $script:SayFailed -gt 0 -and $code -ne 5) { $code = 3 }
-    return $code
+    $exitNow = $code
+    if ($script:SayFailed -gt 0 -and $exitNow -ne 5) { $exitNow = 3 }
+    Say ("SEAT EXIT {0}" -f $exitNow)
+    if ($script:Mutant -ne 'exit_unchecked' -and $script:SayFailed -gt 0 -and $exitNow -ne 5) { $exitNow = 3 }
+    return $exitNow
 }
 
 # ---- the game: its launch, the wait, the shutdown and the proof of its end. One set of functions for the sitting and
