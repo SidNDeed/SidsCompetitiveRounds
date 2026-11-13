@@ -996,3 +996,36 @@ def test_a_banned_deleted_or_service_invitee_gets_the_joins_own_refusal(monkeypa
             "the gate mutant left a refusal: the invite path checks the account itself", why, bad)
         assert (await env.row(iid))["state"] == "accepted"
     case(monkeypatch, body)
+
+
+# -- design change (k): lobby_closed before not_in_lobby ----------------------------
+
+def test_a_send_to_a_lobby_no_longer_open_answers_lobby_closed_whoever_sends(monkeypatch):
+    """The send's lobby gate checks that the lobby is open, under its row lock,
+    before it checks that the caller is a live member: a member of a lobby
+    that is no longer open and a caller who never was one are both answered
+    409 lobby_closed and nothing is written, while a caller who is not a
+    member of an open lobby is answered 403 not_in_lobby. The mutant makes
+    the gate read the lobby as open: the outsider's answer becomes
+    not_in_lobby."""
+    async def body(env):
+        for mode in inv.MODES:
+            lid, (h,) = await env.lobby(mode, 1)
+            outsider, x = await env.players(2)
+            ans = await env.send(outsider, x, mode, lid)
+            assert ans.status == 403 and ans.body == "not_in_lobby", (mode, ans)
+            await env.conn.execute("UPDATE %s SET status = 'canceled' WHERE id = $1"
+                                   % inv.LOBBY_TABLE[mode], lid)
+            for who in (h, outsider):
+                before = await env.snapshot()
+                ans = await env.send(who, x, mode, lid)
+                assert ans.status == 409 and ans.body == "lobby_closed", (mode, who, ans)
+                assert await env.snapshot() == before, (mode, "a refused send wrote rows")
+            # the mutant: the gate's lobby read answers 'open'
+            with env.rewriting("SELECT id, status, kicked_steam_ids FROM",
+                               "SELECT id, CAST('open' AS text) AS status, kicked_steam_ids FROM",
+                               where=" FOR UPDATE") as hits:
+                bad = await env.send(outsider, x, mode, lid)
+            assert hits, mode
+            assert bad.status == 403 and bad.body == "not_in_lobby", (mode, "the mutant changed nothing", bad)
+    case(monkeypatch, body)
