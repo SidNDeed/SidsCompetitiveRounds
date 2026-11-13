@@ -3062,7 +3062,7 @@
           ],
           "main",
           "mail_send",
-          "7ecc252c649c18e4f3885a76d40ff14309bc50f0"
+          "53994253976038752b8c2b30efddb7dd44e3852d"
         ],
         [
           "/api/v1/mail/blocks",
@@ -3134,7 +3134,7 @@
           ],
           "main",
           "mail_status",
-          "fbd61cc043520d974cf26be3cc8be015c74d046e"
+          "91527061b4c224a2d0447afd64e4d8801218855b"
         ],
         [
           "/api/v1/mail/{message_id}",
@@ -3170,7 +3170,7 @@
           ],
           "main",
           "mail_reply",
-          "c4f5e3238be05da26984eadb8797f2aa254e3d36"
+          "48105e54d8a3fb99763ad055bfb52dfe1cc837ab"
         ],
         [
           "/api/v1/mail/{message_id}/report",
@@ -3983,7 +3983,7 @@
           ],
           "main",
           "invite_send",
-          "411e8e65f89161a36c2b20e1958380f2ca7323c5"
+          "faa8eef1b456814619fd6d448cd46de446489d11"
         ],
         [
           "/api/v1/invites/{invite_id}/accept",
