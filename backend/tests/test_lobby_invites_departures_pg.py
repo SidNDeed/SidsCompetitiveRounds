@@ -508,3 +508,68 @@ def test_a_ban_locks_the_banned_players_lobbies_in_order_and_holds_them_through_
         assert obs["at_drain"] == {m: "update" for m in _BAN_ORDER}, (
             "the FOR UPDATE mutant still granted a key share", obs)
     case(monkeypatch, body)
+
+
+# -- a revision bump while the invitee's account is being deleted ----------------
+
+_BUMP = "INSERT INTO mail_inbox_rev"
+
+
+def test_a_bump_skips_an_account_being_deleted_and_leaves_it_no_revision_row(monkeypatch):
+    """An invite change that owes a revision to an invitee whose account is
+    being deleted skips that account at once, and the deletion's removal of
+    the account's revision row stands. The real deletion is paused at its
+    last bump, after its steam_id rewrite (FOR UPDATE strength on the players
+    row) and its delete of the revision row; the sender's cancel answers 200
+    without waiting, and once the deletion commits the account has no
+    revision row. Mutants: the bump as first built (no players lock, no
+    deleted_at test) waits on the deleted revision row and, when the deletion
+    commits, writes the account a new one; the players lock without SKIP
+    LOCKED waits for the deletion's commit."""
+    async def body(env):
+        lid, (h,) = await env.lobby("team", 1)
+        real_bump = main._invite_bump
+        gate = {"armed": False}
+
+        async def paused_bump(db, mids):
+            # The deletion's last bump (the first call while armed) waits for
+            # the test; every other call runs as written.
+            if gate["armed"]:
+                gate["armed"] = False
+                gate["paused"].set()
+                await gate["resume"].wait()
+            return await real_bump(db, mids)
+        env.mp.setattr(main, "_invite_bump", paused_bump)
+
+        async def scene():
+            p = await env.player()
+            iid = await env.invite(h, p, "team", lid)
+            assert await env.rev(p) > 0, "the send left no revision row to delete"
+            gate.update(armed=True, paused=asyncio.Event(), resume=asyncio.Event())
+            deletion = asyncio.ensure_future(_delete(env, p))
+            cancel = None
+            try:
+                await asyncio.wait_for(gate["paused"].wait(), BOUND)
+                cancel = asyncio.ensure_future(env.cancel(h, iid))
+                done, _rest = await asyncio.wait([cancel], timeout=3)
+                waited = not done
+            finally:
+                gate["resume"].set()
+            gone = await asyncio.wait_for(deletion, BOUND)
+            ans = await asyncio.wait_for(cancel, BOUND)
+            left = await env.conn.fetchval(
+                "SELECT EXISTS (SELECT 1 FROM mail_inbox_rev WHERE recipient_id = $1)", p.id)
+            return {"deleted": gone.status, "cancel": ans.status, "waited": waited, "left": left}
+
+        got = await scene()
+        assert got == {"deleted": 200, "cancel": 200, "waited": False, "left": False}, got
+        with env.rewriting("p.deleted_at IS NULL AND ", "", where=_BUMP) as h1, \
+                env.rewriting(" FOR KEY SHARE OF p SKIP LOCKED", "", where=_BUMP) as h2:
+            got = await scene()
+        assert h1 and h2
+        assert got["waited"] and got["left"], ("the first-built bump left no revision row", got)
+        with env.rewriting(" SKIP LOCKED", "", where=_BUMP) as h3:
+            got = await scene()
+        assert h3
+        assert got["waited"] and not got["left"], ("the waiting players lock did not wait", got)
+    case(monkeypatch, body)

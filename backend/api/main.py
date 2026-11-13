@@ -80401,19 +80401,19 @@ async def _invite_write_receipt(db: AsyncSession, caller_id, key: UUID, route: s
     ), {"pid": caller_id, "key": key, "route": route, "iid": invite_id, "fp": request_fp})
 
 
-# Every change of an invite's state bumps its invitee's inbox revision, which
-# reaches only a delivered copy, so a suppressed invite bumps nothing. A
-# transaction bumps every revision it owes ONCE, as its last statement, over
-# the whole set in ascending recipient order (the shape of _MAIL_REV_BUMP_SQL),
-# so two transactions never take two invitees' revision rows in opposite
-# orders. DISTINCT: one row may owe two bumps (an expired invite and its
-# replacement to the same invitee), and ON CONFLICT may touch a row once.
+# Every change of an invite's state bumps its invitee's inbox revision through a delivered copy
+# only, so a suppressed invite bumps nothing. A transaction runs this ONCE, last, in ascending
+# player order; a send's envelope is also bumped by migration 300's trigger, on that invitee's
+# row alone (all a send owes). FOR KEY SHARE OF p SKIP LOCKED: only delete_player_data's steam_id
+# rewrite holds a players row at FOR UPDATE strength, so the bump skips exactly an account being
+# deleted (that deletion removes its revision row) and its players lock never waits; deleted_at,
+# read under the lock, skips one already deleted. The IN yields each player once for ON CONFLICT.
 _INVITE_REV_BUMP_SQL = (
     "INSERT INTO mail_inbox_rev (recipient_id, rev)"
-    " SELECT DISTINCT r.recipient_id, 1"
-    "   FROM mail_recipients r"
-    "  WHERE r.message_id = ANY(CAST(:mids AS uuid[])) AND r.delivery = 'delivered'"
-    "  ORDER BY r.recipient_id"
+    " SELECT p.id, 1 FROM players p"
+    "  WHERE p.deleted_at IS NULL AND p.id IN (SELECT r.recipient_id FROM mail_recipients r"
+    "         WHERE r.message_id = ANY(CAST(:mids AS uuid[])) AND r.delivery = 'delivered')"
+    "  ORDER BY p.id FOR KEY SHARE OF p SKIP LOCKED"
     " ON CONFLICT (recipient_id) DO UPDATE"
     "   SET rev = mail_inbox_rev.rev + 1, updated_at = NOW()"
 )

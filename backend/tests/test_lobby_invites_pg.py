@@ -678,7 +678,7 @@ def test_two_transactions_bumping_two_invitees_in_opposite_orders_do_not_deadloc
         mids = [await env.mail_of(await env.invite(h, p, "team", lid)) for p in (a, b)]
         lo, hi = sorted([a.id, b.id], key=str)
         stmt = main._INVITE_REV_BUMP_SQL.replace(":mids", "$1")
-        assert stmt.count("ORDER BY r.recipient_id") == 1
+        assert stmt.count("ORDER BY p.id") == 1
 
         async def blocked(pid):
             for _ in range(100):
@@ -713,7 +713,7 @@ def test_two_transactions_bumping_two_invitees_in_opposite_orders_do_not_deadloc
                     await t.execute("ROLLBACK")
             return errs
         assert await race(stmt) == []
-        mutant = stmt.replace("ORDER BY r.recipient_id", "ORDER BY r.recipient_id DESC")
+        mutant = stmt.replace("ORDER BY p.id", "ORDER BY p.id DESC")
         assert "DeadlockDetectedError" in await race(mutant)
     case(monkeypatch, body)
 
