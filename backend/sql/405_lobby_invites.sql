@@ -259,9 +259,12 @@ BEGIN
     RAISE EXCEPTION '405: a table is missing from schema %', current_schema();
   END IF;
 
-  -- The two tables: ordinary, permanent, no row security, no rules, no trigger.
+  -- The two tables: ordinary, permanent, no row security, no rules, and no
+  -- trigger but the internal ones PostgreSQL keeps for their foreign keys.
+  -- Each boolean is cast to text, which prints true or false (its own output
+  -- form, which format() would use, is t or f).
   SELECT string_agg(format('%s %s %s %s %s', c.relname, c.relkind, c.relpersistence,
-                           c.relrowsecurity, c.relhasrules), '; ' ORDER BY c.relname)
+                           c.relrowsecurity::text, c.relhasrules::text), '; ' ORDER BY c.relname)
     INTO found
     FROM pg_class c
    WHERE c.oid IN (inv, rcp);
@@ -270,13 +273,13 @@ BEGIN
     RAISE EXCEPTION '405: the tables differ from this file (found: %)', found;
   END IF;
   IF EXISTS (SELECT 1 FROM pg_trigger t
-              WHERE t.tgrelid IN (inv, rcp)) THEN
+              WHERE t.tgrelid IN (inv, rcp) AND NOT t.tgisinternal) THEN
     RAISE EXCEPTION '405: a trigger exists on lobby_invites or invite_receipts';
   END IF;
 
   -- Columns, in order: name, type, NOT NULL, default.
   SELECT string_agg(format('%s %s %s %s', a.attname, format_type(a.atttypid, a.atttypmod),
-                           a.attnotnull, coalesce(pg_get_expr(d.adbin, d.adrelid), '-')),
+                           a.attnotnull::text, coalesce(pg_get_expr(d.adbin, d.adrelid), '-')),
                     ', ' ORDER BY a.attnum)
     INTO found
     FROM pg_attribute a
@@ -291,7 +294,7 @@ BEGIN
     RAISE EXCEPTION '405: lobby_invites columns differ from this file (found: %)', found;
   END IF;
   SELECT string_agg(format('%s %s %s %s', a.attname, format_type(a.atttypid, a.atttypmod),
-                           a.attnotnull, coalesce(pg_get_expr(d.adbin, d.adrelid), '-')),
+                           a.attnotnull::text, coalesce(pg_get_expr(d.adbin, d.adrelid), '-')),
                     ', ' ORDER BY a.attnum)
     INTO found
     FROM pg_attribute a
@@ -303,11 +306,13 @@ BEGIN
     RAISE EXCEPTION '405: invite_receipts columns differ from this file (found: %)', found;
   END IF;
 
-  -- Constraints by name and definition, and no other.
+  -- Constraints by name and definition, and no other. NOT NULL is checked
+  -- with the columns above, so a server that also lists it here (contype
+  -- 'n') is not read twice.
   SELECT string_agg(format('%s %s', c.conname, pg_get_constraintdef(c.oid)), '; ' ORDER BY c.conname)
     INTO found
     FROM pg_constraint c
-   WHERE c.conrelid = inv;
+   WHERE c.conrelid = inv AND c.contype <> 'n';
   want := 'ck_lobby_invites_end_reason CHECK ((end_reason = ANY (ARRAY[''lobby_closed''::text, '
        || '''lobby_started''::text, ''sender_left''::text, ''invitee_kicked''::text]))); '
        || 'ck_lobby_invites_ended CHECK (((state = ''pending''::text) = (ended_at IS NULL))); '
@@ -328,7 +333,7 @@ BEGIN
   SELECT string_agg(format('%s %s', c.conname, pg_get_constraintdef(c.oid)), '; ' ORDER BY c.conname)
     INTO found
     FROM pg_constraint c
-   WHERE c.conrelid = rcp;
+   WHERE c.conrelid = rcp AND c.contype <> 'n';
   want := 'ck_invite_receipts_request_fp CHECK ((octet_length(request_fp) = 32)); '
        || 'ck_invite_receipts_route CHECK ((route = ANY (ARRAY[''send''::text, ''accept''::text, '
        || '''decline''::text, ''cancel''::text]))); '
@@ -339,7 +344,7 @@ BEGIN
   END IF;
 
   -- Indexes by name, uniqueness and definition (after ' USING '), all valid, and no other.
-  SELECT string_agg(format('%s %s %s %s', ci.relname, i.indisunique, i.indisvalid,
+  SELECT string_agg(format('%s %s %s %s', ci.relname, i.indisunique::text, i.indisvalid::text,
                            substr(pg_get_indexdef(i.indexrelid),
                                   strpos(pg_get_indexdef(i.indexrelid), ' USING ') + 7)),
                     '; ' ORDER BY ci.relname)
