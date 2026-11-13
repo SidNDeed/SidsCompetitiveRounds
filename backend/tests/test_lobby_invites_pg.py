@@ -8,8 +8,11 @@ and its control, the same check on an ordinary mail or request that keeps
 today's answer.
 """
 
+import ast
+import asyncio
 import json
 import os
+import re
 import sys
 import uuid
 
@@ -273,4 +276,407 @@ def test_an_invites_mail_rows_hold_reserved_keys_and_no_mail_receipt(monkeypatch
             assert "mail_send_receipts" in str(info.value) or "check" in str(info.value).lower(), info.value
         finally:
             await tr.rollback()
+    case(monkeypatch, body)
+
+
+# -- no path takes the per-sender mail lock after a lobby lock (section 11) ----
+
+MAIN_PY = os.path.join(HERE, "..", "api", "main.py")
+# The functions that take the per-sender mail lock themselves. A new taker
+# fails the test, so its place in the lock order is looked at before it lands.
+MAIL_LOCK_TAKERS = {"mail_send", "_mail_reply_core", "admin_mail_broadcast", "invite_send"}
+_ROW_LOCK = re.compile(r"FOR (NO KEY )?UPDATE")
+_LOBBY_ROW = re.compile(r"\b(team|ovt|ffa)_lobbies\b|_INVITE_LOBBY_TABLES|\[.lobbies.\]")
+
+
+def _lock_order(src):
+    """(problems, facts) for main.py's source: every function's calls in
+    line order; a lobby lock is a statement naming a lobby table with FOR
+    UPDATE or FOR NO KEY UPDATE (a literal, an f-string, or a module string
+    a function names), or a call to a function that takes one; a mail-lock
+    holder is _mail_lock_sender or a function that reaches it. A problem is
+    a call that reaches the mail lock below the function's first lobby lock."""
+    tree = ast.parse(src)
+    fns = {n.name: n for n in tree.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
+    const_locks = set()
+    for n in tree.body:
+        if isinstance(n, ast.Assign) and len(n.targets) == 1 and isinstance(n.targets[0], ast.Name):
+            seg = ast.get_source_segment(src, n.value) or ""
+            if _ROW_LOCK.search(seg) and _LOBBY_ROW.search(seg):
+                const_locks.add(n.targets[0].id)
+
+    def callee(c):
+        f = c.func
+        return f.id if isinstance(f, ast.Name) else f.attr if isinstance(f, ast.Attribute) else None
+
+    calls = {name: sorted((c.lineno, callee(c)) for c in ast.walk(fn) if isinstance(c, ast.Call))
+             for name, fn in fns.items()}
+    direct = {}
+    for name, fn in fns.items():
+        lines = []
+        for node in ast.walk(fn):
+            if isinstance(node, (ast.Constant, ast.JoinedStr)) and not (
+                    isinstance(node, ast.Constant) and not isinstance(node.value, str)):
+                seg = ast.get_source_segment(src, node) or ""
+                if _ROW_LOCK.search(seg) and _LOBBY_ROW.search(seg):
+                    lines.append(node.lineno)
+            elif isinstance(node, ast.Name) and node.id in const_locks:
+                lines.append(node.lineno)
+        if lines:
+            direct[name] = min(lines)
+    takers = {n for n, cs in calls.items() if any(c == "_mail_lock_sender" for _l, c in cs)}
+    reach = set(takers) | {"_mail_lock_sender"}
+    lobby = set(direct)
+    for _ in range(len(fns)):
+        grew = False
+        for n, cs in calls.items():
+            if n not in reach and any(c in reach for _l, c in cs):
+                reach.add(n)
+                grew = True
+            if n not in lobby and any(c in lobby for _l, c in cs):
+                lobby.add(n)
+                grew = True
+        if not grew:
+            break
+    problems = []
+    first = {}
+    for n in fns:
+        marks = [direct[n]] if n in direct else []
+        marks += [ln for ln, c in calls[n] if c in lobby and c != n]
+        if marks:
+            first[n] = min(marks)
+            late = [(ln, c) for ln, c in calls[n] if c in reach and c != n and ln > first[n]]
+            if late:
+                problems.append((n, first[n], late))
+    return problems, {"takers": takers, "first": first, "calls": calls}
+
+
+def test_no_path_takes_the_per_sender_mail_lock_after_a_lobby_lock():
+    """The lock order every invite path keeps (main.py's invite section):
+    the per-sender mail lock comes before any lobby row lock. Its positive
+    controls: the checker finds invite_send's lobby lock and its mail lock
+    above it. Its mutant: invite_send's mail lock moved below the lobby
+    gates, which the checker refuses."""
+    src = open(MAIN_PY, encoding="utf-8").read()
+    problems, facts = _lock_order(src)
+    assert facts["takers"] == MAIL_LOCK_TAKERS, sorted(facts["takers"])
+    assert problems == [], problems
+    lock_at = [ln for ln, c in facts["calls"]["invite_send"] if c == "_mail_lock_sender"]
+    assert len(lock_at) == 1 and "invite_send" in facts["first"] and lock_at[0] < facts["first"]["invite_send"]
+    assert "_invite_lobby_gates" in facts["first"] and "_invite_lock_lobby" in facts["first"]
+    mutant = src
+    for old, new in (
+            ('    await _mail_lock_sender(db, me["id"])\n    prior = await _invite_prior(db, me["id"], key, fp)\n',
+             '    prior = await _invite_prior(db, me["id"], key, fp)\n'),
+            ('        ended = await _invite_lobby_gates(db, mode, lobby_id, me, invitee)\n',
+             '        ended = await _invite_lobby_gates(db, mode, lobby_id, me, invitee)\n'
+             '        await _mail_lock_sender(db, me["id"])\n')):
+        assert mutant.count(old) == 1, old
+        mutant = mutant.replace(old, new)
+    bad, _facts = _lock_order(mutant)
+    assert [p[0] for p in bad] == ["invite_send"], bad
+
+
+# -- no answer carries a room name or a password (section 11) ------------------
+
+def test_no_invite_answer_carries_a_room_name_or_a_password(monkeypatch):
+    """A probe planted in every room and password column of the lobby row
+    appears in no answer of the feature: the sends and their repeats, the
+    pending list, the inbox and the reader, the lobby state's invite list,
+    the accept and its repeat, a decline, a cancel and the refusals. The
+    negative control plants the same probe in an answer (the pending list's
+    invite object) and the check sees it."""
+    async def body(env):
+        lid, (h,) = await env.lobby("team", 1)
+        probe = "PRB" + uuid.uuid4().hex
+        cols = [r["column_name"] for r in await env.conn.fetch(
+            "SELECT column_name FROM information_schema.columns"
+            " WHERE table_schema = current_schema() AND table_name = 'team_lobbies'"
+            "   AND data_type IN ('text', 'character varying') AND column_name ~ '(room|password|pw)'")]
+        assert cols, "the lobby row has no room or password column to plant the probe in"
+        for col in cols:
+            await env.conn.execute("UPDATE team_lobbies SET %s = $2 WHERE id = $1" % col, lid, probe)
+        g1, g2, g3 = await env.players(3)
+        answers = []
+        k1 = key()
+        answers.append(await env.send(h, g1, "team", lid, k=k1))
+        answers.append(await env.send(h, g1, "team", lid, k=k1))               # its repeat
+        answers.append(await env.send(h, g1, "team", lid))                     # already_invited
+        iid1 = uuid.UUID(answers[0]["invite_id"])
+        answers.append(await env.pending(g1))
+        answers.append(await env.call(lambda db: main.mail_inbox(Req(g1.sid), cursor="",
+                                                                 limit=main.MAIL_PAGE_MAX, db=db)))
+        mid1 = await env.mail_of(iid1)
+        answers.append(await env.call(lambda db: main.mail_detail(str(mid1), Req(g1.sid), db)))
+        state = await env.call(lambda db: main._lobby_state_impl("team", h.sid, Req(h.sid), db))
+        assert state.status == 200 and [i["invite_id"] for i in state["invites"]] == [str(iid1)], state
+        answers.append(Answer(state.status, state["invites"]))     # the lobby state's invite list
+        ka = key()
+        answers.append(await env.accept(g1, iid1, k=ka))
+        answers.append(await env.accept(g1, iid1, k=ka))                        # its repeat
+        iid2 = await env.invite(h, g2, "team", lid)
+        answers.append(await env.decline(g2, iid2))
+        iid3 = await env.invite(h, g3, "team", lid)
+        answers.append(await env.cancel(h, iid3))
+        answers.append(await env.accept(g3, iid3))                              # a refusal
+        c, t = await env.players(2)
+        answers.append(await env.send(c, t, "team"))                            # a challenge
+        statuses = [a.status for a in answers]
+        assert statuses.count(200) >= 10, statuses
+        for a in answers:
+            assert probe not in a.wire, a
+        # the negative control: a probe in an answer is seen
+        real = main._invite_object
+
+        async def leaky(db, row):
+            out = await real(db, row)
+            out["room"] = probe
+            return out
+        monkeypatch.setattr(main, "_invite_object", leaky)
+        g4 = await env.player()
+        await env.invite(h, g4, "team", lid)
+        assert probe in (await env.pending(g4)).wire
+    case(monkeypatch, body)
+
+
+# -- the send rate counts invites; the same-body rule does not (section 11) ----
+
+def test_the_send_rate_counts_a_senders_invites_from_their_rows(monkeypatch):
+    """Eight invites and two direct mails fill the minute's window of ten,
+    so the next send is refused 429. The mutant counts no invite row and the
+    same send passes. The control: ten direct mails alone fill it too."""
+    async def body(env):
+        lid, (s,) = await env.lobby("team", 1)
+        d = await env.player()
+        invitees = await env.players(8)
+        for p in invitees:
+            await env.invite(s, p, "team", lid)
+        for i in range(2):
+            assert (await env.mail(s, [d], body="Message %d of the minute." % i)).status == 200
+        assert (await env.mail(s, [d], body="One send too many.")).status == 429
+        with env.rewriting(" WHERE sender_player_id = ", " WHERE FALSE AND sender_player_id = ") as hits:
+            assert (await env.mail(s, [d], body="One send too many.")).status == 200
+        assert hits, "the rate mutant reached no statement"
+        t = await env.player()
+        for i in range(10):
+            assert (await env.mail(t, [d], body="Control message %d." % i)).status == 200
+        assert (await env.mail(t, [d], body="Control message 10.")).status == 429
+    case(monkeypatch, body)
+
+
+def test_the_days_invite_count_is_the_same_for_a_delivered_and_a_suppressed_invite(monkeypatch):
+    """The rate's invite statement counts rows, never deliveries: three
+    delivered invites and three suppressed ones count three each. The mutant
+    counts only delivered copies, and the two senders' counts part."""
+    async def body(env):
+        la, (a,) = await env.lobby("team", 1)
+        lb, (b,) = await env.lobby("team", 1)
+        for p in await env.players(3):
+            await env.invite(a, p, "team", la)
+        for p in await env.players(3, mail_from="nobody"):
+            await env.invite(b, p, "team", lb)
+
+        async def day(p):
+            async with env.sm() as db:
+                row = (await db.execute(text(main._INVITE_RATE_SQL), {"sid": p.id})).mappings().first()
+            return int(row["invites_day"]), int(row["invites_minute"])
+        assert await day(a) == await day(b) == (3, 3)
+        with env.rewriting(" WHERE sender_player_id = ",
+                           " WHERE EXISTS (SELECT 1 FROM mail_recipients mr"
+                           " WHERE mr.message_id = mail_message_id AND mr.delivery = 'delivered')"
+                           " AND sender_player_id = ") as hits:
+            assert await day(a) != await day(b)
+        assert hits
+    case(monkeypatch, body)
+
+
+def test_the_same_body_rule_does_not_count_invites(monkeypatch):
+    """Five invites carry the same server text; a direct mail with that text
+    afterwards opens no spam case, because the rule counts direct send
+    receipts and an invite writes none. The mutant writes the invites' mail
+    rows as direct mail, so 404's trigger gives each a receipt, and the same
+    mail opens a case. The control: five direct mails with one body open one."""
+    async def body(env):
+        async def cases(p):
+            return await env.conn.fetchval(
+                "SELECT COUNT(*) FROM moderation_cases WHERE kind = 'mail_spam' AND subject_player_id = $1",
+                p.id)
+        text_body = main._invite_mail_text("team", "invite")[1]
+
+        async def five_then_mail(s, lid):
+            for p in await env.players(5):
+                await env.invite(s, p, "team", lid)
+            d = await env.player()
+            assert (await env.mail(s, [d], subject="Hi", body=text_body)).status == 200
+        lid, (s,) = await env.lobby("team", 1)
+        await five_then_mail(s, lid)
+        assert await cases(s) == 0
+        real = main._mail_write_message
+
+        async def as_direct(db, sender_id, *, kind, **kw):
+            return await real(db, sender_id, kind="direct" if kind == "invite" else kind, **kw)
+        monkeypatch.setattr(main, "_mail_write_message", as_direct)
+        lid2, (s2,) = await env.lobby("team", 1)
+        await five_then_mail(s2, lid2)
+        assert await cases(s2) == 1, "the mutant's invites did not count"
+        monkeypatch.setattr(main, "_mail_write_message", real)
+        c = await env.player()
+        for _ in range(5):
+            d = await env.player()
+            assert (await env.mail(c, [d], subject="Hi", body="The same body five times.")).status == 200
+        assert await cases(c) == 1
+    case(monkeypatch, body)
+
+
+# -- a challenge commits all of its rows or none (section 11) ------------------
+
+def test_a_challenge_commits_its_lobby_seat_invite_receipt_and_mail_together_or_none(monkeypatch):
+    async def body(env):
+        s, t = await env.players(2)
+        k = key()
+        ans = await env.send(s, t, "team", k=k)
+        assert ans.status == 200 and "lobby_id" in ans.body, ans
+        iid, lid = uuid.UUID(ans["invite_id"]), uuid.UUID(ans["lobby_id"])
+        got = await env.conn.fetchrow(
+            "SELECT (SELECT status FROM team_lobbies WHERE id = $1) AS lobby,"
+            "       (SELECT host_player_id FROM team_lobbies WHERE id = $1) AS host,"
+            "       (SELECT status FROM team_queue WHERE player_id = $2 AND series_id = $1) AS seat,"
+            "       (SELECT kind FROM lobby_invites WHERE id = $3) AS invite,"
+            "       (SELECT route FROM invite_receipts WHERE caller_player_id = $2"
+            "          AND idempotency_key = CAST($4 AS uuid)) AS receipt,"
+            "       (SELECT r.delivery FROM mail_recipients r JOIN lobby_invites i"
+            "          ON i.mail_message_id = r.message_id WHERE i.id = $3) AS copy",
+            lid, s.id, iid, k)
+        assert dict(got) == {"lobby": "open", "host": s.id, "seat": "lobby", "invite": "challenge",
+                             "receipt": "send", "copy": "delivered"}, dict(got)
+        u, v = await env.players(2)
+        snap = await env.snapshot()
+
+        async def down(*_a, **_k):
+            raise RuntimeError("relay down")
+        monkeypatch.setattr(mail_discord, "queue_mail_relay", down)
+        with pytest.raises(RuntimeError):
+            await env.send(u, v, "team")
+        assert await env.snapshot() == snap, "a failed challenge left rows"
+        # the mutant: the challenge's lobby committed on its own
+        real = main._invite_challenge_core
+
+        async def split(mode, req, me, request, db):
+            entry = await real(mode, req, me, request, db)
+            await db.commit()
+            return entry
+        monkeypatch.setattr(main, "_invite_challenge_core", split)
+        with pytest.raises(RuntimeError):
+            await env.send(u, v, "team")
+        assert await env.snapshot() != snap, "the split mutant left nothing behind"
+    case(monkeypatch, body)
+
+
+# -- revisions: every change bumps the invitee's; suppressed bumps none --------
+
+def test_every_invite_change_bumps_its_invitees_revision_and_a_suppressed_one_none(monkeypatch):
+    """A send, a decline, a cancel, the sweep's expiry, an accept and a
+    departure's void each bump a delivered invitee's revision; a suppressed
+    invitee's revision moves for none of them; deleting an invite's copy
+    bumps the deleter's. Mutants: the bump's delivered condition widened to
+    suppressed copies; the bump reaching no row."""
+    async def body(env):
+        lid, (h,) = await env.lobby("team", 1)
+        x = await env.player()
+        y = await env.player(mail_from="nobody")
+        moves = []
+
+        async def step(label, fn):
+            bx, by = await env.rev(x), await env.rev(y)
+            out = await fn()
+            moves.append((label, await env.rev(x) > bx, await env.rev(y) - by))
+            return out
+        ix = await step("send", lambda: env.invite(h, x, "team", lid))
+        iy = await step("send suppressed", lambda: env.invite(h, y, "team", lid))
+        await step("decline", lambda: env.decline(x, ix))
+        await step("cancel suppressed", lambda: env.cancel(h, iy))
+        ix = await step("send", lambda: env.invite(h, x, "team", lid))
+        await step("cancel", lambda: env.cancel(h, ix))
+        ix = await step("send", lambda: env.invite(h, x, "team", lid))
+        await env.age(ix, expired_s=5)
+        await step("sweep", env.sweep)
+        ix = await step("send", lambda: env.invite(h, x, "team", lid))
+        await step("accept", lambda: env.accept(x, ix))
+        l2, (h2,) = await env.lobby("team", 1)
+        iz = await step("send", lambda: env.invite(h2, x, "team", l2))
+        iy2 = await step("send suppressed", lambda: env.invite(h2, y, "team", l2))
+        await step("departure", lambda: env.leave("team", h2, l2))
+        assert (await env.row(iz))["state"] == "void" and (await env.row(iy2))["state"] == "void"
+        assert all(bumped for label, bumped, _dy in moves if "suppressed" not in label), moves
+        assert all(dy == 0 for _l, _b, dy in moves), moves
+        mid = await env.mail_of(iz)
+        before = await env.rev(x)
+        assert (await env.call(lambda db: main.mail_delete(str(mid), Req(x.sid), db))).status == 200
+        assert await env.rev(x) > before, "deleting an invite's copy did not bump the deleter's revision"
+        # mutants
+        l3, (h3,) = await env.lobby("team", 1)
+        with env.rewriting("r.delivery = 'delivered'", "r.delivery IN ('delivered', 'suppressed')") as hits:
+            by = await env.rev(y)
+            await env.invite(h3, y, "team", l3)
+            assert await env.rev(y) > by, "the widened bump left the suppressed revision alone"
+        assert hits
+        z = await env.player()
+        with env.rewriting("WHERE r.message_id = ANY(", "WHERE FALSE AND r.message_id = ANY(") as hits:
+            bz = await env.rev(z)
+            await env.invite(h3, z, "team", l3)
+            assert await env.rev(z) == bz, "the bump mutant still bumped"
+        assert hits
+    case(monkeypatch, body)
+
+
+def test_two_transactions_bumping_two_invitees_in_opposite_orders_do_not_deadlock(monkeypatch):
+    """The bump takes its revision rows in ascending recipient order in one
+    statement, so two transactions over the same two invitees wait, never
+    deadlock. A third session holds the lower row; both transactions queue
+    behind it; on release both finish. The mutant runs one transaction's
+    bump in descending order: it takes the upper row first, and the release
+    ends in a deadlock."""
+    async def body(env):
+        lid, (h,) = await env.lobby("team", 1)
+        a, b = await env.players(2)
+        mids = [await env.mail_of(await env.invite(h, p, "team", lid)) for p in (a, b)]
+        lo, hi = sorted([a.id, b.id], key=str)
+        stmt = main._INVITE_REV_BUMP_SQL.replace(":mids", "$1")
+        assert stmt.count("ORDER BY r.recipient_id") == 1
+
+        async def blocked(pid):
+            for _ in range(100):
+                if await env.conn.fetchval("SELECT cardinality(pg_blocking_pids($1)) > 0", pid):
+                    return True
+                await asyncio.sleep(0.05)
+            return False
+
+        async def race(second):
+            """Both bumps queued behind `hold`'s lock on the lower row, the
+            hold released; each transaction ends as soon as its bump does
+            (a bump that waits on the other's row waits on its commit).
+            Returns the errors' names."""
+            hold, t1, t2 = await env.side(), await env.side(), await env.side()
+            await hold.execute("BEGIN")
+            await hold.execute("SELECT 1 FROM mail_inbox_rev WHERE recipient_id = $1 FOR UPDATE", lo)
+            pending = {}
+            for t, sql in ((t1, stmt), (t2, second)):
+                await t.execute("BEGIN")
+                pending[asyncio.ensure_future(t.execute(sql, mids))] = t
+                assert await blocked(t.get_server_pid()), "a bump did not queue"
+            await hold.execute("ROLLBACK")
+            errs = []
+            while pending:
+                done, _rest = await asyncio.wait(list(pending), timeout=20,
+                                                 return_when=asyncio.FIRST_COMPLETED)
+                assert done, "a bump never finished"
+                for fut in done:
+                    t = pending.pop(fut)
+                    if fut.exception() is not None:
+                        errs.append(type(fut.exception()).__name__)
+                    await t.execute("ROLLBACK")
+            return errs
+        assert await race(stmt) == []
+        mutant = stmt.replace("ORDER BY r.recipient_id", "ORDER BY r.recipient_id DESC")
+        assert "DeadlockDetectedError" in await race(mutant)
     case(monkeypatch, body)
