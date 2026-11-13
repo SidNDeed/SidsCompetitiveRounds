@@ -42,6 +42,19 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 PLUGIN_DIR = os.path.join(HERE, "..", "..", "plugin")
 SQL_DIR = os.path.join(HERE, "..", "sql")
 
+
+def _receipt_trigger_kinds():
+    """The kinds migration 404's receipts trigger fires for, READ OFF its
+    WHEN condition, so the fake's trigger follows the file."""
+    with open(os.path.join(SQL_DIR, "404_mail_send_receipts.sql"), encoding="utf-8") as f:
+        src = f.read()
+    found = re.findall(r"WHEN \(NEW\.kind IN \(([^)]*)\)\)", src)
+    assert len(found) == 1, found
+    return frozenset(re.findall(r"'(\w+)'", found[0]))
+
+
+RECEIPT_TRIGGER_KINDS = _receipt_trigger_kinds()
+
 NOW = datetime(2026, 9, 6, 12, 0, tzinfo=timezone.utc)
 DAY = NOW.strftime("%Y-%m-%d")
 
@@ -688,6 +701,23 @@ class FakeDb:
             for mid, k in moves.items():
                 self.messages[mid]["idempotency_key"] = k
             return _Res([(1,)] * len(gone))
+        # Migration 405's change: the sender's invites in the rate windows
+        # (main._INVITE_RATE_SQL), from the fake's invite rows (none unless a
+        # test seeds `invite_rows`), rounded as the SQL rounds.
+        if "AS invites_minute" in sql:
+            assert "FROM lobby_invites" in sql and "WHERE sender_player_id = :sid" in sql, sql
+            assert sql.count("CEIL(EXTRACT") == 2, "invite rate lost its rounding"
+            mine = [r for r in getattr(self, "invite_rows", []) if r["sender_player_id"] == params["sid"]
+                    and r["created_at"] > NOW - timedelta(days=1)]
+            minute = [r for r in mine if r["created_at"] > NOW - timedelta(minutes=1)]
+
+            def inv_wait(rows, span):
+                if not rows:
+                    return None
+                return math.ceil((min(r["created_at"] for r in rows) + span - NOW).total_seconds())
+            return _Res([{"invites_minute": len(minute), "invites_day": len(mine),
+                          "invites_minute_wait": inv_wait(minute, timedelta(minutes=1)),
+                          "invites_day_wait": inv_wait(mine, timedelta(days=1))}])
         if "AS per_minute" in sql:
             assert "kind = 'direct'" in sql, "rate window must ignore broadcasts"
             # review r1 M12: the waits are the time until the OLDEST send in
@@ -727,7 +757,13 @@ class FakeDb:
                           "day_wait": wait(mine, timedelta(days=1), round_day)}])
         # message insert + fan-out
         if "INSERT INTO mail_messages" in sql:
-            kind = "system_broadcast" if "'system_broadcast'" in sql else "direct"
+            # The kind a bind carries (the send core's _mail_write_message,
+            # which the invite send shares since migration 405's change), or
+            # the broadcast insert's literal.
+            if ":kind" in sql:
+                kind = params["kind"]
+            else:
+                kind = "system_broadcast" if "'system_broadcast'" in sql else "direct"
             mid = params["id"]
             assert mid not in self.messages
             self.unique_key_or_raise(params["sid"], params["key"])
@@ -741,7 +777,7 @@ class FakeDb:
                                   # broadcast insert does not, and takes the
                                   # column default exactly as the table does.
                                   "via": params.get("via", "game")}
-            if self.receipt_trigger:
+            if self.receipt_trigger and kind in RECEIPT_TRIGGER_KINDS:
                 # migration 404's trigger, AFTER INSERT: a receipt with no
                 # request digest and the digest of the stored text. A receipt
                 # of the key for ANOTHER message (the key sent again once its
@@ -890,6 +926,11 @@ class FakeDb:
         if any(f"DELETE FROM {t} WHERE player_id = :pid" in sql
                for t in ("ranked_queue", "team_queue", "ovt_queue", "ffa_queue")):
             return _Res()
+        # the ban's open-lobby seat read (migration 405's change): this fake
+        # seats nobody in a lobby, so there is no lobby row to lock
+        if any(sql.startswith(f"SELECT series_id FROM {t} WHERE player_id = :pid AND status = 'lobby'")
+               for t in ("team_queue", "ovt_queue", "ffa_queue")):
+            return _Res([])
         if "SELECT COUNT(*) FROM player_bans" in sql:
             return _Res([(self.recent_bans_by_admin.get(params["adm"], 0),)])
         if "SELECT COUNT(*) FROM admin_actions" in sql:
@@ -1010,6 +1051,21 @@ class FakeDb:
                     out.append({"message_id": mid, "kind": env["kind"], "steam_id": p["steam_id"],
                                 "display_name": p["display_name"]})
             return _Res(out)
+        # Migration 405's change: deleting a copy of an invite moves the
+        # deleter's own revision (main._INVITE_DELETE_BUMP_SQL). Which copy
+        # counts is READ OFF the SQL: the deleter's delivered envelope, and
+        # only when its message's kind is the one the statement names.
+        if "INSERT INTO mail_inbox_rev" in sql and "r.recipient_id = :me" in sql:
+            assert "ON CONFLICT (recipient_id) DO UPDATE" in sql and "SET rev = mail_inbox_rev.rev + 1" in sql, \
+                "the revision must be a DB delta (#326), never an absolute write"
+            kinds = re.findall(r"m\.kind = '(\w+)'", sql)
+            env = self.recipients.get((params["mid"], params["me"]))
+            m = self.messages.get(params["mid"])
+            delivered_only = "r.delivery = 'delivered'" in sql
+            if env is not None and m is not None and (not delivered_only or env["delivery"] == "delivered") \
+                    and (not kinds or m["kind"] in kinds):
+                self.inbox_rev[params["me"]] = self.inbox_rev.get(params["me"], 0) + 1
+            return _Res()
         # the inbox revision counter (migration 300; review r1 M4): a row-locked
         # DB delta per delivered envelope, visited in recipient order
         if "INSERT INTO mail_inbox_rev" in sql:
@@ -1047,6 +1103,10 @@ class FakeDb:
         if "UPDATE mail_messages SET deleted_by_sender_at" in sql:
             m = self.messages.get(params["mid"])
             if m is None or m["sender_id"] != params["me"]:
+                return _Res([])
+            # Migration 405's change, READ OFF the SQL: an invite's sender
+            # holds no handle on its mail row.
+            if "kind <> 'invite'" in sql and m["kind"] == "invite":
                 return _Res([])
             m["deleted_by_sender_at"] = m["deleted_by_sender_at"] or NOW
             return _Res([(1,)])
@@ -3365,3 +3425,53 @@ def test_a_case_ban_whose_subject_was_scrubbed_under_the_lock_is_refused_before_
     assert case["status"] == "open" and case["resolved_by"] is None
     act = inspect.getsource(main._moderation_case_act)
     assert 'optional = {actor_steam_id} | ({subject_sid_pre} if action == "dismiss" else set())' in act
+
+
+def test_a_mail_send_writes_one_receipt_and_one_spam_check_and_an_invite_neither():
+    """Migration 405's change split mail's send at the row write:
+    _mail_write_message writes the message row and its fan-out, and
+    _mail_finish_send adds the receipt, the spam check and the commit. A mail
+    send therefore still writes ONE receipt and runs the spam check ONCE. The
+    invite send writes its mail row through _mail_write_message alone: no
+    receipt (404's trigger fires only for the kinds its WHEN names, which the
+    fake reads off the file) and no spam statement. The route's own source is
+    held to the same: one row write, none of mail's finishing half."""
+    db, ids = _world()
+    before = len(db.statements)
+    out = _send(db, [B_SID])
+    sent = db.statements[before:]
+    assert [str(r["message_id"]) for r in db.receipts.values()] == [out["id"]]
+    assert sum("AS same_body" in s for s in sent) == 1
+    assert sum("INSERT INTO mail_send_receipts" in s for s in sent) == 1
+    # control: the count sees a second spam evaluation when there is one
+    _run(main._mail_spam_check(db, db.players[ids[A_SID]], uuid.UUID(out["id"]), "Hi there",
+                               "A perfectly ordinary body."))
+    assert sum("AS same_body" in s for s in db.statements[before:]) == 2
+
+    subject, body = main._invite_mail_text("team", "invite")
+
+    def invite_write(kind):
+        mark, n_receipts = len(db.statements), len(db.receipts)
+        mid, _fanned = _run(main._mail_write_message(
+            db, ids[A_SID], kind=kind, thread_id=None, in_reply_to=None, subject=subject, body=body,
+            idempotency_key=main._invite_mail_key(), via="game", addressees=[(ids[B_SID], "to", False)]))
+        wrote = db.statements[mark:]
+        return (db.messages[mid]["kind"], len(db.receipts) - n_receipts,
+                sum("AS same_body" in s or "INSERT INTO mail_send_receipts" in s for s in wrote))
+    assert "invite" not in RECEIPT_TRIGGER_KINDS and "direct" in RECEIPT_TRIGGER_KINDS
+    assert invite_write("invite") == ("invite", 0, 0)
+    # negative control: the same write as a direct message gets its receipt
+    # from the trigger, so the receipt count above could have moved
+    assert invite_write("direct") == ("direct", 1, 0)
+
+    route = inspect.getsource(main.invite_send)
+    assert route.count("_mail_write_message(") == 1
+    # the send rate applies to an invite too (it counts the sender's invite
+    # rows beside their receipts); it reads, and writes no receipt
+    assert route.count("_mail_rate_or_raise(") == 1
+    for finishing in ("_mail_finish_send(", "_mail_spam_check(", "_mail_write_receipt(", "_MAIL_RECEIPT_SQL"):
+        assert finishing not in route, finishing
+    # the mail send's own half still runs each of them exactly once
+    finish = inspect.getsource(main._mail_finish_send)
+    for once in ("_mail_write_message(", "_mail_write_receipt(", "_mail_spam_check(", "_mail_rate_or_raise("):
+        assert finish.count(once) == 1, once

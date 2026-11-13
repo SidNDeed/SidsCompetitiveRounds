@@ -78909,6 +78909,23 @@ async def _mail_recipient_cap(db: AsyncSession, sender: dict) -> int:
     return MAIL_RECIPIENT_CAP
 
 
+# Migration 405's change: the sender's invites in the send rate's two
+# windows, in the receipts statement's shape (_mail_rate_or_raise adds the
+# counts and takes the earlier oldest entry of each window).
+_INVITE_RATE_SQL = (
+    "SELECT COUNT(*) FILTER (WHERE created_at > NOW() - make_interval(mins => 1)) AS invites_minute,"
+    "       COUNT(*) AS invites_day,"
+    "       CEIL(EXTRACT(EPOCH FROM ("
+    "            MIN(created_at) FILTER (WHERE created_at > NOW() - make_interval(mins => 1))"
+    "            + make_interval(mins => 1) - NOW()))) AS invites_minute_wait,"
+    "       CEIL(EXTRACT(EPOCH FROM (MIN(created_at) + make_interval(days => 1) - NOW())))"
+    "         AS invites_day_wait"
+    "  FROM lobby_invites"
+    " WHERE sender_player_id = :sid"
+    "   AND created_at > NOW() - make_interval(days => 1)"
+)
+
+
 async def _mail_rate_or_raise(db: AsyncSession, sender_id) -> None:
     """10 per minute and 100 per day, counted on the sender's own send
     receipts under the sender lock (B-11). Broadcasts do not count.
@@ -78924,40 +78941,42 @@ async def _mail_rate_or_raise(db: AsyncSession, sender_id) -> None:
     relies on how long the janitor keeps them.
 
     Invites count too (migration 405's change), from the sender's
-    lobby_invites rows: an invite writes no send receipt, and its row lives
-    INVITE_KEEP_DAYS past its expiry whatever its delivery, so the day's
-    count is the same for a delivered and a suppressed invite."""
+    lobby_invites rows (_INVITE_RATE_SQL): an invite writes no send
+    receipt, and its row lives INVITE_KEEP_DAYS past its expiry whatever its
+    delivery, so the day's count is the same for a delivered and a
+    suppressed invite. Both statements read the transaction's NOW(), so the
+    counts add, and each window's oldest entry is the earlier of the two
+    statements' oldest."""
     # Retry-After is the time until the OLDEST send inside the exhausted
     # window leaves it (review r1) — computed in SQL against the same NOW()
     # the counts use, so a limiter that says "retry in N seconds" is telling
     # the truth for both windows instead of advertising a flat hour.
     rate = (await db.execute(text(
-        "WITH s AS ("
-        "  SELECT created_at FROM mail_send_receipts"
-        "   WHERE sender_id = :sid AND kind = 'direct'"
-        "     AND created_at > NOW() - make_interval(days => 1)"
-        "  UNION ALL"
-        "  SELECT created_at FROM lobby_invites"
-        "   WHERE sender_player_id = :sid"
-        "     AND created_at > NOW() - make_interval(days => 1))"
-        " SELECT COUNT(*) FILTER (WHERE created_at > NOW() - make_interval(mins => 1)) AS per_minute,"
+        "SELECT COUNT(*) FILTER (WHERE created_at > NOW() - make_interval(mins => 1)) AS per_minute,"
         "       COUNT(*) AS per_day,"
         "       CEIL(EXTRACT(EPOCH FROM ("
         "            MIN(created_at) FILTER (WHERE created_at > NOW() - make_interval(mins => 1))"
         "            + make_interval(mins => 1) - NOW()))) AS minute_wait,"
         "       CEIL(EXTRACT(EPOCH FROM (MIN(created_at) + make_interval(days => 1) - NOW()))) AS day_wait"
-        "  FROM s"
+        "  FROM mail_send_receipts"
+        " WHERE sender_id = :sid AND kind = 'direct'"
+        "   AND created_at > NOW() - make_interval(days => 1)"
     ), {"sid": sender_id})).mappings().first()
-    per_minute = int((rate or {}).get("per_minute") or 0)
-    per_day = int((rate or {}).get("per_day") or 0)
+    inv = (await db.execute(text(_INVITE_RATE_SQL), {"sid": sender_id})).mappings().first() or {}
+    per_minute = int((rate or {}).get("per_minute") or 0) + int(inv.get("invites_minute") or 0)
+    per_day = int((rate or {}).get("per_day") or 0) + int(inv.get("invites_day") or 0)
+
+    def _earliest(a, b):
+        got = [int(v) for v in (a, b) if v is not None]
+        return min(got) if got else None
     # Every exhausted window contributes its wait and the LONGEST one is
     # advertised (review r2): with both windows closed, the minute's wait
     # alone would invite a retry the day window then refuses again.
     waits = []
     if per_minute >= MAIL_RATE_PER_MINUTE:
-        waits.append(int((rate or {}).get("minute_wait") or 60))
+        waits.append(_earliest((rate or {}).get("minute_wait"), inv.get("invites_minute_wait")) or 60)
     if per_day >= MAIL_RATE_PER_DAY:
-        waits.append(int((rate or {}).get("day_wait") or 86400))
+        waits.append(_earliest((rate or {}).get("day_wait"), inv.get("invites_day_wait")) or 86400)
     if waits:
         retry = max(1, max(waits))
         raise HTTPException(status_code=429,
@@ -79474,10 +79493,12 @@ async def mail_status(request: Request, db: AsyncSession = Depends(get_db)):
     me = await _mail_caller(request, db)
     row = (await db.execute(text(
         "SELECT"
-        "  (SELECT COUNT(*) FROM mail_recipients r JOIN mail_messages m ON m.id = r.message_id"
-        "    WHERE r.recipient_id = :me AND r.delivery = 'delivered'"
-        "      AND r.read_at IS NULL AND r.deleted_at IS NULL"
-        "      AND (CAST(:inv_ok AS boolean) OR m.kind <> 'invite')) AS unread,"
+        "  (SELECT COUNT(*) FROM mail_recipients r"
+        "    WHERE recipient_id = :me AND delivery = 'delivered'"
+        "      AND read_at IS NULL AND deleted_at IS NULL"
+        "      AND (CAST(:inv_ok AS boolean) OR NOT EXISTS ("
+        "           SELECT 1 FROM mail_messages m"
+        "            WHERE m.id = r.message_id AND m.kind = 'invite'))) AS unread,"
         "  (SELECT rev FROM mail_inbox_rev WHERE recipient_id = :me) AS revision"
     ), {"me": me["id"], "inv_ok": _invite_ok_for(request)})).mappings().first()
     rev = int((row or {}).get("revision") or 0)
