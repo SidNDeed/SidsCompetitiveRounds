@@ -1723,7 +1723,7 @@
           ],
           "main",
           "ffa_lobby_create",
-          "a520dc9f400e534e31993e6c55e28f26fc368aa1"
+          "028ee98e2108899751ea2283033b01c56a8688af"
         ],
         [
           "/api/v1/ffa/lobby/join",
@@ -1732,7 +1732,7 @@
           ],
           "main",
           "ffa_lobby_join",
-          "81ae15d81f5a0d1e22a81cee8eaea61a5528a757"
+          "cfe09b2d76c5d8ecb581cfe7a6175a831958219b"
         ],
         [
           "/api/v1/ffa/lobby/kick",
@@ -2317,7 +2317,7 @@
           ],
           "main",
           "ovt_lobby_create",
-          "152e44c21e470255d3191044e653d3c71f047438"
+          "d80947d6b0a014068f781f0c00278497935fc6dc"
         ],
         [
           "/api/v1/ovt/lobby/join",
@@ -2326,7 +2326,7 @@
           ],
           "main",
           "ovt_lobby_join",
-          "b0fdd425ed2379d53e808e334ca349e7ef16aa6a"
+          "5b04fdd17a28473dda8c6d827b2365735c8e2cb7"
         ],
         [
           "/api/v1/ovt/lobby/kick",
@@ -2713,7 +2713,7 @@
           ],
           "main",
           "team_lobby_create",
-          "cbc52214db4c5cc8aa42764958b780c4b9f69e57"
+          "c3ad217eb506149aeb8dd8cbb45ab165b099eec9"
         ],
         [
           "/api/v1/team/lobby/join",
@@ -2722,7 +2722,7 @@
           ],
           "main",
           "team_lobby_join",
-          "be608b359d036b2745c944076fd5ec72e2679c76"
+          "176a8b35445c78361f13db529488bdbc0e54e4b2"
         ],
         [
           "/api/v1/team/lobby/kick",
@@ -3062,7 +3062,7 @@
           ],
           "main",
           "mail_send",
-          "bc0049a67920beff4fc09ae5d77e7d12d094c66f"
+          "36e13d5ff466ef65a1c835a3c1229c07031a69e9"
         ],
         [
           "/api/v1/mail/blocks",
@@ -3170,7 +3170,7 @@
           ],
           "main",
           "mail_reply",
-          "12e103bff2e90c8aa303d1611b0234710b0e07ea"
+          "7f1c03192b8dad282a8254ad80f1a9c02ed0fba6"
         ],
         [
           "/api/v1/mail/{message_id}/report",
