@@ -874,3 +874,123 @@ def test_mail_keyed_with_an_invites_id_is_a_new_message_whatever_the_invite(monk
         bad = await scenario(env, h2)
         assert any(len(set(a)) > 1 for a in bad.values()), ("the key mutant changed no answer", bad)
     case(monkeypatch, body)
+
+
+# -- section 11: two accepts for the last seat; the join's own identity and
+#    service gates ---------------------------------------------------------------
+
+def _answers(got):
+    """gather(..., return_exceptions=True) as Answers: an exception that is not
+    an HTTP answer becomes a 500 named by its type."""
+    return [g if isinstance(g, Answer) else Answer(500, type(g).__name__) for g in got]
+
+
+@pytest.mark.parametrize("mode", inv.MODES)
+def test_two_accepts_for_the_last_seat_seat_one_and_the_other_gets_the_joins_full_answer(monkeypatch, mode):
+    """A lobby one seat short of full and two invitees accepting at once: the
+    join's lobby row lock orders them, so one is seated, the other is answered
+    byte for byte as the mode's join answers a full lobby, and its invite stays
+    pending. The accepts are made to meet inside the join: each waits up to
+    1.5 s for the other right after the lobby row lock, so with the lock the
+    second arrives only after the first committed. The mutant drops the join's
+    FOR UPDATE for the two accepts alone: both meet, both count the same
+    members, and both are seated."""
+    cap = main._invite_capacity(mode)
+    real_lock = main._InviteJoinHook.lock
+
+    async def race(env, mutant):
+        lid, ps = await env.lobby(mode, cap - 1)
+        x, y = await env.players(2)
+        ix, iy = await env.invite(ps[0], x, mode, lid), await env.invite(ps[0], y, mode, lid)
+        await env.fresh(mode, lid)
+        arrived, met = [], asyncio.Event()
+
+        async def meeting(self, db):
+            arrived.append(self.invite_id)
+            if len(arrived) >= 2:
+                met.set()
+            try:
+                await asyncio.wait_for(met.wait(), timeout=1.5)
+            except asyncio.TimeoutError:
+                pass
+            return await real_lock(self, db)
+
+        async def both():
+            return await asyncio.wait_for(asyncio.gather(env.accept(x, ix), env.accept(y, iy),
+                                                         return_exceptions=True), timeout=60)
+        hits = []
+        monkeypatch.setattr(main._InviteJoinHook, "lock", meeting)
+        try:
+            if mutant:
+                with env.rewriting(" FOR UPDATE", "", where="password_hash, kicked_steam_ids") as hits:
+                    got = await both()
+            else:
+                got = await both()
+        finally:
+            monkeypatch.setattr(main._InviteJoinHook, "lock", real_lock)
+        assert len(arrived) == 2, ("an accept never reached the join's invite step", arrived)
+        return lid, [ix, iy], _answers(got), list(hits)
+
+    async def body(env):
+        lid, invs, got, _hits = await race(env, False)
+        assert sorted(a.status for a in got) == [200, 409], got
+        win, lose = (0, 1) if got[0].status == 200 else (1, 0)
+        assert len(await env.members(mode, lid)) == cap
+        assert (await env.row(invs[win]))["state"] == "accepted"
+        assert (await env.row(invs[lose]))["state"] == "pending"
+        z = await env.player()
+        full = await env.join(mode, z, lid)
+        assert full.status == 409 and got[lose].wire == full.wire, ("not the join's own full answer",
+                                                                    got[lose], full)
+        # the mutant: the join's lobby row lock dropped for the two accepts
+        lid2, _invs, bad, hits = await race(env, True)
+        assert len(hits) >= 2, hits
+        n = len(await env.members(mode, lid2))
+        assert n > cap or [a.status for a in bad] == [200, 200], ("the lock mutant changed nothing", bad, n)
+    case(monkeypatch, body)
+
+
+@pytest.mark.parametrize("why", ["banned", "deleted", "service"])
+def test_a_banned_deleted_or_service_invitee_gets_the_joins_own_refusal(monkeypatch, why):
+    """An invitee banned, carrying a deleted account's tombstone, or made a
+    service account after the send is refused by the join's own identity or
+    service gate: the accept's answer is byte for byte the mode's join answer
+    for the same account, the invite stays pending and nothing is written. The
+    invite path keeps no list of its own: with that gate taken out (the
+    mutant), the same accept seats the invitee."""
+    gate = {"banned": "_enrollment_identity_gate", "deleted": "_enrollment_identity_gate",
+            "service": "_assert_no_service_subject"}[why]
+
+    async def body(env):
+        lid, (h,) = await env.lobby("team", 1)
+        x = await env.player()
+        iid = await env.invite(h, x, "team", lid)
+        if why == "banned":
+            await env.conn.execute("INSERT INTO admin_users (steam_id, granted_at) VALUES ($1, NOW())"
+                                   " ON CONFLICT DO NOTHING", h.sid)
+            await env.conn.execute("INSERT INTO player_bans (steam_id, reason, banned_by_steam_id)"
+                                   " VALUES ($1, 'test', $2)", x.sid, h.sid)
+        elif why == "deleted":
+            monkeypatch.setattr(main, "MATCH_HMAC_SECRET", "inv-case-secret")
+            await env.conn.execute("INSERT INTO deleted_steam_ids (steam_id_hash) VALUES ($1)",
+                                   main._hash_steam_id(x.sid))
+        else:
+            monkeypatch.setattr(main, "SPECTATE_BROADCAST_STEAM_IDS",
+                                set(main.SPECTATE_BROADCAST_STEAM_IDS) | {x.sid})
+        want = await env.join("team", x, lid)
+        assert want.status in (403, 409, 410), want
+        before = await env.snapshot()
+        got = await env.accept(x, iid)
+        assert got.wire == want.wire, (why, got, want)
+        assert await env.snapshot() == before, "a refused accept wrote rows"
+        assert (await env.row(iid))["state"] == "pending"
+
+        # the mutant: the join's gate taken out
+        async def no_gate(*a, **k):
+            return None
+        monkeypatch.setattr(main, gate, no_gate)
+        bad = await env.accept(x, iid)
+        assert bad.status == 200 and x.id in await env.members("team", lid), (
+            "the gate mutant left a refusal: the invite path checks the account itself", why, bad)
+        assert (await env.row(iid))["state"] == "accepted"
+    case(monkeypatch, body)
