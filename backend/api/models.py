@@ -13,7 +13,8 @@ from sqlalchemy import (
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB, UUID
 from sqlalchemy.orm import DeclarativeBase, deferred, relationship
 # Its own statement: the shared import above is in the fingerprint of every
-# route that reaches a model (learning #537), and only MailSendReceipt uses it.
+# route that reaches a model (learning #537), and only MailSendReceipt and
+# InviteReceipt use it.
 from sqlalchemy import LargeBinary
 
 
@@ -1412,8 +1413,10 @@ class MailMessage(Base):
     idempotency_key) stays from 297 for the build before that change, and
     the janitor moves a kept message to a reserved key (main._mail_parse_key)
     when it deletes the key's receipt. kind 'system_broadcast' is admin-only,
-    audited, and bypasses preferences and blocks (B-12); everything else is
-    'direct'."""
+    audited, and bypasses preferences and blocks (B-12); kind 'invite' is an
+    invite's mail row (LobbyInvite, migration 405), written by the invite
+    routes under a reserved key and never read by its sender's mail routes;
+    everything else is 'direct'."""
     __tablename__ = "mail_messages"
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
@@ -1444,7 +1447,7 @@ class MailMessage(Base):
     via = Column(Text, nullable=False, server_default=FetchedValue())
 
     __table_args__ = (
-        CheckConstraint("kind IN ('direct', 'system_broadcast')", name="ck_mail_messages_kind"),
+        CheckConstraint("kind IN ('direct', 'system_broadcast', 'invite')", name="ck_mail_messages_kind"),
         UniqueConstraint("sender_id", "idempotency_key", name="uq_mail_messages_sender_idem"),
     )
 
@@ -1592,6 +1595,84 @@ class MailInboxRev(Base):
     recipient_id = Column(UUID(as_uuid=True), ForeignKey("players.id", ondelete="CASCADE"), primary_key=True)
     rev = Column(BigInteger, nullable=False, default=0)
     updated_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+
+
+class LobbyInvite(Base):
+    """One invite or challenge into one lobby (ask 6; migration 405). `mode`
+    names the lobby table `lobby_id` is in ('team' team_lobbies, 'ovt'
+    ovt_lobbies, 'ffa' ffa_lobbies), so lobby_id has no foreign key and
+    every read names both. `state` leaves 'pending' once: 'accepted',
+    'declined', 'cancelled', 'expired', or 'void' with its `end_reason`.
+    `expires_at` is fixed at send; `ended_at` is set when the row leaves
+    'pending'. `mail_message_id` is the invitee's mail row (kind 'invite'),
+    SET NULL when the mail janitor purges it: the invite does not live or
+    die with its mail. The janitor deletes a row, and its receipts by the
+    cascade, 7 days after `expires_at`."""
+    __tablename__ = "lobby_invites"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
+    mode = Column(Text, nullable=False)
+    lobby_id = Column(UUID(as_uuid=True), nullable=False)
+    sender_player_id = Column(UUID(as_uuid=True), ForeignKey("players.id", name="fk_lobby_invites_sender"),
+                              nullable=False)
+    invitee_player_id = Column(UUID(as_uuid=True), ForeignKey("players.id", name="fk_lobby_invites_invitee"),
+                               nullable=False)
+    kind = Column(Text, nullable=False)
+    state = Column(Text, nullable=False, server_default=text("'pending'"))
+    end_reason = Column(Text, nullable=True)
+    mail_message_id = Column(UUID(as_uuid=True),
+                             ForeignKey("mail_messages.id", ondelete="SET NULL", name="fk_lobby_invites_mail"),
+                             nullable=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+    expires_at = Column(DateTime(timezone=True), nullable=False)
+    ended_at = Column(DateTime(timezone=True), nullable=True)
+
+    __table_args__ = (
+        CheckConstraint("mode IN ('team', 'ovt', 'ffa')", name="ck_lobby_invites_mode"),
+        CheckConstraint("kind IN ('invite', 'challenge')", name="ck_lobby_invites_kind"),
+        CheckConstraint("state IN ('pending', 'accepted', 'declined', 'cancelled', 'expired', 'void')",
+                        name="ck_lobby_invites_state"),
+        CheckConstraint("end_reason IN ('lobby_closed', 'lobby_started', 'sender_left', 'invitee_kicked')",
+                        name="ck_lobby_invites_end_reason"),
+        CheckConstraint("(state = 'void') = (end_reason IS NOT NULL)", name="ck_lobby_invites_void_reason"),
+        CheckConstraint("(state = 'pending') = (ended_at IS NULL)", name="ck_lobby_invites_ended"),
+        CheckConstraint("sender_player_id <> invitee_player_id", name="ck_lobby_invites_not_self"),
+        CheckConstraint("expires_at > created_at", name="ck_lobby_invites_expiry"),
+        Index("uq_lobby_invites_pending", "mode", "lobby_id", "invitee_player_id", unique=True,
+              postgresql_where=text("state = 'pending'")),
+        Index("ix_lobby_invites_invitee_pending", "invitee_player_id", postgresql_where=text("state = 'pending'")),
+        Index("ix_lobby_invites_lobby", "mode", "lobby_id"),
+        Index("ix_lobby_invites_sender_created", "sender_player_id", "created_at"),
+        Index("ix_lobby_invites_expires", "expires_at"),
+    )
+
+
+class InviteReceipt(Base):
+    """One row per keyed invite request that committed a change (ask 6;
+    migration 405): send (a challenge too), accept, decline or cancel, keyed
+    by the caller and the request's idempotency key, one key scope per caller
+    across every invite route. `request_fp` is the SHA-256 of the request's
+    canonical form (the route, the path's invite id, the caller, and the body
+    as its model validated it, key left out). A repeated key is answered from
+    this row before any route, path or state check: the same fingerprint gets
+    the repeat answer, another gets 409 idempotency_key_reused. It lives as
+    long as its invite (ON DELETE CASCADE)."""
+    __tablename__ = "invite_receipts"
+
+    caller_player_id = Column(UUID(as_uuid=True), primary_key=True)
+    idempotency_key = Column(UUID(as_uuid=True), primary_key=True)
+    route = Column(Text, nullable=False)
+    invite_id = Column(UUID(as_uuid=True),
+                       ForeignKey("lobby_invites.id", ondelete="CASCADE", name="fk_invite_receipts_invite"),
+                       nullable=False)
+    request_fp = Column(LargeBinary, nullable=False)
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+
+    __table_args__ = (
+        CheckConstraint("route IN ('send', 'accept', 'decline', 'cancel')", name="ck_invite_receipts_route"),
+        CheckConstraint("octet_length(request_fp) = 32", name="ck_invite_receipts_request_fp"),
+        Index("ix_invite_receipts_invite", "invite_id"),
+    )
 
 
 # -- Seat evidence and the review worker (migration 368) ---------------------

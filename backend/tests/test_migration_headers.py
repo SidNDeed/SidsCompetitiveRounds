@@ -32,14 +32,16 @@ API_DIR = pathlib.Path(__file__).resolve().parents[1] / "api"
 # contribution match_id column and indexes, B10-R3) likewise. 404 (mail send
 # receipts: a table, its index and trigger, and two statements outside every
 # guard, the backfill cue's SELECT set_config() and the trigger's CREATE OR
-# REPLACE FUNCTION) likewise.
+# REPLACE FUNCTION) likewise. 405 (lobby invites: two tables, their indexes
+# and mail_messages' kind check, every step inside a guard) likewise.
 OWNED = ("331_animal_title_ladders.sql",
          "332_pc_edition_schedule.sql",
          "333_pc_card_themes.sql",
          "336_bug_reports_kind.sql",
          "377_admin_evidence_indexes.sql",
          "401_contrib_match_provenance.sql",
-         "404_mail_send_receipts.sql")
+         "404_mail_send_receipts.sql",
+         "405_lobby_invites.sql")
 
 _ORDER_LINE = re.compile(r"^--\s*DEPLOY ORDER:\s*(.+)$", re.MULTILINE)
 
@@ -83,6 +85,28 @@ def test_the_deploy_order_check_fails_404_without_its_line(tmp_path, monkeypatch
     or stands after its BEGIN; fails the check; the same copy step with the
     file's own text passes it."""
     name = "404_mail_send_receipts.sql"
+    real = (SQL_DIR / name).read_text(encoding="utf-8")
+    (line,) = [m.group(0) for m in _ORDER_LINE.finditer(real)]
+    gone = real.replace(line, "--")
+    begin = gone.upper().index("BEGIN;") + len("BEGIN;")
+    mutants = (gone,
+               real.replace(line, "-- DEPLOY ORDER: see the runbook."),
+               gone[:begin] + "\n" + line + gone[begin:])
+    monkeypatch.setitem(globals(), "SQL_DIR", tmp_path)
+    for text in mutants:
+        (tmp_path / name).write_text(text, encoding="utf-8")
+        with pytest.raises(AssertionError):
+            test_every_migration_states_its_deploy_order(name)
+    (tmp_path / name).write_text(real, encoding="utf-8")
+    test_every_migration_states_its_deploy_order(name)
+
+
+def test_the_deploy_order_check_fails_405_without_its_line(tmp_path, monkeypatch):
+    """The negative control of the check's 405 case, which joined OWNED with
+    the lobby invites change: a copy of 405 whose line is gone, names no side,
+    or stands after its BEGIN; fails the check; the same copy step with the
+    file's own text passes it."""
+    name = "405_lobby_invites.sql"
     real = (SQL_DIR / name).read_text(encoding="utf-8")
     (line,) = [m.group(0) for m in _ORDER_LINE.finditer(real)]
     gone = real.replace(line, "--")

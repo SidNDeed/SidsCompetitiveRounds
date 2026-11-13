@@ -306,6 +306,10 @@ PREREQ = {
     # mail_messages and its function, backfills the receipts and drops 297's
     # foreign key on in_reply_to (_mail_tables_prereq).
     "404": _mail_tables_prereq(),
+    # 405 creates lobby_invites and invite_receipts with their indexes, and
+    # replaces 297's check on mail_messages.kind (_mail_tables_prereq: the
+    # check as 297 declares it, over a direct message and two broadcasts).
+    "405": _mail_tables_prereq(),
 }
 
 # The tables whose CONTENT this file is responsible for. Fingerprinted
@@ -325,6 +329,7 @@ TABLES = {
     "396": ("i18n_keys", "i18n_entries", "i18n_proposals"),
     "401": ("card_contrib", "combat_contrib"),
     "404": ("mail_send_receipts", "mail_messages"),
+    "405": ("lobby_invites", "invite_receipts", "mail_messages"),
 }
 
 MIGRATION_FILES = {
@@ -340,6 +345,7 @@ MIGRATION_FILES = {
     "396": "396_faq_early_leave_keys.sql",
     "401": "401_contrib_match_provenance.sql",
     "404": "404_mail_send_receipts.sql",
+    "405": "405_lobby_invites.sql",
 }
 
 
@@ -504,7 +510,7 @@ async def _apply_twice(number, *, between=None, prereq_extra="", cleanup=None):
 
 # ── The bar: a second run changes nothing ───────────────────────────────────
 
-@pytest.mark.parametrize("number", ["331", "332", "333", "336", "337", "365", "366", "377", "391", "396", "401", "404"])
+@pytest.mark.parametrize("number", ["331", "332", "333", "336", "337", "365", "366", "377", "391", "396", "401", "404", "405"])
 def test_a_second_run_writes_no_row(number):
     """Applied twice, back to back, on the state the first run left."""
     applied = _run(_apply_twice(number))
@@ -516,7 +522,7 @@ def test_a_second_run_writes_no_row(number):
         % (number, applied.rows_changed_on_second_run))
 
 
-@pytest.mark.parametrize("number", ["331", "332", "333", "336", "337", "365", "366", "377", "391", "396", "401", "404"])
+@pytest.mark.parametrize("number", ["331", "332", "333", "336", "337", "365", "366", "377", "391", "396", "401", "404", "405"])
 def test_a_second_run_leaves_every_row_byte_identical(number):
     """The value half of the bar, stated separately so a failure says which
     of the two properties broke."""
@@ -529,7 +535,7 @@ def test_a_second_run_leaves_every_row_byte_identical(number):
             % (number, table))
 
 
-@pytest.mark.parametrize("number", ["331", "332", "333", "336", "337", "365", "366", "377", "391", "396", "401", "404"])
+@pytest.mark.parametrize("number", ["331", "332", "333", "336", "337", "365", "366", "377", "391", "396", "401", "404", "405"])
 def test_a_second_run_replaces_no_constraint_or_index(number):
     """OIDs, not definitions. A dropped-and-recreated constraint has the same
     definition, a new OID, and cost an ACCESS EXCLUSIVE lock plus a validating
@@ -548,7 +554,7 @@ def test_a_second_run_replaces_no_constraint_or_index(number):
         "migration %s removed %s on its second run" % (number, vanished))
 
 
-@pytest.mark.parametrize("number", ["331", "332", "333", "336", "337", "365", "366", "377", "391", "396", "401", "404"])
+@pytest.mark.parametrize("number", ["331", "332", "333", "336", "337", "365", "366", "377", "391", "396", "401", "404", "405"])
 def test_a_second_run_removes_no_relation_from_the_database(number):
     """THE THIRD MEASUREMENT, AND THE ONE THE OTHER TWO CANNOT MAKE.
 
@@ -600,6 +606,25 @@ def test_404s_four_rerun_cases_fail_a_planted_second_run_defect(monkeypatch):
                             lambda number, plant=plant: real(number) + "\n" + plant + "\n")
         with pytest.raises(AssertionError, match=message):
             test("404")
+
+
+# 405 owns mail_messages too (it replaces the kind check), so the same four
+# plants, each acting on mail_messages, carry one defect apiece for 405's
+# cases. Its prerequisite has no 404 trigger, so none fires on them.
+_PLANTS_405 = _PLANTS_404
+
+
+def test_405s_four_rerun_cases_fail_a_planted_second_run_defect(monkeypatch):
+    """The negative control of the four measurements' 405 cases, which joined
+    their parametrize lists with the lobby invites change: each fails on a
+    copy of 405 that carries the one defect it measures, while 405 itself
+    passes all four (the parametrized runs above)."""
+    real = migration_text
+    for test, message, plant in _PLANTS_405:
+        monkeypatch.setitem(globals(), "migration_text",
+                            lambda number, plant=plant: real(number) + "\n" + plant + "\n")
+        with pytest.raises(AssertionError, match=message):
+            test("405")
 
 
 def test_377_keeps_its_statistics_object_across_a_second_run():
@@ -1061,7 +1086,7 @@ _HOLDERS = {
 }
 
 _LOCK_CASES = [(number, table, who)
-               for number in ("331", "332", "333", "336", "377", "391", "396", "401", "404")
+               for number in ("331", "332", "333", "336", "377", "391", "396", "401", "404", "405")
                for table in TABLES[number]
                for who in sorted(_HOLDERS)]
 
