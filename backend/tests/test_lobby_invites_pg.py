@@ -147,6 +147,14 @@ def test_an_invites_sender_gets_the_answer_of_an_absent_id(monkeypatch, route):
         ctrl = await env.mail(s, [d])
         assert ctrl.status == 200, ctrl
         ctrl_mid = uuid.UUID(ctrl["id"])
+        # A plain reply goes to its parent's sender, so on the sender's own
+        # mail it has no addressee (today's 400 recipients_empty); the reply's
+        # control is a mail the sender received.
+        ctrl_in = None
+        if route == "reply":
+            got_in = await env.mail(d, [s])
+            assert got_in.status == 200, got_in
+            ctrl_in = uuid.UUID(got_in["id"])
         mids = {}
         for name, p in (("delivered", d), ("suppressed", u), ("purged", g)):
             iid = await env.invite(s, p, "team", lid)
@@ -206,7 +214,7 @@ def test_an_invites_sender_gets_the_answer_of_an_absent_id(monkeypatch, route):
         elif route == "sent":
             pass                                  # the before/after checks list the ordinary mail
         else:
-            got = await _ask(env, route, s, ctrl_mid)
+            got = await _ask(env, route, s, ctrl_in if route == "reply" else ctrl_mid)
             if route == "readback":
                 assert json.loads(got) == [200, {"known": True}], got
             elif route == "delete":
@@ -498,37 +506,53 @@ def test_the_days_invite_count_is_the_same_for_a_delivered_and_a_suppressed_invi
 
 
 def test_the_same_body_rule_does_not_count_invites(monkeypatch):
-    """Five invites carry the same server text; a direct mail with that text
+    """Invites carry the same server text; a direct mail with that text
     afterwards opens no spam case, because the rule counts direct send
-    receipts and an invite writes none. The mutant writes the invites' mail
-    rows as direct mail, so 404's trigger gives each a receipt, and the same
-    mail opens a case. The control: five direct mails with one body open one."""
+    receipts and an invite writes none. The sender sends one invite fewer
+    than the rule's count, so the mail reaches the count only if the invites
+    are in it. The mutant gives each invite a direct send receipt carrying
+    its body's key (what an invite sent through the direct send path would
+    write), and the same mail opens a case. Writing the invites' rows as
+    direct mail is no mutant here: 404's trigger would give each a receipt,
+    but that receipt carries no body key, so the rule counts none of them.
+    The minute's rate counts invites and direct receipts together, so the
+    mutant's sender stays under it only with fewer than half its ten.
+    The control: the rule's count of direct mails with one body opens one."""
     async def body(env):
         async def cases(p):
             return await env.conn.fetchval(
                 "SELECT COUNT(*) FROM moderation_cases WHERE kind = 'mail_spam' AND subject_player_id = $1",
                 p.id)
         text_body = main._invite_mail_text("team", "invite")[1]
+        n = main.MAIL_SPAM_SAME_BODY - 1
+        assert 2 * n < main.MAIL_RATE_PER_MINUTE, (n, main.MAIL_RATE_PER_MINUTE)
 
-        async def five_then_mail(s, lid):
-            for p in await env.players(5):
+        async def invites_then_mail(s, lid):
+            for p in await env.players(n):
                 await env.invite(s, p, "team", lid)
             d = await env.player()
             assert (await env.mail(s, [d], subject="Hi", body=text_body)).status == 200
         lid, (s,) = await env.lobby("team", 1)
-        await five_then_mail(s, lid)
+        await invites_then_mail(s, lid)
         assert await cases(s) == 0
         real = main._mail_write_message
 
-        async def as_direct(db, sender_id, *, kind, **kw):
-            return await real(db, sender_id, kind="direct" if kind == "invite" else kind, **kw)
-        monkeypatch.setattr(main, "_mail_write_message", as_direct)
+        async def with_direct_receipt(db, sender_id, *, kind, **kw):
+            mid, fanned = await real(db, sender_id, kind=kind, **kw)
+            if kind == "invite":
+                await main._mail_write_receipt(
+                    db, sender_id=sender_id, key=uuid.uuid4(), kind="direct", request_fp=bytes(32),
+                    message_fp=main._mail_message_fp("send", kw["subject"], kw["body"]),
+                    message_id=mid, recipients=int(fanned.rowcount),
+                    body_key=main._mail_body_key(kw["body"]))
+            return mid, fanned
+        monkeypatch.setattr(main, "_mail_write_message", with_direct_receipt)
         lid2, (s2,) = await env.lobby("team", 1)
-        await five_then_mail(s2, lid2)
+        await invites_then_mail(s2, lid2)
         assert await cases(s2) == 1, "the mutant's invites did not count"
         monkeypatch.setattr(main, "_mail_write_message", real)
         c = await env.player()
-        for _ in range(5):
+        for _ in range(main.MAIL_SPAM_SAME_BODY):
             d = await env.player()
             assert (await env.mail(c, [d], subject="Hi", body="The same body five times.")).status == 200
         assert await cases(c) == 1
@@ -586,7 +610,7 @@ def test_every_invite_change_bumps_its_invitees_revision_and_a_suppressed_one_no
     departure's void each bump a delivered invitee's revision; a suppressed
     invitee's revision moves for none of them; deleting an invite's copy
     bumps the deleter's. Mutants: the bump's delivered condition widened to
-    suppressed copies; the bump reaching no row."""
+    suppressed copies; the bump reaching no row, on a cancel."""
     async def body(env):
         lid, (h,) = await env.lobby("team", 1)
         x = await env.player()
@@ -627,10 +651,15 @@ def test_every_invite_change_bumps_its_invitees_revision_and_a_suppressed_one_no
             await env.invite(h3, y, "team", l3)
             assert await env.rev(y) > by, "the widened bump left the suppressed revision alone"
         assert hits
+        # A send's envelope also bumps, through migration 300's trigger on
+        # mail_recipients (the api keeps its own bump as well, as 300 says),
+        # so the mutant of the api's bump is judged on a change that writes
+        # no envelope: the sender's cancel.
         z = await env.player()
+        iz3 = await env.invite(h3, z, "team", l3)
         with env.rewriting("WHERE r.message_id = ANY(", "WHERE FALSE AND r.message_id = ANY(") as hits:
             bz = await env.rev(z)
-            await env.invite(h3, z, "team", l3)
+            assert (await env.cancel(h3, iz3)).status == 200
             assert await env.rev(z) == bz, "the bump mutant still bumped"
         assert hits
     case(monkeypatch, body)
@@ -813,12 +842,15 @@ def test_an_invite_and_its_receipts_go_seven_days_after_its_expiry_whatever_its_
 # -- a mail, a reply and a broadcast keyed with an invite's id (section 11) ----
 
 def test_mail_keyed_with_an_invites_id_is_a_new_message_whatever_the_invite(monkeypatch):
-    """The invite's sender sends a direct mail, a reply and a broadcast, each
+    """The invite's sender sends a direct mail, a reply or a broadcast, each
     with an invite's id as its key, for a delivered, a suppressed and a
     suppressed-then-purged invite: each is a new message, and the answers are
     byte for byte the same across the three but for the new message's id.
+    One sender per verb: a direct mail and a reply share their sender's key
+    space, so a reply keyed like that sender's earlier mail is refused as a
+    reused key (409 idempotency_key_reused), whatever any invite does.
     The mutant keys each invite's mail row with the invite's id."""
-    async def scenario(env, h):
+    async def scenario(env, h, verb):
         lid = await env.create("team", h)
         d = await env.player()
         u1, u2 = await env.players(2, mail_from="nobody")
@@ -831,37 +863,36 @@ def test_mail_keyed_with_an_invites_id_is_a_new_message_whatever_the_invite(monk
         await env.retention()
         first = await env.mail(r, [h], body="A thread to answer.")
         assert first.status == 200, first
-        out = {"mail": [], "reply": [], "broadcast": []}
+        out = []
         for i in ids:
             k = str(i)
-            for verb in out:
-                if verb == "mail":
-                    coro = lambda db, k=k: main.mail_send(main._MailSendReq(
-                        to=[r.sid], subject="Hi", body="Keyed with an id.", idempotency_key=k), Req(h.sid), db)
-                elif verb == "reply":
-                    coro = lambda db, k=k: main.mail_reply(first["id"], main._MailReplyReq(
-                        body="A keyed reply.", idempotency_key=k), Req(h.sid), db)
-                else:
-                    coro = lambda db, k=k: main.admin_mail_broadcast(main._AdminMailBroadcastReq(
-                        admin_steam_id=h.sid, subject="News", body="A keyed notice.", idempotency_key=k), db)
-                try:
-                    ans = await env.call(coro)
-                except Exception as exc:                       # the mutant's collision
-                    ans = Answer(500, type(exc).__name__)
-                new = ans.get("id") if ans.status == 200 else None
-                if new is not None:
-                    row = await env.conn.fetchrow(
-                        "SELECT kind, CAST(idempotency_key AS text) AS k FROM mail_messages WHERE id = $1",
-                        uuid.UUID(new))
-                    assert row is not None and row["k"] == k, (verb, row)
-                out[verb].append(ans.wire.replace(new, "<id>") if new else ans.wire)
+            if verb == "mail":
+                coro = lambda db, k=k: main.mail_send(main._MailSendReq(
+                    to=[r.sid], subject="Hi", body="Keyed with an id.", idempotency_key=k), Req(h.sid), db)
+            elif verb == "reply":
+                coro = lambda db, k=k: main.mail_reply(first["id"], main._MailReplyReq(
+                    body="A keyed reply.", idempotency_key=k), Req(h.sid), db)
+            else:
+                coro = lambda db, k=k: main.admin_mail_broadcast(main._AdminMailBroadcastReq(
+                    admin_steam_id=h.sid, subject="News", body="A keyed notice.", idempotency_key=k), db)
+            try:
+                ans = await env.call(coro)
+            except Exception as exc:                       # the mutant's collision
+                ans = Answer(500, type(exc).__name__)
+            new = ans.get("id") if ans.status == 200 else None
+            if new is not None:
+                row = await env.conn.fetchrow(
+                    "SELECT kind, CAST(idempotency_key AS text) AS k FROM mail_messages WHERE id = $1",
+                    uuid.UUID(new))
+                assert row is not None and row["k"] == k, (verb, row)
+            out.append(ans.wire.replace(new, "<id>") if new else ans.wire)
         return out
     monkeypatch.setattr(main, "_verify_admin_hmac", lambda *a, **k: True)
+    verbs = ("mail", "reply", "broadcast")
 
     async def body(env):
-        h = await env.player()
-        out = await scenario(env, h)
-        for verb, answers in out.items():
+        for verb in verbs:
+            answers = await scenario(env, await env.player(), verb)
             assert len(set(answers)) == 1 and json.loads(answers[0])[0] == 200, (verb, answers)
         real = main._mail_write_message
 
@@ -872,8 +903,9 @@ def test_mail_keyed_with_an_invites_id_is_a_new_message_whatever_the_invite(monk
                     " ORDER BY created_at DESC LIMIT 1"), {"sid": sender_id})).scalar()
             return await real(db, sender_id, kind=kind, idempotency_key=idempotency_key, **kw)
         monkeypatch.setattr(main, "_mail_write_message", keyed_by_invite)
-        h2 = await env.player()
-        bad = await scenario(env, h2)
+        bad = {}
+        for verb in verbs:
+            bad[verb] = await scenario(env, await env.player(), verb)
         assert any(len(set(a)) > 1 for a in bad.values()), ("the key mutant changed no answer", bad)
     case(monkeypatch, body)
 
