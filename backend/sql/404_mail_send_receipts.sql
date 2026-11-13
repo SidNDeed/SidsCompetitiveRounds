@@ -147,8 +147,8 @@
 -- the table or the trigger), so a second run issues none of them and takes
 -- no lock on mail_messages or on mail_send_receipts; the statements
 -- inside the guards keep `IF NOT EXISTS`. Two statements stand
--- outside every guard: the backfill's cue, a setting local to the
--- transaction that starts 'off', and
+-- outside every guard: the backfill's cue, a SELECT set_config() that
+-- sets a setting local to the transaction to 'off', and
 -- CREATE OR REPLACE FUNCTION mail_send_receipt_sync(), which runs
 -- unconditionally on each run and re-creates the same function body. Neither
 -- takes a lock on either table.
