@@ -77819,7 +77819,6 @@ MAIL_ADDRESSEES_MAX = 64           # addressees rendered per message (lists stay
 MAIL_BLOCKS_MAX = 500
 MAIL_BROADCAST_SEEN_DAYS = 180     # system_broadcast targets mod_seen_at within this window (B-12)
 MAIL_RETENTION_DAYS = 180
-MAIL_PURGE_MIN_AGE_DAYS = 1        # the janitor purges no message younger than this: the spam check's longest window
 MAIL_CENSOR_HITS_KEEP_DAYS = 2
 MAIL_SPAM_SAME_BODY = 5            # >= 5 same-body messages in a day (B-14)
 MAIL_SPAM_BULK_MESSAGES = 3        # >= 3 messages each reaching > 20 distinct recipients in an hour
@@ -77940,16 +77939,36 @@ _MAIL_REV_BUMP_SQL = (
 # Addressees of a page of messages, bounded per message by a window rank so
 # an admin's 1000-recipient message cannot blow up a Sent page; 'to' sorts
 # before 'cc'. Delivery is NOT selected: the sender never learns it (B-7).
-_MAIL_ADDRESSEES_SQL = (
-    "WITH a AS ("
+# The addressees of the messages in a CTE named `src` (with its id and
+# kind), ranked To before Cc, then by name, for a statement that ends with
+# `LEFT JOIN a ON a.message_id = src.id AND a.rn <= CAST(:cap AS integer)`
+# (_mail_group_addressees reads its rows). A message and its addressees come
+# from ONE statement, so from one snapshot (migration 404's change): the
+# janitor's purge removes a message and its envelopes together, and a second
+# statement could find the envelopes gone after the first had listed the
+# message. A broadcast's envelope is the whole community, so it has none
+# here.
+_MAIL_ADDRESSEES_CTE = (
+    " a AS ("
     "  SELECT r.message_id, r.kind, p.steam_id, p.display_name,"
     "         ROW_NUMBER() OVER (PARTITION BY r.message_id"
     "                            ORDER BY r.kind DESC, p.display_name, p.steam_id) AS rn"
     "    FROM mail_recipients r JOIN players p ON p.id = r.recipient_id"
-    "   WHERE r.message_id = ANY(CAST(:mids AS uuid[])))"
-    " SELECT message_id, kind, steam_id, display_name FROM a"
-    "  WHERE rn <= CAST(:cap AS integer) ORDER BY message_id, rn"
+    "   WHERE r.message_id IN (SELECT id FROM src WHERE kind <> 'system_broadcast'))"
 )
+
+# The retention clock of the sender's own views, read INSIDE the statement
+# that applies it (migration 404's change); the statement continues with its
+# next CTE and CROSS JOINs `t`. A MATERIALIZED CTE reads clock_timestamp()
+# once, after the statement's snapshot was taken and after every lock the
+# transaction waited for, where NOW() is the transaction's start. The janitor
+# purges a message its sender has not deleted only once the janitor's own
+# clock is past the message's retention, and a purge this snapshot can see
+# committed before the snapshot was taken, so that clock was earlier than
+# this one. A message this clock admits therefore cannot have been purged in
+# this snapshot, and one that was purged is past this clock and refused too:
+# the answer is the same whether or not the purge has run.
+_MAIL_CLOCK_CTE = "WITH t AS MATERIALIZED (SELECT clock_timestamp() AS now_),"
 
 
 class _MailSendReq(BaseModel):
@@ -78110,9 +78129,18 @@ def _mail_norm_body(body: str) -> str:
     STRASSE and Stra\u00dfe agree) and EVERY run of Unicode whitespace collapsed
     to one space (str.split with no separator is the whole Unicode class,
     NBSP and NEL included), trimmed. Computed on the Python side ONLY \u2014
-    _mail_spam_check reads the sender's day of bodies and compares here, so
-    there is one normaliser and nothing in SQL to drift from it."""
+    _mail_body_key digests this form for each direct send's receipt and the
+    spam check compares those digests, so there is one normaliser and
+    nothing in SQL to drift from it."""
     return " ".join((body or "").casefold().split())
+
+
+def _mail_body_key(body: str) -> bytes:
+    """The same-body key as stored (migration 404's change): SHA-256 of
+    _mail_norm_body's form of the body, UTF-8. The api writes it on each
+    direct send's receipt, and _mail_spam_check counts the sender's receipts
+    that carry the new body's key."""
+    return hashlib.sha256(_mail_norm_body(body).encode("utf-8")).digest()
 
 
 def _mail_settings_payload(me: dict) -> dict:
@@ -78443,8 +78471,10 @@ _MAIL_PRIOR_SEND_SQL = (
     " WHERE sender_id = :sid AND idempotency_key = :key"
 )
 
-# The api's own write of a receipt, in the sending transaction right after
-# the message row (for a broadcast, after its recipient count). Migration
+# The api's own write of a receipt, in the sending transaction: for a direct
+# message right after its fan-out, with the number of envelopes it wrote and
+# the body's same-body key (_mail_body_key), both of which the spam check
+# counts; for a broadcast after its recipient count. Migration
 # 404's trigger on mail_messages has normally written the row already, with
 # no digest, when the message row was inserted -- the trigger is there for
 # every OTHER writer of mail_messages, such as the previous api build while
@@ -78456,11 +78486,13 @@ _MAIL_PRIOR_SEND_SQL = (
 # the same digest of the same stored text.
 _MAIL_RECEIPT_SQL = (
     "INSERT INTO mail_send_receipts"
-    "   (sender_id, idempotency_key, kind, request_fp, message_fp, message_id, recipients)"
+    "   (sender_id, idempotency_key, kind, request_fp, message_fp, message_id, recipients,"
+    "    body_key)"
     " VALUES (CAST(:sid AS uuid), CAST(:key AS uuid), CAST(:kind AS text), CAST(:fp AS bytea),"
-    "         CAST(:mfp AS bytea), CAST(:mid AS uuid), CAST(:n AS integer))"
+    "         CAST(:mfp AS bytea), CAST(:mid AS uuid), CAST(:n AS integer), CAST(:bk AS bytea))"
     " ON CONFLICT (sender_id, idempotency_key) DO UPDATE"
-    "   SET request_fp = EXCLUDED.request_fp, recipients = EXCLUDED.recipients"
+    "   SET request_fp = EXCLUDED.request_fp, recipients = EXCLUDED.recipients,"
+    "       body_key = EXCLUDED.body_key"
     "   WHERE mail_send_receipts.message_id = EXCLUDED.message_id"
     " RETURNING 1"
 )
@@ -78472,11 +78504,17 @@ _MAIL_RECEIPT_SQL = (
 # off its key: a key with no receipt is sent as a new message, and 297's
 # UNIQUE (sender_id, idempotency_key), which migration 404 keeps for the
 # previous build, would refuse that insert while the old row still held the
-# key. The message's new key is a reserved one, derived from its own id
-# with its version digit set to 0: every route refuses a reserved key before
-# it reads a mail table (_mail_parse_key), so no request names it. Migration
-# 404's trigger does not fire on the change (UPDATE OF recipient_count
-# only). One row per deleted receipt is returned.
+# key. The message's new key is a reserved one DRAWN AT RANDOM
+# (gen_random_uuid(), 122 random bits) with its version digit then set to 0.
+# This build refuses a reserved key on every route before it reads a mail
+# table (_mail_parse_key); the previous build accepts any key, so a request
+# it serves can store a reserved one, but a drawn key is derived from
+# nothing a sender knows and no route returns a key, so no stored key and no
+# request names it in advance. A draw that met a key already stored (about
+# 2^-122 per stored key of that sender) fails the statement, the janitor's
+# transaction rolls back, and the next run draws again. Migration 404's
+# trigger does not fire on the change (UPDATE OF recipient_count only). One
+# row per deleted receipt is returned.
 _MAIL_RECEIPT_SWEEP_SQL = (
     "WITH gone AS ("
     "  DELETE FROM mail_send_receipts"
@@ -78487,7 +78525,7 @@ _MAIL_RECEIPT_SWEEP_SQL = (
     "  RETURNING sender_id, idempotency_key),"
     " retired AS ("
     "  UPDATE mail_messages m"
-    "     SET idempotency_key = CAST(overlay(md5('mail-key-retired:' || CAST(m.id AS text))"
+    "     SET idempotency_key = CAST(overlay(replace(CAST(gen_random_uuid() AS text), '-', '')"
     "                                PLACING '0' FROM 13 FOR 1) AS uuid)"
     "    FROM gone g"
     "   WHERE m.sender_id = g.sender_id AND m.idempotency_key = g.idempotency_key"
@@ -78581,12 +78619,16 @@ async def _mail_prior_send(db: AsyncSession, sender_id, key: UUID, request_fp: b
 
 async def _mail_write_receipt(db: AsyncSession, *, sender_id, key: UUID, kind: str,
                               request_fp: bytes, message_fp: bytes, message_id,
-                              recipients: int | None = None) -> None:
+                              recipients: int | None = None,
+                              body_key: bytes | None = None) -> None:
     """The api's write of a send's receipt, in the sending transaction.
-    `message_fp` is _mail_message_fp of the text the message row stores."""
+    `message_fp` is _mail_message_fp of the text the message row stores;
+    `recipients` is the number of envelopes the send wrote; `body_key` is
+    _mail_body_key of a direct message's stored body (None on a broadcast,
+    which no spam count reads)."""
     done = (await db.execute(text(_MAIL_RECEIPT_SQL), {
         "sid": sender_id, "key": key, "kind": kind, "fp": request_fp, "mfp": message_fp,
-        "mid": message_id, "n": recipients})).first()
+        "mid": message_id, "n": recipients, "bk": body_key})).first()
     if done is None:
         # A receipt of this key for ANOTHER message. Unreachable while the
         # replay check runs under the sender lock (it would have answered
@@ -78772,32 +78814,38 @@ async def _mail_censor_or_raise(db: AsyncSession, sender: dict, *fields: str) ->
 
 
 async def _mail_spam_check(db: AsyncSession, sender: dict, message_id, subject: str, body: str) -> None:
-    """B-14, evaluated inside the send transaction after the fan-out, so the
-    message just written counts. The same-body key is computed on ONE side
-    only (review r1): the sender's day of bodies is read (bounded by the
-    100/day window) and compared in Python with _mail_norm_body — casefold and
-    the whole Unicode whitespace class, which SQL's lower()/regexp cannot
-    reproduce. 'bulk' counts MESSAGES that each reached more than
-    MAIL_SPAM_BULK_RECIPIENTS distinct recipients."""
-    key = _mail_norm_body(body)
-    bodies = (await db.execute(text(
-        "SELECT body FROM mail_messages"
-        " WHERE sender_id = :sid AND kind = 'direct'"
-        "   AND created_at > NOW() - make_interval(days => 1)"
-    ), {"sid": sender["id"]})).scalars().all()
-    same_body = sum(1 for b in bodies if _mail_norm_body(b) == key)
+    """B-14, evaluated inside the send transaction after the fan-out and the
+    send's receipt, so the message just written counts. Every count reads
+    the sender's send receipts (migration 404's change), never mail_messages:
+    a message row's life depends on its copies' delivery (the janitor purges
+    a deleted message once no delivered copy keeps it) and a receipt's does
+    not, so each count is the same whatever the copies' delivery. The
+    same-body key is computed on ONE side only (review r1): _mail_body_key
+    digests _mail_norm_body's form in Python (casefold and the whole Unicode
+    whitespace class, which SQL's lower()/regexp cannot reproduce), the api
+    stores it on each direct send's receipt, and the count compares
+    digests. 'bulk' counts MESSAGES whose receipt records more than
+    MAIL_SPAM_BULK_RECIPIENTS envelopes. A receipt that migration 404's
+    backfill or trigger wrote (a send the previous build made) carries no
+    body key and no envelope count of a direct message, so it is in neither
+    count, whatever its message's delivery: the previous build's janitor may
+    already have purged such a message by its delivery, so no count could
+    include those sends the same way in every state."""
     row = (await db.execute(text(
         "SELECT"
-        "  (SELECT COUNT(*) FROM ("
-        "     SELECT m.id FROM mail_messages m"
-        "       JOIN mail_recipients r ON r.message_id = m.id"
-        "      WHERE m.sender_id = :sid AND m.kind = 'direct'"
-        "        AND m.created_at > NOW() - make_interval(hours => 1)"
-        "      GROUP BY m.id"
-        "     HAVING COUNT(DISTINCT r.recipient_id) > CAST(:bulk_n AS integer)) x) AS bulk_hour,"
+        "  (SELECT COUNT(*) FROM mail_send_receipts"
+        "    WHERE sender_id = :sid AND kind = 'direct'"
+        "      AND body_key = CAST(:bk AS bytea)"
+        "      AND created_at > NOW() - make_interval(days => 1)) AS same_body,"
+        "  (SELECT COUNT(*) FROM mail_send_receipts"
+        "    WHERE sender_id = :sid AND kind = 'direct'"
+        "      AND recipients > CAST(:bulk_n AS integer)"
+        "      AND created_at > NOW() - make_interval(hours => 1)) AS bulk_hour,"
         "  (SELECT COUNT(*) FROM mail_censor_hits"
         "    WHERE sender_id = :sid AND created_at > NOW() - make_interval(days => 1)) AS censor_hits"
-    ), {"sid": sender["id"], "bulk_n": MAIL_SPAM_BULK_RECIPIENTS})).mappings().first()
+    ), {"sid": sender["id"], "bk": _mail_body_key(body),
+        "bulk_n": MAIL_SPAM_BULK_RECIPIENTS})).mappings().first()
+    same_body = int((row or {}).get("same_body") or 0)
     bulk_hour = int((row or {}).get("bulk_hour") or 0)
     censor_hits = int((row or {}).get("censor_hits") or 0)
     if (same_body >= MAIL_SPAM_SAME_BODY or bulk_hour >= MAIL_SPAM_BULK_MESSAGES
@@ -78811,9 +78859,10 @@ async def _mail_finish_send(db: AsyncSession, sender: dict, *, subject: str, bod
                             request_fp: bytes, cap: int | None = None, via: str = "game") -> dict:
     """Second half of the send transaction, shared by POST /mail and
     /mail/{id}/reply: plain-text rules (judged on the RAW text, then
-    trimmed), censor, cap, rate window, the message row and its send
-    receipt, the ONE fan-out INSERT ... SELECT, the inbox-revision bump,
-    the spam evaluation, the commit. The caller holds the identity and
+    trimmed), censor, cap, rate window, the message row, the ONE fan-out
+    INSERT ... SELECT, the send receipt (with the number of envelopes the
+    fan-out wrote), the inbox-revision bump, the spam evaluation, the
+    commit. The caller holds the identity and
     sender locks and has already answered a repeated idempotency_key.
     `addressees` = [(player_id, 'to'|'cc', forced)], canonical;
     `request_fp` is the request's digest (_mail_request_fp), stored on the
@@ -78837,15 +78886,16 @@ async def _mail_finish_send(db: AsyncSession, sender: dict, *, subject: str, bod
     ), {"id": mid, "sid": sender["id"], "tid": thread_id or mid, "irt": in_reply_to,
         "subj": subject, "body": body, "key": idempotency_key,
         "via": via if via in ("game", "discord") else "game"})
+    fanned = await db.execute(text(_MAIL_FANOUT_SQL), {
+        "mid": mid, "sid": sender["id"],
+        "rids": [a[0] for a in addressees], "kinds": [a[1] for a in addressees],
+        "forced": [bool(a[2]) for a in addressees]})
     await _mail_write_receipt(db, sender_id=sender["id"], key=idempotency_key, kind="direct",
                               request_fp=request_fp,
                               message_fp=_mail_message_fp("send" if thread_id is None else "reply",
                                                           subject, body),
-                              message_id=mid)
-    await db.execute(text(_MAIL_FANOUT_SQL), {
-        "mid": mid, "sid": sender["id"],
-        "rids": [a[0] for a in addressees], "kinds": [a[1] for a in addressees],
-        "forced": [bool(a[2]) for a in addressees]})
+                              message_id=mid, recipients=int(fanned.rowcount),
+                              body_key=_mail_body_key(body))
     await db.execute(text(_MAIL_REV_BUMP_SQL), {"mid": mid})
     await _mail_spam_check(db, sender, mid, subject, body)
     # Item 5: queue the Discord relay LAST, inside this same transaction and
@@ -78882,17 +78932,21 @@ async def _mail_sender_colors(db: AsyncSession, rows) -> dict:
     return out
 
 
-async def _mail_addressees(db: AsyncSession, message_ids: list) -> dict:
-    """{message_id: [{steam_id, name, kind}]} bounded per message."""
-    if not message_ids:
-        return {}
-    rows = (await db.execute(text(_MAIL_ADDRESSEES_SQL),
-                             {"mids": list(message_ids), "cap": MAIL_ADDRESSEES_MAX})).mappings().all()
+def _mail_group_addressees(rows) -> list:
+    """The rows of ONE statement that LEFT JOINs a message CTE `src` to
+    _MAIL_ADDRESSEES_CTE, in that statement's order: one dict per message, in
+    first-seen order, with the message's own columns and `addressees`, a list
+    of {steam_id, name, kind} in rank order (bounded by MAIL_ADDRESSEES_MAX)."""
     out: dict = {}
     for r in rows:
-        out.setdefault(r["message_id"], []).append(
-            {"steam_id": r["steam_id"], "name": r["display_name"], "kind": r["kind"]})
-    return out
+        m = out.get(r["id"])
+        if m is None:
+            m = out[r["id"]] = {k: r[k] for k in r.keys() if not k.startswith("addr_")}
+            m["addressees"] = []
+        if r["addr_steam_id"] is not None:
+            m["addressees"].append(
+                {"steam_id": r["addr_steam_id"], "name": r["addr_name"], "kind": r["addr_kind"]})
+    return list(out.values())
 
 
 @app.post("/api/v1/mail", tags=["Mail"])
@@ -78993,29 +79047,42 @@ async def _mail_reply_core(db: AsyncSession, me: dict, *, message_id: str | None
     if mid is None:
         mid = _mail_parse_uuid(await resolve_target(), "message_id")
     await _mail_sender_gates(db, me)
-    orig = (await db.execute(text(
-        "SELECT m.id, m.sender_id, m.kind, m.thread_id, m.subject"
-        "  FROM mail_messages m"
-        " WHERE m.id = :mid"
-        "   AND ((m.sender_id = :me AND m.deleted_by_sender_at IS NULL"
-        "         AND m.created_at > NOW() - make_interval(days => CAST(:ret_days AS integer)))"
-        "        OR EXISTS (SELECT 1 FROM mail_recipients r"
-        "                    WHERE r.message_id = m.id AND r.recipient_id = :me"
-        "                      AND r.delivery = 'delivered' AND r.deleted_at IS NULL))"
-    ), {"mid": mid, "me": me["id"], "ret_days": MAIL_RETENTION_DAYS})).mappings().first()
-    if orig is None:
+    # The original, who may answer it, and (for a reply all) every envelope
+    # of it in ONE statement, with the retention clock read inside it
+    # (_MAIL_CLOCK_CTE): the janitor's purge removes a message and its
+    # envelopes together, so the reply-all list is the envelope set of the
+    # very row this statement admitted, and a row past the replier's clock is
+    # refused whether or not the purge has taken it yet. A row admitted
+    # through the caller's own live delivered copy is one the purge cannot
+    # take while that copy is live. A broadcast's envelopes are never read.
+    rows = (await db.execute(text(
+        _MAIL_CLOCK_CTE +
+        " o AS MATERIALIZED ("
+        "  SELECT m.id, m.sender_id, m.kind, m.thread_id, m.subject"
+        "    FROM mail_messages m CROSS JOIN t"
+        "   WHERE m.id = :mid"
+        "     AND ((m.sender_id = :me AND m.deleted_by_sender_at IS NULL"
+        "           AND m.created_at > t.now_ - make_interval(days => CAST(:ret_days AS integer)))"
+        "          OR EXISTS (SELECT 1 FROM mail_recipients r"
+        "                      WHERE r.message_id = m.id AND r.recipient_id = :me"
+        "                        AND r.delivery = 'delivered' AND r.deleted_at IS NULL)))"
+        " SELECT o.id, o.sender_id, o.kind, o.thread_id, o.subject,"
+        "        e.recipient_id AS env_recipient_id, e.kind AS env_kind, e.delivery AS env_delivery"
+        "   FROM o LEFT JOIN mail_recipients e"
+        "     ON e.message_id = o.id AND CAST(:reply_all AS boolean) AND o.kind <> 'system_broadcast'"
+    ), {"mid": mid, "me": me["id"], "ret_days": MAIL_RETENTION_DAYS,
+        "reply_all": bool(reply_all)})).mappings().all()
+    if not rows:
         raise HTTPException(status_code=404, detail="not_found")
+    orig = rows[0]
     if reply_all and orig["kind"] == "system_broadcast":
         raise HTTPException(status_code=400, detail="reply_all_refused")
     pairs = [(orig["sender_id"], "to", False)]
     if reply_all:
         # Every addressee of the original, whatever its delivery; one whose
         # copy was suppressed is forced suppressed on the reply.
-        rows = (await db.execute(text(
-            "SELECT recipient_id, kind, delivery FROM mail_recipients"
-            " WHERE message_id = :mid"
-        ), {"mid": mid})).mappings().all()
-        pairs.extend((r["recipient_id"], r["kind"], r["delivery"] != "delivered") for r in rows)
+        pairs.extend((r["env_recipient_id"], r["env_kind"], r["env_delivery"] != "delivered")
+                     for r in rows if r["env_recipient_id"] is not None)
     addressees = _mail_canonical_ids(me["id"], pairs)
     subj = orig["subject"] or ""
     subject = subj if subj.startswith("Re: ") else ("Re: " + subj)[:MAIL_SUBJECT_MAX]
@@ -79082,26 +79149,34 @@ async def mail_sent(request: Request, cursor: str = Query(""),
     empty and `kind` says why. A message is listed until its sender deletes
     it or until MAIL_RETENTION_DAYS after it was sent, whichever is first,
     whatever its delivery: the janitor's purge depends on the recipients'
-    delivery, so the list never relies on it."""
+    delivery, so the list never relies on it. The page and its addressees
+    come from one statement with the clock read inside it (_MAIL_CLOCK_CTE,
+    _MAIL_ADDRESSEES_CTE)."""
     me = await _mail_caller(request, db)
     c_at, c_id = _mail_cursor_decode(cursor)
     rows = (await db.execute(text(
-        "SELECT m.id, m.thread_id, m.subject, m.created_at, m.kind"
-        "  FROM mail_messages m"
-        " WHERE m.sender_id = :me AND m.deleted_by_sender_at IS NULL"
-        "   AND m.created_at > NOW() - make_interval(days => CAST(:ret_days AS integer))"
-        "   AND (CAST(:c_at AS timestamptz) IS NULL"
-        "        OR (m.created_at, m.id) < (CAST(:c_at AS timestamptz), CAST(:c_id AS uuid)))"
-        " ORDER BY m.created_at DESC, m.id DESC"
-        " LIMIT CAST(:lim AS integer)"
+        _MAIL_CLOCK_CTE +
+        " src AS MATERIALIZED ("
+        "  SELECT m.id, m.thread_id, m.subject, m.created_at, m.kind"
+        "    FROM mail_messages m CROSS JOIN t"
+        "   WHERE m.sender_id = :me AND m.deleted_by_sender_at IS NULL"
+        "     AND m.created_at > t.now_ - make_interval(days => CAST(:ret_days AS integer))"
+        "     AND (CAST(:c_at AS timestamptz) IS NULL"
+        "          OR (m.created_at, m.id) < (CAST(:c_at AS timestamptz), CAST(:c_id AS uuid)))"
+        "   ORDER BY m.created_at DESC, m.id DESC"
+        "   LIMIT CAST(:lim AS integer)),"
+        + _MAIL_ADDRESSEES_CTE +
+        " SELECT src.id, src.thread_id, src.subject, src.created_at, src.kind,"
+        "        a.kind AS addr_kind, a.steam_id AS addr_steam_id, a.display_name AS addr_name"
+        "   FROM src LEFT JOIN a ON a.message_id = src.id AND a.rn <= CAST(:cap AS integer)"
+        "  ORDER BY src.created_at DESC, src.id DESC, a.rn"
     ), {"me": me["id"], "c_at": c_at, "c_id": c_id, "lim": limit + 1,
-        "ret_days": MAIL_RETENTION_DAYS})).mappings().all()
-    page, next_cursor = _mail_page(rows, limit)
-    addr = await _mail_addressees(db, [r["id"] for r in page if r["kind"] != "system_broadcast"])
+        "ret_days": MAIL_RETENTION_DAYS, "cap": MAIL_ADDRESSEES_MAX})).mappings().all()
+    page, next_cursor = _mail_page(_mail_group_addressees(rows), limit)
     return {"messages": [{
         "id": str(r["id"]), "thread_id": str(r["thread_id"]), "kind": r["kind"],
         "subject": r["subject"], "created_at": _mail_iso(r["created_at"]),
-        "addressees": addr.get(r["id"], []),
+        "addressees": r["addressees"],
     } for r in page], "next_cursor": next_cursor}
 
 
@@ -79248,27 +79323,37 @@ async def mail_detail(message_id: str, request: Request, db: AsyncSession = Depe
     Marks nothing read (the client posts /read explicitly)."""
     me = await _mail_caller(request, db)
     mid = _mail_parse_uuid(message_id, "message_id")
-    row = (await db.execute(text(
-        "SELECT m.id, m.thread_id, m.in_reply_to, m.kind, m.subject, m.body, m.created_at, m.via,"
-        "       m.sender_id, s.steam_id AS sender_steam_id, s.display_name AS sender_name,"
-        "       CAST(s.id AS text) AS sender_pid, COALESCE(gr.rating, 1500) AS rating,"
-        "       si.name AS title, si.preview_color AS title_color, si.sku AS title_sku,"
-        "       r.read_at"
-        "  FROM mail_messages m"
-        "  JOIN players s ON s.id = m.sender_id"
-        "  LEFT JOIN glicko_ratings gr ON gr.player_id = s.id"
-        "  LEFT JOIN shop_items si ON si.id = s.active_title_id"
-        "  LEFT JOIN mail_recipients r ON r.message_id = m.id AND r.recipient_id = :me"
-        "                             AND r.delivery = 'delivered' AND r.deleted_at IS NULL"
-        " WHERE m.id = :mid"
-        "   AND (r.recipient_id IS NOT NULL"
-        "        OR (m.sender_id = :me AND m.deleted_by_sender_at IS NULL"
-        "            AND m.created_at > NOW() - make_interval(days => CAST(:ret_days AS integer))))"
-    ), {"mid": mid, "me": me["id"], "ret_days": MAIL_RETENTION_DAYS})).mappings().first()
-    if row is None:
+    # The message, who may read it and its addressees in ONE statement, with
+    # the clock read inside it (_MAIL_CLOCK_CTE, _MAIL_ADDRESSEES_CTE).
+    rows = (await db.execute(text(
+        _MAIL_CLOCK_CTE +
+        " src AS MATERIALIZED ("
+        "  SELECT m.id, m.thread_id, m.in_reply_to, m.kind, m.subject, m.body, m.created_at, m.via,"
+        "         m.sender_id, s.steam_id AS sender_steam_id, s.display_name AS sender_name,"
+        "         CAST(s.id AS text) AS sender_pid, COALESCE(gr.rating, 1500) AS rating,"
+        "         si.name AS title, si.preview_color AS title_color, si.sku AS title_sku,"
+        "         r.read_at"
+        "    FROM mail_messages m CROSS JOIN t"
+        "    JOIN players s ON s.id = m.sender_id"
+        "    LEFT JOIN glicko_ratings gr ON gr.player_id = s.id"
+        "    LEFT JOIN shop_items si ON si.id = s.active_title_id"
+        "    LEFT JOIN mail_recipients r ON r.message_id = m.id AND r.recipient_id = :me"
+        "                               AND r.delivery = 'delivered' AND r.deleted_at IS NULL"
+        "   WHERE m.id = :mid"
+        "     AND (r.recipient_id IS NOT NULL"
+        "          OR (m.sender_id = :me AND m.deleted_by_sender_at IS NULL"
+        "              AND m.created_at > t.now_ - make_interval(days => CAST(:ret_days AS integer))))),"
+        + _MAIL_ADDRESSEES_CTE +
+        " SELECT src.*, a.kind AS addr_kind, a.steam_id AS addr_steam_id, a.display_name AS addr_name"
+        "   FROM src LEFT JOIN a ON a.message_id = src.id AND a.rn <= CAST(:cap AS integer)"
+        "  ORDER BY a.rn"
+    ), {"mid": mid, "me": me["id"], "ret_days": MAIL_RETENTION_DAYS,
+        "cap": MAIL_ADDRESSEES_MAX})).mappings().all()
+    if not rows:
         raise HTTPException(status_code=404, detail="not_found")
+    row = _mail_group_addressees(rows)[0]
     colors = await _mail_sender_colors(db, [row])
-    addr = [] if row["kind"] == "system_broadcast" else (await _mail_addressees(db, [row["id"]])).get(row["id"], [])
+    addr = row["addressees"]
     return {
         "id": str(row["id"]), "thread_id": str(row["thread_id"]),
         # The parent's id also after the janitor has purged the parent: no
@@ -79801,12 +79886,11 @@ async def _mail_retention_sweep(db: AsyncSession) -> tuple[int, int, int, int]:
     is soft-expired, which keeps the sender's addressee list intact until
     the message itself goes); a message is purged once NO delivered envelope
     is still live AND (the sender deleted it OR it is older than
-    MAIL_RETENTION_DAYS) AND it is at least MAIL_PURGE_MIN_AGE_DAYS old.
-    Unread mail is therefore kept: a live unread envelope blocks the purge.
-    The age floor is migration 404's change: the spam check counts the
-    sender's direct messages of the last day (same body) and hour (bulk)
-    from these rows, so a send the sender deleted stays in both counts for
-    their whole window, whatever its copies' delivery. Bounded batches; the
+    MAIL_RETENTION_DAYS). Unread mail is therefore kept: a live unread
+    envelope blocks the purge. What a sender is answered never reads whether
+    the purge has run: the spam check counts send receipts, and the
+    sender's own views read their rows with the clock inside the statement
+    (_MAIL_CLOCK_CTE). Bounded batches; the
     cascade removes the envelopes, moderation_cases.message_id goes NULL and
     the case keeps its snapshot. A reply's in_reply_to keeps the purged
     parent's id: migration 404 dropped the foreign key that set it NULL, so a
@@ -79834,12 +79918,11 @@ async def _mail_retention_sweep(db: AsyncSession) -> tuple[int, int, int, int]:
         "    WHERE NOT EXISTS (SELECT 1 FROM mail_recipients r"
         "                       WHERE r.message_id = m.id AND r.delivery = 'delivered'"
         "                         AND r.deleted_at IS NULL)"
-        "      AND m.created_at < NOW() - make_interval(days => CAST(:min_age_days AS integer))"
         "      AND (m.deleted_by_sender_at IS NOT NULL"
         "           OR m.created_at < NOW() - make_interval(days => CAST(:days AS integer)))"
         "    LIMIT 500)"
         " RETURNING 1"
-    ), {"days": MAIL_RETENTION_DAYS, "min_age_days": MAIL_PURGE_MIN_AGE_DAYS})).fetchall()
+    ), {"days": MAIL_RETENTION_DAYS})).fetchall()
     hits = (await db.execute(text(
         "DELETE FROM mail_censor_hits"
         " WHERE created_at < NOW() - make_interval(days => CAST(:days AS integer))"

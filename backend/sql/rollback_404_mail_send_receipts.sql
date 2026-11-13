@@ -29,7 +29,7 @@
 --
 -- RESERVED KEYS. A message whose receipt the janitor deleted while the
 -- message was still kept carries a reserved idempotency_key (version digit
--- 0), derived from its own id (main._MAIL_RECEIPT_SWEEP_SQL). The file leaves
+-- 0), drawn at random (main._MAIL_RECEIPT_SWEEP_SQL). The file leaves
 -- it: the build without the change then sends a repeat of the message's
 -- original key as a new message, and that key's answer had ended with its
 -- receipt, MAIL_RETENTION_DAYS after the send. That build does not refuse a

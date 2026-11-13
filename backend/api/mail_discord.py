@@ -258,7 +258,8 @@ _RELAY_THREADS_SQL = (
 # different mail than the one the recent-window branch would pick today --
 # naming the latter told the player they had answered a mail they had not.
 _REPLIED_TO_SQL = (
-    "SELECT m.id, m.subject, p.display_name AS sender_name,"
+    "WITH t AS MATERIALIZED (SELECT clock_timestamp() AS now_)"
+    " SELECT m.id, m.subject, p.display_name AS sender_name,"
     # The code of the thread that was ACTUALLY answered, so the bot's
     # confirmation carries a marker line of its own. Replying to the last
     # message in a DM conversation is what people do, and without this every
@@ -267,7 +268,7 @@ _REPLIED_TO_SQL = (
     "         WHERE d.mail_id = m.id AND d.steam_id = :sid"
     "           AND d.relay_code IS NOT NULL AND NOT d.undeliverable"
     "         ORDER BY d.id DESC LIMIT 1) AS relay_code"
-    "  FROM mail_messages rep"
+    "  FROM mail_messages rep CROSS JOIN t"
     "  JOIN mail_messages m ON m.id = rep.in_reply_to"
     "  JOIN players p ON p.id = m.sender_id"
     " WHERE rep.id = CAST(:rid AS uuid)"
@@ -275,16 +276,19 @@ _REPLIED_TO_SQL = (
     # the reply while it is in their Sent -- not deleted by them, inside
     # the sender's clock -- and the thread while they could open it, through
     # a live delivered copy or as its sender inside the same clock. The
-    # janitor cannot purge a row these admit, so whether a replay names its
-    # thread follows the replier's own deletes and the clock, never whether
-    # an addressee's copy was delivered or suppressed.
+    # clock is read inside this statement, once, after its snapshot and after
+    # every lock the reply core waited for (`t`; main._MAIL_CLOCK_CTE says
+    # why): a row these admit cannot have been purged in this snapshot, and a
+    # row that was is past the clock and refused too, so whether a replay
+    # names its thread follows the replier's own deletes and the clock, never
+    # whether an addressee's copy was delivered or suppressed.
     "   AND rep.sender_id = CAST(:pid AS uuid) AND rep.deleted_by_sender_at IS NULL"
-    "   AND rep.created_at > NOW() - make_interval(days => CAST(:ret_days AS integer))"
+    "   AND rep.created_at > t.now_ - make_interval(days => CAST(:ret_days AS integer))"
     "   AND (EXISTS (SELECT 1 FROM mail_recipients r"
     "                 WHERE r.message_id = m.id AND r.recipient_id = CAST(:pid AS uuid)"
     "                   AND r.delivery = 'delivered' AND r.deleted_at IS NULL)"
     "        OR (m.sender_id = CAST(:pid AS uuid) AND m.deleted_by_sender_at IS NULL"
-    "            AND m.created_at > NOW() - make_interval(days => CAST(:ret_days AS integer))))")
+    "            AND m.created_at > t.now_ - make_interval(days => CAST(:ret_days AS integer))))")
 
 # The idempotency namespace, and the derivation as a function rather than
 # an expression buried in the route: a structural pin could see a uuid5

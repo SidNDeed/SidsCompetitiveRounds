@@ -17,14 +17,22 @@
 --                                  under (a row its key's next message
 --                                  superseded holds a reserved key, see WHY
 --                                  THE TRIGGER): the message
---                                  id it answered with, its kind, a
---                                  broadcast's recipient count, created_at,
+--                                  id it answered with, its kind, the number
+--                                  of envelopes the send wrote (recipients: a
+--                                  broadcast's count, and a direct message's
+--                                  on the api's own rows), created_at,
 --                                  request_fp, the SHA-256 digest of the
 --                                  request (main._mail_request_fp; NULL on the
---                                  rows this file and its trigger write), and
+--                                  rows this file and its trigger write),
 --                                  message_fp, the SHA-256 digest of the
 --                                  message's text as stored (MESSAGE_FP below;
---                                  on every row). No foreign keys: a receipt
+--                                  on every row), and body_key, the digest of
+--                                  a direct message's body as the spam check
+--                                  compares bodies (main._mail_body_key; NULL
+--                                  on the rows this file and its trigger
+--                                  write). The spam check counts a sender's
+--                                  direct sends from these rows
+--                                  (main._mail_spam_check). No foreign keys: a receipt
 --                                  outlives the purge of its message. The
 --                                  janitor deletes it MAIL_RETENTION_DAYS
 --                                  after the send, and account deletion
@@ -49,7 +57,7 @@
 -- The new build answers from the receipt alone, and a key with no receipt is
 -- sent as a new message; so when the janitor deletes a receipt whose message
 -- is still kept (an unread delivered copy keeps it), the same statement moves
--- that message to a reserved key derived from its own id
+-- that message to a reserved key drawn at random
 -- (main._MAIL_RECEIPT_SWEEP_SQL), and the key can be sent again without
 -- meeting the constraint.
 --
@@ -61,7 +69,15 @@
 -- broadcast has no caller in this repository; RFC 9562 lists version 0 as
 -- unused, and the nil UUID, its one form with that digit, is refused too.
 -- The kept message the sweep moves off its key and the receipt the trigger
--- supersedes take keys from that space, so no request names either.
+-- or the backfill supersedes take keys from that space, each DRAWN AT
+-- RANDOM: gen_random_uuid() (122 random bits) with the version digit then
+-- set to 0. The previous build refuses no key, so a request it serves can
+-- store a reserved one; but a drawn key is derived from nothing a sender
+-- knows and no route returns a key, so no stored key and no request names
+-- one in advance. A draw that met a key already stored (about 2^-122 per
+-- stored key of that sender) fails its statement: the send rolls back, the
+-- file aborts with nothing changed, or the janitor's sweep runs again an
+-- hour later.
 --
 -- MESSAGE_FP. A receipt this file or its trigger writes has no request
 -- digest; a repeat of its key is compared on message_fp instead. It is
@@ -85,8 +101,9 @@
 -- writes a receipt with no request digest (recipients = NEW.recipient_count).
 -- If the key already has a receipt for ANOTHER message -- the previous build
 -- sends a key again once the janitor has purged the key's first message --
--- that receipt stays the record of its own send under a reserved key derived
--- from both message ids, and this message gets the key's receipt, which is
+-- that receipt stays the record of its own send under a reserved key drawn
+-- at random, with its kind, time and digests, and this message gets the
+-- key's receipt, which is
 -- what the previous build answered with. So a repeat of the key answers the
 -- newer message, while the sender's rate window, which counts receipts
 -- (main._mail_rate_or_raise), still counts the first send until its receipt
@@ -100,19 +117,25 @@
 -- BACKFILL. When this run creates the table or the trigger, every message
 -- row present gets a receipt with no request digest: created_at and
 -- message_fp are the message's, recipients its recipient_count (NULL on a
--- direct message). A broadcast with no count (written before migration
+-- direct message), body_key NULL. A broadcast with no count (written before migration
 -- 300 added the column) aborts the file instead of being backfilled:
 -- the previous build answers a repeat of such a row's key with a count
 -- of its envelopes taken at that moment, which no stored count stays
 -- equal to once a recipient's account goes. The primary held no
--- broadcast row at all on 12 Nov 2026. The backfill runs in the
+-- broadcast row at all on 12 Nov 2026. A key whose receipt names ANOTHER
+-- message -- a receipt an earlier run wrote, kept after its message's
+-- purge, while the trigger was absent and the previous build sent the key
+-- again -- is superseded first, as the trigger supersedes it: that receipt
+-- stays the record of its own send under a reserved key drawn at random,
+-- and the message that holds the key gets the key's receipt, which is what
+-- the previous build answers a repeat of the key with. The backfill runs in the
 -- trigger's block right after the trigger's guard, under SHARE ROW
 -- EXCLUSIVE on mail_messages (CREATE TRIGGER's own lock, or a LOCK
 -- TABLE when this run created the table under a trigger already
 -- there), which holds every concurrent write of the table until
 -- COMMIT, so no message commits between the trigger and the backfill;
--- the block then counts the message rows left without a receipt and
--- aborts the file unless there are none. A run that creates neither,
+-- the block then counts the message rows whose key has no receipt naming
+-- that message and aborts the file unless there are none. A run that creates neither,
 -- as every re-run, backfills nothing: by then the janitor has deleted
 -- receipts that a backfill would bring back.
 --
@@ -157,9 +180,9 @@
 -- definition this file states, because a guard alone accepts any object
 -- that has the right name. The table: an ordinary permanent table, not a
 -- typed one, with no row security, no rules, no inheritance and no trigger
--- of its own; its eight columns (type with no modifier, NOT NULL, the
+-- of its own; its nine columns (type with no modifier, NOT NULL, the
 -- default expression, no identity, not generated, the type's own
--- collation); its primary key and its four named checks with their
+-- collation); its primary key and its five named checks with their
 -- expressions, and no other constraint; exactly two indexes, the primary
 -- key's (btree (sender_id, idempotency_key)) and
 -- ix_mail_send_receipts_created (btree (created_at), not unique), both
@@ -195,6 +218,7 @@ BEGIN
       message_id       UUID        NOT NULL,
       recipients       INTEGER     NULL,
       created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      body_key         BYTEA       NULL,
       PRIMARY KEY (sender_id, idempotency_key),
       CONSTRAINT ck_mail_send_receipts_kind
         CHECK (kind IN ('direct', 'system_broadcast')),
@@ -203,7 +227,9 @@ BEGIN
       CONSTRAINT ck_mail_send_receipts_message_fp
         CHECK (octet_length(message_fp) = 32),
       CONSTRAINT ck_mail_send_receipts_recipients
-        CHECK (recipients IS NULL OR recipients >= 0)
+        CHECK (recipients IS NULL OR recipients >= 0),
+      CONSTRAINT ck_mail_send_receipts_body_key
+        CHECK (body_key IS NULL OR octet_length(body_key) = 32)
     );
     PERFORM set_config('m404.backfill', 'on', true);
   END IF;
@@ -223,9 +249,8 @@ END $m404idx$;
 -- the backfill below; tests/test_mail_receipts_pg.py compares both with
 -- main._mail_message_fp. Its UPDATE supersedes a receipt of this key for
 -- another message (WHY THE TRIGGER): that row keeps its own send's record
--- under a reserved key (version digit 0) derived from both message ids, so
--- each supersession gives a key of its own; the key's receipt then becomes
--- this message's.
+-- under a reserved key (version digit 0) drawn at random (RESERVED KEYS);
+-- the key's receipt then becomes this message's.
 CREATE OR REPLACE FUNCTION mail_send_receipt_sync() RETURNS trigger
 LANGUAGE plpgsql
 SET search_path FROM CURRENT
@@ -233,8 +258,7 @@ AS $m404fn$
 BEGIN
   IF TG_OP = 'INSERT' THEN
     UPDATE mail_send_receipts
-       SET idempotency_key = CAST(overlay(md5('mail-receipt-superseded:' || CAST(message_id AS text)
-                                              || ':' || CAST(NEW.id AS text))
+       SET idempotency_key = CAST(overlay(replace(CAST(gen_random_uuid() AS text), '-', '')
                                           PLACING '0' FROM 13 FOR 1) AS uuid)
      WHERE sender_id = NEW.sender_id
        AND idempotency_key = NEW.idempotency_key
@@ -294,6 +318,17 @@ BEGIN
     IF uncounted <> 0 THEN
       RAISE EXCEPTION '404: % broadcast row(s) have no recipient_count (written before migration 300); this file backfills no such row', uncounted;
     END IF;
+    -- A key whose receipt names another message: that receipt keeps its own
+    -- send's record under a reserved key drawn at random, as the trigger's
+    -- UPDATE does, and the message holding the key gets the key's receipt.
+    UPDATE mail_send_receipts s
+       SET idempotency_key = CAST(overlay(replace(CAST(gen_random_uuid() AS text), '-', '')
+                                          PLACING '0' FROM 13 FOR 1) AS uuid)
+      FROM mail_messages m
+     WHERE m.kind IN ('direct', 'system_broadcast')
+       AND s.sender_id = m.sender_id
+       AND s.idempotency_key = m.idempotency_key
+       AND s.message_id <> m.id;
     INSERT INTO mail_send_receipts
            (sender_id, idempotency_key, kind, request_fp, message_fp, message_id, recipients,
             created_at)
@@ -315,9 +350,10 @@ BEGIN
      WHERE m.kind IN ('direct', 'system_broadcast')
        AND NOT EXISTS (SELECT 1 FROM mail_send_receipts s
                         WHERE s.sender_id = m.sender_id
-                          AND s.idempotency_key = m.idempotency_key);
+                          AND s.idempotency_key = m.idempotency_key
+                          AND s.message_id = m.id);
     IF missing <> 0 THEN
-      RAISE EXCEPTION '404: % message row(s) have no send receipt after the backfill', missing;
+      RAISE EXCEPTION '404: % message row(s) have no send receipt naming them after the backfill', missing;
     END IF;
   END IF;
 END $m404trg$;
@@ -378,8 +414,8 @@ BEGIN
      AND c.relname = 'mail_send_receipts'
      AND a.attnum > 0
      AND NOT a.attisdropped;
-  IF n <> 8 THEN
-    RAISE EXCEPTION '404: mail_send_receipts has % columns, this file states 8', n;
+  IF n <> 9 THEN
+    RAISE EXCEPTION '404: mail_send_receipts has % columns, this file states 9', n;
   END IF;
   -- Each column whole: its type with no modifier, NOT NULL, its default
   -- expression as PostgreSQL prints it (pg_get_expr), no identity, not
@@ -392,7 +428,8 @@ BEGIN
                  ('message_fp', 'bytea'::regtype, true, NULL),
                  ('message_id', 'uuid'::regtype, true, NULL),
                  ('recipients', 'integer'::regtype, false, NULL),
-                 ('created_at', 'timestamptz'::regtype, true, 'now()')) AS w(col, typ, notnull_, def)
+                 ('created_at', 'timestamptz'::regtype, true, 'now()'),
+                 ('body_key', 'bytea'::regtype, false, NULL)) AS w(col, typ, notnull_, def)
     JOIN pg_attribute a ON a.attname = w.col AND NOT a.attisdropped
     JOIN pg_class c ON c.oid = a.attrelid
     JOIN pg_namespace ns ON ns.oid = c.relnamespace
@@ -407,7 +444,7 @@ BEGIN
      AND a.attgenerated = ''
      AND a.attcollation = t.typcollation
      AND pg_get_expr(d.adbin, d.adrelid) IS NOT DISTINCT FROM w.def;
-  IF n <> 8 THEN
+  IF n <> 9 THEN
     RAISE EXCEPTION '404: mail_send_receipts columns differ from this file (found: %)',
       (SELECT string_agg(format('%s %s%s%s%s%s%s', a.attname, format_type(a.atttypid, a.atttypmod),
                                 CASE WHEN a.attnotnull THEN ' NOT NULL' ELSE '' END,
@@ -428,7 +465,7 @@ BEGIN
           AND a.attnum > 0
           AND NOT a.attisdropped);
   END IF;
-  -- The key and the four checks by their definitions as PostgreSQL prints
+  -- The key and the five checks by their definitions as PostgreSQL prints
   -- them (pg_get_constraintdef, which also prints DEFERRABLE and NOT VALID),
   -- and no other constraint (NOT NULL is checked with the columns above).
   SELECT count(*) FILTER (
@@ -443,7 +480,9 @@ BEGIN
                         ('ck_mail_send_receipts_message_fp',
                          'CHECK ((octet_length(message_fp) = 32))'),
                         ('ck_mail_send_receipts_recipients',
-                         'CHECK (((recipients IS NULL) OR (recipients >= 0)))')))),
+                         'CHECK (((recipients IS NULL) OR (recipients >= 0)))'),
+                        ('ck_mail_send_receipts_body_key',
+                         'CHECK (((body_key IS NULL) OR (octet_length(body_key) = 32)))')))),
          count(*) FILTER (WHERE k.contype <> 'n')
     INTO n, total
     FROM pg_constraint k
@@ -451,7 +490,7 @@ BEGIN
     JOIN pg_namespace ns ON ns.oid = c.relnamespace
    WHERE ns.nspname = current_schema()
      AND c.relname = 'mail_send_receipts';
-  IF n <> 5 OR total <> 5 THEN
+  IF n <> 6 OR total <> 6 THEN
     RAISE EXCEPTION '404: mail_send_receipts key or checks differ from this file (found: %)',
       (SELECT string_agg(format('%s %s', k.conname, pg_get_constraintdef(k.oid)), '; ' ORDER BY k.conname)
          FROM pg_constraint k

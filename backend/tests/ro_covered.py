@@ -985,13 +985,14 @@ COMPILED_LANGUAGES = ("c", "internal")
 # the earlier bodies gives abe12e04f4331d36a23d366f3e947fbc at bc65d516,
 # the md5 the census printed for it at 25fb3696, and
 # f281402a3dc72dac8fcd58a0472f941a at 3fe2cf5b, the md5 the census passed
-# with there.
+# with there, and 46a1730c3d1cc6720884e63e37cccde2 at 34cb136b, whose
+# superseded key was still derived from the two message ids.
 PROC_SIDES = {
     "<case>.mail_inbox_rev_bump() f": (
         "0b3bc33098b25519ea53ceb4ed4ac618", "neither",
         "SET is the ON CONFLICT DO UPDATE SET clause (300_mail_inbox_rev.sql)"),
     "<case>.mail_send_receipt_sync() f": (
-        "46a1730c3d1cc6720884e63e37cccde2", "neither",
+        "a6a2f7efe07c21da0942562f9e36a08f", "neither",
         "SET is the UPDATE ... SET clause of each arm; the SET attribute"
         " search_path FROM CURRENT holds for the call only"
         " (404_mail_send_receipts.sql)"),

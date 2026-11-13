@@ -30,8 +30,9 @@ API_DIR = pathlib.Path(__file__).resolve().parents[1] / "api"
 # 377 (admin evidence report order indexes) is held to the same header rules:
 # a deploy-order line, and catalog guards stated as such. 401 (the
 # contribution match_id column and indexes, B10-R3) likewise. 404 (mail send
-# receipts: a table, its index and trigger, and one statement outside every
-# guard, the trigger's CREATE OR REPLACE FUNCTION) likewise.
+# receipts: a table, its index and trigger, and two statements outside every
+# guard, the backfill cue's SELECT set_config() and the trigger's CREATE OR
+# REPLACE FUNCTION) likewise.
 OWNED = ("331_animal_title_ladders.sql",
          "332_pc_edition_schedule.sql",
          "333_pc_card_themes.sql",

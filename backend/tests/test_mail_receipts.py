@@ -23,13 +23,22 @@ What each endpoint answers after the change:
   suppressed copy of the reply.
 - Sent, and the sender's branch of the detail read and of the reply's
   original read, show a message until MAIL_RETENTION_DAYS after it was
-  sent (or until its sender deletes it), whatever its delivery.
+  sent (or until its sender deletes it), whatever its delivery. Each reads
+  the message and its envelopes (the reply-all list, the addressees) in ONE
+  statement, with the clock read inside that statement (clock_timestamp()
+  in a MATERIALIZED CTE), so its answer is the same whether or not the
+  janitor's purge has taken the message.
+- The spam check counts the sender's send receipts (same body by the
+  receipt's body key, bulk by its envelope count), so a count is the same
+  whatever the copies' delivery and whether the purge has run. The purge
+  has no age floor.
 - DELETE /mail/{id} answers 200 {"status": "deleted", "id"} for every
   well-formed id.
 - The janitor deletes a receipt MAIL_RETENTION_DAYS after its send,
   whatever the state of the message it names, and moves a message still
-  kept to a reserved key, so the key can be sent again under 297's UNIQUE
-  (sender_id, idempotency_key), which migration 404 keeps.
+  kept to a reserved key drawn at random, so the key can be sent again
+  under 297's UNIQUE (sender_id, idempotency_key), which migration 404
+  keeps.
 - Every route that takes an idempotency key refuses a reserved one (version
   digit 0), 400 idempotency_key_invalid, before the sender lock and before
   any mail table is read (main._mail_parse_key).
@@ -55,15 +64,22 @@ from fastapi import HTTPException
 from sqlalchemy import text
 from sqlalchemy.sql.elements import TextClause
 
+import mail_discord
 import main
 import test_mail as tm
-from test_mail import A_SID, ADMIN_SID, B_SID, C_SID, D_SID, NOW, _SENDER_CLOCK
+from test_mail import A_SID, ADMIN_SID, B_SID, C_SID, D_SID, NOW, _CLOCK_CTE, _SENDER_CLOCK
 
 REUSED = (409, "idempotency_key_reused")
 NOT_FOUND = (404, "not_found")
 OLD = NOW - timedelta(days=main.MAIL_RETENTION_DAYS + 1)
 YOUNG = NOW - timedelta(days=main.MAIL_RETENTION_DAYS - 1)
-_REPLY_ALL_READ = "SELECT recipient_id, kind, delivery FROM mail_recipients WHERE message_id = :mid"
+# The reply core's join of the original's envelopes (migration 404's change)
+_REPLY_ALL_JOIN = "ON e.message_id = o.id AND CAST(:reply_all AS boolean) AND o.kind <> 'system_broadcast'"
+# Anchors of the three sender reads, present in the one-statement shape and
+# in the previous build's first statement alike
+_ORIG_READ = "SELECT m.id, m.sender_id, m.kind, m.thread_id, m.subject"
+_SENT_READ = "WHERE m.sender_id = :me AND m.deleted_by_sender_at IS NULL"
+_DETAIL_READ = "LEFT JOIN mail_recipients r ON r.message_id = m.id AND r.recipient_id = :me"
 _COMPARE = "if stored is not None and bytes(stored) != request_fp:"
 _LEGACY_COMPARE = ('if stored is None and (message_fp is None or bytes(prior["message_fp"])'
                    ' != message_fp):')
@@ -74,7 +90,8 @@ _REPLY_MFP = '_mail_request_message_fp("reply", subject="", body=body)'
 # replace one on the module.
 _REAL = {name: getattr(main, name) for name in (
     "_mail_prior_send", "_mail_reply_core", "mail_send", "admin_mail_broadcast", "mail_delete",
-    "_mail_write_receipt", "_mail_request_fp", "_mail_request_message_fp")}
+    "_mail_write_receipt", "_mail_request_fp", "_mail_request_message_fp",
+    "_mail_spam_check", "_mail_finish_send", "mail_sent", "mail_detail")}
 _REAL_SWEEP = main._MAIL_RECEIPT_SWEEP_SQL
 
 
@@ -90,10 +107,17 @@ def _key():
 
 
 def _reserved(seed):
-    """A reserved key: the md5 of `seed` with its version digit (the 13th
-    hex digit) set to 0, as the janitor's sweep and migration 404's trigger
-    derive one (main._mail_parse_key)."""
+    """A key in the reserved space (version digit, the 13th hex digit, 0;
+    main._mail_parse_key): the md5 of `seed` with that digit set to 0, the
+    value the sweep and the trigger DERIVED before migration 404's change
+    drew them at random."""
     h = hashlib.md5(seed.encode("ascii")).hexdigest()
+    return UUID(h[:12] + "0" + h[13:])
+
+
+def _drawn_reserved():
+    """A reserved key as the sweep and the trigger now draw one."""
+    h = uuid.uuid4().hex
     return UUID(h[:12] + "0" + h[13:])
 
 
@@ -190,6 +214,50 @@ def _recompiled(name, old, new):
     ns = dict(vars(main))
     exec(compile("".join(lines[start:]), f"<mutant of {name}>", "exec"), ns)
     return ns[name]
+
+
+def _spliced(name, cuts, extra=None):
+    """Mutant: main.<name> recompiled from its own source with each
+    (start, end, new) cut applied in turn -- the text from `start` through
+    `end` (each found exactly once) replaced by `new` -- in a copy of main's
+    namespace updated with `extra`. Route decorators are dropped."""
+    src = textwrap.dedent(inspect.getsource(_REAL[name]))
+    for start, end, new in cuts:
+        assert src.count(start) == 1, f"cut start occurs {src.count(start)} times in {name}: {start!r}"
+        assert src.count(end) == 1, f"cut end occurs {src.count(end)} times in {name}: {end!r}"
+        i = src.index(start)
+        j = src.index(end, i) + len(end)
+        src = src[:i] + new + src[j:]
+    lines = src.splitlines(keepends=True)
+    first = next(i for i, ln in enumerate(lines) if ln.startswith(("def ", "async def ")))
+    ns = dict(vars(main))
+    ns.update(extra or {})
+    exec(compile("".join(lines[first:]), f"<mutant of {name}>", "exec"), ns)
+    return ns[name]
+
+
+def _after_sql(db, anchor, action):
+    """Runs `action(db)` once, right after the first statement containing
+    `anchor` has been answered: a commit (the janitor's purge) landing
+    between that statement and the request's next one. Returns the
+    statements it followed, so a test can prove it ran."""
+    real, hits = db.execute, []
+
+    async def execute(statement, params=None):
+        res = await real(statement, params)
+        if not hits and anchor in str(statement):
+            hits.append(str(statement))
+            action(db)
+        return res
+    db.execute = execute
+    return hits
+
+
+def _mail_reads(db):
+    """The statements so far that read mail_messages or mail_recipients and
+    write nothing."""
+    return [s for s in db.statements if ("mail_messages" in s or "mail_recipients" in s)
+            and not any(w in s for w in ("INSERT INTO", "UPDATE ", "DELETE FROM"))]
 
 
 async def _no_receipt(db, **kw):
@@ -335,8 +403,8 @@ def test_a_receipt_without_a_request_digest_answers_on_the_stored_text(monkeypat
 def test_a_send_replays_from_its_receipt_after_the_message_is_purged():
     """B's copy is suppressed, so no delivered copy keeps the row. The test
     removes the row directly (_purge): the state the janitor's purge reaches
-    once the sender has deleted the message and its age floor has passed. The
-    retry's answer is the first one."""
+    once the sender has deleted the message. The retry's answer is the first
+    one."""
     def run(drop_receipt):
         db, ids = tm._world()
         db.players[ids[B_SID]]["mail_from"] = "nobody"
@@ -408,7 +476,7 @@ def _reply_all_world(suppress_d, mutate=None):
 
 
 def _delivered_only(db):
-    return _rewrite_sql(db, _REPLY_ALL_READ, _REPLY_ALL_READ + " AND delivery = 'delivered'")
+    return _rewrite_sql(db, _REPLY_ALL_JOIN, _REPLY_ALL_JOIN + " AND e.delivery = 'delivered'")
 
 
 def test_reply_all_answers_the_replier_the_same_whatever_the_delivery():
@@ -579,23 +647,22 @@ def test_delete_answers_the_same_for_every_well_formed_id():
 _RATE_FROM = "  FROM mail_send_receipts WHERE sender_id = :sid AND kind = 'direct'"
 
 
-def _rate_with_a_row_gone(gone, mutant=False):
-    """Nine sends from A to B 30 s ago; A deletes the first, whose copy to B
-    was suppressed, and the janitor sweeps, which keeps a row that young
-    (the age floor). With `gone` the row and its envelopes are then removed
-    as the purge removes them, standing for any way the row could go; then
-    A sends twice. The tenth send fits the minute's window of 10 and the
-    eleventh does not, either way: the window counts the send's receipt."""
+def _rate_after_a_purge(delete, mutant=False):
+    """Nine sends from A to B 30 s ago, the first one's copy suppressed.
+    With `delete` A deletes that first send, and the janitor's sweep purges
+    its row (no delivered copy keeps it; the purge has no age floor); then A
+    sends twice. The tenth send fits the minute's window of 10 and the
+    eleventh does not, either way: the window counts the send's receipt,
+    which the purge leaves."""
     db, ids = tm._world()
     mids = [db.seed_message(ids[A_SID], [(ids[B_SID], "to", "suppressed" if i == 0 else "delivered")],
                             created_at=NOW - timedelta(seconds=30)) for i in range(9)]
     hits = _rewrite_sql(db, _RATE_FROM, _RATE_FROM.replace("mail_send_receipts", "mail_messages")) \
         if mutant else None
-    assert tm._run(main.mail_delete(str(mids[0]), tm._req("tokA"), db))["status"] == "deleted"
+    if delete:
+        assert tm._run(main.mail_delete(str(mids[0]), tm._req("tokA"), db))["status"] == "deleted"
     tm._run(main._mail_retention_sweep(db))
     kept = mids[0] in db.messages
-    if gone:
-        _purge(db, mids[0])
     out = [_outcome(tm._send, db, [B_SID]), _outcome(tm._send, db, [B_SID])]
     assert hits is None or hits, "the mutant did not reach the rate query"
     return kept, [o if isinstance(o, tuple) else "accepted" for o in out]
@@ -603,66 +670,115 @@ def _rate_with_a_row_gone(gone, mutant=False):
 
 def test_the_rate_window_counts_a_send_whose_row_is_gone():
     limited = (429, {"error": "rate_limited", "retry_after": 30})
-    assert _rate_with_a_row_gone(False) == (True, ["accepted", limited])
-    assert _rate_with_a_row_gone(True) == (True, ["accepted", limited])
-    # mutant: the window counted on message rows -> the removed row frees a
+    assert _rate_after_a_purge(False) == (True, ["accepted", limited])
+    assert _rate_after_a_purge(True) == (False, ["accepted", limited])
+    # mutant: the window counted on message rows -> the purged row frees a
     # place, so A's eleventh send in the minute is accepted
-    assert _rate_with_a_row_gone(True, mutant=True) == (True, ["accepted", "accepted"])
-    assert _rate_with_a_row_gone(False, mutant=True) == (True, ["accepted", limited])
+    assert _rate_after_a_purge(True, mutant=True) == (False, ["accepted", "accepted"])
+    assert _rate_after_a_purge(False, mutant=True) == (True, ["accepted", limited])
 
 
-# ── the janitor's age floor and the spam check ────────────────────────────
+# ── the spam check counts receipts ────────────────────────────────────────
 
-_PURGE_FLOOR = "      AND m.created_at < NOW() - make_interval(days => CAST(:min_age_days AS integer))"
+# The previous build's spam reads, as a cut of main._mail_spam_check: the
+# sender's day of bodies from mail_messages, compared in Python, and bulk
+# from the envelopes in mail_recipients.
+_OLD_SPAM_READ = '''
+    key = _mail_norm_body(body)
+    bodies = (await db.execute(text(
+        "SELECT body FROM mail_messages"
+        " WHERE sender_id = :sid AND kind = 'direct'"
+        "   AND created_at > NOW() - make_interval(days => 1)"
+    ), {"sid": sender["id"]})).scalars().all()
+    same_body = sum(1 for b in bodies if _mail_norm_body(b) == key)
+    row = (await db.execute(text(
+        "SELECT"
+        "  (SELECT COUNT(*) FROM ("
+        "     SELECT m.id FROM mail_messages m"
+        "       JOIN mail_recipients r ON r.message_id = m.id"
+        "      WHERE m.sender_id = :sid AND m.kind = 'direct'"
+        "        AND m.created_at > NOW() - make_interval(hours => 1)"
+        "      GROUP BY m.id"
+        "     HAVING COUNT(DISTINCT r.recipient_id) > CAST(:bulk_n AS integer)) x) AS bulk_hour,"
+        "  (SELECT COUNT(*) FROM mail_censor_hits"
+        "    WHERE sender_id = :sid AND created_at > NOW() - make_interval(days => 1)) AS censor_hits"
+    ), {"sid": sender["id"], "bulk_n": MAIL_SPAM_BULK_RECIPIENTS})).mappings().first()
+'''[1:]
+_OLD_SPAM_CUT = ('    row = (await db.execute(text(\n',
+                 '    same_body = int((row or {}).get("same_body") or 0)\n', _OLD_SPAM_READ)
 
 
-def _spam_after_deletes(delivery, mutant=False):
-    """The spam check's same-body count over a day: four sends of one body
-    from A to B two hours ago, which A deleted, B's copies `delivery`
-    (unread); the janitor sweeps; then A sends the same body to C, the
-    fifth in the day. Returns the rows the sweep left and each case's
-    same-body count."""
+def _spam_after_a_purge(purged, before_fifth=None):
+    """A sends one body to B four times (this build: each receipt carries
+    the body key) and deletes the four; three more sends of that body two
+    hours ago were made by the previous build (migration 404's backfill
+    wrote their receipts, with no body key), A deleted those too. B's copies
+    are suppressed (`purged`: no delivered copy keeps the rows and the
+    janitor's sweep purges them) or delivered and unread (the sweep keeps
+    them). Then A sends the body to C. Returns the rows the sweep left, the
+    receipts with no body key, and each case's same-body count."""
     db, ids = tm._world()
-    for _ in range(4):
+    if purged:
+        db.players[ids[B_SID]]["mail_from"] = "nobody"
+    delivery = "suppressed" if purged else "delivered"
+    for _ in range(3):
         db.seed_message(ids[A_SID], [(ids[B_SID], "to", delivery)], body="Buy gold now",
                         created_at=NOW - timedelta(hours=2), deleted_by_sender_at=NOW - timedelta(hours=1))
-    hits = _rewrite_sql(db, _PURGE_FLOOR) if mutant else None
+    for _ in range(4):
+        sent = tm._send(db, [B_SID], body="Buy  GOLD now")
+        assert tm._run(main.mail_delete(sent["id"], tm._req("tokA"), db))["status"] == "deleted"
+    assert not db.cases
     tm._run(main._mail_retention_sweep(db))
-    left = len(db.messages)
+    left = len(_directs(db, ids[A_SID]))
+    keyless = sum(1 for r in db.receipts.values() if r["kind"] == "direct" and r["body_key"] is None)
+    if before_fifth is not None:
+        before_fifth()
     tm._send(db, [C_SID], body="buy gold now")
-    assert hits is None or hits, "the mutant did not reach the purge"
-    return left, [c["evidence"]["same_body_day"] for c in db.cases.values()]
+    return left, keyless, [c["evidence"]["same_body_day"] for c in db.cases.values()]
 
 
-def test_the_spam_check_counts_a_deleted_send_whatever_its_delivery():
-    assert inspect.getsource(main._mail_retention_sweep).count(_PURGE_FLOOR) == 1
-    assert _spam_after_deletes("suppressed") == (4, [5])
-    assert _spam_after_deletes("delivered") == (4, [5])     # B's unread copies keep the rows anyway
-    # mutant: the purge without its age floor -> the deleted sends whose
-    # copies were suppressed leave the day's count, and no case opens
-    assert _spam_after_deletes("suppressed", mutant=True) == (0, [])
-    assert _spam_after_deletes("delivered", mutant=True) == (4, [5])
+def test_the_same_body_count_is_the_same_whether_the_purge_ran(monkeypatch):
+    # the fifth send of the body by this build opens the case in both
+    # states; the previous build's three sends count in neither
+    assert _spam_after_a_purge(True) == (0, 3, [5])
+    assert _spam_after_a_purge(False) == (7, 3, [5])
+    # mutant: the count read off mail_messages bodies (the shape before
+    # migration 404's change) -> the purge decides the count: one body left
+    # and no case, or every kept body and a case of 8
+    old = _spliced("_mail_spam_check", [_OLD_SPAM_CUT])
+    install = lambda: monkeypatch.setattr(main, "_mail_spam_check", old)  # noqa: E731
+    assert _spam_after_a_purge(True, install) == (0, 3, [])
+    monkeypatch.setattr(main, "_mail_spam_check", _REAL["_mail_spam_check"])
+    assert _spam_after_a_purge(False, install) == (7, 3, [8])
 
 
-_SPANS = {"days": 86400, "hours": 3600, "mins": 60, "secs": 1}
+def _bulk_sends(delivery, before=None):
+    """A (an admin: no recipient cap) sends three messages within the hour,
+    each to MAIL_SPAM_BULK_RECIPIENTS + 1 players whose copies are all
+    `delivery`. Returns the copies' deliveries and each case's bulk count."""
+    db, ids = tm._world()
+    db.admins.add(A_SID)
+    many = [db.add_player(f"765611980000003{i:02d}",
+                          mail_from="everyone" if delivery == "delivered" else "nobody")
+            for i in range(main.MAIL_SPAM_BULK_RECIPIENTS + 1)]
+    if before is not None:
+        before()
+    for i in range(3):
+        tm._send(db, [db.players[r]["steam_id"] for r in many], body=f"Notice number {i}.")
+    copies = {e["delivery"] for (_m, r), e in db.recipients.items() if r in set(many)}
+    return copies, [c["evidence"]["bulk_hour"] for c in db.cases.values()]
 
 
-def _longest_window(src):
-    """The longest make_interval(...) literal in `src`, in seconds; every
-    make_interval in it must be a literal this reads."""
-    found = re.findall(r"make_interval\((days|hours|mins|secs) => (\d+)\)", src)
-    assert found and len(found) == src.count("make_interval("), "a window this check cannot read"
-    return max(_SPANS[unit] * int(n) for unit, n in found)
-
-
-def test_the_age_floor_covers_every_window_the_spam_check_reads():
-    floor = main.MAIL_PURGE_MIN_AGE_DAYS * 86400
-    src = inspect.getsource(main._mail_spam_check)
-    assert _longest_window(src) <= floor
-    # negative controls: a longer window, and one this check cannot read
-    assert _longest_window(src.replace("make_interval(days => 1)", "make_interval(days => 2)")) > floor
-    with pytest.raises(AssertionError, match="a window this check cannot read"):
-        _longest_window(src.replace("make_interval(hours => 1)", "make_interval(hours => CAST(:h AS integer))"))
+def test_bulk_counts_each_sends_envelope_count_whatever_the_delivery(monkeypatch):
+    assert _bulk_sends("delivered") == ({"delivered"}, [3])
+    assert _bulk_sends("suppressed") == ({"suppressed"}, [3])
+    # the receipt records the fan-out's own count
+    assert "recipients=int(fanned.rowcount)" in inspect.getsource(main._mail_finish_send)
+    # mutant: the receipt written with no envelope count -> no send is bulk
+    old = _recompiled("_mail_finish_send", "recipients=int(fanned.rowcount)", "recipients=None")
+    install = lambda: monkeypatch.setattr(main, "_mail_finish_send", old)  # noqa: E731
+    assert _bulk_sends("delivered", install) == ({"delivered"}, [])
+    assert _bulk_sends("suppressed", install) == ({"suppressed"}, [])
 
 
 # ── the admin broadcast ───────────────────────────────────────────────────
@@ -817,24 +933,26 @@ def test_a_receipt_goes_after_retention_whatever_its_message():
     assert hits and n == 0 and left == {"old_delivered", "old_suppressed", "young_delivered", "young_suppressed"}
 
 
-_RETIRE = re.compile(r"CAST\(overlay\(md5\('mail-key-retired:' \|\| CAST\(m\.id AS text\)\)"
-                     r"\s+PLACING '0' FROM 13 FOR 1\) AS uuid\)")
+_DRAWN = re.compile(r"CAST\(overlay\(replace\(CAST\(gen_random_uuid\(\) AS text\), '-', ''\)"
+                    r"\s+PLACING '0' FROM 13 FOR 1\) AS uuid\)")
+_DRAW_EXPR = "replace(CAST(gen_random_uuid() AS text), '-', '')"
+_DERIVE_EXPR = "md5('mail-key-retired:' || CAST(m.id AS text))"
 
 
 def _sweep_with(monkeypatch, new):
     """Mutant: the sweep's new key for a kept message is `new`."""
-    assert len(_RETIRE.findall(main._MAIL_RECEIPT_SWEEP_SQL)) == 1
-    monkeypatch.setattr(main, "_MAIL_RECEIPT_SWEEP_SQL", _RETIRE.sub(new, main._MAIL_RECEIPT_SWEEP_SQL))
+    assert len(_DRAWN.findall(_REAL_SWEEP)) == 1
+    monkeypatch.setattr(main, "_MAIL_RECEIPT_SWEEP_SQL", _DRAWN.sub(lambda _m: new, _REAL_SWEEP))
 
 
 def test_a_swept_receipt_moves_a_kept_message_to_a_reserved_key(monkeypatch):
     """The janitor deletes an old receipt while an unread delivered copy
     still keeps its message. The same statement moves that message to a
-    reserved key derived from its own id, so the old key, which has no
-    receipt now, is sent as a new message instead of being refused by 297's
-    UNIQUE (sender_id, idempotency_key). The moved row's own key is refused
-    on every route (_mail_parse_key), so no answer depends on whether that
-    row is still kept."""
+    reserved key drawn at random, so the old key, which has no receipt now,
+    is sent as a new message instead of being refused by 297's UNIQUE
+    (sender_id, idempotency_key). The moved row's own key is refused on
+    every route (_mail_parse_key), so no answer depends on whether that row
+    is still kept."""
     def run():
         db, _ids, made = _aged_world()
         row = db.messages[UUID(made["old_delivered"])]
@@ -845,7 +963,8 @@ def test_a_swept_receipt_moves_a_kept_message_to_a_reserved_key(monkeypatch):
         named = _outcome_or_23505(tm._send, db, to=[B_SID], key=str(row["idempotency_key"]))
         return kept, row["idempotency_key"], key, again, named, made
     kept, now_key, key, again, named, made = run()
-    assert kept and now_key == _reserved("mail-key-retired:" + made["old_delivered"])
+    assert kept and now_key.hex[12] == "0" and now_key != key
+    assert now_key != _reserved("mail-key-retired:" + made["old_delivered"])
     assert isinstance(again, dict) and again["accepted"] and again["id"] != made["old_delivered"]
     assert named == (400, "idempotency_key_invalid")
     # mutant (a): the sweep leaves the key as it was -> the kept row still
@@ -853,20 +972,57 @@ def test_a_swept_receipt_moves_a_kept_message_to_a_reserved_key(monkeypatch):
     _sweep_with(monkeypatch, "m.idempotency_key")
     kept, now_key, key, again, named, _made = run()
     assert kept and now_key == key and again == "23505"
-    # mutant (b): the plain md5, version digit left as it falls -> a request
-    # can name the moved row's key, and the send under it reaches the insert,
-    # which the kept row refuses (a purged row would let it through). A
-    # message id whose md5 has digit 0 there is reserved by chance, so the
-    # world is drawn again until it has not.
-    monkeypatch.setattr(main, "_MAIL_RECEIPT_SWEEP_SQL", _REAL_SWEEP)
-    _sweep_with(monkeypatch, "CAST(md5('mail-key-retired:' || CAST(m.id AS text)) AS uuid)")
-    for _ in range(64):
-        kept, now_key, key, again, named, made = run()
-        if now_key.hex[12] != "0":
-            break
-    assert kept and now_key == UUID(hashlib.md5(("mail-key-retired:" + made["old_delivered"])
-                                                .encode("ascii")).hexdigest())
+    # mutant (b): a random key with its version digit as drawn (4) -> a
+    # request can name the moved row's key, and the send under it reaches
+    # the insert, which the kept row refuses (a purged row would let it
+    # through)
+    _sweep_with(monkeypatch, "gen_random_uuid()")
+    kept, now_key, key, again, named, made = run()
+    assert kept and now_key.hex[12] == "4" and now_key != key
     assert isinstance(again, dict) and again["accepted"] and named == "23505"
+
+
+def _sweep_beside_a_held_derived_key(collide=False):
+    """_aged_world, plus a message of A's sent now under the value the sweep
+    DERIVED before migration 404's change for the kept message M
+    (old_delivered): md5('mail-key-retired:' || M) with version digit 0. The
+    previous build refuses no key, so a request it served could have stored
+    that value. The janitor then sweeps M's receipt (older than retention)
+    while B's unread copy keeps M. `collide` forces the sweep's draw to that
+    same value. Returns (the sweep's outcome, M's key after, M's key before,
+    the derived value, whether M's receipt is left, the holder's key)."""
+    db, ids, made = _aged_world()
+    m = UUID(made["old_delivered"])
+    key = db.messages[m]["idempotency_key"]
+    derived = _reserved("mail-key-retired:" + made["old_delivered"])
+    holder = db.seed_message(ids[A_SID], [(ids[B_SID], "to", "delivered")], key=derived)
+    if collide:
+        db.draw = lambda: derived
+    res = _outcome_or_23505(lambda: tm._run(main._mail_retention_sweep(db)))
+    return (res, db.messages[m]["idempotency_key"], key, derived, (ids[A_SID], key) in db.receipts,
+            db.messages[holder]["idempotency_key"])
+
+
+def test_the_sweep_draws_a_kept_messages_key_at_random(monkeypatch):
+    """A key another message of the sender already holds does not stop the
+    sweep: M's receipt goes and M moves to a reserved key drawn for it."""
+    res, now_key, key, derived, receipt_left, held = _sweep_beside_a_held_derived_key()
+    assert isinstance(res, tuple) and res[3] == 2 and not receipt_left
+    assert now_key.hex[12] == "0" and now_key not in (key, derived) and held == derived
+    assert _outcome(main._mail_parse_key, str(now_key)) == (400, "idempotency_key_invalid")
+    # drawn per run: a second world moves its M to another key
+    assert _sweep_beside_a_held_derived_key()[1] != now_key
+    # the fake's own control: a draw that meets a key the sender's messages
+    # hold fails the statement (297's unique key), and nothing it did stays
+    res, now_key, key, _derived, receipt_left, _held = _sweep_beside_a_held_derived_key(collide=True)
+    assert res == "23505" and now_key == key and receipt_left
+    # mutant: the key derived from M's id (the expression before migration
+    # 404's change) -> the derived value is held already, the statement
+    # fails, and M's receipt is never deleted
+    assert _REAL_SWEEP.count(_DRAW_EXPR) == 1
+    monkeypatch.setattr(main, "_MAIL_RECEIPT_SWEEP_SQL", _REAL_SWEEP.replace(_DRAW_EXPR, _DERIVE_EXPR))
+    res, now_key, key, _derived, receipt_left, held = _sweep_beside_a_held_derived_key()
+    assert res == "23505" and now_key == key and receipt_left
 
 
 _MAIL_READS = ("mail_send_receipts", "mail_messages", "mail_recipients", "pg_advisory")
@@ -909,8 +1065,7 @@ def test_a_reserved_key_is_refused_on_every_route_before_any_read(monkeypatch):
     any mail table is read, so its answer cannot depend on a row that holds
     it. The keys the shipped callers mint, uuid4 and uuid5, are sent."""
     bad = (400, "idempotency_key_invalid")
-    reserved = [str(_reserved("mail-key-retired:%s" % uuid.uuid4())),
-                str(_reserved("mail-receipt-superseded:%s:%s" % (uuid.uuid4(), uuid.uuid4())))]
+    reserved = [str(_drawn_reserved()), str(_reserved("mail-key-retired:%s" % uuid.uuid4()))]
     for key in reserved:
         got = _every_key_route(key)
         assert [(r, a, t) for r, a, t in got] == [(r, bad, []) for r, _a, _t in got], key
@@ -965,3 +1120,269 @@ def test_a_reply_target_is_resolved_only_after_the_receipt_check(monkeypatch):
         "_mail_reply_core", check + resolve, resolve + check))
     first, again, fresh, calls = run()
     assert first["accepted"] and again == NOT_FOUND and fresh == NOT_FOUND and len(calls) == 3
+
+
+# ── one statement per sender read ─────────────────────────────────────────
+#
+# The janitor's purge removes a message and its envelopes together. The
+# reply core, Sent and the detail read take the message and its envelopes
+# (the reply-all list, the addressees) from ONE statement, so from one
+# snapshot. Each test below purges the message right after the statement
+# that read it (_after_sql) -- the state the purge reaches when it commits
+# between two statements of the request -- and compares the answer with the
+# kept state. The mutant is the previous build's two-statement shape (a cut
+# of the route's own source), whose second statement finds the envelopes
+# gone.
+
+_OLD_REPLY_CUTS = (
+    ('    rows = (await db.execute(text(\n        _MAIL_CLOCK_CTE +\n',
+     '    orig = rows[0]\n', '''
+    orig = (await db.execute(text(
+        "SELECT m.id, m.sender_id, m.kind, m.thread_id, m.subject"
+        "  FROM mail_messages m"
+        " WHERE m.id = :mid"
+        "   AND ((m.sender_id = :me AND m.deleted_by_sender_at IS NULL"
+        "         AND m.created_at > NOW() - make_interval(days => CAST(:ret_days AS integer)))"
+        "        OR EXISTS (SELECT 1 FROM mail_recipients r"
+        "                    WHERE r.message_id = m.id AND r.recipient_id = :me"
+        "                      AND r.delivery = 'delivered' AND r.deleted_at IS NULL))"
+    ), {"mid": mid, "me": me["id"], "ret_days": MAIL_RETENTION_DAYS})).mappings().first()
+    if orig is None:
+        raise HTTPException(status_code=404, detail="not_found")
+'''[1:]),
+    ('        pairs.extend((r["env_recipient_id"]',
+     '                     for r in rows if r["env_recipient_id"] is not None)\n', '''
+        rows = (await db.execute(text(
+            "SELECT recipient_id, kind, delivery FROM mail_recipients"
+            " WHERE message_id = :mid"
+        ), {"mid": mid})).mappings().all()
+        pairs.extend((r["recipient_id"], r["kind"], r["delivery"] != "delivered") for r in rows)
+'''[1:]))
+
+# The previous build's addressee read (main._MAIL_ADDRESSEES_SQL and
+# main._mail_addressees before migration 404's change), for the mutants.
+_OLD_ADDRESSEES_SQL = (
+    "WITH a AS ("
+    "  SELECT r.message_id, r.kind, p.steam_id, p.display_name,"
+    "         ROW_NUMBER() OVER (PARTITION BY r.message_id"
+    "                            ORDER BY r.kind DESC, p.display_name, p.steam_id) AS rn"
+    "    FROM mail_recipients r JOIN players p ON p.id = r.recipient_id"
+    "   WHERE r.message_id = ANY(CAST(:mids AS uuid[])))"
+    " SELECT message_id, kind, steam_id, display_name FROM a"
+    "  WHERE rn <= CAST(:cap AS integer) ORDER BY message_id, rn"
+)
+
+
+async def _old_addressees(db, message_ids):
+    if not message_ids:
+        return {}
+    rows = (await db.execute(text(_OLD_ADDRESSEES_SQL),
+                             {"mids": list(message_ids), "cap": main.MAIL_ADDRESSEES_MAX})).mappings().all()
+    out = {}
+    for r in rows:
+        out.setdefault(r["message_id"], []).append(
+            {"steam_id": r["steam_id"], "name": r["display_name"], "kind": r["kind"]})
+    return out
+
+
+_OLD_SENT_CUTS = (
+    ('    rows = (await db.execute(text(\n',
+     '    page, next_cursor = _mail_page(_mail_group_addressees(rows), limit)\n', '''
+    rows = (await db.execute(text(
+        "SELECT m.id, m.thread_id, m.subject, m.created_at, m.kind"
+        "  FROM mail_messages m"
+        " WHERE m.sender_id = :me AND m.deleted_by_sender_at IS NULL"
+        "   AND m.created_at > NOW() - make_interval(days => CAST(:ret_days AS integer))"
+        "   AND (CAST(:c_at AS timestamptz) IS NULL"
+        "        OR (m.created_at, m.id) < (CAST(:c_at AS timestamptz), CAST(:c_id AS uuid)))"
+        " ORDER BY m.created_at DESC, m.id DESC"
+        " LIMIT CAST(:lim AS integer)"
+    ), {"me": me["id"], "c_at": c_at, "c_id": c_id, "lim": limit + 1,
+        "ret_days": MAIL_RETENTION_DAYS})).mappings().all()
+    page, next_cursor = _mail_page(rows, limit)
+    addr = await _mail_addressees(db, [r["id"] for r in page if r["kind"] != "system_broadcast"])
+'''[1:]),
+    ('"addressees": r["addressees"],', '"addressees": r["addressees"],', '"addressees": addr.get(r["id"], []),'))
+
+_OLD_DETAIL_CUTS = (
+    ('    rows = (await db.execute(text(\n', '    addr = row["addressees"]\n', '''
+    row = (await db.execute(text(
+        "SELECT m.id, m.thread_id, m.in_reply_to, m.kind, m.subject, m.body, m.created_at, m.via,"
+        "       m.sender_id, s.steam_id AS sender_steam_id, s.display_name AS sender_name,"
+        "       CAST(s.id AS text) AS sender_pid, COALESCE(gr.rating, 1500) AS rating,"
+        "       si.name AS title, si.preview_color AS title_color, si.sku AS title_sku,"
+        "       r.read_at"
+        "  FROM mail_messages m"
+        "  JOIN players s ON s.id = m.sender_id"
+        "  LEFT JOIN glicko_ratings gr ON gr.player_id = s.id"
+        "  LEFT JOIN shop_items si ON si.id = s.active_title_id"
+        "  LEFT JOIN mail_recipients r ON r.message_id = m.id AND r.recipient_id = :me"
+        "                             AND r.delivery = 'delivered' AND r.deleted_at IS NULL"
+        " WHERE m.id = :mid"
+        "   AND (r.recipient_id IS NOT NULL"
+        "        OR (m.sender_id = :me AND m.deleted_by_sender_at IS NULL"
+        "            AND m.created_at > NOW() - make_interval(days => CAST(:ret_days AS integer))))"
+    ), {"mid": mid, "me": me["id"], "ret_days": MAIL_RETENTION_DAYS})).mappings().first()
+    if row is None:
+        raise HTTPException(status_code=404, detail="not_found")
+    colors = await _mail_sender_colors(db, [row])
+    addr = [] if row["kind"] == "system_broadcast" else (await _mail_addressees(db, [row["id"]])).get(row["id"], [])
+'''[1:]),)
+
+
+def _one_statement(reads):
+    """The route read the message and its envelopes in exactly one statement."""
+    return len(reads) == 1 and "FROM mail_messages m" in reads[0] and "mail_recipients" in reads[0]
+
+
+def _reply_all_across_a_purge(purge):
+    """A writes to B and D, both copies suppressed (so no delivered copy
+    keeps the message), and replies to all on A's own message; with `purge`
+    the message is purged right after the statement that admitted it.
+    Returns the answer's shape, the reply's copies and the reply's reads."""
+    db, ids = tm._world()
+    db.players[ids[B_SID]]["mail_from"] = "nobody"
+    db.blocks.add((ids[D_SID], ids[A_SID]))
+    orig = tm._send(db, [B_SID, D_SID], subject="Plan")
+    hits = _after_sql(db, _ORIG_READ, lambda d: _purge(d, orig["id"])) if purge else None
+    db.statements.clear()
+    ans = _outcome(_reply, db, orig["id"], body="Anyone?", all_=True, token="tokA")
+    reads = _mail_reads(db)
+    assert hits is None or hits, "the purge did not run"
+    copies = sorted(e["delivery"] for (m, _r), e in db.recipients.items()
+                    if isinstance(ans, dict) and m == UUID(ans["id"]))
+    return _shape(ans), copies, reads
+
+
+def test_reply_all_reads_the_original_and_its_envelopes_in_one_statement(monkeypatch):
+    for purge in (False, True):
+        shape, copies, reads = _reply_all_across_a_purge(purge)
+        assert shape == ["accepted", "id"] and copies == ["suppressed", "suppressed"], purge
+        assert _one_statement(reads), reads
+    # mutant: the original and its envelopes read by two statements -> a
+    # purge between them leaves the reply with no addressee, and the
+    # refusal depends on whether the purge ran
+    monkeypatch.setattr(main, "_mail_reply_core", _spliced("_mail_reply_core", _OLD_REPLY_CUTS))
+    shape, copies, reads = _reply_all_across_a_purge(False)
+    assert shape == ["accepted", "id"] and copies == ["suppressed", "suppressed"]
+    assert len(reads) == 2 and not _one_statement(reads)
+    shape, _copies, _reads = _reply_all_across_a_purge(True)
+    assert shape == (400, "recipients_empty")
+
+
+def _sent_and_detail_across_a_purge(route, purge):
+    """A writes to B, Cc C, then opens Sent (`route` "sent") or the
+    message's detail ("detail"); with `purge` the message is purged right
+    after the statement that read it. Returns the addressees shown and the
+    route's reads."""
+    db, ids = tm._world()
+    orig = tm._send(db, [B_SID], cc=[C_SID], subject="Plan")
+    anchor = _SENT_READ if route == "sent" else _DETAIL_READ
+    hits = _after_sql(db, anchor, lambda d: _purge(d, orig["id"])) if purge else None
+    db.statements.clear()
+    if route == "sent":
+        entry = next(m for m in _sent(db, "tokA") if m["id"] == orig["id"])
+        shown = [(a["steam_id"], a["kind"]) for a in entry["addressees"]]
+    else:
+        ans = _detail(db, orig["id"], "tokA")
+        shown = [(a["steam_id"], k) for k in ("to", "cc") for a in ans[k]]
+    reads = _mail_reads(db)
+    assert hits is None or hits, "the purge did not run"
+    return shown, reads
+
+
+@pytest.mark.parametrize("route, cuts", [("sent", _OLD_SENT_CUTS), ("detail", _OLD_DETAIL_CUTS)])
+def test_sent_and_detail_read_the_message_and_its_addressees_in_one_statement(monkeypatch, route, cuts):
+    want = [(B_SID, "to"), (C_SID, "cc")]
+    for purge in (False, True):
+        shown, reads = _sent_and_detail_across_a_purge(route, purge)
+        assert shown == want and _one_statement(reads), (purge, reads)
+    for gone in ("_MAIL_ADDRESSEES_SQL", "_mail_addressees"):
+        assert not hasattr(main, gone), gone
+    # mutant: the message and its addressees read by two statements -> a
+    # purge between them empties the list the sender is shown
+    name = "mail_sent" if route == "sent" else "mail_detail"
+    monkeypatch.setattr(main, name, _spliced(name, cuts, {"_mail_addressees": _old_addressees}))
+    shown, reads = _sent_and_detail_across_a_purge(route, False)
+    assert shown == want and len(reads) == 2 and not _one_statement(reads)
+    shown, _reads = _sent_and_detail_across_a_purge(route, True)
+    assert shown == []
+
+
+# ── the clock is read inside each statement ───────────────────────────────
+
+_CLOCK_APPLIED = "t.now_ - make_interval(days => CAST(:ret_days AS integer))"
+
+
+def _clock_faults(sql):
+    """What keeps `sql` from reading its retention clock inside itself: the
+    MATERIALIZED clock_timestamp() CTE first, joined and applied, and no
+    NOW() anywhere."""
+    faults = []
+    if not sql.lstrip().startswith(_CLOCK_CTE):
+        faults.append("no clock CTE")
+    if "NOW()" in sql.upper():
+        faults.append("NOW()")
+    if "CROSS JOIN t" not in sql:
+        faults.append("t not joined")
+    if _CLOCK_APPLIED not in sql:
+        faults.append("clock not applied")
+    return faults
+
+
+def _clock_statements():
+    """The reply core's read (reply all), Sent's and the detail read, as the
+    routes issue them against the fake, and mail_discord._REPLIED_TO_SQL."""
+    db, _ids = tm._world()
+    orig = tm._send(db, [B_SID], cc=[C_SID])
+    db.statements.clear()
+    _reply(db, orig["id"], body="All of you?", all_=True, token="tokA")
+    _sent(db, "tokA")
+    _detail(db, orig["id"], "tokA")
+    out = {}
+    for name, anchor in (("reply", _ORIG_READ), ("sent", _SENT_READ), ("detail", _DETAIL_READ)):
+        found = [s for s in db.statements if anchor in s]
+        assert len(found) == 1, (name, found)
+        out[name] = found[0]
+    out["replied_to"] = mail_discord._REPLIED_TO_SQL
+    return out
+
+
+def test_each_sender_read_takes_its_clock_inside_the_statement():
+    assert main._MAIL_CLOCK_CTE == _CLOCK_CTE + ","
+    assert mail_discord._REPLIED_TO_SQL.startswith(_CLOCK_CTE)
+    for name, sql in _clock_statements().items():
+        assert _clock_faults(sql) == [], name
+        # mutant: NOW() (the transaction's start) in place of t.now_
+        assert sql.count("t.now_ -") >= 1, name
+        assert "NOW()" in _clock_faults(sql.replace("t.now_ -", "NOW() -")), name
+
+
+def _past_retention_across_the_purge(mutate):
+    """A's message to B (suppressed), sent MAIL_RETENTION_DAYS and 5 s ago.
+    A's transaction began 10 s before the statement ran (it waited for its
+    locks), so NOW() is 10 s behind the statement's clock. A opens Sent and
+    the detail, the janitor's sweep purges the message, A opens both again.
+    Returns (before, purged, after), each view as (listed, detail shape)."""
+    db, ids = tm._world()
+    db.txn_start = NOW - timedelta(seconds=10)
+    mid = str(db.seed_message(ids[A_SID], [(ids[B_SID], "to", "suppressed")],
+                              created_at=NOW - timedelta(days=main.MAIL_RETENTION_DAYS, seconds=5)))
+    hits = _rewrite_sql(db, "t.now_ -", "NOW() -") if mutate else None
+
+    def seen():
+        return mid in {m["id"] for m in _sent(db, "tokA")}, _shape(_outcome(_detail, db, mid, "tokA"))
+    before = seen()
+    tm._run(main._mail_retention_sweep(db))
+    purged = UUID(mid) not in db.messages
+    after = seen()
+    assert hits is None or hits, "the mutant did not reach the reads"
+    return before, purged, after
+
+
+def test_the_senders_view_is_the_same_whether_the_purge_ran():
+    assert _past_retention_across_the_purge(False) == ((False, NOT_FOUND), True, (False, NOT_FOUND))
+    # mutant: the clock taken from NOW() -> the transaction's earlier start
+    # still admits the message, so the answer turns on whether the purge ran
+    before, purged, after = _past_retention_across_the_purge(True)
+    assert purged and before[0] is True and isinstance(before[1], list) and after == (False, NOT_FOUND)

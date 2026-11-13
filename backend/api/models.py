@@ -1454,13 +1454,17 @@ class MailSendReceipt(Base):
     (sender_id, idempotency_key) it committed under (migration 404; a send
     whose key a later message took keeps its row under a reserved key, its
     trigger): the message id it answered
-    with, its kind, a broadcast's recipient count, the SHA-256 digest of
-    the request (`request_fp`; NULL on rows backfilled by the migration or
-    written by its trigger for a writer that stores none), and the SHA-256
-    digest of the message's stored text (`message_fp`, main._mail_message_fp;
-    on every row, compared when `request_fp` is NULL). A repeated key is
-    answered from this row alone (main._mail_prior_send), so the answer does
-    not depend on whether the janitor has purged the message. No foreign
+    with, its kind, the number of envelopes the send wrote (`recipients`: a
+    broadcast's count, and a direct message's on the api's own rows), the
+    SHA-256 digest of the request (`request_fp`; NULL on rows backfilled by
+    the migration or written by its trigger for a writer that stores none),
+    the SHA-256 digest of the message's stored text (`message_fp`,
+    main._mail_message_fp; on every row, compared when `request_fp` is NULL),
+    and a direct message's same-body key (`body_key`, main._mail_body_key;
+    NULL where `request_fp` is). A repeated key is answered from this row
+    alone (main._mail_prior_send), and the spam check counts these rows
+    (main._mail_spam_check), so neither depends on whether the janitor has
+    purged the message. No foreign
     keys: message_id outlives that purge, and the janitor and account
     deletion remove rows by value."""
     __tablename__ = "mail_send_receipts"
@@ -1473,12 +1477,15 @@ class MailSendReceipt(Base):
     message_id = Column(UUID(as_uuid=True), nullable=False)
     recipients = Column(Integer, nullable=True)
     created_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+    body_key = Column(LargeBinary, nullable=True)
 
     __table_args__ = (
         CheckConstraint("kind IN ('direct', 'system_broadcast')", name="ck_mail_send_receipts_kind"),
         CheckConstraint("request_fp IS NULL OR octet_length(request_fp) = 32", name="ck_mail_send_receipts_fp"),
         CheckConstraint("octet_length(message_fp) = 32", name="ck_mail_send_receipts_message_fp"),
         CheckConstraint("recipients IS NULL OR recipients >= 0", name="ck_mail_send_receipts_recipients"),
+        CheckConstraint("body_key IS NULL OR octet_length(body_key) = 32",
+                        name="ck_mail_send_receipts_body_key"),
         Index("ix_mail_send_receipts_created", "created_at"),
     )
 
