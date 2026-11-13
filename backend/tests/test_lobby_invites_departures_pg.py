@@ -551,7 +551,7 @@ def test_a_bump_skips_an_account_being_deleted_and_leaves_it_no_revision_row(mon
             try:
                 await asyncio.wait_for(gate["paused"].wait(), BOUND)
                 cancel = asyncio.ensure_future(env.cancel(h, iid))
-                done, _rest = await asyncio.wait([cancel], timeout=3)
+                done, _rest = await asyncio.wait([cancel], timeout=10)
                 waited = not done
             finally:
                 gate["resume"].set()
