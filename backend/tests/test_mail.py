@@ -2861,8 +2861,10 @@ def test_fake_db_reads_its_authorisation_off_the_production_sql():
     with pytest.raises(AssertionError):
         _the_statement(db, "FROM mail_recipients r", "JOIN players s ON s.id = m.sender_id")
     assert inbox_sql != detail_sql
-    # the sender's branch, with its clock (migration 404's change), whole
-    sender_clause = re.search(r"\(m\.sender_id = :me AND m\.deleted_by_sender_at IS NULL\s+"
+    # the sender's branch, with its clock (migration 404's change) and its
+    # invite exclusion (migration 405's change), whole
+    sender_clause = re.search(r"\(m\.sender_id = :me AND m\.deleted_by_sender_at IS NULL"
+                              r" AND m\.kind <> 'invite'\s+"
                               + re.escape(_SENDER_CLOCK) + r"\)", detail_sql)
     assert sender_clause is not None, "the detail read's sender clause"
     for needle, sql in (("r.recipient_id IS NOT NULL", detail_sql),
