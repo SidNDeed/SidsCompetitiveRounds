@@ -1185,6 +1185,17 @@ def _raises(coro):
     return info.value
 
 
+def _the_statement(db, *needles):
+    """The one statement text the routes issued that holds every needle (a
+    text issued twice counts once). Two different texts that both hold them
+    fail here, where taking the first match would pick one of them silently:
+    since migration 404's change the detail read joins the addressees, so it
+    also holds the inbox read's FROM mail_recipients r and its sender join."""
+    found = {s for s in db.statements if all(n in s for n in needles)}
+    assert len(found) == 1, (needles, len(found))
+    return found.pop()
+
+
 def _world():
     """Four players (A, B, C, D), A and B with sessions; A has run the mod."""
     db = FakeDb()
@@ -1380,7 +1391,7 @@ def test_rate_limits_10_per_minute_and_100_per_day():
     exc = _send_raises(db, to=[B_SID])
     assert exc.detail == {"error": "rate_limited", "retry_after": 22 * 3600}    # ~22 h, not the hour once advertised
     assert exc.headers["Retry-After"] == str(22 * 3600)
-    rate_sql = next(s for s in db.statements if "AS per_minute" in s)
+    rate_sql = _the_statement(db, "AS per_minute")
     assert "AS minute_wait" in rate_sql and "AS day_wait" in rate_sql and rate_sql.count("MIN(created_at)") == 2
     # broadcasts never count against the sender's window
     db, ids = _world()
@@ -2236,7 +2247,7 @@ def test_sender_lock_bind_is_typed_uuid_for_asyncpg():
     it, and the pre-repair statement is shown to be the failing one."""
     db, ids = _world()
     assert _send(db, [B_SID])["accepted"] is True
-    lock_sql = next(s for s in db.statements if "hashtext('mail:'" in s)
+    lock_sql = _the_statement(db, "hashtext('mail:'")
     assert "CAST(CAST(:sid AS uuid) AS text)" in lock_sql
     old = "SELECT pg_advisory_xact_lock(hashtext('mail:' || CAST(:sid AS text)))"
     with pytest.raises(TypeError, match="expected str, got UUID"):
@@ -2400,7 +2411,7 @@ def test_status_revision_advances_in_commit_order_not_created_at():
     assert _status(db, "tokB")["revision"] == "2" and db.inbox_rev.get(ids[A_SID]) is None
     bumps = [s for s in db.statements if "INSERT INTO mail_inbox_rev" in s]
     assert bumps and all("SET rev = mail_inbox_rev.rev + 1" in s for s in bumps)   # a DB delta (#326)
-    assert "FROM mail_inbox_rev" in next(s for s in db.statements if "AS revision" in s)
+    assert "FROM mail_inbox_rev" in _the_statement(db, "AS revision")
 
 
 def test_recipient_bound_is_above_every_grant_and_the_cap_precedes_resolution():
@@ -2596,9 +2607,16 @@ def test_fake_db_reads_its_authorisation_off_the_production_sql():
     assert _raises(main.mail_detail(res["id"], _req("tokD"), db)).status_code == 404
     assert [m["id"] for m in _inbox(db, "tokB")["messages"]] == [res["id"]]
     assert _status(db, "tokB")["unread"] == 1
-    detail_sql = next(s for s in db.statements if "LEFT JOIN mail_recipients r ON r.message_id = m.id AND r.recipient_id = :me" in s)
-    inbox_sql = next(s for s in db.statements if "FROM mail_recipients r" in s and "JOIN players s ON s.id = m.sender_id" in s)
-    status_sql = next(s for s in db.statements if "AS unread" in s and "AS revision" in s)
+    detail_sql = _the_statement(db, "LEFT JOIN mail_recipients r ON r.message_id = m.id AND r.recipient_id = :me")
+    inbox_sql = _the_statement(db, "FROM mail_recipients r", "JOIN mail_messages m ON m.id = r.message_id",
+                               "JOIN players s ON s.id = m.sender_id")
+    status_sql = _the_statement(db, "AS unread", "AS revision")
+    # the inbox selector this test used before: the detail read holds its two
+    # needles as well (it joins the addressees since migration 404's change),
+    # and the helper refuses to pick one of the two
+    with pytest.raises(AssertionError):
+        _the_statement(db, "FROM mail_recipients r", "JOIN players s ON s.id = m.sender_id")
+    assert inbox_sql != detail_sql
     # the sender's branch, with its clock (migration 404's change), whole
     sender_clause = re.search(r"\(m\.sender_id = :me AND m\.deleted_by_sender_at IS NULL\s+"
                               + re.escape(_SENDER_CLOCK) + r"\)", detail_sql)
@@ -3035,7 +3053,7 @@ def test_rate_wait_is_the_maximum_across_exhausted_windows_and_rounds_up():
         db.seed_message(ids[A_SID], [(ids[B_SID], "to", "delivered")], created_at=NOW - timedelta(seconds=29.5))
     exc = _send_raises(db, to=[B_SID])
     assert exc.detail["retry_after"] == 31 and exc.headers["Retry-After"] == "31"
-    rate_sql = next(s for s in db.statements if "AS per_minute" in s)
+    rate_sql = _the_statement(db, "AS per_minute")
     assert rate_sql.count("CEIL(EXTRACT") == 2 and "FLOOR(" not in rate_sql
     floored = db._dispatch(rate_sql.replace("CEIL(EXTRACT", "FLOOR(EXTRACT"), {"sid": ids[A_SID]}).first()
     assert floored["minute_wait"] == 30                              # control: the fake follows the SQL's rounding
