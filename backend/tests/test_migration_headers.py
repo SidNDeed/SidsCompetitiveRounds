@@ -77,6 +77,28 @@ def test_every_migration_states_its_deploy_order(filename):
         "actually reads" % filename)
 
 
+def test_the_deploy_order_check_fails_404_without_its_line(tmp_path, monkeypatch):
+    """The negative control of the check's 404 case, which joined OWNED with
+    migration 404's change: a copy of 404 whose line is gone, names no side,
+    or stands after its BEGIN; fails the check; the same copy step with the
+    file's own text passes it."""
+    name = "404_mail_send_receipts.sql"
+    real = (SQL_DIR / name).read_text(encoding="utf-8")
+    (line,) = [m.group(0) for m in _ORDER_LINE.finditer(real)]
+    gone = real.replace(line, "--")
+    begin = gone.upper().index("BEGIN;") + len("BEGIN;")
+    mutants = (gone,
+               real.replace(line, "-- DEPLOY ORDER: see the runbook."),
+               gone[:begin] + "\n" + line + gone[begin:])
+    monkeypatch.setitem(globals(), "SQL_DIR", tmp_path)
+    for text in mutants:
+        (tmp_path / name).write_text(text, encoding="utf-8")
+        with pytest.raises(AssertionError):
+            test_every_migration_states_its_deploy_order(name)
+    (tmp_path / name).write_text(real, encoding="utf-8")
+    test_every_migration_states_its_deploy_order(name)
+
+
 # ── 336's reader inventory ─────────────────────────────────────────────────
 
 _USES_KIND = re.compile(

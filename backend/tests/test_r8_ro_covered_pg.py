@@ -1481,6 +1481,19 @@ def test_census_complete_layer_frozen_whole():
     for (rel, call) in ro_census.FORWARDING:
         assert list(map(tuple, fz.FROZEN[rel + ro_census.COMPLETE])).count(
             ("call", call)) == 1, (rel, call)
+    # control (migration 404's change): models.py as it stands matches the
+    # freeze; models.py as on main, without its LargeBinary import line,
+    # differs from it by exactly the hand-frozen form, missing
+    models_rel = "api/models.py"
+    with open(os.path.join(HERE, "..", models_rel), encoding="utf-8") as fh:
+        models_src = fh.read()
+    line = "from sqlalchemy import LargeBinary\n"
+    assert models_src.count(line) == 1
+    frozen = {k: fz.FROZEN[k] for k in (models_rel, models_rel + ro_census.COMPLETE) if k in fz.FROZEN}
+    assert ro_census.diff(ro_census.file_forms(models_rel, models_src), frozen) == []
+    old = ro_census.diff(ro_census.file_forms(models_rel, models_src.replace(line, "")), frozen)
+    assert [tuple(r) for r in old if r[0] == models_rel] == [
+        (models_rel, "-", "import", "from sqlalchemy import LargeBinary")], old
 
 
 # ------------------------- REHEARSAL-R9-A1 (C): refuse by default, the census

@@ -573,6 +573,35 @@ def test_a_second_run_removes_no_relation_from_the_database(number):
         % (number, gone))
 
 
+# Each one a second-run defect that one of the four measurements above exists
+# to see, appended after 404's COMMIT. 404's trigger fires on an INSERT and on
+# an UPDATE OF recipient_count only, so none of them reaches it.
+_PLANTS_404 = (
+    (test_a_second_run_writes_no_row, "rewrote",
+     "UPDATE mail_messages SET subject = subject;"),
+    (test_a_second_run_leaves_every_row_byte_identical, "changed the contents of",
+     "UPDATE mail_messages SET subject = subject || '.';"),
+    (test_a_second_run_replaces_no_constraint_or_index, "dropped and recreated",
+     "DROP INDEX IF EXISTS planted_idx; CREATE INDEX planted_idx ON mail_messages (subject);"),
+    (test_a_second_run_removes_no_relation_from_the_database, "from the database on its second run",
+     "DO $$ BEGIN IF to_regclass('planted_probe') IS NULL THEN CREATE TABLE planted_probe (x int);"
+     " ELSE DROP TABLE planted_probe; END IF; END $$;"),
+)
+
+
+def test_404s_four_rerun_cases_fail_a_planted_second_run_defect(monkeypatch):
+    """The negative control of the four measurements' 404 cases, which joined
+    their parametrize lists with migration 404's change: each fails on a copy
+    of 404 that carries the one defect it measures, while 404 itself passes
+    all four (the parametrized runs above)."""
+    real = migration_text
+    for test, message, plant in _PLANTS_404:
+        monkeypatch.setitem(globals(), "migration_text",
+                            lambda number, plant=plant: real(number) + "\n" + plant + "\n")
+        with pytest.raises(AssertionError, match=message):
+            test("404")
+
+
 def test_377_keeps_its_statistics_object_across_a_second_run():
     """The object census above can only see a replaced statistics object if
     one exists: 377 must leave `stx_matches_pair` after its first run and the

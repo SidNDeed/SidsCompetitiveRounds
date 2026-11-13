@@ -3291,6 +3291,11 @@ def test_a_reply_to_a_thread_whose_mail_is_gone_is_told_it_was_deleted(monkeypat
         await kw["resolve_target"]()
         return {"id": REPLY_ID, "accepted": True}
 
+    async def _core_resolving_nothing(_db, _me, **kw):
+        # This test's core before migration 404's change, written for a
+        # route that resolved the code before the core ran: the control.
+        return {"id": REPLY_ID, "accepted": True}
+
     async def run():
         conn = await asyncpg.connect(DSN)
         engine = create_async_engine(sa_dsn, poolclass=NullPool)
@@ -3338,6 +3343,14 @@ def test_a_reply_to_a_thread_whose_mail_is_gone_is_told_it_was_deleted(monkeypat
             seen["purged"] = await reply("d1", code)
             seen["purged, not theirs"] = await reply("d2", code)
             seen["never minted"] = await reply("d1", _code())
+            # Negative control: a core that never awaits resolve_target is
+            # answered "accepted" for the purged thread and for a code never
+            # minted -- each 404 above is the route's own resolution of the
+            # code, which since migration 404's change runs only inside the
+            # core, after its receipt check.
+            mail_discord._BOUND["reply_core"] = _core_resolving_nothing
+            seen["control: purged"] = await reply("d1", code)
+            seen["control: never minted"] = await reply("d1", _code())
             return seen, tomb
         finally:
             mail_discord._BOUND["reply_core"] = prev
@@ -3357,6 +3370,8 @@ def test_a_reply_to_a_thread_whose_mail_is_gone_is_told_it_was_deleted(monkeypat
         "purged": "404 not_found",
         "purged, not theirs": "404 unknown_code",
         "never minted": "404 unknown_code",
+        "control: purged": "accepted",
+        "control: never minted": "accepted",
     }, seen
 
 
