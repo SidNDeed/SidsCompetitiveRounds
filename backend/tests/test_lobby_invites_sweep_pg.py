@@ -122,6 +122,17 @@ async def _sweep_within(env, ms):
         return None, "%s: %s" % (type(exc).__name__, exc)
 
 
+async def _refresh_live(env):
+    """Every lobby seat polled within the last 300 s is polled now, so a slow
+    setup across three modes cannot age a kept invite's sender past the
+    75 s live-member window; a seat a case made stale on purpose (inv_pg's
+    stale: 600 s ago) stays stale."""
+    for q in inv.QUEUE_TABLE.values():
+        await env.conn.execute(
+            "UPDATE %s SET last_polled = clock_timestamp()"
+            " WHERE status = 'lobby' AND last_polled > clock_timestamp() - INTERVAL '300 seconds'" % q)
+
+
 # The sweep statement, and nothing else, carries this text.
 _SWEEP_MARK = "FOR NO KEY UPDATE OF i SKIP LOCKED"
 _LOBBY_OPEN = "COALESCE(tl.status, ol.status, fl.status, '') = 'open'"
@@ -319,6 +330,7 @@ def test_the_sweep_keeps_exactly_the_states_it_names(monkeypatch, cond):
             return [(mode, await _end(env, i)) for mode, i, _e in targets]
 
         async def mutant_sweep():
+            await _refresh_live(env)
             with env.rewriting(old, new, where=_SWEEP_MARK) as hits:
                 await env.sweep()
             assert hits, (cond, "the mutant reached no statement")
@@ -327,11 +339,13 @@ def test_the_sweep_keeps_exactly_the_states_it_names(monkeypatch, cond):
             assert not same, (cond, "the mutant left these ends as the real sweep gives them", same)
 
         if cond == "only_pending_rows":
+            await _refresh_live(env)
             await env.sweep()
             assert await got() == want, cond
             await mutant_sweep()
         else:
             await mutant_sweep()
+            await _refresh_live(env)
             await env.sweep()
             assert await got() == want, cond
         assert await _ends(env, kept) == [("pending", None)] * len(kept), (cond, "a kept invite ended")
