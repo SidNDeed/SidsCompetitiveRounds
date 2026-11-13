@@ -287,7 +287,10 @@ _REPLIED_TO_SQL = (
     "   AND (EXISTS (SELECT 1 FROM mail_recipients r"
     "                 WHERE r.message_id = m.id AND r.recipient_id = CAST(:pid AS uuid)"
     "                   AND r.delivery = 'delivered' AND r.deleted_at IS NULL)"
+    # Migration 405's change: an invite's sender holds no handle on its
+    # mail row, so the sender branch leaves kind 'invite' out.
     "        OR (m.sender_id = CAST(:pid AS uuid) AND m.deleted_by_sender_at IS NULL"
+    "            AND m.kind <> 'invite'"
     "            AND m.created_at > t.now_ - make_interval(days => CAST(:ret_days AS integer))))")
 
 # The idempotency namespace, and the derivation as a function rather than

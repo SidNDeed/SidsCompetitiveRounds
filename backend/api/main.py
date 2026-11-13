@@ -5616,12 +5616,19 @@ async def queue_cleanup_loop():
                      ORDER BY random()
                      LIMIT 10
                      FOR UPDATE SKIP LOCKED"""))).mappings().all()
+                # Migration 405's change: a pruned member's pending invites for
+                # the lobby end with them (sender_left), an abandoned lobby's
+                # rest end with it (lobby_closed), and the invitees' revisions
+                # move as the transaction's last statement.
+                _inv_ended = []
                 for ol in open_lobbies:
-                    await db.execute(text("""
+                    _pruned = list((await db.execute(text("""
                         DELETE FROM ffa_queue
                          WHERE series_id = :lid AND status = 'lobby'
-                           AND last_polled < NOW() - INTERVAL '75 seconds'"""),
-                        {"lid": ol["id"]})
+                           AND last_polled < NOW() - INTERVAL '75 seconds'
+                        RETURNING player_id"""),
+                        {"lid": ol["id"]})).scalars().all())
+                    _inv_ended += await _invite_end_departed(db, "ffa", ol["id"], _pruned)
                     live = (await db.execute(text("""
                         SELECT player_id, joined_at FROM ffa_queue
                          WHERE series_id = :lid AND status = 'lobby'
@@ -5638,6 +5645,7 @@ async def queue_cleanup_loop():
                         # start, so its held wagers come back (migration 207).
                         if _killed is not None:
                             await _refund_lobby_bets(db, "ffa", ol["id"], "lobby_abandoned")
+                            _inv_ended += await _invite_end_lobby(db, "ffa", ol["id"], "lobby_closed")
                     elif ol["host_player_id"] not in {m["player_id"] for m in live}:
                         await db.execute(text(
                             "UPDATE ffa_lobbies SET host_player_id=:h WHERE id=:lid"
@@ -5700,6 +5708,7 @@ async def queue_cleanup_loop():
                 # FFA lives ONLY in ffa_queue_poll ('expired') — a janitor
                 # DELETE would race the poll into the client's auto-rejoin
                 # not_in_queue path and defeat the cap. See the ovt note.
+                await _invite_bump(db, _inv_ended)
                 await db.commit()
         except Exception as e:
             print(f"[QUEUE-CLEANUP] ffa sweep error: {e}")
@@ -5740,12 +5749,16 @@ async def queue_cleanup_loop():
                          ORDER BY random()
                          LIMIT 10
                          FOR UPDATE SKIP LOCKED"""))).mappings().all()
+                    # Migration 405's change: as the FFA arm above.
+                    _inv_ended = []
                     for ol in open_lobbies:
-                        await db.execute(text(f"""
+                        _pruned = list((await db.execute(text(f"""
                             DELETE FROM {_qt}
                              WHERE series_id = :lid AND status = 'lobby'
-                               AND last_polled < NOW() - INTERVAL '75 seconds'"""),
-                            {"lid": ol["id"]})
+                               AND last_polled < NOW() - INTERVAL '75 seconds'
+                            RETURNING player_id"""),
+                            {"lid": ol["id"]})).scalars().all())
+                        _inv_ended += await _invite_end_departed(db, _mode, ol["id"], _pruned)
                         live = (await db.execute(text(f"""
                             SELECT player_id FROM {_qt}
                              WHERE series_id = :lid AND status = 'lobby'
@@ -5763,12 +5776,15 @@ async def queue_cleanup_loop():
                             # wagers (migration 207). No-op for 'ovt'.
                             if _killed is not None:
                                 await _refund_lobby_bets(db, _mode, ol["id"], "lobby_abandoned")
+                                _inv_ended += await _invite_end_lobby(
+                                    db, _mode, ol["id"], "lobby_closed")
                         elif ol["host_player_id"] not in set(live):
                             await db.execute(text(
                                 f"UPDATE {_lt} SET host_player_id=:h WHERE id=:lid"
                             ), {"h": live[0], "lid": ol["id"]})
                             print(f"[{_tag}-LOBBY] host pruned — promoted earliest "
                                   f"member (lobby {ol['id']})")
+                    await _invite_bump(db, _inv_ended)
                     await db.commit()
             except Exception as e:
                 print(f"[QUEUE-CLEANUP] {_tag} lobby sweep error: {e}")
@@ -5956,6 +5972,26 @@ async def queue_cleanup_loop():
                               f"deleted {_receipts} send receipt(s)")
         except Exception as e:
             print(f"[MAIL-RETENTION] sweep error: {e}")
+        # ── Lobby invites (migration 405) ───────────────────────────────
+        # Own try/except (#228). Every pass: the sweep ends each pending
+        # invite it does not keep and bumps its invitee's revision, then
+        # retention deletes rows INVITE_KEEP_DAYS past their expiry. Two
+        # transactions, so a retention failure never undoes the sweep. The
+        # statements live in _invite_sweep and _invite_retention_sweep so the
+        # boot-time EXPLAIN self-test reaches them through these calls.
+        try:
+            async with async_session() as db:
+                _ended = await _invite_sweep(db)
+                await db.commit()
+            if _ended:
+                print(f"[INVITES] ended {_ended} invite(s)")
+            async with async_session() as db:
+                _gone = await _invite_retention_sweep(db)
+                await db.commit()
+            if _gone:
+                print(f"[INVITES] deleted {_gone} invite row(s) past retention")
+        except Exception as e:
+            print(f"[INVITES] sweep error: {e}")
         # ── FFA readmission (V3 P4.1 lapse, P3 journal windows) ─────────
         # Own try/except (#228). Both arms find candidates with a plain read
         # and act per lobby in one transaction each; a lobby with no hold and
@@ -44936,6 +44972,11 @@ async def delete_player_data(steam_id: str, request: Request, sig: str = Query(.
     # account was sitting in. Without this the lobby keeps pointing at the
     # anonymized account as host and nothing else ever repairs it (the series
     # UPDATEs above cannot — a lobby id matches no series row).
+    # Migration 405's change: the deleted account's pending invites for each
+    # open lobby it sat in end with its seat (sender_left), a disband ends the
+    # rest (lobby_closed), and the invitees' revisions move just before the
+    # commit below. Each lobby row is locked above.
+    _inv_ended = []
     for _lmode, _qt, _lt, _lids in (("team", "team_queue", "team_lobbies", _team_lob),
                                     ("ovt", "ovt_queue", "ovt_lobbies", _ovt_lob)):
         for _lid in _lids:
@@ -44944,6 +44985,7 @@ async def delete_player_data(steam_id: str, request: Request, sig: str = Query(.
                 " FOR UPDATE SKIP LOCKED"), {"lid": _lid})).mappings().first()
             if _ol is None:
                 continue
+            _inv_ended += await _invite_end_departed(db, _lmode, _lid, [pid])
             _live = (await db.execute(text(f"""
                 SELECT player_id FROM {_qt}
                  WHERE series_id = :lid AND status = 'lobby' AND player_id <> :pid
@@ -44960,6 +45002,7 @@ async def delete_player_data(steam_id: str, request: Request, sig: str = Query(.
                 # No-op for 'ovt'. A promotion (the elif) dissolves nothing.
                 if _killed is not None:
                     await _refund_lobby_bets(db, _lmode, _lid, "lobby_disbanded")
+                    _inv_ended += await _invite_end_lobby(db, _lmode, _lid, "lobby_closed")
             elif _ol["host_player_id"] == pid:
                 await db.execute(text(
                     f"UPDATE {_lt} SET host_player_id=:h WHERE id=:lid"
@@ -44978,6 +45021,7 @@ async def delete_player_data(steam_id: str, request: Request, sig: str = Query(.
             "SELECT id, host_player_id FROM ffa_lobbies WHERE id=:lid AND status='open'"
             " FOR UPDATE SKIP LOCKED"), {"lid": _lid})).mappings().first()
         if _ol is not None:
+            _inv_ended += await _invite_end_departed(db, "ffa", _lid, [pid])
             _live = (await db.execute(text("""
                 SELECT player_id FROM ffa_queue
                  WHERE series_id = :lid AND status = 'lobby' AND player_id <> :pid
@@ -44993,6 +45037,7 @@ async def delete_player_data(steam_id: str, request: Request, sig: str = Query(.
                 # wagers (migration 207). A promotion dissolves nothing.
                 if _killed is not None:
                     await _refund_lobby_bets(db, "ffa", _lid, "lobby_disbanded")
+                    _inv_ended += await _invite_end_lobby(db, "ffa", _lid, "lobby_closed")
             elif _ol["host_player_id"] == pid:
                 await db.execute(text(
                     "UPDATE ffa_lobbies SET host_player_id=:h WHERE id=:lid"
@@ -45243,6 +45288,7 @@ async def delete_player_data(steam_id: str, request: Request, sig: str = Query(.
     #     itself in-game; only the notification is dropped.
     await db.execute(text(_ERASE_RELAY_DMS_TO_SQL), {"sid": steam_id})
     await db.execute(text(_ERASE_RELAY_DMS_FROM_SQL), {"sid": steam_id, "pid": pid})
+    await _invite_bump(db, _inv_ended)
 
     await db.commit()
     print(f"[PRIVACY] Anonymized steam_id={steam_id} (placeholder={player.steam_id})")
@@ -48233,7 +48279,28 @@ async def _apply_ban_core(db: AsyncSession, *, admin_steam_id: str, target_steam
     _bpid = (await db.execute(text(
         "SELECT id FROM players WHERE steam_id = :sid"
     ), {"sid": target_steam_id})).scalar()
+    _ban_inv_ended = []
     if _bpid is not None:
+        # Migration 405's change: an open-lobby seat the ban removes ends the
+        # invites it sent for that lobby, under the lobby row's lock. Each such
+        # lobby row is locked BEFORE the queue rows below, so the ban keeps
+        # the canonical lobby -> queue-row order, and in the order account
+        # deletion takes them (FFA, then 2v2, then 1v2). The banned player's
+        # own joins wait on the identity lock above, so the seat cannot move
+        # to another lobby meanwhile; a seat that left in between leaves the
+        # end below with nothing to end.
+        _ban_lobbies = []
+        for _lmode, _lqt, _llt in (("ffa", "ffa_queue", "ffa_lobbies"),
+                                   ("team", "team_queue", "team_lobbies"),
+                                   ("ovt", "ovt_queue", "ovt_lobbies")):
+            _blid = (await db.execute(text(
+                f"SELECT series_id FROM {_lqt} WHERE player_id = :pid AND status = 'lobby'"
+            ), {"pid": _bpid})).scalar()
+            if _blid is not None:
+                await db.execute(text(
+                    f"SELECT 1 FROM {_llt} WHERE id = :lid FOR NO KEY UPDATE"
+                ), {"lid": _blid})
+                _ban_lobbies.append((_lmode, _blid))
         # ALL-status row delete (round-18 find 1). Round 15's pair-DISSOLUTION
         # branch was racy because it did partner WRITES from a status-filtered
         # snapshot; a bare unconditional DELETE of the banned player's own
@@ -48242,8 +48309,9 @@ async def _apply_ban_core(db: AsyncSession, *, admin_steam_id: str, target_steam
         # from entry through commit, so this DELETE either waits behind a
         # formation that commits first (room pre-dates the ban — legal) or
         # commits first, leaving the formation's member read empty (no room —
-        # the invariant). Lock order stays acyclic: ban = identity -> queue
-        # rows; formation = queue rows only, never identity. Innocent
+        # the invariant). Lock order stays acyclic: ban = identity -> (the
+        # open lobby rows above, migration 405's change) -> queue rows;
+        # formation = queue rows only, never identity. Innocent
         # partners self-heal via their polls' missing-opponent handling; live
         # groups keep reporting against their FROZEN rosters (member_ids /
         # series slots), which never referenced queue rows.
@@ -48251,6 +48319,8 @@ async def _apply_ban_core(db: AsyncSession, *, admin_steam_id: str, target_steam
             await db.execute(text(
                 f"DELETE FROM {_qt} WHERE player_id = :pid"
             ), {"pid": _bpid})
+        for _lmode, _blid in _ban_lobbies:
+            _ban_inv_ended += await _invite_end_departed(db, _lmode, _blid, [_bpid])
         # The candidate scans additionally exclude active bans (round-16) and
         # the issuance branches re-check all members (round-17) — those stay
         # as defense-in-depth around this serialization.
@@ -48284,6 +48354,10 @@ async def _apply_ban_core(db: AsyncSession, *, admin_steam_id: str, target_steam
     await db.execute(text(
         "DELETE FROM pc_delivery_leases WHERE subject_id IN "
         "(SELECT id FROM players WHERE steam_id = :sid)"), {"sid": target_steam_id})
+    # Migration 405's change: the invitees' revisions for the invites ended
+    # above, after the drain, as the core's last write (the ORM rows below are
+    # flushed at the caller's commit).
+    await _invite_bump(db, _ban_inv_ended)
     existing = await _is_banned(db, target_steam_id)
     if existing is not None:   # round-15 find 3: "" is an ACTIVE ban too
         return {"status": "already_banned", "reason": existing}
@@ -49248,6 +49322,12 @@ async def team_queue_leave(request: Request, steam_id: str = Query(...),
             text("DELETE FROM team_queue WHERE player_id = :pid"),
             {"pid": player.id},
         )
+        # Migration 405's change: an open-lobby member leaving through the
+        # queue leave ends the invites they sent for that lobby (the group
+        # lock above holds the lobby row).
+        if r["status"] == "lobby" and r["series_id"] is not None:
+            await _invite_bump(db, await _invite_end_departed(
+                db, "team", r["series_id"], [player.id]))
         await db.commit()
     return {"status": "left"}
 
@@ -49506,6 +49586,10 @@ async def team_queue_poll(steam_id: str, request: Request,
                 "DELETE FROM queue_leases WHERE player_id = :pid"
                 "   AND mode = 'team' AND group_id = :lid"),
                 {"pid": my_pid, "lid": me["series_id"]})
+            # Migration 405's change: the expired seat's pending invites for
+            # this lobby end with it.
+            await _invite_bump(db, await _invite_end_departed(
+                db, "team", me["series_id"], [my_pid]))
             await db.commit()
             print(f"[LEASE] open 2v2 lobby seat expired for {steam_id} (lobby {me['series_id']})")
             return TeamQueuePollResponse(status="lobby_closed")
@@ -53597,6 +53681,12 @@ async def ovt_queue_leave(request: Request, steam_id: str = Query(...),
     await db.execute(text(
         "DELETE FROM ovt_queue WHERE player_id = :pid"
     ), {"pid": me["player_id"]})
+    # Migration 405's change: an open-lobby member leaving through the queue
+    # leave ends the invites they sent for that lobby (the group lock above
+    # holds the lobby row).
+    if me["status"] == "lobby" and me["series_id"] is not None:
+        await _invite_bump(db, await _invite_end_departed(
+            db, "ovt", me["series_id"], [me["player_id"]]))
     await db.commit()
     return {"status": "ok", "lock_dissolved": dissolved}
 
@@ -53797,6 +53887,10 @@ async def ovt_queue_poll(steam_id: str, request: Request, db: AsyncSession = Dep
                 "DELETE FROM queue_leases WHERE player_id = :pid"
                 "   AND mode = 'ovt' AND group_id = :lid"),
                 {"pid": me["player_id"], "lid": me["series_id"]})
+            # Migration 405's change: the expired seat's pending invites for
+            # this lobby end with it.
+            await _invite_bump(db, await _invite_end_departed(
+                db, "ovt", me["series_id"], [me["player_id"]]))
             await db.commit()
             print(f"[LEASE] open 1v2 lobby seat expired for {steam_id} (lobby {me['series_id']})")
             return {"status": "lobby_closed", "queue_count": 0}
@@ -57775,14 +57869,18 @@ class _LobbyEntry:
     """A lobby create's or join's work before its commit: `answer` is the
     route's reply, `lobby_id` the lobby's id, `player_id` the caller's, and
     `note` the line logged after the commit (None for a recovery rejoin,
-    which has never logged one)."""
-    __slots__ = ("answer", "lobby_id", "player_id", "note")
+    which has never logged one). `bump` holds the mail rows of the invites
+    the work ended (a join's pruning ends the pruned members' invites,
+    migration 405's change); the route bumps them (_invite_bump) as the
+    transaction's last statement, before its commit."""
+    __slots__ = ("answer", "lobby_id", "player_id", "note", "bump")
 
-    def __init__(self, answer: dict, lobby_id, player_id, note: str | None):
+    def __init__(self, answer: dict, lobby_id, player_id, note: str | None, bump=()):
         self.answer = answer
         self.lobby_id = lobby_id
         self.player_id = player_id
         self.note = note
+        self.bump = list(bump)
 
 
 async def _lobby_entry_after_commit(db: AsyncSession, entry: _LobbyEntry, cfg: dict) -> dict:
@@ -57847,15 +57945,21 @@ async def _lobby_create_core(mode: str, req: _LobbyCreateReq, request: Request,
 async def _lobby_join_impl(mode: str, req: _LobbyJoinReq, request: Request,
                            db: AsyncSession) -> dict:
     entry = await _lobby_join_core(mode, req, request, db)
+    await _invite_bump(db, entry.bump)
     await db.commit()
     return await _lobby_entry_after_commit(db, entry, _lobby_cfg(mode))
 
 
 async def _lobby_join_core(mode: str, req: _LobbyJoinReq, request: Request,
-                           db: AsyncSession) -> _LobbyEntry:
+                           db: AsyncSession, invite=None) -> _LobbyEntry:
     """Everything a join does before its commit, in the same order, so a
     route can add its own rows to the same transaction. The caller commits,
-    then hands the result to _lobby_entry_after_commit."""
+    then hands the result to _lobby_entry_after_commit.
+
+    `invite` (an accept, migration 405's change) takes the password's place
+    for this one player: its row is locked right after the lobby row and
+    before the pruning, and re-checked after it (_InviteJoinHook). Every
+    other gate is the join's own, in the join's order."""
     cfg = _lobby_cfg(mode)
     await _check_steam_session(request, req.steam_id, db)
     await _assert_no_service_subject(db, affected_steam_ids=[req.steam_id])
@@ -57881,6 +57985,8 @@ async def _lobby_join_core(mode: str, req: _LobbyJoinReq, request: Request,
         f"SELECT id, status, password_hash, kicked_steam_ids, friendly_fire, same_cards"
         f"  FROM {cfg['lobbies']} WHERE id = :lid FOR UPDATE"
     ), {"lid": lobby_id})).mappings().first()
+    if invite is not None:
+        await invite.lock(db)
     if lrow is None or lrow["status"] != "open":
         raise HTTPException(404, "That lobby is no longer open")
     # Aug 8 (Sid): a kicked player may not rejoin THIS lobby. Checked before
@@ -57891,8 +57997,10 @@ async def _lobby_join_core(mode: str, req: _LobbyJoinReq, request: Request,
         raise HTTPException(403, "kicked_from_lobby")
     # Password AFTER the open-check (so a wrong password and a dead lobby stay
     # distinguishable) and BEFORE any membership mutation (so a failed guess
-    # can never leave a partial enrollment behind).
-    _lobby_password_check(lrow["password_hash"], req.password)
+    # can never leave a partial enrollment behind). An accept's invite stands
+    # in for it.
+    if invite is None:
+        _lobby_password_check(lrow["password_hash"], req.password)
     # A1 r2 (review MEDIUM :45600, swept from the one site it names to all
     # four). A seat pruned here is out of the lobby, but its lobby lease
     # outlives the row and keeps that player cross-mode blocked for the rest
@@ -57909,7 +58017,12 @@ async def _lobby_join_core(mode: str, req: _LobbyJoinReq, request: Request,
            AND NOT ({LOBBY_MEMBER_FRESH_SQL})
         RETURNING player_id
     """), {"lid": lobby_id})).all()]
+    _ended_invites = []
     if _pruned_seats:
+        # D7 (migration 405's change): a pruned seat's pending invites for
+        # this lobby end with it, from the DELETE's own RETURNING set (the one
+        # set that is exact, as above), before its leases go.
+        _ended_invites = await _invite_end_departed(db, mode, lobby_id, _pruned_seats)
         # Fenced to this mode+lobby: a lease the seat has SINCE taken
         # elsewhere is not this lobby's to destroy.
         await db.execute(text(
@@ -57919,6 +58032,8 @@ async def _lobby_join_core(mode: str, req: _LobbyJoinReq, request: Request,
     live = await _lobby_live_members(db, mode, lobby_id)
     await _assert_no_service_subject(
         db, affected_player_ids=[m["player_id"] for m in live] + [player.id])
+    if invite is not None:
+        invite.recheck(live)
     if any(m["player_id"] == player.id for m in live):
         # Idempotent rejoin — short-circuit so the capacity check can't 409
         # our own existing seat.
@@ -57929,7 +58044,7 @@ async def _lobby_join_core(mode: str, req: _LobbyJoinReq, request: Request,
         # is the only later actor that can repair the cross-queue ghost.
         return _LobbyEntry({"status": "ok", "lobby_id": str(lobby_id),
                             "player_count": len(live), "max_players": cfg["players"]},
-                           lobby_id, player.id, None)
+                           lobby_id, player.id, None, _ended_invites)
     if len(live) >= cfg["players"]:
         raise HTTPException(409, "That lobby is full")
     # Room rules (migration 306): a lobby whose CURRENT settings are
@@ -57946,7 +58061,7 @@ async def _lobby_join_core(mode: str, req: _LobbyJoinReq, request: Request,
                         "player_count": len(live) + 1, "max_players": cfg["players"]},
                        lobby_id, player.id,
                        f"[{cfg['label']}-LOBBY] {req.steam_id} joined lobby {lobby_id} "
-                       f"({len(live) + 1}/{cfg['players']})")
+                       f"({len(live) + 1}/{cfg['players']})", _ended_invites)
 
 
 async def _lobby_state_impl(mode: str, steam_id: str, request: Request,
@@ -58012,6 +58127,9 @@ async def _lobby_state_impl(mode: str, steam_id: str, request: Request,
             "DELETE FROM queue_leases WHERE player_id = :pid"
             "   AND mode = :mode AND group_id = :lid"),
             {"pid": me["player_id"], "mode": mode, "lid": lobby_id})
+        # Migration 405's change: a member who leaves an open lobby ends the
+        # invites they sent for it (the lobby row is locked above).
+        await _invite_bump(db, await _invite_end_departed(db, mode, lobby_id, [me["player_id"]]))
         await db.commit()
         print(f"[LEASE] open {mode} lobby seat expired for {steam_id} (lobby {lobby_id})")
         return {"status": "not_in_lobby"}
@@ -58026,6 +58144,10 @@ async def _lobby_state_impl(mode: str, steam_id: str, request: Request,
         "seen": max(0, int(seen_settings_version or 0)), "cur": _cur_ver})
     live = await _lobby_live_members(db, mode, lobby_id)
     host_id = _lobby_effective_host(lrow["host_player_id"], live)
+    # Migration 405's change: the lobby's invites, for a member whose client
+    # is at or above the invite floor (an older client is never sent them).
+    invites = (await _invite_lobby_list(db, mode, lobby_id, me["player_id"], host_id)
+               if _invite_ok_for(request) else None)
     now_utc = datetime.now(timezone.utc)
     await db.commit()
     _rules = _rules_from_lobby_row(lrow)
@@ -58072,6 +58194,7 @@ async def _lobby_state_impl(mode: str, steam_id: str, request: Request,
             "wait_seconds": int((now_utc - m["joined_at"]).total_seconds()) if m["joined_at"] else 0,
             **_member_flags(m),
         } for m in live],
+        **({"invites": invites} if invites is not None else {}),
     }
 
 
@@ -58193,6 +58316,10 @@ async def _lobby_leave_impl(mode: str, steam_id: str, expected_lobby_id: str | N
     await db.execute(text(
         "DELETE FROM queue_leases WHERE player_id = :pid AND group_id = CAST(:lid AS uuid)"
     ), {"pid": me["player_id"], "lid": str(lobby_id)})
+    # Migration 405's change: the leaver's pending invites for this lobby end
+    # with them (sender_left), and a disband ends the rest (lobby_closed);
+    # the invitees' revisions move as the transaction's last statement.
+    _inv_ended = await _invite_end_departed(db, mode, lobby_id, [me["player_id"]])
     remaining = (await db.execute(text(f"""
         SELECT player_id FROM {cfg['queue']}
          WHERE series_id = :lid AND status = 'lobby' AND {LOBBY_MEMBER_FRESH_SQL}
@@ -58212,6 +58339,7 @@ async def _lobby_leave_impl(mode: str, steam_id: str, expected_lobby_id: str | N
         # lobby that is about to start. No-op for 'ovt' (no bet table).
         if _killed is not None:
             await _refund_lobby_bets(db, mode, lobby_id, "lobby_disbanded")
+            _inv_ended += await _invite_end_lobby(db, mode, lobby_id, "lobby_closed")
     else:
         # Promote only when the LEAVER was the stored host (a read never
         # persists the derived host — see _lobby_effective_host).
@@ -58222,6 +58350,7 @@ async def _lobby_leave_impl(mode: str, steam_id: str, expected_lobby_id: str | N
             await db.execute(text(
                 f"UPDATE {cfg['lobbies']} SET host_player_id=:h WHERE id=:lid"
             ), {"h": remaining[0], "lid": lobby_id})
+    await _invite_bump(db, _inv_ended)
     await db.commit()
     print(f"[{cfg['label']}-LOBBY] {steam_id} left lobby {lobby_id}"
           f"{' (disbanded)' if disbanded else f' ({len(remaining)} left)'}")
@@ -58680,6 +58809,12 @@ async def _lobby_kick_impl(mode: str, req: _LobbyKickReq, request: Request,
     await db.execute(text(
         "DELETE FROM queue_leases WHERE player_id = :pid AND mode = :m AND group_id = :lid"),
         {"pid": target["player_id"], "m": mode, "lid": lobby_id})
+    # Migration 405's change: the kicked member's pending invites for this
+    # lobby end (sender_left), and so do the lobby's pending invites to them
+    # (invitee_kicked); the invitees' revisions move as the last statement.
+    _inv_ended = await _invite_end_departed(db, mode, lobby_id, [target["player_id"]])
+    _inv_ended += await _invite_end_kicked(db, mode, lobby_id, [target["player_id"]])
+    await _invite_bump(db, _inv_ended)
     await db.commit()
     print(f"[{cfg['label']}-LOBBY] host {req.steam_id} kicked {req.target_steam_id} "
           f"from lobby {lobby_id}")
@@ -58816,9 +58951,16 @@ async def _lobby_start_common(db: AsyncSession, mode: str, steam_id: str, reques
     # the fix: that would drop the group lock this function still needs for
     # the checks below and for the caller's Start. Instead, commit only on the
     # way out through a raise, where the lock is being released anyway.
+    #
+    # Migration 405's change: a refusal that commits the evictions also ends
+    # the invites the removed seats sent (stale and banned alike) and bumps
+    # their invitees' revisions as its last statement. A start that goes
+    # through ends every pending invite of the lobby at its caller instead.
     async def _fail(exc: HTTPException):
         if _banned:
             try:
+                await _invite_bump(db, await _invite_end_departed(
+                    db, mode, lobby_id, _pruned_seats + _banned))
                 await db.commit()
             except Exception as _cex:
                 print(f"[{cfg['label']}-LOBBY] ban-eviction commit failed: {_cex}")
@@ -59131,6 +59273,10 @@ async def team_lobby_start(req: _LobbyStartReq, request: Request,
         await db.rollback()
         raise HTTPException(status_code=409, detail=
                             "A lobby member entered another live match")
+    # Migration 405's change: the start ends the lobby's pending invites
+    # (lobby_started) and bumps their invitees' revisions, the last write
+    # before the relock stamp below, which stays last.
+    await _invite_bump(db, await _invite_end_lobby(db, "team", lobby_id, "lobby_started"))
     if _pick_outcome == "picked":
         # r4 finding (H1 placement): the relock stamp must be the LAST write
         # before commit so the 10-minute DC fence measures externally-visible
@@ -59267,6 +59413,9 @@ async def ovt_lobby_start(req: _LobbyStartReq, request: Request,
         await db.rollback()
         raise HTTPException(status_code=409, detail=
                             "A lobby member entered another live match")
+    # Migration 405's change: the start ends the lobby's pending invites
+    # (lobby_started) and bumps their invitees' revisions, as its last write.
+    await _invite_bump(db, await _invite_end_lobby(db, "ovt", lobby_id, "lobby_started"))
     await db.commit()
     print(f"[1v2-LOBBY] host {req.steam_id} started lobby {lobby_id} "
           f"series {series_id} room {room} solo={solo['steam_id']}")
@@ -59620,6 +59769,7 @@ async def _ffa_lobby_create_core(req: _FfaLobbyCreateReq, request: Request,
 async def ffa_lobby_join(req: _FfaLobbyJoinReq, request: Request, db: AsyncSession = Depends(get_db)):
     """Join an open host lobby from the browser."""
     entry = await _ffa_lobby_join_core(req, request, db)
+    await _invite_bump(db, entry.bump)
     await db.commit()
     answer = await _lobby_entry_after_commit(db, entry, _FFA_LOBBY_QUEUE_CFG)
     # Config echo (Codex client round-2 find 13): without it the client's
@@ -59629,10 +59779,10 @@ async def ffa_lobby_join(req: _FfaLobbyJoinReq, request: Request, db: AsyncSessi
 
 
 async def _ffa_lobby_join_core(req: _FfaLobbyJoinReq, request: Request,
-                               db: AsyncSession) -> _LobbyEntry:
+                               db: AsyncSession, invite=None) -> _LobbyEntry:
     """Everything an FFA join does before its commit, in the same order, as
-    _lobby_join_core is for the other modes. The route adds the config echo
-    after its commit."""
+    _lobby_join_core is for the other modes, `invite` included. The route
+    adds the config echo after its commit."""
     await _check_steam_session(request, req.steam_id, db)
     await _assert_no_service_subject(db, affected_steam_ids=[req.steam_id])
     _presence_touch(req.steam_id)
@@ -59654,6 +59804,8 @@ async def _ffa_lobby_join_core(req: _FfaLobbyJoinReq, request: Request,
     lrow = (await db.execute(text(
         "SELECT id, status, password_hash, kicked_steam_ids FROM ffa_lobbies WHERE id = :lid FOR UPDATE"
     ), {"lid": lobby_id})).mappings().first()
+    if invite is not None:
+        await invite.lock(db)
     if lrow is None or lrow["status"] != "open":
         raise HTTPException(404, "That lobby is no longer open")
     # Aug 8 (Sid): kicked players may not rejoin — before the password so the
@@ -59663,8 +59815,9 @@ async def _ffa_lobby_join_core(req: _FfaLobbyJoinReq, request: Request,
     # Aug 6 item 9. Checked under the lobby lock and BEFORE any membership
     # mutation, so a wrong password cannot leave a partial enrollment behind.
     # Deliberately AFTER the open-check so a wrong password and a dead lobby
-    # stay distinguishable to the client.
-    _lobby_password_check(lrow["password_hash"], req.password)
+    # stay distinguishable to the client. An accept's invite stands in for it.
+    if invite is None:
+        _lobby_password_check(lrow["password_hash"], req.password)
     # A1 r2 (review MEDIUM :45600, swept from the one site it names to all
     # four). A seat pruned here is out of the lobby, but its lobby lease
     # outlives the row and keeps that player cross-mode blocked for the rest
@@ -59681,7 +59834,10 @@ async def _ffa_lobby_join_core(req: _FfaLobbyJoinReq, request: Request,
            AND NOT ({FFA_LOBBY_MEMBER_FRESH_SQL})
         RETURNING player_id
     """), {"lid": lobby_id})).all()]
+    _ended_invites = []
     if _pruned_seats:
+        # D7 (migration 405's change): as _lobby_join_core's pruning.
+        _ended_invites = await _invite_end_departed(db, "ffa", lobby_id, _pruned_seats)
         # Fenced to this mode+lobby: a lease the seat has SINCE taken
         # elsewhere is not this lobby's to destroy.
         await db.execute(text(
@@ -59691,6 +59847,8 @@ async def _ffa_lobby_join_core(req: _FfaLobbyJoinReq, request: Request,
     live = await _ffa_live_lobby_members(db, lobby_id)
     await _assert_no_service_subject(
         db, affected_player_ids=[m["player_id"] for m in live] + [player.id])
+    if invite is not None:
+        invite.recheck(live)
     if any(m["player_id"] == player.id for m in live):
         # Idempotent same-lobby rejoin handled in the enroll helper too, but
         # short-circuit so the capacity check below can't 409 our own row.
@@ -59699,12 +59857,14 @@ async def _ffa_lobby_join_core(req: _FfaLobbyJoinReq, request: Request,
         # (impl review find 10): if the FIRST enrollment's best-effort
         # eviction failed, the recovery rejoin is the only later actor that
         # can repair the cross-queue ghost.
-        return _LobbyEntry({"status": "ok", "lobby_id": str(lobby_id)}, lobby_id, player.id, None)
+        return _LobbyEntry({"status": "ok", "lobby_id": str(lobby_id)}, lobby_id, player.id, None,
+                           _ended_invites)
     if len(live) >= FFA_MAX_PLAYERS:
         raise HTTPException(409, "That lobby is full")
     await _ffa_lobby_enroll_caller(db, player, req, lobby_id)
     return _LobbyEntry({"status": "ok", "lobby_id": str(lobby_id)}, lobby_id, player.id,
-                       f"[FFA-LOBBY] {req.steam_id} joined lobby {lobby_id} ({len(live)+1} members)")
+                       f"[FFA-LOBBY] {req.steam_id} joined lobby {lobby_id} ({len(live)+1} members)",
+                       _ended_invites)
 
 
 async def _ffa_lobby_config_echo(db: AsyncSession, lobby_id) -> dict:
@@ -60335,6 +60495,11 @@ async def ffa_lobby_start(req: _FfaLobbyStartReq, request: Request, db: AsyncSes
     # lock (I2 writer 1).
     room, region, ordered, _locked_ranked = await _ffa_lock_roster(
         db, lobby_id, live, offered_pid=me["player_id"])
+    # Migration 405's change: the start ends the lobby's pending invites
+    # (lobby_started) and bumps their invitees' revisions, as its last write.
+    # Every refusal above rolls back, the prunes with it, so no refusal owes
+    # an invite end.
+    await _invite_bump(db, await _invite_end_lobby(db, "ffa", lobby_id, "lobby_started"))
     await db.commit()
     print(f"[FFA-LOBBY] host {req.steam_id} started lobby {lobby_id} room {room} n={len(ordered)}")
     try:
@@ -60475,6 +60640,10 @@ async def ffa_lobby_kick(req: _LobbyKickReq, request: Request,
     await db.execute(text(
         "DELETE FROM queue_leases WHERE player_id = :pid AND mode = 'ffa' AND group_id = :lid"),
         {"pid": target["player_id"], "lid": lobby_id})
+    # Migration 405's change: as the 2v2 and 1v2 kick (_lobby_kick_impl).
+    _inv_ended = await _invite_end_departed(db, "ffa", lobby_id, [target["player_id"]])
+    _inv_ended += await _invite_end_kicked(db, "ffa", lobby_id, [target["player_id"]])
+    await _invite_bump(db, _inv_ended)
     await db.commit()
     print(f"[FFA-LOBBY] host {req.steam_id} kicked {req.target_steam_id} from lobby {lobby_id}")
     return {"status": "kicked"}
@@ -60618,6 +60787,10 @@ async def ffa_queue_leave(request: Request, steam_id: str = Query(...),
     if me["status"] == "lobby" and lobby_id is not None:
         await db.execute(text("DELETE FROM ffa_queue WHERE player_id = :pid"),
                          {"pid": me["player_id"]})
+        # Migration 405's change: the leaver's pending invites for this lobby
+        # end with them (sender_left), and a disband ends the rest
+        # (lobby_closed); the invitees' revisions move as the last statement.
+        _inv_ended = await _invite_end_departed(db, "ffa", lobby_id, [me["player_id"]])
         lrow = (await db.execute(text(
             "SELECT status, host_player_id FROM ffa_lobbies WHERE id = :lid"
         ), {"lid": lobby_id})).mappings().first()
@@ -60640,11 +60813,13 @@ async def ffa_queue_leave(request: Request, steam_id: str = Query(...),
                         await _refund_lobby_bets(db, "ffa", lobby_id, "lobby_disbanded")
                     except Exception as _re:
                         print(f"[FFA-LOBBY] lobby-bet refund deferred to janitor: {_re}")
+                    _inv_ended += await _invite_end_lobby(db, "ffa", lobby_id, "lobby_closed")
             elif lrow["host_player_id"] == me["player_id"]:
                 await db.execute(text(
                     "UPDATE ffa_lobbies SET host_player_id=:h WHERE id=:lid"
                 ), {"h": live[0]["player_id"], "lid": lobby_id})
                 print(f"[FFA-LOBBY] host left lobby {lobby_id} — promoted earliest member")
+        await _invite_bump(db, _inv_ended)
         await db.commit()
         return {"status": "ok"}
     if me["status"] == "ready_join" and lobby_id is not None:
@@ -65058,11 +65233,19 @@ async def _ffa_queue_poll_inner(steam_id: str, request: Request, db: AsyncSessio
                 "DELETE FROM queue_leases WHERE player_id = :pid"
                 "   AND mode = 'ffa' AND group_id = :lid"),
                 {"pid": me["player_id"], "lid": me["series_id"]})
+            # Migration 405's change: a member who leaves an open lobby ends
+            # the invites they sent for it (the group helper holds the lobby).
+            await _invite_bump(db, await _invite_end_departed(
+                db, "ffa", me["series_id"], [me["player_id"]]))
             await db.commit()
             print(f"[LEASE] open-lobby seat expired for {steam_id} (lobby {me['series_id']})")
             return {"status": "lobby_closed", "queue_count": 0}
         live = await _ffa_live_lobby_members(db, me["series_id"])
         host_id = _ffa_effective_host(lrow["host_player_id"], live)
+        # Migration 405's change: the lobby's invites, for a member whose
+        # client is at or above the invite floor.
+        invites = (await _invite_lobby_list(db, "ffa", me["series_id"], me["player_id"], host_id)
+                   if _invite_ok_for(request) else None)
         now_utc = datetime.now(timezone.utc)
         await db.commit()
         _cfg = _ffa_lobby_config(lrow)
@@ -65106,6 +65289,7 @@ async def _ffa_queue_poll_inner(steam_id: str, request: Request, db: AsyncSessio
                  "wait_seconds": int((now_utc - m["joined_at"]).total_seconds()) if m["joined_at"] else 0}
                 for m in live
             ],
+            **({"invites": invites} if invites is not None else {}),
         }
 
     # Already locked → self-heal dead locks, else report the lobby.
@@ -78737,21 +78921,32 @@ async def _mail_rate_or_raise(db: AsyncSession, sender_id) -> None:
     trigger), so each committed send is one receipt. A row's
     life depends on delivery (the janitor purges a deleted message only once
     no delivered copy keeps it), so the window neither counts rows nor
-    relies on how long the janitor keeps them."""
+    relies on how long the janitor keeps them.
+
+    Invites count too (migration 405's change), from the sender's
+    lobby_invites rows: an invite writes no send receipt, and its row lives
+    INVITE_KEEP_DAYS past its expiry whatever its delivery, so the day's
+    count is the same for a delivered and a suppressed invite."""
     # Retry-After is the time until the OLDEST send inside the exhausted
     # window leaves it (review r1) — computed in SQL against the same NOW()
     # the counts use, so a limiter that says "retry in N seconds" is telling
     # the truth for both windows instead of advertising a flat hour.
     rate = (await db.execute(text(
-        "SELECT COUNT(*) FILTER (WHERE created_at > NOW() - make_interval(mins => 1)) AS per_minute,"
+        "WITH s AS ("
+        "  SELECT created_at FROM mail_send_receipts"
+        "   WHERE sender_id = :sid AND kind = 'direct'"
+        "     AND created_at > NOW() - make_interval(days => 1)"
+        "  UNION ALL"
+        "  SELECT created_at FROM lobby_invites"
+        "   WHERE sender_player_id = :sid"
+        "     AND created_at > NOW() - make_interval(days => 1))"
+        " SELECT COUNT(*) FILTER (WHERE created_at > NOW() - make_interval(mins => 1)) AS per_minute,"
         "       COUNT(*) AS per_day,"
         "       CEIL(EXTRACT(EPOCH FROM ("
         "            MIN(created_at) FILTER (WHERE created_at > NOW() - make_interval(mins => 1))"
         "            + make_interval(mins => 1) - NOW()))) AS minute_wait,"
         "       CEIL(EXTRACT(EPOCH FROM (MIN(created_at) + make_interval(days => 1) - NOW()))) AS day_wait"
-        "  FROM mail_send_receipts"
-        " WHERE sender_id = :sid AND kind = 'direct'"
-        "   AND created_at > NOW() - make_interval(days => 1)"
+        "  FROM s"
     ), {"sid": sender_id})).mappings().first()
     per_minute = int((rate or {}).get("per_minute") or 0)
     per_day = int((rate or {}).get("per_day") or 0)
@@ -79125,13 +79320,16 @@ async def _mail_reply_core(db: AsyncSession, me: dict, *, message_id: str | None
     # refused whether or not the purge has taken it yet. A row admitted
     # through the caller's own live delivered copy is one the purge cannot
     # take while that copy is live. A broadcast's envelopes are never read.
+    # An invite's sender holds no handle on its mail row (migration 405's
+    # change): the sender branch leaves kind 'invite' out, so a reply or a
+    # reply all to it answers its sender as for an absent id.
     rows = (await db.execute(text(
         _MAIL_CLOCK_CTE +
         " o AS MATERIALIZED ("
         "  SELECT m.id, m.sender_id, m.kind, m.thread_id, m.subject"
         "    FROM mail_messages m CROSS JOIN t"
         "   WHERE m.id = :mid"
-        "     AND ((m.sender_id = :me AND m.deleted_by_sender_at IS NULL"
+        "     AND ((m.sender_id = :me AND m.deleted_by_sender_at IS NULL AND m.kind <> 'invite'"
         "           AND m.created_at > t.now_ - make_interval(days => CAST(:ret_days AS integer)))"
         "          OR EXISTS (SELECT 1 FROM mail_recipients r"
         "                      WHERE r.message_id = m.id AND r.recipient_id = :me"
@@ -79145,7 +79343,9 @@ async def _mail_reply_core(db: AsyncSession, me: dict, *, message_id: str | None
     if not rows:
         raise HTTPException(status_code=404, detail="not_found")
     orig = rows[0]
-    if reply_all and orig["kind"] == "system_broadcast":
+    # An invite has one recipient, so its invitee's reply all is refused as
+    # a broadcast's is; a plain reply to it is unchanged.
+    if reply_all and orig["kind"] in ("system_broadcast", "invite"):
         raise HTTPException(status_code=400, detail="reply_all_refused")
     pairs = [(orig["sender_id"], "to", False)]
     if reply_all:
@@ -79180,9 +79380,12 @@ async def mail_inbox(request: Request, cursor: str = Query(""),
                      limit: int = Query(MAIL_PAGE_DEFAULT, ge=1, le=MAIL_PAGE_MAX),
                      db: AsyncSession = Depends(get_db)):
     """Newest first, keyset-paged on (created_at, id). Delivered, undeleted
-    envelopes only — a suppressed copy is never listed (B-7)."""
+    envelopes only — a suppressed copy is never listed (B-7). An invite's
+    row (migration 405) carries its `invite` object, and is left out for a
+    caller whose client is below the invite floor."""
     me = await _mail_caller(request, db)
     c_at, c_id = _mail_cursor_decode(cursor)
+    inv_ok = _invite_ok_for(request)
     rows = (await db.execute(text(
         "SELECT m.id, m.thread_id, m.subject, m.created_at, m.kind, r.read_at,"
         "       s.steam_id AS sender_steam_id, s.display_name AS sender_name,"
@@ -79194,19 +79397,23 @@ async def mail_inbox(request: Request, cursor: str = Query(""),
         "  LEFT JOIN glicko_ratings gr ON gr.player_id = s.id"
         "  LEFT JOIN shop_items si ON si.id = s.active_title_id"
         " WHERE r.recipient_id = :me AND r.delivery = 'delivered' AND r.deleted_at IS NULL"
+        "   AND (CAST(:inv_ok AS boolean) OR m.kind <> 'invite')"
         "   AND (CAST(:c_at AS timestamptz) IS NULL"
         "        OR (m.created_at, m.id) < (CAST(:c_at AS timestamptz), CAST(:c_id AS uuid)))"
         " ORDER BY m.created_at DESC, m.id DESC"
         " LIMIT CAST(:lim AS integer)"
-    ), {"me": me["id"], "c_at": c_at, "c_id": c_id, "lim": limit + 1})).mappings().all()
+    ), {"me": me["id"], "inv_ok": inv_ok, "c_at": c_at, "c_id": c_id,
+        "lim": limit + 1})).mappings().all()
     page, next_cursor = _mail_page(rows, limit)
     colors = await _mail_sender_colors(db, page)
+    invites = await _invite_objects_for_messages(db, me["id"], page) if inv_ok else {}
     return {"messages": [{
         "id": str(r["id"]), "thread_id": str(r["thread_id"]), "kind": r["kind"],
         "sender": {"steam_id": r["sender_steam_id"], "name": r["sender_name"],
                    "title_color": colors.get(r["sender_pid"], "")},
         "subject": r["subject"], "created_at": _mail_iso(r["created_at"]),
         "read_at": _mail_iso(r["read_at"]),
+        **({"invite": invites[r["id"]]} if r["id"] in invites else {}),
     } for r in page], "next_cursor": next_cursor}
 
 
@@ -79221,7 +79428,8 @@ async def mail_sent(request: Request, cursor: str = Query(""),
     whatever its delivery: the janitor's purge depends on the recipients'
     delivery, so the list never relies on it. The page and its addressees
     come from one statement with the clock read inside it (_MAIL_CLOCK_CTE,
-    _MAIL_ADDRESSEES_CTE)."""
+    _MAIL_ADDRESSEES_CTE). An invite's mail row is never listed: its sender
+    holds no handle on it (migration 405's change)."""
     me = await _mail_caller(request, db)
     c_at, c_id = _mail_cursor_decode(cursor)
     rows = (await db.execute(text(
@@ -79229,7 +79437,7 @@ async def mail_sent(request: Request, cursor: str = Query(""),
         " src AS MATERIALIZED ("
         "  SELECT m.id, m.thread_id, m.subject, m.created_at, m.kind"
         "    FROM mail_messages m CROSS JOIN t"
-        "   WHERE m.sender_id = :me AND m.deleted_by_sender_at IS NULL"
+        "   WHERE m.sender_id = :me AND m.deleted_by_sender_at IS NULL AND m.kind <> 'invite'"
         "     AND m.created_at > t.now_ - make_interval(days => CAST(:ret_days AS integer))"
         "     AND (CAST(:c_at AS timestamptz) IS NULL"
         "          OR (m.created_at, m.id) < (CAST(:c_at AS timestamptz), CAST(:c_id AS uuid)))"
@@ -79257,16 +79465,21 @@ async def mail_status(request: Request, db: AsyncSession = Depends(get_db)):
     envelope in the sending transaction, so it moves exactly when new mail
     arrives and in commit order — never on a read or a delete, and never
     backwards (the client toasts on a change, never on the count); "" until
-    the first delivery. Carries mail_from so the Settings pane can render
-    the current preference without a second call."""
+    the first delivery. Since migration 405 it also moves on every change of
+    an invite's state and when the invitee deletes an invite's copy (never
+    for a suppressed copy), so a client refetches what an answer elsewhere
+    changed. Carries mail_from so the Settings pane can render the current
+    preference without a second call. A caller below the invite floor is
+    counted no invite row."""
     me = await _mail_caller(request, db)
     row = (await db.execute(text(
         "SELECT"
-        "  (SELECT COUNT(*) FROM mail_recipients"
-        "    WHERE recipient_id = :me AND delivery = 'delivered'"
-        "      AND read_at IS NULL AND deleted_at IS NULL) AS unread,"
+        "  (SELECT COUNT(*) FROM mail_recipients r JOIN mail_messages m ON m.id = r.message_id"
+        "    WHERE r.recipient_id = :me AND r.delivery = 'delivered'"
+        "      AND r.read_at IS NULL AND r.deleted_at IS NULL"
+        "      AND (CAST(:inv_ok AS boolean) OR m.kind <> 'invite')) AS unread,"
         "  (SELECT rev FROM mail_inbox_rev WHERE recipient_id = :me) AS revision"
-    ), {"me": me["id"]})).mappings().first()
+    ), {"me": me["id"], "inv_ok": _invite_ok_for(request)})).mappings().first()
     rev = int((row or {}).get("revision") or 0)
     out = {"unread": int((row or {}).get("unread") or 0),
            "revision": str(rev) if rev > 0 else ""}
@@ -79390,9 +79603,14 @@ async def mail_detail(message_id: str, request: Request, db: AsyncSession = Depe
     """Full message for its sender (until they delete it, or until
     MAIL_RETENTION_DAYS after it was sent, as in Sent) or a delivered,
     undeleted recipient. to/cc carry names only — delivery is NOT exposed.
-    Marks nothing read (the client posts /read explicitly)."""
+    Marks nothing read (the client posts /read explicitly). Migration 405's
+    change: an invite's sender holds no handle on its mail row (the sender
+    branch leaves kind 'invite' out), the invitee's copy carries its
+    `invite` object, and a caller below the invite floor is shown no invite
+    row."""
     me = await _mail_caller(request, db)
     mid = _mail_parse_uuid(message_id, "message_id")
+    inv_ok = _invite_ok_for(request)
     # The message, who may read it and its addressees in ONE statement, with
     # the clock read inside it (_MAIL_CLOCK_CTE, _MAIL_ADDRESSEES_CTE).
     rows = (await db.execute(text(
@@ -79410,20 +79628,22 @@ async def mail_detail(message_id: str, request: Request, db: AsyncSession = Depe
         "    LEFT JOIN mail_recipients r ON r.message_id = m.id AND r.recipient_id = :me"
         "                               AND r.delivery = 'delivered' AND r.deleted_at IS NULL"
         "   WHERE m.id = :mid"
+        "     AND (CAST(:inv_ok AS boolean) OR m.kind <> 'invite')"
         "     AND (r.recipient_id IS NOT NULL"
-        "          OR (m.sender_id = :me AND m.deleted_by_sender_at IS NULL"
+        "          OR (m.sender_id = :me AND m.deleted_by_sender_at IS NULL AND m.kind <> 'invite'"
         "              AND m.created_at > t.now_ - make_interval(days => CAST(:ret_days AS integer))))),"
         + _MAIL_ADDRESSEES_CTE +
         " SELECT src.*, a.kind AS addr_kind, a.steam_id AS addr_steam_id, a.display_name AS addr_name"
         "   FROM src LEFT JOIN a ON a.message_id = src.id AND a.rn <= CAST(:cap AS integer)"
         "  ORDER BY a.rn"
-    ), {"mid": mid, "me": me["id"], "ret_days": MAIL_RETENTION_DAYS,
+    ), {"mid": mid, "me": me["id"], "ret_days": MAIL_RETENTION_DAYS, "inv_ok": inv_ok,
         "cap": MAIL_ADDRESSEES_MAX})).mappings().all()
     if not rows:
         raise HTTPException(status_code=404, detail="not_found")
     row = _mail_group_addressees(rows)[0]
     colors = await _mail_sender_colors(db, [row])
     addr = row["addressees"]
+    invites = await _invite_objects_for_messages(db, me["id"], [row]) if inv_ok else {}
     return {
         "id": str(row["id"]), "thread_id": str(row["thread_id"]),
         # The parent's id also after the janitor has purged the parent: no
@@ -79442,6 +79662,7 @@ async def mail_detail(message_id: str, request: Request, db: AsyncSession = Depe
         "created_at": _mail_iso(row["created_at"]), "read_at": _mail_iso(row["read_at"]),
         "to": [{"steam_id": a["steam_id"], "name": a["name"]} for a in addr if a["kind"] == "to"],
         "cc": [{"steam_id": a["steam_id"], "name": a["name"]} for a in addr if a["kind"] == "cc"],
+        **({"invite": invites[row["id"]]} if row["id"] in invites else {}),
     }
 
 
@@ -79480,9 +79701,11 @@ async def mail_delete(message_id: str, request: Request, db: AsyncSession = Depe
         " WHERE message_id = :mid AND recipient_id = :me AND delivery = 'delivered'"
         " RETURNING 1"
     ), {"mid": mid, "me": me["id"]})).first()
+    # Migration 405's change: an invite's sender holds no handle on its mail
+    # row, so the sender's update leaves kind 'invite' out.
     as_sender = (await db.execute(text(
         "UPDATE mail_messages SET deleted_by_sender_at = COALESCE(deleted_by_sender_at, NOW())"
-        " WHERE id = :mid AND sender_id = :me"
+        " WHERE id = :mid AND sender_id = :me AND kind <> 'invite'"
         " RETURNING 1"
     ), {"mid": mid, "me": me["id"]})).first()
     if as_recipient is not None:
@@ -79501,8 +79724,24 @@ async def mail_delete(message_id: str, request: Request, db: AsyncSession = Depe
         # Deleting it made that last case answer "this code names nothing".
         await db.execute(text(_MAIL_CANCEL_PENDING_DM_SQL),
                          {"mid": mid, "sid": me["steam_id"]})
+        # Migration 405's change: deleting a copy of an invite takes it off
+        # the invitee's pending list, so their revision moves and their
+        # other clients refetch. One row, the transaction's last statement.
+        await db.execute(text(_INVITE_DELETE_BUMP_SQL), {"mid": mid, "me": me["id"]})
     await db.commit()
     return {"status": "deleted", "id": str(mid)}
+
+
+# The deleting invitee's own revision, when the copy deleted is an invite's.
+_INVITE_DELETE_BUMP_SQL = (
+    "INSERT INTO mail_inbox_rev (recipient_id, rev)"
+    " SELECT r.recipient_id, 1"
+    "   FROM mail_recipients r JOIN mail_messages m ON m.id = r.message_id"
+    "  WHERE r.message_id = :mid AND r.recipient_id = :me AND r.delivery = 'delivered'"
+    "    AND m.kind = 'invite'"
+    " ON CONFLICT (recipient_id) DO UPDATE"
+    "   SET rev = mail_inbox_rev.rev + 1, updated_at = NOW()"
+)
 
 
 @app.post("/api/v1/mail/{message_id}/report", tags=["Mail"])
@@ -79947,6 +80186,936 @@ async def admin_mail_bulk_grant_revoke(
         details={"revoked": gone is not None})
     await db.commit()
     return {"status": "ok", "steam_id": sid, "revoked": gone is not None}
+
+
+# ── Lobby invites (migration 405) ───────────────────────────────────────────
+#
+# An invite is one lobby_invites row: this player asks that player to join
+# this lobby. Two ways in, one row shape: an invite to a lobby the sender is
+# a live member of, and a challenge, which opens a lobby for the sender with
+# the mode's own create core and invites the named player to it in the same
+# transaction. The invitee gets one mail row of kind 'invite', written by
+# mail's own fan-out, so a block or mail_from suppresses it exactly as it
+# suppresses mail. Accepting is the mode's own join core with the invite in
+# place of the lobby's password for that one player (_InviteJoinHook).
+#
+# No answer here, no mail row and no Discord relay carries a room name or a
+# lobby password (lesson 463), and no answer to a sender depends on the
+# invitee's delivery or presence.
+#
+# Lock order on every invite path: the caller's identity; the per-sender
+# mail lock (sends only); the lobby row; invite rows (the request's own
+# first); queue rows; leases; and last, inbox revisions, bumped once per
+# transaction by _invite_bump in one statement, in ascending recipient order.
+#
+# Keyed requests (send, accept, decline, cancel) read the caller's
+# invite_receipts row for the key under the caller's identity lock, before
+# any route, path or state check: the same fingerprint gets the repeat
+# answer, built from the rows as they are now; another gets 409
+# idempotency_key_reused; a refusal writes no receipt, so its retry runs
+# again.
+
+INVITE_LIFETIME_MINUTES = 10
+# The client version that ships invites, PROVISIONAL: it is the release that
+# carries the client half, set when that release is numbered. A send to an
+# invitee whose last version (players.mod_version) is below it is refused,
+# and the inbox leaves invite rows out for a caller below it. An absent or
+# unparsable version is below it (_mod_version_at_least).
+INVITE_FLOOR_VERSION = "1.42.0"
+INVITE_ENDED_SHOWN_SECONDS = 120   # an ended invite stays in its lobby's list this long
+INVITE_KEEP_DAYS = 7               # a row, and by the cascade its receipts, goes this long after expires_at
+INVITE_PAGE_MAX = 50
+INVITE_LIST_MAX = 64               # rows in one lobby's invite list
+INVITE_SWEEP_BATCH = 500
+_INVITE_LOBBY_TABLES = {"team": "team_lobbies", "ovt": "ovt_lobbies", "ffa": "ffa_lobbies"}
+_INVITE_MODE_NAMES = {"team": "2v2", "ovt": "1v2", "ffa": "FFA"}
+# A lobby row's statuses past 'open' (sql/154, sql/193): 'active' and
+# 'completed' follow a start, 'canceled' a closure. A missing row is closed.
+_INVITE_STARTED_STATUSES = ("active", "completed")
+
+
+class _InviteSendReq(BaseModel):
+    invitee_steam_id: str = ""
+    mode: str = ""
+    # The lobby to invite into. Omitted or blank is a challenge: a lobby is
+    # opened for the sender with the fields below as its create request.
+    lobby_id: str | None = None
+    display_name: str = "Player"
+    region: str | None = None
+    preferred_team: int | None = None
+    preferred_side: int | None = None
+    solo_extra_pick: bool = False
+    caps: str = Field("", max_length=64)
+    idempotency_key: str = ""
+
+
+class _InviteAcceptReq(BaseModel):
+    # The join request's own fields for the invitee's seat; the lobby comes
+    # from the invite, and the invite takes the password's place.
+    display_name: str = "Player"
+    region: str | None = None
+    preferred_team: int | None = None
+    preferred_side: int | None = None
+    solo_extra_pick: bool = False
+    caps: str = Field("", max_length=64)
+    idempotency_key: str = ""
+
+
+class _InviteAnswerReq(BaseModel):
+    idempotency_key: str = ""
+
+
+def _invite_request_fp(route: str, invite_id: str | None, caller_id, req: BaseModel) -> bytes:
+    """The digest an invite receipt stores of the request that committed it:
+    SHA-256 over the route, the path's invite id (None for a send), the
+    caller's player id and the body as the request model validated it --
+    every field the model declares, defaults included, the key left out --
+    as sorted ASCII JSON with no spaces. No field is picked by hand, so a
+    field a model gains later is compared too."""
+    doc = _json.dumps({"route": route, "invite_id": invite_id, "caller": str(caller_id),
+                       "body": req.model_dump(mode="json", exclude={"idempotency_key"})},
+                      sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(doc.encode("ascii")).digest()
+
+
+def _invite_path_id(value) -> tuple:
+    """(the path's invite id, or None when it is no UUID; the text the
+    fingerprint names: the canonical form when it parses, else the text as
+    given, which no committed request can have named)."""
+    raw = str(value or "").strip()
+    try:
+        iid = UUID(raw)
+    except Exception:
+        return None, raw
+    return iid, str(iid)
+
+
+def _invite_mail_key() -> UUID:
+    """An invite's mail row key: random, with the version digit (the 13th
+    hex digit) set to 0, the reserved space no mail request can name
+    (_mail_parse_key). Mail's replay and uniqueness never meet an invite's
+    row, whatever key a client sends."""
+    h = uuid.uuid4().hex
+    return UUID(h[:12] + "0" + h[13:])
+
+
+def _invite_state_now(row) -> str:
+    """A row's state as every read gives it: a pending row past its
+    expires_at is expired, whether or not the sweep has marked it."""
+    return "expired" if row["state"] == "pending" and row["past"] else row["state"]
+
+
+def _invite_refuse_ended(row, *, void_as_answered: bool) -> None:
+    """An answer to an invite that is no longer pending. An accept answers a
+    void invite invite_void; a decline or a cancel answers it as answered,
+    with its final state."""
+    state = _invite_state_now(row)
+    if state == "pending":
+        return
+    if state == "expired":
+        raise HTTPException(status_code=410, detail="invite_expired")
+    if state == "void" and not void_as_answered:
+        raise HTTPException(status_code=409,
+                            detail={"error": "invite_void", "end_reason": row["end_reason"]})
+    raise HTTPException(status_code=409, detail={"error": "invite_answered", "state": state})
+
+
+def _invite_capacity(mode: str) -> int:
+    return FFA_MAX_PLAYERS if mode == "ffa" else _lobby_cfg(mode)["players"]
+
+
+def _invite_queue_cfg(mode: str) -> dict:
+    return _FFA_LOBBY_QUEUE_CFG if mode == "ffa" else _lobby_cfg(mode)
+
+
+async def _invite_live_members(db: AsyncSession, mode: str, lobby_id):
+    """The lobby's live members by the join's own rule, in its order."""
+    if mode == "ffa":
+        return await _ffa_live_lobby_members(db, lobby_id)
+    return await _lobby_live_members(db, mode, lobby_id)
+
+
+def _invite_effective_host(mode: str, host_player_id, live):
+    if mode == "ffa":
+        return _ffa_effective_host(host_player_id, live)
+    return _lobby_effective_host(host_player_id, live)
+
+
+async def _invite_identity_lock(db: AsyncSession, steam_id: str) -> None:
+    """The caller's identity lock alone (the advisory lock the join's gate
+    takes first), for a decline or a cancel: it orders one player's
+    requests, without the gate's ban and deletion refusals."""
+    await db.execute(text("SELECT pg_advisory_xact_lock(hashtext(:sid))"), {"sid": steam_id})
+
+
+async def _invite_lock_lobby(db: AsyncSession, mode: str, lobby_id):
+    return (await db.execute(text(
+        f"SELECT id, status, host_player_id, kicked_steam_ids FROM {_INVITE_LOBBY_TABLES[mode]}"
+        f" WHERE id = :lid FOR UPDATE"
+    ), {"lid": lobby_id})).mappings().first()
+
+
+async def _invite_prior(db: AsyncSession, caller_id, key: UUID, request_fp: bytes):
+    """The caller's receipt for this key, read under the caller's identity
+    lock before any route, path or state check: the same fingerprint means
+    the request already committed and gets its repeat answer; another means
+    the key was used on another request, 409 idempotency_key_reused, and
+    nothing is written."""
+    row = (await db.execute(text(
+        "SELECT route, invite_id, request_fp FROM invite_receipts"
+        " WHERE caller_player_id = :pid AND idempotency_key = :key"
+    ), {"pid": caller_id, "key": key})).mappings().first()
+    if row is None:
+        return None
+    if bytes(row["request_fp"]) != request_fp:
+        raise HTTPException(status_code=409, detail="idempotency_key_reused")
+    return row
+
+
+async def _invite_write_receipt(db: AsyncSession, caller_id, key: UUID, route: str, invite_id,
+                                request_fp: bytes) -> None:
+    await db.execute(text(
+        "INSERT INTO invite_receipts (caller_player_id, idempotency_key, route, invite_id, request_fp)"
+        " VALUES (:pid, :key, :route, :iid, :fp)"
+    ), {"pid": caller_id, "key": key, "route": route, "iid": invite_id, "fp": request_fp})
+
+
+# Every change of an invite's state bumps its invitee's inbox revision, which
+# reaches only a delivered copy, so a suppressed invite bumps nothing. A
+# transaction bumps every revision it owes ONCE, as its last statement, over
+# the whole set in ascending recipient order (the shape of _MAIL_REV_BUMP_SQL),
+# so two transactions never take two invitees' revision rows in opposite
+# orders. DISTINCT: one row may owe two bumps (an expired invite and its
+# replacement to the same invitee), and ON CONFLICT may touch a row once.
+_INVITE_REV_BUMP_SQL = (
+    "INSERT INTO mail_inbox_rev (recipient_id, rev)"
+    " SELECT DISTINCT r.recipient_id, 1"
+    "   FROM mail_recipients r"
+    "  WHERE r.message_id = ANY(CAST(:mids AS uuid[])) AND r.delivery = 'delivered'"
+    "  ORDER BY r.recipient_id"
+    " ON CONFLICT (recipient_id) DO UPDATE"
+    "   SET rev = mail_inbox_rev.rev + 1, updated_at = NOW()"
+)
+
+
+async def _invite_bump(db: AsyncSession, mids) -> None:
+    ids = sorted({m for m in (mids or []) if m is not None}, key=str)
+    if ids:
+        await db.execute(text(_INVITE_REV_BUMP_SQL), {"mids": ids})
+
+
+# A departure (D7): the pending invites a member who leaves an open lobby
+# sent for it end with them. Each row gets its true end: one past its
+# expires_at is 'expired' (what every read already calls it), any other
+# 'void' with sender_left. Called under the lobby row's lock, in the
+# departure's own transaction; the caller bumps the returned mail rows
+# (_invite_bump) as its last statement.
+_INVITE_END_DEPARTED_SQL = (
+    "UPDATE lobby_invites"
+    "   SET state = CASE WHEN expires_at <= NOW() THEN 'expired' ELSE 'void' END,"
+    "       end_reason = CASE WHEN expires_at <= NOW() THEN NULL ELSE 'sender_left' END,"
+    "       ended_at = NOW()"
+    " WHERE mode = :mode AND lobby_id = :lid AND state = 'pending'"
+    "   AND sender_player_id = ANY(CAST(:pids AS uuid[]))"
+    " RETURNING mail_message_id"
+)
+
+# Every pending invite of one lobby, at its start (lobby_started) or when a
+# path closes it (lobby_closed): under the lobby row's lock, in that
+# transaction.
+_INVITE_END_LOBBY_SQL = (
+    "UPDATE lobby_invites"
+    "   SET state = CASE WHEN expires_at <= NOW() THEN 'expired' ELSE 'void' END,"
+    "       end_reason = CASE WHEN expires_at <= NOW() THEN NULL ELSE CAST(:why AS text) END,"
+    "       ended_at = NOW()"
+    " WHERE mode = :mode AND lobby_id = :lid AND state = 'pending'"
+    " RETURNING mail_message_id"
+)
+
+# A kick also ends the pending invites TO the kicked player for that lobby:
+# its accept would be refused kicked_from_lobby.
+_INVITE_END_KICKED_SQL = (
+    "UPDATE lobby_invites"
+    "   SET state = CASE WHEN expires_at <= NOW() THEN 'expired' ELSE 'void' END,"
+    "       end_reason = CASE WHEN expires_at <= NOW() THEN NULL ELSE 'invitee_kicked' END,"
+    "       ended_at = NOW()"
+    " WHERE mode = :mode AND lobby_id = :lid AND state = 'pending'"
+    "   AND invitee_player_id = ANY(CAST(:pids AS uuid[]))"
+    " RETURNING mail_message_id"
+)
+
+
+async def _invite_end_departed(db: AsyncSession, mode: str, lobby_id, player_ids) -> list:
+    ids = [p for p in (player_ids or []) if p is not None]
+    if not ids:
+        return []
+    return list((await db.execute(text(_INVITE_END_DEPARTED_SQL),
+                                  {"mode": mode, "lid": lobby_id, "pids": ids})).scalars().all())
+
+
+async def _invite_end_lobby(db: AsyncSession, mode: str, lobby_id, why: str) -> list:
+    return list((await db.execute(text(_INVITE_END_LOBBY_SQL),
+                                  {"why": why, "mode": mode, "lid": lobby_id})).scalars().all())
+
+
+async def _invite_end_kicked(db: AsyncSession, mode: str, lobby_id, player_ids) -> list:
+    ids = [p for p in (player_ids or []) if p is not None]
+    if not ids:
+        return []
+    return list((await db.execute(text(_INVITE_END_KICKED_SQL),
+                                  {"mode": mode, "lid": lobby_id, "pids": ids})).scalars().all())
+
+
+def _invite_mail_text(mode: str, kind: str) -> tuple:
+    """The invite's mail row: server text, one per mode and kind, holding
+    nothing a player typed and nothing that joins a room. The client renders
+    the invite from its own fields; this is what the mail row keeps once the
+    invite row is gone, and what a Discord relay carries."""
+    name = _INVITE_MODE_NAMES[mode]
+    if kind == "challenge":
+        return (f"Challenge: {name}",
+                f"You are challenged to a {name} lobby. Open SCR in game to accept or decline.")
+    return (f"Lobby invite: {name}",
+            f"You are invited to a {name} lobby. Open SCR in game to accept or decline.")
+
+
+async def _invite_invitee_or_raise(db: AsyncSession, me: dict, steam_id) -> dict:
+    """The invitee: a live player who is not the caller, whose last client
+    version is at or above the invite floor."""
+    sid = str(steam_id or "").strip()
+    if not sid or sid == me["steam_id"]:
+        raise HTTPException(status_code=400, detail="recipients_empty")
+    row = (await db.execute(text(
+        "SELECT id, steam_id, mod_version FROM players WHERE steam_id = :sid AND deleted_at IS NULL"
+    ), {"sid": sid})).mappings().first()
+    if row is None:
+        raise HTTPException(status_code=400, detail="recipient_unknown")
+    if not _mod_version_at_least(row["mod_version"], INVITE_FLOOR_VERSION):
+        raise HTTPException(status_code=409, detail="invitee_needs_update")
+    return dict(row)
+
+
+async def _invite_lobby_gates(db: AsyncSession, mode: str, lobby_id, me: dict,
+                              invitee: dict) -> list:
+    """An invite to an existing lobby, under the lobby row's lock: the lobby
+    is open; a pending invite to this invitee past its expires_at is ended,
+    so the unique pending index admits the new one; the caller is a live
+    member; there is a free seat; the lobby is under its pending cap (twice
+    its capacity, counting unexpired rows); the invitee is neither kicked
+    from it nor a member nor already invited. Returns the mail rows of the
+    invite it ended."""
+    lrow = (await db.execute(text(
+        f"SELECT id, status, kicked_steam_ids FROM {_INVITE_LOBBY_TABLES[mode]}"
+        f" WHERE id = :lid FOR UPDATE"
+    ), {"lid": lobby_id})).mappings().first()
+    if lrow is None or lrow["status"] != "open":
+        raise HTTPException(status_code=409, detail="lobby_closed")
+    ended = list((await db.execute(text(
+        "UPDATE lobby_invites SET state = 'expired', ended_at = NOW()"
+        " WHERE mode = :mode AND lobby_id = :lid AND invitee_player_id = :inv"
+        "   AND state = 'pending' AND expires_at <= NOW()"
+        " RETURNING mail_message_id"
+    ), {"mode": mode, "lid": lobby_id, "inv": invitee["id"]})).scalars().all())
+    live = await _invite_live_members(db, mode, lobby_id)
+    live_ids = {m["player_id"] for m in live}
+    if me["id"] not in live_ids:
+        raise HTTPException(status_code=403, detail="not_in_lobby")
+    cap = _invite_capacity(mode)
+    if len(live) >= cap:
+        raise HTTPException(status_code=409, detail="lobby_full")
+    pending = (await db.execute(text(
+        "SELECT id, invitee_player_id FROM lobby_invites"
+        " WHERE mode = :mode AND lobby_id = :lid AND state = 'pending' AND expires_at > NOW()"
+    ), {"mode": mode, "lid": lobby_id})).mappings().all()
+    if len(pending) >= 2 * cap:
+        raise HTTPException(status_code=409, detail="invites_full")
+    if invitee["steam_id"] in [s for s in (lrow["kicked_steam_ids"] or "").split(",") if s]:
+        raise HTTPException(status_code=403, detail="kicked_from_lobby")
+    if invitee["id"] in live_ids:
+        raise HTTPException(status_code=409, detail="already_in_lobby")
+    dup = next((p for p in pending if p["invitee_player_id"] == invitee["id"]), None)
+    if dup is not None:
+        raise HTTPException(status_code=409,
+                            detail={"error": "already_invited", "invite_id": str(dup["id"])})
+    return ended
+
+
+async def _invite_challenge_core(mode: str, req: _InviteSendReq, me: dict, request: Request,
+                                 db: AsyncSession) -> _LobbyEntry:
+    """A challenge's lobby: the mode's own create core, with the caller as
+    its creator and the request's preferences, opened as Create Lobby opens
+    one (listed, no password)."""
+    if mode == "ffa":
+        return await _ffa_lobby_create_core(_FfaLobbyCreateReq(
+            steam_id=me["steam_id"], display_name=req.display_name, region=req.region,
+            password=None, caps=req.caps), request, db)
+    return await _lobby_create_core(mode, _LobbyCreateReq(
+        steam_id=me["steam_id"], display_name=req.display_name, region=req.region, password=None,
+        preferred_team=req.preferred_team, preferred_side=req.preferred_side,
+        solo_extra_pick=req.solo_extra_pick, caps=req.caps), request, db)
+
+
+async def _invite_create_answer(db: AsyncSession, mode: str, lobby_id) -> dict:
+    """A create's answer for the lobby as it is now (a challenge's repeat)."""
+    if mode == "ffa":
+        return {"status": "ok", "lobby_id": str(lobby_id)}
+    cfg = _lobby_cfg(mode)
+    pw = (await db.execute(text(
+        f"SELECT password_hash FROM {cfg['lobbies']} WHERE id = :lid"
+    ), {"lid": lobby_id})).scalar()
+    return {"status": "ok", "lobby_id": str(lobby_id), "has_password": bool(pw),
+            "max_players": cfg["players"]}
+
+
+async def _invite_send_repeat(db: AsyncSession, me: dict, invite_id) -> dict:
+    """A send's repeat: the invite row as it is now (the receipt lives
+    exactly as long as the row, so the row is there), and for a challenge
+    the create's fields while the sender is still a live member of its
+    lobby, so a client never adopts a lobby it has left. Writes nothing."""
+    row = (await db.execute(text(
+        "SELECT id, mode, lobby_id, kind, state, expires_at, (expires_at <= NOW()) AS past"
+        "  FROM lobby_invites WHERE id = :iid"
+    ), {"iid": invite_id})).mappings().first()
+    out = {"invite_id": str(row["id"]), "state": _invite_state_now(row),
+           "expires_at": _mail_iso(row["expires_at"])}
+    if row["kind"] == "challenge":
+        live = await _invite_live_members(db, row["mode"], row["lobby_id"])
+        if any(m["player_id"] == me["id"] for m in live):
+            out.update(await _invite_create_answer(db, row["mode"], row["lobby_id"]))
+    return out
+
+
+@app.post("/api/v1/invites", tags=["Invites"])
+async def invite_send(req: _InviteSendReq, request: Request, db: AsyncSession = Depends(get_db)):
+    """Invite a player to the caller's lobby (lobby_id given), or challenge
+    them (lobby_id omitted: the mode's create core opens a lobby for the
+    caller in this transaction). Mail's send steps in mail's order -- the
+    caller, the key, the identity and per-sender locks, the receipt in place
+    of mail's replay, the sender gates, the rate limits -- then the invite's
+    own checks, the invite row, its receipt, the mail rows, the relay, the
+    revision bump and one commit. Mail's spam check does not run and no mail
+    receipt is written: the text is the server's. Answers {invite_id, state,
+    expires_at}, and for a challenge the create's answer too."""
+    me = await _mail_caller(request, db)
+    key = _mail_parse_key(req.idempotency_key)
+    fp = _invite_request_fp("send", None, me["id"], req)
+    await _mail_lock_identities(db, me["steam_id"], handles={me["steam_id"]: me["id"]})
+    await _mail_lock_sender(db, me["id"])
+    prior = await _invite_prior(db, me["id"], key, fp)
+    if prior is not None:
+        return await _invite_send_repeat(db, me, prior["invite_id"])
+    await _mail_sender_gates(db, me)
+    await _mail_rate_or_raise(db, me["id"])
+    mode = (req.mode or "").strip().lower()
+    if mode not in _INVITE_LOBBY_TABLES:
+        raise HTTPException(status_code=400, detail="mode_invalid")
+    invitee = await _invite_invitee_or_raise(db, me, req.invitee_steam_id)
+    ended: list = []
+    entry = None
+    raw_lid = (req.lobby_id or "").strip()
+    if raw_lid:
+        try:
+            lobby_id = UUID(raw_lid)
+        except (ValueError, TypeError):
+            raise HTTPException(status_code=400, detail="lobby_id_invalid")
+        ended = await _invite_lobby_gates(db, mode, lobby_id, me, invitee)
+        kind = "invite"
+    else:
+        entry = await _invite_challenge_core(mode, req, me, request, db)
+        lobby_id = entry.lobby_id
+        kind = "challenge"
+    row = (await db.execute(text(
+        "INSERT INTO lobby_invites (mode, lobby_id, sender_player_id, invitee_player_id, kind,"
+        "                           state, expires_at)"
+        " VALUES (:mode, :lid, :sid, :inv, :kind, 'pending',"
+        "         NOW() + make_interval(mins => CAST(:life AS integer)))"
+        " RETURNING id, expires_at"
+    ), {"mode": mode, "lid": lobby_id, "sid": me["id"], "inv": invitee["id"], "kind": kind,
+        "life": INVITE_LIFETIME_MINUTES})).mappings().first()
+    iid = row["id"]
+    await _invite_write_receipt(db, me["id"], key, "send", iid, fp)
+    subject, body = _invite_mail_text(mode, kind)
+    mid, _fanned = await _mail_write_message(
+        db, me["id"], kind="invite", thread_id=None, in_reply_to=None, subject=subject,
+        body=body, idempotency_key=_invite_mail_key(), via="game",
+        addressees=[(invitee["id"], "to", False)])
+    await db.execute(text(
+        "UPDATE lobby_invites SET mail_message_id = :mid WHERE id = :iid"
+    ), {"mid": mid, "iid": iid})
+    # D13: relayed as other mail is, to an invitee who keeps the relay on;
+    # the helper relays only a delivered copy, so a suppressed invite is
+    # never relayed.
+    await mail_discord.queue_mail_relay(
+        db, mail_id=mid, sender_name=me.get("display_name") or "",
+        sender_steam_id=me.get("steam_id") or "", subject=subject, body=body)
+    await _invite_bump(db, [mid] + ended)
+    await db.commit()
+    out = {"invite_id": str(iid), "state": "pending", "expires_at": _mail_iso(row["expires_at"])}
+    if entry is not None:
+        out.update(await _lobby_entry_after_commit(db, entry, _invite_queue_cfg(mode)))
+    return out
+
+
+# The invitee's own row of an invite, only while they hold a delivered,
+# undeleted copy of it: an unknown id, another player's invite and one whose
+# copy is gone all read nothing, so all answer invite_not_found alike.
+_INVITE_INVITEE_ROW_SQL = (
+    "SELECT i.id, i.mode, i.lobby_id, i.sender_player_id, i.kind, i.state, i.end_reason,"
+    "       i.mail_message_id, i.expires_at, (i.expires_at <= NOW()) AS past"
+    "  FROM lobby_invites i"
+    " WHERE i.id = :iid AND i.invitee_player_id = :me"
+    "   AND EXISTS (SELECT 1 FROM mail_recipients r"
+    "                WHERE r.message_id = i.mail_message_id AND r.recipient_id = :me"
+    "                  AND r.delivery = 'delivered' AND r.deleted_at IS NULL)"
+)
+
+
+class _InviteJoinHook:
+    """An accept's invite inside the mode's join core, in place of the
+    password for this one player. lock() runs right after the core's lobby
+    row lock and before its pruning, so an accept and a departure are
+    ordered by the lobby lock; recheck() runs after the pruning, on the
+    live members the core read: the invite is still pending and unexpired,
+    and its sender is a live member (D7)."""
+    __slots__ = ("invite_id", "sender_id", "row")
+
+    def __init__(self, invite_id, sender_id):
+        self.invite_id = invite_id
+        self.sender_id = sender_id
+        self.row = None
+
+    async def lock(self, db: AsyncSession) -> None:
+        self.row = (await db.execute(text(
+            "SELECT state, end_reason, (expires_at <= NOW()) AS past"
+            "  FROM lobby_invites WHERE id = :iid FOR NO KEY UPDATE"
+        ), {"iid": self.invite_id})).mappings().first()
+
+    def recheck(self, live) -> None:
+        if self.row is None:
+            raise HTTPException(status_code=404, detail="invite_not_found")
+        _invite_refuse_ended(self.row, void_as_answered=False)
+        if self.sender_id not in {m["player_id"] for m in live}:
+            raise HTTPException(status_code=409,
+                                detail={"error": "invite_void", "end_reason": "sender_left"})
+
+
+async def _invite_join_core(mode: str, req: _InviteAcceptReq, me: dict, lobby_id,
+                            request: Request, db: AsyncSession,
+                            hook: _InviteJoinHook) -> _LobbyEntry:
+    if mode == "ffa":
+        return await _ffa_lobby_join_core(_FfaLobbyJoinReq(
+            steam_id=me["steam_id"], display_name=req.display_name, region=req.region,
+            lobby_id=str(lobby_id), password=None, caps=req.caps), request, db, invite=hook)
+    return await _lobby_join_core(mode, _LobbyJoinReq(
+        steam_id=me["steam_id"], display_name=req.display_name, region=req.region,
+        lobby_id=str(lobby_id), password=None, preferred_team=req.preferred_team,
+        preferred_side=req.preferred_side, solo_extra_pick=req.solo_extra_pick,
+        caps=req.caps), request, db, invite=hook)
+
+
+def _invite_join_ending(exc: HTTPException) -> str | None:
+    """Which join refusals end the invite they answer: a lobby no longer
+    open, a kick, and the sender's seat gone. Every other refusal (a full
+    lobby, room rules, another mode's live match) leaves it pending."""
+    if exc.status_code == 404 and exc.detail == "That lobby is no longer open":
+        return "lobby_closed"
+    if exc.status_code == 403 and exc.detail == "kicked_from_lobby":
+        return "invitee_kicked"
+    if isinstance(exc.detail, dict) and exc.detail.get("error") == "invite_void":
+        return "sender_left"
+    return None
+
+
+async def _invite_end_after_refusal(db: AsyncSession, invite_id, why: str, invitee_steam_id: str) -> None:
+    """An accept the join refused in a way that ends the invite, written in
+    a second, short transaction after the rollback restored everything the
+    join wrote, its pruning included. Under the lobby lock the invite row is
+    re-read and changed only while it is still pending and unexpired: a
+    lobby no longer open ends it lobby_started or lobby_closed by the
+    lobby's status; a kick ends it invitee_kicked; a sender who is not a
+    live member by the join's own rule -- never the restored row's mere
+    existence -- ends it sender_left."""
+    head = (await db.execute(text(
+        "SELECT mode, lobby_id FROM lobby_invites WHERE id = :iid"
+    ), {"iid": invite_id})).mappings().first()
+    if head is None:
+        await db.rollback()
+        return
+    lrow = await _invite_lock_lobby(db, head["mode"], head["lobby_id"])
+    row = (await db.execute(text(
+        "SELECT state, sender_player_id, mail_message_id, (expires_at <= NOW()) AS past"
+        "  FROM lobby_invites WHERE id = :iid FOR NO KEY UPDATE"
+    ), {"iid": invite_id})).mappings().first()
+    reason = None
+    if row is not None and row["state"] == "pending" and not row["past"]:
+        if lrow is None or lrow["status"] != "open":
+            reason = ("lobby_started" if lrow is not None
+                      and lrow["status"] in _INVITE_STARTED_STATUSES else "lobby_closed")
+        elif why == "invitee_kicked":
+            if invitee_steam_id in [s for s in (lrow["kicked_steam_ids"] or "").split(",") if s]:
+                reason = "invitee_kicked"
+        elif why == "sender_left":
+            live = await _invite_live_members(db, head["mode"], head["lobby_id"])
+            if row["sender_player_id"] not in {m["player_id"] for m in live}:
+                reason = "sender_left"
+    if reason is None:
+        await db.rollback()
+        return
+    await db.execute(text(
+        "UPDATE lobby_invites SET state = 'void', end_reason = :why, ended_at = NOW()"
+        " WHERE id = :iid AND state = 'pending'"
+    ), {"why": reason, "iid": invite_id})
+    await _invite_bump(db, [row["mail_message_id"]])
+    await db.commit()
+
+
+async def _invite_accept_repeat(db: AsyncSession, me: dict, invite_id) -> dict:
+    """An accept's repeat: the join's answer built from the lobby as it is
+    now, as the join's member branch builds it, while the caller is a live
+    member; invite_answered with state accepted once not. No join gate runs
+    and nothing is written."""
+    row = (await db.execute(text(
+        "SELECT mode, lobby_id FROM lobby_invites WHERE id = :iid"
+    ), {"iid": invite_id})).mappings().first()
+    live = await _invite_live_members(db, row["mode"], row["lobby_id"])
+    if not any(m["player_id"] == me["id"] for m in live):
+        raise HTTPException(status_code=409, detail={"error": "invite_answered", "state": "accepted"})
+    if row["mode"] == "ffa":
+        return {"status": "ok", "lobby_id": str(row["lobby_id"]),
+                **(await _ffa_lobby_config_echo(db, row["lobby_id"]))}
+    return {"status": "ok", "lobby_id": str(row["lobby_id"]), "player_count": len(live),
+            "max_players": _lobby_cfg(row["mode"])["players"]}
+
+
+@app.post("/api/v1/invites/{invite_id}/accept", tags=["Invites"])
+async def invite_accept(invite_id: str, req: _InviteAcceptReq, request: Request,
+                        db: AsyncSession = Depends(get_db)):
+    """The invitee joins the invite's lobby: the session and the key; the
+    join's identity gate; the receipt; the caller's delivered, undeleted
+    copy; an invite no longer pending, or past its expires_at, answered
+    before any join gate; then the mode's join core with this invite in
+    place of the password, every other gate the join's own in the join's
+    order. The invite is marked accepted and its receipt written before the
+    one commit. A refusal that ends the invite is written after the
+    rollback and returned unchanged; any other leaves it pending."""
+    me = await _mail_caller(request, db)
+    key = _mail_parse_key(req.idempotency_key)
+    iid, iid_text = _invite_path_id(invite_id)
+    fp = _invite_request_fp("accept", iid_text, me["id"], req)
+    await _enrollment_identity_gate(db, me["steam_id"])
+    prior = await _invite_prior(db, me["id"], key, fp)
+    if prior is not None:
+        return await _invite_accept_repeat(db, me, prior["invite_id"])
+    if iid is None:
+        raise HTTPException(status_code=400, detail="invite_id_invalid")
+    row = (await db.execute(text(_INVITE_INVITEE_ROW_SQL),
+                            {"iid": iid, "me": me["id"]})).mappings().first()
+    if row is None:
+        raise HTTPException(status_code=404, detail="invite_not_found")
+    _invite_refuse_ended(row, void_as_answered=False)
+    mode = row["mode"]
+    hook = _InviteJoinHook(iid, row["sender_player_id"])
+    try:
+        entry = await _invite_join_core(mode, req, me, row["lobby_id"], request, db, hook)
+    except HTTPException as exc:
+        why = _invite_join_ending(exc)
+        if why is not None:
+            try:
+                await db.rollback()
+                await _invite_end_after_refusal(db, iid, why, me["steam_id"])
+            except Exception as end_exc:
+                print(f"[INVITES] ending invite {iid} after a refused accept failed: {end_exc}")
+        raise
+    await db.execute(text(
+        "UPDATE lobby_invites SET state = 'accepted', ended_at = NOW()"
+        " WHERE id = :iid AND state = 'pending'"
+    ), {"iid": iid})
+    await _invite_write_receipt(db, me["id"], key, "accept", iid, fp)
+    await _invite_bump(db, [row["mail_message_id"]] + list(entry.bump))
+    await db.commit()
+    answer = await _lobby_entry_after_commit(db, entry, _invite_queue_cfg(mode))
+    if mode == "ffa":
+        answer = {**answer, **(await _ffa_lobby_config_echo(db, entry.lobby_id))}
+    return answer
+
+
+@app.post("/api/v1/invites/{invite_id}/decline", tags=["Invites"])
+async def invite_decline(invite_id: str, req: _InviteAnswerReq, request: Request,
+                         db: AsyncSession = Depends(get_db)):
+    """The invitee declines: the identity lock alone, the receipt, the
+    invite row locked by its id through the caller's live copy, pending and
+    unexpired; no lobby row and no queue or lease lock."""
+    me = await _mail_caller(request, db)
+    key = _mail_parse_key(req.idempotency_key)
+    iid, iid_text = _invite_path_id(invite_id)
+    fp = _invite_request_fp("decline", iid_text, me["id"], req)
+    await _invite_identity_lock(db, me["steam_id"])
+    if await _invite_prior(db, me["id"], key, fp) is not None:
+        return {"state": "declined"}
+    if iid is None:
+        raise HTTPException(status_code=400, detail="invite_id_invalid")
+    row = (await db.execute(text(_INVITE_INVITEE_ROW_SQL + " FOR NO KEY UPDATE OF i"),
+                            {"iid": iid, "me": me["id"]})).mappings().first()
+    if row is None:
+        raise HTTPException(status_code=404, detail="invite_not_found")
+    _invite_refuse_ended(row, void_as_answered=True)
+    await db.execute(text(
+        "UPDATE lobby_invites SET state = 'declined', ended_at = NOW() WHERE id = :iid"
+    ), {"iid": iid})
+    await _invite_write_receipt(db, me["id"], key, "decline", iid, fp)
+    await _invite_bump(db, [row["mail_message_id"]])
+    await db.commit()
+    return {"state": "declined"}
+
+
+@app.post("/api/v1/invites/{invite_id}/cancel", tags=["Invites"])
+async def invite_cancel(invite_id: str, req: _InviteAnswerReq, request: Request,
+                        db: AsyncSession = Depends(get_db)):
+    """The invite's sender, or the lobby's host, withdraws a pending invite:
+    the identity lock alone, the receipt, the invite row read for its lobby,
+    the lobby row locked, then the invite row. A caller who is neither is
+    answered as for an unknown id."""
+    me = await _mail_caller(request, db)
+    key = _mail_parse_key(req.idempotency_key)
+    iid, iid_text = _invite_path_id(invite_id)
+    fp = _invite_request_fp("cancel", iid_text, me["id"], req)
+    await _invite_identity_lock(db, me["steam_id"])
+    if await _invite_prior(db, me["id"], key, fp) is not None:
+        return {"state": "cancelled"}
+    if iid is None:
+        raise HTTPException(status_code=400, detail="invite_id_invalid")
+    head = (await db.execute(text(
+        "SELECT mode, lobby_id FROM lobby_invites WHERE id = :iid"
+    ), {"iid": iid})).mappings().first()
+    if head is None:
+        raise HTTPException(status_code=404, detail="invite_not_found")
+    lrow = await _invite_lock_lobby(db, head["mode"], head["lobby_id"])
+    row = (await db.execute(text(
+        "SELECT id, sender_player_id, state, end_reason, mail_message_id,"
+        "       (expires_at <= NOW()) AS past"
+        "  FROM lobby_invites WHERE id = :iid FOR NO KEY UPDATE"
+    ), {"iid": iid})).mappings().first()
+    live = await _invite_live_members(db, head["mode"], head["lobby_id"])
+    host = _invite_effective_host(head["mode"], lrow["host_player_id"] if lrow else None, live)
+    if row is None or me["id"] not in (row["sender_player_id"], host):
+        raise HTTPException(status_code=404, detail="invite_not_found")
+    _invite_refuse_ended(row, void_as_answered=True)
+    await db.execute(text(
+        "UPDATE lobby_invites SET state = 'cancelled', ended_at = NOW() WHERE id = :iid"
+    ), {"iid": iid})
+    await _invite_write_receipt(db, me["id"], key, "cancel", iid, fp)
+    await _invite_bump(db, [row["mail_message_id"]])
+    await db.commit()
+    return {"state": "cancelled"}
+
+
+# An invite row as its invitee sees it, with its sender's name.
+_INVITE_VIEW_SELECT = (
+    "SELECT i.id, i.kind, i.mode, i.lobby_id, i.state, i.end_reason, i.created_at,"
+    "       i.expires_at, i.mail_message_id, (i.expires_at <= NOW()) AS past,"
+    "       CAST(GREATEST(0, CEIL(EXTRACT(EPOCH FROM (i.expires_at - NOW())))) AS integer)"
+    "         AS seconds_left,"
+    "       s.steam_id AS sender_steam_id, s.display_name AS sender_name"
+    "  FROM lobby_invites i JOIN players s ON s.id = i.sender_player_id"
+)
+
+
+async def _invite_lobby_view(db: AsyncSession, mode: str, lobby_id) -> dict:
+    """Seats taken and total and the lobby's settings as they are now, from
+    the lobby row and its live members; never a password, never a room."""
+    live = await _invite_live_members(db, mode, lobby_id)
+    if mode == "ffa":
+        lrow = (await db.execute(text(
+            "SELECT host_player_id FROM ffa_lobbies WHERE id = :lid"
+        ), {"lid": lobby_id})).mappings().first()
+        settings = await _ffa_lobby_config_echo(db, lobby_id)
+    else:
+        lrow = (await db.execute(text(
+            f"SELECT host_player_id, friendly_fire, same_cards"
+            f"  FROM {_INVITE_LOBBY_TABLES[mode]} WHERE id = :lid"
+        ), {"lid": lobby_id})).mappings().first()
+        rules = _rules_from_lobby_row(lrow) if lrow is not None else {"ff": False, "sc": False}
+        settings = {"friendly_fire": bool(rules["ff"]), "same_cards": bool(rules["sc"])}
+    host_id = _invite_effective_host(mode, lrow["host_player_id"] if lrow else None, live)
+    host = next((m for m in live if m["player_id"] == host_id), None)
+    return {"players": len(live), "max_players": _invite_capacity(mode),
+            "region": (host["region"] if host else None) or "", "settings": settings}
+
+
+async def _invite_object(db: AsyncSession, row) -> dict:
+    """The invite as its invitee's list, inbox and reader show it. The
+    sender's name, the one player-written field, comes last (#156)."""
+    state = _invite_state_now(row)
+    view = await _invite_lobby_view(db, row["mode"], row["lobby_id"])
+    return {
+        "invite_id": str(row["id"]), "kind": row["kind"], "mode": row["mode"],
+        "lobby_id": str(row["lobby_id"]), "state": state,
+        "end_reason": row["end_reason"] if state == "void" else None,
+        "seconds_left": int(row["seconds_left"] or 0) if state == "pending" else 0,
+        "expires_at": _mail_iso(row["expires_at"]),
+        "players": view["players"], "max_players": view["max_players"],
+        "region": view["region"], **view["settings"],
+        "sender_steam_id": row["sender_steam_id"],
+        "sender_name": row["sender_name"] or "?",
+    }
+
+
+async def _invite_objects_for_messages(db: AsyncSession, me_id, rows) -> dict:
+    """{mail message id: invite object} for the caller's invite rows among a
+    page of mail rows, read through the invite's invitee only. An invite row
+    already gone (INVITE_KEEP_DAYS after its expiry) has none: the mail row
+    then shows only the text written at send."""
+    mids = [r["id"] for r in rows if r["kind"] == "invite"]
+    if not mids:
+        return {}
+    inv = (await db.execute(text(
+        _INVITE_VIEW_SELECT +
+        " WHERE i.mail_message_id = ANY(CAST(:mids AS uuid[])) AND i.invitee_player_id = :me"
+    ), {"mids": mids, "me": me_id})).mappings().all()
+    return {r["mail_message_id"]: await _invite_object(db, r) for r in inv}
+
+
+def _invite_ok_for(request: Request) -> bool:
+    """Whether the calling client is at or above the invite floor; a caller
+    below it is never shown an invite row."""
+    return _mod_version_at_least(_request_mod_version(request), INVITE_FLOOR_VERSION)
+
+
+@app.get("/api/v1/invites/pending", tags=["Invites"])
+async def invite_pending(request: Request, cursor: str = Query(""),
+                         limit: int = Query(INVITE_PAGE_MAX, ge=1, le=INVITE_PAGE_MAX),
+                         db: AsyncSession = Depends(get_db)):
+    """The caller's own invites that are pending, unexpired and held through
+    a delivered, undeleted copy: newest first, keyset-paged."""
+    me = await _mail_caller(request, db)
+    c_at, c_id = _mail_cursor_decode(cursor)
+    rows = (await db.execute(text(
+        _INVITE_VIEW_SELECT +
+        " WHERE i.invitee_player_id = :me AND i.state = 'pending' AND i.expires_at > NOW()"
+        "   AND EXISTS (SELECT 1 FROM mail_recipients r"
+        "                WHERE r.message_id = i.mail_message_id AND r.recipient_id = :me"
+        "                  AND r.delivery = 'delivered' AND r.deleted_at IS NULL)"
+        "   AND (CAST(:c_at AS timestamptz) IS NULL"
+        "        OR (i.created_at, i.id) < (CAST(:c_at AS timestamptz), CAST(:c_id AS uuid)))"
+        " ORDER BY i.created_at DESC, i.id DESC"
+        " LIMIT CAST(:lim AS integer)"
+    ), {"me": me["id"], "c_at": c_at, "c_id": c_id, "lim": limit + 1})).mappings().all()
+    page, next_cursor = _mail_page(rows, limit)
+    return {"invites": [await _invite_object(db, r) for r in page], "next_cursor": next_cursor}
+
+
+# One lobby's invites for its members: pending, or ended within
+# INVITE_ENDED_SHOWN_SECONDS (so a decline is seen), from the invite rows
+# alone, never from mail delivery. A row's end is its ended_at, or its
+# expires_at when that came first (a pending row past it is expired).
+_INVITE_LOBBY_LIST_SQL = (
+    "SELECT i.id, i.state, i.end_reason, i.sender_player_id, (i.expires_at <= NOW()) AS past,"
+    "       CAST(GREATEST(0, CEIL(EXTRACT(EPOCH FROM (i.expires_at - NOW())))) AS integer)"
+    "         AS seconds_left,"
+    "       p.steam_id AS invitee_steam_id, p.display_name AS invitee_name"
+    "  FROM lobby_invites i JOIN players p ON p.id = i.invitee_player_id"
+    " WHERE i.mode = :mode AND i.lobby_id = :lid"
+    "   AND LEAST(COALESCE(i.ended_at, i.expires_at), i.expires_at)"
+    "       > NOW() - make_interval(secs => CAST(:shown AS double precision))"
+    " ORDER BY i.created_at, i.id"
+    " LIMIT CAST(:cap AS integer)"
+)
+
+
+async def _invite_lobby_list(db: AsyncSession, mode: str, lobby_id, me_id, host_id) -> list:
+    """The lobby state's `invites`, for members only. can_cancel is true for
+    a pending invite's sender and for the lobby's host."""
+    rows = (await db.execute(text(_INVITE_LOBBY_LIST_SQL), {
+        "mode": mode, "lid": lobby_id, "shown": INVITE_ENDED_SHOWN_SECONDS,
+        "cap": INVITE_LIST_MAX})).mappings().all()
+    out = []
+    for r in rows:
+        state = _invite_state_now(r)
+        out.append({
+            "invite_id": str(r["id"]), "state": state,
+            "end_reason": r["end_reason"] if state == "void" else None,
+            "seconds_left": int(r["seconds_left"] or 0) if state == "pending" else 0,
+            "can_cancel": state == "pending" and me_id in (r["sender_player_id"], host_id),
+            "invitee_steam_id": r["invitee_steam_id"],
+            "invitee_name": r["invitee_name"] or "?",
+        })
+    return out
+
+
+# The janitor's invite arm (queue_cleanup_loop, every 60 s). It names what
+# it KEEPS (lesson 252): a pending row that is unexpired, whose lobby is
+# open, and whose sender is a live member by the join's own rule (a fresh
+# 'lobby' row in that lobby, LOBBY_MEMBER_FRESH_SQL and
+# FFA_LOBBY_MEMBER_FRESH_SQL alike). Every other pending row ends: past its
+# expires_at, expired; else void, lobby_started or lobby_closed by its
+# lobby's status, or sender_left. FOR NO KEY UPDATE SKIP LOCKED, so it never
+# waits on an accept in flight and leaves a row an accept holds alone.
+_INVITE_SWEEP_SQL = (
+    "WITH c AS ("
+    "  SELECT i.id,"
+    "         CASE WHEN i.expires_at <= NOW() THEN 'expired' ELSE 'void' END AS new_state,"
+    "         CASE WHEN i.expires_at <= NOW() THEN NULL"
+    "              WHEN COALESCE(tl.status, ol.status, fl.status, '') IN ('active', 'completed')"
+    "                THEN 'lobby_started'"
+    "              WHEN COALESCE(tl.status, ol.status, fl.status, '') <> 'open' THEN 'lobby_closed'"
+    "              ELSE 'sender_left' END AS new_reason"
+    "    FROM lobby_invites i"
+    "    LEFT JOIN team_lobbies tl ON i.mode = 'team' AND tl.id = i.lobby_id"
+    "    LEFT JOIN ovt_lobbies ol ON i.mode = 'ovt' AND ol.id = i.lobby_id"
+    "    LEFT JOIN ffa_lobbies fl ON i.mode = 'ffa' AND fl.id = i.lobby_id"
+    "   WHERE i.state = 'pending'"
+    "     AND NOT (i.expires_at > NOW()"
+    "              AND COALESCE(tl.status, ol.status, fl.status, '') = 'open'"
+    "              AND CASE i.mode"
+    "                    WHEN 'team' THEN EXISTS (SELECT 1 FROM team_queue q"
+    "                      WHERE q.player_id = i.sender_player_id AND q.series_id = i.lobby_id"
+    "                        AND q.status = 'lobby'"
+    "                        AND q.last_polled > clock_timestamp() - INTERVAL '75 seconds')"
+    "                    WHEN 'ovt' THEN EXISTS (SELECT 1 FROM ovt_queue q"
+    "                      WHERE q.player_id = i.sender_player_id AND q.series_id = i.lobby_id"
+    "                        AND q.status = 'lobby'"
+    "                        AND q.last_polled > clock_timestamp() - INTERVAL '75 seconds')"
+    "                    WHEN 'ffa' THEN EXISTS (SELECT 1 FROM ffa_queue q"
+    "                      WHERE q.player_id = i.sender_player_id AND q.series_id = i.lobby_id"
+    "                        AND q.status = 'lobby'"
+    "                        AND q.last_polled > clock_timestamp() - INTERVAL '75 seconds')"
+    "                    ELSE FALSE END)"
+    "   ORDER BY i.expires_at, i.id"
+    "   LIMIT CAST(:lim AS integer)"
+    "   FOR NO KEY UPDATE OF i SKIP LOCKED)"
+    " UPDATE lobby_invites i"
+    "    SET state = c.new_state, end_reason = c.new_reason, ended_at = NOW()"
+    "   FROM c WHERE i.id = c.id"
+    " RETURNING i.mail_message_id"
+)
+
+# Retention: a row, whatever its state, goes INVITE_KEEP_DAYS after its
+# expires_at, which is fixed at send, so no row's life depends on delivery
+# or on how the invite ended; its receipts go with it (ON DELETE CASCADE).
+_INVITE_RETENTION_SQL = (
+    "DELETE FROM lobby_invites"
+    " WHERE id IN (SELECT id FROM lobby_invites"
+    "               WHERE expires_at < NOW() - make_interval(days => CAST(:days AS integer))"
+    "               ORDER BY expires_at LIMIT 2000)"
+    " RETURNING 1"
+)
+
+
+async def _invite_sweep(db: AsyncSession) -> int:
+    """Ends every pending invite the sweep does not keep, then bumps the
+    invitees' revisions as the transaction's last statement. Returns the
+    number ended. The caller commits."""
+    mids = list((await db.execute(text(_INVITE_SWEEP_SQL),
+                                  {"lim": INVITE_SWEEP_BATCH})).scalars().all())
+    await _invite_bump(db, mids)
+    return len(mids)
+
+
+async def _invite_retention_sweep(db: AsyncSession) -> int:
+    """Deletes invite rows INVITE_KEEP_DAYS after their expires_at. The
+    caller commits."""
+    return len((await db.execute(text(_INVITE_RETENTION_SQL),
+                                 {"days": INVITE_KEEP_DAYS})).fetchall())
 
 
 async def _mail_retention_sweep(db: AsyncSession) -> tuple[int, int, int, int]:
