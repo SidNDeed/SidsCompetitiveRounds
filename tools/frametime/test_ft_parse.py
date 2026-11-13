@@ -2431,7 +2431,8 @@ def _b11_text(games, model, marker=True, settled=True, first_game=1, edit=None, 
     census summary; per game the settled line under F18 reading A, its replay, its calibration run (fhat, a disp line
     per shape, span), its opened, census, heavy, offthread, between and flushed lines, and t0 and t1 on every point
     line; the refusals line at the quit and 'sitting complete'. fhat is every settled and calibration f_hat, t_us every
-    frame's time, heavy(g, op) an optional (live, at_call, edge) for a heavy line."""
+    frame's time, heavy(g, op) an optional (live, at_call, edge) for a heavy line. A point's "ghost" makes its closing
+    frame open one window more: no line, live_frames two above the windows' frames, the next window's marks from it."""
     L = ["[FRAME-TIME] " + P.MARK_FT] if marker else []
     if mark:
         L.append("[FRAME-TIME] mark cost cyc=50 p90=70 n=1000")
@@ -2471,7 +2472,9 @@ def _b11_text(games, model, marker=True, settled=True, first_game=1, edit=None, 
                 prun = 1 if run in pt.get("plant", ()) else 0
                 plant = 1 if prun and arm == "OFF" and run not in pt.get("unspun", ()) else 0
                 pred = "none" if prev is None else prev["arm"]
-                res = 1 if prev is not None and prev["prun"] == 1 and prun == 0 else 0
+                # the build's rule (FtSchedule.OpenWindow: WinRes = r == 0 && _lastPlant): a run's first window after
+                # a plant-run window of the game, whether or not its own run is a plant run
+                res = 1 if prev is not None and prev["prun"] == 1 and pos == 1 else 0
                 qn = P._bins(n)
                 partial = 1 if n < P.WINDOW_FRAMES else 0
                 S = E = R = 0
@@ -2511,6 +2514,12 @@ def _b11_text(games, model, marker=True, settled=True, first_game=1, edit=None, 
                 ws.append(w)
                 prev = w
                 f0 += n
+            if pt.get("ghost"):
+                # the build opens one more window on the point's closing frame when the frames before it fill whole
+                # windows (FtSchedule.cs:124), and that frame is never measured (FtFrames.cs:136): no line carries the
+                # window, live_frames counts its frame, and the game's next window takes pred and res from it
+                run, pos, arm = _b11_arm(pt["coins"], len(pt["n"]) + 1)
+                prev = dict(arm="ON" if force == "ON" and force_arms else arm, prun=1 if run in pt.get("plant", ()) else 0)
             un = [w for w in ws if not w["plant"]]
             pl = [w for w in ws if w["plant"]]
             t0 = clock[0]
@@ -2521,7 +2530,8 @@ def _b11_text(games, model, marker=True, settled=True, first_game=1, edit=None, 
                      % (label, ws[0]["arm"], ws[0]["pred"], sum(w["n"] for w in un), sum(w["sF"] for w in un),
                         sum(w["sS"] for w in un), sum(w["sC"] for w in un), sum(w["n"] for w in pl),
                         sum(w["sF"] for w in pl), sum(w["sS"] for w in pl), sum(w["sC"] for w in pl),
-                        sum(w["sP"] for w in un), sum(w["sP"] for w in pl), len(ws), sum(w["n"] for w in ws),
+                        sum(w["sP"] for w in un), sum(w["sP"] for w in pl), len(ws),
+                        sum(w["n"] for w in ws) + (2 if pt.get("ghost") else 0),
                         pt.get("zs", 0), pt.get("own_split", 0), p_extra,
                         " t0=%d t1=%d answer=replay" % (t0, t0 + sum(w["sF"] for w in ws)) if sitting else ""))
             if sitting and pi > 0:
@@ -2553,13 +2563,16 @@ def _na(x):
 
 def _b11_wline(w):
     # FtFrames.cs's line: medF and the excess counts only on a full window; then SHARED.md's appended fields, and V6's
-    # after nm
+    # after nm. The builder's window dict counts a point's runs and windows from 1 (a point's "plant" and "unspun" name
+    # runs that way, and an edit selects a window by that count); the line carries run= and wi= from 0, as the build
+    # prints them (FtSchedule.OpenWindow: WinK = k with the point's first window k = 0, WinRun = k / 4; FtFrames.cs
+    # prints both). A parsed record therefore holds run and wi one below the builder's
     full = "" if w["partial"] else "medF=1 e4=0,0 e8=0,0 e16=0,0 "
     return ("[FRAME-TIME] w pt=%s arm=%s plant=%d partial=%d n=%d sF=%d sS=%d sC=%d sP=%d maxF=1 %sgc=0 run=%d pos=%d "
             "unit=%s coin=%d wi=%d f0=%d pred=%s prun=%d res=%d gcn=%d cG=%s cW=%d cR=%d cS=%d cE=%d q=%s r=%s qn=%s "
             "wu=%s tok=%s nm=%d cP=%d cX=%d aC=%s aW=%s aR=%s aS=%s aP=%s aX=%s wa=%s"
-            % (w["pt"], w["arm"], w["plant"], w["partial"], w["n"], w["sF"], w["sS"], w["sC"], w["sP"], full, w["run"],
-               w["pos"], w["unit"], w["coin"], w["wi"], w["f0"], w["pred"], w["prun"], w["res"], w["gcn"], _na(w["cG"]),
+            % (w["pt"], w["arm"], w["plant"], w["partial"], w["n"], w["sF"], w["sS"], w["sC"], w["sP"], full, w["run"] - 1,
+               w["pos"], w["unit"], w["coin"], w["wi"] - 1, w["f0"], w["pred"], w["prun"], w["res"], w["gcn"], _na(w["cG"]),
                w["cW"], w["cR"], w["cS"], w["cE"], ",".join(map(str, w["q"])), ",".join(map(str, w["r"])),
                ",".join(map(str, w["qn"])), w["wu"], w["tok"], w["nm"], w["cP"], w["cX"], _na(w["aC"]), _na(w["aW"]),
                _na(w["aR"]), _na(w["aS"]), _na(w["aP"]), _na(w["aX"]), w["wa"]))
@@ -2693,7 +2706,7 @@ def chk_a_pair_is_one_variance_unit(m):
     y = dict((w["wi"], (w["arm"], v)) for w, v in _ys(m, text))
     N = 480.0
     want = 0.0
-    for a, b in ((1, 3), (2, 4)):
+    for a, b in ((0, 2), (1, 3)):       # the mates by the line's wi, which counts from 0 (_b11_wline)
         on, off = (a, b) if y[a][0] == "ON" else (b, a)
         want += (2 * (y[on][1] - y[off][1]) / N) ** 2
     est, var, _ = m.ht_var(T["B"])
@@ -2712,8 +2725,8 @@ def chk_a_partial_mate_stays_in_its_pair(m):
     assert T["units"] == (1, 1)
     y = dict((w["wi"], (w["arm"], v, w["n"])) for w, v in _ys(m, text))
     N, beta = 300.0, m.BETA_US
-    t13 = 2 * ((y[1][1] - y[1][2] * beta) - (y[3][1] - y[3][2] * beta)) / N      # w1 ON, w3 OFF (1 - A)
-    t24 = 2 * (y[2][1] - y[2][2] * beta) / N                                       # w2 ON, its mate never ran
+    t13 = 2 * ((y[0][1] - y[0][2] * beta) - (y[2][1] - y[2][2] * beta)) / N      # w1 ON, w3 OFF (1 - A): wi 0, 2
+    t24 = 2 * (y[1][1] - y[1][2] * beta) / N                                       # w2 ON (wi 1), its mate never ran
     est, var, _ = m.ht_var(T["B"])
     assert est == pytest.approx(t13 + t24, rel=1e-12) and var == pytest.approx(t13 ** 2 + t24 ** 2, rel=1e-12)
     same = _b11_text([[{"n": [120, 120, 60], "coins": [(1, 1)]}]], _flat,
@@ -2842,18 +2855,18 @@ def chk_marker_whole_line(m):
 
 
 def chk_token_open1_and_continuity(m):
-    # SHARED.md (md5 2119eb2e): per type open1 >= 0, and each window's open0 = the game's previous window's open1. The
-    # fixture is P1's mutant (hash's service counted on log): every type's conservation sum still holds
+    # SHARED.md (md5 2119eb2e): per type open1 >= 0, and inside a point each window's open0 = the window before's
+    # open1. P1's mutant (hash's service counted on log) keeps every sum. The builder's window 2 is the line's wi=1
     def moved(w):
         if w["pt"] == "1.1.1" and w["wi"] == 2:
             w["tok"] = "log:0,1,0,2,0,0,-1;hash:0,1,0,0,0,0,1;recv:0,0,0,0,0,0,0;sock:0,0,0,0,0,0,0"
     recs = m.read(_two_points(edit=moved))
-    w = [r for r in recs if m.b11_line(r) and r["pt"] == "1.1.1" and r["wi"] == 2][0]
+    w = [r for r in recs if m.b11_line(r) and r["pt"] == "1.1.1" and r["tok"].startswith("log:0,1,0,2,0,0,-1;")][0]
     assert all(x[0] + x[1] + x[2] == x[3] + x[4] + x[5] + x[6] for x in m._typed(w["tok"], 7).values())
     miss = m.window_reconcile(recs)
-    assert [x for x in miss if "window 1.1.1.2: log open1=-1 is below 0" in x], miss
-    assert [x for x in miss if "window 1.1.1.3: log open0=0, the game's previous window's open1=-1" in x], miss
-    assert [x for x in miss if "window 1.1.1.3: hash open0=0, the game's previous window's open1=1" in x], miss
+    assert [x for x in miss if "window 1.1.1.1: log open1=-1 is below 0" in x], miss
+    assert [x for x in miss if "window 1.1.1.2: log open0=0, the game's previous window's open1=-1" in x], miss
+    assert [x for x in miss if "window 1.1.1.2: hash open0=0, the game's previous window's open1=1" in x], miss
     assert m.window_reconcile(m.read(_two_points())) == []
 
 
@@ -3139,12 +3152,12 @@ def _off_last(w):
 
 def chk_sitting_v_is_forced_on(m):
     # m8: B1 is withheld for a seat when a sitting-V window prints arm=OFF, or a game's settled line another force=
-    # than ON, on either seat; under force=ON mates carry one coin field and not one arm
+    # than ON, on either seat; under force=ON mates carry one coin field and not one arm (a reason names wi from 0)
     clean = _v_text()
     assert _v(m, clean)["why"] == []
     off = _v_text(edit=_off_last)
-    assert "sitting V: this seat prints arm=OFF in 1 windows (3.1.1.4)" in _v(m, off, clean)["why"]
-    assert "sitting V: the peer seat prints arm=OFF in 1 windows (3.1.1.4)" in _v(m, clean, off)["why"]
+    assert "sitting V: this seat prints arm=OFF in 1 windows (3.1.1.3)" in _v(m, off, clean)["why"]
+    assert "sitting V: the peer seat prints arm=OFF in 1 windows (3.1.1.3)" in _v(m, clean, off)["why"]
     nf = re.sub(r"(settled g=3 [^\n]*) force=ON", r"\1 force=none", clean)
     assert "sitting V: this seat's settled lines print another force= than ON (g=3 force=none)" in _v(m, nf, clean)["why"]
     assert ("sitting V: the peer seat's settled lines print another force= than ON (g=3 force=none)"
@@ -3152,14 +3165,14 @@ def chk_sitting_v_is_forced_on(m):
 
 
 # (what, the sitting-V log, the reason sitting_v must give): m9's NA, pin, ab_back and controls, each boot line
-# missing, R-SCOPE's two lines, bE, the as-built p line and wu faults, own_split, the line invariants and VR1
+# missing, R-SCOPE's two lines, bE, the p line and wu faults, own_split, line invariants, VR1 (a reason's wi: from 0)
 V_SPOILS = (
     ("aC NA", lambda: _v_text(edit=lambda w: w.update(aC=None) if (w["pt"], w["wi"]) == ("2.1.1", 1) else None),
-     "an a* or wa value prints NA in 1 windows (2.1.1.1)"),
+     "an a* or wa value prints NA in 1 windows (2.1.1.0)"),
     ("aX NA", lambda: _v_text(edit=lambda w: w.update(aX=None) if (w["pt"], w["wi"]) == ("2.1.1", 3) else None),
-     "an a* or wa value prints NA in 1 windows (2.1.1.3)"),
+     "an a* or wa value prints NA in 1 windows (2.1.1.2)"),
     ("wa NA", lambda: _v_text(edit=lambda w: w.update(wa="log:400;hash:300;sock:NA") if (w["pt"], w["wi"]) ==
-                              ("4.1.1", 2) else None), "an a* or wa value prints NA in 1 windows (4.1.1.2)"),
+                              ("4.1.1", 2) else None), "an a* or wa value prints NA in 1 windows (4.1.1.1)"),
     ("pin", lambda: _v_text(boot={"alloc": "alloc pin=differs planted=1048600/1048576 empty=0"}),
      "the counter's pin differs or is not read (pin=differs)"),
     ("ab_back", lambda: _p_sub(_v_text(), "1.1.1", " ab_back=0 ", " ab_back=2 "),
@@ -3250,7 +3263,7 @@ V_SPOILS = (
     ("own_split", lambda: _p_sub(_v_text(), "1.1.1", " own_split=0 ", " own_split=1 "),
      "own_split: ownership faults at 1.1.1"),
     ("line invariant", lambda: _v_text(edit=lambda w: w.update(sC=w["sC"] + 1) if (w["pt"], w["wi"]) == ("2.1.1", 3)
-                                       else None), "line invariants: window 2.1.1.3: sC="),
+                                       else None), "line invariants: window 2.1.1.2: sC="),
     ("VR1", lambda: _v_text(fpscap=False), "VR1: no '[FPSCAP] held by frame-time calibration' line"),
 )
 
@@ -4521,6 +4534,19 @@ def chk_attach_guard(m):
             ok, w = _attach_of(m, v)
             assert ok is False and [x for x in w if x.startswith(who + want)], (what, who, w)
             assert [x for x in v["why"] if x.startswith("ATTACH: ") and (who + want) in x], (what, who, v["why"])
+    # the seat script's own count line (frame_time_seat.ps1's step 4 prints 'slice class <class>: <n> lines' for each
+    # slice class, and a pulled log holds those lines after its log lines): at 0 it is no fault, on either seat; at
+    # any other count, or as a part of a longer line, it is a fault like every line that holds the words
+    zero = "slice class Failed to patch: 0 lines"
+    for t, p in ((clean + "\n" + zero, clean), (clean, clean + "\n" + zero)):
+        assert _attach_of(m, _v(m, t, p)) == (True, []), _attach_of(m, _v(m, t, p))
+    assert m.attach_patch_faults("a\n  " + zero + "  \nb") == []
+    for line in ("slice class Failed to patch: 1 lines", "slice class Failed to patch: 10 lines", zero + " x",
+                 "x " + zero, "slice class Failed to patch: 0 lines, slice class Failed to patch: 0 lines"):
+        assert m.attach_patch_faults(clean + "\n" + line) == ["line %d: %s" % (len(clean.splitlines()) + 1, line)], line
+        for t, p, who in ((clean + "\n" + line, clean, ""), (clean, clean + "\n" + line, "peer seat: ")):
+            ok, w = _attach_of(m, _v(m, t, p))
+            assert ok is False and [x for x in w if x.startswith(who + "line ") and x.endswith(line)], (line, who, w)
     # sitting C: no cross-check, the verdict naming ATTACH
     v, c = _v_text(), _c_text()
     bc = _c_text(boot={"attach": ATTACH_OK.replace("FtSockPatch:2/2", "FtSockPatch:0/2")})
@@ -5164,6 +5190,317 @@ def test_every_attached_instrument_has_a_row():
             assert re.search(r"\bclass %s\b" % x, every), x
 
 
+def chk_run_and_ordinal_count_from_zero(m):
+    # the build prints run= and wi= from 0 (FtSchedule.OpenWindow: WinK = k with the point's first window k = 0,
+    # WinRun = k / 4, WinPos = k % 4 + 1; FtFrames.cs prints the three): wi = 4 * run + pos - 1 on every window, and a
+    # point's ordinals are 0..k-1. The same windows numbered from 1 (run, wi or both) miss on every window, and on
+    # every point when wi is among them (found on the first two-seat match logs, 13 Nov 2026: the parser took both
+    # from 1 and its own fixture printed them so)
+    text = _two_points()
+    recs = m.read(text)
+    ws = [w for w in recs if w["kind"] == "w"]
+    pts = sorted(set(w["pt"] for w in ws))
+    assert m.window_reconcile(recs) == [] and len(pts) == 2
+    assert all(w["wi"] == 4 * w["run"] + w["pos"] - 1 for w in ws)
+    for pt in pts:
+        own = sorted(w["wi"] for w in ws if w["pt"] == pt)
+        assert own == list(range(len(own))), (pt, own)
+    assert sorted(len([w for w in ws if w["pt"] == pt]) for pt in pts) == [3, 5]       # one point reaches run 1
+    assert sorted(set(w["run"] for w in ws)) == [0, 1]
+
+    def up(keys):
+        pat = re.compile(r" (%s)=(\d+)(?= )" % "|".join(keys))
+        return "\n".join(pat.sub(lambda x: " %s=%d" % (x.group(1), int(x.group(2)) + 1), ln) if " w pt=" in ln else ln
+                         for ln in text.splitlines())
+    for keys, points in ((("run", "wi"), len(pts)), (("wi",), len(pts)), (("run",), 0)):
+        assert up(keys) != text
+        miss = m.window_reconcile(m.read(up(keys)))
+        assert len([x for x in miss if " is not ordinal " in x]) == len(ws), (keys, miss)
+        assert len([x for x in miss if ": window ordinals " in x and " are not 0.." in x]) == points, (keys, miss)
+
+
+def chk_res_marks_a_runs_first_window_after_a_plant_run_window(m):
+    # the build's rule (FtSchedule.OpenWindow: WinRes = r == 0 && _lastPlant, where _lastPlant is the plant-run state
+    # of the game's previous window): res=1 on a run's first window after a plant-run window, whether its own run is a
+    # plant run or not, in the same point or the next; res=0 on every other window (SHARED.md: "The first window
+    # after a plant run carries res=1"). Found on the first two-seat match logs, 13 Nov 2026: the parser wanted res=0
+    # on a plant run that follows a plant run. Plant-run windows leave the estimate either way (b11_terms)
+    games = [[{"n": [120] * 12, "coins": [(1, 0), (0, 1), (1, 1)], "plant": (1, 2)},
+              {"n": [120] * 4, "coins": [(0, 1)], "plant": (1,)},
+              {"n": [120] * 8, "coins": [(1, 0), (0, 1)], "plant": (1,)}]]
+    text = _b11_text(games, _flat)
+    recs = m.read(text)
+    assert m.window_reconcile(recs) == [], m.window_reconcile(recs)
+    ws = [w for w in recs if w["kind"] == "w"]
+    marked = [(w["pt"], w["wi"], w["prun"]) for w in ws if w["res"]]
+    assert marked == [("1.1.1", 4, 1), ("1.1.1", 8, 0), ("1.1.3", 0, 1), ("1.1.3", 4, 0)], marked
+    assert len(ws) == 24
+
+    def flip(pt, wi):
+        out, n = [], 0
+        for ln in text.splitlines():
+            if " w pt=%s " % pt in ln and " wi=%d " % wi in ln:
+                ln, n = ln.replace(" res=0 ", " res=X ").replace(" res=1 ", " res=0 ").replace(" res=X ", " res=1 "), n + 1
+            out.append(ln)
+        assert n == 1, (pt, wi, n)
+        return "\n".join(out)
+    for w in ws:
+        miss = [x for x in m.window_reconcile(m.read(flip(w["pt"], w["wi"]))) if ": res=" in x]
+        assert miss == ["window %s.%d: res=%d, needs %d (a run's first window after a plant-run window)"
+                        % (w["pt"], w["wi"], 1 - w["res"], w["res"])], (w["pt"], w["wi"], miss)
+    # the estimate's frames are the same under either reading of a marked plant-run window: it is a plant-run window
+    T = m.b11_terms(recs)
+    assert T["loss"] == {"plant": 16 * 120, "res": 2 * 120, "all": 24 * 120} and T["N"] == 6 * 120, (T["loss"], T["N"])
+
+
+def chk_an_opened_window_without_a_line_is_the_predecessor(m):
+    # ruling R6-A3.11.172 (4) e. The build opens window k at its first live frame (FtSchedule.cs:124) and never measures
+    # the frame in which combat ended (FtFrames.cs:136). When the frames before that one fill whole windows, the closing
+    # frame opens one more window: no line carries it, the point line's live_frames counts its frame, and the game's
+    # next window takes pred and res from it (FtSchedule.OpenWindow: PrevArm = _lastArm, WinRes from _lastPlant). The
+    # parser reads that window off live_frames and holds the next window to what the lines still fix: the forced arm,
+    # else the mate's opposite arm at positions 3 and 4; and the run's plant state unless the window began a run. What
+    # the lines do not fix is not checked on that one window; one live frame less and both marks are held as ever
+    def two(n1, coins2, force="none", first_game=1, **spoil):
+        games = [[{"n": [120] * n1, "coins": [(1, 0), coins2], "plant": (2,), "ghost": True},
+                  {"n": [120] * 4, "coins": [(1, 1)]}]]
+        edit = (lambda w: w.update(**spoil) if (w["pt"], w["wi"]) == ("1.1.2", 1) else None) if spoil else None
+        return _b11_text(games, _flat, force=force, first_game=first_game, edit=edit)
+
+    def got(text, pt="1.1.2"):
+        return [x.split(" (")[0] for x in m.window_reconcile(m.read(text)) if x.startswith("window %s.0: " % pt)]
+    off_on = "window 1.1.2.0: pred=OFF, the game's previous window is ON"
+    # A: the unprinted window began a run (four whole windows before it), arms as built: the lines fix neither mark
+    a = two(4, (0, 1))
+    assert a.count(" live_frames=482 ") == 1 and m.window_reconcile(m.read(a)) == [], m.window_reconcile(m.read(a))
+    assert got(two(4, (0, 1), pred="ON")) == [] and got(two(4, (0, 1), res=0)) == []
+    # one live frame less: the last frame was measured, no window was opened, and the same lines miss on both marks
+    assert got(a.replace(" live_frames=482 ", " live_frames=481 ")) == [off_on, "window 1.1.2.0: res=1, needs 0"]
+    # B: it stands at position 3 of a plant run: the arm is its mate's opposite, the plant state its run's
+    for coins2 in ((0, 0), (0, 1)):
+        b = two(6, coins2)
+        assert m.window_reconcile(m.read(b)) == [], (coins2, m.window_reconcile(m.read(b)))
+        assert got(two(6, coins2, pred="OFF")) == [off_on], coins2
+        assert got(two(6, coins2, res=0)) == ["window 1.1.2.0: res=0, needs 1"], coins2
+    # C: position 2: its coin is on no line, so its arm is not fixed; its run's plant state is
+    assert m.window_reconcile(m.read(two(5, (0, 1)))) == []
+    assert got(two(5, (0, 1), pred="OFF")) == [] and got(two(5, (0, 1), res=0)) == ["window 1.1.2.0: res=0, needs 1"]
+    # D: a forced game: every opened window has the forced arm, the unprinted one too
+    assert m.window_reconcile(m.read(two(4, (0, 1), force="ON"))) == []
+    assert got(two(4, (0, 1), force="ON", pred="OFF")) == [off_on] and got(two(4, (0, 1), force="ON", res=0)) == []
+    # E: a point that printed no window at all (it ended inside its second live frame): its window 0 was opened
+
+    def none_printed(text, g=1):
+        out = []
+        for ln in text.splitlines():
+            if " w pt=%d.1.2 " % g in ln:
+                continue
+            if " p pt=%d.1.2 " % g in ln:
+                ln = re.sub(r" (n|sF|sS|sC|sP)=\d+", lambda x: " %s=0" % x.group(1), ln)
+                ln = ln.replace(" windows=1 ", " windows=0 ").replace(" live_frames=60 ", " live_frames=2 ")
+                assert " windows=0 " in ln and " live_frames=2 " in ln and " n=0 " in ln, ln
+            out.append(ln)
+        return "\n".join(out)
+    games = [[{"n": [120] * 4, "coins": [(1, 0)]}, {"n": [60], "coins": [(0, 0)]}, {"n": [120] * 4, "coins": [(1, 1)]}]]
+    whole = _b11_text(games, _flat)
+    assert m.window_reconcile(m.read(whole)) == []
+    assert " wi=0 f0=540 pred=OFF " in whole            # the third point's first window follows the second's OFF one
+    e = none_printed(whole)
+    assert e.count(" w pt=") == 8 and m.window_reconcile(m.read(e)) == [], m.window_reconcile(m.read(e))
+    spoil = lambda w: w.update(pred="OFF") if (w["pt"], w["wi"]) == ("1.1.3", 1) else None     # noqa: E731
+    assert got(none_printed(_b11_text(games, _flat, force="ON", edit=spoil)), "1.1.3") == [
+        "window 1.1.3.0: pred=OFF, the game's previous window is ON"]
+    # F: the menu self-check's segments carry game -1 and open no schedule window (FtSchedule.cs:112): the lines of A
+    # and of E are held there as ever, to the window printed before
+    assert got(two(4, (0, 1), first_game=-1), "-1.1.2") == [
+        "window -1.1.2.0: pred=OFF, the game's previous window is ON", "window -1.1.2.0: res=1, needs 0"]
+    assert got(none_printed(_b11_text(games, _flat, first_game=-1), -1), "-1.1.3") == [
+        "window -1.1.3.0: pred=OFF, the game's previous window is ON"]
+
+
+def chk_token_level_may_move_between_two_points(m):
+    # ruling R6-A3.11.172 (5) a. Inside a point the build copies a window's end snapshot into the next window's begin
+    # snapshot (FtFrames.cs:346), so there open0 equals the earlier open1 by construction. A point's first window takes
+    # a new snapshot (FtFrames.cs:133 and :248) after the point before took its last one (FtFrames.cs:161), and a
+    # datagram that arrives or is served between two points moves the level between them (found on the first complete
+    # two-seat sitting, 13 Nov 2026: a point's window 0 with sock open0=1 after the point before ended at open1=0, and
+    # the reverse). So the level may differ between two points, in either direction, and is held between two windows
+    # of one point as ever. An edit selects a window by the builder's count (from 1: point 1.1.1 has windows 1 to 5,
+    # point 1.1.2 windows 1 to 3); a miss names the line's wi, one below (_b11_wline)
+    def level(pt, wis):
+        hit = []
+
+        def edit(w):
+            if w["pt"] == pt and w["wi"] in wis:
+                w["tok"] = "log:0,0,0,0,0,0,0;hash:0,0,0,0,0,0,0;recv:0,0,0,0,0,0,0;sock:1,0,0,0,0,0,1"
+                hit.append(w["wi"])
+        miss = m.window_reconcile(m.read(_two_points(edit=edit)))
+        assert tuple(hit) == tuple(wis), (pt, wis, hit)       # every window named took the level: no silent no-op
+        return miss
+    assert level("1.1.2", (1, 2, 3)) == [], level("1.1.2", (1, 2, 3))                 # up between the two points
+    assert level("1.1.1", (1, 2, 3, 4, 5)) == [], level("1.1.1", (1, 2, 3, 4, 5))     # down between them
+    assert level("1.1.2", (1,)) == ["window 1.1.2.1: sock open0=0, the game's previous window's open1=1"], \
+        level("1.1.2", (1,))
+    assert level("1.1.1", (5,)) == ["window 1.1.1.4: sock open0=1, the game's previous window's open1=0"], \
+        level("1.1.1", (5,))
+
+
+def chk_vr2_spread_reads_the_measured_games(m):
+    # ruling R6-A3.11.172 (5) b. VR2's 2 percent spread reads the settled f_hat of the measured games (first_game and
+    # up): game 0 is the washout game and no reported number is converted with its f_hat (found on the first complete
+    # two-seat sitting, 13 Nov 2026: one seat's game 0 calibrated 10 percent below its games 1 to 16). VR2's other
+    # halves keep game 0, a measured game outside 2 percent fails as before, and vr2()'s own default still reads every
+    # game from 0
+    def low(text, g, pct):
+        out, n = [], 0
+        for ln in text.splitlines():
+            if " settled g=%d " % g in ln or " why=game%d kind=fhat " % g in ln:
+                ln, k = re.subn(r" f_hat=(\d+)", lambda x: " f_hat=%d" % (int(x.group(1)) * (100 - pct) // 100), ln)
+                n += k
+            out.append(ln)
+        assert n == 2, (g, n)
+        return "\n".join(out)
+    text = _log()
+    assert m.vr2(m.read(text), m.LAST_GAME, 1) == (True, []) and m.vr2(m.read(text), m.LAST_GAME) == (True, [])
+    g0 = m.read(low(text, 0, 10))
+    assert m.vr2(g0, m.LAST_GAME, 1) == (True, []), m.vr2(g0, m.LAST_GAME, 1)
+    assert m.vr2(g0, m.LAST_GAME) == (False, ["f_hat spread %d..%d exceeds 2 percent" % (FHAT * 90 // 100, FHAT)])
+    for g in (1, m.LAST_GAME):
+        got = m.vr2(m.read(low(text, g, 3)), m.LAST_GAME, 1)
+        assert got == (False, ["f_hat spread %d..%d exceeds 2 percent" % (FHAT * 97 // 100, FHAT)]), (g, got)
+        assert m.vr2(m.read(low(text, g, 1)), m.LAST_GAME, 1) == (True, []), g
+    ok, bad = m.vr2(m.read(_log(drop_cal=[0])), m.LAST_GAME, 1)
+    assert not ok and [b for b in bad if b.startswith("game 0: 0 calibration runs")], bad
+    # the validity set passes its own first_game on
+    v = _v_text()
+    assert _rows(m, v)["VR2 instrument"] == (True, []), _rows(m, v)["VR2 instrument"]
+    assert _rows(m, low(v, 0, 10))["VR2 instrument"] == (True, []), _rows(m, low(v, 0, 10))["VR2 instrument"]
+    ok, why = _rows(m, low(v, 1, 3))["VR2 instrument"]
+    assert not ok and len(why) == 1 and why[0].startswith("f_hat spread "), why
+    # sitting C's as-built line reads the measured games too
+    def as_built(t):
+        return [x for x in m.report(t, peer=_peer_text()).splitlines() if x.startswith("VR2 instrument ")]
+    assert as_built(text) == ["VR2 instrument PASS "], as_built(text)
+    assert as_built(low(text, 0, 10)) == ["VR2 instrument PASS "], as_built(low(text, 0, 10))
+    assert as_built(low(text, 1, 3)) == ["VR2 instrument FAIL f_hat spread %d..%d exceeds 2 percent"
+                                         % (FHAT * 97 // 100, FHAT)], as_built(low(text, 1, 3))
+
+
+def chk_the_completed_sittings_own_end_line(m):
+    # ruling R6-A3.11.172 (5) c. FtArm asks for the sitting's own end first and for two fighters later (FtArm.cs:198
+    # and :210) and prints the first failure after arming once (FtArm.cs:142-149), so a seat whose fighter count moves
+    # before its own end is set prints 'disarmed input=fighters pt=<the last point>' after its last point line (found
+    # on the first complete two-seat sitting, 13 Nov 2026, on one seat). That one line is the completed sitting's own
+    # end and no VR6 failure, for the seat and for its peer's row, when ALL of these hold: its input is fighters; the
+    # newest point line before it is of the last game and carries its pt; no window line and no point line follows
+    # it; the seat's 'sitting complete g=<last game>' line follows it. Every other disarm line fails VR6 as before
+    v = _v_text(pts=lambda g: [{"n": [120] * 4, "coins": [(1, 0)]}] * 2 if g == m.LAST_GAME else None)
+    pts = [r for r in m.read(v) if r["kind"] == "p"]
+    first, last = pts[-2]["pt"], pts[-1]["pt"]
+    assert (pts[-2]["game"], pts[-1]["game"]) == (m.LAST_GAME, m.LAST_GAME) and first != last, (first, last)
+    quit_ = LOG_PREFIX + "[FRAME-TIME] refusals why=quit"
+    done = LOG_PREFIX + "[FRAME-TIME] sitting complete g=%d" % m.LAST_GAME
+    assert v.count(quit_) == 1 and v.endswith("\n" + done)
+
+    def line(why, pt):
+        return LOG_PREFIX + "[FRAME-TIME] disarmed input=%s pt=%s" % (why, pt)
+
+    def dis(text):
+        r = m.read(text)
+        return m.disarms(r), m.disarms(r, True), m.vr6_build(r)[0]
+    own = _insert_before(v, quit_, line("fighters", last))
+    assert dis(v) == ([], [], True), dis(v)
+    assert dis(own) == ([], ["fighters at %s" % last], True), dis(own)
+    # its input
+    assert dis(_insert_before(v, quit_, line("room", last))) == (["room at %s" % last], [], False)
+    # the newest point line before it: its pt (the newest one's, no earlier one's) and its game
+    assert dis(_insert_before(v, quit_, line("fighters", first))) == (["fighters at %s" % first], [], False)
+    cut = v.index(LOG_PREFIX + "[FRAME-TIME] settled g=%d " % m.LAST_GAME)
+    p15 = [r for r in m.read(v[:cut]) if r["kind"] == "p"][-1]
+    short = v[:cut] + "\n".join([line("fighters", p15["pt"]), quit_ + " pairs=0", done])
+    assert p15["game"] == m.LAST_GAME - 1 and dis(short) == (["fighters at %s" % p15["pt"]], [], False), dis(short)
+    # nothing measured follows it: no point line and no window line
+    for kind in ("p", "w"):
+        ln = [x for x in v.splitlines() if "[FRAME-TIME] %s pt=%s " % (kind, last) in x][-1]
+        assert dis(_insert_before(own, quit_, ln)) == (["fighters at %s" % last], [], False), kind
+    # the sitting's own completion line follows it
+    assert dis(_sub1(own, "\n" + done, "")) == (["fighters at %s" % last], [], False)
+    assert dis(_sub1(own, done, done[:-2] + "%d" % (m.LAST_GAME - 1))) == (["fighters at %s" % last], [], False)
+    assert dis(v + "\n" + line("fighters", last)) == (["fighters at %s" % last], [], False)
+    # a disarm in the middle of the sitting fails VR6 beside the end line, on the seat's row and on its peer's
+    mid = _insert_before(own, LOG_PREFIX + "[FRAME-TIME] settled g=9 ", line("fighters", "8.1.1"))
+    assert dis(mid) == (["fighters at 8.1.1"], ["fighters at %s" % last], False), dis(mid)
+    assert _rows(m, own)["VR6 build"] == (True, []) and _rows(m, v, peer=own)["VR6 build"] == (True, [])
+    assert _rows(m, v, peer=mid)["VR6 build"] == (False, ["peer seat disarmed: fighters at 8.1.1"])
+    assert _rows(m, mid, peer=v)["VR6 build"] == (False, ["disarmed: fighters at 8.1.1"])
+    on = m.report_on({"a": own, "b": v})[0]
+    assert "V6 VALIDITY seat a VR6 build PASS" in on and "V6 VALIDITY seat b VR6 build PASS" in on, on
+
+
+# the build's own lines (sitting C of 13 Nov 2026, the VM seat; numbers only): the first window of point 1.1.1, that
+# point's line (its first window OFF: arm=OFF gate=1) and point 1.2.2's (its first window ON: arm=ON gate=0)
+REAL_W = ("w pt=1.1.1 arm=OFF plant=0 partial=0 n=120 sF=5262309 sS=1856675 sC=1485357965 sP=3742926767 maxF=127071 "
+          "medF=39973 e4=3,3 e8=1,1 e16=0,0 gc=1 run=0 pos=1 unit=P13 coin=0 wi=0 f0=2 pred=none prun=0 res=0 gcn=1 "
+          "cG=NA cW=0 cR=0 cS=0 cE=1478657234 "
+          "q=158547302,140379775,129646888,210260643,138654318,144978533,137330820,145191625,126973527,153394534 "
+          "r=0,0,0,0,0,0,0,0,0,0 qn=12,12,12,12,12,12,12,12,12,12 wu=log:0:0;hash:0:0;recv:0:0;sock:17:735978 "
+          "tok=log:0,0,0,0,0,0,0;hash:0,0,0,0,0,0,0;recv:0,0,0,0,0,0,0;sock:0,17,0,0,17,0,0 nm=238 cP=0 cX=6700731 "
+          "aC=599040 aW=0 aR=0 aS=0 aP=0 aX=53776 wa=log:0;hash:0;sock:224")
+REAL_P_OFF = ("p pt=1.1.1 arm=OFF gate=1 pred=none n=4194 sF=173001534 sS=63619118 sC=50173822225 maxF=163824 pn=240 "
+              "psF=9424701 psS=3469399 psC=2694533831 sP=128742780210 psP=7012770991 excl=1 plant_mixed=0 windows=37 "
+              "live_frames=4436 missing_end=0 span_g=813507 span_gn=23001 span_u=103 span_un=2 on_calls=21958 "
+              "guarded=20811 zs=0 zl=1 t0=4680658799 t1=4863450882 answer=replay off_g=0 off_gn=0 off_on=0 "
+              "on_guarded=0 own_split=0 span_class_overflow=0 gc_read_failures=0 recv_offmain=0 ledger_cycle_miss=0 "
+              "sock_p95=65536 sock_n=601 sock_thr=0 sock_main=0 ab_back=0 ab_retry=0 heap=97533952")
+REAL_P_ON = ("p pt=1.2.2 arm=ON gate=0 pred=OFF n=1440 sF=110028644 sS=50151983 sC=32251614726 maxF=262236 pn=71 "
+             "psF=5077046 psS=2216836 psC=1490051290 sP=67793967625 psP=3048594758 excl=1 plant_mixed=0 windows=13 "
+             "live_frames=1513 missing_end=0 span_g=761313 span_gn=7958 span_u=1216 span_un=2 on_calls=7362 "
+             "guarded=8073 zs=0 zl=1 t0=5605957003 t1=5721312918 answer=replay off_g=0 off_gn=0 off_on=0 "
+             "on_guarded=0 own_split=0 span_class_overflow=0 gc_read_failures=0 recv_offmain=0 ledger_cycle_miss=0 "
+             "sock_p95=370728 sock_n=409 sock_thr=0 sock_main=0 ab_back=0 ab_retry=0 heap=87674880")
+
+
+def chk_a_points_totals_hold_both_arms(m):
+    # ruling R6-A3.11.173: the build switches arms per window and prints a point's span_g, span_gn, on_calls and
+    # guarded as that point's totals, with the gate of its first window (plugin/FtFrames.cs:44-46 and :274). In a log
+    # with B11 window lines VR5's OFF-window rule reads the four window counters and judges no whole-point total: the
+    # build's own lines hold. A log without window lines keeps the whole-point rule (the control), and the window
+    # counters still judge a log whose points carry totals
+    real = [m.parse_line(LOG_PREFIX + "[FRAME-TIME] " + s) for s in (REAL_W, REAL_P_OFF, REAL_P_ON)]
+    assert [r["kind"] for r in real] == ["w", "p", "p"] and m.b11_line(real[0]), real
+    assert [(r["gate"], r["span_g"] > 0, r["on_calls"] > 0, r["guarded"] > 0) for r in real[1:]] == \
+        [(1, True, True, True), (0, True, True, True)]
+    assert m.vr5_points(real) == (True, []), m.vr5_points(real)
+    assert m.vr5_points(real[1:]) == (False, ["pt=1.1.1 gated: span_g=813507 span_gn=23001 on_calls=21958",
+                                              "pt=1.2.2 open: guarded=8073"]), m.vr5_points(real[1:])
+    # the same at the sitting's level: the fixture's point lines given the build's form (gate=1 where the first window
+    # is OFF; spans, calls and returns above 0 at every point)
+    v, c = _v_text(), _c_text()
+    rc, lines, n = m.read(c), c.split("\n"), 0
+    sub = ((" span_g=0 span_gn=0 ", " span_g=900 span_gn=40 "),
+           (" on_calls=0 guarded=0 ", " on_calls=40 guarded=40 "), (" arm=OFF gate=0 ", " arm=OFF gate=1 "))
+    for i, x in enumerate(lines):
+        if "[FRAME-TIME] p pt=" in x:
+            assert " gate=0 " in x and all(a in x for a, _ in sub[:2]), x
+            for a, b in sub:
+                x = x.replace(a, b)
+            lines[i], n = x, n + 1
+    built = "\n".join(lines)
+    rb = m.read(built)
+    assert n > 2 and sorted(set(r["gate"] for r in rb if r["kind"] == "p")) == [0, 1], n
+    assert m.vr5_points(rb) == (True, []), m.vr5_points(rb)[1][:3]
+
+    def vr5(text):
+        return dict((nm, (w, d)) for nm, w, d in m.sitting_c(m.read(text), text, rc, c, None, "C:a")["two"])[
+            "VR5 OFF-window rule"]
+    assert vr5(built) == ("PASS", "holds"), vr5(built)
+    pt = [r["pt"] for r in rb if r["kind"] == "p" and r["game"] == 2][0]
+    w, d = vr5(_p_sub(built, pt, " off_gn=0", " off_gn=1"))
+    assert w == "FAIL" and ("off_gn above 0 or not printed at %s" % pt) in d, (w, d)
+    ln = _verdict(_comb(m, v, v, built, c), "a")
+    assert "; cross-check " in ln and "VR5 OFF-window rule" not in ln, ln
+
+
 # the B11 mutants (mut_parse.py's B11_MUTS) are proven here, in process, so a seat's pytest run proves them: each row
 # names the check functions it must turn red; mutant 0, the unchanged parser, keeps every check green
 B11_CHECKS = ["chk_c2_recovers_3_25", "chk_c3_recovers_3_0375", "chk_c4_recovers_3_5", "chk_charge_never_negative",
@@ -5205,7 +5542,17 @@ B11_CHECKS = ["chk_c2_recovers_3_25", "chk_c3_recovers_3_0375", "chk_c4_recovers
               "chk_free_text_never_read_as_fields", "chk_empty_values_refused_as_written",
               "chk_nch_room_calls_held_to_the_source", "chk_plant_from_held_to_the_source",
               # G3 (ruling R6-A3.11.153 (3)): the census's partial variant
-              "chk_census_partial_out_of_range", "chk_emitted_variants_are_forms"]
+              "chk_census_partial_out_of_range", "chk_emitted_variants_are_forms",
+              # ruling R6-A3.11.172: run and wi from 0, the res mark, and a window opened without a line, as the build
+              # prints and opens them
+              "chk_run_and_ordinal_count_from_zero", "chk_res_marks_a_runs_first_window_after_a_plant_run_window",
+              "chk_an_opened_window_without_a_line_is_the_predecessor",
+              # ruling R6-A3.11.172 (5): the token level between two points, VR2's spread over the measured games, and
+              # the completed sitting's own end line
+              "chk_token_level_may_move_between_two_points", "chk_vr2_spread_reads_the_measured_games",
+              "chk_the_completed_sittings_own_end_line",
+              # ruling R6-A3.11.173: arms switch per window, so a point's totals hold both arms
+              "chk_a_points_totals_hold_both_arms"]
 
 
 @pytest.mark.parametrize("name", B11_CHECKS)
@@ -5308,9 +5655,9 @@ def test_b11_ownership_and_ordinals():
     twice = [x for x in lines if " p pt=1.1.2 " in x][0]
     miss = P.window_reconcile(P.read(text + "\n" + twice))
     assert "window lines of point 1.1.2: 2 owner point lines (needs exactly 1)" in miss, miss
-    gap = "\n".join(x for x in lines if not (" w pt=1.1.1 " in x and " wi=3 " in x))
+    gap = "\n".join(x for x in lines if not (" w pt=1.1.1 " in x and " wi=2 " in x))      # the point's third window
     miss = P.window_reconcile(P.read(gap))
-    assert [x for x in miss if "window ordinals 1,2,4,5 are not 1..4" in x], miss
+    assert [x for x in miss if "window ordinals 0,1,3,4 are not 0..3" in x], miss
     assert [x for x in miss if x.startswith("point 1.1.1: 4 window lines, the point line counts 5")], miss
 
 
@@ -5328,9 +5675,9 @@ def test_b11_plant_runs_and_res_windows_leave_the_estimate_and_are_counted():
     assert P.window_reconcile(P.read(un)) == []
     assert not [w for w in P.read(un) if w["kind"] == "w" and w["plant"]]
     T2 = P.b11_terms(P.read(un))
-    assert T2["N"] == 360 and T2["loss"]["plant"] == 480 and T2["unspun"] == [(1, "1.1.1", 1)]
+    assert T2["N"] == 360 and T2["loss"]["plant"] == 480 and T2["unspun"] == [(1, "1.1.1", 0)]   # the line's run=0
     assert [x for x in P.b11_report(P.read(un))[0] if x.startswith("B11 plant runs: 1, 1 unspun") and
-            x.endswith("; 1.1.1 run 1")]
+            x.endswith("; 1.1.1 run 0")]
 
 
 def test_b11_transitions_own_split_and_na_writers():
@@ -5377,7 +5724,7 @@ def test_b11_gc_na_windows_are_checked_without_cg_and_named():
     doc = " ".join(P.b11_estimate.__doc__.split())
     assert "fallback" not in doc and "withhold" not in doc.replace("withholds nothing", ""), doc
     assert "the envelope enters no figure" in doc, doc
-    assert "1.1.1.2" in gl[0] and "2.1.1.2" in gl[0]
+    assert "1.1.1.1" in gl[0] and "2.1.1.1" in gl[0]          # each point's second window, the line's wi=1
     bad = _b11_text(_one_run_games(), _c2_model, cg=lambda w: None if w["wi"] == 2 else 30,
                     edit=lambda w: w.update(sC=w["sC"] + 30) if w["cG"] is None else None)
     assert [x for x in P.window_reconcile(P.read(bad)) if "is not cW+cR+cS+cP+cX+cE" in x]

@@ -600,10 +600,9 @@ HEAVY_OPS = ("ce_build", "se_build", "cd_build", "ic_build", "enqueue", "spool",
 
 
 def complete(recs, last_game=LAST_GAME):
-    """The complete sitting (round-1 HIGH 4, the complete-slice law): before any verdict, games 0 to last_game
-    each present with a settled line, point lines, a calibration run and their census, and the sitting's own
-    completion line (FtDrive: sitting complete g=last_game). Returns the list of what is missing (empty when
-    complete)."""
+    """The complete sitting (round-1 HIGH 4, the complete-slice law): before any verdict, games 0 to last_game each
+    present with a settled line, point lines, a calibration run and their census, and the sitting's own completion
+    line (FtDrive: sitting complete g=last_game). Returns the list of what is missing (empty when complete)."""
     miss = []
     want = set(range(0, last_game + 1))
     sett = set(r["g"] for r in recs if r["kind"] == "settled")
@@ -696,9 +695,8 @@ def records_missing(recs, last_game=LAST_GAME):
     # answer_replay (round-3 MEDIUM ft_parse.py:1461): under reading A, FtSchedule writes one replay line per game
     # over: a replay call (FtReplay.Run) at the next boundary that reads not live or at the next game start, or a skip
     # line (FtReplay.Skip, result=skipped_live, skipped_quit or skipped_absent) where no call may run, decided owed at
-    # the game over (reading A with the sentinel present there). Each game 0..last needs exactly
-    # one; f18() fails a skip only for a game it reads (g >= first_game), so game 0's counts here only. Under reading
-    # B there is none
+    # the game over (reading A with the sentinel present there). Each game 0..last needs exactly one; f18() fails a
+    # skip only for a game it reads (g >= first_game), so game 0's counts here only. Under reading B there is none
     readings = set(r.get("f18") for r in recs if r["kind"] == "settled" and r.get("g", -1) >= 0)
     for g in range(0, last_game + 1):
         n = sum(1 for r in recs if r["kind"] == "answer_replay" and r.get("g") == g)
@@ -1041,12 +1039,11 @@ def dC_us(recs, z=Z_END, first_game=1):
 
 
 def d_up(recs, z=Z_END, first_game=1):
-    """D_up (V4 3.6, F14; round-1 HIGH 3): n_k_max is entry k's largest per-game mean of calls per ON live frame
-    (the census's on count over the game's ON live frames, the live frames of its gate-clear points, measured
-    games); per calibration j at a game start, D_j = sum over entries of n_k_max x d_kj, d_kj the per-call
-    closed-path cost of entry k's shape in calibration j (mean over its batches of (patched - unpatched) / n, us by
-    the settled Stopwatch frequency); D_up = max(mean + t(z, J - 1) SE, largest D_j).
-    Returns (D_up, [D_j], {entry: n_k_max})."""
+    """D_up (V4 3.6, F14; round-1 HIGH 3): n_k_max is entry k's largest per-game mean of calls per ON live frame (the
+    census's on count over the game's ON live frames, the live frames of its gate-clear points, measured games); per
+    calibration j at a game start, D_j = sum over entries of n_k_max x d_kj, d_kj the per-call closed-path cost of
+    entry k's shape in calibration j (mean over its batches of (patched - unpatched) / n, us by the settled Stopwatch
+    frequency); D_up = max(mean + t(z, J - 1) SE, largest D_j). Returns (D_up, [D_j], {entry: n_k_max})."""
     freq = set(r["freq"] for r in recs if r["kind"] == "settled")
     if len(freq) != 1:
         raise Refused("D_up needs one Stopwatch frequency (got %s)" % sorted(freq))
@@ -1440,13 +1437,12 @@ def vr9(recs, bound_us, first_game=1):
 
 def b3(recs):
     """B3 (V4 3.9), placement: no heavy operation (record builds, queue writes, the pump, answers, the hashing
-    thread's start, a hash completed on the main thread) ran in a live-combat frame: neither with CombatLive true
-    at its call, in any moment (at_call), nor in a frame that started live whose combat ended before the call
-    (edge; round-1 MEDIUM, FtHeavy.cs:39); and the hashing job's interval [hash_t0, hash_t1] lies clear of every
-    point's live interval [t0, t1]. Off-thread calls (off) are reported, not judged (ruled not a fault, ruling
-    R6-A3.11.154): they run in no frame of the main thread, report() prints them, and what they cost the frames is in
-    the measured frame times themselves.
-    Returns (ok, reasons, {op: (at_call, edge, off, live-moment calls)})."""
+    thread's start, a hash completed on the main thread) ran in a live-combat frame: neither with CombatLive true at
+    its call, in any moment (at_call), nor in a frame that started live whose combat ended before the call (edge;
+    round-1 MEDIUM, FtHeavy.cs:39); and the hashing job's interval [hash_t0, hash_t1] lies clear of every point's live
+    interval [t0, t1]. Off-thread calls (off) are reported, not judged (ruled not a fault, ruling R6-A3.11.154): they
+    run in no frame of the main thread, report() prints them, and what they cost the frames is in the measured frame
+    times themselves. Returns (ok, reasons, {op: (at_call, edge, off, live-moment calls)})."""
     hv = [r for r in recs if r["kind"] == "heavy"]
     if not hv:
         raise Refused("B3 needs heavy lines (one per operation per game)")
@@ -1484,21 +1480,25 @@ def b3(recs):
     return not bad, bad, ops
 
 
-def disarms(recs):
-    """FtArm's disarm lines (the predicate failed after arming): ['<input> at <pt>']."""
-    return ["%s at %s" % (r.get("input", "?"), r.get("pt", "?")) for r in recs if r["kind"] == "disarmed"]
+def disarms(recs, end=False):
+    """FtArm's disarm lines ['<input> at <pt>'] less the sitting's own end (ruling .172 (5) c); end=True: it alone."""
+    own = [i for i, r in enumerate(recs) if r["kind"] == "disarmed" and r.get("input") == "fighters"
+           and [(q["game"], q["pt"]) for q in recs[:i] if q["kind"] == "p"][-1:] == [(LAST_GAME, r.get("pt"))]
+           and not any(q["kind"] in ("p", "w") for q in recs[i:])
+           and any(q["kind"] == "sitting" and q.get("g") == LAST_GAME for q in recs[i:])]
+    return ["%s at %s" % (r.get("input", "?"), r.get("pt", "?")) for i, r in enumerate(recs)
+            if r["kind"] == "disarmed" and (i in own) == end]
 
 
 def vr6_build(recs):
-    """VR6's build half (FORMAT-M-PLAN.md V2 part b): the latest refusals line (why=quit when present, else the
-    last game over) gives every refused what:route pair's count and every allowed route's send count; a route that
-    was both refused and sent fails, and any disarmed line makes the sitting INVALID. A refusals line out of its form
-    (a key printed twice, a token not key=value, pairs= not the pairs listed) fails as written and no pair is read
-    (ruling R6-A3.11.154). The file listings before and
-    after are the runner's half. The dispatched and sent counts come from one patch class, FtRoute_SendPatch: when it
-    never attached both stay at zero and agree, so this comparison rests on the validity set's ATTACH guard, which
-    requires that class's entry fully attached (ruling R6-A3.11.151 (2) class A, F2). Returns (ok, reasons, {pair:
-    count}, [disarm inputs])."""
+    """VR6's build half (FORMAT-M-PLAN.md V2 part b): the latest refusals line (why=quit when present, else the last
+    game over) gives every refused what:route pair's count and every allowed route's send count; a route that was both
+    refused and sent fails, and any line of disarms() makes the sitting INVALID. A refusals line out of its form (a
+    key printed twice, a token not key=value, pairs= not the pairs listed) fails as written and no pair is read
+    (ruling R6-A3.11.154). The file listings before and after are the runner's half. The dispatched and sent counts
+    come from one patch class, FtRoute_SendPatch: when it never attached both stay at zero and agree, so this
+    comparison rests on the validity set's ATTACH guard, which requires that class's entry fully attached (ruling
+    R6-A3.11.151 (2) class A, F2). Returns (ok, reasons, {pair: count}, [disarm inputs])."""
     lines = [r for r in recs if r["kind"] == "refusals"]
     dis = disarms(recs)
     if not lines:
@@ -1814,19 +1814,19 @@ def gate_counter_faults(recs, valid):
 
 
 def vr5_points(recs):
-    """VR5's rules: every entry that ran in ON live frames shows guarded returns in OFF live frames, per game; and
-    per point, a gated point has no gated span time, no gated span call and no census call with the gate clear,
-    an ungated point no guarded return. In a V6 log (one carrying B11 window lines) every point line also carries
-    the same rules at window granularity (gate_counter_faults)."""
+    """VR5's rules: every entry that ran in ON live frames shows guarded returns in OFF live frames, per game. Without
+    B11 window lines, per point: a gated point has no gated span time or call and no on_calls, an ungated point no
+    guarded return. With them arms switch per window: point totals hold both arms; GATE_COUNTERS carry the rule."""
+    per_w = any(b11_line(r) for r in recs)
     bad = gate_counter_faults(recs, None) if any(b11_line(r) for r in recs) else []
     for r in recs:
         if r["kind"] == "census" and r["on"] > 0 and r["guarded"] == 0:
             bad.append("g=%d %s" % (r["g"], r["entry"]))
         if r["kind"] == "p" and "span_g" in r:
-            if r["gate"] == 1 and (r["span_g"] or r["span_gn"] or r["on_calls"]):
+            if not per_w and r["gate"] == 1 and (r["span_g"] or r["span_gn"] or r["on_calls"]):
                 bad.append("pt=%s gated: span_g=%d span_gn=%d on_calls=%d" % (r["pt"], r["span_g"], r["span_gn"],
                                                                           r["on_calls"]))
-            if r["gate"] == 0 and r["guarded"]:
+            if not per_w and r["gate"] == 0 and r["guarded"]:
                 bad.append("pt=%s open: guarded=%d" % (r["pt"], r["guarded"]))
         # B11 (method-v52.md:87, kept by method-v54.md:183): arms switch per window, so the zero is per window: an
         # OFF window executes no switched scope
@@ -1890,12 +1890,12 @@ def counters_faults(recs, games):
     return bad
 
 
-def vr2(recs, last_game=None):
-    """Instrument (V4 3.7 VR2): every game has a settled line; no frame without FT_End, no cycle-read failure
-    and no span open at a frame boundary in any settled line; f_hat within 2 percent; and (round-1 MEDIUM,
-    calibration coverage) each game's start calibration complete: one run per game (why=game<g>) with its fhat
-    line, its span line and a disp line for every shape the census maps an entry to (the registered table's
-    shapes and every shape a census line names). e_C_lo >= 0.5 is judged in report()."""
+def vr2(recs, last_game=None, first_game=0):
+    """Instrument (V4 3.7 VR2): every game has a settled line; no frame without FT_End, no cycle-read failure and no
+    span open at a frame boundary in any settled line; f_hat within 2 percent from first_game on (ruling R6-A3.11.172
+    (5) b); and (round-1 MEDIUM, calibration coverage) each game's start calibration complete: one run per game
+    (why=game<g>) with its fhat line, its span line and a disp line for every shape the census maps an entry to (the
+    registered table's shapes and every shape a census line names). e_C_lo >= 0.5 is judged in report()."""
     sett = [r for r in recs if r["kind"] == "settled"]
     games = set(r["game"] for r in recs if r["kind"] == "p")
     if last_game is not None:
@@ -1942,7 +1942,7 @@ def vr2(recs, last_game=None):
     for r in recs:
         if r["kind"] == "p" and r["game"] >= 0 and r.get("missing_end", 0) != 0:
             bad.append("point %s: missing_end=%d" % (r["pt"], r["missing_end"]))
-    fh = [r["f_hat"] for r in sett if r["g"] >= 0 and r.get("f_hat", 0) > 0]
+    fh = [r["f_hat"] for r in sett if r["g"] >= first_game and r.get("f_hat", 0) > 0]
     if fh and (max(fh) - min(fh)) > 0.02 * min(fh):
         bad.append("f_hat spread %d..%d exceeds 2 percent" % (min(fh), max(fh)))
     return not bad, bad
@@ -2550,7 +2550,7 @@ def window_faults(w):
     f = []
     if w["unit"] != UNIT_OF_POS.get(w["pos"]):
         f.append("%s: unit %s at position %s" % (tag, w["unit"], w["pos"]))
-    if w["run"] < 1 or w["wi"] != 4 * (w["run"] - 1) + w["pos"]:
+    if w["run"] < 0 or w["wi"] != 4 * w["run"] + w["pos"] - 1:    # both count from 0 (FtSchedule.OpenWindow: k, k / 4)
         f.append("%s: run %d position %d is not ordinal %d" % (tag, w["run"], w["pos"], w["wi"]))
     for k in ("coin", "plant", "prun", "res", "partial"):
         if w[k] not in (0, 1):
@@ -2599,7 +2599,7 @@ def window_faults(w):
         f.append("%s: tok=%s is not type:open0,enqON,enqOFF,doneON,doneOFF,disc,open1;..." % (tag, w["tok"]))
     else:
         # SHARED.md (md5 2119eb2e): the conservation sum is an identity of the emitter (open is computed from the
-        # same counters), so the checks are open1 >= 0 here and open0 = the previous window's open1 (window_reconcile)
+        # same counters), so the checks are open1 >= 0 here and open0 = the point's previous open1 (window_reconcile)
         for t, x in sorted(tok.items()):
             if x[6] < 0:
                 f.append("%s: %s open1=%d is below 0 (a service counted on the wrong type)" % (tag, t, x[6]))
@@ -2613,17 +2613,13 @@ def window_faults(w):
 def window_reconcile(recs):
     """Window ownership and the B11 reconciliation (ruling .138, SHARED.md), visiting every window and every point
     with no early stop: every w line has exactly one owner point line; every point has as many w lines as its line
-    counts; B11 lines: one format per log, ordinals 1..k per point, the point's unplanted and planted totals of n,
+    counts; B11 lines: one format per log, ordinals 0..k-1 per point, the point's unplanted and planted totals of n,
     sF, sS, sC and sP equal to its line's, each window's own invariants (window_faults), the predecessor and res=1
-    marks against the game's window order, plant constant per run, and mates on one coin (opposite arms, one coin
-    field). Returns the misses."""
-    miss = []
-    owners, wins = {}, {}
-    for r in recs:
-        if r["kind"] == "p":
-            owners.setdefault(r["pt"], []).append(r)
-        elif r["kind"] == "w":
-            wins.setdefault(r["pt"], []).append(r)
+    marks against the game's order of opened windows (one may carry no line: ruling R6-A3.11.172 (4) e), plant
+    constant per run, and mates on one coin (opposite arms, one coin field). Returns the misses."""
+    miss, owners, wins, after, games = [], {}, {}, {}, {}
+    for r in (r for r in recs if r["kind"] in ("p", "w")):
+        (owners if r["kind"] == "p" else wins).setdefault(r["pt"], []).append(r)
     for pt in sorted(wins):
         k = len(owners.get(pt, []))
         if k != 1:
@@ -2639,17 +2635,22 @@ def window_reconcile(recs):
     old = sum(1 for r in recs if r["kind"] == "w" and not b11_line(r))
     if old:
         miss.append("%d window lines lack the B11 fields beside %d that carry them" % (old, len(b11)))
+    # SHARED.md V6: under force=ON (or OFF) arm= is the gate's real state, not the coin: mates hold one coin field only
+    forced = dict((r["g"], r["force"]) for r in recs if r["kind"] == "settled" and r.get("force") in ("ON", "OFF"))
     for pt in sorted(wins):
-        bw = [w for w in wins[pt] if b11_line(w)]
+        bw = sorted((w for w in wins[pt] if b11_line(w)), key=lambda w: w["wi"])
         if not bw:
             continue
-        wis = sorted(w["wi"] for w in bw)
-        if wis != list(range(1, len(bw) + 1)):
-            miss.append("point %s: window ordinals %s are not 1..%d" % (pt, ",".join(map(str, wis)), len(bw)))
+        wis = [w["wi"] for w in bw]
+        if wis != list(range(len(bw))):
+            miss.append("point %s: window ordinals %s are not 0..%d" % (pt, ",".join(map(str, wis)), len(bw) - 1))
         own = owners.get(pt, [])
         if len(own) != 1:
             continue
-        p = own[0]
+        p, lf = own[0], own[0].get("live_frames")
+        if p["game"] >= 0 and isinstance(lf, int) and (lf - 2) // WINDOW_FRAMES == len(bw):
+            mate = None if len(bw) % 4 < 2 else "ON" if bw[-2]["arm"] == "OFF" else "OFF"      # the unprinted window's
+            after[id(bw[-1])] = (forced.get(bw[-1]["game"], mate), bw[-1]["prun"] if len(bw) % 4 else None)  # arm, prun
         for planted, pairs in ((0, (("n", "n"), ("sF", "sF"), ("sS", "sS"), ("sC", "sC"), ("sP", "sP"))),
                                (1, (("n", "pn"), ("sF", "psF"), ("sS", "psS"), ("sC", "psC"), ("sP", "psP")))):
             for wk, pk in pairs:
@@ -2657,32 +2658,31 @@ def window_reconcile(recs):
                 if tot != p.get(pk):
                     miss.append("point %s: the %s windows' %s total %d, the point line's %s %s"
                                 % (pt, "planted" if planted else "unplanted", wk, tot, pk, p.get(pk)))
-    for w in b11:
-        miss += window_faults(w)
-    games = {}
-    for w in b11:
-        games.setdefault(w["game"], []).append(w)
-    # SHARED.md V6: arm= is the gate's real state, so under force=ON (or OFF) a window's arm no longer carries its
-    # coin; mates are then held to one coin field only
-    forced = set(r["g"] for r in recs if r["kind"] == "settled" and r.get("force") in ("ON", "OFF"))
+    for r in recs:  # a game's opened windows in the log's order; a point with no window line stands for its window 0
+        miss += window_faults(r) if b11_line(r) else []
+        if b11_line(r) or (r["kind"] == "p" and r["game"] >= 0 and r["pt"] not in wins):
+            games.setdefault(r["game"], []).append(r)
     for g in sorted(games):
-        prev = None
-        runs, coins = {}, {}
+        prev, last, runs, coins = None, None, {}, {}    # prev: the arm and plant run of the window opened before w
         for w in games[g]:
-            want = "none" if prev is None else prev["arm"]
-            if w["pred"] != want:
-                miss.append("window %s.%d: pred=%s, the game's previous window is %s" % (w["pt"], w["wi"], w["pred"], want))
-            if prev is not None:
-                t0, t1 = _typed(w["tok"], 7), _typed(prev["tok"], 7)
+            if w["kind"] == "p":
+                prev = (forced.get(g), None)
+                continue
+            want = "none" if prev is None else prev[0]
+            if want is not None and w["pred"] != want:
+                miss.append("window %s.%d: pred=%s, the game's previous window is %s"
+                            % (w["pt"], w["wi"], w["pred"], want))
+            if last is not None and last["pt"] == w["pt"]:   # one point: ruling R6-A3.11.172 (5) a (FtFrames.cs:346)
+                t0, t1 = _typed(w["tok"], 7), _typed(last["tok"], 7)
                 for t in (sorted(set(t0) & set(t1)) if t0 and t1 else ()):
                     if t0[t][0] != t1[t][6]:
                         miss.append("window %s.%d: %s open0=%d, the game's previous window's open1=%d"
                                     % (w["pt"], w["wi"], t, t0[t][0], t1[t][6]))
-            res = 1 if prev is not None and prev["prun"] == 1 and w["prun"] == 0 else 0
-            if w["res"] != res:
-                miss.append("window %s.%d: res=%d, needs %d (the first window after a plant run)" % (w["pt"], w["wi"],
-                                                                                                   w["res"], res))
-            prev = w
+            res = 1 if prev is not None and prev[1] == 1 and w["pos"] == 1 else 0
+            if w["res"] != res and not (prev is not None and prev[1] is None and w["pos"] == 1):
+                miss.append("window %s.%d: res=%d, needs %d (a run's first window after a plant-run window)"
+                            % (w["pt"], w["wi"], w["res"], res))
+            last, prev = w, after.get(id(w), (w["arm"], w["prun"]))
             runs.setdefault((w["pt"], w["run"]), set()).add(w["prun"])
             coins.setdefault(coin_of(w), []).append(w)
         for (pt, run), pl in sorted(runs.items()):
@@ -3758,10 +3758,10 @@ def attach_patch_faults(text):
     'Failed to patch'. Plugin's patch loop prints '[HARMONY] Failed to patch <class>: <message>' (plugin/Plugin.cs:
     1483) for a class that did not attach; the laptop's slice exports that line as 'withheld Failed to patch <n>' (its
     message is free text), which holds the same words (lesson #83: attached, or never attached). Returns the reasons,
-    each naming its line and the class."""
+    each naming its line and the class. Exempt: the seat script's 'slice class Failed to patch: 0 lines'."""
     bad = []
     for i, ln in enumerate(text.splitlines(), 1):
-        if FAILED_PATCH in ln:
+        if FAILED_PATCH in ln and ln.strip() != "slice class %s: 0 lines" % FAILED_PATCH:
             ln = ln.strip()
             bad.append("line %d: %s" % (i, ln[ln.find("[HARMONY]"):] if "[HARMONY]" in ln else ln))
     return bad
@@ -3893,7 +3893,7 @@ def validity_set(recs, text, peer_recs, peer_text, t_vr1, src, first_game=1, t_n
     rows.append(("complete sitting",) + _guard(lambda: _complete_row(recs, text, peer_recs, peer_text)))
     rows.append(("census summary",) + _guard(lambda: _census_row(recs, peer_recs)))
     rows.append(("VR1",) + _guard(lambda: _vr1_row(recs, text, t_vr1, t_name)))
-    rows.append(("VR2 instrument",) + _guard(lambda: vr2(recs, LAST_GAME)))
+    rows.append(("VR2 instrument",) + _guard(lambda: vr2(recs, LAST_GAME, first_game)))
     rows.append(("VR5 records",) + _guard(lambda: vr5_records(recs, 0, LAST_GAME)))
     rows.append(("VR6 build",) + _guard(lambda: _vr6_row(recs, peer_recs)))
     rows.append(("F18",) + _guard(lambda: _f18_row(recs, first_game)))
@@ -4482,7 +4482,7 @@ def report(text, peer=None, src="log", peer_src="peer", ref=None, ref_src="refer
         lines_cs.append("CENSUS summary peer seat %s: %s" % ("PASS" if okp else "FAIL", rdp))
     out.append("SITTING %s" % ("complete: games 0 to %d" % LAST_GAME if not miss else "INCOMPLETE: " + "; ".join(miss)))
     out += lines_cs
-    ok2, why2 = vr2(recs, LAST_GAME)
+    ok2, why2 = vr2(recs, LAST_GAME, 1)         # the spread over the measured games, as sitting_c's first_game
     out.append("VR2 instrument %s %s" % ("PASS" if ok2 else "FAIL", "; ".join(why2)))
     ok5, why5 = vr5(recs, 0, LAST_GAME)
     vr["VR5"] = ok5

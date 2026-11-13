@@ -83,7 +83,7 @@ FREE = "IOException: %s at planted.example/x y=1" % MARK
 ROOM = "ft_0123abcd"
 
 W6 = ("w pt=1.1.1 arm=ON plant=0 partial=0 n=120 sF=21600000 sS=0 sC=1000 sP=1000 maxF=1 medF=1 e4=0,0 e8=0,0 "
-      "e16=0,0 gc=0 run=1 pos=1 unit=P13 coin=1 wi=1 f0=0 pred=none prun=0 res=0 gcn=0 cG=0 cW=0 cR=0 cS=0 cE=1000 "
+      "e16=0,0 gc=0 run=0 pos=1 unit=P13 coin=1 wi=0 f0=0 pred=none prun=0 res=0 gcn=0 cG=0 cW=0 cR=0 cS=0 cE=1000 "
       "q=100,100,100,100,100,100,100,100,100,100 r=0,0,0,0,0,0,0,0,0,0 qn=12,12,12,12,12,12,12,12,12,12 "
       "wu=log:1:2;hash:1:2;recv:2:3;sock:3:4 tok=log:0,0,0,0,0,0,0;hash:0,0,0,0,0,0,0;recv:0,0,0,0,0,0,0;"
       "sock:0,0,0,0,0,0,0 nm=4 cP=0 cX=0 aC=12000000 aW=1000 aR=2000 aS=3000 aP=500 aX=1500 wa=log:400;hash:300;sock:300")
