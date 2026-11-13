@@ -78028,6 +78028,23 @@ def _mail_parse_uuid(value, field: str) -> UUID:
         raise HTTPException(status_code=400, detail=f"{field}_invalid")
 
 
+def _mail_parse_key(value) -> UUID:
+    """A send's, a reply's or a broadcast's idempotency key. Refused 400
+    idempotency_key_invalid when it is no UUID, or when it is a RESERVED key:
+    version digit (the 13th hex digit) 0. The janitor's sweep moves a kept
+    message off its key into that space (_MAIL_RECEIPT_SWEEP_SQL), and
+    migration 404's trigger moves a superseded receipt into it, so no request
+    names either, whatever it computes. Refused before the sender lock and
+    before any mail table is read. No shipped caller sends one: the client
+    mints uuid4 keys, the Discord route derives uuid5 (reply_idempotency_key).
+    The broadcast has no caller in this repository; RFC 9562 lists version
+    0 as unused, and the nil UUID, its one form with that digit, is refused."""
+    key = _mail_parse_uuid(value, "idempotency_key")
+    if key.hex[12] == "0":
+        raise HTTPException(status_code=400, detail="idempotency_key_invalid")
+    return key
+
+
 def _mail_normalise(s: str) -> str:
     """B-L1 first step: CRLF -> LF, and NOTHING else. A lone CR is left in
     place so the control scan refuses it (review r1: turning CR into LF or
@@ -78412,7 +78429,10 @@ async def _log_admin_action_strict(db: AsyncSession, *, admin_steam_id: str, act
 # Send receipts (migration 404). Every committed mail send, reply and
 # broadcast has one row in mail_send_receipts, keyed (sender_id,
 # idempotency_key): the message id the send answered with, its kind, a
-# broadcast's recipient count and the request's digest. A repeated key is
+# broadcast's recipient count and the request's digest. (When the previous
+# build sends a key again after the key's first message was purged, the
+# first send's row stays under a reserved key, _mail_parse_key, and the key's
+# row is the newer message's: migration 404's trigger.) A repeated key is
 # answered from the receipt ALONE. The message row is no source for that
 # answer: the janitor purges a row only once no delivered copy keeps it, which
 # depends on the recipients' delivery, while the receipt lives until
@@ -78447,15 +78467,15 @@ _MAIL_RECEIPT_SQL = (
 
 # The janitor's receipt arm: a receipt goes MAIL_RETENTION_DAYS after the
 # send, in bounded batches, whatever the message's delivery or purge state.
-# The same statement retires the key of every message a deleted receipt
-# answered for that is still kept (an unread delivered copy keeps a row
-# past retention): the key becomes one derived from the message's own id.
-# A key with no receipt is sent as a new message, and 297's UNIQUE
-# (sender_id, idempotency_key), which migration 404 keeps for the previous
-# build, would refuse that insert while the old row still held the key.
-# The new key matches no request (clients send uuid4 keys, the Discord
-# route uuid5 keys), nothing returns a message's key to a caller, and
-# migration 404's trigger does not fire on it (UPDATE OF recipient_count
+# The same statement moves every message a deleted receipt answered for
+# that is still kept (an unread delivered copy keeps a row past retention)
+# off its key: a key with no receipt is sent as a new message, and 297's
+# UNIQUE (sender_id, idempotency_key), which migration 404 keeps for the
+# previous build, would refuse that insert while the old row still held the
+# key. The message's new key is a reserved one, derived from its own id
+# with its version digit set to 0: every route refuses a reserved key before
+# it reads a mail table (_mail_parse_key), so no request names it. Migration
+# 404's trigger does not fire on the change (UPDATE OF recipient_count
 # only). One row per deleted receipt is returned.
 _MAIL_RECEIPT_SWEEP_SQL = (
     "WITH gone AS ("
@@ -78467,7 +78487,8 @@ _MAIL_RECEIPT_SWEEP_SQL = (
     "  RETURNING sender_id, idempotency_key),"
     " retired AS ("
     "  UPDATE mail_messages m"
-    "     SET idempotency_key = CAST(md5('mail-key-retired:' || CAST(m.id AS text)) AS uuid)"
+    "     SET idempotency_key = CAST(overlay(md5('mail-key-retired:' || CAST(m.id AS text))"
+    "                                PLACING '0' FROM 13 FOR 1) AS uuid)"
     "    FROM gone g"
     "   WHERE m.sender_id = g.sender_id AND m.idempotency_key = g.idempotency_key"
     "  RETURNING 1)"
@@ -78614,7 +78635,10 @@ async def _mail_rate_or_raise(db: AsyncSession, sender_id) -> None:
 
     Receipts, not message rows (migration 404's change): a receipt stays
     MAIL_RETENTION_DAYS after the send whatever happens to the message, so
-    every send counts for its whole window whatever its delivery. A row's
+    every send counts for its whole window whatever its delivery. That holds
+    when a later message takes the send's key, too: the first send's receipt
+    stays, under a reserved key, with its own kind and time (migration 404's
+    trigger), so each committed send is one receipt. A row's
     life depends on delivery (the janitor purges a deleted message only once
     no delivered copy keeps it), so the window neither counts rows nor
     relies on how long the janitor keeps them."""
@@ -78878,7 +78902,7 @@ async def mail_send(req: _MailSendReq, request: Request, db: AsyncSession = Depe
     (B-7). Unknown or deleted recipients are an addressing error (400); the
     cap is counted after canonicalisation."""
     me = await _mail_caller(request, db)
-    key = _mail_parse_uuid(req.idempotency_key, "idempotency_key")
+    key = _mail_parse_key(req.idempotency_key)
     fp = _mail_request_fp("send", to=[str(x) for x in req.to], cc=[str(x) for x in req.cc],
                           subject=req.subject, body=req.body)
     mfp = _mail_request_message_fp("send", subject=req.subject, body=req.body)
@@ -78958,7 +78982,7 @@ async def _mail_reply_core(db: AsyncSession, me: dict, *, message_id: str | None
     if (message_id is None) == (resolve_target is None):
         raise TypeError("_mail_reply_core takes exactly one of message_id and resolve_target")
     mid = None if message_id is None else _mail_parse_uuid(message_id, "message_id")
-    key = _mail_parse_uuid(idempotency_key, "idempotency_key")
+    key = _mail_parse_key(idempotency_key)
     fp = _mail_request_fp("reply", body=body, all=bool(reply_all))
     mfp = _mail_request_message_fp("reply", subject="", body=body)
     await _mail_lock_identities(db, me["steam_id"], handles={me["steam_id"]: me["id"]})
@@ -79631,7 +79655,7 @@ async def admin_mail_broadcast(req: _AdminMailBroadcastReq, db: AsyncSession = D
     rules and censor as player mail; no rate window and no spam evaluation
     (exempt by design); idempotent on (sender, idempotency_key) like every
     send. The sender row is the admin's own player row."""
-    key = _mail_parse_uuid(req.idempotency_key, "idempotency_key")
+    key = _mail_parse_key(req.idempotency_key)
     fp = _mail_request_fp("broadcast", subject=req.subject, body=req.body)
     mfp = _mail_request_message_fp("broadcast", subject=req.subject, body=req.body)
     await _require_admin(db, req.admin_steam_id, "mail_broadcast", str(key), req.hmac_signature)

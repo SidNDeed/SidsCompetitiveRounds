@@ -27,9 +27,12 @@ What each endpoint answers after the change:
 - DELETE /mail/{id} answers 200 {"status": "deleted", "id"} for every
   well-formed id.
 - The janitor deletes a receipt MAIL_RETENTION_DAYS after its send,
-  whatever the state of the message it names, and retires the key of a
-  message still kept, so the key can be sent again under 297's UNIQUE
+  whatever the state of the message it names, and moves a message still
+  kept to a reserved key, so the key can be sent again under 297's UNIQUE
   (sender_id, idempotency_key), which migration 404 keeps.
+- Every route that takes an idempotency key refuses a reserved one (version
+  digit 0), 400 idempotency_key_invalid, before the sender lock and before
+  any mail table is read (main._mail_parse_key).
 
 Every test runs a control (the code as written) and at least one mutant
 (the code with one rule taken out: the production SQL rewritten on its way
@@ -72,6 +75,7 @@ _REPLY_MFP = '_mail_request_message_fp("reply", subject="", body=body)'
 _REAL = {name: getattr(main, name) for name in (
     "_mail_prior_send", "_mail_reply_core", "mail_send", "admin_mail_broadcast", "mail_delete",
     "_mail_write_receipt", "_mail_request_fp", "_mail_request_message_fp")}
+_REAL_SWEEP = main._MAIL_RECEIPT_SWEEP_SQL
 
 
 @pytest.fixture(autouse=True)
@@ -83,6 +87,14 @@ def _freeze_clock(monkeypatch):
 
 def _key():
     return str(uuid.uuid4())
+
+
+def _reserved(seed):
+    """A reserved key: the md5 of `seed` with its version digit (the 13th
+    hex digit) set to 0, as the janitor's sweep and migration 404's trigger
+    derive one (main._mail_parse_key)."""
+    h = hashlib.md5(seed.encode("ascii")).hexdigest()
+    return UUID(h[:12] + "0" + h[13:])
 
 
 def _outcome(fn, *a, **kw):
@@ -321,8 +333,10 @@ def test_a_receipt_without_a_request_digest_answers_on_the_stored_text(monkeypat
 
 
 def test_a_send_replays_from_its_receipt_after_the_message_is_purged():
-    """B's copy is suppressed, so no delivered copy keeps the row and the
-    janitor may purge it at once; the retry's answer is the first one."""
+    """B's copy is suppressed, so no delivered copy keeps the row. The test
+    removes the row directly (_purge): the state the janitor's purge reaches
+    once the sender has deleted the message and its age floor has passed. The
+    retry's answer is the first one."""
     def run(drop_receipt):
         db, ids = tm._world()
         db.players[ids[B_SID]]["mail_from"] = "nobody"
@@ -803,12 +817,24 @@ def test_a_receipt_goes_after_retention_whatever_its_message():
     assert hits and n == 0 and left == {"old_delivered", "old_suppressed", "young_delivered", "young_suppressed"}
 
 
-def test_a_swept_receipt_retires_the_key_of_a_message_still_kept(monkeypatch):
+_RETIRE = re.compile(r"CAST\(overlay\(md5\('mail-key-retired:' \|\| CAST\(m\.id AS text\)\)"
+                     r"\s+PLACING '0' FROM 13 FOR 1\) AS uuid\)")
+
+
+def _sweep_with(monkeypatch, new):
+    """Mutant: the sweep's new key for a kept message is `new`."""
+    assert len(_RETIRE.findall(main._MAIL_RECEIPT_SWEEP_SQL)) == 1
+    monkeypatch.setattr(main, "_MAIL_RECEIPT_SWEEP_SQL", _RETIRE.sub(new, main._MAIL_RECEIPT_SWEEP_SQL))
+
+
+def test_a_swept_receipt_moves_a_kept_message_to_a_reserved_key(monkeypatch):
     """The janitor deletes an old receipt while an unread delivered copy
-    still keeps its message. The same statement gives that message a key
-    derived from its own id, so the old key, which has no receipt now, is
-    sent as a new message instead of being refused by 297's UNIQUE
-    (sender_id, idempotency_key)."""
+    still keeps its message. The same statement moves that message to a
+    reserved key derived from its own id, so the old key, which has no
+    receipt now, is sent as a new message instead of being refused by 297's
+    UNIQUE (sender_id, idempotency_key). The moved row's own key is refused
+    on every route (_mail_parse_key), so no answer depends on whether that
+    row is still kept."""
     def run():
         db, _ids, made = _aged_world()
         row = db.messages[UUID(made["old_delivered"])]
@@ -816,19 +842,86 @@ def test_a_swept_receipt_retires_the_key_of_a_message_still_kept(monkeypatch):
         tm._run(main._mail_retention_sweep(db))
         kept = UUID(made["old_delivered"]) in db.messages
         again = _outcome_or_23505(tm._send, db, to=[B_SID], key=str(key))
-        return kept, row["idempotency_key"], key, again, made
-    kept, now_key, key, again, made = run()
-    assert kept and now_key != key and now_key == UUID(hashlib.md5(
-        ("mail-key-retired:" + made["old_delivered"]).encode("ascii")).hexdigest())
+        named = _outcome_or_23505(tm._send, db, to=[B_SID], key=str(row["idempotency_key"]))
+        return kept, row["idempotency_key"], key, again, named, made
+    kept, now_key, key, again, named, made = run()
+    assert kept and now_key == _reserved("mail-key-retired:" + made["old_delivered"])
     assert isinstance(again, dict) and again["accepted"] and again["id"] != made["old_delivered"]
-    # mutant: the retirement leaves the key as it was -> the kept row still
+    assert named == (400, "idempotency_key_invalid")
+    # mutant (a): the sweep leaves the key as it was -> the kept row still
     # holds it, and the new send under it is refused by the unique key
-    retire = "md5('mail-key-retired:' || CAST(m.id AS text))"
-    assert main._MAIL_RECEIPT_SWEEP_SQL.count(retire) == 1
-    monkeypatch.setattr(main, "_MAIL_RECEIPT_SWEEP_SQL",
-                        main._MAIL_RECEIPT_SWEEP_SQL.replace(retire, "m.idempotency_key"))
-    kept, now_key, key, again, _made = run()
+    _sweep_with(monkeypatch, "m.idempotency_key")
+    kept, now_key, key, again, named, _made = run()
     assert kept and now_key == key and again == "23505"
+    # mutant (b): the plain md5, version digit left as it falls -> a request
+    # can name the moved row's key, and the send under it reaches the insert,
+    # which the kept row refuses (a purged row would let it through). A
+    # message id whose md5 has digit 0 there is reserved by chance, so the
+    # world is drawn again until it has not.
+    monkeypatch.setattr(main, "_MAIL_RECEIPT_SWEEP_SQL", _REAL_SWEEP)
+    _sweep_with(monkeypatch, "CAST(md5('mail-key-retired:' || CAST(m.id AS text)) AS uuid)")
+    for _ in range(64):
+        kept, now_key, key, again, named, made = run()
+        if now_key.hex[12] != "0":
+            break
+    assert kept and now_key == UUID(hashlib.md5(("mail-key-retired:" + made["old_delivered"])
+                                                .encode("ascii")).hexdigest())
+    assert isinstance(again, dict) and again["accepted"] and named == "23505"
+
+
+_MAIL_READS = ("mail_send_receipts", "mail_messages", "mail_recipients", "pg_advisory")
+
+
+def _every_key_route(key):
+    """Every route that takes an idempotency key, each in a world of its
+    own, called with `key`: [(route, answer, the statements that read a
+    mail table or took a lock, plus "resolved" for each call of the Discord
+    route's relay-code resolver)]."""
+    def touched(db):
+        return [s for s in db.statements if any(t in s for t in _MAIL_READS)]
+    out = []
+    db, _ids = tm._world()
+    out.append(("send", _outcome(tm._send, db, [B_SID], key=key), touched(db)))
+    db, ids = tm._world()
+    mid = db.seed_message(ids[A_SID], [(ids[B_SID], "to", "delivered")])
+    out.append(("reply", _outcome(_reply, db, mid, key=key), touched(db)))
+    db, ids = tm._world()
+    orig = db.seed_message(ids[B_SID], [(ids[A_SID], "to", "delivered")], subject="Day")
+    me = tm._run(main._mail_caller(tm._req("tokA"), db))
+    resolved = []
+
+    async def target():
+        resolved.append("resolved")
+        return str(orig)
+    ans = _outcome(lambda: tm._run(main._mail_reply_core(
+        db, me, resolve_target=target, body="Yes.", reply_all=False, idempotency_key=key,
+        via="discord")))
+    out.append(("discord reply", ans, touched(db) + resolved))
+    db, _ids, _admin = _bcast_db()
+    with tm._admin_secret():
+        out.append(("broadcast", _outcome(tm._broadcast, db, key=key), touched(db)))
+    return out
+
+
+def test_a_reserved_key_is_refused_on_every_route_before_any_read(monkeypatch):
+    """A key with version digit 0 is the janitor's and the trigger's, never
+    a request's: each route refuses it 400 before the sender lock and before
+    any mail table is read, so its answer cannot depend on a row that holds
+    it. The keys the shipped callers mint, uuid4 and uuid5, are sent."""
+    bad = (400, "idempotency_key_invalid")
+    reserved = [str(_reserved("mail-key-retired:%s" % uuid.uuid4())),
+                str(_reserved("mail-receipt-superseded:%s:%s" % (uuid.uuid4(), uuid.uuid4())))]
+    for key in reserved:
+        got = _every_key_route(key)
+        assert [(r, a, t) for r, a, t in got] == [(r, bad, []) for r, _a, _t in got], key
+    for key in (str(uuid.uuid4()), str(uuid.uuid5(uuid.NAMESPACE_URL, "reply:%s" % uuid.uuid4()))):
+        for route, ans, seen in _every_key_route(key):
+            assert isinstance(ans, dict) and seen, (route, key)    # sent, and the probe sees its reads
+    # mutant: the parse refuses no version digit -> every route sends under
+    # a reserved key, after reading the mail tables
+    monkeypatch.setattr(main, "_mail_parse_key", lambda v: main._mail_parse_uuid(v, "idempotency_key"))
+    for route, ans, seen in _every_key_route(reserved[0]):
+        assert isinstance(ans, dict) and seen, route
 
 
 def test_a_reply_target_is_resolved_only_after_the_receipt_check(monkeypatch):

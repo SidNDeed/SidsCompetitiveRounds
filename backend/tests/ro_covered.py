@@ -976,24 +976,25 @@ COMPILED_LANGUAGES = ("c", "internal")
 # Migration 404's change adds a fourth, measured on seat-3 at 25fb3696 (log
 # pytest-E-194931, where this census failed naming it):
 # mail_send_receipt_sync(), a plpgsql trigger function of the case schema,
-# matched by the word SET (an UPDATE ... SET clause, and the ON CONFLICT
-# DO UPDATE SET clause of its INSERT) and by its one SET attribute,
-# search_path FROM CURRENT. PostgreSQL applies a function's SET attribute
-# when a call enters and restores the prior value when it exits, and the
-# body sets no setting, so a call leaves none behind. Its md5 is that of
-# the body as committed (the text between the $m404fn$ delimiters, which
-# is what prosrc holds); the same reading of the previous body, at
-# bc65d516, gives abe12e04f4331d36a23d366f3e947fbc, the md5 the census
-# printed for it at 25fb3696.
+# matched by the word SET (the UPDATE ... SET clause of each of its two
+# arms) and by its one SET attribute, search_path FROM CURRENT. PostgreSQL
+# applies a function's SET attribute when a call enters and restores the
+# prior value when it exits, and the body sets no setting, so a call leaves
+# none behind. Its md5 is that of the body as committed (the text between
+# the $m404fn$ delimiters, which is what prosrc holds); the same reading of
+# the earlier bodies gives abe12e04f4331d36a23d366f3e947fbc at bc65d516,
+# the md5 the census printed for it at 25fb3696, and
+# f281402a3dc72dac8fcd58a0472f941a at 3fe2cf5b, the md5 the census passed
+# with there.
 PROC_SIDES = {
     "<case>.mail_inbox_rev_bump() f": (
         "0b3bc33098b25519ea53ceb4ed4ac618", "neither",
         "SET is the ON CONFLICT DO UPDATE SET clause (300_mail_inbox_rev.sql)"),
     "<case>.mail_send_receipt_sync() f": (
-        "f281402a3dc72dac8fcd58a0472f941a", "neither",
-        "SET is an UPDATE ... SET clause and an ON CONFLICT DO UPDATE SET"
-        " clause; the SET attribute search_path FROM CURRENT holds for the"
-        " call only (404_mail_send_receipts.sql)"),
+        "46a1730c3d1cc6720884e63e37cccde2", "neither",
+        "SET is the UPDATE ... SET clause of each arm; the SET attribute"
+        " search_path FROM CURRENT holds for the call only"
+        " (404_mail_send_receipts.sql)"),
     "<case>.pc_prints_immutable() f": (
         "5a8f3ad588521922f61573a3c5b5785f", "neither",
         "'set' is a word of a RAISE EXCEPTION message (353_pc_trades.sql)"),

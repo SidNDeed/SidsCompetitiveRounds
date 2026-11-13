@@ -11,9 +11,12 @@
 -- message's delivery and whether the janitor has purged the row since
 -- (main._mail_prior_send).
 --
---   mail_send_receipts             NEW table, one row per (sender_id,
---                                  idempotency_key) a direct message, a reply
---                                  or a broadcast committed under: the message
+--   mail_send_receipts             NEW table, one row per committed direct
+--                                  message, reply or broadcast, keyed by the
+--                                  (sender_id, idempotency_key) it committed
+--                                  under (a row its key's next message
+--                                  superseded holds a reserved key, see WHY
+--                                  THE TRIGGER): the message
 --                                  id it answered with, its kind, a
 --                                  broadcast's recipient count, created_at,
 --                                  request_fp, the SHA-256 digest of the
@@ -45,10 +48,20 @@
 -- answers a repeated key from the message row and relies on it, unchanged.
 -- The new build answers from the receipt alone, and a key with no receipt is
 -- sent as a new message; so when the janitor deletes a receipt whose message
--- is still kept (an unread delivered copy keeps it), the same statement gives
--- that message a retired key derived from its own id
+-- is still kept (an unread delivered copy keeps it), the same statement moves
+-- that message to a reserved key derived from its own id
 -- (main._MAIL_RECEIPT_SWEEP_SQL), and the key can be sent again without
 -- meeting the constraint.
+--
+-- RESERVED KEYS. A UUID whose version digit (its 13th hex digit) is 0 is a
+-- reserved key. Every route that takes an idempotency key refuses one, 400
+-- idempotency_key_invalid, before the sender lock and before it reads any
+-- mail table (main._mail_parse_key). No shipped caller sends one: the game
+-- client mints uuid4 keys and the Discord route derives uuid5 keys. The
+-- broadcast has no caller in this repository; RFC 9562 lists version 0 as
+-- unused, and the nil UUID, its one form with that digit, is refused too.
+-- The kept message the sweep moves off its key and the receipt the trigger
+-- supersedes take keys from that space, so no request names either.
 --
 -- MESSAGE_FP. A receipt this file or its trigger writes has no request
 -- digest; a repeat of its key is compared on message_fp instead. It is
@@ -72,27 +85,36 @@
 -- writes a receipt with no request digest (recipients = NEW.recipient_count).
 -- If the key already has a receipt for ANOTHER message -- the previous build
 -- sends a key again once the janitor has purged the key's first message --
--- the receipt becomes this message's, which is what the previous build
--- answered with; a receipt of the same message is left as it is. On UPDATE
+-- that receipt stays the record of its own send under a reserved key derived
+-- from both message ids, and this message gets the key's receipt, which is
+-- what the previous build answered with. So a repeat of the key answers the
+-- newer message, while the sender's rate window, which counts receipts
+-- (main._mail_rate_or_raise), still counts the first send until its receipt
+-- expires. A receipt of the same message is left as it is. On UPDATE
 -- OF recipient_count it fills the count of that message's receipt while the
 -- count is still NULL, which is how a broadcast's count reaches its receipt
 -- (both builds set the count after the fan-out, in the same transaction).
 -- The api's own write is an upsert that completes the trigger's row
 -- (main._MAIL_RECEIPT_SQL).
 --
--- BACKFILL. Every message row present when the trigger is created gets a
--- receipt with no request digest: created_at and message_fp are the
--- message's, recipients its recipient_count (NULL on a direct message). A
--- broadcast with no count (written before migration 300 added the column)
--- aborts the file instead of being backfilled: the previous build answers a
--- repeat of such a row's key with a count of its envelopes taken at that
--- moment, which no stored count stays equal to once a recipient's account
--- goes. The primary held no broadcast row at all on 12 Nov 2026. The
--- backfill runs in the trigger's guard block right after CREATE TRIGGER,
--- whose SHARE ROW EXCLUSIVE lock on mail_messages holds every concurrent
--- write of the table until COMMIT, so no message commits between the trigger
--- and the backfill; the block then counts the message rows left without a
--- receipt and aborts the file unless there are none.
+-- BACKFILL. When this run creates the table or the trigger, every message
+-- row present gets a receipt with no request digest: created_at and
+-- message_fp are the message's, recipients its recipient_count (NULL on a
+-- direct message). A broadcast with no count (written before migration
+-- 300 added the column) aborts the file instead of being backfilled:
+-- the previous build answers a repeat of such a row's key with a count
+-- of its envelopes taken at that moment, which no stored count stays
+-- equal to once a recipient's account goes. The primary held no
+-- broadcast row at all on 12 Nov 2026. The backfill runs in the
+-- trigger's block right after the trigger's guard, under SHARE ROW
+-- EXCLUSIVE on mail_messages (CREATE TRIGGER's own lock, or a LOCK
+-- TABLE when this run created the table under a trigger already
+-- there), which holds every concurrent write of the table until
+-- COMMIT, so no message commits between the trigger and the backfill;
+-- the block then counts the message rows left without a receipt and
+-- aborts the file unless there are none. A run that creates neither,
+-- as every re-run, backfills nothing: by then the janitor has deleted
+-- receipts that a backfill would bring back.
 --
 -- DEPLOY ORDER: THIS FILE FIRST, THE API SECOND.
 -- -----------------------------------------------
@@ -121,31 +143,42 @@
 --
 -- RE-RUNS. Each catalog guard below issues its step only when its object is
 -- absent (the foreign key's drop only when a foreign key still covers
--- in_reply_to), so a second run issues none of them and takes no lock on
--- mail_messages or on mail_send_receipts; the statements inside the guards
--- keep `IF NOT EXISTS`. The one statement outside every guard is CREATE OR
--- REPLACE FUNCTION mail_send_receipt_sync(), which runs unconditionally on
--- each run and re-creates the same function body; it takes no lock on
--- either table.
+-- in_reply_to; the backfill and its LOCK TABLE only in a run that created
+-- the table or the trigger), so a second run issues none of them and takes
+-- no lock on mail_messages or on mail_send_receipts; the statements
+-- inside the guards keep `IF NOT EXISTS`. Two statements stand
+-- outside every guard: the backfill's cue, a setting local to the
+-- transaction that starts 'off', and
+-- CREATE OR REPLACE FUNCTION mail_send_receipt_sync(), which runs
+-- unconditionally on each run and re-creates the same function body. Neither
+-- takes a lock on either table.
 --
 -- POST-CHECK. After the guards, one read compares every object with the
 -- definition this file states, because a guard alone accepts any object
--- that has the right name. The table: an ordinary permanent table with no
--- row security, no rules, no inheritance and no trigger of its own; its
--- eight columns (type with no modifier, NOT NULL, the default expression,
--- no identity, not generated, the type's own collation); its primary key and
--- its four named checks with their expressions, and no other constraint;
--- exactly two indexes, the primary key's (btree (sender_id,
--- idempotency_key)) and ix_mail_send_receipts_created (btree (created_at),
--- not unique), both valid. The trigger (AFTER INSERT OR UPDATE OF
--- recipient_count, for each row, with this file's WHEN condition, enabled,
--- calling this file's function); the function (returns trigger; its body is
--- this file's, re-created above on every run). And no foreign key covering
+-- that has the right name. The table: an ordinary permanent table, not a
+-- typed one, with no row security, no rules, no inheritance and no trigger
+-- of its own; its eight columns (type with no modifier, NOT NULL, the
+-- default expression, no identity, not generated, the type's own
+-- collation); its primary key and its four named checks with their
+-- expressions, and no other constraint; exactly two indexes, the primary
+-- key's (btree (sender_id, idempotency_key)) and
+-- ix_mail_send_receipts_created (btree (created_at), not unique), both
+-- valid. The trigger, by every column of its pg_trigger row: AFTER INSERT
+-- OR UPDATE OF recipient_count, for each row, this file's WHEN condition,
+-- no arguments, not a constraint trigger, not deferrable, no transition
+-- tables, not a partition's clone, not internal, enabled, and calling this
+-- file's function, which returns trigger and whose body is this file's,
+-- re-created above on every run. And no foreign key covering
 -- mail_messages.in_reply_to. Anything that differs aborts the file, naming
--- what it found.
+-- what it found. Not compared: ownership and privileges (a missing grant
+-- fails the first statement that needs it, with an error), and the storage
+-- and statistics settings of the table and its columns, which change no
+-- row, no answer and no firing.
 
 BEGIN;
 SET LOCAL lock_timeout = '5s';
+-- 'on' once this run creates the table or the trigger (the backfill's cue).
+SELECT set_config('m404.backfill', 'off', true);
 
 DO $m404tbl$
 BEGIN
@@ -172,6 +205,7 @@ BEGIN
       CONSTRAINT ck_mail_send_receipts_recipients
         CHECK (recipients IS NULL OR recipients >= 0)
     );
+    PERFORM set_config('m404.backfill', 'on', true);
   END IF;
 END $m404tbl$;
 
@@ -187,13 +221,24 @@ END $m404idx$;
 
 -- The INSERT arm's message_fp is MESSAGE_FP above, spelled out once more in
 -- the backfill below; tests/test_mail_receipts_pg.py compares both with
--- main._mail_message_fp.
+-- main._mail_message_fp. Its UPDATE supersedes a receipt of this key for
+-- another message (WHY THE TRIGGER): that row keeps its own send's record
+-- under a reserved key (version digit 0) derived from both message ids, so
+-- each supersession gives a key of its own; the key's receipt then becomes
+-- this message's.
 CREATE OR REPLACE FUNCTION mail_send_receipt_sync() RETURNS trigger
 LANGUAGE plpgsql
 SET search_path FROM CURRENT
 AS $m404fn$
 BEGIN
   IF TG_OP = 'INSERT' THEN
+    UPDATE mail_send_receipts
+       SET idempotency_key = CAST(overlay(md5('mail-receipt-superseded:' || CAST(message_id AS text)
+                                              || ':' || CAST(NEW.id AS text))
+                                          PLACING '0' FROM 13 FOR 1) AS uuid)
+     WHERE sender_id = NEW.sender_id
+       AND idempotency_key = NEW.idempotency_key
+       AND message_id <> NEW.id;
     INSERT INTO mail_send_receipts
            (sender_id, idempotency_key, kind, request_fp, message_fp, message_id, recipients,
             created_at)
@@ -207,14 +252,7 @@ BEGIN
                    || decode('00', 'hex')
                    || convert_to(NEW.body, 'UTF8')),
             NEW.id, NEW.recipient_count, NEW.created_at)
-    ON CONFLICT (sender_id, idempotency_key) DO UPDATE
-       SET kind = EXCLUDED.kind,
-           request_fp = NULL,
-           message_fp = EXCLUDED.message_fp,
-           message_id = EXCLUDED.message_id,
-           recipients = EXCLUDED.recipients,
-           created_at = EXCLUDED.created_at
-     WHERE mail_send_receipts.message_id <> EXCLUDED.message_id;
+    ON CONFLICT (sender_id, idempotency_key) DO NOTHING;
   ELSE
     UPDATE mail_send_receipts
        SET recipients = NEW.recipient_count
@@ -244,6 +282,11 @@ BEGIN
       FOR EACH ROW
       WHEN (NEW.kind IN ('direct', 'system_broadcast'))
       EXECUTE FUNCTION mail_send_receipt_sync();
+    PERFORM set_config('m404.backfill', 'on', true);
+  END IF;
+  -- BACKFILL, in a run that created the table or the trigger.
+  IF current_setting('m404.backfill') = 'on' THEN
+    LOCK TABLE mail_messages IN SHARE ROW EXCLUSIVE MODE;
     SELECT count(*) INTO uncounted
       FROM mail_messages m
      WHERE m.kind = 'system_broadcast'
@@ -309,7 +352,7 @@ DECLARE
   valid integer;
   total integer;
 BEGIN
-  -- The table itself: an ordinary, permanent table, alone (no row
+  -- The table itself: an ordinary, permanent, untyped table, alone (no row
   -- security, no rewrite rule, no parent or child, no trigger of its own).
   SELECT count(*) INTO n
     FROM pg_class c
@@ -317,6 +360,7 @@ BEGIN
    WHERE ns.nspname = current_schema()
      AND c.relname = 'mail_send_receipts'
      AND c.relkind = 'r'
+     AND c.reloftype = 0
      AND c.relpersistence = 'p'
      AND NOT c.relrowsecurity
      AND NOT c.relforcerowsecurity
@@ -324,7 +368,7 @@ BEGIN
      AND NOT EXISTS (SELECT 1 FROM pg_inherits i WHERE i.inhrelid = c.oid OR i.inhparent = c.oid)
      AND NOT EXISTS (SELECT 1 FROM pg_trigger tg WHERE tg.tgrelid = c.oid AND NOT tg.tgisinternal);
   IF n <> 1 THEN
-    RAISE EXCEPTION '404: mail_send_receipts is not the plain table this file states (kind, persistence, row security, rules, inheritance or a trigger)';
+    RAISE EXCEPTION '404: mail_send_receipts is not the plain table this file states (kind, type, persistence, row security, rules, inheritance or a trigger)';
   END IF;
   SELECT count(*) INTO n
     FROM pg_attribute a
@@ -451,6 +495,8 @@ BEGIN
         WHERE ns.nspname = current_schema()
           AND t.relname = 'mail_send_receipts');
   END IF;
+  -- The trigger by every column of its pg_trigger row (its oid, table and
+  -- name are what found it).
   SELECT count(*) INTO n
     FROM pg_trigger tg
     JOIN pg_class c ON c.oid = tg.tgrelid
@@ -460,12 +506,21 @@ BEGIN
    WHERE ns.nspname = current_schema()
      AND c.relname = 'mail_messages'
      AND tg.tgname = 'trg_mail_send_receipt'
+     AND tg.tgparentid = 0                      -- not a partition's clone
      AND NOT tg.tgisinternal
      AND tg.tgtype = 21                         -- for each row, after, insert or update
      AND tg.tgenabled = 'O'
+     -- not a constraint trigger; tgconstrrelid, tgconstrindid, tgdeferrable
+     -- and tginitdeferred are set on a constraint trigger alone, so they
+     -- are zero and false here
+     AND tg.tgconstraint = 0
+     -- no arguments to the function (tgargs is then empty)
+     AND tg.tgnargs = 0
      -- tgattr is an int2vector, whose subscripts start at 0, and array
      -- equality compares the start as well: its text form is compared
-     -- instead (one column prints as its number).
+     -- instead (one column prints as its number). PostgreSQL refuses
+     -- transition tables on a trigger with a column list, so tgoldtable and
+     -- tgnewtable are NULL here.
      AND CAST(tg.tgattr AS text) = (SELECT CAST(a.attnum AS text) FROM pg_attribute a
                                      WHERE a.attrelid = c.oid
                                        AND a.attname = 'recipient_count'
@@ -478,8 +533,9 @@ BEGIN
      AND p.prorettype = 'trigger'::regtype;
   IF n <> 1 THEN
     RAISE EXCEPTION '404: trg_mail_send_receipt or its function differs from this file (found: %)',
-      COALESCE((SELECT string_agg(format('%s, enabled %s, function in %s returning %s',
-                                         pg_get_triggerdef(tg.oid), tg.tgenabled, pns.nspname,
+      COALESCE((SELECT string_agg(format('%s, enabled %s, parent %s, internal %s, function in %s returning %s',
+                                         pg_get_triggerdef(tg.oid), tg.tgenabled, tg.tgparentid,
+                                         tg.tgisinternal, pns.nspname,
                                          CAST(p.prorettype AS regtype)), '; ')
                   FROM pg_trigger tg
                   JOIN pg_class c ON c.oid = tg.tgrelid

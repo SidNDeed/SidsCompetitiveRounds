@@ -1410,9 +1410,10 @@ class MailMessage(Base):
     message they name. A retried send finds its original through its send
     receipt (MailSendReceipt, migration 404); UNIQUE (sender_id,
     idempotency_key) stays from 297 for the build before that change, and
-    the janitor retires a kept message's key when it deletes the key's
-    receipt. kind 'system_broadcast' is admin-only, audited, and bypasses
-    preferences and blocks (B-12); everything else is 'direct'."""
+    the janitor moves a kept message to a reserved key (main._mail_parse_key)
+    when it deletes the key's receipt. kind 'system_broadcast' is admin-only,
+    audited, and bypasses preferences and blocks (B-12); everything else is
+    'direct'."""
     __tablename__ = "mail_messages"
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
@@ -1444,12 +1445,15 @@ class MailMessage(Base):
 
     __table_args__ = (
         CheckConstraint("kind IN ('direct', 'system_broadcast')", name="ck_mail_messages_kind"),
+        UniqueConstraint("sender_id", "idempotency_key", name="uq_mail_messages_sender_idem"),
     )
 
 
 class MailSendReceipt(Base):
-    """One row per (sender_id, idempotency_key) that a mail send, reply or
-    broadcast committed under (migration 404): the message id it answered
+    """One row per committed mail send, reply or broadcast, keyed by the
+    (sender_id, idempotency_key) it committed under (migration 404; a send
+    whose key a later message took keeps its row under a reserved key, its
+    trigger): the message id it answered
     with, its kind, a broadcast's recipient count, the SHA-256 digest of
     the request (`request_fp`; NULL on rows backfilled by the migration or
     written by its trigger for a writer that stores none), and the SHA-256

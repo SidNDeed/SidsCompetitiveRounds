@@ -527,12 +527,15 @@ class FakeDb:
             for k in gone:
                 self.receipts.pop(k)
             if "UPDATE mail_messages m" in sql and "md5('mail-key-retired:' || CAST(m.id AS text))" in sql:
-                # the same statement's second arm, READ OFF the SQL: the key of
-                # every kept message a deleted receipt answered for is retired
+                # the same statement's second arm, READ OFF the SQL: every kept
+                # message a deleted receipt answered for moves to a key derived
+                # from its id, with its version digit set to 0 (the reserved
+                # space, main._mail_parse_key) when the SQL says so
+                reserved = "PLACING '0' FROM 13 FOR 1" in sql
                 for m in self.messages.values():
                     if (m["sender_id"], m["idempotency_key"]) in gone:
-                        m["idempotency_key"] = UUID(hashlib.md5(
-                            ("mail-key-retired:" + str(m["id"])).encode("ascii")).hexdigest())
+                        h = hashlib.md5(("mail-key-retired:" + str(m["id"])).encode("ascii")).hexdigest()
+                        m["idempotency_key"] = UUID(h[:12] + "0" + h[13:] if reserved else h)
             return _Res([(1,)] * len(gone))
         if "AS per_minute" in sql:
             assert "kind = 'direct'" in sql, "rate window must ignore broadcasts"
@@ -589,13 +592,20 @@ class FakeDb:
                                   "via": params.get("via", "game")}
             if self.receipt_trigger:
                 # migration 404's trigger, AFTER INSERT: a receipt with no
-                # request digest and the digest of the stored text; a receipt
-                # of the key for ANOTHER message is replaced by this one (the
-                # key sent again once its first message was purged), one of
-                # this message is left as it is
+                # request digest and the digest of the stored text. A receipt
+                # of the key for ANOTHER message (the key sent again once its
+                # first message was purged) stays the record of its own send
+                # under a reserved key derived from both message ids, and this
+                # message gets the key's receipt; one of this message is left
+                # as it is
                 k = (params["sid"], params["key"])
                 r = self.receipts.get(k)
-                if r is None or r["message_id"] != mid:
+                if r is not None and r["message_id"] != mid:
+                    h = hashlib.md5(("mail-receipt-superseded:%s:%s" % (r["message_id"], mid))
+                                    .encode("ascii")).hexdigest()
+                    self.receipts[(params["sid"], UUID(h[:12] + "0" + h[13:]))] = self.receipts.pop(k)
+                    r = None
+                if r is None:
                     self.receipts[k] = {
                         "message_id": mid, "kind": kind, "recipients": None, "request_fp": None,
                         "message_fp": main._mail_message_fp(self.route_of(mid), params["subj"],

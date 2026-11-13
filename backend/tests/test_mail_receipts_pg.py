@@ -26,6 +26,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
+from fastapi import HTTPException
 
 import main
 import mail_discord
@@ -81,6 +82,31 @@ def _mutated(text, old, new):
     """A mutant: `text` with its one occurrence of `old` replaced."""
     assert text.count(old) == 1, ("mutant anchor occurs %d times" % text.count(old), old)
     return text.replace(old, new)
+
+
+def _without(text, start, lines=1):
+    """A mutant: `text` with `lines` lines taken out, from its one line
+    that begins with `start`."""
+    rows = text.split("\n")
+    at = [i for i, r in enumerate(rows) if r.startswith(start)]
+    assert len(at) == 1, ("mutant anchor occurs %d times" % len(at), start)
+    return "\n".join(rows[:at[0]] + rows[at[0] + lines:])
+
+
+def _reserved(seed):
+    """A reserved key: the md5 of `seed` with its version digit (the 13th
+    hex digit) set to 0, as the sweep and the trigger derive one."""
+    h = hashlib.md5(seed.encode("ascii")).hexdigest()
+    return str(uuid.UUID(h[:12] + "0" + h[13:]))
+
+
+def _refused(key):
+    """Whether every route's key parse refuses `key` (main._mail_parse_key)."""
+    try:
+        main._mail_parse_key(key)
+    except HTTPException as e:
+        return (e.status_code, e.detail) == (400, "idempotency_key_invalid")
+    return False
 
 
 def _bind(sql, params):
@@ -154,10 +180,10 @@ class _Schema:
 
 
 async def _message(conn, sender=A, kind="direct", key=None, count=None, at=None, thread=None,
-                   parent=None, subject="s", body="b"):
+                   parent=None, subject="s", body="b", mid=None):
     """A message row as a writer of mail_messages inserts it: a new thread
     (thread_id = id) unless `thread` names one, in reply to `parent`."""
-    mid = str(uuid.uuid4())
+    mid = mid or str(uuid.uuid4())
     await conn.execute(
         "INSERT INTO mail_messages (id, sender_id, kind, thread_id, in_reply_to, subject, body,"
         " idempotency_key, created_at, recipient_count)"
@@ -217,6 +243,24 @@ async def _shape(conn):
 APPLIED = {"table": True, "function": True, "trigger": True, "fk": False, "uq": True}
 ROLLED_BACK = {"table": False, "function": False, "trigger": False, "fk": True, "uq": True}
 BEFORE = ROLLED_BACK                     # 297's schema: what a refused first run leaves
+
+# 404's objects as the file makes them, made before the file runs (as the
+# api build's own table creation, or an earlier partial run, would make
+# them); the function made before it does nothing, and the file replaces it.
+_TABLE_AS_FILE = (
+    "CREATE TABLE mail_send_receipts (sender_id UUID NOT NULL, idempotency_key UUID NOT NULL,"
+    " kind TEXT NOT NULL, request_fp BYTEA, message_fp BYTEA NOT NULL, message_id UUID NOT NULL,"
+    " recipients INTEGER, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),"
+    " PRIMARY KEY (sender_id, idempotency_key),"
+    " CONSTRAINT ck_mail_send_receipts_kind CHECK (kind IN ('direct', 'system_broadcast')),"
+    " CONSTRAINT ck_mail_send_receipts_fp CHECK (request_fp IS NULL OR octet_length(request_fp) = 32),"
+    " CONSTRAINT ck_mail_send_receipts_message_fp CHECK (octet_length(message_fp) = 32),"
+    " CONSTRAINT ck_mail_send_receipts_recipients CHECK (recipients IS NULL OR recipients >= 0));")
+_FN_NOOP = ("CREATE FUNCTION mail_send_receipt_sync() RETURNS trigger LANGUAGE plpgsql"
+            " AS $f$BEGIN RETURN NULL; END$f$; ")
+_TRG_AS_FILE = ("CREATE TRIGGER trg_mail_send_receipt AFTER INSERT OR UPDATE OF recipient_count"
+                " ON mail_messages FOR EACH ROW WHEN (NEW.kind IN ('direct', 'system_broadcast'))"
+                " EXECUTE FUNCTION mail_send_receipt_sync();")
 
 
 # ── the migration ─────────────────────────────────────────────────────────
@@ -331,17 +375,11 @@ def test_the_post_check_accepts_matching_objects_and_refuses_differing_ones():
     """A same-named table made before the file (as the api build's own table
     creation would make it, deployed out of order) is accepted when it
     matches the file's definition; one that differs -- a column's type, or a
-    check's expression under its own name -- aborts the whole file. So does
-    a same-named trigger whose WHEN condition differs, while one made as the
-    file makes it is accepted."""
-    same = ("CREATE TABLE mail_send_receipts (sender_id UUID NOT NULL, idempotency_key UUID NOT NULL,"
-            " kind TEXT NOT NULL, request_fp BYTEA, message_fp BYTEA NOT NULL, message_id UUID NOT NULL,"
-            " recipients INTEGER, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),"
-            " PRIMARY KEY (sender_id, idempotency_key),"
-            " CONSTRAINT ck_mail_send_receipts_kind CHECK (kind IN ('direct', 'system_broadcast')),"
-            " CONSTRAINT ck_mail_send_receipts_fp CHECK (request_fp IS NULL OR octet_length(request_fp) = 32),"
-            " CONSTRAINT ck_mail_send_receipts_message_fp CHECK (octet_length(message_fp) = 32),"
-            " CONSTRAINT ck_mail_send_receipts_recipients CHECK (recipients IS NULL OR recipients >= 0));")
+    check's expression under its own name, a typed table -- aborts the whole
+    file. So does a same-named trigger that differs in any column of its
+    pg_trigger row the file states, while one made as the file makes it is
+    accepted."""
+    same = _TABLE_AS_FILE
     table_only = {"table": True, "function": False, "trigger": False, "fk": True, "uq": True}
 
     async def body(pre, migration=M404):
@@ -361,6 +399,16 @@ def test_the_post_check_accepts_matching_objects_and_refuses_differing_ones():
     trig = ("CREATE FUNCTION t404_noop() RETURNS trigger LANGUAGE plpgsql AS $f$BEGIN RETURN NEW; END$f$;"
             " CREATE TRIGGER t404_extra BEFORE INSERT ON mail_send_receipts FOR EACH ROW"
             " EXECUTE FUNCTION t404_noop();")
+    # the same columns, NOT NULLs, default, key and checks, on a table of a
+    # composite type
+    typed = ("CREATE TYPE t404_receipt AS (sender_id UUID, idempotency_key UUID, kind TEXT,"
+             " request_fp BYTEA, message_fp BYTEA, message_id UUID, recipients INTEGER,"
+             " created_at TIMESTAMPTZ);"
+             " CREATE TABLE mail_send_receipts OF t404_receipt (sender_id WITH OPTIONS NOT NULL,"
+             " idempotency_key WITH OPTIONS NOT NULL, kind WITH OPTIONS NOT NULL,"
+             " message_fp WITH OPTIONS NOT NULL, message_id WITH OPTIONS NOT NULL,"
+             " created_at WITH OPTIONS NOT NULL DEFAULT NOW(), PRIMARY KEY (sender_id, idempotency_key),"
+             + same[same.index(" CONSTRAINT ck_mail_send_receipts_kind"):])
     cases = {
         "type": (_mutated(same, "created_at TIMESTAMPTZ", "created_at TIMESTAMP"),
                  "404: mail_send_receipts columns differ", "created_at timestamp without time zone"),
@@ -381,6 +429,7 @@ def test_the_post_check_accepts_matching_objects_and_refuses_differing_ones():
         "row security": (same + " ALTER TABLE mail_send_receipts ENABLE ROW LEVEL SECURITY;",
                          "404: mail_send_receipts is not the plain table", ""),
         "trigger": (same + " " + trig, "404: mail_send_receipts is not the plain table", ""),
+        "typed": (typed, "404: mail_send_receipts is not the plain table", ""),
     }
     for name, (pre, message, found) in cases.items():
         refused, shape = _run(body(pre))
@@ -393,21 +442,51 @@ def test_the_post_check_accepts_matching_objects_and_refuses_differing_ones():
             ("modifier", "     AND a.atttypmod = -1\n", ""),
             ("index", "IF n <> 1 OR pk <> 1 OR valid <> 2 OR total <> 2 THEN",
              "IF n <> 1 OR pk <> 1 THEN"),
-            ("unlogged", "     AND c.relpersistence = 'p'\n", "")):
+            ("unlogged", "     AND c.relpersistence = 'p'\n", ""),
+            ("typed", "     AND c.reloftype = 0\n", "")):
         refused, shape = _run(body(cases[name][0], _mutated(M404, old, new)))
         assert refused is None and shape == APPLIED, (name, refused)
 
-    fn = ("CREATE FUNCTION mail_send_receipt_sync() RETURNS trigger LANGUAGE plpgsql"
-          " AS $f$BEGIN RETURN NULL; END$f$;")
-    trg = ("CREATE TRIGGER trg_mail_send_receipt AFTER INSERT OR UPDATE OF recipient_count"
-           " ON mail_messages FOR EACH ROW WHEN (NEW.kind IN ('direct', 'system_broadcast'))"
-           " EXECUTE FUNCTION mail_send_receipt_sync();")
-    assert _run(body(fn + trg)) == (None, APPLIED)
-    refused, shape = _run(body(fn + _mutated(trg, "NEW.kind IN ('direct', 'system_broadcast')",
-                                             "NEW.kind = 'direct'")))
-    assert refused and "404: trg_mail_send_receipt or its function differs" in refused
-    assert "new.kind = 'direct'" in refused                                  # what it found
-    assert shape == {"table": False, "function": True, "trigger": True, "fk": True, "uq": True}
+    # The trigger: made as the file makes it, it is accepted; each column of
+    # its pg_trigger row the post-check compares, changed alone on a trigger
+    # made before the file, aborts the file, the refusal printing what it
+    # found. A clone of a partitioned parent's trigger differs in tgparentid
+    # alone.
+    assert _run(body(_FN_NOOP + _TRG_AS_FILE)) == (None, APPLIED)
+    clone = ("CREATE TABLE t404_parent (LIKE mail_messages) PARTITION BY LIST (kind); "
+             + _mutated(_TRG_AS_FILE, " ON mail_messages ", " ON t404_parent ")
+             + " ALTER TABLE t404_parent ATTACH PARTITION mail_messages"
+               " FOR VALUES IN ('direct', 'system_broadcast');")
+    triggers = {
+        # name: (made before the file, what the refusal prints of it, and
+        # the post-check's comparison a mutant takes out: first line, lines)
+        "when": (_mutated(_TRG_AS_FILE, "NEW.kind IN ('direct', 'system_broadcast')", "NEW.kind = 'direct'"),
+                 "new.kind = 'direct'", ("     AND substring(pg_get_triggerdef(tg.oid)", 2)),
+        "timing": (_mutated(_TRG_AS_FILE, " AFTER INSERT", " BEFORE INSERT"), " BEFORE INSERT",
+                   ("     AND tg.tgtype = 21 ", 1)),
+        "columns": (_mutated(_TRG_AS_FILE, "UPDATE OF recipient_count", "UPDATE OF recipient_count, subject"),
+                    "UPDATE OF recipient_count, subject", ("     AND CAST(tg.tgattr AS text)", 4)),
+        "enabled": (_TRG_AS_FILE + " ALTER TABLE mail_messages DISABLE TRIGGER trg_mail_send_receipt;",
+                    "enabled D", ("     AND tg.tgenabled = 'O'", 1)),
+        "argument": (_mutated(_TRG_AS_FILE, "mail_send_receipt_sync();", "mail_send_receipt_sync('x');"),
+                     "mail_send_receipt_sync('x')", ("     AND tg.tgnargs = 0", 1)),
+        "constraint": (_mutated(_TRG_AS_FILE, "CREATE TRIGGER", "CREATE CONSTRAINT TRIGGER"),
+                       "CREATE CONSTRAINT TRIGGER", ("     AND tg.tgconstraint = 0", 1)),
+        "clone": (clone, ", parent ", ("     AND tg.tgparentid = 0 ", 1)),
+    }
+    found = {}
+    for name, (pre, printed, _line) in triggers.items():
+        refused, shape = _run(body(_FN_NOOP + pre))
+        assert refused and "404: trg_mail_send_receipt or its function differs" in refused, (name, refused)
+        assert printed in refused, (name, refused)
+        assert shape == {"table": False, "function": True, "trigger": True, "fk": True, "uq": True}, name
+        found[name] = refused
+    assert re.search(r", parent [1-9]", found["clone"]) and ", parent 0," in found["when"]
+    # mutants: each comparison taken out of the post-check -> its case is
+    # accepted and the file commits over the differing trigger
+    for name, (pre, _printed, (start, lines)) in triggers.items():
+        refused, shape = _run(body(_FN_NOOP + pre, _without(M404, start, lines)))
+        assert refused is None and shape == APPLIED, (name, refused)
     # The foreign key's drop is part of the check: a file that kept 297's
     # foreign key on in_reply_to is refused by its own post-check.
     refused, shape = _run(body("SELECT 1;", _mutated(
@@ -415,6 +494,30 @@ def test_the_post_check_accepts_matching_objects_and_refuses_differing_ones():
         "    NULL;\n")))
     assert refused and "404: a foreign key still covers mail_messages.in_reply_to" in refused
     assert shape == BEFORE
+
+
+def test_the_backfill_runs_when_this_run_creates_the_table_or_the_trigger():
+    """A message written before the file gets its receipt when the run
+    creates the table under a trigger made before it, and when it creates
+    the trigger over a table made before it: either run is the first in
+    which the message could be without one."""
+    cue = "    PERFORM set_config('m404.backfill', 'on', true);\n"
+
+    async def body(pre, migration=M404):
+        async with _Schema() as conn:
+            mid = await _message(conn)
+            await conn.execute(pre)
+            await conn.execute(migration)
+            return mid, set(await _receipts(conn))
+    for name, pre, creates in (
+            ("trigger made before", _FN_NOOP + _TRG_AS_FILE, "    );\n"),
+            ("table made before", _TABLE_AS_FILE, "      EXECUTE FUNCTION mail_send_receipt_sync();\n")):
+        mid, got = _run(body(pre))
+        assert got == {mid}, name
+        # mutant: the creation this run makes does not cue the backfill ->
+        # the file commits and the message has no receipt
+        _mid, got = _run(body(pre, _mutated(M404, creates + cue, creates)))
+        assert got == set(), name
 
 
 # ── the api's statements ──────────────────────────────────────────────────
@@ -509,76 +612,126 @@ def test_the_sweep_deletes_receipts_older_than_retention_and_no_other():
         == (1, [True])
 
 
-def test_the_sweep_retires_the_key_of_a_kept_message_and_no_other():
+_RETIRE = re.compile(r"CAST\(overlay\(md5\('mail-key-retired:' \|\| CAST\(m\.id AS text\)\)"
+                     r"\s+PLACING '0' FROM 13 FOR 1\) AS uuid\)")
+
+
+def test_the_sweep_moves_a_kept_message_to_a_reserved_key_and_no_other():
     """A's message to B under key K, made DAYS+1 days ago and still unread,
     so the janitor's purge keeps its row; its receipt is past retention and
-    the sweep deletes it. The message's key becomes one derived from its own
-    id, so K sent again is a new message under 297's unique key, and K's
-    receipt answers for it. A's young message keeps its key."""
-    retire = "CAST(md5('mail-key-retired:' || CAST(m.id AS text)) AS uuid)"
+    the sweep deletes it. The message moves to a reserved key derived from
+    its own id, one every route refuses (main._mail_parse_key), so K sent
+    again is a new message under 297's unique key, and K's receipt answers
+    for it. A's young message keeps its key."""
+    retire = _RETIRE.findall(main._MAIL_RECEIPT_SWEEP_SQL)
+    assert len(retire) == 1
+    retire = retire[0]
+    # an id whose plain md5 has no 0 at the version digit, so the mutant
+    # without the overlay writes a key a request can name
+    old_id = next(m for m in ("00000000-0000-4000-8000-%012d" % i for i in range(64))
+                  if hashlib.md5(("mail-key-retired:" + m).encode("ascii")).hexdigest()[12] != "0")
 
     async def body(sweep):
         async with _Schema() as conn:
             await conn.execute(M404)
             key, young_key = str(uuid.uuid4()), str(uuid.uuid4())
             now = await conn.fetchval("SELECT NOW()")
-            old = await _message(conn, key=key, at=now - timedelta(days=DAYS + 1))
+            old = await _message(conn, key=key, at=now - timedelta(days=DAYS + 1), mid=old_id)
             await _envelope(conn, old, B)
             young = await _message(conn, key=young_key, at=now - timedelta(days=1))
             swept = len(await conn.fetch(*_flat(_bind(sweep, {"days": DAYS}))))
             keys = {r["id"]: r["k"] for r in await conn.fetch(
                 "SELECT id::text AS id, idempotency_key::text AS k FROM mail_messages")}
-            derived = str(uuid.UUID(hashlib.md5(("mail-key-retired:" + old).encode()).hexdigest()))
+            moved = (keys[old] == _reserved("mail-key-retired:" + old), _refused(keys[old]))
             try:
                 new = await _message(conn, key=key)
             except asyncpg.PostgresError as e:
-                return swept, keys[old] == derived, keys[young] == young_key, e.sqlstate
-            return swept, keys[old] == derived, keys[young] == young_key, \
-                (await _receipt(conn, A, key))[0] == new
-    assert _run(body(main._MAIL_RECEIPT_SWEEP_SQL)) == (1, True, True, True)
+                return swept, moved, keys[young] == young_key, e.sqlstate
+            return swept, moved, keys[young] == young_key, (await _receipt(conn, A, key))[0] == new
+    assert _run(body(main._MAIL_RECEIPT_SWEEP_SQL)) == (1, (True, True), True, True)
     # mutant: the key left as it was -> K sent again breaks 297's unique key
     assert _run(body(_mutated(main._MAIL_RECEIPT_SWEEP_SQL, retire, "m.idempotency_key"))) == \
-        (1, False, True, "23505")
-    # mutant: the key's match taken out -> every message of the sender is retired
+        (1, (False, False), True, "23505")
+    # mutant: the plain md5, no overlay -> the moved row's key is one a
+    # request can name
+    assert _run(body(_mutated(main._MAIL_RECEIPT_SWEEP_SQL, retire,
+                              "CAST(md5('mail-key-retired:' || CAST(m.id AS text)) AS uuid)"))) == \
+        (1, (False, False), True, True)
+    # mutant: the key's match taken out -> every message of the sender moves
     assert _run(body(_mutated(main._MAIL_RECEIPT_SWEEP_SQL, " AND m.idempotency_key = g.idempotency_key",
-                              ""))) == (1, True, False, True)
+                              ""))) == (1, (True, True), False, True)
 
 
-def test_a_key_the_previous_build_sends_again_after_a_purge_moves_its_receipt():
-    """The previous build on the migrated schema. A's message under key K,
-    whose receipt the current build completed with its request digest, is
-    deleted (any way a row goes); the previous build answers a retry of K
-    from mail_messages, finds nothing and sends K again as a new message.
-    The trigger moves K's receipt to the new message -- its id and time --
-    and clears the digest of the first request: a replay of K answers the
-    message that exists, by its stored text."""
+_SUPERSEDE = re.compile(r"    UPDATE mail_send_receipts\n       SET idempotency_key = CAST\(overlay\("
+                        r"md5\('mail-receipt-superseded:'.*?AND message_id <> NEW\.id;\n", re.S)
+
+
+def _superseding(pattern, new):
+    """A mutant of the trigger function's supersession UPDATE: its one match
+    of `pattern` replaced by `new` (None: the statement taken out)."""
+    stmt = _SUPERSEDE.findall(M404)
+    assert len(stmt) == 1
+    if new is None:
+        return _mutated(M404, stmt[0], "")
+    changed, n = re.subn(pattern, lambda _m: new, stmt[0], flags=re.S)
+    assert n == 1, pattern
+    return _mutated(M404, stmt[0], changed)
+
+
+def test_a_key_the_previous_build_sends_again_after_a_purge_supersedes_its_receipt():
+    """The previous build on the migrated schema. A's direct message under
+    key K, whose receipt the current build completed with its request
+    digest, is deleted (any way a row goes); the previous build answers a
+    retry of K from mail_messages, finds nothing and sends K again as a new
+    direct message, and once that one is deleted too, as a broadcast. Each
+    time the trigger keeps the superseded receipt -- its message, kind,
+    digest and time -- under a reserved key derived from both message ids,
+    and K's receipt is the new message's: a replay of K answers the message
+    that exists, by its stored text, and both direct sends stay in A's rate
+    window, which counts direct receipts."""
     fp = bytes(range(32))
-    conflict = re.compile(r"ON CONFLICT \(sender_id, idempotency_key\) DO UPDATE\n.*?"
-                          r"<> EXCLUDED\.message_id;", re.S)
+    window = _sql_in(main._mail_rate_or_raise, "SELECT COUNT(*) FILTER")
 
     async def body(migration):
         async with _Schema() as conn:
             await conn.execute(migration)
             key = str(uuid.uuid4())
-            first = await _message(conn, key=key, at=await conn.fetchval("SELECT NOW()") - timedelta(hours=2))
+            mids = [await _message(conn, key=key, at=await conn.fetchval("SELECT NOW()") - timedelta(hours=2))]
             await conn.execute(*_flat(_bind(main._MAIL_RECEIPT_SQL, {
                 "sid": A, "key": key, "kind": "direct", "fp": fp,
-                "mfp": main._mail_message_fp("send", "s", "b"), "mid": first, "n": None})))
-            await conn.execute("DELETE FROM mail_messages WHERE id = $1", first)
-            second = await _message(conn, key=key)
-            return await _receipts(conn), first, second
-    got, _first, second = _run(body(M404))
-    assert got == {second: ("direct", None, None, True)}
-    # mutant: the trigger's conflict arm as DO NOTHING -> K still answers the
-    # deleted message, with the first request's digest and time
-    nothing, n = conflict.subn("ON CONFLICT (sender_id, idempotency_key) DO NOTHING;", M404)
-    assert n == 1
-    got, first, _second = _run(body(nothing))
-    assert got == {first: ("direct", None, fp, None)}
-    # mutant: the digest kept -> the new message answers a changed body by
-    # the first request's digest
-    got, _first, second = _run(body(_mutated(M404, "           request_fp = NULL,\n", "")))
-    assert got == {second: ("direct", None, fp, True)}
+                "mfp": main._mail_message_fp("send", "s", "b"), "mid": mids[0], "n": None})))
+            try:
+                for kind, count in (("direct", None), ("system_broadcast", 1)):
+                    await conn.execute("DELETE FROM mail_messages WHERE id = $1", mids[-1])
+                    mids.append(await _message(conn, kind=kind, key=key, count=count))
+            except asyncpg.PostgresError as e:
+                return e.sqlstate, mids, key
+            row = await conn.fetchrow(*_flat(_bind(window, {"sid": A})))
+            keyed = {r["mid"]: r["k"] for r in await conn.fetch(
+                "SELECT message_id::text AS mid, idempotency_key::text AS k FROM mail_send_receipts")}
+            return (await _receipts(conn), keyed, (row["per_minute"], row["per_day"])), mids, key
+    (got, keyed, counts), (first, second, third), key = _run(body(M404))
+    assert got == {first: ("direct", None, fp, None), second: ("direct", None, None, None),
+                   third: ("system_broadcast", 1, None, True)}
+    assert keyed == {first: _reserved("mail-receipt-superseded:%s:%s" % (first, second)),
+                     second: _reserved("mail-receipt-superseded:%s:%s" % (second, third)), third: key}
+    assert _refused(keyed[first]) and _refused(keyed[second]) and counts == (1, 2)
+    # mutant: the superseded receipt deleted instead of kept -> both direct
+    # sends leave A's rate window
+    (got, _keyed, counts), (_first, _second, third), _key = _run(body(_superseding(
+        r"    UPDATE mail_send_receipts\n       SET .*?AS uuid\)\n", "    DELETE FROM mail_send_receipts\n")))
+    assert got == {third: ("system_broadcast", 1, None, True)} and counts == (0, 0)
+    # mutant: no supersession -> K still answers the deleted first message,
+    # with the first request's digest and time, and the new sends have no
+    # receipt
+    (got, keyed, counts), (first, _second, _third), key = _run(body(_superseding(None, None)))
+    assert got == {first: ("direct", None, fp, None)} and keyed == {first: key} and counts == (0, 1)
+    # mutant: the reserved key derived from K alone -> the second
+    # supersession of K takes the first one's key, and the send fails
+    sqlstate, mids, _key = _run(body(_superseding(
+        r"md5\('mail-receipt-superseded:'.*?CAST\(NEW\.id AS text\)\)",
+        "md5('mail-receipt-superseded:' || CAST(NEW.idempotency_key AS text))")))
+    assert sqlstate == "23505" and len(mids) == 2
 
 
 def test_a_replys_in_reply_to_names_its_parent_whatever_the_parents_purge(monkeypatch):
