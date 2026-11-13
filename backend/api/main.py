@@ -57771,8 +57771,46 @@ class _LobbyJoinReq(_LobbyCreateReq):
     lobby_id: str
 
 
+class _LobbyEntry:
+    """A lobby create's or join's work before its commit: `answer` is the
+    route's reply, `lobby_id` the lobby's id, `player_id` the caller's, and
+    `note` the line logged after the commit (None for a recovery rejoin,
+    which has never logged one)."""
+    __slots__ = ("answer", "lobby_id", "player_id", "note")
+
+    def __init__(self, answer: dict, lobby_id, player_id, note: str | None):
+        self.answer = answer
+        self.lobby_id = lobby_id
+        self.player_id = player_id
+        self.note = note
+
+
+async def _lobby_entry_after_commit(db: AsyncSession, entry: _LobbyEntry, cfg: dict) -> dict:
+    """What a lobby create or join does once its transaction has committed,
+    in the order the routes have always used: the log line, then the
+    eviction of the caller's searches in the other queues. `cfg` names the
+    mode's queue and label (_lobby_cfg's, or _FFA_LOBBY_QUEUE_CFG). A lobby
+    member is committed to this mode; the eviction is post-commit, in its
+    own transactions, SKIP LOCKED. Returns the route's answer."""
+    if entry.note:
+        print(entry.note)
+    await _evict_other_queue_searching(db, [entry.player_id], cfg["queue"],
+                                       f"an open {cfg['label']} lobby")
+    return entry.answer
+
+
 async def _lobby_create_impl(mode: str, req: _LobbyCreateReq, request: Request,
                              db: AsyncSession) -> dict:
+    entry = await _lobby_create_core(mode, req, request, db)
+    await db.commit()
+    return await _lobby_entry_after_commit(db, entry, _lobby_cfg(mode))
+
+
+async def _lobby_create_core(mode: str, req: _LobbyCreateReq, request: Request,
+                             db: AsyncSession) -> _LobbyEntry:
+    """Everything a create does before its commit, in the same order, so a
+    route can add its own rows to the same transaction. The caller commits,
+    then hands the result to _lobby_entry_after_commit."""
     cfg = _lobby_cfg(mode)
     await _check_steam_session(request, req.steam_id, db)
     await _assert_no_service_subject(db, affected_steam_ids=[req.steam_id])
@@ -57800,19 +57838,24 @@ async def _lobby_create_impl(mode: str, req: _LobbyCreateReq, request: Request,
     """), {"lid": lobby_id, "host": player.id, "pw": _pw})
     await _lobby_enroll_caller(db, mode, player, req, lobby_id,
                                mod_version=_request_mod_version(request))
-    await db.commit()
-    print(f"[{cfg['label']}-LOBBY] {req.steam_id} opened lobby {lobby_id}"
-          f"{' (private)' if _pw else ''}")
-    # A lobby member is committed to this mode — clear their searches
-    # elsewhere. Post-commit, own transaction, SKIP LOCKED.
-    await _evict_other_queue_searching(db, [player.id], cfg["queue"],
-                                       f"an open {cfg['label']} lobby")
-    return {"status": "ok", "lobby_id": str(lobby_id), "has_password": bool(_pw),
-            "max_players": cfg["players"]}
+    return _LobbyEntry({"status": "ok", "lobby_id": str(lobby_id), "has_password": bool(_pw),
+                        "max_players": cfg["players"]}, lobby_id, player.id,
+                       f"[{cfg['label']}-LOBBY] {req.steam_id} opened lobby {lobby_id}"
+                       f"{' (private)' if _pw else ''}")
 
 
 async def _lobby_join_impl(mode: str, req: _LobbyJoinReq, request: Request,
                            db: AsyncSession) -> dict:
+    entry = await _lobby_join_core(mode, req, request, db)
+    await db.commit()
+    return await _lobby_entry_after_commit(db, entry, _lobby_cfg(mode))
+
+
+async def _lobby_join_core(mode: str, req: _LobbyJoinReq, request: Request,
+                           db: AsyncSession) -> _LobbyEntry:
+    """Everything a join does before its commit, in the same order, so a
+    route can add its own rows to the same transaction. The caller commits,
+    then hands the result to _lobby_entry_after_commit."""
     cfg = _lobby_cfg(mode)
     await _check_steam_session(request, req.steam_id, db)
     await _assert_no_service_subject(db, affected_steam_ids=[req.steam_id])
@@ -57881,14 +57924,12 @@ async def _lobby_join_impl(mode: str, req: _LobbyJoinReq, request: Request,
         # our own existing seat.
         await _lobby_enroll_caller(db, mode, player, req, lobby_id,
                                    mod_version=_request_mod_version(request))
-        await db.commit()
-        # Eviction runs on this path too: if the FIRST enrollment's
-        # best-effort eviction failed, the recovery rejoin is the only later
-        # actor that can repair the cross-queue ghost.
-        await _evict_other_queue_searching(db, [player.id], cfg["queue"],
-                                           f"an open {cfg['label']} lobby")
-        return {"status": "ok", "lobby_id": str(lobby_id),
-                "player_count": len(live), "max_players": cfg["players"]}
+        # Eviction runs on this path too, after the caller's commit: if the
+        # FIRST enrollment's best-effort eviction failed, the recovery rejoin
+        # is the only later actor that can repair the cross-queue ghost.
+        return _LobbyEntry({"status": "ok", "lobby_id": str(lobby_id),
+                            "player_count": len(live), "max_players": cfg["players"]},
+                           lobby_id, player.id, None)
     if len(live) >= cfg["players"]:
         raise HTTPException(409, "That lobby is full")
     # Room rules (migration 306): a lobby whose CURRENT settings are
@@ -57901,13 +57942,11 @@ async def _lobby_join_impl(mode: str, req: _LobbyJoinReq, request: Request,
         raise HTTPException(409, "rules_unsupported")
     await _lobby_enroll_caller(db, mode, player, req, lobby_id,
                                mod_version=_request_mod_version(request))
-    await db.commit()
-    print(f"[{cfg['label']}-LOBBY] {req.steam_id} joined lobby {lobby_id} "
-          f"({len(live) + 1}/{cfg['players']})")
-    await _evict_other_queue_searching(db, [player.id], cfg["queue"],
-                                       f"an open {cfg['label']} lobby")
-    return {"status": "ok", "lobby_id": str(lobby_id),
-            "player_count": len(live) + 1, "max_players": cfg["players"]}
+    return _LobbyEntry({"status": "ok", "lobby_id": str(lobby_id),
+                        "player_count": len(live) + 1, "max_players": cfg["players"]},
+                       lobby_id, player.id,
+                       f"[{cfg['label']}-LOBBY] {req.steam_id} joined lobby {lobby_id} "
+                       f"({len(live) + 1}/{cfg['players']})")
 
 
 async def _lobby_state_impl(mode: str, steam_id: str, request: Request,
@@ -59534,9 +59573,22 @@ async def _ffa_lobby_enroll_caller(db: AsyncSession, player, req, lobby_id) -> N
                 detail="You're in a live match in another mode - finish it first")
 
 
+# FFA's queue and label in _lobby_cfg's shape, for _lobby_entry_after_commit.
+_FFA_LOBBY_QUEUE_CFG = {"queue": "ffa_queue", "label": "FFA"}
+
+
 @app.post("/api/v1/ffa/lobby/create", tags=["FFA Queue"])
 async def ffa_lobby_create(req: _FfaLobbyCreateReq, request: Request, db: AsyncSession = Depends(get_db)):
     """Open a host lobby. The caller becomes host and its only member."""
+    entry = await _ffa_lobby_create_core(req, request, db)
+    await db.commit()
+    return await _lobby_entry_after_commit(db, entry, _FFA_LOBBY_QUEUE_CFG)
+
+
+async def _ffa_lobby_create_core(req: _FfaLobbyCreateReq, request: Request,
+                                 db: AsyncSession) -> _LobbyEntry:
+    """Everything an FFA create does before its commit, in the same order,
+    as _lobby_create_core is for the other modes."""
     await _check_steam_session(request, req.steam_id, db)
     await _assert_no_service_subject(db, affected_steam_ids=[req.steam_id])
     _presence_touch(req.steam_id)
@@ -59560,17 +59612,27 @@ async def ffa_lobby_create(req: _FfaLobbyCreateReq, request: Request, db: AsyncS
         VALUES (:lid, 'open', 0, '{}', :host, NOW(), :pw)
     """), {"lid": lobby_id, "host": player.id, "pw": _pw})
     await _ffa_lobby_enroll_caller(db, player, req, lobby_id)
-    await db.commit()
-    print(f"[FFA-LOBBY] {req.steam_id} opened lobby {lobby_id}")
-    # A lobby member is committed to FFA — clear their searches elsewhere
-    # (design review find 3; post-commit, own transactions, SKIP LOCKED).
-    await _evict_other_queue_searching(db, [player.id], "ffa_queue", "an open FFA lobby")
-    return {"status": "ok", "lobby_id": str(lobby_id)}
+    return _LobbyEntry({"status": "ok", "lobby_id": str(lobby_id)}, lobby_id, player.id,
+                       f"[FFA-LOBBY] {req.steam_id} opened lobby {lobby_id}")
 
 
 @app.post("/api/v1/ffa/lobby/join", tags=["FFA Queue"])
 async def ffa_lobby_join(req: _FfaLobbyJoinReq, request: Request, db: AsyncSession = Depends(get_db)):
     """Join an open host lobby from the browser."""
+    entry = await _ffa_lobby_join_core(req, request, db)
+    await db.commit()
+    answer = await _lobby_entry_after_commit(db, entry, _FFA_LOBBY_QUEUE_CFG)
+    # Config echo (Codex client round-2 find 13): without it the client's
+    # mirrors show defaults (or the PREVIOUS lobby's values) until the first
+    # membership poll lands.
+    return {**answer, **(await _ffa_lobby_config_echo(db, entry.lobby_id))}
+
+
+async def _ffa_lobby_join_core(req: _FfaLobbyJoinReq, request: Request,
+                               db: AsyncSession) -> _LobbyEntry:
+    """Everything an FFA join does before its commit, in the same order, as
+    _lobby_join_core is for the other modes. The route adds the config echo
+    after its commit."""
     await _check_steam_session(request, req.steam_id, db)
     await _assert_no_service_subject(db, affected_steam_ids=[req.steam_id])
     _presence_touch(req.steam_id)
@@ -59633,24 +59695,16 @@ async def ffa_lobby_join(req: _FfaLobbyJoinReq, request: Request, db: AsyncSessi
         # Idempotent same-lobby rejoin handled in the enroll helper too, but
         # short-circuit so the capacity check below can't 409 our own row.
         await _ffa_lobby_enroll_caller(db, player, req, lobby_id)
-        await db.commit()
-        # Eviction runs on the idempotent path too (impl review find 10): if
-        # the FIRST enrollment's best-effort eviction failed, the recovery
-        # rejoin is the only later actor that can repair the cross-queue ghost.
-        await _evict_other_queue_searching(db, [player.id], "ffa_queue", "an open FFA lobby")
-        return {"status": "ok", "lobby_id": str(lobby_id),
-                **(await _ffa_lobby_config_echo(db, lobby_id))}
+        # Eviction runs on the idempotent path too, after the caller's commit
+        # (impl review find 10): if the FIRST enrollment's best-effort
+        # eviction failed, the recovery rejoin is the only later actor that
+        # can repair the cross-queue ghost.
+        return _LobbyEntry({"status": "ok", "lobby_id": str(lobby_id)}, lobby_id, player.id, None)
     if len(live) >= FFA_MAX_PLAYERS:
         raise HTTPException(409, "That lobby is full")
     await _ffa_lobby_enroll_caller(db, player, req, lobby_id)
-    await db.commit()
-    print(f"[FFA-LOBBY] {req.steam_id} joined lobby {lobby_id} ({len(live)+1} members)")
-    await _evict_other_queue_searching(db, [player.id], "ffa_queue", "an open FFA lobby")
-    # Config echo (Codex client round-2 find 13): without it the client's
-    # mirrors show defaults (or the PREVIOUS lobby's values) until the first
-    # membership poll lands.
-    return {"status": "ok", "lobby_id": str(lobby_id),
-            **(await _ffa_lobby_config_echo(db, lobby_id))}
+    return _LobbyEntry({"status": "ok", "lobby_id": str(lobby_id)}, lobby_id, player.id,
+                       f"[FFA-LOBBY] {req.steam_id} joined lobby {lobby_id} ({len(live)+1} members)")
 
 
 async def _ffa_lobby_config_echo(db: AsyncSession, lobby_id) -> dict:
@@ -78854,6 +78908,30 @@ async def _mail_spam_check(db: AsyncSession, sender: dict, message_id, subject: 
                               same_body=same_body, bulk_hour=bulk_hour, censor_hits=censor_hits)
 
 
+async def _mail_write_message(db: AsyncSession, sender_id, *, kind: str, thread_id, in_reply_to,
+                              subject: str, body: str, idempotency_key, via: str,
+                              addressees: list):
+    """The message row and its ONE fan-out INSERT ... SELECT, which decides
+    each addressee's delivery. Writes only: the caller holds the locks and
+    writes whatever else the transaction needs before its own commit.
+    `addressees` is as for _mail_finish_send. Returns the new message's id
+    and the fan-out's result, whose rowcount is the number of envelopes
+    written."""
+    mid = uuid.uuid4()
+    await db.execute(text(
+        "INSERT INTO mail_messages"
+        "   (id, sender_id, kind, thread_id, in_reply_to, subject, body, idempotency_key, via)"
+        " VALUES (:id, :sid, :kind, :tid, :irt, :subj, :body, :key, :via)"
+    ), {"id": mid, "sid": sender_id, "kind": kind, "tid": thread_id or mid, "irt": in_reply_to,
+        "subj": subject, "body": body, "key": idempotency_key,
+        "via": via if via in ("game", "discord") else "game"})
+    fanned = await db.execute(text(_MAIL_FANOUT_SQL), {
+        "mid": mid, "sid": sender_id,
+        "rids": [a[0] for a in addressees], "kinds": [a[1] for a in addressees],
+        "forced": [bool(a[2]) for a in addressees]})
+    return mid, fanned
+
+
 async def _mail_finish_send(db: AsyncSession, sender: dict, *, subject: str, body: str,
                             addressees: list, thread_id, in_reply_to, idempotency_key: UUID,
                             request_fp: bytes, cap: int | None = None, via: str = "game") -> dict:
@@ -78878,18 +78956,10 @@ async def _mail_finish_send(db: AsyncSession, sender: dict, *, subject: str, bod
     if len(addressees) > cap:
         raise HTTPException(status_code=400, detail="too_many_recipients")
     await _mail_rate_or_raise(db, sender["id"])
-    mid = uuid.uuid4()
-    await db.execute(text(
-        "INSERT INTO mail_messages"
-        "   (id, sender_id, kind, thread_id, in_reply_to, subject, body, idempotency_key, via)"
-        " VALUES (:id, :sid, 'direct', :tid, :irt, :subj, :body, :key, :via)"
-    ), {"id": mid, "sid": sender["id"], "tid": thread_id or mid, "irt": in_reply_to,
-        "subj": subject, "body": body, "key": idempotency_key,
-        "via": via if via in ("game", "discord") else "game"})
-    fanned = await db.execute(text(_MAIL_FANOUT_SQL), {
-        "mid": mid, "sid": sender["id"],
-        "rids": [a[0] for a in addressees], "kinds": [a[1] for a in addressees],
-        "forced": [bool(a[2]) for a in addressees]})
+    mid, fanned = await _mail_write_message(
+        db, sender["id"], kind="direct", thread_id=thread_id, in_reply_to=in_reply_to,
+        subject=subject, body=body, idempotency_key=idempotency_key, via=via,
+        addressees=addressees)
     await _mail_write_receipt(db, sender_id=sender["id"], key=idempotency_key, kind="direct",
                               request_fp=request_fp,
                               message_fp=_mail_message_fp("send" if thread_id is None else "reply",
