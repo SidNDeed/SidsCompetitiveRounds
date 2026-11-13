@@ -103,7 +103,10 @@ SET LOCAL lock_timeout = '5s';
 
 DO $m405tables$
 BEGIN
-  IF to_regclass('public.lobby_invites') IS NULL THEN
+  IF NOT EXISTS (SELECT 1 FROM pg_class c
+                   JOIN pg_namespace n ON n.oid = c.relnamespace
+                  WHERE n.nspname = current_schema()
+                    AND c.relname = 'lobby_invites') THEN
     CREATE TABLE IF NOT EXISTS lobby_invites (
       id                 UUID        NOT NULL DEFAULT gen_random_uuid(),
       mode               TEXT        NOT NULL,
@@ -134,25 +137,43 @@ BEGIN
       CONSTRAINT ck_lobby_invites_expiry CHECK (expires_at > created_at)
     );
   END IF;
-  IF to_regclass('public.uq_lobby_invites_pending') IS NULL THEN
+  IF NOT EXISTS (SELECT 1 FROM pg_class c
+                   JOIN pg_namespace n ON n.oid = c.relnamespace
+                  WHERE n.nspname = current_schema()
+                    AND c.relname = 'uq_lobby_invites_pending') THEN
     CREATE UNIQUE INDEX IF NOT EXISTS uq_lobby_invites_pending
       ON lobby_invites (mode, lobby_id, invitee_player_id) WHERE state = 'pending';
   END IF;
-  IF to_regclass('public.ix_lobby_invites_invitee_pending') IS NULL THEN
+  IF NOT EXISTS (SELECT 1 FROM pg_class c
+                   JOIN pg_namespace n ON n.oid = c.relnamespace
+                  WHERE n.nspname = current_schema()
+                    AND c.relname = 'ix_lobby_invites_invitee_pending') THEN
     CREATE INDEX IF NOT EXISTS ix_lobby_invites_invitee_pending
       ON lobby_invites (invitee_player_id) WHERE state = 'pending';
   END IF;
-  IF to_regclass('public.ix_lobby_invites_lobby') IS NULL THEN
+  IF NOT EXISTS (SELECT 1 FROM pg_class c
+                   JOIN pg_namespace n ON n.oid = c.relnamespace
+                  WHERE n.nspname = current_schema()
+                    AND c.relname = 'ix_lobby_invites_lobby') THEN
     CREATE INDEX IF NOT EXISTS ix_lobby_invites_lobby ON lobby_invites (mode, lobby_id);
   END IF;
-  IF to_regclass('public.ix_lobby_invites_sender_created') IS NULL THEN
+  IF NOT EXISTS (SELECT 1 FROM pg_class c
+                   JOIN pg_namespace n ON n.oid = c.relnamespace
+                  WHERE n.nspname = current_schema()
+                    AND c.relname = 'ix_lobby_invites_sender_created') THEN
     CREATE INDEX IF NOT EXISTS ix_lobby_invites_sender_created
       ON lobby_invites (sender_player_id, created_at);
   END IF;
-  IF to_regclass('public.ix_lobby_invites_expires') IS NULL THEN
+  IF NOT EXISTS (SELECT 1 FROM pg_class c
+                   JOIN pg_namespace n ON n.oid = c.relnamespace
+                  WHERE n.nspname = current_schema()
+                    AND c.relname = 'ix_lobby_invites_expires') THEN
     CREATE INDEX IF NOT EXISTS ix_lobby_invites_expires ON lobby_invites (expires_at);
   END IF;
-  IF to_regclass('public.invite_receipts') IS NULL THEN
+  IF NOT EXISTS (SELECT 1 FROM pg_class c
+                   JOIN pg_namespace n ON n.oid = c.relnamespace
+                  WHERE n.nspname = current_schema()
+                    AND c.relname = 'invite_receipts') THEN
     CREATE TABLE IF NOT EXISTS invite_receipts (
       caller_player_id   UUID        NOT NULL,
       idempotency_key    UUID        NOT NULL,
@@ -167,7 +188,10 @@ BEGIN
       CONSTRAINT ck_invite_receipts_request_fp CHECK (octet_length(request_fp) = 32)
     );
   END IF;
-  IF to_regclass('public.ix_invite_receipts_invite') IS NULL THEN
+  IF NOT EXISTS (SELECT 1 FROM pg_class c
+                   JOIN pg_namespace n ON n.oid = c.relnamespace
+                  WHERE n.nspname = current_schema()
+                    AND c.relname = 'ix_invite_receipts_invite') THEN
     CREATE INDEX IF NOT EXISTS ix_invite_receipts_invite ON invite_receipts (invite_id);
   END IF;
 END $m405tables$;
@@ -180,17 +204,25 @@ END $m405tables$;
 DO $m405kind$
 DECLARE
   old_check name;
+  mm oid;
 BEGIN
+  SELECT c.oid INTO mm
+    FROM pg_class c
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+   WHERE n.nspname = current_schema() AND c.relname = 'mail_messages';
+  IF mm IS NULL THEN
+    RAISE EXCEPTION '405: mail_messages is not in schema %', current_schema();
+  END IF;
   IF NOT EXISTS (
        SELECT 1 FROM pg_constraint c
-        WHERE c.conrelid = 'public.mail_messages'::regclass
+        WHERE c.conrelid = mm
           AND c.contype = 'c'
           AND c.conname = 'ck_mail_messages_kind'
           AND pg_get_constraintdef(c.oid)
               = 'CHECK ((kind = ANY (ARRAY[''direct''::text, ''system_broadcast''::text, ''invite''::text])))') THEN
     FOR old_check IN
       SELECT c.conname FROM pg_constraint c
-       WHERE c.conrelid = 'public.mail_messages'::regclass
+       WHERE c.conrelid = mm
          AND c.contype = 'c'
          AND pg_get_constraintdef(c.oid)
              = 'CHECK ((kind = ANY (ARRAY[''direct''::text, ''system_broadcast''::text])))'
@@ -206,19 +238,39 @@ DO $m405check$
 DECLARE
   found text;
   want text;
+  inv oid;
+  rcp oid;
+  mm oid;
 BEGIN
+  -- The three tables this file names, in the schema it ran in.
+  SELECT c.oid INTO inv
+    FROM pg_class c
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+   WHERE n.nspname = current_schema() AND c.relname = 'lobby_invites';
+  SELECT c.oid INTO rcp
+    FROM pg_class c
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+   WHERE n.nspname = current_schema() AND c.relname = 'invite_receipts';
+  SELECT c.oid INTO mm
+    FROM pg_class c
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+   WHERE n.nspname = current_schema() AND c.relname = 'mail_messages';
+  IF inv IS NULL OR rcp IS NULL OR mm IS NULL THEN
+    RAISE EXCEPTION '405: a table is missing from schema %', current_schema();
+  END IF;
+
   -- The two tables: ordinary, permanent, no row security, no rules, no trigger.
   SELECT string_agg(format('%s %s %s %s %s', c.relname, c.relkind, c.relpersistence,
                            c.relrowsecurity, c.relhasrules), '; ' ORDER BY c.relname)
     INTO found
     FROM pg_class c
-   WHERE c.oid IN ('public.lobby_invites'::regclass, 'public.invite_receipts'::regclass);
+   WHERE c.oid IN (inv, rcp);
   want := 'invite_receipts r p false false; lobby_invites r p false false';
   IF found IS DISTINCT FROM want THEN
     RAISE EXCEPTION '405: the tables differ from this file (found: %)', found;
   END IF;
   IF EXISTS (SELECT 1 FROM pg_trigger t
-              WHERE t.tgrelid IN ('public.lobby_invites'::regclass, 'public.invite_receipts'::regclass)) THEN
+              WHERE t.tgrelid IN (inv, rcp)) THEN
     RAISE EXCEPTION '405: a trigger exists on lobby_invites or invite_receipts';
   END IF;
 
@@ -229,7 +281,7 @@ BEGIN
     INTO found
     FROM pg_attribute a
     LEFT JOIN pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum
-   WHERE a.attrelid = 'public.lobby_invites'::regclass AND a.attnum > 0 AND NOT a.attisdropped;
+   WHERE a.attrelid = inv AND a.attnum > 0 AND NOT a.attisdropped;
   want := 'id uuid true gen_random_uuid(), mode text true -, lobby_id uuid true -, '
        || 'sender_player_id uuid true -, invitee_player_id uuid true -, kind text true -, '
        || 'state text true ''pending''::text, end_reason text false -, mail_message_id uuid false -, '
@@ -244,7 +296,7 @@ BEGIN
     INTO found
     FROM pg_attribute a
     LEFT JOIN pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum
-   WHERE a.attrelid = 'public.invite_receipts'::regclass AND a.attnum > 0 AND NOT a.attisdropped;
+   WHERE a.attrelid = rcp AND a.attnum > 0 AND NOT a.attisdropped;
   want := 'caller_player_id uuid true -, idempotency_key uuid true -, route text true -, '
        || 'invite_id uuid true -, request_fp bytea true -, created_at timestamp with time zone true now()';
   IF found IS DISTINCT FROM want THEN
@@ -255,7 +307,7 @@ BEGIN
   SELECT string_agg(format('%s %s', c.conname, pg_get_constraintdef(c.oid)), '; ' ORDER BY c.conname)
     INTO found
     FROM pg_constraint c
-   WHERE c.conrelid = 'public.lobby_invites'::regclass;
+   WHERE c.conrelid = inv;
   want := 'ck_lobby_invites_end_reason CHECK ((end_reason = ANY (ARRAY[''lobby_closed''::text, '
        || '''lobby_started''::text, ''sender_left''::text, ''invitee_kicked''::text]))); '
        || 'ck_lobby_invites_ended CHECK (((state = ''pending''::text) = (ended_at IS NULL))); '
@@ -276,7 +328,7 @@ BEGIN
   SELECT string_agg(format('%s %s', c.conname, pg_get_constraintdef(c.oid)), '; ' ORDER BY c.conname)
     INTO found
     FROM pg_constraint c
-   WHERE c.conrelid = 'public.invite_receipts'::regclass;
+   WHERE c.conrelid = rcp;
   want := 'ck_invite_receipts_request_fp CHECK ((octet_length(request_fp) = 32)); '
        || 'ck_invite_receipts_route CHECK ((route = ANY (ARRAY[''send''::text, ''accept''::text, '
        || '''decline''::text, ''cancel''::text]))); '
@@ -294,7 +346,7 @@ BEGIN
     INTO found
     FROM pg_index i
     JOIN pg_class ci ON ci.oid = i.indexrelid
-   WHERE i.indrelid IN ('public.lobby_invites'::regclass, 'public.invite_receipts'::regclass);
+   WHERE i.indrelid IN (inv, rcp);
   want := 'invite_receipts_pkey true true btree (caller_player_id, idempotency_key); '
        || 'ix_invite_receipts_invite false true btree (invite_id); '
        || 'ix_lobby_invites_expires false true btree (expires_at); '
@@ -312,7 +364,7 @@ BEGIN
   SELECT string_agg(format('%s %s', c.conname, pg_get_constraintdef(c.oid)), '; ' ORDER BY c.conname)
     INTO found
     FROM pg_constraint c
-   WHERE c.conrelid = 'public.mail_messages'::regclass
+   WHERE c.conrelid = mm
      AND c.contype = 'c'
      AND pg_get_constraintdef(c.oid) ~ '\mkind\M';
   want := 'ck_mail_messages_kind CHECK ((kind = ANY (ARRAY[''direct''::text, ''system_broadcast''::text, '

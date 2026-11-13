@@ -30,10 +30,19 @@ DELETE FROM mail_messages WHERE kind = 'invite';
 ALTER TABLE mail_messages DROP CONSTRAINT IF EXISTS ck_mail_messages_kind;
 
 DO $r405kind$
+DECLARE
+  mm oid;
 BEGIN
+  SELECT c.oid INTO mm
+    FROM pg_class c
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+   WHERE n.nspname = current_schema() AND c.relname = 'mail_messages';
+  IF mm IS NULL THEN
+    RAISE EXCEPTION 'rollback 405: mail_messages is not in schema %', current_schema();
+  END IF;
   IF NOT EXISTS (
        SELECT 1 FROM pg_constraint c
-        WHERE c.conrelid = 'public.mail_messages'::regclass
+        WHERE c.conrelid = mm
           AND c.contype = 'c'
           AND pg_get_constraintdef(c.oid)
               = 'CHECK ((kind = ANY (ARRAY[''direct''::text, ''system_broadcast''::text])))') THEN

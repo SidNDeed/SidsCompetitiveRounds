@@ -771,6 +771,11 @@ _EVERY_STATEMENT_GUARDED = {
         "one catalog-guarded ADD COLUMN block, two catalog-guarded CREATE INDEX "
         "blocks and a read-only post-check, between BEGIN, SET LOCAL "
         "lock_timeout and COMMIT; a re-run issues no DDL",
+    "405_lobby_invites.sql":
+        "one catalog-guarded block creating lobby_invites, invite_receipts and "
+        "their indexes, one block replacing mail_messages' kind check only while "
+        "the wider check is absent, and a read-only post-check, between BEGIN, "
+        "SET LOCAL lock_timeout and COMMIT; a re-run issues no DDL",
 }
 _EVERY_STATEMENT_GUARDED_KINDS = {"BEGIN", "COMMIT", "SET LOCAL", "DO"}
 
