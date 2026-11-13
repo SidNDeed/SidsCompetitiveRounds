@@ -88,7 +88,7 @@
           ],
           "main",
           "admin_ban",
-          "9d65a3fe251744b3aca2b6843ab94610e3c7b419"
+          "b9dac28f1a531e5d94f28c113bbf72f68de75f61"
         ],
         [
           "/api/v1/admin/banned-users",
@@ -952,7 +952,7 @@
           ],
           "main",
           "delete_player_data",
-          "dbf35f23356a3c3644104c037f6fa167f4cdee08"
+          "f99f859e42e89e3b46130e4baccb480f9ba90c5a"
         ],
         [
           "/api/v1/players/{steam_id}/ffa-history",
@@ -1723,7 +1723,7 @@
           ],
           "main",
           "ffa_lobby_create",
-          "028ee98e2108899751ea2283033b01c56a8688af"
+          "752ae4cd3d86b0abb8c1a47c7d5c4010e9a5e5be"
         ],
         [
           "/api/v1/ffa/lobby/join",
@@ -1732,7 +1732,7 @@
           ],
           "main",
           "ffa_lobby_join",
-          "cfe09b2d76c5d8ecb581cfe7a6175a831958219b"
+          "cf1f94eca58615868695b775b2191ecd41ee280c"
         ],
         [
           "/api/v1/ffa/lobby/kick",
@@ -1741,7 +1741,7 @@
           ],
           "main",
           "ffa_lobby_kick",
-          "13c8c209f3ba3c935a0f634308869e68ff1fc684"
+          "a422cd4ea426b0d5eee9beac55002fb17c7a1607"
         ],
         [
           "/api/v1/ffa/lobby/settings",
@@ -1759,7 +1759,7 @@
           ],
           "main",
           "ffa_lobby_start",
-          "094569c772fe3f71708cc3e6233ff0868c99e21b"
+          "f6022c9b96572dc5bc7a284ed2c90d711272e81c"
         ],
         [
           "/api/v1/ffa/lobby/{lobby_id}/assembly",
@@ -1822,7 +1822,7 @@
           ],
           "main",
           "ffa_queue_leave",
-          "2704d244d1f54cd0260b2891a0774399dcf9d481"
+          "44b5974d852f111fa51223bb16b95777ce5636c9"
         ],
         [
           "/api/v1/ffa/queue/list",
@@ -1840,7 +1840,7 @@
           ],
           "main",
           "ffa_queue_poll",
-          "81448844c3706628774d0219d39490ee7208e8c1"
+          "11aebbd55366b3da95f5d8cdcbbd0165b8b02332"
         ],
         [
           "/api/v1/ffa/queue/recent-joins",
@@ -2317,7 +2317,7 @@
           ],
           "main",
           "ovt_lobby_create",
-          "d80947d6b0a014068f781f0c00278497935fc6dc"
+          "aafe0664fef2d20868b0ce54e1141fc0fcc802a7"
         ],
         [
           "/api/v1/ovt/lobby/join",
@@ -2326,7 +2326,7 @@
           ],
           "main",
           "ovt_lobby_join",
-          "5b04fdd17a28473dda8c6d827b2365735c8e2cb7"
+          "640f16cdca6f1e23a1634772bb295a0fde3b874b"
         ],
         [
           "/api/v1/ovt/lobby/kick",
@@ -2335,7 +2335,7 @@
           ],
           "main",
           "ovt_lobby_kick",
-          "f9eb7c10cd56f51da5aed47666511f3e401685d1"
+          "fb9d6b5ec0b5bd3a5e589b154a5c011f4e8f863b"
         ],
         [
           "/api/v1/ovt/lobby/leave",
@@ -2344,7 +2344,7 @@
           ],
           "main",
           "ovt_lobby_leave",
-          "8154b7518e2524b89aa88d6f5cfa730a9c222ec4"
+          "efc5052d017b5eaab2d0ef0ae7c92e9d386265c0"
         ],
         [
           "/api/v1/ovt/lobby/prefs",
@@ -2380,7 +2380,7 @@
           ],
           "main",
           "ovt_lobby_start",
-          "b0ffe68e4cb73dbbee299ee7579da20cd8a04242"
+          "2b8979b753428c7b6e63c982f1751c8b25f8c696"
         ],
         [
           "/api/v1/ovt/lobby/state",
@@ -2389,7 +2389,7 @@
           ],
           "main",
           "ovt_lobby_state",
-          "b898b48d763b723b41af9adcb68c310c467f6f62"
+          "0860a5fbe6a1d85f1ed48d8b5259a2eac4e0da8e"
         ],
         [
           "/api/v1/ovt/queue/join",
@@ -2407,7 +2407,7 @@
           ],
           "main",
           "ovt_queue_leave",
-          "99bb4ef83ed7a5100313a0b44ccd63145ef8c6f0"
+          "eb0b06d0f7ef257083453dcbc0d72664f9019f2f"
         ],
         [
           "/api/v1/ovt/queue/list",
@@ -2425,7 +2425,7 @@
           ],
           "main",
           "ovt_queue_poll",
-          "23984474d7021f8c99f39b07838ba15cf8422d9e"
+          "dd7399385bcf904d14f8e4b7f82ec024092f3619"
         ],
         [
           "/api/v1/ovt/queue/recent-joins",
@@ -2713,7 +2713,7 @@
           ],
           "main",
           "team_lobby_create",
-          "c3ad217eb506149aeb8dd8cbb45ab165b099eec9"
+          "b97228143499013ddade982e17ec2ab3ac36da71"
         ],
         [
           "/api/v1/team/lobby/join",
@@ -2722,7 +2722,7 @@
           ],
           "main",
           "team_lobby_join",
-          "176a8b35445c78361f13db529488bdbc0e54e4b2"
+          "eedceb91185e97c09239f866aa427f5e306ab57e"
         ],
         [
           "/api/v1/team/lobby/kick",
@@ -2731,7 +2731,7 @@
           ],
           "main",
           "team_lobby_kick",
-          "ac8a23941b2ee0072cf898ffa2cf0d7392db7e8a"
+          "93b835e009bdd795dd80e6c7beb04176bf87096a"
         ],
         [
           "/api/v1/team/lobby/leave",
@@ -2740,7 +2740,7 @@
           ],
           "main",
           "team_lobby_leave",
-          "adc86438a686aedf5913656e03d3e75b0ad4f96f"
+          "cd577ccc0f78f0edf6a12268f288bc1f5ac3b81c"
         ],
         [
           "/api/v1/team/lobby/prefs",
@@ -2776,7 +2776,7 @@
           ],
           "main",
           "team_lobby_start",
-          "4ecb00a52d01eb731e4b370fff2c007ab4d021c5"
+          "c10376e1c95330b0e62666ade94a5f6b3b777a43"
         ],
         [
           "/api/v1/team/lobby/state",
@@ -2785,7 +2785,7 @@
           ],
           "main",
           "team_lobby_state",
-          "18468fe378326386256b6356ee4ca72dc60ef604"
+          "b99b6e0ec776b444a79340a319aae142428db7c9"
         ],
         [
           "/api/v1/team/queue/count",
@@ -2812,7 +2812,7 @@
           ],
           "main",
           "team_queue_leave",
-          "ceb88184a01c7182e4a5b0758c219f5a9ce30913"
+          "f472013e721798b2d8ed21429e4daa20c835124c"
         ],
         [
           "/api/v1/team/queue/list",
@@ -2839,7 +2839,7 @@
           ],
           "main",
           "team_queue_poll",
-          "2c5a253b0391db54aac4c5332489106e70be26cb"
+          "17370471df0a674dbd9a951e0f5f7a2d555f0a5f"
         ],
         [
           "/api/v1/team/queue/preferred-team",
@@ -2936,7 +2936,7 @@
           ],
           "main",
           "admin_moderation_case_act",
-          "c0f8fd1f3479f0e19048b674a4cd4263ff3595d9"
+          "6e67a019919f40abf4103dddd139c849c297704b"
         ],
         [
           "/api/v1/admin/moderation-cases/{case_id}/notified",
@@ -2981,7 +2981,7 @@
           ],
           "main",
           "internal_moderation_case_act",
-          "f6755783b313271262a12fb308102a6af79c8587"
+          "eaeecc1c6de177532fb78979614e9924dcc13865"
         ],
         [
           "/api/v1/internal/moderation-cases/{case_id}/notified",
@@ -3062,7 +3062,7 @@
           ],
           "main",
           "mail_send",
-          "36e13d5ff466ef65a1c835a3c1229c07031a69e9"
+          "7ecc252c649c18e4f3885a76d40ff14309bc50f0"
         ],
         [
           "/api/v1/mail/blocks",
@@ -3098,7 +3098,7 @@
           ],
           "main",
           "mail_inbox",
-          "85655e56973e9a4d1f2034e63201ddcbc6d21aeb"
+          "1527f99d54b2682eb4512fd607f6c0e714d8769c"
         ],
         [
           "/api/v1/mail/sent",
@@ -3107,7 +3107,7 @@
           ],
           "main",
           "mail_sent",
-          "8a8364be1f3fe93d149d54b226d917c6cd02051b"
+          "e4c48849d000feffa013b7f61980c9b980388a72"
         ],
         [
           "/api/v1/mail/settings",
@@ -3134,7 +3134,7 @@
           ],
           "main",
           "mail_status",
-          "2d7bee0a217e2898dcbca9bb1798569871190a01"
+          "fbd61cc043520d974cf26be3cc8be015c74d046e"
         ],
         [
           "/api/v1/mail/{message_id}",
@@ -3143,7 +3143,7 @@
           ],
           "main",
           "mail_delete",
-          "c46e301d2f300f8077d51fb40b7cfd3d5a019eb8"
+          "134b92954bdd64ceb11f2ffcf78c024e786f53f9"
         ],
         [
           "/api/v1/mail/{message_id}",
@@ -3152,7 +3152,7 @@
           ],
           "main",
           "mail_detail",
-          "f62faff830740007524e3b35aee009b897a6f67c"
+          "828af944004d99eaf18a8af9fb62aad6f2e55bcd"
         ],
         [
           "/api/v1/mail/{message_id}/read",
@@ -3170,7 +3170,7 @@
           ],
           "main",
           "mail_reply",
-          "7f1c03192b8dad282a8254ad80f1a9c02ed0fba6"
+          "c4f5e3238be05da26984eadb8797f2aa254e3d36"
         ],
         [
           "/api/v1/mail/{message_id}/report",
@@ -3743,7 +3743,7 @@
           ],
           "mail_discord",
           "mail_reply_from_discord",
-          "f0e5de4d2da2e8edf8127d035dae85568f34e553"
+          "3cd00a53f4314fd92bcad26d663fcdd46db4ac7c"
         ]
       ]
     },
@@ -3971,6 +3971,57 @@
           "b0157bfe56d531ffa0fb4cc9dbf3c005f4361326"
         ]
       ]
+    },
+    {
+      "classification": "statically-nonconsumer",
+      "reason": "Static source review (lobby invites, migration 405: the five invite routes in main.py): over each route's whole reached surface, walked by this gate's own closure, no W1 private Match column is named and no SQL reads the matches table. POST /api/v1/invites answers {status, invite_id, ...} from its own lobby_invites, invite_receipts and mail rows and the lobby and queue tables (a challenge also answers the lobby it creates, through the lobby create cores); POST /api/v1/invites/{invite_id}/accept answers the lobby join routes' own answer through the same join cores, or the invite's state; .../decline and .../cancel answer the invite's state; GET /api/v1/invites/pending answers invite objects built from lobby_invites, players and the lobby rows' settings. No route serializes a lobby password or a room name (lesson 463).",
+      "routes": [
+        [
+          "/api/v1/invites",
+          [
+            "POST"
+          ],
+          "main",
+          "invite_send",
+          "411e8e65f89161a36c2b20e1958380f2ca7323c5"
+        ],
+        [
+          "/api/v1/invites/{invite_id}/accept",
+          [
+            "POST"
+          ],
+          "main",
+          "invite_accept",
+          "b686d9e224ae701923de422455b859c34b7b29cc"
+        ],
+        [
+          "/api/v1/invites/{invite_id}/decline",
+          [
+            "POST"
+          ],
+          "main",
+          "invite_decline",
+          "1ea398b2f3fe878fa376c8f85ebe037f0503a285"
+        ],
+        [
+          "/api/v1/invites/{invite_id}/cancel",
+          [
+            "POST"
+          ],
+          "main",
+          "invite_cancel",
+          "e713aae85744917811e51037921f44681234a4a7"
+        ],
+        [
+          "/api/v1/invites/pending",
+          [
+            "GET"
+          ],
+          "main",
+          "invite_pending",
+          "043d2f79257ff84b39a1831158be47298bb70d56"
+        ]
+      ]
     }
   ],
   "entry_points": {
@@ -4017,7 +4068,7 @@
       [
         "main",
         "lifespan",
-        "0d2beb46055179312d0f850b412e2bfd2f5d3ed5"
+        "a5108552cdbf700584011ec22ebc3c6591dfece4"
       ]
     ]
   },
@@ -4446,6 +4497,11 @@
     "POST /api/v1/admin/mail/broadcast -> main.admin_mail_broadcast",
     "POST /api/v1/admin/mail/bulk-grants -> main.admin_mail_bulk_grant",
     "DELETE /api/v1/admin/mail/bulk-grants/{steam_id} -> main.admin_mail_bulk_grant_revoke",
+    "POST /api/v1/invites -> main.invite_send",
+    "POST /api/v1/invites/{invite_id}/accept -> main.invite_accept",
+    "POST /api/v1/invites/{invite_id}/decline -> main.invite_decline",
+    "POST /api/v1/invites/{invite_id}/cancel -> main.invite_cancel",
+    "GET /api/v1/invites/pending -> main.invite_pending",
     "POST /api/v1/admin/operators/keys -> main.admin_operator_key_issue",
     "POST /api/v1/admin/operators/keys/revoke -> main.admin_operator_key_revoke",
     "GET /api/v1/admin/operators -> main.admin_operator_list",
