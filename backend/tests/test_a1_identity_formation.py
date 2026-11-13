@@ -3903,12 +3903,20 @@ def _fix1b_calls(function_name, callee):
             if isinstance(node, _ast.Call) and b.spelled(node.func, callee)]
 
 
-def test_fix1b_r1_floor_is_independent_inert_and_complete():
-    assert main.FFA_PROXIMITY_VICTIM_MIN_VERSION == main.MIN_MOD_VERSION == "1.38.7"
-    floor = main.MIN_MOD_VERSION
+def test_fix1b_r1_floor_is_independent_shipped_and_complete():
+    # The release commit raised the floor from its inert authoring value (the
+    # oldest admitted version) to 1.41.0, the first release carrying cr_prox1
+    # (SHIP COUPLING at the constant). A current client clears it; an older one
+    # in the roster, a short roster, or a roster at the oldest admitted version
+    # does not.
+    assert main.FFA_PROXIMITY_VICTIM_MIN_VERSION == "1.41.0"
+    assert main._mod_version_at_least(main.LATEST_MOD_VERSION,
+                                      main.FFA_PROXIMITY_VICTIM_MIN_VERSION) is True
+    floor = main.FFA_PROXIMITY_VICTIM_MIN_VERSION
     assert main._ffa_roster_clears_proximity_floor([floor, "v" + floor, "V" + floor], 3)
-    assert not main._ffa_roster_clears_proximity_floor([floor, "1.38.6", floor], 3)
+    assert not main._ffa_roster_clears_proximity_floor([floor, "1.40.3", floor], 3)
     assert not main._ffa_roster_clears_proximity_floor([floor, floor], 3)
+    assert not main._ffa_roster_clears_proximity_floor([main.MIN_MOD_VERSION] * 3, 3)
     helper = _ast.parse(_inspect.getsource(main._ffa_roster_clears_proximity_floor))
     assert not any(isinstance(node, _ast.Await) for node in _ast.walk(helper))
 

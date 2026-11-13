@@ -113,14 +113,6 @@ def test_version_floor_fails_closed():
         assert main._mod_version_at_least(ok, FLOOR) is True, ok
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "bug #365/#366: ROOM_RULES_MIN_VERSION is 1.41.0 while LATEST_MOD_VERSION is 1.40.3, "
-    "so no client that exists can satisfy the floor and _rules_for_queue_match forces sc=0 "
-    "on every ranked-queue room whatever both players have set. Fixing it is a release "
-    "coupling (client ModVersion and this floor set to the same string in one commit, API "
-    "deployed before the client per #337), so the marker stays until that ship. strict=True "
-    "on purpose: the moment the floor becomes reachable this test XPASSes and FAILS the "
-    "suite, which is what forces this marker to be removed rather than left to rot."))
 def test_the_version_floor_is_reachable_by_a_client_that_exists():
     """The floor is a forward pin, and a forward pin that is never brought back
     down silently disables the feature it gates for ever.

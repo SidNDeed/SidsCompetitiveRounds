@@ -6260,10 +6260,10 @@ BULLET_STATS_CLEAN_MIN_VERSION = "1.39.4"
 # could BUY a dance but has no surface to play or preview it (the #163
 # "born unusable" class, for a behavior instead of a PNG). SHIP COUPLING
 # (#294/#331): this must be <= the version the dance client actually ships
-# as — if Sid names the release 1.40.0 the gate still opens (1.40.0 >
-# 1.39.7); it must never be RAISED past the shipped version or every
-# client loses the section.
-DANCES_MIN_VERSION = "1.39.7"
+# as. v1.40.0 is the first release tag containing DanceEmotes and no release
+# carries a version between 1.39.6 and 1.40.0, so the floor is exactly 1.40.0;
+# never RAISE it past the shipped version or every client loses the section.
+DANCES_MIN_VERSION = "1.40.0"
 
 # Music albums are version-gated PER SKU, not per kind: each album's floor is
 # the client version whose compiled MusicCatalog carries that album (an older
@@ -6276,14 +6276,14 @@ DANCES_MIN_VERSION = "1.39.7"
 # an unparseable value EXCLUDES its sku from every supported set (fail closed,
 # never version-0) with one loud startup line.
 MUSIC_SKU_MIN_VERSIONS: dict[str, str] = {
-    # SHIP COUPLING (#294/#331): 1.39.7 = the PENDING client release that
-    # ships this album's MusicCatalog entry. Every shipped client is <=1.39.6
-    # and stays excluded, so staging this entry now exposes nothing; if Sid
-    # names a different final version, any >=1.39.7 ship still gates
-    # correctly (same direction rule as DANCES_MIN_VERSION above). NEVER
-    # raise it past the version that actually ships the catalog entry — that
-    # hides the album from the shipping client.
-    "music_album_another_round": "1.39.7",
+    # SHIP COUPLING (#294/#331): 1.40.0 = the first release tag whose
+    # MusicCatalog carries this album. No release carries a version between
+    # 1.39.6 and 1.40.0, so moving this floor from 1.39.7 (the pending
+    # version it was staged at) to 1.40.0 moved no shipped client across it.
+    # Same direction rule as DANCES_MIN_VERSION above: NEVER raise it past
+    # the version that actually ships the catalog entry — that hides the
+    # album from the shipping client.
+    "music_album_another_round": "1.40.0",
     # SHIP COUPLING (#294/#331): 1.40.0 = the client release Sid named for
     # music batch 2 ("ship out v1.40.0") — the first MusicCatalog carrying
     # this album. If he renames the release LOWER than 1.40.0 the constant
@@ -7852,7 +7852,7 @@ async def health_check(db: AsyncSession = Depends(get_db)):
                               session_report=0)
 
 
-LATEST_MOD_VERSION = "1.40.3"
+LATEST_MOD_VERSION = "1.41.0"
 
 @app.get("/api/v1/mod-version", tags=["System"])
 async def get_mod_version(request: Request = None):
@@ -56380,7 +56380,7 @@ FFA_SUDDEN_DEATH_MIN_VERSION = "1.37.0"
 # cr_prox1 client capability in the SAME ship commit as that version bump.  It
 # is deliberately inert at the oldest admitted version in this authoring
 # commit; the two-SHA release order raises it only after the server is live.
-FFA_PROXIMITY_VICTIM_MIN_VERSION = "1.38.7"
+FFA_PROXIMITY_VICTIM_MIN_VERSION = "1.41.0"
 FFA_CONFIG_DEFAULTS = {
     "score_target": 5, "card_candidates": 5, "initial_picks": 1,
     "card_cap": 5, "same_card_rule": False,
