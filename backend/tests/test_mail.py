@@ -626,6 +626,14 @@ class FakeDb:
             return _Res([(sum(1 for h in self.censor_hits if h["sender_id"] == params["sid"]
                               and h["created_at"] > NOW - timedelta(days=1)),)])
         # idempotency + rate
+        if sql.lstrip().startswith("SELECT id, kind, recipient_count FROM mail_messages") \
+                and "WHERE sender_id = :sid AND idempotency_key = :key" in sql:
+            # the replay read before migration 404's change, still answered so
+            # a mutant restoring it runs: the message row by (sender, key)
+            m = next((m for m in self.messages.values()
+                      if m["sender_id"] == params["sid"] and m["idempotency_key"] == params["key"]), None)
+            return _Res([{"id": m["id"], "kind": m["kind"], "recipient_count": m["recipient_count"]}]
+                        if m else [])
         if "FROM mail_send_receipts" in sql and "WHERE sender_id = :sid AND idempotency_key = :key" in sql:
             # the replay read (migration 404): the key's receipt and nothing else
             assert sql.lstrip().startswith("SELECT message_id, kind, recipients, request_fp"), sql
@@ -1493,6 +1501,24 @@ def test_reply_derives_recipients_server_side():
     # a non-party (D's copy was suppressed) cannot reply at all
     db.add_session("tokD", D_SID)
     assert _raises(main.mail_reply(orig["id"], reply, _req("tokD"), db)).status_code == 404
+    # mutant: the reply all's envelope join kept to delivered copies (the
+    # previous build's read) -> D is not addressed, so who B's reply all
+    # reaches turns on D's delivery
+    join = "ON e.message_id = o.id AND CAST(:reply_all AS boolean) AND o.kind <> 'system_broadcast'"
+    real, hits = db.execute, []
+
+    async def delivered_only(statement, params=None):
+        sql = str(statement)
+        if isinstance(statement, TextClause) and join in sql:
+            hits.append(sql)
+            statement = text(sql.replace(join, join + " AND e.delivery = 'delivered'"))
+        return await real(statement, params)
+    db.execute = delivered_only
+    r4 = _run(main.mail_reply(orig["id"], main._MailReplyReq(body="All again", all=True,
+                                                             idempotency_key=str(uuid.uuid4())),
+                              _req("tokB"), db))
+    got = {rid: (env["kind"], env["delivery"]) for (mid, rid), env in db.recipients.items() if mid == UUID(r4["id"])}
+    assert len(hits) == 1 and got == {ids[A_SID]: ("to", "delivered"), ids[C_SID]: ("cc", "delivered")}
 
 
 def test_reply_all_refused_on_a_broadcast():
@@ -2557,12 +2583,45 @@ def test_case_without_its_outbox_row_does_not_commit():
     assert len(db.outbox) == 1 and db.outbox[0][1].startswith(f"{main.MAIL_CASE_MARKER}{case['case_id']}]")
 
 
-def test_broadcast_replay_returns_the_full_original_response():
-    """M5, and review r2 LOW: a same-key retry whose first answer was lost
-    still learns the recipient count — the count stored in the sending
-    transaction (on the row, migration 300, and on the send's receipt,
-    migration 404) and replayed verbatim from the receipt, so a recipient
-    who deleted their account in between cannot change the replayed answer."""
+# The replay read before migration 404's change (main.py at 28778d95): the
+# message row by (sender, key); a broadcast's count from the row, or from its
+# delivered envelopes when the row has none.
+_OLD_PRIOR_SEND = '''
+async def _mail_prior_send(db, sender_id, key, request_fp=None, message_fp=None):
+    prior = (await db.execute(text(
+        "SELECT id, kind, recipient_count FROM mail_messages"
+        " WHERE sender_id = :sid AND idempotency_key = :key"
+    ), {"sid": sender_id, "key": key})).mappings().first()
+    if prior is None:
+        return None
+    out = {"id": str(prior["id"]), "accepted": True}
+    if prior["kind"] == "system_broadcast":
+        n = prior.get("recipient_count")
+        if n is None:
+            n = (await db.execute(text(
+                "SELECT COUNT(*) FROM mail_recipients"
+                " WHERE message_id = CAST(:mid AS uuid) AND delivery = 'delivered'"
+            ), {"mid": prior["id"]})).scalar() or 0
+        out["recipients"] = int(n)
+    return out
+'''
+
+
+def _old_prior_send():
+    """Mutant: the replay read before migration 404's change
+    (_OLD_PRIOR_SEND), compiled in a copy of main's namespace. It takes the
+    two digests this build passes and ignores them, as that build had none."""
+    ns = dict(vars(main))
+    exec(compile(_OLD_PRIOR_SEND, "<the replay read before migration 404's change>", "exec"), ns)
+    return ns["_mail_prior_send"]
+
+
+def _broadcast_replays():
+    """The admin broadcasts to the four players, then repeats the key three
+    times: after D's envelope goes (D's account), after the row's count is
+    cleared, and after the janitor's purge of the row and its envelopes.
+    Returns the first answer, the three replays, whether the first replay
+    counted envelopes, and how many broadcast rows are left."""
     db, ids = _world()
     admin_pid = db.add_player(ADMIN_SID)
     db.admins.add(ADMIN_SID)
@@ -2577,21 +2636,39 @@ def test_broadcast_replay_returns_the_full_original_response():
         assert set_i < rec_i < db.commit_marks[-1]                     # both inside the sending transaction
         db.recipients.pop((mid, ids[D_SID]))                           # D's account went: the envelope is gone
         db.statements.clear()
-        again = _broadcast(db, key=key)
-    assert first["recipients"] == 4 and again == first and set(again) == {"id", "accepted", "recipients"}
-    assert not any("COUNT(*) FROM mail_recipients" in s for s in db.statements)   # replayed, not recounted
-    assert len([m for m in db.messages.values() if m["kind"] == "system_broadcast"]) == 1
-    # the answer is the receipt's alone (migration 404): neither the row's
-    # count nor its envelopes are read, so neither a cleared count nor the
-    # janitor's purge of the row changes it
-    db.messages[mid]["recipient_count"] = None
-    with _admin_secret():
-        assert _broadcast(db, key=key) == first
-        db.messages.pop(mid)
+        gone = _broadcast(db, key=key)
+        recounted = any("COUNT(*) FROM mail_recipients" in s for s in db.statements)
+        db.messages[mid]["recipient_count"] = None                     # a cleared count
+        cleared = _broadcast(db, key=key)
+        db.messages.pop(mid)                                           # the janitor's purge of the row
         for k in [k for k in db.recipients if k[0] == mid]:
             db.recipients.pop(k)
-        assert _broadcast(db, key=key) == first
-    assert not any(m["kind"] == "system_broadcast" for m in db.messages.values())
+        purged = _broadcast(db, key=key)
+    left = len([m for m in db.messages.values() if m["kind"] == "system_broadcast"])
+    return first, (gone, cleared, purged), recounted, left
+
+
+def test_broadcast_replay_returns_the_full_original_response(monkeypatch):
+    """M5, and review r2 LOW: a same-key retry whose first answer was lost
+    still learns the recipient count — the count stored in the sending
+    transaction (on the row, migration 300, and on the send's receipt,
+    migration 404) and replayed verbatim from the receipt, so a recipient
+    who deleted their account in between cannot change the replayed answer.
+    The answer is the receipt's alone (migration 404): neither the row's
+    count nor its envelopes are read, so neither a cleared count nor the
+    janitor's purge of the row changes it."""
+    first, replays, recounted, left = _broadcast_replays()
+    assert first["recipients"] == 4 and set(first) == {"id", "accepted", "recipients"}
+    assert replays == (first, first, first) and not recounted and left == 0
+    # mutant: the replay read before migration 404's change -> the row's
+    # count survives D's envelope, but a cleared count is recounted from the
+    # envelopes left (3), and after the purge the key is sent again as a
+    # second broadcast
+    monkeypatch.setattr(main, "_mail_prior_send", _old_prior_send())
+    first, (gone, cleared, purged), recounted, left = _broadcast_replays()
+    assert gone == first and not recounted
+    assert cleared == dict(first, recipients=3)
+    assert purged["id"] != first["id"] and left == 1
 
 
 def test_fake_db_reads_its_authorisation_off_the_production_sql():
