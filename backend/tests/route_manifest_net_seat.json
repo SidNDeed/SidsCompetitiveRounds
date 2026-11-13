@@ -637,7 +637,7 @@
           ],
           "main",
           "submit_macro_evidence",
-          "99e9cf72155585f95f23cd17395e5811cb122a71"
+          "7c8d3f31dc8de823b839fad4f1a392f509bc9d5d"
         ],
         [
           "/api/v1/ovt/leaderboard",
@@ -952,7 +952,7 @@
           ],
           "main",
           "delete_player_data",
-          "0f0a20a38207ac254751562e365932ae81cb2049"
+          "dbf35f23356a3c3644104c037f6fa167f4cdee08"
         ],
         [
           "/api/v1/players/{steam_id}/ffa-history",
@@ -2900,7 +2900,7 @@
           ],
           "main",
           "admin_mail_broadcast",
-          "77acd1b85ed856ef2ab9f1e160dd5fe29e0b69c0"
+          "ed5bb63d7d35f9160252ae8c897a1cb305a9a2fe"
         ],
         [
           "/api/v1/admin/mail/bulk-grants",
@@ -3062,7 +3062,7 @@
           ],
           "main",
           "mail_send",
-          "b20232193d999b9c20088c521eb0aa1aa2b3d42e"
+          "bc0049a67920beff4fc09ae5d77e7d12d094c66f"
         ],
         [
           "/api/v1/mail/blocks",
@@ -3107,7 +3107,7 @@
           ],
           "main",
           "mail_sent",
-          "e1f049cd90746e50f6414a025ce91fe1c3020f00"
+          "8a8364be1f3fe93d149d54b226d917c6cd02051b"
         ],
         [
           "/api/v1/mail/settings",
@@ -3143,7 +3143,7 @@
           ],
           "main",
           "mail_delete",
-          "adefa44915eda68b1c877145f544266e2f9f2cf8"
+          "c46e301d2f300f8077d51fb40b7cfd3d5a019eb8"
         ],
         [
           "/api/v1/mail/{message_id}",
@@ -3152,7 +3152,7 @@
           ],
           "main",
           "mail_detail",
-          "fa3ded6319ea371a0256d38ae36a2f00ed68f387"
+          "f62faff830740007524e3b35aee009b897a6f67c"
         ],
         [
           "/api/v1/mail/{message_id}/read",
@@ -3170,7 +3170,7 @@
           ],
           "main",
           "mail_reply",
-          "3706cd44982a2af087624bbf2f85c4a8e0e8bd86"
+          "12e103bff2e90c8aa303d1611b0234710b0e07ea"
         ],
         [
           "/api/v1/mail/{message_id}/report",
@@ -3743,7 +3743,7 @@
           ],
           "mail_discord",
           "mail_reply_from_discord",
-          "830bbd30914283661199ae0aada562cb1460695b"
+          "f0e5de4d2da2e8edf8127d035dae85568f34e553"
         ]
       ]
     },
@@ -4017,7 +4017,7 @@
       [
         "main",
         "lifespan",
-        "924b708d4ed7fe9b8c393bddfee372bb655b4a76"
+        "0d2beb46055179312d0f850b412e2bfd2f5d3ed5"
       ]
     ]
   },
