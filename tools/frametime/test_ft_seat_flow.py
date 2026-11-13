@@ -13,7 +13,15 @@ than the nine meant: each run's name, its exit code and its proof word, and the 
 that ends like its clean case is a rule that is not tested). check_flow is tried on changed outputs as well: it must
 refuse a missing run, a wrong code and a control that did not flip.
 
-Needs PowerShell (skipped where there is none). It starts stand-in child processes only: no game, lane or job file.
+The review of 13 Nov 2026 found two more (a run that never reached its launch exported the log of an earlier
+session, A-H1; a sentinel that could not be removed left the restore proof standing, A-H2) and two smaller ones (a
+line end that only the parser read, A-M1; a last line whose failed write changed no exit code, A-M2). The script's
+self-test holds each rule beside its negative control; this file reads those runs' own lines the same way
+(check_review), and holds the seat's line ends equal to the set str.splitlines() ends a line at, which is how
+ft_parse.py reads what the seat exports.
+
+Needs PowerShell (skipped where there is none), except the line-end comparison, which reads the script's text. It
+starts stand-in child processes only: no game, lane or job file.
 """
 import os
 import re
@@ -174,3 +182,156 @@ def test_check_flow_refuses(what):
     elif what == "an extra run":
         out.insert(9, _line("never"))
     assert check_flow(rc, out) != [], what
+
+
+# ---- the review of 13 Nov 2026
+
+def py_line_ends():
+    """The characters at which str.splitlines() ends a line, found by trying every code point."""
+    return sorted(c for c in map(chr, range(0x110000)) if len(("a" + c + "b").splitlines()) == 2)
+
+
+def seat_line_ends(src):
+    """(pattern, members) of the seat script's $LineEnds in SRC: CRLF first, then one character class."""
+    m = re.search(r"^\$LineEnds = '([^'\r\n]*)'\r?$", src, re.M)
+    assert m, "no $LineEnds line of the form"
+    pat = m.group(1)
+    head = "\\r\\n|["
+    assert pat.startswith(head) and pat.endswith("]"), pat
+    body = pat[len(head):-1]
+    toks = re.findall(r"\\n|\\r|\\x[0-9a-f]{2}|\\u[0-9a-f]{4}", body)
+    assert "".join(toks) == body, "a member of $LineEnds is of no known form: %r" % body
+    return pat, sorted("\n" if t == "\\n" else "\r" if t == "\\r" else chr(int(t[2:], 16)) for t in toks)
+
+
+def test_the_seat_ends_lines_where_the_parser_does():
+    pat, members = seat_line_ends(open(PS1, encoding="utf-8", newline="").read())
+    ends = py_line_ends()
+    assert members == ends, (members, ends)
+    # the pattern itself, read by Python: a text with every line end in it splits as splitlines() splits it
+    sample = "p" + "".join(c + "q%d" % i for i, c in enumerate(ends)) + "\r\nlast"
+    assert re.split(pat, sample) == sample.splitlines()
+
+
+def test_the_line_end_comparison_refuses_a_set_that_lacks_one():
+    src = open(PS1, encoding="utf-8", newline="").read()
+    assert "\\x85" in seat_line_ends(src)[0]
+    _, members = seat_line_ends(src.replace("\\x85", "", 1))
+    assert members != py_line_ends()
+
+
+# run name -> the fields its line must show; a control shows what the rule's absence gives
+REVIEW_WANT = [
+    ("stale_arm", {"code": "3", "launches": 0, "lane": 0, "not_read": 1, "proof_ok": 1, "proof_failed": 0,
+                   "sentinel": "absent", "there": "False"}),
+    ("stale_fresh", {"code": "3", "launches": 0, "lane": 0, "not_read": 1, "proof_ok": 1, "proof_failed": 0,
+                     "sentinel": "absent", "there": "False"}),
+    ("stale_read", {"launches": 0, "not_read": 0}),
+    ("arm_stays", {"code": "5", "launches": 1, "proof_ok": 0, "proof_failed": 1,
+                   "sentinel": "PRESENT (the seat is armed)", "there": "True"}),
+    ("arm_stays_once", {"code": "3", "launches": 1, "proof_ok": 1, "proof_failed": 0, "sentinel": "absent",
+                        "there": "False"}),
+    ("arm_stays_lax", {"launches": 1, "proof_ok": 1, "proof_failed": 0, "there": "True"}),
+]
+REVIEW_COUNTS = [("line ends", "lf_only", 8), ("exit line", "exit_unchecked", 6)]
+
+_REVIEW = re.compile(
+    r"^self-test review (?P<name>[a-z_]+): code (?P<code>\S+), launches (?P<launches>\d+), lane lines printed "
+    r"(?P<lane>\d+), 'not read' lines (?P<not_read>\d+), proof ok (?P<proof_ok>\d+) FAILED (?P<proof_failed>\d+), "
+    r"sentinel line 'sentinel after the restore: (?P<sentinel>[^']*)', sentinel there after (?P<there>True|False), "
+    r"files as before (?P<files_back>True|False), threw '(?P<threw>.*)'$")
+
+
+def check_review(lines):
+    """Every way the self-test's lines for the review of 13 Nov 2026 are not the runs meant: a list of sentences."""
+    f = []
+    for what, control, n in REVIEW_COUNTS:
+        clean = [x for x in lines if x.startswith("self-test %s none: " % what)]
+        ctl = [x for x in lines if x.startswith("self-test %s %s: " % (what, control))]
+        if clean != ["self-test %s none: %d cases, 0 differ" % (what, n)]:
+            f.append("%s: the clean line is %r" % (what, clean))
+        if len(ctl) != 1 or not re.match(r"^self-test %s %s: %d cases, [1-9][0-9]* differ: " % (what, control, n),
+                                         ctl[0]):
+            f.append("%s: the control's line is %r: no case differs under %s" % (what, ctl, control))
+    runs = []
+    for ln in lines:
+        if ln.startswith("self-test review "):
+            m = _REVIEW.match(ln)
+            runs.append((m.group("name"), m.groupdict()) if m else ("?", {"line": ln}))
+    if [n for n, _ in runs] != [n for n, _ in REVIEW_WANT]:
+        f.append("the review runs are %r, not %r" % ([n for n, _ in runs], [n for n, _ in REVIEW_WANT]))
+        return f
+    got = dict(runs)
+    for name, want in REVIEW_WANT:
+        d = got[name]
+        if d["files_back"] != "True" or d["threw"] != "":
+            f.append("%s: files as before %s, threw %r" % (name, d["files_back"], d["threw"]))
+        for k, v in want.items():
+            have = int(d[k]) if isinstance(v, int) else d[k]
+            if have != v:
+                f.append("%s: %s is %r, not %r" % (name, k, have, v))
+    if int(got["stale_read"]["lane"]) < 1:
+        f.append("stale_read printed no lane line: the control did not flip")
+    if got["arm_stays"]["proof_ok"] == got["arm_stays_lax"]["proof_ok"]:
+        f.append("arm_stays and arm_stays_lax end alike: the control did not flip")
+    return f
+
+
+@pytest.fixture(scope="module")
+def selftest_output():
+    p = subprocess.run([PS, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", PS1, "-SelfTest"],
+                       stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=900)
+    out = p.stdout.decode("utf-8", "replace").replace("\r", "").split("\n")
+    return p.returncode, out, p.stderr.decode("utf-8", "replace")
+
+
+@need_ps
+def test_selftest_holds_the_review_rules_beside_their_controls(selftest_output):
+    rc, out, err = selftest_output
+    f = check_review(out)
+    assert rc == 0 and "SELFTEST PASS" in out and f == [], "\n".join(
+        f + [x for x in out if x.startswith(("self-test review ", "self-test line ends ", "self-test exit line ",
+                                             "SELFTEST"))]) + err[-800:]
+    # no case's own last line reached the self-test's output
+    assert [x for x in out if x.startswith("SEAT EXIT ")] == []
+
+
+def _review_good():
+    out = ["self-test line ends none: 8 cases, 0 differ", "self-test line ends lf_only: 8 cases, 2 differ: x",
+           "self-test exit line none: 6 cases, 0 differ", "self-test exit line exit_unchecked: 6 cases, 3 differ: x"]
+    base = {"code": "3", "launches": 0, "lane": 0, "not_read": 0, "proof_ok": 1, "proof_failed": 0,
+            "sentinel": "absent", "there": "False"}
+    for name, want in REVIEW_WANT:
+        d = dict(base)
+        d.update(want)
+        if name == "stale_read":
+            d["lane"] = 9
+        out.append("self-test review %s: code %s, launches %d, lane lines printed %d, 'not read' lines %d, proof ok %d "
+                   "FAILED %d, sentinel line 'sentinel after the restore: %s', sentinel there after %s, files as "
+                   "before True, threw ''" % (name, d["code"], d["launches"], d["lane"], d["not_read"], d["proof_ok"],
+                                              d["proof_failed"], d["sentinel"], d["there"]))
+    return out
+
+
+def test_check_review_takes_the_wanted_output():
+    assert check_review(_review_good()) == []
+
+
+@pytest.mark.parametrize("what", ["a run is missing", "a wrong code", "the stale control did not flip",
+                                  "the sentinel control did not flip", "a count control with no difference",
+                                  "a clean count line that differs"])
+def test_check_review_refuses(what):
+    out = _review_good()
+    if what == "a run is missing":
+        out = [x for x in out if not x.startswith("self-test review arm_stays_once:")]
+    elif what == "a wrong code":
+        out[7] = out[7].replace("code 5,", "code 3,")
+    elif what == "the stale control did not flip":
+        out[6] = out[6].replace("lane lines printed 9,", "lane lines printed 0,")
+    elif what == "the sentinel control did not flip":
+        out[9] = out[9].replace("proof ok 1 FAILED 0", "proof ok 0 FAILED 1")
+    elif what == "a count control with no difference":
+        out[1] = "self-test line ends lf_only: 8 cases, 0 differ"
+    elif what == "a clean count line that differs":
+        out[2] = "self-test exit line none: 6 cases, 1 differ: x"
+    assert check_review(out) != [], what

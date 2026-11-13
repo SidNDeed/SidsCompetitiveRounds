@@ -115,6 +115,14 @@ needs, besides step 5's proof, that a launch that was asked showed a game proces
 none was left before the files were read, and that none is there after the restore; each miss prints its own "game
 end: ..." line, the proof line reads "RESTORE-PROOF FAILED" and the job ends 5. A console write that fails is
 counted, never thrown, so no print can end a cleanup; with one counted the job ends 3 unless it ends 5.
+The review of 13 Nov 2026: step 4 reads the log only when this run removed the standing log and asked for its launch;
+before that point it prints "log lines: not read (...)" and exports no log line. The log's lines end where the
+parser's do (the set of its text.splitlines(), CRLF as one), in the wait as in step 4. The sentinel is part of the
+proof: after the restore a sentinel still there is removed once more, and one line says "sentinel after the restore:
+absent" or "... PRESENT (the seat is armed)"; with it present the proof line reads "RESTORE-PROOF FAILED" and the job
+ends 5. The count of failed console writes is read once more after the last line, so a last line that did not reach
+the output ends the job 3 unless it ends 5. The self-test holds each of these rules beside its negative control
+(stale_read, lf_only, arm_stays_lax, exit_unchecked).
 -FlowTest runs the sitting's own launch, wait, shutdown and game-end functions on a stand-in game (a child PowerShell
 that writes a stand-in log, or none) in temp folders: five cases (the end line written, a stale log, a process that
 stays, one that shows late, none at all), each beside its rule's negative control. It prints one "flow-test <case>:
@@ -122,7 +130,7 @@ stays, one that shows late, none at all), each beside its rule's negative contro
 touches no lane, job file or game.
 Exit codes: 0 pass, 2 refused before the launch (a step-1 error included), 3 the sitting did not complete (a launch,
 wait or shutdown error included), 4 VR6 failed (a step-4 error included), 5 the restore is not proven (a mismatch, a
-step-5 error, or a game process not shown ended; ruling R6-A3.11.112 F1), 6 the self-test or the flow test failed.
+step-5 error, a game process not shown ended, a sentinel left; R6-A3.11.112 F1), 6 the self-test or flow test failed.
 5 overrides 3 and 4: the job ends 0 or 4 only with "RESTORE-PROOF ok <n>", and 3 only when the restore is proven too.
 #>
 [CmdletBinding()]
@@ -631,12 +639,12 @@ $script:Out = New-Object System.Collections.Generic.List[string]
 # the output is gone) the sitting must still close the game and put the files back, so the failure is counted in
 # $script:SayFailed and never thrown: no print can end a cleanup (the review of 12 Nov 2026, D-H4). The sitting's last
 # lines turn a count above 0 into exit 3 unless the code is 5. $script:SayBreaks is the self-test's stand-in for a
-# console that takes no line: 'counted' fails each write as a console would; 'thrown' lets the failure out, as it
-# left before this rule (the negative control)
+# console that takes no line: 'counted' fails each write as a console would; 'exit_line' fails the sitting's last
+# line alone; 'thrown' lets the failure out, as it left before this rule (the negative control)
 function Say([string]$s) {
     $script:Out.Add($s)
     try {
-        if ($script:SayBreaks -ne 'none') { throw 'the console takes no line (stand-in)' }
+        if ($script:SayBreaks -ne 'none' -and ($script:SayBreaks -ne 'exit_line' -or $s.StartsWith('SEAT EXIT '))) { throw 'the console takes no line (stand-in)' }
         [Console]::Out.WriteLine($s)
     }
     catch { if ($script:SayBreaks -eq 'thrown') { throw }; $script:SayFailed++ }
@@ -845,12 +853,18 @@ function CfgKind([string]$a, [string]$b) {
     catch { return 'REFUSED' }
 }
 
+# the line ends of a log: the set that the parser's text.splitlines() splits on, CRLF as one (ft_parse.py reads the
+# exported lines with it; test_ft_seat_flow.py holds the two sets equal). One line here is then one line there, and
+# no exported line carries a second one behind a line end that only the parser reads (the review of 13 Nov 2026,
+# A-M1). The self-test's mutant lf_only splits at LF and CRLF alone, as before this rule (the negative control)
+$LineEnds = '\r\n|[\n\r\x0b\x0c\x1c\x1d\x1e\x85\u2028\u2029]'
 function ReadShared([string]$p) {
     # the game holds LogOutput.log open: read it with ReadWrite sharing
     if (-not (Test-Path -LiteralPath $p -PathType Leaf)) { return @() }
     $fs = [System.IO.File]::Open($p, 'Open', 'Read', 'ReadWrite')
     try { $sr = New-Object System.IO.StreamReader($fs); $t = $sr.ReadToEnd() } finally { $fs.Dispose() }
-    return $t -split "`r?`n"
+    if ($script:Mutant -eq 'lf_only') { return $t -split "`r?`n" }
+    return [regex]::Split($t, $LineEnds)
 }
 
 # the lines of a log: a line is a line only with its line end. The text after the last line end is no line: a game
@@ -955,8 +969,16 @@ function FreshLog($C, $p) {
 }
 
 # ---- step 4
-function Step4($C, $p) {
-    $read = ReadLines $C.Logs['LogOutput.log']
+# $fresh: this run removed the standing log and asked for its launch. Before that point the file there is an earlier
+# session's and its lines are not this sitting's, so it is not read, and one line says so (the review of 13 Nov 2026,
+# A-H1). The self-test's mutant stale_read reads it whatever happened, as it was read before this rule (the negative
+# control)
+function Step4($C, $p, [bool]$fresh) {
+    if ($fresh -or $script:Mutant -eq 'stale_read') { $read = ReadLines $C.Logs['LogOutput.log'] }
+    else {
+        $read = @{ Lines = @(); Tail = 0 }
+        Say 'log lines: not read (this run did not reach its launch; the log there is an earlier session''s)'
+    }
     if ($read.Tail -gt 0) { Say ("log tail: {0} characters after the last line end are no line (not exported)" -f $read.Tail) }
     $sel = SliceExport ([string[]]@($read.Lines))
     Say '=== log lines'
@@ -1059,9 +1081,10 @@ function NewRun([string]$seat) {
 # on, each catch sets its state before it prints, and no print can throw (Say): no error on the way can leave the
 # files not put back (the review of 12 Nov 2026, D-H4)
 function Sitting($C, $p, [scriptblock]$Launch, [scriptblock]$Wait, [scriptblock]$Shutdown, [scriptblock]$End, [scriptblock]$Left) {
-    # Asked: the launch was requested. Seen: a game process was in hand (at the launch, or late at the shutdown).
-    # Ended: no game process was left before the files were read. After: the game processes read after the restore
-    $st = @{ Code = 0; Proc = $null; V = $false; R = $false; Asked = $false; Seen = $false; Ended = $false; After = -1 }
+    # Fresh: this run removed the standing log (FreshLog returned), so the log there is this launch's. Asked: the
+    # launch was requested. Seen: a game process was in hand (at the launch, or late at the shutdown). Ended: no game
+    # process was left before the files were read. After: the game processes read after the restore
+    $st = @{ Code = 0; Proc = $null; V = $false; R = $false; Fresh = $false; Asked = $false; Seen = $false; Ended = $false; After = -1 }
     try {
         try {
             try {
@@ -1073,6 +1096,7 @@ function Sitting($C, $p, [scriptblock]$Launch, [scriptblock]$Wait, [scriptblock]
                     Set-Content -LiteralPath $C.Arm -Value $armLines -Encoding ascii
                     Say ("sentinel written: seed={0} f18={1}{2}" -f $Seed, $F18, $(if ($ArmForce -eq 'ON') { ' force=ON' } else { '' }))
                     FreshLog $C $p
+                    $st.Fresh = $true
                     $st.Asked = $true
                     $st.Proc = & $Launch $C
                     if (-not $st.Proc) { $st.Code = 3; Say 'launch: no ROUNDS process within 120 s' }
@@ -1096,7 +1120,7 @@ function Sitting($C, $p, [scriptblock]$Launch, [scriptblock]$Wait, [scriptblock]
         # the game's end, before the files are read and put back
         try { $st.Ended = [bool](& $End) }
         catch { $st.Ended = $false; Say ('game end error: ' + $_.Exception.Message) }
-        try { $st.V = Step4 $C $p }
+        try { $st.V = Step4 $C $p $st.Fresh }
         catch { $st.V = $false; Say ('step 4 error: ' + $_.Exception.Message) }
     }
     catch { $st.Code = 3; Say ('sitting error (outside the steps): ' + $_.Exception.Message) }
@@ -1106,6 +1130,24 @@ function Sitting($C, $p, [scriptblock]$Launch, [scriptblock]$Wait, [scriptblock]
     }
     try { $st.After = [int](& $Left) }
     catch { $st.After = -1; Say ('game end error (after the restore): ' + $_.Exception.Message) }
+    # the sentinel as part of the proof (the review of 13 Nov 2026, A-H2): a seat whose sentinel is still there is
+    # armed, whatever the files say. It is read here, after every step and whatever happened on the way: one still
+    # there is removed once more, then the folder's own listing says whether it is gone (a folder that is not there
+    # holds none; a reading that fails proves nothing). One line. The self-test's mutant arm_stays_lax leaves the
+    # reading out of the proof, as it was before this rule (the negative control)
+    $armGone = $false
+    try { if (Test-Path -LiteralPath $C.Arm) { Remove-Item -LiteralPath $C.Arm -Force } }
+    catch { Say ('sentinel error (after the restore): ' + $_.Exception.Message) }
+    try {
+        $armDir = Split-Path $C.Arm
+        $dirThere = $true
+        try { [void](Get-Item -LiteralPath $armDir -Force) }
+        catch [System.Management.Automation.ItemNotFoundException] { $dirThere = $false }
+        $armGone = (-not $dirThere) -or
+            (@(Get-ChildItem -LiteralPath $armDir -Force | Where-Object { $_.Name -eq (Split-Path $C.Arm -Leaf) }).Count -eq 0)
+    }
+    catch { $armGone = $false; Say ('sentinel error (the reading after the restore): ' + $_.Exception.Message) }
+    Say ("sentinel after the restore: {0}" -f $(if ($armGone) { 'absent' } else { 'PRESENT (the seat is armed)' }))
     # the game's end as part of the proof (the review of 12 Nov 2026, D-H2 and D-H3): the files are proven put back
     # only when no game process can still write them. That needs three things, and each miss prints its own line: a
     # launch that was asked showed a game process (else one may still start; -FlowTest's mutant seen_lax drops this
@@ -1122,12 +1164,23 @@ function Sitting($C, $p, [scriptblock]$Launch, [scriptblock]$Wait, [scriptblock]
     # every log and the cfg printed a "restored ... equal" line and nothing failed, so exit 4 (and 0) need that
     # positive proof; a failed or unproven restore is exit 5, which also replaces 3 (no reader of the job's result
     # tells 3 from 5: both are refused, and 5 names the state that needs action: files not put back, or a game
-    # process that can still write them)
-    $proven = $st.R -and $gone
+    # process that can still write them, or a sentinel still there)
+    $proven = $st.R -and $gone -and ($armGone -or $script:Mutant -eq 'arm_stays_lax')
     if ($proven) { Say ("RESTORE-PROOF ok {0}" -f $script:RestoredEqual) } else { Say 'RESTORE-PROOF FAILED' }
     if (-not $proven) { $st.Code = 5 }
     elseif ($st.Code -eq 0 -and -not $st.V) { $st.Code = 4 }
     return $st
+}
+
+# the sitting's last line and its exit code. A console write that failed anywhere turns the code into 3 unless it is
+# 5; the last line's own write can fail too, so the count is read again after it: the exit code is the last word (the
+# review of 13 Nov 2026, A-M2). The self-test's mutant exit_unchecked leaves the second reading out, as it was before
+# this rule (the negative control)
+function SeatExit([int]$code) {
+    if ($script:SayFailed -gt 0 -and $code -ne 5) { $code = 3 }
+    Say ("SEAT EXIT {0}" -f $code)
+    if ($script:Mutant -ne 'exit_unchecked' -and $script:SayFailed -gt 0 -and $code -ne 5) { $code = 3 }
+    return $code
 }
 
 # ---- the game: its launch, the wait, the shutdown and the proof of its end. One set of functions for the sitting and
@@ -1159,7 +1212,7 @@ function GameWait($C, $proc, $E, [int]$BudgetS) {
     for ($i = 0; $i -lt [int]($BudgetS / $E.WaitStepS) + 1 -and -not $done; $i++) {
         if ((Get-Date) -gt $deadline -or $proc.HasExited) { break }
         Start-Sleep -Seconds $E.WaitStepS
-        $done = @((ReadShared $C.Logs['LogOutput.log']) | Where-Object { $_.Contains('[FRAME-TIME] sitting complete') }).Count -gt 0
+        $done = @((ReadLines $C.Logs['LogOutput.log']).Lines | Where-Object { $_.Contains('[FRAME-TIME] sitting complete') }).Count -gt 0
     }
     Say ("wait ended: complete {0}, exited {1}" -f $done, $proc.HasExited)
     return $done
@@ -1565,6 +1618,59 @@ function SelfTestOne([string]$root, [string]$mutant) {
     }
 }
 
+# the self-test's runs for the review of 13 Nov 2026, each through function Sitting on a stand-in seat of its own.
+# stale_arm: the standing log holds an earlier lane session's lines and the sentinel cannot be written (a folder
+# stands at its path), so the run never reaches its launch; stale_fresh: the same log, changed after step 1, so
+# FreshLog refuses; stale_read: stale_arm with step 4 reading the log whatever happened (the negative control).
+# arm_stays: the sentinel is held open from the launch on, so no removal takes it away; arm_stays_once: the hold ends
+# with the game, so the removal after the restore takes it; arm_stays_lax: arm_stays with the sentinel left out of the
+# proof (the negative control)
+function ReviewOne([string]$root, [string]$case) {
+    $script:Out = New-Object System.Collections.Generic.List[string]
+    $script:SayFailed = 0
+    $C = FixtureSeat $root
+    $stale = $case -in @('stale_arm', 'stale_fresh', 'stale_read')
+    if ($stale) { Set-Content -LiteralPath $C.Logs['LogOutput.log'] -Value (@($SimFt) + @($SimWindow)) -Encoding ascii }
+    $run = NewRun $C.Seat
+    $p = Step1 $C $run
+    if ($case -in @('stale_arm', 'stale_read')) { New-Item -ItemType Directory -Force -Path $C.Arm | Out-Null }
+    if ($case -eq 'stale_fresh') { Add-Content -LiteralPath $C.Logs['LogOutput.log'] -Value $SimFt[0] -Encoding ascii }
+    $script:Launched = 0
+    $launch = {
+        param($C)
+        $script:Launched++
+        Set-Content -LiteralPath $C.Logs['LogOutput.log'] -Value (@($SimFt) + @($SimWindow)) -Encoding ascii
+        if ($script:Mutant -like 'arm_stays*') { $script:Hold = [System.IO.File]::Open($C.Arm, 'Open', 'Read', 'Read') }
+        return [pscustomobject]@{ Id = 0; HasExited = $false }
+    }
+    $wait = { param($C, $proc) Say 'wait ended: complete True, exited False'; return $true }
+    $shutdown = { param($proc) Say ("shutdown: simulated pid {0}" -f $(if ($proc) { $proc.Id } else { 'none' })) }
+    $end = {
+        if ($script:Mutant -eq 'arm_stays_once' -and $script:Hold) { $script:Hold.Dispose(); $script:Hold = $null }
+        $true
+    }
+    $left = { 0 }
+    $script:Mutant = $case
+    $script:Hold = $null
+    $threw = ''
+    $st = $null
+    try { $st = Sitting $C $p $launch $wait $shutdown $end $left }
+    catch { $threw = $_.Exception.Message }
+    finally { $script:Mutant = 'none'; if ($script:Hold) { $script:Hold.Dispose(); $script:Hold = $null } }
+    $o = @($script:Out)
+    return @{
+        Threw = $threw; Code = $(if ($st) { $st.Code } else { 'none' }); Launched = $script:Launched
+        # the lane's own lines; the component section's head line names the class and is none of them
+        LaneOut = @($o | Where-Object { $_.Contains('[FRAME-TIME]') -and $_ -notlike 'component slice: *' }).Count
+        NotRead = @($o | Where-Object { $_ -like 'log lines: not read*' }).Count
+        ProofOk = @($o | Where-Object { $_ -match '^RESTORE-PROOF ok [0-9]+$' }).Count
+        ProofFailed = @($o | Where-Object { $_ -ceq 'RESTORE-PROOF FAILED' }).Count
+        ArmLine = (@($o | Where-Object { $_ -like 'sentinel after the restore: *' }) -join '|')
+        ArmThere = [bool](Test-Path -LiteralPath $C.Arm)
+        FilesBack = (FilesAsBefore $C $p)
+    }
+}
+
 if ($SliceOf -ne '') {
     # step 4's two exported sections for a log file, as the sitting prints them; reads only
     [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
@@ -1827,6 +1933,83 @@ if ($SelfTest) {
             'throw_in_wait' { if ($r.Code -ne 3) { $fail += "mutant ${m}: exit code $($r.Code), not 3" } }            'throw_in_step4' { if ($r.Code -ne 4) { $fail += "mutant ${m}: exit code $($r.Code), not 4" } }
         }
     }
+    # ---- the review of 13 Nov 2026: each rule beside its negative control
+    # the line ends (A-M1): ReadLines on hand-made texts, under the rule (none) and with LF and CRLF alone (lf_only)
+    $ch = { param([int]$n) [string][char]$n }
+    $lineCases = @(
+        @{ Name = 'CRLF and LF'; Text = "a`r`nb`n"; Lines = @('a', 'b'); Tail = 0 }
+        @{ Name = 'a lone CR between two lines'; Text = "a`rb`n"; Lines = @('a', 'b'); Tail = 0 }
+        @{ Name = 'a last line ended by CR alone'; Text = "a`r"; Lines = @('a'); Tail = 0 }
+        @{ Name = 'an unfinished last line'; Text = "a`r`nbc"; Lines = @('a'); Tail = 2 }
+        @{ Name = 'the other line ends'; Lines = @('a', 'b', 'c', 'd', 'e', 'f', 'g', 'h'); Tail = 0
+            Text = ('a' + (& $ch 0x0b) + 'b' + (& $ch 0x0c) + 'c' + (& $ch 0x1c) + 'd' + (& $ch 0x1d) + 'e' + (& $ch 0x1e) + 'f' + (& $ch 0x85) + 'g' + (& $ch 0x2028) + 'h' + (& $ch 0x2029)) }
+        @{ Name = 'an empty line'; Text = "a`r`n`r`nb`r`n"; Lines = @('a', '', 'b'); Tail = 0 }
+        @{ Name = 'an empty file'; Text = ''; Lines = @(); Tail = 0 }
+        @{ Name = 'no line end at all'; Text = 'abc'; Lines = @(); Tail = 3 }
+    )
+    New-Item -ItemType Directory -Force -Path $base | Out-Null
+    $lineFile = Join-Path $base 'line-ends.txt'
+    foreach ($m in @('none', 'lf_only')) {
+        $diff = @()
+        foreach ($lc in $lineCases) {
+            [System.IO.File]::WriteAllText($lineFile, $lc.Text, (New-Object System.Text.UTF8Encoding($false)))
+            $script:Mutant = $m
+            try { $got = ReadLines $lineFile } finally { $script:Mutant = 'none' }
+            $gl = @($got.Lines)
+            if ($gl.Count -ne $lc.Lines.Count -or ($gl -join '|') -cne ($lc.Lines -join '|') -or $got.Tail -ne $lc.Tail) {
+                $diff += ("{0}: {1} lines and a tail of {2}, wanted {3} and {4}" -f $lc.Name, $gl.Count, $got.Tail, $lc.Lines.Count, $lc.Tail)
+            }
+        }
+        Print ("self-test line ends {0}: {1} cases, {2} differ{3}" -f $m, $lineCases.Count, $diff.Count, $(if ($diff.Count) { ': ' + ($diff -join '; ') } else { '' }))
+        if ($m -eq 'none' -and $diff.Count) { $fail += "line ends: $($diff -join '; ')" }
+        if ($m -eq 'lf_only' -and $diff.Count -eq 0) { $fail += 'line ends lf_only: no case differs (control FAILED)' }
+    }
+    # the exit line (A-M2): SeatExit with a console that takes every line, none, or every line but the last. The console
+    # is set aside for these calls, so no "SEAT EXIT" line of a case reaches the self-test's own output
+    $exitCases = @(
+        @{ Breaks = 'none'; In = 0; Want = 0 }, @{ Breaks = 'none'; In = 4; Want = 4 }, @{ Breaks = 'counted'; In = 0; Want = 3 },
+        @{ Breaks = 'exit_line'; In = 0; Want = 3 }, @{ Breaks = 'exit_line'; In = 4; Want = 3 }, @{ Breaks = 'exit_line'; In = 5; Want = 5 }
+    )
+    $conOut = [Console]::Out
+    foreach ($m in @('none', 'exit_unchecked')) {
+        $diff = @()
+        foreach ($ec in $exitCases) {
+            $script:Mutant = $m; $script:SayFailed = 0; $script:SayBreaks = $ec.Breaks
+            [Console]::SetOut([System.IO.TextWriter]::Null)
+            try { $got = SeatExit $ec.In }
+            finally { [Console]::SetOut($conOut); $script:Mutant = 'none'; $script:SayBreaks = 'none'; $script:SayFailed = 0 }
+            if ($got -ne $ec.Want) { $diff += ("console {0}, code {1}: gave {2}, wanted {3}" -f $ec.Breaks, $ec.In, $got, $ec.Want) }
+        }
+        Print ("self-test exit line {0}: {1} cases, {2} differ{3}" -f $m, $exitCases.Count, $diff.Count, $(if ($diff.Count) { ': ' + ($diff -join '; ') } else { '' }))
+        if ($m -eq 'none' -and $diff.Count) { $fail += "exit line: $($diff -join '; ')" }
+        if ($m -eq 'exit_unchecked' -and $diff.Count -eq 0) { $fail += 'exit line exit_unchecked: no case differs (control FAILED)' }
+    }
+    # the stale log (A-H1) and the sentinel in the proof (A-H2): ReviewOne's runs
+    foreach ($m in @('stale_arm', 'stale_fresh', 'stale_read', 'arm_stays', 'arm_stays_once', 'arm_stays_lax')) {
+        $rv = ReviewOne (Join-Path $base ('review-' + $m)) $m
+        Print ("self-test review {0}: code {1}, launches {2}, lane lines printed {3}, 'not read' lines {4}, proof ok {5} FAILED {6}, sentinel line '{7}', sentinel there after {8}, files as before {9}, threw '{10}'" -f
+            $m, $rv.Code, $rv.Launched, $rv.LaneOut, $rv.NotRead, $rv.ProofOk, $rv.ProofFailed, $rv.ArmLine, $rv.ArmThere, $rv.FilesBack, $rv.Threw)
+        if ($rv.Threw -ne '') { $fail += "review ${m}: an error left the sitting: $($rv.Threw)" }
+        if (-not $rv.FilesBack) { $fail += "review ${m}: the files are not as before the sitting" }
+        switch ($m) {
+            { $_ -in @('stale_arm', 'stale_fresh') } {
+                # A-H1: no launch, so the log there is not read: no lane line leaves, one line says so, exit 3 with the proof
+                if ($rv.Launched -ne 0 -or $rv.LaneOut -ne 0 -or $rv.NotRead -ne 1 -or $rv.Code -ne 3 -or $rv.ProofOk -ne 1 -or $rv.ProofFailed -ne 0 -or
+                    $rv.ArmThere -or $rv.ArmLine -cne 'sentinel after the restore: absent') { $fail += "review ${m}: an earlier session's log lines left, or the run did not end 3 with its proof" }
+            }
+            'stale_read' { if ($rv.LaneOut -lt 1 -or $rv.NotRead -ne 0) { $fail += 'review stale_read: no earlier lane line was printed (control FAILED)' } }
+            'arm_stays' {
+                # A-H2: a sentinel that stays is named, the proof fails, exit 5
+                if ($rv.Launched -ne 1 -or $rv.Code -ne 5 -or $rv.ProofOk -ne 0 -or $rv.ProofFailed -ne 1 -or -not $rv.ArmThere -or
+                    $rv.ArmLine -cne 'sentinel after the restore: PRESENT (the seat is armed)') { $fail += 'review arm_stays: a sentinel that stayed did not fail the proof (wanted code 5, one RESTORE-PROOF FAILED)' }
+            }
+            'arm_stays_once' {
+                if ($rv.Code -ne 3 -or $rv.ProofOk -ne 1 -or $rv.ProofFailed -ne 0 -or $rv.ArmThere -or
+                    $rv.ArmLine -cne 'sentinel after the restore: absent') { $fail += 'review arm_stays_once: the removal after the restore did not take the sentinel away (wanted code 3, one proof ok)' }
+            }
+            'arm_stays_lax' { if ($rv.ProofOk -ne 1 -or -not $rv.ArmThere) { $fail += 'review arm_stays_lax: the proof did not pass with the sentinel there (control FAILED)' } }
+        }
+    }
     Print "self-test scratch: $base"
     if ($fail.Count) { Print ('SELFTEST FAIL: ' + ($fail -join '; ')); exit 6 }
     Print 'SELFTEST PASS'
@@ -2017,8 +2200,8 @@ finally {
         Say ("step 6 (not here): restore the Release DLL; newest backup {0}; installed now {1}" -f $(if ($bk) { $bk.Name } else { 'none' }), (Sha $C.Dll))
     }
     catch { Say ('step 6 line error: ' + $_.Exception.Message) }
-    # a result line that did not reach the output: the job's result is not whole, so it is no pass (3 unless 5)
-    if ($script:SayFailed -gt 0 -and $code -ne 5) { $code = 3 }
-    Say ("SEAT EXIT {0}" -f $code)
+    # a result line that did not reach the output: the job's result is not whole, so it is no pass (3 unless 5).
+    # SeatExit prints the last line and reads the count once more after it
+    $code = SeatExit $code
 }
 exit $code
