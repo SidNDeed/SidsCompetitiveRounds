@@ -314,7 +314,9 @@ def _lock_order(src):
         f = c.func
         return f.id if isinstance(f, ast.Name) else f.attr if isinstance(f, ast.Attribute) else None
 
-    calls = {name: sorted((c.lineno, callee(c)) for c in ast.walk(fn) if isinstance(c, ast.Call))
+    # a call with no plain name (a call's result called, a subscript) sorts
+    # as "" so two calls on one line always compare
+    calls = {name: sorted((c.lineno, callee(c) or "") for c in ast.walk(fn) if isinstance(c, ast.Call))
              for name, fn in fns.items()}
     direct = {}
     for name, fn in fns.items():

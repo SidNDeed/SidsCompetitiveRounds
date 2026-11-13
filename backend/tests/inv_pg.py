@@ -4,6 +4,12 @@ invite suites share.
 One case schema per case through cf_pg: every numbered migration's DDL is
 replayed (404 and 405 among them), the held-out ones run whole, and the
 real handlers in main.py are called with a session bound to that schema.
+The replay runs a DO block only when it makes a table, an index or a
+column, so a built case has 404's receipt function but not its trigger,
+which 404 makes inside a DO block. Each case therefore makes that trigger
+itself, with 404's own CREATE TRIGGER statement read from the file, seals
+the schema, and drops the trigger when the case ends, so a pooled schema
+goes back to the build as it found it.
 Two seams are replaced, both outside what these suites test: the session
 token (a Req names its player, and the stand-in for _mail_caller runs that
 function's own player read), and the lobby routes' session check (cf_asm's
@@ -424,18 +430,49 @@ class Env:
         return out
 
 
+M404 = os.path.join(HERE, "..", "sql", "404_mail_send_receipts.sql")
+RECEIPT_TRIGGER = "trg_mail_send_receipt"
+
+
+def receipt_trigger_ddl():
+    """404's CREATE TRIGGER statement, exactly as its DO block runs it."""
+    with open(M404, encoding="utf-8") as fh:
+        found = re.findall(r"CREATE TRIGGER %s\b.*?;" % RECEIPT_TRIGGER, fh.read(), re.S)
+    assert len(found) == 1, ("404's trigger statement", found)
+    return found[0]
+
+
+async def _has_receipt_trigger(conn):
+    return await conn.fetchval(
+        "SELECT EXISTS (SELECT 1 FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid"
+        "                WHERE c.relname = 'mail_messages' AND t.tgname = $1 AND NOT t.tgisinternal"
+        "                  AND c.relnamespace ="
+        "                      (SELECT oid FROM pg_namespace WHERE nspname = current_schema()))",
+        RECEIPT_TRIGGER)
+
+
 def case(monkeypatch, body, prefix="inv"):
-    """Build a case, run `body(env)` in it, close it."""
+    """Build a case, make 404's trigger when the build lacks it, seal, run
+    `body(env)`, drop the trigger it made, close."""
     cf_pg.require_live_pg()
 
     async def go():
         async with cf_pg.case(prefix) as (c, sm):
+            made = not await _has_receipt_trigger(c.conn)
+            if made:
+                await c.conn.execute(receipt_trigger_ddl())
+                assert await _has_receipt_trigger(c.conn), "404's trigger was not made"
+            await c.seal()
             env = Env(c, sm, monkeypatch)
             try:
                 await env.require_schema()
                 await body(env)
             finally:
                 await env.close()
+                if made:
+                    if c.conn.is_in_transaction():
+                        await c.conn.execute("ROLLBACK")
+                    await c.conn.execute("DROP TRIGGER IF EXISTS %s ON mail_messages" % RECEIPT_TRIGGER)
     run(go())
 
 
