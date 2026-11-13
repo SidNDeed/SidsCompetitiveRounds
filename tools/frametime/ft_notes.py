@@ -32,22 +32,24 @@ def fhat_note(label, recs, first_game=FIRST_GAME):
     """The seat's f_hat line: what VR2's spread check judges; the same measure over every game from 0, the reading
     before ruling R6-A3.11.172 (5) b, so that both readings stand (a rule changed after its data); and every settled
     value the check does not judge, named with its game: each menu segment, each game before the first measured
-    one, and any value that is not above 0 (the check reads values above 0 only)."""
+    one, and any value that is not above 0 (the check reads values above 0 only). The reading from game 0 is given
+    whenever a value above 0 stands at game 0 or later, also when no measured game's value is judged."""
     fh = [(r["g"], r.get("f_hat", 0)) for r in recs if r["kind"] == "settled"]
     judged = [v for g, v in fh if g >= first_game and v > 0]
     left = ", ".join("%s %d" % ("a menu segment" if g < 0 else "game %d" % g, v)
                      for g, v in fh if g < first_game or v <= 0)
-    if not judged:
-        return ("V6 NOTE seat %s: f_hat: no settled line of a measured game prints one; not judged by VR2's spread: %s"
-                % (label, left or "none"))
     was = [v for g, v in fh if g >= 0 and v > 0]
+    old = ("over every game from 0 (%d values, the reading before ruling R6-A3.11.172 (5) b) %d..%d, spread %.2f "
+           "percent (%s %s)" % (len(was), min(was), max(was), 100.0 * (max(was) - min(was)) / min(was),
+                                "over" if max(was) - min(was) > 0.02 * min(was) else "within",
+                                "that limit" if judged else "VR2's limit, 2 percent")) if was else ""
+    if not judged:
+        return ("V6 NOTE seat %s: f_hat: no settled line of a measured game prints a value above 0%s; not judged by "
+                "VR2's spread: %s" % (label, "; " + old if old else "", left or "none"))
     return ("V6 NOTE seat %s: f_hat over the measured games (%d and up, %d values) %d..%d, spread %.2f percent of the "
-            "lower (VR2 judges these, limit 2 percent); over every game from 0 (%d values, the reading before ruling "
-            "R6-A3.11.172 (5) b) %d..%d, spread %.2f percent (%s that limit); not judged by VR2's spread: %s"
+            "lower (VR2 judges these, limit 2 percent); %s; not judged by VR2's spread: %s"
             % (label, first_game, len(judged), min(judged), max(judged),
-               100.0 * (max(judged) - min(judged)) / min(judged), len(was), min(was), max(was),
-               100.0 * (max(was) - min(was)) / min(was),
-               "over" if max(was) - min(was) > 0.02 * min(was) else "within", left or "none"))
+               100.0 * (max(judged) - min(judged)) / min(judged), old, left or "none"))
 
 
 def end_notes(label, recs, peer_label, peer_recs):

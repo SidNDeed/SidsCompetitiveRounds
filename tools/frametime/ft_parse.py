@@ -577,8 +577,7 @@ def void_rounds(recs):
 def games_of(recs, first_game=1):
     """Measured games (game 0 is the washout test and counts toward nothing), void rounds left out:
     {game: [point records]}. A game with no valid round is absent (reported by zero_state)."""
-    void = void_rounds(recs)
-    out = {}
+    void, out = void_rounds(recs), {}
     for r in recs:
         if r["kind"] == "p" and r["game"] >= first_game and (r["game"], r["round"]) not in void:
             out.setdefault(r["game"], []).append(r)
@@ -603,10 +602,8 @@ def complete(recs, last_game=LAST_GAME):
     """The complete sitting (round-1 HIGH 4, the complete-slice law): before any verdict, games 0 to last_game each
     present with a settled line, point lines, a calibration run and their census, and the sitting's own completion
     line (FtDrive: sitting complete g=last_game). Returns the list of what is missing (empty when complete)."""
-    miss = []
-    want = set(range(0, last_game + 1))
-    sett = set(r["g"] for r in recs if r["kind"] == "settled")
-    pts = set(r["game"] for r in recs if r["kind"] == "p")
+    miss, want = [], set(range(0, last_game + 1))
+    sett, pts = set(r["g"] for r in recs if r["kind"] == "settled"), set(r["game"] for r in recs if r["kind"] == "p")
     cen = set(r["g"] for r in recs if r["kind"] == "census")
     # a failed calibration line is no calibration (round-4 rule; ruling R6-A3.11.92 (4))
     cal = set(int(r["why"][4:]) for r in recs if r["kind"] == "cal" and re.fullmatch(r"game\d+", str(r.get("why", "")))
@@ -635,8 +632,7 @@ def census_summary(recs):
     (expected_entries(), gate_specs/entries.py), missing is 0 and duplicates is 0. Required: FtClock.Install writes it
     unconditionally once the clock installs, and no game line is written without the clock, so a log without it (or
     with two, a second process) is not one sitting's. Returns (ok, reading, misses)."""
-    want = len(expected_entries())
-    lines = [r for r in recs if r["kind"] == "census_summary"]
+    want, lines = len(expected_entries()), [r for r in recs if r["kind"] == "census_summary"]
     bad = []
     if len(lines) != 1:
         bad.append("%d census summary lines (needs exactly 1)" % len(lines))
@@ -681,8 +677,7 @@ def records_missing(recs, last_game=LAST_GAME):
         n = sum(1 for r in recs if r["kind"] == "between" and r.get("g") == g)
         if pts and n != len(pts) - 1:
             miss.append("game %d: %d between lines for %d points (needs %d)" % (g, n, len(pts), len(pts) - 1))
-        # heavy and offthread: one per operation per game, one per game (B3 also refuses on them)
-        for op in HEAVY_OPS:
+        for op in HEAVY_OPS:  # heavy and offthread: one per operation per game, one per game (B3 also refuses on them)
             n = sum(1 for r in recs if r["kind"] == "heavy" and r.get("g") == g and r.get("op") == op)
             if n != 1:
                 miss.append("game %d: %d heavy lines for %s (needs 1)" % (g, n, op))
@@ -703,8 +698,7 @@ def records_missing(recs, last_game=LAST_GAME):
         want = 1 if readings == {"A"} else 0
         if n != want:
             miss.append("game %d: %d answer_replay lines (reading %s needs %d)" % (g, n, "/".join(sorted(map(str, readings))), want))
-    # counters: FtSchedule.FlushGame writes one per game (VR2 judges its values)
-    for g in range(0, last_game + 1):
+    for g in range(0, last_game + 1):  # counters: FtSchedule.FlushGame writes one per game (VR2 judges its values)
         n = sum(1 for r in recs if r["kind"] == "counters" and r.get("g") == g)
         if n != 1:
             miss.append("game %d: %d counters lines (needs 1)" % (g, n))
@@ -990,11 +984,9 @@ def unknown_forms(text):
 def zero_state(recs):
     """VR8, part 1: game 0 (the mutant) must have every round void; reports the void rounds of the measured
     games and the games left with no valid round. Returns (ok, game-0 void, game-0 rounds, measured void, empty)."""
-    void = void_rounds(recs)
-    rounds = set((r["game"], r["round"]) for r in recs if r["kind"] == "p")
+    void, rounds = void_rounds(recs), set((r["game"], r["round"]) for r in recs if r["kind"] == "p")
     g0 = [x for x in rounds if x[0] == 0]
-    g0v = [x for x in g0 if x in void]
-    meas = sorted(x for x in void if x[0] >= 1)
+    g0v, meas = [x for x in g0 if x in void], sorted(x for x in void if x[0] >= 1)
     games = set(x[0] for x in rounds if x[0] >= 1)
     empty = sorted(g for g in games if all((g, r) in void for (gg, r) in rounds if gg == g))
     return bool(g0) and len(g0v) == len(g0), len(g0v), len(g0), meas, empty
@@ -1002,10 +994,8 @@ def zero_state(recs):
 
 def contrast_c(points):
     """One game's frame-weighted ON-minus-OFF C per frame (cycles; ratio of sums), and its frames N_g."""
-    son = sum(p["sC"] for p in points if p["arm"] == "ON")
-    non = sum(p["n"] for p in points if p["arm"] == "ON")
-    soff = sum(p["sC"] for p in points if p["arm"] == "OFF")
-    noff = sum(p["n"] for p in points if p["arm"] == "OFF")
+    son, non = sum(p["sC"] for p in points if p["arm"] == "ON"), sum(p["n"] for p in points if p["arm"] == "ON")
+    soff, noff = sum(p["sC"] for p in points if p["arm"] == "OFF"), sum(p["n"] for p in points if p["arm"] == "OFF")
     if non == 0 or noff == 0:
         raise Refused("a game without both arms")
     return son / non - soff / noff, non + noff
@@ -1026,9 +1016,7 @@ def _fhat(recs):
 def dC_us(recs, z=Z_END, first_game=1):
     """dC in microseconds per frame: each game's frame-weighted contrast in cycles over that game's f_hat (V4 3.2:
     C in us is cycles / f_hat), then fw_interval at z. Returns (est, hw, df, lag-1)."""
-    fh = _fhat(recs)
-    g = games_of(recs, first_game)
-    dw = []
+    fh, g, dw = _fhat(recs), games_of(recs, first_game), []
     for k in sorted(g):
         if fh.get(k, 0) <= 0:
             raise Refused("no f_hat for game %d" % k)
@@ -1047,8 +1035,7 @@ def d_up(recs, z=Z_END, first_game=1):
     freq = set(r["freq"] for r in recs if r["kind"] == "settled")
     if len(freq) != 1:
         raise Refused("D_up needs one Stopwatch frequency (got %s)" % sorted(freq))
-    f = freq.pop()
-    on_frames = {}
+    f, on_frames = freq.pop(), {}
     for g, pts in games_of(recs, first_game).items():
         on_frames[g] = sum(q["live_frames"] for q in pts if q["gate"] == 0)
     rate, shape = {}, {}
@@ -1067,8 +1054,7 @@ def d_up(recs, z=Z_END, first_game=1):
     cals = {}
     for r in recs:
         if r["kind"] == "cal" and r.get("why", "").startswith("game") and r.get("ckind") == "disp" and not r.get("failed"):
-            u = [int(x) for x in r["u"].split(",")]
-            pp = [int(x) for x in r["p"].split(",")]
+            u, pp = [int(x) for x in r["u"].split(",")], [int(x) for x in r["p"].split(",")]
             if len(u) != len(pp) or not u:
                 raise Refused("cal i=%d shape=%s: batch lists differ" % (r["i"], r["shape"]))
             cost = sum(b - a for a, b in zip(u, pp)) / len(u) / r["n"] * 1e6 / f
@@ -1170,8 +1156,7 @@ def a3_live(recs, spec=None, first_game=1, last_game=LAST_GAME):
     value is refused like one without the marker. Returns ({k: d_k us}, {k: [(g, reads, scopes, ticks, tmax)]})."""
     spec = a3_spec() if spec is None else spec
     live = [n for n, sid, kind, why, proof in spec if kind == "dependent" and proof == LIVE_PROOF]
-    names = set(row[0] for row in spec)
-    a3c = [r for r in recs if r["kind"] == "cal" and r.get("ckind") == "a3"]
+    names, a3c = set(row[0] for row in spec), [r for r in recs if r["kind"] == "cal" and r.get("ckind") == "a3"]
     for r in a3c:
         k = r.get("k")
         # a name outside the inventory is ignored, as every other a3 line of one is (the inventory's own coverage is
@@ -1193,8 +1178,7 @@ def a3_live(recs, spec=None, first_game=1, last_game=LAST_GAME):
     freq = set(r["freq"] for r in recs if r["kind"] == "settled")
     if len(freq) != 1:
         raise Refused("A3 live rows need one Stopwatch frequency (got %s)" % sorted(freq))
-    f = freq.pop()
-    starts = {}
+    f, starts = freq.pop(), {}
     for r in recs:
         if (r["kind"] == "cal" and re.fullmatch(r"game\d+", str(r.get("why", ""))) and "live" not in r
                 and not r.get("failed")):
@@ -1296,8 +1280,7 @@ def a3(recs, z=Z_END, first_game=1, last_game=LAST_GAME, spec=None, peer_recs=No
     # withheld-row refusal, which only ever saw this seat's log)
     ld, _ = a3_live(recs, spec, first_game, last_game)
     pd, _ = a3_live(peer_recs, spec, first_game, last_game) if peer_recs is not None else ({}, {})
-    ld = {k: max(v, pd[k]) for k, v in ld.items()}
-    on_frames = {}
+    ld, on_frames = {k: max(v, pd[k]) for k, v in ld.items()}, {}
     for g, pts in games_of(recs, first_game).items():
         if last_game is None or g <= last_game:
             on_frames[g] = sum(q["live_frames"] for q in pts if q["gate"] == 0)
@@ -1317,8 +1300,7 @@ def a3(recs, z=Z_END, first_game=1, last_game=LAST_GAME, spec=None, peer_recs=No
             rows = [r for r in recs if r["kind"] == "a3drain" and r.get("g") == g and r.get("k") == k]
             if len(rows) != 1:
                 raise Refused("A3 drained structure %s: game %d has %d a3drain lines (needs 1)" % (k, g, len(rows)))
-            r = rows[0]
-            npts = sum(1 for q in recs if q["kind"] == "p" and q["game"] == g)
+            r, npts = rows[0], sum(1 for q in recs if q["kind"] == "p" and q["game"] == g)
             if r.get("starts", -1) != npts:
                 raise Refused("A3 drained structure %s: game %d probed at %s point starts, the game has %d points"
                               % (k, g, r.get("starts"), npts))
@@ -1345,8 +1327,7 @@ def t_ref(recs, first_game=1):
     return sum(q["sF"] for q in pts) * 1e6 / freq.pop() / n
 
 
-FPSCAP_HOLD = "[FPSCAP] held by frame-time calibration"
-FPSCAP_RELEASED = "[FPSCAP] released ("
+FPSCAP_HOLD, FPSCAP_RELEASED = "[FPSCAP] held by frame-time calibration", "[FPSCAP] released ("
 
 
 def _until_last_settled(text):
@@ -1363,8 +1344,7 @@ def vr1(recs, text, tref, name="T_ref"):
     armfile is present, proven reached by its own line, lesson #83) and no other [FPSCAP] line; every settled line
     vsync 0 and target -1 or above 1000; the frame time tref (named name: T_ref, or T_on in sitting V, ruling
     R6-A3.11.149 (6) 3) not within 2 percent of 1e6 / k for k in 60, 75, 120, 144, 165, 240."""
-    bad = []
-    caps = [ln.strip() for ln in _until_last_settled(text) if "[FPSCAP]" in ln]
+    bad, caps = [], [ln.strip() for ln in _until_last_settled(text) if "[FPSCAP]" in ln]
     if not any(FPSCAP_HOLD in ln for ln in caps):
         bad.append("no '%s' line: the hold is not proven reached" % FPSCAP_HOLD)
     other = [ln for ln in caps if FPSCAP_HOLD not in ln]
@@ -1393,9 +1373,7 @@ def predecessor(recs, first_game=1):
     round's OFF mean, grouped by the arm of the previous round's last point (the point line's pred; first rounds
     have pred none and drop out); FLAG when (after-ON mean - after-OFF mean) - 1.96 x Welch SE > 0.
     Returns (flag, after-ON values, after-OFF values)."""
-    fh = _fhat(recs)
-    g = games_of(recs, first_game)
-    groups = {"ON": [], "OFF": []}
+    fh, g, groups = _fhat(recs), games_of(recs, first_game), {"ON": [], "OFF": []}
     for k in sorted(g):
         rounds = {}
         for q in g[k]:
@@ -1411,28 +1389,65 @@ def predecessor(recs, first_game=1):
     if len(a) < 2 or len(b) < 2:
         raise Refused("predecessor check needs two rounds in each group (got %d and %d)" % (len(a), len(b)))
     ma, mb = sum(a) / len(a), sum(b) / len(b)
-    va = sum((v - ma) ** 2 for v in a) / (len(a) - 1)
-    vb = sum((v - mb) ** 2 for v in b) / (len(b) - 1)
+    va, vb = sum((v - ma) ** 2 for v in a) / (len(a) - 1), sum((v - mb) ** 2 for v in b) / (len(b) - 1)
     return (ma - mb) - 1.96 * math.sqrt(va / len(a) + vb / len(b)) > 0, a, b
 
 
-def vr9(recs, bound_us, first_game=1):
+def vr9_windows(recs, pts):
+    """Ruling R6-A3.11.175 (b): each window the live frames of points pts reach (frame 1 in window 0, frame f >= 2 in
+    window (f - 2) // 120: FtSchedule.cs:121-124, 187-188) as {pt, arm, n: its frames}. Its arm: its line's; window 0
+    of a point without window lines: the point's; the closing window (opened at frame live_frames, no line): its
+    successor's pred= by window_reconcile's map, as b11_terms reads it, else at position 3 or 4 the arm its printed
+    mate's coin gives, else None. Another window without a line: Refused. Returns (windows, those with arm None)."""
+    opn, pr, out = {}, {}, []
+    window_reconcile(recs, opn)
+    for w in (r for r in recs if b11_line(r)):
+        pr.setdefault(w["pt"], {})[w["wi"]] = w
+    nxt = dict(((x[2]["pt"], x[2]["wi"] + 1), w["pred"]) for w, x in ((w, opn.get(id(w))) for w in recs)
+               if x and x[3] and x[2]["kind"] == "w" and w["pred"] in ("ON", "OFF"))   # after a window with no line
+    for q in pts:
+        lf, p = q["live_frames"], pr.get(q["pt"], {})
+        for j in range(max(lf - 2, 0) // WINDOW_FRAMES + 1 if lf > 0 else 0):
+            m = p.get(j - 2) if j % 4 > 1 else None             # position 3 or 4: its mate, on one coin
+            if j not in p and (p or j) and (j == 0 or lf != WINDOW_FRAMES * j + 2):
+                raise Refused("VR9: window %d of point %s (live_frames %d) printed no line" % (j, q["pt"], lf))
+            a = p[j]["arm"] if j in p else q["arm"] if j == 0 else nxt.get((q["pt"], j)) or m and (
+                "ON" if m["coin"] ^ (j % 4 > 1) else "OFF")
+            out.append({"pt": q["pt"], "arm": a,
+                        "n": min(lf, WINDOW_FRAMES + 1) if j == 0 else min(lf - WINDOW_FRAMES * j - 1, WINDOW_FRAMES)})
+    return out, [w for w in out if w["arm"] is None]
+
+
+def vr9(recs, bound_us, first_game=1, unk=None):
     """VR9, absorption: the gated spans' ON live time per ON live frame (us by the settled frequency), frame-weighted
-    over games, at its lower 97.5 percent end, at most the bound max(0, dC_up) / min(1, e_C_lo). Without window lines:
-    span_g over live_frames at ON points. A window log (a point holds windows of both arms): every point's span_g
-    over the frames n of its ON windows; a live frame outside a window is in no divisor. Returns (ok, lower end)."""
+    over games, at its lower 97.5 percent end, at most the bound max(0, dC_up) / min(1, e_C_lo). span_g, the gated time
+    in a point's live frames 1..live_frames (FtFrames.cs:267), is the ON frames' time while VR5's off_g is 0. Without
+    window lines: span_g over live_frames at ON points, weight n. A window log (ruling R6-A3.11.175): per game,
+    games_of's points' span_g over their live frames in ON windows (vr9_windows), weight that count; each unknown arm
+    is ON and OFF in turn, the largest lower end judged (over 12 of them: Refused). Returns (ok, lower end); a list
+    unk receives the text the reports add for the unknown arms."""
     freq = set(r["freq"] for r in recs if r["kind"] == "settled")
     if len(freq) != 1:
         raise Refused("VR9 needs one Stopwatch frequency (got %s)" % sorted(freq))
-    f, g, sw, ws = freq.pop(), games_of(recs, first_game), [], [r for r in recs if b11_line(r)]
-    for k in sorted(g):
-        on = g[k] if ws else [q for q in g[k] if q["arm"] == "ON"]
-        pts = set(q["pt"] for q in on)
-        lf = sum(w["n"] for w in ws if w["arm"] == "ON" and w["pt"] in pts) if ws else sum(q["live_frames"] for q in on)
-        if lf > 0:
-            sw.append((sum(q["span_g"] for q in on) * 1e6 / f / lf, lf if ws else sum(q["n"] for q in on)))
-    est, hw, _ = fw_interval(sw, _ND.inv_cdf(0.975))
-    return est - hw <= bound_us, est - hw
+    f, g = freq.pop(), games_of(recs, first_game)
+    ws, u = vr9_windows(recs, [q for k in sorted(g) for q in g[k]]) if any(b11_line(r) for r in recs) else ([], [])
+    if len(u) > 12:
+        raise Refused("VR9: %d windows of unknown arm (at most 12 are evaluated)" % len(u))
+    for bits in range(2 ** len(u)):
+        for i, w in enumerate(u):
+            w["arm"] = "ON" if bits >> i & 1 else "OFF"
+        sw = []
+        for k in sorted(g):
+            on = g[k] if ws else [q for q in g[k] if q["arm"] == "ON"]
+            pts = set(q["pt"] for q in on)
+            lf = (sum(w["n"] for w in ws if w["arm"] == "ON" and w["pt"] in pts) if ws
+                  else sum(q["live_frames"] for q in on))
+            if lf > 0:
+                sw.append((sum(q["span_g"] for q in on) * 1e6 / f / lf, lf if ws else sum(q["n"] for q in on)))
+        est, hw, _ = fw_interval(sw, _ND.inv_cdf(0.975))
+        lo = est - hw if bits == 0 else max(lo, est - hw)
+    (unk if unk is not None else []).append(" (the largest over %d windows of unknown arm)" % len(u) if u else "")
+    return lo <= bound_us, lo
 
 
 def b3(recs):
@@ -1499,8 +1514,7 @@ def vr6_build(recs):
     come from one patch class, FtRoute_SendPatch: when it never attached both stay at zero and agree, so this
     comparison rests on the validity set's ATTACH guard, which requires that class's entry fully attached (ruling
     R6-A3.11.151 (2) class A, F2). Returns (ok, reasons, {pair: count}, [disarm inputs])."""
-    lines = [r for r in recs if r["kind"] == "refusals"]
-    dis = disarms(recs)
+    lines, dis = [r for r in recs if r["kind"] == "refusals"], disarms(recs)
     if not lines:
         raise Refused("VR6 needs a refusals line (game over or quit)")
     # ruling R6-A3.11.154: every refusals line is judged as written; one out of its form (parse_line's "form") is
@@ -1537,14 +1551,10 @@ def f18(recs, first_game=1):
     readings = set(r.get("f18") for r in st)
     if len(readings) != 1 or None in readings:
         raise Refused("F18 needs one reading named on every measured settled line (got %s)" % sorted(map(str, readings)))
-    reading = readings.pop()
-    rep = [r for r in recs if r["kind"] == "answer_replay"]
-    bad = []
-    us = []
+    reading, rep, bad, us = readings.pop(), [r for r in recs if r["kind"] == "answer_replay"], [], []
     if reading == "A":
         freq = set(r["freq"] for r in recs if r["kind"] == "settled")
-        f = freq.pop() if len(freq) == 1 else None
-        games = sorted(set(r["g"] for r in st))
+        f, games = freq.pop() if len(freq) == 1 else None, sorted(set(r["g"] for r in st))
         byg = dict((r["g"], r) for r in rep)
         for g in games:
             r = byg.get(g)
@@ -1593,8 +1603,7 @@ def longest_frames(recs, first_game=1):
     freq = set(r["freq"] for r in recs if r["kind"] == "settled")
     if len(freq) != 1:
         raise Refused("longest frames need one Stopwatch frequency (got %s)" % sorted(freq))
-    f = freq.pop()
-    out = {}
+    f, out = freq.pop(), {}
     for r in recs:
         if r["kind"] == "p" and r["game"] >= first_game:
             out[r["arm"]] = max(out.get(r["arm"], 0), r["maxF"])
@@ -1632,14 +1641,10 @@ def hitch(recs, first_game=1, side=_side_plain):
         raise Refused("fewer than two games with full windows on both sides")
     out = {}
     for h in H_MS:
-        n_on = [per[("ON", g)]["n"] for g in games]
-        n_off = [per[("OFF", g)]["n"] for g in games]
-        on_min = [per[("ON", g)]["k"][h][0] for g in games]
-        on_max = [per[("ON", g)]["k"][h][1] for g in games]
-        off_min = [per[("OFF", g)]["k"][h][0] for g in games]
-        off_max = [per[("OFF", g)]["k"][h][1] for g in games]
-        fail = rate_lb(on_min, n_on) - rate_ub(off_max, n_off) > 0
-        ub = rate_ub(on_max, n_on) - rate_lb(off_min, n_off)
+        n_on, n_off = [per[("ON", g)]["n"] for g in games], [per[("OFF", g)]["n"] for g in games]
+        on_min, on_max = [per[("ON", g)]["k"][h][0] for g in games], [per[("ON", g)]["k"][h][1] for g in games]
+        off_min, off_max = [per[("OFF", g)]["k"][h][0] for g in games], [per[("OFF", g)]["k"][h][1] for g in games]
+        fail, ub = rate_lb(on_min, n_on) - rate_ub(off_max, n_off) > 0, rate_ub(on_max, n_on) - rate_lb(off_min, n_off)
         out[h] = {"fail": fail, "ub_per_frame": ub, "ub_per_1000": ub * 1000.0}
     return out
 
@@ -1660,8 +1665,7 @@ def e_c(recs, z=Z_END, first_game=1):
     cp = [r["c_plant"] for r in recs if r["kind"] == "plant"]
     if len(cp) != 1 or cp[0] <= 0:
         raise Refused("e_C needs exactly one plant line with c_plant > 0 (got %s)" % cp)
-    fh = {r["g"]: r["f_hat"] for r in recs if r["kind"] == "settled"}
-    games = games_of(recs, first_game)
+    fh, games = {r["g"]: r["f_hat"] for r in recs if r["kind"] == "settled"}, games_of(recs, first_game)
     es, missing = [], []
     for g in sorted(games):
         if g not in fh or fh[g] <= 0:
@@ -1694,10 +1698,8 @@ def match_power(recs, z=Z_END, first_game=1, margin=MENU_PLAN_MARGIN):
     cp = [r["c_plant"] for r in recs if r["kind"] == "plant"]
     if len(cp) != 1 or cp[0] <= 0:
         return ["match power: not computable (needs exactly one plant line with c_plant > 0, got %s)" % cp]
-    cpu = cp[0]
-    fh = {r["g"]: r["f_hat"] for r in recs if r["kind"] == "settled"}
-    games = games_of(recs, first_game)
-    wins = {}
+    cpu, fh = cp[0], {r["g"]: r["f_hat"] for r in recs if r["kind"] == "settled"}
+    games, wins = games_of(recs, first_game), {}
     for r in recs:
         if r["kind"] == "w" and r.get("game", -1) >= first_game and r.get("arm") == "OFF" and not r.get("partial") \
                 and r.get("n", 0) > 0:
@@ -1720,8 +1722,7 @@ def match_power(recs, z=Z_END, first_game=1, margin=MENU_PLAN_MARGIN):
             if q["arm"] != "OFF" or q.get("pn", 0) <= 0 or q["n"] <= 0:
                 continue
             ws = wins.get((g, q["round"], q["point"]), [])
-            npl = sum(1 for x in ws if x.get("plant"))
-            nun = sum(1 for x in ws if not x.get("plant"))
+            npl, nun = sum(1 for x in ws if x.get("plant")), sum(1 for x in ws if not x.get("plant"))
             if npl > 0 and nun > 0:
                 inv.append(1.0 / npl + 1.0 / nun)
             ev.append((q["psC"] / q["pn"] - q["sC"] / q["n"]) / unit)
@@ -1760,8 +1761,7 @@ def vr5_records(recs, first_game=0, last_game=None):
     first_game..last_game when last_game is given), one opened line showing all three collectors opened (se, ce,
     ic = 1), and exactly one census line for every registered entry (gate_specs/entries.py) with its registered
     shape. Missing, duplicated or unregistered records fail; nothing passes by absence."""
-    bad = []
-    exp = dict(expected_entries())
+    bad, exp = [], dict(expected_entries())
     games = set(r["game"] for r in recs if r["kind"] == "p" and r["game"] >= first_game)
     if last_game is not None:
         games |= set(range(first_game, last_game + 1))
@@ -3945,9 +3945,8 @@ def _two_vr3(recs):
 
 
 def _two_vr4(e):
-    e = _need_e(e)
-    return vr4(e["hw"], e["tref"]), ("the contrast's half-width %.3f us against 1.5 percent of T_ref as built, %.2f us"
-                                     % (e["hw"], 0.015 * e["tref"]))
+    return vr4(_need_e(e)["hw"], e["tref"]), ("the contrast's half-width %.3f us against 1.5 percent of T_ref "
+                                              "as built, %.2f us" % (e["hw"], 0.015 * e["tref"]))
 
 
 def _two_vr5(recs):
@@ -3967,11 +3966,12 @@ def _two_vr8(recs, first_game):
 
 
 def _two_vr9(recs, e, first_game):
-    e, elo = _need_e(e), e_c(recs, first_game=first_game)[3]
+    e, elo, u = _need_e(e), e_c(recs, first_game=first_game)[3], []
     bound = max(0.0, e["bu"]) / min(1.0, max(elo, 1e-9))
-    ok, lo = vr9(recs, bound, first_game)
-    return ok, "gated span time per ON live frame, lower end %.2f us, against %.2f us%s" % (
-        lo, bound, "" if elo > 0 else " (e_C_lo %.4f is not above 0: floored at 1e-9, the bound binds nothing)" % elo)
+    ok, lo = vr9(recs, bound, first_game, u)
+    return ok, "gated span time per ON live frame, lower end %.2f us%s, against %.2f us%s" % (lo, u[0], bound, (
+        " (dC_up %.2f is not above 0: the bound is 0)" % e["bu"] if e["bu"] <= 0 else
+        "" if elo > 0 else " (e_C_lo %.4f is not above 0: floored at 1e-9, the bound binds nothing)" % elo))
 
 
 def _two_carry(e):
@@ -4612,13 +4612,13 @@ def report(text, peer=None, src="log", peer_src="peer", ref=None, ref_src="refer
     try:
         bu, bn, bo = between_after(recs)
         out.append("between-point spans after points whose last measured window was ON %.1f us per transition over %d "
-                   "(after OFF: %d, not used)" % (bu, bn, bo))
+                   "(after OFF: %d, not used; a point without a measured window counts by its arm)" % (bu, bn, bo))
     except (Refused, KeyError, ZeroDivisionError, ValueError) as e:
         out.append("between-point figure not computable: %s" % e)
     try:
         tr1 = t_ref(recs)
         de, dh, _, _ = dC_us(recs)
-        _, _, _, elo3, _, _ = e_c(recs)
+        (_, _, _, elo3, _, _), u9 = e_c(recs), []
         vr["VR1"], why1 = vr1(recs, text, tr1)
         out.append("VR1 %s %s" % ("PASS" if vr["VR1"] else "FAIL", "; ".join(why1)))
         vr["VR4"] = vr4(dh, tr1)
@@ -4630,9 +4630,9 @@ def report(text, peer=None, src="log", peer_src="peer", ref=None, ref_src="refer
         vr["VR8"] = vfrac <= 0.10 and not flag and zok
         out.append("VR8 %s: %.1f percent of measured rounds void (max 10); predecessor %s (after ON %d, after OFF %d)"
                    % ("PASS" if vr["VR8"] else "FAIL", 100 * vfrac, "FLAG" if flag else "no flag", len(a), len(b)))
-        ok9, lo9 = vr9(recs, max(0.0, de + dh) / min(1.0, max(elo3, 1e-9)))
-        vr["VR9"] = ok9
-        out.append("VR9 %s: gated span time per ON live frame, lower end %.2f us" % ("PASS" if ok9 else "FAIL", lo9))
+        vr["VR9"], lo9 = vr9(recs, max(0.0, de + dh) / min(1.0, max(elo3, 1e-9)), 1, u9)
+        out.append("VR9 %s: gated span time per ON live frame, lower end %.2f us%s"
+                   % ("PASS" if vr["VR9"] else "FAIL", lo9, u9[0]))
     except (Refused, KeyError, ZeroDivisionError, ValueError) as e:
         out.append("VR1/VR4/VR8/VR9 not computable: %s" % e)
     try:

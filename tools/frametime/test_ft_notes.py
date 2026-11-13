@@ -81,10 +81,17 @@ def test_fhat_note_gives_the_judged_extremes_and_names_what_is_left_out():
     assert not ok and len(bad) == 1, bad
     ends = re.search(r"f_hat spread (\d+)\.\.(\d+) exceeds 2 percent", bad[0]).groups()
     assert " %s..%s, spread 3.09 percent " % ends in N.fhat_note("a", g5), (ends, N.fhat_note("a", g5))
-    # no measured game prints one: said so, never a number
+    # no measured game prints one: said so, never a judged number; game 0's value still gives the reading from game 0
+    # (review .174 MEDIUM 4)
     none = "\n".join(ln for ln in v.splitlines() if " settled g=" not in ln or " settled g=0 " in ln)
-    assert N.fhat_note("a", P.read(none)).startswith("V6 NOTE seat a: f_hat: no settled line of a measured game prints "
-                                                     "one; not judged by VR2's spread: ")
+    assert N.fhat_note("a", P.read(none)) == (
+        "V6 NOTE seat a: f_hat: no settled line of a measured game prints a value above 0; over every game from 0 (1 "
+        "values, the reading before ruling R6-A3.11.172 (5) b) %d..%d, spread 0.00 percent (within VR2's limit, 2 "
+        "percent); not judged by VR2's spread: game 0 %d" % (base, base, base)), N.fhat_note("a", P.read(none))
+    # no value above 0 at all: no reading from game 0 either
+    bare = "\n".join(ln for ln in v.splitlines() if " settled g=" not in ln)
+    assert N.fhat_note("a", P.read(bare)) == ("V6 NOTE seat a: f_hat: no settled line of a measured game prints a value "
+                                              "above 0; not judged by VR2's spread: none"), N.fhat_note("a", P.read(bare))
     # a settled value that is not above 0 is never judged (vr2 reads the values above 0): it is named, whichever game
     # prints it, and it enters neither reading's count
     note = N.fhat_note("a", P.read(_zero(v, 0)))
@@ -94,6 +101,22 @@ def test_fhat_note_gives_the_judged_extremes_and_names_what_is_left_out():
     left = note.split("not judged by VR2's spread: ")[1]
     assert "game 5 0" in left and "game 0 %d" % base in left, note
     assert "(1 and up, %d values)" % (P.LAST_GAME - 1) in note and "from 0 (%d values, " % P.LAST_GAME in note, note
+
+
+def test_fhat_note_gives_the_reading_from_game_0_when_no_measured_value_is_judged():
+    # review .174 MEDIUM 4: game 0's settled f_hat 1000000 and every measured game's f_hat 0. VR2's spread judges no
+    # value; the note still gives the reading over every game from 0 (one value, within the limit) and names every
+    # value it does not judge
+    v = T._v_text()
+    for g in range(1, P.LAST_GAME + 1):
+        v = _zero(v, g)
+    fh = [(r["g"], r["f_hat"]) for r in P.read(v) if r["kind"] == "settled"]
+    assert fh == [(0, 1000000)] + [(g, 0) for g in range(1, P.LAST_GAME + 1)], fh
+    assert N.fhat_note("a", P.read(v)) == (
+        "V6 NOTE seat a: f_hat: no settled line of a measured game prints a value above 0; over every game from 0 (1 "
+        "values, the reading before ruling R6-A3.11.172 (5) b) 1000000..1000000, spread 0.00 percent (within VR2's "
+        "limit, 2 percent); not judged by VR2's spread: game 0 1000000, %s"
+        % ", ".join("game %d 0" % g for g in range(1, P.LAST_GAME + 1))), N.fhat_note("a", P.read(v))
 
 
 def test_end_notes_stand_beside_the_exemption_for_the_seat_and_for_its_peer():

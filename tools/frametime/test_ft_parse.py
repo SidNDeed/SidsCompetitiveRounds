@@ -632,7 +632,7 @@ def test_report_carries_the_specified_figures():
     out, btw = _report(_log()), "between-point spans after points whose last measured window was ON "
     for want in ("U without D_up", "dF ", "dS ", "dP (process CPU, all threads)", "e_F ", "e_S ", "trend: d_g slope",
                  "last four games' mean", "UPKEEP spans per live frame: ON", "format M's own stamps",
-                 btw, "conditional: U bounds the NET", "PASS <= 3, SID <= 5"):
+                 btw, "measured window counts by its arm)", "conditional: U bounds the NET", "PASS <= 3, SID <= 5"):
         assert want in out, (want, out)
     assert P.classify(2.9, 100, 9, 0) == "PASS" and P.classify(4.0, 100, 1, 3.1) == "SID" \
         and P.classify(5.1, 100, 1, 5.05) == "FAIL"
@@ -5589,80 +5589,158 @@ def chk_an_unprinted_predecessor_gives_its_arm_and_coin_to_the_carryover(m):
 
 def chk_pred_none_after_an_unprinted_window_is_a_miss(m):
     # ruling R6-A3.11.172 (4) e, tightened after review .173: a window that follows an opened window without a line
-    # has a predecessor even where no line fixes its arm (position 2; a point that printed no window), so pred=none
-    # there is a miss; either arm passes
-    def text(pred, empty):
-        pts = ([{"n": [120], "coins": [(1, 0)]}, {"n": [60], "coins": [(0, 0)]}] if empty
-               else [{"n": [120], "coins": [(1, 0)], "ghost": True}])
+    # has a predecessor even where no line fixes its arm, so pred=none there is a miss; either arm passes. Every such
+    # shape (review .174 MEDIUM 6): the closing frame's window at position 2 (no mate) and at position 1 after four
+    # full windows (a new run), a point that printed no window with two live frames and with one
+    def text(pred, shape):
+        pts = {"pos2": [{"n": [120], "coins": [(1, 0)], "ghost": True}],
+               "pos1": [{"n": [120] * 4, "coins": [(1, 0), (0, 1)], "ghost": True}],
+               "lf2": [{"n": [120], "coins": [(1, 0)]}, {"n": [60], "coins": [(0, 0)]}],
+               "lf1": [{"n": [120], "coins": [(1, 0)]}, {"n": [60], "coins": [(0, 0)]}]}[shape]
         lab = "1.1.%d" % (len(pts) + 1)
         edit = (lambda w: w.update(pred=pred) if (w["pt"], w["wi"]) == (lab, 1) else None) if pred else None
         t = _b11_text([pts + [{"n": [120] * 4, "coins": [(1, 1)]}]], _flat, edit=edit)
-        return (_unprint(t, ["1.1.2"]) if empty else t), lab
-    for empty in (False, True):
+        t = _unprint(t, ["1.1.2"]) if shape.startswith("lf") else t
+        return (_p_sub(t, "1.1.2", " live_frames=2 ", " live_frames=1 ") if shape == "lf1" else t), lab
+    for shape in ("pos2", "lf2", "pos1", "lf1"):
         for pred in (None, "ON", "OFF"):
-            t, lab = text(pred, empty)
-            assert " w pt=%s " % lab in t and m.window_reconcile(m.read(t)) == [], (empty, pred)
-        t, lab = text("none", empty)
-        assert re.search(r" w pt=%s .* wi=0 f0=\d+ pred=none " % re.escape(lab), t), (empty, lab)    # the edit took
+            t, lab = text(pred, shape)
+            assert " w pt=%s " % lab in t and m.window_reconcile(m.read(t)) == [], (shape, pred)
+        t, lab = text("none", shape)
+        assert re.search(r" w pt=%s .* wi=0 f0=\d+ pred=none " % re.escape(lab), t), (shape, lab)    # the edit took
+        assert shape != "lf1" or " live_frames=1 " in t, t
         assert m.window_reconcile(m.read(t)) == [
             "window %s.0: pred=none, the game's previous window is one that printed no line" % lab], \
-            (empty, m.window_reconcile(m.read(t)))
+            (shape, m.window_reconcile(m.read(t)))
+
+
+def _vr9_emit(games, empty=(), lf=None, span=None, model=_flat, **kw):
+    """VR9's fixtures as the build prints them (ruling R6-A3.11.175; review .174 LOW 8). live_frames holds a point's
+    opening frame (StartPoint opens window 0 and the same boundary counts frame 1: FtSchedule.cs:187-188, 121; it is
+    never measured: FtFrames.cs:131-134) and its closing frame (never measured: FtFrames.cs:136), two above its
+    windows' frames; a point whose windows are all full opens one more window on its closing frame
+    (FtSchedule.cs:123-124), so it is built with "ghost". The points labelled in empty print no window (_unprint:
+    live_frames 2); lf maps a label to another live_frames. span_g: live_frames x span(label, k) ticks at the k-th
+    point line from 0, by default 900 + 37 k, so the games' rates differ."""
+    gs = [[p if "ghost" in p else dict(p, ghost=min(p["n"]) == P.WINDOW_FRAMES) for p in g] for g in games]
+    t = _b11_text(gs, model, **kw)
+    out, k = [], 0
+    for ln in (_unprint(t, list(empty)) if empty else t).splitlines():
+        if " p pt=" in ln:
+            f = dict(x.split("=", 1) for x in ln.split(" p ", 1)[1].split() if "=" in x)
+            have = int(f["live_frames"])
+            want = (lf or {}).get(f["pt"], have + 2 if have == int(f["n"]) + int(f["pn"]) and f["windows"] != "0"
+                                  else have)
+            per = span(f["pt"], k) if span else 900 + 37 * k
+            ln = ln.replace(" live_frames=%d " % have, " live_frames=%d " % want).replace(
+                " span_g=0 ", " span_g=%d " % (want * per))
+            k += 1
+        out.append(ln)
+    return "\n".join(out)
+
+
+def _ghost_arms(games, first_game=1):
+    """{(point, window): arm} of each window a closing frame opens at a point whose windows are all full (as
+    _vr9_emit builds them): the arm _b11_text gives that window."""
+    return dict((("%d.%d.%d" % (first_game + gi, p.get("rnd", 1), p.get("pnum", pi + 1)), len(p["n"])),
+                 _b11_arm(p["coins"], len(p["n"]) + 1)[2])
+                for gi, g in enumerate(games) for pi, p in enumerate(g) if min(p["n"]) == P.WINDOW_FRAMES)
+
+
+def _vr9_frames(text, arms=None, first_game=1):
+    """VR9's lower end in a window log by fact (ii) of ruling R6-A3.11.175, computed here from the lines: a point's
+    live frame 1 runs under its window 0, frame f >= 2 under window (f - 2) // 120 (FtSchedule.cs:121-124; W = 120,
+    FtFrames.cs:71); a window's arm is its line's, window 0's of a point without window lines the point's, else
+    arms[(point, window)]. Per measured game, void rounds left out, the span_g of its points over its ON frames,
+    weighted by them; fw_interval at z 0.975, as vr9 calls it. Returns (lower end, [(rate, ON frames)])."""
+    recs = P.read(text)
+    wl = dict(((w["pt"], w["wi"]), w["arm"]) for w in recs if w["kind"] == "w")
+    pts = [q for q in recs if q["kind"] == "p" and q["game"] >= first_game]
+    void = set((q["game"], q["round"]) for q in pts if q["zs"])
+    sw = []
+    for g in sorted(set(q["game"] for q in pts)):
+        mine, on = [q for q in pts if q["game"] == g and (g, q["round"]) not in void], 0
+        for q in mine:
+            lined = any(pt == q["pt"] for pt, _ in wl)
+            for f in range(1, q["live_frames"] + 1):
+                j = 0 if f == 1 else (f - 2) // 120
+                arm = wl.get((q["pt"], j)) or (q["arm"] if j == 0 and not lined else arms[(q["pt"], j)])
+                on += arm == "ON"
+        if on:
+            sw.append((sum(q["span_g"] for q in mine) * 1e6 / FREQ / on, on))
+    est, hw, _ = P.fw_interval(sw, P._ND.inv_cdf(0.975))
+    return est - hw, sw
+
+
+def _vr9_of(m, text, bound, first_game=1, refusal=False):
+    """m.vr9 on text as (ok, lower end, the text the reports add for unknown arms). A refusal passes through when
+    refusal is True; otherwise it, like any other exception, is a failed assert (a wrong value fails a check, never
+    crashes it). A parser before ruling R6-A3.11.175 (its vr9 takes no unk: a negative control) is judged by its
+    values, its text ""."""
+    u = []
+    try:
+        if "unk" in m.vr9.__code__.co_varnames:
+            ok, lo = m.vr9(m.read(text), bound, first_game, u)
+        else:
+            ok, lo = m.vr9(m.read(text), bound, first_game)
+            u.append("")
+    except m.Refused as x:
+        if refusal:
+            raise
+        raise AssertionError("vr9 refused: %s" % x)
+    except Exception as x:
+        raise AssertionError("vr9: %r" % x)
+    assert len(u) == 1, u
+    return ok, lo, u[0]
+
+
+# four games whose points switch arms per window; the closing frame's window of an all-full point takes its arm from
+# the next window's pred= (games 1, 2 and 4) or from its mate's coin (games 2 and 3)
+_VR9_GAMES = [[{"n": [120] * 4, "coins": [(1, 0), (0, 0)]}, {"n": [120, 60], "coins": [(0, 1)]}],
+              [{"n": [120] * 3, "coins": [(0, 0)]}, {"n": [120] * 4 + [60], "coins": [(1, 1), (0, 1)]}],
+              [{"n": [120] * 2, "coins": [(1, 1)]}],
+              [{"n": [120] * 5, "coins": [(0, 1), (1, 0)]}, {"n": [60], "coins": [(1, 0)]}]]
 
 
 def _vr9_text(windows=True):
-    """Four games whose points switch arms per window, with different ON-window frame counts (300, 360, 240, 420 of
-    662, 840, 240, 660 live frames) and span_g above 0 at every point (first windows ON and OFF); one ON-first point
-    ends with an opened window that printed no line, so its live_frames is two above its n. windows=False drops
-    every window line (a log without them)."""
-    games = [[{"n": [120] * 4, "coins": [(1, 0), (0, 0)], "ghost": True}, {"n": [120, 60], "coins": [(0, 1)]}],
-             [{"n": [120] * 3, "coins": [(0, 0)]}, {"n": [120] * 4, "coins": [(1, 1)]}],
-             [{"n": [120] * 2, "coins": [(1, 1)]}],
-             [{"n": [120] * 5, "coins": [(0, 1), (1, 0)]}, {"n": [60], "coins": [(1, 0)]}]]
-    out, k = [], 0
-    for ln in _b11_text(games, _flat).splitlines():
-        if " p pt=" in ln:
-            k += 1
-            ln = ln.replace(" span_g=0 ", " span_g=%d " % (70000 * k + 11000 * k * k))
-        if windows or " w pt=" not in ln:
-            out.append(ln)
-    assert k == 7 and ("[FRAME-TIME] w pt=" in "\n".join(out)) == windows
+    """_VR9_GAMES as the build prints them (_vr9_emit), span_g above 0 at every point (first windows ON and OFF).
+    windows=False drops every window line (a log without them)."""
+    out = [ln for ln in _vr9_emit(_VR9_GAMES).splitlines() if windows or " w pt=" not in ln]
+    assert ("[FRAME-TIME] w pt=" in "\n".join(out)) == windows
     return "\n".join(out)
 
 
 def chk_vr9_reads_on_window_frames_in_a_window_log(m):
-    # review .173, HIGH 2 (ruling R6-A3.11.173: arms switch per window). In a window log VR9's rate is, per game, the
-    # span_g of all its points over the frames n of its ON windows, weighted over games by that frame count; without
-    # window lines span_g over live_frames at the ON points (first-window arm), weighted by their n, as before. Both
-    # computed here from the line fields and held to vr9's lower end (fw_interval at z 0.975, as vr9 calls it)
+    # review .173, HIGH 2 (ruling R6-A3.11.173: arms switch per window), as ruling R6-A3.11.175 (a) counts it: in a
+    # window log VR9's rate is, per game, the span_g of all its points over the live frames of its ON windows (fact
+    # (ii), _vr9_frames), weighted over games by that count; without window lines span_g over live_frames at the ON
+    # points (first-window arm), weighted by their n, as before. Both computed here from the line fields and held to
+    # vr9's lower end. The ON frames by hand: game 1 121 + 120 + 61; game 2 120 + 1 (the closing frame's window at
+    # position 4, ON by its mate) + 121 + 120; game 3 121 + 120; game 4 120 + 120 + 120 + 62
     for windows in (True, False):
         t = _vr9_text(windows)
         recs = P.read(t)
-        sw = []
-        for g in (1, 2, 3, 4):
-            pts = [q for q in recs if q["kind"] == "p" and q["game"] == g]
-            if windows:
-                n_on = sum(w["n"] for w in recs if w["kind"] == "w" and w["game"] == g and w["arm"] == "ON")
-                sw.append((sum(q["span_g"] for q in pts) * 1e6 / FREQ / n_on, n_on))
-            else:
-                on = [q for q in pts if q["arm"] == "ON"]
+        if windows:
+            ref, sw = _vr9_frames(t, _ghost_arms(_VR9_GAMES))
+        else:
+            sw = []
+            for g in (1, 2, 3, 4):
+                on = [q for q in recs if q["kind"] == "p" and q["game"] == g and q["arm"] == "ON"]
                 sw.append((sum(q["span_g"] for q in on) * 1e6 / FREQ / sum(q["live_frames"] for q in on),
                            sum(q["n"] for q in on)))
-        assert [n for _, n in sw] == ([300, 360, 240, 420] if windows else [480, 480, 240, 60]), sw
-        est, hw, _ = P.fw_interval(sw, P._ND.inv_cdf(0.975))
-        try:
-            ok, lo = m.vr9(m.read(t), est - hw + 1e-6)
-            no, lo2 = m.vr9(m.read(t), est - hw - 1e-6)
-        except Exception as x:              # a mutant that empties a divisor: a failure, not a crash
-            raise AssertionError("vr9: %r" % x)
-        assert lo == pytest.approx(est - hw, rel=1e-12) and lo2 == lo and ok and not no, (windows, lo, est - hw)
-    # the earlier reading (ON points by first-window arm, over all their live frames) differs on the window log
-    old = []
+            est, hw, _ = P.fw_interval(sw, P._ND.inv_cdf(0.975))
+            ref = est - hw
+        assert [n for _, n in sw] == ([302, 362, 241, 422] if windows else [480, 540, 240, 60]), sw
+        ok, lo, _ = _vr9_of(m, t, ref + 1e-6)
+        no = _vr9_of(m, t, ref - 1e-6)[0]
+        assert lo == pytest.approx(ref, rel=1e-12) and ok and not no, (windows, lo, ref)
+    # the earlier divisor (the ON windows' measured frames n, review .173's reading) differs on the window log
+    recs, old = P.read(_vr9_text()), []
     for g in (1, 2, 3, 4):
-        on = [q for q in P.read(_vr9_text()) if q["kind"] == "p" and q["game"] == g and q["arm"] == "ON"]
-        old.append((sum(q["span_g"] for q in on) * 1e6 / FREQ / sum(q["live_frames"] for q in on),
-                    sum(q["n"] for q in on)))
+        n_on = sum(w["n"] for w in recs if w["kind"] == "w" and w["game"] == g and w["arm"] == "ON")
+        old.append((sum(q["span_g"] for q in recs if q["kind"] == "p" and q["game"] == g) * 1e6 / FREQ / n_on, n_on))
     e_old, h_old, _ = P.fw_interval(old, P._ND.inv_cdf(0.975))
-    assert abs((e_old - h_old) - m.vr9(m.read(_vr9_text()), 0.0)[1]) > 1e-3
+    assert abs((e_old - h_old) - _vr9_of(m, _vr9_text(), 0.0)[1]) > 1e-3
 
 
 def _low_plant(text):
@@ -5683,19 +5761,23 @@ def _low_plant(text):
 
 
 def chk_vr9_floor_sentence_when_e_c_lo_is_not_above_0(m):
-    # review .173 (report line 5): VR9's bound divides by min(1, max(e_C_lo, 1e-9)); the TWO-ARM VR9 detail says so,
-    # with e_C_lo, exactly when e_C_lo is not above 0 (both sides: _log's e_C_lo above 0, _low_plant's below)
-    e = {"bu": 3.5}
+    # review .173 (report line 5) and review .174 MEDIUM 2: VR9's bound is max(0, dC_up) / min(1, max(e_C_lo, 1e-9)).
+    # The TWO-ARM VR9 detail names the floor, with e_C_lo, exactly when e_C_lo is not above 0 and dC_up is above 0;
+    # when dC_up is not above 0 it says the bound is 0, whatever e_C_lo; otherwise it adds nothing. e_C_lo on both
+    # sides of 0 (_log's above, _low_plant's below), dC_up 3.5, 0 and -1.2
     for neg in (False, True):
         t = _low_plant(_log()) if neg else _log()
-        elo = P.e_c(P.read(t))[3]
+        recs, mr = P.read(t), m.read(t)
+        elo = P.e_c(recs)[3]
         assert (elo <= 0) == neg, (neg, elo)
-        bound = 3.5 / min(1.0, max(elo, 1e-9))
-        lo = P.vr9(P.read(t), bound)[1]
-        tail = " (e_C_lo %.4f is not above 0: floored at 1e-9, the bound binds nothing)" % elo if neg else ""
-        got = m._two_vr9(m.read(t), e, 1)
-        assert got == (lo <= bound, "gated span time per ON live frame, lower end %.2f us, against %.2f us%s"
-                       % (lo, bound, tail)), (neg, got)
+        for bu in (3.5, 0.0, -1.2):
+            bound = max(0.0, bu) / min(1.0, max(elo, 1e-9))
+            lo = P.vr9(recs, bound)[1]
+            tail = (" (dC_up %.2f is not above 0: the bound is 0)" % bu if bu <= 0 else
+                    " (e_C_lo %.4f is not above 0: floored at 1e-9, the bound binds nothing)" % elo if neg else "")
+            got = m._two_vr9(mr, {"bu": bu}, 1)
+            assert got == (lo <= bound, "gated span time per ON live frame, lower end %.2f us, against %.2f us%s"
+                           % (lo, bound, tail)), (neg, bu, got)
 
 
 U_LINE = re.compile(r"U ([0-9.]+) us = max\(0, dC_up ([-0-9.]+)\) / min\(1, max\(e_C_lo ([-0-9.]+), 1e-9\)\) "
@@ -5717,9 +5799,11 @@ def chk_single_parse_texts_of_review_173(m):
         tol = 0.0051 / div + (0.0 if neg else max(0.0, dc) * 6e-5 / div ** 2) + 0.01
         assert (e <= 0) == neg and abs(u - (max(0.0, dc) / div + k + d + a)) <= tol, (neg, us)
         assert "NOTE window log" not in out, neg
+        # review .174 MEDIUM 3: the line names the emitter's fallback (FtFrames.cs:246, _ptLastArm = _ptArm)
         btw = [x for x in out.splitlines() if x.startswith("between-point spans after ")]
-        assert len(btw) == 1 and btw[0].startswith("between-point spans after points whose last measured window was "
-                                                   "ON "), btw
+        assert len(btw) == 1 and re.fullmatch(r"between-point spans after points whose last measured window was ON "
+                                              r"[0-9.]+ us per transition over \d+ \(after OFF: \d+, not used; a point "
+                                              r"without a measured window counts by its arm\)", btw[0]), btw
     recs, mr = P.read(_log()), m.read(_log())
     mc, hc, dfc, elo, ng, miss = P.e_c(recs)
     assert m._two_ec(mr, 1) == (elo >= 0.5, "e_C %.4f, lower end %.4f (needs at least 0.5; OFF points by first-window "
@@ -5872,6 +5956,199 @@ def chk_vr2_caller_passes_a_first_game_other_than_1(m):
         assert not ok and len(why) == 1 and why[0].startswith("f_hat spread "), (fg, why)
 
 
+def chk_vr9_counts_a_points_opening_and_closing_frames(m):
+    # review .174 HIGH (ruling R6-A3.11.175 (a)): VR9's divisor holds every live frame of an ON window, the opening
+    # and the closing frame among them, as span_g holds their gated time (FtFrames.cs:232, 267). Review .174's case as
+    # the build prints it: sixteen games, every live frame ON at 100 us (1000 ticks at 10 MHz); per game a point of
+    # 239 measured frames (live_frames 241), and in game 16 twenty points more that printed no window (live_frames 2,
+    # no measured frame). The lower end is 100 (FAIL against 99.95); over the windows' measured frames it is below
+    games = [[{"n": [120, 119], "coins": [(1, 1)]}] for _ in range(15)]
+    games.append([{"n": [120, 119], "coins": [(1, 1)]}] + [{"n": [60], "coins": [(1, 0)]} for _ in range(20)])
+    t = _vr9_emit(games, empty=["16.1.%d" % k for k in range(2, 22)], span=lambda lab, k: 1000)
+    recs = P.read(t)
+    assert set(w["arm"] for w in recs if w["kind"] == "w") == {"ON"} and sorted(set(
+        (q["arm"], q["live_frames"]) for q in recs if q["kind"] == "p")) == [("ON", 2), ("ON", 241)], t[-300:]
+    ok, lo, u = _vr9_of(m, t, 99.95)
+    assert lo == pytest.approx(100.0, abs=1e-9) and not ok and u == "", (ok, lo, u)
+    sw = []
+    for g in range(1, 17):
+        n = sum(w["n"] for w in recs if w["kind"] == "w" and w["game"] == g)
+        sw.append((sum(q["span_g"] for q in recs if q["kind"] == "p" and q["game"] == g) * 1e6 / FREQ / n, n))
+    est, hw, _ = P.fw_interval(sw, P._ND.inv_cdf(0.975))
+    assert est - hw < 99.95, est - hw
+
+
+def chk_vr9_window_frames_by_live_frame(m):
+    # ruling R6-A3.11.175 (a), (b): each window's live frames by fact (ii), held to the independent count of
+    # _vr9_frames at live_frames 1 and 2 (points that printed no window: the point's arm), 121 (one partial window
+    # that holds the closing frame), 122 (the closing frame opens window 1 at position 2: its arm the next window's
+    # pred=), 152, 182, 241, 242 (the closing frame opens window 2 at position 3: its arm from its mate's coin) and 302
+    # (a partial last window), arms mixed; PASS against the lower end plus 1e-6, FAIL against it minus 1e-6
+    games = [[{"n": [120, 60], "coins": [(1, 0)]}, {"n": [60], "coins": [(1, 0)]}],
+             [{"n": [120, 60], "coins": [(0, 1)]}, {"n": [60], "coins": [(1, 0)]}],
+             [{"n": [119], "coins": [(1, 0)]}, {"n": [120, 30], "coins": [(0, 1)]}],
+             [{"n": [120], "coins": [(1, 0)]}, {"n": [120, 60], "coins": [(1, 1)]}],
+             [{"n": [120, 119], "coins": [(0, 1)]}],
+             [{"n": [120] * 2, "coins": [(0, 1)]}],
+             [{"n": [120] * 2 + [60], "coins": [(0, 1)]}]]
+    t = _vr9_emit(games, empty=("1.1.2", "2.1.2"), lf={"1.1.2": 1})
+    lfs = [q["live_frames"] for q in P.read(t) if q["kind"] == "p"]
+    assert lfs == [182, 1, 182, 2, 121, 152, 122, 182, 241, 242, 302], lfs
+    arms = _ghost_arms(games)
+    assert arms == {("4.1.1", 1): "OFF", ("6.1.1", 2): "ON"}, arms
+    ref = _vr9_frames(t, arms)[0]
+    ok, lo, u = _vr9_of(m, t, ref + 1e-6)
+    no = _vr9_of(m, t, ref - 1e-6)[0]
+    assert lo == pytest.approx(ref, rel=1e-12) and ok and not no and u == "", (lo, ref, ok, no, u)
+    # (b): any other window without a line is refused: a point whose frames reach a window past its closing frame's
+    # (window 2 at live_frames 245), and a point without window lines whose frames reach window 1
+    for lab, old, new, j in (("5.1.1", 241, 245, 2), ("1.1.2", 1, 130, 1)):
+        try:
+            _vr9_of(m, _p_sub(t, lab, " live_frames=%d " % old, " live_frames=%d " % new), 1e9, refusal=True)
+        except m.Refused as x:
+            assert str(x) == "VR9: window %d of point %s (live_frames %d) printed no line" % (j, lab, new), x
+        else:
+            raise AssertionError("window %d of point %s read without a line" % (j, lab))
+
+
+def chk_vr9_unknown_arms_take_the_largest_lower_end(m):
+    # ruling R6-A3.11.175 (c): a window whose arm no line and no rule fixes (the closing frame's window at position 2
+    # at the end of its game: no successor, no mate) is evaluated ON and OFF, and the larger lower end is judged and
+    # returned. The two differ here, the larger once OFF's and once ON's (that game's span_g 900 and 2000 ticks per
+    # live frame): against a bound between them FAIL with the larger as the lower end, against one above both PASS.
+    # Twelve such windows are evaluated; thirteen are refused
+    ordinary = [[{"n": [120, 60], "coins": [(1, 0)]}], [{"n": [120, 90], "coins": [(1, 1)]}],
+                [{"n": [120, 45], "coins": [(0, 1)]}], [{"n": [120, 75], "coins": [(1, 0)]}]]
+    games = [[{"n": [120], "coins": [(1, 0)]}]] + ordinary
+    for us, big in ((900, "OFF"), (2000, "ON")):
+        t = _vr9_emit(games, span=lambda lab, k: us if lab == "1.1.1" else 900 + 37 * k)
+        lo_on, lo_off = (_vr9_frames(t, {("1.1.1", 1): a})[0] for a in ("ON", "OFF"))
+        hi = max(lo_on, lo_off)
+        assert (lo_on > lo_off) == (big == "ON") and abs(lo_on - lo_off) > 1.0, (us, lo_on, lo_off)
+        ok, lo, u = _vr9_of(m, t, (lo_on + lo_off) / 2)
+        assert not ok and lo == pytest.approx(hi, rel=1e-12), (us, ok, lo, lo_on, lo_off)
+        assert u == " (the largest over 1 windows of unknown arm)", u
+        ok, lo, u = _vr9_of(m, t, hi + 1.0)
+        assert ok and lo == pytest.approx(hi, rel=1e-12), (us, ok, lo, hi)
+    one = [[{"n": [120], "coins": [(1, g % 2)]}] for g in range(13)]
+    ok, lo, u = _vr9_of(m, _vr9_emit(one[:12]), 1e9)
+    assert ok and u == " (the largest over 12 windows of unknown arm)", (ok, u)
+    try:
+        _vr9_of(m, _vr9_emit(one), 1e9, refusal=True)
+    except m.Refused as x:
+        assert str(x) == "VR9: 13 windows of unknown arm (at most 12 are evaluated)", x
+    else:
+        raise AssertionError("thirteen windows of unknown arm evaluated")
+
+
+def chk_vr9_closing_window_arm_by_its_successor_and_its_mate(m):
+    # ruling R6-A3.11.175 (b): the window a point's closing frame opens prints no line. Its arm is the next window's
+    # pred= (window_reconcile's map, as b11_terms reads it): at position 2 (no mate) before a point. Without a
+    # successor, at position 3 or 4 its mate's coin gives it (ON exactly when coin XOR 1 is 1): the last point of its
+    # game. Each arm at least once per route: the lower end is the one those arms give (_vr9_frames), it differs
+    # with any one of them flipped, and no window is of unknown arm. A fifth mate game ON, so that flipping them all
+    # moves the ON frames' total (with two ON and two OFF it would not, and the two-game batches would not move)
+    pad = [[{"n": [120, 60], "coins": [(1, 0)]}], [{"n": [120, 90], "coins": [(0, 1)]}]]
+    succ = [[{"n": [120], "coins": [(1, c)]}, {"n": [120, 60], "coins": [(1, 1)]}] for c in (0, 1)]
+    mate = ([[{"n": [120] * 2, "coins": [(c, 1)]}] for c in (0, 1)]
+            + [[{"n": [120] * 3, "coins": [(1, c)]}] for c in (0, 1)] + [[{"n": [120] * 2, "coins": [(0, 1)]}]])
+    for games, n in ((succ + pad, 2), (mate + pad, 5)):
+        t, arms = _vr9_emit(games), _ghost_arms(games)
+        assert len(arms) == n and set(arms.values()) == {"OFF", "ON"}, arms
+        ref = _vr9_frames(t, arms)[0]
+        for k in arms:
+            flip = dict(arms)
+            flip[k] = "OFF" if arms[k] == "ON" else "ON"
+            assert abs(_vr9_frames(t, flip)[0] - ref) > 1e-9, k
+        ok, lo, u = _vr9_of(m, t, ref + 1e-6)
+        assert lo == pytest.approx(ref, rel=1e-12) and ok and u == "", (n, lo, ref, u)
+
+
+def _vr9_report_text(unknown):
+    """A window log whose single-parse VR9 line and TWO-ARM VR9 row both compute: eight games, plant runs in round 1
+    and the plant line (e_C), an ON first point after each arm in rounds 2 and 3 beside an OFF point (VR8's
+    predecessor check). With unknown, game 8's last point ends with the closing frame's window at position 2."""
+    games = [[{"n": [120] * 8, "coins": [(c & 1, 0), (1, 1), (0, 0)], "plant": (2,)},
+              {"n": [120, 60], "coins": [(1, 0)], "rnd": 2, "pnum": 1},
+              {"n": [120, 60], "coins": [(0, 1)], "rnd": 2, "pnum": 2},
+              {"n": [120, 60], "coins": [(1, c >> 1 & 1)], "rnd": 3, "pnum": 1},
+              {"n": [120] if unknown and c == 7 else [120, 60], "coins": [(0, 1)], "rnd": 3, "pnum": 2}]
+             for c in range(8)]
+    return _vr9_emit(games) + "\n" + LOG_PREFIX + "[FRAME-TIME] " + PLANT_C
+
+
+def chk_vr9_texts_name_the_windows_of_unknown_arm(m):
+    # ruling R6-A3.11.175 (c): the single parse's VR9 line and the TWO-ARM VR9 detail add "(the largest over N windows
+    # of unknown arm)" after the lower end when N is above 0, and nothing when N is 0
+    for unknown in (False, True):
+        t = _vr9_report_text(unknown)
+        lo, u = _vr9_of(m, t, 0.0)[1:]
+        tail = " (the largest over 1 windows of unknown arm)" if unknown else ""
+        assert u == tail, (unknown, u)
+        try:
+            out, two = m.report(t, peer=t), m._two_vr9(m.read(t), {"bu": 3.5}, 1)[1]
+        except Exception as x:
+            raise AssertionError("report: %r" % x)
+        line = [x for x in out.splitlines() if x.startswith("VR9 ")]
+        assert len(line) == 1 and re.fullmatch(r"VR9 (PASS|FAIL): gated span time per ON live frame, lower end %s us%s"
+                                               % (re.escape("%.2f" % lo), re.escape(tail)), line[0]), (unknown, line)
+        assert two.startswith("gated span time per ON live frame, lower end %.2f us%s, against " % (lo, tail)), two
+
+
+def chk_vr9_leaves_void_rounds_out_of_both_sides(m):
+    # review .174 MEDIUM 7 (ruling R6-A3.11.175 (a)): VR9 reads games_of's points only, so a void round's ON frames
+    # are in neither the divisor nor the numerator (span_g). Two void rounds hold ON windows here, one ending with the
+    # closing frame's window at position 2 (whose arm no rule fixes): no window of unknown arm, as its point is not
+    # read. The lower end is _vr9_frames' (void rounds left out); counted by game it would differ
+    void = dict(rnd=2, zs=4)
+    games = [[{"n": [120, 60], "coins": [(1, 0)]}, dict(void, n=[120, 60], coins=[(1, 1)]),
+              dict(void, n=[120], coins=[(1, 0)])],
+             [{"n": [120, 90], "coins": [(0, 1)]}, dict(void, n=[120, 30], coins=[(1, 1)])],
+             [{"n": [120, 45], "coins": [(1, 1)]}], [{"n": [120, 75], "coins": [(1, 0)]}]]
+    t = _vr9_emit(games)
+    assert t.count(" zs=4 ") == 3, t.count(" zs=4 ")
+    ref = _vr9_frames(t)[0]
+    assert abs(_vr9_frames(t.replace(" zs=4 ", " zs=0 "), _ghost_arms(games))[0] - ref) > 1e-6
+    ok, lo, u = _vr9_of(m, t, ref + 1e-6)
+    assert lo == pytest.approx(ref, rel=1e-12) and ok and u == "", (lo, ref, u)
+
+
+def chk_the_carryover_reads_every_unprinted_predecessor_shape(m):
+    # review .174 MEDIUM 5 (ruling R6-A3.11.172 (4) e, the estimator's side): b11_terms gives a window whose opened
+    # predecessor printed no line that predecessor's coin (its ordinal o's run, position and unit) and the arm its
+    # pred= states, in every shape: the closing frame's window at position 3 (o 2) before a full and before a partial
+    # window, at position 2 (o 1) before a partial window, and a point of one live frame (its window 0, o 0) before a
+    # full and before a partial window; in game 0 as in game 1 (first_game 0), each arm once. A full window's exposure
+    # is read in d10 (its tenth 10), a partial window's in hp; its sign is the unprinted window's arm
+    games, empty = [], []
+    for g in (0, 1):
+        games.append([{"n": [120] * 2, "coins": [(g, 1)], "ghost": True}, {"n": [120], "coins": [(1, 0)]},
+                      {"n": [120] * 2, "coins": [(1 - g, 0)], "ghost": True}, {"n": [60], "coins": [(0, 0)]},
+                      {"n": [120], "coins": [(1, 1 - g)], "ghost": True}, {"n": [60], "coins": [(1, 0)]},
+                      {"n": [60], "coins": [(g, 0)]}, {"n": [120], "coins": [(1, 0)]},
+                      {"n": [60], "coins": [(1 - g, 0)]}, {"n": [60], "coins": [(0, 1)]}])
+        empty += ["%d.1.7" % g, "%d.1.9" % g]
+    t = _unprint(_b11_text(games, _carry_model, first_game=0), empty)
+    for lab in empty:
+        t = _p_sub(t, lab, " live_frames=2 ", " live_frames=1 ")
+    recs = m.read(t)
+    assert m.window_reconcile(recs) == [], m.window_reconcile(recs)[:4]
+    try:
+        terms = m.b11_terms(recs, 0)
+    except Exception as x:                  # a wrong predecessor record may not be a window: a failure, not a crash
+        raise AssertionError("b11_terms: %r" % x)
+    for g, pts in enumerate(games):
+        for pt, o, last in ((1, 2, 2), (3, 2, 4), (5, 1, 6), (7, 0, 8), (9, 0, 10)):
+            arm = _b11_arm(pts[pt - 1]["coins"], o + 1)[2]
+            mine = [w for w in recs if w["kind"] == "w" and w["pt"] == "%d.1.%d" % (g, last)]
+            assert len(mine) == 1 and mine[0]["pred"] == arm, (g, pt, [w["pred"] for w in mine], arm)
+            ghost = ((g, 1, pt, o // 4, "P13" if o % 4 in (0, 2) else "P24"), int(arm == "ON") ^ int(o % 4 in (2, 3)))
+            own = ((g, 1, last, 0, "P13"), int(mine[0]["arm"] == "ON"))
+            stat = terms["hp"] if mine[0]["partial"] else terms["d10"][mine[0]["arm"]]
+            got = stat.get(g, {}).get(tuple(sorted([ghost, own])))
+            assert got is not None and (got > 0) == (arm == "ON"), (g, pt, o, arm, mine[0]["partial"], got)
+
+
 # the B11 mutants (mut_parse.py's B11_MUTS) are proven here, in process, so a seat's pytest run proves them: each row
 # names the check functions it must turn red; mutant 0, the unchanged parser, keeps every check green
 B11_CHECKS = ["chk_c2_recovers_3_25", "chk_c3_recovers_3_0375", "chk_c4_recovers_3_5", "chk_charge_never_negative",
@@ -5934,7 +6211,14 @@ B11_CHECKS = ["chk_c2_recovers_3_25", "chk_c3_recovers_3_0375", "chk_c4_recovers
               # review .173: the test and mutant MEDIUMs
               "chk_a_negative_run_is_not_ordinal", "chk_unprinted_window_in_game_0_at_position_4_and_forced_off",
               "chk_unprinted_window_boundaries_one_live_frame_and_partial",
-              "chk_the_relaxation_expires_after_one_successor", "chk_vr2_caller_passes_a_first_game_other_than_1"]
+              "chk_the_relaxation_expires_after_one_successor", "chk_vr2_caller_passes_a_first_game_other_than_1",
+              # review .174 (ruling R6-A3.11.175): VR9's live frames by window, unknown arms and their texts, void
+              # rounds; the estimator's predecessor shapes that printed no line
+              "chk_vr9_counts_a_points_opening_and_closing_frames", "chk_vr9_window_frames_by_live_frame",
+              "chk_vr9_unknown_arms_take_the_largest_lower_end",
+              "chk_vr9_closing_window_arm_by_its_successor_and_its_mate",
+              "chk_vr9_texts_name_the_windows_of_unknown_arm", "chk_vr9_leaves_void_rounds_out_of_both_sides",
+              "chk_the_carryover_reads_every_unprinted_predecessor_shape"]
 
 
 @pytest.mark.parametrize("name", B11_CHECKS)
