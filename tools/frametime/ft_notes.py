@@ -6,8 +6,10 @@ check over the measured games; disarms() and the VR6 rows that read it). The not
 those two rules left out, so that nothing they exempt is exempt silently:
 
   f_hat    per seat: the settled f_hat values VR2's spread check judges (the measured games: the two extremes and
-           their spread as a percent of the lower one, VR2's own measure) and every value it does not judge (each
-           menu segment and each game before the first measured game), named with its game.
+           their spread as a percent of the lower one, VR2's own measure); the same measure over every game from 0,
+           the reading before that ruling, with its word against the same limit; and every value the check does
+           not judge (each menu segment, each game before the first measured game, any value not above 0), named
+           with its game.
   end line per seat: every disarm line that is the completed sitting's own end and so no VR6 failure (ft_parse's
            disarms(recs, True)), once for the seat that printed it and once on its peer's row.
 
@@ -27,17 +29,25 @@ FIRST_GAME = 1
 
 
 def fhat_note(label, recs, first_game=FIRST_GAME):
-    """The seat's f_hat line: what VR2's spread check judges and what it leaves out."""
-    fh = [(r["g"], r["f_hat"]) for r in recs if r["kind"] == "settled" and r.get("f_hat", 0) > 0]
-    judged = [v for g, v in fh if g >= first_game]
-    left = ", ".join("%s %d" % ("a menu segment" if g < 0 else "game %d" % g, v) for g, v in fh if g < first_game)
+    """The seat's f_hat line: what VR2's spread check judges; the same measure over every game from 0, the reading
+    before ruling R6-A3.11.172 (5) b, so that both readings stand (a rule changed after its data); and every settled
+    value the check does not judge, named with its game: each menu segment, each game before the first measured
+    one, and any value that is not above 0 (the check reads values above 0 only)."""
+    fh = [(r["g"], r.get("f_hat", 0)) for r in recs if r["kind"] == "settled"]
+    judged = [v for g, v in fh if g >= first_game and v > 0]
+    left = ", ".join("%s %d" % ("a menu segment" if g < 0 else "game %d" % g, v)
+                     for g, v in fh if g < first_game or v <= 0)
     if not judged:
         return ("V6 NOTE seat %s: f_hat: no settled line of a measured game prints one; not judged by VR2's spread: %s"
                 % (label, left or "none"))
+    was = [v for g, v in fh if g >= 0 and v > 0]
     return ("V6 NOTE seat %s: f_hat over the measured games (%d and up, %d values) %d..%d, spread %.2f percent of the "
-            "lower (VR2 judges these, limit 2 percent); not judged by VR2's spread: %s"
+            "lower (VR2 judges these, limit 2 percent); over every game from 0 (%d values, the reading before ruling "
+            "R6-A3.11.172 (5) b) %d..%d, spread %.2f percent (%s that limit); not judged by VR2's spread: %s"
             % (label, first_game, len(judged), min(judged), max(judged),
-               100.0 * (max(judged) - min(judged)) / min(judged), left or "none"))
+               100.0 * (max(judged) - min(judged)) / min(judged), len(was), min(was), max(was),
+               100.0 * (max(was) - min(was)) / min(was),
+               "over" if max(was) - min(was) > 0.02 * min(was) else "within", left or "none"))
 
 
 def end_notes(label, recs, peer_label, peer_recs):

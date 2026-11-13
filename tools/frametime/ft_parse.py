@@ -19,7 +19,7 @@ Lines read (all values integers; a value with a decimal point is refused, HIGH 5
   heavy    per operation per game: g op live between pick over menu at_call edge off (B3)
   offthread per game: g span_off hash_t0 hash_t1 (B3)
   refusals at game over and quit: why pairs what:route=count ... (VR6's build half)
-  disarmed once, if FtArm's predicate fails after arming: input pt (the sitting is INVALID)
+  disarmed once, if FtArm's predicate fails after arming: input pt (INVALID, save the completed sitting's own end)
   answer_replay per game under f18=A: g ticks result (F18; settled and point lines carry answer=replay|unmeasured)
 
 The plant gives e_C_lo (V4 3.5) and VR7. Part 3's remainder adds D_up (V4 3.6) and K_up (UPKEEP spans); until
@@ -1417,20 +1417,20 @@ def predecessor(recs, first_game=1):
 
 
 def vr9(recs, bound_us, first_game=1):
-    """VR9, absorption: the gated spans' ON live time per live frame (span_g over live_frames at ON points, us by
-    the settled frequency), frame-weighted over games, at its lower 97.5 percent end, at most the bound
-    max(0, dC_up) / min(1, e_C_lo). Returns (ok, lower end)."""
+    """VR9, absorption: the gated spans' ON live time per ON live frame (us by the settled frequency), frame-weighted
+    over games, at its lower 97.5 percent end, at most the bound max(0, dC_up) / min(1, e_C_lo). Without window lines:
+    span_g over live_frames at ON points. A window log (a point holds windows of both arms): every point's span_g
+    over the frames n of its ON windows; a live frame outside a window is in no divisor. Returns (ok, lower end)."""
     freq = set(r["freq"] for r in recs if r["kind"] == "settled")
     if len(freq) != 1:
         raise Refused("VR9 needs one Stopwatch frequency (got %s)" % sorted(freq))
-    f = freq.pop()
-    g = games_of(recs, first_game)
-    sw = []
+    f, g, sw, ws = freq.pop(), games_of(recs, first_game), [], [r for r in recs if b11_line(r)]
     for k in sorted(g):
-        on = [q for q in g[k] if q["arm"] == "ON"]
-        lf = sum(q["live_frames"] for q in on)
+        on = g[k] if ws else [q for q in g[k] if q["arm"] == "ON"]
+        pts = set(q["pt"] for q in on)
+        lf = sum(w["n"] for w in ws if w["arm"] == "ON" and w["pt"] in pts) if ws else sum(q["live_frames"] for q in on)
         if lf > 0:
-            sw.append((sum(q["span_g"] for q in on) * 1e6 / f / lf, sum(q["n"] for q in on)))
+            sw.append((sum(q["span_g"] for q in on) * 1e6 / f / lf, lf if ws else sum(q["n"] for q in on)))
     est, hw, _ = fw_interval(sw, _ND.inv_cdf(0.975))
     return est - hw <= bound_us, est - hw
 
@@ -2610,13 +2610,15 @@ def window_faults(w):
     return f
 
 
-def window_reconcile(recs):
+def window_reconcile(recs, opn=None):
     """Window ownership and the B11 reconciliation (ruling .138, SHARED.md), visiting every window and every point
     with no early stop: every w line has exactly one owner point line; every point has as many w lines as its line
     counts; B11 lines: one format per log, ordinals 0..k-1 per point, the point's unplanted and planted totals of n,
     sF, sS, sC and sP equal to its line's, each window's own invariants (window_faults), the predecessor and res=1
     marks against the game's order of opened windows (one may carry no line: ruling R6-A3.11.172 (4) e), plant
-    constant per run, and mates on one coin (opposite arms, one coin field). Returns the misses."""
+    constant per run, and mates on one coin (opposite arms, one coin field). Returns the misses. A dict opn takes
+    each window's opened predecessor: id(w) -> None (a game's first), else (arm, prun, the line before w in that
+    order, True when the predecessor printed no line and follows that one); arm, prun None where no line fixes one."""
     miss, owners, wins, after, games = [], {}, {}, {}, {}
     for r in (r for r in recs if r["kind"] in ("p", "w")):
         (owners if r["kind"] == "p" else wins).setdefault(r["pt"], []).append(r)
@@ -2664,14 +2666,15 @@ def window_reconcile(recs):
             games.setdefault(r["game"], []).append(r)
     for g in sorted(games):
         prev, last, runs, coins = None, None, {}, {}    # prev: the arm and plant run of the window opened before w
-        for w in games[g]:
+        for was, w in zip([None] + games[g], games[g]):
             if w["kind"] == "p":
                 prev = (forced.get(g), None)
                 continue
+            (opn if opn is not None else {})[id(w)] = prev and prev + (was, was["kind"] == "p" or id(was) in after)
             want = "none" if prev is None else prev[0]
-            if want is not None and w["pred"] != want:
+            if (want is not None and w["pred"] != want) or (want is None and w["pred"] == "none"):
                 miss.append("window %s.%d: pred=%s, the game's previous window is %s"
-                            % (w["pt"], w["wi"], w["pred"], want))
+                            % (w["pt"], w["wi"], w["pred"], want or "one that printed no line"))
             if last is not None and last["pt"] == w["pt"]:   # one point: ruling R6-A3.11.172 (5) a (FtFrames.cs:346)
                 t0, t1 = _typed(w["tok"], 7), _typed(last["tok"], 7)
                 for t in (sorted(set(t0) & set(t1)) if t0 and t1 else ()):
@@ -2728,9 +2731,10 @@ def b11_terms(recs, first_game=1, beta_us=BETA_US):
       Full stratum: c_a,F = sum over j < 10 of (1/10)(d_aj - d_a10), d_aj the per-frame difference in tenth j's Y
       between predecessor ON and OFF over full windows, HT with the joint current and predecessor probabilities.
       Partial stratum: c_a,P the same difference over a partial window's occupied frames, estimated directly and
-      centred on the unit's baseline (ruling .140 (5): its widths are the centred ones). A
-      window with no predecessor (pred=none) is in its stratum's frames with no difference: nothing precedes it
-      (refutation-c3.md:23 counts C3's cold first window so).
+      centred on the unit's baseline (ruling .140 (5): its widths are the centred ones). The predecessor is the
+      window OPENED before it, by window_reconcile's order: one that printed no line (ruling .172 (4) e) enters with
+      the coin of its ordinal and the arm that the window's own pred states. A window with none (pred=none) is in
+      its stratum's frames with no difference: nothing precedes it (refutation-c3.md:23 counts C3's cold first so).
     - d10[a]: the between-window d_a10 over full windows, R-CARRY's falsifier.
     - D: the direct branch, sign(arm) x (cR + cS) in ON and cS in OFF (R_OFF restored), per frame, for r_U.
     - hp: the uncentred partial part of the charge, (1/2)(F_P c_ON,P + F_P c_OFF,P) without the centring, whose
@@ -2745,15 +2749,13 @@ def b11_terms(recs, first_game=1, beta_us=BETA_US):
             byg.setdefault(r["game"], []).append(r)
     if not byg:
         raise Refused("no B11 window records in a measured game")
-    loss = {"plant": 0, "res": 0, "all": 0}
-    pop, pred_of, idx = [], {}, {}
+    loss, pop, pred_of, idx = {"plant": 0, "res": 0, "all": 0}, [], {}, {}
+    window_reconcile(recs, pred_of)     # each window's opened predecessor: it may have printed no line (.172 (4) e)
     for g in sorted(byg):
         if fh.get(g, 0) <= 0:
             raise Refused("no f_hat for game %d" % g)
-        prev = None
         for i, w in enumerate(byg[g]):
-            pred_of[id(w)], idx[id(w)] = prev, i
-            prev = w
+            idx[id(w)] = i
             if w["pt"] not in valid:
                 continue
             loss["all"] += w["n"]
@@ -2766,9 +2768,7 @@ def b11_terms(recs, first_game=1, beta_us=BETA_US):
     N = sum(w["n"] for w in pop)
     if N <= 0:
         raise Refused("no B11 window frames outside plant runs and res=1 windows")
-    Ng = {}
-    for w in pop:
-        Ng[w["game"]] = Ng.get(w["game"], 0) + w["n"]
+    Ng = dict((g, sum(w["n"] for w in pop if w["game"] == g)) for g in set(w["game"] for w in pop))
     full = [w for w in pop if w["partial"] == 0]
     nfull = sum(w["n"] for w in full)
     npart = N - nfull
@@ -2798,9 +2798,7 @@ def b11_terms(recs, first_game=1, beta_us=BETA_US):
                 hit = v
                 break
         base[c] = hit
-    B, D, d10, hp = {}, {}, {"ON": {}, "OFF": {}}, {}
-    cs = {"ON": {}, "OFF": {}}
-    rows = []
+    B, D, d10, hp, cs, rows = {}, {}, {"ON": {}, "OFF": {}}, {}, {"ON": {}, "OFF": {}}, []
     for w in pop:
         g = w["game"]
         k = 1e6 / fh[g]
@@ -2823,6 +2821,8 @@ def b11_terms(recs, first_game=1, beta_us=BETA_US):
         pw = pred_of[id(w)]
         if pw is None:
             continue
+        o = 0 if pw[2]["kind"] == "p" else pw[2]["wi"] + 1    # a predecessor that printed no line (pw[3]): its ordinal
+        pw = dict(pw[2], arm=w["pred"], run=o // 4, pos=o % 4 + 1, unit=UNIT_OF_POS[o % 4 + 1]) if pw[3] else pw[2]
         sp = 1.0 if pw["arm"] == "ON" else -1.0
         e2 = event((coin_of(pw), coin_value(pw)), (c, v))
         a = w["arm"]
@@ -3936,12 +3936,12 @@ def _need_e(e):
 
 def _two_ec(recs, first_game):
     m, hw, df, elo, ng, miss = e_c(recs, first_game=first_game)
-    return elo >= 0.5, "e_C %.4f, lower end %.4f (needs at least 0.5)" % (m, elo)
+    return elo >= 0.5, "e_C %.4f, lower end %.4f (needs at least 0.5; OFF points by first-window arm)" % (m, elo)
 
 
 def _two_vr3(recs):
     est, hw, df, r1 = dC(recs)
-    return r1 <= VR3_MAX, "lag-1 %.3f (max %.3f)" % (r1, VR3_MAX)
+    return r1 <= VR3_MAX, "lag-1 %.3f (max %.3f; dC's points by first-window arm)" % (r1, VR3_MAX)
 
 
 def _two_vr4(e):
@@ -3962,23 +3962,23 @@ def _two_vr7(recs, first_game):
 
 def _two_vr8(recs, first_game):
     flag, a, b = predecessor(recs, first_game)
-    return not flag, "%s (after ON %d rounds, after OFF %d)" % ("FLAG" if flag else "no flag", len(a), len(b))
+    return not flag, "%s (after ON %d rounds, after OFF %d; points by first-window arm)" % (
+        "FLAG" if flag else "no flag", len(a), len(b))
 
 
 def _two_vr9(recs, e, first_game):
-    e = _need_e(e)
-    elo = e_c(recs, first_game=first_game)[3]
+    e, elo = _need_e(e), e_c(recs, first_game=first_game)[3]
     bound = max(0.0, e["bu"]) / min(1.0, max(elo, 1e-9))
     ok, lo = vr9(recs, bound, first_game)
-    return ok, "gated span time per ON live frame, lower end %.2f us, against %.2f us" % (lo, bound)
+    return ok, "gated span time per ON live frame, lower end %.2f us, against %.2f us%s" % (
+        lo, bound, "" if elo > 0 else " (e_C_lo %.4f is not above 0: floored at 1e-9, the bound binds nothing)" % elo)
 
 
 def _two_carry(e):
-    e = _need_e(e)
-    fals = [a for a in ("ON", "OFF") if e["d10"][a][0] - e["d10"][a][1] > 0]
+    d = _need_e(e)["d10"]
+    fals = [a for a in ("ON", "OFF") if d[a][0] - d[a][1] > 0]
     return not fals, "d_ON,10 %.3f +- %.3f us, d_OFF,10 %.3f +- %.3f us%s" % (
-        e["d10"]["ON"][0], e["d10"]["ON"][1], e["d10"]["OFF"][0], e["d10"]["OFF"][1],
-        ": FALSIFIED in %s" % "/".join(fals) if fals else "")
+        d["ON"][0], d["ON"][1], d["OFF"][0], d["OFF"][1], ": FALSIFIED in %s" % "/".join(fals) if fals else "")
 
 
 def _two_common(recs, e, ref_recs, first_game):
@@ -4482,11 +4482,15 @@ def report(text, peer=None, src="log", peer_src="peer", ref=None, ref_src="refer
         lines_cs.append("CENSUS summary peer seat %s: %s" % ("PASS" if okp else "FAIL", rdp))
     out.append("SITTING %s" % ("complete: games 0 to %d" % LAST_GAME if not miss else "INCOMPLETE: " + "; ".join(miss)))
     out += lines_cs
+    if any(b11_line(r) for r in recs):
+        out.append("NOTE window log: a point holds windows of both arms; its arm and gate fields are its first "
+                   "window's. Every figure below that reads points by arm or gate (dC, VR3, VR4, e_C, e_F, e_S, match "
+                   "power, T_ref, D_up, A3, UPKEEP, U, dF, dS, dP, the longest frame, the stamps, the trend, VR8's "
+                   "predecessor) is the earlier method's per-point reading, none arm-pure. VR5 and VR9 read windows.")
     ok2, why2 = vr2(recs, LAST_GAME, 1)         # the spread over the measured games, as sitting_c's first_game
     out.append("VR2 instrument %s %s" % ("PASS" if ok2 else "FAIL", "; ".join(why2)))
-    ok5, why5 = vr5(recs, 0, LAST_GAME)
-    vr["VR5"] = ok5
-    out.append("VR5 %s %s" % ("PASS" if ok5 else "FAIL", "; ".join(why5)))
+    vr["VR5"], why5 = vr5(recs, 0, LAST_GAME)
+    out.append("VR5 %s %s" % ("PASS" if vr["VR5"] else "FAIL", "; ".join(why5)))
     try:
         est, hw, df, r1 = dC(recs)
         out.append("dC %.1f cycles/frame, one-sided half-width %.1f at z %.4f, df %d" % (est, hw, Z_END, df))
@@ -4494,7 +4498,7 @@ def report(text, peer=None, src="log", peer_src="peer", ref=None, ref_src="refer
         out.append("VR3 %s lag-1 %.3f (max %.3f)" % ("PASS" if vr["VR3"] else "FAIL", r1, VR3_MAX))
     except (Refused, ZeroDivisionError, ValueError) as e:
         out.append("dC not computable: %s" % e)
-    b2 = None
+    b2 = elo = None
     try:
         b2 = hitch(recs)
         try:
@@ -4508,12 +4512,10 @@ def report(text, peer=None, src="log", peer_src="peer", ref=None, ref_src="refer
     except (Refused, KeyError, ZeroDivisionError, ValueError) as e:
         out.append("B2 not computable: %s" % e)
     try:
-        ok7, why7 = vr7(recs)
-        vr["VR7"] = ok7
-        out.append("VR7 %s %s" % ("PASS" if ok7 else "FAIL", "; ".join(why7)))
+        vr["VR7"], why7 = vr7(recs)
+        out.append("VR7 %s %s" % ("PASS" if vr["VR7"] else "FAIL", "; ".join(why7)))
     except (Refused, KeyError, ZeroDivisionError, ValueError) as e:
         out.append("VR7 not computable: %s" % e)
-    elo = None
     try:
         m, hw, df, elo, ng, miss_g = e_c(recs)
         out.append("e_C %.4f, lower end %.4f at z %.4f, df %d, %d games%s" % (m, elo, Z_END, df, ng,
@@ -4539,7 +4541,7 @@ def report(text, peer=None, src="log", peer_src="peer", ref=None, ref_src="refer
         out.append("UPKEEP spans per live frame: ON %.3f us, OFF %.3f us (reported)" % (ua["ON"], ua["OFF"]))
     except (Refused, KeyError, ZeroDivisionError, ValueError) as e:
         out.append("K_up not computable: %s" % e)
-    u = tr = hw4 = u_lo = None
+    u = tr = hw4 = u_lo = okb3 = None
     try:
         du, dsj, rate = d_up(recs)
         out.append("D_up %.3f us per live frame over J=%d calibrations, %d entries" % (du, len(dsj), len(rate)))
@@ -4566,8 +4568,8 @@ def report(text, peer=None, src="log", peer_src="peer", ref=None, ref_src="refer
         # (2), RUL:3452-3454): dC's half-width, and every component at its lower end: dC's, unfloored and unscaled
         # (e_C <= 1); K_up, D_up and A3 are charges with no lower end measured, so 0
         hw4, u_lo = dh, de - dh
-        out.append("U %.2f us = max(0, dC_up %.2f) / min(1, e_C_lo %.4f) + K_up %.3f + D_up %.3f + A3 %.3f; T_ref %.1f us"
-                   % (u, de + dh, elo2, ku, du, a3v, tr))
+        out.append("U %.2f us = max(0, dC_up %.2f) / min(1, max(e_C_lo %.4f, 1e-9)) + K_up %.3f + D_up %.3f + A3 %.3f; "
+                   "T_ref %.1f us" % (u, de + dh, elo2, ku, du, a3v, tr))
         out.append("U without D_up %.2f us (reported)" % (lead + ku + a3v))
         out.append("U without A3 %.2f us (reported)" % (lead + ku + du))
         out.append("U against T_ref: %.3f percent; against 60/144/240 FPS: %.3f / %.3f / %.3f percent; R3 %.0f FPS, "
@@ -4609,17 +4611,16 @@ def report(text, peer=None, src="log", peer_src="peer", ref=None, ref_src="refer
         out.append("stamp estimate not computable: %s" % e)
     try:
         bu, bn, bo = between_after(recs)
-        out.append("between-point spans after ON points %.1f us per transition over %d (after OFF: %d, not used)"
-                   % (bu, bn, bo))
+        out.append("between-point spans after points whose last measured window was ON %.1f us per transition over %d "
+                   "(after OFF: %d, not used)" % (bu, bn, bo))
     except (Refused, KeyError, ZeroDivisionError, ValueError) as e:
         out.append("between-point figure not computable: %s" % e)
     try:
         tr1 = t_ref(recs)
         de, dh, _, _ = dC_us(recs)
         _, _, _, elo3, _, _ = e_c(recs)
-        ok1, why1 = vr1(recs, text, tr1)
-        vr["VR1"] = ok1
-        out.append("VR1 %s %s" % ("PASS" if ok1 else "FAIL", "; ".join(why1)))
+        vr["VR1"], why1 = vr1(recs, text, tr1)
+        out.append("VR1 %s %s" % ("PASS" if vr["VR1"] else "FAIL", "; ".join(why1)))
         vr["VR4"] = vr4(dh, tr1)
         out.append("VR4 %s half-width %.2f us against 1.5 percent of T_ref = %.2f us"
                    % ("PASS" if vr["VR4"] else "FAIL", dh, 0.015 * tr1))
@@ -4646,7 +4647,6 @@ def report(text, peer=None, src="log", peer_src="peer", ref=None, ref_src="refer
                    % ("PASS" if ok6 else "FAIL: ", "; ".join(why6), len(pairs)))
     except Refused as e:
         out.append("VR6 build half not computable: %s" % e)
-    okb3 = None
     try:
         okb3, whyb3, ops = b3(recs)
         edge = sum(v[1] for v in ops.values())

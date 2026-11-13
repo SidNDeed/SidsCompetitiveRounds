@@ -629,10 +629,10 @@ def test_report_end_to_end_reaches_a_verdict():
 
 def test_report_carries_the_specified_figures():
     # round-1 MEDIUM (ft_parse:793): the classification and the figures V4 section 0 and 3.3 to 3.9 report
-    out = _report(_log())
+    out, btw = _report(_log()), "between-point spans after points whose last measured window was ON "
     for want in ("U without D_up", "dF ", "dS ", "dP (process CPU, all threads)", "e_F ", "e_S ", "trend: d_g slope",
                  "last four games' mean", "UPKEEP spans per live frame: ON", "format M's own stamps",
-                 "between-point spans after ON points", "conditional: U bounds the NET", "PASS <= 3, SID <= 5"):
+                 btw, "conditional: U bounds the NET", "PASS <= 3, SID <= 5"):
         assert want in out, (want, out)
     assert P.classify(2.9, 100, 9, 0) == "PASS" and P.classify(4.0, 100, 1, 3.1) == "SID" \
         and P.classify(5.1, 100, 1, 5.05) == "FAIL"
@@ -1434,10 +1434,10 @@ def test_report_adds_a3_to_u():
     out = _report(_log())
     assert re.search(r"^A3 [0-9.]+ us per live frame", out, re.M), out
     assert re.search(r"\+ D_up [0-9.]+ \+ A3 [0-9.]+;", out) and "U without A3" in out, out
-    m = re.search(r"^U ([0-9.]+) us = max\(0, dC_up ([-0-9.]+)\) / min\(1, e_C_lo ([0-9.]+)\) \+ K_up ([0-9.]+) "
-                  r"\+ D_up ([0-9.]+) \+ A3 ([0-9.]+);", out, re.M)
+    m = re.search(r"^U ([0-9.]+) us = max\(0, dC_up ([-0-9.]+)\) / min\(1, max\(e_C_lo ([-0-9.]+), 1e-9\)\) "
+                  r"\+ K_up ([0-9.]+) \+ D_up ([0-9.]+) \+ A3 ([0-9.]+); T_ref [0-9.]+ us$", out, re.M)
     u, dc, e, k, d, a = (float(x) for x in m.groups())
-    assert a > 0 and abs(u - (max(0.0, dc) / min(1.0, e) + k + d + a)) < 0.02, (u, dc, e, k, d, a)
+    assert a > 0 and abs(u - (max(0.0, dc) / min(1.0, max(e, 1e-9)) + k + d + a)) < 0.02, (u, dc, e, k, d, a)
 
 
 def test_verdicts_need_the_complete_sitting():
@@ -2396,7 +2396,7 @@ V6_BOOT = (("alloc", "alloc pin=ok planted=1048600/1048576 empty=0"),
            ("nest", "nest plant asked=2000 x=2020 e=1990 p=2005"),
            # ruling R6-A3.11.149 (1): the patch line names ten methods, typed as FtPhoton.ReportPatched prints them
            ("photon", "photon patches n=10 names=" + ",".join(P.PHOTON_ENTRIES)),
-           ("scope census", "scope census entries=40 wrapped=40"),
+           ("scope census", "scope census entries=44 wrapped=44"),
            # P1's V6 emitter (via the integrator, 12 Nov): a sitting log's control-mutant line
            ("controls", "controls k_mutant=none"),
            # the follow-up to ruling .149, A and B: the writer ledger's disk-log tap (FtLedger.Install) and the room
@@ -2534,8 +2534,8 @@ def _b11_text(games, model, marker=True, settled=True, first_game=1, edit=None, 
                         sum(w["n"] for w in ws) + (2 if pt.get("ghost") else 0),
                         pt.get("zs", 0), pt.get("own_split", 0), p_extra,
                         " t0=%d t1=%d answer=replay" % (t0, t0 + sum(w["sF"] for w in ws)) if sitting else ""))
-            if sitting and pi > 0:
-                L.append("[FRAME-TIME] between g=%d after=%s ticks=2000 calls=4" % (g, ws[0]["pred"]))
+            if sitting and pi > 0:      # after=: the arm of the last measured window, L[-2] (FtFrames.cs:284)
+                L.append("[FRAME-TIME] between g=%d after=%s ticks=2000 calls=4" % (g, L[-2].split()[3][4:]))
             for w in ws:
                 L.append(_b11_wline(w))
         if sitting:
@@ -3248,11 +3248,11 @@ V_SPOILS = (
      "R-SCOPE's patches line out of range (n=10 for 10 names; not attached: PhotonPeer.DispatchIncomingCommands"),
     ("photon failed", lambda: _v_text(boot={"photon": "photon patches report failed: boom"}),
      "R-SCOPE's patches line out of range (the patch report failed (the line prints no n=))"),
-    ("census wrapped", lambda: _v_text(boot={"scope census": "scope census entries=40 wrapped=39"}),
-     "R-SCOPE's census line out of range (entries 40, wrapped 39)"),
-    ("census threw", lambda: _v_text(boot={"scope census": "scope census entries=40 wrapped=40 "
+    ("census wrapped", lambda: _v_text(boot={"scope census": "scope census entries=44 wrapped=43"}),
+     "R-SCOPE's census line out of range (entries 44, wrapped 43)"),
+    ("census threw", lambda: _v_text(boot={"scope census": "scope census entries=44 wrapped=44 "
                                                            "failed=NullReferenceException"}),
-     "R-SCOPE's census line out of range (entries 40, wrapped 40; the census threw (failed=NullReferenceException))"),
+     "R-SCOPE's census line out of range (entries 44, wrapped 44; the census threw (failed=NullReferenceException))"),
     ("bE", lambda: _v_text(cls=_v_cls(bytes_=dict(V6_BYTES, aC=9000))), "bE is 0 or below in games 1, 2, 3, 4, 5, 6"),
     ("recv_offmain", lambda: _p_sub(_v_text(), "1.1.1", " recv_offmain=0 ", " recv_offmain=1 "),
      "p-line faults: recv_offmain nonzero or not printed at 1.1.1"),
@@ -3786,8 +3786,8 @@ def chk_controls_ruled_lines_refused(m):
         assert m.controls_proof(_boot_full(**kw), prof)[0], prof
     for kw, want in ((dict(photon="photon patches n=9 names=" + ",".join(P.PHOTON_ENTRIES[:9])),
                       "CONTROLS R-SCOPE patches OUT OF RANGE: n=9 for 9 names; not attached: "),
-                     (dict(scope_census="scope census entries=40 wrapped=39"),
-                      "CONTROLS R-SCOPE census OUT OF RANGE: entries 40, wrapped 39")):
+                     (dict(scope_census="scope census entries=44 wrapped=43"),
+                      "CONTROLS R-SCOPE census OUT OF RANGE: entries 44, wrapped 43")):
         ok, lines = m.controls_proof(_boot_full(**kw), "boot")
         assert not ok and [x for x in lines if x.startswith(want)], (kw, lines)
         assert lines[-1].startswith("CONTROLS PROOF FAIL: profile boot, k_mutant=none; out of range none (needs "
@@ -4005,7 +4005,7 @@ def chk_plant_from_held_to_the_source(m):
     r = m.parse_line(LOG_PREFIX + "[FRAME-TIME] plant c_plant=80 ticks=10 from=sentinel")
     assert (r["kind"], r["c_plant"], r["ticks"], r["from"]) == ("plant", 80, 10, "sentinel"), r
     a = _c_planted()
-    b = _sub1(a, "c_plant=80 ticks=800 from=0.1.2", "c_plant=80 ticks=10 from=sentinel")
+    b = _sub1(a, PLANT_C, PLANT_C.split(" ticks=")[0] + " ticks=10 from=sentinel")
     ra, rb = m.read(a), m.read(b)
     assert [x for x in rb if x["kind"] == "plant"][0]["from"] == "sentinel"
     assert m.sitting_c(rb, b, rb, b, None, "C:a") == m.sitting_c(ra, a, ra, a, None, "C:a")
@@ -5035,10 +5035,20 @@ def test_fault_fields_are_every_emitted_fault_field():
             assert k in getattr(P, how), (line, k, how)
 
 
+# the plant's line in the sitting-C fixture (_c_planted): FtFrames.cs:285-287 fixes the plant at the end of the first
+# point of a game from 0 with at least W OFF frames, at 3 percent of that point's mean OFF frame time. In _c_text
+# that is 0.1.1 (game 0 replays the first measured game's point, coins (0, 0): windows 1 and 2 OFF, 240 frames)
+# and every frame takes B11_T, 180000 us: c_plant 5400 us, 54000 ticks at FREQ
+PLANT_C = "plant c_plant=%d ticks=%d from=0.1.1" % (B11_T * 3 // 100, B11_T * 3 // 100 * FREQ // 10 ** 6)
+
+
 def _c_planted():
-    """A clean sitting-C log with the plant's boot line (FtPlant.Fix), which the fixture otherwise leaves out."""
-    mark = "[FRAME-TIME] mark cost cyc=50 p90=70 n=1000"
-    return _sub1(_c_text(), mark, mark + "\n" + LOG_PREFIX + "[FRAME-TIME] plant c_plant=80 ticks=800 from=0.1.2")
+    """A clean sitting-C log with the plant's line (FtPlant.Fix), which the fixture otherwise leaves out, after the
+    line of the point that fixes it (PLANT_C)."""
+    t = _c_text()
+    p = [x for x in t.split("\n") if "[FRAME-TIME] p pt=0.1.1 " in x]
+    assert len(p) == 1 and " arm=OFF " in p[0] and " n=480 " in p[0] and " sF=%d " % (480 * B11_T * B11_TICKS) in p[0]
+    return _sub1(t, p[0], p[0] + "\n" + LOG_PREFIX + "[FRAME-TIME] " + PLANT_C)
 
 
 _DISP0 = "cal i=4 why=game3 kind=disp shape=%s n=100000 u=1000000,1000000 p=1030000,1030000" % sorted(SHAPES)[0]
@@ -5076,8 +5086,8 @@ INSTRUMENTS = (
      "R-SCOPE's patches line out of range (n=9 for 9 names; not attached: LoadBalancingClient.OnMessage)"),
     ("the listener scopes", ("FtCensus scope wrap",), '"[FRAME-TIME] scope census entries="',
      "boot_controls: R-SCOPE's census line (wrapped = entries, not failed)", "V",
-     lambda t: _sub1(t, "scope census entries=40 wrapped=40", "scope census entries=40 wrapped=39"),
-     "R-SCOPE's census line out of range (entries 40, wrapped 39)"),
+     lambda t: _sub1(t, "scope census entries=44 wrapped=44", "scope census entries=44 wrapped=43"),
+     "R-SCOPE's census line out of range (entries 44, wrapped 43)"),
     ("the census entry registry", ("FtE.RegisterAll",), '"[FRAME-TIME] census registered="',
      "validity 'census summary'", "V",
      lambda t: _sub1(t, CENSUS_CLEAN, CENSUS_SUMMARY % (len(ENTRIES), len(ENTRIES), 1, 0)), "census summary: "),
@@ -5128,7 +5138,7 @@ INSTRUMENTS = (
      "sitting V: this seat's settled lines print another force= than ON (g=3 force=none)"),
     ("the plant", ("FtPlant.Fix",), '"[FRAME-TIME] plant c_plant="',
      "sitting C's two-arm 'VR2 e_C_lo': FAIL, not computable (it weakens the cross-check)", "C",
-     lambda t: _sub1(t, "\n" + LOG_PREFIX + "[FRAME-TIME] plant c_plant=80 ticks=800 from=0.1.2", ""),
+     lambda t: _sub1(t, "\n" + LOG_PREFIX + "[FRAME-TIME] " + PLANT_C, ""),
      "VR2 e_C_lo FAIL: not computable: e_C needs exactly one plant line with c_plant > 0 (got [])"),
     ("the heavy and off-thread marks", ("FtHeavy.Mark",), '"[FRAME-TIME] heavy g="',
      "validity 'complete sitting': one heavy line per operation per game", "V",
@@ -5501,6 +5511,367 @@ def chk_a_points_totals_hold_both_arms(m):
     assert "; cross-check " in ln and "VR5 OFF-window rule" not in ln, ln
 
 
+def _unprint(text, labels):
+    """The points of labels (each of one window) as points that printed no window: their window lines dropped, their
+    totals 0, windows=0 and live_frames=2 (the point ended inside its second live frame; the build opened its window 0
+    on its first live frame and never measured it), as case E of
+    chk_an_opened_window_without_a_line_is_the_predecessor."""
+    out, hit = [], set()
+    for ln in text.splitlines():
+        mm = re.search(r" ([wp]) pt=(\S+) ", ln)
+        if mm and mm.group(2) in labels:
+            if mm.group(1) == "w":
+                continue
+            ln = re.sub(r" (n|sF|sS|sC|sP)=\d+", lambda x: " %s=0" % x.group(1), ln)
+            ln, k = re.subn(r" windows=1 live_frames=\d+ ", " windows=0 live_frames=2 ", ln)
+            assert k == 1 and " n=0 " in ln, ln
+            hit.add(mm.group(2))
+        out.append(ln)
+    assert hit == set(labels), (sorted(labels), sorted(hit))
+    return "\n".join(out)
+
+
+def _carry_model(arm, pred, pos, partial, j):
+    # ON costs 2 percent direct; a window after a predecessor ON costs 1 percent more when ON and 2 percent more when
+    # OFF, in tenths 1 to 9, at every position
+    return (B11_PC * 2 if arm == "ON" else 0), ((B11_PC if arm == "ON" else B11_PC * 2) if pred == "ON" and j < 9
+                                                 else 0), 0
+
+
+def _unprinted_pred_games():
+    """Games of one-window final points whose window 0 follows a window opened without a line, every assignment of
+    the coins each layout uses once: after a point of k full windows (k = 1, 3, 4) the closing frame opens ordinal k
+    (position 2, position 4, a new run's position 1); or after a point that printed no window, its window 0 (ordinal
+    0). Returns the text and per game (game, the unprinted window's point, its ordinal, its arm, the final point)."""
+    games, lay, empty = [], [], []
+    for k in (1, 3, 4):
+        for c in _enum(3 if k < 4 else 4):
+            first = [(c[0], c[1])] + ([(c[2], 0)] if k == 4 else [])
+            games.append([{"n": [120] * k, "coins": first, "ghost": True}, {"n": [120], "coins": [(c[-1], 0)]}])
+            lay.append((len(games), 1, k, _b11_arm(first, k + 1)[2], 2))
+    for c in _enum(3):
+        games.append([{"n": [120], "coins": [(c[0], 0)]}, {"n": [60], "coins": [(c[1], 0)]},
+                      {"n": [120], "coins": [(c[2], 0)]}])
+        lay.append((len(games), 2, 0, _b11_arm([(c[1], 0)], 1)[2], 3))
+        empty.append("%d.1.2" % len(games))
+    return _unprint(_b11_text(games, _carry_model), empty), lay
+
+
+def chk_an_unprinted_predecessor_gives_its_arm_and_coin_to_the_carryover(m):
+    # ruling R6-A3.11.172 (4) e, the estimator's side (review .173, HIGH 1): b11_terms takes a window's predecessor
+    # from window_reconcile's order of OPENED windows; one that printed no line enters with the arm the window's pred=
+    # states and the coin of its ordinal o (run o // 4, position o % 4 + 1, its unit), o = 0 after a point that printed
+    # no window, else the printed window before it plus one. Every coin assignment once per layout, so each carryover
+    # term is its planted value: 0.9 x (the extra cost after ON) x 104/144 (104 of the 144 windows have a predecessor),
+    # c_ON 0.65 and c_OFF 1.3 percent; the 40 final windows are the windows after an unprinted one
+    text, lay = _unprinted_pred_games()
+    recs = m.read(text)
+    assert m.window_reconcile(recs) == [], m.window_reconcile(recs)[:4]
+    assert len([w for w in recs if w["kind"] == "w"]) == 144 and len(lay) == 40
+    try:
+        e = m.b11_estimate(recs)
+    except Exception as x:                  # a wrong predecessor record may not be a window: a failure, not a crash
+        raise AssertionError("b11_estimate: %r" % x)
+    assert _pct(e["c_on"][0]) == pytest.approx(0.65, abs=1e-9), e["c_on"]
+    assert _pct(e["c_off"][0]) == pytest.approx(1.3, abs=1e-9), e["c_off"]
+    # the exposure of each final window: the unprinted window's coin (game, round, point, run, unit) with the value
+    # its arm gives at its position, beside the final window's own; its sign the unprinted window's arm (R-CARRY's
+    # d_a10 term, sp x y_10 / ff with y_10 above 0)
+    d10 = e["T"]["d10"]
+    for g, pt, o, arm, last in lay:
+        mine = [w for w in recs if w["kind"] == "w" and w["pt"] == "%d.1.%d" % (g, last)]
+        assert len(mine) == 1 and mine[0]["pred"] == arm, (g, [w["pred"] for w in mine], arm)
+        ghost = ((g, 1, pt, o // 4, "P13" if o % 4 in (0, 2) else "P24"), int(arm == "ON") ^ int(o % 4 in (2, 3)))
+        own = ((g, 1, last, 0, "P13"), int(mine[0]["arm"] == "ON"))
+        got = d10[mine[0]["arm"]].get(g, {}).get(tuple(sorted([ghost, own])))
+        assert got is not None and (got > 0) == (arm == "ON"), (g, pt, o, arm, got, d10[mine[0]["arm"]].get(g))
+
+
+def chk_pred_none_after_an_unprinted_window_is_a_miss(m):
+    # ruling R6-A3.11.172 (4) e, tightened after review .173: a window that follows an opened window without a line
+    # has a predecessor even where no line fixes its arm (position 2; a point that printed no window), so pred=none
+    # there is a miss; either arm passes
+    def text(pred, empty):
+        pts = ([{"n": [120], "coins": [(1, 0)]}, {"n": [60], "coins": [(0, 0)]}] if empty
+               else [{"n": [120], "coins": [(1, 0)], "ghost": True}])
+        lab = "1.1.%d" % (len(pts) + 1)
+        edit = (lambda w: w.update(pred=pred) if (w["pt"], w["wi"]) == (lab, 1) else None) if pred else None
+        t = _b11_text([pts + [{"n": [120] * 4, "coins": [(1, 1)]}]], _flat, edit=edit)
+        return (_unprint(t, ["1.1.2"]) if empty else t), lab
+    for empty in (False, True):
+        for pred in (None, "ON", "OFF"):
+            t, lab = text(pred, empty)
+            assert " w pt=%s " % lab in t and m.window_reconcile(m.read(t)) == [], (empty, pred)
+        t, lab = text("none", empty)
+        assert re.search(r" w pt=%s .* wi=0 f0=\d+ pred=none " % re.escape(lab), t), (empty, lab)    # the edit took
+        assert m.window_reconcile(m.read(t)) == [
+            "window %s.0: pred=none, the game's previous window is one that printed no line" % lab], \
+            (empty, m.window_reconcile(m.read(t)))
+
+
+def _vr9_text(windows=True):
+    """Four games whose points switch arms per window, with different ON-window frame counts (300, 360, 240, 420 of
+    662, 840, 240, 660 live frames) and span_g above 0 at every point (first windows ON and OFF); one ON-first point
+    ends with an opened window that printed no line, so its live_frames is two above its n. windows=False drops
+    every window line (a log without them)."""
+    games = [[{"n": [120] * 4, "coins": [(1, 0), (0, 0)], "ghost": True}, {"n": [120, 60], "coins": [(0, 1)]}],
+             [{"n": [120] * 3, "coins": [(0, 0)]}, {"n": [120] * 4, "coins": [(1, 1)]}],
+             [{"n": [120] * 2, "coins": [(1, 1)]}],
+             [{"n": [120] * 5, "coins": [(0, 1), (1, 0)]}, {"n": [60], "coins": [(1, 0)]}]]
+    out, k = [], 0
+    for ln in _b11_text(games, _flat).splitlines():
+        if " p pt=" in ln:
+            k += 1
+            ln = ln.replace(" span_g=0 ", " span_g=%d " % (70000 * k + 11000 * k * k))
+        if windows or " w pt=" not in ln:
+            out.append(ln)
+    assert k == 7 and ("[FRAME-TIME] w pt=" in "\n".join(out)) == windows
+    return "\n".join(out)
+
+
+def chk_vr9_reads_on_window_frames_in_a_window_log(m):
+    # review .173, HIGH 2 (ruling R6-A3.11.173: arms switch per window). In a window log VR9's rate is, per game, the
+    # span_g of all its points over the frames n of its ON windows, weighted over games by that frame count; without
+    # window lines span_g over live_frames at the ON points (first-window arm), weighted by their n, as before. Both
+    # computed here from the line fields and held to vr9's lower end (fw_interval at z 0.975, as vr9 calls it)
+    for windows in (True, False):
+        t = _vr9_text(windows)
+        recs = P.read(t)
+        sw = []
+        for g in (1, 2, 3, 4):
+            pts = [q for q in recs if q["kind"] == "p" and q["game"] == g]
+            if windows:
+                n_on = sum(w["n"] for w in recs if w["kind"] == "w" and w["game"] == g and w["arm"] == "ON")
+                sw.append((sum(q["span_g"] for q in pts) * 1e6 / FREQ / n_on, n_on))
+            else:
+                on = [q for q in pts if q["arm"] == "ON"]
+                sw.append((sum(q["span_g"] for q in on) * 1e6 / FREQ / sum(q["live_frames"] for q in on),
+                           sum(q["n"] for q in on)))
+        assert [n for _, n in sw] == ([300, 360, 240, 420] if windows else [480, 480, 240, 60]), sw
+        est, hw, _ = P.fw_interval(sw, P._ND.inv_cdf(0.975))
+        try:
+            ok, lo = m.vr9(m.read(t), est - hw + 1e-6)
+            no, lo2 = m.vr9(m.read(t), est - hw - 1e-6)
+        except Exception as x:              # a mutant that empties a divisor: a failure, not a crash
+            raise AssertionError("vr9: %r" % x)
+        assert lo == pytest.approx(est - hw, rel=1e-12) and lo2 == lo and ok and not no, (windows, lo, est - hw)
+    # the earlier reading (ON points by first-window arm, over all their live frames) differs on the window log
+    old = []
+    for g in (1, 2, 3, 4):
+        on = [q for q in P.read(_vr9_text()) if q["kind"] == "p" and q["game"] == g and q["arm"] == "ON"]
+        old.append((sum(q["span_g"] for q in on) * 1e6 / FREQ / sum(q["live_frames"] for q in on),
+                    sum(q["n"] for q in on)))
+    e_old, h_old, _ = P.fw_interval(old, P._ND.inv_cdf(0.975))
+    assert abs((e_old - h_old) - m.vr9(m.read(_vr9_text()), 0.0)[1]) > 1e-3
+
+
+def _low_plant(text):
+    """_log's text with every planted OFF point's psC set below its unplanted mean C: e = -(25 - g % 5) / 50 per
+    point, -0.5 to -0.42 by game, so e_C and its lower end are below 0."""
+    unit = 80 * FHAT // 10 ** 6
+    out, k = [], 0
+    for ln in text.splitlines():
+        if " p pt=" in ln and " pn=0 " not in ln:
+            g = int(re.search(r" p pt=(\d+)\.", ln).group(1))
+            n, sc, pn = (int(re.search(r" %s=(\d+) " % f, ln).group(1)) for f in ("n", "sC", "pn"))
+            ln, j = re.subn(r" psC=\d+ ", " psC=%d " % (pn * sc // n - pn * unit * (25 - g % 5) // 50), ln)
+            assert j == 1, ln
+            k += 1
+        out.append(ln)
+    assert k > 0
+    return "\n".join(out)
+
+
+def chk_vr9_floor_sentence_when_e_c_lo_is_not_above_0(m):
+    # review .173 (report line 5): VR9's bound divides by min(1, max(e_C_lo, 1e-9)); the TWO-ARM VR9 detail says so,
+    # with e_C_lo, exactly when e_C_lo is not above 0 (both sides: _log's e_C_lo above 0, _low_plant's below)
+    e = {"bu": 3.5}
+    for neg in (False, True):
+        t = _low_plant(_log()) if neg else _log()
+        elo = P.e_c(P.read(t))[3]
+        assert (elo <= 0) == neg, (neg, elo)
+        bound = 3.5 / min(1.0, max(elo, 1e-9))
+        lo = P.vr9(P.read(t), bound)[1]
+        tail = " (e_C_lo %.4f is not above 0: floored at 1e-9, the bound binds nothing)" % elo if neg else ""
+        got = m._two_vr9(m.read(t), e, 1)
+        assert got == (lo <= bound, "gated span time per ON live frame, lower end %.2f us, against %.2f us%s"
+                       % (lo, bound, tail)), (neg, got)
+
+
+U_LINE = re.compile(r"U ([0-9.]+) us = max\(0, dC_up ([-0-9.]+)\) / min\(1, max\(e_C_lo ([-0-9.]+), 1e-9\)\) "
+                    r"\+ K_up ([0-9.]+) \+ D_up ([0-9.]+) \+ A3 ([0-9.]+); T_ref [0-9.]+ us$")
+
+
+def chk_single_parse_texts_of_review_173(m):
+    # review .173 (report lines 5, 6, 7, 21). The single parse's U line shows the floor min(1, max(e_C_lo, 1e-9)) and
+    # its value follows from the printed parts on both sides of 0 (within their rounding); without window lines no
+    # NOTE line, and the between-point line names the arm of the last measured window; the two-arm details of e_C,
+    # VR3 and VR8 say their points are grouped by first-window arm; a window log's report prints the NOTE once
+    for neg in (False, True):
+        out = m.report(_low_plant(_log()) if neg else _log(), peer=_peer_text())
+        us = [x for x in out.splitlines() if x.startswith("U ") and " us = " in x]
+        mm = U_LINE.match(us[0]) if len(us) == 1 else None
+        assert mm, (neg, us)
+        u, dc, e, k, d, a = (float(x) for x in mm.groups())
+        div = min(1.0, max(e, 1e-9))
+        tol = 0.0051 / div + (0.0 if neg else max(0.0, dc) * 6e-5 / div ** 2) + 0.01
+        assert (e <= 0) == neg and abs(u - (max(0.0, dc) / div + k + d + a)) <= tol, (neg, us)
+        assert "NOTE window log" not in out, neg
+        btw = [x for x in out.splitlines() if x.startswith("between-point spans after ")]
+        assert len(btw) == 1 and btw[0].startswith("between-point spans after points whose last measured window was "
+                                                   "ON "), btw
+    recs, mr = P.read(_log()), m.read(_log())
+    mc, hc, dfc, elo, ng, miss = P.e_c(recs)
+    assert m._two_ec(mr, 1) == (elo >= 0.5, "e_C %.4f, lower end %.4f (needs at least 0.5; OFF points by first-window "
+                                            "arm)" % (mc, elo)), m._two_ec(mr, 1)
+    r1 = P.dC(recs)[3]
+    assert m._two_vr3(mr) == (r1 <= P.VR3_MAX, "lag-1 %.3f (max %.3f; dC's points by first-window arm)"
+                              % (r1, P.VR3_MAX)), m._two_vr3(mr)
+    flag, a, b = P.predecessor(recs, 1)
+    assert m._two_vr8(mr, 1) == (not flag, "%s (after ON %d rounds, after OFF %d; points by first-window arm)"
+                                 % ("FLAG" if flag else "no flag", len(a), len(b))), m._two_vr8(mr, 1)
+    text = _b11_text(_one_run_games(), _c2_model)
+    out = m.report(text, peer=text)
+    assert [x for x in out.splitlines() if x.startswith("NOTE ")] == [
+        "NOTE window log: a point holds windows of both arms; its arm and gate fields are its first window's. Every "
+        "figure below that reads points by arm or gate (dC, VR3, VR4, e_C, e_F, e_S, match power, T_ref, D_up, A3, "
+        "UPKEEP, U, dF, dS, dP, the longest frame, the stamps, the trend, VR8's predecessor) is the earlier method's "
+        "per-point reading, none arm-pure. VR5 and VR9 read windows."], out
+
+
+def chk_a_negative_run_is_not_ordinal(m):
+    # review .173 MEDIUM (report line 8): window_faults holds run to 0 and up as well as wi = 4 * run + pos - 1, so a
+    # window with run=-1 and the wi that relation gives (pos - 5) is a fault at every position; the window as printed
+    # is none (the control)
+    w = [r for r in m.read(_two_points()) if r["kind"] == "w"][3]
+    assert (w["run"], w["pos"], w["wi"]) == (0, 4, 3) and m.window_faults(w) == [], m.window_faults(w)
+    for pos in (1, 2, 3, 4):
+        bad = dict(w, run=-1, pos=pos, wi=pos - 5, unit="P13" if pos in (1, 3) else "P24")
+        assert m.window_faults(bad) == ["window %s.%d: run -1 position %d is not ordinal %d"
+                                        % (w["pt"], pos - 5, pos, pos - 5)], (pos, m.window_faults(bad))
+
+
+def _s0_model(arm, pred, pos, partial, j):
+    # no switched cost in any window (an OFF window's cS stays 0 when an edit forces its arm)
+    return 0, B11_PC * (j % 2), 0
+
+
+def _unprinted_case(games, lab, spoil=None, force="none", first_game=1, edit=None, unprint=()):
+    """The text of games built by _b11_text with _s0_model: edit(window) first, then spoil updates the fields of
+    lab's window 0 (the builder's count 1); the points of unprint printed as points without a window (_unprint)."""
+    def ed(w):
+        if edit:
+            edit(w)
+        if spoil and (w["pt"], w["wi"]) == (lab, 1):
+            w.update(**spoil)
+    t = _b11_text(games, _s0_model, force=force, first_game=first_game, edit=ed)
+    return _unprint(t, unprint) if unprint else t
+
+
+def _misses(m, text):
+    return [x.split(" (")[0] for x in m.window_reconcile(m.read(text))]
+
+
+def chk_unprinted_window_in_game_0_at_position_4_and_forced_off(m):
+    # review .173 MEDIUM (report line 9). window_reconcile reads an opened window without a line in game 0 as in any
+    # measured game (only the menu's game -1 opens none): A, a closing frame's window at position 3 (its arm its
+    # mate's opposite); B, a point that printed no window (its arm unknown: either pred passes; held to the window
+    # printed before, the arm as built would miss). C: position 4's arm is its mate's opposite (position 2, printed
+    # before it). D: a game under force=OFF takes the forced arm for the unprinted window at position 2 (whose coin no
+    # line carries), as under force=ON. The arm as built passes; the other arm is a miss where the lines fix the arm
+    def off(w):
+        w.update(arm="OFF", nm=1)
+        if w["pred"] != "none":
+            w["pred"] = "OFF"
+    cases = (("A", [[{"n": [120] * 2, "coins": [(1, 1)], "ghost": True}, {"n": [120] * 4, "coins": [(1, 1)]}]],
+              "0.1.2", dict(first_game=0), (), "OFF", "ON", True),
+             ("B", [[{"n": [120] * 4, "coins": [(1, 0)]}, {"n": [60], "coins": [(0, 0)]},
+                     {"n": [120] * 4, "coins": [(1, 1)]}]], "0.1.3", dict(first_game=0), ("0.1.2",), "OFF", "ON",
+              False),
+             ("C", [[{"n": [120] * 3, "coins": [(0, 1)], "ghost": True}, {"n": [120] * 4, "coins": [(1, 1)]}]],
+              "1.1.2", {}, (), "OFF", "ON", True),
+             ("D", [[{"n": [120], "coins": [(1, 1)], "ghost": True}, {"n": [120] * 4, "coins": [(1, 1)]}]],
+              "1.1.2", dict(force="OFF", edit=off), (), "OFF", "ON", True))
+    for name, games, lab, kw, empty, built, other, fixed in cases:
+        texts = []
+        for spoil in (None, dict(pred=other)):
+            t = _unprinted_case(games, lab, spoil=spoil, unprint=empty, **kw)
+            assert re.search(r" w pt=%s .* wi=0 f0=\d+ pred=%s " % (re.escape(lab), spoil["pred"] if spoil else built),
+                             t), (name, spoil)
+            texts.append(t)
+        # the window printed before lab's window 0 has the other arm (held to it, the arm as built would miss); in D
+        # every arm is the forced one
+        prior = [ln for ln in texts[0].splitlines() if " w pt=" in ln and " w pt=%s " % lab not in ln][-1]
+        assert " arm=%s " % (built if name == "D" else other) in prior, (name, prior)
+        assert _misses(m, texts[0]) == [], (name, _misses(m, texts[0]))
+        want = ["window %s.0: pred=%s, the game's previous window is %s" % (lab, other, built)] if fixed else []
+        assert _misses(m, texts[1]) == want, (name, _misses(m, texts[1]))
+
+
+def chk_unprinted_window_boundaries_one_live_frame_and_partial(m):
+    # review .173 MEDIUM (report line 10). One live frame: a point whose only live frame was its closing frame prints
+    # no window and live_frames=1; its window 0 was opened as with live_frames=2, so the next window's pred is not
+    # held to the window printed before (whose arm differs here). A partial terminal window: the closing frame falls
+    # inside the last window (live_frames two above the windows' frames, 540 + 2), so no window opens after it and the
+    # next window's pred is held to the partial window's arm (position 1 of run 1, OFF)
+    games = [[{"n": [120] * 4, "coins": [(1, 0)]}, {"n": [60], "coins": [(0, 0)]}, {"n": [120] * 4, "coins": [(1, 1)]}]]
+    for lf in (2, 1):
+        t = _unprinted_case(games, "1.1.3", unprint=("1.1.2",))
+        t = t if lf == 2 else _p_sub(t, "1.1.2", " live_frames=2 ", " live_frames=1 ")
+        last = [ln for ln in t.splitlines() if " w pt=1.1.1 " in ln][-1]
+        assert " arm=ON " in last and re.search(r" w pt=1\.1\.3 .* wi=0 f0=\d+ pred=OFF ", t), lf
+        assert _misses(m, t) == [], (lf, _misses(m, t))
+    games = [[{"n": [120] * 4 + [60], "coins": [(1, 0), (0, 0)]}, {"n": [120] * 4, "coins": [(1, 1)]}]]
+    for pred, want in (("OFF", []), ("ON", ["window 1.1.2.0: pred=ON, the game's previous window is OFF"])):
+        t = _p_sub(_unprinted_case(games, "1.1.2", spoil=dict(pred=pred)), "1.1.1", " live_frames=540 ",
+                   " live_frames=542 ")
+        assert re.search(r" w pt=1\.1\.1 arm=OFF plant=0 partial=1 n=60 .* wi=4 ", t), pred
+        assert _misses(m, t) == want, (pred, _misses(m, t))
+
+
+def chk_the_relaxation_expires_after_one_successor(m):
+    # review .173 MEDIUM (report line 11). What the lines do not fix about an opened window without a line is
+    # unchecked on its one successor only; the window after that is held to the successor as ever. Arm: an unprinted
+    # window at position 2 (no line carries its coin): the next point's window 0 takes either pred, its window 1 is
+    # held to window 0's arm. Plant state: an unprinted window that began a run: the next point's window 0 takes
+    # either res; that point's run 1 (builder's run 2) begins after its plant run 0, so its window 4 needs res=1
+    arm = [[{"n": [120] * 5, "coins": [(1, 0), (0, 1)], "ghost": True}, {"n": [120] * 4, "coins": [(1, 1)]}]]
+    plant = [[{"n": [120] * 4, "coins": [(1, 0), (0, 1)], "plant": (2,), "ghost": True},
+              {"n": [120] * 8, "coins": [(1, 1), (0, 0)], "plant": (1,)}]]
+
+    def spoil(games, wi, **kw):
+        return _misses(m, _unprinted_case(games, "1.1.2", edit=lambda w: w.update(**kw) if (w["pt"], w["wi"]) == (
+            "1.1.2", wi) else None))
+    assert _misses(m, _unprinted_case(arm, "1.1.2")) == [] and _misses(m, _unprinted_case(plant, "1.1.2")) == []
+    assert spoil(arm, 1, pred="ON") == [] and spoil(arm, 1, pred="OFF") == []
+    assert spoil(arm, 2, pred="OFF") == ["window 1.1.2.1: pred=OFF, the game's previous window is ON"], \
+        spoil(arm, 2, pred="OFF")
+    assert spoil(plant, 1, res=0) == [] and spoil(plant, 1, res=1) == []
+    assert spoil(plant, 5, res=0) == ["window 1.1.2.4: res=0, needs 1"], spoil(plant, 5, res=0)
+
+
+def chk_vr2_caller_passes_a_first_game_other_than_1(m):
+    # review .173 MEDIUM (report line 13): validity_set hands its own first_game to VR2's spread. With first_game=2,
+    # game 1's settled f_hat 3 percent low is outside the spread read and passes; with first_game=1 it fails; game 2
+    # low fails with first_game=2
+    def low(text, g, pct):
+        out, n = [], 0
+        for ln in text.splitlines():
+            if " settled g=%d " % g in ln or " why=game%d kind=fhat " % g in ln:
+                ln, k = re.subn(r" f_hat=(\d+)", lambda x: " f_hat=%d" % (int(x.group(1)) * (100 - pct) // 100), ln)
+                n += k
+            out.append(ln)
+        assert n == 2, (g, n)
+        return "\n".join(out)
+    v = _v_text()
+    g1, g2 = low(v, 1, 3), low(v, 2, 3)
+    assert _rows(m, v, first_game=2)["VR2 instrument"] == (True, []), _rows(m, v, first_game=2)["VR2 instrument"]
+    assert _rows(m, g1, first_game=2)["VR2 instrument"] == (True, []), _rows(m, g1, first_game=2)["VR2 instrument"]
+    for text, fg in ((g1, 1), (g2, 2)):
+        ok, why = _rows(m, text, first_game=fg)["VR2 instrument"]
+        assert not ok and len(why) == 1 and why[0].startswith("f_hat spread "), (fg, why)
+
+
 # the B11 mutants (mut_parse.py's B11_MUTS) are proven here, in process, so a seat's pytest run proves them: each row
 # names the check functions it must turn red; mutant 0, the unchanged parser, keeps every check green
 B11_CHECKS = ["chk_c2_recovers_3_25", "chk_c3_recovers_3_0375", "chk_c4_recovers_3_5", "chk_charge_never_negative",
@@ -5552,7 +5923,18 @@ B11_CHECKS = ["chk_c2_recovers_3_25", "chk_c3_recovers_3_0375", "chk_c4_recovers
               "chk_token_level_may_move_between_two_points", "chk_vr2_spread_reads_the_measured_games",
               "chk_the_completed_sittings_own_end_line",
               # ruling R6-A3.11.173: arms switch per window, so a point's totals hold both arms
-              "chk_a_points_totals_hold_both_arms"]
+              "chk_a_points_totals_hold_both_arms",
+              # review .173: the estimator's predecessor that printed no line, pred=none after one
+              "chk_an_unprinted_predecessor_gives_its_arm_and_coin_to_the_carryover",
+              "chk_pred_none_after_an_unprinted_window_is_a_miss",
+              # review .173: VR9's divisor in a window log
+              "chk_vr9_reads_on_window_frames_in_a_window_log",
+              # review .173: the reports' new texts
+              "chk_vr9_floor_sentence_when_e_c_lo_is_not_above_0", "chk_single_parse_texts_of_review_173",
+              # review .173: the test and mutant MEDIUMs
+              "chk_a_negative_run_is_not_ordinal", "chk_unprinted_window_in_game_0_at_position_4_and_forced_off",
+              "chk_unprinted_window_boundaries_one_live_frame_and_partial",
+              "chk_the_relaxation_expires_after_one_successor", "chk_vr2_caller_passes_a_first_game_other_than_1"]
 
 
 @pytest.mark.parametrize("name", B11_CHECKS)
