@@ -186,13 +186,15 @@ class Env:
                 await conn.close()
 
     @contextlib.contextmanager
-    def rewriting(self, old, new):
+    def rewriting(self, old, new, where=None):
         """A mutant: every statement holding `old` (a string, or a compiled
-        pattern) has it replaced by `new` while the block runs. Yields the
-        list of statements it changed."""
+        pattern) -- and `where`, when given -- has it replaced by `new` while
+        the block runs. Yields the list of statements it changed."""
         hits = []
 
         def rw(sql):
+            if where is not None and where not in sql:
+                return sql
             if isinstance(old, str):
                 if old not in sql:
                     return sql

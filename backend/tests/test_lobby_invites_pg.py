@@ -155,6 +155,9 @@ def test_an_invites_sender_gets_the_answer_of_an_absent_id(monkeypatch, route):
         assert await env.delivery(mids["suppressed"][1], u) == "suppressed"
         await env.age(mids["purged"][0], kept_days=main.INVITE_KEEP_DAYS + 1,
                       mail_days=main.MAIL_RETENTION_DAYS + 1)
+        # read, so the mail retention sweep expires the copy and purges the row
+        await env.conn.execute("UPDATE mail_recipients SET read_at = NOW() WHERE message_id = $1",
+                               mids["purged"][1])
         absent = uuid.uuid4()
 
         async def holds(phase):
@@ -174,6 +177,8 @@ def test_an_invites_sender_gets_the_answer_of_an_absent_id(monkeypatch, route):
         await holds("before")
         await env.sweep()
         await env.retention()
+        assert not await env.conn.fetchval("SELECT EXISTS (SELECT 1 FROM mail_messages WHERE id = $1)",
+                                           mids["purged"][1]), "the purged invite's mail row was kept"
         await holds("after")
 
         # the mutant: this route's own condition taken out
@@ -679,4 +684,193 @@ def test_two_transactions_bumping_two_invitees_in_opposite_orders_do_not_deadloc
         assert await race(stmt) == []
         mutant = stmt.replace("ORDER BY r.recipient_id", "ORDER BY r.recipient_id DESC")
         assert "DeadlockDetectedError" in await race(mutant)
+    case(monkeypatch, body)
+
+
+# -- deviation (a): a send ends only its own invitee's stale invite; the cap
+#    counts unexpired rows ------------------------------------------------------
+
+def test_a_send_ends_only_its_invitees_stale_invite_and_the_cap_counts_unexpired_rows(monkeypatch):
+    """A send to x ends x's pending invite that is past its expiry (so the
+    unique pending index admits the new one) and leaves another invitee's
+    stale row to the sweep; eight stale rows, the 2v2 cap, refuse no send.
+    Mutants: the expiry step reaching every stale row of the lobby; the cap
+    counting stale rows."""
+    async def body(env):
+        lid, (h,) = await env.lobby("team", 1)
+        x, y = await env.players(2)
+        ix, iy = await env.invite(h, x, "team", lid), await env.invite(h, y, "team", lid)
+        for i in (ix, iy):
+            await env.age(i, expired_s=5)
+        ix2 = await env.invite(h, x, "team", lid)
+        assert ((await env.row(ix))["state"], (await env.row(iy))["state"]) == ("expired", "pending")
+        for p in await env.players(7):
+            await env.age(await env.invite(h, p, "team", lid), expired_s=5)
+        stale = await env.conn.fetchval(
+            "SELECT COUNT(*) FROM lobby_invites WHERE lobby_id = $1 AND state = 'pending'"
+            "   AND expires_at <= NOW()", lid)
+        assert stale == 2 * main._invite_capacity("team") == 8, stale
+        assert (await env.send(h, await env.player(), "team", lid)).status == 200
+        # mutant 1: the cap counts stale rows (eight of them are pending)
+        with env.rewriting(" AND expires_at > NOW()", "",
+                           where="SELECT id, invitee_player_id FROM lobby_invites") as hits:
+            ans = await env.send(h, await env.player(), "team", lid)
+        assert hits
+        assert ans.status == 409 and ans.body == "invites_full", ans
+        # mutant 2: the send's expiry step reaches every stale row of the lobby
+        q = await env.player()
+        iq = await env.invite(h, q, "team", lid)
+        await env.age(iq, expired_s=5)
+        assert (await env.row(iy))["state"] == "pending"
+        with env.rewriting(inv.placeholder_rx("invitee_player_id"), r"(invitee_player_id = \1 OR TRUE)",
+                           where="SET state = 'expired', ended_at = NOW()") as hits:
+            assert (await env.send(h, q, "team", lid)).status == 200
+        assert hits
+        assert (await env.row(iy))["state"] == "expired", "the expiry mutant left another invitee's row"
+        assert ix2
+    case(monkeypatch, body)
+
+
+# -- deviation (e): invite rows only for clients at or above the floor ---------
+
+def test_invite_rows_reach_only_clients_at_or_above_the_floor(monkeypatch):
+    """A lobby member's state carries the lobby's invites, and an invitee's
+    inbox and unread count carry the invite row, only for a client at or
+    above INVITE_FLOOR_VERSION; an older client sees neither. The mutant
+    calls every client current."""
+    async def body(env):
+        lid, (h,) = await env.lobby("team", 1)
+        g = await env.player()
+        iid = await env.invite(h, g, "team", lid)
+        mid = await env.mail_of(iid)
+
+        async def views(version):
+            st = await env.call(lambda db: main._lobby_state_impl("team", h.sid, Req(h.sid, version), db))
+            ib = await env.call(lambda db: main.mail_inbox(Req(g.sid, version), cursor="",
+                                                           limit=main.MAIL_PAGE_MAX, db=db))
+            ms = await env.call(lambda db: main.mail_status(Req(g.sid, version), db))
+            assert st.status == ib.status == ms.status == 200, (st, ib, ms)
+            listed = [m["id"] for m in ib["messages"]]
+            return ("invites" in st.body and bool(st["invites"]), str(mid) in listed, ms["unread"])
+        assert await views(inv.FLOOR) == (True, True, 1)
+        assert await views(inv.BELOW) == (False, False, 0)
+        monkeypatch.setattr(main, "_invite_ok_for", lambda request: True)
+        assert await views(inv.BELOW) == (True, True, 1), "the floor mutant changed nothing"
+    case(monkeypatch, body)
+
+
+# -- retention: a row and its receipts go seven days after expiry ---------------
+
+def test_an_invite_and_its_receipts_go_seven_days_after_its_expiry_whatever_its_end(monkeypatch):
+    """Delivered, suppressed, declined and expired invites alike: kept six
+    days after expires_at, gone with their receipts at eight. A suppressed
+    invite is never listed for its invitee and never answerable by them: its
+    accept and decline answer as for an unknown id. The mutant keeps a
+    declined row."""
+    async def body(env):
+        lid, (h,) = await env.lobby("team", 1)
+        d, c, e = await env.players(3)
+        u = await env.player(mail_from="nobody")
+        ids = {"delivered": await env.invite(h, d, "team", lid),
+               "suppressed": await env.invite(h, u, "team", lid),
+               "declined": await env.invite(h, c, "team", lid),
+               "expired": await env.invite(h, e, "team", lid)}
+        assert (await env.decline(c, ids["declined"])).status == 200
+        await env.age(ids["expired"], expired_s=5)
+        await env.sweep()
+        assert (await env.row(ids["expired"]))["state"] == "expired"
+        # the suppressed invite, from its invitee's side
+        assert (await env.pending(u))["invites"] == []
+        unknown = uuid.uuid4()
+        for verb in ("accept", "decline"):
+            got = await getattr(env, verb)(u, ids["suppressed"])
+            want = await getattr(env, verb)(u, unknown)
+            assert got == want and got.status == 404, (verb, got, want)
+
+        async def receipts():
+            return await env.conn.fetchval(
+                "SELECT COUNT(*) FROM invite_receipts WHERE invite_id = ANY($1::uuid[])", list(ids.values()))
+        assert await receipts() == 5                       # four sends and the decline
+        for i in ids.values():
+            await env.age(i, kept_days=main.INVITE_KEEP_DAYS - 1)
+        await env.retention()
+        assert all([await env.row(i) is not None for i in ids.values()])
+        for i in ids.values():
+            await env.age(i, kept_days=main.INVITE_KEEP_DAYS + 1)
+        with env.rewriting("WHERE expires_at < NOW()", "WHERE state <> 'declined' AND expires_at < NOW()",
+                           where="DELETE FROM lobby_invites") as hits:
+            await env.retention()
+        assert hits
+        assert await env.row(ids["declined"]) is not None, "the retention mutant deleted the declined row"
+        await env.retention()
+        assert [await env.row(i) for i in ids.values()] == [None] * 4
+        assert await receipts() == 0
+    case(monkeypatch, body)
+
+
+# -- a mail, a reply and a broadcast keyed with an invite's id (section 11) ----
+
+def test_mail_keyed_with_an_invites_id_is_a_new_message_whatever_the_invite(monkeypatch):
+    """The invite's sender sends a direct mail, a reply and a broadcast, each
+    with an invite's id as its key, for a delivered, a suppressed and a
+    suppressed-then-purged invite: each is a new message, and the answers are
+    byte for byte the same across the three but for the new message's id.
+    The mutant keys each invite's mail row with the invite's id."""
+    async def scenario(env, h):
+        lid = await env.create("team", h)
+        d = await env.player()
+        u1, u2 = await env.players(2, mail_from="nobody")
+        r = await env.player()
+        await env.conn.execute("INSERT INTO admin_users (steam_id, granted_at) VALUES ($1, NOW())"
+                               " ON CONFLICT DO NOTHING", h.sid)
+        ids = [await env.invite(h, d, "team", lid), await env.invite(h, u1, "team", lid),
+               await env.invite(h, u2, "team", lid)]
+        await env.age(ids[2], kept_days=main.INVITE_KEEP_DAYS + 1, mail_days=main.MAIL_RETENTION_DAYS + 1)
+        await env.retention()
+        first = await env.mail(r, [h], body="A thread to answer.")
+        assert first.status == 200, first
+        out = {"mail": [], "reply": [], "broadcast": []}
+        for i in ids:
+            k = str(i)
+            for verb in out:
+                if verb == "mail":
+                    coro = lambda db, k=k: main.mail_send(main._MailSendReq(
+                        to=[r.sid], subject="Hi", body="Keyed with an id.", idempotency_key=k), Req(h.sid), db)
+                elif verb == "reply":
+                    coro = lambda db, k=k: main.mail_reply(first["id"], main._MailReplyReq(
+                        body="A keyed reply.", idempotency_key=k), Req(h.sid), db)
+                else:
+                    coro = lambda db, k=k: main.admin_mail_broadcast(main._AdminMailBroadcastReq(
+                        admin_steam_id=h.sid, subject="News", body="A keyed notice.", idempotency_key=k), db)
+                try:
+                    ans = await env.call(coro)
+                except Exception as exc:                       # the mutant's collision
+                    ans = Answer(500, type(exc).__name__)
+                new = ans.get("id") if ans.status == 200 else None
+                if new is not None:
+                    row = await env.conn.fetchrow(
+                        "SELECT kind, CAST(idempotency_key AS text) AS k FROM mail_messages WHERE id = $1",
+                        uuid.UUID(new))
+                    assert row is not None and row["k"] == k, (verb, row)
+                out[verb].append(ans.wire.replace(new, "<id>") if new else ans.wire)
+        return out
+    monkeypatch.setattr(main, "_verify_admin_hmac", lambda *a, **k: True)
+
+    async def body(env):
+        h = await env.player()
+        out = await scenario(env, h)
+        for verb, answers in out.items():
+            assert len(set(answers)) == 1 and json.loads(answers[0])[0] == 200, (verb, answers)
+        real = main._mail_write_message
+
+        async def keyed_by_invite(db, sender_id, *, kind, idempotency_key, **kw):
+            if kind == "invite":
+                idempotency_key = (await db.execute(text(
+                    "SELECT id FROM lobby_invites WHERE sender_player_id = :sid AND mail_message_id IS NULL"
+                    " ORDER BY created_at DESC LIMIT 1"), {"sid": sender_id})).scalar()
+            return await real(db, sender_id, kind=kind, idempotency_key=idempotency_key, **kw)
+        monkeypatch.setattr(main, "_mail_write_message", keyed_by_invite)
+        h2 = await env.player()
+        bad = await scenario(env, h2)
+        assert any(len(set(a)) > 1 for a in bad.values()), ("the key mutant changed no answer", bad)
     case(monkeypatch, body)
