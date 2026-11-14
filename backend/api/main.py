@@ -6297,10 +6297,10 @@ BULLET_STATS_CLEAN_MIN_VERSION = "1.39.4"
 # could BUY a dance but has no surface to play or preview it (the #163
 # "born unusable" class, for a behavior instead of a PNG). SHIP COUPLING
 # (#294/#331): this must be <= the version the dance client actually ships
-# as — if Sid names the release 1.40.0 the gate still opens (1.40.0 >
-# 1.39.7); it must never be RAISED past the shipped version or every
-# client loses the section.
-DANCES_MIN_VERSION = "1.39.7"
+# as. v1.40.0 is the first release tag containing DanceEmotes and no release
+# carries a version between 1.39.6 and 1.40.0, so the floor is exactly 1.40.0;
+# never RAISE it past the shipped version or every client loses the section.
+DANCES_MIN_VERSION = "1.40.0"
 
 # Music albums are version-gated PER SKU, not per kind: each album's floor is
 # the client version whose compiled MusicCatalog carries that album (an older
@@ -6313,14 +6313,14 @@ DANCES_MIN_VERSION = "1.39.7"
 # an unparseable value EXCLUDES its sku from every supported set (fail closed,
 # never version-0) with one loud startup line.
 MUSIC_SKU_MIN_VERSIONS: dict[str, str] = {
-    # SHIP COUPLING (#294/#331): 1.39.7 = the PENDING client release that
-    # ships this album's MusicCatalog entry. Every shipped client is <=1.39.6
-    # and stays excluded, so staging this entry now exposes nothing; if Sid
-    # names a different final version, any >=1.39.7 ship still gates
-    # correctly (same direction rule as DANCES_MIN_VERSION above). NEVER
-    # raise it past the version that actually ships the catalog entry — that
-    # hides the album from the shipping client.
-    "music_album_another_round": "1.39.7",
+    # SHIP COUPLING (#294/#331): 1.40.0 = the first release tag whose
+    # MusicCatalog carries this album. No release carries a version between
+    # 1.39.6 and 1.40.0, so moving this floor from 1.39.7 (the pending
+    # version it was staged at) to 1.40.0 moved no shipped client across it.
+    # Same direction rule as DANCES_MIN_VERSION above: NEVER raise it past
+    # the version that actually ships the catalog entry — that hides the
+    # album from the shipping client.
+    "music_album_another_round": "1.40.0",
     # SHIP COUPLING (#294/#331): 1.40.0 = the client release Sid named for
     # music batch 2 ("ship out v1.40.0") — the first MusicCatalog carrying
     # this album. If he renames the release LOWER than 1.40.0 the constant
@@ -7727,6 +7727,18 @@ _REGION_PICK_BUILD = 1
 # before it.
 _REHEARSAL_FOUR_BUILD = 1
 # Release-train verification plumbing, not a design mechanism: the build
+# marker of the music-delist lane (the sales board, the gold-source pie and
+# the artist item list net music_royalty_reversal and leave out
+# music_album_refund; account deletion clears discord_display_name),
+# reported on /health as `music_delist_build`. It names build identity only.
+# The lane adds no route, and on data without the two new reasons its
+# readers answer as before, so without it the train could not tell a box on
+# the new build from a stale one (learnings 780, 794).
+# A code constant, equal on both boxes by construction, probed by the
+# release train and read by nothing else (#306). Absent on any build
+# before it.
+_MUSIC_DELIST_BUILD = 1
+# Release-train verification plumbing, not a design mechanism: the build
 # marker of the lobby invites batch (migrations 415 and 416, the send
 # receipts and the invite tables, and the five invite routes), reported on
 # /health as `ask6_invites_build`, so a phase of the train can tell a box on
@@ -7812,6 +7824,7 @@ async def health_check(db: AsyncSession = Depends(get_db)):
                               ffa_leave_figure=_FFA_LEAVE_FIGURE_BUILD,
                               region_pick_build=_REGION_PICK_BUILD,
                               rehearsal_four_build=_REHEARSAL_FOUR_BUILD,
+                              music_delist_build=_MUSIC_DELIST_BUILD,
                               ask6_invites_build=_ASK6_INVITES_BUILD,
                               build_manifest=_build_manifest.health_word(),
                               review_eval=_review_rules.review_eval(),
@@ -7875,6 +7888,7 @@ async def health_check(db: AsyncSession = Depends(get_db)):
                               ffa_leave_figure=_FFA_LEAVE_FIGURE_BUILD,
                               region_pick_build=_REGION_PICK_BUILD,
                               rehearsal_four_build=_REHEARSAL_FOUR_BUILD,
+                              music_delist_build=_MUSIC_DELIST_BUILD,
                               ask6_invites_build=_ASK6_INVITES_BUILD,
                               build_manifest=_build_manifest.health_word(),
                               review_eval=_review_rules.review_eval(),
@@ -7900,7 +7914,7 @@ async def health_check(db: AsyncSession = Depends(get_db)):
                               session_report=0)
 
 
-LATEST_MOD_VERSION = "1.40.3"
+LATEST_MOD_VERSION = "1.41.0"
 
 @app.get("/api/v1/mod-version", tags=["System"])
 async def get_mod_version(request: Request = None):
@@ -14418,9 +14432,9 @@ async def shop_sales_board(db: AsyncSession = Depends(get_db)):
     """Sept 1 (Sid — Compare > Players 'Shop Sales', reworked): per-ARTIST
     sales board. One row per living player who has authored shop items: how
     many of their items are up for sale, copies sold/gifted, gross revenue,
-    and what the shop actually PAID them (summed 'artist_royalty' ledger rows
-    — the actual-paid figure, not a recomputed rate, so a future royalty-rate
-    change never rewrites history). Parallel arrays (compare-board client
+    and what the shop actually PAID them (summed 'artist_royalty' ledger rows,
+    net of 'music_royalty_reversal': actual-paid, not a recomputed rate, so a
+    royalty-rate change never rewrites history). Parallel arrays (compare-board client
     convention); the client sorts locally, server order is earned DESC.
 
     Scope rules: house items (artist_steam_id IS NULL) have no seller and are
@@ -14464,7 +14478,7 @@ async def shop_sales_board(db: AsyncSession = Depends(get_db)):
             SELECT p.steam_id, COALESCE(SUM(gt.amount), 0)::bigint AS earned
               FROM gold_transactions gt
               JOIN players p ON p.id = gt.player_id
-             WHERE gt.reason = 'artist_royalty' AND gt.amount > 0
+             WHERE (gt.reason = 'artist_royalty' AND gt.amount > 0) OR gt.reason = 'music_royalty_reversal'
              GROUP BY p.steam_id
         )
         SELECT ap.display_name AS artist,
@@ -15204,11 +15218,11 @@ async def get_gold_sources(
     """Aug 6 item 1 — where this player's gold came from (pie source): SUM of
     POSITIVE gold_transactions by bucket. Buckets map the reason strings the
     award paths actually write (grepped from every GoldTransaction insert
-    site — none invented): artist_royalty; bet_win/team_bet_payout/
-    ffa_bet_win (winnings only — stake-return refunds refund_abandoned/
+    site — none invented): artist_royalty net of music_royalty_reversal; bet_win/
+    team_bet_payout/ffa_bet_win (winnings only — returned principal refund_abandoned/
     team_bet_refund/ffa_bet_refund/admin_reverse/lobby_bet_refund/
-    refund_tournament_forfeit are EXCLUDED entirely: returned stakes are
-    not income); series_win/series_loss/bet_tax + ranked-match xp;
+    refund_tournament_forfeit/music_album_refund is EXCLUDED entirely: not
+    income); series_win/series_loss/bet_tax + ranked-match xp;
     casual-match xp;
     level_reward (own bucket — the every-5-levels ding is the game's
     3rd-largest gold source, #251/#259, and folding it into a mode bucket
@@ -15226,7 +15240,7 @@ async def get_gold_sources(
         raise HTTPException(status_code=404, detail="Player not found")
     rows = (await db.execute(text("""
         SELECT CASE
-                 WHEN gt.reason = 'artist_royalty' THEN 'shop_sales'
+                 WHEN gt.reason IN ('artist_royalty', 'music_royalty_reversal') THEN 'shop_sales'
                  WHEN gt.reason IN ('bet_win', 'team_bet_payout', 'ffa_bet_win') THEN 'betting'
                  WHEN gt.reason IN ('series_win', 'series_loss', 'bet_tax') THEN 'ranked_1v1'
                  WHEN gt.reason = 'xp' AND m.is_ranked IS TRUE THEN 'ranked_1v1'
@@ -15243,15 +15257,15 @@ async def get_gold_sources(
           FROM gold_transactions gt
           LEFT JOIN matches m ON gt.reason = 'xp' AND m.id::text = gt.reference_id
          WHERE gt.player_id = :pid
-           AND gt.amount > 0
-           -- 'admin_reverse' added Aug 9 (bet audit r1 find 10): the 1v1
-           -- reversal refund returns PRINCIPAL, same as its siblings here.
-           -- 'refund_tournament_forfeit' added Aug 22 (lifecycle r1 find
-           -- 12): the terminal-bracket-row refund is principal too.
+           AND (gt.amount > 0 OR gt.reason = 'music_royalty_reversal')
+           -- 'admin_reverse' (Aug 9, bet audit r1 find 10) and
+           -- 'refund_tournament_forfeit' (Aug 22, lifecycle r1 find 12) return
+           -- principal, as their siblings do; so does 'music_album_refund'
+           -- (migration 413: a withdrawn album's price back to its buyer).
            AND gt.reason NOT IN ('refund_abandoned', 'team_bet_refund', 'ffa_bet_refund',
                                  'admin_reverse', 'lobby_bet_refund',
-                                 'refund_tournament_forfeit')
-         GROUP BY 1
+                                 'refund_tournament_forfeit', 'music_album_refund')
+         GROUP BY 1 HAVING SUM(gt.amount) > 0
          ORDER BY SUM(gt.amount) DESC
     """), {"pid": pid})).mappings().all()
     return GoldSourcesResponse(
@@ -41077,7 +41091,7 @@ async def artist_items(steam_id: str, request: Request, db: AsyncSession = Depen
         "LEFT JOIN (SELECT gt.reference_id AS sku, SUM(gt.amount) AS earned "
         "           FROM gold_transactions gt "
         "           JOIN players ap ON ap.id = gt.player_id "
-        "           WHERE gt.reason = 'artist_royalty' AND ap.steam_id = :sid "
+        "           WHERE gt.reason IN ('artist_royalty', 'music_royalty_reversal') AND ap.steam_id = :sid "
         "           GROUP BY gt.reference_id) roy ON roy.sku = si.sku "
         "WHERE si.artist_steam_id = :sid "
         "ORDER BY si.created_at, si.id"
@@ -45254,7 +45268,7 @@ async def delete_player_data(steam_id: str, request: Request, sig: str = Query(.
     player.steam_id = f"deleted_{short}"
     player.display_name = "[Deleted User]"
     player.discord_id = None
-    player.discord_username = None
+    player.discord_username = player.discord_display_name = None
     player.ranked_enabled = False
     player.deleted_at = datetime.now(timezone.utc)
 
@@ -56485,7 +56499,7 @@ FFA_SUDDEN_DEATH_MIN_VERSION = "1.37.0"
 # cr_prox1 client capability in the SAME ship commit as that version bump.  It
 # is deliberately inert at the oldest admitted version in this authoring
 # commit; the two-SHA release order raises it only after the server is live.
-FFA_PROXIMITY_VICTIM_MIN_VERSION = "1.38.7"
+FFA_PROXIMITY_VICTIM_MIN_VERSION = "1.41.0"
 FFA_CONFIG_DEFAULTS = {
     "score_target": 5, "card_candidates": 5, "initial_picks": 1,
     "card_cap": 5, "same_card_rule": False,

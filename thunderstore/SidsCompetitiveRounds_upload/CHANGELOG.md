@@ -1,3 +1,360 @@
+## v1.41.0 — 2026-11-13
+
+**Player Cards arrive in the client**
+
+- Player Cards arrive in the client: collectible cards of the people who play
+  here, under a new Collection tab in the Shop group, with Open Packs, Binder
+  and Get packs views. A pack open that is interrupted can be recovered.
+- Packs come from a free daily claim, from buying with gold or shards, and as
+  a chance reward when you win a ranked series or a ranked FFA match.
+- Players who have run the mod from a Steam account and are not banned have a
+  card in the pool. A card's rarity is its player's rank in the card pool on
+  the day of the pull, and the pool's top two are Legendary.
+- Any card can also come out Foil or Signed; a Signed card carries its
+  player's autograph.
+- A card's picture is the player's public Steam profile picture until their
+  own game uploads their in-game character. The cards of a player who deletes
+  their data are cleaned up.
+- The card picture is now framed on the character itself, so a gun or a
+  one-sided cosmetic widens the frame instead of pushing the body off centre.
+  Because the framing changed, every stored card picture is out of date: the
+  first time you open Player Cards on this version, your game draws your card
+  picture again and uploads the new one. Nothing needs to be done by hand.
+- Batch shard: several cards can be turned into shards in one batch, and a
+  discard sends one request per discarded copy. A card you received in a trade
+  gives no shards when discarded, and a discarded card still shows in your
+  pack history, stamped as discarded.
+- Shard on the fly: the pull tab's five cards carry the binder's actions, and
+  Shard dupes there counts only the shown pack's cards you own right now.
+- The binder can be ordered by where each card's player stands on the board
+  today.
+- Card trading: a Trades view in the Collection with Incoming, Sent and Recent
+  sections, where you propose trades and answer the ones sent to you. A Card
+  trading row in the Player Cards settings turns card trading on or off.
+- Two more rows in the Player Cards settings choose whether other players can
+  see which cards you hold, in the mod and in Discord, and whether your rare
+  pulls may be posted in Discord with your name.
+- Dance on my card: choose one of your dances in the Player Cards settings and
+  your card plays it as an animation.
+- Card editions end and roll over on a schedule.
+- The Settings picture row now shows your whole card as other players see it.
+- Your Top card is named on your card face with its art, in that card's own
+  ink colour. Its thumbnail sits inside the badge frame instead of over its
+  rounded corners, and its art uses the same rectangle on the server-drawn
+  cards as in the game.
+
+**Player Cards reach Discord**
+
+- Player Cards drawn for Discord carry the Top card's art, placed where the
+  game draws it (bug 408).
+- In Discord, /pack and /binder show your packs and collection as images,
+  /daily opens your daily pack, /buypack buys one with gold or shards, and
+  /card shows a player's full card and posts its dance as a GIF once its
+  preview is ready.
+
+**The Discord bot**
+
+- The leaderboard channel carries the 1v1, 2v2 and FFA boards, and a board is
+  replaced only after its new copy is posted.
+- Sync tournaments: one rule decides who counts toward the start vote, and
+  availability checks go only to eligible entrants.
+
+**Tournaments**
+
+- Double-elimination brackets for 9 to 15 players are built in full: a field
+  of 9 to 14 could not lock before, and in a field of 15 one player could be
+  out after a single loss.
+- A withdrawal after the lock no longer stalls the bracket. When the place
+  stays empty, a match missing one player becomes a bye for the player who is
+  there, a match with no player in either place is passed over, and a
+  tournament whose final is decided that way completes. Before, such a match
+  waited for good and held up the grand final.
+- In the in-game bracket, a match with no player in either place shows dashes.
+- After a tournament locks, the server refuses a leave request sent from the
+  game; the game then says "Couldn't leave the tournament - it may have locked
+  or started" and refreshes the Tournaments tab. The rule book now says that
+  after the lock you withdraw by answering No on the bot's availability-check
+  DM.
+- The availability-check DM's buttons act only for the SCR account now linked
+  to your Discord account: on a DM sent before an unlink or relink they say
+  "Couldn't use this button" with the reason, and the server checks the link
+  again when it records a No.
+- A Yes pressed on the availability-check DM after your No went through no
+  longer shows "Confirmed": the bot answers that you have already withdrawn.
+  It gives that answer until it sends you a new availability-check DM for that
+  tournament, prepared after your No went through, or until the bot restarts.
+- A tournament action button pressed while the Tournaments tab is out of step
+  with the tournament data the game holds does nothing: it says "Tournament
+  info is refreshing - try again in a moment" and refreshes the tab.
+- The Force Start count on the Tournaments tab counts only the votes the start
+  rule counts.
+- The bot's tournament-complete post names only the places that were awarded,
+  and its bracket progress leaves out byes with no player in them.
+
+**Title ladders move into the Shop**
+
+- Title ladders move into the Shop's Titles section, and the separate Titles
+  tab is gone. Each ladder has five tiers, and clicking a ladder opens its
+  tiers in a dropdown under it.
+- A player who has not started a ladder is told so, instead of being told the
+  ladder service is unavailable.
+- Titles up to 16 characters show whole on the FFA leaderboard and recent-match
+  rows (they were cut at 12 and 14), and the F5 board fits a name and a title
+  in its column.
+- The Voidshot and Kingslayer titles are retired; everyone who bought one got
+  the price back in gold.
+
+**Settings is rebuilt around eight sub-tabs**
+
+- Controls: a new Controls sub-tab in Settings rebinds the mod's own keys and
+  the game's controls.
+- Settings is rebuilt as eight sub-tabs of one-line rows, with a help pane for
+  the rows. Every sub-tab except Privacy & account has a reset: to its
+  recommended values, or on Controls to the default keys.
+- A controller can drive the Settings page: the shoulder buttons move between
+  sub-tabs and the bottom face button activates a row.
+- The language row names the detected language as a word ("Detected:
+  Svenska").
+- Damage numbers: optional numbers above players for damage dealt and health
+  healed, Off, Me or Everyone, Off by default.
+- Avatar defaults: two presets. Your modded avatar is worn wherever everyone
+  runs the mod; a vanilla avatar is worn in Quick Match and in any game where
+  someone does not, because modded face items show as empty slots to them. The
+  game switches for that room and gives your own face back when you leave.
+  Only presets a base-game player's game can load are offered as the vanilla
+  default.
+- HP precision: the HP precision setting existed but had no row, so no one
+  could reach it. It now has a row in Settings.
+- The leaderboard's active-player count and the Show inactive players row
+  state the inactivity window the server advertises, or no day count when it
+  states none, instead of a fixed 90 days, and update when the window arrives.
+- The bug-report form opens from a bug icon in the page title row beside Mail
+  and Music. The box near the bottom of Settings is gone.
+- The F5 footer gains a scrmod.com button after Thunderstore.
+- On a window that is not 16:9, the mod now clears the bands above and below
+  the game to black. Before, a closed page left its title, Back button and
+  footer behind in those bands until something else drew there.
+
+**Room rules stay with the room**
+
+- Same Cards works in every mode: in 1v1 when both players want it, and in
+  hosted modes when the host turns it on. 2v2 and 1v2 hosts can turn friendly
+  fire off.
+- Friendly fire and Same Cards are fixed on the room when it is created and
+  reported by every history surface and by the Discord result posts.
+- A strip at the top centre names the room's rules for the whole game, Same
+  Cards and friendly fire off included, so a player who joined after they
+  were set, or reconnected, can still see them. The config key [UI]
+  ShowRoomRulesIndicator hides it.
+- FFA history shows the settings frozen for that game.
+
+**2v2, 1v2 and FFA players can come back mid-game**
+
+- 2v2 and 1v2: when a player drops, the game waits at the next point boundary
+  so they can come back. If they do not return in time, the disconnect is
+  handled as before. This needs every player in the room on 1.41.0; a room
+  with an older client in it plays exactly as before.
+- FFA late entry (a player joining a game already under way) and FFA mid-game
+  readmission (a dropped player let back into the same game, with their card
+  picks made for them while they are away) are on in FFA rooms where every
+  player runs 1.41.0. With an older client in the room, neither is used.
+
+**Ranked FFA handles joins and mixed versions**
+
+- Joining a ranked FFA room where every player runs 1.41.0: the game follows
+  each player's connection and the match start waits while players connect.
+  If a player cannot connect, the lobby re-forms with the players still there,
+  or closes before the match.
+- A ranked FFA counts for rating only when every player in the room runs
+  1.41.0 or newer, the version with the Lifestealer fix below; otherwise the
+  game is unrated.
+- In a ranked FFA where players run different mod versions, the closing seat
+  collects every player's card pick again, older builds' picks included
+  (bugs 435, 436).
+- Attempted fix for bugs 389 and 437-439: Lifestealer kept draining the one
+  player it first picked, anywhere on the map. In rooms where every player
+  runs 1.41.0 or newer, it now picks its target again each time it activates,
+  the way the game itself picks one.
+- Early leave: a player who leaves a ranked FFA before the field has scored
+  four half points in total, whether or not any became a full point, is not
+  rated for that game and earns no game gold or XP.
+- One earlier ranked FFA game was corrected under this rule: the player who
+  left it early had that game's rating change reversed. Gold and XP were not
+  touched, and no other player's result in that game changed.
+- The Info library's FFA, economy and rule-book pages and the FFA mode text
+  state the early-leave rule above. They described an older one: two half
+  points, and only while the leaver's own tally was still zero.
+- An FFA result sent by a mod version older than 1.39.1 is refused when it
+  names a player who left during that game, so update the mod.
+- The ranked-FFA shutout achievements say they count the players who finished
+  the game, which is the rule the server applies.
+- The in-game post-session report tells a player whose connection failed
+  apart from one who chose to leave.
+
+**Disconnected 2v2 series wait for review**
+
+- A 2v2 series in which a player disconnects is no longer settled
+  automatically by the lead-forfeit. The games already reported stand, rating
+  and gold do not move, and an admin awards or voids the series from the admin
+  panel. Each game's number comes from the series' own recorded score, so a
+  player who rejoins numbers the games the same way as everyone else.
+- 2v2 disconnects are reported more reliably, and a backup report no longer
+  overrides the real one (bugs 384, 385).
+
+**Queues widen and rooms choose a region**
+
+- The 1v1 ranked search accepts any rating once you have waited two minutes.
+  If the server accepts the queue leave that your cancel or your ranked-off
+  switch sends, while it still has your search, and you search again within 30
+  seconds, your wait time carries over, unless it has reached the 30-minute cap
+  by then or the server restarted in between.
+- 2v2, 1v2 and FFA queue rooms and hosted lobbies pick their region from every
+  member's own ping measurements.
+- Ranked 1v1: when both players' ping maps arrive in time, the room moves to
+  the shared region with the lowest worst ping for the pair, within each
+  player's own limit, if that beats the usual region by more than 20 ms.
+- Ranked 1v1 rooms start from the two players' home regions. The region your
+  game was last connected to, for example after quick play, decides a room
+  only when both players were connected to a region one of them calls home,
+  or when no home region was sent or none that the server can confirm is
+  still in service. Before, it could keep a pair on a region far from one of
+  them whatever their ping maps said (bug 457). Each player's limit is now
+  measured against both players' home regions (the region each game pings
+  lowest, and its cached home region when the game measured it) and the
+  region the room would otherwise get, so the limit no longer keeps a pair
+  from the best region they share when each game measured the other's
+  lowest-ping region.
+- The server refuses a region ping map that carries an entry with no region
+  code, like every other malformed map. Before, such a map was stored and
+  could decide a ranked 1v1 room.
+
+**Connection trouble explains itself**
+
+- While the match connection is failing, a corner notice says so and clears
+  when data flows again. At a disconnect that message is handed over to the
+  disconnect notice instead of being torn down.
+- A game you try to spectate that the server refuses shows why.
+
+**Session reports show more of each game**
+
+- Builds pages: one compact block per game. Totals become four pages, every
+  number taken from a named recorded field. The score race plots rounds won
+  against the mode's win target.
+- Each game in the report shows its gold in every mode, and its XP in 1v1 and
+  FFA games.
+- After a set it has watched, the broadcast pages through that set's
+  post-session report, the same pages players see in the game. When the
+  report is unavailable, it shows its own report screens instead.
+- The broadcast's idle showcase walks every Compare category.
+
+**Mail can reach Discord**
+
+- Players who link their Discord account can also get new mail as a Discord
+  DM and reply from Discord. The Discord relay switch in the mail settings
+  turns it on or off for you.
+
+**Custom music meets the game's level**
+
+- The custom music slider's top is now measured against the game's own music
+  level, so custom tracks no longer play far louder than the game, and clips
+  are evened out to one target level. A slider stored at 100 moves to the new
+  default once. The first track after a silent main menu fades in.
+
+**Log uploads are opt-in and prepared before sending**
+
+- Automatic log upload, opt-in and off by default, in Privacy & account: when
+  you leave a room you played in, the game sends the same bundle the
+  bug-report form sends. The bundle is built off the game thread, and turning
+  consent off stops an upload already under way.
+- Revoking consent clears an open chat line and its resume notice as well as
+  the stashed draft.
+- The first-run data-consent prompt says in red what stops working without
+  consent: the leaderboard, ranked matchmaking, chat, player cards and bug
+  reports with logs. Decline now asks you to confirm first; Back returns to
+  the prompt.
+- Log handling for bug reports and automatic uploads has been updated.
+- The bug-report form and the log viewer are prepared off the game thread, and
+  match history is read a little at a time each frame, so neither stalls the
+  game.
+
+**Five community faces**
+
+- Gold headband, Orbit, Pumpking Hat, leafy mushroom and Red Scarf join the
+  shop in the detail slot, marked out of stock until each face's artist opens
+  sales. Until then the server refuses a purchase ("Not for sale yet"), and a
+  face's artist can still gift it. They need 1.41.0: the server leaves them
+  out of an older version's shop and refuses its purchase of one, and it
+  accepts a gift of one only when the last mod version it recorded for the
+  recipient is 1.41.0 or newer.
+
+**Fixes**
+
+- Attempted vanilla fix, in rooms where every player runs 1.41.0: a shot
+  fired in the last moments of a round no longer leaves the gun on that
+  reload when the next round starts; the round revive now clears the weapon
+  cooldown like the other timers it resets.
+- Attempted fix for bugs 406 and 407, in rooms where every player runs
+  1.41.0: poison and other damage over time converge on every seat. Each tick
+  is applied once per life, a tick for a life this seat has not reached yet
+  waits for it, and a player no longer appears to take no poison damage on the
+  other screen.
+- Attempted vanilla fixes: a Saw's particle effects stop once its target is
+  dead, and in rooms where every player runs 1.41.0 a dead player no longer
+  shields a living one from a Saw. Lifestealer's range ring is drawn at the
+  range it really reaches.
+- The avatar you picked is the one that shows at card pick and at spawn, not
+  the default face (bug 444).
+- Esc closes chat without sending and keeps your draft; switching to another
+  account clears the previous account's draft (bugs 351, 382).
+- The Recent Ranked Series page no longer renders blank when a player's name
+  holds a character the game font cannot draw; every list-panel name passes
+  one glyph sanitiser.
+- A player name with angle brackets in it is no longer read as empty or cut
+  short: the mod shows those brackets as round ones, so `<Name>` reads
+  (Name) and `AC<DC>Fan` reads AC(DC)Fan.
+- An abandoned 1v2 series is closed after 14 days with no game, with no
+  winner and no award, and the solo seat can no longer change in the middle of
+  a 1v2 series. A decided 1v2 game reported after its series was cancelled
+  still pays its gold and XP.
+- Bet refunds return the exact stake, and one refund that fails no longer
+  blocks the others.
+- A word in the chat filter that is also a common given name was removed, so
+  that name is no longer filtered.
+- Moderation: a mute reason containing a null character, which the database
+  cannot store, is refused with a message saying so instead of a server error
+  that lost the mute.
+- An oversized cosmetic upload states the exact limit it enforces.
+- The Translate portal button, on the backup connection, checks the secure
+  connection first and opens the portal in the same press when it answers; a
+  timer keeps retrying in the background, and no restart is needed.
+- The server lists shop items that share a price in one fixed order, so the
+  shop shows them in the same order on every visit while its items stay the
+  same.
+- Nineteen community faces that were already in the shop show their own
+  descriptions instead of the general "community cosmetic" line. In 1.41.0
+  these descriptions are also in Spanish, Russian, Ukrainian and Swedish.
+- The Star Earmuffs face has new art.
+- A new body colour, Demonic, is in the shop. Every client text that became
+  translatable since 1.40.3 (over a thousand, Demonic's shop text and the new
+  card trading, mail relay and dance-reason texts among them) ships in
+  Spanish, Russian, Ukrainian and Swedish; eight Spanish labels that still
+  showed English are translated.
+
+**Schema changes:** migrations added since v1.40.3, by number: 306, 307, 308,
+309, 310, 311, 312, 313, 314, 315, 316, 317, 318, 319, 320, 321, 324, 325,
+327, 330, 331, 332, 333, 336, 337, 338, 340, 341, 342, 348, 349, 351, 352,
+353, 354, 355, 356, 358, 359, 360, 361, 363, 364, 365, 366, 367, 368, 370,
+372, 373, 376, 377, 378, 379, 380, 383, 384, 385, 386, 387, 388, 389, 390,
+391, 392, 393, 396, 397, 398, 399, 400, 401.
+Rollback files ship beside the newer ones; 374 and 375 are rollback-only files
+for the mail relay.
+
+- 363 revoked four ranked-FFA shutout awards below the finishing-count rule.
+- 398 makes the five community faces visible in the shop once this release is
+  published; they stay out of stock until their artists open sales.
+- 399 replaces the placeholder description of nineteen community faces already
+  in the shop, once this release is published.
+
 ## v1.40.3 — 2026-09-09
 
 **The ranked room's region is measured again**
@@ -1027,441 +1384,5 @@ purchase royalty stamp is fail-closed on 279's columns).
 (`i18n_portal_sessions.first_use_at`), 246 (night-pack + gradient shop
 rows), 247 (cosmetic release + Spring rev 3), 248 (53 i18n keys), 249
 (212 translation seeds), 250 (release notes, five locales).
-
-## v1.39.1 — 2026-08-22
-
-**Tournaments: deadline check-ins and tidier histories (Aug 22)**
-
-- **Async deadline check-in DMs.** On the last day of an async match's
-  7-day window, the bot DMs both players asking whether they've made
-  contact and plan to play today - three buttons: yes (extends the deadline
-  24 hours - once per opponent per tournament, each player has their own
-  extension), "I reached out - no response / they quit", "not yet - still
-  coordinating". The buttons survive bot restarts and verify the clicker
-  owns the linked account.
-- **One player wanting to play is no longer punished for the other's
-  silence.** When an async match times out with neither side ready, a
-  player who had answered the check-in now wins a
-  normal forfeit instead of both players being eliminated - the exact
-  losers-bracket double-DQ that hit this week is impossible now. (That
-  match was also repaired by hand: the willing player advances with a
-  fresh 7-day deadline.)
-- **The tournament Forfeit button is deliberately held for a dedicated
-  lifecycle pass.** Forfeited finals still need correct podium minting,
-  terminal series need wager settlement, and late reports need isolation
-  from already-resolved matches.
-- **Sync and async tournament histories are separate now.** The Recent
-  Tournaments popup shows only the sub-tab's own kind, and your
-  placements line lives in that popup instead of the page bottom.
-- **The FFA match-point banner no longer renders styled names HUGE.** A
-  nametag size tag reaching the banner made the name enormous; names keep
-  their color/bold styling but geometry tags are stripped.
-- **FFA game-over freeze fixed** (bug 261): once a player in slot 0/1 had
-  left, every other seat froze on the VICTORY screen because the rematch
-  popup crashed looking up an empty team's color.
-- **Muted-players header fixed** (bug 259): a styled nametag no longer
-  renders as "(color=#55CCFF" - styling tags are stripped before
-  truncation, and real angle brackets in names still show as parens.
-- **Invisible Toxic Cloud** (bug 260): two fix designs were refuted in
-  review (the second disproved the diagnosis itself); the report stays
-  open with a field diagnostic riding this release to catch the real
-  mechanism in production logs.
-- **New cosmetics**: Seasonal Spring (animated, 8 frames) and Nuclear
-  glasses, both by the community artist behind the Poison set.
-- **FFA early-leave grace goes LIVE with this release** - the client now
-  reports the leave-time score the server rule has been waiting for. A
-  second one-off correction (migration 236) repaired the one affected
-  game played since the first backfill. The async losers-bracket repair
-  is migration 237.
-
-Schema changes: migrations **238** (tournament check-ins + deadline
-extensions), **239** (machine-translation seeds for 44 new strings x 4
-languages), **240** (cosmetic release flips).
-
-**Bug-report sweep (Aug 21)**
-
-- **2v2 DC-rejoin no longer creates duplicate series** (bug 245, dedicated
-  hardening pass after four review rounds). The disconnect report has marked
-  a series "incomplete, admin decides" since the manual-control policy, but
-  the queue's resume path still only looked for the legacy paused state — so
-  four players re-queuing after a DC always got a brand-new series, leaving
-  up to three live rows for one sitting in the 2v2 tab. Re-queuing within 30
-  minutes (queue OR hosted lobby) now re-locks the four onto their original
-  series (same teams, score kept, spawn/room state reset); every same-four
-  creation path shares one serialization and resolves the WHOLE family
-  (zero-game husks superseded with bets reconciled); a late disconnect
-  report about the abandoned room can no longer forfeit the resumed sitting
-  (room fence + wall-clock relock stamp); lobby wagers staged against a
-  fresh series are refunded rather than bound when the Start adopts a
-  series with a decided game; and the continuation self-heal picks the row
-  the caller can actually use, never a husk.
-- **The broadcaster switches to the better game** (bug 244). The rotation
-  rule could only fire when the rotation set held two games, so a lone
-  higher-priority game (a 2v2 outscoring the watched 1v1, or a lone
-  tournament game) could never preempt — the seat stayed on the lesser game
-  indefinitely. The dwell window (no switching inside 3 minutes) is
-  unchanged.
-- **Tournament games are labeled in the stream posts** (bug 250). The
-  matchup lines said "Ranked 1v1" for tournament games because the label
-  consulted the narrow mandatory-spectate classifier; a display-only
-  resolver now follows the game to its series and labels "Tournament 1v1"
-  (with the trophy) for sync, async, and code-room tournament games alike.
-- **Spectators see both teams' cards in 2v2** (bug 243). Spectator seats
-  never extended the card-bar array past vanilla's two, so team 2's cards
-  threw index errors and both visible bars carried team 1 — every spectator
-  saw one team's cards. Spectator seats now get the same four-bar layout as
-  fighters.
-- **Spectators see Refresh block resets** (bug 241). The spectator poison
-  path rendered only lifesteal; the block-cooldown reset from "block back
-  when you deal damage" now renders too, so a Poison+Refresh fighter's
-  block no longer reads as permanently down on spectator seats.
-- **Spectator crown error storm fixed** (bug 251). A rematch could leave the
-  crown pointing at a severed body anchor on spectator seats, erroring every
-  frame until the room died; the between-games flush now resets the crown
-  and the update skips severed states.
-- **"Leave All Queues" actually clears 2v2/1v2 beliefs** (bug 247). The
-  escape hatch missed the 2v2/1v2 pending slots and the team queue state, so
-  a DC'd player stayed "in a match" to the spectate gate with no way out.
-- **Leaderboard profile stat lines reorganized** (bug 218, Stan's format):
-  1v1 now matches the 2v2/FFA line shape with its board rank, 1v2 groups
-  with the modes, and a blank line separates the block from the match
-  summary.
-- **Async tournament wording** (bugs 219/220): "Once you win a BO3 (first to
-  2 games)..." — two players read "2 BO3 wins" as two series.
-- **Chat source tags** (bug 248): now [Discord], [Game], [Twitch],
-  [YouTube].
-- **Compare tab** (bug 252): "Top Cards" renamed "Most Used Cards" in all
-  languages.
-- **Game audio mutes while tabbed out in online play** (bug 210, per Sid):
-  deterministic instead of the OS's intermittent ducking; restores your
-  exact volume on refocus. Menu/queue audio untouched (the match-found
-  sound still reaches you), broadcast seat exempt. Config:
-  `MuteAudioInBackground`, default on.
-- **Black YouTube VOD thumbnails** (bug 255, VM bot): the thumbnail engine
-  had no content check and uploaded provably uniform-black captures (5 of
-  its first 6). Every capture is now probed with a tiny pixel decode and
-  rejected below live-measured luminance thresholds; a rejected report
-  retries while still on screen, and a session that ends with only black
-  frames says so in the bot log. Pre-engine VODs keep YouTube's auto
-  thumbnail (the stream goes live on a near-black card) unless backfilled.
-
-Schema changes: migrations **229** (`stream_channel_posts` gains
-`twitch_vod_url` / `youtube_vod_url`; retro-fixed 16 finalized posts —
-applied 2026-08-18), **230** (`stream_channel_posts.matchups` session
-matchup list; applied 2026-08-18), **233** (`ffa_match_players.game_points_at_leave`),
-**234** (one-off: un-rates ten pre-fix early-leave rows).
-
-Backend data: migration **231** — one-shot 20,000g `admin_grant` to
-NotNic for a community promo video (applied 2026-08-19). Same shape as
-`067`, plus ledger-keyed idempotency so a re-run is a no-op.
-
-**Lobby and text-cell fixes (Aug 20)**
-
-- **The lobby browser now shows the whole roster.** The "who is inside"
-  line under each open lobby shared one fixed-height cell with the lobby
-  header, and a cell can only carry one wrapping mode -- so a full lobby's
-  roster clipped at the cell edge and the trailing "+N more" counter never
-  appeared, in exactly the case that counter exists for. The roster is now
-  its own element that sizes itself to its content and takes as many lines
-  as it needs. Rows are usually SHORTER than before, not taller.
-- **Four text cells no longer drop their text instead of clipping it.** The
-  FFA and 2v2 leaderboard name cells, the FFA recent-games identity cell and
-  the 2v2 series line all left word wrap on inside fixed-height boxes, so an
-  over-long "name [title]" wrapped onto a line the box could not show and the
-  wrapped part was discarded rather than clipped. Most visible on the
-  translated "(left)" disconnect marker, which could vanish entirely.
-
-**Admin (Aug 20)**
-
-- **Lexia granted admin** (migration **232**).
-
-**FFA early-leave grace (Aug 20)**
-
-- **Leaving an FFA before the field has scored two points no longer costs
-  Elo.** Below two half-points nothing has been decided, so the placement
-  the report hands a leaver is not evidence about anyone — the same
-  threshold the bet cutoff, the 2v2 disconnect rule and the client's own
-  fresh-game cancel already use. The leaver is unrated for that game
-  (no rating, no XP or gold, out of everyone else's beaten counts); the
-  players who stayed play on and are rated among themselves.
-- This does not reopen leave-to-dodge. The dodge that rule exists to stop is
-  quitting a game you are losing, and by then the field is well past two
-  points. The grace window is the opening seconds, before the first round
-  converts. The claim is also reported by a *surviving* client, never by the
-  leaver, and is refused outright if the leaver's signed tally shows they
-  actually played.
-- **Ten past games corrected.** Nine players who left with a completely
-  empty stat line — no rounds, no points, no kills, no damage — had that
-  game's rating change reversed. Eight gain (from +22.9 to +180.5); one
-  loses a +69.8 that the same rule says they should not have banked. XP and
-  gold already paid are untouched, and nobody who stayed in those games has
-  their result changed.
-
-**Map skin backgrounds fixed (bug 249, Aug 19)**
-
-- Every custom map skin now renders its own designed background. They were
-  all landing on the same pinkish red — most visible on the broadcast seat,
-  which cycles all 23 skins, and easy to miss on a normal seat, which holds
-  one skin for a whole session.
-- The cause: the map background is the background camera's clear colour, and
-  that clear is pure red. Vanilla ROUNDS arts turn it into a sky with a large
-  hue shift; our skins replaced that with a colour *filter*, which multiplies
-  — and multiplying pure red can never produce green or blue. Every skin
-  collapsed onto one hue. Verified in-game: Abyss ("near-black blue") rendered
-  hot magenta before the fix and deep blue after, on the same build.
-- Also fixed in the same pass: the map arts share particle systems, so
-  switching off the unused arts was switching off the live skin's own backdrop
-  a couple of seconds into every round; the screen-filling backdrop layers were
-  being painted with the skin's *wall* colours instead of its background; the
-  per-skin post-process profile was sharing its effects with the base game's
-  art asset, so repeated skin changes were quietly degrading it; and a backdrop
-  pass that never matched a backdrop was recolouring Homing bullets and the
-  card-choice face instead. Retired.
-- The neutral skins read neutral again. Monochrome and Platinum were coming out
-  warm beige because the base game grades everything the main camera draws with
-  a red-weighted gain, and nothing was compensating for it. The correction is
-  measured from the render rather than from the profile numbers, only touches
-  colours the skin actually designed as grey, and scales with brightness — so
-  Magma, Abyss, Mint and Soft measured unchanged.
-- Five older defects in the same subsystem, fixed in the same pass: the
-  automatic per-round art change could still recolour particles in the middle of
-  the map slide (the stall that used to leave players off-screen); the "disable
-  map lighting" backdrop was painted at an unsafe moment and then overwritten a
-  couple of seconds later, so the setting never visually stuck; the premium
-  skins' shimmer ticked faster than the transition guard and reached into the
-  same window; switching from a custom skin back to a vanilla one left the art
-  wearing the old colours; and unequipping your LAST map colour did nothing
-  until you restarted the game.
-
-**Broadcast stream stability (Aug 18)**
-
-- Streams no longer cut in and out: the VM director holds outputs through
-  transient status blips and sitting hops (the teardown/restart cycle was
-  exhausting the push legs' restart budget into up-to-10-minute dead-air
-  windows), organic sitting ends are no longer misread as seat failures
-  (fighter-departure evidence), and the broadcast seat no longer self-
-  updates out from under its supervisor.
-- YouTube title updates fixed (the API rejects two listing filters at once)
-  — the channel side was already healthy.
-- Spectator view: fighter info panels moved to the top corners under the
-  card bars; the camera now zooms out to keep every live fighter in frame
-  (vertical and horizontal), instead of losing airborne players above the
-  fixed vanilla framing.
-- The stream-ended Discord post keeps its links and now points at the VODs
-  — the exact Twitch/YouTube VOD of that session when resolvable while
-  live, the channel archive pages otherwise.
-- Ops: a maintenance pause flag idles the broadcast bot's supervisors for
-  up to 8 hours so builds and tests on the VM aren't fought by it.
-
-## v1.39.0 — 2026-08-18
-
-Schema changes: migrations **225** (`spectate_drain_tombstones` table +
-spectator cap default 5; applied 2026-08-16), **226** (`stream_channel_posts`
-living-stream-post table), **227** (`record_exclusions` — admin record
-removal).
-
-**Records (round 2, Aug 18)**
-
-- **Rarest Hand** — the rare-picks record board's proper name (it measures
-  the rarest hand *picked*).
-- **New: Luckiest** — the rarest hand *drawn*: the share of Rare cards among
-  everything a game offered a player, picked or not (counted over recorded
-  hands with a full candidate set). Deliberately allows the same player to
-  hold several placements — luck shouldn't favor anyone, so a name filling
-  this board up is worth a second look.
-- **Records now has two pages** (button top-right of the panel); new boards
-  land on page 2.
-- **Admins can remove records** — a small control on each row (click twice
-  to confirm) excludes a cheated row from the boards without touching the
-  match itself; every removal is audit-logged.
-- **Record hovers carry the game** — score (half-point convention), duration,
-  the holder's full name and title, and the cards one per line.
-- **Home tab "Get Link Code" button no longer clips its label.**
-
-**Corrections + polish (round 3, Aug 18)**
-
-- Recent Tournaments popup is split into **Sync and Async sections** again.
-- Bracket hover scores use the **half-point convention** (the "(x-y pts)"
-  form is gone for good).
-- **Text floor:** everything this batch touched renders at 14pt bold or
-  bigger — records rows, bracket cells and elos, hover tooltips.
-- Offer telemetry hardened: offers are recorded only for the reporting
-  player's own seat, with size caps, and excluded matches stop voting in
-  the card-rarity election.
-- **Records boards only admit rows the holder's own client reported** — a
-  modified opponent can no longer plant a fake record (stats, cards, or
-  draws) under an innocent player's name. Rarity votes follow the same
-  rule, and forged-length games can't own the Longest Game board.
-- **Every new string is translated** (es/ru/uk/sv — 65 keys x 4 languages).
-
-**Broadcast seat (VM-only, invisible to players)**
-
-- The game pins itself to windowed 1920x1080 (the capture geometry OBS
-  expects) and drops to 15fps after 16 minutes idle — both only on the
-  broadcast identity.
-- Nightly clean cycle at 05:00 (skipped while a stream is live).
-
-**Fixed**
-
-- **Lost identity / "PlayerName" (bug 234).** The base game sets every
-  player's nickname to a literal "PlayerName" placeholder before connecting
-  and repairs it from Steam only once, as the last step of joining a room —
-  if that single attempt fails (a transient Steam hiccup), the placeholder
-  sticks for the whole game and the in-world name label never refreshes. The
-  mod now retries the Steam lookup with a bounded in-room budget and
-  repaints name labels whenever a player's nickname heals, in every online
-  room type.
-- **2v2 game details ignored team colors.** Expanding a Recent 2v2 Series
-  entry showed the per-game card columns and telemetry lines in fixed
-  blue/orange side colors even when the series header showed the stamped
-  team-identity colors — the inner view could contradict the header (and
-  read "blue" for both teams). The expanded columns now use the same
-  resolved team colors as the header.
-- **Tournament signup names could corrupt the whole list.** The shared
-  object-array parser was not string-aware, so one display name containing a
-  brace could silently corrupt every row parsed after it (#156 class).
-
-**Tournaments**
-
-- **Recent Tournaments is now a popup** (button under Tournament Bets):
-  every participant with their locked elo, seed, bracket win-loss, final
-  result, plus the tournament's duration (hours for sync, weeks for async)
-  and prize snapshot. The old one-line right-column list is retired.
-- **Cleaner bracket.** The long winners-to-losers drop-down connector lines
-  are gone — the two brackets now only visibly meet at the grand final.
-  Player elos render beside names in the bracket cells, and titles beside
-  names in the signups list.
-- **Hover a bracket name for the full story**: per-game scores, points,
-  duration, hit/block percentages, fps/ping, and every card that player
-  picked, straight from the recorded games.
-
-**Records (Leaderboard > Compare)**
-
-- Records are now derived from the actual record-setting GAME: each row
-  carries the date, the holder's title and rating, and (on hover) the cards
-  it was set with. Names are no longer truncated to 13 characters.
-- Four new boards: **Highest Avg DPS** (growth builds excluded), **Luckiest**
-  (highest rare-pick share in one game), **Longest Game** and **Shortest
-  Game** (both participants + both builds shown).
-
-**Broadcast**
-
-- **Living stream post in #scr-ranked-streaming**: when the broadcast seat
-  goes live, one rich Discord post appears with the current match (names,
-  ratings, mode, series score) and the Twitch/YouTube links, edits itself on
-  match switches and score changes, and flips to "stream ended" when the
-  broadcast stops.
-
-**Server**
-
-- Reserved broadcast spectator seat: spectator capacity moves to 5 with the
-  fifth seat reserved for the broadcast account; public capacity and listing
-  semantics unchanged at 4.
-- New `/broadcast/target` director endpoint (broadcast account only) that
-  ranks live spectatable games and rotates between near-tied ones.
-- Service-account policy: the broadcast account is structurally excluded
-  from queues, matches, tournaments, betting, shop, chat, and presence
-  counts, with a detection audit.
-- Spectator seat lifecycle: durable drain records for seats whose physical
-  departure is unconfirmed (enforcement deferred to a future client
-  release).
-
-## v1.38.7 — 2026-08-15
-
-Schema changes: migrations **221** (`pcolor_poison` body color; applied),
-**222** (`ranked_queue.home_region`; applied), **223** (76 machine-translation
-seeds for the new shop/vocab keys; applied).
-
-**Added**
-
-- **New body color: Poison.** The exact green the Poison card flashes on its
-  victims — taken from the game's own card data rather than matched by eye —
-  for anyone building a poison-themed look. None of the existing greens was
-  close: Forest shares the hue but renders at half the brightness, Emerald
-  leans jade, Neon Lime leans yellow. 3000g, under Body Colors in the shop.
-
-- **Tournament matches announce themselves everywhere.** The in-game HUD now
-  shows a gold TOURNAMENT banner (with your exact bracket position, e.g.
-  "Async Tournament - Winners R2") above the RANKED line; the Discord series
-  results, the live-bets board, the gambler ping, bet confirmations and the
-  settled-bets posts all carry a trophy tag naming the bracket match.
-- **Post-match tournament DMs (the missing notifications).** After every
-  bracket match the bot now DMs both players: winners are told who they
-  face next (with the async deadline when one applies) or which match
-  they're waiting on; a first loss leads with "You're not out!" and names
-  your next opponent — or the match that decides them; elimination
-  congratulates the run, with your placement when the bracket records one;
-  champions get their own DM. A separate DM lands the moment your next
-  match actually goes live, and it's delivered reliably — retried until it
-  reaches you. Forfeit advances are phrased honestly instead of "you won".
-- **Tournament matches are always spectatable.** The spectator opt-out is
-  bypassed for the two players of a live bracket match — tournament games
-  are public by rule. Every other spectate safety rule still applies.
-
-**Fixed**
-
-- **Tournament bets popup is clickable again (bug 230).** The popup's own
-  buttons were being swallowed by its click shield, and a coordinate bug made
-  any click read as "outside the popup" and dismiss it.
-- **Better diagnostics for post-match disconnects (bugs 227/228).** The
-  connection-restart tracers now run in every room type, so the next
-  code-room disconnect names its exact trigger in the log. The investigation
-  found the mechanism — the base game restarts a player's connection 10
-  seconds after they answer the rematch prompt if their opponent hasn't
-  answered yet — but a safe fix needs both clients acting together, and
-  every one-sided approach made things worse in review; it's deferred to a
-  dedicated pass rather than shipped half-safe.
-
-- **Poison hits register reliably (bug 225).** A bullet's poison component
-  could miss registration on the victim's client due to a game init-ordering
-  race — the hit then knocked you back but the poison (all of a poison
-  bullet's real damage) never started on any screen. The missing component is
-  now re-registered at hit time, with a safety net against double-application.
-- **Faces show in 1v2 and 2v2 rooms (bug 224).** The last player to join a
-  team room missed everyone else's face for the whole sitting (a base-game
-  quirk FFA already worked around); the fix now covers team rooms too.
-- **Discord language channels stop reposting ancient messages (bug 226).**
-  The relay now tracks exactly what it has delivered — durably, across
-  restarts — instead of relying on a memory that old test messages could
-  fall out of. The stale test messages themselves are cleaned up too.
-- **Live-bets boards stop fighting Discord's rate limit.** The three boards
-  edited into one channel every 10 seconds and were permanently throttled;
-  they now stagger and skip edits when nothing changed, while still
-  recovering if a board message is deleted.
-- **Round-end poison watchdog accuracy.** Streams orphaned by a round
-  boundary after they started no longer produce false "possible modified
-  client" log entries; genuine mid-fight silence still gets flagged.
-- **Phoenix no longer floods the log** with ~2,000 harmless warnings per game
-  while charging its revive.
-- **Community cosmetic translations actually show** (reported by Kyltist, our
-  Russian translator). Approved translations for community-made cosmetic
-  names and descriptions now render in the shop, on Home, and in the preview
-  — an early design decision had the game deliberately skip them while the
-  translation portal kept accepting the work, so approved entries (24 in
-  Russian alone) existed but never displayed.
-- **Nametag size previews show again.** The Bigger / XL / Huge / Float rows
-  rendered nothing after "Preview:" in every language — the preview's own
-  size tag was taller than the row and got clipped whole. Those rows now
-  grow to show the name at its true size, which is the point of the preview.
-- **Rarity and item-kind words translate.** "(rare)", "(common)", "(face)",
-  "(nametag)" and friends were never translatable at all. In Russian,
-  Spanish, Ukrainian and Swedish the rarity reads as a labeled phrase
-  ("Ã‘â‚¬ÃÂµÃÂ´ÃÂºÃÂ¾Ã‘ÂÃ‘â€šÑŒ: Ã‘ÂÃÂ¿ÃÂ¸Ã‘â€¡ÃÂµÃ‘ÂÃÂºÃÂ°Ã‘Â") so the grammar works next to any item type.
-- **Fairer ranked-queue regions.** The room region used to be whichever
-  player's momentary connection region happened to win the coin toss — which
-  is how two same-region players could both end up on a 200-ping US server.
-  Now, when both players' Photon home region (its own ping cache) agrees,
-  that region is used, and any region signal beats the old "us" default.
-  Also fixed a pre-existing race where the two clients could be told
-  different regions for the same match and end up in separate rooms.
-
-**Changed**
-
-- **Card popup images no longer need downloading.** Card art in stats popups,
-  the hold-Tab board and the tier-list export now renders natively from the
-  game itself (correct in every language, always up to date) — the old image
-  pack download (which had been failing quietly) is gone, and the mod's
-  Thunderstore package shrinks by ~15 MB. The tier-list export shows a
-  progress note the first time while it renders each card.
 
 _(older entries trimmed - full history on GitHub)_

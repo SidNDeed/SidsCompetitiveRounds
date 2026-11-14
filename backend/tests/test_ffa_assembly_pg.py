@@ -1763,7 +1763,7 @@ def test_fix1b_r1_hosted_and_automatic_locks_freeze_rating_floor(monkeypatch):
         assert bool(report["rating_changes"]) is rated, (tag, report)
 
     async def body(env):
-        floor = main.MIN_MOD_VERSION
+        floor = main.FFA_PROXIMITY_VICTIM_MIN_VERSION
         caps = [""] * 3
         hosted_ok = await _open_lobby(env, 3, caps, [floor] * 3)
         await settled(env, hosted_ok, await _start(env, main, hosted_ok), True, "hosted floor")
@@ -1786,7 +1786,7 @@ async def _fix1b_gold_snapshot(env, pid):
 
 def test_fix1b_r2_floor_unrated_reform_refunds_parent_wagers(monkeypatch):
     async def body(env):
-        floor = main.MIN_MOD_VERSION
+        floor = main.FFA_PROXIMITY_VICTIM_MIN_VERSION
         lob = await _open_lobby(env, 5, ["ffa_asm1"] * 5, [floor] * 5)
         started = await _start(env, main, lob)
         assert started.status == 200 and (await env.lobby_row(lob))["is_ranked"] is True
@@ -1811,7 +1811,7 @@ def test_fix1b_r2_floor_unrated_reform_refunds_parent_wagers(monkeypatch):
             " VALUES ('ffa', $1, $2, 100, $3, 'open') RETURNING id",
             lob.lid, bettors[3][0], lob.sids[0])
 
-        env.mp.setattr(main, "FFA_PROXIMITY_VICTIM_MIN_VERSION", "1.41.0")
+        env.mp.setattr(main, "FFA_PROXIMITY_VICTIM_MIN_VERSION", "1.41.1")  # tightened past the roster
         await env.at(lob, 40.0)
         answer = await _post(env, lob, 0, [0, 1, 2, 3])
         assert answer["status"] == "reformed", answer
@@ -1867,10 +1867,10 @@ def test_fix1b_r3_locked_rated_rejoin_refuses_only_below_floor(monkeypatch):
         assert answer.status == 409 and answer.body == refusal
         assert await env.queue_row(rated, 0) == before
 
-        answer = await _fix1b_rejoin(env, rated, 0, main.MIN_MOD_VERSION)
+        answer = await _fix1b_rejoin(env, rated, 0, main.FFA_PROXIMITY_VICTIM_MIN_VERSION)
         assert answer.status == 200, answer
         at_floor = await env.queue_row(rated, 0)
-        assert at_floor["mod_version"] == main.MIN_MOD_VERSION
+        assert at_floor["mod_version"] == main.FFA_PROXIMITY_VICTIM_MIN_VERSION
         assert at_floor["status"] == "ready_join" and at_floor["series_id"] == rated.lid
 
         casual = await env.lobby(3, ranked=False)
@@ -1882,7 +1882,7 @@ def test_fix1b_r3_locked_rated_rejoin_refuses_only_below_floor(monkeypatch):
 
 def test_fix1b_r4_null_is_unrated_at_both_locks_and_refused_on_rejoin(monkeypatch):
     async def body(env):
-        floor = main.MIN_MOD_VERSION
+        floor = main.FFA_PROXIMITY_VICTIM_MIN_VERSION
         hosted = await _open_lobby(env, 3, [""] * 3, [floor, None, floor])
         answer = await _start(env, main, hosted)
         assert answer.status == 200 and answer["ranked_refusal"] == "unranked"

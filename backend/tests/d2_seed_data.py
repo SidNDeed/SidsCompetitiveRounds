@@ -4944,3 +4944,45 @@ UPDATE glicko_ratings_ffa
    AND updated_at  IS DISTINCT FROM TIMESTAMPTZ '2026-10-18 04:59:48.803927+00';
 COMMIT;
 '''
+
+SEEDS['rollback_384_i18n_keys_stage2_hold.sql'] = r'''-- d2 seed for rollback_384_i18n_keys_stage2_hold.sql: the ownership baseline's rows only, rerun-safe.
+-- 410 has no rollback file and its upsert rewrites every key of its manifest, so this step
+-- stands in for 410's missing inverse on these 13 rows only.
+-- It puts each key of rollback_384's ownership baseline (i18n_keys_384_ownership, read here,
+-- never typed) back to the row 384 stored there (owned), and refuses when the baseline holds
+-- other than 13 rows, when a baseline key is missing from i18n_keys, or when it writes other
+-- than 13 rows. It writes i18n_keys only.
+BEGIN;
+DO $seed_r384$
+DECLARE
+    v_base integer;
+    v_missing integer;
+    v_put integer;
+BEGIN
+    SELECT count(*) INTO v_base FROM i18n_keys_384_ownership;
+    IF v_base <> 13 THEN
+        RAISE EXCEPTION 'd2 seed rollback_384: the ownership baseline holds % rows, not 13', v_base;
+    END IF;
+    SELECT count(*) INTO v_missing
+      FROM i18n_keys_384_ownership b
+      LEFT JOIN i18n_keys k ON k.key_id = b.key_id
+     WHERE k.key_id IS NULL;
+    IF v_missing <> 0 THEN
+        RAISE EXCEPTION 'd2 seed rollback_384: % baseline keys are missing from i18n_keys', v_missing;
+    END IF;
+    UPDATE i18n_keys k
+       SET namespace = s.namespace, msgctxt = s.msgctxt,
+           source_hash = s.source_hash, sensitive = s.sensitive,
+           max_px = s.max_px, context = s.context,
+           retired_at = s.retired_at, updated_at = s.updated_at
+      FROM (SELECT b.key_id AS owner_key, (jsonb_populate_record(NULL::i18n_keys, b.owned)).*
+              FROM i18n_keys_384_ownership b
+             WHERE b.active AND b.owned IS NOT NULL) AS s
+     WHERE k.key_id = s.owner_key;
+    GET DIAGNOSTICS v_put = ROW_COUNT;
+    IF v_put <> 13 THEN
+        RAISE EXCEPTION 'd2 seed rollback_384: % rows put back, not 13', v_put;
+    END IF;
+END $seed_r384$;
+COMMIT;
+'''

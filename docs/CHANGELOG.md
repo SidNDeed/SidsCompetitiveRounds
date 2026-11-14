@@ -1,6 +1,6 @@
 # Sid's Competitive Rounds — Changelog
 
-## v1.41.0 — unreleased
+## v1.41.0 — 2026-11-13
 
 **Player Cards arrive in the client**
 
@@ -58,9 +58,40 @@
 
 - The leaderboard channel carries the 1v1, 2v2 and FFA boards, and a board is
   replaced only after its new copy is posted.
-- Player names in bot posts are shown as typed, never as Discord formatting.
 - Sync tournaments: one rule decides who counts toward the start vote, and
   availability checks go only to eligible entrants.
+
+**Tournaments**
+
+- Double-elimination brackets for 9 to 15 players are built in full: a field
+  of 9 to 14 could not lock before, and in a field of 15 one player could be
+  out after a single loss.
+- A withdrawal after the lock no longer stalls the bracket. When the place
+  stays empty, a match missing one player becomes a bye for the player who is
+  there, a match with no player in either place is passed over, and a
+  tournament whose final is decided that way completes. Before, such a match
+  waited for good and held up the grand final.
+- In the in-game bracket, a match with no player in either place shows dashes.
+- After a tournament locks, the server refuses a leave request sent from the
+  game; the game then says "Couldn't leave the tournament - it may have locked
+  or started" and refreshes the Tournaments tab. The rule book now says that
+  after the lock you withdraw by answering No on the bot's availability-check
+  DM.
+- The availability-check DM's buttons act only for the SCR account now linked
+  to your Discord account: on a DM sent before an unlink or relink they say
+  "Couldn't use this button" with the reason, and the server checks the link
+  again when it records a No.
+- A Yes pressed on the availability-check DM after your No went through no
+  longer shows "Confirmed": the bot answers that you have already withdrawn.
+  It gives that answer until it sends you a new availability-check DM for that
+  tournament, prepared after your No went through, or until the bot restarts.
+- A tournament action button pressed while the Tournaments tab is out of step
+  with the tournament data the game holds does nothing: it says "Tournament
+  info is refreshing - try again in a moment" and refreshes the tab.
+- The Force Start count on the Tournaments tab counts only the votes the start
+  rule counts.
+- The bot's tournament-complete post names only the places that were awarded,
+  and its bracket progress leaves out byes with no player in them.
 
 **Title ladders move into the Shop**
 
@@ -119,7 +150,7 @@
   ShowRoomRulesIndicator hides it.
 - FFA history shows the settings frozen for that game.
 
-**2v2 and 1v2 players can come back mid-game**
+**2v2, 1v2 and FFA players can come back mid-game**
 
 - 2v2 and 1v2: when a player drops, the game waits at the next point boundary
   so they can come back. If they do not return in time, the disconnect is
@@ -127,10 +158,8 @@
   with an older client in it plays exactly as before.
 - FFA late entry (a player joining a game already under way) and FFA mid-game
   readmission (a dropped player let back into the same game, with their card
-  picks made for them while they are away) are built in the client and the
-  server and are being trialled in lobbies where every player is an enrolled
-  tester. A later release switches them on for everyone, with one setting in
-  the client and one on the server.
+  picks made for them while they are away) are on in FFA rooms where every
+  player runs 1.41.0. With an older client in the room, neither is used.
 
 **Ranked FFA handles joins and mixed versions**
 
@@ -154,6 +183,11 @@
 - One earlier ranked FFA game was corrected under this rule: the player who
   left it early had that game's rating change reversed. Gold and XP were not
   touched, and no other player's result in that game changed.
+- The Info library's FFA, economy and rule-book pages and the FFA mode text
+  state the early-leave rule above. They described an older one: two half
+  points, and only while the leaver's own tally was still zero.
+- An FFA result sent by a mod version older than 1.39.1 is refused when it
+  names a player who left during that game, so update the mod.
 - The ranked-FFA shutout achievements say they count the players who finished
   the game, which is the rule the server applies.
 - The in-game post-session report tells a player whose connection failed
@@ -236,10 +270,24 @@
   consent off stops an upload already under way.
 - Revoking consent clears an open chat line and its resume notice as well as
   the stashed draft.
+- The first-run data-consent prompt says in red what stops working without
+  consent: the leaderboard, ranked matchmaking, chat, player cards and bug
+  reports with logs. Decline now asks you to confirm first; Back returns to
+  the prompt.
 - Log handling for bug reports and automatic uploads has been updated.
 - The bug-report form and the log viewer are prepared off the game thread, and
   match history is read a little at a time each frame, so neither stalls the
   game.
+
+**Five community faces**
+
+- Gold headband, Orbit, Pumpking Hat, leafy mushroom and Red Scarf join the
+  shop in the detail slot, marked out of stock until each face's artist opens
+  sales. Until then the server refuses a purchase ("Not for sale yet"), and a
+  face's artist can still gift it. They need 1.41.0: the server leaves them
+  out of an older version's shop and refuses its purchase of one, and it
+  accepts a gift of one only when the last mod version it recorded for the
+  recipient is 1.41.0 or newer.
 
 **Fixes**
 
@@ -263,6 +311,9 @@
 - The Recent Ranked Series page no longer renders blank when a player's name
   holds a character the game font cannot draw; every list-panel name passes
   one glyph sanitiser.
+- A player name with angle brackets in it is no longer read as empty or cut
+  short: the mod shows those brackets as round ones, so `<Name>` reads
+  (Name) and `AC<DC>Fan` reads AC(DC)Fan.
 - An abandoned 1v2 series is closed after 14 days with no game, with no
   winner and no award, and the solo seat can no longer change in the middle of
   a 1v2 series. A decided 1v2 game reported after its series was cancelled
@@ -278,23 +329,33 @@
 - The Translate portal button, on the backup connection, checks the secure
   connection first and opens the portal in the same press when it answers; a
   timer keeps retrying in the background, and no restart is needed.
-- A new body colour, Demonic, is in the shop. Its shop text is translated, and
-  the new card trading, mail relay and dance-reason texts ship in Spanish,
-  Russian, Ukrainian and Swedish, as do 171 more client texts added since
-  1.40.3; eight Spanish labels that still showed English are translated.
+- The server lists shop items that share a price in one fixed order, so the
+  shop shows them in the same order on every visit while its items stay the
+  same.
+- Nineteen community faces that were already in the shop show their own
+  descriptions instead of the general "community cosmetic" line. In 1.41.0
+  these descriptions are also in Spanish, Russian, Ukrainian and Swedish.
+- The Star Earmuffs face has new art.
+- A new body colour, Demonic, is in the shop. Every client text that became
+  translatable since 1.40.3 (over a thousand, Demonic's shop text and the new
+  card trading, mail relay and dance-reason texts among them) ships in
+  Spanish, Russian, Ukrainian and Swedish; eight Spanish labels that still
+  showed English are translated.
 
 **Schema changes:** migrations added since v1.40.3, by number: 306, 307, 308,
 309, 310, 311, 312, 313, 314, 315, 316, 317, 318, 319, 320, 321, 324, 325,
 327, 330, 331, 332, 333, 336, 337, 338, 340, 341, 342, 348, 349, 351, 352,
 353, 354, 355, 356, 358, 359, 360, 361, 363, 364, 365, 366, 367, 368, 370,
-372, 373, 376, 377, 378, 379, 380, 383, 384, 385, 386, 387, 388, 389, 390.
+372, 373, 376, 377, 378, 379, 380, 383, 384, 385, 386, 387, 388, 389, 390,
+391, 392, 393, 396, 397, 398, 399, 400, 401.
 Rollback files ship beside the newer ones; 374 and 375 are rollback-only files
 for the mail relay.
 
 - 363 revoked four ranked-FFA shutout awards below the finishing-count rule.
-
-**Known issues:** the double-elimination bracket can still fail for 9 to 14
-players; the fix is not in this release.
+- 398 makes the five community faces visible in the shop once this release is
+  published; they stay out of stock until their artists open sales.
+- 399 replaces the placeholder description of nineteen community faces already
+  in the shop, once this release is published.
 
 ## v1.40.3 — 2026-09-09
 
