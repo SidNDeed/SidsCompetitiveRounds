@@ -9491,6 +9491,105 @@ async def admin_register_game_file_digest(
         return _sev_refusal(r)
 
 
+# -- a repeated 1v1 report (submit_match) --------------------------------------
+#
+# The game key of a 1v1 match row is (photon_room_id, player1_id, player2_id),
+# enforced by the unique constraint below. A report whose key is already
+# recorded is the client's outbox redelivering a game the server holds, and it
+# is answered as recorded, never as a failure: a 5xx is retried for hours.
+# The decision is made by the violated constraint's NAME, so a unique violation
+# on any other constraint stays a failure.
+_MATCH_DUP_CONSTRAINT = "unique_match"
+
+
+def _violated_unique(exc) -> str | None:
+    """The constraint named by the unique violation (SQLSTATE 23505) this
+    error carries, else None. SQLAlchemy wraps the driver's error (`.orig`,
+    whose `__cause__` is asyncpg's own exception carrying `constraint_name`),
+    so the chain is walked rather than one level read."""
+    seen = set()
+    e = exc
+    while e is not None and id(e) not in seen:
+        seen.add(id(e))
+        state = getattr(e, "sqlstate", None) or getattr(e, "pgcode", None)
+        name = getattr(e, "constraint_name", None)
+        if state == "23505" and isinstance(name, str) and name:
+            return name
+        e = getattr(e, "orig", None) or e.__cause__
+    return None
+
+
+async def _flush_new_match(db, match) -> bool:
+    """Add the match row and flush it: the INSERT runs here. True when it
+    inserted. False when it met _MATCH_DUP_CONSTRAINT (this game is already
+    recorded): the transaction is then rolled back whole, so nothing of the
+    request is kept and its locks are released. Any other error propagates."""
+    db.add(match)
+    try:
+        await db.flush()
+    except IntegrityError as ie:
+        if _violated_unique(ie) != _MATCH_DUP_CONSTRAINT:
+            raise
+        await db.rollback()
+        return False
+    return True
+
+
+async def _commit_new_match(db) -> bool:
+    """Commit the report's transaction. True when committed; False when the
+    commit met _MATCH_DUP_CONSTRAINT (a deferred check), rolled back whole.
+    Any other error propagates."""
+    try:
+        await db.commit()
+    except IntegrityError as ie:
+        if _violated_unique(ie) != _MATCH_DUP_CONSTRAINT:
+            raise
+        await db.rollback()
+        return False
+    return True
+
+
+async def _duplicate_match_response(db, room, p1_id, p2_id, winner_steam, reporter_id):
+    """The answer to a report whose game key is already recorded: 200,
+    series_status "duplicate", zero gains, the EXISTING match's id. Called
+    after the rollback, so it takes plain values (every ORM object of the
+    request is expired) and reads everything it answers with afresh. It reads
+    only: no lock, no write. If the row the violation named is gone again (a
+    delete in between), the report is not recorded and the answer is a 503,
+    which the client retries."""
+    existing = (await db.execute(text(
+        "SELECT id, series_id FROM matches WHERE photon_room_id = :r "
+        "AND player1_id = :a AND player2_id = :b"),
+        {"r": room, "a": p1_id, "b": p2_id})).first()
+    if existing is None:
+        await db.rollback()
+        print(f"[MATCH] duplicate key met but no recorded row found (room={room}); "
+              f"answering 503 so the client retries")
+        raise HTTPException(status_code=503, detail="duplicate_unresolved")
+    total_xp = (await db.execute(text("SELECT total_xp FROM players WHERE id = :p"),
+                                 {"p": reporter_id})).scalar_one_or_none() or 0
+    score = ""
+    if existing.series_id is not None:
+        s = (await db.execute(text(
+            "SELECT player1_id, p1_series_wins, p2_series_wins FROM ranked_series WHERE id = :s"),
+            {"s": existing.series_id})).first()
+        if s is not None:
+            score = (f"{s.p1_series_wins}-{s.p2_series_wins}" if s.player1_id == reporter_id
+                     else f"{s.p2_series_wins}-{s.p1_series_wins}")
+    await db.rollback()
+    print(f"[MATCH] repeated report answered as already recorded: room={room} "
+          f"match={existing.id}")
+    return MatchResponse(
+        match_id=existing.id,
+        winner_steam_id=winner_steam,
+        message="already recorded (duplicate)",
+        xp_gained=0, xp_bonuses=[], total_xp=total_xp,
+        level=level_from_xp(total_xp)[0],
+        series_status="duplicate", series_score=score,
+        gold_gained=0, gold_bonuses=[],
+    )
+
+
 @app.post("/api/v1/matches", response_model=MatchResponse, tags=["Matches"])
 async def submit_match(report: MatchReport, request: Request, db: AsyncSession = Depends(get_db)):
     """
@@ -9938,8 +10037,13 @@ async def submit_match(report: MatchReport, request: Request, db: AsyncSession =
         session_uuid=report.session_uuid,
         **_match_net_seat_values(report, reporter_is_p1),
     )
-    db.add(match)
-    await db.flush()  # Get match.id
+    # Plain values for the duplicate answer, taken BEFORE anything can roll
+    # back (a rollback expires every ORM object of this request).
+    _dup_key = (report.photon_room_id, p1.id, p2.id, winner.steam_id, reporter.id)
+    # The INSERT runs at this flush, so this is where a repeated report meets
+    # unique_match; it is answered as recorded with nothing kept.
+    if not await _flush_new_match(db, match):  # also gets match.id
+        return await _duplicate_match_response(db, *_dup_key)
 
     # Record card picks for player 1
     for card in report.player1.cards:
@@ -10025,7 +10129,8 @@ async def submit_match(report: MatchReport, request: Request, db: AsyncSession =
     except Exception as _fx:
         print(f"[ANTICHEAT] fps/lag flag check error: {_fx}")
     if ac["invalidate"]:
-        await db.commit()
+        if not await _commit_new_match(db):
+            return await _duplicate_match_response(db, *_dup_key)
         return MatchResponse(
             match_id=match.id,
             winner_steam_id=winner.steam_id,
@@ -10769,31 +10874,15 @@ async def submit_match(report: MatchReport, request: Request, db: AsyncSession =
         await _ladder_add_late_gold(
             db, match.id, _ladder_mark_streak, _ladder_achievement_mark(db), "streak")
 
-    try:
-        await db.commit()
-    except IntegrityError:
-        # F2: an exact-duplicate match (same room + same two players) hits the
-        # unique constraint and is rejected ATOMICALLY — the whole transaction
-        # rolls back, so there's no double Elo/gold. Return the existing match
-        # idempotently instead of surfacing a 500. (A determined key-holder who
-        # mutates the room_id suffix to dodge the constraint is the residual
-        # shared-secret limitation noted in the audit; tracked as follow-up.)
-        await db.rollback()
-        existing = (await db.execute(
-            select(Match).where(
-                Match.photon_room_id == report.photon_room_id,
-                Match.player1_id == p1.id, Match.player2_id == p2.id,
-            ).order_by(Match.created_at.desc()).limit(1)
-        )).scalar_one_or_none()
-        return MatchResponse(
-            match_id=existing.id if existing else match.id,
-            winner_steam_id=winner.steam_id,
-            message="already recorded (duplicate)",
-            xp_gained=0, xp_bonuses=[], total_xp=reporter_total_xp or 0,
-            level=reporter_level,
-            series_status="duplicate", series_score=series_score,
-            gold_gained=0, gold_bonuses=[],
-        )
+    # F2: an exact-duplicate match (same room + same two players) meets
+    # unique_match. With the constraint as created (not deferrable) that
+    # happens at the insert's flush above, which answers it; this arm answers
+    # the same violation if it is ever met at commit. Either way the whole
+    # transaction rolls back (no double Elo/gold) and the existing match is
+    # answered idempotently (series_status="duplicate") instead of a 500. Any
+    # other integrity error is not a duplicate and propagates.
+    if not await _commit_new_match(db):
+        return await _duplicate_match_response(db, *_dup_key)
 
     # Committed. NOW the sighting is real evidence: a game that is on disk, in a
     # room this server sent two players to. The duplicate branch above returns

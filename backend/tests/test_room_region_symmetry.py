@@ -1396,9 +1396,15 @@ def test_the_sighting_is_published_only_after_the_match_has_committed():
     assert read_at < commit_at < publish_at, (
         "the sighting is published before the match it witnesses is committed"
     )
-    # ...and the rollback branch returns before the publication
-    duplicate_return = src.index('series_status="duplicate"')
-    assert commit_at < duplicate_return < publish_at
+    # ...and every rollback branch (the duplicate answer, met at the insert's
+    # flush or at a commit) returns before the publication, and the answer
+    # itself publishes nothing.
+    dup_returns = [m.start() for m in re.finditer(
+        r"return await _duplicate_match_response\(", src)]
+    assert len(dup_returns) == 3, dup_returns
+    assert all(at < publish_at for at in dup_returns)
+    assert src.rindex("return await _duplicate_match_response(") > commit_at
+    assert "_note_region_seen" not in inspect.getsource(main._duplicate_match_response)
 
 
 def test_a_room_this_server_never_issued_contributes_nothing():
