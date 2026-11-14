@@ -1840,7 +1840,7 @@
           ],
           "main",
           "ffa_queue_poll",
-          "8adb15c7d54b597c7e61a3a0e80693589aa89d64"
+          "8a56854bd38d84a400e0ac9ebf2be0e709882ead"
         ],
         [
           "/api/v1/ffa/queue/recent-joins",
@@ -2389,7 +2389,7 @@
           ],
           "main",
           "ovt_lobby_state",
-          "b739ab2c06aa5067f991fe5e22ad2bd2cae1b150"
+          "488f436a1f93ba4f084b0e9dd5d7eee97e614a59"
         ],
         [
           "/api/v1/ovt/queue/join",
@@ -2785,7 +2785,7 @@
           ],
           "main",
           "team_lobby_state",
-          "f5e434f8de347c3659a57f9968b4174ae3d3fc04"
+          "82746c70fcf3c94b31ae08cdd8da3bff96effa1a"
         ],
         [
           "/api/v1/team/queue/count",
@@ -3098,7 +3098,7 @@
           ],
           "main",
           "mail_inbox",
-          "1527f99d54b2682eb4512fd607f6c0e714d8769c"
+          "0b5cc7c7d56e58d3da477b431324911f260091ac"
         ],
         [
           "/api/v1/mail/sent",
@@ -3152,7 +3152,7 @@
           ],
           "main",
           "mail_detail",
-          "828af944004d99eaf18a8af9fb62aad6f2e55bcd"
+          "83f3f64914af46ba0acd58ac12fe838a6b520409"
         ],
         [
           "/api/v1/mail/{message_id}/read",
@@ -3983,7 +3983,7 @@
           ],
           "main",
           "invite_send",
-          "e9d00ebb54478b849e5f29aeeac4423e6c40bf94"
+          "473e574dcbb9a6d4ad98c51f1683ac1fc87e6ec3"
         ],
         [
           "/api/v1/invites/{invite_id}/accept",
@@ -4019,7 +4019,7 @@
           ],
           "main",
           "invite_pending",
-          "f280fa377f6424bbc2f9b73e320f036cc4ac75a7"
+          "bdb9c865b8b75aa3f0af4db50fcd74089f0697d8"
         ]
       ]
     }
@@ -4068,7 +4068,7 @@
       [
         "main",
         "lifespan",
-        "e191445be43d4fdccbdc3fff0329c19882f0e1ae"
+        "ca738baead6e2618b2c1164a611cc82e5df22acf"
       ]
     ]
   },
