@@ -1598,7 +1598,7 @@ class MailInboxRev(Base):
 
 
 class LobbyInvite(Base):
-    """One invite or challenge into one lobby (ask 6; migration 405). `mode`
+    """One invite or challenge into one lobby (migration 405). `mode`
     names the lobby table `lobby_id` is in ('team' team_lobbies, 'ovt'
     ovt_lobbies, 'ffa' ffa_lobbies), so lobby_id has no foreign key and
     every read names both. `state` leaves 'pending' once: 'accepted',
@@ -1648,7 +1648,7 @@ class LobbyInvite(Base):
 
 
 class InviteReceipt(Base):
-    """One row per keyed invite request that committed a change (ask 6;
+    """One row per keyed invite request that committed a change (see
     migration 405): send (a challenge too), accept, decline or cancel, keyed
     by the caller and the request's idempotency key, one key scope per caller
     across every invite route. `request_fp` is the SHA-256 of the request's

@@ -5,7 +5,7 @@
 -- final number at landing (the next above the highest file on main) and
 -- renames this file, its rollback and the tests that name them.
 --
--- Lobby invites (ask 6). A lobby member invites a player into their 2v2, 1v2
+-- Lobby invites. A lobby member invites a player into their 2v2, 1v2
 -- or FFA lobby, or a player challenges another from their name, which opens
 -- a lobby and invites them into it. The invitee gets the invite as a mail row
 -- of kind 'invite' and answers it from the mail row or a popup.
