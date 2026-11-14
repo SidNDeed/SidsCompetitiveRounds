@@ -13,6 +13,13 @@
 -- that gap, since sends go on until the api is rolled back.
 --
 -- What it does, in one transaction:
+--   0. puts the session's temporary schema last in search_path for the
+--      transaction (set_config, local to it), as 405 does: PostgreSQL
+--      otherwise searches that schema first for relation and type names, so
+--      a temporary table named like one of the tables below would be
+--      dropped, deleted from or altered in its place. A search_path that
+--      names no existing schema, or already names pg_temp, is refused
+--      before anything changes;
 --   1. drops invite_receipts, then lobby_invites (with their indexes);
 --   2. deletes every mail row of kind 'invite': the previous api build has
 --      no reader for them, and 297's check cannot be put back while one
@@ -27,6 +34,22 @@
 
 BEGIN;
 SET LOCAL lock_timeout = '5s';
+
+-- Step 0: the session's temporary schema goes last in search_path for this
+-- transaction, or the file refuses.
+DO $r405path$
+DECLARE
+  new_path text;
+BEGIN
+  IF current_schema() IS NULL THEN
+    RAISE EXCEPTION 'rollback 405: search_path names no existing schema (found: %)',
+      current_setting('search_path');
+  END IF;
+  IF position('pg_temp' IN lower(current_setting('search_path'))) > 0 THEN
+    RAISE EXCEPTION 'rollback 405: search_path names pg_temp (found: %)', current_setting('search_path');
+  END IF;
+  new_path := set_config('search_path', current_setting('search_path') || ', pg_temp', true);
+END $r405path$;
 
 DROP TABLE IF EXISTS invite_receipts;
 DROP TABLE IF EXISTS lobby_invites;

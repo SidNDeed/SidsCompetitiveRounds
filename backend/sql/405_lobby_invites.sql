@@ -96,18 +96,29 @@
 --   - anything else refuses: one without the other, either one unmarked or
 --     marked otherwise, or either one not an ordinary table.
 -- On the create path the applying role creates both tables in this
--- transaction, so it owns them and holds every privilege on them. A test
--- recomputes the mark from this text, so the statements between the markers
--- cannot change without the mark: tables an older text made are refused.
+-- transaction, so it owns them. Their privileges are the ones a new table of
+-- that role receives, its default privileges included: the file grants and
+-- revokes nothing. A test recomputes the mark from this text, so the
+-- statements between the markers cannot change without the mark: tables an
+-- older text made are refused.
 -- The file does not police a change made to a marked table after it created
 -- it: a re-run accepts such a table, because a re-run issues nothing for the
 -- tables and no deploy step depends on one.
 --
+-- SEARCH PATH. PostgreSQL searches the session's temporary schema first for
+-- relation and type names unless search_path names it, so an unqualified
+-- name in this file could reach a temporary object instead of the schema's
+-- own: a temporary invite_receipts would take the index and the mark meant
+-- for the table just created. The first block therefore appends pg_temp to
+-- search_path for this transaction (set_config, local to it), which puts the
+-- temporary schema last. Before it changes anything it refuses a search_path
+-- that names no existing schema or that already names pg_temp.
+--
 -- RE-RUNS. The kind check's replacement is issued only when mail_messages
 -- has no check named ck_mail_messages_kind with this file's definition, so
 -- a second run issues no DDL and takes no lock on any table. No statement
--- stands outside every guard except BEGIN, SET LOCAL, the guard blocks
--- themselves and COMMIT.
+-- stands outside every guard except BEGIN, SET LOCAL, the search-path
+-- block's setting, the guard blocks themselves and COMMIT.
 --
 -- POST-CHECK. After the guards, one read compares mail_messages' checks with
 -- this file: exactly one check names kind, and it is ck_mail_messages_kind
@@ -117,6 +128,22 @@
 
 BEGIN;
 SET LOCAL lock_timeout = '5s';
+
+-- The session's temporary schema goes last in search_path for this
+-- transaction, or the file refuses (SEARCH PATH above).
+DO $m405path$
+DECLARE
+  new_path text;
+BEGIN
+  IF current_schema() IS NULL THEN
+    RAISE EXCEPTION '405: search_path names no schema to create in (found: %)',
+      current_setting('search_path');
+  END IF;
+  IF position('pg_temp' IN lower(current_setting('search_path'))) > 0 THEN
+    RAISE EXCEPTION '405: search_path names pg_temp (found: %)', current_setting('search_path');
+  END IF;
+  new_path := set_config('search_path', current_setting('search_path') || ', pg_temp', true);
+END $m405path$;
 
 -- The two tables: created and marked, or found marked, or refused (CREATE
 -- OR REFUSE above).

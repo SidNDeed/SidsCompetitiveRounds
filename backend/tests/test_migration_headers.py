@@ -772,6 +772,8 @@ _EVERY_STATEMENT_GUARDED = {
         "blocks and a read-only post-check, between BEGIN, SET LOCAL "
         "lock_timeout and COMMIT; a re-run issues no DDL",
     "405_lobby_invites.sql":
+        "one block that puts the session's temporary schema last in "
+        "search_path for the transaction, "
         "one catalog-guarded block that creates lobby_invites, invite_receipts "
         "and their indexes and marks both, or else refuses unless both carry the "
         "mark, one block replacing mail_messages' kind check only while the wider "

@@ -692,24 +692,26 @@ def test_405s_mark_is_the_digest_of_its_own_ddl():
 
 # The schema's state a refused run must leave as it found it: every relation
 # with its kind and comment, and every constraint with its definition
-# (mail_messages' kind check among them).
+# (mail_messages' kind check among them). The schema is named ($1), so a
+# state that changes search_path is still read.
 _405_STATE = (
     "SELECT string_agg(x, '; ' ORDER BY x) FROM ("
     " SELECT format('%s %s %s', c.relname, c.relkind, coalesce(obj_description(c.oid, 'pg_class'), '-')) AS x"
     "   FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace"
-    "  WHERE n.nspname = current_schema()"
+    "  WHERE n.nspname = $1"
     " UNION ALL"
     " SELECT format('%s.%s %s', t.relname, k.conname, pg_get_constraintdef(k.oid))"
     "   FROM pg_constraint k JOIN pg_class t ON t.oid = k.conrelid"
     "   JOIN pg_namespace n ON n.oid = t.relnamespace"
-    "  WHERE n.nspname = current_schema()) s")
+    "  WHERE n.nspname = $1) s")
 
 
-async def _405_over(setup, probes):
-    """405 applied once in a fresh schema holding its prerequisite and then
-    `setup` (SQL, which may itself apply 405): (405's error or None, whether
-    the schema's state read the same after the run as before it, each
-    probe's value). The schema is dropped whatever happened."""
+async def _405_over(setup, probes, sql=None):
+    """405 applied once (or `sql`, a text standing in for it) in a fresh
+    schema holding its prerequisite and then `setup` (SQL, which may itself
+    apply 405): (the run's error or None, whether the schema's state read the
+    same after the run as before it, each probe's value). The schema is
+    dropped whatever happened."""
     schema = "m405c_%s" % uuid.uuid4().hex[:10]
     conn = await asyncpg.connect(DSN)
     try:
@@ -718,14 +720,14 @@ async def _405_over(setup, probes):
         await conn.execute(PREREQ["405"])
         if setup:
             await conn.execute(setup)
-        before = await conn.fetchval(_405_STATE)
+        before = await conn.fetchval(_405_STATE, schema)
         try:
-            await conn.execute(migration_text("405"))
+            await conn.execute(migration_text("405") if sql is None else sql)
             verdict = None
         except Exception as ex:
             verdict = "%s: %s" % (type(ex).__name__, ex)
             await conn.execute("ROLLBACK")        # the file's own BEGIN, aborted
-        after = await conn.fetchval(_405_STATE)
+        after = await conn.fetchval(_405_STATE, schema)
         return verdict, before == after, tuple([await conn.fetchval(p) for p in probes])
     finally:
         try:
@@ -743,7 +745,8 @@ _405_MARKS = ("SELECT string_agg(c.relname || ' ' || coalesce(obj_description(c.
               " WHERE n.nspname = current_schema() AND c.relname IN ('lobby_invites', 'invite_receipts')")
 _405_INDEXES = ("SELECT string_agg(ci.relname, ', ' ORDER BY ci.relname) FROM pg_index i"
                 " JOIN pg_class ci ON ci.oid = i.indexrelid"
-                " WHERE i.indrelid IN (to_regclass('lobby_invites'), to_regclass('invite_receipts'))")
+                " WHERE i.indrelid IN (to_regclass(format('%I.lobby_invites', current_schema())),"
+                "                      to_regclass(format('%I.invite_receipts', current_schema())))")
 
 
 def test_405_creates_and_marks_both_tables_and_a_second_run_finds_them_its_own():
@@ -763,12 +766,82 @@ def test_405_creates_and_marks_both_tables_and_a_second_run_finds_them_its_own()
     assert verdict is None and same and got == (marks, indexes), (verdict, same, got)
 
 
+# The session's temporary invite_receipts: its indexes, then its comment, '-'
+# for none of either; NULL when there is no such table.
+_405_TEMP = ("SELECT coalesce((SELECT string_agg(ci.relname, ', ' ORDER BY ci.relname) FROM pg_index i"
+             "                  JOIN pg_class ci ON ci.oid = i.indexrelid WHERE i.indrelid = c.oid), '-')"
+             "       || ' / ' || coalesce(obj_description(c.oid, 'pg_class'), '-')"
+             "  FROM pg_class c WHERE c.relnamespace = pg_my_temp_schema() AND c.relname = 'invite_receipts'")
+_405_PATH_BLOCK = re.compile(r"^DO \$m405path\$\n.*?^END \$m405path\$;\n", re.S | re.M)
+
+
+def test_405_creates_its_tables_past_a_temporary_table_of_the_same_name():
+    """A temporary invite_receipts in the applying session takes neither the
+    create path's index nor its mark: for its transaction 405 puts the
+    session's temporary schema last in search_path, so every unqualified
+    name after CREATE TABLE reaches the table just created. Negative
+    control: the file without that block indexes and marks the temporary
+    table, and the schema's invite_receipts has neither."""
+    temp = "CREATE TEMP TABLE invite_receipts (invite_id UUID);\n"
+    mark = _405_real_mark()
+    probes = (_405_MARKS, _405_INDEXES, _405_TEMP)
+    indexes = ("invite_receipts_pkey, ix_invite_receipts_invite, ix_lobby_invites_expires, "
+               "ix_lobby_invites_invitee_pending, ix_lobby_invites_lobby, ix_lobby_invites_sender_created, "
+               "lobby_invites_pkey, uq_lobby_invites_pending")
+    verdict, _, got = _run(_405_over(temp, probes))
+    assert verdict is None and got == ("invite_receipts %s; lobby_invites %s" % (mark, mark), indexes,
+                                       "- / -"), (verdict, got)
+    bare, n = _405_PATH_BLOCK.subn("", migration_text("405"))
+    assert n == 1, "405's search-path block was not found"
+    verdict, _, got = _run(_405_over(temp, probes, sql=bare))
+    assert verdict is None and got == ("invite_receipts -; lobby_invites %s" % mark,
+                                       indexes.replace("ix_invite_receipts_invite, ", ""),
+                                       "ix_invite_receipts_invite / %s" % mark), (
+        "the file without its search-path block did not reach the temporary table", verdict, got)
+
+
+_R405_PATH_BLOCK = re.compile(r"^DO \$r405path\$\n.*?^END \$r405path\$;\n", re.S | re.M)
+# The two tables standing in the schema, and in the session's temporary schema.
+_405_HERE = ("SELECT string_agg(c.relname, ', ' ORDER BY c.relname) FROM pg_class c"
+             " JOIN pg_namespace n ON n.oid = c.relnamespace"
+             " WHERE n.nspname = current_schema() AND c.relname IN ('lobby_invites', 'invite_receipts')")
+_405_TEMP_HERE = ("SELECT string_agg(c.relname, ', ' ORDER BY c.relname) FROM pg_class c"
+                  " WHERE c.relnamespace = pg_my_temp_schema()"
+                  "   AND c.relname IN ('lobby_invites', 'invite_receipts')")
+
+
+def test_405s_rollback_drops_its_tables_past_a_temporary_table_of_the_same_name():
+    """With a temporary lobby_invites in the session, 405's rollback still
+    drops the schema's two tables and leaves the temporary one alone: it puts
+    the session's temporary schema last in search_path for its transaction,
+    as 405 does, and refuses a search_path that names pg_temp, changing
+    nothing. Negative control: the rollback without that block drops the
+    temporary table and commits with the schema's lobby_invites standing."""
+    rollback = (SQL_DIR / "rollback_405_lobby_invites.sql").read_text(encoding="utf-8")
+    setup = migration_text("405") + "\nCREATE TEMP TABLE lobby_invites (id UUID);\n"
+    probes = (_405_HERE, _405_TEMP_HERE)
+    verdict, _, got = _run(_405_over(setup, probes, sql=rollback))
+    assert verdict is None and got == (None, "lobby_invites"), (verdict, got)
+    bare, n = _R405_PATH_BLOCK.subn("", rollback)
+    assert n == 1, "the rollback's search-path block was not found"
+    verdict, _, got = _run(_405_over(setup, probes, sql=bare))
+    assert verdict is None and got == ("lobby_invites", None), (
+        "the rollback without its search-path block dropped the schema's lobby_invites", verdict, got)
+    named = migration_text("405") + (
+        "\nSELECT set_config('search_path', current_setting('search_path') || ', pg_temp', false);\n")
+    verdict, same, got = _run(_405_over(named, (_405_HERE,), sql=rollback))
+    assert verdict is not None and "rollback 405: search_path names pg_temp" in verdict, verdict
+    assert same and got == ("invite_receipts, lobby_invites",), ("the refused rollback changed the schema", got)
+
+
 def _405_real_mark():
     return "lobby invites, DDL sha256 %s" % _405_MARK.findall(migration_text("405"))[0]
 
 
 _405_NOT_BOTH = "405: lobby_invites and invite_receipts are neither both absent nor both marked by this file"
 _405_TAKEN = "405: a name this file creates already stands in schema"
+_405_PATH_TEMP = "405: search_path names pg_temp"
+_405_NO_SCHEMA = "405: search_path names no schema to create in"
 # Each state 405 refuses: (the state, made before the run; the refusal's own
 # text; what that text must name as found).
 _405_REFUSALS = {
@@ -797,6 +870,12 @@ _405_REFUSALS = {
     "a row type's name": (
         lambda: "CREATE TYPE invite_receipts AS (x int);\n",
         _405_TAKEN, "(found: invite_receipts)"),
+    "a search path naming pg_temp": (
+        lambda: "SELECT set_config('search_path', current_setting('search_path') || ', pg_temp', false);\n",
+        _405_PATH_TEMP, ", pg_temp)"),
+    "a search path naming no schema": (
+        lambda: "SET search_path TO m405_no_such_schema;\n",
+        _405_NO_SCHEMA, "(found: m405_no_such_schema)"),
 }
 
 
