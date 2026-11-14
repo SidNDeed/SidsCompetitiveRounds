@@ -3921,7 +3921,8 @@ def test_the_handout_and_card_apply_the_pools_ban_word_to_puller_and_subject():
     says it of the subject live rather than trusting the latest snapshot. One
     fragment, formatted with the row alias, so the word cannot drift."""
     ban = main._PC_NOT_BANNED_SQL
-    assert ban == "NOT EXISTS (SELECT 1 FROM player_bans b WHERE b.steam_id = {a}.steam_id AND b.unbanned_at IS NULL)"
+    assert ban == ("NOT EXISTS (SELECT 1 FROM player_bans b WHERE b.steam_id = {a}.steam_id AND "
+                   + main.player_ban_active_sql("b") + ")")
     assert main._PC_STEAM_ELIGIBLE_SQL.count(ban.format(a="p")) == 1
     skip, pend = main._PC_EVENTS_SKIP_SQL, main._PC_EVENTS_PENDING_SQL
     for alias in ("pl", "su"):

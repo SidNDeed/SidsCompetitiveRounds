@@ -300,7 +300,8 @@ def test_the_pool_admits_players_who_have_run_the_mod_through_one_fragment():
     drift."""
     fragment = main._PC_POOL_MEMBER_SQL
     assert "p.mod_seen_at IS NOT NULL" in fragment and "p.deleted_at IS NULL" in fragment
-    assert "NOT EXISTS (SELECT 1 FROM player_bans b WHERE b.steam_id = p.steam_id AND b.unbanned_at IS NULL)" in fragment
+    assert ("NOT EXISTS (SELECT 1 FROM player_bans b WHERE b.steam_id = p.steam_id AND "
+            + main.player_ban_active_sql("b") + ")") in fragment
     # the Steam id clause is the other half of the intersection (v4.13), and the
     # word carries it once -- a union of the two decisions would admit a
     # mod-runner with no SteamID64 and break the later one

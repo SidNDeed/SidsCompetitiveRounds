@@ -25,7 +25,7 @@ import uuid
 from uuid import UUID
 
 import json as _json
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, StrictInt
 from fastapi import Body, Depends, FastAPI, Header, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
@@ -48,6 +48,7 @@ from glicko2 import calculate_new_rating
 import steamid64 as _sid64   # the SteamID64 rule, standard library only: the name cleanup, the bug-log scrubber and the Steam sweep read it
 import log_redaction as _logred   # the credential rule, standard library only: every receive path and read-back door of client log text applies it
 from models import AdminUser, AdminAction, Bet, BoosterGrant, BugReport, BugReportEvent, CardOffer, FlaggedMatch, GlickoRating, GoldTransaction, Match, MatchCard, Player, PlayerBan, PlayerItem, RankedSeries, RankRoleColor, RatingHistory, RankedQueue, QueueBlock, PlayerBlock, LinkCode, PlayerAchievement, ShopItem, GlickoRating2v2, TeamQueue, TeamSeries, TeamMatch, TeamMatchCard, TeamMatchTelemetry, TournamentMatch
+from models import player_ban_active_sql
 from schemas import (
     AchievementUnlockRequest,
     AchievementListResponse,
@@ -989,6 +990,43 @@ def _presence_online_ids() -> list[str]:
     return list(_presence_seen.keys())
 
 
+async def _presence_online_ids_shown(db: AsyncSession) -> list[str]:
+    """The online ids a presence ANSWER may hold: _presence_online_ids less
+    every account under an active ban (the one definition,
+    models.player_ban_active_sql). Every "N online" count and the online list
+    of /presence/online read this, so a banned account is in no online list
+    and no online count, and is back by the ordinary rules the moment its ban
+    ends or is lifted. The map itself keeps the id: a banned client still
+    pings, and the lifecycle sweeps' liveness evidence (_presence_is_online)
+    is not a presence answer. One read of player_bans; nothing is written to
+    the database. The ids the read found banned are kept process-locally
+    (_presence_banned_last) for the one answer that must be given even when
+    the read fails (_presence_online_count_shown_fallback)."""
+    global _presence_banned_last
+    ids = _presence_online_ids()
+    if not ids:
+        return ids
+    banned = set((await db.execute(text(
+        "SELECT pb.steam_id FROM player_bans pb"
+        " WHERE pb.steam_id = ANY(CAST(:ids AS text[])) AND " + player_ban_active_sql("pb")
+    ), {"ids": ids})).scalars().all())
+    _presence_banned_last = frozenset(banned)
+    return [sid for sid in ids if sid not in banned]
+
+
+# The banned ids the last successful _presence_online_ids_shown read found
+# among the online ids. Read only by the fallback below; a process restart
+# empties it, and the next successful read refreshes it.
+_presence_banned_last: frozenset = frozenset()
+
+
+def _presence_online_count_shown_fallback() -> int:
+    """The online count when the ban read failed: the map's count less the
+    ids the last successful read found banned. A ban written since that read
+    is not yet subtracted; the next successful read corrects it."""
+    return sum(1 for sid in _presence_online_ids() if sid not in _presence_banned_last)
+
+
 # ── In-match evidence (July 30 lifecycle sweep) ────────────────────────────
 # The failure behind two destroyed games: the server only learns a game happened
 # when the REPORT lands, which is at game END, so every lifecycle timer is blind
@@ -1223,12 +1261,19 @@ def _persistable_exit_cause(cause: str | None) -> str:
 # most the 90 s freshness gate late, after which a stalled standby shows no
 # dots at all rather than stale ones. Nothing shorter is available to a
 # replica read; the bound is what the CHANGELOG states.
+# An actively banned account carries no online marker (Sid, 13 Nov: a banned
+# account shows online nowhere): the last term is the one ban definition
+# (models.player_ban_active_sql), read on whichever box answers, so the
+# marker comes back by itself when the ban ends or is lifted. It reads rows
+# only; nothing here writes.
 _ONLINE_MARKER_SQL = (
     "(p.presence_seen_at > NOW() - INTERVAL '3 minutes'"
     " AND p.appear_offline = FALSE"
     " AND (NOT pg_is_in_recovery()"
     " OR COALESCE(pg_last_xact_replay_timestamp(), 'epoch'::timestamptz)"
-    " > NOW() - INTERVAL '90 seconds'))"
+    " > NOW() - INTERVAL '90 seconds')"
+    " AND NOT EXISTS (SELECT 1 FROM player_bans pbo"
+    " WHERE pbo.steam_id = p.steam_id AND " + player_ban_active_sql("pbo") + "))"
 )
 
 
@@ -7689,6 +7734,18 @@ _REGION_PICK_BUILD = 1
 # release train and read by nothing else (#306). Absent on any build
 # before it.
 _REHEARSAL_FOUR_BUILD = 1
+# Release-train verification plumbing, not a design mechanism: the build
+# marker of the batch in which a ban can carry an end time (player_bans.
+# expires_at, migration 417; models.player_ban_active_sql is the one
+# definition every ban reader uses), reported on /health as
+# `ban_expiry_build`. It names build identity only. What the batch changes
+# (which bans are active, the online lists, the admin answers) is seen by no
+# phase of the train, so without it the train could not tell a box on the
+# new build from a stale one (learnings 780, 794).
+# A code constant, equal on both boxes by construction, probed by the
+# release train and read by nothing else (#306). Absent on any build
+# before it.
+_BAN_EXPIRY_BUILD = 1
 # Its sibling, the /health `session_report` word, asks
 # the DATABASE whether it has every table and column the report route's
 # statements name, and the app whether that route is bound. Its statements are
@@ -7766,6 +7823,7 @@ async def health_check(db: AsyncSession = Depends(get_db)):
                               ffa_leave_figure=_FFA_LEAVE_FIGURE_BUILD,
                               region_pick_build=_REGION_PICK_BUILD,
                               rehearsal_four_build=_REHEARSAL_FOUR_BUILD,
+                              ban_expiry_build=_BAN_EXPIRY_BUILD,
                               build_manifest=_build_manifest.health_word(),
                               review_eval=_review_rules.review_eval(),
                               review_rules=_review_rules.health_word(),
@@ -7828,6 +7886,7 @@ async def health_check(db: AsyncSession = Depends(get_db)):
                               ffa_leave_figure=_FFA_LEAVE_FIGURE_BUILD,
                               region_pick_build=_REGION_PICK_BUILD,
                               rehearsal_four_build=_REHEARSAL_FOUR_BUILD,
+                              ban_expiry_build=_BAN_EXPIRY_BUILD,
                               build_manifest=_build_manifest.health_word(),
                               review_eval=_review_rules.review_eval(),
                               review_rules=_review_rules.health_word(),
@@ -11219,7 +11278,9 @@ async def _h2h_profile_block(db, target_id) -> H2HProfileBlock | None:
     presence heartbeat. Gold and Discord identity are NOT in the response.
     Title and tier strings come from the canonical utilities the boards use
     (_display_title_sync with the podium maps, _rank_info), never a
-    re-derivation (A-L)."""
+    re-derivation (A-L). is_banned (B3) says whether the player is under an
+    active ban (models.player_ban_active_sql); the marker in is_online
+    already reads false for one (B1), and last_seen_s is unchanged."""
     row = (await db.execute(text(f"""
         SELECT p.steam_id, p.display_name, p.total_xp,
                si.name AS title, si.preview_color AS title_color, si.sku AS title_sku,
@@ -11228,7 +11289,9 @@ async def _h2h_profile_block(db, target_id) -> H2HProfileBlock | None:
                CASE WHEN p.appear_offline THEN NULL
                     ELSE CAST(GREATEST(0, FLOOR(EXTRACT(EPOCH FROM (NOW()
                          - GREATEST(p.last_seen, COALESCE(p.presence_seen_at, p.last_seen)))))) AS BIGINT)
-               END AS last_seen_s
+               END AS last_seen_s,
+               EXISTS (SELECT 1 FROM player_bans pbh
+                        WHERE pbh.steam_id = p.steam_id AND {player_ban_active_sql('pbh')}) AS is_banned
           FROM players p
           LEFT JOIN glicko_ratings gr ON gr.player_id = p.id
           LEFT JOIN shop_items si ON si.id = p.active_title_id
@@ -11258,6 +11321,7 @@ async def _h2h_profile_block(db, target_id) -> H2HProfileBlock | None:
         level=level_from_xp(int(row["total_xp"] or 0))[0],
         is_online=None if row["is_online"] is None else bool(row["is_online"]),
         last_seen_s=None if row["last_seen_s"] is None else int(row["last_seen_s"]),
+        is_banned=bool(row["is_banned"]),
     )
 
 
@@ -15753,19 +15817,29 @@ async def check_player_registered(steam_id: str, db: AsyncSession = Depends(get_
     result = await db.execute(select(Player).where(Player.steam_id == steam_id))
     player = result.scalar_one_or_none()
 
+    # B3/B5 (server half): ban_expires_at (UTC ISO 8601 with Z, null =
+    # permanent or not banned) and ban_seconds_left (an integer, null =
+    # permanent or not banned) come AFTER ban_reason; every key before them
+    # keeps its value and its place. The 1.41.0 client reads this answer with
+    # JsonUtility.FromJson<ModCheckResponse>, which ignores keys its class
+    # does not declare, wherever they stand.
     if not player:
-        return {"registered": False, "ranked": False, "banned": False, "ban_reason": ""}
+        return {"registered": False, "ranked": False, "banned": False, "ban_reason": "",
+                "ban_expires_at": None, "ban_seconds_left": None}
 
     # Item 4: surface mod-wide ban status here so the OTHER player's client (which
     # already calls /mod/check on its opponent at room handshake) can notify +
     # leave when it's matched against a banned cheater.
-    ban_reason = await _is_banned(db, steam_id)
+    ban = await _active_ban_details(db, steam_id)
     return {
         "registered": True,
         "ranked": player.ranked_enabled,
         "display_name": player.display_name,
-        "banned": ban_reason is not None,
-        "ban_reason": ban_reason or "",
+        "banned": ban is not None,
+        "ban_reason": (ban["reason"] or "") if ban is not None else "",
+        "ban_expires_at": _ban_end_iso(ban["expires_at"]) if ban is not None else None,
+        "ban_seconds_left": (int(ban["seconds_left"])
+                             if ban is not None and ban["seconds_left"] is not None else None),
     }
 
 
@@ -17611,7 +17685,7 @@ _RANKED_CANDIDATE_SQL = """
       -- banned row matchable when the scan itself refuses it.
       AND NOT EXISTS (SELECT 1 FROM player_bans pb
                        WHERE pb.steam_id = ranked_queue.steam_id
-                         AND pb.unbanned_at IS NULL)
+                         AND """ + player_ban_active_sql("pb") + """)
       -- A1 r2 (a review MEDIUM). Discovery must not SELECT a seat the
       -- gate under the locks is going to refuse. The gate stays the
       -- authority -- this read is unlocked by design -- but a filter that
@@ -17677,7 +17751,7 @@ _OVT_CANDIDATE_SQL = """
        AND last_polled > clock_timestamp() - INTERVAL '10 seconds'
        AND NOT EXISTS (SELECT 1 FROM player_bans pb
                         WHERE pb.steam_id = ovt_queue.steam_id
-                          AND pb.unbanned_at IS NULL)
+                          AND """ + player_ban_active_sql("pb") + """)
        AND NOT (steam_id = ANY(CAST(:service_ids AS text[])))
        -- Stage 2 (V3 S3): no row with a live hold.
        AND NOT """ + _S2_LIVE_HOLD_SQL.format(col="ovt_queue.player_id") + """
@@ -17703,7 +17777,7 @@ _FFA_CANDIDATE_SQL = """
        AND last_polled > clock_timestamp() - INTERVAL '10 seconds'
        AND NOT EXISTS (SELECT 1 FROM player_bans pb
                         WHERE pb.steam_id = ffa_queue.steam_id
-                          AND pb.unbanned_at IS NULL)
+                          AND """ + player_ban_active_sql("pb") + """)
        AND NOT (steam_id = ANY(CAST(:service_ids AS text[])))
        -- see _OVT_CANDIDATE_SQL: excluded at discovery so one committed seat
        -- cannot wedge the gather, re-checked at the gate for the window
@@ -17761,7 +17835,7 @@ _TEAM_CANDIDATE_SQL_TMPL = """
               )
               AND NOT EXISTS (SELECT 1 FROM player_bans pb
                                WHERE pb.steam_id = tq.steam_id
-                                 AND pb.unbanned_at IS NULL)
+                                 AND """ + player_ban_active_sql("pb") + """)
               AND NOT (tq.steam_id = ANY(CAST(:service_ids AS text[])))
               -- Stage 2 (V3 S3): no candidate with a live hold.
               AND NOT """ + _S2_TQ_LIVE_HOLD_SQL + """
@@ -17795,7 +17869,7 @@ _TEAM_RESUME_CONSENT_SQL = """
                    AND last_polled > clock_timestamp() - INTERVAL '10 seconds'
                    AND NOT EXISTS (SELECT 1 FROM player_bans pb
                                     WHERE pb.steam_id = team_queue.steam_id
-                                      AND pb.unbanned_at IS NULL)
+                                      AND """ + player_ban_active_sql("pb") + """)
                    -- revalidation aims the predicate at the discovered rows
                    AND (CAST(:only AS uuid[]) IS NULL
                         OR player_id = ANY(CAST(:only AS uuid[])))
@@ -19568,7 +19642,9 @@ async def queue_count(steam_id: str | None = Query(None), db: AsyncSession = Dep
         text("SELECT COUNT(*) FROM ranked_queue")
     )
     total = result2.scalar() or 0
-    return {"searching": searching, "total": total, "online": _presence_online_count()}
+    # The online figure leaves out actively banned accounts (B1).
+    online = len(await _presence_online_ids_shown(db))
+    return {"searching": searching, "total": total, "online": online}
 
 
 @app.get("/api/v1/presence/ping", tags=["Queue"])
@@ -19818,10 +19894,23 @@ async def presence_ping(request: Request,
         except Exception:
             pass
         print(f"[PRESENCE] last_seen stamp failed for {steam_id}: {ex}")
+    # The online figure leaves out actively banned accounts (B1). The ping is
+    # answered whatever the database does (the stamps above swallow their own
+    # failure), so a failed ban read answers the map's count less the ids the
+    # last successful read found banned, logged.
+    try:
+        online = len(await _presence_online_ids_shown(db))
+    except Exception as ex:
+        try:
+            await db.rollback()
+        except Exception:
+            pass
+        print(f"[PRESENCE] online count ban read failed: {ex}")
+        online = _presence_online_count_shown_fallback()
     # Aug 7 item 1: alerts revision piggybacks on the cheapest always-on poll
     # — clients refetch /alerts/active only when it moves. Flat-scalar
     # addition, ignored by old parsers (#73).
-    return {"online": _presence_online_count(), "alerts_rev": _alerts_rev}
+    return {"online": online, "alerts_rev": _alerts_rev}
 
 
 @app.get("/api/v1/presence/online", tags=["Queue"])
@@ -19834,8 +19923,14 @@ async def presence_online(db: AsyncSession = Depends(get_db)):
     excluded from BOTH lists (the anonymous count still includes them).
     Entries carry the player's displayed title (dynamic rank/podium titles
     resolved live, same as the leaderboard). Key order is load-bearing for
-    the mod's manual parser: display_name first, minutes_ago last."""
-    online_ids = _presence_online_ids()
+    the mod's manual parser: display_name first, minutes_ago last.
+
+    An actively banned account (models.player_ban_active_sql) is in neither
+    list and not in online_count (B1): the online ids come from
+    _presence_online_ids_shown, and the recent list's statement carries the
+    definition. It shows again by these same rules once the ban ends or is
+    lifted. Reads only, so the standby answers it the same way."""
+    online_ids = await _presence_online_ids_shown(db)
     online_count = len(online_ids)
 
     online_rows = []
@@ -19871,6 +19966,8 @@ async def presence_online(db: AsyncSession = Depends(get_db)):
           AND p.appear_offline = FALSE
           AND NOT (p.steam_id = ANY(:sids))
           AND NOT (p.steam_id = ANY(CAST(:service_ids AS text[])))
+          AND NOT EXISTS (SELECT 1 FROM player_bans pb
+                           WHERE pb.steam_id = p.steam_id AND """ + player_ban_active_sql("pb") + """)
         ORDER BY p.last_seen DESC
         LIMIT 15
     """), {"sids": online_ids or [""],
@@ -29062,7 +29159,7 @@ _PC_POOL_RULE = 3
 _PC_POOL_MEMBER_SQL = """(p.deleted_at IS NULL
            AND """ + _PC_POOL_STEAM_ID_SQL + """
            AND p.mod_seen_at IS NOT NULL
-           AND NOT EXISTS (SELECT 1 FROM player_bans b WHERE b.steam_id = p.steam_id AND b.unbanned_at IS NULL))"""
+           AND NOT EXISTS (SELECT 1 FROM player_bans b WHERE b.steam_id = p.steam_id AND """ + player_ban_active_sql("b") + """))"""
 
 # board_rank (c3 F): eligibility is the LIVE leaderboard's own count — every
 # completed series, an invalidated one included, plus legacy matches — with
@@ -29578,7 +29675,7 @@ _PC_TRADE_PARTY_SQL = """
     SELECT p.id, p.steam_id,
            (p.deleted_at IS NULL) AS live,
            (p.mod_seen_at IS NOT NULL) AS has_mod,
-           NOT EXISTS (SELECT 1 FROM player_bans b WHERE b.steam_id = p.steam_id AND b.unbanned_at IS NULL) AS not_banned,
+           NOT EXISTS (SELECT 1 FROM player_bans b WHERE b.steam_id = p.steam_id AND """ + player_ban_active_sql("b") + """) AS not_banned,
            p.pc_trades_open AS switch_on,
            p.pc_trades_generation AS generation,
            p.pc_collection_public AS binder_public,
@@ -29617,17 +29714,17 @@ _PC_TRADE_DEAD_SQL = """(t.status = 'proposed' AND (EXISTS (SELECT 1 FROM unnest
                       JOIN pc_cards c ON c.id = pr.card_id
                       JOIN players s ON s.id = c.subject_player_id
                     WHERE pr.id = ANY(t.a_prints || t.b_prints)
-                      AND EXISTS (SELECT 1 FROM player_bans b WHERE b.steam_id = s.steam_id AND b.unbanned_at IS NULL))
+                      AND EXISTS (SELECT 1 FROM player_bans b WHERE b.steam_id = s.steam_id AND """ + player_ban_active_sql("b") + """))
       OR EXISTS (SELECT 1 FROM players p WHERE p.id = t.proposer
                     AND (NOT p.pc_trades_open OR p.pc_trades_generation <> t.proposer_generation))
       OR EXISTS (SELECT 1 FROM players p WHERE p.id = (CASE WHEN t.proposer = t.pair_lo THEN t.pair_hi ELSE t.pair_lo END)
                     AND (NOT p.pc_trades_open OR p.pc_trades_generation <> t.counterparty_generation))
       OR EXISTS (SELECT 1 FROM players p WHERE p.id = t.proposer
                     AND (p.deleted_at IS NOT NULL
-                         OR EXISTS (SELECT 1 FROM player_bans b WHERE b.steam_id = p.steam_id AND b.unbanned_at IS NULL)))
+                         OR EXISTS (SELECT 1 FROM player_bans b WHERE b.steam_id = p.steam_id AND """ + player_ban_active_sql("b") + """)))
       OR EXISTS (SELECT 1 FROM players p WHERE p.id = (CASE WHEN t.proposer = t.pair_lo THEN t.pair_hi ELSE t.pair_lo END)
                     AND (p.deleted_at IS NOT NULL
-                         OR EXISTS (SELECT 1 FROM player_bans b WHERE b.steam_id = p.steam_id AND b.unbanned_at IS NULL)))))"""
+                         OR EXISTS (SELECT 1 FROM player_bans b WHERE b.steam_id = p.steam_id AND """ + player_ban_active_sql("b") + """)))))"""
 _PC_TRADE_VOID_REASON_SQL = """(CASE WHEN EXISTS (SELECT 1 FROM unnest(t.a_prints || t.b_prints) AS n(print_id)
                     WHERE NOT EXISTS (SELECT 1 FROM pc_prints pr
                                        WHERE pr.id = n.print_id AND pr.discarded_at IS NULL)) THEN 'print_gone'
@@ -29638,17 +29735,17 @@ _PC_TRADE_VOID_REASON_SQL = """(CASE WHEN EXISTS (SELECT 1 FROM unnest(t.a_print
                       JOIN pc_cards c ON c.id = pr.card_id
                       JOIN players s ON s.id = c.subject_player_id
                     WHERE pr.id = ANY(t.a_prints || t.b_prints)
-                      AND EXISTS (SELECT 1 FROM player_bans b WHERE b.steam_id = s.steam_id AND b.unbanned_at IS NULL)) THEN 'subject_unavailable'
+                      AND EXISTS (SELECT 1 FROM player_bans b WHERE b.steam_id = s.steam_id AND """ + player_ban_active_sql("b") + """)) THEN 'subject_unavailable'
       WHEN EXISTS (SELECT 1 FROM players p WHERE p.id = t.proposer
                     AND (NOT p.pc_trades_open OR p.pc_trades_generation <> t.proposer_generation)) THEN 'trading_closed'
       WHEN EXISTS (SELECT 1 FROM players p WHERE p.id = (CASE WHEN t.proposer = t.pair_lo THEN t.pair_hi ELSE t.pair_lo END)
                     AND (NOT p.pc_trades_open OR p.pc_trades_generation <> t.counterparty_generation)) THEN 'counterparty_closed'
       WHEN EXISTS (SELECT 1 FROM players p WHERE p.id = t.proposer
                     AND (p.deleted_at IS NOT NULL
-                         OR EXISTS (SELECT 1 FROM player_bans b WHERE b.steam_id = p.steam_id AND b.unbanned_at IS NULL))) THEN 'not_eligible'
+                         OR EXISTS (SELECT 1 FROM player_bans b WHERE b.steam_id = p.steam_id AND """ + player_ban_active_sql("b") + """))) THEN 'not_eligible'
       WHEN EXISTS (SELECT 1 FROM players p WHERE p.id = (CASE WHEN t.proposer = t.pair_lo THEN t.pair_hi ELSE t.pair_lo END)
                     AND (p.deleted_at IS NOT NULL
-                         OR EXISTS (SELECT 1 FROM player_bans b WHERE b.steam_id = p.steam_id AND b.unbanned_at IS NULL))) THEN 'counterparty_unavailable' END)"""
+                         OR EXISTS (SELECT 1 FROM player_bans b WHERE b.steam_id = p.steam_id AND """ + player_ban_active_sql("b") + """))) THEN 'counterparty_unavailable' END)"""
 
 # A stored (proposer-side) void code as the RECEIVER reads it.
 _PC_TRADE_REASON_FOR_RECEIVER = {
@@ -29765,7 +29862,7 @@ async def _pc_trade_lock_prints(db: AsyncSession, print_ids) -> dict:
         row = (await db.execute(text("""
             SELECT pr.id, pr.owner_player_id, pr.discarded_at, s.steam_id AS subject_steam_id,
                    EXISTS (SELECT 1 FROM player_bans b
-                            WHERE b.steam_id = s.steam_id AND b.unbanned_at IS NULL) AS subject_banned
+                            WHERE b.steam_id = s.steam_id AND """ + player_ban_active_sql("b") + """) AS subject_banned
               FROM pc_prints pr
               JOIN pc_cards c ON c.id = pr.card_id
               JOIN players s ON s.id = c.subject_player_id
@@ -29844,7 +29941,7 @@ def _pc_portrait_resolve_cols(alias: str) -> str:
                ({alias}.deleted_at IS NOT NULL) AS subject_deleted,
                {alias}.pc_game_portrait_hash AS portrait_hash,
                {alias}.pc_steam_portrait_hash AS steam_portrait_hash,
-               EXISTS (SELECT 1 FROM player_bans b WHERE b.steam_id = {alias}.steam_id AND b.unbanned_at IS NULL) AS subject_banned
+               EXISTS (SELECT 1 FROM player_bans b WHERE b.steam_id = {alias}.steam_id AND {player_ban_active_sql('b')}) AS subject_banned
 """
 
 
@@ -32744,7 +32841,7 @@ async def _pc_trade_janitor_step() -> None:
 # open's live check reads); the handout applies the same word to the puller and
 # the subject, so a pull of a player banned since the open is never posted
 # (2026-09-13, r5 M3). One fragment, formatted with the row alias.
-_PC_NOT_BANNED_SQL = "NOT EXISTS (SELECT 1 FROM player_bans b WHERE b.steam_id = {a}.steam_id AND b.unbanned_at IS NULL)"
+_PC_NOT_BANNED_SQL = "NOT EXISTS (SELECT 1 FROM player_bans b WHERE b.steam_id = {a}.steam_id AND " + player_ban_active_sql("b") + ")"
 
 # One word for "this pull may be announced", read at three moments (r6 H1/M2):
 # the handout's skip (negated: the event is resolved without a post), the
@@ -33807,7 +33904,7 @@ _PC_STEAM_ELIGIBLE_SQL = f"""
     AND {_sid64.individual_id_sql("p.steam_id")}
     AND p.mod_seen_at IS NOT NULL
     AND (p.pc_game_portrait_locked_until IS NULL OR p.pc_game_portrait_locked_until < now())
-    AND NOT EXISTS (SELECT 1 FROM player_bans b WHERE b.steam_id = p.steam_id AND b.unbanned_at IS NULL)
+    AND NOT EXISTS (SELECT 1 FROM player_bans b WHERE b.steam_id = p.steam_id AND {player_ban_active_sql('b')})
 """
 
 
@@ -34820,7 +34917,7 @@ async def pc_portrait_upload(
                EXTRACT(EPOCH FROM (p.pc_game_portrait_locked_until - now())) AS lock_left,
                p.pc_game_portrait_locked_until,
                p.active_player_color_id, p.active_player_effect_id,
-               EXISTS (SELECT 1 FROM player_bans b WHERE b.steam_id = p.steam_id AND b.unbanned_at IS NULL) AS banned,
+               EXISTS (SELECT 1 FROM player_bans b WHERE b.steam_id = p.steam_id AND """ + player_ban_active_sql("b") + """) AS banned,
                (SELECT si.sku FROM shop_items si
                  WHERE si.id = p.active_dance_id AND si.kind = 'dance') AS dance_sku
           FROM players p WHERE p.id = CAST(:pid AS uuid) AND p.deleted_at IS NULL
@@ -34922,7 +35019,7 @@ _PC_MOTION_ROW_SQL = """
     SELECT p.pc_game_portrait_hash, p.pc_game_portrait_descriptor,
            EXTRACT(EPOCH FROM (p.pc_game_portrait_locked_until - now())) AS lock_left,
            p.pc_game_portrait_locked_until,
-           EXISTS (SELECT 1 FROM player_bans b WHERE b.steam_id = p.steam_id AND b.unbanned_at IS NULL) AS banned,
+           EXISTS (SELECT 1 FROM player_bans b WHERE b.steam_id = p.steam_id AND """ + player_ban_active_sql("b") + """) AS banned,
            p.active_dance_id, di.sku AS dance_sku, di.kind AS dance_kind, di.catalog_ready AS dance_ready,
            EXISTS (SELECT 1 FROM player_items pi
                     WHERE pi.player_id = p.id AND pi.item_id = p.active_dance_id) AS dance_bought,
@@ -47975,14 +48072,49 @@ async def _require_admin(db: AsyncSession, admin_steam_id: str, action: str, tar
 
 
 async def _is_banned(db: AsyncSession, steam_id: str):
+    """The reason of the account's ACTIVE ban (models.player_ban_active_sql:
+    not lifted, and its end time, if any, ahead of the database's clock), or
+    None. A timed ban that has ended reads None here with no write anywhere,
+    so every gate built on this helper lets the account through again."""
     if not steam_id:
         return None
     r = await db.execute(text(
-        "SELECT reason FROM player_bans WHERE steam_id = :sid AND unbanned_at IS NULL "
+        "SELECT reason FROM player_bans WHERE steam_id = :sid AND "
+        + player_ban_active_sql("player_bans") + " "
         "ORDER BY banned_at DESC LIMIT 1"
     ), {"sid": steam_id})
     row = r.first()
     return row[0] if row else None
+
+
+# What a ban answer says about its end: expires_at as UTC ISO 8601 with a
+# trailing Z (null = permanent), and seconds_left, the whole seconds until it
+# by the database's clock (null = permanent). Both read from one row.
+_BAN_END_COLS_SQL = (
+    "{a}.expires_at, CASE WHEN {a}.expires_at IS NULL THEN NULL"
+    " ELSE CAST(GREATEST(0, CEIL(EXTRACT(EPOCH FROM ({a}.expires_at - NOW())))) AS BIGINT)"
+    " END AS seconds_left")
+
+
+def _ban_end_iso(value) -> str | None:
+    """A ban's end time as UTC ISO 8601 with a trailing Z, or None."""
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+async def _active_ban_details(db: AsyncSession, steam_id: str):
+    """The account's ACTIVE ban as a mapping (id, reason, expires_at,
+    seconds_left), or None. The same definition as _is_banned."""
+    if not steam_id:
+        return None
+    return (await db.execute(text(
+        "SELECT pb.id, pb.reason, " + _BAN_END_COLS_SQL.format(a="pb") + " "
+        "FROM player_bans pb WHERE pb.steam_id = :sid AND " + player_ban_active_sql("pb") + " "
+        "ORDER BY pb.banned_at DESC LIMIT 1"
+    ), {"sid": steam_id})).mappings().first()
 
 
 async def _check_ban_or_raise(db: AsyncSession, steam_id: str) -> None:
@@ -48081,22 +48213,30 @@ async def admin_list_bans(
     The new `total` key is a NUMBER, which matters: the client's
     ParseBannedUsers splits the body on the literal `"id":"` and would treat
     any new quoted-string key named `id` as another ban row. Numeric siblings
-    are invisible to it."""
+    are invisible to it.
+
+    Active means the one definition (models.player_ban_active_sql): a timed
+    ban that has ended is no longer listed. Each row gains `expires_at` (UTC
+    ISO 8601 with Z, null = permanent) and `seconds_left` (an integer, null =
+    permanent) AFTER banned_at, its last key in 1.41.0: the client cuts each
+    row from one `"id":"` to the next and reads its six keys with
+    ExtractJsonString, so two trailing keys with other names cannot be read
+    in place of any of them."""
     await _require_admin(db, admin_steam_id, "list_bans", "", hmac_signature)
-    where = "pb.unbanned_at IS NULL"
+    search_sql = ""
     params: dict = {}
     if search:
         # Case-insensitive on display_name OR steam_id. Bound parameter, never
         # interpolated (#188); ILIKE wildcards in user input are escaped so a
         # '%' typed in the box searches for a literal '%'.
-        where += (" AND (p.display_name ILIKE :q ESCAPE '\\'"
-                  "      OR pb.steam_id   ILIKE :q ESCAPE '\\')")
+        search_sql = (" AND (p.display_name ILIKE :q ESCAPE '\\'"
+                      "      OR pb.steam_id   ILIKE :q ESCAPE '\\')")
         _esc = search.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
         params["q"] = f"%{_esc}%"
     total = (await db.execute(text(
         "SELECT COUNT(*) FROM player_bans pb "
         "LEFT JOIN players p ON p.steam_id = pb.steam_id "
-        f"WHERE {where}"
+        "WHERE " + player_ban_active_sql("pb") + search_sql
     ), params)).scalar() or 0
     page_sql = ""
     if limit is not None:
@@ -48104,10 +48244,10 @@ async def admin_list_bans(
         params = {**params, "limit": limit, "offset": offset}
     rows = (await db.execute(text(
         "SELECT pb.id, pb.steam_id, pb.reason, pb.banned_by_steam_id, pb.banned_at, "
-        "       pb.unbanned_at, p.display_name "
+        "       pb.unbanned_at, p.display_name, " + _BAN_END_COLS_SQL.format(a="pb") + " "
         "FROM player_bans pb "
         "LEFT JOIN players p ON p.steam_id = pb.steam_id "
-        f"WHERE {where} "
+        "WHERE " + player_ban_active_sql("pb") + search_sql + " "
         # id as a stable tiebreak so paging can't repeat or skip a row when
         # several bans share a banned_at instant.
         "ORDER BY pb.banned_at DESC, pb.id DESC"
@@ -48121,6 +48261,8 @@ async def admin_list_bans(
             "reason": r["reason"],
             "banned_by_steam_id": r["banned_by_steam_id"],
             "banned_at": r["banned_at"].isoformat() if r["banned_at"] else None,
+            "expires_at": _ban_end_iso(r["expires_at"]),
+            "seconds_left": None if r["seconds_left"] is None else int(r["seconds_left"]),
         } for r in rows
     ], "total": int(total), "limit": limit, "offset": offset}
 
@@ -48190,13 +48332,74 @@ async def _ban_rate_gate_or_raise(db: AsyncSession, admin_steam_id: str, target_
                                    "blocked for now - flagged to #scr-admin.")
 
 
+# unbanned_by_steam_id of a timed ban the ban writer closed because it had
+# ended (migration 417): the system closed it, not an admin. The column is
+# TEXT with no foreign key (028), so the marker needs no admin_users row.
+BAN_CLOSED_BY_EXPIRY = "system:expired"
+# A ban length, in minutes: one minute to ten years (365 * 24 * 60 * 10).
+BAN_DURATION_MAX_MINUTES = 5256000
+
+
+def _ban_end_sql(duration_minutes) -> str:
+    """The SQL value of a ban's end for a length in minutes: NULL (permanent)
+    for None, else NOW() plus the length on the database's clock. Built in
+    code, so no bind exists only to be null-tested (learning #448)."""
+    if duration_minutes is None:
+        return "NULL"
+    return "NOW() + make_interval(mins => CAST(:ban_minutes AS integer))"
+
+
+async def _ban_set_length_core(db: AsyncSession, *, admin_steam_id: str, target_steam_id: str,
+                               active, duration_minutes) -> dict:
+    """A length change on an ACTIVE ban (B4): the active row's end becomes
+    NOW() plus the length, or NULL for permanent. Called by _apply_ban_core
+    under the target's identity lock, before any of a new ban's side effects
+    (no session, portal, queue or card write: the ban they belong to is
+    already in force), so it writes exactly this UPDATE and one admin_actions
+    row holding the old and the new end. The reason and the row count do not
+    change. Does NOT commit."""
+    params = {"id": active["id"]}
+    if duration_minutes is not None:
+        params["ban_minutes"] = int(duration_minutes)
+    row = (await db.execute(text(
+        "UPDATE player_bans pb SET expires_at = " + _ban_end_sql(duration_minutes) + " "
+        "WHERE pb.id = :id AND " + player_ban_active_sql("pb") + " "
+        "RETURNING " + _BAN_END_COLS_SQL.format(a="pb")
+    ), params)).mappings().first()
+    if row is None:
+        # Unreachable under the identity lock, which every writer of this
+        # key's rows takes; refused rather than reported as a change.
+        raise HTTPException(status_code=409, detail="ban_changed_concurrently")
+    old_end, new_end = _ban_end_iso(active["expires_at"]), _ban_end_iso(row["expires_at"])
+    db.add(AdminAction(
+        admin_steam_id=admin_steam_id, action="ban_length", target_steam_id=target_steam_id,
+        details={"ban_id": str(active["id"]), "old_expires_at": old_end,
+                 "new_expires_at": new_end, "duration_minutes": duration_minutes},
+    ))
+    return {"status": "length_changed", "steam_id": target_steam_id, "reason": active["reason"],
+            "expires_at": new_end,
+            "seconds_left": None if row["seconds_left"] is None else int(row["seconds_left"])}
+
+
 async def _apply_ban_core(db: AsyncSession, *, admin_steam_id: str, target_steam_id: str,
-                          reason: str) -> dict:
+                          reason: str, duration_minutes: int | None = None,
+                          length_sent: bool = False) -> dict:
     """The ban WRITE core, extracted verbatim from admin_ban (Sept 6 item b,
     B-2): identity lock, session and portal revocation, queue-row revocation,
     the already_banned check, the PlayerBan + AdminAction rows. Does NOT
     commit — admin_ban commits right after; the moderation-case act path
-    commits together with its case row. Returns the route's response dict."""
+    commits together with its case row. Returns the route's response dict.
+
+    B4 (migration 417): `length_sent` says the request carried
+    duration_minutes (null included, which means permanent). Then, for a
+    target already under an ACTIVE ban, the core changes that ban's end and
+    returns (_ban_set_length_core) before any side effect below. Otherwise
+    it runs as before; a new ban's row carries expires_at = NOW() plus the
+    length (NULL when no length was given), and an ENDED open row of the
+    same key is closed first, in this transaction and under this lock, as
+    the system (BAN_CLOSED_BY_EXPIRY): migration 417's unique index holds
+    one open row per key, so the earlier ban stays in the log, closed, and
+    no two rows of one key are ever both active."""
     # Identity lock FIRST, before any purge (round-13 find 6: with the lock
     # taken after the session purge, a steam_auth finalization holding the
     # lock could insert a fresh session AFTER our purge but BEFORE our ban
@@ -48204,6 +48407,12 @@ async def _apply_ban_core(db: AsyncSession, *, admin_steam_id: str, target_steam
     # behind, and therefore see, this whole transaction).
     await db.execute(text("SELECT pg_advisory_xact_lock(hashtext(:sid))"),
                      {"sid": target_steam_id})
+    if length_sent:
+        _active = await _active_ban_details(db, target_steam_id)
+        if _active is not None:
+            return await _ban_set_length_core(
+                db, admin_steam_id=admin_steam_id, target_steam_id=target_steam_id,
+                active=_active, duration_minutes=duration_minutes)
     # Revoke live Steam sessions (audit lower-pri item): without this a banned
     # player's existing verified session kept authenticating session-gated
     # endpoints until its 24h expiry. Ban checks at usage sites still apply;
@@ -48281,23 +48490,53 @@ async def _apply_ban_core(db: AsyncSession, *, admin_steam_id: str, target_steam
         "(SELECT id FROM players WHERE steam_id = :sid)"), {"sid": target_steam_id})
     existing = await _is_banned(db, target_steam_id)
     if existing is not None:   # round-15 find 3: "" is an ACTIVE ban too
-        return {"status": "already_banned", "reason": existing}
+        # The answer gains the active ban's end (B4), after its two keys.
+        _end = await _active_ban_details(db, target_steam_id)
+        return {"status": "already_banned", "reason": existing,
+                "expires_at": _ban_end_iso(_end["expires_at"]) if _end else None,
+                "seconds_left": (int(_end["seconds_left"])
+                                 if _end and _end["seconds_left"] is not None else None)}
     # Normalize a blank reason at the boundary (find 3): the row's existence
     # is the ban; the reason is display-only and must never be empty.
     # Normalize AND truncate ONCE (round-17 find 4): every sink — ban row,
     # audit details, response — carries this exact value.
     _ban_reason = ((reason or "").strip() or "violation")[:256]
-    db.add(PlayerBan(steam_id=target_steam_id, reason=_ban_reason, banned_by_steam_id=admin_steam_id))
+    # An ENDED timed ban of this key is closed by the system before the new
+    # row (migration 417's index holds one open row per key): its unbanned_at
+    # is the end it reached, so the log keeps when it stopped applying.
+    _closed = [str(x) for x in (await db.execute(text(
+        "UPDATE player_bans SET unbanned_by_steam_id = :closer, unbanned_at = expires_at "
+        "WHERE steam_id = :sid AND unbanned_at IS NULL "
+        "AND expires_at IS NOT NULL AND expires_at <= NOW() RETURNING id"
+    ), {"closer": BAN_CLOSED_BY_EXPIRY, "sid": target_steam_id})).scalars().all()]
+    # The end on the database's clock, read in this transaction (NOW() is
+    # its start, the instant the row's own banned_at default does not use).
+    _ban_end = None
+    if duration_minutes is not None:
+        _ban_end = (await db.execute(text("SELECT " + _ban_end_sql(duration_minutes)),
+                                     {"ban_minutes": int(duration_minutes)})).scalar()
+    db.add(PlayerBan(steam_id=target_steam_id, reason=_ban_reason, banned_by_steam_id=admin_steam_id,
+                     expires_at=_ban_end))
+    _details = {"reason": _ban_reason}
+    if length_sent:
+        _details["duration_minutes"] = duration_minutes
+        _details["expires_at"] = _ban_end_iso(_ban_end)
+    if _closed:
+        _details["closed_ended_ban_ids"] = _closed
     db.add(AdminAction(
         admin_steam_id=admin_steam_id, action="ban", target_steam_id=target_steam_id,
         # The NORMALIZED reason (round-16 find 6): audit and ban row must
         # agree — raw whitespace here showed a different "reason" to audit
         # consumers than the ban itself carried.
-        details={"reason": _ban_reason},
+        details=_details,
     ))
     # The bot's poll_new_bans loop picks this up from /internal/recent-bans and
     # posts it to #scr-admin (item 4).
-    return {"status": "banned", "steam_id": target_steam_id, "reason": _ban_reason}
+    # NOW() is fixed for the transaction, so the end read above is exactly
+    # the length ahead of it: seconds_left is the length in seconds.
+    return {"status": "banned", "steam_id": target_steam_id, "reason": _ban_reason,
+            "expires_at": _ban_end_iso(_ban_end),
+            "seconds_left": None if _ban_end is None else int(duration_minutes) * 60}
 
 
 class _AdminBanReq(BaseModel):
@@ -48305,10 +48544,31 @@ class _AdminBanReq(BaseModel):
     target_steam_id: str
     reason: str = "violation"
     hmac_signature: str | None = None
+    # B4: the ban's length in minutes, 1 to BAN_DURATION_MAX_MINUTES (ten
+    # years); absent or null = permanent. StrictInt, so a string, a float or a
+    # boolean is a 422 naming the field, never coerced. Not in the signature's
+    # canonical string, which stays admin:{admin}:ban:{target}. Whether it was
+    # SENT (null included) is model_fields_set, which tells a length change
+    # on an active ban apart from a repeat of the 1.41.0 request.
+    duration_minutes: StrictInt | None = Field(default=None, ge=1, le=BAN_DURATION_MAX_MINUTES)
 
 
 @app.post("/api/v1/admin/ban", tags=["Admin"])
 async def admin_ban(req: _AdminBanReq, _slot=Depends(_pc_writer_slot), db: AsyncSession = Depends(get_db)):
+    """Ban an account (admin HMAC over admin:{admin}:ban:{target}).
+
+    Without duration_minutes (every 1.41.0 request) it answers as it always
+    has: a target with no active ban is banned permanently ("banned"); a
+    target already under an active ban gets the repeat cleanup (sessions,
+    portal sessions, queue rows, card withdrawal) and "already_banned" with
+    the active ban's reason, nothing else written. With the field (1 to ten
+    years of minutes, or null for permanent): a target with no active ban is
+    banned with expires_at = NOW() plus the length; a target under an active
+    ban has that ban's end set (NOW() plus the length, or NULL), its reason
+    kept, no side effect of a new ban repeated, one admin_actions
+    "ban_length" row holding the old and the new end, and answers
+    "length_changed". Every answer ends with expires_at (UTC ISO 8601 with Z,
+    null = permanent) and seconds_left (an integer, null = permanent)."""
     _mod_target_or_422(req.target_steam_id, "target_steam_id")   # before the signature, the reads, the locks and the gate (r13)
     await _require_admin(db, req.admin_steam_id, "ban", req.target_steam_id, req.hmac_signature)
     # ONE lock order on every ban path (Sept 6 item b, review r2): the
@@ -48331,7 +48591,9 @@ async def admin_ban(req: _AdminBanReq, _slot=Depends(_pc_writer_slot), db: Async
     target_w = _mail_identity_to_write(rows, req.target_steam_id)
     await _ban_rate_gate_or_raise(db, req.admin_steam_id, req.target_steam_id, target_w=target_w)
     result = await _apply_ban_core(db, admin_steam_id=req.admin_steam_id,
-                                   target_steam_id=req.target_steam_id, reason=req.reason)
+                                   target_steam_id=req.target_steam_id, reason=req.reason,
+                                   duration_minutes=req.duration_minutes,
+                                   length_sent="duration_minutes" in req.model_fields_set)
     await db.commit()
     return result
 
@@ -48344,7 +48606,9 @@ async def get_recent_bans(
     db: AsyncSession = Depends(get_db),
 ):
     """Bot-only feed for the #scr-admin poller: newly-added active bans,
-    chronological. Mirrors /internal/recent-flags."""
+    chronological. Mirrors /internal/recent-flags. Active is the one
+    definition (models.player_ban_active_sql); each row gains `expires_at`
+    (UTC ISO 8601 with Z, null = permanent) as its last key."""
     expected = os.getenv("API_SECRET_KEY", "")
     if not expected or x_internal_key != expected:
         raise HTTPException(status_code=403, detail="Invalid internal key")
@@ -48356,9 +48620,9 @@ async def get_recent_bans(
         cutoff = row[0] if row else None
     q = (
         "SELECT pb.id::text AS id, pb.steam_id, pb.reason, pb.banned_by_steam_id, "
-        "       pb.banned_at, p.display_name "
+        "       pb.banned_at, p.display_name, pb.expires_at "
         "FROM player_bans pb LEFT JOIN players p ON p.steam_id = pb.steam_id "
-        "WHERE pb.unbanned_at IS NULL "
+        "WHERE " + player_ban_active_sql("pb") + " "
         + ("AND pb.banned_at > :cutoff " if cutoff else "")
         + "ORDER BY pb.banned_at ASC LIMIT :limit"
     )
@@ -48369,7 +48633,8 @@ async def get_recent_bans(
     return {"bans": [
         {"id": r["id"], "steam_id": r["steam_id"], "reason": r["reason"],
          "banned_by_steam_id": r["banned_by_steam_id"], "display_name": r["display_name"],
-         "banned_at": r["banned_at"].isoformat() if r["banned_at"] else None}
+         "banned_at": r["banned_at"].isoformat() if r["banned_at"] else None,
+         "expires_at": _ban_end_iso(r["expires_at"])}
         for r in rows
     ]}
 
@@ -48406,9 +48671,13 @@ async def admin_unban(req: _AdminUnbanReq, _slot=Depends(_pc_writer_slot), db: A
     _mail_actor_live_or_raise(rows, req.admin_steam_id)
     admin_w = _mail_identity_to_write(rows, req.admin_steam_id)
     target_w = _mail_identity_to_write(rows, req.target_steam_id)
+    # Only an ACTIVE ban is released (the one definition): for a timed ban
+    # that has ended the UPDATE releases nothing, and the route answers what
+    # it answers for an account with no ban (rows 0). The ended row stays
+    # open until the next ban of this key closes it as the system.
     res = await db.execute(text(
         "UPDATE player_bans SET unbanned_at = NOW(), unbanned_by_steam_id = :admin "
-        "WHERE steam_id = :sid AND unbanned_at IS NULL"
+        "WHERE steam_id = :sid AND " + player_ban_active_sql("player_bans")
     ), {"admin": admin_w, "sid": req.target_steam_id})
     _mod_release_or_422(req.target_steam_id, res.rowcount)   # outside the domain and nothing released: 422, nothing written
     db.add(AdminAction(

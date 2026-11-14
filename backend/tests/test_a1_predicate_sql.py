@@ -123,7 +123,8 @@ CREATE TABLE ranked_queue (
 
 CREATE TABLE player_bans (
     steam_id TEXT NOT NULL,
-    unbanned_at TIMESTAMPTZ
+    unbanned_at TIMESTAMPTZ,
+    expires_at TIMESTAMPTZ
 );
 
 CREATE TABLE player_blocks (

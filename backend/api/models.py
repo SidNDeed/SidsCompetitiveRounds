@@ -854,13 +854,19 @@ class AdminUser(Base):
 
 
 class PlayerBan(Base):
-    """Append-only ban log; player is currently banned if latest row has unbanned_at IS NULL.
+    """Append-only ban log. A row is an ACTIVE ban while player_ban_active_sql
+    holds for it: not lifted (unbanned_at IS NULL) and its end time, if it has
+    one, still ahead (expires_at, migration 417; NULL = permanent).
 
     The applied steam_id column is TEXT (028); String(20) here is a declaration
     SQLAlchemy does not enforce on insert. Once migration 319 is applied the
-    table enforces its CHECK: an ACTIVE row's steam_id is one to twenty ASCII
-    digits (main._MOD_TARGET_PATTERN); an unbanned row keeps the key it was
-    written with."""
+    table enforces its CHECK: a row with unbanned_at NULL (an active ban, or a
+    timed one that has ended and is not yet closed) has a steam_id of one to
+    twenty ASCII digits (main._MOD_TARGET_PATTERN); a closed row keeps the key
+    it was written with. Migration 417 adds a unique index on steam_id over the
+    rows with unbanned_at NULL: one open row per key, so the ban writer closes
+    an ended row (unbanned_at = expires_at, unbanned_by_steam_id =
+    main.BAN_CLOSED_BY_EXPIRY) in the transaction that inserts the next ban."""
     __tablename__ = "player_bans"
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
@@ -870,6 +876,26 @@ class PlayerBan(Base):
     banned_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
     unbanned_at = Column(DateTime(timezone=True), nullable=True)
     unbanned_by_steam_id = Column(String(20), nullable=True)
+    expires_at = Column(DateTime(timezone=True), nullable=True)
+
+
+# The ONE definition of an ACTIVE ban, as SQL over a player_bans row aliased
+# `alias` (the table's own name when the statement gives it no alias): the row
+# is not lifted and its end time, if it has one, is still ahead. The end is
+# compared with the database's clock (NOW(), the transaction's start), never
+# the api process's, and a timed ban ends by this comparison at read time: no
+# job, sweep or timer closes it. Every SQL reader of player_bans in backend/api
+# splices this into its predicate; test_ban_active_definition.py walks the AST
+# of every api module and of the bot and fails a statement that names the
+# table without it, unless the statement is on that test's short allow-list.
+_PLAYER_BAN_ALIAS = frozenset("abcdefghijklmnopqrstuvwxyz_0123456789")
+
+
+def player_ban_active_sql(alias: str) -> str:
+    if not alias or alias[0].isdigit() or not set(alias) <= _PLAYER_BAN_ALIAS:
+        raise ValueError(f"not a SQL alias: {alias!r}")
+    return (f"({alias}.unbanned_at IS NULL"
+            f" AND ({alias}.expires_at IS NULL OR {alias}.expires_at > NOW()))")
 
 
 class AdminAction(Base):

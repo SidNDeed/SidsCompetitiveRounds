@@ -379,6 +379,15 @@ class FakeDb:
         if "SELECT reason FROM player_bans" in sql:
             r = self.bans.get(params["sid"])
             return _Res([(r,)] if r is not None else [])
+        # _active_ban_details (B4): every ban this fake holds is permanent.
+        if "SELECT pb.id, pb.reason, pb.expires_at" in sql:
+            r = self.bans.get(params["sid"])
+            return _Res([{"id": "ban-" + params["sid"], "reason": r, "expires_at": None,
+                          "seconds_left": None}] if r is not None else [])
+        # The ban writer's close of an ENDED timed row (migration 417): this
+        # fake's bans never end, so there is none to close.
+        if sql.startswith("UPDATE player_bans SET unbanned_by_steam_id = :closer"):
+            return _Res([])
         if "FROM chat_mutes" in sql and sql.lstrip().startswith("SELECT 1"):
             wants_chan = ":chan" in sql
             for mu in self.mutes:
