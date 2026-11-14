@@ -1079,16 +1079,36 @@ def test_336_probe_cleanup_cannot_reach_a_same_named_ordinary_table():
         "whatever the search path offers." % (gone,))
 
 
-async def _second_run_under_lock(number, table, holder_sql):
+async def _xids(conn, table):
+    """Every transaction id a row of ``table`` carries now, as xmin or xmax,
+    and '0' (no xmax); only '0' when the table does not exist yet (the first
+    run creates it)."""
+    if await conn.fetchval("SELECT to_regclass($1) IS NULL", table):
+        return {"0"}
+    rows = await conn.fetch("SELECT xmin::text AS n, xmax::text AS x FROM %s" % table)
+    return {"0"} | {r["n"] for r in rows} | {r["x"] for r in rows}
+
+
+async def _second_run_under_lock(number, table, holder_sql, rows=False, plant=""):
     """Apply the file, then apply it AGAIN while another session holds a lock.
 
-    Returns ``(control, verdict)``. ``control`` is what an explicitly
-    ACCESS-EXCLUSIVE statement did under the same holder, and it is not
-    decoration: without it, "the re-run completed" is exactly what this probe
-    would also print if the holder had failed to take any lock at all, which
-    is a check that cannot fail dressed up as a live experiment (#689/#342).
-    The control runs under its own short lock_timeout so the proof costs
-    milliseconds rather than the file's own five seconds.
+    Returns ``(control, verdict, outside, held)``. ``control`` is what an
+    explicitly ACCESS-EXCLUSIVE statement did under the same holder, and it is
+    not decoration: without it, "the re-run completed" is exactly what this
+    probe would also print if the holder had failed to take any lock at all,
+    which is a check that cannot fail dressed up as a live experiment
+    (#689/#342). The control runs under its own short lock_timeout so the
+    proof costs milliseconds rather than the file's own five seconds.
+
+    With ``rows`` the holder also takes the row locks an ordinary writer holds
+    (_WRITER_ROWS) on every row OUTSIDE the first run's footprint: the rows
+    the first run wrote or locked carry an xmin or xmax the table did not
+    hold before it, and every other row -- this number's bystander included
+    (_BYSTANDERS, inserted after the first run) -- is held. ``outside`` is how
+    many rows that is, ``held`` how many the holder locked (None without
+    ``rows``). ``plant`` is SQL run at the start of the SECOND execution only.
+    The second execution runs under a session lock_timeout of 5 s, so a wait
+    on the holder fails rather than hangs (333 sets none of its own).
     """
     sql = migration_text(number)
     schema = "mlock%s_%s" % (number, uuid.uuid4().hex[:8])
@@ -1100,11 +1120,21 @@ async def _second_run_under_lock(number, table, holder_sql):
         await holder.execute('SET search_path TO "%s"' % schema)
         if PREREQ[number].strip():
             await doer.execute(PREREQ[number])
+        before = await _xids(doer, table)
         await doer.execute(sql)
+        after = await doer.fetch("SELECT ctid::text AS c, xmin::text AS n, xmax::text AS x FROM %s"
+                                 % table)
+        footprint = {r["c"] for r in after if r["n"] not in before or r["x"] not in before}
+        bystander = _BYSTANDERS.get((number, table))
+        if bystander:
+            await doer.execute(bystander[0])
+        outside = [r["c"] for r in await doer.fetch("SELECT ctid::text AS c FROM %s" % table)
+                   if r["c"] not in footprint]
 
         tx = holder.transaction()
         await tx.start()
         await holder.execute(holder_sql)
+        held = await holder.fetchval(_WRITER_ROWS % table, outside) if rows else None
         try:
             # CONTROL. `ADD COLUMN IF NOT EXISTS` over a column that cannot
             # exist: it writes nothing, and it takes ACCESS EXCLUSIVE in order
@@ -1121,13 +1151,14 @@ async def _second_run_under_lock(number, table, holder_sql):
         except Exception:
             pass
 
+        await doer.execute("SET lock_timeout = '5s'")
         try:
-            await doer.execute(sql)
+            await doer.execute(plant + sql)
             verdict = None
         except Exception as ex:
             verdict = "%s: %s" % (type(ex).__name__, ex)
         await tx.rollback()
-        return control, verdict
+        return control, verdict, len(outside), held
     finally:
         try:
             await doer.execute("ROLLBACK")
@@ -1143,6 +1174,64 @@ async def _second_run_under_lock(number, table, holder_sql):
 _HOLDERS = {
     "an ordinary reader": "SELECT count(*) FROM %s",
     "an ordinary writer": "LOCK TABLE %s IN ROW EXCLUSIVE MODE",
+}
+
+# What an ordinary writer holds besides its table lock: FOR NO KEY UPDATE, the
+# row lock a non-key UPDATE takes, on the rows it writes. The writer case takes
+# it on every row outside the first run's footprint. A file that locks its own
+# rows first and judges them after (396, 398 and 399; learning #1072 bounds
+# that wait at 5 s and the hold at 25 s) locks those same rows again on a
+# second run, by design: they are its footprint. A lock on any other row is
+# what the writer case's row half catches.
+_WRITER_ROWS = ("WITH held AS (SELECT 1 FROM %s WHERE ctid::text = ANY($1::text[]) "
+                "FOR NO KEY UPDATE) SELECT count(*) FROM held")
+
+# (number, table) -> (insert, predicate): one row per table that neither run
+# writes or locks, inserted after the first run, so every writer case of these
+# numbers has a row outside the footprint to hold. Their fixtures alone leave
+# some tables with none: 398's and 399's faces are all targets, 397's
+# provenance table starts empty, and 410 writes every proposal and audit row it
+# is given. Each row is in a state both runs leave alone: 410 retires LIVE keys
+# outside its manifest and supersedes PENDING proposals, so its key is retired
+# already and its proposal rejected.
+_BYSTANDER_KEY = "f410000000000003"
+_SHOP_BYSTANDER = ("INSERT INTO shop_items (sku, kind, name, price) "
+                   "VALUES ('bystander_row_lock', 'title', 'a bystander', 0)",
+                   "sku = 'bystander_row_lock'")
+_PROVENANCE_BYSTANDER = ("INSERT INTO shop_item_release_provenance (migration, shop_item_id, "
+                         "submission_id, released_at, published_revision) "
+                         "VALUES ('bystander', 0, 0, NOW(), 1)",
+                         "migration = 'bystander'")
+_BYSTANDERS = {
+    ("397", "shop_items"): _SHOP_BYSTANDER,
+    ("397", "shop_item_release_provenance"): _PROVENANCE_BYSTANDER,
+    ("398", "shop_items"): _SHOP_BYSTANDER,
+    ("398", "cosmetic_submissions"): (
+        "INSERT INTO cosmetic_submissions (artist_steam_id, name, slot, png_data, png_bytes) "
+        "SELECT artist_steam_id, 'a bystander', slot, decode('00', 'hex'), 1 "
+        "FROM cosmetic_submissions ORDER BY id LIMIT 1",
+        "name = 'a bystander'"),
+    ("398", "shop_item_release_provenance"): _PROVENANCE_BYSTANDER,
+    ("399", "shop_items"): _SHOP_BYSTANDER,
+    ("410", "i18n_keys"): (
+        "INSERT INTO i18n_keys (key_id, namespace, msgctxt, source_hash, retired_at) VALUES "
+        "('%s', 'game', 'a bystander', repeat('1', 40), TIMESTAMPTZ '2026-08-01 10:00+00')"
+        % _BYSTANDER_KEY,
+        "key_id = '%s'" % _BYSTANDER_KEY),
+    ("410", "i18n_entries"): (
+        "INSERT INTO i18n_entries (key_id, language_code, target, state, approved_source_hash) "
+        "VALUES ('%s', 'de', 'a bystander', 'approved', repeat('1', 40))" % _410_OUTSIDE_RETIRED,
+        "key_id = '%s' AND language_code = 'de'" % _410_OUTSIDE_RETIRED),
+    ("410", "i18n_proposals"): (
+        "INSERT INTO i18n_proposals (key_id, language_code, source_hash, proposed_target, "
+        "proposer_steam_id, status) VALUES ('%s', 'de', repeat('1', 40), 'a bystander', "
+        "'76561190000000004', 'rejected')" % _410_OUTSIDE_RETIRED,
+        "proposed_target = 'a bystander'"),
+    ("410", "i18n_review_events"): (
+        "INSERT INTO i18n_review_events (actor_steam_id, actor_role, language_code, key_id, "
+        "action, detail) VALUES ('76561190000000004', 'moderator', 'de', NULL, 'reject', "
+        "'a bystander')",
+        "detail = 'a bystander'"),
 }
 
 _LOCK_CASES = [(number, table, who)
@@ -1169,9 +1258,25 @@ def test_a_second_run_takes_no_blocking_lock(number, table, who):
     The measurement is therefore behavioural rather than a reading of the
     statements: hold the lock an ordinary request holds, re-apply the file,
     and require it to get all the way through.
+
+    An ordinary writer holds row locks as well as its table lock, so the
+    writer case also holds FOR NO KEY UPDATE on every row outside the first
+    run's footprint (_WRITER_ROWS): a second run that takes a row lock there
+    -- a `SELECT ... FOR UPDATE` in a guard, say -- would stop a writer of that
+    row, and fails here. For 397 to 410 the rows held include a bystander
+    (_BYSTANDERS), so their row half always holds at least one row; the
+    planted test below proves it can fail.
     """
     holder_sql = _HOLDERS[who] % table
-    control, verdict = _run(_second_run_under_lock(number, table, holder_sql))
+    rows = who == "an ordinary writer"
+    control, verdict, outside, held = _run(_second_run_under_lock(number, table, holder_sql, rows))
+    if rows:
+        assert held == outside, (
+            "the writer holder locked %r of the %d rows of %s outside the first "
+            "run's footprint" % (held, outside, table))
+        assert outside >= 1 or (number, table) not in _BYSTANDERS, (
+            "no row of %s outside the first run's footprint to hold, bystander "
+            "included: the row half would read nothing" % table)
     assert control == "LockNotAvailableError", (
         "the control did not fire: an ALTER TABLE needing ACCESS EXCLUSIVE on "
         "%s ran to completion while %s was supposed to be holding a lock on it "
@@ -1184,6 +1289,28 @@ def test_a_second_run_takes_no_blocking_lock(number, table, who):
         "table: guard the statement on the catalog so it is never issued, "
         "rather than spelling it IF NOT EXISTS."
         % (MIGRATION_FILES[number], who, table, verdict))
+
+
+@pytest.mark.parametrize("number,table", sorted(_BYSTANDERS))
+def test_a_second_run_row_lock_outside_its_footprint_fails_the_writer_case(number, table):
+    """The writer case's row half can fail, for each of the ten 397-to-410
+    writer cases: plant a row lock on the bystander -- a row the first run
+    neither wrote nor locked -- at the start of the second execution, and the
+    writer holder stops it (LockNotAvailableError at the 5 s session
+    lock_timeout). The same plant under the reader holder, which takes no row
+    lock, goes through: the failure is the row lock's, not the table's."""
+    assert _BYSTANDER_KEY not in _410_manifest()
+    plant = "SELECT 1 FROM %s WHERE %s FOR UPDATE;\n" % (table, _BYSTANDERS[(number, table)][1])
+    control, verdict, outside, held = _run(_second_run_under_lock(
+        number, table, _HOLDERS["an ordinary writer"] % table, True, plant))
+    assert control == "LockNotAvailableError", control
+    assert held == outside and outside >= 1, (held, outside)
+    assert verdict is not None and verdict.startswith("LockNotAvailableError"), verdict
+    control, verdict, _, held = _run(_second_run_under_lock(
+        number, table, _HOLDERS["an ordinary reader"] % table, False, plant))
+    assert control == "LockNotAvailableError" and held is None, (control, held)
+    assert verdict is None, ("the plant failed under the reader holder too, so the "
+                             "writer case's failure is not the row lock's: %s" % verdict)
 
 
 # ── The specific hazards each guard was written for ─────────────────────────
