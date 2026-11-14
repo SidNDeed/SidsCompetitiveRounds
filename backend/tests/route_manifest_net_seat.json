@@ -3983,7 +3983,7 @@
           ],
           "main",
           "invite_send",
-          "473e574dcbb9a6d4ad98c51f1683ac1fc87e6ec3"
+          "1b87923c1d3c0258507fe164d1b121691494c8d1"
         ],
         [
           "/api/v1/invites/{invite_id}/accept",
