@@ -93,16 +93,22 @@ ENV_ALLOWED = {"PGCLIENTENCODING": "UTF8"}
 # exactly those four sites, each by one file's cost, and at no other:
 # _connect 1118 -> 1122, record 427 -> 428, run 378 -> 379, test_zz
 # 23 -> 24. Neither file has a d2_seed prerequisite.
+# Re-frozen for migration 405 and its rollback file (the number is
+# provisional), the same one-file case: _build applies and records 405 (one
+# psql start, one pg_dump start, two _connect opens) and test_zz applies its
+# rollback and reads after it (one psql start, two _connect opens), so
+# _connect 1122 -> 1126, record 428 -> 429, run 379 -> 380, test_zz 24 -> 25.
+# Neither file has a d2_seed prerequisite (SEEDS names no 405 file).
 OPEN_COUNTS = {
-    "_admin": 315, "_clone_with_oid": 2, "_connect": 1122, "_fetchval": 6, "_orm": 1,
+    "_admin": 315, "_clone_with_oid": 2, "_connect": 1126, "_fetchval": 6, "_orm": 1,
     "_probe_problems": 2, "_r10_authid_reading": 1, "_r10_inplace_bound": 1,
     "_r10_outside_across_drop": 2, "_r10_routes": 1, "_r10_settings": 2, "_r9_databases": 1,
     "_template_problem": 3, "_whoami": 3}
 START_COUNTS = {
-    "_apply_tail": 2, "_blobs": 1, "_build": 1, "_build.<locals>.record": 428,
-    "_build.<locals>.run": 379, "_git": 2, "_route_run": 56,
+    "_apply_tail": 2, "_blobs": 1, "_build": 1, "_build.<locals>.record": 429,
+    "_build.<locals>.run": 380, "_git": 2, "_route_run": 56,
     "test_migrations_are_applied_from_the_object_store": 2,
-    "test_zz_rollback_and_resume_files_do_not_change_mail_inbox_rev": 24}
+    "test_zz_rollback_and_resume_files_do_not_change_mail_inbox_rev": 25}
 
 REUSE_REFUSAL = ("D2_REUSE_DB is set: the chain was not built in this run, so the run is not "
                  "one the packet cites (ruling FOUR-R11-A17 (g))")
