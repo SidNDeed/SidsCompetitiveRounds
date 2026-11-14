@@ -7726,6 +7726,15 @@ _REGION_PICK_BUILD = 1
 # release train and read by nothing else (#306). Absent on any build
 # before it.
 _REHEARSAL_FOUR_BUILD = 1
+# Release-train verification plumbing, not a design mechanism: the build
+# marker of the lobby invites batch (migrations 415 and 416, the send
+# receipts and the invite tables, and the five invite routes), reported on
+# /health as `ask6_invites_build`, so a phase of the train can tell a box on
+# the new build from a stale one by one key (learnings 780, 794).
+# A code constant, equal on both boxes by construction, probed by the
+# release train and read by nothing else (#306). Absent on any build
+# before it.
+_ASK6_INVITES_BUILD = 1
 # Its sibling, the /health `session_report` word, asks
 # the DATABASE whether it has every table and column the report route's
 # statements name, and the app whether that route is bound. Its statements are
@@ -7803,6 +7812,7 @@ async def health_check(db: AsyncSession = Depends(get_db)):
                               ffa_leave_figure=_FFA_LEAVE_FIGURE_BUILD,
                               region_pick_build=_REGION_PICK_BUILD,
                               rehearsal_four_build=_REHEARSAL_FOUR_BUILD,
+                              ask6_invites_build=_ASK6_INVITES_BUILD,
                               build_manifest=_build_manifest.health_word(),
                               review_eval=_review_rules.review_eval(),
                               review_rules=_review_rules.health_word(),
@@ -7865,6 +7875,7 @@ async def health_check(db: AsyncSession = Depends(get_db)):
                               ffa_leave_figure=_FFA_LEAVE_FIGURE_BUILD,
                               region_pick_build=_REGION_PICK_BUILD,
                               rehearsal_four_build=_REHEARSAL_FOUR_BUILD,
+                              ask6_invites_build=_ASK6_INVITES_BUILD,
                               build_manifest=_build_manifest.health_word(),
                               review_eval=_review_rules.review_eval(),
                               review_rules=_review_rules.health_word(),
