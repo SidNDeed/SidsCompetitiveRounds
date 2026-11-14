@@ -9,12 +9,12 @@ keyed by that game's own row id, so a 1v1 or 2v2 series of two games credits
 two. The bar, from LADDER-HOOK-DESIGN-LITE-V3 sections 3, 4 and 12.5 with the
 unit moved from the series to the game:
 
-  H3  one game delivered twice is credited once. 1v1's second delivery of a
-      report meets unique_match at the match insert's flush and is answered
-      as already recorded with nothing written; 2v2's is the duplicate echo; FFA's is refused by the room gate
-      -- the replay echo -- with no second ffa_matches row. The after-the-fact
-      2v2 settlement (admin completion, lead forfeit) plays no game and
-      credits nothing, whichever path completed the series.
+  H3  one game delivered twice is credited once: 1v1's second delivery meets
+      unique_match at the match insert's flush and is answered as already
+      recorded, nothing written; 2v2's is the duplicate echo; FFA's is
+      refused by the room gate (the replay echo), no second ffa_matches row.
+      The after-the-fact 2v2 settlement (admin completion, lead forfeit)
+      plays no game and credits nothing, whichever path completed the series.
   H5  a DATABASE fault inside the hook's call -- the real hook runs, then a
       failing statement -- costs the completion nothing. The same completion
       runs twice, clean and faulted, each in a fresh schema: the result,
@@ -45,9 +45,9 @@ for the game it did not play), and three of Codex round 2's LOW residual
 sentences (design 12.6) made tests, re-read for the game unit: R1 (a fault
 in game 1 costs game 1's credit and nothing else; game 2 credits its own),
 R3 (the 1v1 credit stands when the rating pass fails or skips, and causes
-nothing else) and Q-G (the resent deciding 1v1 report answers 500 through
-main.app and writes nothing -- behaviour documented as it stands, not
-changed here).
+nothing else) and Q-G (the resent deciding 1v1 report answers 200
+"duplicate" with the stored match's id and writes nothing; closed by lane
+server-fix-1114).
 
 Every H3 and H8 case also records each call main.py makes to the hook, the
 real hook still doing the work (the hook_calls fixture), and asserts it: a
