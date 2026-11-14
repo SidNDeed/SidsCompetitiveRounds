@@ -9613,7 +9613,6 @@ _last_ban_id_posted: str | None = None
 _ban_poller_initialized = False
 
 
-@tasks.loop(seconds=60)
 def _ban_end_line(b) -> str:
     """The embed's end line for one /internal/recent-bans row: the end in
     Discord's timestamp form, or "Permanent" when the row's expires_at is
@@ -9633,6 +9632,7 @@ def _ban_end_line(b) -> str:
         return ""
 
 
+@tasks.loop(seconds=60)
 async def poll_new_bans():
     """Poll new mod-wide player bans and post them to #scr-admin (item 4).
     Each embed carries the ban's end (_ban_end_line) when the api sends it."""

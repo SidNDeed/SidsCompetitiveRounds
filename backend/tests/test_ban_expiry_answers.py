@@ -86,3 +86,7 @@ def test_the_end_line_is_built_inside_the_post_and_never_reaches_the_ban():
     assert body.index("end_line = _ban_end_line(b)") < body.index("discord.Embed(")
     fn = _bot_function("_ban_end_line")
     assert isinstance(fn.body[-1], ast.Try) and [ast.unparse(h.type) for h in fn.body[-1].handlers] == ["Exception"]
+    # the helper sits above the poller without taking its decorator: the
+    # poller is still the 60 s task the bot starts, the helper a plain function
+    assert [ast.unparse(d) for d in poll.decorator_list] == ["tasks.loop(seconds=60)"]
+    assert fn.decorator_list == [] and isinstance(fn, ast.FunctionDef)
