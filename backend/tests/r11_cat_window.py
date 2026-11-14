@@ -87,16 +87,27 @@ ENV_ALLOWED = {"PGCLIENTENCODING": "UTF8"}
 # it (two _connect opens, _snap and _internal_not_enabled). Neither file has
 # a d2_seed prerequisite. So _connect 1114 -> 1118, record 426 -> 427, run
 # 377 -> 378, test_zz 22 -> 23; every other count is unchanged.
+# Re-frozen for main's 1.41.0 migration files: 392 and its rollback file, then
+# 410, 411 and 412, which have no rollback file. Each numbered file costs what
+# 401 costs above (one run start, one record start, two _connect opens) and the
+# rollback file what rollback_401 costs (one test_zz start, two _connect
+# opens); none of the five files has a d2_seed prerequisite. So _connect
+# 1118 -> 1128, record 427 -> 431, run 378 -> 382, test_zz 23 -> 24; every
+# other count is unchanged.
+# Then one d2_seed prerequisite for rollback_384 (d2_seed_data's seed under
+# that file's name): test_zz runs it right before the file, on one _connect
+# open (_prereq) and no start. So _connect 1128 -> 1129; every other count is
+# unchanged.
 OPEN_COUNTS = {
-    "_admin": 315, "_clone_with_oid": 2, "_connect": 1118, "_fetchval": 6, "_orm": 1,
+    "_admin": 315, "_clone_with_oid": 2, "_connect": 1129, "_fetchval": 6, "_orm": 1,
     "_probe_problems": 2, "_r10_authid_reading": 1, "_r10_inplace_bound": 1,
     "_r10_outside_across_drop": 2, "_r10_routes": 1, "_r10_settings": 2, "_r9_databases": 1,
     "_template_problem": 3, "_whoami": 3}
 START_COUNTS = {
-    "_apply_tail": 2, "_blobs": 1, "_build": 1, "_build.<locals>.record": 427,
-    "_build.<locals>.run": 378, "_git": 2, "_route_run": 56,
+    "_apply_tail": 2, "_blobs": 1, "_build": 1, "_build.<locals>.record": 431,
+    "_build.<locals>.run": 382, "_git": 2, "_route_run": 56,
     "test_migrations_are_applied_from_the_object_store": 2,
-    "test_zz_rollback_and_resume_files_do_not_change_mail_inbox_rev": 23}
+    "test_zz_rollback_and_resume_files_do_not_change_mail_inbox_rev": 24}
 
 REUSE_REFUSAL = ("D2_REUSE_DB is set: the chain was not built in this run, so the run is not "
                  "one the packet cites (ruling FOUR-R11-A17 (g))")
