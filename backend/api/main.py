@@ -49586,10 +49586,6 @@ async def team_queue_poll(steam_id: str, request: Request,
                 "DELETE FROM queue_leases WHERE player_id = :pid"
                 "   AND mode = 'team' AND group_id = :lid"),
                 {"pid": my_pid, "lid": me["series_id"]})
-            # Migration 405's change: the expired seat's pending invites for
-            # this lobby end with it.
-            await _invite_bump(db, await _invite_end_departed(
-                db, "team", me["series_id"], [my_pid]))
             await db.commit()
             print(f"[LEASE] open 2v2 lobby seat expired for {steam_id} (lobby {me['series_id']})")
             return TeamQueuePollResponse(status="lobby_closed")
@@ -53887,10 +53883,6 @@ async def ovt_queue_poll(steam_id: str, request: Request, db: AsyncSession = Dep
                 "DELETE FROM queue_leases WHERE player_id = :pid"
                 "   AND mode = 'ovt' AND group_id = :lid"),
                 {"pid": me["player_id"], "lid": me["series_id"]})
-            # Migration 405's change: the expired seat's pending invites for
-            # this lobby end with it.
-            await _invite_bump(db, await _invite_end_departed(
-                db, "ovt", me["series_id"], [me["player_id"]]))
             await db.commit()
             print(f"[LEASE] open 1v2 lobby seat expired for {steam_id} (lobby {me['series_id']})")
             return {"status": "lobby_closed", "queue_count": 0}

@@ -17,6 +17,7 @@ import asyncio
 import contextlib
 import inspect
 import os
+import re
 import sys
 
 import pytest
@@ -524,11 +525,14 @@ def test_a_start_refused_after_a_banned_seats_eviction_ends_that_seats_invites(m
     case(monkeypatch, body)
 
 
-# -- removals that take no lobby lock rely on the sweep and accept's re-check -----
+# -- removals that end no invite rely on the sweep and accept's re-check ----------
 #
 # The janitor's stale and husk prunes and its lobby-not-open deletes do not
 # take the lobby lock, so they may leave a pending invite behind: accept
-# re-checks the sender's live seat itself, and the sweep ends the rest.
+# re-checks the sender's live seat itself, and the sweep ends the rest. The
+# 2v2 and 1v2 polls' lease-expiry branch ends no invite either (note 13 (m)):
+# both polls are walked by test_a1_identity_formation.py under a frozen
+# grammar that an ending call there does not fit.
 
 @pytest.mark.parametrize("mode", inv.MODES)
 def test_a_seat_or_lobby_gone_without_an_ending_is_caught_by_accept_and_the_sweep(monkeypatch, mode):
@@ -586,4 +590,79 @@ def test_a_seat_or_lobby_gone_without_an_ending_is_caught_by_accept_and_the_swee
         assert await _end(env, iw) == ("pending", None), "the lobby mutant still ended the invite"
         await env.sweep()
         assert await _end(env, iw) == ("void", "lobby_closed")
+    case(monkeypatch, body)
+
+
+# Every statement, for a statement log (a rewrite that changes nothing); and
+# a write to lobby_invites.
+_EVERY = re.compile(r"\A")
+_INVITE_WRITE = re.compile(r"\b(?:UPDATE|INSERT INTO|DELETE FROM)\s+lobby_invites\b")
+
+
+@pytest.mark.parametrize("mode", ("team", "ovt"))
+def test_an_expired_2v2_or_1v2_seat_ends_no_invite_and_accept_and_the_sweep_end_them(monkeypatch, mode):
+    """Note 13 (m). The member's seat lease is gone, so the mode's own poll
+    (team_queue_poll, ovt_queue_poll) ends the seat, its row and its lease,
+    and ends no invite: its statements include the seat's delete and no
+    write to lobby_invites, the member's three invites stay pending, and no
+    invitee's revision moves. Then an accept answers invite_void
+    (sender_left), seats nobody and ends its invite, and the next sweep ends
+    another and bumps its invitee's revision. Negative control: before the
+    poll, with the sender's fresh 'lobby' row in place, the sweep keeps all
+    three pending. Mutants: accept's live-sender re-check removed (the
+    accept seats the invitee); the sweep's sender condition removed (the
+    invite stays pending)."""
+    async def body(env):
+        q = inv.QUEUE_TABLE[mode]
+        poll = main.team_queue_poll if mode == "team" else main.ovt_queue_poll
+        lid, (h, m) = await env.lobby(mode, 2)
+        x, y, z = await env.players(3)
+        ix, iy, iz = [await env.invite(m, p, mode, lid) for p in (x, y, z)]
+        await env.fresh(mode, lid)
+
+        # negative control: the sender's fresh 'lobby' row keeps the invites
+        await env.sweep()
+        assert await _ends(env, [ix, iy, iz]) == [("pending", None)] * 3, "the sweep ended a live sender's invite"
+
+        # the poll, with the seat's lease gone
+        await env.conn.execute("DELETE FROM queue_leases WHERE player_id = $1", m.id)
+        revs = [await env.rev(p) for p in (x, y, z)]
+        with env.rewriting(_EVERY, "") as log:
+            ans = await env.call(lambda db: poll(m.sid, Req(m.sid), db=db, rdm=0))
+        status = ans.body.get("status") if isinstance(ans.body, dict) else getattr(ans.body, "status", None)
+        assert ans.status == 200 and status == "lobby_closed", ans
+        assert await _seat(env, mode, m) is None, "the expired seat was not ended"
+        assert [s for s in log if ("DELETE FROM %s" % q) in s], "the poll's seat delete is not in its statements"
+        assert not [s for s in log if _INVITE_WRITE.search(s)], "the poll wrote to lobby_invites"
+        assert await _ends(env, [ix, iy, iz]) == [("pending", None)] * 3, "the poll ended an invite"
+        assert [await env.rev(p) for p in (x, y, z)] == revs, "the poll bumped an invitee's revision"
+
+        # accept's own re-check
+        got = await env.accept(x, ix)
+        assert got == Answer(409, _VOID), got
+        assert str(x.id) not in await _member_ids(env, mode, lid)
+        assert await _end(env, ix) == ("void", "sender_left")
+        calls = []
+
+        def _no_sender_check(self, live):
+            calls.append(1)
+            if self.row is None:
+                raise HTTPException(status_code=404, detail="invite_not_found")
+            main._invite_refuse_ended(self.row, void_as_answered=False)
+        with _swap(main._InviteJoinHook, "recheck", _no_sender_check):
+            got = await env.accept(y, iy)
+        assert calls, "the re-check mutant was not reached"
+        assert got.status == 200 and got != Answer(409, _VOID), got
+        assert str(y.id) in await _member_ids(env, mode, lid), "the mutant accept seated nobody"
+
+        # the sweep's sender condition
+        await env.fresh(mode, lid)
+        with env.rewriting(_SENDER_SEAT, "THEN TRUE OR EXISTS (SELECT 1 FROM", where=_SWEEP_MARK) as hits:
+            await env.sweep()
+        assert hits
+        assert await _end(env, iz) == ("pending", None), "the sender mutant still ended the invite"
+        rz = await env.rev(z)
+        await env.sweep()
+        assert await _end(env, iz) == ("void", "sender_left")
+        assert await env.rev(z) > rz, "the sweep's ending did not bump the invitee's revision"
     case(monkeypatch, body)

@@ -1,9 +1,10 @@
 """Lobby invites on PostgreSQL (migration 405's change): departures, through
 inv_pg (one cf_pg case schema per case, the real handlers in main.py).
 
-Every path that removes a member from an open lobby takes the lobby row's
-lock before it removes the seat, then ends the departed sender's pending
-invites in the same transaction, after the queue-row delete. Each path is
+Each departure path in _PATHS takes the lobby row's lock before it removes
+the seat, then ends the departed sender's pending invites in the same
+transaction, after the queue-row delete. (The removals that end no invite,
+note 13 (g) and (m), are in test_lobby_invites_sweep_pg.py.) Each path is
 run with a second session holding the lobby row FOR NO KEY UPDATE (which
 conflicts with every row lock a path takes, and with no foreign-key check):
 while it is held the departure waits, the member is seated and the invite
@@ -190,8 +191,9 @@ async def _under_lock(env, mode, lid, who, iids, depart):
 # the lobby row to promote a host or disband) sends one invite, then departs:
 #   leave        _lobby_leave_impl (2v2, 1v2), ffa_queue_leave (FFA)
 #   queue_leave  team_queue_leave, ovt_queue_leave
-#   poll         team_queue_poll, ovt_queue_poll, ffa_queue_poll (the seat's
-#                lease is gone, so its renewal fails and the seat ends)
+#   poll         ffa_queue_poll (the seat's lease is gone, so its renewal
+#                fails and the seat ends; the 2v2 and 1v2 polls' same branch
+#                ends no invite, note 13 (m), and is tested in the sweep suite)
 #   state        _lobby_state_impl (the same renewal, from the lobby state)
 #   join_prune   _lobby_join_core, _ffa_lobby_join_core (m is stale; a join prunes it)
 #   delete       delete_player_data
@@ -201,7 +203,7 @@ async def _under_lock(env, mode, lid, who, iids, depart):
 _PATHS = (
     ("leave", "team"), ("leave", "ovt"), ("leave", "ffa"),
     ("queue_leave", "team"), ("queue_leave", "ovt"),
-    ("poll", "team"), ("poll", "ovt"), ("poll", "ffa"),
+    ("poll", "ffa"),
     ("state", "team"), ("state", "ovt"),
     ("join_prune", "team"), ("join_prune", "ovt"), ("join_prune", "ffa"),
     ("delete", "team"), ("delete", "ovt"), ("delete", "ffa"),
@@ -242,10 +244,7 @@ def _depart(env, path, s):
         return lambda: env.call(lambda db: main.ovt_queue_leave(
             Req(m.sid), steam_id=m.sid, cause="", expected_series_id=None, db=db))
     if path == "poll":
-        if mode == "team":
-            return lambda: env.call(lambda db: main.team_queue_poll(m.sid, Req(m.sid), db=db, rdm=0))
-        if mode == "ovt":
-            return lambda: env.call(lambda db: main.ovt_queue_poll(m.sid, Req(m.sid), db=db, rdm=0))
+        assert mode == "ffa", mode                         # note 13 (m)
         return lambda: env.call(lambda db: main.ffa_queue_poll(m.sid, Req(m.sid), db=db))
     if path == "state":
         return lambda: env.call(lambda db: main._lobby_state_impl(mode, m.sid, Req(m.sid), db))
