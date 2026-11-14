@@ -94,8 +94,12 @@ ENV_ALLOWED = {"PGCLIENTENCODING": "UTF8"}
 # opens); none of the five files has a d2_seed prerequisite. So _connect
 # 1118 -> 1128, record 427 -> 431, run 378 -> 382, test_zz 23 -> 24; every
 # other count is unchanged.
+# Then one d2_seed prerequisite for rollback_384 (d2_seed_data's seed under
+# that file's name): test_zz runs it right before the file, on one _connect
+# open (_prereq) and no start. So _connect 1128 -> 1129; every other count is
+# unchanged.
 OPEN_COUNTS = {
-    "_admin": 315, "_clone_with_oid": 2, "_connect": 1128, "_fetchval": 6, "_orm": 1,
+    "_admin": 315, "_clone_with_oid": 2, "_connect": 1129, "_fetchval": 6, "_orm": 1,
     "_probe_problems": 2, "_r10_authid_reading": 1, "_r10_inplace_bound": 1,
     "_r10_outside_across_drop": 2, "_r10_routes": 1, "_r10_settings": 2, "_r9_databases": 1,
     "_template_problem": 3, "_whoami": 3}
