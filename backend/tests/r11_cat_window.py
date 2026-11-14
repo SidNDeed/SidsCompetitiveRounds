@@ -98,14 +98,17 @@ ENV_ALLOWED = {"PGCLIENTENCODING": "UTF8"}
 # that file's name): test_zz runs it right before the file, on one _connect
 # open (_prereq) and no start. So _connect 1128 -> 1129; every other count is
 # unchanged.
+# Then 413_music_albums_delist_refund.sql, which has no rollback file and no
+# d2_seed prerequisite: one numbered file at 401's cost. So _connect 1129 ->
+# 1131, record 431 -> 432, run 382 -> 383; every other count is unchanged.
 OPEN_COUNTS = {
-    "_admin": 315, "_clone_with_oid": 2, "_connect": 1129, "_fetchval": 6, "_orm": 1,
+    "_admin": 315, "_clone_with_oid": 2, "_connect": 1131, "_fetchval": 6, "_orm": 1,
     "_probe_problems": 2, "_r10_authid_reading": 1, "_r10_inplace_bound": 1,
     "_r10_outside_across_drop": 2, "_r10_routes": 1, "_r10_settings": 2, "_r9_databases": 1,
     "_template_problem": 3, "_whoami": 3}
 START_COUNTS = {
-    "_apply_tail": 2, "_blobs": 1, "_build": 1, "_build.<locals>.record": 431,
-    "_build.<locals>.run": 382, "_git": 2, "_route_run": 56,
+    "_apply_tail": 2, "_blobs": 1, "_build": 1, "_build.<locals>.record": 432,
+    "_build.<locals>.run": 383, "_git": 2, "_route_run": 56,
     "test_migrations_are_applied_from_the_object_store": 2,
     "test_zz_rollback_and_resume_files_do_not_change_mail_inbox_rev": 24}
 
