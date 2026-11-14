@@ -9148,6 +9148,140 @@ def _sev_refusal(r):
     return JSONResponse(status_code=r.status, content={"detail": r.field})
 
 
+# -- the evidence refusal census (migration 414, evidence_refusal_daily) --------
+#
+# Every answer of an evidence intake route that does NOT store the record
+# raises one counter: (UTC day, kind, status, field, mod version). Counts only:
+# no player, steam id, room or game key, address or body part is written. Every
+# column is bounded by the server: kind from _EVC_KINDS, status from
+# _EVC_STATUSES, field from the server's own vocabulary (else `unlisted`),
+# version from a closed release range (else `other`). A 401 is counted under
+# seat_session / `other` whatever it sent. The census never changes the answer.
+#
+# A fifth evidence kind: one line in _EVC_KINDS (its word and its module).
+_EVC_KINDS = {"seat": _sev, "card": _cev, "combat": _cbev, "clock": _ice}
+_EVC_STATUSES = frozenset({400, 401, 403, 409, 413, 422, 429, 500, 503})
+_EVC_FIELD_RE = _re.compile(r"[a-z][a-z0-9_.]{0,47}")
+_EVC_VERSION_RE = _re.compile(r"(0|[1-9][0-9]?)\.(0|[1-9][0-9]?)\.(0|[1-9][0-9]?)")
+_EVC_SQL = (
+    "INSERT INTO evidence_refusal_daily (day, kind, status, field, mod_version, n, last_at) "
+    "VALUES (CAST(timezone('UTC', now()) AS date), :k, :s, :f, :v, 1, now()) "
+    "ON CONFLICT (day, kind, status, field, mod_version) DO UPDATE "
+    "SET n = evidence_refusal_daily.n + 1, last_at = EXCLUDED.last_at")
+
+
+def _evc_source_strings(mod) -> set:
+    import ast as _ast
+    try:
+        with open(mod.__file__, encoding="utf-8") as f:
+            tree = _ast.parse(f.read())
+    except Exception as ex:   # the census then files this module's fields as `unlisted`
+        print(f"[EVIDENCE-CENSUS] vocabulary of {getattr(mod, '__name__', mod)} unread: {ex}")
+        return set()
+    return {n.value for n in _ast.walk(tree)
+            if isinstance(n, _ast.Constant) and isinstance(n.value, str)}
+
+
+def _evc_vocabulary() -> frozenset:
+    """The field names the server itself can put in a refusal: every string
+    literal of the evidence modules (and the *_evidence / *_measures modules
+    they parse with), the composed rule names, and the routes' fixed answers.
+    A closed set fixed at import: nothing a client sends can extend it."""
+    mods = []
+    for m in _EVC_KINDS.values():
+        mods.append(m)
+        mods.extend(v for v in vars(m).values() if isinstance(v, type(_sev))
+                    and v.__name__.endswith(("_evidence", "_measures")))
+    words = set()
+    for m in {id(m): m for m in mods}.values():
+        words |= _evc_source_strings(m)
+    words |= {"hit_sent.reset_%s_%s" % (s, w) for s in _sev.RESET_NAMES for w in ("since", "last")}
+    words |= {"ldir." + p for p in _ice.IC_LDIR_PARTS}
+    words |= {"seat_session", "not_ready", "signature", "internal", "rate_limited",
+              "seat_evidence_off", "card_evidence_off", "combat_evidence_off",
+              "identity_clock_evidence_off"}
+    return frozenset(w for w in words if _EVC_FIELD_RE.fullmatch(w))
+
+
+_EVC_FIELDS = _evc_vocabulary()
+
+
+def _evc_version(request) -> str:
+    """The X-Mod-Version header when it is a plain release version inside the
+    server's accepted range (MIN_MOD_VERSION_EFFECTIVE .. LATEST_MOD_VERSION),
+    else `other`."""
+    v = (request.headers.get("X-Mod-Version") or "") if request is not None else ""
+    if not _EVC_VERSION_RE.fullmatch(v):
+        return "other"
+    parsed = tuple(int(x) for x in v.split("."))
+    lo = _parse_pure_dotted_version(MIN_MOD_VERSION_EFFECTIVE)
+    hi = _parse_pure_dotted_version(LATEST_MOD_VERSION)
+    if lo is None or hi is None or not (lo <= parsed <= hi):
+        return "other"
+    return v
+
+
+def _evc_field(field) -> str:
+    return field if isinstance(field, str) and field in _EVC_FIELDS else "unlisted"
+
+
+def _evc_key(status, field, request) -> tuple[str, str]:
+    """(field, version) as counted. A 401 carries no verified session, so
+    nothing it sent may vary its row: fixed field, version `other`."""
+    if status == 401:
+        return "seat_session", "other"
+    return _evc_field(field), _evc_version(request)
+
+
+# A refusal never waits behind another refusal's counter row for long: on
+# timeout it is not counted (one printed line) and answers as it would.
+_EVC_LOCK_TIMEOUT = "SET LOCAL lock_timeout = '250ms'"
+
+
+def _evc_answer_field(answer) -> str:
+    """The field an evidence route's refusal answer names (_sev_refusal's
+    shapes and the routes' fixed answers)."""
+    try:
+        body = _json.loads(answer.body)
+    except Exception:
+        return "unlisted"
+    if not isinstance(body, dict):
+        return "unlisted"
+    if body.get("error") == "rate_limited":
+        return body.get("field")
+    return body.get("detail") or body.get("status") or body.get("error")
+
+
+async def _evidence_census(db, kind, request, status, field) -> None:
+    """Raise one refusal counter. Never raises and never changes the answer.
+    It first ends the route's own transaction (a refusal stores nothing, and
+    every lock the route took is released before the counter row is touched),
+    then writes the counter in its own short transaction under a lock timeout,
+    and on any failure rolls back and prints one line, so no failed
+    transaction is left behind."""
+    if kind not in _EVC_KINDS or status not in _EVC_STATUSES:
+        return
+    field, version = _evc_key(status, field, request)
+    try:
+        await db.rollback()
+        await db.execute(text(_EVC_LOCK_TIMEOUT))
+        await db.execute(text(_EVC_SQL), {"k": kind, "s": status, "f": field, "v": version})
+        await db.commit()
+    except Exception as ex:
+        print(f"[EVIDENCE-CENSUS] {kind} {status} {field} not counted: {type(ex).__name__}")
+        try:
+            await db.rollback()
+        except Exception:
+            pass
+
+
+async def _evidence_refused(db, kind, request, answer):
+    """An evidence route's refusal answer, counted (see _evidence_census) and
+    returned unchanged."""
+    await _evidence_census(db, kind, request, answer.status_code, _evc_answer_field(answer))
+    return answer
+
+
 async def _sev_claimed_seat(request) -> tuple[str, object]:
     """The body, read once, and the seat it names (empty when it names none):
     the session check needs the claimed seat before anything else happens."""
@@ -9165,30 +9299,37 @@ async def submit_seat_evidence(request: Request, db: AsyncSession = Depends(get_
 
     The FIRST decision is the session: 401 unless the request carries a
     verified session for the seat the body names (_strict_steam_session_ok),
-    before any other route work; that check only reads. After it, this route
-    writes the seat_evidence table and nothing else: it never creates a player
-    row, never touches a match, a series, a rating, gold or flagged_matches.
-    Evaluation runs later, in review_worker_loop."""
+    before any other route work; that check only reads. A stored record is
+    written to the seat_evidence table; an answer that does not store it
+    (any refusal, the 401 included) raises one counter in
+    evidence_refusal_daily through _evidence_census, which holds no record
+    content. Nothing else is written: it never creates a player row, never
+    touches a match, a series, a rating, gold or flagged_matches. Evaluation
+    runs later, in review_worker_loop."""
     seat, body = await _sev_claimed_seat(request)
     if not seat or not await _strict_steam_session_ok(request, seat, db):
-        return JSONResponse(status_code=401, content={"detail": "seat_session"})
+        return await _evidence_refused(db, "seat", request, JSONResponse(status_code=401, content={"detail": "seat_session"}))
     try:
         if await _sev.setting(db, "seat_evidence_accept", "0") != "1":
-            return JSONResponse(status_code=503, content={"error": "seat_evidence_off"})
+            return await _evidence_refused(db, "seat", request, JSONResponse(status_code=503, content={"error": "seat_evidence_off"}))
         env = _sev.parse_envelope(body)
         if not _sev.verify_sig(MATCH_HMAC_SECRET, env):
-            return JSONResponse(status_code=403, content={"detail": "signature"})
+            return await _evidence_refused(db, "seat", request, JSONResponse(status_code=403, content={"detail": "signature"}))
         rec = _sev.parse_record(env)
         rows = (await db.execute(
             select(Player.id, Player.steam_id).where(Player.steam_id.in_([env["seat"], env["other"]]))
         )).all()
         by_steam = {r.steam_id: r.id for r in rows}
         if env["seat"] not in by_steam or env["other"] not in by_steam:
-            return JSONResponse(status_code=409, content={"status": "not_ready"})
+            return await _evidence_refused(db, "seat", request, JSONResponse(status_code=409, content={"status": "not_ready"}))
         return await _sev.store_record(db, env, rec, by_steam[env["seat"]], by_steam[env["other"]],
                                        _sev_header_version(request))
     except _sev.EvidenceRefused as r:
-        return _sev_refusal(r)
+        return await _evidence_refused(db, "seat", request, _sev_refusal(r))
+    except Exception:
+        # an unexpected error: counted, then the same 500
+        await _evidence_census(db, "seat", request, 500, "internal")
+        raise
 
 
 @app.post("/api/v1/client/compat-outcome", tags=["Matches"])
@@ -9249,29 +9390,36 @@ async def submit_card_evidence(request: Request, db: AsyncSession = Depends(get_
     the request carries a verified session for the seat the body names; then
     the accept switch (503 card_evidence_off), the envelope (400/413/422), the
     signature over the card string (403), the record (422), both accounts
-    (409 not_ready). After that it writes the card_evidence table and nothing
-    else: never a player row, a match, a series, a rating, gold, match_cards
-    or flagged_matches. Evaluation runs later, in review_worker_loop."""
+    (409 not_ready). After that it writes the card_evidence table. Every
+    answer that does not store the record (each refusal above, 409 conflict,
+    429, and a 500) raises one counter in evidence_refusal_daily through
+    _evidence_census, which holds no record content. Nothing else: never a
+    player row, a match, a series, a rating, gold, match_cards or
+    flagged_matches. Evaluation runs later, in review_worker_loop."""
     seat, body = await _sev_claimed_seat(request)
     if not seat or not await _strict_steam_session_ok(request, seat, db):
-        return JSONResponse(status_code=401, content={"detail": "seat_session"})
+        return await _evidence_refused(db, "card", request, JSONResponse(status_code=401, content={"detail": "seat_session"}))
     try:
         if await _cev.setting(db, "card_evidence_accept", "0") != "1":
-            return JSONResponse(status_code=503, content={"error": "card_evidence_off"})
+            return await _evidence_refused(db, "card", request, JSONResponse(status_code=503, content={"error": "card_evidence_off"}))
         env = _cev.parse_envelope(body)
         if not _cev.verify_sig(MATCH_HMAC_SECRET, env):
-            return JSONResponse(status_code=403, content={"detail": "signature"})
+            return await _evidence_refused(db, "card", request, JSONResponse(status_code=403, content={"detail": "signature"}))
         rec = _cev.parse_record(env)
         rows = (await db.execute(
             select(Player.id, Player.steam_id).where(Player.steam_id.in_([env["seat"], env["other"]]))
         )).all()
         by_steam = {r.steam_id: r.id for r in rows}
         if env["seat"] not in by_steam or env["other"] not in by_steam:
-            return JSONResponse(status_code=409, content={"status": "not_ready"})
+            return await _evidence_refused(db, "card", request, JSONResponse(status_code=409, content={"status": "not_ready"}))
         return await _cev.store_record(db, env, rec, by_steam[env["seat"]], by_steam[env["other"]],
                                        _sev_header_version(request))
     except _sev.EvidenceRefused as r:
-        return _sev_refusal(r)
+        return await _evidence_refused(db, "card", request, _sev_refusal(r))
+    except Exception:
+        # an unexpected error: counted, then the same 500
+        await _evidence_census(db, "card", request, 500, "internal")
+        raise
 
 
 @app.get("/api/v1/admin/card-evidence", tags=["Admin"])
@@ -9332,30 +9480,37 @@ async def submit_combat_evidence(request: Request, db: AsyncSession = Depends(ge
     The session rule and signing are the seat evidence route's: the FIRST
     decision is the session (401 unless the request carries a verified
     session for the seat the body names), before any other route work.
-    After it, this route writes the combat_evidence table and nothing else,
-    storing the record before anything is derived: it never
-    creates a player row, never touches a match, a series, a rating, gold
-    or flagged_matches. Every derivation runs later, in review_worker_loop."""
+    After it, this route writes the combat_evidence table, storing the record
+    before anything is derived; an answer that does not store the record (any
+    refusal, the 401 included) raises one counter in evidence_refusal_daily
+    through _evidence_census, which holds no record content. Nothing else: it
+    never creates a player row, never touches a match, a series, a rating,
+    gold or flagged_matches. Every derivation runs later, in
+    review_worker_loop."""
     seat, body = await _sev_claimed_seat(request)
     if not seat or not await _strict_steam_session_ok(request, seat, db):
-        return JSONResponse(status_code=401, content={"detail": "seat_session"})
+        return await _evidence_refused(db, "combat", request, JSONResponse(status_code=401, content={"detail": "seat_session"}))
     try:
         if await _cbev.setting(db, "combat_evidence_accept", "0") != "1":
-            return JSONResponse(status_code=503, content={"error": "combat_evidence_off"})
+            return await _evidence_refused(db, "combat", request, JSONResponse(status_code=503, content={"error": "combat_evidence_off"}))
         env = _cbev.parse_envelope(body)
         if not _cbev.verify_sig(MATCH_HMAC_SECRET, env):
-            return JSONResponse(status_code=403, content={"detail": "signature"})
+            return await _evidence_refused(db, "combat", request, JSONResponse(status_code=403, content={"detail": "signature"}))
         rec = _cbev.parse_record(env)
         rows = (await db.execute(
             select(Player.id, Player.steam_id).where(Player.steam_id.in_([env["seat"], env["other"]]))
         )).all()
         by_steam = {r.steam_id: r.id for r in rows}
         if env["seat"] not in by_steam or env["other"] not in by_steam:
-            return JSONResponse(status_code=409, content={"status": "not_ready"})
+            return await _evidence_refused(db, "combat", request, JSONResponse(status_code=409, content={"status": "not_ready"}))
         return await _cbev.store_record(db, env, rec, by_steam[env["seat"]], by_steam[env["other"]],
                                        _sev_header_version(request))
     except _cbev.EvidenceRefused as r:
-        return _sev_refusal(r)
+        return await _evidence_refused(db, "combat", request, _sev_refusal(r))
+    except Exception:
+        # an unexpected error: counted, then the same 500
+        await _evidence_census(db, "combat", request, 500, "internal")
+        raise
 
 
 @app.get("/api/v1/admin/combat-evidence", tags=["Admin"])
@@ -9420,17 +9575,20 @@ async def submit_identity_clock_evidence(request: Request, db: AsyncSession = De
     the rate limiter keys on is classified in memory against the offline
     range list already loaded, and only the class word and the list's
     revision id are kept. The address itself is not written, logged or sent
-    anywhere. This route writes the identity_clock_evidence table and nothing
-    else; evaluation runs later in review_worker_loop."""
+    anywhere. This route writes the identity_clock_evidence table for a stored
+    record; an answer that does not store it (any refusal, the 401 included)
+    raises one counter in evidence_refusal_daily through _evidence_census,
+    which holds no record content and no address. Nothing else is written;
+    evaluation runs later in review_worker_loop."""
     seat, body = await _sev_claimed_seat(request)
     if not seat or not await _strict_steam_session_ok(request, seat, db):
-        return JSONResponse(status_code=401, content={"detail": "seat_session"})
+        return await _evidence_refused(db, "clock", request, JSONResponse(status_code=401, content={"detail": "seat_session"}))
     try:
         if await _ice.ice_setting(db, "identity_clock_evidence_accept", "0") != "1":
-            return JSONResponse(status_code=503, content={"error": "identity_clock_evidence_off"})
+            return await _evidence_refused(db, "clock", request, JSONResponse(status_code=503, content={"error": "identity_clock_evidence_off"}))
         env = _ice.ice_parse_envelope(body)
         if not _ice.ice_verify_sig(MATCH_HMAC_SECRET, env):
-            return JSONResponse(status_code=403, content={"detail": "signature"})
+            return await _evidence_refused(db, "clock", request, JSONResponse(status_code=403, content={"detail": "signature"}))
         rec = _ice.ice_parse_record(env)
         clock = _ice.ice_parse_clock(request.headers.get(_ice.CLOCK_HEADER), rec)
         conn_class, conn_word = _conn_ranges.classify_address(_rl_client_address(request))
@@ -9439,12 +9597,16 @@ async def submit_identity_clock_evidence(request: Request, db: AsyncSession = De
         )).all()
         by_steam = {r.steam_id: r.id for r in rows}
         if env["seat"] not in by_steam or env["other"] not in by_steam:
-            return JSONResponse(status_code=409, content={"status": "not_ready"})
+            return await _evidence_refused(db, "clock", request, JSONResponse(status_code=409, content={"status": "not_ready"}))
         return await _ice.ice_store_record(db, env, rec, by_steam[env["seat"]],
                                            by_steam[env["other"]], _sev_header_version(request),
                                            clock, conn_class, conn_word)
     except _sev.EvidenceRefused as r:
-        return _sev_refusal(r)
+        return await _evidence_refused(db, "clock", request, _sev_refusal(r))
+    except Exception:
+        # an unexpected error: counted, then the same 500
+        await _evidence_census(db, "clock", request, 500, "internal")
+        raise
 
 
 @app.get("/api/v1/admin/identity-clock-evidence", tags=["Admin"])
