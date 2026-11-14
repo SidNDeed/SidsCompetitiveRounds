@@ -71,45 +71,86 @@
 -- writes one.
 --
 -- LOCKS. On a first run the two tables and their indexes are created empty
--- and no other session sees them before COMMIT. Replacing the kind check
--- takes ACCESS EXCLUSIVE on mail_messages and reads the table once to
--- validate the new check: every mail read and write waits from that
+-- and no other session sees them before COMMIT. Their foreign keys take
+-- SHARE ROW EXCLUSIVE on players and on mail_messages: writes to either
+-- table wait from that statement until COMMIT, and reads do not. Replacing
+-- the kind check takes ACCESS EXCLUSIVE on mail_messages and reads the table
+-- once to validate the new check: every mail read and write waits from that
 -- statement until COMMIT. mail_messages is small (the primary held 9 rows on
 -- 12 Nov 2026). `lock_timeout` bounds how long each step waits to START
 -- behind a transaction already in flight; if it expires, the whole file
 -- rolls back with nothing changed and is re-applied.
 --
--- RE-RUNS. Each catalog guard below issues its step only when its object is
--- absent (the check's replacement only when mail_messages has no check named
--- ck_mail_messages_kind with this file's definition), so a second run issues
--- none of them and takes no lock on any table; the statements inside the
--- guards keep `IF NOT EXISTS`. No statement stands outside every guard
--- except BEGIN, SET LOCAL, the guard blocks themselves and COMMIT.
+-- CREATE OR REFUSE. The two tables are new and this file alone makes them,
+-- so it either creates them or proves they are its own work, and refuses
+-- every other state with nothing changed:
+--   - neither name stands in the schema: the file creates both tables, with
+--     their keys and indexes, and stamps each with its mark, a table comment
+--     holding the SHA-256 of the statements between the DDL START and DDL END
+--     lines (comment and blank lines dropped, each line trimmed). A name
+--     those statements create that already stands in the schema (an index,
+--     a key's index, a table's row type) refuses the run before any of them;
+--   - both are ordinary tables and both carry exactly that mark: they are
+--     this file's own committed work, and the file issues nothing for them
+--     and takes no lock on them;
+--   - anything else refuses: one without the other, either one unmarked or
+--     marked otherwise, or either one not an ordinary table.
+-- On the create path the applying role creates both tables in this
+-- transaction, so it owns them and holds every privilege on them. A test
+-- recomputes the mark from this text, so the statements between the markers
+-- cannot change without the mark: tables an older text made are refused.
+-- The file does not police a change made to a marked table after it created
+-- it: a re-run accepts such a table, because a re-run issues nothing for the
+-- tables and no deploy step depends on one.
 --
--- POST-CHECK. After the guards, one read compares every object with the
--- definition this file states, because a guard alone accepts any object
--- that has the right name: each table is an ordinary permanent table with
--- no row security, no rules and no trigger, in no inheritance and no
--- partitioning; its columns in order (type, NOT NULL, default), each an
--- ordinary column (neither generated nor identity) with its type's default
--- collation; its constraints by name and definition, and no other;
--- its indexes by name, uniqueness and definition, all valid, and no other.
--- On mail_messages: exactly one check names kind, and it is
--- ck_mail_messages_kind with this file's definition. Anything that differs
--- aborts the file, naming what it found. Not compared: ownership and
--- privileges (a missing grant fails the first statement that needs it), and
--- storage and statistics settings, which change no row and no answer.
+-- RE-RUNS. The kind check's replacement is issued only when mail_messages
+-- has no check named ck_mail_messages_kind with this file's definition, so
+-- a second run issues no DDL and takes no lock on any table. No statement
+-- stands outside every guard except BEGIN, SET LOCAL, the guard blocks
+-- themselves and COMMIT.
+--
+-- POST-CHECK. After the guards, one read compares mail_messages' checks with
+-- this file: exactly one check names kind, and it is ck_mail_messages_kind
+-- with this file's definition. Anything else aborts the file, naming what it
+-- found. mail_messages is an existing table, so the claim stays that narrow:
+-- the file compares nothing else of it.
 
 BEGIN;
 SET LOCAL lock_timeout = '5s';
 
+-- The two tables: created and marked, or found marked, or refused (CREATE
+-- OR REFUSE above).
 DO $m405tables$
+DECLARE
+  mark CONSTANT text := 'lobby invites, DDL sha256 d8c6427e321c7e2eebe713174e46aa968e34c02cbb8f92901adeabe4ff9d4b6b';
+  taken text;
+  found text;
 BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_class c
                    JOIN pg_namespace n ON n.oid = c.relnamespace
                   WHERE n.nspname = current_schema()
-                    AND c.relname = 'lobby_invites') THEN
-    CREATE TABLE IF NOT EXISTS lobby_invites (
+                    AND c.relname IN ('lobby_invites', 'invite_receipts')) THEN
+    SELECT string_agg(x.name, ', ' ORDER BY x.name) INTO taken
+      FROM (SELECT c.relname::text AS name
+              FROM pg_class c
+              JOIN pg_namespace n ON n.oid = c.relnamespace
+             WHERE n.nspname = current_schema()
+               AND c.relname IN ('lobby_invites_pkey', 'uq_lobby_invites_pending',
+                                 'ix_lobby_invites_invitee_pending', 'ix_lobby_invites_lobby',
+                                 'ix_lobby_invites_sender_created', 'ix_lobby_invites_expires',
+                                 'invite_receipts_pkey', 'ix_invite_receipts_invite')
+            UNION ALL
+            SELECT t.typname::text
+              FROM pg_type t
+              JOIN pg_namespace n ON n.oid = t.typnamespace
+             WHERE n.nspname = current_schema()
+               AND t.typname IN ('lobby_invites', 'invite_receipts')) x;
+    IF taken IS NOT NULL THEN
+      RAISE EXCEPTION '405: a name this file creates already stands in schema % (found: %)',
+        current_schema(), taken;
+    END IF;
+    -- DDL START
+    CREATE TABLE lobby_invites (
       id                 UUID        NOT NULL DEFAULT gen_random_uuid(),
       mode               TEXT        NOT NULL,
       lobby_id           UUID        NOT NULL,
@@ -138,45 +179,15 @@ BEGIN
       CONSTRAINT ck_lobby_invites_not_self CHECK (sender_player_id <> invitee_player_id),
       CONSTRAINT ck_lobby_invites_expiry CHECK (expires_at > created_at)
     );
-  END IF;
-  IF NOT EXISTS (SELECT 1 FROM pg_class c
-                   JOIN pg_namespace n ON n.oid = c.relnamespace
-                  WHERE n.nspname = current_schema()
-                    AND c.relname = 'uq_lobby_invites_pending') THEN
-    CREATE UNIQUE INDEX IF NOT EXISTS uq_lobby_invites_pending
+    CREATE UNIQUE INDEX uq_lobby_invites_pending
       ON lobby_invites (mode, lobby_id, invitee_player_id) WHERE state = 'pending';
-  END IF;
-  IF NOT EXISTS (SELECT 1 FROM pg_class c
-                   JOIN pg_namespace n ON n.oid = c.relnamespace
-                  WHERE n.nspname = current_schema()
-                    AND c.relname = 'ix_lobby_invites_invitee_pending') THEN
-    CREATE INDEX IF NOT EXISTS ix_lobby_invites_invitee_pending
+    CREATE INDEX ix_lobby_invites_invitee_pending
       ON lobby_invites (invitee_player_id) WHERE state = 'pending';
-  END IF;
-  IF NOT EXISTS (SELECT 1 FROM pg_class c
-                   JOIN pg_namespace n ON n.oid = c.relnamespace
-                  WHERE n.nspname = current_schema()
-                    AND c.relname = 'ix_lobby_invites_lobby') THEN
-    CREATE INDEX IF NOT EXISTS ix_lobby_invites_lobby ON lobby_invites (mode, lobby_id);
-  END IF;
-  IF NOT EXISTS (SELECT 1 FROM pg_class c
-                   JOIN pg_namespace n ON n.oid = c.relnamespace
-                  WHERE n.nspname = current_schema()
-                    AND c.relname = 'ix_lobby_invites_sender_created') THEN
-    CREATE INDEX IF NOT EXISTS ix_lobby_invites_sender_created
+    CREATE INDEX ix_lobby_invites_lobby ON lobby_invites (mode, lobby_id);
+    CREATE INDEX ix_lobby_invites_sender_created
       ON lobby_invites (sender_player_id, created_at);
-  END IF;
-  IF NOT EXISTS (SELECT 1 FROM pg_class c
-                   JOIN pg_namespace n ON n.oid = c.relnamespace
-                  WHERE n.nspname = current_schema()
-                    AND c.relname = 'ix_lobby_invites_expires') THEN
-    CREATE INDEX IF NOT EXISTS ix_lobby_invites_expires ON lobby_invites (expires_at);
-  END IF;
-  IF NOT EXISTS (SELECT 1 FROM pg_class c
-                   JOIN pg_namespace n ON n.oid = c.relnamespace
-                  WHERE n.nspname = current_schema()
-                    AND c.relname = 'invite_receipts') THEN
-    CREATE TABLE IF NOT EXISTS invite_receipts (
+    CREATE INDEX ix_lobby_invites_expires ON lobby_invites (expires_at);
+    CREATE TABLE invite_receipts (
       caller_player_id   UUID        NOT NULL,
       idempotency_key    UUID        NOT NULL,
       route              TEXT        NOT NULL,
@@ -189,12 +200,25 @@ BEGIN
       CONSTRAINT ck_invite_receipts_route CHECK (route IN ('send', 'accept', 'decline', 'cancel')),
       CONSTRAINT ck_invite_receipts_request_fp CHECK (octet_length(request_fp) = 32)
     );
-  END IF;
-  IF NOT EXISTS (SELECT 1 FROM pg_class c
-                   JOIN pg_namespace n ON n.oid = c.relnamespace
-                  WHERE n.nspname = current_schema()
-                    AND c.relname = 'ix_invite_receipts_invite') THEN
-    CREATE INDEX IF NOT EXISTS ix_invite_receipts_invite ON invite_receipts (invite_id);
+    CREATE INDEX ix_invite_receipts_invite ON invite_receipts (invite_id);
+    -- DDL END
+    EXECUTE format('COMMENT ON TABLE lobby_invites IS %L', mark);
+    EXECUTE format('COMMENT ON TABLE invite_receipts IS %L', mark);
+  ELSE
+    SELECT string_agg(format('%s %s', w.name, coalesce((
+             SELECT CASE WHEN c.relkind <> 'r' THEN 'not a table'
+                         WHEN obj_description(c.oid, 'pg_class') = mark THEN 'marked'
+                         ELSE 'unmarked' END
+               FROM pg_class c
+               JOIN pg_namespace n ON n.oid = c.relnamespace
+              WHERE n.nspname = current_schema() AND c.relname = w.name), 'absent')),
+           ', ' ORDER BY w.name)
+      INTO found
+      FROM (VALUES ('invite_receipts'), ('lobby_invites')) AS w(name);
+    IF found IS DISTINCT FROM 'invite_receipts marked, lobby_invites marked' THEN
+      RAISE EXCEPTION '405: lobby_invites and invite_receipts are neither both absent nor both marked by this file (found: %)',
+        found;
+    END IF;
   END IF;
 END $m405tables$;
 
@@ -240,159 +264,13 @@ DO $m405check$
 DECLARE
   found text;
   want text;
-  inv oid;
-  rcp oid;
   mm oid;
 BEGIN
-  -- The three tables this file names, in the schema it ran in.
-  SELECT c.oid INTO inv
-    FROM pg_class c
-    JOIN pg_namespace n ON n.oid = c.relnamespace
-   WHERE n.nspname = current_schema() AND c.relname = 'lobby_invites';
-  SELECT c.oid INTO rcp
-    FROM pg_class c
-    JOIN pg_namespace n ON n.oid = c.relnamespace
-   WHERE n.nspname = current_schema() AND c.relname = 'invite_receipts';
+  -- mail_messages: exactly one check names kind, and it is this file's.
   SELECT c.oid INTO mm
     FROM pg_class c
     JOIN pg_namespace n ON n.oid = c.relnamespace
    WHERE n.nspname = current_schema() AND c.relname = 'mail_messages';
-  IF inv IS NULL OR rcp IS NULL OR mm IS NULL THEN
-    RAISE EXCEPTION '405: a table is missing from schema %', current_schema();
-  END IF;
-
-  -- The two tables: ordinary, permanent, no row security, no rules, and no
-  -- trigger but the internal ones PostgreSQL keeps for their foreign keys.
-  -- Each boolean is cast to text, which prints true or false (its own output
-  -- form, which format() would use, is t or f).
-  SELECT string_agg(format('%s %s %s %s %s', c.relname, c.relkind, c.relpersistence,
-                           c.relrowsecurity::text, c.relhasrules::text), '; ' ORDER BY c.relname)
-    INTO found
-    FROM pg_class c
-   WHERE c.oid IN (inv, rcp);
-  want := 'invite_receipts r p false false; lobby_invites r p false false';
-  IF found IS DISTINCT FROM want THEN
-    RAISE EXCEPTION '405: the tables differ from this file (found: %)', found;
-  END IF;
-  IF EXISTS (SELECT 1 FROM pg_trigger t
-              WHERE t.tgrelid IN (inv, rcp) AND NOT t.tgisinternal) THEN
-    RAISE EXCEPTION '405: a trigger exists on lobby_invites or invite_receipts';
-  END IF;
-  -- Every column is an ordinary one. The column check below compares name,
-  -- type, NOT NULL and default, and a generated column's expression reads
-  -- back through pg_attrdef exactly as a default does, so it is refused here.
-  IF EXISTS (SELECT 1 FROM pg_attribute a
-              WHERE a.attrelid IN (inv, rcp) AND a.attnum > 0 AND NOT a.attisdropped
-                AND (a.attgenerated <> '' OR a.attidentity <> '')) THEN
-    RAISE EXCEPTION '405: a generated or identity column exists on lobby_invites or invite_receipts';
-  END IF;
-  -- Every column has its type's default collation, as every column this
-  -- file declares does (none says COLLATE). The column check below reads no
-  -- collation, and a collation decides what equality and order mean on text.
-  IF EXISTS (SELECT 1 FROM pg_attribute a
-               JOIN pg_type t ON t.oid = a.atttypid
-              WHERE a.attrelid IN (inv, rcp) AND a.attnum > 0 AND NOT a.attisdropped
-                AND a.attcollation <> t.typcollation) THEN
-    RAISE EXCEPTION '405: a column of lobby_invites or invite_receipts has a collation this file does not declare';
-  END IF;
-  -- Neither table takes part in inheritance or partitioning, either way
-  -- round. As a partition, a table's bound refuses rows this file admits;
-  -- as a parent, its scans reach its children's rows, which its unique
-  -- indexes do not cover.
-  IF EXISTS (SELECT 1 FROM pg_inherits h
-              WHERE h.inhrelid IN (inv, rcp) OR h.inhparent IN (inv, rcp)) THEN
-    RAISE EXCEPTION '405: lobby_invites or invite_receipts takes part in inheritance or partitioning';
-  END IF;
-
-  -- Columns, in order: name, type, NOT NULL, default.
-  SELECT string_agg(format('%s %s %s %s', a.attname, format_type(a.atttypid, a.atttypmod),
-                           a.attnotnull::text, coalesce(pg_get_expr(d.adbin, d.adrelid), '-')),
-                    ', ' ORDER BY a.attnum)
-    INTO found
-    FROM pg_attribute a
-    LEFT JOIN pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum
-   WHERE a.attrelid = inv AND a.attnum > 0 AND NOT a.attisdropped;
-  want := 'id uuid true gen_random_uuid(), mode text true -, lobby_id uuid true -, '
-       || 'sender_player_id uuid true -, invitee_player_id uuid true -, kind text true -, '
-       || 'state text true ''pending''::text, end_reason text false -, mail_message_id uuid false -, '
-       || 'created_at timestamp with time zone true now(), expires_at timestamp with time zone true -, '
-       || 'ended_at timestamp with time zone false -';
-  IF found IS DISTINCT FROM want THEN
-    RAISE EXCEPTION '405: lobby_invites columns differ from this file (found: %)', found;
-  END IF;
-  SELECT string_agg(format('%s %s %s %s', a.attname, format_type(a.atttypid, a.atttypmod),
-                           a.attnotnull::text, coalesce(pg_get_expr(d.adbin, d.adrelid), '-')),
-                    ', ' ORDER BY a.attnum)
-    INTO found
-    FROM pg_attribute a
-    LEFT JOIN pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum
-   WHERE a.attrelid = rcp AND a.attnum > 0 AND NOT a.attisdropped;
-  want := 'caller_player_id uuid true -, idempotency_key uuid true -, route text true -, '
-       || 'invite_id uuid true -, request_fp bytea true -, created_at timestamp with time zone true now()';
-  IF found IS DISTINCT FROM want THEN
-    RAISE EXCEPTION '405: invite_receipts columns differ from this file (found: %)', found;
-  END IF;
-
-  -- Constraints by name and definition, and no other. NOT NULL is checked
-  -- with the columns above, so a server that also lists it here (contype
-  -- 'n') is not read twice.
-  SELECT string_agg(format('%s %s', c.conname, pg_get_constraintdef(c.oid)), '; ' ORDER BY c.conname)
-    INTO found
-    FROM pg_constraint c
-   WHERE c.conrelid = inv AND c.contype <> 'n';
-  want := 'ck_lobby_invites_end_reason CHECK ((end_reason = ANY (ARRAY[''lobby_closed''::text, '
-       || '''lobby_started''::text, ''sender_left''::text, ''invitee_kicked''::text]))); '
-       || 'ck_lobby_invites_ended CHECK (((state = ''pending''::text) = (ended_at IS NULL))); '
-       || 'ck_lobby_invites_expiry CHECK ((expires_at > created_at)); '
-       || 'ck_lobby_invites_kind CHECK ((kind = ANY (ARRAY[''invite''::text, ''challenge''::text]))); '
-       || 'ck_lobby_invites_mode CHECK ((mode = ANY (ARRAY[''team''::text, ''ovt''::text, ''ffa''::text]))); '
-       || 'ck_lobby_invites_not_self CHECK ((sender_player_id <> invitee_player_id)); '
-       || 'ck_lobby_invites_state CHECK ((state = ANY (ARRAY[''pending''::text, ''accepted''::text, '
-       || '''declined''::text, ''cancelled''::text, ''expired''::text, ''void''::text]))); '
-       || 'ck_lobby_invites_void_reason CHECK (((state = ''void''::text) = (end_reason IS NOT NULL))); '
-       || 'fk_lobby_invites_invitee FOREIGN KEY (invitee_player_id) REFERENCES players(id); '
-       || 'fk_lobby_invites_mail FOREIGN KEY (mail_message_id) REFERENCES mail_messages(id) ON DELETE SET NULL; '
-       || 'fk_lobby_invites_sender FOREIGN KEY (sender_player_id) REFERENCES players(id); '
-       || 'lobby_invites_pkey PRIMARY KEY (id)';
-  IF found IS DISTINCT FROM want THEN
-    RAISE EXCEPTION '405: lobby_invites constraints differ from this file (found: %)', found;
-  END IF;
-  SELECT string_agg(format('%s %s', c.conname, pg_get_constraintdef(c.oid)), '; ' ORDER BY c.conname)
-    INTO found
-    FROM pg_constraint c
-   WHERE c.conrelid = rcp AND c.contype <> 'n';
-  want := 'ck_invite_receipts_request_fp CHECK ((octet_length(request_fp) = 32)); '
-       || 'ck_invite_receipts_route CHECK ((route = ANY (ARRAY[''send''::text, ''accept''::text, '
-       || '''decline''::text, ''cancel''::text]))); '
-       || 'fk_invite_receipts_invite FOREIGN KEY (invite_id) REFERENCES lobby_invites(id) ON DELETE CASCADE; '
-       || 'invite_receipts_pkey PRIMARY KEY (caller_player_id, idempotency_key)';
-  IF found IS DISTINCT FROM want THEN
-    RAISE EXCEPTION '405: invite_receipts constraints differ from this file (found: %)', found;
-  END IF;
-
-  -- Indexes by name, uniqueness and definition (after ' USING '), all valid, and no other.
-  SELECT string_agg(format('%s %s %s %s', ci.relname, i.indisunique::text, i.indisvalid::text,
-                           substr(pg_get_indexdef(i.indexrelid),
-                                  strpos(pg_get_indexdef(i.indexrelid), ' USING ') + 7)),
-                    '; ' ORDER BY ci.relname)
-    INTO found
-    FROM pg_index i
-    JOIN pg_class ci ON ci.oid = i.indexrelid
-   WHERE i.indrelid IN (inv, rcp);
-  want := 'invite_receipts_pkey true true btree (caller_player_id, idempotency_key); '
-       || 'ix_invite_receipts_invite false true btree (invite_id); '
-       || 'ix_lobby_invites_expires false true btree (expires_at); '
-       || 'ix_lobby_invites_invitee_pending false true btree (invitee_player_id) WHERE (state = ''pending''::text); '
-       || 'ix_lobby_invites_lobby false true btree (mode, lobby_id); '
-       || 'ix_lobby_invites_sender_created false true btree (sender_player_id, created_at); '
-       || 'lobby_invites_pkey true true btree (id); '
-       || 'uq_lobby_invites_pending true true btree (mode, lobby_id, invitee_player_id) '
-       || 'WHERE (state = ''pending''::text)';
-  IF found IS DISTINCT FROM want THEN
-    RAISE EXCEPTION '405: the indexes differ from this file (found: %)', found;
-  END IF;
-
-  -- mail_messages: exactly one check names kind, and it is this file's.
   SELECT string_agg(format('%s %s', c.conname, pg_get_constraintdef(c.oid)), '; ' ORDER BY c.conname)
     INTO found
     FROM pg_constraint c

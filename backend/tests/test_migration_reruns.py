@@ -40,6 +40,7 @@ SCR_MIGRATION_TEST_PG_OPTOUT=1 and the failures become named skips.
 """
 import asyncio
 import datetime as _dt
+import hashlib
 import os
 import re
 import sys
@@ -627,119 +628,105 @@ def test_405s_four_rerun_cases_fail_a_planted_second_run_defect(monkeypatch):
             test("405")
 
 
-_405_STATE_ORDINARY = "      state              TEXT        NOT NULL DEFAULT 'pending',\n"
-_405_STATE_GENERATED = ("      state              TEXT        NOT NULL"
-                        " GENERATED ALWAYS AS ('pending'::text) STORED,\n")
-_405_ORDINARY_CHECK = "  -- Every column is an ordinary one."
+# 405 creates lobby_invites and invite_receipts and marks both, or finds both
+# marked, or refuses with nothing changed (its CREATE OR REFUSE section). The
+# mark is a table comment holding the SHA-256 of the statements between the
+# file's DDL START and DDL END lines, comment and blank lines dropped and
+# each line trimmed.
+_405_MARK = re.compile(r"'lobby invites, DDL sha256 ([0-9a-f]{64})'")
 
 
-def test_405_refuses_a_generated_column_in_place_of_a_declared_one():
-    """405's post-check refuses a lobby_invites whose `state` is a stored
-    generated column with the declared default's expression, which its
-    column comparison alone accepts: a generated column's expression reads
-    back through pg_attrdef exactly as a default does, and the name, type
-    and NOT NULL all match. The file is applied as written (it applies),
-    with that one column line generated (refused, nothing left behind), and
-    -- the negative control -- generated with the ordinary-column check cut
-    out (it applies, and the column it leaves is generated)."""
+def _405_ddl_lines(text):
+    """The lines strictly between 405's DDL START and DDL END lines."""
+    lines = text.replace("\r\n", "\n").split("\n")
+    starts = [i for i, s in enumerate(lines) if s.strip() == "-- DDL START"]
+    ends = [i for i, s in enumerate(lines) if s.strip() == "-- DDL END"]
+    assert len(starts) == 1 and len(ends) == 1 and starts[0] < ends[0], (starts, ends)
+    return lines[starts[0] + 1:ends[0]]
+
+
+def _405_ddl_digest(text):
+    """The SHA-256 405's mark must hold, recomputed from a text of the file."""
+    keep = [s.strip() for s in _405_ddl_lines(text)]
+    body = "\n".join(s for s in keep if s and not s.startswith("--"))
+    return hashlib.sha256(body.encode("utf-8")).hexdigest()
+
+
+def _405_mark_defects(text):
+    """What is wrong with a text's mark: [] when the text holds exactly one
+    mark and that mark is the digest of its own DDL block."""
+    marks = _405_MARK.findall(text)
+    if len(marks) != 1:
+        return ["%d marks, not 1" % len(marks)]
+    want = _405_ddl_digest(text)
+    return [] if marks[0] == want else ["the mark is %s, the DDL's digest is %s" % (marks[0], want)]
+
+
+def test_405s_mark_is_the_digest_of_its_own_ddl():
+    """405's mark is recomputed from its own text, so the statements that
+    create the two tables cannot change without it, and tables an older text
+    made are refused. The negative control: a copy with one DDL token changed
+    (a column type, an index's columns, a check's values, a NOT NULL) fails,
+    each still holding the old mark; a comment line or an indent inside the
+    block does not. The block holds no migration number, so the renumbering
+    at landing leaves the mark as it is."""
     real = migration_text("405")
-    assert real.count(_405_STATE_ORDINARY) == 1 and real.count(_405_ORDINARY_CHECK) == 1
-    planted = real.replace(_405_STATE_ORDINARY, _405_STATE_GENERATED)
-    i = planted.index(_405_ORDINARY_CHECK)
-    j = planted.index("  END IF;\n", i) + len("  END IF;\n")
-    unchecked = planted[:i] + planted[j:]
-    assert "attgenerated" in planted[i:j] and "attgenerated" not in unchecked
-
-    async def go(sql):
-        schema = "m405g_%s" % uuid.uuid4().hex[:10]
-        conn = await asyncpg.connect(DSN)
-        try:
-            await conn.execute('CREATE SCHEMA "%s"' % schema)
-            await conn.execute('SET search_path TO "%s"' % schema)
-            await conn.execute(PREREQ["405"])
-            try:
-                await conn.execute(sql)
-                verdict = None
-            except Exception as ex:
-                verdict = "%s: %s" % (type(ex).__name__, ex)
-                await conn.execute("ROLLBACK")        # the file's own BEGIN, aborted
-            gen = await conn.fetchval(
-                "SELECT a.attgenerated::text FROM pg_attribute a"
-                " WHERE a.attrelid = to_regclass('lobby_invites') AND a.attname = 'state'")
-            return verdict, gen
-        finally:
-            try:
-                await conn.execute("ROLLBACK")
-            except Exception:
-                pass
-            try:
-                await conn.execute('DROP SCHEMA IF EXISTS "%s" CASCADE' % schema)
-            finally:
-                await conn.close()
-
-    assert _run(go(real)) == (None, ""), "405 as written did not apply with an ordinary state"
-    verdict, gen = _run(go(planted))
-    assert verdict is not None and "405: a generated or identity column exists" in verdict, verdict
-    assert gen is None, ("the refused run left a lobby_invites behind", gen)
-    assert _run(go(unchecked)) == (None, "s"), (
-        "without the ordinary-column check the generated column was not accepted, so the"
-        " check is not what refuses it")
+    assert _405_mark_defects(real) == []
+    mutants = {
+        "a column type": ("      route              TEXT        NOT NULL,",
+                          "      route              VARCHAR     NOT NULL,"),
+        "an index's columns": ("ON lobby_invites (expires_at);", "ON lobby_invites (expires_at, id);"),
+        "a check's values": ("CHECK (mode IN ('team', 'ovt', 'ffa'))", "CHECK (mode IN ('team', 'ovt'))"),
+        "a NOT NULL": ("      lobby_id           UUID        NOT NULL,",
+                       "      lobby_id           UUID        NULL,"),
+    }
+    for name, (old, new) in mutants.items():
+        assert real.count(old) == 1, name
+        assert _405_mark_defects(real.replace(old, new)), "%s left the mark matching" % name
+    inert = real.replace("    -- DDL END", "    -- a comment line inside the block\n    -- DDL END")
+    inert = inert.replace("    CREATE INDEX ix_lobby_invites_expires", "        CREATE INDEX ix_lobby_invites_expires")
+    assert inert != real and _405_mark_defects(inert) == []
+    number = MIGRATION_FILES["405"].split("_")[0]
+    assert number not in "\n".join(_405_ddl_lines(real))
 
 
-_405_STATE_COLLATED = ("      state              TEXT        COLLATE " + '"C"'
-                       + " NOT NULL DEFAULT 'pending',\n")
-_405_POST_CHECK = "DO $m405check$"
-_405_CHECK_END = "  END IF;\n"
-_405_INHERITANCE_CHECK = "  -- Neither table takes part in inheritance or partitioning"
-_405_INHERITANCE_REFUSAL = "405: lobby_invites or invite_receipts takes part in inheritance or partitioning"
-# One state per check that joined the generated-column one, each a state 405
-# does not declare that every other part of its post-check accepts: (the
-# plant, the first line of the check that refuses it, a word only that check
-# holds, the refusal, a read of the state after the run, that read for the
-# file as written, that read for the plant applied without its check).
-_405_PLANTS = {
-    "collation": (
-        lambda t: t.replace(_405_STATE_ORDINARY, _405_STATE_COLLATED),
-        "  -- Every column has its type's default collation", "attcollation",
-        "405: a column of lobby_invites or invite_receipts has a collation this file does not declare",
-        "SELECT c.collname::text FROM pg_attribute a JOIN pg_collation c ON c.oid = a.attcollation"
-        " WHERE a.attrelid = to_regclass('lobby_invites') AND a.attname = 'state'",
-        "default", "C"),
-    "child": (
-        lambda t: t.replace(_405_POST_CHECK,
-                            "CREATE TABLE planted_child () INHERITS (lobby_invites);\n\n" + _405_POST_CHECK),
-        _405_INHERITANCE_CHECK, "pg_inherits", _405_INHERITANCE_REFUSAL,
-        "SELECT count(*)::text FROM pg_inherits WHERE inhparent = to_regclass('lobby_invites')",
-        "0", "1"),
-    "partition": (
-        lambda t: t.replace(_405_POST_CHECK,
-                            "CREATE TABLE planted_parent (LIKE invite_receipts) PARTITION BY LIST (route);\n"
-                            "ALTER TABLE planted_parent ATTACH PARTITION invite_receipts FOR VALUES IN ('send');\n\n"
-                            + _405_POST_CHECK),
-        _405_INHERITANCE_CHECK, "pg_inherits", _405_INHERITANCE_REFUSAL,
-        "SELECT c.relispartition::text FROM pg_class c WHERE c.oid = to_regclass('invite_receipts')",
-        "false", "true"),
-}
+# The schema's state a refused run must leave as it found it: every relation
+# with its kind and comment, and every constraint with its definition
+# (mail_messages' kind check among them).
+_405_STATE = (
+    "SELECT string_agg(x, '; ' ORDER BY x) FROM ("
+    " SELECT format('%s %s %s', c.relname, c.relkind, coalesce(obj_description(c.oid, 'pg_class'), '-')) AS x"
+    "   FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace"
+    "  WHERE n.nspname = current_schema()"
+    " UNION ALL"
+    " SELECT format('%s.%s %s', t.relname, k.conname, pg_get_constraintdef(k.oid))"
+    "   FROM pg_constraint k JOIN pg_class t ON t.oid = k.conrelid"
+    "   JOIN pg_namespace n ON n.oid = t.relnamespace"
+    "  WHERE n.nspname = current_schema()) s")
 
 
-async def _apply_405_once(sql, probe):
-    """Apply one text of 405 in a fresh schema holding its prerequisite and
-    answer (its error or None, whether lobby_invites exists afterwards, the
+async def _405_over(setup, probes):
+    """405 applied once in a fresh schema holding its prerequisite and then
+    `setup` (SQL, which may itself apply 405): (405's error or None, whether
+    the schema's state read the same after the run as before it, each
     probe's value). The schema is dropped whatever happened."""
-    schema = "m405p_%s" % uuid.uuid4().hex[:10]
+    schema = "m405c_%s" % uuid.uuid4().hex[:10]
     conn = await asyncpg.connect(DSN)
     try:
         await conn.execute('CREATE SCHEMA "%s"' % schema)
         await conn.execute('SET search_path TO "%s"' % schema)
         await conn.execute(PREREQ["405"])
+        if setup:
+            await conn.execute(setup)
+        before = await conn.fetchval(_405_STATE)
         try:
-            await conn.execute(sql)
+            await conn.execute(migration_text("405"))
             verdict = None
         except Exception as ex:
             verdict = "%s: %s" % (type(ex).__name__, ex)
             await conn.execute("ROLLBACK")        # the file's own BEGIN, aborted
-        exists = await conn.fetchval("SELECT to_regclass('lobby_invites') IS NOT NULL")
-        return verdict, exists, await conn.fetchval(probe)
+        after = await conn.fetchval(_405_STATE)
+        return verdict, before == after, tuple([await conn.fetchval(p) for p in probes])
     finally:
         try:
             await conn.execute("ROLLBACK")
@@ -751,34 +738,79 @@ async def _apply_405_once(sql, probe):
             await conn.close()
 
 
-@pytest.mark.parametrize("case", sorted(_405_PLANTS))
-def test_405_refuses_a_collation_or_an_inheritance_it_does_not_declare(case):
-    """405's post-check refuses, on either table, a column collation the file
-    does not declare and any part in inheritance or partitioning (a child of
-    lobby_invites; invite_receipts attached as a partition), none of which the
-    column, constraint and index comparisons read. Per case: the file as
-    written applies and leaves the declared state; the planted copy is refused
-    with that check's own text and leaves nothing behind; and -- the negative
-    control -- the planted copy with that one check cut out applies and leaves
-    the planted state, so that check is what refuses it."""
-    plant, marker, word, refusal, probe, as_written, as_planted = _405_PLANTS[case]
-    real = migration_text("405")
-    assert real.count(_405_STATE_ORDINARY) == 1 and real.count(_405_POST_CHECK) == 1
-    assert real.count(marker) == 1
-    planted = plant(real)
-    assert planted != real
-    i = planted.index(marker)
-    j = planted.index(_405_CHECK_END, i) + len(_405_CHECK_END)
-    unchecked = planted[:i] + planted[j:]
-    assert word in planted[i:j] and word not in unchecked
+_405_MARKS = ("SELECT string_agg(c.relname || ' ' || coalesce(obj_description(c.oid, 'pg_class'), '-'), '; '"
+              " ORDER BY c.relname) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace"
+              " WHERE n.nspname = current_schema() AND c.relname IN ('lobby_invites', 'invite_receipts')")
+_405_INDEXES = ("SELECT string_agg(ci.relname, ', ' ORDER BY ci.relname) FROM pg_index i"
+                " JOIN pg_class ci ON ci.oid = i.indexrelid"
+                " WHERE i.indrelid IN (to_regclass('lobby_invites'), to_regclass('invite_receipts'))")
 
-    assert _run(_apply_405_once(real, probe)) == (None, True, as_written), (
-        "405 as written did not apply, or did not leave the declared state")
-    verdict, exists, _ = _run(_apply_405_once(planted, probe))
-    assert verdict is not None and refusal in verdict, verdict
-    assert not exists, "the refused run left a lobby_invites behind"
-    assert _run(_apply_405_once(unchecked, probe)) == (None, True, as_planted), (
-        "without its check the planted state was not accepted, so that check is not what refuses it")
+
+def test_405_creates_and_marks_both_tables_and_a_second_run_finds_them_its_own():
+    """A fresh apply creates both tables with all eight indexes and marks each
+    with the file's mark. A second apply over that finds both marked: it
+    succeeds and leaves the schema's state exactly as it found it. What a
+    second run writes, replaces and locks is measured by the rerun cases and
+    the lock cases above, 405 among them."""
+    mark = "lobby invites, DDL sha256 %s" % _405_MARK.findall(migration_text("405"))[0]
+    marks = "invite_receipts %s; lobby_invites %s" % (mark, mark)
+    indexes = ("invite_receipts_pkey, ix_invite_receipts_invite, ix_lobby_invites_expires, "
+               "ix_lobby_invites_invitee_pending, ix_lobby_invites_lobby, ix_lobby_invites_sender_created, "
+               "lobby_invites_pkey, uq_lobby_invites_pending")
+    verdict, same, got = _run(_405_over("", (_405_MARKS, _405_INDEXES)))
+    assert verdict is None and not same and got == (marks, indexes), (verdict, same, got)
+    verdict, same, got = _run(_405_over(migration_text("405"), (_405_MARKS, _405_INDEXES)))
+    assert verdict is None and same and got == (marks, indexes), (verdict, same, got)
+
+
+def _405_real_mark():
+    return "lobby invites, DDL sha256 %s" % _405_MARK.findall(migration_text("405"))[0]
+
+
+_405_NOT_BOTH = "405: lobby_invites and invite_receipts are neither both absent nor both marked by this file"
+_405_TAKEN = "405: a name this file creates already stands in schema"
+# Each state 405 refuses: (the state, made before the run; the refusal's own
+# text; what that text must name as found).
+_405_REFUSALS = {
+    "one table without the other": (
+        lambda: migration_text("405") + "\nDROP TABLE invite_receipts;\n",
+        _405_NOT_BOTH, "(found: invite_receipts absent, lobby_invites marked)"),
+    "a table without its mark": (
+        lambda: migration_text("405") + "\nCOMMENT ON TABLE lobby_invites IS NULL;\n",
+        _405_NOT_BOTH, "(found: invite_receipts marked, lobby_invites unmarked)"),
+    "a table with another mark": (
+        lambda: migration_text("405") + "\nCOMMENT ON TABLE invite_receipts IS 'lobby invites, DDL sha256 %s';\n"
+        % ("0" * 64),
+        _405_NOT_BOTH, "(found: invite_receipts unmarked, lobby_invites marked)"),
+    "two tables this file did not make": (
+        lambda: "CREATE TABLE lobby_invites (id UUID PRIMARY KEY);\nCREATE TABLE invite_receipts (id UUID);\n",
+        _405_NOT_BOTH, "(found: invite_receipts unmarked, lobby_invites unmarked)"),
+    "a marked name that is not a table": (
+        lambda: "CREATE VIEW lobby_invites AS SELECT 1 AS id;\n"
+                "COMMENT ON VIEW lobby_invites IS '%s';\n"
+                "CREATE TABLE invite_receipts (id UUID);\n"
+                "COMMENT ON TABLE invite_receipts IS '%s';\n" % (_405_real_mark(), _405_real_mark()),
+        _405_NOT_BOTH, "(found: invite_receipts marked, lobby_invites not a table)"),
+    "an index name on another table": (
+        lambda: "CREATE TABLE planted (x int);\nCREATE INDEX ix_lobby_invites_expires ON planted (x);\n",
+        _405_TAKEN, "(found: ix_lobby_invites_expires)"),
+    "a row type's name": (
+        lambda: "CREATE TYPE invite_receipts AS (x int);\n",
+        _405_TAKEN, "(found: invite_receipts)"),
+}
+
+
+@pytest.mark.parametrize("state", sorted(_405_REFUSALS))
+def test_405_refuses_every_state_but_absent_or_its_own_with_nothing_changed(state):
+    """405 refuses each state that is neither both tables absent nor both its
+    own marked tables, with its own text naming what it found, and the
+    refused run changes nothing: the schema's relations, comments and
+    constraints (mail_messages' kind check among them) read the same after it
+    as before it."""
+    setup, refusal, found = _405_REFUSALS[state]
+    verdict, same, _ = _run(_405_over(setup(), ()))
+    assert verdict is not None and refusal in verdict and found in verdict, verdict
+    assert same, "the refused run changed the schema"
 
 
 def test_377_keeps_its_statistics_object_across_a_second_run():
