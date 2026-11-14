@@ -1,4 +1,4 @@
-"""Lobby invites on PostgreSQL (migration 405's change): the keys, the repeats
+"""Lobby invites on PostgreSQL (migration 416's change): the keys, the repeats
 and the refusals of the five keyed invite requests (send, challenge, accept,
 decline, cancel), design note section 11, against a local PostgreSQL through
 inv_pg (one cf_pg case schema per case, the real handlers in main.py).

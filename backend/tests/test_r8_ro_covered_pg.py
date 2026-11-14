@@ -1426,7 +1426,7 @@ def test_census_complete_layer_frozen_whole():
     once as a call; the count is the coarse 365 (363, plus the two coarse forms
     of the round-11 merge, re-frozen once from the seat derivation), plus the
     one coarse form of the B10 merge (B10_MERGE_FROZEN, frozen by hand), plus
-    the one coarse form of migration 404's change (MAIL_SEND_RECEIPTS_FROZEN,
+    the one coarse form of migration 415's change (MAIL_SEND_RECEIPTS_FROZEN,
     frozen by hand), plus the complete layer."""
     import ro_census
     import ro_census_frozen as fz
@@ -1446,7 +1446,7 @@ def test_census_complete_layer_frozen_whole():
     assert sum(len(v) for v in fz.B10_MERGE_FROZEN.values()) == fz.B10_MERGE_COUNT == 1
     assert set(fz.B10_MERGE_FROZEN) <= coarse
     assert {f[0] for v in fz.B10_MERGE_FROZEN.values() for f in v} == {"import"}
-    # migration 404's change: one hand-frozen coarse import form (models.py's LargeBinary)
+    # migration 415's change: one hand-frozen coarse import form (models.py's LargeBinary)
     assert sum(len(v) for v in fz.MAIL_SEND_RECEIPTS_FROZEN.values()) == fz.MAIL_SEND_RECEIPTS_COUNT == 1
     assert set(fz.MAIL_SEND_RECEIPTS_FROZEN) <= coarse
     assert {f[0] for v in fz.MAIL_SEND_RECEIPTS_FROZEN.values() for f in v} == {"import"}
@@ -1481,7 +1481,7 @@ def test_census_complete_layer_frozen_whole():
     for (rel, call) in ro_census.FORWARDING:
         assert list(map(tuple, fz.FROZEN[rel + ro_census.COMPLETE])).count(
             ("call", call)) == 1, (rel, call)
-    # control (migration 404's change): models.py as it stands matches the
+    # control (migration 415's change): models.py as it stands matches the
     # freeze; models.py as on main, without its LargeBinary import line,
     # differs from it by exactly the hand-frozen form, missing
     models_rel = "api/models.py"

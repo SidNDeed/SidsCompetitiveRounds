@@ -87,18 +87,18 @@ ENV_ALLOWED = {"PGCLIENTENCODING": "UTF8"}
 # it (two _connect opens, _snap and _internal_not_enabled). Neither file has
 # a d2_seed prerequisite. So _connect 1114 -> 1118, record 426 -> 427, run
 # 377 -> 378, test_zz 22 -> 23; every other count is unchanged.
-# Re-frozen for migration 404 and its rollback file (the number is
-# provisional), the same one-file case: the whole-module run on seat-3 at
+# Re-frozen for migration 415 and its rollback file (written as 404,
+# renumbered since), the same one-file case: the whole-module run on seat-3 at
 # c8bfcc33 (log b6-logs/pytest-C-173306) differs from the table above at
 # exactly those four sites, each by one file's cost, and at no other:
 # _connect 1118 -> 1122, record 427 -> 428, run 378 -> 379, test_zz
 # 23 -> 24. Neither file has a d2_seed prerequisite.
-# Re-frozen for migration 405 and its rollback file (the number is
-# provisional), the same one-file case: _build applies and records 405 (one
+# Re-frozen for migration 416 and its rollback file (written as 405,
+# renumbered since), the same one-file case: _build applies and records 416 (one
 # psql start, one pg_dump start, two _connect opens) and test_zz applies its
 # rollback and reads after it (one psql start, two _connect opens), so
 # _connect 1122 -> 1126, record 428 -> 429, run 379 -> 380, test_zz 24 -> 25.
-# Neither file has a d2_seed prerequisite (SEEDS names no 405 file).
+# Neither file has a d2_seed prerequisite (SEEDS names no 416 file).
 OPEN_COUNTS = {
     "_admin": 315, "_clone_with_oid": 2, "_connect": 1126, "_fetchval": 6, "_orm": 1,
     "_probe_problems": 2, "_r10_authid_reading": 1, "_r10_inplace_bound": 1,

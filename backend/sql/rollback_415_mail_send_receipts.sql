@@ -1,15 +1,15 @@
--- rollback_404_mail_send_receipts.sql
+-- rollback_415_mail_send_receipts.sql
 --
--- PROVISIONAL NUMBER: renamed together with 404_mail_send_receipts.sql at
--- landing.
+-- NUMBER: written as rollback_404, and renumbered together with
+-- 415_mail_send_receipts.sql before landing.
 --
--- Removes what 404_mail_send_receipts.sql added: the trigger
+-- Removes what 415_mail_send_receipts.sql added: the trigger
 -- trg_mail_send_receipt on mail_messages, its function
 -- mail_send_receipt_sync(), and the table mail_send_receipts with every
--- receipt in it (its index goes with it). Restores what 404 dropped: 297's
+-- receipt in it (its index goes with it). Restores what 415 dropped: 297's
 -- foreign key on mail_messages.in_reply_to, REFERENCES mail_messages(id) ON
 -- DELETE SET NULL. 297's UNIQUE (sender_id, idempotency_key) is not touched:
--- 404 keeps it. Re-runnable: every DROP is IF EXISTS and the foreign key is
+-- 415 keeps it. Re-runnable: every DROP is IF EXISTS and the foreign key is
 -- added only when none covers in_reply_to, so a second run changes nothing.
 --
 -- DEPLOY ORDER: THE API FIRST. Deploy an api build without this change (one
@@ -19,7 +19,7 @@
 -- message row again, so a key whose message the janitor has purged is no
 -- longer answered from anything.
 --
--- THE FOREIGN KEY. While 404 is applied, a reply keeps its parent's id after
+-- THE FOREIGN KEY. While 415 is applied, a reply keeps its parent's id after
 -- the janitor purges the parent. Before the key is added, each such
 -- in_reply_to is set to NULL -- the value 297's ON DELETE SET NULL gave it
 -- at the purge -- so the key validates. When a foreign key already covers
@@ -48,7 +48,7 @@ DROP TRIGGER IF EXISTS trg_mail_send_receipt ON mail_messages;
 DROP FUNCTION IF EXISTS mail_send_receipt_sync();
 DROP TABLE IF EXISTS mail_send_receipts;
 
-DO $r404irt$
+DO $r415irt$
 DECLARE
   total integer;
   same integer;
@@ -76,7 +76,7 @@ BEGIN
       ADD CONSTRAINT mail_messages_in_reply_to_fkey
       FOREIGN KEY (in_reply_to) REFERENCES mail_messages(id) ON DELETE SET NULL;
   ELSIF total <> 1 OR same <> 1 THEN
-    RAISE EXCEPTION 'rollback 404: the foreign key on mail_messages.in_reply_to differs from 297''s (found: %)',
+    RAISE EXCEPTION 'rollback 415: the foreign key on mail_messages.in_reply_to differs from 297''s (found: %)',
       (SELECT string_agg(format('%s %s', k.conname, pg_get_constraintdef(k.oid)), '; ' ORDER BY k.conname)
          FROM pg_constraint k
          JOIN pg_class c ON c.oid = k.conrelid
@@ -89,6 +89,6 @@ BEGIN
           AND NOT a.attisdropped
           AND a.attnum = ANY (k.conkey));
   END IF;
-END $r404irt$;
+END $r415irt$;
 
 COMMIT;

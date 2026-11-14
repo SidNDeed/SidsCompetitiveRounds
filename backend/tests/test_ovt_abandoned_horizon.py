@@ -1685,7 +1685,7 @@ def test_the_janitor_lock_census_sees_orm_locks_and_not_only_sql():
                 and getattr(first.value.func, "id", None) == "_rdm_janitor_bound"
                 and [a.id for a in first.value.args] == [w.items[0].optional_vars.id]), \
             ast.dump(first)
-    # Migration 405's change (lobby invites) adds one decline at one site and
+    # Migration 416's change (lobby invites) adds one decline at one site and
     # two waits at two sites. The decline: the invite sweep's selection
     # (_invite_sweep, reached from queue_cleanup_loop), FOR NO KEY UPDATE OF
     # i SKIP LOCKED. The waits: the inbox revision bump (_invite_bump, which
@@ -1701,7 +1701,7 @@ def test_the_janitor_lock_census_sees_orm_locks_and_not_only_sql():
     # statements the change adds to the janitor carry no row lock clause, so
     # the census does not list them: the ending UPDATEs the prunes run
     # (_invite_end_departed, _invite_end_lobby) and the retention DELETE
-    # (_invite_retention_sweep). Before 405: 31/29/28/26; at stage 4:
+    # (_invite_retention_sweep). Before 416: 31/29/28/26; at stage 4:
     # 33/29/30/26.
     assert [r["func"] for r in census["declines"]].count("_invite_sweep") == 1, census["declines"]
     assert not any(r["func"] == "_invite_bump" for r in census["declines"]), census["declines"]

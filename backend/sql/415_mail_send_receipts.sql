@@ -1,8 +1,8 @@
--- 404_mail_send_receipts.sql
+-- 415_mail_send_receipts.sql
 --
--- PROVISIONAL NUMBER. 404 is this lane's working number. The integrator
--- assigns the final one at landing (the next above the highest file on main)
--- and renames this file, its rollback and the tests that name them.
+-- NUMBER. Written and reviewed in its lane as 404, and renumbered 415
+-- before landing together with its rollback and the tests that name it.
+-- 416 (lobby invites) builds on it.
 --
 -- Mail send receipts. A repeated idempotency_key on POST /mail, on POST
 -- /mail/{id}/reply (and on the Discord reply route, which runs the same
@@ -201,9 +201,9 @@
 BEGIN;
 SET LOCAL lock_timeout = '5s';
 -- 'on' once this run creates the table or the trigger (the backfill's cue).
-SELECT set_config('m404.backfill', 'off', true);
+SELECT set_config('m415.backfill', 'off', true);
 
-DO $m404tbl$
+DO $m415tbl$
 BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_class c
                    JOIN pg_namespace n ON n.oid = c.relnamespace
@@ -231,11 +231,11 @@ BEGIN
       CONSTRAINT ck_mail_send_receipts_body_key
         CHECK (body_key IS NULL OR octet_length(body_key) = 32)
     );
-    PERFORM set_config('m404.backfill', 'on', true);
+    PERFORM set_config('m415.backfill', 'on', true);
   END IF;
-END $m404tbl$;
+END $m415tbl$;
 
-DO $m404idx$
+DO $m415idx$
 BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_class c
                    JOIN pg_namespace n ON n.oid = c.relnamespace
@@ -243,7 +243,7 @@ BEGIN
                     AND c.relname = 'ix_mail_send_receipts_created') THEN
     CREATE INDEX IF NOT EXISTS ix_mail_send_receipts_created ON mail_send_receipts (created_at);
   END IF;
-END $m404idx$;
+END $m415idx$;
 
 -- The INSERT arm's message_fp is MESSAGE_FP above, spelled out once more in
 -- the backfill below; tests/test_mail_receipts_pg.py compares both with
@@ -254,7 +254,7 @@ END $m404idx$;
 CREATE OR REPLACE FUNCTION mail_send_receipt_sync() RETURNS trigger
 LANGUAGE plpgsql
 SET search_path FROM CURRENT
-AS $m404fn$
+AS $m415fn$
 BEGIN
   IF TG_OP = 'INSERT' THEN
     UPDATE mail_send_receipts
@@ -287,9 +287,9 @@ BEGIN
   END IF;
   RETURN NULL;
 END
-$m404fn$;
+$m415fn$;
 
-DO $m404trg$
+DO $m415trg$
 DECLARE
   uncounted integer;
   missing integer;
@@ -306,17 +306,17 @@ BEGIN
       FOR EACH ROW
       WHEN (NEW.kind IN ('direct', 'system_broadcast'))
       EXECUTE FUNCTION mail_send_receipt_sync();
-    PERFORM set_config('m404.backfill', 'on', true);
+    PERFORM set_config('m415.backfill', 'on', true);
   END IF;
   -- BACKFILL, in a run that created the table or the trigger.
-  IF current_setting('m404.backfill') = 'on' THEN
+  IF current_setting('m415.backfill') = 'on' THEN
     LOCK TABLE mail_messages IN SHARE ROW EXCLUSIVE MODE;
     SELECT count(*) INTO uncounted
       FROM mail_messages m
      WHERE m.kind = 'system_broadcast'
        AND m.recipient_count IS NULL;
     IF uncounted <> 0 THEN
-      RAISE EXCEPTION '404: % broadcast row(s) have no recipient_count (written before migration 300); this file backfills no such row', uncounted;
+      RAISE EXCEPTION '415: % broadcast row(s) have no recipient_count (written before migration 300); this file backfills no such row', uncounted;
     END IF;
     -- A key whose receipt names another message: that receipt keeps its own
     -- send's record under a reserved key drawn at random, as the trigger's
@@ -353,15 +353,15 @@ BEGIN
                           AND s.idempotency_key = m.idempotency_key
                           AND s.message_id = m.id);
     IF missing <> 0 THEN
-      RAISE EXCEPTION '404: % message row(s) have no send receipt naming them after the backfill', missing;
+      RAISE EXCEPTION '415: % message row(s) have no send receipt naming them after the backfill', missing;
     END IF;
   END IF;
-END $m404trg$;
+END $m415trg$;
 
 -- Every foreign key that covers mail_messages.in_reply_to, whatever its name
 -- or its ON DELETE action: each one makes a reply's in_reply_to follow its
 -- parent's purge (SET NULL), or the purge itself (CASCADE, RESTRICT).
-DO $m404irt$
+DO $m415irt$
 DECLARE
   k record;
 BEGIN
@@ -379,9 +379,9 @@ BEGIN
   LOOP
     EXECUTE format('ALTER TABLE mail_messages DROP CONSTRAINT %I', k.conname);
   END LOOP;
-END $m404irt$;
+END $m415irt$;
 
-DO $m404check$
+DO $m415check$
 DECLARE
   n integer;
   pk integer;
@@ -404,7 +404,7 @@ BEGIN
      AND NOT EXISTS (SELECT 1 FROM pg_inherits i WHERE i.inhrelid = c.oid OR i.inhparent = c.oid)
      AND NOT EXISTS (SELECT 1 FROM pg_trigger tg WHERE tg.tgrelid = c.oid AND NOT tg.tgisinternal);
   IF n <> 1 THEN
-    RAISE EXCEPTION '404: mail_send_receipts is not the plain table this file states (kind, type, persistence, row security, rules, inheritance or a trigger)';
+    RAISE EXCEPTION '415: mail_send_receipts is not the plain table this file states (kind, type, persistence, row security, rules, inheritance or a trigger)';
   END IF;
   SELECT count(*) INTO n
     FROM pg_attribute a
@@ -415,7 +415,7 @@ BEGIN
      AND a.attnum > 0
      AND NOT a.attisdropped;
   IF n <> 9 THEN
-    RAISE EXCEPTION '404: mail_send_receipts has % columns, this file states 9', n;
+    RAISE EXCEPTION '415: mail_send_receipts has % columns, this file states 9', n;
   END IF;
   -- Each column whole: its type with no modifier, NOT NULL, its default
   -- expression as PostgreSQL prints it (pg_get_expr), no identity, not
@@ -445,7 +445,7 @@ BEGIN
      AND a.attcollation = t.typcollation
      AND pg_get_expr(d.adbin, d.adrelid) IS NOT DISTINCT FROM w.def;
   IF n <> 9 THEN
-    RAISE EXCEPTION '404: mail_send_receipts columns differ from this file (found: %)',
+    RAISE EXCEPTION '415: mail_send_receipts columns differ from this file (found: %)',
       (SELECT string_agg(format('%s %s%s%s%s%s%s', a.attname, format_type(a.atttypid, a.atttypmod),
                                 CASE WHEN a.attnotnull THEN ' NOT NULL' ELSE '' END,
                                 COALESCE(' DEFAULT ' || pg_get_expr(d.adbin, d.adrelid), ''),
@@ -491,7 +491,7 @@ BEGIN
    WHERE ns.nspname = current_schema()
      AND c.relname = 'mail_send_receipts';
   IF n <> 6 OR total <> 6 THEN
-    RAISE EXCEPTION '404: mail_send_receipts key or checks differ from this file (found: %)',
+    RAISE EXCEPTION '415: mail_send_receipts key or checks differ from this file (found: %)',
       (SELECT string_agg(format('%s %s', k.conname, pg_get_constraintdef(k.oid)), '; ' ORDER BY k.conname)
          FROM pg_constraint k
          JOIN pg_class c ON c.oid = k.conrelid
@@ -523,7 +523,7 @@ BEGIN
    WHERE ns.nspname = current_schema()
      AND t.relname = 'mail_send_receipts';
   IF n <> 1 OR pk <> 1 OR valid <> 2 OR total <> 2 THEN
-    RAISE EXCEPTION '404: mail_send_receipts indexes differ from this file (found: %)',
+    RAISE EXCEPTION '415: mail_send_receipts indexes differ from this file (found: %)',
       (SELECT string_agg(format('%s%s', pg_get_indexdef(i.indexrelid),
                                 CASE WHEN i.indisvalid THEN '' ELSE ' (not valid)' END),
                          '; ' ORDER BY ci.relname)
@@ -571,7 +571,7 @@ BEGIN
      AND pns.nspname = current_schema()
      AND p.prorettype = 'trigger'::regtype;
   IF n <> 1 THEN
-    RAISE EXCEPTION '404: trg_mail_send_receipt or its function differs from this file (found: %)',
+    RAISE EXCEPTION '415: trg_mail_send_receipt or its function differs from this file (found: %)',
       COALESCE((SELECT string_agg(format('%s, enabled %s, parent %s, internal %s, function in %s returning %s',
                                          pg_get_triggerdef(tg.oid), tg.tgenabled, tg.tgparentid,
                                          tg.tgisinternal, pns.nspname,
@@ -595,8 +595,8 @@ BEGIN
                 AND a.attname = 'in_reply_to'
                 AND NOT a.attisdropped
                 AND a.attnum = ANY (k.conkey)) THEN
-    RAISE EXCEPTION '404: a foreign key still covers mail_messages.in_reply_to';
+    RAISE EXCEPTION '415: a foreign key still covers mail_messages.in_reply_to';
   END IF;
-END $m404check$;
+END $m415check$;
 
 COMMIT;

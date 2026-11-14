@@ -1,4 +1,4 @@
-"""Lobby invites on PostgreSQL (migration 405's change): the server half's
+"""Lobby invites on PostgreSQL (migration 416's change): the server half's
 tests, design note section 11, against a local PostgreSQL through inv_pg
 (one cf_pg case schema per case, the real handlers in main.py).
 
@@ -227,12 +227,12 @@ def test_an_invites_sender_gets_the_answer_of_an_absent_id(monkeypatch, route):
     case(monkeypatch, body)
 
 
-# -- reserved keys, no mail receipt, and 404's trigger (section 11) ------------
+# -- reserved keys, no mail receipt, and 415's trigger (section 11) ------------
 
 def test_an_invites_mail_rows_hold_reserved_keys_and_no_mail_receipt(monkeypatch):
     """Every invite's mail row has a key in the reserved space (version
     digit 0), and no mail_send_receipts row names it, for a delivered and a
-    suppressed copy and for a challenge. The mutant widens 404's trigger to
+    suppressed copy and for a challenge. The mutant widens 415's trigger to
     every kind inside a transaction that is rolled back: the invite's mail
     row then fails the receipts' kind check. The control: a direct send
     writes its receipt."""
@@ -255,7 +255,7 @@ def test_an_invites_mail_rows_hold_reserved_keys_and_no_mail_receipt(monkeypatch
         assert await env.conn.fetchval(
             "SELECT COUNT(*) FROM mail_send_receipts WHERE message_id = $1", uuid.UUID(ctrl["id"])) == 1
 
-        # the mutant: 404's trigger with its WHEN widened to every kind
+        # the mutant: 415's trigger with its WHEN widened to every kind
         side = await env.side()
         tdef = await side.fetchval(
             "SELECT pg_get_triggerdef(t.oid) FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid"
@@ -513,7 +513,7 @@ def test_the_same_body_rule_does_not_count_invites(monkeypatch):
     are in it. The mutant gives each invite a direct send receipt carrying
     its body's key (what an invite sent through the direct send path would
     write), and the same mail opens a case. Writing the invites' rows as
-    direct mail is no mutant here: 404's trigger would give each a receipt,
+    direct mail is no mutant here: 415's trigger would give each a receipt,
     but that receipt carries no body key, so the rule counts none of them.
     The minute's rate counts invites and direct receipts together, so the
     mutant's sender stays under it only with fewer than half its ten.

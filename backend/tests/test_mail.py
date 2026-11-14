@@ -44,9 +44,9 @@ SQL_DIR = os.path.join(HERE, "..", "sql")
 
 
 def _receipt_trigger_kinds():
-    """The kinds migration 404's receipts trigger fires for, READ OFF its
+    """The kinds migration 415's receipts trigger fires for, READ OFF its
     WHEN condition, so the fake's trigger follows the file."""
-    with open(os.path.join(SQL_DIR, "404_mail_send_receipts.sql"), encoding="utf-8") as f:
+    with open(os.path.join(SQL_DIR, "415_mail_send_receipts.sql"), encoding="utf-8") as f:
         src = f.read()
     found = re.findall(r"WHEN \(NEW\.kind IN \(([^)]*)\)\)", src)
     assert len(found) == 1, found
@@ -67,7 +67,7 @@ PLAY_SOURCES = ("matches", "team_matches", "ffa_match_players", "ovt_matches")
 FANOUT_PREDICATES = ("FROM mail_blocks", "mail_from = 'nobody'", "mail_from = 'played'",
                      "FROM matches", "FROM team_matches", "FROM ffa_match_players",
                      "FROM ovt_matches", "unnest(")
-# The sender-side clock on the sender's reads (migration 404's change), as
+# The sender-side clock on the sender's reads (migration 415's change), as
 # the production SQL spells it; the fake enforces it only where it is found.
 # It is read off the statement's own clock CTE (`t`, main._MAIL_CLOCK_CTE):
 # clock_timestamp() read once inside the statement, which the fake answers
@@ -78,7 +78,7 @@ _CLOCK_CTE = "WITH t AS MATERIALIZED (SELECT clock_timestamp() AS now_)"
 _SENDER_CLOCK = "AND m.created_at > t.now_ - make_interval(days => CAST(:ret_days AS integer))"
 _TXN_CLOCK = "AND m.created_at > NOW() - make_interval(days => CAST(:ret_days AS integer))"
 # The sweep's new key for a kept message, per spelling the fake answers
-# (whitespace collapsed): migration 404's random draw with its version digit
+# (whitespace collapsed): migration 415's random draw with its version digit
 # set to 0, and the shapes the mutants of test_mail_receipts.py restore.
 _KEY_DRAWN = ("CAST(overlay(replace(CAST(gen_random_uuid() AS text), '-', '')"
               " PLACING '0' FROM 13 FOR 1) AS uuid)")
@@ -187,8 +187,8 @@ class FakeDb:
         self.fail_admin_actions = False     # make the admin_actions insert fail (review r1 M10)
         self.commit_marks = []              # len(statements) at each commit: which statements were inside which transaction (review r2)
         self.purged_hashes = set()          # deleted_steam_ids: the deletion ledger delete_player_data writes with the scrub (review r3)
-        self.receipts = {}                  # (sender_id, key) -> mail_send_receipts row (migration 404)
-        self.receipt_trigger = True         # migration 404's trigger on mail_messages; False = a schema without it
+        self.receipts = {}                  # (sender_id, key) -> mail_send_receipts row (migration 415)
+        self.receipt_trigger = True         # migration 415's trigger on mail_messages; False = a schema without it
         self.stmt_clock = NOW               # clock_timestamp() read inside a statement (main._MAIL_CLOCK_CTE)
         self.txn_start = NOW                # NOW(): the transaction's start, never later than stmt_clock
         self.draw = uuid.uuid4              # gen_random_uuid(); a test may force a value
@@ -222,7 +222,7 @@ class FakeDb:
                      kind="direct", key=None, read=False, deleted_by_sender_at=None, thread_id=None,
                      in_reply_to=None, via="game", receipt="backfill"):
         """A stored message and its envelopes. `receipt` says who wrote its
-        send receipt: "backfill" = migration 404's backfill (no request
+        send receipt: "backfill" = migration 415's backfill (no request
         digest, no body key, no envelope count on a direct message), "api" =
         this build's own write in the sending transaction (a request digest,
         the body's same-body key and the number of envelopes the send wrote),
@@ -241,10 +241,10 @@ class FakeDb:
             self.recipients[(mid, rid)] = {"kind": rkind, "delivery": delivery,
                                            "read_at": NOW if read else None, "deleted_at": None}
         if kind in ("direct", "system_broadcast"):
-            # Migration 404's backfill: every existing message has a receipt
+            # Migration 415's backfill: every existing message has a receipt
             # with no request digest and the digest of its stored text; a
             # broadcast's count is the recipient_count the build that sent it
-            # persisted from its delivered envelopes (404 refuses a broadcast
+            # persisted from its delivered envelopes (415 refuses a broadcast
             # without one).
             n = (sum(1 for (m, _r), e in self.recipients.items() if m == mid and e["delivery"] == "delivered")
                  if kind == "system_broadcast" else None)
@@ -261,7 +261,7 @@ class FakeDb:
 
     def draw_reserved(self):
         """gen_random_uuid() with its version digit (the 13th hex digit) set
-        to 0: migration 404's reserved key, drawn at random."""
+        to 0: migration 415's reserved key, drawn at random."""
         h = self.draw().hex
         return UUID(h[:12] + "0" + h[13:])
 
@@ -280,7 +280,7 @@ class FakeDb:
         raise AssertionError(f"sweep key expression this fake does not answer: {expr}")
 
     def route_of(self, mid):
-        """Migration 404's route of a stored message, as its trigger and
+        """Migration 415's route of a stored message, as its trigger and
         backfill derive it: a broadcast, a send (a thread of its own) or a
         reply."""
         m = self.messages[mid]
@@ -290,7 +290,7 @@ class FakeDb:
 
     def unique_key_or_raise(self, sender_id, key):
         """297's UNIQUE (sender_id, idempotency_key) on mail_messages, which
-        migration 404 keeps: a second row with a sender's key is refused, as
+        migration 415 keeps: a second row with a sender's key is refused, as
         PostgreSQL refuses it (23505)."""
         if any(m["sender_id"] == sender_id and m["idempotency_key"] == key
                for m in self.messages.values()):
@@ -378,7 +378,7 @@ class FakeDb:
         return "delivered"
 
     def _clock_admits(self, m, sql, params, full=None):
-        """The sender-side clock (migration 404's change): a message is the
+        """The sender-side clock (migration 415's change): a message is the
         sender's to see until MAIL_RETENTION_DAYS after it was sent, by the
         clock the statement READS: its own clock CTE (`full` is the whole
         statement when `sql` is the part of it that applies the clause),
@@ -584,7 +584,7 @@ class FakeDb:
             self.censor_hits.append({"sender_id": params["sid"], "created_at": NOW})
             return _Res()
         # spam evaluation (before the bare censor count: it embeds the same text).
-        # Migration 404's change: ONE statement counting the sender's send
+        # Migration 415's change: ONE statement counting the sender's send
         # receipts. The same-body key is computed on the Python side ONLY
         # (review r1 M7; main._mail_body_key) and compared here as bytes, so
         # the SQL carries no normaliser of its own to drift from it. A receipt
@@ -641,14 +641,14 @@ class FakeDb:
         # idempotency + rate
         if sql.lstrip().startswith("SELECT id, kind, recipient_count FROM mail_messages") \
                 and "WHERE sender_id = :sid AND idempotency_key = :key" in sql:
-            # the replay read before migration 404's change, still answered so
+            # the replay read before migration 415's change, still answered so
             # a mutant restoring it runs: the message row by (sender, key)
             m = next((m for m in self.messages.values()
                       if m["sender_id"] == params["sid"] and m["idempotency_key"] == params["key"]), None)
             return _Res([{"id": m["id"], "kind": m["kind"], "recipient_count": m["recipient_count"]}]
                         if m else [])
         if "FROM mail_send_receipts" in sql and "WHERE sender_id = :sid AND idempotency_key = :key" in sql:
-            # the replay read (migration 404): the key's receipt and nothing else
+            # the replay read (migration 415): the key's receipt and nothing else
             assert sql.lstrip().startswith("SELECT message_id, kind, recipients, request_fp"), sql
             r = self.receipts.get((params["sid"], params["key"]))
             return _Res([dict(r)] if r else [])
@@ -658,7 +658,7 @@ class FakeDb:
             same_message_only = "WHERE mail_send_receipts.message_id = EXCLUDED.message_id" in sql
             k = (params["sid"], params["key"])
             r = self.receipts.get(k)
-            # body_key (migration 404's change) is written on insert, and on
+            # body_key (migration 415's change) is written on insert, and on
             # the conflict update where the SQL says so
             bk = params["bk"] if ":bk" in sql else None
             if r is None:
@@ -701,7 +701,7 @@ class FakeDb:
             for mid, k in moves.items():
                 self.messages[mid]["idempotency_key"] = k
             return _Res([(1,)] * len(gone))
-        # Migration 405's change: the sender's invites in the rate windows
+        # Migration 416's change: the sender's invites in the rate windows
         # (main._INVITE_RATE_SQL), from the fake's invite rows (none unless a
         # test seeds `invite_rows`), rounded as the SQL rounds.
         if "AS invites_minute" in sql:
@@ -725,7 +725,7 @@ class FakeDb:
             for needle in ("MIN(created_at) FILTER (WHERE created_at > NOW() - make_interval(mins => 1))",
                            "AS minute_wait", "MIN(created_at) + make_interval(days => 1) - NOW()", "AS day_wait"):
                 assert needle in sql, f"rate query lost: {needle}"
-            # the window's rows are READ OFF the SQL's source (migration 404's
+            # the window's rows are READ OFF the SQL's source (migration 415's
             # change): the send receipts, which the janitor's purge leaves, or
             # the message rows, which it removes
             if "FROM mail_send_receipts" in sql:
@@ -758,7 +758,7 @@ class FakeDb:
         # message insert + fan-out
         if "INSERT INTO mail_messages" in sql:
             # The kind a bind carries (the send core's _mail_write_message,
-            # which the invite send shares since migration 405's change), or
+            # which the invite send shares since migration 416's change), or
             # the broadcast insert's literal.
             if ":kind" in sql:
                 kind = params["kind"]
@@ -778,7 +778,7 @@ class FakeDb:
                                   # column default exactly as the table does.
                                   "via": params.get("via", "game")}
             if self.receipt_trigger and kind in RECEIPT_TRIGGER_KINDS:
-                # migration 404's trigger, AFTER INSERT: a receipt with no
+                # migration 415's trigger, AFTER INSERT: a receipt with no
                 # request digest and the digest of the stored text. A receipt
                 # of the key for ANOTHER message (the key sent again once its
                 # first message was purged) stays the record of its own send
@@ -814,7 +814,7 @@ class FakeDb:
             assert "ranked_series" not in sql, "ranked_series is not proof of play (B-13)"
             assert "INSERT INTO mail_recipients" in sql and sql.count("INSERT INTO") == 1
             assert "FOR KEY SHARE OF p" in sql, "the fan-out must hold each recipient's players row (the delete-account lattice)"
-            # migration 404's change: the forced arm is READ OFF the SQL
+            # migration 415's change: the forced arm is READ OFF the SQL
             forced_arm = "WHEN a.forced THEN 'suppressed'" in sql
             if "CAST(:forced AS boolean[])" in sql:
                 assert len(params["forced"]) == len(params["rids"]) == len(params["kinds"])
@@ -829,7 +829,7 @@ class FakeDb:
                     "kind": kind, "delivery": delivery, "read_at": None, "deleted_at": None}
                 n += 1
             # an INSERT ... SELECT's rowcount: the envelopes it inserted, which
-            # the send's receipt records (migration 404's change)
+            # the send's receipt records (migration 415's change)
             return _Res(rowcount=n)
         if "INSERT INTO mail_recipients" in sql and "'to', 'delivered'" in sql:
             assert "mod_seen_at > NOW() - make_interval(days => CAST(:days AS integer))" in sql
@@ -926,7 +926,7 @@ class FakeDb:
         if any(f"DELETE FROM {t} WHERE player_id = :pid" in sql
                for t in ("ranked_queue", "team_queue", "ovt_queue", "ffa_queue")):
             return _Res()
-        # the ban's open-lobby seat read (migration 405's change): this fake
+        # the ban's open-lobby seat read (migration 416's change): this fake
         # seats nobody in a lobby, so there is no lobby row to lock
         if any(sql.startswith(f"SELECT series_id FROM {t} WHERE player_id = :pid AND status = 'lobby'")
                for t in ("team_queue", "ovt_queue", "ffa_queue")):
@@ -952,7 +952,7 @@ class FakeDb:
                 return _Res([])
             if " o AS MATERIALIZED (" not in sql:
                 return _Res([dict(m)])          # the previous build's read: the original alone
-            # Migration 404's change: the original and (for a reply all) its
+            # Migration 415's change: the original and (for a reply all) its
             # envelopes in ONE statement. The join's conditions are READ OFF
             # the SQL: the reply_all flag, the broadcast exclusion and any
             # delivery filter (a build that put one back would stop
@@ -1037,7 +1037,7 @@ class FakeDb:
             rows.sort(key=lambda r: (r["created_at"], r["id"]), reverse=True)
             return _Res(rows[: int(params["lim"])])
         # The previous build's separate addressee read (main._MAIL_ADDRESSEES_SQL
-        # before migration 404's change), still answered so a mutant restoring
+        # before migration 415's change), still answered so a mutant restoring
         # the two-statement shape runs.
         if "WITH a AS (" in sql and "ROW_NUMBER() OVER (PARTITION BY r.message_id" in sql:
             assert "r.delivery" not in sql, "addressee lists must not expose delivery"
@@ -1051,7 +1051,7 @@ class FakeDb:
                     out.append({"message_id": mid, "kind": env["kind"], "steam_id": p["steam_id"],
                                 "display_name": p["display_name"]})
             return _Res(out)
-        # Migration 405's change: deleting a copy of an invite moves the
+        # Migration 416's change: deleting a copy of an invite moves the
         # deleter's own revision (main._INVITE_DELETE_BUMP_SQL). Which copy
         # counts is READ OFF the SQL: the deleter's delivered envelope, and
         # only when its message's kind is the one the statement names.
@@ -1104,7 +1104,7 @@ class FakeDb:
             m = self.messages.get(params["mid"])
             if m is None or m["sender_id"] != params["me"]:
                 return _Res([])
-            # Migration 405's change, READ OFF the SQL: an invite's sender
+            # Migration 416's change, READ OFF the SQL: an invite's sender
             # holds no handle on its mail row.
             if "kind <> 'invite'" in sql and m["kind"] == "invite":
                 return _Res([])
@@ -1136,7 +1136,7 @@ class FakeDb:
                     n += 1
             return _Res([(1,)] * n)
         if "DELETE FROM mail_messages" in sql:
-            # no age floor since migration 404's change: the spam check counts
+            # no age floor since migration 415's change: the spam check counts
             # receipts, so nothing the sender is answered reads these rows
             assert "min_age_days" not in sql, "the purge's age floor is gone"
             gone = []
@@ -1257,7 +1257,7 @@ def _the_statement(db, *needles):
     """The one statement text the routes issued that holds every needle (a
     text issued twice counts once). Two different texts that both hold them
     fail here, where taking the first match would pick one of them silently:
-    since migration 404's change the detail read joins the addressees, so it
+    since migration 415's change the detail read joins the addressees, so it
     also holds the inbox read's FROM mail_recipients r and its sender join."""
     found = {s for s in db.statements if all(n in s for n in needles)}
     assert len(found) == 1, (needles, len(found))
@@ -1266,7 +1266,7 @@ def _the_statement(db, *needles):
 
 def _purge_rows(db, mid):
     """The janitor's purge of one message: its row and its envelopes go, its
-    send receipt stays (migration 404's change)."""
+    send receipt stays (migration 415's change)."""
     db.messages.pop(mid)
     for k in [k for k in db.recipients if k[0] == mid]:
         db.recipients.pop(k)
@@ -1476,7 +1476,7 @@ def test_rate_limits_10_per_minute_and_100_per_day():
         db.seed_message(ids[A_SID], [(ids[B_SID], "to", "delivered")], kind="system_broadcast",
                         created_at=NOW - timedelta(seconds=10))
     assert _send(db, [B_SID])["accepted"] is True
-    # control (migration 404's change): the window counts the send receipts,
+    # control (migration 415's change): the window counts the send receipts,
     # which the janitor's purge leaves. Nine sends in the minute whose rows
     # were purged still fill it; the previous build's read (this statement
     # over mail_messages, a mutant) frees their nine places
@@ -1581,7 +1581,7 @@ def test_reply_derives_recipients_server_side():
     r3 = _run(main.mail_reply(orig["id"], main._MailReplyReq(body="All", all=True, idempotency_key=str(uuid.uuid4())),
                               _req("tokB"), db))
     got = {rid: (env["kind"], env["delivery"]) for (mid, rid), env in db.recipients.items() if mid == UUID(r3["id"])}
-    # the sender plus EVERY addressee minus self (migration 404's change): D's
+    # the sender plus EVERY addressee minus self (migration 415's change): D's
     # copy of the original was suppressed, so D is addressed and D's copy of
     # the reply is suppressed too -- B's answer and Sent list read no delivery
     assert got == {ids[A_SID]: ("to", "delivered"), ids[D_SID]: ("to", "suppressed"),
@@ -1647,7 +1647,7 @@ def test_report_snapshots_dedupes_and_posts_once():
 
 def test_spam_same_body_opens_one_case_per_day_and_bumps(monkeypatch):
     # the three earlier sends carry this build's receipts (body key, envelope
-    # count): the spam check counts receipts (migration 404's change)
+    # count): the spam check counts receipts (migration 415's change)
     db, ids = _world()
     for _ in range(3):
         db.seed_message(ids[A_SID], [(ids[B_SID], "to", "delivered")], body="Buy  GOLD now",
@@ -1663,7 +1663,7 @@ def test_spam_same_body_opens_one_case_per_day_and_bumps(monkeypatch):
     _send(db, [B_SID], body="buy gold now")                          # 6th: bumped, not re-posted
     assert len(db.cases) == 1 and case["evidence"]["hits"] == 2 and case["evidence"]["same_body_day"] == 6
     assert len(db.outbox) == 1
-    # control (migration 404's change): the count is the receipts' body keys.
+    # control (migration 415's change): the count is the receipts' body keys.
     # The three earlier sends' rows purged, their receipts kept: the fifth
     # send still opens the case; the previous build's read (bodies from
     # mail_messages, a mutant) counts two and opens none
@@ -1700,7 +1700,7 @@ def test_spam_bulk_sends_and_censor_hits(monkeypatch):
     assert _send_raises(db, to=[B_SID], body=term).detail == "censored"
     assert len(db.cases) == 1 and next(iter(db.cases.values()))["evidence"]["censor_hits_day"] == 3
     assert len(db.outbox) == 1 and db.commits == 1
-    # control (migration 404's change): bulk is the receipts' envelope counts.
+    # control (migration 415's change): bulk is the receipts' envelope counts.
     # The two earlier bulk sends' rows purged, their receipts kept: the third
     # still opens the case; the previous build's read (envelopes counted in
     # mail_recipients, a mutant) counts one and opens none
@@ -1962,7 +1962,7 @@ def test_read_delete_detail_and_status_revision_monotonic():
     assert _raises(main.mail_detail(m2, _req("tokA"), db)).status_code == 404
     db.add_session("tokC", C_SID)
     assert _run(main.mail_detail(m2, _req("tokC"), db))["id"] == m2
-    nobody = str(uuid.uuid4())                                       # an id nobody holds: the same answer (migration 404's change)
+    nobody = str(uuid.uuid4())                                       # an id nobody holds: the same answer (migration 415's change)
     assert _run(main.mail_delete(nobody, _req("tokB"), db)) == {"status": "deleted", "id": nobody}
     # control: the previous build's delete (404 for an id the caller holds no
     # copy of, a mutant) answers that id otherwise
@@ -2222,7 +2222,7 @@ def test_delete_account_handles_every_new_table_by_name():
                     ("UPDATE moderation_cases SET reporter_id = NULL WHERE reporter_id = :pid", 1),
                     ("DELETE FROM mail_bulk_grants WHERE steam_id = :sid", 1),
                     ("DELETE FROM mail_censor_hits WHERE sender_id = :pid", 1),
-                    ("DELETE FROM mail_send_receipts WHERE sender_id = :pid", 1),                          # migration 404
+                    ("DELETE FROM mail_send_receipts WHERE sender_id = :pid", 1),                          # migration 415
                     ("UPDATE moderation_cases SET resolved_by = :tomb WHERE resolved_by = :sid", 1),     # M11
                     ("UPDATE mail_bulk_grants SET granted_by = :tomb WHERE granted_by = :sid", 1),       # M11
                     ("DELETE FROM mail_inbox_rev WHERE recipient_id = :pid", 1),                          # migration 300
@@ -2234,7 +2234,7 @@ def test_delete_account_handles_every_new_table_by_name():
                     ("text(_ERASE_RELAY_DMS_TO_SQL)", 1),
                     ("text(_ERASE_RELAY_DMS_FROM_SQL)", 1)):
         assert src.count(stmt) == n, stmt
-    # control (migration 404's change): the handler as on main, without the
+    # control (migration 415's change): the handler as on main, without the
     # one statement that change added, fails the receipts pin
     added = 'await db.execute(text("DELETE FROM mail_send_receipts WHERE sender_id = :pid"), {"pid": pid})'
     assert src.count(added) == 1
@@ -2289,14 +2289,14 @@ def test_janitor_retention_keeps_unread_and_purges_let_go_mail():
                                       created_at=NOW - timedelta(days=2))
     kept_suppressed = db.seed_message(ids[A_SID], [(ids[B_SID], "to", "suppressed")])
     # let go a moment after it was sent: the purge has no age floor since
-    # migration 404's change (the spam check counts receipts), so it goes too
+    # migration 415's change (the spam check counts receipts), so it goes too
     fresh_let_go = db.seed_message(ids[A_SID], [(ids[B_SID], "to", "suppressed")], deleted_by_sender_at=NOW,
                                    created_at=NOW - timedelta(minutes=1))
     db.censor_hits = [{"sender_id": ids[A_SID], "created_at": NOW - timedelta(days=3)},
                       {"sender_id": ids[A_SID], "created_at": NOW - timedelta(hours=1)}]
     expired, purged, hits, receipts = _run(main._mail_retention_sweep(db))
     assert (expired, purged, hits, receipts) == (1, 4, 1, 2)
-    # migration 404: the two receipts older than MAIL_RETENTION_DAYS go whatever
+    # migration 415: the two receipts older than MAIL_RETENTION_DAYS go whatever
     # their messages' state; the purged recent messages keep theirs
     assert {r["message_id"] for r in db.receipts.values()} == {let_go, half_let_go, suppressed_only, kept_suppressed,
                                                              fresh_let_go}
@@ -2314,7 +2314,7 @@ def test_janitor_retention_keeps_unread_and_purges_let_go_mail():
     assert "r.delivery = 'delivered'" in sweep and "r.deleted_at IS NULL" in sweep
     # the floor is gone, bind and constant alike
     assert "min_age_days" not in sweep and not hasattr(main, "MAIL_PURGE_MIN_AGE_DAYS")
-    # control (migration 404's change): the receipt count and the key move
+    # control (migration 415's change): the receipt count and the key move
     # above are the receipt sweep's. An old kept message swept without that
     # statement (the previous build's sweep, a mutant) keeps its receipt and
     # its key
@@ -2617,7 +2617,7 @@ def test_same_body_key_casefolds_and_collapses_unicode_whitespace(monkeypatch):
     assert norm("STRASSE") == norm("Straße") == norm("strasse")
     assert norm("buy gold now") == norm(" buy  gold\n\nnow ") == "buy gold now"
     assert norm("Buy Gold") != norm("Buy Gold Now")                  # negative control
-    # the stored key (migration 404's change) is SHA-256 of that one form
+    # the stored key (migration 415's change) is SHA-256 of that one form
     key = main._mail_body_key
     assert key("STRASSE") == key("Straße") == hashlib.sha256(b"strasse").digest()
     assert len(key("x")) == 32 and key("Buy Gold") != key("Buy Gold Now")
@@ -2636,7 +2636,7 @@ def test_same_body_key_casefolds_and_collapses_unicode_whitespace(monkeypatch):
     # the send's receipt carries the key the count compares
     assert {bytes(r["body_key"]) for r in db.receipts.values()
             if r["request_fp"] is not None and r["created_at"] == NOW} == {key("strasse")}
-    # control (migration 404's change): the same five sends with the three
+    # control (migration 415's change): the same five sends with the three
     # earlier rows purged and their receipts kept still open the case at the
     # fifth; the previous build's read (bodies from mail_messages, a mutant)
     # counts two and opens none
@@ -2750,7 +2750,7 @@ def test_case_without_its_outbox_row_does_not_commit():
     assert len(db.outbox) == 1 and db.outbox[0][1].startswith(f"{main.MAIL_CASE_MARKER}{case['case_id']}]")
 
 
-# The replay read before migration 404's change (main.py at 28778d95): the
+# The replay read before migration 415's change (main.py at 28778d95): the
 # message row by (sender, key); a broadcast's count from the row, or from its
 # delivered envelopes when the row has none.
 _OLD_PRIOR_SEND = '''
@@ -2775,11 +2775,11 @@ async def _mail_prior_send(db, sender_id, key, request_fp=None, message_fp=None)
 
 
 def _old_prior_send():
-    """Mutant: the replay read before migration 404's change
+    """Mutant: the replay read before migration 415's change
     (_OLD_PRIOR_SEND), compiled in a copy of main's namespace. It takes the
     two digests this build passes and ignores them, as that build had none."""
     ns = dict(vars(main))
-    exec(compile(_OLD_PRIOR_SEND, "<the replay read before migration 404's change>", "exec"), ns)
+    exec(compile(_OLD_PRIOR_SEND, "<the replay read before migration 415's change>", "exec"), ns)
     return ns["_mail_prior_send"]
 
 
@@ -2819,15 +2819,15 @@ def test_broadcast_replay_returns_the_full_original_response(monkeypatch):
     """M5, and review r2 LOW: a same-key retry whose first answer was lost
     still learns the recipient count — the count stored in the sending
     transaction (on the row, migration 300, and on the send's receipt,
-    migration 404) and replayed verbatim from the receipt, so a recipient
+    migration 415) and replayed verbatim from the receipt, so a recipient
     who deleted their account in between cannot change the replayed answer.
-    The answer is the receipt's alone (migration 404): neither the row's
+    The answer is the receipt's alone (migration 415): neither the row's
     count nor its envelopes are read, so neither a cleared count nor the
     janitor's purge of the row changes it."""
     first, replays, recounted, left = _broadcast_replays()
     assert first["recipients"] == 4 and set(first) == {"id", "accepted", "recipients"}
     assert replays == (first, first, first) and not recounted and left == 0
-    # mutant: the replay read before migration 404's change -> the row's
+    # mutant: the replay read before migration 415's change -> the row's
     # count survives D's envelope, but a cleared count is recounted from the
     # envelopes left (3), and after the purge the key is sent again as a
     # second broadcast
@@ -2856,13 +2856,13 @@ def test_fake_db_reads_its_authorisation_off_the_production_sql():
                                "JOIN players s ON s.id = m.sender_id")
     status_sql = _the_statement(db, "AS unread", "AS revision")
     # the inbox selector this test used before: the detail read holds its two
-    # needles as well (it joins the addressees since migration 404's change),
+    # needles as well (it joins the addressees since migration 415's change),
     # and the helper refuses to pick one of the two
     with pytest.raises(AssertionError):
         _the_statement(db, "FROM mail_recipients r", "JOIN players s ON s.id = m.sender_id")
     assert inbox_sql != detail_sql
-    # the sender's branch, with its clock (migration 404's change) and its
-    # invite exclusion (migration 405's change), whole
+    # the sender's branch, with its clock (migration 415's change) and its
+    # invite exclusion (migration 416's change), whole
     sender_clause = re.search(r"\(m\.sender_id = :me AND m\.deleted_by_sender_at IS NULL"
                               r" AND m\.kind <> 'invite'\s+"
                               + re.escape(_SENDER_CLOCK) + r"\)", detail_sql)
@@ -2998,12 +2998,12 @@ def test_migration_300_matches_the_orm_and_the_readers():
     # and the broadcast's persisted recipient count rides the same file
     assert "ALTER TABLE mail_messages ADD COLUMN IF NOT EXISTS recipient_count INTEGER" in sql
     assert "recipient_count" in {c.name for c in models.MailMessage.__table__.columns}
-    # migration 404: the replay reads the count from the send's receipt, which
+    # migration 415: the replay reads the count from the send's receipt, which
     # the broadcast route writes with that count in the same transaction
     assert "recipients" in main._MAIL_PRIOR_SEND_SQL and "FROM mail_send_receipts" in main._MAIL_PRIOR_SEND_SQL
     assert "recipients=n" in inspect.getsource(main.admin_mail_broadcast)
     assert "UPDATE mail_messages SET recipient_count" in inspect.getsource(main.admin_mail_broadcast)
-    # control: the replay read before migration 404's change (_OLD_PRIOR_SEND,
+    # control: the replay read before migration 415's change (_OLD_PRIOR_SEND,
     # the broadcast-replay test's mutant) fails the pin above: it reads the
     # count off the message row
     assert "FROM mail_send_receipts" not in _OLD_PRIOR_SEND
@@ -3430,12 +3430,12 @@ def test_a_case_ban_whose_subject_was_scrubbed_under_the_lock_is_refused_before_
 
 
 def test_a_mail_send_writes_one_receipt_and_one_spam_check_and_an_invite_neither():
-    """Migration 405's change split mail's send at the row write:
+    """Migration 416's change split mail's send at the row write:
     _mail_write_message writes the message row and its fan-out, and
     _mail_finish_send adds the receipt, the spam check and the commit. A mail
     send therefore still writes ONE receipt and runs the spam check ONCE. The
     invite send writes its mail row through _mail_write_message alone: no
-    receipt (404's trigger fires only for the kinds its WHEN names, which the
+    receipt (415's trigger fires only for the kinds its WHEN names, which the
     fake reads off the file) and no spam statement. The route's own source is
     held to the same: one row write, none of mail's finishing half."""
     db, ids = _world()

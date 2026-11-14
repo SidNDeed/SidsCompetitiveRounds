@@ -1,4 +1,4 @@
-"""Lobby invites on PostgreSQL (migration 405's change): departures, through
+"""Lobby invites on PostgreSQL (migration 416's change): departures, through
 inv_pg (one cf_pg case schema per case, the real handlers in main.py).
 
 Each departure path in _PATHS takes the lobby row's lock before it removes

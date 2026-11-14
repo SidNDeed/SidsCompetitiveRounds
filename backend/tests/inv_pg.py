@@ -1,13 +1,13 @@
-"""Lobby invites on PostgreSQL (migration 405's change): the case harness the
+"""Lobby invites on PostgreSQL (migration 416's change): the case harness the
 invite suites share.
 
 One case schema per case through cf_pg: every numbered migration's DDL is
-replayed (404 and 405 among them), the held-out ones run whole, and the
+replayed (415 and 416 among them), the held-out ones run whole, and the
 real handlers in main.py are called with a session bound to that schema.
 The replay runs a DO block only when it makes a table, an index or a
-column, so a built case has 404's receipt function but not its trigger,
-which 404 makes inside a DO block. Each case therefore makes that trigger
-itself, with 404's own CREATE TRIGGER statement read from the file, seals
+column, so a built case has 415's receipt function but not its trigger,
+which 415 makes inside a DO block. Each case therefore makes that trigger
+itself, with 415's own CREATE TRIGGER statement read from the file, seals
 the schema, and drops the trigger when the case ends, so a pooled schema
 goes back to the build as it found it.
 Two seams are replaced, both outside what these suites test: the session
@@ -430,15 +430,15 @@ class Env:
         return out
 
 
-M404 = os.path.join(HERE, "..", "sql", "404_mail_send_receipts.sql")
+M415 = os.path.join(HERE, "..", "sql", "415_mail_send_receipts.sql")
 RECEIPT_TRIGGER = "trg_mail_send_receipt"
 
 
 def receipt_trigger_ddl():
-    """404's CREATE TRIGGER statement, exactly as its DO block runs it."""
-    with open(M404, encoding="utf-8") as fh:
+    """415's CREATE TRIGGER statement, exactly as its DO block runs it."""
+    with open(M415, encoding="utf-8") as fh:
         found = re.findall(r"CREATE TRIGGER %s\b.*?;" % RECEIPT_TRIGGER, fh.read(), re.S)
-    assert len(found) == 1, ("404's trigger statement", found)
+    assert len(found) == 1, ("415's trigger statement", found)
     return found[0]
 
 
@@ -452,7 +452,7 @@ async def _has_receipt_trigger(conn):
 
 
 def case(monkeypatch, body, prefix="inv"):
-    """Build a case, make 404's trigger when the build lacks it, seal, run
+    """Build a case, make 415's trigger when the build lacks it, seal, run
     `body(env)`, drop the trigger it made, close."""
     cf_pg.require_live_pg()
 
@@ -461,7 +461,7 @@ def case(monkeypatch, body, prefix="inv"):
             made = not await _has_receipt_trigger(c.conn)
             if made:
                 await c.conn.execute(receipt_trigger_ddl())
-                assert await _has_receipt_trigger(c.conn), "404's trigger was not made"
+                assert await _has_receipt_trigger(c.conn), "415's trigger was not made"
             await c.seal()
             env = Env(c, sm, monkeypatch)
             try:

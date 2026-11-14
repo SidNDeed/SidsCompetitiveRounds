@@ -1,4 +1,4 @@
-"""Lobby invites on PostgreSQL (migration 405's change): how pending invites
+"""Lobby invites on PostgreSQL (migration 416's change): how pending invites
 end -- after a refused accept, in the janitor's sweep, at a lobby's start --
 and the one-pending-invite rule, against a local PostgreSQL through inv_pg
 (one cf_pg case schema per case, the real handlers in main.py).

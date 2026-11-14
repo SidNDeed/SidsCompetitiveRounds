@@ -2206,7 +2206,7 @@ def test_the_thread_the_confirmation_names_is_escaped_for_discord():
 def test_the_read_back_is_handed_every_name_its_statement_binds():
     """The read-back runs inside a try that answers known=False on any
     failure, so a bind the route forgot would never surface as an error.
-    Migration 404's change gave the statement the replier's own id and the
+    Migration 415's change gave the statement the replier's own id and the
     retention clock (test_mail_receipts_pg runs it on PostgreSQL): the route
     hands it exactly the names it binds, with the replier's id and main's
     MAIL_RETENTION_DAYS."""
@@ -3292,7 +3292,7 @@ def test_a_reply_to_a_thread_whose_mail_is_gone_is_told_it_was_deleted(monkeypat
         return {"id": REPLY_ID, "accepted": True}
 
     async def _core_resolving_nothing(_db, _me, **kw):
-        # This test's core before migration 404's change, written for a
+        # This test's core before migration 415's change, written for a
         # route that resolved the code before the core ran: the control.
         return {"id": REPLY_ID, "accepted": True}
 
@@ -3346,7 +3346,7 @@ def test_a_reply_to_a_thread_whose_mail_is_gone_is_told_it_was_deleted(monkeypat
             # Negative control: a core that never awaits resolve_target is
             # answered "accepted" for the purged thread and for a code never
             # minted -- each 404 above is the route's own resolution of the
-            # code, which since migration 404's change runs only inside the
+            # code, which since migration 415's change runs only inside the
             # core, after its receipt check.
             mail_discord._BOUND["reply_core"] = _core_resolving_nothing
             seen["control: purged"] = await reply("d1", code)
@@ -3381,7 +3381,7 @@ def test_a_reply_to_a_thread_whose_mail_is_gone_is_told_it_was_deleted(monkeypat
 # the lock the relay-off gate waits on. To plan, it needs players' mail_from
 # and deleted_at, the block table and the four "played together" sources;
 # empty stubs suffice, since every recipient here is passed forced = false
-# (migration 404's flag) and is 'delivered' through the ELSE branch. steam_sessions (and mod_seen_at) let the in-game settings
+# (migration 415's flag) and is 'delivered' through the ELSE branch. steam_sessions (and mod_seen_at) let the in-game settings
 # route resolve its caller as it does in production.
 _RACE_TABLES = ("mail_blocks", "matches", "team_matches", "ffa_match_players",
                 "ovt_matches", "steam_sessions")

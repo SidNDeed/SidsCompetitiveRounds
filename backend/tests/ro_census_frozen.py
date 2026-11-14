@@ -3726,7 +3726,7 @@ FROZEN_COUNT = (COARSE_COUNT + COMPLETE_COUNT + R10_COUNT + R10_MERGE_COUNT
                 + R11_ID_COUNT + R11_OPEN_COUNT + B10_MERGE_COUNT)
 
 
-# Hand edit for migration 404's change (the mail send receipts): one coarse
+# Hand edit for migration 415's change (the mail send receipts): one coarse
 # form it adds to a census file. It is the module-scope
 # `from sqlalchemy import LargeBinary` in models.py, a statement of its own so
 # that the shared sqlalchemy import stays as it was (learning #537).
@@ -3743,7 +3743,7 @@ FROZEN_COUNT = (COARSE_COUNT + COMPLETE_COUNT + R10_COUNT + R10_MERGE_COUNT
                 + MAIL_SEND_RECEIPTS_COUNT)
 
 
-# Hand edit for migration 405's change (the lobby invites): four forms it adds
+# Hand edit for migration 416's change (the lobby invites): four forms it adds
 # to a census file, each a kwarg form in main.py. They are the explicit
 # `password=None` with which the invite cores build the mode's request: a
 # challenge's create (_invite_challenge_core) and an accept's join

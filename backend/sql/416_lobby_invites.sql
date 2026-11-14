@@ -1,9 +1,8 @@
--- 405_lobby_invites.sql
+-- 416_lobby_invites.sql
 --
--- PROVISIONAL NUMBER. 405 is this lane's working number. The lane builds on
--- 404 (mail send receipts), which lands first. The integrator assigns the
--- final number at landing (the next above the highest file on main) and
--- renames this file, its rollback and the tests that name them.
+-- NUMBER. Written and reviewed in its lane as 405, and renumbered 416
+-- before landing together with its rollback and the tests that name it.
+-- It builds on 415 (mail send receipts), which is applied first.
 --
 -- Lobby invites. A lobby member invites a player into their 2v2, 1v2
 -- or FFA lobby, or a player challenges another from their name, which opens
@@ -50,13 +49,13 @@
 --                                  'direct' and 'system_broadcast'.
 --
 -- MAIL'S KEY SPACE IS NOT SPLIT. 297's UNIQUE (sender_id, idempotency_key)
--- stays as 404 keeps it. An invite's mail rows hold a reserved key drawn at
--- random (version digit 0, see 404's RESERVED KEYS), which every mail route
--- refuses in a request, so no send, reply or broadcast meets one. 404's
+-- stays as 415 keeps it. An invite's mail rows hold a reserved key drawn at
+-- random (version digit 0, see 415's RESERVED KEYS), which every mail route
+-- refuses in a request, so no send, reply or broadcast meets one. 415's
 -- trigger fires only for kinds 'direct' and 'system_broadcast' (its WHEN
 -- condition), so an invite's mail row gets no mail_send_receipts row: mail's
 -- replay and its rate and spam counts never see an invite. This file leaves
--- 404's trigger and function as they are.
+-- 415's trigger and function as they are.
 --
 -- DEPLOY ORDER: THIS FILE FIRST, THE API SECOND.
 -- -----------------------------------------------
@@ -131,23 +130,23 @@ SET LOCAL lock_timeout = '5s';
 
 -- The session's temporary schema goes last in search_path for this
 -- transaction, or the file refuses (SEARCH PATH above).
-DO $m405path$
+DO $m416path$
 DECLARE
   new_path text;
 BEGIN
   IF current_schema() IS NULL THEN
-    RAISE EXCEPTION '405: search_path names no schema to create in (found: %)',
+    RAISE EXCEPTION '416: search_path names no schema to create in (found: %)',
       current_setting('search_path');
   END IF;
   IF position('pg_temp' IN lower(current_setting('search_path'))) > 0 THEN
-    RAISE EXCEPTION '405: search_path names pg_temp (found: %)', current_setting('search_path');
+    RAISE EXCEPTION '416: search_path names pg_temp (found: %)', current_setting('search_path');
   END IF;
   new_path := set_config('search_path', current_setting('search_path') || ', pg_temp', true);
-END $m405path$;
+END $m416path$;
 
 -- The two tables: created and marked, or found marked, or refused (CREATE
 -- OR REFUSE above).
-DO $m405tables$
+DO $m416tables$
 DECLARE
   mark CONSTANT text := 'lobby invites, DDL sha256 d8c6427e321c7e2eebe713174e46aa968e34c02cbb8f92901adeabe4ff9d4b6b';
   taken text;
@@ -173,7 +172,7 @@ BEGIN
              WHERE n.nspname = current_schema()
                AND t.typname IN ('lobby_invites', 'invite_receipts')) x;
     IF taken IS NOT NULL THEN
-      RAISE EXCEPTION '405: a name this file creates already stands in schema % (found: %)',
+      RAISE EXCEPTION '416: a name this file creates already stands in schema % (found: %)',
         current_schema(), taken;
     END IF;
     -- DDL START
@@ -243,18 +242,18 @@ BEGIN
       INTO found
       FROM (VALUES ('invite_receipts'), ('lobby_invites')) AS w(name);
     IF found IS DISTINCT FROM 'invite_receipts marked, lobby_invites marked' THEN
-      RAISE EXCEPTION '405: lobby_invites and invite_receipts are neither both absent nor both marked by this file (found: %)',
+      RAISE EXCEPTION '416: lobby_invites and invite_receipts are neither both absent nor both marked by this file (found: %)',
         found;
     END IF;
   END IF;
-END $m405tables$;
+END $m416tables$;
 
 -- mail_messages.kind admits 'invite'. 297 declared the check inline, so its
 -- name is the server's (mail_messages_kind_check on every box this repo has
 -- built); it is found by its definition instead, and only a check of exactly
 -- 297's definition is dropped. Any other check naming kind is left for the
 -- post-check to refuse.
-DO $m405kind$
+DO $m416kind$
 DECLARE
   old_check name;
   mm oid;
@@ -264,7 +263,7 @@ BEGIN
     JOIN pg_namespace n ON n.oid = c.relnamespace
    WHERE n.nspname = current_schema() AND c.relname = 'mail_messages';
   IF mm IS NULL THEN
-    RAISE EXCEPTION '405: mail_messages is not in schema %', current_schema();
+    RAISE EXCEPTION '416: mail_messages is not in schema %', current_schema();
   END IF;
   IF NOT EXISTS (
        SELECT 1 FROM pg_constraint c
@@ -285,9 +284,9 @@ BEGIN
     ALTER TABLE mail_messages ADD CONSTRAINT ck_mail_messages_kind
       CHECK (kind IN ('direct', 'system_broadcast', 'invite'));
   END IF;
-END $m405kind$;
+END $m416kind$;
 
-DO $m405check$
+DO $m416check$
 DECLARE
   found text;
   want text;
@@ -307,8 +306,8 @@ BEGIN
   want := 'ck_mail_messages_kind CHECK ((kind = ANY (ARRAY[''direct''::text, ''system_broadcast''::text, '
        || '''invite''::text])))';
   IF found IS DISTINCT FROM want THEN
-    RAISE EXCEPTION '405: mail_messages kind checks differ from this file (found: %)', found;
+    RAISE EXCEPTION '416: mail_messages kind checks differ from this file (found: %)', found;
   END IF;
-END $m405check$;
+END $m416check$;
 
 COMMIT;

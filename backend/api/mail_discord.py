@@ -272,7 +272,7 @@ _REPLIED_TO_SQL = (
     "  JOIN mail_messages m ON m.id = rep.in_reply_to"
     "  JOIN players p ON p.id = m.sender_id"
     " WHERE rep.id = CAST(:rid AS uuid)"
-    # The replier's own view, as the game gives it (migration 404's change):
+    # The replier's own view, as the game gives it (migration 415's change):
     # the reply while it is in their Sent -- not deleted by them, inside
     # the sender's clock -- and the thread while they could open it, through
     # a live delivered copy or as its sender inside the same clock. The
@@ -287,7 +287,7 @@ _REPLIED_TO_SQL = (
     "   AND (EXISTS (SELECT 1 FROM mail_recipients r"
     "                 WHERE r.message_id = m.id AND r.recipient_id = CAST(:pid AS uuid)"
     "                   AND r.delivery = 'delivered' AND r.deleted_at IS NULL)"
-    # Migration 405's change: an invite's sender holds no handle on its
+    # Migration 416's change: an invite's sender holds no handle on its
     # mail row, so the sender branch leaves kind 'invite' out.
     "        OR (m.sender_id = CAST(:pid AS uuid) AND m.deleted_by_sender_at IS NULL"
     "            AND m.kind <> 'invite'"
@@ -468,7 +468,7 @@ async def mail_reply_from_discord(
     # write here", which is the only question it was ever able to answer.
     # Which thread is answered is settled by `_target` below, which the core
     # calls under its locks right AFTER the repeated-key check (migration
-    # 404's change): a retry of a reply that was sent is answered from the
+    # 415's change): a retry of a reply that was sent is answered from the
     # reply's receipt even when the code no longer resolves (the player has
     # deleted their copy of the thread since), as a retry in game is. What
     # is checked before the core runs is the request alone: a code and

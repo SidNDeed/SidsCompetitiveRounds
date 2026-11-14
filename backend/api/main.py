@@ -5616,7 +5616,7 @@ async def queue_cleanup_loop():
                      ORDER BY random()
                      LIMIT 10
                      FOR UPDATE SKIP LOCKED"""))).mappings().all()
-                # Migration 405's change: a pruned member's pending invites for
+                # Migration 416's change: a pruned member's pending invites for
                 # the lobby end with them (sender_left), an abandoned lobby's
                 # rest end with it (lobby_closed), and the invitees' revisions
                 # move as the transaction's last statement.
@@ -5749,7 +5749,7 @@ async def queue_cleanup_loop():
                          ORDER BY random()
                          LIMIT 10
                          FOR UPDATE SKIP LOCKED"""))).mappings().all()
-                    # Migration 405's change: as the FFA arm above.
+                    # Migration 416's change: as the FFA arm above.
                     _inv_ended = []
                     for ol in open_lobbies:
                         _pruned = list((await db.execute(text(f"""
@@ -5972,7 +5972,7 @@ async def queue_cleanup_loop():
                               f"deleted {_receipts} send receipt(s)")
         except Exception as e:
             print(f"[MAIL-RETENTION] sweep error: {e}")
-        # ── Lobby invites (migration 405) ───────────────────────────────
+        # ── Lobby invites (migration 416) ───────────────────────────────
         # Own try/except (#228). Every pass: the sweep ends each pending
         # invite it does not keep and bumps its invitee's revision, then
         # retention deletes rows INVITE_KEEP_DAYS past their expiry. Two
@@ -44972,7 +44972,7 @@ async def delete_player_data(steam_id: str, request: Request, sig: str = Query(.
     # account was sitting in. Without this the lobby keeps pointing at the
     # anonymized account as host and nothing else ever repairs it (the series
     # UPDATEs above cannot — a lobby id matches no series row).
-    # Migration 405's change: the deleted account's pending invites for each
+    # Migration 416's change: the deleted account's pending invites for each
     # open lobby it sat in end with its seat (sender_left), a disband ends the
     # rest (lobby_closed), and the invitees' revisions move just before the
     # commit below. Each lobby row is locked above.
@@ -45110,7 +45110,7 @@ async def delete_player_data(steam_id: str, request: Request, sig: str = Query(.
     await db.execute(text("UPDATE moderation_cases SET reporter_id = NULL WHERE reporter_id = :pid"), {"pid": pid})
     await db.execute(text("DELETE FROM mail_bulk_grants WHERE steam_id = :sid"), {"sid": steam_id})
     await db.execute(text("DELETE FROM mail_censor_hits WHERE sender_id = :pid"), {"pid": pid})
-    # Send receipts (migration 404): this player's record of what they sent
+    # Send receipts (migration 415): this player's record of what they sent
     # under which key, with a digest of each request. The account sends
     # nothing again, so no repeat can need one.
     await db.execute(text("DELETE FROM mail_send_receipts WHERE sender_id = :pid"), {"pid": pid})
@@ -45265,7 +45265,7 @@ async def delete_player_data(steam_id: str, request: Request, sig: str = Query(.
     # (migration 300) is personal state and goes with the envelopes; it is
     # removed at this handler's end rather than in the early sweep, so the
     # row-lock order (players, then mail_inbox_rev) matches the fan-out's and
-    # neither side can wait on the other. Migration 405's change moved it
+    # neither side can wait on the other. Migration 416's change moved it
     # from here to the very end: there it is locked in the same ascending
     # pass as the invite bump's rows (_invite_bump's `drop`), the one order
     # every writer of mail_inbox_rev takes, and nothing is locked after it.
@@ -48284,7 +48284,7 @@ async def _apply_ban_core(db: AsyncSession, *, admin_steam_id: str, target_steam
     ), {"sid": target_steam_id})).scalar()
     _ban_inv_ended = []
     if _bpid is not None:
-        # Migration 405's change: an open-lobby seat the ban removes ends the
+        # Migration 416's change: an open-lobby seat the ban removes ends the
         # invites it sent for that lobby, under the lobby row's lock. Each such
         # lobby row is locked BEFORE the queue rows below, so the ban keeps
         # the canonical lobby -> queue-row order, and in the order account
@@ -48313,7 +48313,7 @@ async def _apply_ban_core(db: AsyncSession, *, admin_steam_id: str, target_steam
         # formation that commits first (room pre-dates the ban — legal) or
         # commits first, leaving the formation's member read empty (no room —
         # the invariant). Lock order stays acyclic: ban = identity -> (the
-        # open lobby rows above, migration 405's change) -> queue rows;
+        # open lobby rows above, migration 416's change) -> queue rows;
         # formation = queue rows only, never identity. Innocent
         # partners self-heal via their polls' missing-opponent handling; live
         # groups keep reporting against their FROZEN rosters (member_ids /
@@ -48357,7 +48357,7 @@ async def _apply_ban_core(db: AsyncSession, *, admin_steam_id: str, target_steam
     await db.execute(text(
         "DELETE FROM pc_delivery_leases WHERE subject_id IN "
         "(SELECT id FROM players WHERE steam_id = :sid)"), {"sid": target_steam_id})
-    # Migration 405's change: the invitees' revisions for the invites ended
+    # Migration 416's change: the invitees' revisions for the invites ended
     # above, after the drain, as the core's last write (the ORM rows below are
     # flushed at the caller's commit).
     await _invite_bump(db, _ban_inv_ended)
@@ -49325,7 +49325,7 @@ async def team_queue_leave(request: Request, steam_id: str = Query(...),
             text("DELETE FROM team_queue WHERE player_id = :pid"),
             {"pid": player.id},
         )
-        # Migration 405's change: an open-lobby member leaving through the
+        # Migration 416's change: an open-lobby member leaving through the
         # queue leave ends the invites they sent for that lobby (the group
         # lock above holds the lobby row).
         if r["status"] == "lobby" and r["series_id"] is not None:
@@ -53680,7 +53680,7 @@ async def ovt_queue_leave(request: Request, steam_id: str = Query(...),
     await db.execute(text(
         "DELETE FROM ovt_queue WHERE player_id = :pid"
     ), {"pid": me["player_id"]})
-    # Migration 405's change: an open-lobby member leaving through the queue
+    # Migration 416's change: an open-lobby member leaving through the queue
     # leave ends the invites they sent for that lobby (the group lock above
     # holds the lobby row).
     if me["status"] == "lobby" and me["series_id"] is not None:
@@ -57866,7 +57866,7 @@ class _LobbyEntry:
     `note` the line logged after the commit (None for a recovery rejoin,
     which has never logged one). `bump` holds the mail rows of the invites
     the work ended (a join's pruning ends the pruned members' invites,
-    migration 405's change); the route bumps them (_invite_bump) as the
+    migration 416's change); the route bumps them (_invite_bump) as the
     transaction's last statement, before its commit."""
     __slots__ = ("answer", "lobby_id", "player_id", "note", "bump")
 
@@ -57951,7 +57951,7 @@ async def _lobby_join_core(mode: str, req: _LobbyJoinReq, request: Request,
     route can add its own rows to the same transaction. The caller commits,
     then hands the result to _lobby_entry_after_commit.
 
-    `invite` (an accept, migration 405's change) takes the password's place
+    `invite` (an accept, migration 416's change) takes the password's place
     for this one player: its row is locked right after the lobby row and
     before the pruning, and re-checked after it (_InviteJoinHook). Every
     other gate is the join's own, in the join's order."""
@@ -58014,7 +58014,7 @@ async def _lobby_join_core(mode: str, req: _LobbyJoinReq, request: Request,
     """), {"lid": lobby_id})).all()]
     _ended_invites = []
     if _pruned_seats:
-        # D7 (migration 405's change): a pruned seat's pending invites for
+        # D7 (migration 416's change): a pruned seat's pending invites for
         # this lobby end with it, from the DELETE's own RETURNING set (the one
         # set that is exact, as above), before its leases go.
         _ended_invites = await _invite_end_departed(db, mode, lobby_id, _pruned_seats)
@@ -58122,7 +58122,7 @@ async def _lobby_state_impl(mode: str, steam_id: str, request: Request,
             "DELETE FROM queue_leases WHERE player_id = :pid"
             "   AND mode = :mode AND group_id = :lid"),
             {"pid": me["player_id"], "mode": mode, "lid": lobby_id})
-        # Migration 405's change: a member who leaves an open lobby ends the
+        # Migration 416's change: a member who leaves an open lobby ends the
         # invites they sent for it (the lobby row is locked above).
         await _invite_bump(db, await _invite_end_departed(db, mode, lobby_id, [me["player_id"]]))
         await db.commit()
@@ -58139,7 +58139,7 @@ async def _lobby_state_impl(mode: str, steam_id: str, request: Request,
         "seen": max(0, int(seen_settings_version or 0)), "cur": _cur_ver})
     live = await _lobby_live_members(db, mode, lobby_id)
     host_id = _lobby_effective_host(lrow["host_player_id"], live)
-    # Migration 405's change: the lobby's invites, for a member whose client
+    # Migration 416's change: the lobby's invites, for a member whose client
     # is at or above the invite floor (an older client is never sent them).
     invites = (await _invite_lobby_list(db, mode, lobby_id, me["player_id"], host_id)
                if _invite_ok_for(request) else None)
@@ -58311,7 +58311,7 @@ async def _lobby_leave_impl(mode: str, steam_id: str, expected_lobby_id: str | N
     await db.execute(text(
         "DELETE FROM queue_leases WHERE player_id = :pid AND group_id = CAST(:lid AS uuid)"
     ), {"pid": me["player_id"], "lid": str(lobby_id)})
-    # Migration 405's change: the leaver's pending invites for this lobby end
+    # Migration 416's change: the leaver's pending invites for this lobby end
     # with them (sender_left), and a disband ends the rest (lobby_closed);
     # the invitees' revisions move as the transaction's last statement.
     _inv_ended = await _invite_end_departed(db, mode, lobby_id, [me["player_id"]])
@@ -58804,7 +58804,7 @@ async def _lobby_kick_impl(mode: str, req: _LobbyKickReq, request: Request,
     await db.execute(text(
         "DELETE FROM queue_leases WHERE player_id = :pid AND mode = :m AND group_id = :lid"),
         {"pid": target["player_id"], "m": mode, "lid": lobby_id})
-    # Migration 405's change: the kicked member's pending invites for this
+    # Migration 416's change: the kicked member's pending invites for this
     # lobby end (sender_left), and so do the lobby's pending invites to them
     # (invitee_kicked); the invitees' revisions move as the last statement.
     _inv_ended = await _invite_end_departed(db, mode, lobby_id, [target["player_id"]])
@@ -58947,7 +58947,7 @@ async def _lobby_start_common(db: AsyncSession, mode: str, steam_id: str, reques
     # the checks below and for the caller's Start. Instead, commit only on the
     # way out through a raise, where the lock is being released anyway.
     #
-    # Migration 405's change: a refusal that commits the evictions also ends
+    # Migration 416's change: a refusal that commits the evictions also ends
     # the invites the removed seats sent (stale and banned alike) and bumps
     # their invitees' revisions as its last statement. A start that goes
     # through ends every pending invite of the lobby at its caller instead.
@@ -59268,7 +59268,7 @@ async def team_lobby_start(req: _LobbyStartReq, request: Request,
         await db.rollback()
         raise HTTPException(status_code=409, detail=
                             "A lobby member entered another live match")
-    # Migration 405's change: the start ends the lobby's pending invites
+    # Migration 416's change: the start ends the lobby's pending invites
     # (lobby_started) and bumps their invitees' revisions, the last write
     # before the relock stamp below, which stays last (r4 H1). The one
     # recorded exception to the bump-last rule (the design note, section
@@ -59412,7 +59412,7 @@ async def ovt_lobby_start(req: _LobbyStartReq, request: Request,
         await db.rollback()
         raise HTTPException(status_code=409, detail=
                             "A lobby member entered another live match")
-    # Migration 405's change: the start ends the lobby's pending invites
+    # Migration 416's change: the start ends the lobby's pending invites
     # (lobby_started) and bumps their invitees' revisions, as its last write.
     await _invite_bump(db, await _invite_end_lobby(db, "ovt", lobby_id, "lobby_started"))
     await db.commit()
@@ -59835,7 +59835,7 @@ async def _ffa_lobby_join_core(req: _FfaLobbyJoinReq, request: Request,
     """), {"lid": lobby_id})).all()]
     _ended_invites = []
     if _pruned_seats:
-        # D7 (migration 405's change): as _lobby_join_core's pruning.
+        # D7 (migration 416's change): as _lobby_join_core's pruning.
         _ended_invites = await _invite_end_departed(db, "ffa", lobby_id, _pruned_seats)
         # Fenced to this mode+lobby: a lease the seat has SINCE taken
         # elsewhere is not this lobby's to destroy.
@@ -60494,7 +60494,7 @@ async def ffa_lobby_start(req: _FfaLobbyStartReq, request: Request, db: AsyncSes
     # lock (I2 writer 1).
     room, region, ordered, _locked_ranked = await _ffa_lock_roster(
         db, lobby_id, live, offered_pid=me["player_id"])
-    # Migration 405's change: the start ends the lobby's pending invites
+    # Migration 416's change: the start ends the lobby's pending invites
     # (lobby_started) and bumps their invitees' revisions, as its last write.
     # Every refusal above rolls back, the prunes with it, so no refusal owes
     # an invite end.
@@ -60639,7 +60639,7 @@ async def ffa_lobby_kick(req: _LobbyKickReq, request: Request,
     await db.execute(text(
         "DELETE FROM queue_leases WHERE player_id = :pid AND mode = 'ffa' AND group_id = :lid"),
         {"pid": target["player_id"], "lid": lobby_id})
-    # Migration 405's change: as the 2v2 and 1v2 kick (_lobby_kick_impl).
+    # Migration 416's change: as the 2v2 and 1v2 kick (_lobby_kick_impl).
     _inv_ended = await _invite_end_departed(db, "ffa", lobby_id, [target["player_id"]])
     _inv_ended += await _invite_end_kicked(db, "ffa", lobby_id, [target["player_id"]])
     await _invite_bump(db, _inv_ended)
@@ -60786,7 +60786,7 @@ async def ffa_queue_leave(request: Request, steam_id: str = Query(...),
     if me["status"] == "lobby" and lobby_id is not None:
         await db.execute(text("DELETE FROM ffa_queue WHERE player_id = :pid"),
                          {"pid": me["player_id"]})
-        # Migration 405's change: the leaver's pending invites for this lobby
+        # Migration 416's change: the leaver's pending invites for this lobby
         # end with them (sender_left), and a disband ends the rest
         # (lobby_closed); the invitees' revisions move as the last statement.
         _inv_ended = await _invite_end_departed(db, "ffa", lobby_id, [me["player_id"]])
@@ -65232,7 +65232,7 @@ async def _ffa_queue_poll_inner(steam_id: str, request: Request, db: AsyncSessio
                 "DELETE FROM queue_leases WHERE player_id = :pid"
                 "   AND mode = 'ffa' AND group_id = :lid"),
                 {"pid": me["player_id"], "lid": me["series_id"]})
-            # Migration 405's change: a member who leaves an open lobby ends
+            # Migration 416's change: a member who leaves an open lobby ends
             # the invites they sent for it (the group helper holds the lobby).
             await _invite_bump(db, await _invite_end_departed(
                 db, "ffa", me["series_id"], [me["player_id"]]))
@@ -65241,7 +65241,7 @@ async def _ffa_queue_poll_inner(steam_id: str, request: Request, db: AsyncSessio
             return {"status": "lobby_closed", "queue_count": 0}
         live = await _ffa_live_lobby_members(db, me["series_id"])
         host_id = _ffa_effective_host(lrow["host_player_id"], live)
-        # Migration 405's change: the lobby's invites, for a member whose
+        # Migration 416's change: the lobby's invites, for a member whose
         # client is at or above the invite floor.
         invites = (await _invite_lobby_list(db, "ffa", me["series_id"], me["player_id"], host_id)
                    if _invite_ok_for(request) else None)
@@ -78120,7 +78120,7 @@ _MAIL_FANOUT_SQL = (
 # blocks, re-reads the row and finds deleted_at set. No per-recipient
 # advisory lock is needed for this (a broadcast has hundreds of recipients).
 #
-# `forced` (migration 404's change): one flag per addressee, true only for an
+# `forced` (migration 415's change): one flag per addressee, true only for an
 # addressee of a reply all whose copy of the original was suppressed. A
 # reply all addresses every addressee of the original whatever its delivery,
 # so the replier's answer, the recipient cap and the replier's Sent list read
@@ -78180,7 +78180,7 @@ _MAIL_REV_BUMP_SQL = (
 # kind), ranked To before Cc, then by name, for a statement that ends with
 # `LEFT JOIN a ON a.message_id = src.id AND a.rn <= CAST(:cap AS integer)`
 # (_mail_group_addressees reads its rows). A message and its addressees come
-# from ONE statement, so from one snapshot (migration 404's change): the
+# from ONE statement, so from one snapshot (migration 415's change): the
 # janitor's purge removes a message and its envelopes together, and a second
 # statement could find the envelopes gone after the first had listed the
 # message. A broadcast's envelope is the whole community, so it has none
@@ -78195,7 +78195,7 @@ _MAIL_ADDRESSEES_CTE = (
 )
 
 # The retention clock of the sender's own views, read INSIDE the statement
-# that applies it (migration 404's change); the statement continues with its
+# that applies it (migration 415's change); the statement continues with its
 # next CTE and CROSS JOINs `t`. A MATERIALIZED CTE reads clock_timestamp()
 # once, after the statement's snapshot was taken and after every lock the
 # transaction waited for, where NOW() is the transaction's start. The janitor
@@ -78289,7 +78289,7 @@ def _mail_parse_key(value) -> UUID:
     idempotency_key_invalid when it is no UUID, or when it is a RESERVED key:
     version digit (the 13th hex digit) 0. The janitor's sweep moves a kept
     message off its key into that space (_MAIL_RECEIPT_SWEEP_SQL), and
-    migration 404's trigger moves a superseded receipt into it, so no request
+    migration 415's trigger moves a superseded receipt into it, so no request
     names either, whatever it computes. Refused before the sender lock and
     before any mail table is read. No shipped caller sends one: the client
     mints uuid4 keys, the Discord route derives uuid5 (reply_idempotency_key).
@@ -78373,7 +78373,7 @@ def _mail_norm_body(body: str) -> str:
 
 
 def _mail_body_key(body: str) -> bytes:
-    """The same-body key as stored (migration 404's change): SHA-256 of
+    """The same-body key as stored (migration 415's change): SHA-256 of
     _mail_norm_body's form of the body, UTF-8. The api writes it on each
     direct send's receipt, and _mail_spam_check counts the sender's receipts
     that carry the new body's key."""
@@ -78691,13 +78691,13 @@ async def _log_admin_action_strict(db: AsyncSession, *, admin_steam_id: str, act
         "t": (target_steam_id or None), "d": _json.dumps(details or {})})
 
 
-# Send receipts (migration 404). Every committed mail send, reply and
+# Send receipts (migration 415). Every committed mail send, reply and
 # broadcast has one row in mail_send_receipts, keyed (sender_id,
 # idempotency_key): the message id the send answered with, its kind, a
 # broadcast's recipient count and the request's digest. (When the previous
 # build sends a key again after the key's first message was purged, the
 # first send's row stays under a reserved key, _mail_parse_key, and the key's
-# row is the newer message's: migration 404's trigger.) A repeated key is
+# row is the newer message's: migration 415's trigger.) A repeated key is
 # answered from the receipt ALONE. The message row is no source for that
 # answer: the janitor purges a row only once no delivered copy keeps it, which
 # depends on the recipients' delivery, while the receipt lives until
@@ -78712,7 +78712,7 @@ _MAIL_PRIOR_SEND_SQL = (
 # message right after its fan-out, with the number of envelopes it wrote and
 # the body's same-body key (_mail_body_key), both of which the spam check
 # counts; for a broadcast after its recipient count. Migration
-# 404's trigger on mail_messages has normally written the row already, with
+# 415's trigger on mail_messages has normally written the row already, with
 # no digest, when the message row was inserted -- the trigger is there for
 # every OTHER writer of mail_messages, such as the previous api build while
 # a deploy is in progress -- so this is an upsert that completes that row.
@@ -78739,7 +78739,7 @@ _MAIL_RECEIPT_SQL = (
 # The same statement moves every message a deleted receipt answered for
 # that is still kept (an unread delivered copy keeps a row past retention)
 # off its key: a key with no receipt is sent as a new message, and 297's
-# UNIQUE (sender_id, idempotency_key), which migration 404 keeps for the
+# UNIQUE (sender_id, idempotency_key), which migration 415 keeps for the
 # previous build, would refuse that insert while the old row still held the
 # key. The message's new key is a reserved one DRAWN AT RANDOM
 # (gen_random_uuid(), 122 random bits) with its version digit then set to 0.
@@ -78749,7 +78749,7 @@ _MAIL_RECEIPT_SQL = (
 # nothing a sender knows and no route returns a key, so no stored key and no
 # request names it in advance. A draw that met a key already stored (about
 # 2^-122 per stored key of that sender) fails the statement, the janitor's
-# transaction rolls back, and the next run draws again. Migration 404's
+# transaction rolls back, and the next run draws again. Migration 415's
 # trigger does not fire on the change (UPDATE OF recipient_count only). One
 # row per deleted receipt is returned.
 _MAIL_RECEIPT_SWEEP_SQL = (
@@ -78795,7 +78795,7 @@ def _mail_request_fp(route: str, **fields) -> bytes:
 
 def _mail_message_fp(route: str, subject: str, body: str) -> bytes:
     """The digest of a message's text as its row stores it, on every send
-    receipt (migration 404's message_fp, whose trigger and backfill compute
+    receipt (migration 415's message_fp, whose trigger and backfill compute
     it in SQL from the row): SHA-256 over the route ('send', 'reply' or
     'broadcast'), the subject (empty for a reply, whose subject is derived
     from its parent's, not asked for) and the body, UTF-8, each pair
@@ -78830,7 +78830,7 @@ async def _mail_prior_send(db: AsyncSession, sender_id, key: UUID, request_fp: b
     and whether the janitor has purged it. A receipt that stores a request
     digest answers only the request it was written for: the same key with
     another digest is refused, 409 idempotency_key_reused, and nothing is
-    written. A receipt without one (backfilled by migration 404, or written
+    written. A receipt without one (backfilled by migration 415, or written
     by its trigger for a writer without this change) is compared on
     message_fp, the digest of the text its message stored: `message_fp` is
     that digest of this request's text (_mail_request_message_fp, None when
@@ -78908,7 +78908,7 @@ async def _mail_recipient_cap(db: AsyncSession, sender: dict) -> int:
     return MAIL_RECIPIENT_CAP
 
 
-# Migration 405's change: the sender's invites in the send rate's two
+# Migration 416's change: the sender's invites in the send rate's two
 # windows, in the receipts statement's shape (_mail_rate_or_raise adds the
 # counts and takes the earlier oldest entry of each window).
 _INVITE_RATE_SQL = (
@@ -78929,17 +78929,17 @@ async def _mail_rate_or_raise(db: AsyncSession, sender_id) -> None:
     """10 per minute and 100 per day, counted on the sender's own send
     receipts under the sender lock (B-11). Broadcasts do not count.
 
-    Receipts, not message rows (migration 404's change): a receipt stays
+    Receipts, not message rows (migration 415's change): a receipt stays
     MAIL_RETENTION_DAYS after the send whatever happens to the message, so
     every send counts for its whole window whatever its delivery. That holds
     when a later message takes the send's key, too: the first send's receipt
-    stays, under a reserved key, with its own kind and time (migration 404's
+    stays, under a reserved key, with its own kind and time (migration 415's
     trigger), so each committed send is one receipt. A row's
     life depends on delivery (the janitor purges a deleted message only once
     no delivered copy keeps it), so the window neither counts rows nor
     relies on how long the janitor keeps them.
 
-    Invites count too (migration 405's change), from the sender's
+    Invites count too (migration 416's change), from the sender's
     lobby_invites rows (_INVITE_RATE_SQL): an invite writes no send
     receipt, and its row lives INVITE_KEEP_DAYS past its expiry whatever its
     delivery, so the day's count is the same for a delivered and a
@@ -79083,7 +79083,7 @@ async def _mail_censor_or_raise(db: AsyncSession, sender: dict, *fields: str) ->
 async def _mail_spam_check(db: AsyncSession, sender: dict, message_id, subject: str, body: str) -> None:
     """B-14, evaluated inside the send transaction after the fan-out and the
     send's receipt, so the message just written counts. Every count reads
-    the sender's send receipts (migration 404's change), never mail_messages:
+    the sender's send receipts (migration 415's change), never mail_messages:
     a message row's life depends on its copies' delivery (the janitor purges
     a deleted message once no delivered copy keeps it) and a receipt's does
     not, so each count is the same whatever the copies' delivery. The
@@ -79092,7 +79092,7 @@ async def _mail_spam_check(db: AsyncSession, sender: dict, message_id, subject: 
     whitespace class, which SQL's lower()/regexp cannot reproduce), the api
     stores it on each direct send's receipt, and the count compares
     digests. 'bulk' counts MESSAGES whose receipt records more than
-    MAIL_SPAM_BULK_RECIPIENTS envelopes. A receipt that migration 404's
+    MAIL_SPAM_BULK_RECIPIENTS envelopes. A receipt that migration 415's
     backfill or trigger wrote (a send the previous build made) carries no
     body key and no envelope count of a direct message, so it is in neither
     count, whatever its message's delivery: the previous build's janitor may
@@ -79313,7 +79313,7 @@ async def _mail_reply_core(db: AsyncSession, me: dict, *, message_id: str | None
     parameter) or from `resolve_target`, an async callable returning its id
     (the Discord route's relay-code lookup, which may refuse 404). Exactly
     one is given. The callable runs under the locks AFTER the repeated-key
-    check (migration 404's change): a repeated key is answered from its
+    check (migration 415's change): a repeated key is answered from its
     receipt before anything about the target is read, on both routes, so a
     retry's answer does not depend on the target's state since the send."""
     if (message_id is None) == (resolve_target is None):
@@ -79338,7 +79338,7 @@ async def _mail_reply_core(db: AsyncSession, me: dict, *, message_id: str | None
     # refused whether or not the purge has taken it yet. A row admitted
     # through the caller's own live delivered copy is one the purge cannot
     # take while that copy is live. A broadcast's envelopes are never read.
-    # An invite's sender holds no handle on its mail row (migration 405's
+    # An invite's sender holds no handle on its mail row (migration 416's
     # change): the sender branch leaves kind 'invite' out, so a reply or a
     # reply all to it answers its sender as for an absent id.
     rows = (await db.execute(text(
@@ -79399,7 +79399,7 @@ async def mail_inbox(request: Request, cursor: str = Query(""),
                      db: AsyncSession = Depends(get_db)):
     """Newest first, keyset-paged on (created_at, id). Delivered, undeleted
     envelopes only — a suppressed copy is never listed (B-7). An invite's
-    row (migration 405) carries its `invite` object, and is left out for a
+    row (migration 416) carries its `invite` object, and is left out for a
     caller whose client is below the invite floor."""
     me = await _mail_caller(request, db)
     c_at, c_id = _mail_cursor_decode(cursor)
@@ -79447,7 +79447,7 @@ async def mail_sent(request: Request, cursor: str = Query(""),
     delivery, so the list never relies on it. The page and its addressees
     come from one statement with the clock read inside it (_MAIL_CLOCK_CTE,
     _MAIL_ADDRESSEES_CTE). An invite's mail row is never listed: its sender
-    holds no handle on it (migration 405's change)."""
+    holds no handle on it (migration 416's change)."""
     me = await _mail_caller(request, db)
     c_at, c_id = _mail_cursor_decode(cursor)
     rows = (await db.execute(text(
@@ -79483,7 +79483,7 @@ async def mail_status(request: Request, db: AsyncSession = Depends(get_db)):
     envelope in the sending transaction, so it moves exactly when new mail
     arrives and in commit order — never on a read or a delete, and never
     backwards (the client toasts on a change, never on the count); "" until
-    the first delivery. Since migration 405 it also moves on every change of
+    the first delivery. Since migration 416 it also moves on every change of
     an invite's state and when the invitee deletes an invite's copy (never
     for a suppressed copy), so a client refetches what an answer elsewhere
     changed. Carries mail_from so the Settings pane can render the current
@@ -79623,7 +79623,7 @@ async def mail_detail(message_id: str, request: Request, db: AsyncSession = Depe
     """Full message for its sender (until they delete it, or until
     MAIL_RETENTION_DAYS after it was sent, as in Sent) or a delivered,
     undeleted recipient. to/cc carry names only — delivery is NOT exposed.
-    Marks nothing read (the client posts /read explicitly). Migration 405's
+    Marks nothing read (the client posts /read explicitly). Migration 416's
     change: an invite's sender holds no handle on its mail row (the sender
     branch leaves kind 'invite' out), the invitee's copy carries its
     `invite` object, and a caller below the invite floor is shown no invite
@@ -79667,7 +79667,7 @@ async def mail_detail(message_id: str, request: Request, db: AsyncSession = Depe
     return {
         "id": str(row["id"]), "thread_id": str(row["thread_id"]),
         # The parent's id also after the janitor has purged the parent: no
-        # foreign key covers the column since migration 404, so the sender
+        # foreign key covers the column since migration 415, so the sender
         # of a reply reads the same value whatever the parent's delivery.
         "in_reply_to": str(row["in_reply_to"]) if row["in_reply_to"] else None,
         "kind": row["kind"],
@@ -79721,7 +79721,7 @@ async def mail_delete(message_id: str, request: Request, db: AsyncSession = Depe
         " WHERE message_id = :mid AND recipient_id = :me AND delivery = 'delivered'"
         " RETURNING 1"
     ), {"mid": mid, "me": me["id"]})).first()
-    # Migration 405's change: an invite's sender holds no handle on its mail
+    # Migration 416's change: an invite's sender holds no handle on its mail
     # row, so the sender's update leaves kind 'invite' out.
     as_sender = (await db.execute(text(
         "UPDATE mail_messages SET deleted_by_sender_at = COALESCE(deleted_by_sender_at, NOW())"
@@ -79744,7 +79744,7 @@ async def mail_delete(message_id: str, request: Request, db: AsyncSession = Depe
         # Deleting it made that last case answer "this code names nothing".
         await db.execute(text(_MAIL_CANCEL_PENDING_DM_SQL),
                          {"mid": mid, "sid": me["steam_id"]})
-        # Migration 405's change: deleting a copy of an invite takes it off
+        # Migration 416's change: deleting a copy of an invite takes it off
         # the invitee's pending list, so their revision moves and their
         # other clients refetch. One row, the transaction's last statement.
         await db.execute(text(_INVITE_DELETE_BUMP_SQL), {"mid": mid, "me": me["id"]})
@@ -80119,7 +80119,7 @@ async def admin_mail_broadcast(req: _AdminMailBroadcastReq, db: AsyncSession = D
         "mid": mid, "sid": sender["id"], "days": MAIL_BROADCAST_SEEN_DAYS})).fetchall()
     n = len(delivered)
     # The answer's recipient count is persisted on the row (migration 300)
-    # and on the send's receipt (migration 404) in this same transaction;
+    # and on the send's receipt (migration 415) in this same transaction;
     # _mail_prior_send replays the receipt's verbatim.
     await db.execute(text(
         "UPDATE mail_messages SET recipient_count = CAST(:n AS integer) WHERE id = :mid"
@@ -80208,7 +80208,7 @@ async def admin_mail_bulk_grant_revoke(
     return {"status": "ok", "steam_id": sid, "revoked": gone is not None}
 
 
-# ── Lobby invites (migration 405) ───────────────────────────────────────────
+# ── Lobby invites (migration 416) ───────────────────────────────────────────
 #
 # An invite is one lobby_invites row: this player asks that player to join
 # this lobby. Two ways in, one row shape: an invite to a lobby the sender is
@@ -81250,10 +81250,10 @@ async def _mail_retention_sweep(db: AsyncSession) -> tuple[int, int, int, int]:
     (_MAIL_CLOCK_CTE). Bounded batches; the
     cascade removes the envelopes, moderation_cases.message_id goes NULL and
     the case keeps its snapshot. A reply's in_reply_to keeps the purged
-    parent's id: migration 404 dropped the foreign key that set it NULL, so a
+    parent's id: migration 415 dropped the foreign key that set it NULL, so a
     reply's sender reads the same in_reply_to whatever the parent's delivery
     kept or released. The censor-hit ledger is pruned after
-    MAIL_CENSOR_HITS_KEEP_DAYS. Send receipts (migration 404) are deleted
+    MAIL_CENSOR_HITS_KEEP_DAYS. Send receipts (migration 415) are deleted
     MAIL_RETENTION_DAYS after the send whatever the message's delivery or
     purge: a repeated key is answered from its receipt until then, and the
     key of a message still kept is retired with it

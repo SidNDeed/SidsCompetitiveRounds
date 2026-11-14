@@ -29,10 +29,10 @@ API_DIR = pathlib.Path(__file__).resolve().parents[1] / "api"
 #
 # 377 (admin evidence report order indexes) is held to the same header rules:
 # a deploy-order line, and catalog guards stated as such. 401 (the
-# contribution match_id column and indexes, B10-R3) likewise. 404 (mail send
+# contribution match_id column and indexes, B10-R3) likewise. 415 (mail send
 # receipts: a table, its index and trigger, and two statements outside every
 # guard, the backfill cue's SELECT set_config() and the trigger's CREATE OR
-# REPLACE FUNCTION) likewise. 405 (lobby invites: two tables, their indexes
+# REPLACE FUNCTION) likewise. 416 (lobby invites: two tables, their indexes
 # and mail_messages' kind check, every step inside a guard) likewise.
 OWNED = ("331_animal_title_ladders.sql",
          "332_pc_edition_schedule.sql",
@@ -40,8 +40,8 @@ OWNED = ("331_animal_title_ladders.sql",
          "336_bug_reports_kind.sql",
          "377_admin_evidence_indexes.sql",
          "401_contrib_match_provenance.sql",
-         "404_mail_send_receipts.sql",
-         "405_lobby_invites.sql")
+         "415_mail_send_receipts.sql",
+         "416_lobby_invites.sql")
 
 _ORDER_LINE = re.compile(r"^--\s*DEPLOY ORDER:\s*(.+)$", re.MULTILINE)
 
@@ -79,12 +79,12 @@ def test_every_migration_states_its_deploy_order(filename):
         "actually reads" % filename)
 
 
-def test_the_deploy_order_check_fails_404_without_its_line(tmp_path, monkeypatch):
-    """The negative control of the check's 404 case, which joined OWNED with
-    migration 404's change: a copy of 404 whose line is gone, names no side,
+def test_the_deploy_order_check_fails_415_without_its_line(tmp_path, monkeypatch):
+    """The negative control of the check's 415 case, which joined OWNED with
+    migration 415's change: a copy of 415 whose line is gone, names no side,
     or stands after its BEGIN; fails the check; the same copy step with the
     file's own text passes it."""
-    name = "404_mail_send_receipts.sql"
+    name = "415_mail_send_receipts.sql"
     real = (SQL_DIR / name).read_text(encoding="utf-8")
     (line,) = [m.group(0) for m in _ORDER_LINE.finditer(real)]
     gone = real.replace(line, "--")
@@ -101,12 +101,12 @@ def test_the_deploy_order_check_fails_404_without_its_line(tmp_path, monkeypatch
     test_every_migration_states_its_deploy_order(name)
 
 
-def test_the_deploy_order_check_fails_405_without_its_line(tmp_path, monkeypatch):
-    """The negative control of the check's 405 case, which joined OWNED with
-    the lobby invites change: a copy of 405 whose line is gone, names no side,
+def test_the_deploy_order_check_fails_416_without_its_line(tmp_path, monkeypatch):
+    """The negative control of the check's 416 case, which joined OWNED with
+    the lobby invites change: a copy of 416 whose line is gone, names no side,
     or stands after its BEGIN; fails the check; the same copy step with the
     file's own text passes it."""
-    name = "405_lobby_invites.sql"
+    name = "416_lobby_invites.sql"
     real = (SQL_DIR / name).read_text(encoding="utf-8")
     (line,) = [m.group(0) for m in _ORDER_LINE.finditer(real)]
     gone = real.replace(line, "--")
@@ -771,7 +771,7 @@ _EVERY_STATEMENT_GUARDED = {
         "one catalog-guarded ADD COLUMN block, two catalog-guarded CREATE INDEX "
         "blocks and a read-only post-check, between BEGIN, SET LOCAL "
         "lock_timeout and COMMIT; a re-run issues no DDL",
-    "405_lobby_invites.sql":
+    "416_lobby_invites.sql":
         "one block that puts the session's temporary schema last in "
         "search_path for the transaction, "
         "one catalog-guarded block that creates lobby_invites, invite_receipts "

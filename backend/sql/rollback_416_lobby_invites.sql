@@ -1,8 +1,8 @@
--- rollback_405_lobby_invites.sql
+-- rollback_416_lobby_invites.sql
 --
--- Undoes 405_lobby_invites.sql (provisional number; renamed with it).
+-- Undoes 416_lobby_invites.sql (written as 405; renumbered with it).
 --
--- ORDER: THE API FIRST, THIS FILE SECOND. The api build carrying 405 reads
+-- ORDER: THE API FIRST, THIS FILE SECOND. The api build carrying 416 reads
 -- and writes both tables on every invite route and writes mail rows of kind
 -- 'invite'; roll it back first, then apply this file, back to back.
 -- Between the two steps traffic is not quiesced: the previous api lists each
@@ -14,7 +14,7 @@
 --
 -- What it does, in one transaction:
 --   0. puts the session's temporary schema last in search_path for the
---      transaction (set_config, local to it), as 405 does: PostgreSQL
+--      transaction (set_config, local to it), as 416 does: PostgreSQL
 --      otherwise searches that schema first for relation and type names, so
 --      a temporary table named like one of the tables below would be
 --      dropped, deleted from or altered in its place. A search_path that
@@ -37,19 +37,19 @@ SET LOCAL lock_timeout = '5s';
 
 -- Step 0: the session's temporary schema goes last in search_path for this
 -- transaction, or the file refuses.
-DO $r405path$
+DO $r416path$
 DECLARE
   new_path text;
 BEGIN
   IF current_schema() IS NULL THEN
-    RAISE EXCEPTION 'rollback 405: search_path names no existing schema (found: %)',
+    RAISE EXCEPTION 'rollback 416: search_path names no existing schema (found: %)',
       current_setting('search_path');
   END IF;
   IF position('pg_temp' IN lower(current_setting('search_path'))) > 0 THEN
-    RAISE EXCEPTION 'rollback 405: search_path names pg_temp (found: %)', current_setting('search_path');
+    RAISE EXCEPTION 'rollback 416: search_path names pg_temp (found: %)', current_setting('search_path');
   END IF;
   new_path := set_config('search_path', current_setting('search_path') || ', pg_temp', true);
-END $r405path$;
+END $r416path$;
 
 DROP TABLE IF EXISTS invite_receipts;
 DROP TABLE IF EXISTS lobby_invites;
@@ -58,7 +58,7 @@ DELETE FROM mail_messages WHERE kind = 'invite';
 
 ALTER TABLE mail_messages DROP CONSTRAINT IF EXISTS ck_mail_messages_kind;
 
-DO $r405kind$
+DO $r416kind$
 DECLARE
   mm oid;
 BEGIN
@@ -67,7 +67,7 @@ BEGIN
     JOIN pg_namespace n ON n.oid = c.relnamespace
    WHERE n.nspname = current_schema() AND c.relname = 'mail_messages';
   IF mm IS NULL THEN
-    RAISE EXCEPTION 'rollback 405: mail_messages is not in schema %', current_schema();
+    RAISE EXCEPTION 'rollback 416: mail_messages is not in schema %', current_schema();
   END IF;
   IF NOT EXISTS (
        SELECT 1 FROM pg_constraint c
@@ -78,6 +78,6 @@ BEGIN
     ALTER TABLE mail_messages ADD CONSTRAINT mail_messages_kind_check
       CHECK (kind IN ('direct', 'system_broadcast'));
   END IF;
-END $r405kind$;
+END $r416kind$;
 
 COMMIT;

@@ -1406,15 +1406,15 @@ class SpectateLease(Base):
 class MailMessage(Base):
     """One sent message. thread_id is the ROOT message's own id (a new thread
     points at itself), in_reply_to the parent's id; neither has a foreign
-    key (migration 404 dropped 297's SET NULL self-reference on
+    key (migration 415 dropped 297's SET NULL self-reference on
     in_reply_to), so both keep their value after the janitor purges the
     message they name. A retried send finds its original through its send
-    receipt (MailSendReceipt, migration 404); UNIQUE (sender_id,
+    receipt (MailSendReceipt, migration 415); UNIQUE (sender_id,
     idempotency_key) stays from 297 for the build before that change, and
     the janitor moves a kept message to a reserved key (main._mail_parse_key)
     when it deletes the key's receipt. kind 'system_broadcast' is admin-only,
     audited, and bypasses preferences and blocks (B-12); kind 'invite' is an
-    invite's mail row (LobbyInvite, migration 405), written by the invite
+    invite's mail row (LobbyInvite, migration 416), written by the invite
     routes under a reserved key and never read by its sender's mail routes;
     everything else is 'direct'."""
     __tablename__ = "mail_messages"
@@ -1454,7 +1454,7 @@ class MailMessage(Base):
 
 class MailSendReceipt(Base):
     """One row per committed mail send, reply or broadcast, keyed by the
-    (sender_id, idempotency_key) it committed under (migration 404; a send
+    (sender_id, idempotency_key) it committed under (migration 415; a send
     whose key a later message took keeps its row under a reserved key, its
     trigger): the message id it answered
     with, its kind, the number of envelopes the send wrote (`recipients`: a
@@ -1598,7 +1598,7 @@ class MailInboxRev(Base):
 
 
 class LobbyInvite(Base):
-    """One invite or challenge into one lobby (migration 405). `mode`
+    """One invite or challenge into one lobby (migration 416). `mode`
     names the lobby table `lobby_id` is in ('team' team_lobbies, 'ovt'
     ovt_lobbies, 'ffa' ffa_lobbies), so lobby_id has no foreign key and
     every read names both. `state` leaves 'pending' once: 'accepted',
@@ -1649,7 +1649,7 @@ class LobbyInvite(Base):
 
 class InviteReceipt(Base):
     """One row per keyed invite request that committed a change (see
-    migration 405): send (a challenge too), accept, decline or cancel, keyed
+    migration 416): send (a challenge too), accept, decline or cancel, keyed
     by the caller and the request's idempotency key, one key scope per caller
     across every invite route. `request_fp` is the SHA-256 of the request's
     canonical form (the route, the path's invite id, the caller, and the body

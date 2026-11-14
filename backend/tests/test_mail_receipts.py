@@ -1,4 +1,4 @@
-"""Mail send receipts, reply all and the sender's own view (migration 404's
+"""Mail send receipts, reply all and the sender's own view (migration 415's
 change), executed against the in-memory fake of test_mail.py.
 
 What each endpoint answers after the change:
@@ -9,7 +9,7 @@ What each endpoint answers after the change:
   purged the message row since. A request that differs from the one the
   receipt was written for (its digest, main._mail_request_fp) is refused,
   409 idempotency_key_reused, and writes nothing. A receipt with no request
-  digest (written by migration 404's backfill or by its trigger) is compared
+  digest (written by migration 415's backfill or by its trigger) is compared
   on the digest of the text its message stored (message_fp,
   main._mail_message_fp): the same text replays, another body (or another
   subject on a send or a broadcast) is refused the same way.
@@ -37,7 +37,7 @@ What each endpoint answers after the change:
 - The janitor deletes a receipt MAIL_RETENTION_DAYS after its send,
   whatever the state of the message it names, and moves a message still
   kept to a reserved key drawn at random, so the key can be sent again
-  under 297's UNIQUE (sender_id, idempotency_key), which migration 404
+  under 297's UNIQUE (sender_id, idempotency_key), which migration 415
   keeps.
 - Every route that takes an idempotency key refuses a reserved one (version
   digit 0), 400 idempotency_key_invalid, before the sender lock and before
@@ -73,7 +73,7 @@ REUSED = (409, "idempotency_key_reused")
 NOT_FOUND = (404, "not_found")
 OLD = NOW - timedelta(days=main.MAIL_RETENTION_DAYS + 1)
 YOUNG = NOW - timedelta(days=main.MAIL_RETENTION_DAYS - 1)
-# The reply core's join of the original's envelopes (migration 404's change)
+# The reply core's join of the original's envelopes (migration 415's change)
 _REPLY_ALL_JOIN = "ON e.message_id = o.id AND CAST(:reply_all AS boolean) AND o.kind <> 'system_broadcast'"
 # Anchors of the three sender reads, present in the one-statement shape and
 # in the previous build's first statement alike
@@ -109,7 +109,7 @@ def _key():
 def _reserved(seed):
     """A key in the reserved space (version digit, the 13th hex digit, 0;
     main._mail_parse_key): the md5 of `seed` with that digit set to 0, the
-    value the sweep and the trigger DERIVED before migration 404's change
+    value the sweep and the trigger DERIVED before migration 415's change
     drew them at random."""
     h = hashlib.md5(seed.encode("ascii")).hexdigest()
     return UUID(h[:12] + "0" + h[13:])
@@ -351,7 +351,7 @@ def test_the_send_digest_covers_each_field(monkeypatch, field, old, new):
 
 
 def test_a_receipt_without_a_request_digest_answers_on_the_stored_text(monkeypatch):
-    """A receipt written by migration 404's backfill or by its trigger (a
+    """A receipt written by migration 415's backfill or by its trigger (a
     send or a reply the previous api build committed) has no request
     digest. A retry of its key is compared on the digest of the text the
     message stored: the same text replays, also when the request's body
@@ -417,7 +417,7 @@ def test_a_send_replays_from_its_receipt_after_the_message_is_purged():
     first, again, sent = run(False)
     assert again == first and sent == []                    # answered from the receipt; nothing sent again
     # data mutant: no receipt (the answer read off the message row, as before
-    # migration 404) -> the retry after the purge is sent again under a new id
+    # migration 415) -> the retry after the purge is sent again under a new id
     first, again, sent = run(True)
     assert again != first and [str(m["id"]) for m in sent] == [again["id"]]
 
@@ -486,7 +486,7 @@ def test_reply_all_answers_the_replier_the_same_whatever_the_delivery():
     assert [(a["steam_id"], a["kind"]) for a in seen_open[2]] == [(A_SID, "to"), (D_SID, "to"), (C_SID, "cc")]
     assert d_open["delivery"] == "delivered" and d_hidden["delivery"] == "suppressed"
     # mutant: the reply-all read keeps delivered envelopes only (the rule
-    # before migration 404) -> B's Sent entry differs between the worlds
+    # before migration 415) -> B's Sent entry differs between the worlds
     seen_open, _d, _inbox, hits_open = _reply_all_world(False, _delivered_only)
     seen_hidden, d_hidden, _inbox, hits = _reply_all_world(True, _delivered_only)
     assert hits and hits_open and seen_open != seen_hidden and d_hidden is None
@@ -711,7 +711,7 @@ _OLD_SPAM_CUT = ('    row = (await db.execute(text(\n',
 def _spam_after_a_purge(purged, before_fifth=None):
     """A sends one body to B four times (this build: each receipt carries
     the body key) and deletes the four; three more sends of that body two
-    hours ago were made by the previous build (migration 404's backfill
+    hours ago were made by the previous build (migration 415's backfill
     wrote their receipts, with no body key), A deleted those too. B's copies
     are suppressed (`purged`: no delivered copy keeps the rows and the
     janitor's sweep purges them) or delivered and unread (the sweep keeps
@@ -743,7 +743,7 @@ def test_the_same_body_count_is_the_same_whether_the_purge_ran(monkeypatch):
     assert _spam_after_a_purge(True) == (0, 3, [5])
     assert _spam_after_a_purge(False) == (7, 3, [5])
     # mutant: the count read off mail_messages bodies (the shape before
-    # migration 404's change) -> the purge decides the count: one body left
+    # migration 415's change) -> the purge decides the count: one body left
     # and no case, or every kept body and a case of 8
     old = _spliced("_mail_spam_check", [_OLD_SPAM_CUT])
     install = lambda: monkeypatch.setattr(main, "_mail_spam_check", old)  # noqa: E731
@@ -873,7 +873,7 @@ def test_without_the_trigger_the_api_writes_the_whole_receipt(monkeypatch):
     another recipient is refused. The retry after the purge replays."""
     def run(trigger):
         db, ids = tm._world()
-        db.receipt_trigger = trigger                         # False: a schema without migration 404's trigger
+        db.receipt_trigger = trigger                         # False: a schema without migration 415's trigger
         key = _key()
         first = tm._send(db, [B_SID], body="Meet at eight.", key=key)
         changed = _outcome_or_23505(tm._send, db, to=[C_SID], body="Meet at eight.", key=key)
@@ -984,7 +984,7 @@ def test_a_swept_receipt_moves_a_kept_message_to_a_reserved_key(monkeypatch):
 
 def _sweep_beside_a_held_derived_key(collide=False):
     """_aged_world, plus a message of A's sent now under the value the sweep
-    DERIVED before migration 404's change for the kept message M
+    DERIVED before migration 415's change for the kept message M
     (old_delivered): md5('mail-key-retired:' || M) with version digit 0. The
     previous build refuses no key, so a request it served could have stored
     that value. The janitor then sweeps M's receipt (older than retention)
@@ -1017,7 +1017,7 @@ def test_the_sweep_draws_a_kept_messages_key_at_random(monkeypatch):
     res, now_key, key, _derived, receipt_left, _held = _sweep_beside_a_held_derived_key(collide=True)
     assert res == "23505" and now_key == key and receipt_left
     # mutant: the key derived from M's id (the expression before migration
-    # 404's change) -> the derived value is held already, the statement
+    # 415's change) -> the derived value is held already, the statement
     # fails, and M's receipt is never deleted
     assert _REAL_SWEEP.count(_DRAW_EXPR) == 1
     monkeypatch.setattr(main, "_MAIL_RECEIPT_SWEEP_SQL", _REAL_SWEEP.replace(_DRAW_EXPR, _DERIVE_EXPR))
@@ -1160,7 +1160,7 @@ _OLD_REPLY_CUTS = (
 '''[1:]))
 
 # The previous build's addressee read (main._MAIL_ADDRESSEES_SQL and
-# main._mail_addressees before migration 404's change), for the mutants.
+# main._mail_addressees before migration 415's change), for the mutants.
 _OLD_ADDRESSEES_SQL = (
     "WITH a AS ("
     "  SELECT r.message_id, r.kind, p.steam_id, p.display_name,"
