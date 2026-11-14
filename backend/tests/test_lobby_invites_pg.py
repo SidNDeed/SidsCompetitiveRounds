@@ -835,7 +835,8 @@ def test_an_invite_and_its_receipts_go_seven_days_after_its_expiry_whatever_its_
         assert all([await env.row(i) is not None for i in ids.values()])
         for i in ids.values():
             await env.age(i, kept_days=main.INVITE_KEEP_DAYS + 1)
-        with env.rewriting("WHERE expires_at < NOW()", "WHERE state <> 'declined' AND expires_at < NOW()",
+        with env.rewriting("WHERE expires_at < (SELECT clock_timestamp())",
+                           "WHERE state <> 'declined' AND expires_at < (SELECT clock_timestamp())",
                            where="DELETE FROM lobby_invites") as hits:
             await env.retention()
         assert hits

@@ -80637,8 +80637,11 @@ async def _invite_send_repeat(db: AsyncSession, me: dict, invite_id) -> dict:
     exactly as long as the row, so the row is there), and for a challenge
     the create's fields while the sender is still a live member of its
     lobby, so a client never adopts a lobby it has left. Writes nothing."""
+    # Expiry is compared with the clock when this statement runs, not with
+    # NOW(), which is when the transaction began: the identity and sender
+    # locks above can wait.
     row = (await db.execute(text(
-        "SELECT id, mode, lobby_id, kind, state, expires_at, (expires_at <= NOW()) AS past"
+        "SELECT id, mode, lobby_id, kind, state, expires_at, (expires_at <= clock_timestamp()) AS past"
         "  FROM lobby_invites WHERE id = :iid"
     ), {"iid": invite_id})).mappings().first()
     out = {"invite_id": str(row["id"]), "state": _invite_state_now(row),
@@ -80999,14 +81002,18 @@ async def invite_cancel(invite_id: str, req: _InviteAnswerReq, request: Request,
     return {"state": "cancelled"}
 
 
-# An invite row as its invitee sees it, with its sender's name.
+# An invite row as its invitee sees it, with its sender's name. Expiry is
+# compared with the clock when the statement runs: t.at, one clock_timestamp()
+# reading shared by `past`, `seconds_left` and a caller's own predicate on
+# t.at. Not NOW(), which is when the transaction began.
 _INVITE_VIEW_SELECT = (
-    "SELECT i.id, i.kind, i.mode, i.lobby_id, i.state, i.end_reason, i.created_at,"
-    "       i.expires_at, i.mail_message_id, (i.expires_at <= NOW()) AS past,"
-    "       CAST(GREATEST(0, CEIL(EXTRACT(EPOCH FROM (i.expires_at - NOW())))) AS integer)"
+    "WITH t AS MATERIALIZED (SELECT clock_timestamp() AS at)"
+    " SELECT i.id, i.kind, i.mode, i.lobby_id, i.state, i.end_reason, i.created_at,"
+    "       i.expires_at, i.mail_message_id, (i.expires_at <= t.at) AS past,"
+    "       CAST(GREATEST(0, CEIL(EXTRACT(EPOCH FROM (i.expires_at - t.at)))) AS integer)"
     "         AS seconds_left,"
     "       s.steam_id AS sender_steam_id, s.display_name AS sender_name"
-    "  FROM lobby_invites i JOIN players s ON s.id = i.sender_player_id"
+    "  FROM lobby_invites i JOIN players s ON s.id = i.sender_player_id CROSS JOIN t"
 )
 
 
@@ -81086,7 +81093,7 @@ async def invite_pending(request: Request, cursor: str = Query(""),
     c_at, c_id = _mail_cursor_decode(cursor)
     rows = (await db.execute(text(
         _INVITE_VIEW_SELECT +
-        " WHERE i.invitee_player_id = :me AND i.state = 'pending' AND i.expires_at > NOW()"
+        " WHERE i.invitee_player_id = :me AND i.state = 'pending' AND i.expires_at > t.at"
         "   AND EXISTS (SELECT 1 FROM mail_recipients r"
         "                WHERE r.message_id = i.mail_message_id AND r.recipient_id = :me"
         "                  AND r.delivery = 'delivered' AND r.deleted_at IS NULL)"
@@ -81103,15 +81110,19 @@ async def invite_pending(request: Request, cursor: str = Query(""),
 # INVITE_ENDED_SHOWN_SECONDS (so a decline is seen), from the invite rows
 # alone, never from mail delivery. A row's end is its ended_at, or its
 # expires_at when that came first (a pending row past it is expired).
+# Expiry and the display horizon are compared with the clock when the
+# statement runs (t.at, one reading), not with NOW(), which is when the
+# transaction began: the lobby state's own locks come between the two.
 _INVITE_LOBBY_LIST_SQL = (
-    "SELECT i.id, i.state, i.end_reason, i.sender_player_id, (i.expires_at <= NOW()) AS past,"
-    "       CAST(GREATEST(0, CEIL(EXTRACT(EPOCH FROM (i.expires_at - NOW())))) AS integer)"
+    "WITH t AS MATERIALIZED (SELECT clock_timestamp() AS at)"
+    " SELECT i.id, i.state, i.end_reason, i.sender_player_id, (i.expires_at <= t.at) AS past,"
+    "       CAST(GREATEST(0, CEIL(EXTRACT(EPOCH FROM (i.expires_at - t.at)))) AS integer)"
     "         AS seconds_left,"
     "       p.steam_id AS invitee_steam_id, p.display_name AS invitee_name"
-    "  FROM lobby_invites i JOIN players p ON p.id = i.invitee_player_id"
+    "  FROM lobby_invites i JOIN players p ON p.id = i.invitee_player_id CROSS JOIN t"
     " WHERE i.mode = :mode AND i.lobby_id = :lid"
     "   AND LEAST(COALESCE(i.ended_at, i.expires_at), i.expires_at)"
-    "       > NOW() - make_interval(secs => CAST(:shown AS double precision))"
+    "       > t.at - make_interval(secs => CAST(:shown AS double precision))"
     " ORDER BY i.created_at, i.id"
     " LIMIT CAST(:cap AS integer)"
 )
@@ -81145,21 +81156,25 @@ async def _invite_lobby_list(db: AsyncSession, mode: str, lobby_id, me_id, host_
 # expires_at, expired; else void, lobby_started or lobby_closed by its
 # lobby's status, or sender_left. FOR NO KEY UPDATE SKIP LOCKED, so it never
 # waits on an accept in flight and leaves a row an accept holds alone.
+# Expiry is compared with the clock when the statement runs (t.at, one
+# reading, which also stamps ended_at), not with NOW(), which is when the
+# transaction began: a wait for a table lock can come between the two.
 _INVITE_SWEEP_SQL = (
-    "WITH c AS ("
-    "  SELECT i.id,"
-    "         CASE WHEN i.expires_at <= NOW() THEN 'expired' ELSE 'void' END AS new_state,"
-    "         CASE WHEN i.expires_at <= NOW() THEN NULL"
+    "WITH t AS MATERIALIZED (SELECT clock_timestamp() AS at),"
+    " c AS ("
+    "  SELECT i.id, t.at,"
+    "         CASE WHEN i.expires_at <= t.at THEN 'expired' ELSE 'void' END AS new_state,"
+    "         CASE WHEN i.expires_at <= t.at THEN NULL"
     "              WHEN COALESCE(tl.status, ol.status, fl.status, '') IN ('active', 'completed')"
     "                THEN 'lobby_started'"
     "              WHEN COALESCE(tl.status, ol.status, fl.status, '') <> 'open' THEN 'lobby_closed'"
     "              ELSE 'sender_left' END AS new_reason"
-    "    FROM lobby_invites i"
+    "    FROM t CROSS JOIN lobby_invites i"
     "    LEFT JOIN team_lobbies tl ON i.mode = 'team' AND tl.id = i.lobby_id"
     "    LEFT JOIN ovt_lobbies ol ON i.mode = 'ovt' AND ol.id = i.lobby_id"
     "    LEFT JOIN ffa_lobbies fl ON i.mode = 'ffa' AND fl.id = i.lobby_id"
     "   WHERE i.state = 'pending'"
-    "     AND NOT (i.expires_at > NOW()"
+    "     AND NOT (i.expires_at > t.at"
     "              AND COALESCE(tl.status, ol.status, fl.status, '') = 'open'"
     "              AND CASE i.mode"
     "                    WHEN 'team' THEN EXISTS (SELECT 1 FROM team_queue q"
@@ -81179,7 +81194,7 @@ _INVITE_SWEEP_SQL = (
     "   LIMIT CAST(:lim AS integer)"
     "   FOR NO KEY UPDATE OF i SKIP LOCKED)"
     " UPDATE lobby_invites i"
-    "    SET state = c.new_state, end_reason = c.new_reason, ended_at = NOW()"
+    "    SET state = c.new_state, end_reason = c.new_reason, ended_at = c.at"
     "   FROM c WHERE i.id = c.id"
     " RETURNING i.mail_message_id"
 )
@@ -81187,10 +81202,13 @@ _INVITE_SWEEP_SQL = (
 # Retention: a row, whatever its state, goes INVITE_KEEP_DAYS after its
 # expires_at, which is fixed at send, so no row's life depends on delivery
 # or on how the invite ended; its receipts go with it (ON DELETE CASCADE).
+# The cutoff is read from the clock when the statement runs, once (an
+# uncorrelated subquery), not from NOW(), which is when the transaction began.
 _INVITE_RETENTION_SQL = (
     "DELETE FROM lobby_invites"
     " WHERE id IN (SELECT id FROM lobby_invites"
-    "               WHERE expires_at < NOW() - make_interval(days => CAST(:days AS integer))"
+    "               WHERE expires_at < (SELECT clock_timestamp())"
+    "                                  - make_interval(days => CAST(:days AS integer))"
     "               ORDER BY expires_at LIMIT 2000)"
     " RETURNING 1"
 )

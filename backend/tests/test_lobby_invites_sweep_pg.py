@@ -250,7 +250,7 @@ def test_a_refused_accept_ends_its_invite_after_the_rollback_and_answers_the_ref
 # in the statement: the sender's conditions occur once per mode.
 
 _SWEEP_KEEPS = {
-    "unexpired": ("i.expires_at > NOW()", "TRUE", 1),
+    "unexpired": ("i.expires_at > t.at", "TRUE", 1),
     "lobby_open": (_LOBBY_OPEN, "TRUE", 1),
     "sender_has_a_seat": (_SENDER_SEAT, "THEN TRUE OR EXISTS (SELECT 1 FROM", 3),
     "seat_is_the_senders": ("q.player_id = i.sender_player_id", "TRUE", 3),
@@ -431,7 +431,8 @@ def test_one_pending_invite_per_lobby_and_invitee_the_index_and_the_sends_answer
                 ans = await env.send(sender, x, mode, lid)
                 assert ans == want, (mode, sender, ans)
             assert await _pending_to(env, mode, lid, x) == 1
-            with env.rewriting(" AND expires_at > NOW()", " AND FALSE",
+            with env.rewriting(re.compile(r" AND expires_at > CAST\((?:\$\d+|%s|%\(\w+\)s|:\w+) AS timestamptz\)"),
+                               " AND FALSE",
                                where="SELECT id, invitee_player_id FROM lobby_invites") as hits:
                 with pytest.raises(Exception) as ei:
                     await env.send(m, x, mode, lid)

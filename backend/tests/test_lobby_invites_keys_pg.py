@@ -13,6 +13,7 @@ import asyncio
 import contextlib
 import json
 import os
+import re
 import sys
 import types
 import typing
@@ -852,7 +853,8 @@ def test_every_send_refusal_answers_its_own_detail_and_writes_nothing(monkeypatc
                                                "SELECT id, CAST('open' AS text) AS status, kicked_steam_ids FROM",
                                                None)))
 
-        pending_read = (" AND expires_at > NOW()", " AND expires_at > NOW() AND FALSE",
+        pending_read = (re.compile(r" AND expires_at > (CAST\((?:\$\d+|%s|%\(\w+\)s|:\w+) AS timestamptz\))"),
+                        r" AND expires_at > \1 AND FALSE",
                         "SELECT id, invitee_player_id FROM lobby_invites")
 
         async def capped():
