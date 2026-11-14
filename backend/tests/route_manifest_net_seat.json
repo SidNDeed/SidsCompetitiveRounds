@@ -952,7 +952,7 @@
           ],
           "main",
           "delete_player_data",
-          "0f0a20a38207ac254751562e365932ae81cb2049"
+          "ba641a421854849b105c6173cbe3a62f0a6586ea"
         ],
         [
           "/api/v1/players/{steam_id}/ffa-history",
@@ -970,7 +970,7 @@
           ],
           "main",
           "get_gold_sources",
-          "3b95aa7d487e22d6804c27a102dbb8a839c5744a"
+          "aa50694eaae8a4bc4ab470b227a88bbb025898f1"
         ],
         [
           "/api/v1/players/{steam_id}/hide-gold",
@@ -1471,7 +1471,7 @@
           ],
           "main",
           "artist_items",
-          "ad5d496d666ffb6603829af0f4d5db74008ec628"
+          "9d05f10acb92719972b881fdb7414244cb476671"
         ],
         [
           "/api/v1/artist/{steam_id}/sales",
@@ -1867,7 +1867,7 @@
           ],
           "main",
           "health_check",
-          "24555bdccffe305e4ceb789739bc96ce3ecdbbf8"
+          "62b75d2bff9eb6d14158bc490b9b9825f95c4e7a"
         ],
         [
           "/api/v1/i18n/approved",
@@ -2623,7 +2623,7 @@
           ],
           "main",
           "shop_sales_board",
-          "7ea1074f1773380d361f2a770f73b2f0937d8ef3"
+          "de2cbbde4871b9b11daa2a73309a4298e828a4cd"
         ],
         [
           "/api/v1/spectate/close",
