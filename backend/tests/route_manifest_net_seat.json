@@ -403,7 +403,7 @@
           ],
           "main",
           "submit_bug_report",
-          "c4b58c601625cb30e1ba71f162e608d461a21761"
+          "badefd809f7cf7050f33e9ec0a2adb1ba5750794"
         ],
         [
           "/api/v1/bug-reports/events/recent",
@@ -619,7 +619,7 @@
           ],
           "main",
           "submit_match",
-          "6417898a9f9f33558bfb568052506eb78e3648fa"
+          "03495e7c0428f75195aec22cc72b7266027fc1aa"
         ],
         [
           "/api/v1/matches/casual-dc",
@@ -655,7 +655,7 @@
           ],
           "main",
           "submit_ovt_match",
-          "5d5db1de47ba21a579a2b1ce6f907e8770f6f660"
+          "0c52fab5b837e4b220b413ca2b5580bac379b34d"
         ],
         [
           "/api/v1/ovt/series/active",
@@ -1132,7 +1132,7 @@
           ],
           "main",
           "series_preflight",
-          "4cbc31a491967a9354c59b0593e9db640f356037"
+          "cf9f10e9781f14ab9462236dcdb1f6c5ded1eaf6"
         ],
         [
           "/api/v1/series/recent",
@@ -1186,7 +1186,7 @@
           ],
           "main",
           "submit_team_match",
-          "b1f0f2a7cf07cfc987902fce198815455722271f"
+          "35f6923eaa021bc49de1f07efa1b69e46fac5ec0"
         ],
         [
           "/api/v1/team/players/{steam_id}/team-matches",
@@ -1300,7 +1300,7 @@
           ],
           "main",
           "unlock_achievement",
-          "c5abe9b826fe83e1102b44c74e7dd457b4a70319"
+          "db2b2c5cc2e1d75fa52355d15a93b673fa27c2d9"
         ],
         [
           "/api/v1/achievements/{key}/earners",
@@ -1759,7 +1759,7 @@
           ],
           "main",
           "ffa_lobby_start",
-          "094569c772fe3f71708cc3e6233ff0868c99e21b"
+          "e4f7109e04cbde251bc20980db120c1068b58b52"
         ],
         [
           "/api/v1/ffa/lobby/{lobby_id}/assembly",
@@ -1768,7 +1768,7 @@
           ],
           "main",
           "ffa_lobby_assembly",
-          "10dad4c3c6e53d0bdea79051933f1a56a38be383"
+          "37e69c443e828c247e0e1da03f787e6143576712"
         ],
         [
           "/api/v1/ffa/lobby/{lobby_id}/connect",
@@ -1777,7 +1777,7 @@
           ],
           "main",
           "ffa_lobby_connect",
-          "b37f64bd0647f0cd3ff779e6c69b530ae39ec28b"
+          "e2e3d1766a348fc0a74e5bb85e321ff003c2c852"
         ],
         [
           "/api/v1/ffa/lobby/{lobby_id}/release",
@@ -1813,7 +1813,7 @@
           ],
           "main",
           "ffa_queue_join",
-          "7e64f0e5cf256ccf7f23e502da4a7afee2e307b3"
+          "7cc7022a8466115a990311a793d2c7d7288d4be7"
         ],
         [
           "/api/v1/ffa/queue/leave",
@@ -1822,7 +1822,7 @@
           ],
           "main",
           "ffa_queue_leave",
-          "2704d244d1f54cd0260b2891a0774399dcf9d481"
+          "a86ef5f79b6751059c8f60d22bdac71038af56d4"
         ],
         [
           "/api/v1/ffa/queue/list",
@@ -1840,7 +1840,7 @@
           ],
           "main",
           "ffa_queue_poll",
-          "81448844c3706628774d0219d39490ee7208e8c1"
+          "94294edfb99e601f23b041bb2766ae59171e53c8"
         ],
         [
           "/api/v1/ffa/queue/recent-joins",
@@ -2254,7 +2254,7 @@
           ],
           "main",
           "get_mod_version",
-          "481ff8abb223e77ae963202a1ff943889871cf1b"
+          "ffa089216fead50765bcfb5e36d3f3bb92639f94"
         ],
         [
           "/api/v1/mod/check/{steam_id}",
@@ -2272,7 +2272,7 @@
           ],
           "main",
           "toggle_ranked",
-          "5598f9f7783c4173ceb939954fb9a6e3cc8e0163"
+          "ce1818feed9a2d2be9ba08094e1646fe04e087a5"
         ],
         [
           "/api/v1/music/rate",
@@ -2461,7 +2461,7 @@
           ],
           "main",
           "presence_ping",
-          "aecf785b8795e90f56c928fc50de15fb859834b0"
+          "465b27347f88f65789c1b74c573652700f398881"
         ],
         [
           "/api/v1/queue/count",
@@ -2488,7 +2488,7 @@
           ],
           "main",
           "queue_join",
-          "339a171c5626d11e315d8d01e5462b5cd972a3ba"
+          "bc328145ccd13a864572d3664b703fa3fdb25a92"
         ],
         [
           "/api/v1/queue/leave",
@@ -2596,7 +2596,7 @@
           ],
           "main",
           "list_shop_items",
-          "d622cad7f41d49ec41ef9452ce69134ea1091c63"
+          "616852d22c37adc5ff5cd1b58ab8a6c8357772f7"
         ],
         [
           "/api/v1/shop/newest",
@@ -2803,7 +2803,7 @@
           ],
           "main",
           "team_queue_join",
-          "82be72bdc4b29f95270210ed5afb7653a07184cd"
+          "5a71281b2e63758121fa12074c214078fbe4d0c0"
         ],
         [
           "/api/v1/team/queue/leave",
@@ -3869,7 +3869,7 @@
           ],
           "match_hold",
           "match_hold_entered",
-          "570502ae1e024693de67207eab8153da26279f72"
+          "15a25590a2865c24fb053d53a7f52919a789ac36"
         ],
         [
           "/api/v1/match/hold/{hold_id}/state",
@@ -4017,7 +4017,7 @@
       [
         "main",
         "lifespan",
-        "924b708d4ed7fe9b8c393bddfee372bb655b4a76"
+        "2931573f8c6048d4168a29b0621e0c8af557d2cd"
       ]
     ]
   },
