@@ -80556,30 +80556,18 @@ async def _invite_invitee_or_raise(db: AsyncSession, me: dict, steam_id) -> dict
 async def _invite_lobby_gates(db: AsyncSession, mode: str, lobby_id, me: dict,
                               invitee: dict) -> list:
     """An invite to an existing lobby, under the lobby row's lock: the lobby
-    is open; a pending invite to this invitee past its expires_at is ended,
-    so the unique pending index admits the new one; the caller is a live
-    member; there is a free seat; the lobby is under its pending cap (twice
-    its capacity, counting unexpired rows); the invitee is neither kicked
-    from it nor a member nor already invited. Returns the mail rows of the
-    invite it ended."""
+    is open; the caller is a live member; there is a free seat; a pending
+    invite to this invitee past its expires_at is ended, so the unique
+    pending index admits the new one; the lobby is under its pending cap
+    (twice its capacity, counting unexpired rows); the invitee is neither
+    kicked from it nor a member nor already invited. Returns the mail rows
+    of the invite it ended."""
     lrow = (await db.execute(text(
         f"SELECT id, status, kicked_steam_ids FROM {_INVITE_LOBBY_TABLES[mode]}"
         f" WHERE id = :lid FOR UPDATE"
     ), {"lid": lobby_id})).mappings().first()
     if lrow is None or lrow["status"] != "open":
         raise HTTPException(status_code=409, detail="lobby_closed")
-    # One clock reading, after the lobby lock, decides expiry for both
-    # statements below: a row past it is ended here and a row before it is
-    # counted there, so no pending row is neither (the unique pending index
-    # would then refuse the new invite). NOW() is the transaction's start,
-    # before the lock waits.
-    at = (await db.execute(text("SELECT clock_timestamp()"))).scalar()
-    ended = list((await db.execute(text(
-        "UPDATE lobby_invites SET state = 'expired', ended_at = CAST(:at AS timestamptz)"
-        " WHERE mode = :mode AND lobby_id = :lid AND invitee_player_id = :inv"
-        "   AND state = 'pending' AND expires_at <= CAST(:at AS timestamptz)"
-        " RETURNING mail_message_id"
-    ), {"mode": mode, "lid": lobby_id, "inv": invitee["id"], "at": at})).scalars().all())
     live = await _invite_live_members(db, mode, lobby_id)
     live_ids = {m["player_id"] for m in live}
     if me["id"] not in live_ids:
@@ -80587,6 +80575,23 @@ async def _invite_lobby_gates(db: AsyncSession, mode: str, lobby_id, me: dict,
     cap = _invite_capacity(mode)
     if len(live) >= cap:
         raise HTTPException(status_code=409, detail="lobby_full")
+    # One clock reading decides expiry for both statements below: a row past
+    # it is ended here and a row before it is counted there, so no pending
+    # row is neither (the unique pending index would then refuse the new
+    # invite). The reading comes after the lobby lock, the live-member read
+    # and the ending's table lock, which the LOCK TABLE takes here (the
+    # UPDATE would otherwise take it as it starts, after the reading); no
+    # other statement runs between the reading and the two that use it. The
+    # ending's row locks are still taken inside the UPDATE, after the
+    # reading. NOW() is the transaction's start, before all of these waits.
+    await db.execute(text("LOCK TABLE lobby_invites IN ROW EXCLUSIVE MODE"))
+    at = (await db.execute(text("SELECT clock_timestamp()"))).scalar()
+    ended = list((await db.execute(text(
+        "UPDATE lobby_invites SET state = 'expired', ended_at = CAST(:at AS timestamptz)"
+        " WHERE mode = :mode AND lobby_id = :lid AND invitee_player_id = :inv"
+        "   AND state = 'pending' AND expires_at <= CAST(:at AS timestamptz)"
+        " RETURNING mail_message_id"
+    ), {"mode": mode, "lid": lobby_id, "inv": invitee["id"], "at": at})).scalars().all())
     pending = (await db.execute(text(
         "SELECT id, invitee_player_id FROM lobby_invites"
         " WHERE mode = :mode AND lobby_id = :lid AND state = 'pending'"

@@ -802,6 +802,81 @@ def test_a_send_held_behind_the_lobby_lock_ends_the_invite_that_expired_meanwhil
     case(monkeypatch, body)
 
 
+# SHARE on lobby_invites conflicts with the ROW EXCLUSIVE a send's ending
+# takes, and with no lock a send takes on the table before it.
+_SHARE_HOLD = "LOCK TABLE lobby_invites IN SHARE MODE"
+# The live-member read's table. A plain read waits only behind ACCESS
+# EXCLUSIVE, and no statement of a send before that read touches the table.
+_QUEUE_HOLD = "LOCK TABLE %s IN ACCESS EXCLUSIVE MODE" % QUEUE_TABLE["team"]
+
+
+def test_a_send_held_behind_a_share_lock_on_the_invites_ends_the_invite_that_expired_meanwhile(monkeypatch):
+    """A second invite to the same player, sent while a second session holds
+    SHARE on lobby_invites and the first invite expires during that wait,
+    ends the first one 'expired' and is answered 200: the send takes its
+    ending's table lock (ROW EXCLUSIVE) before its clock reading. Mutant:
+    without that LOCK TABLE the UPDATE takes the lock as it starts, after
+    the reading, and the send counts the expired invite as pending,
+    already_invited."""
+    async def body(env):
+        async def scene():
+            lid, (h,) = await env.lobby("team", 1)
+            p = await env.player()
+            first = await env.invite(h, p, "team", lid)
+            ans = await _past_expiry_behind_a_lock(env, first, _SHARE_HOLD, None,
+                                                   lambda: env.send(h, p, "team", lid))
+            return ans, (await env.row(first))["state"]
+
+        ans, state = await scene()
+        assert ans.status == 200 and state == "expired", (ans, state)
+        with env.rewriting("LOCK TABLE lobby_invites IN ROW EXCLUSIVE MODE", "SELECT 1") as hits:
+            ans, state = await scene()
+        assert hits
+        assert (ans.status, state) == (409, "pending") and ans["error"] == "already_invited", (
+            "the mutant without the table lock ended the expired invite", ans, state)
+    case(monkeypatch, body)
+
+
+def _gates_reading_before_the_live_read():
+    """A mutant of the send's lobby gates, compiled in main's namespace: its
+    clock reading moved ahead of the live-member read, the order the a6s6
+    round reviewed."""
+    src = inspect.getsource(main._invite_lobby_gates)
+    reading = '    at = (await db.execute(text("SELECT clock_timestamp()"))).scalar()\n'
+    live = "    live = await _invite_live_members(db, mode, lobby_id)\n"
+    assert src.count(reading) == 1 and src.count(live) == 1, "the gates' text changed shape"
+    out = src.replace(reading, "").replace(live, reading + live)
+    assert out != src
+    ns = {}
+    exec(compile(out, "<mutant _invite_lobby_gates>", "exec"), vars(main), ns)
+    return ns["_invite_lobby_gates"]
+
+
+def test_a_send_held_behind_a_lock_on_the_queue_table_ends_the_invite_that_expired_meanwhile(monkeypatch):
+    """A second invite to the same player, sent while a second session holds
+    the mode's queue table (the live-member read waits on it) and the first
+    invite expires during that wait, ends the first one 'expired' and is
+    answered 200: the send reads its live members before its clock reading.
+    Mutant: the reading ahead of the live-member read counts the expired
+    invite as pending, already_invited."""
+    async def body(env):
+        async def scene():
+            lid, (h,) = await env.lobby("team", 1)
+            p = await env.player()
+            first = await env.invite(h, p, "team", lid)
+            ans = await _past_expiry_behind_a_lock(env, first, _QUEUE_HOLD, None,
+                                                   lambda: env.send(h, p, "team", lid))
+            return ans, (await env.row(first))["state"]
+
+        ans, state = await scene()
+        assert ans.status == 200 and state == "expired", (ans, state)
+        with monkeypatch.context() as mp:
+            mp.setattr(main, "_invite_lobby_gates", _gates_reading_before_the_live_read())
+            ans, state = await scene()
+        assert (ans.status, state) == (409, "pending") and ans["error"] == "already_invited", (
+            "the mutant reading ahead of the live-member read ended the expired invite", ans, state)
+    case(monkeypatch, body)
+
 def test_an_ending_after_a_refused_accept_decides_expiry_after_its_lobby_lock(monkeypatch):
     """The ending written after an accept the join refused (here: the lobby
     no longer open) re-reads the invite after the lobby lock, against the
