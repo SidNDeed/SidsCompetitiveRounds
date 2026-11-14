@@ -686,6 +686,101 @@ def test_405_refuses_a_generated_column_in_place_of_a_declared_one():
         " check is not what refuses it")
 
 
+_405_STATE_COLLATED = ("      state              TEXT        COLLATE " + '"C"'
+                       + " NOT NULL DEFAULT 'pending',\n")
+_405_POST_CHECK = "DO $m405check$"
+_405_CHECK_END = "  END IF;\n"
+_405_INHERITANCE_CHECK = "  -- Neither table takes part in inheritance or partitioning"
+_405_INHERITANCE_REFUSAL = "405: lobby_invites or invite_receipts takes part in inheritance or partitioning"
+# One state per check that joined the generated-column one, each a state 405
+# does not declare that every other part of its post-check accepts: (the
+# plant, the first line of the check that refuses it, a word only that check
+# holds, the refusal, a read of the state after the run, that read for the
+# file as written, that read for the plant applied without its check).
+_405_PLANTS = {
+    "collation": (
+        lambda t: t.replace(_405_STATE_ORDINARY, _405_STATE_COLLATED),
+        "  -- Every column has its type's default collation", "attcollation",
+        "405: a column of lobby_invites or invite_receipts has a collation this file does not declare",
+        "SELECT c.collname::text FROM pg_attribute a JOIN pg_collation c ON c.oid = a.attcollation"
+        " WHERE a.attrelid = to_regclass('lobby_invites') AND a.attname = 'state'",
+        "default", "C"),
+    "child": (
+        lambda t: t.replace(_405_POST_CHECK,
+                            "CREATE TABLE planted_child () INHERITS (lobby_invites);\n\n" + _405_POST_CHECK),
+        _405_INHERITANCE_CHECK, "pg_inherits", _405_INHERITANCE_REFUSAL,
+        "SELECT count(*)::text FROM pg_inherits WHERE inhparent = to_regclass('lobby_invites')",
+        "0", "1"),
+    "partition": (
+        lambda t: t.replace(_405_POST_CHECK,
+                            "CREATE TABLE planted_parent (LIKE invite_receipts) PARTITION BY LIST (route);\n"
+                            "ALTER TABLE planted_parent ATTACH PARTITION invite_receipts FOR VALUES IN ('send');\n\n"
+                            + _405_POST_CHECK),
+        _405_INHERITANCE_CHECK, "pg_inherits", _405_INHERITANCE_REFUSAL,
+        "SELECT c.relispartition::text FROM pg_class c WHERE c.oid = to_regclass('invite_receipts')",
+        "false", "true"),
+}
+
+
+async def _apply_405_once(sql, probe):
+    """Apply one text of 405 in a fresh schema holding its prerequisite and
+    answer (its error or None, whether lobby_invites exists afterwards, the
+    probe's value). The schema is dropped whatever happened."""
+    schema = "m405p_%s" % uuid.uuid4().hex[:10]
+    conn = await asyncpg.connect(DSN)
+    try:
+        await conn.execute('CREATE SCHEMA "%s"' % schema)
+        await conn.execute('SET search_path TO "%s"' % schema)
+        await conn.execute(PREREQ["405"])
+        try:
+            await conn.execute(sql)
+            verdict = None
+        except Exception as ex:
+            verdict = "%s: %s" % (type(ex).__name__, ex)
+            await conn.execute("ROLLBACK")        # the file's own BEGIN, aborted
+        exists = await conn.fetchval("SELECT to_regclass('lobby_invites') IS NOT NULL")
+        return verdict, exists, await conn.fetchval(probe)
+    finally:
+        try:
+            await conn.execute("ROLLBACK")
+        except Exception:
+            pass
+        try:
+            await conn.execute('DROP SCHEMA IF EXISTS "%s" CASCADE' % schema)
+        finally:
+            await conn.close()
+
+
+@pytest.mark.parametrize("case", sorted(_405_PLANTS))
+def test_405_refuses_a_collation_or_an_inheritance_it_does_not_declare(case):
+    """405's post-check refuses, on either table, a column collation the file
+    does not declare and any part in inheritance or partitioning (a child of
+    lobby_invites; invite_receipts attached as a partition), none of which the
+    column, constraint and index comparisons read. Per case: the file as
+    written applies and leaves the declared state; the planted copy is refused
+    with that check's own text and leaves nothing behind; and -- the negative
+    control -- the planted copy with that one check cut out applies and leaves
+    the planted state, so that check is what refuses it."""
+    plant, marker, word, refusal, probe, as_written, as_planted = _405_PLANTS[case]
+    real = migration_text("405")
+    assert real.count(_405_STATE_ORDINARY) == 1 and real.count(_405_POST_CHECK) == 1
+    assert real.count(marker) == 1
+    planted = plant(real)
+    assert planted != real
+    i = planted.index(marker)
+    j = planted.index(_405_CHECK_END, i) + len(_405_CHECK_END)
+    unchecked = planted[:i] + planted[j:]
+    assert word in planted[i:j] and word not in unchecked
+
+    assert _run(_apply_405_once(real, probe)) == (None, True, as_written), (
+        "405 as written did not apply, or did not leave the declared state")
+    verdict, exists, _ = _run(_apply_405_once(planted, probe))
+    assert verdict is not None and refusal in verdict, verdict
+    assert not exists, "the refused run left a lobby_invites behind"
+    assert _run(_apply_405_once(unchecked, probe)) == (None, True, as_planted), (
+        "without its check the planted state was not accepted, so that check is not what refuses it")
+
+
 def test_377_keeps_its_statistics_object_across_a_second_run():
     """The object census above can only see a replaced statistics object if
     one exists: 377 must leave `stx_matches_pair` after its first run and the

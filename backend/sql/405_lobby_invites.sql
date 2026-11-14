@@ -89,8 +89,10 @@
 -- POST-CHECK. After the guards, one read compares every object with the
 -- definition this file states, because a guard alone accepts any object
 -- that has the right name: each table is an ordinary permanent table with
--- no row security, no rules and no trigger; its columns in order (type,
--- NOT NULL, default); its constraints by name and definition, and no other;
+-- no row security, no rules and no trigger, in no inheritance and no
+-- partitioning; its columns in order (type, NOT NULL, default), each an
+-- ordinary column (neither generated nor identity) with its type's default
+-- collation; its constraints by name and definition, and no other;
 -- its indexes by name, uniqueness and definition, all valid, and no other.
 -- On mail_messages: exactly one check names kind, and it is
 -- ck_mail_messages_kind with this file's definition. Anything that differs
@@ -283,6 +285,23 @@ BEGIN
               WHERE a.attrelid IN (inv, rcp) AND a.attnum > 0 AND NOT a.attisdropped
                 AND (a.attgenerated <> '' OR a.attidentity <> '')) THEN
     RAISE EXCEPTION '405: a generated or identity column exists on lobby_invites or invite_receipts';
+  END IF;
+  -- Every column has its type's default collation, as every column this
+  -- file declares does (none says COLLATE). The column check below reads no
+  -- collation, and a collation decides what equality and order mean on text.
+  IF EXISTS (SELECT 1 FROM pg_attribute a
+               JOIN pg_type t ON t.oid = a.atttypid
+              WHERE a.attrelid IN (inv, rcp) AND a.attnum > 0 AND NOT a.attisdropped
+                AND a.attcollation <> t.typcollation) THEN
+    RAISE EXCEPTION '405: a column of lobby_invites or invite_receipts has a collation this file does not declare';
+  END IF;
+  -- Neither table takes part in inheritance or partitioning, either way
+  -- round. As a partition, a table's bound refuses rows this file admits;
+  -- as a parent, its scans reach its children's rows, which its unique
+  -- indexes do not cover.
+  IF EXISTS (SELECT 1 FROM pg_inherits h
+              WHERE h.inhrelid IN (inv, rcp) OR h.inhparent IN (inv, rcp)) THEN
+    RAISE EXCEPTION '405: lobby_invites or invite_receipts takes part in inheritance or partitioning';
   END IF;
 
   -- Columns, in order: name, type, NOT NULL, default.
