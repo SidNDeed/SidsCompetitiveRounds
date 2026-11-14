@@ -1035,7 +1035,7 @@ def _own_open_post(live, key, revs=None):
         sm = live.sm
         ids = await _players(sm, OO_A, OO_B)
         ta, tb = await _session(sm, OO_A), await _session(sm, OO_B)
-        await _match(sm, ids, OO_A, OO_B, key + "_r8", minutes_ago=10)
+        mid = await _match(sm, ids, OO_A, OO_B, key + "_r8", minutes_ago=10)
         mine = _body(OO_A, OO_B, key, blk_sent=blk)
         posted = [await _post(sm, mine, ta),
                   await _post(sm, _body(OO_B, OO_A, key, rounds=[3, 5]), tb)]
@@ -1043,17 +1043,45 @@ def _own_open_post(live, key, revs=None):
                                "JOIN players p ON p.id = e.seat_player_id "
                                "WHERE e.stable_game_key = :k ORDER BY e.id", k=key)
         st = await se.games_pass(sm, revs.shadow) if revs is not None else None
-        return posted, rows, st, hashlib.sha256(mine["record"].encode("ascii")).hexdigest(), blk
+        game = await _rows(sm, GAME_SQL, k=key)
+        found = await _rows(sm, _findings_sql("dedup_key LIKE :k"), k=key + "|%")
+        return {"posted": posted, "rows": rows, "stats": st, "mid": mid, "game": game,
+                "findings": found, "blk": blk,
+                "sha": hashlib.sha256(mine["record"].encode("ascii")).hexdigest()}
     return live.run(go())
 
 
 def test_own_open_raw_ms_is_stored_as_sent_and_the_worker_evaluates_it(live, signing, revs):
-    posted, rows, st, sha, blk = _own_open_post(live, "ranked_sevoo_000001", revs)
-    assert [p[0] for p in posted] == [200, 200], posted
-    mine = [r for r in rows if r["steam_id"] == OO_A]
-    assert len(mine) == 1 and mine[0]["payload_sha256"] == sha        # byte for byte as received
-    assert se._jsonv(mine[0]["payload"])["blk_sent"] == blk           # not rewritten, rounded or mapped
-    assert not _errors(st), st                                         # the worker read it without error
+    out = _own_open_post(live, "ranked_sevoo_000001", revs)
+    assert [p[0] for p in out["posted"]] == [200, 200], out["posted"]
+    mine = [r for r in out["rows"] if r["steam_id"] == OO_A]
+    assert len(mine) == 1 and mine[0]["payload_sha256"] == out["sha"]   # byte for byte as received
+    assert se._jsonv(mine[0]["payload"])["blk_sent"] == out["blk"]      # not rewritten, rounded or mapped
+    # the worker did the work, read as positive facts: the pass evaluated at
+    # least this game, the game attached to its match, it was finalized under
+    # the loaded revision, and every finding of it carries that revision
+    st, game, found = out["stats"], out["game"], out["findings"]
+    assert "off" not in st and st["evaluated"] >= 1 and not _errors(st), st
+    assert len(game) == 1 and game[0]["match_id"] == out["mid"], game
+    assert game[0]["finalized_at"] is not None, game
+    assert game[0]["evaluated_rev"] == revs.shadow.ruleset.rev, game
+    assert found and all(r["rules_rev"] == revs.shadow.ruleset.rev for r in found), found
+
+
+def test_control_the_worker_switched_off_evaluates_nothing(live, signing, revs):
+    """Mutant: the worker's switch off. The same post then shows the pass
+    answering {"off": 1}, no game row (evaluate_one creates it) and no
+    finding: the facts the test above asserts are the ones that move."""
+    async def off(value):
+        await _set(live.sm, "seat_evidence_worker", value)
+    live.run(off("0"))
+    try:
+        out = _own_open_post(live, "ranked_sevoo_000003", revs)
+    finally:
+        live.run(off("1"))
+    assert [p[0] for p in out["posted"]] == [200, 200], out["posted"]
+    assert out["stats"] == {"off": 1}, out["stats"]
+    assert out["game"] == [] and out["findings"] == [], out
 
 
 def test_control_the_two_state_rule_restored_refuses_it_as_own_open(live, signing, monkeypatch):
@@ -1067,9 +1095,9 @@ def test_control_the_two_state_rule_restored_refuses_it_as_own_open(live, signin
                 raise se.EvidenceRefused(422, "blk_sent.own_open")
         real(rec)
     monkeypatch.setattr(se, "check_events", two_state)
-    posted, rows, _, _, _ = _own_open_post(live, "ranked_sevoo_000002")
-    assert posted[0] == (422, {"detail": "blk_sent.own_open"}), posted
-    assert not [r for r in rows if r["steam_id"] == OO_A], rows
+    out = _own_open_post(live, "ranked_sevoo_000002")
+    assert out["posted"][0] == (422, {"detail": "blk_sent.own_open"}), out["posted"]
+    assert not [r for r in out["rows"] if r["steam_id"] == OO_A], out["rows"]
 
 
 # -- last in this module: it drops the lane's tables and puts them back ---------

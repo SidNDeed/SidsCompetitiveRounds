@@ -9,12 +9,17 @@
 --                           with a counter raised by a delta (n = n + 1) and
 --                           the time of the last one
 --
--- Written by main._evidence_census, called by the four evidence intake routes
--- (seat-evidence, card-evidence, combat-evidence, identity-clock-evidence) on
--- every answer that does not store the record: 401 seat_session, 503 switch
+-- Written by main._evc_count, exactly once for every answer of status
+-- 400..599 to a POST on one of the four evidence intake paths (seat-evidence,
+-- card-evidence, combat-evidence, identity-clock-evidence), wherever it was
+-- decided. The route counts its own refusals (401 seat_session, 503 switch
 -- off, 403 signature, 409 not_ready, 409 conflict, 400/413/422/429 refusals,
--- and 500 on an unexpected error. A stored record (200 recorded, or 200
--- already_recorded for the identical repeat) is not counted.
+-- 500 internal on an unexpected error); main.evidence_census_gate counts every
+-- other one (a middleware's 413/426/429/503, a raised HTTPException, an
+-- unhandled error) under a fixed gate_* field. A stored record (200 recorded,
+-- or 200 already_recorded for the identical repeat) is not counted. The write
+-- runs in its own transaction, never the request's, and delays the answer by
+-- at most main.EVC_BUDGET_MS.
 --
 -- WHAT IT HOLDS, AND WHAT IT NEVER HOLDS. Counts only. No player id, steam id,
 -- room or game key, attach key, address, session, signature, or any part of
@@ -27,12 +32,14 @@
 --   kind         the route's fixed kind word; the code's closed set is
 --                seat, card, clock, combat. CHECK: ^[a-z]{1,16}$, so a fifth
 --                kind needs no migration.
---   status       the HTTP status the route answered. CHECK: one of
---                400, 401, 403, 409, 413, 422, 429, 500, 503.
+--   status       the HTTP status answered. CHECK: 400 to 599.
 --   field        the refusal's field name, the server's own string: the
 --                EvidenceRefused field or the route's fixed answer
 --                (seat_session, not_ready, signature, *_evidence_off,
---                internal). A field the server did not author (a refusal that
+--                internal), or for an answer decided outside the route one of
+--                gate_size (413), gate_version (426), gate_rate (429),
+--                gate_other (any other status). A field the server did not
+--                author (a refusal that
 --                names a key the client sent) is not in the code's closed
 --                vocabulary and is stored as the fixed word `unlisted`.
 --                CHECK: ^[a-z][a-z0-9_.]{0,47}$.
@@ -66,7 +73,7 @@ BEGIN;
 CREATE TABLE IF NOT EXISTS evidence_refusal_daily (
     day          DATE        NOT NULL,
     kind         TEXT        NOT NULL CHECK (kind ~ '^[a-z]{1,16}$'),
-    status       SMALLINT    NOT NULL CHECK (status IN (400, 401, 403, 409, 413, 422, 429, 500, 503)),
+    status       SMALLINT    NOT NULL CHECK (status BETWEEN 400 AND 599),
     field        TEXT        NOT NULL CHECK (field ~ '^[a-z][a-z0-9_.]{0,47}$'),
     mod_version  TEXT        NOT NULL CHECK (mod_version = 'other' OR mod_version ~
                      '^(0|[1-9][0-9]?)[.](0|[1-9][0-9]?)[.](0|[1-9][0-9]?)$'),

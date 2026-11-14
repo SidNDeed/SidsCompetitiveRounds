@@ -137,6 +137,12 @@ def test_m8_control_the_legal_forms_pass(field, entry):
 @pytest.mark.parametrize("own_open", [-600000, -201, -1, 1, 203, 600000])
 def test_own_open_is_any_integer_inside_the_ms_bound(own_open):
     se.check_record(fx.base_record(blk_sent=[[1, 0, 0, own_open]]))
+    # positive control on the same entry position: the check does run there
+    # (the same record one step past the bound, on the same side, is refused)
+    past = 600001 if own_open > 0 else -600001
+    with pytest.raises(se.EvidenceRefused) as e:
+        se.check_record(fx.base_record(blk_sent=[[1, 0, 0, past]]))
+    assert (e.value.status, e.value.field) == (422, "blk_sent")
 
 
 @pytest.mark.parametrize("own_open", [600001, -600001, 1.5, 200.0, "0", True, None])
