@@ -627,6 +627,65 @@ def test_405s_four_rerun_cases_fail_a_planted_second_run_defect(monkeypatch):
             test("405")
 
 
+_405_STATE_ORDINARY = "      state              TEXT        NOT NULL DEFAULT 'pending',\n"
+_405_STATE_GENERATED = ("      state              TEXT        NOT NULL"
+                        " GENERATED ALWAYS AS ('pending'::text) STORED,\n")
+_405_ORDINARY_CHECK = "  -- Every column is an ordinary one."
+
+
+def test_405_refuses_a_generated_column_in_place_of_a_declared_one():
+    """405's post-check refuses a lobby_invites whose `state` is a stored
+    generated column with the declared default's expression, which its
+    column comparison alone accepts: a generated column's expression reads
+    back through pg_attrdef exactly as a default does, and the name, type
+    and NOT NULL all match. The file is applied as written (it applies),
+    with that one column line generated (refused, nothing left behind), and
+    -- the negative control -- generated with the ordinary-column check cut
+    out (it applies, and the column it leaves is generated)."""
+    real = migration_text("405")
+    assert real.count(_405_STATE_ORDINARY) == 1 and real.count(_405_ORDINARY_CHECK) == 1
+    planted = real.replace(_405_STATE_ORDINARY, _405_STATE_GENERATED)
+    i = planted.index(_405_ORDINARY_CHECK)
+    j = planted.index("  END IF;\n", i) + len("  END IF;\n")
+    unchecked = planted[:i] + planted[j:]
+    assert "attgenerated" in planted[i:j] and "attgenerated" not in unchecked
+
+    async def go(sql):
+        schema = "m405g_%s" % uuid.uuid4().hex[:10]
+        conn = await asyncpg.connect(DSN)
+        try:
+            await conn.execute('CREATE SCHEMA "%s"' % schema)
+            await conn.execute('SET search_path TO "%s"' % schema)
+            await conn.execute(PREREQ["405"])
+            try:
+                await conn.execute(sql)
+                verdict = None
+            except Exception as ex:
+                verdict = "%s: %s" % (type(ex).__name__, ex)
+                await conn.execute("ROLLBACK")        # the file's own BEGIN, aborted
+            gen = await conn.fetchval(
+                "SELECT a.attgenerated::text FROM pg_attribute a"
+                " WHERE a.attrelid = to_regclass('lobby_invites') AND a.attname = 'state'")
+            return verdict, gen
+        finally:
+            try:
+                await conn.execute("ROLLBACK")
+            except Exception:
+                pass
+            try:
+                await conn.execute('DROP SCHEMA IF EXISTS "%s" CASCADE' % schema)
+            finally:
+                await conn.close()
+
+    assert _run(go(real)) == (None, ""), "405 as written did not apply with an ordinary state"
+    verdict, gen = _run(go(planted))
+    assert verdict is not None and "405: a generated or identity column exists" in verdict, verdict
+    assert gen is None, ("the refused run left a lobby_invites behind", gen)
+    assert _run(go(unchecked)) == (None, "s"), (
+        "without the ordinary-column check the generated column was not accepted, so the"
+        " check is not what refuses it")
+
+
 def test_377_keeps_its_statistics_object_across_a_second_run():
     """The object census above can only see a replaced statistics object if
     one exists: 377 must leave `stx_matches_pair` after its first run and the

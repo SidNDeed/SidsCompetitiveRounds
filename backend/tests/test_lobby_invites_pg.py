@@ -678,7 +678,7 @@ def test_two_transactions_bumping_two_invitees_in_opposite_orders_do_not_deadloc
         mids = [await env.mail_of(await env.invite(h, p, "team", lid)) for p in (a, b)]
         lo, hi = sorted([a.id, b.id], key=str)
         stmt = main._INVITE_REV_BUMP_SQL.replace(":mids", "$1")
-        assert stmt.count("ORDER BY p.id") == 1
+        assert stmt.count("ORDER BY v.recipient_id FOR NO KEY UPDATE") == 1
 
         async def blocked(pid):
             for _ in range(100):
@@ -713,7 +713,7 @@ def test_two_transactions_bumping_two_invitees_in_opposite_orders_do_not_deadloc
                     await t.execute("ROLLBACK")
             return errs
         assert await race(stmt) == []
-        mutant = stmt.replace("ORDER BY p.id", "ORDER BY p.id DESC")
+        mutant = stmt.replace("ORDER BY v.recipient_id", "ORDER BY v.recipient_id DESC")
         assert "DeadlockDetectedError" in await race(mutant)
     case(monkeypatch, body)
 
@@ -743,7 +743,9 @@ def test_a_send_ends_only_its_invitees_stale_invite_and_the_cap_counts_unexpired
         assert stale == 2 * main._invite_capacity("team") == 8, stale
         assert (await env.send(h, await env.player(), "team", lid)).status == 200
         # mutant 1: the cap counts stale rows (eight of them are pending)
-        with env.rewriting(" AND expires_at > NOW()", "",
+        # (the reading stays bound, so the statement keeps its parameter)
+        with env.rewriting(re.compile(r"AND expires_at > CAST\((\$\d+|%s|%\(\w+\)s|:\w+) AS timestamptz\)"),
+                           r"AND CAST(\1 AS timestamptz) IS NOT NULL",
                            where="SELECT id, invitee_player_id FROM lobby_invites") as hits:
             ans = await env.send(h, await env.player(), "team", lid)
         assert hits
@@ -754,7 +756,7 @@ def test_a_send_ends_only_its_invitees_stale_invite_and_the_cap_counts_unexpired
         await env.age(iq, expired_s=5)
         assert (await env.row(iy))["state"] == "pending"
         with env.rewriting(inv.placeholder_rx("invitee_player_id"), r"(invitee_player_id = \1 OR TRUE)",
-                           where="SET state = 'expired', ended_at = NOW()") as hits:
+                           where="SET state = 'expired', ended_at = CAST(") as hits:
             assert (await env.send(h, q, "team", lid)).status == 200
         assert hits
         assert (await env.row(iy))["state"] == "expired", "the expiry mutant left another invitee's row"
@@ -766,9 +768,10 @@ def test_a_send_ends_only_its_invitees_stale_invite_and_the_cap_counts_unexpired
 
 def test_invite_rows_reach_only_clients_at_or_above_the_floor(monkeypatch):
     """A lobby member's state carries the lobby's invites, and an invitee's
-    inbox and unread count carry the invite row, only for a client at or
-    above INVITE_FLOOR_VERSION; an older client sees neither. The mutant
-    calls every client current."""
+    inbox, unread count and pending list carry the invite row, only for a
+    client at or above INVITE_FLOOR_VERSION; an older client sees none of
+    them (its pending list is an empty page). The mutant calls every client
+    current."""
     async def body(env):
         lid, (h,) = await env.lobby("team", 1)
         g = await env.player()
@@ -780,13 +783,17 @@ def test_invite_rows_reach_only_clients_at_or_above_the_floor(monkeypatch):
             ib = await env.call(lambda db: main.mail_inbox(Req(g.sid, version), cursor="",
                                                            limit=main.MAIL_PAGE_MAX, db=db))
             ms = await env.call(lambda db: main.mail_status(Req(g.sid, version), db))
-            assert st.status == ib.status == ms.status == 200, (st, ib, ms)
+            pd = await env.pending(g, version)
+            assert st.status == ib.status == ms.status == pd.status == 200, (st, ib, ms, pd)
             listed = [m["id"] for m in ib["messages"]]
-            return ("invites" in st.body and bool(st["invites"]), str(mid) in listed, ms["unread"])
-        assert await views(inv.FLOOR) == (True, True, 1)
-        assert await views(inv.BELOW) == (False, False, 0)
+            pending = [i["invite_id"] for i in pd["invites"]]
+            assert pd["next_cursor"] is None, pd
+            return ("invites" in st.body and bool(st["invites"]), str(mid) in listed, ms["unread"],
+                    pending == [str(iid)])
+        assert await views(inv.FLOOR) == (True, True, 1, True)
+        assert await views(inv.BELOW) == (False, False, 0, False)
         monkeypatch.setattr(main, "_invite_ok_for", lambda request: True)
-        assert await views(inv.BELOW) == (True, True, 1), "the floor mutant changed nothing"
+        assert await views(inv.BELOW) == (True, True, 1, True), "the floor mutant changed nothing"
     case(monkeypatch, body)
 
 

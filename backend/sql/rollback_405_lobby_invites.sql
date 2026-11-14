@@ -4,7 +4,13 @@
 --
 -- ORDER: THE API FIRST, THIS FILE SECOND. The api build carrying 405 reads
 -- and writes both tables on every invite route and writes mail rows of kind
--- 'invite'; roll it back first, then apply this file.
+-- 'invite'; roll it back first, then apply this file, back to back.
+-- Between the two steps traffic is not quiesced: the previous api lists each
+-- invite's mail row, to its own sender (Sent) and invitee (inbox), as an
+-- ordinary mail with the server's text. The row holds no room, no password
+-- and no player-written text, and no other player can read it; step 2 below
+-- deletes it. Deleting invite mail before the api rollback would not close
+-- that gap, since sends go on until the api is rolled back.
 --
 -- What it does, in one transaction:
 --   1. drops invite_receipts, then lobby_invites (with their indexes);

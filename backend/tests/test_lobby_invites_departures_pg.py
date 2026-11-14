@@ -36,7 +36,7 @@ sys.path.insert(0, HERE)
 
 from fastapi import HTTPException  # noqa: E402
 
-from inv_pg import LOBBY_TABLE, MODES, QUEUE_TABLE, Req, case, waiting_on  # noqa: E402
+from inv_pg import LOBBY_TABLE, MODES, QUEUE_TABLE, Req, case, mail_discord, waiting_on  # noqa: E402
 
 import main  # noqa: E402
 
@@ -511,40 +511,71 @@ def test_a_ban_locks_the_banned_players_lobbies_in_order_and_holds_them_through_
 
 # -- a revision bump while the invitee's account is being deleted ----------------
 
-_BUMP = "INSERT INTO mail_inbox_rev"
+# The bump as first built: an upsert through the invitees' players rows, with
+# no players lock and no deleted_at test.
+_UPSERT_BUMP = (
+    "INSERT INTO mail_inbox_rev (recipient_id, rev)"
+    " SELECT p.id, 1 FROM players p"
+    "  WHERE p.id IN (SELECT r.recipient_id FROM mail_recipients r"
+    "         WHERE r.message_id = ANY(CAST(:mids AS uuid[])) AND r.delivery = 'delivered')"
+    "  ORDER BY p.id"
+    " ON CONFLICT (recipient_id) DO UPDATE"
+    "   SET rev = mail_inbox_rev.rev + 1, updated_at = NOW()"
+)
+# The bump at stage 4: the same upsert under FOR KEY SHARE OF p SKIP LOCKED
+# and deleted_at IS NULL, which skips any invitee whose players row is held
+# at FOR UPDATE strength.
+_SKIPPING_BUMP = (
+    "INSERT INTO mail_inbox_rev (recipient_id, rev)"
+    " SELECT p.id, 1 FROM players p"
+    "  WHERE p.deleted_at IS NULL AND p.id IN (SELECT r.recipient_id FROM mail_recipients r"
+    "         WHERE r.message_id = ANY(CAST(:mids AS uuid[])) AND r.delivery = 'delivered')"
+    "  ORDER BY p.id FOR KEY SHARE OF p SKIP LOCKED"
+    " ON CONFLICT (recipient_id) DO UPDATE"
+    "   SET rev = mail_inbox_rev.rev + 1, updated_at = NOW()"
+)
 
 
-def test_a_bump_skips_an_account_being_deleted_and_leaves_it_no_revision_row(monkeypatch):
+def test_a_bump_racing_an_account_deletion_leaves_the_account_no_revision_row(monkeypatch):
     """An invite change that owes a revision to an invitee whose account is
-    being deleted skips that account at once, and the deletion's removal of
-    the account's revision row stands. The real deletion is paused at its
-    last bump, after its steam_id rewrite (FOR UPDATE strength on the players
-    row) and its delete of the revision row; the sender's cancel answers 200
-    without waiting, and once the deletion commits the account has no
-    revision row. Mutants: the bump as first built (no players lock, no
-    deleted_at test) waits on the deleted revision row and, when the deletion
-    commits, writes the account a new one; the players lock without SKIP
-    LOCKED waits for the deletion's commit."""
+    being deleted leaves that account no revision row, at either point of
+    the deletion's end. The real deletion is paused at its last bump (the
+    call with `drop`), and the sender cancels the invite:
+      before the bump -- the deletion holds the players row at FOR UPDATE
+        strength (its steam_id rewrite) but no revision row: the cancel
+        answers 200 at once, its bump moving the row the deletion then
+        deletes;
+      after the bump -- the deletion holds the account's revision row (its
+        ascending lock pass), not yet deleted: the cancel's bump waits, and
+        once the deletion deletes the row and commits it finds none.
+    Mutant: the bump as first built (an upsert) waits there too, and then
+    writes the deleted account a new revision row."""
     async def body(env):
         lid, (h,) = await env.lobby("team", 1)
         real_bump = main._invite_bump
-        gate = {"armed": False}
+        gate = {"at": None}
 
-        async def paused_bump(db, mids):
-            # The deletion's last bump (the first call while armed) waits for
-            # the test; every other call runs as written.
-            if gate["armed"]:
-                gate["armed"] = False
+        async def paused_bump(db, mids, drop=None):
+            # The deletion's last bump waits for the test, before or after it
+            # runs; every other call runs as written.
+            if drop is None or gate["at"] is None:
+                return await real_bump(db, mids, drop=drop)
+            at, gate["at"] = gate["at"], None
+            if at == "before":
                 gate["paused"].set()
                 await gate["resume"].wait()
-            return await real_bump(db, mids)
+            out = await real_bump(db, mids, drop=drop)
+            if at == "after":
+                gate["paused"].set()
+                await gate["resume"].wait()
+            return out
         env.mp.setattr(main, "_invite_bump", paused_bump)
 
-        async def scene():
+        async def scene(at):
             p = await env.player()
             iid = await env.invite(h, p, "team", lid)
-            assert await env.rev(p) > 0, "the send left no revision row to delete"
-            gate.update(armed=True, paused=asyncio.Event(), resume=asyncio.Event())
+            assert await env.rev(p) > 0, "the send left no revision row"
+            gate.update(at=at, paused=asyncio.Event(), resume=asyncio.Event())
             deletion = asyncio.ensure_future(_delete(env, p))
             cancel = None
             try:
@@ -560,15 +591,260 @@ def test_a_bump_skips_an_account_being_deleted_and_leaves_it_no_revision_row(mon
                 "SELECT EXISTS (SELECT 1 FROM mail_inbox_rev WHERE recipient_id = $1)", p.id)
             return {"deleted": gone.status, "cancel": ans.status, "waited": waited, "left": left}
 
-        got = await scene()
+        got = await scene("before")
         assert got == {"deleted": 200, "cancel": 200, "waited": False, "left": False}, got
-        with env.rewriting("p.deleted_at IS NULL AND ", "", where=_BUMP) as h1, \
-                env.rewriting(" FOR KEY SHARE OF p SKIP LOCKED", "", where=_BUMP) as h2:
-            got = await scene()
-        assert h1 and h2
-        assert got["waited"] and got["left"], ("the first-built bump left no revision row", got)
-        with env.rewriting(" SKIP LOCKED", "", where=_BUMP) as h3:
-            got = await scene()
-        assert h3
-        assert got["waited"] and not got["left"], ("the waiting players lock did not wait", got)
+        got = await scene("after")
+        assert got == {"deleted": 200, "cancel": 200, "waited": True, "left": False}, got
+        env.mp.setattr(main, "_INVITE_REV_BUMP_SQL", _UPSERT_BUMP)
+        got = await scene("after")
+        assert got["waited"] and got["left"], ("the upsert mutant left no revision row", got)
     case(monkeypatch, body)
+
+
+def test_a_bump_moves_a_live_invitees_revision_while_their_players_row_is_held(monkeypatch):
+    """A live invitee's players row held at FOR UPDATE strength by another
+    request -- mail_discord's relay-off gate, run as written on a second
+    session -- neither stops nor delays the revision bump an invite change
+    owes them: the sender's cancel answers 200 without waiting and the
+    invitee's revision moves by one. Mutant: the stage-4 bump (FOR KEY SHARE
+    OF p SKIP LOCKED) answers 200 and leaves it unmoved."""
+    gate_sql = re.sub(r":me\b", "$1", mail_discord.RELAY_OFF_GATE_BY_ID_SQL)
+    assert gate_sql.endswith("FOR UPDATE") and "$1" in gate_sql, gate_sql
+
+    async def body(env):
+        lid, (h,) = await env.lobby("team", 1)
+
+        async def scene():
+            p = await env.player()
+            iid = await env.invite(h, p, "team", lid)
+            before = await env.rev(p)
+            side = await env.side()
+            await side.execute("BEGIN")
+            await side.fetchval(gate_sql, p.id)
+            try:
+                task = asyncio.ensure_future(env.cancel(h, iid))
+                done, _rest = await asyncio.wait([task], timeout=10)
+            finally:
+                await side.execute("ROLLBACK")
+            ans = await asyncio.wait_for(task, BOUND)
+            return {"cancel": ans.status, "waited": not done, "moved": await env.rev(p) - before}
+
+        assert await scene() == {"cancel": 200, "waited": False, "moved": 1}
+        env.mp.setattr(main, "_INVITE_REV_BUMP_SQL", _SKIPPING_BUMP)
+        got = await scene()
+        assert got == {"cancel": 200, "waited": False, "moved": 0}, (
+            "the stage-4 bump moved a held invitee's revision", got)
+    case(monkeypatch, body)
+
+
+# -- expiry decided after the lock waits ------------------------------------
+
+async def _past_expiry_behind_a_lock(env, iid, hold_sql, hold_arg, call):
+    """The invite's expires_at 2.5 s ahead; a second session holds a lock
+    (`hold_sql`) while `call` starts and waits on it, the wait confirmed
+    while the invite is still unexpired; the expiry passes; the lock is
+    released. Returns the call's answer."""
+    await env.conn.execute(
+        "UPDATE lobby_invites SET expires_at = clock_timestamp() + make_interval(secs => 2.5)"
+        " WHERE id = $1", iid)
+    side = await env.side()
+    await side.execute("BEGIN")
+    await side.fetch(hold_sql, hold_arg)
+    task = asyncio.ensure_future(call())
+    try:
+        waiters = await waiting_on(env, side.get_server_pid())
+        ahead = await env.conn.fetchval(
+            "SELECT EXTRACT(EPOCH FROM (expires_at - clock_timestamp())) FROM lobby_invites"
+            " WHERE id = $1", iid)
+        assert waiters and not task.done() and ahead > 0, (
+            "the call was not seen waiting before the expiry", waiters, task.done(), ahead)
+        await asyncio.sleep(float(ahead) + 0.3)
+    finally:
+        await side.execute("ROLLBACK")
+    return await asyncio.wait_for(task, BOUND)
+
+
+def _lobby_hold(mode="team"):
+    return "SELECT id FROM %s WHERE id = $1 FOR UPDATE" % LOBBY_TABLE[mode]
+
+
+_INVITE_HOLD = "SELECT id FROM lobby_invites WHERE id = $1 FOR NO KEY UPDATE"
+
+
+def test_an_accept_held_behind_the_lobby_lock_past_the_expiry_is_refused_expired(monkeypatch):
+    """An accept that waits on the lobby row's lock while its invite expires
+    is answered 410 invite_expired, seats nobody, and leaves the invite as it
+    was: the join hook decides expiry after its locks are held. Mutant: the
+    hook's read on NOW(), the transaction's start, seats the invitee."""
+    async def body(env):
+        async def scene():
+            lid, (h,) = await env.lobby("team", 1)
+            p = await env.player()
+            iid = await env.invite(h, p, "team", lid)
+            ans = await _past_expiry_behind_a_lock(env, iid, _lobby_hold(), lid,
+                                                   lambda: env.accept(p, iid))
+            return ans, p.id in await env.members("team", lid), (await env.row(iid))["state"]
+
+        ans, seated, state = await scene()
+        assert (ans.status, ans.body, seated, state) == (410, "invite_expired", False, "pending"), (
+            ans, seated, state)
+        with env.rewriting("(expires_at <= clock_timestamp()) AS past", "(expires_at <= NOW()) AS past",
+                           where="SELECT state, end_reason, (expires_at") as hits:
+            ans, seated, state = await scene()
+        assert hits
+        assert ans.status == 200 and seated, ("the NOW() mutant refused the accept", ans, seated)
+    case(monkeypatch, body)
+
+
+def test_a_decline_held_behind_the_invite_row_lock_past_the_expiry_is_refused_expired(monkeypatch):
+    """A decline that waits on the invite row's lock while the invite expires
+    is answered 410 invite_expired and leaves it pending: its read after the
+    row lock decides. Mutant: that read on NOW() declines it."""
+    async def body(env):
+        lid, (h,) = await env.lobby("team", 1)
+
+        async def scene():
+            p = await env.player()
+            iid = await env.invite(h, p, "team", lid)
+            ans = await _past_expiry_behind_a_lock(env, iid, _INVITE_HOLD, iid,
+                                                   lambda: env.decline(p, iid))
+            return ans, (await env.row(iid))["state"]
+
+        ans, state = await scene()
+        assert (ans.status, ans.body, state) == (410, "invite_expired", "pending"), (ans, state)
+        with env.rewriting("(i.expires_at <= clock_timestamp()) AS past", "(i.expires_at <= NOW()) AS past",
+                           where="i.invitee_player_id = ") as hits:
+            ans, state = await scene()
+        assert hits
+        assert ans.status == 200 and state == "declined", ("the NOW() mutant refused the decline", ans)
+    case(monkeypatch, body)
+
+
+def test_a_cancel_held_behind_the_lobby_lock_past_the_expiry_is_refused_expired(monkeypatch):
+    """A cancel that waits on the lobby row's lock while the invite expires
+    is answered 410 invite_expired and leaves it pending. Mutant: the read
+    after the locks on NOW() cancels it."""
+    async def body(env):
+        lid, (h,) = await env.lobby("team", 1)
+
+        async def scene():
+            p = await env.player()
+            iid = await env.invite(h, p, "team", lid)
+            ans = await _past_expiry_behind_a_lock(env, iid, _lobby_hold(), lid,
+                                                   lambda: env.cancel(h, iid))
+            return ans, (await env.row(iid))["state"]
+
+        ans, state = await scene()
+        assert (ans.status, ans.body, state) == (410, "invite_expired", "pending"), (ans, state)
+        with env.rewriting("(expires_at <= clock_timestamp()) AS past", "(expires_at <= NOW()) AS past",
+                           where="SELECT id, sender_player_id, state, end_reason") as hits:
+            ans, state = await scene()
+        assert hits
+        assert ans.status == 200 and state == "cancelled", ("the NOW() mutant refused the cancel", ans)
+    case(monkeypatch, body)
+
+
+def test_a_departure_held_behind_the_lobby_lock_past_the_expiry_ends_the_invite_expired(monkeypatch):
+    """A sender who leaves while a second session holds the lobby row, the
+    invite expiring during that wait, ends it 'expired' with no end_reason
+    and ended_at at or after its expires_at: the ending statement reads the
+    clock once, after the lock. Mutant: that reading on NOW() ends it void,
+    sender_left."""
+    async def body(env):
+        async def scene():
+            lid, (h, s) = await env.lobby("team", 2)
+            p = await env.player()
+            iid = await env.invite(s, p, "team", lid)
+            ans = await _past_expiry_behind_a_lock(env, iid, _lobby_hold(), lid,
+                                                   lambda: env.leave("team", s, lid))
+            assert ans.status == 200, ans
+            r = await env.row(iid)
+            return r["state"], r["end_reason"], r["ended_at"] >= r["expires_at"]
+
+        assert await scene() == ("expired", None, True)
+        with env.rewriting("SELECT clock_timestamp() AS at", "SELECT NOW() AS at",
+                           where="'sender_left'") as hits:
+            got = await scene()
+        assert hits
+        assert got[:2] == ("void", "sender_left"), ("the NOW() mutant ended it expired", got)
+    case(monkeypatch, body)
+
+
+def test_a_send_held_behind_the_lobby_lock_ends_the_invite_that_expired_meanwhile(monkeypatch):
+    """A second invite to the same player, sent while a second session holds
+    the lobby row and the first invite expires during that wait, ends the
+    first one 'expired' and is answered 200: one clock reading after the
+    lobby lock decides both the ending and the pending count. Mutant: that
+    reading on NOW() counts the expired invite as pending, already_invited."""
+    async def body(env):
+        async def scene():
+            lid, (h,) = await env.lobby("team", 1)
+            p = await env.player()
+            first = await env.invite(h, p, "team", lid)
+            ans = await _past_expiry_behind_a_lock(env, first, _lobby_hold(), lid,
+                                                   lambda: env.send(h, p, "team", lid))
+            return ans, (await env.row(first))["state"]
+
+        ans, state = await scene()
+        assert ans.status == 200 and state == "expired", (ans, state)
+        with env.rewriting(re.compile(r"^SELECT clock_timestamp\(\)$"), "SELECT NOW()") as hits:
+            ans, state = await scene()
+        assert hits
+        assert (ans.status, state) == (409, "pending") and ans["error"] == "already_invited", (
+            "the NOW() mutant ended the expired invite", ans, state)
+    case(monkeypatch, body)
+
+
+def test_an_ending_after_a_refused_accept_decides_expiry_after_its_lobby_lock(monkeypatch):
+    """The ending written after an accept the join refused (here: the lobby
+    no longer open) re-reads the invite after the lobby lock, against the
+    clock: an invite that expired while that transaction waited is left
+    pending (every read calls it expired), not ended lobby_closed. The wait
+    is made inside the ending's transaction, between its first statement and
+    its lobby lock. Mutant: the read on NOW() ends it void, lobby_closed."""
+    async def body(env):
+        real_lock = main._invite_lock_lobby
+        hold = {"until": None}
+
+        async def slow_lock(db, mode, lobby_id):
+            if hold["until"] is not None:
+                until, hold["until"] = hold["until"], None
+                left = await env.conn.fetchval(
+                    "SELECT EXTRACT(EPOCH FROM (CAST($1 AS timestamptz) - clock_timestamp()))", until)
+                await asyncio.sleep(max(0.0, float(left)) + 0.3)
+            return await real_lock(db, mode, lobby_id)
+        env.mp.setattr(main, "_invite_lock_lobby", slow_lock)
+
+        async def scene():
+            lid, (h,) = await env.lobby("team", 1)
+            p = await env.player()
+            iid = await env.invite(h, p, "team", lid)
+            hold["until"] = await env.conn.fetchval(
+                "UPDATE lobby_invites SET expires_at = clock_timestamp() + make_interval(secs => 1.5)"
+                " WHERE id = $1 RETURNING expires_at", iid)
+            await env.conn.execute("UPDATE %s SET status = 'canceled' WHERE id = $1" % LOBBY_TABLE["team"],
+                                   lid)
+            ans = await env.accept(p, iid)
+            r = await env.row(iid)
+            return ans.status, r["state"], r["end_reason"]
+
+        status, state, reason = await scene()
+        assert status == 404 and (state, reason) == ("pending", None), (status, state, reason)
+        with env.rewriting("(expires_at <= clock_timestamp()) AS past", "(expires_at <= NOW()) AS past",
+                           where="SELECT state, sender_player_id, mail_message_id,") as hits:
+            got = await scene()
+        assert hits
+        assert got == (404, "void", "lobby_closed"), ("the NOW() mutant left it pending", got)
+    case(monkeypatch, body)
+
+
+def test_each_ending_statement_reads_the_clock_once_and_never_now():
+    """The three ending statements decide expiry at one clock reading: a
+    MATERIALIZED CTE over clock_timestamp(), and no NOW() and no second
+    clock call, which could give state and end_reason two different
+    instants (ck_lobby_invites_void_reason refuses a void row without one)."""
+    for name in ("_INVITE_END_DEPARTED_SQL", "_INVITE_END_LOBBY_SQL", "_INVITE_END_KICKED_SQL"):
+        sql = getattr(main, name)
+        assert sql.startswith("WITH c AS MATERIALIZED (SELECT clock_timestamp() AS at)"), name
+        assert sql.count("clock_timestamp()") == 1 and "NOW()" not in sql.upper(), name
+        assert sql.count("c.at") == 3, name

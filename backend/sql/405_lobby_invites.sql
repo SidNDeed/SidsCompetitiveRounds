@@ -276,6 +276,14 @@ BEGIN
               WHERE t.tgrelid IN (inv, rcp) AND NOT t.tgisinternal) THEN
     RAISE EXCEPTION '405: a trigger exists on lobby_invites or invite_receipts';
   END IF;
+  -- Every column is an ordinary one. The column check below compares name,
+  -- type, NOT NULL and default, and a generated column's expression reads
+  -- back through pg_attrdef exactly as a default does, so it is refused here.
+  IF EXISTS (SELECT 1 FROM pg_attribute a
+              WHERE a.attrelid IN (inv, rcp) AND a.attnum > 0 AND NOT a.attisdropped
+                AND (a.attgenerated <> '' OR a.attidentity <> '')) THEN
+    RAISE EXCEPTION '405: a generated or identity column exists on lobby_invites or invite_receipts';
+  END IF;
 
   -- Columns, in order: name, type, NOT NULL, default.
   SELECT string_agg(format('%s %s %s %s', a.attname, format_type(a.atttypid, a.atttypmod),

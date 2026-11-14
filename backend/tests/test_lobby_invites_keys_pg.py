@@ -944,8 +944,8 @@ def test_every_accept_refusal_answers_as_section_4_2_says(monkeypatch):
             await env.age(j, expired_s=5)
             return {"ask": accept(x, j)}
         await _pin_refusal(env, "invite_expired", expired, Answer(410, "invite_expired"),
-                           lambda c: _rw(env, ("(i.expires_at <= NOW()) AS past", "FALSE AS past", INVITEE_ROW),
-                                         ("(expires_at <= NOW()) AS past", "FALSE AS past",
+                           lambda c: _rw(env, ("(i.expires_at <= clock_timestamp()) AS past", "FALSE AS past", INVITEE_ROW),
+                                         ("(expires_at <= clock_timestamp()) AS past", "FALSE AS past",
                                           "SELECT state, end_reason, (expires_at")))
 
         async def void():
@@ -1046,7 +1046,7 @@ def test_every_decline_refusal_answers_as_section_4_2_says(monkeypatch):
             await env.age(j, expired_s=5)
             return {"ask": decline(x, j)}
         await _pin_refusal(env, "invite_expired", expired, Answer(410, "invite_expired"),
-                           lambda c: _rw(env, ("(i.expires_at <= NOW()) AS past", "FALSE AS past", INVITEE_ROW)))
+                           lambda c: _rw(env, ("(i.expires_at <= clock_timestamp()) AS past", "FALSE AS past", INVITEE_ROW)))
 
         async def cancelled():
             _lid, ps, x, j = await _invited(env)
@@ -1107,7 +1107,7 @@ def test_every_cancel_refusal_answers_as_section_4_2_says(monkeypatch):
             await env.age(i, expired_s=5)
             return {"ask": cancel(ps[0], i)}
         await _pin_refusal(env, "invite_expired", expired, Answer(410, "invite_expired"),
-                           lambda c: _rw(env, ("(expires_at <= NOW()) AS past", "FALSE AS past",
+                           lambda c: _rw(env, ("(expires_at <= clock_timestamp()) AS past", "FALSE AS past",
                                                "SELECT id, sender_player_id, state")))
 
         async def declined():

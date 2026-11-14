@@ -45263,12 +45263,14 @@ async def delete_player_data(steam_id: str, request: Request, sig: str = Query(.
     # rewrite (its envelope is caught here) or blocks on the row, re-reads it
     # after this commits and finds deleted_at set. The inbox revision row
     # (migration 300) is personal state and goes with the envelopes; it is
-    # removed here rather than in the early sweep so the row-lock order
-    # (players, then mail_inbox_rev) matches the fan-out's and neither side
-    # can wait on the other.
+    # removed at this handler's end rather than in the early sweep, so the
+    # row-lock order (players, then mail_inbox_rev) matches the fan-out's and
+    # neither side can wait on the other. Migration 405's change moved it
+    # from here to the very end: there it is locked in the same ascending
+    # pass as the invite bump's rows (_invite_bump's `drop`), the one order
+    # every writer of mail_inbox_rev takes, and nothing is locked after it.
     await db.flush()
     await db.execute(text("DELETE FROM mail_recipients WHERE recipient_id = :pid"), {"pid": pid})
-    await db.execute(text("DELETE FROM mail_inbox_rev WHERE recipient_id = :pid"), {"pid": pid})
     # Item 5 (migration 330). A relay DM row is a COPY of the mail held
     # outside the envelope tables: the addressee's raw Steam ID, the body
     # text, the sender's display name as it read when the mail was sent, and
@@ -45288,7 +45290,8 @@ async def delete_player_data(steam_id: str, request: Request, sig: str = Query(.
     #     itself in-game; only the notification is dropped.
     await db.execute(text(_ERASE_RELAY_DMS_TO_SQL), {"sid": steam_id})
     await db.execute(text(_ERASE_RELAY_DMS_FROM_SQL), {"sid": steam_id, "pid": pid})
-    await _invite_bump(db, _inv_ended)
+    await _invite_bump(db, _inv_ended, drop=pid)
+    await db.execute(text("DELETE FROM mail_inbox_rev WHERE recipient_id = :pid"), {"pid": pid})
 
     await db.commit()
     print(f"[PRIVACY] Anonymized steam_id={steam_id} (placeholder={player.steam_id})")
@@ -59267,7 +59270,11 @@ async def team_lobby_start(req: _LobbyStartReq, request: Request,
                             "A lobby member entered another live match")
     # Migration 405's change: the start ends the lobby's pending invites
     # (lobby_started) and bumps their invitees' revisions, the last write
-    # before the relock stamp below, which stays last.
+    # before the relock stamp below, which stays last (r4 H1). The one
+    # recorded exception to the bump-last rule (the design note, section
+    # 13): the stamp updates the team_series row this start already holds
+    # (the adopt's UPDATE above), so it waits on no lock while the revision
+    # rows are held.
     await _invite_bump(db, await _invite_end_lobby(db, "team", lobby_id, "lobby_started"))
     if _pick_outcome == "picked":
         # r4 finding (H1 placement): the relock stamp must be the LAST write
@@ -80394,25 +80401,47 @@ async def _invite_write_receipt(db: AsyncSession, caller_id, key: UUID, route: s
 
 
 # Every change of an invite's state bumps its invitee's inbox revision through a delivered copy
-# only, so a suppressed invite bumps nothing. A transaction runs this ONCE, last, in ascending
-# player order; a send's envelope is also bumped by migration 300's trigger, on that invitee's
-# row alone (all a send owes). FOR KEY SHARE OF p SKIP LOCKED: only delete_player_data's steam_id
-# rewrite holds a players row at FOR UPDATE strength, so the bump skips exactly an account being
-# deleted (that deletion removes its revision row) and its players lock never waits; deleted_at,
-# read under the lock, skips one already deleted. The IN yields each player once for ON CONFLICT.
+# only, so a suppressed invite bumps nothing. A transaction runs this ONCE, last; a send's
+# envelope is also bumped by migration 300's trigger, on that invitee's row alone (all a send
+# owes). It UPDATEs the invitees' existing revision rows and never inserts one: every delivered
+# copy got its row from migration 300's trigger when it was written, and the one statement that
+# removes a row is delete_player_data's (the table's ON DELETE CASCADE from players is reached
+# only by a DELETE of a players row, which no route runs). So no deleted account is written a row
+# again. It takes no players lock -- players rows are held FOR UPDATE by more than the deletion
+# (mail_discord's relay-off gates, tournaments' link read), and a skip or a wait there would drop
+# or stall a live invitee's bump. The rows are locked in ascending recipient order in one
+# statement (the CTE), the order of every writer of this table (mail's sends and migration 300's
+# trigger insert in that order; the deletion takes its own row in the same ascending pass as its
+# bump, _INVITE_REV_DROP_LOCK_SQL), and nothing is locked after them, so two writers never wait on
+# each other in a cycle. A row the deletion holds is waited for and, once it commits, gone.
 _INVITE_REV_BUMP_SQL = (
-    "INSERT INTO mail_inbox_rev (recipient_id, rev)"
-    " SELECT p.id, 1 FROM players p"
-    "  WHERE p.deleted_at IS NULL AND p.id IN (SELECT r.recipient_id FROM mail_recipients r"
+    "WITH t AS (SELECT v.recipient_id FROM mail_inbox_rev v"
+    "            WHERE v.recipient_id IN (SELECT r.recipient_id FROM mail_recipients r"
+    "                   WHERE r.message_id = ANY(CAST(:mids AS uuid[])) AND r.delivery = 'delivered')"
+    "            ORDER BY v.recipient_id FOR NO KEY UPDATE)"
+    " UPDATE mail_inbox_rev v SET rev = v.rev + 1, updated_at = NOW()"
+    "   FROM t WHERE v.recipient_id = t.recipient_id"
+)
+
+# An account deletion's end: the revision rows its bump moves and the account's own row, locked
+# in one ascending pass, before the bump and before the account's row is deleted. A deletion that
+# took its own row first and its invitees' rows after would lock out of the shared order.
+_INVITE_REV_DROP_LOCK_SQL = (
+    "SELECT v.recipient_id FROM mail_inbox_rev v"
+    " WHERE v.recipient_id = CAST(:pid AS uuid)"
+    "    OR v.recipient_id IN (SELECT r.recipient_id FROM mail_recipients r"
     "         WHERE r.message_id = ANY(CAST(:mids AS uuid[])) AND r.delivery = 'delivered')"
-    "  ORDER BY p.id FOR KEY SHARE OF p SKIP LOCKED"
-    " ON CONFLICT (recipient_id) DO UPDATE"
-    "   SET rev = mail_inbox_rev.rev + 1, updated_at = NOW()"
+    " ORDER BY v.recipient_id FOR NO KEY UPDATE"
 )
 
 
-async def _invite_bump(db: AsyncSession, mids) -> None:
+async def _invite_bump(db: AsyncSession, mids, drop=None) -> None:
+    """The invitees' revision bump. `drop` is the player whose account
+    delete_player_data is removing: its revision row is locked in the same
+    ascending pass, and the caller deletes it next, as its last write."""
     ids = sorted({m for m in (mids or []) if m is not None}, key=str)
+    if drop is not None:
+        await db.execute(text(_INVITE_REV_DROP_LOCK_SQL), {"mids": ids, "pid": drop})
     if ids:
         await db.execute(text(_INVITE_REV_BUMP_SQL), {"mids": ids})
 
@@ -80423,11 +80452,23 @@ async def _invite_bump(db: AsyncSession, mids) -> None:
 # 'void' with sender_left. Called under the lobby row's lock, in the
 # departure's own transaction; the caller bumps the returned mail rows
 # (_invite_bump) as its last statement.
+#
+# The three ending statements decide expiry at ONE clock reading, taken by
+# the statement itself after the lobby lock its caller holds: c is
+# MATERIALIZED (and clock_timestamp() is volatile, so it is read once), and
+# state, end_reason and ended_at all come from it. NOW() is the
+# transaction's start, before any lock wait; and two clock_timestamp()
+# calls could disagree, giving a 'void' row no end_reason, which
+# ck_lobby_invites_void_reason refuses. A row whose lock is held by a
+# decline (the one invite writer that takes no lobby lock) is decided at
+# the reading taken before that wait; the row ends here either way.
 _INVITE_END_DEPARTED_SQL = (
-    "UPDATE lobby_invites"
-    "   SET state = CASE WHEN expires_at <= NOW() THEN 'expired' ELSE 'void' END,"
-    "       end_reason = CASE WHEN expires_at <= NOW() THEN NULL ELSE 'sender_left' END,"
-    "       ended_at = NOW()"
+    "WITH c AS MATERIALIZED (SELECT clock_timestamp() AS at)"
+    " UPDATE lobby_invites"
+    "   SET state = CASE WHEN expires_at <= c.at THEN 'expired' ELSE 'void' END,"
+    "       end_reason = CASE WHEN expires_at <= c.at THEN NULL ELSE 'sender_left' END,"
+    "       ended_at = c.at"
+    "  FROM c"
     " WHERE mode = :mode AND lobby_id = :lid AND state = 'pending'"
     "   AND sender_player_id = ANY(CAST(:pids AS uuid[]))"
     " RETURNING mail_message_id"
@@ -80437,10 +80478,12 @@ _INVITE_END_DEPARTED_SQL = (
 # path closes it (lobby_closed): under the lobby row's lock, in that
 # transaction.
 _INVITE_END_LOBBY_SQL = (
-    "UPDATE lobby_invites"
-    "   SET state = CASE WHEN expires_at <= NOW() THEN 'expired' ELSE 'void' END,"
-    "       end_reason = CASE WHEN expires_at <= NOW() THEN NULL ELSE CAST(:why AS text) END,"
-    "       ended_at = NOW()"
+    "WITH c AS MATERIALIZED (SELECT clock_timestamp() AS at)"
+    " UPDATE lobby_invites"
+    "   SET state = CASE WHEN expires_at <= c.at THEN 'expired' ELSE 'void' END,"
+    "       end_reason = CASE WHEN expires_at <= c.at THEN NULL ELSE CAST(:why AS text) END,"
+    "       ended_at = c.at"
+    "  FROM c"
     " WHERE mode = :mode AND lobby_id = :lid AND state = 'pending'"
     " RETURNING mail_message_id"
 )
@@ -80448,10 +80491,12 @@ _INVITE_END_LOBBY_SQL = (
 # A kick also ends the pending invites TO the kicked player for that lobby:
 # its accept would be refused kicked_from_lobby.
 _INVITE_END_KICKED_SQL = (
-    "UPDATE lobby_invites"
-    "   SET state = CASE WHEN expires_at <= NOW() THEN 'expired' ELSE 'void' END,"
-    "       end_reason = CASE WHEN expires_at <= NOW() THEN NULL ELSE 'invitee_kicked' END,"
-    "       ended_at = NOW()"
+    "WITH c AS MATERIALIZED (SELECT clock_timestamp() AS at)"
+    " UPDATE lobby_invites"
+    "   SET state = CASE WHEN expires_at <= c.at THEN 'expired' ELSE 'void' END,"
+    "       end_reason = CASE WHEN expires_at <= c.at THEN NULL ELSE 'invitee_kicked' END,"
+    "       ended_at = c.at"
+    "  FROM c"
     " WHERE mode = :mode AND lobby_id = :lid AND state = 'pending'"
     "   AND invitee_player_id = ANY(CAST(:pids AS uuid[]))"
     " RETURNING mail_message_id"
@@ -80523,12 +80568,18 @@ async def _invite_lobby_gates(db: AsyncSession, mode: str, lobby_id, me: dict,
     ), {"lid": lobby_id})).mappings().first()
     if lrow is None or lrow["status"] != "open":
         raise HTTPException(status_code=409, detail="lobby_closed")
+    # One clock reading, after the lobby lock, decides expiry for both
+    # statements below: a row past it is ended here and a row before it is
+    # counted there, so no pending row is neither (the unique pending index
+    # would then refuse the new invite). NOW() is the transaction's start,
+    # before the lock waits.
+    at = (await db.execute(text("SELECT clock_timestamp()"))).scalar()
     ended = list((await db.execute(text(
-        "UPDATE lobby_invites SET state = 'expired', ended_at = NOW()"
+        "UPDATE lobby_invites SET state = 'expired', ended_at = CAST(:at AS timestamptz)"
         " WHERE mode = :mode AND lobby_id = :lid AND invitee_player_id = :inv"
-        "   AND state = 'pending' AND expires_at <= NOW()"
+        "   AND state = 'pending' AND expires_at <= CAST(:at AS timestamptz)"
         " RETURNING mail_message_id"
-    ), {"mode": mode, "lid": lobby_id, "inv": invitee["id"]})).scalars().all())
+    ), {"mode": mode, "lid": lobby_id, "inv": invitee["id"], "at": at})).scalars().all())
     live = await _invite_live_members(db, mode, lobby_id)
     live_ids = {m["player_id"] for m in live}
     if me["id"] not in live_ids:
@@ -80538,8 +80589,9 @@ async def _invite_lobby_gates(db: AsyncSession, mode: str, lobby_id, me: dict,
         raise HTTPException(status_code=409, detail="lobby_full")
     pending = (await db.execute(text(
         "SELECT id, invitee_player_id FROM lobby_invites"
-        " WHERE mode = :mode AND lobby_id = :lid AND state = 'pending' AND expires_at > NOW()"
-    ), {"mode": mode, "lid": lobby_id})).mappings().all()
+        " WHERE mode = :mode AND lobby_id = :lid AND state = 'pending'"
+        "   AND expires_at > CAST(:at AS timestamptz)"
+    ), {"mode": mode, "lid": lobby_id, "at": at})).mappings().all()
     if len(pending) >= 2 * cap:
         raise HTTPException(status_code=409, detail="invites_full")
     if invitee["steam_id"] in [s for s in (lrow["kicked_steam_ids"] or "").split(",") if s]:
@@ -80672,9 +80724,17 @@ async def invite_send(req: _InviteSendReq, request: Request, db: AsyncSession = 
 # The invitee's own row of an invite, only while they hold a delivered,
 # undeleted copy of it: an unknown id, another player's invite and one whose
 # copy is gone all read nothing, so all answer invite_not_found alike.
+#
+# Every expiry DECISION about an invite (here, the accept's join hook, the
+# ending after a refused accept, decline, cancel) is read against
+# clock_timestamp(), in a statement that runs after every lock the decision
+# depends on is held. NOW() is the transaction's start, which comes before
+# any lock wait; and an expression in a locking statement is evaluated
+# before that statement's own row lock is granted. So a decision under a
+# row lock takes the lock in one statement and reads in the next.
 _INVITE_INVITEE_ROW_SQL = (
     "SELECT i.id, i.mode, i.lobby_id, i.sender_player_id, i.kind, i.state, i.end_reason,"
-    "       i.mail_message_id, i.expires_at, (i.expires_at <= NOW()) AS past"
+    "       i.mail_message_id, i.expires_at, (i.expires_at <= clock_timestamp()) AS past"
     "  FROM lobby_invites i"
     " WHERE i.id = :iid AND i.invitee_player_id = :me"
     "   AND EXISTS (SELECT 1 FROM mail_recipients r"
@@ -80698,9 +80758,14 @@ class _InviteJoinHook:
         self.row = None
 
     async def lock(self, db: AsyncSession) -> None:
+        # The row lock, then the read: expiry is decided after both the
+        # lobby lock and this row's lock are held (see _INVITE_INVITEE_ROW_SQL).
+        await db.execute(text(
+            "SELECT id FROM lobby_invites WHERE id = :iid FOR NO KEY UPDATE"
+        ), {"iid": self.invite_id})
         self.row = (await db.execute(text(
-            "SELECT state, end_reason, (expires_at <= NOW()) AS past"
-            "  FROM lobby_invites WHERE id = :iid FOR NO KEY UPDATE"
+            "SELECT state, end_reason, (expires_at <= clock_timestamp()) AS past"
+            "  FROM lobby_invites WHERE id = :iid"
         ), {"iid": self.invite_id})).mappings().first()
 
     def recheck(self, live) -> None:
@@ -80755,9 +80820,13 @@ async def _invite_end_after_refusal(db: AsyncSession, invite_id, why: str, invit
         await db.rollback()
         return
     lrow = await _invite_lock_lobby(db, head["mode"], head["lobby_id"])
+    # The row lock, then the read, as the accept's hook does.
+    await db.execute(text(
+        "SELECT id FROM lobby_invites WHERE id = :iid FOR NO KEY UPDATE"
+    ), {"iid": invite_id})
     row = (await db.execute(text(
-        "SELECT state, sender_player_id, mail_message_id, (expires_at <= NOW()) AS past"
-        "  FROM lobby_invites WHERE id = :iid FOR NO KEY UPDATE"
+        "SELECT state, sender_player_id, mail_message_id, (expires_at <= clock_timestamp()) AS past"
+        "  FROM lobby_invites WHERE id = :iid"
     ), {"iid": invite_id})).mappings().first()
     reason = None
     if row is not None and row["state"] == "pending" and not row["past"]:
@@ -80867,7 +80936,11 @@ async def invite_decline(invite_id: str, req: _InviteAnswerReq, request: Request
         return {"state": "declined"}
     if iid is None:
         raise HTTPException(status_code=400, detail="invite_id_invalid")
-    row = (await db.execute(text(_INVITE_INVITEE_ROW_SQL + " FOR NO KEY UPDATE OF i"),
+    # The row lock through the caller's live copy, then the read that
+    # decides (_INVITE_INVITEE_ROW_SQL): the lock's own row is discarded.
+    await db.execute(text(_INVITE_INVITEE_ROW_SQL + " FOR NO KEY UPDATE OF i"),
+                     {"iid": iid, "me": me["id"]})
+    row = (await db.execute(text(_INVITE_INVITEE_ROW_SQL),
                             {"iid": iid, "me": me["id"]})).mappings().first()
     if row is None:
         raise HTTPException(status_code=404, detail="invite_not_found")
@@ -80903,10 +80976,14 @@ async def invite_cancel(invite_id: str, req: _InviteAnswerReq, request: Request,
     if head is None:
         raise HTTPException(status_code=404, detail="invite_not_found")
     lrow = await _invite_lock_lobby(db, head["mode"], head["lobby_id"])
+    # The row lock, then the read, as the accept's hook does.
+    await db.execute(text(
+        "SELECT id FROM lobby_invites WHERE id = :iid FOR NO KEY UPDATE"
+    ), {"iid": iid})
     row = (await db.execute(text(
         "SELECT id, sender_player_id, state, end_reason, mail_message_id,"
-        "       (expires_at <= NOW()) AS past"
-        "  FROM lobby_invites WHERE id = :iid FOR NO KEY UPDATE"
+        "       (expires_at <= clock_timestamp()) AS past"
+        "  FROM lobby_invites WHERE id = :iid"
     ), {"iid": iid})).mappings().first()
     live = await _invite_live_members(db, head["mode"], head["lobby_id"])
     host = _invite_effective_host(head["mode"], lrow["host_player_id"] if lrow else None, live)
@@ -80999,8 +81076,13 @@ async def invite_pending(request: Request, cursor: str = Query(""),
                          limit: int = Query(INVITE_PAGE_MAX, ge=1, le=INVITE_PAGE_MAX),
                          db: AsyncSession = Depends(get_db)):
     """The caller's own invites that are pending, unexpired and held through
-    a delivered, undeleted copy: newest first, keyset-paged."""
+    a delivered, undeleted copy: newest first, keyset-paged. A client below
+    the invite floor is shown no invite row (the floor gates every invite
+    surface, as the inbox and the unread count leave such rows out): it is
+    answered an empty page."""
     me = await _mail_caller(request, db)
+    if not _invite_ok_for(request):
+        return {"invites": [], "next_cursor": None}
     c_at, c_id = _mail_cursor_decode(cursor)
     rows = (await db.execute(text(
         _INVITE_VIEW_SELECT +
