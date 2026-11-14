@@ -18,6 +18,7 @@ kicked player too (invitee_kicked); a ban takes its lobby locks in the order
 FFA, 2v2, 1v2, FOR NO KEY UPDATE, and holds them through _pc_lease_drain.
 """
 
+import ast
 import asyncio
 import hashlib
 import hmac
@@ -26,6 +27,7 @@ import os
 import re
 import sys
 import types
+import uuid
 
 import asyncpg
 import pytest
@@ -36,7 +38,7 @@ sys.path.insert(0, HERE)
 
 from fastapi import HTTPException  # noqa: E402
 
-from inv_pg import LOBBY_TABLE, MODES, QUEUE_TABLE, Req, case, mail_discord, waiting_on  # noqa: E402
+from inv_pg import LOBBY_TABLE, MODES, QUEUE_TABLE, Req, case, key, mail_discord, waiting_on  # noqa: E402
 
 import main  # noqa: E402
 
@@ -641,21 +643,26 @@ def test_a_bump_moves_a_live_invitees_revision_while_their_players_row_is_held(m
 
 async def _past_expiry_behind_a_lock(env, iid, hold_sql, hold_arg, call):
     """The invite's expires_at 2.5 s ahead; a second session holds a lock
-    (`hold_sql`) while `call` starts and waits on it, the wait confirmed
-    while the invite is still unexpired; the expiry passes; the lock is
-    released. Returns the call's answer."""
-    await env.conn.execute(
+    (`hold_sql`, with `hold_arg` as its one parameter, or with none when it
+    is None) while `call` starts and waits on it, the wait confirmed while
+    the invite is still unexpired; the expiry passes; the lock is released.
+    Returns the call's answer. The time left is computed from the expires_at
+    the update returned, so nothing here reads lobby_invites while a second
+    session holds a lock on the table itself."""
+    until = await env.conn.fetchval(
         "UPDATE lobby_invites SET expires_at = clock_timestamp() + make_interval(secs => 2.5)"
-        " WHERE id = $1", iid)
+        " WHERE id = $1 RETURNING expires_at", iid)
     side = await env.side()
     await side.execute("BEGIN")
-    await side.fetch(hold_sql, hold_arg)
+    if hold_arg is None:
+        await side.execute(hold_sql)
+    else:
+        await side.fetch(hold_sql, hold_arg)
     task = asyncio.ensure_future(call())
     try:
         waiters = await waiting_on(env, side.get_server_pid())
         ahead = await env.conn.fetchval(
-            "SELECT EXTRACT(EPOCH FROM (expires_at - clock_timestamp())) FROM lobby_invites"
-            " WHERE id = $1", iid)
+            "SELECT EXTRACT(EPOCH FROM (CAST($1 AS timestamptz) - clock_timestamp()))", until)
         assert waiters and not task.done() and ahead > 0, (
             "the call was not seen waiting before the expiry", waiters, task.done(), ahead)
         await asyncio.sleep(float(ahead) + 0.3)
@@ -800,31 +807,49 @@ def test_an_ending_after_a_refused_accept_decides_expiry_after_its_lobby_lock(mo
     no longer open) re-reads the invite after the lobby lock, against the
     clock: an invite that expired while that transaction waited is left
     pending (every read calls it expired), not ended lobby_closed. The wait
-    is made inside the ending's transaction, between its first statement and
-    its lobby lock. Mutant: the read on NOW() ends it void, lobby_closed."""
+    is a real one: inside the ending's transaction, between its first
+    statement and its lobby lock, a second session takes the lobby row and
+    holds it past the expiry, and the ending is seen waiting on it before the
+    expiry. Mutant: the read on NOW() ends it void, lobby_closed."""
     async def body(env):
         real_lock = main._invite_lock_lobby
-        hold = {"until": None}
+        hold = {"until": None, "seen": None, "task": None}
 
-        async def slow_lock(db, mode, lobby_id):
-            if hold["until"] is not None:
-                until, hold["until"] = hold["until"], None
-                left = await env.conn.fetchval(
-                    "SELECT EXTRACT(EPOCH FROM (CAST($1 AS timestamptz) - clock_timestamp()))", until)
-                await asyncio.sleep(max(0.0, float(left)) + 0.3)
+        async def contested_lock(db, mode, lobby_id):
+            until, hold["until"] = hold["until"], None
+            if until is not None:
+                side = await env.side()
+                await side.execute("BEGIN")
+                await side.fetch(_lobby_hold(mode), lobby_id)
+
+                async def release():
+                    try:
+                        waiters = await waiting_on(env, side.get_server_pid())
+                        ahead = await env.conn.fetchval(
+                            "SELECT EXTRACT(EPOCH FROM (CAST($1 AS timestamptz) - clock_timestamp()))", until)
+                        hold["seen"] = (bool(waiters), ahead > 0)
+                        await asyncio.sleep(max(0.0, float(ahead)) + 0.3)
+                    finally:
+                        await side.execute("ROLLBACK")
+                hold["task"] = asyncio.ensure_future(release())
             return await real_lock(db, mode, lobby_id)
-        env.mp.setattr(main, "_invite_lock_lobby", slow_lock)
+        env.mp.setattr(main, "_invite_lock_lobby", contested_lock)
 
         async def scene():
             lid, (h,) = await env.lobby("team", 1)
             p = await env.player()
             iid = await env.invite(h, p, "team", lid)
+            hold["seen"], hold["task"] = None, None
             hold["until"] = await env.conn.fetchval(
                 "UPDATE lobby_invites SET expires_at = clock_timestamp() + make_interval(secs => 1.5)"
                 " WHERE id = $1 RETURNING expires_at", iid)
             await env.conn.execute("UPDATE %s SET status = 'canceled' WHERE id = $1" % LOBBY_TABLE["team"],
                                    lid)
-            ans = await env.accept(p, iid)
+            ans = await asyncio.wait_for(env.accept(p, iid), BOUND)
+            assert hold["task"] is not None, "the ending never took the lobby lock"
+            await asyncio.wait_for(hold["task"], BOUND)
+            assert hold["seen"] == (True, True), (
+                "the ending was not seen waiting on the lobby row before the expiry", hold["seen"])
             r = await env.row(iid)
             return ans.status, r["state"], r["end_reason"]
 
@@ -838,13 +863,289 @@ def test_an_ending_after_a_refused_accept_decides_expiry_after_its_lobby_lock(mo
     case(monkeypatch, body)
 
 
+def _ending_statement_defects(sql):
+    """What is wrong with one ending statement's clock: [] when it reads
+    clock_timestamp() once, in a leading MATERIALIZED CTE, takes state,
+    end_reason and ended_at from that one reading (c.at, three times) and
+    holds no NOW()."""
+    out = []
+    if not sql.startswith("WITH c AS MATERIALIZED (SELECT clock_timestamp() AS at)"):
+        out.append("no leading MATERIALIZED clock reading")
+    if sql.count("clock_timestamp()") != 1:
+        out.append("%d clock_timestamp() calls" % sql.count("clock_timestamp()"))
+    if "NOW()" in sql.upper():
+        out.append("a NOW()")
+    if sql.count("c.at") != 3:
+        out.append("%d uses of c.at, not 3" % sql.count("c.at"))
+    return out
+
+
 def test_each_ending_statement_reads_the_clock_once_and_never_now():
     """The three ending statements decide expiry at one clock reading: a
     MATERIALIZED CTE over clock_timestamp(), and no NOW() and no second
     clock call, which could give state and end_reason two different
-    instants (ck_lobby_invites_void_reason refuses a void row without one)."""
+    instants (ck_lobby_invites_void_reason refuses a void row without one).
+    The negative control: each defect, planted in a copy of a real ending
+    statement, is reported."""
     for name in ("_INVITE_END_DEPARTED_SQL", "_INVITE_END_LOBBY_SQL", "_INVITE_END_KICKED_SQL"):
-        sql = getattr(main, name)
-        assert sql.startswith("WITH c AS MATERIALIZED (SELECT clock_timestamp() AS at)"), name
-        assert sql.count("clock_timestamp()") == 1 and "NOW()" not in sql.upper(), name
-        assert sql.count("c.at") == 3, name
+        assert _ending_statement_defects(getattr(main, name)) == [], name
+    real = main._INVITE_END_LOBBY_SQL
+    mutants = {
+        "the reading on NOW()": real.replace("SELECT clock_timestamp() AS at", "SELECT NOW() AS at"),
+        "the reading not materialized": real.replace("WITH c AS MATERIALIZED (", "WITH c AS ("),
+        "a second clock call": real.replace("c.at", "clock_timestamp()", 1),
+        "a field on NOW()": real.replace("c.at", "NOW()", 1),
+    }
+    for what, sql in mutants.items():
+        assert sql != real, what
+        assert _ending_statement_defects(sql), "%s was not reported" % what
+
+
+# -- the reads: expiry against the clock when the statement runs ------------
+
+_TABLE_HOLD = "LOCK TABLE lobby_invites IN ACCESS EXCLUSIVE MODE"
+# The per-sender mail lock a send takes after its identity barrier and before
+# it reads its key's receipt. (The barrier's own wait is bounded at 2.5 s, so
+# a hold there would refuse the send 503 before the invite expired.)
+_SENDER_HOLD = "SELECT pg_advisory_xact_lock(hashtext('mail:' || CAST(CAST($1 AS uuid) AS text)))"
+_VIEW_FROM = "FROM lobby_invites i JOIN players s ON s.id = i.sender_player_id"
+_LIST_FROM = "FROM lobby_invites i JOIN players p ON p.id = i.invitee_player_id"
+
+
+def _invite_in_inbox(answer, iid):
+    """The invite object of `iid`'s mail row in an inbox answer, or None."""
+    for m in answer["messages"]:
+        inv = m.get("invite")
+        if inv and inv["invite_id"] == str(iid):
+            return inv
+    return None
+
+
+def test_a_send_repeat_held_behind_the_sender_lock_past_the_expiry_answers_expired(monkeypatch):
+    """A send repeated with its key while a second session holds the
+    sender's per-sender mail lock, the invite expiring during that wait,
+    answers it 'expired': the repeat compares expiry with the clock when its
+    read runs. Mutant: that read on NOW(), the transaction's start, answers
+    'pending'."""
+    async def body(env):
+        async def scene():
+            lid, (h,) = await env.lobby("team", 1)
+            p = await env.player()
+            k = key()
+            first = await env.send(h, p, "team", lid, k=k)
+            assert first.status == 200, first
+            iid = uuid.UUID(first["invite_id"])
+            ans = await _past_expiry_behind_a_lock(env, iid, _SENDER_HOLD, h.id,
+                                                   lambda: env.send(h, p, "team", lid, k=k))
+            assert ans.status == 200 and ans["invite_id"] == str(iid), ans
+            return ans["state"]
+
+        assert await scene() == "expired"
+        with env.rewriting("(expires_at <= clock_timestamp()) AS past", "(expires_at <= NOW()) AS past",
+                           where="SELECT id, mode, lobby_id, kind, state, expires_at,") as hits:
+            state = await scene()
+        assert hits
+        assert state == "pending", ("the NOW() mutant answered it expired", state)
+    case(monkeypatch, body)
+
+
+def test_the_inbox_held_behind_a_table_lock_past_the_expiry_shows_the_invite_expired(monkeypatch):
+    """The invitee's inbox, read while a second session holds lobby_invites
+    and the invite expires during that wait, shows the invite 'expired' with
+    no seconds left: the invite view compares expiry with the clock when its
+    statement runs. Mutant: that reading on NOW() shows it pending."""
+    async def body(env):
+        async def scene():
+            lid, (h,) = await env.lobby("team", 1)
+            p = await env.player()
+            iid = await env.invite(h, p, "team", lid)
+            ans = await _past_expiry_behind_a_lock(
+                env, iid, _TABLE_HOLD, None,
+                lambda: env.call(lambda db: main.mail_inbox(Req(p.sid), cursor="",
+                                                            limit=main.MAIL_PAGE_MAX, db=db)))
+            assert ans.status == 200, ans
+            inv = _invite_in_inbox(ans, iid)
+            assert inv is not None, ans
+            return inv["state"], inv["seconds_left"]
+
+        assert await scene() == ("expired", 0)
+        with env.rewriting("SELECT clock_timestamp() AS at", "SELECT NOW() AS at", where=_VIEW_FROM) as hits:
+            state, left = await scene()
+        assert hits
+        assert state == "pending" and left > 0, ("the NOW() mutant showed it expired", state, left)
+    case(monkeypatch, body)
+
+
+def test_the_pending_list_held_behind_a_table_lock_past_the_expiry_leaves_the_invite_out(monkeypatch):
+    """The invitee's pending list, read while a second session holds
+    lobby_invites and the invite expires during that wait, leaves it out:
+    its filter compares expiry with the clock when the statement runs.
+    Mutant: that reading on NOW() lists it."""
+    async def body(env):
+        async def scene():
+            lid, (h,) = await env.lobby("team", 1)
+            p = await env.player()
+            iid = await env.invite(h, p, "team", lid)
+            ans = await _past_expiry_behind_a_lock(env, iid, _TABLE_HOLD, None, lambda: env.pending(p))
+            assert ans.status == 200, ans
+            return [i["invite_id"] for i in ans["invites"]], str(iid)
+
+        listed, _iid = await scene()
+        assert listed == [], listed
+        with env.rewriting("SELECT clock_timestamp() AS at", "SELECT NOW() AS at", where=_VIEW_FROM) as hits:
+            listed, iid = await scene()
+        assert hits
+        assert listed == [iid], ("the NOW() mutant left the invite out", listed)
+    case(monkeypatch, body)
+
+
+def test_a_lobby_list_held_behind_a_table_lock_past_the_expiry_shows_the_invite_expired(monkeypatch):
+    """A member's lobby state, read while a second session holds lobby_invites
+    and an invite expires during that wait, lists it 'expired' with no
+    seconds left and no cancel: the lobby list compares expiry with the clock
+    when its statement runs. Mutant: that reading on NOW() lists it pending
+    and cancellable."""
+    async def body(env):
+        async def scene():
+            lid, (h,) = await env.lobby("team", 1)
+            p = await env.player()
+            iid = await env.invite(h, p, "team", lid)
+            ans = await _past_expiry_behind_a_lock(
+                env, iid, _TABLE_HOLD, None,
+                lambda: env.call(lambda db: main._lobby_state_impl("team", h.sid, Req(h.sid), db)))
+            assert ans.status == 200, ans
+            (inv,) = [i for i in ans["invites"] if i["invite_id"] == str(iid)]
+            return inv["state"], inv["seconds_left"], inv["can_cancel"]
+
+        assert await scene() == ("expired", 0, False)
+        with env.rewriting("SELECT clock_timestamp() AS at", "SELECT NOW() AS at", where=_LIST_FROM) as hits:
+            state, left, can_cancel = await scene()
+        assert hits
+        assert (state, can_cancel) == ("pending", True) and left > 0, (
+            "the NOW() mutant listed it expired", state, left, can_cancel)
+    case(monkeypatch, body)
+
+
+def test_the_sweep_held_behind_a_table_lock_past_the_expiry_ends_the_invite_expired(monkeypatch):
+    """A pending invite whose lobby has closed, swept while a second session
+    holds lobby_invites and the invite expires during that wait, is ended
+    'expired' with no end_reason: the sweep compares expiry with the clock
+    when its statement runs. Mutant: that reading on NOW() ends it void,
+    lobby_closed."""
+    async def body(env):
+        async def scene():
+            lid, (h,) = await env.lobby("team", 1)
+            p = await env.player()
+            iid = await env.invite(h, p, "team", lid)
+            await env.conn.execute("UPDATE %s SET status = 'canceled' WHERE id = $1" % LOBBY_TABLE["team"],
+                                   lid)
+            await _past_expiry_behind_a_lock(env, iid, _TABLE_HOLD, None, env.sweep)
+            r = await env.row(iid)
+            return r["state"], r["end_reason"]
+
+        assert await scene() == ("expired", None)
+        with env.rewriting("SELECT clock_timestamp() AS at", "SELECT NOW() AS at",
+                           where="UPDATE lobby_invites i") as hits:
+            got = await scene()
+        assert hits
+        assert got == ("void", "lobby_closed"), ("the NOW() mutant ended it expired", got)
+    case(monkeypatch, body)
+
+
+# main.py's invite code runs from INVITE_LIFETIME_MINUTES to the end of
+# _invite_retention_sweep. Every SQL text there compares an invite's expiry
+# with the clock when its statement runs. NOW() and the other clocks that
+# stand still for a transaction or a statement appear there only as a value a
+# write stores: an invite's ended_at, a revision's updated_at, and a new
+# invite's expires_at (NOW() plus its lifetime).
+_STILL_CLOCKS = re.compile(r"\b(now\(\)|current_timestamp|transaction_timestamp\(\)|statement_timestamp\(\)"
+                           r"|localtimestamp|current_time|current_date)", re.I)
+_STORED_VALUES = (re.compile(r", ended_at = NOW\(\)"), re.compile(r", updated_at = NOW\(\)"),
+                  re.compile(r"NOW\(\) \+ make_interval\(mins => CAST\(:life AS integer\)\)"))
+
+
+_REGION_FIRST = re.compile(r"^INVITE_LIFETIME_MINUTES = ", re.M)
+_REGION_LAST = re.compile(r"^async def _invite_retention_sweep\(", re.M)
+_TOP_LEVEL = re.compile(r"^[^\s#)\]}]", re.M)
+# The statements and functions that hold the expiry reads; each must stand in the region.
+_REGION_NAMES = ("_INVITE_END_DEPARTED_SQL", "_INVITE_END_LOBBY_SQL", "_INVITE_END_KICKED_SQL",
+                 "_invite_send_repeat", "_INVITE_VIEW_SELECT", "_INVITE_LOBBY_LIST_SQL", "_INVITE_SWEEP_SQL",
+                 "_invite_retention_sweep")
+
+
+def _invite_region(source):
+    """main.py's invite code, parsed alone (one parse of the whole of
+    main.py takes seconds): from the INVITE_LIFETIME_MINUTES assignment to
+    the end of _invite_retention_sweep, where the next top-level statement
+    starts."""
+    assert len(_REGION_FIRST.findall(source)) == 1 and len(_REGION_LAST.findall(source)) == 1
+    first = _REGION_FIRST.search(source).start()
+    after = _TOP_LEVEL.search(source, source.index("\n", _REGION_LAST.search(source).end()) + 1)
+    tree = ast.parse(source[first:after.start() if after else len(source)])
+    last = tree.body[-1]
+    assert isinstance(last, ast.AsyncFunctionDef) and last.name == "_invite_retention_sweep", ast.dump(last)[:80]
+    return tree
+
+
+def _region_names(tree):
+    """The names the region's top-level statements define."""
+    out = set()
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            out.add(node.name)
+        elif isinstance(node, ast.Assign):
+            out.update(getattr(t, "id", None) for t in node.targets)
+    return out
+
+
+def _invite_sql_texts(source):
+    """Every string constant in main.py's invite code, docstrings left out."""
+    tree = _invite_region(source)
+    docs = set()
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and node.body \
+                and isinstance(node.body[0], ast.Expr) and isinstance(node.body[0].value, ast.Constant):
+            docs.add(id(node.body[0].value))
+    return [n.value for n in ast.walk(tree)
+            if isinstance(n, ast.Constant) and isinstance(n.value, str) and id(n) not in docs]
+
+
+def _invite_clock_defects(source):
+    """Each still clock in the invite code's SQL that is not a stored value."""
+    out = []
+    for sql in _invite_sql_texts(source):
+        rest = sql
+        for stored in _STORED_VALUES:
+            rest = stored.sub("", rest)
+        out.extend("%s in %r" % (m.group(0), sql[:70]) for m in _STILL_CLOCKS.finditer(rest))
+    return out
+
+
+def test_no_invite_read_compares_expiry_with_a_clock_that_stands_still():
+    """No SQL text in the invite code compares with NOW() or another clock
+    that stands still for a transaction or a statement; such a clock appears
+    only as a value a write stores. The negative control: each still clock,
+    planted in a copy of main.py at one expiry comparison of each read (the
+    send's repeat, the invitee's view, the pending filter, the lobby list's
+    horizon, the sweep, retention), is reported."""
+    with open(main.__file__, encoding="utf-8") as f:
+        source = f.read()
+    missing = set(_REGION_NAMES) - _region_names(_invite_region(source))
+    assert not missing, ("the invite region lacks", sorted(missing))
+    assert _invite_sql_texts(source), "the invite code holds no SQL text"
+    assert _invite_clock_defects(source) == []
+    mutants = {
+        "the send's repeat": ("expires_at, (expires_at <= clock_timestamp()) AS past",
+                              "expires_at, (expires_at <= NOW()) AS past"),
+        "the invitee's view": ("i.mail_message_id, (i.expires_at <= t.at) AS past,",
+                               "i.mail_message_id, (i.expires_at <= CURRENT_TIMESTAMP) AS past,"),
+        "the pending filter": ("AND i.state = 'pending' AND i.expires_at > t.at",
+                               "AND i.state = 'pending' AND i.expires_at > statement_timestamp()"),
+        "the lobby list's horizon": ("> t.at - make_interval(secs => CAST(:shown AS double precision))",
+                                     "> transaction_timestamp() - make_interval(secs => CAST(:shown AS double precision))"),
+        "the sweep": ("AND NOT (i.expires_at > t.at", "AND NOT (i.expires_at > now()"),
+        "retention": ("WHERE expires_at < (SELECT clock_timestamp())", "WHERE expires_at < LOCALTIMESTAMP"),
+    }
+    for what, (old, new) in mutants.items():
+        assert source.count(old) == 1, what
+        assert _invite_clock_defects(source.replace(old, new)), "%s was not reported" % what
