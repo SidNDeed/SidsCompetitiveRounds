@@ -3263,7 +3263,7 @@ def test_the_lease_gate_is_never_wrapped_in_a_swallowing_scope(site):
 # commitment point by definition, whether or not anyone remembered to list it.
 #
 # The walk is interprocedural because the code is: team_lobby_start and
-# ovt_lobby_start acquire in their OWN bodies (team_lobby_start's one _lease_acquire_many call at main.py:59262, ovt_lobby_start's at main.py:59402) while the gate
+# ovt_lobby_start acquire in their OWN bodies (team_lobby_start's one _lease_acquire_many call at main.py:59265, ovt_lobby_start's at main.py:59409) while the gate
 # that covers them lives in _lobby_start_common, which they call. A per-function
 # pass calls those two ungated and is simply wrong, which is the kind of
 # false positive that gets a test deleted rather than fixed.
@@ -5676,7 +5676,7 @@ def test_r8_frozen_callee_picks_one_name_of_a_frozen_statement():
 # --- round 8, M1: the static S analysis retired; a frozen execute lookup ----
 # Ruling REHEARSAL-FOUR-R7-A1 M1 and W30b's rulings (a) and (b): an execute
 # is 'read' only at a ro_covered.COVERED position whose OUTCOME is 'ok';
-# WRITERS (main.py:16906 and :51983 included: grammar/lookup writers, not
+# WRITERS (main.py:16906 and :51986 included: grammar/lookup writers, not
 # role-bound), the covered positions the role did not reach, and every
 # position in neither table are 'write'.
 
@@ -5691,7 +5691,7 @@ _SR_RETIRED = ("SqlLists", "_SQL_END_WORDS", "_SQL_OTHER_COMMANDS", "_DML",
 def test_r8_sr_the_lookup_reads_only_the_covered_ok_positions():
     """The lookup, position by position (ruling R-A): every COVERED
     position whose OUTCOME is green reads; every WRITERS position locks
-    (main.py:16906 and :51983 named: 'ok' under the role, so the walk's lock
+    (main.py:16906 and :51986 named: 'ok' under the role, so the walk's lock
     rule alone bounds them); every other COVERED position (the reads the
     role did not reach) and a real execute in no table is a write; the key
     holds the file (a WRITERS line under another file's name is a write)."""
@@ -5724,7 +5724,7 @@ def test_r8_sr_the_lookup_reads_only_the_covered_ok_positions():
         b, c = _sr_placed(e)
         want = "read" if e[1:4] in ok else "lock" if e[1:4] in locks else "write"
         assert b.execute_kind(c, _A1_TABLE) == want, (e, want)
-    for ln in (16906, 51983):
+    for ln in (16906, 51986):
         e = [w for w in _ro.WRITERS if w[1] == "main.py" and w[2] == ln][0]
         b, c = _sr_placed(e)
         assert b.execute_kind(c, _A1_TABLE) == "lock", e
