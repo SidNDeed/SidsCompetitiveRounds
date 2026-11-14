@@ -91,8 +91,6 @@ def test_the_shared_budget_fixture_pins_the_bytes_the_client_must_produce():
 # -- M-8: the enumerated and cross-field event invariants ------------------------
 
 EVENT_CASES = [
-    ("blk_sent", [1, 0, 0, -1], "blk_sent.own_open"),
-    ("blk_sent", [1, 0, 0, 200], "blk_sent.own_open"),
     ("hit_recv", [1, 5, 7, 0, 5, 0, 1, -1], "hit_recv.path"),
     ("hit_recv", [0, 5, 7, 0, 5, 0, 1, -1], "hit_recv.pid"),
     ("hit_sent", [0, 5, 7, 0, -1, 0, 0, -1, 0, 0], "hit_sent.pid"),
@@ -108,6 +106,10 @@ EVENT_CASES = [
 ]
 EVENT_CONTROLS = [
     ("blk_sent", [1, 0, 0, 0]), ("blk_sent", [1, 0, 0, -200]),
+    # own_open is a raw signed ms difference (contract 2 as shipped): the two
+    # values that once pinned a refusal are what an unmodified 1.41.0 client
+    # writes (jitter on the own block, an echo step)
+    ("blk_sent", [1, 0, 0, -1]), ("blk_sent", [1, 3, 0, 200]),
     ("hit_recv", [0, 5, 0, 0, 5, 0, 1, -1]),
     ("hit_sent", [1, 5, 7, 0, -1, 0, 0, -1, 0, 0]),
     # the three valid states: none (-1, [0,-1,0]), keyed (>= 0, a block), unkeyed (>= 0, [0,-1,0])
@@ -130,6 +132,18 @@ def test_m8_an_event_breaking_an_invariant_is_refused_by_name(field, entry, name
 @pytest.mark.parametrize("field,entry", EVENT_CONTROLS)
 def test_m8_control_the_legal_forms_pass(field, entry):
     se.check_record(fx.base_record(**{field: [entry]}))
+
+
+@pytest.mark.parametrize("own_open", [-600000, -201, -1, 1, 203, 600000])
+def test_own_open_is_any_integer_inside_the_ms_bound(own_open):
+    se.check_record(fx.base_record(blk_sent=[[1, 0, 0, own_open]]))
+
+
+@pytest.mark.parametrize("own_open", [600001, -600001, 1.5, 200.0, "0", True, None])
+def test_own_open_outside_the_ms_bound_is_refused_under_the_field_name(own_open):
+    with pytest.raises(se.EvidenceRefused) as e:
+        se.check_record(fx.base_record(blk_sent=[[1, 0, 0, own_open]]))
+    assert (e.value.status, e.value.field) == (422, "blk_sent")
 
 
 # -- round 2 new L: the optional `end` key (amendment A1) -------------------------

@@ -1391,7 +1391,8 @@ def test_the_sighting_is_published_only_after_the_match_has_committed():
     after it: read, hold, commit, then note."""
     src = inspect.getsource(main.submit_match)
     read_at = src.index("SELECT region FROM issued_room_regions")
-    commit_at = src.index("await db.commit()", read_at)
+    # the report's commit goes through _commit_new_match (its duplicate arm)
+    commit_at = src.index("await _commit_new_match(db)", read_at)
     publish_at = src.index("_note_region_seen(*_region_sighting)")
     assert read_at < commit_at < publish_at, (
         "the sighting is published before the match it witnesses is committed"

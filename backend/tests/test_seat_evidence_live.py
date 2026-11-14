@@ -1019,6 +1019,59 @@ def test_b7_the_client_envelopes_go_through_the_route_and_all_eight_are_stored_b
         assert all(len(e) == 10 for e in se._jsonv(row[0]["payload"])["hit_sent"])
 
 
+# -- own_open as the shipped client writes it (lane server-fix-1114, part C) -----
+
+OO_A, OO_B = "1000000000000701", "1000000000000702"
+
+
+def _own_open_post(live, key, revs=None):
+    """Seat A's record carrying an echo entry (kind 3, own_open 203) and a
+    jitter entry on its own block (kind 0, own_open -1), seat B's plain one,
+    through the route; then the worker's pass over the game when `revs`."""
+    import hashlib
+    blk = [[5000, 0, 0, -1], [5000, 3, 0, 203]]
+
+    async def go():
+        sm = live.sm
+        ids = await _players(sm, OO_A, OO_B)
+        ta, tb = await _session(sm, OO_A), await _session(sm, OO_B)
+        await _match(sm, ids, OO_A, OO_B, key + "_r8", minutes_ago=10)
+        mine = _body(OO_A, OO_B, key, blk_sent=blk)
+        posted = [await _post(sm, mine, ta),
+                  await _post(sm, _body(OO_B, OO_A, key, rounds=[3, 5]), tb)]
+        rows = await _rows(sm, "SELECT p.steam_id, e.payload, e.payload_sha256 FROM seat_evidence e "
+                               "JOIN players p ON p.id = e.seat_player_id "
+                               "WHERE e.stable_game_key = :k ORDER BY e.id", k=key)
+        st = await se.games_pass(sm, revs.shadow) if revs is not None else None
+        return posted, rows, st, hashlib.sha256(mine["record"].encode("ascii")).hexdigest(), blk
+    return live.run(go())
+
+
+def test_own_open_raw_ms_is_stored_as_sent_and_the_worker_evaluates_it(live, signing, revs):
+    posted, rows, st, sha, blk = _own_open_post(live, "ranked_sevoo_000001", revs)
+    assert [p[0] for p in posted] == [200, 200], posted
+    mine = [r for r in rows if r["steam_id"] == OO_A]
+    assert len(mine) == 1 and mine[0]["payload_sha256"] == sha        # byte for byte as received
+    assert se._jsonv(mine[0]["payload"])["blk_sent"] == blk           # not rewritten, rounded or mapped
+    assert not _errors(st), st                                         # the worker read it without error
+
+
+def test_control_the_two_state_rule_restored_refuses_it_as_own_open(live, signing, monkeypatch):
+    """Mutant: the removed rule put back in front of the real check_events.
+    The same record is then refused 422 blk_sent.own_open."""
+    real = se.check_events
+
+    def two_state(rec):
+        for e in rec["blk_sent"]:
+            if e[3] not in (0, -200):
+                raise se.EvidenceRefused(422, "blk_sent.own_open")
+        real(rec)
+    monkeypatch.setattr(se, "check_events", two_state)
+    posted, rows, _, _, _ = _own_open_post(live, "ranked_sevoo_000002")
+    assert posted[0] == (422, {"detail": "blk_sent.own_open"}), posted
+    assert not [r for r in rows if r["steam_id"] == OO_A], rows
+
+
 # -- last in this module: it drops the lane's tables and puts them back ---------
 
 def test_the_rollback_removes_exactly_what_368_added_and_368_reapplies(live):
