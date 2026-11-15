@@ -1,20 +1,29 @@
 """The evidence refusal census (migration 414, evidence_refusal_daily), against
-a real PostgreSQL (lane server-fix-1114, part B, fix 2).
+a real PostgreSQL (lane server-fix-1114, part B, fixes 2 and 3).
 
-The method (fix 2): the request path only NOTES. ONE counting place,
+The method: the request path only NOTES. ONE counting place,
 main.evidence_census_gate, notes every FINAL answer of 400..599 to a POST on
 one of the four evidence paths in a bounded in-memory tally (_evc_settle and
 _evc_note, plain functions), under the field the route left on request.state
-(_evc_leave) or the gate_* field of the status. ONE janitor step,
-_evc_flush_janitor_step in queue_cleanup_loop, writes the tally's deltas.
+(_evc_leave) or the gate_* field of the status. queue_cleanup_loop's census
+step, _evc_flush_kick, is a plain function too (fix 3): it starts ONE task,
+_evc_flush_janitor_step, which writes the tally's deltas, and never awaits
+it; while that task runs no second one starts.
 
-  P1  structure, by the parse tree of main.py as it is on disk: the note,
+  P1  structure, by the parse tree of main.py as it is on disk, every name
+      resolved through its bindings (an alias such as `emit = print`, in the
+      function or at module level, is followed to what it names): the note,
       the settle and the leave, and every main.py function they reach, are
       plain functions with no await, no output call (a called name holding
-      `print`) and no name of a session, engine, connection, output stream,
-      write, log, sleep, file or socket; the gate holds exactly one await
-      (call_next); none of the four routes calls a census function but
-      _evc_leave. One mutant each, and four in the helpers.
+      `print`, or any name resolving to an output builtin) and no name of a
+      session, engine, connection, output stream, write, log, sleep, file or
+      socket, and every callee resolves to a main.py function, a builtin or
+      an attribute; the gate holds exactly one await (call_next); each of
+      the four routes, through every main.py function it reaches, meets no
+      census function but _evc_leave and calls nothing unresolved; no other
+      api module names a census function. One mutant each, round 3's two
+      among them (an alias of print in the note; a route counting through a
+      neutral helper).
   P2  through the whole ASGI app, reading the TALLY: each place of the
       derivation table, a route refusal once, a refusal whose session
       cleanup then fails (500 with the route's field) once, an unhandled
@@ -25,10 +34,14 @@ _evc_flush_janitor_step in queue_cleanup_loop, writes the tally's deltas.
       line and is reset. The fill's size is this file's constant CAP, never
       the attribute a control patches.
   P4  the flush: deltas added, last_at never moves back, the tally empty
-      afterwards; two flushes add; a failure before the commit merges back;
-      a failure of the commit drops the batch and prints its size; the table
-      absent: the step skips and keeps the tally; an empty tally executes
-      nothing; the transaction's three settings are in effect.
+      afterwards; two flushes add; a note before UTC midnight and one after
+      give two daily rows of one each; a failure before the commit merges
+      back; a failure of the commit drops the batch and prints its size, and
+      the failure caught is the planted one (its message and SQLSTATE); the
+      table absent: the step skips and keeps the tally; an empty tally
+      executes nothing; the transaction's three settings are in effect.
+      Every note and lookup here names its day (_DAY, read from the clock
+      once), so no proof depends on when it runs.
   P5  the janitor: the live inventory has no dynamic site and holds the
       flush's statements by name; the real boot self-test, run against this
       database (414 applied), checks each of them with verdict explained (a
@@ -39,24 +52,42 @@ _evc_flush_janitor_step in queue_cleanup_loop, writes the tally's deltas.
       42P01 and janitor_selftest reads 0, and the flush step skips and keeps
       the tally. Every bind of every census statement is typed.
   P6  end to end once: a refused seat record through the stack, then one
-      janitor step: the row is in evidence_refusal_daily with n = 1.
+      flush: the row of the note's own day is in evidence_refusal_daily
+      with n = 1.
+  TH  the census off the janitor's path (fix 3), with the real
+      queue_cleanup_loop driven pass by pass against this case and a flush
+      whose COMMIT is held by a planted deferred trigger until the test
+      releases it: TH1 passes run to their end inside a stated bound while
+      it is held, and the steps around the census step run in each; TH2 one
+      flush task and one stalled census connection, notes still taken and
+      the excess over the cap counted as dropped; TH3 released, the next
+      pass starts a new flush and the table holds what was noted meanwhile
+      less what was dropped; TH4 a flush that raises is collected by the
+      next pass, printed once, and a new flush starts; TH5 structure: the
+      loop awaits nothing that is or reaches census code, and the kick has
+      no await. Each with its mutant.
   B   the key's bounds: the version rule, the vocabulary, the 401 rule, the
       table's CHECKs, real records (stored, repeat, conflict, a made-up key).
 
 No proof here depends on a wall-clock race: nothing on the request path
-waits on anything. Every control runs one mutant and asserts the mutant's
-OWN outcome (lesson 1187).
+waits on anything, and TH's bounds are wide margins over what a pass takes.
+Every control runs one mutant and asserts the mutant's OWN outcome (lesson
+1187).
 
 Built on seat_evidence_pg's case (every numbered migration replayed, so 414 is
 in it) and the seat-evidence live helpers.
 """
 import ast
+import asyncio
+import builtins
 import contextlib
 import io
 import json
+import os
 import re
+import time
 import types
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import httpx
 import pytest
@@ -106,11 +137,14 @@ REFUSALS = sorted(n for n, (_p, want) in SCENARIOS.items() if want is not None)
 
 @pytest.fixture(autouse=True)
 def _fresh_tally(monkeypatch):
-    """Every test starts on an empty tally, no dropped number and no cached
-    table answer; the module's own state is put back afterwards."""
+    """Every test starts on an empty tally, no dropped number, no cached
+    table answer and an empty flush slot; the module's own state is put back
+    afterwards. (A TH test ends every flush task it started before it
+    returns: this module's tests share one event loop.)"""
     monkeypatch.setattr(main, "_EVC_TALLY", {})
     monkeypatch.setattr(main, "_EVC_DROPPED", [0])
     monkeypatch.setattr(main, "_EVC_TABLE_FOUND", False)
+    monkeypatch.setattr(main, "_EVC_FLIGHT", {"task": None, "since": 0.0, "passes": 0})
     yield
 
 
@@ -228,9 +262,13 @@ def _once(out, key):
 # A name (a variable, a called name or an attribute) whose presence means I/O:
 # a session, engine, connection or bind; an output stream, a write, a flush or
 # a log; a blocking sleep; a file, a socket, a process or a URL. An output
-# CALL is also any called name holding `print` (print, _janitor_print).
+# CALL is also any called name holding `print` (print, _janitor_print), and
+# any name that resolves, by any alias, to a builtin in _OUTPUT.
 _NO_IO_NAME = re.compile(r"session|engine|connect|bind|^db$|stdout|stderr|^write$|^writelines$"
                          r"|^flush$|logg|sleep|^open$|socket|subprocess|urlopen")
+_OUTPUT = frozenset({"print", "open", "input", "breakpoint", "exec", "eval", "compile", "__import__"})
+_FUNCS = (ast.FunctionDef, ast.AsyncFunctionDef)
+_UNITS = _FUNCS + (ast.ClassDef,)
 PLAIN = ("_evc_note", "_evc_settle", "_evc_leave")
 # Every main.py function the request path's census reaches from PLAIN (the
 # note, the settle, the leave and their helpers): pinned, so a new helper is
@@ -260,45 +298,259 @@ def _sources(*names):
     return {name: ast.get_source_segment(src, _function(tree, name)) for name in names}
 
 
-def _plain_violations(tree, name):
-    """What makes `name` other than a plain, I/O-free function."""
-    f = _function(tree, name)
+def _targets(t):
+    """(name, single) for each name an assignment target binds; single when
+    the target is the name itself, so its value is the bound value."""
+    if isinstance(t, ast.Name):
+        yield t.id, True
+    elif isinstance(t, (ast.Tuple, ast.List)):
+        for e in t.elts:
+            for name, _single in _targets(e):
+                yield name, False
+    elif isinstance(t, ast.Starred):
+        for name, _single in _targets(t.value):
+            yield name, False
+
+
+def _bindings(nodes):
+    """name -> what each binding among `nodes` binds it to: the value node of
+    a plain `name = value` (`name: T = value`, `name := value`), ("import",
+    the imported name) for an import, and None for every other form
+    (unpacking, augmented assignment, for, with, except, a def or class, a
+    parameter of a nested function or lambda, global, nonlocal, match)."""
+    out = {}
+
+    def put(name, value):
+        out.setdefault(name, []).append(value)
+    for n in nodes:
+        if isinstance(n, ast.Assign):
+            for t in n.targets:
+                for name, single in _targets(t):
+                    put(name, n.value if single else None)
+        elif isinstance(n, ast.AnnAssign) and isinstance(n.target, ast.Name):
+            put(n.target.id, n.value)
+        elif isinstance(n, ast.NamedExpr):
+            put(n.target.id, n.value)
+        elif isinstance(n, ast.AugAssign):
+            for name, _single in _targets(n.target):
+                put(name, None)
+        elif isinstance(n, (ast.For, ast.AsyncFor, ast.comprehension)):
+            for name, _single in _targets(n.target):
+                put(name, None)
+        elif isinstance(n, ast.withitem) and n.optional_vars is not None:
+            for name, _single in _targets(n.optional_vars):
+                put(name, None)
+        elif isinstance(n, ast.ExceptHandler) and n.name:
+            put(n.name, None)
+        elif isinstance(n, (ast.Import, ast.ImportFrom)):
+            for a in n.names:
+                put((a.asname or a.name).split(".")[0], ("import", a.name))
+        elif isinstance(n, _UNITS):
+            put(n.name, None)
+        elif isinstance(n, ast.arg):
+            put(n.arg, None)
+        elif isinstance(n, (ast.Global, ast.Nonlocal)):
+            for name in n.names:
+                put(name, None)
+        elif isinstance(n, (ast.MatchAs, ast.MatchStar)) and n.name:
+            put(n.name, None)
+        elif isinstance(n, ast.MatchMapping) and n.rest:
+            put(n.rest, None)
+    return out
+
+
+def _shallow(stmts):
+    """The nodes of a module's own statements: a def, a class or a lambda met
+    there binds its name, but its body is another scope's (its decorators and
+    defaults are this scope's)."""
+    todo = list(stmts)
+    while todo:
+        n = todo.pop()
+        yield n
+        if isinstance(n, _UNITS):
+            todo.extend(n.decorator_list)
+            if not isinstance(n, ast.ClassDef):
+                todo.extend(d for d in n.args.defaults + n.args.kw_defaults if d is not None)
+            continue
+        if isinstance(n, ast.Lambda):
+            continue
+        todo.extend(ast.iter_child_nodes(n))
+
+
+class _Names:
+    """What a name read in main.py is bound to, by the parse tree: a top-level
+    function or class of main.py ('def', 'class'), an import, a builtin, a
+    parameter, another value, or 'unresolved' (bound more than once, bound by
+    a form _bindings does not follow, or bound nowhere). An alias (`emit =
+    print`, at module level or inside the function) is followed to what it
+    names."""
+
+    def __init__(self, tree):
+        self.units, self.twice = {}, set()
+        for n in tree.body:
+            if isinstance(n, _UNITS):
+                if n.name in self.units:
+                    self.twice.add(n.name)
+                self.units[n.name] = n
+        self.module = _bindings(_shallow([s for s in tree.body if not isinstance(s, _UNITS)]))
+        self._scopes = {}
+
+    def _scope(self, f):
+        if id(f) not in self._scopes:
+            nodes = [n for s in f.body for n in ast.walk(s)]
+            params = set()
+            if not isinstance(f, ast.ClassDef):
+                a = f.args
+                params = {x.arg for x in a.posonlyargs + a.args + a.kwonlyargs}
+                params |= {x.arg for x in (a.vararg, a.kwarg) if x is not None}
+            glob = {name for n in nodes if isinstance(n, ast.Global) for name in n.names}
+            self._scopes[id(f)] = (_bindings(nodes), params, glob)
+        return self._scopes[id(f)]
+
+    def resolve(self, name, f=None, depth=0):
+        if depth > 16:
+            return "unresolved", name + " (alias chain)"
+        if f is not None:
+            local, params, glob = self._scope(f)
+            if name not in glob:
+                if name in local:
+                    return self._value(local[name], f, depth)
+                if name in params:
+                    return "param", name
+        if name in self.module:
+            if name in self.units:
+                return "unresolved", name + " (bound twice)"
+            return self._value(self.module[name], None, depth)
+        if name in self.units:
+            if name in self.twice:
+                return "unresolved", name + " (defined twice)"
+            return ("class" if isinstance(self.units[name], ast.ClassDef) else "def"), name
+        if hasattr(builtins, name):
+            return "builtin", name
+        return "unresolved", name
+
+    def _value(self, values, f, depth):
+        if len(values) != 1:
+            return "unresolved", "bound %d times" % len(values)
+        v = values[0]
+        if isinstance(v, tuple):
+            return "import", v[1]
+        if isinstance(v, ast.Name):
+            return self.resolve(v.id, f, depth + 1)
+        if v is None:
+            return "unresolved", "bound by a form this check does not follow"
+        return "value", ast.unparse(v)[:60]
+
+
+def _names(src=None):
+    return _Names(ast.parse(src if src is not None else _main_source()))
+
+
+def _callee(nm, call, f):
+    """A call's callee: a name as _Names resolves it; ('attr', name) for an
+    attribute call; ('dynamic', text) for any other expression."""
+    if isinstance(call.func, ast.Name):
+        return nm.resolve(call.func.id, f)
+    if isinstance(call.func, ast.Attribute):
+        return "attr", call.func.attr
+    return "dynamic", ast.unparse(call.func)[:60]
+
+
+def _plain_violations(nm, name):
+    """What makes `name` other than a plain, I/O-free function whose every
+    callee is resolved: a coroutine; an await; an output call (a called name
+    holding `print`, or any name that resolves, by any alias, to a builtin in
+    _OUTPUT); a callee that is not a main.py function, a builtin or an
+    attribute (an import, a class, a parameter, a value, a dynamic
+    expression, anything unresolved); an I/O name."""
+    f = nm.units[name]
     out = []
     if isinstance(f, ast.AsyncFunctionDef):
         out.append((name, "coroutine"))
+    called = {id(n.func) for n in ast.walk(f) if isinstance(n, ast.Call)}
     for n in ast.walk(f):
-        if isinstance(n, ast.Await):
+        if isinstance(n, (ast.Await, ast.AsyncFor, ast.AsyncWith)):
             out.append((name, "await"))
         if isinstance(n, ast.Call):
-            called = n.func.id if isinstance(n.func, ast.Name) else getattr(n.func, "attr", "")
-            if "print" in called:
+            kind, what = _callee(nm, n, f)
+            shown = n.func.id if isinstance(n.func, ast.Name) else what
+            if kind != "dynamic" and "print" in shown:
                 out.append((name, "print"))
+            elif kind == "builtin" and what in _OUTPUT:
+                out.append((name, "output " + what))
+            elif kind not in ("def", "builtin", "attr"):
+                out.append((name, "callee %s: %s %s" % (shown, kind, what)))
+        elif isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load) and id(n) not in called:
+            kind, what = nm.resolve(n.id, f)
+            if kind == "builtin" and what in _OUTPUT:
+                out.append((name, "output " + what))
         ident = n.id if isinstance(n, ast.Name) else n.attr if isinstance(n, ast.Attribute) else None
         if ident and _NO_IO_NAME.search(ident):
             out.append((name, "name " + ident))
     return out
 
 
-def _reached(tree, roots):
-    """The top-level functions of main.py that `roots` reach by naming them
-    (a call, or the function passed as a value), the roots included. The
-    walk visits each function once, so it ends."""
-    defs = {n.name: n for n in tree.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
+def _reached(nm, roots):
+    """The top-level functions (and classes) of main.py that `roots` reach by
+    any name that resolves to one (a call, an alias, the function passed as
+    a value), the roots included. Each is visited once, so the walk ends."""
     seen, todo = set(), list(roots)
     while todo:
         name = todo.pop()
         if name in seen:
             continue
         seen.add(name)
-        for n in ast.walk(defs[name]):
-            if isinstance(n, ast.Name) and n.id in defs and n.id not in seen:
-                todo.append(n.id)
+        f = nm.units[name]
+        for n in ast.walk(f):
+            if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load):
+                kind, what = nm.resolve(n.id, f)
+                if kind in ("def", "class") and what not in seen:
+                    todo.append(what)
     return seen
 
 
 def _reached_violations(src):
-    tree = ast.parse(src)
-    return sorted(v for name in _reached(tree, PLAIN) for v in _plain_violations(tree, name))
+    nm = _names(src)
+    return sorted(v for name in _reached(nm, PLAIN) for v in _plain_violations(nm, name))
+
+
+def _is_census(name):
+    return isinstance(name, str) and (name.startswith("_evc") or name == "evidence_census_gate")
+
+
+def _census_reach(nm, root):
+    """From `root`, through every main.py function or class it names, and
+    every one those name: the census functions met (recorded, not entered),
+    the census functions awaited, and every call whose callee does not
+    resolve to a main.py function or class, a builtin, an import or an
+    attribute (a parameter, a value, a dynamic expression, unresolved). An
+    attribute named like a census function counts as meeting it."""
+    seen, todo, met, awaited, unresolved = set(), [root], set(), set(), []
+    while todo:
+        name = todo.pop()
+        if name in seen:
+            continue
+        seen.add(name)
+        f = nm.units[name]
+        for n in ast.walk(f):
+            if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load):
+                kind, what = nm.resolve(n.id, f)
+                if kind in ("def", "class"):
+                    if _is_census(what):
+                        met.add(what)
+                    elif what not in seen:
+                        todo.append(what)
+            elif isinstance(n, ast.Attribute) and _is_census(n.attr):
+                met.add(n.attr)
+            elif isinstance(n, ast.Call):
+                kind, what = _callee(nm, n, f)
+                if kind not in ("def", "class", "builtin", "import", "attr"):
+                    unresolved.append((name, "%s: %s" % (kind, what)))
+            elif isinstance(n, ast.Await) and isinstance(n.value, ast.Call):
+                kind, what = _callee(nm, n.value, f)
+                if _is_census(what):
+                    awaited.add(what)
+    return met, awaited, sorted(unresolved)
 
 
 def _route_names():
@@ -310,46 +562,55 @@ def _route_names():
     return names
 
 
-def _census_calls(tree, name):
-    """Every census function `name` calls (a name starting _evc or naming
-    the census), and whether any of them is awaited."""
-    f = _function(tree, name)
-    called, awaited = set(), False
-    for n in ast.walk(f):
-        if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and (
-                n.func.id.startswith("_evc") or "census" in n.func.id):
-            called.add(n.func.id)
-        if isinstance(n, ast.Await) and isinstance(n.value, ast.Call) and isinstance(
-                n.value.func, ast.Name) and n.value.func.id.startswith("_evc"):
-            awaited = True
-    return called, awaited
-
-
 def _gate_awaits(tree):
     f = _function(tree, "evidence_census_gate")
     return [ast.unparse(n.value) for n in ast.walk(f) if isinstance(n, ast.Await)]
 
 
 def test_p1_the_note_the_settle_and_the_leave_are_plain_functions():
-    tree = ast.parse(_main_source())
+    nm = _names()
     for name in PLAIN:
-        assert _plain_violations(tree, name) == [], name
+        assert _plain_violations(nm, name) == [], name
 
 
 def test_p1_the_gate_awaits_call_next_only_and_counts_by_the_settle():
     tree = ast.parse(_main_source())
+    nm = _Names(tree)
     assert _gate_awaits(tree) == ["call_next(request)"]
-    assert _census_calls(tree, "evidence_census_gate") == ({"_evc_settle"}, False)
-    assert _plain_violations(tree, "evidence_census_gate").count(
-        ("evidence_census_gate", "print")) == 0
+    assert _census_reach(nm, "evidence_census_gate") == (
+        {"_evc_settle"}, set(), [("evidence_census_gate", "param: call_next")])
+    assert ("evidence_census_gate", "print") not in _plain_violations(nm, "evidence_census_gate")
 
 
 def test_p1_the_routes_only_leave_the_field():
-    tree = ast.parse(_main_source())
+    """Each route, and every main.py function it reaches, meets no census
+    function but _evc_leave, awaits none, and calls nothing unresolved."""
+    nm = _names()
     names = _route_names()
     assert sorted(names) == sorted(ROUTES) and all(names[k] == ROUTES[k][0] for k in ROUTES)
     for kind, name in names.items():
-        assert _census_calls(tree, name) == ({"_evc_leave"}, False), (kind, name)
+        assert _census_reach(nm, name) == ({"_evc_leave"}, set(), []), (kind, name)
+
+
+def test_p1_no_other_api_module_names_a_census_function():
+    """The reach above is main.py's; no other module of the api names a
+    census function (as a name, an attribute, an import or a string)."""
+    api = os.path.dirname(main.__file__)
+    for root, _dirs, files in os.walk(api):
+        for fn in sorted(files):
+            path = os.path.join(root, fn)
+            if not fn.endswith(".py") or os.path.samefile(path, main.__file__):
+                continue
+            with open(path, encoding="utf-8") as fh:
+                tree = ast.parse(fh.read())
+            found = set()
+            for n in ast.walk(tree):
+                for word in (getattr(n, "id", None), getattr(n, "attr", None),
+                             getattr(n, "name", None), getattr(n, "asname", None),
+                             n.value if isinstance(n, ast.Constant) else None):
+                    if _is_census(word):
+                        found.add(word)
+            assert found == set(), (fn, found)
 
 
 def test_p1_control_an_await_in_the_note():
@@ -360,7 +621,7 @@ def test_p1_control_an_await_in_the_note():
     old2 = "        now = datetime.now(timezone.utc)\n        key = (now.date(), kind, status, field, version)"
     assert src.count(old2) == 1
     src = src.replace(old2, "        await asyncio.sleep(0)\n" + old2)
-    assert _plain_violations(ast.parse(src), "_evc_note") == [
+    assert _plain_violations(_names(src), "_evc_note") == [
         ("_evc_note", "coroutine"), ("_evc_note", "await"), ("_evc_note", "name sleep")]
 
 
@@ -369,27 +630,62 @@ def test_p1_control_a_print_in_the_note():
     old2 = "        now = datetime.now(timezone.utc)\n        key = (now.date(), kind, status, field, version)"
     assert src.count(old2) == 1
     src = src.replace(old2, "        print('evc_probe_print')\n" + old2)
-    assert _plain_violations(ast.parse(src), "_evc_note") == [("_evc_note", "print")]
+    assert _plain_violations(_names(src), "_evc_note") == [("_evc_note", "print")]
+
+
+_SEAT_401 = ('        return _evc_leave(request, JSONResponse(status_code=401, '
+             'content={"detail": "seat_session"}))')
+
+
+def _in_the_seat_route(src, line):
+    """`line` put before submit_seat_evidence's 401 answer (the first of the
+    four routes' identical 401 lines)."""
+    assert src.count(_SEAT_401) == 4
+    i = src.index(_SEAT_401)
+    return src[:i] + line + src[i:]
+
+
+def _seat_and_card(src):
+    nm = _names(src)
+    return _census_reach(nm, "submit_seat_evidence"), _census_reach(nm, "submit_card_evidence")
 
 
 def test_p1_control_a_route_that_counts_by_itself():
-    src = _main_source()
-    old = ('        return _evc_leave(request, JSONResponse(status_code=401, '
-           'content={"detail": "seat_session"}))')
-    assert src.count(old) == 4
-    i = src.index(old)                                   # the first: submit_seat_evidence
-    src = src[:i] + '        _evc_note("seat", 401, "seat_session", "other")\n' + src[i:]
-    tree = ast.parse(src)
-    assert _census_calls(tree, "submit_seat_evidence") == ({"_evc_leave", "_evc_note"}, False)
-    assert _census_calls(tree, "submit_card_evidence") == ({"_evc_leave"}, False)
+    src = _in_the_seat_route(_main_source(), '        _evc_note("seat", 401, "seat_session", "other")\n')
+    seat, card = _seat_and_card(src)
+    assert seat == ({"_evc_leave", "_evc_note"}, set(), []) and card == ({"_evc_leave"}, set(), [])
+
+
+def test_p1_control_a_route_that_counts_through_a_neutral_helper():
+    """Round 3's mutant: the route calls a neutral helper, record_failure(),
+    and the helper counts."""
+    src = _in_the_seat_route(_main_source(), "        record_failure()\n")
+    src += '\n\ndef record_failure():\n    _evc_note("seat", 401, "seat_session", "other")\n'
+    seat, card = _seat_and_card(src)
+    assert seat == ({"_evc_leave", "_evc_note"}, set(), []) and card == ({"_evc_leave"}, set(), [])
+
+
+def test_p1_control_a_route_that_counts_through_a_module_alias():
+    src = _in_the_seat_route(_main_source(), '        probe_count("seat", 401, "seat_session", "other")\n')
+    src += "\n\nprobe_count = _evc_note\n"
+    seat, _card = _seat_and_card(src)
+    assert seat == ({"_evc_leave", "_evc_note"}, set(), [])
+
+
+def test_p1_control_a_route_with_a_dynamic_callee_is_refused():
+    src = _in_the_seat_route(_main_source(),
+                             '        globals()["_evc_note"]("seat", 401, "seat_session", "other")\n')
+    seat, _card = _seat_and_card(src)
+    assert seat == ({"_evc_leave"}, set(),
+                    [("submit_seat_evidence", "dynamic: globals()['_evc_note']")])
 
 
 def test_p1_everything_the_request_path_reaches_is_plain():
     """The note, the settle and the leave, and every main.py function they
-    reach: no coroutine, no await, no output call, no I/O name."""
+    reach: no coroutine, no await, no output call, no unresolved callee, no
+    I/O name."""
     src = _main_source()
-    tree = ast.parse(src)
-    reached = _reached(tree, PLAIN)
+    reached = _reached(_names(src), PLAIN)
     assert reached == REQUEST_PATH, sorted(reached ^ REQUEST_PATH)
     assert _reached_violations(src) == []
 
@@ -409,8 +705,38 @@ def _mutate(src, anchor, before):
 def test_p1_control_a_new_helper_of_the_note_that_prints():
     src = _mutate(_main_source(), _NOTE_FIRST, "        _evc_probe_helper()\n")
     src += "\n\ndef _evc_probe_helper():\n    print('evc_probe_print')\n"
-    assert _reached(ast.parse(src), PLAIN) == REQUEST_PATH | {"_evc_probe_helper"}
+    assert _reached(_names(src), PLAIN) == REQUEST_PATH | {"_evc_probe_helper"}
     assert _reached_violations(src) == [("_evc_probe_helper", "print")]
+
+
+def test_p1_control_an_alias_of_print_in_the_note():
+    """Round 3's mutant: `emit = print`, then `emit()`, inside the note."""
+    src = _mutate(_main_source(), _NOTE_FIRST, "        emit = print\n        emit('evc_probe')\n")
+    assert _reached_violations(src) == [("_evc_note", "output print"), ("_evc_note", "output print")]
+
+
+def test_p1_control_a_module_alias_of_print_in_a_helper():
+    src = _mutate(_main_source(), _FIELD_BODY, "    probe_emit('evc_probe')\n")
+    src += "\n\nprobe_emit = print\n"
+    assert _reached_violations(src) == [("_evc_field", "output print")]
+
+
+def test_p1_control_a_module_alias_of_a_helper_that_prints():
+    src = _mutate(_main_source(), _NOTE_FIRST, "        probe_say()\n")
+    src += "\n\ndef _probe_helper():\n    print('evc_probe_print')\n\n\nprobe_say = _probe_helper\n"
+    assert _reached(_names(src), PLAIN) == REQUEST_PATH | {"_probe_helper"}
+    assert _reached_violations(src) == [("_probe_helper", "print")]
+
+
+def test_p1_control_an_imported_callable_by_another_name():
+    src = _mutate(_main_source(), _VERSION_TEST,
+                  "    from time import sleep as pause\n    pause(0)\n")
+    assert _reached_violations(src) == [("_evc_version", "callee pause: import sleep")]
+
+
+def test_p1_control_a_dynamic_callee_in_a_helper():
+    src = _mutate(_main_source(), _FIELD_BODY, "    (lambda: None)()\n")
+    assert _reached_violations(src) == [("_evc_field", "callee lambda: None: dynamic lambda: None")]
 
 
 def test_p1_control_output_by_another_name_in_a_helper():
@@ -761,6 +1087,45 @@ def test_b5_each_kind_names_its_route_by_path():
     assert sorted(main._EVC_PATH_KINDS.values()) == sorted(ROUTES)
 
 
+# -- the day the flush proofs name ------------------------------------------------------
+
+# Three days before the clock's own UTC day, read once when this file is
+# imported, and its noon. Every P3, P4 and TH note is taken at a stated
+# instant (_note, default _DAY_NOON) and every lookup names its day, so no
+# proof depends on the clock crossing midnight while it runs; the crossing
+# itself is test_p4_a_note_before_utc_midnight_and_one_after_*.
+_DAY = datetime.now(timezone.utc).date() - timedelta(days=3)
+_DAY_NOON = datetime(_DAY.year, _DAY.month, _DAY.day, 12, tzinfo=timezone.utc)
+
+
+@contextlib.contextmanager
+def _clock(at):
+    """main's datetime.now answers `at` while the block runs. Only plain
+    calls run inside (the note): no await, so no other code runs meanwhile."""
+    class _At(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return at if tz is not None else at.replace(tzinfo=None)
+    real = main.datetime
+    main.datetime = _At
+    try:
+        yield
+    finally:
+        main.datetime = real
+
+
+def _note(*key, at=_DAY_NOON):
+    with _clock(at):
+        main._evc_note(*key)
+
+
+async def _rows_of(sm, day):
+    """The table's rows of one day: {(kind, status, field, version): n}."""
+    rows = await sl._rows(sm, "SELECT kind, status, field, mod_version, n FROM evidence_refusal_daily "
+                              "WHERE day = CAST(:d AS date)", d=day)
+    return {(r["kind"], r["status"], r["field"], r["mod_version"]): r["n"] for r in rows}
+
+
 # -- P3: the cap ----------------------------------------------------------------------
 
 # The production cap, restated as this file's constant. _fill_to_the_cap's
@@ -771,11 +1136,13 @@ CAP = 512
 
 
 def _fill_to_the_cap():
-    """CAP distinct keys, then a new key past the cap and an existing key."""
-    for i in range(CAP):
-        main._evc_note("seat", 422, "probe_%d" % i, "other")
-    main._evc_note("seat", 422, "probe_new", "other")              # a new key past the cap
-    main._evc_note("seat", 422, "probe_0", "other")                # an existing key
+    """CAP distinct keys, then a new key past the cap and an existing key,
+    every note at _DAY_NOON."""
+    with _clock(_DAY_NOON):
+        for i in range(CAP):
+            main._evc_note("seat", 422, "probe_%d" % i, "other")
+        main._evc_note("seat", 422, "probe_new", "other")          # a new key past the cap
+        main._evc_note("seat", 422, "probe_0", "other")            # an existing key
     return len(main._EVC_TALLY), main._EVC_DROPPED[0], _tally()
 
 
@@ -821,14 +1188,14 @@ def test_p3_control_the_cap_one_higher_nothing_is_dropped(monkeypatch):
 # -- P4: the flush -------------------------------------------------------------------
 
 _FUTURE_ROW = ("INSERT INTO evidence_refusal_daily (day, kind, status, field, mod_version, n, last_at) "
-               "VALUES (CAST(timezone('UTC', now()) AS date), 'seat', 403, 'signature', '1.41.0', 5, "
-               "now() + interval '1 day')")
+               "VALUES (DATE '%s', 'seat', 403, 'signature', '1.41.0', 5, now() + interval '1 day')"
+               % _DAY.isoformat())
 
 
-async def _row(sm, field="signature"):
+async def _row(sm, field="signature", day=_DAY):
     rows = await sl._rows(sm, "SELECT n, last_at, last_at > now() AS future FROM evidence_refusal_daily "
-                              "WHERE day = CAST(timezone('UTC', now()) AS date) AND kind = 'seat' "
-                              "AND status = 403 AND field = :f AND mod_version = '1.41.0'", f=field)
+                              "WHERE day = CAST(:d AS date) AND kind = 'seat' "
+                              "AND status = 403 AND field = :f AND mod_version = '1.41.0'", f=field, d=day)
     return dict(rows[0]) if rows else None
 
 
@@ -844,8 +1211,8 @@ async def _added_to_an_existing_row(live):
     await _exec(live, "DELETE FROM evidence_refusal_daily WHERE field IN ('signature', 'record')")
     await _exec(live, _FUTURE_ROW)
     for _ in range(2):
-        main._evc_note("seat", 403, "signature", "1.41.0")
-    main._evc_note("seat", 403, "record", "1.41.0")
+        _note("seat", 403, "signature", "1.41.0")
+    _note("seat", 403, "record", "1.41.0")
     lines = await _flush_lines()
     return lines, await _row(live.sm), await _row(live.sm, "record")
 
@@ -871,7 +1238,7 @@ async def _two_flushes(live):
     await _exec(live, "DELETE FROM evidence_refusal_daily WHERE field = 'signature'")
     out = []
     for _ in range(2):
-        main._evc_note("seat", 403, "signature", "1.41.0")
+        _note("seat", 403, "signature", "1.41.0")
         out.append(await _flush_lines())
     return out, await _row(live.sm)
 
@@ -883,9 +1250,27 @@ def test_p4_two_flushes_of_one_key_add(live, monkeypatch):
     assert row["n"] == 2, row
 
 
+async def _across_midnight(live):
+    nxt = _DAY + timedelta(days=1)
+    midnight = datetime(nxt.year, nxt.month, nxt.day, tzinfo=timezone.utc)
+    await _exec(live, "DELETE FROM evidence_refusal_daily WHERE field = 'signature'")
+    _note("seat", 403, "signature", "1.41.0", at=midnight - timedelta(milliseconds=500))
+    _note("seat", 403, "signature", "1.41.0", at=midnight + timedelta(milliseconds=500))
+    lines = await _flush_lines()
+    return lines, await _row(live.sm, day=_DAY), await _row(live.sm, day=nxt)
+
+
+def test_p4_a_note_before_utc_midnight_and_one_after_make_two_daily_rows(live, monkeypatch):
+    with _janitor_on(live, monkeypatch):
+        lines, before, after = live.run(_across_midnight(live))
+    assert lines == ["[EVIDENCE-CENSUS] flushed 2 increment(s) in 2 key(s); 0 dropped by the cap"]
+    assert before is not None and after is not None, (before, after)
+    assert (before["n"], after["n"]) == (1, 1), (before, after)
+
+
 def _two_notes():
-    main._evc_note("seat", 403, "signature", "1.41.0")
-    main._evc_note("seat", 403, "signature", "1.41.0")
+    _note("seat", 403, "signature", "1.41.0")
+    _note("seat", 403, "signature", "1.41.0")
     return {k: list(v) for k, v in main._EVC_TALLY.items()}
 
 
@@ -934,27 +1319,74 @@ _COMMIT_UNDO = ("DROP TRIGGER IF EXISTS evc_probe_commit ON evidence_refusal_dai
                 "DROP FUNCTION IF EXISTS evc_probe_commit();")
 
 
-async def _commit_fails(live):
-    """The flush's COMMIT runs a deferred trigger that raises (P0001): the
-    commit call itself fails, so the batch's fate is treated as unknown."""
-    await _exec(live, _COMMIT_DDL)
+async def _commit_fails(live, message="evc_probe_commit_fails"):
+    """The flush's COMMIT runs a deferred trigger that raises `message`
+    (P0001): the commit call itself fails, so the batch's fate is treated
+    as unknown."""
+    await _exec(live, _COMMIT_DDL.replace("evc_probe_commit_fails", message))
     try:
         _two_notes()
-        before = await _census(live.sm)
+        before = await _rows_of(live.sm, _DAY)
         lines = await _flush_lines()
-        rows = _delta(before, await _census(live.sm))
+        rows = _delta(before, await _rows_of(live.sm, _DAY))
     finally:
         await _exec(live, _COMMIT_UNDO)
     return lines, rows
 
 
+def _caught(monkeypatch):
+    """Every exception the flush hands to _evc_reason (the failure its line
+    names), recorded as it passes."""
+    seen = []
+    real = main._evc_reason
+
+    def _recording(ex):
+        seen.append(ex)
+        return real(ex)
+    monkeypatch.setattr(main, "_evc_reason", _recording)
+    return seen
+
+
+def _chain(ex):
+    """An exception and what it wraps, by the same links _evc_reason follows."""
+    out, e = [], ex
+    while e is not None and all(e is not x for x in out):
+        out.append(e)
+        e = getattr(e, "orig", None) or e.__cause__
+    return out
+
+
+def _planted(ex, message):
+    """The failure is the planted one: its chain carries SQLSTATE P0001 and
+    the planted message."""
+    chain = _chain(ex)
+    states = {getattr(e, "sqlstate", None) or getattr(e, "pgcode", None) for e in chain}
+    return "P0001" in states and any(message in str(e) for e in chain)
+
+
+_COMMIT_LINE = ("[EVIDENCE-CENSUS] flush commit failed: 2 increment(s) in 1 key(s) dropped, not merged "
+                "back; 0 dropped by the cap: ")
+
+
 def test_p4_a_failure_of_the_commit_drops_the_batch_and_prints_its_size(live, monkeypatch):
+    caught = _caught(monkeypatch)
     with _janitor_on(live, monkeypatch):
         lines, rows = live.run(_commit_fails(live))
-    assert len(lines) == 1 and lines[0].startswith(
-        "[EVIDENCE-CENSUS] flush commit failed: 2 increment(s) in 1 key(s) dropped, not merged "
-        "back; 0 dropped by the cap: ") and lines[0].endswith(" P0001"), lines
+    assert len(lines) == 1 and lines[0].startswith(_COMMIT_LINE) and lines[0].endswith(" P0001"), lines
+    assert len(caught) == 1 and _planted(caught[0], "evc_probe_commit_fails"), [
+        (type(e).__name__, str(e)[:200]) for x in caught for e in _chain(x)]
     assert main._EVC_TALLY == {} and rows == {}
+
+
+def test_p4_control_another_p0001_at_the_commit_is_not_the_planted_failure(live, monkeypatch):
+    """Round 3's mutant: the trigger raises another P0001. The line alone
+    cannot tell (it still ends P0001); the caught failure can."""
+    caught = _caught(monkeypatch)
+    with _janitor_on(live, monkeypatch):
+        lines, _rows = live.run(_commit_fails(live, "evc_probe_other_p0001"))
+    assert len(lines) == 1 and lines[0].startswith(_COMMIT_LINE) and lines[0].endswith(" P0001"), lines
+    assert len(caught) == 1 and not _planted(caught[0], "evc_probe_commit_fails")
+    assert _planted(caught[0], "evc_probe_other_p0001")
 
 
 async def _with_the_table_gone(live, coro_fn):
@@ -1186,17 +1618,21 @@ def test_p5_control_the_table_gone_the_insert_fails_42P01_and_the_word_is_0(live
 # -- P6: end to end once ---------------------------------------------------------------
 
 async def _end_to_end(live, monkeypatch):
+    """The request through the app takes its note on the clock's own day;
+    the lookup names that day, read from the note's key before the flush."""
     await _exec(live, "DELETE FROM evidence_refusal_daily WHERE field = 'signature'")
     out = await _through_app(live, monkeypatch)
+    days = sorted({k[0] for k in main._EVC_TALLY})
     lines = await _flush_lines()
-    return out, lines, await _row(live.sm)
+    return out, days, lines, (await _row(live.sm, day=days[0]) if len(days) == 1 else None)
 
 
-def test_p6_a_refused_record_then_one_janitor_step_writes_the_row(live, monkeypatch):
+def test_p6_a_refused_record_then_one_flush_writes_the_row(live, monkeypatch):
     with _janitor_on(live, monkeypatch):
-        out, lines, row = live.run(_end_to_end(live, monkeypatch))
+        out, days, lines, row = live.run(_end_to_end(live, monkeypatch))
     assert out["status"] == 403 and out["delta"] == {("seat", 403, "signature", "1.41.0"): 1}, out
     assert out["rows"] == {}, out                                   # nothing written on the request path
+    assert len(days) == 1, days
     assert lines == ["[EVIDENCE-CENSUS] flushed 1 increment(s) in 1 key(s); 0 dropped by the cap"]
     assert row["n"] == 1 and main._EVC_TALLY == {}, row
 
@@ -1254,3 +1690,482 @@ def test_control_without_the_settle_guard_a_failing_note_loses_the_answer(live, 
     out = live.run(_through_app(live, monkeypatch))
     assert planted == ["evc_probe_note_fails"], planted
     assert out["status"] == 500 and out["delta"] == {}, out          # the 403 is lost
+
+
+# -- TH: the census off the janitor's path (fix 3) ----------------------------------------
+
+class _StopLoop(BaseException):
+    """Ends queue_cleanup_loop at a pass's sleep (the loop catches Exception)."""
+
+
+# The planted stall. A deferred constraint trigger on evidence_refusal_daily
+# runs at the flush's COMMIT and waits there, in steps of 50 ms, until a row
+# exists in evc_probe_release; it first takes a shared advisory lock (414,
+# 1114), so the test can count the connections held in it. PostgreSQL stops
+# the statement timer before it commits (lesson 1072) and the wait takes no
+# lock, so none of the flush's settings ends it: the COMMIT does not return
+# until the test releases it, while every other connection works. Its own
+# backstop: after 1200 steps (a minute or more) it raises.
+_STALL_DDL = """
+CREATE TABLE IF NOT EXISTS evc_probe_release (released boolean);
+DELETE FROM evc_probe_release;
+CREATE OR REPLACE FUNCTION evc_probe_stall() RETURNS trigger LANGUAGE plpgsql AS $f$
+BEGIN
+  PERFORM pg_advisory_xact_lock_shared(414, 1114);
+  FOR i IN 1..1200 LOOP
+    IF EXISTS (SELECT 1 FROM evc_probe_release) THEN
+      RETURN NULL;
+    END IF;
+    PERFORM pg_sleep(0.05);
+  END LOOP;
+  RAISE EXCEPTION 'evc_probe_stall_expired';
+END $f$;
+DROP TRIGGER IF EXISTS evc_probe_stall ON evidence_refusal_daily;
+CREATE CONSTRAINT TRIGGER evc_probe_stall AFTER INSERT OR UPDATE ON evidence_refusal_daily
+  DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION evc_probe_stall();
+"""
+_STALL_UNDO = ("DROP TRIGGER IF EXISTS evc_probe_stall ON evidence_refusal_daily; "
+               "DROP FUNCTION IF EXISTS evc_probe_stall(); DROP TABLE IF EXISTS evc_probe_release;")
+_RELEASE = "INSERT INTO evc_probe_release VALUES (true)"
+_STALLED_SQL = ("SELECT count(DISTINCT pid) FROM pg_locks WHERE locktype = 'advisory' "
+                "AND classid = 414 AND objid = 1114 AND database = "
+                "(SELECT oid FROM pg_database WHERE datname = current_database())")
+
+# TH's bounds, stated. A janitor pass against this case ends within
+# PASS_BOUND_S while the flush is held (it has no census wait in it). The
+# watchdog releases the stall after WATCHDOG_S whatever happens, so a mutant
+# whose pass waits on the flush ends too, its pass then outlasting the bound.
+PASS_BOUND_S = 15.0
+WATCHDOG_S = 30.0
+# The test's own wait for flush tasks it started to end (test cleanup only;
+# production never waits on one).
+_TEST_WAIT_S = 20.0
+
+
+async def _stalled(live):
+    """The connections held in the planted stall now."""
+    conn = await sl.sp.harness.connect_bound(sl.sp.DSN, live.case.schema)
+    try:
+        return await conn.fetchval(_STALLED_SQL)
+    finally:
+        await conn.close()
+
+
+class _Drive:
+    """queue_cleanup_loop (or a mutant of it) against the case, pass by pass.
+
+    Each pass's sleep(60) returns at once (other sleeps are real); at the
+    sleep that ends pass i (i = 0: before the first) hooks[i] runs, and the
+    sleep after `passes` passes then ends the loop. The daily service audit
+    is stubbed (read-only, rate-limited, nothing to do with this). Recorded:
+    when each pass started and ended (monotonic, hooks excluded); the passes
+    in which the report-window step (before the census step) and the
+    earned-pack reconcile (the step after it) ran, each the real function
+    under a counting wrapper; every flush started and the most that ran at
+    once; the release; the census lines printed."""
+
+    def __init__(self, live, monkeypatch, passes, hooks, stall=True):
+        self.live, self.mp, self.passes, self.hooks = live, monkeypatch, passes, hooks
+        self.stall = stall
+        self.starts, self.ends, self.windows, self.after = [], [], [], []
+        self.flushes, self.inflight, self.max_inflight = [], 0, 0
+        self.released_at, self.released_by = None, None
+        self.buf = io.StringIO()
+        self.real_sleep = asyncio.sleep
+
+    def _install(self):
+        real_flush = main._evc_flush_janitor_step
+        real_windows = main._report_window_janitor
+        real_after = main._pc_reconcile_earned_packs
+
+        async def flush():
+            self.flushes.append(asyncio.current_task())
+            self.inflight += 1
+            self.max_inflight = max(self.max_inflight, self.inflight)
+            try:
+                return await real_flush()
+            finally:
+                self.inflight -= 1
+
+        async def windows():
+            self.windows.append(len(self.starts))
+            return await real_windows()
+
+        async def after():
+            self.after.append(len(self.starts))
+            return await real_after()
+
+        async def no_audit(*_a, **_k):
+            return None
+
+        async def sleep(delay, *a, **k):
+            if delay != 60:
+                return await self.real_sleep(delay, *a, **k)
+            if self.starts:
+                self.ends.append(time.monotonic())
+            i = len(self.ends)
+            hook = self.hooks.get(i)
+            if hook is not None:
+                await hook(self)
+            if i >= self.passes:
+                raise _StopLoop()
+            self.starts.append(time.monotonic())
+            return None
+
+        self.mp.setattr(database, "async_session", self.live.sm)
+        self.mp.setattr(main, "_run_service_policy_audit", no_audit)
+        self.mp.setattr(main, "_evc_flush_janitor_step", flush)
+        self.mp.setattr(main, "_report_window_janitor", windows)
+        self.mp.setattr(main, "_pc_reconcile_earned_packs", after)
+        self.mp.setattr(asyncio, "sleep", sleep)
+
+    async def release(self, by):
+        if self.stall and self.released_at is None:
+            self.released_at, self.released_by = time.monotonic(), by
+            await _exec(self.live, _RELEASE)
+
+    async def _watchdog(self):
+        await self.real_sleep(WATCHDOG_S)
+        await self.release("watchdog")
+
+    def held(self):
+        """The flush in the slot is still running."""
+        t = main._EVC_FLIGHT["task"]
+        return t is not None and not t.done()
+
+    async def ended(self):
+        """Wait (the test's own wait, bounded) until every flush task started
+        so far has ended."""
+        me = asyncio.current_task()
+        pending = [t for t in self.flushes if t is not me and not t.done()]
+        if pending:
+            await asyncio.wait(pending, timeout=_TEST_WAIT_S)
+
+    async def run(self, loop_fn):
+        self._install()
+        watchdog = asyncio.create_task(self._watchdog()) if self.stall else None
+        try:
+            with contextlib.redirect_stdout(self.buf):
+                try:
+                    await asyncio.wait_for(loop_fn(), timeout=WATCHDOG_S + 120)
+                except _StopLoop:
+                    pass
+                await self.release("end")
+                await self.ended()
+        finally:
+            self.mp.setattr(asyncio, "sleep", self.real_sleep)
+            if watchdog is not None:
+                watchdog.cancel()
+            await self.release("end")          # on any failure too: nothing stays held
+            await self.ended()
+        for t in self.flushes:                 # retrieve what a mutant left unretrieved
+            if t.done() and not t.cancelled() and t is not asyncio.current_task():
+                t.exception()
+        return self
+
+    def lines(self):
+        return _census_lines(self.buf.getvalue().splitlines())
+
+    def durations(self):
+        return [e - s for s, e in zip(self.starts, self.ends)]
+
+    def ended_while_held(self):
+        """Passes that ended before the release."""
+        return sum(1 for e in self.ends if self.released_at is None or e < self.released_at)
+
+
+_A = ("seat", 403, "signature", "1.41.0")
+_B = ("seat", 403, "record", "1.41.0")
+_C = ("seat", 422, "record", "1.41.0")
+
+
+async def _stall_scenario(live, monkeypatch, loop_fn=None):
+    """TH1-TH3 in one run: flush F1 is held at its COMMIT through passes 1-3
+    while notes go on (new keys, then the cap's excess); the test releases it
+    at the end of pass 3, and pass 4 starts the next flush."""
+    obs = {}
+
+    async def h0(d):                          # something to write at pass 1's kick
+        _note(*_A)
+        _note(*_A)
+
+    async def h1(d):                          # F1 is held; two new keys
+        obs["held"] = [d.held()]
+        _note(*_B)
+        _note(*_C)
+
+    async def h2(d):                          # still held; fill past the cap
+        obs["held"].append(d.held())
+        obs["stalled"] = [await _stalled(live)]
+        for i in range(CAP + 3):
+            _note("seat", 422, "probe_%d" % i, "other")
+
+    async def h3(d):                          # still held: what the tally holds; release
+        obs["held"].append(d.held())
+        obs["stalled"].append(await _stalled(live))
+        obs["tally"] = (len(main._EVC_TALLY), main._EVC_DROPPED[0],
+                        sum(c[0] for c in main._EVC_TALLY.values()))
+        obs["expected"] = {k[1:]: c[0] for k, c in main._EVC_TALLY.items()}
+        await d.release("test")
+        await d.ended()
+
+    async def h4(d):                          # pass 4 started F2; let it end
+        await d.ended()
+        obs["after_f2"] = (dict(main._EVC_TALLY), main._EVC_DROPPED[0], d.held())
+
+    await _exec(live, "DELETE FROM evidence_refusal_daily WHERE day = DATE '%s' AND status IN (403, 422)"
+                % _DAY.isoformat())
+    await _exec(live, _STALL_DDL)
+    try:
+        before = await _rows_of(live.sm, _DAY)
+        d = await _Drive(live, monkeypatch, 4, {0: h0, 1: h1, 2: h2, 3: h3, 4: h4}).run(
+            loop_fn or main.queue_cleanup_loop)
+        obs["rows"] = _delta(before, await _rows_of(live.sm, _DAY))
+    finally:
+        await _exec(live, _STALL_UNDO)
+    return d, obs
+
+
+def _th1(d, obs):
+    """TH1's facts: the passes that ended while F1 was held, each inside the
+    bound, with the steps before and after the census step run in each."""
+    return {"released_by": d.released_by, "held": obs.get("held"),
+            "ended_while_held": d.ended_while_held(),
+            "within_bound": [x <= PASS_BOUND_S for x in d.durations()[:3]],
+            "windows": d.windows, "after": d.after}
+
+
+_TH1_WANT = {"released_by": "test", "held": [True, True, True], "ended_while_held": 3,
+             "within_bound": [True, True, True], "windows": [1, 2, 3, 4], "after": [1, 2, 3, 4]}
+_IN_FLIGHT = re.compile(r"\[EVIDENCE-CENSUS\] a flush is in flight since monotonic [0-9.]+ \([0-9]+ s, "
+                        r"2 pass\(es\) found it running\); the tally holds 512 key\(s\), 5 dropped "
+                        r"by the cap$")
+
+
+def test_th1_a_held_flush_holds_up_no_janitor_pass(live, monkeypatch):
+    """F1's COMMIT is held through passes 1-3: each pass runs to its end
+    inside PASS_BOUND_S, and the report-window step (the settlement of
+    waiting reports, before the census step) and the earned-pack reconcile
+    (after it) run in every pass. A waiting report itself is not planted:
+    its fixtures live in the match-hold harness, whose case this file does
+    not build; the real settlement step runs in each pass."""
+    monkeypatch.setattr(main, "EVC_FLIGHT_LINE_EVERY", 2)
+    d, obs = live.run(_stall_scenario(live, monkeypatch))
+    assert _th1(d, obs) == _TH1_WANT, (_th1(d, obs), d.durations(), d.lines())
+
+
+def _loop_awaiting_the_flush():
+    """The mutant loop: its census step awaits the flush again."""
+    src = _sources("queue_cleanup_loop")["queue_cleanup_loop"]
+    old = "            _evc_flush_kick()\n"
+    assert src.count(old) == 1
+    ns = {}
+    exec(compile(src.replace(old, "            await _evc_flush_janitor_step()\n"), "evc_probe_mutant",
+                 "exec"), main.__dict__, ns)
+    return ns["queue_cleanup_loop"]
+
+
+def test_th1_control_the_loop_awaiting_the_flush_is_held_up(live, monkeypatch):
+    """The loop awaits the flush again: pass 1 waits on F1's COMMIT until the
+    watchdog releases it, so no pass ends while F1 is held and pass 1
+    outlasts the bound."""
+    d, obs = live.run(_stall_scenario(live, monkeypatch, _loop_awaiting_the_flush()))
+    facts = _th1(d, obs)
+    assert facts["released_by"] == "watchdog" and facts["ended_while_held"] == 0, facts
+    assert d.durations()[0] > PASS_BOUND_S and d.ends[0] >= d.released_at, d.durations()
+    assert facts != _TH1_WANT
+
+
+def test_th2_one_flush_task_and_one_census_connection_while_held(live, monkeypatch):
+    """Under the same hold: F1 is the one flush task until it ends (two in
+    all, never two at once), one connection is held in the stall at two
+    readings, notes go on into the tally, and the excess over the cap is
+    counted as dropped; the in-flight line says so."""
+    monkeypatch.setattr(main, "EVC_FLIGHT_LINE_EVERY", 2)
+    d, obs = live.run(_stall_scenario(live, monkeypatch))
+    assert (len(d.flushes), d.max_inflight, obs["stalled"]) == (2, 1, [1, 1]), (
+        len(d.flushes), d.max_inflight, obs["stalled"])
+    assert obs["tally"] == (CAP, 5, CAP), obs["tally"]          # B, C and 510 probes; 5 dropped
+    flight = [ln for ln in d.lines() if "in flight" in ln]
+    assert len(flight) == 1 and _IN_FLIGHT.match(flight[0]), d.lines()
+
+
+def _kick_forgetting_the_running_flush():
+    """The mutant kick: it does not look at the running flush, so it starts
+    a second one while one runs (and never collects one)."""
+    src = _sources("_evc_flush_kick")["_evc_flush_kick"]
+    old = '    task = _EVC_FLIGHT["task"]\n'
+    assert src.count(old) == 1
+    ns = {}
+    exec(compile(src.replace(old, "    task = None\n"), "evc_probe_mutant", "exec"), main.__dict__, ns)
+    return ns["_evc_flush_kick"]
+
+
+def test_th2_control_a_kick_that_starts_a_second_flush(live, monkeypatch):
+    monkeypatch.setattr(main, "_evc_flush_kick", _kick_forgetting_the_running_flush())
+    d, obs = live.run(_stall_scenario(live, monkeypatch))
+    assert d.max_inflight >= 2 and len(d.flushes) >= 3, (d.max_inflight, len(d.flushes))
+    assert max(obs["stalled"]) >= 2, obs["stalled"]
+
+
+def test_th3_released_the_next_pass_writes_what_was_noted_meanwhile(live, monkeypatch):
+    """Released at the end of pass 3: F1 commits its batch (A, 2), pass 4
+    starts F2, and the table then holds every increment noted while F1 was
+    held less the 5 counted as dropped: B, C and probe_0..probe_509, one
+    each. The tally is then empty and the slot's flush has ended."""
+    d, obs = live.run(_stall_scenario(live, monkeypatch))
+    want = dict(obs["expected"])
+    want[_A] = want.get(_A, 0) + 2
+    assert len(obs["expected"]) == CAP and sum(obs["expected"].values()) == CAP
+    assert ("seat", 422, "probe_509", "other") in obs["expected"]
+    assert ("seat", 422, "probe_510", "other") not in obs["expected"]
+    assert obs["rows"] == want, sorted(set(obs["rows"].items()) ^ set(want.items()))[:10]
+    assert obs["after_f2"] == ({}, 0, False), obs["after_f2"]
+    assert d.lines() == [
+        "[EVIDENCE-CENSUS] flushed 2 increment(s) in 1 key(s); 0 dropped by the cap",
+        "[EVIDENCE-CENSUS] flushed 512 increment(s) in 512 key(s); 5 dropped by the cap"], d.lines()
+    assert len(d.flushes) == 2
+
+
+async def _raise_scenario(live, monkeypatch):
+    """F1 raises something unforeseen before its take (the table probe
+    raises once); pass 2's kick collects it and starts F2."""
+    real_table = main._evc_table
+    raised = []
+
+    async def table_once(db):
+        if not raised:
+            raised.append(1)
+            raise RuntimeError("evc_probe_unforeseen")
+        return await real_table(db)
+    monkeypatch.setattr(main, "_evc_table", table_once)
+
+    async def h0(d):
+        _note(*_A)
+        _note(*_A)
+
+    async def h_end(d):
+        await d.ended()
+    await _exec(live, "DELETE FROM evidence_refusal_daily WHERE day = DATE '%s' AND field = 'signature'"
+                % _DAY.isoformat())
+    before = await _rows_of(live.sm, _DAY)
+    d = await _Drive(live, monkeypatch, 2, {0: h0, 1: h_end, 2: h_end}, stall=False).run(
+        main.queue_cleanup_loop)
+    return d, _delta(before, await _rows_of(live.sm, _DAY))
+
+
+_RAISED = "[EVIDENCE-CENSUS] the last flush raised: RuntimeError"
+_FLUSHED_A = "[EVIDENCE-CENSUS] flushed 2 increment(s) in 1 key(s); 0 dropped by the cap"
+
+
+def test_th4_a_flush_that_raises_is_collected_printed_and_followed(live, monkeypatch):
+    d, rows = live.run(_raise_scenario(live, monkeypatch))
+    assert d.lines() == [_RAISED, _FLUSHED_A], d.lines()
+    assert len(d.flushes) == 2 and rows == {_A: 2}, (len(d.flushes), rows)
+    assert not [ln for ln in d.lines() if "kick error" in ln]
+
+
+def _kick_not_collecting():
+    """The mutant kick: it frees the slot of an ended flush without
+    collecting its outcome."""
+    src = _sources("_evc_flush_kick")["_evc_flush_kick"]
+    old = "        _evc_collect(task)\n"
+    assert src.count(old) == 1
+    ns = {}
+    exec(compile(src.replace(old, ""), "evc_probe_mutant", "exec"), main.__dict__, ns)
+    return ns["_evc_flush_kick"]
+
+
+def test_th4_control_a_kick_that_does_not_collect_prints_nothing(live, monkeypatch):
+    monkeypatch.setattr(main, "_evc_flush_kick", _kick_not_collecting())
+    d, rows = live.run(_raise_scenario(live, monkeypatch))
+    assert d.lines() == [_FLUSHED_A], d.lines()                    # the raise is never reported
+    assert len(d.flushes) == 2 and rows == {_A: 2}
+
+
+def _loop_census_awaits(nm, loop="queue_cleanup_loop"):
+    """(census code an await of the loop is or reaches, awaits whose callee
+    does not resolve). Each awaited main.py function is walked through every
+    main.py function it names (one walk for all, each function once; the
+    loop itself is not re-entered); an attribute await is another module's
+    or an object's, and no other api module names census code
+    (test_p1_no_other_api_module_names_a_census_function)."""
+    f = nm.units[loop]
+    met, unresolved, origin = [], [], {}
+    for n in ast.walk(f):
+        if not isinstance(n, ast.Await):
+            continue
+        if not isinstance(n.value, ast.Call):
+            unresolved.append("await of %s" % ast.unparse(n.value)[:60])
+            continue
+        kind, what = _callee(nm, n.value, f)
+        if _is_census(what):
+            met.append((what, what))
+        elif kind in ("def", "class"):
+            origin.setdefault(what, what)
+        elif kind not in ("attr", "import", "builtin"):
+            unresolved.append("%s: %s" % (kind, what))
+    todo = sorted(origin)
+    while todo:
+        name = todo.pop()
+        g = nm.units[name]
+        for n in ast.walk(g):
+            if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load):
+                kind, what = nm.resolve(n.id, g)
+                if kind in ("def", "class") and what != loop:
+                    if _is_census(what):
+                        met.append((origin[name], what))
+                    elif what not in origin:
+                        origin[what] = origin[name]
+                        todo.append(what)
+            elif isinstance(n, ast.Attribute) and _is_census(n.attr):
+                met.append((origin[name], n.attr))
+    return sorted(set(met)), sorted(unresolved)
+
+
+def _kick_awaits(nm):
+    kick = nm.units["_evc_flush_kick"]
+    out = ["coroutine"] if not isinstance(kick, ast.FunctionDef) else []
+    return out + [type(n).__name__ for n in ast.walk(kick)
+                  if isinstance(n, (ast.Await, ast.AsyncFor, ast.AsyncWith))]
+
+
+def _kick_calls(nm, loop="queue_cleanup_loop"):
+    """The loop's calls of the kick, each (awaited?)."""
+    f = nm.units[loop]
+    awaited = {id(n.value) for n in ast.walk(f) if isinstance(n, ast.Await)}
+    return [id(n) in awaited for n in ast.walk(f)
+            if isinstance(n, ast.Call) and _callee(nm, n, f) == ("def", "_evc_flush_kick")]
+
+
+def test_th5_the_loop_awaits_no_census_code_and_the_kick_has_no_await():
+    nm = _names()
+    assert _loop_census_awaits(nm) == ([], [])
+    assert _kick_awaits(nm) == []
+    assert _kick_calls(nm) == [False]
+
+
+_KICK_LINE = "            _evc_flush_kick()\n"
+
+
+def test_th5_control_the_loop_awaiting_the_flush():
+    src = _main_source().replace("\r\n", "\n")
+    assert src.count(_KICK_LINE) == 1
+    nm = _names(src.replace(_KICK_LINE, "            await _evc_flush_janitor_step()\n"))
+    assert _loop_census_awaits(nm) == ([("_evc_flush_janitor_step", "_evc_flush_janitor_step")], [])
+    assert _kick_calls(nm) == []
+
+
+def test_th5_control_the_loop_awaiting_a_neutral_step_that_awaits_the_flush():
+    src = _main_source().replace("\r\n", "\n")
+    src = src.replace(_KICK_LINE, "            await probe_neutral_step()\n")
+    src += "\n\nasync def probe_neutral_step():\n    await _evc_flush_janitor_step()\n"
+    assert _loop_census_awaits(_names(src)) == ([("probe_neutral_step", "_evc_flush_janitor_step")], [])
+
+
+def test_th5_control_a_kick_with_an_await():
+    src = _main_source().replace("\r\n", "\n")
+    old = "def _evc_flush_kick() -> None:\n"
+    assert src.count(old) == 1
+    src = src.replace(old, "async def _evc_flush_kick() -> None:\n    await asyncio.sleep(0)\n")
+    assert _kick_awaits(_names(src)) == ["coroutine", "Await"]

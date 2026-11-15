@@ -5223,13 +5223,14 @@ async def queue_cleanup_loop():
             await _pc_trade_janitor_step()
         except Exception as e:
             print(f"[QUEUE-CLEANUP] player cards trading error: {e}")
-        # The evidence refusal census (migration 414): write the in-memory
-        # tally's deltas -- its own session and its own try; it skips (and
-        # keeps the tally) until the schema probe finds the table.
+        # The evidence refusal census (migration 414): a plain call, never
+        # awaited. _evc_flush_kick starts the census's write as a task of its
+        # own when none is running, so this path does no census I/O and no
+        # census flush can hold up the steps after it.
         try:
-            await _evc_flush_janitor_step()
+            _evc_flush_kick()
         except Exception as e:
-            _janitor_print(f"[EVIDENCE-CENSUS] flush error: {type(e).__name__}: {e}")
+            _janitor_print(f"[EVIDENCE-CENSUS] kick error: {type(e).__name__}: {e}")
         # Player Cards (WP-D): re-derive, at the earned-pack odds in force,
         # the grants a failed savepoint lost, and void the unopened packs of
         # invalidated series (its own session, every PC_RECONCILE_EVERY_S).
@@ -7010,8 +7011,9 @@ async def evidence_census_gate(request: Request, call_next):
     left one, else the gate_* field of that status. An error raised through
     it is noted as 500 (with the route's field when one was left) and raised
     on unchanged. Every other request passes untouched. Nothing here awaits
-    anything but call_next, prints, or takes a connection; the janitor step
-    _evc_flush_janitor_step writes the tally.
+    anything but call_next, prints, or takes a connection; the tally is
+    written by a task the janitor starts (_evc_flush_kick), which neither a
+    request nor the janitor waits on.
 
     Registered just before replica_write_gate, so every layer that can answer
     such a POST on the primary is inside it: version_gate (426),
@@ -9219,7 +9221,8 @@ def _sev_refusal(r):
 # intake paths is noted once against one counter: (UTC day, kind, status,
 # field, mod version). A note for a NEW key beyond the tally's bound is
 # dropped and counted as dropped instead; what reaches the table, and what can
-# be lost on the way, is in _evc_flush_janitor_step's docstring. ONE place
+# be lost on the way, is in the docstrings of _evc_flush_kick (the janitor's
+# side) and _evc_flush_janitor_step (the write). ONE place
 # counts: evidence_census_gate, after call_next, with the final status. A route that refuses does not count; it leaves the refused
 # field (one validated word) on request.state (_evc_leave), and the gate
 # counts under that field, else under the fixed gate_* field of the status.
@@ -9232,8 +9235,10 @@ def _sev_refusal(r):
 # Between "decided" and "delivered" the census does no database work, takes no
 # connection, awaits nothing and prints nothing: the gate adds one to a number
 # in a bounded in-memory tally (_evc_note, at most EVC_TALLY_MAX_KEYS keys).
-# The janitor step _evc_flush_janitor_step (queue_cleanup_loop, primary only)
-# writes the tally's deltas, in one transaction, about once a minute.
+# queue_cleanup_loop (primary only) calls _evc_flush_kick about once a minute,
+# a plain function: when no flush is running it starts _evc_flush_janitor_step
+# as a task of its own, and that task writes the tally's deltas in one
+# transaction. Neither the request path nor the janitor's waits on it.
 #
 # A fifth evidence kind: one line in _EVC_KINDS (its word, its module, its
 # route's path, and the modules it parses with, whose literals are fields).
@@ -9343,15 +9348,17 @@ def _evc_key(status, field, request) -> tuple[str, str]:
 # local makes this COMMIT wait for the primary's own WAL flush only, never for
 # a standby's confirmation, whatever synchronous_standby_names says (it is
 # empty on the primary today): a count is not worth that wait. None of this
-# is on a request's path: the flush runs in the janitor. The three settings
+# is on a request's path or the janitor's: the flush runs as a task of its
+# own, which nothing awaits (_evc_flush_kick). The three settings
 # are one statement (set_config with is_local true, the same as SET LOCAL):
 # one round trip.
 _EVC_SETTINGS_SQL = ("SELECT set_config('lock_timeout', '2s', true), "
                      "set_config('statement_timeout', '10s', true), "
                      "set_config('synchronous_commit', 'local', true)")
 # The tally: (UTC day of the note, kind, status, field, version) -> [count,
-# time of the last note]. Module state of this process; see
-# _evc_flush_janitor_step for what that costs and why it is accepted.
+# time of the last note]. Module state of this process; what that costs, and
+# why it is accepted, is in _evc_flush_janitor_step's docstring ("Known and
+# accepted") and in _evc_flush_kick's (a flush that never ends).
 _EVC_TALLY: dict = {}
 _EVC_DROPPED = [0]
 # The table found once is cached for the process (414 is additive).
@@ -9474,12 +9481,12 @@ def _evc_merge_back(batch) -> int:
 async def _evc_table(db) -> str:
     """'found' (cached once found), 'missing', or 'unknown' (the probe did
     not complete). The probe runs in a savepoint (#235). Only 'found' is
-    remembered: while the table is missing every pass probes again, so a
-    table created after boot is written from the next pass, no restart
-    needed. If a found table later goes away, each pass (about a minute)
-    fails at the flush statement before its commit, merges the batch back
-    within the bound and prints one 'flush failed before its commit ...
-    42P01' line."""
+    remembered: while the table is missing every flush probes again, so a
+    table created after boot is written from the next flush, no restart
+    needed. If a found table later goes away, each flush (at most one per
+    janitor pass, about a minute) fails at the flush statement before its
+    commit, merges the batch back within the bound and prints one 'flush
+    failed before its commit ... 42P01' line."""
     global _EVC_TABLE_FOUND
     if _EVC_TABLE_FOUND:
         return "found"
@@ -9496,27 +9503,36 @@ async def _evc_table(db) -> str:
 
 
 async def _evc_flush_janitor_step() -> None:
-    """One pass of queue_cleanup_loop: write the tally's deltas to
-    evidence_refusal_daily, in the form of _pc_trade_janitor_step (its own
-    try in the loop, its own session, one transaction).
+    """The census's write: the tally's deltas to evidence_refusal_daily, on a
+    session of its own, in one transaction. It runs only as the task that
+    _evc_flush_kick starts, at most one at a time: nothing awaits it, nothing
+    in this module cancels it, and no second one starts while it runs. (The
+    name is the one migration 414's header gives the writer; it is no longer
+    an awaited step of the loop.)
 
     - An empty tally (and no dropped number) executes nothing.
-    - The table absent (new code, old schema): the step skips by the schema
+    - The table absent (new code, old schema): the flush skips by the schema
       probe and keeps the tally.
     - The transaction first sets lock_timeout, statement_timeout and
       synchronous_commit = local; then the probe; then the tally is taken and
       emptied with no await in between, and ONE statement applies every
       key's delta (n = n + d; last_at never moves back).
-    - What bounds what (lesson 1072; see the comment at _EVC_SETTINGS_SQL):
-      the write is ONE statement, so after the take the step's database
-      time is one lock wait (lock_timeout), that statement (statement_timeout,
-      its lock wait included) and the COMMIT (bounded by neither). Before the
-      take: taking a connection waits at most the pool's timeout, as in every
-      janitor step; the settings statement runs before its own values apply,
-      and reads no table and takes no lock; the probe (until the table is
-      found) is bounded by statement_timeout. A failure of the settings
-      statement (raised to the loop's own arm) or of the probe (printed; the
-      step returns) comes before the take, so the tally stays whole.
+    - What bounds what inside the task (lesson 1072; see the comment at
+      _EVC_SETTINGS_SQL): the write is ONE statement, so after the take the
+      task's database time is one lock wait (lock_timeout), that statement
+      (statement_timeout, its lock wait included) and the COMMIT (bounded by
+      neither). Before the take: taking a connection is not bounded by the
+      pool's timeout alone, which bounds only the wait for a free slot; a
+      checkout also waits for the pre-ping's reply, a recycled connection's
+      replacement and a new connection's opening. The settings statement
+      runs before its own values apply, and reads no table and takes no
+      lock; the probe (until the table is found) is bounded by
+      statement_timeout. The session's close is bounded by nothing here.
+      These are waits of this task only: the janitor's path and the request
+      path never wait on it (_evc_flush_kick says what a flush that never
+      ends costs). A failure of the settings statement (raised out of the
+      task; the next kick collects and prints it) or of the probe (printed;
+      the flush returns) comes before the take, so the tally stays whole.
     - A failure BEFORE the commit is attempted: the batch is merged back by
       addition (within the cap). A failure OF the commit call (its outcome
       unknown): the batch is dropped, never merged back, and one line says
@@ -9524,12 +9540,14 @@ async def _evc_flush_janitor_step() -> None:
     - It prints only through _janitor_print; the number the cap dropped is in
       its line and is reset.
 
-    Known and accepted: a count reaches the table at the next pass that
-    flushes, about a minute after its answer when that pass succeeds (a pass
-    that fails before its commit carries it to a later pass, merged back
-    within the bound; a pass whose commit call fails drops it); counts not
-    yet flushed are lost when the process ends (normally up to about a
-    minute of them, at a deploy).
+    Known and accepted: a count reaches the table with the first flush that
+    starts after its note and succeeds, about a minute after its answer
+    while flushes end within a pass (a flush that fails before its commit
+    carries it to a later flush, merged back within the bound; a flush whose
+    commit call fails drops it); counts not yet flushed are lost when the
+    process ends (normally up to about a minute of them, at a deploy; while
+    a flush is stalled, every count since it took its batch, see
+    _evc_flush_kick).
     The api runs one worker (Dockerfile); with more, each would flush its own
     deltas correctly, because each delta is added, never assigned. The loop
     runs on the primary only, so on the standby, whose evidence POSTs never
@@ -9570,6 +9588,87 @@ async def _evc_flush_janitor_step() -> None:
             return
     _janitor_print(f"[EVIDENCE-CENSUS] flushed {increments} increment(s) in {len(keys)} key(s); "
                    f"{dropped} dropped by the cap")
+
+
+# The census flush's one slot: the task writing now (None when none is), the
+# monotonic reading when it started, and how many kicks have found it still
+# running.
+_EVC_FLIGHT = {"task": None, "since": 0.0, "passes": 0}
+# One in-flight line per this many kicks that find a flush still running
+# (about every five minutes of a stall).
+EVC_FLIGHT_LINE_EVERY = 5
+
+
+def _evc_collect(task) -> None:
+    """A finished flush's outcome, retrieved (so it is never left
+    unretrieved) and printed when it is not a plain return: a cancellation,
+    or an exception by its type and SQLSTATE."""
+    if task.cancelled():
+        _janitor_print("[EVIDENCE-CENSUS] the last flush was cancelled")
+        return
+    e = task.exception()
+    if e is not None:
+        _janitor_print(f"[EVIDENCE-CENSUS] the last flush raised: {_evc_reason(e)}")
+
+
+def _evc_flush_kick() -> None:
+    """The census's step in queue_cleanup_loop (primary only, about once a
+    minute): a plain function, no await and no I/O. It keeps one slot,
+    _EVC_FLIGHT.
+
+    - A flush still running: nothing is started (single flight); every
+      EVC_FLIGHT_LINE_EVERY-th kick that finds it running prints one line:
+      the monotonic reading it has been in flight since, for how long, and
+      the tally's keys and dropped number now.
+    - A flush that has ended: the slot is freed and its outcome collected
+      (_evc_collect: an exception retrieved and printed, a cancellation
+      printed).
+    - No flush running and something to write: one task is created for
+      _evc_flush_janitor_step and kept in the slot.
+
+    What bounds what:
+    - The janitor's path holds no census I/O: no checkout, no settings
+      statement, no probe, no commit, no session close. What the loop spends
+      here is a few reads of the slot and the tally, at most one printed
+      line and at most one create_task.
+    - The census holds at most one connection at any time. One task owns one
+      session from its open to its close; nothing in this module cancels the
+      task, so it ends only after its session's close has returned, and the
+      slot is freed only when the task has ended; no second task starts
+      while one runs. The count of flushes and the connection end together
+      (lesson 1192, rule 1).
+    - A flush that never ends stops the census only: notes go on into the
+      tally, which fills to EVC_TALLY_MAX_KEYS keys; a note for a new key
+      beyond it is counted in _EVC_DROPPED; the in-flight line keeps saying
+      so until the process ends. Every other step of the loop still runs
+      every pass; what the held flush keeps from them is the one pooled
+      connection it holds.
+
+    At shutdown nothing here waits on the task: lifespan cancels and gathers
+    its own tasks, the loop's among them, and this one is not among them.
+    The event loop's own end (asyncio.run) cancels a task still pending, as
+    it does every other, wherever it stands. What is lost then is what is
+    already accepted: the counts not yet flushed (normally up to about a
+    minute of them; while a flush is stalled, every count since it took its
+    batch)."""
+    task = _EVC_FLIGHT["task"]
+    if task is not None:
+        if not task.done():
+            _EVC_FLIGHT["passes"] += 1
+            if _EVC_FLIGHT["passes"] % EVC_FLIGHT_LINE_EVERY == 0:
+                since = _EVC_FLIGHT["since"]
+                _janitor_print(f"[EVIDENCE-CENSUS] a flush is in flight since monotonic {since:.1f} "
+                               f"({time.monotonic() - since:.0f} s, {_EVC_FLIGHT['passes']} pass(es) "
+                               f"found it running); the tally holds {len(_EVC_TALLY)} key(s), "
+                               f"{_EVC_DROPPED[0]} dropped by the cap")
+            return
+        _EVC_FLIGHT["task"] = None
+        _evc_collect(task)
+    if not _EVC_TALLY and not _EVC_DROPPED[0]:
+        return
+    _EVC_FLIGHT["task"] = asyncio.create_task(_evc_flush_janitor_step())
+    _EVC_FLIGHT["since"] = time.monotonic()
+    _EVC_FLIGHT["passes"] = 0
 
 
 async def _sev_claimed_seat(request) -> tuple[str, object]:
