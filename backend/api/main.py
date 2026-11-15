@@ -998,11 +998,9 @@ async def _presence_online_ids_shown(db: AsyncSession) -> list[str]:
     and no online count, and is back by the ordinary rules the moment its ban
     ends or is lifted. The map itself keeps the id: a banned client still
     pings, and the lifecycle sweeps' liveness evidence (_presence_is_online)
-    is not a presence answer. One read of player_bans; nothing is written to
-    the database. The ids the read found banned are kept process-locally
-    (_presence_banned_last) for the one answer that must be given even when
-    the read fails (_presence_online_count_shown_fallback)."""
-    global _presence_banned_last
+    is not a presence answer. One read of player_bans per call; nothing is
+    written to the database and no ban state is kept between calls, so the
+    answer is always the database's current word."""
     ids = _presence_online_ids()
     if not ids:
         return ids
@@ -1010,21 +1008,7 @@ async def _presence_online_ids_shown(db: AsyncSession) -> list[str]:
         "SELECT pb.steam_id FROM player_bans pb"
         " WHERE pb.steam_id = ANY(CAST(:ids AS text[])) AND " + player_ban_active_sql("pb")
     ), {"ids": ids})).scalars().all())
-    _presence_banned_last = frozenset(banned)
     return [sid for sid in ids if sid not in banned]
-
-
-# The banned ids the last successful _presence_online_ids_shown read found
-# among the online ids. Read only by the fallback below; a process restart
-# empties it, and the next successful read refreshes it.
-_presence_banned_last: frozenset = frozenset()
-
-
-def _presence_online_count_shown_fallback() -> int:
-    """The online count when the ban read failed: the map's count less the
-    ids the last successful read found banned. A ban written since that read
-    is not yet subtracted; the next successful read corrects it."""
-    return sum(1 for sid in _presence_online_ids() if sid not in _presence_banned_last)
 
 
 # ── In-match evidence (July 30 lifecycle sweep) ────────────────────────────
@@ -19962,9 +19946,12 @@ async def presence_ping(request: Request,
             pass
         print(f"[PRESENCE] last_seen stamp failed for {steam_id}: {ex}")
     # The online figure leaves out actively banned accounts (B1). The ping is
-    # answered whatever the database does (the stamps above swallow their own
-    # failure), so a failed ban read answers the map's count less the ids the
-    # last successful read found banned, logged.
+    # every client's heartbeat and is answered 200 whatever the database does
+    # (the stamps above swallow their own failure), as the released build
+    # answers it: when the ban read fails, the figure is the presence map's
+    # plain count, NOT ban-filtered for that one answer, and the failure is
+    # logged. No ban state is kept between pings; the next ping whose read
+    # succeeds is filtered again.
     try:
         online = len(await _presence_online_ids_shown(db))
     except Exception as ex:
@@ -19973,7 +19960,7 @@ async def presence_ping(request: Request,
         except Exception:
             pass
         print(f"[PRESENCE] online count ban read failed: {ex}")
-        online = _presence_online_count_shown_fallback()
+        online = _presence_online_count()
     # Aug 7 item 1: alerts revision piggybacks on the cheapest always-on poll
     # — clients refetch /alerts/active only when it moves. Flat-scalar
     # addition, ignored by old parsers (#73).
