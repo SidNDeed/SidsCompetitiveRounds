@@ -228,10 +228,11 @@ def _planted(plant, site=SITE):
     return inv, line
 
 
-# Every form the module census (main._module_census, the one that decides
-# module constants) refuses the name for, planted after the definition's
-# import, with the reason the inventory records. "opaque: ..." is a form
-# that may rebind any module name and so refuses every name in the module.
+# Every form the module census refuses the name for (_module_census inside
+# main._janitor_sql_from_sources, the census that decides module constants),
+# one per branch that blocks or gives the module up, planted after the
+# definition's import, with the reason the inventory records. "opaque: ..."
+# is a form that may rebind any module name and so refuses every name.
 REBINDING_FORMS = [
     # the review's forms
     ("globals-literal-key", 'globals()["player_ban_active_sql"] = lambda a: "FALSE"',
@@ -269,6 +270,16 @@ REBINDING_FORMS = [
      "opaque: namespace argument"),
     ("namespace-returned", "def _ns():\n    return globals()", "opaque: namespace escape"),
     ("namespace-yielded", "def _ns():\n    yield globals()", "opaque: namespace escape"),
+    ("namespace-yielded-from", "def _ns():\n    yield from globals()", "opaque: namespace escape"),
+    ("globals-literal-del", 'del globals()["player_ban_active_sql"]', "namespace store by literal key"),
+    ("derived-item-store", '_e = globals()["_cfg"]\n_e["player_ban_active_sql"] = lambda a: "FALSE"',
+     "opaque: namespace store"),
+    ("derived-attribute-store", '_e = globals()["_cfg"]\n_e.player_ban_active_sql = lambda a: "FALSE"',
+     "opaque: namespace store"),
+    ("namespace-stored-in-an-object", "import types\n_ns = types.SimpleNamespace()\n_ns.g = globals()",
+     "opaque: namespace store"),
+    ("setattr-call-target", 'setattr(object(), "player_ban_active_sql", lambda a: "FALSE")',
+     "setattr by a literal name"),
     ("namespace-matched", "match globals():\n    case _:\n        pass", "opaque: namespace escape"),
     ("exec", "exec(\"player_ban_active_sql = lambda a: 'FALSE'\")", "opaque: exec"),
     ("eval", 'eval("0")', "opaque: eval"),
@@ -278,6 +289,7 @@ REBINDING_FORMS = [
     # every binding of the name itself
     ("module-assignment", 'player_ban_active_sql = lambda a: "FALSE"', "assignment"),
     ("tuple-leaf", 'player_ban_active_sql, _x = (lambda a: "FALSE"), 1', "assignment target"),
+    ("chained-assignment", 'player_ban_active_sql = _y = lambda a: "FALSE"', "assignment target"),
     ("starred-leaf", '*player_ban_active_sql, = [lambda a: "FALSE"]', "assignment target"),
     ("augmented", 'player_ban_active_sql += ""', "augmented or annotated assignment"),
     ("annotated", 'player_ban_active_sql: object = lambda a: "FALSE"', "augmented or annotated assignment"),
@@ -293,6 +305,7 @@ REBINDING_FORMS = [
     ("except-alias", "try:\n    pass\nexcept Exception as player_ban_active_sql:\n    pass", "except alias"),
     ("match-capture", "match 1:\n    case player_ban_active_sql:\n        pass", "match capture"),
     ("match-mapping-rest", "match {}:\n    case {**player_ban_active_sql}:\n        pass", "match capture"),
+    ("match-star", "match []:\n    case [*player_ban_active_sql]:\n        pass", "match capture"),
     ("match-subject", "match player_ban_active_sql:\n    case _:\n        pass", "match"),
     ("global", 'def _g():\n    global player_ban_active_sql\n    player_ban_active_sql = lambda a: "FALSE"',
      "global or nonlocal declaration"),
@@ -323,8 +336,9 @@ def test_control_a_form_that_can_rebind_the_name_refuses_the_definition(plant, w
 
 
 # A binding inside the site's own function shadows the definition exactly
-# where it shadows a module constant (main._analyze_bindings' `bound`, or a
-# class or match in the subtree, which refuses expansion there).
+# where it shadows a module constant (the `bound` set of _analyze_bindings
+# inside main._janitor_sql_from_sources, or a class or match in the
+# subtree, which refuses expansion there).
 FUNCTION_FORMS = [
     ("parameter", '''
         async def root(db, player_ban_active_sql=None):
