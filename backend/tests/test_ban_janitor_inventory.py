@@ -22,6 +22,7 @@ _pc_take_snapshot, _pc_trade_janitor_step and four tournaments sites
 _queue_availability_notices) were dynamic, the first two through the
 evaluator's depth bound and the rest through the call itself.
 """
+import asyncio
 import os
 import re
 import sys
@@ -107,22 +108,46 @@ def test_control_a_statement_added_to_a_janitor_function_moves_the_numbers():
     assert (len(inv["statements"]), [d["func"] for d in inv["dynamic"]]) == (STATEMENTS, ["_pc_snapshot_due"])
 
 
+def _src(body):
+    return "from models import player_ban_active_sql\n\n" + textwrap.dedent(body).lstrip("\n")
+
+
 def _inventory(body):
-    src = "from models import player_ban_active_sql\n\n" + textwrap.dedent(body).lstrip("\n")
-    inv = main._janitor_sql_from_sources({"main": src}, ROOT)
+    inv = main._janitor_sql_from_sources({"main": _src(body)}, ROOT)
     return [_flat(s["sql"]) for s in inv["statements"]], [d["line"] for d in inv["dynamic"]]
 
 
+def _runtime_sql(body):
+    """The strings the planted root hands db.execute when it RUNS: the same
+    source executed with `text` as the identity, so each one is exactly the
+    string the runtime builds."""
+    seen = []
+
+    class _DB:
+        async def execute(self, q):
+            seen.append(q)
+
+    ns = {"text": lambda q: q, "__name__": "planted"}
+    exec(compile(_src(body), "planted.py", "exec"), ns)
+    asyncio.run(ns["root"](_DB()))
+    return seen
+
+
 def test_positive_control_literal_arguments_resolve_to_the_definitions_text():
-    sqls, dynamic = _inventory('''
+    body = '''
         async def root(db):
             await db.execute(text("SELECT 1 FROM player_bans pb WHERE " + player_ban_active_sql("pb")))
             await db.execute(text(f"SELECT 1 FROM player_bans b WHERE {player_ban_active_sql('b', 'CAST(:t AS timestamptz)')}"))
-    ''')
+    '''
+    sqls, dynamic = _inventory(body)
     assert dynamic == [] and len(sqls) == 2, (sqls, dynamic)
     assert "SELECT 1 FROM player_bans pb WHERE " + models.player_ban_active_sql("pb") in sqls
     assert "SELECT 1 FROM player_bans b WHERE " + models.player_ban_active_sql(
         "b", "CAST(:t AS timestamptz)") in sqls
+    # and unnormalised: each inventoried string is the very string the root
+    # builds when it runs, character for character, in the order it runs
+    inv = main._janitor_sql_from_sources({"main": _src(body)}, ROOT)
+    assert [s["sql"] for s in inv["statements"]] == _runtime_sql(body)
 
 
 def test_control_a_non_literal_alias_stays_dynamic():
