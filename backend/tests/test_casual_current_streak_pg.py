@@ -111,14 +111,15 @@ def _answer(rows):
 async def _ranked_streak_async(series):
     """Plant the players and `series` (in list order) as completed
     ranked_series rows, then return main.get_ranked_streak(db, ME). Each
-    entry: (winner steam id, completed minute, created minute)."""
+    entry: (winner steam id, completed minute, created minute[, id]); the id
+    is random when not given."""
     async with cf_pg.case("streak463rs") as (c, sm):
         ids = {}
         async with sm() as db:
             for steam in (ME, OPP):
                 ids[steam] = (await main.get_or_create_player(db, steam, "Streak " + steam[-2:])).id
             await db.commit()
-        for winner, completed, created in series:
+        for winner, completed, created, *sid in series:
             # ranked_series is made by the ORM, whose Python-side defaults are
             # not column defaults: every NOT NULL column is planted.
             p1_wins, p2_wins = (2, 0) if winner == ME else (0, 2)
@@ -127,7 +128,7 @@ async def _ranked_streak_async(series):
                 " p1_series_wins, p2_series_wins, live_p1_points, live_p2_points,"
                 " is_tournament, is_private, created_at, completed_at)"
                 " VALUES ($1, $2, $3, 'completed', $4, $5, $6, 0, 0, false, false, $7, $8)",
-                uuid.uuid4(), ids[ME], ids[OPP], ids[winner], p1_wins, p2_wins,
+                sid[0] if sid else uuid.uuid4(), ids[ME], ids[OPP], ids[winner], p1_wins, p2_wins,
                 BASE + timedelta(minutes=created), BASE + timedelta(minutes=completed))
         async with sm() as db:
             return await main.get_ranked_streak(db, ME)
@@ -138,11 +139,23 @@ def test_pg_ranked_streak_equal_completion_times_are_decided_by_created_at(later
     """get_ranked_streak: A (a win) and B (a loss) completed at the same
     instant; A was created first, so B is the latest series by the full
     order (completed_at, created_at, id, all DESC): the streak is -1, in
+    both planting orders. The ids disagree with the created order (A has
+    HIGH_ID), so an order that drops created_at but keeps id fails too."""
+    cf_pg.require_live_pg()
+    b = (OPP, 10, 2, LOW_ID)
+    a = (ME, 10, 1, HIGH_ID)
+    assert asyncio.run(_ranked_streak_async(_planted(a, b, later_first))) == -1
+
+
+@BOTH_ORDERS
+def test_pg_ranked_streak_equal_completion_and_created_times_are_decided_by_id(later_first):
+    """get_ranked_streak: X (a win, LOW_ID) and Y (a loss, HIGH_ID) share
+    completed_at AND created_at; id DESC puts Y first: the streak is -1, in
     both planting orders."""
     cf_pg.require_live_pg()
-    b = (OPP, 10, 2)
-    a = (ME, 10, 1)
-    assert asyncio.run(_ranked_streak_async(_planted(a, b, later_first))) == -1
+    x = (ME, 10, 5, LOW_ID)
+    y = (OPP, 10, 5, HIGH_ID)
+    assert asyncio.run(_ranked_streak_async(_planted(x, y, later_first))) == -1
 
 
 FOURTH = "76561190000046304"
@@ -152,19 +165,20 @@ async def _team_streak_async(series):
     """Plant four players and `series` (in list order) as completed
     team_series rows with ME and OPP on team 1, then return the
     current_streak of the real get_player_team_stats(ME). Each entry:
-    (winner_team, completed minute, created minute)."""
+    (winner_team, completed minute, created minute[, id]); the id is random
+    when not given."""
     async with cf_pg.case("streak463ts") as (c, sm):
         ids = {}
         async with sm() as db:
             for steam in (ME, OPP, THIRD, FOURTH):
                 ids[steam] = (await main.get_or_create_player(db, steam, "Streak " + steam[-2:])).id
             await db.commit()
-        for winner_team, completed, created in series:
+        for winner_team, completed, created, *sid in series:
             await c.conn.execute(
                 "INSERT INTO team_series (id, t1a_id, t1b_id, t2a_id, t2b_id, status,"
                 " winner_team, created_at, completed_at)"
                 " VALUES ($1, $2, $3, $4, $5, 'completed', $6, $7, $8)",
-                uuid.uuid4(), ids[ME], ids[OPP], ids[THIRD], ids[FOURTH], winner_team,
+                sid[0] if sid else uuid.uuid4(), ids[ME], ids[OPP], ids[THIRD], ids[FOURTH], winner_team,
                 BASE + timedelta(minutes=created), BASE + timedelta(minutes=completed))
         async with sm() as db:
             got = await main.get_player_team_stats(steam_id=ME, db=db)
@@ -178,16 +192,31 @@ def test_pg_team_streak_with_no_team_series_is_0():
     assert asyncio.run(_team_streak_async([])) == 0
 
 
+# Migration 053's idx_team_series_status (status, created_at DESC) can feed the
+# walk's rows already in created_at order, so planting in both orders alone
+# cannot make a dropped created_at fail; the ids below must disagree with it.
 @BOTH_ORDERS
 def test_pg_team_streak_equal_completion_times_are_decided_by_created_at(later_first):
     """get_player_team_stats: A (won by ME's team) and B (lost) completed at
     the same instant; A was created first, so B is the latest series by the
     full order (completed_at, created_at, id, all DESC): the streak is -1,
-    in both planting orders."""
+    in both planting orders. The ids disagree with the created order (A has
+    HIGH_ID), so an order that drops created_at but keeps id fails too."""
     cf_pg.require_live_pg()
-    a = (1, 10, 1)
-    b = (2, 10, 2)
+    a = (1, 10, 1, HIGH_ID)
+    b = (2, 10, 2, LOW_ID)
     assert asyncio.run(_team_streak_async(_planted(a, b, later_first))) == -1
+
+
+@BOTH_ORDERS
+def test_pg_team_streak_equal_completion_and_created_times_are_decided_by_id(later_first):
+    """get_player_team_stats: X (won, LOW_ID) and Y (lost, HIGH_ID) share
+    completed_at AND created_at, so the index key ties too; id DESC puts Y
+    first: the streak is -1, in both planting orders."""
+    cf_pg.require_live_pg()
+    x = (1, 10, 5, LOW_ID)
+    y = (2, 10, 5, HIGH_ID)
+    assert asyncio.run(_team_streak_async(_planted(x, y, later_first))) == -1
 
 
 def test_pg_w_w_l_gives_current_minus_1_and_best_2():
