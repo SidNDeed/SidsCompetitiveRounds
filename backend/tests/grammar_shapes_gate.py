@@ -639,8 +639,8 @@ SQL_NAMES = {
         "sql = f'SELECT {_HOLD_COLS} FROM match_seat_holds WHERE id = CAST(:hid AS uuid)'",
     }),
 }
-# The module constants among SQL_NAMES (W30b at the round-9 merge, the gr
-# child's question 1): a name the checked body reads but binds nowhere is
+# The module constants among SQL_NAMES (W30b of round 9, the gr child's
+# question 1): a name the checked body reads but binds nowhere is
 # bound in its module, and that binding is frozen too. The module's source
 # (read from its file, never imported) must hold exactly ONE binding of the
 # name of any kind shape_grammar.bindings reads (store, del, parameter,

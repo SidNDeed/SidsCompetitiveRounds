@@ -372,6 +372,10 @@ class PlayerStatsResponse(BaseModel):
     xp_for_next_level: int = 0
     best_ranked_streak: int = 0
     best_casual_streak: int = 0
+    # Bug report 463: the current casual streak from the same full-history
+    # walk as best_casual_streak, SIGNED like current_ranked_game_streak
+    # (negative = loss streak).
+    current_casual_streak: int = 0
     # July 20 item 5: labeled game/series ranked streaks. best_ranked_streak
     # keeps its historical per-SERIES value (old clients + Compare graph bind
     # to it); current_* are SIGNED (negative = loss streak).
@@ -1260,6 +1264,32 @@ class HealthResponse(BaseModel):
     # one (learnings 780, 794). Probed by the release train and read by
     # nothing else (#306). No default, as above. Absent on any build before it.
     music_delist_build: int
+    # server_fix_1114_build: release-train verification plumbing, not a design
+    # mechanism (main._SERVER_FIX_1114_BUILD; 1 = this build carries the
+    # server-fix-1114 batch). It names build identity only. A code constant,
+    # equal on both roles by construction, so the train can read it through
+    # the edge; the batch adds no route, and this is the key that tells a
+    # stale box from a refreshed one (learnings 780, 794). Probed by the
+    # release train and read by nothing else (#306). No default, as above.
+    # Absent on any build before it.
+    server_fix_1114_build: int
+    # ask6_invites_build: release-train verification plumbing, not a design
+    # mechanism (main._ASK6_INVITES_BUILD; 1 = this build carries the lobby
+    # invites batch: migrations 415 and 416 and the five invite routes). A
+    # code constant, equal on both roles by construction, so the train can
+    # read it through the edge (learnings 780, 794). Probed by the release
+    # train and read by nothing else (#306). No default, as above. Absent on
+    # any build before it.
+    ask6_invites_build: int
+    # casual_streak_build: release-train verification plumbing, not a design
+    # mechanism (main._CASUAL_STREAK_BUILD; 1 = this build's player-stats
+    # answer carries current_casual_streak). It names build identity only. A
+    # code constant, equal on both roles by construction, so the train can
+    # read it through the edge; the lane adds no route, and this is the key
+    # that tells a stale box from a refreshed one (learnings 780, 794). Probed
+    # by the release train and read by nothing else (#306). No default, as
+    # above. Absent on any build before it.
+    casual_streak_build: int
     # ban_expiry_build: release-train verification plumbing, not a design
     # mechanism (main._BAN_EXPIRY_BUILD; 1 = this build reads a ban's end
     # time, player_bans.expires_at of migration 417). It names build identity

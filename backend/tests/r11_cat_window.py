@@ -101,22 +101,32 @@ ENV_ALLOWED = {"PGCLIENTENCODING": "UTF8"}
 # Then 413_music_albums_delist_refund.sql, which has no rollback file and no
 # d2_seed prerequisite: one numbered file at 401's cost. So _connect 1129 ->
 # 1131, record 431 -> 432, run 382 -> 383; every other count is unchanged.
-# Then 417_player_bans_expires_at.sql and its rollback file, neither with a
-# d2_seed prerequisite: the numbered file at 401's cost (one run start, one
-# record start, two _connect opens) and the rollback file at rollback_401's
-# (one test_zz start, two _connect opens). So _connect 1131 -> 1135, record
-# 432 -> 433, run 383 -> 384, test_zz 24 -> 25; every other count is
-# unchanged.
+# Then 414_evidence_refusal_daily.sql, which has no rollback file and no
+# d2_seed prerequisite: one numbered file at 401's cost. So _connect 1131 ->
+# 1133, record 432 -> 433, run 383 -> 384; every other count is unchanged.
+# Then migration 415 and its rollback file (written as 404, renumbered
+# since), the same one-file case: on the lobby invites branch the
+# whole-module run on seat-3 at c8bfcc33 (log b6-logs/pytest-C-173306)
+# differed from the table before them at exactly those four sites, each by
+# one file's cost, and at no other. So _connect 1133 -> 1137, record
+# 433 -> 434, run 384 -> 385, test_zz 24 -> 25. Neither file has a d2_seed
+# prerequisite.
+# Then migration 416 and its rollback file (written as 405, renumbered
+# since), the same one-file case: _build applies and records 416 (one psql
+# start, one pg_dump start, two _connect opens) and test_zz applies its
+# rollback and reads after it (one psql start, two _connect opens), so
+# _connect 1137 -> 1141, record 434 -> 435, run 385 -> 386, test_zz 25 -> 26.
+# Neither file has a d2_seed prerequisite (SEEDS names no 416 file).
 OPEN_COUNTS = {
-    "_admin": 315, "_clone_with_oid": 2, "_connect": 1135, "_fetchval": 6, "_orm": 1,
+    "_admin": 315, "_clone_with_oid": 2, "_connect": 1141, "_fetchval": 6, "_orm": 1,
     "_probe_problems": 2, "_r10_authid_reading": 1, "_r10_inplace_bound": 1,
     "_r10_outside_across_drop": 2, "_r10_routes": 1, "_r10_settings": 2, "_r9_databases": 1,
     "_template_problem": 3, "_whoami": 3}
 START_COUNTS = {
-    "_apply_tail": 2, "_blobs": 1, "_build": 1, "_build.<locals>.record": 433,
-    "_build.<locals>.run": 384, "_git": 2, "_route_run": 56,
+    "_apply_tail": 2, "_blobs": 1, "_build": 1, "_build.<locals>.record": 435,
+    "_build.<locals>.run": 386, "_git": 2, "_route_run": 56,
     "test_migrations_are_applied_from_the_object_store": 2,
-    "test_zz_rollback_and_resume_files_do_not_change_mail_inbox_rev": 25}
+    "test_zz_rollback_and_resume_files_do_not_change_mail_inbox_rev": 26}
 
 REUSE_REFUSAL = ("D2_REUSE_DB is set: the chain was not built in this run, so the run is not "
                  "one the packet cites (ruling FOUR-R11-A17 (g))")

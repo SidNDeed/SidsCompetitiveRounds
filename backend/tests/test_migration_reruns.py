@@ -40,6 +40,7 @@ SCR_MIGRATION_TEST_PG_OPTOUT=1 and the failures become named skips.
 """
 import asyncio
 import datetime as _dt
+import hashlib
 import os
 import re
 import sys
@@ -50,6 +51,8 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import title_ladders_lane_schema as _lane  # noqa: E402
+import d2_seed  # noqa: E402
+import d2_seed_data  # noqa: E402
 
 try:
     import asyncpg
@@ -130,6 +133,175 @@ def _contrib_tables_prereq():
         "source, utc_day) VALUES ('k401', '00000000-0000-0000-0000-0000000004a1', "
         "'00000000-0000-0000-0000-0000000004b2', '00000000-0000-0000-0000-0000000004a1', "
         "'self', DATE '2026-11-01');")
+    return "\n".join(out)
+
+
+def _one_statement(name, pattern):
+    """The one statement of backend/sql/<name> that `pattern` matches, read
+    out of the file rather than retyped."""
+    found = re.findall(pattern, (SQL_DIR / name).read_text(encoding="utf-8"), re.S)
+    assert len(found) == 1, (name, pattern, len(found))
+    return found[0]
+
+
+def _shop_items_table():
+    """shop_items as the primary's catalogue held it on 2026-10-01: the
+    statement in title_ladders_lane_schema.BASE. It has every column that
+    398, 399 and their d2 seeds name, except the one 397 adds, and 147's
+    catalog_ready DEFAULT TRUE."""
+    found = re.findall(r"CREATE TABLE shop_items \(.*?\);", _lane.BASE, re.S)
+    assert len(found) == 1, ("title_ladders_lane_schema.BASE: shop_items", len(found))
+    return found[0]
+
+
+_F148 = "148_cosmetic_placement_and_macro_evidence.sql"
+
+
+def _shop_release_prereq():
+    """What 398 and 399 read: shop_items (_shop_items_table); artist_users as
+    109 creates it; cosmetic_submissions as 114 creates it, with the columns
+    147, 148 and 204 add; and 148's two shop_items triggers, each statement
+    read out of its file. The insert gate holds a new face unpublished: the
+    d2 seeds' face rows rely on it, since 147's catalog_ready default is
+    TRUE. The flip trigger, when a row's catalog_ready turns TRUE, stamps
+    released_at where it is unset and, where the row has an approved
+    submission, that submission's approved revision as the published one."""
+    out = [_shop_items_table(),
+           _one_statement("109_artists_and_channel_posts.sql",
+                          r"CREATE TABLE IF NOT EXISTS artist_users \(.*?\n\);"),
+           _one_statement("114_cosmetic_submissions_and_new_artists.sql",
+                          r"CREATE TABLE IF NOT EXISTS cosmetic_submissions \(.*?\n\);"),
+           _one_statement("147_cosmetic_scale_and_catalog_gate.sql",
+                          r"ALTER TABLE cosmetic_submissions\s+ADD COLUMN IF NOT EXISTS render_scale .*?;"),
+           _one_statement(_F148, r"ALTER TABLE cosmetic_submissions\s+ADD COLUMN IF NOT EXISTS "
+                                 r"render_offset_x .*?submission_fingerprint VARCHAR\(64\);")]
+    text = (SQL_DIR / "204_cosmetic_animation_frames.sql").read_text(encoding="utf-8")
+    for line in ("ALTER TABLE cosmetic_submissions ADD COLUMN IF NOT EXISTS frame_count "
+                 "INTEGER NOT NULL DEFAULT 1;",
+                 "ALTER TABLE cosmetic_submissions ADD COLUMN IF NOT EXISTS anim_fps REAL;"):
+        assert text.count(line) == 1, ("204_cosmetic_animation_frames.sql", line)
+        out.append(line)
+    for function, trigger in (("gate_new_face_shop_item", "trg_gate_new_face_shop_item"),
+                              ("stamp_shop_item_catalog_release", "trg_shop_item_catalog_release")):
+        out.append(_one_statement(_F148, r"CREATE OR REPLACE FUNCTION %s\(\).*?\n\$\$;" % function))
+        out.append(_one_statement(_F148, r"CREATE TRIGGER %s\b.*?;" % trigger))
+    return "\n".join(out)
+
+
+def _398_prereq():
+    """_shop_release_prereq, then 397 (the column and the provenance table
+    398 writes), then the catalog chain's d2 seed for 398 with its art
+    expanded from the repo's PNGs (d2_seed.expand): the five faces' shop
+    rows, unpublished with the approval placeholder, and their approved
+    submissions. 398's first run publishes all five."""
+    return "\n".join((
+        _shop_release_prereq(),
+        (SQL_DIR / "397_shop_item_min_client_version.sql").read_text(encoding="utf-8"),
+        d2_seed.expand(d2_seed_data.SEEDS["398_release_five_faces_v1410.sql"])))
+
+
+def _399_prereq():
+    """_shop_release_prereq, then the catalog chain's d2 seed for 399 (the 19
+    faces' shop rows at their production ids, each with its placeholder,
+    held unpublished by the insert gate), then their publication: the state
+    399's header records on the primary, all 19 catalog_ready with a
+    placeholder. The seed alone leaves them unpublished, and on such rows 399
+    writes nothing on either run."""
+    return "\n".join((
+        _shop_release_prereq(),
+        d2_seed.expand(d2_seed_data.SEEDS["399_shop_face_descriptions.sql"]),
+        "UPDATE shop_items SET catalog_ready = TRUE WHERE kind = 'face' AND catalog_ready IS FALSE;"))
+
+
+_F410 = "410_i18n_keys_v1410.sql"
+_410_OUTSIDE_LIVE = "f410000000000001"
+_410_OUTSIDE_RETIRED = "f410000000000002"
+
+
+def _410_manifest():
+    """key_id -> namespace for every row of 410's VALUES list, read out of the
+    file rather than taken from its count check."""
+    text = (SQL_DIR / _F410).read_text(encoding="utf-8")
+    rows = re.findall(r"^  (?:, )?\('([0-9a-f]{16})', '(client|game)', ", text, re.M)
+    manifest = dict(rows)
+    namespaces = sorted(manifest.values())
+    assert (len(rows), len(manifest), namespaces.count("client"), namespaces.count("game")) == (
+        4021, 4021, 3779, 242), (len(rows), len(manifest))
+    return manifest
+
+
+def _410_prereq():
+    """The i18n tables as 181 and 212 create them, and four keys, so that each
+    step a second run must skip has done its work on the first: a manifest
+    key whose source changed, with a pending proposal at the old source (the
+    first supersede) and a machine entry; a retired manifest key, which 410
+    brings back; a live client key outside the manifest, with a pending
+    proposal and an approved translation (the retirement sweep and the second
+    supersede; the translation stays); and a key retired earlier, outside the
+    manifest, with an approved translation, which neither run may touch."""
+    manifest = _410_manifest()
+    client = sorted(k for k, ns in manifest.items() if ns == "client")
+    assert _410_OUTSIDE_LIVE not in manifest and _410_OUTSIDE_RETIRED not in manifest
+    rows = dict(changed=client[0], back=client[1], live=_410_OUTSIDE_LIVE,
+                retired=_410_OUTSIDE_RETIRED, old="0" * 40, outside="1" * 40)
+    return "\n".join((
+        (SQL_DIR / "181_i18n_infrastructure.sql").read_text(encoding="utf-8"),
+        (SQL_DIR / "212_i18n_key_context.sql").read_text(encoding="utf-8"),
+        """
+        INSERT INTO i18n_keys (key_id, namespace, msgctxt, source_hash, retired_at) VALUES
+          ('%(changed)s', 'client', 'the text before 1.41.0', '%(old)s', NULL),
+          ('%(back)s', 'client', 'a key 1.41.0 brings back', '%(old)s',
+           TIMESTAMPTZ '2026-09-01 10:00+00'),
+          ('%(live)s', 'client', 'a string 1.41.0 replaced', '%(outside)s', NULL),
+          ('%(retired)s', 'game', 'a string retired earlier', '%(outside)s',
+           TIMESTAMPTZ '2026-08-01 10:00+00');
+        INSERT INTO i18n_proposals (key_id, language_code, source_hash, proposed_target,
+                                    proposer_steam_id) VALUES
+          ('%(changed)s', 'es', '%(old)s', 'una propuesta', '76561190000000002'),
+          ('%(live)s', 'ru', '%(outside)s', 'a proposal', '76561190000000003');
+        INSERT INTO i18n_entries (key_id, language_code, target, state, approved_source_hash) VALUES
+          ('%(changed)s', 'ru', 'a machine entry', 'machine', NULL),
+          ('%(live)s', 'uk', 'an approved translation', 'approved', '%(outside)s'),
+          ('%(retired)s', 'sv', 'an approved translation', 'approved', '%(outside)s');
+        """ % rows))
+
+
+def _mail_tables_prereq():
+    """415's prerequisites: `players`, and mail_messages and mail_recipients
+    exactly as 297 creates them (their CREATE TABLE statements read out of
+    that file, not retyped) with 300's recipient_count, and three messages:
+    a direct one and two broadcasts with their counts (the second with two
+    delivered envelopes and one suppressed; 415 refuses a broadcast without
+    a count). The second run is measured beside the receipts the first
+    run's backfill wrote, and beside the dropped foreign key."""
+    p = "00000000-0000-0000-0000-000000000%s"
+    out = ["CREATE TABLE players (id UUID PRIMARY KEY);",
+           "INSERT INTO players (id) VALUES ('%s'), ('%s'), ('%s'), ('%s');"
+           % (p % "4a1", p % "4b2", p % "4c3", p % "4d4")]
+    text = (SQL_DIR / "297_mail.sql").read_text(encoding="utf-8")
+    for table in ("mail_messages", "mail_recipients"):
+        found = re.search(r"CREATE TABLE IF NOT EXISTS %s \(.*?\n\);" % table, text, re.S)
+        assert found, ("297_mail.sql", table)
+        out.append(found.group(0))
+    column = "ALTER TABLE mail_messages ADD COLUMN IF NOT EXISTS recipient_count INTEGER NULL;"
+    assert column in (SQL_DIR / "300_mail_inbox_rev.sql").read_text(encoding="utf-8")
+    out.append(column)
+    out.append(
+        "INSERT INTO mail_messages (id, sender_id, kind, thread_id, subject, body, idempotency_key, "
+        "created_at, recipient_count) VALUES "
+        "('%s', '%s', 'direct', '%s', 's', 'b', '%s', TIMESTAMPTZ '2026-11-01 10:00+00', NULL), "
+        "('%s', '%s', 'system_broadcast', '%s', 's', 'b', '%s', TIMESTAMPTZ '2026-11-02 10:00+00', 3), "
+        "('%s', '%s', 'system_broadcast', '%s', 's', 'b', '%s', TIMESTAMPTZ '2026-11-03 10:00+00', 2);"
+        % (p % "4e1", p % "4a1", p % "4e1", p % "4f1",
+           p % "4e2", p % "4a1", p % "4e2", p % "4f2",
+           p % "4e3", p % "4a1", p % "4e3", p % "4f3"))
+    out.append(
+        "INSERT INTO mail_recipients (message_id, recipient_id, kind, delivery) VALUES "
+        "('%s', '%s', 'to', 'delivered'), "
+        "('%s', '%s', 'to', 'delivered'), ('%s', '%s', 'to', 'delivered'), "
+        "('%s', '%s', 'to', 'suppressed');"
+        % (p % "4e1", p % "4b2",
+           p % "4e3", p % "4b2", p % "4e3", p % "4c3", p % "4e3", p % "4d4"))
     return "\n".join(out)
 
 
@@ -260,9 +432,32 @@ PREREQ = {
         INSERT INTO i18n_entries (key_id, language_code, target, state)
         VALUES ('3bb08fc59139b367', 'ru', 'a machine entry', 'machine');
     """),
+    # 397 adds one column (with its CHECK and comment) to shop_items and
+    # creates shop_item_release_provenance: shop_items as the primary's
+    # catalogue holds it, with two rows, so the CHECK's validating scan and
+    # the second run are measured against rows that exist.
+    "397": _shop_items_table() + """
+        INSERT INTO shop_items (sku, kind, name, price)
+             VALUES ('title_r397', 'title', 'R397', 100),
+                    ('face_detail_r397', 'face', 'R397', 750);
+    """,
+    # 398 publishes five faces and records what it wrote (_398_prereq).
+    "398": _398_prereq(),
+    # 399 rewrites the placeholder on 19 published faces (_399_prereq).
+    "399": _399_prereq(),
     # 401 adds a column to combat_contrib and indexes both contribution
     # tables on match_id (_contrib_tables_prereq).
     "401": _contrib_tables_prereq(),
+    # 410 syncs the 1.41.0 keys into the i18n tables (_410_prereq).
+    "410": _410_prereq(),
+    # 415 creates mail_send_receipts and its index, the trigger on
+    # mail_messages and its function, backfills the receipts and drops 297's
+    # foreign key on in_reply_to (_mail_tables_prereq).
+    "415": _mail_tables_prereq(),
+    # 416 creates lobby_invites and invite_receipts with their indexes, and
+    # replaces 297's check on mail_messages.kind (_mail_tables_prereq: the
+    # check as 297 declares it, over a direct message and two broadcasts).
+    "416": _mail_tables_prereq(),
 }
 
 # The tables whose CONTENT this file is responsible for. Fingerprinted
@@ -280,7 +475,13 @@ TABLES = {
     "377": ("matches",),
     "391": ("dc_events",),
     "396": ("i18n_keys", "i18n_entries", "i18n_proposals"),
+    "397": ("shop_items", "shop_item_release_provenance"),
+    "398": ("shop_items", "cosmetic_submissions", "shop_item_release_provenance"),
+    "399": ("shop_items",),
     "401": ("card_contrib", "combat_contrib"),
+    "410": ("i18n_keys", "i18n_entries", "i18n_proposals", "i18n_review_events"),
+    "415": ("mail_send_receipts", "mail_messages"),
+    "416": ("lobby_invites", "invite_receipts", "mail_messages"),
 }
 
 MIGRATION_FILES = {
@@ -294,7 +495,13 @@ MIGRATION_FILES = {
     "377": "377_admin_evidence_indexes.sql",
     "391": "391_dc_events_leave_anchor.sql",
     "396": "396_faq_early_leave_keys.sql",
+    "397": "397_shop_item_min_client_version.sql",
+    "398": "398_release_five_faces_v1410.sql",
+    "399": "399_shop_face_descriptions.sql",
     "401": "401_contrib_match_provenance.sql",
+    "410": _F410,
+    "415": "415_mail_send_receipts.sql",
+    "416": "416_lobby_invites.sql",
 }
 
 
@@ -459,7 +666,8 @@ async def _apply_twice(number, *, between=None, prereq_extra="", cleanup=None):
 
 # ── The bar: a second run changes nothing ───────────────────────────────────
 
-@pytest.mark.parametrize("number", ["331", "332", "333", "336", "337", "365", "366", "377", "391", "396", "401"])
+@pytest.mark.parametrize("number", ["331", "332", "333", "336", "337", "365", "366", "377", "391", "396",
+                                    "397", "398", "399", "401", "415", "416"])
 def test_a_second_run_writes_no_row(number):
     """Applied twice, back to back, on the state the first run left."""
     applied = _run(_apply_twice(number))
@@ -471,7 +679,8 @@ def test_a_second_run_writes_no_row(number):
         % (number, applied.rows_changed_on_second_run))
 
 
-@pytest.mark.parametrize("number", ["331", "332", "333", "336", "337", "365", "366", "377", "391", "396", "401"])
+@pytest.mark.parametrize("number", ["331", "332", "333", "336", "337", "365", "366", "377", "391", "396",
+                                    "397", "398", "399", "401", "415", "416"])
 def test_a_second_run_leaves_every_row_byte_identical(number):
     """The value half of the bar, stated separately so a failure says which
     of the two properties broke."""
@@ -484,7 +693,8 @@ def test_a_second_run_leaves_every_row_byte_identical(number):
             % (number, table))
 
 
-@pytest.mark.parametrize("number", ["331", "332", "333", "336", "337", "365", "366", "377", "391", "396", "401"])
+@pytest.mark.parametrize("number", ["331", "332", "333", "336", "337", "365", "366", "377", "391", "396",
+                                    "397", "398", "399", "401", "410", "415", "416"])
 def test_a_second_run_replaces_no_constraint_or_index(number):
     """OIDs, not definitions. A dropped-and-recreated constraint has the same
     definition, a new OID, and cost an ACCESS EXCLUSIVE lock plus a validating
@@ -503,7 +713,8 @@ def test_a_second_run_replaces_no_constraint_or_index(number):
         "migration %s removed %s on its second run" % (number, vanished))
 
 
-@pytest.mark.parametrize("number", ["331", "332", "333", "336", "337", "365", "366", "377", "391", "396", "401"])
+@pytest.mark.parametrize("number", ["331", "332", "333", "336", "337", "365", "366", "377", "391", "396",
+                                    "397", "398", "399", "401", "410", "415", "416"])
 def test_a_second_run_removes_no_relation_from_the_database(number):
     """THE THIRD MEASUREMENT, AND THE ONE THE OTHER TWO CANNOT MAKE.
 
@@ -526,6 +737,325 @@ def test_a_second_run_removes_no_relation_from_the_database(number):
         "migration %s removed %s from the database on its second run. A "
         "re-run may not delete a relation it did not create."
         % (number, gone))
+
+
+# Each one a second-run defect that one of the four measurements above exists
+# to see, appended after 415's COMMIT. 415's trigger fires on an INSERT and on
+# an UPDATE OF recipient_count only, so none of them reaches it.
+_PLANTS_415 = (
+    (test_a_second_run_writes_no_row, "rewrote",
+     "UPDATE mail_messages SET subject = subject;"),
+    (test_a_second_run_leaves_every_row_byte_identical, "changed the contents of",
+     "UPDATE mail_messages SET subject = subject || '.';"),
+    (test_a_second_run_replaces_no_constraint_or_index, "dropped and recreated",
+     "DROP INDEX IF EXISTS planted_idx; CREATE INDEX planted_idx ON mail_messages (subject);"),
+    (test_a_second_run_removes_no_relation_from_the_database, "from the database on its second run",
+     "DO $$ BEGIN IF to_regclass('planted_probe') IS NULL THEN CREATE TABLE planted_probe (x int);"
+     " ELSE DROP TABLE planted_probe; END IF; END $$;"),
+)
+
+
+def test_415s_four_rerun_cases_fail_a_planted_second_run_defect(monkeypatch):
+    """The negative control of the four measurements' 415 cases, which joined
+    their parametrize lists with migration 415's change: each fails on a copy
+    of 415 that carries the one defect it measures, while 415 itself passes
+    all four (the parametrized runs above)."""
+    real = migration_text
+    for test, message, plant in _PLANTS_415:
+        monkeypatch.setitem(globals(), "migration_text",
+                            lambda number, plant=plant: real(number) + "\n" + plant + "\n")
+        with pytest.raises(AssertionError, match=message):
+            test("415")
+
+
+# 416 owns mail_messages too (it replaces the kind check), so the same four
+# plants, each acting on mail_messages, carry one defect apiece for 416's
+# cases. Its prerequisite has no 415 trigger, so none fires on them.
+_PLANTS_416 = _PLANTS_415
+
+
+def test_416s_four_rerun_cases_fail_a_planted_second_run_defect(monkeypatch):
+    """The negative control of the four measurements' 416 cases, which joined
+    their parametrize lists with the lobby invites change: each fails on a
+    copy of 416 that carries the one defect it measures, while 416 itself
+    passes all four (the parametrized runs above)."""
+    real = migration_text
+    for test, message, plant in _PLANTS_416:
+        monkeypatch.setitem(globals(), "migration_text",
+                            lambda number, plant=plant: real(number) + "\n" + plant + "\n")
+        with pytest.raises(AssertionError, match=message):
+            test("416")
+
+
+# 416 creates lobby_invites and invite_receipts and marks both, or finds both
+# marked, or refuses with nothing changed (its CREATE OR REFUSE section). The
+# mark is a table comment holding the SHA-256 of the statements between the
+# file's DDL START and DDL END lines, comment and blank lines dropped and
+# each line trimmed.
+_416_MARK = re.compile(r"'lobby invites, DDL sha256 ([0-9a-f]{64})'")
+
+
+def _416_ddl_lines(text):
+    """The lines strictly between 416's DDL START and DDL END lines."""
+    lines = text.replace("\r\n", "\n").split("\n")
+    starts = [i for i, s in enumerate(lines) if s.strip() == "-- DDL START"]
+    ends = [i for i, s in enumerate(lines) if s.strip() == "-- DDL END"]
+    assert len(starts) == 1 and len(ends) == 1 and starts[0] < ends[0], (starts, ends)
+    return lines[starts[0] + 1:ends[0]]
+
+
+def _416_ddl_digest(text):
+    """The SHA-256 416's mark must hold, recomputed from a text of the file."""
+    keep = [s.strip() for s in _416_ddl_lines(text)]
+    body = "\n".join(s for s in keep if s and not s.startswith("--"))
+    return hashlib.sha256(body.encode("utf-8")).hexdigest()
+
+
+def _416_mark_defects(text):
+    """What is wrong with a text's mark: [] when the text holds exactly one
+    mark and that mark is the digest of its own DDL block."""
+    marks = _416_MARK.findall(text)
+    if len(marks) != 1:
+        return ["%d marks, not 1" % len(marks)]
+    want = _416_ddl_digest(text)
+    return [] if marks[0] == want else ["the mark is %s, the DDL's digest is %s" % (marks[0], want)]
+
+
+def test_416s_mark_is_the_digest_of_its_own_ddl():
+    """416's mark is recomputed from its own text, so the statements that
+    create the two tables cannot change without it, and tables an older text
+    made are refused. The negative control: a copy with one DDL token changed
+    (a column type, an index's columns, a check's values, a NOT NULL) fails,
+    each still holding the old mark; a comment line or an indent inside the
+    block does not. The block holds no migration number, so the renumbering
+    leaves the mark as it is: 405 became 416 with the same mark."""
+    real = migration_text("416")
+    assert _416_mark_defects(real) == []
+    mutants = {
+        "a column type": ("      route              TEXT        NOT NULL,",
+                          "      route              VARCHAR     NOT NULL,"),
+        "an index's columns": ("ON lobby_invites (expires_at);", "ON lobby_invites (expires_at, id);"),
+        "a check's values": ("CHECK (mode IN ('team', 'ovt', 'ffa'))", "CHECK (mode IN ('team', 'ovt'))"),
+        "a NOT NULL": ("      lobby_id           UUID        NOT NULL,",
+                       "      lobby_id           UUID        NULL,"),
+    }
+    for name, (old, new) in mutants.items():
+        assert real.count(old) == 1, name
+        assert _416_mark_defects(real.replace(old, new)), "%s left the mark matching" % name
+    inert = real.replace("    -- DDL END", "    -- a comment line inside the block\n    -- DDL END")
+    inert = inert.replace("    CREATE INDEX ix_lobby_invites_expires", "        CREATE INDEX ix_lobby_invites_expires")
+    assert inert != real and _416_mark_defects(inert) == []
+    number = MIGRATION_FILES["416"].split("_")[0]
+    assert number not in "\n".join(_416_ddl_lines(real))
+
+
+# The schema's state a refused run must leave as it found it: every relation
+# with its kind and comment, and every constraint with its definition
+# (mail_messages' kind check among them). The schema is named ($1), so a
+# state that changes search_path is still read.
+_416_STATE = (
+    "SELECT string_agg(x, '; ' ORDER BY x) FROM ("
+    " SELECT format('%s %s %s', c.relname, c.relkind, coalesce(obj_description(c.oid, 'pg_class'), '-')) AS x"
+    "   FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace"
+    "  WHERE n.nspname = $1"
+    " UNION ALL"
+    " SELECT format('%s.%s %s', t.relname, k.conname, pg_get_constraintdef(k.oid))"
+    "   FROM pg_constraint k JOIN pg_class t ON t.oid = k.conrelid"
+    "   JOIN pg_namespace n ON n.oid = t.relnamespace"
+    "  WHERE n.nspname = $1) s")
+
+
+async def _416_over(setup, probes, sql=None):
+    """416 applied once (or `sql`, a text standing in for it) in a fresh
+    schema holding its prerequisite and then `setup` (SQL, which may itself
+    apply 416): (the run's error or None, whether the schema's state read the
+    same after the run as before it, each probe's value). The schema is
+    dropped whatever happened."""
+    schema = "m416c_%s" % uuid.uuid4().hex[:10]
+    conn = await asyncpg.connect(DSN)
+    try:
+        await conn.execute('CREATE SCHEMA "%s"' % schema)
+        await conn.execute('SET search_path TO "%s"' % schema)
+        await conn.execute(PREREQ["416"])
+        if setup:
+            await conn.execute(setup)
+        before = await conn.fetchval(_416_STATE, schema)
+        try:
+            await conn.execute(migration_text("416") if sql is None else sql)
+            verdict = None
+        except Exception as ex:
+            verdict = "%s: %s" % (type(ex).__name__, ex)
+            await conn.execute("ROLLBACK")        # the file's own BEGIN, aborted
+        after = await conn.fetchval(_416_STATE, schema)
+        return verdict, before == after, tuple([await conn.fetchval(p) for p in probes])
+    finally:
+        try:
+            await conn.execute("ROLLBACK")
+        except Exception:
+            pass
+        try:
+            await conn.execute('DROP SCHEMA IF EXISTS "%s" CASCADE' % schema)
+        finally:
+            await conn.close()
+
+
+_416_MARKS = ("SELECT string_agg(c.relname || ' ' || coalesce(obj_description(c.oid, 'pg_class'), '-'), '; '"
+              " ORDER BY c.relname) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace"
+              " WHERE n.nspname = current_schema() AND c.relname IN ('lobby_invites', 'invite_receipts')")
+_416_INDEXES = ("SELECT string_agg(ci.relname, ', ' ORDER BY ci.relname) FROM pg_index i"
+                " JOIN pg_class ci ON ci.oid = i.indexrelid"
+                " WHERE i.indrelid IN (to_regclass(format('%I.lobby_invites', current_schema())),"
+                "                      to_regclass(format('%I.invite_receipts', current_schema())))")
+
+
+def test_416_creates_and_marks_both_tables_and_a_second_run_finds_them_its_own():
+    """A fresh apply creates both tables with all eight indexes and marks each
+    with the file's mark. A second apply over that finds both marked: it
+    succeeds and leaves the schema's state exactly as it found it. What a
+    second run writes, replaces and locks is measured by the rerun cases and
+    the lock cases above, 416 among them."""
+    mark = "lobby invites, DDL sha256 %s" % _416_MARK.findall(migration_text("416"))[0]
+    marks = "invite_receipts %s; lobby_invites %s" % (mark, mark)
+    indexes = ("invite_receipts_pkey, ix_invite_receipts_invite, ix_lobby_invites_expires, "
+               "ix_lobby_invites_invitee_pending, ix_lobby_invites_lobby, ix_lobby_invites_sender_created, "
+               "lobby_invites_pkey, uq_lobby_invites_pending")
+    verdict, same, got = _run(_416_over("", (_416_MARKS, _416_INDEXES)))
+    assert verdict is None and not same and got == (marks, indexes), (verdict, same, got)
+    verdict, same, got = _run(_416_over(migration_text("416"), (_416_MARKS, _416_INDEXES)))
+    assert verdict is None and same and got == (marks, indexes), (verdict, same, got)
+
+
+# The session's temporary invite_receipts: its indexes, then its comment, '-'
+# for none of either; NULL when there is no such table.
+_416_TEMP = ("SELECT coalesce((SELECT string_agg(ci.relname, ', ' ORDER BY ci.relname) FROM pg_index i"
+             "                  JOIN pg_class ci ON ci.oid = i.indexrelid WHERE i.indrelid = c.oid), '-')"
+             "       || ' / ' || coalesce(obj_description(c.oid, 'pg_class'), '-')"
+             "  FROM pg_class c WHERE c.relnamespace = pg_my_temp_schema() AND c.relname = 'invite_receipts'")
+_416_PATH_BLOCK = re.compile(r"^DO \$m416path\$\n.*?^END \$m416path\$;\n", re.S | re.M)
+
+
+def test_416_creates_its_tables_past_a_temporary_table_of_the_same_name():
+    """A temporary invite_receipts in the applying session takes neither the
+    create path's index nor its mark: for its transaction 416 puts the
+    session's temporary schema last in search_path, so every unqualified
+    name after CREATE TABLE reaches the table just created. Negative
+    control: the file without that block indexes and marks the temporary
+    table, and the schema's invite_receipts has neither."""
+    temp = "CREATE TEMP TABLE invite_receipts (invite_id UUID);\n"
+    mark = _416_real_mark()
+    probes = (_416_MARKS, _416_INDEXES, _416_TEMP)
+    indexes = ("invite_receipts_pkey, ix_invite_receipts_invite, ix_lobby_invites_expires, "
+               "ix_lobby_invites_invitee_pending, ix_lobby_invites_lobby, ix_lobby_invites_sender_created, "
+               "lobby_invites_pkey, uq_lobby_invites_pending")
+    verdict, _, got = _run(_416_over(temp, probes))
+    assert verdict is None and got == ("invite_receipts %s; lobby_invites %s" % (mark, mark), indexes,
+                                       "- / -"), (verdict, got)
+    bare, n = _416_PATH_BLOCK.subn("", migration_text("416"))
+    assert n == 1, "416's search-path block was not found"
+    verdict, _, got = _run(_416_over(temp, probes, sql=bare))
+    assert verdict is None and got == ("invite_receipts -; lobby_invites %s" % mark,
+                                       indexes.replace("ix_invite_receipts_invite, ", ""),
+                                       "ix_invite_receipts_invite / %s" % mark), (
+        "the file without its search-path block did not reach the temporary table", verdict, got)
+
+
+_R416_PATH_BLOCK = re.compile(r"^DO \$r416path\$\n.*?^END \$r416path\$;\n", re.S | re.M)
+# The two tables standing in the schema, and in the session's temporary schema.
+_416_HERE = ("SELECT string_agg(c.relname, ', ' ORDER BY c.relname) FROM pg_class c"
+             " JOIN pg_namespace n ON n.oid = c.relnamespace"
+             " WHERE n.nspname = current_schema() AND c.relname IN ('lobby_invites', 'invite_receipts')")
+_416_TEMP_HERE = ("SELECT string_agg(c.relname, ', ' ORDER BY c.relname) FROM pg_class c"
+                  " WHERE c.relnamespace = pg_my_temp_schema()"
+                  "   AND c.relname IN ('lobby_invites', 'invite_receipts')")
+
+
+def test_416s_rollback_drops_its_tables_past_a_temporary_table_of_the_same_name():
+    """With a temporary lobby_invites in the session, 416's rollback still
+    drops the schema's two tables and leaves the temporary one alone: it puts
+    the session's temporary schema last in search_path for its transaction,
+    as 416 does, and refuses a search_path that names pg_temp, changing
+    nothing. Negative control: the rollback without that block drops the
+    temporary table and commits with the schema's lobby_invites standing."""
+    rollback = (SQL_DIR / "rollback_416_lobby_invites.sql").read_text(encoding="utf-8")
+    setup = migration_text("416") + "\nCREATE TEMP TABLE lobby_invites (id UUID);\n"
+    probes = (_416_HERE, _416_TEMP_HERE)
+    verdict, _, got = _run(_416_over(setup, probes, sql=rollback))
+    assert verdict is None and got == (None, "lobby_invites"), (verdict, got)
+    bare, n = _R416_PATH_BLOCK.subn("", rollback)
+    assert n == 1, "the rollback's search-path block was not found"
+    verdict, _, got = _run(_416_over(setup, probes, sql=bare))
+    assert verdict is None and got == ("lobby_invites", None), (
+        "the rollback without its search-path block dropped the schema's lobby_invites", verdict, got)
+    named = migration_text("416") + (
+        "\nSELECT set_config('search_path', current_setting('search_path') || ', pg_temp', false);\n")
+    verdict, same, got = _run(_416_over(named, (_416_HERE,), sql=rollback))
+    assert verdict is not None and "rollback 416: search_path names pg_temp" in verdict, verdict
+    assert same and got == ("invite_receipts, lobby_invites",), ("the refused rollback changed the schema", got)
+
+
+def _416_real_mark():
+    return "lobby invites, DDL sha256 %s" % _416_MARK.findall(migration_text("416"))[0]
+
+
+_416_NOT_BOTH = "416: lobby_invites and invite_receipts are neither both absent nor both marked by this file"
+_416_TAKEN = "416: a name this file creates already stands in schema"
+_416_PATH_TEMP = "416: search_path names pg_temp"
+_416_NO_SCHEMA = "416: search_path names no schema to create in"
+# Each state 416 refuses: (the state, made before the run; the refusal's own
+# text; what that text must name as found).
+_416_REFUSALS = {
+    "one table without the other": (
+        lambda: migration_text("416") + "\nDROP TABLE invite_receipts;\n",
+        _416_NOT_BOTH, "(found: invite_receipts absent, lobby_invites marked)"),
+    "a table without its mark": (
+        lambda: migration_text("416") + "\nCOMMENT ON TABLE lobby_invites IS NULL;\n",
+        _416_NOT_BOTH, "(found: invite_receipts marked, lobby_invites unmarked)"),
+    "a table with another mark": (
+        lambda: migration_text("416") + "\nCOMMENT ON TABLE invite_receipts IS 'lobby invites, DDL sha256 %s';\n"
+        % ("0" * 64),
+        _416_NOT_BOTH, "(found: invite_receipts unmarked, lobby_invites marked)"),
+    "two tables this file did not make": (
+        lambda: "CREATE TABLE lobby_invites (id UUID PRIMARY KEY);\nCREATE TABLE invite_receipts (id UUID);\n",
+        _416_NOT_BOTH, "(found: invite_receipts unmarked, lobby_invites unmarked)"),
+    "a marked name that is not a table": (
+        lambda: "CREATE VIEW lobby_invites AS SELECT 1 AS id;\n"
+                "COMMENT ON VIEW lobby_invites IS '%s';\n"
+                "CREATE TABLE invite_receipts (id UUID);\n"
+                "COMMENT ON TABLE invite_receipts IS '%s';\n" % (_416_real_mark(), _416_real_mark()),
+        _416_NOT_BOTH, "(found: invite_receipts marked, lobby_invites not a table)"),
+    "an index name on another table": (
+        lambda: "CREATE TABLE planted (x int);\nCREATE INDEX ix_lobby_invites_expires ON planted (x);\n",
+        _416_TAKEN, "(found: ix_lobby_invites_expires)"),
+    # A row (composite) type has a pg_class row (relkind 'c'), so 416 finds
+    # a relation of that name and refuses it in its second branch, as not a
+    # table. An enum has a pg_type row and no pg_class row, so only the taken
+    # check's pg_type half finds it.
+    "a row type's name": (
+        lambda: "CREATE TYPE invite_receipts AS (x int);\n",
+        _416_NOT_BOTH, "(found: invite_receipts not a table, lobby_invites absent)"),
+    "an enum type's name": (
+        lambda: "CREATE TYPE invite_receipts AS ENUM ('x');\n",
+        _416_TAKEN, "(found: invite_receipts)"),
+    "a search path naming pg_temp": (
+        lambda: "SELECT set_config('search_path', current_setting('search_path') || ', pg_temp', false);\n",
+        _416_PATH_TEMP, ", pg_temp)"),
+    "a search path naming no schema": (
+        lambda: "SET search_path TO m416_no_such_schema;\n",
+        _416_NO_SCHEMA, "(found: m416_no_such_schema)"),
+}
+
+
+@pytest.mark.parametrize("state", sorted(_416_REFUSALS))
+def test_416_refuses_every_state_but_absent_or_its_own_with_nothing_changed(state):
+    """416 refuses each state that is neither both tables absent nor both its
+    own marked tables, with its own text naming what it found, and the
+    refused run changes nothing: the schema's relations, comments and
+    constraints (mail_messages' kind check among them) read the same after it
+    as before it."""
+    setup, refusal, found = _416_REFUSALS[state]
+    verdict, same, _ = _run(_416_over(setup(), ()))
+    assert verdict is not None and refusal in verdict and found in verdict, verdict
+    assert same, "the refused run changed the schema"
 
 
 def test_377_keeps_its_statistics_object_across_a_second_run():
@@ -920,16 +1450,36 @@ def test_336_probe_cleanup_cannot_reach_a_same_named_ordinary_table():
         "whatever the search path offers." % (gone,))
 
 
-async def _second_run_under_lock(number, table, holder_sql):
+async def _xids(conn, table):
+    """Every transaction id a row of ``table`` carries now, as xmin or xmax,
+    and '0' (no xmax); only '0' when the table does not exist yet (the first
+    run creates it)."""
+    if await conn.fetchval("SELECT to_regclass($1) IS NULL", table):
+        return {"0"}
+    rows = await conn.fetch("SELECT xmin::text AS n, xmax::text AS x FROM %s" % table)
+    return {"0"} | {r["n"] for r in rows} | {r["x"] for r in rows}
+
+
+async def _second_run_under_lock(number, table, holder_sql, rows=False, plant=""):
     """Apply the file, then apply it AGAIN while another session holds a lock.
 
-    Returns ``(control, verdict)``. ``control`` is what an explicitly
-    ACCESS-EXCLUSIVE statement did under the same holder, and it is not
-    decoration: without it, "the re-run completed" is exactly what this probe
-    would also print if the holder had failed to take any lock at all, which
-    is a check that cannot fail dressed up as a live experiment (#689/#342).
-    The control runs under its own short lock_timeout so the proof costs
-    milliseconds rather than the file's own five seconds.
+    Returns ``(control, verdict, outside, held)``. ``control`` is what an
+    explicitly ACCESS-EXCLUSIVE statement did under the same holder, and it is
+    not decoration: without it, "the re-run completed" is exactly what this
+    probe would also print if the holder had failed to take any lock at all,
+    which is a check that cannot fail dressed up as a live experiment
+    (#689/#342). The control runs under its own short lock_timeout so the
+    proof costs milliseconds rather than the file's own five seconds.
+
+    With ``rows`` the holder also takes the row locks an ordinary writer holds
+    (_WRITER_ROWS) on every row OUTSIDE the first run's footprint: the rows
+    the first run wrote or locked carry an xmin or xmax the table did not
+    hold before it, and every other row -- this number's bystander included
+    (_BYSTANDERS, inserted after the first run) -- is held. ``outside`` is how
+    many rows that is, ``held`` how many the holder locked (None without
+    ``rows``). ``plant`` is SQL run at the start of the SECOND execution only.
+    The second execution runs under a session lock_timeout of 5 s, so a wait
+    on the holder fails rather than hangs (333 sets none of its own).
     """
     sql = migration_text(number)
     schema = "mlock%s_%s" % (number, uuid.uuid4().hex[:8])
@@ -941,11 +1491,21 @@ async def _second_run_under_lock(number, table, holder_sql):
         await holder.execute('SET search_path TO "%s"' % schema)
         if PREREQ[number].strip():
             await doer.execute(PREREQ[number])
+        before = await _xids(doer, table)
         await doer.execute(sql)
+        after = await doer.fetch("SELECT ctid::text AS c, xmin::text AS n, xmax::text AS x FROM %s"
+                                 % table)
+        footprint = {r["c"] for r in after if r["n"] not in before or r["x"] not in before}
+        bystander = _BYSTANDERS.get((number, table))
+        if bystander:
+            await doer.execute(bystander[0])
+        outside = [r["c"] for r in await doer.fetch("SELECT ctid::text AS c FROM %s" % table)
+                   if r["c"] not in footprint]
 
         tx = holder.transaction()
         await tx.start()
         await holder.execute(holder_sql)
+        held = await holder.fetchval(_WRITER_ROWS % table, outside) if rows else None
         try:
             # CONTROL. `ADD COLUMN IF NOT EXISTS` over a column that cannot
             # exist: it writes nothing, and it takes ACCESS EXCLUSIVE in order
@@ -962,13 +1522,14 @@ async def _second_run_under_lock(number, table, holder_sql):
         except Exception:
             pass
 
+        await doer.execute("SET lock_timeout = '5s'")
         try:
-            await doer.execute(sql)
+            await doer.execute(plant + sql)
             verdict = None
         except Exception as ex:
             verdict = "%s: %s" % (type(ex).__name__, ex)
         await tx.rollback()
-        return control, verdict
+        return control, verdict, len(outside), held
     finally:
         try:
             await doer.execute("ROLLBACK")
@@ -986,8 +1547,67 @@ _HOLDERS = {
     "an ordinary writer": "LOCK TABLE %s IN ROW EXCLUSIVE MODE",
 }
 
+# What an ordinary writer holds besides its table lock: FOR NO KEY UPDATE, the
+# row lock a non-key UPDATE takes, on the rows it writes. The writer case takes
+# it on every row outside the first run's footprint. A file that locks its own
+# rows first and judges them after (396, 398 and 399; learning #1072 bounds
+# that wait at 5 s and the hold at 25 s) locks those same rows again on a
+# second run, by design: they are its footprint. A lock on any other row is
+# what the writer case's row half catches.
+_WRITER_ROWS = ("WITH held AS (SELECT 1 FROM %s WHERE ctid::text = ANY($1::text[]) "
+                "FOR NO KEY UPDATE) SELECT count(*) FROM held")
+
+# (number, table) -> (insert, predicate): one row per table that neither run
+# writes or locks, inserted after the first run, so every writer case of these
+# numbers has a row outside the footprint to hold. Their fixtures alone leave
+# some tables with none: 398's and 399's faces are all targets, 397's
+# provenance table starts empty, and 410 writes every proposal and audit row it
+# is given. Each row is in a state both runs leave alone: 410 retires LIVE keys
+# outside its manifest and supersedes PENDING proposals, so its key is retired
+# already and its proposal rejected.
+_BYSTANDER_KEY = "f410000000000003"
+_SHOP_BYSTANDER = ("INSERT INTO shop_items (sku, kind, name, price) "
+                   "VALUES ('bystander_row_lock', 'title', 'a bystander', 0)",
+                   "sku = 'bystander_row_lock'")
+_PROVENANCE_BYSTANDER = ("INSERT INTO shop_item_release_provenance (migration, shop_item_id, "
+                         "submission_id, released_at, published_revision) "
+                         "VALUES ('bystander', 0, 0, NOW(), 1)",
+                         "migration = 'bystander'")
+_BYSTANDERS = {
+    ("397", "shop_items"): _SHOP_BYSTANDER,
+    ("397", "shop_item_release_provenance"): _PROVENANCE_BYSTANDER,
+    ("398", "shop_items"): _SHOP_BYSTANDER,
+    ("398", "cosmetic_submissions"): (
+        "INSERT INTO cosmetic_submissions (artist_steam_id, name, slot, png_data, png_bytes) "
+        "SELECT artist_steam_id, 'a bystander', slot, decode('00', 'hex'), 1 "
+        "FROM cosmetic_submissions ORDER BY id LIMIT 1",
+        "name = 'a bystander'"),
+    ("398", "shop_item_release_provenance"): _PROVENANCE_BYSTANDER,
+    ("399", "shop_items"): _SHOP_BYSTANDER,
+    ("410", "i18n_keys"): (
+        "INSERT INTO i18n_keys (key_id, namespace, msgctxt, source_hash, retired_at) VALUES "
+        "('%s', 'game', 'a bystander', repeat('1', 40), TIMESTAMPTZ '2026-08-01 10:00+00')"
+        % _BYSTANDER_KEY,
+        "key_id = '%s'" % _BYSTANDER_KEY),
+    ("410", "i18n_entries"): (
+        "INSERT INTO i18n_entries (key_id, language_code, target, state, approved_source_hash) "
+        "VALUES ('%s', 'de', 'a bystander', 'approved', repeat('1', 40))" % _410_OUTSIDE_RETIRED,
+        "key_id = '%s' AND language_code = 'de'" % _410_OUTSIDE_RETIRED),
+    ("410", "i18n_proposals"): (
+        "INSERT INTO i18n_proposals (key_id, language_code, source_hash, proposed_target, "
+        "proposer_steam_id, status) VALUES ('%s', 'de', repeat('1', 40), 'a bystander', "
+        "'76561190000000004', 'rejected')" % _410_OUTSIDE_RETIRED,
+        "proposed_target = 'a bystander'"),
+    ("410", "i18n_review_events"): (
+        "INSERT INTO i18n_review_events (actor_steam_id, actor_role, language_code, key_id, "
+        "action, detail) VALUES ('76561190000000004', 'moderator', 'de', NULL, 'reject', "
+        "'a bystander')",
+        "detail = 'a bystander'"),
+}
+
 _LOCK_CASES = [(number, table, who)
-               for number in ("331", "332", "333", "336", "377", "391", "396", "401")
+               for number in ("331", "332", "333", "336", "377", "391", "396", "397", "398", "399",
+                              "401", "410", "415", "416")
                for table in TABLES[number]
                for who in sorted(_HOLDERS)]
 
@@ -1009,9 +1629,25 @@ def test_a_second_run_takes_no_blocking_lock(number, table, who):
     The measurement is therefore behavioural rather than a reading of the
     statements: hold the lock an ordinary request holds, re-apply the file,
     and require it to get all the way through.
+
+    An ordinary writer holds row locks as well as its table lock, so the
+    writer case also holds FOR NO KEY UPDATE on every row outside the first
+    run's footprint (_WRITER_ROWS): a second run that takes a row lock there
+    -- a `SELECT ... FOR UPDATE` in a guard, say -- would stop a writer of that
+    row, and fails here. For 397 to 410 the rows held include a bystander
+    (_BYSTANDERS), so their row half always holds at least one row; the
+    planted test below proves it can fail.
     """
     holder_sql = _HOLDERS[who] % table
-    control, verdict = _run(_second_run_under_lock(number, table, holder_sql))
+    rows = who == "an ordinary writer"
+    control, verdict, outside, held = _run(_second_run_under_lock(number, table, holder_sql, rows))
+    if rows:
+        assert held == outside, (
+            "the writer holder locked %r of the %d rows of %s outside the first "
+            "run's footprint" % (held, outside, table))
+        assert outside >= 1 or (number, table) not in _BYSTANDERS, (
+            "no row of %s outside the first run's footprint to hold, bystander "
+            "included: the row half would read nothing" % table)
     assert control == "LockNotAvailableError", (
         "the control did not fire: an ALTER TABLE needing ACCESS EXCLUSIVE on "
         "%s ran to completion while %s was supposed to be holding a lock on it "
@@ -1024,6 +1660,28 @@ def test_a_second_run_takes_no_blocking_lock(number, table, who):
         "table: guard the statement on the catalog so it is never issued, "
         "rather than spelling it IF NOT EXISTS."
         % (MIGRATION_FILES[number], who, table, verdict))
+
+
+@pytest.mark.parametrize("number,table", sorted(_BYSTANDERS))
+def test_a_second_run_row_lock_outside_its_footprint_fails_the_writer_case(number, table):
+    """The writer case's row half can fail, for each of the ten 397-to-410
+    writer cases: plant a row lock on the bystander -- a row the first run
+    neither wrote nor locked -- at the start of the second execution, and the
+    writer holder stops it (LockNotAvailableError at the 5 s session
+    lock_timeout). The same plant under the reader holder, which takes no row
+    lock, goes through: the failure is the row lock's, not the table's."""
+    assert _BYSTANDER_KEY not in _410_manifest()
+    plant = "SELECT 1 FROM %s WHERE %s FOR UPDATE;\n" % (table, _BYSTANDERS[(number, table)][1])
+    control, verdict, outside, held = _run(_second_run_under_lock(
+        number, table, _HOLDERS["an ordinary writer"] % table, True, plant))
+    assert control == "LockNotAvailableError", control
+    assert held == outside and outside >= 1, (held, outside)
+    assert verdict is not None and verdict.startswith("LockNotAvailableError"), verdict
+    control, verdict, _, held = _run(_second_run_under_lock(
+        number, table, _HOLDERS["an ordinary reader"] % table, False, plant))
+    assert control == "LockNotAvailableError" and held is None, (control, held)
+    assert verdict is None, ("the plant failed under the reader holder too, so the "
+                             "writer case's failure is not the row lock's: %s" % verdict)
 
 
 # ── The specific hazards each guard was written for ─────────────────────────
@@ -2219,3 +2877,357 @@ def test_396_hold_check_refuses_a_second_statement_thirty_plus_five_and_a_commit
     assert len(got) == 1 and got[0].startswith("the SET lines after BEGIN"), got
     got = _396_hold_problems(sql.replace(sync, "SET LOCAL synchronous_commit = on;\n"), one)
     assert len(got) == 1 and "synchronous_commit = on" in got[0], got
+
+
+# ── 397 to 399 and 410: what each second run is pinned to ──────────────────
+#
+# 397, 398 and 399 joined the four measurements above and the lock cases.
+# 410 joined the constraint-and-index case, the relation case and the lock
+# cases only: its upsert has no WHERE, so a second run writes a new version
+# of every manifest key with a new updated_at, and its audit insert adds a
+# row on every run. The tests below pin exactly what each second run does,
+# and each check has its negative control.
+
+def test_397_keeps_its_check_constraint_across_a_second_run():
+    """The constraint census can only see 397's CHECK replaced if the first
+    run made it: 397 must leave ck_shop_items_min_client_version after its
+    first run and the SAME constraint (one OID) after its second. Whether
+    the second run issues the ALTER at all is the lock cases' question."""
+    applied = _run(_apply_twice("397"))
+    key = ("constraint", "ck_shop_items_min_client_version")
+    assert key in applied.objects_first, (
+        "397 left no constraint ck_shop_items_min_client_version: %r"
+        % sorted(applied.objects_first))
+    assert applied.objects_second.get(key) == applied.objects_first[key], (
+        "397's second run replaced or removed ck_shop_items_min_client_version: %r -> %r"
+        % (applied.objects_first[key], applied.objects_second.get(key)))
+
+
+# Each one a second-run defect that one of the four measurements exists to
+# see, appended after the file's COMMIT, on a table the file owns.
+_GENERAL_PLANTS = {
+    test_a_second_run_writes_no_row: ("rewrote", "UPDATE {t} SET {c} = {c};"),
+    test_a_second_run_leaves_every_row_byte_identical: (
+        "changed the contents of", "UPDATE {t} SET {c} = {c} || '.';"),
+    test_a_second_run_replaces_no_constraint_or_index: (
+        "dropped and recreated",
+        "DROP INDEX IF EXISTS planted_idx; CREATE INDEX planted_idx ON {t} ({c});"),
+    test_a_second_run_removes_no_relation_from_the_database: (
+        "from the database on its second run",
+        "DO $$ BEGIN IF to_regclass('planted_probe') IS NULL THEN CREATE TABLE planted_probe (x int);"
+        " ELSE DROP TABLE planted_probe; END IF; END $$;"),
+}
+_PLANT_TARGETS = {"397": ("shop_items", "name"), "398": ("shop_items", "name"),
+                  "399": ("shop_items", "name"), "410": ("i18n_entries", "target")}
+_PLANT_CASES = ([(number, test) for number in ("397", "398", "399") for test in _GENERAL_PLANTS]
+                + [("410", test_a_second_run_replaces_no_constraint_or_index),
+                   ("410", test_a_second_run_removes_no_relation_from_the_database)])
+
+
+@pytest.mark.parametrize("number,test", _PLANT_CASES, ids=[
+    "%s-%s" % (number, test.__name__[len("test_a_second_run_"):]) for number, test in _PLANT_CASES])
+def test_the_rerun_cases_397_to_399_and_410_joined_fail_a_planted_second_run_defect(number, test, monkeypatch):
+    """The negative control of each case these four numbers joined: it fails
+    on a copy of the file carrying the one defect it measures, while the file
+    itself passes it (the parametrized runs above)."""
+    message, plant = _GENERAL_PLANTS[test]
+    table, column = _PLANT_TARGETS[number]
+    plant = plant.format(t=table, c=column)
+    real = migration_text
+    monkeypatch.setitem(globals(), "migration_text", lambda n: real(n) + "\n" + plant + "\n")
+    with pytest.raises(AssertionError, match=message):
+        test(number)
+
+
+async def _two_runs(number, sql, state):
+    """PREREQ[number], then `sql` twice, in a throwaway schema. Returns, per
+    run, `state(conn)` after it and the NOTICE messages it sent."""
+    schema = "m%sp_%s" % (number, uuid.uuid4().hex[:10])
+    conn = await asyncpg.connect(DSN)
+    heard = []
+    conn.add_log_listener(lambda _conn, message: heard.append(message.message))
+    try:
+        await conn.execute('CREATE SCHEMA "%s"' % schema)
+        await conn.execute('SET search_path TO "%s"' % schema)
+        await conn.execute(PREREQ[number])
+        runs = []
+        for _ in range(2):
+            await asyncio.sleep(0)
+            del heard[:]
+            await conn.execute(sql)
+            await asyncio.sleep(0)
+            said = list(heard)
+            runs.append((await state(conn), said))
+        return runs
+    finally:
+        try:
+            await conn.execute("ROLLBACK")
+        except Exception:
+            pass
+        try:
+            await conn.execute('DROP SCHEMA IF EXISTS "%s" CASCADE' % schema)
+        finally:
+            await conn.close()
+
+
+async def _rows(conn, tables):
+    """Each table's rows as text (png_data left out), with row versions."""
+    out = {}
+    for table in tables:
+        out[table] = [tuple(r) for r in await conn.fetch(
+            "SELECT (to_jsonb(t) - 'png_data')::text, t.xmin::text FROM %s t ORDER BY 1" % table)]
+    return out
+
+
+# 410
+
+_410_FIRST = "4021 keys, 1 retired, 1 superseded, 1 superseded (retired); migration 410"
+_410_SECOND = "4021 keys, 0 retired, 0 superseded, 0 superseded (retired); migration 410"
+_410_ACTOR = ("actor_steam_id", "actor_role", "language_code", "key_id", "action")
+
+
+async def _410_state(conn):
+    """Every row of the four tables 410 writes, with its row version."""
+    keys = await conn.fetch("""
+        SELECT key_id, namespace, msgctxt, source_hash, sensitive, max_px, context,
+               retired_at, updated_at, xmin::text AS version
+          FROM i18n_keys ORDER BY key_id""")
+    out = {"keys": {r["key_id"]: dict(r) for r in keys}}
+    for name, table, order in (("proposals", "i18n_proposals", "id"),
+                               ("entries", "i18n_entries", "key_id, language_code"),
+                               ("events", "i18n_review_events", "id")):
+        out[name] = [dict(r) for r in await conn.fetch(
+            "SELECT t.*, t.xmin::text AS version FROM %s t ORDER BY %s" % (table, order))]
+    return out
+
+
+def _410_second_run_problems(first, second, manifest):
+    """What 410's second run may change: updated_at, forward, on each
+    manifest key (and so that row's version), and one added audit row with
+    _410_SECOND's text by the first row's actor. Anything else is listed."""
+    problems = []
+    a, b = first["keys"], second["keys"]
+    if set(a) != set(b):
+        problems.append("the second run added or removed a key: %r" % sorted(set(a) ^ set(b))[:5])
+    moved = sorted(k for k in b if b[k] != a.get(k))
+    outside = [k for k in moved if k not in manifest]
+    if outside:
+        problems.append("a key outside the manifest moved: %r" % outside[:5])
+    still = sorted(set(manifest) - set(moved))
+    if still:
+        problems.append("%d manifest keys did not move: %r" % (len(still), still[:5]))
+    for k in moved:
+        if k not in manifest or k not in a:
+            continue
+        other = sorted(c for c in a[k] if c not in ("updated_at", "version") and a[k][c] != b[k][c])
+        if other:
+            problems.append("the manifest key %s changed %s" % (k, other))
+        if not b[k]["updated_at"] > a[k]["updated_at"]:
+            problems.append("the manifest key %s: updated_at did not move forward" % k)
+    for k in sorted(a):
+        if k not in manifest and a[k]["retired_at"] is not None and (
+                k not in b or b[k]["retired_at"] != a[k]["retired_at"]):
+            problems.append("the retired key %s: retired_at moved" % k)
+    for name in ("proposals", "entries"):
+        if second[name] != first[name]:
+            problems.append("a row of %s changed" % name)
+    kept, added = second["events"][:len(first["events"])], second["events"][len(first["events"]):]
+    if kept != first["events"]:
+        problems.append("an earlier audit row changed")
+    if [e["detail"] for e in added] != [_410_SECOND]:
+        problems.append("audit rows added: %r" % [e["detail"] for e in added])
+    elif first["events"] and [added[0][c] for c in _410_ACTOR] != [first["events"][-1][c] for c in _410_ACTOR]:
+        problems.append("the added audit row's actor differs: %r" % added[0])
+    return problems
+
+
+def test_410s_second_run_moves_updated_at_on_the_manifest_keys_and_nothing_else():
+    """The fixture's first run does each thing a second run must skip
+    (_410_prereq): it brings the retired manifest key back, retires the live
+    key outside the manifest, supersedes the proposal at the old source and
+    the proposal on the key it retired, and writes its audit row with those
+    counts. The second run then moves updated_at, forward, on exactly the
+    4021 manifest keys and on no other key; changes no other column of any
+    key, so the retired keys keep their retired_at; changes no proposal and
+    no entry row; and adds one audit row, '4021 keys, 0 retired, 0
+    superseded, 0 superseded (retired); migration 410', by the first row's
+    actor."""
+    manifest = _410_manifest()
+    (first, _), (second, _) = _run(_two_runs("410", migration_text("410"), _410_state))
+    keys = first["keys"]
+    assert [e["detail"] for e in first["events"]] == [_410_FIRST], first["events"]
+    assert len(keys) == len(manifest) + 2, len(keys)
+    assert all(keys[k]["retired_at"] is None for k in manifest), "a manifest key is retired after the first run"
+    assert keys[_410_OUTSIDE_LIVE]["retired_at"] is not None, keys[_410_OUTSIDE_LIVE]
+    assert keys[_410_OUTSIDE_RETIRED]["retired_at"] is not None, keys[_410_OUTSIDE_RETIRED]
+    assert sorted((p["key_id"] == _410_OUTSIDE_LIVE, p["status"], p["review_note"])
+                  for p in first["proposals"]) == [
+        (False, "superseded", "source changed at key sync"),
+        (True, "superseded", "key retired at key sync")], first["proposals"]
+    assert len(first["entries"]) == 3, first["entries"]
+    assert _410_second_run_problems(first, second, manifest) == []
+
+
+def _410_plants():
+    """(the problem it must raise, a defect appended after 410's COMMIT). The
+    last two act only after the second run (two audit rows exist by then)."""
+    changed = sorted(k for k, ns in _410_manifest().items() if ns == "client")[0]
+    after_second = "DO $p$ BEGIN IF (SELECT count(*) FROM i18n_review_events) > 1 THEN %s; END IF; END $p$;"
+    return (
+        ("a key outside the manifest moved",
+         "UPDATE i18n_keys SET updated_at = updated_at + interval '1 second' WHERE retired_at IS NOT NULL;"),
+        ("retired_at moved",
+         "UPDATE i18n_keys SET retired_at = retired_at + interval '1 second' WHERE retired_at IS NOT NULL;"),
+        ("a row of proposals changed", "UPDATE i18n_proposals SET review_note = review_note;"),
+        ("a row of entries changed", "UPDATE i18n_entries SET target = target;"),
+        ("audit rows added",
+         "INSERT INTO i18n_review_events (actor_steam_id, actor_role, language_code, action, detail) "
+         "VALUES ('76561190000000009', 'admin', 'all', 'sync_keys', 'planted');"),
+        ("changed ['msgctxt']", after_second % (
+            "UPDATE i18n_keys SET msgctxt = msgctxt || '.' WHERE key_id = '%s'" % changed)),
+        ("did not move forward", after_second % (
+            "UPDATE i18n_keys SET updated_at = updated_at - interval '1 day' WHERE key_id = '%s'" % changed)),
+    )
+
+
+@pytest.mark.parametrize("message,plant", _410_plants(), ids=[m for m, _ in _410_plants()])
+def test_410s_second_run_check_fails_a_planted_defect(message, plant):
+    """The negative control of the test above: each defect makes
+    _410_second_run_problems name it."""
+    manifest = _410_manifest()
+    (first, _), (second, _) = _run(_two_runs("410", migration_text("410") + "\n" + plant + "\n",
+                                             _410_state))
+    problems = _410_second_run_problems(first, second, manifest)
+    assert any(message in p for p in problems), (message, problems)
+
+
+# 398
+
+_398_SAID = "398: post-check OK: 5 of 5 v1.41.0 faces live (flipped %d, already live %d)"
+
+
+def _398_faces():
+    """(submission id, shop item id) of the five faces, read out of 398's
+    expected array."""
+    pairs = re.findall(r"\['(\d+)', '(\d+)', 'face_[a-z_]+',", migration_text("398"))
+    assert len(pairs) == 5, pairs
+    return [(int(sub), int(shop)) for sub, shop in pairs]
+
+
+async def _398_state(conn):
+    faces = [tuple(r) for r in await conn.fetch(
+        "SELECT id, catalog_ready, min_client_version FROM shop_items WHERE kind = 'face' ORDER BY id")]
+    return {"rows": await _rows(conn, TABLES["398"]), "faces": faces}
+
+
+def _398_second_run_problems(first, second):
+    """What 398's second run may do: count the five faces as already live
+    and write nothing."""
+    (s1, _), (s2, said) = first, second
+    problems = []
+    said = [m for m in said if m.startswith("398: post-check")]
+    if said != [_398_SAID % (0, 5)]:
+        problems.append("the second run said %r" % said)
+    for table in TABLES["398"]:
+        if s2["rows"][table] != s1["rows"][table]:
+            problems.append("the second run changed a row of %s" % table)
+    if s2["faces"] != s1["faces"]:
+        problems.append("the second run changed a face's catalog_ready or minimum: %r" % s2["faces"])
+    return problems
+
+
+def test_398s_second_run_counts_the_five_faces_already_live_and_reaches_neither_write():
+    """From the catalog chain's d2 seed for 398 and 148's two triggers
+    (_398_prereq), the first run publishes the five faces, each with
+    min_client_version 1.41.0 and one provenance row. The second run counts
+    the five as already live, by 398's own provenance rows, so it reaches
+    neither the flip UPDATE nor the provenance INSERT: no new provenance row,
+    catalog_ready and min_client_version unchanged on the five, and no row
+    of the three tables changed, version included. (It locks ten rows, the
+    five shop rows and the five submissions; it counts five faces.)"""
+    first, second = _run(_two_runs("398", migration_text("398"), _398_state))
+    s1, said1 = first
+    assert [m for m in said1 if m.startswith("398: post-check")] == [_398_SAID % (5, 0)], said1
+    shops = sorted(shop for _, shop in _398_faces())
+    assert s1["faces"] == [(shop, True, "1.41.0") for shop in shops], s1["faces"]
+    assert len(s1["rows"]["shop_item_release_provenance"]) == 5, s1["rows"]["shop_item_release_provenance"]
+    assert _398_second_run_problems(first, second) == []
+
+
+def _398_plants():
+    """(the problem it must raise, a defect appended after 398's COMMIT). The
+    first puts one face back to its pre-image after each run, so the second
+    run publishes it again."""
+    sub, shop = _398_faces()[0]
+    placeholder = re.findall(r"placeholder\s+CONSTANT TEXT := '([^']*)';", migration_text("398"))
+    assert len(placeholder) == 1, placeholder
+    return (
+        ("the second run said",
+         "UPDATE cosmetic_submissions SET published_placement_revision = 0 WHERE id = %d; "
+         "DELETE FROM shop_item_release_provenance WHERE migration = '398' AND shop_item_id = %d; "
+         "UPDATE shop_items SET catalog_ready = FALSE, released_at = NULL, min_client_version = NULL, "
+         "description = '%s' WHERE id = %d;" % (sub, shop, placeholder[0], shop)),
+        ("the second run changed a row of shop_item_release_provenance",
+         "UPDATE shop_item_release_provenance SET recorded_at = recorded_at;"),
+    )
+
+
+# 399
+
+_399_SAID = "399: %d descriptions written, %d already written, %d left alone"
+_399_PLANTS = (
+    ("the second run said",
+     "UPDATE shop_items SET description = description || '.' "
+     "WHERE id = (SELECT min(id) FROM shop_items WHERE kind = 'face');"),
+    ("the second run changed a row of shop_items", "UPDATE shop_items SET description = description;"),
+)
+
+
+async def _399_state(conn):
+    texts = [tuple(r) for r in await conn.fetch(
+        "SELECT id, description FROM shop_items WHERE kind = 'face' ORDER BY id")]
+    return {"rows": await _rows(conn, TABLES["399"]), "texts": texts}
+
+
+def _399_second_run_problems(first, second):
+    """What 399's second run may do: count the 19 as already written and
+    write nothing."""
+    (s1, _), (s2, said) = first, second
+    problems = []
+    said = [m for m in said if re.match(r"399: \d+ descriptions written", m)]
+    if said != [_399_SAID % (0, 19, 0)]:
+        problems.append("the second run said %r" % said)
+    if s2["rows"] != s1["rows"]:
+        problems.append("the second run changed a row of shop_items")
+    if s2["texts"] != s1["texts"]:
+        problems.append("the second run changed a description")
+    return problems
+
+
+def test_399s_second_run_counts_the_nineteen_already_written_and_changes_no_text():
+    """From the catalog chain's d2 seed for 399, its 19 faces published
+    (_399_prereq), the first run writes all 19 descriptions. The second run
+    counts all 19 as already holding the new text, so the UPDATE, which needs
+    the old text, is never reached: no description changes and no row of
+    shop_items changes, version included."""
+    first, second = _run(_two_runs("399", migration_text("399"), _399_state))
+    s1, said1 = first
+    assert [m for m in said1 if re.match(r"399: \d+ descriptions written", m)] == [
+        _399_SAID % (19, 0, 0)], said1
+    assert len(s1["texts"]) == 19, s1["texts"]
+    assert not [t for _, t in s1["texts"] if "Ships with the next mod update" in t], s1["texts"]
+    assert _399_second_run_problems(first, second) == []
+
+
+@pytest.mark.parametrize("number,index", [("398", 0), ("398", 1), ("399", 0), ("399", 1)])
+def test_398s_and_399s_second_run_checks_fail_a_planted_defect(number, index):
+    """The negative control of the two tests above: each defect makes the
+    number's check name it."""
+    if number == "398":
+        plants, state, check = _398_plants(), _398_state, _398_second_run_problems
+    else:
+        plants, state, check = _399_PLANTS, _399_state, _399_second_run_problems
+    message, plant = plants[index]
+    first, second = _run(_two_runs(number, migration_text(number) + "\n" + plant + "\n", state))
+    problems = check(first, second)
+    assert any(message in p for p in problems), (message, problems)
