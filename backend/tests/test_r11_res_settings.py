@@ -159,9 +159,17 @@ def test_r11_res_sweep_production_settings_statements():
         forms, ns = ro_covered.settings_forms([sql])
         assert forms == (), (where, sql, forms)
         names |= set(ns)
+    # Judged since 5b18949a, +1 (server-fix-1114): the evidence census flush's
+    # settings statement, main._EVC_SETTINGS_SQL, three set_config calls with
+    # is_local the literal true and literal names; synchronous_commit has a
+    # pg_settings row, so the existing pg_settings reading measures it.
     assert names == {"lock_timeout", "statement_timeout",
-                     "idle_in_transaction_session_timeout"}, names
-    assert len(got) == 16, got
+                     "idle_in_transaction_session_timeout", "synchronous_commit"}, names
+    assert len(got) == 17, got
+    assert [sql for _w, sql in got if "synchronous_commit" in sql] == [
+        "SELECT set_config('lock_timeout', '2s', true), "
+        "set_config('statement_timeout', '10s', true), "
+        "set_config('synchronous_commit', 'local', true)"], got
     for where, frag in fragments:
         toks = ro_covered.sql_tokens(frag)
         assert toks[0] == ("word", "set"), (where, frag)

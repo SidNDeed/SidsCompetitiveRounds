@@ -6,20 +6,22 @@
 --   evidence_refusal_daily  one row per (UTC day, evidence kind, HTTP status
 --                           answered, refusal field, mod version) for every
 --                           evidence record an intake route did NOT store,
---                           with a counter raised by a delta (n = n + 1) and
+--                           with a counter raised by a delta (n = n + d) and
 --                           the time of the last one
 --
--- Written by main._evc_count, exactly once for every answer of status
--- 400..599 to a POST on one of the four evidence intake paths (seat-evidence,
--- card-evidence, combat-evidence, identity-clock-evidence), wherever it was
--- decided. The route counts its own refusals (401 seat_session, 503 switch
--- off, 403 signature, 409 not_ready, 409 conflict, 400/413/422/429 refusals,
--- 500 internal on an unexpected error); main.evidence_census_gate counts every
--- other one (a middleware's 413/426/429/503, a raised HTTPException, an
--- unhandled error) under a fixed gate_* field. A stored record (200 recorded,
--- or 200 already_recorded for the identical repeat) is not counted. The write
--- runs in its own transaction, never the request's, and delays the answer by
--- at most main.EVC_BUDGET_MS.
+-- Counted once for every FINAL answer of status 400..599 to a POST on one of
+-- the four evidence intake paths (seat-evidence, card-evidence,
+-- combat-evidence, identity-clock-evidence), by ONE place:
+-- main.evidence_census_gate, which notes it in an in-memory tally of the api
+-- process (no database work on the request's path). The field is the one the
+-- route left when it refused (401 seat_session, 503 switch off, 403
+-- signature, 409 not_ready, 409 conflict, 400/413/422/429 refusals, 500
+-- internal on an unexpected error), else a fixed gate_* field (a
+-- middleware's 413/426/429/503, a raised HTTPException, an unhandled error).
+-- A stored record (200 recorded, or 200 already_recorded for the identical
+-- repeat) is not counted. Written by main._evc_flush_janitor_step, a step of
+-- queue_cleanup_loop on the primary, about once a minute: each key's delta
+-- added in one transaction.
 --
 -- WHAT IT HOLDS, AND WHAT IT NEVER HOLDS. Counts only. No player id, steam id,
 -- room or game key, attach key, address, session, signature, or any part of
@@ -59,9 +61,11 @@
 --    WHERE day >= CURRENT_DATE - 7
 --    ORDER BY day DESC, n DESC;
 --
--- DEPLOY ORDER: either. An api deployed before this file finds no table: the
--- census write fails, the route answers exactly the same refusal, and prints
--- one [EVIDENCE-CENSUS] line per refusal until this file runs.
+-- DEPLOY ORDER: this file before the api. An api deployed before it answers
+-- exactly the same, and its flush step finds no table by its schema probe,
+-- skips and keeps the tally in memory; but the boot janitor self-test checks
+-- the flush's statements against this table and reports them failed
+-- (janitor_selftest 0) until this file runs.
 --
 -- ROLLBACK: no rollback file. The table is new and starts empty; removing it
 -- is DROP TABLE evidence_refusal_daily, and nothing else depends on it.

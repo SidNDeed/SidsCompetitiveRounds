@@ -2319,7 +2319,7 @@ def test_m6_the_rating_pass_and_its_gold_supplement_ride_the_reports_one_commit(
     assert src.count(call) == 1, src.count(call)
     i = src.index(call)
     assert "_ladder_late_mark = _ladder_achievement_mark(db)" in src[i - 400:i], src[i - 400:i]
-    seg = src[i:src.index("await db.commit()", i)]
+    seg = src[i:src.index("await _commit_new_match(db)", i)]   # the report's commit (server-fix-1114)
     assert ("_ladder_add_late_gold(\n            db, match.id, _ladder_late_mark, "
             "_ladder_achievement_mark(db), \"rating\")") in seg[:400], seg[:400]
     assert seg.count("_ladder_add_late_gold(") == 3, seg.count("_ladder_add_late_gold(")

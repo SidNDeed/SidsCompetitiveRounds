@@ -5223,6 +5223,13 @@ async def queue_cleanup_loop():
             await _pc_trade_janitor_step()
         except Exception as e:
             print(f"[QUEUE-CLEANUP] player cards trading error: {e}")
+        # The evidence refusal census (migration 414): write the in-memory
+        # tally's deltas -- its own session and its own try; it skips (and
+        # keeps the tally) until the schema probe finds the table.
+        try:
+            await _evc_flush_janitor_step()
+        except Exception as e:
+            _janitor_print(f"[EVIDENCE-CENSUS] flush error: {type(e).__name__}: {e}")
         # Player Cards (WP-D): re-derive, at the earned-pack odds in force,
         # the grants a failed savepoint lost, and void the unopened packs of
         # invalidated series (its own session, every PC_RECONCILE_EVERY_S).
@@ -6996,11 +7003,15 @@ async def version_gate(request: Request, call_next):
 
 @app.middleware("http")
 async def evidence_census_gate(request: Request, call_next):
-    """The evidence refusal census's outer layer (migration 414): a POST on
-    one of the four evidence intake paths whose answer is 400..599 and which
-    the route did not count itself is counted here, once, under a gate_*
-    field (_evidence_census_outer); an error raised through it is counted as
-    500 and raised on unchanged. Every other request passes untouched.
+    """The evidence refusal census's ONE counting place (migration 414): a
+    POST on one of the four evidence intake paths whose FINAL answer is
+    400..599 is noted here, once, in the in-memory tally (_evc_settle, a
+    plain function): under the field the route left on request.state when it
+    left one, else the gate_* field of that status. An error raised through
+    it is noted as 500 (with the route's field when one was left) and raised
+    on unchanged. Every other request passes untouched. Nothing here awaits
+    anything but call_next, prints, or takes a connection; the janitor step
+    _evc_flush_janitor_step writes the tally.
 
     Registered just before replica_write_gate, so every layer that can answer
     such a POST on the primary is inside it: version_gate (426),
@@ -7010,15 +7021,14 @@ async def evidence_census_gate(request: Request, call_next):
     write and so no count could be made, and evidence_key_gate, which answers
     only under /api/v1/internal/evidence-report/."""
     kind = _EVC_PATH_KINDS.get(request.url.path) if request.method == "POST" else None
-    if kind is None:
-        return await call_next(request)
     try:
         response = await call_next(request)
     except Exception:
-        await _evidence_census_outer(request, kind, 500)
+        if kind is not None:
+            _evc_settle(request, kind, 500)
         raise
-    if response.status_code >= _EVC_STATUS_MIN:
-        await _evidence_census_outer(request, kind, response.status_code)
+    if kind is not None:
+        _evc_settle(request, kind, response.status_code)
     return response
 
 
@@ -9205,27 +9215,25 @@ def _sev_refusal(r):
 
 # -- the evidence refusal census (migration 414, evidence_refusal_daily) --------
 #
-# Every answer of status 400..599 to a POST on one of the four evidence intake
-# paths raises one counter: (UTC day, kind, status, field, mod version),
-# exactly once, wherever the answer was decided. The route's own refusals are
-# counted by the route (_evidence_refused / _evidence_census, which name the
-# refusal's field); every other one (a middleware's refusal, a raised
-# HTTPException, an unhandled error) is counted by evidence_census_gate under
-# a fixed gate_* field. The first count of a request sets
-# request.state.evc_counted, so the outer layer counts only what the route did
-# not. Counts only: no player, steam id, room or game key, address or body part
-# is written. Every column is bounded by the server: kind from _EVC_KINDS,
-# status 400..599, field from the server's own vocabulary (else `unlisted`),
-# version from a closed release range (else `other`). A 401 is counted under
+# Every FINAL answer of status 400..599 to a POST on one of the four evidence
+# intake paths is noted once against one counter: (UTC day, kind, status,
+# field, mod version). A note for a NEW key beyond the tally's bound is
+# dropped and counted as dropped instead; what reaches the table, and what can
+# be lost on the way, is in _evc_flush_janitor_step's docstring. ONE place
+# counts: evidence_census_gate, after call_next, with the final status. A route that refuses does not count; it leaves the refused
+# field (one validated word) on request.state (_evc_leave), and the gate
+# counts under that field, else under the fixed gate_* field of the status.
+# Counts only: no player, steam id, room or game key, address or body part is
+# kept. Every column is bounded by the server: kind from _EVC_KINDS, status
+# 400..599, field from the server's own vocabulary (else `unlisted`), version
+# from a closed release range (else `other`). A 401 is counted under
 # seat_session / `other` whatever it sent.
 #
-# The census never changes the answer and delays it by at most EVC_BUDGET_MS:
-# the counter is written by its own task on its own session (never the
-# request's), awaited for the budget only; past it the task is cancelled, kept
-# referenced in _EVC_TASKS until it ends, and bounded in the database by its
-# statement_timeout. At most EVC_MAX_CONCURRENT census tasks exist at once; a
-# count beyond that is skipped at once (shed), never queued, so the census
-# cannot be what empties the connection pool.
+# Between "decided" and "delivered" the census does no database work, takes no
+# connection, awaits nothing and prints nothing: the gate adds one to a number
+# in a bounded in-memory tally (_evc_note, at most EVC_TALLY_MAX_KEYS keys).
+# The janitor step _evc_flush_janitor_step (queue_cleanup_loop, primary only)
+# writes the tally's deltas, in one transaction, about once a minute.
 #
 # A fifth evidence kind: one line in _EVC_KINDS (its word, its module, its
 # route's path, and the modules it parses with, whose literals are fields).
@@ -9239,15 +9247,27 @@ _EVC_STATUS_MIN, _EVC_STATUS_MAX = 400, 599
 # The closed field set of an answer decided outside the route's own census.
 _EVC_GATE_FIELDS = {413: "gate_size", 426: "gate_version", 429: "gate_rate"}
 _EVC_GATE_OTHER = "gate_other"
-EVC_BUDGET_MS = 300
-EVC_MAX_CONCURRENT = 2
+# The tally's bound: a note for a NEW key beyond it is dropped (and counted in
+# _EVC_DROPPED); an existing key still counts.
+EVC_TALLY_MAX_KEYS = 512
 _EVC_FIELD_RE = _re.compile(r"[a-z][a-z0-9_.]{0,47}")
 _EVC_VERSION_RE = _re.compile(r"(0|[1-9][0-9]?)\.(0|[1-9][0-9]?)\.(0|[1-9][0-9]?)")
-_EVC_SQL = (
-    "INSERT INTO evidence_refusal_daily (day, kind, status, field, mod_version, n, last_at) "
-    "VALUES (CAST(timezone('UTC', now()) AS date), :k, :s, :f, :v, 1, now()) "
-    "ON CONFLICT (day, kind, status, field, mod_version) DO UPDATE "
-    "SET n = evidence_refusal_daily.n + 1, last_at = EXCLUDED.last_at")
+# The flush's ONE statement for the whole batch: one row per key from typed
+# arrays (the batch's keys are distinct, so ON CONFLICT never meets one row
+# twice), each key's delta added to its row; last_at never moves back.
+_EVC_FLUSH_SQL = """
+    INSERT INTO evidence_refusal_daily (day, kind, status, field, mod_version, n, last_at)
+    SELECT u.day, u.kind, u.status, u.field, u.mod_version, u.n, u.last_at
+      FROM unnest(CAST(:day AS date[]), CAST(:k AS text[]), CAST(:s AS smallint[]),
+                  CAST(:f AS text[]), CAST(:v AS text[]), CAST(:d AS bigint[]),
+                  CAST(:t AS timestamptz[]))
+           AS u(day, kind, status, field, mod_version, n, last_at)
+    ON CONFLICT (day, kind, status, field, mod_version) DO UPDATE
+       SET n = evidence_refusal_daily.n + EXCLUDED.n,
+           last_at = GREATEST(evidence_refusal_daily.last_at, EXCLUDED.last_at)
+"""
+# The house schema probe (one catalog statement, run in a savepoint).
+_EVC_TABLE_PROBE_SQL = "SELECT to_regclass('evidence_refusal_daily') IS NOT NULL AS present"
 
 
 def _evc_source_strings(mod) -> set:
@@ -9314,22 +9334,28 @@ def _evc_key(status, field, request) -> tuple[str, str]:
     return _evc_field(field), _evc_version(request)
 
 
-# What the database still does for a census transaction is bounded on the
-# server too: a counter row held elsewhere is waited for at most lock_timeout,
-# and any statement (the COMMIT included) runs at most statement_timeout, so a
-# census task cancelled at the budget, or one whose cancel cannot reach the
-# server, ends within that bound.
-_EVC_LOCK_TIMEOUT = "SET LOCAL lock_timeout = '250ms'"
-_EVC_STATEMENT_TIMEOUT = "SET LOCAL statement_timeout = '1000ms'"
-# The engine the census writes on. None in service: the route's census uses
-# the engine of the route's session (a separate session on it, never the
-# route's own), the outer layer the app's engine (database.engine). A test
-# that drives the whole app sets its own engine here.
-_EVC_BIND = None
-# Every census task until it ends (the strong reference that owns it), and how
-# many exist: a cancelled task still holds its slot until it has ended.
-_EVC_TASKS: set = set()
-_EVC_BUSY = [0]
+# The flush transaction's settings. What bounds what (lesson 1072): a lock
+# wait is bounded by lock_timeout, and a statement (its lock waits included)
+# by statement_timeout; the COMMIT is bounded by neither, because the server
+# stops the statement timer before it commits, so a deferred trigger's or a
+# synchronous standby's wait at COMMIT is unbounded there.
+# evidence_refusal_daily has no deferred trigger, and synchronous_commit =
+# local makes this COMMIT wait for the primary's own WAL flush only, never for
+# a standby's confirmation, whatever synchronous_standby_names says (it is
+# empty on the primary today): a count is not worth that wait. None of this
+# is on a request's path: the flush runs in the janitor. The three settings
+# are one statement (set_config with is_local true, the same as SET LOCAL):
+# one round trip.
+_EVC_SETTINGS_SQL = ("SELECT set_config('lock_timeout', '2s', true), "
+                     "set_config('statement_timeout', '10s', true), "
+                     "set_config('synchronous_commit', 'local', true)")
+# The tally: (UTC day of the note, kind, status, field, version) -> [count,
+# time of the last note]. Module state of this process; see
+# _evc_flush_janitor_step for what that costs and why it is accepted.
+_EVC_TALLY: dict = {}
+_EVC_DROPPED = [0]
+# The table found once is cached for the process (414 is additive).
+_EVC_TABLE_FOUND = False
 
 
 def _evc_answer_field(answer) -> str:
@@ -9346,30 +9372,57 @@ def _evc_answer_field(answer) -> str:
     return body.get("detail") or body.get("status") or body.get("error")
 
 
-def _evc_engine(db=None):
-    """The engine a census write uses (see _EVC_BIND)."""
-    if _EVC_BIND is not None:
-        return _EVC_BIND
-    bind = getattr(db, "bind", None) if db is not None else None
-    if bind is not None:
-        return bind
-    import database as _database
-    return _database.engine
+def _evc_leave(request, answer=None, field=None):
+    """What a refusing evidence route does for the census, and all it does:
+    leave the refused field (one validated word: `field`, else the one its
+    answer names) on request.state for evidence_census_gate, and return the
+    answer unchanged. A plain function; it cannot change the answer."""
+    try:
+        request.state.evc_field = _evc_field(field if field is not None
+                                             else _evc_answer_field(answer))
+    except Exception:
+        pass
+    return answer
 
 
-async def _evc_write(engine, kind, status, field, version) -> None:
-    """One counter, in its own session and transaction on `engine`. Closing
-    the session (also on a cancel) rolls back whatever did not commit."""
-    async with AsyncSession(bind=engine, expire_on_commit=False) as s:
-        await s.execute(text(_EVC_STATEMENT_TIMEOUT))
-        await s.execute(text(_EVC_LOCK_TIMEOUT))
-        await s.execute(text(_EVC_SQL), {"k": kind, "s": status, "f": field, "v": version})
-        await s.commit()
+def _evc_note(kind, status, field, version) -> None:
+    """Add one to the tally's key for this answer. A plain function: no I/O,
+    no await, nothing it meets can reach the request. A NEW key beyond
+    EVC_TALLY_MAX_KEYS is dropped and counted in _EVC_DROPPED."""
+    try:
+        now = datetime.now(timezone.utc)
+        key = (now.date(), kind, status, field, version)
+        cell = _EVC_TALLY.get(key)
+        if cell is None:
+            if len(_EVC_TALLY) >= EVC_TALLY_MAX_KEYS:
+                _EVC_DROPPED[0] += 1
+                return
+            _EVC_TALLY[key] = [1, now]
+        else:
+            cell[0] += 1
+            cell[1] = now
+    except Exception:
+        pass
+
+
+def _evc_settle(request, kind, status) -> None:
+    """The gate's count of one final answer: inside 400..599, under the field
+    the route left (request.state.evc_field), else the gate_* field of the
+    status. A plain function, guarded whole."""
+    try:
+        if kind not in _EVC_KINDS or not (_EVC_STATUS_MIN <= status <= _EVC_STATUS_MAX):
+            return
+        left = getattr(request.state, "evc_field", None)
+        field = left if left is not None else _EVC_GATE_FIELDS.get(status, _EVC_GATE_OTHER)
+        field, version = _evc_key(status, field, request)
+        _evc_note(kind, status, field, version)
+    except Exception:
+        pass
 
 
 def _evc_reason(ex) -> str:
-    """The failure as printed: its type and, when the database gave one,
-    its SQLSTATE (55P03 lock_timeout, 57014 statement_timeout, ...)."""
+    """A failure as printed: its type and, when the database gave one, its
+    SQLSTATE (55P03 lock_timeout, 57014 statement_timeout, ...)."""
     seen, e = set(), ex
     while e is not None and id(e) not in seen:
         seen.add(id(e))
@@ -9380,85 +9433,143 @@ def _evc_reason(ex) -> str:
     return type(ex).__name__
 
 
-def _evc_cancel(task) -> None:
-    """Cancel a census task past its budget. It stays in _EVC_TASKS, holding
-    its slot, until it has actually ended (_evc_done)."""
-    task.cancel()
+def _evc_take() -> tuple:
+    """The tally's content and the cap's dropped number, taken and reset with
+    no await in between."""
+    batch = dict(_EVC_TALLY)
+    _EVC_TALLY.clear()
+    dropped = _EVC_DROPPED[0]
+    _EVC_DROPPED[0] = 0
+    return batch, dropped
 
 
-def _evc_done(task, label, late) -> None:
-    """A census task has ended: release its slot and its reference, and
-    consume its outcome. A failure inside the budget is printed by
-    _evc_count; one that ends after the budget (late) is printed here."""
-    _EVC_TASKS.discard(task)
-    _EVC_BUSY[0] -= 1
-    if task.cancelled():
-        return
-    ex = task.exception()
-    if ex is not None and late[0]:
-        print(f"[EVIDENCE-CENSUS] {label} not counted late: {_evc_reason(ex)}")
-
-
-async def _evc_count(engine, request, kind, status, field) -> None:
-    """Count one answer of an evidence path, at most once per request. Never
-    raises, never changes the answer, and returns within EVC_BUDGET_MS
-    whatever the write is doing (waiting for a connection or a lock,
-    executing, committing): the write runs as its own task and is awaited
-    with asyncio.wait, which does not wait for a cancelled task to finish."""
+def _evc_size(batch) -> tuple:
+    """(keys, increments) of a batch, for a failure's line; never raises."""
     try:
-        state = request.state
-        if getattr(state, "evc_counted", False):
-            return
-        state.evc_counted = True
+        return len(batch), sum(cell[0] for cell in batch.values())
     except Exception:
-        return
-    if kind not in _EVC_KINDS or not (_EVC_STATUS_MIN <= status <= _EVC_STATUS_MAX):
-        return
-    field, version = _evc_key(status, field, request)
-    label = f"{kind} {status} {field}"
-    if _EVC_BUSY[0] >= EVC_MAX_CONCURRENT:
-        print(f"[EVIDENCE-CENSUS] shed {label}")
-        return
-    _EVC_BUSY[0] += 1
+        return -1, -1
+
+
+def _evc_merge_back(batch) -> int:
+    """Add a batch whose write did not reach its commit back into the tally,
+    within the cap; returns the increments that did not fit (counted as
+    dropped)."""
+    lost = 0
+    for key, (n, last) in batch.items():
+        cell = _EVC_TALLY.get(key)
+        if cell is None:
+            if len(_EVC_TALLY) >= EVC_TALLY_MAX_KEYS:
+                lost += n
+                continue
+            _EVC_TALLY[key] = [n, last]
+        else:
+            cell[0] += n
+            if last > cell[1]:
+                cell[1] = last
+    _EVC_DROPPED[0] += lost
+    return lost
+
+
+async def _evc_table(db) -> str:
+    """'found' (cached once found), 'missing', or 'unknown' (the probe did
+    not complete). The probe runs in a savepoint (#235). Only 'found' is
+    remembered: while the table is missing every pass probes again, so a
+    table created after boot is written from the next pass, no restart
+    needed. If a found table later goes away, each pass (about a minute)
+    fails at the flush statement before its commit, merges the batch back
+    within the bound and prints one 'flush failed before its commit ...
+    42P01' line."""
+    global _EVC_TABLE_FOUND
+    if _EVC_TABLE_FOUND:
+        return "found"
     try:
-        task = asyncio.ensure_future(_evc_write(engine, kind, status, field, version))
-    except Exception as ex:
-        _EVC_BUSY[0] -= 1
-        print(f"[EVIDENCE-CENSUS] {label} not counted: {_evc_reason(ex)}")
+        async with db.begin_nested():
+            present = (await db.execute(text(_EVC_TABLE_PROBE_SQL))).scalar()
+    except Exception as e:
+        _janitor_print(f"[EVIDENCE-CENSUS] table probe did not complete: {_evc_reason(e)}")
+        return "unknown"
+    if present is True:
+        _EVC_TABLE_FOUND = True
+        return "found"
+    return "missing"
+
+
+async def _evc_flush_janitor_step() -> None:
+    """One pass of queue_cleanup_loop: write the tally's deltas to
+    evidence_refusal_daily, in the form of _pc_trade_janitor_step (its own
+    try in the loop, its own session, one transaction).
+
+    - An empty tally (and no dropped number) executes nothing.
+    - The table absent (new code, old schema): the step skips by the schema
+      probe and keeps the tally.
+    - The transaction first sets lock_timeout, statement_timeout and
+      synchronous_commit = local; then the probe; then the tally is taken and
+      emptied with no await in between, and ONE statement applies every
+      key's delta (n = n + d; last_at never moves back).
+    - What bounds what (lesson 1072; see the comment at _EVC_SETTINGS_SQL):
+      the write is ONE statement, so after the take the step's database
+      time is one lock wait (lock_timeout), that statement (statement_timeout,
+      its lock wait included) and the COMMIT (bounded by neither). Before the
+      take: taking a connection waits at most the pool's timeout, as in every
+      janitor step; the settings statement runs before its own values apply,
+      and reads no table and takes no lock; the probe (until the table is
+      found) is bounded by statement_timeout. A failure of the settings
+      statement (raised to the loop's own arm) or of the probe (printed; the
+      step returns) comes before the take, so the tally stays whole.
+    - A failure BEFORE the commit is attempted: the batch is merged back by
+      addition (within the cap). A failure OF the commit call (its outcome
+      unknown): the batch is dropped, never merged back, and one line says
+      how many increments were dropped, so the table never over-counts.
+    - It prints only through _janitor_print; the number the cap dropped is in
+      its line and is reset.
+
+    Known and accepted: a count reaches the table at the next pass that
+    flushes, about a minute after its answer when that pass succeeds (a pass
+    that fails before its commit carries it to a later pass, merged back
+    within the bound; a pass whose commit call fails drops it); counts not
+    yet flushed are lost when the process ends (normally up to about a
+    minute of them, at a deploy).
+    The api runs one worker (Dockerfile); with more, each would flush its own
+    deltas correctly, because each delta is added, never assigned. The loop
+    runs on the primary only, so on the standby, whose evidence POSTs never
+    pass replica_write_gate, nothing is noted and nothing is written."""
+    if not _EVC_TALLY and not _EVC_DROPPED[0]:
         return
-    late = [False]
-    _EVC_TASKS.add(task)
-    task.add_done_callback(lambda t: _evc_done(t, label, late))
-    done, _pending = await asyncio.wait({task}, timeout=EVC_BUDGET_MS / 1000)
-    if not done:
-        late[0] = True
-        _evc_cancel(task)
-        print(f"[EVIDENCE-CENSUS] budget {label}")
-        return
-    if not task.cancelled() and task.exception() is not None:
-        print(f"[EVIDENCE-CENSUS] {label} not counted: {_evc_reason(task.exception())}")
-
-
-async def _evidence_census(db, kind, request, status, field) -> None:
-    """Raise one refusal counter for the route's own answer: a separate
-    session on the route session's engine, never the route's session or
-    transaction (see _evc_count for the bound)."""
-    await _evc_count(_evc_engine(db), request, kind, status, field)
-
-
-async def _evidence_census_outer(request, kind, status) -> None:
-    """Count an answer decided outside the route's own census (a middleware,
-    the framework, a raised HTTPException, an unhandled error), under the
-    closed gate_* field set: nothing the client chose enters its key."""
-    await _evc_count(_evc_engine(None), request, kind, status,
-                     _EVC_GATE_FIELDS.get(status, _EVC_GATE_OTHER))
-
-
-async def _evidence_refused(db, kind, request, answer):
-    """An evidence route's refusal answer, counted (see _evidence_census) and
-    returned unchanged."""
-    await _evidence_census(db, kind, request, answer.status_code, _evc_answer_field(answer))
-    return answer
+    from database import async_session
+    async with async_session() as db:
+        await db.execute(text(_EVC_SETTINGS_SQL))
+        if await _evc_table(db) != "found":
+            return
+        batch, dropped, committing = {}, 0, False
+        try:
+            batch, dropped = _evc_take()
+            keys = list(batch)
+            increments = sum(batch[k][0] for k in keys)
+            if keys:
+                await db.execute(text(_EVC_FLUSH_SQL), {
+                    "day": [k[0] for k in keys], "k": [k[1] for k in keys],
+                    "s": [k[2] for k in keys], "f": [k[3] for k in keys],
+                    "v": [k[4] for k in keys], "d": [batch[k][0] for k in keys],
+                    "t": [batch[k][1] for k in keys]})
+                committing = True
+                await db.commit()
+        except BaseException as e:
+            n_keys, n_inc = _evc_size(batch)
+            if committing:
+                _janitor_print(f"[EVIDENCE-CENSUS] flush commit failed: {n_inc} increment(s) "
+                               f"in {n_keys} key(s) dropped, not merged back; {dropped} dropped "
+                               f"by the cap: {_evc_reason(e)}")
+            else:
+                lost = _evc_merge_back(batch)
+                _janitor_print(f"[EVIDENCE-CENSUS] flush failed before its commit: {n_inc} "
+                               f"increment(s) merged back ({lost} beyond the cap, counted as "
+                               f"dropped); {dropped} dropped by the cap: {_evc_reason(e)}")
+            if not isinstance(e, Exception):
+                raise
+            return
+    _janitor_print(f"[EVIDENCE-CENSUS] flushed {increments} increment(s) in {len(keys)} key(s); "
+                   f"{dropped} dropped by the cap")
 
 
 async def _sev_claimed_seat(request) -> tuple[str, object]:
@@ -9481,36 +9592,36 @@ async def submit_seat_evidence(request: Request, db: AsyncSession = Depends(get_
     before any other route work; that check only reads. A stored record is
     written to the seat_evidence table; an answer that does not store it
     (any refusal, the 401 included) raises one counter in
-    evidence_refusal_daily through _evidence_census, which holds no record
+    evidence_refusal_daily through evidence_census_gate, which holds no record
     content. Nothing else is written: it never creates a player row, never
     touches a match, a series, a rating, gold or flagged_matches. Evaluation
     runs later, in review_worker_loop."""
     seat, body = await _sev_claimed_seat(request)
     if not seat or not await _strict_steam_session_ok(request, seat, db):
-        return await _evidence_refused(db, "seat", request, JSONResponse(status_code=401, content={"detail": "seat_session"}))
+        return _evc_leave(request, JSONResponse(status_code=401, content={"detail": "seat_session"}))
     try:
         if await _sev.setting(db, "seat_evidence_accept", "0") != "1":
-            return await _evidence_refused(db, "seat", request, JSONResponse(status_code=503, content={"error": "seat_evidence_off"}))
+            return _evc_leave(request, JSONResponse(status_code=503, content={"error": "seat_evidence_off"}))
         env = _sev.parse_envelope(body)
         if not _sev.verify_sig(MATCH_HMAC_SECRET, env):
-            return await _evidence_refused(db, "seat", request, JSONResponse(status_code=403, content={"detail": "signature"}))
+            return _evc_leave(request, JSONResponse(status_code=403, content={"detail": "signature"}))
         rec = _sev.parse_record(env)
         rows = (await db.execute(
             select(Player.id, Player.steam_id).where(Player.steam_id.in_([env["seat"], env["other"]]))
         )).all()
         by_steam = {r.steam_id: r.id for r in rows}
         if env["seat"] not in by_steam or env["other"] not in by_steam:
-            return await _evidence_refused(db, "seat", request, JSONResponse(status_code=409, content={"status": "not_ready"}))
+            return _evc_leave(request, JSONResponse(status_code=409, content={"status": "not_ready"}))
         return await _sev.store_record(db, env, rec, by_steam[env["seat"]], by_steam[env["other"]],
                                        _sev_header_version(request))
     except _sev.EvidenceRefused as r:
-        return await _evidence_refused(db, "seat", request, _sev_refusal(r))
+        return _evc_leave(request, _sev_refusal(r))
     except HTTPException:
-        # its own status: counted once by evidence_census_gate
+        # its own status, noted by evidence_census_gate under that status's gate field
         raise
     except Exception:
-        # an unexpected error: counted, then the same 500
-        await _evidence_census(db, "seat", request, 500, "internal")
+        # an unexpected error: the field `internal` left for the gate's 500
+        _evc_leave(request, field="internal")
         raise
 
 
@@ -9575,35 +9686,35 @@ async def submit_card_evidence(request: Request, db: AsyncSession = Depends(get_
     (409 not_ready). After that it writes the card_evidence table. Every
     answer that does not store the record (each refusal above, 409 conflict,
     429, and a 500) raises one counter in evidence_refusal_daily through
-    _evidence_census, which holds no record content. Nothing else: never a
+    evidence_census_gate, which holds no record content. Nothing else: never a
     player row, a match, a series, a rating, gold, match_cards or
     flagged_matches. Evaluation runs later, in review_worker_loop."""
     seat, body = await _sev_claimed_seat(request)
     if not seat or not await _strict_steam_session_ok(request, seat, db):
-        return await _evidence_refused(db, "card", request, JSONResponse(status_code=401, content={"detail": "seat_session"}))
+        return _evc_leave(request, JSONResponse(status_code=401, content={"detail": "seat_session"}))
     try:
         if await _cev.setting(db, "card_evidence_accept", "0") != "1":
-            return await _evidence_refused(db, "card", request, JSONResponse(status_code=503, content={"error": "card_evidence_off"}))
+            return _evc_leave(request, JSONResponse(status_code=503, content={"error": "card_evidence_off"}))
         env = _cev.parse_envelope(body)
         if not _cev.verify_sig(MATCH_HMAC_SECRET, env):
-            return await _evidence_refused(db, "card", request, JSONResponse(status_code=403, content={"detail": "signature"}))
+            return _evc_leave(request, JSONResponse(status_code=403, content={"detail": "signature"}))
         rec = _cev.parse_record(env)
         rows = (await db.execute(
             select(Player.id, Player.steam_id).where(Player.steam_id.in_([env["seat"], env["other"]]))
         )).all()
         by_steam = {r.steam_id: r.id for r in rows}
         if env["seat"] not in by_steam or env["other"] not in by_steam:
-            return await _evidence_refused(db, "card", request, JSONResponse(status_code=409, content={"status": "not_ready"}))
+            return _evc_leave(request, JSONResponse(status_code=409, content={"status": "not_ready"}))
         return await _cev.store_record(db, env, rec, by_steam[env["seat"]], by_steam[env["other"]],
                                        _sev_header_version(request))
     except _sev.EvidenceRefused as r:
-        return await _evidence_refused(db, "card", request, _sev_refusal(r))
+        return _evc_leave(request, _sev_refusal(r))
     except HTTPException:
-        # its own status: counted once by evidence_census_gate
+        # its own status, noted by evidence_census_gate under that status's gate field
         raise
     except Exception:
-        # an unexpected error: counted, then the same 500
-        await _evidence_census(db, "card", request, 500, "internal")
+        # an unexpected error: the field `internal` left for the gate's 500
+        _evc_leave(request, field="internal")
         raise
 
 
@@ -9668,36 +9779,36 @@ async def submit_combat_evidence(request: Request, db: AsyncSession = Depends(ge
     After it, this route writes the combat_evidence table, storing the record
     before anything is derived; an answer that does not store the record (any
     refusal, the 401 included) raises one counter in evidence_refusal_daily
-    through _evidence_census, which holds no record content. Nothing else: it
+    through evidence_census_gate, which holds no record content. Nothing else: it
     never creates a player row, never touches a match, a series, a rating,
     gold or flagged_matches. Every derivation runs later, in
     review_worker_loop."""
     seat, body = await _sev_claimed_seat(request)
     if not seat or not await _strict_steam_session_ok(request, seat, db):
-        return await _evidence_refused(db, "combat", request, JSONResponse(status_code=401, content={"detail": "seat_session"}))
+        return _evc_leave(request, JSONResponse(status_code=401, content={"detail": "seat_session"}))
     try:
         if await _cbev.setting(db, "combat_evidence_accept", "0") != "1":
-            return await _evidence_refused(db, "combat", request, JSONResponse(status_code=503, content={"error": "combat_evidence_off"}))
+            return _evc_leave(request, JSONResponse(status_code=503, content={"error": "combat_evidence_off"}))
         env = _cbev.parse_envelope(body)
         if not _cbev.verify_sig(MATCH_HMAC_SECRET, env):
-            return await _evidence_refused(db, "combat", request, JSONResponse(status_code=403, content={"detail": "signature"}))
+            return _evc_leave(request, JSONResponse(status_code=403, content={"detail": "signature"}))
         rec = _cbev.parse_record(env)
         rows = (await db.execute(
             select(Player.id, Player.steam_id).where(Player.steam_id.in_([env["seat"], env["other"]]))
         )).all()
         by_steam = {r.steam_id: r.id for r in rows}
         if env["seat"] not in by_steam or env["other"] not in by_steam:
-            return await _evidence_refused(db, "combat", request, JSONResponse(status_code=409, content={"status": "not_ready"}))
+            return _evc_leave(request, JSONResponse(status_code=409, content={"status": "not_ready"}))
         return await _cbev.store_record(db, env, rec, by_steam[env["seat"]], by_steam[env["other"]],
                                        _sev_header_version(request))
     except _cbev.EvidenceRefused as r:
-        return await _evidence_refused(db, "combat", request, _sev_refusal(r))
+        return _evc_leave(request, _sev_refusal(r))
     except HTTPException:
-        # its own status: counted once by evidence_census_gate
+        # its own status, noted by evidence_census_gate under that status's gate field
         raise
     except Exception:
-        # an unexpected error: counted, then the same 500
-        await _evidence_census(db, "combat", request, 500, "internal")
+        # an unexpected error: the field `internal` left for the gate's 500
+        _evc_leave(request, field="internal")
         raise
 
 
@@ -9765,18 +9876,18 @@ async def submit_identity_clock_evidence(request: Request, db: AsyncSession = De
     revision id are kept. The address itself is not written, logged or sent
     anywhere. This route writes the identity_clock_evidence table for a stored
     record; an answer that does not store it (any refusal, the 401 included)
-    raises one counter in evidence_refusal_daily through _evidence_census,
+    raises one counter in evidence_refusal_daily through evidence_census_gate,
     which holds no record content and no address. Nothing else is written;
     evaluation runs later in review_worker_loop."""
     seat, body = await _sev_claimed_seat(request)
     if not seat or not await _strict_steam_session_ok(request, seat, db):
-        return await _evidence_refused(db, "clock", request, JSONResponse(status_code=401, content={"detail": "seat_session"}))
+        return _evc_leave(request, JSONResponse(status_code=401, content={"detail": "seat_session"}))
     try:
         if await _ice.ice_setting(db, "identity_clock_evidence_accept", "0") != "1":
-            return await _evidence_refused(db, "clock", request, JSONResponse(status_code=503, content={"error": "identity_clock_evidence_off"}))
+            return _evc_leave(request, JSONResponse(status_code=503, content={"error": "identity_clock_evidence_off"}))
         env = _ice.ice_parse_envelope(body)
         if not _ice.ice_verify_sig(MATCH_HMAC_SECRET, env):
-            return await _evidence_refused(db, "clock", request, JSONResponse(status_code=403, content={"detail": "signature"}))
+            return _evc_leave(request, JSONResponse(status_code=403, content={"detail": "signature"}))
         rec = _ice.ice_parse_record(env)
         clock = _ice.ice_parse_clock(request.headers.get(_ice.CLOCK_HEADER), rec)
         conn_class, conn_word = _conn_ranges.classify_address(_rl_client_address(request))
@@ -9785,18 +9896,18 @@ async def submit_identity_clock_evidence(request: Request, db: AsyncSession = De
         )).all()
         by_steam = {r.steam_id: r.id for r in rows}
         if env["seat"] not in by_steam or env["other"] not in by_steam:
-            return await _evidence_refused(db, "clock", request, JSONResponse(status_code=409, content={"status": "not_ready"}))
+            return _evc_leave(request, JSONResponse(status_code=409, content={"status": "not_ready"}))
         return await _ice.ice_store_record(db, env, rec, by_steam[env["seat"]],
                                            by_steam[env["other"]], _sev_header_version(request),
                                            clock, conn_class, conn_word)
     except _sev.EvidenceRefused as r:
-        return await _evidence_refused(db, "clock", request, _sev_refusal(r))
+        return _evc_leave(request, _sev_refusal(r))
     except HTTPException:
-        # its own status: counted once by evidence_census_gate
+        # its own status, noted by evidence_census_gate under that status's gate field
         raise
     except Exception:
-        # an unexpected error: counted, then the same 500
-        await _evidence_census(db, "clock", request, 500, "internal")
+        # an unexpected error: the field `internal` left for the gate's 500
+        _evc_leave(request, field="internal")
         raise
 
 
