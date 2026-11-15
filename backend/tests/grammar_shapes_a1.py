@@ -83,7 +83,7 @@ A1_SPANS = (
     ('region_pick.py', 89, 'home_of', 40),
     ('region_pick.py', 101, 'pick_region_for_group', 54),
     ('region_pick.py', 186, '_pick', 892),
-    ('tournaments.py', 279, '_region_candidate_volumes', 47),
+    ('tournaments.py', 280, '_region_candidate_volumes', 47),
 )
 
 
@@ -107,7 +107,7 @@ A1_SHAPES = frozenset({
     '<root>>AsyncFunctionDef(name=str,args=arguments,body=[Assign|Expr|If|Return],decorator_list=[],returns=-,type_comment=-,type_params=[])',  # main.py:17093
     '<root>>AsyncFunctionDef(name=str,args=arguments,body=[Assign|Expr|If|Return],decorator_list=[],returns=Name,type_comment=-,type_params=[])',  # match_hold.py:364
     '<root>>AsyncFunctionDef(name=str,args=arguments,body=[Assign|Expr|If|Return|Try],decorator_list=[],returns=-,type_comment=-,type_params=[])',  # main.py:18855
-    '<root>>AsyncFunctionDef(name=str,args=arguments,body=[Assign|Expr|Return],decorator_list=[],returns=Name,type_comment=-,type_params=[])',  # tournaments.py:279
+    '<root>>AsyncFunctionDef(name=str,args=arguments,body=[Assign|Expr|Return],decorator_list=[],returns=Name,type_comment=-,type_params=[])',  # tournaments.py:280
     '<root>>AsyncFunctionDef(name=str,args=arguments,body=[Assign|Expr|Try],decorator_list=[],returns=Constant,type_comment=-,type_params=[])',  # main.py:57818
     '<root>>AsyncFunctionDef(name=str,args=arguments,body=[AsyncWith|Expr|If|Return],decorator_list=[],returns=-,type_comment=-,type_params=[])',  # main.py:57778
     '<root>>AsyncFunctionDef(name=str,args=arguments,body=[Expr],decorator_list=[],returns=Constant,type_comment=-,type_params=[])',  # main.py:52282
@@ -343,7 +343,7 @@ A1_SHAPES = frozenset({
     'AsyncFunctionDef.body>Return(value=BoolOp)',  # main.py:18968
     'AsyncFunctionDef.body>Return(value=Call)',  # main.py:17588
     'AsyncFunctionDef.body>Return(value=Constant)',  # main.py:17166
-    'AsyncFunctionDef.body>Return(value=DictComp)',  # tournaments.py:308
+    'AsyncFunctionDef.body>Return(value=DictComp)',  # tournaments.py:309
     'AsyncFunctionDef.body>Return(value=Name)',  # main.py:17134
     'AsyncFunctionDef.body>Return(value=Subscript)',  # main.py:18874
     'AsyncFunctionDef.body>Return(value=Tuple)',  # main.py:17090
@@ -566,7 +566,7 @@ A1_SHAPES = frozenset({
     'BoolOp.values>UnaryOp(op=Not,operand=Subscript)',  # main.py:57793
     "Call.args>Attribute(value=Name,attr='id',ctx=Load)",  # main.py:20659
     "Call.args>Attribute(value=Name,attr='map',ctx=Load)",  # region_pick.py:239
-    "Call.args>Attribute(value=Name,attr='n',ctx=Load)",  # tournaments.py:308
+    "Call.args>Attribute(value=Name,attr='n',ctx=Load)",  # tournaments.py:309
     "Call.args>Attribute(value=Name,attr='region',ctx=Load)",  # region_pick.py:257
     "Call.args>Attribute(value=Name,attr='rules',ctx=Load)",  # main.py:20587
     "Call.args>Attribute(value=Name,attr='state',ctx=Load)",  # main.py:56900
@@ -915,11 +915,11 @@ A1_SHAPES = frozenset({
     'DictComp.generators>comprehension(target=Name,iter=Name,ifs=[],is_async=0)',  # main.py:17047
     'DictComp.generators>comprehension(target=Tuple,iter=Call,ifs=[],is_async=0)',  # main.py:52450
     "DictComp.key>Attribute(value=Name,attr='id',ctx=Load)",  # main.py:28709
-    "DictComp.key>Attribute(value=Name,attr='region',ctx=Load)",  # tournaments.py:308
+    "DictComp.key>Attribute(value=Name,attr='region',ctx=Load)",  # tournaments.py:309
     'DictComp.key>Call(func=Name,args=[Name],keywords=[])',  # main.py:52450
     'DictComp.key>Call(func=Name,args=[Subscript],keywords=[])',  # main.py:17047
     'DictComp.key>Subscript(value=Name,slice=Constant,ctx=Load)',  # main.py:50659
-    'DictComp.value>Call(func=Name,args=[Attribute],keywords=[])',  # tournaments.py:308
+    'DictComp.value>Call(func=Name,args=[Attribute],keywords=[])',  # tournaments.py:309
     'DictComp.value>Name(id=str,ctx=Load)',  # main.py:17047
     'DictComp.value>Subscript(value=Name,slice=Constant,ctx=Load)',  # main.py:50659
     'DictComp.value>Tuple(elts=[Constant],ctx=Load)',  # main.py:56951
@@ -1432,7 +1432,7 @@ A1_SHAPES = frozenset({
     'Return.value>Dict(keys=[Constant],values=[Call|Constant|Name|UnaryOp])',  # main.py:65717
     'Return.value>Dict(keys=[Constant],values=[Constant])',  # main.py:54102
     'Return.value>Dict(keys=[Constant],values=[Constant|Name])',  # main.py:56930
-    'Return.value>DictComp(key=Attribute,value=Call,generators=[comprehension])',  # tournaments.py:308
+    'Return.value>DictComp(key=Attribute,value=Call,generators=[comprehension])',  # tournaments.py:309
     'Return.value>IfExp(test=Call,body=Call,orelse=Subscript)',  # match_report_window.py:48
     'Return.value>IfExp(test=Call,body=Name,orelse=Constant)',  # region_pick.py:194
     'Return.value>IfExp(test=Compare,body=Call,orelse=Constant)',  # main.py:56900
