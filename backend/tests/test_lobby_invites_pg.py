@@ -608,13 +608,21 @@ def test_a_challenge_commits_its_lobby_seat_invite_receipt_and_mail_together_or_
 def test_every_invite_change_bumps_its_invitees_revision_and_a_suppressed_one_none(monkeypatch):
     """A send, a decline, a cancel, the sweep's expiry, an accept and a
     departure's void each bump a delivered invitee's revision; a suppressed
-    invitee's revision moves for none of them; deleting an invite's copy
-    bumps the deleter's. Mutants: the bump's delivered condition widened to
-    suppressed copies; the bump reaching no row, on a cancel."""
+    invitee's revision, a row from mail it got before closing its mail,
+    moves for none of them; deleting an invite's copy bumps the deleter's.
+    Mutants: the bump's delivered condition widened to suppressed copies;
+    the bump reaching no row, on a cancel."""
     async def body(env):
         lid, (h,) = await env.lobby("team", 1)
         x = await env.player()
         y = await env.player(mail_from="nobody")
+        # Nothing in this case writes y a revision row: its copies are all
+        # suppressed, and the invite bump updates rows that exist and inserts
+        # none. With no row, env.rev(y) reads 0 before and after any bump, so
+        # the widened mutant below could not move it (it failed 0 > 0). y gets
+        # the row a player has who got mail before closing its mail.
+        await env.conn.execute("INSERT INTO mail_inbox_rev (recipient_id, rev) VALUES ($1, 1)", y.id)
+        assert await env.rev(y) == 1
         moves = []
 
         async def step(label, fn):
