@@ -46225,7 +46225,11 @@ async def delete_player_data(steam_id: str, request: Request, sig: str = Query(.
     # (migration 300) is personal state and goes with the envelopes; it is
     # removed at this handler's end rather than in the early sweep, so the
     # row-lock order (players, then mail_inbox_rev) matches the fan-out's and
-    # neither side can wait on the other. Migration 416's change moved it
+    # no cycle of waits between the two can form over these two tables' rows.
+    # (A send that crosses a spam threshold takes one more lock after them,
+    # its sender's case row for the day, and can close a cycle with this
+    # deletion's resolved_by scrub above: see the comment above
+    # _INVITE_REV_BUMP_SQL.) Migration 416's change moved it
     # from here to the very end: there it is locked in the same ascending
     # pass as the invite bump's rows (_invite_bump's `drop`), the one order
     # every writer of mail_inbox_rev takes, and nothing is locked after it.
@@ -49336,6 +49340,9 @@ async def _apply_ban_core(db: AsyncSession, *, admin_steam_id: str, target_steam
     # this closes the token half. Runs BEFORE the already_banned early return
     # (Codex review find) so re-banning also re-purges — the recovery lever
     # for any session that survived (migration 152 cleans pre-batch bans).
+    # The lever is a re-ban that carries NO length: a request that carries
+    # duration_minutes for an account under an active ban is a length change
+    # and has returned above, before this purge and every one below.
     await db.execute(text("DELETE FROM steam_sessions WHERE steam_id = :sid"),
                      {"sid": target_steam_id})
     # Portal tokens are live authority too (round-10 find 2): a banned
@@ -49430,8 +49437,19 @@ async def _apply_ban_core(db: AsyncSession, *, admin_steam_id: str, target_steam
         "DELETE FROM pc_delivery_leases WHERE subject_id IN "
         "(SELECT id FROM players WHERE steam_id = :sid)"), {"sid": target_steam_id})
     # Migration 416's change: the invitees' revisions for the invites ended
-    # above, after the drain, as the core's last write (the ORM rows below are
-    # flushed at the caller's commit).
+    # above, after the drain. On a new ban the core makes three writes after
+    # it, and none can wait on another transaction of the application:
+    # migration 417's close of this key's ended ban row here, and the ban and
+    # admin action rows, which go out when the session next flushes (at the
+    # caller's commit at the latest). Every writer of a key's player_bans
+    # rows holds that key's identity lock, which this core takes first (the
+    # close and the insert here, _ban_set_length_core inside this core,
+    # admin_unban through its sorted identity locks). The ban row's foreign
+    # key reads the admin's admin_users row, which the application never
+    # writes or locks; the admin action row has no foreign key (migration 192
+    # dropped it) and no unique key but its random id. _moderation_case_act
+    # then writes its case row, which it locked before this core, and its own
+    # admin action row; neither can wait either.
     await _invite_bump(db, _ban_inv_ended)
     existing = await _is_banned(db, target_steam_id)
     if existing is not None:   # round-15 find 3: "" is an ACTIVE ban too
@@ -60402,7 +60420,7 @@ async def team_lobby_start(req: _LobbyStartReq, request: Request,
                             "A lobby member entered another live match")
     # Migration 416's change: the start ends the lobby's pending invites
     # (lobby_started) and bumps their invitees' revisions, the last write
-    # before the relock stamp below, which stays last (r4 H1). The one
+    # before the relock stamp below, which stays last (r4 H1). One
     # recorded exception to the bump-last rule (the design note, section
     # 13): the stamp updates the team_series row this start already holds
     # (the adopt's UPDATE above), so it waits on no lock while the revision
@@ -81527,7 +81545,7 @@ async def _invite_write_receipt(db: AsyncSession, caller_id, key: UUID, route: s
 
 
 # Every change of an invite's state bumps its invitee's inbox revision through a delivered copy
-# only, so a suppressed invite bumps nothing. A transaction runs this ONCE, last; a send's
+# only, so a suppressed invite bumps nothing. A transaction runs this ONCE; a send's
 # envelope is also bumped by migration 300's trigger, on that invitee's row alone (all a send
 # owes). It UPDATEs the invitees' existing revision rows and never inserts one: every delivered
 # copy got its row from migration 300's trigger when it was written, and the one statement that
@@ -81538,8 +81556,10 @@ async def _invite_write_receipt(db: AsyncSession, caller_id, key: UUID, route: s
 # or stall a live invitee's bump. The rows are locked in ascending recipient order in one
 # statement (the CTE), the order of every writer of this table (mail's sends and migration 300's
 # trigger insert in that order; the deletion takes its own row in the same ascending pass as its
-# bump, _INVITE_REV_DROP_LOCK_SQL), and nothing is locked after them, so two writers never wait on
-# each other in a cycle. A row the deletion holds is waited for and, once it commits, gone.
+# bump, _INVITE_REV_DROP_LOCK_SQL), so waits on these rows alone never form a cycle. A lock taken
+# after a bump can still close one: _apply_ban_core says why its own cannot; mail's send can (its
+# spam case can wait on delete_player_data's resolved_by scrub, which then waits on rows the send
+# holds). A row the deletion holds is waited for and, once it commits, gone.
 _INVITE_REV_BUMP_SQL = (
     "WITH t AS (SELECT v.recipient_id FROM mail_inbox_rev v"
     "            WHERE v.recipient_id IN (SELECT r.recipient_id FROM mail_recipients r"
@@ -81577,7 +81597,7 @@ async def _invite_bump(db: AsyncSession, mids, drop=None) -> None:
 # expires_at is 'expired' (what every read already calls it), any other
 # 'void' with sender_left. Called under the lobby row's lock, in the
 # departure's own transaction; the caller bumps the returned mail rows
-# (_invite_bump) as its last statement.
+# (_invite_bump) after the statements that returned them.
 #
 # The three ending statements decide expiry at ONE clock reading, taken by
 # the statement itself after the lobby lock its caller holds: c is
