@@ -1268,6 +1268,462 @@ def test_t8_the_model_reads_and_writes_the_column(case):
     assert got == [end] and raw == end and raw - end == timedelta(0), (got, raw)
 
 
+# -- F3: a ban that ends frees the account in the card pool at once ---------
+#
+# Fix 1, ruling (b). The pool is a snapshot; _pc_snapshot_due gains the
+# reason 'ban_ended' and the readers of pc_pool_members apply the definition
+# at read time. Every case runs through the real janitor pass
+# (_pc_snapshot_janitor_step) against this module's case schema, and every
+# transition is ONE ban row whose end moves (F5's form).
+#
+# Pool players need a SteamID64 the pool's id rule admits. They take ids from
+# the reveal harness's block (discord_collection_harness.STEAM_BASE: account
+# type 0, never an individual account; test_cf_fixture_steam_ids.py proves
+# the decode), admitted only while that harness's predicate is injected for
+# the test. No test before this section seeds a pool player, so the pool is
+# exactly this section's accounts. Ratings rise from test to test, so each
+# test's subject is pool rank 1 once it is a member, and its witness is rank
+# 1 while the subject is out.
+
+import discord_collection_harness as H  # noqa: E402
+
+_POOL_N = itertools.count(1)
+_POOL_BASE = itertools.count(0)
+_SNAP_LINE = re.compile(r"\[PC-SNAPSHOT\] id=\d+ members=\d+ reason=(\w+)")
+
+
+@pytest.fixture
+def pool_env(case, monkeypatch, admin_open):
+    H.inject_pool_predicate(monkeypatch)
+    return case
+
+
+class _TopRng:
+    """Every slot rolls legendary and takes the band's first member."""
+
+    def random(self):
+        return 0.0
+
+    def randrange(self, n):
+        return 0
+
+
+async def _pool_player(db, rating):
+    n = 417000 + next(_POOL_N)
+    sid, did = H.steam_of(n), H.discord_of(n)
+    pid = await _player(db, sid, mod_seen_at=None, discord_id=did)
+    await lh._insert(db, "glicko_ratings", {"player_id": pid, "rating": float(rating),
+                                            "peak_rating": float(rating), "rating_deviation": 100.0,
+                                            "volatility": 0.06})
+    return types.SimpleNamespace(sid=sid, pid=pid, did=did)
+
+
+async def _ban_at(db, sid, admin, *, began="NOW() - INTERVAL '1 hour'", minutes=60):
+    """One OPEN ban row of `sid`, begun at `began` (SQL), ending in `minutes`
+    (None = permanent; negative = already behind the clock)."""
+    end = "NULL" if minutes is None else "NOW() + make_interval(mins => CAST(:m AS integer))"
+    params = {"id": uuid.uuid4(), "s": sid, "a": admin}
+    if minutes is not None:
+        params["m"] = minutes
+    await db.execute(text(
+        "INSERT INTO player_bans (id, steam_id, reason, banned_by_steam_id, banned_at, expires_at)"
+        " VALUES (:id, :s, 'ban-test', :a, " + began + ", " + end + ")"), params)
+    return params["id"]
+
+
+async def _pool_world(sm, *, banned=True):
+    """A subject (banned, ending in an hour, begun before the baseline when
+    `banned`) above a witness, then the baseline snapshot."""
+    base = 3000 + 100 * next(_POOL_BASE)
+    async with sm() as db:
+        admin = await _admin(db)
+        subject = await _pool_player(db, base + 50)
+        witness = await _pool_player(db, base + 10)
+        subject.ban = await _ban_at(db, subject.sid, admin) if banned else None
+        await db.commit()
+    subject.admin = admin
+    snap = await _take(sm, "ban-test baseline")
+    return subject, witness, snap
+
+
+async def _take(sm, reason):
+    async with sm() as db:
+        out = await main._pc_take_snapshot(db, reason=reason)
+        await db.commit()
+    return out["snapshot_id"]
+
+
+async def _janitor_pass(sm):
+    """One real janitor step on the case schema. Returns the reasons of the
+    snapshots it took (printed by _pc_take_snapshot) and the whole log."""
+    saved = database.async_session
+    database.async_session = sm
+    log = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(log):
+            await main._pc_snapshot_janitor_step()
+    finally:
+        database.async_session = saved
+    return _SNAP_LINE.findall(log.getvalue()), log.getvalue()
+
+
+async def _snapshot_mark(sm):
+    """The latest snapshot id. Retention (snapshot_keep) deletes the oldest
+    snapshot whenever one is taken, so the COUNT stays put; the snapshots
+    taken since a mark are the ids above it."""
+    async with sm() as db:
+        return (await db.execute(text("SELECT COALESCE(MAX(id), 0) FROM pc_pool_snapshots"))).scalar()
+
+
+async def _taken_since(sm, mark):
+    async with sm() as db:
+        return (await db.execute(text("SELECT count(*) FROM pc_pool_snapshots WHERE id > :m"),
+                                 {"m": mark})).scalar()
+
+
+async def _members(sm, snap):
+    async with sm() as db:
+        return [tuple(r) for r in (await db.execute(text(
+            "SELECT player_id, pool_rank FROM pc_pool_members WHERE snapshot_id = :s ORDER BY pool_rank"),
+            {"s": snap})).all()]
+
+
+async def _pool_card(sm, who):
+    """The bot's /card: the raw answer, or 'not_in_pool' for its named 404."""
+    async with sm() as db:
+        try:
+            return await main.internal_pc_card(discord_id=who.did, x_internal_key=INTERNAL_KEY, db=db)
+        except HTTPException as e:
+            if e.status_code == 404 and e.detail == {"error": "not_in_pool"}:
+                return "not_in_pool"
+            raise
+        finally:
+            await db.rollback()
+
+
+async def _pool_preview(sm, who, fn=None):
+    """The preview routes' one membership read (_pc_preview_read): its spec,
+    or 'not_in_pool' -- the face route answers 404 not_in_pool exactly when
+    the read returns None."""
+    async with sm() as db:
+        try:
+            read = await (fn or main._pc_preview_read)(db, str(who.pid), "en", None)
+        finally:
+            await db.rollback()
+    return "not_in_pool" if read is None else read[2]
+
+
+async def _pool_roll(sm, owner):
+    """A pack roll from the latest snapshot: the subjects of its prints, or
+    the reason it refused."""
+    async with sm() as db:
+        try:
+            snap = (await db.execute(text(
+                "SELECT id FROM pc_pool_snapshots ORDER BY id DESC LIMIT 1"))).scalar_one()
+            prints, reason = await main._pc_roll_prints(db, snap, owner.pid, rng=_TopRng())
+        finally:
+            await db.rollback()
+    return reason if prints is None else [p["player_id"] for p in prints]
+
+
+async def _pool_answers(sm, subject, witness):
+    return {"card": await _pool_card(sm, subject), "preview": await _pool_preview(sm, subject),
+            "roll": await _pool_roll(sm, witness)}
+
+
+def _out(witness):
+    n = int(main._pc.PC_ECONOMY["prints_per_pack"])
+    return {"card": "not_in_pool", "preview": "not_in_pool", "roll": [str(witness.pid)] * n}
+
+
+def _in(answers, subject):
+    """The positive fact of membership, read from the whole answers: rank 1,
+    legendary, on the card and on the preview; every print of the roll."""
+    card, spec, roll = answers["card"], answers["preview"], answers["roll"]
+    n = int(main._pc.PC_ECONOMY["prints_per_pack"])
+    return (isinstance(card, dict) and card["player_ref"] == str(subject.pid) and card["pool_rank"] == 1
+            and card["rarity"] == "legendary" and isinstance(spec, dict) and spec["pool_rank"] == 1
+            and spec["band"] == "legendary" and roll == [str(subject.pid)] * n)
+
+
+async def _end_now(sm, subject, how):
+    """The subject's ONE ban row ends: its expiry moves behind the clock, or
+    the admin route lifts it."""
+    if how == "expiry":
+        await _end_moves_behind(sm, subject.ban)
+    else:
+        async with sm() as db:
+            ans = await main.admin_unban(main._AdminUnbanReq(admin_steam_id=subject.admin,
+                                                             target_steam_id=subject.sid), _slot=None, db=db)
+        assert ans["rows"] == 1, ans
+
+
+def _end_frees(case, how):
+    async def body(sm):
+        subject, witness, snap = await _pool_world(sm)
+        members = await _members(sm, snap)
+        banned = await _pool_answers(sm, subject, witness)
+        await _end_now(sm, subject, how)
+        waiting = await _pool_answers(sm, subject, witness)
+        n0 = await _snapshot_mark(sm)
+        first, log1 = await _janitor_pass(sm)
+        freed = await _pool_answers(sm, subject, witness)
+        second, log2 = await _janitor_pass(sm)
+        return dict(subject=subject, witness=witness, members=members, banned=banned, waiting=waiting,
+                    first=first, second=second, n0=n0, n=await _taken_since(sm, n0), freed=freed,
+                    log=log1 + log2)
+    r = _with_sm(case, body)
+    # R-a: under an active ban at the baseline, the subject takes no pool rank; the ranks are 1..n
+    assert r["subject"].pid not in [p for p, _ in r["members"]], r["members"]
+    assert [k for _, k in r["members"]] == list(range(1, len(r["members"]) + 1)), r["members"]
+    assert r["banned"] == _out(r["witness"]), r["banned"]
+    # between the end and the next pass the account still answers 404 not_in_pool
+    assert r["waiting"] == _out(r["witness"]), r["waiting"]
+    # one pass: one ordinary snapshot, reason ban_ended; the account is a member at rank 1
+    assert r["first"] == ["ban_ended"] and r["n"] == 1, (r["first"], r["n0"], r["n"])
+    assert _in(r["freed"], r["subject"]), r["freed"]
+    # once: the next pass takes none
+    assert r["second"] == [], r["second"]
+    assert "ban_ended read failed" not in r["log"], r["log"][-400:]
+
+
+def test_f3_an_expiry_frees_the_account_at_the_next_pass(pool_env):
+    _end_frees(pool_env, "expiry")
+
+
+def test_f3_a_lift_frees_the_account_at_the_next_pass(pool_env):
+    _end_frees(pool_env, "lift")
+
+
+async def _not_due_case(sm, name):
+    """Each case ends with one janitor pass that must take no snapshot."""
+    if name == "no ban change":
+        subject, witness, _ = await _pool_world(sm)
+    elif name == "a ban begun and ended after the snapshot":
+        subject, witness, _ = await _pool_world(sm, banned=False)
+        async with sm() as db:
+            subject.ban = await _ban_at(db, subject.sid, subject.admin, began="NOW()")
+            await db.commit()
+        await _end_moves_behind(sm, subject.ban)
+    elif name == "an end while another ban on the account is active":
+        subject, witness, _ = await _pool_world(sm)
+        await _end_now(sm, subject, "lift")
+        async with sm() as db:
+            await _ban_at(db, subject.sid, subject.admin, began="NOW()", minutes=None)
+            await db.commit()
+    elif name == "the re-ban that closes an expired row":
+        subject, witness, _ = await _pool_world(sm, banned=False)
+        async with sm() as db:   # expired BEFORE the next snapshot, still open
+            subject.ban = await _ban_at(db, subject.sid, subject.admin, began="NOW() - INTERVAL '2 hours'",
+                                        minutes=-30)
+            await db.commit()
+        await _take(sm, "ban-test baseline")
+        ans = await _admin_ban(sm, subject.admin, subject.sid)   # closes it (unbanned_at = expires_at), bans anew
+        assert ans["status"] == "banned", ans
+    elif name == "a ban that ended before the snapshot, still open":
+        subject, witness, _ = await _pool_world(sm, banned=False)
+        async with sm() as db:
+            subject.ban = await _ban_at(db, subject.sid, subject.admin, began="NOW() - INTERVAL '2 hours'",
+                                        minutes=-30)
+            await db.commit()
+        await _take(sm, "ban-test baseline")
+    else:
+        raise AssertionError(name)
+    n0 = await _snapshot_mark(sm)
+    reasons, log = await _janitor_pass(sm)
+    return reasons, await _taken_since(sm, n0), log
+
+
+NOT_DUE = ("no ban change", "a ban begun and ended after the snapshot",
+           "an end while another ban on the account is active", "the re-ban that closes an expired row",
+           "a ban that ended before the snapshot, still open")
+
+
+@pytest.mark.parametrize("name", NOT_DUE)
+def test_f3_nothing_is_due_without_an_end_of_a_ban_the_snapshot_held(pool_env, name):
+    reasons, taken, log = _with_sm(pool_env, lambda sm: _not_due_case(sm, name))
+    assert (reasons, taken) == ([], 0), (name, reasons, taken, log[-400:])
+    assert "ban_ended read failed" not in log, log[-400:]
+
+
+def test_f3_rule_outranks_ban_ended_when_both_hold(pool_env):
+    """Both hold (an older rule on the latest snapshot, and an end since):
+    the printed reason is the first in the documented order, 'rule'; and the
+    snapshot it takes frees the account too."""
+    async def body(sm):
+        subject, witness, snap = await _pool_world(sm)
+        await _end_now(sm, subject, "expiry")
+        async with sm() as db:
+            await db.execute(text("UPDATE pc_pool_snapshots SET rule = :r WHERE id = :s"),
+                             {"r": int(main._PC_POOL_RULE) - 1, "s": snap})
+            await db.commit()
+        reasons, _ = await _janitor_pass(sm)
+        return reasons, await _pool_answers(sm, subject, witness), subject
+    reasons, answers, subject = _with_sm(pool_env, body)
+    assert reasons == ["rule"] and _in(answers, subject), (reasons, answers)
+
+
+def test_f3_a_failed_ban_read_frees_nobody_and_breaks_nothing(pool_env):
+    """The ban read fails (a statement the database refuses): the pass takes
+    no snapshot, raises nothing and logs the failure; once the read works
+    again the next pass frees the account."""
+    async def body(sm):
+        subject, witness, _ = await _pool_world(sm)
+        await _end_now(sm, subject, "expiry")
+        good = main._PC_SNAPSHOT_BAN_ENDED_SQL
+        main._PC_SNAPSHOT_BAN_ENDED_SQL = "SELECT no_such_column AS ban_ended FROM player_bans"
+        try:
+            failed = await _janitor_pass(sm)
+            during = await _pool_answers(sm, subject, witness)
+        finally:
+            main._PC_SNAPSHOT_BAN_ENDED_SQL = good
+        again, _ = await _janitor_pass(sm)
+        return failed, during, again, await _pool_answers(sm, subject, witness), subject, witness
+    (reasons, log), during, again, after, subject, witness = _with_sm(pool_env, body)
+    assert reasons == [] and "[PC-SNAPSHOT] ban_ended read failed (" in log, log[-600:]
+    assert during == _out(witness), during
+    assert again == ["ban_ended"] and _in(after, subject), (again, after)
+
+
+def test_f3_each_mutant_of_the_due_reason_shows_its_defect(pool_env, monkeypatch):
+    """Each mutant judged by its positive fact, through the real pass:
+      - the reason removed: an end leaves the account out after the pass;
+      - the "active at the snapshot's time" half removed: a ban begun and
+        ended after the snapshot makes a snapshot due;
+      - the earlier-of rule removed (the instant form loses its expiry
+        clause): a ban that ended before the snapshot and is still open
+        makes a snapshot due -- the re-ban case cannot show this one, since
+        the re-ban's close writes unbanned_at = expires_at;
+      - the other-ban clause removed: an end while another ban is active
+        makes a snapshot due."""
+    at = models.player_ban_active_sql("b", "CAST(:last_at AS timestamptz)")
+    at_no_expiry = "(b.banned_at <= CAST(:last_at AS timestamptz)" \
+                   " AND (b.unbanned_at IS NULL OR b.unbanned_at > CAST(:last_at AS timestamptz)))"
+    other = main._PC_SNAPSHOT_BAN_ENDED_SQL[main._PC_SNAPSHOT_BAN_ENDED_SQL.index("AND NOT EXISTS"):
+                                            main._PC_SNAPSHOT_BAN_ENDED_SQL.index(") AS ban_ended")]
+    assert main._PC_SNAPSHOT_BAN_ENDED_SQL.count(at) == 1 and other.count("b2") >= 2, other
+    no_reason = _replace_source(main._pc_snapshot_due, 'return "ban_ended" if ended else None', "return None")
+    sql_mutants = {
+        "active at the snapshot's time removed": (
+            main._PC_SNAPSHOT_BAN_ENDED_SQL.replace(at, "TRUE"), "a ban begun and ended after the snapshot"),
+        "earlier-of rule removed": (
+            main._PC_SNAPSHOT_BAN_ENDED_SQL.replace(at, at_no_expiry),
+            "a ban that ended before the snapshot, still open"),
+        "other-ban clause removed": (
+            main._PC_SNAPSHOT_BAN_ENDED_SQL.replace(other, ""),
+            "an end while another ban on the account is active"),
+    }
+    out = {}
+    with monkeypatch.context() as mp:
+        mp.setattr(main, "_pc_snapshot_due", no_reason)
+        async def removed(sm):
+            subject, witness, _ = await _pool_world(sm)
+            await _end_now(sm, subject, "expiry")
+            reasons, _ = await _janitor_pass(sm)
+            return reasons, await _pool_answers(sm, subject, witness), witness
+        reasons, answers, witness = _with_sm(pool_env, removed)
+        out["reason removed"] = reasons == [] and answers == _out(witness)
+    for name, (sql, case_name) in sql_mutants.items():
+        assert sql != main._PC_SNAPSHOT_BAN_ENDED_SQL, name
+        with monkeypatch.context() as mp:
+            mp.setattr(main, "_PC_SNAPSHOT_BAN_ENDED_SQL", sql)
+            reasons, taken, log = _with_sm(pool_env, lambda sm: _not_due_case(sm, case_name))
+        out[name] = (reasons == ["ban_ended"] and taken == 1) or (reasons, taken, log[-600:])
+    assert out == {k: True for k in ["reason removed"] + list(sql_mutants)}, out
+
+
+def test_f3_every_read_time_reader_hides_a_member_banned_since_the_snapshot(pool_env, monkeypatch):
+    """R-e at read time: a member of the latest snapshot banned after it is
+    out of the card, the preview, the roll and the pool summary at once,
+    before any pass. Each reader's mutant (its pool word without the ban
+    clause) shows the banned account."""
+    word = main._PC_POOL_MEMBER_SQL
+    clause = " AND NOT EXISTS (SELECT 1 FROM player_bans b WHERE b.steam_id = p.steam_id AND " \
+             + models.player_ban_active_sql("b") + ")"
+    flat = " ".join(word.split())
+    assert flat.count(" ".join(clause.split())) == 1, flat
+    noban = re.sub(r"\s+AND NOT EXISTS \(SELECT 1 FROM player_bans b WHERE b\.steam_id = p\.steam_id AND "
+                   + re.escape(models.player_ban_active_sql("b")) + r"\)", "", word)
+    assert noban != word and "player_bans" not in noban, noban
+    extra = {"_PC_POOL_MEMBER_SQL_NOBAN": noban}
+    readers = {
+        "card": _replace_source(main.internal_pc_card, 'AND """ + _PC_POOL_MEMBER_SQL + """',
+                                'AND """ + _PC_POOL_MEMBER_SQL_NOBAN + """', extra),
+        "summary": _replace_source(main.pc_pool_summary, 'AND """ + _PC_POOL_MEMBER_SQL + """',
+                                   'AND """ + _PC_POOL_MEMBER_SQL_NOBAN + """', extra),
+        # the preview is gated twice: the word on its subject read, and the
+        # resolve columns' own subject_banned over the same row; its clause
+        # removed is both
+        "preview": _replace_source_all(main._pc_preview_read, [
+            ("+ _PC_POOL_MEMBER_SQL)", "+ _PC_POOL_MEMBER_SQL_NOBAN)"),
+            (' or sub["subject_banned"]', "")], extra),
+    }
+    live_noban = main._PC_LIVE_POOL_CHECK_SQL.replace(word, noban)
+    assert live_noban != main._PC_LIVE_POOL_CHECK_SQL
+
+    async def world(sm):
+        subject, witness, _ = await _pool_world(sm, banned=False)
+        members = await _members(sm, await _take(sm, "ban-test member"))
+        async with sm() as db:
+            await _ban_at(db, subject.sid, subject.admin, began="NOW()")
+            await db.commit()
+        return subject, witness, members
+
+    async def summary(sm, fn):
+        async with sm() as db:
+            try:
+                ans = await fn(db=db)
+            finally:
+                await db.rollback()
+        return [t["pool_rank"] for t in ans["top"]]
+
+    async def observe(sm, subject, witness, fns):
+        card = fns.get("card", main.internal_pc_card)
+        async with sm() as db:
+            try:
+                c = await card(discord_id=subject.did, x_internal_key=INTERNAL_KEY, db=db)
+            except HTTPException as e:
+                if not (e.status_code == 404 and e.detail == {"error": "not_in_pool"}):
+                    raise
+                c = "not_in_pool"
+            finally:
+                await db.rollback()
+        return {"card": c, "preview": await _pool_preview(sm, subject, fns.get("preview")),
+                "roll": await _pool_roll(sm, witness),
+                "summary": await summary(sm, fns.get("summary", main.pc_pool_summary))}
+
+    async def body(sm):
+        subject, witness, members = await world(sm)
+        got = {"control": await observe(sm, subject, witness, {})}
+        for name, fn in readers.items():
+            got[name] = await observe(sm, subject, witness, {name: fn})
+        main_live = main._PC_LIVE_POOL_CHECK_SQL
+        main._PC_LIVE_POOL_CHECK_SQL = live_noban
+        try:
+            got["roll"] = await observe(sm, subject, witness, {})
+        finally:
+            main._PC_LIVE_POOL_CHECK_SQL = main_live
+        return subject, witness, members, got
+    subject, witness, members, got = _with_sm(pool_env, body)
+    assert members[0][0] == subject.pid, members      # a member, rank 1, when the snapshot was taken
+    n = int(main._pc.PC_ECONOMY["prints_per_pack"])
+    control = got["control"]
+    top = int(main._pc.PC_ECONOMY["band_max_rank"]["uncommon"])
+    assert control["card"] == "not_in_pool" and control["preview"] == "not_in_pool", control
+    # the roll lands on rank 1 (the subject), is refused by the live check and re-rolled
+    # onto the same slot until the attempts run out: the pack is refused before any debit
+    assert control["roll"] == "pool_changed", control["roll"]
+    # the summary's whole top list: every member of the snapshot but the subject (rank 1)
+    assert control["summary"] == [k for _, k in members if k != 1 and k <= top], (control["summary"], members)
+    shows = {
+        "card": isinstance(got["card"]["card"], dict) and got["card"]["card"]["player_ref"] == str(subject.pid),
+        "preview": isinstance(got["preview"]["preview"], dict) and got["preview"]["preview"]["pool_rank"] == 1,
+        "summary": got["summary"]["summary"] == [k for _, k in members if k <= top],
+        "roll": got["roll"]["roll"] == [str(subject.pid)] * n,
+    }
+    assert shows == {"card": True, "preview": True, "summary": True, "roll": True}, (shows, got)
+
+
 # -- the definition mutant's driver ------------------------------------------
 def _mutant_main():
     schema = os.environ["BAN_EXPIRY_SCHEMA"]

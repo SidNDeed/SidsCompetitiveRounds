@@ -2294,8 +2294,8 @@ def _janitor_sql_from_sources(sources: dict, roots) -> dict:
       - `+` concatenation requires every operand to be str; f-string
         placeholders str() their value exactly like Python;
       - a call is refused, except a call to the one ban definition
-        (models.player_ban_active_sql) whose one argument is a positional
-        str literal (the alias),
+        (models.player_ban_active_sql) whose arguments are positional str
+        literals only (the alias, and optionally the instant's bind cast),
         under a name nothing else in the module binds: it evaluates to the
         text the same call builds at runtime;
       - a conditional expression expands ONLY when its test is statically
@@ -2378,14 +2378,14 @@ def _janitor_sql_from_sources(sources: dict, roots) -> dict:
                         mod_aliases[m].setdefault(a.asname or a.name, set()).add(a.name)
 
     # The one ban definition (models.player_ban_active_sql, migration 417).
-    # A call to it whose one argument is a positional str literal (the
-    # alias) evaluates to exactly the
+    # A call to it whose arguments are positional str literals only (the
+    # alias, and optionally the instant's bind cast) evaluates to exactly the
     # text the runtime builds from the same call, so the evaluator takes that
     # text. The name resolves only when the module binds it by a top-level
     # `from models import player_ban_active_sql [as X]` and by nothing else
     # anywhere in the module (no second import, store, parameter, def,
     # class, handler, pattern or global). Any other call, and this one with
-    # a non-literal argument, a keyword or a second argument, stays
+    # a non-literal argument, a keyword or a third argument, stays
     # unresolvable and lands in `dynamic`.
     ban_def_names: dict = {}   # module -> local names bound only to the definition
     for m, tree in trees.items():
@@ -2964,7 +2964,7 @@ def _janitor_sql_from_sources(sources: dict, roots) -> dict:
         if isinstance(node, _ast.Call):
             f = node.func
             if isinstance(f, _ast.Name) and f.id in _ban_def_view[0] \
-                    and len(node.args) == 1 and not node.keywords \
+                    and 1 <= len(node.args) <= 2 and not node.keywords \
                     and all(isinstance(a, _ast.Constant) and isinstance(a.value, str)
                             for a in node.args):
                 try:
@@ -30365,11 +30365,60 @@ async def _pc_take_snapshot(db: AsyncSession, *, reason: str) -> dict:
     return {"snapshot_id": int(snap_id), "members": len(rows)}
 
 
+# 'ban_ended' (migration 417): an account that was under an active ban at the
+# latest snapshot's taken_at and is under no active ban now. Both halves are
+# the ONE definition (models.player_ban_active_sql): its instant form at the
+# snapshot's taken_at and its plain form now; there is no second spelling of
+# "active" here. `b2` is the account's other rows: an end while another ban of
+# the same account is active makes nothing due.
+_PC_SNAPSHOT_BAN_ENDED_SQL = f"""
+    SELECT EXISTS (
+        SELECT 1 FROM player_bans b
+         WHERE {player_ban_active_sql('b', 'CAST(:last_at AS timestamptz)')}
+           AND NOT {player_ban_active_sql('b')}
+           AND NOT EXISTS (SELECT 1 FROM player_bans b2
+                            WHERE b2.steam_id = b.steam_id AND {player_ban_active_sql('b2')})
+    ) AS ban_ended
+"""
+
+
 async def _pc_snapshot_due(db: AsyncSession):
     """'first' when no snapshot exists, 'rule' when the latest one was taken
     under an older pool rule than _PC_POOL_RULE, 'daily' when the last one
-    predates today's 00:05 UTC and that time has passed, else None -- from the
-    DB clock and the durable MAX(taken_at) / latest rule, so it is restart-safe.
+    predates today's 00:05 UTC and that time has passed, 'ban_ended' when an
+    account under an active ban at the latest snapshot's taken_at is under
+    none now, else None -- from the DB clock and the durable MAX(taken_at) /
+    latest rule / ban rows, so it is restart-safe. When two hold, the first
+    in that order is the reason printed.
+
+    'ban_ended' (migration 417, _PC_SNAPSHOT_BAN_ENDED_SQL): a ban ends at
+    the EARLIER of its lift and its expiry, both read through the one
+    definition. Closing an already-expired row at a re-ban (_apply_ban_core)
+    is not an end: that close writes unbanned_at = expires_at, the end the
+    row had already reached. A ban that began after the latest snapshot and
+    has ended already makes nothing due (that account was a member all
+    along; the readers free it at once), and nothing is due while the
+    account is under another active ban. Once the snapshot is taken the same
+    end is no longer due (it lies before the new taken_at); a failed
+    snapshot is retried on the next pass like the other reasons. A failed
+    ban read is logged and answers None, inside a savepoint so the step's
+    transaction survives: it frees nobody early, and the daily snapshot
+    still frees the account. Between a ban's end and the next janitor pass
+    (about 60 s) the account still answers 404 not_in_pool; and a ban_ended
+    snapshot re-freezes EVERY member at current values, exactly as the daily
+    one does. So other players' cards move only to their own current
+    standing, earlier than 00:05, never because of a banned account. Each
+    such snapshot also counts against snapshot_keep (14 snapshots, not days:
+    player_cards.py PC_ECONOMY), so it shortens how far back the retained
+    snapshots reach: a preview pinned to a snapshot retention has deleted
+    answers 404 not_in_pool on the face route and 404 on the motion route
+    (_pc_preview_read finds no member row), nothing is debited, and a pack
+    open is not affected (it reads the latest snapshot id). The halves
+    compare timestamps, not what the snapshot's own read saw: a lift whose
+    transaction began before the snapshot's and committed after its member
+    read is read as ended before that snapshot, so this reason misses it and
+    the daily snapshot frees that account; a ban or a lift committed inside
+    the same window can make one snapshot due that changes no membership.
 
     'rule' is what carries a membership change into the pool at the DEPLOY
     rather than at the next 00:05 UTC: it fires at the first janitor pass after
@@ -30389,9 +30438,17 @@ async def _pc_snapshot_due(db: AsyncSession):
         return "first"
     if int(due["last_rule"] or 0) < int(_PC_POOL_RULE):
         return "rule"
-    if db_now < today_at or last_at >= today_at:
+    if not (db_now < today_at or last_at >= today_at):
+        return "daily"
+    try:
+        async with db.begin_nested():
+            ended = (await db.execute(text(_PC_SNAPSHOT_BAN_ENDED_SQL),
+                                      {"last_at": last_at})).scalar_one_or_none()
+    except Exception as ex:
+        print(f"[PC-SNAPSHOT] ban_ended read failed ({type(ex).__name__}) -- "
+              "nothing is due for it on this pass; the daily snapshot still frees the account")
         return None
-    return "daily"
+    return "ban_ended" if ended else None
 
 
 # The Discord channel the edition notice posts to: the gambler chat, the
@@ -30548,7 +30605,9 @@ async def _pc_snapshot_janitor_step() -> None:
     none exists (first boot after the migration), when the latest one was
     taken under an older pool rule than this build carries (`_pc_snapshot_due`'s
     'rule' -- the members scan that term used to be is gone since the
-    2026-09-15 merge), or once per UTC day at or after 00:05 UTC. Also run once
+    2026-09-15 merge), once per UTC day at or after 00:05 UTC, or when an
+    account under an active ban at the latest snapshot is under none now
+    (`_pc_snapshot_due`'s 'ban_ended', migration 417). Also run once
     on the primary's boot path (`_pc_snapshot_boot_retake`), which is why it
     carries no caller state. An advisory try-lock keeps two api processes from
     taking the same day's snapshot twice, and the due state is re-read under

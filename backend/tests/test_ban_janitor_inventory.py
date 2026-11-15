@@ -4,15 +4,16 @@ statement now that the ban clause is a call to the one definition
 
 main._janitor_sql_inventory() is what the boot self-test EXPLAINs; a site it
 cannot resolve lands in `dynamic` and the sweep silently stops covering it.
-The evaluator resolves a call to the definition ONLY when its one argument
-is a positional str literal and the module binds the name by its top-level
+The evaluator resolves a call to the definition ONLY when every argument is
+a positional str literal and the module binds the name by its top-level
 `from models import player_ban_active_sql` alone; anything else stays
 dynamic. The controls plant each of those shapes, and plant one resolvable
 and one unresolvable statement into the live sources to show the exact
 numbers move.
 
-The numbers are exact. Main b2ba4b91 reads 350 statements and 0 dynamic, and
-so does this lane after F1. On 88a0a2bf (before fix 1) it read 344 and 6:
+The numbers are exact. Main b2ba4b91 reads 350 statements and 0 dynamic; this
+lane adds ONE janitor statement (the 'ban_ended' read of _pc_snapshot_due),
+so the tip reads 351 and 0. On 88a0a2bf (before fix 1) it read 344 and 6:
 _pc_take_snapshot, _pc_trade_janitor_step and four tournaments sites
 (_player_id_banned, _eligible_entrant_ids, _eligible_slot_tallies,
 _queue_availability_notices) were dynamic, the first two through the
@@ -29,7 +30,7 @@ sys.path.insert(0, os.path.normpath(os.path.join(HERE, "..", "api")))
 import main  # noqa: E402
 import models  # noqa: E402
 
-STATEMENTS, DYNAMIC = 350, 0
+STATEMENTS, DYNAMIC = 351, 0
 ROOT = (("main", "root"),)
 DEF = re.compile(r"\((\w+)\.unbanned_at IS NULL AND \(\1\.expires_at IS NULL OR \1\.expires_at > NOW\(\)\)\)")
 # the sites that were dynamic on 88a0a2bf, and the alias each one's definition call names
@@ -56,6 +57,12 @@ def test_the_startup_inventory_reads_every_statement_and_none_is_dynamic():
     for (module, func), alias in FORMERLY_DYNAMIC.items():
         sqls = [_flat(s["sql"]) for s in inv["statements"] if (s["module"], s["func"]) == (module, func)]
         assert any(models.player_ban_active_sql(alias) in q for q in sqls), (module, func, len(sqls))
+    # the ban_ended read resolves both forms of the one definition
+    due = [_flat(s["sql"]) for s in inv["statements"] if s["func"] == "_pc_snapshot_due"]
+    ended = [q for q in due if "AS ban_ended" in q]
+    assert len(ended) == 1, due
+    assert models.player_ban_active_sql("b", "CAST(:last_at AS timestamptz)") in ended[0]
+    assert models.player_ban_active_sql("b") in ended[0] and models.player_ban_active_sql("b2") in ended[0]
 
 
 def _live_sources():
@@ -104,9 +111,12 @@ def test_positive_control_literal_arguments_resolve_to_the_definitions_text():
     sqls, dynamic = _inventory('''
         async def root(db):
             await db.execute(text("SELECT 1 FROM player_bans pb WHERE " + player_ban_active_sql("pb")))
+            await db.execute(text(f"SELECT 1 FROM player_bans b WHERE {player_ban_active_sql('b', 'CAST(:t AS timestamptz)')}"))
     ''')
-    assert dynamic == [] and len(sqls) == 1, (sqls, dynamic)
+    assert dynamic == [] and len(sqls) == 2, (sqls, dynamic)
     assert "SELECT 1 FROM player_bans pb WHERE " + models.player_ban_active_sql("pb") in sqls
+    assert "SELECT 1 FROM player_bans b WHERE " + models.player_ban_active_sql(
+        "b", "CAST(:t AS timestamptz)") in sqls
 
 
 def test_control_a_non_literal_alias_stays_dynamic():
@@ -128,11 +138,11 @@ def test_control_another_function_stays_dynamic():
     assert sqls == [] and dynamic == [7], (sqls, dynamic)
 
 
-def test_control_a_keyword_or_a_second_argument_stays_dynamic():
+def test_control_a_keyword_or_a_third_argument_stays_dynamic():
     sqls, dynamic = _inventory('''
         async def root(db):
             await db.execute(text("SELECT 1 FROM player_bans pb WHERE " + player_ban_active_sql(alias="pb")))
-            await db.execute(text("SELECT 1 FROM player_bans pb WHERE " + player_ban_active_sql("pb", "CAST(:t AS timestamptz)")))
+            await db.execute(text("SELECT 1 FROM player_bans pb WHERE " + player_ban_active_sql("pb", "x", "y")))
     ''')
     assert sqls == [] and dynamic == [4, 5], (sqls, dynamic)
 
@@ -152,5 +162,6 @@ def test_control_an_argument_the_definition_refuses_stays_dynamic():
     sqls, dynamic = _inventory('''
         async def root(db):
             await db.execute(text("SELECT 1 FROM player_bans pb WHERE " + player_ban_active_sql("pb;")))
+            await db.execute(text("SELECT 1 FROM player_bans pb WHERE " + player_ban_active_sql("pb", "NOW()")))
     ''')
-    assert sqls == [] and dynamic == [4], (sqls, dynamic)
+    assert sqls == [] and dynamic == [4, 5], (sqls, dynamic)

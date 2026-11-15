@@ -116,10 +116,13 @@ MARK = "\x00"
 
 
 def _definition_alias(node):
-    """The alias of a call to the definition whose one argument is a
-    positional str literal, else None."""
+    """The alias of a call to the definition whose arguments are positional
+    str literals only, else None. The second argument, when present, is the
+    instant form (`at`, a timestamptz bind cast): the same definition read at
+    that instant, so it covers its alias exactly as the plain form does --
+    it is the one helper, not a second spelling (fix 1, F3 R-f)."""
     if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == DEFINITION \
-            and len(node.args) == 1 and not node.keywords \
+            and 1 <= len(node.args) <= 2 and not node.keywords \
             and all(isinstance(a, ast.Constant) and isinstance(a.value, str) for a in node.args):
         return node.args[0].value
     return None
@@ -322,6 +325,16 @@ def test_the_definition_compares_the_end_on_the_database_clock():
     for bad in ("", "1x", "pb;", "pb.x", "PB"):
         with pytest.raises(ValueError):
             models.player_ban_active_sql(bad)
+    # the instant form (F3): the same three facts read at a bound instant --
+    # begun by then, not lifted by then, not expired by then (a ban ends at
+    # the EARLIER of its lift and its expiry)
+    assert models.player_ban_active_sql("b", "CAST(:t AS timestamptz)") == (
+        "(b.banned_at <= CAST(:t AS timestamptz)"
+        " AND (b.unbanned_at IS NULL OR b.unbanned_at > CAST(:t AS timestamptz))"
+        " AND (b.expires_at IS NULL OR b.expires_at > CAST(:t AS timestamptz)))")
+    for bad in ("NOW()", ":t", "CAST(:t AS date)", "CAST(:t AS timestamptz) OR TRUE", "", 5):
+        with pytest.raises(ValueError):
+            models.player_ban_active_sql("b", bad)
 
 
 PLANTED_UNCOVERED = '''
@@ -452,3 +465,130 @@ async def _ban_rate_gate_or_raise(db):
     problems, _ = judge(readers, orm, whole_tree=False)
     assert ("allowed count moved", ("main.py", "_ban_rate_gate_or_raise"), 1) == problems[0][:3], problems
 
+
+# -- F3 R-e: every reader of pc_pool_members applies the definition ---------
+#
+# A snapshot freezes the pool; a member banned since it was taken is still a
+# row in pc_pool_members. So every statement that reads that table either
+# carries the pool's word (_PC_POOL_MEMBER_SQL, which carries the definition
+# for the member's account) or is listed here with the reason it need not.
+# Derived like the ban readers above: every non-docstring literal naming the
+# table, judged inside its root expression. A site is keyed by its function,
+# or by the constant it is assigned to at module level.
+POOL_TABLE = re.compile(r"\bpc_pool_members\b")
+POOL_WORD = "_PC_POOL_MEMBER_SQL"
+POOL_ALLOWED = {
+    ("main.py", "_PC_MEMBER_INSERT_SQL"): (
+        1, "the snapshot's own insert (a writer); its rows come from the pool CTE, which carries the word"),
+    ("main.py", "_PC_MEMBER_AT_SQL"): (
+        1, "the open's pick inside the snapshot it rolls from; _pc_roll_prints follows every pick with "
+           "_PC_LIVE_POOL_CHECK_SQL (the word, now) and re-rolls a refused member before any debit"),
+    ("main.py", "_pc_roll_prints"): (
+        1, "the band sizes of the same frozen rows the pick indexes by OFFSET; sizes filtered by the word "
+           "would index a different row set than the pick reads, and a banned member counted here is a "
+           "slot the live check re-rolls"),
+    ("main.py", "_pc_steam_claim"): (
+        1, "ordering only: the pool rank orders the portrait queue inside a WHERE that is "
+           "_PC_STEAM_ELIGIBLE_SQL, which carries the definition; nothing about membership is answered"),
+    ("main.py", "_pc_preview_read"): (
+        1, "the member read after the subject read of the same player, which carries the word and "
+           "returns None before this read when the word refuses"),
+    ("main.py", "delete_player_data"): (
+        1, "the account deletion's own delete of the account's rows"),
+}
+
+
+def _site(node, parents):
+    q = _qualname(node, parents)
+    if q != "<module>":
+        return q
+    while node in parents:
+        node = parents[node]
+        if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
+            return node.targets[0].id
+    return q
+
+
+def pool_readers(module, src):
+    """(module, site) -> [(lineno, carries the word)] per root naming the table."""
+    tree = ast.parse(src)
+    parents = _parents(tree)
+    out, seen = {}, set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Constant) and isinstance(node.value, str) and POOL_TABLE.search(node.value):
+            if _bare_string(node, parents):
+                continue
+            root = _root(node, parents)
+            if id(root) in seen:
+                continue
+            seen.add(id(root))
+            carries = any((isinstance(n, ast.Name) and n.id == POOL_WORD) or _definition_alias(n) is not None
+                          for n in ast.walk(root))
+            out.setdefault((module, _site(node, parents)), []).append((root.lineno, carries))
+    return out
+
+
+def judge_pool(readers, whole_tree=True):
+    problems, counts = [], {"roots": 0, "carry": 0, "allowed": 0}
+    for key, roots in sorted(readers.items()):
+        counts["roots"] += len(roots)
+        bare = [ln for ln, carries in roots if not carries]
+        counts["carry"] += len(roots) - len(bare)
+        if key in POOL_ALLOWED:
+            if len(bare) != POOL_ALLOWED[key][0]:
+                problems.append(("allowed count moved", key, POOL_ALLOWED[key][0], bare))
+            counts["allowed"] += len(bare)
+        else:
+            problems.extend(("pool reader without the word", key, ln) for ln in bare)
+    for key in (POOL_ALLOWED if whole_tree else ()):
+        if key not in readers:
+            problems.append(("allowed site gone", key))
+    return problems, counts
+
+
+def test_every_reader_of_the_pool_members_applies_the_definition(capsys):
+    readers = {}
+    for name, path in _modules():
+        with open(path, encoding="utf-8") as fh:
+            readers.update(pool_readers(name, fh.read()))
+    problems, counts = judge_pool(readers)
+    with capsys.disabled():
+        print("\n[pool-readers] roots %(roots)d carry-the-word %(carry)d allowed %(allowed)d" % counts)
+    assert not problems, problems
+    assert counts["carry"] >= 2 and ("main.py", "internal_pc_card") in readers \
+        and ("main.py", "pc_pool_summary") in readers, (counts, sorted(readers))
+
+
+def test_the_pool_word_and_the_allowed_readers_reasons_hold():
+    """The facts the allow-list's reasons rest on, as code: the word carries
+    the definition for the member's account; the roll re-checks every pick
+    with it; the portrait queue's WHERE carries the definition; the preview
+    gates on the word before its member read."""
+    import inspect
+    import sys
+    sys.path.insert(0, API)
+    import main
+    import models
+    word = main._PC_POOL_MEMBER_SQL
+    assert ("NOT EXISTS (SELECT 1 FROM player_bans b WHERE b.steam_id = p.steam_id AND "
+            + models.player_ban_active_sql("b") + ")") in word
+    assert word in main._PC_LIVE_POOL_CHECK_SQL
+    roll = inspect.getsource(main._pc_roll_prints)
+    assert roll.index("text(_PC_MEMBER_AT_SQL)") < roll.index("text(_PC_LIVE_POOL_CHECK_SQL)")
+    assert "if live is None:\n                continue" in roll
+    assert models.player_ban_active_sql("b") in main._PC_STEAM_ELIGIBLE_SQL
+    assert "where = _PC_STEAM_ELIGIBLE_SQL" in inspect.getsource(main._pc_steam_claim)
+    prev = inspect.getsource(main._pc_preview_read)
+    assert prev.index("+ _PC_POOL_MEMBER_SQL)") < prev.index("FROM pc_pool_members m")
+    assert prev.index("if sub is None") < prev.index("FROM pc_pool_members m")
+
+
+def test_negative_control_a_pool_reader_without_the_word_is_reported():
+    src = '''
+async def planted(db):
+    await db.execute(text("SELECT m.pool_rank FROM pc_pool_members m WHERE m.player_id = :p AND " + _PC_POOL_MEMBER_SQL))
+    await db.execute(text("SELECT m.pool_rank FROM pc_pool_members m WHERE m.player_id = :p"))
+'''
+    problems, counts = judge_pool(pool_readers("planted.py", src), whole_tree=False)
+    assert problems == [("pool reader without the word", ("planted.py", "planted"), 4)], problems
+    assert counts == {"roots": 2, "carry": 1, "allowed": 0}, counts

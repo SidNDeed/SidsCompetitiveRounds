@@ -125,6 +125,11 @@ class Scripted:
     async def rollback(self):
         self.rolled_back += 1
 
+    def begin_nested(self):
+        # a savepoint (the ban_ended read of _pc_snapshot_due): the fake has
+        # no transactions, so it is the session itself as a context manager
+        return self
+
     def count(self, key):
         return sum(1 for sql, _ in self.log if key in sql)
 

@@ -331,3 +331,30 @@ def test_control_module_level_ban_state_is_found():
     assert found == {("planted.py", "_banned_seen"), ("planted.py", "_ban_snapshot"),
                      ("planted.py", "_last_ban_answer")}, sorted(found)
 
+
+# -- F3 (fix 1): the due reasons and their order -------------------------------
+
+def test_ban_ended_is_the_last_due_reason_and_answers_alone_only():
+    """_pc_snapshot_due, on the scripted session the Player Cards tests use:
+    'ban_ended' is due exactly when the ban read says so and nothing earlier
+    in the order holds; when another reason holds, that one is the reason."""
+    from datetime import timedelta
+    from test_player_cards_server import Scripted, _due_row, _run
+    today = datetime(2026, 11, 14, 0, 5, tzinfo=timezone.utc)
+    later, before = today + timedelta(seconds=30), today - timedelta(days=1)
+
+    def due(row, ended):
+        db = Scripted({"SELECT (SELECT MAX(taken_at)": [row], "AS ban_ended": [[{"ban_ended": ended}]]})
+        return _run(main._pc_snapshot_due(db)), db.count("AS ban_ended")
+
+    old = int(main._PC_POOL_RULE) - 1
+    assert due(_due_row(later, today + timedelta(hours=5), today), True) == ("ban_ended", 1)
+    assert due(_due_row(later, today + timedelta(hours=5), today), False) == (None, 1)
+    # an earlier reason holds: it is the reason, and the ban read is not made
+    assert due(_due_row(before, today + timedelta(minutes=1), today), True) == ("daily", 0)
+    assert due(_due_row(later, today + timedelta(hours=5), today, last_rule=old), True) == ("rule", 0)
+    assert due(_due_row(None, today, today, last_rule=old), True) == ("first", 0)
+    read = " ".join(__import__("inspect").getsource(main._pc_snapshot_due).split())
+    assert read.index('return "first"') < read.index('return "rule"') < read.index('return "daily"') \
+        < read.index('return "ban_ended" if ended else None')
+    assert "async with db.begin_nested():" in read and "return None" in read

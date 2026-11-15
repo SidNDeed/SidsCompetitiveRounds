@@ -3,6 +3,7 @@ SQLAlchemy ORM models for Competitive ROUNDS.
 These map directly to the tables created by 001_schema.sql.
 """
 
+import re
 import uuid
 from datetime import datetime, timezone
 
@@ -888,14 +889,27 @@ class PlayerBan(Base):
 # splices this into its predicate; test_ban_active_definition.py walks the AST
 # of every api module and of the bot and fails a statement that names the
 # table without it, unless the statement is on that test's short allow-list.
+#
+# With `at`, the same definition evaluated at an earlier instant instead of
+# now (the pool snapshot's "was this account banned when the snapshot was
+# taken", fix 1 F3): the row existed by then, and neither its lift nor its
+# expiry had come by then -- a ban ends at the EARLIER of the two. `at` is
+# only ever a bind cast, `CAST(:name AS timestamptz)`; anything else raises.
 _PLAYER_BAN_ALIAS = frozenset("abcdefghijklmnopqrstuvwxyz_0123456789")
+_PLAYER_BAN_AT = re.compile(r"CAST\(:[a-z_][a-z_0-9]* AS timestamptz\)\Z")
 
 
-def player_ban_active_sql(alias: str) -> str:
+def player_ban_active_sql(alias: str, at: str | None = None) -> str:
     if not alias or alias[0].isdigit() or not set(alias) <= _PLAYER_BAN_ALIAS:
         raise ValueError(f"not a SQL alias: {alias!r}")
-    return (f"({alias}.unbanned_at IS NULL"
-            f" AND ({alias}.expires_at IS NULL OR {alias}.expires_at > NOW()))")
+    if at is None:
+        return (f"({alias}.unbanned_at IS NULL"
+                f" AND ({alias}.expires_at IS NULL OR {alias}.expires_at > NOW()))")
+    if not isinstance(at, str) or not _PLAYER_BAN_AT.match(at):
+        raise ValueError(f"not a timestamptz bind cast: {at!r}")
+    return (f"({alias}.banned_at <= {at}"
+            f" AND ({alias}.unbanned_at IS NULL OR {alias}.unbanned_at > {at})"
+            f" AND ({alias}.expires_at IS NULL OR {alias}.expires_at > {at}))")
 
 
 class AdminAction(Base):
