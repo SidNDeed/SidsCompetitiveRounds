@@ -14,17 +14,29 @@ backend/discord_bot.py and collects
 Each literal is judged inside its ROOT expression, the expression that ends
 where the SQL stops being built: climbing from the literal through string
 concatenation (BinOp), f-strings (JoinedStr / FormattedValue) and calls
-(text(...), db.execute(...)). Every `player_bans <alias>` the root's SQL text
-names (the alias is the table name itself when none follows) must be covered
-by a `player_ban_active_sql("<alias>")` call in the same root. A site that
-does not compare a ban's state at all (a writer, a lookup by id, a count of
-an admin's bans by time) is on ALLOWED, keyed by module and function, with
-the number of roots it holds and the reason. The counts are exact both ways:
-a new uncovered reader in an allowed function fails, and so does an allowed
-entry whose reader is gone.
+(text(...), db.execute(...)). The root's SQL text is rebuilt in source order
+with a marker where each `player_ban_active_sql("<alias>")` call stands.
 
-The negative control plants an uncovered reader and requires the walk to
-report it; the positive control plants a covered one and requires silence.
+Coverage is judged per TABLE OCCURRENCE, not per root (fix 1, F4): every
+`player_bans <alias>` (the alias is the table name itself when none follows)
+is one reader whose scope is the innermost parenthesised group holding it
+(the whole statement at the top level). A marker for an alias belongs to the
+innermost scope of an occurrence of that alias that holds the marker; each
+scope needs as many markers of an alias as it holds occurrences of it. So
+two subqueries that share an alias cannot cover each other, and neither can
+an outer reader be covered by a marker inside a nested one.
+
+A site that does not compare a ban's state at all (a writer, a lookup by id,
+a count of an admin's bans by time) is on ALLOWED, keyed by module and
+function, with the number of roots it holds and the reason. The counts are
+exact both ways: a new uncovered reader in an allowed function fails, and so
+does an allowed entry whose reader is gone. Two ORM forms the walk does not
+model (`aliased(PlayerBan)` and a relationship to PlayerBan) fail it outright
+wherever they appear; none exists.
+
+The negative controls plant uncovered readers (one per shape the walk must
+see) and require the walk to report each; the positive control plants a
+covered one and requires silence.
 """
 import ast
 import os
@@ -41,7 +53,8 @@ DEFINITION = "player_ban_active_sql"
 TABLE = re.compile(r"\bplayer_bans\b")
 # `player_bans` followed by an alias, or by a keyword (then the table name is
 # its own alias). AS is optional in SQL.
-ALIAS = re.compile(r"\bplayer_bans\b(?:\s+(?:AS\s+)?([A-Za-z_][A-Za-z0-9_]*))?", re.I)
+# A qualified column (`player_bans.steam_id`) is not a table occurrence.
+ALIAS = re.compile(r"\bplayer_bans\b(?!\s*\.)(?:\s+(?:AS\s+)?([A-Za-z_][A-Za-z0-9_]*))?", re.I)
 KEYWORDS = {
     "where", "set", "on", "join", "left", "right", "inner", "outer", "cross", "order",
     "group", "limit", "using", "and", "or", "for", "returning", "values", "select",
@@ -97,48 +110,123 @@ def _bare_string(node, parents):
     return isinstance(p, ast.Expr) and p.value is node
 
 
-def _covered(root):
-    return {n.args[0].value for n in ast.walk(root)
-            if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == DEFINITION
-            and len(n.args) == 1 and isinstance(n.args[0], ast.Constant) and isinstance(n.args[0].value, str)}
+# A marker is MARK + the alias in hex + MARK: no SQL text holds a NUL, and the
+# hex keeps a marker for the bare table from reading as an occurrence of it.
+MARK = "\x00"
+
+
+def _definition_alias(node):
+    """The alias of a call to the definition whose one argument is a
+    positional str literal, else None."""
+    if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == DEFINITION \
+            and len(node.args) == 1 and not node.keywords \
+            and all(isinstance(a, ast.Constant) and isinstance(a.value, str) for a in node.args):
+        return node.args[0].value
+    return None
 
 
 def _sql_text(root):
-    """The root's SQL: its string literals in source order, leaving out the
-    definition's own alias argument and the bind parameters (dict keys and
+    """The root's SQL in source order (an in-order walk: BinOp left then
+    right, JoinedStr values, call arguments), with a marker where each call
+    to the definition stands, leaving out the bind parameters (dict keys and
     values, keyword arguments), which are not SQL."""
     parts = []
 
     def visit(node, skip):
         if isinstance(node, ast.Constant) and isinstance(node.value, str):
             if not skip:
-                parts.append(node)
+                parts.append(node.value)
             return
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == DEFINITION:
+            alias = _definition_alias(node)
+            if alias is not None and not skip:
+                parts.append(" " + MARK + alias.encode().hex() + MARK + " ")
             return
         for child in ast.iter_child_nodes(node):
             visit(child, skip or isinstance(node, (ast.Dict, ast.keyword)))
     visit(root, False)
-    parts.sort(key=lambda n: (n.lineno, n.col_offset))
-    return " ".join(n.value for n in parts)
+    return " ".join(parts)
 
 
-def _aliases(sql):
-    out = set()
+def _groups(sql):
+    """(start, end) of every parenthesised group, quotes respected."""
+    out, stack, quoted = [], [], False
+    for i, ch in enumerate(sql):
+        if ch == "'":
+            quoted = not quoted
+        elif quoted:
+            continue
+        elif ch == "(":
+            stack.append(i)
+        elif ch == ")" and stack:
+            out.append((stack.pop(), i))
+    return out
+
+
+def _scope(pos, groups, length):
+    inner = (-1, length)
+    for a, b in groups:
+        if a < pos < b and (b - a) < (inner[1] - inner[0]):
+            inner = (a, b)
+    return inner
+
+
+def occurrences(sql):
+    """[(position, alias)] of every `player_bans` reader in the text."""
+    out = []
     for m in ALIAS.finditer(sql):
         word = m.group(1)
-        out.add("player_bans" if word is None or word.lower() in KEYWORDS else word)
+        out.append((m.start(), "player_bans" if word is None or word.lower() in KEYWORDS else word))
     return out
+
+
+def uncovered(sql):
+    """The aliases of the occurrences no marker of their scope covers."""
+    groups = _groups(sql)
+    occ = [(alias, _scope(pos, groups, len(sql))) for pos, alias in occurrences(sql)]
+    need = {}
+    for alias, scope in occ:
+        need[(alias, scope)] = need.get((alias, scope), 0) + 1
+    have = {}
+    for m in re.finditer(re.escape(MARK) + r"([^" + MARK + r"]*)" + re.escape(MARK), sql):
+        alias = bytes.fromhex(m.group(1)).decode()
+        holders = [scope for (a, scope) in need if a == alias and scope[0] < m.start() < scope[1]]
+        if holders:
+            best = min(holders, key=lambda s: s[1] - s[0])
+            have[(alias, best)] = have.get((alias, best), 0) + 1
+    missing = []
+    for key, n in need.items():
+        missing.extend([key[0]] * max(0, n - have.get(key, 0)))
+    return sorted(missing)
+
+
+def _tripwire(node):
+    """An ORM form of PlayerBan the walk does not model, else None."""
+    if not isinstance(node, ast.Call):
+        return None
+    f = node.func
+    name = f.id if isinstance(f, ast.Name) else f.attr if isinstance(f, ast.Attribute) else None
+    if name not in ("aliased", "relationship", "backref"):
+        return None
+    for a in list(node.args) + [k.value for k in node.keywords]:
+        if (isinstance(a, ast.Name) and a.id == "PlayerBan") or \
+                (isinstance(a, ast.Constant) and a.value == "PlayerBan"):
+            return name
+    return None
 
 
 def scan_source(module, src):
     """(readers, orm): readers maps (module, qualname) to a list of
-    (lineno, uncovered aliases) per root; orm maps (module, qualname) to the
-    line numbers of PlayerBan uses."""
+    (lineno, uncovered aliases, occurrences) per root; orm maps (module,
+    qualname) to the line numbers of PlayerBan uses, and an unmodelled ORM
+    form is entered under ("<tripwire>", form) with its line."""
     tree = ast.parse(src)
     parents = _parents(tree)
     readers, roots_seen, orm = {}, set(), {}
     for node in ast.walk(tree):
+        trip = _tripwire(node)
+        if trip:
+            orm.setdefault(("<tripwire>", "%s(PlayerBan) in %s" % (trip, module)), []).append(node.lineno)
         if isinstance(node, ast.Constant) and isinstance(node.value, str) and TABLE.search(node.value):
             if _bare_string(node, parents):
                 continue
@@ -146,8 +234,9 @@ def scan_source(module, src):
             if id(root) in roots_seen:
                 continue
             roots_seen.add(id(root))
-            missing = sorted(_aliases(_sql_text(root)) - _covered(root))
-            readers.setdefault((module, _qualname(node, parents)), []).append((root.lineno, missing))
+            sql = _sql_text(root)
+            readers.setdefault((module, _qualname(node, parents)), []).append(
+                (root.lineno, uncovered(sql), len(occurrences(sql))))
         elif isinstance(node, ast.Name) and node.id == "PlayerBan" and isinstance(node.ctx, ast.Load):
             orm.setdefault((module, _qualname(node, parents)), []).append(node.lineno)
         elif isinstance(node, ast.Attribute) and node.attr == "PlayerBan":
@@ -179,18 +268,19 @@ def judge(readers, orm, whole_tree=True):
     tree an allowed site that is gone is a problem too; a planted source
     holds only the planted function, so that check is for the tree alone."""
     problems = []
-    counts = {"roots": 0, "covered": 0, "allowed": 0, "orm": 0}
+    counts = {"roots": 0, "occurrences": 0, "covered": 0, "allowed": 0, "orm": 0}
     for key, roots in sorted(readers.items()):
         counts["roots"] += len(roots)
+        counts["occurrences"] += sum(r[2] for r in roots)
         if key in ALLOWED:
             want = ALLOWED[key][0]
-            uncovered = [r for r in roots if r[1]]
-            if len(uncovered) != want:
-                problems.append(("allowed count moved", key, want, uncovered))
-            counts["allowed"] += len(uncovered)
-            counts["covered"] += len(roots) - len(uncovered)
+            bad = [r[:2] for r in roots if r[1]]
+            if len(bad) != want:
+                problems.append(("allowed count moved", key, want, bad))
+            counts["allowed"] += len(bad)
+            counts["covered"] += len(roots) - len(bad)
             continue
-        for lineno, missing in roots:
+        for lineno, missing, _n in roots:
             if missing:
                 problems.append(("reader without the definition", key, lineno, missing))
             else:
@@ -199,6 +289,9 @@ def judge(readers, orm, whole_tree=True):
         if key not in readers:
             problems.append(("allowed site gone", key))
     for key, lines in sorted(orm.items()):
+        if key[0] == "<tripwire>":
+            problems.append(("ORM form this walk does not model; extend the walk first", key[1], lines))
+            continue
         counts["orm"] += len(lines)
         want = ALLOWED_ORM.get(key, (0, ""))[0]
         if len(lines) != want:
@@ -213,8 +306,8 @@ def test_every_reader_of_player_bans_uses_the_one_definition(capsys):
     readers, orm = scan_tree()
     problems, counts = judge(readers, orm)
     with capsys.disabled():
-        print("\n[ban-definition] roots %(roots)d covered %(covered)d allowed %(allowed)d "
-              "orm %(orm)d" % counts)
+        print("\n[ban-definition] roots %(roots)d occurrences %(occurrences)d covered %(covered)d "
+              "allowed %(allowed)d orm %(orm)d" % counts)
     assert not problems, problems
     # the walk reached the readers this lane changed (no silent empty scan)
     assert counts["covered"] >= 25 and counts["orm"] == 1, counts
@@ -264,7 +357,88 @@ def test_negative_control_a_planted_reader_is_reported():
 
 def test_positive_control_a_covered_reader_is_silent():
     readers, orm = scan_source("planted.py", PLANTED_COVERED)
-    assert judge(readers, orm, whole_tree=False) == ([], {"roots": 1, "covered": 1, "allowed": 0, "orm": 0})
+    assert judge(readers, orm, whole_tree=False) == (
+        [], {"roots": 1, "occurrences": 1, "covered": 1, "allowed": 0, "orm": 0})
+
+
+# F4: one planted reader per shape a per-root census could miss. Each must be
+# reported with exactly the alias of its uncovered occurrence.
+PLANTED_SHAPES = {
+    "a second subquery with the same alias": ('''
+async def planted(db):
+    return await db.execute(text("SELECT 1 FROM t WHERE EXISTS (SELECT 1 FROM player_bans b WHERE b.unbanned_at IS NULL)"
+        " OR EXISTS (SELECT 1 FROM player_bans b WHERE b.steam_id = t.s AND " + player_ban_active_sql("b") + ")"))
+''', ["b"]),
+    "two aliases in one statement, one bare": ('''
+async def planted(db):
+    return await db.execute(text("SELECT 1 FROM player_bans pb JOIN player_bans ON player_bans.steam_id = pb.steam_id"
+        " WHERE " + player_ban_active_sql("pb")))
+''', ["player_bans"]),
+    "a reader inside a CTE": ('''
+async def planted(db):
+    return await db.execute(text("WITH x AS (SELECT steam_id FROM player_bans pb WHERE pb.unbanned_at IS NULL)"
+        " SELECT 1 FROM player_bans pb WHERE pb.steam_id IN (SELECT steam_id FROM x) AND " + player_ban_active_sql("pb")))
+''', ["pb"]),
+    "an outer reader beside a covered nested one": ('''
+async def planted(db):
+    return await db.execute(text("SELECT 1 FROM player_bans pb WHERE pb.steam_id IN"
+        " (SELECT pb.steam_id FROM player_bans pb WHERE " + player_ban_active_sql("pb") + ")"))
+''', ["pb"]),
+}
+PLANTED_SECOND_STATEMENT = '''
+async def planted(db):
+    await db.execute(text("SELECT 1 FROM player_bans pb WHERE " + player_ban_active_sql("pb")))
+    await db.execute(text("SELECT 1 FROM player_bans pb WHERE pb.unbanned_at IS NULL"))
+'''
+
+
+@pytest.mark.parametrize("shape", sorted(PLANTED_SHAPES))
+def test_negative_control_each_shape_of_uncovered_occurrence_is_reported(shape):
+    src, missing = PLANTED_SHAPES[shape]
+    readers, orm = scan_source("planted.py", src)
+    problems, counts = judge(readers, orm, whole_tree=False)
+    assert problems == [("reader without the definition", ("planted.py", "planted"), 3, missing)], problems
+    assert counts["occurrences"] == 2, counts
+
+
+def test_negative_control_a_reader_in_a_second_statement_is_reported():
+    readers, orm = scan_source("planted.py", PLANTED_SECOND_STATEMENT)
+    problems, counts = judge(readers, orm, whole_tree=False)
+    assert problems == [("reader without the definition", ("planted.py", "planted"), 4, ["pb"])], problems
+    assert counts["roots"] == 2 and counts["covered"] == 1, counts
+
+
+def test_negative_control_the_reviewers_trade_mutant_is_reported():
+    """The first definition call of main._PC_TRADE_DEAD_SQL replaced by
+    `b.unbanned_at IS NULL`: two other subqueries keep alias b covered, and
+    the census must still name the one it no longer covers."""
+    path = os.path.join(API, "main.py")
+    with open(path, encoding="utf-8") as fh:
+        src = fh.read()
+    start = src.index("_PC_TRADE_DEAD_SQL = ")
+    end = src.index("\n_PC_TRADE_VOID_REASON_SQL = ", start)
+    block = src[start:end]
+    call = "{player_ban_active_sql('b')}"
+    assert block.count(call) == 3, block.count(call)
+    mutated = block.replace(call, "b.unbanned_at IS NULL", 1)
+    readers, orm = scan_source("main.py", block)
+    assert judge(readers, orm, whole_tree=False)[0] == [], "the unmutated constant must be covered"
+    readers, orm = scan_source("main.py", mutated)
+    problems, counts = judge(readers, orm, whole_tree=False)
+    assert problems == [("reader without the definition", ("main.py", "<module>"), 1, ["b"])], problems
+    assert counts["occurrences"] == 3, counts
+
+
+@pytest.mark.parametrize("form", [
+    "pb = aliased(PlayerBan)",
+    "bans = relationship('PlayerBan')",
+    "bans = relationship(PlayerBan, backref='player')",
+    "bans = orm.relationship('PlayerBan')",
+])
+def test_tripwire_an_unmodelled_orm_form_fails_the_walk(form):
+    readers, orm = scan_source("planted.py", form + "\n")
+    problems, _ = judge(readers, orm, whole_tree=False)
+    assert problems and problems[0][0] == "ORM form this walk does not model; extend the walk first", problems
 
 
 def test_an_allowed_function_gaining_a_reader_is_reported():
@@ -277,3 +451,4 @@ async def _ban_rate_gate_or_raise(db):
     readers, orm = scan_source("main.py", src)
     problems, _ = judge(readers, orm, whole_tree=False)
     assert ("allowed count moved", ("main.py", "_ban_rate_gate_or_raise"), 1) == problems[0][:3], problems
+
