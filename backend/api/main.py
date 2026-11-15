@@ -11757,7 +11757,11 @@ async def get_player_stats(
     player_level, xp_into_level, xp_needed_for_next = level_from_xp(player_total_xp)
 
     # Compute best win streaks (July 20 item 5: game AND series units, both
-    # with best + signed current, invalidated rows excluded).
+    # with best + signed current, invalidated rows excluded). Each walk's
+    # ORDER BY is complete (end time, created_at, id): rows with equal end
+    # times otherwise come back in no fixed order. The match walks order by
+    # the match history's three columns, each reversed, so the rows both
+    # select are walked in exactly the reverse of the history's order.
     def _walk_streak(rows, pid):
         """(best_win_streak, signed_current_streak) over chronological winner ids."""
         best, run = 0, 0
@@ -11781,7 +11785,7 @@ async def get_player_stats(
         WHERE rs.status = 'completed'
           AND rs.invalidated_at IS NULL
           AND (rs.player1_id = :pid OR rs.player2_id = :pid)
-        ORDER BY rs.completed_at ASC
+        ORDER BY rs.completed_at ASC, rs.created_at ASC, rs.id ASC
     """), {"pid": player.id})).mappings().all()
     best_ranked_streak, current_ranked_series_streak = _walk_streak(ranked_streak_rows, player.id)
 
@@ -11795,7 +11799,7 @@ async def get_player_stats(
           AND m.is_ranked = true
           AND m.invalidated_at IS NULL
           AND (m.photon_room_id IS NULL OR LEFT(m.photon_room_id, 5) != 'team_')
-        ORDER BY m.ended_at ASC
+        ORDER BY m.ended_at ASC, m.created_at ASC, m.id ASC
     """), {"pid": player.id})).mappings().all()
     best_ranked_game_streak, current_ranked_game_streak = _walk_streak(ranked_game_rows, player.id)
 
@@ -11806,7 +11810,7 @@ async def get_player_stats(
         WHERE (m.player1_id = :pid OR m.player2_id = :pid)
           AND m.is_ranked = false
           AND m.invalidated_at IS NULL
-        ORDER BY m.ended_at ASC
+        ORDER BY m.ended_at ASC, m.created_at ASC, m.id ASC
     """), {"pid": player.id})).mappings().all()
     best_casual_streak, current_casual_streak = _walk_streak(casual_streak_rows, player.id)
 
