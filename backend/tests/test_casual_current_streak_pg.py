@@ -94,6 +94,37 @@ def _answer(rows):
     return asyncio.run(_answer_async(rows))
 
 
+async def _ranked_streak_async(series):
+    """Plant the players and `series` (in list order) as completed
+    ranked_series rows, then return main.get_ranked_streak(db, ME). Each
+    entry: (winner steam id, completed minute, created minute)."""
+    async with cf_pg.case("streak463rs") as (c, sm):
+        ids = {}
+        async with sm() as db:
+            for steam in (ME, OPP):
+                ids[steam] = (await main.get_or_create_player(db, steam, "Streak " + steam[-2:])).id
+            await db.commit()
+        for winner, completed, created in series:
+            await c.conn.execute(
+                "INSERT INTO ranked_series (id, player1_id, player2_id, status, winner_id,"
+                " created_at, completed_at) VALUES ($1, $2, $3, 'completed', $4, $5, $6)",
+                uuid.uuid4(), ids[ME], ids[OPP], ids[winner],
+                BASE + timedelta(minutes=created), BASE + timedelta(minutes=completed))
+        async with sm() as db:
+            return await main.get_ranked_streak(db, ME)
+
+
+def test_pg_ranked_streak_equal_completion_times_are_decided_by_created_at():
+    """get_ranked_streak: A (a win) and B (a loss) completed at the same
+    instant; A was created first, so B is the latest series by the full
+    order (completed_at, created_at, id, all DESC): the streak is -1. B's
+    row is inserted before A's."""
+    cf_pg.require_live_pg()
+    b = (OPP, 10, 2)
+    a = (ME, 10, 1)
+    assert asyncio.run(_ranked_streak_async([b, a])) == -1
+
+
 def test_pg_w_w_l_gives_current_minus_1_and_best_2():
     # inserted newest first
     assert _answer([_l(3), _w(2), _w(1)]) == (-1, 2)

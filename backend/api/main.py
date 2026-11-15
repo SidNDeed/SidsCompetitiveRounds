@@ -22397,12 +22397,13 @@ async def get_ranked_streak(db: AsyncSession, steam_id: str) -> int:
     # No LIMIT: the loop below breaks at the first series the player didn't win,
     # so it only walks the actual streak. A prior LIMIT 20 capped every displayed
     # streak at 20 (bug #17). winner_id-only rows make a full scan cheap.
+    # The ORDER BY is complete (completed_at, created_at, id) so equal completion times sort one way.
     streak_rows = (await db.execute(text("""
         SELECT rs.winner_id
         FROM ranked_series rs
         WHERE rs.status = 'completed'
           AND (rs.player1_id = :pid OR rs.player2_id = :pid)
-        ORDER BY rs.completed_at DESC
+        ORDER BY rs.completed_at DESC, rs.created_at DESC, rs.id DESC
     """), {"pid": p.id})).mappings().all()
     if not streak_rows:
         return 0
@@ -71635,6 +71636,7 @@ async def get_player_team_stats(steam_id: str, db: AsyncSession = Depends(get_db
     # Series streak — walk completed series newest first, count consecutive same-result.
     # No LIMIT: the loop breaks at the first opposite result, so it only walks the actual
     # streak. A prior LIMIT 50 silently capped the 2v2 streak at 50 (same class as #17).
+    # The ORDER BY is complete (completed_at, created_at, id) so equal completion times sort one way.
     streak_q = await db.execute(
         text("""
             SELECT s.winner_team,
@@ -71642,7 +71644,7 @@ async def get_player_team_stats(steam_id: str, db: AsyncSession = Depends(get_db
             FROM team_series s
             WHERE s.status = 'completed'
               AND :pid IN (s.t1a_id, s.t1b_id, s.t2a_id, s.t2b_id)
-            ORDER BY s.completed_at DESC
+            ORDER BY s.completed_at DESC, s.created_at DESC, s.id DESC
         """),
         {"pid": player.id},
     )

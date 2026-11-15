@@ -270,6 +270,42 @@ def test_each_walk_orders_by_the_history_columns_reversed():
         got["ranked_streak_rows"]
 
 
+def _fn_statement(func, target: str) -> str:
+    """The text() literal assigned (through execute) to `target` in `func`."""
+    (fn,) = ast.parse(textwrap.dedent(inspect.getsource(func))).body
+    (assign,) = [n for n in ast.walk(fn) if isinstance(n, ast.Assign)
+                 and [ast.unparse(t) for t in n.targets] == [target]]
+    (sql,) = [c.args[0].value for c in ast.walk(assign)
+              if isinstance(c, ast.Call) and isinstance(c.func, ast.Name)
+              and c.func.id == "text" and c.args
+              and isinstance(c.args[0], ast.Constant)]
+    return sql
+
+
+def test_get_ranked_streak_orders_by_the_series_walk_reversed():
+    """get_ranked_streak walks completed series newest first; its order is
+    the get_player_stats series walk's columns with each direction reversed,
+    so both name the same series as the latest one."""
+    sql = _fn_statement(main.get_ranked_streak, "streak_rows")
+    assert sql.count("ORDER BY ") == 1, sql
+    series_walk = _order_by(_statement("ranked_streak_rows"))
+    got = _order_by(sql)
+    assert got == [(col, FLIP[d]) for col, d in series_walk], (got, series_walk)
+    assert got == [("rs.completed_at", "DESC"), ("rs.created_at", "DESC"),
+                   ("rs.id", "DESC")], got
+
+
+def test_team_series_streak_walk_orders_completely():
+    """get_player_team_stats' series streak walk ends in a complete order,
+    newest first: completed_at, created_at, id, all DESC (team_series has
+    created_at, migration 053)."""
+    sql = _fn_statement(main.get_player_team_stats, "streak_q")
+    assert sql.count("ORDER BY ") == 1, sql
+    got = _order_by(sql)
+    assert got == [("s.completed_at", "DESC"), ("s.created_at", "DESC"),
+                   ("s.id", "DESC")], got
+
+
 def test_the_order_reader_refuses_an_incomplete_or_trailing_clause():
     """Negative controls for _order_by: a missing direction and a clause
     after the ORDER BY are refused."""
