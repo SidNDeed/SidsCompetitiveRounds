@@ -65109,10 +65109,12 @@ async def ffa_queue_list(db: AsyncSession = Depends(get_db)):
 
 @app.get("/api/v1/ffa/queue/poll/{steam_id}", tags=["FFA Queue"])
 async def ffa_queue_poll(steam_id: str, request: Request, db: AsyncSession = Depends(get_db)):
-    """Poll the FFA queue (_ffa_queue_poll_inner), then attach the assembly
-    notice after the poll's own COMMIT, whatever its status (the
-    connect-failure design, sec3.4)."""
+    """Poll the FFA queue (_ffa_queue_poll_inner), then attach, after the
+    poll's own COMMIT, an open lobby's invites (migration 416's change; see
+    _ffa_attach_invites) and the assembly notice, whatever the poll's status
+    (the connect-failure design, sec3.4)."""
     out = await _ffa_queue_poll_inner(steam_id, request, db)
+    out = await _ffa_attach_invites(db, request, steam_id, out)
     return await _ffa_attach_asm_notice(db, steam_id, out)
 
 
@@ -65257,19 +65259,11 @@ async def _ffa_queue_poll_inner(steam_id: str, request: Request, db: AsyncSessio
                 "DELETE FROM queue_leases WHERE player_id = :pid"
                 "   AND mode = 'ffa' AND group_id = :lid"),
                 {"pid": me["player_id"], "lid": me["series_id"]})
-            # Migration 416's change: a member who leaves an open lobby ends
-            # the invites they sent for it (the group helper holds the lobby).
-            await _invite_bump(db, await _invite_end_departed(
-                db, "ffa", me["series_id"], [me["player_id"]]))
             await db.commit()
             print(f"[LEASE] open-lobby seat expired for {steam_id} (lobby {me['series_id']})")
             return {"status": "lobby_closed", "queue_count": 0}
         live = await _ffa_live_lobby_members(db, me["series_id"])
         host_id = _ffa_effective_host(lrow["host_player_id"], live)
-        # Migration 416's change: the lobby's invites, for a member whose
-        # client is at or above the invite floor.
-        invites = (await _invite_lobby_list(db, "ffa", me["series_id"], me["player_id"], host_id)
-                   if _invite_ok_for(request) else None)
         now_utc = datetime.now(timezone.utc)
         await db.commit()
         _cfg = _ffa_lobby_config(lrow)
@@ -65313,7 +65307,6 @@ async def _ffa_queue_poll_inner(steam_id: str, request: Request, db: AsyncSessio
                  "wait_seconds": int((now_utc - m["joined_at"]).total_seconds()) if m["joined_at"] else 0}
                 for m in live
             ],
-            **({"invites": invites} if invites is not None else {}),
         }
 
     # Already locked → self-heal dead locks, else report the lobby.
@@ -81175,6 +81168,32 @@ async def _invite_lobby_list(db: AsyncSession, mode: str, lobby_id, me_id, host_
             "invitee_steam_id": r["invitee_steam_id"],
             "invitee_name": r["invitee_name"] or "?",
         })
+    return out
+
+
+async def _ffa_attach_invites(db: AsyncSession, request: Request, steam_id: str, out):
+    """An open FFA lobby's `invites` on its member's poll answer, as the 2v2
+    and 1v2 lobby state carries them, for a client at or above the invite
+    floor. ffa_queue_poll calls it after the inner poll's own COMMIT, beside
+    the assembly notice: _ffa_queue_poll_inner is an a1 site, and its body
+    stays as main has it. The host is the member the answer marks is_host.
+    It writes nothing, and a failure only loses the list for this poll."""
+    if not isinstance(out, dict) or out.get("status") != "lobby" or not _invite_ok_for(request):
+        return out
+    host_sid = next((m["steam_id"] for m in out.get("members") or () if m.get("is_host")), None)
+    try:
+        ids = {r[0]: r[1] for r in (await db.execute(text(
+            "SELECT steam_id, id FROM players WHERE steam_id IN (:me, :host)"),
+            {"me": steam_id, "host": host_sid or steam_id})).all()}
+        if steam_id not in ids:
+            return out
+        invites = await _invite_lobby_list(db, "ffa", UUID(out["lobby_id"]), ids[steam_id],
+                                           ids.get(host_sid))
+    except Exception as ex:
+        await _asm_rollback(db)
+        print(f"[INVITE] ffa lobby list read failed: {type(ex).__name__}")
+        return out
+    out["invites"] = invites
     return out
 
 

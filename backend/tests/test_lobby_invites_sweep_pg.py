@@ -431,8 +431,10 @@ def test_one_pending_invite_per_lobby_and_invitee_the_index_and_the_sends_answer
                 ans = await env.send(sender, x, mode, lid)
                 assert ans == want, (mode, sender, ans)
             assert await _pending_to(env, mode, lid, x) == 1
-            with env.rewriting(re.compile(r" AND expires_at > CAST\((?:\$\d+|%s|%\(\w+\)s|:\w+) AS timestamptz\)"),
-                               " AND FALSE",
+            # The duplicate check reads no row; its clock placeholder stays in
+            # the text, so the statement keeps every argument it is sent.
+            with env.rewriting(re.compile(r" AND expires_at > CAST\((\$\d+|%s|%\(\w+\)s|:\w+) AS timestamptz\)"),
+                               r" AND FALSE AND CAST(\1 AS timestamptz) IS NOT NULL",
                                where="SELECT id, invitee_player_id FROM lobby_invites") as hits:
                 with pytest.raises(Exception) as ei:
                     await env.send(m, x, mode, lid)
@@ -531,9 +533,10 @@ def test_a_start_refused_after_a_banned_seats_eviction_ends_that_seats_invites(m
 # The janitor's stale and husk prunes and its lobby-not-open deletes do not
 # take the lobby lock, so they may leave a pending invite behind: accept
 # re-checks the sender's live seat itself, and the sweep ends the rest. The
-# 2v2 and 1v2 polls' lease-expiry branch ends no invite either (note 13 (m)):
-# both polls are walked by test_a1_identity_formation.py under a frozen
-# grammar that an ending call there does not fit.
+# three queue polls' lease-expiry branch ends no invite either (note 13 (m)):
+# team_queue_poll, ovt_queue_poll and FFA's body _ffa_queue_poll_inner are
+# walked by test_a1_identity_formation.py under a frozen grammar that an
+# ending call there does not fit.
 
 @pytest.mark.parametrize("mode", inv.MODES)
 def test_a_seat_or_lobby_gone_without_an_ending_is_caught_by_accept_and_the_sweep(monkeypatch, mode):
@@ -600,11 +603,20 @@ _EVERY = re.compile(r"\A")
 _INVITE_WRITE = re.compile(r"\b(?:UPDATE|INSERT INTO|DELETE FROM)\s+lobby_invites\b")
 
 
-@pytest.mark.parametrize("mode", ("team", "ovt"))
-def test_an_expired_2v2_or_1v2_seat_ends_no_invite_and_accept_and_the_sweep_end_them(monkeypatch, mode):
+# Each mode's queue poll, called as its route calls it.
+_QUEUE_POLL = {
+    "team": lambda sid: (lambda db: main.team_queue_poll(sid, Req(sid), db=db, rdm=0)),
+    "ovt": lambda sid: (lambda db: main.ovt_queue_poll(sid, Req(sid), db=db, rdm=0)),
+    "ffa": lambda sid: (lambda db: main.ffa_queue_poll(sid, Req(sid), db=db)),
+}
+
+
+@pytest.mark.parametrize("mode", ("team", "ovt", "ffa"))
+def test_an_expired_lobby_seat_ends_no_invite_and_accept_and_the_sweep_end_them(monkeypatch, mode):
     """Note 13 (m). The member's seat lease is gone, so the mode's own poll
-    (team_queue_poll, ovt_queue_poll) ends the seat, its row and its lease,
-    and ends no invite: its statements include the seat's delete and no
+    (team_queue_poll, ovt_queue_poll; ffa_queue_poll, whose body
+    _ffa_queue_poll_inner holds the branch) ends the seat, its row and its
+    lease, and ends no invite: its statements include the seat's delete and no
     write to lobby_invites, the member's three invites stay pending, and no
     invitee's revision moves. Then an accept answers invite_void
     (sender_left), seats nobody and ends its invite, and the next sweep ends
@@ -615,7 +627,6 @@ def test_an_expired_2v2_or_1v2_seat_ends_no_invite_and_accept_and_the_sweep_end_
     invite stays pending)."""
     async def body(env):
         q = inv.QUEUE_TABLE[mode]
-        poll = main.team_queue_poll if mode == "team" else main.ovt_queue_poll
         lid, (h, m) = await env.lobby(mode, 2)
         x, y, z = await env.players(3)
         ix, iy, iz = [await env.invite(m, p, mode, lid) for p in (x, y, z)]
@@ -629,7 +640,7 @@ def test_an_expired_2v2_or_1v2_seat_ends_no_invite_and_accept_and_the_sweep_end_
         await env.conn.execute("DELETE FROM queue_leases WHERE player_id = $1", m.id)
         revs = [await env.rev(p) for p in (x, y, z)]
         with env.rewriting(_EVERY, "") as log:
-            ans = await env.call(lambda db: poll(m.sid, Req(m.sid), db=db, rdm=0))
+            ans = await env.call(_QUEUE_POLL[mode](m.sid))
         status = ans.body.get("status") if isinstance(ans.body, dict) else getattr(ans.body, "status", None)
         assert ans.status == 200 and status == "lobby_closed", ans
         assert await _seat(env, mode, m) is None, "the expired seat was not ended"

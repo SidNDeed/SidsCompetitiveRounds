@@ -797,6 +797,69 @@ def test_invite_rows_reach_only_clients_at_or_above_the_floor(monkeypatch):
     case(monkeypatch, body)
 
 
+# -- FFA's lobby list rides the poll answer, read after the inner poll -----------
+
+def test_an_ffa_lobby_poll_carries_its_invites_read_after_the_inner_polls_commit(monkeypatch):
+    """An open FFA lobby's members get the lobby's invites on their poll
+    answer, as the 2v2 and 1v2 lobby state carries them: ffa_queue_poll
+    attaches them (_ffa_attach_invites) after _ffa_queue_poll_inner has
+    answered and committed, so the inner poll's own answer has none.
+    can_cancel is true for the invite's sender and for the lobby's host, false
+    for another member; a client below the floor gets no list; a failed list
+    read loses only the list (the poll still answers its lobby). Mutants: the
+    wrapper skips the attach (no member gets a list); the attach passes no
+    host (the host loses its cancel); every client called current (a client
+    below the floor gets the list)."""
+    async def body(env):
+        lid, (h, m, k) = await env.lobby("ffa", 3)
+        x = await env.player()
+        iid = await env.invite(m, x, "ffa", lid)
+        await env.fresh("ffa", lid)
+        none = {"h": None, "m": None, "k": None}
+
+        async def views(version=inv.FLOOR):
+            got = {}
+            for tag, p in (("h", h), ("m", m), ("k", k)):
+                ans = await env.call(lambda db: main.ffa_queue_poll(p.sid, Req(p.sid, version), db=db))
+                assert ans.status == 200 and ans["status"] == "lobby" and ans["lobby_id"] == str(lid), ans
+                got[tag] = ([(i["invite_id"], i["state"], i["can_cancel"]) for i in ans["invites"]]
+                            if "invites" in ans.body else None)
+            return got
+
+        want = {"h": [(str(iid), "pending", True)], "m": [(str(iid), "pending", True)],
+                "k": [(str(iid), "pending", False)]}
+        assert await views() == want
+        assert await views(inv.BELOW) == none
+        # the inner poll alone (the a1 site, as main has it) carries no list
+        inner = await env.call(lambda db: main._ffa_queue_poll_inner(h.sid, Req(h.sid), db))
+        assert inner.status == 200 and inner["status"] == "lobby" and "invites" not in inner.body, inner
+
+        # a failed list read: the poll still answers its lobby, without the list
+        with env.rewriting("FROM lobby_invites i JOIN players p",
+                           "FROM lobby_invites_absent i JOIN players p") as hits:
+            assert await views() == none
+        assert hits, "the planted failure reached no statement"
+        assert await views() == want
+
+        with monkeypatch.context() as mp:
+            async def _skip(db, request, steam_id, out):
+                return out
+            mp.setattr(main, "_ffa_attach_invites", _skip)
+            assert await views() == none, "the skip mutant changed nothing"
+        with monkeypatch.context() as mp:
+            real = main._invite_lobby_list
+
+            async def _no_host(db, mode, lobby_id, me_id, host_id):
+                return await real(db, mode, lobby_id, me_id, None)
+            mp.setattr(main, "_invite_lobby_list", _no_host)
+            got = await views()
+        assert got == dict(want, h=[(str(iid), "pending", False)]), ("the no-host mutant", got)
+        with monkeypatch.context() as mp:
+            mp.setattr(main, "_invite_ok_for", lambda request: True)
+            assert await views(inv.BELOW) == want, "the floor mutant changed nothing"
+    case(monkeypatch, body)
+
+
 # -- retention: a row and its receipts go seven days after expiry ---------------
 
 def test_an_invite_and_its_receipts_go_seven_days_after_its_expiry_whatever_its_end(monkeypatch):

@@ -193,19 +193,19 @@ async def _under_lock(env, mode, lid, who, iids, depart):
 # the lobby row to promote a host or disband) sends one invite, then departs:
 #   leave        _lobby_leave_impl (2v2, 1v2), ffa_queue_leave (FFA)
 #   queue_leave  team_queue_leave, ovt_queue_leave
-#   poll         ffa_queue_poll (the seat's lease is gone, so its renewal
-#                fails and the seat ends; the 2v2 and 1v2 polls' same branch
-#                ends no invite, note 13 (m), and is tested in the sweep suite)
-#   state        _lobby_state_impl (the same renewal, from the lobby state)
+#   state        _lobby_state_impl (the seat's lease is gone, so the lobby
+#                state's renewal fails and the seat ends)
 #   join_prune   _lobby_join_core, _ffa_lobby_join_core (m is stale; a join prunes it)
 #   delete       delete_player_data
 #   ban          _apply_ban_core
-# The kick has its own test below.
+# The kick has its own test below. The three queue polls' same lease-expiry
+# branch (team_queue_poll, ovt_queue_poll, and FFA's body
+# _ffa_queue_poll_inner) ends no invite, note 13 (m), and is tested in the
+# sweep suite.
 
 _PATHS = (
     ("leave", "team"), ("leave", "ovt"), ("leave", "ffa"),
     ("queue_leave", "team"), ("queue_leave", "ovt"),
-    ("poll", "ffa"),
     ("state", "team"), ("state", "ovt"),
     ("join_prune", "team"), ("join_prune", "ovt"), ("join_prune", "ffa"),
     ("delete", "team"), ("delete", "ovt"), ("delete", "ffa"),
@@ -225,7 +225,7 @@ async def _seat(env, path, mode):
     iid = await env.invite(m, x, mode, lid)
     await env.fresh(mode, lid)
     s = types.SimpleNamespace(mode=mode, lid=lid, h=h, m=m, x=x, iid=iid, j=None, admin=None)
-    if path in ("poll", "state"):
+    if path == "state":
         await env.conn.execute("DELETE FROM queue_leases WHERE player_id = $1", m.id)
     elif path == "join_prune":
         await env.stale(mode, m, lid)
@@ -245,9 +245,6 @@ def _depart(env, path, s):
                 Req(m.sid), steam_id=m.sid, expected_series_id=None, db=db))
         return lambda: env.call(lambda db: main.ovt_queue_leave(
             Req(m.sid), steam_id=m.sid, cause="", expected_series_id=None, db=db))
-    if path == "poll":
-        assert mode == "ffa", mode                         # note 13 (m)
-        return lambda: env.call(lambda db: main.ffa_queue_poll(m.sid, Req(m.sid), db=db))
     if path == "state":
         return lambda: env.call(lambda db: main._lobby_state_impl(mode, m.sid, Req(m.sid), db))
     if path == "join_prune":
