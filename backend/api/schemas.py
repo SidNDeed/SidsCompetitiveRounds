@@ -841,9 +841,12 @@ class HealthResponse(BaseModel):
     # v2 §9), which is why the release train asserts it per role.
     pc_steam_sweep: str | None = None
     # pc_pool_rule: the card pool's membership rule this build carries
-    # (main._PC_POOL_RULE; 3 = players who have run the mod AND whose id is a
-    # public individual SteamID64 — the 2026-09-15 merge's intersection of two
-    # decisions, 2 having been the mod-runner half alone). A code constant, so
+    # (main._PC_POOL_RULE; 4 = players who have run the mod AND whose id is a
+    # public individual SteamID64 AND who are under no active ban by the one
+    # definition, models.player_ban_active_sql, so a ban whose end has passed
+    # no longer excludes them (timed bans, migration 417). 3 was the
+    # 2026-09-15 merge's intersection of two decisions with any unlifted ban
+    # excluding, and 2 was the mod-runner half alone). A code constant, so
     # the release train can tell the new build from the old one on a batch that
     # adds no route, and equal on both boxes by construction.
     pc_pool_rule: int | None = None

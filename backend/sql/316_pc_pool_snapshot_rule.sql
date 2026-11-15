@@ -10,6 +10,11 @@
 -- holds a number and nothing else, so this list is the stamp's only decoder and a
 -- rule added to main.py's enumeration (_PC_POOL_RULE) belongs here in the same
 -- change.
+-- Rule 4 (timed bans, migration 417): rule 3 with "not banned" under the one
+-- active-ban definition (models.player_ban_active_sql). A ban is active while it
+-- is not lifted and its end, if it has one, is ahead of the database's clock, so
+-- a ban whose end has passed no longer excludes the account. It is listed here
+-- because this header decodes the stamp; this file's SQL is unchanged.
 --
 -- The api carries the current rule as _PC_POOL_RULE and takes a new snapshot as
 -- soon as the latest one predates it, so the pool changes at the deploy and not at

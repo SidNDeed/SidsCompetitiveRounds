@@ -293,7 +293,7 @@ def test_snapshot_freezes_band_from_rank_and_the_resolved_title(monkeypatch):
     assert select_params["min_matches"] == 5 and select_params["active_days"] == main.LEADERBOARD_ACTIVE_DAYS
     # the snapshot records the pool rule it was taken under (Sept 14 batch, S1)
     snapshot_params = [p for sql, p in db.log if "INSERT INTO pc_pool_snapshots" in sql]
-    assert snapshot_params == [{"n": 3, "rule": main._PC_POOL_RULE}] and main._PC_POOL_RULE == 3
+    assert snapshot_params == [{"n": 3, "rule": main._PC_POOL_RULE}] and main._PC_POOL_RULE == 4
 
 
 def test_the_pool_admits_players_who_have_run_the_mod_through_one_fragment():
@@ -525,8 +525,11 @@ def test_migration_321_converts_the_prints_minted_while_legendary_was_rank_1():
     assert "AND m.pool_rank = 2" in pre
     # ...and the recorded rule, because "the pool was retaken" IS "a snapshot was
     # taken under the deployed pool word"; the band table and the pool rule are two
-    # independent constants that merely ship together.
-    assert "IF v_rule < %d THEN" % main._PC_POOL_RULE in pre
+    # independent constants that merely ship together. 321's guard is rule 3,
+    # the rule that shipped with the band edge; a later rule (4, migration 417)
+    # is >= 3 and passes it, which is right: every later rule keeps rule 3's
+    # restrictions and the band edge.
+    assert "IF v_rule < 3 THEN" in pre and main._PC_POOL_RULE >= 3
     # it names no player: a subject id would rot the moment the pool reorders
     for rots in ("steam_id", "player_id", "subject", "display_name"):
         assert rots not in pre, rots
@@ -537,7 +540,7 @@ def test_migration_321_converts_the_prints_minted_while_legendary_was_rank_1():
     # ORDER: it converts what the OLD code minted, so it runs AFTER the deploy that
     # carries the new band edge and the new pool rule (#236) -- and both are here
     assert "run AFTER the api deploy" in sql and "_PC_POOL_RULE = 3" in sql
-    assert pc.PC_ECONOMY["band_max_rank"]["legendary"] == 2 and main._PC_POOL_RULE == 3
+    assert pc.PC_ECONOMY["band_max_rank"]["legendary"] == 2 and main._PC_POOL_RULE >= 3
     # its claims about 316 are 316's own text and the code's own term
     sql316 = (ROOT / "backend" / "sql" / "316_pc_pool_snapshot_rule.sql").read_text(encoding="utf-8")
     assert "NOT NULL DEFAULT 1" in sql and "ADD COLUMN IF NOT EXISTS rule INTEGER NOT NULL DEFAULT 1" in sql316

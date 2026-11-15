@@ -29194,13 +29194,23 @@ _PC_POOL_STEAM_ID_SQL = "(CASE WHEN p.steam_id ~ '^[0-9]{17}$' THEN CAST(p.steam
 #   1  every registered, non-banned player (Sept 10-13)
 #   2  only players who have run the mod (mod_seen_at set) and are not banned
 #   3  rule 2 AND the id is a public individual SteamID64 (the Sept 15 merge)
+#   4  rule 3 with "not banned" under the one active-ban definition (timed bans, migration 417)
 #
 # Rule 3 is the INTERSECTION of two decisions taken a day apart, not a choice
 # between them: "only players who have run the mod" (product owner,
 # 2026-09-13) and "no Steam ID, no card" (Sid, 2026-09-15). Both restrict who
 # may be a subject, so admitting a member either one refuses would break the
 # later decision; a union was considered and is wrong for that reason.
-_PC_POOL_RULE = 3
+#
+# Rule 4 keeps rule 3's three restrictions and changes what "not banned"
+# means: the ban clause is models.player_ban_active_sql, so a ban is active
+# while it is not lifted and its end, if it has one, is ahead of the
+# database's clock. Under rule 3 any unlifted ban row excluded the account;
+# under rule 4 a ban whose end has passed does not. A snapshot recorded at
+# rule 3 is retaken (reason 'rule') by the janitor's snapshot step, which the
+# primary also runs once on its boot path; like the daily snapshot, that
+# re-freezes every member at current values.
+_PC_POOL_RULE = 4
 
 # Pool membership: ONE word for every reader that decides who is in the pool
 # now -- the snapshot's pool CTE, the open's live re-check, the public pool
