@@ -6328,7 +6328,7 @@ A1_IMPORTS = frozenset({
 # other callee outside a module's namespace resolves.
 A1_CALLEES = frozenset({
     ('from tournaments import _region_candidate_volumes', 'tournaments.py',
-     279, '_region_candidate_volumes'),
+     280, '_region_candidate_volumes'),
     ('_match_hold._hold_latch', 'match_hold.py', 364, '_hold_latch'),
     ('_mrw_mod().series_fresh', 'match_report_window.py', 77, 'series_fresh'),
     ('_mrw_mod().series_holds', 'match_report_window.py', 85, 'series_holds'),
