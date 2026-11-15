@@ -2745,7 +2745,7 @@ def _janitor_sql_from_sources(sources: dict, roots) -> dict:
                         or (isinstance(tgt, _ast.Name) and tgt.id in imported):
                     # setattr(sys.modules[__name__], ...) / setattr(<module>, ...)
                     if _const_str(attr):
-                        _block(attr.value, "setattr")
+                        _block(attr.value, "setattr by a literal name")
                     else:
                         opaque[0] = "setattr"
             elif isinstance(node, _ast.Call) and not _direct(node) and (
