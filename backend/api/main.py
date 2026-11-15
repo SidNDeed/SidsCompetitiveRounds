@@ -2409,7 +2409,7 @@ def _janitor_sql_from_sources(sources: dict, roots) -> dict:
                 elif isinstance(node, (_ast.Global, _ast.Nonlocal)):
                     binds += 2 * (name in node.names)
                 else:
-                    binds += 2 * any(getattr(node, f, None) == name for f in ("name", "rest"))
+                    binds += 2 * (getattr(node, "name", None) == name or getattr(node, "rest", None) == name)
             if binds == 1:
                 ban_def_names[m].add(name)
 
