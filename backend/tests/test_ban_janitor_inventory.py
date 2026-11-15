@@ -153,6 +153,18 @@ def test_control_a_keyword_or_a_third_argument_stays_dynamic():
     assert sqls == [] and dynamic == [4, 5], (sqls, dynamic)
 
 
+def test_control_a_positional_literal_with_a_keyword_stays_dynamic():
+    """One positional literal passes the arity check on its own, so this is
+    the call only the keyword refusal keeps dynamic: resolving it while
+    ignoring `at` would inventory the current-instant text for a site that
+    runs the at-instant one."""
+    sqls, dynamic = _inventory('''
+        async def root(db):
+            await db.execute(text("SELECT 1 FROM player_bans pb WHERE " + player_ban_active_sql("pb", at="CAST(:t AS timestamptz)")))
+    ''')
+    assert sqls == [] and dynamic == [4], (sqls, dynamic)
+
+
 def test_control_a_rebound_name_is_not_the_definition():
     sqls, dynamic = _inventory('''
         def player_ban_active_sql(alias):
