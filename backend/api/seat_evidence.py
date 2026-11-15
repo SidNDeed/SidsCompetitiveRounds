@@ -203,9 +203,25 @@ RECORD_KEYS = tuple(k for k, _ in RECORD_SPEC)
 OPTIONAL_KEYS = ("end",)
 
 
+# blk_sent's fourth element, `own_open`, in contract 2 AS SHIPPED (1.41.0): a
+# raw signed millisecond difference on the Photon clock, clamped by the
+# client to the MS bound (+-600000; SeatEvidenceCore.BlkSentEntry, Ms()), and
+# accepted at intake as any integer inside that bound. It has no states. Its
+# three writers (plugin/SeatEvidence.cs):
+#   kind 0, this seat's own block (:360 stamps ServerNow() at the block, :415
+#     writes WrapDiff(that stamp, the outgoing RPC's envelope stamp)): 0, or a
+#     few ms BELOW 0 when the clock ticks between the two reads;
+#   kind 0 or 1, the local leg of a keyed block (:341, WrapDiff(ServerNow(),
+#     the block's stamp)): 0 or a few ms ABOVE 0;
+#   kind 3, an echo block (:353, WrapDiff(ServerNow(), the ROOT block's
+#     stamp)): about 200 ms per echo step plus jitter.
+# The record is stored byte for byte as received; no reader may treat this
+# field as a two-state value (the server's derivations read elements 0-2
+# only). The two-state rule the contract text once stated (0 or -200) was
+# never what the client wrote, and is gone.
+#
 # The event invariants the contract states beyond each element's own range
-# (section 2.4 and amendment A2): `own_open` has exactly two states; a path-0
-# hit carries no projectile identity; a received hit is always path 0 (a
+# (section 2.4 and amendment A2): a path-0 hit carries no projectile identity; a received hit is always path 0 (a
 # path-1 hit is one-sided by construction and is counted in `unpair`, never
 # listed); and a sent hit's (since_ms, last_*) is the one pair its last-reset
 # state admits (the amended B7): none = (-1, the no-block tuple [0, -1, 0]),
@@ -216,7 +232,6 @@ OPTIONAL_KEYS = ("end",)
 # if-and-only-if coupling, which an unkeyed reset could not satisfy, and the
 # old `hit_sent.last` (a last_kind of -1 with a tuple other than [0, -1, 0]),
 # which the three `_last` rules now cover in every state.
-OWN_OPEN_STATES = (0, -200)
 NO_BLOCK = (0, -1, 0)
 NO_SINCE = -1
 
@@ -224,10 +239,8 @@ NO_SINCE = -1
 def check_events(rec) -> None:
     """Raise EvidenceRefused(422, "<list>.<field>") for the first event entry
     that breaks an enumerated or cross-field invariant. Runs after every
-    entry passed its own range check."""
-    for e in rec["blk_sent"]:
-        if e[3] not in OWN_OPEN_STATES:
-            raise EvidenceRefused(422, "blk_sent.own_open")
+    entry passed its own range check (blk_sent has no invariant beyond its
+    ranges: own_open is any integer in the MS bound, see above)."""
     for e in rec["hit_recv"]:
         if e[0] != 0:
             raise EvidenceRefused(422, "hit_recv.path")

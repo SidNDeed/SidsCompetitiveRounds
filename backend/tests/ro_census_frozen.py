@@ -1517,18 +1517,18 @@ FROZEN = {'api/admin_evidence.py': [('import', 'from sqlalchemy import text'),
                                             'sections 3, 4 and 12.5 with the\n'
                                             'unit moved from the series to the game:\n'
                                             '\n'
-                                            '  H3  one game delivered twice is credited once. '
-                                            "1v1's second delivery of a\n"
-                                            "      report dies at the match insert's flush on "
-                                            'unique_match with nothing\n'
-                                            "      written; 2v2's is the duplicate echo; FFA's is "
-                                            'refused by the room gate\n'
-                                            '      -- the replay echo -- with no second '
-                                            'ffa_matches row. The after-the-fact\n'
-                                            '      2v2 settlement (admin completion, lead forfeit) '
-                                            'plays no game and\n'
-                                            '      credits nothing, whichever path completed the '
-                                            'series.\n'
+                                            '  H3  one game delivered twice is credited once: '
+                                            "1v1's second delivery meets\n"
+                                            "      unique_match at the match insert's flush and is "
+                                            'answered as already\n'
+                                            "      recorded, nothing written; 2v2's is the "
+                                            "duplicate echo; FFA's is\n"
+                                            '      refused by the room gate (the replay echo), no '
+                                            'second ffa_matches row.\n'
+                                            '      The after-the-fact 2v2 settlement (admin '
+                                            'completion, lead forfeit)\n'
+                                            '      plays no game and credits nothing, whichever '
+                                            'path completed the series.\n'
                                             "  H5  a DATABASE fault inside the hook's call -- the "
                                             'real hook runs, then a\n'
                                             '      failing statement -- costs the completion '
@@ -1586,10 +1586,10 @@ FROZEN = {'api/admin_evidence.py': [('import', 'from sqlalchemy import text'),
                                             'R3 (the 1v1 credit stands when the rating pass fails '
                                             'or skips, and causes\n'
                                             'nothing else) and Q-G (the resent deciding 1v1 report '
-                                            'answers 500 through\n'
-                                            'main.app and writes nothing -- behaviour documented '
-                                            'as it stands, not\n'
-                                            'changed here).\n'
+                                            'answers 200\n'
+                                            '"duplicate" with the stored match\'s id and writes '
+                                            'nothing; closed by lane\n'
+                                            'server-fix-1114).\n'
                                             '\n'
                                             'Every H3 and H8 case also records each call main.py '
                                             'makes to the hook, the\n'
