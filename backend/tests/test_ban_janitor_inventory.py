@@ -4,12 +4,15 @@ statement now that the ban clause is a call to the one definition
 
 main._janitor_sql_inventory() is what the boot self-test EXPLAINs; a site it
 cannot resolve lands in `dynamic` and the sweep silently stops covering it.
-The evaluator resolves a call to the definition ONLY when every argument is
-a positional str literal and the module binds the name by its top-level
-`from models import player_ban_active_sql` alone; anything else stays
-dynamic. The controls plant each of those shapes, and plant one resolvable
-and one unresolvable statement into the live sources to show the exact
-numbers move.
+The evaluator resolves a call to the definition ONLY when it has one or two
+positional str literals and no keyword, through a name a top-level
+`from models import player_ban_active_sql` binds that the module census
+(the one that decides module constants) admits and the site's function does
+not shadow; anything else stays dynamic, and a refused name is listed in
+the inventory's `ban_def_refused` with the census's reasons. The controls
+plant each of those shapes, every form the census refuses the name for,
+and one resolvable and one unresolvable statement into the live sources to
+show the exact numbers move.
 
 The numbers are exact. Main b2ba4b91 reads 350 statements and 0 dynamic; this
 lane adds ONE janitor statement (the 'ban_ended' read of _pc_snapshot_due),
@@ -23,6 +26,8 @@ import os
 import re
 import sys
 import textwrap
+
+import pytest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.normpath(os.path.join(HERE, "..", "api")))
@@ -52,6 +57,7 @@ def test_the_startup_inventory_reads_every_statement_and_none_is_dynamic():
     inv = main._janitor_sql_inventory()
     assert (len(inv["statements"]), len(inv["dynamic"])) == (STATEMENTS, DYNAMIC), (
         len(inv["statements"]), inv["dynamic"])
+    assert inv["ban_def_refused"] == [], inv["ban_def_refused"]
     # each formerly dynamic site is a statement now, carrying the definition's
     # own text for its alias (resolved, not skipped)
     for (module, func), alias in FORMERLY_DYNAMIC.items():
@@ -165,3 +171,172 @@ def test_control_an_argument_the_definition_refuses_stays_dynamic():
             await db.execute(text("SELECT 1 FROM player_bans pb WHERE " + player_ban_active_sql("pb", "NOW()")))
     ''')
     assert sqls == [] and dynamic == [4, 5], (sqls, dynamic)
+
+
+SITE = '''
+async def root(db):
+    await db.execute(text("SELECT 1 FROM player_bans pb WHERE " + player_ban_active_sql("pb")))
+'''
+
+
+def _planted(plant, site=SITE):
+    """The inventory of a module that imports the definition, then runs
+    `plant`, then defines the root whose one statement calls the name; and
+    the line of that statement."""
+    src = ("from models import player_ban_active_sql\n"
+           + textwrap.dedent(plant).strip("\n") + "\n\n"
+           + textwrap.dedent(site).lstrip("\n"))
+    inv = main._janitor_sql_from_sources({"main": src}, ROOT)
+    line = 1 + next(i for i, t in enumerate(src.splitlines()) if "await db.execute" in t)
+    return inv, line
+
+
+# Every form the module census (main._module_census, the one that decides
+# module constants) refuses the name for, planted after the definition's
+# import, with the reason the inventory records. "opaque: ..." is a form
+# that may rebind any module name and so refuses every name in the module.
+REBINDING_FORMS = [
+    # the review's forms
+    ("globals-literal-key", 'globals()["player_ban_active_sql"] = lambda a: "FALSE"',
+     "namespace store by literal key"),
+    ("globals-variable-key", '_k = "player_ban_active_sql"\nglobals()[_k] = lambda a: "FALSE"',
+     "opaque: namespace store"),
+    ("module-attribute-sys-modules",
+     'import sys\nsys.modules[__name__].player_ban_active_sql = lambda a: "FALSE"',
+     "namespace attribute store"),
+    ("module-attribute-self-import", 'import main\nmain.player_ban_active_sql = lambda a: "FALSE"',
+     "attribute store on an imported name"),
+    ("setattr-sys-modules",
+     'import sys\nsetattr(sys.modules[__name__], "player_ban_active_sql", lambda a: "FALSE")',
+     "setattr"),
+    ("wildcard-import", "from os.path import *", "opaque: import *"),
+    # every other namespace form
+    ("module-attribute-namespace-alias",
+     'import sys\n_m = sys.modules[__name__]\n_m.player_ban_active_sql = lambda a: "FALSE"',
+     "namespace attribute store"),
+    ("setattr-imported-module", 'import main\nsetattr(main, "player_ban_active_sql", lambda a: "FALSE")',
+     "setattr"),
+    ("setattr-variable-name",
+     'import sys\n_k = "player_ban_active_sql"\nsetattr(sys.modules[__name__], _k, lambda a: "FALSE")',
+     "opaque: setattr"),
+    ("vars-literal-key", 'vars()["player_ban_active_sql"] = lambda a: "FALSE"',
+     "namespace store by literal key"),
+    ("locals-literal-key", 'locals()["player_ban_active_sql"] = lambda a: "FALSE"',
+     "namespace store by literal key"),
+    ("module-dict-literal-key",
+     'import sys\nsys.modules[__name__].__dict__["player_ban_active_sql"] = lambda a: "FALSE"',
+     "namespace store by literal key"),
+    ("namespace-method", 'globals().update(player_ban_active_sql=lambda a: "FALSE")',
+     "opaque: namespace method"),
+    ("namespace-argument", 'dict.update(globals(), player_ban_active_sql=lambda a: "FALSE")',
+     "opaque: namespace argument"),
+    ("namespace-returned", "def _ns():\n    return globals()", "opaque: namespace escape"),
+    ("namespace-yielded", "def _ns():\n    yield globals()", "opaque: namespace escape"),
+    ("namespace-matched", "match globals():\n    case _:\n        pass", "opaque: namespace escape"),
+    ("exec", "exec(\"player_ban_active_sql = lambda a: 'FALSE'\")", "opaque: exec"),
+    ("eval", 'eval("0")', "opaque: eval"),
+    ("dunder-import", '__import__("os")', "opaque: __import__"),
+    ("builtins-name", "_b = __builtins__", "opaque: __builtins__"),
+    ("builtins-exec", 'import builtins\nbuiltins.exec("0")', "opaque: exec"),
+    # every binding of the name itself
+    ("module-assignment", 'player_ban_active_sql = lambda a: "FALSE"', "assignment"),
+    ("tuple-leaf", 'player_ban_active_sql, _x = (lambda a: "FALSE"), 1', "assignment target"),
+    ("starred-leaf", '*player_ban_active_sql, = [lambda a: "FALSE"]', "assignment target"),
+    ("augmented", 'player_ban_active_sql += ""', "augmented or annotated assignment"),
+    ("annotated", 'player_ban_active_sql: object = lambda a: "FALSE"', "augmented or annotated assignment"),
+    ("walrus", '(player_ban_active_sql := lambda a: "FALSE")', "walrus"),
+    ("for-target", 'for player_ban_active_sql in (lambda a: "FALSE",):\n    pass', "for target"),
+    ("with-alias", "with open(__file__) as player_ban_active_sql:\n    pass", "with alias"),
+    ("del", "del player_ban_active_sql", "del"),
+    ("comprehension-target", "_xs = [player_ban_active_sql for player_ban_active_sql in ()]",
+     "comprehension target"),
+    ("def", 'def player_ban_active_sql(alias):\n    return "TRUE"', "def"),
+    ("async-def", 'async def player_ban_active_sql(alias):\n    return "TRUE"', "def"),
+    ("class", "class player_ban_active_sql:\n    pass", "class"),
+    ("except-alias", "try:\n    pass\nexcept Exception as player_ban_active_sql:\n    pass", "except alias"),
+    ("match-capture", "match 1:\n    case player_ban_active_sql:\n        pass", "match capture"),
+    ("match-mapping-rest", "match {}:\n    case {**player_ban_active_sql}:\n        pass", "match capture"),
+    ("match-subject", "match player_ban_active_sql:\n    case _:\n        pass", "match"),
+    ("global", 'def _g():\n    global player_ban_active_sql\n    player_ban_active_sql = lambda a: "FALSE"',
+     "global or nonlocal declaration"),
+    ("nonlocal",
+     "def _o():\n    player_ban_active_sql = 1\n    def _i():\n"
+     "        nonlocal player_ban_active_sql\n        player_ban_active_sql = 2",
+     "global or nonlocal declaration"),
+    ("second-import", "from models import player_ban_active_sql", "import"),
+    ("function-import", "def _f():\n    from models import player_ban_active_sql", "import"),
+    ("method-call", "player_ban_active_sql.cache_clear()", "method call"),
+    # (a module-level store whose target is not a bare name also blocks every
+    # name in that target, the receiver included)
+    ("attribute-store", "player_ban_active_sql.x = 1", "assignment target, store through the name"),
+    ("subscript-store", "player_ban_active_sql[0] = 1", "assignment target, store through the name"),
+    ("attribute-store-in-a-function", "def _s():\n    player_ban_active_sql.x = 1", "store through the name"),
+] + ([("type-alias", "type player_ban_active_sql = int", "type alias")]
+     if sys.version_info >= (3, 12) else [])
+
+
+@pytest.mark.parametrize("plant,why", [f[1:] for f in REBINDING_FORMS],
+                         ids=[f[0] for f in REBINDING_FORMS])
+def test_control_a_form_that_can_rebind_the_name_refuses_the_definition(plant, why):
+    inv, line = _planted(plant)
+    assert ([s["line"] for s in inv["statements"]], [d["line"] for d in inv["dynamic"]]) == ([], [line]), (
+        inv["statements"], inv["dynamic"])
+    assert inv["ban_def_refused"] == [
+        {"module": "main", "func": None, "name": "player_ban_active_sql", "why": why}], inv["ban_def_refused"]
+
+
+# A binding inside the site's own function shadows the definition exactly
+# where it shadows a module constant (main._analyze_bindings' `bound`, or a
+# class or match in the subtree, which refuses expansion there).
+FUNCTION_FORMS = [
+    ("parameter", '''
+        async def root(db, player_ban_active_sql=None):
+            await db.execute(text("SELECT 1 FROM player_bans pb WHERE " + player_ban_active_sql("pb")))
+     ''', "bound in the function"),
+    ("local-assignment", '''
+        async def root(db):
+            player_ban_active_sql = lambda a: "FALSE"
+            await db.execute(text("SELECT 1 FROM player_bans pb WHERE " + player_ban_active_sql("pb")))
+     ''', "bound in the function"),
+    ("nested-def", '''
+        async def root(db):
+            def player_ban_active_sql(a):
+                return "FALSE"
+            await db.execute(text("SELECT 1 FROM player_bans pb WHERE " + player_ban_active_sql("pb")))
+     ''', "bound in the function"),
+    ("class-in-function", '''
+        async def root(db):
+            class _Row:
+                pass
+            await db.execute(text("SELECT 1 FROM player_bans pb WHERE " + player_ban_active_sql("pb")))
+     ''', "class or match in the function"),
+    ("match-in-function", '''
+        async def root(db):
+            match db:
+                case _:
+                    pass
+            await db.execute(text("SELECT 1 FROM player_bans pb WHERE " + player_ban_active_sql("pb")))
+     ''', "class or match in the function"),
+]
+
+
+@pytest.mark.parametrize("site,why", [f[1:] for f in FUNCTION_FORMS],
+                         ids=[f[0] for f in FUNCTION_FORMS])
+def test_control_a_binding_in_the_function_shadows_the_definition(site, why):
+    inv, line = _planted("", site)
+    assert ([s["line"] for s in inv["statements"]], [d["line"] for d in inv["dynamic"]]) == ([], [line]), (
+        inv["statements"], inv["dynamic"])
+    assert inv["ban_def_refused"] == [
+        {"module": "main", "func": "root", "name": "player_ban_active_sql", "why": why}], inv["ban_def_refused"]
+
+
+def test_positive_control_an_unrelated_literal_key_globals_store_leaves_the_site_resolved():
+    """The shape of main.py's own globals() stores: a literal key naming
+    something else blocks that name only."""
+    inv, line = _planted('''
+        def _tick():
+            globals()["_ffa_gather_started_mono"] = None
+    ''')
+    assert inv["dynamic"] == [] and inv["ban_def_refused"] == [], (inv["dynamic"], inv["ban_def_refused"])
+    assert [(s["line"], s["sql"]) for s in inv["statements"]] == [
+        (line, "SELECT 1 FROM player_bans pb WHERE " + models.player_ban_active_sql("pb"))]

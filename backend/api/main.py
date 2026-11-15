@@ -2293,11 +2293,11 @@ def _janitor_sql_from_sources(sources: dict, roots) -> dict:
         exactly like Python;
       - `+` concatenation requires every operand to be str; f-string
         placeholders str() their value exactly like Python;
-      - a call is refused, except a call to the one ban definition
-        (models.player_ban_active_sql) whose arguments are positional str
-        literals only (the alias, and optionally the instant's bind cast),
-        under a name nothing else in the module binds: it evaluates to the
-        text the same call builds at runtime;
+      - a call is refused, except a call with one or two positional str
+        literals and no keyword through a name `ban_def_names` (below)
+        admits for the site's function: it takes the text
+        models.player_ban_active_sql returns for those literals, and is
+        refused when the definition raises ValueError for them;
       - a conditional expression expands ONLY when its test is statically
         known (literal, or a name resolving to exactly one constant), and
         then only its live arm is inventoried. RUNTIME-conditional SQL is
@@ -2338,9 +2338,12 @@ def _janitor_sql_from_sources(sources: dict, roots) -> dict:
 
     Returns {"statements": [{module, func, line, sql, roots, class, keyword}],
              "dynamic":    [{module, func, line}],
-             "root_counts": {root_fn: n statements reachable}}.
+             "root_counts": {root_fn: n statements reachable},
+             "ban_def_refused": [{module, func, name, why}]}.
     `class` and `keyword` are _janitor_statement_class(sql): the check the
-    self-test applies to that statement.
+    self-test applies to that statement. `ban_def_refused` lists each name
+    for the one ban definition that `ban_def_names` refused, module-wide
+    (func None) or in a reached function that names it, with the reasons.
     """
     import ast as _ast
 
@@ -2376,42 +2379,6 @@ def _janitor_sql_from_sources(sources: dict, roots) -> dict:
                 for a in node.names:
                     if a.name in sources:
                         mod_aliases[m].setdefault(a.asname or a.name, set()).add(a.name)
-
-    # The one ban definition (models.player_ban_active_sql, migration 417).
-    # A call to it whose arguments are positional str literals only (the
-    # alias, and optionally the instant's bind cast) evaluates to exactly the
-    # text the runtime builds from the same call, so the evaluator takes that
-    # text. The name resolves only when the module binds it by a top-level
-    # `from models import player_ban_active_sql [as X]` and by nothing else
-    # anywhere in the module (no second import, store, parameter, def,
-    # class, handler, pattern or global). Any other call, and this one with
-    # a non-literal argument, a keyword or a third argument, stays
-    # unresolvable and lands in `dynamic`.
-    ban_def_names: dict = {}   # module -> local names bound only to the definition
-    for m, tree in trees.items():
-        cands = set()
-        for node in tree.body:
-            if isinstance(node, _ast.ImportFrom) and node.module == "models" \
-                    and not node.level:
-                for a in node.names:
-                    if a.name == "player_ban_active_sql":
-                        cands.add(a.asname or a.name)
-        ban_def_names[m] = set()
-        for name in cands:
-            binds = 0
-            for node in _ast.walk(tree):
-                if isinstance(node, _ast.alias):
-                    binds += (node.asname or node.name.split(".")[0]) == name
-                elif isinstance(node, _ast.Name):
-                    binds += 2 * (node.id == name and not isinstance(node.ctx, _ast.Load))
-                elif isinstance(node, _ast.arg):
-                    binds += 2 * (node.arg == name)
-                elif isinstance(node, (_ast.Global, _ast.Nonlocal)):
-                    binds += 2 * (name in node.names)
-                else:
-                    binds += 2 * (getattr(node, "name", None) == name or getattr(node, "rest", None) == name)
-            if binds == 1:
-                ban_def_names[m].add(name)
 
     _MAX_VARIANTS = 20
     _SCOPES = (_ast.FunctionDef, _ast.AsyncFunctionDef, _ast.Lambda)
@@ -2587,40 +2554,33 @@ def _janitor_sql_from_sources(sources: dict, roots) -> dict:
                    if d["for_n"] >= 1 and not d["assigns"] and not d["blocked"]}
         return consts, loop_ok, disabled[0], set(info)
 
-    def _module_consts(tree):
-        """Module-level names a site may read as constants: bound EXACTLY
-        ONCE in the whole module, by an unconditional top-level single-target
-        assignment, and never otherwise bound, declared global/nonlocal,
-        stored-through, deleted or handed to a non-whitelisted method
-        anywhere in the module; a mutable literal (dict/list/set) further
-        needs every load in the module to be a whitelisted read-only
-        receiver — the census _analyze_bindings takes of a function, taken
-        of the module. A `match` statement blocks every name it mentions
-        (its binding forms are not modelled). Recorded with a NEGATIVE
-        lineno and the root scope/context: a module binding exists before
-        any function body the janitor runs, whatever the textual order (a
-        constant defined below its reader is still the value it reads),
-        and before any other module constant that reads it (a module that
-        read one before binding it would never have loaded). Values stay
-        AST nodes and resolve through the same evaluator, so an f-string
-        over other module constants expands, while an env-derived value
-        (`int(os.environ.get(...))`) refuses exactly as before — the
-        evaluator never invents a value the runtime would not use.
-        Motivation (r10): every `text(_X_SQL)` site and the lock-key
-        constant _publish_pair_sitting interpolates were `dynamic` for want
-        of this — synthetic self-test failures on real, static SQL."""
+    def _module_census(tree):
+        """The module-wide binding census that decides both the module
+        constants (_module_consts) and the names a site may call as the one
+        ban definition (`ban_def_names`): one walk, one set of rules. Per
+        name, `assigns` counts the module-level single-target assignments
+        and `blocked` lists the reason of every other binding or use that
+        disqualifies the name; an import is listed as "import", so a caller
+        can allow exactly the one binding it expects. `opaque` names a
+        construct that may rebind ANY module name and so disqualifies every
+        name. `top` holds the values of the top-level single-target
+        assignments; `loads` and `safe_loads` are the load census a mutable
+        constant needs."""
         info: dict = {}
         loads: dict = {}
         safe_loads: set = set()
         top: dict = {}
 
         def _d(name):
-            return info.setdefault(name, {"assigns": 0, "blocked": False})
+            return info.setdefault(name, {"assigns": 0, "blocked": []})
 
-        def _block_leaves(t):
+        def _block(name, why):
+            _d(name)["blocked"].append(why)
+
+        def _block_leaves(t, why):
             for leaf in _ast.walk(t):
                 if isinstance(leaf, _ast.Name):
-                    _d(leaf.id)["blocked"] = True
+                    _block(leaf.id, why)
 
         # Constructs that can rebind a module name without a Name store (c3
         # D, c5 E, c6 E): the census either blocks the exact name (a constant
@@ -2739,14 +2699,14 @@ def _janitor_sql_from_sources(sources: dict, roots) -> dict:
             name holds, and the load census."""
             if isinstance(node, (_ast.Global, _ast.Nonlocal)):
                 for n in node.names:
-                    _d(n)["blocked"] = True
+                    _block(n, "global or nonlocal declaration")
             elif isinstance(node, (_ast.Import, _ast.ImportFrom)):
                 for a in node.names:
                     if a.name == "*":
                         opaque[0] = "import *"   # may rebind ANY module name (c3 D)
-                    _d(a.asname or a.name.split(".")[0])["blocked"] = True
+                    _block(a.asname or a.name.split(".")[0], "import")
             elif isinstance(node, _ast.NamedExpr):
-                _block_leaves(node.target)   # a walrus binds the ENCLOSING scope (a default, a comprehension)
+                _block_leaves(node.target, "walrus")   # a walrus binds the ENCLOSING scope (a default, a comprehension)
             elif isinstance(node, (_ast.Return, _ast.Yield, _ast.YieldFrom)) and _contains(node.value):
                 opaque[0] = "namespace escape"   # handed to a caller the census cannot follow (c6 E)
             elif hasattr(_ast, "Match") and isinstance(node, _ast.Match) and _contains(node.subject):
@@ -2758,15 +2718,22 @@ def _janitor_sql_from_sources(sources: dict, roots) -> dict:
                 # anything else (a variable key, an item of the namespace,
                 # a derived name) the module.
                 if _direct(node.value) and _const_str(node.slice):
-                    _d(node.slice.value)["blocked"] = True
+                    _block(node.slice.value, "namespace store by literal key")
                 else:
                     opaque[0] = "namespace store"
             elif isinstance(node, _ast.Attribute) and isinstance(node.ctx, (_ast.Store, _ast.Del)) \
                     and _through(node.value):
                 if _direct(node.value):
-                    _d(node.attr)["blocked"] = True   # sys.modules[__name__].Q = ... / m.Q = ... (c5 E)
+                    _block(node.attr, "namespace attribute store")   # sys.modules[__name__].Q = ... / m.Q = ... (c5 E)
                 else:
                     opaque[0] = "namespace store"
+            elif isinstance(node, _ast.Attribute) and isinstance(node.ctx, (_ast.Store, _ast.Del)) \
+                    and isinstance(node.value, _ast.Name) and node.value.id in imported:
+                # <x>.Q = ... through a name an import binds (a module, maybe
+                # this one): blocks Q, as setattr(<x>, "Q", ...) below does,
+                # and blocks the receiver like any store through a name.
+                _block(node.attr, "attribute store on an imported name")
+                _block(node.value.id, "store through the name")
             elif isinstance(node, _ast.Call) and isinstance(node.func, _ast.Attribute) \
                     and _through(node.func.value) and not _direct(node):
                 opaque[0] = "namespace method"   # globals().update(...) et al.
@@ -2778,7 +2745,7 @@ def _janitor_sql_from_sources(sources: dict, roots) -> dict:
                         or (isinstance(tgt, _ast.Name) and tgt.id in imported):
                     # setattr(sys.modules[__name__], ...) / setattr(<module>, ...)
                     if _const_str(attr):
-                        _d(attr.value)["blocked"] = True
+                        _block(attr.value, "setattr")
                     else:
                         opaque[0] = "setattr"
             elif isinstance(node, _ast.Call) and not _direct(node) and (
@@ -2790,11 +2757,11 @@ def _janitor_sql_from_sources(sources: dict, roots) -> dict:
                 if node.func.attr in _READONLY_METHODS:
                     safe_loads.add(id(node.func.value))
                 else:
-                    _d(node.func.value.id)["blocked"] = True
+                    _block(node.func.value.id, "method call")
             elif isinstance(node, (_ast.Attribute, _ast.Subscript)) \
                     and isinstance(node.ctx, (_ast.Store, _ast.Del)) \
                     and isinstance(node.value, _ast.Name):
-                _d(node.value.id)["blocked"] = True
+                _block(node.value.id, "store through the name")
             if isinstance(node, _ast.Name) and isinstance(node.ctx, _ast.Load):
                 loads.setdefault(node.id, []).append(node)
                 if node.id in DYNAMIC or node.id == "__builtins__":
@@ -2810,38 +2777,38 @@ def _janitor_sql_from_sources(sources: dict, roots) -> dict:
             is the only way back to the module."""
             if isinstance(node, _SCOPES):
                 if not isinstance(node, _ast.Lambda):
-                    _d(node.name)["blocked"] = True
+                    _block(node.name, "def")
             elif isinstance(node, _ast.ClassDef):
-                _d(node.name)["blocked"] = True
+                _block(node.name, "class")
             elif hasattr(_ast, "Match") and isinstance(node, _ast.Match):
-                _block_leaves(node)
+                _block_leaves(node, "match")
                 for leaf in _ast.walk(node):   # capture patterns bind by NAME STRING (c3 D)
                     if isinstance(leaf, (_ast.MatchAs, _ast.MatchStar)) and leaf.name:
-                        _d(leaf.name)["blocked"] = True
+                        _block(leaf.name, "match capture")
                     elif isinstance(leaf, _ast.MatchMapping) and leaf.rest:
-                        _d(leaf.rest)["blocked"] = True
+                        _block(leaf.rest, "match capture")
             elif _TYPE_ALIAS is not None and isinstance(node, _TYPE_ALIAS):
                 if isinstance(node.name, _ast.Name):
-                    _d(node.name.id)["blocked"] = True
+                    _block(node.name.id, "type alias")
             elif isinstance(node, _ast.ExceptHandler) and node.name:
-                _d(node.name)["blocked"] = True
+                _block(node.name, "except alias")
             elif isinstance(node, _ast.Assign):
                 if len(node.targets) == 1 and isinstance(node.targets[0], _ast.Name):
                     _d(node.targets[0].id)["assigns"] += 1
                 else:
                     for tgt in node.targets:
-                        _block_leaves(tgt)
+                        _block_leaves(tgt, "assignment target")
             elif isinstance(node, (_ast.AugAssign, _ast.AnnAssign)):
-                _block_leaves(node.target)
+                _block_leaves(node.target, "augmented or annotated assignment")
             elif isinstance(node, (_ast.For, _ast.AsyncFor)):
-                _block_leaves(node.target)
+                _block_leaves(node.target, "for target")
             elif isinstance(node, _ast.withitem) and node.optional_vars:
-                _block_leaves(node.optional_vars)
+                _block_leaves(node.optional_vars, "with alias")
             elif isinstance(node, _ast.Delete):
                 for tgt in node.targets:
-                    _block_leaves(tgt)
+                    _block_leaves(tgt, "del")
             elif isinstance(node, _ast.comprehension):
-                _block_leaves(node.target)
+                _block_leaves(node.target, "comprehension target")
 
         # An explicit stack, not recursion: a long elif chain nests one If
         # per branch and a module this size has chains deeper than is safe.
@@ -2854,23 +2821,105 @@ def _janitor_sql_from_sources(sources: dict, roots) -> dict:
             inner = local or isinstance(node, _SCOPES) or isinstance(node, _ast.ClassDef)
             for child in _ast.iter_child_nodes(node):
                 stack.append((child, inner))
-        if opaque[0]:
+        return {"info": info, "opaque": opaque[0], "top": top,
+                "loads": loads, "safe_loads": safe_loads}
+
+    def _module_consts(census):
+        """Module-level names a site may read as constants: bound EXACTLY
+        ONCE in the whole module, by an unconditional top-level single-target
+        assignment, and never otherwise bound, declared global/nonlocal,
+        stored-through, deleted or handed to a non-whitelisted method
+        anywhere in the module; a mutable literal (dict/list/set) further
+        needs every load in the module to be a whitelisted read-only
+        receiver — the census _analyze_bindings takes of a function, taken
+        of the module (_module_census). A `match` statement blocks every
+        name it mentions (its binding forms are not modelled). Recorded
+        with a NEGATIVE lineno and the root scope/context: a module binding
+        exists before
+        any function body the janitor runs, whatever the textual order (a
+        constant defined below its reader is still the value it reads),
+        and before any other module constant that reads it (a module that
+        read one before binding it would never have loaded). Values stay
+        AST nodes and resolve through the same evaluator, so an f-string
+        over other module constants expands, while an env-derived value
+        (`int(os.environ.get(...))`) refuses exactly as before — the
+        evaluator never invents a value the runtime would not use.
+        Motivation (r10): every `text(_X_SQL)` site and the lock-key
+        constant _publish_pair_sitting interpolates were `dynamic` for want
+        of this — synthetic self-test failures on real, static SQL."""
+        if census["opaque"]:
             return {}
         consts = {}
-        for n, values in top.items():
-            d = info.get(n, {"assigns": 0, "blocked": False})
+        for n, values in census["top"].items():
+            d = census["info"].get(n, {"assigns": 0, "blocked": []})
             if len(values) != 1 or d["assigns"] != 1 or d["blocked"]:
                 continue
             value = values[0]
             if isinstance(value, (_ast.Dict, _ast.List, _ast.Set)) and any(
-                    id(x) not in safe_loads for x in loads.get(n, [])):
+                    id(x) not in census["safe_loads"] for x in census["loads"].get(n, [])):
                 continue   # escapes somewhere in the module — may be mutated
             consts[n] = ((), (), value, -1)
         return consts
 
-    mod_consts = {m: _module_consts(tree) for m, tree in trees.items()}
+    mod_census = {m: _module_census(tree) for m, tree in trees.items()}
+    mod_consts = {m: _module_consts(c) for m, c in mod_census.items()}
+
+    # The one ban definition (models.player_ban_active_sql, migration 417).
+    # A candidate is a name a top-level, non-relative
+    # `from models import player_ban_active_sql [as X]` binds. It is decided
+    # by the SAME census as a module constant (_module_census): admitted when
+    # that census is not opaque and lists for the name no assignment and no
+    # block but one "import" (its own). So everything that blocks a constant
+    # refuses it: another import of the name (any scope); at module level a
+    # def, class, except alias, match capture or any name in a `match`, type
+    # alias, a store of any kind (assignment, tuple or starred leaf, any
+    # name in a non-name target, augmented, annotated, for or comprehension
+    # target, with alias, del); in any scope a walrus, a global/nonlocal
+    # declaration, a non-whitelisted method call on the name, an attribute
+    # or item store through it; a literal-key item store into a namespace
+    # (globals(), locals(), vars(), a name bound to one, sys.modules[...],
+    # import_module(...), a __dict__/__globals__/frame globals); an
+    # attribute store naming it on such a namespace or on a name an import
+    # binds; a setattr naming it by a literal on either, or on any item or
+    # call. The opaque forms refuse every candidate of the module: `import
+    # *`; an item store into a namespace whose key is not a literal, or any
+    # store into something reached through one; a setattr of a non-literal
+    # name where a literal one would block; a method call on a namespace or
+    # on something reached through one; a namespace passed to a call,
+    # returned, yielded, matched on or stored into an object; a load of
+    # exec, eval, __import__ or __builtins__, or an imported name's exec,
+    # eval or __import__. Per function, the name is dropped where a constant
+    # is: when that function's census (_analyze_bindings) lists it in
+    # `bound`, or refuses expansion (a class or `match` in the subtree). Not
+    # looked at: a store into this module made from ANOTHER module or from
+    # code outside `sources` (an importer, a monkeypatch), and an attribute
+    # store or setattr on a module object reached any other way than the
+    # above (bound to a second name by assignment, passed as an argument,
+    # kept in a container). `ban_def_refused` records each refusal with the
+    # census's reasons.
+    ban_def_names: dict = {}     # module -> names a site may call as the definition
+    ban_def_refused: dict = {}   # (module, function or None, name) -> reasons
+    for m, tree in trees.items():
+        ban_def_names[m] = set()
+        census = mod_census[m]
+        for node in tree.body:
+            if isinstance(node, _ast.ImportFrom) and node.module == "models" \
+                    and not node.level:
+                for a in node.names:
+                    if a.name != "player_ban_active_sql":
+                        continue
+                    name = a.asname or a.name
+                    why = list(census["info"][name]["blocked"])
+                    why.remove("import")   # its own import: the one binding admitted
+                    why += ["assignment"] * census["info"][name]["assigns"]
+                    if census["opaque"]:
+                        why.insert(0, "opaque: " + census["opaque"])
+                    if why:
+                        ban_def_refused[(m, None, name)] = ", ".join(why)
+                    else:
+                        ban_def_names[m].add(name)
     _module_view = [None]   # the module whose constants a module-constant recursion resolves against (c5 E)
-    _ban_def_view = [frozenset()]   # that module's names for the one ban definition
+    _ban_def_view = [frozenset()]   # the names the site's function may call as the one ban definition
 
     def _string_variants(node, env, consts, site_scope, site_cond, site_line,
                          depth=0):
@@ -3045,8 +3094,19 @@ def _janitor_sql_from_sources(sources: dict, roots) -> dict:
         dynamic (statically unresolvable) call sites [line]."""
         found, dyn = [], []
         _module_view[0] = mod_consts[mod]
-        _ban_def_view[0] = frozenset(ban_def_names[mod])
         consts, loop_ok, expansion_disabled, bound_here = _analyze_bindings(fn_node)
+        # The one ban definition is shadowed here exactly where a module
+        # constant is: a name this subtree binds, blocks or loops over, and
+        # every name when expansion is refused (a class or `match` in it).
+        view = set()
+        for n in ban_def_names[mod]:
+            if not expansion_disabled and n not in bound_here:
+                view.add(n)
+            elif any(isinstance(x, _ast.Name) and x.id == n for x in _ast.walk(fn_node)):
+                ban_def_refused[(mod, fn_node.name, n)] = (
+                    "class or match in the function" if expansion_disabled
+                    else "bound in the function")
+        _ban_def_view[0] = frozenset(view)
         if expansion_disabled:
             consts, loop_ok = {}, set()
         else:
@@ -3279,6 +3339,10 @@ def _janitor_sql_from_sources(sources: dict, roots) -> dict:
         "orm_locks": sorted(orm_locks.values(),
                             key=lambda s: (s["module"], s["line"])),
         "root_counts": root_counts,
+        "ban_def_refused": [
+            {"module": m, "func": f, "name": n, "why": w}
+            for (m, f, n), w in sorted(ban_def_refused.items(),
+                                       key=lambda kv: (kv[0][0], kv[0][1] or "", kv[0][2]))],
     }
 
 
