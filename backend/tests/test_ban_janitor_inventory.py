@@ -16,7 +16,10 @@ show the exact numbers move.
 
 The numbers are exact. Main b2ba4b91 reads 350 statements and 0 dynamic; this
 lane adds ONE janitor statement (the 'ban_ended' read of _pc_snapshot_due),
-so the tip reads 351 and 0. On 88a0a2bf (before fix 1) it read 344 and 6:
+so the lane's own tip reads 351 and 0. Stacked on the casual-streak stack
+(a3fc2562, which reads 360 and 0), the tree reads 361 and 0, as
+main._janitor_sql_inventory() measures it. On 88a0a2bf (before fix 1) it read
+344 and 6:
 _pc_take_snapshot, _pc_trade_janitor_step and four tournaments sites
 (_player_id_banned, _eligible_entrant_ids, _eligible_slot_tallies,
 _queue_availability_notices) were dynamic, the first two through the
@@ -36,7 +39,7 @@ sys.path.insert(0, os.path.normpath(os.path.join(HERE, "..", "api")))
 import main  # noqa: E402
 import models  # noqa: E402
 
-STATEMENTS, DYNAMIC = 351, 0
+STATEMENTS, DYNAMIC = 361, 0
 ROOT = (("main", "root"),)
 DEF = re.compile(r"\((\w+)\.unbanned_at IS NULL AND \(\1\.expires_at IS NULL OR \1\.expires_at > NOW\(\)\)\)")
 # the sites that were dynamic on 88a0a2bf, and the alias each one's definition call names
