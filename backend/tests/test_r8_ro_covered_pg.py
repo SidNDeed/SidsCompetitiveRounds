@@ -23,9 +23,9 @@ REHEARSAL-FOUR-R7-A1 M1, R7-A2).
    claim; each is a QUESTION in the hand-back). Each WRITERS position the
    drivers reach must equal WRITER_OUTCOME: refused (25006), the writer
    proof by the role, or, for the two statements the role cannot refuse,
-   the effect the harness measures: main.py:16869, a transaction-local
+   the effect the harness measures: main.py:17573, a transaction-local
    set_config of lock_timeout, ('continuity', the changed setting) by the
-   round-10 residue reading, and main.py:51898, pg_advisory_xact_lock,
+   round-10 residue reading, and main.py:52653, pg_advisory_xact_lock,
    ('lock', advisory) by the lock read.
 
 4. Transaction continuity (ruling REHEARSAL-R9-A1 (B)): every measured
@@ -431,8 +431,8 @@ LOCK_TARGETS = frozenset(e[1:4] for e in ro_covered.COVERED + ro_covered.WRITERS
 class _Planting:
     """A control's session: at a production site named in
     self.info['plant'] ({(file, line): plant}) the statement the position
-    runs is the planted one, the way the round-8 report changed main.py:16901
-    and :16858 (main.py itself is never changed: the program a position runs
+    runs is the planted one, the way the round-8 report changed main.py:17605
+    and :17562 (main.py itself is never changed: the program a position runs
     is the harness's input). A plant is SQL text (run with no parameters in
     place of the production statement), or a planted PROGRAM: an async
     callable (ex, statement, params) whose statements run at the position,
@@ -466,8 +466,8 @@ def _entry(f, line):
     return next(e for e in ro_covered.COVERED if e[1] == f and e[2] == line)
 
 
-E_16828 = _entry("main.py", 16858)
-E_16871 = _entry("main.py", 16901)
+E_16828 = _entry("main.py", 17562)
+E_16871 = _entry("main.py", 17605)
 FOR_UPDATE = "SELECT clock_timestamp() FROM players LIMIT 1 FOR UPDATE"
 ADVISORY = ("SELECT clock_timestamp() FROM (SELECT pg_catalog.pg_advisory_xact_lock(808))"
             " AS planted")
@@ -494,7 +494,7 @@ LOCK_CONTROLS = (
 # session's continuity bracket. A planted program `_then_own(sql)` runs `sql`
 # and then the position's own production statement, so the program continues
 # exactly as written (the round-9 report's case: COMMIT AND CHAIN at
-# main.py:16858, the drivers then return normally).
+# main.py:17562, the drivers then return normally).
 
 def _then_own(sql):
     async def program(ex, statement, params):
@@ -526,9 +526,9 @@ PREPARED_GID = "rf10_ro_" + os.urandom(4).hex()
 # The round-10 report's exact text (codex-rehearsal-four-r10.out, F4).
 R11_HIDDEN = "SELECT set_config('rf10.hidden','yes',false)"
 R11_HIDDEN_PARTS = {"session set_config rf10.hidden", "placeholder rf10.hidden=yes"}
-E_16886 = _entry("main.py", 16916)
+E_16886 = _entry("main.py", 17620)
 LEASE_GRANT_TARGETS = [e for e in ro_covered.COVERED if e[4] == "_lease_admission_gate"
-                       and e[2] >= 16898]
+                       and e[2] >= 17602]
 
 # Each control: (name, driver, entry, plant, grants or None, want). want is
 # 'continuity' (the run stayed 'ok' and the bracket refused it, with
@@ -589,11 +589,11 @@ CONTINUITY_CONTROLS = (
      _then_own("DECLARE rf10_ro_c CURSOR WITH HOLD FOR SELECT 1"), None,
      ("continuity", {"holdable cursors 0->1"})),
     # a later position on a session an earlier position broke (under grant:
-    # 16901 ends the transaction 16881 locked; 16916 then runs, lock-clean
+    # 17605 ends the transaction 17585 locked; 17620 then runs, lock-clean
     # and with a zero delta, in the replacement transaction)
     ("chain_at_16871_then_16886_under_grant", "main._lease_admission_gate", E_16886,
      _then_own("COMMIT AND CHAIN"), ("UPDATE players",),
-     ("continuity", {"after txn ended at main.py:16901"})),
+     ("continuity", {"after txn ended at main.py:17605"})),
     # the negative control: the same bracket, nothing planted
     ("unplanted_16828_under_role", "main._lease_admission_gate empty", E_16828,
      None, None, ("ok", set())),
@@ -601,7 +601,7 @@ CONTINUITY_CONTROLS = (
     # (the 16.9 probes, RF11 logs r11-res-probe-55432-20261106T065356Z.log and
     # r11-res-probe2-55432-20261106T090205Z.log). The round-10 report's case
     # (ro_covered.py:515): a session-scope custom placeholder at
-    # main.py:16858, both drivers and the replacing route; then one control
+    # main.py:17562, both drivers and the replacing route; then one control
     # per route, each refused by that route alone (R11_EXACT): the text
     # reading (a session set_config of '', and setseed, which no reading of
     # the session moves), the placeholder reading (a transaction-local
@@ -1115,7 +1115,7 @@ def test_continuity_control(runs, name):
 @pytest.mark.parametrize("driver", ["role", "grant", "replaces_role", "replaces_grant"])
 def test_r10_n_ro_covered_488_commit_and_chain_at_16828_refused(runs, driver):
     """The round-9 report's case (ro_covered.py:488): `COMMIT AND CHAIN` at
-    main.py:16858 must not classify as a read; the lock and counter
+    main.py:17562 must not classify as a read; the lock and counter
     measurements must not read the replacement transaction. Executed at the
     control's route (a planted program at the position: COMMIT AND CHAIN,
     then the position's own statement; main.py unchanged), under the
@@ -1151,7 +1151,7 @@ def test_r10_driver_connections_discarded(runs):
 @pytest.mark.parametrize("driver", ["role", "grant", "replaces_role"])
 def test_r11_n_ro_covered_515_hidden_set_config_at_16828_refused(runs, driver):
     """The round-10 report's case (ro_covered.py:515): `SELECT
-    set_config('rf10.hidden','yes',false)` at main.py:16858 must refuse as
+    set_config('rf10.hidden','yes',false)` at main.py:17562 must refuse as
     session residue; pg_settings had no row for such a placeholder on 16.9
     (RF11 log r11-res-probe-55432-20261106T065356Z.log). Executed at the
     control's route (planted program then the position's own statement, and
@@ -1233,7 +1233,7 @@ def _r11_production_records(runs):
 # Ruling FOUR-R11-A6 (3a): every (name, class, scope) the program's own
 # captured texts set, measured on seat-3 (16.15) at ec9ecef6 (RF11 log
 # r11-res-p2-r8-ec9ecef6.log): one name, the SET LOCAL lock_timeout of
-# main._identity_lock_many (main.py 17369-17400 at this tip; NOTES-r11-res.md).
+# main._identity_lock_many (main.py 18073-18104 at this tip; NOTES-r11-res.md).
 R11_SETTING_NAMES = (("lock_timeout", "server", "local"),)
 # (3b): the placeholders those texts set at session scope: frozen at none.
 R11_SESSION_PLACEHOLDERS = ()
@@ -1426,7 +1426,9 @@ def test_census_complete_layer_frozen_whole():
     once as a call; the count is the coarse 365 (363, plus the two coarse forms
     of the round-11 merge, re-frozen once from the seat derivation), plus the
     one coarse form of the B10 merge (B10_MERGE_FROZEN, frozen by hand), plus
-    the complete layer."""
+    the one coarse form of migration 415's change (MAIL_SEND_RECEIPTS_FROZEN,
+    frozen by hand), plus the four coarse forms of migration 416's change
+    (LOBBY_INVITES_FROZEN, frozen by hand), plus the complete layer."""
     import ro_census
     import ro_census_frozen as fz
     import test_r7_ro_role_pg as r7
@@ -1438,12 +1440,23 @@ def test_census_complete_layer_frozen_whole():
     # freeze lists only the files with a coarse form
     assert complete == {k + ro_census.COMPLETE for k in r7.CENSUS_FILES}
     assert coarse <= set(r7.CENSUS_FILES)
-    assert sum(len(fz.FROZEN[k]) for k in coarse) == fz.COARSE_COUNT + fz.B10_MERGE_COUNT == 366
+    assert sum(len(fz.FROZEN[k]) for k in coarse) == (fz.COARSE_COUNT + fz.B10_MERGE_COUNT
+                                                      + fz.MAIL_SEND_RECEIPTS_COUNT
+                                                      + fz.LOBBY_INVITES_COUNT) == 371
     assert fz.COARSE_COUNT == 365
+    # migration 416's change: four hand-frozen coarse kwarg forms in main.py
+    # (the invite cores' explicit password=None on the four request models)
+    assert sum(len(v) for v in fz.LOBBY_INVITES_FROZEN.values()) == fz.LOBBY_INVITES_COUNT == 4
+    assert set(fz.LOBBY_INVITES_FROZEN) <= coarse
+    assert {f[0] for v in fz.LOBBY_INVITES_FROZEN.values() for f in v} == {"kwarg"}
     # the B10 merge: one hand-frozen coarse import form (W30k)
     assert sum(len(v) for v in fz.B10_MERGE_FROZEN.values()) == fz.B10_MERGE_COUNT == 1
     assert set(fz.B10_MERGE_FROZEN) <= coarse
     assert {f[0] for v in fz.B10_MERGE_FROZEN.values() for f in v} == {"import"}
+    # migration 415's change: one hand-frozen coarse import form (models.py's LargeBinary)
+    assert sum(len(v) for v in fz.MAIL_SEND_RECEIPTS_FROZEN.values()) == fz.MAIL_SEND_RECEIPTS_COUNT == 1
+    assert set(fz.MAIL_SEND_RECEIPTS_FROZEN) <= coarse
+    assert {f[0] for v in fz.MAIL_SEND_RECEIPTS_FROZEN.values() for f in v} == {"import"}
     assert sum(len(fz.COMPLETE_FROZEN[k]) for k in complete) == fz.COMPLETE_COUNT == 218
     assert sum(len(fz.R10_FROZEN[k]) for k in complete) == fz.R10_COUNT == 114
     # round 10's merge: the hand-frozen block (W30b), fifteen forms of the gr child's providers
@@ -1462,7 +1475,8 @@ def test_census_complete_layer_frozen_whole():
                                                         + fz.R11_ID_COUNT + fz.R11_OPEN_COUNT)
     assert fz.FROZEN_COUNT == (fz.COARSE_COUNT + fz.COMPLETE_COUNT + fz.R10_COUNT
                                + fz.R10_MERGE_COUNT + fz.R11_ID_COUNT + fz.R11_OPEN_COUNT
-                               + fz.B10_MERGE_COUNT) == 855
+                               + fz.B10_MERGE_COUNT + fz.MAIL_SEND_RECEIPTS_COUNT
+                               + fz.LOBBY_INVITES_COUNT) == 860
     assert not [f for k in complete for f in fz.FROZEN[k] if f[0] == "refuse"]
     assert {f[0] for k in complete for f in fz.R10_FROZEN[k]} <= set(R10_KINDS)
     # the declared forwarding wrapper is bound whole, exactly once
@@ -1475,6 +1489,19 @@ def test_census_complete_layer_frozen_whole():
     for (rel, call) in ro_census.FORWARDING:
         assert list(map(tuple, fz.FROZEN[rel + ro_census.COMPLETE])).count(
             ("call", call)) == 1, (rel, call)
+    # control (migration 415's change): models.py as it stands matches the
+    # freeze; models.py as on main, without its LargeBinary import line,
+    # differs from it by exactly the hand-frozen form, missing
+    models_rel = "api/models.py"
+    with open(os.path.join(HERE, "..", models_rel), encoding="utf-8") as fh:
+        models_src = fh.read()
+    line = "from sqlalchemy import LargeBinary\n"
+    assert models_src.count(line) == 1
+    frozen = {k: fz.FROZEN[k] for k in (models_rel, models_rel + ro_census.COMPLETE) if k in fz.FROZEN}
+    assert ro_census.diff(ro_census.file_forms(models_rel, models_src), frozen) == []
+    old = ro_census.diff(ro_census.file_forms(models_rel, models_src.replace(line, "")), frozen)
+    assert [tuple(r) for r in old if r[0] == models_rel] == [
+        (models_rel, "-", "import", "from sqlalchemy import LargeBinary")], old
 
 
 # ------------------------- REHEARSAL-R9-A1 (C): refuse by default, the census

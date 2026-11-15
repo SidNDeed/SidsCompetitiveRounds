@@ -1999,6 +1999,11 @@ def _reply_route(db, req, core=None):
     seen = {}
 
     async def _core(_db, _me, **kw):
+        # The real core calls the route's resolver after its repeated-key
+        # check; this one has no receipts, so it always calls it.
+        target = kw.pop("resolve_target", None)
+        if target is not None:
+            kw["message_id"] = await target()
         seen.update(kw)
         return {"id": REPLY_ID, "accepted": True}
 
@@ -2053,6 +2058,52 @@ def test_a_reply_with_nothing_to_key_on_is_refused_not_quietly_made_unsafe():
         _route_db([[{"id": MAIL, "subject": "s", "sender_name": "n",
                      "relay_code": CODE_OK}]]), req2)
     assert out["accepted"] is True
+
+
+def _route_mutant(old, new):
+    """mail_reply_from_discord recompiled from mail_discord.py's source with
+    `old` replaced by `new` (decorators dropped, nothing registered), in a
+    copy of the module's namespace."""
+    node = copy.deepcopy(_func(MODULE_SRC, "mail_reply_from_discord"))
+    node.decorator_list = []
+    src = ast.unparse(node)
+    assert src.count(old) == 1, (old, src.count(old))
+    ns = dict(vars(mail_discord))
+    exec(compile(src.replace(old, new), "<mutant of mail_reply_from_discord>", "exec"), ns)
+    return ns["mail_reply_from_discord"]
+
+
+def test_a_replayed_reply_reads_nothing_about_its_thread_first(monkeypatch):
+    """The route checks only the request before the core runs (a code and
+    something to key on) and hands the code's lookup to the core as a
+    resolver, which the core calls after its repeated-key check. A core
+    that answers from the reply's receipt never calls it, so a retry of a
+    reply that was sent is answered even when its code no longer resolves
+    because the player has deleted their copy of the thread since.
+
+    MUTATION: the route resolves the code itself and passes the id. Must
+    fail."""
+    async def _replay(_db, _me, **kw):
+        return {"id": REPLY_ID, "accepted": True}
+
+    def run():
+        # the player; then, for a lookup, no thread (the copy is deleted)
+        # and the code's gone-check row; the read-back of what the reply
+        # answered takes whatever comes next
+        db = _FakeDb([[PLAYER_ROW], [], [{"gone": 1}]])
+        req = mail_discord._ReplyFromDiscord(
+            discord_id="d1", relay_code=CODE_OK, body="yes", source_message_id="77")
+        try:
+            out, _seen = _reply_route(db, req, core=_replay)
+        except HTTPException as ex:
+            out = (ex.status_code, ex.detail)
+        return out, [s for s in db.sql if "relay_code = :c" in s]
+    out, lookups = run()
+    assert out["accepted"] is True and out["id"] == REPLY_ID and lookups == []
+    monkeypatch.setattr(mail_discord, "mail_reply_from_discord", _route_mutant(
+        "resolve_target=_target", "message_id=await _target()"))
+    out, lookups = run()
+    assert out == (404, "not_found") and len(lookups) == 2
 
 
 def test_a_reply_that_names_no_thread_is_refused_rather_than_routed():
@@ -2150,6 +2201,27 @@ def test_the_thread_the_confirmation_names_is_escaped_for_discord():
     assert "**" not in info["subject"], info["subject"]
     # The code comes back so the confirmation can carry its own marker.
     assert info["relay_code"] == CODE_OK
+
+
+def test_the_read_back_is_handed_every_name_its_statement_binds():
+    """The read-back runs inside a try that answers known=False on any
+    failure, so a bind the route forgot would never surface as an error.
+    Migration 415's change gave the statement the replier's own id and the
+    retention clock (test_mail_receipts_pg runs it on PostgreSQL): the route
+    hands it exactly the names it binds, with the replier's id and main's
+    MAIL_RETENTION_DAYS."""
+    req = mail_discord._ReplyFromDiscord(
+        discord_id="d1", relay_code=CODE_OK, body="yes", source_message_id="77")
+    db = _route_db([[{"id": MAIL, "subject": "s", "sender_name": "Bob", "relay_code": CODE_OK}]])
+    out, _seen = _reply_route(db, req)
+    assert out["replied_to"]["known"] is True
+    i = db.sql.index(mail_discord._REPLIED_TO_SQL)
+    names = set(_sql_re.findall(r"(?<!:):([a-z_]+)", mail_discord._REPLIED_TO_SQL))
+    assert set(db.params[i]) == names == {"rid", "sid", "pid", "ret_days"}, db.params[i]
+    assert (db.params[i]["rid"], db.params[i]["pid"], db.params[i]["ret_days"]) == (
+        REPLY_ID, str(PLAYER_ROW["id"]), main.MAIL_RETENTION_DAYS)
+    # negative control: the previous build's two binds leave the new names unbound
+    assert names - {"rid", "sid"} == {"pid", "ret_days"}
 
 
 def test_the_confirmation_does_not_invent_a_thread_it_could_not_read():
@@ -3215,6 +3287,13 @@ def test_a_reply_to_a_thread_whose_mail_is_gone_is_told_it_was_deleted(monkeypat
     sa_dsn = "postgresql+asyncpg://" + DSN.split("://", 1)[1]
 
     async def _core(_db, _me, **kw):
+        # A key with no receipt: the real core resolves the target next.
+        await kw["resolve_target"]()
+        return {"id": REPLY_ID, "accepted": True}
+
+    async def _core_resolving_nothing(_db, _me, **kw):
+        # This test's core before migration 415's change, written for a
+        # route that resolved the code before the core ran: the control.
         return {"id": REPLY_ID, "accepted": True}
 
     async def run():
@@ -3264,6 +3343,14 @@ def test_a_reply_to_a_thread_whose_mail_is_gone_is_told_it_was_deleted(monkeypat
             seen["purged"] = await reply("d1", code)
             seen["purged, not theirs"] = await reply("d2", code)
             seen["never minted"] = await reply("d1", _code())
+            # Negative control: a core that never awaits resolve_target is
+            # answered "accepted" for the purged thread and for a code never
+            # minted -- each 404 above is the route's own resolution of the
+            # code, which since migration 415's change runs only inside the
+            # core, after its receipt check.
+            mail_discord._BOUND["reply_core"] = _core_resolving_nothing
+            seen["control: purged"] = await reply("d1", code)
+            seen["control: never minted"] = await reply("d1", _code())
             return seen, tomb
         finally:
             mail_discord._BOUND["reply_core"] = prev
@@ -3283,6 +3370,8 @@ def test_a_reply_to_a_thread_whose_mail_is_gone_is_told_it_was_deleted(monkeypat
         "purged": "404 not_found",
         "purged, not theirs": "404 unknown_code",
         "never minted": "404 unknown_code",
+        "control: purged": "accepted",
+        "control: never minted": "accepted",
     }, seen
 
 
@@ -3291,8 +3380,8 @@ def test_a_reply_to_a_thread_whose_mail_is_gone_is_told_it_was_deleted(monkeypat
 # main._MAIL_FANOUT_SQL runs here for real, because its FOR KEY SHARE OF p is
 # the lock the relay-off gate waits on. To plan, it needs players' mail_from
 # and deleted_at, the block table and the four "played together" sources;
-# empty stubs suffice, since every recipient here is 'delivered' through the
-# ELSE branch. steam_sessions (and mod_seen_at) let the in-game settings
+# empty stubs suffice, since every recipient here is passed forced = false
+# (migration 415's flag) and is 'delivered' through the ELSE branch. steam_sessions (and mod_seen_at) let the in-game settings
 # route resolve its caller as it does in production.
 _RACE_TABLES = ("mail_blocks", "matches", "team_matches", "ffa_match_players",
                 "ovt_matches", "steam_sessions")
@@ -3340,8 +3429,8 @@ async def _send_until_commit(conn):
     await conn.execute(
         "INSERT INTO mail_messages (id, sender_id, subject, body)"
         " VALUES ($1, $2, 'raced', 'raced body')", RACED_MAIL, SENDER_PID)
-    await conn.execute(_pg(main._MAIL_FANOUT_SQL, "mid", "sid", "rids", "kinds"),
-                       RACED_MAIL, SENDER_PID, [RACED_PID], ["to"])
+    await conn.execute(_pg(main._MAIL_FANOUT_SQL, "mid", "sid", "rids", "kinds", "forced"),
+                       RACED_MAIL, SENDER_PID, [RACED_PID], ["to"], [False])
     tag = await conn.execute(_asyncpg_sql(), "the raced DM", RACED_MAIL, _code(),
                              SENDER_SID)
     return tr, tag

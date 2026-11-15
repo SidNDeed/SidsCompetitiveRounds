@@ -351,7 +351,9 @@ def test_lobby_gates_and_settings_write():
     assert settings.count("settings_version = settings_version + 1") == 1
     assert settings.count('"rules_unsupported"') == 1
     assert settings.count('"rules_need_update"') == 1
-    join = _src("_lobby_join_impl")
+    # The join's gates live in its core; the route's function runs that core.
+    assert _src("_lobby_join_impl").count("await _lobby_join_core(") == 1
+    join = _src("_lobby_join_core")
     assert join.count('"rules_unsupported"') == 1
     state = _src("_lobby_state_impl")
     assert state.count("LEAST(CAST(:seen AS INTEGER), CAST(:cur AS INTEGER))") == 1

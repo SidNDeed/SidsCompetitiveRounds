@@ -40,6 +40,7 @@ SCR_MIGRATION_TEST_PG_OPTOUT=1 and the failures become named skips.
 """
 import asyncio
 import datetime as _dt
+import hashlib
 import os
 import re
 import sys
@@ -265,6 +266,45 @@ def _410_prereq():
         """ % rows))
 
 
+def _mail_tables_prereq():
+    """415's prerequisites: `players`, and mail_messages and mail_recipients
+    exactly as 297 creates them (their CREATE TABLE statements read out of
+    that file, not retyped) with 300's recipient_count, and three messages:
+    a direct one and two broadcasts with their counts (the second with two
+    delivered envelopes and one suppressed; 415 refuses a broadcast without
+    a count). The second run is measured beside the receipts the first
+    run's backfill wrote, and beside the dropped foreign key."""
+    p = "00000000-0000-0000-0000-000000000%s"
+    out = ["CREATE TABLE players (id UUID PRIMARY KEY);",
+           "INSERT INTO players (id) VALUES ('%s'), ('%s'), ('%s'), ('%s');"
+           % (p % "4a1", p % "4b2", p % "4c3", p % "4d4")]
+    text = (SQL_DIR / "297_mail.sql").read_text(encoding="utf-8")
+    for table in ("mail_messages", "mail_recipients"):
+        found = re.search(r"CREATE TABLE IF NOT EXISTS %s \(.*?\n\);" % table, text, re.S)
+        assert found, ("297_mail.sql", table)
+        out.append(found.group(0))
+    column = "ALTER TABLE mail_messages ADD COLUMN IF NOT EXISTS recipient_count INTEGER NULL;"
+    assert column in (SQL_DIR / "300_mail_inbox_rev.sql").read_text(encoding="utf-8")
+    out.append(column)
+    out.append(
+        "INSERT INTO mail_messages (id, sender_id, kind, thread_id, subject, body, idempotency_key, "
+        "created_at, recipient_count) VALUES "
+        "('%s', '%s', 'direct', '%s', 's', 'b', '%s', TIMESTAMPTZ '2026-11-01 10:00+00', NULL), "
+        "('%s', '%s', 'system_broadcast', '%s', 's', 'b', '%s', TIMESTAMPTZ '2026-11-02 10:00+00', 3), "
+        "('%s', '%s', 'system_broadcast', '%s', 's', 'b', '%s', TIMESTAMPTZ '2026-11-03 10:00+00', 2);"
+        % (p % "4e1", p % "4a1", p % "4e1", p % "4f1",
+           p % "4e2", p % "4a1", p % "4e2", p % "4f2",
+           p % "4e3", p % "4a1", p % "4e3", p % "4f3"))
+    out.append(
+        "INSERT INTO mail_recipients (message_id, recipient_id, kind, delivery) VALUES "
+        "('%s', '%s', 'to', 'delivered'), "
+        "('%s', '%s', 'to', 'delivered'), ('%s', '%s', 'to', 'delivered'), "
+        "('%s', '%s', 'to', 'suppressed');"
+        % (p % "4e1", p % "4b2",
+           p % "4e3", p % "4b2", p % "4e3", p % "4c3", p % "4e3", p % "4d4"))
+    return "\n".join(out)
+
+
 PREREQ = {
     "331": """
         CREATE TABLE players (
@@ -410,6 +450,14 @@ PREREQ = {
     "401": _contrib_tables_prereq(),
     # 410 syncs the 1.41.0 keys into the i18n tables (_410_prereq).
     "410": _410_prereq(),
+    # 415 creates mail_send_receipts and its index, the trigger on
+    # mail_messages and its function, backfills the receipts and drops 297's
+    # foreign key on in_reply_to (_mail_tables_prereq).
+    "415": _mail_tables_prereq(),
+    # 416 creates lobby_invites and invite_receipts with their indexes, and
+    # replaces 297's check on mail_messages.kind (_mail_tables_prereq: the
+    # check as 297 declares it, over a direct message and two broadcasts).
+    "416": _mail_tables_prereq(),
 }
 
 # The tables whose CONTENT this file is responsible for. Fingerprinted
@@ -432,6 +480,8 @@ TABLES = {
     "399": ("shop_items",),
     "401": ("card_contrib", "combat_contrib"),
     "410": ("i18n_keys", "i18n_entries", "i18n_proposals", "i18n_review_events"),
+    "415": ("mail_send_receipts", "mail_messages"),
+    "416": ("lobby_invites", "invite_receipts", "mail_messages"),
 }
 
 MIGRATION_FILES = {
@@ -450,6 +500,8 @@ MIGRATION_FILES = {
     "399": "399_shop_face_descriptions.sql",
     "401": "401_contrib_match_provenance.sql",
     "410": _F410,
+    "415": "415_mail_send_receipts.sql",
+    "416": "416_lobby_invites.sql",
 }
 
 
@@ -615,7 +667,7 @@ async def _apply_twice(number, *, between=None, prereq_extra="", cleanup=None):
 # ── The bar: a second run changes nothing ───────────────────────────────────
 
 @pytest.mark.parametrize("number", ["331", "332", "333", "336", "337", "365", "366", "377", "391", "396",
-                                    "397", "398", "399", "401"])
+                                    "397", "398", "399", "401", "415", "416"])
 def test_a_second_run_writes_no_row(number):
     """Applied twice, back to back, on the state the first run left."""
     applied = _run(_apply_twice(number))
@@ -628,7 +680,7 @@ def test_a_second_run_writes_no_row(number):
 
 
 @pytest.mark.parametrize("number", ["331", "332", "333", "336", "337", "365", "366", "377", "391", "396",
-                                    "397", "398", "399", "401"])
+                                    "397", "398", "399", "401", "415", "416"])
 def test_a_second_run_leaves_every_row_byte_identical(number):
     """The value half of the bar, stated separately so a failure says which
     of the two properties broke."""
@@ -642,7 +694,7 @@ def test_a_second_run_leaves_every_row_byte_identical(number):
 
 
 @pytest.mark.parametrize("number", ["331", "332", "333", "336", "337", "365", "366", "377", "391", "396",
-                                    "397", "398", "399", "401", "410"])
+                                    "397", "398", "399", "401", "410", "415", "416"])
 def test_a_second_run_replaces_no_constraint_or_index(number):
     """OIDs, not definitions. A dropped-and-recreated constraint has the same
     definition, a new OID, and cost an ACCESS EXCLUSIVE lock plus a validating
@@ -662,7 +714,7 @@ def test_a_second_run_replaces_no_constraint_or_index(number):
 
 
 @pytest.mark.parametrize("number", ["331", "332", "333", "336", "337", "365", "366", "377", "391", "396",
-                                    "397", "398", "399", "401", "410"])
+                                    "397", "398", "399", "401", "410", "415", "416"])
 def test_a_second_run_removes_no_relation_from_the_database(number):
     """THE THIRD MEASUREMENT, AND THE ONE THE OTHER TWO CANNOT MAKE.
 
@@ -685,6 +737,325 @@ def test_a_second_run_removes_no_relation_from_the_database(number):
         "migration %s removed %s from the database on its second run. A "
         "re-run may not delete a relation it did not create."
         % (number, gone))
+
+
+# Each one a second-run defect that one of the four measurements above exists
+# to see, appended after 415's COMMIT. 415's trigger fires on an INSERT and on
+# an UPDATE OF recipient_count only, so none of them reaches it.
+_PLANTS_415 = (
+    (test_a_second_run_writes_no_row, "rewrote",
+     "UPDATE mail_messages SET subject = subject;"),
+    (test_a_second_run_leaves_every_row_byte_identical, "changed the contents of",
+     "UPDATE mail_messages SET subject = subject || '.';"),
+    (test_a_second_run_replaces_no_constraint_or_index, "dropped and recreated",
+     "DROP INDEX IF EXISTS planted_idx; CREATE INDEX planted_idx ON mail_messages (subject);"),
+    (test_a_second_run_removes_no_relation_from_the_database, "from the database on its second run",
+     "DO $$ BEGIN IF to_regclass('planted_probe') IS NULL THEN CREATE TABLE planted_probe (x int);"
+     " ELSE DROP TABLE planted_probe; END IF; END $$;"),
+)
+
+
+def test_415s_four_rerun_cases_fail_a_planted_second_run_defect(monkeypatch):
+    """The negative control of the four measurements' 415 cases, which joined
+    their parametrize lists with migration 415's change: each fails on a copy
+    of 415 that carries the one defect it measures, while 415 itself passes
+    all four (the parametrized runs above)."""
+    real = migration_text
+    for test, message, plant in _PLANTS_415:
+        monkeypatch.setitem(globals(), "migration_text",
+                            lambda number, plant=plant: real(number) + "\n" + plant + "\n")
+        with pytest.raises(AssertionError, match=message):
+            test("415")
+
+
+# 416 owns mail_messages too (it replaces the kind check), so the same four
+# plants, each acting on mail_messages, carry one defect apiece for 416's
+# cases. Its prerequisite has no 415 trigger, so none fires on them.
+_PLANTS_416 = _PLANTS_415
+
+
+def test_416s_four_rerun_cases_fail_a_planted_second_run_defect(monkeypatch):
+    """The negative control of the four measurements' 416 cases, which joined
+    their parametrize lists with the lobby invites change: each fails on a
+    copy of 416 that carries the one defect it measures, while 416 itself
+    passes all four (the parametrized runs above)."""
+    real = migration_text
+    for test, message, plant in _PLANTS_416:
+        monkeypatch.setitem(globals(), "migration_text",
+                            lambda number, plant=plant: real(number) + "\n" + plant + "\n")
+        with pytest.raises(AssertionError, match=message):
+            test("416")
+
+
+# 416 creates lobby_invites and invite_receipts and marks both, or finds both
+# marked, or refuses with nothing changed (its CREATE OR REFUSE section). The
+# mark is a table comment holding the SHA-256 of the statements between the
+# file's DDL START and DDL END lines, comment and blank lines dropped and
+# each line trimmed.
+_416_MARK = re.compile(r"'lobby invites, DDL sha256 ([0-9a-f]{64})'")
+
+
+def _416_ddl_lines(text):
+    """The lines strictly between 416's DDL START and DDL END lines."""
+    lines = text.replace("\r\n", "\n").split("\n")
+    starts = [i for i, s in enumerate(lines) if s.strip() == "-- DDL START"]
+    ends = [i for i, s in enumerate(lines) if s.strip() == "-- DDL END"]
+    assert len(starts) == 1 and len(ends) == 1 and starts[0] < ends[0], (starts, ends)
+    return lines[starts[0] + 1:ends[0]]
+
+
+def _416_ddl_digest(text):
+    """The SHA-256 416's mark must hold, recomputed from a text of the file."""
+    keep = [s.strip() for s in _416_ddl_lines(text)]
+    body = "\n".join(s for s in keep if s and not s.startswith("--"))
+    return hashlib.sha256(body.encode("utf-8")).hexdigest()
+
+
+def _416_mark_defects(text):
+    """What is wrong with a text's mark: [] when the text holds exactly one
+    mark and that mark is the digest of its own DDL block."""
+    marks = _416_MARK.findall(text)
+    if len(marks) != 1:
+        return ["%d marks, not 1" % len(marks)]
+    want = _416_ddl_digest(text)
+    return [] if marks[0] == want else ["the mark is %s, the DDL's digest is %s" % (marks[0], want)]
+
+
+def test_416s_mark_is_the_digest_of_its_own_ddl():
+    """416's mark is recomputed from its own text, so the statements that
+    create the two tables cannot change without it, and tables an older text
+    made are refused. The negative control: a copy with one DDL token changed
+    (a column type, an index's columns, a check's values, a NOT NULL) fails,
+    each still holding the old mark; a comment line or an indent inside the
+    block does not. The block holds no migration number, so the renumbering
+    leaves the mark as it is: 405 became 416 with the same mark."""
+    real = migration_text("416")
+    assert _416_mark_defects(real) == []
+    mutants = {
+        "a column type": ("      route              TEXT        NOT NULL,",
+                          "      route              VARCHAR     NOT NULL,"),
+        "an index's columns": ("ON lobby_invites (expires_at);", "ON lobby_invites (expires_at, id);"),
+        "a check's values": ("CHECK (mode IN ('team', 'ovt', 'ffa'))", "CHECK (mode IN ('team', 'ovt'))"),
+        "a NOT NULL": ("      lobby_id           UUID        NOT NULL,",
+                       "      lobby_id           UUID        NULL,"),
+    }
+    for name, (old, new) in mutants.items():
+        assert real.count(old) == 1, name
+        assert _416_mark_defects(real.replace(old, new)), "%s left the mark matching" % name
+    inert = real.replace("    -- DDL END", "    -- a comment line inside the block\n    -- DDL END")
+    inert = inert.replace("    CREATE INDEX ix_lobby_invites_expires", "        CREATE INDEX ix_lobby_invites_expires")
+    assert inert != real and _416_mark_defects(inert) == []
+    number = MIGRATION_FILES["416"].split("_")[0]
+    assert number not in "\n".join(_416_ddl_lines(real))
+
+
+# The schema's state a refused run must leave as it found it: every relation
+# with its kind and comment, and every constraint with its definition
+# (mail_messages' kind check among them). The schema is named ($1), so a
+# state that changes search_path is still read.
+_416_STATE = (
+    "SELECT string_agg(x, '; ' ORDER BY x) FROM ("
+    " SELECT format('%s %s %s', c.relname, c.relkind, coalesce(obj_description(c.oid, 'pg_class'), '-')) AS x"
+    "   FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace"
+    "  WHERE n.nspname = $1"
+    " UNION ALL"
+    " SELECT format('%s.%s %s', t.relname, k.conname, pg_get_constraintdef(k.oid))"
+    "   FROM pg_constraint k JOIN pg_class t ON t.oid = k.conrelid"
+    "   JOIN pg_namespace n ON n.oid = t.relnamespace"
+    "  WHERE n.nspname = $1) s")
+
+
+async def _416_over(setup, probes, sql=None):
+    """416 applied once (or `sql`, a text standing in for it) in a fresh
+    schema holding its prerequisite and then `setup` (SQL, which may itself
+    apply 416): (the run's error or None, whether the schema's state read the
+    same after the run as before it, each probe's value). The schema is
+    dropped whatever happened."""
+    schema = "m416c_%s" % uuid.uuid4().hex[:10]
+    conn = await asyncpg.connect(DSN)
+    try:
+        await conn.execute('CREATE SCHEMA "%s"' % schema)
+        await conn.execute('SET search_path TO "%s"' % schema)
+        await conn.execute(PREREQ["416"])
+        if setup:
+            await conn.execute(setup)
+        before = await conn.fetchval(_416_STATE, schema)
+        try:
+            await conn.execute(migration_text("416") if sql is None else sql)
+            verdict = None
+        except Exception as ex:
+            verdict = "%s: %s" % (type(ex).__name__, ex)
+            await conn.execute("ROLLBACK")        # the file's own BEGIN, aborted
+        after = await conn.fetchval(_416_STATE, schema)
+        return verdict, before == after, tuple([await conn.fetchval(p) for p in probes])
+    finally:
+        try:
+            await conn.execute("ROLLBACK")
+        except Exception:
+            pass
+        try:
+            await conn.execute('DROP SCHEMA IF EXISTS "%s" CASCADE' % schema)
+        finally:
+            await conn.close()
+
+
+_416_MARKS = ("SELECT string_agg(c.relname || ' ' || coalesce(obj_description(c.oid, 'pg_class'), '-'), '; '"
+              " ORDER BY c.relname) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace"
+              " WHERE n.nspname = current_schema() AND c.relname IN ('lobby_invites', 'invite_receipts')")
+_416_INDEXES = ("SELECT string_agg(ci.relname, ', ' ORDER BY ci.relname) FROM pg_index i"
+                " JOIN pg_class ci ON ci.oid = i.indexrelid"
+                " WHERE i.indrelid IN (to_regclass(format('%I.lobby_invites', current_schema())),"
+                "                      to_regclass(format('%I.invite_receipts', current_schema())))")
+
+
+def test_416_creates_and_marks_both_tables_and_a_second_run_finds_them_its_own():
+    """A fresh apply creates both tables with all eight indexes and marks each
+    with the file's mark. A second apply over that finds both marked: it
+    succeeds and leaves the schema's state exactly as it found it. What a
+    second run writes, replaces and locks is measured by the rerun cases and
+    the lock cases above, 416 among them."""
+    mark = "lobby invites, DDL sha256 %s" % _416_MARK.findall(migration_text("416"))[0]
+    marks = "invite_receipts %s; lobby_invites %s" % (mark, mark)
+    indexes = ("invite_receipts_pkey, ix_invite_receipts_invite, ix_lobby_invites_expires, "
+               "ix_lobby_invites_invitee_pending, ix_lobby_invites_lobby, ix_lobby_invites_sender_created, "
+               "lobby_invites_pkey, uq_lobby_invites_pending")
+    verdict, same, got = _run(_416_over("", (_416_MARKS, _416_INDEXES)))
+    assert verdict is None and not same and got == (marks, indexes), (verdict, same, got)
+    verdict, same, got = _run(_416_over(migration_text("416"), (_416_MARKS, _416_INDEXES)))
+    assert verdict is None and same and got == (marks, indexes), (verdict, same, got)
+
+
+# The session's temporary invite_receipts: its indexes, then its comment, '-'
+# for none of either; NULL when there is no such table.
+_416_TEMP = ("SELECT coalesce((SELECT string_agg(ci.relname, ', ' ORDER BY ci.relname) FROM pg_index i"
+             "                  JOIN pg_class ci ON ci.oid = i.indexrelid WHERE i.indrelid = c.oid), '-')"
+             "       || ' / ' || coalesce(obj_description(c.oid, 'pg_class'), '-')"
+             "  FROM pg_class c WHERE c.relnamespace = pg_my_temp_schema() AND c.relname = 'invite_receipts'")
+_416_PATH_BLOCK = re.compile(r"^DO \$m416path\$\n.*?^END \$m416path\$;\n", re.S | re.M)
+
+
+def test_416_creates_its_tables_past_a_temporary_table_of_the_same_name():
+    """A temporary invite_receipts in the applying session takes neither the
+    create path's index nor its mark: for its transaction 416 puts the
+    session's temporary schema last in search_path, so every unqualified
+    name after CREATE TABLE reaches the table just created. Negative
+    control: the file without that block indexes and marks the temporary
+    table, and the schema's invite_receipts has neither."""
+    temp = "CREATE TEMP TABLE invite_receipts (invite_id UUID);\n"
+    mark = _416_real_mark()
+    probes = (_416_MARKS, _416_INDEXES, _416_TEMP)
+    indexes = ("invite_receipts_pkey, ix_invite_receipts_invite, ix_lobby_invites_expires, "
+               "ix_lobby_invites_invitee_pending, ix_lobby_invites_lobby, ix_lobby_invites_sender_created, "
+               "lobby_invites_pkey, uq_lobby_invites_pending")
+    verdict, _, got = _run(_416_over(temp, probes))
+    assert verdict is None and got == ("invite_receipts %s; lobby_invites %s" % (mark, mark), indexes,
+                                       "- / -"), (verdict, got)
+    bare, n = _416_PATH_BLOCK.subn("", migration_text("416"))
+    assert n == 1, "416's search-path block was not found"
+    verdict, _, got = _run(_416_over(temp, probes, sql=bare))
+    assert verdict is None and got == ("invite_receipts -; lobby_invites %s" % mark,
+                                       indexes.replace("ix_invite_receipts_invite, ", ""),
+                                       "ix_invite_receipts_invite / %s" % mark), (
+        "the file without its search-path block did not reach the temporary table", verdict, got)
+
+
+_R416_PATH_BLOCK = re.compile(r"^DO \$r416path\$\n.*?^END \$r416path\$;\n", re.S | re.M)
+# The two tables standing in the schema, and in the session's temporary schema.
+_416_HERE = ("SELECT string_agg(c.relname, ', ' ORDER BY c.relname) FROM pg_class c"
+             " JOIN pg_namespace n ON n.oid = c.relnamespace"
+             " WHERE n.nspname = current_schema() AND c.relname IN ('lobby_invites', 'invite_receipts')")
+_416_TEMP_HERE = ("SELECT string_agg(c.relname, ', ' ORDER BY c.relname) FROM pg_class c"
+                  " WHERE c.relnamespace = pg_my_temp_schema()"
+                  "   AND c.relname IN ('lobby_invites', 'invite_receipts')")
+
+
+def test_416s_rollback_drops_its_tables_past_a_temporary_table_of_the_same_name():
+    """With a temporary lobby_invites in the session, 416's rollback still
+    drops the schema's two tables and leaves the temporary one alone: it puts
+    the session's temporary schema last in search_path for its transaction,
+    as 416 does, and refuses a search_path that names pg_temp, changing
+    nothing. Negative control: the rollback without that block drops the
+    temporary table and commits with the schema's lobby_invites standing."""
+    rollback = (SQL_DIR / "rollback_416_lobby_invites.sql").read_text(encoding="utf-8")
+    setup = migration_text("416") + "\nCREATE TEMP TABLE lobby_invites (id UUID);\n"
+    probes = (_416_HERE, _416_TEMP_HERE)
+    verdict, _, got = _run(_416_over(setup, probes, sql=rollback))
+    assert verdict is None and got == (None, "lobby_invites"), (verdict, got)
+    bare, n = _R416_PATH_BLOCK.subn("", rollback)
+    assert n == 1, "the rollback's search-path block was not found"
+    verdict, _, got = _run(_416_over(setup, probes, sql=bare))
+    assert verdict is None and got == ("lobby_invites", None), (
+        "the rollback without its search-path block dropped the schema's lobby_invites", verdict, got)
+    named = migration_text("416") + (
+        "\nSELECT set_config('search_path', current_setting('search_path') || ', pg_temp', false);\n")
+    verdict, same, got = _run(_416_over(named, (_416_HERE,), sql=rollback))
+    assert verdict is not None and "rollback 416: search_path names pg_temp" in verdict, verdict
+    assert same and got == ("invite_receipts, lobby_invites",), ("the refused rollback changed the schema", got)
+
+
+def _416_real_mark():
+    return "lobby invites, DDL sha256 %s" % _416_MARK.findall(migration_text("416"))[0]
+
+
+_416_NOT_BOTH = "416: lobby_invites and invite_receipts are neither both absent nor both marked by this file"
+_416_TAKEN = "416: a name this file creates already stands in schema"
+_416_PATH_TEMP = "416: search_path names pg_temp"
+_416_NO_SCHEMA = "416: search_path names no schema to create in"
+# Each state 416 refuses: (the state, made before the run; the refusal's own
+# text; what that text must name as found).
+_416_REFUSALS = {
+    "one table without the other": (
+        lambda: migration_text("416") + "\nDROP TABLE invite_receipts;\n",
+        _416_NOT_BOTH, "(found: invite_receipts absent, lobby_invites marked)"),
+    "a table without its mark": (
+        lambda: migration_text("416") + "\nCOMMENT ON TABLE lobby_invites IS NULL;\n",
+        _416_NOT_BOTH, "(found: invite_receipts marked, lobby_invites unmarked)"),
+    "a table with another mark": (
+        lambda: migration_text("416") + "\nCOMMENT ON TABLE invite_receipts IS 'lobby invites, DDL sha256 %s';\n"
+        % ("0" * 64),
+        _416_NOT_BOTH, "(found: invite_receipts unmarked, lobby_invites marked)"),
+    "two tables this file did not make": (
+        lambda: "CREATE TABLE lobby_invites (id UUID PRIMARY KEY);\nCREATE TABLE invite_receipts (id UUID);\n",
+        _416_NOT_BOTH, "(found: invite_receipts unmarked, lobby_invites unmarked)"),
+    "a marked name that is not a table": (
+        lambda: "CREATE VIEW lobby_invites AS SELECT 1 AS id;\n"
+                "COMMENT ON VIEW lobby_invites IS '%s';\n"
+                "CREATE TABLE invite_receipts (id UUID);\n"
+                "COMMENT ON TABLE invite_receipts IS '%s';\n" % (_416_real_mark(), _416_real_mark()),
+        _416_NOT_BOTH, "(found: invite_receipts marked, lobby_invites not a table)"),
+    "an index name on another table": (
+        lambda: "CREATE TABLE planted (x int);\nCREATE INDEX ix_lobby_invites_expires ON planted (x);\n",
+        _416_TAKEN, "(found: ix_lobby_invites_expires)"),
+    # A row (composite) type has a pg_class row (relkind 'c'), so 416 finds
+    # a relation of that name and refuses it in its second branch, as not a
+    # table. An enum has a pg_type row and no pg_class row, so only the taken
+    # check's pg_type half finds it.
+    "a row type's name": (
+        lambda: "CREATE TYPE invite_receipts AS (x int);\n",
+        _416_NOT_BOTH, "(found: invite_receipts not a table, lobby_invites absent)"),
+    "an enum type's name": (
+        lambda: "CREATE TYPE invite_receipts AS ENUM ('x');\n",
+        _416_TAKEN, "(found: invite_receipts)"),
+    "a search path naming pg_temp": (
+        lambda: "SELECT set_config('search_path', current_setting('search_path') || ', pg_temp', false);\n",
+        _416_PATH_TEMP, ", pg_temp)"),
+    "a search path naming no schema": (
+        lambda: "SET search_path TO m416_no_such_schema;\n",
+        _416_NO_SCHEMA, "(found: m416_no_such_schema)"),
+}
+
+
+@pytest.mark.parametrize("state", sorted(_416_REFUSALS))
+def test_416_refuses_every_state_but_absent_or_its_own_with_nothing_changed(state):
+    """416 refuses each state that is neither both tables absent nor both its
+    own marked tables, with its own text naming what it found, and the
+    refused run changes nothing: the schema's relations, comments and
+    constraints (mail_messages' kind check among them) read the same after it
+    as before it."""
+    setup, refusal, found = _416_REFUSALS[state]
+    verdict, same, _ = _run(_416_over(setup(), ()))
+    assert verdict is not None and refusal in verdict and found in verdict, verdict
+    assert same, "the refused run changed the schema"
 
 
 def test_377_keeps_its_statistics_object_across_a_second_run():
@@ -1236,7 +1607,7 @@ _BYSTANDERS = {
 
 _LOCK_CASES = [(number, table, who)
                for number in ("331", "332", "333", "336", "377", "391", "396", "397", "398", "399",
-                              "401", "410")
+                              "401", "410", "415", "416")
                for table in TABLES[number]
                for who in sorted(_HOLDERS)]
 

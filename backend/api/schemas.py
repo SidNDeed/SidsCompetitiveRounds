@@ -1257,6 +1257,23 @@ class HealthResponse(BaseModel):
     # one (learnings 780, 794). Probed by the release train and read by
     # nothing else (#306). No default, as above. Absent on any build before it.
     music_delist_build: int
+    # server_fix_1114_build: release-train verification plumbing, not a design
+    # mechanism (main._SERVER_FIX_1114_BUILD; 1 = this build carries the
+    # server-fix-1114 batch). It names build identity only. A code constant,
+    # equal on both roles by construction, so the train can read it through
+    # the edge; the batch adds no route, and this is the key that tells a
+    # stale box from a refreshed one (learnings 780, 794). Probed by the
+    # release train and read by nothing else (#306). No default, as above.
+    # Absent on any build before it.
+    server_fix_1114_build: int
+    # ask6_invites_build: release-train verification plumbing, not a design
+    # mechanism (main._ASK6_INVITES_BUILD; 1 = this build carries the lobby
+    # invites batch: migrations 415 and 416 and the five invite routes). A
+    # code constant, equal on both roles by construction, so the train can
+    # read it through the edge (learnings 780, 794). Probed by the release
+    # train and read by nothing else (#306). No default, as above. Absent on
+    # any build before it.
+    ask6_invites_build: int
     # casual_streak_build: release-train verification plumbing, not a design
     # mechanism (main._CASUAL_STREAK_BUILD; 1 = this build's player-stats
     # answer carries current_casual_streak). It names build identity only. A
