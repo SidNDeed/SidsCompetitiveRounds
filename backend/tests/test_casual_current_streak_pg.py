@@ -17,9 +17,11 @@ waived (CF_TEST_PG_OPTOUT=1), every case FAILS (cf_pg.require_live_pg).
 
 Rows are inserted in an order of the case's choosing (each case says which),
 never chronologically by accident, so the walk's order comes from its
-ORDER BY. The two tie cases pin the complete order: equal end times are
+ORDER BY. The casual tie cases pin the complete order: equal end times are
 decided by created_at, then by id, exactly in reverse of the match history's
-order (get_player_matches: ended_at DESC, created_at DESC, id DESC).
+order (get_player_matches: ended_at DESC, created_at DESC, id DESC). The
+get_ranked_streak and get_player_team_stats cases run those handlers' series
+walks the same way. Every tie case plants its rows in both orders.
 """
 import asyncio
 import os
@@ -31,8 +33,20 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "..", "api"))
 sys.path.insert(0, HERE)
 
+import pytest  # noqa: E402
+
 import main  # noqa: E402
 import cf_pg  # noqa: E402
+
+# Every tie case plants its two tied rows in BOTH orders and expects the same
+# answer: with one order the rows' physical order can agree with the complete
+# order, and a one-column ORDER BY would then pass as well.
+BOTH_ORDERS = pytest.mark.parametrize("later_first", [True, False],
+                                      ids=["later_row_first", "later_row_last"])
+
+
+def _planted(earlier, later, later_first):
+    return [later, earlier] if later_first else [earlier, later]
 
 # Synthetic steam ids (the 7656119000000xxxx form test_title_ladder_hooks_live
 # uses): no real account.
@@ -105,24 +119,75 @@ async def _ranked_streak_async(series):
                 ids[steam] = (await main.get_or_create_player(db, steam, "Streak " + steam[-2:])).id
             await db.commit()
         for winner, completed, created in series:
+            # ranked_series is made by the ORM, whose Python-side defaults are
+            # not column defaults: every NOT NULL column is planted.
+            p1_wins, p2_wins = (2, 0) if winner == ME else (0, 2)
             await c.conn.execute(
                 "INSERT INTO ranked_series (id, player1_id, player2_id, status, winner_id,"
-                " created_at, completed_at) VALUES ($1, $2, $3, 'completed', $4, $5, $6)",
-                uuid.uuid4(), ids[ME], ids[OPP], ids[winner],
+                " p1_series_wins, p2_series_wins, live_p1_points, live_p2_points,"
+                " is_tournament, is_private, created_at, completed_at)"
+                " VALUES ($1, $2, $3, 'completed', $4, $5, $6, 0, 0, false, false, $7, $8)",
+                uuid.uuid4(), ids[ME], ids[OPP], ids[winner], p1_wins, p2_wins,
                 BASE + timedelta(minutes=created), BASE + timedelta(minutes=completed))
         async with sm() as db:
             return await main.get_ranked_streak(db, ME)
 
 
-def test_pg_ranked_streak_equal_completion_times_are_decided_by_created_at():
+@BOTH_ORDERS
+def test_pg_ranked_streak_equal_completion_times_are_decided_by_created_at(later_first):
     """get_ranked_streak: A (a win) and B (a loss) completed at the same
     instant; A was created first, so B is the latest series by the full
-    order (completed_at, created_at, id, all DESC): the streak is -1. B's
-    row is inserted before A's."""
+    order (completed_at, created_at, id, all DESC): the streak is -1, in
+    both planting orders."""
     cf_pg.require_live_pg()
     b = (OPP, 10, 2)
     a = (ME, 10, 1)
-    assert asyncio.run(_ranked_streak_async([b, a])) == -1
+    assert asyncio.run(_ranked_streak_async(_planted(a, b, later_first))) == -1
+
+
+FOURTH = "76561190000046304"
+
+
+async def _team_streak_async(series):
+    """Plant four players and `series` (in list order) as completed
+    team_series rows with ME and OPP on team 1, then return the
+    current_streak of the real get_player_team_stats(ME). Each entry:
+    (winner_team, completed minute, created minute)."""
+    async with cf_pg.case("streak463ts") as (c, sm):
+        ids = {}
+        async with sm() as db:
+            for steam in (ME, OPP, THIRD, FOURTH):
+                ids[steam] = (await main.get_or_create_player(db, steam, "Streak " + steam[-2:])).id
+            await db.commit()
+        for winner_team, completed, created in series:
+            await c.conn.execute(
+                "INSERT INTO team_series (id, t1a_id, t1b_id, t2a_id, t2b_id, status,"
+                " winner_team, created_at, completed_at)"
+                " VALUES ($1, $2, $3, $4, $5, 'completed', $6, $7, $8)",
+                uuid.uuid4(), ids[ME], ids[OPP], ids[THIRD], ids[FOURTH], winner_team,
+                BASE + timedelta(minutes=created), BASE + timedelta(minutes=completed))
+        async with sm() as db:
+            got = await main.get_player_team_stats(steam_id=ME, db=db)
+        return got.current_streak
+
+
+def test_pg_team_streak_with_no_team_series_is_0():
+    """The 2v2 streak statement runs on PostgreSQL for a player with no team
+    series; the handler's zero value comes back."""
+    cf_pg.require_live_pg()
+    assert asyncio.run(_team_streak_async([])) == 0
+
+
+@BOTH_ORDERS
+def test_pg_team_streak_equal_completion_times_are_decided_by_created_at(later_first):
+    """get_player_team_stats: A (won by ME's team) and B (lost) completed at
+    the same instant; A was created first, so B is the latest series by the
+    full order (completed_at, created_at, id, all DESC): the streak is -1,
+    in both planting orders."""
+    cf_pg.require_live_pg()
+    a = (1, 10, 1)
+    b = (2, 10, 2)
+    assert asyncio.run(_team_streak_async(_planted(a, b, later_first))) == -1
 
 
 def test_pg_w_w_l_gives_current_minus_1_and_best_2():
@@ -149,20 +214,22 @@ def test_pg_an_invalidated_match_and_a_ranked_match_are_skipped():
     assert _answer(rows) == (3, 3)
 
 
-def test_pg_equal_end_times_are_decided_by_created_at():
+@BOTH_ORDERS
+def test_pg_equal_end_times_are_decided_by_created_at(later_first):
     """A (a win) and B (a loss) end at the same instant; A was created first,
-    so B is the later match by the full order: the answer is -1. B's row is
-    inserted before A's."""
+    so B is the later match by the full order: the answer is -1, in both
+    planting orders."""
     a = _w(10, created=1)
     b = _l(10, created=2)
-    assert _answer([b, a]) == (-1, 1)
+    assert _answer(_planted(a, b, later_first)) == (-1, 1)
 
 
-def test_pg_equal_end_and_created_times_are_decided_by_id():
+@BOTH_ORDERS
+def test_pg_equal_end_and_created_times_are_decided_by_id(later_first):
     """X (a win, id HIGH_ID) and Y (a loss, id LOW_ID) share ended_at AND
     created_at. ORDER BY ... m.id ASC walks Y then X, so X is the later
-    match: the answer is +1 (the history, id DESC, lists X first). X's row
-    is inserted before Y's."""
+    match: the answer is +1 (the history, id DESC, lists X first), in both
+    planting orders."""
     x = _w(10, created=5, mid=HIGH_ID)
     y = _l(10, created=5, mid=LOW_ID)
-    assert _answer([x, y]) == (1, 1)
+    assert _answer(_planted(y, x, later_first)) == (1, 1)
