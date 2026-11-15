@@ -1427,7 +1427,8 @@ def test_census_complete_layer_frozen_whole():
     of the round-11 merge, re-frozen once from the seat derivation), plus the
     one coarse form of the B10 merge (B10_MERGE_FROZEN, frozen by hand), plus
     the one coarse form of migration 415's change (MAIL_SEND_RECEIPTS_FROZEN,
-    frozen by hand), plus the complete layer."""
+    frozen by hand), plus the four coarse forms of migration 416's change
+    (LOBBY_INVITES_FROZEN, frozen by hand), plus the complete layer."""
     import ro_census
     import ro_census_frozen as fz
     import test_r7_ro_role_pg as r7
@@ -1440,8 +1441,14 @@ def test_census_complete_layer_frozen_whole():
     assert complete == {k + ro_census.COMPLETE for k in r7.CENSUS_FILES}
     assert coarse <= set(r7.CENSUS_FILES)
     assert sum(len(fz.FROZEN[k]) for k in coarse) == (fz.COARSE_COUNT + fz.B10_MERGE_COUNT
-                                                      + fz.MAIL_SEND_RECEIPTS_COUNT) == 367
+                                                      + fz.MAIL_SEND_RECEIPTS_COUNT
+                                                      + fz.LOBBY_INVITES_COUNT) == 371
     assert fz.COARSE_COUNT == 365
+    # migration 416's change: four hand-frozen coarse kwarg forms in main.py
+    # (the invite cores' explicit password=None on the four request models)
+    assert sum(len(v) for v in fz.LOBBY_INVITES_FROZEN.values()) == fz.LOBBY_INVITES_COUNT == 4
+    assert set(fz.LOBBY_INVITES_FROZEN) <= coarse
+    assert {f[0] for v in fz.LOBBY_INVITES_FROZEN.values() for f in v} == {"kwarg"}
     # the B10 merge: one hand-frozen coarse import form (W30k)
     assert sum(len(v) for v in fz.B10_MERGE_FROZEN.values()) == fz.B10_MERGE_COUNT == 1
     assert set(fz.B10_MERGE_FROZEN) <= coarse
@@ -1468,7 +1475,8 @@ def test_census_complete_layer_frozen_whole():
                                                         + fz.R11_ID_COUNT + fz.R11_OPEN_COUNT)
     assert fz.FROZEN_COUNT == (fz.COARSE_COUNT + fz.COMPLETE_COUNT + fz.R10_COUNT
                                + fz.R10_MERGE_COUNT + fz.R11_ID_COUNT + fz.R11_OPEN_COUNT
-                               + fz.B10_MERGE_COUNT + fz.MAIL_SEND_RECEIPTS_COUNT) == 856
+                               + fz.B10_MERGE_COUNT + fz.MAIL_SEND_RECEIPTS_COUNT
+                               + fz.LOBBY_INVITES_COUNT) == 860
     assert not [f for k in complete for f in fz.FROZEN[k] if f[0] == "refuse"]
     assert {f[0] for k in complete for f in fz.R10_FROZEN[k]} <= set(R10_KINDS)
     # the declared forwarding wrapper is bound whole, exactly once
