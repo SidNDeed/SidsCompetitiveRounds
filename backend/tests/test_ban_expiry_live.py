@@ -18,16 +18,20 @@ row whose expires_at is already behind the database's clock.
 
 Run as a script (BAN_EXPIRY_MUTANT=definition) this module is T7's definition
 mutant: models.player_ban_active_sql loses its expiry clause before main is
-imported, and every T1 observer is run against the parent's subjects.
+imported, and T1's same-row transition is run at every site in the parent's
+case schema.
 """
 import ast
 import asyncio
+import contextlib
 import hashlib
 import hmac
 import inspect
+import io
 import itertools
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -48,8 +52,11 @@ MUTANT = os.environ.get("BAN_EXPIRY_MUTANT", "")
 if MUTANT == "definition":
     import models as _mutant_models
 
-    def _definition_without_expiry(alias):
-        return "(%s.unbanned_at IS NULL)" % alias
+    def _definition_without_expiry(alias, at=None):
+        if at is None:
+            return "(%s.unbanned_at IS NULL)" % alias
+        return "(%s.banned_at <= %s AND (%s.unbanned_at IS NULL OR %s.unbanned_at > %s))" % (
+            alias, at, alias, alias, at)
     _mutant_models.player_ban_active_sql = _definition_without_expiry
 
 import pytest  # noqa: E402
@@ -71,7 +78,9 @@ M417 = os.path.join(SQL_DIR, "417_player_bans_expires_at.sql")
 R417 = os.path.join(SQL_DIR, "rollback_417_player_bans_expires_at.sql")
 INDEX = "player_bans_one_open_per_key"
 INTERNAL_KEY = "ban-expiry-internal-key"
-_IDS = itertools.count(1)
+# the definition mutant's child process writes into the parent's case schema,
+# so its ids start where the parent's never reach
+_IDS = itertools.count(500001 if MUTANT else 1)
 
 
 def _sid():
@@ -237,31 +246,60 @@ async def _admin_ban(sm, admin, target, **fields):
         return await main.admin_ban(req, _slot=None, db=db)
 
 
-# -- T1: the gates, with an ended ban and a ban still running ---------------
+# -- T1: one ban row whose end moves from the future to the past ------------
+#
+# F5 (fix 1): every site observes the SAME row twice -- active while its end
+# is ahead of the database's clock, then inactive once that end is moved
+# behind it -- so an answer cached per account, or a site that reads a second
+# row, cannot pass. Each observer returns the site's raw verdict (True = the
+# site treats the account as under an active ban) and lets every exception
+# it does not name propagate: the refusal each one names is the site's ban
+# answer, and its admission is named just as exactly.
+
+class SiteAnswerUnexpected(AssertionError):
+    """A site answered neither its named refusal nor its named admission."""
+
+
+def _banned_409(e):
+    return isinstance(e, HTTPException) and e.status_code == 409 and str(e.detail).startswith("Banned")
+
 
 async def _obs_sign_in(sm, sid, pid):
+    """Refusal: 409 Banned. Admission: a session token (unverified: no web
+    API key in the test). Anything else propagates."""
     async with sm() as db:
         try:
-            await main.steam_auth(main.SteamAuthRequest(steam_id=sid, ticket_hex="00"), db=db)
+            ans = await main.steam_auth(main.SteamAuthRequest(steam_id=sid, ticket_hex="00"), db=db)
         except HTTPException as e:
-            return e.status_code == 409 and str(e.detail).startswith("Banned")
+            if _banned_409(e):
+                return True
+            raise
         finally:
             await db.rollback()
-    return False
+    if sorted(ans) == ["expires_in", "session_token", "verified"] and ans["verified"] is False:
+        return False
+    raise SiteAnswerUnexpected(("sign_in", sorted(ans)))
 
 
 async def _obs_queue_gate(sm, sid, pid):
+    """Refusal: 409 Banned. Admission: the gate returns None."""
     async with sm() as db:
         try:
-            await main._enrollment_identity_gate(db, sid)
+            ans = await main._enrollment_identity_gate(db, sid)
         except HTTPException as e:
-            return e.status_code == 409 and str(e.detail).startswith("Banned")
+            if _banned_409(e):
+                return True
+            raise
         finally:
             await db.rollback()
-    return False
+    if ans is None:
+        return False
+    raise SiteAnswerUnexpected(("shared_queue_gate", ans))
 
 
 async def _obs_scan(sm, sid, pid):
+    """The ranked candidate scan restricted to the subject: [] (left out)
+    or exactly [the subject]."""
     async with sm() as db:
         try:
             await db.execute(text("UPDATE ranked_queue SET last_polled = clock_timestamp()"
@@ -272,15 +310,21 @@ async def _obs_scan(sm, sid, pid):
                 "only": pid})).mappings().all()
         finally:
             await db.rollback()
-    return pid not in [r["player_id"] for r in rows]
+    ids = [r["player_id"] for r in rows]
+    if ids in ([], [pid]):
+        return ids == []
+    raise SiteAnswerUnexpected(("scan_ranked", len(ids)))
 
 
 async def _obs_tournament(sm, sid, pid):
     async with sm() as db:
         try:
-            return bool(await tournaments._player_id_banned(db, pid))
+            ans = await tournaments._player_id_banned(db, pid)
         finally:
             await db.rollback()
+    if isinstance(ans, bool):
+        return ans
+    raise SiteAnswerUnexpected(("tournament_gate", ans))
 
 
 async def _obs_tournament_entrants(sm, sid, pid):
@@ -292,7 +336,9 @@ async def _obs_tournament_entrants(sm, sid, pid):
                 {"pid": pid})).scalar()
         finally:
             await db.rollback()
-    return n == 0
+    if n in (0, 1):
+        return n == 0
+    raise SiteAnswerUnexpected(("tournament_entrants", n))
 
 
 async def _obs_card(sm, sid, pid):
@@ -303,19 +349,35 @@ async def _obs_card(sm, sid, pid):
                 + main._PC_NOT_BANNED_SQL.format(a="p")), {"s": sid})).scalar()
         finally:
             await db.rollback()
-    return n == 0
+    if n in (0, 1):
+        return n == 0
+    raise SiteAnswerUnexpected(("card_gate", n))
 
 
 async def _obs_chat(sm, sid, pid):
+    """The chat helper swallows its own failure into False; its log line is
+    how that failure shows, so a printed check error fails the observer."""
+    import contextlib
+    import io
     saved = database.async_session
     database.async_session = sm
+    log = io.StringIO()
     try:
-        return await main._is_banned_via_session(sid)
+        with contextlib.redirect_stdout(log):
+            ans = await main._is_banned_via_session(sid)
     finally:
         database.async_session = saved
+    if "[BAN] check error" in log.getvalue():
+        raise SiteAnswerUnexpected(("chat", log.getvalue()[-300:]))
+    if isinstance(ans, bool):
+        return ans
+    raise SiteAnswerUnexpected(("chat", ans))
 
 
 async def _obs_bets(sm, sid, pid):
+    """Refusal: 409 Banned. Admission: the next gate after the ban check,
+    404 "Series not found" (the series id is a fresh uuid). Anything else
+    propagates."""
     saved = (main._check_steam_session, main.MATCH_HMAC_SECRET)
 
     async def _session_ok(*a, **k):
@@ -328,15 +390,17 @@ async def _obs_bets(sm, sid, pid):
     try:
         async with sm() as db:
             try:
-                await main.place_bet(steam_id=sid, series_id=series, bet_on_steam_id=sid, amount=1,
-                                     sig=sig, db=db, request=None)
+                ans = await main.place_bet(steam_id=sid, series_id=series, bet_on_steam_id=sid, amount=1,
+                                           sig=sig, db=db, request=None)
             except HTTPException as e:
-                return e.status_code == 409 and str(e.detail).startswith("Banned")
-            except Exception:
-                return False        # past the ban gate, refused for another reason
+                if _banned_409(e):
+                    return True
+                if e.status_code == 404 and e.detail == "Series not found":
+                    return False
+                raise
             finally:
                 await db.rollback()
-        return False
+        raise SiteAnswerUnexpected(("bets", ans))
     finally:
         main._check_steam_session, main.MATCH_HMAC_SECRET = saved
 
@@ -344,12 +408,17 @@ async def _obs_bets(sm, sid, pid):
 async def _obs_mod_check(sm, sid, pid):
     async with sm() as db:
         try:
-            return (await main.check_player_registered(sid, db=db))["banned"]
+            ans = await main.check_player_registered(sid, db=db)
         finally:
             await db.rollback()
+    if isinstance(ans.get("banned"), bool):
+        return ans["banned"]
+    raise SiteAnswerUnexpected(("mod_check", sorted(ans)))
 
 
 async def _obs_admin_list(sm, sid, pid):
+    """The banned-users list searched by the subject's id: the whole answer
+    is that one row or nothing, and its total agrees."""
     saved = main._require_admin
 
     async def _ok(*a, **k):
@@ -364,10 +433,16 @@ async def _obs_admin_list(sm, sid, pid):
                 await db.rollback()
     finally:
         main._require_admin = saved
-    return [b["steam_id"] for b in ans["bans"]] == [sid]
+    ids = [b["steam_id"] for b in ans["bans"]]
+    if ids in ([], [sid]) and ans["total"] == len(ids):
+        return ids == [sid]
+    raise SiteAnswerUnexpected(("admin_list", len(ids), ans["total"]))
 
 
 async def _obs_recent_bans(sm, sid, pid):
+    """The bot's feed is every active ban (it has no per-account filter):
+    the subject is in the whole answer or not, and the answer holds each
+    account at most once."""
     saved = os.environ.get("API_SECRET_KEY")
     os.environ["API_SECRET_KEY"] = INTERNAL_KEY
     try:
@@ -381,15 +456,21 @@ async def _obs_recent_bans(sm, sid, pid):
             os.environ.pop("API_SECRET_KEY", None)
         else:
             os.environ["API_SECRET_KEY"] = saved
-    return sid in [b["steam_id"] for b in ans["bans"]]
+    ids = [b["steam_id"] for b in ans["bans"]]
+    if len(ids) == len(set(ids)) and len(ids) < 200:
+        return sid in ids
+    raise SiteAnswerUnexpected(("recent_bans_feed", len(ids), len(set(ids))))
 
 
 async def _obs_h2h_is_banned(sm, sid, pid):
     async with sm() as db:
         try:
-            return (await main._h2h_profile_block(db, pid)).is_banned
+            ans = (await main._h2h_profile_block(db, pid)).is_banned
         finally:
             await db.rollback()
+    if isinstance(ans, bool):
+        return ans
+    raise SiteAnswerUnexpected(("h2h_is_banned", ans))
 
 
 OBSERVERS = [
@@ -402,44 +483,130 @@ OBSERVERS = [
 OBSERVER = dict(OBSERVERS)
 
 
-@pytest.fixture(scope="module")
-def t1_subjects(case):
-    """Two accounts, each with one open timed ban: one whose end is a minute
-    behind the database's clock, one whose end is an hour ahead."""
-    async def body(sm):
-        out = {}
-        async with sm() as db:
-            admin = await _admin(db)
-            for key, minutes in (("past", -1), ("future", 60)):
-                sid = _sid()
-                pid = await _player(db, sid)
-                await _ban_row(db, sid, admin, minutes)
-                await lh._insert(db, "ranked_queue", {
-                    "player_id": pid, "steam_id": sid, "display_name": "bx-q", "rating": 1500.0,
-                    "status": "searching", "last_polled": None, "joined_at": None})
-                out[key] = (sid, str(pid))
-            await db.commit()
-        return out
-    return _with_sm(case, body)
+async def _t1_subject(sm):
+    """One account with ONE open timed ban whose end is an hour ahead, and a
+    searching queue row for the scan. Returns (steam id, player id, ban id)."""
+    async with sm() as db:
+        admin = await _admin(db)
+        sid = _sid()
+        pid = await _player(db, sid)
+        ban = await _ban_row(db, sid, admin, 60)
+        await lh._insert(db, "ranked_queue", {
+            "player_id": pid, "steam_id": sid, "display_name": "bx-q", "rating": 1500.0,
+            "status": "searching", "last_polled": None, "joined_at": None})
+        await db.commit()
+    return sid, pid, ban
+
+
+async def _end_moves_behind(sm, ban):
+    """The same row's end moves from the future to this statement's instant
+    (clock_timestamp): behind the clock of every later transaction, and
+    after every snapshot already taken, as a real expiry is. Nothing else
+    about the row changes."""
+    async with sm() as db:
+        n = (await db.execute(text(
+            "UPDATE player_bans SET expires_at = clock_timestamp()"
+            " WHERE id = :id AND unbanned_at IS NULL AND expires_at > NOW()"), {"id": ban})).rowcount
+        await db.commit()
+    assert n == 1, "the ban row's end did not move"
+
+
+async def _t1_observe(sm, fn):
+    sid, pid, ban = await _t1_subject(sm)
+    before = await fn(sm, sid, pid)
+    await _end_moves_behind(sm, ban)
+    after = await fn(sm, sid, pid)
+    return before, after
 
 
 @pytest.mark.parametrize("site", [name for name, _ in OBSERVERS])
-def test_t1_an_ended_ban_is_not_active_and_a_running_one_is(case, t1_subjects, site, monkeypatch):
+def test_t1_one_ban_row_is_active_until_its_end_moves_behind_the_clock(case, site, monkeypatch):
     monkeypatch.delenv("STEAM_WEB_API_KEY", raising=False)
-    fn = OBSERVER[site]
-
-    async def body(sm):
-        return [await fn(sm, sid, uuid.UUID(pid)) for sid, pid in (t1_subjects["past"], t1_subjects["future"])]
-    past, future = _with_sm(case, body)
-    assert (past, future) == (False, True), (site, "ended ban active" if past else "running ban not active")
+    got = _with_sm(case, lambda sm: _t1_observe(sm, OBSERVER[site]))
+    assert got == (True, False), (site, "running ban not active" if not got[0] else "ended ban still active")
 
 
-def test_t7_the_definition_without_its_expiry_clause_fails_t1_at_every_site(case, t1_subjects):
-    """The mutant (a subprocess, so every constant is built from it) answers
-    the ENDED ban as active at every T1 site: the positive fact that names
-    the defect the expiry clause prevents."""
+# Control for the observers (F5 d): each one reads only its named refusal and
+# its named admission; an exception it does not name, a non-ban HTTP refusal
+# and an answer of another shape all fail it. No database: the site is
+# replaced by a plant and the session holds nothing.
+class _Planted(Exception):
+    """An exception no observer names."""
+
+
+class _NoSession:
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+    async def rollback(self):
+        return None
+
+    async def execute(self, *a, **k):
+        raise _Planted("execute")
+
+
+# observer -> (module, attribute) of the site it calls; None: the site is a
+# statement the observer executes itself (the session's execute is the plant)
+OBSERVED_SITE = {
+    "sign_in": (main, "steam_auth"), "shared_queue_gate": (main, "_enrollment_identity_gate"),
+    "scan_ranked": None, "tournament_gate": (tournaments, "_player_id_banned"),
+    "tournament_entrants": None, "card_gate": None, "chat": (main, "_is_banned_via_session"),
+    "bets": (main, "place_bet"), "mod_check": (main, "check_player_registered"),
+    "admin_list": (main, "admin_list_bans"), "recent_bans_feed": (main, "get_recent_bans"),
+    "h2h_is_banned": (main, "_h2h_profile_block"),
+}
+# the observers that name an HTTP refusal, and an answer each must refuse to read
+NAMED_REFUSAL = ("sign_in", "shared_queue_gate", "bets")
+UNREADABLE = {
+    "sign_in": {"session_token": "t"}, "shared_queue_gate": "admitted", "tournament_gate": None,
+    "chat": None, "mod_check": {"registered": True},
+    "admin_list": {"bans": [{"steam_id": "x"}], "total": 1},
+    "recent_bans_feed": {"bans": [{"steam_id": "x"}, {"steam_id": "x"}]},
+    "h2h_is_banned": types.SimpleNamespace(is_banned=None),
+}
+
+
+def _plant(monkeypatch, site, behaviour):
+    if OBSERVED_SITE[site] is None:
+        return
+    mod, attr = OBSERVED_SITE[site]
+
+    async def planted(*a, **k):
+        if isinstance(behaviour, BaseException):
+            raise behaviour
+        return behaviour
+    monkeypatch.setattr(mod, attr, planted)
+
+
+@pytest.mark.parametrize("site", [name for name, _ in OBSERVERS])
+def test_t1_control_an_observer_reads_only_what_it_names(site, monkeypatch):
+    assert sorted(OBSERVED_SITE) == sorted(OBSERVER)
+    sid = _sid()
+    _plant(monkeypatch, site, _Planted(site))
+    with pytest.raises(_Planted):
+        _run(OBSERVER[site](_NoSession, sid, uuid.uuid4()))
+    if site in NAMED_REFUSAL:
+        _plant(monkeypatch, site, HTTPException(status_code=403, detail="Forbidden"))
+        with pytest.raises(HTTPException):
+            _run(OBSERVER[site](_NoSession, sid, uuid.uuid4()))
+        _plant(monkeypatch, site, HTTPException(status_code=409, detail="Banned from the mod"))
+        assert _run(OBSERVER[site](_NoSession, sid, uuid.uuid4())) is True
+    if site in UNREADABLE:
+        _plant(monkeypatch, site, UNREADABLE[site])
+        with pytest.raises(SiteAnswerUnexpected):
+            _run(OBSERVER[site](_NoSession, sid, uuid.uuid4()))
+
+
+def test_t7_the_definition_without_its_expiry_clause_fails_t1_at_every_site(case):
+    """The mutant (a subprocess, so every constant is built from it) runs
+    T1's same-row transition at every site and still answers the row as
+    active after its end moved: the positive fact that names the defect the
+    expiry clause prevents."""
     env = dict(os.environ, BAN_EXPIRY_MUTANT="definition", BAN_EXPIRY_SCHEMA=case,
-               BAN_EXPIRY_SUBJECTS=json.dumps(t1_subjects), PYTHONDONTWRITEBYTECODE="1")
+               PYTHONDONTWRITEBYTECODE="1")
     env.pop("STEAM_WEB_API_KEY", None)
     p = subprocess.run([sys.executable, os.path.abspath(__file__)], env=env, cwd=HERE,
                        capture_output=True, text=True, timeout=600)
@@ -447,9 +614,7 @@ def test_t7_the_definition_without_its_expiry_clause_fails_t1_at_every_site(case
     assert p.returncode == 0 and len(lines) == 1, (p.returncode, p.stdout[-800:], p.stderr[-1500:])
     out = json.loads(lines[0][len("T1-MUTANT "):])
     assert out["definition"] == "(pb.unbanned_at IS NULL)" and "expires_at" not in out["marker"], out
-    still_active = sorted(name for name, (past, future) in out["results"].items() if past and future)
-    assert still_active == sorted(OBSERVER), ("sites the mutant did not break", sorted(
-        set(OBSERVER) - set(still_active)), out["results"])
+    assert out["results"] == {name: [True, True] for name in OBSERVER}, out["results"]
 
 
 # -- T3: a second ban after the end; two bans at once -------------------------
@@ -540,6 +705,20 @@ def _replace_source(fn, old, new, extra=None):
     assert src.count(old) == 1, (fn.__name__, old, src.count(old))
     tree = ast.parse(src.replace(old, new))
     node = tree.body[0]
+    node.decorator_list = []
+    ns = dict(vars(main))
+    ns.update(extra or {})
+    exec(compile(ast.Module(body=[node], type_ignores=[]), "<mutant %s>" % fn.__name__, "exec"), ns)
+    return ns[node.name]
+
+
+def _replace_source_all(fn, pairs, extra=None):
+    """_replace_source with several (old, new) pairs, each occurring once."""
+    src = textwrap.dedent(inspect.getsource(fn))
+    for old, new in pairs:
+        assert src.count(old) == 1, (fn.__name__, old, src.count(old))
+        src = src.replace(old, new)
+    node = ast.parse(src).body[0]
     node.decorator_list = []
     ns = dict(vars(main))
     ns.update(extra or {})
@@ -718,21 +897,34 @@ def test_t5_old_clients_and_the_key_order_of_every_changed_answer(case, admin_op
                                   for r in listed["bans"]])
     parsed = _parse_banned_users_1410(_wire(listed))
     assert parsed == _parse_banned_users_1410(_wire(stripped)) and parsed[0]["steam_id"] == timed, parsed
-    # the bot's feed: expires_at is each row's last key
-    feed = [b for b in out["feed"]["bans"] if b["steam_id"] in (permanent, timed)]
-    assert [list(b) for b in feed] == [["id", "steam_id", "reason", "banned_by_steam_id", "display_name",
-                                        "banned_at", "expires_at"]] * 2, feed
-    assert {b["steam_id"]: b["expires_at"] for b in feed} == {permanent: None, timed: out["timed"]["expires_at"]}
+    # the bot's feed (every active ban in the schema, unfiltered): every row's
+    # key order, expires_at last; one row per account; and this test's two
+    # accounts carry their own ends
+    feed = out["feed"]["bans"]
+    assert feed and [list(b) for b in feed] == [["id", "steam_id", "reason", "banned_by_steam_id",
+                                                 "display_name", "banned_at", "expires_at"]] * len(feed), feed
+    ends = {b["steam_id"]: b["expires_at"] for b in feed}
+    assert len(ends) == len(feed), feed
+    assert (ends[permanent], ends[timed]) == (None, out["timed"]["expires_at"]), ends
 
 
 # -- T6 / T7: presence -------------------------------------------------------
+#
+# F5 (fix 1): every answer is read WHOLE. The world is closed: no other test
+# before this section writes a rating row, a 2v2/FFA rating row, a 1v2 match
+# or a mod_seen_at stamp, so each list and board holds exactly the world's
+# accounts and the expected answer names every row of it.
 
 @pytest.fixture(scope="module")
 def presence_world(case):
     """B: banned (permanent) and pinging; C: the control, same stamps; E: an
     ENDED ban, pinging; B2 / C2: banned / control, offline but recent; L:
-    banned then lifted by T6. Every one has last_seen, presence_seen_at and
-    mod_seen_at stamped now and a 1v1 rating row."""
+    banned then lifted by T6. Every one has last_seen and mod_seen_at stamped
+    now and a 1v1 rating row; the three pinging ones have presence_seen_at
+    re-stamped at every read (_presence_answers), the other three ten
+    minutes old, so the marker's 3-minute window decides nothing by timing.
+    B, C and E also hold the played-game rows the three other boards need:
+    a 2v2 and an FFA rating row each and one 1v2 match between them."""
     async def body(sm):
         out = {}
         async with sm() as db:
@@ -746,6 +938,20 @@ def presence_world(case):
                 if minutes is not False:
                     await _ban_row(db, sid, admin, minutes)
                 out[key] = (sid, pid)
+            for key in ("B2", "C2", "L"):
+                await db.execute(text("UPDATE players SET presence_seen_at = NOW() - INTERVAL '10 minutes'"
+                                      " WHERE id = :p"), {"p": out[key][1]})
+            for key in ("B", "C", "E"):
+                await lh._insert(db, "glicko_ratings_2v2", {"player_id": out[key][1], "rating": 1500.0,
+                                                            "rating_deviation": 100.0, "volatility": 0.06,
+                                                            "completed_series": 1})
+                await lh._insert(db, "glicko_ratings_ffa", {"player_id": out[key][1], "rating": 1500.0,
+                                                            "rating_deviation": 100.0, "volatility": 0.06,
+                                                            "games_played": 1})
+            # ended_at takes its column default (now) and invalidated_at stays
+            # NULL: lh._insert writes NOW() for a None value
+            await lh._insert(db, "ovt_matches", {"solo_id": out["B"][1], "duo_a_id": out["C"][1],
+                                                 "duo_b_id": out["E"][1], "winner_side": 1})
             await db.commit()
         out["admin"] = admin
         return out
@@ -778,12 +984,21 @@ def _ping_request():
 THREE_BOARDS = ("ovt_leaderboard", "ffa_leaderboard", "team_leaderboard")
 
 
+def _board(ans):
+    """A board answer whole: every entry's (steam id, is_online)."""
+    return sorted((e.steam_id, e.is_online) for e in ans.entries)
+
+
 async def _presence_answers(sm, w, fns=None):
     f = dict(queue_count=main.queue_count, presence_ping=main.presence_ping,
              presence_online=main.presence_online, get_leaderboard=main.get_leaderboard,
-             h2h=main._h2h_profile_block, marker=main._ONLINE_MARKER_SQL)
+             ovt_leaderboard=main.ovt_leaderboard, ffa_leaderboard=main.ffa_leaderboard,
+             team_leaderboard=main.team_leaderboard, h2h=main._h2h_profile_block, marker=main._ONLINE_MARKER_SQL)
     f.update(fns or {})
-    sids = [w[k][0] for k in ("B", "C", "E", "B2", "C2")]
+    async with sm() as db:
+        await db.execute(text("UPDATE players SET presence_seen_at = NOW() WHERE id = ANY(:p)"),
+                         {"p": [w[k][1] for k in ("B", "C", "E")]})
+        await db.commit()
     async with sm() as db:
         out = {"queue_count": (await f["queue_count"](steam_id=None, db=db))["online"]}
     async with sm() as db:
@@ -792,11 +1007,20 @@ async def _presence_answers(sm, w, fns=None):
     async with sm() as db:
         po = await f["presence_online"](db=db)
         out["online_count"] = po["online_count"]
-        out["online"] = sorted(e["steam_id"] for e in po["online"] if e["steam_id"] in sids)
-        out["recent"] = sorted(e["steam_id"] for e in po["recent"] if e["steam_id"] in sids)
+        out["online"] = sorted(e["steam_id"] for e in po["online"])
+        out["recent"] = sorted(e["steam_id"] for e in po["recent"])
     async with sm() as db:
         lb = await f["get_leaderboard"](limit=500, offset=0, min_matches=0, include_inactive=True, db=db)
-        out["board_1v1"] = {e.steam_id: e.is_online for e in lb.entries if e.steam_id in sids[:3]}
+        out["board_1v1"] = _board(lb)
+    async with sm() as db:
+        out["ovt_leaderboard"] = _board(await f["ovt_leaderboard"](limit=200, role="combined",
+                                                                   include_inactive=True, db=db))
+    async with sm() as db:
+        out["ffa_leaderboard"] = _board(await f["ffa_leaderboard"](limit=200, min_games=1, sort_by="rating",
+                                                                   include_inactive=True, db=db))
+    async with sm() as db:
+        out["team_leaderboard"] = _board(await f["team_leaderboard"](limit=200, min_series=0, sort_by="rating",
+                                                                     include_inactive=True, db=db))
     async with sm() as db:
         out["h2h"] = {}
         for k in ("B", "C", "E"):
@@ -804,14 +1028,24 @@ async def _presence_answers(sm, w, fns=None):
             out["h2h"][w[k][0]] = (blk.is_online, blk.is_banned)
         out["marker"] = dict((await db.execute(text(
             "SELECT p.steam_id, " + f["marker"] + " AS lit FROM players p WHERE p.steam_id = ANY(:s)"),
-            {"s": sids[:3]})).all())
+            {"s": [w[k][0] for k in ("B", "C", "E")]})).all())
     return out
 
 
-def _expected(w):
+async def _lifted(sm, w):
+    async with sm() as db:
+        return await main._is_banned(db, w["L"][0]) is None
+
+
+def _expected(w, lifted):
+    """Every answer whole, with B, C and E in the presence map. L is in the
+    recent list once its ban is lifted (T6 lifts it)."""
     b, c, e = w["B"][0], w["C"][0], w["E"][0]
+    bce = sorted([(b, False), (c, True), (e, True)])
     return {"queue_count": 2, "ping": 2, "online_count": 2, "online": sorted([c, e]),
-            "recent": [w["C2"][0]], "board_1v1": {b: False, c: True, e: True},
+            "recent": sorted([w["C2"][0]] + ([w["L"][0]] if lifted else [])),
+            "board_1v1": sorted(bce + [(w[k][0], False) for k in ("B2", "C2", "L")]),
+            "ovt_leaderboard": bce, "ffa_leaderboard": bce, "team_leaderboard": bce,
             "h2h": {b: (False, True), c: (True, False), e: (True, False)},
             "marker": {b: False, c: True, e: True}}
 
@@ -819,13 +1053,9 @@ def _expected(w):
 def test_t6_a_banned_account_is_in_no_presence_answer_and_an_ended_ban_shows_again(case, presence_world, admin_open):
     w = presence_world
     with _Map([w[k][0] for k in ("B", "C", "E")]):
+        lifted = _with_sm(case, lambda sm: _lifted(sm, w))
         got = _with_sm(case, lambda sm: _presence_answers(sm, w))
-    assert got == _expected(w), got
-    # the three boards that need played games to list a row read the same marker, mapped as it is answered
-    for name in THREE_BOARDS:
-        src = inspect.getsource(getattr(main, name))
-        assert src.count("{_ONLINE_MARKER_SQL} AS is_online") == 1, name
-        assert 'is_online=bool(r["is_online"])' in src, name
+    assert lifted is False and got == _expected(w, lifted=False), got
 
     # lifted: the account shows again by the ordinary rules, with no other step
     async def lift(sm):
@@ -839,8 +1069,10 @@ def test_t6_a_banned_account_is_in_no_presence_answer_and_an_ended_ban_shows_aga
 
 
 def test_t7_each_presence_answer_without_its_ban_filter_shows_the_banned_account(case, presence_world, admin_open):
-    """One mutant per route, each run against T6's world, each asserting the
-    defect itself: the banned account B counted, listed or marked online."""
+    """One mutant per route, each run through its route against T6's world,
+    each asserting the defect itself: the banned account B counted, listed or
+    marked online. The unmutated routes, read the same way first, are the
+    control: they give exactly the expected answers."""
     w = presence_world
     b = w["B"][0]
     marker = main._ONLINE_MARKER_SQL
@@ -848,6 +1080,9 @@ def test_t7_each_presence_answer_without_its_ban_filter_shows_the_banned_account
     noban = marker[:cut] + ")"
     extra = {"_ONLINE_MARKER_SQL_NOBAN": noban}
     shown = "online = len(await _presence_online_ids_shown(db))"
+
+    def board(fn):
+        return _replace_source(fn, "{_ONLINE_MARKER_SQL}", "{_ONLINE_MARKER_SQL_NOBAN}", extra)
     mutants = {
         "queue_count": dict(queue_count=_replace_source(main.queue_count, shown, "online = len(_presence_online_ids())")),
         "presence_ping": dict(presence_ping=_replace_source(main.presence_ping, shown,
@@ -857,12 +1092,18 @@ def test_t7_each_presence_answer_without_its_ban_filter_shows_the_banned_account
             "online_ids = _presence_online_ids()")),
         "presence_online:recent": dict(presence_online=_replace_source(
             main.presence_online, 'player_ban_active_sql("pb")', '"FALSE"')),
-        "board_1v1": dict(get_leaderboard=_replace_source(
-            main.get_leaderboard, "{_ONLINE_MARKER_SQL}", "{_ONLINE_MARKER_SQL_NOBAN}", extra)),
-        "h2h": dict(h2h=_replace_source(
-            main._h2h_profile_block, "{_ONLINE_MARKER_SQL}", "{_ONLINE_MARKER_SQL_NOBAN}", extra)),
+        "board_1v1": dict(get_leaderboard=board(main.get_leaderboard)),
+        "ovt_leaderboard": dict(ovt_leaderboard=board(main.ovt_leaderboard)),
+        "ffa_leaderboard": dict(ffa_leaderboard=board(main.ffa_leaderboard)),
+        "team_leaderboard": dict(team_leaderboard=board(main.team_leaderboard)),
+        "h2h": dict(h2h=board(main._h2h_profile_block)),
         "marker": dict(marker=noban),
     }
+    with _Map([w[k][0] for k in ("B", "C", "E")]):
+        lifted = _with_sm(case, lambda sm: _lifted(sm, w))
+        control = _with_sm(case, lambda sm: _presence_answers(sm, w))
+    expected = _expected(w, lifted)
+    assert control == expected, ("the unmutated routes", control)
     defects = {}
     for name, fns in mutants.items():
         with _Map([w[k][0] for k in ("B", "C", "E")]):
@@ -872,17 +1113,119 @@ def test_t7_each_presence_answer_without_its_ban_filter_shows_the_banned_account
             "presence_ping": got["ping"] == 3,
             "presence_online:online": b in got["online"] and got["online_count"] == 3,
             "presence_online:recent": b in got["recent"] and w["B2"][0] in got["recent"],
-            "board_1v1": got["board_1v1"][b] is True,
+            "board_1v1": (b, True) in got["board_1v1"],
+            "ovt_leaderboard": (b, True) in got["ovt_leaderboard"],
+            "ffa_leaderboard": (b, True) in got["ffa_leaderboard"],
+            "team_leaderboard": (b, True) in got["team_leaderboard"],
             "h2h": got["h2h"][b] == (True, True),
             "marker": got["marker"][b] is True,
         }[name]
-        assert got != _expected(w), (name, "the mutant left every presence answer as T6 requires")
+        # the mutant moved its own answer and only that answer
+        moved = sorted(k for k in expected if got[k] != expected[k])
+        assert moved == MOVES.get(name, [name]), (name, moved)
     assert all(defects.values()), defects
-    # the three boards: their mutant loses the shared marker T6 pins, and the
-    # ban-less marker it would read marks B online (the "marker" mutant above)
-    for name in THREE_BOARDS:
-        src = inspect.getsource(getattr(main, name)).replace("{_ONLINE_MARKER_SQL}", "{_ONLINE_MARKER_SQL_NOBAN}")
-        assert src.count("{_ONLINE_MARKER_SQL} AS is_online") == 0, name
+
+
+# the answers each T7 mutant moves; a mutant not named moves the answer of its own name
+MOVES = {"presence_ping": ["ping"], "presence_online:online": ["online", "online_count"],
+         "presence_online:recent": ["recent"]}
+
+
+# -- F2: the presence ping keeps no ban state of its own ---------------------
+
+def _r1_ping():
+    """The r1 build's ping, rebuilt as the control's subject: every ban read
+    that works records the ids it found banned, and a failed read answers the
+    map's count less that recorded set. Its ban read is whichever one main
+    holds at call time, so the driver's swap reaches it too."""
+    seen = {"banned": frozenset()}
+
+    async def recording_read(db):
+        ids = main._presence_online_ids()
+        shown = await main._presence_online_ids_shown(db)
+        seen["banned"] = frozenset(ids) - frozenset(shown)
+        return shown
+
+    def recorded_fallback():
+        return sum(1 for sid in main._presence_online_ids() if sid not in seen["banned"])
+    return _replace_source(main.presence_ping, "online = _presence_online_count()", "online = _r1_fallback()",
+                           extra={"_r1_fallback": recorded_fallback, "_presence_online_ids_shown": recording_read})
+
+
+def _f2_sequence(case, w, ping):
+    """Four pings by C, the map holding B (banned, permanent), C, P (one
+    timed ban, running) and Q (no ban yet):
+      works    the read works;
+      failed   P's ONE row has ended (its end moved behind the clock) and the
+               ban read fails;
+      again    the read works again;
+      new      Q is banned now and the read works.
+    Returns the four answers whole and the failed ping's printed log."""
+    failing = _replace_source(main._presence_online_ids_shown, '"SELECT pb.steam_id FROM player_bans pb"',
+                              '"SELECT pb.no_such_column FROM player_bans pb"')
+
+    async def body(sm):
+        async with sm() as db:
+            admin = await _admin(db)
+            p_sid, q_sid = _sid(), _sid()
+            await _player(db, p_sid)
+            await _player(db, q_sid)
+            p_ban = await _ban_row(db, p_sid, admin, 60)
+            await db.commit()
+
+        async def one():
+            async with sm() as db:
+                return await ping(request=_ping_request(), steam_id=w["C"][0], in_match=None, db=db)
+        out = {}
+        with _Map([w["B"][0], w["C"][0], p_sid, q_sid]):
+            out["works"] = await one()
+            await _end_moves_behind(sm, p_ban)
+            saved = main._presence_online_ids_shown
+            main._presence_online_ids_shown = failing
+            log = io.StringIO()
+            try:
+                with contextlib.redirect_stdout(log):
+                    out["failed"] = await one()
+            finally:
+                main._presence_online_ids_shown = saved
+            out["log"] = log.getvalue()
+            out["again"] = await one()
+            async with sm() as db:
+                await _ban_row(db, q_sid, admin, None)
+                await db.commit()
+            out["new"] = await one()
+        return out
+    return _with_sm(case, body)
+
+
+def test_f2_the_ping_answers_200_through_a_failed_ban_read_and_filters_again_after(case, presence_world,
+                                                                                    admin_open):
+    """The ping is every client's heartbeat. When its ban read fails it
+    answers 200 with the presence map's plain count (not ban-filtered for
+    that one answer) and no exception text; the next ping whose read works is
+    filtered again, with the ended ban counted at once (the same row, no
+    state in between) and a ban made since excluded at once."""
+    out = _f2_sequence(case, presence_world, main.presence_ping)
+    rev = main._alerts_rev
+    assert "no_such_column" not in json.dumps(out["failed"]), out["failed"]
+    assert "[PRESENCE] online count ban read failed" in out["log"], out["log"][-400:]
+    # B, C, P, Q in the map: B and P banned (2); P's row ended and the read
+    # failed: the plain count (4); the read works: only B (3); Q banned (2)
+    assert {k: out[k] for k in ("works", "failed", "again", "new")} == {
+        "works": {"online": 2, "alerts_rev": rev}, "failed": {"online": 4, "alerts_rev": rev},
+        "again": {"online": 3, "alerts_rev": rev}, "new": {"online": 2, "alerts_rev": rev}}, out
+
+
+def test_f2_control_the_r1_recorded_set_fails_the_sequence(case, presence_world, admin_open):
+    """Control: the same four pings through the r1 build's ping. Its failed
+    read still subtracts the set the working read recorded, so the ended ban
+    stays excluded: 2 where the test above requires 4, and only there."""
+    out = _f2_sequence(case, presence_world, _r1_ping())
+    rev = main._alerts_rev
+    assert "[PRESENCE] online count ban read failed" in out["log"], out["log"][-400:]
+    assert {k: out[k] for k in ("works", "failed", "again", "new")} == {
+        "works": {"online": 2, "alerts_rev": rev}, "failed": {"online": 2, "alerts_rev": rev},
+        "again": {"online": 3, "alerts_rev": rev}, "new": {"online": 2, "alerts_rev": rev}}, out
 
 
 # -- T8: the migration, through psql, twice; the model's column -------------
@@ -926,10 +1269,8 @@ def test_t8_the_model_reads_and_writes_the_column(case):
 
 
 # -- the definition mutant's driver ------------------------------------------
-
 def _mutant_main():
     schema = os.environ["BAN_EXPIRY_SCHEMA"]
-    subjects = json.loads(os.environ["BAN_EXPIRY_SUBJECTS"])
 
     async def go():
         engine = harness.bound_engine(lh.DSN, schema)
@@ -937,8 +1278,7 @@ def _mutant_main():
         try:
             out = {}
             for name, fn in OBSERVERS:
-                out[name] = [await fn(sm, sid, uuid.UUID(pid))
-                             for sid, pid in (subjects["past"], subjects["future"])]
+                out[name] = list(await _t1_observe(sm, fn))
             return out
         finally:
             await engine.dispose()
