@@ -619,7 +619,7 @@
           ],
           "main",
           "submit_match",
-          "03495e7c0428f75195aec22cc72b7266027fc1aa"
+          "4a6b873f9afad44802055abac87e58a56bba346a"
         ],
         [
           "/api/v1/matches/casual-dc",
@@ -3710,7 +3710,7 @@
           ],
           "main",
           "submit_seat_evidence",
-          "1e3e807d81e398baa0cdba198bfef600ed70b17f"
+          "5719782c506d294d92332233feaccfc4923ae96a"
         ]
       ]
     },
@@ -3911,7 +3911,7 @@
           ],
           "main",
           "submit_identity_clock_evidence",
-          "73d7904ef5b8685fc7ce135023b6378ff3d9e35b"
+          "932685e3f0fa1caba841bf8121a962875e9d3e5c"
         ]
       ]
     },
@@ -3944,7 +3944,7 @@
           ],
           "main",
           "submit_card_evidence",
-          "d380d2f821a1f99b4dc311bf324ae2c717b78636"
+          "96dd64f03e7fdd6269f1a4b984c996c1df3a697b"
         ]
       ]
     },
@@ -3968,7 +3968,7 @@
           ],
           "main",
           "submit_combat_evidence",
-          "b0157bfe56d531ffa0fb4cc9dbf3c005f4361326"
+          "7ef84d322a3dee842234898b57d42f5f41dfbc6d"
         ]
       ]
     },
@@ -4030,6 +4030,11 @@
         "admin_evidence",
         "evidence_key_gate",
         "a58f459acd57eb799fef71e1004bec539d9286f8"
+      ],
+      [
+        "main",
+        "evidence_census_gate",
+        "6eb4ac1f6c25aeefcfb1656d3ac83c6ac4e5fbe5"
       ],
       [
         "main",

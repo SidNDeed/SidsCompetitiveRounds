@@ -391,12 +391,15 @@ def test_the_match_commit_sits_below_the_rating_pass_and_the_grants():
     body = SRC[start:end]
     rating = body.index("await _apply_series_rating_pass(")
     grants = body.index('granted_streak |= await _grant_achievement_inline(')
-    commit = body.index("await db.commit()", grants)
+    commit = body.index("await _commit_new_match(db)", grants)
     assert rating < grants < commit, "the report commits before its finalization"
     # Three commits, and each is accounted for: the anti-cheat invalidation
-    # early return, the one report commit, and the tournament advance's own
-    # transaction (deliberately still separate — see the note at that site).
-    assert body.count("await db.commit()") == 3
+    # early return and the one report commit (both through _commit_new_match,
+    # whose only other arm answers a repeated report), and the tournament
+    # advance's own transaction (deliberately still separate — see the note at
+    # that site).
+    assert body.count("await _commit_new_match(db)") == 2
+    assert body.count("await db.commit()") == 1
     assert body.index("await db.commit()", commit + 1) > body.index(
         "advance_tournament_match(db, series.id)")
     # The cross-gap validity flag belongs to the split shape and is gone as

@@ -9,12 +9,12 @@ keyed by that game's own row id, so a 1v1 or 2v2 series of two games credits
 two. The bar, from LADDER-HOOK-DESIGN-LITE-V3 sections 3, 4 and 12.5 with the
 unit moved from the series to the game:
 
-  H3  one game delivered twice is credited once. 1v1's second delivery of a
-      report dies at the match insert's flush on unique_match with nothing
-      written; 2v2's is the duplicate echo; FFA's is refused by the room gate
-      -- the replay echo -- with no second ffa_matches row. The after-the-fact
-      2v2 settlement (admin completion, lead forfeit) plays no game and
-      credits nothing, whichever path completed the series.
+  H3  one game delivered twice is credited once: 1v1's second delivery meets
+      unique_match at the match insert's flush and is answered as already
+      recorded, nothing written; 2v2's is the duplicate echo; FFA's is
+      refused by the room gate (the replay echo), no second ffa_matches row.
+      The after-the-fact 2v2 settlement (admin completion, lead forfeit)
+      plays no game and credits nothing, whichever path completed the series.
   H5  a DATABASE fault inside the hook's call -- the real hook runs, then a
       failing statement -- costs the completion nothing. The same completion
       runs twice, clean and faulted, each in a fresh schema: the result,
@@ -45,9 +45,9 @@ for the game it did not play), and three of Codex round 2's LOW residual
 sentences (design 12.6) made tests, re-read for the game unit: R1 (a fault
 in game 1 costs game 1's credit and nothing else; game 2 credits its own),
 R3 (the 1v1 credit stands when the rating pass fails or skips, and causes
-nothing else) and Q-G (the resent deciding 1v1 report answers 500 through
-main.app and writes nothing -- behaviour documented as it stands, not
-changed here).
+nothing else) and Q-G (the resent deciding 1v1 report answers 200
+"duplicate" with the stored match's id and writes nothing; closed by lane
+server-fix-1114).
 
 Every H3 and H8 case also records each call main.py makes to the hook, the
 real hook still doing the work (the hook_calls fixture), and asserts it: a
@@ -790,8 +790,8 @@ def test_pg_1v1_a_series_of_two_games_credits_two(opened, hook_calls):
     hook for both players keyed by its own match id and credits each +1 --
     P1 across its second rung (granted, owned, worn); game 2 completes the
     series and credits each +1 again under ITS id; both GETs read +2; the
-    deciding report sent again dies at the flush on unique_match, before the
-    hook, with nothing written; the bystander never moves.
+    deciding report sent again meets unique_match at the flush, before the
+    hook, and is answered as already recorded with nothing written; the bystander never moves.
 
     Negative control (recorded in the build notes): main.py's 1v1 call keyed
     by str(series.id) again turns this red -- the second game's claim
@@ -837,8 +837,11 @@ def test_pg_1v1_a_series_of_two_games_credits_two(opened, hook_calls):
                 assert _worn_games(body) == (WEAR[s][0], WEAR[s][1] + 2), (
                     "H6: the GET after the series", s, _worn_games(body))
             again = await _submit(sm, main.submit_match, deciding)
-            assert isinstance(again[1], IntegrityError) and "unique_match" in str(again[1]), (
-                "H3: the resent deciding report did not die on unique_match", again[1])
+            assert again[1] is None and again[0].series_status == "duplicate", (
+                "H3: the resent deciding report was not answered as recorded", again)
+            assert str(again[0].match_id) == m2, ("H3: not the existing match", again[0])
+            assert any(ln.startswith("[MATCH] repeated report answered as already recorded")
+                       for ln in again[2]), again[2]
             after, econ2 = await _look(schema)
             assert after == done and econ2 == econ, (
                 "H3: the resent deciding report wrote something")
@@ -1931,7 +1934,7 @@ async def _r3_run(how, tag, armed=None):
 @pytest.mark.parametrize("how", ["fail", "one_commit"])
 def test_pg_r3_the_1v1_credit_rides_the_reports_one_commit(opened, monkeypatch, how):
     """LOW-R3 (design V3 section 12.6): "Forcing the 1v1 T2 pass to fail or
-    take the skip at `backend/api/main.py:8338-8350` leaves the T1 credit
+    take the skip at `backend/api/main.py:8405-8417` leaves the T1 credit
     committed without a rating update; the credit must not cause a match,
     gold or unrelated-ladder mutation." (The line numbers are the base
     tree's.) Re-read for the tree this file runs on: the v1.41.0 candidate
@@ -2044,17 +2047,15 @@ async def _app(schema):
         await engine.dispose()
 
 
-def test_pg_qg_the_resent_1v1_report_answers_500_and_writes_nothing(opened):
+def test_pg_qg_the_resent_1v1_report_answers_duplicate_and_writes_nothing(opened):
     """LOW-Q-G (design V3 section 12.6): "Resending the same 1v1 report
-    currently returns HTTP 500 at `backend/api/main.py:7669`; it must write
-    no second result, rating, gold or ladder credit." (The line number is
-    the base tree's.) Documented as it stands and NOT changed in this
-    lane: through main.app, the series' two reports answer 200 and complete
-    it, crediting both players once per game; the deciding report sent again
-    answers
-    HTTP 500 -- its match insert's flush meets unique_match before any
-    series logic -- and writes no second result, rating, gold or ladder
-    credit."""
+    currently returns HTTP 500 ...; it must write no second result, rating,
+    gold or ladder credit." Closed by lane server-fix-1114: through main.app,
+    the series' two reports answer 200 and complete it, crediting both
+    players once per game; the deciding report sent again meets unique_match
+    at its match insert's flush, before any series logic, and answers 200
+    series_status "duplicate" with the existing match's id -- and writes no
+    second result, rating, gold or ladder credit."""
     _require_live_pg()
 
     async def _go():
@@ -2075,7 +2076,9 @@ def test_pg_qg_the_resent_1v1_report_answers_500_and_writes_nothing(opened):
                     assert _credited(done, str(ref), "1v1", [P1, P2]), done["credits"]
                 assert len(done["credits"]) == 4, done["credits"]
                 again = await client.post("/api/v1/matches", json=deciding)
-                assert again.status_code == 500, (again.status_code, again.text)
+                assert again.status_code == 200, (again.status_code, again.text)
+                assert again.json()["series_status"] == "duplicate", again.text
+                assert again.json()["match_id"] == second.json()["match_id"], again.text
             after, econ2 = await _look(schema)
             assert len(econ2["matches"]) == 2, econ2["matches"]
             assert after == done and econ2 == econ, (
@@ -2316,7 +2319,7 @@ def test_m6_the_rating_pass_and_its_gold_supplement_ride_the_reports_one_commit(
     assert src.count(call) == 1, src.count(call)
     i = src.index(call)
     assert "_ladder_late_mark = _ladder_achievement_mark(db)" in src[i - 400:i], src[i - 400:i]
-    seg = src[i:src.index("await db.commit()", i)]
+    seg = src[i:src.index("await _commit_new_match(db)", i)]   # the report's commit (server-fix-1114)
     assert ("_ladder_add_late_gold(\n            db, match.id, _ladder_late_mark, "
             "_ladder_achievement_mark(db), \"rating\")") in seg[:400], seg[:400]
     assert seg.count("_ladder_add_late_gold(") == 3, seg.count("_ladder_add_late_gold(")

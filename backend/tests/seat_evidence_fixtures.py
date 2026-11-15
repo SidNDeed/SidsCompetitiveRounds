@@ -69,8 +69,8 @@ def worst_case_record(n=400) -> dict:
     """Every scalar at its widest legal text, and every list far past the cap
     with full-width signed stamps (the L6 failing input: four 160-entry lists
     of int32-minimum stamps already pass 12 KiB). Every entry is CONTRACT
-    -VALID, cross-field invariants included (check_events): own_open is one
-    of its two states, hit_recv is path 0 with pid 0, and a hit_sent naming
+    -VALID, cross-field invariants included (check_events): own_open is an
+    integer inside the MS bound, hit_recv is path 0 with pid 0, and a hit_sent naming
     a block carries that block's last_* tuple and the keyed last-reset state
     (amended B7: the tenth element, one digit whatever its value)."""
     lo = se.I32_MIN
