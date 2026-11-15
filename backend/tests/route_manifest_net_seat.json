@@ -3710,7 +3710,7 @@
           ],
           "main",
           "submit_seat_evidence",
-          "6f33d821f16d4f742e092081b3def3d85cd54f64"
+          "5719782c506d294d92332233feaccfc4923ae96a"
         ]
       ]
     },
@@ -3911,7 +3911,7 @@
           ],
           "main",
           "submit_identity_clock_evidence",
-          "dda72864a967efda7b37a88adf505ea4b22652a7"
+          "932685e3f0fa1caba841bf8121a962875e9d3e5c"
         ]
       ]
     },
@@ -3944,7 +3944,7 @@
           ],
           "main",
           "submit_card_evidence",
-          "9a29f3578bb754fd91da81aba20f909a5f5dc6ba"
+          "96dd64f03e7fdd6269f1a4b984c996c1df3a697b"
         ]
       ]
     },
@@ -3968,7 +3968,7 @@
           ],
           "main",
           "submit_combat_evidence",
-          "0b27836ee708174fdc2f602a1ad578060d1e79df"
+          "7ef84d322a3dee842234898b57d42f5f41dfbc6d"
         ]
       ]
     }
@@ -3983,7 +3983,7 @@
       [
         "main",
         "evidence_census_gate",
-        "5a6a83da69bd983103d5b7125f0f00aa49149eb4"
+        "f315d24b18cbc97efd289b751b090ef0e88a41b8"
       ],
       [
         "main",
@@ -4022,7 +4022,7 @@
       [
         "main",
         "lifespan",
-        "d39e58d0969bdbd54398de1fe5e7014c632fca22"
+        "1cdfc33a4f380e694687440bbc62e4ee07ce19b0"
       ]
     ]
   },
