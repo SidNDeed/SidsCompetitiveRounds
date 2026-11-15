@@ -2309,6 +2309,11 @@ def _janitor_sql_from_sources(sources: dict, roots) -> dict:
         exactly like Python;
       - `+` concatenation requires every operand to be str; f-string
         placeholders str() their value exactly like Python;
+      - a call is refused, except a call to the one ban definition
+        (models.player_ban_active_sql) whose one argument is a positional
+        str literal (the alias),
+        under a name nothing else in the module binds: it evaluates to the
+        text the same call builds at runtime;
       - a conditional expression expands ONLY when its test is statically
         known (literal, or a name resolving to exactly one constant), and
         then only its live arm is inventoried. RUNTIME-conditional SQL is
@@ -2387,6 +2392,42 @@ def _janitor_sql_from_sources(sources: dict, roots) -> dict:
                 for a in node.names:
                     if a.name in sources:
                         mod_aliases[m].setdefault(a.asname or a.name, set()).add(a.name)
+
+    # The one ban definition (models.player_ban_active_sql, migration 417).
+    # A call to it whose one argument is a positional str literal (the
+    # alias) evaluates to exactly the
+    # text the runtime builds from the same call, so the evaluator takes that
+    # text. The name resolves only when the module binds it by a top-level
+    # `from models import player_ban_active_sql [as X]` and by nothing else
+    # anywhere in the module (no second import, store, parameter, def,
+    # class, handler, pattern or global). Any other call, and this one with
+    # a non-literal argument, a keyword or a second argument, stays
+    # unresolvable and lands in `dynamic`.
+    ban_def_names: dict = {}   # module -> local names bound only to the definition
+    for m, tree in trees.items():
+        cands = set()
+        for node in tree.body:
+            if isinstance(node, _ast.ImportFrom) and node.module == "models" \
+                    and not node.level:
+                for a in node.names:
+                    if a.name == "player_ban_active_sql":
+                        cands.add(a.asname or a.name)
+        ban_def_names[m] = set()
+        for name in cands:
+            binds = 0
+            for node in _ast.walk(tree):
+                if isinstance(node, _ast.alias):
+                    binds += (node.asname or node.name.split(".")[0]) == name
+                elif isinstance(node, _ast.Name):
+                    binds += 2 * (node.id == name and not isinstance(node.ctx, _ast.Load))
+                elif isinstance(node, _ast.arg):
+                    binds += 2 * (node.arg == name)
+                elif isinstance(node, (_ast.Global, _ast.Nonlocal)):
+                    binds += 2 * (name in node.names)
+                else:
+                    binds += 2 * any(getattr(node, f, None) == name for f in ("name", "rest"))
+            if binds == 1:
+                ban_def_names[m].add(name)
 
     _MAX_VARIANTS = 20
     _SCOPES = (_ast.FunctionDef, _ast.AsyncFunctionDef, _ast.Lambda)
@@ -2845,6 +2886,7 @@ def _janitor_sql_from_sources(sources: dict, roots) -> dict:
 
     mod_consts = {m: _module_consts(tree) for m, tree in trees.items()}
     _module_view = [None]   # the module whose constants a module-constant recursion resolves against (c5 E)
+    _ban_def_view = [frozenset()]   # that module's names for the one ban definition
 
     def _string_variants(node, env, consts, site_scope, site_cond, site_line,
                          depth=0):
@@ -2935,6 +2977,16 @@ def _janitor_sql_from_sources(sources: dict, roots) -> dict:
                     return None
                 outs = [o + p for o in outs for p in part]
             return outs
+        if isinstance(node, _ast.Call):
+            f = node.func
+            if isinstance(f, _ast.Name) and f.id in _ban_def_view[0] \
+                    and len(node.args) == 1 and not node.keywords \
+                    and all(isinstance(a, _ast.Constant) and isinstance(a.value, str)
+                            for a in node.args):
+                try:
+                    return [player_ban_active_sql(*[a.value for a in node.args])]
+                except ValueError:   # an argument the definition refuses
+                    return None
         return None
 
     def _const_loop_rows(node, consts, loop_ok, site_scope, site_cond):
@@ -3009,6 +3061,7 @@ def _janitor_sql_from_sources(sources: dict, roots) -> dict:
         dynamic (statically unresolvable) call sites [line]."""
         found, dyn = [], []
         _module_view[0] = mod_consts[mod]
+        _ban_def_view[0] = frozenset(ban_def_names[mod])
         consts, loop_ok, expansion_disabled, bound_here = _analyze_bindings(fn_node)
         if expansion_disabled:
             consts, loop_ok = {}, set()
@@ -29169,11 +29222,15 @@ _PC_POOL_RULE = 3
 # of the summary and of /card. `mod_seen_at` is the set-once "has ever run the
 # mod" stamp (bug #78). The ban clause is _PC_NOT_BANNED_SQL's text, written
 # out because that fragment is defined further down, with the handout; a test
-# pins the two spellings together.
+# pins the two spellings together. The tail after the id clause is bracketed
+# for the reason the snapshot select's tail is (see the note above
+# _PC_SNAPSHOT_SELECT_SQL): written flat, the ban call's two extra `+` terms
+# push _PC_POOL_STEAM_ID_SQL two levels deeper and the janitor inventory's
+# folder stops resolving _pc_take_snapshot.
 _PC_POOL_MEMBER_SQL = """(p.deleted_at IS NULL
-           AND """ + _PC_POOL_STEAM_ID_SQL + """
+           AND """ + _PC_POOL_STEAM_ID_SQL + ("""
            AND p.mod_seen_at IS NOT NULL
-           AND NOT EXISTS (SELECT 1 FROM player_bans b WHERE b.steam_id = p.steam_id AND """ + player_ban_active_sql("b") + """))"""
+           AND NOT EXISTS (SELECT 1 FROM player_bans b WHERE b.steam_id = p.steam_id AND """ + player_ban_active_sql("b") + """))""")
 
 # board_rank (c3 F): eligibility is the LIVE leaderboard's own count — every
 # completed series, an invalidated one included, plus legacy matches — with
@@ -29718,7 +29775,7 @@ _PC_TRADE_PARTY_SQL = """
 # ELSE t.pair_lo END); a read translates them to its viewer's side.
 _PC_TRADE_DEAD_CODES = ("print_gone", "not_owned", "subject_unavailable", "trading_closed",
                         "counterparty_closed", "not_eligible", "counterparty_unavailable")
-_PC_TRADE_DEAD_SQL = """(t.status = 'proposed' AND (EXISTS (SELECT 1 FROM unnest(t.a_prints || t.b_prints) AS n(print_id)
+_PC_TRADE_DEAD_SQL = f"""(t.status = 'proposed' AND (EXISTS (SELECT 1 FROM unnest(t.a_prints || t.b_prints) AS n(print_id)
                     WHERE NOT EXISTS (SELECT 1 FROM pc_prints pr
                                        WHERE pr.id = n.print_id AND pr.discarded_at IS NULL))
       OR EXISTS (SELECT 1 FROM pc_prints pr
@@ -29728,18 +29785,18 @@ _PC_TRADE_DEAD_SQL = """(t.status = 'proposed' AND (EXISTS (SELECT 1 FROM unnest
                       JOIN pc_cards c ON c.id = pr.card_id
                       JOIN players s ON s.id = c.subject_player_id
                     WHERE pr.id = ANY(t.a_prints || t.b_prints)
-                      AND EXISTS (SELECT 1 FROM player_bans b WHERE b.steam_id = s.steam_id AND """ + player_ban_active_sql("b") + """))
+                      AND EXISTS (SELECT 1 FROM player_bans b WHERE b.steam_id = s.steam_id AND {player_ban_active_sql('b')}))
       OR EXISTS (SELECT 1 FROM players p WHERE p.id = t.proposer
                     AND (NOT p.pc_trades_open OR p.pc_trades_generation <> t.proposer_generation))
       OR EXISTS (SELECT 1 FROM players p WHERE p.id = (CASE WHEN t.proposer = t.pair_lo THEN t.pair_hi ELSE t.pair_lo END)
                     AND (NOT p.pc_trades_open OR p.pc_trades_generation <> t.counterparty_generation))
       OR EXISTS (SELECT 1 FROM players p WHERE p.id = t.proposer
                     AND (p.deleted_at IS NOT NULL
-                         OR EXISTS (SELECT 1 FROM player_bans b WHERE b.steam_id = p.steam_id AND """ + player_ban_active_sql("b") + """)))
+                         OR EXISTS (SELECT 1 FROM player_bans b WHERE b.steam_id = p.steam_id AND {player_ban_active_sql('b')})))
       OR EXISTS (SELECT 1 FROM players p WHERE p.id = (CASE WHEN t.proposer = t.pair_lo THEN t.pair_hi ELSE t.pair_lo END)
                     AND (p.deleted_at IS NOT NULL
-                         OR EXISTS (SELECT 1 FROM player_bans b WHERE b.steam_id = p.steam_id AND """ + player_ban_active_sql("b") + """)))))"""
-_PC_TRADE_VOID_REASON_SQL = """(CASE WHEN EXISTS (SELECT 1 FROM unnest(t.a_prints || t.b_prints) AS n(print_id)
+                         OR EXISTS (SELECT 1 FROM player_bans b WHERE b.steam_id = p.steam_id AND {player_ban_active_sql('b')})))))"""
+_PC_TRADE_VOID_REASON_SQL = f"""(CASE WHEN EXISTS (SELECT 1 FROM unnest(t.a_prints || t.b_prints) AS n(print_id)
                     WHERE NOT EXISTS (SELECT 1 FROM pc_prints pr
                                        WHERE pr.id = n.print_id AND pr.discarded_at IS NULL)) THEN 'print_gone'
       WHEN EXISTS (SELECT 1 FROM pc_prints pr
@@ -29749,17 +29806,17 @@ _PC_TRADE_VOID_REASON_SQL = """(CASE WHEN EXISTS (SELECT 1 FROM unnest(t.a_print
                       JOIN pc_cards c ON c.id = pr.card_id
                       JOIN players s ON s.id = c.subject_player_id
                     WHERE pr.id = ANY(t.a_prints || t.b_prints)
-                      AND EXISTS (SELECT 1 FROM player_bans b WHERE b.steam_id = s.steam_id AND """ + player_ban_active_sql("b") + """)) THEN 'subject_unavailable'
+                      AND EXISTS (SELECT 1 FROM player_bans b WHERE b.steam_id = s.steam_id AND {player_ban_active_sql('b')})) THEN 'subject_unavailable'
       WHEN EXISTS (SELECT 1 FROM players p WHERE p.id = t.proposer
                     AND (NOT p.pc_trades_open OR p.pc_trades_generation <> t.proposer_generation)) THEN 'trading_closed'
       WHEN EXISTS (SELECT 1 FROM players p WHERE p.id = (CASE WHEN t.proposer = t.pair_lo THEN t.pair_hi ELSE t.pair_lo END)
                     AND (NOT p.pc_trades_open OR p.pc_trades_generation <> t.counterparty_generation)) THEN 'counterparty_closed'
       WHEN EXISTS (SELECT 1 FROM players p WHERE p.id = t.proposer
                     AND (p.deleted_at IS NOT NULL
-                         OR EXISTS (SELECT 1 FROM player_bans b WHERE b.steam_id = p.steam_id AND """ + player_ban_active_sql("b") + """))) THEN 'not_eligible'
+                         OR EXISTS (SELECT 1 FROM player_bans b WHERE b.steam_id = p.steam_id AND {player_ban_active_sql('b')}))) THEN 'not_eligible'
       WHEN EXISTS (SELECT 1 FROM players p WHERE p.id = (CASE WHEN t.proposer = t.pair_lo THEN t.pair_hi ELSE t.pair_lo END)
                     AND (p.deleted_at IS NOT NULL
-                         OR EXISTS (SELECT 1 FROM player_bans b WHERE b.steam_id = p.steam_id AND """ + player_ban_active_sql("b") + """))) THEN 'counterparty_unavailable' END)"""
+                         OR EXISTS (SELECT 1 FROM player_bans b WHERE b.steam_id = p.steam_id AND {player_ban_active_sql('b')}))) THEN 'counterparty_unavailable' END)"""
 
 # A stored (proposer-side) void code as the RECEIVER reads it.
 _PC_TRADE_REASON_FOR_RECEIVER = {
