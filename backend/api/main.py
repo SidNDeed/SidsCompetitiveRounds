@@ -7706,6 +7706,17 @@ _MUSIC_DELIST_BUILD = 1
 # statements name, and the app whether that route is bound. Its statements are
 # DERIVED from the report's own constants, so it is defined after
 # get_set_report.
+# Release-train verification plumbing, not a design mechanism: the build
+# marker of the casual-streak lane (the /players/{steam_id} answer carries
+# current_casual_streak, the signed current value of the same full-history
+# walk that gives best_casual_streak), reported on /health as
+# `casual_streak_build`. It names build identity only. The lane adds no
+# route, and a stale box answers the stats read with the key left out and
+# no error, so without it the train could not tell a box on the new build
+# from a stale one (learnings 780, 794). A code constant, equal on both
+# boxes by construction, probed by the release train and read by nothing
+# else (#306). Absent on any build before it.
+_CASUAL_STREAK_BUILD = 1
 
 
 def _title_ladders_health_word() -> int:
@@ -7779,6 +7790,7 @@ async def health_check(db: AsyncSession = Depends(get_db)):
                               region_pick_build=_REGION_PICK_BUILD,
                               rehearsal_four_build=_REHEARSAL_FOUR_BUILD,
                               music_delist_build=_MUSIC_DELIST_BUILD,
+                              casual_streak_build=_CASUAL_STREAK_BUILD,
                               build_manifest=_build_manifest.health_word(),
                               review_eval=_review_rules.review_eval(),
                               review_rules=_review_rules.health_word(),
@@ -7842,6 +7854,7 @@ async def health_check(db: AsyncSession = Depends(get_db)):
                               region_pick_build=_REGION_PICK_BUILD,
                               rehearsal_four_build=_REHEARSAL_FOUR_BUILD,
                               music_delist_build=_MUSIC_DELIST_BUILD,
+                              casual_streak_build=_CASUAL_STREAK_BUILD,
                               build_manifest=_build_manifest.health_word(),
                               review_eval=_review_rules.review_eval(),
                               review_rules=_review_rules.health_word(),
@@ -11795,7 +11808,7 @@ async def get_player_stats(
           AND m.invalidated_at IS NULL
         ORDER BY m.ended_at ASC
     """), {"pid": player.id})).mappings().all()
-    best_casual_streak, _ = _walk_streak(casual_streak_rows, player.id)
+    best_casual_streak, current_casual_streak = _walk_streak(casual_streak_rows, player.id)
 
     # Active cosmetic lookups (title + trail + map color)
     active_title_name: str | None = None
@@ -12771,6 +12784,7 @@ async def get_player_stats(
         xp_for_next_level=xp_needed_for_next,
         best_ranked_streak=best_ranked_streak,
         best_casual_streak=best_casual_streak,
+        current_casual_streak=current_casual_streak,
         best_ranked_game_streak=best_ranked_game_streak,
         current_ranked_game_streak=current_ranked_game_streak,
         best_ranked_series_streak=best_ranked_streak,
