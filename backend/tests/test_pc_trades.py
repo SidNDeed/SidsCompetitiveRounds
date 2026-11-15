@@ -109,7 +109,7 @@ OPTOUT = os.environ.get(OPTOUT_VAR) == "1"
 
 SCHEMA = "pc_trades_t"
 HARNESS_TABLE = "pc_trades_harness"
-HARNESS_VERSION = "3"
+HARNESS_VERSION = "4"
 SQL_DIR = BACKEND / "sql"
 MIGRATION = SQL_DIR / "353_pc_trades.sql"
 MIGRATION_NUMBER = 353
@@ -295,6 +295,159 @@ def _stale_held_out():
     then no longer says what the replay leaves out."""
     numbered = {p.name for p in SQL_DIR.glob("*.sql") if re.match(r"^\d{3}_", p.name)}
     return sorted(HELD_OUT - numbered)
+
+
+# -- the tables the ORM build leaves to their file -----------------------------
+#
+# A CREATE TABLE without IF NOT EXISTS creates its table or fails, and 416
+# creates its two tables or refuses a pair it did not create and mark (its
+# CREATE OR REFUSE). _build runs create_all before it replays the files above
+# 353, so a table such a file creates must not come from the ORM: the replay
+# would fail on it (416's "neither both absent nor both marked"). _build
+# leaves those tables out of create_all and out of the column top-up, and
+# checks after the replay that the files made each of them.
+#
+# The set is read from the files above 353: comments and the contents of
+# quoted strings are left out, and each dollar-quoted body (a DO block's or a
+# function's) is read as SQL of its own, or left out when it does not lex as
+# SQL (a data literal). A misreading fails a run either way: a table it misses
+# fails the replay's own check in _build (with its file's error), and a table
+# it adds fails here (models.py does not declare it) or fails _build's check
+# that the files made it.
+
+_SQL_SPECIAL = re.compile(r"--|/\*|['\"$]")
+_EOL = re.compile(r"[\r\n]")
+_DOLLAR_QUOTE = re.compile(r"\$(?:[^\W\d]\w*)?\$")
+_BARE_CREATE_TABLE = re.compile(
+    r"\bCREATE\s+(?:UNLOGGED\s+)?TABLE\s+(?!IF\s+NOT\s+EXISTS\b)"
+    r"(\"(?:[^\"]|\"\")+\"|[^\W\d][\w$]*)(\s*\.)?", re.I)
+
+
+def _ident_char(ch):
+    return ch.isalnum() or ch in "_$"
+
+
+def _string_end(src, i, esc):
+    """The index after the string literal whose opening quote is at i (an
+    escape string's backslash takes the next character)."""
+    j, n = i + 1, len(src)
+    while j < n:
+        k = src.find("'", j)
+        if esc:
+            b = src.find("\\", j)
+            if b >= 0 and (k < 0 or b < k):
+                j = b + 2
+                continue
+        if k < 0:
+            break
+        if src.startswith("''", k):
+            j = k + 2
+            continue
+        return k + 1
+    raise ValueError("an unterminated string at offset %d" % i)
+
+
+def _sql_code(src):
+    """src's SQL as a list of texts: src with its comments and the contents
+    of its quoted strings blanked and its dollar-quoted bodies taken out,
+    then each body read the same way, in order. A body that does not lex (an
+    unterminated string, comment or quote: a data literal, not SQL) adds
+    nothing; src itself not lexing raises ValueError."""
+    out, bodies, i, n = [], [], 0, len(src)
+    while i < n:
+        m = _SQL_SPECIAL.search(src, i)
+        if m is None:
+            out.append(src[i:])
+            break
+        out.append(src[i:m.start()])
+        i = m.start()
+        c = src[i]
+        if src.startswith("--", i):
+            e = _EOL.search(src, i)
+            i = n if e is None else e.start()
+            out.append(" ")
+        elif src.startswith("/*", i):
+            depth, j = 1, i + 2
+            while depth:
+                a, b = src.find("/*", j), src.find("*/", j)
+                if b < 0:
+                    raise ValueError("an unterminated block comment at offset %d" % i)
+                if 0 <= a < b:
+                    depth, j = depth + 1, a + 2
+                else:
+                    depth, j = depth - 1, b + 2
+            i = j
+            out.append(" ")
+        elif c == "'":
+            esc = i > 0 and src[i - 1] in "eE" and (i < 2 or not _ident_char(src[i - 2]))
+            i = _string_end(src, i, esc)
+            out.append(" ")
+        elif c == '"':
+            j = i + 1
+            while True:
+                j = src.find('"', j)
+                if j < 0:
+                    raise ValueError("an unterminated quoted identifier at offset %d" % i)
+                if not src.startswith('""', j):
+                    break
+                j += 2
+            out.append(src[i:j + 1])
+            i = j + 1
+        else:
+            q = _DOLLAR_QUOTE.match(src, i)
+            if q is None or (i > 0 and _ident_char(src[i - 1])):
+                out.append(c)
+                i += 1
+                continue
+            tag = q.group(0)
+            j = src.find(tag, i + len(tag))
+            if j < 0:
+                raise ValueError("an unterminated dollar quote %s at offset %d" % (tag, i))
+            bodies.append(src[i + len(tag):j])
+            out.append(" ")
+            i = j + len(tag)
+    texts = ["".join(out)]
+    for body in bodies:
+        try:
+            texts.extend(_sql_code(body))
+        except ValueError:
+            pass
+    return texts
+
+
+def _create_or_refuse_tables(sources=None):
+    """{table: the file that creates it} for every table a numbered file
+    above 353 creates with a CREATE TABLE that has no IF NOT EXISTS (see
+    above). `sources` is (name, text) pairs, the files above 353 by default.
+    Fails when it derives nothing (a reading that can come back empty would
+    leave nothing out for ever), when a file names a schema for the table,
+    when models.py does not declare a table it derives, and when a table the
+    ORM build keeps has a foreign key to one it leaves out."""
+    if sources is None:
+        sources = [(p.name, p.read_text(encoding="utf-8")) for p in _numbered(above=MIGRATION_NUMBER)]
+    found = {}
+    for fname, src in sources:
+        try:
+            texts = _sql_code(src)
+        except ValueError as e:
+            raise AssertionError("%s does not lex: %s" % (fname, e))
+        for code in texts:
+            for m in _BARE_CREATE_TABLE.finditer(code):
+                assert not m.group(2), ("%s: a CREATE TABLE names a schema; the harness builds into "
+                                        "its own" % fname, m.group(0))
+                t = m.group(1)
+                t = t[1:-1].replace('""', '"') if t.startswith('"') else t.lower()
+                found.setdefault(t, fname)
+    assert found, ("the files above 353 create no table without IF NOT EXISTS: the reading derived "
+                   "nothing to leave out of the ORM build", [fname for fname, _src in sources][:5])
+    declared = models.Base.metadata.tables
+    undeclared = {t: f for t, f in found.items() if t not in declared}
+    assert not undeclared, ("a table a file above 353 creates is not declared in models.py", undeclared)
+    kept = sorted("%s -> %s" % (t.name, fk.target_fullname)
+                  for t in models.Base.metadata.sorted_tables if t.name not in found
+                  for fk in t.foreign_keys if fk.target_fullname.split(".")[0] in found)
+    assert not kept, ("a table the ORM build keeps has a foreign key to one it leaves out", kept)
+    return found
 
 
 def _sign(canon):
@@ -484,8 +637,11 @@ async def _orm(fn):
         await engine.dispose()
 
 
-async def _create_all(c):
-    await c.run_sync(models.Base.metadata.create_all)
+async def _create_all(c, left):
+    """create_all over every mapped table except `left`, the tables a file
+    above 353 creates (_create_or_refuse_tables)."""
+    tables = [t for t in models.Base.metadata.sorted_tables if t.name not in left]
+    await c.run_sync(lambda sc: models.Base.metadata.create_all(sc, tables=tables))
 
 
 def _353_added_columns():
@@ -500,10 +656,14 @@ def _353_added_columns():
     return found
 
 
-async def _orm_columns(c):
+async def _orm_columns(c, left):
+    """The mapped columns the tables lack, added, except 353's own and the
+    columns of `left` (tables the replay above 353 has not made yet)."""
     from sqlalchemy.schema import CreateColumn
     added, skip = [], _353_added_columns()
     for table in models.Base.metadata.sorted_tables:
+        if table.name in left:
+            continue
         have = {r[0] for r in (await c.exec_driver_sql(
             "SELECT attname FROM pg_attribute WHERE attrelid = to_regclass('\"%s\".\"%s\"') "
             "AND attnum > 0 AND NOT attisdropped" % (SCHEMA, table.name))).all()}
@@ -539,12 +699,17 @@ async def _build():
         await conn.execute('DROP SCHEMA IF EXISTS "%s" CASCADE' % SCHEMA)
         await conn.execute('CREATE SCHEMA "%s"' % SCHEMA)
         files = _numbered(upto=MIGRATION_NUMBER - 1)
+        left = _create_or_refuse_tables()
         await _replay(conn, files)
-        await _orm(_create_all)
+        await _orm(lambda c: _create_all(c, left))
         await _replay(conn, files)
-        await _orm(_orm_columns)
+        await _orm(lambda c: _orm_columns(c, left))
         count, failures = await _replay(conn, _numbered(above=MIGRATION_NUMBER))
         assert not failures, ("a migration above 353 failed its replay before 353", failures)
+        unmade = [t for t in sorted(left) if not await conn.fetchval(
+            "SELECT to_regclass($1) IS NOT NULL", '"%s"."%s"' % (SCHEMA, t))]
+        assert not unmade, ("a table the ORM build left to a file above 353 was not made by it",
+                            {t: left[t] for t in unmade})
         fp_pre = await _fingerprint(conn)
         await conn.execute(MIGRATION.read_text(encoding="utf-8"))
         fp_full = await _fingerprint(conn)
@@ -2835,3 +3000,179 @@ def test_f67_a_deletion_meets_the_r15_ruling_clause_by_clause(env):
     assert ad == dict(freeze=None, b_received=0, b_today=0, a_cooldown=None), ("(d) derived state", ad)
     assert out["pids"][0] != out["pids"][1] and out["fresh"] == (True, 0), ("(d) recreated", out["fresh"])
     assert out["again"][0] == 200, ("(d) the recreated account proposes", out["again"])
+
+
+# ------------------------------------ the ORM build and the files above 353
+
+def test_the_orm_build_leaves_out_the_tables_a_file_above_353_creates():
+    """The reading behind _build's left-out set (_create_or_refuse_tables), on
+    the real files and on planted ones. The real files above 353 give 416's
+    two tables and nothing else (the words CREATE TABLE in comments of 361,
+    384 and 397 give nothing). Planted: a CREATE TABLE in a line comment, a
+    nested block comment, a string, an escape string or a data literal gives
+    nothing, and so does IF NOT EXISTS; one in a DO body gives its table; a
+    bare name is folded and a quoted one taken exactly. A reading that finds
+    no table, a table models.py does not declare, a schema-qualified name, a
+    kept table with a foreign key to a left-out one, and a file that does not
+    lex each fail."""
+    assert _create_or_refuse_tables() == {"lobby_invites": "416_lobby_invites.sql",
+                                          "invite_receipts": "416_lobby_invites.sql"}
+    planted = (
+        "-- CREATE TABLE players (x int);\n"
+        "/* CREATE TABLE players ( /* nested */ x int); */\n"
+        "SELECT 'CREATE TABLE players (x int)', E'\\' CREATE TABLE players', $t$it's CREATE TABLE$t$;\n"
+        "CREATE TABLE IF NOT EXISTS players (x int);\n"
+        "DO $d$ BEGIN RAISE NOTICE 'CREATE TABLE players'; -- CREATE TABLE players\n"
+        "  CREATE TABLE LOBBY_INVITES (x int); END $d$;\n"
+        "CREATE TABLE \"invite_receipts\" (x int);\n")
+    assert _create_or_refuse_tables([("900_planted.sql", planted)]) == {
+        "lobby_invites": "900_planted.sql", "invite_receipts": "900_planted.sql"}
+    pair = "CREATE TABLE lobby_invites (x int); CREATE TABLE invite_receipts (x int);\n"
+    for src, words in (
+            ("CREATE TABLE IF NOT EXISTS players (x int);", "derived nothing"),
+            (pair + "CREATE TABLE pct_no_such_table (x int);", "not declared in models.py"),
+            (pair + "CREATE TABLE public.mail_send_receipts (x int);", "names a schema"),
+            ("CREATE TABLE lobby_invites (x int);", "foreign key to one it leaves out"),
+            (pair + "SELECT 'unterminated;", "does not lex")):
+        with pytest.raises(AssertionError, match=words):
+            _create_or_refuse_tables([("900_planted.sql", src)])
+
+
+def _m416_tables_block():
+    """416's CREATE OR REFUSE block: the statement that creates its pair."""
+    stmts = [s for s in split_sql((SQL_DIR / "416_lobby_invites.sql").read_text(encoding="utf-8"))
+             if "$m416tables$" in s]
+    assert len(stmts) == 1, stmts
+    return stmts[0]
+
+
+def _orm_ddl(names):
+    """What create_all runs for the mapped tables `names`: each table's
+    CREATE TABLE, then its indexes', in dependency order."""
+    from sqlalchemy.dialects import postgresql
+    from sqlalchemy.schema import CreateIndex, CreateTable
+    dialect = postgresql.dialect()
+    out = []
+    for t in models.Base.metadata.sorted_tables:
+        if t.name in names:
+            out.append(str(CreateTable(t).compile(dialect=dialect)))
+            out.extend(str(CreateIndex(ix).compile(dialect=dialect))
+                       for ix in sorted(t.indexes, key=lambda ix: ix.name))
+    assert {t.name for t in models.Base.metadata.sorted_tables if t.name in names} == set(names), names
+    return out
+
+
+async def _rolled_back(app, fn):
+    """fn(conn) on a connection of its own, in one transaction that is then
+    rolled back, whatever fn did or raised."""
+    conn = await _connect(app)
+    tr = conn.transaction()
+    await tr.start()
+    try:
+        return await fn(conn)
+    finally:
+        await tr.rollback()
+        await conn.close()
+
+
+def test_416_refuses_the_pair_an_orm_build_makes_and_finds_its_own_in_the_build(env):
+    """The left-out set's control, the failure it removes: in the built
+    schema 416's CREATE OR REFUSE block finds its pair marked and passes;
+    with the pair made as create_all made it before the set existed (the two
+    tables dropped, then the ORM's DDL for them), the same block refuses with
+    416's own text. One transaction, rolled back."""
+    block = _m416_tables_block()
+
+    async def go(conn):
+        await conn.execute(block)
+        await conn.execute("DROP TABLE invite_receipts, lobby_invites")
+        for stmt in _orm_ddl({"lobby_invites", "invite_receipts"}):
+            await conn.execute(stmt)
+        try:
+            await conn.execute(block)
+        except asyncpg.PostgresError as e:
+            return (str(e).splitlines() or [""])[0]
+        return None
+    assert _run(_rolled_back("m416", go)) == (
+        "416: lobby_invites and invite_receipts are neither both absent nor both marked by this "
+        "file (found: invite_receipts unmarked, lobby_invites unmarked)")
+
+
+_DESCRIBE_SQL = (
+    ("columns",
+     "SELECT a.attname, format_type(a.atttypid, a.atttypmod), a.attnotnull,"
+     "       pg_get_expr(d.adbin, d.adrelid)"
+     "  FROM pg_attribute a LEFT JOIN pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum"
+     " WHERE a.attrelid = to_regclass($1) AND a.attnum > 0 AND NOT a.attisdropped ORDER BY a.attnum"),
+    ("constraints",
+     "SELECT conname, contype::text, pg_get_constraintdef(oid) FROM pg_constraint"
+     " WHERE conrelid = to_regclass($1) ORDER BY conname"),
+    ("indexes",
+     "SELECT c.relname, pg_get_indexdef(i.indexrelid) FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid"
+     " WHERE i.indrelid = to_regclass($1) ORDER BY c.relname"),
+)
+
+
+async def _described(conn, schema, table):
+    """The table as the catalog has it: its columns (name, type, not null,
+    default, in column order), its constraints (name, kind, definition) and
+    its indexes (name, definition), with `schema.` taken out of each text."""
+    rel = '"%s"."%s"' % (schema, table)
+    assert await conn.fetchval("SELECT to_regclass($1) IS NOT NULL", rel), rel
+    strip = re.compile(r'(?:"%s"|\b%s)\.' % (re.escape(schema), re.escape(schema)))
+    return {key: [tuple(strip.sub("", v) if isinstance(v, str) else v for v in r)
+                  for r in await conn.fetch(sql, rel)]
+            for key, sql in _DESCRIBE_SQL}
+
+
+def _described_diff(a, b):
+    return {k: ({r for r in a[k] if r not in b[k]}, {r for r in b[k] if r not in a[k]})
+            for k in a if a[k] != b[k]}
+
+
+def test_the_orm_and_the_migrations_build_the_invite_pair_and_mail_send_receipts_alike(env):
+    """models.py and the migrations each describe 416's pair (lobby_invites,
+    invite_receipts) and 415's mail_send_receipts. Each table is built both
+    ways, each way in a scratch schema of its own whose search_path then
+    names the build's schema (the players and mail_messages the foreign keys
+    name): by the migrations' own blocks (416's CREATE OR REFUSE block, 415's
+    table and index blocks), and by what create_all runs for the mapped
+    tables. Read from the catalog, the columns (name, type, nullability,
+    default, order), the constraints (name, kind, definition) and the indexes
+    (name, definition) are the same. Mutant: five changes to the ORM-built
+    lobby_invites, one default, one nullability, one type, one constraint
+    and one index, and the comparison names exactly those five. One
+    transaction, rolled back."""
+    m415 = [s for s in split_sql((SQL_DIR / "415_mail_send_receipts.sql").read_text(encoding="utf-8"))
+            if "$m415tbl$" in s or "$m415idx$" in s]
+    assert len(m415) == 2, m415
+    names = ("lobby_invites", "invite_receipts", "mail_send_receipts")
+
+    async def go(conn):
+        await conn.execute("CREATE SCHEMA pct_pair_mig; CREATE SCHEMA pct_pair_orm")
+        await conn.execute('SET LOCAL search_path = pct_pair_mig, "%s"' % SCHEMA)
+        for stmt in [_m416_tables_block()] + m415:
+            await conn.execute(stmt)
+        await conn.execute('SET LOCAL search_path = pct_pair_orm, "%s"' % SCHEMA)
+        for stmt in _orm_ddl(set(names)):
+            await conn.execute(stmt)
+        await conn.execute('SET LOCAL search_path = "%s"' % SCHEMA)
+        got = {t: (await _described(conn, "pct_pair_mig", t), await _described(conn, "pct_pair_orm", t))
+               for t in names}
+        for stmt in ("ALTER TABLE pct_pair_orm.lobby_invites ALTER COLUMN state DROP DEFAULT",
+                     "ALTER TABLE pct_pair_orm.lobby_invites ALTER COLUMN mail_message_id SET NOT NULL",
+                     "ALTER TABLE pct_pair_orm.lobby_invites ALTER COLUMN ended_at TYPE timestamp",
+                     "ALTER TABLE pct_pair_orm.lobby_invites DROP CONSTRAINT ck_lobby_invites_expiry",
+                     "DROP INDEX pct_pair_orm.ix_lobby_invites_expires"):
+            await conn.execute(stmt)
+        return got, await _described(conn, "pct_pair_orm", "lobby_invites")
+
+    got, mutated = _run(_rolled_back("pair", go))
+    for t, (mig, orm) in got.items():
+        assert mig["columns"] and mig["constraints"] and mig["indexes"], (t, mig)
+        assert mig == orm, (t, _described_diff(mig, orm))
+    diff = _described_diff(got["lobby_invites"][0], mutated)
+    assert {k: [sorted(r[0] for r in side) for side in v] for k, v in diff.items()} == {
+        "columns": [["ended_at", "mail_message_id", "state"], ["ended_at", "mail_message_id", "state"]],
+        "constraints": [["ck_lobby_invites_expiry"], []],
+        "indexes": [["ix_lobby_invites_expires"], []]}, diff
