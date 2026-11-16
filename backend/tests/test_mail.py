@@ -2263,7 +2263,7 @@ def test_delete_account_handles_every_new_table_by_name():
                     ("DELETE FROM mail_blocks WHERE blocker_id = :pid OR blocked_id = :pid", 1),
                     # moderation_cases: reporter_id and M11's resolved_by, both in the one last
                     # statement, which skips a held row (mail spam case lock lane, route B;
-                    # waits on mail rows that are not case rows are the open item MDPL)
+                    # two deletions waiting for each other on other mail rows: item MDPL)
                     ("text(_DELETE_CASE_SCRUB_SQL)", 1),
                     ("DELETE FROM mail_bulk_grants WHERE steam_id = :sid", 1),
                     ("DELETE FROM mail_censor_hits WHERE sender_id = :pid", 1),

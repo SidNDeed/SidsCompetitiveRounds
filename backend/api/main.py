@@ -46260,9 +46260,9 @@ async def delete_player_data(steam_id: str, request: Request, sig: str = Query(.
     # (A send that crosses a spam threshold takes one more lock after them,
     # its sender's case row for the day. This deletion never waits for a case
     # row: it writes moderation_cases only in its last statement, which skips
-    # a row another transaction holds, _DELETE_CASE_SCRUB_SQL. Waits on mail
-    # rows that are not case rows, against the retention purge or another
-    # deletion, are the open item MDPL.) Migration 416's change moved it from
+    # a row another transaction holds, _DELETE_CASE_SCRUB_SQL. Two deletions
+    # can still wait for each other on mail rows that are not case rows: the
+    # open item MDPL.) Migration 416's change moved it from
     # here to the end: there it is locked in the same ascending pass as the
     # invite bump's rows (_invite_bump's `drop`), the one order every writer of
     # mail_inbox_rev takes. The only lock taken after it is that last
@@ -46293,9 +46293,9 @@ async def delete_player_data(steam_id: str, request: Request, sig: str = Query(.
     # The LAST statement before the commit, and this handler's only write to
     # a moderation_cases row: it never waits for another transaction's row
     # (_DELETE_CASE_SCRUB_SQL says why). A row it skips keeps its old values
-    # until the janitor's _mail_case_scrub_pass finishes it. Waits on mail
-    # rows that are not case rows, against the retention purge or another
-    # deletion, are the open item MDPL.
+    # until the janitor's _mail_case_scrub_pass finishes it. Two deletions can
+    # still wait for each other on mail rows that are not case rows (the open
+    # item MDPL); the retention sweep waits for no row lock and is not in it.
     await db.execute(text(_DELETE_CASE_SCRUB_SQL), {"pid": pid, "sid": steam_id, "tomb": _tomb})
 
     await db.commit()
@@ -81624,8 +81624,8 @@ async def _invite_write_receipt(db: AsyncSession, caller_id, key: UUID, route: s
 # sender's spam case row after its bump, and delete_player_data, which waits for these rows, never
 # waits for a case row: it writes moderation_cases only in its last statement, which skips a row
 # another transaction holds (_DELETE_CASE_SCRUB_SQL). A row the deletion holds is waited for and,
-# once it commits, gone. Waits on mail rows that are not case rows, between the deletion and the
-# retention purge or another deletion, are the open item MDPL.
+# once it commits, gone. Two deletions can still wait for each other on mail rows that are not
+# case rows (the open item MDPL); the retention sweep waits for no row lock and is not in it.
 _INVITE_REV_BUMP_SQL = (
     "WITH t AS (SELECT v.recipient_id FROM mail_inbox_rev v"
     "            WHERE v.recipient_id IN (SELECT r.recipient_id FROM mail_recipients r"
