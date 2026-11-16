@@ -32,7 +32,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 sys.path.insert(0, os.path.join(HERE, ".."))
 
-from test_discord_evidence_bot import ae, bot_ns, game_body, summary_body  # noqa: E402
+from test_discord_evidence_bot import SCHEMA_WORD, ae, bot_ns, game_body, summary_body  # noqa: E402
 import aer_render_worker as worker  # noqa: E402
 
 BACKEND = os.path.dirname(HERE)
@@ -140,7 +140,7 @@ def test_1a_rules_are_exactly_report_absent_and_the_audit_copies_them():
 
 def test_p14_the_1a_decoder_refuses_a_class_slot_and_1b_rules():
     ns = bot_ns()
-    word = "Evidence report: unavailable (schema)."
+    word = SCHEMA_WORD
     good = game_body()
     page, w = ns["_aer_outcome"](200, good)
     assert page is not None and w is None
@@ -157,7 +157,7 @@ def test_p14_the_1a_decoder_refuses_a_class_slot_and_1b_rules():
 
 def test_p14_the_1a_decoder_refuses_metadata_map_extras():
     ns = bot_ns()
-    word = "Evidence report: unavailable (schema)."
+    word = SCHEMA_WORD
     assert ns["_aer_outcome"](200, game_body())[1] is None
     assert ns["_aer_outcome"](200, summary_body())[1] is None
     for part, key in (("population", "cls"), ("baseline", "mark"),

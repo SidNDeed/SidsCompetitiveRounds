@@ -4131,6 +4131,10 @@ async def lifespan(app: FastAPI):
         # Read-only (SELECT COUNT per table, each begin_nested-wrapped), so it
         # runs on both roles.
         await _run_service_policy_audit(force=True)
+        # The evidence report's display population, built once after start
+        # through the report's own path: both roles create it, a database in
+        # recovery skips it (admin_evidence.warm_display_population).
+        tasks.append(asyncio.create_task(_admin_evidence.warm_display_population()))
         yield
     finally:
         for background_task in tasks:
@@ -4906,7 +4910,7 @@ async def _ovt_horizon_candidates(db, days: int, limit: int):
     Idleness is measured from SERVER-CLOCK columns only: `ovt_series.created_at`
     (NOW() at insert) and, per game, `GREATEST(ovt_matches.ended_at,
     ovt_matches.created_at)` — the report sink writes `ended_at` as NOW()
-    (PIN main.py:56328 ":started, NOW(),") and `created_at` defaults to NOW()
+    (PIN main.py:56345 ":started, NOW(),") and `created_at` defaults to NOW()
     by schema. `ovt_matches.started_at`
     is the one client-supplied stamp on that row and is deliberately NOT read
     here: a client-attested value may only move the server toward the
@@ -4972,7 +4976,7 @@ async def _ovt_settle_horizon_row(db, series_id, days: int) -> bool:
     report advances the tally and can complete the series. The bound the code
     actually holds is the ordering one — this settlement and that report
     serialise on the same series row lock: the report sink's lock waits
-    (PIN main.py:56129 "SELECT * FROM ovt_series WHERE id = :sid FOR NO KEY UPDATE"),
+    (PIN main.py:56146 "SELECT * FROM ovt_series WHERE id = :sid FOR NO KEY UPDATE"),
     this one declines. Whichever commits second observes the first, and a
     report arriving after the void is recorded and paid on the settled-without
     -play arm of `submit_ovt_match` rather than lost.
@@ -5042,7 +5046,7 @@ async def _ovt_settle_horizon_row(db, series_id, days: int) -> bool:
         return False
     # 'canceled', one L. Every other ovt path uses that spelling and the
     # continuation's prior-series lookup filters on it
-    # (PIN main.py:55460 "WHERE status IN ('completed', 'canceled', 'cancelled')"); the
+    # (PIN main.py:55477 "WHERE status IN ('completed', 'canceled', 'cancelled')"); the
     # janitor's original 'cancelled' made its own rows invisible to that lookup
     # and backend/sql/145_ovt_status_spelling.sql had to normalise them. A third
     # spelling would reopen that hole, so the VOID is carried by
@@ -7972,6 +7976,15 @@ _BAN_EXPIRY_BUILD = 1
 # boxes by construction, probed by the release train and read by nothing
 # else (#306). Absent on any build before it.
 _CASUAL_STREAK_BUILD = 1
+# Release-train verification plumbing, not a design mechanism: the build
+# marker of the batch in which the evidence report's population cache has a
+# fixed byte allowance (admin_evidence POP_CACHE_MAX_MB) and the display
+# population is built once after start, reported on /health as
+# `aer_popgate_build`. It names build identity only; the batch adds no
+# route (learnings 780, 794). A code constant, equal on both boxes by
+# construction, probed by the release train and read by nothing else (#306).
+# Absent on any build before it.
+_AER_POPGATE_BUILD = 1
 
 
 def _title_ladders_health_word() -> int:
@@ -8049,6 +8062,8 @@ async def health_check(db: AsyncSession = Depends(get_db)):
                               ask6_invites_build=_ASK6_INVITES_BUILD,
                               casual_streak_build=_CASUAL_STREAK_BUILD,
                               ban_expiry_build=_BAN_EXPIRY_BUILD,
+                              aer_popgate_build=_AER_POPGATE_BUILD,
+                              admin_evidence_population=_admin_evidence.population_health_word(),
                               build_manifest=_build_manifest.health_word(),
                               review_eval=_review_rules.review_eval(),
                               review_rules=_review_rules.health_word(),
@@ -8116,6 +8131,8 @@ async def health_check(db: AsyncSession = Depends(get_db)):
                               ask6_invites_build=_ASK6_INVITES_BUILD,
                               casual_streak_build=_CASUAL_STREAK_BUILD,
                               ban_expiry_build=_BAN_EXPIRY_BUILD,
+                              aer_popgate_build=_AER_POPGATE_BUILD,
+                              admin_evidence_population=_admin_evidence.population_health_word(),
                               build_manifest=_build_manifest.health_word(),
                               review_eval=_review_rules.review_eval(),
                               review_rules=_review_rules.health_word(),
@@ -56442,7 +56459,7 @@ async def _settle_ovt_report(db: AsyncSession, report: OvtMatchReport, *,
     # above is `FOR NO KEY UPDATE` with NO `SKIP LOCKED`: it WAITS. The 1v2
     # horizon janitor takes the same mode on the same row WITH `SKIP LOCKED`
     # — its locking read is
-    # PIN main.py:5011 "SELECT status FROM ovt_series WHERE id = CAST(:sid AS uuid)"
+    # PIN main.py:5015 "SELECT status FROM ovt_series WHERE id = CAST(:sid AS uuid)"
     # and the clause is the line under it. So the two can
     # never both decide this row: either the janitor meets this report's lock
     # and DECLINES the row for that tick, or it commits its void first and
