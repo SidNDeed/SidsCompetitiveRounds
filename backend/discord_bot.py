@@ -17397,8 +17397,38 @@ def _aer_escaped_set():
 
 
 AER_ESC = _aer_escaped_set()
-AER_REFUSED = "Evidence report refused."
+AER_REFUSED = ("Evidence report refused: it runs only for authorized admins, in the admin "
+               "channel. Trying again will not help; if you should have access, report "
+               "it. (refused)")
 AER_PREFIX = "Evidence report: "
+# The answers that are not a served page (AER-POPGATE-1): what happened, in
+# one sentence, then whether trying again helps, then the reason word in
+# brackets so a log search still finds it. Plain ASCII, under an equality
+# test (test_discord_evidence_bot.py WORDS).
+_AER_AGAIN = "Try again in a minute; if it repeats, report it."
+AER_TEXTS = {
+    "api_unreachable": "the bot could not reach the server. " + _AER_AGAIN,
+    "bad_argument": "the server did not accept the request%s. Correct it and try again.",
+    "not_found": ("no game, series or player matches that. Check the code or id; the "
+                  "same request will not find it."),
+    "primary_only": ("the request reached the standby server, which does not run "
+                     "reports. " + _AER_AGAIN),
+    "rate": "too many reports in a short time. Try again in %d s.",
+    "population": "the server could not prepare its comparison data. " + _AER_AGAIN,
+    "deadline": "the server took too long to build the report. " + _AER_AGAIN,
+    "audit_unavailable": ("the server could not record the report in its audit log, so "
+                          "it sent nothing. " + _AER_AGAIN),
+    "too_large": ("the report is too large to send. Ask for fewer games, or for one "
+                  "game; the same request will fail again."),
+    "schema": ("the server's answer was not in a form this bot reads, so nothing was "
+               "posted. Trying again will not help; report it."),
+}
+_AER_UNAVAILABLE = "the server could not answer just now. " + _AER_AGAIN
+
+
+def _aer_text(word, sentence):
+    """One non-page answer: the sentence, then the reason word in brackets."""
+    return AER_PREFIX + sentence + " (%s)" % word
 AER_POSTED = "Posted."
 AER_TIMEOUT_S = 30
 AER_CUSTOM_ID_MAX = 100
@@ -17806,32 +17836,36 @@ def _aer_decode_response(body, phase="1a", *, expected=None):
 def _aer_word(status, body, headers=None):
     """The one closed status handler (design 5.1), shared by the command and
     the page buttons: every answer that is not a served page is exactly one
-    of these ephemeral words. Status 0 is an api the bot could not reach; an
-    answer outside the api's documented words is `unavailable (schema)`."""
+    of these ephemeral answers (AER_TEXTS). Status 0 is an api the bot could
+    not reach; an answer outside the api's documented words is `schema`."""
     detail = body.get("detail") if isinstance(body, dict) else None
     detail = detail if isinstance(detail, str) else ""
     if status == 0:
-        return AER_PREFIX + "api unreachable."
+        return _aer_text("api_unreachable", AER_TEXTS["api_unreachable"])
     if status == 403:
         return AER_REFUSED
     if status == 400 and re.fullmatch(r"bad_argument( \([a-z_ ;]{1,60}\))?", detail):
         field = _aer_enc_text(detail[len("bad_argument"):].strip()[1:-1])
-        return AER_PREFIX + ("bad argument (%s)." % field if field else "bad argument.")
+        return _aer_text("bad_argument",
+                         AER_TEXTS["bad_argument"] % (" (%s)" % field if field else ""))
     if status == 404:
-        return AER_PREFIX + "not found."
+        return _aer_text("not_found", AER_TEXTS["not_found"])
     if status == 409:
-        return AER_PREFIX + "primary unavailable."
+        return _aer_text("primary_only", AER_TEXTS["primary_only"])
     if status == 429:
         retry = str({k.lower(): v for k, v in (headers or {}).items()}.get("retry-after", ""))
         if retry.isdigit():
-            return AER_PREFIX + "rate limit, retry in %d s." % int(retry)
+            return _aer_text("rate", AER_TEXTS["rate"] % int(retry))
     if status == 503:
         m = re.fullmatch(r"(?:unavailable \(([a-z_]{1,40})\)|([a-z_]{1,40}))", detail)
         if m:
-            return AER_PREFIX + "unavailable (%s)." % _aer_enc_text(m.group(1) or m.group(2))
+            word = m.group(1) or m.group(2)
+            sentence = (AER_TEXTS[word] if word in ("population", "deadline", "audit_unavailable")
+                        else _AER_UNAVAILABLE)
+            return _aer_text(_aer_enc_text(word), sentence)
     if status == 500 and detail == "too_large":
-        return AER_PREFIX + "unavailable (too_large)."
-    return AER_PREFIX + "unavailable (schema)."
+        return _aer_text("too_large", AER_TEXTS["too_large"])
+    return _aer_text("schema", AER_TEXTS["schema"])
 
 
 def _aer_outcome(status, body, headers=None, *, expected=None):
@@ -17841,7 +17875,7 @@ def _aer_outcome(status, body, headers=None, *, expected=None):
         try:
             return _aer_decode_response(body, "1a", expected=expected), None
         except AerSchemaError:
-            return None, AER_PREFIX + "unavailable (schema)."
+            return None, _aer_text("schema", AER_TEXTS["schema"])
     return None, _aer_word(status, body, headers)
 
 

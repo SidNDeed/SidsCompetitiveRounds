@@ -45,7 +45,7 @@ from test_discord_evidence_render import check_plan  # noqa: E402
 REPO = os.path.abspath(os.path.join(HERE, "..", ".."))
 # The commit this lane was cut from: main with phase 1a live and no sections.
 BASE = "1c77f580a29e33190f93cc27636c29e7dd8f2494"
-SCHEMA = "Evidence report: unavailable (schema)."
+SCHEMA = tbot.SCHEMA_WORD
 T0 = dt.datetime(2026, 11, 1, 12, 0, tzinfo=dt.timezone.utc)
 
 

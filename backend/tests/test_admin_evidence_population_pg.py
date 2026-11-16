@@ -42,14 +42,10 @@ refuses with `503 unavailable (population)` and one log line, publishes
 nothing (the live generation and the gen counter unchanged), and its
 one-fact twin serves.
 
-Cold start: `B` measured in a fresh interpreter after the api's imports,
-compiled from source with no bytecode cache, then the worst-case cache; `B`
-within BASE_RSS_FLOOR_MB, peak x 1.25 within POP_MEM_BUDGET_MB and the worst
-case within the budget gate. The gate binds on Linux only (the api
-container's resident set); elsewhere the figure is the working set, so the
-test reports it and skips with a reason naming the platform.
+The worst-case cache against the fixed allowance POP_CACHE_MAX_MB is
+tested in test_admin_evidence_popgate.py, which reads no database.
 
-Present: the two-producer cache-copy observer (:753-801) and route-shape coverage
+Present: the two-producer cache-copy observer (:648-698) and route-shape coverage
 (test_admin_evidence_routes_pg.py:359-388). Not here yet: route-level cold start (R1-R4, 1a-4).
 
 `ADMIN_EVIDENCE_TEST_PG_DSN` names a database whose name carries
@@ -68,7 +64,6 @@ import sys
 import time
 import tracemalloc
 import uuid
-import warnings
 
 import pytest
 
@@ -445,14 +440,15 @@ def _big(n_bytes):
     return array("d", bytes(n_bytes))
 
 
-def _gate_cache(budget_mb):
-    """A cache whose budget is `budget_mb`: B set so POP_MEM_BUDGET_MB/1.25 - B - 2 = it."""
-    b = ae.AER_CONTRACT_BOUNDS["POP_MEM_BUDGET_MB"] / 1.25 - 2 - budget_mb
-    return ae.PopulationCache(clock=_Clock(), base_rss_mb=b)
+def _gate_cache(monkeypatch, budget_mb):
+    """A cache whose allowance is `budget_mb` MiB: POP_CACHE_MAX_MB replaced
+    for this test only."""
+    monkeypatch.setitem(ae.AER_CONTRACT_BOUNDS, "POP_CACHE_MAX_MB", budget_mb)
+    return ae.PopulationCache(clock=_Clock())
 
 
-def test_p9_budget_gate_waits_on_a_lease_release():
-    cache = _gate_cache(1.5)
+def test_p9_budget_gate_waits_on_a_lease_release(monkeypatch):
+    cache = _gate_cache(monkeypatch, 1.5)
     key = ("display", "all", "fp", 30, 120)
     part = 600 * 1024
 
@@ -487,8 +483,8 @@ def test_p9_budget_gate_waits_on_a_lease_release():
           "%.3f s, at the lease release" % (cache.budget, part, waited))
 
 
-def test_p9_budget_gate_refuses_at_the_deadline(caplog):
-    cache = _gate_cache(1.5)
+def test_p9_budget_gate_refuses_at_the_deadline(caplog, monkeypatch):
+    cache = _gate_cache(monkeypatch, 1.5)
     key = ("display", "all", "fp", 30, 120)
     part = 600 * 1024
 
@@ -512,7 +508,7 @@ def test_p9_budget_gate_refuses_at_the_deadline(caplog):
     finally:
         loop.close()
     assert exc is not None, "a replacement over the budget published"
-    assert (exc.status, exc.detail) == (503, "unavailable (population)")
+    assert (exc.status, exc.detail, exc.reason) == (503, "unavailable (population)", "budget")
     assert cache.current(key) is g2 and cache.in_progress == 0
     assert [r for r in caplog.records if "population unavailable" in r.getMessage()]
     print("GATE p9 budget refusal: %s" % exc)
@@ -584,7 +580,7 @@ def test_p9_duplicate_game_population_refuses(live, monkeypatch, caplog, placeme
     assert len(twin.values[Z_KI]) == small
     assert (500.0 in twin.values[Z_KI]) == (placement == "at_cap")
     assert exc is not None, "the duplicate %s did not refuse" % placement
-    assert (exc.status, exc.detail) == (503, "unavailable (population)")
+    assert (exc.status, exc.detail, exc.reason) == (503, "unavailable (population)", "duplicate")
     assert len(_refused(caplog.records)) == 1
     assert cache.live[key] is twin and cache._gen == twin.gen and not twin.retired
     print("GATE p9 duplicate game %s: twin gen %d served %d values; duplicate refused: %s"
@@ -631,112 +627,11 @@ def test_p9_duplicate_window_source_refuses(live, monkeypatch, caplog, basis, pl
     assert list(twin.offsets[Z_KI]) == [0, 30, 40] and Z_KI in twin.truncated
     assert list(twin.values[Z_KI][:3]) == [34.0, 33.0, 32.0]
     assert exc is not None, "the duplicate %s (%s) did not refuse" % (placement, basis)
-    assert (exc.status, exc.detail) == (503, "unavailable (population)")
+    assert (exc.status, exc.detail, exc.reason) == (503, "unavailable (population)", "duplicate")
     assert len(_refused(caplog.records)) == 1
     assert cache.live[key] is twin and cache._gen == twin.gen and not twin.retired
     print("GATE p9 duplicate window %s %s: twin gen %d served offsets %s; refused: %s"
           % (basis, placement, twin.gen, list(twin.offsets[Z_KI]), exc))
-
-
-_COLD_START = r"""
-import json, sys
-sys.path.insert(0, sys.argv[1])
-import main                      # the api's own imports (design 2.6: main.py)
-import admin_evidence as ae
-from array import array
-b = ae.process_rss_mb()
-P = ae.AER_CONTRACT_BOUNDS["POP_VALUES_MAX"]
-W = ae.AER_CONTRACT_BOUNDS["WIN_VALUES_MAX"]
-R = sum(1 for e in ae.REPORT_REGISTRY if not e.is_window and e.ranked)
-cache = ae.PopulationCache(base_rss_mb=b)
-def vals(n):
-    return {k: array("d", bytes(8 * n)) for k in range(R)}
-def offs(n):
-    return {k: array("i", bytes(4 * (n + 1))) for k in range(R)}
-for i in range(4):               # 4 live game sets, 4 retired under leases
-    cache.lease(cache.publish(("g", i), vals(P), {}))
-    cache.publish(("g", i), vals(P), {})
-replacement = vals(P)            # 1 replacement in progress
-cache.in_progress = sum(len(a) * 8 for a in replacement.values())
-for i in range(8):               # 8 live window sources, 4 retired, one value per unit
-    if i < 4:
-        cache.lease(cache.publish(("w", i), vals(W), {}, offsets=offs(W)))
-    cache.publish(("w", i), vals(W), {}, offsets=offs(W))
-lease = cache.current(("w", 0))
-for j in range(32):              # the memo at WIN_DERIVED_BYTES_MAX
-    cache.memo_put(("c", j), lease, {"d": array("d", bytes(65536))}, 65536)
-print(json.dumps({"b": b, "peak": ae.process_rss_mb(peak=True), "platform": sys.platform,
-                  "python": sys.version.split()[0], "cache_bytes": cache.cache_bytes(), "budget": cache.budget,
-                  "live": len(cache.live), "retired": len(cache.retired),
-                  "pycache_prefix": sys.pycache_prefix, "dont_write": sys.dont_write_bytecode}))
-"""
-
-# The marker every off-Linux run of the cold-start gate carries in its skip
-# reason, so the skip is visible in a summary and countable by a reader.
-P9_OFF_LINUX = "P9-OFF-LINUX"
-
-
-def test_p9_cold_start_base_rss_and_peak_within_the_budget():
-    """Cold start (design 2.6, P9): `B` is the resident set after the api's
-    imports, measured in a fresh interpreter; then the cache at its worst
-    case (4 live and 4 leased-retired game sets, a replacement, 8 live and 4
-    retired window sources at maximum fragmentation, the memo full). `B`
-    must not exceed BASE_RSS_FLOOR_MB, peak x 1.25 must fit
-    POP_MEM_BUDGET_MB, and the worst-case cache must fit the budget gate at
-    the measured `B`.
-
-    The bytecode cache is an input of `B` (one Linux seat, one tree: 160.4
-    MB alone, 102.7 MB in a run whose earlier tests had imported the api;
-    on win32 a compiled copy of backend/api measured 109.5 against 114.5
-    uncompiled, peak 126 against 164), so the fresh interpreter runs with -B and
-    PYTHONPYCACHEPREFIX naming a new empty directory: it reads no tree's
-    __pycache__ and writes nothing, and every module compiles from source,
-    as the api container's first start does. The test proves that state
-    from the child (the prefix it saw, bytecode writing off) and from the
-    directory (still empty after the run).
-
-    The gate binds on Linux only, where the figure is the api container's
-    resident set. On any other platform the figure is that platform's
-    working set (win32 measured about 114 MB compiled cold), which the
-    design's bounds do not describe; the test runs the same measurement and
-    the same state checks, then skips with a reason that starts with
-    P9_OFF_LINUX and names the platform and the measured line. The
-    measured line is also issued as a warning, so a quiet run (`-q`, no
-    captured output shown) still prints the figure on every outcome. This
-    test reads no database, so it runs without the DSN."""
-    import shutil
-    import subprocess
-    import tempfile
-    api = os.path.join(HERE, "..", "api")
-    prefix = tempfile.mkdtemp(prefix="p9-pycache-")
-    env = dict(os.environ, PYTHONPYCACHEPREFIX=prefix)
-    try:
-        out = subprocess.run([sys.executable, "-B", "-c", _COLD_START, api],
-                             capture_output=True, text=True, timeout=300, env=env)
-        left = sorted(os.listdir(prefix))
-    finally:
-        shutil.rmtree(prefix, ignore_errors=True)
-    assert out.returncode == 0, out.stderr[-2000:]
-    m = json.loads(out.stdout.strip().splitlines()[-1])
-    assert os.path.normcase(os.path.abspath(m["pycache_prefix"] or "")) == \
-        os.path.normcase(os.path.abspath(prefix)), m
-    assert m["dont_write"] is True, m
-    assert left == [], "the cold interpreter wrote bytecode: %s" % left[:5]
-    line = ("GATE p9 cold start (%s, Python %s): B %.1f MB (floor %.1f), peak %.1f MB "
-            "x 1.25 = %.1f (budget %d), cache %d bytes against %d, %d live, %d retired"
-            % (m["platform"], m["python"], m["b"], ae.BASE_RSS_FLOOR_MB, m["peak"],
-               m["peak"] * 1.25, ae.AER_CONTRACT_BOUNDS["POP_MEM_BUDGET_MB"], m["cache_bytes"],
-               m["budget"], m["live"], m["retired"]))
-    print(line)
-    warnings.warn(line)
-    assert (m["live"], m["retired"]) == (12, 8)
-    if sys.platform != "linux":
-        pytest.skip("%s platform=%s: the cold-start gate binds on Linux only (the api "
-                    "container's resident set); this figure is the %s working set, "
-                    "reported, not gated: %s" % (P9_OFF_LINUX, sys.platform, sys.platform, line))
-    assert m["b"] <= ae.BASE_RSS_FLOOR_MB, "B %.1f MB misses the floor: a budget decision" % m["b"]
-    assert m["peak"] * 1.25 <= ae.AER_CONTRACT_BOUNDS["POP_MEM_BUDGET_MB"], m
-    assert m["cache_bytes"] <= m["budget"], "the worst-case cache misses the budget gate: %s" % m
 
 
 def _builder_lines():

@@ -234,7 +234,7 @@ def rig(monkeypatch):
     monkeypatch.setitem(main.app.dependency_overrides, database.get_db, r.db)
     monkeypatch.setattr(ae, "_RATE", {})
     monkeypatch.setattr(ae, "_INFLIGHT", [0])
-    monkeypatch.setattr(ae, "_CACHE", [ae.PopulationCache(base_rss_mb=ae.SIZING_BASE_RSS_MB)])
+    monkeypatch.setattr(ae, "_CACHE", [ae.PopulationCache()])
     try:
         yield r
     finally:
@@ -392,6 +392,44 @@ def test_p9_one_game_set_serves_every_route_under_a_lease(rig, monkeypatch):
           % (game_sets[0][:2],))
 
 
+def test_popgate_a_fresh_cache_in_a_large_process_admits_the_display_population(
+        rig, monkeypatch, caplog):
+    """AER-POPGATE-1: the first report of the process makes the cache (as on
+    a live start), in a process whose resident size reads 475.8 MB wherever
+    it is still read, the figure the live refusal of 16 Nov implies. The
+    display population is admitted, published and served, no refusal line
+    is logged, and /health's population word reads `ready`."""
+    import logging
+    # raising=False: the fix removes process_rss_mb (and adds _POP_STATE), so
+    # each patch must hold on the tree before the fix and the tree after it;
+    # where the name is absent the patch only adds an attribute nothing reads.
+    monkeypatch.setattr(ae, "process_rss_mb", lambda peak=False: 475.8, raising=False)
+    monkeypatch.setattr(ae, "_CACHE", [None])
+    monkeypatch.setattr(ae, "_POP_STATE", ["pending"], raising=False)
+
+    async def go():
+        admin = await _admin(rig)
+        a, sa, _d = await rig.player()
+        b, sb, _d = await rig.player()
+        s = await rig.series(a, b)
+        gid = await rig.match(a, b, NOW - dt.timedelta(hours=1), series=s)
+        await rig.commit()
+        return await rig.get(_route_paths(gid.hex, sa, sb, games="1")["game"], actor=admin)
+
+    with caplog.at_level(logging.INFO, logger="admin_evidence"):
+        status, content, _h = rig.run(go())
+    refused = [r.getMessage() for r in caplog.records
+               if "population unavailable" in r.getMessage()]
+    assert (status, refused) == (200, []), (status, content[:120], refused)
+    cache = ae._CACHE[0]
+    assert list(cache.live) == [ae._display_key()] and cache._gen == 1
+    assert cache.cache_bytes() <= cache.budget
+    assert ae.population_health_word() == "ready"
+    print("GATE popgate: fresh cache at a 475.8 MB process, display population admitted "
+          "(%d counted bytes within %d), served 200, word ready"
+          % (cache.cache_bytes(), cache.budget))
+
+
 def test_p3_the_key_gate_is_the_outermost_middleware():
     import main
     outer = main.app.user_middleware[0]
@@ -490,7 +528,7 @@ def test_p9_pair_summary_ttl_boundary_uses_one_window_generation(rig, monkeypatc
     """Both pair orientations and win_computed_at use one leased source even
     when that source reaches its TTL after the first lease."""
     clock = _Clock()
-    cache = ae.PopulationCache(clock=clock, base_rss_mb=ae.SIZING_BASE_RSS_MB)
+    cache = ae.PopulationCache(clock=clock)
     monkeypatch.setattr(ae, "_CACHE", [cache])
     window_leases, result_sources = [], []
     original_lease = ae._Report.lease
@@ -962,7 +1000,7 @@ def test_p9_a_duplicate_refuses_through_the_routes_and_the_twin_served(rig, monk
                                                                        source):
     monkeypatch.setattr(ae, "population_branches", _z_branches)
     clock = _Clock()
-    cache = ae.PopulationCache(clock=clock, base_rss_mb=ae.SIZING_BASE_RSS_MB)
+    cache = ae.PopulationCache(clock=clock)
     monkeypatch.setattr(ae, "_CACHE", [cache])
 
     async def go():

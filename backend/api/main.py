@@ -4131,6 +4131,10 @@ async def lifespan(app: FastAPI):
         # Read-only (SELECT COUNT per table, each begin_nested-wrapped), so it
         # runs on both roles.
         await _run_service_policy_audit(force=True)
+        # The evidence report's display population, built once after start
+        # through the report's own path: both roles create it, a database in
+        # recovery skips it (admin_evidence.warm_display_population).
+        tasks.append(asyncio.create_task(_admin_evidence.warm_display_population()))
         yield
     finally:
         for background_task in tasks:
@@ -7972,6 +7976,15 @@ _BAN_EXPIRY_BUILD = 1
 # boxes by construction, probed by the release train and read by nothing
 # else (#306). Absent on any build before it.
 _CASUAL_STREAK_BUILD = 1
+# Release-train verification plumbing, not a design mechanism: the build
+# marker of the batch in which the evidence report's population cache has a
+# fixed byte allowance (admin_evidence POP_CACHE_MAX_MB) and the display
+# population is built once after start, reported on /health as
+# `aer_popgate_build`. It names build identity only; the batch adds no
+# route (learnings 780, 794). A code constant, equal on both boxes by
+# construction, probed by the release train and read by nothing else (#306).
+# Absent on any build before it.
+_AER_POPGATE_BUILD = 1
 
 
 def _title_ladders_health_word() -> int:
@@ -8049,6 +8062,8 @@ async def health_check(db: AsyncSession = Depends(get_db)):
                               ask6_invites_build=_ASK6_INVITES_BUILD,
                               casual_streak_build=_CASUAL_STREAK_BUILD,
                               ban_expiry_build=_BAN_EXPIRY_BUILD,
+                              aer_popgate_build=_AER_POPGATE_BUILD,
+                              admin_evidence_population=_admin_evidence.population_health_word(),
                               build_manifest=_build_manifest.health_word(),
                               review_eval=_review_rules.review_eval(),
                               review_rules=_review_rules.health_word(),
@@ -8116,6 +8131,8 @@ async def health_check(db: AsyncSession = Depends(get_db)):
                               ask6_invites_build=_ASK6_INVITES_BUILD,
                               casual_streak_build=_CASUAL_STREAK_BUILD,
                               ban_expiry_build=_BAN_EXPIRY_BUILD,
+                              aer_popgate_build=_AER_POPGATE_BUILD,
+                              admin_evidence_population=_admin_evidence.population_health_word(),
                               build_manifest=_build_manifest.health_word(),
                               review_eval=_review_rules.review_eval(),
                               review_rules=_review_rules.health_word(),
