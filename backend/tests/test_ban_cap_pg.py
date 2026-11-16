@@ -388,19 +388,29 @@ def _psql_client():
     return fallback if os.path.isfile(fallback) else None
 
 
-def _psql_apply(schema, path):
-    """The file on psql's stdin with ON_ERROR_STOP, bound to the case schema
-    by the startup packet's search path: (exit code, stderr)."""
+def _psql_args(schema, settings=(), appname=None):
+    """psql with ON_ERROR_STOP, bound to the case schema by the startup
+    packet's search path; `settings` are further session settings given the
+    same way, from OUTSIDE the file (name, value)."""
     psql = _psql_client()
     assert psql is not None, "no psql client found (set BAN_TEST_PSQL or put psql on PATH)"
     u = urlparse(lh.DSN)
-    env = dict(os.environ, PGOPTIONS="-c search_path=%s" % schema)
+    opts = ["-c search_path=%s" % schema] + ["-c %s=%s" % (k, v) for k, v in settings]
+    env = dict(os.environ, PGOPTIONS=" ".join(opts))
+    if appname:
+        env["PGAPPNAME"] = appname
     if u.password:
         env["PGPASSWORD"] = u.password
     args = [psql, "-X", "-q", "-v", "ON_ERROR_STOP=1", "-h", u.hostname or "localhost",
             "-p", str(u.port or 5432), "-d", u.path.lstrip("/")]
     if u.username:
         args += ["-U", u.username]
+    return args, env
+
+
+def _psql_apply(schema, path, settings=()):
+    """The file on psql's stdin: (exit code, stderr)."""
+    args, env = _psql_args(schema, settings)
     with open(path, "rb") as fh:
         p = subprocess.run(args, stdin=fh, env=env, capture_output=True, timeout=120)
     return p.returncode, p.stderr.decode("utf-8", "replace")
@@ -917,3 +927,272 @@ def test_the_checks_verdict_is_the_same_in_every_session_time_zone(case):
     for zone in ("UTC", "America/Los_Angeles"):
         assert (out[(zone, "past")], out[(zone, "exact")]) == ("refused", "admitted"), out
     assert (out[("UTC", "days")], out[("America/Los_Angeles", "days")]) == (False, True), out
+
+
+# -- 418 under any session settings, and two first runs at once ---------------
+
+INTERVAL_STYLES = ("postgres", "postgres_verbose", "sql_standard", "iso_8601")
+PIN_LINE = "SET LOCAL IntervalStyle = 'postgres';\n"
+REREAD = ("    EXECUTE 'LOCK TABLE player_bans IN ACCESS EXCLUSIVE MODE';\n"
+          "    present := EXISTS (SELECT 1 FROM pg_constraint c\n"
+          "                        WHERE c.conrelid = tbl AND c.conname = 'player_bans_max_one_year');\n")
+REREAD_CUT = "    EXECUTE 'LOCK TABLE player_bans IN ACCESS EXCLUSIVE MODE';\n"
+
+
+def _m418_copy(old, new):
+    """A temporary copy of 418 with `old` (present once) replaced: a mutant
+    of exactly that edit. The caller unlinks it."""
+    src = io.open(M418, encoding="utf-8").read()
+    assert src.count(old) == 1, (old, src.count(old))
+    with tempfile.NamedTemporaryFile("w", suffix=".sql", delete=False, encoding="utf-8") as fh:
+        fh.write(src.replace(old, new))
+        return fh.name
+
+
+async def _styles_run(case, path):
+    """The file at `path` under each IntervalStyle, set for the session from
+    OUTSIDE the file (the startup packet), as a role or database setting
+    would set it: rollback, apply, apply again, rollback twice; then 418 once
+    more under the default style, so the case ends with its CHECK."""
+    conn = await harness.connect_bound(lh.DSN, case)
+    out = {}
+    try:
+        for style in INTERVAL_STYLES:
+            st = (("IntervalStyle", style),)
+            out[(style, "rollback")] = _psql_apply(case, R418, st)
+            out[(style, "absent")] = await _constraint_def(conn)
+            snap0 = await _snapshot(conn)
+            out[(style, "first")] = _psql_apply(case, path, st)
+            out[(style, "def")] = await _constraint_def(conn)
+            snap = await _snapshot(conn)
+            out[(style, "unchanged_on_refusal")] = snap == snap0
+            out[(style, "again")] = _psql_apply(case, path, st)
+            out[(style, "same")] = (await _constraint_def(conn), await _snapshot(conn)) == (out[(style, "def")], snap)
+            out[(style, "rollback2")] = _psql_apply(case, R418, st)
+            out[(style, "rollback3")] = _psql_apply(case, R418, st)
+            out[(style, "after_rollbacks")] = await _constraint_def(conn)
+    finally:
+        await conn.close()
+    out["last"] = _psql_apply(case, M418)
+    return out
+
+
+def test_418_applies_under_every_interval_style(case):
+    """H1 of bancap-r1. 418's post-check compares pg_get_constraintdef's text,
+    which prints the CHECK's interval constant by IntervalStyle. Under each of
+    the four styles, set from outside the file, 418 applies, applies again as
+    a no-op, and the rollback (which compares no deparsed text) drops and
+    drops again."""
+    out = _run(_styles_run(case, M418))
+    for style in INTERVAL_STYLES:
+        for step in ("rollback", "rollback2", "rollback3"):
+            assert out[(style, step)][0] == 0, (style, step, out[(style, step)])
+        assert out[(style, "absent")] is None, style
+        rc, err = out[(style, "first")]
+        assert rc == 0, (style, err)
+        assert out[(style, "def")] == WANT_DEF, (style, out[(style, "def")])
+        rc, err = out[(style, "again")]
+        assert rc == 0 and _notices(err) == ["418: player_bans_max_one_year is present; no row changed"], (style, err)
+        assert out[(style, "same")] is True, style
+        assert out[(style, "after_rollbacks")] is None, style
+    assert out["last"][0] == 0, out["last"]
+
+
+def test_mutant_418_without_its_interval_style_pin_is_refused_under_iso_8601(case):
+    """Mutant: 418 without its SET LOCAL IntervalStyle line. Under iso_8601
+    the post-check reads the definition as PT8760H and refuses, and the
+    refusal leaves nothing behind (no CHECK, no row changed); under the
+    postgres style the same copy applies, so the refusal has that one
+    reason."""
+    path = _m418_copy(PIN_LINE, "")
+    try:
+        out = _run(_styles_run(case, path))
+    finally:
+        os.unlink(path)
+    rc, err = out[("iso_8601", "first")]
+    assert rc != 0 and "PT8760H" in err and "not the validated CHECK 418 adds" in err, (rc, err)
+    assert out[("iso_8601", "def")] is None and out[("iso_8601", "unchanged_on_refusal")] is True, out
+    rc, err = out[("postgres", "first")]
+    assert rc == 0 and out[("postgres", "def")] == WANT_DEF, (rc, err)
+    assert out["last"][0] == 0, out["last"]
+
+
+async def _rows_with_xmin(conn):
+    return [tuple(r) for r in await conn.fetch(
+        "SELECT id, expires_at, xmin::text FROM player_bans ORDER BY id")]
+
+
+async def _wait_for_lock_wait(obs, appname, limit_s=10.0):
+    """True once the session named `appname` waits on a lock."""
+    deadline = asyncio.get_running_loop().time() + limit_s
+    while asyncio.get_running_loop().time() < deadline:
+        if await obs.fetchval(
+                "SELECT count(*) FROM pg_stat_activity WHERE application_name = $1"
+                " AND wait_event_type = 'Lock'", appname):
+            return True
+        await asyncio.sleep(0.05)
+    return False
+
+
+async def _two_first_runs(case, path, release):
+    """Session A holds player_bans' ACCESS EXCLUSIVE lock in an open
+    transaction while session B (psql, the file at `path`) starts 418 and
+    waits. With `release`, A then does what 418's first run does (the
+    backfill and the ADD CONSTRAINT) and commits inside B's 5 s lock timeout;
+    without it, A holds on until B has ended and then rolls back."""
+    a = await harness.connect_bound(lh.DSN, case)
+    obs = await harness.connect_bound(lh.DSN, case)
+    out = {}
+    try:
+        out["rollback"] = _psql_apply(case, R418)
+        admin = _sid()
+        await a.execute("INSERT INTO admin_users (steam_id) VALUES ($1)", admin)
+        out["null_id"] = await a.fetchval(
+            "INSERT INTO player_bans (steam_id, reason, banned_by_steam_id, expires_at)"
+            " VALUES ($1, 'race', $2, NULL) RETURNING id", _sid(), admin)
+        out["before"] = await _rows_with_xmin(a)
+        tr = a.transaction()
+        await tr.start()
+        await a.execute("LOCK TABLE player_bans IN ACCESS EXCLUSIVE MODE")
+        appname = "bancap_b_%s" % uuid.uuid4().hex[:8]
+        args, env = _psql_args(case, appname=appname)
+        with open(path, "rb") as fh:
+            b = subprocess.Popen(args, stdin=fh, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        try:
+            out["b_waited"] = await _wait_for_lock_wait(obs, appname)
+            if release:
+                await a.execute("UPDATE player_bans SET expires_at = banned_at + interval '8760 hours'"
+                                " WHERE expires_at IS NULL")
+                await a.execute("ALTER TABLE player_bans ADD CONSTRAINT player_bans_max_one_year"
+                                " CHECK (expires_at IS NOT NULL AND banned_at IS NOT NULL"
+                                " AND expires_at <= banned_at + interval '8760 hours')")
+                await tr.commit()
+                out["after_a"] = await _rows_with_xmin(obs)
+                _o, e = await asyncio.get_running_loop().run_in_executor(None, lambda: b.communicate(timeout=60))
+            else:
+                _o, e = await asyncio.get_running_loop().run_in_executor(None, lambda: b.communicate(timeout=60))
+                await tr.rollback()
+                out["after_a"] = await _rows_with_xmin(obs)
+        except BaseException:
+            b.kill()
+            raise
+        out["b"] = (b.returncode, e.decode("utf-8", "replace"))
+        out["after_b"] = await _rows_with_xmin(obs)
+        out["def"] = await _constraint_def(obs)
+    finally:
+        await a.close()
+        await obs.close()
+    out["restore"] = _psql_apply(case, M418)
+    return out
+
+
+def test_two_first_runs_of_418_at_once_end_as_two_in_sequence(case):
+    """H2 of bancap-r1. A first run of 418 that finds the constraint absent
+    and then waits for the table's lock reads the constraint again under the
+    lock: when another session added it meanwhile, this run ends with exit 0
+    and changes no row (every row's xmin as session A left it)."""
+    out = _run(_two_first_runs(case, M418, release=True))
+    assert out["rollback"][0] == 0, out["rollback"]
+    assert out["b_waited"] is True, "session B never waited on the lock"
+    rc, err = out["b"]
+    assert rc == 0, err
+    assert _notices(err) == ["418: player_bans_max_one_year is present; no row changed"], err
+    assert out["after_b"] == out["after_a"], "session B changed a row"
+    assert out["after_a"] != out["before"], "session A's backfill changed nothing"
+    assert out["def"] == WANT_DEF, out["def"]
+    assert out["restore"][0] == 0, out["restore"]
+
+
+def test_control_a_first_run_held_out_ends_at_its_lock_timeout_with_nothing_changed(case):
+    """The control: session A never releases. B gives up at its 5 s lock
+    timeout, and nothing is applied: no constraint, the row without an end
+    still without one, every row as before."""
+    out = _run(_two_first_runs(case, M418, release=False))
+    assert out["b_waited"] is True, "session B never waited on the lock"
+    rc, err = out["b"]
+    assert rc != 0 and "lock timeout" in err, (rc, err)
+    assert out["def"] is None, out["def"]
+    assert out["after_b"] == out["before"], "a row changed"
+    assert any(r[0] == out["null_id"] and r[1] is None for r in out["after_b"]), out["after_b"]
+    assert out["restore"][0] == 0, out["restore"]
+
+
+def test_mutant_418_without_its_reread_under_the_lock_fails_the_second_run(case):
+    """Mutant: the re-read under the lock removed (418 as it stood at
+    30caa3b4 in this respect). B acts on its first read, backfills nothing,
+    and its ADD CONSTRAINT is refused because the constraint exists."""
+    path = _m418_copy(REREAD, REREAD_CUT)
+    try:
+        out = _run(_two_first_runs(case, path, release=True))
+    finally:
+        os.unlink(path)
+    assert out["b_waited"] is True, "session B never waited on the lock"
+    rc, err = out["b"]
+    assert rc != 0 and "already exists" in err and CONSTRAINT in err, (rc, err)
+    assert out["after_b"] == out["after_a"] and out["def"] == WANT_DEF, out
+
+
+async def _two_rollbacks(case, path):
+    """The same two sessions for the rollback file: the CHECK present, A
+    holds the table's lock, B (the file at `path`) reads the CHECK present
+    and waits, A drops it and commits."""
+    out = {"apply": _psql_apply(case, M418)}
+    a = await harness.connect_bound(lh.DSN, case)
+    obs = await harness.connect_bound(lh.DSN, case)
+    try:
+        out["before"] = await _rows_with_xmin(a)
+        tr = a.transaction()
+        await tr.start()
+        await a.execute("LOCK TABLE player_bans IN ACCESS EXCLUSIVE MODE")
+        appname = "bancap_r_%s" % uuid.uuid4().hex[:8]
+        args, env = _psql_args(case, appname=appname)
+        with open(path, "rb") as fh:
+            b = subprocess.Popen(args, stdin=fh, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        try:
+            out["b_waited"] = await _wait_for_lock_wait(obs, appname)
+            await a.execute("ALTER TABLE player_bans DROP CONSTRAINT " + CONSTRAINT)
+            await tr.commit()
+            _o, e = await asyncio.get_running_loop().run_in_executor(None, lambda: b.communicate(timeout=60))
+        except BaseException:
+            b.kill()
+            raise
+        out["b"] = (b.returncode, e.decode("utf-8", "replace"))
+        out["after_b"] = await _rows_with_xmin(obs)
+        out["def"] = await _constraint_def(obs)
+    finally:
+        await a.close()
+        await obs.close()
+    out["restore"] = _psql_apply(case, M418)
+    return out
+
+
+def test_two_rollbacks_of_418_at_once_both_end_without_an_error(case):
+    """The rollback file's own precondition: it reads the CHECK present
+    without a lock; its DROP asks again under the lock its ALTER takes, so a
+    run that waited while another dropped the CHECK ends with exit 0."""
+    out = _run(_two_rollbacks(case, R418))
+    assert out["apply"][0] == 0, out["apply"]
+    assert out["b_waited"] is True, "session B never waited on the lock"
+    rc, err = out["b"]
+    assert rc == 0, err
+    assert out["def"] is None and out["after_b"] == out["before"], out
+    assert out["restore"][0] == 0, out["restore"]
+
+
+def test_mutant_the_rollback_dropping_without_if_exists_fails_the_second_run(case):
+    """Mutant: the rollback's DROP without IF EXISTS (the file as it stood at
+    30caa3b4). B acts on its unlocked read and fails on the missing CHECK."""
+    src = io.open(R418, encoding="utf-8").read()
+    old = "DROP CONSTRAINT IF EXISTS player_bans_max_one_year"
+    assert src.count(old) == 1
+    with tempfile.NamedTemporaryFile("w", suffix=".sql", delete=False, encoding="utf-8") as fh:
+        fh.write(src.replace(old, "DROP CONSTRAINT player_bans_max_one_year"))
+        path = fh.name
+    try:
+        out = _run(_two_rollbacks(case, path))
+    finally:
+        os.unlink(path)
+    assert out["b_waited"] is True, "session B never waited on the lock"
+    rc, err = out["b"]
+    assert rc != 0 and "does not exist" in err and CONSTRAINT in err, (rc, err)
+    assert out["def"] is None, out["def"]

@@ -15,7 +15,10 @@
 --
 -- Same lock bound as 418 (learning #1072): wait 5 s, hold at most 25 s +
 -- 5 s plus the COMMIT's local completion. A rerun after a successful drop is
--- a no-op and takes no lock.
+-- a no-op and takes no lock. The first read takes no lock; the drop itself
+-- (DROP CONSTRAINT IF EXISTS) asks again under the lock the ALTER takes, so
+-- of two runs at once the second waits on the first, then finds nothing to
+-- drop and ends without an error. This file compares no deparsed text.
 
 BEGIN;
 SET LOCAL lock_timeout = '5s';
@@ -28,7 +31,7 @@ BEGIN
   IF EXISTS (SELECT 1 FROM pg_constraint c
               WHERE c.conrelid = to_regclass(format('%I.player_bans', current_schema()))
                 AND c.conname = 'player_bans_max_one_year') THEN
-    ALTER TABLE player_bans DROP CONSTRAINT player_bans_max_one_year;
+    ALTER TABLE player_bans DROP CONSTRAINT IF EXISTS player_bans_max_one_year;
   END IF;
 END $r418$;
 
