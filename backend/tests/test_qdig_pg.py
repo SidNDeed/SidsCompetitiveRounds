@@ -19,6 +19,7 @@ from datetime import timedelta
 from pathlib import Path
 
 import pytest
+from asyncpg.exceptions import LockNotAvailableError
 from sqlalchemy import text
 
 import main
@@ -280,8 +281,10 @@ def test_pg_qdig_the_lock_and_the_filing_recheck_each_guard_a_concurrent_review(
                                                " reviewed_at=NOW(), review_note='by an admin'"
                                                " WHERE id=$1 AND status='pending'", uuid.UUID(A1))
                             applied.append(True)
-                        except Exception:
-                            applied.append(False)     # the janitor's row lock held it off
+                        except LockNotAvailableError:
+                            # the janitor's row lock held it off: lock_timeout
+                            # (SQLSTATE 55P03); any other error fails the test
+                            applied.append(False)
                     finally:
                         await conn.close()
                 return await real(db, rows, admit=admit)

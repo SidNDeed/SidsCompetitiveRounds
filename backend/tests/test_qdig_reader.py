@@ -262,12 +262,12 @@ def test_the_reader_cannot_raise():
     # The catch-all is for what is NOT a ValueError: a body nested past the
     # decoder's recursion limit (RecursionError, inside the size bound) and a
     # row whose own reads raise (RuntimeError). Each reads as one fixed word.
-    class Hostile(dict):
+    class RaisingRow(dict):
         def get(self, *a, **k):
             raise RuntimeError("no")
     deep = {"payload": "[" * 100000 + "]" * 100000, "mode": "ffa"}
     assert len(deep["payload"]) <= main.QDIG_BODY_MAX_BYTES
-    for r in (deep, Hostile(payload="{}", mode="ffa")):
+    for r in (deep, RaisingRow(payload="{}", mode="ffa")):
         v = main._qdig_read_body(r)
         assert (v["ok"], v["why"]) == (False, "unreadable"), v
 
