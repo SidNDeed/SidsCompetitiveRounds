@@ -1867,7 +1867,7 @@
           ],
           "main",
           "health_check",
-          "e072dca3e207ae89f5b7e62004c0df78299f92fc"
+          "b229f71446b904268e68ccbd288389059f481989"
         ],
         [
           "/api/v1/i18n/approved",
@@ -4073,7 +4073,7 @@
       [
         "main",
         "lifespan",
-        "0f560b2f02366d1bdde1a0f094b39375da2a717e"
+        "10283f7162c633e07298a1105bf84bba8006cf0c"
       ]
     ]
   },
