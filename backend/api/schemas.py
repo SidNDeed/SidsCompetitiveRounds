@@ -1321,8 +1321,8 @@ class HealthResponse(BaseModel):
     # delete_player_data writes moderation_cases only in its last statement,
     # which skips a row another transaction holds, and the janitor finishes a
     # skipped row; a mail send keeps its order; the retention sweep waits for
-    # no row lock; the open item MDPL, two deletions against each other on
-    # mail rows that are not case rows, is not in it). It names build
+    # no row lock; MDPL, the deletion's lock order against other writers and
+    # its bounded new attempts, is not in it). It names build
     # identity only. A code
     # constant, equal on both roles by construction, so the train can read it
     # through the edge; the lane adds no route and no key to any answer, and

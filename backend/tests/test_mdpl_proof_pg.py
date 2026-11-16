@@ -154,6 +154,71 @@ def test_r3_control_the_key_below_the_owned_prints_deadlocks(monkeypatch):
     case(monkeypatch, body, prefix="mdpl")
 
 
+# -- R2 ---------------------------------------------------------------------------------------
+
+async def _shared_mail(env):
+    """P and Q with a relay row each way (P's message to Q, Q's to P) and a
+    mail block each way, the blocks written after the two sends."""
+    p, q = await env.players(2)
+    r1 = await _relay_row(env, q, p, await _sent(env, p, q))
+    r2 = await _relay_row(env, p, q, await _sent(env, q, p))
+    await env.conn.execute(
+        "INSERT INTO mail_blocks (blocker_id, blocked_id) VALUES ($1, $2), ($2, $1)", p.id, q.id)
+    return p, q, [r1, r2]
+
+
+def test_r2_two_deletions_sharing_mail_rows_wait_only_at_the_key(monkeypatch):
+    """R2: P holds the key; Q waits for it with no transaction id, so with no
+    row lock (a backend takes one with its first row write or row lock);
+    both commit, and every shared row is gone."""
+    async def body(env):
+        _arm(env)
+        _order_only(env)
+        p, q, rel = await _shared_mail(env)
+        at = _parks(env)
+        spot = at(KEY_SQL, "after")
+        tp = asyncio.create_task(_delete(env, p))
+        await _parked(spot, tp)
+        tq = asyncio.create_task(_delete(env, q))
+        state, w = await _settle(env, tq, by=spot.pid)
+        assert state == "waits" and (w["query"] or "").startswith(KEY_SQL), (state, w)
+        assert w["xid"] is None, ("Q holds a row lock while it waits for the key", w)
+        a, b = await _finish([tp, tq], [spot])
+        assert not _bad(a, b), ("outcomes", _name(a), _name(b))
+        assert a["status"] == "anonymized" and b["status"] == "anonymized", (a, b)
+        assert await env.conn.fetchval(
+            "SELECT COUNT(*) FROM pending_dms WHERE id = ANY($1::bigint[])", rel) == 0
+        assert await env.conn.fetchval(
+            "SELECT COUNT(*) FROM mail_blocks WHERE blocker_id = ANY($1::uuid[])"
+            "    OR blocked_id = ANY($1::uuid[])", [p.id, q.id]) == 0
+    case(monkeypatch, body, prefix="mdpl")
+
+
+def test_r2_control_without_the_key_two_deletions_hold_rows_at_once(monkeypatch):
+    """R2's control: the key statement made a plain SELECT. P, parked past its
+    relay pass, holds the shared relay rows; Q runs into a row P holds and
+    waits there with a transaction id of its own. After the release a 40P01
+    is allowed (the circle the key keeps out); no other error is."""
+    async def body(env):
+        _arm(env)
+        _order_only(env)
+        p, q, _rel = await _shared_mail(env)
+        at = _parks(env)
+        spot = at(PASS_MARK, "after")
+        with env.rewriting(KEY_EXACT, "SELECT 1") as head:
+            tp = asyncio.create_task(_delete(env, p))
+            await _parked(spot, tp)
+            tq = asyncio.create_task(_delete(env, q))
+            state, w = await _settle(env, tq, by=spot.pid)
+            assert state == "waits", (state, w)
+            assert w["xid"] is not None and not (w["query"] or "").startswith(("SELECT 1", KEY_SQL)), w
+            a, b = await _finish([tp, tq], [spot])
+        assert len(head) >= 2, len(head)
+        for x in (a, b):
+            assert not _bad(x) or _deadlock(x), _name(x)
+    case(monkeypatch, body, prefix="mdpl")
+
+
 # -- R4: the deletion and the ack -------------------------------------------------------------
 
 def test_r4_control_the_deletions_pass_removed_deadlocks_with_the_ack(monkeypatch):

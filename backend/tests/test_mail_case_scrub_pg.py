@@ -24,8 +24,8 @@ Y both take, before C, a lock that orders them (a subject's or a reporter's
 identity lock). The retention sweep now meets the first everywhere: it
 waits for no row lock at all (main._mail_retention_sweep's comment), taking
 every row it writes with SKIP LOCKED first and leaving what it cannot hold
-to a later pass. Two deletions waiting on each other's mail rows that are
-not case rows stay the open item MDPL.
+to a later pass. Two deletions never wait on each other's rows: each takes
+the pool snapshot key before its first row lock (MDPL R3).
 
 A mutant here is a statement rewrite (inv_pg Env.rewriting: what reaches
 PostgreSQL) or a stand-in for one function or one transaction boundary of

@@ -8001,8 +8001,8 @@ _AER_POPGATE_BUILD = 1
 # which skips a row another transaction holds (_DELETE_CASE_SCRUB_SQL), and
 # the janitor finishes a skipped row (_mail_case_scrub_pass); the retention
 # sweep waits for no row lock (mscl-r2, the comment above
-# _mail_retention_sweep); the open item MDPL (two deletions against each
-# other on mail rows that are not case rows) is not in it. Value 1 (a send's
+# _mail_retention_sweep); MDPL (the deletion's lock order against other
+# writers, and its bounded new attempts) is not in it. Value 1 (a send's
 # lock on its spam case row) was never deployed. It names build
 # identity only. The lane adds no route and no key to any answer, so without
 # it the train could not tell a box on the new build from a stale one
@@ -46434,8 +46434,8 @@ async def delete_player_data(steam_id: str, request: Request, sig: str = Query(.
     # its sender's case row for the day. This deletion never waits for a case
     # row: it writes moderation_cases only in its last statement, which skips
     # a row another transaction holds, _DELETE_CASE_SCRUB_SQL. Two deletions
-    # can still wait for each other on mail rows that are not case rows: the
-    # open item MDPL.) Migration 416's change moved it from
+    # never wait for each other on a row: each takes the pool snapshot key
+    # before its first row lock, MDPL R3.) Migration 416's change moved it from
     # here to the end: there it is locked in the same ascending pass as the
     # invite bump's rows (_invite_bump's `drop`), the one order every writer of
     # mail_inbox_rev takes. The only lock taken after it is that last
@@ -46467,9 +46467,9 @@ async def delete_player_data(steam_id: str, request: Request, sig: str = Query(.
     # The LAST statement before the commit, and this handler's only write to
     # a moderation_cases row: it never waits for another transaction's row
     # (_DELETE_CASE_SCRUB_SQL says why). A row it skips keeps its old values
-    # until the janitor's _mail_case_scrub_pass finishes it. Two deletions can
-    # still wait for each other on mail rows that are not case rows (the open
-    # item MDPL); the retention sweep waits for no row lock and is not in it.
+    # until the janitor's _mail_case_scrub_pass finishes it. Two deletions
+    # never wait for each other on a row (each takes the pool snapshot key
+    # before its first row lock); the retention sweep waits for no row lock.
     await db.execute(text(_DELETE_CASE_SCRUB_SQL), {"pid": pid, "sid": steam_id, "tomb": _tomb})
 
     # MDPL R6a: no commit starts after the deadline -- the client may have
@@ -81816,8 +81816,8 @@ async def _invite_write_receipt(db: AsyncSession, caller_id, key: UUID, route: s
 # sender's spam case row after its bump, and delete_player_data, which waits for these rows, never
 # waits for a case row: it writes moderation_cases only in its last statement, which skips a row
 # another transaction holds (_DELETE_CASE_SCRUB_SQL). A row the deletion holds is waited for and,
-# once it commits, gone. Two deletions can still wait for each other on mail rows that are not
-# case rows (the open item MDPL); the retention sweep waits for no row lock and is not in it.
+# once it commits, gone. Two deletions never wait for each other on a row: each takes the pool
+# snapshot key before its first row lock (MDPL R3); the retention sweep waits for no row lock.
 _INVITE_REV_BUMP_SQL = (
     "WITH t AS (SELECT v.recipient_id FROM mail_inbox_rev v"
     "            WHERE v.recipient_id IN (SELECT r.recipient_id FROM mail_recipients r"
@@ -82889,11 +82889,11 @@ async def _mail_purge_due(db: AsyncSession) -> list:
 #     moderator's action on one case, in any pair, take its subject's
 #     identity lock; two reports of one message take the reporter's.
 # Each edge is settled by its own two transactions, so the rule holds for
-# circles of any length (ORDER-V3 has the table). The deletion and another
-# deletion can still wait for each other on mail rows that are not case rows
-# (envelopes, relay rows, censor hits, send receipts), taken in different
-# orders; that open class is the item MDPL. The retention sweep is no longer
-# in it.
+# circles of any length (ORDER-V3 has the table). A deletion and another
+# deletion never wait for each other on a row (envelopes, relay rows, censor
+# hits, send receipts or any other): each takes the pool snapshot key before
+# its first row lock, so one waiting for the other holds no row (MDPL R3).
+# The retention sweep waits for no row lock.
 _DELETE_CASE_SCRUB_SQL = (
     "UPDATE moderation_cases"
     "   SET reporter_id = CASE WHEN reporter_id = CAST(:pid AS uuid) THEN NULL"
