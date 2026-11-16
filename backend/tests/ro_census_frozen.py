@@ -3724,3 +3724,43 @@ for _k, _v in B10_MERGE_FROZEN.items():
     FROZEN[_k] = list(FROZEN.get(_k, [])) + list(_v)
 FROZEN_COUNT = (COARSE_COUNT + COMPLETE_COUNT + R10_COUNT + R10_MERGE_COUNT
                 + R11_ID_COUNT + R11_OPEN_COUNT + B10_MERGE_COUNT)
+
+
+# Hand edit for migration 415's change (the mail send receipts): one coarse
+# form it adds to a census file. It is the module-scope
+# `from sqlalchemy import LargeBinary` in models.py, a statement of its own so
+# that the shared sqlalchemy import stays as it was (learning #537).
+# LargeBinary is a column type: the type of MailSendReceipt.request_fp, the
+# digest of a send's request. It reaches no opener, no DSN and no role, and it
+# is an import form, not an identity form. Frozen by hand, not by a
+# re-derivation; FROZEN_COUNT is 856.
+MAIL_SEND_RECEIPTS_FROZEN = {'api/models.py': [('import', 'from sqlalchemy import LargeBinary')]}
+MAIL_SEND_RECEIPTS_COUNT = 1
+for _k, _v in MAIL_SEND_RECEIPTS_FROZEN.items():
+    FROZEN[_k] = list(FROZEN.get(_k, [])) + list(_v)
+FROZEN_COUNT = (COARSE_COUNT + COMPLETE_COUNT + R10_COUNT + R10_MERGE_COUNT
+                + R11_ID_COUNT + R11_OPEN_COUNT + B10_MERGE_COUNT
+                + MAIL_SEND_RECEIPTS_COUNT)
+
+
+# Hand edit for migration 416's change (the lobby invites): four forms it adds
+# to a census file, each a kwarg form in main.py. They are the explicit
+# `password=None` with which the invite cores build the mode's request: a
+# challenge's create (_invite_challenge_core) and an accept's join
+# (_invite_join_core), FFA's and the 2v2 and 1v2 lobbies' alike, so each
+# states that it builds its request with no password. The four callees are
+# request models (_FfaLobbyCreateReq, _FfaLobbyJoinReq, _LobbyCreateReq,
+# _LobbyJoinReq): no opener, no DSN and no role, and each form is a kwarg
+# form, not an identity form. Frozen by hand, not by a re-derivation;
+# FROZEN_COUNT is 860.
+LOBBY_INVITES_FROZEN = {'api/main.py': [
+    ('kwarg', '_FfaLobbyCreateReq password=None'),
+    ('kwarg', '_FfaLobbyJoinReq password=None'),
+    ('kwarg', '_LobbyCreateReq password=None'),
+    ('kwarg', '_LobbyJoinReq password=None')]}
+LOBBY_INVITES_COUNT = 4
+for _k, _v in LOBBY_INVITES_FROZEN.items():
+    FROZEN[_k] = list(FROZEN.get(_k, [])) + list(_v)
+FROZEN_COUNT = (COARSE_COUNT + COMPLETE_COUNT + R10_COUNT + R10_MERGE_COUNT
+                + R11_ID_COUNT + R11_OPEN_COUNT + B10_MERGE_COUNT
+                + MAIL_SEND_RECEIPTS_COUNT + LOBBY_INVITES_COUNT)

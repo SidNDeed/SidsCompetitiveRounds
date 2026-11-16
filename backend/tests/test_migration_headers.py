@@ -29,13 +29,19 @@ API_DIR = pathlib.Path(__file__).resolve().parents[1] / "api"
 #
 # 377 (admin evidence report order indexes) is held to the same header rules:
 # a deploy-order line, and catalog guards stated as such. 401 (the
-# contribution match_id column and indexes, B10-R3) likewise.
+# contribution match_id column and indexes, B10-R3) likewise. 415 (mail send
+# receipts: a table, its index and trigger, and two statements outside every
+# guard, the backfill cue's SELECT set_config() and the trigger's CREATE OR
+# REPLACE FUNCTION) likewise. 416 (lobby invites: two tables, their indexes
+# and mail_messages' kind check, every step inside a guard) likewise.
 OWNED = ("331_animal_title_ladders.sql",
          "332_pc_edition_schedule.sql",
          "333_pc_card_themes.sql",
          "336_bug_reports_kind.sql",
          "377_admin_evidence_indexes.sql",
-         "401_contrib_match_provenance.sql")
+         "401_contrib_match_provenance.sql",
+         "415_mail_send_receipts.sql",
+         "416_lobby_invites.sql")
 
 _ORDER_LINE = re.compile(r"^--\s*DEPLOY ORDER:\s*(.+)$", re.MULTILINE)
 
@@ -71,6 +77,50 @@ def test_every_migration_states_its_deploy_order(filename):
     assert text.upper().find("DEPLOY ORDER") < first_statement, (
         "%s's deploy-order line sits after BEGIN;, below the header a reader "
         "actually reads" % filename)
+
+
+def test_the_deploy_order_check_fails_415_without_its_line(tmp_path, monkeypatch):
+    """The negative control of the check's 415 case, which joined OWNED with
+    migration 415's change: a copy of 415 whose line is gone, names no side,
+    or stands after its BEGIN; fails the check; the same copy step with the
+    file's own text passes it."""
+    name = "415_mail_send_receipts.sql"
+    real = (SQL_DIR / name).read_text(encoding="utf-8")
+    (line,) = [m.group(0) for m in _ORDER_LINE.finditer(real)]
+    gone = real.replace(line, "--")
+    begin = gone.upper().index("BEGIN;") + len("BEGIN;")
+    mutants = (gone,
+               real.replace(line, "-- DEPLOY ORDER: see the runbook."),
+               gone[:begin] + "\n" + line + gone[begin:])
+    monkeypatch.setitem(globals(), "SQL_DIR", tmp_path)
+    for text in mutants:
+        (tmp_path / name).write_text(text, encoding="utf-8")
+        with pytest.raises(AssertionError):
+            test_every_migration_states_its_deploy_order(name)
+    (tmp_path / name).write_text(real, encoding="utf-8")
+    test_every_migration_states_its_deploy_order(name)
+
+
+def test_the_deploy_order_check_fails_416_without_its_line(tmp_path, monkeypatch):
+    """The negative control of the check's 416 case, which joined OWNED with
+    the lobby invites change: a copy of 416 whose line is gone, names no side,
+    or stands after its BEGIN; fails the check; the same copy step with the
+    file's own text passes it."""
+    name = "416_lobby_invites.sql"
+    real = (SQL_DIR / name).read_text(encoding="utf-8")
+    (line,) = [m.group(0) for m in _ORDER_LINE.finditer(real)]
+    gone = real.replace(line, "--")
+    begin = gone.upper().index("BEGIN;") + len("BEGIN;")
+    mutants = (gone,
+               real.replace(line, "-- DEPLOY ORDER: see the runbook."),
+               gone[:begin] + "\n" + line + gone[begin:])
+    monkeypatch.setitem(globals(), "SQL_DIR", tmp_path)
+    for text in mutants:
+        (tmp_path / name).write_text(text, encoding="utf-8")
+        with pytest.raises(AssertionError):
+            test_every_migration_states_its_deploy_order(name)
+    (tmp_path / name).write_text(real, encoding="utf-8")
+    test_every_migration_states_its_deploy_order(name)
 
 
 # ── 336's reader inventory ─────────────────────────────────────────────────
@@ -721,6 +771,14 @@ _EVERY_STATEMENT_GUARDED = {
         "one catalog-guarded ADD COLUMN block, two catalog-guarded CREATE INDEX "
         "blocks and a read-only post-check, between BEGIN, SET LOCAL "
         "lock_timeout and COMMIT; a re-run issues no DDL",
+    "416_lobby_invites.sql":
+        "one block that puts the session's temporary schema last in "
+        "search_path for the transaction, "
+        "one catalog-guarded block that creates lobby_invites, invite_receipts "
+        "and their indexes and marks both, or else refuses unless both carry the "
+        "mark, one block replacing mail_messages' kind check only while the wider "
+        "check is absent, and a read-only post-check of that check, between "
+        "BEGIN, SET LOCAL lock_timeout and COMMIT; a re-run issues no DDL",
 }
 _EVERY_STATEMENT_GUARDED_KINDS = {"BEGIN", "COMMIT", "SET LOCAL", "DO"}
 

@@ -1685,10 +1685,35 @@ def test_the_janitor_lock_census_sees_orm_locks_and_not_only_sql():
                 and getattr(first.value.func, "id", None) == "_rdm_janitor_bound"
                 and [a.id for a in first.value.args] == [w.items[0].optional_vars.id]), \
             ast.dump(first)
-    assert len(census["declines"]) == 31, census["declines"]
-    assert len(census["waits"]) == 29, census["waits"]   # 25 before the queue-row lock became visible
-    assert len(census["decline_sites"]) == 28, census["decline_sites"]
-    assert len(census["wait_sites"]) == 26, census["wait_sites"]   # 22 before: the four queue-row lock literals
+    # Migration 416's change (lobby invites) adds one decline at one site and
+    # two waits at two sites. The decline: the invite sweep's selection
+    # (_invite_sweep, reached from queue_cleanup_loop), FOR NO KEY UPDATE OF
+    # i SKIP LOCKED. The waits: the inbox revision bump (_invite_bump, which
+    # the sweep and the stale member prunes run), FOR NO KEY UPDATE on the
+    # invitees' mail_inbox_rev rows in ascending order, and the deletion's
+    # lock pass in the same function (_INVITE_REV_DROP_LOCK_SQL; the janitor
+    # never passes `drop`, but the census counts what the function can
+    # reach). Both wait only on revision rows, which every writer takes in
+    # ascending order and holds only from its last statement to its commit.
+    # The bump no longer touches players rows: at stage 4 it was a decline
+    # there (FOR KEY SHARE OF p SKIP LOCKED), and a players row held FOR
+    # UPDATE by any request made it skip a live invitee. The other
+    # statements the change adds to the janitor carry no row lock clause, so
+    # the census does not list them: the ending UPDATEs the prunes run
+    # (_invite_end_departed, _invite_end_lobby) and the retention DELETE
+    # (_invite_retention_sweep). Before 416: 31/29/28/26; at stage 4:
+    # 33/29/30/26.
+    assert [r["func"] for r in census["declines"]].count("_invite_sweep") == 1, census["declines"]
+    assert not any(r["func"] == "_invite_bump" for r in census["declines"]), census["declines"]
+    assert sorted(r["sql"].split(" FROM ", 1)[1][:16] for r in census["waits"]
+                  if r["func"].startswith("_invite_")) == ["mail_inbox_rev v", "mail_inbox_rev v"], \
+        census["waits"]
+    assert {r["func"] for r in census["waits"] if r["func"].startswith("_invite_")} == {"_invite_bump"}, \
+        census["waits"]
+    assert len(census["declines"]) == 32, census["declines"]
+    assert len(census["waits"]) == 31, census["waits"]   # 25 before the queue-row lock became visible
+    assert len(census["decline_sites"]) == 29, census["decline_sites"]
+    assert len(census["wait_sites"]) == 28, census["wait_sites"]   # 22 before: the four queue-row lock literals
 
 
 def test_a_lock_taking_path_outside_the_counted_set_reds_the_census():

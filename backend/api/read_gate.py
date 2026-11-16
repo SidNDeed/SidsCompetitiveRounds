@@ -383,6 +383,7 @@ PLAYER: frozenset = frozenset({
     "/api/v1/artist/{steam_id}/sales",
     "/api/v1/broadcast/report-status",
     "/api/v1/h2h/{steam_id}/{opponent_steam_id}",
+    "/api/v1/invites/pending",
     "/api/v1/mail/blocks",
     "/api/v1/mail/sent",
     "/api/v1/mail/settings",
