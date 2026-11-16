@@ -856,6 +856,11 @@ class FakeDb:
                 out.append((1,))
             return _Res(out)
         # moderation cases
+        if "SELECT 1 FROM moderation_cases WHERE kind = 'mail_spam' AND bucket_key = :bucket" in sql:
+            # a send's lock on its sender's spam case row for the day (main._MAIL_SPAM_CASE_LOCK_SQL)
+            hit = [c for c in self.cases.values()
+                   if (c["kind"], c["bucket_key"]) == ("mail_spam", params["bucket"])]
+            return _Res([(1,)] if hit else [])
         if "INSERT INTO moderation_cases" in sql:
             key = (params["kind"], params["bucket"])
             existing = [c for c in self.cases.values() if (c["kind"], c["bucket_key"]) == key]
@@ -1452,6 +1457,46 @@ def test_advisory_lock_is_taken_first_and_pinned_in_the_send_span():
             < src.index("_mail_prior_send(") < src.index("_mail_sender_gates(")
     assert "pg_advisory_xact_lock(hashtext('mail:' || CAST(CAST(:sid AS uuid) AS text)))" in inspect.getsource(main._mail_lock_sender)
     assert res["accepted"] is True
+
+
+def test_a_send_locks_its_spam_case_row_before_its_message_row_and_writes_the_row_it_locked(monkeypatch):
+    """A send locks its sender's mail_spam case row for the day
+    (main._MAIL_SPAM_CASE_LOCK_SQL) once: after its rate window, before its
+    message row and its fan-out. The case it then writes is the row it
+    locked, because the send reads the day once: here the clock passes
+    midnight as the lock goes through, and the case is still the locked
+    day's. Control: the clock did move, so a case write that read the day
+    again would have written the next day's row. The live two-session proof
+    of the order is test_mail_spam_case_lock_pg.py."""
+    db, ids = _world()
+    late = datetime(2026, 9, 6, 23, 59, 59, tzinfo=timezone.utc)
+    db.add_session("tokLate", A_SID, expires_at=late + timedelta(hours=1))
+    monkeypatch.setattr(main, "MAIL_SPAM_SAME_BODY", 1)          # this one send crosses the threshold
+    clock = [late]
+    monkeypatch.setattr(main, "_utc_now", lambda: clock[0])
+    locked = []
+    real = db._dispatch
+
+    def dispatch(sql, params, outer=None):
+        if main._MAIL_SPAM_CASE_LOCK_SQL in sql:
+            locked.append(params["bucket"])
+            clock[0] = late + timedelta(seconds=2)                 # midnight passes after the lock
+        return real(sql, params, outer)
+    db._dispatch = dispatch
+    out = _send(db, [B_SID], token="tokLate")
+    sql = db.statements
+    lock_i = [i for i, s in enumerate(sql) if main._MAIL_SPAM_CASE_LOCK_SQL in s]
+    ins_i = next(i for i, s in enumerate(sql) if "INSERT INTO mail_messages" in s)
+    fan_i = next(i for i, s in enumerate(sql) if main._MAIL_FANOUT_SQL in s)
+    case_i = next(i for i, s in enumerate(sql) if "INSERT INTO moderation_cases" in s)
+    assert len(lock_i) == 1 and lock_i[0] < ins_i < fan_i < case_i, (lock_i, ins_i, fan_i, case_i)
+    assert locked == [f"{ids[A_SID]}:2026-09-06"]
+    [case] = [c for c in db.cases.values() if c["kind"] == "mail_spam"]
+    assert case["bucket_key"] == locked[0] and str(case["message_id"]) == out["id"]
+    assert main._mail_spam_day() == "2026-09-07"                   # control: the clock did pass midnight
+    finish = inspect.getsource(main._mail_finish_send)
+    assert finish.index("_mail_rate_or_raise(") < finish.index("_MAIL_SPAM_CASE_LOCK_SQL") \
+        < finish.index("_mail_write_message(")
 
 
 # ── limits ────────────────────────────────────────────────────────────────
@@ -3456,7 +3501,7 @@ def test_a_mail_send_writes_one_receipt_and_one_spam_check_and_an_invite_neither
     assert sum("INSERT INTO mail_send_receipts" in s for s in sent) == 1
     # control: the count sees a second spam evaluation when there is one
     _run(main._mail_spam_check(db, db.players[ids[A_SID]], uuid.UUID(out["id"]), "Hi there",
-                               "A perfectly ordinary body."))
+                               "A perfectly ordinary body.", day=main._mail_spam_day()))
     assert sum("AS same_body" in s for s in db.statements[before:]) == 2
 
     subject, body = main._invite_mail_text("team", "invite")

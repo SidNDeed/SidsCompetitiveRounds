@@ -46220,16 +46220,16 @@ async def delete_player_data(steam_id: str, request: Request, sig: str = Query(.
     # The mail fan-outs hold FOR KEY SHARE on each recipient's players row
     # while they insert, and the steam_id rewrite above takes FOR UPDATE on
     # that row — so a send racing this deletion either committed before the
-    # rewrite (its envelope is caught here) or blocks on the row, re-reads it
-    # after this commits and finds deleted_at set. The inbox revision row
+    # rewrite (its envelope is caught here) or takes the row in its fan-out
+    # only after this commits, and finds deleted_at set: it blocks on the
+    # row, or, when the resolved_by scrub above holds its spam case row for
+    # the day, it blocks earlier, at its lock on that row before its fan-out
+    # (_MAIL_SPAM_CASE_LOCK_SQL). The inbox revision row
     # (migration 300) is personal state and goes with the envelopes; it is
     # removed at this handler's end rather than in the early sweep, so the
     # row-lock order (players, then mail_inbox_rev) matches the fan-out's and
     # no cycle of waits between the two can form over these two tables' rows.
-    # (A send that crosses a spam threshold takes one more lock after them,
-    # its sender's case row for the day, and can close a cycle with this
-    # deletion's resolved_by scrub above: see the comment above
-    # _INVITE_REV_BUMP_SQL.) Migration 416's change moved it
+    # Migration 416's change moved it
     # from here to the very end: there it is locked in the same ascending
     # pass as the invite bump's rows (_invite_bump's `drop`), the one order
     # every writer of mail_inbox_rev takes, and nothing is locked after it.
@@ -80178,9 +80178,42 @@ async def _mail_open_case(db: AsyncSession, *, kind: str, subject_player_id, rep
     return case_id, inserted
 
 
-async def _mail_spam_case(db: AsyncSession, sender: dict, *, message_id, subject: str | None,
-                          body: str | None, same_body: int, bulk_hour: int, censor_hits: int) -> None:
-    day = _utc_now().strftime("%Y-%m-%d")
+def _mail_spam_day() -> str:
+    """The UTC day a sender's spam case is bucketed by. A send reads it once,
+    in _mail_finish_send, and passes it to its lock on the case row and to
+    each case write it makes, so the row it locks is the row it writes, at
+    midnight too."""
+    return _utc_now().strftime("%Y-%m-%d")
+
+
+def _mail_spam_bucket(sender_id, day: str) -> str:
+    """moderation_cases.bucket_key of a sender's mail_spam case for `day`."""
+    return f"{sender_id}:{day}"
+
+
+# A send's lock on its sender's mail_spam case row for the day, taken BEFORE it
+# writes the message row and its fan-out (_mail_finish_send), in the mode the
+# upsert takes (_mail_open_case's DO UPDATE sets evidence and message_id,
+# neither a key column). delete_player_data's resolved_by scrub can hold this
+# row, and that deletion then rewrites its own players row FOR UPDATE, which
+# waits on any fan-out's FOR KEY SHARE of that row. A send that first took the
+# case row at its upsert, after its fan-out, could wait on the scrub while the
+# deletion's rewrite waited on the send's key share, until PostgreSQL ended
+# one of the two with 40P01. Taken here, a send that waits on the scrub holds
+# only its own identity's and sender's locks (_mail_lock_identities,
+# _mail_lock_sender), and the deletion takes neither after its scrub. A row
+# absent here stays absent until this send writes it: only a send of this
+# sender creates it, and _mail_lock_sender serialises those sends.
+_MAIL_SPAM_CASE_LOCK_SQL = (
+    "SELECT 1 FROM moderation_cases"
+    " WHERE kind = 'mail_spam' AND bucket_key = :bucket"
+    " FOR NO KEY UPDATE"
+)
+
+
+async def _mail_spam_case(db: AsyncSession, sender: dict, *, day: str, message_id,
+                          subject: str | None, body: str | None, same_body: int, bulk_hour: int,
+                          censor_hits: int) -> None:
     evidence = {
         "sender_steam_id": sender["steam_id"], "sender_name": sender.get("display_name"),
         "same_body_day": int(same_body), "bulk_hour": int(bulk_hour),
@@ -80197,10 +80230,10 @@ async def _mail_spam_case(db: AsyncSession, sender: dict, *, message_id, subject
             + (f" Latest subject: {_mail_discord_safe(subject, 120)}" if subject else ""))
     await _mail_open_case(db, kind="mail_spam", subject_player_id=sender["id"], reporter_id=None,
                           message_id=message_id, evidence=evidence,
-                          bucket_key=f"{sender['id']}:{day}", bump=True, post_text=post)
+                          bucket_key=_mail_spam_bucket(sender["id"], day), bump=True, post_text=post)
 
 
-async def _mail_censor_or_raise(db: AsyncSession, sender: dict, *fields: str) -> None:
+async def _mail_censor_or_raise(db: AsyncSession, sender: dict, *fields: str, day: str) -> None:
     """Both text fields pass the chat censor (_chat_censor_hit, in-memory,
     fail-closed). A hit is recorded in mail_censor_hits and evaluated against
     B-14's third trigger BEFORE the refusal is raised — the refusal is the
@@ -80218,13 +80251,14 @@ async def _mail_censor_or_raise(db: AsyncSession, sender: dict, *fields: str) ->
             " WHERE sender_id = :sid AND created_at > NOW() - make_interval(days => 1)"
         ), {"sid": sender["id"]})).scalar() or 0
         if int(hits) >= MAIL_SPAM_CENSOR_HITS:
-            await _mail_spam_case(db, sender, message_id=None, subject=None, body=None,
+            await _mail_spam_case(db, sender, day=day, message_id=None, subject=None, body=None,
                                   same_body=0, bulk_hour=0, censor_hits=int(hits))
         await db.commit()
         raise HTTPException(status_code=400, detail="censored")
 
 
-async def _mail_spam_check(db: AsyncSession, sender: dict, message_id, subject: str, body: str) -> None:
+async def _mail_spam_check(db: AsyncSession, sender: dict, message_id, subject: str, body: str, *,
+                           day: str) -> None:
     """B-14, evaluated inside the send transaction after the fan-out and the
     send's receipt, so the message just written counts. Every count reads
     the sender's send receipts (migration 415's change), never mail_messages:
@@ -80261,7 +80295,7 @@ async def _mail_spam_check(db: AsyncSession, sender: dict, message_id, subject: 
     censor_hits = int((row or {}).get("censor_hits") or 0)
     if (same_body >= MAIL_SPAM_SAME_BODY or bulk_hour >= MAIL_SPAM_BULK_MESSAGES
             or censor_hits >= MAIL_SPAM_CENSOR_HITS):
-        await _mail_spam_case(db, sender, message_id=message_id, subject=subject, body=body,
+        await _mail_spam_case(db, sender, day=day, message_id=message_id, subject=subject, body=body,
                               same_body=same_body, bulk_hour=bulk_hour, censor_hits=censor_hits)
 
 
@@ -80294,7 +80328,8 @@ async def _mail_finish_send(db: AsyncSession, sender: dict, *, subject: str, bod
                             request_fp: bytes, cap: int | None = None, via: str = "game") -> dict:
     """Second half of the send transaction, shared by POST /mail and
     /mail/{id}/reply: plain-text rules (judged on the RAW text, then
-    trimmed), censor, cap, rate window, the message row, the ONE fan-out
+    trimmed), censor, cap, rate window, the lock on the sender's spam case
+    row for the day, the message row, the ONE fan-out
     INSERT ... SELECT, the send receipt (with the number of envelopes the
     fan-out wrote), the inbox-revision bump, the spam evaluation, the
     commit. The caller holds the identity and
@@ -80305,7 +80340,8 @@ async def _mail_finish_send(db: AsyncSession, sender: dict, *, subject: str, bod
     list before resolving ids (one grant read per send)."""
     subject = _mail_text_or_raise(subject, field="subject", subject=True)
     body = _mail_text_or_raise(body, field="body", subject=False)
-    await _mail_censor_or_raise(db, sender, subject, body)
+    day = _mail_spam_day()
+    await _mail_censor_or_raise(db, sender, subject, body, day=day)
     if not addressees:
         raise HTTPException(status_code=400, detail="recipients_empty")
     if cap is None:
@@ -80313,6 +80349,12 @@ async def _mail_finish_send(db: AsyncSession, sender: dict, *, subject: str, bod
     if len(addressees) > cap:
         raise HTTPException(status_code=400, detail="too_many_recipients")
     await _mail_rate_or_raise(db, sender["id"])
+    # The sender's spam case row for the day, locked before the message row
+    # and its fan-out (_MAIL_SPAM_CASE_LOCK_SQL says why). Whether this send
+    # crosses a threshold is known only once its receipt is written, so every
+    # send takes the lock (on no row, when the day's row does not exist).
+    await db.execute(text(_MAIL_SPAM_CASE_LOCK_SQL),
+                     {"bucket": _mail_spam_bucket(sender["id"], day)})
     mid, fanned = await _mail_write_message(
         db, sender["id"], kind="direct", thread_id=thread_id, in_reply_to=in_reply_to,
         subject=subject, body=body, idempotency_key=idempotency_key, via=via,
@@ -80324,7 +80366,7 @@ async def _mail_finish_send(db: AsyncSession, sender: dict, *, subject: str, bod
                               message_id=mid, recipients=int(fanned.rowcount),
                               body_key=_mail_body_key(body))
     await db.execute(text(_MAIL_REV_BUMP_SQL), {"mid": mid})
-    await _mail_spam_check(db, sender, mid, subject, body)
+    await _mail_spam_check(db, sender, mid, subject, body, day=day)
     # Item 5: queue the Discord relay LAST, inside this same transaction and
     # after the spam check, so a mail that rolls back queues no DM and a
     # mail that commits always has its DMs queued. The helper reads the
@@ -81556,10 +81598,8 @@ async def _invite_write_receipt(db: AsyncSession, caller_id, key: UUID, route: s
 # or stall a live invitee's bump. The rows are locked in ascending recipient order in one
 # statement (the CTE), the order of every writer of this table (mail's sends and migration 300's
 # trigger insert in that order; the deletion takes its own row in the same ascending pass as its
-# bump, _INVITE_REV_DROP_LOCK_SQL), so waits on these rows alone never form a cycle. A lock taken
-# after a bump can still close one: _apply_ban_core says why its own cannot; mail's send can (its
-# spam case can wait on delete_player_data's resolved_by scrub, which then waits on rows the send
-# holds). A row the deletion holds is waited for and, once it commits, gone.
+# bump, _INVITE_REV_DROP_LOCK_SQL), so waits on these rows alone never form a cycle. A row the
+# deletion holds is waited for and, once it commits, gone.
 _INVITE_REV_BUMP_SQL = (
     "WITH t AS (SELECT v.recipient_id FROM mail_inbox_rev v"
     "            WHERE v.recipient_id IN (SELECT r.recipient_id FROM mail_recipients r"
