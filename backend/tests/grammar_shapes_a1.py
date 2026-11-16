@@ -19,55 +19,55 @@ restored, minus three removed shapes (M4, M7, M8).
 
 # (file, def line, name, nodes) of every span the a1 walks admit
 A1_SPANS = (
-    ('main.py', 4441, '_team_clear_dc_fallback_marker', 34),
-    ('main.py', 6645, '_parse_version', 44),
-    ('main.py', 17287, '_lock_queue_rows_ordered', 168),
-    ('main.py', 17740, '_admission_key', 36),
-    ('main.py', 17744, '_lease_admission_gate', 624),
-    ('main.py', 17883, '_lease_acquire', 115),
-    ('main.py', 17933, '_lease_acquire_many', 108),
-    ('main.py', 18319, '_lock_snapshot_rows', 143),
-    ('main.py', 18358, '_lease_live_claim_strict', 29),
-    ('main.py', 18384, '_formation_lease_conflict', 113),
-    ('main.py', 19536, '_region_pings_newer', 63),
-    ('main.py', 19614, '_region_mode_of', 96),
-    ('main.py', 19633, '_region_current', 33),
-    ('main.py', 19645, '_region_volumes', 113),
-    ('main.py', 19667, '_group_region', 706),
-    ('main.py', 21035, 'queue_poll', 2650),
-    ('main.py', 29445, '_bet_fighter_tax', 88),
-    ('main.py', 29464, '_credit_bet_fighter_tax', 113),
-    ('main.py', 29489, '_credit_team_bet_fighter_tax', 115),
-    ('main.py', 38987, '_return_stake_exactly', 96),
-    ('main.py', 50241, '_balance_teams', 230),
-    ('main.py', 50261, '_team_balance_rating', 49),
-    ('main.py', 50618, 'team_queue_poll', 4249),
-    ('main.py', 52504, '_reconcile_team_series_bets', 606),
-    ('main.py', 53134, '_team_quartet_key', 26),
-    ('main.py', 53142, '_team_quartet_lock', 27),
-    ('main.py', 53159, '_team_series_resumable', 139),
-    ('main.py', 53187, '_team_lock_family_pick', 441),
-    ('main.py', 53286, '_team_resolve_live_family', 214),
-    ('main.py', 53326, '_team_relock_existing_series', 271),
-    ('main.py', 54943, 'ovt_queue_poll', 2152),
-    ('main.py', 55668, '_mrw_mod', 9),
-    ('main.py', 57229, '_ffa_gather_decide', 92),
-    ('main.py', 57679, '_rules_normalize', 114),
-    ('main.py', 57701, '_rules_json', 64),
-    ('main.py', 57734, '_mod_version_at_least', 39),
-    ('main.py', 57746, '_ffa_roster_clears_proximity_floor', 59),
-    ('main.py', 57762, '_request_mod_version', 28),
-    ('main.py', 57786, '_rules_for_queue_match', 78),
-    ('main.py', 57809, '_rules_members', 136),
-    ('main.py', 57831, '_rules_for_members', 118),
-    ('main.py', 58299, '_ffa_sort_key', 25),
-    ('main.py', 58647, '_player_body_color', 88),
-    ('main.py', 58667, '_team_color_holders', 51),
-    ('main.py', 58687, '_stamp_team_series_colors', 249),
-    ('main.py', 63667, '_asm_sqlstate', 119),
-    ('main.py', 66267, '_ffa_queue_poll_inner', 2939),
-    ('main.py', 76146, '_assert_no_service_subject', 96),
-    ('main.py', 76194, '_service_player_uuids', 183),
+    ('main.py', 4446, '_team_clear_dc_fallback_marker', 34),
+    ('main.py', 6654, '_parse_version', 44),
+    ('main.py', 17328, '_lock_queue_rows_ordered', 168),
+    ('main.py', 17781, '_admission_key', 36),
+    ('main.py', 17785, '_lease_admission_gate', 624),
+    ('main.py', 17924, '_lease_acquire', 115),
+    ('main.py', 17974, '_lease_acquire_many', 108),
+    ('main.py', 18360, '_lock_snapshot_rows', 143),
+    ('main.py', 18399, '_lease_live_claim_strict', 29),
+    ('main.py', 18425, '_formation_lease_conflict', 113),
+    ('main.py', 19577, '_region_pings_newer', 63),
+    ('main.py', 19655, '_region_mode_of', 96),
+    ('main.py', 19674, '_region_current', 33),
+    ('main.py', 19686, '_region_volumes', 113),
+    ('main.py', 19708, '_group_region', 706),
+    ('main.py', 21076, 'queue_poll', 2650),
+    ('main.py', 29486, '_bet_fighter_tax', 88),
+    ('main.py', 29505, '_credit_bet_fighter_tax', 113),
+    ('main.py', 29530, '_credit_team_bet_fighter_tax', 115),
+    ('main.py', 39028, '_return_stake_exactly', 96),
+    ('main.py', 50367, '_balance_teams', 230),
+    ('main.py', 50387, '_team_balance_rating', 49),
+    ('main.py', 50744, 'team_queue_poll', 4249),
+    ('main.py', 52630, '_reconcile_team_series_bets', 606),
+    ('main.py', 53260, '_team_quartet_key', 26),
+    ('main.py', 53268, '_team_quartet_lock', 27),
+    ('main.py', 53285, '_team_series_resumable', 139),
+    ('main.py', 53313, '_team_lock_family_pick', 441),
+    ('main.py', 53412, '_team_resolve_live_family', 214),
+    ('main.py', 53452, '_team_relock_existing_series', 271),
+    ('main.py', 55069, 'ovt_queue_poll', 2152),
+    ('main.py', 55794, '_mrw_mod', 9),
+    ('main.py', 57355, '_ffa_gather_decide', 92),
+    ('main.py', 57805, '_rules_normalize', 114),
+    ('main.py', 57827, '_rules_json', 64),
+    ('main.py', 57860, '_mod_version_at_least', 39),
+    ('main.py', 57872, '_ffa_roster_clears_proximity_floor', 59),
+    ('main.py', 57888, '_request_mod_version', 28),
+    ('main.py', 57912, '_rules_for_queue_match', 78),
+    ('main.py', 57935, '_rules_members', 136),
+    ('main.py', 57957, '_rules_for_members', 118),
+    ('main.py', 58422, '_ffa_sort_key', 25),
+    ('main.py', 58770, '_player_body_color', 88),
+    ('main.py', 58790, '_team_color_holders', 51),
+    ('main.py', 58810, '_stamp_team_series_colors', 249),
+    ('main.py', 63790, '_asm_sqlstate', 119),
+    ('main.py', 66390, '_ffa_queue_poll_inner', 2939),
+    ('main.py', 75179, '_assert_no_service_subject', 96),
+    ('main.py', 75227, '_service_player_uuids', 183),
     ('match_hold.py', 212, 'caps_token_sql', 16),
     ('match_hold.py', 235, '_mode_or_400', 23),
     ('match_hold.py', 351, '_latch_sql', 78),
@@ -91,1622 +91,1622 @@ A1_NODES = 20183
 
 
 A1_SHAPES = frozenset({
-    '<root>>AsyncFunctionDef(name=str,args=arguments,body=[Assign|Expr|For|Global|If|Return],decorator_list=[],returns=-,type_comment=-,type_params=[])',  # main.py:66267
-    '<root>>AsyncFunctionDef(name=str,args=arguments,body=[Assign|Expr|For|If],decorator_list=[],returns=Constant,type_comment=-,type_params=[])',  # main.py:17287
-    '<root>>AsyncFunctionDef(name=str,args=arguments,body=[Assign|Expr|For|If|Import|Return|While],decorator_list=[Call],returns=-,type_comment=-,type_params=[])',  # main.py:21035
-    '<root>>AsyncFunctionDef(name=str,args=arguments,body=[Assign|Expr|For|If|Return],decorator_list=[Call],returns=-,type_comment=-,type_params=[])',  # main.py:54943
-    '<root>>AsyncFunctionDef(name=str,args=arguments,body=[Assign|Expr|For|If|Return],decorator_list=[],returns=-,type_comment=-,type_params=[])',  # main.py:17933
-    '<root>>AsyncFunctionDef(name=str,args=arguments,body=[Assign|Expr|For|If|Return],decorator_list=[],returns=Name,type_comment=-,type_params=[])',  # main.py:57809
-    '<root>>AsyncFunctionDef(name=str,args=arguments,body=[Assign|Expr|For|If|Return|Try],decorator_list=[],returns=-,type_comment=-,type_params=[])',  # main.py:53326
-    '<root>>AsyncFunctionDef(name=str,args=arguments,body=[Assign|Expr|For|If|Return|Try],decorator_list=[],returns=Subscript,type_comment=-,type_params=[])',  # main.py:17744
-    '<root>>AsyncFunctionDef(name=str,args=arguments,body=[Assign|Expr|For|Return],decorator_list=[],returns=-,type_comment=-,type_params=[])',  # main.py:58667
-    '<root>>AsyncFunctionDef(name=str,args=arguments,body=[Assign|Expr|For|Return],decorator_list=[],returns=Name,type_comment=-,type_params=[])',  # main.py:57831
-    '<root>>AsyncFunctionDef(name=str,args=arguments,body=[Assign|Expr|FunctionDef|If|Return|Try],decorator_list=[],returns=-,type_comment=-,type_params=[])',  # main.py:19667
-    '<root>>AsyncFunctionDef(name=str,args=arguments,body=[Assign|Expr|Global|If|Return],decorator_list=[],returns=Constant,type_comment=-,type_params=[])',  # main.py:76194
-    '<root>>AsyncFunctionDef(name=str,args=arguments,body=[Assign|Expr|If],decorator_list=[],returns=Constant,type_comment=-,type_params=[])',  # main.py:29489
-    '<root>>AsyncFunctionDef(name=str,args=arguments,body=[Assign|Expr|If|Return],decorator_list=[],returns=-,type_comment=-,type_params=[])',  # main.py:17883
+    '<root>>AsyncFunctionDef(name=str,args=arguments,body=[Assign|Expr|For|Global|If|Return],decorator_list=[],returns=-,type_comment=-,type_params=[])',  # main.py:66390
+    '<root>>AsyncFunctionDef(name=str,args=arguments,body=[Assign|Expr|For|If],decorator_list=[],returns=Constant,type_comment=-,type_params=[])',  # main.py:17328
+    '<root>>AsyncFunctionDef(name=str,args=arguments,body=[Assign|Expr|For|If|Import|Return|While],decorator_list=[Call],returns=-,type_comment=-,type_params=[])',  # main.py:21076
+    '<root>>AsyncFunctionDef(name=str,args=arguments,body=[Assign|Expr|For|If|Return],decorator_list=[Call],returns=-,type_comment=-,type_params=[])',  # main.py:55069
+    '<root>>AsyncFunctionDef(name=str,args=arguments,body=[Assign|Expr|For|If|Return],decorator_list=[],returns=-,type_comment=-,type_params=[])',  # main.py:17974
+    '<root>>AsyncFunctionDef(name=str,args=arguments,body=[Assign|Expr|For|If|Return],decorator_list=[],returns=Name,type_comment=-,type_params=[])',  # main.py:57935
+    '<root>>AsyncFunctionDef(name=str,args=arguments,body=[Assign|Expr|For|If|Return|Try],decorator_list=[],returns=-,type_comment=-,type_params=[])',  # main.py:53452
+    '<root>>AsyncFunctionDef(name=str,args=arguments,body=[Assign|Expr|For|If|Return|Try],decorator_list=[],returns=Subscript,type_comment=-,type_params=[])',  # main.py:17785
+    '<root>>AsyncFunctionDef(name=str,args=arguments,body=[Assign|Expr|For|Return],decorator_list=[],returns=-,type_comment=-,type_params=[])',  # main.py:58790
+    '<root>>AsyncFunctionDef(name=str,args=arguments,body=[Assign|Expr|For|Return],decorator_list=[],returns=Name,type_comment=-,type_params=[])',  # main.py:57957
+    '<root>>AsyncFunctionDef(name=str,args=arguments,body=[Assign|Expr|FunctionDef|If|Return|Try],decorator_list=[],returns=-,type_comment=-,type_params=[])',  # main.py:19708
+    '<root>>AsyncFunctionDef(name=str,args=arguments,body=[Assign|Expr|Global|If|Return],decorator_list=[],returns=Constant,type_comment=-,type_params=[])',  # main.py:75227
+    '<root>>AsyncFunctionDef(name=str,args=arguments,body=[Assign|Expr|If],decorator_list=[],returns=Constant,type_comment=-,type_params=[])',  # main.py:29530
+    '<root>>AsyncFunctionDef(name=str,args=arguments,body=[Assign|Expr|If|Return],decorator_list=[],returns=-,type_comment=-,type_params=[])',  # main.py:17924
     '<root>>AsyncFunctionDef(name=str,args=arguments,body=[Assign|Expr|If|Return],decorator_list=[],returns=Name,type_comment=-,type_params=[])',  # match_hold.py:364
-    '<root>>AsyncFunctionDef(name=str,args=arguments,body=[Assign|Expr|If|Return|Try],decorator_list=[],returns=-,type_comment=-,type_params=[])',  # main.py:19645
+    '<root>>AsyncFunctionDef(name=str,args=arguments,body=[Assign|Expr|If|Return|Try],decorator_list=[],returns=-,type_comment=-,type_params=[])',  # main.py:19686
     '<root>>AsyncFunctionDef(name=str,args=arguments,body=[Assign|Expr|Return],decorator_list=[],returns=Name,type_comment=-,type_params=[])',  # tournaments.py:280
-    '<root>>AsyncFunctionDef(name=str,args=arguments,body=[Assign|Expr|Try],decorator_list=[],returns=Constant,type_comment=-,type_params=[])',  # main.py:58687
-    '<root>>AsyncFunctionDef(name=str,args=arguments,body=[AsyncWith|Expr|If|Return],decorator_list=[],returns=-,type_comment=-,type_params=[])',  # main.py:58647
-    '<root>>AsyncFunctionDef(name=str,args=arguments,body=[Expr],decorator_list=[],returns=Constant,type_comment=-,type_params=[])',  # main.py:53142
-    '<root>>AsyncFunctionDef(name=str,args=arguments,body=[Expr|For|If],decorator_list=[],returns=Constant,type_comment=-,type_params=[])',  # main.py:18319
-    '<root>>AsyncFunctionDef(name=str,args=arguments,body=[Expr|If],decorator_list=[],returns=Constant,type_comment=-,type_params=[])',  # main.py:29464
-    '<root>>AsyncFunctionDef(name=str,args=arguments,body=[Expr|Return],decorator_list=[],returns=-,type_comment=-,type_params=[])',  # main.py:18358
-    '<root>>AsyncFunctionDef(name=str,args=arguments,body=[Expr|Try],decorator_list=[],returns=-,type_comment=-,type_params=[])',  # main.py:52504
-    '<root>>AsyncFunctionDef(name=str,args=arguments,body=[Expr|Try],decorator_list=[],returns=Constant,type_comment=-,type_params=[])',  # main.py:4441
-    '<root>>FunctionDef(name=str,args=arguments,body=[Assert|Assign|Expr|FunctionDef|Return],decorator_list=[],returns=Subscript,type_comment=-,type_params=[])',  # main.py:50241
-    '<root>>FunctionDef(name=str,args=arguments,body=[Assert|Assign|Expr|If|Return],decorator_list=[],returns=Subscript,type_comment=-,type_params=[])',  # main.py:29445
+    '<root>>AsyncFunctionDef(name=str,args=arguments,body=[Assign|Expr|Try],decorator_list=[],returns=Constant,type_comment=-,type_params=[])',  # main.py:58810
+    '<root>>AsyncFunctionDef(name=str,args=arguments,body=[AsyncWith|Expr|If|Return],decorator_list=[],returns=-,type_comment=-,type_params=[])',  # main.py:58770
+    '<root>>AsyncFunctionDef(name=str,args=arguments,body=[Expr],decorator_list=[],returns=Constant,type_comment=-,type_params=[])',  # main.py:53268
+    '<root>>AsyncFunctionDef(name=str,args=arguments,body=[Expr|For|If],decorator_list=[],returns=Constant,type_comment=-,type_params=[])',  # main.py:18360
+    '<root>>AsyncFunctionDef(name=str,args=arguments,body=[Expr|If],decorator_list=[],returns=Constant,type_comment=-,type_params=[])',  # main.py:29505
+    '<root>>AsyncFunctionDef(name=str,args=arguments,body=[Expr|Return],decorator_list=[],returns=-,type_comment=-,type_params=[])',  # main.py:18399
+    '<root>>AsyncFunctionDef(name=str,args=arguments,body=[Expr|Try],decorator_list=[],returns=-,type_comment=-,type_params=[])',  # main.py:52630
+    '<root>>AsyncFunctionDef(name=str,args=arguments,body=[Expr|Try],decorator_list=[],returns=Constant,type_comment=-,type_params=[])',  # main.py:4446
+    '<root>>FunctionDef(name=str,args=arguments,body=[Assert|Assign|Expr|FunctionDef|Return],decorator_list=[],returns=Subscript,type_comment=-,type_params=[])',  # main.py:50367
+    '<root>>FunctionDef(name=str,args=arguments,body=[Assert|Assign|Expr|If|Return],decorator_list=[],returns=Subscript,type_comment=-,type_params=[])',  # main.py:29486
     '<root>>FunctionDef(name=str,args=arguments,body=[Assign|Expr|For|FunctionDef|If|Return],decorator_list=[],returns=-,type_comment=-,type_params=[])',  # region_pick.py:186
-    '<root>>FunctionDef(name=str,args=arguments,body=[Assign|Expr|For|If|Return],decorator_list=[],returns=-,type_comment=-,type_params=[])',  # main.py:19614
+    '<root>>FunctionDef(name=str,args=arguments,body=[Assign|Expr|For|If|Return],decorator_list=[],returns=-,type_comment=-,type_params=[])',  # main.py:19655
     '<root>>FunctionDef(name=str,args=arguments,body=[Assign|Expr|For|Return],decorator_list=[],returns=Name,type_comment=-,type_params=[])',  # match_report_window.py:51
-    '<root>>FunctionDef(name=str,args=arguments,body=[Assign|Expr|If|Return],decorator_list=[],returns=-,type_comment=-,type_params=[])',  # main.py:57229
-    '<root>>FunctionDef(name=str,args=arguments,body=[Assign|Expr|If|Return],decorator_list=[],returns=Name,type_comment=-,type_params=[])',  # main.py:53159
-    '<root>>FunctionDef(name=str,args=arguments,body=[Assign|Expr|Return],decorator_list=[],returns=Name,type_comment=-,type_params=[])',  # main.py:57786
-    '<root>>FunctionDef(name=str,args=arguments,body=[Assign|Expr|Return|While],decorator_list=[],returns=-,type_comment=-,type_params=[])',  # main.py:63667
+    '<root>>FunctionDef(name=str,args=arguments,body=[Assign|Expr|If|Return],decorator_list=[],returns=-,type_comment=-,type_params=[])',  # main.py:57355
+    '<root>>FunctionDef(name=str,args=arguments,body=[Assign|Expr|If|Return],decorator_list=[],returns=Name,type_comment=-,type_params=[])',  # main.py:53285
+    '<root>>FunctionDef(name=str,args=arguments,body=[Assign|Expr|Return],decorator_list=[],returns=Name,type_comment=-,type_params=[])',  # main.py:57912
+    '<root>>FunctionDef(name=str,args=arguments,body=[Assign|Expr|Return|While],decorator_list=[],returns=-,type_comment=-,type_params=[])',  # main.py:63790
     '<root>>FunctionDef(name=str,args=arguments,body=[Assign|Return],decorator_list=[],returns=Name,type_comment=-,type_params=[])',  # match_hold.py:351
-    '<root>>FunctionDef(name=str,args=arguments,body=[Expr|If|Return],decorator_list=[],returns=-,type_comment=-,type_params=[])',  # main.py:19536
-    '<root>>FunctionDef(name=str,args=arguments,body=[Expr|If|Return],decorator_list=[],returns=Name,type_comment=-,type_params=[])',  # main.py:50261
-    '<root>>FunctionDef(name=str,args=arguments,body=[Expr|If|Try],decorator_list=[],returns=Name,type_comment=-,type_params=[])',  # main.py:57734
-    '<root>>FunctionDef(name=str,args=arguments,body=[Expr|Import|Return],decorator_list=[],returns=-,type_comment=-,type_params=[])',  # main.py:55668
-    '<root>>FunctionDef(name=str,args=arguments,body=[Expr|Return],decorator_list=[],returns=Name,type_comment=-,type_params=[])',  # main.py:53134
-    '<root>>FunctionDef(name=str,args=arguments,body=[Expr|Try],decorator_list=[],returns=-,type_comment=-,type_params=[])',  # main.py:57762
+    '<root>>FunctionDef(name=str,args=arguments,body=[Expr|If|Return],decorator_list=[],returns=-,type_comment=-,type_params=[])',  # main.py:19577
+    '<root>>FunctionDef(name=str,args=arguments,body=[Expr|If|Return],decorator_list=[],returns=Name,type_comment=-,type_params=[])',  # main.py:50387
+    '<root>>FunctionDef(name=str,args=arguments,body=[Expr|If|Try],decorator_list=[],returns=Name,type_comment=-,type_params=[])',  # main.py:57860
+    '<root>>FunctionDef(name=str,args=arguments,body=[Expr|Import|Return],decorator_list=[],returns=-,type_comment=-,type_params=[])',  # main.py:55794
+    '<root>>FunctionDef(name=str,args=arguments,body=[Expr|Return],decorator_list=[],returns=Name,type_comment=-,type_params=[])',  # main.py:53260
+    '<root>>FunctionDef(name=str,args=arguments,body=[Expr|Try],decorator_list=[],returns=-,type_comment=-,type_params=[])',  # main.py:57888
     '<root>>FunctionDef(name=str,args=arguments,body=[If|Return],decorator_list=[],returns=Name,type_comment=-,type_params=[])',  # match_hold.py:235
     '<root>>FunctionDef(name=str,args=arguments,body=[Return],decorator_list=[],returns=-,type_comment=-,type_params=[])',  # match_report_window.py:47
-    '<root>>FunctionDef(name=str,args=arguments,body=[Return],decorator_list=[],returns=Subscript,type_comment=-,type_params=[])',  # main.py:17740
-    '<root>>FunctionDef(name=str,args=arguments,body=[Try],decorator_list=[],returns=Subscript,type_comment=-,type_params=[])',  # main.py:6645
-    'Assert.test>Compare(left=Call,ops=[Eq],comparators=[Constant])',  # main.py:50246
-    'Assert.test>Compare(left=Name,ops=[Gt],comparators=[Name])',  # main.py:29460
-    'Assign.targets>Name(id=str,ctx=Store)',  # main.py:17322
-    'Assign.targets>Subscript(value=Call,slice=Constant,ctx=Store)',  # main.py:66724
-    'Assign.targets>Subscript(value=Name,slice=Call,ctx=Store)',  # main.py:57827
-    'Assign.targets>Subscript(value=Name,slice=Constant,ctx=Store)',  # main.py:19756
-    'Assign.targets>Subscript(value=Name,slice=Name,ctx=Store)',  # main.py:19626
-    'Assign.targets>Subscript(value=Name,slice=Subscript,ctx=Store)',  # main.py:19708
-    'Assign.targets>Tuple(elts=[Name],ctx=Store)',  # main.py:17895
-    'Assign.targets>Tuple(elts=[Subscript],ctx=Store)',  # main.py:19661
-    'Assign.value>Await(value=Call)',  # main.py:17895
-    'Assign.value>BinOp(left=BinOp,op=Add,right=BinOp)',  # main.py:29501
-    'Assign.value>BinOp(left=Call,op=Add,right=Constant)',  # main.py:19626
-    'Assign.value>BinOp(left=Name,op=Add,right=List)',  # main.py:50814
-    'Assign.value>BinOp(left=Name,op=FloorDiv,right=Constant)',  # main.py:29502
-    'Assign.value>BinOp(left=Name,op=Sub,right=Call)',  # main.py:21228
-    'Assign.value>BinOp(left=Name,op=Sub,right=Name)',  # main.py:29455
-    'Assign.value>BoolOp(op=And,values=[Call])',  # main.py:57793
-    'Assign.value>BoolOp(op=And,values=[Call|Compare])',  # main.py:66874
-    'Assign.value>BoolOp(op=And,values=[Compare])',  # main.py:50839
-    'Assign.value>BoolOp(op=Or,values=[BoolOp|Compare])',  # main.py:55108
-    'Assign.value>BoolOp(op=Or,values=[Call|Constant])',  # main.py:19742
-    'Assign.value>BoolOp(op=Or,values=[Call|List])',  # main.py:19741
-    'Assign.value>BoolOp(op=Or,values=[Call|Subscript])',  # main.py:19724
-    'Assign.value>BoolOp(op=Or,values=[Constant|Subscript])',  # main.py:21324
-    'Assign.value>Call(func=Attribute,args=[Attribute],keywords=[])',  # main.py:21198
-    'Assign.value>Call(func=Attribute,args=[Call],keywords=[])',  # main.py:17863
+    '<root>>FunctionDef(name=str,args=arguments,body=[Return],decorator_list=[],returns=Subscript,type_comment=-,type_params=[])',  # main.py:17781
+    '<root>>FunctionDef(name=str,args=arguments,body=[Try],decorator_list=[],returns=Subscript,type_comment=-,type_params=[])',  # main.py:6654
+    'Assert.test>Compare(left=Call,ops=[Eq],comparators=[Constant])',  # main.py:50372
+    'Assert.test>Compare(left=Name,ops=[Gt],comparators=[Name])',  # main.py:29501
+    'Assign.targets>Name(id=str,ctx=Store)',  # main.py:17363
+    'Assign.targets>Subscript(value=Call,slice=Constant,ctx=Store)',  # main.py:66847
+    'Assign.targets>Subscript(value=Name,slice=Call,ctx=Store)',  # main.py:57953
+    'Assign.targets>Subscript(value=Name,slice=Constant,ctx=Store)',  # main.py:19797
+    'Assign.targets>Subscript(value=Name,slice=Name,ctx=Store)',  # main.py:19667
+    'Assign.targets>Subscript(value=Name,slice=Subscript,ctx=Store)',  # main.py:19749
+    'Assign.targets>Tuple(elts=[Name],ctx=Store)',  # main.py:17936
+    'Assign.targets>Tuple(elts=[Subscript],ctx=Store)',  # main.py:19702
+    'Assign.value>Await(value=Call)',  # main.py:17936
+    'Assign.value>BinOp(left=BinOp,op=Add,right=BinOp)',  # main.py:29542
+    'Assign.value>BinOp(left=Call,op=Add,right=Constant)',  # main.py:19667
+    'Assign.value>BinOp(left=Name,op=Add,right=List)',  # main.py:50940
+    'Assign.value>BinOp(left=Name,op=FloorDiv,right=Constant)',  # main.py:29543
+    'Assign.value>BinOp(left=Name,op=Sub,right=Call)',  # main.py:21269
+    'Assign.value>BinOp(left=Name,op=Sub,right=Name)',  # main.py:29496
+    'Assign.value>BoolOp(op=And,values=[Call])',  # main.py:57919
+    'Assign.value>BoolOp(op=And,values=[Call|Compare])',  # main.py:66997
+    'Assign.value>BoolOp(op=And,values=[Compare])',  # main.py:50965
+    'Assign.value>BoolOp(op=Or,values=[BoolOp|Compare])',  # main.py:55234
+    'Assign.value>BoolOp(op=Or,values=[Call|Constant])',  # main.py:19783
+    'Assign.value>BoolOp(op=Or,values=[Call|List])',  # main.py:19782
+    'Assign.value>BoolOp(op=Or,values=[Call|Subscript])',  # main.py:19765
+    'Assign.value>BoolOp(op=Or,values=[Constant|Subscript])',  # main.py:21365
+    'Assign.value>Call(func=Attribute,args=[Attribute],keywords=[])',  # main.py:21239
+    'Assign.value>Call(func=Attribute,args=[Call],keywords=[])',  # main.py:17904
     'Assign.value>Call(func=Attribute,args=[Constant],keywords=[])',  # region_pick.py:201
     'Assign.value>Call(func=Attribute,args=[Constant|Name],keywords=[])',  # region_pick.py:193
     'Assign.value>Call(func=Attribute,args=[GeneratorExp],keywords=[])',  # match_hold.py:352
-    'Assign.value>Call(func=Attribute,args=[Name],keywords=[])',  # main.py:19711
-    'Assign.value>Call(func=Attribute,args=[Name],keywords=[keyword])',  # main.py:53176
-    'Assign.value>Call(func=Attribute,args=[Subscript|Tuple],keywords=[])',  # main.py:19716
-    'Assign.value>Call(func=Attribute,args=[],keywords=[])',  # main.py:17773
-    'Assign.value>Call(func=Attribute,args=[],keywords=[keyword])',  # main.py:19723
-    'Assign.value>Call(func=Name,args=[Attribute],keywords=[])',  # main.py:21377
-    'Assign.value>Call(func=Name,args=[BinOp],keywords=[])',  # main.py:29458
-    'Assign.value>Call(func=Name,args=[BinOp|Call],keywords=[])',  # main.py:66751
-    'Assign.value>Call(func=Name,args=[BinOp|Constant],keywords=[])',  # main.py:66424
-    'Assign.value>Call(func=Name,args=[BinOp|Name],keywords=[])',  # main.py:57250
-    'Assign.value>Call(func=Name,args=[BoolOp],keywords=[])',  # main.py:50837
-    'Assign.value>Call(func=Name,args=[Call],keywords=[])',  # main.py:19629
-    'Assign.value>Call(func=Name,args=[Call|Name],keywords=[])',  # main.py:66871
+    'Assign.value>Call(func=Attribute,args=[Name],keywords=[])',  # main.py:19752
+    'Assign.value>Call(func=Attribute,args=[Name],keywords=[keyword])',  # main.py:53302
+    'Assign.value>Call(func=Attribute,args=[Subscript|Tuple],keywords=[])',  # main.py:19757
+    'Assign.value>Call(func=Attribute,args=[],keywords=[])',  # main.py:17814
+    'Assign.value>Call(func=Attribute,args=[],keywords=[keyword])',  # main.py:19764
+    'Assign.value>Call(func=Name,args=[Attribute],keywords=[])',  # main.py:21418
+    'Assign.value>Call(func=Name,args=[BinOp],keywords=[])',  # main.py:29499
+    'Assign.value>Call(func=Name,args=[BinOp|Call],keywords=[])',  # main.py:66874
+    'Assign.value>Call(func=Name,args=[BinOp|Constant],keywords=[])',  # main.py:66547
+    'Assign.value>Call(func=Name,args=[BinOp|Name],keywords=[])',  # main.py:57376
+    'Assign.value>Call(func=Name,args=[BoolOp],keywords=[])',  # main.py:50963
+    'Assign.value>Call(func=Name,args=[Call],keywords=[])',  # main.py:19670
+    'Assign.value>Call(func=Name,args=[Call|Name],keywords=[])',  # main.py:66994
     'Assign.value>Call(func=Name,args=[Constant],keywords=[])',  # match_report_window.py:54
-    'Assign.value>Call(func=Name,args=[Constant|Name],keywords=[])',  # main.py:51348
-    'Assign.value>Call(func=Name,args=[GeneratorExp],keywords=[])',  # main.py:50254
-    'Assign.value>Call(func=Name,args=[GeneratorExp],keywords=[keyword])',  # main.py:66421
-    'Assign.value>Call(func=Name,args=[Name],keywords=[])',  # main.py:18416
-    'Assign.value>Call(func=Name,args=[Name],keywords=[keyword])',  # main.py:19732
-    'Assign.value>Call(func=Name,args=[Name|Subscript],keywords=[])',  # main.py:66412
-    'Assign.value>Call(func=Name,args=[Name|Subscript],keywords=[keyword])',  # main.py:21356
-    'Assign.value>Call(func=Name,args=[SetComp],keywords=[keyword])',  # main.py:17771
-    'Assign.value>Call(func=Name,args=[Subscript],keywords=[])',  # main.py:17857
-    'Assign.value>Call(func=Name,args=[],keywords=[])',  # main.py:19727
-    'Assign.value>Call(func=Name,args=[],keywords=[keyword])',  # main.py:21412
+    'Assign.value>Call(func=Name,args=[Constant|Name],keywords=[])',  # main.py:51474
+    'Assign.value>Call(func=Name,args=[GeneratorExp],keywords=[])',  # main.py:50380
+    'Assign.value>Call(func=Name,args=[GeneratorExp],keywords=[keyword])',  # main.py:66544
+    'Assign.value>Call(func=Name,args=[Name],keywords=[])',  # main.py:18457
+    'Assign.value>Call(func=Name,args=[Name],keywords=[keyword])',  # main.py:19773
+    'Assign.value>Call(func=Name,args=[Name|Subscript],keywords=[])',  # main.py:66535
+    'Assign.value>Call(func=Name,args=[Name|Subscript],keywords=[keyword])',  # main.py:21397
+    'Assign.value>Call(func=Name,args=[SetComp],keywords=[keyword])',  # main.py:17812
+    'Assign.value>Call(func=Name,args=[Subscript],keywords=[])',  # main.py:17898
+    'Assign.value>Call(func=Name,args=[],keywords=[])',  # main.py:19768
+    'Assign.value>Call(func=Name,args=[],keywords=[keyword])',  # main.py:21453
     'Assign.value>Compare(left=Name,ops=[LtE],comparators=[Name])',  # region_pick.py:249
-    'Assign.value>Compare(left=Subscript,ops=[Eq],comparators=[Name])',  # main.py:52576
-    'Assign.value>Constant(value=NoneType)',  # main.py:19721
-    'Assign.value>Constant(value=bool)',  # main.py:17782
-    'Assign.value>Constant(value=float)',  # main.py:66422
-    'Assign.value>Constant(value=int)',  # main.py:21117
-    'Assign.value>Constant(value=str)',  # main.py:52585
-    'Assign.value>Dict(keys=[Constant],values=[Call])',  # main.py:55195
+    'Assign.value>Compare(left=Subscript,ops=[Eq],comparators=[Name])',  # main.py:52702
+    'Assign.value>Constant(value=NoneType)',  # main.py:19762
+    'Assign.value>Constant(value=bool)',  # main.py:17823
+    'Assign.value>Constant(value=float)',  # main.py:66545
+    'Assign.value>Constant(value=int)',  # main.py:21158
+    'Assign.value>Constant(value=str)',  # main.py:52711
+    'Assign.value>Dict(keys=[Constant],values=[Call])',  # main.py:55321
     'Assign.value>Dict(keys=[Constant],values=[Call|Constant|List|Name])',  # region_pick.py:227
-    'Assign.value>Dict(keys=[Constant],values=[Call|Name])',  # main.py:21592
-    'Assign.value>Dict(keys=[Constant],values=[Call|Name|Subscript])',  # main.py:51148
-    'Assign.value>Dict(keys=[Constant],values=[Name|Subscript])',  # main.py:51211
-    'Assign.value>Dict(keys=[Constant],values=[Subscript])',  # main.py:57705
-    'Assign.value>Dict(keys=[Name],values=[Call])',  # main.py:51304
-    'Assign.value>Dict(keys=[],values=[])',  # main.py:19622
-    'Assign.value>DictComp(key=Attribute,value=Name,generators=[comprehension])',  # main.py:29500
-    'Assign.value>DictComp(key=Call,value=Name,generators=[comprehension])',  # main.py:17837
-    'Assign.value>DictComp(key=Call,value=Tuple,generators=[comprehension])',  # main.py:57817
-    'Assign.value>DictComp(key=Subscript,value=Subscript,generators=[comprehension])',  # main.py:51519
+    'Assign.value>Dict(keys=[Constant],values=[Call|Name])',  # main.py:21633
+    'Assign.value>Dict(keys=[Constant],values=[Call|Name|Subscript])',  # main.py:51274
+    'Assign.value>Dict(keys=[Constant],values=[Name|Subscript])',  # main.py:51337
+    'Assign.value>Dict(keys=[Constant],values=[Subscript])',  # main.py:57831
+    'Assign.value>Dict(keys=[Name],values=[Call])',  # main.py:51430
+    'Assign.value>Dict(keys=[],values=[])',  # main.py:19663
+    'Assign.value>DictComp(key=Attribute,value=Name,generators=[comprehension])',  # main.py:29541
+    'Assign.value>DictComp(key=Call,value=Name,generators=[comprehension])',  # main.py:17878
+    'Assign.value>DictComp(key=Call,value=Tuple,generators=[comprehension])',  # main.py:57943
+    'Assign.value>DictComp(key=Subscript,value=Subscript,generators=[comprehension])',  # main.py:51645
     'Assign.value>IfExp(test=BoolOp,body=Name,orelse=Constant)',  # region_pick.py:204
-    'Assign.value>IfExp(test=BoolOp,body=Subscript,orelse=Constant)',  # main.py:52547
+    'Assign.value>IfExp(test=BoolOp,body=Subscript,orelse=Constant)',  # main.py:52673
     'Assign.value>IfExp(test=Call,body=Name,orelse=Dict)',  # region_pick.py:190
-    'Assign.value>IfExp(test=Compare,body=Call,orelse=Constant)',  # main.py:21501
-    'Assign.value>IfExp(test=Compare,body=Call,orelse=Set)',  # main.py:17820
-    'Assign.value>IfExp(test=Compare,body=Constant,orelse=Constant)',  # main.py:53361
+    'Assign.value>IfExp(test=Compare,body=Call,orelse=Constant)',  # main.py:21542
+    'Assign.value>IfExp(test=Compare,body=Call,orelse=Set)',  # main.py:17861
+    'Assign.value>IfExp(test=Compare,body=Constant,orelse=Constant)',  # main.py:53487
     'Assign.value>IfExp(test=Compare,body=Name,orelse=Name)',  # match_report_window.py:61
-    'Assign.value>IfExp(test=Compare,body=Subscript,orelse=Constant)',  # main.py:19624
-    'Assign.value>IfExp(test=Compare,body=Tuple,orelse=Constant)',  # main.py:19707
-    'Assign.value>IfExp(test=Compare,body=Tuple,orelse=IfExp)',  # main.py:52556
-    'Assign.value>IfExp(test=Name,body=Call,orelse=Call)',  # main.py:50841
-    'Assign.value>IfExp(test=Name,body=Call,orelse=Constant)',  # main.py:52577
-    'Assign.value>IfExp(test=Name,body=Call,orelse=Subscript)',  # main.py:55209
-    'Assign.value>IfExp(test=Name,body=Call,orelse=Tuple)',  # main.py:52578
+    'Assign.value>IfExp(test=Compare,body=Subscript,orelse=Constant)',  # main.py:19665
+    'Assign.value>IfExp(test=Compare,body=Tuple,orelse=Constant)',  # main.py:19748
+    'Assign.value>IfExp(test=Compare,body=Tuple,orelse=IfExp)',  # main.py:52682
+    'Assign.value>IfExp(test=Name,body=Call,orelse=Call)',  # main.py:50967
+    'Assign.value>IfExp(test=Name,body=Call,orelse=Constant)',  # main.py:52703
+    'Assign.value>IfExp(test=Name,body=Call,orelse=Subscript)',  # main.py:55335
+    'Assign.value>IfExp(test=Name,body=Call,orelse=Tuple)',  # main.py:52704
     'Assign.value>IfExp(test=Name,body=Compare,orelse=Compare)',  # region_pick.py:248
-    'Assign.value>IfExp(test=Name,body=Constant,orelse=Constant)',  # main.py:52581
-    'Assign.value>IfExp(test=Name,body=Name,orelse=BinOp)',  # main.py:76243
+    'Assign.value>IfExp(test=Name,body=Constant,orelse=Constant)',  # main.py:52707
+    'Assign.value>IfExp(test=Name,body=Name,orelse=BinOp)',  # main.py:75276
     'Assign.value>IfExp(test=Name,body=Name,orelse=IfExp)',  # region_pick.py:250
-    'Assign.value>JoinedStr(values=[Constant|FormattedValue])',  # main.py:21353
-    'Assign.value>List(elts=[Dict],ctx=Load)',  # main.py:51472
-    'Assign.value>List(elts=[Name],ctx=Load)',  # main.py:63671
-    'Assign.value>List(elts=[Subscript],ctx=Load)',  # main.py:51210
-    'Assign.value>List(elts=[Tuple],ctx=Load)',  # main.py:21333
-    'Assign.value>List(elts=[],ctx=Load)',  # main.py:17322
+    'Assign.value>JoinedStr(values=[Constant|FormattedValue])',  # main.py:21394
+    'Assign.value>List(elts=[Dict],ctx=Load)',  # main.py:51598
+    'Assign.value>List(elts=[Name],ctx=Load)',  # main.py:63794
+    'Assign.value>List(elts=[Subscript],ctx=Load)',  # main.py:51336
+    'Assign.value>List(elts=[Tuple],ctx=Load)',  # main.py:21374
+    'Assign.value>List(elts=[],ctx=Load)',  # main.py:17363
     'Assign.value>ListComp(elt=Attribute,generators=[comprehension])',  # region_pick.py:74
-    'Assign.value>ListComp(elt=Call,generators=[comprehension])',  # main.py:17775
-    'Assign.value>ListComp(elt=Name,generators=[comprehension])',  # main.py:21334
-    'Assign.value>ListComp(elt=Subscript,generators=[comprehension])',  # main.py:19699
-    'Assign.value>ListComp(elt=Tuple,generators=[comprehension])',  # main.py:58703
-    'Assign.value>Name(id=str,ctx=Load)',  # main.py:19653
-    'Assign.value>Set(elts=[Subscript])',  # main.py:53250
-    'Assign.value>SetComp(elt=Call,generators=[comprehension])',  # main.py:17829
+    'Assign.value>ListComp(elt=Call,generators=[comprehension])',  # main.py:17816
+    'Assign.value>ListComp(elt=Name,generators=[comprehension])',  # main.py:21375
+    'Assign.value>ListComp(elt=Subscript,generators=[comprehension])',  # main.py:19740
+    'Assign.value>ListComp(elt=Tuple,generators=[comprehension])',  # main.py:58826
+    'Assign.value>Name(id=str,ctx=Load)',  # main.py:19694
+    'Assign.value>Set(elts=[Subscript])',  # main.py:53376
+    'Assign.value>SetComp(elt=Call,generators=[comprehension])',  # main.py:17870
     'Assign.value>SetComp(elt=Name,generators=[comprehension])',  # region_pick.py:189
-    'Assign.value>Subscript(value=Call,slice=Constant,ctx=Load)',  # main.py:17784
-    'Assign.value>Subscript(value=Name,slice=Constant,ctx=Load)',  # main.py:21202
+    'Assign.value>Subscript(value=Call,slice=Constant,ctx=Load)',  # main.py:17825
+    'Assign.value>Subscript(value=Name,slice=Constant,ctx=Load)',  # main.py:21243
     'Assign.value>Tuple(elts=[Attribute],ctx=Load)',  # region_pick.py:265
     'Assign.value>Tuple(elts=[Call],ctx=Load)',  # region_pick.py:241
-    'Assign.value>Tuple(elts=[Call|Name],ctx=Load)',  # main.py:19661
-    'Assign.value>Tuple(elts=[Call|Subscript],ctx=Load)',  # main.py:57827
-    'Assign.value>Tuple(elts=[Constant|Dict|Name],ctx=Load)',  # main.py:19697
+    'Assign.value>Tuple(elts=[Call|Name],ctx=Load)',  # main.py:19702
+    'Assign.value>Tuple(elts=[Call|Subscript],ctx=Load)',  # main.py:57953
+    'Assign.value>Tuple(elts=[Constant|Dict|Name],ctx=Load)',  # main.py:19738
     'Assign.value>Tuple(elts=[Constant|Name],ctx=Load)',  # region_pick.py:269
-    'Assign.value>Tuple(elts=[List],ctx=Load)',  # main.py:51495
-    'Assign.value>Tuple(elts=[Name],ctx=Load)',  # main.py:19713
-    'Assign.value>Tuple(elts=[Name|Subscript],ctx=Load)',  # main.py:19708
-    'Assign.value>Tuple(elts=[Subscript],ctx=Load)',  # main.py:18427
-    'Assign.value>UnaryOp(op=Not,operand=Name)',  # main.py:21313
-    'Assign.value>UnaryOp(op=Not,operand=Subscript)',  # main.py:50858
-    'AsyncFunctionDef.args>arguments(posonlyargs=[],args=[arg],vararg=-,kwonlyargs=[],kw_defaults=[],kwarg=-,defaults=[Call])',  # main.py:21035
-    'AsyncFunctionDef.args>arguments(posonlyargs=[],args=[arg],vararg=-,kwonlyargs=[],kw_defaults=[],kwarg=-,defaults=[Constant])',  # main.py:29464
-    'AsyncFunctionDef.args>arguments(posonlyargs=[],args=[arg],vararg=-,kwonlyargs=[],kw_defaults=[],kwarg=-,defaults=[Name])',  # main.py:52504
-    'AsyncFunctionDef.args>arguments(posonlyargs=[],args=[arg],vararg=-,kwonlyargs=[],kw_defaults=[],kwarg=-,defaults=[Tuple])',  # main.py:29489
-    'AsyncFunctionDef.args>arguments(posonlyargs=[],args=[arg],vararg=-,kwonlyargs=[],kw_defaults=[],kwarg=-,defaults=[])',  # main.py:4441
-    'AsyncFunctionDef.args>arguments(posonlyargs=[],args=[arg],vararg=-,kwonlyargs=[arg],kw_defaults=[Constant],kwarg=-,defaults=[])',  # main.py:17287
-    'AsyncFunctionDef.args>arguments(posonlyargs=[],args=[arg],vararg=-,kwonlyargs=[arg],kw_defaults=[Constant|Tuple],kwarg=-,defaults=[Constant])',  # main.py:17744
-    'AsyncFunctionDef.args>arguments(posonlyargs=[],args=[arg],vararg=-,kwonlyargs=[arg],kw_defaults=[Constant|Tuple],kwarg=-,defaults=[Constant|Name])',  # main.py:17883
-    'AsyncFunctionDef.args>arguments(posonlyargs=[],args=[arg],vararg=-,kwonlyargs=[arg],kw_defaults=[Constant|Tuple],kwarg=-,defaults=[])',  # main.py:18384
-    'AsyncFunctionDef.args>arguments(posonlyargs=[],args=[arg],vararg=-,kwonlyargs=[arg],kw_defaults=[NoneType],kwarg=-,defaults=[])',  # main.py:38987
-    'AsyncFunctionDef.args>arguments(posonlyargs=[],args=[arg],vararg=-,kwonlyargs=[arg],kw_defaults=[Tuple],kwarg=-,defaults=[Constant|Name])',  # main.py:17933
-    'AsyncFunctionDef.body>Assign(targets=[Name],value=Await,type_comment=-)',  # main.py:21123
-    'AsyncFunctionDef.body>Assign(targets=[Name],value=BinOp,type_comment=-)',  # main.py:29501
-    'AsyncFunctionDef.body>Assign(targets=[Name],value=BoolOp,type_comment=-)',  # main.py:19741
-    'AsyncFunctionDef.body>Assign(targets=[Name],value=Call,type_comment=-)',  # main.py:17771
-    'AsyncFunctionDef.body>Assign(targets=[Name],value=Constant,type_comment=-)',  # main.py:17782
-    'AsyncFunctionDef.body>Assign(targets=[Name],value=Dict,type_comment=-)',  # main.py:51148
-    'AsyncFunctionDef.body>Assign(targets=[Name],value=DictComp,type_comment=-)',  # main.py:17837
-    'AsyncFunctionDef.body>Assign(targets=[Name],value=IfExp,type_comment=-)',  # main.py:17820
-    'AsyncFunctionDef.body>Assign(targets=[Name],value=JoinedStr,type_comment=-)',  # main.py:55278
-    'AsyncFunctionDef.body>Assign(targets=[Name],value=List,type_comment=-)',  # main.py:17322
-    'AsyncFunctionDef.body>Assign(targets=[Name],value=ListComp,type_comment=-)',  # main.py:17775
-    'AsyncFunctionDef.body>Assign(targets=[Name],value=Name,type_comment=-)',  # main.py:19653
-    'AsyncFunctionDef.body>Assign(targets=[Name],value=SetComp,type_comment=-)',  # main.py:17829
-    'AsyncFunctionDef.body>Assign(targets=[Name],value=Subscript,type_comment=-)',  # main.py:17855
-    'AsyncFunctionDef.body>Assign(targets=[Subscript],value=Constant,type_comment=-)',  # main.py:66914
-    'AsyncFunctionDef.body>Assign(targets=[Tuple],value=Await,type_comment=-)',  # main.py:17946
-    'AsyncFunctionDef.body>Assign(targets=[Tuple],value=Call,type_comment=-)',  # main.py:21069
-    'AsyncFunctionDef.body>Assign(targets=[Tuple],value=Tuple,type_comment=-)',  # main.py:19697
-    'AsyncFunctionDef.body>AsyncWith(items=[withitem],body=[Assign],type_comment=-)',  # main.py:58654
-    'AsyncFunctionDef.body>Expr(value=Await)',  # main.py:17903
-    'AsyncFunctionDef.body>Expr(value=Call)',  # main.py:17821
-    'AsyncFunctionDef.body>Expr(value=Constant)',  # main.py:4442
-    'AsyncFunctionDef.body>For(target=Name,iter=Call,body=[Assign|Break|Expr|If],orelse=[Expr|Raise],type_comment=-)',  # main.py:55198
-    'AsyncFunctionDef.body>For(target=Name,iter=Call,body=[Assign|Expr|For|If|Return],orelse=[Expr|Raise],type_comment=-)',  # main.py:21565
-    'AsyncFunctionDef.body>For(target=Name,iter=Call,body=[If],orelse=[],type_comment=-)',  # main.py:17326
-    'AsyncFunctionDef.body>For(target=Name,iter=Name,body=[Assign],orelse=[],type_comment=-)',  # main.py:57826
-    'AsyncFunctionDef.body>For(target=Name,iter=Name,body=[Assign|Expr],orelse=[],type_comment=-)',  # main.py:53360
-    'AsyncFunctionDef.body>For(target=Name,iter=Name,body=[Assign|Expr|If],orelse=[],type_comment=-)',  # main.py:53218
-    'AsyncFunctionDef.body>For(target=Name,iter=Name,body=[Assign|If],orelse=[],type_comment=-)',  # main.py:17856
-    'AsyncFunctionDef.body>For(target=Name,iter=Name,body=[Expr],orelse=[],type_comment=-)',  # main.py:17953
-    'AsyncFunctionDef.body>For(target=Name,iter=Name,body=[Expr|If],orelse=[],type_comment=-)',  # main.py:53245
-    'AsyncFunctionDef.body>For(target=Name,iter=Name,body=[If],orelse=[],type_comment=-)',  # main.py:17323
-    'AsyncFunctionDef.body>For(target=Name,iter=Tuple,body=[Expr],orelse=[],type_comment=-)',  # main.py:51580
-    'AsyncFunctionDef.body>For(target=Tuple,iter=Call,body=[Expr],orelse=[],type_comment=-)',  # main.py:66894
-    'AsyncFunctionDef.body>For(target=Tuple,iter=Call,body=[Expr|If],orelse=[],type_comment=-)',  # main.py:18345
-    'AsyncFunctionDef.body>For(target=Tuple,iter=Name,body=[Assign|If|Return],orelse=[],type_comment=-)',  # main.py:18419
-    'AsyncFunctionDef.body>FunctionDef(name=str,args=arguments,body=[Return],decorator_list=[],returns=-,type_comment=-,type_params=[])',  # main.py:19739
-    'AsyncFunctionDef.body>Global(names=[str])',  # main.py:66740
-    'AsyncFunctionDef.body>If(test=Await,body=[Expr|Return],orelse=[])',  # main.py:51132
-    'AsyncFunctionDef.body>If(test=BoolOp,body=[Assign],orelse=[])',  # main.py:66745
-    'AsyncFunctionDef.body>If(test=BoolOp,body=[Assign|Expr|FunctionDef|If|Return],orelse=[])',  # main.py:50772
-    'AsyncFunctionDef.body>If(test=BoolOp,body=[Assign|Expr|If|Return],orelse=[])',  # main.py:21257
-    'AsyncFunctionDef.body>If(test=BoolOp,body=[Assign|Expr|If|Return|Try],orelse=[])',  # main.py:50705
-    'AsyncFunctionDef.body>If(test=BoolOp,body=[Assign|If],orelse=[])',  # main.py:55013
-    'AsyncFunctionDef.body>If(test=BoolOp,body=[Expr],orelse=[])',  # main.py:29481
-    'AsyncFunctionDef.body>If(test=BoolOp,body=[Expr|Return],orelse=[])',  # main.py:21248
-    'AsyncFunctionDef.body>If(test=BoolOp,body=[Return],orelse=[])',  # main.py:19655
-    'AsyncFunctionDef.body>If(test=BoolOp,body=[Try],orelse=[])',  # main.py:76214
-    'AsyncFunctionDef.body>If(test=Call,body=[Raise],orelse=[])',  # main.py:76159
-    'AsyncFunctionDef.body>If(test=Call,body=[Return],orelse=[])',  # main.py:17838
-    'AsyncFunctionDef.body>If(test=Compare,body=[Assign],orelse=[])',  # main.py:19752
-    'AsyncFunctionDef.body>If(test=Compare,body=[Assign|Expr],orelse=[Expr])',  # main.py:21212
-    'AsyncFunctionDef.body>If(test=Compare,body=[Assign|Expr|For],orelse=[Assign])',  # main.py:51494
-    'AsyncFunctionDef.body>If(test=Compare,body=[Assign|Expr|If|Return],orelse=[])',  # main.py:51448
-    'AsyncFunctionDef.body>If(test=Compare,body=[Assign|Expr|Return],orelse=[])',  # main.py:66842
-    'AsyncFunctionDef.body>If(test=Compare,body=[Assign|Expr|While],orelse=[])',  # main.py:51209
-    'AsyncFunctionDef.body>If(test=Compare,body=[Expr],orelse=[])',  # main.py:18417
-    'AsyncFunctionDef.body>If(test=Compare,body=[Expr|Raise],orelse=[])',  # main.py:21190
-    'AsyncFunctionDef.body>If(test=Compare,body=[Expr|Return],orelse=[])',  # main.py:21550
-    'AsyncFunctionDef.body>If(test=Compare,body=[Raise],orelse=[])',  # main.py:17320
-    'AsyncFunctionDef.body>If(test=Compare,body=[Return],orelse=[])',  # main.py:29473
-    'AsyncFunctionDef.body>If(test=Name,body=[Assign|Expr],orelse=[])',  # main.py:53257
-    'AsyncFunctionDef.body>If(test=Name,body=[Assign|Return],orelse=[])',  # main.py:17812
-    'AsyncFunctionDef.body>If(test=Name,body=[Expr],orelse=[])',  # main.py:51582
-    'AsyncFunctionDef.body>If(test=UnaryOp,body=[Assign|Expr|Return],orelse=[])',  # main.py:55262
-    'AsyncFunctionDef.body>If(test=UnaryOp,body=[Assign|If],orelse=[])',  # main.py:17894
-    'AsyncFunctionDef.body>If(test=UnaryOp,body=[Assign|Return],orelse=[])',  # main.py:17772
-    'AsyncFunctionDef.body>If(test=UnaryOp,body=[Expr|Return],orelse=[])',  # main.py:21103
-    'AsyncFunctionDef.body>If(test=UnaryOp,body=[Raise],orelse=[])',  # main.py:21060
-    'AsyncFunctionDef.body>If(test=UnaryOp,body=[Return],orelse=[])',  # main.py:17951
-    "AsyncFunctionDef.body>Import(names=['uuid'])",  # main.py:21058
-    'AsyncFunctionDef.body>Return(value=Await)',  # main.py:55325
-    'AsyncFunctionDef.body>Return(value=BoolOp)',  # main.py:19758
-    'AsyncFunctionDef.body>Return(value=Call)',  # main.py:18378
-    'AsyncFunctionDef.body>Return(value=Constant)',  # main.py:17956
+    'Assign.value>Tuple(elts=[List],ctx=Load)',  # main.py:51621
+    'Assign.value>Tuple(elts=[Name],ctx=Load)',  # main.py:19754
+    'Assign.value>Tuple(elts=[Name|Subscript],ctx=Load)',  # main.py:19749
+    'Assign.value>Tuple(elts=[Subscript],ctx=Load)',  # main.py:18468
+    'Assign.value>UnaryOp(op=Not,operand=Name)',  # main.py:21354
+    'Assign.value>UnaryOp(op=Not,operand=Subscript)',  # main.py:50984
+    'AsyncFunctionDef.args>arguments(posonlyargs=[],args=[arg],vararg=-,kwonlyargs=[],kw_defaults=[],kwarg=-,defaults=[Call])',  # main.py:21076
+    'AsyncFunctionDef.args>arguments(posonlyargs=[],args=[arg],vararg=-,kwonlyargs=[],kw_defaults=[],kwarg=-,defaults=[Constant])',  # main.py:29505
+    'AsyncFunctionDef.args>arguments(posonlyargs=[],args=[arg],vararg=-,kwonlyargs=[],kw_defaults=[],kwarg=-,defaults=[Name])',  # main.py:52630
+    'AsyncFunctionDef.args>arguments(posonlyargs=[],args=[arg],vararg=-,kwonlyargs=[],kw_defaults=[],kwarg=-,defaults=[Tuple])',  # main.py:29530
+    'AsyncFunctionDef.args>arguments(posonlyargs=[],args=[arg],vararg=-,kwonlyargs=[],kw_defaults=[],kwarg=-,defaults=[])',  # main.py:4446
+    'AsyncFunctionDef.args>arguments(posonlyargs=[],args=[arg],vararg=-,kwonlyargs=[arg],kw_defaults=[Constant],kwarg=-,defaults=[])',  # main.py:17328
+    'AsyncFunctionDef.args>arguments(posonlyargs=[],args=[arg],vararg=-,kwonlyargs=[arg],kw_defaults=[Constant|Tuple],kwarg=-,defaults=[Constant])',  # main.py:17785
+    'AsyncFunctionDef.args>arguments(posonlyargs=[],args=[arg],vararg=-,kwonlyargs=[arg],kw_defaults=[Constant|Tuple],kwarg=-,defaults=[Constant|Name])',  # main.py:17924
+    'AsyncFunctionDef.args>arguments(posonlyargs=[],args=[arg],vararg=-,kwonlyargs=[arg],kw_defaults=[Constant|Tuple],kwarg=-,defaults=[])',  # main.py:18425
+    'AsyncFunctionDef.args>arguments(posonlyargs=[],args=[arg],vararg=-,kwonlyargs=[arg],kw_defaults=[NoneType],kwarg=-,defaults=[])',  # main.py:39028
+    'AsyncFunctionDef.args>arguments(posonlyargs=[],args=[arg],vararg=-,kwonlyargs=[arg],kw_defaults=[Tuple],kwarg=-,defaults=[Constant|Name])',  # main.py:17974
+    'AsyncFunctionDef.body>Assign(targets=[Name],value=Await,type_comment=-)',  # main.py:21164
+    'AsyncFunctionDef.body>Assign(targets=[Name],value=BinOp,type_comment=-)',  # main.py:29542
+    'AsyncFunctionDef.body>Assign(targets=[Name],value=BoolOp,type_comment=-)',  # main.py:19782
+    'AsyncFunctionDef.body>Assign(targets=[Name],value=Call,type_comment=-)',  # main.py:17812
+    'AsyncFunctionDef.body>Assign(targets=[Name],value=Constant,type_comment=-)',  # main.py:17823
+    'AsyncFunctionDef.body>Assign(targets=[Name],value=Dict,type_comment=-)',  # main.py:51274
+    'AsyncFunctionDef.body>Assign(targets=[Name],value=DictComp,type_comment=-)',  # main.py:17878
+    'AsyncFunctionDef.body>Assign(targets=[Name],value=IfExp,type_comment=-)',  # main.py:17861
+    'AsyncFunctionDef.body>Assign(targets=[Name],value=JoinedStr,type_comment=-)',  # main.py:55404
+    'AsyncFunctionDef.body>Assign(targets=[Name],value=List,type_comment=-)',  # main.py:17363
+    'AsyncFunctionDef.body>Assign(targets=[Name],value=ListComp,type_comment=-)',  # main.py:17816
+    'AsyncFunctionDef.body>Assign(targets=[Name],value=Name,type_comment=-)',  # main.py:19694
+    'AsyncFunctionDef.body>Assign(targets=[Name],value=SetComp,type_comment=-)',  # main.py:17870
+    'AsyncFunctionDef.body>Assign(targets=[Name],value=Subscript,type_comment=-)',  # main.py:17896
+    'AsyncFunctionDef.body>Assign(targets=[Subscript],value=Constant,type_comment=-)',  # main.py:67037
+    'AsyncFunctionDef.body>Assign(targets=[Tuple],value=Await,type_comment=-)',  # main.py:17987
+    'AsyncFunctionDef.body>Assign(targets=[Tuple],value=Call,type_comment=-)',  # main.py:21110
+    'AsyncFunctionDef.body>Assign(targets=[Tuple],value=Tuple,type_comment=-)',  # main.py:19738
+    'AsyncFunctionDef.body>AsyncWith(items=[withitem],body=[Assign],type_comment=-)',  # main.py:58777
+    'AsyncFunctionDef.body>Expr(value=Await)',  # main.py:17944
+    'AsyncFunctionDef.body>Expr(value=Call)',  # main.py:17862
+    'AsyncFunctionDef.body>Expr(value=Constant)',  # main.py:4447
+    'AsyncFunctionDef.body>For(target=Name,iter=Call,body=[Assign|Break|Expr|If],orelse=[Expr|Raise],type_comment=-)',  # main.py:55324
+    'AsyncFunctionDef.body>For(target=Name,iter=Call,body=[Assign|Expr|For|If|Return],orelse=[Expr|Raise],type_comment=-)',  # main.py:21606
+    'AsyncFunctionDef.body>For(target=Name,iter=Call,body=[If],orelse=[],type_comment=-)',  # main.py:17367
+    'AsyncFunctionDef.body>For(target=Name,iter=Name,body=[Assign],orelse=[],type_comment=-)',  # main.py:57952
+    'AsyncFunctionDef.body>For(target=Name,iter=Name,body=[Assign|Expr],orelse=[],type_comment=-)',  # main.py:53486
+    'AsyncFunctionDef.body>For(target=Name,iter=Name,body=[Assign|Expr|If],orelse=[],type_comment=-)',  # main.py:53344
+    'AsyncFunctionDef.body>For(target=Name,iter=Name,body=[Assign|If],orelse=[],type_comment=-)',  # main.py:17897
+    'AsyncFunctionDef.body>For(target=Name,iter=Name,body=[Expr],orelse=[],type_comment=-)',  # main.py:17994
+    'AsyncFunctionDef.body>For(target=Name,iter=Name,body=[Expr|If],orelse=[],type_comment=-)',  # main.py:53371
+    'AsyncFunctionDef.body>For(target=Name,iter=Name,body=[If],orelse=[],type_comment=-)',  # main.py:17364
+    'AsyncFunctionDef.body>For(target=Name,iter=Tuple,body=[Expr],orelse=[],type_comment=-)',  # main.py:51706
+    'AsyncFunctionDef.body>For(target=Tuple,iter=Call,body=[Expr],orelse=[],type_comment=-)',  # main.py:67017
+    'AsyncFunctionDef.body>For(target=Tuple,iter=Call,body=[Expr|If],orelse=[],type_comment=-)',  # main.py:18386
+    'AsyncFunctionDef.body>For(target=Tuple,iter=Name,body=[Assign|If|Return],orelse=[],type_comment=-)',  # main.py:18460
+    'AsyncFunctionDef.body>FunctionDef(name=str,args=arguments,body=[Return],decorator_list=[],returns=-,type_comment=-,type_params=[])',  # main.py:19780
+    'AsyncFunctionDef.body>Global(names=[str])',  # main.py:66863
+    'AsyncFunctionDef.body>If(test=Await,body=[Expr|Return],orelse=[])',  # main.py:51258
+    'AsyncFunctionDef.body>If(test=BoolOp,body=[Assign],orelse=[])',  # main.py:66868
+    'AsyncFunctionDef.body>If(test=BoolOp,body=[Assign|Expr|FunctionDef|If|Return],orelse=[])',  # main.py:50898
+    'AsyncFunctionDef.body>If(test=BoolOp,body=[Assign|Expr|If|Return],orelse=[])',  # main.py:21298
+    'AsyncFunctionDef.body>If(test=BoolOp,body=[Assign|Expr|If|Return|Try],orelse=[])',  # main.py:50831
+    'AsyncFunctionDef.body>If(test=BoolOp,body=[Assign|If],orelse=[])',  # main.py:55139
+    'AsyncFunctionDef.body>If(test=BoolOp,body=[Expr],orelse=[])',  # main.py:29522
+    'AsyncFunctionDef.body>If(test=BoolOp,body=[Expr|Return],orelse=[])',  # main.py:21289
+    'AsyncFunctionDef.body>If(test=BoolOp,body=[Return],orelse=[])',  # main.py:19696
+    'AsyncFunctionDef.body>If(test=BoolOp,body=[Try],orelse=[])',  # main.py:75247
+    'AsyncFunctionDef.body>If(test=Call,body=[Raise],orelse=[])',  # main.py:75192
+    'AsyncFunctionDef.body>If(test=Call,body=[Return],orelse=[])',  # main.py:17879
+    'AsyncFunctionDef.body>If(test=Compare,body=[Assign],orelse=[])',  # main.py:19793
+    'AsyncFunctionDef.body>If(test=Compare,body=[Assign|Expr],orelse=[Expr])',  # main.py:21253
+    'AsyncFunctionDef.body>If(test=Compare,body=[Assign|Expr|For],orelse=[Assign])',  # main.py:51620
+    'AsyncFunctionDef.body>If(test=Compare,body=[Assign|Expr|If|Return],orelse=[])',  # main.py:51574
+    'AsyncFunctionDef.body>If(test=Compare,body=[Assign|Expr|Return],orelse=[])',  # main.py:66965
+    'AsyncFunctionDef.body>If(test=Compare,body=[Assign|Expr|While],orelse=[])',  # main.py:51335
+    'AsyncFunctionDef.body>If(test=Compare,body=[Expr],orelse=[])',  # main.py:18458
+    'AsyncFunctionDef.body>If(test=Compare,body=[Expr|Raise],orelse=[])',  # main.py:21231
+    'AsyncFunctionDef.body>If(test=Compare,body=[Expr|Return],orelse=[])',  # main.py:21591
+    'AsyncFunctionDef.body>If(test=Compare,body=[Raise],orelse=[])',  # main.py:17361
+    'AsyncFunctionDef.body>If(test=Compare,body=[Return],orelse=[])',  # main.py:29514
+    'AsyncFunctionDef.body>If(test=Name,body=[Assign|Expr],orelse=[])',  # main.py:53383
+    'AsyncFunctionDef.body>If(test=Name,body=[Assign|Return],orelse=[])',  # main.py:17853
+    'AsyncFunctionDef.body>If(test=Name,body=[Expr],orelse=[])',  # main.py:51708
+    'AsyncFunctionDef.body>If(test=UnaryOp,body=[Assign|Expr|Return],orelse=[])',  # main.py:55388
+    'AsyncFunctionDef.body>If(test=UnaryOp,body=[Assign|If],orelse=[])',  # main.py:17935
+    'AsyncFunctionDef.body>If(test=UnaryOp,body=[Assign|Return],orelse=[])',  # main.py:17813
+    'AsyncFunctionDef.body>If(test=UnaryOp,body=[Expr|Return],orelse=[])',  # main.py:21144
+    'AsyncFunctionDef.body>If(test=UnaryOp,body=[Raise],orelse=[])',  # main.py:21101
+    'AsyncFunctionDef.body>If(test=UnaryOp,body=[Return],orelse=[])',  # main.py:17992
+    "AsyncFunctionDef.body>Import(names=['uuid'])",  # main.py:21099
+    'AsyncFunctionDef.body>Return(value=Await)',  # main.py:55451
+    'AsyncFunctionDef.body>Return(value=BoolOp)',  # main.py:19799
+    'AsyncFunctionDef.body>Return(value=Call)',  # main.py:18419
+    'AsyncFunctionDef.body>Return(value=Constant)',  # main.py:17997
     'AsyncFunctionDef.body>Return(value=DictComp)',  # tournaments.py:309
-    'AsyncFunctionDef.body>Return(value=Name)',  # main.py:17924
-    'AsyncFunctionDef.body>Return(value=Subscript)',  # main.py:19664
-    'AsyncFunctionDef.body>Return(value=Tuple)',  # main.py:17880
-    'AsyncFunctionDef.body>Try(body=[Assign|AsyncWith|For|If],handlers=[ExceptHandler],orelse=[],finalbody=[])',  # main.py:19698
-    'AsyncFunctionDef.body>Try(body=[Assign|AsyncWith|ImportFrom],handlers=[ExceptHandler],orelse=[],finalbody=[])',  # main.py:19657
-    'AsyncFunctionDef.body>Try(body=[Assign|Expr|For],handlers=[ExceptHandler],orelse=[],finalbody=[])',  # main.py:17783
-    'AsyncFunctionDef.body>Try(body=[Assign|If],handlers=[ExceptHandler],orelse=[],finalbody=[])',  # main.py:58693
-    'AsyncFunctionDef.body>Try(body=[AsyncWith],handlers=[ExceptHandler],orelse=[],finalbody=[])',  # main.py:4486
-    'AsyncFunctionDef.body>While(test=BoolOp,body=[Assign|AugAssign|Expr|If],orelse=[])',  # main.py:21151
-    'AsyncFunctionDef.body>While(test=Compare,body=[Assign|AugAssign|Break|Expr|If],orelse=[Expr|Raise])',  # main.py:51349
-    'AsyncFunctionDef.decorator_list>Call(func=Attribute,args=[Constant],keywords=[keyword])',  # main.py:21034
-    'AsyncFunctionDef.returns>Constant(value=NoneType)',  # main.py:4441
-    'AsyncFunctionDef.returns>Constant(value=str)',  # main.py:76194
-    'AsyncFunctionDef.returns>Name(id=str,ctx=Load)',  # main.py:57809
-    'AsyncFunctionDef.returns>Subscript(value=Name,slice=Tuple,ctx=Load)',  # main.py:17755
-    'AsyncWith.body>Assign(targets=[Name],value=Await,type_comment=-)',  # main.py:19660
-    'AsyncWith.body>Assign(targets=[Name],value=Call,type_comment=-)',  # main.py:52540
-    'AsyncWith.body>Assign(targets=[Name],value=Constant,type_comment=-)',  # main.py:52573
-    'AsyncWith.body>Assign(targets=[Name],value=IfExp,type_comment=-)',  # main.py:52547
-    'AsyncWith.body>Expr(value=Await)',  # main.py:4488
-    'AsyncWith.body>For(target=Name,iter=Call,body=[Assign],orelse=[],type_comment=-)',  # main.py:19706
-    'AsyncWith.body>For(target=Name,iter=Call,body=[Expr],orelse=[],type_comment=-)',  # main.py:52562
-    'AsyncWith.body>For(target=Name,iter=Name,body=[If],orelse=[],type_comment=-)',  # main.py:52574
-    'AsyncWith.body>If(test=BoolOp,body=[Expr],orelse=[])',  # main.py:52620
-    'AsyncWith.body>If(test=BoolOp,body=[Expr|Return],orelse=[])',  # main.py:52552
-    'AsyncWith.body>If(test=Compare,body=[Return],orelse=[])',  # main.py:52545
-    'AsyncWith.items>withitem(context_expr=Call,optional_vars=-)',  # main.py:4487
-    'Attribute.ctx>Load()',  # main.py:4487
-    "Attribute.value>Attribute(value=Name,attr='headers',ctx=Load)",  # main.py:21069
+    'AsyncFunctionDef.body>Return(value=Name)',  # main.py:17965
+    'AsyncFunctionDef.body>Return(value=Subscript)',  # main.py:19705
+    'AsyncFunctionDef.body>Return(value=Tuple)',  # main.py:17921
+    'AsyncFunctionDef.body>Try(body=[Assign|AsyncWith|For|If],handlers=[ExceptHandler],orelse=[],finalbody=[])',  # main.py:19739
+    'AsyncFunctionDef.body>Try(body=[Assign|AsyncWith|ImportFrom],handlers=[ExceptHandler],orelse=[],finalbody=[])',  # main.py:19698
+    'AsyncFunctionDef.body>Try(body=[Assign|Expr|For],handlers=[ExceptHandler],orelse=[],finalbody=[])',  # main.py:17824
+    'AsyncFunctionDef.body>Try(body=[Assign|If],handlers=[ExceptHandler],orelse=[],finalbody=[])',  # main.py:58816
+    'AsyncFunctionDef.body>Try(body=[AsyncWith],handlers=[ExceptHandler],orelse=[],finalbody=[])',  # main.py:4491
+    'AsyncFunctionDef.body>While(test=BoolOp,body=[Assign|AugAssign|Expr|If],orelse=[])',  # main.py:21192
+    'AsyncFunctionDef.body>While(test=Compare,body=[Assign|AugAssign|Break|Expr|If],orelse=[Expr|Raise])',  # main.py:51475
+    'AsyncFunctionDef.decorator_list>Call(func=Attribute,args=[Constant],keywords=[keyword])',  # main.py:21075
+    'AsyncFunctionDef.returns>Constant(value=NoneType)',  # main.py:4446
+    'AsyncFunctionDef.returns>Constant(value=str)',  # main.py:75227
+    'AsyncFunctionDef.returns>Name(id=str,ctx=Load)',  # main.py:57935
+    'AsyncFunctionDef.returns>Subscript(value=Name,slice=Tuple,ctx=Load)',  # main.py:17796
+    'AsyncWith.body>Assign(targets=[Name],value=Await,type_comment=-)',  # main.py:19701
+    'AsyncWith.body>Assign(targets=[Name],value=Call,type_comment=-)',  # main.py:52666
+    'AsyncWith.body>Assign(targets=[Name],value=Constant,type_comment=-)',  # main.py:52699
+    'AsyncWith.body>Assign(targets=[Name],value=IfExp,type_comment=-)',  # main.py:52673
+    'AsyncWith.body>Expr(value=Await)',  # main.py:4493
+    'AsyncWith.body>For(target=Name,iter=Call,body=[Assign],orelse=[],type_comment=-)',  # main.py:19747
+    'AsyncWith.body>For(target=Name,iter=Call,body=[Expr],orelse=[],type_comment=-)',  # main.py:52688
+    'AsyncWith.body>For(target=Name,iter=Name,body=[If],orelse=[],type_comment=-)',  # main.py:52700
+    'AsyncWith.body>If(test=BoolOp,body=[Expr],orelse=[])',  # main.py:52746
+    'AsyncWith.body>If(test=BoolOp,body=[Expr|Return],orelse=[])',  # main.py:52678
+    'AsyncWith.body>If(test=Compare,body=[Return],orelse=[])',  # main.py:52671
+    'AsyncWith.items>withitem(context_expr=Call,optional_vars=-)',  # main.py:4492
+    'Attribute.ctx>Load()',  # main.py:4492
+    "Attribute.value>Attribute(value=Name,attr='headers',ctx=Load)",  # main.py:21110
     "Attribute.value>Attribute(value=Name,attr='map',ctx=Load)",  # region_pick.py:223
-    'Attribute.value>Await(value=Call)',  # main.py:17773
-    'Attribute.value>BinOp(left=Call,op=Sub,right=BoolOp)',  # main.py:21585
-    'Attribute.value>BinOp(left=Call,op=Sub,right=Name)',  # main.py:55139
-    'Attribute.value>BinOp(left=Call,op=Sub,right=Subscript)',  # main.py:55014
-    'Attribute.value>BinOp(left=Name,op=Sub,right=BoolOp)',  # main.py:21201
-    'Attribute.value>BinOp(left=Name,op=Sub,right=Name)',  # main.py:66424
-    'Attribute.value>BinOp(left=Name,op=Sub,right=Subscript)',  # main.py:21298
-    'Attribute.value>BoolOp(op=Or,values=[Call|Constant])',  # main.py:51107
-    'Attribute.value>BoolOp(op=Or,values=[Constant|Name])',  # main.py:58704
-    'Attribute.value>BoolOp(op=Or,values=[Constant|Subscript])',  # main.py:51405
-    'Attribute.value>Call(func=Attribute,args=[],keywords=[])',  # main.py:6647
-    'Attribute.value>Call(func=Name,args=[BoolOp],keywords=[])',  # main.py:57757
-    'Attribute.value>Call(func=Name,args=[Name],keywords=[])',  # main.py:19663
-    'Attribute.value>Call(func=Name,args=[],keywords=[])',  # main.py:53176
-    'Attribute.value>Constant(value=str)',  # main.py:19742
-    'Attribute.value>Name(id=str,ctx=Load)',  # main.py:4487
-    'Attribute.value>Subscript(value=Name,slice=Constant,ctx=Load)',  # main.py:55208
-    'AugAssign.op>Add()',  # main.py:21152
+    'Attribute.value>Await(value=Call)',  # main.py:17814
+    'Attribute.value>BinOp(left=Call,op=Sub,right=BoolOp)',  # main.py:21626
+    'Attribute.value>BinOp(left=Call,op=Sub,right=Name)',  # main.py:55265
+    'Attribute.value>BinOp(left=Call,op=Sub,right=Subscript)',  # main.py:55140
+    'Attribute.value>BinOp(left=Name,op=Sub,right=BoolOp)',  # main.py:21242
+    'Attribute.value>BinOp(left=Name,op=Sub,right=Name)',  # main.py:66547
+    'Attribute.value>BinOp(left=Name,op=Sub,right=Subscript)',  # main.py:21339
+    'Attribute.value>BoolOp(op=Or,values=[Call|Constant])',  # main.py:51233
+    'Attribute.value>BoolOp(op=Or,values=[Constant|Name])',  # main.py:58827
+    'Attribute.value>BoolOp(op=Or,values=[Constant|Subscript])',  # main.py:51531
+    'Attribute.value>Call(func=Attribute,args=[],keywords=[])',  # main.py:6656
+    'Attribute.value>Call(func=Name,args=[BoolOp],keywords=[])',  # main.py:57883
+    'Attribute.value>Call(func=Name,args=[Name],keywords=[])',  # main.py:19704
+    'Attribute.value>Call(func=Name,args=[],keywords=[])',  # main.py:53302
+    'Attribute.value>Constant(value=str)',  # main.py:19783
+    'Attribute.value>Name(id=str,ctx=Load)',  # main.py:4492
+    'Attribute.value>Subscript(value=Name,slice=Constant,ctx=Load)',  # main.py:55334
+    'AugAssign.op>Add()',  # main.py:21193
     'AugAssign.op>BitAnd()',  # region_pick.py:239
-    'AugAssign.op>BitOr()',  # main.py:19730
-    'AugAssign.op>Sub()',  # main.py:51213
-    'AugAssign.target>Name(id=str,ctx=Store)',  # main.py:19730
+    'AugAssign.op>BitOr()',  # main.py:19771
+    'AugAssign.op>Sub()',  # main.py:51339
+    'AugAssign.target>Name(id=str,ctx=Store)',  # main.py:19771
     'AugAssign.value>BinOp(left=Name,op=Sub,right=Name)',  # match_report_window.py:64
     'AugAssign.value>Call(func=Name,args=[Attribute],keywords=[])',  # region_pick.py:239
-    'AugAssign.value>Call(func=Name,args=[Subscript],keywords=[])',  # main.py:19730
-    'AugAssign.value>Constant(value=int)',  # main.py:21152
-    'Await.value>Call(func=Attribute,args=[Call],keywords=[])',  # main.py:17773
-    'Await.value>Call(func=Attribute,args=[Call|Dict],keywords=[])',  # main.py:4488
+    'AugAssign.value>Call(func=Name,args=[Subscript],keywords=[])',  # main.py:19771
+    'AugAssign.value>Constant(value=int)',  # main.py:21193
+    'Await.value>Call(func=Attribute,args=[Call],keywords=[])',  # main.py:17814
+    'Await.value>Call(func=Attribute,args=[Call|Dict],keywords=[])',  # main.py:4493
     'Await.value>Call(func=Attribute,args=[Call|Name],keywords=[])',  # match_hold.py:380
-    'Await.value>Call(func=Attribute,args=[Constant|Name],keywords=[])',  # main.py:55306
-    'Await.value>Call(func=Attribute,args=[Constant|Name|Subscript],keywords=[])',  # main.py:50966
-    'Await.value>Call(func=Attribute,args=[Name|Subscript],keywords=[])',  # main.py:53247
-    'Await.value>Call(func=Attribute,args=[],keywords=[])',  # main.py:17808
-    'Await.value>Call(func=Name,args=[Attribute|Constant|List|Name],keywords=[keyword])',  # main.py:21447
-    'Await.value>Call(func=Name,args=[BinOp|Constant|Name],keywords=[])',  # main.py:51624
-    'Await.value>Call(func=Name,args=[BinOp|Constant|Name],keywords=[keyword])',  # main.py:51552
-    'Await.value>Call(func=Name,args=[BinOp|Name],keywords=[])',  # main.py:51235
-    'Await.value>Call(func=Name,args=[BinOp|Name],keywords=[keyword])',  # main.py:51276
-    'Await.value>Call(func=Name,args=[BinOp|Name|Subscript],keywords=[])',  # main.py:51534
-    'Await.value>Call(func=Name,args=[Call|Constant|Name],keywords=[])',  # main.py:29503
-    'Await.value>Call(func=Name,args=[Call|Constant|Name],keywords=[keyword])',  # main.py:50932
-    'Await.value>Call(func=Name,args=[Call|Constant|Name|Subscript],keywords=[])',  # main.py:53374
-    'Await.value>Call(func=Name,args=[Call|Name],keywords=[])',  # main.py:18355
-    'Await.value>Call(func=Name,args=[Call|Name|Subscript],keywords=[])',  # main.py:52609
-    'Await.value>Call(func=Name,args=[Constant|ListComp|Name],keywords=[])',  # main.py:51062
-    'Await.value>Call(func=Name,args=[Constant|ListComp|Name],keywords=[keyword])',  # main.py:55293
-    'Await.value>Call(func=Name,args=[Constant|ListComp|Name|Subscript],keywords=[])',  # main.py:51024
-    'Await.value>Call(func=Name,args=[Constant|List|Name],keywords=[])',  # main.py:21115
-    'Await.value>Call(func=Name,args=[Constant|List|Name],keywords=[keyword])',  # main.py:21379
-    'Await.value>Call(func=Name,args=[Constant|Name],keywords=[])',  # main.py:50649
-    'Await.value>Call(func=Name,args=[Constant|Name],keywords=[keyword])',  # main.py:21608
-    'Await.value>Call(func=Name,args=[Constant|Name|Subscript],keywords=[])',  # main.py:50785
-    'Await.value>Call(func=Name,args=[Constant|Name|Subscript],keywords=[keyword])',  # main.py:50741
-    'Await.value>Call(func=Name,args=[ListComp|Name],keywords=[])',  # main.py:55217
-    'Await.value>Call(func=Name,args=[ListComp|Name],keywords=[keyword])',  # main.py:50908
-    'Await.value>Call(func=Name,args=[List|Name],keywords=[])',  # main.py:21607
-    'Await.value>Call(func=Name,args=[List|Name],keywords=[keyword])',  # main.py:17895
-    'Await.value>Call(func=Name,args=[Name],keywords=[])',  # main.py:18422
-    'Await.value>Call(func=Name,args=[Name],keywords=[keyword])',  # main.py:17946
-    'Await.value>Call(func=Name,args=[Name|Subscript],keywords=[])',  # main.py:21113
-    'Await.value>Call(func=Name,args=[Name|Subscript],keywords=[keyword])',  # main.py:21374
-    'Await.value>Call(func=Name,args=[],keywords=[])',  # main.py:17328
-    'BinOp.left>BinOp(left=BoolOp,op=Add,right=BoolOp)',  # main.py:53259
-    'BinOp.left>BinOp(left=Constant,op=Add,right=Name)',  # main.py:66631
+    'Await.value>Call(func=Attribute,args=[Constant|Name],keywords=[])',  # main.py:55432
+    'Await.value>Call(func=Attribute,args=[Constant|Name|Subscript],keywords=[])',  # main.py:51092
+    'Await.value>Call(func=Attribute,args=[Name|Subscript],keywords=[])',  # main.py:53373
+    'Await.value>Call(func=Attribute,args=[],keywords=[])',  # main.py:17849
+    'Await.value>Call(func=Name,args=[Attribute|Constant|List|Name],keywords=[keyword])',  # main.py:21488
+    'Await.value>Call(func=Name,args=[BinOp|Constant|Name],keywords=[])',  # main.py:51750
+    'Await.value>Call(func=Name,args=[BinOp|Constant|Name],keywords=[keyword])',  # main.py:51678
+    'Await.value>Call(func=Name,args=[BinOp|Name],keywords=[])',  # main.py:51361
+    'Await.value>Call(func=Name,args=[BinOp|Name],keywords=[keyword])',  # main.py:51402
+    'Await.value>Call(func=Name,args=[BinOp|Name|Subscript],keywords=[])',  # main.py:51660
+    'Await.value>Call(func=Name,args=[Call|Constant|Name],keywords=[])',  # main.py:29544
+    'Await.value>Call(func=Name,args=[Call|Constant|Name],keywords=[keyword])',  # main.py:51058
+    'Await.value>Call(func=Name,args=[Call|Constant|Name|Subscript],keywords=[])',  # main.py:53500
+    'Await.value>Call(func=Name,args=[Call|Name],keywords=[])',  # main.py:18396
+    'Await.value>Call(func=Name,args=[Call|Name|Subscript],keywords=[])',  # main.py:52735
+    'Await.value>Call(func=Name,args=[Constant|ListComp|Name],keywords=[])',  # main.py:51188
+    'Await.value>Call(func=Name,args=[Constant|ListComp|Name],keywords=[keyword])',  # main.py:55419
+    'Await.value>Call(func=Name,args=[Constant|ListComp|Name|Subscript],keywords=[])',  # main.py:51150
+    'Await.value>Call(func=Name,args=[Constant|List|Name],keywords=[])',  # main.py:21156
+    'Await.value>Call(func=Name,args=[Constant|List|Name],keywords=[keyword])',  # main.py:21420
+    'Await.value>Call(func=Name,args=[Constant|Name],keywords=[])',  # main.py:50775
+    'Await.value>Call(func=Name,args=[Constant|Name],keywords=[keyword])',  # main.py:21649
+    'Await.value>Call(func=Name,args=[Constant|Name|Subscript],keywords=[])',  # main.py:50911
+    'Await.value>Call(func=Name,args=[Constant|Name|Subscript],keywords=[keyword])',  # main.py:50867
+    'Await.value>Call(func=Name,args=[ListComp|Name],keywords=[])',  # main.py:55343
+    'Await.value>Call(func=Name,args=[ListComp|Name],keywords=[keyword])',  # main.py:51034
+    'Await.value>Call(func=Name,args=[List|Name],keywords=[])',  # main.py:21648
+    'Await.value>Call(func=Name,args=[List|Name],keywords=[keyword])',  # main.py:17936
+    'Await.value>Call(func=Name,args=[Name],keywords=[])',  # main.py:18463
+    'Await.value>Call(func=Name,args=[Name],keywords=[keyword])',  # main.py:17987
+    'Await.value>Call(func=Name,args=[Name|Subscript],keywords=[])',  # main.py:21154
+    'Await.value>Call(func=Name,args=[Name|Subscript],keywords=[keyword])',  # main.py:21415
+    'Await.value>Call(func=Name,args=[],keywords=[])',  # main.py:17369
+    'BinOp.left>BinOp(left=BoolOp,op=Add,right=BoolOp)',  # main.py:53385
+    'BinOp.left>BinOp(left=Constant,op=Add,right=Name)',  # main.py:66754
     'BinOp.left>BinOp(left=Name,op=BitAnd,right=Name)',  # region_pick.py:244
-    'BinOp.left>BinOp(left=Name,op=FloorDiv,right=Constant)',  # main.py:29501
+    'BinOp.left>BinOp(left=Name,op=FloorDiv,right=Constant)',  # main.py:29542
     'BinOp.left>BinOp(left=Name,op=Sub,right=Name)',  # match_report_window.py:74
-    'BinOp.left>BoolOp(op=Or,values=[Constant|Subscript])',  # main.py:53259
-    'BinOp.left>Call(func=Attribute,args=[Attribute],keywords=[])',  # main.py:21585
-    'BinOp.left>Call(func=Attribute,args=[Constant|Name],keywords=[])',  # main.py:19626
+    'BinOp.left>BoolOp(op=Or,values=[Constant|Subscript])',  # main.py:53385
+    'BinOp.left>Call(func=Attribute,args=[Attribute],keywords=[])',  # main.py:21626
+    'BinOp.left>Call(func=Attribute,args=[Constant|Name],keywords=[])',  # main.py:19667
     'BinOp.left>Call(func=Name,args=[Attribute],keywords=[])',  # region_pick.py:257
-    'BinOp.left>Constant(value=float)',  # main.py:66424
-    'BinOp.left>Constant(value=int)',  # main.py:55015
-    'BinOp.left>Constant(value=str)',  # main.py:66631
-    'BinOp.left>JoinedStr(values=[Constant|FormattedValue])',  # main.py:19745
-    'BinOp.left>ListComp(elt=Subscript,generators=[comprehension])',  # main.py:51236
-    'BinOp.left>ListComp(elt=Tuple,generators=[comprehension])',  # main.py:51277
-    'BinOp.left>Name(id=str,ctx=Load)',  # main.py:17740
-    'BinOp.left>Subscript(value=Name,slice=Constant,ctx=Load)',  # main.py:52577
-    'BinOp.op>Add()',  # main.py:19626
+    'BinOp.left>Constant(value=float)',  # main.py:66547
+    'BinOp.left>Constant(value=int)',  # main.py:55141
+    'BinOp.left>Constant(value=str)',  # main.py:66754
+    'BinOp.left>JoinedStr(values=[Constant|FormattedValue])',  # main.py:19786
+    'BinOp.left>ListComp(elt=Subscript,generators=[comprehension])',  # main.py:51362
+    'BinOp.left>ListComp(elt=Tuple,generators=[comprehension])',  # main.py:51403
+    'BinOp.left>Name(id=str,ctx=Load)',  # main.py:17781
+    'BinOp.left>Subscript(value=Name,slice=Constant,ctx=Load)',  # main.py:52703
+    'BinOp.op>Add()',  # main.py:19667
     'BinOp.op>BitAnd()',  # region_pick.py:244
-    'BinOp.op>BitOr()',  # main.py:17740
-    'BinOp.op>FloorDiv()',  # main.py:29501
-    'BinOp.op>Mod()',  # main.py:29501
-    'BinOp.op>Mult()',  # main.py:21248
-    'BinOp.op>Sub()',  # main.py:19655
-    'BinOp.right>BinOp(left=Name,op=Mod,right=Constant)',  # main.py:29501
-    'BinOp.right>BinOp(left=Name,op=Sub,right=Constant)',  # main.py:76245
-    'BinOp.right>BoolOp(op=Or,values=[Constant|Subscript])',  # main.py:53259
-    'BinOp.right>BoolOp(op=Or,values=[Subscript])',  # main.py:21201
-    'BinOp.right>Call(func=Attribute,args=[],keywords=[])',  # main.py:66424
-    'BinOp.right>Call(func=Name,args=[Name],keywords=[])',  # main.py:52572
-    'BinOp.right>Call(func=Name,args=[Subscript],keywords=[])',  # main.py:52577
-    'BinOp.right>Call(func=Name,args=[],keywords=[keyword])',  # main.py:21228
-    'BinOp.right>Constant(value=NoneType)',  # main.py:17740
-    'BinOp.right>Constant(value=float)',  # main.py:76245
-    'BinOp.right>Constant(value=int)',  # main.py:19626
-    'BinOp.right>Constant(value=str)',  # main.py:66633
-    'BinOp.right>IfExp(test=Compare,body=JoinedStr,orelse=Constant)',  # main.py:19751
-    'BinOp.right>List(elts=[Name],ctx=Load)',  # main.py:50814
-    'BinOp.right>List(elts=[Tuple],ctx=Load)',  # main.py:51278
-    'BinOp.right>Name(id=str,ctx=Load)',  # main.py:29455
+    'BinOp.op>BitOr()',  # main.py:17781
+    'BinOp.op>FloorDiv()',  # main.py:29542
+    'BinOp.op>Mod()',  # main.py:29542
+    'BinOp.op>Mult()',  # main.py:21289
+    'BinOp.op>Sub()',  # main.py:19696
+    'BinOp.right>BinOp(left=Name,op=Mod,right=Constant)',  # main.py:29542
+    'BinOp.right>BinOp(left=Name,op=Sub,right=Constant)',  # main.py:75278
+    'BinOp.right>BoolOp(op=Or,values=[Constant|Subscript])',  # main.py:53385
+    'BinOp.right>BoolOp(op=Or,values=[Subscript])',  # main.py:21242
+    'BinOp.right>Call(func=Attribute,args=[],keywords=[])',  # main.py:66547
+    'BinOp.right>Call(func=Name,args=[Name],keywords=[])',  # main.py:52698
+    'BinOp.right>Call(func=Name,args=[Subscript],keywords=[])',  # main.py:52703
+    'BinOp.right>Call(func=Name,args=[],keywords=[keyword])',  # main.py:21269
+    'BinOp.right>Constant(value=NoneType)',  # main.py:17781
+    'BinOp.right>Constant(value=float)',  # main.py:75278
+    'BinOp.right>Constant(value=int)',  # main.py:19667
+    'BinOp.right>Constant(value=str)',  # main.py:66756
+    'BinOp.right>IfExp(test=Compare,body=JoinedStr,orelse=Constant)',  # main.py:19792
+    'BinOp.right>List(elts=[Name],ctx=Load)',  # main.py:50940
+    'BinOp.right>List(elts=[Tuple],ctx=Load)',  # main.py:51404
+    'BinOp.right>Name(id=str,ctx=Load)',  # main.py:29496
     'BinOp.right>Set(elts=[Name])',  # region_pick.py:244
-    'BinOp.right>Subscript(value=Name,slice=Constant,ctx=Load)',  # main.py:19655
+    'BinOp.right>Subscript(value=Name,slice=Constant,ctx=Load)',  # main.py:19696
     'BinOp.right>Tuple(elts=[Attribute|UnaryOp],ctx=Load)',  # region_pick.py:257
-    'BoolOp.op>And()',  # main.py:17324
-    'BoolOp.op>Or()',  # main.py:18346
+    'BoolOp.op>And()',  # main.py:17365
+    'BoolOp.op>Or()',  # main.py:18387
     "BoolOp.values>Attribute(value=Name,attr='admitted_by',ctx=Load)",  # region_pick.py:261
     "BoolOp.values>Attribute(value=Name,attr='map',ctx=Load)",  # region_pick.py:83
     'BoolOp.values>BoolOp(op=And,values=[Call|UnaryOp])',  # region_pick.py:232
-    'BoolOp.values>BoolOp(op=And,values=[Compare])',  # main.py:53252
-    'BoolOp.values>BoolOp(op=And,values=[Name|UnaryOp])',  # main.py:55109
-    'BoolOp.values>BoolOp(op=Or,values=[Compare])',  # main.py:66583
-    'BoolOp.values>Call(func=Attribute,args=[Constant],keywords=[])',  # main.py:19741
-    'BoolOp.values>Call(func=Attribute,args=[GeneratorExp],keywords=[])',  # main.py:19742
-    'BoolOp.values>Call(func=Attribute,args=[],keywords=[])',  # main.py:21715
-    'BoolOp.values>Call(func=Name,args=[Constant|GeneratorExp],keywords=[])',  # main.py:55272
-    'BoolOp.values>Call(func=Name,args=[GeneratorExp],keywords=[])',  # main.py:57793
-    'BoolOp.values>Call(func=Name,args=[Name],keywords=[])',  # main.py:19724
-    'BoolOp.values>Call(func=Name,args=[Name|Subscript],keywords=[])',  # main.py:19712
+    'BoolOp.values>BoolOp(op=And,values=[Compare])',  # main.py:53378
+    'BoolOp.values>BoolOp(op=And,values=[Name|UnaryOp])',  # main.py:55235
+    'BoolOp.values>BoolOp(op=Or,values=[Compare])',  # main.py:66706
+    'BoolOp.values>Call(func=Attribute,args=[Constant],keywords=[])',  # main.py:19782
+    'BoolOp.values>Call(func=Attribute,args=[GeneratorExp],keywords=[])',  # main.py:19783
+    'BoolOp.values>Call(func=Attribute,args=[],keywords=[])',  # main.py:21756
+    'BoolOp.values>Call(func=Name,args=[Constant|GeneratorExp],keywords=[])',  # main.py:55398
+    'BoolOp.values>Call(func=Name,args=[GeneratorExp],keywords=[])',  # main.py:57919
+    'BoolOp.values>Call(func=Name,args=[Name],keywords=[])',  # main.py:19765
+    'BoolOp.values>Call(func=Name,args=[Name|Subscript],keywords=[])',  # main.py:19753
     'BoolOp.values>Call(func=Name,args=[Name|Tuple],keywords=[])',  # region_pick.py:40
-    'BoolOp.values>Call(func=Name,args=[Subscript],keywords=[])',  # main.py:66493
-    'BoolOp.values>Call(func=Name,args=[],keywords=[])',  # main.py:55149
-    'BoolOp.values>Compare(left=Attribute,ops=[Eq],comparators=[Name])',  # main.py:29481
-    'BoolOp.values>Compare(left=Attribute,ops=[Is],comparators=[Constant])',  # main.py:19722
+    'BoolOp.values>Call(func=Name,args=[Subscript],keywords=[])',  # main.py:66616
+    'BoolOp.values>Call(func=Name,args=[],keywords=[])',  # main.py:55275
+    'BoolOp.values>Compare(left=Attribute,ops=[Eq],comparators=[Name])',  # main.py:29522
+    'BoolOp.values>Compare(left=Attribute,ops=[Is],comparators=[Constant])',  # main.py:19763
     'BoolOp.values>Compare(left=Attribute,ops=[NotEq],comparators=[Name])',  # region_pick.py:83
-    'BoolOp.values>Compare(left=Await,ops=[Is],comparators=[Constant])',  # main.py:66553
-    'BoolOp.values>Compare(left=BinOp,ops=[Gt],comparators=[Constant])',  # main.py:66745
-    'BoolOp.values>Compare(left=BinOp,ops=[Gt],comparators=[Name])',  # main.py:76215
+    'BoolOp.values>Compare(left=Await,ops=[Is],comparators=[Constant])',  # main.py:66676
+    'BoolOp.values>Compare(left=BinOp,ops=[Gt],comparators=[Constant])',  # main.py:66868
+    'BoolOp.values>Compare(left=BinOp,ops=[Gt],comparators=[Name])',  # main.py:75248
     'BoolOp.values>Compare(left=BinOp,ops=[LtE],comparators=[Name])',  # region_pick.py:202
-    'BoolOp.values>Compare(left=BinOp,ops=[Lt],comparators=[Name])',  # main.py:19655
-    'BoolOp.values>Compare(left=BoolOp,ops=[Gt],comparators=[Constant])',  # main.py:53265
-    'BoolOp.values>Compare(left=BoolOp,ops=[LtE],comparators=[Constant])',  # main.py:53172
-    'BoolOp.values>Compare(left=Call,ops=[Eq],comparators=[Call])',  # main.py:55123
-    'BoolOp.values>Compare(left=Call,ops=[Eq],comparators=[Constant])',  # main.py:55095
-    'BoolOp.values>Compare(left=Call,ops=[Eq],comparators=[Name])',  # main.py:17865
-    'BoolOp.values>Compare(left=Call,ops=[GtE],comparators=[Call])',  # main.py:66622
-    'BoolOp.values>Compare(left=Call,ops=[GtE],comparators=[Constant])',  # main.py:55146
-    'BoolOp.values>Compare(left=Call,ops=[GtE],comparators=[Name])',  # main.py:66433
-    'BoolOp.values>Compare(left=Call,ops=[Gt],comparators=[Constant])',  # main.py:55122
-    'BoolOp.values>Compare(left=Call,ops=[Gt],comparators=[Name])',  # main.py:29456
-    'BoolOp.values>Compare(left=Call,ops=[In],comparators=[Name])',  # main.py:63674
+    'BoolOp.values>Compare(left=BinOp,ops=[Lt],comparators=[Name])',  # main.py:19696
+    'BoolOp.values>Compare(left=BoolOp,ops=[Gt],comparators=[Constant])',  # main.py:53391
+    'BoolOp.values>Compare(left=BoolOp,ops=[LtE],comparators=[Constant])',  # main.py:53298
+    'BoolOp.values>Compare(left=Call,ops=[Eq],comparators=[Call])',  # main.py:55249
+    'BoolOp.values>Compare(left=Call,ops=[Eq],comparators=[Constant])',  # main.py:55221
+    'BoolOp.values>Compare(left=Call,ops=[Eq],comparators=[Name])',  # main.py:17906
+    'BoolOp.values>Compare(left=Call,ops=[GtE],comparators=[Call])',  # main.py:66745
+    'BoolOp.values>Compare(left=Call,ops=[GtE],comparators=[Constant])',  # main.py:55272
+    'BoolOp.values>Compare(left=Call,ops=[GtE],comparators=[Name])',  # main.py:66556
+    'BoolOp.values>Compare(left=Call,ops=[Gt],comparators=[Constant])',  # main.py:55248
+    'BoolOp.values>Compare(left=Call,ops=[Gt],comparators=[Name])',  # main.py:29497
+    'BoolOp.values>Compare(left=Call,ops=[In],comparators=[Name])',  # main.py:63797
     'BoolOp.values>Compare(left=Call,ops=[Lt],comparators=[Call])',  # region_pick.py:261
-    'BoolOp.values>Compare(left=Call,ops=[Lt],comparators=[Constant])',  # main.py:51498
-    'BoolOp.values>Compare(left=Call,ops=[Lt],comparators=[Name])',  # main.py:66825
-    'BoolOp.values>Compare(left=Call,ops=[NotEq],comparators=[Call])',  # main.py:51406
-    'BoolOp.values>Compare(left=Call,ops=[NotEq],comparators=[Constant])',  # main.py:51310
-    'BoolOp.values>Compare(left=Call,ops=[NotEq],comparators=[Name])',  # main.py:51405
-    'BoolOp.values>Compare(left=Name,ops=[Eq],comparators=[Call])',  # main.py:53252
-    'BoolOp.values>Compare(left=Name,ops=[Eq],comparators=[Constant])',  # main.py:51498
-    'BoolOp.values>Compare(left=Name,ops=[Eq],comparators=[Subscript])',  # main.py:66433
-    'BoolOp.values>Compare(left=Name,ops=[GtE],comparators=[Name])',  # main.py:57243
-    'BoolOp.values>Compare(left=Name,ops=[Gt],comparators=[BinOp])',  # main.py:21248
-    'BoolOp.values>Compare(left=Name,ops=[Gt],comparators=[Constant])',  # main.py:55095
-    'BoolOp.values>Compare(left=Name,ops=[Gt],comparators=[Name])',  # main.py:21299
+    'BoolOp.values>Compare(left=Call,ops=[Lt],comparators=[Constant])',  # main.py:51624
+    'BoolOp.values>Compare(left=Call,ops=[Lt],comparators=[Name])',  # main.py:66948
+    'BoolOp.values>Compare(left=Call,ops=[NotEq],comparators=[Call])',  # main.py:51532
+    'BoolOp.values>Compare(left=Call,ops=[NotEq],comparators=[Constant])',  # main.py:51436
+    'BoolOp.values>Compare(left=Call,ops=[NotEq],comparators=[Name])',  # main.py:51531
+    'BoolOp.values>Compare(left=Name,ops=[Eq],comparators=[Call])',  # main.py:53378
+    'BoolOp.values>Compare(left=Name,ops=[Eq],comparators=[Constant])',  # main.py:51624
+    'BoolOp.values>Compare(left=Name,ops=[Eq],comparators=[Subscript])',  # main.py:66556
+    'BoolOp.values>Compare(left=Name,ops=[GtE],comparators=[Name])',  # main.py:57369
+    'BoolOp.values>Compare(left=Name,ops=[Gt],comparators=[BinOp])',  # main.py:21289
+    'BoolOp.values>Compare(left=Name,ops=[Gt],comparators=[Constant])',  # main.py:55221
+    'BoolOp.values>Compare(left=Name,ops=[Gt],comparators=[Name])',  # main.py:21340
     'BoolOp.values>Compare(left=Name,ops=[In],comparators=[Attribute])',  # region_pick.py:83
-    'BoolOp.values>Compare(left=Name,ops=[IsNot],comparators=[Constant])',  # main.py:17324
-    'BoolOp.values>Compare(left=Name,ops=[Is],comparators=[Constant])',  # main.py:19547
-    'BoolOp.values>Compare(left=Name,ops=[LtE],comparators=[Constant])',  # main.py:29456
-    'BoolOp.values>Compare(left=Name,ops=[LtE],comparators=[Name])',  # main.py:50269
-    'BoolOp.values>Compare(left=Name,ops=[Lt],comparators=[Constant])',  # main.py:21151
-    'BoolOp.values>Compare(left=Name,ops=[Lt],comparators=[Name])',  # main.py:19550
-    'BoolOp.values>Compare(left=Name,ops=[NotEq],comparators=[Call])',  # main.py:66826
-    'BoolOp.values>Compare(left=Name,ops=[NotIn],comparators=[Name])',  # main.py:17324
-    'BoolOp.values>Compare(left=Subscript,ops=[Eq],comparators=[Constant])',  # main.py:21248
-    'BoolOp.values>Compare(left=Subscript,ops=[Eq],comparators=[Name])',  # main.py:51054
-    'BoolOp.values>Compare(left=Subscript,ops=[Eq],comparators=[Subscript])',  # main.py:53263
-    'BoolOp.values>Compare(left=Subscript,ops=[Gt],comparators=[Call])',  # main.py:66552
-    'BoolOp.values>Compare(left=Subscript,ops=[Gt],comparators=[Name])',  # main.py:53181
-    'BoolOp.values>Compare(left=Subscript,ops=[In],comparators=[Tuple])',  # main.py:17858
-    'BoolOp.values>Compare(left=Subscript,ops=[IsNot],comparators=[Constant])',  # main.py:50705
-    'BoolOp.values>Compare(left=Subscript,ops=[Is],comparators=[Constant])',  # main.py:52550
-    'BoolOp.values>Compare(left=Subscript,ops=[NotEq],comparators=[Constant])',  # main.py:21621
-    'BoolOp.values>Compare(left=Subscript,ops=[NotEq],comparators=[Name])',  # main.py:17859
-    'BoolOp.values>Compare(left=Subscript,ops=[NotEq],comparators=[Subscript])',  # main.py:19547
-    'BoolOp.values>Compare(left=Subscript,ops=[NotIn],comparators=[Name])',  # main.py:52552
-    'BoolOp.values>Constant(value=NoneType)',  # main.py:58664
-    'BoolOp.values>Constant(value=bool)',  # main.py:50851
-    'BoolOp.values>Constant(value=float)',  # main.py:50838
-    'BoolOp.values>Constant(value=int)',  # main.py:21715
-    'BoolOp.values>Constant(value=str)',  # main.py:19744
-    'BoolOp.values>List(elts=[],ctx=Load)',  # main.py:19741
-    'BoolOp.values>Name(id=str,ctx=Load)',  # main.py:17858
-    'BoolOp.values>Subscript(value=BoolOp,slice=Slice,ctx=Load)',  # main.py:58664
-    'BoolOp.values>Subscript(value=Name,slice=Constant,ctx=Load)',  # main.py:19655
-    'BoolOp.values>Tuple(elts=[],ctx=Load)',  # main.py:18346
-    'BoolOp.values>UnaryOp(op=Not,operand=BoolOp)',  # main.py:21299
-    'BoolOp.values>UnaryOp(op=Not,operand=Call)',  # main.py:55097
-    'BoolOp.values>UnaryOp(op=Not,operand=Name)',  # main.py:50820
-    'BoolOp.values>UnaryOp(op=Not,operand=Subscript)',  # main.py:58662
-    "Call.args>Attribute(value=Name,attr='id',ctx=Load)",  # main.py:21449
+    'BoolOp.values>Compare(left=Name,ops=[IsNot],comparators=[Constant])',  # main.py:17365
+    'BoolOp.values>Compare(left=Name,ops=[Is],comparators=[Constant])',  # main.py:19588
+    'BoolOp.values>Compare(left=Name,ops=[LtE],comparators=[Constant])',  # main.py:29497
+    'BoolOp.values>Compare(left=Name,ops=[LtE],comparators=[Name])',  # main.py:50395
+    'BoolOp.values>Compare(left=Name,ops=[Lt],comparators=[Constant])',  # main.py:21192
+    'BoolOp.values>Compare(left=Name,ops=[Lt],comparators=[Name])',  # main.py:19591
+    'BoolOp.values>Compare(left=Name,ops=[NotEq],comparators=[Call])',  # main.py:66949
+    'BoolOp.values>Compare(left=Name,ops=[NotIn],comparators=[Name])',  # main.py:17365
+    'BoolOp.values>Compare(left=Subscript,ops=[Eq],comparators=[Constant])',  # main.py:21289
+    'BoolOp.values>Compare(left=Subscript,ops=[Eq],comparators=[Name])',  # main.py:51180
+    'BoolOp.values>Compare(left=Subscript,ops=[Eq],comparators=[Subscript])',  # main.py:53389
+    'BoolOp.values>Compare(left=Subscript,ops=[Gt],comparators=[Call])',  # main.py:66675
+    'BoolOp.values>Compare(left=Subscript,ops=[Gt],comparators=[Name])',  # main.py:53307
+    'BoolOp.values>Compare(left=Subscript,ops=[In],comparators=[Tuple])',  # main.py:17899
+    'BoolOp.values>Compare(left=Subscript,ops=[IsNot],comparators=[Constant])',  # main.py:50831
+    'BoolOp.values>Compare(left=Subscript,ops=[Is],comparators=[Constant])',  # main.py:52676
+    'BoolOp.values>Compare(left=Subscript,ops=[NotEq],comparators=[Constant])',  # main.py:21662
+    'BoolOp.values>Compare(left=Subscript,ops=[NotEq],comparators=[Name])',  # main.py:17900
+    'BoolOp.values>Compare(left=Subscript,ops=[NotEq],comparators=[Subscript])',  # main.py:19588
+    'BoolOp.values>Compare(left=Subscript,ops=[NotIn],comparators=[Name])',  # main.py:52678
+    'BoolOp.values>Constant(value=NoneType)',  # main.py:58787
+    'BoolOp.values>Constant(value=bool)',  # main.py:50977
+    'BoolOp.values>Constant(value=float)',  # main.py:50964
+    'BoolOp.values>Constant(value=int)',  # main.py:21756
+    'BoolOp.values>Constant(value=str)',  # main.py:19785
+    'BoolOp.values>List(elts=[],ctx=Load)',  # main.py:19782
+    'BoolOp.values>Name(id=str,ctx=Load)',  # main.py:17899
+    'BoolOp.values>Subscript(value=BoolOp,slice=Slice,ctx=Load)',  # main.py:58787
+    'BoolOp.values>Subscript(value=Name,slice=Constant,ctx=Load)',  # main.py:19696
+    'BoolOp.values>Tuple(elts=[],ctx=Load)',  # main.py:18387
+    'BoolOp.values>UnaryOp(op=Not,operand=BoolOp)',  # main.py:21340
+    'BoolOp.values>UnaryOp(op=Not,operand=Call)',  # main.py:55223
+    'BoolOp.values>UnaryOp(op=Not,operand=Name)',  # main.py:50946
+    'BoolOp.values>UnaryOp(op=Not,operand=Subscript)',  # main.py:58785
+    "Call.args>Attribute(value=Name,attr='id',ctx=Load)",  # main.py:21490
     "Call.args>Attribute(value=Name,attr='map',ctx=Load)",  # region_pick.py:239
     "Call.args>Attribute(value=Name,attr='n',ctx=Load)",  # tournaments.py:309
     "Call.args>Attribute(value=Name,attr='region',ctx=Load)",  # region_pick.py:257
-    "Call.args>Attribute(value=Name,attr='rules',ctx=Load)",  # main.py:21377
-    "Call.args>Attribute(value=Name,attr='state',ctx=Load)",  # main.py:57766
+    "Call.args>Attribute(value=Name,attr='rules',ctx=Load)",  # main.py:21418
+    "Call.args>Attribute(value=Name,attr='state',ctx=Load)",  # main.py:57892
     "Call.args>Attribute(value=Name,attr='sum',ctx=Load)",  # region_pick.py:257
-    "Call.args>Attribute(value=Name,attr='utc',ctx=Load)",  # main.py:21198
+    "Call.args>Attribute(value=Name,attr='utc',ctx=Load)",  # main.py:21239
     "Call.args>Attribute(value=Name,attr='worst',ctx=Load)",  # region_pick.py:257
     "Call.args>Attribute(value=Subscript,attr='map',ctx=Load)",  # region_pick.py:237
-    'Call.args>Await(value=Call)',  # main.py:53247
-    'Call.args>BinOp(left=BinOp,op=Add,right=Constant)',  # main.py:66631
+    'Call.args>Await(value=Call)',  # main.py:53373
+    'Call.args>BinOp(left=BinOp,op=Add,right=Constant)',  # main.py:66754
     'Call.args>BinOp(left=BinOp,op=Sub,right=Set)',  # region_pick.py:244
-    'Call.args>BinOp(left=Constant,op=Sub,right=Call)',  # main.py:66424
-    'Call.args>BinOp(left=JoinedStr,op=Add,right=IfExp)',  # main.py:19745
-    'Call.args>BinOp(left=ListComp,op=Add,right=List)',  # main.py:51236
-    'Call.args>BinOp(left=Name,op=Add,right=Constant)',  # main.py:21565
-    'Call.args>BinOp(left=Name,op=Add,right=Name)',  # main.py:51535
-    'Call.args>BinOp(left=Name,op=Mult,right=Name)',  # main.py:29458
-    'Call.args>BinOp(left=Name,op=Sub,right=Name)',  # main.py:50256
-    'Call.args>BinOp(left=Subscript,op=Mult,right=Call)',  # main.py:52577
-    'Call.args>BoolOp(op=And,values=[Compare|Name|Subscript])',  # main.py:51053
-    'Call.args>BoolOp(op=And,values=[Compare|Subscript])',  # main.py:51055
-    'Call.args>BoolOp(op=Or,values=[Call|Constant])',  # main.py:50837
-    'Call.args>BoolOp(op=Or,values=[Call|Name])',  # main.py:57841
-    'Call.args>BoolOp(op=Or,values=[Constant|Name])',  # main.py:57757
-    'Call.args>BoolOp(op=Or,values=[Constant|Subscript])',  # main.py:55095
-    'Call.args>BoolOp(op=Or,values=[List|Subscript])',  # main.py:66467
-    'Call.args>BoolOp(op=Or,values=[Name|Tuple])',  # main.py:18355
-    'Call.args>Call(func=Attribute,args=[Constant],keywords=[])',  # main.py:19743
-    'Call.args>Call(func=Attribute,args=[Name],keywords=[])',  # main.py:29505
-    'Call.args>Call(func=Attribute,args=[],keywords=[])',  # main.py:19629
-    'Call.args>Call(func=Name,args=[BinOp],keywords=[])',  # main.py:52577
-    'Call.args>Call(func=Name,args=[BoolOp],keywords=[])',  # main.py:18355
+    'Call.args>BinOp(left=Constant,op=Sub,right=Call)',  # main.py:66547
+    'Call.args>BinOp(left=JoinedStr,op=Add,right=IfExp)',  # main.py:19786
+    'Call.args>BinOp(left=ListComp,op=Add,right=List)',  # main.py:51362
+    'Call.args>BinOp(left=Name,op=Add,right=Constant)',  # main.py:21606
+    'Call.args>BinOp(left=Name,op=Add,right=Name)',  # main.py:51661
+    'Call.args>BinOp(left=Name,op=Mult,right=Name)',  # main.py:29499
+    'Call.args>BinOp(left=Name,op=Sub,right=Name)',  # main.py:50382
+    'Call.args>BinOp(left=Subscript,op=Mult,right=Call)',  # main.py:52703
+    'Call.args>BoolOp(op=And,values=[Compare|Name|Subscript])',  # main.py:51179
+    'Call.args>BoolOp(op=And,values=[Compare|Subscript])',  # main.py:51181
+    'Call.args>BoolOp(op=Or,values=[Call|Constant])',  # main.py:50963
+    'Call.args>BoolOp(op=Or,values=[Call|Name])',  # main.py:57967
+    'Call.args>BoolOp(op=Or,values=[Constant|Name])',  # main.py:57883
+    'Call.args>BoolOp(op=Or,values=[Constant|Subscript])',  # main.py:55221
+    'Call.args>BoolOp(op=Or,values=[List|Subscript])',  # main.py:66590
+    'Call.args>BoolOp(op=Or,values=[Name|Tuple])',  # main.py:18396
+    'Call.args>Call(func=Attribute,args=[Constant],keywords=[])',  # main.py:19784
+    'Call.args>Call(func=Attribute,args=[Name],keywords=[])',  # main.py:29546
+    'Call.args>Call(func=Attribute,args=[],keywords=[])',  # main.py:19670
+    'Call.args>Call(func=Name,args=[BinOp],keywords=[])',  # main.py:52703
+    'Call.args>Call(func=Name,args=[BoolOp],keywords=[])',  # main.py:18396
     'Call.args>Call(func=Name,args=[Call],keywords=[])',  # match_hold.py:380
-    'Call.args>Call(func=Name,args=[Call|Name],keywords=[])',  # main.py:66428
-    'Call.args>Call(func=Name,args=[Constant],keywords=[])',  # main.py:4488
-    'Call.args>Call(func=Name,args=[Constant|Name],keywords=[])',  # main.py:63681
-    'Call.args>Call(func=Name,args=[GeneratorExp],keywords=[])',  # main.py:53139
-    'Call.args>Call(func=Name,args=[JoinedStr],keywords=[])',  # main.py:18352
-    'Call.args>Call(func=Name,args=[Name],keywords=[])',  # main.py:21600
-    'Call.args>Call(func=Name,args=[Name],keywords=[keyword])',  # main.py:21601
-    'Call.args>Call(func=Name,args=[Subscript],keywords=[])',  # main.py:17863
-    'Call.args>Call(func=Name,args=[],keywords=[keyword])',  # main.py:29483
-    'Call.args>Constant(value=NoneType)',  # main.py:21687
-    'Call.args>Constant(value=float)',  # main.py:66424
-    'Call.args>Constant(value=int)',  # main.py:19626
-    'Call.args>Constant(value=str)',  # main.py:4489
-    'Call.args>Dict(keys=[Constant],values=[Attribute|Name|Subscript])',  # main.py:51051
-    'Call.args>Dict(keys=[Constant],values=[BinOp|Call|Name])',  # main.py:51611
-    'Call.args>Dict(keys=[Constant],values=[BoolOp|Name])',  # main.py:58733
-    'Call.args>Dict(keys=[Constant],values=[Call])',  # main.py:53156
-    'Call.args>Dict(keys=[Constant],values=[Call|Compare|Name|Subscript])',  # main.py:50959
-    'Call.args>Dict(keys=[Constant],values=[Call|IfExp|Name])',  # main.py:19725
+    'Call.args>Call(func=Name,args=[Call|Name],keywords=[])',  # main.py:66551
+    'Call.args>Call(func=Name,args=[Constant],keywords=[])',  # main.py:4493
+    'Call.args>Call(func=Name,args=[Constant|Name],keywords=[])',  # main.py:63804
+    'Call.args>Call(func=Name,args=[GeneratorExp],keywords=[])',  # main.py:53265
+    'Call.args>Call(func=Name,args=[JoinedStr],keywords=[])',  # main.py:18393
+    'Call.args>Call(func=Name,args=[Name],keywords=[])',  # main.py:21641
+    'Call.args>Call(func=Name,args=[Name],keywords=[keyword])',  # main.py:21642
+    'Call.args>Call(func=Name,args=[Subscript],keywords=[])',  # main.py:17904
+    'Call.args>Call(func=Name,args=[],keywords=[keyword])',  # main.py:29524
+    'Call.args>Constant(value=NoneType)',  # main.py:21728
+    'Call.args>Constant(value=float)',  # main.py:66547
+    'Call.args>Constant(value=int)',  # main.py:19667
+    'Call.args>Constant(value=str)',  # main.py:4494
+    'Call.args>Dict(keys=[Constant],values=[Attribute|Name|Subscript])',  # main.py:51177
+    'Call.args>Dict(keys=[Constant],values=[BinOp|Call|Name])',  # main.py:51737
+    'Call.args>Dict(keys=[Constant],values=[BoolOp|Name])',  # main.py:58856
+    'Call.args>Dict(keys=[Constant],values=[Call])',  # main.py:53282
+    'Call.args>Dict(keys=[Constant],values=[Call|Compare|Name|Subscript])',  # main.py:51085
+    'Call.args>Dict(keys=[Constant],values=[Call|IfExp|Name])',  # main.py:19766
     'Call.args>Dict(keys=[Constant],values=[Call|ListComp|Name])',  # region_pick.py:271
-    'Call.args>Dict(keys=[Constant],values=[Call|ListComp|Name|Subscript])',  # main.py:66891
-    'Call.args>Dict(keys=[Constant],values=[Call|Name])',  # main.py:17878
-    'Call.args>Dict(keys=[Constant],values=[Call|Name|Subscript])',  # main.py:51562
-    'Call.args>Dict(keys=[Constant],values=[Call|Subscript])',  # main.py:51480
-    'Call.args>Dict(keys=[Constant],values=[Constant|IfExp|Name|Subscript])',  # main.py:66654
-    'Call.args>Dict(keys=[Constant],values=[Constant|Subscript])',  # main.py:66634
-    'Call.args>Dict(keys=[Constant],values=[ListComp])',  # main.py:51595
-    'Call.args>Dict(keys=[Constant],values=[Name])',  # main.py:4492
-    'Call.args>Dict(keys=[Constant],values=[Name|Subscript])',  # main.py:50732
-    'Call.args>Dict(keys=[Constant],values=[Subscript])',  # main.py:21270
+    'Call.args>Dict(keys=[Constant],values=[Call|ListComp|Name|Subscript])',  # main.py:67014
+    'Call.args>Dict(keys=[Constant],values=[Call|Name])',  # main.py:17919
+    'Call.args>Dict(keys=[Constant],values=[Call|Name|Subscript])',  # main.py:51688
+    'Call.args>Dict(keys=[Constant],values=[Call|Subscript])',  # main.py:51606
+    'Call.args>Dict(keys=[Constant],values=[Constant|IfExp|Name|Subscript])',  # main.py:66777
+    'Call.args>Dict(keys=[Constant],values=[Constant|Subscript])',  # main.py:66757
+    'Call.args>Dict(keys=[Constant],values=[ListComp])',  # main.py:51721
+    'Call.args>Dict(keys=[Constant],values=[Name])',  # main.py:4497
+    'Call.args>Dict(keys=[Constant],values=[Name|Subscript])',  # main.py:50858
+    'Call.args>Dict(keys=[Constant],values=[Subscript])',  # main.py:21311
     'Call.args>GeneratorExp(elt=BinOp,generators=[comprehension])',  # match_hold.py:352
     'Call.args>GeneratorExp(elt=BoolOp,generators=[comprehension])',  # region_pick.py:83
-    'Call.args>GeneratorExp(elt=Call,generators=[comprehension])',  # main.py:6647
-    'Call.args>GeneratorExp(elt=Compare,generators=[comprehension])',  # main.py:17838
+    'Call.args>GeneratorExp(elt=Call,generators=[comprehension])',  # main.py:6656
+    'Call.args>GeneratorExp(elt=Compare,generators=[comprehension])',  # main.py:17879
     'Call.args>GeneratorExp(elt=Constant,generators=[comprehension])',  # region_pick.py:246
-    'Call.args>GeneratorExp(elt=JoinedStr,generators=[comprehension])',  # main.py:19742
-    'Call.args>GeneratorExp(elt=Name,generators=[comprehension])',  # main.py:19630
-    'Call.args>GeneratorExp(elt=Subscript,generators=[comprehension])',  # main.py:50254
-    'Call.args>JoinedStr(values=[Constant|FormattedValue])',  # main.py:17321
-    'Call.args>List(elts=[Constant],ctx=Load)',  # main.py:29482
-    'Call.args>List(elts=[Name],ctx=Load)',  # main.py:17896
-    'Call.args>List(elts=[Name|Subscript],ctx=Load)',  # main.py:21380
-    'Call.args>List(elts=[Subscript],ctx=Load)',  # main.py:21116
-    'Call.args>List(elts=[Tuple],ctx=Load)',  # main.py:21433
-    'Call.args>ListComp(elt=Subscript,generators=[comprehension])',  # main.py:51025
-    'Call.args>ListComp(elt=Tuple,generators=[comprehension])',  # main.py:50909
-    'Call.args>Name(id=str,ctx=Load)',  # main.py:6647
-    'Call.args>SetComp(elt=Name,generators=[comprehension])',  # main.py:17771
-    'Call.args>SetComp(elt=Tuple,generators=[comprehension])',  # main.py:18346
-    'Call.args>Subscript(value=Name,slice=Constant,ctx=Load)',  # main.py:17837
+    'Call.args>GeneratorExp(elt=JoinedStr,generators=[comprehension])',  # main.py:19783
+    'Call.args>GeneratorExp(elt=Name,generators=[comprehension])',  # main.py:19671
+    'Call.args>GeneratorExp(elt=Subscript,generators=[comprehension])',  # main.py:50380
+    'Call.args>JoinedStr(values=[Constant|FormattedValue])',  # main.py:17362
+    'Call.args>List(elts=[Constant],ctx=Load)',  # main.py:29523
+    'Call.args>List(elts=[Name],ctx=Load)',  # main.py:17937
+    'Call.args>List(elts=[Name|Subscript],ctx=Load)',  # main.py:21421
+    'Call.args>List(elts=[Subscript],ctx=Load)',  # main.py:21157
+    'Call.args>List(elts=[Tuple],ctx=Load)',  # main.py:21474
+    'Call.args>ListComp(elt=Subscript,generators=[comprehension])',  # main.py:51151
+    'Call.args>ListComp(elt=Tuple,generators=[comprehension])',  # main.py:51035
+    'Call.args>Name(id=str,ctx=Load)',  # main.py:6656
+    'Call.args>SetComp(elt=Name,generators=[comprehension])',  # main.py:17812
+    'Call.args>SetComp(elt=Tuple,generators=[comprehension])',  # main.py:18387
+    'Call.args>Subscript(value=Name,slice=Constant,ctx=Load)',  # main.py:17878
     'Call.args>Subscript(value=Name,slice=Name,ctx=Load)',  # match_hold.py:353
-    'Call.args>Subscript(value=Name,slice=Slice,ctx=Load)',  # main.py:55207
-    'Call.args>Tuple(elts=[Constant],ctx=Load)',  # main.py:19716
-    'Call.args>Tuple(elts=[Name],ctx=Load)',  # main.py:19717
-    "Call.func>Attribute(value=Attribute,attr='get',ctx=Load)",  # main.py:21069
-    "Call.func>Attribute(value=Await,attr='all',ctx=Load)",  # main.py:53310
-    "Call.func>Attribute(value=Await,attr='first',ctx=Load)",  # main.py:58655
-    "Call.func>Attribute(value=Await,attr='mappings',ctx=Load)",  # main.py:17784
-    "Call.func>Attribute(value=Await,attr='scalar',ctx=Load)",  # main.py:17796
-    "Call.func>Attribute(value=Await,attr='scalar_one',ctx=Load)",  # main.py:17773
-    "Call.func>Attribute(value=Await,attr='scalar_one_or_none',ctx=Load)",  # main.py:50778
-    "Call.func>Attribute(value=Await,attr='scalars',ctx=Load)",  # main.py:17869
-    "Call.func>Attribute(value=BinOp,attr='total_seconds',ctx=Load)",  # main.py:21201
-    "Call.func>Attribute(value=BoolOp,attr='lower',ctx=Load)",  # main.py:51107
-    "Call.func>Attribute(value=BoolOp,attr='lstrip',ctx=Load)",  # main.py:66875
+    'Call.args>Subscript(value=Name,slice=Slice,ctx=Load)',  # main.py:55333
+    'Call.args>Tuple(elts=[Constant],ctx=Load)',  # main.py:19757
+    'Call.args>Tuple(elts=[Name],ctx=Load)',  # main.py:19758
+    "Call.func>Attribute(value=Attribute,attr='get',ctx=Load)",  # main.py:21110
+    "Call.func>Attribute(value=Await,attr='all',ctx=Load)",  # main.py:53436
+    "Call.func>Attribute(value=Await,attr='first',ctx=Load)",  # main.py:58778
+    "Call.func>Attribute(value=Await,attr='mappings',ctx=Load)",  # main.py:17825
+    "Call.func>Attribute(value=Await,attr='scalar',ctx=Load)",  # main.py:17837
+    "Call.func>Attribute(value=Await,attr='scalar_one',ctx=Load)",  # main.py:17814
+    "Call.func>Attribute(value=Await,attr='scalar_one_or_none',ctx=Load)",  # main.py:50904
+    "Call.func>Attribute(value=Await,attr='scalars',ctx=Load)",  # main.py:17910
+    "Call.func>Attribute(value=BinOp,attr='total_seconds',ctx=Load)",  # main.py:21242
+    "Call.func>Attribute(value=BoolOp,attr='lower',ctx=Load)",  # main.py:51233
+    "Call.func>Attribute(value=BoolOp,attr='lstrip',ctx=Load)",  # main.py:66998
     "Call.func>Attribute(value=BoolOp,attr='strip',ctx=Load)",  # match_hold.py:376
-    "Call.func>Attribute(value=Call,attr='all',ctx=Load)",  # main.py:17831
-    "Call.func>Attribute(value=Call,attr='fetchall',ctx=Load)",  # main.py:57820
-    "Call.func>Attribute(value=Call,attr='first',ctx=Load)",  # main.py:18378
-    "Call.func>Attribute(value=Call,attr='lstrip',ctx=Load)",  # main.py:57757
-    "Call.func>Attribute(value=Call,attr='one',ctx=Load)",  # main.py:17784
-    "Call.func>Attribute(value=Call,attr='series_fresh',ctx=Load)",  # main.py:53176
-    "Call.func>Attribute(value=Call,attr='series_holds',ctx=Load)",  # main.py:53247
-    "Call.func>Attribute(value=Call,attr='split',ctx=Load)",  # main.py:6647
-    "Call.func>Attribute(value=Constant,attr='join',ctx=Load)",  # main.py:19742
-    "Call.func>Attribute(value=Name,attr='UUID',ctx=Load)",  # main.py:57816
+    "Call.func>Attribute(value=Call,attr='all',ctx=Load)",  # main.py:17872
+    "Call.func>Attribute(value=Call,attr='fetchall',ctx=Load)",  # main.py:57946
+    "Call.func>Attribute(value=Call,attr='first',ctx=Load)",  # main.py:18419
+    "Call.func>Attribute(value=Call,attr='lstrip',ctx=Load)",  # main.py:57883
+    "Call.func>Attribute(value=Call,attr='one',ctx=Load)",  # main.py:17825
+    "Call.func>Attribute(value=Call,attr='series_fresh',ctx=Load)",  # main.py:53302
+    "Call.func>Attribute(value=Call,attr='series_holds',ctx=Load)",  # main.py:53373
+    "Call.func>Attribute(value=Call,attr='split',ctx=Load)",  # main.py:6656
+    "Call.func>Attribute(value=Constant,attr='join',ctx=Load)",  # main.py:19783
+    "Call.func>Attribute(value=Name,attr='UUID',ctx=Load)",  # main.py:57942
     "Call.func>Attribute(value=Name,attr='_asdict',ctx=Load)",  # region_pick.py:274
-    "Call.func>Attribute(value=Name,attr='_hold_latch',ctx=Load)",  # main.py:50966
-    "Call.func>Attribute(value=Name,attr='add',ctx=Load)",  # main.py:18418
-    "Call.func>Attribute(value=Name,attr='append',ctx=Load)",  # main.py:17325
-    "Call.func>Attribute(value=Name,attr='begin_nested',ctx=Load)",  # main.py:4487
-    "Call.func>Attribute(value=Name,attr='caps_token_sql',ctx=Load)",  # main.py:51048
-    "Call.func>Attribute(value=Name,attr='ceil',ctx=Load)",  # main.py:66428
-    "Call.func>Attribute(value=Name,attr='choice',ctx=Load)",  # main.py:58696
-    "Call.func>Attribute(value=Name,attr='commit',ctx=Load)",  # main.py:21086
-    "Call.func>Attribute(value=Name,attr='dumps',ctx=Load)",  # main.py:57708
-    "Call.func>Attribute(value=Name,attr='execute',ctx=Load)",  # main.py:4488
-    "Call.func>Attribute(value=Name,attr='expire',ctx=Load)",  # main.py:29482
-    "Call.func>Attribute(value=Name,attr='extend',ctx=Load)",  # main.py:51581
-    "Call.func>Attribute(value=Name,attr='flush',ctx=Load)",  # main.py:21420
-    "Call.func>Attribute(value=Name,attr='format',ctx=Load)",  # main.py:51146
-    "Call.func>Attribute(value=Name,attr='get',ctx=Load)",  # main.py:17863
-    "Call.func>Attribute(value=Name,attr='intersection',ctx=Load)",  # main.py:76159
-    "Call.func>Attribute(value=Name,attr='items',ctx=Load)",  # main.py:19630
-    "Call.func>Attribute(value=Name,attr='loads',ctx=Load)",  # main.py:19719
-    "Call.func>Attribute(value=Name,attr='lower',ctx=Load)",  # main.py:58698
-    "Call.func>Attribute(value=Name,attr='mappings',ctx=Load)",  # main.py:19706
-    "Call.func>Attribute(value=Name,attr='monotonic',ctx=Load)",  # main.py:19654
-    "Call.func>Attribute(value=Name,attr='now',ctx=Load)",  # main.py:21198
-    "Call.func>Attribute(value=Name,attr='pop',ctx=Load)",  # main.py:63673
-    "Call.func>Attribute(value=Name,attr='replace',ctx=Load)",  # main.py:19723
-    "Call.func>Attribute(value=Name,attr='rollback',ctx=Load)",  # main.py:17808
-    "Call.func>Attribute(value=Name,attr='scalar',ctx=Load)",  # main.py:21715
-    "Call.func>Attribute(value=Name,attr='sort',ctx=Load)",  # main.py:53258
-    "Call.func>Attribute(value=Name,attr='strip',ctx=Load)",  # main.py:6647
-    "Call.func>Attribute(value=Name,attr='time',ctx=Load)",  # main.py:19735
-    "Call.func>Attribute(value=Name,attr='timestamp',ctx=Load)",  # main.py:19726
-    "Call.func>Attribute(value=Name,attr='update',ctx=Load)",  # main.py:17821
-    "Call.func>Attribute(value=Name,attr='uuid4',ctx=Load)",  # main.py:17902
-    "Call.func>Attribute(value=Name,attr='values',ctx=Load)",  # main.py:19629
-    "Call.func>Attribute(value=Subscript,attr='isdigit',ctx=Load)",  # main.py:55208
-    'Call.func>Name(id=str,ctx=Load)',  # main.py:4488
-    "Call.keywords>keyword(arg='_gate_held',value=Constant)",  # main.py:17955
-    "Call.keywords>keyword(arg='affected_player_ids',value=BinOp)",  # main.py:51547
-    "Call.keywords>keyword(arg='affected_player_ids',value=Call)",  # main.py:53298
-    "Call.keywords>keyword(arg='affected_player_ids',value=List)",  # main.py:21142
-    "Call.keywords>keyword(arg='affected_player_ids',value=ListComp)",  # main.py:55288
-    "Call.keywords>keyword(arg='affected_steam_ids',value=List)",  # main.py:21142
-    "Call.keywords>keyword(arg='allow',value=Tuple)",  # main.py:50910
-    "Call.keywords>keyword(arg='allow_any',value=ListComp)",  # main.py:51279
-    "Call.keywords>keyword(arg='allow_any',value=Tuple)",  # main.py:21434
-    "Call.keywords>keyword(arg='allowed_group_ids',value=Name)",  # main.py:17897
-    "Call.keywords>keyword(arg='allowed_hold_ids',value=Name)",  # main.py:17898
-    "Call.keywords>keyword(arg='allowed_keys',value=Name)",  # main.py:17950
-    "Call.keywords>keyword(arg='allowed_keys',value=Tuple)",  # main.py:21450
-    "Call.keywords>keyword(arg='amount',value=Call)",  # main.py:39071
-    "Call.keywords>keyword(arg='amount',value=Name)",  # main.py:29484
-    "Call.keywords>keyword(arg='balance_rating',value=Name)",  # main.py:50849
-    "Call.keywords>keyword(arg='bilateral',value=IfExp)",  # main.py:51147
-    "Call.keywords>keyword(arg='completed_series',value=Name)",  # main.py:50850
-    "Call.keywords>keyword(arg='content',value=Name)",  # main.py:50646
-    "Call.keywords>keyword(arg='current',value=Call)",  # main.py:50934
-    "Call.keywords>keyword(arg='default',value=Constant)",  # main.py:66421
-    "Call.keywords>keyword(arg='detail',value=Constant)",  # main.py:17810
-    "Call.keywords>keyword(arg='display_name',value=Subscript)",  # main.py:50844
-    "Call.keywords>keyword(arg='elo_range',value=IfExp)",  # main.py:21726
-    "Call.keywords>keyword(arg='elo_range',value=Name)",  # main.py:51134
-    "Call.keywords>keyword(arg='elo_unbounded',value=Compare)",  # main.py:21727
-    "Call.keywords>keyword(arg='ge',value=Constant)",  # main.py:50620
-    "Call.keywords>keyword(arg='hold',value=IfExp)",  # main.py:51082
-    "Call.keywords>keyword(arg='key',value=Lambda)",  # main.py:18347
-    "Call.keywords>keyword(arg='key',value=Name)",  # main.py:17326
-    "Call.keywords>keyword(arg='le',value=Constant)",  # main.py:50620
-    "Call.keywords>keyword(arg='live_p1_points',value=Constant)",  # main.py:21415
-    "Call.keywords>keyword(arg='live_p2_points',value=Constant)",  # main.py:21415
-    "Call.keywords>keyword(arg='margin_ms',value=Name)",  # main.py:19734
-    "Call.keywords>keyword(arg='match_age_seconds',value=Constant)",  # main.py:51663
-    "Call.keywords>keyword(arg='match_age_seconds',value=IfExp)",  # main.py:51075
-    "Call.keywords>keyword(arg='max_age_s',value=Name)",  # main.py:19735
-    "Call.keywords>keyword(arg='max_total_seconds',value=Name)",  # main.py:50743
-    "Call.keywords>keyword(arg='minutes',value=Name)",  # main.py:53175
-    "Call.keywords>keyword(arg='my_pid',value=Name)",  # main.py:21381
-    "Call.keywords>keyword(arg='my_pid',value=Subscript)",  # main.py:55295
-    "Call.keywords>keyword(arg='my_ready',value=Call)",  # main.py:51076
-    "Call.keywords>keyword(arg='now',value=Call)",  # main.py:19735
-    "Call.keywords>keyword(arg='now',value=Name)",  # main.py:53176
-    "Call.keywords>keyword(arg='only',value=Constant)",  # main.py:21601
-    "Call.keywords>keyword(arg='only',value=ListComp)",  # main.py:51245
-    "Call.keywords>keyword(arg='only',value=Name)",  # main.py:51403
-    "Call.keywords>keyword(arg='only',value=Subscript)",  # main.py:21620
-    "Call.keywords>keyword(arg='opponent_name',value=Subscript)",  # main.py:21484
-    "Call.keywords>keyword(arg='opponent_rating',value=Subscript)",  # main.py:21485
-    "Call.keywords>keyword(arg='opponent_ready',value=Constant)",  # main.py:21486
-    "Call.keywords>keyword(arg='opponent_ready',value=Name)",  # main.py:21519
-    "Call.keywords>keyword(arg='opponent_steam_id',value=Subscript)",  # main.py:21483
-    "Call.keywords>keyword(arg='opponents',value=List)",  # main.py:53432
-    "Call.keywords>keyword(arg='opponents',value=Name)",  # main.py:51072
-    "Call.keywords>keyword(arg='p1_pings',value=Subscript)",  # main.py:21359
-    "Call.keywords>keyword(arg='p1_pings_at',value=Subscript)",  # main.py:21360
-    "Call.keywords>keyword(arg='p1_series_wins',value=Constant)",  # main.py:21414
-    "Call.keywords>keyword(arg='p1_steam_id',value=IfExp)",  # main.py:21490
-    "Call.keywords>keyword(arg='p1_wins',value=Attribute)",  # main.py:21492
-    "Call.keywords>keyword(arg='p1_wins',value=IfExp)",  # main.py:21527
-    "Call.keywords>keyword(arg='p2_pings',value=Subscript)",  # main.py:21359
-    "Call.keywords>keyword(arg='p2_pings_at',value=Subscript)",  # main.py:21360
-    "Call.keywords>keyword(arg='p2_series_wins',value=Constant)",  # main.py:21414
-    "Call.keywords>keyword(arg='p2_steam_id',value=IfExp)",  # main.py:21491
-    "Call.keywords>keyword(arg='p2_wins',value=Attribute)",  # main.py:21493
-    "Call.keywords>keyword(arg='p2_wins',value=IfExp)",  # main.py:21528
-    "Call.keywords>keyword(arg='parents',value=List)",  # main.py:51238
-    "Call.keywords>keyword(arg='photon_region',value=BoolOp)",  # main.py:21521
-    "Call.keywords>keyword(arg='photon_region',value=Name)",  # main.py:21488
-    "Call.keywords>keyword(arg='player1_id',value=Name)",  # main.py:21413
-    "Call.keywords>keyword(arg='player2_id',value=Subscript)",  # main.py:21413
-    "Call.keywords>keyword(arg='player_id',value=Name)",  # main.py:29484
-    "Call.keywords>keyword(arg='player_id',value=Subscript)",  # main.py:52607
-    "Call.keywords>keyword(arg='player_ids',value=BinOp)",  # main.py:51366
-    "Call.keywords>keyword(arg='player_ids',value=List)",  # main.py:21609
-    "Call.keywords>keyword(arg='player_ids',value=ListComp)",  # main.py:50918
-    "Call.keywords>keyword(arg='player_ids',value=Name)",  # main.py:50825
-    "Call.keywords>keyword(arg='queue_count',value=Call)",  # main.py:50768
-    "Call.keywords>keyword(arg='queue_count',value=Constant)",  # main.py:51134
-    "Call.keywords>keyword(arg='queue_count',value=Name)",  # main.py:51464
-    "Call.keywords>keyword(arg='queue_size',value=Name)",  # main.py:21721
-    "Call.keywords>keyword(arg='rating',value=Call)",  # main.py:50845
-    "Call.keywords>keyword(arg='ready',value=Call)",  # main.py:50851
-    "Call.keywords>keyword(arg='reason',value=Constant)",  # main.py:52608
-    "Call.keywords>keyword(arg='reason',value=Name)",  # main.py:29485
-    "Call.keywords>keyword(arg='reference_id',value=Call)",  # main.py:29485
-    "Call.keywords>keyword(arg='region',value=Subscript)",  # main.py:50846
-    "Call.keywords>keyword(arg='regret_ms',value=Name)",  # main.py:19734
-    "Call.keywords>keyword(arg='request',value=Name)",  # main.py:21381
-    "Call.keywords>keyword(arg='require',value=Constant)",  # main.py:50910
-    "Call.keywords>keyword(arg='response_model',value=Name)",  # main.py:21034
-    "Call.keywords>keyword(arg='reverse',value=Constant)",  # main.py:53260
-    "Call.keywords>keyword(arg='room',value=Name)",  # main.py:50934
-    "Call.keywords>keyword(arg='room_id',value=Name)",  # main.py:21374
-    "Call.keywords>keyword(arg='room_name',value=Name)",  # main.py:21487
-    "Call.keywords>keyword(arg='room_region',value=Name)",  # main.py:51074
-    "Call.keywords>keyword(arg='rules',value=Call)",  # main.py:21494
-    "Call.keywords>keyword(arg='rules',value=Name)",  # main.py:21387
-    "Call.keywords>keyword(arg='rules_prop',value=Call)",  # main.py:21495
-    "Call.keywords>keyword(arg='seconds',value=Name)",  # main.py:21228
-    "Call.keywords>keyword(arg='separators',value=Tuple)",  # main.py:57708
-    "Call.keywords>keyword(arg='series_id',value=Call)",  # main.py:21489
-    "Call.keywords>keyword(arg='series_id',value=Name)",  # main.py:21522
-    "Call.keywords>keyword(arg='sort_keys',value=Constant)",  # main.py:57708
-    "Call.keywords>keyword(arg='status',value=Constant)",  # main.py:21105
-    "Call.keywords>keyword(arg='status',value=IfExp)",  # main.py:21351
-    "Call.keywords>keyword(arg='status_code',value=Constant)",  # main.py:17810
-    "Call.keywords>keyword(arg='steam_id',value=Subscript)",  # main.py:50843
-    "Call.keywords>keyword(arg='strict_team_ovt_queue',value=Name)",  # main.py:17899
-    "Call.keywords>keyword(arg='tags',value=List)",  # main.py:21034
-    "Call.keywords>keyword(arg='team_assigned',value=Name)",  # main.py:51070
-    "Call.keywords>keyword(arg='team_assigned',value=Subscript)",  # main.py:50847
-    "Call.keywords>keyword(arg='teammates',value=List)",  # main.py:53431
-    "Call.keywords>keyword(arg='teammates',value=Name)",  # main.py:51071
-    "Call.keywords>keyword(arg='tzinfo',value=Attribute)",  # main.py:19723
-    "Call.keywords>keyword(arg='using_fallback_rating',value=Name)",  # main.py:50848
-    "Call.keywords>keyword(arg='wait_time',value=Constant)",  # main.py:21554
-    "Call.keywords>keyword(arg='wait_time',value=Name)",  # main.py:21254
-    "Call.keywords>keyword(arg='window',value=Name)",  # main.py:53176
+    "Call.func>Attribute(value=Name,attr='_hold_latch',ctx=Load)",  # main.py:51092
+    "Call.func>Attribute(value=Name,attr='add',ctx=Load)",  # main.py:18459
+    "Call.func>Attribute(value=Name,attr='append',ctx=Load)",  # main.py:17366
+    "Call.func>Attribute(value=Name,attr='begin_nested',ctx=Load)",  # main.py:4492
+    "Call.func>Attribute(value=Name,attr='caps_token_sql',ctx=Load)",  # main.py:51174
+    "Call.func>Attribute(value=Name,attr='ceil',ctx=Load)",  # main.py:66551
+    "Call.func>Attribute(value=Name,attr='choice',ctx=Load)",  # main.py:58819
+    "Call.func>Attribute(value=Name,attr='commit',ctx=Load)",  # main.py:21127
+    "Call.func>Attribute(value=Name,attr='dumps',ctx=Load)",  # main.py:57834
+    "Call.func>Attribute(value=Name,attr='execute',ctx=Load)",  # main.py:4493
+    "Call.func>Attribute(value=Name,attr='expire',ctx=Load)",  # main.py:29523
+    "Call.func>Attribute(value=Name,attr='extend',ctx=Load)",  # main.py:51707
+    "Call.func>Attribute(value=Name,attr='flush',ctx=Load)",  # main.py:21461
+    "Call.func>Attribute(value=Name,attr='format',ctx=Load)",  # main.py:51272
+    "Call.func>Attribute(value=Name,attr='get',ctx=Load)",  # main.py:17904
+    "Call.func>Attribute(value=Name,attr='intersection',ctx=Load)",  # main.py:75192
+    "Call.func>Attribute(value=Name,attr='items',ctx=Load)",  # main.py:19671
+    "Call.func>Attribute(value=Name,attr='loads',ctx=Load)",  # main.py:19760
+    "Call.func>Attribute(value=Name,attr='lower',ctx=Load)",  # main.py:58821
+    "Call.func>Attribute(value=Name,attr='mappings',ctx=Load)",  # main.py:19747
+    "Call.func>Attribute(value=Name,attr='monotonic',ctx=Load)",  # main.py:19695
+    "Call.func>Attribute(value=Name,attr='now',ctx=Load)",  # main.py:21239
+    "Call.func>Attribute(value=Name,attr='pop',ctx=Load)",  # main.py:63796
+    "Call.func>Attribute(value=Name,attr='replace',ctx=Load)",  # main.py:19764
+    "Call.func>Attribute(value=Name,attr='rollback',ctx=Load)",  # main.py:17849
+    "Call.func>Attribute(value=Name,attr='scalar',ctx=Load)",  # main.py:21756
+    "Call.func>Attribute(value=Name,attr='sort',ctx=Load)",  # main.py:53384
+    "Call.func>Attribute(value=Name,attr='strip',ctx=Load)",  # main.py:6656
+    "Call.func>Attribute(value=Name,attr='time',ctx=Load)",  # main.py:19776
+    "Call.func>Attribute(value=Name,attr='timestamp',ctx=Load)",  # main.py:19767
+    "Call.func>Attribute(value=Name,attr='update',ctx=Load)",  # main.py:17862
+    "Call.func>Attribute(value=Name,attr='uuid4',ctx=Load)",  # main.py:17943
+    "Call.func>Attribute(value=Name,attr='values',ctx=Load)",  # main.py:19670
+    "Call.func>Attribute(value=Subscript,attr='isdigit',ctx=Load)",  # main.py:55334
+    'Call.func>Name(id=str,ctx=Load)',  # main.py:4493
+    "Call.keywords>keyword(arg='_gate_held',value=Constant)",  # main.py:17996
+    "Call.keywords>keyword(arg='affected_player_ids',value=BinOp)",  # main.py:51673
+    "Call.keywords>keyword(arg='affected_player_ids',value=Call)",  # main.py:53424
+    "Call.keywords>keyword(arg='affected_player_ids',value=List)",  # main.py:21183
+    "Call.keywords>keyword(arg='affected_player_ids',value=ListComp)",  # main.py:55414
+    "Call.keywords>keyword(arg='affected_steam_ids',value=List)",  # main.py:21183
+    "Call.keywords>keyword(arg='allow',value=Tuple)",  # main.py:51036
+    "Call.keywords>keyword(arg='allow_any',value=ListComp)",  # main.py:51405
+    "Call.keywords>keyword(arg='allow_any',value=Tuple)",  # main.py:21475
+    "Call.keywords>keyword(arg='allowed_group_ids',value=Name)",  # main.py:17938
+    "Call.keywords>keyword(arg='allowed_hold_ids',value=Name)",  # main.py:17939
+    "Call.keywords>keyword(arg='allowed_keys',value=Name)",  # main.py:17991
+    "Call.keywords>keyword(arg='allowed_keys',value=Tuple)",  # main.py:21491
+    "Call.keywords>keyword(arg='amount',value=Call)",  # main.py:39112
+    "Call.keywords>keyword(arg='amount',value=Name)",  # main.py:29525
+    "Call.keywords>keyword(arg='balance_rating',value=Name)",  # main.py:50975
+    "Call.keywords>keyword(arg='bilateral',value=IfExp)",  # main.py:51273
+    "Call.keywords>keyword(arg='completed_series',value=Name)",  # main.py:50976
+    "Call.keywords>keyword(arg='content',value=Name)",  # main.py:50772
+    "Call.keywords>keyword(arg='current',value=Call)",  # main.py:51060
+    "Call.keywords>keyword(arg='default',value=Constant)",  # main.py:66544
+    "Call.keywords>keyword(arg='detail',value=Constant)",  # main.py:17851
+    "Call.keywords>keyword(arg='display_name',value=Subscript)",  # main.py:50970
+    "Call.keywords>keyword(arg='elo_range',value=IfExp)",  # main.py:21767
+    "Call.keywords>keyword(arg='elo_range',value=Name)",  # main.py:51260
+    "Call.keywords>keyword(arg='elo_unbounded',value=Compare)",  # main.py:21768
+    "Call.keywords>keyword(arg='ge',value=Constant)",  # main.py:50746
+    "Call.keywords>keyword(arg='hold',value=IfExp)",  # main.py:51208
+    "Call.keywords>keyword(arg='key',value=Lambda)",  # main.py:18388
+    "Call.keywords>keyword(arg='key',value=Name)",  # main.py:17367
+    "Call.keywords>keyword(arg='le',value=Constant)",  # main.py:50746
+    "Call.keywords>keyword(arg='live_p1_points',value=Constant)",  # main.py:21456
+    "Call.keywords>keyword(arg='live_p2_points',value=Constant)",  # main.py:21456
+    "Call.keywords>keyword(arg='margin_ms',value=Name)",  # main.py:19775
+    "Call.keywords>keyword(arg='match_age_seconds',value=Constant)",  # main.py:51789
+    "Call.keywords>keyword(arg='match_age_seconds',value=IfExp)",  # main.py:51201
+    "Call.keywords>keyword(arg='max_age_s',value=Name)",  # main.py:19776
+    "Call.keywords>keyword(arg='max_total_seconds',value=Name)",  # main.py:50869
+    "Call.keywords>keyword(arg='minutes',value=Name)",  # main.py:53301
+    "Call.keywords>keyword(arg='my_pid',value=Name)",  # main.py:21422
+    "Call.keywords>keyword(arg='my_pid',value=Subscript)",  # main.py:55421
+    "Call.keywords>keyword(arg='my_ready',value=Call)",  # main.py:51202
+    "Call.keywords>keyword(arg='now',value=Call)",  # main.py:19776
+    "Call.keywords>keyword(arg='now',value=Name)",  # main.py:53302
+    "Call.keywords>keyword(arg='only',value=Constant)",  # main.py:21642
+    "Call.keywords>keyword(arg='only',value=ListComp)",  # main.py:51371
+    "Call.keywords>keyword(arg='only',value=Name)",  # main.py:51529
+    "Call.keywords>keyword(arg='only',value=Subscript)",  # main.py:21661
+    "Call.keywords>keyword(arg='opponent_name',value=Subscript)",  # main.py:21525
+    "Call.keywords>keyword(arg='opponent_rating',value=Subscript)",  # main.py:21526
+    "Call.keywords>keyword(arg='opponent_ready',value=Constant)",  # main.py:21527
+    "Call.keywords>keyword(arg='opponent_ready',value=Name)",  # main.py:21560
+    "Call.keywords>keyword(arg='opponent_steam_id',value=Subscript)",  # main.py:21524
+    "Call.keywords>keyword(arg='opponents',value=List)",  # main.py:53558
+    "Call.keywords>keyword(arg='opponents',value=Name)",  # main.py:51198
+    "Call.keywords>keyword(arg='p1_pings',value=Subscript)",  # main.py:21400
+    "Call.keywords>keyword(arg='p1_pings_at',value=Subscript)",  # main.py:21401
+    "Call.keywords>keyword(arg='p1_series_wins',value=Constant)",  # main.py:21455
+    "Call.keywords>keyword(arg='p1_steam_id',value=IfExp)",  # main.py:21531
+    "Call.keywords>keyword(arg='p1_wins',value=Attribute)",  # main.py:21533
+    "Call.keywords>keyword(arg='p1_wins',value=IfExp)",  # main.py:21568
+    "Call.keywords>keyword(arg='p2_pings',value=Subscript)",  # main.py:21400
+    "Call.keywords>keyword(arg='p2_pings_at',value=Subscript)",  # main.py:21401
+    "Call.keywords>keyword(arg='p2_series_wins',value=Constant)",  # main.py:21455
+    "Call.keywords>keyword(arg='p2_steam_id',value=IfExp)",  # main.py:21532
+    "Call.keywords>keyword(arg='p2_wins',value=Attribute)",  # main.py:21534
+    "Call.keywords>keyword(arg='p2_wins',value=IfExp)",  # main.py:21569
+    "Call.keywords>keyword(arg='parents',value=List)",  # main.py:51364
+    "Call.keywords>keyword(arg='photon_region',value=BoolOp)",  # main.py:21562
+    "Call.keywords>keyword(arg='photon_region',value=Name)",  # main.py:21529
+    "Call.keywords>keyword(arg='player1_id',value=Name)",  # main.py:21454
+    "Call.keywords>keyword(arg='player2_id',value=Subscript)",  # main.py:21454
+    "Call.keywords>keyword(arg='player_id',value=Name)",  # main.py:29525
+    "Call.keywords>keyword(arg='player_id',value=Subscript)",  # main.py:52733
+    "Call.keywords>keyword(arg='player_ids',value=BinOp)",  # main.py:51492
+    "Call.keywords>keyword(arg='player_ids',value=List)",  # main.py:21650
+    "Call.keywords>keyword(arg='player_ids',value=ListComp)",  # main.py:51044
+    "Call.keywords>keyword(arg='player_ids',value=Name)",  # main.py:50951
+    "Call.keywords>keyword(arg='queue_count',value=Call)",  # main.py:50894
+    "Call.keywords>keyword(arg='queue_count',value=Constant)",  # main.py:51260
+    "Call.keywords>keyword(arg='queue_count',value=Name)",  # main.py:51590
+    "Call.keywords>keyword(arg='queue_size',value=Name)",  # main.py:21762
+    "Call.keywords>keyword(arg='rating',value=Call)",  # main.py:50971
+    "Call.keywords>keyword(arg='ready',value=Call)",  # main.py:50977
+    "Call.keywords>keyword(arg='reason',value=Constant)",  # main.py:52734
+    "Call.keywords>keyword(arg='reason',value=Name)",  # main.py:29526
+    "Call.keywords>keyword(arg='reference_id',value=Call)",  # main.py:29526
+    "Call.keywords>keyword(arg='region',value=Subscript)",  # main.py:50972
+    "Call.keywords>keyword(arg='regret_ms',value=Name)",  # main.py:19775
+    "Call.keywords>keyword(arg='request',value=Name)",  # main.py:21422
+    "Call.keywords>keyword(arg='require',value=Constant)",  # main.py:51036
+    "Call.keywords>keyword(arg='response_model',value=Name)",  # main.py:21075
+    "Call.keywords>keyword(arg='reverse',value=Constant)",  # main.py:53386
+    "Call.keywords>keyword(arg='room',value=Name)",  # main.py:51060
+    "Call.keywords>keyword(arg='room_id',value=Name)",  # main.py:21415
+    "Call.keywords>keyword(arg='room_name',value=Name)",  # main.py:21528
+    "Call.keywords>keyword(arg='room_region',value=Name)",  # main.py:51200
+    "Call.keywords>keyword(arg='rules',value=Call)",  # main.py:21535
+    "Call.keywords>keyword(arg='rules',value=Name)",  # main.py:21428
+    "Call.keywords>keyword(arg='rules_prop',value=Call)",  # main.py:21536
+    "Call.keywords>keyword(arg='seconds',value=Name)",  # main.py:21269
+    "Call.keywords>keyword(arg='separators',value=Tuple)",  # main.py:57834
+    "Call.keywords>keyword(arg='series_id',value=Call)",  # main.py:21530
+    "Call.keywords>keyword(arg='series_id',value=Name)",  # main.py:21563
+    "Call.keywords>keyword(arg='sort_keys',value=Constant)",  # main.py:57834
+    "Call.keywords>keyword(arg='status',value=Constant)",  # main.py:21146
+    "Call.keywords>keyword(arg='status',value=IfExp)",  # main.py:21392
+    "Call.keywords>keyword(arg='status_code',value=Constant)",  # main.py:17851
+    "Call.keywords>keyword(arg='steam_id',value=Subscript)",  # main.py:50969
+    "Call.keywords>keyword(arg='strict_team_ovt_queue',value=Name)",  # main.py:17940
+    "Call.keywords>keyword(arg='tags',value=List)",  # main.py:21075
+    "Call.keywords>keyword(arg='team_assigned',value=Name)",  # main.py:51196
+    "Call.keywords>keyword(arg='team_assigned',value=Subscript)",  # main.py:50973
+    "Call.keywords>keyword(arg='teammates',value=List)",  # main.py:53557
+    "Call.keywords>keyword(arg='teammates',value=Name)",  # main.py:51197
+    "Call.keywords>keyword(arg='tzinfo',value=Attribute)",  # main.py:19764
+    "Call.keywords>keyword(arg='using_fallback_rating',value=Name)",  # main.py:50974
+    "Call.keywords>keyword(arg='wait_time',value=Constant)",  # main.py:21595
+    "Call.keywords>keyword(arg='wait_time',value=Name)",  # main.py:21295
+    "Call.keywords>keyword(arg='window',value=Name)",  # main.py:53302
     "Compare.comparators>Attribute(value=Name,attr='map',ctx=Load)",  # region_pick.py:83
-    'Compare.comparators>BinOp(left=Constant,op=Mult,right=Constant)',  # main.py:55015
-    'Compare.comparators>BinOp(left=Name,op=Mult,right=Constant)',  # main.py:21248
-    'Compare.comparators>Call(func=Attribute,args=[Attribute],keywords=[])',  # main.py:66552
-    'Compare.comparators>Call(func=Attribute,args=[],keywords=[])',  # main.py:58698
-    'Compare.comparators>Call(func=Name,args=[BoolOp],keywords=[])',  # main.py:66622
-    'Compare.comparators>Call(func=Name,args=[GeneratorExp],keywords=[keyword])',  # main.py:66826
-    'Compare.comparators>Call(func=Name,args=[Name],keywords=[])',  # main.py:51246
-    'Compare.comparators>Call(func=Name,args=[Subscript],keywords=[])',  # main.py:51406
-    'Compare.comparators>Constant(value=NoneType)',  # main.py:17324
-    'Compare.comparators>Constant(value=bool)',  # main.py:21450
-    'Compare.comparators>Constant(value=float)',  # main.py:66745
-    'Compare.comparators>Constant(value=int)',  # main.py:21151
-    'Compare.comparators>Constant(value=str)',  # main.py:17334
-    'Compare.comparators>Name(id=str,ctx=Load)',  # main.py:17320
-    'Compare.comparators>Subscript(value=Name,slice=Constant,ctx=Load)',  # main.py:19547
-    'Compare.comparators>Tuple(elts=[Constant],ctx=Load)',  # main.py:17809
-    'Compare.comparators>Tuple(elts=[Name],ctx=Load)',  # main.py:53361
+    'Compare.comparators>BinOp(left=Constant,op=Mult,right=Constant)',  # main.py:55141
+    'Compare.comparators>BinOp(left=Name,op=Mult,right=Constant)',  # main.py:21289
+    'Compare.comparators>Call(func=Attribute,args=[Attribute],keywords=[])',  # main.py:66675
+    'Compare.comparators>Call(func=Attribute,args=[],keywords=[])',  # main.py:58821
+    'Compare.comparators>Call(func=Name,args=[BoolOp],keywords=[])',  # main.py:66745
+    'Compare.comparators>Call(func=Name,args=[GeneratorExp],keywords=[keyword])',  # main.py:66949
+    'Compare.comparators>Call(func=Name,args=[Name],keywords=[])',  # main.py:51372
+    'Compare.comparators>Call(func=Name,args=[Subscript],keywords=[])',  # main.py:51532
+    'Compare.comparators>Constant(value=NoneType)',  # main.py:17365
+    'Compare.comparators>Constant(value=bool)',  # main.py:21491
+    'Compare.comparators>Constant(value=float)',  # main.py:66868
+    'Compare.comparators>Constant(value=int)',  # main.py:21192
+    'Compare.comparators>Constant(value=str)',  # main.py:17375
+    'Compare.comparators>Name(id=str,ctx=Load)',  # main.py:17361
+    'Compare.comparators>Subscript(value=Name,slice=Constant,ctx=Load)',  # main.py:19588
+    'Compare.comparators>Tuple(elts=[Constant],ctx=Load)',  # main.py:17850
+    'Compare.comparators>Tuple(elts=[Name],ctx=Load)',  # main.py:53487
     "Compare.left>Attribute(value=Name,attr='home',ctx=Load)",  # region_pick.py:83
-    "Compare.left>Attribute(value=Name,attr='id',ctx=Load)",  # main.py:29481
+    "Compare.left>Attribute(value=Name,attr='id',ctx=Load)",  # main.py:29522
     "Compare.left>Attribute(value=Name,attr='map',ctx=Load)",  # region_pick.py:211
-    "Compare.left>Attribute(value=Name,attr='player1_id',ctx=Load)",  # main.py:21490
-    "Compare.left>Attribute(value=Name,attr='tzinfo',ctx=Load)",  # main.py:19722
-    'Compare.left>Await(value=Call)',  # main.py:21335
+    "Compare.left>Attribute(value=Name,attr='player1_id',ctx=Load)",  # main.py:21531
+    "Compare.left>Attribute(value=Name,attr='tzinfo',ctx=Load)",  # main.py:19763
+    'Compare.left>Await(value=Call)',  # main.py:21376
     'Compare.left>BinOp(left=BinOp,op=Sub,right=Call)',  # match_report_window.py:74
     'Compare.left>BinOp(left=Constant,op=Mult,right=Name)',  # region_pick.py:248
-    'Compare.left>BinOp(left=Name,op=Sub,right=Name)',  # main.py:66745
-    'Compare.left>BinOp(left=Name,op=Sub,right=Subscript)',  # main.py:19655
-    'Compare.left>BoolOp(op=Or,values=[Constant|Subscript])',  # main.py:53172
-    'Compare.left>Call(func=Attribute,args=[Constant],keywords=[])',  # main.py:57696
-    'Compare.left>Call(func=Attribute,args=[],keywords=[])',  # main.py:51107
+    'Compare.left>BinOp(left=Name,op=Sub,right=Name)',  # main.py:66868
+    'Compare.left>BinOp(left=Name,op=Sub,right=Subscript)',  # main.py:19696
+    'Compare.left>BoolOp(op=Or,values=[Constant|Subscript])',  # main.py:53298
+    'Compare.left>Call(func=Attribute,args=[Constant],keywords=[])',  # main.py:57822
+    'Compare.left>Call(func=Attribute,args=[],keywords=[])',  # main.py:51233
     'Compare.left>Call(func=Name,args=[Attribute],keywords=[])',  # region_pick.py:261
-    'Compare.left>Call(func=Name,args=[BoolOp],keywords=[])',  # main.py:55095
-    'Compare.left>Call(func=Name,args=[Call],keywords=[])',  # main.py:57741
-    'Compare.left>Call(func=Name,args=[Name],keywords=[])',  # main.py:17809
-    'Compare.left>Call(func=Name,args=[Subscript],keywords=[])',  # main.py:17838
-    'Compare.left>Constant(value=str)',  # main.py:19624
-    'Compare.left>Name(id=str,ctx=Load)',  # main.py:17320
-    'Compare.left>Subscript(value=Name,slice=Constant,ctx=Load)',  # main.py:17858
-    'Compare.ops>Eq()',  # main.py:17334
-    'Compare.ops>Gt()',  # main.py:21248
-    'Compare.ops>GtE()',  # main.py:50267
-    'Compare.ops>In()',  # main.py:17809
-    'Compare.ops>Is()',  # main.py:17741
-    'Compare.ops>IsNot()',  # main.py:17324
-    'Compare.ops>Lt()',  # main.py:19549
-    'Compare.ops>LtE()',  # main.py:29456
-    'Compare.ops>NotEq()',  # main.py:17859
-    'Compare.ops>NotIn()',  # main.py:17320
-    'Dict.keys>Constant(value=str)',  # main.py:4492
-    'Dict.keys>Name(id=str,ctx=Load)',  # main.py:51304
-    "Dict.values>Attribute(value=Name,attr='HOLD_CAPS_TOKEN',ctx=Load)",  # main.py:51052
+    'Compare.left>Call(func=Name,args=[BoolOp],keywords=[])',  # main.py:55221
+    'Compare.left>Call(func=Name,args=[Call],keywords=[])',  # main.py:57867
+    'Compare.left>Call(func=Name,args=[Name],keywords=[])',  # main.py:17850
+    'Compare.left>Call(func=Name,args=[Subscript],keywords=[])',  # main.py:17879
+    'Compare.left>Constant(value=str)',  # main.py:19665
+    'Compare.left>Name(id=str,ctx=Load)',  # main.py:17361
+    'Compare.left>Subscript(value=Name,slice=Constant,ctx=Load)',  # main.py:17899
+    'Compare.ops>Eq()',  # main.py:17375
+    'Compare.ops>Gt()',  # main.py:21289
+    'Compare.ops>GtE()',  # main.py:50393
+    'Compare.ops>In()',  # main.py:17850
+    'Compare.ops>Is()',  # main.py:17782
+    'Compare.ops>IsNot()',  # main.py:17365
+    'Compare.ops>Lt()',  # main.py:19590
+    'Compare.ops>LtE()',  # main.py:29497
+    'Compare.ops>NotEq()',  # main.py:17900
+    'Compare.ops>NotIn()',  # main.py:17361
+    'Dict.keys>Constant(value=str)',  # main.py:4497
+    'Dict.keys>Name(id=str,ctx=Load)',  # main.py:51430
+    "Dict.values>Attribute(value=Name,attr='HOLD_CAPS_TOKEN',ctx=Load)",  # main.py:51178
     "Dict.values>Attribute(value=Name,attr='id',ctx=Load)",  # region_pick.py:222
-    'Dict.values>BinOp(left=Name,op=Add,right=Name)',  # main.py:51615
-    'Dict.values>BoolOp(op=And,values=[Compare])',  # main.py:66433
-    'Dict.values>BoolOp(op=Or,values=[Constant|Name])',  # main.py:58733
-    'Dict.values>Call(func=Attribute,args=[Constant],keywords=[])',  # main.py:51304
-    'Dict.values>Call(func=Name,args=[Call],keywords=[])',  # main.py:51476
-    'Dict.values>Call(func=Name,args=[Name],keywords=[])',  # main.py:17879
-    'Dict.values>Call(func=Name,args=[Subscript],keywords=[])',  # main.py:19725
-    'Dict.values>Compare(left=Name,ops=[Eq],comparators=[Subscript])',  # main.py:66432
-    'Dict.values>Compare(left=Subscript,ops=[Eq],comparators=[Name])',  # main.py:66452
-    'Dict.values>Compare(left=Subscript,ops=[IsNot],comparators=[Constant])',  # main.py:50960
+    'Dict.values>BinOp(left=Name,op=Add,right=Name)',  # main.py:51741
+    'Dict.values>BoolOp(op=And,values=[Compare])',  # main.py:66556
+    'Dict.values>BoolOp(op=Or,values=[Constant|Name])',  # main.py:58856
+    'Dict.values>Call(func=Attribute,args=[Constant],keywords=[])',  # main.py:51430
+    'Dict.values>Call(func=Name,args=[Call],keywords=[])',  # main.py:51602
+    'Dict.values>Call(func=Name,args=[Name],keywords=[])',  # main.py:17920
+    'Dict.values>Call(func=Name,args=[Subscript],keywords=[])',  # main.py:19766
+    'Dict.values>Compare(left=Name,ops=[Eq],comparators=[Subscript])',  # main.py:66555
+    'Dict.values>Compare(left=Subscript,ops=[Eq],comparators=[Name])',  # main.py:66575
+    'Dict.values>Compare(left=Subscript,ops=[IsNot],comparators=[Constant])',  # main.py:51086
     'Dict.values>Constant(value=NoneType)',  # region_pick.py:227
-    'Dict.values>Constant(value=bool)',  # main.py:57796
-    'Dict.values>Constant(value=int)',  # main.py:54968
-    'Dict.values>Constant(value=str)',  # main.py:54968
+    'Dict.values>Constant(value=bool)',  # main.py:57922
+    'Dict.values>Constant(value=int)',  # main.py:55094
+    'Dict.values>Constant(value=str)',  # main.py:55094
     'Dict.values>IfExp(test=Attribute,body=Call,orelse=Constant)',  # region_pick.py:223
-    'Dict.values>IfExp(test=Compare,body=Call,orelse=Constant)',  # main.py:19726
-    'Dict.values>IfExp(test=Name,body=Constant,orelse=Constant)',  # main.py:66655
-    'Dict.values>IfExp(test=Subscript,body=Call,orelse=Constant)',  # main.py:66453
-    'Dict.values>JoinedStr(values=[Constant|FormattedValue])',  # main.py:19737
+    'Dict.values>IfExp(test=Compare,body=Call,orelse=Constant)',  # main.py:19767
+    'Dict.values>IfExp(test=Name,body=Constant,orelse=Constant)',  # main.py:66778
+    'Dict.values>IfExp(test=Subscript,body=Call,orelse=Constant)',  # main.py:66576
+    'Dict.values>JoinedStr(values=[Constant|FormattedValue])',  # main.py:19778
     'Dict.values>List(elts=[],ctx=Load)',  # region_pick.py:229
-    'Dict.values>ListComp(elt=Call,generators=[comprehension])',  # main.py:53312
-    'Dict.values>ListComp(elt=Dict,generators=[comprehension])',  # main.py:66448
-    'Dict.values>ListComp(elt=Subscript,generators=[comprehension])',  # main.py:51595
-    'Dict.values>Name(id=str,ctx=Load)',  # main.py:4492
-    'Dict.values>Subscript(value=BoolOp,slice=Slice,ctx=Load)',  # main.py:55302
-    'Dict.values>Subscript(value=Name,slice=Constant,ctx=Load)',  # main.py:21270
-    'Dict.values>Subscript(value=Subscript,slice=Constant,ctx=Load)',  # main.py:55301
-    'Dict.values>UnaryOp(op=USub,operand=Constant)',  # main.py:66728
-    'DictComp.generators>comprehension(target=Name,iter=Name,ifs=[],is_async=0)',  # main.py:17837
-    'DictComp.generators>comprehension(target=Tuple,iter=Call,ifs=[],is_async=0)',  # main.py:53310
-    "DictComp.key>Attribute(value=Name,attr='id',ctx=Load)",  # main.py:29500
+    'Dict.values>ListComp(elt=Call,generators=[comprehension])',  # main.py:53438
+    'Dict.values>ListComp(elt=Dict,generators=[comprehension])',  # main.py:66571
+    'Dict.values>ListComp(elt=Subscript,generators=[comprehension])',  # main.py:51721
+    'Dict.values>Name(id=str,ctx=Load)',  # main.py:4497
+    'Dict.values>Subscript(value=BoolOp,slice=Slice,ctx=Load)',  # main.py:55428
+    'Dict.values>Subscript(value=Name,slice=Constant,ctx=Load)',  # main.py:21311
+    'Dict.values>Subscript(value=Subscript,slice=Constant,ctx=Load)',  # main.py:55427
+    'Dict.values>UnaryOp(op=USub,operand=Constant)',  # main.py:66851
+    'DictComp.generators>comprehension(target=Name,iter=Name,ifs=[],is_async=0)',  # main.py:17878
+    'DictComp.generators>comprehension(target=Tuple,iter=Call,ifs=[],is_async=0)',  # main.py:53436
+    "DictComp.key>Attribute(value=Name,attr='id',ctx=Load)",  # main.py:29541
     "DictComp.key>Attribute(value=Name,attr='region',ctx=Load)",  # tournaments.py:309
-    'DictComp.key>Call(func=Name,args=[Name],keywords=[])',  # main.py:53310
-    'DictComp.key>Call(func=Name,args=[Subscript],keywords=[])',  # main.py:17837
-    'DictComp.key>Subscript(value=Name,slice=Constant,ctx=Load)',  # main.py:51519
+    'DictComp.key>Call(func=Name,args=[Name],keywords=[])',  # main.py:53436
+    'DictComp.key>Call(func=Name,args=[Subscript],keywords=[])',  # main.py:17878
+    'DictComp.key>Subscript(value=Name,slice=Constant,ctx=Load)',  # main.py:51645
     'DictComp.value>Call(func=Name,args=[Attribute],keywords=[])',  # tournaments.py:309
-    'DictComp.value>Name(id=str,ctx=Load)',  # main.py:17837
-    'DictComp.value>Subscript(value=Name,slice=Constant,ctx=Load)',  # main.py:51519
-    'DictComp.value>Tuple(elts=[Constant],ctx=Load)',  # main.py:57817
-    'ExceptHandler.body>Assign(targets=[Name],value=Constant,type_comment=-)',  # main.py:19721
-    'ExceptHandler.body>Assign(targets=[Name],value=Name,type_comment=-)',  # main.py:76286
-    'ExceptHandler.body>Assign(targets=[Tuple],value=Tuple,type_comment=-)',  # main.py:19737
-    'ExceptHandler.body>Expr(value=Await)',  # main.py:17808
-    'ExceptHandler.body>Expr(value=Call)',  # main.py:19663
-    'ExceptHandler.body>If(test=BoolOp,body=[Expr|Raise],orelse=[])',  # main.py:76287
-    'ExceptHandler.body>If(test=Compare,body=[Raise],orelse=[])',  # main.py:17809
-    'ExceptHandler.body>If(test=UnaryOp,body=[Expr|Raise],orelse=[])',  # main.py:76272
-    'ExceptHandler.body>Pass()',  # main.py:4494
-    'ExceptHandler.body>Raise(exc=-,cause=-)',  # main.py:17811
-    'ExceptHandler.body>Return(value=Constant)',  # main.py:57743
-    'ExceptHandler.body>Return(value=Tuple)',  # main.py:6649
-    'ExceptHandler.type>Name(id=str,ctx=Load)',  # main.py:4493
-    'Expr.value>Await(value=Call)',  # main.py:4488
-    'Expr.value>Call(func=Attribute,args=[BoolOp],keywords=[])',  # main.py:57841
-    'Expr.value>Call(func=Attribute,args=[Call],keywords=[])',  # main.py:29483
-    'Expr.value>Call(func=Attribute,args=[Dict],keywords=[])',  # main.py:19725
-    'Expr.value>Call(func=Attribute,args=[GeneratorExp],keywords=[])',  # main.py:17821
-    'Expr.value>Call(func=Attribute,args=[List],keywords=[])',  # main.py:51581
-    'Expr.value>Call(func=Attribute,args=[List|Name],keywords=[])',  # main.py:29482
-    'Expr.value>Call(func=Attribute,args=[Name],keywords=[])',  # main.py:17325
-    'Expr.value>Call(func=Attribute,args=[Subscript],keywords=[])',  # main.py:50868
-    'Expr.value>Call(func=Attribute,args=[Tuple],keywords=[])',  # main.py:58674
-    'Expr.value>Call(func=Attribute,args=[],keywords=[keyword])',  # main.py:53258
-    'Expr.value>Call(func=Name,args=[BinOp],keywords=[])',  # main.py:19745
-    'Expr.value>Call(func=Name,args=[JoinedStr],keywords=[])',  # main.py:19663
-    'Expr.value>Call(func=Name,args=[Name],keywords=[])',  # main.py:21062
-    'Expr.value>Constant(value=str)',  # main.py:4442
-    'For.body>Assign(targets=[Name],value=Await,type_comment=-)',  # main.py:18422
-    'For.body>Assign(targets=[Name],value=BoolOp,type_comment=-)',  # main.py:19724
-    'For.body>Assign(targets=[Name],value=Call,type_comment=-)',  # main.py:17796
+    'DictComp.value>Name(id=str,ctx=Load)',  # main.py:17878
+    'DictComp.value>Subscript(value=Name,slice=Constant,ctx=Load)',  # main.py:51645
+    'DictComp.value>Tuple(elts=[Constant],ctx=Load)',  # main.py:57943
+    'ExceptHandler.body>Assign(targets=[Name],value=Constant,type_comment=-)',  # main.py:19762
+    'ExceptHandler.body>Assign(targets=[Name],value=Name,type_comment=-)',  # main.py:75319
+    'ExceptHandler.body>Assign(targets=[Tuple],value=Tuple,type_comment=-)',  # main.py:19778
+    'ExceptHandler.body>Expr(value=Await)',  # main.py:17849
+    'ExceptHandler.body>Expr(value=Call)',  # main.py:19704
+    'ExceptHandler.body>If(test=BoolOp,body=[Expr|Raise],orelse=[])',  # main.py:75320
+    'ExceptHandler.body>If(test=Compare,body=[Raise],orelse=[])',  # main.py:17850
+    'ExceptHandler.body>If(test=UnaryOp,body=[Expr|Raise],orelse=[])',  # main.py:75305
+    'ExceptHandler.body>Pass()',  # main.py:4499
+    'ExceptHandler.body>Raise(exc=-,cause=-)',  # main.py:17852
+    'ExceptHandler.body>Return(value=Constant)',  # main.py:57869
+    'ExceptHandler.body>Return(value=Tuple)',  # main.py:6658
+    'ExceptHandler.type>Name(id=str,ctx=Load)',  # main.py:4498
+    'Expr.value>Await(value=Call)',  # main.py:4493
+    'Expr.value>Call(func=Attribute,args=[BoolOp],keywords=[])',  # main.py:57967
+    'Expr.value>Call(func=Attribute,args=[Call],keywords=[])',  # main.py:29524
+    'Expr.value>Call(func=Attribute,args=[Dict],keywords=[])',  # main.py:19766
+    'Expr.value>Call(func=Attribute,args=[GeneratorExp],keywords=[])',  # main.py:17862
+    'Expr.value>Call(func=Attribute,args=[List],keywords=[])',  # main.py:51707
+    'Expr.value>Call(func=Attribute,args=[List|Name],keywords=[])',  # main.py:29523
+    'Expr.value>Call(func=Attribute,args=[Name],keywords=[])',  # main.py:17366
+    'Expr.value>Call(func=Attribute,args=[Subscript],keywords=[])',  # main.py:50994
+    'Expr.value>Call(func=Attribute,args=[Tuple],keywords=[])',  # main.py:58797
+    'Expr.value>Call(func=Attribute,args=[],keywords=[keyword])',  # main.py:53384
+    'Expr.value>Call(func=Name,args=[BinOp],keywords=[])',  # main.py:19786
+    'Expr.value>Call(func=Name,args=[JoinedStr],keywords=[])',  # main.py:19704
+    'Expr.value>Call(func=Name,args=[Name],keywords=[])',  # main.py:21103
+    'Expr.value>Constant(value=str)',  # main.py:4447
+    'For.body>Assign(targets=[Name],value=Await,type_comment=-)',  # main.py:18463
+    'For.body>Assign(targets=[Name],value=BoolOp,type_comment=-)',  # main.py:19765
+    'For.body>Assign(targets=[Name],value=Call,type_comment=-)',  # main.py:17837
     'For.body>Assign(targets=[Name],value=Compare,type_comment=-)',  # region_pick.py:249
-    'For.body>Assign(targets=[Name],value=Constant,type_comment=-)',  # main.py:55251
-    'For.body>Assign(targets=[Name],value=Dict,type_comment=-)',  # main.py:21592
-    'For.body>Assign(targets=[Name],value=IfExp,type_comment=-)',  # main.py:19624
-    'For.body>Assign(targets=[Name],value=ListComp,type_comment=-)',  # main.py:55208
-    'For.body>Assign(targets=[Name],value=Subscript,type_comment=-)',  # main.py:21588
-    'For.body>Assign(targets=[Name],value=Tuple,type_comment=-)',  # main.py:18427
+    'For.body>Assign(targets=[Name],value=Constant,type_comment=-)',  # main.py:55377
+    'For.body>Assign(targets=[Name],value=Dict,type_comment=-)',  # main.py:21633
+    'For.body>Assign(targets=[Name],value=IfExp,type_comment=-)',  # main.py:19665
+    'For.body>Assign(targets=[Name],value=ListComp,type_comment=-)',  # main.py:55334
+    'For.body>Assign(targets=[Name],value=Subscript,type_comment=-)',  # main.py:21629
+    'For.body>Assign(targets=[Name],value=Tuple,type_comment=-)',  # main.py:18468
     'For.body>Assign(targets=[Subscript],value=Name,type_comment=-)',  # region_pick.py:58
-    'For.body>Assign(targets=[Subscript],value=Subscript,type_comment=-)',  # main.py:51306
-    'For.body>Assign(targets=[Subscript],value=Tuple,type_comment=-)',  # main.py:19708
-    'For.body>Assign(targets=[Tuple],value=Await,type_comment=-)',  # main.py:58672
-    'For.body>Assign(targets=[Tuple],value=Call,type_comment=-)',  # main.py:19716
+    'For.body>Assign(targets=[Subscript],value=Subscript,type_comment=-)',  # main.py:51432
+    'For.body>Assign(targets=[Subscript],value=Tuple,type_comment=-)',  # main.py:19749
+    'For.body>Assign(targets=[Tuple],value=Await,type_comment=-)',  # main.py:58795
+    'For.body>Assign(targets=[Tuple],value=Call,type_comment=-)',  # main.py:19757
     'For.body>AugAssign(target=Name,op=BitAnd,value=Call)',  # region_pick.py:239
-    'For.body>Break()',  # main.py:55252
-    'For.body>Expr(value=Await)',  # main.py:17954
-    'For.body>Expr(value=Call)',  # main.py:19725
-    'For.body>For(target=Tuple,iter=List,body=[Expr],orelse=[],type_comment=-)',  # main.py:21660
-    'For.body>If(test=BoolOp,body=[Assign],orelse=[])',  # main.py:19722
-    'For.body>If(test=BoolOp,body=[Assign|Continue|Expr],orelse=[])',  # main.py:21621
-    'For.body>If(test=BoolOp,body=[Assign|Continue|Expr|If],orelse=[])',  # main.py:66796
-    'For.body>If(test=BoolOp,body=[Assign|If],orelse=[])',  # main.py:53249
-    'For.body>If(test=BoolOp,body=[Continue],orelse=[])',  # main.py:53263
-    'For.body>If(test=BoolOp,body=[Expr],orelse=[Expr])',  # main.py:57840
-    'For.body>If(test=BoolOp,body=[Expr],orelse=[If])',  # main.py:51498
-    'For.body>If(test=BoolOp,body=[Expr],orelse=[])',  # main.py:17324
-    'For.body>If(test=BoolOp,body=[Return],orelse=[])',  # main.py:17858
-    'For.body>If(test=Call,body=[Assign],orelse=[])',  # main.py:57692
-    'For.body>If(test=Call,body=[AugAssign],orelse=[])',  # main.py:19729
-    'For.body>If(test=Call,body=[Try],orelse=[])',  # main.py:19717
-    'For.body>If(test=Compare,body=[Assign],orelse=[Assign])',  # main.py:52575
-    'For.body>If(test=Compare,body=[Assign],orelse=[])',  # main.py:66793
-    'For.body>If(test=Compare,body=[Assign|Break],orelse=[])',  # main.py:17799
-    'For.body>If(test=Compare,body=[Assign|Continue|Expr],orelse=[])',  # main.py:55228
-    'For.body>If(test=Compare,body=[Assign|Continue|Expr|If],orelse=[])',  # main.py:21642
+    'For.body>Break()',  # main.py:55378
+    'For.body>Expr(value=Await)',  # main.py:17995
+    'For.body>Expr(value=Call)',  # main.py:19766
+    'For.body>For(target=Tuple,iter=List,body=[Expr],orelse=[],type_comment=-)',  # main.py:21701
+    'For.body>If(test=BoolOp,body=[Assign],orelse=[])',  # main.py:19763
+    'For.body>If(test=BoolOp,body=[Assign|Continue|Expr],orelse=[])',  # main.py:21662
+    'For.body>If(test=BoolOp,body=[Assign|Continue|Expr|If],orelse=[])',  # main.py:66919
+    'For.body>If(test=BoolOp,body=[Assign|If],orelse=[])',  # main.py:53375
+    'For.body>If(test=BoolOp,body=[Continue],orelse=[])',  # main.py:53389
+    'For.body>If(test=BoolOp,body=[Expr],orelse=[Expr])',  # main.py:57966
+    'For.body>If(test=BoolOp,body=[Expr],orelse=[If])',  # main.py:51624
+    'For.body>If(test=BoolOp,body=[Expr],orelse=[])',  # main.py:17365
+    'For.body>If(test=BoolOp,body=[Return],orelse=[])',  # main.py:17899
+    'For.body>If(test=Call,body=[Assign],orelse=[])',  # main.py:57818
+    'For.body>If(test=Call,body=[AugAssign],orelse=[])',  # main.py:19770
+    'For.body>If(test=Call,body=[Try],orelse=[])',  # main.py:19758
+    'For.body>If(test=Compare,body=[Assign],orelse=[Assign])',  # main.py:52701
+    'For.body>If(test=Compare,body=[Assign],orelse=[])',  # main.py:66916
+    'For.body>If(test=Compare,body=[Assign|Break],orelse=[])',  # main.py:17840
+    'For.body>If(test=Compare,body=[Assign|Continue|Expr],orelse=[])',  # main.py:55354
+    'For.body>If(test=Compare,body=[Assign|Continue|Expr|If],orelse=[])',  # main.py:21683
     'For.body>If(test=Compare,body=[AugAssign],orelse=[])',  # match_report_window.py:63
-    'For.body>If(test=Compare,body=[AugAssign|If],orelse=[AugAssign|Expr])',  # main.py:52601
-    'For.body>If(test=Compare,body=[Break],orelse=[])',  # main.py:21602
-    'For.body>If(test=Compare,body=[Continue],orelse=[])',  # main.py:17861
-    'For.body>If(test=Compare,body=[Continue|If],orelse=[])',  # main.py:18423
-    'For.body>If(test=Compare,body=[Expr],orelse=[If])',  # main.py:17334
-    'For.body>If(test=Compare,body=[Expr],orelse=[])',  # main.py:17327
-    'For.body>If(test=Compare,body=[Expr|Raise],orelse=[])',  # main.py:21576
-    'For.body>If(test=Compare,body=[Expr|Return],orelse=[])',  # main.py:21573
-    'For.body>If(test=Compare,body=[Raise],orelse=[])',  # main.py:18349
-    'For.body>If(test=Compare,body=[Return],orelse=[])',  # main.py:53235
-    'For.body>If(test=Name,body=[Assign],orelse=[])',  # main.py:19625
-    'For.body>If(test=Name,body=[Expr],orelse=[])',  # main.py:58673
+    'For.body>If(test=Compare,body=[AugAssign|If],orelse=[AugAssign|Expr])',  # main.py:52727
+    'For.body>If(test=Compare,body=[Break],orelse=[])',  # main.py:21643
+    'For.body>If(test=Compare,body=[Continue],orelse=[])',  # main.py:17902
+    'For.body>If(test=Compare,body=[Continue|If],orelse=[])',  # main.py:18464
+    'For.body>If(test=Compare,body=[Expr],orelse=[If])',  # main.py:17375
+    'For.body>If(test=Compare,body=[Expr],orelse=[])',  # main.py:17368
+    'For.body>If(test=Compare,body=[Expr|Raise],orelse=[])',  # main.py:21617
+    'For.body>If(test=Compare,body=[Expr|Return],orelse=[])',  # main.py:21614
+    'For.body>If(test=Compare,body=[Raise],orelse=[])',  # main.py:18390
+    'For.body>If(test=Compare,body=[Return],orelse=[])',  # main.py:53361
+    'For.body>If(test=Name,body=[Assign],orelse=[])',  # main.py:19666
+    'For.body>If(test=Name,body=[Expr],orelse=[])',  # main.py:58796
     'For.body>If(test=UnaryOp,body=[Assign],orelse=[])',  # region_pick.py:198
-    'For.body>If(test=UnaryOp,body=[Continue],orelse=[])',  # main.py:53246
-    'For.body>Return(value=Call)',  # main.py:21692
-    'For.body>Return(value=Tuple)',  # main.py:18430
+    'For.body>If(test=UnaryOp,body=[Continue],orelse=[])',  # main.py:53372
+    'For.body>Return(value=Call)',  # main.py:21733
+    'For.body>Return(value=Tuple)',  # main.py:18471
     'For.iter>BoolOp(op=Or,values=[Name|Tuple])',  # region_pick.py:197
-    'For.iter>Call(func=Attribute,args=[],keywords=[])',  # main.py:19706
+    'For.iter>Call(func=Attribute,args=[],keywords=[])',  # main.py:19747
     'For.iter>Call(func=Name,args=[BinOp],keywords=[])',  # region_pick.py:244
-    'For.iter>Call(func=Name,args=[BinOp|Constant],keywords=[])',  # main.py:21565
-    'For.iter>Call(func=Name,args=[Name],keywords=[])',  # main.py:66894
-    'For.iter>Call(func=Name,args=[Name],keywords=[keyword])',  # main.py:17326
-    'For.iter>Call(func=Name,args=[SetComp],keywords=[keyword])',  # main.py:18345
-    'For.iter>List(elts=[Tuple],ctx=Load)',  # main.py:21660
-    'For.iter>Name(id=str,ctx=Load)',  # main.py:17323
+    'For.iter>Call(func=Name,args=[BinOp|Constant],keywords=[])',  # main.py:21606
+    'For.iter>Call(func=Name,args=[Name],keywords=[])',  # main.py:67017
+    'For.iter>Call(func=Name,args=[Name],keywords=[keyword])',  # main.py:17367
+    'For.iter>Call(func=Name,args=[SetComp],keywords=[keyword])',  # main.py:18386
+    'For.iter>List(elts=[Tuple],ctx=Load)',  # main.py:21701
+    'For.iter>Name(id=str,ctx=Load)',  # main.py:17364
     'For.iter>Subscript(value=Name,slice=Slice,ctx=Load)',  # region_pick.py:238
-    'For.iter>Tuple(elts=[Constant],ctx=Load)',  # main.py:57690
-    'For.iter>Tuple(elts=[Name],ctx=Load)',  # main.py:51580
-    'For.orelse>Expr(value=Await)',  # main.py:21706
-    'For.orelse>Expr(value=Call)',  # main.py:21707
-    'For.orelse>Raise(exc=Call,cause=-)',  # main.py:21709
-    'For.target>Name(id=str,ctx=Store)',  # main.py:17323
-    'For.target>Tuple(elts=[Name],ctx=Store)',  # main.py:18345
-    'For.target>Tuple(elts=[Name|Tuple],ctx=Store)',  # main.py:57838
-    'FormattedValue.format_spec>JoinedStr(values=[Constant])',  # main.py:51462
-    "FormattedValue.value>Attribute(value=Call,attr='__name__',ctx=Load)",  # main.py:19663
-    'FormattedValue.value>Call(func=Attribute,args=[Constant],keywords=[])',  # main.py:19743
-    'FormattedValue.value>Call(func=Name,args=[Call],keywords=[])',  # main.py:19743
+    'For.iter>Tuple(elts=[Constant],ctx=Load)',  # main.py:57816
+    'For.iter>Tuple(elts=[Name],ctx=Load)',  # main.py:51706
+    'For.orelse>Expr(value=Await)',  # main.py:21747
+    'For.orelse>Expr(value=Call)',  # main.py:21748
+    'For.orelse>Raise(exc=Call,cause=-)',  # main.py:21750
+    'For.target>Name(id=str,ctx=Store)',  # main.py:17364
+    'For.target>Tuple(elts=[Name],ctx=Store)',  # main.py:18386
+    'For.target>Tuple(elts=[Name|Tuple],ctx=Store)',  # main.py:57964
+    'FormattedValue.format_spec>JoinedStr(values=[Constant])',  # main.py:51588
+    "FormattedValue.value>Attribute(value=Call,attr='__name__',ctx=Load)",  # main.py:19704
+    'FormattedValue.value>Call(func=Attribute,args=[Constant],keywords=[])',  # main.py:19784
+    'FormattedValue.value>Call(func=Name,args=[Call],keywords=[])',  # main.py:19784
     'FormattedValue.value>Call(func=Name,args=[Constant],keywords=[])',  # match_hold.py:359
-    'FormattedValue.value>Call(func=Name,args=[Name],keywords=[])',  # main.py:39068
-    'FormattedValue.value>IfExp(test=Name,body=Constant,orelse=Constant)',  # main.py:50788
-    'FormattedValue.value>ListComp(elt=Subscript,generators=[comprehension])',  # main.py:51467
-    'FormattedValue.value>Name(id=str,ctx=Load)',  # main.py:17321
-    'FormattedValue.value>Subscript(value=Attribute,slice=Slice,ctx=Load)',  # main.py:21353
-    'FormattedValue.value>Subscript(value=Name,slice=Constant,ctx=Load)',  # main.py:21284
+    'FormattedValue.value>Call(func=Name,args=[Name],keywords=[])',  # main.py:39109
+    'FormattedValue.value>IfExp(test=Name,body=Constant,orelse=Constant)',  # main.py:50914
+    'FormattedValue.value>ListComp(elt=Subscript,generators=[comprehension])',  # main.py:51593
+    'FormattedValue.value>Name(id=str,ctx=Load)',  # main.py:17362
+    'FormattedValue.value>Subscript(value=Attribute,slice=Slice,ctx=Load)',  # main.py:21394
+    'FormattedValue.value>Subscript(value=Name,slice=Constant,ctx=Load)',  # main.py:21325
     'FormattedValue.value>Subscript(value=Name,slice=Name,ctx=Load)',  # match_hold.py:355
-    'FunctionDef.args>arguments(posonlyargs=[],args=[],vararg=-,kwonlyargs=[],kw_defaults=[],kwarg=-,defaults=[])',  # main.py:55668
-    'FunctionDef.args>arguments(posonlyargs=[],args=[arg],vararg=-,kwonlyargs=[],kw_defaults=[],kwarg=-,defaults=[Constant])',  # main.py:19614
-    'FunctionDef.args>arguments(posonlyargs=[],args=[arg],vararg=-,kwonlyargs=[],kw_defaults=[],kwarg=-,defaults=[])',  # main.py:6645
+    'FunctionDef.args>arguments(posonlyargs=[],args=[],vararg=-,kwonlyargs=[],kw_defaults=[],kwarg=-,defaults=[])',  # main.py:55794
+    'FunctionDef.args>arguments(posonlyargs=[],args=[arg],vararg=-,kwonlyargs=[],kw_defaults=[],kwarg=-,defaults=[Constant])',  # main.py:19655
+    'FunctionDef.args>arguments(posonlyargs=[],args=[arg],vararg=-,kwonlyargs=[],kw_defaults=[],kwarg=-,defaults=[])',  # main.py:6654
     'FunctionDef.args>arguments(posonlyargs=[],args=[arg],vararg=-,kwonlyargs=[arg],kw_defaults=[Constant],kwarg=-,defaults=[])',  # region_pick.py:101
     'FunctionDef.args>arguments(posonlyargs=[],args=[arg],vararg=-,kwonlyargs=[arg],kw_defaults=[NoneType],kwarg=-,defaults=[])',  # match_report_window.py:68
-    'FunctionDef.body>Assert(test=Compare,msg=-)',  # main.py:29460
-    'FunctionDef.body>Assign(targets=[Name],value=BinOp,type_comment=-)',  # main.py:29455
-    'FunctionDef.body>Assign(targets=[Name],value=BoolOp,type_comment=-)',  # main.py:50839
-    'FunctionDef.body>Assign(targets=[Name],value=Call,type_comment=-)',  # main.py:19629
-    'FunctionDef.body>Assign(targets=[Name],value=Dict,type_comment=-)',  # main.py:19622
-    'FunctionDef.body>Assign(targets=[Name],value=IfExp,type_comment=-)',  # main.py:50841
-    'FunctionDef.body>Assign(targets=[Name],value=List,type_comment=-)',  # main.py:50248
+    'FunctionDef.body>Assert(test=Compare,msg=-)',  # main.py:29501
+    'FunctionDef.body>Assign(targets=[Name],value=BinOp,type_comment=-)',  # main.py:29496
+    'FunctionDef.body>Assign(targets=[Name],value=BoolOp,type_comment=-)',  # main.py:50965
+    'FunctionDef.body>Assign(targets=[Name],value=Call,type_comment=-)',  # main.py:19670
+    'FunctionDef.body>Assign(targets=[Name],value=Dict,type_comment=-)',  # main.py:19663
+    'FunctionDef.body>Assign(targets=[Name],value=IfExp,type_comment=-)',  # main.py:50967
+    'FunctionDef.body>Assign(targets=[Name],value=List,type_comment=-)',  # main.py:50374
     'FunctionDef.body>Assign(targets=[Name],value=ListComp,type_comment=-)',  # region_pick.py:74
-    'FunctionDef.body>Assign(targets=[Name],value=Name,type_comment=-)',  # main.py:50247
+    'FunctionDef.body>Assign(targets=[Name],value=Name,type_comment=-)',  # main.py:50373
     'FunctionDef.body>Assign(targets=[Name],value=SetComp,type_comment=-)',  # region_pick.py:189
-    'FunctionDef.body>Assign(targets=[Name],value=Subscript,type_comment=-)',  # main.py:53177
+    'FunctionDef.body>Assign(targets=[Name],value=Subscript,type_comment=-)',  # main.py:53303
     'FunctionDef.body>Assign(targets=[Tuple],value=Call,type_comment=-)',  # region_pick.py:208
     'FunctionDef.body>Assign(targets=[Tuple],value=Tuple,type_comment=-)',  # region_pick.py:241
     'FunctionDef.body>Expr(value=Call)',  # region_pick.py:259
-    'FunctionDef.body>Expr(value=Constant)',  # main.py:19537
+    'FunctionDef.body>Expr(value=Constant)',  # main.py:19578
     'FunctionDef.body>For(target=Name,iter=BoolOp,body=[Assign|Expr|If],orelse=[],type_comment=-)',  # region_pick.py:197
     'FunctionDef.body>For(target=Name,iter=Call,body=[Assign|Expr],orelse=[],type_comment=-)',  # region_pick.py:244
-    'FunctionDef.body>For(target=Name,iter=Name,body=[Assign|If],orelse=[],type_comment=-)',  # main.py:19623
+    'FunctionDef.body>For(target=Name,iter=Name,body=[Assign|If],orelse=[],type_comment=-)',  # main.py:19664
     'FunctionDef.body>For(target=Name,iter=Subscript,body=[AugAssign],orelse=[],type_comment=-)',  # region_pick.py:238
     'FunctionDef.body>For(target=Tuple,iter=Call,body=[Assign|If],orelse=[],type_comment=-)',  # region_pick.py:51
-    'FunctionDef.body>FunctionDef(name=str,args=arguments,body=[Assign|Return],decorator_list=[],returns=-,type_comment=-,type_params=[])',  # main.py:50253
+    'FunctionDef.body>FunctionDef(name=str,args=arguments,body=[Assign|Return],decorator_list=[],returns=-,type_comment=-,type_params=[])',  # main.py:50379
     'FunctionDef.body>FunctionDef(name=str,args=arguments,body=[If|Return],decorator_list=[],returns=-,type_comment=-,type_params=[])',  # region_pick.py:210
     'FunctionDef.body>FunctionDef(name=str,args=arguments,body=[Return],decorator_list=[],returns=-,type_comment=-,type_params=[])',  # region_pick.py:221
-    'FunctionDef.body>If(test=BoolOp,body=[Return],orelse=[])',  # main.py:29456
-    'FunctionDef.body>If(test=Call,body=[Assign],orelse=[])',  # main.py:57706
-    'FunctionDef.body>If(test=Call,body=[For|If],orelse=[])',  # main.py:57689
-    'FunctionDef.body>If(test=Call,body=[Try],orelse=[])',  # main.py:57684
+    'FunctionDef.body>If(test=BoolOp,body=[Return],orelse=[])',  # main.py:29497
+    'FunctionDef.body>If(test=Call,body=[Assign],orelse=[])',  # main.py:57832
+    'FunctionDef.body>If(test=Call,body=[For|If],orelse=[])',  # main.py:57815
+    'FunctionDef.body>If(test=Call,body=[Try],orelse=[])',  # main.py:57810
     'FunctionDef.body>If(test=Compare,body=[Assign],orelse=[])',  # region_pick.py:187
-    'FunctionDef.body>If(test=Compare,body=[If|Return],orelse=[])',  # main.py:19546
+    'FunctionDef.body>If(test=Compare,body=[If|Return],orelse=[])',  # main.py:19587
     'FunctionDef.body>If(test=Compare,body=[Raise],orelse=[])',  # match_hold.py:236
-    'FunctionDef.body>If(test=Compare,body=[Return],orelse=[])',  # main.py:50267
+    'FunctionDef.body>If(test=Compare,body=[Return],orelse=[])',  # main.py:50393
     'FunctionDef.body>If(test=Name,body=[Assign],orelse=[Assign])',  # region_pick.py:263
-    'FunctionDef.body>If(test=UnaryOp,body=[Return],orelse=[])',  # main.py:19627
-    "FunctionDef.body>Import(names=['match_report_window'])",  # main.py:55670
+    'FunctionDef.body>If(test=UnaryOp,body=[Return],orelse=[])',  # main.py:19668
+    "FunctionDef.body>Import(names=['match_report_window'])",  # main.py:55796
     'FunctionDef.body>Return(value=BinOp)',  # region_pick.py:257
-    'FunctionDef.body>Return(value=BoolOp)',  # main.py:19550
-    'FunctionDef.body>Return(value=Call)',  # main.py:19630
+    'FunctionDef.body>Return(value=BoolOp)',  # main.py:19591
+    'FunctionDef.body>Return(value=Call)',  # main.py:19671
     'FunctionDef.body>Return(value=Compare)',  # match_report_window.py:74
-    'FunctionDef.body>Return(value=Constant)',  # main.py:53184
-    'FunctionDef.body>Return(value=Dict)',  # main.py:57796
-    'FunctionDef.body>Return(value=IfExp)',  # main.py:19740
+    'FunctionDef.body>Return(value=Constant)',  # main.py:53310
+    'FunctionDef.body>Return(value=Dict)',  # main.py:57922
+    'FunctionDef.body>Return(value=IfExp)',  # main.py:19781
     'FunctionDef.body>Return(value=JoinedStr)',  # match_hold.py:220
     'FunctionDef.body>Return(value=ListComp)',  # region_pick.py:222
-    'FunctionDef.body>Return(value=Name)',  # main.py:50271
-    'FunctionDef.body>Return(value=Tuple)',  # main.py:17741
-    'FunctionDef.body>Try(body=[Return],handlers=[ExceptHandler],orelse=[],finalbody=[])',  # main.py:6646
-    'FunctionDef.body>While(test=Name,body=[Assign|Expr|For|If],orelse=[])',  # main.py:63672
-    'FunctionDef.returns>Name(id=str,ctx=Load)',  # main.py:50261
-    'FunctionDef.returns>Subscript(value=Name,slice=Tuple,ctx=Load)',  # main.py:6645
+    'FunctionDef.body>Return(value=Name)',  # main.py:50397
+    'FunctionDef.body>Return(value=Tuple)',  # main.py:17782
+    'FunctionDef.body>Try(body=[Return],handlers=[ExceptHandler],orelse=[],finalbody=[])',  # main.py:6655
+    'FunctionDef.body>While(test=Name,body=[Assign|Expr|For|If],orelse=[])',  # main.py:63795
+    'FunctionDef.returns>Name(id=str,ctx=Load)',  # main.py:50387
+    'FunctionDef.returns>Subscript(value=Name,slice=Tuple,ctx=Load)',  # main.py:6654
     'GeneratorExp.elt>BinOp(left=Constant,op=Add,right=Name)',  # match_hold.py:352
     'GeneratorExp.elt>BinOp(left=Name,op=Sub,right=Name)',  # region_pick.py:247
     'GeneratorExp.elt>BoolOp(op=And,values=[Attribute|Compare])',  # region_pick.py:83
     'GeneratorExp.elt>Call(func=Name,args=[Call|Name],keywords=[keyword])',  # match_report_window.py:81
-    'GeneratorExp.elt>Call(func=Name,args=[Name],keywords=[])',  # main.py:6647
-    'GeneratorExp.elt>Call(func=Name,args=[Subscript],keywords=[])',  # main.py:55277
-    'GeneratorExp.elt>Compare(left=Call,ops=[GtE],comparators=[Name])',  # main.py:57757
-    'GeneratorExp.elt>Compare(left=Call,ops=[In],comparators=[Name])',  # main.py:17880
-    'GeneratorExp.elt>Compare(left=Call,ops=[NotIn],comparators=[Name])',  # main.py:17838
-    'GeneratorExp.elt>Compare(left=Name,ops=[In],comparators=[Tuple])',  # main.py:51307
+    'GeneratorExp.elt>Call(func=Name,args=[Name],keywords=[])',  # main.py:6656
+    'GeneratorExp.elt>Call(func=Name,args=[Subscript],keywords=[])',  # main.py:55403
+    'GeneratorExp.elt>Compare(left=Call,ops=[GtE],comparators=[Name])',  # main.py:57883
+    'GeneratorExp.elt>Compare(left=Call,ops=[In],comparators=[Name])',  # main.py:17921
+    'GeneratorExp.elt>Compare(left=Call,ops=[NotIn],comparators=[Name])',  # main.py:17879
+    'GeneratorExp.elt>Compare(left=Name,ops=[In],comparators=[Tuple])',  # main.py:51433
     'GeneratorExp.elt>Compare(left=Name,ops=[NotEq],comparators=[Constant])',  # region_pick.py:232
     'GeneratorExp.elt>Constant(value=int)',  # region_pick.py:246
-    'GeneratorExp.elt>JoinedStr(values=[Constant|FormattedValue])',  # main.py:19743
-    'GeneratorExp.elt>Name(id=str,ctx=Load)',  # main.py:19630
-    'GeneratorExp.elt>Subscript(value=Name,slice=Constant,ctx=Load)',  # main.py:50254
-    'GeneratorExp.generators>comprehension(target=Name,iter=Call,ifs=[],is_async=0)',  # main.py:6647
-    'GeneratorExp.generators>comprehension(target=Name,iter=Name,ifs=[Compare],is_async=0)',  # main.py:17821
-    'GeneratorExp.generators>comprehension(target=Name,iter=Name,ifs=[Subscript],is_async=0)',  # main.py:66421
-    'GeneratorExp.generators>comprehension(target=Name,iter=Name,ifs=[],is_async=0)',  # main.py:17838
-    'GeneratorExp.generators>comprehension(target=Tuple,iter=Call,ifs=[Compare],is_async=0)',  # main.py:19630
+    'GeneratorExp.elt>JoinedStr(values=[Constant|FormattedValue])',  # main.py:19784
+    'GeneratorExp.elt>Name(id=str,ctx=Load)',  # main.py:19671
+    'GeneratorExp.elt>Subscript(value=Name,slice=Constant,ctx=Load)',  # main.py:50380
+    'GeneratorExp.generators>comprehension(target=Name,iter=Call,ifs=[],is_async=0)',  # main.py:6656
+    'GeneratorExp.generators>comprehension(target=Name,iter=Name,ifs=[Compare],is_async=0)',  # main.py:17862
+    'GeneratorExp.generators>comprehension(target=Name,iter=Name,ifs=[Subscript],is_async=0)',  # main.py:66544
+    'GeneratorExp.generators>comprehension(target=Name,iter=Name,ifs=[],is_async=0)',  # main.py:17879
+    'GeneratorExp.generators>comprehension(target=Tuple,iter=Call,ifs=[Compare],is_async=0)',  # main.py:19671
     'GeneratorExp.generators>comprehension(target=Tuple,iter=Call,ifs=[],is_async=0)',  # region_pick.py:247
-    'GeneratorExp.generators>comprehension(target=Tuple,iter=Name,ifs=[],is_async=0)',  # main.py:17828
+    'GeneratorExp.generators>comprehension(target=Tuple,iter=Name,ifs=[],is_async=0)',  # main.py:17869
     'GeneratorExp.generators>comprehension(target=Tuple,iter=Subscript,ifs=[],is_async=0)',  # match_hold.py:352
-    'If.body>Assign(targets=[Name],value=Await,type_comment=-)',  # main.py:21263
-    'If.body>Assign(targets=[Name],value=BinOp,type_comment=-)',  # main.py:21228
-    'If.body>Assign(targets=[Name],value=BoolOp,type_comment=-)',  # main.py:21324
-    'If.body>Assign(targets=[Name],value=Call,type_comment=-)',  # main.py:17773
-    'If.body>Assign(targets=[Name],value=Compare,type_comment=-)',  # main.py:52576
-    'If.body>Assign(targets=[Name],value=Constant,type_comment=-)',  # main.py:17800
-    'If.body>Assign(targets=[Name],value=Dict,type_comment=-)',  # main.py:51211
-    'If.body>Assign(targets=[Name],value=IfExp,type_comment=-)',  # main.py:21501
-    'If.body>Assign(targets=[Name],value=JoinedStr,type_comment=-)',  # main.py:21353
-    'If.body>Assign(targets=[Name],value=List,type_comment=-)',  # main.py:21333
-    'If.body>Assign(targets=[Name],value=ListComp,type_comment=-)',  # main.py:21334
-    'If.body>Assign(targets=[Name],value=Name,type_comment=-)',  # main.py:21361
-    'If.body>Assign(targets=[Name],value=Set,type_comment=-)',  # main.py:53250
-    'If.body>Assign(targets=[Name],value=Subscript,type_comment=-)',  # main.py:21292
-    'If.body>Assign(targets=[Name],value=UnaryOp,type_comment=-)',  # main.py:21313
-    'If.body>Assign(targets=[Subscript],value=BinOp,type_comment=-)',  # main.py:19626
-    'If.body>Assign(targets=[Subscript],value=Constant,type_comment=-)',  # main.py:66724
-    'If.body>Assign(targets=[Subscript],value=Name,type_comment=-)',  # main.py:19756
-    'If.body>Assign(targets=[Subscript],value=Subscript,type_comment=-)',  # main.py:57697
-    'If.body>Assign(targets=[Subscript],value=Tuple,type_comment=-)',  # main.py:19713
-    'If.body>Assign(targets=[Tuple],value=Await,type_comment=-)',  # main.py:17895
-    'If.body>Assign(targets=[Tuple],value=Call,type_comment=-)',  # main.py:66821
-    'If.body>Assign(targets=[Tuple],value=IfExp,type_comment=-)',  # main.py:52578
-    'If.body>Assign(targets=[Tuple],value=Name,type_comment=-)',  # main.py:19710
-    'If.body>Assign(targets=[Tuple],value=Tuple,type_comment=-)',  # main.py:51495
+    'If.body>Assign(targets=[Name],value=Await,type_comment=-)',  # main.py:21304
+    'If.body>Assign(targets=[Name],value=BinOp,type_comment=-)',  # main.py:21269
+    'If.body>Assign(targets=[Name],value=BoolOp,type_comment=-)',  # main.py:21365
+    'If.body>Assign(targets=[Name],value=Call,type_comment=-)',  # main.py:17814
+    'If.body>Assign(targets=[Name],value=Compare,type_comment=-)',  # main.py:52702
+    'If.body>Assign(targets=[Name],value=Constant,type_comment=-)',  # main.py:17841
+    'If.body>Assign(targets=[Name],value=Dict,type_comment=-)',  # main.py:51337
+    'If.body>Assign(targets=[Name],value=IfExp,type_comment=-)',  # main.py:21542
+    'If.body>Assign(targets=[Name],value=JoinedStr,type_comment=-)',  # main.py:21394
+    'If.body>Assign(targets=[Name],value=List,type_comment=-)',  # main.py:21374
+    'If.body>Assign(targets=[Name],value=ListComp,type_comment=-)',  # main.py:21375
+    'If.body>Assign(targets=[Name],value=Name,type_comment=-)',  # main.py:21402
+    'If.body>Assign(targets=[Name],value=Set,type_comment=-)',  # main.py:53376
+    'If.body>Assign(targets=[Name],value=Subscript,type_comment=-)',  # main.py:21333
+    'If.body>Assign(targets=[Name],value=UnaryOp,type_comment=-)',  # main.py:21354
+    'If.body>Assign(targets=[Subscript],value=BinOp,type_comment=-)',  # main.py:19667
+    'If.body>Assign(targets=[Subscript],value=Constant,type_comment=-)',  # main.py:66847
+    'If.body>Assign(targets=[Subscript],value=Name,type_comment=-)',  # main.py:19797
+    'If.body>Assign(targets=[Subscript],value=Subscript,type_comment=-)',  # main.py:57823
+    'If.body>Assign(targets=[Subscript],value=Tuple,type_comment=-)',  # main.py:19754
+    'If.body>Assign(targets=[Tuple],value=Await,type_comment=-)',  # main.py:17936
+    'If.body>Assign(targets=[Tuple],value=Call,type_comment=-)',  # main.py:66944
+    'If.body>Assign(targets=[Tuple],value=IfExp,type_comment=-)',  # main.py:52704
+    'If.body>Assign(targets=[Tuple],value=Name,type_comment=-)',  # main.py:19751
+    'If.body>Assign(targets=[Tuple],value=Tuple,type_comment=-)',  # main.py:51621
     'If.body>AugAssign(target=Name,op=Add,value=BinOp)',  # match_report_window.py:64
-    'If.body>AugAssign(target=Name,op=Add,value=Constant)',  # main.py:52602
-    'If.body>AugAssign(target=Name,op=BitOr,value=Call)',  # main.py:19730
-    'If.body>Break()',  # main.py:17801
-    'If.body>Continue()',  # main.py:17862
-    'If.body>Expr(value=Await)',  # main.py:17328
-    'If.body>Expr(value=Call)',  # main.py:17325
-    'If.body>For(target=Name,iter=Name,body=[Assign],orelse=[],type_comment=-)',  # main.py:51305
-    'If.body>For(target=Name,iter=Name,body=[Assign|If],orelse=[],type_comment=-)',  # main.py:51496
-    'If.body>For(target=Name,iter=Name,body=[If],orelse=[],type_comment=-)',  # main.py:50866
-    'If.body>For(target=Name,iter=Tuple,body=[Assign|If],orelse=[],type_comment=-)',  # main.py:57690
-    'If.body>FunctionDef(name=str,args=arguments,body=[Assign|Return],decorator_list=[],returns=-,type_comment=-,type_params=[])',  # main.py:50836
-    'If.body>If(test=BoolOp,body=[Assign],orelse=[If])',  # main.py:55097
-    'If.body>If(test=BoolOp,body=[Assign],orelse=[])',  # main.py:19712
-    'If.body>If(test=BoolOp,body=[Assign|Break],orelse=[])',  # main.py:66824
-    'If.body>If(test=BoolOp,body=[Assign|Expr],orelse=[])',  # main.py:55163
-    'If.body>If(test=BoolOp,body=[Assign|Expr|If|Return],orelse=[])',  # main.py:21312
-    'If.body>If(test=BoolOp,body=[Assign|Expr|Return],orelse=[])',  # main.py:50820
-    'If.body>If(test=BoolOp,body=[Assign|If],orelse=[If])',  # main.py:55124
-    'If.body>If(test=BoolOp,body=[Assign|If],orelse=[])',  # main.py:55116
-    'If.body>If(test=BoolOp,body=[Expr],orelse=[])',  # main.py:66360
-    'If.body>If(test=BoolOp,body=[Expr|If|Return],orelse=[])',  # main.py:66353
-    'If.body>If(test=BoolOp,body=[Expr|Return],orelse=[])',  # main.py:21299
-    'If.body>If(test=BoolOp,body=[Return],orelse=[])',  # main.py:19547
-    'If.body>If(test=Call,body=[Assign|If],orelse=[])',  # main.py:51307
-    'If.body>If(test=Compare,body=[Assign],orelse=[Assign])',  # main.py:21376
-    'If.body>If(test=Compare,body=[Assign],orelse=[])',  # main.py:57696
-    'If.body>If(test=Compare,body=[Assign|Break],orelse=[])',  # main.py:51432
-    'If.body>If(test=Compare,body=[Assign|Expr],orelse=[])',  # main.py:21411
-    'If.body>If(test=Compare,body=[Assign|Expr|Return],orelse=[])',  # main.py:50782
-    'If.body>If(test=Compare,body=[Assign|If],orelse=[])',  # main.py:66420
-    'If.body>If(test=Compare,body=[Break],orelse=[])',  # main.py:21648
-    'If.body>If(test=Compare,body=[Expr],orelse=[Expr])',  # main.py:21340
-    'If.body>If(test=Compare,body=[Expr],orelse=[])',  # main.py:51461
-    'If.body>If(test=Compare,body=[Expr|If],orelse=[])',  # main.py:66798
-    'If.body>If(test=Compare,body=[Expr|Raise],orelse=[])',  # main.py:21447
-    'If.body>If(test=Compare,body=[Expr|Return],orelse=[])',  # main.py:21436
-    'If.body>If(test=Compare,body=[Return],orelse=[])',  # main.py:66684
-    'If.body>If(test=Name,body=[Assign],orelse=[])',  # main.py:50873
-    'If.body>If(test=Name,body=[Assign|Expr|If|Return],orelse=[])',  # main.py:50856
-    'If.body>If(test=Name,body=[Assign|Expr|Return],orelse=[])',  # main.py:21499
-    'If.body>If(test=Name,body=[Expr],orelse=[])',  # main.py:21469
-    'If.body>If(test=Name,body=[Expr|If|Return],orelse=[])',  # main.py:21336
-    'If.body>If(test=Name,body=[Expr|Return],orelse=[])',  # main.py:55152
-    'If.body>If(test=Name,body=[Return],orelse=[])',  # main.py:18424
-    'If.body>If(test=Subscript,body=[Assign|If],orelse=[])',  # main.py:21297
-    'If.body>If(test=UnaryOp,body=[Assign],orelse=[])',  # main.py:21409
-    'If.body>If(test=UnaryOp,body=[Assign|Expr|For|If],orelse=[Assign])',  # main.py:50859
-    'If.body>If(test=UnaryOp,body=[Assign|If],orelse=[If])',  # main.py:21325
-    'If.body>If(test=UnaryOp,body=[Continue],orelse=[])',  # main.py:53252
-    'If.body>If(test=UnaryOp,body=[Expr|Return],orelse=[])',  # main.py:21274
-    'If.body>If(test=UnaryOp,body=[Return],orelse=[])',  # main.py:17900
-    'If.body>Raise(exc=Call,cause=-)',  # main.py:17321
-    'If.body>Raise(exc=Call,cause=Constant)',  # main.py:17810
-    'If.body>Return(value=-)',  # main.py:29474
-    'If.body>Return(value=Await)',  # main.py:55179
-    'If.body>Return(value=BoolOp)',  # main.py:53181
-    'If.body>Return(value=Call)',  # main.py:21105
-    'If.body>Return(value=Compare)',  # main.py:19549
-    'If.body>Return(value=Constant)',  # main.py:17901
-    'If.body>Return(value=Dict)',  # main.py:54968
-    'If.body>Return(value=Name)',  # main.py:19628
-    'If.body>Return(value=Subscript)',  # main.py:19656
-    'If.body>Return(value=Tuple)',  # main.py:17774
-    'If.body>Try(body=[Assign],handlers=[ExceptHandler],orelse=[],finalbody=[])',  # main.py:19718
-    'If.body>Try(body=[Assign|AsyncWith],handlers=[ExceptHandler],orelse=[],finalbody=[])',  # main.py:76227
-    'If.body>Try(body=[AsyncWith],handlers=[ExceptHandler],orelse=[],finalbody=[])',  # main.py:50739
-    'If.body>While(test=Compare,body=[Assign|AugAssign|Break|Expr|If],orelse=[Expr|Raise])',  # main.py:51212
-    'If.orelse>Assign(targets=[Name],value=Await,type_comment=-)',  # main.py:21379
-    'If.orelse>Assign(targets=[Name],value=Call,type_comment=-)',  # main.py:21403
-    'If.orelse>Assign(targets=[Name],value=Constant,type_comment=-)',  # main.py:52584
-    'If.orelse>Assign(targets=[Name],value=Subscript,type_comment=-)',  # main.py:51038
-    'If.orelse>Assign(targets=[Tuple],value=Call,type_comment=-)',  # main.py:51512
+    'If.body>AugAssign(target=Name,op=Add,value=Constant)',  # main.py:52728
+    'If.body>AugAssign(target=Name,op=BitOr,value=Call)',  # main.py:19771
+    'If.body>Break()',  # main.py:17842
+    'If.body>Continue()',  # main.py:17903
+    'If.body>Expr(value=Await)',  # main.py:17369
+    'If.body>Expr(value=Call)',  # main.py:17366
+    'If.body>For(target=Name,iter=Name,body=[Assign],orelse=[],type_comment=-)',  # main.py:51431
+    'If.body>For(target=Name,iter=Name,body=[Assign|If],orelse=[],type_comment=-)',  # main.py:51622
+    'If.body>For(target=Name,iter=Name,body=[If],orelse=[],type_comment=-)',  # main.py:50992
+    'If.body>For(target=Name,iter=Tuple,body=[Assign|If],orelse=[],type_comment=-)',  # main.py:57816
+    'If.body>FunctionDef(name=str,args=arguments,body=[Assign|Return],decorator_list=[],returns=-,type_comment=-,type_params=[])',  # main.py:50962
+    'If.body>If(test=BoolOp,body=[Assign],orelse=[If])',  # main.py:55223
+    'If.body>If(test=BoolOp,body=[Assign],orelse=[])',  # main.py:19753
+    'If.body>If(test=BoolOp,body=[Assign|Break],orelse=[])',  # main.py:66947
+    'If.body>If(test=BoolOp,body=[Assign|Expr],orelse=[])',  # main.py:55289
+    'If.body>If(test=BoolOp,body=[Assign|Expr|If|Return],orelse=[])',  # main.py:21353
+    'If.body>If(test=BoolOp,body=[Assign|Expr|Return],orelse=[])',  # main.py:50946
+    'If.body>If(test=BoolOp,body=[Assign|If],orelse=[If])',  # main.py:55250
+    'If.body>If(test=BoolOp,body=[Assign|If],orelse=[])',  # main.py:55242
+    'If.body>If(test=BoolOp,body=[Expr],orelse=[])',  # main.py:66483
+    'If.body>If(test=BoolOp,body=[Expr|If|Return],orelse=[])',  # main.py:66476
+    'If.body>If(test=BoolOp,body=[Expr|Return],orelse=[])',  # main.py:21340
+    'If.body>If(test=BoolOp,body=[Return],orelse=[])',  # main.py:19588
+    'If.body>If(test=Call,body=[Assign|If],orelse=[])',  # main.py:51433
+    'If.body>If(test=Compare,body=[Assign],orelse=[Assign])',  # main.py:21417
+    'If.body>If(test=Compare,body=[Assign],orelse=[])',  # main.py:57822
+    'If.body>If(test=Compare,body=[Assign|Break],orelse=[])',  # main.py:51558
+    'If.body>If(test=Compare,body=[Assign|Expr],orelse=[])',  # main.py:21452
+    'If.body>If(test=Compare,body=[Assign|Expr|Return],orelse=[])',  # main.py:50908
+    'If.body>If(test=Compare,body=[Assign|If],orelse=[])',  # main.py:66543
+    'If.body>If(test=Compare,body=[Break],orelse=[])',  # main.py:21689
+    'If.body>If(test=Compare,body=[Expr],orelse=[Expr])',  # main.py:21381
+    'If.body>If(test=Compare,body=[Expr],orelse=[])',  # main.py:51587
+    'If.body>If(test=Compare,body=[Expr|If],orelse=[])',  # main.py:66921
+    'If.body>If(test=Compare,body=[Expr|Raise],orelse=[])',  # main.py:21488
+    'If.body>If(test=Compare,body=[Expr|Return],orelse=[])',  # main.py:21477
+    'If.body>If(test=Compare,body=[Return],orelse=[])',  # main.py:66807
+    'If.body>If(test=Name,body=[Assign],orelse=[])',  # main.py:50999
+    'If.body>If(test=Name,body=[Assign|Expr|If|Return],orelse=[])',  # main.py:50982
+    'If.body>If(test=Name,body=[Assign|Expr|Return],orelse=[])',  # main.py:21540
+    'If.body>If(test=Name,body=[Expr],orelse=[])',  # main.py:21510
+    'If.body>If(test=Name,body=[Expr|If|Return],orelse=[])',  # main.py:21377
+    'If.body>If(test=Name,body=[Expr|Return],orelse=[])',  # main.py:55278
+    'If.body>If(test=Name,body=[Return],orelse=[])',  # main.py:18465
+    'If.body>If(test=Subscript,body=[Assign|If],orelse=[])',  # main.py:21338
+    'If.body>If(test=UnaryOp,body=[Assign],orelse=[])',  # main.py:21450
+    'If.body>If(test=UnaryOp,body=[Assign|Expr|For|If],orelse=[Assign])',  # main.py:50985
+    'If.body>If(test=UnaryOp,body=[Assign|If],orelse=[If])',  # main.py:21366
+    'If.body>If(test=UnaryOp,body=[Continue],orelse=[])',  # main.py:53378
+    'If.body>If(test=UnaryOp,body=[Expr|Return],orelse=[])',  # main.py:21315
+    'If.body>If(test=UnaryOp,body=[Return],orelse=[])',  # main.py:17941
+    'If.body>Raise(exc=Call,cause=-)',  # main.py:17362
+    'If.body>Raise(exc=Call,cause=Constant)',  # main.py:17851
+    'If.body>Return(value=-)',  # main.py:29515
+    'If.body>Return(value=Await)',  # main.py:55305
+    'If.body>Return(value=BoolOp)',  # main.py:53307
+    'If.body>Return(value=Call)',  # main.py:21146
+    'If.body>Return(value=Compare)',  # main.py:19590
+    'If.body>Return(value=Constant)',  # main.py:17942
+    'If.body>Return(value=Dict)',  # main.py:55094
+    'If.body>Return(value=Name)',  # main.py:19669
+    'If.body>Return(value=Subscript)',  # main.py:19697
+    'If.body>Return(value=Tuple)',  # main.py:17815
+    'If.body>Try(body=[Assign],handlers=[ExceptHandler],orelse=[],finalbody=[])',  # main.py:19759
+    'If.body>Try(body=[Assign|AsyncWith],handlers=[ExceptHandler],orelse=[],finalbody=[])',  # main.py:75260
+    'If.body>Try(body=[AsyncWith],handlers=[ExceptHandler],orelse=[],finalbody=[])',  # main.py:50865
+    'If.body>While(test=Compare,body=[Assign|AugAssign|Break|Expr|If],orelse=[Expr|Raise])',  # main.py:51338
+    'If.orelse>Assign(targets=[Name],value=Await,type_comment=-)',  # main.py:21420
+    'If.orelse>Assign(targets=[Name],value=Call,type_comment=-)',  # main.py:21444
+    'If.orelse>Assign(targets=[Name],value=Constant,type_comment=-)',  # main.py:52710
+    'If.orelse>Assign(targets=[Name],value=Subscript,type_comment=-)',  # main.py:51164
+    'If.orelse>Assign(targets=[Tuple],value=Call,type_comment=-)',  # main.py:51638
     'If.orelse>Assign(targets=[Tuple],value=Tuple,type_comment=-)',  # region_pick.py:268
-    'If.orelse>AugAssign(target=Name,op=Add,value=Constant)',  # main.py:52613
-    'If.orelse>Expr(value=Await)',  # main.py:21242
-    'If.orelse>Expr(value=Call)',  # main.py:51503
-    'If.orelse>If(test=BoolOp,body=[Assign],orelse=[If])',  # main.py:66493
-    'If.orelse>If(test=BoolOp,body=[Assign],orelse=[])',  # main.py:55142
-    'If.orelse>If(test=BoolOp,body=[Expr],orelse=[Expr])',  # main.py:51500
-    'If.orelse>If(test=Compare,body=[Expr],orelse=[If])',  # main.py:17337
-    'If.orelse>If(test=Compare,body=[Expr],orelse=[])',  # main.py:17343
-    'If.orelse>If(test=Compare,body=[Expr|Return],orelse=[Assign])',  # main.py:21392
-    'If.orelse>If(test=Name,body=[Assign],orelse=[])',  # main.py:55103
-    'If.test>Await(value=Call)',  # main.py:51132
-    'If.test>BoolOp(op=And,values=[BoolOp|Name])',  # main.py:66583
-    'If.test>BoolOp(op=And,values=[Call|Compare|Name|UnaryOp])',  # main.py:55142
-    'If.test>BoolOp(op=And,values=[Call|Name])',  # main.py:63679
-    'If.test>BoolOp(op=And,values=[Compare])',  # main.py:17324
-    'If.test>BoolOp(op=And,values=[Compare|Name])',  # main.py:17858
-    'If.test>BoolOp(op=And,values=[Compare|Subscript])',  # main.py:19655
-    'If.test>BoolOp(op=And,values=[Compare|UnaryOp])',  # main.py:21299
-    'If.test>BoolOp(op=And,values=[Name])',  # main.py:21312
-    'If.test>BoolOp(op=And,values=[Name|UnaryOp])',  # main.py:55097
-    'If.test>BoolOp(op=Or,values=[BoolOp|Compare])',  # main.py:57243
-    'If.test>BoolOp(op=Or,values=[Call|Compare])',  # main.py:19712
+    'If.orelse>AugAssign(target=Name,op=Add,value=Constant)',  # main.py:52739
+    'If.orelse>Expr(value=Await)',  # main.py:21283
+    'If.orelse>Expr(value=Call)',  # main.py:51629
+    'If.orelse>If(test=BoolOp,body=[Assign],orelse=[If])',  # main.py:66616
+    'If.orelse>If(test=BoolOp,body=[Assign],orelse=[])',  # main.py:55268
+    'If.orelse>If(test=BoolOp,body=[Expr],orelse=[Expr])',  # main.py:51626
+    'If.orelse>If(test=Compare,body=[Expr],orelse=[If])',  # main.py:17378
+    'If.orelse>If(test=Compare,body=[Expr],orelse=[])',  # main.py:17384
+    'If.orelse>If(test=Compare,body=[Expr|Return],orelse=[Assign])',  # main.py:21433
+    'If.orelse>If(test=Name,body=[Assign],orelse=[])',  # main.py:55229
+    'If.test>Await(value=Call)',  # main.py:51258
+    'If.test>BoolOp(op=And,values=[BoolOp|Name])',  # main.py:66706
+    'If.test>BoolOp(op=And,values=[Call|Compare|Name|UnaryOp])',  # main.py:55268
+    'If.test>BoolOp(op=And,values=[Call|Name])',  # main.py:63802
+    'If.test>BoolOp(op=And,values=[Compare])',  # main.py:17365
+    'If.test>BoolOp(op=And,values=[Compare|Name])',  # main.py:17899
+    'If.test>BoolOp(op=And,values=[Compare|Subscript])',  # main.py:19696
+    'If.test>BoolOp(op=And,values=[Compare|UnaryOp])',  # main.py:21340
+    'If.test>BoolOp(op=And,values=[Name])',  # main.py:21353
+    'If.test>BoolOp(op=And,values=[Name|UnaryOp])',  # main.py:55223
+    'If.test>BoolOp(op=Or,values=[BoolOp|Compare])',  # main.py:57369
+    'If.test>BoolOp(op=Or,values=[Call|Compare])',  # main.py:19753
     'If.test>BoolOp(op=Or,values=[Call|UnaryOp])',  # region_pick.py:54
-    'If.test>BoolOp(op=Or,values=[Compare])',  # main.py:19547
-    'If.test>BoolOp(op=Or,values=[Compare|UnaryOp])',  # main.py:58662
-    'If.test>BoolOp(op=Or,values=[Name])',  # main.py:52620
+    'If.test>BoolOp(op=Or,values=[Compare])',  # main.py:19588
+    'If.test>BoolOp(op=Or,values=[Compare|UnaryOp])',  # main.py:58785
+    'If.test>BoolOp(op=Or,values=[Name])',  # main.py:52746
     'If.test>BoolOp(op=Or,values=[UnaryOp])',  # region_pick.py:52
-    'If.test>Call(func=Attribute,args=[Await],keywords=[])',  # main.py:76171
-    'If.test>Call(func=Attribute,args=[Constant],keywords=[])',  # main.py:57706
-    'If.test>Call(func=Attribute,args=[Name],keywords=[])',  # main.py:76159
-    'If.test>Call(func=Name,args=[GeneratorExp],keywords=[])',  # main.py:17838
-    'If.test>Call(func=Name,args=[Name],keywords=[])',  # main.py:57689
-    'If.test>Call(func=Name,args=[Name|Subscript],keywords=[])',  # main.py:19729
-    'If.test>Call(func=Name,args=[Name|Tuple],keywords=[])',  # main.py:19717
+    'If.test>Call(func=Attribute,args=[Await],keywords=[])',  # main.py:75204
+    'If.test>Call(func=Attribute,args=[Constant],keywords=[])',  # main.py:57832
+    'If.test>Call(func=Attribute,args=[Name],keywords=[])',  # main.py:75192
+    'If.test>Call(func=Name,args=[GeneratorExp],keywords=[])',  # main.py:17879
+    'If.test>Call(func=Name,args=[Name],keywords=[])',  # main.py:57815
+    'If.test>Call(func=Name,args=[Name|Subscript],keywords=[])',  # main.py:19770
+    'If.test>Call(func=Name,args=[Name|Tuple],keywords=[])',  # main.py:19758
     'If.test>Compare(left=Attribute,ops=[Is],comparators=[Constant])',  # region_pick.py:211
-    'If.test>Compare(left=Await,ops=[IsNot],comparators=[Constant])',  # main.py:21550
-    'If.test>Compare(left=Await,ops=[Is],comparators=[Constant])',  # main.py:21447
-    'If.test>Compare(left=Call,ops=[Eq],comparators=[Call])',  # main.py:66793
-    'If.test>Compare(left=Call,ops=[Eq],comparators=[Constant])',  # main.py:51107
-    'If.test>Compare(left=Call,ops=[In],comparators=[Tuple])',  # main.py:17809
-    'If.test>Compare(left=Call,ops=[Lt],comparators=[Constant])',  # main.py:50801
-    'If.test>Compare(left=Call,ops=[Lt],comparators=[Name])',  # main.py:66725
-    'If.test>Compare(left=Call,ops=[NotEq],comparators=[Call])',  # main.py:51246
-    'If.test>Compare(left=Call,ops=[NotEq],comparators=[Constant])',  # main.py:51412
-    'If.test>Compare(left=Call,ops=[NotEq],comparators=[Name])',  # main.py:57753
-    'If.test>Compare(left=Name,ops=[Eq],comparators=[Constant])',  # main.py:17334
-    'If.test>Compare(left=Name,ops=[GtE],comparators=[Constant])',  # main.py:51461
-    'If.test>Compare(left=Name,ops=[GtE],comparators=[Name])',  # main.py:50267
-    'If.test>Compare(left=Name,ops=[Gt],comparators=[BinOp])',  # main.py:55015
-    'If.test>Compare(left=Name,ops=[Gt],comparators=[Constant])',  # main.py:52603
+    'If.test>Compare(left=Await,ops=[IsNot],comparators=[Constant])',  # main.py:21591
+    'If.test>Compare(left=Await,ops=[Is],comparators=[Constant])',  # main.py:21488
+    'If.test>Compare(left=Call,ops=[Eq],comparators=[Call])',  # main.py:66916
+    'If.test>Compare(left=Call,ops=[Eq],comparators=[Constant])',  # main.py:51233
+    'If.test>Compare(left=Call,ops=[In],comparators=[Tuple])',  # main.py:17850
+    'If.test>Compare(left=Call,ops=[Lt],comparators=[Constant])',  # main.py:50927
+    'If.test>Compare(left=Call,ops=[Lt],comparators=[Name])',  # main.py:66848
+    'If.test>Compare(left=Call,ops=[NotEq],comparators=[Call])',  # main.py:51372
+    'If.test>Compare(left=Call,ops=[NotEq],comparators=[Constant])',  # main.py:51538
+    'If.test>Compare(left=Call,ops=[NotEq],comparators=[Name])',  # main.py:57879
+    'If.test>Compare(left=Name,ops=[Eq],comparators=[Constant])',  # main.py:17375
+    'If.test>Compare(left=Name,ops=[GtE],comparators=[Constant])',  # main.py:51587
+    'If.test>Compare(left=Name,ops=[GtE],comparators=[Name])',  # main.py:50393
+    'If.test>Compare(left=Name,ops=[Gt],comparators=[BinOp])',  # main.py:55141
+    'If.test>Compare(left=Name,ops=[Gt],comparators=[Constant])',  # main.py:52729
     'If.test>Compare(left=Name,ops=[Gt],comparators=[Name])',  # match_report_window.py:63
-    'If.test>Compare(left=Name,ops=[In],comparators=[Name])',  # main.py:18428
-    'If.test>Compare(left=Name,ops=[IsNot],comparators=[Constant])',  # main.py:17327
-    'If.test>Compare(left=Name,ops=[Is],comparators=[Constant])',  # main.py:17799
-    'If.test>Compare(left=Name,ops=[LtE],comparators=[Constant])',  # main.py:29473
-    'If.test>Compare(left=Name,ops=[Lt],comparators=[Name])',  # main.py:66721
-    'If.test>Compare(left=Name,ops=[NotEq],comparators=[Constant])',  # main.py:50719
-    'If.test>Compare(left=Name,ops=[NotEq],comparators=[Name])',  # main.py:55210
+    'If.test>Compare(left=Name,ops=[In],comparators=[Name])',  # main.py:18469
+    'If.test>Compare(left=Name,ops=[IsNot],comparators=[Constant])',  # main.py:17368
+    'If.test>Compare(left=Name,ops=[Is],comparators=[Constant])',  # main.py:17840
+    'If.test>Compare(left=Name,ops=[LtE],comparators=[Constant])',  # main.py:29514
+    'If.test>Compare(left=Name,ops=[Lt],comparators=[Name])',  # main.py:66844
+    'If.test>Compare(left=Name,ops=[NotEq],comparators=[Constant])',  # main.py:50845
+    'If.test>Compare(left=Name,ops=[NotEq],comparators=[Name])',  # main.py:55336
     'If.test>Compare(left=Name,ops=[NotIn],comparators=[Attribute])',  # region_pick.py:215
-    'If.test>Compare(left=Name,ops=[NotIn],comparators=[Name])',  # main.py:17320
-    'If.test>Compare(left=Subscript,ops=[Eq],comparators=[Constant])',  # main.py:17861
-    'If.test>Compare(left=Subscript,ops=[Eq],comparators=[Name])',  # main.py:21648
-    'If.test>Compare(left=Subscript,ops=[In],comparators=[Name])',  # main.py:21345
-    'If.test>Compare(left=Subscript,ops=[IsNot],comparators=[Constant])',  # main.py:66420
-    'If.test>Compare(left=Subscript,ops=[NotEq],comparators=[Constant])',  # main.py:21576
-    'If.test>Compare(left=Subscript,ops=[NotEq],comparators=[Name])',  # main.py:21392
-    'If.test>Compare(left=Subscript,ops=[NotEq],comparators=[Subscript])',  # main.py:21190
-    'If.test>Name(id=str,ctx=Load)',  # main.py:17812
-    'If.test>Subscript(value=Name,slice=Constant,ctx=Load)',  # main.py:21297
+    'If.test>Compare(left=Name,ops=[NotIn],comparators=[Name])',  # main.py:17361
+    'If.test>Compare(left=Subscript,ops=[Eq],comparators=[Constant])',  # main.py:17902
+    'If.test>Compare(left=Subscript,ops=[Eq],comparators=[Name])',  # main.py:21689
+    'If.test>Compare(left=Subscript,ops=[In],comparators=[Name])',  # main.py:21386
+    'If.test>Compare(left=Subscript,ops=[IsNot],comparators=[Constant])',  # main.py:66543
+    'If.test>Compare(left=Subscript,ops=[NotEq],comparators=[Constant])',  # main.py:21617
+    'If.test>Compare(left=Subscript,ops=[NotEq],comparators=[Name])',  # main.py:21433
+    'If.test>Compare(left=Subscript,ops=[NotEq],comparators=[Subscript])',  # main.py:21231
+    'If.test>Name(id=str,ctx=Load)',  # main.py:17853
+    'If.test>Subscript(value=Name,slice=Constant,ctx=Load)',  # main.py:21338
     'If.test>UnaryOp(op=Not,operand=Attribute)',  # region_pick.py:213
-    'If.test>UnaryOp(op=Not,operand=Await)',  # main.py:21060
-    'If.test>UnaryOp(op=Not,operand=BoolOp)',  # main.py:53252
-    'If.test>UnaryOp(op=Not,operand=Call)',  # main.py:21283
+    'If.test>UnaryOp(op=Not,operand=Await)',  # main.py:21101
+    'If.test>UnaryOp(op=Not,operand=BoolOp)',  # main.py:53378
+    'If.test>UnaryOp(op=Not,operand=Call)',  # main.py:21324
     'If.test>UnaryOp(op=Not,operand=Compare)',  # region_pick.py:56
-    'If.test>UnaryOp(op=Not,operand=Name)',  # main.py:17772
-    'If.test>UnaryOp(op=Not,operand=Subscript)',  # main.py:50859
-    'IfExp.body>Call(func=Attribute,args=[Name],keywords=[])',  # main.py:58696
-    'IfExp.body>Call(func=Attribute,args=[],keywords=[])',  # main.py:19726
-    'IfExp.body>Call(func=Name,args=[Attribute],keywords=[])',  # main.py:21501
-    'IfExp.body>Call(func=Name,args=[Attribute|Constant],keywords=[])',  # main.py:57766
-    'IfExp.body>Call(func=Name,args=[Call],keywords=[])',  # main.py:50841
-    'IfExp.body>Call(func=Name,args=[Name],keywords=[])',  # main.py:51532
-    'IfExp.body>Call(func=Name,args=[Name],keywords=[keyword])',  # main.py:55209
-    'IfExp.body>Call(func=Name,args=[Name|Subscript],keywords=[])',  # main.py:52578
-    'IfExp.body>Call(func=Name,args=[Subscript],keywords=[])',  # main.py:53359
-    'IfExp.body>Call(func=Name,args=[],keywords=[])',  # main.py:17820
+    'If.test>UnaryOp(op=Not,operand=Name)',  # main.py:17813
+    'If.test>UnaryOp(op=Not,operand=Subscript)',  # main.py:50985
+    'IfExp.body>Call(func=Attribute,args=[Name],keywords=[])',  # main.py:58819
+    'IfExp.body>Call(func=Attribute,args=[],keywords=[])',  # main.py:19767
+    'IfExp.body>Call(func=Name,args=[Attribute],keywords=[])',  # main.py:21542
+    'IfExp.body>Call(func=Name,args=[Attribute|Constant],keywords=[])',  # main.py:57892
+    'IfExp.body>Call(func=Name,args=[Call],keywords=[])',  # main.py:50967
+    'IfExp.body>Call(func=Name,args=[Name],keywords=[])',  # main.py:51658
+    'IfExp.body>Call(func=Name,args=[Name],keywords=[keyword])',  # main.py:55335
+    'IfExp.body>Call(func=Name,args=[Name|Subscript],keywords=[])',  # main.py:52704
+    'IfExp.body>Call(func=Name,args=[Subscript],keywords=[])',  # main.py:53485
+    'IfExp.body>Call(func=Name,args=[],keywords=[])',  # main.py:17861
     'IfExp.body>Compare(left=BinOp,ops=[Gt],comparators=[Name])',  # region_pick.py:248
-    'IfExp.body>Constant(value=NoneType)',  # main.py:17741
-    'IfExp.body>Constant(value=int)',  # main.py:21527
-    'IfExp.body>Constant(value=str)',  # main.py:19740
-    'IfExp.body>JoinedStr(values=[Constant|FormattedValue])',  # main.py:19751
-    'IfExp.body>Name(id=str,ctx=Load)',  # main.py:21490
-    'IfExp.body>Subscript(value=Name,slice=Constant,ctx=Load)',  # main.py:19624
+    'IfExp.body>Constant(value=NoneType)',  # main.py:17782
+    'IfExp.body>Constant(value=int)',  # main.py:21568
+    'IfExp.body>Constant(value=str)',  # main.py:19781
+    'IfExp.body>JoinedStr(values=[Constant|FormattedValue])',  # main.py:19792
+    'IfExp.body>Name(id=str,ctx=Load)',  # main.py:21531
+    'IfExp.body>Subscript(value=Name,slice=Constant,ctx=Load)',  # main.py:19665
     'IfExp.body>Tuple(elts=[Name],ctx=Load)',  # region_pick.py:254
-    'IfExp.body>Tuple(elts=[Subscript],ctx=Load)',  # main.py:19707
-    "IfExp.orelse>Attribute(value=Name,attr='p1_series_wins',ctx=Load)",  # main.py:21527
-    "IfExp.orelse>Attribute(value=Name,attr='p2_series_wins',ctx=Load)",  # main.py:21528
-    'IfExp.orelse>BinOp(left=Name,op=Sub,right=BinOp)',  # main.py:76245
-    'IfExp.orelse>Call(func=Name,args=[Call],keywords=[])',  # main.py:50841
-    'IfExp.orelse>Call(func=Name,args=[Name],keywords=[])',  # main.py:17741
+    'IfExp.body>Tuple(elts=[Subscript],ctx=Load)',  # main.py:19748
+    "IfExp.orelse>Attribute(value=Name,attr='p1_series_wins',ctx=Load)",  # main.py:21568
+    "IfExp.orelse>Attribute(value=Name,attr='p2_series_wins',ctx=Load)",  # main.py:21569
+    'IfExp.orelse>BinOp(left=Name,op=Sub,right=BinOp)',  # main.py:75278
+    'IfExp.orelse>Call(func=Name,args=[Call],keywords=[])',  # main.py:50967
+    'IfExp.orelse>Call(func=Name,args=[Name],keywords=[])',  # main.py:17782
     'IfExp.orelse>Compare(left=BinOp,ops=[GtE],comparators=[Name])',  # region_pick.py:248
-    'IfExp.orelse>Constant(value=NoneType)',  # main.py:19624
-    'IfExp.orelse>Constant(value=bool)',  # main.py:66446
-    'IfExp.orelse>Constant(value=int)',  # main.py:51075
-    'IfExp.orelse>Constant(value=str)',  # main.py:19751
+    'IfExp.orelse>Constant(value=NoneType)',  # main.py:19665
+    'IfExp.orelse>Constant(value=bool)',  # main.py:66569
+    'IfExp.orelse>Constant(value=int)',  # main.py:51201
+    'IfExp.orelse>Constant(value=str)',  # main.py:19792
     'IfExp.orelse>Dict(keys=[],values=[])',  # region_pick.py:190
-    'IfExp.orelse>IfExp(test=Compare,body=Name,orelse=Subscript)',  # main.py:21524
-    'IfExp.orelse>IfExp(test=Compare,body=Subscript,orelse=Name)',  # main.py:21526
-    'IfExp.orelse>IfExp(test=Compare,body=Tuple,orelse=Tuple)',  # main.py:52558
+    'IfExp.orelse>IfExp(test=Compare,body=Name,orelse=Subscript)',  # main.py:21565
+    'IfExp.orelse>IfExp(test=Compare,body=Subscript,orelse=Name)',  # main.py:21567
+    'IfExp.orelse>IfExp(test=Compare,body=Tuple,orelse=Tuple)',  # main.py:52684
     'IfExp.orelse>IfExp(test=Name,body=Name,orelse=Constant)',  # region_pick.py:250
-    'IfExp.orelse>Name(id=str,ctx=Load)',  # main.py:19740
-    'IfExp.orelse>Set(elts=[Call])',  # main.py:17820
-    'IfExp.orelse>Subscript(value=Name,slice=Constant,ctx=Load)',  # main.py:21490
+    'IfExp.orelse>Name(id=str,ctx=Load)',  # main.py:19781
+    'IfExp.orelse>Set(elts=[Call])',  # main.py:17861
+    'IfExp.orelse>Subscript(value=Name,slice=Constant,ctx=Load)',  # main.py:21531
     'IfExp.orelse>Subscript(value=Name,slice=Name,ctx=Load)',  # match_report_window.py:48
-    'IfExp.orelse>Subscript(value=Subscript,slice=Constant,ctx=Load)',  # main.py:55209
-    'IfExp.orelse>Tuple(elts=[Constant],ctx=Load)',  # main.py:52580
+    'IfExp.orelse>Subscript(value=Subscript,slice=Constant,ctx=Load)',  # main.py:55335
+    'IfExp.orelse>Tuple(elts=[Constant],ctx=Load)',  # main.py:52706
     'IfExp.orelse>Tuple(elts=[Name],ctx=Load)',  # region_pick.py:254
-    'IfExp.orelse>Tuple(elts=[],ctx=Load)',  # main.py:52559
+    'IfExp.orelse>Tuple(elts=[],ctx=Load)',  # main.py:52685
     "IfExp.test>Attribute(value=Name,attr='map',ctx=Load)",  # region_pick.py:223
     'IfExp.test>BoolOp(op=And,values=[Call|Name])',  # region_pick.py:204
-    'IfExp.test>BoolOp(op=And,values=[Compare])',  # main.py:52548
+    'IfExp.test>BoolOp(op=And,values=[Compare])',  # main.py:52674
     'IfExp.test>Call(func=Name,args=[Constant|Name],keywords=[])',  # match_report_window.py:48
     'IfExp.test>Call(func=Name,args=[Name],keywords=[])',  # region_pick.py:190
-    'IfExp.test>Compare(left=Attribute,ops=[Eq],comparators=[Name])',  # main.py:21490
-    'IfExp.test>Compare(left=BoolOp,ops=[Gt],comparators=[Constant])',  # main.py:66450
-    'IfExp.test>Compare(left=Constant,ops=[In],comparators=[Name])',  # main.py:19624
-    'IfExp.test>Compare(left=Name,ops=[Eq],comparators=[Constant])',  # main.py:17820
+    'IfExp.test>Compare(left=Attribute,ops=[Eq],comparators=[Name])',  # main.py:21531
+    'IfExp.test>Compare(left=BoolOp,ops=[Gt],comparators=[Constant])',  # main.py:66573
+    'IfExp.test>Compare(left=Constant,ops=[In],comparators=[Name])',  # main.py:19665
+    'IfExp.test>Compare(left=Name,ops=[Eq],comparators=[Constant])',  # main.py:17861
     'IfExp.test>Compare(left=Name,ops=[Gt],comparators=[Name])',  # match_report_window.py:61
-    'IfExp.test>Compare(left=Name,ops=[In],comparators=[Name])',  # main.py:21351
-    'IfExp.test>Compare(left=Name,ops=[In],comparators=[Tuple])',  # main.py:53361
-    'IfExp.test>Compare(left=Name,ops=[IsNot],comparators=[Constant])',  # main.py:19726
-    'IfExp.test>Compare(left=Name,ops=[Is],comparators=[Constant])',  # main.py:17741
+    'IfExp.test>Compare(left=Name,ops=[In],comparators=[Name])',  # main.py:21392
+    'IfExp.test>Compare(left=Name,ops=[In],comparators=[Tuple])',  # main.py:53487
+    'IfExp.test>Compare(left=Name,ops=[IsNot],comparators=[Constant])',  # main.py:19767
+    'IfExp.test>Compare(left=Name,ops=[Is],comparators=[Constant])',  # main.py:17782
     'IfExp.test>Compare(left=Name,ops=[Lt],comparators=[Name])',  # match_report_window.py:62
-    'IfExp.test>Compare(left=Subscript,ops=[Eq],comparators=[Subscript])',  # main.py:55308
-    'IfExp.test>Compare(left=Subscript,ops=[IsNot],comparators=[Constant])',  # main.py:19707
-    'IfExp.test>Name(id=str,ctx=Load)',  # main.py:50788
-    'IfExp.test>Subscript(value=Name,slice=Constant,ctx=Load)',  # main.py:51075
-    "Import.names>alias(name='match_report_window',asname=None)",  # main.py:55670
-    "Import.names>alias(name='uuid',asname='uuid_mod')",  # main.py:21058
-    "ImportFrom.names>alias(name='_region_candidate_volumes',asname=None)",  # main.py:19658
-    'JoinedStr.values>Constant(value=str)',  # main.py:17321
-    'JoinedStr.values>FormattedValue(value=Attribute,conversion=-1,format_spec=-)',  # main.py:19663
-    'JoinedStr.values>FormattedValue(value=Call,conversion=-1,format_spec=-)',  # main.py:19743
-    'JoinedStr.values>FormattedValue(value=IfExp,conversion=-1,format_spec=-)',  # main.py:50788
-    'JoinedStr.values>FormattedValue(value=ListComp,conversion=-1,format_spec=-)',  # main.py:51467
-    'JoinedStr.values>FormattedValue(value=Name,conversion=-1,format_spec=-)',  # main.py:18352
-    'JoinedStr.values>FormattedValue(value=Name,conversion=114,format_spec=-)',  # main.py:17321
-    'JoinedStr.values>FormattedValue(value=Subscript,conversion=-1,format_spec=-)',  # main.py:21284
-    'JoinedStr.values>FormattedValue(value=Subscript,conversion=-1,format_spec=JoinedStr)',  # main.py:51462
-    'Lambda.args>arguments(posonlyargs=[],args=[arg],vararg=-,kwonlyargs=[],kw_defaults=[],kwarg=-,defaults=[])',  # main.py:18347
-    'Lambda.body>Call(func=Name,args=[Subscript],keywords=[])',  # main.py:50257
-    'Lambda.body>Subscript(value=Name,slice=Name,ctx=Load)',  # main.py:51520
-    'Lambda.body>Tuple(elts=[BinOp|Subscript],ctx=Load)',  # main.py:53258
-    'Lambda.body>Tuple(elts=[Call|Subscript],ctx=Load)',  # main.py:18347
+    'IfExp.test>Compare(left=Subscript,ops=[Eq],comparators=[Subscript])',  # main.py:55434
+    'IfExp.test>Compare(left=Subscript,ops=[IsNot],comparators=[Constant])',  # main.py:19748
+    'IfExp.test>Name(id=str,ctx=Load)',  # main.py:50914
+    'IfExp.test>Subscript(value=Name,slice=Constant,ctx=Load)',  # main.py:51201
+    "Import.names>alias(name='match_report_window',asname=None)",  # main.py:55796
+    "Import.names>alias(name='uuid',asname='uuid_mod')",  # main.py:21099
+    "ImportFrom.names>alias(name='_region_candidate_volumes',asname=None)",  # main.py:19699
+    'JoinedStr.values>Constant(value=str)',  # main.py:17362
+    'JoinedStr.values>FormattedValue(value=Attribute,conversion=-1,format_spec=-)',  # main.py:19704
+    'JoinedStr.values>FormattedValue(value=Call,conversion=-1,format_spec=-)',  # main.py:19784
+    'JoinedStr.values>FormattedValue(value=IfExp,conversion=-1,format_spec=-)',  # main.py:50914
+    'JoinedStr.values>FormattedValue(value=ListComp,conversion=-1,format_spec=-)',  # main.py:51593
+    'JoinedStr.values>FormattedValue(value=Name,conversion=-1,format_spec=-)',  # main.py:18393
+    'JoinedStr.values>FormattedValue(value=Name,conversion=114,format_spec=-)',  # main.py:17362
+    'JoinedStr.values>FormattedValue(value=Subscript,conversion=-1,format_spec=-)',  # main.py:21325
+    'JoinedStr.values>FormattedValue(value=Subscript,conversion=-1,format_spec=JoinedStr)',  # main.py:51588
+    'Lambda.args>arguments(posonlyargs=[],args=[arg],vararg=-,kwonlyargs=[],kw_defaults=[],kwarg=-,defaults=[])',  # main.py:18388
+    'Lambda.body>Call(func=Name,args=[Subscript],keywords=[])',  # main.py:50383
+    'Lambda.body>Subscript(value=Name,slice=Name,ctx=Load)',  # main.py:51646
+    'Lambda.body>Tuple(elts=[BinOp|Subscript],ctx=Load)',  # main.py:53384
+    'Lambda.body>Tuple(elts=[Call|Subscript],ctx=Load)',  # main.py:18388
     'Lambda.body>Tuple(elts=[Name|Subscript],ctx=Load)',  # region_pick.py:98
-    'List.ctx>Load()',  # main.py:17322
-    'List.elts>Constant(value=str)',  # main.py:21034
-    'List.elts>Dict(keys=[Constant],values=[Call|Name|Subscript])',  # main.py:51473
-    'List.elts>Name(id=str,ctx=Load)',  # main.py:17896
-    'List.elts>Subscript(value=Name,slice=Constant,ctx=Load)',  # main.py:21116
-    'List.elts>Tuple(elts=[Constant|Subscript],ctx=Load)',  # main.py:51238
-    'List.elts>Tuple(elts=[List],ctx=Load)',  # main.py:50249
-    'List.elts>Tuple(elts=[Name],ctx=Load)',  # main.py:21333
-    'List.elts>Tuple(elts=[Name|Subscript],ctx=Load)',  # main.py:21660
-    'List.elts>Tuple(elts=[Subscript],ctx=Load)',  # main.py:21333
+    'List.ctx>Load()',  # main.py:17363
+    'List.elts>Constant(value=str)',  # main.py:21075
+    'List.elts>Dict(keys=[Constant],values=[Call|Name|Subscript])',  # main.py:51599
+    'List.elts>Name(id=str,ctx=Load)',  # main.py:17937
+    'List.elts>Subscript(value=Name,slice=Constant,ctx=Load)',  # main.py:21157
+    'List.elts>Tuple(elts=[Constant|Subscript],ctx=Load)',  # main.py:51364
+    'List.elts>Tuple(elts=[List],ctx=Load)',  # main.py:50375
+    'List.elts>Tuple(elts=[Name],ctx=Load)',  # main.py:21374
+    'List.elts>Tuple(elts=[Name|Subscript],ctx=Load)',  # main.py:21701
+    'List.elts>Tuple(elts=[Subscript],ctx=Load)',  # main.py:21374
     "ListComp.elt>Attribute(value=Name,attr='home',ctx=Load)",  # region_pick.py:74
-    'ListComp.elt>Call(func=Attribute,args=[Call],keywords=[])',  # main.py:57816
+    'ListComp.elt>Call(func=Attribute,args=[Call],keywords=[])',  # main.py:57942
     'ListComp.elt>Call(func=Attribute,args=[],keywords=[])',  # region_pick.py:274
-    'ListComp.elt>Call(func=Name,args=[Name],keywords=[])',  # main.py:17775
-    'ListComp.elt>Call(func=Name,args=[],keywords=[keyword])',  # main.py:51647
+    'ListComp.elt>Call(func=Name,args=[Name],keywords=[])',  # main.py:17816
+    'ListComp.elt>Call(func=Name,args=[],keywords=[keyword])',  # main.py:51773
     'ListComp.elt>Dict(keys=[Constant],values=[Attribute|IfExp|Name])',  # region_pick.py:222
-    'ListComp.elt>Dict(keys=[Constant],values=[Call|Compare|IfExp|Subscript])',  # main.py:66449
-    'ListComp.elt>Name(id=str,ctx=Load)',  # main.py:21334
+    'ListComp.elt>Dict(keys=[Constant],values=[Call|Compare|IfExp|Subscript])',  # main.py:66572
+    'ListComp.elt>Name(id=str,ctx=Load)',  # main.py:21375
     'ListComp.elt>Subscript(value=Attribute,slice=Name,ctx=Load)',  # region_pick.py:240
-    'ListComp.elt>Subscript(value=Name,slice=Constant,ctx=Load)',  # main.py:19699
-    'ListComp.elt>Tuple(elts=[Call|Name],ctx=Load)',  # main.py:53314
-    'ListComp.elt>Tuple(elts=[Constant|Name],ctx=Load)',  # main.py:51279
-    'ListComp.elt>Tuple(elts=[Name],ctx=Load)',  # main.py:58703
-    'ListComp.elt>Tuple(elts=[Subscript],ctx=Load)',  # main.py:50909
+    'ListComp.elt>Subscript(value=Name,slice=Constant,ctx=Load)',  # main.py:19740
+    'ListComp.elt>Tuple(elts=[Call|Name],ctx=Load)',  # main.py:53440
+    'ListComp.elt>Tuple(elts=[Constant|Name],ctx=Load)',  # main.py:51405
+    'ListComp.elt>Tuple(elts=[Name],ctx=Load)',  # main.py:58826
+    'ListComp.elt>Tuple(elts=[Subscript],ctx=Load)',  # main.py:51035
     'ListComp.generators>comprehension(target=Name,iter=Name,ifs=[Attribute],is_async=0)',  # region_pick.py:74
     'ListComp.generators>comprehension(target=Name,iter=Name,ifs=[BoolOp],is_async=0)',  # region_pick.py:260
-    'ListComp.generators>comprehension(target=Name,iter=Name,ifs=[Call],is_async=0)',  # main.py:55208
-    'ListComp.generators>comprehension(target=Name,iter=Name,ifs=[Compare],is_async=0)',  # main.py:50812
-    'ListComp.generators>comprehension(target=Name,iter=Name,ifs=[],is_async=0)',  # main.py:17775
-    'ListComp.generators>comprehension(target=Name,iter=Subscript,ifs=[],is_async=0)',  # main.py:50258
-    'ListComp.generators>comprehension(target=Tuple,iter=Call,ifs=[Compare],is_async=0)',  # main.py:51308
+    'ListComp.generators>comprehension(target=Name,iter=Name,ifs=[Call],is_async=0)',  # main.py:55334
+    'ListComp.generators>comprehension(target=Name,iter=Name,ifs=[Compare],is_async=0)',  # main.py:50938
+    'ListComp.generators>comprehension(target=Name,iter=Name,ifs=[],is_async=0)',  # main.py:17816
+    'ListComp.generators>comprehension(target=Name,iter=Subscript,ifs=[],is_async=0)',  # main.py:50384
+    'ListComp.generators>comprehension(target=Tuple,iter=Call,ifs=[Compare],is_async=0)',  # main.py:51434
     'ListComp.generators>comprehension(target=Tuple,iter=Call,ifs=[],is_async=0)',  # region_pick.py:222
-    'ListComp.generators>comprehension(target=Tuple,iter=Name,ifs=[Compare],is_async=0)',  # main.py:21334
-    'Name.ctx>Load()',  # main.py:4487
-    'Name.ctx>Store()',  # main.py:6647
-    'Raise.cause>Constant(value=NoneType)',  # main.py:17810
+    'ListComp.generators>comprehension(target=Tuple,iter=Name,ifs=[Compare],is_async=0)',  # main.py:21375
+    'Name.ctx>Load()',  # main.py:4492
+    'Name.ctx>Store()',  # main.py:6656
+    'Raise.cause>Constant(value=NoneType)',  # main.py:17851
     'Raise.exc>Call(func=Name,args=[Constant],keywords=[])',  # match_hold.py:237
-    'Raise.exc>Call(func=Name,args=[JoinedStr],keywords=[])',  # main.py:17321
-    'Raise.exc>Call(func=Name,args=[],keywords=[keyword])',  # main.py:17810
-    'Return.value>Await(value=Call)',  # main.py:55179
+    'Raise.exc>Call(func=Name,args=[JoinedStr],keywords=[])',  # main.py:17362
+    'Raise.exc>Call(func=Name,args=[],keywords=[keyword])',  # main.py:17851
+    'Return.value>Await(value=Call)',  # main.py:55305
     'Return.value>BinOp(left=Call,op=Add,right=Tuple)',  # region_pick.py:257
     'Return.value>BoolOp(op=And,values=[Call|UnaryOp])',  # region_pick.py:40
-    'Return.value>BoolOp(op=And,values=[Compare])',  # main.py:53181
-    'Return.value>BoolOp(op=And,values=[Compare|Name])',  # main.py:53183
-    'Return.value>BoolOp(op=Or,values=[Compare])',  # main.py:19550
-    'Return.value>BoolOp(op=Or,values=[Constant|Name])',  # main.py:19758
-    'Return.value>Call(func=Attribute,args=[Call],keywords=[])',  # main.py:53139
-    'Return.value>Call(func=Attribute,args=[Name],keywords=[keyword])',  # main.py:57708
-    'Return.value>Call(func=Attribute,args=[],keywords=[])',  # main.py:18378
-    'Return.value>Call(func=Name,args=[BinOp],keywords=[])',  # main.py:50256
-    'Return.value>Call(func=Name,args=[GeneratorExp],keywords=[])',  # main.py:6647
-    'Return.value>Call(func=Name,args=[Name],keywords=[])',  # main.py:57844
+    'Return.value>BoolOp(op=And,values=[Compare])',  # main.py:53307
+    'Return.value>BoolOp(op=And,values=[Compare|Name])',  # main.py:53309
+    'Return.value>BoolOp(op=Or,values=[Compare])',  # main.py:19591
+    'Return.value>BoolOp(op=Or,values=[Constant|Name])',  # main.py:19799
+    'Return.value>Call(func=Attribute,args=[Call],keywords=[])',  # main.py:53265
+    'Return.value>Call(func=Attribute,args=[Name],keywords=[keyword])',  # main.py:57834
+    'Return.value>Call(func=Attribute,args=[],keywords=[])',  # main.py:18419
+    'Return.value>Call(func=Name,args=[BinOp],keywords=[])',  # main.py:50382
+    'Return.value>Call(func=Name,args=[GeneratorExp],keywords=[])',  # main.py:6656
+    'Return.value>Call(func=Name,args=[Name],keywords=[])',  # main.py:57970
     'Return.value>Call(func=Name,args=[Name],keywords=[keyword])',  # region_pick.py:98
-    'Return.value>Call(func=Name,args=[],keywords=[keyword])',  # main.py:21105
+    'Return.value>Call(func=Name,args=[],keywords=[keyword])',  # main.py:21146
     'Return.value>Compare(left=BinOp,ops=[Lt],comparators=[Name])',  # match_report_window.py:74
-    'Return.value>Compare(left=Call,ops=[GtE],comparators=[Call])',  # main.py:57741
-    'Return.value>Compare(left=Subscript,ops=[Lt],comparators=[Subscript])',  # main.py:19549
-    'Return.value>Constant(value=NoneType)',  # main.py:18431
-    'Return.value>Constant(value=bool)',  # main.py:17901
+    'Return.value>Compare(left=Call,ops=[GtE],comparators=[Call])',  # main.py:57867
+    'Return.value>Compare(left=Subscript,ops=[Lt],comparators=[Subscript])',  # main.py:19590
+    'Return.value>Constant(value=NoneType)',  # main.py:18472
+    'Return.value>Constant(value=bool)',  # main.py:17942
     'Return.value>Constant(value=str)',  # region_pick.py:212
-    'Return.value>Dict(keys=[Constant],values=[BoolOp|Call|Compare|Constant|IfExp|ListComp|Name|Subscript])',  # main.py:66429
-    'Return.value>Dict(keys=[Constant],values=[Call|Constant])',  # main.py:55065
-    'Return.value>Dict(keys=[Constant],values=[Call|Constant|Name])',  # main.py:66756
-    'Return.value>Dict(keys=[Constant],values=[Call|Constant|Name|UnaryOp])',  # main.py:66727
-    'Return.value>Dict(keys=[Constant],values=[Constant])',  # main.py:54968
-    'Return.value>Dict(keys=[Constant],values=[Constant|Name])',  # main.py:57796
+    'Return.value>Dict(keys=[Constant],values=[BoolOp|Call|Compare|Constant|IfExp|ListComp|Name|Subscript])',  # main.py:66552
+    'Return.value>Dict(keys=[Constant],values=[Call|Constant])',  # main.py:55191
+    'Return.value>Dict(keys=[Constant],values=[Call|Constant|Name])',  # main.py:66879
+    'Return.value>Dict(keys=[Constant],values=[Call|Constant|Name|UnaryOp])',  # main.py:66850
+    'Return.value>Dict(keys=[Constant],values=[Constant])',  # main.py:55094
+    'Return.value>Dict(keys=[Constant],values=[Constant|Name])',  # main.py:57922
     'Return.value>DictComp(key=Attribute,value=Call,generators=[comprehension])',  # tournaments.py:309
     'Return.value>IfExp(test=Call,body=Call,orelse=Subscript)',  # match_report_window.py:48
     'Return.value>IfExp(test=Call,body=Name,orelse=Constant)',  # region_pick.py:194
-    'Return.value>IfExp(test=Compare,body=Call,orelse=Constant)',  # main.py:57766
-    'Return.value>IfExp(test=Compare,body=Constant,orelse=Name)',  # main.py:19740
+    'Return.value>IfExp(test=Compare,body=Call,orelse=Constant)',  # main.py:57892
+    'Return.value>IfExp(test=Compare,body=Constant,orelse=Name)',  # main.py:19781
     'Return.value>IfExp(test=Name,body=Tuple,orelse=Tuple)',  # region_pick.py:254
     'Return.value>JoinedStr(values=[Constant|FormattedValue])',  # match_hold.py:220
     'Return.value>ListComp(elt=Dict,generators=[comprehension])',  # region_pick.py:222
-    'Return.value>Name(id=str,ctx=Load)',  # main.py:17924
-    'Return.value>Subscript(value=Name,slice=Constant,ctx=Load)',  # main.py:19656
-    'Return.value>Tuple(elts=[BoolOp],ctx=Load)',  # main.py:58664
-    'Return.value>Tuple(elts=[BoolOp|Call],ctx=Load)',  # main.py:58304
-    'Return.value>Tuple(elts=[Call|Constant],ctx=Load)',  # main.py:57251
-    'Return.value>Tuple(elts=[Call|Name],ctx=Load)',  # main.py:17880
-    'Return.value>Tuple(elts=[Constant],ctx=Load)',  # main.py:6649
-    'Return.value>Tuple(elts=[Constant|Name],ctx=Load)',  # main.py:17774
+    'Return.value>Name(id=str,ctx=Load)',  # main.py:17965
+    'Return.value>Subscript(value=Name,slice=Constant,ctx=Load)',  # main.py:19697
+    'Return.value>Tuple(elts=[BoolOp],ctx=Load)',  # main.py:58787
+    'Return.value>Tuple(elts=[BoolOp|Call],ctx=Load)',  # main.py:58427
+    'Return.value>Tuple(elts=[Call|Constant],ctx=Load)',  # main.py:57377
+    'Return.value>Tuple(elts=[Call|Name],ctx=Load)',  # main.py:17921
+    'Return.value>Tuple(elts=[Constant],ctx=Load)',  # main.py:6658
+    'Return.value>Tuple(elts=[Constant|Name],ctx=Load)',  # main.py:17815
     'Return.value>Tuple(elts=[Constant|Subscript],ctx=Load)',  # region_pick.py:81
     'Return.value>Tuple(elts=[Dict|Name],ctx=Load)',  # region_pick.py:183
-    'Return.value>Tuple(elts=[IfExp|Name],ctx=Load)',  # main.py:17741
-    'Return.value>Tuple(elts=[ListComp],ctx=Load)',  # main.py:50258
-    'Return.value>Tuple(elts=[Name],ctx=Load)',  # main.py:29461
-    'Return.value>Tuple(elts=[Name|Subscript],ctx=Load)',  # main.py:19638
-    'Set.elts>Call(func=Name,args=[Name],keywords=[])',  # main.py:17820
+    'Return.value>Tuple(elts=[IfExp|Name],ctx=Load)',  # main.py:17782
+    'Return.value>Tuple(elts=[ListComp],ctx=Load)',  # main.py:50384
+    'Return.value>Tuple(elts=[Name],ctx=Load)',  # main.py:29502
+    'Return.value>Tuple(elts=[Name|Subscript],ctx=Load)',  # main.py:19679
+    'Set.elts>Call(func=Name,args=[Name],keywords=[])',  # main.py:17861
     'Set.elts>Name(id=str,ctx=Load)',  # region_pick.py:244
-    'Set.elts>Subscript(value=Name,slice=Constant,ctx=Load)',  # main.py:53250
-    'SetComp.elt>Call(func=Name,args=[Name],keywords=[])',  # main.py:17829
-    'SetComp.elt>Name(id=str,ctx=Load)',  # main.py:17771
-    'SetComp.elt>Tuple(elts=[Name],ctx=Load)',  # main.py:18346
+    'Set.elts>Subscript(value=Name,slice=Constant,ctx=Load)',  # main.py:53376
+    'SetComp.elt>Call(func=Name,args=[Name],keywords=[])',  # main.py:17870
+    'SetComp.elt>Name(id=str,ctx=Load)',  # main.py:17812
+    'SetComp.elt>Tuple(elts=[Name],ctx=Load)',  # main.py:18387
     'SetComp.generators>comprehension(target=Name,iter=BoolOp,ifs=[BoolOp],is_async=0)',  # region_pick.py:189
-    'SetComp.generators>comprehension(target=Name,iter=BoolOp,ifs=[Name],is_async=0)',  # main.py:76158
-    'SetComp.generators>comprehension(target=Name,iter=Name,ifs=[Compare],is_async=0)',  # main.py:17771
-    'SetComp.generators>comprehension(target=Name,iter=Name,ifs=[],is_async=0)',  # main.py:76233
-    'SetComp.generators>comprehension(target=Tuple,iter=BoolOp,ifs=[BoolOp],is_async=0)',  # main.py:18346
+    'SetComp.generators>comprehension(target=Name,iter=BoolOp,ifs=[Name],is_async=0)',  # main.py:75191
+    'SetComp.generators>comprehension(target=Name,iter=Name,ifs=[Compare],is_async=0)',  # main.py:17812
+    'SetComp.generators>comprehension(target=Name,iter=Name,ifs=[],is_async=0)',  # main.py:75266
+    'SetComp.generators>comprehension(target=Tuple,iter=BoolOp,ifs=[BoolOp],is_async=0)',  # main.py:18387
     'Slice.lower>Constant(value=int)',  # region_pick.py:238
-    'Slice.upper>Constant(value=int)',  # main.py:21353
-    'Subscript.ctx>Load()',  # main.py:6645
-    'Subscript.ctx>Store()',  # main.py:19626
-    'Subscript.slice>Call(func=Name,args=[Subscript],keywords=[])',  # main.py:57827
-    'Subscript.slice>Constant(value=int)',  # main.py:17855
-    'Subscript.slice>Constant(value=str)',  # main.py:17794
-    'Subscript.slice>Name(id=str,ctx=Load)',  # main.py:19626
-    'Subscript.slice>Slice(lower=-,upper=Constant,step=-)',  # main.py:21353
+    'Slice.upper>Constant(value=int)',  # main.py:21394
+    'Subscript.ctx>Load()',  # main.py:6654
+    'Subscript.ctx>Store()',  # main.py:19667
+    'Subscript.slice>Call(func=Name,args=[Subscript],keywords=[])',  # main.py:57953
+    'Subscript.slice>Constant(value=int)',  # main.py:17896
+    'Subscript.slice>Constant(value=str)',  # main.py:17835
+    'Subscript.slice>Name(id=str,ctx=Load)',  # main.py:19667
+    'Subscript.slice>Slice(lower=-,upper=Constant,step=-)',  # main.py:21394
     'Subscript.slice>Slice(lower=Constant,upper=-,step=-)',  # region_pick.py:238
-    'Subscript.slice>Subscript(value=Name,slice=Constant,ctx=Load)',  # main.py:19708
-    'Subscript.slice>Tuple(elts=[BinOp|Name],ctx=Load)',  # main.py:17740
-    'Subscript.slice>Tuple(elts=[Constant|Name],ctx=Load)',  # main.py:6645
-    'Subscript.slice>Tuple(elts=[Name],ctx=Load)',  # main.py:17755
-    'Subscript.slice>Tuple(elts=[Subscript],ctx=Load)',  # main.py:50241
-    "Subscript.value>Attribute(value=Call,attr='hex',ctx=Load)",  # main.py:21353
+    'Subscript.slice>Subscript(value=Name,slice=Constant,ctx=Load)',  # main.py:19749
+    'Subscript.slice>Tuple(elts=[BinOp|Name],ctx=Load)',  # main.py:17781
+    'Subscript.slice>Tuple(elts=[Constant|Name],ctx=Load)',  # main.py:6654
+    'Subscript.slice>Tuple(elts=[Name],ctx=Load)',  # main.py:17796
+    'Subscript.slice>Tuple(elts=[Subscript],ctx=Load)',  # main.py:50367
+    "Subscript.value>Attribute(value=Call,attr='hex',ctx=Load)",  # main.py:21394
     "Subscript.value>Attribute(value=Name,attr='map',ctx=Load)",  # region_pick.py:240
-    'Subscript.value>BoolOp(op=Or,values=[Constant|Name])',  # main.py:55302
-    'Subscript.value>BoolOp(op=Or,values=[Constant|Subscript])',  # main.py:58664
+    'Subscript.value>BoolOp(op=Or,values=[Constant|Name])',  # main.py:55428
+    'Subscript.value>BoolOp(op=Or,values=[Constant|Subscript])',  # main.py:58787
     'Subscript.value>BoolOp(op=Or,values=[Name])',  # region_pick.py:86
-    'Subscript.value>Call(func=Attribute,args=[],keywords=[])',  # main.py:17784
-    'Subscript.value>Call(func=Name,args=[Name],keywords=[])',  # main.py:17855
-    'Subscript.value>Call(func=Name,args=[],keywords=[])',  # main.py:66724
-    'Subscript.value>Name(id=str,ctx=Load)',  # main.py:6645
-    'Subscript.value>Subscript(value=Name,slice=Constant,ctx=Load)',  # main.py:55209
-    'Try.body>Assign(targets=[Name],value=Await,type_comment=-)',  # main.py:19731
-    'Try.body>Assign(targets=[Name],value=Call,type_comment=-)',  # main.py:19727
-    'Try.body>Assign(targets=[Name],value=Dict,type_comment=-)',  # main.py:19700
-    'Try.body>Assign(targets=[Name],value=IfExp,type_comment=-)',  # main.py:76242
-    'Try.body>Assign(targets=[Name],value=List,type_comment=-)',  # main.py:19714
-    'Try.body>Assign(targets=[Name],value=ListComp,type_comment=-)',  # main.py:19699
-    'Try.body>Assign(targets=[Name],value=Name,type_comment=-)',  # main.py:76251
-    'Try.body>Assign(targets=[Name],value=SetComp,type_comment=-)',  # main.py:76233
-    'Try.body>Assign(targets=[Name],value=Subscript,type_comment=-)',  # main.py:17784
-    'Try.body>Assign(targets=[Tuple],value=Call,type_comment=-)',  # main.py:19732
-    'Try.body>Assign(targets=[Tuple],value=IfExp,type_comment=-)',  # main.py:58696
-    'Try.body>Assign(targets=[Tuple],value=Tuple,type_comment=-)',  # main.py:19661
-    'Try.body>AsyncWith(items=[withitem],body=[Assign],type_comment=-)',  # main.py:19659
-    'Try.body>AsyncWith(items=[withitem],body=[Assign|Expr|For|If],type_comment=-)',  # main.py:52539
-    'Try.body>AsyncWith(items=[withitem],body=[Assign|For],type_comment=-)',  # main.py:19701
-    'Try.body>AsyncWith(items=[withitem],body=[Expr],type_comment=-)',  # main.py:4487
-    'Try.body>Expr(value=Await)',  # main.py:17802
-    'Try.body>For(target=Name,iter=Name,body=[Assign|Expr|If],orelse=[],type_comment=-)',  # main.py:19715
-    'Try.body>For(target=Name,iter=Name,body=[Assign|If],orelse=[],type_comment=-)',  # main.py:17795
-    'Try.body>For(target=Name,iter=Name,body=[If],orelse=[],type_comment=-)',  # main.py:19728
-    'Try.body>If(test=BoolOp,body=[Assign],orelse=[])',  # main.py:58698
-    'Try.body>If(test=Compare,body=[Assign|If],orelse=[])',  # main.py:19709
-    "Try.body>ImportFrom(module='tournaments',names=[alias],level=0)",  # main.py:19658
-    'Try.body>Return(value=Call)',  # main.py:6647
-    'Try.body>Return(value=Compare)',  # main.py:57741
-    'Try.body>Return(value=IfExp)',  # main.py:57766
-    'Try.handlers>ExceptHandler(type=Name,name=-,body=[Assign])',  # main.py:19720
-    'Try.handlers>ExceptHandler(type=Name,name=-,body=[Pass])',  # main.py:4493
-    'Try.handlers>ExceptHandler(type=Name,name=-,body=[Return])',  # main.py:6648
-    'Try.handlers>ExceptHandler(type=Name,name=str,body=[Assign])',  # main.py:19736
-    'Try.handlers>ExceptHandler(type=Name,name=str,body=[Assign|Expr])',  # main.py:58706
-    'Try.handlers>ExceptHandler(type=Name,name=str,body=[Assign|Expr|If])',  # main.py:76252
-    'Try.handlers>ExceptHandler(type=Name,name=str,body=[Expr])',  # main.py:19662
-    'Try.handlers>ExceptHandler(type=Name,name=str,body=[Expr|If|Raise])',  # main.py:17805
+    'Subscript.value>Call(func=Attribute,args=[],keywords=[])',  # main.py:17825
+    'Subscript.value>Call(func=Name,args=[Name],keywords=[])',  # main.py:17896
+    'Subscript.value>Call(func=Name,args=[],keywords=[])',  # main.py:66847
+    'Subscript.value>Name(id=str,ctx=Load)',  # main.py:6654
+    'Subscript.value>Subscript(value=Name,slice=Constant,ctx=Load)',  # main.py:55335
+    'Try.body>Assign(targets=[Name],value=Await,type_comment=-)',  # main.py:19772
+    'Try.body>Assign(targets=[Name],value=Call,type_comment=-)',  # main.py:19768
+    'Try.body>Assign(targets=[Name],value=Dict,type_comment=-)',  # main.py:19741
+    'Try.body>Assign(targets=[Name],value=IfExp,type_comment=-)',  # main.py:75275
+    'Try.body>Assign(targets=[Name],value=List,type_comment=-)',  # main.py:19755
+    'Try.body>Assign(targets=[Name],value=ListComp,type_comment=-)',  # main.py:19740
+    'Try.body>Assign(targets=[Name],value=Name,type_comment=-)',  # main.py:75284
+    'Try.body>Assign(targets=[Name],value=SetComp,type_comment=-)',  # main.py:75266
+    'Try.body>Assign(targets=[Name],value=Subscript,type_comment=-)',  # main.py:17825
+    'Try.body>Assign(targets=[Tuple],value=Call,type_comment=-)',  # main.py:19773
+    'Try.body>Assign(targets=[Tuple],value=IfExp,type_comment=-)',  # main.py:58819
+    'Try.body>Assign(targets=[Tuple],value=Tuple,type_comment=-)',  # main.py:19702
+    'Try.body>AsyncWith(items=[withitem],body=[Assign],type_comment=-)',  # main.py:19700
+    'Try.body>AsyncWith(items=[withitem],body=[Assign|Expr|For|If],type_comment=-)',  # main.py:52665
+    'Try.body>AsyncWith(items=[withitem],body=[Assign|For],type_comment=-)',  # main.py:19742
+    'Try.body>AsyncWith(items=[withitem],body=[Expr],type_comment=-)',  # main.py:4492
+    'Try.body>Expr(value=Await)',  # main.py:17843
+    'Try.body>For(target=Name,iter=Name,body=[Assign|Expr|If],orelse=[],type_comment=-)',  # main.py:19756
+    'Try.body>For(target=Name,iter=Name,body=[Assign|If],orelse=[],type_comment=-)',  # main.py:17836
+    'Try.body>For(target=Name,iter=Name,body=[If],orelse=[],type_comment=-)',  # main.py:19769
+    'Try.body>If(test=BoolOp,body=[Assign],orelse=[])',  # main.py:58821
+    'Try.body>If(test=Compare,body=[Assign|If],orelse=[])',  # main.py:19750
+    "Try.body>ImportFrom(module='tournaments',names=[alias],level=0)",  # main.py:19699
+    'Try.body>Return(value=Call)',  # main.py:6656
+    'Try.body>Return(value=Compare)',  # main.py:57867
+    'Try.body>Return(value=IfExp)',  # main.py:57892
+    'Try.handlers>ExceptHandler(type=Name,name=-,body=[Assign])',  # main.py:19761
+    'Try.handlers>ExceptHandler(type=Name,name=-,body=[Pass])',  # main.py:4498
+    'Try.handlers>ExceptHandler(type=Name,name=-,body=[Return])',  # main.py:6657
+    'Try.handlers>ExceptHandler(type=Name,name=str,body=[Assign])',  # main.py:19777
+    'Try.handlers>ExceptHandler(type=Name,name=str,body=[Assign|Expr])',  # main.py:58829
+    'Try.handlers>ExceptHandler(type=Name,name=str,body=[Assign|Expr|If])',  # main.py:75285
+    'Try.handlers>ExceptHandler(type=Name,name=str,body=[Expr])',  # main.py:19703
+    'Try.handlers>ExceptHandler(type=Name,name=str,body=[Expr|If|Raise])',  # main.py:17846
     'Try.handlers>ExceptHandler(type=Name,name=str,body=[Return])',  # region_pick.py:182
-    'Tuple.ctx>Load()',  # main.py:6649
-    'Tuple.ctx>Store()',  # main.py:17828
+    'Tuple.ctx>Load()',  # main.py:6658
+    'Tuple.ctx>Store()',  # main.py:17869
     "Tuple.elts>Attribute(value=Name,attr='admitted_by',ctx=Load)",  # region_pick.py:265
     "Tuple.elts>Attribute(value=Name,attr='gain',ctx=Load)",  # region_pick.py:266
-    "Tuple.elts>Attribute(value=Name,attr='id',ctx=Load)",  # main.py:21435
+    "Tuple.elts>Attribute(value=Name,attr='id',ctx=Load)",  # main.py:21476
     "Tuple.elts>Attribute(value=Name,attr='max_regret',ctx=Load)",  # region_pick.py:266
     "Tuple.elts>Attribute(value=Name,attr='region',ctx=Load)",  # region_pick.py:257
     "Tuple.elts>Attribute(value=Name,attr='sum',ctx=Load)",  # region_pick.py:266
     "Tuple.elts>Attribute(value=Name,attr='worst',ctx=Load)",  # region_pick.py:266
-    'Tuple.elts>BinOp(left=BinOp,op=Add,right=BoolOp)',  # main.py:53259
-    'Tuple.elts>BinOp(left=Name,op=BitOr,right=Constant)',  # main.py:17740
-    'Tuple.elts>BoolOp(op=Or,values=[Constant|Name])',  # main.py:58304
-    'Tuple.elts>BoolOp(op=Or,values=[Constant|Subscript])',  # main.py:58664
-    'Tuple.elts>Call(func=Attribute,args=[Call],keywords=[])',  # main.py:53314
-    'Tuple.elts>Call(func=Name,args=[BoolOp],keywords=[])',  # main.py:58304
-    'Tuple.elts>Call(func=Name,args=[Call|Constant],keywords=[])',  # main.py:57251
-    'Tuple.elts>Call(func=Name,args=[GeneratorExp],keywords=[])',  # main.py:17880
-    'Tuple.elts>Call(func=Name,args=[Name],keywords=[])',  # main.py:19661
-    'Tuple.elts>Call(func=Name,args=[Subscript],keywords=[])',  # main.py:18347
-    'Tuple.elts>Constant(value=NoneType)',  # main.py:19716
-    'Tuple.elts>Constant(value=bool)',  # main.py:17774
-    'Tuple.elts>Constant(value=ellipsis)',  # main.py:6645
-    'Tuple.elts>Constant(value=int)',  # main.py:6649
-    'Tuple.elts>Constant(value=str)',  # main.py:17809
+    'Tuple.elts>BinOp(left=BinOp,op=Add,right=BoolOp)',  # main.py:53385
+    'Tuple.elts>BinOp(left=Name,op=BitOr,right=Constant)',  # main.py:17781
+    'Tuple.elts>BoolOp(op=Or,values=[Constant|Name])',  # main.py:58427
+    'Tuple.elts>BoolOp(op=Or,values=[Constant|Subscript])',  # main.py:58787
+    'Tuple.elts>Call(func=Attribute,args=[Call],keywords=[])',  # main.py:53440
+    'Tuple.elts>Call(func=Name,args=[BoolOp],keywords=[])',  # main.py:58427
+    'Tuple.elts>Call(func=Name,args=[Call|Constant],keywords=[])',  # main.py:57377
+    'Tuple.elts>Call(func=Name,args=[GeneratorExp],keywords=[])',  # main.py:17921
+    'Tuple.elts>Call(func=Name,args=[Name],keywords=[])',  # main.py:19702
+    'Tuple.elts>Call(func=Name,args=[Subscript],keywords=[])',  # main.py:18388
+    'Tuple.elts>Constant(value=NoneType)',  # main.py:19757
+    'Tuple.elts>Constant(value=bool)',  # main.py:17815
+    'Tuple.elts>Constant(value=ellipsis)',  # main.py:6654
+    'Tuple.elts>Constant(value=int)',  # main.py:6658
+    'Tuple.elts>Constant(value=str)',  # main.py:17850
     'Tuple.elts>Dict(keys=[Constant],values=[Call])',  # region_pick.py:183
-    'Tuple.elts>Dict(keys=[Constant],values=[JoinedStr])',  # main.py:19737
-    'Tuple.elts>Dict(keys=[],values=[])',  # main.py:19697
-    'Tuple.elts>IfExp(test=Compare,body=Constant,orelse=Call)',  # main.py:17741
-    'Tuple.elts>List(elts=[Subscript],ctx=Load)',  # main.py:50249
-    'Tuple.elts>List(elts=[],ctx=Load)',  # main.py:51495
-    'Tuple.elts>ListComp(elt=Subscript,generators=[comprehension])',  # main.py:50258
-    'Tuple.elts>Name(id=str,ctx=Load)',  # main.py:6645
-    'Tuple.elts>Name(id=str,ctx=Store)',  # main.py:17828
+    'Tuple.elts>Dict(keys=[Constant],values=[JoinedStr])',  # main.py:19778
+    'Tuple.elts>Dict(keys=[],values=[])',  # main.py:19738
+    'Tuple.elts>IfExp(test=Compare,body=Constant,orelse=Call)',  # main.py:17782
+    'Tuple.elts>List(elts=[Subscript],ctx=Load)',  # main.py:50375
+    'Tuple.elts>List(elts=[],ctx=Load)',  # main.py:51621
+    'Tuple.elts>ListComp(elt=Subscript,generators=[comprehension])',  # main.py:50384
+    'Tuple.elts>Name(id=str,ctx=Load)',  # main.py:6654
+    'Tuple.elts>Name(id=str,ctx=Store)',  # main.py:17869
     'Tuple.elts>Subscript(value=BoolOp,slice=Constant,ctx=Load)',  # region_pick.py:86
-    'Tuple.elts>Subscript(value=Name,slice=Constant,ctx=Load)',  # main.py:18347
-    'Tuple.elts>Subscript(value=Name,slice=Constant,ctx=Store)',  # main.py:19661
-    'Tuple.elts>Subscript(value=Name,slice=Name,ctx=Load)',  # main.py:50241
-    'Tuple.elts>Tuple(elts=[Attribute|Constant],ctx=Load)',  # main.py:21435
-    'Tuple.elts>Tuple(elts=[Constant],ctx=Load)',  # main.py:21434
-    'Tuple.elts>Tuple(elts=[Name],ctx=Store)',  # main.py:57838
+    'Tuple.elts>Subscript(value=Name,slice=Constant,ctx=Load)',  # main.py:18388
+    'Tuple.elts>Subscript(value=Name,slice=Constant,ctx=Store)',  # main.py:19702
+    'Tuple.elts>Subscript(value=Name,slice=Name,ctx=Load)',  # main.py:50367
+    'Tuple.elts>Tuple(elts=[Attribute|Constant],ctx=Load)',  # main.py:21476
+    'Tuple.elts>Tuple(elts=[Constant],ctx=Load)',  # main.py:21475
+    'Tuple.elts>Tuple(elts=[Name],ctx=Store)',  # main.py:57964
     'Tuple.elts>UnaryOp(op=USub,operand=Call)',  # region_pick.py:257
-    'UnaryOp.op>Not()',  # main.py:17772
-    'UnaryOp.op>USub()',  # main.py:66728
+    'UnaryOp.op>Not()',  # main.py:17813
+    'UnaryOp.op>USub()',  # main.py:66851
     "UnaryOp.operand>Attribute(value=Name,attr='fresh',ctx=Load)",  # region_pick.py:213
-    'UnaryOp.operand>Await(value=Call)',  # main.py:21060
-    'UnaryOp.operand>BoolOp(op=And,values=[Name])',  # main.py:21299
-    'UnaryOp.operand>BoolOp(op=Or,values=[BoolOp])',  # main.py:53252
+    'UnaryOp.operand>Await(value=Call)',  # main.py:21101
+    'UnaryOp.operand>BoolOp(op=And,values=[Name])',  # main.py:21340
+    'UnaryOp.operand>BoolOp(op=Or,values=[BoolOp])',  # main.py:53378
     'UnaryOp.operand>Call(func=Name,args=[Attribute],keywords=[])',  # region_pick.py:257
-    'UnaryOp.operand>Call(func=Name,args=[Await|Name],keywords=[])',  # main.py:53246
-    'UnaryOp.operand>Call(func=Name,args=[Name],keywords=[])',  # main.py:21283
-    'UnaryOp.operand>Call(func=Name,args=[Subscript],keywords=[])',  # main.py:55140
-    'UnaryOp.operand>Call(func=Name,args=[],keywords=[])',  # main.py:55097
+    'UnaryOp.operand>Call(func=Name,args=[Await|Name],keywords=[])',  # main.py:53372
+    'UnaryOp.operand>Call(func=Name,args=[Name],keywords=[])',  # main.py:21324
+    'UnaryOp.operand>Call(func=Name,args=[Subscript],keywords=[])',  # main.py:55266
+    'UnaryOp.operand>Call(func=Name,args=[],keywords=[])',  # main.py:55223
     'UnaryOp.operand>Compare(left=Name,ops=[LtE],comparators=[Name])',  # region_pick.py:56
-    'UnaryOp.operand>Constant(value=int)',  # main.py:66728
-    'UnaryOp.operand>Name(id=str,ctx=Load)',  # main.py:17772
-    'UnaryOp.operand>Subscript(value=Name,slice=Constant,ctx=Load)',  # main.py:50858
-    'While.body>Assign(targets=[Name],value=Await,type_comment=-)',  # main.py:51276
-    'While.body>Assign(targets=[Name],value=Call,type_comment=-)',  # main.py:21154
-    'While.body>Assign(targets=[Name],value=Constant,type_comment=-)',  # main.py:51302
-    'While.body>Assign(targets=[Name],value=ListComp,type_comment=-)',  # main.py:51364
-    'While.body>Assign(targets=[Name],value=Name,type_comment=-)',  # main.py:51249
-    'While.body>Assign(targets=[Tuple],value=Await,type_comment=-)',  # main.py:51319
-    'While.body>AugAssign(target=Name,op=Add,value=Constant)',  # main.py:21152
-    'While.body>AugAssign(target=Name,op=Sub,value=Constant)',  # main.py:51213
-    'While.body>Break()',  # main.py:51327
-    'While.body>Expr(value=Await)',  # main.py:21153
-    'While.body>Expr(value=Call)',  # main.py:63676
-    'While.body>For(target=Name,iter=Tuple,body=[Assign|If],orelse=[],type_comment=-)',  # main.py:63677
-    'While.body>If(test=BoolOp,body=[Assign|Break|Expr],orelse=[])',  # main.py:51404
-    'While.body>If(test=BoolOp,body=[Continue],orelse=[])',  # main.py:63674
-    'While.body>If(test=Compare,body=[Assign|Break],orelse=[])',  # main.py:51356
-    'While.body>If(test=Compare,body=[Assign|For|If],orelse=[])',  # main.py:51303
-    'While.body>If(test=Compare,body=[Break],orelse=[])',  # main.py:51228
-    'While.body>If(test=Compare,body=[Break|Expr],orelse=[])',  # main.py:51280
-    'While.body>If(test=Compare,body=[Continue|Expr],orelse=[])',  # main.py:51246
-    'While.body>If(test=Compare,body=[Continue|Expr|If],orelse=[])',  # main.py:51427
-    'While.body>If(test=Compare,body=[Expr|Return],orelse=[])',  # main.py:51323
-    'While.body>If(test=Compare,body=[Return],orelse=[])',  # main.py:51321
-    'While.body>If(test=UnaryOp,body=[Expr|Return],orelse=[])',  # main.py:21163
-    'While.orelse>Expr(value=Await)',  # main.py:51329
-    'While.orelse>Expr(value=Call)',  # main.py:51330
-    'While.orelse>Raise(exc=Call,cause=-)',  # main.py:51332
-    'While.test>BoolOp(op=And,values=[Compare])',  # main.py:21151
-    'While.test>Compare(left=Name,ops=[Gt],comparators=[Constant])',  # main.py:51212
-    'While.test>Name(id=str,ctx=Load)',  # main.py:63672
-    'arg.annotation>BinOp(left=Name,op=BitOr,right=Constant)',  # main.py:29470
-    'arg.annotation>Name(id=str,ctx=Load)',  # main.py:6645
-    'arg.annotation>Subscript(value=Name,slice=Name,ctx=Load)',  # main.py:50241
-    'arg.annotation>Subscript(value=Name,slice=Tuple,ctx=Load)',  # main.py:29495
-    'arguments.args>arg(arg=str,annotation=-,type_comment=-)',  # main.py:4441
-    'arguments.args>arg(arg=str,annotation=BinOp,type_comment=-)',  # main.py:29470
-    'arguments.args>arg(arg=str,annotation=Name,type_comment=-)',  # main.py:6645
-    'arguments.args>arg(arg=str,annotation=Subscript,type_comment=-)',  # main.py:29495
-    'arguments.defaults>Call(func=Name,args=[Constant],keywords=[keyword])',  # main.py:50620
-    'arguments.defaults>Call(func=Name,args=[Name],keywords=[])',  # main.py:21035
-    'arguments.defaults>Constant(value=NoneType)',  # main.py:17748
-    'arguments.defaults>Constant(value=float)',  # main.py:50261
-    'arguments.defaults>Constant(value=str)',  # main.py:19614
-    'arguments.defaults>Name(id=str,ctx=Load)',  # main.py:17884
-    'arguments.defaults>Tuple(elts=[],ctx=Load)',  # main.py:29495
-    'arguments.kw_defaults>Constant(value=NoneType)',  # main.py:17288
-    'arguments.kw_defaults>Constant(value=bool)',  # main.py:17754
-    'arguments.kw_defaults>Constant(value=int)',  # main.py:17753
-    'arguments.kw_defaults>Constant(value=str)',  # main.py:19667
-    'arguments.kw_defaults>Tuple(elts=[],ctx=Load)',  # main.py:17750
-    'arguments.kwonlyargs>arg(arg=str,annotation=-,type_comment=-)',  # main.py:17288
-    'arguments.kwonlyargs>arg(arg=str,annotation=Name,type_comment=-)',  # main.py:17753
+    'UnaryOp.operand>Constant(value=int)',  # main.py:66851
+    'UnaryOp.operand>Name(id=str,ctx=Load)',  # main.py:17813
+    'UnaryOp.operand>Subscript(value=Name,slice=Constant,ctx=Load)',  # main.py:50984
+    'While.body>Assign(targets=[Name],value=Await,type_comment=-)',  # main.py:51402
+    'While.body>Assign(targets=[Name],value=Call,type_comment=-)',  # main.py:21195
+    'While.body>Assign(targets=[Name],value=Constant,type_comment=-)',  # main.py:51428
+    'While.body>Assign(targets=[Name],value=ListComp,type_comment=-)',  # main.py:51490
+    'While.body>Assign(targets=[Name],value=Name,type_comment=-)',  # main.py:51375
+    'While.body>Assign(targets=[Tuple],value=Await,type_comment=-)',  # main.py:51445
+    'While.body>AugAssign(target=Name,op=Add,value=Constant)',  # main.py:21193
+    'While.body>AugAssign(target=Name,op=Sub,value=Constant)',  # main.py:51339
+    'While.body>Break()',  # main.py:51453
+    'While.body>Expr(value=Await)',  # main.py:21194
+    'While.body>Expr(value=Call)',  # main.py:63799
+    'While.body>For(target=Name,iter=Tuple,body=[Assign|If],orelse=[],type_comment=-)',  # main.py:63800
+    'While.body>If(test=BoolOp,body=[Assign|Break|Expr],orelse=[])',  # main.py:51530
+    'While.body>If(test=BoolOp,body=[Continue],orelse=[])',  # main.py:63797
+    'While.body>If(test=Compare,body=[Assign|Break],orelse=[])',  # main.py:51482
+    'While.body>If(test=Compare,body=[Assign|For|If],orelse=[])',  # main.py:51429
+    'While.body>If(test=Compare,body=[Break],orelse=[])',  # main.py:51354
+    'While.body>If(test=Compare,body=[Break|Expr],orelse=[])',  # main.py:51406
+    'While.body>If(test=Compare,body=[Continue|Expr],orelse=[])',  # main.py:51372
+    'While.body>If(test=Compare,body=[Continue|Expr|If],orelse=[])',  # main.py:51553
+    'While.body>If(test=Compare,body=[Expr|Return],orelse=[])',  # main.py:51449
+    'While.body>If(test=Compare,body=[Return],orelse=[])',  # main.py:51447
+    'While.body>If(test=UnaryOp,body=[Expr|Return],orelse=[])',  # main.py:21204
+    'While.orelse>Expr(value=Await)',  # main.py:51455
+    'While.orelse>Expr(value=Call)',  # main.py:51456
+    'While.orelse>Raise(exc=Call,cause=-)',  # main.py:51458
+    'While.test>BoolOp(op=And,values=[Compare])',  # main.py:21192
+    'While.test>Compare(left=Name,ops=[Gt],comparators=[Constant])',  # main.py:51338
+    'While.test>Name(id=str,ctx=Load)',  # main.py:63795
+    'arg.annotation>BinOp(left=Name,op=BitOr,right=Constant)',  # main.py:29511
+    'arg.annotation>Name(id=str,ctx=Load)',  # main.py:6654
+    'arg.annotation>Subscript(value=Name,slice=Name,ctx=Load)',  # main.py:50367
+    'arg.annotation>Subscript(value=Name,slice=Tuple,ctx=Load)',  # main.py:29536
+    'arguments.args>arg(arg=str,annotation=-,type_comment=-)',  # main.py:4446
+    'arguments.args>arg(arg=str,annotation=BinOp,type_comment=-)',  # main.py:29511
+    'arguments.args>arg(arg=str,annotation=Name,type_comment=-)',  # main.py:6654
+    'arguments.args>arg(arg=str,annotation=Subscript,type_comment=-)',  # main.py:29536
+    'arguments.defaults>Call(func=Name,args=[Constant],keywords=[keyword])',  # main.py:50746
+    'arguments.defaults>Call(func=Name,args=[Name],keywords=[])',  # main.py:21076
+    'arguments.defaults>Constant(value=NoneType)',  # main.py:17789
+    'arguments.defaults>Constant(value=float)',  # main.py:50387
+    'arguments.defaults>Constant(value=str)',  # main.py:19655
+    'arguments.defaults>Name(id=str,ctx=Load)',  # main.py:17925
+    'arguments.defaults>Tuple(elts=[],ctx=Load)',  # main.py:29536
+    'arguments.kw_defaults>Constant(value=NoneType)',  # main.py:17329
+    'arguments.kw_defaults>Constant(value=bool)',  # main.py:17795
+    'arguments.kw_defaults>Constant(value=int)',  # main.py:17794
+    'arguments.kw_defaults>Constant(value=str)',  # main.py:19708
+    'arguments.kw_defaults>Tuple(elts=[],ctx=Load)',  # main.py:17791
+    'arguments.kwonlyargs>arg(arg=str,annotation=-,type_comment=-)',  # main.py:17329
+    'arguments.kwonlyargs>arg(arg=str,annotation=Name,type_comment=-)',  # main.py:17794
     "comprehension.ifs>Attribute(value=Name,attr='home',ctx=Load)",  # region_pick.py:74
     'comprehension.ifs>BoolOp(op=And,values=[Attribute|Compare])',  # region_pick.py:261
     'comprehension.ifs>BoolOp(op=And,values=[Call|Name])',  # region_pick.py:189
-    'comprehension.ifs>BoolOp(op=And,values=[Compare|Name])',  # main.py:18346
-    'comprehension.ifs>Call(func=Attribute,args=[],keywords=[])',  # main.py:55208
+    'comprehension.ifs>BoolOp(op=And,values=[Compare|Name])',  # main.py:18387
+    'comprehension.ifs>Call(func=Attribute,args=[],keywords=[])',  # main.py:55334
     'comprehension.ifs>Call(func=Name,args=[GeneratorExp],keywords=[])',  # region_pick.py:83
-    'comprehension.ifs>Compare(left=Await,ops=[IsNot],comparators=[Constant])',  # main.py:21335
+    'comprehension.ifs>Compare(left=Await,ops=[IsNot],comparators=[Constant])',  # main.py:21376
     'comprehension.ifs>Compare(left=BinOp,ops=[GtE],comparators=[Name])',  # region_pick.py:246
-    'comprehension.ifs>Compare(left=Call,ops=[NotEq],comparators=[Call])',  # main.py:58704
-    'comprehension.ifs>Compare(left=Name,ops=[Eq],comparators=[Constant])',  # main.py:51308
-    'comprehension.ifs>Compare(left=Name,ops=[Eq],comparators=[Name])',  # main.py:19630
-    'comprehension.ifs>Compare(left=Name,ops=[IsNot],comparators=[Constant])',  # main.py:17771
-    'comprehension.ifs>Compare(left=Subscript,ops=[Eq],comparators=[Constant])',  # main.py:55272
-    'comprehension.ifs>Compare(left=Subscript,ops=[Eq],comparators=[Name])',  # main.py:50812
-    'comprehension.ifs>Compare(left=Subscript,ops=[NotEq],comparators=[Name])',  # main.py:50813
-    'comprehension.ifs>Compare(left=Subscript,ops=[NotEq],comparators=[Subscript])',  # main.py:55273
-    'comprehension.ifs>Compare(left=Subscript,ops=[NotIn],comparators=[Name])',  # main.py:50871
-    'comprehension.ifs>Name(id=str,ctx=Load)',  # main.py:76158
-    'comprehension.ifs>Subscript(value=Name,slice=Constant,ctx=Load)',  # main.py:66421
-    'comprehension.iter>BoolOp(op=Or,values=[Name|Tuple])',  # main.py:18346
-    'comprehension.iter>Call(func=Attribute,args=[Constant],keywords=[])',  # main.py:6647
-    'comprehension.iter>Call(func=Attribute,args=[],keywords=[])',  # main.py:19630
+    'comprehension.ifs>Compare(left=Call,ops=[NotEq],comparators=[Call])',  # main.py:58827
+    'comprehension.ifs>Compare(left=Name,ops=[Eq],comparators=[Constant])',  # main.py:51434
+    'comprehension.ifs>Compare(left=Name,ops=[Eq],comparators=[Name])',  # main.py:19671
+    'comprehension.ifs>Compare(left=Name,ops=[IsNot],comparators=[Constant])',  # main.py:17812
+    'comprehension.ifs>Compare(left=Subscript,ops=[Eq],comparators=[Constant])',  # main.py:55398
+    'comprehension.ifs>Compare(left=Subscript,ops=[Eq],comparators=[Name])',  # main.py:50938
+    'comprehension.ifs>Compare(left=Subscript,ops=[NotEq],comparators=[Name])',  # main.py:50939
+    'comprehension.ifs>Compare(left=Subscript,ops=[NotEq],comparators=[Subscript])',  # main.py:55399
+    'comprehension.ifs>Compare(left=Subscript,ops=[NotIn],comparators=[Name])',  # main.py:50997
+    'comprehension.ifs>Name(id=str,ctx=Load)',  # main.py:75191
+    'comprehension.ifs>Subscript(value=Name,slice=Constant,ctx=Load)',  # main.py:66544
+    'comprehension.iter>BoolOp(op=Or,values=[Name|Tuple])',  # main.py:18387
+    'comprehension.iter>Call(func=Attribute,args=[Constant],keywords=[])',  # main.py:6656
+    'comprehension.iter>Call(func=Attribute,args=[],keywords=[])',  # main.py:19671
     'comprehension.iter>Call(func=Name,args=[Name],keywords=[])',  # region_pick.py:225
-    'comprehension.iter>Name(id=str,ctx=Load)',  # main.py:17771
-    'comprehension.iter>Subscript(value=Name,slice=Constant,ctx=Load)',  # main.py:50258
+    'comprehension.iter>Name(id=str,ctx=Load)',  # main.py:17812
+    'comprehension.iter>Subscript(value=Name,slice=Constant,ctx=Load)',  # main.py:50384
     'comprehension.iter>Subscript(value=Name,slice=Name,ctx=Load)',  # match_hold.py:352
-    'comprehension.target>Name(id=str,ctx=Store)',  # main.py:6647
-    'comprehension.target>Tuple(elts=[Name],ctx=Store)',  # main.py:17828
-    "keyword.value>Attribute(value=Name,attr='p1_series_wins',ctx=Load)",  # main.py:21492
-    "keyword.value>Attribute(value=Name,attr='p2_series_wins',ctx=Load)",  # main.py:21493
-    "keyword.value>Attribute(value=Name,attr='utc',ctx=Load)",  # main.py:19723
-    'keyword.value>BinOp(left=ListComp,op=Add,right=Call)',  # main.py:52572
-    'keyword.value>BinOp(left=Name,op=Add,right=List)',  # main.py:51366
-    'keyword.value>BinOp(left=Name,op=Add,right=Name)',  # main.py:51547
-    'keyword.value>BoolOp(op=Or,values=[Constant|Subscript])',  # main.py:21521
-    'keyword.value>Call(func=Attribute,args=[],keywords=[])',  # main.py:19735
-    'keyword.value>Call(func=Name,args=[Attribute],keywords=[])',  # main.py:21489
-    'keyword.value>Call(func=Name,args=[BoolOp],keywords=[])',  # main.py:50851
-    'keyword.value>Call(func=Name,args=[Call],keywords=[])',  # main.py:50845
-    'keyword.value>Call(func=Name,args=[Constant|Name],keywords=[])',  # main.py:21494
-    'keyword.value>Call(func=Name,args=[Name],keywords=[])',  # main.py:21495
-    'keyword.value>Call(func=Name,args=[Name|Subscript],keywords=[])',  # main.py:55285
-    'keyword.value>Call(func=Name,args=[Subscript],keywords=[])',  # main.py:50769
-    'keyword.value>Compare(left=Name,ops=[Is],comparators=[Constant])',  # main.py:21727
-    'keyword.value>Constant(value=NoneType)',  # main.py:21601
-    'keyword.value>Constant(value=bool)',  # main.py:17955
-    'keyword.value>Constant(value=int)',  # main.py:17810
-    'keyword.value>Constant(value=str)',  # main.py:17810
-    'keyword.value>IfExp(test=Compare,body=Constant,orelse=Attribute)',  # main.py:21527
-    'keyword.value>IfExp(test=Compare,body=Constant,orelse=Constant)',  # main.py:21351
-    'keyword.value>IfExp(test=Compare,body=Constant,orelse=IfExp)',  # main.py:21523
-    'keyword.value>IfExp(test=Compare,body=Constant,orelse=Name)',  # main.py:51147
-    'keyword.value>IfExp(test=Compare,body=Name,orelse=Name)',  # main.py:21726
-    'keyword.value>IfExp(test=Compare,body=Name,orelse=Subscript)',  # main.py:21490
-    'keyword.value>IfExp(test=Compare,body=Subscript,orelse=Name)',  # main.py:21491
-    'keyword.value>IfExp(test=Name,body=Constant,orelse=Constant)',  # main.py:50790
-    'keyword.value>IfExp(test=Name,body=Name,orelse=Constant)',  # main.py:51082
-    'keyword.value>IfExp(test=Subscript,body=Call,orelse=Constant)',  # main.py:51075
-    'keyword.value>Lambda(args=arguments,body=Call)',  # main.py:50257
-    'keyword.value>Lambda(args=arguments,body=Subscript)',  # main.py:51520
-    'keyword.value>Lambda(args=arguments,body=Tuple)',  # main.py:18347
-    'keyword.value>List(elts=[Constant],ctx=Load)',  # main.py:21034
-    'keyword.value>List(elts=[Name],ctx=Load)',  # main.py:21142
-    'keyword.value>List(elts=[Name|Subscript],ctx=Load)',  # main.py:21609
-    'keyword.value>List(elts=[Subscript],ctx=Load)',  # main.py:21142
-    'keyword.value>List(elts=[Tuple],ctx=Load)',  # main.py:51238
-    'keyword.value>List(elts=[],ctx=Load)',  # main.py:53431
-    'keyword.value>ListComp(elt=Subscript,generators=[comprehension])',  # main.py:50918
-    'keyword.value>ListComp(elt=Tuple,generators=[comprehension])',  # main.py:51279
-    'keyword.value>Name(id=str,ctx=Load)',  # main.py:17326
-    'keyword.value>Subscript(value=Name,slice=Constant,ctx=Load)',  # main.py:21359
-    'keyword.value>Tuple(elts=[Constant],ctx=Load)',  # main.py:57708
-    'keyword.value>Tuple(elts=[Constant|Subscript],ctx=Load)',  # main.py:50910
-    'keyword.value>Tuple(elts=[Tuple],ctx=Load)',  # main.py:21434
-    'withitem.context_expr>Call(func=Attribute,args=[],keywords=[])',  # main.py:4487
+    'comprehension.target>Name(id=str,ctx=Store)',  # main.py:6656
+    'comprehension.target>Tuple(elts=[Name],ctx=Store)',  # main.py:17869
+    "keyword.value>Attribute(value=Name,attr='p1_series_wins',ctx=Load)",  # main.py:21533
+    "keyword.value>Attribute(value=Name,attr='p2_series_wins',ctx=Load)",  # main.py:21534
+    "keyword.value>Attribute(value=Name,attr='utc',ctx=Load)",  # main.py:19764
+    'keyword.value>BinOp(left=ListComp,op=Add,right=Call)',  # main.py:52698
+    'keyword.value>BinOp(left=Name,op=Add,right=List)',  # main.py:51492
+    'keyword.value>BinOp(left=Name,op=Add,right=Name)',  # main.py:51673
+    'keyword.value>BoolOp(op=Or,values=[Constant|Subscript])',  # main.py:21562
+    'keyword.value>Call(func=Attribute,args=[],keywords=[])',  # main.py:19776
+    'keyword.value>Call(func=Name,args=[Attribute],keywords=[])',  # main.py:21530
+    'keyword.value>Call(func=Name,args=[BoolOp],keywords=[])',  # main.py:50977
+    'keyword.value>Call(func=Name,args=[Call],keywords=[])',  # main.py:50971
+    'keyword.value>Call(func=Name,args=[Constant|Name],keywords=[])',  # main.py:21535
+    'keyword.value>Call(func=Name,args=[Name],keywords=[])',  # main.py:21536
+    'keyword.value>Call(func=Name,args=[Name|Subscript],keywords=[])',  # main.py:55411
+    'keyword.value>Call(func=Name,args=[Subscript],keywords=[])',  # main.py:50895
+    'keyword.value>Compare(left=Name,ops=[Is],comparators=[Constant])',  # main.py:21768
+    'keyword.value>Constant(value=NoneType)',  # main.py:21642
+    'keyword.value>Constant(value=bool)',  # main.py:17996
+    'keyword.value>Constant(value=int)',  # main.py:17851
+    'keyword.value>Constant(value=str)',  # main.py:17851
+    'keyword.value>IfExp(test=Compare,body=Constant,orelse=Attribute)',  # main.py:21568
+    'keyword.value>IfExp(test=Compare,body=Constant,orelse=Constant)',  # main.py:21392
+    'keyword.value>IfExp(test=Compare,body=Constant,orelse=IfExp)',  # main.py:21564
+    'keyword.value>IfExp(test=Compare,body=Constant,orelse=Name)',  # main.py:51273
+    'keyword.value>IfExp(test=Compare,body=Name,orelse=Name)',  # main.py:21767
+    'keyword.value>IfExp(test=Compare,body=Name,orelse=Subscript)',  # main.py:21531
+    'keyword.value>IfExp(test=Compare,body=Subscript,orelse=Name)',  # main.py:21532
+    'keyword.value>IfExp(test=Name,body=Constant,orelse=Constant)',  # main.py:50916
+    'keyword.value>IfExp(test=Name,body=Name,orelse=Constant)',  # main.py:51208
+    'keyword.value>IfExp(test=Subscript,body=Call,orelse=Constant)',  # main.py:51201
+    'keyword.value>Lambda(args=arguments,body=Call)',  # main.py:50383
+    'keyword.value>Lambda(args=arguments,body=Subscript)',  # main.py:51646
+    'keyword.value>Lambda(args=arguments,body=Tuple)',  # main.py:18388
+    'keyword.value>List(elts=[Constant],ctx=Load)',  # main.py:21075
+    'keyword.value>List(elts=[Name],ctx=Load)',  # main.py:21183
+    'keyword.value>List(elts=[Name|Subscript],ctx=Load)',  # main.py:21650
+    'keyword.value>List(elts=[Subscript],ctx=Load)',  # main.py:21183
+    'keyword.value>List(elts=[Tuple],ctx=Load)',  # main.py:51364
+    'keyword.value>List(elts=[],ctx=Load)',  # main.py:53557
+    'keyword.value>ListComp(elt=Subscript,generators=[comprehension])',  # main.py:51044
+    'keyword.value>ListComp(elt=Tuple,generators=[comprehension])',  # main.py:51405
+    'keyword.value>Name(id=str,ctx=Load)',  # main.py:17367
+    'keyword.value>Subscript(value=Name,slice=Constant,ctx=Load)',  # main.py:21400
+    'keyword.value>Tuple(elts=[Constant],ctx=Load)',  # main.py:57834
+    'keyword.value>Tuple(elts=[Constant|Subscript],ctx=Load)',  # main.py:51036
+    'keyword.value>Tuple(elts=[Tuple],ctx=Load)',  # main.py:21475
+    'withitem.context_expr>Call(func=Attribute,args=[],keywords=[])',  # main.py:4492
 })
 
 
@@ -1965,63 +1965,54 @@ A1_MEANINGFUL = frozenset({
 A1_BINDINGS = frozenset({
     ('db', 'parameter'),
     ('uuid_mod', 'import'),
-    ('rollback', 'end', (  # main.py:17808
+    ('rollback', 'end', (  # main.py:17849
         'AsyncFunctionDef.body>Try(body=[Assign|Expr|For],handlers=[ExceptHandler],orelse=[],finalbody=[])',
         'Try.handlers>ExceptHandler(type=Name,name=str,body=[Expr|If|Raise])',
         'ExceptHandler.body>Expr(value=Await)',
         'Expr.value>Await(value=Call)',
         'Await.value>Call(func=Attribute,args=[],keywords=[])',
     )),
-    ('commit', 'end', (  # main.py:21086
+    ('commit', 'end', (  # main.py:21127
         'AsyncFunctionDef.body>Expr(value=Await)',
         'Expr.value>Await(value=Call)',
         'Await.value>Call(func=Attribute,args=[],keywords=[])',
     )),
-    ('commit', 'end', (  # main.py:21104
+    ('commit', 'end', (  # main.py:21145
         'AsyncFunctionDef.body>If(test=UnaryOp,body=[Expr|Return],orelse=[])',
         'If.body>Expr(value=Await)',
         'Expr.value>Await(value=Call)',
         'Await.value>Call(func=Attribute,args=[],keywords=[])',
     )),
-    ('commit', 'end', (  # main.py:21153
+    ('commit', 'end', (  # main.py:21194
         'AsyncFunctionDef.body>While(test=BoolOp,body=[Assign|AugAssign|Expr|If],orelse=[])',
         'While.body>Expr(value=Await)',
         'Expr.value>Await(value=Call)',
         'Await.value>Call(func=Attribute,args=[],keywords=[])',
     )),
-    ('commit', 'end', (  # main.py:21164
+    ('commit', 'end', (  # main.py:21205
         'AsyncFunctionDef.body>While(test=BoolOp,body=[Assign|AugAssign|Expr|If],orelse=[])',
         'While.body>If(test=UnaryOp,body=[Expr|Return],orelse=[])',
         'If.body>Expr(value=Await)',
         'Expr.value>Await(value=Call)',
         'Await.value>Call(func=Attribute,args=[],keywords=[])',
     )),
-    ('commit', 'end', (  # main.py:21253
+    ('commit', 'end', (  # main.py:21294
         'AsyncFunctionDef.body>If(test=BoolOp,body=[Expr|Return],orelse=[])',
         'If.body>Expr(value=Await)',
         'Expr.value>Await(value=Call)',
         'Await.value>Call(func=Attribute,args=[],keywords=[])',
     )),
-    ('commit', 'end', (  # main.py:21277
+    ('commit', 'end', (  # main.py:21318
         'AsyncFunctionDef.body>If(test=BoolOp,body=[Assign|Expr|If|Return],orelse=[])',
         'If.body>If(test=UnaryOp,body=[Expr|Return],orelse=[])',
         'If.body>Expr(value=Await)',
         'Expr.value>Await(value=Call)',
         'Await.value>Call(func=Attribute,args=[],keywords=[])',
     )),
-    ('commit', 'end', (  # main.py:21308
+    ('commit', 'end', (  # main.py:21349
         'AsyncFunctionDef.body>If(test=BoolOp,body=[Assign|Expr|If|Return],orelse=[])',
         'If.body>If(test=Subscript,body=[Assign|If],orelse=[])',
         'If.body>If(test=BoolOp,body=[Expr|Return],orelse=[])',
-        'If.body>Expr(value=Await)',
-        'Expr.value>Await(value=Call)',
-        'Await.value>Call(func=Attribute,args=[],keywords=[])',
-    )),
-    ('commit', 'end', (  # main.py:21349
-        'AsyncFunctionDef.body>If(test=BoolOp,body=[Assign|Expr|If|Return],orelse=[])',
-        'If.body>If(test=BoolOp,body=[Assign|Expr|If|Return],orelse=[])',
-        'If.body>If(test=UnaryOp,body=[Assign|If],orelse=[If])',
-        'If.body>If(test=Name,body=[Expr|If|Return],orelse=[])',
         'If.body>Expr(value=Await)',
         'Expr.value>Await(value=Call)',
         'Await.value>Call(func=Attribute,args=[],keywords=[])',
@@ -2030,12 +2021,21 @@ A1_BINDINGS = frozenset({
         'AsyncFunctionDef.body>If(test=BoolOp,body=[Assign|Expr|If|Return],orelse=[])',
         'If.body>If(test=BoolOp,body=[Assign|Expr|If|Return],orelse=[])',
         'If.body>If(test=UnaryOp,body=[Assign|If],orelse=[If])',
+        'If.body>If(test=Name,body=[Expr|If|Return],orelse=[])',
+        'If.body>Expr(value=Await)',
+        'Expr.value>Await(value=Call)',
+        'Await.value>Call(func=Attribute,args=[],keywords=[])',
+    )),
+    ('commit', 'end', (  # main.py:21431
+        'AsyncFunctionDef.body>If(test=BoolOp,body=[Assign|Expr|If|Return],orelse=[])',
+        'If.body>If(test=BoolOp,body=[Assign|Expr|If|Return],orelse=[])',
+        'If.body>If(test=UnaryOp,body=[Assign|If],orelse=[If])',
         'If.body>If(test=UnaryOp,body=[Expr|Return],orelse=[])',
         'If.body>Expr(value=Await)',
         'Expr.value>Await(value=Call)',
         'Await.value>Call(func=Attribute,args=[],keywords=[])',
     )),
-    ('commit', 'end', (  # main.py:21397
+    ('commit', 'end', (  # main.py:21438
         'AsyncFunctionDef.body>If(test=BoolOp,body=[Assign|Expr|If|Return],orelse=[])',
         'If.body>If(test=BoolOp,body=[Assign|Expr|If|Return],orelse=[])',
         'If.body>If(test=UnaryOp,body=[Assign|If],orelse=[If])',
@@ -2044,7 +2044,7 @@ A1_BINDINGS = frozenset({
         'Expr.value>Await(value=Call)',
         'Await.value>Call(func=Attribute,args=[],keywords=[])',
     )),
-    ('commit', 'end', (  # main.py:21440
+    ('commit', 'end', (  # main.py:21481
         'AsyncFunctionDef.body>If(test=BoolOp,body=[Assign|Expr|If|Return],orelse=[])',
         'If.body>If(test=BoolOp,body=[Assign|Expr|If|Return],orelse=[])',
         'If.body>If(test=Compare,body=[Expr|Return],orelse=[])',
@@ -2052,7 +2052,7 @@ A1_BINDINGS = frozenset({
         'Expr.value>Await(value=Call)',
         'Await.value>Call(func=Attribute,args=[],keywords=[])',
     )),
-    ('rollback', 'end', (  # main.py:21451
+    ('rollback', 'end', (  # main.py:21492
         'AsyncFunctionDef.body>If(test=BoolOp,body=[Assign|Expr|If|Return],orelse=[])',
         'If.body>If(test=BoolOp,body=[Assign|Expr|If|Return],orelse=[])',
         'If.body>If(test=Compare,body=[Expr|Raise],orelse=[])',
@@ -2060,104 +2060,104 @@ A1_BINDINGS = frozenset({
         'Expr.value>Await(value=Call)',
         'Await.value>Call(func=Attribute,args=[],keywords=[])',
     )),
-    ('commit', 'end', (  # main.py:21464
+    ('commit', 'end', (  # main.py:21505
         'AsyncFunctionDef.body>If(test=BoolOp,body=[Assign|Expr|If|Return],orelse=[])',
         'If.body>If(test=BoolOp,body=[Assign|Expr|If|Return],orelse=[])',
         'If.body>Expr(value=Await)',
         'Expr.value>Await(value=Call)',
         'Await.value>Call(func=Attribute,args=[],keywords=[])',
     )),
-    ('commit', 'end', (  # main.py:21502
+    ('commit', 'end', (  # main.py:21543
         'AsyncFunctionDef.body>If(test=BoolOp,body=[Assign|Expr|If|Return],orelse=[])',
         'If.body>If(test=Name,body=[Assign|Expr|Return],orelse=[])',
         'If.body>Expr(value=Await)',
         'Expr.value>Await(value=Call)',
         'Await.value>Call(func=Attribute,args=[],keywords=[])',
     )),
-    ('commit', 'end', (  # main.py:21534
+    ('commit', 'end', (  # main.py:21575
         'AsyncFunctionDef.body>If(test=BoolOp,body=[Assign|Expr|If|Return],orelse=[])',
         'If.body>Expr(value=Await)',
         'Expr.value>Await(value=Call)',
         'Await.value>Call(func=Attribute,args=[],keywords=[])',
     )),
-    ('commit', 'end', (  # main.py:21553
+    ('commit', 'end', (  # main.py:21594
         'AsyncFunctionDef.body>If(test=Compare,body=[Expr|Return],orelse=[])',
         'If.body>Expr(value=Await)',
         'Expr.value>Await(value=Call)',
         'Await.value>Call(func=Attribute,args=[],keywords=[])',
     )),
-    ('_form_attempt', 'store', (  # main.py:21565
+    ('_form_attempt', 'store', (  # main.py:21606
         'AsyncFunctionDef.body>For(target=Name,iter=Call,body=[Assign|Expr|For|If|Return],orelse=[Expr|Raise],type_comment=-)',
         'For.target>Name(id=str,ctx=Store)',
     )),
-    ('commit', 'end', (  # main.py:21574
+    ('commit', 'end', (  # main.py:21615
         'AsyncFunctionDef.body>For(target=Name,iter=Call,body=[Assign|Expr|For|If|Return],orelse=[Expr|Raise],type_comment=-)',
         'For.body>If(test=Compare,body=[Expr|Return],orelse=[])',
         'If.body>Expr(value=Await)',
         'Expr.value>Await(value=Call)',
         'Await.value>Call(func=Attribute,args=[],keywords=[])',
     )),
-    ('rollback', 'end', (  # main.py:21622
+    ('rollback', 'end', (  # main.py:21663
         'AsyncFunctionDef.body>For(target=Name,iter=Call,body=[Assign|Expr|For|If|Return],orelse=[Expr|Raise],type_comment=-)',
         'For.body>If(test=BoolOp,body=[Assign|Continue|Expr],orelse=[])',
         'If.body>Expr(value=Await)',
         'Expr.value>Await(value=Call)',
         'Await.value>Call(func=Attribute,args=[],keywords=[])',
     )),
-    ('rollback', 'end', (  # main.py:21646
+    ('rollback', 'end', (  # main.py:21687
         'AsyncFunctionDef.body>For(target=Name,iter=Call,body=[Assign|Expr|For|If|Return],orelse=[Expr|Raise],type_comment=-)',
         'For.body>If(test=Compare,body=[Assign|Continue|Expr|If],orelse=[])',
         'If.body>Expr(value=Await)',
         'Expr.value>Await(value=Call)',
         'Await.value>Call(func=Attribute,args=[],keywords=[])',
     )),
-    ('rollback', 'end', (  # main.py:21688
+    ('rollback', 'end', (  # main.py:21729
         'AsyncFunctionDef.body>For(target=Name,iter=Call,body=[Assign|Expr|For|If|Return],orelse=[Expr|Raise],type_comment=-)',
         'For.body>If(test=Compare,body=[Expr|Raise],orelse=[])',
         'If.body>Expr(value=Await)',
         'Expr.value>Await(value=Call)',
         'Await.value>Call(func=Attribute,args=[],keywords=[])',
     )),
-    ('commit', 'end', (  # main.py:21690
+    ('commit', 'end', (  # main.py:21731
         'AsyncFunctionDef.body>For(target=Name,iter=Call,body=[Assign|Expr|For|If|Return],orelse=[Expr|Raise],type_comment=-)',
         'For.body>Expr(value=Await)',
         'Expr.value>Await(value=Call)',
         'Await.value>Call(func=Attribute,args=[],keywords=[])',
     )),
-    ('rollback', 'end', (  # main.py:21706
+    ('rollback', 'end', (  # main.py:21747
         'AsyncFunctionDef.body>For(target=Name,iter=Call,body=[Assign|Expr|For|If|Return],orelse=[Expr|Raise],type_comment=-)',
         'For.orelse>Expr(value=Await)',
         'Expr.value>Await(value=Call)',
         'Await.value>Call(func=Attribute,args=[],keywords=[])',
     )),
-    ('commit', 'end', (  # main.py:50733
+    ('commit', 'end', (  # main.py:50859
         'AsyncFunctionDef.body>If(test=BoolOp,body=[Assign|Expr|If|Return|Try],orelse=[])',
         'If.body>If(test=Compare,body=[Expr|Return],orelse=[])',
         'If.body>Expr(value=Await)',
         'Expr.value>Await(value=Call)',
         'Await.value>Call(func=Attribute,args=[],keywords=[])',
     )),
-    ('commit', 'end', (  # main.py:50760
+    ('commit', 'end', (  # main.py:50886
         'AsyncFunctionDef.body>If(test=BoolOp,body=[Assign|Expr|If|Return|Try],orelse=[])',
         'If.body>If(test=UnaryOp,body=[Expr|Return],orelse=[])',
         'If.body>Expr(value=Await)',
         'Expr.value>Await(value=Call)',
         'Await.value>Call(func=Attribute,args=[],keywords=[])',
     )),
-    ('commit', 'end', (  # main.py:50767
+    ('commit', 'end', (  # main.py:50893
         'AsyncFunctionDef.body>If(test=BoolOp,body=[Assign|Expr|If|Return|Try],orelse=[])',
         'If.body>Expr(value=Await)',
         'Expr.value>Await(value=Call)',
         'Await.value>Call(func=Attribute,args=[],keywords=[])',
     )),
-    ('commit', 'end', (  # main.py:50786
+    ('commit', 'end', (  # main.py:50912
         'AsyncFunctionDef.body>If(test=BoolOp,body=[Assign|Expr|FunctionDef|If|Return],orelse=[])',
         'If.body>If(test=Compare,body=[Assign|Expr|Return],orelse=[])',
         'If.body>Expr(value=Await)',
         'Expr.value>Await(value=Call)',
         'Await.value>Call(func=Attribute,args=[],keywords=[])',
     )),
-    ('commit', 'end', (  # main.py:50831
+    ('commit', 'end', (  # main.py:50957
         'AsyncFunctionDef.body>If(test=BoolOp,body=[Assign|Expr|FunctionDef|If|Return],orelse=[])',
         'If.body>If(test=Subscript,body=[Assign|If],orelse=[])',
         'If.body>If(test=BoolOp,body=[Assign|Expr|Return],orelse=[])',
@@ -2165,7 +2165,7 @@ A1_BINDINGS = frozenset({
         'Expr.value>Await(value=Call)',
         'Await.value>Call(func=Attribute,args=[],keywords=[])',
     )),
-    ('commit', 'end', (  # main.py:50888
+    ('commit', 'end', (  # main.py:51014
         'AsyncFunctionDef.body>If(test=BoolOp,body=[Assign|Expr|FunctionDef|If|Return],orelse=[])',
         'If.body>If(test=Name,body=[Assign|Expr|If|Return],orelse=[])',
         'If.body>If(test=UnaryOp,body=[Assign|Expr|For|If],orelse=[Assign])',
@@ -2174,7 +2174,7 @@ A1_BINDINGS = frozenset({
         'Expr.value>Await(value=Call)',
         'Await.value>Call(func=Attribute,args=[],keywords=[])',
     )),
-    ('commit', 'end', (  # main.py:50925
+    ('commit', 'end', (  # main.py:51051
         'AsyncFunctionDef.body>If(test=BoolOp,body=[Assign|Expr|FunctionDef|If|Return],orelse=[])',
         'If.body>If(test=Name,body=[Assign|Expr|If|Return],orelse=[])',
         'If.body>If(test=UnaryOp,body=[Assign|Expr|For|If],orelse=[Assign])',
@@ -2183,7 +2183,7 @@ A1_BINDINGS = frozenset({
         'Expr.value>Await(value=Call)',
         'Await.value>Call(func=Attribute,args=[],keywords=[])',
     )),
-    ('rollback', 'end', (  # main.py:51027
+    ('rollback', 'end', (  # main.py:51153
         'AsyncFunctionDef.body>If(test=BoolOp,body=[Assign|Expr|FunctionDef|If|Return],orelse=[])',
         'If.body>If(test=Name,body=[Assign|Expr|If|Return],orelse=[])',
         'If.body>If(test=UnaryOp,body=[Assign|Expr|For|If],orelse=[Assign])',
@@ -2192,36 +2192,36 @@ A1_BINDINGS = frozenset({
         'Expr.value>Await(value=Call)',
         'Await.value>Call(func=Attribute,args=[],keywords=[])',
     )),
-    ('commit', 'end', (  # main.py:51057
+    ('commit', 'end', (  # main.py:51183
         'AsyncFunctionDef.body>If(test=BoolOp,body=[Assign|Expr|FunctionDef|If|Return],orelse=[])',
         'If.body>If(test=Name,body=[Assign|Expr|If|Return],orelse=[])',
         'If.body>Expr(value=Await)',
         'Expr.value>Await(value=Call)',
         'Await.value>Call(func=Attribute,args=[],keywords=[])',
     )),
-    ('commit', 'end', (  # main.py:51086
+    ('commit', 'end', (  # main.py:51212
         'AsyncFunctionDef.body>If(test=BoolOp,body=[Assign|Expr|FunctionDef|If|Return],orelse=[])',
         'If.body>Expr(value=Await)',
         'Expr.value>Await(value=Call)',
         'Await.value>Call(func=Attribute,args=[],keywords=[])',
     )),
-    ('commit', 'end', (  # main.py:51133
+    ('commit', 'end', (  # main.py:51259
         'AsyncFunctionDef.body>If(test=Await,body=[Expr|Return],orelse=[])',
         'If.body>Expr(value=Await)',
         'Expr.value>Await(value=Call)',
         'Await.value>Call(func=Attribute,args=[],keywords=[])',
     )),
-    ('_form_left', 'store', (  # main.py:51208
+    ('_form_left', 'store', (  # main.py:51334
         'AsyncFunctionDef.body>Assign(targets=[Name],value=Name,type_comment=-)',
         'Assign.targets>Name(id=str,ctx=Store)',
     )),
-    ('_form_left', 'store', (  # main.py:51213
+    ('_form_left', 'store', (  # main.py:51339
         'AsyncFunctionDef.body>If(test=Compare,body=[Assign|Expr|While],orelse=[])',
         'If.body>While(test=Compare,body=[Assign|AugAssign|Break|Expr|If],orelse=[Expr|Raise])',
         'While.body>AugAssign(target=Name,op=Sub,value=Constant)',
         'AugAssign.target>Name(id=str,ctx=Store)',
     )),
-    ('rollback', 'end', (  # main.py:51247
+    ('rollback', 'end', (  # main.py:51373
         'AsyncFunctionDef.body>If(test=Compare,body=[Assign|Expr|While],orelse=[])',
         'If.body>While(test=Compare,body=[Assign|AugAssign|Break|Expr|If],orelse=[Expr|Raise])',
         'While.body>If(test=Compare,body=[Continue|Expr],orelse=[])',
@@ -2229,7 +2229,7 @@ A1_BINDINGS = frozenset({
         'Expr.value>Await(value=Call)',
         'Await.value>Call(func=Attribute,args=[],keywords=[])',
     )),
-    ('rollback', 'end', (  # main.py:51295
+    ('rollback', 'end', (  # main.py:51421
         'AsyncFunctionDef.body>If(test=Compare,body=[Assign|Expr|While],orelse=[])',
         'If.body>While(test=Compare,body=[Assign|AugAssign|Break|Expr|If],orelse=[Expr|Raise])',
         'While.body>If(test=Compare,body=[Break|Expr],orelse=[])',
@@ -2237,7 +2237,7 @@ A1_BINDINGS = frozenset({
         'Expr.value>Await(value=Call)',
         'Await.value>Call(func=Attribute,args=[],keywords=[])',
     )),
-    ('commit', 'end', (  # main.py:51324
+    ('commit', 'end', (  # main.py:51450
         'AsyncFunctionDef.body>If(test=Compare,body=[Assign|Expr|While],orelse=[])',
         'If.body>While(test=Compare,body=[Assign|AugAssign|Break|Expr|If],orelse=[Expr|Raise])',
         'While.body>If(test=Compare,body=[Expr|Return],orelse=[])',
@@ -2245,167 +2245,167 @@ A1_BINDINGS = frozenset({
         'Expr.value>Await(value=Call)',
         'Await.value>Call(func=Attribute,args=[],keywords=[])',
     )),
-    ('rollback', 'end', (  # main.py:51329
+    ('rollback', 'end', (  # main.py:51455
         'AsyncFunctionDef.body>If(test=Compare,body=[Assign|Expr|While],orelse=[])',
         'If.body>While(test=Compare,body=[Assign|AugAssign|Break|Expr|If],orelse=[Expr|Raise])',
         'While.orelse>Expr(value=Await)',
         'Expr.value>Await(value=Call)',
         'Await.value>Call(func=Attribute,args=[],keywords=[])',
     )),
-    ('commit', 'end', (  # main.py:51338
+    ('commit', 'end', (  # main.py:51464
         'AsyncFunctionDef.body>If(test=Compare,body=[Assign|Expr|While],orelse=[])',
         'If.body>Expr(value=Await)',
         'Expr.value>Await(value=Call)',
         'Await.value>Call(func=Attribute,args=[],keywords=[])',
     )),
-    ('others', 'store', (  # main.py:51341
+    ('others', 'store', (  # main.py:51467
         'AsyncFunctionDef.body>Assign(targets=[Name],value=Constant,type_comment=-)',
         'Assign.targets>Name(id=str,ctx=Store)',
     )),
-    ('_form_left', 'store', (  # main.py:51348
+    ('_form_left', 'store', (  # main.py:51474
         'AsyncFunctionDef.body>Assign(targets=[Name],value=Call,type_comment=-)',
         'Assign.targets>Name(id=str,ctx=Store)',
     )),
-    ('_form_left', 'store', (  # main.py:51350
+    ('_form_left', 'store', (  # main.py:51476
         'AsyncFunctionDef.body>While(test=Compare,body=[Assign|AugAssign|Break|Expr|If],orelse=[Expr|Raise])',
         'While.body>AugAssign(target=Name,op=Sub,value=Constant)',
         'AugAssign.target>Name(id=str,ctx=Store)',
     )),
-    ('others', 'store', (  # main.py:51357
+    ('others', 'store', (  # main.py:51483
         'AsyncFunctionDef.body>While(test=Compare,body=[Assign|AugAssign|Break|Expr|If],orelse=[Expr|Raise])',
         'While.body>If(test=Compare,body=[Assign|Break],orelse=[])',
         'If.body>Assign(targets=[Name],value=Name,type_comment=-)',
         'Assign.targets>Name(id=str,ctx=Store)',
     )),
-    ('rollback', 'end', (  # main.py:51409
+    ('rollback', 'end', (  # main.py:51535
         'AsyncFunctionDef.body>While(test=Compare,body=[Assign|AugAssign|Break|Expr|If],orelse=[Expr|Raise])',
         'While.body>If(test=BoolOp,body=[Assign|Break|Expr],orelse=[])',
         'If.body>Expr(value=Await)',
         'Expr.value>Await(value=Call)',
         'Await.value>Call(func=Attribute,args=[],keywords=[])',
     )),
-    ('others', 'store', (  # main.py:51410
+    ('others', 'store', (  # main.py:51536
         'AsyncFunctionDef.body>While(test=Compare,body=[Assign|AugAssign|Break|Expr|If],orelse=[Expr|Raise])',
         'While.body>If(test=BoolOp,body=[Assign|Break|Expr],orelse=[])',
         'If.body>Assign(targets=[Name],value=List,type_comment=-)',
         'Assign.targets>Name(id=str,ctx=Store)',
     )),
-    ('rollback', 'end', (  # main.py:51413
+    ('rollback', 'end', (  # main.py:51539
         'AsyncFunctionDef.body>While(test=Compare,body=[Assign|AugAssign|Break|Expr|If],orelse=[Expr|Raise])',
         'While.body>If(test=Compare,body=[Continue|Expr],orelse=[])',
         'If.body>Expr(value=Await)',
         'Expr.value>Await(value=Call)',
         'Await.value>Call(func=Attribute,args=[],keywords=[])',
     )),
-    ('rollback', 'end', (  # main.py:51431
+    ('rollback', 'end', (  # main.py:51557
         'AsyncFunctionDef.body>While(test=Compare,body=[Assign|AugAssign|Break|Expr|If],orelse=[Expr|Raise])',
         'While.body>If(test=Compare,body=[Continue|Expr|If],orelse=[])',
         'If.body>Expr(value=Await)',
         'Expr.value>Await(value=Call)',
         'Await.value>Call(func=Attribute,args=[],keywords=[])',
     )),
-    ('others', 'store', (  # main.py:51435
+    ('others', 'store', (  # main.py:51561
         'AsyncFunctionDef.body>While(test=Compare,body=[Assign|AugAssign|Break|Expr|If],orelse=[Expr|Raise])',
         'While.body>If(test=Compare,body=[Continue|Expr|If],orelse=[])',
         'If.body>If(test=Compare,body=[Assign|Break],orelse=[])',
         'If.body>Assign(targets=[Name],value=List,type_comment=-)',
         'Assign.targets>Name(id=str,ctx=Store)',
     )),
-    ('others', 'store', (  # main.py:51438
+    ('others', 'store', (  # main.py:51564
         'AsyncFunctionDef.body>While(test=Compare,body=[Assign|AugAssign|Break|Expr|If],orelse=[Expr|Raise])',
         'While.body>Assign(targets=[Name],value=Name,type_comment=-)',
         'Assign.targets>Name(id=str,ctx=Store)',
     )),
-    ('rollback', 'end', (  # main.py:51443
+    ('rollback', 'end', (  # main.py:51569
         'AsyncFunctionDef.body>While(test=Compare,body=[Assign|AugAssign|Break|Expr|If],orelse=[Expr|Raise])',
         'While.orelse>Expr(value=Await)',
         'Expr.value>Await(value=Call)',
         'Await.value>Call(func=Attribute,args=[],keywords=[])',
     )),
-    ('rollback', 'end', (  # main.py:51463
+    ('rollback', 'end', (  # main.py:51589
         'AsyncFunctionDef.body>If(test=Compare,body=[Assign|Expr|If|Return],orelse=[])',
         'If.body>Expr(value=Await)',
         'Expr.value>Await(value=Call)',
         'Await.value>Call(func=Attribute,args=[],keywords=[])',
     )),
-    ('rollback', 'end', (  # main.py:51627
+    ('rollback', 'end', (  # main.py:51753
         'AsyncFunctionDef.body>If(test=Compare,body=[Expr|Raise],orelse=[])',
         'If.body>Expr(value=Await)',
         'Expr.value>Await(value=Call)',
         'Await.value>Call(func=Attribute,args=[],keywords=[])',
     )),
-    ('commit', 'end', (  # main.py:55018
+    ('commit', 'end', (  # main.py:55144
         'AsyncFunctionDef.body>If(test=BoolOp,body=[Assign|If],orelse=[])',
         'If.body>If(test=Compare,body=[Expr|Return],orelse=[])',
         'If.body>Expr(value=Await)',
         'Expr.value>Await(value=Call)',
         'Await.value>Call(func=Attribute,args=[],keywords=[])',
     )),
-    ('commit', 'end', (  # main.py:55159
+    ('commit', 'end', (  # main.py:55285
         'AsyncFunctionDef.body>If(test=BoolOp,body=[Assign|Expr|If|Return],orelse=[])',
         'If.body>If(test=Name,body=[Expr|Return],orelse=[])',
         'If.body>Expr(value=Await)',
         'Expr.value>Await(value=Call)',
         'Await.value>Call(func=Attribute,args=[],keywords=[])',
     )),
-    ('_form_attempt', 'store', (  # main.py:55198
+    ('_form_attempt', 'store', (  # main.py:55324
         'AsyncFunctionDef.body>For(target=Name,iter=Call,body=[Assign|Break|Expr|If],orelse=[Expr|Raise],type_comment=-)',
         'For.target>Name(id=str,ctx=Store)',
     )),
-    ('rollback', 'end', (  # main.py:55229
+    ('rollback', 'end', (  # main.py:55355
         'AsyncFunctionDef.body>For(target=Name,iter=Call,body=[Assign|Break|Expr|If],orelse=[Expr|Raise],type_comment=-)',
         'For.body>If(test=Compare,body=[Assign|Continue|Expr],orelse=[])',
         'If.body>Expr(value=Await)',
         'Expr.value>Await(value=Call)',
         'Await.value>Call(func=Attribute,args=[],keywords=[])',
     )),
-    ('rollback', 'end', (  # main.py:55244
+    ('rollback', 'end', (  # main.py:55370
         'AsyncFunctionDef.body>For(target=Name,iter=Call,body=[Assign|Break|Expr|If],orelse=[Expr|Raise],type_comment=-)',
         'For.body>If(test=Compare,body=[Assign|Continue|Expr|If],orelse=[])',
         'If.body>Expr(value=Await)',
         'Expr.value>Await(value=Call)',
         'Await.value>Call(func=Attribute,args=[],keywords=[])',
     )),
-    ('rollback', 'end', (  # main.py:55257
+    ('rollback', 'end', (  # main.py:55383
         'AsyncFunctionDef.body>For(target=Name,iter=Call,body=[Assign|Break|Expr|If],orelse=[Expr|Raise],type_comment=-)',
         'For.orelse>Expr(value=Await)',
         'Expr.value>Await(value=Call)',
         'Await.value>Call(func=Attribute,args=[],keywords=[])',
     )),
-    ('rollback', 'end', (  # main.py:55264
+    ('rollback', 'end', (  # main.py:55390
         'AsyncFunctionDef.body>If(test=UnaryOp,body=[Assign|Expr|Return],orelse=[])',
         'If.body>Expr(value=Await)',
         'Expr.value>Await(value=Call)',
         'Await.value>Call(func=Attribute,args=[],keywords=[])',
     )),
-    ('rollback', 'end', (  # main.py:55275
+    ('rollback', 'end', (  # main.py:55401
         'AsyncFunctionDef.body>If(test=Compare,body=[Expr|Return],orelse=[])',
         'If.body>Expr(value=Await)',
         'Expr.value>Await(value=Call)',
         'Await.value>Call(func=Attribute,args=[],keywords=[])',
     )),
-    ('commit', 'end', (  # main.py:66365
+    ('commit', 'end', (  # main.py:66488
         'AsyncFunctionDef.body>If(test=BoolOp,body=[Assign|Expr|If|Return|Try],orelse=[])',
         'If.body>If(test=BoolOp,body=[Expr|If|Return],orelse=[])',
         'If.body>Expr(value=Await)',
         'Expr.value>Await(value=Call)',
         'Await.value>Call(func=Attribute,args=[],keywords=[])',
     )),
-    ('commit', 'end', (  # main.py:66556
+    ('commit', 'end', (  # main.py:66679
         'AsyncFunctionDef.body>If(test=BoolOp,body=[Assign|Expr|If|Return],orelse=[])',
         'If.body>If(test=BoolOp,body=[Expr|Return],orelse=[])',
         'If.body>Expr(value=Await)',
         'Expr.value>Await(value=Call)',
         'Await.value>Call(func=Attribute,args=[],keywords=[])',
     )),
-    ('rollback', 'end', (  # main.py:66797
+    ('rollback', 'end', (  # main.py:66920
         'AsyncFunctionDef.body>For(target=Name,iter=Call,body=[Assign|Break|Expr|If],orelse=[Expr|Raise],type_comment=-)',
         'For.body>If(test=BoolOp,body=[Assign|Continue|Expr|If],orelse=[])',
         'If.body>Expr(value=Await)',
         'Expr.value>Await(value=Call)',
         'Await.value>Call(func=Attribute,args=[],keywords=[])',
     )),
-    ('rollback', 'end', (  # main.py:66853
+    ('rollback', 'end', (  # main.py:66976
         'AsyncFunctionDef.body>If(test=Compare,body=[Assign|Expr|Return],orelse=[])',
         'If.body>Expr(value=Await)',
         'Expr.value>Await(value=Call)',
@@ -2416,13 +2416,13 @@ A1_BINDINGS = frozenset({
 
 # Round 9 (ruling REHEARSAL-R8-A1, G2; finding grammar_shapes_a1:2106): the
 # anchors above are NARROWED by two, never added to: the committing
-# refusals of queue_poll (main.py:21195 and :21582, `await db.commit()`
+# refusals of queue_poll (main.py:21236 and :21623, `await db.commit()`
 # then `raise HTTPException(503, "queue_contended")`) were conformed to
 # `await db.rollback()` (their transactions hold only reads and locks
 # since the last commit or rollback, so the end is the same; production
 # edits recorded in RF/r9/gr/NOTES-r9-gr.md), and their two
 # ('commit', 'end', ...) anchors, whose chains equal the rollback anchors
-# at :51627 and :21688, are removed: a commit at a refusal that raises
+# at :51753 and :21729, are removed: a commit at a refusal that raises
 # now refuses by its anchor.
 #
 # The POSITION rule (closed_walk.positions, G2 and G3): an anchor binds a

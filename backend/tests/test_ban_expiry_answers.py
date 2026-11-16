@@ -27,13 +27,14 @@ def test_a_length_that_is_not_a_whole_number_of_minutes_in_range_is_refused(bad)
 
 
 def test_the_length_bounds_and_whether_it_was_sent():
-    assert main.BAN_DURATION_MAX_MINUTES == 10 * 365 * 24 * 60
+    # the cap ruling (16 Nov 2026): 8760 hours, models.BAN_MAX_MINUTES
+    assert main.BAN_DURATION_MAX_MINUTES == 365 * 24 * 60 == main.BAN_MAX_MINUTES
     for ok in (1, 60, main.BAN_DURATION_MAX_MINUTES):
         assert _req(duration_minutes=ok).duration_minutes == ok
-    # the 1.41.0 request carries no field: permanent, and not a length change
+    # the 1.41.0 request carries no field: the maximum, and not a length change
     old = _req()
     assert old.duration_minutes is None and "duration_minutes" not in old.model_fields_set
-    # an explicit null is SENT: it makes an active ban permanent
+    # an explicit null is SENT: it sets an active ban's end to its start plus the maximum
     null = _req(duration_minutes=None)
     assert null.duration_minutes is None and "duration_minutes" in null.model_fields_set
     # the signature's canonical string does not move (admin:{admin}:ban:{target})
@@ -58,21 +59,35 @@ def _bot_function(name):
     return fn
 
 
+def _bot_assign(name):
+    with open(BOT, encoding="utf-8") as fh:
+        tree = ast.parse(fh.read())
+    (node,) = [n for n in tree.body if isinstance(n, ast.Assign)
+               and [ast.unparse(t) for t in n.targets] == [name]]
+    return node
+
+
 def _end_line():
     ns = {"datetime": datetime}
-    exec(compile(ast.Module(body=[_bot_function("_ban_end_line")], type_ignores=[]), BOT, "exec"), ns)
+    body = [_bot_assign("_BAN_END_LINE_UNREAD"), _bot_function("_ban_end_line")]
+    exec(compile(ast.Module(body=body, type_ignores=[]), BOT, "exec"), ns)
     return ns["_ban_end_line"]
 
 
-def test_the_bot_end_line_reads_the_end_or_permanent_and_never_raises():
+def test_the_bot_end_line_always_carries_an_end_and_never_raises():
+    """The cap ruling (16 Nov 2026): every ban ends, so every notice carries
+    its end line: the end itself, or, for a row whose end the bot cannot
+    read, the line that says a ban ends within a year. Never empty."""
     line = _end_line()
     end = datetime(2031, 1, 2, 3, 4, 5, tzinfo=timezone.utc)
     assert line({"expires_at": "2031-01-02T03:04:05Z"}) == "Ends: <t:%d:F>" % int(end.timestamp())
-    assert line({"expires_at": None}) == "Ends: **Permanent**"
-    # an api older than the key: no line, the post is the one it was before
-    assert line({"id": "x"}) == ""
-    for odd in ({"expires_at": "not a time"}, {"expires_at": 12}, None, "row"):
-        assert line(odd) == ""
+    unread = "Ends: **within one year of the ban** (end not readable)"
+    for odd in ({"expires_at": None}, {"id": "x"}, {"expires_at": "not a time"},
+                {"expires_at": 12}, None, "row"):
+        assert line(odd) == unread, odd
+    with open(BOT, encoding="utf-8") as fh:
+        src = fh.read()
+    assert "Permanent" not in ast.unparse(_bot_function("_ban_end_line")) and "**Permanent**" not in src
 
 
 def test_the_end_line_is_built_inside_the_post_and_never_reaches_the_ban():

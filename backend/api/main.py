@@ -33,7 +33,7 @@ from sqlalchemy import and_, case, func, or_, select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
-
+from pydantic import field_validator   # its own line: an import line is part of every fingerprint that reaches a name it binds
 from database import RELEASE_POOL_OVERFLOW, RELEASE_POOL_SIZE, get_db, get_release_db
 from database import get_asm_db
 from flag_evidence import fetch_flag_context_rows, flag_payload
@@ -49,6 +49,7 @@ import steamid64 as _sid64   # the SteamID64 rule, standard library only: the na
 import log_redaction as _logred   # the credential rule, standard library only: every receive path and read-back door of client log text applies it
 from models import AdminUser, AdminAction, Bet, BoosterGrant, BugReport, BugReportEvent, CardOffer, FlaggedMatch, GlickoRating, GoldTransaction, Match, MatchCard, Player, PlayerBan, PlayerItem, RankedSeries, RankRoleColor, RatingHistory, RankedQueue, QueueBlock, PlayerBlock, LinkCode, PlayerAchievement, ShopItem, GlickoRating2v2, TeamQueue, TeamSeries, TeamMatch, TeamMatchCard, TeamMatchTelemetry, TournamentMatch
 from models import player_ban_active_sql
+from models import BAN_MAX_DAYS, BAN_MAX_HOURS, BAN_MAX_MINUTES, ban_cap_sql
 from schemas import (
     AchievementUnlockRequest,
     AchievementListResponse,
@@ -4131,6 +4132,10 @@ async def lifespan(app: FastAPI):
         # Read-only (SELECT COUNT per table, each begin_nested-wrapped), so it
         # runs on both roles.
         await _run_service_policy_audit(force=True)
+        # The evidence report's display population, built once after start
+        # through the report's own path: both roles create it, a database in
+        # recovery skips it (admin_evidence.warm_display_population).
+        tasks.append(asyncio.create_task(_admin_evidence.warm_display_population()))
         yield
     finally:
         for background_task in tasks:
@@ -4906,7 +4911,7 @@ async def _ovt_horizon_candidates(db, days: int, limit: int):
     Idleness is measured from SERVER-CLOCK columns only: `ovt_series.created_at`
     (NOW() at insert) and, per game, `GREATEST(ovt_matches.ended_at,
     ovt_matches.created_at)` — the report sink writes `ended_at` as NOW()
-    (PIN main.py:56346 ":started, NOW(),") and `created_at` defaults to NOW()
+    (PIN main.py:56472 ":started, NOW(),") and `created_at` defaults to NOW()
     by schema. `ovt_matches.started_at`
     is the one client-supplied stamp on that row and is deliberately NOT read
     here: a client-attested value may only move the server toward the
@@ -4972,7 +4977,7 @@ async def _ovt_settle_horizon_row(db, series_id, days: int) -> bool:
     report advances the tally and can complete the series. The bound the code
     actually holds is the ordering one — this settlement and that report
     serialise on the same series row lock: the report sink's lock waits
-    (PIN main.py:56147 "SELECT * FROM ovt_series WHERE id = :sid FOR NO KEY UPDATE"),
+    (PIN main.py:56273 "SELECT * FROM ovt_series WHERE id = :sid FOR NO KEY UPDATE"),
     this one declines. Whichever commits second observes the first, and a
     report arriving after the void is recorded and paid on the settled-without
     -play arm of `submit_ovt_match` rather than lost.
@@ -5042,7 +5047,7 @@ async def _ovt_settle_horizon_row(db, series_id, days: int) -> bool:
         return False
     # 'canceled', one L. Every other ovt path uses that spelling and the
     # continuation's prior-series lookup filters on it
-    # (PIN main.py:55478 "WHERE status IN ('completed', 'canceled', 'cancelled')"); the
+    # (PIN main.py:55604 "WHERE status IN ('completed', 'canceled', 'cancelled')"); the
     # janitor's original 'cancelled' made its own rows invisible to that lookup
     # and backend/sql/145_ovt_status_spelling.sql had to normalise them. A third
     # spelling would reopen that hole, so the VOID is carried by
@@ -6131,6 +6136,15 @@ async def queue_cleanup_loop():
                               f"deleted {_receipts} send receipt(s)")
         except Exception as e:
             print(f"[MAIL-RETENTION] sweep error: {e}")
+        # ── Case-row scrub finish (mail spam case lock lane, route B) ────
+        # Own try/except (#228). Every pass: _mail_case_scrub_pass finishes
+        # the moderation_cases rows delete_player_data's last statement
+        # skipped, in short transactions of its own, and waits for no other
+        # transaction's row (SKIP LOCKED).
+        try:
+            _mail_case_scrub_log(await _mail_case_scrub_pass(async_session))
+        except Exception as e:
+            print(f"[MAIL-CASE-SCRUB] sweep error: {e}")
         # ── Lobby invites (migration 416) ───────────────────────────────
         # Own try/except (#228). Every pass: the sweep ends each pending
         # invite it does not keep and bumps its invitee's revision, then
@@ -7961,6 +7975,17 @@ _ASK6_INVITES_BUILD = 1
 # release train and read by nothing else (#306). Absent on any build
 # before it.
 _BAN_EXPIRY_BUILD = 1
+# Release-train verification plumbing, not a design mechanism: the build
+# marker of the batch in which every ban has an end at most
+# models.BAN_MAX_HOURS after its start (the cap ruling of 16 Nov 2026;
+# migration 418 holds the bound in the table and is applied AFTER this
+# build), reported on /health as `ban_cap_build`. It names build identity
+# only; the train cannot see what the batch changes (the end every ban
+# writer stores), so without it a box on the new build could not be told
+# from a stale one (learnings 780, 794, 1186). A code constant, equal on
+# both boxes by construction, probed by the release train and read by
+# nothing else (#306). Absent on any build before it.
+_BAN_CAP_BUILD = 1
 # Its sibling, the /health `session_report` word, asks
 # the DATABASE whether it has every table and column the report route's
 # statements name, and the app whether that route is bound. Its statements are
@@ -7986,6 +8011,31 @@ _CASUAL_STREAK_BUILD = 1
 # by nothing else (#306). Absent on any build before it. Its sibling
 # `quarantine_needs_decision` is a measured value (_qdig_needs_decision_word).
 _QDIG_BUILD = 1
+# Release-train verification plumbing, not a design mechanism: the build
+# marker of the batch in which the evidence report's population cache has a
+# fixed byte allowance (admin_evidence POP_CACHE_MAX_MB) and the display
+# population is built once after start, reported on /health as
+# `aer_popgate_build`. It names build identity only; the batch adds no
+# route (learnings 780, 794). A code constant, equal on both boxes by
+# construction, probed by the release train and read by nothing else (#306).
+# Absent on any build before it.
+_AER_POPGATE_BUILD = 1
+# Release-train verification plumbing, not a design mechanism: the build
+# marker of the mail spam case lock lane, reported on /health as
+# `mail_spam_case_lock_build`. 2 = its route B: a mail send keeps its order,
+# delete_player_data writes moderation_cases only in its last statement,
+# which skips a row another transaction holds (_DELETE_CASE_SCRUB_SQL), and
+# the janitor finishes a skipped row (_mail_case_scrub_pass); the retention
+# sweep waits for no row lock (mscl-r2, the comment above
+# _mail_retention_sweep); the open item MDPL (two deletions against each
+# other on mail rows that are not case rows) is not in it. Value 1 (a send's
+# lock on its spam case row) was never deployed. It names build
+# identity only. The lane adds no route and no key to any answer, so without
+# it the train could not tell a box on the new build from a stale one
+# (learnings 780, 794). A code constant, equal on both boxes by
+# construction, probed by the release train and read by nothing else (#306).
+# Absent on any build before it.
+_MAIL_SPAM_CASE_LOCK_BUILD = 2
 
 
 def _title_ladders_health_word() -> int:
@@ -8065,6 +8115,10 @@ async def health_check(db: AsyncSession = Depends(get_db)):
                               ban_expiry_build=_BAN_EXPIRY_BUILD,
                               qdig_build=_QDIG_BUILD,
                               quarantine_needs_decision=_qdig_needs_decision_word(),
+                              ban_cap_build=_BAN_CAP_BUILD,
+                              aer_popgate_build=_AER_POPGATE_BUILD,
+                              admin_evidence_population=_admin_evidence.population_health_word(),
+                              mail_spam_case_lock_build=_MAIL_SPAM_CASE_LOCK_BUILD,
                               build_manifest=_build_manifest.health_word(),
                               review_eval=_review_rules.review_eval(),
                               review_rules=_review_rules.health_word(),
@@ -8134,6 +8188,10 @@ async def health_check(db: AsyncSession = Depends(get_db)):
                               ban_expiry_build=_BAN_EXPIRY_BUILD,
                               qdig_build=_QDIG_BUILD,
                               quarantine_needs_decision=_qdig_needs_decision_word(),
+                              ban_cap_build=_BAN_CAP_BUILD,
+                              aer_popgate_build=_AER_POPGATE_BUILD,
+                              admin_evidence_population=_admin_evidence.population_health_word(),
+                              mail_spam_case_lock_build=_MAIL_SPAM_CASE_LOCK_BUILD,
                               build_manifest=_build_manifest.health_word(),
                               review_eval=_review_rules.review_eval(),
                               review_rules=_review_rules.health_word(),
@@ -16658,9 +16716,10 @@ async def check_player_registered(steam_id: str, db: AsyncSession = Depends(get_
     result = await db.execute(select(Player).where(Player.steam_id == steam_id))
     player = result.scalar_one_or_none()
 
-    # B3/B5 (server half): ban_expires_at (UTC ISO 8601 with Z, null =
-    # permanent or not banned) and ban_seconds_left (an integer, null =
-    # permanent or not banned) come AFTER ban_reason; every key before them
+    # B3/B5 (server half): ban_expires_at (UTC ISO 8601 with Z, null = not
+    # banned, or a ban row written before migration 418 gave every ban an
+    # end) and ban_seconds_left (an integer, null in the same two cases)
+    # come AFTER ban_reason; every key before them
     # keeps its value and its place. The 1.41.0 client reads this answer with
     # JsonUtility.FromJson<ModCheckResponse>, which ignores keys its class
     # does not declare, wherever they stand.
@@ -46079,13 +46138,13 @@ async def delete_player_data(steam_id: str, request: Request, sig: str = Query(.
     # ANONYMISED, so mail_blocks' ON DELETE CASCADE never fires (#437) — every
     # mail table is handled by name. The inbox and addressee envelopes go
     # (this player's property); both directions of their mail blocks go; their
-    # reports keep the evidence snapshot but lose the reporter_id; a bulk grant
+    # reports keep the evidence snapshot but lose the reporter_id (in this
+    # handler's last statement, _DELETE_CASE_SCRUB_SQL); a bulk grant
     # is live authority and dies with the account; the censor-hit ledger is
     # personal. Messages they SENT stay — the recipients' property, now
     # pointing at the anonymised row.
     await db.execute(text("DELETE FROM mail_recipients WHERE recipient_id = :pid"), {"pid": pid})
     await db.execute(text("DELETE FROM mail_blocks WHERE blocker_id = :pid OR blocked_id = :pid"), {"pid": pid})
-    await db.execute(text("UPDATE moderation_cases SET reporter_id = NULL WHERE reporter_id = :pid"), {"pid": pid})
     await db.execute(text("DELETE FROM mail_bulk_grants WHERE steam_id = :sid"), {"sid": steam_id})
     await db.execute(text("DELETE FROM mail_censor_hits WHERE sender_id = :pid"), {"pid": pid})
     # Send receipts (migration 415): this player's record of what they sent
@@ -46113,10 +46172,8 @@ async def delete_player_data(steam_id: str, request: Request, sig: str = Query(.
     # Sept 6 item b (review r1): the two raw-identity columns the mail tables
     # carry for an ACTING account — the moderator who resolved a case and the
     # admin who granted a bulk cap — take the same tombstone as the i18n
-    # granted_by column above.
-    await db.execute(text(
-        "UPDATE moderation_cases SET resolved_by = :tomb WHERE resolved_by = :sid"),
-        {"sid": steam_id, "tomb": _tomb})
+    # granted_by column above: the bulk grant's here, the moderator's in this
+    # handler's last statement (_DELETE_CASE_SCRUB_SQL).
     await db.execute(text(
         "UPDATE mail_bulk_grants SET granted_by = :tomb WHERE granted_by = :sid"),
         {"sid": steam_id, "tomb": _tomb})
@@ -46226,10 +46283,16 @@ async def delete_player_data(steam_id: str, request: Request, sig: str = Query(.
     player.deleted_at = datetime.now(timezone.utc)
 
     # Record hash so a later match report from the same Steam ID can't
-    # spoof a fresh account.
+    # spoof a fresh account. deleted_at is the database clock read HERE, after
+    # this transaction's identity lock (pg_advisory_xact_lock above), and not
+    # the column's default NOW(), which is the transaction's start: the
+    # resolver half of the case-scrub pass (_CASE_SCRUB_RESOLVER_SQL) compares
+    # it with resolved_at, and only a stamp read after the lock is ordered
+    # after every action that wrote this raw id (mscl-r2).
     if MATCH_HMAC_SECRET:
         await db.execute(
-            text("INSERT INTO deleted_steam_ids (steam_id_hash) VALUES (:h) ON CONFLICT DO NOTHING"),
+            text("INSERT INTO deleted_steam_ids (steam_id_hash, deleted_at)"
+                 " VALUES (:h, clock_timestamp()) ON CONFLICT DO NOTHING"),
             {"h": _hash_steam_id(steam_id)},
         )
 
@@ -46245,12 +46308,15 @@ async def delete_player_data(steam_id: str, request: Request, sig: str = Query(.
     # row-lock order (players, then mail_inbox_rev) matches the fan-out's and
     # no cycle of waits between the two can form over these two tables' rows.
     # (A send that crosses a spam threshold takes one more lock after them,
-    # its sender's case row for the day, and can close a cycle with this
-    # deletion's resolved_by scrub above: see the comment above
-    # _INVITE_REV_BUMP_SQL.) Migration 416's change moved it
-    # from here to the very end: there it is locked in the same ascending
-    # pass as the invite bump's rows (_invite_bump's `drop`), the one order
-    # every writer of mail_inbox_rev takes, and nothing is locked after it.
+    # its sender's case row for the day. This deletion never waits for a case
+    # row: it writes moderation_cases only in its last statement, which skips
+    # a row another transaction holds, _DELETE_CASE_SCRUB_SQL. Two deletions
+    # can still wait for each other on mail rows that are not case rows: the
+    # open item MDPL.) Migration 416's change moved it from
+    # here to the end: there it is locked in the same ascending pass as the
+    # invite bump's rows (_invite_bump's `drop`), the one order every writer of
+    # mail_inbox_rev takes. The only lock taken after it is that last
+    # statement's, which never waits for another transaction's row.
     await db.flush()
     await db.execute(text("DELETE FROM mail_recipients WHERE recipient_id = :pid"), {"pid": pid})
     # Item 5 (migration 330). A relay DM row is a COPY of the mail held
@@ -46274,6 +46340,13 @@ async def delete_player_data(steam_id: str, request: Request, sig: str = Query(.
     await db.execute(text(_ERASE_RELAY_DMS_FROM_SQL), {"sid": steam_id, "pid": pid})
     await _invite_bump(db, _inv_ended, drop=pid)
     await db.execute(text("DELETE FROM mail_inbox_rev WHERE recipient_id = :pid"), {"pid": pid})
+    # The LAST statement before the commit, and this handler's only write to
+    # a moderation_cases row: it never waits for another transaction's row
+    # (_DELETE_CASE_SCRUB_SQL says why). A row it skips keeps its old values
+    # until the janitor's _mail_case_scrub_pass finishes it. Two deletions can
+    # still wait for each other on mail rows that are not case rows (the open
+    # item MDPL); the retention sweep waits for no row lock and is not in it.
+    await db.execute(text(_DELETE_CASE_SCRUB_SQL), {"pid": pid, "sid": steam_id, "tomb": _tomb})
 
     await db.commit()
     print(f"[PRIVACY] Anonymized steam_id={steam_id} (placeholder={player.steam_id})")
@@ -49027,8 +49100,9 @@ async def _is_banned(db: AsyncSession, steam_id: str):
 
 
 # What a ban answer says about its end: expires_at as UTC ISO 8601 with a
-# trailing Z (null = permanent), and seconds_left, the whole seconds until it
-# by the database's clock (null = permanent). Both read from one row.
+# trailing Z, and seconds_left, the whole seconds until it by the database's
+# clock. Both read from one row; both are null only for a row written before
+# migration 418 gave every ban an end.
 _BAN_END_COLS_SQL = (
     "{a}.expires_at, CASE WHEN {a}.expires_at IS NULL THEN NULL"
     " ELSE CAST(GREATEST(0, CEIL(EXTRACT(EPOCH FROM ({a}.expires_at - NOW())))) AS BIGINT)"
@@ -49156,8 +49230,8 @@ async def admin_list_bans(
 
     Active means the one definition (models.player_ban_active_sql): a timed
     ban that has ended is no longer listed. Each row gains `expires_at` (UTC
-    ISO 8601 with Z, null = permanent) and `seconds_left` (an integer, null =
-    permanent) AFTER banned_at, its last key in 1.41.0: the client cuts each
+    ISO 8601 with Z) and `seconds_left` (an integer), both null only for a
+    row written before migration 418 gave every ban an end, AFTER banned_at, its last key in 1.41.0: the client cuts each
     row from one `"id":"` to the next and reads its six keys with
     ExtractJsonString, so two trailing keys with other names cannot be read
     in place of any of them."""
@@ -49275,39 +49349,68 @@ async def _ban_rate_gate_or_raise(db: AsyncSession, admin_steam_id: str, target_
 # ended (migration 417): the system closed it, not an admin. The column is
 # TEXT with no foreign key (028), so the marker needs no admin_users row.
 BAN_CLOSED_BY_EXPIRY = "system:expired"
-# A ban length, in minutes: one minute to ten years (365 * 24 * 60 * 10).
-BAN_DURATION_MAX_MINUTES = 5256000
+# A ban length, in minutes: one minute to the maximum, models.BAN_MAX_MINUTES
+# (BAN_MAX_HOURS, 365 days of 24 hours, after the ban's start).
+BAN_DURATION_MAX_MINUTES = BAN_MAX_MINUTES
 
 
-def _ban_end_sql(duration_minutes) -> str:
-    """The SQL value of a ban's end for a length in minutes: NULL (permanent)
-    for None, else NOW() plus the length on the database's clock. Built in
-    code, so no bind exists only to be null-tested (learning #448)."""
+def _ban_end_sql(duration_minutes, start: str) -> str:
+    """The SQL value of a ban's end: `start` plus the length in minutes (bound
+    as :ban_minutes), or `start` plus the maximum (models.ban_cap_sql) when no
+    length is given. Never NULL. The ONE helper every api writer of
+    player_bans.expires_at takes its value from (test_ban_cap_pg.py counts
+    the writers and their calls of it). `start` is SQL this module builds (a
+    column or a clock read), never request text. Built in code, so no bind
+    exists only to be null-tested (learning #448)."""
     if duration_minutes is None:
-        return "NULL"
-    return "NOW() + make_interval(mins => CAST(:ban_minutes AS integer))"
+        return ban_cap_sql(start)
+    return f"({start} + make_interval(mins => CAST(:ban_minutes AS integer)))"
+
+
+def _ban_past_maximum_detail(latest_end) -> str:
+    """The refusal of a length change whose end would pass the ban's latest
+    possible end (its start plus the maximum), naming that end."""
+    return (f"ban_length_past_maximum: a ban lasts at most {BAN_MAX_DAYS} days "
+            f"({BAN_MAX_HOURS} hours) from its start; the latest end this ban can "
+            f"have is {_ban_end_iso(latest_end)}")
 
 
 async def _ban_set_length_core(db: AsyncSession, *, admin_steam_id: str, target_steam_id: str,
                                active, duration_minutes) -> dict:
     """A length change on an ACTIVE ban (B4): the active row's end becomes
-    NOW() plus the length, or NULL for permanent. Called by _apply_ban_core
-    under the target's identity lock, before any of a new ban's side effects
-    (no session, portal, queue or card write: the ban they belong to is
-    already in force), so it writes exactly this UPDATE and one admin_actions
-    row holding the old and the new end. The reason and the row count do not
-    change. Does NOT commit."""
+    NOW() plus the length, or, with no length (null), the ban's start plus
+    the maximum (the latest end it can have). An end later than the ban's
+    start plus the maximum is refused (422, naming that latest end) and
+    nothing is written: the UPDATE's own predicate holds the bound, so the
+    row is never offered a value migration 418's CHECK would refuse. Called
+    by _apply_ban_core under the target's identity lock, before any of a new
+    ban's side effects (no session, portal, queue or card write: the ban
+    they belong to is already in force), so it writes exactly this UPDATE
+    and one admin_actions row holding the old and the new end. The reason
+    and the row count do not change. Does NOT commit."""
     params = {"id": active["id"]}
     if duration_minutes is not None:
         params["ban_minutes"] = int(duration_minutes)
+        _new_end = _ban_end_sql(duration_minutes, "NOW()")
+    else:
+        _new_end = _ban_end_sql(None, "pb.banned_at")
     row = (await db.execute(text(
-        "UPDATE player_bans pb SET expires_at = " + _ban_end_sql(duration_minutes) + " "
+        "UPDATE player_bans pb SET expires_at = " + _new_end + " "
         "WHERE pb.id = :id AND " + player_ban_active_sql("pb") + " "
+        "AND " + _new_end + " <= " + ban_cap_sql("pb.banned_at") + " "
         "RETURNING " + _BAN_END_COLS_SQL.format(a="pb")
     ), params)).mappings().first()
     if row is None:
-        # Unreachable under the identity lock, which every writer of this
-        # key's rows takes; refused rather than reported as a change.
+        # The bound refused the end, or the row stopped being active, which
+        # is unreachable under the identity lock every writer of this key's
+        # rows takes; the second is refused rather than reported as a change.
+        cap = (await db.execute(text(
+            "SELECT " + ban_cap_sql("pb.banned_at") + " AS latest_end, "
+            + player_ban_active_sql("pb") + " AS active "
+            "FROM player_bans pb WHERE pb.id = :id"
+        ), {"id": active["id"]})).mappings().first()
+        if cap is not None and cap["active"]:
+            raise HTTPException(status_code=422, detail=_ban_past_maximum_detail(cap["latest_end"]))
         raise HTTPException(status_code=409, detail="ban_changed_concurrently")
     old_end, new_end = _ban_end_iso(active["expires_at"]), _ban_end_iso(row["expires_at"])
     db.add(AdminAction(
@@ -49325,20 +49428,23 @@ async def _apply_ban_core(db: AsyncSession, *, admin_steam_id: str, target_steam
                           length_sent: bool = False) -> dict:
     """The ban WRITE core, extracted verbatim from admin_ban (Sept 6 item b,
     B-2): identity lock, session and portal revocation, queue-row revocation,
-    the already_banned check, the PlayerBan + AdminAction rows. Does NOT
+    the already_banned check, the player_bans + AdminAction rows. Does NOT
     commit — admin_ban commits right after; the moderation-case act path
     commits together with its case row. Returns the route's response dict.
 
     B4 (migration 417): `length_sent` says the request carried
-    duration_minutes (null included, which means permanent). Then, for a
+    duration_minutes (null included, which means the maximum). Then, for a
     target already under an ACTIVE ban, the core changes that ban's end and
     returns (_ban_set_length_core) before any side effect below. Otherwise
-    it runs as before; a new ban's row carries expires_at = NOW() plus the
-    length (NULL when no length was given), and an ENDED open row of the
-    same key is closed first, in this transaction and under this lock, as
-    the system (BAN_CLOSED_BY_EXPIRY): migration 417's unique index holds
-    one open row per key, so the earlier ban stays in the log, closed, and
-    no two rows of one key are ever both active."""
+    it runs as before; a new ban's row carries banned_at = one clock read
+    taken at the insert, after the identity lock, and expires_at = that
+    start plus the length, or plus the maximum (models.BAN_MAX_HOURS) when
+    no length was given -- every ban ends (the cap ruling of 16 Nov 2026,
+    migration 418). An ENDED open row of the same key is closed first, in
+    this transaction and under this lock, as the system
+    (BAN_CLOSED_BY_EXPIRY): migration 417's unique index holds one open row
+    per key, so the earlier ban stays in the log, closed, and no two rows of
+    one key are ever both active."""
     # Identity lock FIRST, before any purge (round-13 find 6: with the lock
     # taken after the session purge, a steam_auth finalization holding the
     # lock could insert a fresh session AFTER our purge but BEFORE our ban
@@ -49457,9 +49563,10 @@ async def _apply_ban_core(db: AsyncSession, *, admin_steam_id: str, target_steam
     # Migration 416's change: the invitees' revisions for the invites ended
     # above, after the drain. On a new ban the core makes three writes after
     # it, and none can wait on another transaction of the application:
-    # migration 417's close of this key's ended ban row here, and the ban and
-    # admin action rows, which go out when the session next flushes (at the
-    # caller's commit at the latest). Every writer of a key's player_bans
+    # migration 417's close of this key's ended ban row here, the ban row's
+    # INSERT right after it, and the admin action row, which goes out when
+    # the session next flushes (at the caller's commit at the latest). Every
+    # writer of a key's player_bans
     # rows holds that key's identity lock, which this core takes first (the
     # close and the insert here, _ban_set_length_core inside this core,
     # admin_unban through its sorted identity locks). The ban row's foreign
@@ -49490,14 +49597,29 @@ async def _apply_ban_core(db: AsyncSession, *, admin_steam_id: str, target_steam
         "WHERE steam_id = :sid AND unbanned_at IS NULL "
         "AND expires_at IS NOT NULL AND expires_at <= NOW() RETURNING id"
     ), {"closer": BAN_CLOSED_BY_EXPIRY, "sid": target_steam_id})).scalars().all()]
-    # The end on the database's clock, read in this transaction (NOW() is
-    # its start, the instant the row's own banned_at default does not use).
-    _ban_end = None
+    # The new row, by SQL rather than the ORM class (the cap ruling,
+    # migration 418): its start and its end come from ONE read of the
+    # database's clock, taken here, after the identity lock (clock_timestamp(),
+    # not NOW(), which is this transaction's start and would date a ban that
+    # waited on the lock before what committed during the wait). The ORM's
+    # banned_at default was the api process's clock, so start plus the
+    # maximum could pass the table's bound by the skew between the two
+    # clocks. Every column is named, with the value the ORM class wrote:
+    # id a fresh uuid4 (the ORM default; the table's default is
+    # gen_random_uuid()), unbanned_at and unbanned_by_steam_id NULL.
+    _ban_params = {"id": str(uuid.uuid4()), "sid": target_steam_id, "reason": _ban_reason,
+                   "adm": admin_steam_id}
     if duration_minutes is not None:
-        _ban_end = (await db.execute(text("SELECT " + _ban_end_sql(duration_minutes)),
-                                     {"ban_minutes": int(duration_minutes)})).scalar()
-    db.add(PlayerBan(steam_id=target_steam_id, reason=_ban_reason, banned_by_steam_id=admin_steam_id,
-                     expires_at=_ban_end))
+        _ban_params["ban_minutes"] = int(duration_minutes)
+    _ban_row = (await db.execute(text(
+        "WITH c AS (SELECT clock_timestamp() AS t) "
+        "INSERT INTO player_bans (id, steam_id, reason, banned_by_steam_id, banned_at, "
+        "unbanned_at, unbanned_by_steam_id, expires_at) "
+        "SELECT CAST(:id AS uuid), CAST(:sid AS text), CAST(:reason AS text), CAST(:adm AS text), "
+        "c.t, NULL, NULL, " + _ban_end_sql(duration_minutes, "c.t") + " FROM c "
+        "RETURNING id, banned_at, expires_at"
+    ), _ban_params)).mappings().one()
+    _ban_end = _ban_row["expires_at"]
     _details = {"reason": _ban_reason}
     if length_sent:
         _details["duration_minutes"] = duration_minutes
@@ -49513,11 +49635,13 @@ async def _apply_ban_core(db: AsyncSession, *, admin_steam_id: str, target_steam
     ))
     # The bot's poll_new_bans loop picks this up from /internal/recent-bans and
     # posts it to #scr-admin (item 4).
-    # NOW() is fixed for the transaction, so the end read above is exactly
-    # the length ahead of it: seconds_left is the length in seconds.
+    # The start and the end come from one clock read, so at the start the
+    # end is exactly the length ahead: seconds_left is the length in seconds.
+    _ban_len_s = (int(duration_minutes) * 60 if duration_minutes is not None
+                  else BAN_MAX_HOURS * 3600)
     return {"status": "banned", "steam_id": target_steam_id, "reason": _ban_reason,
             "expires_at": _ban_end_iso(_ban_end),
-            "seconds_left": None if _ban_end is None else int(duration_minutes) * 60}
+            "seconds_left": _ban_len_s}
 
 
 class _AdminBanReq(BaseModel):
@@ -49525,31 +49649,46 @@ class _AdminBanReq(BaseModel):
     target_steam_id: str
     reason: str = "violation"
     hmac_signature: str | None = None
-    # B4: the ban's length in minutes, 1 to BAN_DURATION_MAX_MINUTES (ten
-    # years); absent or null = permanent. StrictInt, so a string, a float or a
-    # boolean is a 422 naming the field, never coerced. Not in the signature's
-    # canonical string, which stays admin:{admin}:ban:{target}. Whether it was
-    # SENT (null included) is model_fields_set, which tells a length change
-    # on an active ban apart from a repeat of the 1.41.0 request.
-    duration_minutes: StrictInt | None = Field(default=None, ge=1, le=BAN_DURATION_MAX_MINUTES)
+    # B4: the ban's length in minutes, 1 to BAN_DURATION_MAX_MINUTES
+    # (models.BAN_MAX_MINUTES, 365 days); absent or null = the maximum.
+    # StrictInt, so a string, a float or a boolean is a 422 naming the field,
+    # never coerced; a length over the maximum is a 422 whose message names
+    # the maximum in days (_ban_minutes_within_maximum). Not in the
+    # signature's canonical string, which stays admin:{admin}:ban:{target}.
+    # Whether it was SENT (null included) is model_fields_set, which tells a
+    # length change on an active ban apart from a repeat of the 1.41.0
+    # request.
+    duration_minutes: StrictInt | None = Field(default=None, ge=1)
+
+    @field_validator("duration_minutes")
+    @classmethod
+    def _ban_minutes_within_maximum(cls, v):
+        if v is not None and v > BAN_DURATION_MAX_MINUTES:
+            raise ValueError(f"duration_minutes is at most {BAN_DURATION_MAX_MINUTES} "
+                             f"({BAN_MAX_DAYS} days); a ban lasts at most {BAN_MAX_DAYS} days")
+        return v
 
 
 @app.post("/api/v1/admin/ban", tags=["Admin"])
 async def admin_ban(req: _AdminBanReq, _slot=Depends(_pc_writer_slot), db: AsyncSession = Depends(get_db)):
     """Ban an account (admin HMAC over admin:{admin}:ban:{target}).
 
-    Without duration_minutes (every 1.41.0 request) it answers as it always
-    has: a target with no active ban is banned permanently ("banned"); a
-    target already under an active ban gets the repeat cleanup (sessions,
-    portal sessions, queue rows, card withdrawal) and "already_banned" with
-    the active ban's reason, nothing else written. With the field (1 to ten
-    years of minutes, or null for permanent): a target with no active ban is
-    banned with expires_at = NOW() plus the length; a target under an active
-    ban has that ban's end set (NOW() plus the length, or NULL), its reason
-    kept, no side effect of a new ban repeated, one admin_actions
-    "ban_length" row holding the old and the new end, and answers
-    "length_changed". Every answer ends with expires_at (UTC ISO 8601 with Z,
-    null = permanent) and seconds_left (an integer, null = permanent)."""
+    Every ban ends, at most 365 days (models.BAN_MAX_HOURS) after its start.
+    Without duration_minutes (every 1.41.0 request): a target with no active
+    ban is banned until its start plus the maximum ("banned"); a target
+    already under an active ban gets the repeat cleanup (sessions, portal
+    sessions, queue rows, card withdrawal) and "already_banned" with the
+    active ban's reason, nothing else written. With the field (1 minute to
+    the maximum, or null for the maximum; a longer length is a 422 naming
+    the maximum in days): a target with no active ban is banned with
+    expires_at = its start plus the length; a target under an active ban has
+    that ban's end set (NOW() plus the length, or its start plus the maximum
+    for null; an end past its start plus the maximum is a 422 naming the
+    latest end it can have), its reason kept, no side effect of a new ban
+    repeated, one admin_actions "ban_length" row holding the old and the new
+    end, and answers "length_changed". Every answer ends with expires_at
+    (UTC ISO 8601 with Z) and seconds_left (an integer); both are null only
+    for a ban row written before migration 418, which gives it an end."""
     _mod_target_or_422(req.target_steam_id, "target_steam_id")   # before the signature, the reads, the locks and the gate (r13)
     await _require_admin(db, req.admin_steam_id, "ban", req.target_steam_id, req.hmac_signature)
     # ONE lock order on every ban path (Sept 6 item b, review r2): the
@@ -49589,7 +49728,8 @@ async def get_recent_bans(
     """Bot-only feed for the #scr-admin poller: newly-added active bans,
     chronological. Mirrors /internal/recent-flags. Active is the one
     definition (models.player_ban_active_sql); each row gains `expires_at`
-    (UTC ISO 8601 with Z, null = permanent) as its last key."""
+    (UTC ISO 8601 with Z) as its last key, never null: a row written before
+    migration 418 answers the end 418 gives it, its start plus the maximum."""
     expected = os.getenv("API_SECRET_KEY", "")
     if not expected or x_internal_key != expected:
         raise HTTPException(status_code=403, detail="Invalid internal key")
@@ -49601,7 +49741,11 @@ async def get_recent_bans(
         cutoff = row[0] if row else None
     q = (
         "SELECT pb.id::text AS id, pb.steam_id, pb.reason, pb.banned_by_steam_id, "
-        "       pb.banned_at, p.display_name, pb.expires_at "
+        # A row written before migration 418 has no end yet; the notice
+        # names the end 418 gives it (its start plus the maximum), so every
+        # notice carries one.
+        "       pb.banned_at, p.display_name, "
+        "       COALESCE(pb.expires_at, " + ban_cap_sql("pb.banned_at") + ") AS expires_at "
         "FROM player_bans pb LEFT JOIN players p ON p.steam_id = pb.steam_id "
         "WHERE " + player_ban_active_sql("pb") + " "
         + ("AND pb.banned_at > :cutoff " if cutoff else "")
@@ -56460,7 +56604,7 @@ async def _settle_ovt_report(db: AsyncSession, report: OvtMatchReport, *,
     # above is `FOR NO KEY UPDATE` with NO `SKIP LOCKED`: it WAITS. The 1v2
     # horizon janitor takes the same mode on the same row WITH `SKIP LOCKED`
     # — its locking read is
-    # PIN main.py:5011 "SELECT status FROM ovt_series WHERE id = CAST(:sid AS uuid)"
+    # PIN main.py:5016 "SELECT status FROM ovt_series WHERE id = CAST(:sid AS uuid)"
     # and the clause is the line under it. So the two can
     # never both decide this row: either the janitor meets this report's lock
     # and DECLINES the row for that tick, or it commits its void first and
@@ -80982,7 +81126,7 @@ async def _log_admin_action_strict(db: AsyncSession, *, admin_steam_id: str, act
 # row is the newer message's: migration 415's trigger.) A repeated key is
 # answered from the receipt ALONE. The message row is no source for that
 # answer: the janitor purges a row only once no delivered copy keeps it, which
-# depends on the recipients' delivery, while the receipt lives until
+# depends on the recipients' delivery, while the receipt lives at least until
 # MAIL_RETENTION_DAYS after the send whatever happened to the message
 # (_MAIL_RECEIPT_SWEEP_SQL).
 _MAIL_PRIOR_SEND_SQL = (
@@ -81016,8 +81160,9 @@ _MAIL_RECEIPT_SQL = (
     " RETURNING 1"
 )
 
-# The janitor's receipt arm: a receipt goes MAIL_RETENTION_DAYS after the
-# send, in bounded batches, whatever the message's delivery or purge state.
+# The janitor's receipt arm: a receipt is due MAIL_RETENTION_DAYS after the
+# send whatever the message's delivery or purge state, and a run deletes, in
+# bounded batches, the due receipts it can hold (below).
 # The same statement moves every message a deleted receipt answered for
 # that is still kept (an unread delivered copy keeps a row past retention)
 # off its key: a key with no receipt is sent as a new message, and 297's
@@ -81034,13 +81179,33 @@ _MAIL_RECEIPT_SQL = (
 # transaction rolls back, and the next run draws again. Migration 415's
 # trigger does not fire on the change (UPDATE OF recipient_count only). One
 # row per deleted receipt is returned.
+#
+# It waits for no other transaction's row lock (mscl-r2; the retention sweep's
+# comment above _mail_retention_sweep says why that matters). `cand` takes the
+# old receipts it can lock (FOR UPDATE: it deletes them) and skips the rest;
+# `held` takes, FOR UPDATE and SKIP LOCKED, the messages that still carry a
+# candidate's key (FOR UPDATE because the key it rewrites is in that unique
+# index, so its UPDATE takes that mode); `gone` deletes a candidate only when
+# no message carrying its key is one `held` could not take, so a receipt and
+# its message's key always go together; `retired` then writes only messages
+# `held` holds. A receipt or a message held elsewhere waits for a later run.
 _MAIL_RECEIPT_SWEEP_SQL = (
-    "WITH gone AS ("
+    "WITH cand AS ("
+    "  SELECT sender_id, idempotency_key FROM mail_send_receipts"
+    "   WHERE created_at < NOW() - make_interval(days => CAST(:days AS integer))"
+    "   LIMIT 2000"
+    "   FOR UPDATE SKIP LOCKED),"
+    " held AS ("
+    "  SELECT x.id FROM mail_messages x JOIN cand c"
+    "    ON x.sender_id = c.sender_id AND x.idempotency_key = c.idempotency_key"
+    "   FOR UPDATE OF x SKIP LOCKED),"
+    " gone AS ("
     "  DELETE FROM mail_send_receipts"
-    "   WHERE (sender_id, idempotency_key) IN ("
-    "     SELECT sender_id, idempotency_key FROM mail_send_receipts"
-    "      WHERE created_at < NOW() - make_interval(days => CAST(:days AS integer))"
-    "      LIMIT 2000)"
+    "   WHERE (sender_id, idempotency_key) IN (SELECT sender_id, idempotency_key FROM cand)"
+    "     AND NOT EXISTS (SELECT 1 FROM mail_messages x"
+    "                      WHERE x.sender_id = mail_send_receipts.sender_id"
+    "                        AND x.idempotency_key = mail_send_receipts.idempotency_key"
+    "                        AND x.id NOT IN (SELECT id FROM held))"
     "  RETURNING sender_id, idempotency_key),"
     " retired AS ("
     "  UPDATE mail_messages m"
@@ -81211,9 +81376,10 @@ async def _mail_rate_or_raise(db: AsyncSession, sender_id) -> None:
     """10 per minute and 100 per day, counted on the sender's own send
     receipts under the sender lock (B-11). Broadcasts do not count.
 
-    Receipts, not message rows (migration 415's change): a receipt stays
-    MAIL_RETENTION_DAYS after the send whatever happens to the message, so
-    every send counts for its whole window whatever its delivery. That holds
+    Receipts, not message rows (migration 415's change): a receipt stays at
+    least MAIL_RETENTION_DAYS after the send whatever happens to the
+    message, so every send counts for its whole window whatever its
+    delivery. That holds
     when a later message takes the send's key, too: the first send's receipt
     stays, under a reserved key, with its own kind and time (migration 415's
     trigger), so each committed send is one receipt. A row's
@@ -82695,9 +82861,12 @@ async def _invite_write_receipt(db: AsyncSession, caller_id, key: UUID, route: s
 # statement (the CTE), the order of every writer of this table (mail's sends and migration 300's
 # trigger insert in that order; the deletion takes its own row in the same ascending pass as its
 # bump, _INVITE_REV_DROP_LOCK_SQL), so waits on these rows alone never form a cycle. A lock taken
-# after a bump can still close one: _apply_ban_core says why its own cannot; mail's send can (its
-# spam case can wait on delete_player_data's resolved_by scrub, which then waits on rows the send
-# holds). A row the deletion holds is waited for and, once it commits, gone.
+# after a bump can still close one: _apply_ban_core says why its own cannot. Mail's send takes its
+# sender's spam case row after its bump, and delete_player_data, which waits for these rows, never
+# waits for a case row: it writes moderation_cases only in its last statement, which skips a row
+# another transaction holds (_DELETE_CASE_SCRUB_SQL). A row the deletion holds is waited for and,
+# once it commits, gone. Two deletions can still wait for each other on mail rows that are not
+# case rows (the open item MDPL); the retention sweep waits for no row lock and is not in it.
 _INVITE_REV_BUMP_SQL = (
     "WITH t AS (SELECT v.recipient_id FROM mail_inbox_rev v"
     "            WHERE v.recipient_id IN (SELECT r.recipient_id FROM mail_recipients r"
@@ -83546,28 +83715,86 @@ async def _invite_retention_sweep(db: AsyncSession) -> int:
                                  {"days": INVITE_KEEP_DAYS})).fetchall())
 
 
+# ── The retention sweep waits for no ROW lock (mscl-r2) ─────────────────────
+#
+# A pass removes every due row it can HOLD and leaves the rest to a later
+# pass. Every row it writes it first takes with SKIP LOCKED, in the weakest
+# mode that still conflicts with its own write, and it then writes only rows
+# it holds, so no statement of it waits for another transaction's row lock:
+#   (a) read envelopes it expires: FOR NO KEY UPDATE (deleted_at is in no
+#       unique index);
+#   (b) messages it purges: FOR UPDATE (it deletes them). While it holds a
+#       message no new row can name it: a foreign-key check takes KEY SHARE
+#       on the message, which FOR UPDATE refuses;
+#   (c) the rows the purge's foreign keys then write, of the messages it
+#       holds: mail_recipients FOR UPDATE (the CASCADE deletes them);
+#       moderation_cases, pending_dms and lobby_invites FOR NO KEY UPDATE
+#       (SET NULL writes a column that is in no unique index). A second read
+#       takes every such row, held or not, and a message with one it does
+#       not hold is left to a later pass;
+#   (d) the DELETE names only the messages whose rows it holds, and checks
+#       the purge predicate again in a statement of its own, after the locks;
+#   (e) censor hits it prunes: FOR UPDATE (it deletes them);
+#   (f) send receipts and the messages whose key goes with them: both FOR
+#       UPDATE, in _MAIL_RECEIPT_SWEEP_SQL (the key is in a unique index).
+# The other kinds of wait, one fact each:
+#   - advisory locks: no statement here takes one, and no trigger of the
+#     written tables' own fires on a write of the sweep: those triggers are
+#     trg_mail_inbox_rev_bump (mail_recipients, AFTER INSERT only) and
+#     trg_mail_send_receipt (mail_messages, AFTER INSERT OR UPDATE OF
+#     recipient_count only), and the sweep inserts nothing and never sets
+#     recipient_count. The foreign keys' actions are the database's own
+#     triggers, and they write only the rows (c) holds. The send's per-sender
+#     mail lock (hashtext('mail:' ...)) is never taken here;
+#   - unique indexes: a uniqueness check waits only for another transaction
+#     whose uncommitted row holds the same key. A DELETE inserts no key. An
+#     UPDATE that is not HOT inserts every index's key again, its unchanged
+#     ones too, and the only other row an unchanged key is in is the row's
+#     own old version, which this transaction is replacing: another
+#     transaction's row with that key fails, or waits at, its own check
+#     against this one. The one changed key here is (f)'s retired key, in
+#     297's UNIQUE (sender_id, idempotency_key): a value drawn at random in
+#     the statement (122 bits, its version digit set to 0). This build
+#     refuses a reserved key from a sender (_mail_parse_key) and no route
+#     returns a drawn one, so no other transaction is inserting it. The
+#     expiry and the SET NULL actions write no column a unique index names
+#     in its columns, its predicate or its expressions (pinned, with the
+#     triggers, the foreign keys and no exclusion constraint or rule, in
+#     test_mail_case_scrub_pg.py);
+#   - table locks: every write here takes ROW EXCLUSIVE and queues behind a
+#     migration's stronger lock like any other write; that wait is outside
+#     this claim.
+# So the sweep is a member of no lock circle, since every member of one waits
+# for another member, and the sweep waits for no row lock, no advisory lock
+# and no other transaction's key: not the class of mscl-r2's first finding
+# (the purge holding a relay row through one message's SET NULL and waiting
+# for a case row through another's), and not the circles with the deletion
+# that ORDER-V2 section 11 named.
 async def _mail_retention_sweep(db: AsyncSession) -> tuple[int, int, int, int]:
     """The janitor's mail arm (called hourly from queue_cleanup_loop, so
     every statement here is in the boot-time EXPLAIN inventory). Policy:
     read mail older than MAIL_RETENTION_DAYS leaves the inbox (its envelope
     is soft-expired, which keeps the sender's addressee list intact until
-    the message itself goes); a message is purged once NO delivered envelope
-    is still live AND (the sender deleted it OR it is older than
-    MAIL_RETENTION_DAYS). Unread mail is therefore kept: a live unread
-    envelope blocks the purge. What a sender is answered never reads whether
-    the purge has run: the spam check counts send receipts, and the
+    the message itself goes); a message is due for the purge once NO
+    delivered envelope is still live AND (the sender deleted it OR it is
+    older than MAIL_RETENTION_DAYS). Unread mail is therefore kept: a live
+    unread envelope blocks the purge. What a sender is answered never reads
+    whether the purge has run: the spam check counts send receipts, and the
     sender's own views read their rows with the clock inside the statement
-    (_MAIL_CLOCK_CTE). Bounded batches; the
-    cascade removes the envelopes, moderation_cases.message_id goes NULL and
+    (_MAIL_CLOCK_CTE). A pass handles what is due in bounded batches, and
+    only the rows it can hold: a row another transaction holds waits for a
+    later pass (the comment above), so no pass is promised to clear all that
+    is due. The cascade removes the envelopes, moderation_cases.message_id goes NULL and
     the case keeps its snapshot. A reply's in_reply_to keeps the purged
     parent's id: migration 415 dropped the foreign key that set it NULL, so a
     reply's sender reads the same in_reply_to whatever the parent's delivery
     kept or released. The censor-hit ledger is pruned after
-    MAIL_CENSOR_HITS_KEEP_DAYS. Send receipts (migration 415) are deleted
+    MAIL_CENSOR_HITS_KEEP_DAYS. Send receipts (migration 415) are due
     MAIL_RETENTION_DAYS after the send whatever the message's delivery or
-    purge: a repeated key is answered from its receipt until then, and the
-    key of a message still kept is retired with it
+    purge: a repeated key is answered from its receipt at least until then,
+    and the key of a message still kept is retired with it
     (_MAIL_RECEIPT_SWEEP_SQL)."""
+    # (a)
     expired = (await db.execute(text(
         "UPDATE mail_recipients SET deleted_at = NOW()"
         " WHERE (message_id, recipient_id) IN ("
@@ -83575,29 +83802,289 @@ async def _mail_retention_sweep(db: AsyncSession) -> tuple[int, int, int, int]:
         "     FROM mail_recipients r JOIN mail_messages m ON m.id = r.message_id"
         "    WHERE r.read_at IS NOT NULL AND r.deleted_at IS NULL"
         "      AND m.created_at < NOW() - make_interval(days => CAST(:days AS integer))"
-        "    LIMIT 2000)"
+        "    LIMIT 2000"
+        "    FOR NO KEY UPDATE OF r SKIP LOCKED)"
         " RETURNING 1"
     ), {"days": MAIL_RETENTION_DAYS})).fetchall()
-    purged = (await db.execute(text(
-        "DELETE FROM mail_messages"
-        " WHERE id IN ("
-        "   SELECT m.id FROM mail_messages m"
-        "    WHERE NOT EXISTS (SELECT 1 FROM mail_recipients r"
-        "                       WHERE r.message_id = m.id AND r.delivery = 'delivered'"
-        "                         AND r.deleted_at IS NULL)"
-        "      AND (m.deleted_by_sender_at IS NOT NULL"
-        "           OR m.created_at < NOW() - make_interval(days => CAST(:days AS integer)))"
-        "    LIMIT 500)"
-        " RETURNING 1"
-    ), {"days": MAIL_RETENTION_DAYS})).fetchall()
+    # (b) to (d)
+    purged = await _mail_purge_due(db)
+    # (e)
     hits = (await db.execute(text(
         "DELETE FROM mail_censor_hits"
-        " WHERE created_at < NOW() - make_interval(days => CAST(:days AS integer))"
+        " WHERE id IN (SELECT id FROM mail_censor_hits"
+        "               WHERE created_at < NOW() - make_interval(days => CAST(:days AS integer))"
+        "               FOR UPDATE SKIP LOCKED)"
         " RETURNING 1"
     ), {"days": MAIL_CENSOR_HITS_KEEP_DAYS})).fetchall()
+    # (f)
     receipts = (await db.execute(text(_MAIL_RECEIPT_SWEEP_SQL),
                                  {"days": MAIL_RETENTION_DAYS})).fetchall()
     return len(expired), len(purged), len(hits), len(receipts)
+
+
+async def _mail_purge_due(db: AsyncSession) -> list:
+    """The retention sweep's purge, steps (b) to (d) of the comment above
+    _mail_retention_sweep, each a statement of its own in the caller's
+    transaction: the messages due that it can hold; the rows the DELETE's
+    foreign keys write for them, those it can hold, then all of them read
+    again; the DELETE of the messages whose rows it holds, with the purge's
+    predicate checked again. One row per message removed. A message it
+    cannot hold, or one with a row it cannot hold, stays for a later pass."""
+    # (b) the messages due, those it can hold
+    held = [r["id"] for r in (await db.execute(text(
+        "SELECT m.id FROM mail_messages m"
+        " WHERE NOT EXISTS (SELECT 1 FROM mail_recipients r"
+        "                    WHERE r.message_id = m.id AND r.delivery = 'delivered'"
+        "                      AND r.deleted_at IS NULL)"
+        "   AND (m.deleted_by_sender_at IS NOT NULL"
+        "        OR m.created_at < NOW() - make_interval(days => CAST(:days AS integer)))"
+        " LIMIT 500"
+        " FOR UPDATE OF m SKIP LOCKED"
+    ), {"days": MAIL_RETENTION_DAYS})).mappings().all()]
+    if not held:
+        return []
+    # (c) every row the DELETE's foreign keys write, those it can hold...
+    took = list((await db.execute(text(
+        "SELECT message_id AS mid FROM mail_recipients"
+        " WHERE message_id = ANY(CAST(:ids AS uuid[]))"
+        " FOR UPDATE SKIP LOCKED"), {"ids": held})).mappings().all())
+    took += (await db.execute(text(
+        "SELECT message_id AS mid FROM moderation_cases"
+        " WHERE message_id = ANY(CAST(:ids AS uuid[]))"
+        " FOR NO KEY UPDATE SKIP LOCKED"), {"ids": held})).mappings().all()
+    took += (await db.execute(text(
+        "SELECT mail_id AS mid FROM pending_dms"
+        " WHERE mail_id = ANY(CAST(:ids AS uuid[]))"
+        " FOR NO KEY UPDATE SKIP LOCKED"), {"ids": held})).mappings().all()
+    took += (await db.execute(text(
+        "SELECT mail_message_id AS mid FROM lobby_invites"
+        " WHERE mail_message_id = ANY(CAST(:ids AS uuid[]))"
+        " FOR NO KEY UPDATE SKIP LOCKED"), {"ids": held})).mappings().all()
+    # ...and all of them, held or not, read after those locks: while it holds
+    # a message no new row can name it, so a row this read does not find
+    # cannot appear before the commit
+    left: dict = {}
+    for r in (await db.execute(text(
+            "SELECT message_id AS mid FROM mail_recipients WHERE message_id = ANY(CAST(:ids AS uuid[]))"
+            " UNION ALL SELECT message_id FROM moderation_cases"
+            "  WHERE message_id = ANY(CAST(:ids AS uuid[]))"
+            " UNION ALL SELECT mail_id FROM pending_dms WHERE mail_id = ANY(CAST(:ids AS uuid[]))"
+            " UNION ALL SELECT mail_message_id FROM lobby_invites"
+            "  WHERE mail_message_id = ANY(CAST(:ids AS uuid[]))"), {"ids": held})).mappings().all():
+        left[str(r["mid"])] = left.get(str(r["mid"]), 0) + 1
+    for r in took:
+        left[str(r["mid"])] = left.get(str(r["mid"]), 0) - 1
+    # (d) a message goes only when it holds every one of its rows
+    whole = [i for i in held if left.get(str(i), 0) == 0]
+    if not whole:
+        return []
+    return list((await db.execute(text(
+        "DELETE FROM mail_messages m"
+        " WHERE m.id = ANY(CAST(:ids AS uuid[]))"
+        "   AND NOT EXISTS (SELECT 1 FROM mail_recipients r"
+        "                    WHERE r.message_id = m.id AND r.delivery = 'delivered'"
+        "                      AND r.deleted_at IS NULL)"
+        "   AND (m.deleted_by_sender_at IS NOT NULL"
+        "        OR m.created_at < NOW() - make_interval(days => CAST(:days AS integer)))"
+        " RETURNING 1"
+    ), {"ids": whole, "days": MAIL_RETENTION_DAYS})).fetchall())
+
+
+# ── Case-row scrubs that never wait (mail spam case lock lane, route B) ─────
+#
+# delete_player_data's LAST statement before its commit, and its only write
+# to a moderation_cases row. It rewrites the two columns that name the deleted
+# account -- reporter_id (its players.id, on a case it reported) goes NULL,
+# resolved_by (its raw Steam ID, on a case it acted on as a moderator) takes
+# the deletion's tombstone -- on every such row it can lock now, and skips a
+# row another transaction holds. As a statement it never waits for another
+# transaction, a migration's table lock aside:
+#   - row locks: the inner SELECT locks only rows no other transaction holds,
+#     in the mode the UPDATE takes (neither column is in a unique index, so
+#     FOR NO KEY UPDATE), and the UPDATE writes only the rows it locked;
+#   - foreign keys: reporter_id changes only to NULL, which needs no check,
+#     and no other key column changes. PostgreSQL re-checks an unchanged key
+#     only on a row this transaction wrote earlier (ri_triggers.c,
+#     RI_FKey_fk_upd_check_required), and the deletion writes no case row
+#     before this statement: no earlier statement of it names the table, and
+#     none deletes a mail_messages row, whose ON DELETE SET NULL would write
+#     one;
+#   - triggers: the table has none of its own, only its foreign keys';
+#   - unique indexes: no indexed column changes. An update that cannot stay on
+#     its page re-inserts the row's unchanged keys, and the only other version
+#     holding them is the row's own old one, which this transaction replaces;
+#   - the table lock: ROW EXCLUSIVE, which only a migration's locks (SHARE and
+#     stronger) conflict with.
+# So the deletion never holds a case row while it waits for anything. A row
+# skipped here keeps its old values until _mail_case_scrub_pass finishes it on
+# a later janitor pass; until then an admin's case list
+# (admin_moderation_cases) can show them.
+#
+# This statement alone does not close the circles through a case row. Route
+# B's first argument checked pairs, and mscl-r2 found a circle of three it
+# missed: the deletion holding an open lobby, a moderator's ban holding its
+# case row and waiting for that lobby, and the retention purge holding a relay
+# row of the deletion's through one message's SET NULL while it waited for the
+# case row through another's. What closes them is a rule per EDGE. A circle
+# through case row C has an edge "X waits for C, held by Y", and it closes only
+# if Y waits for something after taking C and something waits for X. So for
+# every such edge one of these holds:
+#   - Y waits for nothing once it holds C: this statement, the janitor's
+#     finish, the notified stamp (its commit is next), and the retention sweep,
+#     which waits for no row lock at all (the comment above
+#     _mail_retention_sweep);
+#   - X holds nothing while it waits for C: the notified stamp;
+#   - X and Y both take, before C, a lock that orders them: a send and a
+#     moderator's action on one case, in any pair, take its subject's
+#     identity lock; two reports of one message take the reporter's.
+# Each edge is settled by its own two transactions, so the rule holds for
+# circles of any length (ORDER-V3 has the table). The deletion and another
+# deletion can still wait for each other on mail rows that are not case rows
+# (envelopes, relay rows, censor hits, send receipts), taken in different
+# orders; that open class is the item MDPL. The retention sweep is no longer
+# in it.
+_DELETE_CASE_SCRUB_SQL = (
+    "UPDATE moderation_cases"
+    "   SET reporter_id = CASE WHEN reporter_id = CAST(:pid AS uuid) THEN NULL"
+    "                          ELSE reporter_id END,"
+    "       resolved_by = CASE WHEN resolved_by = CAST(:sid AS varchar)"
+    "                          THEN CAST(:tomb AS varchar) ELSE resolved_by END"
+    " WHERE id IN (SELECT id FROM moderation_cases"
+    "               WHERE reporter_id = CAST(:pid AS uuid)"
+    "                  OR resolved_by = CAST(:sid AS varchar)"
+    "               FOR NO KEY UPDATE SKIP LOCKED)"
+)
+
+# The janitor's finish of what _DELETE_CASE_SCRUB_SQL skipped
+# (_mail_case_scrub_pass, every pass of queue_cleanup_loop). By predicate --
+# never by a list of row ids or a cursor that a skipped row could fall behind
+# (#615) -- and with SKIP LOCKED, so it never waits for a case row either: a
+# row still held is found again on a later pass. Each half runs in a
+# transaction of its own, so a pass writes a case row at most once per
+# transaction: a second write would re-check the row's foreign keys and could
+# wait (see above). Its UPDATEs change no key column but reporter_id, and
+# that only to NULL.
+#
+# Reporter half: a reporter_id whose players row has deleted_at set goes NULL.
+_CASE_SCRUB_REPORTER_SQL = (
+    "UPDATE moderation_cases SET reporter_id = NULL"
+    " WHERE id IN (SELECT c.id FROM moderation_cases c"
+    "                JOIN players p ON p.id = c.reporter_id"
+    "               WHERE p.deleted_at IS NOT NULL"
+    "               FOR NO KEY UPDATE OF c SKIP LOCKED)"
+    " RETURNING 1"
+)
+# Resolver half. resolved_by holds a raw Steam ID, so a deleted one is found
+# through the deletion ledger (deleted_steam_ids, the hash _hash_steam_id
+# gives; the deletion writes it, and runs at all, only with MATCH_HMAC_SECRET
+# set). The ids a pass checks: each distinct 17-digit value; a tombstone never
+# matches.
+_CASE_SCRUB_RESOLVER_IDS_SQL = (
+    "SELECT DISTINCT resolved_by FROM moderation_cases"
+    " WHERE resolved_by ~ '^[0-9]{17}$'"
+)
+_CASE_SCRUB_LEDGER_SQL = (
+    "SELECT steam_id_hash, deleted_at FROM deleted_steam_ids"
+    " WHERE steam_id_hash = ANY(CAST(:hashes AS text[]))"
+)
+# One deleted resolver's rows, those resolved before the deletion. The two
+# stamps are both the database server's clock: resolved_at is NOW() of the
+# moderator's action (_moderation_case_act), the start of that transaction;
+# deleted_at is clock_timestamp() read by delete_player_data's ledger insert,
+# AFTER its identity lock. (It was the column's default NOW(), the deleting
+# transaction's start, until mscl-r2 found that nothing bounds how long a
+# deletion can stand before that lock: no lock_timeout, statement_timeout or
+# idle_in_transaction_session_timeout applies to it.) The action and the
+# deletion take the same identity lock (_mail_lock_identities;
+# delete_player_data's pg_advisory_xact_lock), so an action that wrote a row
+# the deletion then skipped committed before the deletion took that lock: its
+# resolved_at is at most its commit, at most the deletion's lock, at most
+# deleted_at, however long the deletion stood before the lock. The one-hour
+# margin covers only a step of the server's clock between the two reads. It
+# cannot reach a row it should leave: once a deletion commits, no action
+# writes that raw id again (_mail_lock_identities refuses an id the ledger
+# records, and _mail_actor_live_or_raise a row with deleted_at set).
+_CASE_SCRUB_RESOLVER_SQL = (
+    "UPDATE moderation_cases SET resolved_by = CAST(:tomb AS varchar)"
+    " WHERE id IN (SELECT id FROM moderation_cases"
+    "               WHERE resolved_by = CAST(:sid AS varchar)"
+    "                 AND resolved_at <= CAST(:deleted_at AS timestamptz)"
+    "                                    + make_interval(hours => 1)"
+    "               FOR NO KEY UPDATE SKIP LOCKED)"
+    " RETURNING 1"
+)
+_CASE_SCRUB_STATE = {"next": 0.0}
+
+
+async def _mail_case_scrub_reporters(db: AsyncSession) -> int:
+    """The reporter half of a case-scrub pass (_CASE_SCRUB_REPORTER_SQL), in
+    the caller's transaction. Returns the rows it finished."""
+    return len((await db.execute(text(_CASE_SCRUB_REPORTER_SQL))).fetchall())
+
+
+async def _mail_case_scrub_resolvers(db: AsyncSession) -> dict:
+    """The resolver half of a case-scrub pass, in the caller's transaction.
+    Without MATCH_HMAC_SECRET it finishes nothing -- no ledger hash can be
+    computed -- and says so in its result: armed False."""
+    out = {"armed": bool(MATCH_HMAC_SECRET), "checked": 0, "deleted": 0, "resolvers": 0}
+    if not MATCH_HMAC_SECRET:
+        return out
+    ids = [r[0] for r in (await db.execute(text(_CASE_SCRUB_RESOLVER_IDS_SQL))).fetchall()]
+    out["checked"] = len(ids)
+    if not ids:
+        return out
+    by_hash = {_hash_steam_id(sid): sid for sid in ids}
+    rows = (await db.execute(text(_CASE_SCRUB_LEDGER_SQL), {"hashes": list(by_hash)})).fetchall()
+    out["deleted"] = len(rows)
+    for h, deleted_at in rows:
+        sid = by_hash.get(str(h).strip())
+        if sid is None:
+            continue
+        # A finished row takes a new tombstone, not the player's own (which is kept nowhere to reuse).
+        tomb = f"deleted_{uuid.uuid4().hex[:8]}"
+        out["resolvers"] += len((await db.execute(
+            text(_CASE_SCRUB_RESOLVER_SQL),
+            {"sid": sid, "tomb": tomb, "deleted_at": deleted_at})).fetchall())
+    return out
+
+
+async def _mail_case_scrub_pass(session_factory) -> dict:
+    """One pass of the case-row finish (the comment above _CASE_SCRUB_REPORTER_SQL
+    says how): the reporter half, then the resolver half, each in a
+    transaction of its own that commits at once. Called from
+    queue_cleanup_loop every pass, so its statements are in the boot-time
+    EXPLAIN inventory. Returns the counts _mail_case_scrub_log prints."""
+    async with session_factory() as db:
+        reporters = await _mail_case_scrub_reporters(db)
+        await db.commit()
+    async with session_factory() as db:
+        out = await _mail_case_scrub_resolvers(db)
+        await db.commit()
+    out["reporters"] = reporters
+    return out
+
+
+def _mail_case_scrub_log(res: dict, now: float | None = None) -> None:
+    """The case-scrub pass's log (learnings 438, 443: a line that shows it
+    runs, not silence). A pass that finished a row prints its counts; so does
+    the first pass after boot and then one pass an hour, finished rows or not.
+    Without MATCH_HMAC_SECRET the line says the resolver half finishes
+    nothing."""
+    now = time.monotonic() if now is None else now
+    done = int(res.get("reporters", 0)) + int(res.get("resolvers", 0))
+    hourly = now >= _CASE_SCRUB_STATE["next"]
+    if not (done or hourly):
+        return
+    if hourly:
+        _CASE_SCRUB_STATE["next"] = now + 3600
+    if not res.get("armed"):
+        print(f"[MAIL-CASE-SCRUB] MATCH_HMAC_SECRET is not set: the resolver half finishes "
+              f"nothing; reporter row(s) finished {int(res.get('reporters', 0))}")
+    else:
+        print(f"[MAIL-CASE-SCRUB] armed: {int(res.get('checked', 0))} resolver id(s) checked, "
+              f"{int(res.get('deleted', 0))} on the deletion ledger; finished "
+              f"{int(res.get('resolvers', 0))} resolver row(s) and "
+              f"{int(res.get('reporters', 0))} reporter row(s)")
 
 
 # -- Verified reads: operator keys, the read-gate stage, census, probe ---------

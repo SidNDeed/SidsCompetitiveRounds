@@ -1313,6 +1313,46 @@ class HealthResponse(BaseModel):
     # (the standby, and the primary before its first census). A measured
     # value, not a marker.
     quarantine_needs_decision: int
+    # ban_cap_build: release-train verification plumbing, not a design
+    # mechanism (main._BAN_CAP_BUILD; 1 = this build writes an end on every
+    # ban, at most models.BAN_MAX_HOURS after its start). It names build
+    # identity only. A code constant, equal on both roles by construction,
+    # so the train can read it through the edge; what the batch changes is
+    # seen by no phase of the train, and this is the key that tells a stale
+    # box from a refreshed one (learnings 780, 794, 1186). Probed by the
+    # release train and read by nothing else (#306). No default, as above.
+    # Absent on any build before it.
+    ban_cap_build: int
+    # aer_popgate_build: release-train verification plumbing, not a design
+    # mechanism (main._AER_POPGATE_BUILD; 1 = this build's evidence report
+    # cache has a fixed byte allowance and builds the display population
+    # once after start). It names build identity only, equal on both roles
+    # by construction; probed by the release train and read by nothing else
+    # (#306). No default, as above. Absent on any build before it.
+    aer_popgate_build: int
+    # admin_evidence_population: the outcome of this process's most recent
+    # build attempt of the evidence report's display population, or of a
+    # start-up build that failed before it reached an attempt
+    # (admin_evidence.population_health_word): "pending" (neither yet),
+    # "ready", or "unavailable:<budget|duplicate|deadline|error>". In
+    # memory, so both arms answer it; a standby answers "pending" for the
+    # life of its process. No default, as above. Absent on any build before
+    # it.
+    admin_evidence_population: str
+    # mail_spam_case_lock_build: release-train verification plumbing, not a
+    # design mechanism (main._MAIL_SPAM_CASE_LOCK_BUILD; 2 = in this build
+    # delete_player_data writes moderation_cases only in its last statement,
+    # which skips a row another transaction holds, and the janitor finishes a
+    # skipped row; a mail send keeps its order; the retention sweep waits for
+    # no row lock; the open item MDPL, two deletions against each other on
+    # mail rows that are not case rows, is not in it). It names build
+    # identity only. A code
+    # constant, equal on both roles by construction, so the train can read it
+    # through the edge; the lane adds no route and no key to any answer, and
+    # this is the key that tells a stale box from a refreshed one (learnings
+    # 780, 794). Probed by the release train and read by nothing else (#306).
+    # No default, as above. Absent on any build before it.
+    mail_spam_case_lock_build: int
     # build_manifest: the SHA-256 of the build-manifest.json this image's build
     # wrote (build_manifest.py: the build context's digest and the identity of
     # every installed wheel and .deb), "absent" when the process was not

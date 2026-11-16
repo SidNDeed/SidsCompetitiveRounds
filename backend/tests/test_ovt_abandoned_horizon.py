@@ -1710,12 +1710,17 @@ def test_the_janitor_lock_census_sees_orm_locks_and_not_only_sql():
         census["waits"]
     assert {r["func"] for r in census["waits"] if r["func"].startswith("_invite_")} == {"_invite_bump"}, \
         census["waits"]
-    # QDIG-1 adds one decline: the held-report janitor's row lock
-    # (_QDIG_SQL_JANITOR_LOCK, FOR UPDATE SKIP LOCKED, in _qdig_janitor_pass).
-    assert [r["func"] for r in census["declines"]].count("_qdig_janitor_pass") == 1, census["declines"]
-    assert len(census["declines"]) == 33, census["declines"]
+    # The mail spam case lock lane (claude/mscl-1116) adds ten declining sites,
+    # one statement each and every one SKIP LOCKED, and no waiter: in
+    # _mail_retention_sweep the read envelopes it expires (FOR NO KEY UPDATE),
+    # the censor hits and the send receipts it deletes (FOR UPDATE); in
+    # _mail_purge_due the messages due and their recipients (FOR UPDATE) and
+    # the case, relay and invite rows that name them (FOR NO KEY UPDATE); and
+    # the two halves of the case scrub, _mail_case_scrub_reporters and
+    # _mail_case_scrub_resolvers (FOR NO KEY UPDATE). Before: 32/31/29/28.
+    assert len(census["declines"]) == 42, census["declines"]
     assert len(census["waits"]) == 31, census["waits"]   # 25 before the queue-row lock became visible
-    assert len(census["decline_sites"]) == 30, census["decline_sites"]   # 29 before QDIG-1
+    assert len(census["decline_sites"]) == 39, census["decline_sites"]
     assert len(census["wait_sites"]) == 28, census["wait_sites"]   # 22 before: the four queue-row lock literals
 
 
