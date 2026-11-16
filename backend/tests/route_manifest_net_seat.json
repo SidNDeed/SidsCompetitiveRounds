@@ -952,7 +952,7 @@
           ],
           "main",
           "delete_player_data",
-          "bc733f58a3619862806f976b9d7be3636710cb6f"
+          "5a79857fa8ce2c8104c65fd7368c729e4e89279e"
         ],
         [
           "/api/v1/players/{steam_id}/ffa-history",
@@ -1867,7 +1867,7 @@
           ],
           "main",
           "health_check",
-          "8ac6efaab1fac26e6a635c5e49fda908cefef106"
+          "aaef820905af05946b47f7f22cc77782506794e4"
         ],
         [
           "/api/v1/i18n/approved",
@@ -3062,7 +3062,7 @@
           ],
           "main",
           "mail_send",
-          "204dfa342e48e6b7c259091284c48e8b61930faf"
+          "6aa0e15b2cdbcbbd0f0e57e143c198a463d52b71"
         ],
         [
           "/api/v1/mail/blocks",
@@ -3170,7 +3170,7 @@
           ],
           "main",
           "mail_reply",
-          "8d4e488adf3fe5cd339ea1e136b312964bf7df3b"
+          "41d68b3ed52c629517371957e7ac9f510215ac7c"
         ],
         [
           "/api/v1/mail/{message_id}/report",
@@ -4073,7 +4073,7 @@
       [
         "main",
         "lifespan",
-        "259e098a36aa04497c6cbedaf655c374af950ca7"
+        "9a8513723cda04d0075f640f94e0847c1f73d207"
       ]
     ]
   },
