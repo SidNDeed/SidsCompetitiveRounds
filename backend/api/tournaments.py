@@ -39,6 +39,7 @@ from models import (
     TournamentMatchCheckin,
     TournamentSignup,
     TournamentTimeVote,
+    player_ban_active_sql,
 )
 from schemas import (
     TournamentCurrentResponse,
@@ -470,12 +471,13 @@ async def _player_id_banned(db: AsyncSession, player_id) -> bool:
     """Active-ban check by player UUID (round-18 find 2): tournaments create
     RankedSeries rows and sct-* rooms, so they are formation surfaces under
     the no-new-pairing-after-ban invariant. Inline query — importing main's
-    helper would be circular."""
+    helper would be circular. "Active" is the one definition,
+    models.player_ban_active_sql: a ban past its end reads as lifted."""
     if player_id is None:
         return False
     row = (await db.execute(text(
         "SELECT 1 FROM player_bans pb JOIN players p ON p.steam_id = pb.steam_id"
-        " WHERE p.id = :pid AND pb.unbanned_at IS NULL LIMIT 1"
+        " WHERE p.id = :pid AND " + player_ban_active_sql("pb") + " LIMIT 1"
     ), {"pid": player_id})).scalar()
     return row is not None
 
@@ -500,7 +502,7 @@ async def _player_id_banned(db: AsyncSession, player_id) -> bool:
 _ELIGIBLE_ENTRANT_SQL = """ts.is_speculative = FALSE
        AND NOT EXISTS (SELECT 1 FROM player_bans pb
                         JOIN players bp ON bp.steam_id = pb.steam_id
-                       WHERE bp.id = ts.player_id AND pb.unbanned_at IS NULL)"""
+                       WHERE bp.id = ts.player_id AND """ + player_ban_active_sql("pb") + """)"""
 
 # A start-time vote counts when its voter is an eligible entrant and its slot
 # is far enough out for the lock to pick it (MIN_SLOT_NOTICE_HOURS after the

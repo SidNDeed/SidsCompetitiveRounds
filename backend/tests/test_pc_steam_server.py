@@ -805,6 +805,10 @@ def test_the_render_probe_composites_a_stored_steam_picture_or_says_why_not(monk
 
 
 TRAIN_BATCH = "sept14-gacha"   # the release-train entry THIS batch ships under
+# The pool rule that entry expects: the rule the sept14 batch shipped. A later
+# rule (4, migration 417) ships under its own entry; this one is history, so it
+# is compared with its own number, not with the build's current constant.
+TRAIN_POOL_RULE = 3
 
 
 def _release_train():
@@ -899,7 +903,8 @@ def test_health_carries_the_fold_marker_the_release_train_asserts_on_both_roles(
     assert rt.NEW_ROUTES == []          # no new route: the markers are the whole discriminator
     assert rt.CODE_MARKERS == ["pc_fold", "pc_pool_rule"]
     assert rt.SMOKE_ROUTE and rt.SMOKE_ROUTE not in rt.NEW_ROUTES
-    assert dict(rt.edge_markers()) == {"pc_fold": fold, "pc_pool_rule": main._PC_POOL_RULE}
+    assert dict(rt.edge_markers()) == {"pc_fold": fold, "pc_pool_rule": TRAIN_POOL_RULE}
+    assert main._PC_POOL_RULE >= TRAIN_POOL_RULE
 
     # the fold marker, exactly once, on both roles, in THIS batch's entry
     assert _role_expect(entry, "pc_fold") == [{"key": "pc_fold", "primary": fold, "standby": fold}]
@@ -907,7 +912,7 @@ def test_health_carries_the_fold_marker_the_release_train_asserts_on_both_roles(
     # question (#438): with no new route a stale standby would otherwise answer
     # exactly like a fresh one (the bug #266 shape)
     assert _role_expect(entry, "pc_pool_rule") == [
-        {"key": "pc_pool_rule", "primary": main._PC_POOL_RULE, "standby": main._PC_POOL_RULE}]
+        {"key": "pc_pool_rule", "primary": TRAIN_POOL_RULE, "standby": TRAIN_POOL_RULE}]
 
     # 321's own work, read back as a positive signal the feature EMITS (#438):
     # not "3 prints" but "every live rank-2 print", so a half-applied run reads 0
@@ -945,7 +950,7 @@ def test_the_release_train_runs_a_batch_that_adds_no_route(monkeypatch):
         assert rt.NEW_ROUTES or rt.CODE_MARKERS or rt.JSON_MARKERS, name
 
     rt.select_batch(TRAIN_BATCH)
-    fold, rule = main.PC_FOLD, main._PC_POOL_RULE
+    fold, rule = main.PC_FOLD, TRAIN_POOL_RULE
     new_build = {"pc_fold": fold, "pc_pool_rule": rule}
     old_build = {"pc_fold": "v4.13"}
     monkeypatch.setattr(rt, "http_code", lambda host, path, **kw: "200")
@@ -3921,7 +3926,8 @@ def test_the_handout_and_card_apply_the_pools_ban_word_to_puller_and_subject():
     says it of the subject live rather than trusting the latest snapshot. One
     fragment, formatted with the row alias, so the word cannot drift."""
     ban = main._PC_NOT_BANNED_SQL
-    assert ban == "NOT EXISTS (SELECT 1 FROM player_bans b WHERE b.steam_id = {a}.steam_id AND b.unbanned_at IS NULL)"
+    assert ban == ("NOT EXISTS (SELECT 1 FROM player_bans b WHERE b.steam_id = {a}.steam_id AND "
+                   + main.player_ban_active_sql("b") + ")")
     assert main._PC_STEAM_ELIGIBLE_SQL.count(ban.format(a="p")) == 1
     skip, pend = main._PC_EVENTS_SKIP_SQL, main._PC_EVENTS_PENDING_SQL
     for alias in ("pl", "su"):

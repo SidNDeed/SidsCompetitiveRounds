@@ -11,9 +11,24 @@ SRC = (API / "main.py").read_text(encoding="utf-8")
 
 
 def _marker_sql():
-    found = re.search(r'_ONLINE_MARKER_SQL = \((?P<body>(?:\s*"[^"\n]*"\s*)+)\)', SRC)
-    assert found, "the marker constant is gone"
-    return "".join(re.findall(r'"([^"\n]*)"', found.group("body")))
+    # The constant's value as the module builds it: since B1 it ends with the
+    # one ban definition (models.player_ban_active_sql), a call, so the text
+    # of the literal alone is no longer the whole expression.
+    import main
+    assert "_ONLINE_MARKER_SQL = (" in SRC, "the marker constant is gone"
+    return main._ONLINE_MARKER_SQL
+
+
+def test_the_marker_is_false_for_an_actively_banned_account():
+    """B1: the marker's last term leaves out an account under an active ban,
+    by the one definition, so every board and the hover card that read the
+    marker show no online dot for it."""
+    import main
+    sql = _marker_sql()
+    tail = (" AND NOT EXISTS (SELECT 1 FROM player_bans pbo WHERE pbo.steam_id = p.steam_id AND "
+            + main.player_ban_active_sql("pbo") + "))")
+    assert sql.endswith(tail), sql
+    assert sql.count("player_bans") == 1
 
 
 def test_every_board_uses_the_shared_marker():

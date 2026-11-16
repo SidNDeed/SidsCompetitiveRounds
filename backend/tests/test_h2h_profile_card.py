@@ -265,6 +265,7 @@ class FakeSession:
                 "rating": p.get("rating"), "rd": p.get("rd"),
                 "is_online": None if off else bool(p.get("online", False)),
                 "last_seen_s": None if off else int(p.get("last_seen_s", 0)),
+                "is_banned": bool(p.get("banned", False)),
             }])
         if "FROM players p" in sql:
             wanted = {params["me"], params["opp"]}
@@ -450,7 +451,7 @@ def test_no_nested_member_name_reuses_a_key_the_line_searches_for():
 def test_profile_matrix_public_fields_always_presence_nulled_by_appear_offline_and_no_gold_or_discord():
     assert set(schemas.H2HProfileBlock.model_fields) == {
         "display_name", "title", "title_color", "tier", "tier_color",
-        "rating_1v1", "rd_1v1", "level", "is_online", "last_seen_s",
+        "rating_1v1", "rd_1v1", "level", "is_online", "last_seen_s", "is_banned",
     }
     for name in schemas.H2HProfileBlock.model_fields:
         assert "gold" not in name and "discord" not in name

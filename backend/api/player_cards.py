@@ -98,9 +98,12 @@ PC_TRADE = {
 PACK_PAY = ("gold", "shards")
 # No opt-out and no picture choice (2026-09-13): no player leaves the pool by
 # choice. Who IS a subject is main._PC_POOL_MEMBER_SQL's word, and since the
-# 2026-09-15 merge (_PC_POOL_RULE = 3) that word is the INTERSECTION of two
-# decisions: an unbanned, undeleted player who has run the mod (mod_seen_at
-# set, 2026-09-13) AND whose id is a public individual SteamID64 (v4.13).
+# 2026-09-15 merge that word is the INTERSECTION of two decisions: an
+# unbanned, undeleted player who has run the mod (mod_seen_at set,
+# 2026-09-13) AND whose id is a public individual SteamID64 (v4.13). Since
+# _PC_POOL_RULE = 4 (migration 417), "unbanned" means under no active ban by
+# the one definition (models.player_ban_active_sql), so a ban whose end has
+# passed no longer excludes the player.
 # Every card carries a picture, and deleting all data is the one way such a
 # player's card leaves the binders.
 # trades_open (migration 353) is the trader-side consent of card trading;

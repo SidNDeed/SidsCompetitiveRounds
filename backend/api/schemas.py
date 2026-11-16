@@ -560,7 +560,10 @@ class H2HProfileBlock(BaseModel):
     Field matrix (A-5): display_name, title (+colour), tier (+colour), the
     1v1 rating and RD, and level are ALWAYS present — each is already public
     on the boards. is_online and last_seen_s are NULL when the player has
-    appear_offline set. Gold and Discord identity are not carried at all."""
+    appear_offline set. Gold and Discord identity are not carried at all.
+    is_banned is true while the player is under an active ban (the one
+    definition, models.player_ban_active_sql); it is the block's last key,
+    so the 1.41.0 card (which reads this block by key name) is unaffected."""
     display_name: str | None = None
     title: str | None = None
     title_color: str | None = None
@@ -571,6 +574,7 @@ class H2HProfileBlock(BaseModel):
     level: int = 0
     is_online: bool | None = None
     last_seen_s: int | None = None
+    is_banned: bool = False
 
 
 class H2HWinLoss(BaseModel):
@@ -841,9 +845,12 @@ class HealthResponse(BaseModel):
     # v2 §9), which is why the release train asserts it per role.
     pc_steam_sweep: str | None = None
     # pc_pool_rule: the card pool's membership rule this build carries
-    # (main._PC_POOL_RULE; 3 = players who have run the mod AND whose id is a
-    # public individual SteamID64 — the 2026-09-15 merge's intersection of two
-    # decisions, 2 having been the mod-runner half alone). A code constant, so
+    # (main._PC_POOL_RULE; 4 = players who have run the mod AND whose id is a
+    # public individual SteamID64 AND who are under no active ban by the one
+    # definition, models.player_ban_active_sql, so a ban whose end has passed
+    # no longer excludes them (timed bans, migration 417). 3 was the
+    # 2026-09-15 merge's intersection of two decisions with any unlifted ban
+    # excluding, and 2 was the mod-runner half alone). A code constant, so
     # the release train can tell the new build from the old one on a batch that
     # adds no route, and equal on both boxes by construction.
     pc_pool_rule: int | None = None
@@ -1283,6 +1290,16 @@ class HealthResponse(BaseModel):
     # by the release train and read by nothing else (#306). No default, as
     # above. Absent on any build before it.
     casual_streak_build: int
+    # ban_expiry_build: release-train verification plumbing, not a design
+    # mechanism (main._BAN_EXPIRY_BUILD; 1 = this build reads a ban's end
+    # time, player_bans.expires_at of migration 417). It names build identity
+    # only. A code constant, equal on both roles by construction, so the
+    # train can read it through the edge; what the batch changes is seen by
+    # no phase of the train, and this is the key that tells a stale box from
+    # a refreshed one (learnings 780, 794). Probed by the release train and
+    # read by nothing else (#306). No default, as above. Absent on any build
+    # before it.
+    ban_expiry_build: int
     # build_manifest: the SHA-256 of the build-manifest.json this image's build
     # wrote (build_manifest.py: the build context's digest and the identity of
     # every installed wheel and .deb), "absent" when the process was not

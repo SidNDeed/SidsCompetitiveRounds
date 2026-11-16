@@ -9613,9 +9613,29 @@ _last_ban_id_posted: str | None = None
 _ban_poller_initialized = False
 
 
+def _ban_end_line(b) -> str:
+    """The embed's end line for one /internal/recent-bans row: the end in
+    Discord's timestamp form, or "Permanent" when the row's expires_at is
+    null. An api that predates the key sends no expires_at; the line is then
+    left out (""), so the post is the one it was before. Never raises: an
+    unreadable value also gives "" (lesson 187 - the notice is optional and
+    stays out of the ban's failure domain; the ban is already written)."""
+    try:
+        if not isinstance(b, dict) or "expires_at" not in b:
+            return ""
+        raw = b.get("expires_at")
+        if raw is None:
+            return "Ends: **Permanent**"
+        end = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+        return f"Ends: <t:{int(end.timestamp())}:F>"
+    except Exception:
+        return ""
+
+
 @tasks.loop(seconds=60)
 async def poll_new_bans():
-    """Poll new mod-wide player bans and post them to #scr-admin (item 4)."""
+    """Poll new mod-wide player bans and post them to #scr-admin (item 4).
+    Each embed carries the ban's end (_ban_end_line) when the api sends it."""
     global _last_ban_id_posted, _ban_poller_initialized
     if not http_session or not API_SECRET_KEY or not ADMIN_CHANNEL_ID:
         return
@@ -9651,12 +9671,14 @@ async def poll_new_bans():
     for b in bans:
         try:
             name = b.get("display_name") or b["steam_id"]
+            end_line = _ban_end_line(b)
             embed = discord.Embed(
                 title="🔨 Player banned (mod-wide)",
                 description=(
                     f"**{discord.utils.escape_markdown(str(name))}** (`{b['steam_id']}`)\n"
                     f"Reason: **{b.get('reason') or 'violation'}**\n"
                     f"By: `{b.get('banned_by_steam_id') or '—'}`"
+                    + (f"\n{end_line}" if end_line else "")
                 ),
                 color=0xCC2222,
                 timestamp=datetime.fromisoformat(b["banned_at"].replace("Z", "+00:00")) if b.get("banned_at") else None,

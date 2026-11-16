@@ -25,7 +25,7 @@ import uuid
 from uuid import UUID
 
 import json as _json
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, StrictInt
 from fastapi import Body, Depends, FastAPI, Header, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
@@ -48,6 +48,7 @@ from glicko2 import calculate_new_rating
 import steamid64 as _sid64   # the SteamID64 rule, standard library only: the name cleanup, the bug-log scrubber and the Steam sweep read it
 import log_redaction as _logred   # the credential rule, standard library only: every receive path and read-back door of client log text applies it
 from models import AdminUser, AdminAction, Bet, BoosterGrant, BugReport, BugReportEvent, CardOffer, FlaggedMatch, GlickoRating, GoldTransaction, Match, MatchCard, Player, PlayerBan, PlayerItem, RankedSeries, RankRoleColor, RatingHistory, RankedQueue, QueueBlock, PlayerBlock, LinkCode, PlayerAchievement, ShopItem, GlickoRating2v2, TeamQueue, TeamSeries, TeamMatch, TeamMatchCard, TeamMatchTelemetry, TournamentMatch
+from models import player_ban_active_sql
 from schemas import (
     AchievementUnlockRequest,
     AchievementListResponse,
@@ -989,6 +990,27 @@ def _presence_online_ids() -> list[str]:
     return list(_presence_seen.keys())
 
 
+async def _presence_online_ids_shown(db: AsyncSession) -> list[str]:
+    """The online ids a presence ANSWER may hold: _presence_online_ids less
+    every account under an active ban (the one definition,
+    models.player_ban_active_sql). Every "N online" count and the online list
+    of /presence/online read this, so a banned account is in no online list
+    and no online count, and is back by the ordinary rules the moment its ban
+    ends or is lifted. The map itself keeps the id: a banned client still
+    pings, and the lifecycle sweeps' liveness evidence (_presence_is_online)
+    is not a presence answer. One read of player_bans per call; nothing is
+    written to the database and no ban state is kept between calls, so the
+    answer is always the database's current word."""
+    ids = _presence_online_ids()
+    if not ids:
+        return ids
+    banned = set((await db.execute(text(
+        "SELECT pb.steam_id FROM player_bans pb"
+        " WHERE pb.steam_id = ANY(CAST(:ids AS text[])) AND " + player_ban_active_sql("pb")
+    ), {"ids": ids})).scalars().all())
+    return [sid for sid in ids if sid not in banned]
+
+
 # ── In-match evidence (July 30 lifecycle sweep) ────────────────────────────
 # The failure behind two destroyed games: the server only learns a game happened
 # when the REPORT lands, which is at game END, so every lifecycle timer is blind
@@ -1223,12 +1245,19 @@ def _persistable_exit_cause(cause: str | None) -> str:
 # most the 90 s freshness gate late, after which a stalled standby shows no
 # dots at all rather than stale ones. Nothing shorter is available to a
 # replica read; the bound is what the CHANGELOG states.
+# An actively banned account carries no online marker (Sid, 13 Nov: a banned
+# account shows online nowhere): the last term is the one ban definition
+# (models.player_ban_active_sql), read on whichever box answers, so the
+# marker comes back by itself when the ban ends or is lifted. It reads rows
+# only; nothing here writes.
 _ONLINE_MARKER_SQL = (
     "(p.presence_seen_at > NOW() - INTERVAL '3 minutes'"
     " AND p.appear_offline = FALSE"
     " AND (NOT pg_is_in_recovery()"
     " OR COALESCE(pg_last_xact_replay_timestamp(), 'epoch'::timestamptz)"
-    " > NOW() - INTERVAL '90 seconds'))"
+    " > NOW() - INTERVAL '90 seconds')"
+    " AND NOT EXISTS (SELECT 1 FROM player_bans pbo"
+    " WHERE pbo.steam_id = p.steam_id AND " + player_ban_active_sql("pbo") + "))"
 )
 
 
@@ -2264,6 +2293,11 @@ def _janitor_sql_from_sources(sources: dict, roots) -> dict:
         exactly like Python;
       - `+` concatenation requires every operand to be str; f-string
         placeholders str() their value exactly like Python;
+      - a call is refused, except a call with one or two positional str
+        literals and no keyword through a name `ban_def_names` (below)
+        admits for the site's function: it takes the text
+        models.player_ban_active_sql returns for those literals, and is
+        refused when the definition raises ValueError for them;
       - a conditional expression expands ONLY when its test is statically
         known (literal, or a name resolving to exactly one constant), and
         then only its live arm is inventoried. RUNTIME-conditional SQL is
@@ -2304,9 +2338,12 @@ def _janitor_sql_from_sources(sources: dict, roots) -> dict:
 
     Returns {"statements": [{module, func, line, sql, roots, class, keyword}],
              "dynamic":    [{module, func, line}],
-             "root_counts": {root_fn: n statements reachable}}.
+             "root_counts": {root_fn: n statements reachable},
+             "ban_def_refused": [{module, func, name, why}]}.
     `class` and `keyword` are _janitor_statement_class(sql): the check the
-    self-test applies to that statement.
+    self-test applies to that statement. `ban_def_refused` lists each name
+    for the one ban definition that `ban_def_names` refused, module-wide
+    (func None) or in a reached function that names it, with the reasons.
     """
     import ast as _ast
 
@@ -2517,40 +2554,33 @@ def _janitor_sql_from_sources(sources: dict, roots) -> dict:
                    if d["for_n"] >= 1 and not d["assigns"] and not d["blocked"]}
         return consts, loop_ok, disabled[0], set(info)
 
-    def _module_consts(tree):
-        """Module-level names a site may read as constants: bound EXACTLY
-        ONCE in the whole module, by an unconditional top-level single-target
-        assignment, and never otherwise bound, declared global/nonlocal,
-        stored-through, deleted or handed to a non-whitelisted method
-        anywhere in the module; a mutable literal (dict/list/set) further
-        needs every load in the module to be a whitelisted read-only
-        receiver — the census _analyze_bindings takes of a function, taken
-        of the module. A `match` statement blocks every name it mentions
-        (its binding forms are not modelled). Recorded with a NEGATIVE
-        lineno and the root scope/context: a module binding exists before
-        any function body the janitor runs, whatever the textual order (a
-        constant defined below its reader is still the value it reads),
-        and before any other module constant that reads it (a module that
-        read one before binding it would never have loaded). Values stay
-        AST nodes and resolve through the same evaluator, so an f-string
-        over other module constants expands, while an env-derived value
-        (`int(os.environ.get(...))`) refuses exactly as before — the
-        evaluator never invents a value the runtime would not use.
-        Motivation (r10): every `text(_X_SQL)` site and the lock-key
-        constant _publish_pair_sitting interpolates were `dynamic` for want
-        of this — synthetic self-test failures on real, static SQL."""
+    def _module_census(tree):
+        """The module-wide binding census that decides both the module
+        constants (_module_consts) and the names a site may call as the one
+        ban definition (`ban_def_names`): one walk, one set of rules. Per
+        name, `assigns` counts the module-level single-target assignments
+        and `blocked` lists the reason of every other binding or use that
+        disqualifies the name; an import is listed as "import", so a caller
+        can allow exactly the one binding it expects. `opaque` names a
+        construct that may rebind ANY module name and so disqualifies every
+        name. `top` holds the values of the top-level single-target
+        assignments; `loads` and `safe_loads` are the load census a mutable
+        constant needs."""
         info: dict = {}
         loads: dict = {}
         safe_loads: set = set()
         top: dict = {}
 
         def _d(name):
-            return info.setdefault(name, {"assigns": 0, "blocked": False})
+            return info.setdefault(name, {"assigns": 0, "blocked": []})
 
-        def _block_leaves(t):
+        def _block(name, why):
+            _d(name)["blocked"].append(why)
+
+        def _block_leaves(t, why):
             for leaf in _ast.walk(t):
                 if isinstance(leaf, _ast.Name):
-                    _d(leaf.id)["blocked"] = True
+                    _block(leaf.id, why)
 
         # Constructs that can rebind a module name without a Name store (c3
         # D, c5 E, c6 E): the census either blocks the exact name (a constant
@@ -2669,14 +2699,14 @@ def _janitor_sql_from_sources(sources: dict, roots) -> dict:
             name holds, and the load census."""
             if isinstance(node, (_ast.Global, _ast.Nonlocal)):
                 for n in node.names:
-                    _d(n)["blocked"] = True
+                    _block(n, "global or nonlocal declaration")
             elif isinstance(node, (_ast.Import, _ast.ImportFrom)):
                 for a in node.names:
                     if a.name == "*":
                         opaque[0] = "import *"   # may rebind ANY module name (c3 D)
-                    _d(a.asname or a.name.split(".")[0])["blocked"] = True
+                    _block(a.asname or a.name.split(".")[0], "import")
             elif isinstance(node, _ast.NamedExpr):
-                _block_leaves(node.target)   # a walrus binds the ENCLOSING scope (a default, a comprehension)
+                _block_leaves(node.target, "walrus")   # a walrus binds the ENCLOSING scope (a default, a comprehension)
             elif isinstance(node, (_ast.Return, _ast.Yield, _ast.YieldFrom)) and _contains(node.value):
                 opaque[0] = "namespace escape"   # handed to a caller the census cannot follow (c6 E)
             elif hasattr(_ast, "Match") and isinstance(node, _ast.Match) and _contains(node.subject):
@@ -2688,15 +2718,22 @@ def _janitor_sql_from_sources(sources: dict, roots) -> dict:
                 # anything else (a variable key, an item of the namespace,
                 # a derived name) the module.
                 if _direct(node.value) and _const_str(node.slice):
-                    _d(node.slice.value)["blocked"] = True
+                    _block(node.slice.value, "namespace store by literal key")
                 else:
                     opaque[0] = "namespace store"
             elif isinstance(node, _ast.Attribute) and isinstance(node.ctx, (_ast.Store, _ast.Del)) \
                     and _through(node.value):
                 if _direct(node.value):
-                    _d(node.attr)["blocked"] = True   # sys.modules[__name__].Q = ... / m.Q = ... (c5 E)
+                    _block(node.attr, "namespace attribute store")   # sys.modules[__name__].Q = ... / m.Q = ... (c5 E)
                 else:
                     opaque[0] = "namespace store"
+            elif isinstance(node, _ast.Attribute) and isinstance(node.ctx, (_ast.Store, _ast.Del)) \
+                    and isinstance(node.value, _ast.Name) and node.value.id in imported:
+                # <x>.Q = ... through a name an import binds (a module, maybe
+                # this one): blocks Q, as setattr(<x>, "Q", ...) below does,
+                # and blocks the receiver like any store through a name.
+                _block(node.attr, "attribute store on an imported name")
+                _block(node.value.id, "store through the name")
             elif isinstance(node, _ast.Call) and isinstance(node.func, _ast.Attribute) \
                     and _through(node.func.value) and not _direct(node):
                 opaque[0] = "namespace method"   # globals().update(...) et al.
@@ -2708,7 +2745,7 @@ def _janitor_sql_from_sources(sources: dict, roots) -> dict:
                         or (isinstance(tgt, _ast.Name) and tgt.id in imported):
                     # setattr(sys.modules[__name__], ...) / setattr(<module>, ...)
                     if _const_str(attr):
-                        _d(attr.value)["blocked"] = True
+                        _block(attr.value, "setattr by a literal name")
                     else:
                         opaque[0] = "setattr"
             elif isinstance(node, _ast.Call) and not _direct(node) and (
@@ -2720,11 +2757,11 @@ def _janitor_sql_from_sources(sources: dict, roots) -> dict:
                 if node.func.attr in _READONLY_METHODS:
                     safe_loads.add(id(node.func.value))
                 else:
-                    _d(node.func.value.id)["blocked"] = True
+                    _block(node.func.value.id, "method call")
             elif isinstance(node, (_ast.Attribute, _ast.Subscript)) \
                     and isinstance(node.ctx, (_ast.Store, _ast.Del)) \
                     and isinstance(node.value, _ast.Name):
-                _d(node.value.id)["blocked"] = True
+                _block(node.value.id, "store through the name")
             if isinstance(node, _ast.Name) and isinstance(node.ctx, _ast.Load):
                 loads.setdefault(node.id, []).append(node)
                 if node.id in DYNAMIC or node.id == "__builtins__":
@@ -2740,38 +2777,38 @@ def _janitor_sql_from_sources(sources: dict, roots) -> dict:
             is the only way back to the module."""
             if isinstance(node, _SCOPES):
                 if not isinstance(node, _ast.Lambda):
-                    _d(node.name)["blocked"] = True
+                    _block(node.name, "def")
             elif isinstance(node, _ast.ClassDef):
-                _d(node.name)["blocked"] = True
+                _block(node.name, "class")
             elif hasattr(_ast, "Match") and isinstance(node, _ast.Match):
-                _block_leaves(node)
+                _block_leaves(node, "match")
                 for leaf in _ast.walk(node):   # capture patterns bind by NAME STRING (c3 D)
                     if isinstance(leaf, (_ast.MatchAs, _ast.MatchStar)) and leaf.name:
-                        _d(leaf.name)["blocked"] = True
+                        _block(leaf.name, "match capture")
                     elif isinstance(leaf, _ast.MatchMapping) and leaf.rest:
-                        _d(leaf.rest)["blocked"] = True
+                        _block(leaf.rest, "match capture")
             elif _TYPE_ALIAS is not None and isinstance(node, _TYPE_ALIAS):
                 if isinstance(node.name, _ast.Name):
-                    _d(node.name.id)["blocked"] = True
+                    _block(node.name.id, "type alias")
             elif isinstance(node, _ast.ExceptHandler) and node.name:
-                _d(node.name)["blocked"] = True
+                _block(node.name, "except alias")
             elif isinstance(node, _ast.Assign):
                 if len(node.targets) == 1 and isinstance(node.targets[0], _ast.Name):
                     _d(node.targets[0].id)["assigns"] += 1
                 else:
                     for tgt in node.targets:
-                        _block_leaves(tgt)
+                        _block_leaves(tgt, "assignment target")
             elif isinstance(node, (_ast.AugAssign, _ast.AnnAssign)):
-                _block_leaves(node.target)
+                _block_leaves(node.target, "augmented or annotated assignment")
             elif isinstance(node, (_ast.For, _ast.AsyncFor)):
-                _block_leaves(node.target)
+                _block_leaves(node.target, "for target")
             elif isinstance(node, _ast.withitem) and node.optional_vars:
-                _block_leaves(node.optional_vars)
+                _block_leaves(node.optional_vars, "with alias")
             elif isinstance(node, _ast.Delete):
                 for tgt in node.targets:
-                    _block_leaves(tgt)
+                    _block_leaves(tgt, "del")
             elif isinstance(node, _ast.comprehension):
-                _block_leaves(node.target)
+                _block_leaves(node.target, "comprehension target")
 
         # An explicit stack, not recursion: a long elif chain nests one If
         # per branch and a module this size has chains deeper than is safe.
@@ -2784,22 +2821,105 @@ def _janitor_sql_from_sources(sources: dict, roots) -> dict:
             inner = local or isinstance(node, _SCOPES) or isinstance(node, _ast.ClassDef)
             for child in _ast.iter_child_nodes(node):
                 stack.append((child, inner))
-        if opaque[0]:
+        return {"info": info, "opaque": opaque[0], "top": top,
+                "loads": loads, "safe_loads": safe_loads}
+
+    def _module_consts(census):
+        """Module-level names a site may read as constants: bound EXACTLY
+        ONCE in the whole module, by an unconditional top-level single-target
+        assignment, and never otherwise bound, declared global/nonlocal,
+        stored-through, deleted or handed to a non-whitelisted method
+        anywhere in the module; a mutable literal (dict/list/set) further
+        needs every load in the module to be a whitelisted read-only
+        receiver — the census _analyze_bindings takes of a function, taken
+        of the module (_module_census). A `match` statement blocks every
+        name it mentions (its binding forms are not modelled). Recorded
+        with a NEGATIVE lineno and the root scope/context: a module binding
+        exists before
+        any function body the janitor runs, whatever the textual order (a
+        constant defined below its reader is still the value it reads),
+        and before any other module constant that reads it (a module that
+        read one before binding it would never have loaded). Values stay
+        AST nodes and resolve through the same evaluator, so an f-string
+        over other module constants expands, while an env-derived value
+        (`int(os.environ.get(...))`) refuses exactly as before — the
+        evaluator never invents a value the runtime would not use.
+        Motivation (r10): every `text(_X_SQL)` site and the lock-key
+        constant _publish_pair_sitting interpolates were `dynamic` for want
+        of this — synthetic self-test failures on real, static SQL."""
+        if census["opaque"]:
             return {}
         consts = {}
-        for n, values in top.items():
-            d = info.get(n, {"assigns": 0, "blocked": False})
+        for n, values in census["top"].items():
+            d = census["info"].get(n, {"assigns": 0, "blocked": []})
             if len(values) != 1 or d["assigns"] != 1 or d["blocked"]:
                 continue
             value = values[0]
             if isinstance(value, (_ast.Dict, _ast.List, _ast.Set)) and any(
-                    id(x) not in safe_loads for x in loads.get(n, [])):
+                    id(x) not in census["safe_loads"] for x in census["loads"].get(n, [])):
                 continue   # escapes somewhere in the module — may be mutated
             consts[n] = ((), (), value, -1)
         return consts
 
-    mod_consts = {m: _module_consts(tree) for m, tree in trees.items()}
+    mod_census = {m: _module_census(tree) for m, tree in trees.items()}
+    mod_consts = {m: _module_consts(c) for m, c in mod_census.items()}
+
+    # The one ban definition (models.player_ban_active_sql, migration 417).
+    # A candidate is a name a top-level, non-relative
+    # `from models import player_ban_active_sql [as X]` binds. It is decided
+    # by the SAME census as a module constant (_module_census): admitted when
+    # that census is not opaque and lists for the name no assignment and no
+    # block but one "import" (its own). So everything that blocks a constant
+    # refuses it: another import of the name (any scope); at module level a
+    # def, class, except alias, match capture or any name in a `match`, type
+    # alias, a store of any kind (assignment, tuple or starred leaf, any
+    # name in a non-name target, augmented, annotated, for or comprehension
+    # target, with alias, del); in any scope a walrus, a global/nonlocal
+    # declaration, a non-whitelisted method call on the name, an attribute
+    # or item store through it; a literal-key item store into a namespace
+    # (globals(), locals(), vars(), a name bound to one, sys.modules[...],
+    # import_module(...), a __dict__/__globals__/frame globals); an
+    # attribute store naming it on such a namespace or on a name an import
+    # binds; a setattr naming it by a literal on either, or on any item or
+    # call. The opaque forms refuse every candidate of the module: `import
+    # *`; an item store into a namespace whose key is not a literal, or any
+    # store into something reached through one; a setattr of a non-literal
+    # name where a literal one would block; a method call on a namespace or
+    # on something reached through one; a namespace passed to a call,
+    # returned, yielded, matched on or stored into an object; a load of
+    # exec, eval, __import__ or __builtins__, or an imported name's exec,
+    # eval or __import__. Per function, the name is dropped where a constant
+    # is: when that function's census (_analyze_bindings) lists it in
+    # `bound`, or refuses expansion (a class or `match` in the subtree). Not
+    # looked at: a store into this module made from ANOTHER module or from
+    # code outside `sources` (an importer, a monkeypatch), and an attribute
+    # store or setattr on a module object reached any other way than the
+    # above (bound to a second name by assignment, passed as an argument,
+    # kept in a container). `ban_def_refused` records each refusal with the
+    # census's reasons.
+    ban_def_names: dict = {}     # module -> names a site may call as the definition
+    ban_def_refused: dict = {}   # (module, function or None, name) -> reasons
+    for m, tree in trees.items():
+        ban_def_names[m] = set()
+        census = mod_census[m]
+        for node in tree.body:
+            if isinstance(node, _ast.ImportFrom) and node.module == "models" \
+                    and not node.level:
+                for a in node.names:
+                    if a.name != "player_ban_active_sql":
+                        continue
+                    name = a.asname or a.name
+                    why = list(census["info"][name]["blocked"])
+                    why.remove("import")   # its own import: the one binding admitted
+                    why += ["assignment"] * census["info"][name]["assigns"]
+                    if census["opaque"]:
+                        why.insert(0, "opaque: " + census["opaque"])
+                    if why:
+                        ban_def_refused[(m, None, name)] = ", ".join(why)
+                    else:
+                        ban_def_names[m].add(name)
     _module_view = [None]   # the module whose constants a module-constant recursion resolves against (c5 E)
+    _ban_def_view = [frozenset()]   # the names the site's function may call as the one ban definition
 
     def _string_variants(node, env, consts, site_scope, site_cond, site_line,
                          depth=0):
@@ -2890,6 +3010,16 @@ def _janitor_sql_from_sources(sources: dict, roots) -> dict:
                     return None
                 outs = [o + p for o in outs for p in part]
             return outs
+        if isinstance(node, _ast.Call):
+            f = node.func
+            if isinstance(f, _ast.Name) and f.id in _ban_def_view[0] \
+                    and 1 <= len(node.args) <= 2 and not node.keywords \
+                    and all(isinstance(a, _ast.Constant) and isinstance(a.value, str)
+                            for a in node.args):
+                try:
+                    return [player_ban_active_sql(*[a.value for a in node.args])]
+                except ValueError:   # an argument the definition refuses
+                    return None
         return None
 
     def _const_loop_rows(node, consts, loop_ok, site_scope, site_cond):
@@ -2965,6 +3095,18 @@ def _janitor_sql_from_sources(sources: dict, roots) -> dict:
         found, dyn = [], []
         _module_view[0] = mod_consts[mod]
         consts, loop_ok, expansion_disabled, bound_here = _analyze_bindings(fn_node)
+        # The one ban definition is shadowed here exactly where a module
+        # constant is: a name this subtree binds, blocks or loops over, and
+        # every name when expansion is refused (a class or `match` in it).
+        view = set()
+        for n in ban_def_names[mod]:
+            if not expansion_disabled and n not in bound_here:
+                view.add(n)
+            elif any(isinstance(x, _ast.Name) and x.id == n for x in _ast.walk(fn_node)):
+                ban_def_refused[(mod, fn_node.name, n)] = (
+                    "class or match in the function" if expansion_disabled
+                    else "bound in the function")
+        _ban_def_view[0] = frozenset(view)
         if expansion_disabled:
             consts, loop_ok = {}, set()
         else:
@@ -3197,6 +3339,10 @@ def _janitor_sql_from_sources(sources: dict, roots) -> dict:
         "orm_locks": sorted(orm_locks.values(),
                             key=lambda s: (s["module"], s["line"])),
         "root_counts": root_counts,
+        "ban_def_refused": [
+            {"module": m, "func": f, "name": n, "why": w}
+            for (m, f, n), w in sorted(ban_def_refused.items(),
+                                       key=lambda kv: (kv[0][0], kv[0][1] or "", kv[0][2]))],
     }
 
 
@@ -4760,7 +4906,7 @@ async def _ovt_horizon_candidates(db, days: int, limit: int):
     Idleness is measured from SERVER-CLOCK columns only: `ovt_series.created_at`
     (NOW() at insert) and, per game, `GREATEST(ovt_matches.ended_at,
     ovt_matches.created_at)` — the report sink writes `ended_at` as NOW()
-    (PIN main.py:55864 ":started, NOW(),") and `created_at` defaults to NOW()
+    (PIN main.py:56328 ":started, NOW(),") and `created_at` defaults to NOW()
     by schema. `ovt_matches.started_at`
     is the one client-supplied stamp on that row and is deliberately NOT read
     here: a client-attested value may only move the server toward the
@@ -4826,7 +4972,7 @@ async def _ovt_settle_horizon_row(db, series_id, days: int) -> bool:
     report advances the tally and can complete the series. The bound the code
     actually holds is the ordering one — this settlement and that report
     serialise on the same series row lock: the report sink's lock waits
-    (PIN main.py:55665 "SELECT * FROM ovt_series WHERE id = :sid FOR NO KEY UPDATE"),
+    (PIN main.py:56129 "SELECT * FROM ovt_series WHERE id = :sid FOR NO KEY UPDATE"),
     this one declines. Whichever commits second observes the first, and a
     report arriving after the void is recorded and paid on the settled-without
     -play arm of `submit_ovt_match` rather than lost.
@@ -4896,7 +5042,7 @@ async def _ovt_settle_horizon_row(db, series_id, days: int) -> bool:
         return False
     # 'canceled', one L. Every other ovt path uses that spelling and the
     # continuation's prior-series lookup filters on it
-    # (PIN main.py:54996 "WHERE status IN ('completed', 'canceled', 'cancelled')"); the
+    # (PIN main.py:55460 "WHERE status IN ('completed', 'canceled', 'cancelled')"); the
     # janitor's original 'cancelled' made its own rows invisible to that lookup
     # and backend/sql/145_ovt_status_spelling.sql had to normalise them. A third
     # spelling would reopen that hole, so the VOID is carried by
@@ -7798,6 +7944,18 @@ _SERVER_FIX_1114_BUILD = 1
 # release train and read by nothing else (#306). Absent on any build
 # before it.
 _ASK6_INVITES_BUILD = 1
+# Release-train verification plumbing, not a design mechanism: the build
+# marker of the batch in which a ban can carry an end time (player_bans.
+# expires_at, migration 417; models.player_ban_active_sql is the one
+# definition every ban reader uses), reported on /health as
+# `ban_expiry_build`. It names build identity only. What the batch changes
+# (which bans are active, the online lists, the admin answers) is seen by no
+# phase of the train, so without it the train could not tell a box on the
+# new build from a stale one (learnings 780, 794).
+# A code constant, equal on both boxes by construction, probed by the
+# release train and read by nothing else (#306). Absent on any build
+# before it.
+_BAN_EXPIRY_BUILD = 1
 # Its sibling, the /health `session_report` word, asks
 # the DATABASE whether it has every table and column the report route's
 # statements name, and the app whether that route is bound. Its statements are
@@ -7890,6 +8048,7 @@ async def health_check(db: AsyncSession = Depends(get_db)):
                               server_fix_1114_build=_SERVER_FIX_1114_BUILD,
                               ask6_invites_build=_ASK6_INVITES_BUILD,
                               casual_streak_build=_CASUAL_STREAK_BUILD,
+                              ban_expiry_build=_BAN_EXPIRY_BUILD,
                               build_manifest=_build_manifest.health_word(),
                               review_eval=_review_rules.review_eval(),
                               review_rules=_review_rules.health_word(),
@@ -7956,6 +8115,7 @@ async def health_check(db: AsyncSession = Depends(get_db)):
                               server_fix_1114_build=_SERVER_FIX_1114_BUILD,
                               ask6_invites_build=_ASK6_INVITES_BUILD,
                               casual_streak_build=_CASUAL_STREAK_BUILD,
+                              ban_expiry_build=_BAN_EXPIRY_BUILD,
                               build_manifest=_build_manifest.health_word(),
                               review_eval=_review_rules.review_eval(),
                               review_rules=_review_rules.health_word(),
@@ -11936,7 +12096,9 @@ async def _h2h_profile_block(db, target_id) -> H2HProfileBlock | None:
     presence heartbeat. Gold and Discord identity are NOT in the response.
     Title and tier strings come from the canonical utilities the boards use
     (_display_title_sync with the podium maps, _rank_info), never a
-    re-derivation (A-L)."""
+    re-derivation (A-L). is_banned (B3) says whether the player is under an
+    active ban (models.player_ban_active_sql); the marker in is_online
+    already reads false for one (B1), and last_seen_s is unchanged."""
     row = (await db.execute(text(f"""
         SELECT p.steam_id, p.display_name, p.total_xp,
                si.name AS title, si.preview_color AS title_color, si.sku AS title_sku,
@@ -11945,7 +12107,9 @@ async def _h2h_profile_block(db, target_id) -> H2HProfileBlock | None:
                CASE WHEN p.appear_offline THEN NULL
                     ELSE CAST(GREATEST(0, FLOOR(EXTRACT(EPOCH FROM (NOW()
                          - GREATEST(p.last_seen, COALESCE(p.presence_seen_at, p.last_seen)))))) AS BIGINT)
-               END AS last_seen_s
+               END AS last_seen_s,
+               EXISTS (SELECT 1 FROM player_bans pbh
+                        WHERE pbh.steam_id = p.steam_id AND {player_ban_active_sql('pbh')}) AS is_banned
           FROM players p
           LEFT JOIN glicko_ratings gr ON gr.player_id = p.id
           LEFT JOIN shop_items si ON si.id = p.active_title_id
@@ -11975,6 +12139,7 @@ async def _h2h_profile_block(db, target_id) -> H2HProfileBlock | None:
         level=level_from_xp(int(row["total_xp"] or 0))[0],
         is_online=None if row["is_online"] is None else bool(row["is_online"]),
         last_seen_s=None if row["last_seen_s"] is None else int(row["last_seen_s"]),
+        is_banned=bool(row["is_banned"]),
     )
 
 
@@ -16475,19 +16640,29 @@ async def check_player_registered(steam_id: str, db: AsyncSession = Depends(get_
     result = await db.execute(select(Player).where(Player.steam_id == steam_id))
     player = result.scalar_one_or_none()
 
+    # B3/B5 (server half): ban_expires_at (UTC ISO 8601 with Z, null =
+    # permanent or not banned) and ban_seconds_left (an integer, null =
+    # permanent or not banned) come AFTER ban_reason; every key before them
+    # keeps its value and its place. The 1.41.0 client reads this answer with
+    # JsonUtility.FromJson<ModCheckResponse>, which ignores keys its class
+    # does not declare, wherever they stand.
     if not player:
-        return {"registered": False, "ranked": False, "banned": False, "ban_reason": ""}
+        return {"registered": False, "ranked": False, "banned": False, "ban_reason": "",
+                "ban_expires_at": None, "ban_seconds_left": None}
 
     # Item 4: surface mod-wide ban status here so the OTHER player's client (which
     # already calls /mod/check on its opponent at room handshake) can notify +
     # leave when it's matched against a banned cheater.
-    ban_reason = await _is_banned(db, steam_id)
+    ban = await _active_ban_details(db, steam_id)
     return {
         "registered": True,
         "ranked": player.ranked_enabled,
         "display_name": player.display_name,
-        "banned": ban_reason is not None,
-        "ban_reason": ban_reason or "",
+        "banned": ban is not None,
+        "ban_reason": (ban["reason"] or "") if ban is not None else "",
+        "ban_expires_at": _ban_end_iso(ban["expires_at"]) if ban is not None else None,
+        "ban_seconds_left": (int(ban["seconds_left"])
+                             if ban is not None and ban["seconds_left"] is not None else None),
     }
 
 
@@ -18333,7 +18508,7 @@ _RANKED_CANDIDATE_SQL = """
       -- banned row matchable when the scan itself refuses it.
       AND NOT EXISTS (SELECT 1 FROM player_bans pb
                        WHERE pb.steam_id = ranked_queue.steam_id
-                         AND pb.unbanned_at IS NULL)
+                         AND """ + player_ban_active_sql("pb") + """)
       -- A1 r2 (a review MEDIUM). Discovery must not SELECT a seat the
       -- gate under the locks is going to refuse. The gate stays the
       -- authority -- this read is unlocked by design -- but a filter that
@@ -18399,7 +18574,7 @@ _OVT_CANDIDATE_SQL = """
        AND last_polled > clock_timestamp() - INTERVAL '10 seconds'
        AND NOT EXISTS (SELECT 1 FROM player_bans pb
                         WHERE pb.steam_id = ovt_queue.steam_id
-                          AND pb.unbanned_at IS NULL)
+                          AND """ + player_ban_active_sql("pb") + """)
        AND NOT (steam_id = ANY(CAST(:service_ids AS text[])))
        -- Stage 2 (V3 S3): no row with a live hold.
        AND NOT """ + _S2_LIVE_HOLD_SQL.format(col="ovt_queue.player_id") + """
@@ -18425,7 +18600,7 @@ _FFA_CANDIDATE_SQL = """
        AND last_polled > clock_timestamp() - INTERVAL '10 seconds'
        AND NOT EXISTS (SELECT 1 FROM player_bans pb
                         WHERE pb.steam_id = ffa_queue.steam_id
-                          AND pb.unbanned_at IS NULL)
+                          AND """ + player_ban_active_sql("pb") + """)
        AND NOT (steam_id = ANY(CAST(:service_ids AS text[])))
        -- see _OVT_CANDIDATE_SQL: excluded at discovery so one committed seat
        -- cannot wedge the gather, re-checked at the gate for the window
@@ -18483,7 +18658,7 @@ _TEAM_CANDIDATE_SQL_TMPL = """
               )
               AND NOT EXISTS (SELECT 1 FROM player_bans pb
                                WHERE pb.steam_id = tq.steam_id
-                                 AND pb.unbanned_at IS NULL)
+                                 AND """ + player_ban_active_sql("pb") + """)
               AND NOT (tq.steam_id = ANY(CAST(:service_ids AS text[])))
               -- Stage 2 (V3 S3): no candidate with a live hold.
               AND NOT """ + _S2_TQ_LIVE_HOLD_SQL + """
@@ -18517,7 +18692,7 @@ _TEAM_RESUME_CONSENT_SQL = """
                    AND last_polled > clock_timestamp() - INTERVAL '10 seconds'
                    AND NOT EXISTS (SELECT 1 FROM player_bans pb
                                     WHERE pb.steam_id = team_queue.steam_id
-                                      AND pb.unbanned_at IS NULL)
+                                      AND """ + player_ban_active_sql("pb") + """)
                    -- revalidation aims the predicate at the discovered rows
                    AND (CAST(:only AS uuid[]) IS NULL
                         OR player_id = ANY(CAST(:only AS uuid[])))
@@ -20290,7 +20465,9 @@ async def queue_count(steam_id: str | None = Query(None), db: AsyncSession = Dep
         text("SELECT COUNT(*) FROM ranked_queue")
     )
     total = result2.scalar() or 0
-    return {"searching": searching, "total": total, "online": _presence_online_count()}
+    # The online figure leaves out actively banned accounts (B1).
+    online = len(await _presence_online_ids_shown(db))
+    return {"searching": searching, "total": total, "online": online}
 
 
 @app.get("/api/v1/presence/ping", tags=["Queue"])
@@ -20540,10 +20717,26 @@ async def presence_ping(request: Request,
         except Exception:
             pass
         print(f"[PRESENCE] last_seen stamp failed for {steam_id}: {ex}")
+    # The online figure leaves out actively banned accounts (B1). The ping is
+    # every client's heartbeat and is answered 200 whatever the database does
+    # (the stamps above swallow their own failure), as the released build
+    # answers it: when the ban read fails, the figure is the presence map's
+    # plain count, NOT ban-filtered for that one answer, and the failure is
+    # logged. No ban state is kept between pings; the next ping whose read
+    # succeeds is filtered again.
+    try:
+        online = len(await _presence_online_ids_shown(db))
+    except Exception as ex:
+        try:
+            await db.rollback()
+        except Exception:
+            pass
+        print(f"[PRESENCE] online count ban read failed: {ex}")
+        online = _presence_online_count()
     # Aug 7 item 1: alerts revision piggybacks on the cheapest always-on poll
     # — clients refetch /alerts/active only when it moves. Flat-scalar
     # addition, ignored by old parsers (#73).
-    return {"online": _presence_online_count(), "alerts_rev": _alerts_rev}
+    return {"online": online, "alerts_rev": _alerts_rev}
 
 
 @app.get("/api/v1/presence/online", tags=["Queue"])
@@ -20556,8 +20749,14 @@ async def presence_online(db: AsyncSession = Depends(get_db)):
     excluded from BOTH lists (the anonymous count still includes them).
     Entries carry the player's displayed title (dynamic rank/podium titles
     resolved live, same as the leaderboard). Key order is load-bearing for
-    the mod's manual parser: display_name first, minutes_ago last."""
-    online_ids = _presence_online_ids()
+    the mod's manual parser: display_name first, minutes_ago last.
+
+    An actively banned account (models.player_ban_active_sql) is in neither
+    list and not in online_count (B1): the online ids come from
+    _presence_online_ids_shown, and the recent list's statement carries the
+    definition. It shows again by these same rules once the ban ends or is
+    lifted. Reads only, so the standby answers it the same way."""
+    online_ids = await _presence_online_ids_shown(db)
     online_count = len(online_ids)
 
     online_rows = []
@@ -20593,6 +20792,8 @@ async def presence_online(db: AsyncSession = Depends(get_db)):
           AND p.appear_offline = FALSE
           AND NOT (p.steam_id = ANY(:sids))
           AND NOT (p.steam_id = ANY(CAST(:service_ids AS text[])))
+          AND NOT EXISTS (SELECT 1 FROM player_bans pb
+                           WHERE pb.steam_id = p.steam_id AND """ + player_ban_active_sql("pb") + """)
         ORDER BY p.last_seen DESC
         LIMIT 15
     """), {"sids": online_ids or [""],
@@ -29766,13 +29967,23 @@ _PC_POOL_STEAM_ID_SQL = "(CASE WHEN p.steam_id ~ '^[0-9]{17}$' THEN CAST(p.steam
 #   1  every registered, non-banned player (Sept 10-13)
 #   2  only players who have run the mod (mod_seen_at set) and are not banned
 #   3  rule 2 AND the id is a public individual SteamID64 (the Sept 15 merge)
+#   4  rule 3 with "not banned" under the one active-ban definition (timed bans, migration 417)
 #
 # Rule 3 is the INTERSECTION of two decisions taken a day apart, not a choice
 # between them: "only players who have run the mod" (product owner,
 # 2026-09-13) and "no Steam ID, no card" (Sid, 2026-09-15). Both restrict who
 # may be a subject, so admitting a member either one refuses would break the
 # later decision; a union was considered and is wrong for that reason.
-_PC_POOL_RULE = 3
+#
+# Rule 4 keeps rule 3's three restrictions and changes what "not banned"
+# means: the ban clause is models.player_ban_active_sql, so a ban is active
+# while it is not lifted and its end, if it has one, is ahead of the
+# database's clock. Under rule 3 any unlifted ban row excluded the account;
+# under rule 4 a ban whose end has passed does not. A snapshot recorded at
+# rule 3 is retaken (reason 'rule') by the janitor's snapshot step, which the
+# primary also runs once on its boot path; like the daily snapshot, that
+# re-freezes every member at current values.
+_PC_POOL_RULE = 4
 
 # Pool membership: ONE word for every reader that decides who is in the pool
 # now -- the snapshot's pool CTE, the open's live re-check, the public pool
@@ -29781,11 +29992,15 @@ _PC_POOL_RULE = 3
 # of the summary and of /card. `mod_seen_at` is the set-once "has ever run the
 # mod" stamp (bug #78). The ban clause is _PC_NOT_BANNED_SQL's text, written
 # out because that fragment is defined further down, with the handout; a test
-# pins the two spellings together.
+# pins the two spellings together. The tail after the id clause is bracketed
+# for the reason the snapshot select's tail is (see the note above
+# _PC_SNAPSHOT_SELECT_SQL): written flat, the ban call's two extra `+` terms
+# push _PC_POOL_STEAM_ID_SQL two levels deeper and the janitor inventory's
+# folder stops resolving _pc_take_snapshot.
 _PC_POOL_MEMBER_SQL = """(p.deleted_at IS NULL
-           AND """ + _PC_POOL_STEAM_ID_SQL + """
+           AND """ + _PC_POOL_STEAM_ID_SQL + ("""
            AND p.mod_seen_at IS NOT NULL
-           AND NOT EXISTS (SELECT 1 FROM player_bans b WHERE b.steam_id = p.steam_id AND b.unbanned_at IS NULL))"""
+           AND NOT EXISTS (SELECT 1 FROM player_bans b WHERE b.steam_id = p.steam_id AND """ + player_ban_active_sql("b") + """))""")
 
 # board_rank (c3 F): eligibility is the LIVE leaderboard's own count — every
 # completed series, an invalidated one included, plus legacy matches — with
@@ -30301,7 +30516,7 @@ _PC_TRADE_PARTY_SQL = """
     SELECT p.id, p.steam_id,
            (p.deleted_at IS NULL) AS live,
            (p.mod_seen_at IS NOT NULL) AS has_mod,
-           NOT EXISTS (SELECT 1 FROM player_bans b WHERE b.steam_id = p.steam_id AND b.unbanned_at IS NULL) AS not_banned,
+           NOT EXISTS (SELECT 1 FROM player_bans b WHERE b.steam_id = p.steam_id AND """ + player_ban_active_sql("b") + """) AS not_banned,
            p.pc_trades_open AS switch_on,
            p.pc_trades_generation AS generation,
            p.pc_collection_public AS binder_public,
@@ -30330,7 +30545,7 @@ _PC_TRADE_PARTY_SQL = """
 # ELSE t.pair_lo END); a read translates them to its viewer's side.
 _PC_TRADE_DEAD_CODES = ("print_gone", "not_owned", "subject_unavailable", "trading_closed",
                         "counterparty_closed", "not_eligible", "counterparty_unavailable")
-_PC_TRADE_DEAD_SQL = """(t.status = 'proposed' AND (EXISTS (SELECT 1 FROM unnest(t.a_prints || t.b_prints) AS n(print_id)
+_PC_TRADE_DEAD_SQL = f"""(t.status = 'proposed' AND (EXISTS (SELECT 1 FROM unnest(t.a_prints || t.b_prints) AS n(print_id)
                     WHERE NOT EXISTS (SELECT 1 FROM pc_prints pr
                                        WHERE pr.id = n.print_id AND pr.discarded_at IS NULL))
       OR EXISTS (SELECT 1 FROM pc_prints pr
@@ -30340,18 +30555,18 @@ _PC_TRADE_DEAD_SQL = """(t.status = 'proposed' AND (EXISTS (SELECT 1 FROM unnest
                       JOIN pc_cards c ON c.id = pr.card_id
                       JOIN players s ON s.id = c.subject_player_id
                     WHERE pr.id = ANY(t.a_prints || t.b_prints)
-                      AND EXISTS (SELECT 1 FROM player_bans b WHERE b.steam_id = s.steam_id AND b.unbanned_at IS NULL))
+                      AND EXISTS (SELECT 1 FROM player_bans b WHERE b.steam_id = s.steam_id AND {player_ban_active_sql('b')}))
       OR EXISTS (SELECT 1 FROM players p WHERE p.id = t.proposer
                     AND (NOT p.pc_trades_open OR p.pc_trades_generation <> t.proposer_generation))
       OR EXISTS (SELECT 1 FROM players p WHERE p.id = (CASE WHEN t.proposer = t.pair_lo THEN t.pair_hi ELSE t.pair_lo END)
                     AND (NOT p.pc_trades_open OR p.pc_trades_generation <> t.counterparty_generation))
       OR EXISTS (SELECT 1 FROM players p WHERE p.id = t.proposer
                     AND (p.deleted_at IS NOT NULL
-                         OR EXISTS (SELECT 1 FROM player_bans b WHERE b.steam_id = p.steam_id AND b.unbanned_at IS NULL)))
+                         OR EXISTS (SELECT 1 FROM player_bans b WHERE b.steam_id = p.steam_id AND {player_ban_active_sql('b')})))
       OR EXISTS (SELECT 1 FROM players p WHERE p.id = (CASE WHEN t.proposer = t.pair_lo THEN t.pair_hi ELSE t.pair_lo END)
                     AND (p.deleted_at IS NOT NULL
-                         OR EXISTS (SELECT 1 FROM player_bans b WHERE b.steam_id = p.steam_id AND b.unbanned_at IS NULL)))))"""
-_PC_TRADE_VOID_REASON_SQL = """(CASE WHEN EXISTS (SELECT 1 FROM unnest(t.a_prints || t.b_prints) AS n(print_id)
+                         OR EXISTS (SELECT 1 FROM player_bans b WHERE b.steam_id = p.steam_id AND {player_ban_active_sql('b')})))))"""
+_PC_TRADE_VOID_REASON_SQL = f"""(CASE WHEN EXISTS (SELECT 1 FROM unnest(t.a_prints || t.b_prints) AS n(print_id)
                     WHERE NOT EXISTS (SELECT 1 FROM pc_prints pr
                                        WHERE pr.id = n.print_id AND pr.discarded_at IS NULL)) THEN 'print_gone'
       WHEN EXISTS (SELECT 1 FROM pc_prints pr
@@ -30361,17 +30576,17 @@ _PC_TRADE_VOID_REASON_SQL = """(CASE WHEN EXISTS (SELECT 1 FROM unnest(t.a_print
                       JOIN pc_cards c ON c.id = pr.card_id
                       JOIN players s ON s.id = c.subject_player_id
                     WHERE pr.id = ANY(t.a_prints || t.b_prints)
-                      AND EXISTS (SELECT 1 FROM player_bans b WHERE b.steam_id = s.steam_id AND b.unbanned_at IS NULL)) THEN 'subject_unavailable'
+                      AND EXISTS (SELECT 1 FROM player_bans b WHERE b.steam_id = s.steam_id AND {player_ban_active_sql('b')})) THEN 'subject_unavailable'
       WHEN EXISTS (SELECT 1 FROM players p WHERE p.id = t.proposer
                     AND (NOT p.pc_trades_open OR p.pc_trades_generation <> t.proposer_generation)) THEN 'trading_closed'
       WHEN EXISTS (SELECT 1 FROM players p WHERE p.id = (CASE WHEN t.proposer = t.pair_lo THEN t.pair_hi ELSE t.pair_lo END)
                     AND (NOT p.pc_trades_open OR p.pc_trades_generation <> t.counterparty_generation)) THEN 'counterparty_closed'
       WHEN EXISTS (SELECT 1 FROM players p WHERE p.id = t.proposer
                     AND (p.deleted_at IS NOT NULL
-                         OR EXISTS (SELECT 1 FROM player_bans b WHERE b.steam_id = p.steam_id AND b.unbanned_at IS NULL))) THEN 'not_eligible'
+                         OR EXISTS (SELECT 1 FROM player_bans b WHERE b.steam_id = p.steam_id AND {player_ban_active_sql('b')}))) THEN 'not_eligible'
       WHEN EXISTS (SELECT 1 FROM players p WHERE p.id = (CASE WHEN t.proposer = t.pair_lo THEN t.pair_hi ELSE t.pair_lo END)
                     AND (p.deleted_at IS NOT NULL
-                         OR EXISTS (SELECT 1 FROM player_bans b WHERE b.steam_id = p.steam_id AND b.unbanned_at IS NULL))) THEN 'counterparty_unavailable' END)"""
+                         OR EXISTS (SELECT 1 FROM player_bans b WHERE b.steam_id = p.steam_id AND {player_ban_active_sql('b')}))) THEN 'counterparty_unavailable' END)"""
 
 # A stored (proposer-side) void code as the RECEIVER reads it.
 _PC_TRADE_REASON_FOR_RECEIVER = {
@@ -30488,7 +30703,7 @@ async def _pc_trade_lock_prints(db: AsyncSession, print_ids) -> dict:
         row = (await db.execute(text("""
             SELECT pr.id, pr.owner_player_id, pr.discarded_at, s.steam_id AS subject_steam_id,
                    EXISTS (SELECT 1 FROM player_bans b
-                            WHERE b.steam_id = s.steam_id AND b.unbanned_at IS NULL) AS subject_banned
+                            WHERE b.steam_id = s.steam_id AND """ + player_ban_active_sql("b") + """) AS subject_banned
               FROM pc_prints pr
               JOIN pc_cards c ON c.id = pr.card_id
               JOIN players s ON s.id = c.subject_player_id
@@ -30567,7 +30782,7 @@ def _pc_portrait_resolve_cols(alias: str) -> str:
                ({alias}.deleted_at IS NOT NULL) AS subject_deleted,
                {alias}.pc_game_portrait_hash AS portrait_hash,
                {alias}.pc_steam_portrait_hash AS steam_portrait_hash,
-               EXISTS (SELECT 1 FROM player_bans b WHERE b.steam_id = {alias}.steam_id AND b.unbanned_at IS NULL) AS subject_banned
+               EXISTS (SELECT 1 FROM player_bans b WHERE b.steam_id = {alias}.steam_id AND {player_ban_active_sql('b')}) AS subject_banned
 """
 
 
@@ -30933,11 +31148,60 @@ async def _pc_take_snapshot(db: AsyncSession, *, reason: str) -> dict:
     return {"snapshot_id": int(snap_id), "members": len(rows)}
 
 
+# 'ban_ended' (migration 417): an account that was under an active ban at the
+# latest snapshot's taken_at and is under no active ban now. Both halves are
+# the ONE definition (models.player_ban_active_sql): its instant form at the
+# snapshot's taken_at and its plain form now; there is no second spelling of
+# "active" here. `b2` is the account's other rows: an end while another ban of
+# the same account is active makes nothing due.
+_PC_SNAPSHOT_BAN_ENDED_SQL = f"""
+    SELECT EXISTS (
+        SELECT 1 FROM player_bans b
+         WHERE {player_ban_active_sql('b', 'CAST(:last_at AS timestamptz)')}
+           AND NOT {player_ban_active_sql('b')}
+           AND NOT EXISTS (SELECT 1 FROM player_bans b2
+                            WHERE b2.steam_id = b.steam_id AND {player_ban_active_sql('b2')})
+    ) AS ban_ended
+"""
+
+
 async def _pc_snapshot_due(db: AsyncSession):
     """'first' when no snapshot exists, 'rule' when the latest one was taken
     under an older pool rule than _PC_POOL_RULE, 'daily' when the last one
-    predates today's 00:05 UTC and that time has passed, else None -- from the
-    DB clock and the durable MAX(taken_at) / latest rule, so it is restart-safe.
+    predates today's 00:05 UTC and that time has passed, 'ban_ended' when an
+    account under an active ban at the latest snapshot's taken_at is under
+    none now, else None -- from the DB clock and the durable MAX(taken_at) /
+    latest rule / ban rows, so it is restart-safe. When two hold, the first
+    in that order is the reason printed.
+
+    'ban_ended' (migration 417, _PC_SNAPSHOT_BAN_ENDED_SQL): a ban ends at
+    the EARLIER of its lift and its expiry, both read through the one
+    definition. Closing an already-expired row at a re-ban (_apply_ban_core)
+    is not an end: that close writes unbanned_at = expires_at, the end the
+    row had already reached. A ban that began after the latest snapshot and
+    has ended already makes nothing due (that account was a member all
+    along; the readers free it at once), and nothing is due while the
+    account is under another active ban. Once the snapshot is taken the same
+    end is no longer due (it lies before the new taken_at); a failed
+    snapshot is retried on the next pass like the other reasons. A failed
+    ban read is logged and answers None, inside a savepoint so the step's
+    transaction survives: it frees nobody early, and the daily snapshot
+    still frees the account. Between a ban's end and the next janitor pass
+    (about 60 s) the account still answers 404 not_in_pool; and a ban_ended
+    snapshot re-freezes EVERY member at current values, exactly as the daily
+    one does. So other players' cards move only to their own current
+    standing, earlier than 00:05, never because of a banned account. Each
+    such snapshot also counts against snapshot_keep (14 snapshots, not days:
+    player_cards.py PC_ECONOMY), so it shortens how far back the retained
+    snapshots reach: a preview pinned to a snapshot retention has deleted
+    answers 404 not_in_pool on the face route and 404 on the motion route
+    (_pc_preview_read finds no member row), nothing is debited, and a pack
+    open is not affected (it reads the latest snapshot id). The halves
+    compare timestamps, not what the snapshot's own read saw: a lift whose
+    transaction began before the snapshot's and committed after its member
+    read is read as ended before that snapshot, so this reason misses it and
+    the daily snapshot frees that account; a ban or a lift committed inside
+    the same window can make one snapshot due that changes no membership.
 
     'rule' is what carries a membership change into the pool at the DEPLOY
     rather than at the next 00:05 UTC: it fires at the first janitor pass after
@@ -30957,9 +31221,17 @@ async def _pc_snapshot_due(db: AsyncSession):
         return "first"
     if int(due["last_rule"] or 0) < int(_PC_POOL_RULE):
         return "rule"
-    if db_now < today_at or last_at >= today_at:
+    if not (db_now < today_at or last_at >= today_at):
+        return "daily"
+    try:
+        async with db.begin_nested():
+            ended = (await db.execute(text(_PC_SNAPSHOT_BAN_ENDED_SQL),
+                                      {"last_at": last_at})).scalar_one_or_none()
+    except Exception as ex:
+        print(f"[PC-SNAPSHOT] ban_ended read failed ({type(ex).__name__}) -- "
+              "nothing is due for it on this pass; the daily snapshot still frees the account")
         return None
-    return "daily"
+    return "ban_ended" if ended else None
 
 
 # The Discord channel the edition notice posts to: the gambler chat, the
@@ -31116,7 +31388,9 @@ async def _pc_snapshot_janitor_step() -> None:
     none exists (first boot after the migration), when the latest one was
     taken under an older pool rule than this build carries (`_pc_snapshot_due`'s
     'rule' -- the members scan that term used to be is gone since the
-    2026-09-15 merge), or once per UTC day at or after 00:05 UTC. Also run once
+    2026-09-15 merge), once per UTC day at or after 00:05 UTC, or when an
+    account under an active ban at the latest snapshot is under none now
+    (`_pc_snapshot_due`'s 'ban_ended', migration 417). Also run once
     on the primary's boot path (`_pc_snapshot_boot_retake`), which is why it
     carries no caller state. An advisory try-lock keeps two api processes from
     taking the same day's snapshot twice, and the due state is re-read under
@@ -33467,7 +33741,7 @@ async def _pc_trade_janitor_step() -> None:
 # open's live check reads); the handout applies the same word to the puller and
 # the subject, so a pull of a player banned since the open is never posted
 # (2026-09-13, r5 M3). One fragment, formatted with the row alias.
-_PC_NOT_BANNED_SQL = "NOT EXISTS (SELECT 1 FROM player_bans b WHERE b.steam_id = {a}.steam_id AND b.unbanned_at IS NULL)"
+_PC_NOT_BANNED_SQL = "NOT EXISTS (SELECT 1 FROM player_bans b WHERE b.steam_id = {a}.steam_id AND " + player_ban_active_sql("b") + ")"
 
 # One word for "this pull may be announced", read at three moments (r6 H1/M2):
 # the handout's skip (negated: the event is resolved without a post), the
@@ -34530,7 +34804,7 @@ _PC_STEAM_ELIGIBLE_SQL = f"""
     AND {_sid64.individual_id_sql("p.steam_id")}
     AND p.mod_seen_at IS NOT NULL
     AND (p.pc_game_portrait_locked_until IS NULL OR p.pc_game_portrait_locked_until < now())
-    AND NOT EXISTS (SELECT 1 FROM player_bans b WHERE b.steam_id = p.steam_id AND b.unbanned_at IS NULL)
+    AND NOT EXISTS (SELECT 1 FROM player_bans b WHERE b.steam_id = p.steam_id AND {player_ban_active_sql('b')})
 """
 
 
@@ -35543,7 +35817,7 @@ async def pc_portrait_upload(
                EXTRACT(EPOCH FROM (p.pc_game_portrait_locked_until - now())) AS lock_left,
                p.pc_game_portrait_locked_until,
                p.active_player_color_id, p.active_player_effect_id,
-               EXISTS (SELECT 1 FROM player_bans b WHERE b.steam_id = p.steam_id AND b.unbanned_at IS NULL) AS banned,
+               EXISTS (SELECT 1 FROM player_bans b WHERE b.steam_id = p.steam_id AND """ + player_ban_active_sql("b") + """) AS banned,
                (SELECT si.sku FROM shop_items si
                  WHERE si.id = p.active_dance_id AND si.kind = 'dance') AS dance_sku
           FROM players p WHERE p.id = CAST(:pid AS uuid) AND p.deleted_at IS NULL
@@ -35645,7 +35919,7 @@ _PC_MOTION_ROW_SQL = """
     SELECT p.pc_game_portrait_hash, p.pc_game_portrait_descriptor,
            EXTRACT(EPOCH FROM (p.pc_game_portrait_locked_until - now())) AS lock_left,
            p.pc_game_portrait_locked_until,
-           EXISTS (SELECT 1 FROM player_bans b WHERE b.steam_id = p.steam_id AND b.unbanned_at IS NULL) AS banned,
+           EXISTS (SELECT 1 FROM player_bans b WHERE b.steam_id = p.steam_id AND """ + player_ban_active_sql("b") + """) AS banned,
            p.active_dance_id, di.sku AS dance_sku, di.kind AS dance_kind, di.catalog_ready AS dance_ready,
            EXISTS (SELECT 1 FROM player_items pi
                     WHERE pi.player_id = p.id AND pi.item_id = p.active_dance_id) AS dance_bought,
@@ -45951,7 +46225,11 @@ async def delete_player_data(steam_id: str, request: Request, sig: str = Query(.
     # (migration 300) is personal state and goes with the envelopes; it is
     # removed at this handler's end rather than in the early sweep, so the
     # row-lock order (players, then mail_inbox_rev) matches the fan-out's and
-    # neither side can wait on the other. Migration 416's change moved it
+    # no cycle of waits between the two can form over these two tables' rows.
+    # (A send that crosses a spam threshold takes one more lock after them,
+    # its sender's case row for the day, and can close a cycle with this
+    # deletion's resolved_by scrub above: see the comment above
+    # _INVITE_REV_BUMP_SQL.) Migration 416's change moved it
     # from here to the very end: there it is locked in the same ascending
     # pass as the invite bump's rows (_invite_bump's `drop`), the one order
     # every writer of mail_inbox_rev takes, and nothing is locked after it.
@@ -48715,14 +48993,49 @@ async def _require_admin(db: AsyncSession, admin_steam_id: str, action: str, tar
 
 
 async def _is_banned(db: AsyncSession, steam_id: str):
+    """The reason of the account's ACTIVE ban (models.player_ban_active_sql:
+    not lifted, and its end time, if any, ahead of the database's clock), or
+    None. A timed ban that has ended reads None here with no write anywhere,
+    so every gate built on this helper lets the account through again."""
     if not steam_id:
         return None
     r = await db.execute(text(
-        "SELECT reason FROM player_bans WHERE steam_id = :sid AND unbanned_at IS NULL "
+        "SELECT reason FROM player_bans WHERE steam_id = :sid AND "
+        + player_ban_active_sql("player_bans") + " "
         "ORDER BY banned_at DESC LIMIT 1"
     ), {"sid": steam_id})
     row = r.first()
     return row[0] if row else None
+
+
+# What a ban answer says about its end: expires_at as UTC ISO 8601 with a
+# trailing Z (null = permanent), and seconds_left, the whole seconds until it
+# by the database's clock (null = permanent). Both read from one row.
+_BAN_END_COLS_SQL = (
+    "{a}.expires_at, CASE WHEN {a}.expires_at IS NULL THEN NULL"
+    " ELSE CAST(GREATEST(0, CEIL(EXTRACT(EPOCH FROM ({a}.expires_at - NOW())))) AS BIGINT)"
+    " END AS seconds_left")
+
+
+def _ban_end_iso(value) -> str | None:
+    """A ban's end time as UTC ISO 8601 with a trailing Z, or None."""
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+async def _active_ban_details(db: AsyncSession, steam_id: str):
+    """The account's ACTIVE ban as a mapping (id, reason, expires_at,
+    seconds_left), or None. The same definition as _is_banned."""
+    if not steam_id:
+        return None
+    return (await db.execute(text(
+        "SELECT pb.id, pb.reason, " + _BAN_END_COLS_SQL.format(a="pb") + " "
+        "FROM player_bans pb WHERE pb.steam_id = :sid AND " + player_ban_active_sql("pb") + " "
+        "ORDER BY pb.banned_at DESC LIMIT 1"
+    ), {"sid": steam_id})).mappings().first()
 
 
 async def _check_ban_or_raise(db: AsyncSession, steam_id: str) -> None:
@@ -48821,22 +49134,30 @@ async def admin_list_bans(
     The new `total` key is a NUMBER, which matters: the client's
     ParseBannedUsers splits the body on the literal `"id":"` and would treat
     any new quoted-string key named `id` as another ban row. Numeric siblings
-    are invisible to it."""
+    are invisible to it.
+
+    Active means the one definition (models.player_ban_active_sql): a timed
+    ban that has ended is no longer listed. Each row gains `expires_at` (UTC
+    ISO 8601 with Z, null = permanent) and `seconds_left` (an integer, null =
+    permanent) AFTER banned_at, its last key in 1.41.0: the client cuts each
+    row from one `"id":"` to the next and reads its six keys with
+    ExtractJsonString, so two trailing keys with other names cannot be read
+    in place of any of them."""
     await _require_admin(db, admin_steam_id, "list_bans", "", hmac_signature)
-    where = "pb.unbanned_at IS NULL"
+    search_sql = ""
     params: dict = {}
     if search:
         # Case-insensitive on display_name OR steam_id. Bound parameter, never
         # interpolated (#188); ILIKE wildcards in user input are escaped so a
         # '%' typed in the box searches for a literal '%'.
-        where += (" AND (p.display_name ILIKE :q ESCAPE '\\'"
-                  "      OR pb.steam_id   ILIKE :q ESCAPE '\\')")
+        search_sql = (" AND (p.display_name ILIKE :q ESCAPE '\\'"
+                      "      OR pb.steam_id   ILIKE :q ESCAPE '\\')")
         _esc = search.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
         params["q"] = f"%{_esc}%"
     total = (await db.execute(text(
         "SELECT COUNT(*) FROM player_bans pb "
         "LEFT JOIN players p ON p.steam_id = pb.steam_id "
-        f"WHERE {where}"
+        "WHERE " + player_ban_active_sql("pb") + search_sql
     ), params)).scalar() or 0
     page_sql = ""
     if limit is not None:
@@ -48844,10 +49165,10 @@ async def admin_list_bans(
         params = {**params, "limit": limit, "offset": offset}
     rows = (await db.execute(text(
         "SELECT pb.id, pb.steam_id, pb.reason, pb.banned_by_steam_id, pb.banned_at, "
-        "       pb.unbanned_at, p.display_name "
+        "       pb.unbanned_at, p.display_name, " + _BAN_END_COLS_SQL.format(a="pb") + " "
         "FROM player_bans pb "
         "LEFT JOIN players p ON p.steam_id = pb.steam_id "
-        f"WHERE {where} "
+        "WHERE " + player_ban_active_sql("pb") + search_sql + " "
         # id as a stable tiebreak so paging can't repeat or skip a row when
         # several bans share a banned_at instant.
         "ORDER BY pb.banned_at DESC, pb.id DESC"
@@ -48861,6 +49182,8 @@ async def admin_list_bans(
             "reason": r["reason"],
             "banned_by_steam_id": r["banned_by_steam_id"],
             "banned_at": r["banned_at"].isoformat() if r["banned_at"] else None,
+            "expires_at": _ban_end_iso(r["expires_at"]),
+            "seconds_left": None if r["seconds_left"] is None else int(r["seconds_left"]),
         } for r in rows
     ], "total": int(total), "limit": limit, "offset": offset}
 
@@ -48930,13 +49253,74 @@ async def _ban_rate_gate_or_raise(db: AsyncSession, admin_steam_id: str, target_
                                    "blocked for now - flagged to #scr-admin.")
 
 
+# unbanned_by_steam_id of a timed ban the ban writer closed because it had
+# ended (migration 417): the system closed it, not an admin. The column is
+# TEXT with no foreign key (028), so the marker needs no admin_users row.
+BAN_CLOSED_BY_EXPIRY = "system:expired"
+# A ban length, in minutes: one minute to ten years (365 * 24 * 60 * 10).
+BAN_DURATION_MAX_MINUTES = 5256000
+
+
+def _ban_end_sql(duration_minutes) -> str:
+    """The SQL value of a ban's end for a length in minutes: NULL (permanent)
+    for None, else NOW() plus the length on the database's clock. Built in
+    code, so no bind exists only to be null-tested (learning #448)."""
+    if duration_minutes is None:
+        return "NULL"
+    return "NOW() + make_interval(mins => CAST(:ban_minutes AS integer))"
+
+
+async def _ban_set_length_core(db: AsyncSession, *, admin_steam_id: str, target_steam_id: str,
+                               active, duration_minutes) -> dict:
+    """A length change on an ACTIVE ban (B4): the active row's end becomes
+    NOW() plus the length, or NULL for permanent. Called by _apply_ban_core
+    under the target's identity lock, before any of a new ban's side effects
+    (no session, portal, queue or card write: the ban they belong to is
+    already in force), so it writes exactly this UPDATE and one admin_actions
+    row holding the old and the new end. The reason and the row count do not
+    change. Does NOT commit."""
+    params = {"id": active["id"]}
+    if duration_minutes is not None:
+        params["ban_minutes"] = int(duration_minutes)
+    row = (await db.execute(text(
+        "UPDATE player_bans pb SET expires_at = " + _ban_end_sql(duration_minutes) + " "
+        "WHERE pb.id = :id AND " + player_ban_active_sql("pb") + " "
+        "RETURNING " + _BAN_END_COLS_SQL.format(a="pb")
+    ), params)).mappings().first()
+    if row is None:
+        # Unreachable under the identity lock, which every writer of this
+        # key's rows takes; refused rather than reported as a change.
+        raise HTTPException(status_code=409, detail="ban_changed_concurrently")
+    old_end, new_end = _ban_end_iso(active["expires_at"]), _ban_end_iso(row["expires_at"])
+    db.add(AdminAction(
+        admin_steam_id=admin_steam_id, action="ban_length", target_steam_id=target_steam_id,
+        details={"ban_id": str(active["id"]), "old_expires_at": old_end,
+                 "new_expires_at": new_end, "duration_minutes": duration_minutes},
+    ))
+    return {"status": "length_changed", "steam_id": target_steam_id, "reason": active["reason"],
+            "expires_at": new_end,
+            "seconds_left": None if row["seconds_left"] is None else int(row["seconds_left"])}
+
+
 async def _apply_ban_core(db: AsyncSession, *, admin_steam_id: str, target_steam_id: str,
-                          reason: str) -> dict:
+                          reason: str, duration_minutes: int | None = None,
+                          length_sent: bool = False) -> dict:
     """The ban WRITE core, extracted verbatim from admin_ban (Sept 6 item b,
     B-2): identity lock, session and portal revocation, queue-row revocation,
     the already_banned check, the PlayerBan + AdminAction rows. Does NOT
     commit — admin_ban commits right after; the moderation-case act path
-    commits together with its case row. Returns the route's response dict."""
+    commits together with its case row. Returns the route's response dict.
+
+    B4 (migration 417): `length_sent` says the request carried
+    duration_minutes (null included, which means permanent). Then, for a
+    target already under an ACTIVE ban, the core changes that ban's end and
+    returns (_ban_set_length_core) before any side effect below. Otherwise
+    it runs as before; a new ban's row carries expires_at = NOW() plus the
+    length (NULL when no length was given), and an ENDED open row of the
+    same key is closed first, in this transaction and under this lock, as
+    the system (BAN_CLOSED_BY_EXPIRY): migration 417's unique index holds
+    one open row per key, so the earlier ban stays in the log, closed, and
+    no two rows of one key are ever both active."""
     # Identity lock FIRST, before any purge (round-13 find 6: with the lock
     # taken after the session purge, a steam_auth finalization holding the
     # lock could insert a fresh session AFTER our purge but BEFORE our ban
@@ -48944,12 +49328,21 @@ async def _apply_ban_core(db: AsyncSession, *, admin_steam_id: str, target_steam
     # behind, and therefore see, this whole transaction).
     await db.execute(text("SELECT pg_advisory_xact_lock(hashtext(:sid))"),
                      {"sid": target_steam_id})
+    if length_sent:
+        _active = await _active_ban_details(db, target_steam_id)
+        if _active is not None:
+            return await _ban_set_length_core(
+                db, admin_steam_id=admin_steam_id, target_steam_id=target_steam_id,
+                active=_active, duration_minutes=duration_minutes)
     # Revoke live Steam sessions (audit lower-pri item): without this a banned
     # player's existing verified session kept authenticating session-gated
     # endpoints until its 24h expiry. Ban checks at usage sites still apply;
     # this closes the token half. Runs BEFORE the already_banned early return
     # (Codex review find) so re-banning also re-purges — the recovery lever
     # for any session that survived (migration 152 cleans pre-batch bans).
+    # The lever is a re-ban that carries NO length: a request that carries
+    # duration_minutes for an account under an active ban is a length change
+    # and has returned above, before this purge and every one below.
     await db.execute(text("DELETE FROM steam_sessions WHERE steam_id = :sid"),
                      {"sid": target_steam_id})
     # Portal tokens are live authority too (round-10 find 2): a banned
@@ -49044,28 +49437,69 @@ async def _apply_ban_core(db: AsyncSession, *, admin_steam_id: str, target_steam
         "DELETE FROM pc_delivery_leases WHERE subject_id IN "
         "(SELECT id FROM players WHERE steam_id = :sid)"), {"sid": target_steam_id})
     # Migration 416's change: the invitees' revisions for the invites ended
-    # above, after the drain, as the core's last write (the ORM rows below are
-    # flushed at the caller's commit).
+    # above, after the drain. On a new ban the core makes three writes after
+    # it, and none can wait on another transaction of the application:
+    # migration 417's close of this key's ended ban row here, and the ban and
+    # admin action rows, which go out when the session next flushes (at the
+    # caller's commit at the latest). Every writer of a key's player_bans
+    # rows holds that key's identity lock, which this core takes first (the
+    # close and the insert here, _ban_set_length_core inside this core,
+    # admin_unban through its sorted identity locks). The ban row's foreign
+    # key reads the admin's admin_users row, which the application never
+    # writes or locks; the admin action row has no foreign key (migration 192
+    # dropped it) and no unique key but its random id. _moderation_case_act
+    # then writes its case row, which it locked before this core, and its own
+    # admin action row; neither can wait either.
     await _invite_bump(db, _ban_inv_ended)
     existing = await _is_banned(db, target_steam_id)
     if existing is not None:   # round-15 find 3: "" is an ACTIVE ban too
-        return {"status": "already_banned", "reason": existing}
+        # The answer gains the active ban's end (B4), after its two keys.
+        _end = await _active_ban_details(db, target_steam_id)
+        return {"status": "already_banned", "reason": existing,
+                "expires_at": _ban_end_iso(_end["expires_at"]) if _end else None,
+                "seconds_left": (int(_end["seconds_left"])
+                                 if _end and _end["seconds_left"] is not None else None)}
     # Normalize a blank reason at the boundary (find 3): the row's existence
     # is the ban; the reason is display-only and must never be empty.
     # Normalize AND truncate ONCE (round-17 find 4): every sink — ban row,
     # audit details, response — carries this exact value.
     _ban_reason = ((reason or "").strip() or "violation")[:256]
-    db.add(PlayerBan(steam_id=target_steam_id, reason=_ban_reason, banned_by_steam_id=admin_steam_id))
+    # An ENDED timed ban of this key is closed by the system before the new
+    # row (migration 417's index holds one open row per key): its unbanned_at
+    # is the end it reached, so the log keeps when it stopped applying.
+    _closed = [str(x) for x in (await db.execute(text(
+        "UPDATE player_bans SET unbanned_by_steam_id = :closer, unbanned_at = expires_at "
+        "WHERE steam_id = :sid AND unbanned_at IS NULL "
+        "AND expires_at IS NOT NULL AND expires_at <= NOW() RETURNING id"
+    ), {"closer": BAN_CLOSED_BY_EXPIRY, "sid": target_steam_id})).scalars().all()]
+    # The end on the database's clock, read in this transaction (NOW() is
+    # its start, the instant the row's own banned_at default does not use).
+    _ban_end = None
+    if duration_minutes is not None:
+        _ban_end = (await db.execute(text("SELECT " + _ban_end_sql(duration_minutes)),
+                                     {"ban_minutes": int(duration_minutes)})).scalar()
+    db.add(PlayerBan(steam_id=target_steam_id, reason=_ban_reason, banned_by_steam_id=admin_steam_id,
+                     expires_at=_ban_end))
+    _details = {"reason": _ban_reason}
+    if length_sent:
+        _details["duration_minutes"] = duration_minutes
+        _details["expires_at"] = _ban_end_iso(_ban_end)
+    if _closed:
+        _details["closed_ended_ban_ids"] = _closed
     db.add(AdminAction(
         admin_steam_id=admin_steam_id, action="ban", target_steam_id=target_steam_id,
         # The NORMALIZED reason (round-16 find 6): audit and ban row must
         # agree — raw whitespace here showed a different "reason" to audit
         # consumers than the ban itself carried.
-        details={"reason": _ban_reason},
+        details=_details,
     ))
     # The bot's poll_new_bans loop picks this up from /internal/recent-bans and
     # posts it to #scr-admin (item 4).
-    return {"status": "banned", "steam_id": target_steam_id, "reason": _ban_reason}
+    # NOW() is fixed for the transaction, so the end read above is exactly
+    # the length ahead of it: seconds_left is the length in seconds.
+    return {"status": "banned", "steam_id": target_steam_id, "reason": _ban_reason,
+            "expires_at": _ban_end_iso(_ban_end),
+            "seconds_left": None if _ban_end is None else int(duration_minutes) * 60}
 
 
 class _AdminBanReq(BaseModel):
@@ -49073,10 +49507,31 @@ class _AdminBanReq(BaseModel):
     target_steam_id: str
     reason: str = "violation"
     hmac_signature: str | None = None
+    # B4: the ban's length in minutes, 1 to BAN_DURATION_MAX_MINUTES (ten
+    # years); absent or null = permanent. StrictInt, so a string, a float or a
+    # boolean is a 422 naming the field, never coerced. Not in the signature's
+    # canonical string, which stays admin:{admin}:ban:{target}. Whether it was
+    # SENT (null included) is model_fields_set, which tells a length change
+    # on an active ban apart from a repeat of the 1.41.0 request.
+    duration_minutes: StrictInt | None = Field(default=None, ge=1, le=BAN_DURATION_MAX_MINUTES)
 
 
 @app.post("/api/v1/admin/ban", tags=["Admin"])
 async def admin_ban(req: _AdminBanReq, _slot=Depends(_pc_writer_slot), db: AsyncSession = Depends(get_db)):
+    """Ban an account (admin HMAC over admin:{admin}:ban:{target}).
+
+    Without duration_minutes (every 1.41.0 request) it answers as it always
+    has: a target with no active ban is banned permanently ("banned"); a
+    target already under an active ban gets the repeat cleanup (sessions,
+    portal sessions, queue rows, card withdrawal) and "already_banned" with
+    the active ban's reason, nothing else written. With the field (1 to ten
+    years of minutes, or null for permanent): a target with no active ban is
+    banned with expires_at = NOW() plus the length; a target under an active
+    ban has that ban's end set (NOW() plus the length, or NULL), its reason
+    kept, no side effect of a new ban repeated, one admin_actions
+    "ban_length" row holding the old and the new end, and answers
+    "length_changed". Every answer ends with expires_at (UTC ISO 8601 with Z,
+    null = permanent) and seconds_left (an integer, null = permanent)."""
     _mod_target_or_422(req.target_steam_id, "target_steam_id")   # before the signature, the reads, the locks and the gate (r13)
     await _require_admin(db, req.admin_steam_id, "ban", req.target_steam_id, req.hmac_signature)
     # ONE lock order on every ban path (Sept 6 item b, review r2): the
@@ -49099,7 +49554,9 @@ async def admin_ban(req: _AdminBanReq, _slot=Depends(_pc_writer_slot), db: Async
     target_w = _mail_identity_to_write(rows, req.target_steam_id)
     await _ban_rate_gate_or_raise(db, req.admin_steam_id, req.target_steam_id, target_w=target_w)
     result = await _apply_ban_core(db, admin_steam_id=req.admin_steam_id,
-                                   target_steam_id=req.target_steam_id, reason=req.reason)
+                                   target_steam_id=req.target_steam_id, reason=req.reason,
+                                   duration_minutes=req.duration_minutes,
+                                   length_sent="duration_minutes" in req.model_fields_set)
     await db.commit()
     return result
 
@@ -49112,7 +49569,9 @@ async def get_recent_bans(
     db: AsyncSession = Depends(get_db),
 ):
     """Bot-only feed for the #scr-admin poller: newly-added active bans,
-    chronological. Mirrors /internal/recent-flags."""
+    chronological. Mirrors /internal/recent-flags. Active is the one
+    definition (models.player_ban_active_sql); each row gains `expires_at`
+    (UTC ISO 8601 with Z, null = permanent) as its last key."""
     expected = os.getenv("API_SECRET_KEY", "")
     if not expected or x_internal_key != expected:
         raise HTTPException(status_code=403, detail="Invalid internal key")
@@ -49124,9 +49583,9 @@ async def get_recent_bans(
         cutoff = row[0] if row else None
     q = (
         "SELECT pb.id::text AS id, pb.steam_id, pb.reason, pb.banned_by_steam_id, "
-        "       pb.banned_at, p.display_name "
+        "       pb.banned_at, p.display_name, pb.expires_at "
         "FROM player_bans pb LEFT JOIN players p ON p.steam_id = pb.steam_id "
-        "WHERE pb.unbanned_at IS NULL "
+        "WHERE " + player_ban_active_sql("pb") + " "
         + ("AND pb.banned_at > :cutoff " if cutoff else "")
         + "ORDER BY pb.banned_at ASC LIMIT :limit"
     )
@@ -49137,7 +49596,8 @@ async def get_recent_bans(
     return {"bans": [
         {"id": r["id"], "steam_id": r["steam_id"], "reason": r["reason"],
          "banned_by_steam_id": r["banned_by_steam_id"], "display_name": r["display_name"],
-         "banned_at": r["banned_at"].isoformat() if r["banned_at"] else None}
+         "banned_at": r["banned_at"].isoformat() if r["banned_at"] else None,
+         "expires_at": _ban_end_iso(r["expires_at"])}
         for r in rows
     ]}
 
@@ -49174,9 +49634,13 @@ async def admin_unban(req: _AdminUnbanReq, _slot=Depends(_pc_writer_slot), db: A
     _mail_actor_live_or_raise(rows, req.admin_steam_id)
     admin_w = _mail_identity_to_write(rows, req.admin_steam_id)
     target_w = _mail_identity_to_write(rows, req.target_steam_id)
+    # Only an ACTIVE ban is released (the one definition): for a timed ban
+    # that has ended the UPDATE releases nothing, and the route answers what
+    # it answers for an account with no ban (rows 0). The ended row stays
+    # open until the next ban of this key closes it as the system.
     res = await db.execute(text(
         "UPDATE player_bans SET unbanned_at = NOW(), unbanned_by_steam_id = :admin "
-        "WHERE steam_id = :sid AND unbanned_at IS NULL"
+        "WHERE steam_id = :sid AND " + player_ban_active_sql("player_bans")
     ), {"admin": admin_w, "sid": req.target_steam_id})
     _mod_release_or_422(req.target_steam_id, res.rowcount)   # outside the domain and nothing released: 422, nothing written
     db.add(AdminAction(
@@ -55978,7 +56442,7 @@ async def _settle_ovt_report(db: AsyncSession, report: OvtMatchReport, *,
     # above is `FOR NO KEY UPDATE` with NO `SKIP LOCKED`: it WAITS. The 1v2
     # horizon janitor takes the same mode on the same row WITH `SKIP LOCKED`
     # — its locking read is
-    # PIN main.py:4865 "SELECT status FROM ovt_series WHERE id = CAST(:sid AS uuid)"
+    # PIN main.py:5011 "SELECT status FROM ovt_series WHERE id = CAST(:sid AS uuid)"
     # and the clause is the line under it. So the two can
     # never both decide this row: either the janitor meets this report's lock
     # and DECLINES the row for that tick, or it commits its void first and
@@ -59956,7 +60420,7 @@ async def team_lobby_start(req: _LobbyStartReq, request: Request,
                             "A lobby member entered another live match")
     # Migration 416's change: the start ends the lobby's pending invites
     # (lobby_started) and bumps their invitees' revisions, the last write
-    # before the relock stamp below, which stays last (r4 H1). The one
+    # before the relock stamp below, which stays last (r4 H1). One
     # recorded exception to the bump-last rule (the design note, section
     # 13): the stamp updates the team_series row this start already holds
     # (the adopt's UPDATE above), so it waits on no lock while the revision
@@ -81081,7 +81545,7 @@ async def _invite_write_receipt(db: AsyncSession, caller_id, key: UUID, route: s
 
 
 # Every change of an invite's state bumps its invitee's inbox revision through a delivered copy
-# only, so a suppressed invite bumps nothing. A transaction runs this ONCE, last; a send's
+# only, so a suppressed invite bumps nothing. A transaction runs this ONCE; a send's
 # envelope is also bumped by migration 300's trigger, on that invitee's row alone (all a send
 # owes). It UPDATEs the invitees' existing revision rows and never inserts one: every delivered
 # copy got its row from migration 300's trigger when it was written, and the one statement that
@@ -81092,8 +81556,10 @@ async def _invite_write_receipt(db: AsyncSession, caller_id, key: UUID, route: s
 # or stall a live invitee's bump. The rows are locked in ascending recipient order in one
 # statement (the CTE), the order of every writer of this table (mail's sends and migration 300's
 # trigger insert in that order; the deletion takes its own row in the same ascending pass as its
-# bump, _INVITE_REV_DROP_LOCK_SQL), and nothing is locked after them, so two writers never wait on
-# each other in a cycle. A row the deletion holds is waited for and, once it commits, gone.
+# bump, _INVITE_REV_DROP_LOCK_SQL), so waits on these rows alone never form a cycle. A lock taken
+# after a bump can still close one: _apply_ban_core says why its own cannot; mail's send can (its
+# spam case can wait on delete_player_data's resolved_by scrub, which then waits on rows the send
+# holds). A row the deletion holds is waited for and, once it commits, gone.
 _INVITE_REV_BUMP_SQL = (
     "WITH t AS (SELECT v.recipient_id FROM mail_inbox_rev v"
     "            WHERE v.recipient_id IN (SELECT r.recipient_id FROM mail_recipients r"
@@ -81131,7 +81597,7 @@ async def _invite_bump(db: AsyncSession, mids, drop=None) -> None:
 # expires_at is 'expired' (what every read already calls it), any other
 # 'void' with sender_left. Called under the lobby row's lock, in the
 # departure's own transaction; the caller bumps the returned mail rows
-# (_invite_bump) as its last statement.
+# (_invite_bump) after the statements that returned them.
 #
 # The three ending statements decide expiry at ONE clock reading, taken by
 # the statement itself after the lobby lock its caller holds: c is

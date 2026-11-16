@@ -406,8 +406,9 @@ def test_one_pool_word_carries_the_steam_id_rule_for_every_membership_reader():
 # The pool word this build carries, and the rule number that stands for it.
 # pc_pool_snapshots.rule records which WORD a snapshot was taken under, so the two
 # are one fact kept in two places; the test below holds them together.
-_POOL_WORD_RULE = 3
-_POOL_WORD_SHA = "8c4a06b4101e8c2bc89f76dfaa5d90cfa28c2132e5cbf66bb01ccdc86b8f73fd"
+# Rule 4 (migration 417): the ban clause is the one active-ban definition.
+_POOL_WORD_RULE = 4
+_POOL_WORD_SHA = "0196019529c09beca5d8f95192380355604eff003d64bd1f2fd7fd554dfd0f27"
 
 
 def test_the_rule_number_and_the_membership_word_cannot_move_without_each_other():
@@ -464,8 +465,9 @@ def test_a_snapshot_holding_a_non_steam_member_is_retaken_at_the_next_pass(monke
     today = datetime(2026, 9, 15, 0, 5, tzinfo=timezone.utc)
     # rule 3 IS the one that added the Steam id clause (the merge), so a
     # snapshot recorded at rule 2 is one an api without that clause took.
-    assert main._PC_POOL_RULE == 3 and main._PC_POOL_STEAM_ID_SQL in main._PC_POOL_MEMBER_SQL
-    pre_steam = main._PC_POOL_RULE - 1
+    # Every later rule keeps the clause (rule 4 changed only the ban clause).
+    assert main._PC_POOL_RULE >= 3 and main._PC_POOL_STEAM_ID_SQL in main._PC_POOL_MEMBER_SQL
+    pre_steam = 2
     # read before the monkeypatch below replaces the taker: the retake CLEARS
     # the condition rather than firing every pass, because the taker writes
     # this build's rule onto the snapshot it just took
