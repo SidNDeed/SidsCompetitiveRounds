@@ -15,6 +15,14 @@ test_mail_case_scrub_pg.py's harness (inv_pg's case schema, the real handlers).
    P, in one transaction: it holds the first and waits for the second,
    which the deletion holds, while the deletion waits for the first.
 
+3. A moderator's ban against a deletion, staged. The deletion deletes the
+   ranked_queue rows naming its player (SKIP LOCKED, held to its commit)
+   before it locks its lobbies; the ban locks its target's open lobby and
+   then deletes the target's ranked_queue row, waiting. The state the
+   circle needs (X's ranked row matched with P while X and P share an open
+   lobby) is out of reach of the lease guard in steady state; the fixture
+   seeds it directly, as a matched pair that outlived its lease would.
+
 Each test asserts what MDPL is to make true: both sides finish, and neither
 ends in 40P01. On the base each fails at its "outcomes" assertion with one
 side's 40P01: that failure is the live reproduction MDPL's proof starts from.
@@ -131,4 +139,50 @@ def test_a_deletion_and_the_relay_ack_both_finish(monkeypatch):
         assert b.status == 200, b
         assert await env.conn.fetchval(
             "SELECT COUNT(*) FROM pending_dms WHERE id = ANY($1::bigint[])", [r_from, r_to]) == 0
+    case(monkeypatch, body, prefix="mdpl")
+
+
+RANKED_MARK = "OR matched_with = :pid"      # the deletion's ranked_queue DELETE (its verify read comes after it)
+ADMIN = "76561190000000001"                 # a synthetic moderator id; the ban core takes it as a string
+
+
+async def _matched(env, a, b):
+    """A ranked_queue row of `a`, matched with `b`, before any room."""
+    await env.conn.execute(
+        "INSERT INTO ranked_queue (player_id, steam_id, display_name, rating, rating_deviation, ranked_only,"
+        "                          status, matched_with, ready, joined_at, matched_at, last_polled)"
+        " VALUES ($1, $2, $3, 1500, 350, false, 'matched', $4, false, NOW(), NOW(), NOW())",
+        a.id, a.sid, a.name, b.id)
+
+
+def test_a_ban_and_a_deletion_sharing_a_lobby_and_a_ranked_match_both_finish(monkeypatch):
+    async def body(env):
+        _arm(env)
+        lid, (p, x) = await env.lobby("team", 2)
+        await _matched(env, p, x)
+        await _matched(env, x, p)
+        assert await env.conn.fetchval(
+            "SELECT COUNT(*) FROM team_queue WHERE series_id = $1 AND status = 'lobby'"
+            "   AND player_id = ANY($2::uuid[])", lid, [p.id, x.id]) == 2
+
+        async def ban(db):
+            out = await main._apply_ban_core(db, admin_steam_id=ADMIN, target_steam_id=x.sid,
+                                             reason="mdpl staged ban")
+            await db.commit()
+            return out
+
+        at = _parks(env)
+        spot = at(RANKED_MARK, "after")
+        td = asyncio.create_task(_delete(env, p))
+        await _parked(spot, td)                       # the deletion holds x's ranked row, not yet the lobby
+        tb = asyncio.create_task(env.call(ban))
+        state, w = await _settle(env, tb, by=spot.pid)
+        assert state == "waits", (state, w)
+        await _past_deadlock_check(env)
+        a, b = await _finish([td, tb], [spot])
+        assert not _bad(a, b), ("outcomes", _name(a), _name(b), "40P01", [_deadlock(a), _deadlock(b)])
+        assert a.status == 200 and a["status"] == "anonymized", a
+        assert b.status == 200, b
+        assert await env.conn.fetchval(
+            "SELECT COUNT(*) FROM ranked_queue WHERE player_id = ANY($1::uuid[])", [p.id, x.id]) == 0
     case(monkeypatch, body, prefix="mdpl")
