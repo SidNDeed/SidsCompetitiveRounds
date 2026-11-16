@@ -193,12 +193,12 @@ def test_pg_qdig_the_predicate_is_re_read_under_the_lock(monkeypatch):
             real = main._qdig_load
             calls = []
 
-            async def load(db, rows, admit=None):
+            async def load(db, rows, deadline_check=None):
                 if not calls:
                     await env.ex("UPDATE match_report_quarantine SET status='discarded', reviewed_at=NOW(),"
                                  " review_note='by an admin' WHERE id=CAST(:i AS uuid)", {"i": A2})
                 calls.append([str(r["id"]) for r, _b in rows])
-                return await real(db, rows, admit=admit)
+                return await real(db, rows, deadline_check=deadline_check)
             monkeypatch.setattr(main, "_qdig_load", load)
             filed = await main._qdig_janitor_pass()
             return filed, await env.statuses(), calls
@@ -270,7 +270,7 @@ def test_pg_qdig_the_lock_and_the_filing_recheck_each_guard_a_concurrent_review(
             real = main._qdig_load
             applied = []
 
-            async def load(db, rows, admit=None):
+            async def load(db, rows, deadline_check=None):
                 ids = [str(r["id"]) for r, _b in rows]
                 if not applied and ids == [A1]:
                     conn = await tq._pg(env.url)
@@ -287,7 +287,7 @@ def test_pg_qdig_the_lock_and_the_filing_recheck_each_guard_a_concurrent_review(
                             applied.append(False)
                     finally:
                         await conn.close()
-                return await real(db, rows, admit=admit)
+                return await real(db, rows, deadline_check=deadline_check)
             monkeypatch.setattr(main, "_qdig_load", load)
             await main._qdig_janitor_pass()
             return applied, await env.statuses()

@@ -75120,7 +75120,7 @@ async def internal_quarantine_digest(
             if ids:
                 qd["detail"] = _qdig_read_rows(await h.read(_QDIG_SQL_D1_DETAIL, {
                     "ids": ids, "body_max": QDIG_BODY_MAX_BYTES, "budget": QDIG_DECODE_BUDGET_BYTES}))
-            qd["facts"] = await _qdig_load(h._db, qd["detail"], admit=h._admit)
+            qd["facts"] = await _qdig_load(h._db, qd["detail"], deadline_check=h._admit)
             for d, _b in sorted(qd["detail"], key=lambda db_: (db_[0]["digest_posted_at"] is not None,
                                                                  db_[0]["created_at"], str(db_[0]["id"]))):
                 try:
@@ -75622,12 +75622,12 @@ def _qdig_steams(body) -> set:
     return out
 
 
-async def _qdig_load(db, pairs, admit=None) -> dict:
+async def _qdig_load(db, pairs, deadline_check=None) -> dict:
     """The facts _qdig_classify and the texts read, for a set of held rows,
     in a constant number of statements: the recorded games that hold their
     rooms, those games' per-player rows, the lobbies (the rows' own and the
     recorded games'), and the display names of everyone the bodies name.
-    `admit` is called before each statement (the triage handle's deadline);
+    `deadline_check` is called before each statement (the triage handle's deadline);
     the janitor and the Admin list pass none. Each statement is a module
     constant, so the janitor's boot self-test EXPLAINs every one of them."""
     facts = _qdig_empty_facts()
@@ -75640,29 +75640,29 @@ async def _qdig_load(db, pairs, admit=None) -> dict:
                 lobby_ids.add(str(r["group_id"]))
         sids |= _qdig_steams(body)
     if rooms:
-        if admit is not None:
-            admit()
+        if deadline_check is not None:
+            deadline_check()
         for m in (await db.execute(text(_QDIG_SQL_MATCHES),
                                    {"rooms": sorted(rooms)})).mappings().all():
             facts["matches"][m["photon_room_id"]] = dict(m)
             if m["lobby_id"] is not None:
                 lobby_ids.add(str(m["lobby_id"]))
     if facts["matches"]:
-        if admit is not None:
-            admit()
+        if deadline_check is not None:
+            deadline_check()
         for v in (await db.execute(text(_QDIG_SQL_VECTORS),
                                    {"ids": sorted(str(m["id"]) for m in facts["matches"].values())})
                   ).mappings().all():
             facts["vectors"].setdefault(str(v["match_id"]), []).append(dict(v))
     if lobby_ids:
-        if admit is not None:
-            admit()
+        if deadline_check is not None:
+            deadline_check()
         for lb in (await db.execute(text(_QDIG_SQL_LOBBIES),
                                     {"ids": sorted(lobby_ids)})).mappings().all():
             facts["lobbies"][str(lb["id"])] = dict(lb)
     if sids:
-        if admit is not None:
-            admit()
+        if deadline_check is not None:
+            deadline_check()
         for p in (await db.execute(text(_QDIG_SQL_NAMES),
                                    {"sids": sorted(sids)})).mappings().all():
             facts["names"][p["steam_id"]] = dict(p)
