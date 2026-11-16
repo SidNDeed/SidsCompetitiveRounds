@@ -268,7 +268,7 @@ def test_ffa_proximity_floor_uses_complete_queue_stamps():
             async with sm() as db:
                 await db.execute(text(
                     "UPDATE ffa_queue SET mod_version = :version"),
-                    {"version": main.MIN_MOD_VERSION})
+                    {"version": main.FFA_PROXIMITY_VICTIM_MIN_VERSION})
                 await db.commit()
                 vals = (await db.execute(text(
                     "SELECT mod_version FROM ffa_queue"

@@ -1300,6 +1300,16 @@ class HealthResponse(BaseModel):
     # read by nothing else (#306). No default, as above. Absent on any build
     # before it.
     ban_expiry_build: int
+    # ban_cap_build: release-train verification plumbing, not a design
+    # mechanism (main._BAN_CAP_BUILD; 1 = this build writes an end on every
+    # ban, at most models.BAN_MAX_HOURS after its start). It names build
+    # identity only. A code constant, equal on both roles by construction,
+    # so the train can read it through the edge; what the batch changes is
+    # seen by no phase of the train, and this is the key that tells a stale
+    # box from a refreshed one (learnings 780, 794, 1186). Probed by the
+    # release train and read by nothing else (#306). No default, as above.
+    # Absent on any build before it.
+    ban_cap_build: int
     # aer_popgate_build: release-train verification plumbing, not a design
     # mechanism (main._AER_POPGATE_BUILD; 1 = this build's evidence report
     # cache has a fixed byte allowance and builds the display population

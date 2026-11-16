@@ -211,7 +211,9 @@ async def _admin(db):
 
 
 async def _ban_row(db, sid, admin, minutes):
-    """One OPEN ban row: minutes None = permanent, < 0 = an end already passed."""
+    """One OPEN ban row: minutes None = no end (a row as written before migration
+    418, which this case schema does not carry: T8 rebuilt 417 without it),
+    < 0 = an end already passed."""
     end = "NULL" if minutes is None else "NOW() + make_interval(mins => CAST(:m AS integer))"
     params = {"id": uuid.uuid4(), "s": sid, "a": admin}
     if minutes is not None:
@@ -643,12 +645,14 @@ def test_t3_a_second_ban_after_the_end_closes_the_first(case, admin_open):
                 {"s": target})).scalars().all()
         return first, second, rows, audit
     first, second, rows, audit = _with_sm(case, body)
-    assert second["status"] == "banned" and second["expires_at"] is None, second
+    # the cap ruling: a ban without a length ends at its start plus the maximum
+    assert second["status"] == "banned" and second["seconds_left"] == main.BAN_MAX_HOURS * 3600, second
     assert len(rows) == 2, rows
     closed, open_ = rows
     assert closed["unbanned_by_steam_id"] == main.BAN_CLOSED_BY_EXPIRY == "system:expired"
     assert closed["unbanned_at"] == closed["expires_at"] and not closed["active"]
-    assert open_["unbanned_at"] is None and open_["expires_at"] is None and open_["active"]
+    assert open_["unbanned_at"] is None and open_["active"]
+    assert main._ban_end_iso(open_["expires_at"]) == second["expires_at"], (open_, second)
     assert [d.get("closed_ended_ban_ids") for d in map(_json, audit)] in (
         [None, [str(closed["id"])]], [[str(closed["id"])], None]), audit
 
@@ -782,6 +786,9 @@ def test_t4_a_length_change_sets_the_end_and_touches_nothing_else(case, admin_op
         back = await _admin_ban(sm, admin, target, duration_minutes=None)
         async with sm() as db:
             end = await _rows(db, target)
+            cap = (await db.execute(text(
+                "SELECT " + models.ban_cap_sql("banned_at") + " FROM player_bans WHERE steam_id = :s"),
+                {"s": target})).scalar()
             audit = (await db.execute(text(
                 "SELECT details FROM admin_actions WHERE target_steam_id = :s AND action = 'ban_length'"),
                 {"s": target})).scalars().all()
@@ -789,19 +796,22 @@ def test_t4_a_length_change_sets_the_end_and_touches_nothing_else(case, admin_op
                                          {"s": target})).scalar()
             queued = (await db.execute(text("SELECT count(*) FROM ranked_queue WHERE player_id = :p"),
                                        {"p": pid})).scalar()
-        return banned, timed, mid, db_end, back, end, audit, sessions, queued
-    banned, timed, mid, db_end, back, end, audit, sessions, queued = _with_sm(case, body)
-    assert banned["status"] == "banned" and banned["expires_at"] is None
+        return banned, timed, mid, db_end, back, end, audit, sessions, queued, cap
+    banned, timed, mid, db_end, back, end, audit, sessions, queued, cap = _with_sm(case, body)
+    # the cap ruling: no length = the start plus the maximum, on a new ban and
+    # (explicit null) on a length change alike
+    assert banned["status"] == "banned" and banned["expires_at"] == main._ban_end_iso(cap), (banned, cap)
     assert timed["status"] == "length_changed" and timed["reason"] == "ban-test", timed
     assert list(timed) == ["status", "steam_id", "reason", "expires_at", "seconds_left"], timed
     assert 1790 <= timed["seconds_left"] <= 1800, timed
     assert timed["expires_at"] == main._ban_end_iso(db_end), (timed, db_end)
     assert len(mid) == 1 and mid[0]["active"] and mid[0]["expires_at"] == db_end, mid
-    assert back["status"] == "length_changed" and back["expires_at"] is None and back["seconds_left"] is None
-    assert len(end) == 1 and end[0]["expires_at"] is None and end[0]["id"] == mid[0]["id"], end
-    trail = sorted((_json(d) for d in audit), key=lambda d: d["old_expires_at"] is not None)
+    assert back["status"] == "length_changed" and back["expires_at"] == main._ban_end_iso(cap), back
+    assert main.BAN_MAX_HOURS * 3600 - 120 <= back["seconds_left"] <= main.BAN_MAX_HOURS * 3600, back
+    assert len(end) == 1 and end[0]["expires_at"] == cap and end[0]["id"] == mid[0]["id"], end
+    trail = sorted((_json(d) for d in audit), key=lambda d: d["new_expires_at"] == banned["expires_at"])
     assert [(d["old_expires_at"], d["new_expires_at"], d["duration_minutes"]) for d in trail] == [
-        (None, timed["expires_at"], 30), (timed["expires_at"], None, None)], trail
+        (banned["expires_at"], timed["expires_at"], 30), (timed["expires_at"], banned["expires_at"], None)], trail
     assert (sessions, queued) == (1, 1), "a length change touched the account's sessions or queue rows"
 
 
@@ -851,30 +861,36 @@ def test_t5_old_clients_and_the_key_order_of_every_changed_answer(case, admin_op
     async def body(sm):
         async with sm() as db:
             admin = await _admin(db)
-            permanent, timed, stranger = _sid(), _sid(), _sid()
-            await _player(db, permanent)
+            capped, timed, stranger, clean = _sid(), _sid(), _sid(), _sid()
+            await _player(db, capped)
             await _player(db, timed)
+            await _player(db, clean)
             await db.commit()
-        out = {"plain": await _admin_ban(sm, admin, permanent)}         # the 1.41.0 request
-        out["again"] = await _admin_ban(sm, admin, permanent)
+        out = {"plain": await _admin_ban(sm, admin, capped)}         # the 1.41.0 request
+        out["again"] = await _admin_ban(sm, admin, capped)
         out["timed"] = await _admin_ban(sm, admin, timed, duration_minutes=90)
         async with sm() as db:
-            out["rows"] = await _rows(db, permanent)
+            out["rows"] = await _rows(db, capped)
             out["check_banned"] = await main.check_player_registered(timed, db=db)
             out["check_unregistered"] = await main.check_player_registered(stranger, db=db)
+            out["check_capped"] = await main.check_player_registered(capped, db=db)
+            out["check_clean"] = await main.check_player_registered(clean, db=db)
             out["list"] = await main.admin_list_bans(admin_steam_id=admin, hmac_signature=None, search=timed,
                                                      limit=None, offset=0, db=db)
             out["feed"] = await main.get_recent_bans(since_id=None, limit=200, x_internal_key=INTERNAL_KEY, db=db)
-        out["sids"] = (permanent, timed)
+        out["sids"] = (capped, timed)
         return out
     out = _with_sm(case, body)
-    permanent, timed = out["sids"]
-    # a ban request without the field is permanent, and so stays when repeated
-    assert out["plain"] == {"status": "banned", "steam_id": permanent, "reason": "ban-test",
-                            "expires_at": None, "seconds_left": None}, out["plain"]
-    assert out["again"]["status"] == "already_banned" and out["again"]["expires_at"] is None
+    capped, timed = out["sids"]
+    # the cap ruling: a ban request without the field (the 1.41.0 request)
+    # ends at its start plus the maximum, and a repeat answers that end
+    plain_end = out["plain"]["expires_at"]
+    assert out["plain"] == {"status": "banned", "steam_id": capped, "reason": "ban-test",
+                            "expires_at": plain_end, "seconds_left": main.BAN_MAX_HOURS * 3600}, out["plain"]
+    assert isinstance(plain_end, str) and plain_end.endswith("Z"), out["plain"]
+    assert out["again"]["status"] == "already_banned" and out["again"]["expires_at"] == plain_end
     assert list(out["again"]) == ["status", "reason", "expires_at", "seconds_left"], out["again"]
-    assert [r["expires_at"] for r in out["rows"]] == [None], out["rows"]
+    assert [main._ban_end_iso(r["expires_at"]) for r in out["rows"]] == [plain_end], out["rows"]
     assert list(out["timed"]) == ["status", "steam_id", "reason", "expires_at", "seconds_left"]
     assert out["timed"]["seconds_left"] == 5400 and out["timed"]["expires_at"].endswith("Z"), out["timed"]
     # /mod/check: JsonUtility reads the five declared fields by name; they keep their order, the two new keys follow
@@ -905,7 +921,17 @@ def test_t5_old_clients_and_the_key_order_of_every_changed_answer(case, admin_op
                                                  "display_name", "banned_at", "expires_at"]] * len(feed), feed
     ends = {b["steam_id"]: b["expires_at"] for b in feed}
     assert len(ends) == len(feed), feed
-    assert (ends[permanent], ends[timed]) == (None, out["timed"]["expires_at"]), ends
+    assert (ends[capped], ends[timed]) == (plain_end, out["timed"]["expires_at"]), ends
+    # ban_seconds_left: an integer for a banned account (a ban without a
+    # length included), null for a registered account under no ban
+    cap_check = out["check_capped"]
+    assert cap_check["banned"] is True and cap_check["ban_expires_at"] == plain_end, cap_check
+    left = cap_check["ban_seconds_left"]
+    assert isinstance(left, int) and main.BAN_MAX_HOURS * 3600 - 120 <= left <= main.BAN_MAX_HOURS * 3600, cap_check
+    clean_check = out["check_clean"]
+    assert (clean_check["banned"], clean_check["ban_expires_at"], clean_check["ban_seconds_left"]) == \
+        (False, None, None), clean_check
+    assert list(clean_check) == list(banned), clean_check
 
 
 # -- T6 / T7: presence -------------------------------------------------------
@@ -917,7 +943,7 @@ def test_t5_old_clients_and_the_key_order_of_every_changed_answer(case, admin_op
 
 @pytest.fixture(scope="module")
 def presence_world(case):
-    """B: banned (permanent) and pinging; C: the control, same stamps; E: an
+    """B: banned (no end: a row from before 418) and pinging; C: the control, same stamps; E: an
     ENDED ban, pinging; B2 / C2: banned / control, offline but recent; L:
     banned then lifted by T6. Every one has last_seen and mod_seen_at stamped
     now and a 1v1 rating row; the three pinging ones have presence_seen_at
@@ -1153,7 +1179,7 @@ def _r1_ping():
 
 
 def _f2_sequence(case, w, ping):
-    """Four pings by C, the map holding B (banned, permanent), C, P (one
+    """Four pings by C, the map holding B (banned, no end: a pre-418 row), C, P (one
     timed ban, running) and Q (no ban yet):
       works    the read works;
       failed   P's ONE row has ended (its end moved behind the clock) and the
@@ -1320,7 +1346,8 @@ async def _pool_player(db, rating):
 
 async def _ban_at(db, sid, admin, *, began="NOW() - INTERVAL '1 hour'", minutes=60):
     """One OPEN ban row of `sid`, begun at `began` (SQL), ending in `minutes`
-    (None = permanent; negative = already behind the clock)."""
+    (None = no end, a row as written before migration 418; negative = already
+    behind the clock)."""
     end = "NULL" if minutes is None else "NOW() + make_interval(mins => CAST(:m AS integer))"
     params = {"id": uuid.uuid4(), "s": sid, "a": admin}
     if minutes is not None:

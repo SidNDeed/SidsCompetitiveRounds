@@ -96,7 +96,8 @@ async def _ban(env, p):
         "INSERT INTO admin_users (steam_id, granted_at) VALUES ($1, NOW()) ON CONFLICT DO NOTHING",
         admin.sid)
     await env.conn.execute(
-        "INSERT INTO player_bans (steam_id, reason, banned_by_steam_id) VALUES ($1, 'test', $2)",
+        "INSERT INTO player_bans (steam_id, reason, banned_by_steam_id, expires_at)"
+        " VALUES ($1, 'test', $2, NOW() + INTERVAL '30 days')",
         p.sid, admin.sid)
 
 

@@ -125,6 +125,10 @@ class _Res:
     def first(self):
         return self._rows[0] if self._rows else None
 
+    def one(self):
+        assert len(self._rows) == 1, self._rows
+        return self._rows[0]
+
     def all(self):
         return list(self._rows)
 
@@ -575,7 +579,8 @@ class FakeDb:
         if "SELECT reason FROM player_bans" in sql:
             r = self.bans.get(params["sid"])
             return _Res([(r,)] if r is not None else [])
-        # _active_ban_details (B4): every ban this fake holds is permanent.
+        # _active_ban_details (B4): a ban this fake holds is a row written
+        # before migration 418 (no end), which the readers still admit.
         if "SELECT pb.id, pb.reason, pb.expires_at" in sql:
             r = self.bans.get(params["sid"])
             return _Res([{"id": "ban-" + params["sid"], "reason": r, "expires_at": None,
@@ -584,6 +589,19 @@ class FakeDb:
         # fake's bans never end, so there is none to close.
         if sql.startswith("UPDATE player_bans SET unbanned_by_steam_id = :closer"):
             return _Res([])
+        # The ban writer's new row (the cap ruling: an INSERT with one clock
+        # read for its start and its end). Recorded where the ORM row used to
+        # be (db.added), as the model the table maps, with the end the
+        # statement's own helper gives: the length, else the maximum.
+        if sql.startswith("WITH c AS (SELECT clock_timestamp() AS t) INSERT INTO player_bans"):
+            start = self.stmt_clock
+            mins = params.get("ban_minutes")
+            end = start + (timedelta(minutes=int(mins)) if mins is not None
+                           else timedelta(hours=main.BAN_MAX_HOURS))
+            self.added.append(main.PlayerBan(
+                id=UUID(params["id"]), steam_id=params["sid"], reason=params["reason"],
+                banned_by_steam_id=params["adm"], banned_at=start, expires_at=end))
+            return _Res([{"id": UUID(params["id"]), "banned_at": start, "expires_at": end}])
         if "FROM chat_mutes" in sql and sql.lstrip().startswith("SELECT 1"):
             wants_chan = ":chan" in sql
             for mu in self.mutes:
@@ -2409,7 +2427,8 @@ def test_moderation_cores_are_shared_not_copied():
     assert "_ban_rate_gate_or_raise(" in ban_route and "_apply_ban_core(" in ban_route
     assert "PlayerBan(" not in ban_route and "pg_advisory_xact_lock" not in ban_route
     core = inspect.getsource(main._apply_ban_core)
-    assert "db.add(PlayerBan(" in core and "await db.commit()" not in core
+    assert "INSERT INTO player_bans (" in core and "await db.commit()" not in core
+    assert "PlayerBan(" not in core
     gate = inspect.getsource(main._ban_rate_gate_or_raise)
     assert gate.count("await db.commit()") == 1 and "status_code=429" in gate
 
