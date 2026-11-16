@@ -19,8 +19,27 @@
 -- (DROP CONSTRAINT IF EXISTS) asks again under the lock the ALTER takes, so
 -- of two runs at once the second waits on the first, then finds nothing to
 -- drop and ends without an error. This file compares no deparsed text.
+--
+-- THE SESSION'S SETTINGS (the list in test_ban_cap_pg.py, SESSION_SETTINGS):
+--   * default_transaction_isolation does not enter: the transaction is READ
+--     COMMITTED whatever the session brought (the BEGIN below, the same form
+--     as 418), and the drop's IF EXISTS asks the catalog under the ALTER's
+--     lock in any case.
+--   * default_transaction_read_only enters as a refusal: with the CHECK
+--     present the ALTER (the drop) fails inside the transaction, nothing
+--     applied; with it absent the file changes nothing and ends rc 0.
+--   * search_path enters at the DO's first read (current_schema() names the
+--     table) and at the drop (the bare name player_bans, the first table of
+--     that name on the path): the same table whenever the current schema
+--     holds one, and with none there the file drops nothing and ends rc 0.
+--     Nothing is parsed into a stored expression and no text is compared,
+--     so no operator another schema holds enters.
+--   * IntervalStyle, quote_all_identifiers, DateStyle, TimeZone,
+--     standard_conforming_strings, extra_float_digits do not enter: the file
+--     reads no deparsed text and holds no constant they print or parse.
 
-BEGIN;
+-- the same transaction form as 418, whatever the session's default (header)
+BEGIN ISOLATION LEVEL READ COMMITTED;
 SET LOCAL lock_timeout = '5s';
 SET LOCAL idle_in_transaction_session_timeout = '5s';
 SET LOCAL statement_timeout = '25s';

@@ -391,11 +391,15 @@ def _psql_client():
 def _psql_args(schema, settings=(), appname=None):
     """psql with ON_ERROR_STOP, bound to the case schema by the startup
     packet's search path; `settings` are further session settings given the
-    same way, from OUTSIDE the file (name, value)."""
+    same way, from OUTSIDE the file (name, value). A later setting of the
+    same name wins; a space in a value is escaped as PGOPTIONS reads it."""
     psql = _psql_client()
     assert psql is not None, "no psql client found (set BAN_TEST_PSQL or put psql on PATH)"
     u = urlparse(lh.DSN)
-    opts = ["-c search_path=%s" % schema] + ["-c %s=%s" % (k, v) for k, v in settings]
+
+    def esc(v):
+        return v.replace("\\", "\\\\").replace(" ", "\\ ")
+    opts = ["-c search_path=%s" % schema] + ["-c %s=%s" % (k, esc(v)) for k, v in settings]
     env = dict(os.environ, PGOPTIONS=" ".join(opts))
     if appname:
         env["PGAPPNAME"] = appname
@@ -1034,12 +1038,15 @@ async def _wait_for_lock_wait(obs, appname, limit_s=10.0):
     return False
 
 
-async def _two_first_runs(case, path, release):
+async def _two_first_runs(case, path, release, b_settings=()):
     """Session A holds player_bans' ACCESS EXCLUSIVE lock in an open
-    transaction while session B (psql, the file at `path`) starts 418 and
-    waits. With `release`, A then does what 418's first run does (the
-    backfill and the ADD CONSTRAINT) and commits inside B's 5 s lock timeout;
-    without it, A holds on until B has ended and then rolls back."""
+    transaction while session B (psql, the file at `path`, under
+    `b_settings`) starts 418 and waits. With `release`, A then does what
+    418's first run does (the backfill and the ADD CONSTRAINT), reads the
+    rows as it leaves them ON ITS OWN CONNECTION before its COMMIT (any other
+    reader waits for B's lock and would see B's changes too: bancap-r2's
+    MEDIUM), and commits inside B's 5 s lock timeout; without it, A holds on
+    until B has ended and then rolls back."""
     a = await harness.connect_bound(lh.DSN, case)
     obs = await harness.connect_bound(lh.DSN, case)
     out = {}
@@ -1055,7 +1062,7 @@ async def _two_first_runs(case, path, release):
         await tr.start()
         await a.execute("LOCK TABLE player_bans IN ACCESS EXCLUSIVE MODE")
         appname = "bancap_b_%s" % uuid.uuid4().hex[:8]
-        args, env = _psql_args(case, appname=appname)
+        args, env = _psql_args(case, b_settings, appname=appname)
         with open(path, "rb") as fh:
             b = subprocess.Popen(args, stdin=fh, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         try:
@@ -1066,8 +1073,8 @@ async def _two_first_runs(case, path, release):
                 await a.execute("ALTER TABLE player_bans ADD CONSTRAINT player_bans_max_one_year"
                                 " CHECK (expires_at IS NOT NULL AND banned_at IS NOT NULL"
                                 " AND expires_at <= banned_at + interval '8760 hours')")
+                out["after_a"] = await _rows_with_xmin(a)
                 await tr.commit()
-                out["after_a"] = await _rows_with_xmin(obs)
                 _o, e = await asyncio.get_running_loop().run_in_executor(None, lambda: b.communicate(timeout=60))
             else:
                 _o, e = await asyncio.get_running_loop().run_in_executor(None, lambda: b.communicate(timeout=60))
@@ -1196,3 +1203,331 @@ def test_mutant_the_rollback_dropping_without_if_exists_fails_the_second_run(cas
     rc, err = out["b"]
     assert rc != 0 and "does not exist" in err and CONSTRAINT in err, (rc, err)
     assert out["def"] is None, out["def"]
+
+
+# -- bancap-r2: every session setting 418's result could follow ---------------
+#
+# One class: the post-check compares deparsed text, and the parse, the
+# deparse and the two-session promise follow session settings. 418 pins its
+# whole environment (BEGIN ISOLATION LEVEL READ COMMITTED; IntervalStyle and
+# quote_all_identifiers in the block at the head of its transaction; the
+# search path at the head of the DO, once the table is named), and ONE
+# generated test runs the real file under each setting below, set from
+# OUTSIDE the file (the startup packet) as a role or database setting would
+# set it, and asserts the constraint's BEHAVIOUR, not only its text.
+# Each entry: (id, settings, plant a `<=` in the table's schema, what the file
+# must do, why the setting does or does not enter). "{case}" in a value is the
+# case schema, which stands for public.
+
+PRESENT = "418: player_bans_max_one_year is present; no row changed"
+SESSION_SETTINGS = (
+    ("intervalstyle-postgres", (("IntervalStyle", "postgres"),), False, "applies",
+     "enters: the post-check's text prints the CHECK's interval by IntervalStyle; pinned"),
+    ("intervalstyle-postgres_verbose", (("IntervalStyle", "postgres_verbose"),), False, "applies",
+     "enters, as above"),
+    ("intervalstyle-sql_standard", (("IntervalStyle", "sql_standard"),), False, "applies",
+     "enters, as above"),
+    ("intervalstyle-iso_8601", (("IntervalStyle", "iso_8601"),), False, "applies",
+     "enters, as above"),
+    ("quote_all_identifiers-on", (("quote_all_identifiers", "on"),), False, "applies",
+     "enters: the deparser then quotes every column name; pinned off"),
+    ("search_path-case_pg_catalog", (("search_path", "{case},pg_catalog"),), False, "applies",
+     "enters: it decides which <= the CHECK is parsed with and whether the deparser "
+     "prints that operator qualified; pinned in the DO once the table is named"),
+    ("search_path-case_pg_catalog-operator", (("search_path", "{case},pg_catalog"),), True, "applies",
+     "the same path with a <= on two timestamptz values in the table's schema that answers true"),
+    ("default_transaction_isolation-repeatable_read",
+     (("default_transaction_isolation", "repeatable read"),), False, "applies",
+     "enters: the re-read under the lock sees another run's commit only at read committed; "
+     "pinned by BEGIN ISOLATION LEVEL READ COMMITTED"),
+    ("default_transaction_isolation-serializable",
+     (("default_transaction_isolation", "serializable"),), False, "applies",
+     "enters, as above"),
+    ("default_transaction_read_only-on", (("default_transaction_read_only", "on"),), False, "refused",
+     "enters as a refusal: the BEGIN inherits it, the first write (the lock) fails inside "
+     "the transaction, and nothing is applied"),
+    ("datestyle-sql_dmy", (("DateStyle", "SQL, DMY"),), False, "applies",
+     "does not enter: the file holds no date or time constant"),
+    ("timezone-los_angeles", (("TimeZone", "America/Los_Angeles"),), False, "applies",
+     "does not enter: the bound is in hours, which no time zone stretches"),
+    ("standard_conforming_strings-off", (("standard_conforming_strings", "off"),), False, "applies",
+     "does not enter: no string literal in the file holds a backslash"),
+    ("extra_float_digits--15", (("extra_float_digits", "-15"),), False, "applies",
+     "does not enter: the file holds no floating-point value"),
+    ("extra_float_digits-3", (("extra_float_digits", "3"),), False, "applies",
+     "does not enter, as above"),
+)
+OP_FN = "bancap_always_true"
+BEGIN_LINE = "BEGIN ISOLATION LEVEL READ COMMITTED;\n"
+QAI_LINE = "SET LOCAL quote_all_identifiers = off;\n"
+PATH_LINE = ("  PERFORM pg_catalog.set_config('search_path', "
+             "pg_catalog.format('pg_catalog, %I, pg_temp', sch), true);\n")
+PATH_LINE_NO_SCHEMA = ("  PERFORM pg_catalog.set_config('search_path', "
+                       "pg_catalog.format('pg_catalog, pg_temp', sch), true);\n")
+PRESENT_LINE = "    RAISE NOTICE '%s';\n" % PRESENT
+NOOP_UPDATE = "    UPDATE player_bans SET expires_at = expires_at;\n"
+REPEATABLE_READ = (("default_transaction_isolation", "repeatable read"),)
+OPERATOR_PATH = (("search_path", "{case},pg_catalog"),)
+
+
+def _settings_for(case, settings):
+    return tuple((k, v.format(case=case)) for k, v in settings)
+
+
+async def _plant_operator(conn, case):
+    """A `<=` on two timestamptz values in the table's schema that always
+    answers true (bancap-r2's input)."""
+    s = harness.quoted(case)
+    await conn.execute("CREATE FUNCTION %s.%s(timestamptz, timestamptz) RETURNS boolean"
+                       " LANGUAGE plpgsql IMMUTABLE AS $f$BEGIN RETURN true; END$f$" % (s, OP_FN))
+    await conn.execute("CREATE OPERATOR %s.<= (LEFTARG = timestamptz, RIGHTARG = timestamptz,"
+                       " FUNCTION = %s.%s)" % (s, s, OP_FN))
+
+
+async def _unplant_operator(conn, case):
+    s = harness.quoted(case)
+    await conn.execute("DROP OPERATOR IF EXISTS %s.<= (timestamptz, timestamptz)" % s)
+    await conn.execute("DROP FUNCTION IF EXISTS %s.%s(timestamptz, timestamptz)" % (s, OP_FN))
+
+
+async def _verdicts(conn, admin):
+    """The CHECK's behaviour: (an end one microsecond past the cap, an end at
+    the cap, a NULL end), each 'refused' or 'admitted', each in a
+    transaction rolled back."""
+    start = "TIMESTAMPTZ '2026-03-10 10:00:00+00'"
+    cap = "%s + INTERVAL '%d hours'" % (start, models.BAN_MAX_HOURS)
+    got = []
+    for end in (cap + " + INTERVAL '1 microsecond'", cap, "NULL"):
+        tr = conn.transaction()
+        await tr.start()
+        try:
+            await conn.execute(
+                "INSERT INTO player_bans (steam_id, reason, banned_by_steam_id, banned_at, expires_at)"
+                " VALUES ($1, 'verdict', $2, %s, %s)" % (start, end), _sid(), admin)
+            got.append("admitted")
+        except Exception as e:      # asyncpg CheckViolationError
+            got.append("refused" if CONSTRAINT in str(e) else repr(e))
+        finally:
+            await tr.rollback()
+    return tuple(got)
+
+
+async def _apply_under(case, path, settings, plant):
+    """The file at `path` under `settings`: with the CHECK absent and one
+    row without an end, a first apply and a second apply, then the CHECK's
+    verdicts. The CHECK is dropped and the operator removed again at the end
+    (the case's census refuses an object the build did not leave), and 418
+    is applied once more under the default session."""
+    st = _settings_for(case, settings)
+    conn = await harness.connect_bound(lh.DSN, case)
+    out = {}
+    try:
+        if plant:
+            await _plant_operator(conn, case)
+        out["rollback"] = _psql_apply(case, R418)
+        admin = _sid()
+        await conn.execute("INSERT INTO admin_users (steam_id) VALUES ($1)", admin)
+        await conn.execute("INSERT INTO player_bans (steam_id, reason, banned_by_steam_id, expires_at)"
+                           " VALUES ($1, 'settings', $2, NULL)", _sid(), admin)
+        out["before"] = await _rows_with_xmin(conn)
+        out["first"] = _psql_apply(case, path, st)
+        out["def"] = await _constraint_def(conn)
+        out["after_first"] = await _rows_with_xmin(conn)
+        out["again"] = _psql_apply(case, path, st)
+        out["after_again"] = (await _constraint_def(conn), await _rows_with_xmin(conn))
+        out["verdicts"] = await _verdicts(conn, admin)
+    finally:
+        try:
+            out["cleanup"] = _psql_apply(case, R418)
+            if plant:
+                await _unplant_operator(conn, case)
+        finally:
+            await conn.close()
+    out["restore"] = _psql_apply(case, M418)
+    return out
+
+
+@pytest.mark.parametrize("entry", SESSION_SETTINGS, ids=[e[0] for e in SESSION_SETTINGS])
+def test_418_under_each_session_setting_applies_once_and_the_check_holds(case, entry):
+    """The generated test. Under each setting of SESSION_SETTINGS: the first
+    apply ends rc 0 with the CHECK 418 adds; a second apply ends rc 0 with
+    the "present" notice and changes no row (every row's xmin as the first
+    left it); and the CHECK refuses an end one microsecond past the cap,
+    admits an end at the cap and refuses a NULL end. The one exception,
+    default_transaction_read_only on: the file ends with an error and
+    nothing is applied (no CHECK, no row changed)."""
+    name, settings, plant, want, _why = entry
+    out = _run(_apply_under(case, M418, settings, plant))
+    assert out["rollback"][0] == 0, out["rollback"]
+    rc, err = out["first"]
+    if want == "refused":
+        assert rc != 0 and "read-only transaction" in err, (name, rc, err)
+        assert out["def"] is None and out["after_first"] == out["before"], (name, out)
+    else:
+        assert rc == 0, (name, err)
+        assert out["def"] == WANT_DEF, (name, out["def"])
+        rc, err = out["again"]
+        assert rc == 0 and _notices(err) == [PRESENT], (name, err)
+        assert out["after_again"] == (WANT_DEF, out["after_first"]), (name, "the second apply changed a row")
+        assert out["verdicts"] == ("refused", "admitted", "refused"), (name, out["verdicts"])
+    assert out["cleanup"][0] == 0 and out["restore"][0] == 0, (name, out["cleanup"], out["restore"])
+
+
+async def _operator_case(case, path):
+    """bancap-r2's first input: a `<=` in the table's schema that always
+    answers true, and the path {case}, pg_catalog. (1) A first apply of the
+    file at `path`, then the CHECK's verdicts. (2) A correct CHECK already
+    standing, added in a session whose path reaches pg_catalog's operator
+    first, then the file applied: its exit, its notices, whether a row
+    changed."""
+    st = _settings_for(case, OPERATOR_PATH)
+    conn = await harness.connect_bound(lh.DSN, case)
+    out = {}
+    try:
+        await _plant_operator(conn, case)
+        out["rollback"] = _psql_apply(case, R418)
+        admin = _sid()
+        await conn.execute("INSERT INTO admin_users (steam_id) VALUES ($1)", admin)
+        await conn.execute("INSERT INTO player_bans (steam_id, reason, banned_by_steam_id, expires_at)"
+                           " VALUES ($1, 'operator', $2, NULL)", _sid(), admin)
+        out["first"] = _psql_apply(case, path, st)
+        out["first_verdicts"] = await _verdicts(conn, admin)
+        out["rollback2"] = _psql_apply(case, R418)
+        await conn.execute("UPDATE player_bans SET expires_at = banned_at + interval '8760 hours'"
+                           " WHERE expires_at IS NULL")
+        await conn.execute("ALTER TABLE player_bans ADD CONSTRAINT player_bans_max_one_year"
+                           " CHECK (expires_at IS NOT NULL AND banned_at IS NOT NULL"
+                           " AND expires_at <= banned_at + interval '8760 hours')")
+        out["standing_def"] = await _constraint_def(conn)
+        out["before"] = await _rows_with_xmin(conn)
+        out["on_standing"] = _psql_apply(case, path, st)
+        out["after"] = (await _constraint_def(conn), await _rows_with_xmin(conn))
+    finally:
+        try:
+            out["cleanup"] = _psql_apply(case, R418)
+            await _unplant_operator(conn, case)
+        finally:
+            await conn.close()
+    out["restore"] = _psql_apply(case, M418)
+    return out
+
+
+def test_r2_a_an_operator_in_the_tables_schema_does_not_decide_the_check(case):
+    """bancap-r2 HIGH 1, its input as a named test. (1) After a first apply
+    under that path the CHECK still refuses an end past the cap (and admits
+    one at it). (2) Where a correct CHECK already stands, the file accepts
+    it: rc 0, the "present" notice, no row changed."""
+    out = _run(_operator_case(case, M418))
+    assert out["rollback"][0] == 0 and out["rollback2"][0] == 0, out
+    rc, err = out["first"]
+    assert rc == 0, err
+    assert out["first_verdicts"] == ("refused", "admitted", "refused"), out["first_verdicts"]
+    assert out["standing_def"] == WANT_DEF, out["standing_def"]
+    rc, err = out["on_standing"]
+    assert rc == 0 and _notices(err) == [PRESENT], (rc, err)
+    assert out["after"] == (WANT_DEF, out["before"]), "the file changed a row or the CHECK"
+    assert out["cleanup"][0] == 0 and out["restore"][0] == 0, out
+
+
+def test_r2_b_quote_all_identifiers_on_a_first_and_a_second_apply_end_rc_0(case):
+    """bancap-r2 HIGH 2, its input as a named test: with quote_all_identifiers
+    on for the session, a first apply and a second apply both end rc 0."""
+    out = _run(_apply_under(case, M418, (("quote_all_identifiers", "on"),), False))
+    assert out["first"][0] == 0, out["first"]
+    assert out["def"] == WANT_DEF, out["def"]
+    rc, err = out["again"]
+    assert rc == 0 and _notices(err) == [PRESENT], (rc, err)
+    assert out["cleanup"][0] == 0 and out["restore"][0] == 0, out
+
+
+def test_two_first_runs_of_418_at_once_under_repeatable_read_end_as_two_in_sequence(case):
+    """Point 4 of the r2 order: the two first runs once more with session B's
+    default_transaction_isolation = repeatable read. B's transaction is read
+    committed whatever the session brought, so its re-read under the lock
+    sees A's commit: rc 0, the "present" notice, no row changed."""
+    out = _run(_two_first_runs(case, M418, release=True, b_settings=REPEATABLE_READ))
+    assert out["b_waited"] is True, "session B never waited on the lock"
+    rc, err = out["b"]
+    assert rc == 0 and _notices(err) == [PRESENT], (rc, err)
+    assert out["after_b"] == out["after_a"], "session B changed a row"
+    assert out["def"] == WANT_DEF and out["restore"][0] == 0, out
+
+
+# -- mutants, one per pinned line, and the MEDIUM's ----------------------------
+
+def test_mutant_418_without_its_isolation_level_fails_the_second_run_under_repeatable_read(case):
+    """Mutant: a bare BEGIN. Under repeatable read B's snapshot is taken at
+    its DO's first read, before A commits, so its re-read under the lock
+    still finds the CHECK absent and it acts on rows A has since changed."""
+    path = _m418_copy(BEGIN_LINE, "BEGIN;\n")
+    try:
+        out = _run(_two_first_runs(case, path, release=True, b_settings=REPEATABLE_READ))
+    finally:
+        os.unlink(path)
+    assert out["b_waited"] is True, "session B never waited on the lock"
+    rc, err = out["b"]
+    assert rc != 0 and "could not serialize access due to concurrent update" in err, (rc, err)
+    assert out["after_b"] == out["after_a"] and out["def"] == WANT_DEF, out
+
+
+def test_mutant_418_without_its_search_path_pin_lets_the_operator_decide(case):
+    """Mutant: the search-path line removed. Under {case}, pg_catalog the
+    first apply parses the CHECK with the planted operator and its post-check
+    reads it back bare, so the CHECK admits an end past the cap; and a
+    correct standing CHECK deparses as OPERATOR(pg_catalog.<=) and is
+    refused."""
+    path = _m418_copy(PATH_LINE, "")
+    try:
+        out = _run(_operator_case(case, path))
+    finally:
+        os.unlink(path)
+    assert out["first"][0] == 0, out["first"]
+    assert out["first_verdicts"][0] == "admitted", out["first_verdicts"]
+    rc, err = out["on_standing"]
+    assert rc != 0 and "OPERATOR(pg_catalog.<=)" in err and "not the validated CHECK 418 adds" in err, (rc, err)
+    assert out["after"] == (WANT_DEF, out["before"]), out["after"]
+    assert out["cleanup"][0] == 0 and out["restore"][0] == 0, out
+
+
+def test_mutant_418_pinning_a_path_without_the_tables_schema_is_refused_with_nothing_applied(case):
+    """Mutant: the pinned path without the table's own schema. The bare name
+    player_bans then resolves to no table, the identity check refuses, and
+    nothing is applied: the case for that check's refusal."""
+    path = _m418_copy(PATH_LINE, PATH_LINE_NO_SCHEMA)
+    try:
+        out = _run(_apply_under(case, path, (), False))
+    finally:
+        os.unlink(path)
+    rc, err = out["first"]
+    assert rc != 0 and "418: player_bans under the pinned search path is missing" in err, (rc, err)
+    assert out["def"] is None and out["after_first"] == out["before"], out
+    assert out["cleanup"][0] == 0 and out["restore"][0] == 0, out
+
+
+def test_mutant_418_without_its_quote_all_identifiers_pin_is_refused_with_it_on(case):
+    """Mutant: the quote_all_identifiers line removed. With it on, the
+    post-check reads the columns quoted and refuses; nothing is applied."""
+    path = _m418_copy(QAI_LINE, "")
+    try:
+        out = _run(_apply_under(case, path, (("quote_all_identifiers", "on"),), False))
+    finally:
+        os.unlink(path)
+    rc, err = out["first"]
+    assert rc != 0 and '"expires_at"' in err and "not the validated CHECK 418 adds" in err, (rc, err)
+    assert out["def"] is None and out["after_first"] == out["before"], out
+    assert out["cleanup"][0] == 0 and out["restore"][0] == 0, out
+
+
+def test_mutant_418_rewriting_every_row_in_its_present_branch_fails_the_two_first_runs(case):
+    """bancap-r2's MEDIUM. Mutant: a no-op UPDATE of every row before the
+    "present" notice. B still ends rc 0 with the notice, but its rows' xmin
+    differ from the rows as A left them, read on A's own connection before
+    its COMMIT: the assertion the two-first-runs test makes turns red."""
+    path = _m418_copy(PRESENT_LINE, NOOP_UPDATE + PRESENT_LINE)
+    try:
+        out = _run(_two_first_runs(case, path, release=True))
+    finally:
+        os.unlink(path)
+    rc, err = out["b"]
+    assert rc == 0 and _notices(err) == [PRESENT], (rc, err)
+    assert out["after_b"] != out["after_a"], "B's rewrite of every row went unseen"

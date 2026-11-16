@@ -37,30 +37,52 @@
 -- own transaction (learning #340): BEGIN and COMMIT below.
 --
 -- REFUSALS (RAISE EXCEPTION, the transaction rolls back, nothing applied):
--- the table missing; expires_at or banned_at missing or not timestamp with
--- time zone; a constraint of this name whose definition is not this one.
+-- the table missing; the bare name player_bans, under the pinned search
+-- path, naming another table or none; expires_at or banned_at missing or
+-- not timestamp with time zone; a constraint of this name whose definition
+-- is not this one; a read-only session (the first write fails).
 --
 -- RE-RUNS. When the constraint is present at the DO's first read, the DO
 -- takes no lock and changes no row: it only re-reads the definition and
 -- refuses one that differs. When it is absent, the DO takes player_bans'
 -- ACCESS EXCLUSIVE lock and reads again UNDER the lock everything it acts
 -- on: whether the constraint exists, both columns' types, and the rows the
--- two UPDATEs count. So of two first runs at once, the second waits on the
--- first's lock (or gives up after 5 s with nothing applied), then finds the
--- constraint under its own lock and changes nothing, the same end state as
--- a second run in sequence. A drop of the constraint after the first read
--- makes the post-check refuse, nothing applied.
+-- two UPDATEs count. The transaction is READ COMMITTED whatever the session
+-- brought, and only at READ COMMITTED does a read under the lock see a
+-- commit made while this run waited for it. So of two first runs at once,
+-- the second waits on the first's lock (or gives up after 5 s with nothing
+-- applied), then finds the constraint under its own lock and changes
+-- nothing, the same end state as a second run in sequence. A drop of the
+-- constraint after the first read makes the post-check refuse, nothing
+-- applied.
 --
--- THE POST-CHECK COMPARES DEPARSED TEXT, so the transaction fixes the one
--- setting that text depends on. pg_get_constraintdef prints the CHECK's
--- interval constant through the interval output function, which follows
--- IntervalStyle (postgres: 8760:00:00; iso_8601: PT8760H); SET LOCAL
--- IntervalStyle = postgres makes the text the same whatever the session
--- brought. The definition holds no date or time constant (DateStyle and
--- TimeZone do not enter it), its column names are never qualified, and it
--- names the built-in interval type, which is never printed qualified. The
--- column-type checks compare type oids, not printed names. search_path is
--- not pinned: it is what names player_bans for every statement here.
+-- THE SESSION'S SETTINGS. The post-check compares deparsed text, and the
+-- CHECK is parsed by name, so the file pins everything its parse, its
+-- deparse and its re-read depend on, and no setting a session, a role or a
+-- database brings moves its verdict:
+--   * the transaction: BEGIN ISOLATION LEVEL READ COMMITTED (above). It
+--     names no READ WRITE: a BEGIN that could fail would leave the rest of
+--     the file running outside a transaction, and this one cannot fail.
+--     Under a read-only default the first write (the lock) then fails
+--     inside the transaction, nothing applied.
+--   * the deparse: SET LOCAL IntervalStyle = postgres (the CHECK's interval
+--     prints 8760:00:00 under it, PT8760H under iso_8601) and SET LOCAL
+--     quote_all_identifiers = off (on, every column name prints quoted).
+--   * the parse: the search path. The DO names the table first, in the
+--     session's current schema, with every function it calls before the pin
+--     qualified by pg_catalog; then pins the path for the rest of the
+--     transaction to pg_catalog first, that schema second and the temporary
+--     schema last, and refuses unless the bare name player_bans still names
+--     that table. So the CHECK's <= and + are pg_catalog's, whatever operator
+--     of that name another schema on the session's path holds, and the
+--     deparser prints them bare.
+-- What does not enter: the definition holds no date or time constant
+-- (DateStyle, TimeZone), no string literal holds a backslash
+-- (standard_conforming_strings), no floating-point value
+-- (extra_float_digits); its column names are never qualified, and the
+-- interval type is never printed qualified. The column-type checks compare
+-- type oids, not printed names. test_ban_cap_pg.py's SESSION_SETTINGS runs
+-- this file under each of these settings and checks the CHECK's behaviour.
 --
 -- HOW LONG THE LOCK CAN LIVE (learning #1072, as in 417). lock_timeout
 -- bounds the WAIT for player_bans' ACCESS EXCLUSIVE (5 s); once held it lives
@@ -69,17 +91,23 @@
 -- and COMMIT (5 s); synchronous_commit = local keeps the COMMIT's wait off
 -- any standby. The table holds one row on the primary.
 
-BEGIN;
+-- The pinned environment (header, THE SESSION'S SETTINGS); the search path
+-- is pinned at the head of the DO, once the table is named.
+-- the re-read under the lock sees another run's commit only at read committed
+BEGIN ISOLATION LEVEL READ COMMITTED;
 SET LOCAL lock_timeout = '5s';
 SET LOCAL idle_in_transaction_session_timeout = '5s';
 SET LOCAL statement_timeout = '25s';
 SET LOCAL synchronous_commit = local;
--- the post-check's deparsed text follows IntervalStyle (header)
+-- the post-check's deparsed text follows IntervalStyle
 SET LOCAL IntervalStyle = 'postgres';
+-- ... and quote_all_identifiers
+SET LOCAL quote_all_identifiers = off;
 
 DO $m418$
 DECLARE
-  tbl regclass := to_regclass(format('%I.player_bans', current_schema()));
+  sch name := pg_catalog.current_schema();
+  tbl regclass := pg_catalog.to_regclass(pg_catalog.format('%I.player_bans', sch));
   present boolean;
   ty_end oid;
   ty_start oid;
@@ -91,6 +119,14 @@ DECLARE
 BEGIN
   IF tbl IS NULL THEN
     RAISE EXCEPTION '418: table player_bans is missing';
+  END IF;
+
+  -- The search path, pinned once the table is named: pg_catalog first, the
+  -- table's schema second, the temporary schema last (header).
+  PERFORM pg_catalog.set_config('search_path', pg_catalog.format('pg_catalog, %I, pg_temp', sch), true);
+  IF to_regclass('player_bans') IS DISTINCT FROM tbl THEN
+    RAISE EXCEPTION '418: player_bans under the pinned search path is %, not %',
+      coalesce(to_regclass('player_bans')::text, 'missing'), tbl;
   END IF;
 
   -- First read, without a lock. Absent: lock, then read again under the
