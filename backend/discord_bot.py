@@ -15337,9 +15337,9 @@ async def on_interaction(interaction: discord.Interaction):
             await _aer_click(interaction, cid)
             return
         if cid.startswith("modlog:"):
-            # /modlog page buttons (MODLOG-1): the request rides the
-            # custom_id, the gate is applied again, the api decides with the
-            # presser's id.
+            # /modlog Next button (MODLOG-1): the bot holds the request the
+            # custom_id names, the gate is applied again, the api decides
+            # with the presser's id.
             await _modlog_click(interaction, cid)
             return
         if cid.startswith("modcase:"):
@@ -18404,40 +18404,50 @@ MODLOG_SCHEMA = ("The moderator log answered in a form this bot does not read. "
                  "Trying again will not help; tell the maintainer.")
 MODLOG_SEARCH_LONG = ("That search is longer than %d characters. Shorten it and ask again."
                       % MODLOG_SEARCH_MAX)
-MODLOG_SEARCH_WIDE = ("That search is too long to keep on the page buttons. "
-                      "Use fewer or plainer characters and ask again.")
 
 
-def _modlog_custom_id(sid, sort, action_idx, page, search):
-    """`modlog:<steam id>:<sort>:<action index or ->:<page>:<search>`. The
-    search is percent-encoded with no safe characters, so a colon in it
-    cannot split the fields; None when the whole id passes 100 characters."""
-    cid = ":".join(["modlog", str(sid), sort, "-" if action_idx is None else str(action_idx),
-                    str(int(page)), urllib.parse.quote(search or "", safe="")])
-    return cid if len(cid) <= MODLOG_CID_MAX else None
+# The read pages by key (MODLOG-1 fix A7): a Next press asks for the rows
+# after the last row shown. The key with the request is longer than a button's
+# custom_id holds, so the bot keeps each next page's request here and the
+# button carries a random token for it; a token not held (expired, or the
+# bot restarted) answers MODLOG_EXPIRED. There is no Previous button.
+MODLOG_HOLD_S = 15 * 60
+MODLOG_HOLD_MAX = 2000
+MODLOG_EXPIRED = "This page is no longer held. Ask /modlog again for the first page."
+_modlog_held = {}
+
+
+def _modlog_hold(req):
+    """Keep `(steam id, sort, action index or None, page, search, after key)`
+    for one Next button and return that button's custom_id."""
+    now = time.monotonic()
+    for tok in [t for t, (exp, _) in _modlog_held.items() if exp <= now]:
+        _modlog_held.pop(tok, None)
+    while len(_modlog_held) >= MODLOG_HOLD_MAX:
+        _modlog_held.pop(next(iter(_modlog_held)))
+    tok = secrets.token_hex(12)
+    _modlog_held[tok] = (now + MODLOG_HOLD_S, tuple(req))
+    cid = "modlog:" + tok
+    assert len(cid) <= MODLOG_CID_MAX
+    return cid
 
 
 def _modlog_parse_custom_id(cid):
-    """`(steam id, sort, action index or None, page, search)`, or None."""
-    parts = cid.split(":", 5) if isinstance(cid, str) else []
-    if len(parts) != 6 or parts[0] != "modlog":
+    """The request a button holds, or None (not a modlog id, or not held)."""
+    if not isinstance(cid, str) or not cid.startswith("modlog:"):
         return None
-    _, sid, sort, act, page, search = parts
-    if not (len(sid) == 17 and sid.isdigit()) or sort not in MODLOG_SORTS or not page.isdigit():
+    held = _modlog_held.get(cid[len("modlog:"):])
+    if held is None or held[0] <= time.monotonic():
         return None
-    if act == "-":
-        idx = None
-    elif act.isdigit() and int(act) < len(MODLOG_BOT_ACTIONS):
-        idx = int(act)
-    else:
-        return None
-    return sid, sort, idx, int(page), urllib.parse.unquote(search)
+    return held[1]
 
 
-def _modlog_params(player, sort, action_idx, page, search):
+def _modlog_params(player, sort, action_idx, after, search):
     api_sort, api_dir, _ = MODLOG_SORTS[sort]
     params = [("player", str(player)), ("sort", api_sort), ("dir", api_dir),
-              ("limit", str(MODLOG_PAGE)), ("offset", str(int(page) * MODLOG_PAGE))]
+              ("limit", str(MODLOG_PAGE))]
+    if after:
+        params.append(("after", after))
     if action_idx is not None:
         params.append(("action", MODLOG_BOT_ACTIONS[action_idx][0]))
     if search:
@@ -18501,10 +18511,33 @@ def _modlog_cut(text, n):
     return text if len(text) <= n else text[:max(0, n - 1)] + "…"
 
 
+def _modlog_fit(text, n):
+    """`text` (already escaped) shortened to at most `n` characters, the cut
+    marked with "…". A cut never ends inside an escape pair: an odd run of
+    backslashes before the cut drops its last one."""
+    if len(text) <= n:
+        return text
+    cut = text[:max(0, n - 1)]
+    run = len(cut) - len(cut.rstrip("\\"))
+    if run % 2:
+        cut = cut[:-1]
+    return cut + "…"
+
+
+MODLOG_TOTALS_MAX = 400
+
+
+def _modlog_row_budget(limit, head, totals, n_rows):
+    """Each row's share of the message: what the header, the totals and the
+    line breaks leave, split evenly over the rows on the page."""
+    return max(0, (limit - len(head) - len(totals) - 1 - n_rows) // max(1, n_rows))
+
+
 def _modlog_render(body, *, page, sort, action_idx, search):
     """The page's text: a header with the player's name and the totals by
-    action, then one line per record. Raises ValueError on a body this
-    function does not read (the caller answers MODLOG_SCHEMA)."""
+    action, then one line per record, every row of the page shown (each row
+    shortened to its budget, with a visible mark). Raises ValueError on a
+    body this function does not read (the caller answers MODLOG_SCHEMA)."""
     if not isinstance(body, dict) or not isinstance(body.get("rows"), list):
         raise ValueError("rows")
     total = body.get("total")
@@ -18532,51 +18565,55 @@ def _modlog_render(body, *, page, sort, action_idx, search):
         if not isinstance(c, dict):
             raise ValueError("count")
         tot.append("%s %d" % (_escape_md(_modlog_cut(c.get("label"), 40)), int(c.get("count") or 0)))
-    totals = "Totals: " + ", ".join(tot) + "." if tot else ""
-    if not body["rows"]:
+    totals = _modlog_fit("Totals: " + ", ".join(tot) + "." if tot else "", MODLOG_TOTALS_MAX)
+    rows = body["rows"]
+    if not rows:
         return "%s\n%s\nNo records on this page." % (head, totals)
-    for reason_n, sentence_n in ((120, 160), (60, 100), (30, 60)):
-        lines = []
-        for r in body["rows"]:
-            if not isinstance(r, dict):
-                raise ValueError("row")
-            line = "%s **%s** by %s" % (_modlog_ts(r.get("at")),
-                                        _escape_md(_modlog_cut(r.get("action_label"), 40)),
-                                        _escape_md(_modlog_cut(r.get("actor_name") or r.get("actor"), 40)))
-            if r.get("reason"):
-                line += " — reason: " + _escape_md(_modlog_cut(r.get("reason"), reason_n))
-            line += " — " + _escape_md(_modlog_cut(r.get("sentence"), sentence_n))
-            lines.append(line)
-        msg = "\n".join([head, totals] + lines)
-        if len(msg) <= MODLOG_MSG_MAX:
-            return msg
-    return _modlog_cut(msg, MODLOG_MSG_MAX)
+    budget = _modlog_row_budget(MODLOG_MSG_MAX, head, totals, len(rows))
+    lines = []
+    for r in rows:
+        if not isinstance(r, dict) or not isinstance(r.get("key"), str):
+            raise ValueError("row")
+        line = "%s **%s** by %s" % (_modlog_ts(r.get("at")),
+                                    _escape_md(_modlog_cut(r.get("action_label"), 40)),
+                                    _escape_md(_modlog_cut(r.get("actor_name") or r.get("actor"), 40)))
+        if r.get("reason"):
+            line += " — reason: " + _escape_md(_modlog_cut(r.get("reason"), 256))
+        line += " — " + _escape_md(_modlog_cut(r.get("sentence"), 600))
+        lines.append(_modlog_fit(line, budget))
+    # The budget keeps the page inside the limit while the header stays
+    # within its own bounds (a 40-character name, a 64-character search);
+    # this cut stands so no page passes the limit even outside them.
+    return _modlog_cut("\n".join([head, totals] + lines), MODLOG_MSG_MAX)
 
 
-def _modlog_view(sid, sort, action_idx, page, search, total):
-    pages = max(1, -(-int(total) // MODLOG_PAGE))
-    if pages <= 1:
+def _modlog_view(req, body):
+    """A Next button when the read says more rows follow: it holds the request
+    for the rows after the last row shown (every row of a page is shown)."""
+    rows = body.get("rows") or []
+    if not body.get("next") or not rows:
         return None
+    sid, sort, action_idx, page, search, _after = req
     view = discord.ui.View(timeout=None)
-    view.add_item(discord.ui.Button(style=discord.ButtonStyle.secondary, label="Previous",
-                                    custom_id=_modlog_custom_id(sid, sort, action_idx, max(page - 1, 0), search),
-                                    disabled=page <= 0))
     view.add_item(discord.ui.Button(style=discord.ButtonStyle.secondary, label="Next",
-                                    custom_id=_modlog_custom_id(sid, sort, action_idx, page + 1, search),
-                                    disabled=page >= pages - 1))
+                                    custom_id=_modlog_hold((sid, sort, action_idx, page + 1, search,
+                                                            rows[-1]["key"]))))
     return view
 
 
-async def _modlog_page(actor_id, player, sort, action_idx, page, search):
-    """`(served, text, view)` for one page: a rendered page with its buttons
-    (or none for a single page), or one plain sentence (served False)."""
-    status, body = await _modlog_fetch(_modlog_params(player, sort, action_idx, page, search), actor_id)
+async def _modlog_page(actor_id, req):
+    """`(served, text, view)` for one page of `req` (steam id or name, sort,
+    action index, page number, search, after key or ""): a rendered page with
+    its button (or none for the last page), or one plain sentence (served
+    False)."""
+    player, sort, action_idx, page, search, after = req
+    status, body = await _modlog_fetch(_modlog_params(player, sort, action_idx, after, search), actor_id)
     if status != 200:
         return False, _modlog_error(status, body), None
     try:
         text_out = _modlog_render(body, page=page, sort=sort, action_idx=action_idx, search=search)
         sid = str(body["player"]["steam_id"])
-        return True, text_out, _modlog_view(sid, sort, action_idx, page, search, body["total"])
+        return True, text_out, _modlog_view((sid, sort, action_idx, page, search, after), body)
     except Exception:
         return False, MODLOG_SCHEMA, None
 
@@ -18592,14 +18629,9 @@ async def _modlog_command(interaction, player, action, search, sort):
     sort = sort if sort in MODLOG_SORTS else "n"
     words = [w for w, _ in MODLOG_BOT_ACTIONS]
     action_idx = words.index(action) if action in words else None
-    # The longest id the buttons can carry for this search: refused here,
-    # never cut on a later page.
-    if _modlog_custom_id("7" * 17, sort, action_idx, 99999, search) is None:
-        await interaction.response.send_message(MODLOG_SEARCH_WIDE, ephemeral=True)
-        return
     await interaction.response.defer(ephemeral=True)
-    _served, text_out, view = await _modlog_page(interaction.user.id, (player or "").strip(), sort,
-                                        action_idx, 0, search)
+    _served, text_out, view = await _modlog_page(
+        interaction.user.id, ((player or "").strip(), sort, action_idx, 0, search, ""))
     if view is None:
         await interaction.followup.send(text_out, ephemeral=True,
                                         allowed_mentions=discord.AllowedMentions.none())
@@ -18609,15 +18641,17 @@ async def _modlog_command(interaction, player, action, search, sort):
 
 
 async def _modlog_click(interaction, cid):
-    """A Previous or Next press: the command's gate again, then a fresh read
-    with the presser's id; the ephemeral page is edited in place."""
-    req = _modlog_parse_custom_id(cid)
-    if req is None or not _aer_local_gate(interaction):
+    """A Next press: the command's gate again, then a fresh read with the
+    presser's id; the ephemeral page is edited in place."""
+    if not _aer_local_gate(interaction):
         await interaction.response.send_message(MODLOG_GATE, ephemeral=True)
         return
-    sid, sort, action_idx, page, search = req
+    req = _modlog_parse_custom_id(cid)
+    if req is None:
+        await interaction.response.send_message(MODLOG_EXPIRED, ephemeral=True)
+        return
     await interaction.response.defer()
-    served, text_out, view = await _modlog_page(interaction.user.id, sid, sort, action_idx, page, search)
+    served, text_out, view = await _modlog_page(interaction.user.id, req)
     if not served:
         # An error sentence: the page shown stays as it was.
         await interaction.followup.send(text_out, ephemeral=True)

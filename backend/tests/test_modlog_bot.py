@@ -122,7 +122,7 @@ def _lift():
             node.decorator_list = []
             picked.append(node)
         elif isinstance(node, ast.Assign) and any(
-                isinstance(t, ast.Name) and t.id.startswith(("MODLOG_", "_MD_"))
+                isinstance(t, ast.Name) and t.id.startswith(("MODLOG_", "_MD_", "_modlog_"))
                 for t in node.targets):
             picked.append(copy.deepcopy(node))
     return picked
@@ -131,7 +131,8 @@ def _lift():
 def bot(answer):
     api = _Api(answer)
     ns = {"discord": FAKE_DISCORD, "aiohttp": FAKE_AIOHTTP, "json": json, "urllib": urllib,
-          "re": __import__("re"), "datetime": datetime, "timezone": timezone, "timedelta": timedelta,
+          "re": __import__("re"), "time": __import__("time"),
+          "secrets": __import__("secrets"), "datetime": datetime, "timezone": timezone, "timedelta": timedelta,
           "http_session": api, "API_SECRET_KEY": "internal-key", "API_BASE_URL": "http://api:8000",
           "ADMIN_CHANNEL_ID": ADMIN}
     exec(compile(ast.Module(body=_lift(), type_ignores=[]), SRC, "exec"), ns)
@@ -148,7 +149,7 @@ def twelve_records(params):
     rows = []
     for i in range(12):
         word, why = KINDS[i % 5]
-        rows.append({"id": "r%d" % i, "at": "2026-11-01T%02d:00:00Z" % (11 - i), "action": word,
+        rows.append({"id": "r%d" % i, "key": "k%d" % i, "at": "2026-11-01T%02d:00:00Z" % (11 - i), "action": word,
                      "action_label": modlog.label(word),
                      "actor": "system" if word == "chat_automute" else "76561190420000001",
                      "actor_name": "System" if word == "chat_automute" else "Mod *Alpha*",
@@ -159,11 +160,14 @@ def twelve_records(params):
                      "target_series_id": None, "details": {}})
     if params.get("dir") == "asc":
         rows.reverse()
-    off, lim = int(params["offset"]), int(params["limit"])
+    assert "offset" not in params
+    lim = int(params["limit"])
+    off = [r["key"] for r in rows].index(params["after"]) + 1 if "after" in params else 0
     counts = {}
     for r in rows:
         counts[r["action"]] = counts.get(r["action"], 0) + 1
-    return 200, {"total": 12, "limit": lim, "offset": off, "sort": params["sort"], "dir": params["dir"],
+    nxt = rows[off + lim - 1]["key"] if off + lim < len(rows) else None
+    return 200, {"total": 12, "limit": lim, "next": nxt, "sort": params["sort"], "dir": params["dir"],
                  "counts_by_action": [{"action": a, "label": modlog.label(a), "count": n}
                                       for a, n in counts.items()],
                  "player": {"steam_id": PLAYER, "name": "Fixture_Player"},
@@ -184,23 +188,24 @@ def test_twelve_records_two_pages_and_the_buttons(capsys):
     assert text.count("\n") == 12      # name, page line, totals, ten rows
     assert "Fixture\\_Player" in text and "Mod \\*Alpha\\*" in text
     nxt = [b.kw for b in kw["view"].children if b.kw["label"] == "Next"][0]
-    assert not nxt["disabled"]
+    assert not nxt.get("disabled")
     assert api.calls[0][2] == {"X-Internal-Key": "internal-key", "X-Actor-Discord-Id": str(ASKER)}
-    assert ("offset", "0") in api.calls[0][1] and ("limit", "10") in api.calls[0][1]
+    assert ("limit", "10") in api.calls[0][1]
+    assert not [p for p, _ in api.calls[0][1] if p in ("offset", "after")]
+    assert [b.kw["label"] for b in kw["view"].children] == ["Next"]      # no Previous (fix A7)
     click = _Inter()
     run(ns["_modlog_click"](click, nxt["custom_id"]))
     (edit,) = click.edits
     assert "page 2 of 2" in edit["content"] and edit["content"].count("\n") == 4   # name, page line, totals, two rows
-    assert ("offset", "10") in api.calls[1][1]
-    prev = [b.kw for b in edit["view"].children if b.kw["label"] == "Previous"][0]
-    assert not prev["disabled"]
+    assert ("after", "k9") in api.calls[1][1]          # after the last row shown
+    assert edit["view"] is None                       # the last page has no button
     with capsys.disabled():
         print("\nMODLOG-BOT-PAGE-1\n" + text + "\nMODLOG-BOT-PAGE-2\n" + edit["content"])
 
 
 def test_no_records_is_one_plain_sentence():
     def empty(params):
-        return 200, {"total": 0, "counts_by_action": [], "limit": 10, "offset": 0, "sort": "time",
+        return 200, {"total": 0, "counts_by_action": [], "limit": 10, "next": None, "sort": "time",
                      "dir": "desc", "rows": [], "player": {"steam_id": PLAYER, "name": "Quiet One"}}
     ns, _ = bot(empty)
     it = _Inter()
@@ -244,29 +249,34 @@ def test_the_gate_on_the_command_and_on_every_press(channel, guild):
     run(ns["_modlog_command"](it, PLAYER, "", "", "n"))
     assert it.sent == [(ns["MODLOG_GATE"], {"ephemeral": True})]
     press = _Inter(channel, guild)
-    run(ns["_modlog_click"](press, ns["_modlog_custom_id"](PLAYER, "n", None, 1, "")))
+    run(ns["_modlog_click"](press, ns["_modlog_hold"]((PLAYER, "n", None, 1, "", "k9"))))
     assert press.sent == [(ns["MODLOG_GATE"], {"ephemeral": True})] and press.edits == []
     assert api.calls == []
 
 
-def test_the_search_survives_the_button_and_a_colon_cannot_split_it():
+def test_the_button_holds_the_request_and_an_unheld_token_is_a_plain_sentence():
     ns, api = bot(twelve_records)
-    cid = ns["_modlog_custom_id"](PLAYER, "o", 3, 1, "a:b:c 50%")
-    assert ns["_modlog_parse_custom_id"](cid) == (PLAYER, "o", 3, 1, "a:b:c 50%")
-    for bad in ("modlog:1:n:-:0:", "modlog:%s:z:-:0:" % PLAYER, "modlog:%s:n:99:0:" % PLAYER,
-                "modlog:%s:n:-:x:" % PLAYER, "other:%s:n:-:0:" % PLAYER):
+    req = (PLAYER, "o", 3, 1, "a:b:c 50% " + "é" * 30, "k" * 300)
+    cid = ns["_modlog_hold"](req)
+    assert len(cid) <= 100 and ns["_modlog_parse_custom_id"](cid) == req
+    for bad in ("modlog:", "modlog:0123456789abcdef01234567", "other:x", None):
         assert ns["_modlog_parse_custom_id"](bad) is None, bad
+    press = _Inter()
+    run(ns["_modlog_click"](press, "modlog:0123456789abcdef01234567"))
+    assert press.sent == [(ns["MODLOG_EXPIRED"], {"ephemeral": True})] and api.calls == []
+    ns["_modlog_held"][cid[len("modlog:"):]] = (0, req)          # expired
+    assert ns["_modlog_parse_custom_id"](cid) is None
 
 
-def test_a_search_too_long_or_too_wide_is_refused_never_cut():
+def test_a_search_too_long_is_refused_never_cut_and_a_wide_one_is_served():
     ns, api = bot(twelve_records)
     it = _Inter()
     run(ns["_modlog_command"](it, PLAYER, "", "x" * 65, "n"))
     assert it.sent[0][0] == ns["MODLOG_SEARCH_LONG"]
+    assert api.calls == []
     it = _Inter()
     run(ns["_modlog_command"](it, PLAYER, "", "é" * 30, "n"))      # 180 characters encoded
-    assert it.sent[0][0] == ns["MODLOG_SEARCH_WIDE"]
-    assert api.calls == []
+    assert ("q", "é" * 30) in api.calls[0][1]          # the button holds it, not its custom_id
 
 
 def test_every_page_stays_under_2000_characters():
@@ -288,3 +298,70 @@ def test_the_action_choices_are_the_apis_words_and_labels():
     for word, label in pairs:
         assert modlog.ACTIONS.get(word) == label, word
     assert not {w for w, _ in pairs} & modlog.READ_ACTIONS
+
+
+# -- fix A9: every row of a page is shown --------------------------------------
+
+MD = "*_~`|>\\"
+
+
+def markdown_records(params):
+    """Twelve rows whose actor names (40 characters) and reasons (256) are
+    made of markdown characters; each row's own minute marks its time."""
+    rows = []
+    for i in range(12):
+        rows.append({"id": "m%d" % i, "key": "k%d" % i, "at": "2026-11-01T10:%02d:00Z" % (59 - i),
+                     "action": "ban", "action_label": "Ban", "actor": "76561190420000001",
+                     "actor_name": (MD * 6)[:40], "players": [{"steam_id": PLAYER, "name": "P"}],
+                     "reason": (MD * 37)[:256], "sentence": (MD * 30)[:200],
+                     "target_steam_id": PLAYER, "target_match_id": None,
+                     "target_series_id": None, "details": {}})
+    if "after" in params:
+        start = [r["key"] for r in rows].index(params["after"]) + 1
+    else:
+        start = int(params.get("offset") or 0)
+    lim = int(params["limit"])
+    page = rows[start:start + lim]
+    nxt = page[-1]["key"] if start + lim < len(rows) else None
+    return 200, {"total": 12, "limit": lim, "sort": params["sort"], "dir": params["dir"],
+                 "next": nxt, "offset": start,
+                 "counts_by_action": [{"action": "ban", "label": "Ban", "count": 12}],
+                 "player": {"steam_id": PLAYER, "name": "P"}, "rows": page}
+
+
+def _stamp(i):
+    dt = datetime(2026, 11, 1, 10, 59 - i, tzinfo=timezone.utc)
+    return "<t:%d:f>" % int(dt.timestamp())
+
+
+def _a9_pages(ns, api):
+    it = _Inter()
+    run(ns["_modlog_command"](it, PLAYER, "", "", "n"))
+    (text, kw), = it.sent
+    nxt = [b.kw for b in kw["view"].children if b.kw["label"] == "Next"][0]
+    click = _Inter()
+    run(ns["_modlog_click"](click, nxt["custom_id"]))
+    return text, click.edits[0]["content"]
+
+
+def test_a9_ten_rows_of_markdown_characters_all_appear_inside_the_limit(capsys):
+    ns, api = bot(markdown_records)
+    first, second = _a9_pages(ns, api)
+    assert len(first) <= 2000 and len(first) <= ns["MODLOG_MSG_MAX"], len(first)
+    assert [_stamp(i) in first for i in range(10)] == [True] * 10, first
+    assert "…" in first                                  # a shortened row carries the mark
+    assert _stamp(10) in second and _stamp(9) not in second, second
+    for line in first.split("\n"):
+        tail = len(line) - len(line.rstrip("\\"))
+        assert tail % 2 == 0 or line.endswith("…"), line   # no escape pair is cut
+    with capsys.disabled():
+        print("\nMODLOG-A9-PAGE length=%d" % len(first))
+
+
+def test_a9_mutant_without_the_row_budget_is_red(monkeypatch):
+    ns, api = bot(markdown_records)
+    ns["_modlog_row_budget"] = lambda *a, **k: 10 ** 6
+    with pytest.raises(AssertionError) as e:
+        first, _ = _a9_pages(ns, api)
+        assert [_stamp(i) in first for i in range(10)] == [True] * 10
+    print("\nMUTANT-RED A9 budget removed: %s" % str(e.value).splitlines()[0][:120])

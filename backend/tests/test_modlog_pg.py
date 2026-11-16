@@ -559,11 +559,16 @@ async def check_sort_action_and_actor(sm, w):
 
 async def check_paging(sm, w):
     p = w["p"]
-    pages = [(await _read(sm, player=p, limit=5, offset=o))["rows"] for o in (0, 5, 10)]
-    assert [len(x) for x in pages] == [5, 5, 2]
+    # Pages by key (fix A7): each page asks for the rows after the last one.
+    pages, after = [], None
+    for _ in range(3):
+        ans = await _read(sm, player=p, limit=5, **({"after": after} if after else {}))
+        pages.append(ans["rows"])
+        after = ans["next"]
+    assert [len(x) for x in pages] == [5, 5, 2] and after is None
     ids = [r["id"] for pg in pages for r in pg]
     assert len(set(ids)) == 12
-    assert (await _read(sm, player=p, limit=5, offset=10000))["rows"] == []
+    assert pages[1][0]["id"] == (await _read(sm, player=p, limit=6))["rows"][5]["id"]
 
 
 async def check_filters(sm, w):
@@ -581,8 +586,8 @@ async def check_filters(sm, w):
 async def check_answer_shape(sm, w):
     ans = await _read(sm, player=w["p"], limit=1)
     row = ans["rows"][0]
-    assert set(ans) == {"total", "counts_by_action", "limit", "offset", "sort", "dir", "rows", "player"}
-    assert set(row) == {"id", "at", "action", "action_label", "actor", "actor_name", "players",
+    assert set(ans) == {"total", "counts_by_action", "limit", "next", "sort", "dir", "rows", "player"}
+    assert set(row) == {"id", "key", "at", "action", "action_label", "actor", "actor_name", "players",
                         "reason", "sentence", "part", "target_steam_id", "target_match_id",
                         "target_series_id", "details"}
     assert row["action"] == "ban" and row["actor_name"] == "Mod Alpha"
@@ -659,7 +664,7 @@ def test_refusals():
                      (dict(limit=0), "limit_out_of_range"),
                      (dict(limit=101), "limit_out_of_range"),
                      (dict(limit="ten"), "limit_invalid"),
-                     (dict(offset=10001), "offset_out_of_range"),
+                     (dict(offset=0), "unknown_parameter"),      # no position paging (fix A7)
                      (dict(since="yesterday"), "since_invalid"),
                      (dict(include_reads="maybe"), "include_reads_invalid"),
                      (dict(q="a\x00b"), "q_invalid")):
@@ -741,7 +746,7 @@ def test_the_per_player_read_uses_the_gin_index_on_50000_rows(case, world, capsy
             where, params = main._modlog_where(f)
             plan = (await db.execute(text(
                 "EXPLAIN (ANALYZE, BUFFERS, COSTS OFF) SELECT aa.id FROM admin_actions aa"
-                f" WHERE {where} ORDER BY {main._MODLOG_ORDER[('time', 'desc')]}"
+                f" WHERE {where} ORDER BY {main._MODLOG_ORDER[('time', 'desc')].format(t='aa')}"
                 " LIMIT 50"), params)).scalars().all()
             n = (await db.execute(text("SELECT count(*) FROM admin_actions"))).scalar()
         return n, plan

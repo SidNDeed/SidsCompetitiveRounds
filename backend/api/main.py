@@ -26642,22 +26642,31 @@ async def admin_list_actions(
 # Every value is a bound parameter with a typed cast; the ORDER BY is one of
 # three fixed literals. Every statement runs under a 5 s transaction-local
 # timeout; the per-player read uses ix_admin_actions_affected. A parameter
-# the route does not know, or a value it cannot use, is refused with 400.
+# the route does not know, or a value it cannot use, is refused with 400; a
+# page key the read cannot use is refused with 422.
+#
+# Pages by key (MODLOG-1 fix A7): every order is a total order with the id
+# last, and `after` (a row's `key`) asks for the rows after that row in the
+# order of the read; a record written between two page reads therefore
+# neither repeats a row nor hides one. The total, the counts and the page
+# come from ONE statement, so they describe one snapshot of the table.
 _MODLOG_LIMIT_DEFAULT = 50
 _MODLOG_LIMIT_MAX = 100
-_MODLOG_OFFSET_MAX = 10000
 _MODLOG_Q_MAX = 64
 _MODLOG_ACTIONS_MAX = 64
+_MODLOG_KEY_MAX = 512
 _MODLOG_ORDER = {
-    ("time", "desc"): "aa.created_at DESC, aa.id DESC",
-    ("time", "asc"): "aa.created_at ASC, aa.id ASC",
-    ("action", "desc"): "aa.action DESC, aa.created_at DESC, aa.id DESC",
-    ("action", "asc"): "aa.action ASC, aa.created_at DESC, aa.id DESC",
-    ("actor", "desc"): "aa.admin_steam_id DESC, aa.created_at DESC, aa.id DESC",
-    ("actor", "asc"): "aa.admin_steam_id ASC, aa.created_at DESC, aa.id DESC",
+    ("time", "desc"): "{t}.created_at DESC, {t}.id DESC",
+    ("time", "asc"): "{t}.created_at ASC, {t}.id ASC",
+    ("action", "desc"): "{t}.action DESC, {t}.created_at DESC, {t}.id DESC",
+    ("action", "asc"): "{t}.action ASC, {t}.created_at DESC, {t}.id DESC",
+    ("actor", "desc"): "{t}.admin_steam_id DESC, {t}.created_at DESC, {t}.id DESC",
+    ("actor", "asc"): "{t}.admin_steam_id ASC, {t}.created_at DESC, {t}.id DESC",
 }
+# The column of the first sort key, for the key and its predicate.
+_MODLOG_SORT_COL = {"action": "action", "actor": "admin_steam_id"}
 _MODLOG_FILTERS = frozenset({"player", "action", "actor", "q", "since", "until", "sort", "dir",
-                             "limit", "offset", "include_reads"})
+                             "limit", "after", "include_reads"})
 _MODLOG_ADMIN_AUTH = frozenset({"admin_steam_id", "hmac_signature"})
 _MODLOG_STEAM_RE = _re.compile(r"[0-9]{17}\Z", _re.ASCII)
 _MODLOG_ACTOR_WORDS = {"system": "System", _modlog.ACTOR_INTERNAL_KEY: "Server tool",
@@ -26733,13 +26742,64 @@ def _modlog_parse(qp, allowed_extra=frozenset(), *, player_may_be_name=False) ->
     if (sort, direction) not in _MODLOG_ORDER:
         _modlog_bad("sort_invalid" if sort not in ("time", "action", "actor") else "dir_invalid")
     limit = _modlog_int(_modlog_one(qp, "limit"), "limit", 1, _MODLOG_LIMIT_MAX, _MODLOG_LIMIT_DEFAULT)
-    offset = _modlog_int(_modlog_one(qp, "offset"), "offset", 0, _MODLOG_OFFSET_MAX, 0)
     reads = (_modlog_one(qp, "include_reads") or "0").lower()
     if reads not in ("0", "1", "true", "false"):
         _modlog_bad("include_reads_invalid")
+    after = _modlog_unkey(_modlog_one(qp, "after"), sort, direction)
     return {"player": player, "actions": sorted(set(actions)), "actor": actor, "q": q,
             "since": since, "until": until, "sort": sort, "dir": direction, "limit": limit,
-            "offset": offset, "include_reads": reads in ("1", "true")}
+            "after": after, "include_reads": reads in ("1", "true")}
+
+
+def _modlog_key(f: dict, row) -> str:
+    """A row's page key: an opaque string of the read's sort and direction,
+    the row's value in the first sort column (none for time), its time and
+    its id."""
+    col = _MODLOG_SORT_COL.get(f["sort"])
+    at = row["created_at"]
+    raw = _json.dumps([f["sort"], f["dir"], row[col] if col else None,
+                       at.astimezone(timezone.utc).isoformat(), str(row["id"])],
+                      separators=(",", ":"), ensure_ascii=True)
+    return base64.urlsafe_b64encode(raw.encode("ascii")).decode("ascii").rstrip("=")
+
+
+def _modlog_unkey(raw, sort: str, direction: str):
+    """`after` checked: None when absent; (value, time, id) for a key this
+    read made for the same sort and direction; 422 otherwise."""
+    if raw is None or raw == "":
+        return None
+    if len(raw) > _MODLOG_KEY_MAX or not _re.fullmatch(r"[A-Za-z0-9_-]+", raw):
+        raise HTTPException(status_code=422, detail="after_invalid")
+    try:
+        k = _json.loads(base64.urlsafe_b64decode(raw + "=" * (-len(raw) % 4)).decode("ascii"))
+        k_sort, k_dir, value, at_raw, kid = k
+        at = datetime.fromisoformat(at_raw)
+        kid = str(uuid.UUID(kid))
+    except Exception:
+        raise HTTPException(status_code=422, detail="after_invalid")
+    if at.tzinfo is None or not isinstance(value, (str, type(None))) or \
+            (value is None) != (sort == "time"):
+        raise HTTPException(status_code=422, detail="after_invalid")
+    if (k_sort, k_dir) != (sort, direction):
+        raise HTTPException(status_code=422, detail="after_other_order")
+    return (value, at, kid)
+
+
+def _modlog_after_sql(f: dict) -> tuple[str, dict]:
+    """The rows after `f["after"]` in the read's order: a predicate on the
+    first sort column, then (created_at, id) in that column's tie order."""
+    if not f.get("after"):
+        return "TRUE", {}
+    value, at, kid = f["after"]
+    params = {"kat": at, "kid": kid}
+    if f["sort"] == "time":
+        op = "<" if f["dir"] == "desc" else ">"
+        return (f"(aa.created_at, aa.id) {op} (CAST(:kat AS timestamptz), CAST(:kid AS uuid))", params)
+    col = "aa." + _MODLOG_SORT_COL[f["sort"]]
+    op = "<" if f["dir"] == "desc" else ">"
+    params["kv"] = value
+    return (f"({col} {op} CAST(:kv AS text) OR ({col} = CAST(:kv AS text)"
+            f" AND (aa.created_at, aa.id) < (CAST(:kat AS timestamptz), CAST(:kid AS uuid))))", params)
 
 
 def _modlog_like(q: str) -> str:
@@ -26818,21 +26878,34 @@ async def _modlog_answer(db: AsyncSession, f: dict, player_row=None) -> dict:
     docstring for its keys)."""
     await db.execute(text("SET LOCAL statement_timeout = '5s'"))
     where, params = _modlog_where(f)
-    # counts_by_action counts ACTIONS: the parts of one action recorded in
-    # parts (fix A3) share one batch value and count once.
-    counts = (await db.execute(text(
-        "SELECT aa.action, COUNT(DISTINCT COALESCE(aa.details->>'batch', CAST(aa.id AS text))) AS n"
-        "  FROM admin_actions aa"
-        f" WHERE {where} GROUP BY aa.action ORDER BY 2 DESC, aa.action"
-    ), params)).all()
-    rows = (await db.execute(text(
-        "SELECT aa.id, aa.created_at, aa.action, aa.admin_steam_id, aa.affected_steam_ids,"
-        "       aa.reason, aa.details, aa.target_steam_id, aa.target_match_id, aa.target_series_id"
-        "  FROM admin_actions aa"
-        f" WHERE {where}"
-        f" ORDER BY {_MODLOG_ORDER[(f['sort'], f['dir'])]}"
-        " LIMIT CAST(:mlimit AS integer) OFFSET CAST(:moffset AS integer)"
-    ), {**params, "mlimit": f["limit"], "moffset": f["offset"]})).mappings().all()
+    after, aparams = _modlog_after_sql(f)
+    order = _MODLOG_ORDER[(f["sort"], f["dir"])]
+    # ONE statement (fix A7): the counts and the page read one snapshot.
+    # Per action: the records, and the actions (the parts of one action
+    # recorded in parts, fix A3, share one batch value and count once). The
+    # page fetches one row past the limit, to know whether a next page exists.
+    got = (await db.execute(text(
+        "WITH c AS (SELECT aa.action, COUNT(*) AS n_rows,"
+        "                  COUNT(DISTINCT COALESCE(aa.details->>'batch', CAST(aa.id AS text))) AS n_actions"
+        "             FROM admin_actions aa"
+        f"           WHERE {where} GROUP BY aa.action),"
+        "     p AS (SELECT aa.id, aa.created_at, aa.action, aa.admin_steam_id, aa.affected_steam_ids,"
+        "                  aa.reason, aa.details, aa.target_steam_id, aa.target_match_id,"
+        "                  aa.target_series_id"
+        "             FROM admin_actions aa"
+        f"           WHERE {where} AND {after}"
+        f"           ORDER BY {order.format(t='aa')}"
+        "            LIMIT CAST(:mlimit AS integer))"
+        " SELECT CAST((SELECT COALESCE(json_agg(json_build_array(c.action, c.n_rows, c.n_actions)"
+        "                                       ORDER BY c.n_actions DESC, c.action), '[]')"
+        "               FROM c) AS text) AS counts, p.*"
+        "   FROM (SELECT 1) one LEFT JOIN p ON TRUE"
+        f" ORDER BY {order.format(t='p')}"
+    ), {**params, **aparams, "mlimit": f["limit"] + 1})).mappings().all()
+    counts = [(a, int(nr), int(na)) for a, nr, na in _json.loads(got[0]["counts"])] if got else []
+    rows = [r for r in got if r["id"] is not None]
+    more = len(rows) > f["limit"]
+    rows = rows[:f["limit"]]
     sids, dids = set(), set()
     for r in rows:
         a = r["admin_steam_id"] or ""
@@ -26866,6 +26939,7 @@ async def _modlog_answer(db: AsyncSession, f: dict, player_row=None) -> dict:
         actor = r["admin_steam_id"] or "unknown"
         out.append({
             "id": str(r["id"]),
+            "key": _modlog_key(f, r),
             "at": r["created_at"].astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
                   if r["created_at"] else None,
             "action": r["action"],
@@ -26884,9 +26958,11 @@ async def _modlog_answer(db: AsyncSession, f: dict, player_row=None) -> dict:
             "details": details,
         })
     answer = {
-        "total": int(sum(int(n) for _, n in counts)),
-        "counts_by_action": [{"action": a, "label": _modlog.label(a), "count": int(n)} for a, n in counts],
-        "limit": f["limit"], "offset": f["offset"], "sort": f["sort"], "dir": f["dir"],
+        "total": sum(nr for _, nr, _ in counts),
+        "counts_by_action": [{"action": a, "label": _modlog.label(a), "count": na}
+                             for a, _, na in counts],
+        "limit": f["limit"], "sort": f["sort"], "dir": f["dir"],
+        "next": out[-1]["key"] if more and out else None,
         "rows": out,
     }
     if f["player"]:
@@ -26907,13 +26983,19 @@ async def admin_modlog(request: Request,
     (repeatable, words of modlog.ACTIONS), actor, q (at most 64 characters,
     case-insensitive, over the reason, the action's label and the details'
     text), since and until (ISO 8601), sort (time, action, actor), dir (asc,
-    desc), limit (1 to 100, default 50), offset (0 to 10000),
-    include_reads (the evidence report's read rows, left out unless 1).
-    Answer: total, counts_by_action [{action, label, count}], limit, offset,
-    sort, dir, rows [{id, at, action, action_label, actor, actor_name,
-    players [{steam_id, name}], reason, sentence, target_steam_id,
-    target_match_id, target_series_id, details}], and player {steam_id,
-    name} when filtered by one. Not recorded.
+    desc), limit (1 to 100, default 50), after (a row's `key`: the rows after
+    that row in this sort and direction; 422 for a key this read did not make
+    for them), include_reads (the evidence report's read rows, left out
+    unless 1). There is no position paging.
+    Answer: total (the records that match the filters, over all pages),
+    counts_by_action [{action, label, count}] (count: the ACTIONS of that
+    kind; an action recorded in parts counts once), limit, sort, dir, next
+    (the key for the next page, null on the last), rows [{id, key, at,
+    action, action_label, actor, actor_name, players [{steam_id, name}],
+    reason, sentence, part, target_steam_id, target_match_id,
+    target_series_id, details}], and player {steam_id, name} when filtered
+    by one. The total, the counts and the rows come from one statement, so
+    they describe the same moment. Not recorded.
 
     The two credential parameters are declared so the route names its
     signature like every ADMIN_SIGNED read (the read gate's class tests read
@@ -26938,7 +27020,8 @@ async def internal_modlog(request: Request,
     admin roster (403 refused otherwise, as the evidence report's routes).
     `player` may also be a player's exact display name (case-insensitive):
     404 player_not_found when none has it, 409 player_ambiguous when more
-    than one live account does. Same parameters and answer otherwise."""
+    than one live account does. Same parameters and answer otherwise
+    (pages by `after`, the answer's `next`; no position paging)."""
     _require_internal_key(x_internal_key)
     d = x_actor_discord_id or ""
     if not (1 <= len(d) <= 20 and d.isascii() and d.isdigit()):
