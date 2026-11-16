@@ -247,7 +247,7 @@ def test_words_that_name_no_player_are_called_without_players_and_420_agrees():
                     bad.append(f"{module}:{n.lineno}")
     assert not bad, bad
     sql = open(os.path.join(HERE, "..", "sql", "420_admin_actions_modlog.sql"), encoding="utf-8").read()
-    m = re.search(r"AND a\.action NOT IN \(([^)]*)\)", sql)
+    m = re.search(r"AND a\.action::text NOT IN \(([^)]*)\)", sql)
     assert m, "420's fill has no NOT IN list"
     assert set(re.findall(r"'([^']+)'", m.group(1))) == set(modlog.NAMES_NONE)
 

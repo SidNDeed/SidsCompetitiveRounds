@@ -16,15 +16,30 @@ and every name is invented. The admin routes' signature checks are replaced
 
 The mutants (search, one sort, the per-player filter) run each read check
 against a mutated read and require it to fail: each prints its red line.
+
+Migration 420 and its rollback run as files through psql on a second case
+schema of their own (the section "migration 420 as a file" at the end): under
+each session setting of SETTINGS, two first applies at once, two rollbacks
+at once, a session whose bare name admin_actions names a temporary table,
+the refusals, and one mutant per pinned line. The psql client:
+
+    MODLOG_TEST_PSQL / CF_PSQL   the psql client (else PATH, else C:/pg16)
 """
 import asyncio
 import hashlib
 import hmac
+import io
 import itertools
 import json
 import os
+import shutil
+import subprocess
 import sys
+import tempfile
 import uuid
+from urllib.parse import urlparse
+
+import asyncpg
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 API = os.path.normpath(os.path.join(HERE, "..", "api"))
@@ -767,3 +782,932 @@ def test_deletion_replaces_the_id_in_every_record_and_keeps_the_reason(case, adm
         assert by["chat_mute"]["reason"] == "said %s things" % gone     # free text is not rewritten
         assert (await _read(sm, player=gone))["total"] == 0
     _with_sm(case, body)
+
+
+# -- migration 420 as a file ---------------------------------------------------
+#
+# A second case schema of its own (no row the tests above write, none of the
+# 50,000 rows): 420's rollback, a seed written the old way, then 420 under the
+# server's defaults is the state every test below starts from and ends in.
+
+M420 = os.path.normpath(os.path.join(HERE, "..", "sql", "420_admin_actions_modlog.sql"))
+R420 = os.path.normpath(os.path.join(HERE, "..", "sql", "rollback_420_admin_actions_modlog.sql"))
+
+# Every session setting 420's result could follow. Each is set from OUTSIDE
+# the file (PGOPTIONS) for a run of the REAL file, with its verdict and why:
+#   "enters"     the setting would move the result; the line named pins it
+#   "no effect"  nothing the file parses, prints or compares follows it
+#   "refuses"    the file must end with an error, and nothing applied
+# "{schema}" is the case schema: the table's own schema, as public is on the
+# boxes.
+SETTINGS = [
+    ("defaults", (), "control",
+     "the server's defaults: the run every other row is compared with"),
+    ("quote_all_identifiers=on", (("quote_all_identifiers", "on"),), "enters",
+     "the deparser would quote the CHECK's column names and the file would refuse its own CHECK;"
+     " pinned off for the transaction in the head of 420's first block; types and the index are"
+     " compared by"
+     " identity, not text"),
+    ("search_path=schema,pg_catalog", (("search_path", "{schema},pg_catalog"),), "enters",
+     "every bare function, operator and table name would bind by this path, and the deparser"
+     " prints by it; 420 resolves the table by it, then pins pg_catalog, the table's schema,"
+     " pg_temp"),
+    ("search_path=schema,pg_catalog+shadows", (("search_path", "{schema},pg_catalog"),), "enters",
+     "as above, with a char_length(text) that answers 0 and an integer <= that answers true in"
+     " the table's schema: bound by the session's path, the CHECK would admit any length, and a"
+     " correct CHECK would deparse qualified and be refused"),
+    ("default_transaction_isolation=repeatable read",
+     (("default_transaction_isolation", "repeatable\\ read"),), "enters",
+     "a read after the lock would not see a concurrent run's commit; pinned by BEGIN ISOLATION"
+     " LEVEL READ COMMITTED (the two-run test runs under it too)"),
+    ("default_transaction_isolation=serializable",
+     (("default_transaction_isolation", "serializable"),), "enters", "as repeatable read"),
+    ("default_transaction_read_only=on", (("default_transaction_read_only", "on"),), "refuses",
+     "the transaction is read-only: 420's LOCK fails inside it and nothing is applied"),
+    ("IntervalStyle=iso_8601", (("IntervalStyle", "iso_8601"),), "no effect",
+     "no interval is printed or compared"),
+    ("DateStyle=SQL,DMY", (("DateStyle", "SQL,DMY"),), "no effect",
+     "no date or time is printed or compared"),
+    ("TimeZone=Pacific/Chatham", (("TimeZone", "Pacific/Chatham"),), "no effect",
+     "no time is printed, compared or computed"),
+    ("standard_conforming_strings=off", (("standard_conforming_strings", "off"),), "no effect",
+     "no literal holds a backslash (the tombstone test is starts_with(target, 'deleted_'))"),
+    ("extra_float_digits=3", (("extra_float_digits", "3"),), "no effect",
+     "no float is printed or compared"),
+    ("default path+plants=true", (), "enters",
+     "an `=` that answers true for each pair of PLANT_PAIRS in the table's schema: pg_catalog has no"
+     " `=` for exactly oid with regclass, regclass with regclass, oid with regtype or regnamespace,"
+     " varchar with varchar or text, text[] with text[], so such a plant is taken even with"
+     " pg_catalog first; 420 compares oid with oid and casts varchar to text"),
+    ("default path+plants=false", (), "enters", "as above, every plant answering false"),
+    ("search_path=schema,pg_catalog+plants=true", (("search_path", "{schema},pg_catalog"),), "enters",
+     "as above, with the table's schema searched first, so the plant on name with name is taken"
+     " too wherever the path is not pinned"),
+    ("search_path=schema,pg_catalog+plants=false", (("search_path", "{schema},pg_catalog"),), "enters",
+     "as above, every plant answering false"),
+]
+SETTING = {s[0]: s for s in SETTINGS}
+
+# The test's own reads compare only pairs pg_catalog has an exact operator
+# for (oid with oid, name with name, text with text), so the plants above
+# never move them.
+ROWS_SQL = ("SELECT coalesce(string_agg(format('%s/%s/%s', a.id, a.xmin, to_jsonb(a)), ' '"
+            " ORDER BY a.id), '') FROM admin_actions a")
+FILL_SQL = ("SELECT coalesce(string_agg(format('%s/%s/%s', a.id, a.affected_steam_ids,"
+            " coalesce(a.reason, '-')), ' ' ORDER BY a.id), '') FROM admin_actions a")
+CAT_SQL = (
+    "SELECT coalesce(string_agg(x, ' ' ORDER BY x), '') FROM ("
+    " SELECT 'class:' || c.relname::text || ':' || c.xmin::text AS x FROM pg_catalog.pg_class c"
+    "  WHERE c.oid = to_regclass('admin_actions')::oid"
+    "     OR c.oid = to_regclass('ix_admin_actions_affected')::oid"
+    " UNION ALL SELECT 'att:' || a.attname::text || ':' || a.xmin::text FROM pg_catalog.pg_attribute a"
+    "  WHERE a.attrelid = to_regclass('admin_actions')::oid AND a.attnum > 0"
+    " UNION ALL SELECT 'con:' || k.conname::text || ':' || k.xmin::text FROM pg_catalog.pg_constraint k"
+    "  WHERE k.conrelid = to_regclass('admin_actions')::oid"
+    " UNION ALL SELECT 'idx:' || i.indexrelid::text || ':' || i.xmin::text FROM pg_catalog.pg_index i"
+    "  WHERE i.indrelid = to_regclass('admin_actions')::oid"
+    " UNION ALL SELECT 'desc:' || d.objsubid::text || ':' || d.xmin::text"
+    "  FROM pg_catalog.pg_description d"
+    "  WHERE d.objoid = to_regclass('admin_actions')::oid"
+    "    AND d.classoid = 'pg_catalog.pg_class'::regclass::oid"
+    ") s")
+COLS_SQL = ("SELECT count(*) FROM pg_catalog.pg_attribute a"
+            " WHERE a.attrelid = to_regclass('admin_actions')::oid"
+            " AND a.attname IN ('affected_steam_ids', 'reason') AND NOT a.attisdropped")
+OBJS_SQL = ("SELECT (SELECT count(*) FROM pg_catalog.pg_constraint k"
+            "         WHERE k.conrelid = to_regclass('admin_actions')::oid"
+            "           AND k.conname = 'ck_admin_actions_reason_len')"
+            "     + (SELECT count(*) FROM pg_catalog.pg_class c"
+            "         WHERE c.oid = to_regclass('ix_admin_actions_affected')::oid)")
+# any relation of the index's name in the table's schema, whatever its shape
+IDX_ANY_SQL = ("SELECT count(*) FROM pg_catalog.pg_class c WHERE c.relname = 'ix_admin_actions_affected'"
+               " AND c.relnamespace = (SELECT t.relnamespace FROM pg_catalog.pg_class t"
+               "                        WHERE t.oid = to_regclass('admin_actions')::oid)")
+# the index by catalog identity: GIN, array_ops, one key column that is
+# affected_steam_ids, valid, no expression, no predicate
+IDX_SQL = (
+    "SELECT count(*) FROM pg_catalog.pg_index i"
+    "  JOIN pg_catalog.pg_class ic ON ic.oid = i.indexrelid"
+    "  JOIN pg_catalog.pg_am am ON am.oid = ic.relam"
+    "  JOIN pg_catalog.pg_opclass oc ON oc.oid = i.indclass[0]"
+    "  JOIN pg_catalog.pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = i.indkey[0]"
+    " WHERE i.indrelid = to_regclass('admin_actions')::oid AND ic.relname = 'ix_admin_actions_affected'"
+    "   AND am.amname = 'gin' AND oc.opcname = 'array_ops' AND i.indnatts = 1"
+    "   AND a.attname = 'affected_steam_ids' AND i.indisvalid"
+    "   AND i.indexprs IS NULL AND i.indpred IS NULL")
+
+_P = ["7656119000000000%d" % i for i in range(1, 7)]
+_U = "00000000-0000-0000-0000-0000000001%02d"
+# Rows written the old way (before 420's columns). Row 14 is the probe of the
+# tombstone test: its target begins "deleted" but not "deleted_".
+SEED_420 = """
+INSERT INTO players (id, steam_id, display_name) VALUES
+ ('00000000-0000-0000-0000-0000000000a1', '76561190000000001', 'Seed One'),
+ ('00000000-0000-0000-0000-0000000000a2', '76561190000000002', 'Seed Two'),
+ ('00000000-0000-0000-0000-0000000000a3', '76561190000000003', 'Seed Three'),
+ ('00000000-0000-0000-0000-0000000000a4', '76561190000000004', 'Seed Four'),
+ ('00000000-0000-0000-0000-0000000000a5', '76561190000000005', 'Seed Five'),
+ ('00000000-0000-0000-0000-0000000000a6', '76561190000000006', 'Seed Six'),
+ ('00000000-0000-0000-0000-0000000000a7', 'deleted_abc12345', '[Deleted User]');
+INSERT INTO ranked_series (id, player1_id, player2_id, p1_series_wins, p2_series_wins, status, created_at,
+                           live_p1_points, live_p2_points, is_tournament, is_private)
+VALUES ('00000000-0000-0000-0000-0000000000b1', '00000000-0000-0000-0000-0000000000a2',
+        '00000000-0000-0000-0000-0000000000a3', 2, 0, 'completed', NOW(), 0, 0, false, false),
+       ('00000000-0000-0000-0000-0000000000b2', '00000000-0000-0000-0000-0000000000a7',
+        '00000000-0000-0000-0000-0000000000a4', 2, 0, 'completed', NOW(), 0, 0, false, false);
+INSERT INTO team_series (id, t1a_id, t1b_id, t2a_id, t2b_id)
+VALUES ('00000000-0000-0000-0000-0000000000c1', '00000000-0000-0000-0000-0000000000a1',
+        '00000000-0000-0000-0000-0000000000a2', '00000000-0000-0000-0000-0000000000a3',
+        '00000000-0000-0000-0000-0000000000a4');
+INSERT INTO matches (id, player1_id, player2_id, p1_rounds_won, p2_rounds_won)
+VALUES ('00000000-0000-0000-0000-0000000000d1', '00000000-0000-0000-0000-0000000000a5',
+        '00000000-0000-0000-0000-0000000000a6', 3, 1);
+INSERT INTO chat_messages (id, source, display_name, message, steam_id)
+VALUES (900001, 'game', 'Seed Six', 'hello', '76561190000000006'),
+       (900002, 'game', 'gone', 'bye', 'deleted_abc12345');
+INSERT INTO admin_actions (id, admin_steam_id, action, target_steam_id, target_series_id, details) VALUES
+ ('00000000-0000-0000-0000-000000000101', '76561190000000099', 'ban', '76561190000000001', NULL, '{"reason": "cheating"}'),
+ ('00000000-0000-0000-0000-000000000102', '76561190000000099', 'unban', '76561190000000001', NULL, '{"rows": 1}'),
+ ('00000000-0000-0000-0000-000000000103', '76561190000000099', 'ban', 'deleted_abc12345', NULL, '{"reason": "old"}'),
+ ('00000000-0000-0000-0000-000000000104', '76561190000000099', 'reverse_series', NULL,
+  '00000000-0000-0000-0000-0000000000b1', '{"matches_reversed": 2}'),
+ ('00000000-0000-0000-0000-000000000105', '76561190000000099', 'reverse_series', NULL,
+  '00000000-0000-0000-0000-0000000000b2', '{}'),
+ ('00000000-0000-0000-0000-000000000106', 'internal-key', 'resolve_team_series', NULL,
+  '00000000-0000-0000-0000-0000000000c1', '{"action": "void"}'),
+ ('00000000-0000-0000-0000-000000000107', '76561190000000099', 'record_exclude', NULL, NULL,
+  '{"match_id": "00000000-0000-0000-0000-0000000000d1", "board": "*", "reason": "lag abuse"}'),
+ ('00000000-0000-0000-0000-000000000108', '76561190000000099', 'chat_delete', NULL, NULL, '{"message_id": 900001}'),
+ ('00000000-0000-0000-0000-000000000109', '76561190000000099', 'chat_delete', NULL, NULL, '{"message_ids": [900002]}'),
+ ('00000000-0000-0000-0000-000000000110', '76561190000000099', 'ban_rate_blocked', '76561190000000001', NULL,
+  '{"recent_bans": 5}'),
+ ('00000000-0000-0000-0000-000000000111', 'discord:1', 'chat_mute', '123', NULL, '{"reason": "spam"}'),
+ ('00000000-0000-0000-0000-000000000112', '76561190000000099', 'chat_mute', '76561190000000005', NULL,
+  jsonb_build_object('reason', repeat('x', 300))),
+ ('00000000-0000-0000-0000-000000000113', '76561190000000099', 'chat_lockdown', NULL, NULL, '{"locked": true}'),
+ ('00000000-0000-0000-0000-000000000114', '76561190000000099', 'reverse_series', 'deletedXnote',
+  '00000000-0000-0000-0000-0000000000b1', '{}');
+"""
+EXPECT_420 = [
+    (_U % 1, [_P[0]], "cheating"),
+    (_U % 2, [_P[0]], None),
+    (_U % 3, [], "old"),                       # a tombstone target keeps '{}'
+    (_U % 4, [_P[1], _P[2]], None),
+    (_U % 5, [_P[3]], None),                   # the deleted player is not named
+    (_U % 6, _P[:4], None),
+    (_U % 7, [_P[4], _P[5]], "lag abuse"),
+    (_U % 8, [_P[5]], None),
+    (_U % 9, [], None),                        # the author's account was deleted
+    (_U % 10, [], None),                       # a word that names no player
+    (_U % 11, [], "spam"),                     # not a 17-digit id
+    (_U % 12, [_P[4]], "x" * 256),             # the reason cut to 256
+    (_U % 13, [], None),
+    (_U % 14, [_P[1], _P[2]], None),           # "deletedX..." is no tombstone
+]
+
+
+def _psql_client():
+    for var in ("MODLOG_TEST_PSQL", "CF_PSQL"):
+        named = os.environ.get(var)
+        if named and (os.path.isfile(named) or shutil.which(named)):
+            return named
+    found = shutil.which("psql")
+    if found:
+        return found
+    fallback = "C:/pg16/pgsql/bin/psql.exe"
+    return fallback if os.path.isfile(fallback) else None
+
+
+def _psql_args(schema, settings=(), appname=None, tuples=False):
+    """psql with ON_ERROR_STOP, bound to the case schema by the startup
+    packet's search path; `settings` are further session settings given the
+    same way, from OUTSIDE the file (name, value; a later one wins)."""
+    psql = _psql_client()
+    assert psql is not None, "no psql client found (set MODLOG_TEST_PSQL or put psql on PATH)"
+    u = urlparse(lh.DSN)
+    opts = ["-c search_path=%s" % schema] + ["-c %s=%s" % (k, v.format(schema=schema))
+                                              for k, v in settings]
+    env = dict(os.environ, PGOPTIONS=" ".join(opts))
+    env.pop("PGAPPNAME", None)
+    if appname:
+        env["PGAPPNAME"] = appname
+    if u.password:
+        env["PGPASSWORD"] = u.password
+    args = [psql, "-X", "-q", "-w", "-v", "ON_ERROR_STOP=1", "-h", u.hostname or "localhost",
+            "-p", str(u.port or 5432), "-d", u.path.lstrip("/")]
+    if u.username:
+        args += ["-U", u.username]
+    if tuples:
+        args += ["-A", "-t"]
+    return args, env
+
+
+def _psql_apply(schema, path, settings=(), prefix=""):
+    """The file on psql's stdin (after `prefix`): (exit code, stderr)."""
+    args, env = _psql_args(schema, settings)
+    with open(path, "rb") as fh:
+        data = prefix.encode("utf-8") + fh.read()
+    p = subprocess.run(args, input=data, env=env, capture_output=True, timeout=180)
+    return p.returncode, p.stderr.decode("utf-8", "replace")
+
+
+def _variant(path, old, new):
+    """A copy of the file at `path` with the one occurrence of `old` replaced."""
+    src = io.open(path, encoding="utf-8").read()
+    assert src.count(old) == 1, ("the mutant's text is not in the file exactly once", old)
+    fd, out = tempfile.mkstemp(prefix="modlog420_", suffix=".sql")
+    with io.open(fd, "w", encoding="utf-8", newline="") as fh:
+        fh.write(src.replace(old, new))
+    return out
+
+
+def _fetch(schema, sql):
+    async def go():
+        c = await harness.connect_bound(lh.DSN, schema)
+        try:
+            return await c.fetchval(sql)
+        finally:
+            await c.close()
+    return _run(go())
+
+
+def _exec(schema, sql):
+    async def go():
+        c = await harness.connect_bound(lh.DSN, schema)
+        try:
+            await c.execute(sql)
+        finally:
+            await c.close()
+    _run(go())
+
+
+def _snap(schema):
+    """(every admin_actions row with its xmin, the table's catalog rows with
+    theirs): equal before and after a run = the run wrote no row."""
+    async def go():
+        c = await harness.connect_bound(lh.DSN, schema)
+        try:
+            return (await c.fetchval(ROWS_SQL), await c.fetchval(CAT_SQL))
+        finally:
+            await c.close()
+    return _run(go())
+
+
+def _seed_rows(schema):
+    async def go():
+        c = await harness.connect_bound(lh.DSN, schema)
+        try:
+            return [(r["id"], list(r["affected_steam_ids"]), r["reason"]) for r in await c.fetch(
+                "SELECT id::text AS id, affected_steam_ids, reason FROM admin_actions ORDER BY id")]
+        finally:
+            await c.close()
+    return _run(go())
+
+
+def _reason_verdicts(schema):
+    """What the table does with a reason of 257 and 256 characters and none."""
+    async def go():
+        c = await harness.connect_bound(lh.DSN, schema)
+        out = {}
+        try:
+            for label, value in (("257", "r" * 257), ("256", "r" * 256), ("null", None)):
+                tr = c.transaction()
+                await tr.start()
+                try:
+                    await c.execute(
+                        "INSERT INTO admin_actions (admin_steam_id, action, details, reason)"
+                        " VALUES ('76561190000000099', 'chat_mute', '{}'::jsonb, $1::text)", value)
+                    out[label] = "admitted"
+                except asyncpg.exceptions.CheckViolationError:
+                    out[label] = "refused"
+                finally:
+                    await tr.rollback()
+        finally:
+            await c.close()
+        return out
+    return _run(go())
+
+
+def _plant_of(name):
+    """The objects an entry of SETTINGS plants in the table's own schema."""
+    for kind in ("shadows", "plants=true", "plants=false"):
+        if name.endswith("+" + kind):
+            return kind
+    return None
+
+
+# The pairs of argument types that pg_catalog has no `=` for exactly (it
+# compares them through a cast), so an exact `=` in a schema on the path is
+# taken for them; and name with name, which pg_catalog has, so a plant is
+# taken only when the path searches the table's schema before pg_catalog.
+PLANT_PAIRS = [("oid", "regclass"), ("regclass", "oid"), ("regclass", "regclass"),
+               ("oid", "regtype"), ("oid", "regnamespace"), ("name", "name"),
+               ("varchar", "varchar"), ("text", "varchar"), ("varchar", "text"),
+               ("text[]", "text[]")]
+
+
+def _plant(schema, kind, on):
+    """kind "shadows": a char_length(text) that answers 0 and an integer <=
+    that answers true. kind "plants=true" / "plants=false": an `=` for each
+    pair of PLANT_PAIRS that always answers true / false. All in the table's
+    own schema."""
+    s = harness.quoted(schema)
+    if kind == "shadows":
+        if on:
+            _exec(schema, (
+                "CREATE FUNCTION {s}.char_length(text) RETURNS integer LANGUAGE sql IMMUTABLE"
+                " AS 'SELECT 0';"
+                " CREATE FUNCTION {s}.modlog_le_true(integer, integer) RETURNS boolean LANGUAGE sql"
+                " IMMUTABLE AS 'SELECT true';"
+                " CREATE OPERATOR {s}.<= (LEFTARG = integer, RIGHTARG = integer,"
+                " FUNCTION = {s}.modlog_le_true)").format(s=s))
+        else:
+            _exec(schema, (
+                "DROP OPERATOR IF EXISTS {s}.<= (integer, integer);"
+                " DROP FUNCTION IF EXISTS {s}.modlog_le_true(integer, integer);"
+                " DROP FUNCTION IF EXISTS {s}.char_length(text)").format(s=s))
+        return
+    answer = kind.split("=")[1]
+    sql = []
+    for i, (left, right) in enumerate(PLANT_PAIRS):
+        if on:
+            sql.append("CREATE FUNCTION {s}.modlog_eq_{i}({l}, {r}) RETURNS boolean LANGUAGE sql"
+                       " IMMUTABLE AS 'SELECT {a}'; CREATE OPERATOR {s}.= (LEFTARG = {l},"
+                       " RIGHTARG = {r}, FUNCTION = {s}.modlog_eq_{i});"
+                       .format(s=s, i=i, l=left, r=right, a=answer))
+        else:
+            sql.append("DROP OPERATOR IF EXISTS {s}.= ({l}, {r});"
+                       " DROP FUNCTION IF EXISTS {s}.modlog_eq_{i}({l}, {r});"
+                       .format(s=s, i=i, l=left, r=right))
+    _exec(schema, " ".join(sql))
+
+
+def _restore(schema, plant=None):
+    """Back to the state every test starts from: 420 applied under the
+    server's defaults. Planted operators go first; shadows go after the
+    rollback (a CHECK a mutant bound to a shadow depends on it)."""
+    if plant in ("plants=true", "plants=false"):
+        _plant(schema, plant, False)
+    rc, err = _psql_apply(schema, R420)
+    assert rc == 0, err
+    if plant == "shadows":
+        _plant(schema, plant, False)
+    rc, err = _psql_apply(schema, M420)
+    assert rc == 0, err
+
+
+
+def _tail(err):
+    return " ".join(err.split())[-400:]
+
+
+@pytest.fixture(scope="module")
+def mcase():
+    lh._require_live_pg()
+    built = {}
+
+    async def build():
+        c = harness.CaseSchema(lh.DSN, "modlogm")
+        await c.__aenter__()
+        try:
+            await lh._build(c)
+        except BaseException:
+            await c.__aexit__(None, None, None)
+            raise
+        built.update(schema=c.schema, own=c.own)
+        await c.conn.close()
+    _run(build())
+    try:
+        yield built["schema"]
+    finally:
+        async def drop():
+            conn = await harness.connect_bound(lh.DSN, built["schema"])
+            try:
+                await harness.drop_case_schema(conn, built["schema"], built["own"])
+            finally:
+                await conn.close()
+        _run(drop())
+
+
+@pytest.fixture(scope="module")
+def m420(mcase):
+    """The rollback, the seed written the old way, 420 under the defaults;
+    the fills read back against what each row names. Answers the fills'
+    text, which every run under a setting must give again."""
+    rc, err = _psql_apply(mcase, R420)
+    assert rc == 0, err
+    _exec(mcase, SEED_420)
+    rc, err = _psql_apply(mcase, M420)
+    assert rc == 0, err
+    assert _seed_rows(mcase) == EXPECT_420
+    return _fetch(mcase, FILL_SQL)
+
+
+def _rolled_back_failures(schema, label):
+    """After a rollback: the two columns, the check and the index are gone
+    (by catalog identity), and a row in the shape the api before 420 writes
+    is admitted."""
+    fails = []
+    if _fetch(schema, COLS_SQL) != 0:
+        fails.append(label + "-LEFT-COLUMNS")
+    if _fetch(schema, OBJS_SQL) != 0 or _fetch(schema, IDX_ANY_SQL) != 0:
+        fails.append(label + "-LEFT-INDEX-OR-CHECK")
+    try:
+        _exec(schema, "BEGIN; INSERT INTO admin_actions (admin_steam_id, action, details)"
+                      " VALUES ('76561190000000099', 'chat_mute', '{}'::jsonb); ROLLBACK")
+    except Exception as e:   # noqa: BLE001 - the label carries it
+        fails.append(label + "-OLD-SHAPE-INSERT-REFUSED %s" % e)
+    return fails
+
+
+def _settings_failures(schema, s0, settings, verdict, plant=None, path=M420, rpath=R420):
+    """The REAL files (or those at `path` / `rpath`) under `settings`, from
+    the state "420 applied under the defaults": an apply over that result;
+    then the rollback, a first apply and an apply again; then the rollback
+    and a rollback again. Answers the labelled failures (empty = as the
+    verdict says)."""
+    fails = []
+    try:
+        if plant:
+            _plant(schema, plant, True)
+        before = _snap(schema)
+        rc, err = _psql_apply(schema, path, settings)
+        if verdict == "refuses":
+            if rc == 0 or "read-only transaction" not in err:
+                fails.append("SECOND-APPLY-NOT-REFUSED rc=%s %s" % (rc, _tail(err)))
+            if _snap(schema) != before:
+                fails.append("SECOND-APPLY-CHANGED")
+            rc, err = _psql_apply(schema, rpath, settings)
+            if rc == 0 or "read-only transaction" not in err:
+                fails.append("ROLLBACK-NOT-REFUSED rc=%s %s" % (rc, _tail(err)))
+            if _snap(schema) != before or _fetch(schema, IDX_SQL) != 1:
+                fails.append("ROLLBACK-CHANGED")
+            rc, err = _psql_apply(schema, R420)
+            assert rc == 0, err
+            before = _snap(schema)
+            rc, err = _psql_apply(schema, path, settings)
+            if rc == 0 or "read-only transaction" not in err:
+                fails.append("FIRST-APPLY-NOT-REFUSED rc=%s %s" % (rc, _tail(err)))
+            if _snap(schema) != before:
+                fails.append("FIRST-APPLY-CHANGED")
+            if _fetch(schema, COLS_SQL) != 0 or _fetch(schema, OBJS_SQL) != 0:
+                fails.append("FIRST-APPLY-LEFT-OBJECTS")
+            return fails
+        if rc != 0:
+            fails.append("SECOND-APPLY-RC rc=%s %s" % (rc, _tail(err)))
+        elif _snap(schema) != before:
+            fails.append("SECOND-APPLY-CHANGED")
+        rc, err = _psql_apply(schema, rpath, settings)
+        if rc != 0:
+            fails.append("ROLLBACK-RC rc=%s %s" % (rc, _tail(err)))
+        fails += _rolled_back_failures(schema, "ROLLBACK")
+        if fails and any(f.startswith("ROLLBACK") for f in fails):
+            return fails
+        rc, err = _psql_apply(schema, path, settings)
+        if rc != 0:
+            fails.append("FIRST-APPLY-RC rc=%s %s" % (rc, _tail(err)))
+            return fails
+        if _fetch(schema, FILL_SQL) != s0:
+            fails.append("FILL-DIFFERS")
+        verdicts = _reason_verdicts(schema)
+        if verdicts != {"257": "refused", "256": "admitted", "null": "admitted"}:
+            fails.append("CHECK-BEHAVIOUR %r" % (verdicts,))
+        if _fetch(schema, IDX_SQL) != 1:
+            fails.append("INDEX-IDENTITY")
+        before = _snap(schema)
+        rc, err = _psql_apply(schema, path, settings)
+        if rc != 0:
+            fails.append("RERUN-RC rc=%s %s" % (rc, _tail(err)))
+        elif _snap(schema) != before:
+            fails.append("RERUN-CHANGED")
+        rc, err = _psql_apply(schema, rpath, settings)
+        if rc != 0:
+            fails.append("LAST-ROLLBACK-RC rc=%s %s" % (rc, _tail(err)))
+        fails += _rolled_back_failures(schema, "LAST-ROLLBACK")
+        before = _snap(schema)
+        rc, err = _psql_apply(schema, rpath, settings)
+        if rc != 0:
+            fails.append("ROLLBACK-RERUN-RC rc=%s %s" % (rc, _tail(err)))
+        elif _snap(schema) != before:
+            fails.append("ROLLBACK-RERUN-CHANGED")
+        return fails
+    finally:
+        _restore(schema, plant=plant)
+
+
+@pytest.mark.parametrize("name,settings,verdict,why", SETTINGS, ids=[s[0] for s in SETTINGS])
+def test_420_gives_one_result_under_each_session_setting(mcase, m420, name, settings, verdict, why,
+                                                        capsys):
+    """The ONE generated test: the real file and the real rollback under each
+    setting of SETTINGS. An apply over the defaults' result, a first apply
+    and an apply again all end rc 0; neither later apply changes an
+    admin_actions row or a catalog row of the table; the fills are the
+    defaults' fills; a reason of 257 characters is refused, 256 and NULL
+    admitted; the index is GIN on the column by catalog identity. The
+    rollback ends rc 0 with both columns, the check and the index gone (by
+    catalog identity) and a row of the old shape admitted, and a rollback
+    again changes nothing. Under a read-only default each file ends with an
+    error and nothing is applied or dropped."""
+    fails = _settings_failures(mcase, m420, settings, verdict, plant=_plant_of(name))
+    with capsys.disabled():
+        print("\nMODLOG-SETTING %s [%s] %s" % (name, verdict, fails or "as the verdict says"))
+    assert not fails, "%s (%s): %s" % (name, why, fails)
+
+
+_QAI_PIN = ("  PERFORM pg_catalog.set_config('quote_all_identifiers', 'off', true);"
+            "   -- the CHECK's deparsed text is compared below\n")
+_PATH_PIN = ("  PERFORM pg_catalog.set_config('search_path',\n"
+             "    pg_catalog.format('pg_catalog, %I, pg_temp', nsp), true);   -- names bind as written\n")
+_TOMB = "NOT pg_catalog.starts_with(a.target_steam_id::text, 'deleted_')"
+_OID_IDENTITY = ("  IF pg_catalog.to_regclass('admin_actions')::oid IS DISTINCT FROM tbl THEN"
+                 "   -- the bare name names the same table\n")
+_TBL_OID = ("  tbl pg_catalog.oid := pg_catalog.to_regclass(\n"
+            "    pg_catalog.format('%I.admin_actions', pg_catalog.current_schema()))::pg_catalog.oid;\n")
+_CHAT_JOIN = "JOIN players p ON p.steam_id::text = cm.steam_id::text"
+
+
+@pytest.mark.parametrize("pin,old,new,setting,expect", [
+    ("quote_all_identifiers off", _QAI_PIN, "", "quote_all_identifiers=on",
+     ("SECOND-APPLY-RC", "FIRST-APPLY-RC")),
+    ("the search path pinned", _PATH_PIN, "", "search_path=schema,pg_catalog+shadows",
+     ("SECOND-APPLY-RC", "CHECK-BEHAVIOUR")),
+    ("the tombstone test without a backslash", _TOMB, "a.target_steam_id::text NOT LIKE 'deleted\\_%'",
+     "standard_conforming_strings=off", ("FILL-DIFFERS",)),
+    ("the table's identity held as an oid", _TBL_OID,
+     "  tbl pg_catalog.regclass := pg_catalog.to_regclass(\n"
+     "    pg_catalog.format('%I.admin_actions', pg_catalog.current_schema()));\n",
+     "default path+plants=false", ("SECOND-APPLY-RC",)),
+    ("varchar ids compared as text", _CHAT_JOIN, "JOIN players p ON p.steam_id = cm.steam_id",
+     "default path+plants=false", ("FILL-DIFFERS",)),
+], ids=["quote_all_identifiers", "search_path", "tombstone_literal", "oid_identity", "varchar_as_text"])
+def test_mutant_420_without_its_pin_is_red_under_its_setting(mcase, m420, pin, old, new, setting,
+                                                            expect, capsys):
+    """One mutant per pinned line of the settings list: the file without that
+    line, run under the setting the line pins, fails the generated test for
+    the line's stated reason (the control is the generated test itself)."""
+    path = _variant(M420, old, new)
+    try:
+        s = SETTING[setting]
+        fails = _settings_failures(mcase, m420, s[1], s[2], plant=_plant_of(setting), path=path)
+    finally:
+        os.unlink(path)
+    with capsys.disabled():
+        print("\nMODLOG-MUTANT %s under %s: %s" % (pin, setting, fails))
+    for label in expect:
+        assert any(f.startswith(label) for f in fails), (label, fails)
+
+
+_R_DROP_REASON = "ALTER TABLE admin_actions DROP COLUMN IF EXISTS reason;\n"
+_R_POST = "-- Its own result: each of the four is gone"
+
+
+def test_the_rollback_refuses_to_end_with_an_object_standing(mcase, m420, capsys):
+    """The rollback's own check of its result: a rollback whose drop of the
+    reason column is cut ends in an error with nothing dropped (the control);
+    the same file without the check ends rc 0 with the column standing (the
+    mutant, red)."""
+    cut = _variant(R420, _R_DROP_REASON, "")
+    src = io.open(cut, encoding="utf-8").read()
+    start, end = src.index(_R_POST), src.index("END $post420r$;") + len("END $post420r$;")
+    fd, nocheck = tempfile.mkstemp(prefix="modlog420_", suffix=".sql")
+    with io.open(fd, "w", encoding="utf-8", newline="") as fh:
+        fh.write(src[:start] + src[end:])
+    try:
+        before = _snap(mcase)
+        rc, err = _psql_apply(mcase, cut)
+        control = (rc, "still standing after the drops: column reason" in err, _snap(mcase) == before)
+        rc2, err2 = _psql_apply(mcase, nocheck)
+        mutant = (rc2, _fetch(mcase, COLS_SQL))
+    finally:
+        os.unlink(cut)
+        os.unlink(nocheck)
+        _restore(mcase)
+    with capsys.disabled():
+        print("\nMODLOG-ROLLBACK-SELF-CHECK control (rc, named, nothing dropped)=%r;"
+              " MODLOG-MUTANT without the check (rc, columns standing)=%r" % (control, mutant))
+    assert control[0] != 0 and control[1] and control[2], (control, _tail(err))
+    assert mutant == (0, 1), "the mutant without the check must end rc 0 with reason standing"
+
+
+# -- two runs at once ------------------------------------------------------------
+
+def _without_commit(path):
+    src = io.open(path, encoding="utf-8").read()
+    body, tail = src.rstrip().rsplit("\n", 1)
+    assert tail.strip() == "COMMIT;", tail
+    return body + "\n"
+
+
+async def _wait_for_lock_wait(obs, appname, limit_s=10.0):
+    """True once the session named `appname` waits on a lock."""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + limit_s
+    while loop.time() < deadline:
+        if await obs.fetchval(
+                "SELECT count(*) FROM pg_stat_activity WHERE application_name = $1"
+                " AND wait_event_type = 'Lock'", appname):
+            return True
+        await asyncio.sleep(0.05)
+    return False
+
+
+async def _two_runs(schema, path, settings=()):
+    """Run A (psql) runs the file at `path` up to its last line, COMMIT, then
+    reads the rows and the catalog on its OWN connection into a file; run B
+    (psql, the whole file) starts and is observed waiting on a lock; then A
+    commits and B ends."""
+    loop = asyncio.get_running_loop()
+    tmp = tempfile.mkdtemp(prefix="modlog420_")
+    snap = os.path.join(tmp, "a_snap.txt").replace("\\", "/")
+    a_out_path, a_err_path = os.path.join(tmp, "a_out.txt"), os.path.join(tmp, "a_err.txt")
+    out = {}
+    obs = await harness.connect_bound(lh.DSN, schema)
+    a = b = None
+    a_out, a_err = open(a_out_path, "wb"), open(a_err_path, "wb")
+    try:
+        out["pre"] = (await obs.fetchval(ROWS_SQL), await obs.fetchval(CAT_SQL))
+        args, env = _psql_args(schema, settings, appname="modlog_a_" + uuid.uuid4().hex[:8], tuples=True)
+        a = subprocess.Popen(args, stdin=subprocess.PIPE, stdout=a_out, stderr=a_err, env=env)
+        a.stdin.write((_without_commit(path) + "\\o '%s'\n" % snap + ROWS_SQL + ";\n" + CAT_SQL
+                       + ";\n\\qecho A-SNAP-END\n\\o\n").encode("utf-8"))
+        a.stdin.flush()
+        deadline, text_ = loop.time() + 60, ""
+        while loop.time() < deadline:
+            if os.path.exists(snap):
+                text_ = io.open(snap, encoding="utf-8").read()
+                if "A-SNAP-END" in text_:
+                    break
+            if a.poll() is not None:
+                break
+            await asyncio.sleep(0.05)
+        lines = text_.splitlines()
+        out["a_ready"] = len(lines) >= 3 and lines[2] == "A-SNAP-END"
+        if out["a_ready"]:
+            out["a_own"] = (lines[0], lines[1])
+            appname = "modlog_b_" + uuid.uuid4().hex[:8]
+            bargs, benv = _psql_args(schema, settings, appname=appname)
+            with open(path, "rb") as fh:
+                b = subprocess.Popen(bargs, stdin=fh, env=benv, stdout=subprocess.PIPE,
+                                     stderr=subprocess.PIPE)
+            out["b_waited"] = await _wait_for_lock_wait(obs, appname)
+        if a.poll() is None:
+            a.stdin.write(b"COMMIT;\n")
+            a.stdin.close()
+        out["a_rc"] = await loop.run_in_executor(None, lambda: a.wait(timeout=60))
+        if b is not None:
+            _o, e = await loop.run_in_executor(None, lambda: b.communicate(timeout=60))
+            out["b"] = (b.returncode, e.decode("utf-8", "replace"))
+        out["after"] = (await obs.fetchval(ROWS_SQL), await obs.fetchval(CAT_SQL))
+    except BaseException:
+        for p in (a, b):
+            if p is not None and p.poll() is None:
+                p.kill()
+        raise
+    finally:
+        await obs.close()
+        a_out.close()
+        a_err.close()
+    out["a_err"] = io.open(a_err_path, encoding="utf-8", errors="replace").read()
+    for f in (snap, a_out_path, a_err_path):
+        if os.path.exists(f):
+            os.unlink(f)
+    os.rmdir(tmp)
+    return out
+
+
+def _two_run_failures(out):
+    fails = []
+    if not out.get("a_ready"):
+        fails.append("A-NOT-READY %s" % _tail(out.get("a_err", "")))
+        return fails
+    if not out.get("b_waited"):
+        fails.append("B-NOT-WAITED")
+    if out.get("a_rc") != 0:
+        fails.append("A-RC rc=%s %s" % (out.get("a_rc"), _tail(out.get("a_err", ""))))
+    b_rc, b_err = out.get("b", (None, ""))
+    if b_rc != 0:
+        fails.append("B-RC rc=%s %s" % (b_rc, _tail(b_err)))
+    if out["after"][0] != out["a_own"][0]:
+        fails.append("B-CHANGED-ROWS")
+    if out["after"][1] != out["a_own"][1]:
+        fails.append("B-CHANGED-CATALOG")
+    if out["a_own"] == out["pre"]:
+        fails.append("A-CHANGED-NOTHING")
+    return fails
+
+
+def _first_applies_failures(schema, s0, path, settings=()):
+    """Two first applies of the file at `path` at once (after the rollback);
+    the rows and the catalog as A leaves them, read on A's own connection
+    before its COMMIT, against the same after B."""
+    rc, err = _psql_apply(schema, R420)
+    assert rc == 0, err
+    try:
+        fails = _two_run_failures(_run(_two_runs(schema, path, settings)))
+        if _fetch(schema, COLS_SQL) != 2:
+            fails.append("COLUMNS-MISSING")
+        elif _fetch(schema, FILL_SQL) != s0:
+            fails.append("FILL-DIFFERS")
+        return fails
+    finally:
+        _restore(schema)
+
+
+ISOLATIONS = [
+    ("default", ()),
+    ("repeatable read", (("default_transaction_isolation", "repeatable\\ read"),)),
+    ("serializable", (("default_transaction_isolation", "serializable"),)),
+]
+
+
+@pytest.mark.parametrize("label,settings", ISOLATIONS, ids=[i[0] for i in ISOLATIONS])
+def test_two_first_applies_of_420_at_once_end_as_two_in_sequence(mcase, m420, label, settings, capsys):
+    """Class 1: the lock first and every precondition read under it, at READ
+    COMMITTED whatever the session's default. B waits on the lock A holds;
+    both end rc 0; B changes no row and no catalog row of the table (the
+    rows and the catalog as A left them, read on A's own connection before
+    its COMMIT)."""
+    fails = _first_applies_failures(mcase, m420, M420, settings)
+    with capsys.disabled():
+        print("\nMODLOG-TWO-APPLIES %s: %s" % (label, fails or "both rc 0, B changed nothing"))
+    assert not fails, fails
+
+
+_LOCK_FIRST = "  LOCK TABLE admin_actions IN ACCESS EXCLUSIVE MODE;   -- every read below runs under it\n"
+_BEGIN_RC = "BEGIN ISOLATION LEVEL READ COMMITTED;   -- reads after the lock see a concurrent run's commit\n"
+
+
+@pytest.mark.parametrize("pin,old,new,isolation", [
+    ("the lock first", _LOCK_FIRST, "", "default"),
+    ("BEGIN ISOLATION LEVEL READ COMMITTED", _BEGIN_RC, "BEGIN;\n", "repeatable read"),
+], ids=["lock_first", "read_committed"])
+def test_mutant_420_without_its_pin_fails_the_second_of_two_applies(mcase, m420, pin, old, new,
+                                                                   isolation, capsys):
+    """Without the lock first, B reads before A commits; without READ
+    COMMITTED, under a repeatable read default, B's reads after the lock keep
+    the snapshot taken before it. Either way B does not see A's columns and
+    ends in an error: it adds a column A added ("already exists"), or, at
+    repeatable read, it sees A's index (a catalog lookup, which reads the
+    latest commit) but not A's column, and refuses the index as not the one
+    420 creates."""
+    path = _variant(M420, old, new)
+    try:
+        fails = _first_applies_failures(mcase, m420, path, dict(ISOLATIONS)[isolation])
+    finally:
+        os.unlink(path)
+    with capsys.disabled():
+        print("\nMODLOG-MUTANT %s under %s: %s" % (pin, isolation, fails))
+    assert any(f.startswith("B-RC") and ("already exists" in f or "is not the GIN index" in f)
+               for f in fails), fails
+
+
+def _rollbacks_failures(schema, path):
+    """Two rollbacks (the file at `path`) at once, from 420 applied."""
+    try:
+        fails = _two_run_failures(_run(_two_runs(schema, path)))
+        if _fetch(schema, COLS_SQL) != 0 or _fetch(schema, OBJS_SQL) != 0:
+            fails.append("LEFT-OBJECTS")
+        return fails
+    finally:
+        _restore(schema)
+
+
+def test_two_rollbacks_of_420_at_once_both_end_rc_0(mcase, m420, capsys):
+    fails = _rollbacks_failures(mcase, R420)
+    with capsys.disabled():
+        print("\nMODLOG-TWO-ROLLBACKS: %s" % (fails or "both rc 0, B changed nothing"))
+    assert not fails, fails
+
+
+@pytest.mark.parametrize("old,new", [
+    ("DROP INDEX IF EXISTS ix_admin_actions_affected;", "DROP INDEX ix_admin_actions_affected;"),
+    ("DROP CONSTRAINT IF EXISTS ck_admin_actions_reason_len;", "DROP CONSTRAINT ck_admin_actions_reason_len;"),
+    ("DROP COLUMN IF EXISTS affected_steam_ids;", "DROP COLUMN affected_steam_ids;"),
+    ("DROP COLUMN IF EXISTS reason;", "DROP COLUMN reason;"),
+], ids=["index", "constraint", "affected_steam_ids", "reason"])
+def test_mutant_the_rollback_without_an_if_exists_fails_the_second_run(mcase, m420, old, new, capsys):
+    path = _variant(R420, old, new)
+    try:
+        fails = _rollbacks_failures(mcase, path)
+    finally:
+        os.unlink(path)
+    with capsys.disabled():
+        print("\nMODLOG-MUTANT rollback %r: %s" % (new, fails))
+    assert any(f.startswith("B-RC") and "does not exist" in f for f in fails), fails
+
+
+# -- the bare name, a temporary table of the name, the refusals ---------------------
+
+_TEMP = "CREATE TEMP TABLE admin_actions (id integer);\n"
+_PG_TEMP_LAST = "pg_catalog.format('pg_catalog, %I, pg_temp', nsp), true);   -- names bind as written"
+_SAME_TABLE = ("  IF pg_catalog.to_regclass('admin_actions')::oid IS DISTINCT FROM tbl THEN"
+               "   -- the bare name names the same table\n"
+               "    RAISE EXCEPTION '420: the name admin_actions resolves to %, not %; nothing changed',\n"
+               "      coalesce(pg_catalog.to_regclass('admin_actions')::text, 'nothing'), tbl::regclass;\n"
+               "  END IF;\n")
+
+
+def _temp_failures(schema, s0, path):
+    """A first apply and an apply again in sessions that hold a temporary
+    table named admin_actions (which a path without pg_temp searches first)."""
+    rc, err = _psql_apply(schema, R420)
+    assert rc == 0, err
+    fails = []
+    try:
+        before = _snap(schema)
+        rc, err = _psql_apply(schema, path, prefix=_TEMP)
+        if rc != 0:
+            fails.append("FIRST-APPLY-RC rc=%s %s" % (rc, _tail(err)))
+            if _snap(schema) != before:
+                fails.append("REFUSAL-CHANGED")
+            return fails
+        if _fetch(schema, FILL_SQL) != s0:
+            fails.append("FILL-DIFFERS")
+        before = _snap(schema)
+        rc, err = _psql_apply(schema, path, prefix=_TEMP)
+        if rc != 0:
+            fails.append("RERUN-RC rc=%s %s" % (rc, _tail(err)))
+        elif _snap(schema) != before:
+            fails.append("RERUN-CHANGED")
+        return fails
+    finally:
+        _restore(schema)
+
+
+def test_420_applies_to_its_own_table_beside_a_temporary_table_of_the_name(mcase, m420, capsys):
+    """Class 3: pg_temp searched last, and the bare name checked to be the
+    table resolved first."""
+    fails = _temp_failures(mcase, m420, M420)
+    with capsys.disabled():
+        print("\nMODLOG-TEMP-TABLE: %s" % (fails or "rc 0 twice, the fills as the defaults'"))
+    assert not fails, fails
+
+
+def test_mutant_the_path_without_pg_temp_is_refused_by_the_same_table_check(mcase, m420, capsys):
+    path = _variant(M420, _PG_TEMP_LAST, _PG_TEMP_LAST.replace(", pg_temp'", "'"))
+    try:
+        fails = _temp_failures(mcase, m420, path)
+    finally:
+        os.unlink(path)
+    with capsys.disabled():
+        print("\nMODLOG-MUTANT path without pg_temp: %s" % fails)
+    assert any(f.startswith("FIRST-APPLY-RC") and "the name admin_actions resolves to" in f
+               for f in fails), fails
+    assert "REFUSAL-CHANGED" not in fails
+
+
+def test_mutant_without_the_same_table_check_the_cause_goes_unnamed(mcase, m420, capsys):
+    """The same-table line removed as well: the run still fails, but later
+    (the post-check, after a lock of the temporary table and writes to it),
+    and no line names the cause."""
+    p1 = _variant(M420, _PG_TEMP_LAST, _PG_TEMP_LAST.replace(", pg_temp'", "'"))
+    try:
+        p2 = _variant(p1, _SAME_TABLE, "")
+    finally:
+        os.unlink(p1)
+    try:
+        fails = _temp_failures(mcase, m420, p2)
+    finally:
+        os.unlink(p2)
+    with capsys.disabled():
+        print("\nMODLOG-MUTANT without the same-table check: %s" % fails)
+    assert any(f.startswith("FIRST-APPLY-RC") for f in fails), fails
+    assert not any("the name admin_actions resolves to" in f for f in fails), fails
+
+
+_COL_AFF = "ALTER TABLE admin_actions ADD COLUMN affected_steam_ids text[] NOT NULL DEFAULT '{}'; "
+WRONG_SHAPES = [
+    ("btree_index", _COL_AFF + "CREATE INDEX ix_admin_actions_affected ON admin_actions"
+     " USING btree (affected_steam_ids)", "is not the GIN index 420 creates"),
+    ("gin_with_predicate", _COL_AFF + "CREATE INDEX ix_admin_actions_affected ON admin_actions"
+     " USING gin (affected_steam_ids) WHERE cardinality(affected_steam_ids) > 0",
+     "is not the GIN index 420 creates"),
+    ("gin_on_expression", _COL_AFF + "CREATE INDEX ix_admin_actions_affected ON admin_actions"
+     " USING gin ((affected_steam_ids || ARRAY['x']::text[]))", "is not the GIN index 420 creates"),
+    ("affected_varchar_array", "ALTER TABLE admin_actions ADD COLUMN affected_steam_ids varchar(17)[]",
+     "affected_steam_ids is character varying"),
+    ("reason_varchar", "ALTER TABLE admin_actions ADD COLUMN reason varchar(256)",
+     "admin_actions.reason is character varying"),
+    ("another_check", "ALTER TABLE admin_actions ADD COLUMN reason text; ALTER TABLE admin_actions"
+     " ADD CONSTRAINT ck_admin_actions_reason_len CHECK (reason IS NULL OR char_length(reason) <= 300)",
+     "ck_admin_actions_reason_len is"),
+    ("check_not_validated", "ALTER TABLE admin_actions ADD COLUMN reason text; ALTER TABLE admin_actions"
+     " ADD CONSTRAINT ck_admin_actions_reason_len CHECK (reason IS NULL OR char_length(reason) <= 256)"
+     " NOT VALID", "ck_admin_actions_reason_len is"),
+]
+
+
+@pytest.mark.parametrize("label,ddl,message", WRONG_SHAPES, ids=[w[0] for w in WRONG_SHAPES])
+def test_420_refuses_a_name_that_exists_with_another_shape(mcase, m420, label, ddl, message):
+    """Class 2: types by oid, the index by catalog identity, the CHECK
+    validated and as 420 writes it; a refusal changes nothing."""
+    rc, err = _psql_apply(mcase, R420)
+    assert rc == 0, err
+    try:
+        _exec(mcase, ddl)
+        before = _snap(mcase)
+        rc, err = _psql_apply(mcase, M420)
+        assert rc != 0 and message in err and "nothing changed" in err, (rc, err)
+        assert _snap(mcase) == before
+    finally:
+        _restore(mcase)
