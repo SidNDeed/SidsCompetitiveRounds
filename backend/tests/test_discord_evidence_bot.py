@@ -1090,7 +1090,7 @@ def test_popgate_every_non_page_answer_is_plain_and_ends_with_its_word():
     assert words == {"bad_argument", "not_found", "primary_only", "rate", "population",
                      "deadline", "audit_unavailable", "sections", "too_large", "schema",
                      "refused", "api_unreachable"}, words
-    assert sorted(ns["AER_TEXTS"]) == sorted(words - {"refused", "sections"})
+    assert sorted(ns["AER_TEXTS"]) == sorted(words - {"refused", "sections", "rate"})
 
 
 def _metadata_extra(part, key):

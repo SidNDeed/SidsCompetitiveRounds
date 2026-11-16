@@ -25,6 +25,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "..", "api"))
 
 import admin_evidence as ae  # noqa: E402
+import database  # noqa: E402
+from fastapi import HTTPException  # noqa: E402
 
 API = os.path.join(HERE, "..", "api", "admin_evidence.py")
 
@@ -116,6 +118,8 @@ def test_the_word_set_is_closed_and_each_refusal_has_its_word():
     assert out(ae.PopulationUnavailable("x", "duplicate")) == "unavailable:duplicate"
     assert out(asyncio.CancelledError()) == "unavailable:deadline"
     assert out(asyncio.TimeoutError()) == "unavailable:deadline"
+    assert out(HTTPException(status_code=503, detail="deadline")) == "unavailable:deadline"
+    assert out(HTTPException(status_code=503, detail="audit_unavailable")) == "unavailable:error"
     assert out(RuntimeError("x")) == "unavailable:error"
     assert out(ae.PopulationUnavailable("x", "other")) == "unavailable:error"
 
@@ -143,6 +147,7 @@ def fresh(monkeypatch):
         return False
 
     monkeypatch.setattr(ae, "_in_recovery", primary)
+    monkeypatch.setattr(database, "async_session", _Session)
     return calls
 
 
@@ -160,7 +165,7 @@ def _rebuild(monkeypatch, calls, result=None, exc=None, sleep=0.0):
 
 def _warm(caplog):
     with caplog.at_level(logging.INFO, logger="admin_evidence"):
-        got = asyncio.run(ae.warm_display_population(session_factory=_Session, delay_s=0))
+        got = asyncio.run(ae.warm_display_population(delay_s=0))
     lines = [r.getMessage() for r in caplog.records if "population warm-up" in r.getMessage()]
     return got, lines
 
@@ -213,7 +218,10 @@ def test_a_database_in_recovery_skips_and_stays_pending(monkeypatch, fresh, capl
     assert len(lines) == 1 and "skipped, the database is in recovery" in lines[0]
 
 
-def test_a_warm_up_whose_session_fails_logs_and_leaves_the_word(monkeypatch, fresh, caplog):
+def test_a_warm_up_that_fails_before_any_build_attempt_records_its_word(monkeypatch, fresh,
+                                                                        caplog):
+    """On the primary `pending` means only "no attempt yet": a start-up
+    build whose session cannot open records its own word."""
     class _Down:
         async def __aenter__(self):
             raise OSError("no database")
@@ -221,9 +229,31 @@ def test_a_warm_up_whose_session_fails_logs_and_leaves_the_word(monkeypatch, fre
         async def __aexit__(self, *a):
             return False
 
-    with caplog.at_level(logging.INFO, logger="admin_evidence"):
-        got = asyncio.run(ae.warm_display_population(session_factory=_Down, delay_s=0))
-    assert (got, ae.population_health_word()) == ("unavailable:error", "pending")
+    monkeypatch.setattr(database, "async_session", _Down)
+    got, lines = _warm(caplog)
+    assert (got, ae.population_health_word()) == ("unavailable:error", "unavailable:error")
+    assert len(lines) == 1 and "unavailable:error (OSError)" in lines[0], lines
+
+
+def test_a_warm_up_refused_while_another_rebuild_holds_the_slot_reads_deadline(
+        monkeypatch, fresh, caplog):
+    """`_wait_until`'s deadline refusal, before any attempt: its own word."""
+    monkeypatch.setattr(ae, "_REBUILDING", [True])
+    got, lines = _warm(caplog)
+    assert (got, ae.population_health_word()) == ("unavailable:deadline",) * 2
+    assert fresh == [] and len(lines) == 1 and "(HTTPException)" in lines[0], lines
+
+
+def test_a_failure_after_an_attempt_keeps_the_attempt_s_word(monkeypatch, fresh, caplog):
+    """The attempt recorded its word; the start-up build does not replace it."""
+    monkeypatch.setattr(ae, "_POP_STATE", ["unavailable:duplicate"])
+
+    async def standby(db):
+        raise OSError("the recovery read failed")
+
+    monkeypatch.setattr(ae, "_in_recovery", standby)
+    got, _lines = _warm(caplog)
+    assert (got, ae.population_health_word()) == ("unavailable:error", "unavailable:duplicate")
 
 
 def test_a_report_build_sets_the_word_too(monkeypatch, fresh):

@@ -1670,8 +1670,9 @@ _POP_STATE = ["pending"]
 def population_health_word():
     """/health `admin_evidence_population`: the outcome of this process's
     most recent build attempt of the display population, whichever caller
-    made it (a report, or warm_display_population), one of POPULATION_WORDS;
-    `pending` before the first attempt. A standby answers `pending` for the
+    made it (a report, or warm_display_population), or of a start-up build
+    that failed before it reached an attempt; one of POPULATION_WORDS;
+    `pending` before either. A standby answers `pending` for the
     life of its process, because every report route answers 409
     primary_only there before it reads the cache, so a population built
     there would serve no report, and the start-up build skips by the same
@@ -1680,13 +1681,16 @@ def population_health_word():
 
 
 def _population_outcome(exc):
-    """The word for one build attempt that raised `exc`: a refusal by its
-    class (the allowance, a repeated identity), a cancellation (the
-    start-up build's deadline, or the process stopping) as the deadline,
+    """The word for a build that raised `exc`: a refusal by its class (the
+    allowance, a repeated identity); a cancellation (the start-up build's
+    deadline, or the process stopping) or the report's own deadline refusal
+    (`_wait_until`, while another rebuild held the slot) as the deadline;
     anything else as an error."""
     if isinstance(exc, PopulationUnavailable) and exc.reason in ("budget", "duplicate"):
         return "unavailable:" + exc.reason
     if isinstance(exc, (asyncio.CancelledError, asyncio.TimeoutError)):
+        return "unavailable:deadline"
+    if isinstance(exc, HTTPException) and exc.detail == "deadline":
         return "unavailable:deadline"
     return "unavailable:error"
 
@@ -1730,9 +1734,10 @@ async def _in_recovery(db):
     return bool(rows[0]["in_recovery"])
 
 
-async def _warm_once(session_factory, deadline):
+async def _warm_once(deadline):
     """One display build through the report's own path; None on a standby."""
-    async with session_factory() as db:
+    from database import async_session
+    async with async_session() as db:
         if await _in_recovery(db):
             return None
         cache = _aer_cache()
@@ -1741,36 +1746,37 @@ async def _warm_once(session_factory, deadline):
         return g
 
 
-async def warm_display_population(session_factory=None, delay_s=None):
+async def warm_display_population(delay_s=None):
     """The start-up build (AER-POPGATE-1), created by main.py's lifespan on
     both roles: POP_WARM_DELAY_S after start, build the display population
     once through the functions a report calls (`_leased`: the rebuild,
     `admit`, `publish`, one rebuild at a time with reports) under the
     report's own deadline, and release the lease. A database in recovery
     skips by the report route's primary rule. It never raises into start-up
-    and logs one line for every outcome; its outcome reaches /health
-    through `_leased`, as a report's does."""
+    and logs one line for every outcome. A build attempt's outcome reaches
+    /health through `_leased`, as a report's does; a failure before any
+    attempt recorded a word (the session, the recovery read, the wait for
+    another rebuild) records its own, so on a primary `pending` means only
+    that nothing has been tried yet."""
     t0 = time.monotonic()
     try:
         await asyncio.sleep(AER_CONTRACT_BOUNDS["POP_WARM_DELAY_S"]
                             if delay_s is None else delay_s)
-        if session_factory is None:
-            from database import async_session as session_factory
         # The report's own bounds: the path runs to the report's deadline
         # (REPORT_DEADLINE_S less AUDIT_RESERVE_S), where the gate refuses
         # as it does for a report; the whole build is cut at REPORT_DEADLINE_S,
         # the most a report may take.
         t0 = time.monotonic()
         deadline = _aer_deadline(None)
-        g = await asyncio.wait_for(_warm_once(session_factory, deadline),
+        g = await asyncio.wait_for(_warm_once(deadline),
                                    AER_CONTRACT_BOUNDS["REPORT_DEADLINE_S"])
     except asyncio.CancelledError:
         _aer_log.info("admin_evidence population warm-up: stopped with the process")
         raise
     except Exception as exc:
         word = _population_outcome(exc)
-        if isinstance(exc, HTTPException) and exc.detail == "deadline":
-            word = "unavailable:deadline"
+        if _POP_STATE[0] == "pending":
+            _POP_STATE[0] = word
         _aer_log.warning("admin_evidence population warm-up: %s (%s) duration_ms=%d",
                          word, type(exc).__name__, int((time.monotonic() - t0) * 1000))
         return word

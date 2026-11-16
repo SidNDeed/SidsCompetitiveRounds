@@ -1308,8 +1308,9 @@ class HealthResponse(BaseModel):
     # (#306). No default, as above. Absent on any build before it.
     aer_popgate_build: int
     # admin_evidence_population: the outcome of this process's most recent
-    # build attempt of the evidence report's display population
-    # (admin_evidence.population_health_word): "pending" (none yet),
+    # build attempt of the evidence report's display population, or of a
+    # start-up build that failed before it reached an attempt
+    # (admin_evidence.population_health_word): "pending" (neither yet),
     # "ready", or "unavailable:<budget|duplicate|deadline|error>". In
     # memory, so both arms answer it; a standby answers "pending" for the
     # life of its process. No default, as above. Absent on any build before

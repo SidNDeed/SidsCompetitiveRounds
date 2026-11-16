@@ -17413,7 +17413,6 @@ AER_TEXTS = {
                   "same request will not find it."),
     "primary_only": ("the request reached the standby server, which does not run "
                      "reports. " + _AER_AGAIN),
-    "rate": "too many reports in a short time. Try again in %d s.",
     "population": "the server could not prepare its comparison data. " + _AER_AGAIN,
     "deadline": "the server took too long to build the report. " + _AER_AGAIN,
     "audit_unavailable": ("the server could not record the report in its audit log, so "
@@ -17855,13 +17854,18 @@ def _aer_word(status, body, headers=None):
     if status == 429:
         retry = str({k.lower(): v for k, v in (headers or {}).items()}.get("retry-after", ""))
         if retry.isdigit():
-            return _aer_text("rate", AER_TEXTS["rate"] % int(retry))
+            # The format stays a literal: the privacy pass labels the number as
+            # formatted text only in a format it can read (not a table entry).
+            return _aer_text("rate", "too many reports in a short time. Try again in %d s."
+                             % int(retry))
     if status == 503:
         m = re.fullmatch(r"(?:unavailable \(([a-z_]{1,40})\)|([a-z_]{1,40}))", detail)
         if m:
             word = m.group(1) or m.group(2)
-            sentence = (AER_TEXTS[word] if word in ("population", "deadline", "audit_unavailable")
-                        else _AER_UNAVAILABLE)
+            sentence = _AER_UNAVAILABLE
+            for known in ("population", "deadline", "audit_unavailable"):
+                if word == known:
+                    sentence = AER_TEXTS[known]
             return _aer_text(_aer_enc_text(word), sentence)
     if status == 500 and detail == "too_large":
         return _aer_text("too_large", AER_TEXTS["too_large"])
