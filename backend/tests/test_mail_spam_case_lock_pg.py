@@ -59,6 +59,13 @@ SCRUB = "UPDATE moderation_cases SET resolved_by = :tomb WHERE resolved_by = :si
 LOCK_HEAD = "SELECT 1 FROM moderation_cases WHERE kind = 'mail_spam' AND bucket_key = "
 # The first statement of the deletion that locks its own players row, as sent
 PC_SHARDS = "UPDATE players SET pc_shards = 0 WHERE id = $1"
+# The send's fan-out (main._MAIL_FANOUT_SQL) as it reaches PostgreSQL, its first 200 characters: its
+# first bind, :mid, goes out as $1. pg_stat_activity keeps a statement's text only up to
+# track_activity_query_size (1024 bytes by default) and this statement is longer, so its key share
+# clause can be cut from what pg_stat_activity shows: a wait in it is recognised by this head, and the
+# lock waited for is read from pg_locks.
+FANOUT_PRE, FANOUT_REST = main._MAIL_FANOUT_SQL.split(":mid", 1)
+FANOUT_HEAD = (FANOUT_PRE + "$1" + FANOUT_REST)[:200]
 
 
 def _deadlock(x):
@@ -109,8 +116,9 @@ async def _race(env, s, m, *, park):
     send has finished or waits on the deletion; then release the deletion
     and wait for both. Returns the deletion's and the send's outcomes (an
     Answer, or the exception it raised), whether the send finished while the
-    deletion was parked, and the statement the send waited at (None if it
-    did not wait)."""
+    deletion was parked, the statement the send waited at (None if it did
+    not wait), and the send's locks while it waited (pg_locks rows as
+    (locktype, relation name, mode, granted); empty if it did not wait)."""
     assert park in ("after", "before")
     parked, release = asyncio.Event(), asyncio.Event()
     state = {}
@@ -133,6 +141,7 @@ async def _race(env, s, m, *, park):
     a = asyncio.ensure_future(_delete(env, m))
     b = None
     where = None
+    locks = []
     try:
         for _ in range(int(BOUND / POLL)):
             if parked.is_set() or a.done():
@@ -149,6 +158,9 @@ async def _race(env, s, m, *, park):
                 state["pid"])
             if row is not None:
                 where = row["query"]
+                locks = [tuple(r) for r in await env.conn.fetch(
+                    "SELECT l.locktype, c.relname, l.mode, l.granted FROM pg_locks l"
+                    "  LEFT JOIN pg_class c ON c.oid = l.relation WHERE l.pid = $1", row["pid"])]
                 break
             await asyncio.sleep(POLL)
         finished = b.done()
@@ -157,7 +169,7 @@ async def _race(env, s, m, *, park):
         release.set()
         outcomes = await asyncio.wait_for(
             asyncio.gather(a, *([b] if b is not None else []), return_exceptions=True), BOUND)
-    return outcomes[0], outcomes[1], finished, where
+    return outcomes[0], outcomes[1], finished, where, locks
 
 
 async def _rows(env, s):
@@ -175,7 +187,7 @@ def test_a_send_waits_for_the_scrub_before_its_fan_out_and_both_finish(monkeypat
     on such a tree the failure names the 40P01."""
     async def body(env):
         s, m = await _seed(env)
-        a, b, finished, where = await _race(env, s, m, park="after")
+        a, b, finished, where, _ = await _race(env, s, m, park="after")
         assert not isinstance(a, BaseException) and not isinstance(b, BaseException), (_name(a), _name(b))
         assert a.status == 200 and a["status"] == "anonymized", a
         assert b.status == 200 and b["accepted"] is True, b
@@ -199,7 +211,7 @@ def test_control_a_send_that_does_not_lock_the_case_row_first_closes_a_cycle(mon
     async def body(env):
         s, m = await _seed(env)
         with env.rewriting(" FOR NO KEY UPDATE", "", where=LOCK_HEAD) as hits:
-            a, b, finished, where = await _race(env, s, m, park="after")
+            a, b, finished, where, _ = await _race(env, s, m, park="after")
         assert hits and all(h.startswith(LOCK_HEAD) for h in hits), hits
         assert not finished and where is not None and "INSERT INTO moderation_cases" in where, where
         assert [_deadlock(a), _deadlock(b)].count(True) == 1, (_name(a), _name(b))
@@ -216,7 +228,7 @@ def test_a_send_finishes_while_the_deletion_holds_every_lock_it_takes_before_its
     scrubs the rows the send wrote and finishes."""
     async def body(env):
         s, m = await _seed(env)
-        a, b, finished, where = await _race(env, s, m, park="before")
+        a, b, finished, where, _ = await _race(env, s, m, park="before")
         assert not isinstance(a, BaseException) and not isinstance(b, BaseException), (_name(a), _name(b))
         assert finished and where is None, where
         assert b.status == 200 and b["accepted"] is True, b
@@ -239,9 +251,18 @@ def test_control_a_deletion_that_locked_its_players_row_for_update_before_its_sc
         s, m = await _seed(env)
         mutant = PC_SHARDS + " AND EXISTS (SELECT 1 FROM players q WHERE q.id = $1 FOR UPDATE)"
         with env.rewriting(PC_SHARDS, mutant) as hits:
-            a, b, finished, where = await _race(env, s, m, park="before")
+            a, b, finished, where, locks = await _race(env, s, m, park="before")
         assert len(hits) == 1, hits
-        assert not finished and where is not None and "FOR KEY SHARE OF p" in where, where
+        # The send waits in its fan-out statement (by its head: the statement is longer than what
+        # pg_stat_activity keeps), on a key share of a players row (a key share that has to wait holds
+        # the row's tuple lock in AccessShareLock), behind the deletion's transaction.
+        assert FANOUT_PRE == ("INSERT INTO mail_recipients (message_id, recipient_id, kind, delivery)"
+                              " SELECT CAST("), FANOUT_PRE
+        assert "FOR KEY SHARE OF p" in main._MAIL_FANOUT_SQL
+        assert not main._MAIL_BROADCAST_FANOUT_SQL.replace(":mid", "$1").startswith(FANOUT_HEAD)
+        assert not finished and where is not None and where.startswith(FANOUT_HEAD), where
+        assert ("tuple", "players", "AccessShareLock", True) in locks, locks
+        assert ("transactionid", None, "ShareLock", False) in locks, locks
         assert [_deadlock(a), _deadlock(b)].count(True) == 1, (_name(a), _name(b))
         ok = b if _deadlock(a) else a
         assert not isinstance(ok, BaseException) and ok.status == 200, _name(ok)
