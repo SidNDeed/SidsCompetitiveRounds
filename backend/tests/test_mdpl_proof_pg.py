@@ -57,6 +57,7 @@ from inv_pg import case  # noqa: E402
 
 import mail_discord  # noqa: E402
 import main  # noqa: E402
+from sqlalchemy.exc import DBAPIError  # noqa: E402
 from test_mail_case_scrub_pg import (  # noqa: E402
     BOUND, CROCKFORD, _arm, _bad, _deadlock, _delete, _finish, _name, _parked, _parks, _relay_row,
     _settle)
@@ -757,3 +758,145 @@ def test_r6b_control_without_the_flag_the_helper_keeps_the_wager_open(monkeypatc
         assert calls >= 1, calls
     case(monkeypatch, body, prefix="mdpl")
     assert "deletion attempt 1 ended" not in capsys.readouterr().out
+
+
+# -- R6b, a caller that is not the deletion (the integrator's C1 and C2) -----------------------
+#
+# The flag travels as an argument: raise_retryable, False by default at
+# every helper; the deletion passes True at its four calls, and
+# _reconcile_ffa_lobby_bets passes its own value on to its two inner
+# helpers. Nothing else carries it. The deadline is the one value the bound
+# keeps in a context variable (_deletion_deadline), set for each attempt
+# and reset in the same try's finally, in _deletion_bounded alone.
+
+LEAVE_DISBANDED = inv_pg.Answer(200, {"status": "ok", "disbanded": True, "remaining": 0})
+POOL_KEY_FAILS = "SELECT mdpl_fail_once(), pg_advisory_xact_lock(hashtext('pc_snapshot'))"
+REFUND_FAILED = "[LOBBY-BETS] refund pass failed for team lobby "
+
+
+async def _open_wager(env, lid, p):
+    """B's open wager of 10 on `lid`, backing `p`: (B, the wager's id)."""
+    (b,) = await env.players(1)
+    await env.conn.execute("UPDATE players SET gold_earned = 200, gold_spent = 100 WHERE id = $1", b.id)
+    bet = await env.conn.fetchval(
+        "INSERT INTO lobby_bets (mode, lobby_id, player_id, amount, target_steams)"
+        " VALUES ('team', $1, $2, 10, $3) RETURNING id", lid, b.id, p.sid)
+    return b, bet
+
+
+async def _wager_state(env, b, bet):
+    st = await env.conn.fetchval("SELECT status FROM lobby_bets WHERE id = $1", bet)
+    spent = await env.conn.fetchval("SELECT gold_spent FROM players WHERE id = $1", b.id)
+    return st, spent
+
+
+async def _leave_with_a_forced_55p03(env, p, lid):
+    """P, alone in `lid`, leaves it: the lobby is disbanded and
+    _lobby_leave_impl calls _refund_lobby_bets with its default flag. The
+    helper's read ends once in 55P03, as in the deletion's R6b test. Returns
+    (the answer, or the database error that escaped, the function's calls)."""
+    await env.conn.execute(FAIL_ONCE % {"code": "55P03"})
+    try:
+        with env.rewriting(BET_READ, "FROM lobby_bets WHERE mdpl_fail_once() AND mode = ",
+                           where="ORDER BY created_at, id") as hits:
+            try:
+                out = await env.leave("team", p, lid)
+            except DBAPIError as exc:
+                out = exc
+        assert hits, "the forced error did not apply"
+        calls = await env.conn.fetchval("SELECT last_value FROM mdpl_once")
+    finally:
+        await env.conn.execute(FAIL_ONCE_GONE)
+    return out, calls
+
+
+def test_r6b_c1_a_lobby_leave_keeps_the_helpers_catch(monkeypatch, capsys):
+    """C1: the same forced 55P03 through a caller that is not the deletion
+    (the leave that disbands a lobby) is caught where it was caught -- the
+    helper's savepoint, its failure line, the wager left open for the
+    janitor's orphan arm -- and the leave answers as a leave without the
+    error does."""
+    async def body(env):
+        _arm(env)
+        lid, (p,) = await env.lobby("team", 1)
+        b, bet = await _open_wager(env, lid, p)
+        out, calls = await _leave_with_a_forced_55p03(env, p, lid)
+        assert not isinstance(out, BaseException), out
+        assert out == LEAVE_DISBANDED, out
+        assert calls == 1, calls
+        assert await _wager_state(env, b, bet) == ("open", 100)
+        # The twin: the same leave with no error refunds at once.
+        lid2, (p2,) = await env.lobby("team", 1)
+        b2, bet2 = await _open_wager(env, lid2, p2)
+        plain = await env.leave("team", p2, lid2)
+        assert plain == out, (plain, out)
+        assert await _wager_state(env, b2, bet2) == ("refunded", 90)
+    case(monkeypatch, body, prefix="mdpl")
+    printed = capsys.readouterr().out
+    assert printed.count(REFUND_FAILED) == 1, printed[-3000:]
+
+
+def test_r6b_c1_control_a_predicate_that_ignores_the_flag_breaks_the_leave(monkeypatch):
+    """C1's mutant: _retryable_for_caller answers as under the deletion for
+    every caller. The 55P03 leaves the helper and the leave itself fails."""
+    async def body(env):
+        _arm(env)
+        real = main._retryable_for_caller
+        env.mp.setattr(main, "_retryable_for_caller", lambda ex, raise_retryable: real(ex, True))
+        lid, (p,) = await env.lobby("team", 1)
+        b, bet = await _open_wager(env, lid, p)
+        out, calls = await _leave_with_a_forced_55p03(env, p, lid)
+        assert isinstance(out, DBAPIError), out
+        assert getattr(out.orig, "sqlstate", None) == "55P03", out
+        assert calls == 1, calls
+        assert await _wager_state(env, b, bet) == ("open", 100)
+        assert await env.members("team", lid), "the failed leave was written"
+    case(monkeypatch, body, prefix="mdpl")
+
+
+def test_r6b_c2_a_call_after_a_refused_and_a_failed_deletion_sees_the_flag_off(monkeypatch, capsys):
+    """C2, in one task: (1) a deletion refused (a 55P03 in its bet helper,
+    503); (2) a deletion ended by another error (23505 at its pool key
+    statement, which leaves the route as it came); after each, the deadline
+    variable is unset in the caller's context; (3) then a leave of the
+    refused deletion's player disbands the same lobby, meets the same forced
+    55P03 in the same helper, and the helper catches it: the flag is off."""
+    async def body(env):
+        _arm(env)
+        assert main._deletion_deadline.get() is None
+        lid, (p,) = await env.lobby("team", 1)
+        b, bet = await _open_wager(env, lid, p)
+        await env.conn.execute(FAIL_ONCE % {"code": "55P03"})
+        try:
+            with env.rewriting(BET_READ, "FROM lobby_bets WHERE mdpl_fail_once() AND mode = ",
+                               where="ORDER BY created_at, id") as hits:
+                a = await _delete(env, p)
+            assert hits, "the forced error did not apply"
+        finally:
+            await env.conn.execute(FAIL_ONCE_GONE)
+        assert (a.status, a.body) == (503, main._DELETION_REFUSAL), a
+        assert await _wager_state(env, b, bet) == ("open", 100)
+        assert main._deletion_deadline.get() is None, "set after a refusal"
+
+        (y,) = await env.players(1)
+        await env.conn.execute(FAIL_ONCE % {"code": "23505"})
+        try:
+            with env.rewriting(KEY_EXACT, POOL_KEY_FAILS) as hits:
+                try:
+                    err = await _delete(env, y)
+                except DBAPIError as exc:
+                    err = exc
+            assert hits, "the forced error did not apply"
+        finally:
+            await env.conn.execute(FAIL_ONCE_GONE)
+        assert isinstance(err, DBAPIError) and getattr(err.orig, "sqlstate", None) == "23505", err
+        assert main._deletion_deadline.get() is None, "set after an error"
+        assert await env.conn.fetchval("SELECT deleted_at FROM players WHERE id = $1", y.id) is None
+
+        out, calls = await _leave_with_a_forced_55p03(env, p, lid)
+        assert not isinstance(out, BaseException), out
+        assert out == LEAVE_DISBANDED and calls == 1, (out, calls)
+        assert await _wager_state(env, b, bet) == ("open", 100)
+    case(monkeypatch, body, prefix="mdpl")
+    printed = capsys.readouterr().out
+    assert printed.count(REFUND_FAILED) == 1, printed[-3000:]

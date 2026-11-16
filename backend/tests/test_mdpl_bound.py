@@ -224,6 +224,30 @@ def test_a_wait_ended_by_the_lock_timeout_is_refused_at_once(monkeypatch):
     assert db.attempts == 1 and db.rollbacks == 1, (db.attempts, db.rollbacks)
 
 
+def test_the_deadline_variable_is_unset_after_a_refusal_and_after_an_error(monkeypatch):
+    """C2: the deadline is the one value the bound keeps in a context
+    variable, set for each attempt and reset in that try's finally. After a
+    deletion refused (55P03) and after one ended by any other error (23505),
+    run in the caller's own task, the variable is unset there."""
+    monkeypatch.setattr(main, "MATCH_HMAC_SECRET", SECRET)
+    clock = _Clock()
+    monkeypatch.setattr(main, "_deletion_clock", clock)
+
+    async def go():
+        seen = [main._deletion_deadline.get()]
+        for code in ("55P03", "23505"):
+            db = _VictimDb(clock, cost=0.1, sqlstate=code)
+            try:
+                await main.delete_player_data(STEAM, None, sig=_sig(STEAM), _arrived=clock.now,
+                                              _slot=None, db=db)
+            except (HTTPException, DBAPIError) as e:
+                seen.append((code, type(e).__name__, db.attempts, main._deletion_deadline.get()))
+        return seen
+
+    seen = asyncio.run(go())
+    assert seen == [None, ("55P03", "HTTPException", 1, None), ("23505", "DBAPIError", 1, None)], seen
+
+
 def test_the_bound_and_the_helpers_read_the_retry_set_when_they_run(monkeypatch):
     """The order tests empty the retry set to see PostgreSQL's 40P01 as it is
     (test_mdpl_deletion_lock_order_pg._order_only). The bound and the
