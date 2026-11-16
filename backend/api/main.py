@@ -45673,8 +45673,12 @@ _ERASE_RELAY_DMS_LOCK_SQL = (
 _DELETION_BUDGET_S = 15.0
 # An attempt starts only when the time left covers one attempt whose waits
 # all find nothing held: the work, plus deadlock_timeout (PostgreSQL's
-# default 1 s), the longest a lock circle waits before PostgreSQL ends it.
-_DELETION_ATTEMPT_MIN_S = 3.0
+# default 1 s, the primary's value when this was set), the longest a lock
+# circle waits before PostgreSQL ends it. The work: at most 1.77 s over six
+# uncontended attempts on the operating seat (a large account and a bare
+# one, three each), times 1.5 since that seat is not the server; 3.65 s in
+# all, rounded up.
+_DELETION_ATTEMPT_MIN_S = 4.0
 # Run again from fresh reads: a deadlock victim and a serialization failure,
 # nothing else (#505: re-running on any database error hides real faults).
 _DELETION_RETRY_SQLSTATES = frozenset({"40P01", "40001"})
