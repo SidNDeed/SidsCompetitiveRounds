@@ -35676,6 +35676,11 @@ async def _pc_lease_drain(db: AsyncSession, pid: str) -> float:
     the acks and every other request (r8 M1, r9 M1)."""
     started = time.monotonic()
     limit = float(_pcp.LEASE_SECONDS) + 5.0
+    deadline = _deletion_deadline.get()
+    if deadline is not None:
+        # Inside the account deletion's bound (MDPL R6a) the wait also ends
+        # at that attempt's deadline; the deletion then commits nothing.
+        limit = min(limit, max(0.0, deadline - _deletion_clock()))
     while True:
         left = (await db.execute(text(_PC_LEASE_NAMING_SQL), {"pid": pid})).scalar_one_or_none()
         if left is None or time.monotonic() - started > limit:
@@ -45286,6 +45291,9 @@ _PENDING_DM_ACK_SQL = (
 # claim, and matches zero rows. That is what a replayed `not_attempted_ids`
 # report and a report arriving after the row was handed out again both hit,
 # and neither can touch the later hand-out's state.
+_PENDING_DM_ACK_LOCK_SQL = (
+    "SELECT id FROM pending_dms WHERE id::text = ANY(CAST(:ids AS TEXT[]))"
+    " ORDER BY id FOR NO KEY UPDATE")
 _PENDING_DM_SETTLE_SQL = (
     "UPDATE pending_dms u "
     "   SET claim_id = NULL, claim_until = NULL, "
@@ -45336,14 +45344,20 @@ _MAIL_CANCEL_PENDING_DM_SQL = (
 #
 # The outer `(claim_until IS NULL OR claim_until <= NOW())` means a row the
 # bot is holding right now is never retired underfoot.
+# SKIP LOCKED (MDPL R4): the retire never waits for a row another writer
+# holds -- a deletion, a relay-off, an ack or a settle is already changing
+# that row -- and a later poll retires it if it still qualifies. The same
+# shape as the poll's own claim (_PENDING_DM_CLAIM_SQL).
 _PENDING_DM_RETIRE_SQL = (
     "UPDATE pending_dms SET undeliverable = true, delivered_at = NOW() "
-    "WHERE delivered_at IS NULL AND NOT undeliverable "
-    "  AND cancelled_at IS NULL "
-    "  AND (claim_until IS NULL OR claim_until <= NOW()) "
-    "  AND (attempts >= :cap "
-    "       OR (claim_until IS NOT NULL "
-    "           AND created_at < NOW() - make_interval(secs => :max_age))) "
+    "WHERE id IN (SELECT id FROM pending_dms "
+    "             WHERE delivered_at IS NULL AND NOT undeliverable "
+    "               AND cancelled_at IS NULL "
+    "               AND (claim_until IS NULL OR claim_until <= NOW()) "
+    "               AND (attempts >= :cap "
+    "                    OR (claim_until IS NOT NULL "
+    "                        AND created_at < NOW() - make_interval(secs => :max_age))) "
+    "             FOR NO KEY UPDATE SKIP LOCKED) "
     "RETURNING id, steam_id, mail_id, attempts, created_at")
 
 
@@ -45393,9 +45407,17 @@ async def ack_pending_dms(
                  if i and i not in done and claims.get(i)]
         return [p[0] for p in pairs], [p[1] for p in pairs]
 
+    buckets = [(charge, *_settle_pairs(bucket))
+               for bucket, charge in ((body.retry_ids, 1), (body.not_attempted_ids, 0))]
+    # MDPL R4, one lock order on pending_dms (_ERASE_RELAY_DMS_LOCK_SQL says
+    # why): every row this report settles or acks, in one statement, in id
+    # order, before the first write; FOR NO KEY UPDATE, the lock the settles'
+    # and the ack's UPDATEs take. The settles and the ack touch no other row.
+    every = list(dict.fromkeys([*ids, *(i for _c, sids, _s in buckets for i in sids)]))
+    if every:
+        await db.execute(text(_PENDING_DM_ACK_LOCK_SQL), {"ids": every})
     settled = 0
-    for bucket, charge in ((body.retry_ids, 1), (body.not_attempted_ids, 0)):
-        sids, sclaims = _settle_pairs(bucket)
+    for charge, sids, sclaims in buckets:
         if not sids:
             continue
         r0 = await db.execute(text(_PENDING_DM_SETTLE_SQL),
@@ -45608,10 +45630,117 @@ _ERASE_RELAY_DMS_FROM_SQL = (
     "DELETE FROM pending_dms"
     " WHERE sender_steam_id = :sid"
     "    OR mail_id IN (SELECT id FROM mail_messages WHERE sender_id = :pid)")
+# MDPL R4, one lock order on pending_dms: every writer that can wait for a
+# relay row another writer holds takes ALL its rows in one statement, in id
+# order, before its first write to the table, and adds no row after it. A
+# writer waiting for row r then holds no row above r, so no two of them wait
+# for each other there. The deletion's two DELETEs above, both sets in one
+# pass, FOR UPDATE: the lock a DELETE takes, so neither DELETE waits after
+# it. No row joins either set between this pass and the DELETEs: the
+# player's own sends need their identity key, which the deletion holds, and
+# a send addressed to them holds FOR KEY SHARE on their players row, which
+# the deletion's anonymising UPDATE has locked FOR UPDATE before this pass.
+_ERASE_RELAY_DMS_LOCK_SQL = (
+    "SELECT id FROM pending_dms"
+    " WHERE (relay_code IS NOT NULL AND steam_id = :sid)"
+    "    OR sender_steam_id = :sid"
+    "    OR mail_id IN (SELECT id FROM mail_messages WHERE sender_id = :pid)"
+    " ORDER BY id FOR UPDATE")
+
+
+# MDPL R6, the account deletion's time budget. The route's one caller, the
+# mod's confirm button, gives up after 20 s, does not retry, and shows one
+# line for any failure. The deadline counts from the request's ARRIVAL:
+# _request_arrival is declared before _pc_writer_slot, so a wait for a
+# writer slot counts against it. The margin of 5 s covers the network, the
+# server's own queue before the dependencies run, and the commit itself.
+_DELETION_BUDGET_S = 15.0
+# An attempt starts only when the time left covers one attempt whose waits
+# all find nothing held: the work, plus deadlock_timeout (PostgreSQL's
+# default 1 s), the longest a lock circle waits before PostgreSQL ends it.
+_DELETION_ATTEMPT_MIN_S = 3.0
+# Run again from fresh reads: a deadlock victim and a serialization failure,
+# nothing else (#505: re-running on any database error hides real faults).
+_DELETION_RETRY_SQLSTATES = frozenset({"40P01", "40001"})
+_DELETION_REFUSAL = "account_cleanup_contended"
+
+
+def _retryable_for_caller(ex, raise_retryable: bool) -> bool:
+    """MDPL R6b. The bet helpers end their savepoint on an error and go on,
+    which is right for the errors they were built for. A deadlock victim or
+    a serialization failure means the whole work can succeed on a new
+    attempt, so a caller that runs whole new attempts -- only the account
+    deletion passes raise_retryable=True -- gets it back as its own error.
+    Every other caller, and every other error, keeps the helper's present
+    behaviour (its janitor sweep finishes the work)."""
+    return bool(raise_retryable) and (
+        getattr(getattr(ex, "orig", None), "sqlstate", None) in _DELETION_RETRY_SQLSTATES)
+_deletion_clock = time.monotonic
+_deletion_deadline = contextvars.ContextVar("deletion_deadline", default=None)
+
+
+def _deletion_past(deadline) -> bool:
+    """True once an attempt's deadline has passed (MDPL R6a): read right
+    after the drain and right before the commit."""
+    return deadline is not None and _deletion_clock() >= deadline
+
+import inspect as _inspect  # noqa: E402
+
+
+async def _request_arrival() -> float:
+    """FastAPI dependency: when the request reached its dependencies.
+    Declared BEFORE _pc_writer_slot, so a wait for a slot counts against
+    the request's deadline."""
+    return _deletion_clock()
+
+
+def _deletion_bounded(fn):
+    """The account deletion's bound (MDPL R6). The whole transaction runs
+    again from fresh reads when PostgreSQL ends it as a deadlock victim or
+    a serialization failure, while the time left covers one attempt. No
+    attempt starts, and none commits, after the deadline. Used up: 503
+    account_cleanup_contended with nothing written; the client's line
+    reads "Deletion failed", which is true, and a second click starts
+    afresh. FastAPI reads the wrapped function's signature."""
+    params = _inspect.signature(fn)
+
+    @_functools.wraps(fn)
+    async def bounded(*args, **kwargs):
+        bound = params.bind_partial(*args, **kwargs)
+        arrived = bound.arguments.get("_arrived")
+        if not isinstance(arrived, (int, float)):   # called directly: no dependency ran
+            arrived = _deletion_clock()
+        deadline = float(arrived) + _DELETION_BUDGET_S
+        db = bound.arguments.get("db")
+        attempt = 0
+        while True:
+            if deadline - _deletion_clock() < _DELETION_ATTEMPT_MIN_S:
+                raise HTTPException(status_code=503, detail=_DELETION_REFUSAL)
+            attempt += 1
+            token = _deletion_deadline.set(deadline)
+            try:
+                return await fn(*args, **kwargs)
+            except DBAPIError as exc:
+                code = getattr(getattr(exc, "orig", None), "sqlstate", None)
+                if code not in _DELETION_RETRY_SQLSTATES and code != "55P03":
+                    raise
+                try:
+                    await db.rollback()
+                except Exception:
+                    pass
+                if code == "55P03":   # a wait reached the deadline (lock_timeout)
+                    raise HTTPException(status_code=503, detail=_DELETION_REFUSAL)
+                print(f"[PRIVACY] deletion attempt {attempt} ended by {code}; "
+                      f"{max(0.0, deadline - _deletion_clock()):.1f}s left")
+            finally:
+                _deletion_deadline.reset(token)
+    return bounded
 
 
 @app.delete("/api/v1/players/{steam_id}/data", tags=["Privacy"])
+@_deletion_bounded
 async def delete_player_data(steam_id: str, request: Request, sig: str = Query(...),
+                             _arrived: float = Depends(_request_arrival),
                              _slot=Depends(_pc_writer_slot), db: AsyncSession = Depends(get_db)):
     """
     Anonymize a player's identity. Irreversible.
@@ -45650,6 +45779,14 @@ async def delete_player_data(steam_id: str, request: Request, sig: str = Query(.
     ).hexdigest()
     if not hmac.compare_digest(sig, expected):
         raise HTTPException(status_code=403, detail="Invalid signature")
+
+    # MDPL R6a: this attempt's deadline (_deletion_bounded). No single wait
+    # in it -- for a row or for either advisory key -- outlasts the time left
+    # at its start: lock_timeout ends that wait with 55P03, which refuses.
+    _deadline = _deletion_deadline.get()
+    if _deadline is not None:
+        await db.execute(text("SELECT set_config('lock_timeout', :v, true)"),
+                         {"v": f"{max(1, int((_deadline - _deletion_clock()) * 1000))}ms"})
 
     # `is None`, not truthiness (round-16 find 5): a legacy reason="" ban is
     # an ACTIVE ban whose sessions are already purged — the truthiness form
@@ -45701,6 +45838,32 @@ async def delete_player_data(steam_id: str, request: Request, sig: str = Query(.
 
     pid = player.id
 
+    # Player Cards (migration 308): every Discord line in flight that names
+    # this player -- as a card's subject or as a party of a pull -- is on
+    # Discord before this transaction commits: the writer waits for the bot
+    # to release its leases (r7 H2), under the identity lock, which refuses
+    # new ones meanwhile. The wait takes no row lock and runs BEFORE the
+    # pool snapshot's key below, so a deletion waiting for the bot holds no
+    # lock another deletion needs. It ends at this attempt's deadline too
+    # (_deletion_deadline); past it, nothing is written (MDPL R6a).
+    waited = await _pc_lease_drain(db, str(pid))
+    if waited >= 1.0:
+        print(f"[PC-LEASE] deletion waited {waited:.1f}s for the lines in flight naming the player")
+    if _deletion_past(_deadline):
+        await db.rollback()
+        raise HTTPException(status_code=503, detail=_DELETION_REFUSAL)
+    # The pool snapshot's key, blocking form, as this transaction's FIRST
+    # lock after the identity key and BEFORE its first row lock (MDPL R3):
+    # every deletion takes it here and holds it to its commit, so while one
+    # deletion waits for it, it holds its own identity key and no row lock,
+    # and two deletions never hold row locks at the same time. The key's
+    # other takers -- _pc_snapshot_janitor_step and admin_pc_snapshot -- take
+    # the try form, which never waits, and hold no identity lock. A snapshot
+    # in flight commits its member rows before this deletion's sweeps run,
+    # so none of this player's survives it (c3 I). Order: identity ->
+    # pc_snapshot -> every row lock.
+    await db.execute(text("SELECT pg_advisory_xact_lock(hashtext('pc_snapshot'))"))
+
     # Drop purely personal rows — no cross-player impact.
     await db.execute(text("DELETE FROM player_achievements WHERE player_id = :pid"), {"pid": pid})
     await db.execute(text("DELETE FROM link_codes WHERE player_id = :pid"), {"pid": pid})
@@ -45711,17 +45874,10 @@ async def delete_player_data(steam_id: str, request: Request, sig: str = Query(.
     # deleted_at after it is granted, so no store in flight recreates the row
     # once this transaction commits.
     await db.execute(text("DELETE FROM player_region_pings WHERE player_id = :pid"), {"pid": pid})
-    # Player Cards (migration 308): first, every Discord line in flight that
-    # names this player -- as a card's subject or as a party of a pull -- is
-    # on Discord before this transaction commits: the writer waits for the
-    # bot to release its leases (r7 H2), under the identity lock, which
-    # refuses new ones meanwhile. Then the player's OWN events (as puller or
-    # subject), prints, daily claims, packs (open attempts cascade) and pool
-    # memberships, shards zeroed — and then, under the snapshot lock, every
-    # print of the player's OWN CARD held by anyone, with the card rows.
-    waited = await _pc_lease_drain(db, str(pid))
-    if waited >= 1.0:
-        print(f"[PC-LEASE] deletion waited {waited:.1f}s for the lines in flight naming the player")
+    # Player Cards (migration 308), the lines in flight drained above: the
+    # player's OWN events (as puller or subject), prints, daily claims, packs
+    # (open attempts cascade) and pool memberships, shards zeroed -- and then
+    # every print of the player's OWN CARD held by anyone, with the card rows.
     await db.execute(text("DELETE FROM pc_events WHERE player_id = :pid OR subject_player_id = :pid"), {"pid": pid})
     # Card trading (migration 353, V8 3.9): every trade naming the player as
     # a party (its holds cascade) and every spent-nonce tombstone of theirs
@@ -45752,11 +45908,7 @@ async def delete_player_data(steam_id: str, request: Request, sig: str = Query(.
         await db.execute(text("DELETE FROM pc_shard_batches WHERE player_id = :pid"), {"pid": pid})
     await db.execute(text("DELETE FROM pc_daily_claims WHERE player_id = :pid"), {"pid": pid})
     await db.execute(text("DELETE FROM pc_packs WHERE player_id = :pid"), {"pid": pid})
-    # The pool snapshot's own lock, blocking form (the takers hold the try
-    # form for their whole transaction and no identity lock — no cycle): a
-    # snapshot in flight commits its member rows before this sweep runs, so
-    # none of this player's survives it (c3 I). Order: identity -> pc_snapshot.
-    await db.execute(text("SELECT pg_advisory_xact_lock(hashtext('pc_snapshot'))"))
+    # Under the pool snapshot's key, taken above before the first row lock.
     await db.execute(text("DELETE FROM pc_pool_members WHERE player_id = :pid"), {"pid": pid})
     # Deleting all data is the one way a player's card leaves every binder
     # (2026-09-13), beside migration 320 for subjects whose id is not a
@@ -45823,27 +45975,11 @@ async def delete_player_data(steam_id: str, request: Request, sig: str = Query(.
         await db.rollback()
         raise HTTPException(status_code=503, detail="account_cleanup_contended")
 
-    await db.execute(text("""
-        DELETE FROM ranked_queue
-        WHERE player_id IN (
-            SELECT player_id FROM ranked_queue
-            WHERE player_id = :pid OR matched_with = :pid
-            FOR UPDATE SKIP LOCKED
-        )
-    """), {"pid": pid})
-    queue_left = (await db.execute(text(
-        "SELECT 1 FROM ranked_queue "
-        "WHERE player_id = :pid OR matched_with = :pid LIMIT 1"
-    ), {"pid": pid})).first()
-    if queue_left is not None:
-        await db.rollback()
-        raise HTTPException(status_code=503, detail="account_cleanup_contended")
-
     # 2v2 and 1v2 queue rows carry COPIED raw steam_id + display_name, and the
     # player row is anonymized rather than deleted, so ON DELETE CASCADE never
     # fires for them — they must be cleared explicitly or the identity survives
     # the anonymization (privacy audit HIGH). Same SKIP LOCKED + verify shape as
-    # ranked_queue above. Codex review find: also DISSOLVE any zero-progress
+    # ranked_queue below. Codex review find: also DISSOLVE any zero-progress
     # locked group the deleted account was part of (mirror of the leave
     # endpoints) — otherwise the other members can reset themselves one by one
     # and leave a forever-'active' series shell no janitor predicate can find.
@@ -45916,6 +46052,26 @@ async def delete_player_data(steam_id: str, request: Request, sig: str = Query(.
         ), {"lid": _lid})
     # Stage 2 (NX6): the hold half, after the series and lobby locks above.
     await _s2_delete_holds(db, pid, steam_id)
+    # The ranked queue rows naming this player, AFTER the lobby and series
+    # locks above (MDPL R5): a ban takes its target's open lobby and then
+    # deletes the target's ranked_queue row (_apply_ban_core), so a deletion
+    # holding that row while it waited for the lobby closed a circle with it.
+    # Ranked rows, then the 2v2, 1v2 and FFA rows: the ban's order too.
+    await db.execute(text("""
+        DELETE FROM ranked_queue
+        WHERE player_id IN (
+            SELECT player_id FROM ranked_queue
+            WHERE player_id = :pid OR matched_with = :pid
+            FOR UPDATE SKIP LOCKED
+        )
+    """), {"pid": pid})
+    queue_left = (await db.execute(text(
+        "SELECT 1 FROM ranked_queue "
+        "WHERE player_id = :pid OR matched_with = :pid LIMIT 1"
+    ), {"pid": pid})).first()
+    if queue_left is not None:
+        await db.rollback()
+        raise HTTPException(status_code=503, detail="account_cleanup_contended")
     _discovered = {"team_queue": {str(s) for s in _grp},
                    "ovt_queue": {str(s) for s in _ovt_grp},
                    "ffa_queue": {str(s) for s in _ffa_grp}}
@@ -45953,7 +46109,7 @@ async def delete_player_data(steam_id: str, request: Request, sig: str = Query(.
                       invalidation_reason='member_deleted'
                 WHERE id=:sid AND status='active' AND spawn_confirmations < 4"""),
             {"sid": _sid})
-        await _reconcile_team_series_bets(db, _sid, "member deleted")
+        await _reconcile_team_series_bets(db, _sid, "member deleted", raise_retryable=True)
         # Codex r2 f2: hosted-aware disposition, same guard as before — only
         # when the cancel above actually landed (a live game keeps its group).
         if (await db.execute(text(
@@ -46005,7 +46161,7 @@ async def delete_player_data(steam_id: str, request: Request, sig: str = Query(.
                 # its held lobby-phase wagers come back (migration 207).
                 # No-op for 'ovt'. A promotion (the elif) dissolves nothing.
                 if _killed is not None:
-                    await _refund_lobby_bets(db, _lmode, _lid, "lobby_disbanded")
+                    await _refund_lobby_bets(db, _lmode, _lid, "lobby_disbanded", raise_retryable=True)
                     _inv_ended += await _invite_end_lobby(db, _lmode, _lid, "lobby_closed")
             elif _ol["host_player_id"] == pid:
                 await db.execute(text(
@@ -46040,7 +46196,7 @@ async def delete_player_data(steam_id: str, request: Request, sig: str = Query(.
                 # Terminal transition landed -> refund the held lobby-phase
                 # wagers (migration 207). A promotion dissolves nothing.
                 if _killed is not None:
-                    await _refund_lobby_bets(db, "ffa", _lid, "lobby_disbanded")
+                    await _refund_lobby_bets(db, "ffa", _lid, "lobby_disbanded", raise_retryable=True)
                     _inv_ended += await _invite_end_lobby(db, "ffa", _lid, "lobby_closed")
             elif _ol["host_player_id"] == pid:
                 await db.execute(text(
@@ -46065,7 +46221,7 @@ async def delete_player_data(steam_id: str, request: Request, sig: str = Query(.
              "rec_trigger": "member_delete"})
         # Reconcile, not blanket-refund: a PLAYED lobby can hold bets whose
         # game has a recorded winner (#241 — those settle, the rest refund).
-        await _reconcile_ffa_lobby_bets(db, _lid, "member deleted")
+        await _reconcile_ffa_lobby_bets(db, _lid, "member deleted", raise_retryable=True)
         await db.execute(text(
             """UPDATE ffa_queue SET status='searching', series_id=NULL, slot=NULL,
                       room_name=NULL, room_region=NULL, matched_at=NULL, joined_at=NOW(),
@@ -46303,6 +46459,7 @@ async def delete_player_data(steam_id: str, request: Request, sig: str = Query(.
     #     display name baked in and, unlike a delivered mail, cannot be
     #     re-rendered from the anonymised row. The recipient keeps the mail
     #     itself in-game; only the notification is dropped.
+    await db.execute(text(_ERASE_RELAY_DMS_LOCK_SQL), {"sid": steam_id, "pid": pid})
     await db.execute(text(_ERASE_RELAY_DMS_TO_SQL), {"sid": steam_id})
     await db.execute(text(_ERASE_RELAY_DMS_FROM_SQL), {"sid": steam_id, "pid": pid})
     await _invite_bump(db, _inv_ended, drop=pid)
@@ -46315,6 +46472,11 @@ async def delete_player_data(steam_id: str, request: Request, sig: str = Query(.
     # item MDPL); the retention sweep waits for no row lock and is not in it.
     await db.execute(text(_DELETE_CASE_SCRUB_SQL), {"pid": pid, "sid": steam_id, "tomb": _tomb})
 
+    # MDPL R6a: no commit starts after the deadline -- the client may have
+    # given up by then; this attempt is rolled back and nothing is written.
+    if _deletion_past(_deadline):
+        await db.rollback()
+        raise HTTPException(status_code=503, detail=_DELETION_REFUSAL)
     await db.commit()
     print(f"[PRIVACY] Anonymized steam_id={steam_id} (placeholder={player.steam_id})")
 
@@ -52542,7 +52704,8 @@ _TEAM_BET_REFUND_STATUSES = ("cancelled", "canceled")
 
 
 async def _reconcile_team_series_bets(db: AsyncSession, series_uuid, reason: str,
-                                      allow_refund_statuses: tuple = _TEAM_BET_REFUND_STATUSES):
+                                      allow_refund_statuses: tuple = _TEAM_BET_REFUND_STATUSES,
+                                      raise_retryable: bool = False):
     """Terminal bet resolution for a 2v2 series that is being cancelled/voided
     (or is discovered already closed with unsettled bets — the janitor sweep).
     A completed, non-invalidated series with a recorded winner SETTLES its
@@ -52661,6 +52824,8 @@ async def _reconcile_team_series_bets(db: AsyncSession, series_uuid, reason: str
                 print(f"[TEAM-BETS] reconciled series {series_uuid} ({reason}): "
                       f"{settled} settled, {refunded} refunded")
     except Exception as ex:
+        if _retryable_for_caller(ex, raise_retryable):
+            raise
         print(f"[TEAM-BETS] reconcile failed for {series_uuid} ({reason}) — janitor retries: {ex}")
 
 
@@ -70516,7 +70681,8 @@ async def _refund_ffa_game_bets_strict(db: AsyncSession, lobby_id, game_number: 
         f"({FFA_REFUND_MAX_BATCHES * 200} refunded and more left)")
 
 
-async def _refund_ffa_lobby_bets(db: AsyncSession, lobby_id, reason: str, game_number: int | None = None):
+async def _refund_ffa_lobby_bets(db: AsyncSession, lobby_id, reason: str, game_number: int | None = None,
+                                 raise_retryable: bool = False):
     """Refund unsettled bets on a lobby (cancel/sweep paths), optionally only
     one game's. Payout == stake marks a refund (#107 display rule). Claim-first
     like the settle (no double-refund across concurrent passes). Runs inside
@@ -70572,10 +70738,12 @@ async def _refund_ffa_lobby_bets(db: AsyncSession, lobby_id, reason: str, game_n
             if n:
                 print(f"[FFA-BETS] refunded {n} bet(s) on lobby {lobby_id} ({reason})")
     except Exception as ex:
+        if _retryable_for_caller(ex, raise_retryable):
+            raise
         print(f"[FFA-BETS] refund pass failed for {lobby_id} ({reason}) — retried at next closure event: {ex}")
 
 
-async def _reconcile_ffa_lobby_bets(db: AsyncSession, lobby_id, reason: str):
+async def _reconcile_ffa_lobby_bets(db: AsyncSession, lobby_id, reason: str, raise_retryable: bool = False):
     """Terminal bet resolution for a lobby that is closing (or already closed):
     settle every unsettled bet whose game has a RECORDED result AND was played
     to the length its wagers were priced for, refund the rest — the wagers on
@@ -70618,6 +70786,8 @@ async def _reconcile_ffa_lobby_bets(db: AsyncSession, lobby_id, reason: str):
         # a refund would return stakes on games that DO have a recorded result
         # (#241's exact mis-pay). The stranded-bet janitor sweep retries the
         # whole reconcile on its next tick instead.
+        if _retryable_for_caller(ex, raise_retryable):
+            raise
         print(f"[FFA-BETS] closure reconcile failed for {lobby_id} ({reason}) — janitor retries: {ex}")
         return
     # Refund the two classes that must not be PAID — a game with no recorded
@@ -70628,10 +70798,11 @@ async def _reconcile_ffa_lobby_bets(db: AsyncSession, lobby_id, reason: str):
     # mis-pay it; scoped this way the overflow simply waits for the sweep's
     # next tick to settle correctly).
     for g in unresolved_games:
-        await _refund_ffa_lobby_bets(db, lobby_id, reason, game_number=g)
+        await _refund_ffa_lobby_bets(db, lobby_id, reason, game_number=g,
+                                     raise_retryable=raise_retryable)
     for g in refund_games:
         await _refund_ffa_lobby_bets(db, lobby_id, f"{reason}+score_target_skew",
-                                     game_number=g)
+                                     game_number=g, raise_retryable=raise_retryable)
 
 
 @app.get("/api/v1/ffa/bettable", tags=["Betting"])
@@ -71074,7 +71245,8 @@ async def _flush_lobby_bet_refunds(db: AsyncSession, mode: str | None = None,
     return n
 
 
-async def _refund_lobby_bets(db: AsyncSession, mode: str, lobby_id, reason: str) -> int:
+async def _refund_lobby_bets(db: AsyncSession, mode: str, lobby_id, reason: str,
+                             raise_retryable: bool = False) -> int:
     """Refund every OPEN wager on a lobby that died WITHOUT ever starting.
 
     Runs inside the CALLER's transaction, inside a savepoint: a refund problem
@@ -71122,6 +71294,8 @@ async def _refund_lobby_bets(db: AsyncSession, mode: str, lobby_id, reason: str)
         if n:
             print(f"[LOBBY-BETS] refunded {n} wager(s) on {mode} lobby {lobby_id} ({reason})")
     except Exception as ex:
+        if _retryable_for_caller(ex, raise_retryable):
+            raise
         print(f"[LOBBY-BETS] refund pass failed for {mode} lobby {lobby_id} "
               f"({reason}) — janitor retries: {ex}")
     return n
@@ -80835,6 +81009,7 @@ async def mail_settings_put(req: _MailSettingsReq, request: Request,
             # Withdraw what is still queued, exactly as `/mail relay off`
             # does -- the same statement, so the two routes cannot drift
             # into meaning different things by the same name.
+            await db.execute(text(mail_discord.RELAY_OFF_LOCK_SQL), {"sid": me["steam_id"]})
             out["withdrawn"] = (await db.execute(
                 text(mail_discord.RELAY_OFF_CANCEL_SQL),
                 {"sid": me["steam_id"]})).rowcount or 0
