@@ -764,10 +764,11 @@ def test_r6b_control_without_the_flag_the_helper_keeps_the_wager_open(monkeypatc
 #
 # The flag travels as an argument: raise_retryable, False by default at
 # every helper; the deletion passes True at its four calls, and
-# _reconcile_ffa_lobby_bets passes its own value on to its two inner
-# helpers. Nothing else carries it. The deadline is the one value the bound
-# keeps in a context variable (_deletion_deadline), set for each attempt
-# and reset in the same try's finally, in _deletion_bounded alone.
+# _reconcile_ffa_lobby_bets passes its own value on at its two calls of
+# _refund_ffa_lobby_bets. Nothing else carries it. The deadline is the one
+# value the bound keeps in a context variable (_deletion_deadline), set for
+# each attempt and reset in the same try's finally, in _deletion_bounded
+# alone.
 
 LEAVE_DISBANDED = inv_pg.Answer(200, {"status": "ok", "disbanded": True, "remaining": 0})
 POOL_KEY_FAILS = "SELECT mdpl_fail_once(), pg_advisory_xact_lock(hashtext('pc_snapshot'))"
