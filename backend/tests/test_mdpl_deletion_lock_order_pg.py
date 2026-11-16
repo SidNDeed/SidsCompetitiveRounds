@@ -28,7 +28,9 @@ ends in 40P01. On the base each fails at its "outcomes" assertion with one
 side's 40P01: that failure is the live reproduction MDPL's proof starts from.
 The second test releases the deletion only after the ack's own deadlock
 check has run, so that on the base the deletion is the side PostgreSQL ends:
-the player's 500.
+the player's 500. Each runs with the bound's new attempts switched off
+(_order_only), so on MDPL's build it proves the ORDER: a 40P01 there would
+reach the test as it does on the base, not be run again.
 """
 
 import asyncio
@@ -59,6 +61,15 @@ async def _past_deadlock_check(env):
     await asyncio.sleep(ms / 1000.0 + 0.3)
 
 
+def _order_only(env):
+    """The bound's new attempts off (main._DELETION_RETRY_SQLSTATES empty) and
+    its budget wide, so a test of the lock ORDER sees PostgreSQL's 40P01 as
+    it is, and no park in it meets the attempt's lock_timeout or deadline.
+    raising=False: the base (732d96b1) has neither name, and ignores both."""
+    env.mp.setattr(main, "_DELETION_RETRY_SQLSTATES", frozenset(), raising=False)
+    env.mp.setattr(main, "_DELETION_BUDGET_S", 120.0, raising=False)
+
+
 async def _edition(env):
     await env.conn.execute(
         "INSERT INTO pc_editions (name) SELECT 'Edition 1'"
@@ -86,6 +97,7 @@ async def _sent(env, sender, to):
 def test_two_deletions_one_owning_a_print_of_the_others_card_both_finish(monkeypatch):
     async def body(env):
         _arm(env)
+        _order_only(env)
         await _edition(env)
         p, q = await env.players(2)
         pr = await _print_of(env, q, p)
@@ -114,6 +126,7 @@ def test_two_deletions_one_owning_a_print_of_the_others_card_both_finish(monkeyp
 def test_a_deletion_and_the_relay_ack_both_finish(monkeypatch):
     async def body(env):
         _arm(env)
+        _order_only(env)
         monkeypatch.setenv("API_SECRET_KEY", INTERNAL)
         p, t = await env.players(2)
         r_from = await _relay_row(env, t, p, await _sent(env, p, t))     # SENT by P, handed out
@@ -159,6 +172,7 @@ async def _matched(env, a, b):
 def test_a_ban_and_a_deletion_sharing_a_lobby_and_a_ranked_match_both_finish(monkeypatch):
     async def body(env):
         _arm(env)
+        _order_only(env)
         lid, (p, x) = await env.lobby("team", 2)
         (mod,) = await env.players(1)
         await env.conn.execute("INSERT INTO admin_users (steam_id, granted_at) VALUES ($1, NOW())"
