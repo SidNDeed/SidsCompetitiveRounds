@@ -143,7 +143,8 @@ def test_a_deletion_and_the_relay_ack_both_finish(monkeypatch):
 
 
 RANKED_MARK = "OR matched_with = :pid"      # the deletion's ranked_queue DELETE (its verify read comes after it)
-# The moderator is a players row of its own: player_bans.banned_by_steam_id references players.
+# The moderator is a players row with an admin_users row: player_bans.banned_by_steam_id references
+# admin_users(steam_id).
 
 
 async def _matched(env, a, b):
@@ -160,6 +161,8 @@ def test_a_ban_and_a_deletion_sharing_a_lobby_and_a_ranked_match_both_finish(mon
         _arm(env)
         lid, (p, x) = await env.lobby("team", 2)
         (mod,) = await env.players(1)
+        await env.conn.execute("INSERT INTO admin_users (steam_id, granted_at) VALUES ($1, NOW())"
+                               " ON CONFLICT DO NOTHING", mod.sid)
         await _matched(env, p, x)
         await _matched(env, x, p)
         assert await env.conn.fetchval(
