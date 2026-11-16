@@ -12848,19 +12848,42 @@ QDIG_POSTED_BATCH = 200               # the route's own bound per call
 QDIG_REMINDER_HOLD_S = 86400          # a reminder whose stamp failed is not repeated by this process
 QDIG_ENTRY_PLAYERS = 10               # the most players an entry lists
 QDIG_ENTRY_IDS = 5                    # the most row ids an entry closes with
+QDIG_ENTRY_REPORTERS = 3              # the most reporter names an entry lists
+QDIG_ENTRY_MAX = 1700                 # one game's entry, bounded by itself before packing
+QDIG_NAME_MAX = 32                    # a name, cut with a visible "..."
+QDIG_REASON_MAX = 240                 # the reason sentence, likewise
+QDIG_BLOCKED_MAX = 140                # the accept-blocked sentence, likewise
+QDIG_DIFF_WORDS = {"winner": "winner", "roster": "number of players", "rounds_won": "rounds",
+                   "points_total": "points", "kills": "kills", "left_early": "left early",
+                   "absent": "absent"}
 QDIG_HEADER = "Held game reports: results a player's game sent that the server did not record as sent."
 QDIG_HEADER_MORE = "Held game reports (continued):"
 QDIG_WHAT_YOU_CAN_DO = ("What you can do: in the Admin tab, Rejected Reports. Accept only marks the report "
                         "as approved for a later ordered replay; it records nothing now. "
                         "Discard marks it as dismissed.")
-QDIG_MD_CHARS = "\\*_~`|>[]()#"
+QDIG_MD_CHARS = "\\*_~`|>[]()#<"
+
+
+def _qdig_md(value, limit: int) -> str:
+    """THE one function every string that goes to Discord from a D1 row
+    passes: names, the reason sentence, the reporter, the winner, the
+    differences, the accept-blocked sentence. One line (control
+    characters, invisible format characters and line breaks become
+    spaces), cut to `limit` characters with a visible "...", URL schemes
+    made inert (": //", so nothing auto-links), and every markdown
+    character escaped. allowed_mentions stays none. The api sends these
+    strings PLAIN and the renderer calls this once per string at the slot
+    where it is formatted, so nothing is escaped twice."""
+    s = " ".join("".join(ch if ch.isprintable() else " " for ch in str(value if value is not None else "")).split())
+    if len(s) > limit:
+        s = s[:max(limit - 3, 0)].rstrip() + "..."
+    s = s.replace("://", ": //")
+    return "".join("\\" + ch if ch in QDIG_MD_CHARS else ch for ch in s)
 
 
 def _qdig_esc(name) -> str:
-    """A display name for a Discord message: one line, at most 32
-    characters, markdown characters escaped (mentions are off already)."""
-    s = " ".join("".join(ch if ch.isprintable() else " " for ch in str(name or "")).split())[:32]
-    return "".join("\\" + ch if ch in QDIG_MD_CHARS else ch for ch in s) or "unknown player"
+    """A display name for a Discord message (_qdig_md at QDIG_NAME_MAX)."""
+    return _qdig_md(name, QDIG_NAME_MAX) or "unknown player"
 
 
 def _qdig_unix(value):
@@ -12882,64 +12905,129 @@ def _qdig_numbers(row: dict) -> tuple:
                   p.get("absent")) for p in row.get("players") or [])
 
 
+def _qdig_n(value) -> int:
+    """A number from a D1 row for a message (0 when it is not one)."""
+    try:
+        return int(value)
+    except (TypeError, ValueError, OverflowError):
+        return 0
+
+
+def _qdig_short_id(value) -> str:
+    """A row id's first eight characters, hex and dashes only."""
+    s = str(value or "")[:8]
+    return s if all(ch in "0123456789abcdef-" for ch in s) else "--------"
+
+
+def _qdig_diff_line(d: dict) -> str:
+    """One difference from the recorded game, held number first."""
+    def yes_no(x):
+        return ("yes" if x else "no") if isinstance(x, bool) else x
+    word = QDIG_DIFF_WORDS.get(d.get("field"), "a number")
+    who = f"{_qdig_esc(d.get('player'))}, " if d.get("player") else ""
+    return (f"- {who}{word}: {_qdig_md(yes_no(d.get('held')), QDIG_NAME_MAX)} here, "
+            f"{_qdig_md(yes_no(d.get('recorded')), QDIG_NAME_MAX)} recorded")
+
+
+def _qdig_fit(lines: list, room: int, what: str) -> list:
+    """As many of `lines` as fit in `room` characters (each with its line
+    break), the rest as one '- and N more <what>' line that always fits."""
+    out, used = [], 0
+    for i, ln in enumerate(lines):
+        rest = len(lines) - i - 1
+        reserve = len(f"- and {rest} more {what}") + 1 if rest else 0
+        if used + len(ln) + 1 + reserve > room:
+            return out + [f"- and {len(lines) - i} more {what}"]
+        out.append(ln)
+        used += len(ln) + 1
+    return out
+
+
 def _qdig_entry(rows: list) -> str:
-    """One game, in plain words: what, when, why held, the numbers, who
-    reported it, what an admin can do. Closed by the rows' short ids."""
+    """One game, in plain words: what, when, why held, the numbers, the
+    differences from the recorded game, who reported it, what an admin can
+    do. Closed by the rows' short ids. Bounded by itself at QDIG_ENTRY_MAX:
+    the head and tail lines are each cut, and the players and differences
+    that do not fit become a count. Every string from the row passes
+    _qdig_md (or _qdig_esc, which is _qdig_md for a name) once, here."""
     r0 = rows[0]
     players = list(r0.get("players") or [])
     sides = r0.get("sides")
     ranked = r0.get("ranked")
     kind = "ranked" if ranked is True else ("casual" if ranked is False else "ranked or casual unknown")
-    if sides:
-        shape = "v".join(str(len(s.get("players") or [])) for s in sides)
-        title = f"**{shape}, {kind}**"
+    if r0.get("malformed"):
+        title = f"**Held report, {kind}**"
+    elif sides:
+        title = f"**{len(sides[0].get('players') or [])}v{len(sides[-1].get('players') or [])}, {kind}**"
     else:
         title = f"**FFA, {len(players)} players, {kind}**"
-    game_no = r0.get("game_number")
-    lines = [title + (f" - game {int(game_no)} of its lobby" if game_no else "")
-             + f" - played {_qdig_when(r0.get('played_at'))}",
-             f"Why held: {r0.get('reason_text') or 'held for review.'}"]
+    game_no = _qdig_n(r0.get("game_number"))
+    head = [title + (f" - game {game_no} of its lobby" if game_no else "")
+            + f" - played {_qdig_when(r0.get('played_at'))}",
+            f"Why held: {_qdig_md(r0.get('reason_head') or r0.get('reason_text') or 'held for review.', QDIG_REASON_MAX)}"]
+    numbers, plines = [], []
     if sides:
-        lines.append("Score (rounds, points):")
+        numbers.append("Score (rounds, points):")
         for s in sides:
             who = " + ".join(_qdig_esc(n) for n in s.get("players") or [])
-            lines.append(f"- {who}: {int(s.get('rounds') or 0)}, {int(s.get('points') or 0)}"
-                         + (" (winner)" if s.get("winner") else ""))
-    else:
-        lines.append("Numbers (rounds, points, kills), winner first:")
+            numbers.append(f"- {who}: {_qdig_n(s.get('rounds'))}, {_qdig_n(s.get('points'))}"
+                           + (" (winner)" if s.get("winner") else ""))
+    elif players:
+        numbers.append("Numbers (rounds, points, kills), winner first:")
         win = r0.get("winner_name")
         order = sorted(range(len(players)),
-                       key=lambda i: (players[i].get("name") != win, -int(players[i].get("rounds") or 0),
-                                      -int(players[i].get("points") or 0), i))
+                       key=lambda i: (players[i].get("name") != win, -_qdig_n(players[i].get("rounds")),
+                                      -_qdig_n(players[i].get("points")), i))
         for i in order[:QDIG_ENTRY_PLAYERS]:
             p = players[i]
             marks = [m for m, on in (("winner", p.get("name") == win and i == order[0]),
-                                     ("left early", p.get("left_early")), ("absent", p.get("absent"))) if on]
-            lines.append(f"- {_qdig_esc(p.get('name'))}: {int(p.get('rounds') or 0)}, "
-                         f"{int(p.get('points') or 0)}, {int(p.get('kills') or 0)}"
-                         + (f" ({', '.join(marks)})" if marks else ""))
+                                     ("left early", p.get("left_early") is True),
+                                     ("absent", p.get("absent") is True)) if on]
+            plines.append(f"- {_qdig_esc(p.get('name'))}: {_qdig_n(p.get('rounds'))}, "
+                          f"{_qdig_n(p.get('points'))}, {_qdig_n(p.get('kills'))}"
+                          + (f" ({', '.join(marks)})" if marks else ""))
         if len(players) > QDIG_ENTRY_PLAYERS:
-            lines.append(f"- and {len(players) - QDIG_ENTRY_PLAYERS} more")
+            plines.append(f"- and {len(players) - QDIG_ENTRY_PLAYERS} more")
+    diffs = [_qdig_diff_line(d) for d in r0.get("differences") or [] if isinstance(d, dict)]
     reporters = []
     for r in rows:
         name = _qdig_esc(r.get("reporter_name"))
         if name not in reporters:
             reporters.append(name)
+    others = len(reporters) - QDIG_ENTRY_REPORTERS
+    who = " and ".join(reporters[:QDIG_ENTRY_REPORTERS]) + (
+        f" and {others} other{'s' if others != 1 else ''}" if others > 0 else "")
     if len(rows) == 1:
         count = "1 report."
     elif len({_qdig_numbers(r) for r in rows}) == 1:
         count = f"{len(rows)} reports, same numbers."
     else:
         count = f"{len(rows)} reports with different numbers (the numbers above are the first one's)."
-    lines.append(f"Reported by {' and '.join(reporters)}. {count}")
     blocked = [r for r in rows if r.get("can_accept") is False]
-    lines.append(QDIG_WHAT_YOU_CAN_DO + (
-        f" Accept is blocked: {blocked[0].get('accept_blocked_reason') or 'the server gave no reason'}."
-        if blocked else ""))
-    ids = [str(r.get("id") or "")[:8] for r in rows]
+    ids = [_qdig_short_id(r.get("id")) for r in rows]
     more = f" +{len(ids) - QDIG_ENTRY_IDS} more" if len(ids) > QDIG_ENTRY_IDS else ""
-    lines.append("[" + ", ".join(ids[:QDIG_ENTRY_IDS]) + more + "]")
-    return "\n".join(lines)
+    tail = [f"Reported by {who}. {count}",
+            QDIG_WHAT_YOU_CAN_DO + (
+                f" Accept is blocked: "
+                f"{_qdig_md(blocked[0].get('accept_blocked_reason') or 'the server gave no reason', QDIG_BLOCKED_MAX)}."
+                if blocked else ""),
+            "[" + ", ".join(ids[:QDIG_ENTRY_IDS]) + more + "]"]
+    # The head and tail are bounded line by line (about 1,500 characters at
+    # the worst, every character escaped); what is left of QDIG_ENTRY_MAX
+    # goes to the players first, then the differences, the rest as counts.
+    label = "Differences from the recorded game:"
+    room = QDIG_ENTRY_MAX - len("\n".join(head + tail)) - 1 - sum(len(x) + 1 for x in numbers)
+    keep = (len(label) + 1 + len(f"- and {len(diffs)} more differences") + 1) if diffs else 0
+    body = numbers + _qdig_fit(plines, max(room - keep, 0), "players") if plines else list(numbers)
+    room -= sum(len(x) + 1 for x in body[len(numbers):])
+    if diffs:
+        body += [label] + _qdig_fit(diffs, max(room - len(label) - 1, 0), "differences")
+    text = "\n".join(head + body + tail)
+    if len(text) > QDIG_ENTRY_MAX:
+        # Not reachable with the cuts above; if it were, whole lines go,
+        # never a cut inside one (which could split an escape).
+        text = "\n".join(head + tail)
+    return text
 
 
 def _qdig_games(rows: list) -> list:
@@ -13009,11 +13097,30 @@ async def _qdig_flush_marks():
             st["unmarked"] -= set(ids)
 
 
-def _qdig_reminder_line(totals: dict) -> str:
-    n = int(totals.get("needs_decision_games") or 0)
+def _qdig_needs_count(rows: list) -> tuple:
+    """Over every row of a complete pass (all pages): the games that need
+    a decision, the oldest one's played_at, and how many rows the api did
+    not describe (class None), which make the count a floor."""
+    needs = [r for r in rows if r.get("class") == "needs_decision"]
+    games = {r.get("game_key") or ("row:" + str(r.get("id"))) for r in needs}
+    played = [(u, r.get("played_at")) for r in needs for u in [_qdig_unix(r.get("played_at"))] if u is not None]
+    oldest = min(played)[1] if played else None
+    return len(games), oldest, sum(1 for r in rows if r.get("class") is None)
+
+
+def _qdig_reminder_line(rows: list) -> str:
+    """The reminder, counted over every page of the pass. When a row was not
+    described the number is a floor and the text says that counting
+    stopped; it is never a number that is silently short."""
+    n, oldest, unread = _qdig_needs_count(rows)
+    if unread:
+        return (f"Held game reports: at least {n} game{'s' if n != 1 else ''} still "
+                f"need{'s' if n == 1 else ''} a decision "
+                f"(counting stopped: {unread} held report{'s were' if unread != 1 else ' was'} not yet "
+                f"described); the oldest counted was played {_qdig_when(oldest)}. "
+                "See the Admin tab, Rejected Reports.")
     return (f"Held game reports: {n} game{'s' if n != 1 else ''} still need{'s' if n == 1 else ''} "
-            f"a decision; the oldest was played {_qdig_when(totals.get('needs_decision_oldest'))}. "
-            "See the Admin tab, Rejected Reports.")
+            f"a decision; the oldest was played {_qdig_when(oldest)}. See the Admin tab, Rejected Reports.")
 
 
 async def _qdig_iteration(rows: list, totals, complete: bool):
@@ -13031,8 +13138,9 @@ async def _qdig_iteration(rows: list, totals, complete: bool):
         st["quota_named"] &= {(q.get("mode"), q.get("group")) for q in (totals or {}).get("at_quota") or []}
         if not st["first_pass_logged"]:
             st["first_pass_logged"] = True
+            _n, _o, _u = _qdig_needs_count(rows)
             print(f"[QDIGEST] first pass complete: {int((totals or {}).get('pending') or 0)} pending, "
-                  f"{(totals or {}).get('needs_decision_games')} game(s) need a decision")
+                  f"{'at least ' if _u else ''}{_n} game(s) need a decision")
     new = [r for r in rows if r.get("class") == "needs_decision" and not r.get("posted")
            and r["id"] not in st["announced"]]
     quota = [q for q in ((totals or {}).get("at_quota") or [])
@@ -13057,7 +13165,7 @@ async def _qdig_iteration(rows: list, totals, complete: bool):
             st["quota_named"] |= set(qkeys)
             st["unmarked"] |= set(ids)
             await _qdig_flush_marks()
-    if reminder_due and await _qdigest_send(channel, _qdig_reminder_line(totals)):
+    if reminder_due and await _qdigest_send(channel, _qdig_reminder_line(rows)):
         needs = [r["id"] for r in rows if r.get("class") == "needs_decision"]
         if not await _qdig_mark("reminder", needs):
             st["reminder_hold"] = time.monotonic()

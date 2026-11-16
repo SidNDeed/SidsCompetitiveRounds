@@ -267,45 +267,119 @@ def test_pg_qdig_the_pass_is_bounded_and_its_cursor_reaches_every_row(monkeypatc
     assert sum(1 for v in st.values() if v[0] == "filed") == 25
 
 
-def test_pg_qdig_the_census_runs_at_most_every_five_minutes_or_after_a_filing(monkeypatch):
+def _own_clock(monkeypatch):
+    clock = types.SimpleNamespace(t=10_000.0)
+    real_time = main.time
+
+    class _Time:
+        """main's time module, its monotonic clock the test's own (the
+        event loop's clock is left alone)."""
+        def __getattr__(self, name):
+            return getattr(real_time, name)
+
+        @staticmethod
+        def monotonic():
+            return clock.t
+    monkeypatch.setattr(main, "time", _Time())
+    return clock
+
+
+def _count_censuses(monkeypatch):
+    calls = []
+    real = main._qdig_needs_games
+
+    def counted(*a, **k):
+        calls.append(1)
+        return real(*a, **k)
+    monkeypatch.setattr(main, "_qdig_needs_games", counted)
+    return calls
+
+
+def test_pg_qdig_the_census_runs_at_most_every_five_minutes_filing_or_not(monkeypatch):
+    """LOW 2: a pass that files a row runs no census before its interval; a
+    pass runs its census after its filing step whenever the census is due."""
     async def body():
         async with QEnv(monkeypatch) as env:
             await env.seed_live()
-            clock = types.SimpleNamespace(t=10_000.0)
-            real_time = main.time
-
-            class _Time:
-                """main's time module, its monotonic clock the test's own
-                (the event loop's clock is left alone)."""
-                def __getattr__(self, name):
-                    return getattr(real_time, name)
-
-                @staticmethod
-                def monotonic():
-                    return clock.t
-            monkeypatch.setattr(main, "time", _Time())
-            await main._qdig_janitor_pass()                       # files 4, counts 2
+            clock = _own_clock(monkeypatch)
+            calls = _count_censuses(monkeypatch)
+            f1 = await main._qdig_janitor_pass()                  # files 4, counts 2
             w1 = main._qdig_needs_decision_word()
             await env.ex("UPDATE match_report_quarantine SET status='discarded', reviewed_at=NOW()"
                          " WHERE id=CAST(:i AS uuid)", {"i": C2})
+            # A third report of game A, from Juniper: FOR THE RECORD, filed at t+60.
+            await env.seed_row(fx.row("A", keyed=False, body=fx.payload("A", reporter=4),
+                                      qid="0a0a0a0a-0000-4000-8000-0000000000a9",
+                                      created=fx.T_LIVE + timedelta(minutes=40)), "A", reporter=4)
             clock.t += 60
-            await main._qdig_janitor_pass()                       # files nothing, 60 s: no census
-            w2 = main._qdig_needs_decision_word()
+            f2 = await main._qdig_janitor_pass()                  # files 1, 60 s on: no census
+            w2, c2 = main._qdig_needs_decision_word(), len(calls)
             clock.t += main.QDIG_COUNT_EVERY_S
             await main._qdig_janitor_pass()                       # 5 minutes on: the census again
-            return w1, w2, main._qdig_needs_decision_word()
+            return f1, f2, w1, w2, c2, main._qdig_needs_decision_word(), len(calls)
 
-    assert run(body()) == (2, 2, 1)
+    f1, f2, w1, w2, c2, w3, c3 = run(body())
+    assert (f1, f2) == (4, 1)
+    assert c2 == 1, "a pass that filed a row ran a census inside the five minutes"
+    assert (w1, w2, w3, c3) == (2, 2, 1, 2)
 
 
-def test_qdig_the_loop_runs_the_pass_isolated_and_time_boxed():
+def test_qdig_a_timed_out_pass_is_cancelled_its_session_closed_and_the_next_duty_runs(monkeypatch):
+    """M5: the janitor loop's QDIG-1 duty with a pass that never ends (its
+    session open on a statement that does not return): the duty returns
+    within its time box, the pass is cancelled and its session closed, and
+    the loop's next duty runs. A pass that raises is the same."""
+    closed = []
+
+    class Session:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, et, ev, tb_):
+            closed.append(et)
+            return False
+
+    async def hung():
+        async with Session():
+            await asyncio.sleep(3600)
+
+    async def broken():
+        async with Session():
+            raise RuntimeError("the database went away")
+
+    monkeypatch.setattr(main, "QDIG_PASS_TIMEOUT_S", 0.05)
+    order = []
+
+    async def loop_tick(pass_fn):
+        monkeypatch.setattr(main, "_qdig_janitor_pass", pass_fn)
+        await main._qdig_janitor_step()
+        order.append("next duty")
+
+    async def body():
+        t0 = asyncio.get_running_loop().time()
+        await loop_tick(hung)
+        took = asyncio.get_running_loop().time() - t0
+        await loop_tick(broken)
+        return took
+
+    took = run(body())
+    assert order == ["next duty", "next duty"], "a timed-out or failing pass stopped the duty after it"
+    assert took < 2.0
+    assert closed == [asyncio.CancelledError, RuntimeError]
+    # The loop calls the duty bare: nothing between it and the next duty
+    # can be skipped by an exception it raised, because it raises none.
+    import ast as _ast
     import inspect
-    src = inspect.getsource(main.queue_cleanup_loop)
-    i = src.index("_qdig_janitor_pass()")
-    block = src[src.rindex("try:", 0, i):src.index("[QDIG] janitor pass error", i)]
-    assert "asyncio.wait_for(_qdig_janitor_pass(), timeout=QDIG_PASS_TIMEOUT_S)" in block
-    assert src.count("_qdig_janitor_pass()") == 1
-    assert main.QDIG_PASS_TIMEOUT_S <= 30
+    loop = _ast.parse(textwrap_dedent(inspect.getsource(main.queue_cleanup_loop)))
+    calls = [n for n in _ast.walk(loop) if isinstance(n, _ast.Await) and isinstance(n.value, _ast.Call)
+             and getattr(n.value.func, "id", None) == "_qdig_janitor_step"]
+    assert len(calls) == 1
+    assert "_qdig_janitor_pass" not in inspect.getsource(main.queue_cleanup_loop)
+
+
+def textwrap_dedent(s):
+    import textwrap
+    return textwrap.dedent(s)
 
 
 # ── the posted route ───────────────────────────────────────────────────────
@@ -562,3 +636,224 @@ def test_qdig_migration_419_shape():
     assert "ADD CONSTRAINT" not in sql.upper()
     rb = R419.read_text(encoding="utf-8")
     assert rb.count("BEGIN;") == 1 and rb.count("COMMIT;") == 1
+
+
+# ── review qdig-r1 ─────────────────────────────────────────────────────────
+
+BAD = "0bad0bad-0000-4000-8000-000000000bad"
+
+
+async def _seed_body(env, body, *, qid=BAD, game="C2", keyed=False, status="pending", created=None):
+    r = fx.row(game, keyed=keyed, body=body, qid=qid, created=created)
+    return await env.seed_row(r, game, status=status)
+
+
+def test_pg_qdig_an_oversize_body_never_reaches_python(monkeypatch):
+    """HIGH 4: a body whose text is over QDIG_BODY_MAX_BYTES comes back from
+    every statement of the lane as NULL with its over-size mark; the row
+    reads MALFORMED (oversize), NEEDS A DECISION, and is never filed."""
+    big = dict(fx.payload("A"), padding="x" * 300000)
+
+    async def body():
+        async with QEnv(monkeypatch) as env:
+            await env.seed_live()
+            await _seed_body(env, big, game="A")
+            async with env.seed.connect() as conn:
+                d = (await conn.execute(text(main._QDIG_SQL_D1_DETAIL), {
+                    "ids": [BAD], "body_max": main.QDIG_BODY_MAX_BYTES,
+                    "budget": main.QDIG_DECODE_BUDGET_BYTES})).mappings().all()
+                lk = (await conn.execute(text(main._QDIG_SQL_JANITOR_LOCK), {
+                    "id": BAD, "body_max": main.QDIG_BODY_MAX_BYTES})).mappings().all()
+            await main._qdig_janitor_pass()
+            feed = tq.ok(await env.d1())
+            admin = tq.ok(await env.client.get(ADMIN_LIST, params={"admin_steam_id": tq.ADMIN,
+                                                                   "hmac_signature": tq.sig("list")}))
+            return d, lk, await env.statuses(), feed, admin
+
+    d, lk, st, feed, admin = run(body())
+    assert d[0]["payload"] is None, "the D1 detail statement handed an over-size body to Python"
+    assert d[0]["payload_oversize"] is True
+    assert lk[0]["payload"] is None and lk[0]["payload_oversize"] is True
+    assert st[BAD][0] == "pending"
+    (row,) = [r for r in feed["rows"] if r["id"] == BAD]
+    assert row["class"] == "needs_decision" and row["malformed"] == "oversize" and row["players"] == []
+    (adm,) = [r for r in admin["reports"] if r["id"] == BAD]
+    assert adm["reason"].startswith("The stored report cannot be read (oversize)") and adm["score"] == ""
+
+
+def test_pg_qdig_a_malformed_body_does_not_stop_the_feed_or_the_list(monkeypatch):
+    """HIGH 5: a pending row whose body is {"players": 1}: D1, the Admin list
+    and the census answer, and the row NEEDS A DECISION."""
+    async def body():
+        async with QEnv(monkeypatch) as env:
+            await env.seed_live()
+            await _seed_body(env, {"players": 1})
+            await main._qdig_janitor_pass()
+            feed = await env.d1()
+            admin = await env.client.get(ADMIN_LIST, params={"admin_steam_id": tq.ADMIN,
+                                                            "hmac_signature": tq.sig("list")})
+            return feed, admin, main._qdig_needs_decision_word()
+
+    feed, admin, word = run(body())
+    d = tq.ok(feed)
+    (row,) = [r for r in d["rows"] if r["id"] == BAD]
+    assert row["class"] == "needs_decision" and row["malformed"] == "players"
+    assert BAD in [r["id"] for r in tq.ok(admin)["reports"]]
+    assert word == 3
+
+
+def test_pg_qdig_the_janitor_never_files_a_malformed_report(monkeypatch):
+    """HIGH 1: game A's held numbers with two players on slot 0 (a capture
+    that runs before the settlement's slot check keeps such a body)."""
+    dup = fx.payload("A")
+    dup["players"][1]["slot"] = 0
+
+    async def body():
+        async with QEnv(monkeypatch) as env:
+            await env.seed_live()
+            await _seed_body(env, dup, game="A")
+            filed = await main._qdig_janitor_pass()
+            return filed, await env.statuses()
+
+    filed, st = run(body())
+    assert st[BAD][0] == "pending", "a report with two players on one slot was filed"
+    assert filed == 4
+
+
+def test_pg_qdig_the_decode_budget_leaves_later_rows_unread_and_the_census_says_so(monkeypatch):
+    """A statement hands Python at most QDIG_DECODE_BUDGET_BYTES of body
+    text: with the budget below two bodies, D1 describes the first rows (the
+    unposted first) and leaves the rest with class None; the census reads
+    -1."""
+    async def body():
+        async with QEnv(monkeypatch) as env:
+            await env.seed_live()
+            await main._qdig_janitor_pass()
+            n_full = main._qdig_needs_decision_word()
+            async with env.seed.connect() as conn:
+                one = (await conn.execute(text(
+                    "SELECT max(octet_length(payload::text)) FROM match_report_quarantine"))).scalar()
+            monkeypatch.setattr(main, "QDIG_DECODE_BUDGET_BYTES", one + 10)
+            monkeypatch.setattr(main, "_qdig_state", {"needs_decision": -1, "count_at": None, "after": None})
+            await main._qdig_janitor_pass()
+            return n_full, tq.ok(await env.d1()), main._qdig_needs_decision_word()
+
+    n_full, d, word = run(body())
+    assert n_full == 2
+    assert [r["class"] for r in d["rows"]] == ["needs_decision", None]
+    assert d["totals"]["needs_decision_complete"] is False
+    assert word == -1
+
+
+def test_pg_qdig_the_census_reads_minus_one_past_its_row_bound(monkeypatch):
+    """LOW 1: more pending rows than QDIG_CENSUS_MAX_ROWS: -1, never a
+    truncated count."""
+    async def body():
+        async with QEnv(monkeypatch) as env:
+            await env.seed_players()
+            await env.seed_lobbies()
+            await env.ex(
+                "INSERT INTO match_report_quarantine (mode, reason, http_status, group_id, photon_room_id, payload,"
+                " status, created_at)"
+                " SELECT 'ffa', 'lobby_completed', 409, NULL, 'QDIGMANY_' || n, CAST(:pl AS JSONB), 'pending',"
+                "        now() - make_interval(secs => n)"
+                "   FROM generate_series(1, 201) n",
+                {"pl": json.dumps(fx.payload("C2"))})
+            await main._qdig_janitor_pass()
+            return main._qdig_needs_decision_word()
+
+    assert run(body()) == -1
+
+
+def test_pg_qdig_filed_rows_count_against_the_quota_and_are_still_recognised(monkeypatch):
+    """M1: the capture's held-row quota and its variant search count FILED
+    rows as they count pending ones."""
+    async def body():
+        async with QEnv(monkeypatch) as env:
+            await env.seed_players()
+            await env.seed_lobbies()
+            g = fx.LOBBY_AB
+            pl = json.dumps(fx.payload("A"))
+            await env.ex(
+                "INSERT INTO match_report_quarantine (mode, reason, http_status, group_id, photon_room_id, payload,"
+                " status, created_at, reviewed_at)"
+                " SELECT 'ffa', 'ffa_game_contradiction', 409, :g, 'QDIGQUOTA_' || n, CAST(:pl AS JSONB),"
+                "        CASE WHEN n <= 4 THEN 'filed' ELSE 'pending' END, now(),"
+                "        CASE WHEN n <= 4 THEN now() END"
+                "   FROM generate_series(1, 50) n", {"g": g, "pl": pl})
+            quota = await env.real_capture(mode="ffa", reason="ffa_game_contradiction", status_code=409,
+                                           payload=fx.payload("B"), group_id=g, photon_room_id="QDIGQUOTA_new",
+                                           reporter_id=None, player_ids=[])
+            await env.ex("DELETE FROM match_report_quarantine")
+            # A keyed row of room R, and a FILED variant of R with another body.
+            room = fx.GAMES["A"]["room"]
+            await env.ex(
+                "INSERT INTO match_report_quarantine (mode, reason, http_status, group_id, photon_room_id, payload,"
+                " status) VALUES ('ffa', 'ffa_game_contradiction', 409, :g, :r, CAST(:k AS JSONB), 'pending'),"
+                " ('ffa', 'ffa_game_contradiction', 409, :g, NULL, CAST(:v AS JSONB), 'filed')",
+                {"g": g, "r": room, "k": json.dumps(fx.payload("A", reporter=2)),
+                 "v": json.dumps(fx.payload("A", reporter=3))})
+            again = await env.real_capture(mode="ffa", reason="ffa_game_contradiction", status_code=409,
+                                           payload=fx.payload("A", reporter=3), group_id=g, photon_room_id=room,
+                                           reporter_id=None, player_ids=[])
+            async with env.seed.connect() as conn:
+                n = (await conn.execute(text(
+                    "SELECT count(*) FROM match_report_quarantine WHERE photon_room_id IS NULL"))).scalar()
+            return quota, again, n
+
+    quota, again, n = run(body())
+    assert quota == "quota", "four filed rows of fifty did not count against the quota"
+    assert n == 1, "a redelivery of a filed variant was captured again"
+    assert again == "variant"
+
+
+def test_pg_qdig_a_repeated_reminder_inside_its_interval_keeps_its_stamp(monkeypatch):
+    """M2: the same reminder acknowledged twice: the second marks nothing and
+    the stamp stays."""
+    async def body():
+        async with QEnv(monkeypatch) as env:
+            await env.seed_live()
+            await main._qdig_janitor_pass()
+            first = (await env.post({"kind": "reminder", "ids": [C2, C3]})).json()
+
+            async def stamps():
+                async with env.seed.connect() as conn:
+                    res = await conn.execute(text(
+                        "SELECT id, digest_reminded_at FROM match_report_quarantine WHERE digest_reminded_at"
+                        " IS NOT NULL"))
+                    return {str(r.id): r.digest_reminded_at for r in res}
+            s1 = await stamps()
+            await asyncio.sleep(0.05)
+            second = (await env.post({"kind": "reminder", "ids": [C2, C3]})).json()
+            await env.ex("UPDATE match_report_quarantine SET digest_reminded_at = NOW() - INTERVAL '25 hours'"
+                         " WHERE id = CAST(:i AS uuid)", {"i": C2})
+            third = (await env.post({"kind": "reminder", "ids": [C2, C3]})).json()
+            return first, second, third, s1, await stamps()
+
+    first, second, third, s1, s3 = run(body())
+    assert first["marked"] == 2
+    assert second["marked"] == 0, "a reminder acknowledged again inside 24 hours moved its stamp"
+    assert third["marked"] == 1 and s3[C3] == s1[C3] and s3[C2] > s1[C2]
+
+
+def test_pg_qdig_a_failed_eligibility_check_answers_one_fixed_sentence(monkeypatch):
+    """M4: the later-rated lookup raises an error whose text carries a
+    statement: accept_blocked_reason is one fixed sentence within 140."""
+    async def body():
+        async with QEnv(monkeypatch) as env:
+            await env.seed_live()
+
+            async def fails(*a, **k):
+                raise RuntimeError("SELECT count(*) FROM ffa_match_players WHERE " + "x = 1 AND " * 40)
+            monkeypatch.setattr(main, "_quarantine_later_rated", fails)
+            return tq.ok(await env.client.get(ADMIN_LIST, params={"admin_steam_id": tq.ADMIN,
+                                                                 "hmac_signature": tq.sig("list")}))
+
+    rep = run(body())["reports"]
+    assert rep
+    for r in rep:
+        assert len(r["accept_blocked_reason"]) <= 140, (
+            "the blocked reason carries the exception's text: " + r["accept_blocked_reason"][:80])
+        assert r["accept_blocked_reason"] == ("The server could not check whether these players have played "
+                                              "since; try again later.")
+        assert r["can_accept"] is False

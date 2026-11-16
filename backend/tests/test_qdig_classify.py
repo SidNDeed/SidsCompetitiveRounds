@@ -30,7 +30,7 @@ def classify(game, numbers=None, *, reason=None, keyed=True, recorded=None, flag
     body = fx.payload(game, numbers, flags=flags, winner=winner)
     r = fx.row(game, keyed=keyed, reason=reason, body=body)
     f = fx.facts(game, recorded=recorded, **facts_kw)
-    return main._qdig_classify(r, f), r, f
+    return fx.judge(main, r, f), r, f
 
 
 # ── the six live rows ──────────────────────────────────────────────────────
@@ -38,7 +38,7 @@ def classify(game, numbers=None, *, reason=None, keyed=True, recorded=None, flag
 def test_the_four_live_contradiction_rows_are_for_the_record():
     rows = fx.live_rows()
     f = fx.facts("A", "B", "C2", "C3")
-    got = [(main._qdig_classify(r, f)["class"], r["reason"]) for r in rows]
+    got = [(fx.judge(main, r, f)["class"], r["reason"]) for r in rows]
     assert got == [(FTR, "ffa_game_contradiction")] * 4 + [(NEEDS, "lobby_completed")] * 2
 
 
@@ -154,7 +154,7 @@ def test_the_kill_thresholds_are_the_settlements_grant_site():
 def test_a_row_whose_room_is_not_recorded_needs_a_decision():
     f = fx.facts("A")
     f["matches"].clear()
-    v = main._qdig_classify(fx.row("A"), f)
+    v = fx.judge(main, fx.row("A"), f)
     assert v["class"] == NEEDS and v["recorded_game"] is None
 
 
@@ -182,8 +182,13 @@ def _team_row(shape):
 
 @pytest.mark.parametrize("shape", ["2v2", "1v2"])
 def test_2v2_and_1v2_rows_are_never_filed(shape):
+    """Even where a recorded FFA game holds the row's room (so nothing but
+    the mode keeps the row out of the comparison)."""
     f = fx.facts("A")
-    v = main._qdig_classify(_team_row(shape), f)
+    r = _team_row(shape)
+    f["matches"][r["photon_room_id"]] = dict(f["matches"][fx.GAMES["A"]["room"]],
+                                              photon_room_id=r["photon_room_id"])
+    v = fx.judge(main, r, f)
     assert v["class"] == NEEDS
 
 
@@ -209,7 +214,7 @@ def test_the_machine_note_names_the_players_and_both_counts():
 def test_the_admin_lists_three_strings_for_an_f5_row():
     r = fx.row("C2")
     f = fx.facts("C2")
-    v = main._qdig_classify(r, f)
+    v = fx.judge(main, r, f)
     reason = main._qdig_admin_reason(r, v, f)
     score = main._qdig_score(r, v, f)
     assert reason == ("The lobby had already been closed when this report arrived, so the game was never "
@@ -231,7 +236,7 @@ def test_the_admin_strings_stay_within_the_clients_lengths_for_long_names():
     for reason in ("lobby_completed", "ffa_game_contradiction", "ffa_replay_roster_mismatch",
                    "lobby_" + "x" * 58, "score_shape_mismatch"):
         r = fx.row("C2", reason=reason)
-        v = main._qdig_classify(r, f)
+        v = fx.judge(main, r, f)
         assert len(main._qdig_admin_reason(r, v, f)) <= 140
         assert len(main._qdig_score(r, v, f)) <= 64
         assert main._qdig_admin_reason(r, v, f).endswith("[" + reason[:64] + "]")
@@ -250,7 +255,7 @@ def test_the_texts_are_ascii_apart_from_names():
     rows = fx.live_rows()
     f = fx.facts("A", "B", "C2", "C3")
     for r in rows:
-        v = main._qdig_classify(r, f)
+        v = fx.judge(main, r, f)
         for s in (main._qdig_reason_sentence(r, v, f), main._qdig_admin_reason(r, v, f),
                   main._qdig_score(r, v, f)):
             assert s.isascii(), s

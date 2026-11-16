@@ -17,6 +17,7 @@ import asyncio
 import copy
 import hashlib
 import os
+import re
 import types
 from datetime import datetime, timedelta, timezone
 
@@ -37,7 +38,7 @@ def run(coro):
 # ── the feed's rows, built by the api's own functions ──────────────────────
 
 def feed_row(r, f, gate=(40, 6)):
-    v = main._qdig_classify(r, f)
+    v = fx.judge(main, r, f)
     out = {"id": str(r["id"]), "mode": r["mode"], "group": str(r["group_id"]) if r.get("group_id") else None,
            "family": main._triage_family(r["mode"], r["reason"], v["match"] is not None),
            "created_at": r["created_at"].isoformat()}
@@ -247,7 +248,7 @@ def test_a_fresh_bot_with_a_reminder_one_hour_old_posts_nothing():
     f = fx.facts("C2")
     hw = datetime(2026, 11, 16, 12, 0, tzinfo=timezone.utc)
     r = fx.row("C2", posted=hw - timedelta(days=3), reminded=hw - timedelta(hours=1))
-    v = main._qdig_classify(r, f)
+    v = fx.judge(main, r, f)
     fr = feed_row(r, f)
     assert main._qdig_totals([(r, v, fr)], hw, True)["reminder_due"] is False
     r25 = fx.row("C2", posted=hw - timedelta(days=3), reminded=hw - timedelta(hours=25))
@@ -380,3 +381,205 @@ def test_the_old_bot_keeps_working_against_the_new_answer():
     assert qb.ids_in(msg) == [r["id"] for r in live_feed()]
     assert not [line for line in ns["_out"] if "error" in line]
     assert feed.posts == []
+
+
+# ── review qdig-r1 ─────────────────────────────────────────────────────────
+
+def _needs_a_row(f):
+    """Game A held with Juniper's rounds changed: NEEDS A DECISION, its
+    reason built on the server with names in it."""
+    import test_qdig_classify as tc
+    body = fx.payload("A", tc._with(fx.GAMES["A"]["held"], 3, 0, 2))
+    return feed_row(fx.row("A", body=body, qid="0a0a0a0a-0000-4000-8000-0000000000aa"), f)
+
+
+def test_names_inside_the_reason_reach_discord_escaped_and_inert():
+    """HIGH 2: a display name enters the reason sentence on the server; in
+    the message it is escaped and its link is inert."""
+    f = fx.facts("A")
+    f["names"][fx.steam(4)]["display_name"] = "**ALERT** https://evil.example"
+    feed = FakeFeed([_needs_a_row(f)])
+    ns, channel, _ = new_bot(feed)
+    run(ns["poll_quarantine_digest"]())
+    (msg,) = texts(channel)
+    assert "**ALERT**" not in msg, "a name reached Discord with its markdown live"
+    assert "https://" not in msg, "a name reached Discord as a live link"
+    assert "\\*\\*ALERT\\*\\* https: //evil.example" in msg
+
+
+# Keys of a feed row that are structure, not text a person wrote; every
+# other string the row carries, at any depth, is a census subject.
+STRUCTURAL = {"id", "mode", "group", "family", "created_at", "class", "game_key", "played_at", "malformed",
+              "field"}
+SENTINEL = "Z**Q_`|>[a](https://s.example)<t:0:R>#" + chr(0x202E) + "\nZQ9"
+
+
+def _string_paths(obj, path=()):
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            if k not in STRUCTURAL:
+                yield from _string_paths(v, path + (k,))
+    elif isinstance(obj, list):
+        for i, v in enumerate(obj):
+            yield from _string_paths(v, path + (i,))
+    elif isinstance(obj, str):
+        yield path
+
+
+def _set(obj, path, value):
+    for k in path[:-1]:
+        obj = obj[k]
+    obj[path[-1]] = value
+
+
+def test_census_every_string_of_a_feed_row_reaches_discord_through_the_one_function():
+    """Each string leaf of each row shape (FFA needs, F5, 2v2, 1v2), set in
+    turn to a sentinel full of markdown, a link, a timestamp, a direction
+    override and a line break: the sentinel never appears raw, and no
+    message carries a live link."""
+    f = fx.facts("A", "C2")
+    shapes = [_needs_a_row(f), feed_row(fx.row("C2"), f), _side_row("2v2"), _side_row("1v2")]
+    seen = 0
+    for shape in shapes:
+        paths = list(_string_paths(shape))
+        assert paths
+        for path in paths:
+            row = copy.deepcopy(shape)
+            _set(row, path, SENTINEL)
+            feed = FakeFeed([row])
+            ns, channel, _ = new_bot(feed)
+            run(ns["poll_quarantine_digest"]())
+            for m in texts(channel):
+                seen += 1
+                assert "Z**Q" not in m and "https://" not in m and chr(0x202E) not in m, (path, m)
+                assert not re.search(r"(?<!\\)<t:0:R>", m), (path, m)
+                assert "\nZQ9" not in m, path
+    assert seen > 30
+
+
+def test_census_no_format_of_the_renderer_reads_a_row_except_through_the_function():
+    """In the bot's QDIG-1 renderer, a format slot that reads a row
+    (`.get(...)`) does so inside _qdig_md, _qdig_esc or a number or time
+    formatter."""
+    allowed = {"_qdig_md", "_qdig_esc", "_qdig_n", "_qdig_when", "_qdig_short_id", "len", "int"}
+    fns = {n.name: n for n in qb.TREE.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
+    names = ["_qdig_entry", "_qdig_diff_line", "_qdig_reminder_line", "_qdig_messages", "_qdig_fit"]
+    bad = []
+    for name in names:
+        for fv in (n for n in ast.walk(fns[name]) if isinstance(n, ast.FormattedValue)):
+            def walk(node, guarded):
+                if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in allowed:
+                    guarded = True
+                if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                        and node.func.attr == "get" and not guarded):
+                    bad.append((name, ast.unparse(fv.value)))
+                for c in ast.iter_child_nodes(node):
+                    walk(c, guarded)
+            walk(fv.value, False)
+    assert bad == []
+    assert "_qdig_md" in {n.func.id for n in ast.walk(fns["_qdig_esc"])
+                          if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)}
+
+
+TEN = list(range(21, 31))
+
+
+def _ten_player_row(monkeypatch, qid="7e070e07-0000-4000-8000-0000000000e7"):
+    """The review's case: ten players with 32-character names; recorded
+    rounds 5 then nine 2s, held 6 then nine 3s; every player's points 10 to
+    11 and kills 20 to 23."""
+    for s in TEN:
+        monkeypatch.setitem(fx.NAMES, s, f"Player{s:02d}" + "x" * 24)
+    monkeypatch.setitem(fx.GAMES, "T", {
+        "lobby": fx.LOBBY_AB, "room": "QDIGTEN_200000_r1", "seats": TEN, "match": fx.MATCH_A,
+        "recorded": [(5, 10, 20)] + [(2, 10, 20)] * 9, "held": [(6, 11, 23)] + [(3, 11, 23)] * 9,
+        "reporters": (21,), "at": fx.T_LIVE, "reason": "ffa_game_contradiction"})
+    f = fx.facts("T")
+    return feed_row(fx.row("T", qid=qid), f), f
+
+
+def test_a_ten_player_contradiction_is_posted_within_the_limit(monkeypatch):
+    """HIGH 3: the entry is bounded by itself; differences beyond what fits
+    become a count."""
+    row, _ = _ten_player_row(monkeypatch)
+    assert row["class"] == "needs_decision" and len(row["differences"]) == 30
+    feed = FakeFeed([row])
+    ns, channel, _ = new_bot(feed)
+    run(ns["poll_quarantine_digest"]())
+    msgs = texts(channel)
+    assert len(msgs) == 1, "the ten-player entry was not posted"
+    assert len(msgs[0]) <= 2000
+    assert "more differences" in msgs[0]
+    assert feed.posts == [("new", [row["id"]], 200)]
+
+
+def test_an_entry_at_its_bound_does_not_block_the_entry_behind_it(monkeypatch):
+    big, _ = _ten_player_row(monkeypatch)
+    # The server's reason_text (thirty differences with names) stays; the
+    # head the new bot shows is long too.
+    big["reason_head"] = "R" * 400
+    assert len(big["reason_text"]) > 1000
+    big["reporter_name"] = "*" * 64
+    big["accept_blocked_reason"] = "_" * 300
+    second = feed_row(fx.row("C2"), fx.facts("C2"))
+    feed = FakeFeed([big, second])
+    ns, channel, _ = new_bot(feed)
+    run(ns["poll_quarantine_digest"]())
+    msgs = texts(channel)
+    assert all(len(m) <= 2000 for m in msgs)
+    stamped = [i for _, ids, _ in feed.posts for i in ids]
+    assert second["id"] in stamped, "the entry behind an over-long one was never posted"
+    assert big["id"] in stamped
+
+
+class TwoPageFeed(FakeFeed):
+    """D1 with a page size of 2 over three rows: the totals are the first
+    page's, as the api computes them."""
+
+    def get(self, url, params=None, headers=None, timeout=None):
+        resp = FakeFeed.get(self, url, params, headers, timeout)
+        body = resp.body
+        all_rows = body["rows"]
+        later = bool(params and params.get("after_id"))
+        body["page_size"] = 2
+        body["rows"] = all_rows[2:] if later else all_rows[:2]
+        if not later:
+            needs = [r for r in body["rows"] if r.get("class") == "needs_decision"]
+            body["totals"]["needs_decision_games"] = len({r["game_key"] for r in needs})
+        return resp
+
+
+def _three_games():
+    f = fx.facts("C2")
+    rows = []
+    for n in range(3):
+        r = fx.row("C2", qid=f"{n:08x}-0000-4000-8000-0000000000c2")
+        r["photon_room_id"] = f"QDIGPAGE_{n:06d}_r2"
+        r["payload"] = dict(r["payload"], photon_room_id=r["photon_room_id"])
+        fr = feed_row(r, f)
+        fr["posted"] = True
+        rows.append(fr)
+    return rows
+
+
+def test_the_reminder_counts_every_page():
+    """M3: three games need a decision over two pages; the reminder says 3,
+    never the first page's 2."""
+    feed = TwoPageFeed(_three_games(), reminder_due=True)
+    ns, channel, _ = new_bot(feed)
+    run(ns["poll_quarantine_digest"]())
+    (msg,) = texts(channel)
+    assert msg.startswith("Held game reports: 3 games still need a decision"), msg
+    assert [p[0] for p in feed.posts] == ["reminder"] and len(feed.posts[0][1]) == 3
+
+
+def test_the_reminder_says_when_it_stopped_counting():
+    rows = _three_games()
+    rows[2] = {k: rows[2][k] for k in ("id", "mode", "group", "family", "created_at")}
+    rows[2].update({"class": None, "detail": False})
+    feed = TwoPageFeed(rows, reminder_due=True)
+    ns, channel, _ = new_bot(feed)
+    run(ns["poll_quarantine_digest"]())
+    (msg,) = texts(channel)
+    assert msg.startswith("Held game reports: at least 2 games still need a decision (counting stopped: "
+                          "1 held report was not yet described)"), msg

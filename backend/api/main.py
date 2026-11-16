@@ -5370,14 +5370,10 @@ async def queue_cleanup_loop():
         except Exception as e:
             print(f"[QUEUE-CLEANUP] player cards trading error: {e}")
         # QDIG-1: file the held reports that say the same as the recorded
-        # game (_qdig_janitor_pass). Its own sessions, its own try and its
-        # own time box, so it never costs the tick the duties after it.
-        try:
-            _qf = await asyncio.wait_for(_qdig_janitor_pass(), timeout=QDIG_PASS_TIMEOUT_S)
-            if _qf:
-                print(f"[QDIG] filed {_qf} held report(s) with the recorded game's result")
-        except Exception as e:
-            print(f"[QDIG] janitor pass error: {type(e).__name__}: {e}")
+        # game. The duty runs the pass in its own sessions and its own time
+        # box and raises nothing, so it never costs the tick the duties
+        # after it.
+        await _qdig_janitor_step()
         # The evidence refusal census (migration 414): a plain call, never
         # awaited. _evc_flush_kick starts the census's write as a task of its
         # own when none is running, so this path does no census I/O and no
@@ -58066,7 +58062,10 @@ async def _quarantine_on_file(db: AsyncSession, *, mode: str, room: str | None,
     nothing.
 
     THE VARIANT SCAN READS THE SAME SET THE QUOTA COUNTS -- this group's
-    PENDING NULL-room rows -- and never more of them than the quota admits.
+    PENDING NULL-room rows, and since QDIG-1 its FILED ones (a row the
+    janitor filed is still held, not reviewed by an admin: it keeps counting
+    against the quota and a redelivery of it is still recognised) -- and
+    never more of them than the quota admits.
     Round 5's note claimed a bound the statement did not have: it read every
     NULL-room row the group had ever produced, reviewed and discarded history
     included, under the advisory lock the caller holds, so a long-lived lobby's
@@ -58101,7 +58100,7 @@ async def _quarantine_on_file(db: AsyncSession, *, mode: str, room: str | None,
         for prior in (await db.execute(text(
             "SELECT payload FROM match_report_quarantine"
             " WHERE mode = :m AND group_id = :g AND photon_room_id IS NULL"
-            "   AND status = 'pending'"
+            "   AND status IN ('pending', 'filed')"
             " ORDER BY created_at, id"
             " LIMIT 50"
         ), {"m": mode, "g": group_id})).scalars().all():
@@ -58217,7 +58216,7 @@ async def _quarantine_report(db: AsyncSession, *, mode: str, reason: str, status
         if group_id is not None:
             _pending = (await db.execute(text("""
                 SELECT COUNT(*) FROM match_report_quarantine
-                 WHERE mode = :m AND group_id = :g AND status = 'pending'
+                 WHERE mode = :m AND group_id = :g AND status IN ('pending', 'filed')
             """), {"m": mode, "g": group_id})).scalar() or 0
             if int(_pending) >= 50:
                 if not _window_owned:
@@ -73726,43 +73725,64 @@ async def admin_list_quarantine(
     reason, so Accept is offered only when nothing has moved since.
     """
     await _require_admin(db, admin_steam_id, "quarantine", "list", hmac_signature)
+    # QDIG-1: the stored body is selected through its size (the same CASE as
+    # every statement of the lane that selects it: above QDIG_BODY_MAX_BYTES
+    # it never reaches Python, and the 50 rows hand Python at most
+    # QDIG_DECODE_BUDGET_BYTES of body text in all, newest first), and read
+    # once by _qdig_read_body.
     rows = (await db.execute(text("""
-        SELECT q.id, q.mode, q.reason, q.http_status, q.group_id, q.photon_room_id,
-               q.player_ids, q.payload, q.status, q.created_at,
-               (SELECT COALESCE(ARRAY_AGG(p.display_name ORDER BY p.display_name), '{}'::text[])
-                  FROM players p WHERE p.id = ANY(q.player_ids)) AS names
-          FROM match_report_quarantine q
-         WHERE q.status = 'pending'
-         ORDER BY q.created_at DESC
-         LIMIT 50
-    """))).mappings().all()
+        SELECT s.id, s.mode, s.reason, s.http_status, s.group_id, s.photon_room_id,
+               s.player_ids, s.status, s.created_at, s.names,
+               CASE WHEN s.sz <= CAST(:body_max AS bigint) AND s.run <= CAST(:budget AS bigint)
+                    THEN s.body END AS payload,
+               s.sz > CAST(:body_max AS bigint) AS payload_oversize,
+               (s.sz <= CAST(:body_max AS bigint) AND s.run > CAST(:budget AS bigint)) AS payload_unread
+          FROM (SELECT q.id, q.mode, q.reason, q.http_status, q.group_id, q.photon_room_id,
+                       q.player_ids, q.status, q.created_at,
+                       q.payload::text AS body, octet_length(q.payload::text) AS sz,
+                       SUM(CASE WHEN octet_length(q.payload::text) <= CAST(:body_max AS bigint)
+                                THEN octet_length(q.payload::text) ELSE 0 END)
+                           OVER (ORDER BY q.created_at DESC, q.id DESC ROWS UNBOUNDED PRECEDING) AS run,
+                       (SELECT COALESCE(ARRAY_AGG(p.display_name ORDER BY p.display_name), '{}'::text[])
+                          FROM players p WHERE p.id = ANY(q.player_ids)) AS names
+                  FROM match_report_quarantine q
+                 WHERE q.status = 'pending'
+                 ORDER BY q.created_at DESC, q.id DESC
+                 LIMIT 50) s
+         ORDER BY s.created_at DESC, s.id DESC
+    """), {"body_max": QDIG_BODY_MAX_BYTES, "budget": QDIG_DECODE_BUDGET_BYTES})).mappings().all()
     # QDIG-1: the facts the plain reason and the score read, in one batch
     # (_qdig_load). A failure leaves the facts empty: every row then reads as
     # NEEDS A DECISION with the body's own names, which is the safe direction.
-    rows = [dict(r) for r in rows]
+    pairs = _qdig_read_rows(rows)
     try:
         async with db.begin_nested():
-            facts = await _qdig_load(db, rows)
+            facts = await _qdig_load(db, pairs)
     except Exception as ex:
         print(f"[QDIG] admin list facts not read: {type(ex).__name__}")
         facts = _qdig_empty_facts()
     out = []
-    for r in rows:
+    for r, body in pairs:
         # Has anything rated these players since? Any later result for a
         # participant means an accept would land out of order. The verdict
         # and its words are _quarantine_accept_verdict, which D1 also calls.
+        # A failed check answers one fixed sentence, never the exception's
+        # text (which can carry a statement and runs past 140 characters).
         try:
             async with db.begin_nested():
                 later = await _quarantine_later_rated(
                     db, r["mode"], r["player_ids"], r["created_at"])
             can_accept, blocked = _quarantine_accept_verdict(*later)
         except Exception as ex:
-            can_accept, blocked = False, f"eligibility check failed: {ex}"
+            print(f"[QDIG] admin list eligibility for {r['id']} not checked: {type(ex).__name__}")
+            can_accept, blocked = False, QDIG_ELIGIBILITY_FAILED
         # The human-readable result and reason, derived from the stored body
         # (the verbatim report, never trusted as authority): the score with
         # numbers, winner first, within the 64 characters the shipped client
         # prints, and the reason as a plain sentence ending in its code.
-        v = _qdig_classify(r, facts)
+        # Names stay PLAIN TEXT here, unescaped: the client draws these
+        # strings as text (NativeUI), never as markdown; a test pins it.
+        v = _qdig_classify(r, body, facts)
         try:
             score = _qdig_score(r, v, facts)
         except Exception:
@@ -74910,9 +74930,14 @@ async def internal_quarantine_digest(
     keys of _qdig_feed_keys -- its class, the plain reason, the players'
     DISPLAY NAMES and numbers, the reporter's name, the recorded game's short
     code, the accept verdict in words, an opaque game key and `posted`; never
-    a Steam id, a player uuid or a room name. `class` is None where the
-    detail read did not fit the read budget. The first page's totals add
-    needs_decision_games, needs_decision_oldest and reminder_due. Which rows
+    a Steam id, a player uuid or a room name. Names are PLAIN text: the bot
+    escapes every string it posts. `reason_head` is the reason without the
+    per-player differences (which `differences` carries apart); `malformed`
+    names the reader's word when the stored body could not be read (no
+    players and no numbers then). `class` is None where the detail read did
+    not fit the read budget or the page's body budget. The first page's
+    totals add needs_decision_games, needs_decision_oldest, reminder_due and
+    needs_decision_complete (false: the count is a floor). Which rows
     the bot has posted, and when it last reminded, are the rows' own
     digest_posted_at and digest_reminded_at (migration 419), written by the
     posted route."""
@@ -74949,10 +74974,11 @@ async def internal_quarantine_digest(
         try:
             ids = [str(q["id"]) for q in out["rows"]]
             if ids:
-                qd["detail"] = await h.read(_QDIG_SQL_D1_DETAIL, {"ids": ids})
+                qd["detail"] = _qdig_read_rows(await h.read(_QDIG_SQL_D1_DETAIL, {
+                    "ids": ids, "body_max": QDIG_BODY_MAX_BYTES, "budget": QDIG_DECODE_BUDGET_BYTES}))
             qd["facts"] = await _qdig_load(h._db, qd["detail"], admit=h._admit)
-            for d in sorted(qd["detail"], key=lambda d: (d["digest_posted_at"] is not None,
-                                                         d["created_at"], str(d["id"]))):
+            for d, _b in sorted(qd["detail"], key=lambda db_: (db_[0]["digest_posted_at"] is not None,
+                                                                 db_[0]["created_at"], str(db_[0]["id"]))):
                 try:
                     qd["gates"][str(d["id"])] = await h.run(
                         _quarantine_later_rated, d["mode"], d["player_ids"], d["created_at"],
@@ -74986,7 +75012,8 @@ async def internal_quarantine_digest(
                     "id": str(oldest["id"]), "mode": oldest["mode"],
                     "group": _triage_str(oldest["group_id"]),
                     "created_at": _triage_iso(oldest["created_at"])}}
-            resp["totals"].update(_qdig_totals(needs, r["hw"], r["qdig"]["facts"] is not None))
+            resp["totals"].update(_qdig_totals(needs, r["hw"], r["qdig"]["facts"] is not None,
+                                               resp["rows"], resp["totals"]["pending"]))
         return resp
 
     return await _triage_read_txn(db, read, build)
@@ -75025,11 +75052,38 @@ QDIG_KILLS_TOLERANCE = 2            # largest kill-count gap a FOR THE RECORD ro
 QDIG_KILLS_THRESHOLDS = (50, 100)   # the settlement's paid kill achievements: strictly more than
 QDIG_POSTED_MAX_IDS = 200           # ids per call of the posted route
 QDIG_REMINDER_EVERY_S = 86400       # the reminder, while something needs a decision
-QDIG_COUNT_EVERY_S = 300            # the /health census, at most this often unless a row was filed
+QDIG_COUNT_EVERY_S = 300            # the /health census, at most this often
 QDIG_PASS_TIMEOUT_S = 20.0          # the janitor pass's own time box
 _QDIG_ADMIN_REASON_MAX = 140
 _QDIG_ADMIN_SCORE_MAX = 64
 _QDIG_NAME_MAX = 32
+# The stored body's bounds, applied IN SQL before anything is decoded: a body
+# whose text is longer than QDIG_BODY_MAX_BYTES is never sent to Python (the
+# row reads MALFORMED, reason word "oversize"); and one statement hands
+# Python at most QDIG_DECODE_BUDGET_BYTES of body text in all (a running sum
+# in the statement; a row past it reads "unread" and is described by a later
+# call). The live rows of 16 Nov are 19.8 to 25.8 kB of text, six players at
+# most (about 4.3 kB a player), so an honest ten-player report is near 43 kB,
+# a sixth of the row bound. The capture stores model_dump() of a report the
+# schema validated (players at most 10; per player at most 200 card picks
+# and 1024 card offers) under the request middleware's 16 MB body cap
+# (_RL_MAX_BODY): the schema allows bodies of about a megabyte, and nothing
+# at capture bounds a body to this figure. A larger body reads "oversize":
+# it NEEDS A DECISION and is never filed.
+QDIG_BODY_MAX_BYTES = 262144
+QDIG_DECODE_BUDGET_BYTES = 8388608
+# The Admin list's accept_blocked_reason when the later-rated check failed:
+# one fixed sentence, never an exception's text.
+QDIG_ELIGIBILITY_FAILED = "The server could not check whether these players have played since; try again later."
+QDIG_CENSUS_MAX_ROWS = 200          # pending rows the /health census reads; more reads as -1
+QDIG_JANITOR_PAGE = 20              # candidates per janitor pass
+QDIG_TEAM_POINTS_MAX = 10000        # the 2v2 and 1v2 schemas bound points below only
+# The reader's verdicts other than a readable body. "unread" is not a
+# verdict on the body: the statement's budget stopped before it.
+QDIG_MALFORMED_WORDS = ("oversize", "unreadable", "not_object", "players", "roster_size", "player_shape",
+                        "field_type", "field_range", "account_id", "duplicate_player", "slots", "winner",
+                        "reporter", "marks", "room", "sides", "schema")
+QDIG_UNREAD = "unread"
 
 # Process-local state of the janitor pass (primary only). needs_decision is
 # /health's quarantine_needs_decision: -1 until a census has run on this
@@ -75058,11 +75112,28 @@ _QDIG_SQL_NAMES = """
       FROM players
      WHERE steam_id = ANY(CAST(:sids AS varchar[]))
 """
+# Every statement of this lane that selects the stored body selects it
+# through its size as text: NULL with payload_oversize above
+# QDIG_BODY_MAX_BYTES, NULL with payload_unread past the statement's running
+# budget QDIG_DECODE_BUDGET_BYTES (unposted rows first here, so a row not
+# yet listed is described before one already listed). Callers bind
+# body_max and budget from those constants.
 _QDIG_SQL_D1_DETAIL = """
-    SELECT q.id, q.mode, q.reason, q.group_id, q.photon_room_id, q.player_ids,
-           q.payload::text AS payload, q.created_at, q.digest_posted_at, q.digest_reminded_at
-      FROM match_report_quarantine q
-     WHERE q.id = ANY(CAST(:ids AS uuid[]))
+    SELECT s.id, s.mode, s.reason, s.group_id, s.photon_room_id, s.player_ids, s.created_at,
+           s.digest_posted_at, s.digest_reminded_at,
+           CASE WHEN s.sz <= CAST(:body_max AS bigint) AND s.run <= CAST(:budget AS bigint)
+                THEN s.body END AS payload,
+           s.sz > CAST(:body_max AS bigint) AS payload_oversize,
+           (s.sz <= CAST(:body_max AS bigint) AND s.run > CAST(:budget AS bigint)) AS payload_unread
+      FROM (SELECT q.id, q.mode, q.reason, q.group_id, q.photon_room_id, q.player_ids, q.created_at,
+                   q.digest_posted_at, q.digest_reminded_at,
+                   q.payload::text AS body, octet_length(q.payload::text) AS sz,
+                   SUM(CASE WHEN octet_length(q.payload::text) <= CAST(:body_max AS bigint)
+                            THEN octet_length(q.payload::text) ELSE 0 END)
+                       OVER (ORDER BY q.digest_posted_at IS NOT NULL, q.created_at, q.id
+                             ROWS UNBOUNDED PRECEDING) AS run
+              FROM match_report_quarantine q
+             WHERE q.id = ANY(CAST(:ids AS uuid[]))) s
 """
 # The janitor's candidates: a keyset page of at most 20 ids after the
 # process-local cursor, which wraps to the start when a page comes back
@@ -75077,13 +75148,18 @@ _QDIG_SQL_JANITOR_CANDIDATES = """
      ORDER BY created_at ASC, id ASC
      LIMIT 20
 """
+# (LIMIT 20 is QDIG_JANITOR_PAGE, written as a literal for the janitor's
+# boot self-test; a test pins the two equal.)
 # The row lock, with the predicate re-read under it. FOR UPDATE because the
 # accept route takes FOR UPDATE on the same row (admin_accept_quarantine) and
 # the discard route's UPDATE takes FOR NO KEY UPDATE; this lock conflicts
 # with both, and SKIP LOCKED leaves a row an admin is acting on to the next
 # pass instead of waiting behind it.
 _QDIG_SQL_JANITOR_LOCK = """
-    SELECT id, mode, reason, group_id, photon_room_id, payload::text AS payload, created_at
+    SELECT id, mode, reason, group_id, photon_room_id, created_at,
+           CASE WHEN octet_length(payload::text) <= CAST(:body_max AS bigint)
+                THEN payload::text END AS payload,
+           octet_length(payload::text) > CAST(:body_max AS bigint) AS payload_oversize
       FROM match_report_quarantine
      WHERE id = CAST(:id AS uuid) AND status = 'pending' AND mode = 'ffa'
        AND reason = 'ffa_game_contradiction'
@@ -75097,13 +75173,25 @@ _QDIG_SQL_JANITOR_FILE = """
      WHERE id = CAST(:id AS uuid) AND status = 'pending'
        AND reviewed_at IS NULL AND reviewed_by IS NULL
 """
-# /health's census: every pending row, oldest first, bounded.
+# /health's census: pending rows oldest first, QDIG_CENSUS_MAX_ROWS + 1 of
+# them (201, a literal for the boot self-test; pinned by a test), so a
+# census that sees more than QDIG_CENSUS_MAX_ROWS knows it is incomplete.
 _QDIG_SQL_PENDING = """
-    SELECT id, mode, reason, group_id, photon_room_id, payload::text AS payload, created_at
-      FROM match_report_quarantine
-     WHERE status = 'pending'
-     ORDER BY created_at ASC, id ASC
-     LIMIT 1000
+    SELECT s.id, s.mode, s.reason, s.group_id, s.photon_room_id, s.created_at,
+           CASE WHEN s.sz <= CAST(:body_max AS bigint) AND s.run <= CAST(:budget AS bigint)
+                THEN s.body END AS payload,
+           s.sz > CAST(:body_max AS bigint) AS payload_oversize,
+           (s.sz <= CAST(:body_max AS bigint) AND s.run > CAST(:budget AS bigint)) AS payload_unread
+      FROM (SELECT q.id, q.mode, q.reason, q.group_id, q.photon_room_id, q.created_at,
+                   q.payload::text AS body, octet_length(q.payload::text) AS sz,
+                   SUM(CASE WHEN octet_length(q.payload::text) <= CAST(:body_max AS bigint)
+                            THEN octet_length(q.payload::text) ELSE 0 END)
+                       OVER (ORDER BY q.created_at, q.id ROWS UNBOUNDED PRECEDING) AS run
+              FROM match_report_quarantine q
+             WHERE q.status = 'pending'
+             ORDER BY q.created_at ASC, q.id ASC
+             LIMIT 201) s
+     ORDER BY s.created_at ASC, s.id ASC
 """
 _QDIG_SQL_POSTED_NEW = """
     UPDATE match_report_quarantine
@@ -75111,10 +75199,14 @@ _QDIG_SQL_POSTED_NEW = """
      WHERE id = ANY(CAST(:ids AS uuid[])) AND status = 'pending' AND digest_posted_at IS NULL
     RETURNING id
 """
+# A reminder acknowledgement inside its interval keeps the stamp it finds
+# (86400 s is QDIG_REMINDER_EVERY_S, pinned by a test), so a repeated
+# acknowledgement never moves the next reminder.
 _QDIG_SQL_POSTED_REMINDER = """
     UPDATE match_report_quarantine
        SET digest_reminded_at = NOW()
      WHERE id = ANY(CAST(:ids AS uuid[])) AND status = 'pending'
+       AND (digest_reminded_at IS NULL OR digest_reminded_at <= NOW() - INTERVAL '86400 seconds')
     RETURNING id
 """
 
@@ -75123,60 +75215,243 @@ def _qdig_empty_facts() -> dict:
     return {"matches": {}, "vectors": {}, "lobbies": {}, "names": {}}
 
 
-def _qdig_payload(row) -> dict:
-    """The stored report body as a dict ({} when it is not one)."""
-    pl = row.get("payload")
-    if isinstance(pl, (str, bytes)):
-        try:
-            pl = _json.loads(pl)
-        except Exception:
-            return {}
-    return pl if isinstance(pl, dict) else {}
+def _qdig_bounds(model, field) -> tuple:
+    """(ge, le) of a schema field, read from the model the submit path
+    validates with (None where the schema sets no bound)."""
+    lo = hi = None
+    for m in model.model_fields[field].metadata:
+        if getattr(m, "ge", None) is not None:
+            lo = m.ge
+        if getattr(m, "le", None) is not None:
+            hi = m.le
+    return lo, hi
 
 
-def _qdig_room(row, pl) -> str | None:
-    """The capture's room: the keyed column, else the room the body names
-    (a variant row carries photon_room_id NULL) -- the triage view's rule."""
-    room = row.get("photon_room_id") or pl.get("photon_room_id")
-    return str(room)[:64] if room else None
+# The settlement's own ranges (FfaPlayerEntry, TeamMatchReport,
+# OvtMatchReport) and its roster sizes (FFA_MIN_PLAYERS..FFA_MAX_PLAYERS),
+# pinned against their sources by a test.
+_QDIG_FFA_INT_FIELDS = {f: _qdig_bounds(FfaPlayerEntry, f)
+                        for f in ("slot", "rounds_won", "points_total", "kills")}
+_QDIG_SIDE_SHAPES = {
+    "2v2": {"key": "t1a", "seats": (("t1a", "t1b"), ("t2a", "t2b")),
+            "rounds": ("t1_rounds_won", "t2_rounds_won"), "points": ("t1_points_total", "t2_points_total"),
+            "winner": "winner_team", "model": TeamMatchReport},
+    "1v2": {"key": "solo", "seats": (("solo",), ("duo_a", "duo_b")),
+            "rounds": ("solo_rounds_won", "duo_rounds_won"), "points": ("solo_points_total", "duo_points_total"),
+            "winner": "winner_side", "model": OvtMatchReport},
+}
 
 
-def _qdig_sides(pl) -> list | None:
-    """A 2v2 or 1v2 body as its two sides, or None for any other shape:
-    [{"steams": [...], "names": [...], "rounds", "points", "won"}]."""
-    def side(keys, rounds, points, won):
-        ents = [pl.get(k) or {} for k in keys]
-        return {"steams": [str(e.get("steam_id") or "") for e in ents],
-                "names": [str(e.get("display_name") or "") for e in ents],
-                "rounds": int(pl.get(rounds) or 0), "points": int(pl.get(points) or 0), "won": won}
-    if isinstance(pl.get("t1a"), dict):
-        w = int(pl.get("winner_team") or 0)
-        return [side(("t1a", "t1b"), "t1_rounds_won", "t1_points_total", w == 1),
-                side(("t2a", "t2b"), "t2_rounds_won", "t2_points_total", w == 2)]
-    if isinstance(pl.get("solo"), dict):
-        w = int(pl.get("winner_side") or 0)
-        return [side(("solo",), "solo_rounds_won", "solo_points_total", w == 1),
-                side(("duo_a", "duo_b"), "duo_rounds_won", "duo_points_total", w == 2)]
-    return None
+class _QdigMalformed(Exception):
+    def __init__(self, why: str):
+        super().__init__(why)
+        self.why = why
 
 
-def _qdig_steams(row) -> set:
-    pl = _qdig_payload(row)
-    out = {str(pl.get("reported_by_steam_id") or "")}
-    sides = _qdig_sides(pl)
-    if sides is not None:
-        for s in sides:
-            out.update(s["steams"])
-    else:
-        out.add(str(pl.get("winner_steam_id") or ""))
-        for p in pl.get("players") or []:
-            if isinstance(p, dict):
-                out.add(str(p.get("steam_id") or ""))
-    out.discard("")
+def _qdig_col_room(row) -> str | None:
+    """The keyed room column (written by the capture from the validated
+    report), or None."""
+    room = row.get("photon_room_id")
+    return room[:64] if isinstance(room, str) and room else None
+
+
+def _qdig_body_value(row, why=None, **known) -> dict:
+    out = {"ok": why is None, "why": why, "shape": None, "room": _qdig_col_room(row), "reporter": None,
+           "winner": None, "players": [], "sides": None, "started_at": None, "is_ranked": None,
+           "report": None}
+    out.update(known)
     return out
 
 
-async def _qdig_load(db, rows, admit=None) -> dict:
+def _qdig_int(x, lo, hi) -> bool:
+    """An int that is an int (not a bool, a str or a float), in [lo, hi]."""
+    return type(x) is int and (lo is None or x >= lo) and (hi is None or x <= hi)
+
+
+def _qdig_account(x) -> bool:
+    return type(x) is str and len(x) == 17 and x.isascii() and x.isdigit()
+
+
+def _qdig_need(cond, why):
+    if not cond:
+        raise _QdigMalformed(why)
+
+
+def _qdig_common(pl, players_ids: set) -> dict:
+    """The fields every shape shares: reporter, room, started_at, is_ranked."""
+    rep = pl.get("reported_by_steam_id")
+    _qdig_need(_qdig_account(rep), "reporter")
+    room = pl.get("photon_room_id")
+    _qdig_need(room is None or (type(room) is str and 0 < len(room) <= 64), "room")
+    started = pl.get("started_at")
+    when = None
+    if started is not None:
+        _qdig_need(type(started) is str and len(started) <= 64, "field_type")
+        try:
+            when = datetime.fromisoformat(started.replace("Z", "+00:00"))
+        except ValueError:
+            raise _QdigMalformed("field_type")
+        if when.tzinfo is None:
+            when = when.replace(tzinfo=timezone.utc)
+    ranked = pl.get("is_ranked")
+    _qdig_need(ranked is None or type(ranked) is bool, "field_type")
+    return {"reporter": rep, "body_room": room, "started_at": when, "is_ranked": ranked}
+
+
+def _qdig_read_ffa(pl, row) -> dict:
+    players = pl.get("players")
+    _qdig_need(type(players) is list, "players")
+    _qdig_need(FFA_MIN_PLAYERS <= len(players) <= FFA_MAX_PLAYERS, "roster_size")
+    out = []
+    for p in players:
+        _qdig_need(type(p) is dict, "player_shape")
+        _qdig_need(_qdig_account(p.get("steam_id")), "account_id")
+        name = p.get("display_name")
+        _qdig_need(type(name) is str and len(name) <= 64, "field_type")
+        for f, (lo, hi) in _QDIG_FFA_INT_FIELDS.items():
+            _qdig_need(type(p.get(f)) is int, "field_type")
+            _qdig_need(_qdig_int(p.get(f), lo, hi), "field_range")
+        _qdig_need(type(p.get("left_early")) is bool and type(p.get("absent")) is bool, "marks")
+        out.append({"steam_id": p["steam_id"], "name": name, "slot": p["slot"], "rounds": p["rounds_won"],
+                    "points": p["points_total"], "kills": p["kills"], "left_early": p["left_early"],
+                    "absent": p["absent"]})
+    ids = {p["steam_id"] for p in out}
+    _qdig_need(len(ids) == len(out), "duplicate_player")
+    # The settlement's slot rule: slot i is the i-th seat of the frozen
+    # roster, so the slots are exactly 0..n-1 (submit_ffa_match, "Slot
+    # mismatch").
+    _qdig_need(sorted(p["slot"] for p in out) == list(range(len(out))), "slots")
+    winner = pl.get("winner_steam_id")
+    _qdig_need(type(winner) is str and winner in ids, "winner")
+    common = _qdig_common(pl, ids)
+    try:
+        report = FfaMatchReport.model_validate(pl)
+    except Exception:
+        raise _QdigMalformed("schema")
+    out.sort(key=lambda p: p["slot"])
+    return _qdig_body_value(row, shape="ffa", room=_qdig_col_room(row) or common["body_room"],
+                            reporter=common["reporter"], winner=winner, players=out,
+                            started_at=common["started_at"], is_ranked=common["is_ranked"], report=report)
+
+
+def _qdig_read_sides(pl, row) -> dict:
+    shape = next((k for k, s in _QDIG_SIDE_SHAPES.items() if s["key"] in pl), None)
+    _qdig_need(shape is not None, "sides")
+    spec = _QDIG_SIDE_SHAPES[shape]
+    sides, seen = [], set()
+    w = pl.get(spec["winner"])
+    _qdig_need(type(w) is int and w in (1, 2), "winner")
+    for n, seats in enumerate(spec["seats"]):
+        steams, names = [], []
+        for k in seats:
+            e = pl.get(k)
+            _qdig_need(type(e) is dict, "player_shape")
+            _qdig_need(_qdig_account(e.get("steam_id")), "account_id")
+            _qdig_need(e["steam_id"] not in seen, "duplicate_player")
+            seen.add(e["steam_id"])
+            nm = e.get("display_name")
+            _qdig_need(type(nm) is str and len(nm) <= 64, "field_type")
+            steams.append(e["steam_id"])
+            names.append(nm)
+        r, pts = pl.get(spec["rounds"][n]), pl.get(spec["points"][n])
+        _qdig_need(type(r) is int and type(pts) is int, "field_type")
+        _qdig_need(_qdig_int(r, *_qdig_bounds(spec["model"], spec["rounds"][n])), "field_range")
+        lo, hi = _qdig_bounds(spec["model"], spec["points"][n])
+        _qdig_need(_qdig_int(pts, lo, hi if hi is not None else QDIG_TEAM_POINTS_MAX), "field_range")
+        sides.append({"steams": steams, "names": names, "rounds": r, "points": pts, "won": w == n + 1})
+    common = _qdig_common(pl, seen)
+    _qdig_need(common["reporter"] in seen, "reporter")
+    return _qdig_body_value(row, shape=shape, room=_qdig_col_room(row) or common["body_room"],
+                            reporter=common["reporter"], sides=sides, started_at=common["started_at"],
+                            is_ranked=common["is_ranked"])
+
+
+def _qdig_read_body(row) -> dict:
+    """THE reader of a held row's stored body: the ONLY code of this lane
+    that touches row["payload"]. It reads the body once, into either a
+    validated value ({"ok": True, "shape": "ffa"|"2v2"|"1v2", "room",
+    "reporter", "winner", "players" (FFA, slot order), "sides" (2v2/1v2),
+    "started_at", "is_ranked", "report" (FFA: the validated model)}) or a
+    verdict ({"ok": False, "why": <a word of QDIG_MALFORMED_WORDS, or
+    QDIG_UNREAD>} with no number taken from the body). Strict: a JSON
+    object; FFA players a list of FFA_MIN_PLAYERS..FFA_MAX_PLAYERS objects,
+    every int an int in the schema's range, every account id 17 digits,
+    players unique, slots exactly 0..n-1, the winner one of the players,
+    both marks present and boolean; a 2v2 or 1v2 body its seats, sides,
+    winner and reporter alike. It cannot raise. The body arrives as text
+    of at most QDIG_BODY_MAX_BYTES (the statement's CASE), or NULL with
+    payload_oversize or payload_unread.
+
+    It validates the fields the classification, the texts and the census
+    USE (presence, type, range), and the settlement's own schema
+    (FfaMatchReport, which the capture validated the body with); a key it
+    does not know, at either level, is ignored and never makes a row
+    MALFORMED, so a newer client's extra keys change nothing. The size
+    bound holds for the whole body. The slot rule is checked here because
+    the lobby-closed captures (submit_ffa_match's `lobby_<status>` and
+    `score_shape_mismatch` refusals) keep a report BEFORE the settlement's
+    own slot check runs."""
+    try:
+        if row.get("payload_oversize"):
+            return _qdig_body_value(row, "oversize")
+        if row.get("payload_unread"):
+            return _qdig_body_value(row, QDIG_UNREAD)
+        raw = row.get("payload")
+        if isinstance(raw, (bytes, bytearray)):
+            if len(raw) > QDIG_BODY_MAX_BYTES:
+                return _qdig_body_value(row, "oversize")
+            raw = bytes(raw).decode("utf-8")
+        if isinstance(raw, str):
+            if len(raw) > QDIG_BODY_MAX_BYTES or len(raw.encode("utf-8")) > QDIG_BODY_MAX_BYTES:
+                return _qdig_body_value(row, "oversize")
+            pl = _json.loads(raw)
+        elif type(raw) is dict:
+            pl = raw          # an already decoded body (the pure tests' rows)
+        else:
+            return _qdig_body_value(row, "unreadable")
+        if type(pl) is not dict:
+            return _qdig_body_value(row, "not_object")
+        if row.get("mode") == "ffa":
+            return _qdig_read_ffa(pl, row)
+        if row.get("mode") == "team":
+            return _qdig_read_sides(pl, row)
+        return _qdig_body_value(row, "sides")
+    except _QdigMalformed as ex:
+        return _qdig_body_value(row, ex.why)
+    except Exception:
+        try:
+            return _qdig_body_value(row, "unreadable")
+        except Exception:
+            return {"ok": False, "why": "unreadable", "shape": None, "room": None, "reporter": None,
+                    "winner": None, "players": [], "sides": None, "started_at": None, "is_ranked": None,
+                    "report": None}
+
+
+def _qdig_read_rows(rows) -> list:
+    """[(row as a dict, its body value)], each body read once."""
+    out = []
+    for r in rows:
+        r = dict(r)
+        out.append((r, _qdig_read_body(r)))
+    return out
+
+
+def _qdig_steams(body) -> set:
+    """Every account the body names (its validated value; none when it is
+    not readable)."""
+    out = set()
+    if body["ok"]:
+        out.add(body["reporter"])
+        if body["winner"]:
+            out.add(body["winner"])
+        out.update(p["steam_id"] for p in body["players"])
+        for s in body["sides"] or []:
+            out.update(s["steams"])
+    out.discard(None)
+    return out
+
+
+async def _qdig_load(db, pairs, admit=None) -> dict:
     """The facts _qdig_classify and the texts read, for a set of held rows,
     in a constant number of statements: the recorded games that hold their
     rooms, those games' per-player rows, the lobbies (the rows' own and the
@@ -75186,14 +75461,13 @@ async def _qdig_load(db, rows, admit=None) -> dict:
     constant, so the janitor's boot self-test EXPLAINs every one of them."""
     facts = _qdig_empty_facts()
     rooms, lobby_ids, sids = set(), set(), set()
-    for r in rows:
+    for r, body in pairs:
         if r.get("mode") == "ffa":
-            room = _qdig_room(r, _qdig_payload(r))
-            if room:
-                rooms.add(room)
+            if body["room"]:
+                rooms.add(body["room"])
             if r.get("group_id") is not None:
                 lobby_ids.add(str(r["group_id"]))
-        sids |= _qdig_steams(r)
+        sids |= _qdig_steams(body)
     if rooms:
         if admit is not None:
             admit()
@@ -75230,31 +75504,35 @@ def _qdig_code(match_id) -> str:
     return str(match_id).replace("-", "").lower()[:12]
 
 
-def _qdig_report(pl):
-    try:
-        return FfaMatchReport.model_validate(pl)
-    except Exception:
-        return None
 
-
-def _qdig_classify(row, facts) -> dict:
+def _qdig_classify(row, body, facts) -> dict:
     """THE classification of one pending held row (see the block comment):
     {"class", "room", "match", "recorded_game", "voided", "differences",
-     "blockers", "report", "payload"}. `differences` lists every way the held
-    account differs from the recorded one, as {"steam_id", "field", "held",
-    "recorded"}; `blockers` names, in plain words, why a contradiction row is
-    not FOR THE RECORD. Pure: facts come from _qdig_load."""
-    pl = _qdig_payload(row)
-    v = {"class": QDIG_NEEDS_DECISION, "room": None, "match": None, "recorded_game": None,
-         "voided": False, "differences": [], "blockers": [], "report": None, "payload": pl}
-    if row.get("mode") != "ffa":
+     "blockers", "report", "body", "malformed", "unread"}. `body` is the
+    row's _qdig_read_body value, read once by the caller. `differences`
+    lists every way the held account differs from the recorded one, as
+    {"steam_id", "field", "held", "recorded"}; `blockers` names, in plain
+    words, why a contradiction row is not FOR THE RECORD. A body that is
+    not readable (MALFORMED) NEEDS A DECISION; one the statement's budget
+    left unread is `unread` and described by a later call. Pure: facts come
+    from _qdig_load."""
+    v = {"class": QDIG_NEEDS_DECISION, "room": body["room"], "match": None, "recorded_game": None,
+         "voided": False, "differences": [], "blockers": [], "report": None, "body": body,
+         "malformed": None, "unread": False}
+    if body["why"] == QDIG_UNREAD:
+        v["unread"] = True
         return v
-    room = _qdig_room(row, pl)
-    v["room"] = room
-    report = _qdig_report(pl)
+    if not body["ok"]:
+        v["malformed"] = body["why"]
+        v["blockers"].append("the stored report cannot be read")
+        return v
+    if row.get("mode") != "ffa" or body["shape"] != "ffa":
+        return v
+    room = body["room"]
+    report = body["report"]
     v["report"] = report
     match = facts["matches"].get(room) if room else None
-    if report is None or match is None:
+    if match is None:
         return v
     v["match"] = match
     v["recorded_game"] = _qdig_code(match["id"])
@@ -75349,7 +75627,7 @@ _QDIG_FIELD_ORDER = ("winner", "roster", "rounds_won", "points_total", "left_ear
 def _qdig_diff_words(v, facts) -> str:
     """Every difference in plain words with both numbers, held first:
     'kills differ for 2 players (Bravo 19 against 18, Charlie 23 against 24)'."""
-    names = {p.steam_id: p.display_name for p in (v["report"].players if v["report"] else [])}
+    names = {p["steam_id"]: p["name"] for p in v["body"]["players"]}
     parts = []
     for field in _QDIG_FIELD_ORDER:
         ds = [d for d in v["differences"] if d["field"] == field]
@@ -75392,9 +75670,22 @@ _QDIG_REASON_WORDS = {
 }
 
 
-def _qdig_reason_sentence(row, v, facts) -> str:
-    """Why the row was held, in one plain sentence (ASCII apart from names)."""
+QDIG_UNREAD_SENTENCE = ("The stored report was not read in this listing (too much report data at once); "
+                        "it is read again on a later one.")
+
+
+def _qdig_reason_sentence(row, v, facts, differences: bool = True) -> str:
+    """Why the row was held, in one plain sentence (ASCII apart from names).
+    Names stand in it as plain text: the Admin list draws it as text, and
+    the bot escapes the whole sentence once, at render (_qdig_md there).
+    differences=False leaves the per-player differences out (the feed's
+    reason_head: the bot lists them itself, bounded)."""
     reason = str(row.get("reason") or "")
+    if v["unread"]:
+        return QDIG_UNREAD_SENTENCE
+    if v["malformed"]:
+        return (f"The stored report cannot be read ({v['malformed']}), so this game needs a decision "
+                "by hand.")
     if row.get("mode") != "ffa":
         status = reason[len("series_"):] if reason.startswith("series_") else reason
         return (f"The series was already {_qdig_clean(status, 24) or 'closed'} when this report arrived, "
@@ -75404,8 +75695,12 @@ def _qdig_reason_sentence(row, v, facts) -> str:
         if code is None:
             return ("It disagrees with a game this lobby already recorded from another report, "
                     "so it was not recorded.")
-        words = _qdig_diff_words(v, facts)
+        words = _qdig_diff_words(v, facts) if differences else ""
         voided = " (that game was later voided)" if v["voided"] else ""
+        if not differences:
+            if v["class"] == QDIG_FOR_THE_RECORD:
+                return f"Same result as the recorded game {code}{voided}."
+            return f"Another seat's report of the recorded game {code}{voided} that disagrees with it."
         if v["class"] == QDIG_FOR_THE_RECORD:
             return f"Same result as the recorded game {code}{voided}; {words or 'same numbers'}."
         return (f"Another seat's report of the recorded game {code}{voided} that disagrees with it: "
@@ -75436,39 +75731,27 @@ def _qdig_admin_reason(row, v, facts) -> str:
 
 
 def _qdig_ffa_players(v, facts) -> list:
-    """The held players in slot order, as the feed and the texts show them."""
-    rep = v["report"]
-    if rep is not None:
-        ents = [(int(p.slot), i, p.steam_id, p.display_name, int(p.rounds_won), int(p.points_total),
-                 int(p.kills or 0), bool(p.left_early), bool(p.absent)) for i, p in enumerate(rep.players)]
-    else:
-        ents = []
-        for i, p in enumerate(v["payload"].get("players") or []):
-            if isinstance(p, dict):
-                try:
-                    ents.append((int(p.get("slot") or 0), i, str(p.get("steam_id") or ""),
-                                 p.get("display_name"), int(p.get("rounds_won") or 0),
-                                 int(p.get("points_total") or 0), int(p.get("kills") or 0),
-                                 bool(p.get("left_early")), bool(p.get("absent"))))
-                except (TypeError, ValueError):
-                    continue
-    ents.sort(key=lambda e: (e[0], e[1]))
-    return [{"steam_id": e[2], "name": _qdig_name(facts, e[2], e[3]), "rounds": e[4], "points": e[5],
-             "kills": e[6], "left_early": e[7], "absent": e[8]} for e in ents]
+    """The held players in slot order, as the feed and the texts show them
+    (none when the body is not readable)."""
+    return [{"steam_id": p["steam_id"], "name": _qdig_name(facts, p["steam_id"], p["name"]),
+             "rounds": p["rounds"], "points": p["points"], "kills": p["kills"],
+             "left_early": p["left_early"], "absent": p["absent"]} for p in v["body"]["players"]]
 
 
 def _qdig_score(row, v, facts) -> str:
     """The Admin list's `score`, at most 64 characters: FFA winner first,
     then by rounds and points, 'Name 5r 11p' each, as many players as fit
-    and then '+N'; a 2v2 or 1v2 body as its two sides."""
-    pl = v["payload"]
-    sides = _qdig_sides(pl)
+    and then '+N'; a 2v2 or 1v2 body as its two sides; empty when the body
+    is not readable (no number is taken from it). Names are plain text:
+    the client draws the string as text."""
+    body = v["body"]
+    sides = body["sides"]
     if sides is not None:
         def nm(s):
             return " + ".join(_qdig_name(facts, sid, n)[:12] for sid, n in zip(s["steams"], s["names"]))
         return f"{nm(sides[0])} {sides[0]['rounds']} | {nm(sides[1])} {sides[1]['rounds']}"[:_QDIG_ADMIN_SCORE_MAX]
     players = _qdig_ffa_players(v, facts)
-    winner = str(pl.get("winner_steam_id") or "")
+    winner = body["winner"]
     players.sort(key=lambda p: (p["steam_id"] != winner, -p["rounds"], -p["points"]))
     parts = [f"{p['name'][:10]} {p['rounds']}r {p['points']}p" for p in players]
     best = ""
@@ -75481,35 +75764,30 @@ def _qdig_score(row, v, facts) -> str:
     return best or (f"+{len(parts)}" if parts else "")
 
 
-def _qdig_played_at(row, pl):
+def _qdig_played_at(row, body):
     """When the game was played: the body's started_at, else the held stamp."""
-    raw = pl.get("started_at")
-    if raw:
-        try:
-            t = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
-            return t if t.tzinfo is not None else t.replace(tzinfo=timezone.utc)
-        except ValueError:
-            pass
-    return row.get("created_at")
+    return body["started_at"] or row.get("created_at")
 
 
 def _qdig_game_key(row, v) -> str:
     """Rows that hold the same room are one game. An opaque key, never the
     room name (a room name is a join credential)."""
-    room = v["room"] or _qdig_room(row, v["payload"])
+    room = v["room"]
     if not room:
         return "row:" + str(row.get("id"))
     return hashlib.sha256(f"{row.get('mode')}|{room}".encode()).hexdigest()[:16]
 
 
 def _qdig_feed_keys(row, v, facts, gate) -> dict:
-    """The additive keys of one D1 row. Display names only."""
-    pl = v["payload"]
-    sides = _qdig_sides(pl)
+    """The additive keys of one D1 row. Display names only, as plain text
+    (the bot escapes every string it posts, once). A body that is not
+    readable gives no players and no numbers."""
+    body = v["body"]
+    sides = body["sides"]
     lobby = facts["lobbies"].get(str(row.get("group_id"))) or {}
     ranked = lobby.get("is_ranked") if row.get("mode") == "ffa" else None
     if ranked is None:
-        ranked = pl.get("is_ranked") if isinstance(pl.get("is_ranked"), bool) else None
+        ranked = body["is_ranked"]
     if sides is not None:
         players = []
         for n, s in enumerate(sides, start=1):
@@ -75524,22 +75802,22 @@ def _qdig_feed_keys(row, v, facts, gate) -> dict:
     else:
         players = [{k: p[k] for k in ("name", "rounds", "points", "kills", "left_early", "absent")}
                    for p in _qdig_ffa_players(v, facts)]
-        names = {str(p.get("steam_id")): p.get("display_name") for p in pl.get("players") or []
-                 if isinstance(p, dict)}
-        w = str(pl.get("winner_steam_id") or "")
+        names = {p["steam_id"]: p["name"] for p in body["players"]}
+        w = body["winner"]
         winner_name = _qdig_name(facts, w, names.get(w)) if w else None
         side_view = None
-    rep = str(pl.get("reported_by_steam_id") or "")
+    rep = body["reporter"]
     rep_name = _qdig_name(facts, rep, None) if rep else None
     if gate is None:
         can_accept, blocked = None, "not computed within the read budget"
     else:
         can_accept, blocked = _quarantine_accept_verdict(*gate)
-    report_names = {p.steam_id: p.display_name for p in (v["report"].players if v["report"] else [])}
-    played = _qdig_played_at(row, pl)
+    report_names = {p["steam_id"]: p["name"] for p in body["players"]}
+    played = _qdig_played_at(row, body)
     return {
-        "class": v["class"], "detail": True,
+        "class": v["class"], "detail": True, "malformed": v["malformed"],
         "reason_text": _qdig_reason_sentence(row, v, facts),
+        "reason_head": _qdig_reason_sentence(row, v, facts, differences=False),
         "ranked": ranked,
         "played_at": _triage_iso(played) if hasattr(played, "isoformat") else None,
         "game_key": _qdig_game_key(row, v),
@@ -75565,28 +75843,37 @@ def _qdig_feed_rows(rows: list, qd: dict) -> list:
     """Adds the QDIG-1 keys to D1's rows in place; returns the NEEDS A
     DECISION rows as (detail row, verdict) for the totals."""
     facts = qd.get("facts")
-    det = {str(d["id"]): d for d in qd.get("detail") or []}
+    det = {str(d["id"]): (d, b) for d, b in qd.get("detail") or []}
     needs = []
     for row in rows:
-        d = det.get(row["id"])
+        d, body = det.get(row["id"], (None, None))
         if d is None or facts is None:
             row.update({"class": None, "detail": False})
             continue
-        v = _qdig_classify(d, facts)
+        v = _qdig_classify(d, body, facts)
+        if v["unread"]:
+            # The statement's decode budget stopped before this body: the
+            # row is described by a later call (unposted rows are read first).
+            row.update({"class": None, "detail": False})
+            continue
         row.update(_qdig_feed_keys(d, v, facts, qd["gates"].get(row["id"])))
         if v["class"] == QDIG_NEEDS_DECISION:
             needs.append((d, v, row))
     return needs
 
 
-def _qdig_totals(needs: list, hw, complete: bool) -> dict:
+def _qdig_totals(needs: list, hw, complete: bool, rows: list | None = None, pending: int | None = None) -> dict:
     """D1's first-page totals for the bot's reminder: how many games need a
-    decision, the oldest played, and whether the reminder is due -- true
-    only when such rows exist, each has been posted or reminded, and 24
-    hours have passed since the newest of their two stamps. Read from the
-    first page (the 500 oldest pending rows)."""
+    decision, the oldest played, whether that count covers every pending
+    row (needs_decision_complete: the first page holds every pending row
+    and every row of it was described; otherwise the count is a floor and
+    the bot says so -- it also counts over all pages itself), and whether
+    the reminder is due -- true only when such rows exist, each has been
+    posted or reminded, and 24 hours have passed since the newest of their
+    two stamps."""
     if not complete:
-        return {"needs_decision_games": None, "needs_decision_oldest": None, "reminder_due": False}
+        return {"needs_decision_games": None, "needs_decision_oldest": None, "reminder_due": False,
+                "needs_decision_complete": False}
     games = {fr["game_key"] for _, _, fr in needs}
     played = [fr["played_at"] for _, _, fr in needs if fr.get("played_at")]
     stamps = [max(t for t in (d.get("digest_posted_at"), d.get("digest_reminded_at")) if t is not None)
@@ -75594,16 +75881,21 @@ def _qdig_totals(needs: list, hw, complete: bool) -> dict:
               if d.get("digest_posted_at") is not None or d.get("digest_reminded_at") is not None]
     due = (bool(needs) and len(stamps) == len(needs) and hw is not None
            and (hw - max(stamps)).total_seconds() >= QDIG_REMINDER_EVERY_S)
+    whole = (rows is not None and pending is not None and len(rows) >= pending
+             and all(r.get("class") is not None for r in rows))
     return {"needs_decision_games": len(games), "needs_decision_oldest": min(played) if played else None,
-            "reminder_due": due}
+            "reminder_due": due, "needs_decision_complete": whole}
 
 
-def _qdig_needs_games(rows: list, facts) -> int:
+def _qdig_needs_games(pairs: list, facts) -> int | None:
     """How many pending GAMES need a decision (rows holding one room are one
-    game), by _qdig_classify."""
+    game), by _qdig_classify; None when a body was left unread (the census
+    then did not finish)."""
     keys = set()
-    for r in rows:
-        v = _qdig_classify(r, facts)
+    for r, body in pairs:
+        v = _qdig_classify(r, body, facts)
+        if v["unread"]:
+            return None
         if v["class"] == QDIG_NEEDS_DECISION:
             keys.add(_qdig_game_key(r, v))
     return len(keys)
@@ -75614,10 +75906,13 @@ async def _qdig_janitor_pass() -> int:
     each in its own transaction -- the row locked (FOR UPDATE SKIP LOCKED,
     the predicate re-read under the lock), its facts read after the lock,
     _qdig_classify, and the UPDATE to 'filed' re-checking that no admin has
-    reviewed it. Then, at most every QDIG_COUNT_EVERY_S or right after a pass
-    that filed a row, the census /health reports. Every transaction carries
-    a 3 s statement timeout; the caller time-boxes the whole pass. Returns
-    how many rows it filed."""
+    reviewed it. Then, AFTER the filing step and only when it is due (at
+    most every QDIG_COUNT_EVERY_S, whatever was filed), the census /health
+    reports. Every transaction carries a 3 s statement timeout; the caller
+    time-boxes the whole pass (_qdig_janitor_step). Bodies decoded per
+    pass: at most QDIG_JANITOR_PAGE x QDIG_BODY_MAX_BYTES (5 MiB) in the
+    filing step, plus QDIG_DECODE_BUDGET_BYTES in a census. Returns how
+    many rows it filed."""
     from database import async_session
     filed = 0
     async with async_session() as db:
@@ -75628,18 +75923,18 @@ async def _qdig_janitor_pass() -> int:
             "c_id": cur[1] if cur else None})).mappings().all()
         await db.commit()
         _qdig_state["after"] = ((cands[-1]["created_at"], str(cands[-1]["id"]))
-                                if len(cands) >= 20 else None)
+                                if len(cands) >= QDIG_JANITOR_PAGE else None)
         for c in cands:
             try:
                 await db.execute(text("SET LOCAL statement_timeout = '3s'"))
                 row = (await db.execute(text(_QDIG_SQL_JANITOR_LOCK),
-                                        {"id": str(c["id"])})).mappings().first()
+                                        {"id": str(c["id"]), "body_max": QDIG_BODY_MAX_BYTES})).mappings().first()
                 if row is None:
                     await db.rollback()
                     continue
-                row = dict(row)
-                facts = await _qdig_load(db, [row])
-                v = _qdig_classify(row, facts)
+                ((row, body),) = _qdig_read_rows([row])
+                facts = await _qdig_load(db, [(row, body)])
+                v = _qdig_classify(row, body, facts)
                 if v["class"] == QDIG_FOR_THE_RECORD:
                     res = await db.execute(text(_QDIG_SQL_JANITOR_FILE),
                                            {"id": str(c["id"]), "note": _qdig_filed_note(v, facts)})
@@ -75652,19 +75947,45 @@ async def _qdig_janitor_pass() -> int:
                 except Exception:
                     pass
         now = time.monotonic()
-        if filed or _qdig_state["count_at"] is None or now - _qdig_state["count_at"] >= QDIG_COUNT_EVERY_S:
-            await db.execute(text("SET LOCAL statement_timeout = '3s'"))
-            rows = [dict(r) for r in (await db.execute(text(_QDIG_SQL_PENDING))).mappings().all()]
-            facts = await _qdig_load(db, rows)
-            await db.commit()
-            _qdig_state["needs_decision"] = _qdig_needs_games(rows, facts)
+        if _qdig_state["count_at"] is None or now - _qdig_state["count_at"] >= QDIG_COUNT_EVERY_S:
+            # The census is stamped as tried before it runs: a census that
+            # fails is not retried before its interval either.
             _qdig_state["count_at"] = now
+            _qdig_state["needs_decision"] = -1
+            await db.execute(text("SET LOCAL statement_timeout = '3s'"))
+            rows = (await db.execute(text(_QDIG_SQL_PENDING), {
+                "body_max": QDIG_BODY_MAX_BYTES, "budget": QDIG_DECODE_BUDGET_BYTES})).mappings().all()
+            if len(rows) > QDIG_CENSUS_MAX_ROWS:
+                await db.commit()
+                return filed     # more pending rows than the census reads: -1
+            pairs = _qdig_read_rows(rows)
+            facts = await _qdig_load(db, pairs)
+            await db.commit()
+            n = _qdig_needs_games(pairs, facts)
+            _qdig_state["needs_decision"] = -1 if n is None else n
     return filed
 
 
+async def _qdig_janitor_step() -> None:
+    """The janitor loop's QDIG-1 duty: the pass in its own time box. It
+    never raises (a timeout, a database error or anything else is printed),
+    so the duties after it in the loop always run; a timed-out pass is
+    cancelled, which closes its session."""
+    try:
+        filed = await asyncio.wait_for(_qdig_janitor_pass(), timeout=QDIG_PASS_TIMEOUT_S)
+        if filed:
+            print(f"[QDIG] filed {filed} held report(s) with the recorded game's result")
+    except asyncio.CancelledError:
+        raise                # the loop itself is being stopped
+    except Exception as e:
+        print(f"[QDIG] janitor pass error: {type(e).__name__}: {e}")
+
+
 def _qdig_needs_decision_word() -> int:
-    """/health `quarantine_needs_decision`: the last census of this process
-    (-1 before the first, and always on the standby, which runs no janitor)."""
+    """/health `quarantine_needs_decision`: the last census of this process;
+    -1 before the first, when the last did not finish (an error, a body
+    left unread, more than QDIG_CENSUS_MAX_ROWS pending rows), and always
+    on the standby, which runs no janitor."""
     return int(_qdig_state["needs_decision"])
 
 

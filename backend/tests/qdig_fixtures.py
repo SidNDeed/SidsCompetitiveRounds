@@ -121,6 +121,23 @@ def facts(*games, recorded=None, kills_tiebreak=False, voided=False, readmit=Fal
     return out
 
 
+def judge(main_mod, r, f) -> dict:
+    """_qdig_classify as the code at hand takes it: the body read once by
+    _qdig_read_body where that reader exists (qdig-r1's fix on), the row
+    alone before it (37608d50), so a red-first test runs at both tips."""
+    reader = getattr(main_mod, "_qdig_read_body", None)
+    if reader is None:
+        return main_mod._qdig_classify(r, f)
+    return main_mod._qdig_classify(r, reader(r), f)
+
+
+def detail(main_mod, rows) -> list:
+    """D1's detail rows as the code at hand keeps them: (row, body) pairs
+    after qdig-r1's fix, the rows alone before it."""
+    reader = getattr(main_mod, "_qdig_read_rows", None)
+    return reader(rows) if reader is not None else [dict(r) for r in rows]
+
+
 def live_rows() -> list:
     """The six live rows: A and B each held twice (a keyed row and a variant
     row, two different reporters), C2 and C3 once each."""
