@@ -952,7 +952,7 @@
           ],
           "main",
           "delete_player_data",
-          "655cdc3d49e1f023d36c3a2b5f6a7e9050375312"
+          "0761746c32bdbb29ca127bed4546dade05fe7683"
         ],
         [
           "/api/v1/players/{steam_id}/ffa-history",
