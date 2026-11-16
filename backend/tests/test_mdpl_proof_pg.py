@@ -27,6 +27,9 @@ The bound (R6a, R6b):
   the deletion, past its drain, holds the identity key.
 - C3: the clock past the deadline between the work and the commit: 503
   account_cleanup_contended, nothing written.
+- R6a: a wait for a held pool key ends at the deadline (the attempt's
+  lock_timeout): 503 within the budget, nothing written; without the
+  lock_timeout the wait outlasts the deadline.
 - R6b: a deadlock victim inside a bet helper's savepoint runs the whole
   deletion again, and the bettor is refunded in its commit; a lock timeout
   there (55P03) refuses at once, with nothing written.
@@ -610,6 +613,65 @@ def test_c3_control_without_the_deadline_read_the_deletion_commits_late(monkeypa
         assert a.status == 200 and a["status"] == "anonymized", a
         assert row["steam_id"] != p.sid and row["deleted_at"] is not None, dict(row)
         assert kept == 1, kept
+    case(monkeypatch, body, prefix="mdpl")
+
+
+# -- R6a: one wait ends at the deadline -------------------------------------------------------
+
+LOCK_TIMEOUT_SET = "SELECT set_config('lock_timeout', "
+
+
+async def _key_held_past_the_budget(env, *, timeout_off):
+    """A side session holds the pool snapshot key; the deletion of P, with a
+    budget of 4 s, waits for it there (its first wait). The side lets go 3 s
+    after the deadline. timeout_off: the mutant, the attempt's lock_timeout
+    statement made to set application_name instead. Returns (P, the answer,
+    the seconds from the call to the answer, P's row)."""
+    _arm(env)
+    (p,) = await env.players(1)
+    env.mp.setattr(main, "_DELETION_BUDGET_S", 4.0)
+    env.mp.setattr(main, "_DELETION_ATTEMPT_MIN_S", 1.0)
+    side = await env.side()
+    await side.execute("SELECT pg_advisory_lock(hashtext('pc_snapshot'))")
+
+    async def let_go():
+        await asyncio.sleep(main._DELETION_BUDGET_S + 3.0)
+        await side.execute("SELECT pg_advisory_unlock(hashtext('pc_snapshot'))")
+
+    hits = None
+    with contextlib.ExitStack() as stack:
+        if timeout_off:
+            hits = stack.enter_context(
+                env.rewriting(LOCK_TIMEOUT_SET, "SELECT set_config('application_name', "))
+        rel = asyncio.create_task(let_go())
+        t0 = time.monotonic()
+        a = await _delete(env, p)
+        spent = time.monotonic() - t0
+        await rel
+    assert hits is None or hits, "the mutant did not apply"
+    row = await env.conn.fetchrow("SELECT steam_id, deleted_at FROM players WHERE id = $1", p.id)
+    return p, a, spent, row
+
+
+def test_r6a_a_wait_for_a_held_key_ends_at_the_deadline(monkeypatch):
+    """The attempt's lock_timeout ends its wait at the deadline: 503
+    account_cleanup_contended within the budget, nothing written."""
+    async def body(env):
+        p, a, spent, row = await _key_held_past_the_budget(env, timeout_off=False)
+        assert (a.status, a.body) == (503, main._DELETION_REFUSAL), a
+        assert spent < main._DELETION_BUDGET_S + 1.0, spent
+        assert row["steam_id"] == p.sid and row["deleted_at"] is None, dict(row)
+    case(monkeypatch, body, prefix="mdpl")
+
+
+def test_r6a_control_without_the_lock_timeout_the_wait_outlasts_the_deadline(monkeypatch):
+    """The mutant: the wait lasts until the side lets go, past the deadline;
+    the commit check still refuses, so nothing is written."""
+    async def body(env):
+        p, a, spent, row = await _key_held_past_the_budget(env, timeout_off=True)
+        assert spent >= main._DELETION_BUDGET_S + 3.0, spent
+        assert (a.status, a.body) == (503, main._DELETION_REFUSAL), a
+        assert row["steam_id"] == p.sid and row["deleted_at"] is None, dict(row)
     case(monkeypatch, body, prefix="mdpl")
 
 
