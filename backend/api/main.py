@@ -8010,6 +8010,20 @@ _AER_POPGATE_BUILD = 1
 # construction, probed by the release train and read by nothing else (#306).
 # Absent on any build before it.
 _MAIL_SPAM_CASE_LOCK_BUILD = 2
+# Release-train verification plumbing, not a design mechanism: the build
+# marker of the account deletion lock lane (MDPL), reported on /health as
+# `account_deletion_lock_build`. 1 = delete_player_data takes the pool
+# snapshot key before its first row lock and its ranked_queue step after
+# its lobby locks; each pending_dms writer that can wait for a relay row
+# takes its rows in one id-ordered pass before its first write, and the
+# poll's retire skips a held row; a deletion that PostgreSQL ends as a
+# deadlock victim runs again within its deadline (_deletion_bounded). It
+# names build identity only. The lane adds no route and no key to any
+# answer, so without it the train could not tell a box on the new build
+# from a stale one (learnings 780, 794). A code constant, equal on both
+# boxes by construction, probed by the release train and read by nothing
+# else (#306). Absent on any build before it.
+_ACCOUNT_DELETION_LOCK_BUILD = 1
 
 
 def _title_ladders_health_word() -> int:
@@ -8090,6 +8104,7 @@ async def health_check(db: AsyncSession = Depends(get_db)):
                               aer_popgate_build=_AER_POPGATE_BUILD,
                               admin_evidence_population=_admin_evidence.population_health_word(),
                               mail_spam_case_lock_build=_MAIL_SPAM_CASE_LOCK_BUILD,
+                              account_deletion_lock_build=_ACCOUNT_DELETION_LOCK_BUILD,
                               build_manifest=_build_manifest.health_word(),
                               review_eval=_review_rules.review_eval(),
                               review_rules=_review_rules.health_word(),
@@ -8160,6 +8175,7 @@ async def health_check(db: AsyncSession = Depends(get_db)):
                               aer_popgate_build=_AER_POPGATE_BUILD,
                               admin_evidence_population=_admin_evidence.population_health_word(),
                               mail_spam_case_lock_build=_MAIL_SPAM_CASE_LOCK_BUILD,
+                              account_deletion_lock_build=_ACCOUNT_DELETION_LOCK_BUILD,
                               build_manifest=_build_manifest.health_word(),
                               review_eval=_review_rules.review_eval(),
                               review_rules=_review_rules.health_word(),

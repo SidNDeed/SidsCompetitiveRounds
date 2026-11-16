@@ -1330,6 +1330,17 @@ class HealthResponse(BaseModel):
     # 780, 794). Probed by the release train and read by nothing else (#306).
     # No default, as above. Absent on any build before it.
     mail_spam_case_lock_build: int
+    # account_deletion_lock_build: release-train verification plumbing, not
+    # a design mechanism (main._ACCOUNT_DELETION_LOCK_BUILD; 1 = in this
+    # build delete_player_data and the pending_dms writers take their locks
+    # in one order, and a deletion that PostgreSQL ends as a deadlock victim
+    # runs again within its deadline). It names build identity only. A code
+    # constant, equal on both roles by construction, so the train can read
+    # it through the edge; the lane adds no route and no key to any answer,
+    # and this is the key that tells a stale box from a refreshed one
+    # (learnings 780, 794). Probed by the release train and read by nothing
+    # else (#306). No default, as above. Absent on any build before it.
+    account_deletion_lock_build: int
     # build_manifest: the SHA-256 of the build-manifest.json this image's build
     # wrote (build_manifest.py: the build context's digest and the identity of
     # every installed wheel and .deb), "absent" when the process was not
