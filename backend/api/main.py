@@ -7972,6 +7972,16 @@ _BAN_EXPIRY_BUILD = 1
 # boxes by construction, probed by the release train and read by nothing
 # else (#306). Absent on any build before it.
 _CASUAL_STREAK_BUILD = 1
+# Release-train verification plumbing, not a design mechanism: the build
+# marker of the mail spam case lock lane (a mail send locks its sender's
+# mail_spam case row for the day before its message row and its fan-out,
+# _MAIL_SPAM_CASE_LOCK_SQL), reported on /health as
+# `mail_spam_case_lock_build`. It names build identity only. The lane adds no
+# route and no key to any answer, so without it the train could not tell a
+# box on the new build from a stale one (learnings 780, 794). A code
+# constant, equal on both boxes by construction, probed by the release train
+# and read by nothing else (#306). Absent on any build before it.
+_MAIL_SPAM_CASE_LOCK_BUILD = 1
 
 
 def _title_ladders_health_word() -> int:
@@ -8049,6 +8059,7 @@ async def health_check(db: AsyncSession = Depends(get_db)):
                               ask6_invites_build=_ASK6_INVITES_BUILD,
                               casual_streak_build=_CASUAL_STREAK_BUILD,
                               ban_expiry_build=_BAN_EXPIRY_BUILD,
+                              mail_spam_case_lock_build=_MAIL_SPAM_CASE_LOCK_BUILD,
                               build_manifest=_build_manifest.health_word(),
                               review_eval=_review_rules.review_eval(),
                               review_rules=_review_rules.health_word(),
@@ -8116,6 +8127,7 @@ async def health_check(db: AsyncSession = Depends(get_db)):
                               ask6_invites_build=_ASK6_INVITES_BUILD,
                               casual_streak_build=_CASUAL_STREAK_BUILD,
                               ban_expiry_build=_BAN_EXPIRY_BUILD,
+                              mail_spam_case_lock_build=_MAIL_SPAM_CASE_LOCK_BUILD,
                               build_manifest=_build_manifest.health_word(),
                               review_eval=_review_rules.review_eval(),
                               review_rules=_review_rules.health_word(),
