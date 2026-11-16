@@ -76,6 +76,17 @@
 --     that table. So the CHECK's <= and + are pg_catalog's, whatever operator
 --     of that name another schema on the session's path holds, and the
 --     deparser prints them bare.
+--   * objects in another schema: the pinned path settles an operator only
+--     against one with the same argument types (operator resolution takes
+--     an exact match of the argument types before one that needs a
+--     coercion, wherever on the path it sits). So every comparison here is
+--     written on types pg_catalog holds an exact operator for: the catalog
+--     reads and the identity check compare oids (tbl::oid, the oid of
+--     pg_catalog's timestamptz, to_regclass(...)::oid); the
+--     other comparisons are name = name, "char" = "char", text = text,
+--     timestamptz <= timestamptz and timestamptz > timestamptz. An operator
+--     of the same name and types in the table's schema comes after
+--     pg_catalog's on the pinned path.
 -- What does not enter: the definition holds no date or time constant
 -- (DateStyle, TimeZone), no string literal holds a backslash
 -- (standard_conforming_strings), no floating-point value
@@ -124,31 +135,31 @@ BEGIN
   -- The search path, pinned once the table is named: pg_catalog first, the
   -- table's schema second, the temporary schema last (header).
   PERFORM pg_catalog.set_config('search_path', pg_catalog.format('pg_catalog, %I, pg_temp', sch), true);
-  IF to_regclass('player_bans') IS DISTINCT FROM tbl THEN
+  IF pg_catalog.to_regclass('player_bans')::oid IS DISTINCT FROM tbl::oid THEN
     RAISE EXCEPTION '418: player_bans under the pinned search path is %, not %',
-      coalesce(to_regclass('player_bans')::text, 'missing'), tbl;
+      coalesce(pg_catalog.to_regclass('player_bans')::text, 'missing'), tbl;
   END IF;
 
   -- First read, without a lock. Absent: lock, then read again under the
   -- lock, since a run that held the lock before us may have added it.
   present := EXISTS (SELECT 1 FROM pg_constraint c
-                      WHERE c.conrelid = tbl AND c.conname = 'player_bans_max_one_year');
+                      WHERE c.conrelid = tbl::oid AND c.conname = 'player_bans_max_one_year');
   IF NOT present THEN
     EXECUTE 'LOCK TABLE player_bans IN ACCESS EXCLUSIVE MODE';
     present := EXISTS (SELECT 1 FROM pg_constraint c
-                        WHERE c.conrelid = tbl AND c.conname = 'player_bans_max_one_year');
+                        WHERE c.conrelid = tbl::oid AND c.conname = 'player_bans_max_one_year');
   END IF;
 
   -- The columns, read after the lock whenever this run will write.
   SELECT a.atttypid INTO ty_end
-    FROM pg_attribute a WHERE a.attrelid = tbl AND a.attname = 'expires_at' AND NOT a.attisdropped;
-  IF ty_end IS DISTINCT FROM 'pg_catalog.timestamptz'::regtype THEN
+    FROM pg_attribute a WHERE a.attrelid = tbl::oid AND a.attname = 'expires_at' AND NOT a.attisdropped;
+  IF ty_end IS DISTINCT FROM 'pg_catalog.timestamptz'::regtype::oid THEN
     RAISE EXCEPTION '418: player_bans.expires_at is %, not timestamp with time zone (apply 417 first)',
       coalesce(format_type(ty_end, NULL), 'missing');
   END IF;
   SELECT a.atttypid INTO ty_start
-    FROM pg_attribute a WHERE a.attrelid = tbl AND a.attname = 'banned_at' AND NOT a.attisdropped;
-  IF ty_start IS DISTINCT FROM 'pg_catalog.timestamptz'::regtype THEN
+    FROM pg_attribute a WHERE a.attrelid = tbl::oid AND a.attname = 'banned_at' AND NOT a.attisdropped;
+  IF ty_start IS DISTINCT FROM 'pg_catalog.timestamptz'::regtype::oid THEN
     RAISE EXCEPTION '418: player_bans.banned_at is %, not timestamp with time zone',
       coalesce(format_type(ty_start, NULL), 'missing');
   END IF;
@@ -173,7 +184,7 @@ BEGIN
   -- Post-check: the guard above only asks whether the name exists.
   SELECT pg_get_constraintdef(c.oid) INTO def
     FROM pg_constraint c
-   WHERE c.conrelid = tbl AND c.conname = 'player_bans_max_one_year'
+   WHERE c.conrelid = tbl::oid AND c.conname = 'player_bans_max_one_year'
      AND c.contype = 'c' AND c.convalidated;
   IF def IS DISTINCT FROM want THEN
     RAISE EXCEPTION '418: player_bans_max_one_year is %, not the validated CHECK 418 adds',

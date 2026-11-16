@@ -778,7 +778,7 @@ async def _snapshot(conn):
 async def _constraint_def(conn):
     return await conn.fetchval(
         "SELECT pg_get_constraintdef(c.oid) FROM pg_constraint c"
-        " WHERE c.conrelid = to_regclass('player_bans') AND c.conname = $1", CONSTRAINT)
+        " WHERE c.conrelid = to_regclass('player_bans')::oid AND c.conname = $1", CONSTRAINT)
 
 
 def _notices(err):
@@ -939,7 +939,7 @@ INTERVAL_STYLES = ("postgres", "postgres_verbose", "sql_standard", "iso_8601")
 PIN_LINE = "SET LOCAL IntervalStyle = 'postgres';\n"
 REREAD = ("    EXECUTE 'LOCK TABLE player_bans IN ACCESS EXCLUSIVE MODE';\n"
           "    present := EXISTS (SELECT 1 FROM pg_constraint c\n"
-          "                        WHERE c.conrelid = tbl AND c.conname = 'player_bans_max_one_year');\n")
+          "                        WHERE c.conrelid = tbl::oid AND c.conname = 'player_bans_max_one_year');\n")
 REREAD_CUT = "    EXECUTE 'LOCK TABLE player_bans IN ACCESS EXCLUSIVE MODE';\n"
 
 
@@ -1215,49 +1215,100 @@ def test_mutant_the_rollback_dropping_without_if_exists_fails_the_second_run(cas
 # generated test runs the real file under each setting below, set from
 # OUTSIDE the file (the startup packet) as a role or database setting would
 # set it, and asserts the constraint's BEHAVIOUR, not only its text.
-# Each entry: (id, settings, plant a `<=` in the table's schema, what the file
-# must do, why the setting does or does not enter). "{case}" in a value is the
-# case schema, which stands for public.
+# Objects in another schema on the session's path enter as settings do, so
+# the list carries them too: an operator planted in the table's own schema
+# (PLANTS), which the pinned path keeps second. pg_catalog first settles an
+# operator only against one with the same argument types: operator
+# resolution takes an exact match of the argument types before any that
+# needs a coercion, wherever it sits on the path, so every comparison in
+# the files is written on types pg_catalog holds an exact operator for.
+# Each entry: (id, settings, the plant (a key of PLANTS, or None), what the
+# file must do, why the setting does or does not enter). "{case}" in a value
+# is the case schema, which stands for public.
 
 PRESENT = "418: player_bans_max_one_year is present; no row changed"
 SESSION_SETTINGS = (
-    ("intervalstyle-postgres", (("IntervalStyle", "postgres"),), False, "applies",
+    ("intervalstyle-postgres", (("IntervalStyle", "postgres"),), None, "applies",
      "enters: the post-check's text prints the CHECK's interval by IntervalStyle; pinned"),
-    ("intervalstyle-postgres_verbose", (("IntervalStyle", "postgres_verbose"),), False, "applies",
+    ("intervalstyle-postgres_verbose", (("IntervalStyle", "postgres_verbose"),), None, "applies",
      "enters, as above"),
-    ("intervalstyle-sql_standard", (("IntervalStyle", "sql_standard"),), False, "applies",
+    ("intervalstyle-sql_standard", (("IntervalStyle", "sql_standard"),), None, "applies",
      "enters, as above"),
-    ("intervalstyle-iso_8601", (("IntervalStyle", "iso_8601"),), False, "applies",
+    ("intervalstyle-iso_8601", (("IntervalStyle", "iso_8601"),), None, "applies",
      "enters, as above"),
-    ("quote_all_identifiers-on", (("quote_all_identifiers", "on"),), False, "applies",
+    ("quote_all_identifiers-on", (("quote_all_identifiers", "on"),), None, "applies",
      "enters: the deparser then quotes every column name; pinned off"),
-    ("search_path-case_pg_catalog", (("search_path", "{case},pg_catalog"),), False, "applies",
+    ("search_path-case_pg_catalog", (("search_path", "{case},pg_catalog"),), None, "applies",
      "enters: it decides which <= the CHECK is parsed with and whether the deparser "
      "prints that operator qualified; pinned in the DO once the table is named"),
-    ("search_path-case_pg_catalog-operator", (("search_path", "{case},pg_catalog"),), True, "applies",
+    ("search_path-case_pg_catalog-operator", (("search_path", "{case},pg_catalog"),), "le_true", "applies",
      "the same path with a <= on two timestamptz values in the table's schema that answers true"),
     ("default_transaction_isolation-repeatable_read",
-     (("default_transaction_isolation", "repeatable read"),), False, "applies",
+     (("default_transaction_isolation", "repeatable read"),), None, "applies",
      "enters: the re-read under the lock sees another run's commit only at read committed; "
      "pinned by BEGIN ISOLATION LEVEL READ COMMITTED"),
     ("default_transaction_isolation-serializable",
-     (("default_transaction_isolation", "serializable"),), False, "applies",
+     (("default_transaction_isolation", "serializable"),), None, "applies",
      "enters, as above"),
-    ("default_transaction_read_only-on", (("default_transaction_read_only", "on"),), False, "refused",
+    ("default_transaction_read_only-on", (("default_transaction_read_only", "on"),), None, "refused",
      "enters as a refusal: the BEGIN inherits it, the first write (the lock) fails inside "
      "the transaction, and nothing is applied"),
-    ("datestyle-sql_dmy", (("DateStyle", "SQL, DMY"),), False, "applies",
+    ("datestyle-sql_dmy", (("DateStyle", "SQL, DMY"),), None, "applies",
      "does not enter: the file holds no date or time constant"),
-    ("timezone-los_angeles", (("TimeZone", "America/Los_Angeles"),), False, "applies",
+    ("timezone-los_angeles", (("TimeZone", "America/Los_Angeles"),), None, "applies",
      "does not enter: the bound is in hours, which no time zone stretches"),
-    ("standard_conforming_strings-off", (("standard_conforming_strings", "off"),), False, "applies",
+    ("standard_conforming_strings-off", (("standard_conforming_strings", "off"),), None, "applies",
      "does not enter: no string literal in the file holds a backslash"),
-    ("extra_float_digits--15", (("extra_float_digits", "-15"),), False, "applies",
+    ("extra_float_digits--15", (("extra_float_digits", "-15"),), None, "applies",
      "does not enter: the file holds no floating-point value"),
-    ("extra_float_digits-3", (("extra_float_digits", "3"),), False, "applies",
+    ("extra_float_digits-3", (("extra_float_digits", "3"),), None, "applies",
      "does not enter, as above"),
+    ("operator-eq_oid_regclass-true", (), "eq_oid_regclass_true", "applies",
+     "an = on (oid, regclass) in the table's schema: an exact match for a comparison of "
+     "a catalog oid with a regclass, which pg_catalog does not hold; the files cast to oid"),
+    ("operator-eq_oid_regclass-false", (), "eq_oid_regclass_false", "applies", "as above, answering false"),
+    ("operator-eq_oid_regtype-true", (), "eq_oid_regtype_true", "applies",
+     "an = on (oid, regtype): the column-type checks; the files cast to oid"),
+    ("operator-eq_oid_regtype-false", (), "eq_oid_regtype_false", "applies", "as above, answering false"),
+    ("operator-eq_regclass_regclass-true", (), "eq_regclass_regclass_true", "applies",
+     "an = on (regclass, regclass): the identity check; the files cast to oid"),
+    ("operator-eq_regclass_regclass-false", (), "eq_regclass_regclass_false", "applies",
+     "as above, answering false"),
+    ("search_path-case_pg_catalog-eq_name_name-true", (("search_path", "{case},pg_catalog"),),
+     "eq_name_name_true", "applies",
+     "an = on (name, name) with the table's schema ahead of pg_catalog on the session's path: "
+     "the constraint-name reads; pg_catalog holds the exact operator and the pinned path "
+     "puts it first"),
+    ("search_path-case_pg_catalog-eq_name_name-false", (("search_path", "{case},pg_catalog"),),
+     "eq_name_name_false", "applies", "as above, answering false"),
 )
-OP_FN = "bancap_always_true"
+
+
+def _eq_plant(left, right, answer):
+    fn = "bancap_eq_%s_%s_%s" % (left, right, answer)
+    return (("CREATE FUNCTION {s}.%s(%s, %s) RETURNS boolean LANGUAGE plpgsql IMMUTABLE"
+             " AS $f$BEGIN RETURN %s; END$f$" % (fn, left, right, answer),
+             "CREATE OPERATOR {s}.= (LEFTARG = %s, RIGHTARG = %s, FUNCTION = {s}.%s)" % (left, right, fn)),
+            ("DROP OPERATOR IF EXISTS {s}.= (%s, %s)" % (left, right),
+             "DROP FUNCTION IF EXISTS {s}.%s(%s, %s)" % (fn, left, right)))
+
+
+# key: (CREATE statements, DROP statements); "{s}" is the quoted case schema.
+# Every plant is removed before the case's own cleanup runs, but for the
+# `<=`, which a CHECK built by a mutant may depend on: it goes after the
+# cleanup has dropped that CHECK (PLANT_AFTER_CLEANUP).
+PLANTS = {
+    "le_true": (("CREATE FUNCTION {s}.bancap_always_true(timestamptz, timestamptz) RETURNS boolean"
+                 " LANGUAGE plpgsql IMMUTABLE AS $f$BEGIN RETURN true; END$f$",
+                 "CREATE OPERATOR {s}.<= (LEFTARG = timestamptz, RIGHTARG = timestamptz,"
+                 " FUNCTION = {s}.bancap_always_true)"),
+                ("DROP OPERATOR IF EXISTS {s}.<= (timestamptz, timestamptz)",
+                 "DROP FUNCTION IF EXISTS {s}.bancap_always_true(timestamptz, timestamptz)")),
+}
+for _l, _r in (("oid", "regclass"), ("oid", "regtype"), ("regclass", "regclass"), ("name", "name")):
+    for _a in ("true", "false"):
+        PLANTS["eq_%s_%s_%s" % (_l, _r, _a)] = _eq_plant(_l, _r, _a)
+PLANT_AFTER_CLEANUP = {"le_true"}
 BEGIN_LINE = "BEGIN ISOLATION LEVEL READ COMMITTED;\n"
 QAI_LINE = "SET LOCAL quote_all_identifiers = off;\n"
 PATH_LINE = ("  PERFORM pg_catalog.set_config('search_path', "
@@ -1274,20 +1325,32 @@ def _settings_for(case, settings):
     return tuple((k, v.format(case=case)) for k, v in settings)
 
 
-async def _plant_operator(conn, case):
-    """A `<=` on two timestamptz values in the table's schema that always
-    answers true (bancap-r2's input)."""
-    s = harness.quoted(case)
-    await conn.execute("CREATE FUNCTION %s.%s(timestamptz, timestamptz) RETURNS boolean"
-                       " LANGUAGE plpgsql IMMUTABLE AS $f$BEGIN RETURN true; END$f$" % (s, OP_FN))
-    await conn.execute("CREATE OPERATOR %s.<= (LEFTARG = timestamptz, RIGHTARG = timestamptz,"
-                       " FUNCTION = %s.%s)" % (s, s, OP_FN))
+async def _plant(conn, case, key):
+    """The plant PLANTS[key] in the table's schema (no-op for None)."""
+    if key:
+        for stmt in PLANTS[key][0]:
+            await conn.execute(stmt.replace("{s}", harness.quoted(case)))
 
 
-async def _unplant_operator(conn, case):
-    s = harness.quoted(case)
-    await conn.execute("DROP OPERATOR IF EXISTS %s.<= (timestamptz, timestamptz)" % s)
-    await conn.execute("DROP FUNCTION IF EXISTS %s.%s(timestamptz, timestamptz)" % (s, OP_FN))
+async def _unplant(conn, case, key):
+    if key:
+        for stmt in PLANTS[key][1]:
+            await conn.execute(stmt.replace("{s}", harness.quoted(case)))
+
+
+# A second table in the case schema carrying a CHECK of the same NAME and
+# definition, and one row: a comparison that stops naming player_bans alone
+# (an `=` on (oid, regclass) that answers true) reads this one instead.
+DECOY = "bancap_decoy"
+DECOY_CREATE = ("CREATE TABLE {s}.%s (banned_at timestamptz NOT NULL DEFAULT now(),"
+                " expires_at timestamptz, CONSTRAINT player_bans_max_one_year CHECK"
+                " (expires_at IS NOT NULL AND banned_at IS NOT NULL"
+                " AND expires_at <= banned_at + interval '8760 hours'))" % DECOY)
+
+
+async def _decoy_rows(conn):
+    return [tuple(r) for r in await conn.fetch(
+        "SELECT banned_at, expires_at, xmin::text FROM %s ORDER BY banned_at" % DECOY)]
 
 
 async def _verdicts(conn, admin):
@@ -1315,32 +1378,42 @@ async def _verdicts(conn, admin):
 async def _apply_under(case, path, settings, plant):
     """The file at `path` under `settings`: with the CHECK absent and one
     row without an end, a first apply and a second apply, then the CHECK's
-    verdicts. The CHECK is dropped and the operator removed again at the end
-    (the case's census refuses an object the build did not leave), and 418
-    is applied once more under the default session."""
+    verdicts, with the decoy table beside it and the plant in place from
+    the first apply on. The plant, the decoy and the CHECK are removed again
+    at the end (the case's census refuses an object the build did not
+    leave), and 418 is applied once more under the default session."""
     st = _settings_for(case, settings)
+    s = harness.quoted(case)
     conn = await harness.connect_bound(lh.DSN, case)
     out = {}
+    planted = False
     try:
-        if plant:
-            await _plant_operator(conn, case)
         out["rollback"] = _psql_apply(case, R418)
         admin = _sid()
         await conn.execute("INSERT INTO admin_users (steam_id) VALUES ($1)", admin)
         await conn.execute("INSERT INTO player_bans (steam_id, reason, banned_by_steam_id, expires_at)"
                            " VALUES ($1, 'settings', $2, NULL)", _sid(), admin)
+        await conn.execute(DECOY_CREATE.replace("{s}", s))
+        await conn.execute("INSERT INTO %s (expires_at) VALUES (now() + interval '1 hour')" % DECOY)
+        out["decoy_before"] = await _decoy_rows(conn)
         out["before"] = await _rows_with_xmin(conn)
+        planted = True
+        await _plant(conn, case, plant)
         out["first"] = _psql_apply(case, path, st)
         out["def"] = await _constraint_def(conn)
         out["after_first"] = await _rows_with_xmin(conn)
         out["again"] = _psql_apply(case, path, st)
         out["after_again"] = (await _constraint_def(conn), await _rows_with_xmin(conn))
         out["verdicts"] = await _verdicts(conn, admin)
+        out["decoy_after"] = await _decoy_rows(conn)
     finally:
         try:
+            if planted and plant not in PLANT_AFTER_CLEANUP:
+                await _unplant(conn, case, plant)
+            await conn.execute("DROP TABLE IF EXISTS %s.%s" % (s, DECOY))
             out["cleanup"] = _psql_apply(case, R418)
-            if plant:
-                await _unplant_operator(conn, case)
+            if planted and plant in PLANT_AFTER_CLEANUP:
+                await _unplant(conn, case, plant)
         finally:
             await conn.close()
     out["restore"] = _psql_apply(case, M418)
@@ -1370,6 +1443,7 @@ def test_418_under_each_session_setting_applies_once_and_the_check_holds(case, e
         assert rc == 0 and _notices(err) == [PRESENT], (name, err)
         assert out["after_again"] == (WANT_DEF, out["after_first"]), (name, "the second apply changed a row")
         assert out["verdicts"] == ("refused", "admitted", "refused"), (name, out["verdicts"])
+    assert out["decoy_after"] == out["decoy_before"], (name, "a row of another table changed")
     assert out["cleanup"][0] == 0 and out["restore"][0] == 0, (name, out["cleanup"], out["restore"])
 
 
@@ -1384,7 +1458,7 @@ async def _operator_case(case, path):
     conn = await harness.connect_bound(lh.DSN, case)
     out = {}
     try:
-        await _plant_operator(conn, case)
+        await _plant(conn, case, "le_true")
         out["rollback"] = _psql_apply(case, R418)
         admin = _sid()
         await conn.execute("INSERT INTO admin_users (steam_id) VALUES ($1)", admin)
@@ -1405,7 +1479,7 @@ async def _operator_case(case, path):
     finally:
         try:
             out["cleanup"] = _psql_apply(case, R418)
-            await _unplant_operator(conn, case)
+            await _unplant(conn, case, "le_true")
         finally:
             await conn.close()
     out["restore"] = _psql_apply(case, M418)
@@ -1432,7 +1506,7 @@ def test_r2_a_an_operator_in_the_tables_schema_does_not_decide_the_check(case):
 def test_r2_b_quote_all_identifiers_on_a_first_and_a_second_apply_end_rc_0(case):
     """bancap-r2 HIGH 2, its input as a named test: with quote_all_identifiers
     on for the session, a first apply and a second apply both end rc 0."""
-    out = _run(_apply_under(case, M418, (("quote_all_identifiers", "on"),), False))
+    out = _run(_apply_under(case, M418, (("quote_all_identifiers", "on"),), None))
     assert out["first"][0] == 0, out["first"]
     assert out["def"] == WANT_DEF, out["def"]
     rc, err = out["again"]
@@ -1495,7 +1569,7 @@ def test_mutant_418_pinning_a_path_without_the_tables_schema_is_refused_with_not
     nothing is applied: the case for that check's refusal."""
     path = _m418_copy(PATH_LINE, PATH_LINE_NO_SCHEMA)
     try:
-        out = _run(_apply_under(case, path, (), False))
+        out = _run(_apply_under(case, path, (), None))
     finally:
         os.unlink(path)
     rc, err = out["first"]
@@ -1509,7 +1583,7 @@ def test_mutant_418_without_its_quote_all_identifiers_pin_is_refused_with_it_on(
     post-check reads the columns quoted and refuses; nothing is applied."""
     path = _m418_copy(QAI_LINE, "")
     try:
-        out = _run(_apply_under(case, path, (("quote_all_identifiers", "on"),), False))
+        out = _run(_apply_under(case, path, (("quote_all_identifiers", "on"),), None))
     finally:
         os.unlink(path)
     rc, err = out["first"]
@@ -1531,3 +1605,185 @@ def test_mutant_418_rewriting_every_row_in_its_present_branch_fails_the_two_firs
     rc, err = out["b"]
     assert rc == 0 and _notices(err) == [PRESENT], (rc, err)
     assert out["after_b"] != out["after_a"], "B's rewrite of every row went unseen"
+
+
+# -- bancap-r2, the integrator's B1 and B2: comparisons written on types --------
+# -- pg_catalog holds an exact operator for, and the rollback pinned too ---------
+
+def _copy_with(src_path, pairs):
+    """A temporary copy of the file at `src_path` with each (old, new, count)
+    replaced; `old` must occur exactly `count` times. The caller unlinks it."""
+    src = io.open(src_path, encoding="utf-8").read()
+    for old, new, count in pairs:
+        assert src.count(old) == count, (old, src.count(old), count)
+        src = src.replace(old, new)
+    with tempfile.NamedTemporaryFile("w", suffix=".sql", delete=False, encoding="utf-8") as fh:
+        fh.write(src)
+        return fh.name
+
+
+# Per cast in 418: the mutant without it, the plant that then moves the
+# file, and the refusal that names the reason.
+CAST_MUTANTS = (
+    ("conrelid", "c.conrelid = tbl::oid", "c.conrelid = tbl", 3, "eq_oid_regclass_false",
+     "418: player_bans_max_one_year is missing or not a validated CHECK, not the validated CHECK 418 adds"),
+    ("attrelid", "a.attrelid = tbl::oid", "a.attrelid = tbl", 2, "eq_oid_regclass_false",
+     "418: player_bans.expires_at is missing, not timestamp with time zone"),
+    ("regtype", "'pg_catalog.timestamptz'::regtype::oid", "'pg_catalog.timestamptz'::regtype", 2,
+     "eq_oid_regtype_false",
+     "418: player_bans.expires_at is timestamp with time zone, not timestamp with time zone"),
+    ("identity", "pg_catalog.to_regclass('player_bans')::oid IS DISTINCT FROM tbl::oid",
+     "pg_catalog.to_regclass('player_bans') IS DISTINCT FROM tbl", 1, "eq_regclass_regclass_false",
+     "418: player_bans under the pinned search path is"),
+)
+
+
+def test_b1_an_oid_regclass_equality_answering_true_leaves_player_bans_with_its_check(case):
+    """B1's case that matters most, as a named test: an `=` on (oid, regclass)
+    in the table's schema that answers true, and a second table carrying a
+    CHECK of the same name. 418 must still put ITS CHECK on player_bans: rc 0,
+    the CHECK refuses an end past the cap and a NULL end and admits one at
+    the cap, a second apply changes no row, the second table's rows are
+    untouched. (At f2580d3a the file ended rc 0 with no CHECK on player_bans,
+    its reads satisfied by the second table's.)"""
+    out = _run(_apply_under(case, M418, (), "eq_oid_regclass_true"))
+    assert out["first"][0] == 0, out["first"]
+    assert out["verdicts"] == ("refused", "admitted", "refused"), out["verdicts"]
+    assert out["def"] == WANT_DEF, out["def"]
+    rc, err = out["again"]
+    assert rc == 0 and _notices(err) == [PRESENT], (rc, err)
+    assert out["after_again"] == (WANT_DEF, out["after_first"]), "the second apply changed a row"
+    assert out["decoy_after"] == out["decoy_before"], "a row of the second table changed"
+    assert out["cleanup"][0] == 0 and out["restore"][0] == 0, out
+
+
+@pytest.mark.parametrize("mutant", CAST_MUTANTS, ids=[m[0] for m in CAST_MUTANTS])
+def test_mutant_418_without_a_cast_is_moved_by_its_plant(case, mutant):
+    """Mutant per cast: the comparison written on its own types again, and an
+    `=` with exactly those types planted in the table's schema answering
+    false. The plant is taken over pg_catalog's operator, which needs a
+    coercion: the file refuses for that comparison's reason, nothing
+    applied. The same plant against the real file is an entry of
+    SESSION_SETTINGS, where the file applies."""
+    _id, old, new, count, plant, reason = mutant
+    path = _copy_with(M418, ((old, new, count),))
+    try:
+        out = _run(_apply_under(case, path, (), plant))
+    finally:
+        os.unlink(path)
+    rc, err = out["first"]
+    assert rc != 0 and reason in err, (rc, err)
+    assert out["def"] is None and out["after_first"] == out["before"], out
+    assert out["cleanup"][0] == 0 and out["restore"][0] == 0, out
+
+
+async def _null_end_verdict(conn, admin):
+    tr = conn.transaction()
+    await tr.start()
+    try:
+        await conn.execute("INSERT INTO player_bans (steam_id, reason, banned_by_steam_id, expires_at)"
+                           " VALUES ($1, 'no end', $2, NULL)", _sid(), admin)
+        return "admitted"
+    except Exception as e:      # asyncpg CheckViolationError
+        return "refused" if CONSTRAINT in str(e) else repr(e)
+    finally:
+        await tr.rollback()
+
+
+async def _rollback_under(case, path, settings, plant):
+    """418 applied under the default session, then the rollback file at
+    `path` under `settings` with the plant in place: its exit, the CHECK
+    after it, whether a ban without an end is admitted again, and a second
+    run. The plant is removed and 418 applied again at the end."""
+    st = _settings_for(case, settings)
+    conn = await harness.connect_bound(lh.DSN, case)
+    out = {}
+    planted = False
+    try:
+        out["apply"] = _psql_apply(case, M418)
+        admin = _sid()
+        await conn.execute("INSERT INTO admin_users (steam_id) VALUES ($1)", admin)
+        out["def_before"] = await _constraint_def(conn)
+        planted = True
+        await _plant(conn, case, plant)
+        out["rollback"] = _psql_apply(case, path, st)
+        out["def_after"] = await _constraint_def(conn)
+        out["null_end"] = await _null_end_verdict(conn, admin)
+        out["again"] = _psql_apply(case, path, st)
+        out["def_again"] = await _constraint_def(conn)
+    finally:
+        try:
+            if planted:
+                await _unplant(conn, case, plant)
+        finally:
+            await conn.close()
+    out["restore"] = _psql_apply(case, M418)
+    return out
+
+
+@pytest.mark.parametrize("entry", SESSION_SETTINGS, ids=[e[0] for e in SESSION_SETTINGS])
+def test_rollback_418_under_each_session_setting_drops_the_check(case, entry):
+    """B2's generated test: the REAL rollback under each entry of
+    SESSION_SETTINGS, with 418 applied before it. rc 0 means the CHECK is
+    gone: afterwards a ban without an end is admitted again, and a second run
+    ends rc 0. Under default_transaction_read_only the drop is refused and
+    the CHECK stands."""
+    name, settings, plant, want, _why = entry
+    out = _run(_rollback_under(case, R418, settings, plant))
+    assert out["apply"][0] == 0 and out["def_before"] == WANT_DEF, (name, out["apply"], out["def_before"])
+    rc, err = out["rollback"]
+    if want == "refused":
+        assert rc != 0 and "read-only transaction" in err, (name, rc, err)
+        assert out["def_after"] == WANT_DEF, (name, out["def_after"])
+    else:
+        assert rc == 0, (name, err)
+        assert out["def_after"] is None and out["null_end"] == "admitted", (name, out)
+        assert out["again"][0] == 0 and out["def_again"] is None, (name, out["again"])
+    assert out["restore"][0] == 0, (name, out["restore"])
+
+
+ROLLBACK_POST_CHECK = (
+    "\n  -- Post-check: rc 0 means the CHECK is gone. Written with pg_catalog's\n"
+    "  -- operators named, so it holds whatever the path above it read.\n"
+    "  IF EXISTS (SELECT 1 FROM pg_catalog.pg_constraint c\n"
+    "              WHERE c.conrelid OPERATOR(pg_catalog.=) tbl::oid\n"
+    "                AND c.conname OPERATOR(pg_catalog.=) 'player_bans_max_one_year'::name) THEN\n"
+    "    RAISE EXCEPTION 'rollback 418: player_bans_max_one_year still stands after the drop';\n"
+    "  END IF;\n")
+
+
+def test_rollback_with_a_false_name_equality_ahead_of_pg_catalog_drops_the_check(case):
+    """B2's input as a named test: an `=` on two name values in the table's
+    schema that answers false, and the path {case}, pg_catalog. The
+    rollback ends rc 0 and the CHECK is gone."""
+    out = _run(_rollback_under(case, R418, OPERATOR_PATH, "eq_name_name_false"))
+    rc, err = out["rollback"]
+    assert rc == 0 and out["def_after"] is None, (rc, err, out["def_after"])
+    assert out["null_end"] == "admitted", out["null_end"]
+
+
+def test_mutant_rollback_without_its_pin_is_refused_by_its_post_check(case):
+    """Mutant: the rollback without its search-path line. Under B2's input
+    its guard reads the CHECK absent and skips the drop; the post-check
+    finds it standing and refuses (rc 3): never rc 0 with the CHECK left."""
+    path = _copy_with(R418, ((PATH_LINE, "", 1),))
+    try:
+        out = _run(_rollback_under(case, path, OPERATOR_PATH, "eq_name_name_false"))
+    finally:
+        os.unlink(path)
+    rc, err = out["rollback"]
+    assert rc != 0 and "still stands after the drop" in err, (rc, err)
+    assert out["def_after"] == WANT_DEF, out["def_after"]
+
+
+def test_mutant_rollback_without_its_pin_and_its_post_check_ends_rc_0_with_the_check(case):
+    """Mutant: the rollback without its pin AND without its post-check (with
+    the pin in place no input known here defeats the guard, so the
+    post-check is measured on the file without it). Under B2's input it ends
+    rc 0 with the CHECK still standing: the outcome the post-check refuses."""
+    path = _copy_with(R418, ((PATH_LINE, "", 1), (ROLLBACK_POST_CHECK, "\n", 1)))
+    try:
+        out = _run(_rollback_under(case, path, OPERATOR_PATH, "eq_name_name_false"))
+    finally:
+        os.unlink(path)
+    assert out["rollback"][0] == 0 and out["def_after"] == WANT_DEF, (out["rollback"], out["def_after"])
