@@ -210,6 +210,39 @@ def test_any_other_database_error_is_not_run_again(monkeypatch):
     assert db.attempts == 1, db.attempts
 
 
+def test_a_wait_ended_by_the_lock_timeout_is_refused_at_once(monkeypatch):
+    """55P03, a wait the attempt's lock_timeout ended: 503 at once, after one
+    attempt, rolled back, never committed."""
+    monkeypatch.setattr(main, "MATCH_HMAC_SECRET", SECRET)
+    clock = _Clock()
+    monkeypatch.setattr(main, "_deletion_clock", clock)
+    db = _VictimDb(clock, cost=0.1, sqlstate="55P03")
+    with pytest.raises(HTTPException) as e:
+        asyncio.run(main.delete_player_data(STEAM, None, sig=_sig(STEAM), _arrived=clock.now,
+                                            _slot=None, db=db))
+    assert (e.value.status_code, e.value.detail) == (503, "account_cleanup_contended"), e.value
+    assert db.attempts == 1 and db.rollbacks == 1, (db.attempts, db.rollbacks)
+
+
+def test_the_bound_and_the_helpers_read_the_retry_set_when_they_run(monkeypatch):
+    """The order tests empty the retry set to see PostgreSQL's 40P01 as it is
+    (test_mdpl_deletion_lock_order_pg._order_only). The bound and the
+    helpers' test both follow it, as a set fixed at import would not: the
+    40P01 is the route's error at once, after one attempt; 55P03 is still
+    acted on."""
+    monkeypatch.setattr(main, "MATCH_HMAC_SECRET", SECRET)
+    monkeypatch.setattr(main, "_DELETION_RETRY_SQLSTATES", frozenset())
+    assert main._retryable_for_caller(_db_error("40P01"), True) is False
+    assert main._retryable_for_caller(_db_error("55P03"), True) is True
+    clock = _Clock()
+    monkeypatch.setattr(main, "_deletion_clock", clock)
+    db = _VictimDb(clock, cost=0.1, sqlstate="40P01")
+    with pytest.raises(DBAPIError):
+        asyncio.run(main.delete_player_data(STEAM, None, sig=_sig(STEAM), _arrived=clock.now,
+                                            _slot=None, db=db))
+    assert db.attempts == 1, db.attempts
+
+
 def test_the_bet_helpers_keep_their_present_behaviour_by_default():
     """R6b: the flag defaults to False on all four helpers, and only the
     deletion passes True (four calls); every other caller is unchanged."""

@@ -45678,10 +45678,17 @@ _DELETION_ATTEMPT_MIN_S = 3.0
 # Run again from fresh reads: a deadlock victim and a serialization failure,
 # nothing else (#505: re-running on any database error hides real faults).
 _DELETION_RETRY_SQLSTATES = frozenset({"40P01", "40001"})
-# The errors the bound acts on: those above, and 55P03, a wait the attempt's
-# lock_timeout ended -- the deadline has come, so the bound refuses at once.
-_DELETION_BOUND_SQLSTATES = _DELETION_RETRY_SQLSTATES | {"55P03"}
+# 55P03: a wait the attempt's lock_timeout ended -- the deadline has come,
+# so the bound refuses at once.
+_DELETION_TIMEOUT_SQLSTATE = "55P03"
 _DELETION_REFUSAL = "account_cleanup_contended"
+
+
+def _deletion_bound_acts_on(code) -> bool:
+    """The errors the deletion's bound acts on: the retry set and the
+    timeout, both read when called, so the bound and the bet helpers
+    always agree on them."""
+    return code in _DELETION_RETRY_SQLSTATES or code == _DELETION_TIMEOUT_SQLSTATE
 
 
 def _retryable_for_caller(ex, raise_retryable: bool) -> bool:
@@ -45689,14 +45696,14 @@ def _retryable_for_caller(ex, raise_retryable: bool) -> bool:
     which is right for the errors they were built for. A caller that runs
     whole bounded attempts -- only the account deletion passes
     raise_retryable=True -- gets back, as its own error, every error its
-    bound acts on (_DELETION_BOUND_SQLSTATES): a deadlock victim or a
+    bound acts on (_deletion_bound_acts_on): a deadlock victim or a
     serialization failure, which a new attempt can get past, and a wait its
     lock_timeout ended, which the bound refuses at once rather than letting
     the attempt go on to later waits. Every other caller, and every other
     error, keeps the helper's present behaviour (its janitor sweep finishes
     the work)."""
-    return bool(raise_retryable) and (
-        getattr(getattr(ex, "orig", None), "sqlstate", None) in _DELETION_BOUND_SQLSTATES)
+    return bool(raise_retryable) and _deletion_bound_acts_on(
+        getattr(getattr(ex, "orig", None), "sqlstate", None))
 _deletion_clock = time.monotonic
 _deletion_deadline = contextvars.ContextVar("deletion_deadline", default=None)
 
@@ -45744,13 +45751,13 @@ def _deletion_bounded(fn):
                 return await fn(*args, **kwargs)
             except DBAPIError as exc:
                 code = getattr(getattr(exc, "orig", None), "sqlstate", None)
-                if code not in _DELETION_BOUND_SQLSTATES:
+                if not _deletion_bound_acts_on(code):
                     raise
                 try:
                     await db.rollback()
                 except Exception:
                     pass
-                if code == "55P03":   # a wait reached the deadline (lock_timeout)
+                if code == _DELETION_TIMEOUT_SQLSTATE:   # a wait reached the deadline (lock_timeout)
                     raise HTTPException(status_code=503, detail=_DELETION_REFUSAL)
                 print(f"[PRIVACY] deletion attempt {attempt} ended by {code}; "
                       f"{max(0.0, deadline - _deletion_clock()):.1f}s left")
