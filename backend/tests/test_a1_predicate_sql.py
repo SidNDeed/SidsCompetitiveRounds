@@ -266,9 +266,25 @@ def test_ffa_proximity_floor_uses_complete_queue_stamps():
         engine, sm, pids = await _setup()
         try:
             async with sm() as db:
+                # The floor is FFA_PROXIMITY_VICTIM_MIN_VERSION (since
+                # 2c905cdd above MIN_MOD_VERSION): a roster stamped with the
+                # floor's own version clears it; one stamped with a lower
+                # version (the admission floor, MIN_MOD_VERSION) is refused.
+                floor = main.FFA_PROXIMITY_VICTIM_MIN_VERSION
+                lower = main.MIN_MOD_VERSION
+                assert main._parse_version(lower) < main._parse_version(floor), (lower, floor)
                 await db.execute(text(
                     "UPDATE ffa_queue SET mod_version = :version"),
-                    {"version": main.MIN_MOD_VERSION})
+                    {"version": lower})
+                await db.commit()
+                vals = (await db.execute(text(
+                    "SELECT mod_version FROM ffa_queue"
+                    " WHERE player_id = ANY(:ids)"), {"ids": pids})).scalars().all()
+                assert not main._ffa_roster_clears_proximity_floor(vals, len(pids))
+
+                await db.execute(text(
+                    "UPDATE ffa_queue SET mod_version = :version"),
+                    {"version": floor})
                 await db.commit()
                 vals = (await db.execute(text(
                     "SELECT mod_version FROM ffa_queue"
