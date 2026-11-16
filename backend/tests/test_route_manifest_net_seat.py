@@ -2253,7 +2253,16 @@ def test_the_helper_closure_stays_affordable():
     # HTTPException, json, math, os, Request and time), and +2 the route does
     # run, the admin_evidence health word and its route tuple. Inside 852, so
     # the bound stays.
-    assert all_worst <= 852, f"worst closure {all_worst} of {total}"
+    # QDIG-1 on the ban cap lane (2026-11-16), claude/qdig-1116 ef3ffa87 on
+    # the ban cap lane's landing tip ba64c28a: 854 measured at GET
+    # /api/v1/health, of 5644 indexed bindings (851 at ba64c28a, of 5565,
+    # the same route): +3 by name, all three run by the health route: main's
+    # _qdig_needs_decision_word (the quarantine_needs_decision word), the
+    # _qdig_state it reads, and _QDIG_BUILD (the qdig_build word); none
+    # leaves. The bound moves to 897, the measurement times 1.05 rounded up,
+    # for that reason and no other. The median (236 against 245) and p90
+    # (398 against 425) bounds stay.
+    assert all_worst <= 897, f"worst closure {all_worst} of {total}"
 
 
 def _route_covering(module, name):
