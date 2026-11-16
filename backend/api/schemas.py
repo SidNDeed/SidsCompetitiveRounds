@@ -1300,6 +1300,19 @@ class HealthResponse(BaseModel):
     # read by nothing else (#306). No default, as above. Absent on any build
     # before it.
     ban_expiry_build: int
+    # qdig_build: release-train verification plumbing, not a design mechanism
+    # (main._QDIG_BUILD; 1 = this build classifies held game reports, files
+    # the ones with the recorded game's result and gives the digest feed its
+    # plain-words keys). It names build identity only, equal on both roles
+    # by construction. Probed by the release train and read by nothing else
+    # (#306). No default, as above. Absent on any build before it.
+    qdig_build: int
+    # quarantine_needs_decision: how many pending held GAMES need an admin's
+    # decision, by the last census of this process's janitor pass
+    # (main._qdig_needs_decision_word); -1 on a box that does not compute it
+    # (the standby, and the primary before its first census). A measured
+    # value, not a marker.
+    quarantine_needs_decision: int
     # build_manifest: the SHA-256 of the build-manifest.json this image's build
     # wrote (build_manifest.py: the build context's digest and the identity of
     # every installed wheel and .deb), "absent" when the process was not

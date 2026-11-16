@@ -39,7 +39,9 @@ sys.path.insert(0, os.path.normpath(os.path.join(HERE, "..", "api")))
 import main  # noqa: E402
 import models  # noqa: E402
 
-STATEMENTS, DYNAMIC = 361, 0
+# 361 before QDIG-1; its janitor pass (_qdig_janitor_pass, _qdig_load) adds
+# 11, every one a module constant or literal (measured, not typed).
+STATEMENTS, DYNAMIC = 372, 0
 ROOT = (("main", "root"),)
 DEF = re.compile(r"\((\w+)\.unbanned_at IS NULL AND \(\1\.expires_at IS NULL OR \1\.expires_at > NOW\(\)\)\)")
 # the sites that were dynamic on 88a0a2bf, and the alias each one's definition call names

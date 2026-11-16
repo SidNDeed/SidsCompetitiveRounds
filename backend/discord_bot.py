@@ -12637,6 +12637,9 @@ _qdigest = {
     "first_pass_logged": False,
     "channel_logged": False,
     "first_post_logged": False,
+    "form": None,             # D1's `qdig` of the current pass's first page (QDIG-1); None = today's form
+    "unmarked": set(),        # QDIG-1: ids Discord accepted whose posted stamp is not yet recorded
+    "reminder_hold": None,    # QDIG-1: monotonic time of a reminder whose stamp could not be recorded
 }
 
 
@@ -12666,10 +12669,14 @@ async def _qdigest_pass():
     answer; every later request sends back hw and the last (created_at, id)
     read. The pass ends on a short page, or on a page that could not be read,
     which leaves it incomplete. The api bounds the cohort by hw, which is what
-    ends a pass over a table that keeps receiving captures."""
+    ends a pass over a table that keeps receiving captures. The first page's
+    `qdig` (QDIG-1) is kept in _qdigest["form"]: it says which form the
+    iteration posts in."""
+    _qdigest["form"] = None
     first = await _qdigest_page({})
     if not isinstance(first, dict):
         return [], None, False
+    _qdigest["form"] = first.get("qdig")
     rows = list(first.get("rows") or [])
     totals = first.get("totals")
     size = int(first.get("page_size") or 0)
@@ -12785,6 +12792,11 @@ async def _qdigest_iteration():
         return
     rows, totals, complete = await _qdigest_pass()
     totals = totals if isinstance(totals, dict) else None
+    if _qdigest.get("form") is not None and _qdigest["form"] == QDIG_FEED_FORM:
+        # QDIG-1: the api describes each row; post in plain words. Without
+        # the key (an api before QDIG-1, or one rolled back) the lines below
+        # post today's one-line form, unchanged.
+        return await _qdig_iteration(rows, totals, complete)
     st = _qdigest
     if complete:
         st["announced"] &= {r["id"] for r in rows}
@@ -12816,6 +12828,239 @@ async def _qdigest_iteration():
         await _qdigest_round(channel, new, quota)
     if reminder_due and await _qdigest_send(channel, _qdigest_totals_line(totals, "quarantine digest reminder")):
         st["reminder_at"] = time.monotonic()
+
+
+# ── QDIG-1: held game reports in plain words ────────────────────────────────
+# When D1's first page carries `qdig` == QDIG_FEED_FORM, each row comes
+# classified and described by the api (main._qdig_classify). The bot then
+# lists only NEEDS A DECISION rows that are not yet posted, one entry per GAME
+# (rows that hold the same room share a game_key), and records each accepted
+# message's ids through the posted route, so a row is listed once and a
+# restart posts nothing unless something is new. The daily reminder is one
+# line, posted only when D1's totals say reminder_due (the clock is the
+# rows' own digest_posted_at / digest_reminded_at, never this process's
+# memory), and its ids are recorded with kind "reminder". FOR THE RECORD rows
+# are never listed. The texts are plain ASCII apart from names.
+
+QDIG_FEED_FORM = 1
+QDIG_POSTED_PATH = "/api/v1/internal/quarantine/digest/posted"
+QDIG_POSTED_BATCH = 200               # the route's own bound per call
+QDIG_REMINDER_HOLD_S = 86400          # a reminder whose stamp failed is not repeated by this process
+QDIG_ENTRY_PLAYERS = 10               # the most players an entry lists
+QDIG_ENTRY_IDS = 5                    # the most row ids an entry closes with
+QDIG_HEADER = "Held game reports: results a player's game sent that the server did not record as sent."
+QDIG_HEADER_MORE = "Held game reports (continued):"
+QDIG_WHAT_YOU_CAN_DO = ("What you can do: in the Admin tab, Rejected Reports. Accept only marks the report "
+                        "as approved for a later ordered replay; it records nothing now. "
+                        "Discard marks it as dismissed.")
+QDIG_MD_CHARS = "\\*_~`|>[]()#"
+
+
+def _qdig_esc(name) -> str:
+    """A display name for a Discord message: one line, at most 32
+    characters, markdown characters escaped (mentions are off already)."""
+    s = " ".join("".join(ch if ch.isprintable() else " " for ch in str(name or "")).split())[:32]
+    return "".join("\\" + ch if ch in QDIG_MD_CHARS else ch for ch in s) or "unknown player"
+
+
+def _qdig_unix(value):
+    try:
+        return int(datetime.fromisoformat(str(value)).timestamp())
+    except (TypeError, ValueError):
+        return None
+
+
+def _qdig_when(value) -> str:
+    """A Discord timestamp, so every reader sees local time."""
+    unix = _qdig_unix(value)
+    return f"<t:{unix}:f>" if unix is not None else "at an unknown time"
+
+
+def _qdig_numbers(row: dict) -> tuple:
+    """What two reports of one game are compared by: the players' numbers."""
+    return tuple((p.get("name"), p.get("rounds"), p.get("points"), p.get("kills"), p.get("left_early"),
+                  p.get("absent")) for p in row.get("players") or [])
+
+
+def _qdig_entry(rows: list) -> str:
+    """One game, in plain words: what, when, why held, the numbers, who
+    reported it, what an admin can do. Closed by the rows' short ids."""
+    r0 = rows[0]
+    players = list(r0.get("players") or [])
+    sides = r0.get("sides")
+    ranked = r0.get("ranked")
+    kind = "ranked" if ranked is True else ("casual" if ranked is False else "ranked or casual unknown")
+    if sides:
+        shape = "v".join(str(len(s.get("players") or [])) for s in sides)
+        title = f"**{shape}, {kind}**"
+    else:
+        title = f"**FFA, {len(players)} players, {kind}**"
+    game_no = r0.get("game_number")
+    lines = [title + (f" - game {int(game_no)} of its lobby" if game_no else "")
+             + f" - played {_qdig_when(r0.get('played_at'))}",
+             f"Why held: {r0.get('reason_text') or 'held for review.'}"]
+    if sides:
+        lines.append("Score (rounds, points):")
+        for s in sides:
+            who = " + ".join(_qdig_esc(n) for n in s.get("players") or [])
+            lines.append(f"- {who}: {int(s.get('rounds') or 0)}, {int(s.get('points') or 0)}"
+                         + (" (winner)" if s.get("winner") else ""))
+    else:
+        lines.append("Numbers (rounds, points, kills), winner first:")
+        win = r0.get("winner_name")
+        order = sorted(range(len(players)),
+                       key=lambda i: (players[i].get("name") != win, -int(players[i].get("rounds") or 0),
+                                      -int(players[i].get("points") or 0), i))
+        for i in order[:QDIG_ENTRY_PLAYERS]:
+            p = players[i]
+            marks = [m for m, on in (("winner", p.get("name") == win and i == order[0]),
+                                     ("left early", p.get("left_early")), ("absent", p.get("absent"))) if on]
+            lines.append(f"- {_qdig_esc(p.get('name'))}: {int(p.get('rounds') or 0)}, "
+                         f"{int(p.get('points') or 0)}, {int(p.get('kills') or 0)}"
+                         + (f" ({', '.join(marks)})" if marks else ""))
+        if len(players) > QDIG_ENTRY_PLAYERS:
+            lines.append(f"- and {len(players) - QDIG_ENTRY_PLAYERS} more")
+    reporters = []
+    for r in rows:
+        name = _qdig_esc(r.get("reporter_name"))
+        if name not in reporters:
+            reporters.append(name)
+    if len(rows) == 1:
+        count = "1 report."
+    elif len({_qdig_numbers(r) for r in rows}) == 1:
+        count = f"{len(rows)} reports, same numbers."
+    else:
+        count = f"{len(rows)} reports with different numbers (the numbers above are the first one's)."
+    lines.append(f"Reported by {' and '.join(reporters)}. {count}")
+    blocked = [r for r in rows if r.get("can_accept") is False]
+    lines.append(QDIG_WHAT_YOU_CAN_DO + (
+        f" Accept is blocked: {blocked[0].get('accept_blocked_reason') or 'the server gave no reason'}."
+        if blocked else ""))
+    ids = [str(r.get("id") or "")[:8] for r in rows]
+    more = f" +{len(ids) - QDIG_ENTRY_IDS} more" if len(ids) > QDIG_ENTRY_IDS else ""
+    lines.append("[" + ", ".join(ids[:QDIG_ENTRY_IDS]) + more + "]")
+    return "\n".join(lines)
+
+
+def _qdig_games(rows: list) -> list:
+    """Rows grouped into games by game_key, oldest game first."""
+    games, order = {}, []
+    for r in rows:
+        key = r.get("game_key") or ("row:" + str(r.get("id")))
+        if key not in games:
+            games[key] = []
+            order.append(key)
+        games[key].append(r)
+    return [games[k] for k in order]
+
+
+def _qdig_messages(games: list, quota: list) -> list:
+    """Whole entries packed into messages under QDIG_MESSAGE_LIMIT: the first
+    carries the header, the rest a short one. Each message is paired with the
+    row ids and the quota keys it carries."""
+    entries = []
+    for q in quota:
+        entries.append((f"A lobby or series holds {int(q.get('pending') or 0)} held reports, the most "
+                        "the server keeps; its next refused report will not be kept.",
+                        [], [(q.get("mode"), q.get("group"))]))
+    for rows in games:
+        entries.append((_qdig_entry(rows), [r["id"] for r in rows], []))
+    n = len(games)
+    header = QDIG_HEADER + (f" {n} game{'s' if n != 1 else ''} need{'s' if n == 1 else ''} a decision."
+                            if n else "")
+    out, cur, ids, qkeys = [], header, [], []
+    for text, eids, ekeys in entries:
+        if (ids or qkeys) and len(cur) + 2 + len(text) > QDIGEST_MESSAGE_LIMIT:
+            out.append((cur, ids, qkeys))
+            cur, ids, qkeys = QDIG_HEADER_MORE, [], []
+        cur = cur + "\n\n" + text
+        ids, qkeys = ids + eids, qkeys + ekeys
+    if ids or qkeys:
+        out.append((cur, ids, qkeys))
+    return out
+
+
+async def _qdig_mark(kind: str, ids: list) -> bool:
+    """Record through the posted route that Discord accepted a message
+    carrying these ids. True only when every batch answered 200."""
+    ok = True
+    for i in range(0, len(ids), QDIG_POSTED_BATCH):
+        try:
+            async with http_session.post(
+                f"{API_BASE_URL}{QDIG_POSTED_PATH}",
+                json={"kind": kind, "ids": ids[i:i + QDIG_POSTED_BATCH]},
+                headers={"X-Internal-Key": API_SECRET_KEY},
+                timeout=aiohttp.ClientTimeout(total=QDIGEST_PAGE_TIMEOUT_S),
+            ) as resp:
+                if resp.status != 200:
+                    print(f"[QDIGEST] posted stamp status={resp.status}")
+                    ok = False
+        except Exception as e:
+            print(f"[QDIGEST] posted stamp error: {type(e).__name__}: {e}")
+            ok = False
+    return ok
+
+
+async def _qdig_flush_marks():
+    st = _qdigest
+    if st["unmarked"]:
+        ids = sorted(st["unmarked"])
+        if await _qdig_mark("new", ids):
+            st["unmarked"] -= set(ids)
+
+
+def _qdig_reminder_line(totals: dict) -> str:
+    n = int(totals.get("needs_decision_games") or 0)
+    return (f"Held game reports: {n} game{'s' if n != 1 else ''} still need{'s' if n == 1 else ''} "
+            f"a decision; the oldest was played {_qdig_when(totals.get('needs_decision_oldest'))}. "
+            "See the Admin tab, Rejected Reports.")
+
+
+async def _qdig_iteration(rows: list, totals, complete: bool):
+    """One QDIG-1 posting step after a pass: new games (NEEDS A DECISION, not
+    yet posted) in the 600 s window, quota notices as today, and the
+    reminder when D1 says it is due. Each accepted message's ids are stamped
+    before the next message is sent; an id whose stamp failed is not posted
+    again by this process and its stamp is retried every iteration."""
+    st = _qdigest
+    await _qdig_flush_marks()
+    if complete:
+        live = {r["id"] for r in rows}
+        st["announced"] &= live
+        st["unmarked"] &= live
+        st["quota_named"] &= {(q.get("mode"), q.get("group")) for q in (totals or {}).get("at_quota") or []}
+        if not st["first_pass_logged"]:
+            st["first_pass_logged"] = True
+            print(f"[QDIGEST] first pass complete: {int((totals or {}).get('pending') or 0)} pending, "
+                  f"{(totals or {}).get('needs_decision_games')} game(s) need a decision")
+    new = [r for r in rows if r.get("class") == "needs_decision" and not r.get("posted")
+           and r["id"] not in st["announced"]]
+    quota = [q for q in ((totals or {}).get("at_quota") or [])
+             if (q.get("mode"), q.get("group")) not in st["quota_named"]]
+    now = time.monotonic()
+    round_due = bool(new or quota) and (st["round_at"] is None or now - st["round_at"] >= QDIGEST_ROUND_EVERY_S)
+    reminder_due = (complete and totals is not None and bool(totals.get("reminder_due")) and not new
+                    and (st["reminder_hold"] is None or now - st["reminder_hold"] >= QDIG_REMINDER_HOLD_S))
+    if not (round_due or reminder_due):
+        return
+    channel = await _qdigest_channel()
+    if channel is None:
+        return
+    if round_due:
+        started = time.monotonic()
+        for n, (content, ids, qkeys) in enumerate(_qdig_messages(_qdig_games(new), quota)):
+            if not await _qdigest_send(channel, content):
+                break
+            if n == 0:
+                st["round_at"] = started
+            st["announced"] |= set(ids)
+            st["quota_named"] |= set(qkeys)
+            st["unmarked"] |= set(ids)
+            await _qdig_flush_marks()
+    if reminder_due and await _qdigest_send(channel, _qdig_reminder_line(totals)):
+        needs = [r["id"] for r in rows if r.get("class") == "needs_decision"]
+        if not await _qdig_mark("reminder", needs):
+            st["reminder_hold"] = time.monotonic()
 
 
 @tasks.loop(seconds=60)

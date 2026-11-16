@@ -1710,9 +1710,12 @@ def test_the_janitor_lock_census_sees_orm_locks_and_not_only_sql():
         census["waits"]
     assert {r["func"] for r in census["waits"] if r["func"].startswith("_invite_")} == {"_invite_bump"}, \
         census["waits"]
-    assert len(census["declines"]) == 32, census["declines"]
+    # QDIG-1 adds one decline: the held-report janitor's row lock
+    # (_QDIG_SQL_JANITOR_LOCK, FOR UPDATE SKIP LOCKED, in _qdig_janitor_pass).
+    assert [r["func"] for r in census["declines"]].count("_qdig_janitor_pass") == 1, census["declines"]
+    assert len(census["declines"]) == 33, census["declines"]
     assert len(census["waits"]) == 31, census["waits"]   # 25 before the queue-row lock became visible
-    assert len(census["decline_sites"]) == 29, census["decline_sites"]
+    assert len(census["decline_sites"]) == 30, census["decline_sites"]   # 29 before QDIG-1
     assert len(census["wait_sites"]) == 28, census["wait_sites"]   # 22 before: the four queue-row lock literals
 
 

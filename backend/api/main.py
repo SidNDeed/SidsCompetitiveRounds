@@ -5369,6 +5369,15 @@ async def queue_cleanup_loop():
             await _pc_trade_janitor_step()
         except Exception as e:
             print(f"[QUEUE-CLEANUP] player cards trading error: {e}")
+        # QDIG-1: file the held reports that say the same as the recorded
+        # game (_qdig_janitor_pass). Its own sessions, its own try and its
+        # own time box, so it never costs the tick the duties after it.
+        try:
+            _qf = await asyncio.wait_for(_qdig_janitor_pass(), timeout=QDIG_PASS_TIMEOUT_S)
+            if _qf:
+                print(f"[QDIG] filed {_qf} held report(s) with the recorded game's result")
+        except Exception as e:
+            print(f"[QDIG] janitor pass error: {type(e).__name__}: {e}")
         # The evidence refusal census (migration 414): a plain call, never
         # awaited. _evc_flush_kick starts the census's write as a task of its
         # own when none is running, so this path does no census I/O and no
@@ -7972,6 +7981,15 @@ _BAN_EXPIRY_BUILD = 1
 # boxes by construction, probed by the release train and read by nothing
 # else (#306). Absent on any build before it.
 _CASUAL_STREAK_BUILD = 1
+# Release-train verification plumbing, not a design mechanism: the build
+# marker of QDIG-1 (held game reports in plain words: the classification,
+# the janitor's 'filed' status, the digest feed's added keys, the posted
+# route, migration 419's digest_posted_at and digest_reminded_at), reported
+# on /health as `qdig_build`. It names build identity only. A code constant,
+# equal on both boxes by construction, probed by the release train and read
+# by nothing else (#306). Absent on any build before it. Its sibling
+# `quarantine_needs_decision` is a measured value (_qdig_needs_decision_word).
+_QDIG_BUILD = 1
 
 
 def _title_ladders_health_word() -> int:
@@ -8049,6 +8067,8 @@ async def health_check(db: AsyncSession = Depends(get_db)):
                               ask6_invites_build=_ASK6_INVITES_BUILD,
                               casual_streak_build=_CASUAL_STREAK_BUILD,
                               ban_expiry_build=_BAN_EXPIRY_BUILD,
+                              qdig_build=_QDIG_BUILD,
+                              quarantine_needs_decision=_qdig_needs_decision_word(),
                               build_manifest=_build_manifest.health_word(),
                               review_eval=_review_rules.review_eval(),
                               review_rules=_review_rules.health_word(),
@@ -8116,6 +8136,8 @@ async def health_check(db: AsyncSession = Depends(get_db)):
                               ask6_invites_build=_ASK6_INVITES_BUILD,
                               casual_streak_build=_CASUAL_STREAK_BUILD,
                               ban_expiry_build=_BAN_EXPIRY_BUILD,
+                              qdig_build=_QDIG_BUILD,
+                              quarantine_needs_decision=_qdig_needs_decision_word(),
                               build_manifest=_build_manifest.health_word(),
                               review_eval=_review_rules.review_eval(),
                               review_rules=_review_rules.health_word(),
@@ -73632,28 +73654,55 @@ class _AdminQuarantineReq(BaseModel):
     note: str | None = None
 
 
-async def _quarantine_later_rated_count(db, mode: str, player_ids, since) -> int:
-    """How many results have been RATED for these participants since the
-    quarantined report was captured — in the rating system the report itself
-    would touch (Codex batch find 11: the check was FFA-only, so a 2v2
-    quarantine row could read 'safe to accept' while later 2v2 results made an
-    in-order apply impossible). FFA and 2v2 glicko are separate ladders, so
-    each mode checks only its own tables."""
+async def _quarantine_later_rated(db, mode: str, player_ids, since) -> tuple:
+    """(results, players): how many results have been RATED for these
+    participants since the quarantined report was captured — in the rating
+    system the report itself would touch (Codex batch find 11: the check was
+    FFA-only, so a 2v2 quarantine row could read 'safe to accept' while later
+    2v2 results made an in-order apply impossible) — and how many of the
+    participants those results hold. FFA and 2v2 glicko are separate ladders,
+    so each mode checks only its own tables. `results` is the number the
+    accept gate has always read; `players` is the number the admin is told."""
     pids = list(player_ids or [])
     if not pids:
-        return 0
+        return 0, 0
     if mode == "team":
-        return (await db.execute(text("""
-            SELECT COUNT(*) FROM team_matches tm
+        row = (await db.execute(text("""
+            SELECT COUNT(*) AS n,
+                   (SELECT COUNT(DISTINCT s.pid) FROM (
+                        SELECT unnest(ARRAY[t2.t1a_id, t2.t1b_id, t2.t2a_id, t2.t2b_id]) AS pid
+                          FROM team_matches t2 WHERE t2.created_at > :since) s
+                     WHERE s.pid = ANY(:pids)) AS players
+              FROM team_matches tm
              WHERE tm.created_at > :since
                AND (tm.t1a_id = ANY(:pids) OR tm.t1b_id = ANY(:pids)
                     OR tm.t2a_id = ANY(:pids) OR tm.t2b_id = ANY(:pids))
-        """), {"pids": pids, "since": since})).scalar() or 0
-    return (await db.execute(text("""
-        SELECT COUNT(*) FROM ffa_match_players f
-          JOIN ffa_matches m ON m.id = f.match_id
-         WHERE f.player_id = ANY(:pids) AND m.ended_at > :since
-    """), {"pids": pids, "since": since})).scalar() or 0
+        """), {"pids": pids, "since": since})).mappings().first()
+    else:
+        row = (await db.execute(text("""
+            SELECT COUNT(*) AS n, COUNT(DISTINCT f.player_id) AS players
+              FROM ffa_match_players f
+              JOIN ffa_matches m ON m.id = f.match_id
+             WHERE f.player_id = ANY(:pids) AND m.ended_at > :since
+        """), {"pids": pids, "since": since})).mappings().first()
+    return int((row or {}).get("n") or 0), int((row or {}).get("players") or 0)
+
+
+async def _quarantine_later_rated_count(db, mode: str, player_ids, since) -> int:
+    """The accept gate's count (_quarantine_later_rated's first number), for
+    the accept route and the triage view's c1."""
+    return (await _quarantine_later_rated(db, mode, player_ids, since))[0]
+
+
+def _quarantine_accept_verdict(results: int, players: int) -> tuple:
+    """(can_accept, the blocked reason in words) from _quarantine_later_rated.
+    The ONE computation the Admin list and the digest feed both call, so the
+    two can never say different things about one row."""
+    if not results:
+        return True, ""
+    who = max(int(players or 0), 1)
+    return False, (f"{who} player{'s have' if who != 1 else ' has'} played rated games since; "
+                   "adding this game now would need a full replay")
 
 
 # ── Routes: match-report quarantine (July 30 lifecycle sweep) ──────────────
@@ -73687,48 +73736,44 @@ async def admin_list_quarantine(
          ORDER BY q.created_at DESC
          LIMIT 50
     """))).mappings().all()
+    # QDIG-1: the facts the plain reason and the score read, in one batch
+    # (_qdig_load). A failure leaves the facts empty: every row then reads as
+    # NEEDS A DECISION with the body's own names, which is the safe direction.
+    rows = [dict(r) for r in rows]
+    try:
+        async with db.begin_nested():
+            facts = await _qdig_load(db, rows)
+    except Exception as ex:
+        print(f"[QDIG] admin list facts not read: {type(ex).__name__}")
+        facts = _qdig_empty_facts()
     out = []
     for r in rows:
-        # Has anything rated these players since? Any later FFA result for a
-        # participant means an accept would land out of order.
-        blocked = None
+        # Has anything rated these players since? Any later result for a
+        # participant means an accept would land out of order. The verdict
+        # and its words are _quarantine_accept_verdict, which D1 also calls.
         try:
             async with db.begin_nested():
-                later = await _quarantine_later_rated_count(
+                later = await _quarantine_later_rated(
                     db, r["mode"], r["player_ids"], r["created_at"])
-            if later:
-                blocked = (f"{later} later rated game(s) for these players — accepting now "
-                           "would apply rating out of order; needs an ordered replay")
+            can_accept, blocked = _quarantine_accept_verdict(*later)
         except Exception as ex:
-            blocked = f"eligibility check failed: {ex}"
-        # Compose the human-readable result from the stored payload. Without
-        # this the admin panel renders "score unavailable" on every row - and the
-        # score is the single fact an admin needs to judge what they are about to
-        # re-apply to the participants' ratings. The payload is the verbatim
-        # report, so this is derived, never trusted as authority.
-        score = ""
+            can_accept, blocked = False, f"eligibility check failed: {ex}"
+        # The human-readable result and reason, derived from the stored body
+        # (the verbatim report, never trusted as authority): the score with
+        # numbers, winner first, within the 64 characters the shipped client
+        # prints, and the reason as a plain sentence ending in its code.
+        v = _qdig_classify(r, facts)
         try:
-            pl = r["payload"] if isinstance(r["payload"], dict) else _json.loads(r["payload"])
-            if r["mode"] == "team":
-                def _tn(k):
-                    return str((pl.get(k) or {}).get("display_name") or "?")[:12]
-                score = (f"{_tn('t1a')} + {_tn('t1b')} {int(pl.get('t1_rounds_won') or 0)}"
-                         f" | {_tn('t2a')} + {_tn('t2b')} {int(pl.get('t2_rounds_won') or 0)}")
-            else:
-                entries = sorted(
-                    [(str(x.get("display_name") or "?")[:14], int(x.get("rounds_won") or 0))
-                     for x in (pl.get("players") or [])],
-                    key=lambda t: -t[1])
-                score = " | ".join(f"{n} {v}" for n, v in entries[:10])
+            score = _qdig_score(r, v, facts)
         except Exception:
             score = ""
         out.append({
-            "id": str(r["id"]), "mode": r["mode"], "reason": r["reason"],
+            "id": str(r["id"]), "mode": r["mode"], "reason": _qdig_admin_reason(r, v, facts),
             "score": score,
             "http_status": int(r["http_status"]), "created_at": r["created_at"].isoformat(),
             "player_names": list(r["names"] or []),
             "room": r["photon_room_id"], "status": r["status"],
-            "can_accept": blocked is None,
+            "can_accept": bool(can_accept),
             "accept_blocked_reason": blocked or "",
         })
     return {"reports": out}
@@ -74859,8 +74904,18 @@ async def internal_quarantine_digest(
     page. Every later request of the pass sends back hw and the last
     (created_at, id). A page holds pending rows with created_at <= hw ordered
     by (created_at, id), 500 at most, each as (id, mode, group, family,
-    created_at): no payload, no names. The pass ends on a short page. Nothing
-    is stored: the durable unposted state is the row's own status."""
+    created_at). The pass ends on a short page. Nothing is stored.
+
+    QDIG-1 (`qdig` = QDIG_FEED_FORM at the top): each row also carries the
+    keys of _qdig_feed_keys -- its class, the plain reason, the players'
+    DISPLAY NAMES and numbers, the reporter's name, the recorded game's short
+    code, the accept verdict in words, an opaque game key and `posted`; never
+    a Steam id, a player uuid or a room name. `class` is None where the
+    detail read did not fit the read budget. The first page's totals add
+    needs_decision_games, needs_decision_oldest and reminder_due. Which rows
+    the bot has posted, and when it last reminded, are the rows' own
+    digest_posted_at and digest_reminded_at (migration 419), written by the
+    posted route."""
     _require_internal_key(x_internal_key)
     later = (hw, after_at, after_id)
     if any(p is not None for p in later) and any(p is None for p in later):
@@ -74884,13 +74939,40 @@ async def internal_quarantine_digest(
         out["rows"] = await h.read(_TRIAGE_SQL_D1_PAGE, {
             "hw": out["hw"], "has_cursor": not first,
             "c_at": after_at, "c_id": str(after_id) if after_id else None, "lim": _TRIAGE_D1_PAGE})
+        # QDIG-1: what a person needs to judge each row, read in this same
+        # transaction, every statement admitted by the handle's deadline. The
+        # detail is optional: a page whose detail reads the deadline stopped
+        # answers 200 with `class` None on the rows it could not describe,
+        # and the bot describes them on a later pass. The accept gate's count
+        # runs in its own savepoint, as V2's c1 does, unposted rows first.
+        qd = out["qdig"] = {"detail": [], "facts": None, "gates": {}, "budget_spent": False}
+        try:
+            ids = [str(q["id"]) for q in out["rows"]]
+            if ids:
+                qd["detail"] = await h.read(_QDIG_SQL_D1_DETAIL, {"ids": ids})
+            qd["facts"] = await _qdig_load(h._db, qd["detail"], admit=h._admit)
+            for d in sorted(qd["detail"], key=lambda d: (d["digest_posted_at"] is not None,
+                                                         d["created_at"], str(d["id"]))):
+                try:
+                    qd["gates"][str(d["id"])] = await h.run(
+                        _quarantine_later_rated, d["mode"], d["player_ids"], d["created_at"],
+                        savepoint=True)
+                except _TriageReadBudgetSpent:
+                    raise
+                except Exception as ex:
+                    if (_triage_ended_early(ex) or "").startswith(("08", "25")):
+                        raise
+                    print(f"[QDIG] later-rated count for {d['id']} not computed: {type(ex).__name__}")
+        except _TriageReadBudgetSpent:
+            qd["budget_spent"] = True
         return out
 
     async def build(r):
-        resp = {"hw": _triage_iso(r["hw"]), "page_size": _TRIAGE_D1_PAGE,
+        resp = {"hw": _triage_iso(r["hw"]), "page_size": _TRIAGE_D1_PAGE, "qdig": QDIG_FEED_FORM,
                 "rows": [{"id": str(q["id"]), "mode": q["mode"], "group": _triage_str(q["group_id"]),
                           "family": _triage_family(q["mode"], q["reason"], q["room_held"]),
                           "created_at": _triage_iso(q["created_at"])} for q in r["rows"]]}
+        needs = _qdig_feed_rows(resp["rows"], r["qdig"])
         t = r["totals"]
         if t is not None:
             by_mode = {row["mode"]: int(row["n"]) for row in t["by_mode"]}
@@ -74904,9 +74986,717 @@ async def internal_quarantine_digest(
                     "id": str(oldest["id"]), "mode": oldest["mode"],
                     "group": _triage_str(oldest["group_id"]),
                     "created_at": _triage_iso(oldest["created_at"])}}
+            resp["totals"].update(_qdig_totals(needs, r["hw"], r["qdig"]["facts"] is not None))
         return resp
 
     return await _triage_read_txn(db, read, build)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# QDIG-1: held game reports an admin can understand (16 Nov 2026)
+#
+# A pending held report is either NEEDS A DECISION or FOR THE RECORD, and
+# _qdig_classify is the one place that decides it. The janitor pass, the
+# digest feed (D1 above), the Admin list and /health all call it; a census
+# test pins that no second copy of the rule exists.
+#
+# FOR THE RECORD is narrow by construction, so that a mistake costs an admin
+# one question and never a held game: an FFA report refused as
+# ffa_game_contradiction whose room a recorded game holds, with the same
+# roster, winner, rounds, points, raw left_early and raw absent for every
+# player, the arm's own comparison (_ffa_report_contradiction, kills not
+# compared) agreeing, no two players sharing (rounds, points) in a lobby
+# whose kills break ties (only there could kills move a placement), and each
+# player's kill counts at most QDIG_KILLS_TOLERANCE apart and on the same
+# side of every paid kill threshold (QDIG_KILLS_THRESHOLDS, the
+# ffa_kills_50/ffa_kills_100 grants). Everything else, every 2v2 and 1v2 row
+# included, NEEDS A DECISION.
+#
+# A FOR THE RECORD row is set to status 'filed' by _qdig_janitor_pass, with a
+# machine-written review_note and reviewed_by NULL; the stored report body
+# stays. Nothing here changes the submit path or what Accept and Discard do.
+# ═══════════════════════════════════════════════════════════════════════════
+
+QDIG_NEEDS_DECISION = "needs_decision"
+QDIG_FOR_THE_RECORD = "for_the_record"
+QDIG_FILED = "filed"
+QDIG_FEED_FORM = 1                  # D1's top-level `qdig`: the rows carry the QDIG-1 keys
+QDIG_KILLS_TOLERANCE = 2            # largest kill-count gap a FOR THE RECORD row may hold
+QDIG_KILLS_THRESHOLDS = (50, 100)   # the settlement's paid kill achievements: strictly more than
+QDIG_POSTED_MAX_IDS = 200           # ids per call of the posted route
+QDIG_REMINDER_EVERY_S = 86400       # the reminder, while something needs a decision
+QDIG_COUNT_EVERY_S = 300            # the /health census, at most this often unless a row was filed
+QDIG_PASS_TIMEOUT_S = 20.0          # the janitor pass's own time box
+_QDIG_ADMIN_REASON_MAX = 140
+_QDIG_ADMIN_SCORE_MAX = 64
+_QDIG_NAME_MAX = 32
+
+# Process-local state of the janitor pass (primary only). needs_decision is
+# /health's quarantine_needs_decision: -1 until a census has run on this
+# process, which is also what the standby answers (it runs no janitor).
+_qdig_state = {"needs_decision": -1, "count_at": None, "after": None}
+
+_QDIG_SQL_MATCHES = """
+    SELECT m.id, m.photon_room_id, m.lobby_id, m.winner_id, m.invalidated_at
+      FROM ffa_matches m
+     WHERE m.photon_room_id = ANY(CAST(:rooms AS varchar[]))
+"""
+_QDIG_SQL_VECTORS = """
+    SELECT fmp.match_id, fmp.player_id, p.steam_id, fmp.rounds_won, fmp.points_total,
+           fmp.kills, fmp.left_early, fmp.absent, fmp.exclusion_reasons
+      FROM ffa_match_players fmp
+      JOIN players p ON p.id = fmp.player_id
+     WHERE fmp.match_id = ANY(CAST(:ids AS uuid[]))
+"""
+_QDIG_SQL_LOBBIES = """
+    SELECT id, is_ranked, kills_tiebreak, readmit_v1, player_count
+      FROM ffa_lobbies
+     WHERE id = ANY(CAST(:ids AS uuid[]))
+"""
+_QDIG_SQL_NAMES = """
+    SELECT steam_id, display_name, deleted_at
+      FROM players
+     WHERE steam_id = ANY(CAST(:sids AS varchar[]))
+"""
+_QDIG_SQL_D1_DETAIL = """
+    SELECT q.id, q.mode, q.reason, q.group_id, q.photon_room_id, q.player_ids,
+           q.payload::text AS payload, q.created_at, q.digest_posted_at, q.digest_reminded_at
+      FROM match_report_quarantine q
+     WHERE q.id = ANY(CAST(:ids AS uuid[]))
+"""
+# The janitor's candidates: a keyset page of at most 20 ids after the
+# process-local cursor, which wraps to the start when a page comes back
+# short, so a row judged NEEDS A DECISION never hides the rows behind it.
+_QDIG_SQL_JANITOR_CANDIDATES = """
+    SELECT id, created_at
+      FROM match_report_quarantine
+     WHERE status = 'pending' AND mode = 'ffa' AND reason = 'ffa_game_contradiction'
+       AND reviewed_at IS NULL AND reviewed_by IS NULL
+       AND (NOT CAST(:has_cursor AS boolean)
+            OR (created_at, id) > (CAST(:c_at AS timestamptz), CAST(:c_id AS uuid)))
+     ORDER BY created_at ASC, id ASC
+     LIMIT 20
+"""
+# The row lock, with the predicate re-read under it. FOR UPDATE because the
+# accept route takes FOR UPDATE on the same row (admin_accept_quarantine) and
+# the discard route's UPDATE takes FOR NO KEY UPDATE; this lock conflicts
+# with both, and SKIP LOCKED leaves a row an admin is acting on to the next
+# pass instead of waiting behind it.
+_QDIG_SQL_JANITOR_LOCK = """
+    SELECT id, mode, reason, group_id, photon_room_id, payload::text AS payload, created_at
+      FROM match_report_quarantine
+     WHERE id = CAST(:id AS uuid) AND status = 'pending' AND mode = 'ffa'
+       AND reason = 'ffa_game_contradiction'
+       AND reviewed_at IS NULL AND reviewed_by IS NULL
+     FOR UPDATE SKIP LOCKED
+"""
+_QDIG_SQL_JANITOR_FILE = """
+    UPDATE match_report_quarantine
+       SET status = 'filed', reviewed_at = NOW(), reviewed_by = NULL,
+           review_note = CAST(:note AS text)
+     WHERE id = CAST(:id AS uuid) AND status = 'pending'
+       AND reviewed_at IS NULL AND reviewed_by IS NULL
+"""
+# /health's census: every pending row, oldest first, bounded.
+_QDIG_SQL_PENDING = """
+    SELECT id, mode, reason, group_id, photon_room_id, payload::text AS payload, created_at
+      FROM match_report_quarantine
+     WHERE status = 'pending'
+     ORDER BY created_at ASC, id ASC
+     LIMIT 1000
+"""
+_QDIG_SQL_POSTED_NEW = """
+    UPDATE match_report_quarantine
+       SET digest_posted_at = NOW()
+     WHERE id = ANY(CAST(:ids AS uuid[])) AND status = 'pending' AND digest_posted_at IS NULL
+    RETURNING id
+"""
+_QDIG_SQL_POSTED_REMINDER = """
+    UPDATE match_report_quarantine
+       SET digest_reminded_at = NOW()
+     WHERE id = ANY(CAST(:ids AS uuid[])) AND status = 'pending'
+    RETURNING id
+"""
+
+
+def _qdig_empty_facts() -> dict:
+    return {"matches": {}, "vectors": {}, "lobbies": {}, "names": {}}
+
+
+def _qdig_payload(row) -> dict:
+    """The stored report body as a dict ({} when it is not one)."""
+    pl = row.get("payload")
+    if isinstance(pl, (str, bytes)):
+        try:
+            pl = _json.loads(pl)
+        except Exception:
+            return {}
+    return pl if isinstance(pl, dict) else {}
+
+
+def _qdig_room(row, pl) -> str | None:
+    """The capture's room: the keyed column, else the room the body names
+    (a variant row carries photon_room_id NULL) -- the triage view's rule."""
+    room = row.get("photon_room_id") or pl.get("photon_room_id")
+    return str(room)[:64] if room else None
+
+
+def _qdig_sides(pl) -> list | None:
+    """A 2v2 or 1v2 body as its two sides, or None for any other shape:
+    [{"steams": [...], "names": [...], "rounds", "points", "won"}]."""
+    def side(keys, rounds, points, won):
+        ents = [pl.get(k) or {} for k in keys]
+        return {"steams": [str(e.get("steam_id") or "") for e in ents],
+                "names": [str(e.get("display_name") or "") for e in ents],
+                "rounds": int(pl.get(rounds) or 0), "points": int(pl.get(points) or 0), "won": won}
+    if isinstance(pl.get("t1a"), dict):
+        w = int(pl.get("winner_team") or 0)
+        return [side(("t1a", "t1b"), "t1_rounds_won", "t1_points_total", w == 1),
+                side(("t2a", "t2b"), "t2_rounds_won", "t2_points_total", w == 2)]
+    if isinstance(pl.get("solo"), dict):
+        w = int(pl.get("winner_side") or 0)
+        return [side(("solo",), "solo_rounds_won", "solo_points_total", w == 1),
+                side(("duo_a", "duo_b"), "duo_rounds_won", "duo_points_total", w == 2)]
+    return None
+
+
+def _qdig_steams(row) -> set:
+    pl = _qdig_payload(row)
+    out = {str(pl.get("reported_by_steam_id") or "")}
+    sides = _qdig_sides(pl)
+    if sides is not None:
+        for s in sides:
+            out.update(s["steams"])
+    else:
+        out.add(str(pl.get("winner_steam_id") or ""))
+        for p in pl.get("players") or []:
+            if isinstance(p, dict):
+                out.add(str(p.get("steam_id") or ""))
+    out.discard("")
+    return out
+
+
+async def _qdig_load(db, rows, admit=None) -> dict:
+    """The facts _qdig_classify and the texts read, for a set of held rows,
+    in a constant number of statements: the recorded games that hold their
+    rooms, those games' per-player rows, the lobbies (the rows' own and the
+    recorded games'), and the display names of everyone the bodies name.
+    `admit` is called before each statement (the triage handle's deadline);
+    the janitor and the Admin list pass none. Each statement is a module
+    constant, so the janitor's boot self-test EXPLAINs every one of them."""
+    facts = _qdig_empty_facts()
+    rooms, lobby_ids, sids = set(), set(), set()
+    for r in rows:
+        if r.get("mode") == "ffa":
+            room = _qdig_room(r, _qdig_payload(r))
+            if room:
+                rooms.add(room)
+            if r.get("group_id") is not None:
+                lobby_ids.add(str(r["group_id"]))
+        sids |= _qdig_steams(r)
+    if rooms:
+        if admit is not None:
+            admit()
+        for m in (await db.execute(text(_QDIG_SQL_MATCHES),
+                                   {"rooms": sorted(rooms)})).mappings().all():
+            facts["matches"][m["photon_room_id"]] = dict(m)
+            if m["lobby_id"] is not None:
+                lobby_ids.add(str(m["lobby_id"]))
+    if facts["matches"]:
+        if admit is not None:
+            admit()
+        for v in (await db.execute(text(_QDIG_SQL_VECTORS),
+                                   {"ids": sorted(str(m["id"]) for m in facts["matches"].values())})
+                  ).mappings().all():
+            facts["vectors"].setdefault(str(v["match_id"]), []).append(dict(v))
+    if lobby_ids:
+        if admit is not None:
+            admit()
+        for lb in (await db.execute(text(_QDIG_SQL_LOBBIES),
+                                    {"ids": sorted(lobby_ids)})).mappings().all():
+            facts["lobbies"][str(lb["id"])] = dict(lb)
+    if sids:
+        if admit is not None:
+            admit()
+        for p in (await db.execute(text(_QDIG_SQL_NAMES),
+                                   {"sids": sorted(sids)})).mappings().all():
+            facts["names"][p["steam_id"]] = dict(p)
+    return facts
+
+
+def _qdig_code(match_id) -> str:
+    """A recorded game's code: the first 12 hexadecimal characters of its
+    id, the value /evidence game code: and GET /api/v1/matches/code take."""
+    return str(match_id).replace("-", "").lower()[:12]
+
+
+def _qdig_report(pl):
+    try:
+        return FfaMatchReport.model_validate(pl)
+    except Exception:
+        return None
+
+
+def _qdig_classify(row, facts) -> dict:
+    """THE classification of one pending held row (see the block comment):
+    {"class", "room", "match", "recorded_game", "voided", "differences",
+     "blockers", "report", "payload"}. `differences` lists every way the held
+    account differs from the recorded one, as {"steam_id", "field", "held",
+    "recorded"}; `blockers` names, in plain words, why a contradiction row is
+    not FOR THE RECORD. Pure: facts come from _qdig_load."""
+    pl = _qdig_payload(row)
+    v = {"class": QDIG_NEEDS_DECISION, "room": None, "match": None, "recorded_game": None,
+         "voided": False, "differences": [], "blockers": [], "report": None, "payload": pl}
+    if row.get("mode") != "ffa":
+        return v
+    room = _qdig_room(row, pl)
+    v["room"] = room
+    report = _qdig_report(pl)
+    v["report"] = report
+    match = facts["matches"].get(room) if room else None
+    if report is None or match is None:
+        return v
+    v["match"] = match
+    v["recorded_game"] = _qdig_code(match["id"])
+    v["voided"] = match.get("invalidated_at") is not None
+    vec = facts["vectors"].get(str(match["id"])) or []
+    lobby = facts["lobbies"].get(str(match.get("lobby_id"))) or {}
+    rec = {x["steam_id"]: x for x in vec}
+    rec_winner = next((x["steam_id"] for x in vec
+                       if str(x["player_id"]) == str(match.get("winner_id"))), None)
+    diffs, blockers = v["differences"], v["blockers"]
+    if report.winner_steam_id != rec_winner:
+        diffs.append({"steam_id": None, "field": "winner",
+                      "held": report.winner_steam_id, "recorded": rec_winner})
+    held_sids = [p.steam_id for p in report.players]
+    if set(held_sids) != set(rec):
+        diffs.append({"steam_id": None, "field": "roster", "held": len(held_sids),
+                      "recorded": len(rec)})
+    for p in report.players:
+        r = rec.get(p.steam_id)
+        if r is None:
+            continue
+        for field, held, recorded in (
+                ("rounds_won", int(p.rounds_won), int(r["rounds_won"] or 0)),
+                ("points_total", int(p.points_total), int(r["points_total"] or 0)),
+                ("kills", int(p.kills or 0), int(r["kills"] or 0)),
+                ("left_early", bool(p.left_early), bool(r["left_early"])),
+                ("absent", bool(p.absent), bool(r["absent"]))):
+            if held != recorded:
+                diffs.append({"steam_id": p.steam_id, "field": field, "held": held,
+                              "recorded": recorded})
+    if row.get("reason") != "ffa_game_contradiction":
+        return v
+    if any(d["field"] != "kills" for d in diffs):
+        blockers.append("the result differs, not only kills")
+        return v
+    # The arm's own comparison, kills not compared: roster, winner, rounds,
+    # points and the server's own did-not-play decision (fmp.absent holds
+    # the decision, ghosts, graces and assembly reasons included).
+    prior_vec = {x["steam_id"]: (int(x["rounds_won"] or 0), int(x["points_total"] or 0),
+                                 int(x["kills"] or 0), bool(x["left_early"]), bool(x["absent"]))
+                 for x in vec}
+    stored = {x["steam_id"]: x.get("exclusion_reasons") for x in vec}
+    eff = ({s for s, t in prior_vec.items() if t[4]} if lobby.get("readmit_v1") else None)
+    if _ffa_report_contradiction(rec_winner, prior_vec, report, False, eff,
+                                 stored_reasons=stored) is not None:
+        blockers.append("the server's own comparison finds a difference besides kills")
+        return v
+    # Placements: with rounds and points equal for every player, kills can
+    # move a placement only where they break a tie, which a lobby does only
+    # when its kills_tiebreak flag is set (submit_ffa_match's _place_key).
+    if lobby.get("kills_tiebreak"):
+        seen = {}
+        for p in report.players:
+            seen.setdefault((int(p.rounds_won), int(p.points_total)), []).append(p.steam_id)
+        if any(len(s) > 1 for s in seen.values()):
+            blockers.append("two players share rounds and points where kills break ties")
+            return v
+    for d in diffs:
+        held, recorded = int(d["held"]), int(d["recorded"])
+        if abs(held - recorded) > QDIG_KILLS_TOLERANCE:
+            blockers.append(f"a kill count differs by more than {QDIG_KILLS_TOLERANCE}")
+            return v
+        if any((held > t) != (recorded > t) for t in QDIG_KILLS_THRESHOLDS):
+            blockers.append("a kill count crosses a paid kill achievement")
+            return v
+    v["class"] = QDIG_FOR_THE_RECORD
+    return v
+
+
+# ── the words ──────────────────────────────────────────────────────────────
+
+def _qdig_clean(value, limit: int = _QDIG_NAME_MAX) -> str:
+    s = " ".join("".join(ch if ch.isprintable() else " " for ch in str(value or "")).split())
+    return s[:limit]
+
+
+def _qdig_name(facts, steam_id, fallback=None) -> str:
+    """A display name, never a Steam id: the account's current name, else
+    the name the body carried, else 'unknown player'."""
+    p = facts["names"].get(str(steam_id or ""))
+    if p is not None and p.get("deleted_at") is not None:
+        return "deleted player"
+    name = _qdig_clean((p or {}).get("display_name")) or _qdig_clean(fallback)
+    return name or "unknown player"
+
+
+_QDIG_FIELD_WORDS = {"rounds_won": "rounds", "points_total": "points", "kills": "kills",
+                     "left_early": "left-early marks", "absent": "absent marks"}
+_QDIG_FIELD_ORDER = ("winner", "roster", "rounds_won", "points_total", "left_early", "absent", "kills")
+
+
+def _qdig_diff_words(v, facts) -> str:
+    """Every difference in plain words with both numbers, held first:
+    'kills differ for 2 players (Bravo 19 against 18, Charlie 23 against 24)'."""
+    names = {p.steam_id: p.display_name for p in (v["report"].players if v["report"] else [])}
+    parts = []
+    for field in _QDIG_FIELD_ORDER:
+        ds = [d for d in v["differences"] if d["field"] == field]
+        if not ds:
+            continue
+        if field == "winner":
+            d = ds[0]
+            parts.append(f"the winner differs ({_qdig_name(facts, d['held'], names.get(d['held']))} "
+                         f"against {_qdig_name(facts, d['recorded'], names.get(d['recorded']))})")
+        elif field == "roster":
+            parts.append(f"the player lists differ ({ds[0]['held']} players against {ds[0]['recorded']})")
+        else:
+            def val(x):
+                return ("yes" if x else "no") if isinstance(x, bool) else str(x)
+            items = ", ".join(f"{_qdig_name(facts, d['steam_id'], names.get(d['steam_id']))} "
+                              f"{val(d['held'])} against {val(d['recorded'])}" for d in ds)
+            parts.append(f"{_QDIG_FIELD_WORDS[field]} differ for {len(ds)} "
+                         f"player{'s' if len(ds) != 1 else ''} ({items})")
+    return "; ".join(parts)
+
+
+def _qdig_filed_note(v, facts) -> str:
+    """The review_note the janitor writes on a row it files."""
+    words = _qdig_diff_words(v, facts) or "same numbers"
+    voided = "; that game was later voided" if v["voided"] else ""
+    return (f"auto-filed: same result as the recorded game {v['recorded_game']}{voided}; "
+            f"{words} (held report against recorded game)")
+
+
+_QDIG_REASON_WORDS = {
+    "ffa_room_other_lobby": "Its room was already recorded under a different lobby.",
+    "score_shape_mismatch": "Its scores cannot be a finished game of this lobby, so it was not recorded.",
+    "ffa_lobby_no_roster": "The lobby had no player list on record, so the report could not be checked.",
+    "lobby_game_limit": ("The lobby had already played its last allowed game when this report arrived, "
+                         "so the game was never recorded."),
+    "v1_canonical_downgrade": ("It was sent in an old signature form from a lobby that needs the new one, "
+                               "so it was not recorded."),
+    "ffa_game_number_mismatch": ("It names a game number this lobby was not expecting, "
+                                 "so it was not recorded."),
+}
+
+
+def _qdig_reason_sentence(row, v, facts) -> str:
+    """Why the row was held, in one plain sentence (ASCII apart from names)."""
+    reason = str(row.get("reason") or "")
+    if row.get("mode") != "ffa":
+        status = reason[len("series_"):] if reason.startswith("series_") else reason
+        return (f"The series was already {_qdig_clean(status, 24) or 'closed'} when this report arrived, "
+                "so the game was never recorded.")
+    code = v["recorded_game"]
+    if reason == "ffa_game_contradiction":
+        if code is None:
+            return ("It disagrees with a game this lobby already recorded from another report, "
+                    "so it was not recorded.")
+        words = _qdig_diff_words(v, facts)
+        voided = " (that game was later voided)" if v["voided"] else ""
+        if v["class"] == QDIG_FOR_THE_RECORD:
+            return f"Same result as the recorded game {code}{voided}; {words or 'same numbers'}."
+        return (f"Another seat's report of the recorded game {code}{voided} that disagrees with it: "
+                f"{words or 'the accounts differ'}.")
+    if reason == "ffa_replay_roster_mismatch":
+        return (f"Its room was already recorded{' as game ' + code if code else ''} "
+                "with a different set of players.")
+    if reason in _QDIG_REASON_WORDS:
+        return _QDIG_REASON_WORDS[reason]
+    if reason.startswith("lobby_"):
+        status = reason[len("lobby_"):]
+        if status in ("completed", "closed"):
+            return "The lobby had already been closed when this report arrived, so the game was never recorded."
+        return (f"The lobby was already {_qdig_clean(status, 24)} when this report arrived, "
+                "so the game was never recorded.")
+    return "It was held for review."
+
+
+def _qdig_admin_reason(row, v, facts) -> str:
+    """The Admin list's `reason`: the plain sentence, the reason code in
+    brackets at its end, at most 140 characters."""
+    tail = f" [{_qdig_clean(row.get('reason'), 64)}]"
+    sentence = _qdig_reason_sentence(row, v, facts)
+    room = _QDIG_ADMIN_REASON_MAX - len(tail)
+    if len(sentence) > room:
+        sentence = sentence[:room - 3].rstrip() + "..."
+    return sentence + tail
+
+
+def _qdig_ffa_players(v, facts) -> list:
+    """The held players in slot order, as the feed and the texts show them."""
+    rep = v["report"]
+    if rep is not None:
+        ents = [(int(p.slot), i, p.steam_id, p.display_name, int(p.rounds_won), int(p.points_total),
+                 int(p.kills or 0), bool(p.left_early), bool(p.absent)) for i, p in enumerate(rep.players)]
+    else:
+        ents = []
+        for i, p in enumerate(v["payload"].get("players") or []):
+            if isinstance(p, dict):
+                try:
+                    ents.append((int(p.get("slot") or 0), i, str(p.get("steam_id") or ""),
+                                 p.get("display_name"), int(p.get("rounds_won") or 0),
+                                 int(p.get("points_total") or 0), int(p.get("kills") or 0),
+                                 bool(p.get("left_early")), bool(p.get("absent"))))
+                except (TypeError, ValueError):
+                    continue
+    ents.sort(key=lambda e: (e[0], e[1]))
+    return [{"steam_id": e[2], "name": _qdig_name(facts, e[2], e[3]), "rounds": e[4], "points": e[5],
+             "kills": e[6], "left_early": e[7], "absent": e[8]} for e in ents]
+
+
+def _qdig_score(row, v, facts) -> str:
+    """The Admin list's `score`, at most 64 characters: FFA winner first,
+    then by rounds and points, 'Name 5r 11p' each, as many players as fit
+    and then '+N'; a 2v2 or 1v2 body as its two sides."""
+    pl = v["payload"]
+    sides = _qdig_sides(pl)
+    if sides is not None:
+        def nm(s):
+            return " + ".join(_qdig_name(facts, sid, n)[:12] for sid, n in zip(s["steams"], s["names"]))
+        return f"{nm(sides[0])} {sides[0]['rounds']} | {nm(sides[1])} {sides[1]['rounds']}"[:_QDIG_ADMIN_SCORE_MAX]
+    players = _qdig_ffa_players(v, facts)
+    winner = str(pl.get("winner_steam_id") or "")
+    players.sort(key=lambda p: (p["steam_id"] != winner, -p["rounds"], -p["points"]))
+    parts = [f"{p['name'][:10]} {p['rounds']}r {p['points']}p" for p in players]
+    best = ""
+    for i in range(len(parts)):
+        rest = len(parts) - i - 1
+        full = " | ".join(parts[:i + 1]) + (f" | +{rest}" if rest else "")
+        if len(full) > _QDIG_ADMIN_SCORE_MAX:
+            break
+        best = full
+    return best or (f"+{len(parts)}" if parts else "")
+
+
+def _qdig_played_at(row, pl):
+    """When the game was played: the body's started_at, else the held stamp."""
+    raw = pl.get("started_at")
+    if raw:
+        try:
+            t = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+            return t if t.tzinfo is not None else t.replace(tzinfo=timezone.utc)
+        except ValueError:
+            pass
+    return row.get("created_at")
+
+
+def _qdig_game_key(row, v) -> str:
+    """Rows that hold the same room are one game. An opaque key, never the
+    room name (a room name is a join credential)."""
+    room = v["room"] or _qdig_room(row, v["payload"])
+    if not room:
+        return "row:" + str(row.get("id"))
+    return hashlib.sha256(f"{row.get('mode')}|{room}".encode()).hexdigest()[:16]
+
+
+def _qdig_feed_keys(row, v, facts, gate) -> dict:
+    """The additive keys of one D1 row. Display names only."""
+    pl = v["payload"]
+    sides = _qdig_sides(pl)
+    lobby = facts["lobbies"].get(str(row.get("group_id"))) or {}
+    ranked = lobby.get("is_ranked") if row.get("mode") == "ffa" else None
+    if ranked is None:
+        ranked = pl.get("is_ranked") if isinstance(pl.get("is_ranked"), bool) else None
+    if sides is not None:
+        players = []
+        for n, s in enumerate(sides, start=1):
+            for sid, nm in zip(s["steams"], s["names"]):
+                players.append({"name": _qdig_name(facts, sid, nm), "side": n, "rounds": s["rounds"],
+                                "points": s["points"], "kills": None, "left_early": False, "absent": False})
+        win = next((s for s in sides if s["won"]), None)
+        winner_name = (" + ".join(_qdig_name(facts, sid, nm) for sid, nm in zip(win["steams"], win["names"]))
+                       if win else None)
+        side_view = [{"players": [_qdig_name(facts, sid, nm) for sid, nm in zip(s["steams"], s["names"])],
+                      "rounds": s["rounds"], "points": s["points"], "winner": s["won"]} for s in sides]
+    else:
+        players = [{k: p[k] for k in ("name", "rounds", "points", "kills", "left_early", "absent")}
+                   for p in _qdig_ffa_players(v, facts)]
+        names = {str(p.get("steam_id")): p.get("display_name") for p in pl.get("players") or []
+                 if isinstance(p, dict)}
+        w = str(pl.get("winner_steam_id") or "")
+        winner_name = _qdig_name(facts, w, names.get(w)) if w else None
+        side_view = None
+    rep = str(pl.get("reported_by_steam_id") or "")
+    rep_name = _qdig_name(facts, rep, None) if rep else None
+    if gate is None:
+        can_accept, blocked = None, "not computed within the read budget"
+    else:
+        can_accept, blocked = _quarantine_accept_verdict(*gate)
+    report_names = {p.steam_id: p.display_name for p in (v["report"].players if v["report"] else [])}
+    played = _qdig_played_at(row, pl)
+    return {
+        "class": v["class"], "detail": True,
+        "reason_text": _qdig_reason_sentence(row, v, facts),
+        "ranked": ranked,
+        "played_at": _triage_iso(played) if hasattr(played, "isoformat") else None,
+        "game_key": _qdig_game_key(row, v),
+        "game_number": _ffa_named_game_number(v["room"]) if row.get("mode") == "ffa" else None,
+        "player_count": len(players),
+        "players": players, "sides": side_view,
+        "winner_name": winner_name, "reporter_name": rep_name,
+        "recorded_game": v["recorded_game"], "recorded_game_voided": v["voided"],
+        "differences": [{"player": (_qdig_name(facts, d["steam_id"], report_names.get(d["steam_id"]))
+                                    if d["steam_id"] else None),
+                         "field": d["field"],
+                         "held": (_qdig_name(facts, d["held"], report_names.get(d["held"]))
+                                  if d["field"] == "winner" else d["held"]),
+                         "recorded": (_qdig_name(facts, d["recorded"], report_names.get(d["recorded"]))
+                                      if d["field"] == "winner" else d["recorded"])}
+                        for d in v["differences"]],
+        "can_accept": can_accept, "accept_blocked_reason": blocked,
+        "posted": row.get("digest_posted_at") is not None,
+    }
+
+
+def _qdig_feed_rows(rows: list, qd: dict) -> list:
+    """Adds the QDIG-1 keys to D1's rows in place; returns the NEEDS A
+    DECISION rows as (detail row, verdict) for the totals."""
+    facts = qd.get("facts")
+    det = {str(d["id"]): d for d in qd.get("detail") or []}
+    needs = []
+    for row in rows:
+        d = det.get(row["id"])
+        if d is None or facts is None:
+            row.update({"class": None, "detail": False})
+            continue
+        v = _qdig_classify(d, facts)
+        row.update(_qdig_feed_keys(d, v, facts, qd["gates"].get(row["id"])))
+        if v["class"] == QDIG_NEEDS_DECISION:
+            needs.append((d, v, row))
+    return needs
+
+
+def _qdig_totals(needs: list, hw, complete: bool) -> dict:
+    """D1's first-page totals for the bot's reminder: how many games need a
+    decision, the oldest played, and whether the reminder is due -- true
+    only when such rows exist, each has been posted or reminded, and 24
+    hours have passed since the newest of their two stamps. Read from the
+    first page (the 500 oldest pending rows)."""
+    if not complete:
+        return {"needs_decision_games": None, "needs_decision_oldest": None, "reminder_due": False}
+    games = {fr["game_key"] for _, _, fr in needs}
+    played = [fr["played_at"] for _, _, fr in needs if fr.get("played_at")]
+    stamps = [max(t for t in (d.get("digest_posted_at"), d.get("digest_reminded_at")) if t is not None)
+              for d, _, _ in needs
+              if d.get("digest_posted_at") is not None or d.get("digest_reminded_at") is not None]
+    due = (bool(needs) and len(stamps) == len(needs) and hw is not None
+           and (hw - max(stamps)).total_seconds() >= QDIG_REMINDER_EVERY_S)
+    return {"needs_decision_games": len(games), "needs_decision_oldest": min(played) if played else None,
+            "reminder_due": due}
+
+
+def _qdig_needs_games(rows: list, facts) -> int:
+    """How many pending GAMES need a decision (rows holding one room are one
+    game), by _qdig_classify."""
+    keys = set()
+    for r in rows:
+        v = _qdig_classify(r, facts)
+        if v["class"] == QDIG_NEEDS_DECISION:
+            keys.add(_qdig_game_key(r, v))
+    return len(keys)
+
+
+async def _qdig_janitor_pass() -> int:
+    """File the FOR THE RECORD rows: a keyset page of at most 20 candidates,
+    each in its own transaction -- the row locked (FOR UPDATE SKIP LOCKED,
+    the predicate re-read under the lock), its facts read after the lock,
+    _qdig_classify, and the UPDATE to 'filed' re-checking that no admin has
+    reviewed it. Then, at most every QDIG_COUNT_EVERY_S or right after a pass
+    that filed a row, the census /health reports. Every transaction carries
+    a 3 s statement timeout; the caller time-boxes the whole pass. Returns
+    how many rows it filed."""
+    from database import async_session
+    filed = 0
+    async with async_session() as db:
+        await db.execute(text("SET LOCAL statement_timeout = '3s'"))
+        cur = _qdig_state["after"]
+        cands = (await db.execute(text(_QDIG_SQL_JANITOR_CANDIDATES), {
+            "has_cursor": cur is not None, "c_at": cur[0] if cur else None,
+            "c_id": cur[1] if cur else None})).mappings().all()
+        await db.commit()
+        _qdig_state["after"] = ((cands[-1]["created_at"], str(cands[-1]["id"]))
+                                if len(cands) >= 20 else None)
+        for c in cands:
+            try:
+                await db.execute(text("SET LOCAL statement_timeout = '3s'"))
+                row = (await db.execute(text(_QDIG_SQL_JANITOR_LOCK),
+                                        {"id": str(c["id"])})).mappings().first()
+                if row is None:
+                    await db.rollback()
+                    continue
+                row = dict(row)
+                facts = await _qdig_load(db, [row])
+                v = _qdig_classify(row, facts)
+                if v["class"] == QDIG_FOR_THE_RECORD:
+                    res = await db.execute(text(_QDIG_SQL_JANITOR_FILE),
+                                           {"id": str(c["id"]), "note": _qdig_filed_note(v, facts)})
+                    filed += int(res.rowcount or 0)
+                await db.commit()
+            except Exception as ex:
+                print(f"[QDIG] row {c['id']} not judged: {type(ex).__name__}: {ex}")
+                try:
+                    await db.rollback()
+                except Exception:
+                    pass
+        now = time.monotonic()
+        if filed or _qdig_state["count_at"] is None or now - _qdig_state["count_at"] >= QDIG_COUNT_EVERY_S:
+            await db.execute(text("SET LOCAL statement_timeout = '3s'"))
+            rows = [dict(r) for r in (await db.execute(text(_QDIG_SQL_PENDING))).mappings().all()]
+            facts = await _qdig_load(db, rows)
+            await db.commit()
+            _qdig_state["needs_decision"] = _qdig_needs_games(rows, facts)
+            _qdig_state["count_at"] = now
+    return filed
+
+
+def _qdig_needs_decision_word() -> int:
+    """/health `quarantine_needs_decision`: the last census of this process
+    (-1 before the first, and always on the standby, which runs no janitor)."""
+    return int(_qdig_state["needs_decision"])
+
+
+@app.post("/api/v1/internal/quarantine/digest/posted", tags=["Internal"])
+async def internal_quarantine_digest_posted(
+    payload: dict = Body(...),
+    x_internal_key: str | None = Header(None, alias="X-Internal-Key"),
+    db: AsyncSession = Depends(get_db),
+):
+    """The bot records that Discord accepted a message carrying these rows.
+    Requires the internal key. `kind` "new" stamps digest_posted_at on
+    pending rows that have none (a row is listed once); "reminder" stamps
+    digest_reminded_at on pending rows. At most QDIG_POSTED_MAX_IDS ids, each
+    a uuid; a repeat changes nothing it already changed. Answers how many
+    rows it stamped and how many it left (not pending, or already posted)."""
+    _require_internal_key(x_internal_key)
+    kind = payload.get("kind", "new") if isinstance(payload, dict) else None
+    ids = payload.get("ids") if isinstance(payload, dict) else None
+    if kind not in ("new", "reminder"):
+        raise HTTPException(422, "kind must be 'new' or 'reminder'")
+    if not isinstance(ids, list) or not ids or len(ids) > QDIG_POSTED_MAX_IDS:
+        raise HTTPException(422, f"ids must be a list of 1 to {QDIG_POSTED_MAX_IDS} report ids")
+    try:
+        uids = sorted({str(UUID(str(i))) for i in ids})
+    except (ValueError, TypeError, AttributeError):
+        raise HTTPException(422, "every id must be a report id")
+    if kind == "new":
+        marked = (await db.execute(text(_QDIG_SQL_POSTED_NEW), {"ids": uids})).scalars().all()
+    else:
+        marked = (await db.execute(text(_QDIG_SQL_POSTED_REMINDER), {"ids": uids})).scalars().all()
+    await db.commit()
+    return {"kind": kind, "marked": len(marked), "ignored": len(uids) - len(marked)}
 
 
 # ═══════════════════════════════════════════════════════════════════════════

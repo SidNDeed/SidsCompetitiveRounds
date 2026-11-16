@@ -121,7 +121,9 @@ def run(coro):
 
 
 # ── schema: the columns the routes, the capture and the checksums touch ───
-# match_report_quarantine and its three indexes are 169's DDL verbatim;
+# match_report_quarantine and its three indexes are 169's DDL verbatim plus
+# 419's two digest columns (QDIG-1), and ffa_lobbies carries 176's is_ranked,
+# 187's kills_tiebreak and 378's readmit_v1, which the digest feed reads;
 # ffa_matches carries 154's columns plus 327's game_number (NOT NULL, as 327
 # leaves it), its source column and idx_ffa_matches_lobby_game. The ten
 # checksum tables of K15 exist so a write to any of them is visible.
@@ -167,7 +169,10 @@ CREATE TABLE ffa_lobbies (
     completed_at TIMESTAMPTZ,
     invalidated_at TIMESTAMPTZ,
     invalidation_reason VARCHAR(64),
-    host_player_id UUID REFERENCES players(id)
+    host_player_id UUID REFERENCES players(id),
+    is_ranked BOOLEAN NOT NULL DEFAULT TRUE,
+    kills_tiebreak BOOLEAN NOT NULL DEFAULT FALSE,
+    readmit_v1 BOOLEAN NOT NULL DEFAULT FALSE
 );
 CREATE TABLE ffa_matches (
     id UUID PRIMARY KEY,
@@ -265,7 +270,9 @@ CREATE TABLE match_report_quarantine (
     reviewed_by     UUID REFERENCES players(id) ON DELETE SET NULL,
     reviewed_at     TIMESTAMPTZ,
     review_note     TEXT,
-    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    digest_posted_at   TIMESTAMPTZ,
+    digest_reminded_at TIMESTAMPTZ
 );
 CREATE UNIQUE INDEX IF NOT EXISTS uq_quarantine_room
     ON match_report_quarantine (mode, photon_room_id)
