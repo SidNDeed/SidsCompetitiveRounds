@@ -442,12 +442,18 @@ def test_the_writer_stores_what_callers_pass_and_refuses_only_its_bounds(case):
         assert len(row["reason"]) == 256 and "\x00" not in row["reason"]
         assert row["details"]["nul"] == "a�b" and row["details"]["nan"] == "nan"
         assert len(row["affected_steam_ids"]) == 1
+        # 17 players: written whole, as two parts of one action (fix A3)
+        actor2 = _sid()
         async with sm() as db:
-            with pytest.raises(ValueError):
-                await main._modlog_write(db, actor=actor, action="ban",
-                                         affected=[_sid() for _ in range(17)])
+            await main._modlog_write(db, actor=actor2, action="ban",
+                                     affected=[_sid() for _ in range(17)])
+            await db.commit()
+        async with sm() as db:
+            parts = await _records(db, actor2)
             with pytest.raises(ValueError):
                 await main._modlog_write(db, actor=actor, action="not_a_word")
+        assert sorted(len(r["affected_steam_ids"]) for r in parts) == [1, 16]
+        assert len({r["details"]["batch"] for r in parts}) == 1
     _with_sm(case, body)
 
 
@@ -577,7 +583,7 @@ async def check_answer_shape(sm, w):
     row = ans["rows"][0]
     assert set(ans) == {"total", "counts_by_action", "limit", "offset", "sort", "dir", "rows", "player"}
     assert set(row) == {"id", "at", "action", "action_label", "actor", "actor_name", "players",
-                        "reason", "sentence", "target_steam_id", "target_match_id",
+                        "reason", "sentence", "part", "target_steam_id", "target_match_id",
                         "target_series_id", "details"}
     assert row["action"] == "ban" and row["actor_name"] == "Mod Alpha"
     assert row["action_label"] == modlog.label("ban")
@@ -779,7 +785,7 @@ def test_deletion_replaces_the_id_in_every_record_and_keeps_the_reason(case, adm
         assert by["ban"]["affected_steam_ids"] == [stay]
         assert all(gone not in (r["affected_steam_ids"] or []) for r in rows)
         assert by["chat_mute"]["target_steam_id"] == tomb
-        assert by["chat_mute"]["reason"] == "said %s things" % gone     # free text is not rewritten
+        assert by["chat_mute"]["reason"] == "said %s things" % tomb     # by whole token (fix A4)
         assert (await _read(sm, player=gone))["total"] == 0
     _with_sm(case, body)
 

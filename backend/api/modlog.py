@@ -164,9 +164,36 @@ def _scope(channel) -> str:
     return f"the {channel} channel"
 
 
-def sentence(word: str, details, reason=None) -> str:
-    """ONE plain sentence saying what was done, with its numbers. Built only
-    from the stored row; a key a row lacks is left out of the sentence."""
+def part_text(details) -> str:
+    """For one record of an action recorded in parts (more players than one
+    record names): 'Part 1 of 2 of one action on 17 players.'; else ''."""
+    d = details if isinstance(details, dict) else {}
+    part, parts, total = _num(d.get("batch_part")), _num(d.get("batch_parts")), _num(d.get("affected_total"))
+    if not d.get("batch") or part is None or parts is None:
+        return ""
+    on = f" on {_plural(total, 'player')}" if total is not None else ""
+    return f"Part {part} of {parts} of one action{on}."
+
+
+def sentence(word: str, details, reason=None, *, ended=None) -> str:
+    """ONE plain sentence saying what was done, with its numbers, built only
+    from the stored row (a key a row lacks is left out of the sentence), and
+    for a record that is one part of an action, which part. `ended` is the
+    read's answer for a record that starts a run in steps (the 2v2 rebuild):
+    True when the run's end is recorded, False when it is not, None when
+    the read did not look."""
+    out = [_sentence(word, details, ended)]
+    unlinked = _num((details if isinstance(details, dict) else {}).get("unlinked_discord_authors"))
+    if unlinked:
+        out.append("The Discord author had no linked game account." if unlinked == 1 else
+                   f"{unlinked} Discord authors had no linked game account.")
+    part = part_text(details)
+    if part:
+        out.append(part)
+    return " ".join(out)
+
+
+def _sentence(word: str, details, ended=None) -> str:
     d = details if isinstance(details, dict) else {}
     if word == "ban":
         dur = duration_text(d.get("duration_minutes"))
@@ -267,6 +294,15 @@ def sentence(word: str, details, reason=None) -> str:
         return "Resolved a 2v2 series."
     if word == "reverse_team_series":
         return "Reversed a 2v2 series."
+    if word == "team_glicko_rebuild" and d.get("stage") == "started":
+        n = _num(d.get("players_planned"))
+        what = ("Started rebuilding every 2v2 rating"
+                + (f" ({_plural(n, 'player')} planned)" if n is not None else ""))
+        if ended is True:
+            return what + "; its finish is recorded."
+        if ended is False:
+            return what + "; no finish was recorded."
+        return what + "."
     if word == "team_glicko_rebuild":
         n = _num(d.get("series_replayed"))
         return (f"Rebuilt every 2v2 rating from {_plural(n, 'series', 'series')}." if n is not None
