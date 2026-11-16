@@ -51,6 +51,62 @@
 --    index probe of players per row found, whatever the size of the
 --    looked-up tables (tests/test_modlog_pg.py reads the plan of this file's
 --    fill with 50,000 rows in each of them).
+-- 4. Actions recorded only in their own tables, carried in as records. One
+--    read-only count per source, of the source's rows that no record names,
+--    was read on the primary on 2026-11-16 between 20:46:48Z and 20:46:52Z.
+--    Each number is a READING of that moment, not a bound this file checks;
+--    the landing reads each again before the file runs. Each statement:
+--      a. bans, player_bans: rows with no 'ban' record whose target is the
+--         row's steam_id. Read: 0.
+--         SELECT COUNT(*) FROM player_bans pb WHERE NOT EXISTS (SELECT 1 FROM admin_actions aa WHERE aa.action = 'ban' AND aa.target_steam_id = pb.steam_id);
+--      b. unbans, player_bans: rows lifted by a person (unbanned_at set,
+--         unbanned_by not 'system:expired', the close a new ban makes of an
+--         ended one) with no 'unban' record whose target is the row's
+--         steam_id. Read: 0.
+--         SELECT COUNT(*) FROM player_bans pb WHERE pb.unbanned_at IS NOT NULL AND COALESCE(pb.unbanned_by_steam_id, '') <> 'system:expired' AND NOT EXISTS (SELECT 1 FROM admin_actions aa WHERE aa.action = 'unban' AND aa.target_steam_id = pb.steam_id);
+--      c. mutes, chat_mutes: rows with no chat_mute, chat_automute or
+--         chat_mute_msg record whose target is the row's steam_id. Read: 0.
+--         SELECT COUNT(*) FROM chat_mutes cm WHERE NOT EXISTS (SELECT 1 FROM admin_actions aa WHERE aa.action IN ('chat_mute', 'chat_automute', 'chat_mute_msg') AND aa.target_steam_id = CAST(cm.steam_id AS text));
+--      d. record exclusions, record_exclusions: rows with no record_exclude
+--         record of the same match and board whose target is the seat's
+--         player (none for a whole match). Read: 0.
+--         SELECT COUNT(*) FROM record_exclusions rx LEFT JOIN players p ON p.id = rx.player_id WHERE NOT EXISTS (SELECT 1 FROM admin_actions aa WHERE aa.action = 'record_exclude' AND aa.details->>'match_id' = CAST(rx.match_id AS text) AND aa.details->>'board' = CAST(rx.board AS text) AND ((rx.player_id IS NULL AND aa.target_steam_id IS NULL) OR aa.target_steam_id = CAST(p.steam_id AS text)));
+--      e. flag reviews, flagged_matches: reviewed flags (reviewed_at set)
+--         with no flag_review record whose details flag_id, lower-cased, is
+--         the flag's id. Read: 7. Carried in below.
+--         SELECT COUNT(*) FROM flagged_matches fm WHERE fm.reviewed_at IS NOT NULL AND NOT EXISTS (SELECT 1 FROM admin_actions aa WHERE aa.action = 'flag_review' AND lower(aa.details->>'flag_id') = CAST(fm.id AS text));
+--      f. held-report reviews, match_report_quarantine: rows accepted or
+--         discarded with no quarantine_accept or quarantine_discard record
+--         whose details quarantine_id is the row's id. Read: 0.
+--         SELECT COUNT(*) FROM match_report_quarantine q WHERE q.status IN ('accepted', 'discarded') AND NOT EXISTS (SELECT 1 FROM admin_actions aa WHERE aa.action IN ('quarantine_accept', 'quarantine_discard') AND aa.details->>'quarantine_id' = CAST(q.id AS text));
+--    Sources a to d and f read 0, so this file inserts nothing for them.
+--    Source e: each reviewed flag that statement e counts gets ONE record,
+--    keyed by statement e's own predicate, so a second run (and any number
+--    at the landing) inserts each flag once. The record is the one the
+--    review route writes (main.admin_review_flag's _modlog_write: actor,
+--    action flag_review, target_match_id, affected_steam_ids, details
+--    flag_id, review_action, evidence_revision, restoration_required; no
+--    reason), with:
+--      - its time the flag's reviewed_at, never this file's clock;
+--      - its actor the flag's reviewed_by_steam_id: 'unknown' when it is
+--        empty (as the writer's fallback), the value as stored when it is
+--        not a 17-digit Steam id or a live players row has it, and
+--        otherwise (a Steam id of no live account, such as a deleted
+--        account's raw id, which delete_player_data leaves in
+--        flagged_matches) a tombstone of the deletion's form, deleted_ and
+--        eight random hex digits, so no raw id of a deleted account is
+--        written;
+--      - its players those of player_steam_ids that a live players row has
+--        (17 digits, sorted, distinct, none past 16), so a deleted
+--        account's raw id is not named (the route names the flag's ids at
+--        review, when each is live);
+--      - flag_id the flag's id as canonical text, evidence_revision and
+--        restoration_required the flag's own columns (the route stores the
+--        revision it checked equal to the flag's, and sets the flag's
+--        restoration_required to the value it stores);
+--      - the details key carried_from = 'flagged_matches', which marks the
+--        row as carried in by this file. rollback_420 removes exactly the
+--        rows with that key.
 --
 -- Refusals (nothing is changed then, one transaction): no admin_actions in
 -- the session's current schema; the bare name admin_actions naming another
@@ -240,6 +296,45 @@ BEGIN
     RAISE EXCEPTION '420: ck_admin_actions_reason_len is not the validated CHECK after the file';
   END IF;
 END $m420$;
+
+-- 4. The reviewed flags that no record names, carried in (header, point 4,
+-- source e). Under the lock the first block took, so a second run waits and
+-- then finds the first run's records. Added when flagged_matches exists; the
+-- statement is the fixed text below. Before the fill, which then finds a
+-- carried row already named, or names it by its match's live players.
+DO $carry420$
+BEGIN
+  IF pg_catalog.to_regclass('flagged_matches') IS NULL OR pg_catalog.to_regclass('players') IS NULL THEN
+    RETURN;
+  END IF;
+  EXECUTE $c$
+    INSERT INTO admin_actions (admin_steam_id, action, target_steam_id, target_match_id, target_series_id,
+                               details, affected_steam_ids, reason, created_at)
+    SELECT CASE WHEN COALESCE(fm.reviewed_by_steam_id::text, '') = '' THEN 'unknown'
+                WHEN fm.reviewed_by_steam_id::text !~ '^[0-9]{17}$'
+                  OR EXISTS (SELECT 1 FROM players r
+                              WHERE r.steam_id::text = fm.reviewed_by_steam_id::text AND r.deleted_at IS NULL)
+                  THEN fm.reviewed_by_steam_id::text
+                ELSE 'deleted_' || pg_catalog.substr(pg_catalog.md5(pg_catalog.gen_random_uuid()::text), 1, 8)
+           END,
+           'flag_review', NULL, fm.match_id, NULL,
+           pg_catalog.jsonb_build_object('flag_id', fm.id::text, 'review_action', fm.review_action::text,
+                                         'evidence_revision', fm.discord_evidence_revision,
+                                         'restoration_required', fm.restoration_required,
+                                         'carried_from', 'flagged_matches'),
+           (SELECT CASE WHEN pg_catalog.cardinality(n.ids) <= 16 THEN n.ids ELSE '{}'::text[] END
+              FROM (SELECT ARRAY(SELECT DISTINCT p.steam_id::text FROM players p
+                                  WHERE p.steam_id::text = ANY (fm.player_steam_ids::text[])
+                                    AND p.deleted_at IS NULL AND p.steam_id::text ~ '^[0-9]{17}$'
+                                  ORDER BY 1) AS ids) n),
+           NULL, fm.reviewed_at
+      FROM flagged_matches fm
+     WHERE fm.reviewed_at IS NOT NULL
+       AND NOT EXISTS (SELECT 1 FROM admin_actions aa
+                        WHERE aa.action::text = 'flag_review'
+                          AND pg_catalog.lower(aa.details OPERATOR(pg_catalog.->>) 'flag_id') = fm.id::text)
+  $c$;
+END $carry420$;
 
 -- 3. The old rows' players. Only a row still at '{}' whose target is not a
 -- tombstone; only 17-digit ids; at most 16 (a row's sources name at most 4).

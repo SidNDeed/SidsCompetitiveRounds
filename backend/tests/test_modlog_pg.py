@@ -2005,3 +2005,261 @@ def test_mutant_a_lookup_compared_as_text_scans_its_table(scase, pairs, table, c
     assert "SEQ-SCAN %s" % table in fails, fails
 
 
+# -- carried in: reviewed flags that no record names (S3) -----------------------
+#
+# From the rollback state: a live reviewer, a deleted account (its players row
+# rewritten to a tombstone, as delete_player_data does; flagged_matches keeps
+# its raw id, which delete_player_data does not touch), and five flags:
+#   C1 reviewed by the live reviewer, two live players       -> carried
+#   C2 reviewed by the live reviewer, the deleted id a player -> carried, naming only the live one
+#   C3 reviewed by the deleted id                            -> carried, the actor a tombstone
+#   C4 reviewed, with a flag_review record (its id upper-case, as a client may send it) -> not carried
+#   C5 not reviewed                                          -> not carried
+_S3_LIVE_REVIEWER = "76561190000000420"
+_S3_GONE = "76561190000000777"
+_S3_F = "00000000-0000-4000-8000-0000000003c%d"
+S3_SEED = """
+INSERT INTO players (id, steam_id, display_name) VALUES
+ ('00000000-0000-4000-8000-0000000003a1', '{rev}', 'S3 reviewer');
+INSERT INTO players (id, steam_id, display_name, deleted_at) VALUES
+ ('00000000-0000-4000-8000-0000000003a2', 'deleted_s3000001', '[Deleted User]', NOW());
+INSERT INTO flagged_matches (id, match_id, player_steam_ids, flag_reason, auto_invalidated,
+                             reviewed_at, reviewed_by_steam_id, review_action, restoration_required,
+                             discord_evidence_revision, created_at)
+VALUES ('{f1}', '00000000-0000-0000-0000-0000000000d1', ARRAY['76561190000000005', '76561190000000006'],
+        'inactive_player', false, '2026-04-24 10:00:00+00', '{rev}', 'false_positive', false, 1, NOW()),
+       ('{f2}', '00000000-0000-0000-0000-0000000000d1', ARRAY['{gone}', '76561190000000005'],
+        'too_many_cards', true, '2026-05-09 11:00:00+00', '{rev}', 'false_positive', true, 2, NOW()),
+       ('{f3}', '00000000-0000-0000-0000-0000000000d1', ARRAY['76561190000000005', '76561190000000006'],
+        'inactive_player', false, '2026-05-01 12:00:00+00', '{gone}', 'confirmed_cheat', false, 1, NOW()),
+       ('{f4}', '00000000-0000-0000-0000-0000000000d1', ARRAY['76561190000000005', '76561190000000006'],
+        'inactive_player', false, '2026-06-01 13:00:00+00', '{rev}', 'false_positive', false, 1, NOW());
+INSERT INTO flagged_matches (id, match_id, player_steam_ids, flag_reason, auto_invalidated,
+                             restoration_required, discord_evidence_revision, created_at)
+VALUES ('{f5}', '00000000-0000-0000-0000-0000000000d1', ARRAY['76561190000000005'], 'inactive_player',
+        false, false, 1, NOW());
+INSERT INTO admin_actions (id, admin_steam_id, action, target_match_id, details) VALUES
+ ('00000000-0000-4000-8000-0000000003b4', '{rev}', 'flag_review', '00000000-0000-0000-0000-0000000000d1',
+  jsonb_build_object('flag_id', upper('{f4}'), 'review_action', 'false_positive'));
+""".format(rev=_S3_LIVE_REVIEWER, gone=_S3_GONE, f1=_S3_F % 1, f2=_S3_F % 2, f3=_S3_F % 3,
+           f4=_S3_F % 4, f5=_S3_F % 5)
+S3_UNSEED = """
+DELETE FROM admin_actions WHERE id = '00000000-0000-4000-8000-0000000003b4'
+   OR (action = 'flag_review' AND details->>'flag_id' LIKE '00000000-0000-4000-8000-0000000003c_');
+DELETE FROM flagged_matches WHERE CAST(id AS text) LIKE '00000000-0000-4000-8000-0000000003c_';
+DELETE FROM players WHERE id IN ('00000000-0000-4000-8000-0000000003a1', '00000000-0000-4000-8000-0000000003a2');
+"""
+# The count statement of the header (source 5), as the landing runs it.
+S3_COUNT = ("SELECT COUNT(*) FROM flagged_matches fm WHERE fm.reviewed_at IS NOT NULL AND NOT EXISTS"
+            " (SELECT 1 FROM admin_actions aa WHERE aa.action = 'flag_review'"
+            " AND lower(aa.details->>'flag_id') = CAST(fm.id AS text))")
+S3_CARRIED_SQL = (
+    "SELECT coalesce(json_agg(json_build_object('flag', a.details->>'flag_id', 'actor', a.admin_steam_id,"
+    " 'at', to_char(a.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS'), 'match', a.target_match_id,"
+    " 'target', a.target_steam_id, 'series', a.target_series_id, 'affected', a.affected_steam_ids,"
+    " 'reason', a.reason, 'details', a.details) ORDER BY a.details->>'flag_id'), '[]')::text"
+    " FROM admin_actions a WHERE a.details->>'carried_from' = 'flagged_matches'")
+_S3_DETAILS = lambda f, verdict, restore, rev: {  # noqa: E731
+    "flag_id": f, "review_action": verdict, "evidence_revision": rev,
+    "restoration_required": restore, "carried_from": "flagged_matches"}
+S3_EXPECT = [
+    {"flag": _S3_F % 1, "actor": _S3_LIVE_REVIEWER, "at": "2026-04-24 10:00:00",
+     "match": "00000000-0000-0000-0000-0000000000d1", "target": None, "series": None,
+     "affected": ["76561190000000005", "76561190000000006"], "reason": None,
+     "details": _S3_DETAILS(_S3_F % 1, "false_positive", False, 1)},
+    {"flag": _S3_F % 2, "actor": _S3_LIVE_REVIEWER, "at": "2026-05-09 11:00:00",
+     "match": "00000000-0000-0000-0000-0000000000d1", "target": None, "series": None,
+     "affected": ["76561190000000005"], "reason": None,
+     "details": _S3_DETAILS(_S3_F % 2, "false_positive", True, 2)},
+    {"flag": _S3_F % 3, "actor": "TOMBSTONE", "at": "2026-05-01 12:00:00",
+     "match": "00000000-0000-0000-0000-0000000000d1", "target": None, "series": None,
+     "affected": ["76561190000000005", "76561190000000006"], "reason": None,
+     "details": _S3_DETAILS(_S3_F % 3, "confirmed_cheat", False, 1)},
+]
+
+
+def _s3_carried(schema):
+    rows = json.loads(_fetch(schema, S3_CARRIED_SQL))
+    for r in rows:
+        a = r["actor"] or ""
+        if a.startswith("deleted_") and len(a) == len("deleted_") + 8 and a != "deleted_s3000001":
+            r["actor"] = "TOMBSTONE"
+    return rows
+
+
+def _s3_failures(schema, path=M420, rpath=R420):
+    """The carry-in from the rollback state with S3_SEED: the first apply, an
+    apply again, the rollback, a rollback again, and an apply after it.
+    Answers the labelled failures."""
+    rc, err = _psql_apply(schema, R420)
+    assert rc == 0, err
+    _exec(schema, S3_SEED)
+    fails = []
+    try:
+        if _fetch(schema, S3_COUNT) != 3:
+            return ["SEED-COUNT %s" % _fetch(schema, S3_COUNT)]
+        rc, err = _psql_apply(schema, path)
+        if rc != 0:
+            return ["FIRST-APPLY-RC rc=%s %s" % (rc, _tail(err))]
+        got = _s3_carried(schema)
+        if got != S3_EXPECT:
+            fails.append("CARRIED %r" % (got,))
+        everything = _fetch(schema, "SELECT coalesce(string_agg(to_jsonb(a)::text, ' '), '') FROM admin_actions a")
+        if _S3_GONE in everything:
+            fails.append("DELETED-ID-SERVED")
+        if _fetch(schema, S3_COUNT) != 0:
+            fails.append("COUNT-AFTER %s" % _fetch(schema, S3_COUNT))
+        before = _snap(schema)
+        rc, err = _psql_apply(schema, path)
+        if rc != 0:
+            fails.append("RERUN-RC rc=%s %s" % (rc, _tail(err)))
+        elif _snap(schema) != before:
+            fails.append("RERUN-CHANGED")
+        rc, err = _psql_apply(schema, rpath)
+        if rc != 0:
+            fails.append("ROLLBACK-RC rc=%s %s" % (rc, _tail(err)))
+        left = _fetch(schema, "SELECT count(*) FROM admin_actions WHERE details->>'carried_from' IS NOT NULL")
+        kept = _fetch(schema, "SELECT count(*) FROM admin_actions"
+                              " WHERE id = '00000000-0000-4000-8000-0000000003b4'")
+        if left != 0:
+            fails.append("ROLLBACK-LEFT-CARRIED %s" % left)
+        if kept != 1:
+            fails.append("ROLLBACK-TOOK-A-RECORD")
+        before = _snap(schema)
+        rc, err = _psql_apply(schema, rpath)
+        if rc != 0:
+            fails.append("ROLLBACK-RERUN-RC rc=%s %s" % (rc, _tail(err)))
+        elif _snap(schema) != before:
+            fails.append("ROLLBACK-RERUN-CHANGED")
+        rc, err = _psql_apply(schema, path)
+        if rc != 0 or _s3_carried(schema) != S3_EXPECT:
+            fails.append("REAPPLY rc=%s" % rc)
+        return fails
+    finally:
+        _exec(schema, S3_UNSEED)
+        _restore(schema)
+
+
+def test_reviewed_flags_without_a_record_are_carried_in_once(mcase, m420, capsys):
+    """S3: each reviewed flag that no flag_review record names gets one
+    record as the review writer writes it, at the flag's reviewed_at, marked
+    carried_from; a deleted account is named nowhere (a player is named only
+    through a live players row; a reviewer with none is a tombstone); a
+    second run inserts nothing; the rollback removes exactly the carried
+    rows, and an apply after it carries them in again."""
+    fails = _s3_failures(mcase)
+    with capsys.disabled():
+        print("\nMODLOG-S3-CARRY: %s" % (fails or "3 carried, keyed, no deleted id, rollback exact"))
+    assert not fails, fails
+
+
+# The dry run on a seed of the live shape (made-up ids; counts only taken
+# from the primary): 132 flags, 20 of them reviewed; 29 flag_review records
+# name 13 of those (8 flags with 1, 2 with 2, 2 with 4, 1 with 9); the other
+# 7 are false_positive, each with a 17-digit reviewer who has a players row,
+# auto_invalidated false for 4 and true for 3, and name 14 players between
+# them, each with a players row.
+_D_FLAG = "00000000-0000-4000-8000-00000000d"   # + 3 digits
+_D_PLAYER = "00000000-0000-4000-8000-0000000e"  # + 4 digits
+_D_REC = "00000000-0000-4000-8000-0000000f"     # + 4 digits
+S3_DRY_SEED = """
+INSERT INTO players (id, steam_id, display_name)
+SELECT CAST('{p}' || lpad(n::text, 4, '0') AS uuid), '76561190000006' || lpad(n::text, 3, '0'), 'S3 dry ' || n
+  FROM generate_series(1, 14) n
+UNION ALL
+SELECT CAST('{p}' || lpad((100 + n)::text, 4, '0') AS uuid), '76561190000005' || lpad(n::text, 3, '0'),
+       'S3 dry reviewer ' || n
+  FROM generate_series(1, 3) n;
+INSERT INTO flagged_matches (id, match_id, player_steam_ids, flag_reason, auto_invalidated, reviewed_at,
+                             reviewed_by_steam_id, review_action, restoration_required,
+                             discord_evidence_revision, created_at)
+SELECT CAST('{f}' || lpad(i::text, 3, '0') AS uuid), '00000000-0000-0000-0000-0000000000d1',
+       CASE WHEN i BETWEEN 14 AND 20
+            THEN ARRAY['76561190000006' || lpad((2 * (i - 13) - 1)::text, 3, '0'),
+                       '76561190000006' || lpad((2 * (i - 13))::text, 3, '0')]
+            ELSE ARRAY['76561190000006001', '76561190000006002'] END,
+       'inactive_player', i BETWEEN 18 AND 20,
+       CASE WHEN i <= 20 THEN TIMESTAMPTZ '2026-04-20 00:00:00+00' + make_interval(days => i) END,
+       CASE WHEN i <= 20 THEN '76561190000005' || lpad((1 + i % 3)::text, 3, '0') END,
+       CASE WHEN i = 13 THEN 'confirmed_cheat' WHEN i <= 20 THEN 'false_positive' END,
+       false, 1, NOW()
+  FROM generate_series(1, 132) i;
+INSERT INTO admin_actions (id, admin_steam_id, action, target_match_id, details)
+SELECT CAST('{r}' || lpad((row_number() OVER ())::text, 4, '0') AS uuid), '76561190000005001', 'flag_review',
+       '00000000-0000-0000-0000-0000000000d1',
+       jsonb_build_object('flag_id', '{f}' || lpad(i::text, 3, '0'),
+                          'review_action', CASE WHEN i = 13 THEN 'confirmed_cheat' ELSE 'false_positive' END)
+  FROM generate_series(1, 13) i,
+       generate_series(1, CASE WHEN i <= 8 THEN 1 WHEN i <= 10 THEN 2 WHEN i <= 12 THEN 4 ELSE 9 END) k;
+""".format(p=_D_PLAYER, f=_D_FLAG, r=_D_REC)
+S3_DRY_UNSEED = """
+DELETE FROM admin_actions WHERE action = 'flag_review' AND details->>'flag_id' LIKE '{f}%';
+DELETE FROM flagged_matches WHERE CAST(id AS text) LIKE '{f}%';
+DELETE FROM players WHERE CAST(id AS text) LIKE '{p}%';
+""".format(p=_D_PLAYER, f=_D_FLAG)
+_S3_RECORDS = "SELECT count(*) FROM admin_actions WHERE action = 'flag_review'"
+_S3_MARKED = "SELECT count(*) FROM admin_actions WHERE details->>'carried_from' = 'flagged_matches'"
+
+
+def test_carry_in_dry_run_on_a_seed_of_the_live_shape(mcase, m420, capsys):
+    """S3 dry run: the count statement, the apply, the count again, a second
+    apply, and the rollback, each with the records before and after."""
+    rc, err = _psql_apply(mcase, R420)
+    assert rc == 0, err
+    _exec(mcase, S3_DRY_SEED)
+    steps = []
+    try:
+        steps.append(("seed", _fetch(mcase, S3_COUNT), _fetch(mcase, _S3_RECORDS), _fetch(mcase, _S3_MARKED)))
+        for label, path in (("apply", M420), ("apply again", M420), ("rollback", R420)):
+            rc, err = _psql_apply(mcase, path)
+            assert rc == 0, (label, _tail(err))
+            steps.append((label, _fetch(mcase, S3_COUNT), _fetch(mcase, _S3_RECORDS), _fetch(mcase, _S3_MARKED)))
+        named = _fetch(mcase, "SELECT count(*) FROM flagged_matches WHERE reviewed_at IS NOT NULL")
+    finally:
+        _exec(mcase, S3_DRY_UNSEED)
+        _restore(mcase)
+    with capsys.disabled():
+        print("\nMODLOG-S3-DRYRUN reviewed %s; (step, count, flag_review records, carried): %s" % (named, steps))
+    assert named == 20
+    assert steps == [("seed", 7, 29, 0), ("apply", 0, 36, 7), ("apply again", 0, 36, 7),
+                     ("rollback", 7, 29, 0)], steps
+
+
+_S3_KEY = ("       AND NOT EXISTS (SELECT 1 FROM admin_actions aa\n"
+           "                        WHERE aa.action::text = 'flag_review'\n")
+_R_CARRY_DELETE = ("DELETE FROM admin_actions\n"
+                   " WHERE pg_catalog.jsonb_typeof(details) = 'object'\n"
+                   "   AND (details OPERATOR(pg_catalog.->>) 'carried_from') IS NOT NULL;\n")
+_R_CARRY_CHECK = ("    UNION ALL\n"
+                  "    SELECT 'carried-in records ' || pg_catalog.count(*)::text FROM admin_actions a\n"
+                  "     WHERE pg_catalog.jsonb_typeof(a.details) = 'object'\n"
+                  "       AND (a.details OPERATOR(pg_catalog.->>) 'carried_from') IS NOT NULL\n"
+                  "    HAVING pg_catalog.count(*) > 0")
+
+
+@pytest.mark.parametrize("m_pairs,r_pairs,expect", [
+    ([("SELECT DISTINCT p.steam_id::text FROM players p",
+       "SELECT DISTINCT u.s FROM pg_catalog.unnest(fm.player_steam_ids) u(s), players p")], [],
+     ("DELETED-ID-SERVED",)),
+    ([("WHEN fm.reviewed_by_steam_id::text !~ '^[0-9]{17}$'", "WHEN true")], [], ("DELETED-ID-SERVED",)),
+    ([(_S3_KEY, _S3_KEY.replace("WHERE aa.action", "WHERE false AND aa.action"))], [],
+     ("CARRIED", "RERUN-CHANGED")),
+    ([("           NULL, fm.reviewed_at\n", "           NULL, pg_catalog.now()\n")], [], ("CARRIED",)),
+    ([], [(_R_CARRY_DELETE, "")], ("ROLLBACK-RC", "ROLLBACK-LEFT-CARRIED")),
+    ([], [(_R_CARRY_DELETE, ""), (_R_CARRY_CHECK, "")], ("ROLLBACK-LEFT-CARRIED",)),
+], ids=["players_from_the_list", "actor_as_stored", "no_key", "time_of_the_run", "rollback_no_delete",
+        "rollback_no_delete_no_check"])
+def test_mutant_the_carry_in_without_its_rule_is_red(mcase, m420, m_pairs, r_pairs, expect, capsys):
+    path = _variant_pairs(M420, m_pairs)
+    rpath = _variant_pairs(R420, r_pairs)
+    try:
+        fails = _s3_failures(mcase, path, rpath)
+    finally:
+        os.unlink(path)
+        os.unlink(rpath)
+    with capsys.disabled():
+        print("\nMODLOG-MUTANT s3: %s" % fails)
+    for label in expect:
+        assert any(f.startswith(label) for f in fails), (label, fails)
+    if "ROLLBACK-RC" not in expect:
+        assert not any(f.startswith("ROLLBACK-RC") for f in fails), fails
