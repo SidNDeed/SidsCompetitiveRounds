@@ -78,7 +78,7 @@ async def _print_of(env, owner, subject):
 
 
 async def _sent(env, sender, to):
-    ans = await env.mail(sender, to, body="An ordinary message.")
+    ans = await env.mail(sender, [to], body="An ordinary message.")
     assert ans.status == 200 and ans["accepted"] is True, ans
     return uuid.UUID(str(ans["id"]))
 
@@ -143,7 +143,7 @@ def test_a_deletion_and_the_relay_ack_both_finish(monkeypatch):
 
 
 RANKED_MARK = "OR matched_with = :pid"      # the deletion's ranked_queue DELETE (its verify read comes after it)
-ADMIN = "76561190000000001"                 # a synthetic moderator id; the ban core takes it as a string
+# The moderator is a players row of its own: player_bans.banned_by_steam_id references players.
 
 
 async def _matched(env, a, b):
@@ -159,6 +159,7 @@ def test_a_ban_and_a_deletion_sharing_a_lobby_and_a_ranked_match_both_finish(mon
     async def body(env):
         _arm(env)
         lid, (p, x) = await env.lobby("team", 2)
+        (mod,) = await env.players(1)
         await _matched(env, p, x)
         await _matched(env, x, p)
         assert await env.conn.fetchval(
@@ -166,7 +167,7 @@ def test_a_ban_and_a_deletion_sharing_a_lobby_and_a_ranked_match_both_finish(mon
             "   AND player_id = ANY($2::uuid[])", lid, [p.id, x.id]) == 2
 
         async def ban(db):
-            out = await main._apply_ban_core(db, admin_steam_id=ADMIN, target_steam_id=x.sid,
+            out = await main._apply_ban_core(db, admin_steam_id=mod.sid, target_steam_id=x.sid,
                                              reason="mdpl staged ban")
             await db.commit()
             return out
