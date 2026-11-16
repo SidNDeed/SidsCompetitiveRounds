@@ -241,7 +241,7 @@
           ],
           "main",
           "admin_list_quarantine",
-          "c35df6aec35e52d90251f3176e43a7200009e0da"
+          "1f6085c7d3ec92c73493f19ed849f7c276ae0b1a"
         ],
         [
           "/api/v1/admin/quarantine/triage",
@@ -259,7 +259,7 @@
           ],
           "main",
           "admin_quarantine_triage_group",
-          "6017c8499529ab249008d53105f353b235abd652"
+          "4bd21f6925fe5febb5400d7e942504fbca6be314"
         ],
         [
           "/api/v1/admin/quarantine/{qid}/accept",
@@ -268,7 +268,7 @@
           ],
           "main",
           "admin_accept_quarantine",
-          "fc3a3111c7ca663cb5a0c1929dbec389f2c623ef"
+          "ae39b2c95fdc0f8a4d5ed269981695502a531e25"
         ],
         [
           "/api/v1/admin/quarantine/{qid}/discard",
@@ -583,7 +583,7 @@
           ],
           "main",
           "internal_quarantine_digest",
-          "fe2aab70add6bf60029e7aa6e03696820a20bc26"
+          "59727d3be662c18fc4c3c768bd43d02508cdfe92"
         ],
         [
           "/api/v1/internal/recent-flags",
@@ -1867,7 +1867,7 @@
           ],
           "main",
           "health_check",
-          "174dfadbca08519b4bf41a975a9a1eaf5a87583e"
+          "d41b5c8c11e5a0f1de7140a6b01cd80d74a3a0b8"
         ],
         [
           "/api/v1/i18n/approved",
@@ -4022,6 +4022,21 @@
           "dea66be9e3bc10772cdcc765734cff65edd8186c"
         ]
       ]
+    },
+    {
+      "classification": "statically-nonconsumer",
+      "reason": "Static source review (QDIG-1, migration 419: the digest posted route in main.py): over the route's whole reached surface, walked by this gate's own closure, no W1 private Match column is named and no SQL reads the matches table. POST /api/v1/internal/quarantine/digest/posted requires the internal key, stamps digest_posted_at or digest_reminded_at on pending match_report_quarantine rows by id, and answers {kind, marked, ignored}: two counts and the kind it was sent.",
+      "routes": [
+        [
+          "/api/v1/internal/quarantine/digest/posted",
+          [
+            "POST"
+          ],
+          "main",
+          "internal_quarantine_digest_posted",
+          "4514c5b20ade8275d2e5e9af22b24d88a62652db"
+        ]
+      ]
     }
   ],
   "entry_points": {
@@ -4073,7 +4088,7 @@
       [
         "main",
         "lifespan",
-        "b81f009b910365377940dc123ce21e06adc2ec14"
+        "1e1061e2123210d2db7d709378edd628c5b509b2"
       ]
     ]
   },
@@ -4469,6 +4484,7 @@
     "GET /api/v1/admin/quarantine/triage -> main.admin_quarantine_triage",
     "GET /api/v1/admin/quarantine/triage/{mode}/{group_id} -> main.admin_quarantine_triage_group",
     "GET /api/v1/internal/quarantine/digest -> main.internal_quarantine_digest",
+    "POST /api/v1/internal/quarantine/digest/posted -> main.internal_quarantine_digest_posted",
     "POST /api/v1/spectate/participant-attest -> main.spectate_participant_attest",
     "POST /api/v1/spectate/close -> main.spectate_close",
     "GET /api/v1/spectate/games -> main.spectate_games",
