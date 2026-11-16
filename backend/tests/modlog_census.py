@@ -17,8 +17,11 @@ FAMILIES = ("bans", "chat", "mail_case", "results", "cards", "grants")
 # sends; service: the bot's and the deploy tools' plumbing (acks, outbox,
 # leases, posts, name sync); config: an admin's or a moderator's change to
 # the server or its content, not to a player; automatic: a grant the server
-# makes from an outside event.
-REASONS = ("read", "own", "gameplay", "service", "config", "automatic")
+# makes from an outside event; read_upkeep: a GET that answers a read and
+# also keeps the server's own state on the way (a cache, a heartbeat or a
+# poll's step, a delivery attempt, a session's refresh, a read audit),
+# changing no moderator state on a player (fix A6: 'read' is checked).
+REASONS = ("read", "read_upkeep", "own", "gameplay", "service", "config", "automatic")
 
 CENSUS = {
     ('POST', '/api/v1/admin/artists/set'): (MOD, 'grants', (('main', 'admin_set_artist'), )),  # main.admin_set_artist
@@ -38,7 +41,7 @@ CENSUS = {
     ('POST', '/api/v1/admin/resolve-flag-restoration'): (MOD, 'results', (('main', 'admin_resolve_flag_restoration'), )),  # main.admin_resolve_flag_restoration
     ('POST', '/api/v1/admin/reverse-series'): (MOD, 'results', (('main', 'admin_reverse_series'), )),  # main.admin_reverse_series
     ('POST', '/api/v1/admin/review-flag'): (MOD, 'results', (('main', 'admin_review_flag'), )),  # main.admin_review_flag
-    ('POST', '/api/v1/admin/team/rebuild-glicko'): (MOD, 'results', (('main', 'admin_rebuild_team_glicko'), )),  # main.admin_rebuild_team_glicko
+    ('POST', '/api/v1/admin/team/rebuild-glicko'): (MOD, 'results', (('main', 'admin_rebuild_team_glicko'), ('main', '_modlog_rebuild_start'), )),  # main.admin_rebuild_team_glicko
     ('POST', '/api/v1/admin/team/reverse-series'): (MOD, 'results', (('main', 'admin_reverse_team_series'), )),  # main.admin_reverse_team_series
     ('POST', '/api/v1/admin/team/series/{series_id}/resolve'): (MOD, 'results', (('main', 'admin_resolve_team_series'), )),  # main.admin_resolve_team_series
     ('POST', '/api/v1/admin/unban'): (MOD, 'bans', (('main', 'admin_unban'), )),  # main.admin_unban
@@ -53,7 +56,7 @@ CENSUS = {
     ('POST', '/api/v1/internal/moderation-cases/{case_id}/act'): (MOD, 'mail_case', (('main', '_moderation_case_act'), ('main', '_apply_ban_core'), )),  # main.internal_moderation_case_act
     ('GET', '/api/v1/achievements/definitions'): (NOT, 'read', ()),  # main.get_achievement_definitions
     ('POST', '/api/v1/achievements/unlock'): (NOT, 'gameplay', ()),  # main.unlock_achievement
-    ('GET', '/api/v1/achievements/{key}/earners'): (NOT, 'read', ()),  # main.get_achievement_earners
+    ('GET', '/api/v1/achievements/{key}/earners'): (NOT, 'read_upkeep', ()),  # main.get_achievement_earners
     ('GET', '/api/v1/achievements/{steam_id}'): (NOT, 'read', ()),  # main.get_player_achievements
     ('GET', '/api/v1/admin/actions'): (NOT, 'read', ()),  # main.admin_list_actions
     ('GET', '/api/v1/admin/admins'): (NOT, 'read', ()),  # main.admin_list_admins
@@ -87,8 +90,8 @@ CENSUS = {
     ('POST', '/api/v1/admin/pc/snapshot'): (NOT, 'config', (('main', 'admin_pc_snapshot'), )),  # main.admin_pc_snapshot
     ('GET', '/api/v1/admin/pc/trades'): (NOT, 'read', ()),  # main.admin_pc_trades
     ('GET', '/api/v1/admin/quarantine'): (NOT, 'read', ()),  # main.admin_list_quarantine
-    ('GET', '/api/v1/admin/quarantine/triage'): (NOT, 'read', ()),  # main.admin_quarantine_triage
-    ('GET', '/api/v1/admin/quarantine/triage/{mode}/{group_id}'): (NOT, 'read', ()),  # main.admin_quarantine_triage_group
+    ('GET', '/api/v1/admin/quarantine/triage'): (NOT, 'read_upkeep', ()),  # main.admin_quarantine_triage
+    ('GET', '/api/v1/admin/quarantine/triage/{mode}/{group_id}'): (NOT, 'read_upkeep', ()),  # main.admin_quarantine_triage_group
     ('GET', '/api/v1/admin/read-census'): (NOT, 'read', ()),  # main.admin_read_census
     ('POST', '/api/v1/admin/read-gate/mode'): (NOT, 'config', (('main', 'admin_read_gate_mode'), )),  # main.admin_read_gate_mode
     ('GET', '/api/v1/admin/recent-series'): (NOT, 'read', ()),  # main.admin_recent_series
@@ -119,7 +122,7 @@ CENSUS = {
     ('POST', '/api/v1/auth/steam'): (NOT, 'own', ()),  # main.steam_auth
     ('POST', '/api/v1/bets'): (NOT, 'gameplay', ()),  # main.place_bet
     ('GET', '/api/v1/broadcast/report-status'): (NOT, 'read', ()),  # main.broadcast_report_status
-    ('GET', '/api/v1/broadcast/target'): (NOT, 'read', ()),  # main.broadcast_target
+    ('GET', '/api/v1/broadcast/target'): (NOT, 'read_upkeep', ()),  # main.broadcast_target
     ('GET', '/api/v1/bug-reports'): (NOT, 'read', ()),  # main.list_bug_reports
     ('POST', '/api/v1/bug-reports'): (NOT, 'own', ()),  # main.submit_bug_report
     ('GET', '/api/v1/bug-reports/events/recent'): (NOT, 'read', ()),  # main.recent_bug_report_events
@@ -133,12 +136,12 @@ CENSUS = {
     ('GET', '/api/v1/cards/pickers-summary'): (NOT, 'read', ()),  # main.get_card_pickers_summary
     ('GET', '/api/v1/cards/top-pickers'): (NOT, 'read', ()),  # main.get_card_top_pickers
     ('POST', '/api/v1/chat/moderate/lockdown'): (NOT, 'config', (('main', '_set_chat_lockdown'), )),  # main.chat_moderate_lockdown
-    ('GET', '/api/v1/chat/moderate/mutes'): (NOT, 'read', ()),  # main.chat_moderate_list_mutes
+    ('GET', '/api/v1/chat/moderate/mutes'): (NOT, 'read_upkeep', ()),  # main.chat_moderate_list_mutes
     ('GET', '/api/v1/chat/moderate/spam-patterns'): (NOT, 'read', ()),  # main.chat_moderate_spam_patterns
     ('POST', '/api/v1/chat/moderate/spam-patterns/add'): (NOT, 'config', (('main', 'chat_moderate_spam_pattern_add'), )),  # main.chat_moderate_spam_pattern_add
     ('POST', '/api/v1/chat/moderate/spam-patterns/revoke'): (NOT, 'config', (('main', 'chat_moderate_spam_pattern_revoke'), )),  # main.chat_moderate_spam_pattern_revoke
     ('POST', '/api/v1/chat/post'): (NOT, 'own', (('main', '_chat_censor_strike'), )),  # main.post_chat_from_discord
-    ('GET', '/api/v1/chat/recent'): (NOT, 'read', ()),  # main.get_recent_chat
+    ('GET', '/api/v1/chat/recent'): (NOT, 'read_upkeep', ()),  # main.get_recent_chat
     ('POST', '/api/v1/client/compat-outcome'): (NOT, 'own', ()),  # main.submit_compat_outcome
     ('GET', '/api/v1/compare/nemesis'): (NOT, 'read', ()),  # main.get_compare_nemesis
     ('GET', '/api/v1/compare/player-nemesis'): (NOT, 'read', ()),  # main.get_compare_player_nemesis
@@ -148,8 +151,8 @@ CENSUS = {
     ('POST', '/api/v1/discord-team-bets'): (NOT, 'gameplay', ()),  # main.place_discord_team_bet
     ('POST', '/api/v1/ffa/bets'): (NOT, 'gameplay', ()),  # main.place_ffa_bet
     ('GET', '/api/v1/ffa/bettable'): (NOT, 'read', ()),  # main.ffa_bettable
-    ('GET', '/api/v1/ffa/leaderboard'): (NOT, 'read', ()),  # main.ffa_leaderboard
-    ('GET', '/api/v1/ffa/lobbies'): (NOT, 'read', ()),  # main.ffa_lobby_browser
+    ('GET', '/api/v1/ffa/leaderboard'): (NOT, 'read_upkeep', ()),  # main.ffa_leaderboard
+    ('GET', '/api/v1/ffa/lobbies'): (NOT, 'read_upkeep', ()),  # main.ffa_lobby_browser
     ('POST', '/api/v1/ffa/lobbies/{lobby_id}/live-points'): (NOT, 'gameplay', ()),  # main.update_ffa_live_points
     ('POST', '/api/v1/ffa/lobby/create'): (NOT, 'gameplay', ()),  # main.ffa_lobby_create
     ('POST', '/api/v1/ffa/lobby/join'): (NOT, 'gameplay', ()),  # main.ffa_lobby_join
@@ -164,22 +167,22 @@ CENSUS = {
     ('POST', '/api/v1/ffa/queue/join'): (NOT, 'gameplay', ()),  # main.ffa_queue_join
     ('POST', '/api/v1/ffa/queue/leave'): (NOT, 'gameplay', ()),  # main.ffa_queue_leave
     ('GET', '/api/v1/ffa/queue/list'): (NOT, 'read', ()),  # main.ffa_queue_list
-    ('GET', '/api/v1/ffa/queue/poll/{steam_id}'): (NOT, 'read', ()),  # main.ffa_queue_poll
+    ('GET', '/api/v1/ffa/queue/poll/{steam_id}'): (NOT, 'read_upkeep', ()),  # main.ffa_queue_poll
     ('GET', '/api/v1/ffa/queue/recent-joins'): (NOT, 'read', ()),  # main.ffa_queue_recent_joins
-    ('GET', '/api/v1/ffa/readmit/offer'): (NOT, 'read', ()),  # main.ffa_readmit_offer
-    ('GET', '/api/v1/ffa/recent'): (NOT, 'read', ()),  # main.ffa_recent
+    ('GET', '/api/v1/ffa/readmit/offer'): (NOT, 'read_upkeep', ()),  # main.ffa_readmit_offer
+    ('GET', '/api/v1/ffa/recent'): (NOT, 'read_upkeep', ()),  # main.ffa_recent
     ('GET', '/api/v1/h2h/{steam_id}/{opponent_steam_id}'): (NOT, 'read', ()),  # main.h2h_summary
     ('GET', '/api/v1/health'): (NOT, 'read', ()),  # main.health_check
-    ('GET', '/api/v1/i18n/approved'): (NOT, 'read', ()),  # main.i18n_approved_list
-    ('GET', '/api/v1/i18n/contributors'): (NOT, 'read', ()),  # main.i18n_contributors
-    ('GET', '/api/v1/i18n/grants/mine'): (NOT, 'read', ()),  # main.i18n_my_grants
-    ('GET', '/api/v1/i18n/history'): (NOT, 'read', ()),  # main.i18n_key_history
-    ('GET', '/api/v1/i18n/keys'): (NOT, 'read', ()),  # main.i18n_keys
+    ('GET', '/api/v1/i18n/approved'): (NOT, 'read_upkeep', ()),  # main.i18n_approved_list
+    ('GET', '/api/v1/i18n/contributors'): (NOT, 'read_upkeep', ()),  # main.i18n_contributors
+    ('GET', '/api/v1/i18n/grants/mine'): (NOT, 'read_upkeep', ()),  # main.i18n_my_grants
+    ('GET', '/api/v1/i18n/history'): (NOT, 'read_upkeep', ()),  # main.i18n_key_history
+    ('GET', '/api/v1/i18n/keys'): (NOT, 'read_upkeep', ()),  # main.i18n_keys
     ('GET', '/api/v1/i18n/pack/{locale}'): (NOT, 'read', ()),  # main.i18n_pack
     ('POST', '/api/v1/i18n/portal-session'): (NOT, 'own', ()),  # main.i18n_portal_session
     ('POST', '/api/v1/i18n/portal-session/refresh'): (NOT, 'own', ()),  # main.i18n_portal_session_refresh
-    ('GET', '/api/v1/i18n/progress'): (NOT, 'read', ()),  # main.i18n_progress
-    ('GET', '/api/v1/i18n/proposals'): (NOT, 'read', ()),  # main.i18n_proposal_queue
+    ('GET', '/api/v1/i18n/progress'): (NOT, 'read_upkeep', ()),  # main.i18n_progress
+    ('GET', '/api/v1/i18n/proposals'): (NOT, 'read_upkeep', ()),  # main.i18n_proposal_queue
     ('POST', '/api/v1/i18n/proposals'): (NOT, 'own', ()),  # main.i18n_propose
     ('POST', '/api/v1/i18n/revert'): (NOT, 'config', ()),  # main.i18n_revert
     ('POST', '/api/v1/i18n/review'): (NOT, 'config', ()),  # main.i18n_review
@@ -189,18 +192,18 @@ CENSUS = {
     ('POST', '/api/v1/internal/bug-reports/{report_id}/channel-posted'): (NOT, 'service', ()),  # main.ack_bug_report_posted
     ('POST', '/api/v1/internal/bug-reports/{report_id}/comment'): (NOT, 'service', ()),  # main.internal_comment_on_bug_report
     ('POST', '/api/v1/internal/channel-posts/ack'): (NOT, 'service', ()),  # main.ack_channel_post
-    ('GET', '/api/v1/internal/channel-posts/pending'): (NOT, 'read', ()),  # main.pending_channel_posts
+    ('GET', '/api/v1/internal/channel-posts/pending'): (NOT, 'read_upkeep', ()),  # main.pending_channel_posts
     ('POST', '/api/v1/internal/chat/bridge'): (NOT, 'service', ()),  # main.bridge_stream_chat
     ('POST', '/api/v1/internal/chat/lockdown'): (NOT, 'config', (('main', '_set_chat_lockdown'), )),  # main.internal_chat_lockdown
     ('GET', '/api/v1/internal/chat/lockdown-state'): (NOT, 'read', ()),  # main.internal_chat_lockdown_state
     ('POST', '/api/v1/internal/chat/mirrors'): (NOT, 'service', ()),  # main.internal_chat_mirrors
-    ('GET', '/api/v1/internal/chat/mod-actions'): (NOT, 'read', ()),  # main.internal_chat_mod_actions
+    ('GET', '/api/v1/internal/chat/mod-actions'): (NOT, 'read_upkeep', ()),  # main.internal_chat_mod_actions
     ('POST', '/api/v1/internal/chat/mod-actions/ack'): (NOT, 'service', ()),  # main.internal_chat_mod_actions_ack
-    ('GET', '/api/v1/internal/chat/since'): (NOT, 'read', ()),  # main.internal_chat_since
-    ('GET', '/api/v1/internal/evidence-report/game/{code}'): (NOT, 'read', ()),  # admin_evidence.evidence_report_game
-    ('GET', '/api/v1/internal/evidence-report/pair'): (NOT, 'read', ()),  # admin_evidence.evidence_report_pair
-    ('GET', '/api/v1/internal/evidence-report/player/{steam_id}'): (NOT, 'read', ()),  # admin_evidence.evidence_report_player
-    ('GET', '/api/v1/internal/evidence-report/series/{code}'): (NOT, 'read', ()),  # admin_evidence.evidence_report_series
+    ('GET', '/api/v1/internal/chat/since'): (NOT, 'read_upkeep', ()),  # main.internal_chat_since
+    ('GET', '/api/v1/internal/evidence-report/game/{code}'): (NOT, 'read_upkeep', ()),  # admin_evidence.evidence_report_game
+    ('GET', '/api/v1/internal/evidence-report/pair'): (NOT, 'read_upkeep', ()),  # admin_evidence.evidence_report_pair
+    ('GET', '/api/v1/internal/evidence-report/player/{steam_id}'): (NOT, 'read_upkeep', ()),  # admin_evidence.evidence_report_player
+    ('GET', '/api/v1/internal/evidence-report/series/{code}'): (NOT, 'read_upkeep', ()),  # admin_evidence.evidence_report_series
     ('GET', '/api/v1/internal/janitor-selftest'): (NOT, 'read', ()),  # main.get_janitor_selftest
     ('GET', '/api/v1/internal/lfp-pings'): (NOT, 'read', ()),  # main.internal_lfp_pings
     ('POST', '/api/v1/internal/lfp-pings/ack'): (NOT, 'service', ()),  # main.ack_lfp_pings
@@ -217,9 +220,9 @@ CENSUS = {
     ('GET', '/api/v1/internal/pc/collection'): (NOT, 'read', ()),  # main.internal_pc_collection
     ('POST', '/api/v1/internal/pc/daily'): (NOT, 'service', ()),  # main.internal_pc_daily
     ('POST', '/api/v1/internal/pc/events/ack'): (NOT, 'service', ()),  # main.internal_pc_events_ack
-    ('GET', '/api/v1/internal/pc/events/pending'): (NOT, 'read', ()),  # main.internal_pc_events_pending
+    ('GET', '/api/v1/internal/pc/events/pending'): (NOT, 'read_upkeep', ()),  # main.internal_pc_events_pending
     ('GET', '/api/v1/internal/pc/face/back'): (NOT, 'read', ()),  # main.internal_pc_face_back
-    ('GET', '/api/v1/internal/pc/face/preview/{player_ref}/{locale}'): (NOT, 'read', ()),  # main.internal_pc_face_preview
+    ('GET', '/api/v1/internal/pc/face/preview/{player_ref}/{locale}'): (NOT, 'read_upkeep', ()),  # main.internal_pc_face_preview
     ('GET', '/api/v1/internal/pc/face/print/{print_id}/{locale}'): (NOT, 'read', ()),  # main.internal_pc_face_print
     ('POST', '/api/v1/internal/pc/lease'): (NOT, 'service', ()),  # main.internal_pc_lease
     ('DELETE', '/api/v1/internal/pc/lease/{lease_id}'): (NOT, 'service', ()),  # main.internal_pc_lease_release
@@ -228,17 +231,17 @@ CENSUS = {
     ('GET', '/api/v1/internal/pc/packs'): (NOT, 'read', ()),  # main.internal_pc_packs
     ('POST', '/api/v1/internal/pc/packs/open'): (NOT, 'service', ()),  # main.internal_pc_open_pack
     ('GET', '/api/v1/internal/pc/packs/{pack_id}/strip/{locale}.png'): (NOT, 'read', ()),  # main.internal_pc_pack_strip
-    ('GET', '/api/v1/internal/pending-dms'): (NOT, 'read', ()),  # main.internal_pending_dms
+    ('GET', '/api/v1/internal/pending-dms'): (NOT, 'read_upkeep', ()),  # main.internal_pending_dms
     ('POST', '/api/v1/internal/pending-dms/ack'): (NOT, 'service', ()),  # main.ack_pending_dms
     ('GET', '/api/v1/internal/pending-dms/{dm_id}/cancelled'): (NOT, 'read', ()),  # main.internal_pending_dm_cancelled
-    ('GET', '/api/v1/internal/quarantine/digest'): (NOT, 'read', ()),  # main.internal_quarantine_digest
+    ('GET', '/api/v1/internal/quarantine/digest'): (NOT, 'read_upkeep', ()),  # main.internal_quarantine_digest
     ('POST', '/api/v1/internal/rank-role-colors'): (NOT, 'service', ()),  # main.push_rank_role_colors
     ('GET', '/api/v1/internal/recent-bans'): (NOT, 'read', ()),  # main.get_recent_bans
     ('GET', '/api/v1/internal/recent-flags'): (NOT, 'read', ()),  # main.get_recent_flags
     ('POST', '/api/v1/internal/recent-flags/ack'): (NOT, 'service', ()),  # main.acknowledge_recent_flag
     ('POST', '/api/v1/internal/release-posts'): (NOT, 'service', ()),  # main.push_release_posts
     ('POST', '/api/v1/internal/stream-posts/ack'): (NOT, 'service', ()),  # main.internal_stream_posts_ack
-    ('GET', '/api/v1/internal/stream-posts/pending'): (NOT, 'read', ()),  # main.internal_stream_posts_pending
+    ('GET', '/api/v1/internal/stream-posts/pending'): (NOT, 'read_upkeep', ()),  # main.internal_stream_posts_pending
     ('GET', '/api/v1/internal/tournament-notices'): (NOT, 'read', ()),  # main.internal_tournament_notices
     ('POST', '/api/v1/internal/tournament-notices/ack'): (NOT, 'service', ()),  # main.ack_tournament_notices
     ('POST', '/api/v1/internal/tournaments/checkin-response'): (NOT, 'service', ()),  # main.internal_tournament_checkin_response
@@ -247,7 +250,7 @@ CENSUS = {
     ('POST', '/api/v1/invites/{invite_id}/accept'): (NOT, 'gameplay', ()),  # main.invite_accept
     ('POST', '/api/v1/invites/{invite_id}/cancel'): (NOT, 'gameplay', ()),  # main.invite_cancel
     ('POST', '/api/v1/invites/{invite_id}/decline'): (NOT, 'gameplay', ()),  # main.invite_decline
-    ('GET', '/api/v1/leaderboard'): (NOT, 'read', ()),  # main.get_leaderboard
+    ('GET', '/api/v1/leaderboard'): (NOT, 'read_upkeep', ()),  # main.get_leaderboard
     ('POST', '/api/v1/lfp-ping'): (NOT, 'gameplay', ()),  # main.lfp_ping
     ('POST', '/api/v1/lobby-bets'): (NOT, 'gameplay', ()),  # main.place_lobby_bet
     ('POST', '/api/v1/lobby-bets/cancel'): (NOT, 'gameplay', ()),  # main.cancel_lobby_bet
@@ -256,20 +259,20 @@ CENSUS = {
     ('GET', '/api/v1/mail/blocks'): (NOT, 'read', ()),  # main.mail_blocks_list
     ('POST', '/api/v1/mail/blocks'): (NOT, 'own', ()),  # main.mail_block_add
     ('DELETE', '/api/v1/mail/blocks/{steam_id}'): (NOT, 'own', ()),  # main.mail_block_remove
-    ('GET', '/api/v1/mail/inbox'): (NOT, 'read', ()),  # main.mail_inbox
+    ('GET', '/api/v1/mail/inbox'): (NOT, 'read_upkeep', ()),  # main.mail_inbox
     ('GET', '/api/v1/mail/sent'): (NOT, 'read', ()),  # main.mail_sent
     ('GET', '/api/v1/mail/settings'): (NOT, 'read', ()),  # main.mail_settings_get
     ('PUT', '/api/v1/mail/settings'): (NOT, 'own', ()),  # main.mail_settings_put
     ('GET', '/api/v1/mail/status'): (NOT, 'read', ()),  # main.mail_status
     ('DELETE', '/api/v1/mail/{message_id}'): (NOT, 'own', ()),  # main.mail_delete
-    ('GET', '/api/v1/mail/{message_id}'): (NOT, 'read', ()),  # main.mail_detail
+    ('GET', '/api/v1/mail/{message_id}'): (NOT, 'read_upkeep', ()),  # main.mail_detail
     ('POST', '/api/v1/mail/{message_id}/read'): (NOT, 'own', ()),  # main.mail_read
     ('POST', '/api/v1/mail/{message_id}/reply'): (NOT, 'own', ()),  # main.mail_reply
     ('POST', '/api/v1/mail/{message_id}/report'): (NOT, 'own', ()),  # main.mail_report
     ('POST', '/api/v1/match/game/start'): (NOT, 'gameplay', ()),  # match_hold.match_game_start
     ('POST', '/api/v1/match/hold/beat'): (NOT, 'gameplay', ()),  # match_hold.match_hold_beat
     ('GET', '/api/v1/match/hold/by-room'): (NOT, 'read', ()),  # match_hold.match_hold_by_room
-    ('GET', '/api/v1/match/hold/mine'): (NOT, 'read', ()),  # match_hold.match_hold_mine
+    ('GET', '/api/v1/match/hold/mine'): (NOT, 'read_upkeep', ()),  # match_hold.match_hold_mine
     ('POST', '/api/v1/match/hold/open'): (NOT, 'gameplay', ()),  # match_hold.match_hold_open
     ('POST', '/api/v1/match/hold/{hold_id}/bind'): (NOT, 'gameplay', ()),  # match_hold.match_hold_bind
     ('POST', '/api/v1/match/hold/{hold_id}/claim'): (NOT, 'gameplay', ()),  # match_hold.match_hold_claim
@@ -288,24 +291,24 @@ CENSUS = {
     ('GET', '/api/v1/mod/check/{steam_id}'): (NOT, 'read', ()),  # main.check_player_registered
     ('POST', '/api/v1/mod/toggle-ranked/{steam_id}'): (NOT, 'own', ()),  # main.toggle_ranked
     ('POST', '/api/v1/music/rate'): (NOT, 'own', ()),  # main.music_rate
-    ('GET', '/api/v1/music/ratings'): (NOT, 'read', ()),  # main.music_ratings_public
-    ('GET', '/api/v1/music/ratings/mine'): (NOT, 'read', ()),  # main.music_ratings_mine
-    ('GET', '/api/v1/ovt/leaderboard'): (NOT, 'read', ()),  # main.ovt_leaderboard
-    ('GET', '/api/v1/ovt/lobbies'): (NOT, 'read', ()),  # main.ovt_lobby_browser
+    ('GET', '/api/v1/music/ratings'): (NOT, 'read_upkeep', ()),  # main.music_ratings_public
+    ('GET', '/api/v1/music/ratings/mine'): (NOT, 'read_upkeep', ()),  # main.music_ratings_mine
+    ('GET', '/api/v1/ovt/leaderboard'): (NOT, 'read_upkeep', ()),  # main.ovt_leaderboard
+    ('GET', '/api/v1/ovt/lobbies'): (NOT, 'read_upkeep', ()),  # main.ovt_lobby_browser
     ('POST', '/api/v1/ovt/lobby/create'): (NOT, 'gameplay', ()),  # main.ovt_lobby_create
     ('POST', '/api/v1/ovt/lobby/join'): (NOT, 'gameplay', ()),  # main.ovt_lobby_join
     ('POST', '/api/v1/ovt/lobby/kick'): (NOT, 'gameplay', ()),  # main.ovt_lobby_kick
     ('POST', '/api/v1/ovt/lobby/leave'): (NOT, 'gameplay', ()),  # main.ovt_lobby_leave
     ('POST', '/api/v1/ovt/lobby/prefs'): (NOT, 'gameplay', ()),  # main.ovt_lobby_prefs
-    ('GET', '/api/v1/ovt/lobby/resolve'): (NOT, 'read', ()),  # main.ovt_lobby_resolve
+    ('GET', '/api/v1/ovt/lobby/resolve'): (NOT, 'read_upkeep', ()),  # main.ovt_lobby_resolve
     ('POST', '/api/v1/ovt/lobby/settings'): (NOT, 'gameplay', ()),  # main.ovt_lobby_settings
     ('POST', '/api/v1/ovt/lobby/start'): (NOT, 'gameplay', ()),  # main.ovt_lobby_start
-    ('GET', '/api/v1/ovt/lobby/state'): (NOT, 'read', ()),  # main.ovt_lobby_state
+    ('GET', '/api/v1/ovt/lobby/state'): (NOT, 'read_upkeep', ()),  # main.ovt_lobby_state
     ('POST', '/api/v1/ovt/matches'): (NOT, 'gameplay', ()),  # main.submit_ovt_match
     ('POST', '/api/v1/ovt/queue/join'): (NOT, 'gameplay', ()),  # main.ovt_queue_join
     ('POST', '/api/v1/ovt/queue/leave'): (NOT, 'gameplay', ()),  # main.ovt_queue_leave
     ('GET', '/api/v1/ovt/queue/list'): (NOT, 'read', ()),  # main.ovt_queue_list
-    ('GET', '/api/v1/ovt/queue/poll/{steam_id}'): (NOT, 'read', ()),  # main.ovt_queue_poll
+    ('GET', '/api/v1/ovt/queue/poll/{steam_id}'): (NOT, 'read_upkeep', ()),  # main.ovt_queue_poll
     ('GET', '/api/v1/ovt/queue/recent-joins'): (NOT, 'read', ()),  # main.ovt_queue_recent_joins
     ('GET', '/api/v1/ovt/recent'): (NOT, 'read', ()),  # main.ovt_recent
     ('GET', '/api/v1/ovt/series/active'): (NOT, 'read', ()),  # main.ovt_series_active
@@ -317,11 +320,11 @@ CENSUS = {
     ('GET', '/api/v1/pc/collection'): (NOT, 'read', ()),  # main.pc_collection
     ('POST', '/api/v1/pc/daily'): (NOT, 'own', ()),  # main.pc_daily_claim
     ('POST', '/api/v1/pc/dance'): (NOT, 'own', ()),  # main.pc_dance_select
-    ('GET', '/api/v1/pc/face/preview'): (NOT, 'read', ()),  # main.pc_face_preview
+    ('GET', '/api/v1/pc/face/preview'): (NOT, 'read_upkeep', ()),  # main.pc_face_preview
     ('GET', '/api/v1/pc/me'): (NOT, 'read', ()),  # main.pc_me
     ('GET', '/api/v1/pc/packs'): (NOT, 'read', ()),  # main.pc_packs_history
     ('POST', '/api/v1/pc/packs/open'): (NOT, 'own', ()),  # main.pc_open_pack
-    ('GET', '/api/v1/pc/packs/result'): (NOT, 'read', ()),  # main.pc_pack_result
+    ('GET', '/api/v1/pc/packs/result'): (NOT, 'read_upkeep', ()),  # main.pc_pack_result
     ('GET', '/api/v1/pc/pool'): (NOT, 'read', ()),  # main.pc_pool_summary
     ('POST', '/api/v1/pc/portrait'): (NOT, 'own', ()),  # main.pc_portrait_upload
     ('POST', '/api/v1/pc/portrait/motion'): (NOT, 'own', ()),  # main.pc_motion_upload
@@ -340,7 +343,7 @@ CENSUS = {
     ('POST', '/api/v1/players/link-discord'): (NOT, 'own', ()),  # main.link_discord
     ('GET', '/api/v1/players/search'): (NOT, 'read', ()),  # main.search_players
     ('POST', '/api/v1/players/unblock'): (NOT, 'own', ()),  # main.unblock_player
-    ('GET', '/api/v1/players/{steam_id}'): (NOT, 'read', ()),  # main.get_player_stats
+    ('GET', '/api/v1/players/{steam_id}'): (NOT, 'read_upkeep', ()),  # main.get_player_stats
     ('POST', '/api/v1/players/{steam_id}/active-color'): (NOT, 'own', ()),  # main.set_active_color
     ('POST', '/api/v1/players/{steam_id}/active-cursor-color'): (NOT, 'own', ()),  # main.set_active_cursor_color
     ('POST', '/api/v1/players/{steam_id}/active-player-color'): (NOT, 'own', ()),  # main.set_active_player_color
@@ -358,7 +361,7 @@ CENSUS = {
     ('GET', '/api/v1/players/{steam_id}/gold-sources'): (NOT, 'read', ()),  # main.get_gold_sources
     ('POST', '/api/v1/players/{steam_id}/hide-gold'): (NOT, 'own', ()),  # main.set_hide_gold
     ('GET', '/api/v1/players/{steam_id}/inventory'): (NOT, 'read', ()),  # main.get_inventory
-    ('GET', '/api/v1/players/{steam_id}/matches'): (NOT, 'read', ()),  # main.get_player_matches
+    ('GET', '/api/v1/players/{steam_id}/matches'): (NOT, 'read_upkeep', ()),  # main.get_player_matches
     ('GET', '/api/v1/players/{steam_id}/matches/summary'): (NOT, 'read', ()),  # main.get_player_matches_summary
     ('POST', '/api/v1/players/{steam_id}/nametag-toggle'): (NOT, 'own', ()),  # main.toggle_nametag_style
     ('GET', '/api/v1/players/{steam_id}/ovt-history'): (NOT, 'read', ()),  # main.player_ovt_history
@@ -372,13 +375,13 @@ CENSUS = {
     ('GET', '/api/v1/players/{steam_id}/team-history'): (NOT, 'read', ()),  # main.player_team_history
     ('GET', '/api/v1/players/{steam_id}/title-ladders'): (NOT, 'read', ()),  # title_ladders.get_title_ladders
     ('GET', '/api/v1/players/{steam_id}/vs/{opponent_steam_id}/top-cards'): (NOT, 'read', ()),  # main.get_h2h_top_cards
-    ('GET', '/api/v1/presence/online'): (NOT, 'read', ()),  # main.presence_online
-    ('GET', '/api/v1/presence/ping'): (NOT, 'read', ()),  # main.presence_ping
+    ('GET', '/api/v1/presence/online'): (NOT, 'read_upkeep', ()),  # main.presence_online
+    ('GET', '/api/v1/presence/ping'): (NOT, 'read_upkeep', ()),  # main.presence_ping
     ('GET', '/api/v1/queue/count'): (NOT, 'read', ()),  # main.queue_count
     ('POST', '/api/v1/queue/decline'): (NOT, 'gameplay', ()),  # main.queue_decline
     ('POST', '/api/v1/queue/join'): (NOT, 'gameplay', ()),  # main.queue_join
     ('POST', '/api/v1/queue/leave'): (NOT, 'gameplay', ()),  # main.queue_leave
-    ('GET', '/api/v1/queue/poll/{steam_id}'): (NOT, 'read', ()),  # main.queue_poll
+    ('GET', '/api/v1/queue/poll/{steam_id}'): (NOT, 'read_upkeep', ()),  # main.queue_poll
     ('POST', '/api/v1/queue/ready'): (NOT, 'gameplay', ()),  # main.queue_ready
     ('GET', '/api/v1/queue/recent-joins'): (NOT, 'read', ()),  # main.queue_recent_joins
     ('POST', '/api/v1/queues/escape'): (NOT, 'gameplay', ()),  # main.queues_escape
@@ -386,13 +389,13 @@ CENSUS = {
     ('GET', '/api/v1/rating-preview/2v2'): (NOT, 'read', ()),  # main.get_rating_preview_2v2
     ('GET', '/api/v1/rating-preview/ffa'): (NOT, 'read', ()),  # main.get_rating_preview_ffa
     ('GET', '/api/v1/read-gate/probe'): (NOT, 'read', ()),  # main.read_gate_probe
-    ('GET', '/api/v1/records'): (NOT, 'read', ()),  # main.get_records_board
+    ('GET', '/api/v1/records'): (NOT, 'read_upkeep', ()),  # main.get_records_board
     ('GET', '/api/v1/release-notes/full/{locale}'): (NOT, 'read', ()),  # main.release_notes_full
     ('GET', '/api/v1/release-notes/{locale}'): (NOT, 'read', ()),  # main.release_notes_localized
     ('GET', '/api/v1/releases/recent'): (NOT, 'read', ()),  # main.get_recent_releases
     ('GET', '/api/v1/report'): (NOT, 'read', ()),  # main.get_set_report
     ('POST', '/api/v1/report-disconnect'): (NOT, 'gameplay', ()),  # main.report_disconnect
-    ('GET', '/api/v1/series/active'): (NOT, 'read', ()),  # main.get_active_series
+    ('GET', '/api/v1/series/active'): (NOT, 'read_upkeep', ()),  # main.get_active_series
     ('POST', '/api/v1/series/preflight'): (NOT, 'gameplay', ()),  # main.series_preflight
     ('GET', '/api/v1/series/recent'): (NOT, 'read', ()),  # main.get_recent_series
     ('GET', '/api/v1/series/recent-multimode'): (NOT, 'read', ()),  # main.get_recent_multimode_series
@@ -403,25 +406,25 @@ CENSUS = {
     ('POST', '/api/v1/shop/purchase'): (NOT, 'own', ()),  # main.purchase_item
     ('GET', '/api/v1/shop/sales-board'): (NOT, 'read', ()),  # main.shop_sales_board
     ('POST', '/api/v1/spectate/close'): (NOT, 'gameplay', ()),  # main.spectate_close
-    ('GET', '/api/v1/spectate/games'): (NOT, 'read', ()),  # main.spectate_games
+    ('GET', '/api/v1/spectate/games'): (NOT, 'read_upkeep', ()),  # main.spectate_games
     ('POST', '/api/v1/spectate/grant'): (NOT, 'gameplay', ()),  # main.spectate_grant
     ('POST', '/api/v1/spectate/heartbeat'): (NOT, 'gameplay', ()),  # main.spectate_heartbeat
     ('POST', '/api/v1/spectate/leave'): (NOT, 'gameplay', ()),  # main.spectate_leave
     ('POST', '/api/v1/spectate/participant-attest'): (NOT, 'gameplay', ()),  # main.spectate_participant_attest
     ('POST', '/api/v1/spectate/validate'): (NOT, 'gameplay', ()),  # main.spectate_validate
     ('POST', '/api/v1/team-bets'): (NOT, 'gameplay', ()),  # main.place_team_bet
-    ('GET', '/api/v1/team/all-series-paged'): (NOT, 'read', ()),  # main.team_all_series_paged
-    ('GET', '/api/v1/team/leaderboard'): (NOT, 'read', ()),  # main.team_leaderboard
-    ('GET', '/api/v1/team/lobbies'): (NOT, 'read', ()),  # main.team_lobby_browser
+    ('GET', '/api/v1/team/all-series-paged'): (NOT, 'read_upkeep', ()),  # main.team_all_series_paged
+    ('GET', '/api/v1/team/leaderboard'): (NOT, 'read_upkeep', ()),  # main.team_leaderboard
+    ('GET', '/api/v1/team/lobbies'): (NOT, 'read_upkeep', ()),  # main.team_lobby_browser
     ('POST', '/api/v1/team/lobby/create'): (NOT, 'gameplay', ()),  # main.team_lobby_create
     ('POST', '/api/v1/team/lobby/join'): (NOT, 'gameplay', ()),  # main.team_lobby_join
     ('POST', '/api/v1/team/lobby/kick'): (NOT, 'gameplay', ()),  # main.team_lobby_kick
     ('POST', '/api/v1/team/lobby/leave'): (NOT, 'gameplay', ()),  # main.team_lobby_leave
     ('POST', '/api/v1/team/lobby/prefs'): (NOT, 'gameplay', ()),  # main.team_lobby_prefs
-    ('GET', '/api/v1/team/lobby/resolve'): (NOT, 'read', ()),  # main.team_lobby_resolve
+    ('GET', '/api/v1/team/lobby/resolve'): (NOT, 'read_upkeep', ()),  # main.team_lobby_resolve
     ('POST', '/api/v1/team/lobby/settings'): (NOT, 'gameplay', ()),  # main.team_lobby_settings
     ('POST', '/api/v1/team/lobby/start'): (NOT, 'gameplay', ()),  # main.team_lobby_start
-    ('GET', '/api/v1/team/lobby/state'): (NOT, 'read', ()),  # main.team_lobby_state
+    ('GET', '/api/v1/team/lobby/state'): (NOT, 'read_upkeep', ()),  # main.team_lobby_state
     ('POST', '/api/v1/team/matches'): (NOT, 'gameplay', ()),  # main.submit_team_match
     ('GET', '/api/v1/team/players/{steam_id}/team-matches'): (NOT, 'read', ()),  # main.get_player_team_matches
     ('GET', '/api/v1/team/players/{steam_id}/team-stats'): (NOT, 'read', ()),  # main.get_player_team_stats
@@ -430,7 +433,7 @@ CENSUS = {
     ('POST', '/api/v1/team/queue/leave'): (NOT, 'gameplay', ()),  # main.team_queue_leave
     ('GET', '/api/v1/team/queue/list'): (NOT, 'read', ()),  # main.team_queue_list
     ('POST', '/api/v1/team/queue/manual-pick-toggle'): (NOT, 'gameplay', ()),  # main.team_queue_manual_pick_toggle
-    ('GET', '/api/v1/team/queue/poll/{steam_id}'): (NOT, 'read', ()),  # main.team_queue_poll
+    ('GET', '/api/v1/team/queue/poll/{steam_id}'): (NOT, 'read_upkeep', ()),  # main.team_queue_poll
     ('POST', '/api/v1/team/queue/preferred-team'): (NOT, 'gameplay', ()),  # main.team_queue_preferred_team
     ('POST', '/api/v1/team/queue/ready'): (NOT, 'gameplay', ()),  # main.team_queue_ready
     ('GET', '/api/v1/team/queue/recent-joins'): (NOT, 'read', ()),  # main.team_queue_recent_joins
@@ -440,14 +443,14 @@ CENSUS = {
     ('POST', '/api/v1/team/series/{series_id}/live-points'): (NOT, 'gameplay', ()),  # main.update_team_live_points
     ('POST', '/api/v1/team/series/{series_id}/report-dc'): (NOT, 'gameplay', ()),  # main.team_series_report_dc
     ('POST', '/api/v1/team/series/{series_id}/spawn-confirm'): (NOT, 'gameplay', ()),  # main.team_series_spawn_confirm
-    ('GET', '/api/v1/team/series/{series_id}/state'): (NOT, 'read', ()),  # main.team_series_state
+    ('GET', '/api/v1/team/series/{series_id}/state'): (NOT, 'read_upkeep', ()),  # main.team_series_state
     ('GET', '/api/v1/team/series/{series_id}/status'): (NOT, 'read', ()),  # main.team_series_status_readonly
     ('GET', '/api/v1/tournaments/current'): (NOT, 'read', ()),  # tournaments.get_current
     ('GET', '/api/v1/tournaments/history'): (NOT, 'read', ()),  # tournaments.history
     ('GET', '/api/v1/tournaments/history-detail'): (NOT, 'read', ()),  # tournaments.history_detail
     ('GET', '/api/v1/tournaments/internal/watch'): (NOT, 'read', ()),  # tournaments.internal_watch
     ('GET', '/api/v1/tournaments/my-active-matches'): (NOT, 'read', ()),  # tournaments.my_active_matches
-    ('GET', '/api/v1/tournaments/players/{steam_id}/penalty'): (NOT, 'read', ()),  # tournaments.player_penalty
+    ('GET', '/api/v1/tournaments/players/{steam_id}/penalty'): (NOT, 'read_upkeep', ()),  # tournaments.player_penalty
     ('GET', '/api/v1/tournaments/players/{steam_id}/tournaments'): (NOT, 'read', ()),  # tournaments.player_tournaments
     ('GET', '/api/v1/tournaments/{tournament_id}/bracket-detail'): (NOT, 'read', ()),  # tournaments.bracket_detail
     ('POST', '/api/v1/tournaments/{tournament_id}/force-start-vote'): (NOT, 'gameplay', ()),  # tournaments.force_vote

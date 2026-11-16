@@ -164,6 +164,14 @@ def _scope(channel) -> str:
     return f"the {channel} channel"
 
 
+def _end_text(d, key) -> str:
+    """A ban end for the length-change sentence: its time, 'permanent' when
+    the record stores the key with no end, 'not recorded' when it lacks it."""
+    if key not in d:
+        return "not recorded"
+    return when_text(d.get(key)) or "permanent"
+
+
 def part_text(details) -> str:
     """For one record of an action recorded in parts (more players than one
     record names): 'Part 1 of 2 of one action on 17 players.'; else ''."""
@@ -204,10 +212,16 @@ def _sentence(word: str, details, ended=None) -> str:
             return f"Banned until {until}."
         if dur:
             return f"Banned for {dur}."
-        return "Banned permanently."
+        # Permanent only when the record says so (MODLOG-1 fix A8): a record
+        # that stores no length is read as not recorded, never as permanent.
+        if d.get("permanent") is True:
+            return "Banned permanently."
+        return "Banned (length not recorded)."
     if word == "ban_length":
-        old = when_text(d.get("old_expires_at")) or "permanent"
-        new = when_text(d.get("new_expires_at")) or "permanent"
+        if "old_expires_at" not in d and "new_expires_at" not in d:
+            return "Ban length changed (lengths not recorded)."
+        old = _end_text(d, "old_expires_at")
+        new = _end_text(d, "new_expires_at")
         return f"Ban length changed from {old} to {new}."
     if word == "ban_repeat":
         return "Banned again while already banned: sessions and queue places cleared again."
@@ -224,7 +238,9 @@ def _sentence(word: str, details, ended=None) -> str:
         mins = d.get("duration_minutes")
         dur = duration_text(mins)
         until = when_text(d.get("expires_at"))
-        span = (f"for {dur}" if dur else (f"until {until}" if until else "permanently"))
+        span = (f"for {dur}" if dur else (f"until {until}" if until else
+                                          "permanently" if d.get("permanent") is True
+                                          else "(length not recorded)"))
         if word == "chat_automute":
             off = _num(d.get("offense"))
             return (f"Muted automatically in all channels {span}"
@@ -246,9 +262,22 @@ def _sentence(word: str, details, ended=None) -> str:
         chan = d.get("channel")
         return f"Deleted a chat message in {_scope(chan)}." if chan else "Deleted a chat message."
     if word == "chat_purge_user":
-        return f"Removed {_plural(_num(d.get('purged')) or 0, 'message')} of a {d.get('platform') or 'platform'} user."
+        out = f"Removed {_plural(_num(d.get('purged')) or 0, 'message')} of a {d.get('platform') or 'platform'} user"
+        dur = duration_text(d.get("duration_minutes"))
+        if d.get("muted") is False:
+            return out + "; not muted."
+        if d.get("permanent") is True:
+            return out + "; muted permanently."
+        if dur:
+            return out + f"; muted for {dur}."
+        return out + "; mute length not recorded."
     if word == "chat_purge_channel":
         return f"Removed {_plural(_num(d.get('purged')) or 0, 'bridged message')}."
+    if word == "alert_create":
+        if "expires_minutes" not in d:
+            return "Alert posted."
+        dur = duration_text(d.get("expires_minutes"))
+        return f"Alert posted, expiring after {dur}." if dur else "Alert posted with no expiry."
     if word == "chat_lockdown":
         return "Locked chat." if d.get("locked") else "Unlocked chat."
     if word == "chat_spam_pattern":

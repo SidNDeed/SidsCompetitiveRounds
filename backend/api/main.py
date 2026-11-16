@@ -23637,7 +23637,8 @@ async def _chat_censor_strike(steam_id: str, display_name: str, channel: str,
                                 reason=f"auto: slur filter (offense {int(offenses) + 1})",
                                 details={"channel": channel, "matched_term": matched,
                                          "message": message[:200], "offense": int(offenses) + 1,
-                                         "duration_minutes": int(minutes), "source": source})
+                                         "duration_minutes": int(minutes), "permanent": False,
+                                         "source": source})
             # #scr-admin post via the durable outbox. The bot sends outbox
             # content with users-allowed mentions (#261) — neutralize mention
             # syntax; the quoted message goes angle-bracket-neutered too.
@@ -25606,6 +25607,7 @@ async def chat_moderate_unmute(req: _ChatModMuteReq, request: Request,
         await _modlog_write(
             db, actor=req.steam_id, action="chat_unmute",
             affected=[req.target_steam_id], target_steam_id=req.target_steam_id,
+            reason=req.reason,
             details={"channel": chan or ("ALL" if role == "admin" else sorted(langs)),
                      "cleared": len(cleared),
                      "moderator_steam_id": req.steam_id, "moderator_role": role})
@@ -26012,6 +26014,9 @@ async def chat_moderate_mute_by_message(req: _ChatModMuteMsgReq, request: Reques
         target_steam_id=row["steam_id"], reason=req.reason or None,
         details={"message_id": int(req.message_id), "channel": chan,
                  "muted": result.get("muted"), "duration_minutes": mins or None,
+                 # The game-side mute route's keys (MODLOG-1 fix A8); none
+                 # when no mute was applied.
+                 "permanent": (mins <= 0) if result.get("muted") else None,
                  "purged": result.get("purged"), "moderator_role": role,
                  **_modlog_unlinked(unlinked)})
     await db.commit()
@@ -26129,7 +26134,7 @@ async def chat_moderate_spam_pattern_add(req: _ChatSpamPatternReq,
         "                    WHERE pattern = :p AND revoked_at IS NULL)"
         " RETURNING id"
     ), {"p": norm, "n": (req.note or "")[:256] or None, "by": req.steam_id[:64]})).scalar()
-    await _modlog_write(db, actor=req.steam_id, action="chat_spam_pattern",
+    await _modlog_write(db, actor=req.steam_id, action="chat_spam_pattern", reason=req.note,
                             details={"op": "add", "raw": req.pattern[:128],
                                      "normalized": norm, "id": row_id})
     await db.commit()
@@ -26146,7 +26151,7 @@ async def chat_moderate_spam_pattern_revoke(req: _ChatSpamPatternReq,
         "UPDATE bridge_spam_patterns SET revoked_at = NOW()"
         " WHERE id = :i AND revoked_at IS NULL RETURNING pattern"
     ), {"i": int(req.pattern_id or 0)})).scalars().all()
-    await _modlog_write(db, actor=req.steam_id, action="chat_spam_pattern",
+    await _modlog_write(db, actor=req.steam_id, action="chat_spam_pattern", reason=req.note,
                             details={"op": "revoke", "id": req.pattern_id,
                                      "pattern": (cleared[0] if cleared else None)})
     await db.commit()
@@ -26281,7 +26286,10 @@ async def internal_chat_bridge_moderation(
                                 details={"platform": source, "platform_user_id": user_id,
                                          "login": login, "purged": len(purged),
                                          "truncated": truncated, "permanent": permanent,
-                                         "ban_duration_s": ban_duration_s})
+                                         "ban_duration_s": ban_duration_s,
+                                         # The relay mute applied above (fix A8).
+                                         "muted": bool(permanent or mins > 0),
+                                         "duration_minutes": mins or None})
         await db.commit()
         await _broadcast_deletes(purged)
         print(f"[CHAT-MOD] {source} purge_user {login or user_id}: {len(purged)} rows"
@@ -26422,6 +26430,8 @@ async def internal_chat_discord_mute(
                             details={"message_id": int(row["id"]), "actor": actor,
                                      "actor_name": str(payload.get("actor_name", ""))[:64],
                                      "muted": result.get("muted"),
+                                     "duration_minutes": mins or None,
+                                     "permanent": (mins <= 0) if result.get("muted") else None,
                                      "purged": result.get("purged"),
                                      "via": "discord context menu",
                                      **_modlog_unlinked(unlinked)})
@@ -49831,7 +49841,7 @@ async def admin_list_bans(
 
 
 async def _ban_rate_gate_or_raise(db: AsyncSession, admin_steam_id: str, target_steam_id: str, *,
-                                  target_w: str | None = None) -> None:
+                                  target_w: str | None = None, reason: str | None = None) -> None:
     """The ban-velocity gate, extracted verbatim from admin_ban (Sept 6 item
     b, B-2) so the moderation-case act path runs the SAME gate. On refusal it
     commits its own audit/alert rows and raises 429 — the caller's transaction
@@ -49840,7 +49850,9 @@ async def _ban_rate_gate_or_raise(db: AsyncSession, admin_steam_id: str, target_
     -- the tombstone when the target's deletion committed first -- written to
     the refusal's audit row and alert; the RAW target id stays the key of the
     ban lookup (the ban row was written with it). The admin is live (the
-    callers refuse a deleted actor), so its raw id is its written id."""
+    callers refuse a deleted actor), so its raw id is its written id.
+    `reason` (MODLOG-1 fix A5): the refused ban's reason, written to the
+    refusal's record."""
     # Aug 7 item 7: ban-velocity gate — 5+ COMMITTED bans by one admin inside
     # 5 minutes blocks further bans (429) and alerts #scr-admin. Counting
     # player_bans rows (not admin_actions) means already_banned no-ops never
@@ -49870,7 +49882,7 @@ async def _ban_rate_gate_or_raise(db: AsyncSession, admin_steam_id: str, target_
         # The refusal is recorded, naming no player (no action was taken on
         # one), and committed with the alert before the 429.
         await _modlog_write(db, actor=admin_steam_id, action="ban_rate_blocked",
-                            target_steam_id=target_w,
+                            target_steam_id=target_w, reason=reason,
                             details={"recent_bans": int(recent_bans), "window": "5m"})
         # Alert once per burst: only on the FIRST blocked attempt (count==5
         # exactly would miss retries; instead check whether we already posted
@@ -50143,7 +50155,8 @@ async def _apply_ban_core(db: AsyncSession, *, admin_steam_id: str, target_steam
                                      {"ban_minutes": int(duration_minutes)})).scalar()
     db.add(PlayerBan(steam_id=target_steam_id, reason=_ban_reason, banned_by_steam_id=admin_steam_id,
                      expires_at=_ban_end))
-    _details = {**(record_details or {}), "reason": _ban_reason}
+    # `permanent` (MODLOG-1 fix A8): the ban row written has no end.
+    _details = {**(record_details or {}), "reason": _ban_reason, "permanent": _ban_end is None}
     if length_sent:
         _details["duration_minutes"] = duration_minutes
         _details["expires_at"] = _ban_end_iso(_ban_end)
@@ -50218,7 +50231,8 @@ async def admin_ban(req: _AdminBanReq, _slot=Depends(_pc_writer_slot), db: Async
     # returned.
     _mail_actor_live_or_raise(rows, req.admin_steam_id)
     target_w = _mail_identity_to_write(rows, req.target_steam_id)
-    await _ban_rate_gate_or_raise(db, req.admin_steam_id, req.target_steam_id, target_w=target_w)
+    await _ban_rate_gate_or_raise(db, req.admin_steam_id, req.target_steam_id, target_w=target_w,
+                                  reason=req.reason)
     result = await _apply_ban_core(db, admin_steam_id=req.admin_steam_id,
                                    target_steam_id=req.target_steam_id, reason=req.reason,
                                    duration_minutes=req.duration_minutes,
@@ -50773,7 +50787,8 @@ async def admin_alert_create(req: _AdminAlertCreateReq, db: AsyncSession = Depen
         "cat": req.category, "msg": msg, "m": exp_min,
     })).scalar()
     await _modlog_write(db, actor=req.admin_steam_id, action="alert_create",
-                            details={"alert_id": int(row), "category": req.category, "message": msg[:200]})
+                            details={"alert_id": int(row), "category": req.category, "message": msg[:200],
+                                     "expires_minutes": exp_min or None})
     # Discord echo to #scr-admin via the durable outbox (the bot's 30s
     # poll_channel_posts loop delivers + acks; zero new bot code). The bot
     # sends outbox content with users-allowed mentions, so neutralize mention
@@ -81788,7 +81803,8 @@ async def _moderation_case_act(db: AsyncSession, *, case_id: str, actor_steam_id
                      "kind": case["kind"], "actor_name": (actor_name or "")[:64]})
         resolution, new_status = f"mute:{h}h", "resolved"
     elif action == "ban":
-        await _ban_rate_gate_or_raise(db, actor_steam_id, subject_sid_pre, target_w=subject_sid)
+        await _ban_rate_gate_or_raise(db, actor_steam_id, subject_sid_pre, target_w=subject_sid,
+                                      reason=reason_txt)
         # The ban core's own record ("ban", or "ban_repeat" for a subject
         # already banned) carries the case: one record per action (MODLOG-1).
         res = await _apply_ban_core(db, admin_steam_id=actor_w,

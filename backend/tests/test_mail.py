@@ -3262,7 +3262,7 @@ def test_every_ban_path_takes_the_identity_locks_before_the_ban_rate_lock():
     assert src.index("_mail_lock_identities(") < src.index("_mail_actor_live_or_raise(rows, req.admin_steam_id)") < src.index("_ban_rate_gate_or_raise(")
     assert "target_w=target_w" in src
     assert act.index("_mail_lock_identities(") < act.index("_mail_actor_live_or_raise(rows, actor_steam_id)") < act.index("_ban_rate_gate_or_raise(")
-    assert "_ban_rate_gate_or_raise(db, actor_steam_id, subject_sid_pre, target_w=subject_sid)" in act
+    assert "_ban_rate_gate_or_raise(db, actor_steam_id, subject_sid_pre, target_w=subject_sid," in act
     assert unban.index("_mail_lock_identities(") < unban.index("_mail_actor_live_or_raise(rows, req.admin_steam_id)") < unban.index("UPDATE player_bans")
 
 
