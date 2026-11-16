@@ -952,7 +952,7 @@
           ],
           "main",
           "delete_player_data",
-          "011c231e282052e9f3744015b3eddd72459d2f62"
+          "bc733f58a3619862806f976b9d7be3636710cb6f"
         ],
         [
           "/api/v1/players/{steam_id}/ffa-history",
@@ -3062,7 +3062,7 @@
           ],
           "main",
           "mail_send",
-          "6aa0e15b2cdbcbbd0f0e57e143c198a463d52b71"
+          "204dfa342e48e6b7c259091284c48e8b61930faf"
         ],
         [
           "/api/v1/mail/blocks",
@@ -3170,7 +3170,7 @@
           ],
           "main",
           "mail_reply",
-          "41d68b3ed52c629517371957e7ac9f510215ac7c"
+          "8d4e488adf3fe5cd339ea1e136b312964bf7df3b"
         ],
         [
           "/api/v1/mail/{message_id}/report",
