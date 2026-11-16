@@ -60,6 +60,43 @@ def pytest_sessionfinish(session, exitstatus):
         reporter = session.config.pluginmanager.get_plugin("terminalreporter")
         if reporter is not None:
             reporter.write_line("review tripwire: non-clean verdict (%d trips)" % len(trips))
+            for line in _tripwire_rows(trips):
+                reporter.write_line(line)
+
+
+_TRIP_ROWS_MAX = 40
+_TRIP_ROW_CHARS = 300
+CHECKOUT_ROOT = BACKEND_ROOT.parent
+
+
+def _trip_path(filename, root=None):
+    """A trip's file relative to the checkout; a file outside it (or a
+    pseudo-file such as <review-witness:...>) by its last component only,
+    so no local path leaves the run."""
+    # String operations only: no filesystem query runs inside the verdict.
+    text = str(filename)
+    base = os.path.normpath(str(CHECKOUT_ROOT if root is None else root))
+    path = os.path.normpath(text)
+    if (os.path.isabs(text)
+            and os.path.normcase(path).startswith(os.path.normcase(base) + os.sep)):
+        return path[len(base) + 1:].replace("\\", "/")
+    return "<outside>/" + text.replace("\\", "/").rsplit("/", 1)[-1]
+
+
+def _tripwire_rows(trips, root=None):
+    """One printable line per trip row: kind, guarded name and the code
+    location only (review_tripwire records no arguments, results or file
+    contents). At most _TRIP_ROWS_MAX rows, each cut to _TRIP_ROW_CHARS."""
+    lines = []
+    for i, row in enumerate(trips[:_TRIP_ROWS_MAX], 1):
+        caller = row.get("caller") or {}
+        line = "review tripwire: trip %d: %s %s at %s:%s in %s" % (
+            i, row.get("kind"), row.get("name"), _trip_path(caller.get("file", "?"), root),
+            caller.get("line", "?"), caller.get("function", "?"))
+        lines.append(line[:_TRIP_ROW_CHARS])
+    if len(trips) > _TRIP_ROWS_MAX:
+        lines.append("review tripwire: %d more trip rows not shown" % (len(trips) - _TRIP_ROWS_MAX))
+    return lines
 
 
 @pytest.hookimpl(trylast=True)
