@@ -83,6 +83,11 @@ AER_CONTRACT_BOUNDS = {
     # Routes (design 4.6): reports per actor per window, in process.
     "RATE_MAX": 20,
     "RATE_WINDOW_S": 600,
+    # The rate map's ceiling: callers with a non-empty window held at once
+    # (_rate_charge). Callers are past the key and actor gates, so in
+    # practice this is the moderator count; at the ceiling a NEW caller is
+    # refused 429 until some caller's window empties.
+    "RATE_KEYS_MAX": 1024,
     "ACTOR_ID_MAX_DIGITS": 32,
     # Evidence sections (phase 2, B10): the per-statement row limits of the
     # card, combat and identity-clock reads, the contribution rows shown per
@@ -1634,17 +1639,39 @@ _REBUILDING = [False]
 _POLL_S = 0.01
 
 
+def _retry_after(seconds, window):
+    """A Retry-After value in whole seconds, bounded to 1..window."""
+    return str(max(1, min(int(window), int(math.ceil(seconds)))))
+
+
 def _rate_charge(actor, now=None):
     """At most RATE_MAX reports per actor per RATE_WINDOW_S, after the gate;
-    over it, `429 rate` with `Retry-After`."""
+    over it, `429 rate` with `Retry-After`.
+
+    The map is bounded: every charge drops each caller's stamps that left
+    the window and removes a caller whose window is empty, and the map holds
+    at most RATE_KEYS_MAX callers. At the ceiling a caller NOT in the map is
+    refused `429 rate`, its Retry-After the earliest time at which some
+    caller's window is empty (that caller's newest stamp plus the window),
+    when a slot is free. The refusal expires by itself within RATE_WINDOW_S;
+    no caller already in the map loses its stamps, so the per-caller bound
+    never weakens."""
     now = time.monotonic() if now is None else now
     window = AER_CONTRACT_BOUNDS["RATE_WINDOW_S"]
-    q = _RATE.setdefault(actor, collections.deque())
-    while q and now - q[0] >= window:
-        q.popleft()
+    for key in list(_RATE):
+        kq = _RATE[key]
+        while kq and now - kq[0] >= window:
+            kq.popleft()
+        if not kq:
+            del _RATE[key]
+    q = _RATE.get(actor)
+    if q is None:
+        if len(_RATE) >= AER_CONTRACT_BOUNDS["RATE_KEYS_MAX"]:
+            free_at = min(kq[-1] for kq in _RATE.values()) + window
+            _aer_fail(429, "rate", headers={"Retry-After": _retry_after(free_at - now, window)})
+        q = _RATE[actor] = collections.deque()
     if len(q) >= AER_CONTRACT_BOUNDS["RATE_MAX"]:
-        retry = max(1, int(math.ceil(window - (now - q[0]))))
-        _aer_fail(429, "rate", headers={"Retry-After": str(retry)})
+        _aer_fail(429, "rate", headers={"Retry-After": _retry_after(window - (now - q[0]), window)})
     q.append(now)
 
 
