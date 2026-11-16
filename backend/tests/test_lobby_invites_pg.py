@@ -307,11 +307,14 @@ _LINE = re.compile(r"[^\r\n]*(?:\r\n|\r|\n)|[^\r\n]+\Z")
 
 def _segments(src):
     """A function giving ast.get_source_segment(src, node) for any node of
-    `src`, with the source split into lines ONCE. The stdlib splits the whole
-    source again on every call: about 30,700 calls on main.py made one
-    _lock_order take about an hour. The slicing is the stdlib's: columns are
-    UTF-8 byte offsets, a segment over several lines joins the first line's
-    tail, the whole lines between and the last line's head."""
+    `src`, with the source split into lines ONCE. The stdlib splits the
+    source again on every call, from its first line down to the node's last
+    (3.12: _splitlines_no_ff(source, maxlines=end_lineno+1)), so one call per
+    node costs time quadratic in the file's length: about 30,700 calls on
+    main.py made one _lock_order take about an hour. The slicing is the
+    stdlib's: columns are UTF-8 byte offsets, a segment over several lines
+    joins the first line's tail, the whole lines between and the last
+    line's head."""
     lines = _LINE.findall(src)
 
     def segment(node):
