@@ -1301,9 +1301,12 @@ class HealthResponse(BaseModel):
     # before it.
     ban_expiry_build: int
     # mail_spam_case_lock_build: release-train verification plumbing, not a
-    # design mechanism (main._MAIL_SPAM_CASE_LOCK_BUILD; 1 = in this build a
-    # mail send locks its sender's mail_spam case row for the day before its
-    # message row and its fan-out). It names build identity only. A code
+    # design mechanism (main._MAIL_SPAM_CASE_LOCK_BUILD; 2 = in this build
+    # delete_player_data writes moderation_cases only in its last statement,
+    # which skips a row another transaction holds, and the janitor finishes a
+    # skipped row; a mail send keeps its order; the open item MDPL, the
+    # deletion against the retention purge on mail rows that are not case
+    # rows, is not in it). It names build identity only. A code
     # constant, equal on both roles by construction, so the train can read it
     # through the edge; the lane adds no route and no key to any answer, and
     # this is the key that tells a stale box from a refreshed one (learnings

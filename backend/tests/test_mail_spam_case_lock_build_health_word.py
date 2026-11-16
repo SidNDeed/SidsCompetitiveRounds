@@ -1,10 +1,11 @@
 """The mail spam case lock lane's build discriminator: /health carries
 `mail_spam_case_lock_build`, the module constant
-main._MAIL_SPAM_CASE_LOCK_BUILD (1), on both health_check arms, required by
-the schema. It names build identity only. The lane changes the order in
-which a mail send takes its locks and adds no route and no key to any
-answer, so the release train can tell a refreshed box from a stale one only
-by this key (learnings 780, 794). A constant equal on both roles, so the
+main._MAIL_SPAM_CASE_LOCK_BUILD (2, the lane's route B), on both
+health_check arms, required by the schema. It names build identity only. The
+lane changes when account deletion writes moderation_cases and adds a janitor
+pass, and adds no route and no key to any answer, so the release train can
+tell a refreshed box from a stale one only by this key (learnings 780,
+794). A constant equal on both roles, so the
 train can read it through the edge. The form is the ban_expiry_build test's
 (test_ban_expiry_build_health_word.py)."""
 import ast
@@ -37,8 +38,8 @@ def _main_tree():
 
 def test_both_arms_carry_the_build_marker():
     """Both arms pass the constant and nothing else in main.py passes the
-    key; the constant is bound once, to 1 (the train fails at once on a
-    falsy word)."""
+    key; the constant is bound once, to 2 (the train fails at once on a
+    falsy word, and value 1 named a build that was never deployed)."""
     tree = _main_tree()
     (health,) = [n for n in ast.walk(tree)
                  if isinstance(n, ast.AsyncFunctionDef) and n.name == "health_check"]
@@ -55,17 +56,17 @@ def test_both_arms_carry_the_build_marker():
               and n.id == CONST and isinstance(n.ctx, ast.Store)]
     (binding,) = [n for n in tree.body if isinstance(n, ast.Assign)
                   and [ast.unparse(t) for t in n.targets] == [CONST]]
-    assert len(stores) == 1 and ast.unparse(binding.value) == "1", ast.unparse(binding)
+    assert len(stores) == 1 and ast.unparse(binding.value) == "2", ast.unparse(binding)
 
 
 def test_the_schema_requires_the_word_and_the_answer_carries_it():
     """HealthResponse declares it an int with no default, so an arm that left
     it out would raise rather than drop the key; the degraded answer, built
-    for real, reads 1."""
+    for real, reads 2."""
     field = schemas.HealthResponse.model_fields.get(KEY)
     assert field is not None and field.annotation is int and field.is_required(), field
     answer = asyncio.run(main.health_check(db=_DownSession())).model_dump()
-    assert answer["status"] == "degraded" and answer[KEY] == 1, answer
+    assert answer["status"] == "degraded" and answer[KEY] == 2, answer
     answer.pop(KEY)
     with pytest.raises(pydantic.ValidationError):
         schemas.HealthResponse(**answer)

@@ -156,9 +156,6 @@ def _base_sql():
         " relay_code TEXT, undeliverable BOOLEAN NOT NULL DEFAULT false);",
         _from_file("297_mail.sql", r"CREATE TABLE IF NOT EXISTS mail_messages \(.*?\n\);"),
         _from_file("297_mail.sql", r"CREATE TABLE IF NOT EXISTS mail_recipients \(.*?\n\);"),
-        # every send locks its sender's spam case row for the day before its
-        # message row (main._MAIL_SPAM_CASE_LOCK_SQL), so the table must stand
-        _from_file("297_mail.sql", r"CREATE TABLE IF NOT EXISTS moderation_cases \(.*?\n\);"),
         _from_file("300_mail_inbox_rev.sql", re.escape(
             "ALTER TABLE mail_messages ADD COLUMN IF NOT EXISTS recipient_count INTEGER NULL;")),
         "ALTER TABLE mail_messages " + _from_file("330_mail_discord_relay.sql", re.escape(

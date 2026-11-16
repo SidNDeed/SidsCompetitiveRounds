@@ -856,11 +856,6 @@ class FakeDb:
                 out.append((1,))
             return _Res(out)
         # moderation cases
-        if "SELECT 1 FROM moderation_cases WHERE kind = 'mail_spam' AND bucket_key = :bucket" in sql:
-            # a send's lock on its sender's spam case row for the day (main._MAIL_SPAM_CASE_LOCK_SQL)
-            hit = [c for c in self.cases.values()
-                   if (c["kind"], c["bucket_key"]) == ("mail_spam", params["bucket"])]
-            return _Res([(1,)] if hit else [])
         if "INSERT INTO moderation_cases" in sql:
             key = (params["kind"], params["bucket"])
             existing = [c for c in self.cases.values() if (c["kind"], c["bucket_key"]) == key]
@@ -1457,46 +1452,6 @@ def test_advisory_lock_is_taken_first_and_pinned_in_the_send_span():
             < src.index("_mail_prior_send(") < src.index("_mail_sender_gates(")
     assert "pg_advisory_xact_lock(hashtext('mail:' || CAST(CAST(:sid AS uuid) AS text)))" in inspect.getsource(main._mail_lock_sender)
     assert res["accepted"] is True
-
-
-def test_a_send_locks_its_spam_case_row_before_its_message_row_and_writes_the_row_it_locked(monkeypatch):
-    """A send locks its sender's mail_spam case row for the day
-    (main._MAIL_SPAM_CASE_LOCK_SQL) once: after its rate window, before its
-    message row and its fan-out. The case it then writes is the row it
-    locked, because the send reads the day once: here the clock passes
-    midnight as the lock goes through, and the case is still the locked
-    day's. Control: the clock did move, so a case write that read the day
-    again would have written the next day's row. The live two-session proof
-    of the order is test_mail_spam_case_lock_pg.py."""
-    db, ids = _world()
-    late = datetime(2026, 9, 6, 23, 59, 59, tzinfo=timezone.utc)
-    db.add_session("tokLate", A_SID, expires_at=late + timedelta(hours=1))
-    monkeypatch.setattr(main, "MAIL_SPAM_SAME_BODY", 1)          # this one send crosses the threshold
-    clock = [late]
-    monkeypatch.setattr(main, "_utc_now", lambda: clock[0])
-    locked = []
-    real = db._dispatch
-
-    def dispatch(sql, params, outer=None):
-        if main._MAIL_SPAM_CASE_LOCK_SQL in sql:
-            locked.append(params["bucket"])
-            clock[0] = late + timedelta(seconds=2)                 # midnight passes after the lock
-        return real(sql, params, outer)
-    db._dispatch = dispatch
-    out = _send(db, [B_SID], token="tokLate")
-    sql = db.statements
-    lock_i = [i for i, s in enumerate(sql) if main._MAIL_SPAM_CASE_LOCK_SQL in s]
-    ins_i = next(i for i, s in enumerate(sql) if "INSERT INTO mail_messages" in s)
-    fan_i = next(i for i, s in enumerate(sql) if main._MAIL_FANOUT_SQL in s)
-    case_i = next(i for i, s in enumerate(sql) if "INSERT INTO moderation_cases" in s)
-    assert len(lock_i) == 1 and lock_i[0] < ins_i < fan_i < case_i, (lock_i, ins_i, fan_i, case_i)
-    assert locked == [f"{ids[A_SID]}:2026-09-06"]
-    [case] = [c for c in db.cases.values() if c["kind"] == "mail_spam"]
-    assert case["bucket_key"] == locked[0] and str(case["message_id"]) == out["id"]
-    assert main._mail_spam_day() == "2026-09-07"                   # control: the clock did pass midnight
-    finish = inspect.getsource(main._mail_finish_send)
-    assert finish.index("_mail_rate_or_raise(") < finish.index("_MAIL_SPAM_CASE_LOCK_SQL") \
-        < finish.index("_mail_write_message(")
 
 
 # ── limits ────────────────────────────────────────────────────────────────
@@ -2273,11 +2228,13 @@ def test_delete_account_handles_every_new_table_by_name():
     src = inspect.getsource(main.delete_player_data)
     for stmt, n in (("DELETE FROM mail_recipients WHERE recipient_id = :pid", 2),   # the early sweep and the post-rewrite sweep (H3)
                     ("DELETE FROM mail_blocks WHERE blocker_id = :pid OR blocked_id = :pid", 1),
-                    ("UPDATE moderation_cases SET reporter_id = NULL WHERE reporter_id = :pid", 1),
+                    # moderation_cases: reporter_id and M11's resolved_by, both in the one last
+                    # statement, which skips a held row (mail spam case lock lane, route B;
+                    # waits on mail rows that are not case rows are the open item MDPL)
+                    ("text(_DELETE_CASE_SCRUB_SQL)", 1),
                     ("DELETE FROM mail_bulk_grants WHERE steam_id = :sid", 1),
                     ("DELETE FROM mail_censor_hits WHERE sender_id = :pid", 1),
                     ("DELETE FROM mail_send_receipts WHERE sender_id = :pid", 1),                          # migration 415
-                    ("UPDATE moderation_cases SET resolved_by = :tomb WHERE resolved_by = :sid", 1),     # M11
                     ("UPDATE mail_bulk_grants SET granted_by = :tomb WHERE granted_by = :sid", 1),       # M11
                     ("DELETE FROM mail_inbox_rev WHERE recipient_id = :pid", 1),                          # migration 300
                     # item 5 / migration 330: a relay DM row is a COPY of the
@@ -2323,6 +2280,12 @@ def test_delete_account_handles_every_new_table_by_name():
     assert "FOR KEY SHARE OF p" in main._MAIL_FANOUT_SQL and "FOR KEY SHARE OF p" in main._MAIL_BROADCAST_FANOUT_SQL
     # sent messages and the moderation evidence are retained (the recipients' and the moderators' property)
     assert "DELETE FROM mail_messages" not in src and "DELETE FROM moderation_cases" not in src
+    # The case statement writes both identity columns, and no other statement of the handler names the
+    # table (the live proofs, the ordering pin and the reachable-SQL census are in
+    # test_mail_case_scrub_pg.py).
+    assert "reporter_id = CASE WHEN reporter_id = CAST(:pid AS uuid) THEN NULL" in main._DELETE_CASE_SCRUB_SQL
+    assert "THEN CAST(:tomb AS varchar) ELSE resolved_by END" in main._DELETE_CASE_SCRUB_SQL
+    assert "FOR NO KEY UPDATE SKIP LOCKED" in main._DELETE_CASE_SCRUB_SQL
     ban = inspect.getsource(main._apply_ban_core)
     assert "mail_" not in ban                                        # a ban leaves mail alone
 
@@ -3501,7 +3464,7 @@ def test_a_mail_send_writes_one_receipt_and_one_spam_check_and_an_invite_neither
     assert sum("INSERT INTO mail_send_receipts" in s for s in sent) == 1
     # control: the count sees a second spam evaluation when there is one
     _run(main._mail_spam_check(db, db.players[ids[A_SID]], uuid.UUID(out["id"]), "Hi there",
-                               "A perfectly ordinary body.", day=main._mail_spam_day()))
+                               "A perfectly ordinary body."))
     assert sum("AS same_body" in s for s in db.statements[before:]) == 2
 
     subject, body = main._invite_mail_text("team", "invite")
