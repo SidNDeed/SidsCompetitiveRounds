@@ -39,6 +39,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from database import get_db
 from read_gate import ReadGateRoute
+from log_lines import print_info_lines
 
 # ── Bounds and display defaults ────────────────────────────────────────────
 #
@@ -1051,7 +1052,11 @@ class PopulationUnavailable(Exception):
         self.reason = reason
 
 
-_aer_log = logging.getLogger("admin_evidence")
+# Its info lines (the population rebuilt, the warm-up ready or skipped, a
+# refusal's class) reach the container log through print(), as the api's own
+# lines do: without a handler of its own this logger's info records were
+# dropped (log_lines.py says why, and why the fix is per module).
+_aer_log = print_info_lines(logging.getLogger("admin_evidence"))
 
 
 async def rebuild_game_population(conn, key, pop_days, lag_s, ranked_only=False,
