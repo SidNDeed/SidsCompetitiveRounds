@@ -70,7 +70,9 @@
 --     quote_all_identifiers = off (on, every column name prints quoted).
 --   * the parse: the search path. The DO names the table first, in the
 --     session's current schema, with every function it calls before the pin
---     qualified by pg_catalog; then pins the path for the rest of the
+--     and every type it declares qualified by pg_catalog (the declarations
+--     are resolved when the block is compiled, before its first statement);
+--     then pins the path for the rest of the
 --     transaction to pg_catalog first, that schema second and the temporary
 --     schema last, and refuses unless the bare name player_bans still names
 --     that table. So the CHECK's <= and + are pg_catalog's, whatever operator
@@ -117,15 +119,15 @@ SET LOCAL quote_all_identifiers = off;
 
 DO $m418$
 DECLARE
-  sch name := pg_catalog.current_schema();
-  tbl regclass := pg_catalog.to_regclass(pg_catalog.format('%I.player_bans', sch));
-  present boolean;
-  ty_end oid;
-  ty_start oid;
-  def text;
-  n_null bigint;
-  n_long bigint;
-  want constant text :=
+  sch pg_catalog.name := pg_catalog.current_schema();
+  tbl pg_catalog.regclass := pg_catalog.to_regclass(pg_catalog.format('%I.player_bans', sch));
+  present pg_catalog.bool;
+  ty_end pg_catalog.oid;
+  ty_start pg_catalog.oid;
+  def pg_catalog.text;
+  n_null pg_catalog.int8;
+  n_long pg_catalog.int8;
+  want constant pg_catalog.text :=
     'CHECK (((expires_at IS NOT NULL) AND (banned_at IS NOT NULL) AND (expires_at <= (banned_at + ''8760:00:00''::interval))))';
 BEGIN
   IF tbl IS NULL THEN

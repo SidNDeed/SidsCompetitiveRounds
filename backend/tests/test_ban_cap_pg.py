@@ -1281,6 +1281,11 @@ SESSION_SETTINGS = (
      "puts it first"),
     ("search_path-case_pg_catalog-eq_name_name-false", (("search_path", "{case},pg_catalog"),),
      "eq_name_name_false", "applies", "as above, answering false"),
+    ("search_path-case_pg_catalog-type_regclass", (("search_path", "{case},pg_catalog"),),
+     "type_regclass", "applies",
+     "a composite type named regclass in the table's schema, ahead of pg_catalog on the session's "
+     "path: a DO block's declared types are resolved when it is compiled, before its pin; the "
+     "files declare pg_catalog's types"),
 )
 
 
@@ -1308,6 +1313,9 @@ PLANTS = {
 for _l, _r in (("oid", "regclass"), ("oid", "regtype"), ("regclass", "regclass"), ("name", "name")):
     for _a in ("true", "false"):
         PLANTS["eq_%s_%s_%s" % (_l, _r, _a)] = _eq_plant(_l, _r, _a)
+# a type of the name one DO block declares a variable with (tbl)
+PLANTS["type_regclass"] = (("CREATE TYPE {s}.regclass AS (x int4)",),
+                           ("DROP TYPE IF EXISTS {s}.regclass",))
 PLANT_AFTER_CLEANUP = {"le_true"}
 BEGIN_LINE = "BEGIN ISOLATION LEVEL READ COMMITTED;\n"
 QAI_LINE = "SET LOCAL quote_all_identifiers = off;\n"
@@ -1760,6 +1768,39 @@ def test_rollback_with_a_false_name_equality_ahead_of_pg_catalog_drops_the_check
     rc, err = out["rollback"]
     assert rc == 0 and out["def_after"] is None, (rc, err, out["def_after"])
     assert out["null_end"] == "admitted", out["null_end"]
+
+
+TBL_DECL = "  tbl pg_catalog.regclass :="
+TBL_DECL_BARE = "  tbl regclass :="
+
+
+def test_mutant_418_declaring_tbl_as_a_bare_regclass_is_refused_under_a_type_of_that_name(case):
+    """Mutant: 418 with `tbl` declared `regclass` again, under the path
+    <case>, pg_catalog with a composite type regclass in the case schema.
+    The block is compiled before its pin, so tbl takes that type: the file
+    refuses, nothing applied. The same plant against the real file is an
+    entry of SESSION_SETTINGS, where the file applies."""
+    path = _copy_with(M418, ((TBL_DECL, TBL_DECL_BARE, 1),))
+    try:
+        out = _run(_apply_under(case, path, OPERATOR_PATH, "type_regclass"))
+    finally:
+        os.unlink(path)
+    rc, err = out["first"]
+    assert rc != 0, (rc, err)
+    assert out["def"] is None and out["after_first"] == out["before"], out
+    assert out["cleanup"][0] == 0 and out["restore"][0] == 0, out
+
+
+def test_mutant_rollback_declaring_tbl_as_a_bare_regclass_is_refused_under_a_type_of_that_name(case):
+    """Mutant: the rollback with `tbl` declared `regclass` again, under the
+    same path and type: it refuses (rc not 0) and the CHECK stands."""
+    path = _copy_with(R418, ((TBL_DECL, TBL_DECL_BARE, 1),))
+    try:
+        out = _run(_rollback_under(case, path, OPERATOR_PATH, "type_regclass"))
+    finally:
+        os.unlink(path)
+    assert out["rollback"][0] != 0, out["rollback"]
+    assert out["def_after"] == WANT_DEF, out["def_after"]
 
 
 def test_mutant_rollback_without_its_pin_is_refused_by_its_post_check(case):

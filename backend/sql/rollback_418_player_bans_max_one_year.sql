@@ -37,7 +37,9 @@
 --     applied; with it absent the file changes nothing and ends rc 0.
 --   * search_path and the operators it reaches: pinned as in 418. The DO
 --     names the table in the session's current schema with every function
---     it calls before the pin qualified by pg_catalog, then pins the path to
+--     it calls before the pin and every type it declares qualified by
+--     pg_catalog (the declarations are resolved when the block is compiled,
+--     before its first statement), then pins the path to
 --     pg_catalog first, that schema second and the temporary schema last,
 --     and refuses unless the bare name player_bans still names that table.
 --     The guard's comparisons are oid = oid and name = name, which
@@ -57,8 +59,8 @@ SET LOCAL synchronous_commit = local;
 
 DO $r418$
 DECLARE
-  sch name := pg_catalog.current_schema();
-  tbl regclass := pg_catalog.to_regclass(pg_catalog.format('%I.player_bans', sch));
+  sch pg_catalog.name := pg_catalog.current_schema();
+  tbl pg_catalog.regclass := pg_catalog.to_regclass(pg_catalog.format('%I.player_bans', sch));
 BEGIN
   IF tbl IS NULL THEN
     RAISE EXCEPTION 'rollback 418: table player_bans is missing';
