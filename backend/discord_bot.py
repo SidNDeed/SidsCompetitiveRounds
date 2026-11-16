@@ -17407,10 +17407,14 @@ AER_PREFIX = "Evidence report: "
 # test (test_discord_evidence_bot.py WORDS).
 _AER_AGAIN = "Try again in a minute; if it repeats, report it."
 AER_TEXTS = {
-    "api_unreachable": "the bot could not reach the server. " + _AER_AGAIN,
+    "api_unreachable": ("the server could not answer just now (no connection, or no answer "
+                        "in time). " + _AER_AGAIN),
     "bad_argument": "the server did not accept the request%s. Correct it and try again.",
-    "not_found": ("no game, series or player matches that. Check the code or id; the "
-                  "same request will not find it."),
+    # Every 404 of the four routes is `not_found`, for an unknown code or id
+    # and for a cohort of zero games alike, so one sentence names both.
+    "not_found": ("nothing to report: no game, series or player matches that, or there "
+                  "are no games the report can use. Check the code or id; asking again at "
+                  "once will not change it."),
     "primary_only": ("the request reached the standby server, which does not run "
                      "reports. " + _AER_AGAIN),
     "population": "the server could not prepare its comparison data. " + _AER_AGAIN,
@@ -17421,8 +17425,9 @@ AER_TEXTS = {
                   "game; the same request will fail again."),
     "schema": ("the server's answer was not in a form this bot reads, so nothing was "
                "posted. Trying again will not help; report it."),
+    "server_error": "the server could not answer just now. " + _AER_AGAIN,
 }
-_AER_UNAVAILABLE = "the server could not answer just now. " + _AER_AGAIN
+_AER_UNAVAILABLE = AER_TEXTS["server_error"]
 
 
 def _aer_text(word, sentence):
@@ -17852,12 +17857,21 @@ def _aer_word(status, body, headers=None):
     if status == 409:
         return _aer_text("primary_only", AER_TEXTS["primary_only"])
     if status == 429:
-        retry = str({k.lower(): v for k, v in (headers or {}).items()}.get("retry-after", ""))
-        if retry.isdigit():
+        retry = ""
+        for k, v in (headers.items() if isinstance(headers, dict) else ()):
+            if isinstance(k, str) and k.lower() == "retry-after" and isinstance(v, str):
+                retry = v
+        # Only 1 to 5 ASCII digits are read, and held within 1 to 3600 s;
+        # any other value answers without a number.
+        if re.fullmatch(r"[0-9]{1,5}", retry):
+            n = int(retry)
+            n = 1 if n < 1 else (3600 if n > 3600 else n)
             # The format stays a literal: the privacy pass labels the number as
             # formatted text only in a format it can read (not a table entry).
             return _aer_text("rate", "too many reports in a short time. Try again in %d s."
-                             % int(retry))
+                             % n)
+        return _aer_text("rate", "too many reports in a short time. Wait a little and "
+                                 "try again.")
     if status == 503:
         m = re.fullmatch(r"(?:unavailable \(([a-z_]{1,40})\)|([a-z_]{1,40}))", detail)
         if m:
@@ -17869,6 +17883,10 @@ def _aer_word(status, body, headers=None):
             return _aer_text(_aer_enc_text(word), sentence)
     if status == 500 and detail == "too_large":
         return _aer_text("too_large", AER_TEXTS["too_large"])
+    # Any other server-side answer (a 500, a proxy's 502 or 504, a 503
+    # without a readable word): the server could not answer just now.
+    if isinstance(status, int) and 500 <= status <= 599:
+        return _aer_text("server_error", AER_TEXTS["server_error"])
     return _aer_text("schema", AER_TEXTS["schema"])
 
 

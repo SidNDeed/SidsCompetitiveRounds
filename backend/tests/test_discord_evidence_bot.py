@@ -62,10 +62,15 @@ SCHEMA_WORD = ("Evidence report: the server's answer was not in a form this bot 
 REFUSED_WORD = ("Evidence report refused: it runs only for authorized admins, in the admin "
                 "channel. Trying again will not help; if you should have access, report "
                 "it. (refused)")
-UNREACHABLE_WORD = "Evidence report: the bot could not reach the server. " + AGAIN + \
-    " (api_unreachable)"
-NOT_FOUND_WORD = ("Evidence report: no game, series or player matches that. Check the code or "
-                  "id; the same request will not find it. (not_found)")
+UNREACHABLE_WORD = ("Evidence report: the server could not answer just now (no connection, or "
+                    "no answer in time). " + AGAIN + " (api_unreachable)")
+NOT_FOUND_WORD = ("Evidence report: nothing to report: no game, series or player matches that, "
+                  "or there are no games the report can use. Check the code or id; asking "
+                  "again at once will not change it. (not_found)")
+SERVER_ERROR_WORD = ("Evidence report: the server could not answer just now. " + AGAIN
+                     + " (server_error)")
+RATE_NO_NUMBER_WORD = ("Evidence report: too many reports in a short time. Wait a little and "
+                       "try again. (rate)")
 PAGE_WORD = ("Evidence report: the server did not accept the request (page). Correct it and "
              "try again. (bad_argument)")
 TOO_LARGE_WORD = ("Evidence report: the report is too large to send. Ask for fewer games, or "
@@ -1053,7 +1058,7 @@ WORDS = [
      + AGAIN + " (primary_only)"),
     ("rate", 429, {"detail": "rate"}, {"Retry-After": "37"},
      "Evidence report: too many reports in a short time. Try again in 37 s. (rate)"),
-    ("rate without a retry", 429, {"detail": "rate"}, {}, SCHEMA_WORD),
+    ("rate without a retry", 429, {"detail": "rate"}, {}, RATE_NO_NUMBER_WORD),
     ("population", 503, {"detail": "unavailable (population)"}, {},
      "Evidence report: the server could not prepare its comparison data. " + AGAIN
      + " (population)"),
@@ -1068,7 +1073,9 @@ WORDS = [
     ("too large, 11-game series", 500, {"detail": "too_large"}, {}, TOO_LARGE_WORD),
     ("too large, 10,000-game series", 500, {"detail": "too_large"}, {}, TOO_LARGE_WORD),
     ("too large, forced oversized body", 500, {"detail": "too_large"}, {}, TOO_LARGE_WORD),
-    ("server error", 500, b"Internal Server Error", {}, SCHEMA_WORD),
+    ("server error", 500, b"Internal Server Error", {}, SERVER_ERROR_WORD),
+    ("proxy, no upstream", 502, None, {}, SERVER_ERROR_WORD),
+    ("proxy, upstream timeout", 504, None, {}, SERVER_ERROR_WORD),
     ("schema", 200, dict(game_body(), rules={"report": "armed"}), {}, SCHEMA_WORD),
     ("refused", 403, {"detail": "refused"}, {}, REFUSED_WORD),
 ]
@@ -1089,8 +1096,69 @@ def test_popgate_every_non_page_answer_is_plain_and_ends_with_its_word():
         assert not re.search(r"(?i)\b(memory|MB|MiB|bytes|budget|rss)\b", t), t
     assert words == {"bad_argument", "not_found", "primary_only", "rate", "population",
                      "deadline", "audit_unavailable", "sections", "too_large", "schema",
-                     "refused", "api_unreachable"}, words
+                     "refused", "api_unreachable", "server_error"}, words
     assert sorted(ns["AER_TEXTS"]) == sorted(words - {"refused", "sections", "rate"})
+
+
+def test_popgate_m1_one_404_sentence_is_true_for_every_404_the_routes_give():
+    """popgate-r1 M1: the four report routes answer 404 only through
+    `_aer_fail(404, "not_found")`, for an unknown code or id and for a cohort
+    of zero games alike, so the answer cannot tell the two apart and the one
+    sentence names both."""
+    import ast
+    with open(os.path.join(HERE, "..", "api", "admin_evidence.py"), encoding="utf-8") as fh:
+        tree = ast.parse(fh.read())
+    fours = [n for n in ast.walk(tree) if isinstance(n, ast.Constant) and n.value == 404
+             and type(n.value) is int]
+    sites = [n for n in ast.walk(tree) if isinstance(n, ast.Call)
+             and any(a in fours for a in list(n.args) + [k.value for k in n.keywords])]
+    shapes = [ast.dump(n) for n in sites]
+    want = ast.dump(ast.parse('_aer_fail(404, "not_found")', mode="eval").body)
+    assert len(fours) == len(sites) == 4 and set(shapes) == {want}, shapes
+    ns = bot_ns()
+    got = ns["_aer_word"](404, {"detail": "not_found"})
+    assert got == NOT_FOUND_WORD, got
+    assert "no games the report can use" in got and "matches that" in got, got
+
+
+def test_popgate_m2_unknown_server_answers_and_transport_failures_say_try_again():
+    """popgate-r1 M2: every 5xx outside the api's own words (a 500, a proxy's
+    502 or 504, a 503 without a readable word) and every transport failure
+    (status 0: a timeout, a refused connection) say the server could not answer
+    just now and that a minute later is right; `schema` keeps only the answers
+    it is true for."""
+    ns = bot_ns()
+    word = ns["_aer_word"]
+    for status, body in ((500, None), (500, {"detail": "boom"}), (501, None), (502, None),
+                         (504, None), (599, None), (503, None), (503, {"detail": "Bad"})):
+        assert word(status, body) == SERVER_ERROR_WORD, (status, body, word(status, body))
+    assert word(0, None) == UNREACHABLE_WORD, word(0, None)
+    for status, body in ((200, None), (400, {"detail": "nope"}), (401, None), (418, None),
+                         (302, None)):
+        assert word(status, body) == SCHEMA_WORD, (status, body)
+
+
+def test_popgate_l3_retry_after_is_bounded_and_never_raises():
+    """popgate-r1 L3: only 1 to 5 ASCII digits are read, held within 1 to
+    3600 seconds; any other header value gives the sentence without a
+    number; nothing raises and every answer stays far under 2,000 characters."""
+    ns = bot_ns()
+    word = ns["_aer_word"]
+    with_n = "Evidence report: too many reports in a short time. Try again in %d s. (rate)"
+    cases = [("99999", with_n % 3600), ("37", with_n % 37), ("0", with_n % 1),
+             ("3600", with_n % 3600), ("3601", with_n % 3600), ("123456", RATE_NO_NUMBER_WORD),
+             ("9" * 5000, RATE_NO_NUMBER_WORD), ("9" * 50000, RATE_NO_NUMBER_WORD),
+             ("²", RATE_NO_NUMBER_WORD), ("٣", RATE_NO_NUMBER_WORD),
+             (" 5", RATE_NO_NUMBER_WORD), ("5\n", RATE_NO_NUMBER_WORD),
+             ("-5", RATE_NO_NUMBER_WORD), ("", RATE_NO_NUMBER_WORD)]
+    for value, want in cases:
+        got = word(429, {"detail": "rate"}, {"Retry-After": value})
+        assert got == want, (value[:20], got[:120])
+        assert len(got) < 2000
+    for headers in (None, {}, {"retry-after": 7}, {"RETRY-AFTER": "7"}):
+        got = word(429, {"detail": "rate"}, headers)
+        want = with_n % 7 if headers == {"RETRY-AFTER": "7"} else RATE_NO_NUMBER_WORD
+        assert got == want, (headers, got)
 
 
 def _metadata_extra(part, key):

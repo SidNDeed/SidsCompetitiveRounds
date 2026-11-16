@@ -1764,8 +1764,10 @@ async def warm_display_population(delay_s=None):
                             if delay_s is None else delay_s)
         # The report's own bounds: the path runs to the report's deadline
         # (REPORT_DEADLINE_S less AUDIT_RESERVE_S), where the gate refuses
-        # as it does for a report; the whole build is cut at REPORT_DEADLINE_S,
-        # the most a report may take.
+        # as it does for a report. At REPORT_DEADLINE_S, the most a report may
+        # take, wait_for asks for a cancellation: it takes effect at the build's
+        # next suspension point and the session's close runs after it, so this
+        # is not a hard bound on wall time.
         t0 = time.monotonic()
         deadline = _aer_deadline(None)
         g = await asyncio.wait_for(_warm_once(deadline),
