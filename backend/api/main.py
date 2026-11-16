@@ -7985,6 +7985,14 @@ _CASUAL_STREAK_BUILD = 1
 # construction, probed by the release train and read by nothing else (#306).
 # Absent on any build before it.
 _AER_POPGATE_BUILD = 1
+# Release-train verification plumbing, not a design mechanism: the build
+# marker of the batch in which every streak walk leaves a voided series or
+# game out (get_ranked_streak and the 2v2 walk gained the invalidated filter),
+# reported on /health as `voided_streak_build`. It names build identity only;
+# the batch adds no route (learnings 780, 794). A code constant, equal on both
+# boxes by construction, probed by the release train and read by nothing else
+# (#306). Absent on any build before it.
+_VOIDED_STREAK_BUILD = 1
 
 
 def _title_ladders_health_word() -> int:
@@ -8063,6 +8071,7 @@ async def health_check(db: AsyncSession = Depends(get_db)):
                               casual_streak_build=_CASUAL_STREAK_BUILD,
                               ban_expiry_build=_BAN_EXPIRY_BUILD,
                               aer_popgate_build=_AER_POPGATE_BUILD,
+                              voided_streak_build=_VOIDED_STREAK_BUILD,
                               admin_evidence_population=_admin_evidence.population_health_word(),
                               build_manifest=_build_manifest.health_word(),
                               review_eval=_review_rules.review_eval(),
@@ -8132,6 +8141,7 @@ async def health_check(db: AsyncSession = Depends(get_db)):
                               casual_streak_build=_CASUAL_STREAK_BUILD,
                               ban_expiry_build=_BAN_EXPIRY_BUILD,
                               aer_popgate_build=_AER_POPGATE_BUILD,
+                              voided_streak_build=_VOIDED_STREAK_BUILD,
                               admin_evidence_population=_admin_evidence.population_health_word(),
                               build_manifest=_build_manifest.health_word(),
                               review_eval=_review_rules.review_eval(),
@@ -12675,13 +12685,16 @@ async def get_player_stats(
     """), {"pid": player.id})).mappings().all()
     best_ranked_game_streak, current_ranked_game_streak = _walk_streak(ranked_game_rows, player.id)
 
-    # Casual: count per individual match (no series)
+    # Casual: count per individual match (no series). The same rows as the
+    # match history's casual box: a team_ room (a legacy 2v2 misroute, refused
+    # at submit since) is left out there, so the streak leaves it out too.
     casual_streak_rows = (await db.execute(text("""
         SELECT m.winner_id
         FROM matches m
         WHERE (m.player1_id = :pid OR m.player2_id = :pid)
           AND m.is_ranked = false
           AND m.invalidated_at IS NULL
+          AND (m.photon_room_id IS NULL OR LEFT(m.photon_room_id, 5) != 'team_')
         ORDER BY m.ended_at ASC, m.created_at ASC, m.id ASC
     """), {"pid": player.id})).mappings().all()
     best_casual_streak, current_casual_streak = _walk_streak(casual_streak_rows, player.id)
@@ -23306,10 +23319,13 @@ async def get_ranked_streak(db: AsyncSession, steam_id: str) -> int:
     # so it only walks the actual streak. A prior LIMIT 20 capped every displayed
     # streak at 20 (bug #17). winner_id-only rows make a full scan cheap.
     # The ORDER BY is complete (completed_at, created_at, id) so equal completion times sort one way.
+    # A voided series (invalidated_at set; a reversed 1v1 series keeps status
+    # 'completed') is left out, as in every streak walk.
     streak_rows = (await db.execute(text("""
         SELECT rs.winner_id
         FROM ranked_series rs
         WHERE rs.status = 'completed'
+          AND rs.invalidated_at IS NULL
           AND (rs.player1_id = :pid OR rs.player2_id = :pid)
         ORDER BY rs.completed_at DESC, rs.created_at DESC, rs.id DESC
     """), {"pid": p.id})).mappings().all()
@@ -73006,12 +73022,15 @@ async def get_player_team_stats(steam_id: str, db: AsyncSession = Depends(get_db
     # No LIMIT: the loop breaks at the first opposite result, so it only walks the actual
     # streak. A prior LIMIT 50 silently capped the 2v2 streak at 50 (same class as #17).
     # The ORDER BY is complete (completed_at, created_at, id) so equal completion times sort one way.
+    # A voided series (invalidated_at set) is left out, as in every streak
+    # walk: a voided win does not lengthen the run, a voided loss does not end it.
     streak_q = await db.execute(
         text("""
             SELECT s.winner_team,
                    CASE WHEN :pid IN (s.t1a_id, s.t1b_id) THEN 1 ELSE 2 END AS my_team
             FROM team_series s
             WHERE s.status = 'completed'
+              AND s.invalidated_at IS NULL
               AND :pid IN (s.t1a_id, s.t1b_id, s.t2a_id, s.t2b_id)
             ORDER BY s.completed_at DESC, s.created_at DESC, s.id DESC
         """),

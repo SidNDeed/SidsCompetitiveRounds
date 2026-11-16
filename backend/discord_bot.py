@@ -5358,10 +5358,10 @@ async def cmd_rank(ctx, member: discord.Member = None):
     if br > 0: series_lines += f"\nBest Streak: **{br}W** 🔥"
     embed.add_field(name="🏆  Ranked Series", value=series_lines, inline=True)
 
-    # Current ranked streak — not a server field; recompute from recent match
-    # history exactly like the client's CalcStreak (NativeUI.cs:6681):
-    # newest-first consecutive same-result among ranked entries.
-    cur = await _current_streak(steam_id, ranked=True)
+    # Current ranked streak in GAMES, signed: the server's full-history walk
+    # (current_ranked_game_streak), which leaves voided games out. The bot
+    # walks no match list of its own: that list carries voided games unmarked.
+    cur = _streak_field(s, "current_ranked_game_streak")
     embed.add_field(name="📈  Current Streak", value=(streak_str(cur) or "—"), inline=True)
 
     # Sweeps (ranked 5-0s)
@@ -5414,32 +5414,12 @@ async def _maybe_defer(ctx):
         pass  # already deferred / prefix edge — never block the command
 
 
-def _calc_streak(entries, ranked=None):
-    """Mirror the client's CalcStreak (NativeUI.cs:6681): walk a newest-first
-    match list, count consecutive same-result games. +N = win streak,
-    -N = loss streak. ranked=True filters to ranked entries, False to casual,
-    None counts all modes."""
-    if not isinstance(entries, list) or not entries:
-        return 0
-    if ranked is not None:
-        entries = [m for m in entries if isinstance(m, dict) and bool(m.get("is_ranked")) == ranked]
-    if not entries:
-        return 0
-    first = bool(entries[0].get("won"))
-    c = 0
-    for m in entries:
-        if bool(m.get("won")) == first:
-            c += 1
-        else:
-            break
-    return c if first else -c
-
-
-async def _current_streak(steam_id, ranked=None):
-    """Current win/loss streak from the 50 most recent matches (the /matches
-    endpoint returns newest-first — ORDER BY m.ended_at DESC, main.py:2652)."""
-    hist = await api_get(f"/players/{steam_id}/matches?limit=50")
-    return _calc_streak(hist, ranked)
+def _streak_field(s, key):
+    """A signed streak field of a /players/{steam} answer as an int (0 when
+    absent or not a number). Every streak the bot shows is a field the api
+    computes; a voided series or game is left out there (one definition)."""
+    v = s.get(key) if isinstance(s, dict) else None
+    return v if isinstance(v, int) and not isinstance(v, bool) else 0
 
 
 def _top_cards_lines(s, limit=5):
@@ -7376,7 +7356,6 @@ async def cmd_mystats(ctx, member: discord.Member = None):
     await _maybe_defer(ctx)
     s = await api_get(f"/players/{steam_id}")
     if not s: await ctx.send("❌ Could not fetch stats."); return
-    hist = await api_get(f"/players/{steam_id}/matches?limit=50")
     rank = s.get("rank_name") or get_rank_name(s["rating"])
     embed = discord.Embed(title=f"{rank_emoji(rank)}  {_escape_md(s['display_name'])}  —  My Stats", color=0x9B59B6)
     # v1.34.1: surface the Discord @display name (opt-out honored — the API
@@ -7403,7 +7382,8 @@ async def cmd_mystats(ctx, member: discord.Member = None):
         inline=False,
     )
 
-    # Records box — total + ranked + casual, with live streaks from history.
+    # Records box — total + ranked + casual, with the server's current streaks
+    # (signed, in games: current_ranked_game_streak, current_casual_streak).
     tw, tl, tt = s.get("wins", 0), s.get("losses", 0), s.get("total_matches", 0)
     twr = f"{tw/tt*100:.1f}%" if tt > 0 else "—"
     rw, rl = s.get("ranked_series_wins", 0), s.get("ranked_series_losses", 0)
@@ -7412,8 +7392,8 @@ async def cmd_mystats(ctx, member: discord.Member = None):
     cw, cl = s.get("casual_wins", 0), s.get("casual_losses", 0)
     ct = cw + cl
     cwr = f"{cw/ct*100:.1f}%" if ct > 0 else "—"
-    r_streak = streak_str(_calc_streak(hist, ranked=True))
-    c_streak = streak_str(_calc_streak(hist, ranked=False))
+    r_streak = streak_str(_streak_field(s, "current_ranked_game_streak"))
+    c_streak = streak_str(_streak_field(s, "current_casual_streak"))
     rec_lines = [
         f"Total: **{tt}** — **{tw}**W / **{tl}**L ({twr})",
         f"Ranked series: **{rw}**W / **{rl}**L ({rwr})" + (f"  ·  {r_streak}" if r_streak else ""),

@@ -38,7 +38,7 @@ from datetime import datetime, timedelta
 
 import pydantic
 import pytest
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, event, text
 
 import main
 import schemas
@@ -106,14 +106,21 @@ def _without(sql: str, fragment: str, replacement: str = "") -> str:
 
 
 def _select(spec, sql=None):
-    """spec: a chronological list of (won, is_ranked, invalidated, players).
-    Rows are inserted shuffled, so the order must come from ORDER BY. Row i
-    (0-based) gets id i + 1 and created_at equal to its ended_at. Returns the
-    statement's rows."""
+    """spec: a chronological list of (won, is_ranked, invalidated, players
+    [, photon_room_id]). Rows are inserted shuffled, so the order must come
+    from ORDER BY. Row i (0-based) gets id i + 1 and created_at equal to its
+    ended_at. Returns the statement's rows. SQLite has no LEFT(); the
+    connection gets one with PostgreSQL's meaning for the prefixes used here."""
     sql = sql or _casual_statement()
     eng = create_engine("sqlite://")
+
+    @event.listens_for(eng, "connect")
+    def _left(dbapi_conn, _record):
+        dbapi_conn.create_function(
+            "LEFT", 2, lambda s, n: None if s is None else s[:n], deterministic=True)
+
     rows = []
-    for i, (won, ranked, invalidated, players) in enumerate(spec):
+    for i, (won, ranked, invalidated, players, *room) in enumerate(spec):
         p1, p2 = players
         rows.append({
             "id": i + 1, "p1": p1, "p2": p2,
@@ -121,6 +128,7 @@ def _select(spec, sql=None):
             "r": 1 if ranked else 0,
             "inv": (BASE + timedelta(days=30)).isoformat() if invalidated else None,
             "at": (BASE + timedelta(minutes=i)).isoformat(),
+            "room": room[0] if room else None,
         })
     random.Random(463).shuffle(rows)
     with eng.begin() as conn:
@@ -131,8 +139,8 @@ def _select(spec, sql=None):
         if rows:
             conn.execute(text(
                 "INSERT INTO matches (id, player1_id, player2_id, winner_id, is_ranked,"
-                " invalidated_at, ended_at, created_at)"
-                " VALUES (:id, :p1, :p2, :w, :r, :inv, :at, :at)"), rows)
+                " invalidated_at, ended_at, created_at, photon_room_id)"
+                " VALUES (:id, :p1, :p2, :w, :r, :inv, :at, :at, :room)"), rows)
         return conn.execute(text(sql), {"pid": PID}).mappings().all()
 
 
@@ -166,6 +174,22 @@ def test_an_invalidated_match_is_skipped():
     assert _casual(spec) == (3, 3)
     # Control: without the invalidated predicate the loss breaks the run.
     assert _casual(spec, _without(_casual_statement(), INVALIDATED)) == (2, 1)
+
+
+TEAM_ROOM = "AND (m.photon_room_id IS NULL OR LEFT(m.photon_room_id, 5) != 'team_')"
+
+
+def test_a_casual_team_room_row_inside_a_run_does_not_count():
+    """A casual row with a team_ room (a legacy 2v2 misroute) is left out of
+    the match history's casual box, so the streak leaves it out too: W W,
+    a team_ loss, W W is one unbroken run. The exclusion is the ranked game
+    walk's and the history's own spelling, copied."""
+    spec = [_g(W), _g(W), _g(L) + ("team_legacy01",), _g(W), _g(W, players=(PID, OPP)) + ("cr_x",)]
+    assert _casual(spec) == (4, 4)
+    # Control: without the room exclusion the team_ loss breaks the run.
+    assert _casual(spec, _without(_casual_statement(), TEAM_ROOM)) == (2, 2)
+    assert TEAM_ROOM in _statement("ranked_game_rows")
+    assert TEAM_ROOM in _history_statement()
 
 
 def test_a_ranked_match_does_not_count():

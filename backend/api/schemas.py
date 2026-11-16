@@ -1307,6 +1307,13 @@ class HealthResponse(BaseModel):
     # by construction; probed by the release train and read by nothing else
     # (#306). No default, as above. Absent on any build before it.
     aer_popgate_build: int
+    # voided_streak_build: release-train verification plumbing, not a design
+    # mechanism (main._VOIDED_STREAK_BUILD; 1 = in this build every streak
+    # walk leaves a voided series or game out). It names build identity only,
+    # equal on both roles by construction; probed by the release train and
+    # read by nothing else (#306). No default, as above. Absent on any build
+    # before it.
+    voided_streak_build: int
     # admin_evidence_population: the outcome of this process's most recent
     # build attempt of the evidence report's display population, or of a
     # start-up build that failed before it reached an attempt
