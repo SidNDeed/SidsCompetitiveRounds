@@ -32,13 +32,14 @@ import ast
 import asyncio
 import inspect
 import random
+import re
 import textwrap
 import uuid
 from datetime import datetime, timedelta
 
 import pydantic
 import pytest
-from sqlalchemy import create_engine, event, text
+from sqlalchemy import create_engine, text
 
 import main
 import schemas
@@ -105,19 +106,31 @@ def _without(sql: str, fragment: str, replacement: str = "") -> str:
     return sql.replace(fragment, replacement)
 
 
+_LEFT_CALL = re.compile(r"\bLEFT\s*\(", re.IGNORECASE)
+_LEFT_COLUMN_PREFIX = re.compile(
+    r"\bLEFT\s*\(\s*([A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)?)\s*,\s*(\d+)\s*\)",
+    re.IGNORECASE)
+
+
+def _for_sqlite(sql: str) -> str:
+    """The statement with every LEFT(<column reference>, <digits>) written
+    substr(<the same reference>, 1, <the same digits>), the same prefix for
+    the non-negative lengths used here; asserts that no LEFT( call is left.
+    Whether SQLite's parser takes a join keyword as a function name depends
+    on the library's version, so the test does not rely on it."""
+    out = _LEFT_COLUMN_PREFIX.sub(r"substr(\1, 1, \2)", sql)
+    assert not _LEFT_CALL.search(out), out
+    return out
+
+
 def _select(spec, sql=None):
     """spec: a chronological list of (won, is_ranked, invalidated, players
     [, photon_room_id]). Rows are inserted shuffled, so the order must come
     from ORDER BY. Row i (0-based) gets id i + 1 and created_at equal to its
-    ended_at. Returns the statement's rows. SQLite has no LEFT(); the
-    connection gets one with PostgreSQL's meaning for the prefixes used here."""
-    sql = sql or _casual_statement()
+    ended_at. Returns the statement's rows; the statement runs as
+    _for_sqlite writes it."""
+    sql = _for_sqlite(sql or _casual_statement())
     eng = create_engine("sqlite://")
-
-    @event.listens_for(eng, "connect")
-    def _left(dbapi_conn, _record):
-        dbapi_conn.create_function(
-            "LEFT", 2, lambda s, n: None if s is None else s[:n], deterministic=True)
 
     rows = []
     for i, (won, ranked, invalidated, players, *room) in enumerate(spec):
@@ -190,6 +203,21 @@ def test_a_casual_team_room_row_inside_a_run_does_not_count():
     assert _casual(spec, _without(_casual_statement(), TEAM_ROOM)) == (2, 2)
     assert TEAM_ROOM in _statement("ranked_game_rows")
     assert TEAM_ROOM in _history_statement()
+
+
+def test_the_sqlite_form_of_the_statement_holds_no_left_call():
+    """The statement runs on SQLite as _for_sqlite writes it: its one LEFT()
+    call becomes substr(), a join keyword is left alone, and a LEFT() form
+    the helper does not translate fails here on every machine."""
+    sql = _casual_statement()
+    assert len(_LEFT_CALL.findall(sql)) == 1, sql
+    out = _for_sqlite(sql)
+    assert "substr(m.photon_room_id, 1, 5)" in out, out
+    assert not _LEFT_CALL.search(out), out
+    joined = "SELECT 1 FROM a LEFT JOIN b ON a.x = b.x LEFT OUTER JOIN c ON c.y = b.y"
+    assert _for_sqlite(joined) == joined
+    with pytest.raises(AssertionError):
+        _for_sqlite("SELECT 1 WHERE LEFT(lower(x), 5) = 'team_'")
 
 
 def test_a_ranked_match_does_not_count():
