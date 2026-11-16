@@ -2138,8 +2138,44 @@ def _writes_to(pattern):
     return sorted(out, key=str)
 
 
+def _module_writer_constants(pattern):
+    """{name: sql} of module-level string constants matching `pattern`."""
+    out = {}
+    for node in TREE.body:
+        if isinstance(node, ast.Assign) and isinstance(node.value, ast.Constant) \
+                and isinstance(node.value.value, str) and re.search(pattern, node.value.value, re.I):
+            for t in node.targets:
+                if isinstance(t, ast.Name):
+                    out[t.id] = node.value.value
+    return out
+
+
+def _users_of(name):
+    return sorted({_enclosing(n.lineno) for n in ast.walk(TREE) if isinstance(n, ast.Name) and n.id == name
+                   and isinstance(n.ctx, ast.Load)}, key=str)
+
+
 def test_k12_the_quarantine_table_is_written_only_by_the_capture_and_the_two_admin_routes():
-    assert _writes_to(r"update\s+match_report_quarantine") == ["admin_accept_quarantine", "admin_discard_quarantine"]
+    """Still no automatic acceptance. QDIG-1 adds three module-level UPDATEs,
+    none of which can write 'accepted' or apply a result: the janitor's
+    (status 'filed' and the review columns, nothing else; only from
+    _qdig_janitor_pass) and the posted route's two (digest_posted_at or
+    digest_reminded_at alone; only from internal_quarantine_digest_posted)."""
+    upd = r"update\s+match_report_quarantine"
+    assert [w for w in _writes_to(upd) if w is not None] == ["admin_accept_quarantine", "admin_discard_quarantine"]
+    consts = _module_writer_constants(upd)
+    assert sorted(consts) == ["_QDIG_SQL_JANITOR_FILE", "_QDIG_SQL_POSTED_NEW", "_QDIG_SQL_POSTED_REMINDER"]
+    assert _writes_to(upd).count(None) == len(consts)
+    sets = {k: " ".join(v.split()).split(" SET ", 1)[1].split(" WHERE ", 1)[0] for k, v in consts.items()}
+    assert sets == {
+        "_QDIG_SQL_JANITOR_FILE": "status = 'filed', reviewed_at = NOW(), reviewed_by = NULL, "
+                                  "review_note = CAST(:note AS text)",
+        "_QDIG_SQL_POSTED_NEW": "digest_posted_at = NOW()",
+        "_QDIG_SQL_POSTED_REMINDER": "digest_reminded_at = NOW()"}
+    assert all("status = 'pending'" in " ".join(v.split()) for v in consts.values())
+    assert _users_of("_QDIG_SQL_JANITOR_FILE") == ["_qdig_janitor_pass"]
+    assert _users_of("_QDIG_SQL_POSTED_NEW") == _users_of("_QDIG_SQL_POSTED_REMINDER") == \
+        ["internal_quarantine_digest_posted"]
     assert _writes_to(r"insert\s+into\s+match_report_quarantine") == ["_quarantine_report"] * 3
     assert _writes_to(r"delete\s+from\s+match_report_quarantine") == []
     assert "match_report_quarantine" not in open(MODELS_SRC, encoding="utf-8").read()
