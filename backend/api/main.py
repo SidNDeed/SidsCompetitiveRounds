@@ -44,10 +44,11 @@ import review_rules as _review_rules
 import identity_clock_evidence as _ice
 import conn_ranges as _conn_ranges
 import build_manifest as _build_manifest   # standard library only: /health `build_manifest`
+import modlog as _modlog   # the moderator log's closed action list, labels and sentences (MODLOG-1)
 from glicko2 import calculate_new_rating
 import steamid64 as _sid64   # the SteamID64 rule, standard library only: the name cleanup, the bug-log scrubber and the Steam sweep read it
 import log_redaction as _logred   # the credential rule, standard library only: every receive path and read-back door of client log text applies it
-from models import AdminUser, AdminAction, Bet, BoosterGrant, BugReport, BugReportEvent, CardOffer, FlaggedMatch, GlickoRating, GoldTransaction, Match, MatchCard, Player, PlayerBan, PlayerItem, RankedSeries, RankRoleColor, RatingHistory, RankedQueue, QueueBlock, PlayerBlock, LinkCode, PlayerAchievement, ShopItem, GlickoRating2v2, TeamQueue, TeamSeries, TeamMatch, TeamMatchCard, TeamMatchTelemetry, TournamentMatch
+from models import AdminUser, Bet, BoosterGrant, BugReport, BugReportEvent, CardOffer, FlaggedMatch, GlickoRating, GoldTransaction, Match, MatchCard, Player, PlayerBan, PlayerItem, RankedSeries, RankRoleColor, RatingHistory, RankedQueue, QueueBlock, PlayerBlock, LinkCode, PlayerAchievement, ShopItem, GlickoRating2v2, TeamQueue, TeamSeries, TeamMatch, TeamMatchCard, TeamMatchTelemetry, TournamentMatch
 from models import player_ban_active_sql
 from schemas import (
     AchievementUnlockRequest,
@@ -7973,6 +7974,16 @@ _BAN_EXPIRY_BUILD = 1
 # else (#306). Absent on any build before it.
 _CASUAL_STREAK_BUILD = 1
 
+# MODLOG-1 (migration 420): 1 = this build writes every moderator action's
+# record through _modlog_write (affected_steam_ids, reason) and serves the
+# moderator log read, reported on /health as `modlog_build`. It names build
+# identity only: a stale box answers no new key anywhere the train looks, so
+# without it the train could not tell a box on the new build from a stale
+# one (learnings 780, 794, 1186). A code constant, equal on both boxes by
+# construction, probed by the release train and read by nothing else
+# (#306). Absent on any build before it.
+_MODLOG_BUILD = 1
+
 
 def _title_ladders_health_word() -> int:
     """/health `title_ladders`: how many ladders the catalogue this build
@@ -8049,6 +8060,7 @@ async def health_check(db: AsyncSession = Depends(get_db)):
                               ask6_invites_build=_ASK6_INVITES_BUILD,
                               casual_streak_build=_CASUAL_STREAK_BUILD,
                               ban_expiry_build=_BAN_EXPIRY_BUILD,
+                              modlog_build=_MODLOG_BUILD,
                               build_manifest=_build_manifest.health_word(),
                               review_eval=_review_rules.review_eval(),
                               review_rules=_review_rules.health_word(),
@@ -8116,6 +8128,7 @@ async def health_check(db: AsyncSession = Depends(get_db)):
                               ask6_invites_build=_ASK6_INVITES_BUILD,
                               casual_streak_build=_CASUAL_STREAK_BUILD,
                               ban_expiry_build=_BAN_EXPIRY_BUILD,
+                              modlog_build=_MODLOG_BUILD,
                               build_manifest=_build_manifest.health_word(),
                               review_eval=_review_rules.review_eval(),
                               review_rules=_review_rules.health_word(),
@@ -15847,10 +15860,14 @@ async def admin_record_exclude(payload: dict, db: AsyncSession = Depends(get_db)
         " ON CONFLICT (board, match_id, player_id) DO NOTHING"
     ), {"b": board, "m": str(mid), "p": str(pid) if pid else None,
         "r": reason or None, "a": admin_id})
-    await _log_admin_action(db, admin_steam_id=admin_id, action="record_exclude",
-                            target_steam_id=steam_id or None,
-                            details={"board": board, "match_id": str(mid),
-                                     "reason": reason})
+    # The record names the seat's player, or both of the match's players for
+    # a match-wide exclusion.
+    await _modlog_write(db, actor=admin_id, action="record_exclude",
+                        affected=[steam_id] if steam_id else
+                        await _modlog_steam_ids(db, [m["player1_id"], m["player2_id"]]),
+                        reason=reason or None, target_steam_id=steam_id or None,
+                        target_match_id=mid,
+                        details={"board": board, "match_id": str(mid), "reason": reason})
     await db.commit()
     return {"status": "ok"}
 
@@ -23612,11 +23629,15 @@ async def _chat_censor_strike(steam_id: str, display_name: str, channel: str,
                 "VALUES (:sid, NULL, 'system', :reason, NOW() + make_interval(mins => :m))"
             ), {"sid": steam_id, "reason": f"auto: slur filter (offense {int(offenses) + 1})",
                 "m": int(minutes)})
-            await _log_admin_action(db, admin_steam_id="system", action="chat_automute",
-                                    target_steam_id=steam_id,
-                                    details={"channel": channel, "matched_term": matched,
-                                             "message": message[:200], "offense": int(offenses) + 1,
-                                             "duration_minutes": int(minutes), "source": source})
+            # The record is in the mute's transaction (MODLOG-1): if it could
+            # not be written, neither is the mute, and the message is dropped
+            # all the same (the caller's decision, as when the database fails).
+            await _modlog_write(db, actor="system", action="chat_automute",
+                                affected=[steam_id], target_steam_id=steam_id,
+                                reason=f"auto: slur filter (offense {int(offenses) + 1})",
+                                details={"channel": channel, "matched_term": matched,
+                                         "message": message[:200], "offense": int(offenses) + 1,
+                                         "duration_minutes": int(minutes), "source": source})
             # #scr-admin post via the durable outbox. The bot sends outbox
             # content with users-allowed mentions (#261) — neutralize mention
             # syntax; the quoted message goes angle-bracket-neutered too.
@@ -25027,23 +25048,131 @@ async def _require_chat_moderator(db: AsyncSession, steam_id: str, channel: str 
     return (role, langs)
 
 
-async def _log_admin_action(db: AsyncSession, *, admin_steam_id: str, action: str,
-                            target_steam_id: str | None = None, details: dict | None = None) -> None:
-    """Append one admin_actions row. Best-effort: an audit failure must never
-    take down the moderation action it describes (#187 — the notification/audit
-    half does not belong in the failure domain of the decision). Uses a
-    SAVEPOINT so a failed insert cannot poison the caller's transaction
-    (#235: under asyncpg a caught SQL error still aborts the whole
-    transaction unless it is rolled back to a savepoint)."""
+async def _modlog_steam_ids(db: AsyncSession, player_ids) -> list:
+    """The CURRENT Steam ids of players rows by their ids (a series' or a
+    trade's or a held report's players), for the record's
+    affected_steam_ids, through _modlog_named: a deleted account (its
+    tombstone) is left out, and a list longer than a record names gives
+    none. An empty input reads nothing."""
+    ids = sorted({str(p) for p in (player_ids or ()) if p is not None})
+    if not ids:
+        return []
+    rows = (await db.execute(text(
+        "SELECT steam_id FROM players WHERE id = ANY(CAST(:ids AS uuid[]))"
+    ), {"ids": ids})).scalars().all()
+    return _modlog_named(str(s) for s in rows if s)
+
+
+# ── The moderator log's one writer (MODLOG-1, migration 420) ──────────────
+#
+# Every admin_actions row of this module is written by _modlog_write, in the
+# transaction of the action it records, with no savepoint and nothing
+# swallowed: the action and its record commit together or not at all. (The
+# evidence report's read audit, admin_evidence._audit, is a read and keeps
+# its own short transaction.) What the writer refuses is the caller's error,
+# never its data: an action word outside modlog.ACTIONS (every call passes a
+# literal word of that list, which tests/test_modlog_census.py checks
+# statically) and more than 16 players (no call names more than the four of
+# a 2v2 series; an action on a list chosen by a rule names none and keeps its
+# count in details). The reason is cut to 256 characters, and every string
+# bound or serialised has the characters PostgreSQL cannot store (NUL, a
+# lone surrogate) replaced first. admin_actions has no foreign key
+# (migration 192 dropped its only one), so the insert locks no other row.
+_MODLOG_MAX_AFFECTED = 16
+_MODLOG_JSON_DEPTH = 12
+_MODLOG_SID_RE = _re.compile(r"[0-9]{17}\Z", _re.ASCII)
+
+
+def _modlog_named(steam_ids) -> list:
+    """The distinct Steam ids of a list read from stored data (a flag's
+    players, a bulk deletion's authors), sorted, for `affected`; none when
+    there are more than a record names, so stored data can never make the
+    writer refuse (the caller keeps the count in details)."""
+    ids = sorted({s for s in (steam_ids or ()) if isinstance(s, str) and _MODLOG_SID_RE.match(s)})
+    return ids if len(ids) <= _MODLOG_MAX_AFFECTED else []
+
+
+def _modlog_text(value) -> str:
+    """The value as text PostgreSQL can store: NUL and lone surrogates become
+    U+FFFD."""
+    s = value if isinstance(value, str) else str(value)
+    if "\x00" in s or any(0xD800 <= ord(ch) <= 0xDFFF for ch in s):
+        s = "".join("�" if ch == "\x00" or 0xD800 <= ord(ch) <= 0xDFFF else ch for ch in s)
+    return s
+
+
+def _modlog_jsonable(value, depth: int = 0):
+    """`details` made into what json.dumps(allow_nan=False) and jsonb both
+    accept, whatever a caller passed: strings cleaned, a non-finite float
+    and any other object as its text, sets sorted."""
+    if depth > _MODLOG_JSON_DEPTH:
+        return _modlog_text(repr(value))[:200]
+    if value is None or isinstance(value, bool):
+        return value
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return value if math.isfinite(value) else _modlog_text(repr(value))
+    if isinstance(value, str):
+        return _modlog_text(value)
+    if isinstance(value, dict):
+        return {_modlog_text(k): _modlog_jsonable(v, depth + 1) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_modlog_jsonable(v, depth + 1) for v in value]
+    if isinstance(value, (set, frozenset)):
+        return sorted((_modlog_jsonable(v, depth + 1) for v in value), key=lambda v: _json.dumps(v))
+    if isinstance(value, datetime):
+        return value.isoformat()
+    return _modlog_text(value)
+
+
+def _modlog_uuid(value):
+    """A target id as a UUID, or None when there is none or it is not one
+    (callers pass the id they acted on, already parsed; the writer never
+    fails on this input)."""
+    if value is None or value == "":
+        return None
+    if isinstance(value, UUID):
+        return value
     try:
-        async with db.begin_nested():
-            await db.execute(text(
-                "INSERT INTO admin_actions (admin_steam_id, action, target_steam_id, details)"
-                " VALUES (:a, :act, :t, CAST(:d AS jsonb))"
-            ), {"a": admin_steam_id, "act": action[:32],   # the actor whole (v4.13): TEXT since 028, and a Discord actor is "discord:<id>"
-                "t": (target_steam_id or None), "d": _json.dumps(details or {})})
-    except Exception as ex:
-        print(f"[CHAT-MOD] audit row failed for {action}: {ex}")
+        return UUID(str(value))
+    except (ValueError, TypeError, AttributeError):
+        return None
+
+
+async def _modlog_write(db: AsyncSession, *, actor: str, action: str, affected=(),
+                        reason: str | None = None, target_steam_id: str | None = None,
+                        target_match_id=None, target_series_id=None,
+                        details: dict | None = None) -> None:
+    """Append the ONE admin_actions row of a moderator action, in the
+    caller's transaction (the caller commits). `actor` as stored today (a
+    Steam id, "discord:<id>", "system", modlog.ACTOR_INTERNAL_KEY or a
+    platform word); `affected` every player the action acts on, at most 16;
+    `reason` the reason the actor gave, or None."""
+    if action not in _modlog.ACTIONS:
+        raise ValueError(f"modlog: {action!r} is not a word of modlog.ACTIONS")
+    named: list = []
+    for sid in affected or ():
+        # Steam ids only, as migration 420's fill: a Discord or platform id, a
+        # tombstone or an empty value names no one.
+        t = sid if isinstance(sid, str) else ("" if sid is None else str(sid))
+        if _MODLOG_SID_RE.match(t) and t not in named:
+            named.append(t)
+    if len(named) > _MODLOG_MAX_AFFECTED:
+        raise ValueError(f"modlog: {len(named)} players named, at most {_MODLOG_MAX_AFFECTED}")
+    why = None
+    if reason is not None:
+        why = _modlog_text(reason).strip()[:_modlog.MAX_REASON] or None
+    await db.execute(text(
+        "INSERT INTO admin_actions (admin_steam_id, action, target_steam_id, target_match_id,"
+        " target_series_id, details, affected_steam_ids, reason)"
+        " VALUES (:a, :act, :t, CAST(:m AS uuid), CAST(:s AS uuid), CAST(:d AS jsonb),"
+        " CAST(:aff AS text[]), CAST(:r AS text))"
+    ), {"a": _modlog_text(actor or "unknown"), "act": action,
+        "t": None if target_steam_id is None else _modlog_text(target_steam_id),
+        "m": _modlog_uuid(target_match_id), "s": _modlog_uuid(target_series_id),
+        "d": _json.dumps(_modlog_jsonable(details or {}), allow_nan=False),
+        "aff": named, "r": why})
 
 
 # ── The WS retraction frame ───────────────────────────────────────────────
@@ -25144,9 +25273,9 @@ async def chat_moderate_delete(req: _ChatModDeleteReq, request: Request,
         "UPDATE chat_messages SET deleted_at = NOW(), deleted_by_steam_id = :by"
         " WHERE id = :mid AND deleted_at IS NULL"
     ), {"mid": req.message_id, "by": req.steam_id[:32]})
-    await _log_admin_action(
-        db, admin_steam_id=req.steam_id, action="chat_delete",
-        target_steam_id=row["steam_id"],
+    await _modlog_write(
+        db, actor=req.steam_id, action="chat_delete",
+        affected=[row["steam_id"]], target_steam_id=row["steam_id"],
         details={"message_id": int(req.message_id), "channel": chan,
                  "author_steam_id": row["steam_id"],
                  "author_discord_id": row["discord_id"],
@@ -25258,9 +25387,9 @@ async def chat_moderate_mute(req: _ChatModMuteReq, request: Request,
         raise HTTPException(400, "duration_minutes too large")
     await _chat_mute_apply(db, target_steam_id=target, channel=chan,
                            by_steam_id=req.steam_id, reason=req.reason, minutes=mins)
-    await _log_admin_action(
-        db, admin_steam_id=req.steam_id, action="chat_mute",
-        target_steam_id=target,
+    await _modlog_write(
+        db, actor=req.steam_id, action="chat_mute",
+        affected=[target], target_steam_id=target, reason=req.reason or None,
         details={"channel": chan or "ALL", "duration_minutes": mins or None,
                  "permanent": mins <= 0, "reason": (req.reason or "")[:256],
                  "moderator_steam_id": req.steam_id, "moderator_role": role})
@@ -25323,9 +25452,9 @@ async def chat_moderate_unmute(req: _ChatModMuteReq, request: Request,
         ), {"sid": req.target_steam_id, "chans": sorted(langs)})).scalars().all()
     _mod_release_or_422(req.target_steam_id, len(cleared))   # chat unmute: outside the domain and nothing revoked: 422, no commit (v4.13 G4)
     if cleared:
-        await _log_admin_action(
-            db, admin_steam_id=req.steam_id, action="chat_unmute",
-            target_steam_id=req.target_steam_id,
+        await _modlog_write(
+            db, actor=req.steam_id, action="chat_unmute",
+            affected=[req.target_steam_id], target_steam_id=req.target_steam_id,
             details={"channel": chan or ("ALL" if role == "admin" else sorted(langs)),
                      "cleared": len(cleared),
                      "moderator_steam_id": req.steam_id, "moderator_role": role})
@@ -25568,8 +25697,8 @@ async def _set_chat_lockdown(db, locked: bool, actor: str) -> None:
         "INSERT INTO runtime_settings (key, value) VALUES ('chat_lockdown', :v)"
         " ON CONFLICT (key) DO UPDATE SET value = :v, updated_at = NOW()"
     ), {"v": "1" if locked else "0"})
-    await _log_admin_action(db, admin_steam_id=actor, action="chat_lockdown",
-                            details={"locked": bool(locked), "actor": actor})
+    await _modlog_write(db, actor=actor, action="chat_lockdown",
+                        details={"locked": bool(locked), "actor": actor})
     # Announcements: Discord (durable channel-post outbox), Twitch chat line
     # (at-most-once, D1 F13) and best-effort emote-only (D1 F11 — native
     # Twitch chat cannot be fully silenced; this is the honest mitigation).
@@ -25723,9 +25852,12 @@ async def chat_moderate_mute_by_message(req: _ChatModMuteMsgReq, request: Reques
     result = await _apply_mute_for_row(db, row, actor=req.steam_id, role=role,
                                        scope_channel=scope_channel, minutes=mins,
                                        reason=req.reason, purge=bool(req.purge))
-    await _log_admin_action(
-        db, admin_steam_id=req.steam_id, action="chat_mute_msg",
-        target_steam_id=row["steam_id"],
+    # The player muted: the message's Steam author, or the Steam account
+    # linked to its Discord author (a platform identity names no player).
+    await _modlog_write(
+        db, actor=req.steam_id, action="chat_mute_msg",
+        affected=[row["steam_id"], result.get("linked_steam")],
+        target_steam_id=row["steam_id"], reason=req.reason or None,
         details={"message_id": int(req.message_id), "channel": chan,
                  "muted": result.get("muted"), "duration_minutes": mins or None,
                  "purged": result.get("purged"), "moderator_role": role})
@@ -25766,8 +25898,8 @@ async def chat_moderate_bridge_unmute(req: _ChatModBridgeUnmuteReq, request: Req
         await _enqueue_mod_action(db, "twitch_unban", user_id=row["platform_user_id"],
                                   login=row["platform_login"])
     if cleared:
-        await _log_admin_action(
-            db, admin_steam_id=req.steam_id, action="chat_unmute_bridge",
+        await _modlog_write(
+            db, actor=req.steam_id, action="chat_unmute_bridge",
             details={"mute_id": int(req.mute_id), "platform": row["platform"],
                      "platform_user_id": row["platform_user_id"],
                      "platform_login": row["platform_login"],
@@ -25844,7 +25976,7 @@ async def chat_moderate_spam_pattern_add(req: _ChatSpamPatternReq,
         "                    WHERE pattern = :p AND revoked_at IS NULL)"
         " RETURNING id"
     ), {"p": norm, "n": (req.note or "")[:256] or None, "by": req.steam_id[:64]})).scalar()
-    await _log_admin_action(db, admin_steam_id=req.steam_id, action="chat_spam_pattern",
+    await _modlog_write(db, actor=req.steam_id, action="chat_spam_pattern",
                             details={"op": "add", "raw": req.pattern[:128],
                                      "normalized": norm, "id": row_id})
     await db.commit()
@@ -25861,7 +25993,7 @@ async def chat_moderate_spam_pattern_revoke(req: _ChatSpamPatternReq,
         "UPDATE bridge_spam_patterns SET revoked_at = NOW()"
         " WHERE id = :i AND revoked_at IS NULL RETURNING pattern"
     ), {"i": int(req.pattern_id or 0)})).scalars().all()
-    await _log_admin_action(db, admin_steam_id=req.steam_id, action="chat_spam_pattern",
+    await _modlog_write(db, actor=req.steam_id, action="chat_spam_pattern",
                             details={"op": "revoke", "id": req.pattern_id,
                                      "pattern": (cleared[0] if cleared else None)})
     await db.commit()
@@ -25937,7 +26069,7 @@ async def internal_chat_bridge_moderation(
         if not _pg_text_ok(native_id):   # bridge moderation: the message's id, before its read (r15)
             raise HTTPException(422, "native_id is not storable text")
         row = (await db.execute(text(
-            "SELECT cm.id, cm.channel, cm.deleted_at"
+            "SELECT cm.id, cm.channel, cm.deleted_at, cm.steam_id"
             "  FROM chat_mirrors mr JOIN chat_messages cm ON cm.id = mr.chat_id"
             " WHERE mr.platform = :p AND mr.mirror_id = :m"
             " FOR UPDATE OF cm"
@@ -25952,9 +26084,10 @@ async def internal_chat_bridge_moderation(
             "UPDATE chat_messages SET deleted_at = NOW(), deleted_by_steam_id = :by"
             " WHERE id = :mid AND deleted_at IS NULL"
         ), {"mid": row["id"], "by": actor})
-        await _log_admin_action(db, admin_steam_id=actor, action="chat_delete",
-                                details={"message_id": int(row["id"]), "channel": chan,
-                                         "native_id": native_id, "via": f"{source} event"})
+        await _modlog_write(db, actor=actor, action="chat_delete",
+                            affected=[row["steam_id"]], target_steam_id=row["steam_id"],
+                            details={"message_id": int(row["id"]), "channel": chan,
+                                     "native_id": native_id, "via": f"{source} event"})
         await _enqueue_mirror_deletes(db, [int(row["id"])], skip={(source, native_id)})
         await db.commit()
         await _broadcast_chat_delete(int(row["id"]), chan)
@@ -25989,7 +26122,7 @@ async def internal_chat_bridge_moderation(
                                       reason=("platform ban" if permanent
                                               else f"platform timeout {ban_duration_s}s"),
                                       minutes=mins)
-        await _log_admin_action(db, admin_steam_id=actor, action="chat_purge_user",
+        await _modlog_write(db, actor=actor, action="chat_purge_user",
                                 details={"platform": source, "platform_user_id": user_id,
                                          "login": login, "purged": len(purged),
                                          "truncated": truncated, "permanent": permanent,
@@ -26004,7 +26137,7 @@ async def internal_chat_bridge_moderation(
             raise HTTPException(422, "purge_channel is twitch-only")
         purged, truncated = await _purge_identity_rows(
             db, kind="twitch_all", value="x", actor=actor)
-        await _log_admin_action(db, admin_steam_id=actor, action="chat_purge_channel",
+        await _modlog_write(db, actor=actor, action="chat_purge_channel",
                                 details={"platform": source, "purged": len(purged),
                                          "truncated": truncated})
         await db.commit()
@@ -26039,7 +26172,7 @@ async def internal_chat_discord_deleted(
     if not mids:
         return {"status": "ok", "deleted": 0}
     rows = (await db.execute(text(
-        "SELECT cm.id, cm.channel, cm.deleted_at, mr.mirror_id"
+        "SELECT cm.id, cm.channel, cm.deleted_at, mr.mirror_id, cm.steam_id"
         "  FROM chat_mirrors mr JOIN chat_messages cm ON cm.id = mr.chat_id"
         " WHERE mr.platform = 'discord' AND mr.mirror_id = ANY(:mids)"
         " FOR UPDATE OF cm"
@@ -26055,9 +26188,13 @@ async def internal_chat_discord_deleted(
     ), {"ids": live_ids})
     skip = {("discord", r["mirror_id"]) for r in live}
     await _enqueue_mirror_deletes(db, live_ids, skip=skip)
-    await _log_admin_action(db, admin_steam_id="discord_mod", action="chat_delete",
-                            details={"message_ids": live_ids, "via": "discord delete event",
-                                     "discord_message_ids": sorted({r["mirror_id"] for r in live})})
+    # The messages' Steam authors are named when they are few; a bulk
+    # deletion of more authors than a record names keeps only their count.
+    await _modlog_write(db, actor="discord_mod", action="chat_delete",
+                        affected=_modlog_named(r["steam_id"] for r in live),
+                        details={"message_ids": live_ids, "via": "discord delete event",
+                                 "discord_message_ids": sorted({r["mirror_id"] for r in live}),
+                                 "authors": len({r["steam_id"] for r in live if r["steam_id"]})})
     await db.commit()
     frames = sorted({(int(r["id"]), (r["channel"] or "global")) for r in live})
     await _broadcast_deletes(frames)
@@ -26120,7 +26257,8 @@ async def internal_chat_discord_mute(
                                        scope_channel=scope_channel, minutes=mins,
                                        reason=f"via Discord by {payload.get('actor_name', '')}"[:200],
                                        purge=True)
-    await _log_admin_action(db, admin_steam_id=actor, action="chat_mute_msg",
+    await _modlog_write(db, actor=actor, action="chat_mute_msg",
+                            affected=[row["steam_id"], result.get("linked_steam")],
                             target_steam_id=row["steam_id"],
                             details={"message_id": int(row["id"]), "actor": actor,
                                      "actor_name": str(payload.get("actor_name", ""))[:64],
@@ -26323,6 +26461,301 @@ async def admin_list_actions(
         "details": r["details"],
         "created_at": r["created_at"].isoformat() if r["created_at"] else None,
     } for r in rows], "total": int(total), "limit": limit, "offset": offset}
+
+
+# ── The moderator log: the read (MODLOG-1) ─────────────────────────────────
+#
+# GET /api/v1/admin/modlog (admin signature: action modlog_list, target "")
+# and its internal twin GET /api/v1/internal/modlog (the internal key, and the
+# asking Discord id linked to a live account on the admin roster: the rule of
+# the evidence report's internal routes). A read of the log is not recorded.
+# Every value is a bound parameter with a typed cast; the ORDER BY is one of
+# three fixed literals. Every statement runs under a 5 s transaction-local
+# timeout; the per-player read uses ix_admin_actions_affected. A parameter
+# the route does not know, or a value it cannot use, is refused with 400.
+_MODLOG_LIMIT_DEFAULT = 50
+_MODLOG_LIMIT_MAX = 100
+_MODLOG_OFFSET_MAX = 10000
+_MODLOG_Q_MAX = 64
+_MODLOG_ACTIONS_MAX = 64
+_MODLOG_ORDER = {
+    ("time", "desc"): "aa.created_at DESC, aa.id DESC",
+    ("time", "asc"): "aa.created_at ASC, aa.id ASC",
+    ("action", "desc"): "aa.action DESC, aa.created_at DESC, aa.id DESC",
+    ("action", "asc"): "aa.action ASC, aa.created_at DESC, aa.id DESC",
+    ("actor", "desc"): "aa.admin_steam_id DESC, aa.created_at DESC, aa.id DESC",
+    ("actor", "asc"): "aa.admin_steam_id ASC, aa.created_at DESC, aa.id DESC",
+}
+_MODLOG_FILTERS = frozenset({"player", "action", "actor", "q", "since", "until", "sort", "dir",
+                             "limit", "offset", "include_reads"})
+_MODLOG_ADMIN_AUTH = frozenset({"admin_steam_id", "hmac_signature"})
+_MODLOG_STEAM_RE = _re.compile(r"[0-9]{17}\Z", _re.ASCII)
+_MODLOG_ACTOR_WORDS = {"system": "System", _modlog.ACTOR_INTERNAL_KEY: "Server tool",
+                       "discord_mod": "Discord moderator", "twitch_mod": "Twitch moderator",
+                       "youtube_mod": "YouTube moderator", "unknown": "Unknown"}
+
+
+def _modlog_bad(word: str):
+    raise HTTPException(status_code=400, detail=word)
+
+
+def _modlog_one(qp, name):
+    vals = qp.getlist(name)
+    if len(vals) > 1:
+        _modlog_bad(f"{name}_repeated")
+    return vals[0] if vals else None
+
+
+def _modlog_when(raw, name):
+    if raw is None or raw == "":
+        return None
+    try:
+        dt = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+    except ValueError:
+        _modlog_bad(f"{name}_invalid")
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
+def _modlog_int(raw, name, lo, hi, default):
+    if raw is None or raw == "":
+        return default
+    if not (raw.isascii() and raw.isdigit()) or len(raw) > 6:
+        _modlog_bad(f"{name}_invalid")
+    v = int(raw)
+    if not lo <= v <= hi:
+        _modlog_bad(f"{name}_out_of_range")
+    return v
+
+
+def _modlog_parse(qp, allowed_extra=frozenset(), *, player_may_be_name=False) -> dict:
+    """The read's parameters from the query string, each checked; 400 with a
+    word naming the first one refused."""
+    unknown = set(qp.keys()) - _MODLOG_FILTERS - set(allowed_extra)
+    if unknown:
+        _modlog_bad("unknown_parameter")
+    for k, v in qp.multi_items():
+        if not _pg_text_ok(v):
+            _modlog_bad(f"{k}_invalid")
+    player = _modlog_one(qp, "player") or None
+    if player is not None:
+        player = player.strip()
+        if not _MODLOG_STEAM_RE.match(player) and not (
+                player_may_be_name and 1 <= len(player) <= 64):
+            _modlog_bad("player_invalid")
+    actions = qp.getlist("action")
+    if len(actions) > _MODLOG_ACTIONS_MAX:
+        _modlog_bad("action_too_many")
+    for a in actions:
+        if a not in _modlog.ACTIONS:
+            _modlog_bad("action_unknown")
+    actor = _modlog_one(qp, "actor") or None
+    if actor is not None and len(actor) > 64:
+        _modlog_bad("actor_invalid")
+    q = _modlog_one(qp, "q") or None
+    if q is not None and len(q) > _MODLOG_Q_MAX:
+        _modlog_bad("q_too_long")
+    since = _modlog_when(_modlog_one(qp, "since"), "since")
+    until = _modlog_when(_modlog_one(qp, "until"), "until")
+    sort = _modlog_one(qp, "sort") or "time"
+    direction = _modlog_one(qp, "dir") or "desc"
+    if (sort, direction) not in _MODLOG_ORDER:
+        _modlog_bad("sort_invalid" if sort not in ("time", "action", "actor") else "dir_invalid")
+    limit = _modlog_int(_modlog_one(qp, "limit"), "limit", 1, _MODLOG_LIMIT_MAX, _MODLOG_LIMIT_DEFAULT)
+    offset = _modlog_int(_modlog_one(qp, "offset"), "offset", 0, _MODLOG_OFFSET_MAX, 0)
+    reads = (_modlog_one(qp, "include_reads") or "0").lower()
+    if reads not in ("0", "1", "true", "false"):
+        _modlog_bad("include_reads_invalid")
+    return {"player": player, "actions": sorted(set(actions)), "actor": actor, "q": q,
+            "since": since, "until": until, "sort": sort, "dir": direction, "limit": limit,
+            "offset": offset, "include_reads": reads in ("1", "true")}
+
+
+def _modlog_like(q: str) -> str:
+    return "%" + q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+
+
+def _modlog_where(f: dict) -> tuple[str, dict]:
+    """The WHERE of both statements and its binds, built from fixed
+    fragments only."""
+    where, params = [], {}
+    if f["player"]:
+        where.append("aa.affected_steam_ids @> ARRAY[CAST(:mp AS text)]")
+        params["mp"] = f["player"]
+    if f["actions"]:
+        where.append("aa.action = ANY(CAST(:ma AS text[]))")
+        params["ma"] = f["actions"]
+    elif not f["include_reads"]:
+        where.append("aa.action <> ALL(CAST(:mr AS text[]))")
+        params["mr"] = sorted(_modlog.READ_ACTIONS)
+    if f["actor"]:
+        where.append("aa.admin_steam_id = CAST(:mactor AS text)")
+        params["mactor"] = f["actor"]
+    if f["q"]:
+        where.append("(aa.reason ILIKE CAST(:mq AS text) ESCAPE '\\'"
+                     " OR CAST(aa.details AS text) ILIKE CAST(:mq AS text) ESCAPE '\\'"
+                     " OR aa.action = ANY(CAST(:mql AS text[])))")
+        params["mq"] = _modlog_like(f["q"])
+        params["mql"] = _modlog.labels_matching(f["q"])
+    if f["since"] is not None:
+        where.append("aa.created_at >= CAST(:msince AS timestamptz)")
+        params["msince"] = f["since"]
+    if f["until"] is not None:
+        where.append("aa.created_at < CAST(:muntil AS timestamptz)")
+        params["muntil"] = f["until"]
+    return (" AND ".join(where) or "TRUE"), params
+
+
+def _modlog_actor_name(actor: str, names: dict, dnames: dict):
+    if actor in _MODLOG_ACTOR_WORDS:
+        return _MODLOG_ACTOR_WORDS[actor]
+    if actor.startswith("discord:"):
+        return dnames.get(actor[len("discord:"):])
+    return names.get(actor)
+
+
+async def _modlog_answer(db: AsyncSession, f: dict, player_row=None) -> dict:
+    """The read's answer for checked parameters `f` (see the route's
+    docstring for its keys)."""
+    await db.execute(text("SET LOCAL statement_timeout = '5s'"))
+    where, params = _modlog_where(f)
+    counts = (await db.execute(text(
+        "SELECT aa.action, COUNT(*) AS n FROM admin_actions aa"
+        f" WHERE {where} GROUP BY aa.action ORDER BY COUNT(*) DESC, aa.action"
+    ), params)).all()
+    rows = (await db.execute(text(
+        "SELECT aa.id, aa.created_at, aa.action, aa.admin_steam_id, aa.affected_steam_ids,"
+        "       aa.reason, aa.details, aa.target_steam_id, aa.target_match_id, aa.target_series_id"
+        "  FROM admin_actions aa"
+        f" WHERE {where}"
+        f" ORDER BY {_MODLOG_ORDER[(f['sort'], f['dir'])]}"
+        " LIMIT CAST(:mlimit AS integer) OFFSET CAST(:moffset AS integer)"
+    ), {**params, "mlimit": f["limit"], "moffset": f["offset"]})).mappings().all()
+    sids, dids = set(), set()
+    for r in rows:
+        a = r["admin_steam_id"] or ""
+        if _MODLOG_STEAM_RE.match(a):
+            sids.add(a)
+        elif a.startswith("discord:") and a[8:].isdigit():
+            dids.add(a[8:])
+        sids.update(s for s in (r["affected_steam_ids"] or []) if s)
+    if f["player"]:
+        sids.add(f["player"])
+    names, dnames = {}, {}
+    if sids or dids:
+        for p in (await db.execute(text(
+            "SELECT steam_id, discord_id, display_name FROM players"
+            " WHERE steam_id = ANY(CAST(:ms AS text[]))"
+            "    OR (discord_id = ANY(CAST(:md AS text[])) AND deleted_at IS NULL)"
+        ), {"ms": sorted(sids), "md": sorted(dids)})).mappings().all():
+            if p["steam_id"] in sids:
+                names[p["steam_id"]] = p["display_name"]
+            if p["discord_id"] and p["discord_id"] in dids:
+                dnames[p["discord_id"]] = p["display_name"]
+    out = []
+    for r in rows:
+        details = r["details"] if isinstance(r["details"], dict) else (r["details"] or {})
+        if isinstance(details, str):
+            try:
+                details = _json.loads(details)
+            except ValueError:
+                details = {"text": details}
+        actor = r["admin_steam_id"] or "unknown"
+        out.append({
+            "id": str(r["id"]),
+            "at": r["created_at"].astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+                  if r["created_at"] else None,
+            "action": r["action"],
+            "action_label": _modlog.label(r["action"]),
+            "actor": actor,
+            "actor_name": _modlog_actor_name(actor, names, dnames),
+            "players": [{"steam_id": s, "name": names.get(s)} for s in (r["affected_steam_ids"] or [])],
+            "reason": r["reason"],
+            "sentence": _modlog.sentence(r["action"], details),
+            "target_steam_id": r["target_steam_id"],
+            "target_match_id": str(r["target_match_id"]) if r["target_match_id"] else None,
+            "target_series_id": str(r["target_series_id"]) if r["target_series_id"] else None,
+            "details": details,
+        })
+    answer = {
+        "total": int(sum(int(n) for _, n in counts)),
+        "counts_by_action": [{"action": a, "label": _modlog.label(a), "count": int(n)} for a, n in counts],
+        "limit": f["limit"], "offset": f["offset"], "sort": f["sort"], "dir": f["dir"],
+        "rows": out,
+    }
+    if f["player"]:
+        answer["player"] = {"steam_id": f["player"], "name": names.get(f["player"])}
+    return answer
+
+
+@app.get("/api/v1/admin/modlog", tags=["Admin"])
+async def admin_modlog(request: Request,
+                       admin_steam_id: str | None = Query(None),
+                       hmac_signature: str | None = Query(None),
+                       db: AsyncSession = Depends(get_db)):
+    """The moderator log (MODLOG-1): every moderator action, newest first by
+    default; per player with `player` (a Steam id).
+
+    Requires the admin signature: admin_steam_id and hmac_signature over
+    admin:{admin}:modlog_list: (target ""). Parameters: player, action
+    (repeatable, words of modlog.ACTIONS), actor, q (at most 64 characters,
+    case-insensitive, over the reason, the action's label and the details'
+    text), since and until (ISO 8601), sort (time, action, actor), dir (asc,
+    desc), limit (1 to 100, default 50), offset (0 to 10000),
+    include_reads (the evidence report's read rows, left out unless 1).
+    Answer: total, counts_by_action [{action, label, count}], limit, offset,
+    sort, dir, rows [{id, at, action, action_label, actor, actor_name,
+    players [{steam_id, name}], reason, sentence, target_steam_id,
+    target_match_id, target_series_id, details}], and player {steam_id,
+    name} when filtered by one. Not recorded.
+
+    The two credential parameters are declared so the route names its
+    signature like every ADMIN_SIGNED read (the read gate's class tests read
+    the declared names); the handler reads every parameter, these two
+    included, from the query string through _modlog_parse, which refuses an
+    unknown one with 400."""
+    qp = request.query_params
+    f = _modlog_parse(qp, _MODLOG_ADMIN_AUTH)
+    admin_id = _modlog_one(qp, "admin_steam_id") or ""
+    await db.execute(text("SET LOCAL statement_timeout = '5s'"))
+    await _require_admin(db, admin_id, "modlog_list", "", _modlog_one(qp, "hmac_signature"))
+    return await _modlog_answer(db, f)
+
+
+@app.get("/api/v1/internal/modlog", tags=["Internal"])
+async def internal_modlog(request: Request,
+                          x_internal_key: str | None = Header(None, alias="X-Internal-Key"),
+                          x_actor_discord_id: str | None = Header(None, alias="X-Actor-Discord-Id"),
+                          db: AsyncSession = Depends(get_db)):
+    """The bot's twin of /api/v1/admin/modlog (the /modlog command): the
+    internal key, and X-Actor-Discord-Id linked to a live account on the
+    admin roster (403 refused otherwise, as the evidence report's routes).
+    `player` may also be a player's exact display name (case-insensitive):
+    404 player_not_found when none has it, 409 player_ambiguous when more
+    than one live account does. Same parameters and answer otherwise."""
+    _require_internal_key(x_internal_key)
+    d = x_actor_discord_id or ""
+    if not (1 <= len(d) <= 20 and d.isascii() and d.isdigit()):
+        raise HTTPException(status_code=403, detail="refused")
+    # Every statement of this read, the gate's and the name lookup's too,
+    # under the read's transaction-local timeout.
+    await db.execute(text("SET LOCAL statement_timeout = '5s'"))
+    steam = (await db.execute(text(
+        "SELECT steam_id FROM players WHERE discord_id = :d AND deleted_at IS NULL"), {"d": d})).scalar()
+    if not steam or not await _is_admin(db, steam):
+        raise HTTPException(status_code=403, detail="refused")
+    f = _modlog_parse(request.query_params, player_may_be_name=True)
+    if f["player"] and not _MODLOG_STEAM_RE.match(f["player"]):
+        found = (await db.execute(text(
+            "SELECT steam_id FROM players WHERE lower(display_name) = lower(CAST(:n AS text))"
+            " AND deleted_at IS NULL ORDER BY steam_id LIMIT 2"), {"n": f["player"]})).scalars().all()
+        if not found:
+            raise HTTPException(status_code=404, detail="player_not_found")
+        if len(found) > 1:
+            raise HTTPException(status_code=409, detail="player_ambiguous")
+        f["player"] = str(found[0])
+    return await _modlog_answer(db, f)
 
 
 # ── Routes: Localization (v1.36, localization-design §2.3/§2.5) ──────
@@ -29165,6 +29598,9 @@ async def admin_i18n_grant(payload: dict, db: AsyncSession = Depends(get_db)):
         "INSERT INTO i18n_review_events (actor_steam_id, actor_role, language_code,"
         " key_id, action, detail) VALUES (:sid, 'admin', :lang, NULL, :act, :d)"
     ), {"sid": admin_id, "lang": lang, "act": action, "d": f"{scope} for {target}"})
+    await _modlog_write(db, actor=admin_id, action="i18n_grant", target_steam_id=target,
+                        affected=[target],
+                        details={"scope": scope, "language_code": lang, "action": action})
     await db.commit()
     return {"ok": True}
 
@@ -32765,14 +33201,14 @@ async def admin_pc_snapshot(
     db: AsyncSession = Depends(get_db),
 ):
     """Take a pool snapshot now (admin HMAC over the admin canonical for
-    action 'pc_snapshot', target 'pool'); writes an AdminAction row."""
+    action 'pc_snapshot', target 'pool'); writes its moderator log record (_modlog_write)."""
     await _require_admin(db, admin_steam_id, "pc_snapshot", "pool", sig)
     got = (await db.execute(text("SELECT pg_try_advisory_xact_lock(hashtext('pc_snapshot'))"))).scalar_one()
     if not got:
         raise HTTPException(status_code=409, detail={"error": "snapshot_in_progress"})
     summary = await _pc_take_snapshot(db, reason="admin")
-    db.add(AdminAction(admin_steam_id=admin_steam_id, action="pc_snapshot", target_steam_id="pool",
-                       details=summary))
+    await _modlog_write(db, actor=admin_steam_id, action="pc_snapshot", target_steam_id="pool",
+                        details=summary)
     await db.commit()
     return {"status": "ok", **summary}
 
@@ -33609,8 +34045,9 @@ async def _admin_pc_trade_reverse_tx(db: AsyncSession, admin_steam_id: str, sig:
         moved_back[key] = sorted(str(r[0]) for r in moved)
     details = {"trade_id": tid, "pair_lo_steam_id": t["lo_steam_id"], "pair_hi_steam_id": t["hi_steam_id"],
                "moved_back": moved_back, "executed_at": _pc_iso(t["executed_at"]), "reason": reason}
-    db.add(AdminAction(admin_steam_id=admin_steam_id, action="pc_trade_reverse", target_steam_id=tid,
-                       details=details))                                           # step 7
+    await _modlog_write(db, actor=admin_steam_id, action="pc_trade_reverse", target_steam_id=tid,   # step 7
+                        affected=[t["lo_steam_id"], t["hi_steam_id"]], reason=reason or None,
+                        details=details)
     await db.commit()
     print(f"[PC-TRADE] reversed trade={tid} by admin={admin_steam_id}")
     return {"status": "reversed", **details}
@@ -33627,7 +34064,7 @@ async def admin_pc_trade_reverse(
     """Reverse an executed trade within reversal_window_minutes (3.10):
     admin HMAC over the admin canonical, action 'pc_trade_reverse', target
     the trade id. Every print goes back to its giver or nothing moves (409
-    moved_on); the AdminAction row commits with the reversal."""
+    moved_on); the moderator log record commits with the reversal."""
     return await _pc_trade_guarded(db, _admin_pc_trade_reverse_tx(db, admin_steam_id, sig, trade_id, reason))
 
 
@@ -36334,6 +36771,10 @@ async def admin_pc_portrait_clear(payload: dict = Body(...), db: AsyncSession = 
         await db.rollback()
         raise HTTPException(status_code=409, detail={"error": "retry_after", "retry_after": wait})
     old, locked = await _pc_clear_portrait_unit(db, str(pid), lock_days=lock_days)
+    await _modlog_write(db, actor=admin_id, action="pc_portrait_clear", target_steam_id=steam_id,
+                        affected=[steam_id],
+                        details={"lock_days": lock_days, "had_portrait": bool(old),
+                                 "locked_until": _pc_iso(locked)})
     await db.commit()
     print(f"[PC-PORTRAIT] admin clear target={steam_id} by={admin_id} lock_days={lock_days} had_blob={bool(old)}")
     return {"cleared": True, "had_portrait": bool(old), "locked_until": _pc_iso(locked)}
@@ -43606,13 +44047,14 @@ async def _admin_cosmetic_review_impl(
                 "pn": note, "pa": admin_steam_id, "i": submission_id})
             dm_content = f'Your cosmetic "{row["name"]}" was not approved. Reason: {note}'
             result_status = "denied"
-        db.add(AdminAction(
-            admin_steam_id=admin_steam_id,
+        await _modlog_write(
+            db, actor=admin_steam_id,
             action="cosmetic-placement-deny" if is_placement_review else "cosmetic-deny",
-            target_steam_id=row["artist_steam_id"],
+            affected=[row["artist_steam_id"]], target_steam_id=row["artist_steam_id"],
+            reason=note or None,
             details={"submission_id": submission_id, "name": row["name"],
                      "placement_revision": expected_revision, "reason": note},
-        ))
+        )
         try:
             await db.flush()
         except Exception as ex:
@@ -43681,14 +44123,15 @@ async def _admin_cosmetic_review_impl(
             "after its art and reviewed placement are included in a mod update."
         )
         result_status = "approved"
-    db.add(AdminAction(
-        admin_steam_id=admin_steam_id,
+    await _modlog_write(
+        db, actor=admin_steam_id,
         action="cosmetic-placement-approve" if is_placement_review else "cosmetic-approve",
-        target_steam_id=row["artist_steam_id"],
+        affected=[row["artist_steam_id"]], target_steam_id=row["artist_steam_id"],
+        reason=note or None,
         details={"submission_id": submission_id, "name": row["name"], "sku": sku,
                  "placement_revision": expected_revision, "render_scale": render_scale,
                  "render_offset_x": render_offset_x, "render_offset_y": render_offset_y},
-    ))
+    )
     try:
         await db.flush()
     except Exception as ex:
@@ -43882,10 +44325,10 @@ async def admin_set_artist(
         # Blocks + item assignments cascade/persist: items keep their
         # artist_steam_id (history), the role row + purchase blocks go.
         await db.execute(text("DELETE FROM artist_users WHERE steam_id = :s"), {"s": target_steam_id})
-    db.add(AdminAction(
-        admin_steam_id=admin_steam_id, action="artist-set", target_steam_id=target_steam_id,
-        details={"grant": grant},
-    ))
+    await _modlog_write(
+        db, actor=admin_steam_id, action="artist-set", target_steam_id=target_steam_id,
+        affected=[target_steam_id], details={"grant": grant},
+    )
     await db.commit()
     print(f"[ADMIN] {admin_steam_id} {'granted' if grant else 'revoked'} artist for {target_steam_id}")
     return {"status": "ok", "target": target_steam_id, "artist": grant}
@@ -43915,10 +44358,10 @@ async def admin_set_item_artist(
         item.artist_steam_id = artist_steam_id
     else:
         item.artist_steam_id = None
-    db.add(AdminAction(
-        admin_steam_id=admin_steam_id, action="item-artist", target_steam_id=artist_steam_id or None,
+    await _modlog_write(
+        db, actor=admin_steam_id, action="item-artist", target_steam_id=artist_steam_id or None,
         details={"sku": sku},
-    ))
+    )
     await db.commit()
     print(f"[ADMIN] {admin_steam_id} set artist of {sku} -> {artist_steam_id or '(none)'}")
     return {"status": "ok", "sku": sku, "artist_steam_id": artist_steam_id}
@@ -46196,6 +46639,17 @@ async def delete_player_data(steam_id: str, request: Request, sig: str = Query(.
         {"sid": steam_id, "tomb": _tomb})
     await db.execute(text(
         "UPDATE admin_actions SET target_steam_id = :tomb WHERE target_steam_id = :sid"),
+        {"sid": steam_id, "tomb": _tomb})
+    # The same rule for the moderator log's players (migration 420): an
+    # element equal to the id becomes the tombstone, exactly as the two
+    # columns above, and free text is left as it is, as details is (the
+    # reason an admin wrote is not rewritten by a deletion). Served by
+    # ix_admin_actions_affected.
+    await db.execute(text(
+        "UPDATE admin_actions"
+        "   SET affected_steam_ids = array_replace(affected_steam_ids, CAST(:sid AS text),"
+        "                                          CAST(:tomb AS text))"
+        " WHERE affected_steam_ids @> ARRAY[CAST(:sid AS text)]"),
         {"sid": steam_id, "tomb": _tomb})
 
     # Anonymize the player row. Keep rating_history / glicko / matches untouched
@@ -48898,12 +49352,12 @@ def _mod_target_or_422(value, field: str = "target_steam_id") -> str:
     any read, the identity locks and the ban-rate gate, for two reasons. The
     target is the key the ban row is written with, and no ban may carry a key
     outside the domain (once migration 319 is applied the table refuses one
-    on an active row). And the gate's refusal writes a best-effort audit row
-    naming this target, then counts those rows to alert once per window
-    (#656): the audit column is TEXT (028), so no LENGTH fails that insert,
-    but a string PostgreSQL text cannot hold (a NUL character, for one) would
-    fail it silently and every refusal would alert again -- the domain keeps
-    every such string away from the gate."""
+    on an active row). And the gate's refusal writes an audit row naming this
+    target, then counts those rows to alert once per window (#656): the
+    audit column is TEXT (028), so no LENGTH fails that insert. (The
+    moderator log's writer, MODLOG-1, replaces the characters PostgreSQL text
+    cannot hold before it binds; the domain still keeps every such string
+    away from the gate.)"""
     if not _mod_target_ok(value):
         raise HTTPException(status_code=422, detail=f"{field} must be a numeric steam id")
     return value
@@ -48962,9 +49416,10 @@ def _mod_reason_or_422(value, field: str = "reason"):
     it -- but the mute INSERT still binds it as text, and PostgreSQL text
     cannot hold a NUL character. Before this guard that INSERT failed, the
     route answered 500 and the mute rolled back, so a moderator's action was
-    lost to a character they cannot type. The audit row is not what failed:
-    it runs under a SAVEPOINT and only logs (#235/#187), which is exactly why
-    the 500 came from the mute and not from the log.
+    lost to a character they cannot type. The audit row was not what failed:
+    it ran under a SAVEPOINT then and only logged (#235/#187). (Since
+    MODLOG-1 the record is written in the mute's own transaction by
+    _modlog_write, which replaces such characters before it binds.)
 
     REFUSED, not stripped. Storing something other than what was sent would
     leave the stored reason and the audit row describing different text, and a
@@ -49225,9 +49680,11 @@ async def _ban_rate_gate_or_raise(db: AsyncSession, admin_steam_id: str, target_
         "WHERE banned_by_steam_id = :adm AND banned_at > NOW() - INTERVAL '5 minutes'"
     ), {"adm": admin_steam_id})).scalar() or 0
     if int(recent_bans) >= 5:
-        await _log_admin_action(db, admin_steam_id=admin_steam_id, action="ban_rate_blocked",
-                                target_steam_id=target_w,
-                                details={"recent_bans": int(recent_bans), "window": "5m"})
+        # The refusal is recorded, naming no player (no action was taken on
+        # one), and committed with the alert before the 429.
+        await _modlog_write(db, actor=admin_steam_id, action="ban_rate_blocked",
+                            target_steam_id=target_w,
+                            details={"recent_bans": int(recent_bans), "window": "5m"})
         # Alert once per burst: only on the FIRST blocked attempt (count==5
         # exactly would miss retries; instead check whether we already posted
         # for this window via the audit trail).
@@ -49271,14 +49728,16 @@ def _ban_end_sql(duration_minutes) -> str:
 
 
 async def _ban_set_length_core(db: AsyncSession, *, admin_steam_id: str, target_steam_id: str,
-                               active, duration_minutes) -> dict:
+                               active, duration_minutes, record_reason: str | None = None,
+                               record_details: dict | None = None) -> dict:
     """A length change on an ACTIVE ban (B4): the active row's end becomes
     NOW() plus the length, or NULL for permanent. Called by _apply_ban_core
     under the target's identity lock, before any of a new ban's side effects
     (no session, portal, queue or card write: the ban they belong to is
     already in force), so it writes exactly this UPDATE and one admin_actions
-    row holding the old and the new end. The reason and the row count do not
-    change. Does NOT commit."""
+    row holding the old and the new end, and the reason given for the change
+    when one was sent (`record_reason`). The ban's own reason and the row
+    count do not change. Does NOT commit."""
     params = {"id": active["id"]}
     if duration_minutes is not None:
         params["ban_minutes"] = int(duration_minutes)
@@ -49292,11 +49751,12 @@ async def _ban_set_length_core(db: AsyncSession, *, admin_steam_id: str, target_
         # key's rows takes; refused rather than reported as a change.
         raise HTTPException(status_code=409, detail="ban_changed_concurrently")
     old_end, new_end = _ban_end_iso(active["expires_at"]), _ban_end_iso(row["expires_at"])
-    db.add(AdminAction(
-        admin_steam_id=admin_steam_id, action="ban_length", target_steam_id=target_steam_id,
-        details={"ban_id": str(active["id"]), "old_expires_at": old_end,
+    await _modlog_write(
+        db, actor=admin_steam_id, action="ban_length", target_steam_id=target_steam_id,
+        affected=[target_steam_id], reason=record_reason,
+        details={**(record_details or {}), "ban_id": str(active["id"]), "old_expires_at": old_end,
                  "new_expires_at": new_end, "duration_minutes": duration_minutes},
-    ))
+    )
     return {"status": "length_changed", "steam_id": target_steam_id, "reason": active["reason"],
             "expires_at": new_end,
             "seconds_left": None if row["seconds_left"] is None else int(row["seconds_left"])}
@@ -49304,10 +49764,11 @@ async def _ban_set_length_core(db: AsyncSession, *, admin_steam_id: str, target_
 
 async def _apply_ban_core(db: AsyncSession, *, admin_steam_id: str, target_steam_id: str,
                           reason: str, duration_minutes: int | None = None,
-                          length_sent: bool = False) -> dict:
+                          length_sent: bool = False, record_reason: str | None = None,
+                          record_details: dict | None = None) -> dict:
     """The ban WRITE core, extracted verbatim from admin_ban (Sept 6 item b,
     B-2): identity lock, session and portal revocation, queue-row revocation,
-    the already_banned check, the PlayerBan + AdminAction rows. Does NOT
+    the already_banned check, the PlayerBan row and its moderator log record. Does NOT
     commit — admin_ban commits right after; the moderation-case act path
     commits together with its case row. Returns the route's response dict.
 
@@ -49320,7 +49781,14 @@ async def _apply_ban_core(db: AsyncSession, *, admin_steam_id: str, target_steam
     same key is closed first, in this transaction and under this lock, as
     the system (BAN_CLOSED_BY_EXPIRY): migration 417's unique index holds
     one open row per key, so the earlier ban stays in the log, closed, and
-    no two rows of one key are ever both active."""
+    no two rows of one key are ever both active.
+
+    The moderator log (MODLOG-1): each path writes one admin_actions row,
+    "ban" (its reason the ban row's own), "ban_repeat" for a target already
+    banned, or "ban_length" (_ban_set_length_core); the last two carry
+    `record_reason`, the reason the request sent, if any. `record_details`
+    (a moderation case's id, kind and route) is added to the row's
+    details."""
     # Identity lock FIRST, before any purge (round-13 find 6: with the lock
     # taken after the session purge, a steam_auth finalization holding the
     # lock could insert a fresh session AFTER our purge but BEFORE our ban
@@ -49333,7 +49801,8 @@ async def _apply_ban_core(db: AsyncSession, *, admin_steam_id: str, target_steam
         if _active is not None:
             return await _ban_set_length_core(
                 db, admin_steam_id=admin_steam_id, target_steam_id=target_steam_id,
-                active=_active, duration_minutes=duration_minutes)
+                active=_active, duration_minutes=duration_minutes,
+                record_reason=record_reason, record_details=record_details)
     # Revoke live Steam sessions (audit lower-pri item): without this a banned
     # player's existing verified session kept authenticating session-gated
     # endpoints until its 24h expiry. Ban checks at usage sites still apply;
@@ -49440,21 +49909,28 @@ async def _apply_ban_core(db: AsyncSession, *, admin_steam_id: str, target_steam
     # above, after the drain. On a new ban the core makes three writes after
     # it, and none can wait on another transaction of the application:
     # migration 417's close of this key's ended ban row here, and the ban and
-    # admin action rows, which go out when the session next flushes (at the
-    # caller's commit at the latest). Every writer of a key's player_bans
+    # admin action rows, which go out at the moderator log's write below (its
+    # statement flushes the pending ban row first; MODLOG-1). Every writer of a key's player_bans
     # rows holds that key's identity lock, which this core takes first (the
     # close and the insert here, _ban_set_length_core inside this core,
     # admin_unban through its sorted identity locks). The ban row's foreign
     # key reads the admin's admin_users row, which the application never
     # writes or locks; the admin action row has no foreign key (migration 192
     # dropped it) and no unique key but its random id. _moderation_case_act
-    # then writes its case row, which it locked before this core, and its own
-    # admin action row; neither can wait either.
+    # then writes its case row, which it locked before this core; it cannot
+    # wait either (its ban is recorded by this core's own row, MODLOG-1).
     await _invite_bump(db, _ban_inv_ended)
     existing = await _is_banned(db, target_steam_id)
     if existing is not None:   # round-15 find 3: "" is an ACTIVE ban too
         # The answer gains the active ban's end (B4), after its two keys.
         _end = await _active_ban_details(db, target_steam_id)
+        # The repeat is recorded too: its cleanup above is an action on the
+        # player (sessions, queue rows, cards), and it is the moderator's.
+        await _modlog_write(
+            db, actor=admin_steam_id, action="ban_repeat", target_steam_id=target_steam_id,
+            affected=[target_steam_id], reason=record_reason,
+            details={**(record_details or {}), "active_reason": existing,
+                     "expires_at": _ban_end_iso(_end["expires_at"]) if _end else None})
         return {"status": "already_banned", "reason": existing,
                 "expires_at": _ban_end_iso(_end["expires_at"]) if _end else None,
                 "seconds_left": (int(_end["seconds_left"])
@@ -49480,19 +49956,22 @@ async def _apply_ban_core(db: AsyncSession, *, admin_steam_id: str, target_steam
                                      {"ban_minutes": int(duration_minutes)})).scalar()
     db.add(PlayerBan(steam_id=target_steam_id, reason=_ban_reason, banned_by_steam_id=admin_steam_id,
                      expires_at=_ban_end))
-    _details = {"reason": _ban_reason}
+    _details = {**(record_details or {}), "reason": _ban_reason}
     if length_sent:
         _details["duration_minutes"] = duration_minutes
         _details["expires_at"] = _ban_end_iso(_ban_end)
     if _closed:
         _details["closed_ended_ban_ids"] = _closed
-    db.add(AdminAction(
-        admin_steam_id=admin_steam_id, action="ban", target_steam_id=target_steam_id,
+    # The writer's statement flushes the pending ban row first, so both go
+    # out here, in this order, under the identity lock.
+    await _modlog_write(
+        db, actor=admin_steam_id, action="ban", target_steam_id=target_steam_id,
+        affected=[target_steam_id],
         # The NORMALIZED reason (round-16 find 6): audit and ban row must
         # agree — raw whitespace here showed a different "reason" to audit
         # consumers than the ban itself carried.
-        details=_details,
-    ))
+        reason=_ban_reason, details=_details,
+    )
     # The bot's poll_new_bans loop picks this up from /internal/recent-bans and
     # posts it to #scr-admin (item 4).
     # NOW() is fixed for the transaction, so the end read above is exactly
@@ -49556,7 +50035,10 @@ async def admin_ban(req: _AdminBanReq, _slot=Depends(_pc_writer_slot), db: Async
     result = await _apply_ban_core(db, admin_steam_id=req.admin_steam_id,
                                    target_steam_id=req.target_steam_id, reason=req.reason,
                                    duration_minutes=req.duration_minutes,
-                                   length_sent="duration_minutes" in req.model_fields_set)
+                                   length_sent="duration_minutes" in req.model_fields_set,
+                                   # a repeat's or a length change's record keeps the reason only
+                                   # when one was sent (the model's default is not one)
+                                   record_reason=req.reason if "reason" in req.model_fields_set else None)
     await db.commit()
     return result
 
@@ -49606,6 +50088,10 @@ class _AdminUnbanReq(BaseModel):
     admin_steam_id: str
     target_steam_id: str
     hmac_signature: str | None = None
+    # MODLOG-1: the reason for the unban, kept in its record only (not in the
+    # signature's canonical string, admin:{admin}:unban:{target}); optional,
+    # cut to 256 characters by the writer, as a ban's reason is.
+    reason: str | None = None
 
 
 @app.post("/api/v1/admin/unban", tags=["Admin"])
@@ -49643,10 +50129,13 @@ async def admin_unban(req: _AdminUnbanReq, _slot=Depends(_pc_writer_slot), db: A
         "WHERE steam_id = :sid AND " + player_ban_active_sql("player_bans")
     ), {"admin": admin_w, "sid": req.target_steam_id})
     _mod_release_or_422(req.target_steam_id, res.rowcount)   # outside the domain and nothing released: 422, nothing written
-    db.add(AdminAction(
-        admin_steam_id=admin_w, action="unban", target_steam_id=target_w,
+    # Recorded whether or not a ban was released: rows 0 reads "there was no
+    # active ban to lift" in the log.
+    await _modlog_write(
+        db, actor=admin_w, action="unban", target_steam_id=target_w,
+        affected=[target_w], reason=req.reason,
         details={"rows": res.rowcount},
-    ))
+    )
     await db.commit()
     return {"status": "unbanned", "steam_id": req.target_steam_id, "rows": res.rowcount}
 
@@ -49683,6 +50172,11 @@ async def admin_grant_achievement(req: _AdminGrantAchReq, db: AsyncSession = Dep
         _repair_sku = ACHIEVEMENT_TITLE_SKUS.get(req.achievement_key)
         if _repair_sku:
             await _grant_title_item(db, target.id, _repair_sku)
+            await _modlog_write(db, actor=req.admin_steam_id, action="grant_achievement",
+                                target_steam_id=req.target_steam_id,
+                                affected=[req.target_steam_id],
+                                details={"achievement_key": req.achievement_key,
+                                         "repair": True, "title_sku": _repair_sku})
             await db.commit()
         return {"status": "already_unlocked"}
     db.add(PlayerAchievement(player_id=target.id, achievement_key=req.achievement_key))
@@ -49724,11 +50218,11 @@ async def admin_grant_achievement(req: _AdminGrantAchReq, db: AsyncSession = Dep
     _title_sku = ACHIEVEMENT_TITLE_SKUS.get(req.achievement_key)
     if _title_sku:
         await _grant_title_item(db, target.id, _title_sku)
-    db.add(AdminAction(
-        admin_steam_id=req.admin_steam_id, action="grant_achievement",
-        target_steam_id=req.target_steam_id,
+    await _modlog_write(
+        db, actor=req.admin_steam_id, action="grant_achievement",
+        target_steam_id=req.target_steam_id, affected=[req.target_steam_id],
         details={"achievement_key": req.achievement_key, "gold_awarded": gold_amt},
-    ))
+    )
     await db.commit()
     return {"status": "granted", "achievement_key": req.achievement_key, "gold_awarded": gold_amt}
 
@@ -49837,12 +50331,14 @@ async def admin_reverse_series(req: _AdminReverseSeriesReq, db: AsyncSession = D
     # invalidated row).
     _refunded = await _refund_series_bets(db, series.id, "admin_reverse")
 
-    db.add(AdminAction(
-        admin_steam_id=req.admin_steam_id, action="reverse_series",
+    await _modlog_write(
+        db, actor=req.admin_steam_id, action="reverse_series",
         target_series_id=series.id,
+        affected=await _modlog_steam_ids(db, [series.player1_id, series.player2_id]),
+        reason=req.reason if "reason" in req.model_fields_set else None,
         details={"reason": req.reason, "matches_reversed": len(matches_in_series),
                  "bets_refunded": _refunded},
-    ))
+    )
     await db.commit()
     return {"status": "reversed", "series_id": req.series_id, "matches_reversed": len(matches_in_series)}
 
@@ -49913,13 +50409,13 @@ async def admin_review_flag(req: _AdminReviewFlagReq, db: AsyncSession = Depends
     restoration_required = bool(
         req.review_action == "false_positive" and fm.auto_invalidated)
     fm.restoration_required = restoration_required
-    db.add(AdminAction(
-        admin_steam_id=req.admin_steam_id, action="flag_review",
-        target_match_id=fm.match_id,
+    await _modlog_write(
+        db, actor=req.admin_steam_id, action="flag_review",
+        target_match_id=fm.match_id, affected=_modlog_named(fm.player_steam_ids),
         details={"flag_id": req.flag_id, "review_action": req.review_action,
                  "evidence_revision": req.evidence_revision,
                  "restoration_required": restoration_required},
-    ))
+    )
     await db.commit()
     return {
         "status": "reviewed",
@@ -49964,12 +50460,12 @@ async def admin_resolve_flag_restoration(
         # a visible failure after the first attempt already committed.
         return {"status": "restoration_already_completed", "flag_id": req.flag_id}
     fm.restoration_required = False
-    db.add(AdminAction(
-        admin_steam_id=req.admin_steam_id,
+    await _modlog_write(
+        db, actor=req.admin_steam_id,
         action="flag_restoration_completed",
-        target_match_id=fm.match_id,
+        target_match_id=fm.match_id, affected=_modlog_named(fm.player_steam_ids),
         details={"flag_id": req.flag_id},
-    ))
+    )
     await db.commit()
     return {"status": "restoration_completed", "flag_id": req.flag_id}
 
@@ -50089,7 +50585,7 @@ async def admin_alert_create(req: _AdminAlertCreateReq, db: AsyncSession = Depen
         "sid": req.admin_steam_id, "name": str(admin_name)[:64],
         "cat": req.category, "msg": msg, "m": exp_min,
     })).scalar()
-    await _log_admin_action(db, admin_steam_id=req.admin_steam_id, action="alert_create",
+    await _modlog_write(db, actor=req.admin_steam_id, action="alert_create",
                             details={"alert_id": int(row), "category": req.category, "message": msg[:200]})
     # Discord echo to #scr-admin via the durable outbox (the bot's 30s
     # poll_channel_posts loop delivers + acks; zero new bot code). The bot
@@ -50130,7 +50626,7 @@ async def admin_alert_revoke(req: _AdminAlertRevokeReq, db: AsyncSession = Depen
     ), {"aid": int(req.alert_id)})
     if not res.rowcount:
         raise HTTPException(404, "alert not found or already revoked")
-    await _log_admin_action(db, admin_steam_id=req.admin_steam_id, action="alert_revoke",
+    await _modlog_write(db, actor=req.admin_steam_id, action="alert_revoke",
                             details={"alert_id": int(req.alert_id)})
     await db.commit()
     _alerts_rev += 1
@@ -52663,10 +53159,14 @@ async def admin_resolve_team_series(
         affected_player_ids=[srow["t1a_id"], srow["t1b_id"],
                              srow["t2a_id"], srow["t2b_id"]],
     )
-    if admin_steam_id and admin_ok:
-        db.add(AdminAction(admin_steam_id=admin_steam_id, action="resolve_team_series",
-                           target_series_id=sid_uuid,
-                           details={"action": action, "winner_team": winner_team}))
+    # Recorded for both callers (MODLOG-1): the admin by its Steam id, a
+    # server tool by the internal key's actor word. A refused action below
+    # (an unknown action, no winner) rolls the record back with it.
+    await _modlog_write(db, actor=admin_steam_id if admin_ok else _modlog.ACTOR_INTERNAL_KEY,
+                        action="resolve_team_series", target_series_id=sid_uuid,
+                        affected=await _modlog_steam_ids(
+                            db, [srow["t1a_id"], srow["t1b_id"], srow["t2a_id"], srow["t2b_id"]]),
+                        details={"action": action, "winner_team": winner_team})
 
     if action == "void":
         await db.execute(
@@ -52931,8 +53431,11 @@ async def admin_reverse_team_series(req: _AdminReverseTeamSeriesReq, db: AsyncSe
     # Unsettled bets on the now-voided result are refunded (settled bets are
     # deliberately untouched — winnings clawback is a separate policy call).
     await _reconcile_team_series_bets(db, sid, "admin_reverse")
-    db.add(AdminAction(admin_steam_id=req.admin_steam_id, action="reverse_team_series",
-                       target_series_id=sid, details={"reason": req.reason}))
+    await _modlog_write(db, actor=req.admin_steam_id, action="reverse_team_series",
+                        target_series_id=sid,
+                        affected=await _modlog_steam_ids(db, [pid for pid, _ in slots]),
+                        reason=req.reason if "reason" in req.model_fields_set else None,
+                        details={"reason": req.reason})
     await db.commit()
     return {"status": "reversed", "series_id": req.series_id}
 
@@ -53093,6 +53596,15 @@ async def admin_rebuild_team_glicko(
                "v": st["volatility"], "peak": st["peak"], "cs": len(sids_by_pid[pid])})
         await db.commit()
         written += 1
+    # MODLOG-1: the rebuild commits once per player, so its record is a
+    # transaction of its own after the last of them, with the counts; it
+    # names no player (every 2v2 player is rewritten by rule). A failure here
+    # leaves the ratings written and answers 500, and the rebuild is
+    # re-runnable.
+    await _modlog_write(db, actor=_modlog.ACTOR_INTERNAL_KEY, action="team_glicko_rebuild",
+                        details={"series_replayed": len(series_rows), "players_written": written,
+                                 "players_contended": len(contended)})
+    await db.commit()
     return {"status": ("rebuilt" if not contended else "incomplete_rerun_needed"),
             "series_replayed": len(series_rows),
             "players_written": written, "players_contended": contended}
@@ -66142,6 +66654,9 @@ async def admin_ffa_g3_seat(payload: dict, db: AsyncSession = Depends(get_db)):
         " VALUES (:pid, NOW(), NOW() + make_interval(hours => CAST(:h AS integer)))"
         " ON CONFLICT (player_id) DO UPDATE SET expires_at = EXCLUDED.expires_at"
         " RETURNING expires_at"), {"pid": pid, "h": hours})).scalar()
+    await _modlog_write(db, actor=admin_id, action="ffa_g3_seat", target_steam_id=target,
+                        affected=[target],
+                        details={"hours": hours, "expires_at": exp.isoformat() if exp is not None else None})
     await db.commit()
     iso = exp.isoformat() if exp is not None else ""
     print(f"[FFA-G3] seat {str(pid)[:8]} expires={iso}")
@@ -73747,15 +74262,21 @@ async def admin_discard_quarantine(qid: str, req: _AdminQuarantineReq,
     if not _pg_text_ok(note):   # quarantine discard: the note, before the admin check and the UPDATE (r15 sweep)
         raise HTTPException(422, "note is not storable text")
     await _require_admin(db, req.admin_steam_id, "quarantine_action", qid, req.hmac_signature)
-    res = await db.execute(text("""
+    done = (await db.execute(text("""
         UPDATE match_report_quarantine
            SET status='discarded', reviewed_at=NOW(), review_note=:note,
                reviewed_by=(SELECT id FROM players WHERE steam_id=:sid)
          WHERE id=CAST(:qid AS UUID) AND status='pending'
-    """), {"qid": str(qid_uuid), "sid": req.admin_steam_id, "note": note})
-    await db.commit()
-    if not res.rowcount:
+         RETURNING player_ids, mode
+    """), {"qid": str(qid_uuid), "sid": req.admin_steam_id, "note": note})).mappings().first()
+    if done is None:
+        # Nothing changed: refused before any record or commit.
         raise HTTPException(409, "Already reviewed")
+    await _modlog_write(db, actor=req.admin_steam_id, action="quarantine_discard",
+                        affected=await _modlog_steam_ids(db, done["player_ids"] or ()),
+                        reason=note or None,
+                        details={"quarantine_id": str(qid_uuid), "mode": done["mode"]})
+    await db.commit()
     return {"status": "discarded"}
 
 
@@ -73799,6 +74320,10 @@ async def admin_accept_quarantine(qid: str, req: _AdminQuarantineReq,
                reviewed_by=(SELECT id FROM players WHERE steam_id=:sid)
          WHERE id=CAST(:qid AS UUID) AND status='pending'
     """), {"qid": str(qid_uuid), "sid": req.admin_steam_id})
+    await _modlog_write(db, actor=req.admin_steam_id, action="quarantine_accept",
+                        affected=await _modlog_steam_ids(db, row["player_ids"] or ()),
+                        reason=(req.note or "")[:500] or None,
+                        details={"quarantine_id": str(qid_uuid), "mode": row["mode"]})
     await db.commit()
     print(f"[QUARANTINE] {qid} accepted by {req.admin_steam_id}")
     return {"status": "accepted"}
@@ -79821,20 +80346,6 @@ async def _mail_lock_admin(db: AsyncSession, admin_steam_id: str, *others: str,
     return rows
 
 
-async def _log_admin_action_strict(db: AsyncSession, *, admin_steam_id: str, action: str,
-                                   target_steam_id: str | None = None, details: dict | None = None) -> None:
-    """The STRICT twin of _log_admin_action for mail's privileged actions
-    (review r1): the audit row is part of the action's own transaction — no
-    savepoint, nothing swallowed — so a broadcast, grant, revoke or case
-    resolution whose admin_actions insert fails does not commit. The soft
-    helper's other callers are unchanged; they chose #187's trade-off."""
-    await db.execute(text(
-        "INSERT INTO admin_actions (admin_steam_id, action, target_steam_id, details)"
-        " VALUES (:a, :act, :t, CAST(:d AS jsonb))"
-    ), {"a": admin_steam_id, "act": action[:32],   # the actor whole, as in _log_admin_action (v4.13)
-        "t": (target_steam_id or None), "d": _json.dumps(details or {})})
-
-
 # Send receipts (migration 415). Every committed mail send, reply and
 # broadcast has one row in mail_send_receipts, keyed (sender_id,
 # idempotency_key): the message id the send answered with, its kind, a
@@ -80978,7 +81489,9 @@ async def _moderation_case_act(db: AsyncSession, *, case_id: str, actor_steam_id
     _chat_scope_allows reserves to admins, and the ban path is admin-only
     everywhere else. dismiss needs any live grant. The moderation writes are
     the SAME cores the chat routes use (_chat_mute_apply; _ban_rate_gate_or_
-    raise + _apply_ban_core), then the case row and the AdminAction row.
+    raise + _apply_ban_core), then the case row. Each action has ONE
+    admin_actions row (MODLOG-1): the mute's or the ban core's, carrying the
+    case's id, kind and route, or "modcase_act" for a dismissal.
     The caller commits. A case that is no longer open answers
     already_resolved — a double click is harmless."""
     cid = _mail_parse_uuid(case_id, "case_id")
@@ -81058,16 +81571,25 @@ async def _moderation_case_act(db: AsyncSession, *, case_id: str, actor_steam_id
             raise HTTPException(status_code=400, detail="hours_invalid")
         await _chat_mute_apply(db, target_steam_id=subject_sid, channel=None,
                                by_steam_id=actor_w, reason=reason_txt, minutes=h * 60)
-        await _log_admin_action_strict(
-            db, admin_steam_id=actor_w, action="chat_mute", target_steam_id=subject_sid,
+        # One record per action (MODLOG-1): the mute's, carrying the case.
+        await _modlog_write(
+            db, actor=actor_w, action="chat_mute", target_steam_id=subject_sid,
+            affected=[subject_sid], reason=reason_txt,
             details={"channel": "ALL", "duration_minutes": h * 60, "permanent": False,
                      "reason": reason_txt, "moderator_steam_id": actor_w,
-                     "moderator_role": role, "via": via, "case_id": str(cid)})
+                     "moderator_role": role, "via": via, "case_id": str(cid),
+                     "kind": case["kind"], "actor_name": (actor_name or "")[:64]})
         resolution, new_status = f"mute:{h}h", "resolved"
     elif action == "ban":
         await _ban_rate_gate_or_raise(db, actor_steam_id, subject_sid_pre, target_w=subject_sid)
+        # The ban core's own record ("ban", or "ban_repeat" for a subject
+        # already banned) carries the case: one record per action (MODLOG-1).
         res = await _apply_ban_core(db, admin_steam_id=actor_w,
-                                    target_steam_id=subject_sid, reason=reason_txt)
+                                    target_steam_id=subject_sid, reason=reason_txt,
+                                    record_reason=reason_txt,
+                                    record_details={"case_id": str(cid), "kind": case["kind"],
+                                                    "via": via, "role": role,
+                                                    "actor_name": (actor_name or "")[:64]})
         resolution = "ban" if res.get("status") == "banned" else "ban:already_banned"
         new_status = "resolved"
     else:
@@ -81077,11 +81599,14 @@ async def _moderation_case_act(db: AsyncSession, *, case_id: str, actor_steam_id
         "   SET status = :st, resolved_at = NOW(), resolved_by = :by, resolution = :res"
         " WHERE id = :id"
     ), {"st": new_status, "by": actor_w[:32], "res": resolution, "id": cid})
-    await _log_admin_action_strict(
-        db, admin_steam_id=actor_w, action="modcase_act", target_steam_id=subject_sid,
-        details={"case_id": str(cid), "kind": case["kind"], "action": action,
-                 "hours": hours, "reason": reason_txt, "via": via,
-                 "actor_name": (actor_name or "")[:64], "role": role})
+    if action == "dismiss":
+        # A dismissal's own record; a mute or a ban was recorded above.
+        await _modlog_write(
+            db, actor=actor_w, action="modcase_act", target_steam_id=subject_sid,
+            affected=[subject_sid], reason=reason_txt,
+            details={"case_id": str(cid), "kind": case["kind"], "action": action,
+                     "hours": hours, "reason": reason_txt, "via": via,
+                     "actor_name": (actor_name or "")[:64], "role": role})
     return {"status": "ok", "case_id": str(cid), "kind": case["kind"], "action": action,
             "resolution": resolution, "subject_steam_id": subject_sid,
             "subject_name": case["subject_name"]}
@@ -81207,8 +81732,8 @@ async def internal_moderation_case_notified(
 
 @app.post("/api/v1/admin/mail/broadcast", tags=["Admin"])
 async def admin_mail_broadcast(req: _AdminMailBroadcastReq, db: AsyncSession = Depends(get_db)):
-    """B-12: kind = 'system_broadcast', explicit and admin-only, audited via
-    AdminAction, bypasses preferences and blocks, targets accounts with
+    """B-12: kind = 'system_broadcast', explicit and admin-only, audited by its
+    moderator log record, bypasses preferences and blocks, targets accounts with
     mod_seen_at inside MAIL_BROADCAST_SEEN_DAYS set-wise. Same plain-text
     rules and censor as player mail; no rate window and no spam evaluation
     (exempt by design); idempotent on (sender, idempotency_key) like every
@@ -81272,8 +81797,10 @@ async def admin_mail_broadcast(req: _AdminMailBroadcastReq, db: AsyncSession = D
                               request_fp=fp, message_fp=_mail_message_fp("broadcast", subject, body),
                               message_id=mid, recipients=n)
     await db.execute(text(_MAIL_REV_BUMP_SQL), {"mid": mid})
-    await _log_admin_action_strict(
-        db, admin_steam_id=_mail_identity_to_write(rows, req.admin_steam_id), action="mail_broadcast",
+    # Names no player: the recipients are chosen by rule (the count is in
+    # details).
+    await _modlog_write(
+        db, actor=_mail_identity_to_write(rows, req.admin_steam_id), action="mail_broadcast",
         target_steam_id=None,
         details={"message_id": str(mid), "subject": subject[:MAIL_SUBJECT_MAX], "recipients": n,
                  "seen_days": MAIL_BROADCAST_SEEN_DAYS})
@@ -81312,8 +81839,10 @@ async def admin_mail_bulk_grant(req: _AdminMailBulkGrantReq, db: AsyncSession = 
         "       granted_by = EXCLUDED.granted_by, granted_at = NOW()"
         " RETURNING expires_at"
     ), {"sid": sid, "n": n, "d": days, "adm": actor_w[:20]})).scalar()
-    await _log_admin_action_strict(
-        db, admin_steam_id=actor_w, action="mail_bulk_grant", target_steam_id=sid,
+    # The grant is given to ONE named player, who is named (the recipients
+    # it later reaches are not).
+    await _modlog_write(
+        db, actor=actor_w, action="mail_bulk_grant", target_steam_id=sid, affected=[sid],
         details={"max_recipients": n, "days": days})
     await db.commit()
     return {"status": "ok", "steam_id": sid, "max_recipients": n, "expires_at": _mail_iso(expires)}
@@ -81345,9 +81874,9 @@ async def admin_mail_bulk_grant_revoke(
     gone = (await db.execute(text(
         "DELETE FROM mail_bulk_grants WHERE steam_id = :sid RETURNING 1"
     ), {"sid": target_w})).first()
-    await _log_admin_action_strict(
-        db, admin_steam_id=actor_w, action="mail_bulk_grant_revoke", target_steam_id=target_w,
-        details={"revoked": gone is not None})
+    await _modlog_write(
+        db, actor=actor_w, action="mail_bulk_grant_revoke", target_steam_id=target_w,
+        affected=[target_w], details={"revoked": gone is not None})
     await db.commit()
     return {"status": "ok", "steam_id": sid, "revoked": gone is not None}
 
@@ -82523,7 +83052,7 @@ async def admin_operator_key_issue(req: _OperatorKeyIssueReq, db: AsyncSession =
                 "hint": hint, "by": req.admin_steam_id[:20]})).scalar()
     except IntegrityError:
         raise HTTPException(status_code=409, detail="two_live_keys")
-    await _log_admin_action(db, admin_steam_id=req.admin_steam_id, action="operator_key_issue",
+    await _modlog_write(db, actor=req.admin_steam_id, action="operator_key_issue",
                             details={"operator": name, "slot": free[0], "id": int(new_id),
                                      "hint": hint})
     await db.commit()
@@ -82544,7 +83073,7 @@ async def admin_operator_key_revoke(req: _OperatorKeyRevokeReq, db: AsyncSession
     ), {"id": req.id, "by": req.admin_steam_id[:20]})).first()
     if row is None:
         raise HTTPException(status_code=404, detail="no_live_key")
-    await _log_admin_action(db, admin_steam_id=req.admin_steam_id, action="operator_key_revoke",
+    await _modlog_write(db, actor=req.admin_steam_id, action="operator_key_revoke",
                             details={"operator": row[0], "slot": int(row[1]), "id": req.id})
     await db.commit()
     read_gate.forget_operator_key_id(req.id)
@@ -82606,7 +83135,7 @@ async def admin_read_gate_mode(req: _ReadGateModeReq, db: AsyncSession = Depends
         "INSERT INTO runtime_settings (key, value) VALUES ('read_gate_mode', :v)"
         " ON CONFLICT (key) DO UPDATE SET value = :v, updated_at = NOW()"
     ), {"v": mode})
-    await _log_admin_action(db, admin_steam_id=req.admin_steam_id, action="read_gate_mode",
+    await _modlog_write(db, actor=req.admin_steam_id, action="read_gate_mode",
                             details={"mode": mode})
     await db.commit()
     read_gate.mode_cache_set(mode)

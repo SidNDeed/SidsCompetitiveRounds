@@ -15336,6 +15336,12 @@ async def on_interaction(interaction: discord.Interaction):
             # rides the custom_id, the api decides with the clicker's id.
             await _aer_click(interaction, cid)
             return
+        if cid.startswith("modlog:"):
+            # /modlog page buttons (MODLOG-1): the request rides the
+            # custom_id, the gate is applied again, the api decides with the
+            # presser's id.
+            await _modlog_click(interaction, cid)
+            return
         if cid.startswith("modcase:"):
             # Mail moderation buttons (Sept 6 item b, B-2): routed to the api
             # with the clicker's Discord id; the server decides.
@@ -18349,6 +18355,290 @@ async def evidence_player(interaction: discord.Interaction, steam_id: str,
 
 
 bot.tree.add_command(evidence_group)
+
+
+# ── /modlog: one player's moderator log (MODLOG-1) ──────────────────────────
+# Who may read it is the api's decision (the internal key plus the asking
+# admin's Discord id, linked to a live account on the admin roster: the rule
+# of /evidence). The bot keeps the command to the admin channel, as /evidence
+# does (_aer_local_gate), applies that gate again on every button press, and
+# answers only the admin who asked (ephemeral). Ten rows a page, newest first
+# unless asked otherwise; every message stays under 2000 characters.
+MODLOG_PATH = "/api/v1/internal/modlog"
+MODLOG_PAGE = 10
+MODLOG_CID_MAX = 100
+MODLOG_SEARCH_MAX = 64
+MODLOG_TIMEOUT_S = 20
+MODLOG_MSG_MAX = 1990
+# sort code -> (the api's sort, its dir, the words shown in the header)
+MODLOG_SORTS = {"n": ("time", "desc", "newest first"),
+                "o": ("time", "asc", "oldest first"),
+                "a": ("action", "asc", "by kind of action"),
+                "m": ("actor", "asc", "by moderator")}
+# The `action` choices: words of the api's closed list (backend/api/modlog.py
+# ACTIONS) with their labels as stored there; the bot image does not copy that
+# file, so test_modlog_bot.py asserts each pair equals the api's.
+MODLOG_BOT_ACTIONS = (
+    ("ban", "Ban"), ("ban_length", "Ban length changed"), ("ban_repeat", "Repeat ban"),
+    ("unban", "Unban"), ("chat_mute", "Chat mute"), ("chat_automute", "Automatic chat mute"),
+    ("chat_mute_msg", "Chat mute from a message"), ("chat_unmute", "Chat unmute"),
+    ("chat_delete", "Chat message deleted"), ("modcase_act", "Mail case closed"),
+    ("reverse_series", "1v1 series reversed"), ("resolve_team_series", "2v2 series resolved"),
+    ("reverse_team_series", "2v2 series reversed"), ("flag_review", "Flagged match reviewed"),
+    ("record_exclude", "Record excluded"), ("quarantine_accept", "Held report accepted"),
+    ("quarantine_discard", "Held report discarded"), ("pc_trade_reverse", "Card trade reversed"),
+    ("pc_portrait_clear", "Portrait cleared"), ("grant_achievement", "Achievement granted"),
+    ("ffa_g3_seat", "FFA seat enrolment"), ("i18n_grant", "Language grant changed"),
+    ("mail_bulk_grant", "Mail bulk-send grant"), ("cosmetic-approve", "Cosmetic approved"),
+    ("cosmetic-deny", "Cosmetic denied"),
+)
+MODLOG_GATE = "The moderator log is answered only in the admin channel."
+MODLOG_UNREACHABLE = ("The moderator log could not be reached just now. "
+                      "Trying again in a minute may help.")
+MODLOG_REFUSED = ("The moderator log is for admins whose Discord account is linked to their "
+                  "game account. Trying again will not help.")
+MODLOG_NOT_FOUND = ("No player has that name or Steam id. Check the spelling; "
+                    "trying again as it is will not help.")
+MODLOG_AMBIGUOUS = "More than one player has that name. Ask again with their Steam id."
+MODLOG_SCHEMA = ("The moderator log answered in a form this bot does not read. "
+                 "Trying again will not help; tell the maintainer.")
+MODLOG_SEARCH_LONG = ("That search is longer than %d characters. Shorten it and ask again."
+                      % MODLOG_SEARCH_MAX)
+MODLOG_SEARCH_WIDE = ("That search is too long to keep on the page buttons. "
+                      "Use fewer or plainer characters and ask again.")
+
+
+def _modlog_custom_id(sid, sort, action_idx, page, search):
+    """`modlog:<steam id>:<sort>:<action index or ->:<page>:<search>`. The
+    search is percent-encoded with no safe characters, so a colon in it
+    cannot split the fields; None when the whole id passes 100 characters."""
+    cid = ":".join(["modlog", str(sid), sort, "-" if action_idx is None else str(action_idx),
+                    str(int(page)), urllib.parse.quote(search or "", safe="")])
+    return cid if len(cid) <= MODLOG_CID_MAX else None
+
+
+def _modlog_parse_custom_id(cid):
+    """`(steam id, sort, action index or None, page, search)`, or None."""
+    parts = cid.split(":", 5) if isinstance(cid, str) else []
+    if len(parts) != 6 or parts[0] != "modlog":
+        return None
+    _, sid, sort, act, page, search = parts
+    if not (len(sid) == 17 and sid.isdigit()) or sort not in MODLOG_SORTS or not page.isdigit():
+        return None
+    if act == "-":
+        idx = None
+    elif act.isdigit() and int(act) < len(MODLOG_BOT_ACTIONS):
+        idx = int(act)
+    else:
+        return None
+    return sid, sort, idx, int(page), urllib.parse.unquote(search)
+
+
+def _modlog_params(player, sort, action_idx, page, search):
+    api_sort, api_dir, _ = MODLOG_SORTS[sort]
+    params = [("player", str(player)), ("sort", api_sort), ("dir", api_dir),
+              ("limit", str(MODLOG_PAGE)), ("offset", str(int(page) * MODLOG_PAGE))]
+    if action_idx is not None:
+        params.append(("action", MODLOG_BOT_ACTIONS[action_idx][0]))
+    if search:
+        params.append(("q", search))
+    return params
+
+
+async def _modlog_fetch(params, actor_id):
+    """GET the internal read with the internal key and the asking admin's
+    Discord id: `(status, parsed JSON or None)`, `(0, None)` when the api
+    cannot be reached."""
+    if http_session is None or not API_SECRET_KEY:
+        return 0, None
+    try:
+        async with http_session.get(
+                API_BASE_URL + MODLOG_PATH, params=params,
+                headers={"X-Internal-Key": API_SECRET_KEY, "X-Actor-Discord-Id": str(actor_id)},
+                timeout=aiohttp.ClientTimeout(total=MODLOG_TIMEOUT_S)) as resp:
+            raw = await resp.read()
+            try:
+                body = json.loads(raw.decode("utf-8"))
+            except Exception:
+                body = None
+            return resp.status, body
+    except Exception:
+        return 0, None
+
+
+def _modlog_error(status, body):
+    """One plain sentence for an answer that is not a page."""
+    detail = body.get("detail") if isinstance(body, dict) else None
+    if status == 0:
+        return MODLOG_UNREACHABLE
+    if status == 403:
+        return MODLOG_REFUSED
+    if status == 404:
+        return MODLOG_NOT_FOUND
+    if status == 409:
+        return MODLOG_AMBIGUOUS
+    if status in (400, 422):
+        return ("The moderator log refused that request (%s). Trying again as it is will not help."
+                % _escape_md(str(detail or "bad request"))[:200])
+    if status == 429 or status >= 500:
+        return ("The moderator log failed on the server (status %d). Trying again in a minute may help."
+                % int(status))
+    return "The moderator log answered status %d. Trying again will not help." % int(status)
+
+
+def _modlog_ts(iso):
+    try:
+        dt = datetime.fromisoformat(str(iso).replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return "<t:%d:f>" % int(dt.timestamp())
+    except Exception:
+        return "(time unknown)"
+
+
+def _modlog_cut(text, n):
+    text = str(text or "")
+    return text if len(text) <= n else text[:max(0, n - 1)] + "…"
+
+
+def _modlog_render(body, *, page, sort, action_idx, search):
+    """The page's text: a header with the player's name and the totals by
+    action, then one line per record. Raises ValueError on a body this
+    function does not read (the caller answers MODLOG_SCHEMA)."""
+    if not isinstance(body, dict) or not isinstance(body.get("rows"), list):
+        raise ValueError("rows")
+    total = body.get("total")
+    counts = body.get("counts_by_action")
+    who = body.get("player")
+    if (not isinstance(total, int) or isinstance(total, bool) or not isinstance(counts, list)
+            or not isinstance(who, dict)):
+        raise ValueError("shape")
+    sid = str(who.get("steam_id") or "")
+    name = _escape_md(_modlog_cut(who.get("name") or "unknown name", 40))
+    filt = []
+    if action_idx is not None:
+        filt.append("kind: " + MODLOG_BOT_ACTIONS[action_idx][1])
+    if search:
+        filt.append("search: " + _escape_md(_modlog_cut(search, 64)))
+    filt_txt = (" (" + "; ".join(filt) + ")") if filt else ""
+    if total == 0:
+        return "No moderator action is on record for **%s** (`%s`)%s." % (name, sid, filt_txt)
+    pages = max(1, -(-total // MODLOG_PAGE))
+    head = ("**Moderator log: %s** (`%s`)%s\n%d record%s, page %d of %d, %s."
+            % (name, sid, filt_txt, total, "" if total == 1 else "s", page + 1, pages,
+               MODLOG_SORTS[sort][2]))
+    tot = []
+    for c in counts:
+        if not isinstance(c, dict):
+            raise ValueError("count")
+        tot.append("%s %d" % (_escape_md(_modlog_cut(c.get("label"), 40)), int(c.get("count") or 0)))
+    totals = "Totals: " + ", ".join(tot) + "." if tot else ""
+    if not body["rows"]:
+        return "%s\n%s\nNo records on this page." % (head, totals)
+    for reason_n, sentence_n in ((120, 160), (60, 100), (30, 60)):
+        lines = []
+        for r in body["rows"]:
+            if not isinstance(r, dict):
+                raise ValueError("row")
+            line = "%s **%s** by %s" % (_modlog_ts(r.get("at")),
+                                        _escape_md(_modlog_cut(r.get("action_label"), 40)),
+                                        _escape_md(_modlog_cut(r.get("actor_name") or r.get("actor"), 40)))
+            if r.get("reason"):
+                line += " — reason: " + _escape_md(_modlog_cut(r.get("reason"), reason_n))
+            line += " — " + _escape_md(_modlog_cut(r.get("sentence"), sentence_n))
+            lines.append(line)
+        msg = "\n".join([head, totals] + lines)
+        if len(msg) <= MODLOG_MSG_MAX:
+            return msg
+    return _modlog_cut(msg, MODLOG_MSG_MAX)
+
+
+def _modlog_view(sid, sort, action_idx, page, search, total):
+    pages = max(1, -(-int(total) // MODLOG_PAGE))
+    if pages <= 1:
+        return None
+    view = discord.ui.View(timeout=None)
+    view.add_item(discord.ui.Button(style=discord.ButtonStyle.secondary, label="Previous",
+                                    custom_id=_modlog_custom_id(sid, sort, action_idx, max(page - 1, 0), search),
+                                    disabled=page <= 0))
+    view.add_item(discord.ui.Button(style=discord.ButtonStyle.secondary, label="Next",
+                                    custom_id=_modlog_custom_id(sid, sort, action_idx, page + 1, search),
+                                    disabled=page >= pages - 1))
+    return view
+
+
+async def _modlog_page(actor_id, player, sort, action_idx, page, search):
+    """`(served, text, view)` for one page: a rendered page with its buttons
+    (or none for a single page), or one plain sentence (served False)."""
+    status, body = await _modlog_fetch(_modlog_params(player, sort, action_idx, page, search), actor_id)
+    if status != 200:
+        return False, _modlog_error(status, body), None
+    try:
+        text_out = _modlog_render(body, page=page, sort=sort, action_idx=action_idx, search=search)
+        sid = str(body["player"]["steam_id"])
+        return True, text_out, _modlog_view(sid, sort, action_idx, page, search, body["total"])
+    except Exception:
+        return False, MODLOG_SCHEMA, None
+
+
+async def _modlog_command(interaction, player, action, search, sort):
+    if not _aer_local_gate(interaction):
+        await interaction.response.send_message(MODLOG_GATE, ephemeral=True)
+        return
+    search = (search or "").strip()
+    if len(search) > MODLOG_SEARCH_MAX:
+        await interaction.response.send_message(MODLOG_SEARCH_LONG, ephemeral=True)
+        return
+    sort = sort if sort in MODLOG_SORTS else "n"
+    words = [w for w, _ in MODLOG_BOT_ACTIONS]
+    action_idx = words.index(action) if action in words else None
+    # The longest id the buttons can carry for this search: refused here,
+    # never cut on a later page.
+    if _modlog_custom_id("7" * 17, sort, action_idx, 99999, search) is None:
+        await interaction.response.send_message(MODLOG_SEARCH_WIDE, ephemeral=True)
+        return
+    await interaction.response.defer(ephemeral=True)
+    _served, text_out, view = await _modlog_page(interaction.user.id, (player or "").strip(), sort,
+                                        action_idx, 0, search)
+    if view is None:
+        await interaction.followup.send(text_out, ephemeral=True,
+                                        allowed_mentions=discord.AllowedMentions.none())
+    else:
+        await interaction.followup.send(text_out, ephemeral=True, view=view,
+                                        allowed_mentions=discord.AllowedMentions.none())
+
+
+async def _modlog_click(interaction, cid):
+    """A Previous or Next press: the command's gate again, then a fresh read
+    with the presser's id; the ephemeral page is edited in place."""
+    req = _modlog_parse_custom_id(cid)
+    if req is None or not _aer_local_gate(interaction):
+        await interaction.response.send_message(MODLOG_GATE, ephemeral=True)
+        return
+    sid, sort, action_idx, page, search = req
+    await interaction.response.defer()
+    served, text_out, view = await _modlog_page(interaction.user.id, sid, sort, action_idx, page, search)
+    if not served:
+        # An error sentence: the page shown stays as it was.
+        await interaction.followup.send(text_out, ephemeral=True)
+        return
+    await interaction.edit_original_response(content=text_out, view=view,
+                                             allowed_mentions=discord.AllowedMentions.none())
+
+
+@bot.tree.command(name="modlog", description="A player's moderator log (admin channel)")
+@app_commands.describe(player="The player's name or Steam id",
+                       action="Only this kind of action",
+                       search="Words to find in the reason, the kind of action or the details",
+                       sort="Order of the rows (newest first if not set)")
+@app_commands.choices(
+    action=[app_commands.Choice(name=label, value=word) for word, label in MODLOG_BOT_ACTIONS],
+    sort=[app_commands.Choice(name=words, value=code) for code, (_, _, words) in MODLOG_SORTS.items()])
+async def modlog_command(interaction: discord.Interaction, player: str,
+                         action: app_commands.Choice[str] = None, search: str = "",
+                         sort: app_commands.Choice[str] = None):
+    await _modlog_command(interaction, player, action.value if action else "", search or "",
+                          sort.value if sort else "n")
 
 
 if __name__ == "__main__":

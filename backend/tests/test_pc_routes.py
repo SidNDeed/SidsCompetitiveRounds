@@ -472,7 +472,10 @@ def test_the_unban_takes_the_identity_lattice_before_it_writes(monkeypatch):
     assert res == {"status": "unbanned", "steam_id": "1", "rows": 1}
     assert [p["sid"] for sql, p in db.log if "pg_advisory_xact_lock(hashtext(CAST(:sid AS text)))" in sql] == ["1", "9"]
     assert _idx(db, "pg_advisory_xact_lock(hashtext(CAST(:sid AS text)))") < _idx(db, "UPDATE player_bans SET unbanned_at")
-    assert db.committed == 1 and len(db.added) == 1 and db.added[0].action == "unban"
+    # MODLOG-1: the record goes through _modlog_write (one INSERT), not the ORM
+    assert db.committed == 1 and not db.added
+    assert [(p["act"], list(p["aff"])) for sql, p in db.log if "INSERT INTO admin_actions" in sql] == \
+        [("unban", [])]   # "1" is not a 17-digit Steam id, so the writer names no one
     src = inspect.getsource(main.admin_unban)
     assert src.index("_require_admin(") < src.index("_mail_lock_identities(") < src.index("UPDATE player_bans")
     assert "optional=(req.admin_steam_id, req.target_steam_id)" in src
@@ -1480,15 +1483,17 @@ def test_the_unban_persists_the_identities_the_lattice_re_read(monkeypatch, gone
     assert res == {"status": "unbanned", "steam_id": "1", "rows": 1}
     update = [p for sql, p in db.log if "UPDATE player_bans SET unbanned_at" in sql]
     assert update == [{"admin": admin_w, "sid": "1"}], update
-    assert len(db.added) == 1 and (db.added[0].admin_steam_id, db.added[0].target_steam_id) == (admin_w, target_w)
-    assert db.added[0].action == "unban" and db.committed == 1
+    # MODLOG-1: the record goes through _modlog_write, not the ORM
+    rec = [p for sql, p in db.log if "INSERT INTO admin_actions" in sql]
+    assert db.added == [] and [(p["a"], p["t"], p["act"]) for p in rec] == [(admin_w, target_w, "unban")]
+    assert db.committed == 1
     assert _idx(db, "pg_advisory_xact_lock(hashtext(CAST(:sid AS text)))") < _idx(db, "FOR NO KEY UPDATE") < _idx(db, "UPDATE player_bans")
     src = inspect.getsource(main.admin_unban)
     assert "rows = await _mail_lock_identities(" in src
     assert src.index("_mail_identity_to_write(rows, req.admin_steam_id)") < src.index("UPDATE player_bans")
     assert src.index("_mail_identity_to_write(rows, req.target_steam_id)") < src.index("UPDATE player_bans")
     assert '{"admin": admin_w, "sid": req.target_steam_id}' in src
-    assert "admin_steam_id=admin_w, action=\"unban\", target_steam_id=target_w" in src
+    assert "actor=admin_w, action=\"unban\", target_steam_id=target_w" in src
 
 
 def test_the_unban_refuses_an_actor_whose_deletion_committed_first(monkeypatch):
@@ -1700,21 +1705,27 @@ def test_the_unban_releases_a_key_outside_the_domain_only_when_a_row_carries_it(
     assert [p["sid"] for sql, p in db.log
             if "pg_advisory_xact_lock(hashtext(CAST(:sid AS text)))" in sql] == sorted({"9", key} - {""}, key=lambda s: (len(s), s))
     assert [p for sql, p in db.log if "UPDATE player_bans SET unbanned_at" in sql] == [{"admin": "9", "sid": key}]
-    assert len(db.added) == 1
-    assert (db.added[0].action, db.added[0].target_steam_id, db.added[0].details) == ("unban", key, {"rows": 1})
+    # MODLOG-1: one record through _modlog_write; a key outside the 17-digit
+    # form is the record's target but names no one in affected_steam_ids
+    rec = [p for sql, p in db.log if "INSERT INTO admin_actions" in sql]
+    assert db.added == [] and len(rec) == 1
+    assert (rec[0]["act"], rec[0]["t"], json.loads(rec[0]["d"]), list(rec[0]["aff"])) == ("unban", key, {"rows": 1}, [])
     assert db.committed == 1
     db = _ReleaseDb({}, 0)
     with pytest.raises(HTTPException) as ex:
         _run(unban(key, db))
     assert (ex.value.status_code, ex.value.detail) == (422, "target_steam_id must be a numeric steam id")
-    assert db.count("UPDATE player_bans SET unbanned_at") == 1 and db.added == [] and db.committed == 0
+    assert db.count("UPDATE player_bans SET unbanned_at") == 1 and db.count("INSERT INTO admin_actions") == 0
+    assert db.committed == 0
     db = _ReleaseDb({}, 0)
     assert _run(unban("76561198000000008", db)) == {"status": "unbanned", "steam_id": "76561198000000008", "rows": 0}
-    assert len(db.added) == 1 and db.added[0].details == {"rows": 0} and db.committed == 1
+    rec = [p for sql, p in db.log if "INSERT INTO admin_actions" in sql]
+    assert len(rec) == 1 and json.loads(rec[0]["d"]) == {"rows": 0} and db.committed == 1
+    assert list(rec[0]["aff"]) == ["76561198000000008"]   # ruling G: an unban that lifts nothing keeps its record
     src = inspect.getsource(main.admin_unban)
     assert "_mod_target_or_422(" not in src
     assert (src.index("UPDATE player_bans") < src.index("_mod_release_or_422(req.target_steam_id, res.rowcount)")
-            < src.index("db.add(AdminAction("))
+            < src.index("_modlog_write("))
 
 
 # strings no text bind can carry: a NUL character (PostgreSQL text holds none) and lone surrogates (no UTF-8 encoding)
@@ -1843,10 +1854,10 @@ def test_the_audit_rows_carry_the_whole_actor(monkeypatch):
     def audited(db):
         return [p["a"] for sql, p in db.log if "INSERT INTO admin_actions" in sql]
 
-    for writer in (main._log_admin_action, main._log_admin_action_strict):
-        db = _GateDb({})
-        _run(writer(db, admin_steam_id=actor, action="x", target_steam_id=None, details={}))
-        assert audited(db) == [actor], writer.__name__
+    # MODLOG-1: one writer remains
+    db = _GateDb({})
+    _run(main._modlog_write(db, actor=actor, action="chat_lockdown", details={}))
+    assert audited(db) == [actor]
     db = _GateDb({})
     _run(main._set_chat_lockdown(db, True, actor))
     assert audited(db) == [actor]
