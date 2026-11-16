@@ -75082,7 +75082,7 @@ QDIG_TEAM_POINTS_MAX = 10000        # the 2v2 and 1v2 schemas bound points below
 # verdict on the body: the statement's budget stopped before it.
 QDIG_MALFORMED_WORDS = ("oversize", "unreadable", "not_object", "players", "roster_size", "player_shape",
                         "field_type", "field_range", "account_id", "duplicate_player", "slots", "winner",
-                        "reporter", "marks", "room", "sides", "schema")
+                        "reporter", "marks", "room", "sides", "schema", "leave_figure")
 QDIG_UNREAD = "unread"
 
 # Process-local state of the janitor pass (primary only). needs_decision is
@@ -75232,6 +75232,7 @@ def _qdig_bounds(model, field) -> tuple:
 # pinned against their sources by a test.
 _QDIG_FFA_INT_FIELDS = {f: _qdig_bounds(FfaPlayerEntry, f)
                         for f in ("slot", "rounds_won", "points_total", "kills")}
+_QDIG_LEAVE_FIGURE_RANGE = _qdig_bounds(FfaPlayerEntry, "game_points_at_leave")
 _QDIG_SIDE_SHAPES = {
     "2v2": {"key": "t1a", "seats": (("t1a", "t1b"), ("t2a", "t2b")),
             "rounds": ("t1_rounds_won", "t2_rounds_won"), "points": ("t1_points_total", "t2_points_total"),
@@ -75277,6 +75278,21 @@ def _qdig_need(cond, why):
         raise _QdigMalformed(why)
 
 
+def _qdig_strict_model(model, pl):
+    """The settlement's own model over the WHOLE body, in pydantic's strict
+    form for JSON input: no field of any level reaches code after the reader
+    converted from another JSON type (a numeric string, a float, true/false
+    where an int is wanted, and the like are refused), so a field this
+    reader does not check by hand is still checked by type, and a field the
+    model gains later is too. The body is the decoded JSON object; it is
+    validated as JSON text so a time is read from its string form, as the
+    capture stored it. Any refusal is the word "schema"."""
+    try:
+        return model.model_validate_json(_json.dumps(pl), strict=True)
+    except Exception:
+        raise _QdigMalformed("schema")
+
+
 def _qdig_common(pl, players_ids: set) -> dict:
     """The fields every shape shares: reporter, room, started_at, is_ranked."""
     rep = pl.get("reported_by_steam_id")
@@ -75312,6 +75328,16 @@ def _qdig_read_ffa(pl, row) -> dict:
             _qdig_need(type(p.get(f)) is int, "field_type")
             _qdig_need(_qdig_int(p.get(f), lo, hi), "field_range")
         _qdig_need(type(p.get("left_early")) is bool and type(p.get("absent")) is bool, "marks")
+        # The leave figure feeds the early-leave grace decision that
+        # _ffa_report_contradiction compares: absent or null on a present
+        # seat and on an absent ghost; REQUIRED on a seat that left during
+        # this game (the submit path's 422, _ffa_missing_leave_figure); an
+        # int in the schema's range wherever it is given.
+        gpal = p.get("game_points_at_leave")
+        if gpal is not None:
+            _qdig_need(type(gpal) is int, "field_type")
+            _qdig_need(_qdig_int(gpal, *_QDIG_LEAVE_FIGURE_RANGE), "field_range")
+        _qdig_need(gpal is not None or not p["left_early"] or p["absent"], "leave_figure")
         out.append({"steam_id": p["steam_id"], "name": name, "slot": p["slot"], "rounds": p["rounds_won"],
                     "points": p["points_total"], "kills": p["kills"], "left_early": p["left_early"],
                     "absent": p["absent"]})
@@ -75324,10 +75350,7 @@ def _qdig_read_ffa(pl, row) -> dict:
     winner = pl.get("winner_steam_id")
     _qdig_need(type(winner) is str and winner in ids, "winner")
     common = _qdig_common(pl, ids)
-    try:
-        report = FfaMatchReport.model_validate(pl)
-    except Exception:
-        raise _QdigMalformed("schema")
+    report = _qdig_strict_model(FfaMatchReport, pl)
     out.sort(key=lambda p: p["slot"])
     return _qdig_body_value(row, shape="ffa", room=_qdig_col_room(row) or common["body_room"],
                             reporter=common["reporter"], winner=winner, players=out,
@@ -75361,6 +75384,7 @@ def _qdig_read_sides(pl, row) -> dict:
         sides.append({"steams": steams, "names": names, "rounds": r, "points": pts, "won": w == n + 1})
     common = _qdig_common(pl, seen)
     _qdig_need(common["reporter"] in seen, "reporter")
+    _qdig_strict_model(spec["model"], pl)
     return _qdig_body_value(row, shape=shape, room=_qdig_col_room(row) or common["body_room"],
                             reporter=common["reporter"], sides=sides, started_at=common["started_at"],
                             is_ranked=common["is_ranked"])
@@ -75383,8 +75407,11 @@ def _qdig_read_body(row) -> dict:
     payload_oversize or payload_unread.
 
     It validates the fields the classification, the texts and the census
-    USE (presence, type, range), and the settlement's own schema
-    (FfaMatchReport, which the capture validated the body with); a key it
+    USE (presence, type, range), and then the WHOLE body against the
+    settlement's own model in its strict form for JSON input
+    (_qdig_strict_model: FfaMatchReport, TeamMatchReport or OvtMatchReport),
+    so no field of the model reaches later code converted from another JSON
+    type; a key it
     does not know, at either level, is ignored and never makes a row
     MALFORMED, so a newer client's extra keys change nothing. The size
     bound holds for the whole body. The slot rule is checked here because

@@ -80,6 +80,14 @@ def _team(shape, **over):
     return body
 
 
+def _left(i, figure, absent=False):
+    """Player i left early (during this game unless absent) with this leave
+    figure (game_points_at_leave)."""
+    def f(b):
+        b["players"][i].update(left_early=True, absent=absent, game_points_at_leave=figure)
+    return f
+
+
 def _dup_player(b):
     b["players"][3] = dict(b["players"][2], slot=3)
 
@@ -156,6 +164,16 @@ TABLE = [
     ("started_at not a time", "ffa", edit(settop("started_at", "yesterday")), "field_type"),
     ("is_ranked a string", "ffa", edit(settop("is_ranked", "yes")), "field_type"),
     ("the schema refuses it", "ffa", edit(deltop("lobby_id")), "schema"),
+    ("a seat that left with no leave figure", "ffa", edit(_left(3, None)), "leave_figure"),
+    ("a leave figure as a numeric string", "ffa", edit(_left(3, "100")), "field_type"),
+    ("a leave figure as a float", "ffa", edit(_left(3, 100.0)), "field_type"),
+    ("a leave figure as true", "ffa", edit(_left(3, True)), "field_type"),
+    ("a leave figure over the schema", "ffa", edit(_left(3, 32001)), "field_range"),
+    ("a seat that left with its leave figure", "ffa", edit(_left(3, 100)), "ok"),
+    ("an absent ghost with no leave figure", "ffa", edit(_left(3, None, absent=True)), "ok"),
+    ("a timeline as a number (the strict model)", "ffa", edit(settop("timeline", 7)), "schema"),
+    ("a player's fps as a numeric string (the strict model)", "ffa", edit(setp(2, "fps", "60")), "schema"),
+    ("a 2v2 seat's fps as a numeric string (the strict model)", "team", _team("2v2", t1a_fps="60"), "schema"),
     ("deep nesting", "ffa", _deep(), "unreadable"),
     ("a 2v2 body", "team", _team("2v2"), "ok"),
     ("a 1v2 body", "team", _team("1v2"), "ok"),
@@ -391,3 +409,172 @@ def test_census_every_lane_statement_selects_the_body_through_its_size():
                 continue                          # the column alias of the CASE
             assert after.startswith("::text") and (
                 "octet_length(" in ctx or "AS body" in ctx or "THEN" in ctx), (k, ctx)
+
+
+# ── qdig-r2: every field of the model, by its JSON type ──────────────────
+#
+# Generated from the models' own field lists, never from a hand list: for
+# every field of every level the reader takes (the FFA report, an FFA
+# player, a 2v2 and a 1v2 report, a seat of either, and the nested card,
+# offer and telemetry entries), each JSON value of a type the field does not
+# accept, put in its place, must make the body MALFORMED. A field that no
+# code after the reader can reach would stand in EXEMPT with its reason;
+# none does, because the reader validates the whole body against the
+# model's strict JSON form (_qdig_strict_model). A model field whose type
+# this test cannot place fails the test until someone decides its kinds.
+
+import datetime as _dt
+import types as _types
+import typing as _typing
+
+from pydantic import BaseModel as _BaseModel
+
+# One value of each JSON type. "1" is the numeric string, 1.0 the whole
+# float: the two a lax model turns into an int.
+_KIND_SAMPLE = {"str": "1", "int": 1, "float": 1.0, "bool": True, "list": [], "object": {}, "null": None}
+
+
+def _kinds(ann) -> set:
+    """The JSON types a field of this annotation accepts in strict JSON form."""
+    origin = _typing.get_origin(ann)
+    if origin in (_typing.Union, _types.UnionType):
+        out = set()
+        for a in _typing.get_args(ann):
+            out |= _kinds(a)
+        return out
+    if ann is type(None):
+        return {"null"}
+    if ann is bool:
+        return {"bool"}
+    if ann is int:
+        return {"int"}
+    if ann is float:
+        return {"int", "float"}
+    if ann is str or ann is _dt.datetime:
+        return {"str"}
+    if origin is list:
+        return {"list"}
+    if origin is dict:
+        return {"object"}
+    if isinstance(ann, type) and issubclass(ann, _BaseModel):
+        return {"object"}
+    raise AssertionError(("a model field of a type this test cannot place: decide its JSON kinds", ann))
+
+
+def _ffa_full():
+    """Game A's body with player 3 carrying a card, an offer and telemetry,
+    so the nested levels have an entry to change."""
+    b = base()
+    b["players"][3].update(cards=[{"card_name": "Buckshot", "pick_order": 1, "round_number": 1}],
+                           card_offers=[{"card_name": "Buckshot", "round_number": 1}],
+                           telemetry={"ping_avg": 40})
+    return b
+
+
+def _team_full(shape):
+    b = _team(shape)
+    seat = "t1a" if shape == "2v2" else "solo"
+    b[seat].update(cards=[{"card_name": "Buckshot", "pick_order": 1, "round_number": 1}],
+                   card_offers=[{"card_name": "Buckshot", "round_number": 1}])
+    if shape == "2v2":
+        b["t1a_telemetry"] = {"ping_avg": 40}
+    return b
+
+
+# (level, mode, base body, model, the object at that level)
+_LEVELS = [
+    ("ffa report", "ffa", _ffa_full, schemas.FfaMatchReport, lambda b: b),
+    ("ffa player", "ffa", _ffa_full, schemas.FfaPlayerEntry, lambda b: b["players"][3]),
+    ("ffa player card", "ffa", _ffa_full, schemas.CardPick, lambda b: b["players"][3]["cards"][0]),
+    ("ffa player offer", "ffa", _ffa_full, schemas.CardOfferEntry, lambda b: b["players"][3]["card_offers"][0]),
+    ("ffa player telemetry", "ffa", _ffa_full, schemas.TeamPlayerTelemetry, lambda b: b["players"][3]["telemetry"]),
+    ("2v2 report", "team", lambda: _team_full("2v2"), schemas.TeamMatchReport, lambda b: b),
+    ("2v2 seat", "team", lambda: _team_full("2v2"), schemas.PlayerMatchData, lambda b: b["t1a"]),
+    ("2v2 seat card", "team", lambda: _team_full("2v2"), schemas.CardPick, lambda b: b["t1a"]["cards"][0]),
+    ("2v2 seat offer", "team", lambda: _team_full("2v2"), schemas.CardOfferEntry,
+     lambda b: b["t1a"]["card_offers"][0]),
+    ("2v2 seat telemetry", "team", lambda: _team_full("2v2"), schemas.TeamPlayerTelemetry,
+     lambda b: b["t1a_telemetry"]),
+    ("1v2 report", "team", lambda: _team_full("1v2"), schemas.OvtMatchReport, lambda b: b),
+    ("1v2 seat", "team", lambda: _team_full("1v2"), schemas.PlayerMatchData, lambda b: b["solo"]),
+]
+
+# Fields no code after the reader can reach, each with its reason. Empty:
+# the strict model reads every field of every level.
+EXEMPT = {}
+
+
+def _cases():
+    out = []
+    for level, mode, make, model, at in _LEVELS:
+        for field, info in model.model_fields.items():
+            if (level, field) in EXEMPT:
+                continue
+            for kind in sorted(set(_KIND_SAMPLE) - _kinds(info.annotation)):
+                out.append((level, field, kind))
+    return out
+
+
+_CASES = _cases()
+_LEVEL = {lv[0]: lv for lv in _LEVELS}
+
+
+def test_every_level_reads_ok_before_any_change():
+    for level, mode, make, model, at in _LEVELS:
+        v = main._qdig_read_body(_row(mode, json.dumps(make())))
+        assert v["ok"], (level, v["why"])
+
+
+def test_the_generated_cases_cover_every_field_of_every_level():
+    """The checked fields plus EXEMPT are exactly each model's fields: a
+    field the model gains is a case here (or a decision in EXEMPT)."""
+    for level, mode, make, model, at in _LEVELS:
+        checked = {f for lv, f, _ in _CASES if lv == level}
+        exempt = {f for lv, f in EXEMPT if lv == level}
+        assert not checked & exempt
+        assert checked | exempt == set(model.model_fields), level
+    assert len(_CASES) >= 300
+
+
+@pytest.mark.parametrize("level,field,kind", _CASES, ids=[f"{a}.{b}={c}" for a, b, c in _CASES])
+def test_every_field_given_a_json_type_it_does_not_accept_is_malformed(level, field, kind):
+    _, mode, make, model, at = _LEVEL[level]
+    body = make()
+    at(body)[field] = copy.deepcopy(_KIND_SAMPLE[kind])
+    v = main._qdig_read_body(_row(mode, json.dumps(body)))
+    assert v["ok"] is False, f"{level}.{field} as a JSON {kind} was read as valid"
+    assert v["why"] in main.QDIG_MALFORMED_WORDS, (level, field, kind, v["why"])
+
+
+# ── qdig-r2: the reviewer's case ─────────────────────────────────────────
+
+def _left_early_both_sides(figure):
+    """Game A's held body with seat 4 (player 3) left during the game with
+    this leave figure, and the recorded game naming seat 4 as left early
+    too; everything else as the fixture's game A, which on its own is FOR
+    THE RECORD."""
+    body = edit(_left(3, figure))
+    f = fx.facts("A")
+    for vec in f["vectors"][str(fx.MATCH_A)]:
+        if vec["steam_id"] == fx.steam(4):
+            vec["left_early"] = True
+    return fx.judge(main, fx.row("A", body=body), f)
+
+
+def test_a_leave_figure_sent_as_a_string_needs_a_decision_and_is_never_filed():
+    v = _left_early_both_sides("100")
+    assert v["class"] != FTR, "a leave figure sent as the string \"100\" was classified for_the_record"
+    assert v["class"] == NEEDS
+    assert v["malformed"] == "field_type"
+
+
+def test_control_a_correct_leave_figure_and_an_allowed_null_classify_as_before():
+    """The accepted shapes stay accepted: an int leave figure on the seat
+    that left, a null on an absent ghost, and the plain live shape, each
+    classify as they did before the strict reading."""
+    assert _left_early_both_sides(100)["class"] == FTR
+    ghost = edit(_left(3, None, absent=True))
+    assert main._qdig_read_body(_row("ffa", json.dumps(ghost)))["ok"] is True
+    assert _judge_body(base())["class"] == FTR
+    for game in ("A", "B", "C2", "C3"):
+        assert main._qdig_read_body(fx.row(game))["ok"] is True, game
