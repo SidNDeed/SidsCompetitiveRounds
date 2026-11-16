@@ -1040,7 +1040,10 @@ async def _ban(ctx, player):
     admin = await _admin(ctx)
     maker = await ctx.session("fixture")
     async with maker() as db:
-        db.add(models.PlayerBan(steam_id=player.steam, reason="test", banned_by_steam_id=admin))
+        # an end (migration 418's CHECK: every ban ends within the maximum)
+        from datetime import datetime, timedelta, timezone
+        db.add(models.PlayerBan(steam_id=player.steam, reason="test", banned_by_steam_id=admin,
+                                expires_at=datetime.now(timezone.utc) + timedelta(days=30)))
         await db.commit()
 
 

@@ -25,7 +25,7 @@ import uuid
 from uuid import UUID
 
 import json as _json
-from pydantic import BaseModel, Field, StrictInt
+from pydantic import BaseModel, Field, StrictInt, field_validator
 from fastapi import Body, Depends, FastAPI, Header, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
@@ -49,6 +49,7 @@ import steamid64 as _sid64   # the SteamID64 rule, standard library only: the na
 import log_redaction as _logred   # the credential rule, standard library only: every receive path and read-back door of client log text applies it
 from models import AdminUser, AdminAction, Bet, BoosterGrant, BugReport, BugReportEvent, CardOffer, FlaggedMatch, GlickoRating, GoldTransaction, Match, MatchCard, Player, PlayerBan, PlayerItem, RankedSeries, RankRoleColor, RatingHistory, RankedQueue, QueueBlock, PlayerBlock, LinkCode, PlayerAchievement, ShopItem, GlickoRating2v2, TeamQueue, TeamSeries, TeamMatch, TeamMatchCard, TeamMatchTelemetry, TournamentMatch
 from models import player_ban_active_sql
+from models import BAN_MAX_DAYS, BAN_MAX_HOURS, BAN_MAX_MINUTES, ban_cap_sql
 from schemas import (
     AchievementUnlockRequest,
     AchievementListResponse,
@@ -7956,6 +7957,17 @@ _ASK6_INVITES_BUILD = 1
 # release train and read by nothing else (#306). Absent on any build
 # before it.
 _BAN_EXPIRY_BUILD = 1
+# Release-train verification plumbing, not a design mechanism: the build
+# marker of the batch in which every ban has an end at most
+# models.BAN_MAX_HOURS after its start (the cap ruling of 16 Nov 2026;
+# migration 418 holds the bound in the table and is applied AFTER this
+# build), reported on /health as `ban_cap_build`. It names build identity
+# only; the train cannot see what the batch changes (the end every ban
+# writer stores), so without it a box on the new build could not be told
+# from a stale one (learnings 780, 794, 1186). A code constant, equal on
+# both boxes by construction, probed by the release train and read by
+# nothing else (#306). Absent on any build before it.
+_BAN_CAP_BUILD = 1
 # Its sibling, the /health `session_report` word, asks
 # the DATABASE whether it has every table and column the report route's
 # statements name, and the app whether that route is bound. Its statements are
@@ -8049,6 +8061,7 @@ async def health_check(db: AsyncSession = Depends(get_db)):
                               ask6_invites_build=_ASK6_INVITES_BUILD,
                               casual_streak_build=_CASUAL_STREAK_BUILD,
                               ban_expiry_build=_BAN_EXPIRY_BUILD,
+                              ban_cap_build=_BAN_CAP_BUILD,
                               build_manifest=_build_manifest.health_word(),
                               review_eval=_review_rules.review_eval(),
                               review_rules=_review_rules.health_word(),
@@ -8116,6 +8129,7 @@ async def health_check(db: AsyncSession = Depends(get_db)):
                               ask6_invites_build=_ASK6_INVITES_BUILD,
                               casual_streak_build=_CASUAL_STREAK_BUILD,
                               ban_expiry_build=_BAN_EXPIRY_BUILD,
+                              ban_cap_build=_BAN_CAP_BUILD,
                               build_manifest=_build_manifest.health_word(),
                               review_eval=_review_rules.review_eval(),
                               review_rules=_review_rules.health_word(),
@@ -16640,9 +16654,10 @@ async def check_player_registered(steam_id: str, db: AsyncSession = Depends(get_
     result = await db.execute(select(Player).where(Player.steam_id == steam_id))
     player = result.scalar_one_or_none()
 
-    # B3/B5 (server half): ban_expires_at (UTC ISO 8601 with Z, null =
-    # permanent or not banned) and ban_seconds_left (an integer, null =
-    # permanent or not banned) come AFTER ban_reason; every key before them
+    # B3/B5 (server half): ban_expires_at (UTC ISO 8601 with Z, null = not
+    # banned, or a ban row written before migration 418 gave every ban an
+    # end) and ban_seconds_left (an integer, null in the same two cases)
+    # come AFTER ban_reason; every key before them
     # keeps its value and its place. The 1.41.0 client reads this answer with
     # JsonUtility.FromJson<ModCheckResponse>, which ignores keys its class
     # does not declare, wherever they stand.
@@ -49009,8 +49024,9 @@ async def _is_banned(db: AsyncSession, steam_id: str):
 
 
 # What a ban answer says about its end: expires_at as UTC ISO 8601 with a
-# trailing Z (null = permanent), and seconds_left, the whole seconds until it
-# by the database's clock (null = permanent). Both read from one row.
+# trailing Z, and seconds_left, the whole seconds until it by the database's
+# clock. Both read from one row; both are null only for a row written before
+# migration 418 gave every ban an end.
 _BAN_END_COLS_SQL = (
     "{a}.expires_at, CASE WHEN {a}.expires_at IS NULL THEN NULL"
     " ELSE CAST(GREATEST(0, CEIL(EXTRACT(EPOCH FROM ({a}.expires_at - NOW())))) AS BIGINT)"
@@ -49138,8 +49154,8 @@ async def admin_list_bans(
 
     Active means the one definition (models.player_ban_active_sql): a timed
     ban that has ended is no longer listed. Each row gains `expires_at` (UTC
-    ISO 8601 with Z, null = permanent) and `seconds_left` (an integer, null =
-    permanent) AFTER banned_at, its last key in 1.41.0: the client cuts each
+    ISO 8601 with Z) and `seconds_left` (an integer), both null only for a
+    row written before migration 418 gave every ban an end, AFTER banned_at, its last key in 1.41.0: the client cuts each
     row from one `"id":"` to the next and reads its six keys with
     ExtractJsonString, so two trailing keys with other names cannot be read
     in place of any of them."""
@@ -49257,39 +49273,68 @@ async def _ban_rate_gate_or_raise(db: AsyncSession, admin_steam_id: str, target_
 # ended (migration 417): the system closed it, not an admin. The column is
 # TEXT with no foreign key (028), so the marker needs no admin_users row.
 BAN_CLOSED_BY_EXPIRY = "system:expired"
-# A ban length, in minutes: one minute to ten years (365 * 24 * 60 * 10).
-BAN_DURATION_MAX_MINUTES = 5256000
+# A ban length, in minutes: one minute to the maximum, models.BAN_MAX_MINUTES
+# (BAN_MAX_HOURS, 365 days of 24 hours, after the ban's start).
+BAN_DURATION_MAX_MINUTES = BAN_MAX_MINUTES
 
 
-def _ban_end_sql(duration_minutes) -> str:
-    """The SQL value of a ban's end for a length in minutes: NULL (permanent)
-    for None, else NOW() plus the length on the database's clock. Built in
-    code, so no bind exists only to be null-tested (learning #448)."""
+def _ban_end_sql(duration_minutes, start: str) -> str:
+    """The SQL value of a ban's end: `start` plus the length in minutes (bound
+    as :ban_minutes), or `start` plus the maximum (models.ban_cap_sql) when no
+    length is given. Never NULL. The ONE helper every api writer of
+    player_bans.expires_at takes its value from (test_ban_cap_pg.py counts
+    the writers and their calls of it). `start` is SQL this module builds (a
+    column or a clock read), never request text. Built in code, so no bind
+    exists only to be null-tested (learning #448)."""
     if duration_minutes is None:
-        return "NULL"
-    return "NOW() + make_interval(mins => CAST(:ban_minutes AS integer))"
+        return ban_cap_sql(start)
+    return f"({start} + make_interval(mins => CAST(:ban_minutes AS integer)))"
+
+
+def _ban_past_maximum_detail(latest_end) -> str:
+    """The refusal of a length change whose end would pass the ban's latest
+    possible end (its start plus the maximum), naming that end."""
+    return (f"ban_length_past_maximum: a ban lasts at most {BAN_MAX_DAYS} days "
+            f"({BAN_MAX_HOURS} hours) from its start; the latest end this ban can "
+            f"have is {_ban_end_iso(latest_end)}")
 
 
 async def _ban_set_length_core(db: AsyncSession, *, admin_steam_id: str, target_steam_id: str,
                                active, duration_minutes) -> dict:
     """A length change on an ACTIVE ban (B4): the active row's end becomes
-    NOW() plus the length, or NULL for permanent. Called by _apply_ban_core
-    under the target's identity lock, before any of a new ban's side effects
-    (no session, portal, queue or card write: the ban they belong to is
-    already in force), so it writes exactly this UPDATE and one admin_actions
-    row holding the old and the new end. The reason and the row count do not
-    change. Does NOT commit."""
+    NOW() plus the length, or, with no length (null), the ban's start plus
+    the maximum (the latest end it can have). An end later than the ban's
+    start plus the maximum is refused (422, naming that latest end) and
+    nothing is written: the UPDATE's own predicate holds the bound, so the
+    row is never offered a value migration 418's CHECK would refuse. Called
+    by _apply_ban_core under the target's identity lock, before any of a new
+    ban's side effects (no session, portal, queue or card write: the ban
+    they belong to is already in force), so it writes exactly this UPDATE
+    and one admin_actions row holding the old and the new end. The reason
+    and the row count do not change. Does NOT commit."""
     params = {"id": active["id"]}
     if duration_minutes is not None:
         params["ban_minutes"] = int(duration_minutes)
+        _new_end = _ban_end_sql(duration_minutes, "NOW()")
+    else:
+        _new_end = _ban_end_sql(None, "pb.banned_at")
     row = (await db.execute(text(
-        "UPDATE player_bans pb SET expires_at = " + _ban_end_sql(duration_minutes) + " "
+        "UPDATE player_bans pb SET expires_at = " + _new_end + " "
         "WHERE pb.id = :id AND " + player_ban_active_sql("pb") + " "
+        "AND " + _new_end + " <= " + ban_cap_sql("pb.banned_at") + " "
         "RETURNING " + _BAN_END_COLS_SQL.format(a="pb")
     ), params)).mappings().first()
     if row is None:
-        # Unreachable under the identity lock, which every writer of this
-        # key's rows takes; refused rather than reported as a change.
+        # The bound refused the end, or the row stopped being active, which
+        # is unreachable under the identity lock every writer of this key's
+        # rows takes; the second is refused rather than reported as a change.
+        cap = (await db.execute(text(
+            "SELECT " + ban_cap_sql("pb.banned_at") + " AS latest_end, "
+            + player_ban_active_sql("pb") + " AS active "
+            "FROM player_bans pb WHERE pb.id = :id"
+        ), {"id": active["id"]})).mappings().first()
+        if cap is not None and cap["active"]:
+            raise HTTPException(status_code=422, detail=_ban_past_maximum_detail(cap["latest_end"]))
         raise HTTPException(status_code=409, detail="ban_changed_concurrently")
     old_end, new_end = _ban_end_iso(active["expires_at"]), _ban_end_iso(row["expires_at"])
     db.add(AdminAction(
@@ -49307,20 +49352,23 @@ async def _apply_ban_core(db: AsyncSession, *, admin_steam_id: str, target_steam
                           length_sent: bool = False) -> dict:
     """The ban WRITE core, extracted verbatim from admin_ban (Sept 6 item b,
     B-2): identity lock, session and portal revocation, queue-row revocation,
-    the already_banned check, the PlayerBan + AdminAction rows. Does NOT
+    the already_banned check, the player_bans + AdminAction rows. Does NOT
     commit — admin_ban commits right after; the moderation-case act path
     commits together with its case row. Returns the route's response dict.
 
     B4 (migration 417): `length_sent` says the request carried
-    duration_minutes (null included, which means permanent). Then, for a
+    duration_minutes (null included, which means the maximum). Then, for a
     target already under an ACTIVE ban, the core changes that ban's end and
     returns (_ban_set_length_core) before any side effect below. Otherwise
-    it runs as before; a new ban's row carries expires_at = NOW() plus the
-    length (NULL when no length was given), and an ENDED open row of the
-    same key is closed first, in this transaction and under this lock, as
-    the system (BAN_CLOSED_BY_EXPIRY): migration 417's unique index holds
-    one open row per key, so the earlier ban stays in the log, closed, and
-    no two rows of one key are ever both active."""
+    it runs as before; a new ban's row carries banned_at = one clock read
+    taken at the insert, after the identity lock, and expires_at = that
+    start plus the length, or plus the maximum (models.BAN_MAX_HOURS) when
+    no length was given -- every ban ends (the cap ruling of 16 Nov 2026,
+    migration 418). An ENDED open row of the same key is closed first, in
+    this transaction and under this lock, as the system
+    (BAN_CLOSED_BY_EXPIRY): migration 417's unique index holds one open row
+    per key, so the earlier ban stays in the log, closed, and no two rows of
+    one key are ever both active."""
     # Identity lock FIRST, before any purge (round-13 find 6: with the lock
     # taken after the session purge, a steam_auth finalization holding the
     # lock could insert a fresh session AFTER our purge but BEFORE our ban
@@ -49439,9 +49487,10 @@ async def _apply_ban_core(db: AsyncSession, *, admin_steam_id: str, target_steam
     # Migration 416's change: the invitees' revisions for the invites ended
     # above, after the drain. On a new ban the core makes three writes after
     # it, and none can wait on another transaction of the application:
-    # migration 417's close of this key's ended ban row here, and the ban and
-    # admin action rows, which go out when the session next flushes (at the
-    # caller's commit at the latest). Every writer of a key's player_bans
+    # migration 417's close of this key's ended ban row here, the ban row's
+    # INSERT right after it, and the admin action row, which goes out when
+    # the session next flushes (at the caller's commit at the latest). Every
+    # writer of a key's player_bans
     # rows holds that key's identity lock, which this core takes first (the
     # close and the insert here, _ban_set_length_core inside this core,
     # admin_unban through its sorted identity locks). The ban row's foreign
@@ -49472,14 +49521,29 @@ async def _apply_ban_core(db: AsyncSession, *, admin_steam_id: str, target_steam
         "WHERE steam_id = :sid AND unbanned_at IS NULL "
         "AND expires_at IS NOT NULL AND expires_at <= NOW() RETURNING id"
     ), {"closer": BAN_CLOSED_BY_EXPIRY, "sid": target_steam_id})).scalars().all()]
-    # The end on the database's clock, read in this transaction (NOW() is
-    # its start, the instant the row's own banned_at default does not use).
-    _ban_end = None
+    # The new row, by SQL rather than the ORM class (the cap ruling,
+    # migration 418): its start and its end come from ONE read of the
+    # database's clock, taken here, after the identity lock (clock_timestamp(),
+    # not NOW(), which is this transaction's start and would date a ban that
+    # waited on the lock before what committed during the wait). The ORM's
+    # banned_at default was the api process's clock, so start plus the
+    # maximum could pass the table's bound by the skew between the two
+    # clocks. Every column is named, with the value the ORM class wrote:
+    # id a fresh uuid4 (the ORM default; the table's default is
+    # gen_random_uuid()), unbanned_at and unbanned_by_steam_id NULL.
+    _ban_params = {"id": str(uuid.uuid4()), "sid": target_steam_id, "reason": _ban_reason,
+                   "adm": admin_steam_id}
     if duration_minutes is not None:
-        _ban_end = (await db.execute(text("SELECT " + _ban_end_sql(duration_minutes)),
-                                     {"ban_minutes": int(duration_minutes)})).scalar()
-    db.add(PlayerBan(steam_id=target_steam_id, reason=_ban_reason, banned_by_steam_id=admin_steam_id,
-                     expires_at=_ban_end))
+        _ban_params["ban_minutes"] = int(duration_minutes)
+    _ban_row = (await db.execute(text(
+        "WITH c AS (SELECT clock_timestamp() AS t) "
+        "INSERT INTO player_bans (id, steam_id, reason, banned_by_steam_id, banned_at, "
+        "unbanned_at, unbanned_by_steam_id, expires_at) "
+        "SELECT CAST(:id AS uuid), CAST(:sid AS text), CAST(:reason AS text), CAST(:adm AS text), "
+        "c.t, NULL, NULL, " + _ban_end_sql(duration_minutes, "c.t") + " FROM c "
+        "RETURNING id, banned_at, expires_at"
+    ), _ban_params)).mappings().one()
+    _ban_end = _ban_row["expires_at"]
     _details = {"reason": _ban_reason}
     if length_sent:
         _details["duration_minutes"] = duration_minutes
@@ -49495,11 +49559,13 @@ async def _apply_ban_core(db: AsyncSession, *, admin_steam_id: str, target_steam
     ))
     # The bot's poll_new_bans loop picks this up from /internal/recent-bans and
     # posts it to #scr-admin (item 4).
-    # NOW() is fixed for the transaction, so the end read above is exactly
-    # the length ahead of it: seconds_left is the length in seconds.
+    # The start and the end come from one clock read, so at the start the
+    # end is exactly the length ahead: seconds_left is the length in seconds.
+    _ban_len_s = (int(duration_minutes) * 60 if duration_minutes is not None
+                  else BAN_MAX_HOURS * 3600)
     return {"status": "banned", "steam_id": target_steam_id, "reason": _ban_reason,
             "expires_at": _ban_end_iso(_ban_end),
-            "seconds_left": None if _ban_end is None else int(duration_minutes) * 60}
+            "seconds_left": _ban_len_s}
 
 
 class _AdminBanReq(BaseModel):
@@ -49507,31 +49573,46 @@ class _AdminBanReq(BaseModel):
     target_steam_id: str
     reason: str = "violation"
     hmac_signature: str | None = None
-    # B4: the ban's length in minutes, 1 to BAN_DURATION_MAX_MINUTES (ten
-    # years); absent or null = permanent. StrictInt, so a string, a float or a
-    # boolean is a 422 naming the field, never coerced. Not in the signature's
-    # canonical string, which stays admin:{admin}:ban:{target}. Whether it was
-    # SENT (null included) is model_fields_set, which tells a length change
-    # on an active ban apart from a repeat of the 1.41.0 request.
-    duration_minutes: StrictInt | None = Field(default=None, ge=1, le=BAN_DURATION_MAX_MINUTES)
+    # B4: the ban's length in minutes, 1 to BAN_DURATION_MAX_MINUTES
+    # (models.BAN_MAX_MINUTES, 365 days); absent or null = the maximum.
+    # StrictInt, so a string, a float or a boolean is a 422 naming the field,
+    # never coerced; a length over the maximum is a 422 whose message names
+    # the maximum in days (_ban_minutes_within_maximum). Not in the
+    # signature's canonical string, which stays admin:{admin}:ban:{target}.
+    # Whether it was SENT (null included) is model_fields_set, which tells a
+    # length change on an active ban apart from a repeat of the 1.41.0
+    # request.
+    duration_minutes: StrictInt | None = Field(default=None, ge=1)
+
+    @field_validator("duration_minutes")
+    @classmethod
+    def _ban_minutes_within_maximum(cls, v):
+        if v is not None and v > BAN_DURATION_MAX_MINUTES:
+            raise ValueError(f"duration_minutes is at most {BAN_DURATION_MAX_MINUTES} "
+                             f"({BAN_MAX_DAYS} days); a ban lasts at most {BAN_MAX_DAYS} days")
+        return v
 
 
 @app.post("/api/v1/admin/ban", tags=["Admin"])
 async def admin_ban(req: _AdminBanReq, _slot=Depends(_pc_writer_slot), db: AsyncSession = Depends(get_db)):
     """Ban an account (admin HMAC over admin:{admin}:ban:{target}).
 
-    Without duration_minutes (every 1.41.0 request) it answers as it always
-    has: a target with no active ban is banned permanently ("banned"); a
-    target already under an active ban gets the repeat cleanup (sessions,
-    portal sessions, queue rows, card withdrawal) and "already_banned" with
-    the active ban's reason, nothing else written. With the field (1 to ten
-    years of minutes, or null for permanent): a target with no active ban is
-    banned with expires_at = NOW() plus the length; a target under an active
-    ban has that ban's end set (NOW() plus the length, or NULL), its reason
-    kept, no side effect of a new ban repeated, one admin_actions
-    "ban_length" row holding the old and the new end, and answers
-    "length_changed". Every answer ends with expires_at (UTC ISO 8601 with Z,
-    null = permanent) and seconds_left (an integer, null = permanent)."""
+    Every ban ends, at most 365 days (models.BAN_MAX_HOURS) after its start.
+    Without duration_minutes (every 1.41.0 request): a target with no active
+    ban is banned until its start plus the maximum ("banned"); a target
+    already under an active ban gets the repeat cleanup (sessions, portal
+    sessions, queue rows, card withdrawal) and "already_banned" with the
+    active ban's reason, nothing else written. With the field (1 minute to
+    the maximum, or null for the maximum; a longer length is a 422 naming
+    the maximum in days): a target with no active ban is banned with
+    expires_at = its start plus the length; a target under an active ban has
+    that ban's end set (NOW() plus the length, or its start plus the maximum
+    for null; an end past its start plus the maximum is a 422 naming the
+    latest end it can have), its reason kept, no side effect of a new ban
+    repeated, one admin_actions "ban_length" row holding the old and the new
+    end, and answers "length_changed". Every answer ends with expires_at
+    (UTC ISO 8601 with Z) and seconds_left (an integer); both are null only
+    for a ban row written before migration 418, which gives it an end."""
     _mod_target_or_422(req.target_steam_id, "target_steam_id")   # before the signature, the reads, the locks and the gate (r13)
     await _require_admin(db, req.admin_steam_id, "ban", req.target_steam_id, req.hmac_signature)
     # ONE lock order on every ban path (Sept 6 item b, review r2): the
@@ -49571,7 +49652,8 @@ async def get_recent_bans(
     """Bot-only feed for the #scr-admin poller: newly-added active bans,
     chronological. Mirrors /internal/recent-flags. Active is the one
     definition (models.player_ban_active_sql); each row gains `expires_at`
-    (UTC ISO 8601 with Z, null = permanent) as its last key."""
+    (UTC ISO 8601 with Z) as its last key, never null: a row written before
+    migration 418 answers the end 418 gives it, its start plus the maximum."""
     expected = os.getenv("API_SECRET_KEY", "")
     if not expected or x_internal_key != expected:
         raise HTTPException(status_code=403, detail="Invalid internal key")
@@ -49583,7 +49665,11 @@ async def get_recent_bans(
         cutoff = row[0] if row else None
     q = (
         "SELECT pb.id::text AS id, pb.steam_id, pb.reason, pb.banned_by_steam_id, "
-        "       pb.banned_at, p.display_name, pb.expires_at "
+        # A row written before migration 418 has no end yet; the notice
+        # names the end 418 gives it (its start plus the maximum), so every
+        # notice carries one.
+        "       pb.banned_at, p.display_name, "
+        "       COALESCE(pb.expires_at, " + ban_cap_sql("pb.banned_at") + ") AS expires_at "
         "FROM player_bans pb LEFT JOIN players p ON p.steam_id = pb.steam_id "
         "WHERE " + player_ban_active_sql("pb") + " "
         + ("AND pb.banned_at > :cutoff " if cutoff else "")

@@ -9613,23 +9613,28 @@ _last_ban_id_posted: str | None = None
 _ban_poller_initialized = False
 
 
+# The end line of a ban notice whose row carries no readable end. Every ban
+# ends at most a year after it began (the cap ruling of 16 Nov 2026), and the
+# api answers every row's end (a row written before migration 418 with the
+# end 418 gives it), so this line is for an answer the bot cannot read.
+_BAN_END_LINE_UNREAD = "Ends: **within one year of the ban** (end not readable)"
+
+
 def _ban_end_line(b) -> str:
     """The embed's end line for one /internal/recent-bans row: the end in
-    Discord's timestamp form, or "Permanent" when the row's expires_at is
-    null. An api that predates the key sends no expires_at; the line is then
-    left out (""), so the post is the one it was before. Never raises: an
-    unreadable value also gives "" (lesson 187 - the notice is optional and
-    stays out of the ban's failure domain; the ban is already written)."""
+    Discord's timestamp form. Never empty: a row without a readable end
+    (no expires_at key, a null, or a value that does not parse) gets
+    _BAN_END_LINE_UNREAD, since every ban ends within a year. Never raises
+    (lesson 187 - the notice stays out of the ban's failure domain; the ban
+    is already written)."""
     try:
-        if not isinstance(b, dict) or "expires_at" not in b:
-            return ""
-        raw = b.get("expires_at")
+        raw = b.get("expires_at") if isinstance(b, dict) else None
         if raw is None:
-            return "Ends: **Permanent**"
+            return _BAN_END_LINE_UNREAD
         end = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
         return f"Ends: <t:{int(end.timestamp())}:F>"
     except Exception:
-        return ""
+        return _BAN_END_LINE_UNREAD
 
 
 @tasks.loop(seconds=60)
