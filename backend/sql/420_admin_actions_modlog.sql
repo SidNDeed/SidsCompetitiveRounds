@@ -30,11 +30,27 @@
 --        rewrites chat_messages.steam_id to the tombstone too).
 --    A source whose table this database does not have adds nothing (the
 --    test schemas replay migrations out of order; pc_trades comes with 353).
---    No id is read from details: delete_player_data does not scrub details,
---    so an id copied there may be a deleted account's raw id. A row whose
---    target_steam_id is already a tombstone keeps '{}'. Only rows still at
---    '{}' are filled (and only reasons still NULL), so a second run changes
---    no row.
+--    No Steam id is read from details: delete_player_data does not scrub
+--    details, so an id copied there may be a deleted account's raw id. A
+--    row whose target_steam_id is already a tombstone keeps '{}'. Only rows
+--    still at '{}' are filled (and only reasons still NULL), so a second
+--    run changes no row.
+--    THE LOOKUPS. Each compares in the looked-up id column's OWN type, so
+--    the column's primary key or unique index answers it: a uuid id with a
+--    uuid, the chat message id as int8, players.steam_id (varchar, which
+--    pg_catalog compares with its text operator, the one its index is built
+--    with) as text. A text taken from a record (a details value; the trade
+--    id kept in target_steam_id) is first checked for the id's form (the
+--    canonical lower-case UUID text; a decimal of at most 18 digits without
+--    a leading zero) and only then cast to the column's type; a text not of
+--    that form names no row, as the text comparison it replaces named none.
+--    No lookup casts an indexed column to another type (a varchar read as
+--    text is the same value relabelled, which its index serves). The bound:
+--    for N records, at most one index scan per record and source (a
+--    record's list of message ids is one scan over those ids), plus one
+--    index probe of players per row found, whatever the size of the
+--    looked-up tables (tests/test_modlog_pg.py reads the plan of this file's
+--    fill with 50,000 rows in each of them).
 --
 -- Refusals (nothing is changed then, one transaction): no admin_actions in
 -- the session's current schema; the bare name admin_actions naming another
@@ -258,9 +274,12 @@ BEGIN
                      FROM matches m
                      JOIN players p1 ON p1.id = m.player1_id
                      JOIN players p2 ON p2.id = m.player2_id
-                    WHERE m.id = a.target_match_id
-                       OR (a.action::text = 'record_exclude' AND a.target_steam_id IS NULL
-                           AND m.id::text = a.details OPERATOR(pg_catalog.->>) 'match_id')
+                    WHERE m.id = ANY (ARRAY[a.target_match_id,
+                            CASE WHEN a.action::text = 'record_exclude' AND a.target_steam_id IS NULL
+                                  AND (a.details OPERATOR(pg_catalog.->>) 'match_id')
+                                      ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+                                 THEN CAST(a.details OPERATOR(pg_catalog.->>) 'match_id' AS pg_catalog.uuid)
+                            END])
                     LIMIT 1), '{}'::text[])$s$;
   END IF;
   IF pg_catalog.to_regclass('players') IS NOT NULL AND pg_catalog.to_regclass('pc_trades') IS NOT NULL THEN
@@ -270,7 +289,10 @@ BEGIN
                      JOIN players lo ON lo.id = t.pair_lo
                      JOIN players hi ON hi.id = t.pair_hi
                     WHERE a.action::text = 'pc_trade_reverse'
-                      AND t.id::text = a.target_steam_id::text), '{}'::text[])$s$;
+                      AND t.id = CASE WHEN a.target_steam_id::text
+                                           ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+                                      THEN CAST(a.target_steam_id::text AS pg_catalog.uuid) END),
+                  '{}'::text[])$s$;
   END IF;
   IF pg_catalog.to_regclass('players') IS NOT NULL AND pg_catalog.to_regclass('chat_messages') IS NOT NULL THEN
     src := src || $s$
@@ -279,10 +301,14 @@ BEGIN
                      JOIN players p ON p.steam_id::text = cm.steam_id::text
                     WHERE a.action::text = 'chat_delete'
                       AND pg_catalog.jsonb_typeof(a.details) = 'object'
-                      AND (cm.id::text = a.details OPERATOR(pg_catalog.->>) 'message_id'
-                           OR (pg_catalog.jsonb_typeof(a.details OPERATOR(pg_catalog.->) 'message_ids') = 'array'
-                               AND cm.id::text IN (SELECT pg_catalog.jsonb_array_elements_text(
-                                                            a.details OPERATOR(pg_catalog.->) 'message_ids'))))),
+                      AND cm.id = ANY (ARRAY(
+                            SELECT CASE WHEN v.e ~ '^(0|[1-9][0-9]{0,17})$' THEN CAST(v.e AS pg_catalog.int8) END
+                              FROM (SELECT a.details OPERATOR(pg_catalog.->>) 'message_id' AS e
+                                    UNION ALL
+                                    SELECT pg_catalog.jsonb_array_elements_text(
+                                             a.details OPERATOR(pg_catalog.->) 'message_ids')
+                                     WHERE pg_catalog.jsonb_typeof(
+                                             a.details OPERATOR(pg_catalog.->) 'message_ids') = 'array') v))),
                   '{}'::text[])$s$;
   END IF;
   EXECUTE $q$

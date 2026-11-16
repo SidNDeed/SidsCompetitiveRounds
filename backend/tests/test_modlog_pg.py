@@ -1793,3 +1793,215 @@ def test_420_refusal_names_the_type_beside_a_format_type_plant(mcase, m420, caps
     assert rc != 0 and "affected_steam_ids is character varying" in err, (rc, _tail(err))
 
 
+# -- the fill's lookups: in the id's own type, by index (S2) ---------------------
+#
+# Every table the fill looks up gets 50,000 rows (ids in ranges of their own,
+# f5a0... to f5e2...; chat ids from 800000001), and 500 records name ids that
+# are absent from them. The plan read is that of the file's OWN fill
+# statement: a copy of 420 whose fill EXECUTE is turned into EXPLAIN (FORMAT
+# JSON) ... INTO, raised as a notice, and whose COMMIT is a ROLLBACK, so the
+# planned text is the file's text and nothing is applied.
+
+S2_LOOKED_UP = ("players", "matches", "ranked_series", "team_series", "pc_trades", "chat_messages")
+_S2_N = 50000
+S2_SEED = """
+INSERT INTO players (id, steam_id, display_name)
+SELECT CAST('f5a00000-0000-4000-8000-' || lpad(to_hex(i), 12, '0') AS uuid),
+       '76561180' || lpad(i::text, 9, '0'), 'S2 seed ' || i
+  FROM generate_series(1, {n} + 3) i;
+INSERT INTO matches (id, player1_id, player2_id, p1_rounds_won, p2_rounds_won)
+SELECT CAST('f5b00000-0000-4000-8000-' || lpad(to_hex(i), 12, '0') AS uuid),
+       CAST('f5a00000-0000-4000-8000-' || lpad(to_hex(i), 12, '0') AS uuid),
+       CAST('f5a00000-0000-4000-8000-' || lpad(to_hex(i + 1), 12, '0') AS uuid), 3, 1
+  FROM generate_series(1, {n}) i;
+INSERT INTO ranked_series (id, player1_id, player2_id, p1_series_wins, p2_series_wins, status, created_at,
+                           live_p1_points, live_p2_points, is_tournament, is_private)
+SELECT CAST('f5c00000-0000-4000-8000-' || lpad(to_hex(i), 12, '0') AS uuid),
+       CAST('f5a00000-0000-4000-8000-' || lpad(to_hex(i), 12, '0') AS uuid),
+       CAST('f5a00000-0000-4000-8000-' || lpad(to_hex(i + 1), 12, '0') AS uuid),
+       2, 0, 'completed', NOW(), 0, 0, false, false
+  FROM generate_series(1, {n}) i;
+INSERT INTO team_series (id, t1a_id, t1b_id, t2a_id, t2b_id, status)
+SELECT CAST('f5d00000-0000-4000-8000-' || lpad(to_hex(i), 12, '0') AS uuid),
+       CAST('f5a00000-0000-4000-8000-' || lpad(to_hex(i), 12, '0') AS uuid),
+       CAST('f5a00000-0000-4000-8000-' || lpad(to_hex(i + 1), 12, '0') AS uuid),
+       CAST('f5a00000-0000-4000-8000-' || lpad(to_hex(i + 2), 12, '0') AS uuid),
+       CAST('f5a00000-0000-4000-8000-' || lpad(to_hex(i + 3), 12, '0') AS uuid), 'completed'
+  FROM generate_series(1, {n}) i;
+INSERT INTO chat_messages (id, source, display_name, message, steam_id)
+SELECT 800000000 + i, 'game', 'S2 seed', 'x', '76561180' || lpad(i::text, 9, '0')
+  FROM generate_series(1, {n}) i;
+INSERT INTO pc_trades (id, pair_lo, pair_hi, proposer, a_prints, b_prints, digest, propose_nonce,
+                       proposer_generation, counterparty_generation, expires_at)
+SELECT CAST('f5e00000-0000-4000-8000-' || lpad(to_hex(i), 12, '0') AS uuid),
+       CAST('f5a00000-0000-4000-8000-' || lpad(to_hex(i), 12, '0') AS uuid),
+       CAST('f5a00000-0000-4000-8000-' || lpad(to_hex(i + 1), 12, '0') AS uuid),
+       CAST('f5a00000-0000-4000-8000-' || lpad(to_hex(i), 12, '0') AS uuid),
+       ARRAY[CAST('f5e10000-0000-4000-8000-' || lpad(to_hex(i), 12, '0') AS uuid)],
+       ARRAY[CAST('f5e20000-0000-4000-8000-' || lpad(to_hex(i), 12, '0') AS uuid)],
+       'd', 'modlogs2' || lpad(i::text, 6, '0'), 0, 0, NOW() + interval '1 day'
+  FROM generate_series(1, {n}) i;
+INSERT INTO admin_actions (id, admin_steam_id, action, target_steam_id, target_match_id, target_series_id, details)
+SELECT CAST('f5f00000-0000-4000-8000-' || lpad(to_hex(i), 12, '0') AS uuid), '76561190000000099',
+       CASE i % 6 WHEN 0 THEN 'record_exclude' WHEN 1 THEN 'chat_delete' WHEN 2 THEN 'pc_trade_reverse'
+                  WHEN 3 THEN 'reverse_series' WHEN 4 THEN 'resolve_team_series' ELSE 'flag_review' END,
+       CASE WHEN i % 6 = 2 THEN 'f5ff0000-0000-4000-8000-' || lpad(to_hex(i), 12, '0') END,
+       CASE WHEN i % 6 = 5 THEN CAST('f5ff0000-0000-4000-8000-' || lpad(to_hex(i), 12, '0') AS uuid) END,
+       CASE WHEN i % 6 IN (3, 4) THEN CAST('f5ff0000-0000-4000-8000-' || lpad(to_hex(i), 12, '0') AS uuid) END,
+       CASE i % 6 WHEN 0 THEN jsonb_build_object('board', '*', 'match_id',
+                                                 'f5ff0000-0000-4000-8000-' || lpad(to_hex(i), 12, '0'))
+                  WHEN 1 THEN CASE WHEN i % 12 = 1 THEN jsonb_build_object('message_id', 900000000 + i)
+                                   ELSE jsonb_build_object('message_ids',
+                                                           jsonb_build_array(900000000 + i, 900100000 + i)) END
+                  ELSE '{{}}'::jsonb END
+  FROM generate_series(1, 500) i;
+ANALYZE players; ANALYZE matches; ANALYZE ranked_series; ANALYZE team_series;
+ANALYZE chat_messages; ANALYZE pc_trades; ANALYZE admin_actions;
+""".format(n=_S2_N)
+@pytest.fixture(scope="module")
+def scase():
+    """A third case schema of its own for the 50,000-row tables: built as
+    mcase, 420 rolled back, S2_SEED written once, dropped at the end (a
+    delete of 50,000 players rows checks every foreign key that names them
+    and takes many minutes; the drop of the schema does not)."""
+    lh._require_live_pg()
+    built = {}
+
+    async def build():
+        c = harness.CaseSchema(lh.DSN, "modlogs")
+        await c.__aenter__()
+        try:
+            await lh._build(c)
+        except BaseException:
+            await c.__aexit__(None, None, None)
+            raise
+        built.update(schema=c.schema, own=c.own)
+        await c.conn.close()
+    _run(build())
+    try:
+        rc, err = _psql_apply(built["schema"], R420)
+        assert rc == 0, err
+        _exec(built["schema"], S2_SEED)
+        yield built["schema"]
+    finally:
+        async def drop():
+            conn = await harness.connect_bound(lh.DSN, built["schema"])
+            try:
+                await harness.drop_case_schema(conn, built["schema"], built["own"])
+            finally:
+                await conn.close()
+        _run(drop())
+
+
+def _fill_plan_variant(path):
+    """A copy of the file at `path` whose fill statement is planned, not run:
+    its EXECUTE becomes EXECUTE 'EXPLAIN (FORMAT JSON) ' || <the same text>
+    INTO a variable, raised as a notice; its COMMIT a ROLLBACK."""
+    src = io.open(path, encoding="utf-8").read()
+    for anchor in ("DO $fill420$\nDECLARE\n", "  EXECUTE $q$\n", "  $q$;\nEND $fill420$;"):
+        assert src.count(anchor) == 1, ("the fill's anchor is not in the file exactly once", anchor)
+    src = src.replace("DO $fill420$\nDECLARE\n", "DO $fill420$\nDECLARE\n  modlog_plan pg_catalog.text;\n")
+    src = src.replace("  EXECUTE $q$\n", "  EXECUTE 'EXPLAIN (FORMAT JSON) ' || $q$\n")
+    src = src.replace("  $q$;\nEND $fill420$;",
+                      "  $q$ INTO modlog_plan;\n  RAISE NOTICE 'MODLOG-PLAN %', modlog_plan;\nEND $fill420$;")
+    body, tail = src.rstrip().rsplit("\n", 1)
+    assert tail.strip() == "COMMIT;", tail
+    fd, out = tempfile.mkstemp(prefix="modlog420_", suffix=".sql")
+    with io.open(fd, "w", encoding="utf-8", newline="") as fh:
+        fh.write(body + "\nROLLBACK;\n")
+    return out
+
+
+def _plan_nodes(plan):
+    """Every node of an EXPLAIN (FORMAT JSON) tree, subplans included."""
+    stack = [n["Plan"] for n in plan]
+    while stack:
+        node = stack.pop()
+        yield node
+        stack.extend(node.get("Plans", ()))
+
+
+def _s2_failures(schema, path):
+    """On scase from the rollback state: the fill's plan read from `path`,
+    then a real apply of `path` timed (the next call rolls it back first).
+    Answers (failures, the apply's wall seconds, {table: node types})."""
+    import time
+    rc, err = _psql_apply(schema, R420)
+    assert rc == 0, err
+    fails, wall, seen = [], None, {}
+    variant = _fill_plan_variant(path)
+    try:
+        rc, err = _psql_apply(schema, variant)
+    finally:
+        os.unlink(variant)
+    at = err.find("MODLOG-PLAN ")
+    if rc != 0 or at < 0:
+        return ["PLAN-RUN rc=%s %s" % (rc, _tail(err))], wall, seen
+    plan, _ = json.JSONDecoder().raw_decode(err[at + len("MODLOG-PLAN "):])
+    for node in _plan_nodes(plan):
+        rel = node.get("Relation Name")
+        if rel in S2_LOOKED_UP:
+            seen.setdefault(rel, set()).add(node["Node Type"])
+            if node["Node Type"] == "Seq Scan":
+                fails.append("SEQ-SCAN %s" % rel)
+    missing = [t for t in S2_LOOKED_UP if t not in seen]
+    if missing:
+        fails.append("NOT-PLANNED %s" % missing)
+    t0 = time.monotonic()
+    rc, err = _psql_apply(schema, path)
+    wall = time.monotonic() - t0
+    if rc != 0:
+        fails.append("APPLY-RC rc=%s %s" % (rc, _tail(err)))
+    return sorted(set(fails)), wall, seen
+
+
+def test_the_fill_looks_up_every_table_by_its_index_on_50000_rows(scase, capsys):
+    """S2: no node of the fill's plan on a looked-up table is a sequential
+    scan, with 50,000 rows in each and 500 records naming absent ids; the
+    apply's wall time is printed."""
+    fails, wall, seen = _s2_failures(scase, M420)
+    with capsys.disabled():
+        print("\nMODLOG-S2-PLAN %s; apply wall %s s; %s"
+              % (fails or "no sequential scan on a looked-up table",
+                 "-" if wall is None else "%.2f" % wall,
+                 {k: sorted(v) for k, v in sorted(seen.items())}))
+    assert not fails, fails
+
+
+def _variant_pairs(path, pairs):
+    """A copy of the file at `path` with each `old` of `pairs` (each in the
+    file exactly once) replaced by its `new`."""
+    src = io.open(path, encoding="utf-8").read()
+    for old, new in pairs:
+        assert src.count(old) == 1, ("the mutant's text is not in the file exactly once", old)
+        src = src.replace(old, new)
+    fd, out = tempfile.mkstemp(prefix="modlog420_", suffix=".sql")
+    with io.open(fd, "w", encoding="utf-8", newline="") as fh:
+        fh.write(src)
+    return out
+
+
+@pytest.mark.parametrize("pairs,table", [
+    ([("WHERE m.id = ANY (ARRAY[a.target_match_id,", "WHERE m.id::text = ANY (ARRAY[a.target_match_id::text,"),
+      ("THEN CAST(a.details OPERATOR(pg_catalog.->>) 'match_id' AS pg_catalog.uuid)",
+       "THEN a.details OPERATOR(pg_catalog.->>) 'match_id'")], "matches"),
+    ([("AND t.id = CASE WHEN", "AND t.id::text = CASE WHEN"),
+      ("THEN CAST(a.target_steam_id::text AS pg_catalog.uuid) END", "THEN a.target_steam_id::text END")],
+     "pc_trades"),
+    ([("AND cm.id = ANY (ARRAY(", "AND cm.id::text = ANY (ARRAY("),
+      ("THEN CAST(v.e AS pg_catalog.int8) END", "THEN v.e END")], "chat_messages"),
+], ids=["matches", "pc_trades", "chat_messages"])
+def test_mutant_a_lookup_compared_as_text_scans_its_table(scase, pairs, table, capsys):
+    """S2: each lookup with the text-side comparison restored (the column
+    cast to text) plans a sequential scan of its table on 50,000 rows."""
+    path = _variant_pairs(M420, pairs)
+    try:
+        fails, wall, _ = _s2_failures(scase, path)
+    finally:
+        os.unlink(path)
+    with capsys.disabled():
+        print("\nMODLOG-MUTANT s2 %s: %s; apply wall %s s"
+              % (table, fails, "-" if wall is None else "%.2f" % wall))
+    assert "SEQ-SCAN %s" % table in fails, fails
+
+

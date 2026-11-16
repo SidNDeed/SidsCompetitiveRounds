@@ -46,6 +46,7 @@ CONSTRUCTS = {
     "exists": "EXISTS (subquery), a construct of the grammar",
     "array": "ARRAY(subquery), the array constructor",
     "coalesce": "COALESCE(...), a construct of the grammar, not a catalog function",
+    "cast": "CAST(expression AS type), a construct of the grammar",
     "operator": "OPERATOR(schema.op), the qualified operator syntax itself",
     "check": "CHECK (expression) of the constraint 420 adds",
     "from": "FROM (subquery) alias, a derived table",
