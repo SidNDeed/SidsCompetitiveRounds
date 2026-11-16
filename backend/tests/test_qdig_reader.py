@@ -177,6 +177,12 @@ TABLE = [
     ("deep nesting", "ffa", _deep(), "unreadable"),
     ("a 2v2 body", "team", _team("2v2"), "ok"),
     ("a 1v2 body", "team", _team("1v2"), "ok"),
+    ("a 2v2 body with an unknown top-level key", "team", _team("2v2", new_top_key={"x": [1]}), "ok"),
+    ("a 2v2 body with an unknown seat key", "team",
+     _team("2v2", t2a={"steam_id": fx.steam(3), "display_name": fx.NAMES[3], "new_seat_key": [None]}), "ok"),
+    ("a 1v2 body with an unknown top-level key", "team", _team("1v2", new_top_key="x"), "ok"),
+    ("a 1v2 body with an unknown seat key", "team",
+     _team("1v2", duo_b={"steam_id": fx.steam(3), "display_name": fx.NAMES[3], "new_seat_key": {"y": 2}}), "ok"),
     ("a 2v2 seat missing", "team", {k: v for k, v in _team("2v2").items() if k != "t2b"}, "player_shape"),
     ("a 2v2 repeated player", "team", _team("2v2", t2b={"steam_id": fx.steam(1), "display_name": "x"}),
      "duplicate_player"),
@@ -252,6 +258,18 @@ def test_the_reader_cannot_raise():
               {"payload": json.dumps(base()), "mode": "ffa", "photon_room_id": 7}):
         v = main._qdig_read_body(r)
         assert v["ok"] is False or v["shape"] == "ffa"
+
+    # The catch-all is for what is NOT a ValueError: a body nested past the
+    # decoder's recursion limit (RecursionError, inside the size bound) and a
+    # row whose own reads raise (RuntimeError). Each reads as one fixed word.
+    class Hostile(dict):
+        def get(self, *a, **k):
+            raise RuntimeError("no")
+    deep = {"payload": "[" * 100000 + "]" * 100000, "mode": "ffa"}
+    assert len(deep["payload"]) <= main.QDIG_BODY_MAX_BYTES
+    for r in (deep, Hostile(payload="{}", mode="ffa")):
+        v = main._qdig_read_body(r)
+        assert (v["ok"], v["why"]) == (False, "unreadable"), v
 
 
 def test_the_bounds_are_the_settlements_own():
@@ -578,3 +596,19 @@ def test_control_a_correct_leave_figure_and_an_allowed_null_classify_as_before()
     assert _judge_body(base())["class"] == FTR
     for game in ("A", "B", "C2", "C3"):
         assert main._qdig_read_body(fx.row(game))["ok"] is True, game
+
+
+# ── qdig-r2: the reader's leave-figure rule is the submit path's ─────────
+
+@pytest.mark.parametrize("left_early,absent,figure", [
+    (le, ab, fig) for le in (False, True) for ab in (False, True) for fig in (None, 100)])
+def test_the_reader_and_the_submit_path_agree_on_a_missing_leave_figure(left_early, absent, figure):
+    """Two copies of one rule: the reader answers leave_figure exactly when
+    the submit path's _ffa_missing_leave_figure names that seat."""
+    body = base()
+    body["players"][3].update(left_early=left_early, absent=absent, game_points_at_leave=figure)
+    submit_names = main._ffa_missing_leave_figure(schemas.FfaMatchReport.model_validate(body))
+    v = main._qdig_read_body(_row("ffa", json.dumps(body)))
+    reader_names = [fx.steam(4)] if v["why"] == "leave_figure" else []
+    assert reader_names == submit_names, (left_early, absent, figure, v["why"], submit_names)
+    assert v["ok"] or v["why"] == "leave_figure", v["why"]

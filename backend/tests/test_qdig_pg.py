@@ -183,7 +183,9 @@ def test_pg_qdig_the_janitor_leaves_reviewed_rows_and_needs_decision_rows(monkey
 
 def test_pg_qdig_the_predicate_is_re_read_under_the_lock(monkeypatch):
     """An admin discards the second candidate after the janitor read its
-    candidates and before it locked that row: the janitor leaves it."""
+    candidates and before it locked that row: the janitor leaves it. The
+    LOCK's own re-read is what leaves it: the row is never judged (its
+    facts are never read), not merely refused by the filing UPDATE."""
     async def body():
         async with QEnv(monkeypatch) as env:
             await env.seed_live()
@@ -194,24 +196,28 @@ def test_pg_qdig_the_predicate_is_re_read_under_the_lock(monkeypatch):
                 if not calls:
                     await env.ex("UPDATE match_report_quarantine SET status='discarded', reviewed_at=NOW(),"
                                  " review_note='by an admin' WHERE id=CAST(:i AS uuid)", {"i": A2})
-                calls.append(1)
+                calls.append([str(r["id"]) for r, _b in rows])
                 return await real(db, rows, admit=admit)
             monkeypatch.setattr(main, "_qdig_load", load)
             filed = await main._qdig_janitor_pass()
-            return filed, await env.statuses()
+            return filed, await env.statuses(), calls
 
-    filed, st = run(body())
+    filed, st, calls = run(body())
+    judged = [i for ids in calls for i in ids]
+    assert A2 not in judged, "the janitor judged a row its lock should have re-read as reviewed"
     assert filed == 3
     assert st[A2] == ("discarded", None, True, "by an admin")
     assert st[A1][0] == st[B1][0] == st[B2][0] == "filed"
 
 
 @pytest.mark.parametrize("held_lock", ["accept", "discard"])
-def test_pg_qdig_a_row_an_admin_is_acting_on_is_skipped_not_waited_for(monkeypatch, held_lock):
+def test_pg_qdig_a_row_an_admin_is_acting_on_is_skipped_not_waited_for(monkeypatch, held_lock, capsys):
     """The accept route's SELECT ... FOR UPDATE, and the discard route's
     UPDATE (FOR NO KEY UPDATE), each held open on row A1: the janitor's
     FOR UPDATE SKIP LOCKED passes over A1 and files the other three, at once;
-    the next pass files A1."""
+    the next pass files A1. SKIPPED, not failed: no row is reported as not
+    judged (a lock that waits until the statement timeout, or one that
+    refuses with an error, ends in that line)."""
     async def body():
         async with QEnv(monkeypatch) as env:
             await env.seed_live()
@@ -235,9 +241,61 @@ def test_pg_qdig_a_row_an_admin_is_acting_on_is_skipped_not_waited_for(monkeypat
             return first, second, took, await env.statuses()
 
     first, second, took, st = run(body())
+    out = capsys.readouterr().out
+    assert "not judged" not in out, f"the held row was not skipped: {out}"
     assert (first, second) == (3, 1)
     assert took < 5.0
     assert st[A1][0] == "filed"
+
+
+# The filing UPDATE's own re-check (_QDIG_SQL_JANITOR_FILE: status
+# 'pending', reviewed_at and reviewed_by NULL) cannot be made to matter
+# while the lock statement stands: _QDIG_SQL_JANITOR_LOCK takes FOR UPDATE,
+# which conflicts with every writer of the row (the accept route's FOR
+# UPDATE and the discard route's UPDATE, FOR NO KEY UPDATE), and the janitor
+# holds it from the lock statement through the filing UPDATE in ONE
+# transaction, so no review can land between the two. The mutant that drops
+# the re-check alone (file_without_recheck) is therefore EQUIVALENT, and the
+# re-check stays: it is the guard that remains if the lock statement is ever
+# changed (lesson 1070). The test below shows the pair: a review that lands
+# between the lock and the filing is held off by the lock, or refused by the
+# re-check; only with BOTH gone does it get through and the reviewed row is
+# filed over it.
+
+def test_pg_qdig_the_lock_and_the_filing_recheck_each_guard_a_concurrent_review(monkeypatch):
+    async def body():
+        async with QEnv(monkeypatch) as env:
+            await env.seed_live()
+            real = main._qdig_load
+            applied = []
+
+            async def load(db, rows, admit=None):
+                ids = [str(r["id"]) for r, _b in rows]
+                if not applied and ids == [A1]:
+                    conn = await tq._pg(env.url)
+                    try:
+                        await conn.execute("SET lock_timeout = '500ms'")
+                        try:
+                            await conn.execute("UPDATE match_report_quarantine SET status='discarded',"
+                                               " reviewed_at=NOW(), review_note='by an admin'"
+                                               " WHERE id=$1 AND status='pending'", uuid.UUID(A1))
+                            applied.append(True)
+                        except Exception:
+                            applied.append(False)     # the janitor's row lock held it off
+                    finally:
+                        await conn.close()
+                return await real(db, rows, admit=admit)
+            monkeypatch.setattr(main, "_qdig_load", load)
+            await main._qdig_janitor_pass()
+            return applied, await env.statuses()
+
+    applied, st = run(body())
+    assert applied in ([True], [False])
+    if applied == [True]:
+        assert st[A1] == ("discarded", None, True, "by an admin"), (
+            f"a review that landed between the lock and the filing was filed over: {st[A1]}")
+    else:
+        assert st[A1][0] == "filed"
 
 
 def test_pg_qdig_the_pass_is_bounded_and_its_cursor_reaches_every_row(monkeypatch):
@@ -374,7 +432,10 @@ def test_qdig_a_timed_out_pass_is_cancelled_its_session_closed_and_the_next_duty
     calls = [n for n in _ast.walk(loop) if isinstance(n, _ast.Await) and isinstance(n.value, _ast.Call)
              and getattr(n.value.func, "id", None) == "_qdig_janitor_step"]
     assert len(calls) == 1
-    assert "_qdig_janitor_pass" not in inspect.getsource(main.queue_cleanup_loop)
+    # Read the CODE, never the text: a comment that names the pass is not a call.
+    names = {n.id for n in _ast.walk(loop) if isinstance(n, _ast.Name)}
+    names |= {n.attr for n in _ast.walk(loop) if isinstance(n, _ast.Attribute)}
+    assert "_qdig_janitor_pass" not in names, "the loop reaches the pass without its step"
 
 
 def textwrap_dedent(s):
