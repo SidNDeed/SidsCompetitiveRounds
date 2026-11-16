@@ -52,13 +52,23 @@
 -- current schema), then the path is pinned for the rest of the transaction:
 -- pg_catalog first, the table's schema second, the temporary schema last;
 -- the bare name must then resolve to the same table. The pinned path
--- settles an operator or function only where pg_catalog has one for
--- exactly the argument types, so every comparison here is of such a pair:
--- identities are oids compared as oid with oid, varchar columns are cast to
--- text, and the polymorphic calls (|| on arrays, unnest, array_agg,
--- cardinality) and to_regclass name pg_catalog. An operator or function of
--- the table's schema is then never taken; the CHECK's char_length and <=
--- (text and integer) are pg_catalog's. quote_all_identifiers is off for the
+-- decides between same-named functions or operators only where their
+-- argument types are IDENTICAL; one of the same name with other argument
+-- types in the table's schema competes with pg_catalog's on an equal
+-- footing wherever the call's arguments are no exact match of pg_catalog's
+-- (an untyped literal argument, as in format('%I...', nsp) or
+-- format_type(oid, NULL); a VARIADIC "any" function; jsonb ->> 'key', whose
+-- literal is read as jsonb first, and pg_catalog has no ->> for jsonb with
+-- jsonb). So every function call in this file, before the pin and after it,
+-- is written pg_catalog.<name>(, every jsonb path operator
+-- OPERATOR(pg_catalog.->>) or OPERATOR(pg_catalog.->), and the polymorphic
+-- || on arrays OPERATOR(pg_catalog.||) (tests/test_modlog_sql_census.py
+-- holds both files to this). Every other comparison is of a pair pg_catalog
+-- has an operator for exactly: identities are oids compared as oid with
+-- oid, varchar columns are cast to text, and a literal stands beside a
+-- value of the type it is read as (text, name, "char"). An operator or
+-- function of the table's schema is then never taken; the CHECK's
+-- char_length and <= (text and integer) are pg_catalog's. quote_all_identifiers is off for the
 -- rest of the transaction, for the one deparsed text the file compares (the
 -- CHECK's). Types and the index are compared by identity, not by printed
 -- text. No literal here holds a backslash, so standard_conforming_strings
@@ -95,8 +105,9 @@ SET LOCAL synchronous_commit = local;
 -- other pair (oid with regclass, regclass with regclass, varchar with
 -- varchar, text[] with text[]) an exact operator in the table's schema would
 -- be taken. So every identity here is held as an oid and compared as oid
--- with oid, every function before the pin and to_regclass after it is
--- qualified, and the fill below qualifies its polymorphic calls.
+-- with oid, and every function call, here and below, names pg_catalog (the
+-- header: the path does not settle a call whose arguments are no exact
+-- match).
 DO $m420$
 DECLARE
   tbl pg_catalog.oid := pg_catalog.to_regclass(
@@ -143,14 +154,14 @@ BEGIN
     FROM pg_attribute a WHERE a.attrelid = tbl AND a.attname = 'affected_steam_ids' AND NOT a.attisdropped;
   IF ty_aff IS NOT NULL AND ty_aff <> text_arr_oid THEN
     RAISE EXCEPTION '420: admin_actions.affected_steam_ids is %, not text[]; nothing changed',
-      format_type(ty_aff, NULL);
+      pg_catalog.format_type(ty_aff, NULL);
   END IF;
   SELECT a.atttypid INTO ty_reason
     FROM pg_attribute a WHERE a.attrelid = tbl AND a.attname = 'reason' AND NOT a.attisdropped;
   IF ty_reason IS NOT NULL AND ty_reason <> text_oid THEN
-    RAISE EXCEPTION '420: admin_actions.reason is %, not text; nothing changed', format_type(ty_reason, NULL);
+    RAISE EXCEPTION '420: admin_actions.reason is %, not text; nothing changed', pg_catalog.format_type(ty_reason, NULL);
   END IF;
-  idx := pg_catalog.to_regclass(format('%I.ix_admin_actions_affected', nsp))::oid;
+  idx := pg_catalog.to_regclass(pg_catalog.format('%I.ix_admin_actions_affected', nsp))::oid;
   IF idx IS NOT NULL THEN
     idx_ok := EXISTS (
       SELECT 1 FROM pg_index i JOIN pg_class ic ON ic.oid = i.indexrelid
@@ -162,12 +173,12 @@ BEGIN
       RAISE EXCEPTION '420: ix_admin_actions_affected is not the GIN index 420 creates on affected_steam_ids; nothing changed';
     END IF;
   END IF;
-  SELECT c.oid, (c.contype = 'c' AND c.convalidated AND pg_get_constraintdef(c.oid) = want)
+  SELECT c.oid, (c.contype = 'c' AND c.convalidated AND pg_catalog.pg_get_constraintdef(c.oid) = want)
     INTO con_oid, con_ok
     FROM pg_constraint c WHERE c.conrelid = tbl AND c.conname = 'ck_admin_actions_reason_len';
   IF con_oid IS NOT NULL AND NOT con_ok THEN
     RAISE EXCEPTION '420: ck_admin_actions_reason_len is %, not the check 420 creates; nothing changed',
-      pg_get_constraintdef(con_oid);
+      pg_catalog.pg_get_constraintdef(con_oid);
   END IF;
 
   -- The columns, the check and the index: each only when absent, so a run
@@ -184,7 +195,7 @@ BEGIN
   END IF;
   IF con_oid IS NULL THEN
     ALTER TABLE admin_actions ADD CONSTRAINT ck_admin_actions_reason_len
-      CHECK (reason IS NULL OR char_length(reason) <= 256);
+      CHECK (reason IS NULL OR pg_catalog.char_length(reason) <= 256);
   END IF;
   IF idx IS NULL THEN
     CREATE INDEX ix_admin_actions_affected ON admin_actions USING gin (affected_steam_ids);
@@ -199,7 +210,7 @@ BEGIN
   END IF;
   IF NOT EXISTS (
       SELECT 1 FROM pg_index i JOIN pg_class ic ON ic.oid = i.indexrelid
-       WHERE i.indexrelid = pg_catalog.to_regclass(format('%I.ix_admin_actions_affected', nsp))::oid
+       WHERE i.indexrelid = pg_catalog.to_regclass(pg_catalog.format('%I.ix_admin_actions_affected', nsp))::oid
          AND i.indrelid = tbl AND i.indisvalid AND i.indisready
          AND i.indnatts = 1 AND i.indkey[0] = att_aff
          AND i.indexprs IS NULL AND i.indpred IS NULL
@@ -209,7 +220,7 @@ BEGIN
   IF NOT EXISTS (
       SELECT 1 FROM pg_constraint c
        WHERE c.conrelid = tbl AND c.conname = 'ck_admin_actions_reason_len'
-         AND c.contype = 'c' AND c.convalidated AND pg_get_constraintdef(c.oid) = want) THEN
+         AND c.contype = 'c' AND c.convalidated AND pg_catalog.pg_get_constraintdef(c.oid) = want) THEN
     RAISE EXCEPTION '420: ck_admin_actions_reason_len is not the validated CHECK after the file';
   END IF;
 END $m420$;
@@ -219,10 +230,9 @@ END $m420$;
 -- Each source is added when its tables exist (header, point 3); the
 -- statement is built from the fixed texts below and nothing else. Every
 -- comparison is of two values of one type that pg_catalog has an operator
--- for (varchar columns are cast to text), and the polymorphic calls (||
--- on arrays, unnest, array_agg, cardinality) name pg_catalog, so no
--- operator or function of the table's schema is taken (the head of the
--- block above).
+-- for (varchar columns are cast to text), and every function call, jsonb
+-- path operator and || on arrays names pg_catalog, so no operator or
+-- function of the table's schema is taken (the header).
 DO $fill420$
 DECLARE
   src text := 'ARRAY[a.target_steam_id::text]';
@@ -250,7 +260,7 @@ BEGIN
                      JOIN players p2 ON p2.id = m.player2_id
                     WHERE m.id = a.target_match_id
                        OR (a.action::text = 'record_exclude' AND a.target_steam_id IS NULL
-                           AND m.id::text = a.details->>'match_id')
+                           AND m.id::text = a.details OPERATOR(pg_catalog.->>) 'match_id')
                     LIMIT 1), '{}'::text[])$s$;
   END IF;
   IF pg_catalog.to_regclass('players') IS NOT NULL AND pg_catalog.to_regclass('pc_trades') IS NOT NULL THEN
@@ -268,10 +278,11 @@ BEGIN
                      FROM chat_messages cm
                      JOIN players p ON p.steam_id::text = cm.steam_id::text
                     WHERE a.action::text = 'chat_delete'
-                      AND jsonb_typeof(a.details) = 'object'
-                      AND (cm.id::text = a.details->>'message_id'
-                           OR (jsonb_typeof(a.details->'message_ids') = 'array'
-                               AND cm.id::text IN (SELECT jsonb_array_elements_text(a.details->'message_ids'))))),
+                      AND pg_catalog.jsonb_typeof(a.details) = 'object'
+                      AND (cm.id::text = a.details OPERATOR(pg_catalog.->>) 'message_id'
+                           OR (pg_catalog.jsonb_typeof(a.details OPERATOR(pg_catalog.->) 'message_ids') = 'array'
+                               AND cm.id::text IN (SELECT pg_catalog.jsonb_array_elements_text(
+                                                            a.details OPERATOR(pg_catalog.->) 'message_ids'))))),
                   '{}'::text[])$s$;
   END IF;
   EXECUTE $q$
@@ -300,8 +311,8 @@ END $fill420$;
 
 -- 3. The old rows' reasons, from the reason their details carry.
 UPDATE admin_actions
-   SET reason = left(details->>'reason', 256)
- WHERE reason IS NULL AND jsonb_typeof(details) = 'object'
-   AND COALESCE(details->>'reason', '') <> '';
+   SET reason = pg_catalog.left(details OPERATOR(pg_catalog.->>) 'reason', 256)
+ WHERE reason IS NULL AND pg_catalog.jsonb_typeof(details) = 'object'
+   AND COALESCE(details OPERATOR(pg_catalog.->>) 'reason', '') <> '';
 
 COMMIT;

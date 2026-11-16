@@ -845,6 +845,16 @@ SETTINGS = [
      " too wherever the path is not pinned"),
     ("search_path=schema,pg_catalog+plants=false", (("search_path", "{schema},pg_catalog"),), "enters",
      "as above, every plant answering false"),
+    ("default path+format(text,text)", (), "enters",
+     "a format(text, text) in the table's schema: a call format('...', nsp) has an untyped literal,"
+     " so it is no exact match of pg_catalog's format(text, VARIADIC \"any\") and the path does not"
+     " decide between the two; a bare call takes the plant. 420 writes pg_catalog.format"),
+    ("default path+format(text,VARIADIC text[])", (), "enters",
+     "as above, with a VARIADIC text[] plant: a bare call takes it on the first apply as on a rerun"),
+    ("default path+jsonb arrows(jsonb,jsonb)", (), "enters",
+     "a ->> and a -> for jsonb with jsonb in the table's schema: an untyped literal on the right is"
+     " read as jsonb first, so a bare details->>'key' takes the plant (pg_catalog has no such pair)."
+     " 420 writes OPERATOR(pg_catalog.->>) and OPERATOR(pg_catalog.->)"),
 ]
 SETTING = {s[0]: s for s in SETTINGS}
 
@@ -1090,10 +1100,40 @@ def _reason_verdicts(schema):
 
 def _plant_of(name):
     """The objects an entry of SETTINGS plants in the table's own schema."""
-    for kind in ("shadows", "plants=true", "plants=false"):
+    for kind in ("shadows", "plants=true", "plants=false") + tuple(CALL_PLANTS):
         if name.endswith("+" + kind):
             return kind
     return None
+
+
+# Same-named objects in the table's schema whose argument types are NOT those
+# of pg_catalog's own (S1 of the fix order): the path decides only between
+# identical argument types, so each is taken by a bare call or operator whose
+# arguments are no exact match of pg_catalog's; only the schema written at the
+# call keeps pg_catalog's. (create, drop) per kind.
+CALL_PLANTS = {
+    "format(text,text)": (
+        "CREATE FUNCTION {s}.format(text, text) RETURNS text LANGUAGE sql IMMUTABLE"
+        " AS 'SELECT ''modlog_plant''';",
+        "DROP FUNCTION IF EXISTS {s}.format(text, text);"),
+    "format(text,VARIADIC text[])": (
+        "CREATE FUNCTION {s}.format(text, VARIADIC text[]) RETURNS text LANGUAGE sql IMMUTABLE"
+        " AS 'SELECT ''modlog_plant''';",
+        "DROP FUNCTION IF EXISTS {s}.format(text, VARIADIC text[]);"),
+    "jsonb arrows(jsonb,jsonb)": (
+        "CREATE FUNCTION {s}.modlog_arrow_text(jsonb, jsonb) RETURNS text LANGUAGE sql IMMUTABLE"
+        " AS 'SELECT ''modlog_plant''';"
+        " CREATE OPERATOR {s}.->> (LEFTARG = jsonb, RIGHTARG = jsonb, FUNCTION = {s}.modlog_arrow_text);"
+        " CREATE FUNCTION {s}.modlog_arrow_json(jsonb, jsonb) RETURNS jsonb LANGUAGE sql IMMUTABLE"
+        " AS 'SELECT ''\"modlog_plant\"''::jsonb';"
+        " CREATE OPERATOR {s}.-> (LEFTARG = jsonb, RIGHTARG = jsonb, FUNCTION = {s}.modlog_arrow_json);",
+        "DROP OPERATOR IF EXISTS {s}.->> (jsonb, jsonb); DROP FUNCTION IF EXISTS {s}.modlog_arrow_text(jsonb, jsonb);"
+        " DROP OPERATOR IF EXISTS {s}.-> (jsonb, jsonb); DROP FUNCTION IF EXISTS {s}.modlog_arrow_json(jsonb, jsonb);"),
+    "format_type(oid,text)": (
+        "CREATE FUNCTION {s}.format_type(oid, text) RETURNS text LANGUAGE sql IMMUTABLE"
+        " AS 'SELECT ''modlog_plant''';",
+        "DROP FUNCTION IF EXISTS {s}.format_type(oid, text);"),
+}
 
 
 # The pairs of argument types that pg_catalog has no `=` for exactly (it
@@ -1112,6 +1152,9 @@ def _plant(schema, kind, on):
     pair of PLANT_PAIRS that always answers true / false. All in the table's
     own schema."""
     s = harness.quoted(schema)
+    if kind in CALL_PLANTS:
+        _exec(schema, CALL_PLANTS[kind][0 if on else 1].format(s=s))
+        return
     if kind == "shadows":
         if on:
             _exec(schema, (
@@ -1146,7 +1189,7 @@ def _restore(schema, plant=None):
     """Back to the state every test starts from: 420 applied under the
     server's defaults. Planted operators go first; shadows go after the
     rollback (a CHECK a mutant bound to a shadow depends on it)."""
-    if plant in ("plants=true", "plants=false"):
+    if plant in ("plants=true", "plants=false") or plant in CALL_PLANTS:
         _plant(schema, plant, False)
     rc, err = _psql_apply(schema, R420)
     assert rc == 0, err
@@ -1324,6 +1367,12 @@ _OID_IDENTITY = ("  IF pg_catalog.to_regclass('admin_actions')::oid IS DISTINCT 
 _TBL_OID = ("  tbl pg_catalog.oid := pg_catalog.to_regclass(\n"
             "    pg_catalog.format('%I.admin_actions', pg_catalog.current_schema()))::pg_catalog.oid;\n")
 _CHAT_JOIN = "JOIN players p ON p.steam_id::text = cm.steam_id::text"
+# S1: the sites a same-named function or operator of other argument types
+# takes when written without pg_catalog (each mutant below drops the schema).
+_S1_IDX_FORMAT = "  idx := pg_catalog.to_regclass(pg_catalog.format('%I.ix_admin_actions_affected', nsp))::oid;\n"
+_S1_POST_FORMAT = ("       WHERE i.indexrelid = pg_catalog.to_regclass(pg_catalog.format("
+                   "'%I.ix_admin_actions_affected', nsp))::oid\n")
+_S1_REASON_OP = "   SET reason = pg_catalog.left(details OPERATOR(pg_catalog.->>) 'reason', 256)\n"
 
 
 @pytest.mark.parametrize("pin,old,new,setting,expect", [
@@ -1339,7 +1388,16 @@ _CHAT_JOIN = "JOIN players p ON p.steam_id::text = cm.steam_id::text"
      "default path+plants=false", ("SECOND-APPLY-RC",)),
     ("varchar ids compared as text", _CHAT_JOIN, "JOIN players p ON p.steam_id = cm.steam_id",
      "default path+plants=false", ("FILL-DIFFERS",)),
-], ids=["quote_all_identifiers", "search_path", "tombstone_literal", "oid_identity", "varchar_as_text"])
+    ("the index lookup's format names pg_catalog", _S1_IDX_FORMAT, _S1_IDX_FORMAT.replace("(pg_catalog.format(", "(format("),
+     "default path+format(text,text)", ("SECOND-APPLY-RC",)),
+    ("the post-check's format names pg_catalog", _S1_POST_FORMAT,
+     _S1_POST_FORMAT.replace("(pg_catalog.format(", "(format("),
+     "default path+format(text,VARIADIC text[])", ("SECOND-APPLY-RC", "FIRST-APPLY-RC")),
+    ("the reason copy's ->> names pg_catalog", _S1_REASON_OP,
+     _S1_REASON_OP.replace(" OPERATOR(pg_catalog.->>) ", "->>"),
+     "default path+jsonb arrows(jsonb,jsonb)", ("SECOND-APPLY-RC",)),
+], ids=["quote_all_identifiers", "search_path", "tombstone_literal", "oid_identity", "varchar_as_text",
+        "s1_idx_lookup", "s1_post_check", "s1_reason_op"])
 def test_mutant_420_without_its_pin_is_red_under_its_setting(mcase, m420, pin, old, new, setting,
                                                             expect, capsys):
     """One mutant per pinned line of the settings list: the file without that
@@ -1711,3 +1769,27 @@ def test_420_refuses_a_name_that_exists_with_another_shape(mcase, m420, label, d
         assert _snap(mcase) == before
     finally:
         _restore(mcase)
+
+
+def _refusal_beside_format_type_plant(schema, path):
+    """The refusal of a varchar[] affected_steam_ids with a format_type(oid,
+    text) in the table's schema: (rc, stderr). The refusal's message passes
+    an untyped NULL, so a bare format_type takes the plant."""
+    rc, err = _psql_apply(schema, R420)
+    assert rc == 0, err
+    try:
+        _exec(schema, "ALTER TABLE admin_actions ADD COLUMN affected_steam_ids varchar(17)[]")
+        _plant(schema, "format_type(oid,text)", True)
+        return _psql_apply(schema, path)
+    finally:
+        _plant(schema, "format_type(oid,text)", False)
+        _restore(schema)
+
+
+def test_420_refusal_names_the_type_beside_a_format_type_plant(mcase, m420, capsys):
+    rc, err = _refusal_beside_format_type_plant(mcase, M420)
+    with capsys.disabled():
+        print("\nMODLOG-FORMAT-TYPE-PLANT rc=%s %s" % (rc, _tail(err)))
+    assert rc != 0 and "affected_steam_ids is character varying" in err, (rc, _tail(err))
+
+
