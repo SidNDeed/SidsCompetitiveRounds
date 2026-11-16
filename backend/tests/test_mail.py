@@ -436,9 +436,42 @@ class FakeDb:
                 "sender_pid": str(p["id"]), "rating": 1500, "title": None, "title_color": None,
                 "title_sku": None}
 
+    def _purge_due(self, days):
+        """The messages the retention purge's predicate takes: no live
+        delivered envelope, and let go by the sender or older than `days`."""
+        due = []
+        for mid, m in list(self.messages.items()):
+            live = any(env["delivery"] == "delivered" and env["deleted_at"] is None
+                       for (mm, _r), env in self.recipients.items() if mm == mid)
+            if not live and (m["deleted_by_sender_at"] is not None
+                             or m["created_at"] < NOW - timedelta(days=days)):
+                due.append(mid)
+        return due
+
     def _dispatch(self, sql, params, outer=None):  # noqa: C901 — one branch per emulated statement
         # `outer`: the whole statement when `sql` is its `src` CTE's query
         # (_with_addressees), so a clause can be checked against it.
+        # The retention sweep's holds (mscl-r2): the messages due, then every
+        # row naming one, locked and then read again. No row is held by
+        # another transaction in this fake, so every lock takes every row.
+        if "FROM mail_messages m" in sql and "FOR UPDATE OF m SKIP LOCKED" in sql:
+            assert "LIMIT 500" in sql, sql
+            return _Res([{"id": mid} for mid in self._purge_due(int(params["days"]))[:500]])
+        if "= ANY(CAST(:ids AS uuid[]))" in sql and ("SKIP LOCKED" in sql or "UNION ALL" in sql) \
+                and not sql.lstrip().startswith("DELETE"):
+            assert " AS mid FROM " in sql, sql
+            ids = {str(i) for i in params["ids"]}
+            rows = []
+            if "FROM mail_recipients" in sql:
+                rows += [{"mid": mid} for (mid, _r) in self.recipients if str(mid) in ids]
+            if "FROM moderation_cases" in sql:
+                rows += [{"mid": c["message_id"]} for c in self.cases.values()
+                         if c["message_id"] is not None and str(c["message_id"]) in ids]
+            if "FROM pending_dms" in sql:
+                rows += [{"mid": r["mail_id"]} for r in self.pending_dms
+                         if r.get("mail_id") is not None and str(r["mail_id"]) in ids]
+            # lobby_invites: this fake keeps no invite row
+            return _Res(rows)
         # the sender's views: a message CTE and its addressees, one statement
         if " src AS MATERIALIZED (" in sql:
             return self._with_addressees(sql, params)
@@ -1148,13 +1181,10 @@ class FakeDb:
             # no age floor since migration 415's change: the spam check counts
             # receipts, so nothing the sender is answered reads these rows
             assert "min_age_days" not in sql, "the purge's age floor is gone"
-            gone = []
-            for mid, m in list(self.messages.items()):
-                live = any(env["delivery"] == "delivered" and env["deleted_at"] is None
-                           for (mm, _r), env in self.recipients.items() if mm == mid)
-                if not live and (m["deleted_by_sender_at"] is not None
-                                 or m["created_at"] < NOW - timedelta(days=int(params["days"]))):
-                    gone.append(mid)
+            # mscl-r2: it names the messages it holds, and checks the predicate again
+            assert "WHERE m.id = ANY(CAST(:ids AS uuid[]))" in sql, sql
+            named = {str(i) for i in params["ids"]}
+            gone = [mid for mid in self._purge_due(int(params["days"])) if str(mid) in named]
             for mid in gone:
                 self.messages.pop(mid)
                 for k in [k for k in self.recipients if k[0] == mid]:
@@ -1162,6 +1192,9 @@ class FakeDb:
                 for c in self.cases.values():
                     if c["message_id"] == mid:
                         c["message_id"] = None
+                for r in self.pending_dms:          # pending_dms.mail_id: ON DELETE SET NULL
+                    if r.get("mail_id") is not None and str(r["mail_id"]) == str(mid):
+                        r["mail_id"] = None
             return _Res([(1,)] * len(gone))
         if "DELETE FROM mail_censor_hits" in sql:
             keep = [h for h in self.censor_hits if h["created_at"] >= NOW - timedelta(days=int(params["days"]))]
@@ -2228,11 +2261,13 @@ def test_delete_account_handles_every_new_table_by_name():
     src = inspect.getsource(main.delete_player_data)
     for stmt, n in (("DELETE FROM mail_recipients WHERE recipient_id = :pid", 2),   # the early sweep and the post-rewrite sweep (H3)
                     ("DELETE FROM mail_blocks WHERE blocker_id = :pid OR blocked_id = :pid", 1),
-                    ("UPDATE moderation_cases SET reporter_id = NULL WHERE reporter_id = :pid", 1),
+                    # moderation_cases: reporter_id and M11's resolved_by, both in the one last
+                    # statement, which skips a held row (mail spam case lock lane, route B;
+                    # two deletions waiting for each other on other mail rows: item MDPL)
+                    ("text(_DELETE_CASE_SCRUB_SQL)", 1),
                     ("DELETE FROM mail_bulk_grants WHERE steam_id = :sid", 1),
                     ("DELETE FROM mail_censor_hits WHERE sender_id = :pid", 1),
                     ("DELETE FROM mail_send_receipts WHERE sender_id = :pid", 1),                          # migration 415
-                    ("UPDATE moderation_cases SET resolved_by = :tomb WHERE resolved_by = :sid", 1),     # M11
                     ("UPDATE mail_bulk_grants SET granted_by = :tomb WHERE granted_by = :sid", 1),       # M11
                     ("DELETE FROM mail_inbox_rev WHERE recipient_id = :pid", 1),                          # migration 300
                     # item 5 / migration 330: a relay DM row is a COPY of the
@@ -2278,6 +2313,12 @@ def test_delete_account_handles_every_new_table_by_name():
     assert "FOR KEY SHARE OF p" in main._MAIL_FANOUT_SQL and "FOR KEY SHARE OF p" in main._MAIL_BROADCAST_FANOUT_SQL
     # sent messages and the moderation evidence are retained (the recipients' and the moderators' property)
     assert "DELETE FROM mail_messages" not in src and "DELETE FROM moderation_cases" not in src
+    # The case statement writes both identity columns, and no other statement of the handler names the
+    # table (the live proofs, the ordering pin and the reachable-SQL census are in
+    # test_mail_case_scrub_pg.py).
+    assert "reporter_id = CASE WHEN reporter_id = CAST(:pid AS uuid) THEN NULL" in main._DELETE_CASE_SCRUB_SQL
+    assert "THEN CAST(:tomb AS varchar) ELSE resolved_by END" in main._DELETE_CASE_SCRUB_SQL
+    assert "FOR NO KEY UPDATE SKIP LOCKED" in main._DELETE_CASE_SCRUB_SQL
     ban = inspect.getsource(main._apply_ban_core)
     assert "mail_" not in ban                                        # a ban leaves mail alone
 
@@ -2319,8 +2360,13 @@ def test_janitor_retention_keeps_unread_and_purges_let_go_mail():
     assert len(db.censor_hits) == 1
     src = inspect.getsource(main.queue_cleanup_loop)
     assert src.count("_mail_retention_sweep(") == 1 and "[MAIL-RETENTION]" in src
+    # since mscl-r2 the purge is _mail_purge_due, called once by the sweep: its hold of the
+    # messages due and its DELETE each check the predicate (delivered, live envelopes only)
+    purge = inspect.getsource(main._mail_purge_due)
     sweep = inspect.getsource(main._mail_retention_sweep)
-    assert "r.delivery = 'delivered'" in sweep and "r.deleted_at IS NULL" in sweep
+    assert sweep.count("_mail_purge_due(db)") == 1
+    assert purge.count("r.delivery = 'delivered'") == 2 and purge.count("r.deleted_at IS NULL") == 2
+    sweep += purge
     # the floor is gone, bind and constant alike
     assert "min_age_days" not in sweep and not hasattr(main, "MAIL_PURGE_MIN_AGE_DAYS")
     # control (migration 415's change): the receipt count and the key move

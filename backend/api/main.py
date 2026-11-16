@@ -4910,7 +4910,7 @@ async def _ovt_horizon_candidates(db, days: int, limit: int):
     Idleness is measured from SERVER-CLOCK columns only: `ovt_series.created_at`
     (NOW() at insert) and, per game, `GREATEST(ovt_matches.ended_at,
     ovt_matches.created_at)` — the report sink writes `ended_at` as NOW()
-    (PIN main.py:56345 ":started, NOW(),") and `created_at` defaults to NOW()
+    (PIN main.py:56386 ":started, NOW(),") and `created_at` defaults to NOW()
     by schema. `ovt_matches.started_at`
     is the one client-supplied stamp on that row and is deliberately NOT read
     here: a client-attested value may only move the server toward the
@@ -4976,7 +4976,7 @@ async def _ovt_settle_horizon_row(db, series_id, days: int) -> bool:
     report advances the tally and can complete the series. The bound the code
     actually holds is the ordering one — this settlement and that report
     serialise on the same series row lock: the report sink's lock waits
-    (PIN main.py:56146 "SELECT * FROM ovt_series WHERE id = :sid FOR NO KEY UPDATE"),
+    (PIN main.py:56187 "SELECT * FROM ovt_series WHERE id = :sid FOR NO KEY UPDATE"),
     this one declines. Whichever commits second observes the first, and a
     report arriving after the void is recorded and paid on the settled-without
     -play arm of `submit_ovt_match` rather than lost.
@@ -5046,7 +5046,7 @@ async def _ovt_settle_horizon_row(db, series_id, days: int) -> bool:
         return False
     # 'canceled', one L. Every other ovt path uses that spelling and the
     # continuation's prior-series lookup filters on it
-    # (PIN main.py:55477 "WHERE status IN ('completed', 'canceled', 'cancelled')"); the
+    # (PIN main.py:55518 "WHERE status IN ('completed', 'canceled', 'cancelled')"); the
     # janitor's original 'cancelled' made its own rows invisible to that lookup
     # and backend/sql/145_ovt_status_spelling.sql had to normalise them. A third
     # spelling would reopen that hole, so the VOID is carried by
@@ -6130,6 +6130,15 @@ async def queue_cleanup_loop():
                               f"deleted {_receipts} send receipt(s)")
         except Exception as e:
             print(f"[MAIL-RETENTION] sweep error: {e}")
+        # ── Case-row scrub finish (mail spam case lock lane, route B) ────
+        # Own try/except (#228). Every pass: _mail_case_scrub_pass finishes
+        # the moderation_cases rows delete_player_data's last statement
+        # skipped, in short transactions of its own, and waits for no other
+        # transaction's row (SKIP LOCKED).
+        try:
+            _mail_case_scrub_log(await _mail_case_scrub_pass(async_session))
+        except Exception as e:
+            print(f"[MAIL-CASE-SCRUB] sweep error: {e}")
         # ── Lobby invites (migration 416) ───────────────────────────────
         # Own try/except (#228). Every pass: the sweep ends each pending
         # invite it does not keep and bumps its invitee's revision, then
@@ -7985,6 +7994,22 @@ _CASUAL_STREAK_BUILD = 1
 # construction, probed by the release train and read by nothing else (#306).
 # Absent on any build before it.
 _AER_POPGATE_BUILD = 1
+# Release-train verification plumbing, not a design mechanism: the build
+# marker of the mail spam case lock lane, reported on /health as
+# `mail_spam_case_lock_build`. 2 = its route B: a mail send keeps its order,
+# delete_player_data writes moderation_cases only in its last statement,
+# which skips a row another transaction holds (_DELETE_CASE_SCRUB_SQL), and
+# the janitor finishes a skipped row (_mail_case_scrub_pass); the retention
+# sweep waits for no row lock (mscl-r2, the comment above
+# _mail_retention_sweep); the open item MDPL (two deletions against each
+# other on mail rows that are not case rows) is not in it. Value 1 (a send's
+# lock on its spam case row) was never deployed. It names build
+# identity only. The lane adds no route and no key to any answer, so without
+# it the train could not tell a box on the new build from a stale one
+# (learnings 780, 794). A code constant, equal on both boxes by
+# construction, probed by the release train and read by nothing else (#306).
+# Absent on any build before it.
+_MAIL_SPAM_CASE_LOCK_BUILD = 2
 
 
 def _title_ladders_health_word() -> int:
@@ -8064,6 +8089,7 @@ async def health_check(db: AsyncSession = Depends(get_db)):
                               ban_expiry_build=_BAN_EXPIRY_BUILD,
                               aer_popgate_build=_AER_POPGATE_BUILD,
                               admin_evidence_population=_admin_evidence.population_health_word(),
+                              mail_spam_case_lock_build=_MAIL_SPAM_CASE_LOCK_BUILD,
                               build_manifest=_build_manifest.health_word(),
                               review_eval=_review_rules.review_eval(),
                               review_rules=_review_rules.health_word(),
@@ -8133,6 +8159,7 @@ async def health_check(db: AsyncSession = Depends(get_db)):
                               ban_expiry_build=_BAN_EXPIRY_BUILD,
                               aer_popgate_build=_AER_POPGATE_BUILD,
                               admin_evidence_population=_admin_evidence.population_health_word(),
+                              mail_spam_case_lock_build=_MAIL_SPAM_CASE_LOCK_BUILD,
                               build_manifest=_build_manifest.health_word(),
                               review_eval=_review_rules.review_eval(),
                               review_rules=_review_rules.health_word(),
@@ -46078,13 +46105,13 @@ async def delete_player_data(steam_id: str, request: Request, sig: str = Query(.
     # ANONYMISED, so mail_blocks' ON DELETE CASCADE never fires (#437) — every
     # mail table is handled by name. The inbox and addressee envelopes go
     # (this player's property); both directions of their mail blocks go; their
-    # reports keep the evidence snapshot but lose the reporter_id; a bulk grant
+    # reports keep the evidence snapshot but lose the reporter_id (in this
+    # handler's last statement, _DELETE_CASE_SCRUB_SQL); a bulk grant
     # is live authority and dies with the account; the censor-hit ledger is
     # personal. Messages they SENT stay — the recipients' property, now
     # pointing at the anonymised row.
     await db.execute(text("DELETE FROM mail_recipients WHERE recipient_id = :pid"), {"pid": pid})
     await db.execute(text("DELETE FROM mail_blocks WHERE blocker_id = :pid OR blocked_id = :pid"), {"pid": pid})
-    await db.execute(text("UPDATE moderation_cases SET reporter_id = NULL WHERE reporter_id = :pid"), {"pid": pid})
     await db.execute(text("DELETE FROM mail_bulk_grants WHERE steam_id = :sid"), {"sid": steam_id})
     await db.execute(text("DELETE FROM mail_censor_hits WHERE sender_id = :pid"), {"pid": pid})
     # Send receipts (migration 415): this player's record of what they sent
@@ -46112,10 +46139,8 @@ async def delete_player_data(steam_id: str, request: Request, sig: str = Query(.
     # Sept 6 item b (review r1): the two raw-identity columns the mail tables
     # carry for an ACTING account — the moderator who resolved a case and the
     # admin who granted a bulk cap — take the same tombstone as the i18n
-    # granted_by column above.
-    await db.execute(text(
-        "UPDATE moderation_cases SET resolved_by = :tomb WHERE resolved_by = :sid"),
-        {"sid": steam_id, "tomb": _tomb})
+    # granted_by column above: the bulk grant's here, the moderator's in this
+    # handler's last statement (_DELETE_CASE_SCRUB_SQL).
     await db.execute(text(
         "UPDATE mail_bulk_grants SET granted_by = :tomb WHERE granted_by = :sid"),
         {"sid": steam_id, "tomb": _tomb})
@@ -46225,10 +46250,16 @@ async def delete_player_data(steam_id: str, request: Request, sig: str = Query(.
     player.deleted_at = datetime.now(timezone.utc)
 
     # Record hash so a later match report from the same Steam ID can't
-    # spoof a fresh account.
+    # spoof a fresh account. deleted_at is the database clock read HERE, after
+    # this transaction's identity lock (pg_advisory_xact_lock above), and not
+    # the column's default NOW(), which is the transaction's start: the
+    # resolver half of the case-scrub pass (_CASE_SCRUB_RESOLVER_SQL) compares
+    # it with resolved_at, and only a stamp read after the lock is ordered
+    # after every action that wrote this raw id (mscl-r2).
     if MATCH_HMAC_SECRET:
         await db.execute(
-            text("INSERT INTO deleted_steam_ids (steam_id_hash) VALUES (:h) ON CONFLICT DO NOTHING"),
+            text("INSERT INTO deleted_steam_ids (steam_id_hash, deleted_at)"
+                 " VALUES (:h, clock_timestamp()) ON CONFLICT DO NOTHING"),
             {"h": _hash_steam_id(steam_id)},
         )
 
@@ -46244,12 +46275,15 @@ async def delete_player_data(steam_id: str, request: Request, sig: str = Query(.
     # row-lock order (players, then mail_inbox_rev) matches the fan-out's and
     # no cycle of waits between the two can form over these two tables' rows.
     # (A send that crosses a spam threshold takes one more lock after them,
-    # its sender's case row for the day, and can close a cycle with this
-    # deletion's resolved_by scrub above: see the comment above
-    # _INVITE_REV_BUMP_SQL.) Migration 416's change moved it
-    # from here to the very end: there it is locked in the same ascending
-    # pass as the invite bump's rows (_invite_bump's `drop`), the one order
-    # every writer of mail_inbox_rev takes, and nothing is locked after it.
+    # its sender's case row for the day. This deletion never waits for a case
+    # row: it writes moderation_cases only in its last statement, which skips
+    # a row another transaction holds, _DELETE_CASE_SCRUB_SQL. Two deletions
+    # can still wait for each other on mail rows that are not case rows: the
+    # open item MDPL.) Migration 416's change moved it from
+    # here to the end: there it is locked in the same ascending pass as the
+    # invite bump's rows (_invite_bump's `drop`), the one order every writer of
+    # mail_inbox_rev takes. The only lock taken after it is that last
+    # statement's, which never waits for another transaction's row.
     await db.flush()
     await db.execute(text("DELETE FROM mail_recipients WHERE recipient_id = :pid"), {"pid": pid})
     # Item 5 (migration 330). A relay DM row is a COPY of the mail held
@@ -46273,6 +46307,13 @@ async def delete_player_data(steam_id: str, request: Request, sig: str = Query(.
     await db.execute(text(_ERASE_RELAY_DMS_FROM_SQL), {"sid": steam_id, "pid": pid})
     await _invite_bump(db, _inv_ended, drop=pid)
     await db.execute(text("DELETE FROM mail_inbox_rev WHERE recipient_id = :pid"), {"pid": pid})
+    # The LAST statement before the commit, and this handler's only write to
+    # a moderation_cases row: it never waits for another transaction's row
+    # (_DELETE_CASE_SCRUB_SQL says why). A row it skips keeps its old values
+    # until the janitor's _mail_case_scrub_pass finishes it. Two deletions can
+    # still wait for each other on mail rows that are not case rows (the open
+    # item MDPL); the retention sweep waits for no row lock and is not in it.
+    await db.execute(text(_DELETE_CASE_SCRUB_SQL), {"pid": pid, "sid": steam_id, "tomb": _tomb})
 
     await db.commit()
     print(f"[PRIVACY] Anonymized steam_id={steam_id} (placeholder={player.steam_id})")
@@ -79861,7 +79902,7 @@ async def _log_admin_action_strict(db: AsyncSession, *, admin_steam_id: str, act
 # row is the newer message's: migration 415's trigger.) A repeated key is
 # answered from the receipt ALONE. The message row is no source for that
 # answer: the janitor purges a row only once no delivered copy keeps it, which
-# depends on the recipients' delivery, while the receipt lives until
+# depends on the recipients' delivery, while the receipt lives at least until
 # MAIL_RETENTION_DAYS after the send whatever happened to the message
 # (_MAIL_RECEIPT_SWEEP_SQL).
 _MAIL_PRIOR_SEND_SQL = (
@@ -79895,8 +79936,9 @@ _MAIL_RECEIPT_SQL = (
     " RETURNING 1"
 )
 
-# The janitor's receipt arm: a receipt goes MAIL_RETENTION_DAYS after the
-# send, in bounded batches, whatever the message's delivery or purge state.
+# The janitor's receipt arm: a receipt is due MAIL_RETENTION_DAYS after the
+# send whatever the message's delivery or purge state, and a run deletes, in
+# bounded batches, the due receipts it can hold (below).
 # The same statement moves every message a deleted receipt answered for
 # that is still kept (an unread delivered copy keeps a row past retention)
 # off its key: a key with no receipt is sent as a new message, and 297's
@@ -79913,13 +79955,33 @@ _MAIL_RECEIPT_SQL = (
 # transaction rolls back, and the next run draws again. Migration 415's
 # trigger does not fire on the change (UPDATE OF recipient_count only). One
 # row per deleted receipt is returned.
+#
+# It waits for no other transaction's row lock (mscl-r2; the retention sweep's
+# comment above _mail_retention_sweep says why that matters). `cand` takes the
+# old receipts it can lock (FOR UPDATE: it deletes them) and skips the rest;
+# `held` takes, FOR UPDATE and SKIP LOCKED, the messages that still carry a
+# candidate's key (FOR UPDATE because the key it rewrites is in that unique
+# index, so its UPDATE takes that mode); `gone` deletes a candidate only when
+# no message carrying its key is one `held` could not take, so a receipt and
+# its message's key always go together; `retired` then writes only messages
+# `held` holds. A receipt or a message held elsewhere waits for a later run.
 _MAIL_RECEIPT_SWEEP_SQL = (
-    "WITH gone AS ("
+    "WITH cand AS ("
+    "  SELECT sender_id, idempotency_key FROM mail_send_receipts"
+    "   WHERE created_at < NOW() - make_interval(days => CAST(:days AS integer))"
+    "   LIMIT 2000"
+    "   FOR UPDATE SKIP LOCKED),"
+    " held AS ("
+    "  SELECT x.id FROM mail_messages x JOIN cand c"
+    "    ON x.sender_id = c.sender_id AND x.idempotency_key = c.idempotency_key"
+    "   FOR UPDATE OF x SKIP LOCKED),"
+    " gone AS ("
     "  DELETE FROM mail_send_receipts"
-    "   WHERE (sender_id, idempotency_key) IN ("
-    "     SELECT sender_id, idempotency_key FROM mail_send_receipts"
-    "      WHERE created_at < NOW() - make_interval(days => CAST(:days AS integer))"
-    "      LIMIT 2000)"
+    "   WHERE (sender_id, idempotency_key) IN (SELECT sender_id, idempotency_key FROM cand)"
+    "     AND NOT EXISTS (SELECT 1 FROM mail_messages x"
+    "                      WHERE x.sender_id = mail_send_receipts.sender_id"
+    "                        AND x.idempotency_key = mail_send_receipts.idempotency_key"
+    "                        AND x.id NOT IN (SELECT id FROM held))"
     "  RETURNING sender_id, idempotency_key),"
     " retired AS ("
     "  UPDATE mail_messages m"
@@ -80090,9 +80152,10 @@ async def _mail_rate_or_raise(db: AsyncSession, sender_id) -> None:
     """10 per minute and 100 per day, counted on the sender's own send
     receipts under the sender lock (B-11). Broadcasts do not count.
 
-    Receipts, not message rows (migration 415's change): a receipt stays
-    MAIL_RETENTION_DAYS after the send whatever happens to the message, so
-    every send counts for its whole window whatever its delivery. That holds
+    Receipts, not message rows (migration 415's change): a receipt stays at
+    least MAIL_RETENTION_DAYS after the send whatever happens to the
+    message, so every send counts for its whole window whatever its
+    delivery. That holds
     when a later message takes the send's key, too: the first send's receipt
     stays, under a reserved key, with its own kind and time (migration 415's
     trigger), so each committed send is one receipt. A row's
@@ -81574,9 +81637,12 @@ async def _invite_write_receipt(db: AsyncSession, caller_id, key: UUID, route: s
 # statement (the CTE), the order of every writer of this table (mail's sends and migration 300's
 # trigger insert in that order; the deletion takes its own row in the same ascending pass as its
 # bump, _INVITE_REV_DROP_LOCK_SQL), so waits on these rows alone never form a cycle. A lock taken
-# after a bump can still close one: _apply_ban_core says why its own cannot; mail's send can (its
-# spam case can wait on delete_player_data's resolved_by scrub, which then waits on rows the send
-# holds). A row the deletion holds is waited for and, once it commits, gone.
+# after a bump can still close one: _apply_ban_core says why its own cannot. Mail's send takes its
+# sender's spam case row after its bump, and delete_player_data, which waits for these rows, never
+# waits for a case row: it writes moderation_cases only in its last statement, which skips a row
+# another transaction holds (_DELETE_CASE_SCRUB_SQL). A row the deletion holds is waited for and,
+# once it commits, gone. Two deletions can still wait for each other on mail rows that are not
+# case rows (the open item MDPL); the retention sweep waits for no row lock and is not in it.
 _INVITE_REV_BUMP_SQL = (
     "WITH t AS (SELECT v.recipient_id FROM mail_inbox_rev v"
     "            WHERE v.recipient_id IN (SELECT r.recipient_id FROM mail_recipients r"
@@ -82425,28 +82491,86 @@ async def _invite_retention_sweep(db: AsyncSession) -> int:
                                  {"days": INVITE_KEEP_DAYS})).fetchall())
 
 
+# ── The retention sweep waits for no ROW lock (mscl-r2) ─────────────────────
+#
+# A pass removes every due row it can HOLD and leaves the rest to a later
+# pass. Every row it writes it first takes with SKIP LOCKED, in the weakest
+# mode that still conflicts with its own write, and it then writes only rows
+# it holds, so no statement of it waits for another transaction's row lock:
+#   (a) read envelopes it expires: FOR NO KEY UPDATE (deleted_at is in no
+#       unique index);
+#   (b) messages it purges: FOR UPDATE (it deletes them). While it holds a
+#       message no new row can name it: a foreign-key check takes KEY SHARE
+#       on the message, which FOR UPDATE refuses;
+#   (c) the rows the purge's foreign keys then write, of the messages it
+#       holds: mail_recipients FOR UPDATE (the CASCADE deletes them);
+#       moderation_cases, pending_dms and lobby_invites FOR NO KEY UPDATE
+#       (SET NULL writes a column that is in no unique index). A second read
+#       takes every such row, held or not, and a message with one it does
+#       not hold is left to a later pass;
+#   (d) the DELETE names only the messages whose rows it holds, and checks
+#       the purge predicate again in a statement of its own, after the locks;
+#   (e) censor hits it prunes: FOR UPDATE (it deletes them);
+#   (f) send receipts and the messages whose key goes with them: both FOR
+#       UPDATE, in _MAIL_RECEIPT_SWEEP_SQL (the key is in a unique index).
+# The other kinds of wait, one fact each:
+#   - advisory locks: no statement here takes one, and no trigger of the
+#     written tables' own fires on a write of the sweep: those triggers are
+#     trg_mail_inbox_rev_bump (mail_recipients, AFTER INSERT only) and
+#     trg_mail_send_receipt (mail_messages, AFTER INSERT OR UPDATE OF
+#     recipient_count only), and the sweep inserts nothing and never sets
+#     recipient_count. The foreign keys' actions are the database's own
+#     triggers, and they write only the rows (c) holds. The send's per-sender
+#     mail lock (hashtext('mail:' ...)) is never taken here;
+#   - unique indexes: a uniqueness check waits only for another transaction
+#     whose uncommitted row holds the same key. A DELETE inserts no key. An
+#     UPDATE that is not HOT inserts every index's key again, its unchanged
+#     ones too, and the only other row an unchanged key is in is the row's
+#     own old version, which this transaction is replacing: another
+#     transaction's row with that key fails, or waits at, its own check
+#     against this one. The one changed key here is (f)'s retired key, in
+#     297's UNIQUE (sender_id, idempotency_key): a value drawn at random in
+#     the statement (122 bits, its version digit set to 0). This build
+#     refuses a reserved key from a sender (_mail_parse_key) and no route
+#     returns a drawn one, so no other transaction is inserting it. The
+#     expiry and the SET NULL actions write no column a unique index names
+#     in its columns, its predicate or its expressions (pinned, with the
+#     triggers, the foreign keys and no exclusion constraint or rule, in
+#     test_mail_case_scrub_pg.py);
+#   - table locks: every write here takes ROW EXCLUSIVE and queues behind a
+#     migration's stronger lock like any other write; that wait is outside
+#     this claim.
+# So the sweep is a member of no lock circle, since every member of one waits
+# for another member, and the sweep waits for no row lock, no advisory lock
+# and no other transaction's key: not the class of mscl-r2's first finding
+# (the purge holding a relay row through one message's SET NULL and waiting
+# for a case row through another's), and not the circles with the deletion
+# that ORDER-V2 section 11 named.
 async def _mail_retention_sweep(db: AsyncSession) -> tuple[int, int, int, int]:
     """The janitor's mail arm (called hourly from queue_cleanup_loop, so
     every statement here is in the boot-time EXPLAIN inventory). Policy:
     read mail older than MAIL_RETENTION_DAYS leaves the inbox (its envelope
     is soft-expired, which keeps the sender's addressee list intact until
-    the message itself goes); a message is purged once NO delivered envelope
-    is still live AND (the sender deleted it OR it is older than
-    MAIL_RETENTION_DAYS). Unread mail is therefore kept: a live unread
-    envelope blocks the purge. What a sender is answered never reads whether
-    the purge has run: the spam check counts send receipts, and the
+    the message itself goes); a message is due for the purge once NO
+    delivered envelope is still live AND (the sender deleted it OR it is
+    older than MAIL_RETENTION_DAYS). Unread mail is therefore kept: a live
+    unread envelope blocks the purge. What a sender is answered never reads
+    whether the purge has run: the spam check counts send receipts, and the
     sender's own views read their rows with the clock inside the statement
-    (_MAIL_CLOCK_CTE). Bounded batches; the
-    cascade removes the envelopes, moderation_cases.message_id goes NULL and
+    (_MAIL_CLOCK_CTE). A pass handles what is due in bounded batches, and
+    only the rows it can hold: a row another transaction holds waits for a
+    later pass (the comment above), so no pass is promised to clear all that
+    is due. The cascade removes the envelopes, moderation_cases.message_id goes NULL and
     the case keeps its snapshot. A reply's in_reply_to keeps the purged
     parent's id: migration 415 dropped the foreign key that set it NULL, so a
     reply's sender reads the same in_reply_to whatever the parent's delivery
     kept or released. The censor-hit ledger is pruned after
-    MAIL_CENSOR_HITS_KEEP_DAYS. Send receipts (migration 415) are deleted
+    MAIL_CENSOR_HITS_KEEP_DAYS. Send receipts (migration 415) are due
     MAIL_RETENTION_DAYS after the send whatever the message's delivery or
-    purge: a repeated key is answered from its receipt until then, and the
-    key of a message still kept is retired with it
+    purge: a repeated key is answered from its receipt at least until then,
+    and the key of a message still kept is retired with it
     (_MAIL_RECEIPT_SWEEP_SQL)."""
+    # (a)
     expired = (await db.execute(text(
         "UPDATE mail_recipients SET deleted_at = NOW()"
         " WHERE (message_id, recipient_id) IN ("
@@ -82454,29 +82578,289 @@ async def _mail_retention_sweep(db: AsyncSession) -> tuple[int, int, int, int]:
         "     FROM mail_recipients r JOIN mail_messages m ON m.id = r.message_id"
         "    WHERE r.read_at IS NOT NULL AND r.deleted_at IS NULL"
         "      AND m.created_at < NOW() - make_interval(days => CAST(:days AS integer))"
-        "    LIMIT 2000)"
+        "    LIMIT 2000"
+        "    FOR NO KEY UPDATE OF r SKIP LOCKED)"
         " RETURNING 1"
     ), {"days": MAIL_RETENTION_DAYS})).fetchall()
-    purged = (await db.execute(text(
-        "DELETE FROM mail_messages"
-        " WHERE id IN ("
-        "   SELECT m.id FROM mail_messages m"
-        "    WHERE NOT EXISTS (SELECT 1 FROM mail_recipients r"
-        "                       WHERE r.message_id = m.id AND r.delivery = 'delivered'"
-        "                         AND r.deleted_at IS NULL)"
-        "      AND (m.deleted_by_sender_at IS NOT NULL"
-        "           OR m.created_at < NOW() - make_interval(days => CAST(:days AS integer)))"
-        "    LIMIT 500)"
-        " RETURNING 1"
-    ), {"days": MAIL_RETENTION_DAYS})).fetchall()
+    # (b) to (d)
+    purged = await _mail_purge_due(db)
+    # (e)
     hits = (await db.execute(text(
         "DELETE FROM mail_censor_hits"
-        " WHERE created_at < NOW() - make_interval(days => CAST(:days AS integer))"
+        " WHERE id IN (SELECT id FROM mail_censor_hits"
+        "               WHERE created_at < NOW() - make_interval(days => CAST(:days AS integer))"
+        "               FOR UPDATE SKIP LOCKED)"
         " RETURNING 1"
     ), {"days": MAIL_CENSOR_HITS_KEEP_DAYS})).fetchall()
+    # (f)
     receipts = (await db.execute(text(_MAIL_RECEIPT_SWEEP_SQL),
                                  {"days": MAIL_RETENTION_DAYS})).fetchall()
     return len(expired), len(purged), len(hits), len(receipts)
+
+
+async def _mail_purge_due(db: AsyncSession) -> list:
+    """The retention sweep's purge, steps (b) to (d) of the comment above
+    _mail_retention_sweep, each a statement of its own in the caller's
+    transaction: the messages due that it can hold; the rows the DELETE's
+    foreign keys write for them, those it can hold, then all of them read
+    again; the DELETE of the messages whose rows it holds, with the purge's
+    predicate checked again. One row per message removed. A message it
+    cannot hold, or one with a row it cannot hold, stays for a later pass."""
+    # (b) the messages due, those it can hold
+    held = [r["id"] for r in (await db.execute(text(
+        "SELECT m.id FROM mail_messages m"
+        " WHERE NOT EXISTS (SELECT 1 FROM mail_recipients r"
+        "                    WHERE r.message_id = m.id AND r.delivery = 'delivered'"
+        "                      AND r.deleted_at IS NULL)"
+        "   AND (m.deleted_by_sender_at IS NOT NULL"
+        "        OR m.created_at < NOW() - make_interval(days => CAST(:days AS integer)))"
+        " LIMIT 500"
+        " FOR UPDATE OF m SKIP LOCKED"
+    ), {"days": MAIL_RETENTION_DAYS})).mappings().all()]
+    if not held:
+        return []
+    # (c) every row the DELETE's foreign keys write, those it can hold...
+    took = list((await db.execute(text(
+        "SELECT message_id AS mid FROM mail_recipients"
+        " WHERE message_id = ANY(CAST(:ids AS uuid[]))"
+        " FOR UPDATE SKIP LOCKED"), {"ids": held})).mappings().all())
+    took += (await db.execute(text(
+        "SELECT message_id AS mid FROM moderation_cases"
+        " WHERE message_id = ANY(CAST(:ids AS uuid[]))"
+        " FOR NO KEY UPDATE SKIP LOCKED"), {"ids": held})).mappings().all()
+    took += (await db.execute(text(
+        "SELECT mail_id AS mid FROM pending_dms"
+        " WHERE mail_id = ANY(CAST(:ids AS uuid[]))"
+        " FOR NO KEY UPDATE SKIP LOCKED"), {"ids": held})).mappings().all()
+    took += (await db.execute(text(
+        "SELECT mail_message_id AS mid FROM lobby_invites"
+        " WHERE mail_message_id = ANY(CAST(:ids AS uuid[]))"
+        " FOR NO KEY UPDATE SKIP LOCKED"), {"ids": held})).mappings().all()
+    # ...and all of them, held or not, read after those locks: while it holds
+    # a message no new row can name it, so a row this read does not find
+    # cannot appear before the commit
+    left: dict = {}
+    for r in (await db.execute(text(
+            "SELECT message_id AS mid FROM mail_recipients WHERE message_id = ANY(CAST(:ids AS uuid[]))"
+            " UNION ALL SELECT message_id FROM moderation_cases"
+            "  WHERE message_id = ANY(CAST(:ids AS uuid[]))"
+            " UNION ALL SELECT mail_id FROM pending_dms WHERE mail_id = ANY(CAST(:ids AS uuid[]))"
+            " UNION ALL SELECT mail_message_id FROM lobby_invites"
+            "  WHERE mail_message_id = ANY(CAST(:ids AS uuid[]))"), {"ids": held})).mappings().all():
+        left[str(r["mid"])] = left.get(str(r["mid"]), 0) + 1
+    for r in took:
+        left[str(r["mid"])] = left.get(str(r["mid"]), 0) - 1
+    # (d) a message goes only when it holds every one of its rows
+    whole = [i for i in held if left.get(str(i), 0) == 0]
+    if not whole:
+        return []
+    return list((await db.execute(text(
+        "DELETE FROM mail_messages m"
+        " WHERE m.id = ANY(CAST(:ids AS uuid[]))"
+        "   AND NOT EXISTS (SELECT 1 FROM mail_recipients r"
+        "                    WHERE r.message_id = m.id AND r.delivery = 'delivered'"
+        "                      AND r.deleted_at IS NULL)"
+        "   AND (m.deleted_by_sender_at IS NOT NULL"
+        "        OR m.created_at < NOW() - make_interval(days => CAST(:days AS integer)))"
+        " RETURNING 1"
+    ), {"ids": whole, "days": MAIL_RETENTION_DAYS})).fetchall())
+
+
+# ── Case-row scrubs that never wait (mail spam case lock lane, route B) ─────
+#
+# delete_player_data's LAST statement before its commit, and its only write
+# to a moderation_cases row. It rewrites the two columns that name the deleted
+# account -- reporter_id (its players.id, on a case it reported) goes NULL,
+# resolved_by (its raw Steam ID, on a case it acted on as a moderator) takes
+# the deletion's tombstone -- on every such row it can lock now, and skips a
+# row another transaction holds. As a statement it never waits for another
+# transaction, a migration's table lock aside:
+#   - row locks: the inner SELECT locks only rows no other transaction holds,
+#     in the mode the UPDATE takes (neither column is in a unique index, so
+#     FOR NO KEY UPDATE), and the UPDATE writes only the rows it locked;
+#   - foreign keys: reporter_id changes only to NULL, which needs no check,
+#     and no other key column changes. PostgreSQL re-checks an unchanged key
+#     only on a row this transaction wrote earlier (ri_triggers.c,
+#     RI_FKey_fk_upd_check_required), and the deletion writes no case row
+#     before this statement: no earlier statement of it names the table, and
+#     none deletes a mail_messages row, whose ON DELETE SET NULL would write
+#     one;
+#   - triggers: the table has none of its own, only its foreign keys';
+#   - unique indexes: no indexed column changes. An update that cannot stay on
+#     its page re-inserts the row's unchanged keys, and the only other version
+#     holding them is the row's own old one, which this transaction replaces;
+#   - the table lock: ROW EXCLUSIVE, which only a migration's locks (SHARE and
+#     stronger) conflict with.
+# So the deletion never holds a case row while it waits for anything. A row
+# skipped here keeps its old values until _mail_case_scrub_pass finishes it on
+# a later janitor pass; until then an admin's case list
+# (admin_moderation_cases) can show them.
+#
+# This statement alone does not close the circles through a case row. Route
+# B's first argument checked pairs, and mscl-r2 found a circle of three it
+# missed: the deletion holding an open lobby, a moderator's ban holding its
+# case row and waiting for that lobby, and the retention purge holding a relay
+# row of the deletion's through one message's SET NULL while it waited for the
+# case row through another's. What closes them is a rule per EDGE. A circle
+# through case row C has an edge "X waits for C, held by Y", and it closes only
+# if Y waits for something after taking C and something waits for X. So for
+# every such edge one of these holds:
+#   - Y waits for nothing once it holds C: this statement, the janitor's
+#     finish, the notified stamp (its commit is next), and the retention sweep,
+#     which waits for no row lock at all (the comment above
+#     _mail_retention_sweep);
+#   - X holds nothing while it waits for C: the notified stamp;
+#   - X and Y both take, before C, a lock that orders them: a send and a
+#     moderator's action on one case, in any pair, take its subject's
+#     identity lock; two reports of one message take the reporter's.
+# Each edge is settled by its own two transactions, so the rule holds for
+# circles of any length (ORDER-V3 has the table). The deletion and another
+# deletion can still wait for each other on mail rows that are not case rows
+# (envelopes, relay rows, censor hits, send receipts), taken in different
+# orders; that open class is the item MDPL. The retention sweep is no longer
+# in it.
+_DELETE_CASE_SCRUB_SQL = (
+    "UPDATE moderation_cases"
+    "   SET reporter_id = CASE WHEN reporter_id = CAST(:pid AS uuid) THEN NULL"
+    "                          ELSE reporter_id END,"
+    "       resolved_by = CASE WHEN resolved_by = CAST(:sid AS varchar)"
+    "                          THEN CAST(:tomb AS varchar) ELSE resolved_by END"
+    " WHERE id IN (SELECT id FROM moderation_cases"
+    "               WHERE reporter_id = CAST(:pid AS uuid)"
+    "                  OR resolved_by = CAST(:sid AS varchar)"
+    "               FOR NO KEY UPDATE SKIP LOCKED)"
+)
+
+# The janitor's finish of what _DELETE_CASE_SCRUB_SQL skipped
+# (_mail_case_scrub_pass, every pass of queue_cleanup_loop). By predicate --
+# never by a list of row ids or a cursor that a skipped row could fall behind
+# (#615) -- and with SKIP LOCKED, so it never waits for a case row either: a
+# row still held is found again on a later pass. Each half runs in a
+# transaction of its own, so a pass writes a case row at most once per
+# transaction: a second write would re-check the row's foreign keys and could
+# wait (see above). Its UPDATEs change no key column but reporter_id, and
+# that only to NULL.
+#
+# Reporter half: a reporter_id whose players row has deleted_at set goes NULL.
+_CASE_SCRUB_REPORTER_SQL = (
+    "UPDATE moderation_cases SET reporter_id = NULL"
+    " WHERE id IN (SELECT c.id FROM moderation_cases c"
+    "                JOIN players p ON p.id = c.reporter_id"
+    "               WHERE p.deleted_at IS NOT NULL"
+    "               FOR NO KEY UPDATE OF c SKIP LOCKED)"
+    " RETURNING 1"
+)
+# Resolver half. resolved_by holds a raw Steam ID, so a deleted one is found
+# through the deletion ledger (deleted_steam_ids, the hash _hash_steam_id
+# gives; the deletion writes it, and runs at all, only with MATCH_HMAC_SECRET
+# set). The ids a pass checks: each distinct 17-digit value; a tombstone never
+# matches.
+_CASE_SCRUB_RESOLVER_IDS_SQL = (
+    "SELECT DISTINCT resolved_by FROM moderation_cases"
+    " WHERE resolved_by ~ '^[0-9]{17}$'"
+)
+_CASE_SCRUB_LEDGER_SQL = (
+    "SELECT steam_id_hash, deleted_at FROM deleted_steam_ids"
+    " WHERE steam_id_hash = ANY(CAST(:hashes AS text[]))"
+)
+# One deleted resolver's rows, those resolved before the deletion. The two
+# stamps are both the database server's clock: resolved_at is NOW() of the
+# moderator's action (_moderation_case_act), the start of that transaction;
+# deleted_at is clock_timestamp() read by delete_player_data's ledger insert,
+# AFTER its identity lock. (It was the column's default NOW(), the deleting
+# transaction's start, until mscl-r2 found that nothing bounds how long a
+# deletion can stand before that lock: no lock_timeout, statement_timeout or
+# idle_in_transaction_session_timeout applies to it.) The action and the
+# deletion take the same identity lock (_mail_lock_identities;
+# delete_player_data's pg_advisory_xact_lock), so an action that wrote a row
+# the deletion then skipped committed before the deletion took that lock: its
+# resolved_at is at most its commit, at most the deletion's lock, at most
+# deleted_at, however long the deletion stood before the lock. The one-hour
+# margin covers only a step of the server's clock between the two reads. It
+# cannot reach a row it should leave: once a deletion commits, no action
+# writes that raw id again (_mail_lock_identities refuses an id the ledger
+# records, and _mail_actor_live_or_raise a row with deleted_at set).
+_CASE_SCRUB_RESOLVER_SQL = (
+    "UPDATE moderation_cases SET resolved_by = CAST(:tomb AS varchar)"
+    " WHERE id IN (SELECT id FROM moderation_cases"
+    "               WHERE resolved_by = CAST(:sid AS varchar)"
+    "                 AND resolved_at <= CAST(:deleted_at AS timestamptz)"
+    "                                    + make_interval(hours => 1)"
+    "               FOR NO KEY UPDATE SKIP LOCKED)"
+    " RETURNING 1"
+)
+_CASE_SCRUB_STATE = {"next": 0.0}
+
+
+async def _mail_case_scrub_reporters(db: AsyncSession) -> int:
+    """The reporter half of a case-scrub pass (_CASE_SCRUB_REPORTER_SQL), in
+    the caller's transaction. Returns the rows it finished."""
+    return len((await db.execute(text(_CASE_SCRUB_REPORTER_SQL))).fetchall())
+
+
+async def _mail_case_scrub_resolvers(db: AsyncSession) -> dict:
+    """The resolver half of a case-scrub pass, in the caller's transaction.
+    Without MATCH_HMAC_SECRET it finishes nothing -- no ledger hash can be
+    computed -- and says so in its result: armed False."""
+    out = {"armed": bool(MATCH_HMAC_SECRET), "checked": 0, "deleted": 0, "resolvers": 0}
+    if not MATCH_HMAC_SECRET:
+        return out
+    ids = [r[0] for r in (await db.execute(text(_CASE_SCRUB_RESOLVER_IDS_SQL))).fetchall()]
+    out["checked"] = len(ids)
+    if not ids:
+        return out
+    by_hash = {_hash_steam_id(sid): sid for sid in ids}
+    rows = (await db.execute(text(_CASE_SCRUB_LEDGER_SQL), {"hashes": list(by_hash)})).fetchall()
+    out["deleted"] = len(rows)
+    for h, deleted_at in rows:
+        sid = by_hash.get(str(h).strip())
+        if sid is None:
+            continue
+        # A finished row takes a new tombstone, not the player's own (which is kept nowhere to reuse).
+        tomb = f"deleted_{uuid.uuid4().hex[:8]}"
+        out["resolvers"] += len((await db.execute(
+            text(_CASE_SCRUB_RESOLVER_SQL),
+            {"sid": sid, "tomb": tomb, "deleted_at": deleted_at})).fetchall())
+    return out
+
+
+async def _mail_case_scrub_pass(session_factory) -> dict:
+    """One pass of the case-row finish (the comment above _CASE_SCRUB_REPORTER_SQL
+    says how): the reporter half, then the resolver half, each in a
+    transaction of its own that commits at once. Called from
+    queue_cleanup_loop every pass, so its statements are in the boot-time
+    EXPLAIN inventory. Returns the counts _mail_case_scrub_log prints."""
+    async with session_factory() as db:
+        reporters = await _mail_case_scrub_reporters(db)
+        await db.commit()
+    async with session_factory() as db:
+        out = await _mail_case_scrub_resolvers(db)
+        await db.commit()
+    out["reporters"] = reporters
+    return out
+
+
+def _mail_case_scrub_log(res: dict, now: float | None = None) -> None:
+    """The case-scrub pass's log (learnings 438, 443: a line that shows it
+    runs, not silence). A pass that finished a row prints its counts; so does
+    the first pass after boot and then one pass an hour, finished rows or not.
+    Without MATCH_HMAC_SECRET the line says the resolver half finishes
+    nothing."""
+    now = time.monotonic() if now is None else now
+    done = int(res.get("reporters", 0)) + int(res.get("resolvers", 0))
+    hourly = now >= _CASE_SCRUB_STATE["next"]
+    if not (done or hourly):
+        return
+    if hourly:
+        _CASE_SCRUB_STATE["next"] = now + 3600
+    if not res.get("armed"):
+        print(f"[MAIL-CASE-SCRUB] MATCH_HMAC_SECRET is not set: the resolver half finishes "
+              f"nothing; reporter row(s) finished {int(res.get('reporters', 0))}")
+    else:
+        print(f"[MAIL-CASE-SCRUB] armed: {int(res.get('checked', 0))} resolver id(s) checked, "
+              f"{int(res.get('deleted', 0))} on the deletion ledger; finished "
+              f"{int(res.get('resolvers', 0))} resolver row(s) and "
+              f"{int(res.get('reporters', 0))} reporter row(s)")
 
 
 # -- Verified reads: operator keys, the read-gate stage, census, probe ---------

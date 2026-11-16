@@ -154,6 +154,10 @@ def _base_sql():
         "CREATE TABLE ovt_matches (solo_id UUID, duo_a_id UUID, duo_b_id UUID);",
         "CREATE TABLE pending_dms (id BIGSERIAL PRIMARY KEY, mail_id UUID, steam_id VARCHAR(32),"
         " relay_code TEXT, undeliverable BOOLEAN NOT NULL DEFAULT false);",
+        # mscl-r2: the purge (main._mail_purge_due) also reads the case and invite
+        # rows that name a message; the one column it reads of each, no rows
+        "CREATE TABLE moderation_cases (id BIGSERIAL PRIMARY KEY, message_id UUID);",
+        "CREATE TABLE lobby_invites (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), mail_message_id UUID);",
         _from_file("297_mail.sql", r"CREATE TABLE IF NOT EXISTS mail_messages \(.*?\n\);"),
         _from_file("297_mail.sql", r"CREATE TABLE IF NOT EXISTS mail_recipients \(.*?\n\);"),
         _from_file("300_mail_inbox_rev.sql", re.escape(
@@ -1119,7 +1123,6 @@ def test_a_replys_in_reply_to_names_its_parent_whatever_the_parents_purge(monkey
     removes it. B's detail read of the reply (the route) names the original
     in both worlds."""
     _route_stubs(monkeypatch)
-    purge = _janitor_purge_sql()
     keep_fk = (("    EXECUTE format('ALTER TABLE mail_messages DROP CONSTRAINT %I', k.conname);\n", "    NULL;\n"),
                ("    RAISE EXCEPTION '415: a foreign key still covers mail_messages.in_reply_to';\n",
                 "    NULL;\n"))
@@ -1135,7 +1138,7 @@ def test_a_replys_in_reply_to_names_its_parent_whatever_the_parents_purge(monkey
             await conn.execute("UPDATE mail_recipients SET deleted_at = NOW()"
                                " WHERE message_id = $1 AND recipient_id = $2", orig, B)
             await conn.execute("UPDATE mail_messages SET deleted_by_sender_at = NOW() WHERE id = $1", orig)
-            await conn.execute(*_flat(_bind(purge, {"days": DAYS})))
+            await _janitor_purge(conn)
             kept = await conn.fetchval("SELECT 1 FROM mail_messages WHERE id = $1", orig) is not None
             got = await _detail(_Session(conn), rep, me=B)
             return kept, (got["in_reply_to"] == orig if got["in_reply_to"] else None)
@@ -1218,7 +1221,6 @@ def test_the_sender_clock_is_read_inside_each_statement(monkeypatch):
     it ("purged"). For the read-back the message is B's reply to A, the
     copy A's."""
     _route_stubs(monkeypatch)
-    purge = _janitor_purge_sql()
 
     async def refused(route, sess, mid):
         if route == "reply":
@@ -1256,7 +1258,7 @@ def test_the_sender_clock_is_read_inside_each_statement(monkeypatch):
                     " - make_interval(days => $2) + interval '0.7 seconds' WHERE id = $3",
                     start, DAYS, mid)
                 await asyncio.sleep(1.5)
-                purged = len(await other.fetch(*_flat(_bind(purge, {"days": DAYS}))))
+                purged = await _janitor_purge(other)
                 out = (purged, await refused(route, sess, mid))
             finally:
                 await tr.rollback()
@@ -1351,9 +1353,14 @@ def _sql_in(fn, prefix):
     return found[0]
 
 
-def _janitor_purge_sql():
-    """The janitor's purge statement, read out of _mail_retention_sweep."""
-    return _sql_in(main._mail_retention_sweep, "DELETE FROM mail_messages")
+async def _janitor_purge(conn):
+    """The janitor's purge as it runs (main._mail_purge_due: since mscl-r2
+    its hold of the messages due, its locks of the rows their foreign keys
+    write, a second read of those rows and its DELETE, each a statement of
+    its own), in one transaction over `conn`: the number of messages it
+    removed."""
+    async with conn.transaction():
+        return len(await main._mail_purge_due(_Session(conn)))
 
 
 def test_the_rate_window_counts_receipts_whatever_the_purge_removed():
@@ -1398,7 +1405,6 @@ def test_the_discord_read_back_follows_the_repliers_own_view():
     stmt = mail_discord._REPLIED_TO_SQL
     rep_side = stmt[stmt.index("   AND rep.sender_id"):stmt.index("   AND (EXISTS")]
     orig_side = stmt[stmt.index("   AND (EXISTS"):]
-    purge = _janitor_purge_sql()
 
     async def body(stmt, other):
         async with _Schema() as conn:
@@ -1425,7 +1431,7 @@ def test_the_discord_read_back_follows_the_repliers_own_view():
                                        " WHERE message_id = $1 AND recipient_id = $2", orig, B)
                     await conn.execute("UPDATE mail_messages SET deleted_by_sender_at = NOW()"
                                        " WHERE id = $1", orig)
-                await conn.execute(*_flat(_bind(purge, {"days": DAYS})))
+                await _janitor_purge(conn)
                 out[case] = (fresh, await named())
             return out
     for other in ("delivered", "suppressed"):
@@ -1462,7 +1468,6 @@ def test_the_spam_check_counts_receipts_whatever_the_purge_removed(monkeypatch):
     monkeypatch.setattr(main, "_mail_rate_or_raise", nothing)
     monkeypatch.setattr(mail_discord, "queue_mail_relay", nothing)
     monkeypatch.setattr(main, "_mail_spam_case", case)
-    purge = _janitor_purge_sql()
     same_body = re.findall(
         r"\(SELECT COUNT\(\*\) FROM mail_send_receipts\s+WHERE sender_id = :sid AND kind = 'direct'"
         r"\s+AND body_key = CAST\(:bk AS bytea\)\s+AND created_at > NOW\(\) - make_interval\(days => 1\)\)"
@@ -1504,7 +1509,7 @@ def test_the_spam_check_counts_receipts_whatever_the_purge_removed(monkeypatch):
                     mid = await _message(conn, body=spam)
                     await _envelope(conn, mid, B, "suppressed" if suppressed else "delivered")
             await conn.execute("UPDATE mail_messages SET deleted_by_sender_at = NOW() WHERE sender_id = $1", A)
-            purged = len(await conn.fetch(*_flat(_bind(purge, {"days": DAYS}))))
+            purged = await _janitor_purge(conn)
             await send()
             # the mutant reached every spam check: one per send through the api
             reached = (len(hits) == (5 if sends == "api" else 1)) if mutant else not hits
