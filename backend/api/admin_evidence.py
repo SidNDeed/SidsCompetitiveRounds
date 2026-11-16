@@ -67,9 +67,10 @@ AER_CONTRACT_BOUNDS = {
     "POP_TTL_S": 3600,
     "REPORT_INFLIGHT_MAX": 2,
     # 128 at the design; 225 from the P9 cold figure on Linux at the lane's
-    # base; 245 from the re-measurement at the re-land onto main (see
-    # BASE_RSS_FLOOR_MB below for both measurements and the derivation).
-    "POP_MEM_BUDGET_MB": 245,
+    # base; 245 from the re-measurement at the re-land onto main; 255 from
+    # the re-measurement on the lobby invites lane (see BASE_RSS_FLOOR_MB
+    # below for the three measurements and the derivation).
+    "POP_MEM_BUDGET_MB": 255,
     "GAME_SETS_LIVE": 4,
     "WINDOW_SOURCES_LIVE": 8,
     # Routes (design 4.6): reports per actor per window, in process.
@@ -1205,7 +1206,19 @@ def process_rss_mb(peak=False):
 #           inside it.
 # The worst-case cache (15,923,456 counted bytes, 15.2 MB) fits the budget
 # gate at the measured B: 245/1.25 - 177.5 - 2 = 16.5 MB.
-BASE_RSS_FLOOR_MB = 180
+#
+# Re-measured on the lobby invites lane at ebf5f4a6 (2026-11-16, suite seat
+# 2, Python 3.12.15, glibc 2.34, the same fresh-interpreter form, the test
+# run alone): B 182.4 MB and peak 182.6 MB, against B 178.7 MB and peak
+# 178.9 MB at main 35357846 on the same seat the same day; the lane's api
+# code adds 3.7 MB (nothing of this module changed). The same derivation,
+# each rounded up to the next multiple of 5:
+#   floor   182.4 -> 185
+#   budget  (B 182.4 + 18.1) x 1.25 = 250.6 -> 255; peak x 1.25 = 228.2 is
+#           inside it.
+# The worst-case cache (15,923,456 counted bytes, 15.2 MB) fits the budget
+# gate at the measured B: 255/1.25 - 182.4 - 2 = 19.6 MB.
+BASE_RSS_FLOOR_MB = 185
 
 
 def budget_bytes(base_rss_mb):
