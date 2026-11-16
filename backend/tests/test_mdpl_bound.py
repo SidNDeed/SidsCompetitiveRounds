@@ -251,10 +251,14 @@ def test_each_pending_dms_writer_runs_its_pass_before_its_first_write():
     assert "FOR NO KEY UPDATE SKIP LOCKED" in main._PENDING_DM_RETIRE_SQL
 
 
-def test_only_a_deadlock_or_a_serialization_failure_leaves_the_savepoint():
-    """R6b: the helpers' test of an error, by its SQLSTATE and the caller's flag."""
+def test_only_the_errors_the_bound_acts_on_leave_the_savepoint():
+    """R6b: the helpers' test of an error, by its SQLSTATE and the caller's
+    flag: with the flag, the errors the deletion's bound acts on (40P01 and
+    40001, run again; 55P03, refused at once); nothing else, and nothing
+    without the flag."""
     for code, flag, want in (("40P01", True, True), ("40001", True, True),
                              ("40P01", False, False), ("23505", True, False),
-                             ("55P03", True, False)):
+                             ("55P03", True, True), ("55P03", False, False),
+                             ("57014", True, False)):
         assert main._retryable_for_caller(_db_error(code), flag) is want, (code, flag)
     assert main._retryable_for_caller(ValueError("x"), True) is False

@@ -45678,19 +45678,25 @@ _DELETION_ATTEMPT_MIN_S = 3.0
 # Run again from fresh reads: a deadlock victim and a serialization failure,
 # nothing else (#505: re-running on any database error hides real faults).
 _DELETION_RETRY_SQLSTATES = frozenset({"40P01", "40001"})
+# The errors the bound acts on: those above, and 55P03, a wait the attempt's
+# lock_timeout ended -- the deadline has come, so the bound refuses at once.
+_DELETION_BOUND_SQLSTATES = _DELETION_RETRY_SQLSTATES | {"55P03"}
 _DELETION_REFUSAL = "account_cleanup_contended"
 
 
 def _retryable_for_caller(ex, raise_retryable: bool) -> bool:
     """MDPL R6b. The bet helpers end their savepoint on an error and go on,
-    which is right for the errors they were built for. A deadlock victim or
-    a serialization failure means the whole work can succeed on a new
-    attempt, so a caller that runs whole new attempts -- only the account
-    deletion passes raise_retryable=True -- gets it back as its own error.
-    Every other caller, and every other error, keeps the helper's present
-    behaviour (its janitor sweep finishes the work)."""
+    which is right for the errors they were built for. A caller that runs
+    whole bounded attempts -- only the account deletion passes
+    raise_retryable=True -- gets back, as its own error, every error its
+    bound acts on (_DELETION_BOUND_SQLSTATES): a deadlock victim or a
+    serialization failure, which a new attempt can get past, and a wait its
+    lock_timeout ended, which the bound refuses at once rather than letting
+    the attempt go on to later waits. Every other caller, and every other
+    error, keeps the helper's present behaviour (its janitor sweep finishes
+    the work)."""
     return bool(raise_retryable) and (
-        getattr(getattr(ex, "orig", None), "sqlstate", None) in _DELETION_RETRY_SQLSTATES)
+        getattr(getattr(ex, "orig", None), "sqlstate", None) in _DELETION_BOUND_SQLSTATES)
 _deletion_clock = time.monotonic
 _deletion_deadline = contextvars.ContextVar("deletion_deadline", default=None)
 
@@ -45738,7 +45744,7 @@ def _deletion_bounded(fn):
                 return await fn(*args, **kwargs)
             except DBAPIError as exc:
                 code = getattr(getattr(exc, "orig", None), "sqlstate", None)
-                if code not in _DELETION_RETRY_SQLSTATES and code != "55P03":
+                if code not in _DELETION_BOUND_SQLSTATES:
                     raise
                 try:
                     await db.rollback()

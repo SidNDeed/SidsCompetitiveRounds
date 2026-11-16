@@ -28,7 +28,8 @@ The bound (R6a, R6b):
 - C3: the clock past the deadline between the work and the commit: 503
   account_cleanup_contended, nothing written.
 - R6b: a deadlock victim inside a bet helper's savepoint runs the whole
-  deletion again, and the bettor is refunded in its commit.
+  deletion again, and the bettor is refunded in its commit; a lock timeout
+  there (55P03) refuses at once, with nothing written.
 """
 
 import asyncio
@@ -41,6 +42,7 @@ import time
 import uuid
 
 import asyncpg
+import pytest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "..", "api"))
@@ -73,7 +75,7 @@ FAIL_ONCE = (
     " CREATE FUNCTION mdpl_fail_once() RETURNS boolean LANGUAGE plpgsql AS $f$"
     " BEGIN"
     "   IF nextval('mdpl_once') = 1 THEN"
-    "     RAISE EXCEPTION 'mdpl: a deadlock victim, forced' USING ERRCODE = '40P01';"
+    "     RAISE EXCEPTION 'mdpl: SQLSTATE %(code)s, forced' USING ERRCODE = '%(code)s';"
     "   END IF;"
     "   RETURN true;"
     " END $f$;")
@@ -613,13 +615,13 @@ def test_c3_control_without_the_deadline_read_the_deletion_commits_late(monkeypa
 
 # -- R6b --------------------------------------------------------------------------------------
 
-async def _wager_on_a_disbanded_lobby(env, *, flag_off):
+async def _wager_on_a_disbanded_lobby(env, *, flag_off, code="40P01"):
     """P alone in an open team lobby, B's open wager on it. The bet helper's
-    read in the deletion's savepoint ends once in 40P01: it calls a function
-    that raises that SQLSTATE the first time only (its sequence survives the
+    read in the deletion's savepoint ends once in SQLSTATE `code`: it calls a
+    function that raises it the first time only (its sequence survives the
     rollback). flag_off: the mutant, _retryable_for_caller made false.
     Returns (the answer, the wager's status, B's gold_spent, the function's
-    calls)."""
+    calls, whether P's row is anonymised)."""
     _arm(env)
     lid, (p,) = await env.lobby("team", 1)
     (b,) = await env.players(1)
@@ -627,7 +629,7 @@ async def _wager_on_a_disbanded_lobby(env, *, flag_off):
     bet = await env.conn.fetchval(
         "INSERT INTO lobby_bets (mode, lobby_id, player_id, amount, target_steams)"
         " VALUES ('team', $1, $2, 10, $3) RETURNING id", lid, b.id, p.sid)
-    await env.conn.execute(FAIL_ONCE)
+    await env.conn.execute(FAIL_ONCE % {"code": code})
     try:
         if flag_off:
             env.mp.setattr(main, "_retryable_for_caller", lambda ex, raise_retryable: False)
@@ -638,17 +640,18 @@ async def _wager_on_a_disbanded_lobby(env, *, flag_off):
         st = await env.conn.fetchval("SELECT status FROM lobby_bets WHERE id = $1", bet)
         spent = await env.conn.fetchval("SELECT gold_spent FROM players WHERE id = $1", b.id)
         calls = await env.conn.fetchval("SELECT last_value FROM mdpl_once")
+        anon = await env.conn.fetchval("SELECT steam_id <> $2 FROM players WHERE id = $1", p.id, p.sid)
     finally:
         # The case schema must hold only what its build left (the harness's
         # census refuses to drop or reuse it otherwise).
         await env.conn.execute(FAIL_ONCE_GONE)
-    return a, st, spent, calls
+    return a, st, spent, calls, anon
 
 
 def test_r6b_a_deadlock_victim_in_a_bet_helper_runs_the_deletion_again(monkeypatch, capsys):
     async def body(env):
-        a, st, spent, calls = await _wager_on_a_disbanded_lobby(env, flag_off=False)
-        assert a.status == 200 and a["status"] == "anonymized", a
+        a, st, spent, calls, anon = await _wager_on_a_disbanded_lobby(env, flag_off=False)
+        assert a.status == 200 and a["status"] == "anonymized" and anon, (a, anon)
         assert st == "refunded" and spent == 90, (st, spent)
         assert calls >= 2, calls
     case(monkeypatch, body, prefix="mdpl")
@@ -656,10 +659,28 @@ def test_r6b_a_deadlock_victim_in_a_bet_helper_runs_the_deletion_again(monkeypat
     assert "deletion attempt 1 ended by 40P01" in out, out[-3000:]
 
 
-def test_r6b_control_without_the_flag_the_helper_keeps_the_wager_open(monkeypatch, capsys):
+def test_r6b_a_lock_timeout_in_a_bet_helper_refuses_at_once(monkeypatch, capsys):
+    """55P03 is the attempt's lock_timeout ending a wait: the deadline has
+    come. The helper hands it to the bound, which refuses at once: 503
+    account_cleanup_contended, nothing written, no second attempt."""
     async def body(env):
-        a, st, spent, calls = await _wager_on_a_disbanded_lobby(env, flag_off=True)
-        assert a.status == 200 and a["status"] == "anonymized", a
+        a, st, spent, calls, anon = await _wager_on_a_disbanded_lobby(env, flag_off=False, code="55P03")
+        assert (a.status, a.body) == (503, main._DELETION_REFUSAL), a
+        assert not anon, "the refused deletion wrote the player's row"
+        assert st == "open" and spent == 100, (st, spent)
+        assert calls == 1, calls
+    case(monkeypatch, body, prefix="mdpl")
+    assert "deletion attempt 1 ended" not in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("code", ["40P01", "55P03"])
+def test_r6b_control_without_the_flag_the_helper_keeps_the_wager_open(monkeypatch, capsys, code):
+    """The mutant for both tests above: the helper keeps its error, the
+    deletion goes on and commits (a forced error moves no clock), and the
+    wager stays open for the janitor's sweep."""
+    async def body(env):
+        a, st, spent, calls, anon = await _wager_on_a_disbanded_lobby(env, flag_off=True, code=code)
+        assert a.status == 200 and a["status"] == "anonymized" and anon, (a, anon)
         assert st == "open" and spent == 100, (st, spent)
         assert calls >= 1, calls
     case(monkeypatch, body, prefix="mdpl")
