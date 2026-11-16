@@ -45,7 +45,9 @@ from test_discord_evidence_render import check_plan  # noqa: E402
 REPO = os.path.abspath(os.path.join(HERE, "..", ".."))
 # The commit this lane was cut from: main with phase 1a live and no sections.
 BASE = "1c77f580a29e33190f93cc27636c29e7dd8f2494"
-SCHEMA = "Evidence report: unavailable (schema)."
+SCHEMA = tbot.SCHEMA_WORD
+# The base commit's bot (old_bot_ns) answers in its own, earlier wording.
+OLD_SCHEMA = "Evidence report: unavailable (schema)."
 T0 = dt.datetime(2026, 11, 1, 12, 0, tzinfo=dt.timezone.utc)
 
 
@@ -488,9 +490,9 @@ def test_s5_the_base_bot_decodes_a_1a_page_and_refuses_sections():
     for body in (game_body(), summary_body(shape="pair")):
         page, word = old["_aer_outcome"](200, copy.deepcopy(body))
         assert word is None and page is not None
-    assert old["_aer_outcome"](200, _sections_for(game_body(), a, b)) == (None, SCHEMA)
+    assert old["_aer_outcome"](200, _sections_for(game_body(), a, b)) == (None, OLD_SCHEMA)
     assert old["_aer_outcome"](200, _summary_sections_for(summary_body(shape="pair"), a, b)
-                               ) == (None, SCHEMA)
+                               ) == (None, OLD_SCHEMA)
 
 
 def test_s5_the_new_bot_asks_for_sections_by_header():

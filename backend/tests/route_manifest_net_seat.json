@@ -655,7 +655,7 @@
           ],
           "main",
           "submit_ovt_match",
-          "1210a762ccda025f5563fe8aaf5e9d082ebded06"
+          "81ad90bc1d81b4da6409270722f7e964fcc2849c"
         ],
         [
           "/api/v1/ovt/series/active",
@@ -952,7 +952,7 @@
           ],
           "main",
           "delete_player_data",
-          "011c231e282052e9f3744015b3eddd72459d2f62"
+          "0761746c32bdbb29ca127bed4546dade05fe7683"
         ],
         [
           "/api/v1/players/{steam_id}/ffa-history",
@@ -1186,7 +1186,7 @@
           ],
           "main",
           "submit_team_match",
-          "2e797d05c385d914f8f92b00c2b336f122b22717"
+          "786b3d96054685518ff616b95ea79cd3979c985d"
         ],
         [
           "/api/v1/team/players/{steam_id}/team-matches",
@@ -1867,7 +1867,7 @@
           ],
           "main",
           "health_check",
-          "99ad5b1b41454543b778ee1055be56afbd9fbc2e"
+          "b229f71446b904268e68ccbd288389059f481989"
         ],
         [
           "/api/v1/i18n/approved",
@@ -3062,7 +3062,7 @@
           ],
           "main",
           "mail_send",
-          "6aa0e15b2cdbcbbd0f0e57e143c198a463d52b71"
+          "0e448a6d196a25505f2e102b06a30dcef16a30f4"
         ],
         [
           "/api/v1/mail/blocks",
@@ -3170,7 +3170,7 @@
           ],
           "main",
           "mail_reply",
-          "41d68b3ed52c629517371957e7ac9f510215ac7c"
+          "1e9c0a70b8c07031ae86f43b769b95a5fce6ed5d"
         ],
         [
           "/api/v1/mail/{message_id}/report",
@@ -3557,7 +3557,7 @@
           ],
           "admin_evidence",
           "evidence_report_game",
-          "39808e5745dbde713ab308d98ddfbc9dab2b398c"
+          "29ba95aa52be0c2fb4932d1ea8ec023659e87446"
         ],
         [
           "/api/v1/internal/evidence-report/series/{code}",
@@ -3566,7 +3566,7 @@
           ],
           "admin_evidence",
           "evidence_report_series",
-          "fb8686c032d0cbc6161f62b66ba7b0a1afe70553"
+          "236d24766cca1044b54560d61dca3818ccfa18d9"
         ],
         [
           "/api/v1/internal/evidence-report/pair",
@@ -3575,7 +3575,7 @@
           ],
           "admin_evidence",
           "evidence_report_pair",
-          "bf931d39c566630de9a3133615782ee708b426b6"
+          "4b3b0a347b67594b1e487c7bd8cfd318fa4580eb"
         ],
         [
           "/api/v1/internal/evidence-report/player/{steam_id}",
@@ -3584,7 +3584,7 @@
           ],
           "admin_evidence",
           "evidence_report_player",
-          "9a39c9af8b4eafa46642ce4e7909a61f17998b98"
+          "5b6ad6bf94f33433cf245a3f2dad536ae02b18ae"
         ]
       ]
     },
@@ -3869,7 +3869,7 @@
           ],
           "match_hold",
           "match_hold_entered",
-          "54092e7f81a4d4262c644a55387dedc621b551c7"
+          "fbafae2860df94b40fb77825d6b71bd321c63b6a"
         ],
         [
           "/api/v1/match/hold/{hold_id}/state",
@@ -3983,7 +3983,7 @@
           ],
           "main",
           "invite_send",
-          "912562f3fe6ff08cfcd8981223ca3c67cfc06f81"
+          "0f242ca4a5e3f30cb4d317a94219ffb107eac571"
         ],
         [
           "/api/v1/invites/{invite_id}/accept",
@@ -4073,7 +4073,7 @@
       [
         "main",
         "lifespan",
-        "0ea304ac5de5fcadc06dbe38dee917c8c0f5316f"
+        "10283f7162c633e07298a1105bf84bba8006cf0c"
       ]
     ]
   },

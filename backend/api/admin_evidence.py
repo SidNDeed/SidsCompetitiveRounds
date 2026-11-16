@@ -59,18 +59,24 @@ AER_CONTRACT_BOUNDS = {
     "STEAM_ID_MIN_DIGITS": 15,
     "STEAM_ID_MAX_DIGITS": 20,
     # Populations (design 2.6): the caps as lowered there, the derived-result
-    # memo, the entry lifetime, the request concurrency and the memory budget.
+    # memo, the entry lifetime, the request concurrency and the cache's
+    # byte allowance.
     "POP_VALUES_MAX": 2000,
     "WIN_VALUES_MAX": 1000,
     "WIN_UNIT_DEPTH": 30,
     "WIN_DERIVED_BYTES_MAX": 2 * 1024 * 1024,
     "POP_TTL_S": 3600,
     "REPORT_INFLIGHT_MAX": 2,
-    # 128 at the design; 225 from the P9 cold figure on Linux at the lane's
-    # base; 245 from the re-measurement at the re-land onto main; 255 from
-    # the re-measurement on the lobby invites lane (see BASE_RSS_FLOOR_MB
-    # below for the three measurements and the derivation).
-    "POP_MEM_BUDGET_MB": 255,
+    # The cache's allowance in MiB (PopulationCache.budget). The worst-case
+    # cache at P 2,000 and W 1,000 is 15,923,456 counted bytes (15.2 MiB:
+    # 4 live and 4 leased-retired game sets and a replacement, 8 live and 4
+    # retired window sources at one value per unit, the memo full); the
+    # allowances the earlier formula gave at its three measured bases were
+    # 17.6, 16.5 and 19.6 MB; 20 is the next multiple of 5 above them.
+    "POP_CACHE_MAX_MB": 20,
+    # Seconds after start-up before the display population is built once
+    # (warm_display_population): the app accepts requests by then.
+    "POP_WARM_DELAY_S": 5,
     "GAME_SETS_LIVE": 4,
     "WINDOW_SOURCES_LIVE": 8,
     # Routes (design 4.6): reports per actor per window, in process.
@@ -1033,11 +1039,16 @@ SELECT t.ki, kv.vals, kv.counts, t.truncated, (SELECT wd.n FROM wd) AS dup
 
 
 class PopulationUnavailable(Exception):
-    """A population source holds two facts for one `(ki, id, subj)`, or a
-    replacement found no room in the budget within the deadline: nothing
-    publishes, and the route answers `503 unavailable (population)`."""
+    """A population source holds two facts for one `(ki, id, subj)`
+    (`reason` "duplicate"), or a replacement found no room in the allowance
+    within the deadline ("budget"): nothing publishes, and the route answers
+    `503 unavailable (population)`."""
     status = 503
     detail = "unavailable (population)"
+
+    def __init__(self, message, reason):
+        super().__init__(message)
+        self.reason = reason
 
 
 _aer_log = logging.getLogger("admin_evidence")
@@ -1059,7 +1070,8 @@ async def rebuild_game_population(conn, key, pop_days, lag_s, ranked_only=False,
     async for row in result:
         if row.dup:
             raise PopulationUnavailable(
-                "population %r: %d repeated (ki, id, subj) facts" % (key, row.dup))
+                "population %r: %d repeated (ki, id, subj) facts" % (key, row.dup),
+                "duplicate")
         values[row.ki] = array("d", row.vals or ())
         if row.truncated:
             truncated[row.ki] = row.cutoff
@@ -1085,7 +1097,8 @@ async def rebuild_window_source(conn, key, basis, pop_days, lag_s, ranked_only=F
     async for row in result:
         if row.dup:
             raise PopulationUnavailable(
-                "window source %r: %d repeated (ki, id, subj) facts" % (key, row.dup))
+                "window source %r: %d repeated (ki, id, subj) facts" % (key, row.dup),
+                "duplicate")
         values[row.ki] = array("d", row.vals or ())
         offsets[row.ki] = array("i", list(itertools.accumulate(row.counts or (), initial=0)))
         if row.truncated:
@@ -1142,89 +1155,13 @@ class Generation:
                 + sum(len(a) * a.itemsize for a in self.offsets.values()))
 
 
-# The design's sizing basis for the cold base RSS `B` (design 2.6); the api
-# replaces it with the value it measures at startup (item 1a-4).
-SIZING_BASE_RSS_MB = 80.0
-
-
-def process_rss_mb(peak=False):
-    """This process's resident set in MB, or its peak: VmRSS or VmHWM from
-    /proc on Linux (the api container); the working set or its peak through
-    psapi elsewhere (the Windows test seat), a different quantity."""
-    try:
-        with open("/proc/self/status", encoding="ascii") as fh:
-            want = "VmHWM:" if peak else "VmRSS:"
-            for line in fh:
-                if line.startswith(want):
-                    return int(line.split()[1]) / 1024.0
-    except OSError:
-        pass
-    import ctypes
-    from ctypes import wintypes
-
-    class _Counters(ctypes.Structure):
-        _fields_ = ([("cb", wintypes.DWORD), ("PageFaultCount", wintypes.DWORD)]
-                    + [(n, ctypes.c_size_t) for n in (
-                        "PeakWorkingSetSize", "WorkingSetSize", "QuotaPeakPagedPoolUsage",
-                        "QuotaPagedPoolUsage", "QuotaPeakNonPagedPoolUsage",
-                        "QuotaNonPagedPoolUsage", "PagefileUsage", "PeakPagefileUsage")])
-
-    kernel32, psapi = ctypes.windll.kernel32, ctypes.windll.psapi
-    kernel32.GetCurrentProcess.restype = wintypes.HANDLE
-    psapi.GetProcessMemoryInfo.argtypes = [wintypes.HANDLE, ctypes.POINTER(_Counters),
-                                           wintypes.DWORD]
-    c = _Counters()
-    c.cb = ctypes.sizeof(c)
-    if not psapi.GetProcessMemoryInfo(kernel32.GetCurrentProcess(), ctypes.byref(c), c.cb):
-        raise OSError("GetProcessMemoryInfo failed")
-    return (c.PeakWorkingSetSize if peak else c.WorkingSetSize) / 1048576.0
-
-
-# A measured B above this is P9 red, and the figure goes to Sid as a budget
-# decision (design 2.6).
-#
-# P9 cold start, Linux (2026-10-17): B 160.4 MB and peak 160.5 MB on an LXC
-# test seat (Python 3.12.15) in three runs, the api imported in a fresh
-# interpreter with no bytecode cache, which is how the container starts: its
-# image compiles nothing at build time and a deploy recreates it. The design's
-# 94.7 floor and 128 budget assumed a sizing B of 80. Both bounds are
-# re-derived from the measurement, each rounded up to the next multiple of 5:
-#   floor   160.4 -> 165
-#   budget  (B 160.4 + the 18.1 MB worst case at P 2,000, W 1,000) x 1.25
-#           = 223.1 -> 225; peak x 1.25 = 200.6 is inside it.
-# The worst-case cache (15,923,456 counted bytes) then fits the budget gate
-# at the measured B: 225/1.25 - 160.4 - 2 = 17.6 MB.
-#
-# Re-measured at the re-land onto main 3fc331e2 (2026-10-30, suite seat 2,
-# Python 3.12.15, the same fresh-interpreter form): B 177.5 MB and peak
-# 177.6 MB, the api having grown by the identity-clock, card and combat
-# evidence servers and the build manifest since the lane's base (nothing of
-# this module changed). The same derivation, each rounded up to the next
-# multiple of 5:
-#   floor   177.5 -> 180
-#   budget  (B 177.5 + 18.1) x 1.25 = 244.5 -> 245; peak x 1.25 = 222.0 is
-#           inside it.
-# The worst-case cache (15,923,456 counted bytes, 15.2 MB) fits the budget
-# gate at the measured B: 245/1.25 - 177.5 - 2 = 16.5 MB.
-#
-# Re-measured on the lobby invites lane at ebf5f4a6 (2026-11-16, suite seat
-# 2, Python 3.12.15, glibc 2.34, the same fresh-interpreter form, the test
-# run alone): B 182.4 MB and peak 182.6 MB, against B 178.7 MB and peak
-# 178.9 MB at main 35357846 on the same seat the same day; the lane's api
-# code adds 3.7 MB (nothing of this module changed). The same derivation,
-# each rounded up to the next multiple of 5:
-#   floor   182.4 -> 185
-#   budget  (B 182.4 + 18.1) x 1.25 = 250.6 -> 255; peak x 1.25 = 228.2 is
-#           inside it.
-# The worst-case cache (15,923,456 counted bytes, 15.2 MB) fits the budget
-# gate at the measured B: 255/1.25 - 182.4 - 2 = 19.6 MB.
-BASE_RSS_FLOOR_MB = 185
-
-
-def budget_bytes(base_rss_mb):
-    """The cache's byte budget (design 2.6): `POP_MEM_BUDGET_MB/1.25 - B - 2` MB."""
-    return int((AER_CONTRACT_BOUNDS["POP_MEM_BUDGET_MB"] / 1.25 - base_rss_mb - 2)
-               * 1024 * 1024)
+# The allowance bounds the bytes the cache counts (`cache_bytes()`: live and
+# leased-retired generations, the memo, a replacement in progress) and
+# nothing else of the process. The process's resident size is not an input:
+# it is measured on a different process from the one the allowance was sized
+# for, and on a live api that has served requests it exceeds any figure a
+# formula subtracting it was derived from, which refuses every population.
+# A fixed allowance admits what the worst case needs on every process.
 
 
 class PopulationCache:
@@ -1237,7 +1174,7 @@ class PopulationCache:
 
     LIVE_MAX = {"game": "GAME_SETS_LIVE", "window": "WINDOW_SOURCES_LIVE"}
 
-    def __init__(self, clock=None, base_rss_mb=SIZING_BASE_RSS_MB):
+    def __init__(self, clock=None):
         self._clock = clock or time.time
         self._gen = 0
         self.live = {}
@@ -1245,12 +1182,12 @@ class PopulationCache:
         self.memo = collections.OrderedDict()
         self.memo_bytes = 0
         self.in_progress = 0
-        self.base_rss_mb = base_rss_mb
         self._released = asyncio.Event()
 
     @property
     def budget(self):
-        return budget_bytes(self.base_rss_mb)
+        """The byte allowance: POP_CACHE_MAX_MB MiB, read from the bounds."""
+        return int(AER_CONTRACT_BOUNDS["POP_CACHE_MAX_MB"] * 1024 * 1024)
 
     def current(self, key):
         g = self.live.get(key)
@@ -1292,7 +1229,7 @@ class PopulationCache:
             if remaining <= 0:
                 raise PopulationUnavailable(
                     "budget: %d cached bytes (a %d-byte replacement among them) over %d"
-                    % (self.cache_bytes(), nbytes, self.budget))
+                    % (self.cache_bytes(), nbytes, self.budget), "budget")
             released = self._released
             try:
                 await asyncio.wait_for(released.wait(), remaining)
@@ -1713,15 +1650,49 @@ async def _wait_until(pred, deadline):
         await asyncio.sleep(_POLL_S)
 
 
-# The api's population cache (design 2.6). `B` is measured once, at the first
-# report, when every import of main.py has run.
+# The api's population cache (design 2.6), made at its first use.
 _CACHE = [None]
 
 
 def _aer_cache():
     if _CACHE[0] is None:
-        _CACHE[0] = PopulationCache(base_rss_mb=process_rss_mb())
+        _CACHE[0] = PopulationCache()
     return _CACHE[0]
+
+
+# /health `admin_evidence_population` (AER-POPGATE-1): the closed set of
+# words, and this process's current one.
+POPULATION_WORDS = ("pending", "ready", "unavailable:budget", "unavailable:duplicate",
+                    "unavailable:deadline", "unavailable:error")
+_POP_STATE = ["pending"]
+
+
+def population_health_word():
+    """/health `admin_evidence_population`: the outcome of this process's
+    most recent build attempt of the display population, whichever caller
+    made it (a report, or warm_display_population), or of a start-up build
+    that failed before it reached an attempt; one of POPULATION_WORDS;
+    `pending` before either. A standby answers `pending` for the
+    life of its process, because every report route answers 409
+    primary_only there before it reads the cache, so a population built
+    there would serve no report, and the start-up build skips by the same
+    rule. The word names nothing else: no size, no count, no id."""
+    return _POP_STATE[0]
+
+
+def _population_outcome(exc):
+    """The word for a build that raised `exc`: a refusal by its class (the
+    allowance, a repeated identity); a cancellation (the start-up build's
+    deadline, or the process stopping) or the report's own deadline refusal
+    (`_wait_until`, while another rebuild held the slot) as the deadline;
+    anything else as an error."""
+    if isinstance(exc, PopulationUnavailable) and exc.reason in ("budget", "duplicate"):
+        return "unavailable:" + exc.reason
+    if isinstance(exc, (asyncio.CancelledError, asyncio.TimeoutError)):
+        return "unavailable:deadline"
+    if isinstance(exc, HTTPException) and exc.detail == "deadline":
+        return "unavailable:deadline"
+    return "unavailable:error"
 
 
 def _display_key():
@@ -1740,9 +1711,14 @@ async def _leased(cache, db, key, deadline, basis=None):
             _REBUILDING[0] = True
             try:
                 if basis is None:
-                    g = await refresh_game_set(
-                        cache, db, key, DISPLAY_DEFAULTS["pop_days"],
-                        DISPLAY_DEFAULTS["lag_s"], deadline=deadline)
+                    try:
+                        g = await refresh_game_set(
+                            cache, db, key, DISPLAY_DEFAULTS["pop_days"],
+                            DISPLAY_DEFAULTS["lag_s"], deadline=deadline)
+                    except BaseException as exc:
+                        _POP_STATE[0] = _population_outcome(exc)
+                        raise
+                    _POP_STATE[0] = "ready"
                 else:
                     g = await refresh_window_source(
                         cache, db, key, basis, DISPLAY_DEFAULTS["pop_days"],
@@ -1750,6 +1726,70 @@ async def _leased(cache, db, key, deadline, basis=None):
             finally:
                 _REBUILDING[0] = False
     return cache.lease(g)
+
+
+async def _in_recovery(db):
+    """The report route's primary rule (`_aer_serve`): true on a standby."""
+    rows = await _aer_rows(db, "SELECT pg_is_in_recovery() AS in_recovery", {})
+    return bool(rows[0]["in_recovery"])
+
+
+async def _warm_once(deadline):
+    """One display build through the report's own path; None on a standby."""
+    from database import async_session
+    async with async_session() as db:
+        if await _in_recovery(db):
+            return None
+        cache = _aer_cache()
+        g = await _leased(cache, db, _display_key(), deadline)
+        cache.release(g)
+        return g
+
+
+async def warm_display_population(delay_s=None):
+    """The start-up build (AER-POPGATE-1), created by main.py's lifespan on
+    both roles: POP_WARM_DELAY_S after start, build the display population
+    once through the functions a report calls (`_leased`: the rebuild,
+    `admit`, `publish`, one rebuild at a time with reports) under the
+    report's own deadline, and release the lease. A database in recovery
+    skips by the report route's primary rule. It never raises into start-up
+    and logs one line for every outcome. A build attempt's outcome reaches
+    /health through `_leased`, as a report's does; a failure before any
+    attempt recorded a word (the session, the recovery read, the wait for
+    another rebuild) records its own, so on a primary `pending` means only
+    that nothing has been tried yet."""
+    t0 = time.monotonic()
+    try:
+        await asyncio.sleep(AER_CONTRACT_BOUNDS["POP_WARM_DELAY_S"]
+                            if delay_s is None else delay_s)
+        # The report's own bounds: the path runs to the report's deadline
+        # (REPORT_DEADLINE_S less AUDIT_RESERVE_S), where the gate refuses
+        # as it does for a report. At REPORT_DEADLINE_S, the most a report may
+        # take, wait_for asks for a cancellation: it takes effect at the build's
+        # next suspension point and the session's close runs after it, so this
+        # is not a hard bound on wall time.
+        t0 = time.monotonic()
+        deadline = _aer_deadline(None)
+        g = await asyncio.wait_for(_warm_once(deadline),
+                                   AER_CONTRACT_BOUNDS["REPORT_DEADLINE_S"])
+    except asyncio.CancelledError:
+        _aer_log.info("admin_evidence population warm-up: stopped with the process")
+        raise
+    except Exception as exc:
+        word = _population_outcome(exc)
+        if _POP_STATE[0] == "pending":
+            _POP_STATE[0] = word
+        _aer_log.warning("admin_evidence population warm-up: %s (%s) duration_ms=%d",
+                         word, type(exc).__name__, int((time.monotonic() - t0) * 1000))
+        return word
+    if g is None:
+        _aer_log.info("admin_evidence population warm-up: skipped, the database is in "
+                      "recovery (reports answer primary_only here); word %s",
+                      population_health_word())
+        return None
+    _aer_log.info("admin_evidence population warm-up: ready gen=%d duration_ms=%d",
+                  g.gen, int((time.monotonic() - t0) * 1000))
+    return "ready"
 
 
 def _iso(value):
