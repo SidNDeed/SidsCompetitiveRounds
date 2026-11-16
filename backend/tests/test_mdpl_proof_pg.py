@@ -18,8 +18,9 @@ The order (R2, R3, R4, R5) runs with the bound's new attempts off
   probe shows it holds no row above the one it waits for. The poll's
   RETIRE skips a held row, and the next poll retires it. The anonymising
   UPDATE's FOR UPDATE, the premise of the deletion's pass: a send to the
-  player arriving there waits; with the steam_id left as it is (FOR NO
-  KEY UPDATE) it does not, and its envelope outlives the deletion.
+  player arriving there waits; with steam_id and discord_id left as they
+  are (FOR NO KEY UPDATE) it does not, and its envelope outlives the
+  deletion.
 - R5, the ban scene's control: the ranked step back above the lobby locks
   deadlocks.
 The bound (R6a, R6b):
@@ -70,7 +71,13 @@ POOL_MARK = "DELETE FROM pc_pool_members WHERE player_id = :pid"
 PASS_MARK = "WHERE (relay_code IS NOT NULL AND steam_id = :sid)"   # _ERASE_RELAY_DMS_LOCK_SQL only
 SETTLE_MARK = "UPDATE pending_dms u "                                # _PENDING_DM_SETTLE_SQL
 IDENTITY_KEY = re.compile(r"pg_advisory_xact_lock\(hashtext\(" + BIND + r"\)\)")
-FLUSH_SID = re.compile(r"\bsteam_id=" + BIND + r"(::\w+(?:\(\d+\))?)?")
+# The flush's UPDATE of the player's row changes two columns that carry a
+# unique index, steam_id always and discord_id when the player had a link:
+# either change makes it FOR UPDATE. The mutant keeps both.
+FLUSH_SID = re.compile(r"\b(steam_id|discord_id)=" + BIND + r"(::\w+(?:\(\d+\))?)?")
+# pg_stat_activity keeps the head of a long statement: the envelope fan-out,
+# main._MAIL_FANOUT_SQL, whose FOR KEY SHARE OF p is at its end.
+FANOUT_HEAD = "INSERT INTO mail_recipients (message_id, recipient_id, kind, delivery) SELECT"
 BET_READ = re.compile(r"FROM lobby_bets\s+WHERE mode = ")
 OFF_IDS = (9000000300, 9000000200, 9000000100)   # inserted in this order: physical order against id order
 FAIL_ONCE = (
@@ -434,10 +441,11 @@ def test_r4_control_without_skip_locked_the_retire_waits(monkeypatch):
 # -- R4: the premise of the deletion's pass -------------------------------------------------
 
 async def _send_after_the_flush(env, *, keep_sid):
-    """Y (relay on) is deleted, parked just before its relay pass, past the
-    anonymising UPDATE's flush; S sends to Y meanwhile. keep_sid: the
-    mutant, that UPDATE leaves steam_id as it is, so it takes FOR NO KEY
-    UPDATE in place of FOR UPDATE."""
+    """Y (relay on, so with a Discord link) is deleted, parked just before
+    its relay pass, past the anonymising UPDATE's flush; S sends to Y
+    meanwhile. keep_sid: the mutant, that UPDATE leaves steam_id and
+    discord_id (each with a unique index) as they are, so it takes FOR NO
+    KEY UPDATE in place of FOR UPDATE."""
     _arm(env)
     _order_only(env)
     y, s = await env.players(2)
@@ -446,7 +454,7 @@ async def _send_after_the_flush(env, *, keep_sid):
         _discord_id(y))
     at = _parks(env)
     spot = at(PASS_MARK, "before")
-    ctx = (env.rewriting(FLUSH_SID, r"steam_id=COALESCE(players.steam_id, \1\2)",
+    ctx = (env.rewriting(FLUSH_SID, r"\1=COALESCE(players.\1, \2\3)",
                          where="UPDATE players SET") if keep_sid else contextlib.nullcontext([]))
     with ctx as kept:
         td = asyncio.create_task(_delete(env, y))
@@ -461,7 +469,9 @@ async def _send_after_the_flush(env, *, keep_sid):
 def test_r4_after_the_flush_a_send_to_the_player_waits(monkeypatch):
     async def body(env):
         y, state, w, a, b = await _send_after_the_flush(env, keep_sid=False)
-        assert state == "waits" and "FOR KEY SHARE" in (w["query"] or ""), (state, w)
+        assert "FOR KEY SHARE OF p" in main._MAIL_FANOUT_SQL
+        assert main._MAIL_FANOUT_SQL.startswith(FANOUT_HEAD)
+        assert state == "waits" and (w["query"] or "").startswith(FANOUT_HEAD), (state, w)
         assert a.status == 200 and a["status"] == "anonymized", a
         assert not _bad(b), _name(b)
         assert await env.conn.fetchval("SELECT COUNT(*) FROM pending_dms WHERE steam_id = $1", y.sid) == 0
