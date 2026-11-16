@@ -77,6 +77,7 @@ FAIL_ONCE = (
     "   END IF;"
     "   RETURN true;"
     " END $f$;")
+FAIL_ONCE_GONE = "DROP FUNCTION IF EXISTS mdpl_fail_once(); DROP SEQUENCE IF EXISTS mdpl_once;"
 
 
 def _circle(a, b):
@@ -303,6 +304,12 @@ def test_r4_control_the_acks_pass_removed_deadlocks_with_a_deletion(monkeypatch)
 
 # -- R4: the relay-off cancel -----------------------------------------------------------------
 
+def _discord_id(p):
+    """A Discord id for player p: 18 digits (players.discord_id is
+    VARCHAR(20) and UNIQUE), one per harness Steam id."""
+    return str(910000000000000000 + int(p.sid[-9:]))
+
+
 def _code(n):
     return "SCR-" + "".join(CROCKFORD[(n >> (5 * i)) & 31] for i in range(12))
 
@@ -321,7 +328,7 @@ async def _relay_off(env, *, pass_off):
         await env.conn.execute(
             "INSERT INTO pending_dms (id, steam_id, content, mail_id, relay_code, sender_steam_id)"
             " VALUES ($1, $2, 'A relayed copy.', $3, $4, $5)", rid, x.sid, mid, _code(rid), s.sid)
-    did = "mdpl-%s" % x.sid
+    did = _discord_id(x)
     await env.conn.execute(
         "UPDATE players SET discord_id = $2, mail_discord_relay = true WHERE id = $1", x.id, did)
     order = [r["id"] for r in await env.conn.fetch(
@@ -431,7 +438,7 @@ async def _send_after_the_flush(env, *, keep_sid):
     y, s = await env.players(2)
     await env.conn.execute(
         "UPDATE players SET discord_id = $2, mail_discord_relay = true WHERE id = $1", y.id,
-        "mdpl-%s" % y.sid)
+        _discord_id(y))
     at = _parks(env)
     spot = at(PASS_MARK, "before")
     ctx = (env.rewriting(FLUSH_SID, r"steam_id=COALESCE(players.steam_id, \1\2)",
@@ -621,15 +628,20 @@ async def _wager_on_a_disbanded_lobby(env, *, flag_off):
         "INSERT INTO lobby_bets (mode, lobby_id, player_id, amount, target_steams)"
         " VALUES ('team', $1, $2, 10, $3) RETURNING id", lid, b.id, p.sid)
     await env.conn.execute(FAIL_ONCE)
-    if flag_off:
-        env.mp.setattr(main, "_retryable_for_caller", lambda ex, raise_retryable: False)
-    with env.rewriting(BET_READ, "FROM lobby_bets WHERE mdpl_fail_once() AND mode = ",
-                       where="ORDER BY created_at, id") as hits:
-        a = await _delete(env, p)
-    assert hits, "the forced error did not apply"
-    st = await env.conn.fetchval("SELECT status FROM lobby_bets WHERE id = $1", bet)
-    spent = await env.conn.fetchval("SELECT gold_spent FROM players WHERE id = $1", b.id)
-    calls = await env.conn.fetchval("SELECT last_value FROM mdpl_once")
+    try:
+        if flag_off:
+            env.mp.setattr(main, "_retryable_for_caller", lambda ex, raise_retryable: False)
+        with env.rewriting(BET_READ, "FROM lobby_bets WHERE mdpl_fail_once() AND mode = ",
+                           where="ORDER BY created_at, id") as hits:
+            a = await _delete(env, p)
+        assert hits, "the forced error did not apply"
+        st = await env.conn.fetchval("SELECT status FROM lobby_bets WHERE id = $1", bet)
+        spent = await env.conn.fetchval("SELECT gold_spent FROM players WHERE id = $1", b.id)
+        calls = await env.conn.fetchval("SELECT last_value FROM mdpl_once")
+    finally:
+        # The case schema must hold only what its build left (the harness's
+        # census refuses to drop or reuse it otherwise).
+        await env.conn.execute(FAIL_ONCE_GONE)
     return a, st, spent, calls
 
 
