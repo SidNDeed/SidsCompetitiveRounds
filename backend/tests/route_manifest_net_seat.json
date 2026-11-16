@@ -619,7 +619,7 @@
           ],
           "main",
           "submit_match",
-          "4a6b873f9afad44802055abac87e58a56bba346a"
+          "8859a04b3d811dcb1f9d26709c1ab71c8e968489"
         ],
         [
           "/api/v1/matches/casual-dc",
@@ -835,7 +835,7 @@
           ],
           "main",
           "get_player_stats",
-          "4eede867a606d9660693f0e95e30805d50ac6d04"
+          "6bbebef31aec6a08ffd7ea4254c277f653d72de1"
         ],
         [
           "/api/v1/players/{steam_id}/active-color",
@@ -1141,7 +1141,7 @@
           ],
           "main",
           "get_recent_series",
-          "156b3e85abdbd8d059a02f66c75a8c9fcaa81e3a"
+          "4788e5b4c998930018d2c6816ca900897ebf3af8"
         ],
         [
           "/api/v1/series/recent-multimode",
@@ -1204,7 +1204,7 @@
           ],
           "main",
           "get_player_team_stats",
-          "7c32a2336602e2ad97f20273fd47a04a837737ea"
+          "01eba3a969b745f32297646db959dc214b12fc42"
         ],
         [
           "/api/v1/team/series/active",
@@ -1867,7 +1867,7 @@
           ],
           "main",
           "health_check",
-          "fd0ae277669635b05c2bb5b477dbd9cd56ffe5e6"
+          "e66363f385498ac84cd7c52e397d3ab961f17668"
         ],
         [
           "/api/v1/i18n/approved",
@@ -4073,7 +4073,7 @@
       [
         "main",
         "lifespan",
-        "91d81423bb0e0eecc22e209ee3d24930791f856e"
+        "c0f41e68fe779a1802cbe1da2592e34bacdd0fda"
       ]
     ]
   },

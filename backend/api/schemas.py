@@ -372,6 +372,10 @@ class PlayerStatsResponse(BaseModel):
     xp_for_next_level: int = 0
     best_ranked_streak: int = 0
     best_casual_streak: int = 0
+    # Bug report 463: the current casual streak from the same full-history
+    # walk as best_casual_streak, SIGNED like current_ranked_game_streak
+    # (negative = loss streak).
+    current_casual_streak: int = 0
     # July 20 item 5: labeled game/series ranked streaks. best_ranked_streak
     # keeps its historical per-SERIES value (old clients + Compare graph bind
     # to it); current_* are SIGNED (negative = loss streak).
@@ -1270,6 +1274,15 @@ class HealthResponse(BaseModel):
     # train and read by nothing else (#306). No default, as above. Absent on
     # any build before it.
     ask6_invites_build: int
+    # casual_streak_build: release-train verification plumbing, not a design
+    # mechanism (main._CASUAL_STREAK_BUILD; 1 = this build's player-stats
+    # answer carries current_casual_streak). It names build identity only. A
+    # code constant, equal on both roles by construction, so the train can
+    # read it through the edge; the lane adds no route, and this is the key
+    # that tells a stale box from a refreshed one (learnings 780, 794). Probed
+    # by the release train and read by nothing else (#306). No default, as
+    # above. Absent on any build before it.
+    casual_streak_build: int
     # build_manifest: the SHA-256 of the build-manifest.json this image's build
     # wrote (build_manifest.py: the build context's digest and the identity of
     # every installed wheel and .deb), "absent" when the process was not

@@ -4760,7 +4760,7 @@ async def _ovt_horizon_candidates(db, days: int, limit: int):
     Idleness is measured from SERVER-CLOCK columns only: `ovt_series.created_at`
     (NOW() at insert) and, per game, `GREATEST(ovt_matches.ended_at,
     ovt_matches.created_at)` — the report sink writes `ended_at` as NOW()
-    (PIN main.py:55845 ":started, NOW(),") and `created_at` defaults to NOW()
+    (PIN main.py:55864 ":started, NOW(),") and `created_at` defaults to NOW()
     by schema. `ovt_matches.started_at`
     is the one client-supplied stamp on that row and is deliberately NOT read
     here: a client-attested value may only move the server toward the
@@ -4826,7 +4826,7 @@ async def _ovt_settle_horizon_row(db, series_id, days: int) -> bool:
     report advances the tally and can complete the series. The bound the code
     actually holds is the ordering one — this settlement and that report
     serialise on the same series row lock: the report sink's lock waits
-    (PIN main.py:55646 "SELECT * FROM ovt_series WHERE id = :sid FOR NO KEY UPDATE"),
+    (PIN main.py:55665 "SELECT * FROM ovt_series WHERE id = :sid FOR NO KEY UPDATE"),
     this one declines. Whichever commits second observes the first, and a
     report arriving after the void is recorded and paid on the settled-without
     -play arm of `submit_ovt_match` rather than lost.
@@ -4896,7 +4896,7 @@ async def _ovt_settle_horizon_row(db, series_id, days: int) -> bool:
         return False
     # 'canceled', one L. Every other ovt path uses that spelling and the
     # continuation's prior-series lookup filters on it
-    # (PIN main.py:54977 "WHERE status IN ('completed', 'canceled', 'cancelled')"); the
+    # (PIN main.py:54996 "WHERE status IN ('completed', 'canceled', 'cancelled')"); the
     # janitor's original 'cancelled' made its own rows invisible to that lookup
     # and backend/sql/145_ovt_status_spelling.sql had to normalise them. A third
     # spelling would reopen that hole, so the VOID is carried by
@@ -7803,6 +7803,17 @@ _ASK6_INVITES_BUILD = 1
 # statements name, and the app whether that route is bound. Its statements are
 # DERIVED from the report's own constants, so it is defined after
 # get_set_report.
+# Release-train verification plumbing, not a design mechanism: the build
+# marker of the casual-streak lane (the /players/{steam_id} answer carries
+# current_casual_streak, the signed current value of the same full-history
+# walk that gives best_casual_streak), reported on /health as
+# `casual_streak_build`. It names build identity only. The lane adds no
+# route, and a stale box answers the stats read with the key left out and
+# no error, so without it the train could not tell a box on the new build
+# from a stale one (learnings 780, 794). A code constant, equal on both
+# boxes by construction, probed by the release train and read by nothing
+# else (#306). Absent on any build before it.
+_CASUAL_STREAK_BUILD = 1
 
 
 def _title_ladders_health_word() -> int:
@@ -7878,6 +7889,7 @@ async def health_check(db: AsyncSession = Depends(get_db)):
                               music_delist_build=_MUSIC_DELIST_BUILD,
                               server_fix_1114_build=_SERVER_FIX_1114_BUILD,
                               ask6_invites_build=_ASK6_INVITES_BUILD,
+                              casual_streak_build=_CASUAL_STREAK_BUILD,
                               build_manifest=_build_manifest.health_word(),
                               review_eval=_review_rules.review_eval(),
                               review_rules=_review_rules.health_word(),
@@ -7943,6 +7955,7 @@ async def health_check(db: AsyncSession = Depends(get_db)):
                               music_delist_build=_MUSIC_DELIST_BUILD,
                               server_fix_1114_build=_SERVER_FIX_1114_BUILD,
                               ask6_invites_build=_ASK6_INVITES_BUILD,
+                              casual_streak_build=_CASUAL_STREAK_BUILD,
                               build_manifest=_build_manifest.health_word(),
                               review_eval=_review_rules.review_eval(),
                               review_rules=_review_rules.health_word(),
@@ -12434,7 +12447,11 @@ async def get_player_stats(
     player_level, xp_into_level, xp_needed_for_next = level_from_xp(player_total_xp)
 
     # Compute best win streaks (July 20 item 5: game AND series units, both
-    # with best + signed current, invalidated rows excluded).
+    # with best + signed current, invalidated rows excluded). Each walk's
+    # ORDER BY is complete (end time, created_at, id): rows with equal end
+    # times otherwise come back in no fixed order. The match walks order by
+    # the match history's three columns, each reversed, so the rows both
+    # select are walked in exactly the reverse of the history's order.
     def _walk_streak(rows, pid):
         """(best_win_streak, signed_current_streak) over chronological winner ids."""
         best, run = 0, 0
@@ -12458,7 +12475,7 @@ async def get_player_stats(
         WHERE rs.status = 'completed'
           AND rs.invalidated_at IS NULL
           AND (rs.player1_id = :pid OR rs.player2_id = :pid)
-        ORDER BY rs.completed_at ASC
+        ORDER BY rs.completed_at ASC, rs.created_at ASC, rs.id ASC
     """), {"pid": player.id})).mappings().all()
     best_ranked_streak, current_ranked_series_streak = _walk_streak(ranked_streak_rows, player.id)
 
@@ -12472,7 +12489,7 @@ async def get_player_stats(
           AND m.is_ranked = true
           AND m.invalidated_at IS NULL
           AND (m.photon_room_id IS NULL OR LEFT(m.photon_room_id, 5) != 'team_')
-        ORDER BY m.ended_at ASC
+        ORDER BY m.ended_at ASC, m.created_at ASC, m.id ASC
     """), {"pid": player.id})).mappings().all()
     best_ranked_game_streak, current_ranked_game_streak = _walk_streak(ranked_game_rows, player.id)
 
@@ -12483,9 +12500,9 @@ async def get_player_stats(
         WHERE (m.player1_id = :pid OR m.player2_id = :pid)
           AND m.is_ranked = false
           AND m.invalidated_at IS NULL
-        ORDER BY m.ended_at ASC
+        ORDER BY m.ended_at ASC, m.created_at ASC, m.id ASC
     """), {"pid": player.id})).mappings().all()
-    best_casual_streak, _ = _walk_streak(casual_streak_rows, player.id)
+    best_casual_streak, current_casual_streak = _walk_streak(casual_streak_rows, player.id)
 
     # Active cosmetic lookups (title + trail + map color)
     active_title_name: str | None = None
@@ -13461,6 +13478,7 @@ async def get_player_stats(
         xp_for_next_level=xp_needed_for_next,
         best_ranked_streak=best_ranked_streak,
         best_casual_streak=best_casual_streak,
+        current_casual_streak=current_casual_streak,
         best_ranked_game_streak=best_ranked_game_streak,
         current_ranked_game_streak=current_ranked_game_streak,
         best_ranked_series_streak=best_ranked_streak,
@@ -23069,12 +23087,13 @@ async def get_ranked_streak(db: AsyncSession, steam_id: str) -> int:
     # No LIMIT: the loop below breaks at the first series the player didn't win,
     # so it only walks the actual streak. A prior LIMIT 20 capped every displayed
     # streak at 20 (bug #17). winner_id-only rows make a full scan cheap.
+    # The ORDER BY is complete (completed_at, created_at, id) so equal completion times sort one way.
     streak_rows = (await db.execute(text("""
         SELECT rs.winner_id
         FROM ranked_series rs
         WHERE rs.status = 'completed'
           AND (rs.player1_id = :pid OR rs.player2_id = :pid)
-        ORDER BY rs.completed_at DESC
+        ORDER BY rs.completed_at DESC, rs.created_at DESC, rs.id DESC
     """), {"pid": p.id})).mappings().all()
     if not streak_rows:
         return 0
@@ -72505,6 +72524,7 @@ async def get_player_team_stats(steam_id: str, db: AsyncSession = Depends(get_db
     # Series streak — walk completed series newest first, count consecutive same-result.
     # No LIMIT: the loop breaks at the first opposite result, so it only walks the actual
     # streak. A prior LIMIT 50 silently capped the 2v2 streak at 50 (same class as #17).
+    # The ORDER BY is complete (completed_at, created_at, id) so equal completion times sort one way.
     streak_q = await db.execute(
         text("""
             SELECT s.winner_team,
@@ -72512,7 +72532,7 @@ async def get_player_team_stats(steam_id: str, db: AsyncSession = Depends(get_db
             FROM team_series s
             WHERE s.status = 'completed'
               AND :pid IN (s.t1a_id, s.t1b_id, s.t2a_id, s.t2b_id)
-            ORDER BY s.completed_at DESC
+            ORDER BY s.completed_at DESC, s.created_at DESC, s.id DESC
         """),
         {"pid": player.id},
     )
