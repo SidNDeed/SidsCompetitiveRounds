@@ -1300,6 +1300,22 @@ class HealthResponse(BaseModel):
     # read by nothing else (#306). No default, as above. Absent on any build
     # before it.
     ban_expiry_build: int
+    # aer_popgate_build: release-train verification plumbing, not a design
+    # mechanism (main._AER_POPGATE_BUILD; 1 = this build's evidence report
+    # cache has a fixed byte allowance and builds the display population
+    # once after start). It names build identity only, equal on both roles
+    # by construction; probed by the release train and read by nothing else
+    # (#306). No default, as above. Absent on any build before it.
+    aer_popgate_build: int
+    # admin_evidence_population: the outcome of this process's most recent
+    # build attempt of the evidence report's display population, or of a
+    # start-up build that failed before it reached an attempt
+    # (admin_evidence.population_health_word): "pending" (neither yet),
+    # "ready", or "unavailable:<budget|duplicate|deadline|error>". In
+    # memory, so both arms answer it; a standby answers "pending" for the
+    # life of its process. No default, as above. Absent on any build before
+    # it.
+    admin_evidence_population: str
     # mail_spam_case_lock_build: release-train verification plumbing, not a
     # design mechanism (main._MAIL_SPAM_CASE_LOCK_BUILD; 2 = in this build
     # delete_player_data writes moderation_cases only in its last statement,
