@@ -158,6 +158,14 @@ def test_one_pass_stays_affordable():
     unchanged, backend/api 6.1, backend/sql 4.4, tools 3.1), no new binary
     directory; the ceiling moves from 56 to 64 MiB, about 7 MiB of headroom
     again.
+
+    Measured at the account deletion lock lane's round r2 (claude/mdpl-1116
+    over main 732d96b1, its lock census frozen): 64.28 MiB across 1249 files
+    as working files on a core.autocrlf=true checkout (63.49 MiB as LF, which
+    a seat's checkout reads), every file tracked, no new binary directory;
+    the lane's seven files are 0.50 MiB of it, the census reader and its two
+    frozen records 0.33 MiB of those; the ceiling moves from 64 to 72 MiB,
+    about 8 MiB of headroom again.
     """
     # Ceiling from the measured budget (fix pass 4, logs d4-fix4-walk-measure.log
     # and d4-fix4-walk-commit.log): the fix-pass-4 working tree on 9b8e3cb0 reads
@@ -175,7 +183,7 @@ def test_one_pass_stays_affordable():
     # it with about 3 MiB of headroom and stands; the lane's 44 MiB is not carried.
     stamps = ct._source_stamps()
     total = sum(size for size, _digest in stamps.values())
-    assert total < 64 * 1024 * 1024, (
+    assert total < 72 * 1024 * 1024, (
         "one tree-movement pass now reads %.1f MiB across %d files, and it runs "
         "twice per session" % (total / 1048576.0, len(stamps)))
 
