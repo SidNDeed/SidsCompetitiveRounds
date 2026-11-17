@@ -21,6 +21,11 @@ time (the keys of the function's dict `installed`) and records them as stores of
    - a rule K-m read of a method named flush is refused by the recorded store. The class is planted in a module
      file named main.py that holds the arming function as main.py has it. The same read of a method named
      flushed is not refused. With no admission row, the read is refused as today, by the census's refusal.
+4. MDPL CLASS K2 (the ruling of 17 Nov 2026 14:10:47Z, 1): the rows read `installed` and the loop's `name`
+   through the resolver, so a binding of either name in any form the resolver knows refuses both rows. One plant
+   per form and place, each with a twin (the same edit under another identifier) that stays admitted; and a
+   check that each plant adds exactly one binding and that the plants cover every kind the resolver's _collect
+   gives a plain name.
 Every part reads main.py's source and imports closed_walk; none imports main."""
 import ast
 import importlib.util
@@ -198,6 +203,114 @@ def test_k_the_dict_keys_are_read_from_the_code(plant, twin):
         assert all(_form_line(tree, SET_FORM) in c["stores"][n] for n in REVIEWED)
     else:
         assert c["refused"] == _both_refused(tree), plant
+
+
+# --- 4. MDPL class K2: every binding form of either name refuses both rows -----------------------------------
+#
+# The ruling of 17 Nov 2026 14:10:47Z, 1: a row reads `installed` and the loop's `name` through the resolver
+# (Bindings over the function, the place and the loop), so a binding of either name in any form the resolver knows
+# refuses both rows: assignment of each kind, for and with targets, except-as, import-as, def and class names,
+# parameters of the arming function and of every nested function, global and nonlocal, the walrus, comprehension
+# targets and match captures. Each plant is red under class K's reading where K saw no ast.Name; its twin makes the
+# same edit under another identifier (installed2, name2), which the reading must leave admitted. A plant's lines
+# spell its identifier @X. `installed` plants stand in the arming function's body after the dict is built (no plant
+# reads the name); `name` plants stand inside the setattr loop before the setattr, or in undo.
+
+_AFTER_DICT = '        installed["begin_nested"] = begin_nested'
+_SET_LINE = "        " + SET_FORM
+_ARM_DEF = "def _deletion_arm_every_statement(db, deadline):"
+_UNDO_DEF = "    def undo():"
+_UNDO_LOOP_IF = "            if mine.get(name) is fn:"
+_UNDO_FIRST = '        mine = getattr(db, "__dict__", {})'
+
+
+def _forms(pad, value):
+    """The statement-level binding forms of @X, each as lines at indent `pad`, `value` the bound value's text."""
+    p, q, r = pad, pad + "    ", pad + "        "
+    return {
+        "assign": [p + "@X = " + value],
+        "augmented assign": [p + "@X += " + value],
+        "annotated assign": [p + "@X: object = " + value],
+        "delete": [p + "del @X"],
+        "for target": [p + "for @X in ():", q + "pass"],
+        "with target": [p + "with _k_cm() as @X:", q + "pass"],
+        "except as": [p + "try:", q + "pass", p + "except Exception as @X:", q + "pass"],
+        "import as": [p + "import collections as @X"],
+        "from import as": [p + "from collections import OrderedDict as @X"],
+        "def name": [p + "def @X():", q + "pass"],
+        "async def name": [p + "async def @X():", q + "pass"],
+        "class name": [p + "class @X:", q + "pass"],
+        "lambda parameter": [p + "_k_f = lambda @X: 0"],
+        "nested function parameter": [p + "def _k_g(@X=None):", q + "pass"],
+        "nested function *parameter": [p + "def _k_g(*@X):", q + "pass"],
+        "nested function **parameter": [p + "def _k_g(**@X):", q + "pass"],
+        "nested function keyword-only parameter": [p + "def _k_g(*, @X=None):", q + "pass"],
+        "nested function positional-only parameter": [p + "def _k_g(@X=None, /):", q + "pass"],
+        "global in a nested function": [p + "def _k_g():", q + "global @X"],
+        "nonlocal in a nested function": [p + "def _k_g():", q + "nonlocal @X"],
+        "walrus": [p + "(@X := " + value + ")"],
+        "list comprehension target": [p + "[0 for @X in ()]"],
+        "dict comprehension target": [p + "{0: 0 for @X in ()}"],
+        "generator target": [p + "sum(0 for @X in ())"],
+        "match capture": [p + "match 0:", q + "case @X:", r + "pass"],
+        "match as": [p + "match 0:", q + "case 1 as @X:", r + "pass"],
+        "match star": [p + "match 0:", q + "case [*@X]:", r + "pass"],
+        "match mapping rest": [p + "match 0:", q + "case {**@X}:", r + "pass"],
+    }
+
+
+# plant label: (the identifier, the anchor line, the lines put after it or in its place, in its place?)
+BINDING_PLANTS = {}
+for _label, _lines in _forms("    ", "{}").items():
+    BINDING_PLANTS["installed: " + _label] = ("installed", _AFTER_DICT, _lines, False)
+for _label, _lines in _forms("        ", "'flush'").items():
+    BINDING_PLANTS["name in the setattr loop: " + _label] = ("name", _SET_LINE, _lines + [_SET_LINE], True)
+for _ident in ("installed", "name"):
+    BINDING_PLANTS[_ident + ": parameter of the arming function"] = (
+        _ident, _ARM_DEF, ["def _deletion_arm_every_statement(db, deadline, @X=None):"], True)
+    BINDING_PLANTS[_ident + ": parameter of undo"] = (_ident, _UNDO_DEF, ["    def undo(@X=None):"], True)
+    BINDING_PLANTS[_ident + ": global in undo"] = (_ident, _UNDO_FIRST, ["        global @X"], False)
+    BINDING_PLANTS[_ident + ": nonlocal in undo"] = (_ident, _UNDO_FIRST, ["        nonlocal @X"], False)
+BINDING_PLANTS["name in undo's loop: import as"] = (
+    "name", _UNDO_LOOP_IF, ["            import os as @X", _UNDO_LOOP_IF], True)
+BINDING_PLANTS["name in undo's loop: except as"] = (
+    "name", _UNDO_LOOP_IF, ["            try:", "                pass", "            except Exception as @X:",
+                            "                pass", _UNDO_LOOP_IF], True)
+
+
+@pytest.mark.parametrize("twin", [False, True], ids=["plant", "twin"])
+@pytest.mark.parametrize("plant", sorted(BINDING_PLANTS))
+def test_k2_a_binding_of_either_name_in_any_form_refuses_both_rows(plant, twin):
+    ident, anchor, lines, replace = BINDING_PLANTS[plant]
+    spelled = ident + "2" if twin else ident
+    tree = ast.parse(_edit(_source(), anchor, [ln.replace("@X", spelled) for ln in lines], replace))
+    c = _census(tree)
+    if twin:
+        assert c["refused"] == [], plant
+        assert all(_form_line(tree, SET_FORM) in c["stores"][n] and _form_line(tree, DEL_FORM) in c["stores"][n]
+                   for n in REVIEWED), plant
+    else:
+        assert c["refused"] == _both_refused(tree), plant
+
+
+def test_k2_the_plants_cover_every_binding_form_the_resolver_collects():
+    """Each plant adds exactly one binding of its identifier to the resolver's table over the arming function, and
+    together they cover every kind the resolver's _collect gives a plain name: param, local, def, import and global
+    (a mutation is the dict's own item store, read by the key plants above)."""
+    src = _source()
+    base = cw.Bindings(None, fn=_fn(ast.parse(src)))
+    kinds = set()
+    for plant, (ident, anchor, lines, replace) in sorted(BINDING_PLANTS.items()):
+        tree = ast.parse(_edit(src, anchor, [ln.replace("@X", ident) for ln in lines], replace))
+        b = cw.Bindings(None, fn=_fn(tree))
+        was = [k for k, _n in base.sites.get(ident, ())]
+        now = [k for k, _n in b.sites.get(ident, ())]
+        extra = list(now)
+        for k in was:
+            extra.remove(k)
+        assert len(now) == len(was) + 1 and len(extra) == 1, (plant, was, now)
+        kinds.add(extra[0])
+    assert kinds == {"param", "local", "def", "import", "global"}, kinds
 
 
 PLANT_CLASS = ("", "", "class KPlant:", "    def flush(self):", "        return 1", "",

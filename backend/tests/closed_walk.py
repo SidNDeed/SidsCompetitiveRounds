@@ -2101,15 +2101,30 @@ _STORE_CENSUS = {}
 # the dict whose keys are the names the form stores, the number of keys the
 # review read, the reason). No name is typed here: the census reads the keys
 # from the code at walk time (_k_dict_keys) and records each as a store of
-# that name, so rule K-m refuses a method read by any of them. A row admits
-# its form only while all of these hold; otherwise the form is refused as
-# before ("a setattr whose name no constant gives"):
-# - the form occurs once in the function, inside a `for <name>, <x> in
-#   <dict>.items():` loop that is a statement of the place's own body; its
-#   name argument is that <name>, and nothing in the loop's body stores it;
-# - the function binds the dict once, to a dict display, and every other use
-#   of the name is a store under a constant str key or the iterable
-#   `<dict>.items()` of a for loop;
+# that name, so rule K-m refuses a method read by any of them. MDPL class
+# K2 (ruling 17 Nov 2026 14:10:47Z, 1): a row reads its two names, the dict
+# and the loop variable, through the resolver, from the binding table of
+# Bindings over the function (its nested definitions, lambdas and
+# comprehensions counted with it), over the place and over the loop that
+# holds the form, in every binding form Bindings._collect knows
+# (Bindings.every_binding, reads, spelled_once and text). No spelling of a
+# walked name is read outside the resolver: the dict's name is the row's,
+# and the loop variable's is the entry of the function's table that holds
+# the loop's own target (_k_entry). A row admits its form only while all
+# of these hold; otherwise the form is refused as before ("a setattr whose
+# name no constant gives"):
+# - the form is the one call of the function whose text (Bindings.text,
+#   every name the function binds enumerated) is the row's, inside a
+#   `for <name>, <x> in <dict>.items():` loop that is a statement of the
+#   place's own body, and its name argument is that <name>;
+# - over the function, the dict's bindings are one store of a dict display
+#   to the plain name, its statement's one target, and item stores
+#   `<dict>[<key>] = ...`, nothing else; every read of the name is the
+#   receiver of such an item store or the iterable `<dict>.items()` of a
+#   for loop; a place nested in the function binds the dict in no form;
+# - over the loop, <name> is bound once, by the loop's own target, and the
+#   name argument is that binding; over the function and over the place,
+#   every binding of <name> is the first target of such a loop;
 # - every key is a constant str, and the keys number exactly the reviewed
 #   count (a fifth key or a missing one refuses).
 K_ADMITTED_STORES = (
@@ -2135,25 +2150,18 @@ def _module_file(scope):
     return src
 
 
-def _k_items_of(expr, dname):
-    """Whether `expr` is `<dname>.items()` (MDPL class K)."""
+# MDPL class K2: every kind the resolver's binding table holds
+# (Bindings._collect).
+_K_KINDS = ("param", "local", "def", "import", "global", "mutated")
+
+
+def _k_items_of(expr, b, dname):
+    """Whether `expr` is `<dname>.items()`, its receiver the plain name
+    `dname` as resolver `b` reads it (Bindings.reads; MDPL classes K and
+    K2)."""
     return (isinstance(expr, _ast.Call) and isinstance(expr.func, _ast.Attribute)
             and expr.func.attr == "items" and isinstance(expr.func.value, _ast.Name)
-            and expr.func.value.id == dname and not expr.args and not expr.keywords)
-
-
-def _k_target_of(n, kind, dname):
-    """Whether statement `n` is an assignment to one target of ast class
-    `kind` that names `dname`: the Name itself, or a Subscript of it (MDPL
-    class K)."""
-    if not isinstance(n, _ast.Assign) or len(n.targets) != 1:
-        return False
-    t = n.targets[0]
-    if not isinstance(t, kind):
-        return False
-    if isinstance(t, _ast.Subscript):
-        t = t.value
-    return isinstance(t, _ast.Name) and t.id == dname
+            and b.reads(expr.func.value, dname) and not expr.args and not expr.keywords)
 
 
 def _k_const_key(k):
@@ -2164,30 +2172,122 @@ def _k_const_key(k):
     return got
 
 
-def _k_dict_keys(top, dname, count):
-    """The keys of the dict `dname` that function `top` builds, read from the
-    code as K_ADMITTED_STORES states, or None (MDPL class K). Every Name
-    `dname` in the function must be one this reading accounts for: the one
-    binding, a store under a key, or a for loop's `<dname>.items()`."""
-    binds, subs, seen, names = [], [], [], []
-    for n in _ast.walk(top):
-        if isinstance(n, _ast.Name) and n.id == dname:
-            names.append(n)
-        if isinstance(n, _ast.For) and _k_items_of(n.iter, dname):
-            seen.append(n)
-        if _k_target_of(n, _ast.Name, dname):
-            binds.append(n.value)
-            seen.append(n)
-        if _k_target_of(n, _ast.Subscript, dname):
+def _k_bindings(b, name, kinds):
+    """Every binding of `name` that resolver `b` collects, as nodes, when
+    each is one of `kinds` (Bindings.every_binding, which then reads the
+    name as enumerated); None otherwise (MDPL class K2)."""
+    try:
+        got = b.every_binding(name, kinds)
+    except Unclassified:
+        got = None
+    return got
+
+
+def _k_once(b, node, name):
+    """Whether resolver `b` reads `node` as the plain name `name`, bound
+    once and as a local (Bindings.spelled_once); a refusal reads as False
+    (MDPL class K2)."""
+    try:
+        got = b.spelled_once(node, name, ("local",))
+    except Unclassified:
+        got = False
+    return got
+
+
+def _k_text(b, node):
+    """The source text of `node` as resolver `b` reads it (Bindings.text),
+    or None when `node` reads a name `b` has not enumerated (MDPL class
+    K2)."""
+    try:
+        got = b.text(node)
+    except Unclassified:
+        got = None
+    return got
+
+
+def _k_resolver(top):
+    """The resolver of function `top`, its nested definitions, lambdas and
+    comprehensions counted with it, every name it binds other than by a
+    mutation (Bindings.bound) enumerated in the kinds the resolver collects
+    (Bindings.every_binding), so that its `text` reads each call of `top`
+    that reads only those names and the module's (MDPL class K2)."""
+    b = Bindings(None, top)
+    for name in Bindings(None, top).bound():
+        _k_bindings(b, name, _K_KINDS)
+    return b
+
+
+def _k_one_target(st, node):
+    """Whether `st` is an assignment whose one target is `node` (MDPL class
+    K2)."""
+    return isinstance(st, _ast.Assign) and len(st.targets) == 1 and st.targets[0] is node
+
+
+def _k_entry(b, node):
+    """The name under which resolver `b` holds binding `node`, found by the
+    node itself (no spelling is read), or None (MDPL class K2)."""
+    got = None
+    for name, binds in b.sites.items():
+        for _kind, n in binds:
+            if n is node:
+                got = name
+    return got
+
+
+def _k_item_store(n):
+    """Whether statement `n` is an item store `<name>[<key>] = ...`, its one
+    target a Subscript of a plain name (MDPL class K2)."""
+    if not isinstance(n, _ast.Assign) or len(n.targets) != 1:
+        return False
+    t = n.targets[0]
+    return isinstance(t, _ast.Subscript) and isinstance(t.value, _ast.Name)
+
+
+def _k_read_admits(b, x, dname):
+    """Whether read `x` of the dict `dname`, a plain name resolver `b` reads,
+    is the receiver of an item store's one target or of a for loop's
+    iterable `<dname>.items()` (MDPL class K2)."""
+    par = b.parent.get(id(x))
+    st = b.parent.get(id(par))
+    if isinstance(par, _ast.Subscript):
+        return par.value is x and _k_one_target(st, par)
+    loop = b.parent.get(id(st))
+    return isinstance(loop, _ast.For) and loop.iter is st and _k_items_of(st, b, dname)
+
+
+def _k_dict_keys(top, b, dname, count):
+    """The keys of the dict `dname` that function `top` builds, read through
+    its resolver `b` (MDPL classes K and K2), or None. Every binding of the
+    name, in every form the resolver collects (_k_bindings), is the one
+    store of a dict display to the plain name, its statement's one target,
+    or an item store `<dname>[<key>] = ...` (_k_item_store); every read of
+    the name (Bindings.reads) is the receiver of such an item store or of a
+    for loop's iterable `<dname>.items()` (_k_read_admits); every key is a
+    constant str, and the keys number exactly `count`."""
+    made = _k_bindings(b, dname, ("local", "mutated"))
+    if made is None:
+        return None
+    binds, subs = [], []
+    for n in made:
+        par = b.parent.get(id(n))
+        if _k_one_target(par, n):
+            binds.append(par.value)
+        if _k_item_store(n):
             subs.append(n.targets[0])
-            seen.append(n)
+    kept = binds + subs
+    if len(kept) != len(made):
+        return None
     if len(binds) != 1 or not isinstance(binds[0], _ast.Dict):
         return None
     shown = binds[0]
     keys = [_k_const_key(k) for k in shown.keys]
     for t in subs:
         keys.append(_k_const_key(t.slice))
-    if None in keys or len(names) != len(seen):
+    uses = [x for x in _ast.walk(top) if isinstance(x, _ast.Name) and b.reads(x, dname)]
+    for x in uses:
+        if not _k_read_admits(b, x, dname):
+            return None
+    if None in keys:
         return None
     got = set(keys)
     if len(got) == count:
@@ -2195,28 +2295,59 @@ def _k_dict_keys(top, dname, count):
     return None
 
 
-def _k_loop_admits(loop, call, dname):
-    """Whether statement `loop` is `for <name>, <x> in <dname>.items():`,
-    `call` is in it once with <name> as its second argument, and nothing in
-    the loop stores <name> but the loop's own target (MDPL class K)."""
-    if not (isinstance(loop, _ast.For) and _k_items_of(loop.iter, dname)
+def _k_first_targets(b, name, dname):
+    """Whether every binding of `name` resolver `b` collects, in every form,
+    is the first target of a `for <name>, <x> in <dname>.items():` loop
+    (MDPL class K2)."""
+    got = _k_bindings(b, name, ("local",))
+    if got is None:
+        return False
+    for n in got:
+        tup = b.parent.get(id(n))
+        loop = b.parent.get(id(tup))
+        if not (isinstance(tup, _ast.Tuple) and len(tup.elts) == 2 and tup.elts[0] is n
+                and isinstance(loop, _ast.For) and loop.target is tup
+                and _k_items_of(loop.iter, b, dname)):
+            return False
+    return True
+
+
+def _k_loop_admits(loop, call, b, hb, dname):
+    """Whether statement `loop` is `for <name>, <x> in <dname>.items():`
+    holding `call` once with <name> as its name argument, read through the
+    resolver (MDPL classes K and K2): <name> is the entry of the function's
+    resolver `b` that holds the loop's own target (_k_entry); over the loop
+    alone, that name's one binding is the loop's target and the argument is
+    it (Bindings.spelled_once); over the function (`b`) and over the place
+    (`hb`), every binding of it, in every form, is the first target of such
+    a loop (_k_first_targets)."""
+    if not (isinstance(loop, _ast.For) and _k_items_of(loop.iter, b, dname)
             and isinstance(loop.target, _ast.Tuple) and len(loop.target.elts) == 2):
         return False
     var = loop.target.elts[0]
     name = call.args[1]
-    if not (isinstance(var, _ast.Name) and isinstance(name, _ast.Name)
-            and var.id == name.id):
-        return False
     inside = [n for n in _ast.walk(loop) if n is call]
-    stores = [n for n in _ast.walk(loop) if isinstance(n, _ast.Name)
-              and n.id == var.id and not isinstance(n.ctx, _ast.Load)]
-    return len(inside) == 1 and len(stores) == 1 and stores[0] is var
+    entry = _k_entry(b, var)
+    if len(inside) != 1 or entry is None:
+        return False
+    stmts = [loop]
+    lb = Bindings(None, None, stmts)
+    own = _k_bindings(lb, entry, ("local",))
+    if own is None or len(own) != 1 or own[0] is not var:
+        return False
+    if not _k_once(lb, name, entry):
+        return False
+    return _k_first_targets(b, entry, dname) and _k_first_targets(hb, entry, dname)
 
 
 def _k_admit_row(tree, row, base, out):
     """Enter {id(call): the names it stores} in `out` when row `row` of
     K_ADMITTED_STORES admits its form in module `tree`, read from a file
-    named `base` (MDPL class K)."""
+    named `base` (MDPL classes K and K2). The function is read through its
+    resolver (_k_resolver): its one call of the form by that call's text
+    (Bindings.text), the dict (_k_dict_keys) and the loop (_k_loop_admits);
+    a place nested in it through its own resolver, which binds the dict in
+    no form."""
     file = row[0]
     top_name = row[1]
     place_name = row[2]
@@ -2233,16 +2364,22 @@ def _k_admit_row(tree, row, base, out):
               and st.name == place_name]
     if place_name == top_name:
         places = [top]
+    b = _k_resolver(top)
     every = [c for c in _ast.walk(top) if isinstance(c, _ast.Call)
-             and _ast.unparse(c) == form]
-    keys = _k_dict_keys(top, dname, row[5])
+             and _k_text(b, c) == form]
+    keys = _k_dict_keys(top, b, dname, row[5])
     if keys is None or len(places) != 1 or len(every) != 1:
         return None
     call = every[0]
     place = places[0]
+    hb = b
+    if place is not top:
+        hb = Bindings(None, place)
+    if hb is not b and hb.count(dname):
+        return None
     stmts = place.body
     for loop in stmts:
-        ok = _k_loop_admits(loop, call, dname)
+        ok = _k_loop_admits(loop, call, b, hb, dname)
         if ok:
             out[id(call)] = keys
     return None
