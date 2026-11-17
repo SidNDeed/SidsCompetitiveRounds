@@ -50457,12 +50457,14 @@ async def _apply_ban_core(db: AsyncSession, *, admin_steam_id: str, target_steam
         "RETURNING id, banned_at, expires_at"
     ), _ban_params)).mappings().one()
     _ban_end = _ban_row["expires_at"]
-    # `permanent` (MODLOG-1 fix A8): whether the ban row written has no end.
-    # Under the cap (migration 418) every row written here has an end.
-    _details = {**(record_details or {}), "reason": _ban_reason, "permanent": _ban_end is None}
+    # `permanent` (MODLOG-1 fix A8): whether the ban row written has no end;
+    # `expires_at`, on every new ban, the end the row was written with (under
+    # the cap, migration 418, a ban sent with no length ends at its start plus
+    # the maximum, and the record states that end).
+    _details = {**(record_details or {}), "reason": _ban_reason, "permanent": _ban_end is None,
+                "expires_at": _ban_end_iso(_ban_end)}
     if length_sent:
         _details["duration_minutes"] = duration_minutes
-        _details["expires_at"] = _ban_end_iso(_ban_end)
     if _closed:
         _details["closed_ended_ban_ids"] = _closed
     # The ban row is written above; its record goes out here, under the

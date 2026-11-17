@@ -718,15 +718,21 @@ def test_a8_every_mute_stores_its_length_and_a_ban_says_permanent_only_when_it_i
                 "SELECT details FROM admin_actions WHERE action = 'chat_purge_user'"
                 "   AND details->>'platform_user_id' = :u"), {"u": uid})).scalar()
             ban = [r for r in await _records(db, a) if r["action"] == "ban"][0]["details"]
-        return timed, perm, purge, ban
-    timed, perm, purge, ban = _with_sm(case, body)
+            ban_end = (await db.execute(text(
+                "SELECT expires_at FROM player_bans WHERE steam_id = :s"), {"s": t})).scalar()
+        return timed, perm, purge, ban, ban_end
+    timed, perm, purge, ban, ban_end = _with_sm(case, body)
     assert (timed.get("duration_minutes"), timed.get("permanent")) == (60, False), timed
     assert (perm.get("duration_minutes"), perm.get("permanent")) == (None, True), perm
     assert (purge.get("duration_minutes"), purge.get("permanent")) == (10, False), purge
-    assert ban.get("permanent") is True and "duration_minutes" not in ban, ban
+    # The cap (migration 418): a ban sent with no length ends at its start plus
+    # the maximum, so its record says it is not permanent and states the end
+    # the ban row was written with.
+    assert ban.get("permanent") is False and "duration_minutes" not in ban, ban
+    assert ban_end is not None and ban.get("expires_at") == main._ban_end_iso(ban_end), (ban, ban_end)
     assert modlog.sentence("chat_mute_msg", timed).startswith("Muted from a message for 1 hour")
     assert "permanently" in modlog.sentence("chat_mute_msg", perm)
-    assert modlog.sentence("ban", ban) == "Banned permanently."
+    assert modlog.sentence("ban", ban) == "Banned until %s." % modlog.when_text(ban["expires_at"])
 
 
 def test_a8_a_length_not_stored_is_never_read_as_permanent():
