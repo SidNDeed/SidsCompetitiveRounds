@@ -24,6 +24,9 @@
 --   absolute write); one gold_transactions row per kind above 0, its
 --   reference_id the held row's id; one admin_actions row (action
 --   quarantine_credit, admin_steam_id 'system:migration_421').
+--   Where migration 420 (the moderator log) has run, that row also names
+--   the player in affected_steam_ids and carries the note as its reason;
+--   where it has not, 420's own fill of earlier rows names the player.
 -- Then each held row: status 'credited', reviewed_at NOW(), reviewed_by NULL,
 -- review_note naming this migration. The status column is VARCHAR(16) with no
 -- CHECK (419 asserts that); 'credited' leaves every reader of pending rows.
@@ -100,6 +103,10 @@ DECLARE
   sum_drip pg_catalog.int8 := 0;
   sum_place pg_catalog.int8 := 0;
   sum_level pg_catalog.int8 := 0;
+  aa_rel pg_catalog.oid;
+  aff_t pg_catalog.oid;
+  reason_t pg_catalog.oid;
+  modlog pg_catalog.bool;
 BEGIN
   SELECT pg_catalog.array_agg((p->>'q')::pg_catalog.uuid ORDER BY (p->>'game')::pg_catalog.int4)
     INTO qids FROM pg_catalog.jsonb_array_elements(pins) AS p;
@@ -210,6 +217,31 @@ BEGIN
   IF n <> 12 OR pg_catalog.jsonb_array_length(amounts) <> 12 THEN
     RAISE EXCEPTION '421: % of the 12 amounts name a slot of their held body; nothing applied', n;
   END IF;
+
+  -- The audit table's form. Migration 420 (the moderator log) adds
+  -- admin_actions.affected_steam_ids (text[], NOT NULL, DEFAULT '{}') and
+  -- admin_actions.reason (text) in one file, and fills the rows written
+  -- before it. Where both columns stand, each audit row names its player in
+  -- affected_steam_ids and carries the note as its reason; where neither
+  -- does, the row is written without them and 420's own fill names the
+  -- player. One column alone, or affected_steam_ids of another type, is a
+  -- form neither file leaves: RAISE, nothing applied.
+  aa_rel := pg_catalog.to_regclass('admin_actions'::pg_catalog.text)::pg_catalog.oid;
+  SELECT a.atttypid INTO aff_t FROM pg_catalog.pg_attribute a
+   WHERE a.attrelid OPERATOR(pg_catalog.=) aa_rel
+     AND a.attname OPERATOR(pg_catalog.=) 'affected_steam_ids'::pg_catalog.name AND NOT a.attisdropped;
+  SELECT a.atttypid INTO reason_t FROM pg_catalog.pg_attribute a
+   WHERE a.attrelid OPERATOR(pg_catalog.=) aa_rel
+     AND a.attname OPERATOR(pg_catalog.=) 'reason'::pg_catalog.name AND NOT a.attisdropped;
+  IF aa_rel IS NULL OR (aff_t IS NULL) <> (reason_t IS NULL) THEN
+    RAISE EXCEPTION '421: admin_actions carries one of affected_steam_ids and reason without the other; nothing applied';
+  END IF;
+  IF aff_t IS NOT NULL
+     AND aff_t OPERATOR(pg_catalog.<>) 'pg_catalog.text[]'::pg_catalog.regtype::pg_catalog.oid THEN
+    RAISE EXCEPTION '421: admin_actions.affected_steam_ids is %, not text[]; nothing applied',
+      pg_catalog.format_type(aff_t, NULL);
+  END IF;
+  modlog := aff_t IS NOT NULL;
 
   -- 4. The six players, locked in settlement's order (str(player_id): byte
   -- order of the text form), then re-read under the lock.
@@ -325,20 +357,38 @@ BEGIN
       INSERT INTO gold_transactions (player_id, amount, reason, reference_id, created_at)
       VALUES (r.pid, lvl_gold, 'level_reward', r.qid::pg_catalog.text, pg_catalog.now());
     END IF;
-    INSERT INTO admin_actions (admin_steam_id, action, target_steam_id, target_match_id, details, created_at)
-    VALUES (actor, 'quarantine_credit', r.steam_id, NULL,
-            pg_catalog.jsonb_build_object(
-              'qid'::pg_catalog.text, r.qid::pg_catalog.text,
-              'game'::pg_catalog.text, r.game,
-              'room'::pg_catalog.text, r.room,
-              'slot'::pg_catalog.text, r.slot,
-              'xp'::pg_catalog.text, r.xp,
-              'gold_ffa_xp'::pg_catalog.text, drip,
-              'gold_ffa_placement'::pg_catalog.text, r.place_gold,
-              'gold_level_reward'::pg_catalog.text, lvl_gold,
-              'ratings'::pg_catalog.text, 'not applied'::pg_catalog.text,
-              'migration'::pg_catalog.text, 421),
-            pg_catalog.now());
+    IF modlog THEN
+      INSERT INTO admin_actions (admin_steam_id, action, target_steam_id, target_match_id, details, created_at,
+                                 affected_steam_ids, reason)
+      VALUES (actor, 'quarantine_credit', r.steam_id, NULL,
+              pg_catalog.jsonb_build_object(
+                'qid'::pg_catalog.text, r.qid::pg_catalog.text,
+                'game'::pg_catalog.text, r.game,
+                'room'::pg_catalog.text, r.room,
+                'slot'::pg_catalog.text, r.slot,
+                'xp'::pg_catalog.text, r.xp,
+                'gold_ffa_xp'::pg_catalog.text, drip,
+                'gold_ffa_placement'::pg_catalog.text, r.place_gold,
+                'gold_level_reward'::pg_catalog.text, lvl_gold,
+                'ratings'::pg_catalog.text, 'not applied'::pg_catalog.text,
+                'migration'::pg_catalog.text, 421),
+              pg_catalog.now(), ARRAY[r.steam_id]::pg_catalog.text[], note);
+    ELSE
+      INSERT INTO admin_actions (admin_steam_id, action, target_steam_id, target_match_id, details, created_at)
+      VALUES (actor, 'quarantine_credit', r.steam_id, NULL,
+              pg_catalog.jsonb_build_object(
+                'qid'::pg_catalog.text, r.qid::pg_catalog.text,
+                'game'::pg_catalog.text, r.game,
+                'room'::pg_catalog.text, r.room,
+                'slot'::pg_catalog.text, r.slot,
+                'xp'::pg_catalog.text, r.xp,
+                'gold_ffa_xp'::pg_catalog.text, drip,
+                'gold_ffa_placement'::pg_catalog.text, r.place_gold,
+                'gold_level_reward'::pg_catalog.text, lvl_gold,
+                'ratings'::pg_catalog.text, 'not applied'::pg_catalog.text,
+                'migration'::pg_catalog.text, 421),
+              pg_catalog.now());
+    END IF;
     sum_xp := sum_xp + r.xp;
     sum_drip := sum_drip + drip;
     sum_place := sum_place + r.place_gold;

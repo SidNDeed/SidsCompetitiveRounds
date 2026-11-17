@@ -23,6 +23,10 @@ nothing else in the file is changed, except by a named mutant.
   T7 the SQL level expression equals level_from_xp / level_reward_for.
   T8 a lock held on a player: the run fails inside its lock timeout, nothing
      applied.
+  T9 where migration 420's two admin_actions columns stand, each audit row
+     names its player in affected_steam_ids and carries the note as reason.
+  T10 one of those columns alone, or affected_steam_ids of another type:
+     the run raises, nothing applied.
 
 RUNNING IT: OCT3B_TEST_PG_DSN names a database (postgresql://...); each case
 makes its own schema there and leaves it. Without the DSN the live cases FAIL;
@@ -108,7 +112,20 @@ MUTANTS = {
     "reward-400": (M421, "ELSE 500 END", "ELSE 400 END", "T7"),
     "threshold": (M421, "10000::pg_catalog.numeric", "10001::pg_catalog.numeric", "T7"),
     "lock-timeout": (M421, "SET LOCAL lock_timeout = '5s';", "SET LOCAL lock_timeout = '60s';", "T8"),
+    "modlog-writes-old-insert": (M421, "    IF modlog THEN\n", "    IF false THEN\n", "T9"),
+    "one-column-as-absent": (M421, "IF aa_rel IS NULL OR (aff_t IS NULL) <> (reason_t IS NULL) THEN",
+                             "IF aa_rel IS NULL THEN", "T10"),
 }
+
+NOTE = "Migration 421, option B: gold and XP credited, ratings not applied."
+
+# Migration 420's two admin_actions columns and its CHECK, as its file adds
+# them (backend/sql/420_admin_actions_modlog.sql on the moderator log
+# branch, claude/modlog-1116, the ADD COLUMN and ADD CONSTRAINT statements).
+M420_AFFECTED = "ALTER TABLE admin_actions ADD COLUMN affected_steam_ids TEXT[] NOT NULL DEFAULT '{}';"
+M420_REASON = ("ALTER TABLE admin_actions ADD COLUMN reason TEXT NULL;\n"
+               "ALTER TABLE admin_actions ADD CONSTRAINT ck_admin_actions_reason_len\n"
+               "  CHECK (reason IS NULL OR pg_catalog.char_length(reason) <= 256);")
 
 
 def _text(path: Path) -> str:
@@ -208,8 +225,9 @@ class Case:
     """One fresh schema in the test database, built and seeded like the
     primary; the schema is left in place afterwards."""
 
-    def __init__(self, seed=True):
+    def __init__(self, seed=True, extra_ddl=""):
         self.seed_rows = seed
+        self.extra_ddl = extra_ddl
         self.schema = "o3_" + uuid.uuid4().hex[:12]
         self.notices = []
 
@@ -227,6 +245,8 @@ class Case:
         # database, so it is left out; its DDL runs as written.
         await self.conn.execute(q169.split("\nDO $$")[0])
         await self.conn.execute((SQL_DIR / "419_quarantine_digest_posted.sql").read_text(encoding="utf-8"))
+        if self.extra_ddl:
+            await self.conn.execute(self.extra_ddl)
         await self.seed()
         return self
 
@@ -622,6 +642,51 @@ def test_t8_a_held_player_lock_fails_the_run_inside_its_lock_timeout():
             finally:
                 await other.execute("ROLLBACK")
                 await other.close()
+            assert await c.fingerprint() == before
+
+    run(body_())
+
+
+# ── T9 / T10 ────────────────────────────────────────────────────────────────
+
+def test_t9_after_420_each_audit_row_names_its_player_and_the_note():
+    require_pg()
+
+    async def body_():
+        async with Case(extra_ddl=M420_AFFECTED + "\n" + M420_REASON) as c:
+            await c.apply()
+            _, ledger, audit = expected(c)
+            assert await c.ledger() == ledger
+            assert await c.audit() == audit
+            rows = await c.conn.fetch(
+                "SELECT target_steam_id, affected_steam_ids, reason FROM admin_actions")
+            assert len(rows) == 12
+            for r in rows:
+                assert r["affected_steam_ids"] == [r["target_steam_id"]], r
+                assert r["reason"] == NOTE, r
+            assert sorted(r["target_steam_id"] for r in rows) == sorted([steam(s) for s in range(6)] * 2)
+
+    run(body_())
+
+
+T10_FORMS = {
+    "reason-alone": M420_REASON,
+    "affected-alone": M420_AFFECTED,
+    "affected-not-text-array": ("ALTER TABLE admin_actions ADD COLUMN affected_steam_ids TEXT NOT NULL DEFAULT '';\n"
+                                + M420_REASON),
+}
+
+
+@pytest.mark.parametrize("form", sorted(T10_FORMS))
+def test_t10_a_partial_or_other_audit_form_raises_with_nothing_applied(form):
+    require_pg()
+
+    async def body_():
+        async with Case(extra_ddl=T10_FORMS[form]) as c:
+            before = await c.fingerprint()
+            with pytest.raises(asyncpg.exceptions.RaiseError) as ei:
+                await c.apply()
+            assert str(ei.value).startswith("421: admin_actions"), str(ei.value)
             assert await c.fingerprint() == before
 
     run(body_())
