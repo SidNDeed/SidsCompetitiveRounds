@@ -235,6 +235,7 @@ CENSUS = {
     ('POST', '/api/v1/internal/pending-dms/ack'): (NOT, 'service', ()),  # main.ack_pending_dms
     ('GET', '/api/v1/internal/pending-dms/{dm_id}/cancelled'): (NOT, 'read', ()),  # main.internal_pending_dm_cancelled
     ('GET', '/api/v1/internal/quarantine/digest'): (NOT, 'read_upkeep', ()),  # main.internal_quarantine_digest
+    ('POST', '/api/v1/internal/quarantine/digest/posted'): (NOT, 'service', ()),  # main.internal_quarantine_digest_posted
     ('POST', '/api/v1/internal/rank-role-colors'): (NOT, 'service', ()),  # main.push_rank_role_colors
     ('GET', '/api/v1/internal/recent-bans'): (NOT, 'read', ()),  # main.get_recent_bans
     ('GET', '/api/v1/internal/recent-flags'): (NOT, 'read', ()),  # main.get_recent_flags

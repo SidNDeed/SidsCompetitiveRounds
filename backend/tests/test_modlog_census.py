@@ -855,6 +855,7 @@ CLOSED = {
             ('POST', '/api/v1/internal/pc/lease'),
             ('POST', '/api/v1/internal/pc/packs/open'),
             ('POST', '/api/v1/internal/pending-dms/ack'),
+            ('POST', '/api/v1/internal/quarantine/digest/posted'),
             ('POST', '/api/v1/internal/rank-role-colors'),
             ('POST', '/api/v1/internal/recent-flags/ack'),
             ('POST', '/api/v1/internal/release-posts'),
@@ -864,7 +865,7 @@ CLOSED = {
         ),
     ),
 }
-CLOSED_LENGTHS = {'automatic': 1, 'config': 25, 'gameplay': 91, 'own': 63, 'read_upkeep': 59, 'service': 26}
+CLOSED_LENGTHS = {'automatic': 1, 'config': 25, 'gameplay': 91, 'own': 63, 'read_upkeep': 59, 'service': 27}
 
 
 def closed_failures(census=None):
