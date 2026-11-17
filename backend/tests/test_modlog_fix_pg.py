@@ -25,6 +25,9 @@ read back against a real PostgreSQL, with its mutants.
         commit, and answers as before
     F1  a mute-by-message record names the player the mute changed, from the
         mute's own resolution, when the Discord link moves before the record
+    F2  an account deletion rewrites a record whose id stands only in a JSON
+        string details, and details keeps its JSON type; the read serves a
+        record whose details is no object
 
 Same harness as test_modlog_pg.py (its case schema, built by the ladder
 harness, sealed, dropped at the end):
@@ -1381,4 +1384,126 @@ def test_f1_the_names_come_from_the_mute_answer_alone():
     assert main._modlog_mute_named({"muted": "discord:1", "linked_steam": None}) == ([], 1)
     assert main._modlog_mute_named({"muted": "twitch:abc"}) == ([], 0)
 
+
+# -- F2: the deletion rewrites a record whose id stands only in details -------------
+#
+# Records whose deleted id stands only in details, stored as a JSON string, an
+# array, an object, and a JSON string that holds JSON text. After the deletion
+# no stored text of any of them holds the id, each keeps its JSON type, and the
+# read finds no record by the id.
+
+F2_KINDS = {"string": "string", "array": "array", "object": "object", "json_text": "string"}
+
+
+def _f2_details(kind, sid):
+    if kind == "string":
+        return "muted %s for spam lines" % sid
+    if kind == "array":
+        return ["x", "from %s." % sid]
+    if kind == "object":
+        return {"note": "from %s." % sid}
+    return json.dumps({"note": "from %s." % sid})
+
+
+def _f2_delete(case, monkeypatch, kind, scrub=None):
+    monkeypatch.setattr(main, "MATCH_HMAC_SECRET", base.DELETE_SECRET)
+    if scrub is not None:
+        monkeypatch.setattr(main, "_modlog_scrub_records", scrub)
+    import cf_asm
+
+    async def body(sm):
+        async with sm() as db:
+            a, _ = await _admin(db)
+            gone, gpid = await _player(db, name="Leaving Player")
+            rid = (await db.execute(text(
+                "INSERT INTO admin_actions (admin_steam_id, action, details)"
+                " VALUES (:a, 'chat_mute', CAST(:d AS jsonb)) RETURNING id"),
+                {"a": a, "d": json.dumps(_f2_details(kind, gone))})).scalar()
+            await db.commit()
+        sig = hmac.new(base.DELETE_SECRET.encode(), ("delete:%s" % gone).encode(),
+                       hashlib.sha256).hexdigest()
+        async with sm() as db:
+            await main.delete_player_data(gone, cf_asm.FakeRequest(), sig=sig, _slot=None, db=db)
+        async with sm() as db:
+            row = (await db.execute(text(
+                "SELECT COALESCE(reason, '') || ' ' || CAST(details AS text) || ' '"
+                "       || COALESCE(target_steam_id, '') || ' ' || admin_steam_id || ' '"
+                "       || array_to_string(affected_steam_ids, ' ') AS texts,"
+                "       jsonb_typeof(details) AS t, CAST(details AS text) AS details_text"
+                "  FROM admin_actions WHERE id = :i"), {"i": rid})).mappings().first()
+            tomb = (await db.execute(text("SELECT steam_id FROM players WHERE id = :i"),
+                                     {"i": gpid})).scalar()
+        found = await _read(sm, q=gone, include_reads=1, limit=100)
+        return gone, tomb, row, found
+    return _with_sm(case, body)
+
+
+def _f2_check(case, monkeypatch, kind, scrub=None):
+    gone, tomb, row, found = _f2_delete(case, monkeypatch, kind, scrub)
+    assert tomb.startswith("deleted_"), tomb
+    assert gone not in row["texts"], (kind, "the id still stored", row["texts"])
+    assert row["t"] == F2_KINDS[kind], (kind, "the JSON type", row["t"])
+    assert json.loads(row["details_text"]) == _f2_details(kind, tomb), (kind, row["details_text"])
+    assert found["total"] == len(found["rows"]) == 0, (kind, "the read finds the id", found["total"])
+
+
+@pytest.mark.parametrize("kind", sorted(F2_KINDS))
+def test_f2_the_deletion_rewrites_details_of_each_json_type(case, admin_open, monkeypatch, kind):
+    _f2_check(case, monkeypatch, kind)
+
+
+F2_MUTANT = ("if all(new[k] == old[k] for k in old):",
+             "if all(new[k] == (new[k] if k == 'details' else old[k]) for k in old):")
+
+
+@pytest.mark.parametrize("kind", sorted(F2_KINDS))
+def test_f2_mutant_comparing_against_the_scrubbed_details_is_red(case, admin_open, monkeypatch, kind):
+    fn = _mutant_of("_modlog_scrub_records", F2_MUTANT)
+    with pytest.raises(AssertionError) as e:
+        _f2_check(case, monkeypatch, kind, scrub=fn)
+    print("\nMUTANT-RED F2 %s compared against the scrubbed value: %s"
+          % (kind, str(e.value).splitlines()[0][:160]))
+
+
+# The read serves a record whose details is no object (the deletion keeps a
+# record's JSON type, so such a record stays one): it answers with every row,
+# the details as stored and a sentence, never an error. The object is the
+# control.
+F2_READ_DETAILS = {"array": ["x", "y"], "number": 7, "json_array_text": "[1, 2]", "object": {"note": "n"}}
+
+
+def _f2_read_check(case, answer=None):
+    async def body(sm):
+        async with sm() as db:
+            a, _ = await _admin(db)
+            for d in F2_READ_DETAILS.values():
+                await db.execute(text(
+                    "INSERT INTO admin_actions (admin_steam_id, action, details)"
+                    " VALUES (:a, 'chat_mute', CAST(:d AS jsonb))"), {"a": a, "d": json.dumps(d)})
+            await db.commit()
+        f = main._modlog_parse(_qp(actor=a, limit=100))
+        async with sm() as db:
+            try:
+                return await (answer or main._modlog_answer)(db, f)
+            except Exception as e:  # what reaches the client as a 500
+                return ("error", type(e).__name__, str(e)[:120])
+    ans = _with_sm(case, body)
+    assert isinstance(ans, dict), ans
+    assert ans["total"] == len(ans["rows"]) == len(F2_READ_DETAILS), ans["total"]
+    assert all(isinstance(r["sentence"], str) and r["sentence"] for r in ans["rows"]), ans["rows"]
+    served = [json.dumps(r["details"], sort_keys=True) for r in ans["rows"]]
+    for d in (["x", "y"], 7, {"note": "n"}):
+        assert served.count(json.dumps(d, sort_keys=True)) == 1, (d, served)
+
+
+def test_f2_the_read_serves_a_record_whose_details_is_no_object(case):
+    _f2_read_check(case)
+
+
+def test_f2_mutant_read_without_the_object_guard_is_red(case):
+    fn = _mutant_of("_modlog_answer", ("facts = details if isinstance(details, dict) else {}",
+                                       "facts = details"))
+    with pytest.raises(AssertionError) as e:
+        _f2_read_check(case, fn)
+    print("\nMUTANT-RED F2 read without the object guard: %s" % str(e.value).splitlines()[0][:160])
 

@@ -25207,8 +25207,13 @@ async def _modlog_scrub_records(db: AsyncSession, ids, tomb: str) -> int:
     if rx is None:
         return 0
     likes = sorted({"%" + str(i) + "%" for i in ids if i and str(i).isascii() and str(i).isdigit()})
+    # details is read as its jsonb text and decoded here once, by json.loads
+    # alone (fix F2), whatever JSON codec the connection carries: a JSON
+    # string arrives as a str, an array as a list, an object as a dict, and
+    # the scrub keeps each of those types.
     rows = (await db.execute(text(
-        "SELECT id, reason, details, target_steam_id, admin_steam_id FROM admin_actions"
+        "SELECT id, reason, CAST(details AS text) AS details_text, target_steam_id, admin_steam_id"
+        "  FROM admin_actions"
         " WHERE (COALESCE(reason, '') || ' ' || COALESCE(CAST(details AS text), '') || ' '"
         "        || COALESCE(target_steam_id, '') || ' ' || COALESCE(admin_steam_id, ''))"
         "       LIKE ANY(CAST(:likes AS text[]))"
@@ -25216,20 +25221,19 @@ async def _modlog_scrub_records(db: AsyncSession, ids, tomb: str) -> int:
     ), {"likes": likes})).mappings().all()
     changed = 0
     for r in rows:
-        new = {k: r[k] for k in ("reason", "details", "target_steam_id", "admin_steam_id")}
-        if isinstance(new["details"], str):
-            try:
-                new["details"] = _json.loads(new["details"])
-            except ValueError:
-                pass
+        # `old` is the row as stored, taken before the scrub; the scrub builds
+        # new values and changes no value it is given, so `new` never aliases
+        # a value of `old`. The row is rewritten exactly when a field differs.
+        old = {"reason": r["reason"], "target_steam_id": r["target_steam_id"],
+               "admin_steam_id": r["admin_steam_id"],
+               "details": None if r["details_text"] is None else _json.loads(r["details_text"])}
+        new = dict(old)
         for field in _MODLOG_SCRUB_FIELDS:
-            if new[field] is not None:
-                new[field] = _modlog_scrub(new[field], rx, tomb)
+            if old[field] is not None:
+                new[field] = _modlog_scrub(old[field], rx, tomb)
         if new["reason"] is not None:
             new["reason"] = new["reason"][:_modlog.MAX_REASON]
-        old_details = r["details"] if not isinstance(r["details"], str) else new["details"]
-        if all(new[k] == r[k] for k in ("reason", "target_steam_id", "admin_steam_id")) \
-                and new["details"] == old_details:
+        if all(new[k] == old[k] for k in old):
             continue
         await db.execute(text(
             "UPDATE admin_actions SET reason = CAST(:r AS text), details = CAST(:d AS jsonb),"
@@ -26980,6 +26984,10 @@ async def _modlog_answer(db: AsyncSession, f: dict, player_row=None) -> dict:
                 details = _json.loads(details)
             except ValueError:
                 details = {"text": details}
+        # The sentence and the part read the details' keys. A record whose
+        # details is no object (a JSON array, a number, a string) has none for
+        # them, and is served as it stands; it is never an error (fix F2).
+        facts = details if isinstance(details, dict) else {}
         actor = r["admin_steam_id"] or "unknown"
         out.append({
             "id": str(r["id"]),
@@ -26992,10 +27000,10 @@ async def _modlog_answer(db: AsyncSession, f: dict, player_row=None) -> dict:
             "actor_name": _modlog_actor_name(actor, names, dnames),
             "players": [{"steam_id": s, "name": names.get(s)} for s in (r["affected_steam_ids"] or [])],
             "reason": r["reason"],
-            "sentence": _modlog.sentence(r["action"], details,
-                                         ended=ended.get(str(details.get("run_id")))
-                                         if details.get("stage") == "started" else None),
-            "part": _modlog_part(details),
+            "sentence": _modlog.sentence(r["action"], facts,
+                                         ended=ended.get(str(facts.get("run_id")))
+                                         if facts.get("stage") == "started" else None),
+            "part": _modlog_part(facts),
             "target_steam_id": r["target_steam_id"],
             "target_match_id": str(r["target_match_id"]) if r["target_match_id"] else None,
             "target_series_id": str(r["target_series_id"]) if r["target_series_id"] else None,
