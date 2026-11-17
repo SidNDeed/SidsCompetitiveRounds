@@ -26828,6 +26828,12 @@ def _modlog_unkey(raw, sort: str, direction: str):
     if at.tzinfo is None or not isinstance(value, (str, type(None))) or \
             (value is None) != (sort == "time"):
         raise HTTPException(status_code=422, detail="after_invalid")
+    # The sort value is the one decoded value bound as text (fix F3): one
+    # PostgreSQL cannot take as a text bind (a NUL, a lone surrogate) is a
+    # malformed key. The time is bound as a datetime and the id as the
+    # canonical text uuid.UUID made, neither of which can carry one.
+    if value is not None and not _pg_text_ok(value):
+        raise HTTPException(status_code=422, detail="after_invalid")
     if (k_sort, k_dir) != (sort, direction):
         raise HTTPException(status_code=422, detail="after_other_order")
     return (value, at, kid)

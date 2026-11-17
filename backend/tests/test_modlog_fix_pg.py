@@ -28,6 +28,8 @@ read back against a real PostgreSQL, with its mutants.
     F2  an account deletion rewrites a record whose id stands only in a JSON
         string details, and details keeps its JSON type; the read serves a
         record whose details is no object
+    F3  a page key whose sort value cannot be bound as text is refused with
+        422 after_invalid on the read and on its internal twin
 
 Same harness as test_modlog_pg.py (its case schema, built by the ladder
 harness, sealed, dropped at the end):
@@ -1507,3 +1509,78 @@ def test_f2_mutant_read_without_the_object_guard_is_red(case):
         _f2_read_check(case, fn)
     print("\nMUTANT-RED F2 read without the object guard: %s" % str(e.value).splitlines()[0][:160])
 
+
+# -- F3: a page key whose sort value is not storable text is refused --------------
+#
+# A key valid in every other way whose sort value holds a NUL (or a lone
+# surrogate, which has no UTF-8 encoding) answers 422 after_invalid on the read
+# and on its internal twin, for each sort that binds a text value, both
+# directions; a valid key's page answers.
+
+F3_SORTS = sorted(k for k in main._MODLOG_ORDER if k[0] != "time")
+F3_BAD = ("ban\x00x", "\x00", "ban\ud800")
+
+
+def _f3_key(sort, direction, value):
+    raw = json.dumps([sort, direction, value, "2026-11-16T12:00:00+00:00", str(uuid.uuid4())],
+                     separators=(",", ":"), ensure_ascii=True)
+    return main.base64.urlsafe_b64encode(raw.encode("ascii")).decode("ascii").rstrip("=")
+
+
+def _f3_answers(case, keys):
+    async def body(sm):
+        async def seed(db):
+            did = _did()
+            a, _ = await _admin(db, discord_id=did)
+            await main._modlog_write(db, actor=a, action="chat_mute", details={"note": "f3"})
+            return a, did
+        a, did = await _commit(sm, seed)
+        out = []
+        for route in ("admin", "internal"):
+            for sort, direction, value in keys:
+                # the actor filter keeps the page to this test's own record
+                kw = {"after": _f3_key(sort, direction, value), "sort": sort, "dir": direction, "actor": a}
+                try:
+                    async with sm() as db:
+                        if route == "admin":
+                            ans = await main.admin_modlog(
+                                base._Req(admin_steam_id=a, hmac_signature="x", **kw), db=db)
+                        else:
+                            ans = await main.internal_modlog(
+                                base._Req(**kw), x_internal_key=INTERNAL_KEY, x_actor_discord_id=did,
+                                db=db)
+                    got = ("answered", isinstance(ans, dict) and "rows" in ans)
+                except HTTPException as e:
+                    got = (e.status_code, e.detail)
+                except Exception as e:  # what reaches the client as a 500
+                    got = ("error", type(e).__name__)
+                out.append((route, sort, direction, repr(value), got))
+        return out
+    return _with_sm(case, body)
+
+
+def _f3_check(case):
+    keys = [(s, d, v) for s, d in F3_SORTS for v in F3_BAD]
+    for route, sort, direction, value, got in _f3_answers(case, keys):
+        assert got == (422, "after_invalid"), (route, sort, direction, value, got)
+
+
+def test_f3_a_key_whose_sort_value_is_not_storable_text_is_422(case, admin_open):
+    _f3_check(case)
+
+
+def test_f3_control_a_valid_key_answers_its_page(case, admin_open):
+    keys = [(s, d, "chat_mute" if s == "action" else "76561190420999902") for s, d in F3_SORTS]
+    for route, sort, direction, value, got in _f3_answers(case, keys):
+        assert got == ("answered", True), (route, sort, direction, value, got)
+
+
+F3_CHECK = ("    if value is not None and not _pg_text_ok(value):\n"
+            "        raise HTTPException(status_code=422, detail=\"after_invalid\")\n")
+
+
+def test_f3_mutant_without_the_check_is_red(case, admin_open, monkeypatch):
+    monkeypatch.setattr(main, "_modlog_unkey", _mutant_of("_modlog_unkey", (F3_CHECK, "")))
+    with pytest.raises(AssertionError) as e:
+        _f3_check(case)
+    print("\nMUTANT-RED F3 check removed: %s" % str(e.value).splitlines()[0][:160])
