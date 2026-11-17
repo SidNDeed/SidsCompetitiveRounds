@@ -538,6 +538,43 @@ def test_j5_the_store_of_views_is_bounded_by_a_count_and_an_age():
     j5_the_bound(ns, api)
 
 
+def j7_carried_row_is_marked(ns, api):
+    it = _Inter()
+    run(ns["_modlog_command"](it, PLAYER, "", "", "n"))
+    (text, kw), = it.sent
+    lines = text.split("\n")[3:]
+    assert len(lines) == 10, lines
+    tag = " (carried in from the flag's review data, not written at the review)"
+    marked = [i for i, line in enumerate(lines) if tag in line]
+    assert marked == [3], (marked, lines[3])
+    assert "**Ban**" + tag + " by " in lines[3], lines[3]
+    assert "carried in" not in lines[2] and "carried in" not in lines[4]
+
+
+def carried_records(params):
+    """markdown_records with the fourth row carried in by migration 420."""
+    status, body = markdown_records(params)
+    for r in body["rows"]:
+        if r["id"] == "m3":
+            r["details"] = {"flag_id": "f3", "carried_from": "flagged_matches"}
+    return status, body
+
+
+def test_j7_a_carried_in_row_is_marked_after_its_kind_inside_the_budget():
+    ns, api = bot(carried_records)
+    j7_carried_row_is_marked(ns, api)
+    assert ns["_modlog_carried"]({"details": {"carried_from": "another_table"}}) == \
+        ns["MODLOG_CARRIED_OTHER"]
+
+
+def test_j7_mutant_without_the_carried_in_mark_is_red():
+    ns, api = bot(carried_records)
+    _mutant(ns, "_modlog_render", "_modlog_carried(r),", '"",')
+    with pytest.raises(AssertionError) as e:
+        j7_carried_row_is_marked(ns, api)
+    print("\nMUTANT-RED J7 bot without the carried-in mark: %s" % str(e.value).splitlines()[0][:120])
+
+
 @pytest.mark.parametrize("fname,old,new", [
     ("_modlog_hold", "    while len(_modlog_held) >= MODLOG_HOLD_MAX:\n"
                      "        _modlog_held.pop(next(iter(_modlog_held)))\n", ""),

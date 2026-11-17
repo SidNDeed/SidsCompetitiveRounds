@@ -183,14 +183,40 @@ def part_text(details) -> str:
     return f"Part {part} of {parts} of one action{on}."
 
 
+# A record carried in by a migration from another table's own data, not
+# written when the action was taken: its details name the source table in
+# `carried_from` (migration 420 writes flag_review records for reviewed flags
+# that no record named, with carried_from = 'flagged_matches'). The read says
+# so in plain words beside the record's sentence.
+CARRIED_FROM = {
+    "flagged_matches": ("This record was carried in from the flagged match's own review data; "
+                        "it was not written at the time of the review."),
+}
+CARRIED_OTHER = ("This record was carried in from stored data; "
+                 "it was not written at the time of the action.")
+
+
+def carried_text(details) -> str:
+    """The plain words for a carried-in record (see CARRIED_FROM); '' for a
+    record written at the time of its action."""
+    src = (details if isinstance(details, dict) else {}).get("carried_from")
+    if not src:
+        return ""
+    return CARRIED_FROM.get(str(src), CARRIED_OTHER)
+
+
 def sentence(word: str, details, reason=None, *, ended=None) -> str:
     """ONE plain sentence saying what was done, with its numbers, built only
-    from the stored row (a key a row lacks is left out of the sentence), and
-    for a record that is one part of an action, which part. `ended` is the
+    from the stored row (a key a row lacks is left out of the sentence); for
+    a carried-in record, that it was carried in (carried_text); and for a
+    record that is one part of an action, which part. `ended` is the
     read's answer for a record that starts a run in steps (the 2v2 rebuild):
     True when the run's end is recorded, False when it is not, None when
     the read did not look."""
     out = [_sentence(word, details, ended)]
+    carried = carried_text(details)
+    if carried:
+        out.append(carried)
     unlinked = _num((details if isinstance(details, dict) else {}).get("unlinked_discord_authors"))
     if unlinked:
         out.append("The Discord author had no linked game account." if unlinked == 1 else

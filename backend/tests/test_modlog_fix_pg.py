@@ -19,6 +19,8 @@ read back against a real PostgreSQL, with its mutants.
     J4  each unmute route: an unmute that revokes nothing commits no record
         and changes nothing; one that revokes a mute commits its record with
         the revocation
+    J7  the read says that a record carried in by migration 420 was not
+        written at the time of the review
 
 Same harness as test_modlog_pg.py (its case schema, built by the ladder
 harness, sealed, dropped at the end):
@@ -924,3 +926,51 @@ def test_j4_mutant_is_red(case, admin_open, route, mutant):
     with pytest.raises(AssertionError) as e:
         _j4_check(case, route, fn)
     print("\nMUTANT-RED J4 %s %s: %s" % (route, mutant, str(e.value).splitlines()[0][:160]))
+
+
+# -- J7: a carried-in record says so in the read ----------------------------------
+#
+# Migration 420 carries in a flag_review record for each reviewed flag that no
+# record named, with details carried_from = 'flagged_matches'. The read's
+# sentence for such a record says in plain words that it was carried in and
+# was not written at the time of the review; a record written by the review
+# route says nothing of the kind.
+
+def _j7_check(case):
+    async def body(sm):
+        async def seed(db):
+            a, _ = await _admin(db)
+            t, _ = await _player(db)
+            ids = {}
+            for carried in (False, True):
+                d = {"flag_id": str(uuid.uuid4()), "review_action": "false_positive"}
+                if carried:
+                    d["carried_from"] = "flagged_matches"
+                ids[carried] = d["flag_id"]
+                await db.execute(text(
+                    "INSERT INTO admin_actions (admin_steam_id, action, details, affected_steam_ids,"
+                    "                           created_at)"
+                    " VALUES (:a, 'flag_review', CAST(:d AS jsonb), CAST(:p AS text[]), clock_timestamp())"),
+                    {"a": a, "d": json.dumps(d), "p": [t]})
+            return t, ids
+        t, ids = await _commit(sm, seed)
+        rows = (await _read(sm, player=t))["rows"]
+        return {c: [r for r in rows if r["details"].get("flag_id") == f] for c, f in ids.items()}
+    by = _with_sm(case, body)
+    (written,), (carried,) = by[False], by[True]
+    assert written["sentence"] == "Reviewed a flagged match: false positive.", written
+    assert carried["sentence"] == (
+        "Reviewed a flagged match: false positive. This record was carried in from the flagged "
+        "match's own review data; it was not written at the time of the review."), carried
+    assert modlog.carried_text({"carried_from": "another_table"}) == modlog.CARRIED_OTHER
+
+
+def test_j7_the_read_says_a_carried_in_record_was_not_written_at_the_review(case):
+    _j7_check(case)
+
+
+def test_j7_mutant_without_the_carried_in_words_is_red(case, monkeypatch):
+    monkeypatch.setattr(modlog, "carried_text", lambda details: "")
+    with pytest.raises(AssertionError) as e:
+        _j7_check(case)
+    print("\nMUTANT-RED J7 read without the carried-in words: %s" % str(e.value).splitlines()[0][:160])

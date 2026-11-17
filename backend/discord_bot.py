@@ -18549,6 +18549,21 @@ def _modlog_fit(text, n):
 
 
 MODLOG_TOTALS_MAX = 400
+# A record carried in by a migration from another table's own data names that
+# table in its details' carried_from (the api's modlog.CARRIED_FROM). The
+# mark stands right after the kind of action, ahead of every text a row's
+# budget can shorten.
+MODLOG_CARRIED = {"flagged_matches": " (carried in from the flag's review data, not written at the review)"}
+MODLOG_CARRIED_OTHER = " (carried in from stored data, not written at the time)"
+
+
+def _modlog_carried(row):
+    """The carried-in mark of a row ('' for a record written at the time)."""
+    details = row.get("details")
+    src = details.get("carried_from") if isinstance(details, dict) else None
+    if not src:
+        return ""
+    return MODLOG_CARRIED.get(str(src), MODLOG_CARRIED_OTHER)
 
 
 def _modlog_row_budget(limit, head, totals, n_rows):
@@ -18598,9 +18613,10 @@ def _modlog_render(body, *, page, sort, action_idx, search):
     for r in rows:
         if not isinstance(r, dict) or not isinstance(r.get("key"), str):
             raise ValueError("row")
-        line = "%s **%s** by %s" % (_modlog_ts(r.get("at")),
-                                    _escape_md(_modlog_cut(r.get("action_label"), 40)),
-                                    _escape_md(_modlog_cut(r.get("actor_name") or r.get("actor"), 40)))
+        line = "%s **%s**%s by %s" % (_modlog_ts(r.get("at")),
+                                      _escape_md(_modlog_cut(r.get("action_label"), 40)),
+                                      _modlog_carried(r),
+                                      _escape_md(_modlog_cut(r.get("actor_name") or r.get("actor"), 40)))
         if r.get("reason"):
             line += " — reason: " + _escape_md(_modlog_cut(r.get("reason"), 256))
         line += " — " + _escape_md(_modlog_cut(r.get("sentence"), 600))
