@@ -16,6 +16,9 @@ read back against a real PostgreSQL, with its mutants.
     J3  the spam pattern add route's statement runs on PostgreSQL: a new
         pattern answers ok, a second add of it answers duplicate, and the
         route records the one addition that stored a row
+    J4  each unmute route: an unmute that revokes nothing commits no record
+        and changes nothing; one that revokes a mute commits its record with
+        the revocation
 
 Same harness as test_modlog_pg.py (its case schema, built by the ladder
 harness, sealed, dropped at the end):
@@ -804,3 +807,120 @@ def test_j3_mutant_with_one_cast_removed_is_red(case, admin_open, mutant):
     with pytest.raises(AssertionError) as e:
         _j3_check(case, handler)
     print("\nMUTANT-RED J3 %s: %s" % (mutant, str(e.value).splitlines()[0][:160]))
+
+
+# -- J4: the two unmute exemptions of the census, checked by behaviour ------------
+#
+# test_modlog_census.NO_CHANGE_COMMITS exempts the one commit of each unmute
+# route from the rule that a record precedes every commit, because the writer
+# runs whenever the UPDATE revoked a row. Here each route runs twice on one
+# mute: the first call revokes it and commits its record with the revocation;
+# the second revokes nothing, and its commit writes no record and changes no
+# row of the mute, the records or the outbox.
+
+_J4_WRITER = "    if cleared:\n        await _modlog_write("
+_J4_COMMIT = "    await db.commit()\n"
+J4_MUTANTS = {
+    # the guard dropped: a call that revokes nothing writes a record
+    "guard_removed": ((_J4_WRITER, "    if True:\n        await _modlog_write("),),
+    # the commit moved before the writer: the record is never committed
+    "record_after_commit": ((_J4_COMMIT, ""), (_J4_WRITER, _J4_COMMIT + _J4_WRITER)),
+}
+
+
+async def _j4_chat_seed(sm):
+    async def seed(db):
+        a, _ = await _admin(db)
+        t, _ = await _player(db)
+        return a, t
+    a, t = await _commit(sm, seed)
+    async with sm() as db:
+        await main.chat_moderate_mute(main._ChatModMuteReq(
+            steam_id=a, target_steam_id=t, duration_minutes=60, reason="insults"), None, db=db)
+    return a, t
+
+
+async def _j4_chat_call(sm, fn, a, t):
+    async with sm() as db:
+        return (await fn(main._ChatModMuteReq(steam_id=a, target_steam_id=t, reason="appeal"),
+                         None, db=db))["cleared"]
+
+
+async def _j4_chat_state(sm, a, t):
+    async with sm() as db:
+        mutes = (await db.execute(text(
+            "SELECT id, revoked_at FROM chat_mutes WHERE steam_id = :t ORDER BY id"), {"t": t})).all()
+        recs = (await db.execute(text(
+            "SELECT count(*) FROM admin_actions WHERE action = 'chat_unmute' AND target_steam_id = :t"),
+            {"t": t})).scalar()
+        total = (await db.execute(text("SELECT count(*) FROM admin_actions"))).scalar()
+    return [tuple(m) for m in mutes], recs, total
+
+
+async def _j4_bridge_seed(sm):
+    async def seed(db):
+        a, _ = await _admin(db)
+        uid = "tw-%s" % uuid.uuid4().hex[:10]
+        mid = (await db.execute(text(
+            "INSERT INTO bridge_mutes (platform, platform_user_id, platform_login, channel, muted_by)"
+            " VALUES ('twitch', :u, :l, NULL, 'system') RETURNING id"),
+            {"u": uid, "l": "login" + uid[-6:]})).scalar()
+        return a, mid
+    return await _commit(sm, seed)
+
+
+async def _j4_bridge_call(sm, fn, a, mid):
+    async with sm() as db:
+        return (await fn(main._ChatModBridgeUnmuteReq(steam_id=a, mute_id=mid), None, db=db))["cleared"]
+
+
+async def _j4_bridge_state(sm, a, mid):
+    async with sm() as db:
+        mutes = (await db.execute(text(
+            "SELECT id, revoked_at FROM bridge_mutes WHERE id = :i"), {"i": mid})).all()
+        recs = (await db.execute(text(
+            "SELECT count(*) FROM admin_actions WHERE action = 'chat_unmute_bridge'"
+            "   AND details->>'mute_id' = :i"), {"i": str(mid)})).scalar()
+        total = (await db.execute(text("SELECT count(*) FROM admin_actions"))).scalar()
+        outbox = (await db.execute(text("SELECT count(*) FROM chat_mod_actions"))).scalar()
+    return [tuple(m) for m in mutes], recs, (total, outbox)
+
+
+J4_ROUTES = {
+    "chat_moderate_unmute": (_j4_chat_seed, _j4_chat_call, _j4_chat_state),
+    "chat_moderate_bridge_unmute": (_j4_bridge_seed, _j4_bridge_call, _j4_bridge_state),
+}
+
+
+def _j4_check(case, route, fn):
+    seed, call, state = J4_ROUTES[route]
+
+    async def body(sm):
+        a, key = await seed(sm)
+        before = await state(sm, a, key)
+        n1 = await call(sm, fn, a, key)
+        s1 = await state(sm, a, key)
+        n2 = await call(sm, fn, a, key)
+        s2 = await state(sm, a, key)
+        return before, n1, s1, n2, s2
+    before, n1, s1, n2, s2 = _with_sm(case, body)
+    assert before[1] == 0 and all(m[1] is None for m in before[0]) and before[0], (route, before)
+    assert n1 >= 1 and all(m[1] is not None for m in s1[0]), (route, n1, s1)
+    assert s1[1] == 1, (route, "the revoking call's record", s1)
+    assert n2 == 0, (route, n2)
+    assert s2 == s1, (route, "the call that revoked nothing changed state", s1, s2)
+
+
+@pytest.mark.parametrize("route", sorted(J4_ROUTES))
+def test_j4_an_unmute_records_what_it_revokes_and_a_no_change_unmute_records_nothing(
+        case, admin_open, route):
+    _j4_check(case, route, getattr(main, route))
+
+
+@pytest.mark.parametrize("mutant", sorted(J4_MUTANTS))
+@pytest.mark.parametrize("route", sorted(J4_ROUTES))
+def test_j4_mutant_is_red(case, admin_open, route, mutant):
+    fn = _mutant_of(route, *J4_MUTANTS[mutant])
+    with pytest.raises(AssertionError) as e:
+        _j4_check(case, route, fn)
+    print("\nMUTANT-RED J4 %s %s: %s" % (route, mutant, str(e.value).splitlines()[0][:160]))
