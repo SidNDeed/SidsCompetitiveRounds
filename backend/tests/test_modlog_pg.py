@@ -1378,8 +1378,10 @@ _S1_REASON_OP = "   SET reason = pg_catalog.left(details OPERATOR(pg_catalog.->>
 @pytest.mark.parametrize("pin,old,new,setting,expect", [
     ("quote_all_identifiers off", _QAI_PIN, "", "quote_all_identifiers=on",
      ("SECOND-APPLY-RC", "FIRST-APPLY-RC")),
+    # The CHECK's char_length names pg_catalog itself (S1), so its behaviour
+    # no longer moves with the path; the deparsed text the file compares does.
     ("the search path pinned", _PATH_PIN, "", "search_path=schema,pg_catalog+shadows",
-     ("SECOND-APPLY-RC", "CHECK-BEHAVIOUR")),
+     ("SECOND-APPLY-RC",)),
     ("the tombstone test without a backslash", _TOMB, "a.target_steam_id::text NOT LIKE 'deleted\\_%'",
      "standard_conforming_strings=off", ("FILL-DIFFERS",)),
     ("the table's identity held as an oid", _TBL_OID,
