@@ -163,9 +163,18 @@ def test_r11_res_sweep_production_settings_statements():
     # settings statement, main._EVC_SETTINGS_SQL, three set_config calls with
     # is_local the literal true and literal names; synchronous_commit has a
     # pg_settings row, so the existing pg_settings reading measures it.
+    # Judged since 5b18949a, +3 (QDIG-1, 2026-11-17): the three statements
+    # SET LOCAL statement_timeout = '3s' in main._qdig_janitor_pass, before
+    # the candidate page read, before each candidate's lock, classify and
+    # file, and before the census read. Each is the first statement of the
+    # transaction the session's autobegin opens after the previous commit or
+    # rollback, and no commit stands between it and the statements it bounds;
+    # statement_timeout is a literal name with a pg_settings row. The count
+    # moves from 17 to 20 for these three and no other reason; a lane that
+    # lands later takes the incoming count at its merge and measures again.
     assert names == {"lock_timeout", "statement_timeout",
                      "idle_in_transaction_session_timeout", "synchronous_commit"}, names
-    assert len(got) == 17, got
+    assert len(got) == 20, got
     assert [sql for _w, sql in got if "synchronous_commit" in sql] == [
         "SELECT set_config('lock_timeout', '2s', true), "
         "set_config('statement_timeout', '10s', true), "
