@@ -506,6 +506,9 @@ class _Res:
     def first(self):
         return self.row
 
+    def close(self):
+        pass
+
 
 class _ScriptDb:
     """Answers each statement with the next scripted row (None: no row) and records the statements."""
@@ -926,29 +929,26 @@ class _RecDb:
 
 
 def test_every_statement_of_an_attempt_is_armed_with_the_time_left_first(monkeypatch):
-    """Before each statement: statement_timeout to the time left, lock_timeout
-    to the smaller of that and the cap. At or after the deadline no statement
-    runs (_DeletionPastDeadline). The undo takes the arming off the session."""
-    clock = _Clock()
-    monkeypatch.setattr(main, "_deletion_clock", clock)
-    db = _RecDb(clock)
-    undo = main._deletion_arm_every_statement(db, clock.deadline)
-    arm = main._DELETION_ARM_SQL
+    """Before each statement, on the attempt's connection: statement_timeout
+    to the time left, lock_timeout to the smaller of that and the cap. At or
+    after the deadline no statement is sent (_DeletionPastDeadline). The undo
+    takes the arming off the session and off its connection."""
+    clock, db, undo = _armed_session(monkeypatch)
     asyncio.run(db.execute(main.text("SELECT 1")))
     clock.now = clock.deadline - 2.25
     asyncio.run(db.execute(main.text("SELECT 2"), {"x": 1}))
     clock.now = clock.deadline - 0.25
     asyncio.run(db.execute(main.text("SELECT 3")))
-    assert db.seen == [(arm, {"lt": "500ms", "st": "15000ms"}), ("SELECT 1", {}),
-                       (arm, {"lt": "500ms", "st": "2250ms"}), ("SELECT 2", {"x": 1}),
-                       (arm, {"lt": "250ms", "st": "250ms"}), ("SELECT 3", {})], db.seen
+    assert db.sent == ["CHECKOUT", _armed("500ms", "15000ms"), ("SQL", "SELECT 1"),
+                       _armed("500ms", "2250ms"), ("SQL", "SELECT 2"),
+                       _armed("250ms", "250ms"), ("SQL", "SELECT 3")], db.sent
     clock.now = clock.deadline
     with pytest.raises(main._DeletionPastDeadline):
         asyncio.run(db.execute(main.text("SELECT 4")))
-    assert len(db.seen) == 6, db.seen
-    assert "execute" in vars(db)
+    assert len(db.sent) == 7, db.sent
+    assert "execute" in vars(db) and db.conn.listeners
     undo()
-    assert "execute" not in vars(db)
+    assert "execute" not in vars(db) and not db.conn.listeners
 
 
 @pytest.mark.parametrize("code,past,want", [
@@ -973,24 +973,392 @@ def test_the_arming_reads_the_two_timeouts_as_the_bound_s_signals(monkeypatch, c
 
 
 def test_the_bound_arms_each_attempt_and_takes_the_arming_off_after(monkeypatch, capsys):
-    """Each attempt's first statement is the arming; after the deletion ends,
-    however it ends, the session carries no arming."""
+    """Each attempt checks out its own connection and arms its first statement
+    there; after the deletion ends, however it ends, neither the session nor
+    any connection it had carries the arming."""
     monkeypatch.setattr(main, "MATCH_HMAC_SECRET", SECRET)
     clock = _Clock()
     monkeypatch.setattr(main, "_deletion_clock", clock)
     _paused(monkeypatch, clock)
-    seen = []
+    _fake_listen(monkeypatch)
 
-    class _Rec(_HeldDb):
-        async def execute(self, statement, params=None, *a, **k):
-            seen.append(str(statement))
-            return await _HeldDb.execute(self, statement, params, *a, **k)
-    db = _Rec(clock, held=1)
+    class _Held(_SessionRec):
+        """The first attempt meets a held bet party row at its first statement;
+        the next attempt ends there with _Stop."""
+        def send(self, conn, statement, params=None, many=False, context=None):
+            _SessionRec.send(self, conn, statement, params, many, context)
+            if statement != main._DELETION_ARM_SQL:
+                if len(self.conns) == 1:
+                    raise main._DeletionRowHeld("bet party row")
+                raise _Stop()
+    db = _Held(clock)
     with pytest.raises(_Stop):
         asyncio.run(main.delete_player_data(STEAM, None, sig=_sig(STEAM), _arrived=clock.now,
                                             _slot=None, db=db))
-    assert seen == [main._DELETION_ARM_SQL, main._DELETION_ARM_SQL], seen
-    assert "execute" not in vars(db)
+    kinds = [s if isinstance(s, str) else s[0] for s in db.sent]
+    assert kinds == ["CHECKOUT", "ARM", "SQL", "ROLLBACK", "CHECKOUT", "ARM", "SQL"], db.sent
+    assert not {"execute", "flush", "commit", "begin_nested"} & set(vars(db)), sorted(vars(db))
+    assert len(db.conns) == 2 and not any(c.listeners for c in db.conns), db.conns
+
+
+# -- r2 HIGH 1: the arming on the attempt's connection -------------------------------------------
+
+class _SyncConn:
+    """One checked-out connection of a _SessionRec: the listeners _deletion_listen attached to it,
+    and a sync execute through which the arming sends its own statement."""
+    def __init__(self, rec, n):
+        self.rec, self.n, self.listeners = rec, n, []
+
+    def execute(self, statement, params=None):
+        self.rec.send(self, str(statement), params)
+        return _Res(None)
+
+    def __repr__(self):
+        return "<connection %d, %d listeners>" % (self.n, len(self.listeners))
+
+
+class _Ctx:
+    """An execution context as the arming reads it: the name of its execute style."""
+    def __init__(self, style):
+        self.execute_style = type("Style", (), {"name": style})()
+
+
+def _fake_listen(monkeypatch):
+    """SQLAlchemy's event registry takes no fake target: the fake sessions keep the listeners on
+    their fake connection. The PG proof's R6c runs the real _deletion_listen."""
+    monkeypatch.setattr(main, "_deletion_listen", lambda conn, fn: conn.listeners.append(fn))
+    monkeypatch.setattr(main, "_deletion_unlisten", lambda conn, fn: conn.listeners.remove(fn))
+
+
+class _SessionRec:
+    """A session with the paths the arming covers, sending what SQLAlchemy sends. Each statement
+    goes through its connection's listeners first, as before_cursor_execute runs them, and a
+    listener that raises keeps it from being sent. Records "CHECKOUT" (a connection checked out:
+    the first statement after a release), ("ARM", params), ("SQL", statement), "COMMIT" and
+    "ROLLBACK" (both release the connection). `pending`: what the next flush sends -- an explicit
+    one, the commit's, or the flushes at a savepoint's two ends -- one statement each, as a flush
+    of rows of several tables does; an entry (statement, params, style) is one executemany or one
+    insert of many rows. `slow`: seconds of the stubbed clock a step takes ("CHECKOUT", "ARM" or a
+    statement's text); `blocked`: no connection is free, a checkout never ends; `fail`: a
+    statement's text and the SQLSTATE it fails with."""
+    def __init__(self, clock, slow=None, blocked=False, fail=None):
+        self.clock, self.slow, self.blocked, self.fail = clock, dict(slow or {}), blocked, dict(fail or {})
+        self.sent, self.conn, self.conns, self.pending = [], None, [], []
+
+    def _took(self, step):
+        self.clock.now += self.slow.get(step, 0.0)
+
+    async def connection(self):
+        if self.conn is None:
+            if self.blocked:
+                await asyncio.Event().wait()
+            self.conn = _SyncConn(self, len(self.conns) + 1)
+            self.conns.append(self.conn)
+            self.sent.append("CHECKOUT")
+            self._took("CHECKOUT")
+        return self
+
+    @property
+    def sync_connection(self):
+        return self.conn
+
+    async def run_sync(self, fn, *a, **k):
+        return fn(self.conn, *a, **k)
+
+    def send(self, conn, statement, params=None, many=False, context=None):
+        for fn in list(conn.listeners):
+            fn(conn, None, statement, params, context, many)
+        if statement == main._DELETION_ARM_SQL:
+            self.sent.append(("ARM", dict(params or {})))
+            self._took("ARM")
+            return
+        self.sent.append(("SQL", statement))
+        self._took(statement)
+        if statement in self.fail:
+            raise _db_error(self.fail[statement])
+
+    async def _on(self):
+        await _SessionRec.connection(self)
+        return self.conn
+
+    async def execute(self, statement, params=None, *a, **k):
+        conn = await self._on()
+        many = isinstance(params, list)
+        self.send(conn, str(statement), params, many, _Ctx("EXECUTEMANY") if many else None)
+        return _Res(None)
+
+    async def flush(self, *a, **k):
+        while self.pending:
+            conn = await self._on()
+            item = self.pending.pop(0)
+            if isinstance(item, tuple):
+                self.send(conn, item[0], item[1], True, _Ctx(item[2]))
+            else:
+                self.send(conn, item)
+
+    async def commit(self):
+        await _SessionRec.flush(self)
+        self.sent.append("COMMIT")
+        self.conn = None
+
+    async def rollback(self):
+        self.sent.append("ROLLBACK")
+        self.conn = None
+        self.pending.clear()
+
+    def begin_nested(self):
+        rec = self
+
+        class _Savepoint:
+            async def __aenter__(self):
+                await _SessionRec.flush(rec)
+                rec.send(await rec._on(), "SAVEPOINT sa_savepoint_1")
+                return self
+
+            async def __aexit__(self, et, ev, tb):
+                if et is None:
+                    try:
+                        await _SessionRec.flush(rec)
+                    except BaseException:
+                        rec.send(rec.conn, "ROLLBACK TO SAVEPOINT sa_savepoint_1")
+                        raise
+                    rec.send(rec.conn, "RELEASE SAVEPOINT sa_savepoint_1")
+                else:
+                    rec.send(rec.conn, "ROLLBACK TO SAVEPOINT sa_savepoint_1")
+                return False
+        return _Savepoint()
+
+
+def _armed(lt, st):
+    return ("ARM", {"lt": lt, "st": st})
+
+
+def _armed_session(monkeypatch, **kw):
+    clock = _Clock()
+    monkeypatch.setattr(main, "_deletion_clock", clock)
+    _fake_listen(monkeypatch)
+    db = _SessionRec(clock, **kw)
+    return clock, db, main._deletion_arm_every_statement(db, clock.deadline)
+
+
+def test_everything_an_attempt_sends_is_armed_with_the_time_left_first(monkeypatch):
+    """r2 HIGH 1. Each statement of a flush is armed on its own (a flush of
+    rows of two tables sends two), and so is a statement inside a savepoint;
+    the savepoint's own statements are not; the commit flushes first, each
+    statement armed, then arms the COMMIT itself. The undo takes the arming
+    off the session's four paths and off its connection."""
+    clock, db, undo = _armed_session(monkeypatch)
+
+    async def attempt():
+        await db.execute(main.text("SELECT 1"))
+        clock.now = clock.deadline - 3.0
+        db.pending[:] = ["INSERT a", "UPDATE b"]
+        await db.flush()
+        async with db.begin_nested():
+            await db.execute(main.text("SELECT 2"))
+        db.pending[:] = ["INSERT c"]
+        clock.now = clock.deadline - 0.2
+        await db.commit()
+    asyncio.run(attempt())
+    full, three, last = _armed("500ms", "15000ms"), _armed("500ms", "3000ms"), _armed("200ms", "200ms")
+    assert db.sent == ["CHECKOUT", full, ("SQL", "SELECT 1"),
+                       three, ("SQL", "INSERT a"), three, ("SQL", "UPDATE b"),
+                       ("SQL", "SAVEPOINT sa_savepoint_1"), three, ("SQL", "SELECT 2"),
+                       ("SQL", "RELEASE SAVEPOINT sa_savepoint_1"),
+                       last, ("SQL", "INSERT c"), last, "COMMIT"], db.sent
+    assert {"execute", "flush", "commit", "begin_nested"} <= set(vars(db)), sorted(vars(db))
+    undo()
+    assert not {"execute", "flush", "commit", "begin_nested"} & set(vars(db)), sorted(vars(db))
+    assert not db.conns[0].listeners, db.conns
+
+
+def test_a_flush_whose_first_statement_ends_at_the_deadline_sends_no_second(monkeypatch):
+    """r2 HIGH 1, the case an arming once per session call leaves open: a
+    flush of two rows sends two statements; the first ends at the deadline;
+    the second is not sent."""
+    clock, db, _undo = _armed_session(monkeypatch, slow={"INSERT a": main._DELETION_BUDGET_S})
+    db.pending[:] = ["INSERT a", "INSERT b"]
+    with pytest.raises(main._DeletionPastDeadline):
+        asyncio.run(db.flush())
+    assert db.sent == ["CHECKOUT", _armed("500ms", "15000ms"), ("SQL", "INSERT a")], db.sent
+
+
+def test_an_executemany_shares_the_time_left_among_its_runs(monkeypatch):
+    """PostgreSQL restarts statement_timeout for each run of an executemany:
+    one arming for n runs gives each an n-th of the time left. An insert of
+    many rows is one statement and keeps the whole of it."""
+    clock, db, _undo = _armed_session(monkeypatch)
+    asyncio.run(db.execute(main.text("UPDATE x"), [{"a": 1}, {"a": 2}, {"a": 3}, {"a": 4}]))
+    db.pending[:] = [("INSERT many", [1, 2, 3, 4], "INSERTMANYVALUES")]
+    asyncio.run(db.flush())
+    assert db.sent == ["CHECKOUT", _armed("500ms", "3750ms"), ("SQL", "UPDATE x"),
+                       _armed("500ms", "15000ms"), ("SQL", "INSERT many")], db.sent
+
+
+def test_a_connection_checked_out_after_a_rollback_is_armed_too(monkeypatch):
+    """A rollback releases the connection; the next statement checks out
+    another, and the arming is attached to that one as well. The undo takes
+    it off both."""
+    clock, db, undo = _armed_session(monkeypatch)
+
+    async def go():
+        await db.execute(main.text("SELECT 1"))
+        await db.rollback()
+        await db.execute(main.text("SELECT 2"))
+    asyncio.run(go())
+    full = _armed("500ms", "15000ms")
+    assert db.sent == ["CHECKOUT", full, ("SQL", "SELECT 1"), "ROLLBACK",
+                       "CHECKOUT", full, ("SQL", "SELECT 2")], db.sent
+    undo()
+    assert len(db.conns) == 2 and not any(c.listeners for c in db.conns), db.conns
+
+
+def _each_path(db):
+    """One coroutine per path that holds the connection first: a statement, a
+    flush with a row to send, a commit with one, a savepoint around nothing."""
+    async def execute():
+        await db.execute(main.text("SELECT 1"))
+
+    async def flush():
+        db.pending[:] = ["INSERT a"]
+        await db.flush()
+
+    async def commit():
+        db.pending[:] = ["INSERT a"]
+        await db.commit()
+
+    async def savepoint():
+        async with db.begin_nested():
+            pass
+    return {"execute": execute, "flush": flush, "commit": commit, "savepoint": savepoint}
+
+
+def test_a_checkout_that_ends_past_the_deadline_sends_nothing(monkeypatch):
+    """r2 HIGH 1, the reviewer's case at the checkout: the pool hands the
+    connection over after the deadline. On each path nothing is sent after
+    it, not even a savepoint's own statement."""
+    for path in ("execute", "flush", "commit", "savepoint"):
+        clock, db, _undo = _armed_session(monkeypatch, slow={"CHECKOUT": main._DELETION_BUDGET_S + 1.0})
+        with pytest.raises(main._DeletionPastDeadline):
+            asyncio.run(_each_path(db)[path]())
+        assert db.sent == ["CHECKOUT"], (path, db.sent)
+
+
+def test_a_checkout_still_waiting_at_the_deadline_is_cut_there(monkeypatch):
+    """r2 HIGH 1: on each path a checkout waits at most the time left (50 ms
+    here, on the event loop's own clock), not the pool's 30 s; then
+    _DeletionPastDeadline, nothing sent. The test's own 10 s limit turns an
+    uncut wait red."""
+    for path in ("execute", "flush", "commit", "savepoint"):
+        clock, db, _undo = _armed_session(monkeypatch, blocked=True)
+        clock.now = clock.deadline - 0.05
+        began = time.monotonic()
+        with pytest.raises(main._DeletionPastDeadline):
+            asyncio.run(asyncio.wait_for(_each_path(db)[path](), 10))
+        assert time.monotonic() - began < 5, (path, "the checkout was not cut at the time left")
+        assert db.sent == [], (path, db.sent)
+
+
+def test_an_arming_that_ends_past_the_deadline_sends_no_statement(monkeypatch):
+    """r2 HIGH 1, the reviewer's reproduction: the arming returns after the
+    deadline (deadline 1015, the arming done at 1016). The statement itself is
+    not sent."""
+    clock, db, _undo = _armed_session(monkeypatch, slow={"ARM": main._DELETION_BUDGET_S + 1.0})
+    with pytest.raises(main._DeletionPastDeadline):
+        asyncio.run(db.execute(main.text("SELECT 1")))
+    assert db.sent == ["CHECKOUT", _armed("500ms", "15000ms")], db.sent
+
+
+def test_a_commit_arms_after_its_flush_and_is_not_sent_past_the_deadline(monkeypatch):
+    """r2 HIGH 1: the commit flushes first, its statement armed, then arms the
+    COMMIT itself; when the flush ends at the deadline the COMMIT is not sent.
+    At the deadline from the start nothing is sent."""
+    clock, db, _undo = _armed_session(monkeypatch, slow={"INSERT c": 3.0})
+    db.pending[:] = ["INSERT c"]
+    clock.now = clock.deadline - 3.0
+    with pytest.raises(main._DeletionPastDeadline):
+        asyncio.run(db.commit())
+    assert db.sent == ["CHECKOUT", _armed("500ms", "3000ms"), ("SQL", "INSERT c")], db.sent
+    clock, db, _undo = _armed_session(monkeypatch)
+    clock.now = clock.deadline
+    with pytest.raises(main._DeletionPastDeadline):
+        asyncio.run(db.commit())
+    assert db.sent == [], db.sent
+
+
+def test_a_rollback_to_a_savepoint_is_sent_past_the_deadline(monkeypatch):
+    """A savepoint's own statements are neither armed nor refused: a body
+    whose statement ends at the deadline is left by the refusal of the next
+    one, and the savepoint is still rolled back."""
+    clock, db, _undo = _armed_session(monkeypatch, slow={"SELECT 2": main._DELETION_BUDGET_S})
+
+    async def go():
+        async with db.begin_nested():
+            await db.execute(main.text("SELECT 2"))
+            await db.execute(main.text("SELECT 3"))
+    with pytest.raises(main._DeletionPastDeadline):
+        asyncio.run(go())
+    assert db.sent == ["CHECKOUT", ("SQL", "SAVEPOINT sa_savepoint_1"), _armed("500ms", "15000ms"),
+                       ("SQL", "SELECT 2"), ("SQL", "ROLLBACK TO SAVEPOINT sa_savepoint_1")], db.sent
+
+
+def test_a_held_row_at_a_savepoint_s_release_flush_rolls_the_savepoint_back(monkeypatch):
+    """A statement of the flush before a savepoint's release meets a held row
+    (55P03 before the deadline): the savepoint is rolled back, not released,
+    and the held signal goes on to the caller."""
+    clock, db, _undo = _armed_session(monkeypatch, fail={"INSERT d": "55P03"})
+
+    async def go():
+        async with db.begin_nested():
+            db.pending[:] = ["INSERT d"]
+    with pytest.raises(main._DeletionRowHeld):
+        asyncio.run(go())
+    assert db.sent == ["CHECKOUT", ("SQL", "SAVEPOINT sa_savepoint_1"), _armed("500ms", "15000ms"),
+                       ("SQL", "INSERT d"), ("SQL", "ROLLBACK TO SAVEPOINT sa_savepoint_1")], db.sent
+
+
+# What the deletion's reach may call on its session: the four methods that hold the connection
+# first (a checkout bounded by the time left, the arming attached; every statement on that
+# connection is then armed by its own event), and three that send nothing and check nothing out
+# (rollback ends the attempt; add and expire leave work for the next flush).
+_SESSION_HELD = {"execute", "flush", "commit", "begin_nested"}
+_SESSION_ALLOWED = _SESSION_HELD | {"rollback", "add", "expire"}
+_SESSION_METHODS = _SESSION_ALLOWED | {
+    "scalar", "scalars", "get", "get_one", "refresh", "delete", "merge", "run_sync", "stream",
+    "stream_scalars", "begin", "connection", "exec_driver_sql", "invalidate", "close", "add_all",
+    "expire_all", "expunge", "reset"}
+
+
+def test_every_session_method_the_deletion_reaches_holds_its_connection_first_or_sends_nothing():
+    """r2 HIGH 1, by class: the deletion's reach calls on a session (db, or a
+    parameter annotated AsyncSession) only the four methods that hold the
+    connection first and three that send nothing and check nothing out; and
+    every begin_nested is used as `async with`, the one form the arming wraps
+    (six of them). Another method (AsyncSession.scalar, get or refresh can
+    check a connection out outside the four) or another form fails here."""
+    with open(main.__file__, encoding="utf-8") as fh:
+        source = fh.read()
+    reach = dict(_reach(source, "delete_player_data"))
+    reach.update(_reach(source, "_pc_lease_drain"))
+    calls, nested_with, nested_all = {}, 0, 0
+    for name, fns in reach.items():
+        for fn in fns:
+            sessions = {"db"} | {a.arg for a in fn.args.args + fn.args.kwonlyargs
+                                 if a.annotation is not None and "AsyncSession" in ast.unparse(a.annotation)}
+            for n in ast.walk(fn):
+                if isinstance(n, ast.AsyncWith):
+                    nested_with += sum(1 for it in n.items
+                                       if isinstance(it.context_expr, ast.Call)
+                                       and isinstance(it.context_expr.func, ast.Attribute)
+                                       and it.context_expr.func.attr == "begin_nested")
+                if (isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+                        and isinstance(n.func.value, ast.Name) and n.func.value.id in sessions
+                        and n.func.attr in _SESSION_METHODS):
+                    calls.setdefault(n.func.attr, set()).add(name)
+                    nested_all += n.func.attr == "begin_nested"
+    assert set(calls) <= _SESSION_ALLOWED, {m: sorted(v) for m, v in calls.items() if m not in _SESSION_ALLOWED}
+    assert _SESSION_HELD <= set(calls), sorted(calls)
+    assert nested_with == nested_all == 6, (nested_with, nested_all)
 
 
 def test_the_wait_cap_is_below_the_primary_s_deadlock_timeout():

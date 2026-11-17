@@ -1307,6 +1307,155 @@ def test_r1h_figure_staggered_holders_end_the_attempt_by_its_deadline(monkeypatc
     case(monkeypatch, body, prefix="mdpl")
 
 
+# -- R6c: the arming on the attempt's real connection (r2 HIGH 1) --------------------------------
+
+def _sent_label(statement):
+    """A statement as R6c compares it: "ARM" for the arming, the verb and its
+    table for a write, the first word for anything else."""
+    if statement.startswith("SELECT set_config('lock_timeout'"):
+        return "ARM"
+    words = statement.split()
+    if words[0] == "UPDATE":
+        return "UPDATE " + words[1]
+    if words[0] == "INSERT":
+        return "INSERT " + words[2]
+    return words[0]
+
+
+def _r6c_pairs(sent):
+    """Each statement sent but an arming, in order: (its label, armed -- the
+    arming came right before it --, its execute style, that arming's
+    (lock_timeout, statement_timeout in ms) or None)."""
+    out, arming = [], None
+    for label, params, style in sent:
+        if label == "ARM":
+            assert arming is None, "two armings with no statement between them: %r" % (sent,)
+            lt, st = list(params.values()) if isinstance(params, dict) else list(params)
+            arming = (lt, int(st[:-2]))
+            continue
+        out.append((label, arming is not None, style, arming))
+        arming = None
+    assert arming is None, "an arming with no statement after it: %r" % (sent,)
+    return out
+
+
+def _r6c_shape(pairs):
+    """(label, armed) for each statement, the first flush's two sorted: the
+    unit of work orders the two tables' statements its own way, and R6c
+    claims nothing about that order."""
+    shape = [(label, armed) for label, armed, _s, _a in pairs]
+    return shape[:1] + sorted(shape[1:3]) + shape[3:]
+
+
+async def _r6c_scene(env):
+    """An attempt's session, armed for 60 s, on a real AsyncSession over
+    asyncpg: an ORM read; a flush of a row of players and one of
+    gold_transactions (two statements); an autoflush ahead of an ORM read; a
+    savepoint around a statement; an executemany of two runs; the commit,
+    whose flush inserts two rows of gold_transactions in one statement
+    (insertmanyvalues); a statement on the connection the session checks out
+    after the commit; then, after the undo, one more statement on that same
+    connection. Returns _r6c_pairs of what was sent, in the order sent
+    (after_cursor_execute, and the engine's commit event for the COMMIT),
+    after checking that the writes committed."""
+    from sqlalchemy import event as sa_event
+    p, q = await env.players(2)
+    sent = []
+
+    def rec(conn, cursor, statement, parameters, context, executemany):
+        sent.append((_sent_label(statement), parameters,
+                     getattr(getattr(context, "execute_style", None), "name", None)))
+
+    def rec_commit(conn):
+        sent.append(("COMMIT", None, None))
+    sa_event.listen(env.engine.sync_engine, "after_cursor_execute", rec)
+    sa_event.listen(env.engine.sync_engine, "commit", rec_commit)
+    try:
+        async with env.sm() as db:
+            undo = main._deletion_arm_every_statement(db, main._deletion_clock() + 60.0)
+            try:
+                one = (await db.execute(
+                    main.select(main.Player).where(main.Player.id == p.id))).scalar_one()
+                one.display_name = "mdpl r6c one"
+                db.add(main.GoldTransaction(player_id=q.id, amount=1, reason="mdpl_r6c", reference_id="1"))
+                await db.flush()
+                one.display_name = "mdpl r6c two"
+                (await db.execute(main.select(main.Player).where(main.Player.id == q.id))).scalar_one()
+                async with db.begin_nested():
+                    await db.execute(main.text("SELECT 1"))
+                await db.execute(main.text("UPDATE players SET display_name = display_name WHERE id = :i"),
+                                 [{"i": p.id}, {"i": q.id}])
+                db.add(main.GoldTransaction(player_id=p.id, amount=1, reason="mdpl_r6c", reference_id="2"))
+                db.add(main.GoldTransaction(player_id=q.id, amount=1, reason="mdpl_r6c", reference_id="3"))
+                await db.commit()
+                await db.execute(main.text("SELECT 3"))
+            finally:
+                undo()
+            await db.execute(main.text("SELECT 4"))
+            await db.rollback()
+    finally:
+        sa_event.remove(env.engine.sync_engine, "after_cursor_execute", rec)
+        sa_event.remove(env.engine.sync_engine, "commit", rec_commit)
+    row = await env.conn.fetchrow("SELECT display_name FROM players WHERE id = $1", p.id)
+    assert row["display_name"] == "mdpl r6c two", dict(row)
+    assert await env.conn.fetchval("SELECT count(*) FROM gold_transactions WHERE reason = 'mdpl_r6c'") == 3
+    return _r6c_pairs(sent)
+
+
+# What the scene sends when every statement is armed: the read; the flush's two
+# (sorted, _r6c_shape); the autoflush and its read; the savepoint, unarmed
+# around its armed statement; the executemany; the commit's flush and the
+# COMMIT; the statement on the connection checked out after the commit; the
+# statement after the undo, unarmed.
+_R6C_ARMED = [("SELECT", True),
+              ("INSERT gold_transactions", True), ("UPDATE players", True),
+              ("UPDATE players", True), ("SELECT", True),
+              ("SAVEPOINT", False), ("SELECT", True), ("RELEASE", False),
+              ("UPDATE players", True),
+              ("INSERT gold_transactions", True), ("COMMIT", True),
+              ("SELECT", True),
+              ("SELECT", False)]
+
+
+def test_r6c_every_statement_of_the_attempt_s_connection_is_armed_first(monkeypatch):
+    """r2 HIGH 1 through SQLAlchemy's own events (the bound tests' fakes stand
+    in for them): each statement is armed right before it is sent -- each of
+    the flush's two, the autoflush and its read, the executemany, the
+    commit's insert of two rows -- with lock_timeout the cap and
+    statement_timeout the time left; the executemany's two runs share the
+    time left; the insert of two rows is one statement and is not shared;
+    the savepoint's own two statements are not armed; the COMMIT is armed
+    after the commit's flush; the connection checked out after the commit is
+    armed too; after the undo that connection sends unarmed."""
+    async def body(env):
+        pairs = await _r6c_scene(env)
+        assert _r6c_shape(pairs) == _R6C_ARMED, pairs
+        cap = "%dms" % int(main._DELETION_WAIT_CAP_S * 1000)
+        armed = [(label, style, arming) for label, is_armed, style, arming in pairs if is_armed]
+        assert all(lt == cap for _l, _s, (lt, _st) in armed), armed
+        many = [st for label, style, (_lt, st) in armed if style == "EXECUTEMANY"]
+        batch = [st for label, style, (_lt, st) in armed if style == "INSERTMANYVALUES"]
+        whole = [st for label, style, (_lt, st) in armed if style not in ("EXECUTEMANY", "INSERTMANYVALUES")]
+        assert len(many) == 1 and 25000 < many[0] <= 30000, armed
+        assert len(batch) == 1 and 50000 < batch[0] <= 60000, armed
+        assert whole == sorted(whole, reverse=True) and 50000 < whole[-1] <= 60000, armed
+    case(monkeypatch, body, prefix="mdpl")
+
+
+def test_r6c_control_without_the_listener_only_the_commit_is_armed(monkeypatch):
+    """The control, mutant B27 run as a test: _deletion_listen attaches
+    nothing (and the undo has nothing to take off). The scene then sends
+    every statement unarmed but the COMMIT, the one the commit arms itself,
+    so the armed test above fails on it."""
+    async def body(env):
+        env.mp.setattr(main, "_deletion_listen", lambda conn, fn: None)
+        env.mp.setattr(main, "_deletion_unlisten", lambda conn, fn: None)
+        shape = _r6c_shape(await _r6c_scene(env))
+        assert shape == [(label, label == "COMMIT") for label, _armed in _R6C_ARMED], shape
+        assert shape != _R6C_ARMED
+    case(monkeypatch, body, prefix="mdpl")
+
+
 # -- point 6: a call outside a deletion issues the statements it issued before -------------------
 
 _EVERY_STATEMENT = re.compile(r"\A")

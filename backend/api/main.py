@@ -45824,54 +45824,194 @@ def _deletion_signal_of(exc, deadline):
     return None
 
 
+# Statements sent unarmed inside an attempt: they take no lock, write nothing and
+# never wait, and a rollback to a savepoint must not be refused at the deadline.
+_DELETION_UNARMED = ("SAVEPOINT ", "RELEASE SAVEPOINT ", "ROLLBACK TO SAVEPOINT ")
+
+
+def _deletion_listen(sync_conn, fn):
+    """Attaches an attempt's arming to one connection: SQLAlchemy's
+    before_cursor_execute runs it before every statement that connection
+    sends. The bound tests' fake sessions replace this and the next."""
+    from sqlalchemy import event
+    event.listen(sync_conn, "before_cursor_execute", fn)
+
+
+def _deletion_unlisten(sync_conn, fn):
+    from sqlalchemy import event
+    event.remove(sync_conn, "before_cursor_execute", fn)
+
+
 def _deletion_arm_every_statement(db, deadline):
-    """MDPL r1, the hold-time figure. For the length of one attempt, every
-    statement the attempt's session executes is preceded by re-arming two
-    settings: statement_timeout to the time left, so no statement -- with
-    every lock wait in it, however many rows it waits for in turn (#689:
-    lock_timeout applies to each lock separately) -- runs past the
-    deadline; and lock_timeout to the smaller of the time left and
-    _DELETION_WAIT_CAP_S. No statement starts after the deadline. A lock
-    wait that reaches the cap before the deadline is a held row or key
-    (_DeletionRowHeld); a statement or wait ended at the deadline is
-    _DeletionPastDeadline (_deletion_signal_of). Both are raised here, from
-    the PostgreSQL error, so every catch in the reach sees a signal the
-    bound acts on. Armed once at the attempt's start, a wait could last the
-    whole time left at the start however late it began, and the waits after
-    a guard added up: an attempt could hold a party's key and row (or its
-    own lobby rows) long past its deadline before the pre-commit check
-    refused it. Armed before every statement, the attempt holds what it
-    took at most until its deadline (at most _DELETION_BUDGET_S after
-    arrival), plus its rollback. Everything the deletion reaches sends its
-    SQL through db.execute; what the session sends on its own (a flush, the
-    commit) runs under the values armed before the last statement, and the
-    bound reads its 55P03 and 57014 the same way. Returns the undo, which
-    the bound runs when the attempt ends."""
+    """MDPL r1, the hold-time figure; r2 HIGH 1, one armed path. For the
+    length of one attempt, every statement the attempt's connection sends
+    is preceded by arming two settings, from SQLAlchemy's
+    before_cursor_execute on that connection: statement_timeout to the
+    time left, so a statement -- with every lock wait in it, however many
+    rows it waits for in turn (#689: lock_timeout applies to each lock
+    separately) -- ends by the deadline plus its own arming's round trip;
+    and lock_timeout to the smaller of the time left and
+    _DELETION_WAIT_CAP_S. The deadline is checked before the arming and
+    after it, and nothing is awaited between that check and the send: no
+    statement starts after the deadline. The event sees what a wrapper of
+    the session's methods cannot: each statement of a flush (an explicit
+    one, an autoflush, the flush a savepoint or the commit runs first)
+    and each batch of an insert of many rows. An executemany of n runs is
+    armed once for all of them with statement_timeout an n-th of the time
+    left, since PostgreSQL restarts the timeout for each run. SAVEPOINT,
+    RELEASE SAVEPOINT and ROLLBACK TO SAVEPOINT go unarmed
+    (_DELETION_UNARMED). The COMMIT is not a statement of the connection's
+    cursor: db.commit flushes first (each statement armed), then arms the
+    COMMIT and checks the deadline. The connection: db.execute, db.flush,
+    db.commit and db.begin_nested each hold it first -- a checkout waits
+    at most the time left (the pool's own wait is pool_timeout, 30 s) --
+    check the deadline after the checkout, and attach the arming to a
+    connection this attempt has not armed (a rollback releases the
+    connection; the next statement checks one out). test_mdpl_bound pins
+    that the deletion's reach calls no other session method that could
+    check one out. A lock wait that reaches the cap before the deadline is
+    a held row or key (_DeletionRowHeld); a statement or wait ended at the
+    deadline, or a checkout still waiting there, is _DeletionPastDeadline
+    (_deletion_signal_of). Both are raised here, from the PostgreSQL
+    error, so every catch in the reach sees a signal the bound acts on.
+    Armed once at the attempt's start, a wait could last the whole time
+    left at the start however late it began, and the waits after a guard
+    added up: an attempt could hold a party's key and row (or its own
+    lobby rows) long past its deadline before the pre-commit check refused
+    it. Armed before every statement, the attempt holds what it took at
+    most until its deadline (at most _DELETION_BUDGET_S after arrival)
+    plus one arming's round trip, then its rollback. Returns the undo,
+    which the bound runs when the attempt ends."""
     real = getattr(db, "execute", None)
     if real is None:
         return lambda: None
+    real_flush = getattr(db, "flush", None)
+    real_commit = getattr(db, "commit", None)
+    real_nested = getattr(db, "begin_nested", None)
+    connection = getattr(db, "connection", None)
     cap_ms = int(_DELETION_WAIT_CAP_S * 1000)
+    armed = []          # the connections this attempt attached its arming to
+    busy = [False]      # the arming's own statement is not armed
 
-    async def execute(statement, *args, **kwargs):
+    def _left():
         left = deadline - _deletion_clock()
         if left <= 0:
             raise _DeletionPastDeadline()
-        left_ms = max(1, int(left * 1000))
+        return left
+
+    def _arm(sync_conn, runs=1):
+        """Sync, in the session's greenlet: arms what the connection sends
+        next, `runs` executions of one statement sharing the time left."""
+        left_ms = max(1, int(_left() * 1000) // runs)
+        busy[0] = True
         try:
-            await real(text(_DELETION_ARM_SQL),
-                       {"lt": f"{min(left_ms, cap_ms)}ms", "st": f"{left_ms}ms"})
-            return await real(statement, *args, **kwargs)
+            sync_conn.execute(text(_DELETION_ARM_SQL),
+                              {"lt": f"{min(left_ms, cap_ms)}ms", "st": f"{left_ms}ms"}).close()
+        except DBAPIError as exc:
+            signal = _deletion_signal_of(exc, deadline)
+            if signal is None:
+                raise
+            raise signal from exc
+        finally:
+            busy[0] = False
+        _left()
+
+    def _before_statement(conn, cursor, statement, parameters, context, executemany):
+        if busy[0] or statement.lstrip().upper().startswith(_DELETION_UNARMED):
+            return
+        style = getattr(getattr(context, "execute_style", None), "name", None)
+        runs = len(parameters) if executemany and style == "EXECUTEMANY" else 1
+        _arm(conn, max(1, runs))
+
+    async def _held():
+        left = _left()
+        if connection is None:
+            return None
+        limit = asyncio.timeout(left)
+        try:
+            async with limit:
+                conn = await connection()
+        except TimeoutError:
+            if limit.expired():
+                raise _DeletionPastDeadline() from None
+            raise
+        sync = getattr(conn, "sync_connection", conn)
+        if not any(c is sync for c in armed):
+            _deletion_listen(sync, _before_statement)
+            armed.append(sync)
+        _left()
+        return conn
+
+    async def _signalled(send):
+        try:
+            return await send()
         except DBAPIError as exc:
             signal = _deletion_signal_of(exc, deadline)
             if signal is None:
                 raise
             raise signal from exc
 
-    db.execute = execute
+    async def execute(statement, *args, **kwargs):
+        async def send():
+            await _held()
+            return await real(statement, *args, **kwargs)
+        return await _signalled(send)
+
+    async def flush(*args, **kwargs):
+        async def send():
+            await _held()
+            return await real_flush(*args, **kwargs)
+        return await _signalled(send)
+
+    async def commit():
+        async def send():
+            conn = await _held()
+            if real_flush is not None:
+                await real_flush()
+            if conn is not None:
+                await conn.run_sync(_arm)
+            return await real_commit()
+        return await _signalled(send)
+
+    class _HeldNested:
+        """db.begin_nested() inside an attempt, as `async with`: the
+        connection held first; the savepoint's flushes at both ends are
+        armed statement by statement like any other."""
+        def __init__(self, args, kwargs):
+            self._args, self._kwargs, self._inner = args, kwargs, None
+
+        async def __aenter__(self):
+            async def send():
+                await _held()
+                self._inner = real_nested(*self._args, **self._kwargs)
+                return await self._inner.__aenter__()
+            return await _signalled(send)
+
+        async def __aexit__(self, et, ev, tb):
+            async def send():
+                return await self._inner.__aexit__(et, ev, tb)
+            return await _signalled(send)
+
+    def begin_nested(*args, **kwargs):
+        return _HeldNested(args, kwargs)
+
+    installed = {"execute": execute}
+    if real_flush is not None:
+        installed["flush"] = flush
+    if real_commit is not None:
+        installed["commit"] = commit
+    if real_nested is not None:
+        installed["begin_nested"] = begin_nested
+    for name, fn in installed.items():
+        setattr(db, name, fn)
 
     def undo():
-        if getattr(db, "__dict__", {}).get("execute") is execute:
-            del db.execute
+        mine = getattr(db, "__dict__", {})
+        for name, fn in installed.items():
+            if mine.get(name) is fn:
+                delattr(db, name)
+        while armed:
+            _deletion_unlisten(armed.pop(), _before_statement)
     return undo
 
 
@@ -45995,9 +46135,12 @@ def _deletion_bounded(fn):
     the time left covers one attempt; a lock wait that reached
     _DELETION_WAIT_CAP_S is such a held row. No attempt starts, no
     statement of one starts, and none commits, after the deadline: every
-    statement of an attempt re-arms statement_timeout to the time left
-    first (_deletion_arm_every_statement), so no statement outlasts the
-    deadline. Used up: 503 account_cleanup_contended with nothing written;
+    statement the attempt's connection sends -- each statement of a flush
+    included -- and its COMMIT is armed first, on that connection, with
+    statement_timeout the time left, and the deadline is checked after the
+    checkout and after each arming (_deletion_arm_every_statement), so none
+    starts after it and none outlasts it by more than its own arming's
+    round trip. Used up: 503 account_cleanup_contended with nothing written;
     the client's line reads "Deletion failed", which is true, and a second
     click starts afresh. FastAPI reads the wrapped function's signature."""
     params = _inspect.signature(fn)
@@ -46029,8 +46172,9 @@ def _deletion_bounded(fn):
                     await db.rollback()
                 except Exception:
                     pass
-                # A timeout the session raised outside db.execute (a flush):
-                # read as the statement arming reads one.
+                # A timeout that reached here unconverted (the four held paths
+                # convert theirs; this reads any other): read as the arming
+                # reads one.
                 signal = _deletion_signal_of(exc, deadline)
                 if signal is None:
                     print(f"[PRIVACY] deletion attempt {attempt} ended by {code}; "
