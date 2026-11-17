@@ -44670,9 +44670,13 @@ async def admin_set_item_artist(
                               f"{sku}:{artist_steam_id}", sig):
         raise HTTPException(status_code=403, detail="Invalid signature")
     # The item's row is read under its lock, so the comparison below reads
-    # the artist that stands until this transaction ends.
+    # the artist that stands until this transaction ends. The lock is FOR NO
+    # KEY UPDATE, the weakest that still conflicts with this route's own write
+    # (artist_steam_id, a column no key uses): a row that references the item
+    # takes FOR KEY SHARE on it, which this lock does not block.
     item = (await db.execute(
-        select(ShopItem).where(ShopItem.sku == sku).with_for_update())).scalar_one_or_none()
+        select(ShopItem).where(ShopItem.sku == sku).with_for_update(key_share=True)
+    )).scalar_one_or_none()
     if item is None:
         raise HTTPException(status_code=404, detail="Item not found")
     if artist_steam_id and not await _is_artist(db, artist_steam_id):

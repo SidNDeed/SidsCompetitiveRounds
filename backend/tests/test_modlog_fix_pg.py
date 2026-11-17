@@ -1218,3 +1218,57 @@ def test_k1_mutant_with_the_unconditional_write_restored_is_red(case, admin_open
     with pytest.raises(AssertionError) as e:
         _k1_check(case, site, fn)
     print("\nMUTANT-RED K1 %s: %s" % (site, str(e.value).splitlines()[0][:160]))
+
+
+# -- K3: the item artist route's row lock ----------------------------------------
+#
+# The route reads the shop item under the weakest lock that still conflicts
+# with its own later write, which changes artist_steam_id alone (a column no
+# key uses): FOR NO KEY UPDATE. An insert or key change that references the
+# item takes FOR KEY SHARE on its row; FOR NO KEY UPDATE does not block it,
+# FOR UPDATE does. The test calls the route through its own handler (the K1
+# ASGI app with the get_db override) and reads every statement the route
+# sends to the test's engine, by a cursor-execute event, not a copy.
+
+_K3_FOR_UPDATE_ALONE = re.compile(r"(?<!NO KEY )\bFOR\s+UPDATE\b", re.I)
+
+
+def _k3_check(case, handler):
+    from sqlalchemy import event
+    _, method, path, seed, req, _, changed_answer, _ = K1_SITES["item_artist"]
+
+    async def body(sm):
+        ctx = await _commit(sm, seed)
+        sent = []
+
+        def collect(conn, cursor, statement, parameters, context, executemany):
+            sent.append(statement)
+        engine = sm.kw["bind"].sync_engine
+        event.listen(engine, "before_cursor_execute", collect)
+        try:
+            r, commits = await _k1_call(sm, method, path, handler, **req(ctx))
+        finally:
+            event.remove(engine, "before_cursor_execute", collect)
+        return ctx, r, commits, sent
+    ctx, r, commits, sent = _with_sm(case, body)
+    # the control: the call reached the route's write
+    assert r.status_code == 200 and changed_answer(ctx, r.json()), (r.status_code, r.text[:200])
+    assert commits == 1, commits
+    flat = [" ".join(s.split()) for s in sent]
+    reads = [s for s in flat if re.match(r"SELECT\b", s, re.I)
+             and re.search(r"\bFROM\s+shop_items\b", s, re.I)]
+    assert len(reads) == 1, ("the route's SELECTs of shop_items", reads)
+    assert re.search(r"\bFOR\s+NO\s+KEY\s+UPDATE$", reads[0], re.I), reads[0]
+    alone = [s for s in flat if _K3_FOR_UPDATE_ALONE.search(s)]
+    assert alone == [], ("a statement holds FOR UPDATE alone", alone)
+
+
+def test_k3_the_item_artist_route_reads_its_item_for_no_key_update(case, admin_open):
+    _k3_check(case, main.admin_set_item_artist)
+
+
+def test_k3_mutant_without_key_share_is_red(case, admin_open):
+    fn = _mutant_of("admin_set_item_artist", ("with_for_update(key_share=True)", "with_for_update()"))
+    with pytest.raises(AssertionError) as e:
+        _k3_check(case, fn)
+    print("\nMUTANT-RED K3 item_artist: %s" % str(e.value).splitlines()[0][:160])
