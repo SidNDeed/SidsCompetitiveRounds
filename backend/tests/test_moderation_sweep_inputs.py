@@ -32,6 +32,7 @@ MATCH = UUID("5f1c2b9e-8d3a-4c71-9e0b-2a6d4f8c1e37")
 P1, P2 = UUID("0b6e6f55-3a53-4f0e-8f55-7d1f6c3a9b21"), UUID("7c2d9a41-51b8-4e3c-a0d4-93e6f1b27c58")
 FLAG = UUID("3e9b7c1a-6d24-4f8b-9a15-c7e0d2b4f613")
 QID = UUID("a47c3e2b-19d5-4b6a-8e70-5f2c9d1b3e84")
+EXCLUSION_ID = UUID("c1d84e2f-7a36-4b59-9e02-6f3b8a1d5c47")
 # strings that are not UUIDs: empty, words, one hex digit short or over, a UUID's text followed by a NUL character,
 # a UUID's text with a lone surrogate in its last place, and the strings no text bind can carry
 NOT_UUIDS = ("", "not-a-uuid", "1234", str(FLAG)[:-1], str(FLAG) + "0", str(FLAG) + "\x00", str(FLAG)[:-1] + "\ud800",
@@ -54,6 +55,11 @@ class _Res:
     def first(self):
         return self._rows[0] if self._rows else None
 
+    def scalar(self):
+        """The first column of the first row, or None (the exclusion's insert reads its RETURNING id so)."""
+        row = self.first()
+        return None if row is None else row[0]
+
 
 class _Nested:
     async def __aenter__(self):
@@ -65,8 +71,8 @@ class _Nested:
 
 class _Db:
     """Logs every statement as normalised SQL with a copy of its binds. Answers the record exclusion's reads (the
-    match, P1 and P2 in its seats; the player P1) and the quarantine's row read (`row`); every other statement
-    reports `rowcount` rows."""
+    match, P1 and P2 in its seats; the player P1), its insert (the stored row's id EXCLUSION_ID, none when
+    `rowcount` is 0) and the quarantine's row read (`row`); every other statement reports `rowcount` rows."""
 
     def __init__(self, row=None, rowcount=1):
         self.log, self.committed, self.row, self.rowcount = [], 0, row, rowcount
@@ -80,6 +86,9 @@ class _Db:
             return _Res([(P1,)])
         if sql.startswith("SELECT player_ids, created_at, status, mode FROM match_report_quarantine"):
             return _Res([self.row] if self.row else [])
+        if sql.startswith("INSERT INTO record_exclusions") and sql.endswith("RETURNING id"):
+            # the exclusion's insert returns the id of the row it stored, none when one stood (MODLOG-1 K1)
+            return _Res([(EXCLUSION_ID,)] if self.rowcount else [])
         if sql.startswith("UPDATE match_report_quarantine") and "RETURNING player_ids, mode" in sql:
             # the discard's UPDATE returns the row it changed (MODLOG-1)
             return _Res([{"player_ids": [], "mode": "1v1"}] if self.rowcount else [])
