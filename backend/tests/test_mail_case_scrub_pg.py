@@ -27,6 +27,21 @@ every row it writes with SKIP LOCKED first and leaving what it cannot hold
 to a later pass. Two deletions never wait on each other's rows: each takes
 the pool snapshot key before its first row lock (MDPL R3).
 
+Since MDPL r1 the deletion runs under main._deletion_bounded (the comments
+from main._DELETION_BUDGET_S to main._DELETION_HELD_PAUSES_S): a lock wait
+of an attempt that reaches main._DELETION_WAIT_CAP_S (0.5 s, below
+deadlock_timeout) is a held row, which ends the attempt, rolled back with
+nothing written; a new attempt runs from fresh reads after a pause while
+the time left covers one, and otherwise the answer is 503
+account_cleanup_contended. The bound prints one line for each attempt that
+did not commit (_attempt_lines). So a statement a mutant rewrites runs once
+in each attempt that reaches it, and a circle the deletion closes ends with
+the deletion yielding at its cap -- or, when its wait began within the 0.5 s
+before another side's own look for a circle, with that side ended by 40P01
+(_circle_ended_once). Where the base's control saw 40P01, its control here
+reads which of the two endings came, and the green assertion that fails
+follows from it.
+
 A mutant here is a statement rewrite (inv_pg Env.rewriting: what reaches
 PostgreSQL) or a stand-in for one function or one transaction boundary of
 main.py. Each control runs its green test's own schedule under the mutant
@@ -34,31 +49,44 @@ and names the assertion of that test which the mutant breaks (lesson 712):
 
   green test (the schedule)                      mutant -> what fails
   a send over a threshold finishes while the     the resolved_by scrub put back before the flush (at
-    deletion is parked at the base's scrub point   the base's place) -> 40P01: "outcomes"
-  a send, a relay-off and the purge all finish   (control: this test at 8cd7fa8c, the lane's first
-                                                   route, must end in 40P01; run on a proof tree. With
-                                                   the sweep of mscl-r2 that send order shows as Q
-                                                   kept instead)
+    deletion is parked at the base's scrub point   the base's place) -> the send waits on the parked
+                                                   deletion: "the send waited", and the circle (40P01
+                                                   at the base) ends as above ("outcomes" when the
+                                                   send is the side ended)
+  a send, a relay-off and the purge all finish   relay-off's row pass reading its rows unlocked, as
+                                                   before MDPL R4 -> the first pass takes the relay
+                                                   row and removes O: "the first pass" (also: this
+                                                   test at 8cd7fa8c, the lane's first route, must end
+                                                   in 40P01; run on a proof tree. With the sweep of
+                                                   mscl-r2 that send order shows as Q kept instead)
   a held case row is skipped, kept and finished  SKIP LOCKED taken out -> "not inside the bound";
     by one sweep pass (the battery case)           the sweep taken out -> "completeness"
   the last statement does not wait on the        the base's separate early reporter scrub -> the
     subject's players row held FOR UPDATE          row's second write re-checks its foreign keys and
-                                                   trips lock_timeout: "outcome"
+                                                   trips lock_timeout at the cap in every attempt,
+                                                   until 503 account_cleanup_contended: "answer"
   one sweep pass over a row both halves match    both halves in one transaction -> the same:
     does not wait on that row either               "outcome"
   the sweep skips a held row and finds it again  SKIP LOCKED taken out of both halves -> lock_timeout
     on the next pass                               at pass 1: "pass 1"
-  a ban in an open lobby both share and the      the base's early reporter scrub -> 40P01 (the base
-    deletion both finish                           circle; also run at 95b795ab): "outcomes"
+  a ban in an open lobby both share and the      the base's early reporter scrub -> the base circle
+    deletion both finish                           (40P01 at the base; also run at 95b795ab), ended as
+                                                   above: "the deletion met a held row" ("outcomes"
+                                                   when the ban is the side ended)
   the purge holding the case row (its lock of    SKIP LOCKED taken out of the last statement -> the
     the rows its DELETE writes) does not stop      deletion waits for the purge: "inside the bound"
     the deletion; the deletion skips the case row
   the purge runs to its end while the deletion   the base's early reporter scrub AND the base's
-    is parked at the base's scrub point            purge -> the purge waits on the deletion; 40P01
-                                                   when it had taken the relay row first: "outcomes"
-                                                   (each taken back alone: nobody waits)
-  the circle of three: the deletion, a ban in a  the base's purge, over X before Y -> 40P01:
-    lobby both share, and the purge all finish     "outcomes"
+    is parked at the base's scrub point            purge -> the purge waits on the deletion: "the
+                                                   purge waited"; when it had taken the relay row
+                                                   first, the circle (40P01 at the base) ends as
+                                                   above ("outcomes" when the purge is the side
+                                                   ended) (each taken back alone: nobody waits)
+  the circle of three: the deletion, a ban in a  the base's purge, over X before Y -> the purge
+    lobby both share, and the purge all finish     waits on the ban: "the purge did not finish", and
+                                                   the circle of three (40P01 at the base) ends as
+                                                   above ("outcomes" when the ban or the purge is
+                                                   the side ended)
   the sweep skips a held row on every lock route  per route: its SKIP LOCKED taken out; for (c) its
     and takes it on the next pass ((a) to (f),     table left out of the locks and the count; the
     (c) once per table)                            DELETE naming messages it does not hold; the
@@ -230,6 +258,75 @@ def _name(x):
 
 def _bad(*xs):
     return any(isinstance(x, BaseException) for x in xs)
+
+
+# -- the deletion's bound (MDPL; the module docstring) ----------------------------------------------
+
+_ATTEMPT_LINE = re.compile(r"^\[PRIVACY\] deletion attempt (\d+) (.+)$", re.M)
+
+
+def _attempt_lines(out):
+    """The bound's lines in captured stdout `out`: [(attempt, the rest)],
+    checked to be numbered 1, 2, ... in order (one deletion per test)."""
+    lines = [(int(n), rest) for n, rest in _ATTEMPT_LINE.findall(out)]
+    assert [n for n, _ in lines] == list(range(1, len(lines) + 1)), ("attempt lines", lines)
+    return lines
+
+
+def _held_line(rest):
+    """True for the line of an attempt that one lock wait reaching the cap ended."""
+    return rest.startswith("met a held %s; " % main._DELETION_WAIT_WHAT)
+
+
+def _held_through(o):
+    """The deletion met a row held through its attempts (`o`: "a", "lines"
+    and "hits", the mutant's rewritten statement, which every attempt runs):
+    every attempt ended at a held wait, but for a last one the deadline cut;
+    the statement ran once in each attempt; and the deletion committed after
+    the holder let go, or answered 503 once the time left covered no
+    further attempt."""
+    a, lines = o["a"], o["lines"]
+    assert not _bad(a), ("the deletion", _name(a))
+    if a.status == 200:
+        assert a["status"] == "anonymized", a.body
+        assert lines and all(_held_line(r) and "next attempt after" in r for _, r in lines), (
+            "held lines", lines)
+        assert len(o["hits"]) == len(lines) + 1, ("one hit per attempt", len(o["hits"]), lines)
+        return
+    assert (a.status, a.body) == (503, main._DELETION_REFUSAL), ("the deletion", a.status, a.body)
+    if lines and lines[-1][1] == "reached its deadline":
+        held, hits = lines[:-1], (len(lines) - 1, len(lines))
+    else:
+        assert lines and lines[-1][1].endswith("no time for another attempt"), ("the last line", lines)
+        held, hits = lines, (len(lines),)
+    assert held and all(_held_line(r) for _, r in held), ("held lines", lines)
+    assert len(o["hits"]) in hits, ("one hit per attempt", len(o["hits"]), lines)
+
+
+def _circle_ended_once(o, others, *, rewritten=True):
+    """A circle the deletion closed ended once (`others`: the answers of the
+    circle's other sides; `o`: "a", "lines" and, when `rewritten`, "hits",
+    the mutant's rewritten statement, which every attempt runs). Either the
+    deletion's first attempt yielded at its wait cap -- every line a held
+    wait, the first included, and nobody ended by 40P01 -- and a later
+    attempt committed; or one other side was ended by 40P01, its own look
+    for a circle having come within the 0.5 s after the deletion's wait
+    began, and the deletion's first attempt committed: no line. Returns
+    which ending came."""
+    a, lines = o["a"], o["lines"]
+    assert not _bad(a) and a.status == 200 and a["status"] == "anonymized", ("the deletion", _name(a), lines)
+    if lines:
+        assert all(_held_line(r) and "next attempt after" in r for _, r in lines), ("held lines", lines)
+        assert not _bad(*others), ("the other sides", [_name(x) for x in others])
+        ending = "the deletion yielded"
+    else:
+        dead = [i for i, x in enumerate(others) if _deadlock(x)]
+        assert len(dead) == 1, ("one side ended by 40P01", [_name(x) for x in others])
+        assert not _bad(*[x for i, x in enumerate(others) if i != dead[0]]), [_name(x) for x in others]
+        ending = "side %d ended by 40P01" % dead[0]
+    if rewritten:
+        assert len(o["hits"]) == len(lines) + 1, ("one hit per attempt", len(o["hits"]), lines)
+    return ending
 
 
 # -- schedules ----------------------------------------------------------------------------------
@@ -563,19 +660,23 @@ def test_a_send_over_a_threshold_finishes_while_the_deletion_is_parked_at_the_ba
     case(monkeypatch, body, prefix="mcs")
 
 
-def test_control_the_scrub_put_back_before_the_flush_closes_the_send_cycle(monkeypatch):
+def test_control_the_scrub_put_back_before_the_flush_closes_the_send_cycle(monkeypatch, capsys):
     """The mutant: the resolved_by scrub runs where the base ran it, before
     the flush. The send waits at its case upsert on the parked deletion;
     released, the deletion's rewrite of M's row waits for the send's key
-    share: one of the two ends with 40P01, and the green test's first
-    assertion ("outcomes") is the one that fails."""
+    share: the circle. At the base one of the two ended with 40P01; under
+    the bound it ends with the deletion yielding at its wait cap, or with
+    the send ended by 40P01 (_circle_ended_once). The green test's
+    assertion that fails: "the send waited on the parked deletion", or
+    "outcomes" when the send is the side ended."""
     async def body(env):
         _arm(env)
         o = await _send_vs_deletion(env, park="base", mutant="scrub-before-flush")
-        assert len(o["hits"]) == 1, o["hits"]
+        o["lines"] = _attempt_lines(capsys.readouterr().out)
         assert o["state"] == "waits" and "INSERT INTO moderation_cases" in (o["where"] or ""), o["where"]
-        assert [_deadlock(o["a"]), _deadlock(o["b"])].count(True) == 1, (_name(o["a"]), _name(o["b"]))
-        with pytest.raises(AssertionError, match="outcomes"):
+        ending = _circle_ended_once(o, [o["b"]])
+        with pytest.raises(AssertionError, match="the send waited on the parked deletion"
+                           if ending == "the deletion yielded" else "outcomes"):
             _check_send_finished(o)
     case(monkeypatch, body, prefix="mcs")
 
@@ -624,32 +725,26 @@ def test_control_a_case_lock_before_the_message_row_leaves_the_rows_to_the_sweep
 
 # -- 2. a send, a relay-off and the purge (mscl-r1's circle) --------------------------------------
 
-def test_a_send_a_relay_off_and_the_purge_all_finish(monkeypatch):
-    """Three sessions. S's spam case rows reference an old message Q; M has a
-    queued relay DM of another old message O; the purge takes both messages.
-    The send parks before its fan-out, relay-off (M's row FOR UPDATE) before
-    its cancel; the purge runs; relay-off is released, then the send.
+# relay-off's row pass (mail_discord.RELAY_OFF_LOCK_SQL) as it reaches PostgreSQL, rewritten to read its
+# rows without locking them, as before MDPL R4
+RELAY_OFF_UNLOCKED = (" ORDER BY id FOR NO KEY UPDATE", " ORDER BY id", "SELECT id FROM pending_dms WHERE steam_id = ")
 
-    At 8cd7fa8c the send took its case row before its fan-out: the purge took
-    the relay row (O) and waited for the case row (Q) on the send, relay-off
-    waited for the relay row on the purge, and the send's fan-out waited for
-    M's row on relay-off: 40P01 (this test, run on that tree, is the
-    control). Now the send takes its case row only after its fan-out: the
-    purge runs to its end while the others are parked. Since mscl-r2 the
-    purge waits for no row lock in any order, so the old send order would
-    show here as Q kept for a later pass (the count below), not as 40P01."""
-    async def body(env):
-        _arm(env)
-        s, m = await env.players(2)
-        o_mid = await _old_mail(env, s, [m], "An old message.")
-        q_mid = await _old_mail(env, s, [m], "Another old message.")
-        relay = await _relay_row(env, m, s, o_mid)
-        env.mp.setattr(main, "MAIL_SPAM_SAME_BODY", 1)
-        await _spam_seed_for(env, s, q_mid)
-        at = _parks(env)
-        send_spot, off_spot = at(FANOUT, "before"), at(CANCEL, "before")
-        send = off = purge = None
-        st = {"purge": None, "off": None, "held": None, "w": None}
+
+async def _send_off_purge(env, *, mutant=None):
+    """mscl-r1's schedule of three sessions (the next test). `mutant`
+    "relay-off-unlocked": RELAY_OFF_UNLOCKED."""
+    s, m = await env.players(2)
+    o_mid = await _old_mail(env, s, [m], "An old message.")
+    q_mid = await _old_mail(env, s, [m], "Another old message.")
+    relay = await _relay_row(env, m, s, o_mid)
+    env.mp.setattr(main, "MAIL_SPAM_SAME_BODY", 1)
+    await _spam_seed_for(env, s, q_mid)
+    at = _parks(env)
+    send_spot, off_spot = at(FANOUT, "before"), at(CANCEL, "before")
+    mut = env.rewriting(*RELAY_OFF_UNLOCKED) if mutant == "relay-off-unlocked" else contextlib.nullcontext([])
+    send = off = purge = None
+    st = {"purge": None, "off": None, "held": None, "w": None, "first": None}
+    with mut as hits:
         try:
             send = asyncio.ensure_future(env.mail(s, [m], body=BODY))
             await _parked(send_spot, send)
@@ -661,21 +756,82 @@ def test_a_send_a_relay_off_and_the_purge_all_finish(monkeypatch):
             if w:
                 st["w"] = w["query"][:120]
                 st["held"] = (await _xmax(env, "pending_dms", relay)) == w["xid"]
+            else:
+                # what the first pass left while relay-off and the send stood parked: O, Q, R's message
+                mail_id = await env.conn.fetchval("SELECT mail_id FROM pending_dms WHERE id = $1", relay)
+                st["first"] = (await _count(env, "mail_messages", "id", o_mid),
+                               await _count(env, "mail_messages", "id", q_mid),
+                               None if mail_id is None else str(mail_id))
             off_spot.release.set()
             st["off"], _ = await _settle(env, off, head=CANCEL)
         finally:
             outs = await _finish([send, off, purge], [send_spot, off_spot])
-        print("MCS-THREE state %s" % st)
-        assert not _bad(*outs), ("outcomes", [_name(x) for x in outs], st)
-        assert st["purge"] == "done", ("the purge waited", st)
-        assert st["off"] == "done", ("relay-off waited", st)
-        sent, offd, _ = outs
-        assert sent.status == 200 and sent["accepted"] is True, sent
-        assert offd.status == 200 and offd["withdrawn"] == 1, offd
-        r = await env.conn.fetchrow("SELECT mail_id, cancelled_at FROM pending_dms WHERE id = $1", relay)
-        assert r["mail_id"] is None and r["cancelled_at"] is not None, dict(r)
-        assert await env.conn.fetchval(
-            "SELECT COUNT(*) FROM mail_messages WHERE id = ANY($1::uuid[])", [o_mid, q_mid]) == 0
+    print("MCS-THREE state %s" % st)
+    return {"st": st, "outs": outs, "hits": list(hits), "relay": relay, "o": str(o_mid), "q": str(q_mid)}
+
+
+async def _check_send_off_purge(env, o):
+    st, outs, relay = o["st"], o["outs"], o["relay"]
+    assert not _bad(*outs), ("outcomes", [_name(x) for x in outs], st)
+    assert st["purge"] == "done", ("the purge waited", st)
+    assert st["off"] == "done", ("relay-off waited", st)
+    sent, offd, first = outs
+    assert sent.status == 200 and sent["accepted"] is True, sent
+    assert offd.status == 200 and offd["withdrawn"] == 1, offd
+    # relay-off, parked before its cancel, held R from its row pass (MDPL R4): the first pass skipped R
+    # and kept O for a later pass; it removed Q, whose case rows the parked send did not hold yet
+    assert first[1][1] == 1 and st["first"] == (1, 0, o["o"]), ("the first pass", first, st["first"])
+    r = await env.conn.fetchrow("SELECT mail_id, cancelled_at FROM pending_dms WHERE id = $1", relay)
+    assert str(r["mail_id"]) == o["o"] and r["cancelled_at"] is not None, dict(r)
+    # the next pass removes O and clears R's message
+    second = await env.retention()
+    assert second[1][1] == 1, ("the second pass", second)
+    r = await env.conn.fetchrow("SELECT mail_id, cancelled_at FROM pending_dms WHERE id = $1", relay)
+    assert r["mail_id"] is None and r["cancelled_at"] is not None, dict(r)
+    assert await env.conn.fetchval(
+        "SELECT COUNT(*) FROM mail_messages WHERE id = ANY($1::uuid[])", [o["o"], o["q"]]) == 0
+
+
+def test_a_send_a_relay_off_and_the_purge_all_finish(monkeypatch):
+    """Three sessions. S's spam case rows reference an old message Q; M has a
+    queued relay DM R of another old message O; the purge takes both
+    messages. The send parks before its fan-out, relay-off (M's row FOR
+    UPDATE) before its cancel; the purge runs; relay-off is released, then
+    the send.
+
+    At 8cd7fa8c the send took its case row before its fan-out: the purge took
+    the relay row (O) and waited for the case row (Q) on the send, relay-off
+    waited for the relay row on the purge, and the send's fan-out waited for
+    M's row on relay-off: 40P01 (this test, run on that tree, is the
+    control). Now the send takes its case row only after its fan-out: the
+    purge runs to its end while the others are parked. Since mscl-r2 the
+    purge waits for no row lock in any order, so the old send order would
+    show here as Q kept for a later pass (the count below), not as 40P01.
+
+    Since MDPL R4 relay-off takes the relay rows it cancels in one id-ordered
+    pass before its cancel (mail_discord.RELAY_OFF_LOCK_SQL), so it holds R
+    where it parks: the first pass skips R and keeps O for a later pass, and
+    the next pass, after relay-off's commit, removes O and clears R's
+    message. The control is the next test."""
+    async def body(env):
+        _arm(env)
+        await _check_send_off_purge(env, await _send_off_purge(env))
+    case(monkeypatch, body, prefix="mcs")
+
+
+def test_control_relay_off_without_its_row_lock_leaves_the_relay_row_to_the_first_pass(monkeypatch):
+    """The mutant: relay-off's row pass reads its rows without locking them
+    (RELAY_OFF_UNLOCKED), as before MDPL R4. Parked before its cancel,
+    relay-off then holds no relay row: the first pass takes R, removes O
+    and clears R's message, and the green test's "the first pass" assertion
+    is the one that fails."""
+    async def body(env):
+        _arm(env)
+        o = await _send_off_purge(env, mutant="relay-off-unlocked")
+        assert len(o["hits"]) == 1, o["hits"]
+        assert o["st"]["first"] == (0, 0, None), o["st"]
+        with pytest.raises(AssertionError, match="the first pass"):
+            await _check_send_off_purge(env, o)
     case(monkeypatch, body, prefix="mcs")
 
 
@@ -730,7 +886,10 @@ async def _skip(env, *, mutant=None):
 def _check_skip(o):
     a, d = o["a"], o["d"]
     assert not _bad(a), ("outcome", _name(a))
-    assert o["in_bound"], ("the deletion did not commit inside the bound", SKIP_BOUND, o["took"])
+    # committed inside the bound: done inside it AND answered 200 (under the deletion's bound a held
+    # row ends the deletion with 503 near the window's edge, done but not committed)
+    assert o["in_bound"] and a.status == 200, (
+        "the deletion did not commit inside the bound", SKIP_BOUND, o["took"], a.status)
     assert a.status == 200 and a["status"] == "anonymized", a
     tomb = a["placeholder"]
     after = o["after"]
@@ -758,14 +917,19 @@ def test_a_held_case_row_is_skipped_kept_and_finished_by_one_sweep_pass(monkeypa
     case(monkeypatch, body, prefix="mcs")
 
 
-def test_control_without_skip_locked_the_deletion_waits_past_the_bound(monkeypatch):
+def test_control_without_skip_locked_the_deletion_waits_past_the_bound(monkeypatch, capsys):
     """The mutant takes SKIP LOCKED out of the last statement: it waits for
     the held row, and the deletion does not commit inside SKIP_BOUND ("did
-    not commit inside the bound")."""
+    not commit inside the bound"). Under the bound every attempt meets the
+    held row at its wait cap and runs the last statement once; the deletion
+    answers 503 once the time left no longer covers an attempt (about 10.4 s
+    after its arrival, at the window's edge, done but not committed), or
+    commits after the holder lets go (_held_through)."""
     async def body(env):
         _arm(env)
         o = await _skip(env, mutant="no-skip-locked")
-        assert len(o["hits"]) == 1 and not o["in_bound"], (o["hits"], o["in_bound"])
+        o["lines"] = _attempt_lines(capsys.readouterr().out)
+        _held_through(o)
         with pytest.raises(AssertionError, match="did not commit inside the bound"):
             _check_skip(o)
     case(monkeypatch, body, prefix="mcs")
@@ -809,7 +973,7 @@ async def _subject_held(env, *, mutant=None):
 def _check_subject(o):
     a = o["a"]
     assert not _bad(a), ("outcome", _name(a))
-    assert a.status == 200 and a["status"] == "anonymized", a
+    assert a.status == 200 and a["status"] == "anonymized", ("answer", a.status, a.body)
     assert (o["row"]["reporter_id"], o["row"]["resolved_by"]) == (None, a["placeholder"]), o["row"]
 
 
@@ -823,18 +987,23 @@ def test_the_last_statement_does_not_wait_on_the_subjects_players_row(monkeypatc
     case(monkeypatch, body, prefix="mcs")
 
 
-def test_control_the_early_reporter_scrub_trips_lock_timeout(monkeypatch):
+def test_control_the_early_reporter_scrub_trips_lock_timeout(monkeypatch, capsys):
     """The mutant: the base's separate early reporter scrub writes the row
     first; the last statement is then the row's second write in the
     transaction, which re-checks its foreign keys (ri_triggers.c,
     RI_FKey_fk_upd_check_required) and waits for KEY SHARE on the subject's
-    row: lock_timeout (55P03)."""
+    row: lock_timeout (55P03), at the bound's wait cap. The row is held
+    through every attempt, so each attempt ends there, running the early
+    scrub once, until the time left covers no attempt: 503
+    account_cleanup_contended (_held_through), and the green test's
+    "answer" assertion is the one that fails."""
     async def body(env):
         _arm(env)
         o = await _subject_held(env, mutant="early-reporter-scrub")
-        assert len(o["hits"]) == 1, o["hits"]
-        assert _lock_timeout(o["a"]), _name(o["a"])
-        with pytest.raises(AssertionError, match="outcome"):
+        o["lines"] = _attempt_lines(capsys.readouterr().out)
+        _held_through(o)
+        assert o["a"].status == 503, (o["a"].status, o["a"].body, o["lines"])
+        with pytest.raises(AssertionError, match="'answer'"):
             _check_subject(o)
     case(monkeypatch, body, prefix="mcs")
 
@@ -1076,18 +1245,21 @@ def _check_lobby(o):
     assert not _bad(a, x), ("outcomes", _name(a), _name(x))
     assert a.status == 200 and a["status"] == "anonymized", a
     assert x.status == 200 and x["status"] == "ok" and x["resolution"] == "ban", x
+    # its first attempt committed: no lock wait of the deletion reached the cap (the bound's lines)
+    assert o["lines"] == [], ("the deletion met a held row", o["lines"])
 
 
-def test_a_ban_in_an_open_lobby_both_share_and_the_deletion_both_finish(monkeypatch):
+def test_a_ban_in_an_open_lobby_both_share_and_the_deletion_both_finish(monkeypatch, capsys):
     """Base circle 1, closed by a staged schedule of two sessions. The ban
     holds C (FOR NO KEY UPDATE OF c) and waits for the lobby row the parked
     deletion locked. At the base the deletion's early reporter scrub then
     waited for C: 40P01. Now the deletion's only case write is its last
-    statement, which skips C: it commits, and the ban follows. C keeps D as
-    reporter until one sweep pass."""
+    statement, which skips C: it commits at its first attempt, and the ban
+    follows. C keeps D as reporter until one sweep pass."""
     async def body(env):
         _arm(env)
         o = await _lobby_ban(env)
+        o["lines"] = _attempt_lines(capsys.readouterr().out)
         assert o["state"] == "waits" and (o["where"] or "").startswith(LOBBY_LOCK_HEAD), o["where"]
         _check_lobby(o)
         row = await _row(env, o["cid"])
@@ -1097,17 +1269,22 @@ def test_a_ban_in_an_open_lobby_both_share_and_the_deletion_both_finish(monkeypa
     case(monkeypatch, body, prefix="mcs")
 
 
-def test_control_the_early_reporter_scrub_closes_the_lobby_circle(monkeypatch):
+def test_control_the_early_reporter_scrub_closes_the_lobby_circle(monkeypatch, capsys):
     """The mutant puts the base's early reporter scrub back: the deletion,
     released, waits for C on the ban while the ban waits for the lobby row
-    on the deletion: one of the two ends with 40P01 ("outcomes")."""
+    on the deletion: the circle. At the base one of the two ended with
+    40P01; under the bound it ends with the deletion yielding at its wait
+    cap, or with the ban ended by 40P01 (_circle_ended_once). The green
+    test's assertion that fails: "the deletion met a held row", or
+    "outcomes" when the ban is the side ended."""
     async def body(env):
         _arm(env)
         o = await _lobby_ban(env, mutant="early-reporter-scrub")
-        assert len(o["hits"]) == 1, o["hits"]
+        o["lines"] = _attempt_lines(capsys.readouterr().out)
         assert o["state"] == "waits" and (o["where"] or "").startswith(LOBBY_LOCK_HEAD), o["where"]
-        assert [_deadlock(o["a"]), _deadlock(o["ban"])].count(True) == 1, (_name(o["a"]), _name(o["ban"]))
-        with pytest.raises(AssertionError, match="outcomes"):
+        ending = _circle_ended_once(o, [o["ban"]])
+        with pytest.raises(AssertionError, match="the deletion met a held row"
+                           if ending == "the deletion yielded" else "outcomes"):
             _check_lobby(o)
     case(monkeypatch, body, prefix="mcs")
 
@@ -1169,7 +1346,9 @@ def _check_purge_holds(o):
     a, p = o["a"], o["p"]
     assert not _bad(a, p), ("outcomes", _name(a), _name(p))
     assert o["held_case"], ("the purge did not hold C", o)
-    assert o["in_bound"], ("the deletion did not commit inside the bound", SKIP_BOUND, o["took"])
+    # committed inside the bound: done inside it AND answered 200 (as _check_skip)
+    assert o["in_bound"] and a.status == 200, (
+        "the deletion did not commit inside the bound", SKIP_BOUND, o["took"], a.status)
     assert a.status == 200 and a["status"] == "anonymized", a
     # C kept both its links through the deletion: the last statement skipped it ...
     assert (o["after"]["reporter_id"], o["after"]["message_id"]) == (o["d"].id, o["x"]), o["after"]
@@ -1194,17 +1373,20 @@ def test_the_purge_holding_the_case_row_does_not_stop_the_deletion(monkeypatch):
     case(monkeypatch, body, prefix="mcs")
 
 
-def test_control_without_skip_locked_the_deletion_waits_for_the_purges_case_row(monkeypatch):
+def test_control_without_skip_locked_the_deletion_waits_for_the_purges_case_row(monkeypatch, capsys):
     """The mutant takes SKIP LOCKED out of the last statement: the deletion
-    waits for C on the parked purge and does not commit inside the bound
-    ("inside the bound"). Released, the purge does not wait for R, which the
-    deletion still holds: it keeps X for a later pass, and both finish. At
-    the base this schedule ended in 40P01."""
+    waits for C on the parked purge at every attempt (_held_through) and
+    does not commit inside the bound ("inside the bound"). Released, the
+    purge does not wait for R: it keeps X for a later pass when an attempt
+    of the deletion holds R then, and removes X when the deletion stands
+    between two attempts, holding nothing; both finish. At the base this
+    schedule ended in 40P01."""
     async def body(env):
         _arm(env)
         o = await _purge_holds_case(env, mutant="no-skip-locked")
-        assert len(o["hits"]) == 1 and o["in_bound"] is False, (o["hits"], o["in_bound"])
-        assert not _bad(o["a"], o["p"]) and o["p"][1] == 0 and o["kept"] == 1, (
+        o["lines"] = _attempt_lines(capsys.readouterr().out)
+        _held_through(o)
+        assert not _bad(o["a"], o["p"]) and (o["p"][1], o["kept"]) in ((0, 1), (1, 0)), (
             _name(o["a"]), _name(o["p"]), o["kept"])
         with pytest.raises(AssertionError, match="inside the bound"):
             _check_purge_holds(o)
@@ -1246,6 +1428,11 @@ def _check_purge(o):
     assert a.status == 200 and a["status"] == "anonymized", a
 
 
+def _check_purge_done(o):
+    _check_purge(o)
+    assert o["state"] == "done", ("the purge waited on the deletion parked at the base's scrub point", o)
+
+
 def test_the_purge_runs_to_its_end_while_the_deletion_is_parked_at_the_base_scrub_point(monkeypatch):
     """Base circle 2. R and C on two messages O and Q. At the base the
     deletion held C here (its early reporter scrub had run); a purge that
@@ -1258,8 +1445,7 @@ def test_the_purge_runs_to_its_end_while_the_deletion_is_parked_at_the_base_scru
     async def body(env):
         _arm(env)
         o = await _purge_vs_deletion(env)
-        _check_purge(o)
-        assert o["state"] == "done", ("the purge waited on the deletion parked at the base's scrub point", o)
+        _check_purge_done(o)
         row = await _row(env, o["cid"])
         assert (row["reporter_id"], row["message_id"]) == (None, None), row
         assert await _count(env, "pending_dms", "id", o["relay"]) == 0
@@ -1276,8 +1462,7 @@ def test_either_change_alone_closes_base_circle_2(monkeypatch, taken_back):
     async def body(env):
         _arm(env)
         o = await _purge_vs_deletion(env, mutants=(taken_back,))
-        _check_purge(o)
-        assert o["state"] == "done", ("the purge waited on the deletion", o)
+        _check_purge_done(o)
         row = await _row(env, o["cid"])
         if taken_back == "base-purge":
             assert (row["reporter_id"], row["message_id"]) == (None, None), row
@@ -1287,23 +1472,30 @@ def test_either_change_alone_closes_base_circle_2(monkeypatch, taken_back):
     case(monkeypatch, body, prefix="mcs")
 
 
-def test_control_the_early_reporter_scrub_and_the_base_purge_reopen_base_circle_2(monkeypatch):
+def test_control_the_early_reporter_scrub_and_the_base_purge_reopen_base_circle_2(monkeypatch, capsys):
     """Both changes taken back: the parked deletion holds C, and the base's
-    purge waits for it there. Released, the two end in 40P01 exactly when
-    the purge had taken R before it reached C ("outcomes")."""
+    purge waits for it there ("the purge waited"). When the purge had taken
+    R before it reached C, the deletion's relay erase, released, waits for
+    R on the purge: the circle, which at the base ended in 40P01 and under
+    the bound ends with the deletion yielding at its wait cap, or with the
+    purge ended by 40P01 ("outcomes") (_circle_ended_once). Otherwise the
+    deletion waits for nothing and commits at its first attempt."""
     async def body(env):
         _arm(env)
         o = await _purge_vs_deletion(env, mutants=("early-reporter-scrub", "base-purge"))
-        print("MCS-PURGE-BASE held_relay=%s held_case=%s where=%s" % (o["held_relay"], o["held_case"],
-                                                                      (o["where"] or "")[:60]))
-        assert len(o["hits"]) == 1, o["hits"]
+        o["lines"] = _attempt_lines(capsys.readouterr().out)
+        print("MCS-PURGE-BASE held_relay=%s held_case=%s where=%s lines=%s" % (
+            o["held_relay"], o["held_case"], (o["where"] or "")[:60], o["lines"]))
         assert o["state"] == "waits" and (o["where"] or "").startswith(PURGE_HEAD), o
         if o["held_relay"]:
-            assert [_deadlock(o["a"]), _deadlock(o["p"])].count(True) == 1, (_name(o["a"]), _name(o["p"]))
-            with pytest.raises(AssertionError, match="outcomes"):
-                _check_purge(o)
+            ending = _circle_ended_once(o, [o["p"]])
+            want = "the purge waited" if ending == "the deletion yielded" else "outcomes"
         else:
-            assert not _bad(o["a"], o["p"]), (_name(o["a"]), _name(o["p"]))
+            assert not _bad(o["a"], o["p"]) and o["lines"] == [] and len(o["hits"]) == 1, (
+                _name(o["a"]), _name(o["p"]), o["lines"], o["hits"])
+            want = "the purge waited"
+        with pytest.raises(AssertionError, match=want):
+            _check_purge_done(o)
     case(monkeypatch, body, prefix="mcs")
 
 
@@ -1357,17 +1549,21 @@ def _check_three(o):
     assert o["p_state"] == "done", ("the purge did not finish while the deletion was parked", o["p_state"])
     assert a.status == 200 and a["status"] == "anonymized", a
     assert ban.status == 200 and ban["status"] == "ok" and ban["resolution"] == "ban", ban
+    # its first attempt committed: no lock wait of the deletion reached the cap (the bound's lines)
+    assert o["lines"] == [], ("the deletion met a held row", o["lines"])
 
 
-def test_the_deletion_a_ban_in_a_shared_lobby_and_the_purge_all_finish(monkeypatch):
+def test_the_deletion_a_ban_in_a_shared_lobby_and_the_purge_all_finish(monkeypatch, capsys):
     """mscl-r2's circle of three, at the fix: the ban waits for L on the
     parked deletion; the purge, under lock_timeout, skips C (held by the
     ban), holds R, removes X and keeps Y, and commits without waiting;
-    released, the deletion erases R, skips C and commits; the ban follows.
-    One sweep pass finishes C's reporter and the next purge pass removes Y."""
+    released, the deletion erases R, skips C and commits at its first
+    attempt; the ban follows. One sweep pass finishes C's reporter and the
+    next purge pass removes Y."""
     async def body(env):
         _arm(env)
         o = await _three(env)
+        o["lines"] = _attempt_lines(capsys.readouterr().out)
         assert o["ban_state"] == "waits" and (o["ban_where"] or "").startswith(LOBBY_LOCK_HEAD), o
         _check_three(o)
         assert o["p"][1] == 1, o["p"]
@@ -1382,18 +1578,21 @@ def test_the_deletion_a_ban_in_a_shared_lobby_and_the_purge_all_finish(monkeypat
     case(monkeypatch, body, prefix="mcs")
 
 
-def test_control_the_base_purge_closes_the_circle_of_three(monkeypatch):
+def test_control_the_base_purge_closes_the_circle_of_three(monkeypatch, capsys):
     """The stand-in for the base's purge, over X and then Y: it holds R
-    (X's SET NULL) and waits for C on the ban; the deletion, released,
-    waits at its relay erase for R: one of the three ends in 40P01
-    ("outcomes")."""
+    (X's SET NULL) and waits for C on the ban ("the purge did not finish");
+    the deletion, released, waits at its relay erase for R: the circle of
+    three. At the base one of the three ended in 40P01; under the bound it
+    ends with the deletion yielding at its wait cap, or with the ban or the
+    purge ended by 40P01 ("outcomes") (_circle_ended_once)."""
     async def body(env):
         _arm(env)
         o = await _three(env, mutant="base-purge")
+        o["lines"] = _attempt_lines(capsys.readouterr().out)
         assert o["ban_state"] == "waits" and o["p_state"] == "waits" and o["held_relay"], o
-        assert [_deadlock(o["a"]), _deadlock(o["ban"]), _deadlock(o["p"])].count(True) == 1, (
-            _name(o["a"]), _name(o["ban"]), _name(o["p"]))
-        with pytest.raises(AssertionError, match="outcomes"):
+        ending = _circle_ended_once(o, [o["ban"], o["p"]], rewritten=False)
+        with pytest.raises(AssertionError, match="the purge did not finish while the deletion was parked"
+                           if ending == "the deletion yielded" else "outcomes"):
             _check_three(o)
     case(monkeypatch, body, prefix="mcs")
 
@@ -2014,6 +2213,11 @@ def _sources():
 CENSOR_LINE = '    await db.execute(text("DELETE FROM mail_censor_hits WHERE sender_id = :pid"), {"pid": pid})\n'
 INBOX_LINE = '    await db.execute(text("DELETE FROM mail_inbox_rev WHERE recipient_id = :pid"), {"pid": pid})\n'
 SCRUB_LINE = '    await db.execute(text(_DELETE_CASE_SCRUB_SQL), {"pid": pid, "sid": steam_id, "tomb": _tomb})\n'
+# The handler's last deadline check (MDPL R6a), the commit after it making it the one such text
+DEADLINE_CHECK = ("    if _deletion_past(_deadline):\n"
+                  "        await db.rollback()\n"
+                  "        raise HTTPException(status_code=503, detail=_DELETION_REFUSAL)\n"
+                  "    await db.commit()\n")
 ARM_BLOCK = ('        try:\n'
              '            _mail_case_scrub_log(await _mail_case_scrub_pass(async_session))\n'
              '        except Exception as e:\n'
@@ -2068,13 +2272,25 @@ def test_control_the_b1_check_fails_on_an_early_case_write_and_on_a_message_dele
 
 def _last_check(fn_src):
     """Condition 1 over a handler's source: the scrub is awaited once, and
-    nothing is awaited after it but the commit."""
+    nothing is awaited after it but the commit -- and, since MDPL R6a, the
+    rollback of the deadline check that is the scrub's next statement:
+    `if _deletion_past(_deadline):` whose whole body is that rollback and
+    the raise of the 503 refusal, so that no commit starts after the
+    deadline and nothing is written then."""
     fn = ast.parse(fn_src).body[0]
     awaits = sorted((n.lineno, n.col_offset, ast.unparse(n.value)) for n in ast.walk(fn)
                     if isinstance(n, ast.Await))
     at = [i for i, a in enumerate(awaits) if "text(_DELETE_CASE_SCRUB_SQL)" in a[2]]
     assert len(at) == 1, ("scrub awaits", awaits)
-    assert [a[2] for a in awaits[at[0] + 1:]] == ["db.commit()"], ("after the scrub", awaits[at[0]:])
+    assert [a[2] for a in awaits[at[0] + 1:]] == ["db.rollback()", "db.commit()"], (
+        "after the scrub", awaits[at[0]:])
+    top = [i for i, s in enumerate(fn.body) if "text(_DELETE_CASE_SCRUB_SQL)" in ast.unparse(s)]
+    assert len(top) == 1 and top[0] + 1 < len(fn.body), ("the scrub's statement", top)
+    check = fn.body[top[0] + 1]
+    assert (isinstance(check, ast.If) and ast.unparse(check.test) == "_deletion_past(_deadline)"
+            and not check.orelse and [ast.unparse(s) for s in check.body] == [
+                "await db.rollback()", "raise HTTPException(status_code=503, detail=_DELETION_REFUSAL)"]), (
+        "the deadline check", ast.unparse(check))
 
 
 def _loop_check(loop_src):
@@ -2110,12 +2326,24 @@ def test_the_scrub_is_last_and_the_janitor_runs_the_pass_on_every_pass():
 
 def test_control_the_last_and_loop_checks_fail_on_their_mutants():
     """The inbox revision delete moved after the scrub fails _last_check on
-    "after the scrub"; the pass called bare in the loop, without a try of its
-    own, fails _loop_check on "tries"."""
+    "after the scrub"; so does a statement awaited in the deadline check
+    before its rollback; the deadline check without its raise, its rollback
+    falling through to the commit, fails it on "the deadline check"; the
+    pass called bare in the loop, without a try of its own, fails
+    _loop_check on "tries"."""
     handler = inspect.getsource(main.delete_player_data)
+    _last_check(handler)
     moved = _mutate(_mutate(handler, INBOX_LINE, ""), SCRUB_LINE, SCRUB_LINE + INBOX_LINE)
     with pytest.raises(AssertionError, match="'after the scrub'"):
         _last_check(moved)
+    awaited = _mutate(handler, DEADLINE_CHECK, DEADLINE_CHECK.replace(
+        "        await db.rollback()\n", "        await db.execute(text(\"SELECT 1\"))\n        await db.rollback()\n"))
+    with pytest.raises(AssertionError, match="'after the scrub'"):
+        _last_check(awaited)
+    unraised = _mutate(handler, DEADLINE_CHECK, DEADLINE_CHECK.replace(
+        "        raise HTTPException(status_code=503, detail=_DELETION_REFUSAL)\n", ""))
+    with pytest.raises(AssertionError, match="'the deadline check'"):
+        _last_check(unraised)
     loop = inspect.getsource(main.queue_cleanup_loop)
     bare = _mutate(loop, ARM_BLOCK, "        _mail_case_scrub_log(await _mail_case_scrub_pass(async_session))\n")
     with pytest.raises(AssertionError, match="'tries'"):

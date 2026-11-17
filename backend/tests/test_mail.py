@@ -1237,6 +1237,18 @@ class FakeDb:
                     or (rearm is not None
                         and 1 <= int(rearm.group(1)) <= main.FORMATION_LOCK_TIMEOUT_MS)), sql
             return _Res([])
+        # MDPL R4: the relay-off edge takes the rows it cancels in one
+        # id-ordered pass before it writes any of them
+        # (mail_discord.RELAY_OFF_LOCK_SQL, the cancel's own predicate).
+        # Matched as the whole statement, and answered with the rows the
+        # cancel below will mark; both callers discard the answer.
+        import mail_discord as _md
+        if sql == _md.RELAY_OFF_LOCK_SQL:
+            return _Res([row for row in self.pending_dms
+                         if row.get("steam_id") == params["sid"]
+                         and row.get("relay_code") is not None
+                         and row.get("delivered_at") is None
+                         and row.get("cancelled_at") is None])
         # Deleting a mail WITHDRAWS the relay DM that has not gone out
         # yet. Undelivered only -- a DM already sent is out, and its row has
         # to survive because the thread code printed in that DM resolves
@@ -2184,8 +2196,13 @@ def test_turning_the_relay_off_takes_its_row_lock_before_any_write(monkeypatch):
     routes; this pins the order, the mode, and that the ON edge and a
     mail_from-only PUT take no gate.
 
+    MDPL R4: after the gate and before the withdrawal sweep, the OFF edge
+    takes the rows the sweep cancels in one id-ordered pass
+    (RELAY_OFF_LOCK_SQL), in the mode the sweep's UPDATE takes.
+
     MUTATION: move either route's gate below its UPDATE, or weaken FOR
-    UPDATE to FOR NO KEY UPDATE. Must fail."""
+    UPDATE to FOR NO KEY UPDATE, or move either route's row pass below its
+    sweep, or drop it. Must fail."""
     import mail_discord as _md
     for const in (_md.RELAY_OFF_GATE_BY_ID_SQL, _md.RELAY_OFF_GATE_BY_DISCORD_SQL):
         flat = " ".join(const.split())
@@ -2194,6 +2211,12 @@ def test_turning_the_relay_off_takes_its_row_lock_before_any_write(monkeypatch):
     # The lock the gate waits on. Weakening or dropping it undoes the gate
     # without touching it, so it is pinned from here as well.
     assert "FOR KEY SHARE OF p" in main._MAIL_FANOUT_SQL
+    # The row pass: the sweep's predicate, in id order, FOR NO KEY UPDATE.
+    flat_lock = " ".join(_md.RELAY_OFF_LOCK_SQL.split())
+    flat_cancel = " ".join(_md.RELAY_OFF_CANCEL_SQL.split())
+    assert flat_lock.endswith(" ORDER BY id FOR NO KEY UPDATE"), flat_lock
+    assert flat_lock.split(" WHERE ", 1)[1].split(" ORDER BY ")[0] == flat_cancel.split(" WHERE ", 1)[1], (
+        flat_lock, flat_cancel)
 
     def _after_gate(statements, gate):
         at = [i for i, s in enumerate(statements) if s == gate]
@@ -2203,6 +2226,9 @@ def test_turning_the_relay_off_takes_its_row_lock_before_any_write(monkeypatch):
             "a write or a row lock came before the relay-off gate", before)
         after = statements[at[0] + 1:]
         assert _md.RELAY_OFF_CANCEL_SQL in after, after
+        assert after.count(_md.RELAY_OFF_LOCK_SQL) == 1, ("the OFF edge's row pass, once", after)
+        assert after.index(_md.RELAY_OFF_LOCK_SQL) < after.index(_md.RELAY_OFF_CANCEL_SQL), (
+            "the OFF edge's row pass came after its sweep", after)
         return after
 
     # the in-game settings PUT, with a mail_from write in the same request
