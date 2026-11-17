@@ -15854,12 +15854,16 @@ async def admin_record_exclude(payload: dict, db: AsyncSession = Depends(get_db)
         # mis-aimed click, not a valid no-op — refuse it loudly.
         if pid not in (m["player1_id"], m["player2_id"]):
             raise HTTPException(400, "player not in that match")
-    await db.execute(text(
+    stored = (await db.execute(text(
         "INSERT INTO record_exclusions (board, match_id, player_id, reason, created_by)"
         " VALUES (:b, :m, :p, :r, :a)"
-        " ON CONFLICT (board, match_id, player_id) DO NOTHING"
+        " ON CONFLICT (board, match_id, player_id) DO NOTHING RETURNING id"
     ), {"b": board, "m": str(mid), "p": str(pid) if pid else None,
-        "r": reason or None, "a": admin_id})
+        "r": reason or None, "a": admin_id})).scalar()
+    if stored is None:
+        # The exclusion already stands: nothing was stored, so nothing is
+        # recorded and nothing is committed (MODLOG-1 K1).
+        return {"status": "ok"}
     # The record names the seat's player, or both of the match's players for
     # a match-wide exclusion.
     await _modlog_write(db, actor=admin_id, action="record_exclude",
@@ -26158,6 +26162,10 @@ async def chat_moderate_spam_pattern_revoke(req: _ChatSpamPatternReq,
         "UPDATE bridge_spam_patterns SET revoked_at = NOW()"
         " WHERE id = :i AND revoked_at IS NULL RETURNING pattern"
     ), {"i": int(req.pattern_id or 0)})).scalars().all()
+    if not cleared:
+        # The id names no active pattern: nothing was revoked, so nothing is
+        # recorded and nothing is committed (MODLOG-1 K1).
+        return {"status": "ok", "cleared": 0}
     await _modlog_write(db, actor=req.steam_id, action="chat_spam_pattern", reason=req.note,
                             details={"op": "revoke", "id": req.pattern_id,
                                      "pattern": (cleared[0] if cleared else None)})
@@ -26279,7 +26287,12 @@ async def internal_chat_bridge_moderation(
                 mins = max(1, int(int(ban_duration_s) / 60))
             except Exception:
                 mins = 0
-        if permanent or mins > 0:
+        muted = bool(permanent or mins > 0)
+        if not purged and not muted:
+            # No row was removed and no mute applies: nothing changed, so
+            # nothing is recorded and nothing is committed (MODLOG-1 K1).
+            return {"status": "ok", "purged": 0, "truncated": truncated}
+        if muted:
             # Mirror the platform's own ban semantics into the relay (design
             # S5): permanent ban -> permanent mute, timeout -> expiring mute.
             # No twitch enforcement enqueue — the ban CAME from the platform.
@@ -26295,7 +26308,7 @@ async def internal_chat_bridge_moderation(
                                          "truncated": truncated, "permanent": permanent,
                                          "ban_duration_s": ban_duration_s,
                                          # The relay mute applied above (fix A8).
-                                         "muted": bool(permanent or mins > 0),
+                                         "muted": muted,
                                          "duration_minutes": mins or None})
         await db.commit()
         await _broadcast_deletes(purged)
@@ -26307,6 +26320,10 @@ async def internal_chat_bridge_moderation(
             raise HTTPException(422, "purge_channel is twitch-only")
         purged, truncated = await _purge_identity_rows(
             db, kind="twitch_all", value="x", actor=actor)
+        if not purged:
+            # No bridged row was removed: nothing changed, so nothing is
+            # recorded and nothing is committed (MODLOG-1 K1).
+            return {"status": "ok", "purged": 0, "truncated": truncated}
         await _modlog_write(db, actor=actor, action="chat_purge_channel",
                                 details={"platform": source, "purged": len(purged),
                                          "truncated": truncated})
@@ -44611,14 +44628,23 @@ async def admin_set_artist(
     if grant and target is None:
         raise HTTPException(status_code=404, detail="Player not found — they need to have used the mod once")
     if grant:
-        await db.execute(text(
+        changed = (await db.execute(text(
             "INSERT INTO artist_users (steam_id, display_name, granted_by_steam_id, notes) "
-            "VALUES (:s, :n, :g, 'granted via admin tab') ON CONFLICT (steam_id) DO NOTHING"
-        ), {"s": target_steam_id, "n": target.display_name if target else None, "g": admin_steam_id})
+            "VALUES (:s, :n, :g, 'granted via admin tab') ON CONFLICT (steam_id) DO NOTHING "
+            "RETURNING steam_id"
+        ), {"s": target_steam_id, "n": target.display_name if target else None,
+            "g": admin_steam_id})).scalar()
     else:
         # Blocks + item assignments cascade/persist: items keep their
         # artist_steam_id (history), the role row + purchase blocks go.
-        await db.execute(text("DELETE FROM artist_users WHERE steam_id = :s"), {"s": target_steam_id})
+        changed = (await db.execute(text(
+            "DELETE FROM artist_users WHERE steam_id = :s RETURNING steam_id"
+        ), {"s": target_steam_id})).scalar()
+    if changed is None:
+        # The role already stood as asked (held for a grant, absent for a
+        # revoke): nothing changed, so nothing is recorded and nothing is
+        # committed (MODLOG-1 K1).
+        return {"status": "ok", "target": target_steam_id, "artist": grant}
     await _modlog_write(
         db, actor=admin_steam_id, action="artist-set", target_steam_id=target_steam_id,
         affected=[target_steam_id], details={"grant": grant},
@@ -44643,15 +44669,19 @@ async def admin_set_item_artist(
     if not _verify_admin_hmac(admin_steam_id, "item-artist",
                               f"{sku}:{artist_steam_id}", sig):
         raise HTTPException(status_code=403, detail="Invalid signature")
-    item = (await db.execute(select(ShopItem).where(ShopItem.sku == sku))).scalar_one_or_none()
+    # The item's row is read under its lock, so the comparison below reads
+    # the artist that stands until this transaction ends.
+    item = (await db.execute(
+        select(ShopItem).where(ShopItem.sku == sku).with_for_update())).scalar_one_or_none()
     if item is None:
         raise HTTPException(status_code=404, detail="Item not found")
-    if artist_steam_id:
-        if not await _is_artist(db, artist_steam_id):
-            raise HTTPException(status_code=409, detail="Target isn't an artist yet — grant the role first")
-        item.artist_steam_id = artist_steam_id
-    else:
-        item.artist_steam_id = None
+    if artist_steam_id and not await _is_artist(db, artist_steam_id):
+        raise HTTPException(status_code=409, detail="Target isn't an artist yet — grant the role first")
+    if item.artist_steam_id == (artist_steam_id or None):
+        # The item already names that artist (or none): nothing changes, so
+        # nothing is recorded and nothing is committed (MODLOG-1 K1).
+        return {"status": "ok", "sku": sku, "artist_steam_id": artist_steam_id}
+    item.artist_steam_id = artist_steam_id or None
     await _modlog_write(
         db, actor=admin_steam_id, action="item-artist", target_steam_id=artist_steam_id or None,
         details={"sku": sku},
@@ -50462,13 +50492,25 @@ async def admin_grant_achievement(req: _AdminGrantAchReq, db: AsyncSession = Dep
         # of reporting "already_unlocked" and changing nothing. Idempotent.
         _repair_sku = ACHIEVEMENT_TITLE_SKUS.get(req.achievement_key)
         if _repair_sku:
-            await _grant_title_item(db, target.id, _repair_sku)
-            await _modlog_write(db, actor=req.admin_steam_id, action="grant_achievement",
-                                target_steam_id=req.target_steam_id,
-                                affected=[req.target_steam_id],
-                                details={"achievement_key": req.achievement_key,
-                                         "repair": True, "title_sku": _repair_sku})
-            await db.commit()
+            # One statement stores the title item when the player lacks it
+            # (the row _grant_title_item writes); its RETURNING row says
+            # whether this call stored it. A player who holds it already, or
+            # a sku with no shop row, changes nothing: no record and no
+            # commit (MODLOG-1 K1).
+            restored = (await db.execute(text(
+                "INSERT INTO player_items (player_id, item_id, purchase_price, "
+                "        royalty_paid, royalty_rate_pct, royalty_resolved) "
+                "SELECT CAST(:pid AS uuid), si.id, 0, 0, 0, TRUE FROM shop_items si "
+                " WHERE si.sku = CAST(:sku AS VARCHAR(64)) "
+                "ON CONFLICT (player_id, item_id) DO NOTHING RETURNING item_id"
+            ), {"pid": target.id, "sku": _repair_sku})).scalar()
+            if restored is not None:
+                await _modlog_write(db, actor=req.admin_steam_id, action="grant_achievement",
+                                    target_steam_id=req.target_steam_id,
+                                    affected=[req.target_steam_id],
+                                    details={"achievement_key": req.achievement_key,
+                                             "repair": True, "title_sku": _repair_sku})
+                await db.commit()
         return {"status": "already_unlocked"}
     db.add(PlayerAchievement(player_id=target.id, achievement_key=req.achievement_key))
     gold_amt = _achievement_gold(req.achievement_key)

@@ -21,6 +21,8 @@ read back against a real PostgreSQL, with its mutants.
         the revocation
     J7  the read says that a record carried in by migration 420 was not
         written at the time of the review
+    K1  a moderator route that changed nothing writes no record and does not
+        commit, and answers as before
 
 Same harness as test_modlog_pg.py (its case schema, built by the ladder
 harness, sealed, dropped at the end):
@@ -980,3 +982,239 @@ def test_j7_mutant_without_the_carried_in_words_is_red(case, monkeypatch):
     with pytest.raises(AssertionError) as e:
         _j7_check(case)
     print("\nMUTANT-RED J7 read without the carried-in words: %s" % str(e.value).splitlines()[0][:160])
+
+
+# -- K1: a moderator route that changed nothing records nothing and commits nothing
+#
+# A moderator route writes its admin_actions record only on a path that changed
+# state; a path that changed nothing writes no record and does not commit, and
+# its answer keeps its status code and its shape. Each site below is called
+# twice through the route itself (its handler on an ASGI app with the get_db
+# override, as J3), with one request: the first call changes state and commits
+# exactly one record; the second changes nothing, and must leave the records,
+# the route's own table and the commit count as they were, answering as the
+# route answered before the fix. The override counts the session's commits.
+
+async def _k1_call(sm, method, path, handler, **req):
+    import httpx
+    from fastapi import FastAPI
+    app = FastAPI()
+    app.add_api_route(path, handler, methods=[method])
+    commits = []
+
+    async def _db():
+        async with sm() as db:
+            real = db.commit
+
+            async def counted():
+                commits.append(1)
+                await real()
+            db.commit = counted
+            yield db
+    app.dependency_overrides[main.get_db] = _db
+    transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)
+    async with httpx.AsyncClient(transport=transport, base_url="http://t") as client:
+        r = await client.request(method, path, **req)
+    return r, len(commits)
+
+
+async def _k1_rows(sm, sql, **params):
+    async with sm() as db:
+        return [tuple(r) for r in (await db.execute(text(sql), params)).all()]
+
+
+async def _k1_records(sm):
+    async with sm() as db:
+        return (await db.execute(text("SELECT count(*) FROM admin_actions"))).scalar()
+
+
+async def _k1_spam_seed(db):
+    a, _ = await _admin(db)
+    pid = (await db.execute(text(
+        "INSERT INTO bridge_spam_patterns (pattern, note, added_by) VALUES (:p, NULL, 'k1 seed')"
+        " RETURNING id"), {"p": "kone%s" % uuid.uuid4().hex[:10]})).scalar()
+    return {"a": a, "id": int(pid)}
+
+
+async def _k1_exclude_seed(db):
+    a, _ = await _admin(db)
+    p = [await _player(db) for _ in range(2)]
+    match = uuid.uuid4()
+    await lh._insert(db, "matches", {"id": match, "player1_id": p[0][1], "player2_id": p[1][1],
+                                     "photon_room_id": "modlog-k1-%s" % match})
+    return {"a": a, "m": str(match), "t": p[0][0]}
+
+
+async def _k1_twitch_rows(db, uid, n):
+    for _ in range(n):
+        await lh._insert(db, "chat_messages", {"channel": "global", "display_name": "Author Example",
+                                               "message": "a line", "source": "twitch",
+                                               "origin_user_id": uid})
+
+
+async def _k1_purge_user_seed(db):
+    uid = "tw-k1-%s" % uuid.uuid4().hex[:8]
+    await _k1_twitch_rows(db, uid, 2)
+    return {"u": uid}
+
+
+async def _k1_purge_channel_seed(db):
+    await _k1_twitch_rows(db, "tw-k1-%s" % uuid.uuid4().hex[:8], 1)
+    return {}
+
+
+async def _k1_artist_seed(db, holds):
+    a, _ = await _admin(db)
+    t, _ = await _player(db)
+    if holds:
+        await lh._insert(db, "artist_users", {"steam_id": t, "granted_by_steam_id": a})
+    return {"a": a, "t": t}
+
+
+async def _k1_item_seed(db):
+    a, _ = await _admin(db)
+    t, _ = await _player(db)
+    await lh._insert(db, "artist_users", {"steam_id": t, "granted_by_steam_id": a})
+    sku = "k1_item_%s" % uuid.uuid4().hex[:10]
+    await lh._insert(db, "shop_items", {"sku": sku, "kind": "face", "name": "Item Example", "price": 1})
+    return {"a": a, "t": t, "sku": sku}
+
+
+K1_TITLE_KEY = "rosetta"
+
+
+async def _k1_repair_seed(db):
+    a, _ = await _admin(db)
+    t, pid = await _player(db)
+    sku = main.ACHIEVEMENT_TITLE_SKUS[K1_TITLE_KEY]
+    if (await db.execute(text("SELECT id FROM shop_items WHERE sku = :s"), {"s": sku})).scalar() is None:
+        await lh._insert(db, "shop_items", {"sku": sku, "kind": "title", "name": "Title Example", "price": 0})
+    await lh._insert(db, "player_achievements", {"player_id": pid, "achievement_key": K1_TITLE_KEY})
+    return {"a": a, "t": t, "pid": pid, "sku": sku}
+
+
+_K1_KEY = {"X-Internal-Key": INTERNAL_KEY}
+
+# site: (handler name, method, path, seed, request(ctx), state(sm, ctx),
+#        the changing call's answer(ctx, body) -> bool, the no-change answer(ctx))
+K1_SITES = {
+    "spam_pattern_revoke": (
+        "chat_moderate_spam_pattern_revoke", "POST", "/api/v1/chat/moderate/spam-patterns/revoke",
+        _k1_spam_seed,
+        lambda c: {"json": {"steam_id": c["a"], "pattern_id": c["id"], "note": "too broad"}},
+        lambda sm, c: _k1_rows(sm, "SELECT id, revoked_at FROM bridge_spam_patterns WHERE id = :i", i=c["id"]),
+        lambda c, b: b == {"status": "ok", "cleared": 1},
+        lambda c: {"status": "ok", "cleared": 0}),
+    "record_exclude": (
+        "admin_record_exclude", "POST", "/api/v1/admin/records/exclude",
+        _k1_exclude_seed,
+        lambda c: {"json": {"admin_steam_id": c["a"], "board": "*", "match_id": c["m"],
+                            "steam_id": c["t"], "reason": "lag abuse", "signature": "x"}},
+        lambda sm, c: _k1_rows(sm, "SELECT id FROM record_exclusions WHERE match_id = CAST(:m AS uuid)"
+                                   " ORDER BY id", m=c["m"]),
+        lambda c, b: b == {"status": "ok"},
+        lambda c: {"status": "ok"}),
+    "purge_user": (
+        "internal_chat_bridge_moderation", "POST", "/api/v1/internal/chat/bridge-moderation",
+        _k1_purge_user_seed,
+        lambda c: {"json": {"source": "twitch", "kind": "purge_user", "platform_user_id": c["u"]},
+                   "headers": _K1_KEY},
+        lambda sm, c: _k1_rows(
+            sm, "SELECT id, deleted_at IS NULL, (SELECT count(*) FROM bridge_mutes"
+                "        WHERE platform_user_id = :u) FROM chat_messages WHERE origin_user_id = :u"
+                " ORDER BY id", u=c["u"]),
+        lambda c, b: b == {"status": "ok", "purged": 2, "truncated": False},
+        lambda c: {"status": "ok", "purged": 0, "truncated": False}),
+    "purge_channel": (
+        "internal_chat_bridge_moderation", "POST", "/api/v1/internal/chat/bridge-moderation",
+        _k1_purge_channel_seed,
+        lambda c: {"json": {"source": "twitch", "kind": "purge_channel"}, "headers": _K1_KEY},
+        lambda sm, c: _k1_rows(sm, "SELECT id FROM chat_messages WHERE source = 'twitch'"
+                                   " AND deleted_at IS NULL ORDER BY id"),
+        lambda c, b: b["status"] == "ok" and b["purged"] >= 1 and b["truncated"] is False,
+        lambda c: {"status": "ok", "purged": 0, "truncated": False}),
+    "artist_grant": (
+        "admin_set_artist", "POST", "/api/v1/admin/artists/set",
+        lambda db: _k1_artist_seed(db, False),
+        lambda c: {"params": {"admin_steam_id": c["a"], "target_steam_id": c["t"], "grant": "true",
+                              "sig": "x"}},
+        lambda sm, c: _k1_rows(sm, "SELECT steam_id FROM artist_users WHERE steam_id = :t", t=c["t"]),
+        lambda c, b: b == {"status": "ok", "target": c["t"], "artist": True},
+        lambda c: {"status": "ok", "target": c["t"], "artist": True}),
+    "artist_revoke": (
+        "admin_set_artist", "POST", "/api/v1/admin/artists/set",
+        lambda db: _k1_artist_seed(db, True),
+        lambda c: {"params": {"admin_steam_id": c["a"], "target_steam_id": c["t"], "grant": "false",
+                              "sig": "x"}},
+        lambda sm, c: _k1_rows(sm, "SELECT steam_id FROM artist_users WHERE steam_id = :t", t=c["t"]),
+        lambda c, b: b == {"status": "ok", "target": c["t"], "artist": False},
+        lambda c: {"status": "ok", "target": c["t"], "artist": False}),
+    "item_artist": (
+        "admin_set_item_artist", "POST", "/api/v1/admin/shop/set-artist",
+        _k1_item_seed,
+        lambda c: {"params": {"admin_steam_id": c["a"], "sku": c["sku"], "artist_steam_id": c["t"],
+                              "sig": "x"}},
+        lambda sm, c: _k1_rows(sm, "SELECT artist_steam_id FROM shop_items WHERE sku = :s", s=c["sku"]),
+        lambda c, b: b == {"status": "ok", "sku": c["sku"], "artist_steam_id": c["t"]},
+        lambda c: {"status": "ok", "sku": c["sku"], "artist_steam_id": c["t"]}),
+    "achievement_title_repair": (
+        "admin_grant_achievement", "POST", "/api/v1/admin/grant-achievement",
+        _k1_repair_seed,
+        lambda c: {"json": {"admin_steam_id": c["a"], "target_steam_id": c["t"],
+                            "achievement_key": K1_TITLE_KEY}},
+        lambda sm, c: _k1_rows(sm, "SELECT pi.item_id FROM player_items pi JOIN shop_items si"
+                                   "    ON si.id = pi.item_id WHERE pi.player_id = :p AND si.sku = :s",
+                               p=c["pid"], s=c["sku"]),
+        lambda c, b: b == {"status": "already_unlocked"},
+        lambda c: {"status": "already_unlocked"}),
+}
+
+# Each site's mutant restores the unconditional write: its guard never returns
+# early, so the path that changed nothing goes on to the record and the commit.
+K1_MUTANTS = {
+    "spam_pattern_revoke": (('        return {"status": "ok", "cleared": 0}\n', "        pass\n"),),
+    "record_exclude": (("    if stored is None:\n", "    if False:\n"),),
+    "purge_user": (("        if not purged and not muted:\n", "        if False:\n"),),
+    "purge_channel": (("        if not purged:\n", "        if False:\n"),),
+    "artist_grant": (("    if changed is None:\n", "    if False:\n"),),
+    "artist_revoke": (("    if changed is None:\n", "    if False:\n"),),
+    "item_artist": (("    if item.artist_steam_id == (artist_steam_id or None):\n", "    if False:\n"),),
+    "achievement_title_repair": (("            if restored is not None:\n", "            if True:\n"),),
+}
+
+
+def _k1_check(case, site, handler):
+    _, method, path, seed, req, state, changed_answer, same_answer = K1_SITES[site]
+
+    async def body(sm):
+        ctx = await _commit(sm, seed)
+        before = (await _k1_records(sm), await state(sm, ctx))
+        r1, c1 = await _k1_call(sm, method, path, handler, **req(ctx))
+        after1 = (await _k1_records(sm), await state(sm, ctx))
+        r2, c2 = await _k1_call(sm, method, path, handler, **req(ctx))
+        after2 = (await _k1_records(sm), await state(sm, ctx))
+        return ctx, before, (r1.status_code, r1.text, c1), after1, (r2.status_code, r2.text, c2), after2
+    ctx, before, one, after1, two, after2 = _with_sm(case, body)
+    # the control: the changing call
+    assert one[0] == 200 and changed_answer(ctx, json.loads(one[1])), (site, one)
+    assert one[2] == 1, (site, "the changing call's commits", one)
+    assert after1[0] == before[0] + 1, (site, "the changing call's record", before[0], after1[0])
+    assert after1[1] != before[1], (site, "the changing call changed nothing", before[1])
+    # the call that changed nothing
+    assert two[0] == 200 and json.loads(two[1]) == same_answer(ctx), (site, "the answer", two)
+    assert after2[0] == after1[0], (site, "a record for a call that changed nothing", after1[0], after2[0])
+    assert two[2] == 0, (site, "a commit for a call that changed nothing", two[2])
+    assert after2[1] == after1[1], (site, "the route's table changed", after1[1], after2[1])
+
+
+@pytest.mark.parametrize("site", sorted(K1_SITES))
+def test_k1_a_call_that_changes_nothing_records_nothing_and_commits_nothing(case, admin_open, site):
+    _k1_check(case, site, getattr(main, K1_SITES[site][0]))
+
+
+@pytest.mark.parametrize("site", sorted(K1_MUTANTS))
+def test_k1_mutant_with_the_unconditional_write_restored_is_red(case, admin_open, site):
+    fn = _mutant_of(K1_SITES[site][0], *K1_MUTANTS[site])
+    with pytest.raises(AssertionError) as e:
+        _k1_check(case, site, fn)
+    print("\nMUTANT-RED K1 %s: %s" % (site, str(e.value).splitlines()[0][:160]))
