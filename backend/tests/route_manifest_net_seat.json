@@ -241,7 +241,7 @@
           ],
           "main",
           "admin_list_quarantine",
-          "c35df6aec35e52d90251f3176e43a7200009e0da"
+          "dbab4ad2077257e20f55b037299c3a55b732d14f"
         ],
         [
           "/api/v1/admin/quarantine/triage",
@@ -259,7 +259,7 @@
           ],
           "main",
           "admin_quarantine_triage_group",
-          "6017c8499529ab249008d53105f353b235abd652"
+          "4bd21f6925fe5febb5400d7e942504fbca6be314"
         ],
         [
           "/api/v1/admin/quarantine/{qid}/accept",
@@ -268,7 +268,7 @@
           ],
           "main",
           "admin_accept_quarantine",
-          "fc3a3111c7ca663cb5a0c1929dbec389f2c623ef"
+          "ae39b2c95fdc0f8a4d5ed269981695502a531e25"
         ],
         [
           "/api/v1/admin/quarantine/{qid}/discard",
@@ -520,7 +520,7 @@
           ],
           "main",
           "submit_ffa_match",
-          "b053ceb4e409fbab64b9db3513e1a2e371a2b305"
+          "d07e4a8e9c93df0171026283806fc2941b8993d7"
         ],
         [
           "/api/v1/h2h/{steam_id}/{opponent_steam_id}",
@@ -583,7 +583,7 @@
           ],
           "main",
           "internal_quarantine_digest",
-          "fe2aab70add6bf60029e7aa6e03696820a20bc26"
+          "0e0dc5131302939c547181aeb4039cf57f3ce691"
         ],
         [
           "/api/v1/internal/recent-flags",
@@ -655,7 +655,7 @@
           ],
           "main",
           "submit_ovt_match",
-          "df39f4fd5ca95ca9dffc0a9a01a1b47bc98d3852"
+          "d53e02473b28820252c3bf9a73b606bb1b18a3ef"
         ],
         [
           "/api/v1/ovt/series/active",
@@ -1186,7 +1186,7 @@
           ],
           "main",
           "submit_team_match",
-          "6ea7ac8365186c9878373807c1f9927a4a49675a"
+          "8549bc9dd0415460eab5778d8d8c3321d6bdd98d"
         ],
         [
           "/api/v1/team/players/{steam_id}/team-matches",
@@ -1867,7 +1867,7 @@
           ],
           "main",
           "health_check",
-          "f43c2eee00ae79694eb5c512c329c74eb6c07ed8"
+          "3c4aba9e7dfbf9d4a7911f2bacd357dcdf0dbd09"
         ],
         [
           "/api/v1/i18n/approved",
@@ -3869,7 +3869,7 @@
           ],
           "match_hold",
           "match_hold_entered",
-          "454099adb68e114c8cbf10364b2fa4b22e039f37"
+          "43014b652ce09cc3129424bef2eb859bd8e5add6"
         ],
         [
           "/api/v1/match/hold/{hold_id}/state",
@@ -4022,6 +4022,21 @@
           "dea66be9e3bc10772cdcc765734cff65edd8186c"
         ]
       ]
+    },
+    {
+      "classification": "statically-nonconsumer",
+      "reason": "Static source review (QDIG-1, migration 419: the digest posted route in main.py): over the route's whole reached surface, walked by this gate's own closure, no W1 private Match column is named and no SQL reads the matches table. POST /api/v1/internal/quarantine/digest/posted requires the internal key, stamps digest_posted_at or digest_reminded_at on pending match_report_quarantine rows by id, and answers {kind, marked, ignored}: two counts and the kind it was sent.",
+      "routes": [
+        [
+          "/api/v1/internal/quarantine/digest/posted",
+          [
+            "POST"
+          ],
+          "main",
+          "internal_quarantine_digest_posted",
+          "55d508c786c65923782d3633aa64f7bb44de3b47"
+        ]
+      ]
     }
   ],
   "entry_points": {
@@ -4073,7 +4088,7 @@
       [
         "main",
         "lifespan",
-        "05dd776a3765fd5da75089317e25719af3f7e004"
+        "52cce45fefb0bbbbf75790ab21c7f4c5371390e5"
       ]
     ]
   },
@@ -4469,6 +4484,7 @@
     "GET /api/v1/admin/quarantine/triage -> main.admin_quarantine_triage",
     "GET /api/v1/admin/quarantine/triage/{mode}/{group_id} -> main.admin_quarantine_triage_group",
     "GET /api/v1/internal/quarantine/digest -> main.internal_quarantine_digest",
+    "POST /api/v1/internal/quarantine/digest/posted -> main.internal_quarantine_digest_posted",
     "POST /api/v1/spectate/participant-attest -> main.spectate_participant_attest",
     "POST /api/v1/spectate/close -> main.spectate_close",
     "GET /api/v1/spectate/games -> main.spectate_games",

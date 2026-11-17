@@ -766,7 +766,7 @@ def test_route_manifest_net_seat_is_exhaustive_and_fails_closed_on_drift():
     # mail relay routes, the pending-DM recheck, the face preview, the batch discard) plus main's 6
     # verified-reads control routes; the auto-log upload and prune, added on both sides, count once.
     # The two sides' own histories follow: the lane's on the assertion, main's below it.
-    assert len(manifest) == 435   # lobby invites (migration 416): 430 plus the five invite routes (statically-nonconsumer), first fingerprints by the re-pin tool, confirmed by its dry run after the write
+    assert len(manifest) == 436   # QDIG-1 (migration 419): 435 plus the digest posted route (statically-nonconsumer); lobby invites (migration 416): 430 plus the five invite routes; first fingerprints by the re-pin tool, confirmed by its dry run after the write
     # admin evidence report re-land (2026-10-29), claude/admin-evidence-server refit onto main 3fc331e2: main's 426 plus the lane's 4 (the four GET report routes under /api/v1/internal/evidence-report/: game, series, pair and player, the admin-authorized-consumer class), confirmed by the re-pin dry run
     # combat evidence re-land (2026-10-29), claude/combat-evidence-server refit onto main 3f4c9fc9: main's 424 plus the lane's 2 (the combat record route and the admin combat-evidence view), confirmed by the re-pin dry run
     # card draw evidence re-land (2026-10-29), claude/card-draw-server refit onto main 15da9a83: main's 421 plus the lane's 3 (the card record route, the admin card-evidence view and the card-pool census registration), measured by the step 5 dry re-pin of the refit (424 live) and written by its commit (b)
@@ -820,7 +820,7 @@ def test_route_manifest_net_seat_is_exhaustive_and_fails_closed_on_drift():
     # trunk fold (2026-10-15): the union of the lane's 395 and main's 395 over their shared 387 is
     # 401: the lane's 6 plus main's 6 plus the 2 auto-log routes both sides added (all
     # statically-nonconsumer). The lane's history is on the assertion, main's below it.
-    assert len(static) == 430   # lobby invites (migration 416): 425 plus the five invite routes, all statically-nonconsumer (431 rows, one sentinel-exercised; first fingerprints by the re-pin tool)
+    assert len(static) == 431   # QDIG-1 (migration 419): 430 plus the digest posted route; lobby invites (migration 416): 425 plus the five invite routes; all statically-nonconsumer (first fingerprints by the re-pin tool)
     # combat evidence re-land (2026-10-29): main's 423 plus the lane's 2, both statically-nonconsumer (426 rows, one sentinel-exercised)
     # card draw evidence re-land (2026-10-29): main's 420 plus the lane's 3, all statically-nonconsumer (424 rows, one sentinel-exercised; measured by the step 5 dry re-pin of the refit, written by its commit (b))
     # identity-clock evidence re-land (2026-10-29): main's 417 plus the lane's 3, all statically-nonconsumer (421 rows, one sentinel-exercised)
@@ -2253,7 +2253,16 @@ def test_the_helper_closure_stays_affordable():
     # HTTPException, json, math, os, Request and time), and +2 the route does
     # run, the admin_evidence health word and its route tuple. Inside 852, so
     # the bound stays.
-    assert all_worst <= 852, f"worst closure {all_worst} of {total}"
+    # QDIG-1 on the ban cap lane (2026-11-16), claude/qdig-1116 ef3ffa87 on
+    # the ban cap lane's landing tip ba64c28a: 854 measured at GET
+    # /api/v1/health, of 5644 indexed bindings (851 at ba64c28a, of 5565,
+    # the same route): +3 by name, all three run by the health route: main's
+    # _qdig_needs_decision_word (the quarantine_needs_decision word), the
+    # _qdig_state it reads, and _QDIG_BUILD (the qdig_build word); none
+    # leaves. The bound moves to 897, the measurement times 1.05 rounded up,
+    # for that reason and no other. The median (236 against 245) and p90
+    # (398 against 425) bounds stay.
+    assert all_worst <= 897, f"worst closure {all_worst} of {total}"
 
 
 def _route_covering(module, name):

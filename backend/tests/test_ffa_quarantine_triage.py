@@ -121,7 +121,9 @@ def run(coro):
 
 
 # ── schema: the columns the routes, the capture and the checksums touch ───
-# match_report_quarantine and its three indexes are 169's DDL verbatim;
+# match_report_quarantine and its three indexes are 169's DDL verbatim plus
+# 419's two digest columns (QDIG-1), and ffa_lobbies carries 176's is_ranked,
+# 187's kills_tiebreak and 378's readmit_v1, which the digest feed reads;
 # ffa_matches carries 154's columns plus 327's game_number (NOT NULL, as 327
 # leaves it), its source column and idx_ffa_matches_lobby_game. The ten
 # checksum tables of K15 exist so a write to any of them is visible.
@@ -167,7 +169,10 @@ CREATE TABLE ffa_lobbies (
     completed_at TIMESTAMPTZ,
     invalidated_at TIMESTAMPTZ,
     invalidation_reason VARCHAR(64),
-    host_player_id UUID REFERENCES players(id)
+    host_player_id UUID REFERENCES players(id),
+    is_ranked BOOLEAN NOT NULL DEFAULT TRUE,
+    kills_tiebreak BOOLEAN NOT NULL DEFAULT FALSE,
+    readmit_v1 BOOLEAN NOT NULL DEFAULT FALSE
 );
 CREATE TABLE ffa_matches (
     id UUID PRIMARY KEY,
@@ -265,7 +270,9 @@ CREATE TABLE match_report_quarantine (
     reviewed_by     UUID REFERENCES players(id) ON DELETE SET NULL,
     reviewed_at     TIMESTAMPTZ,
     review_note     TEXT,
-    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    digest_posted_at   TIMESTAMPTZ,
+    digest_reminded_at TIMESTAMPTZ
 );
 CREATE UNIQUE INDEX IF NOT EXISTS uq_quarantine_room
     ON match_report_quarantine (mode, photon_room_id)
@@ -354,13 +361,96 @@ def keys_of(obj, out=None):
 # ── the environment of one live test ──────────────────────────────────────
 
 def _redirect_for(url):
+    """database.py's engines, as the routes get them, pointed at the lane
+    database. The listener opens the connection itself, from a copy of the
+    engine's connect parameters, and returns it: SQLAlchemy hands every
+    do_connect listener the engine's own parameter dict, made once per
+    engine, so an edit in place outlives the listener's removal, and every
+    later module in the same process that connects through database.py's
+    engines reaches this file's lane database (lesson 1240;
+    discord_collection_harness._redirect_for has the same form). This
+    listener writes nothing to that dict; the test below checks it."""
     def redirect(dialect, conn_rec, cargs, cparams):
-        cparams.update(host=url.host, port=url.port, user=url.username, database=url.database)
+        params = dict(cparams, host=url.host, port=url.port, user=url.username, database=url.database)
         if url.password:
-            cparams["password"] = url.password
+            params["password"] = url.password
         else:
-            cparams.pop("password", None)
+            params.pop("password", None)
+        return dialect.connect(*cargs, **params)
     return redirect
+
+
+class _ConnectProbeStop(Exception):
+    """Raised by the probe below, so the probe opens no connection."""
+
+
+def _engine_connect_params(eng):
+    """What `eng` would connect with now (the probe of
+    test_discord_collection_server.py, in the same form). A do_connect
+    listener placed ahead of any other records the parameter dict SQLAlchemy
+    hands it and stops the connect before a socket opens; the pool is first
+    swapped for an empty one, without closing, so the connect cannot be
+    served from a pooled connection. It runs on an event loop of its own and
+    leaves the thread's current loop as it was, because it also runs when
+    this module is imported (below), before any test body."""
+    seen = []
+
+    def probe(dialect, conn_rec, cargs, cparams):
+        seen.append({k: (dict(v) if isinstance(v, dict) else v) for k, v in cparams.items()})
+        raise _ConnectProbeStop()
+
+    async def attempt():
+        await eng.dispose(close=False)
+        with pytest.raises(_ConnectProbeStop):
+            async with eng.connect():
+                pass
+
+    event.listen(eng.sync_engine, "do_connect", probe, insert=True)
+    loop = asyncio.new_event_loop()
+    try:
+        loop.run_until_complete(attempt())
+    finally:
+        event.remove(eng.sync_engine, "do_connect", probe)
+        loop.close()
+    assert len(seen) == 1, len(seen)
+    return seen[0]
+
+
+# The baseline of database.py's two engines, captured when this module is
+# imported: pytest imports every module before it runs any test body, so no
+# test in the process has run yet.
+_APP_ENGINE_PARAMS_AT_IMPORT = [_engine_connect_params(e) for e in (database.engine, database.release_engine)]
+
+
+def _moved_app_engine_params():
+    """(engine index, key) of every connect parameter of database.py's two
+    engines that differs now from this module's import-time baseline. Names
+    only, never values."""
+    after = [_engine_connect_params(e) for e in (database.engine, database.release_engine)]
+    return [(i, k) for i, (b, a) in enumerate(zip(_APP_ENGINE_PARAMS_AT_IMPORT, after))
+            for k in sorted(set(b) | set(a)) if b.get(k) != a.get(k)]
+
+
+def test_pg_the_harness_leaves_the_app_engines_connect_parameters_as_it_found_them(monkeypatch):
+    """Inside the harness both of database.py's engines reach the lane
+    database through the redirect; after it, their connect parameters equal
+    the ones this module captured at import, so the redirect stayed inside
+    the harness (lesson 1240). Only the labels of engines that missed the
+    lane and the names of changed keys are reported, never their values."""
+    async def body():
+        async with Env(monkeypatch) as env:
+            reached = {}
+            for label, eng in (("database.engine", database.engine),
+                               ("database.release_engine", database.release_engine)):
+                async with eng.connect() as conn:
+                    reached[label] = (await conn.execute(text("SELECT current_database()"))).scalar()
+            return env.url.database, reached
+
+    lane, reached = run(body())
+    missed = sorted(label for label, name in reached.items() if name != lane)
+    assert len(reached) == 2 and not missed, f"an app engine did not reach the lane database: {missed}"
+    moved = _moved_app_engine_params()
+    assert not moved, f"connect parameters changed since this module was imported (engine index, key): {moved}"
 
 
 async def _pg(url):
@@ -2131,8 +2221,44 @@ def _writes_to(pattern):
     return sorted(out, key=str)
 
 
+def _module_writer_constants(pattern):
+    """{name: sql} of module-level string constants matching `pattern`."""
+    out = {}
+    for node in TREE.body:
+        if isinstance(node, ast.Assign) and isinstance(node.value, ast.Constant) \
+                and isinstance(node.value.value, str) and re.search(pattern, node.value.value, re.I):
+            for t in node.targets:
+                if isinstance(t, ast.Name):
+                    out[t.id] = node.value.value
+    return out
+
+
+def _users_of(name):
+    return sorted({_enclosing(n.lineno) for n in ast.walk(TREE) if isinstance(n, ast.Name) and n.id == name
+                   and isinstance(n.ctx, ast.Load)}, key=str)
+
+
 def test_k12_the_quarantine_table_is_written_only_by_the_capture_and_the_two_admin_routes():
-    assert _writes_to(r"update\s+match_report_quarantine") == ["admin_accept_quarantine", "admin_discard_quarantine"]
+    """Still no automatic acceptance. QDIG-1 adds three module-level UPDATEs,
+    none of which can write 'accepted' or apply a result: the janitor's
+    (status 'filed' and the review columns, nothing else; only from
+    _qdig_janitor_pass) and the posted route's two (digest_posted_at or
+    digest_reminded_at alone; only from internal_quarantine_digest_posted)."""
+    upd = r"update\s+match_report_quarantine"
+    assert [w for w in _writes_to(upd) if w is not None] == ["admin_accept_quarantine", "admin_discard_quarantine"]
+    consts = _module_writer_constants(upd)
+    assert sorted(consts) == ["_QDIG_SQL_JANITOR_FILE", "_QDIG_SQL_POSTED_NEW", "_QDIG_SQL_POSTED_REMINDER"]
+    assert _writes_to(upd).count(None) == len(consts)
+    sets = {k: " ".join(v.split()).split(" SET ", 1)[1].split(" WHERE ", 1)[0] for k, v in consts.items()}
+    assert sets == {
+        "_QDIG_SQL_JANITOR_FILE": "status = 'filed', reviewed_at = NOW(), reviewed_by = NULL, "
+                                  "review_note = CAST(:note AS text)",
+        "_QDIG_SQL_POSTED_NEW": "digest_posted_at = NOW()",
+        "_QDIG_SQL_POSTED_REMINDER": "digest_reminded_at = NOW()"}
+    assert all("status = 'pending'" in " ".join(v.split()) for v in consts.values())
+    assert _users_of("_QDIG_SQL_JANITOR_FILE") == ["_qdig_janitor_pass"]
+    assert _users_of("_QDIG_SQL_POSTED_NEW") == _users_of("_QDIG_SQL_POSTED_REMINDER") == \
+        ["internal_quarantine_digest_posted"]
     assert _writes_to(r"insert\s+into\s+match_report_quarantine") == ["_quarantine_report"] * 3
     assert _writes_to(r"delete\s+from\s+match_report_quarantine") == []
     assert "match_report_quarantine" not in open(MODELS_SRC, encoding="utf-8").read()

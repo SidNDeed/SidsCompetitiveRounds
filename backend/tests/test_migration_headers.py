@@ -41,7 +41,8 @@ OWNED = ("331_animal_title_ladders.sql",
          "377_admin_evidence_indexes.sql",
          "401_contrib_match_provenance.sql",
          "415_mail_send_receipts.sql",
-         "416_lobby_invites.sql")
+         "416_lobby_invites.sql",
+         "419_quarantine_digest_posted.sql")
 
 _ORDER_LINE = re.compile(r"^--\s*DEPLOY ORDER:\s*(.+)$", re.MULTILINE)
 
