@@ -1769,7 +1769,8 @@ class Bindings:
         tree = _module_tree(mod)
         if tree is None:
             raise Unclassified((line, f"{mod!r}: no source for rule K's census"))
-        census = self._store_census(tree)
+        path = _module_file(mod)
+        census = self._store_census(tree, path)
         if census["refused"]:
             ln, what = census["refused"][0]
             raise Unclassified((line, f"{what} at line {ln}, a store rule K's "
@@ -1986,17 +1987,20 @@ class Bindings:
         return None
 
 
-    def _store_census(self, tree):
+    def _store_census(self, tree, path=None):
         """Rule K's store census of a module: {"stores": {attribute name:
         [line]} (attribute stores and deletes, and setattr/delattr names read
         from constants), "refused": [(line, form)]} where a refusing form is a
         setattr/delattr whose name no constant gives, a call of __setattr__ or
         __delattr__, a store through __dict__ or vars(), or a store of
-        __class__ or __dict__."""
+        __class__ or __dict__. MDPL class K: a setattr/delattr that a row of
+        K_ADMITTED_STORES admits by hand in the module read from file `path`
+        stores the names that row reads from the code (_k_admitted)."""
         hit = _STORE_CENSUS.get(id(tree))
-        if hit is not None and hit[0] is tree:
-            return hit[1]
+        if hit is not None and hit[0] is tree and hit[1] == path:
+            return hit[2]
         stores, refused = {}, []
+        admitted = _k_admitted(tree, path)
         tops = {}
         for st in tree.body:
             for n in _ast.walk(st):
@@ -2030,6 +2034,8 @@ class Bindings:
                 names = (self._const_names(n.args[1], tops.get(id(n)))
                          if len(n.args) >= 2 else None)
                 if names is None:
+                    names = admitted.get(id(n))
+                if names is None:
                     refused.append((n.lineno, f"a {f.id} whose name no constant "
                                               "gives"))
                 else:
@@ -2039,7 +2045,7 @@ class Bindings:
                     for s in sorted(names):
                         stores.setdefault(s, []).append(n.lineno)
         census = {"stores": stores, "refused": sorted(refused)}
-        _STORE_CENSUS[id(tree)] = (tree, census)
+        _STORE_CENSUS[id(tree)] = (tree, path, census)
         return census
 
 
@@ -2085,6 +2091,173 @@ _BOUND_ROOTS = {}
 _BOUND_STACK = set()
 _NAME_INDEX = {}
 _STORE_CENSUS = {}
+
+# MDPL class K (ruling 17 Nov 2026 12:03:04Z, Q1): rule K's store census
+# admits BY HAND two forms whose name is a loop variable: the account
+# deletion's arming of its attempt's session and the arming's undo (MDPL r2
+# HIGH 1's fix, b962d8d0). A row is (the module's file, the module-level
+# function that holds the form, the place of the form: that function or a
+# function defined directly in its body, the form as ast.unparse spells it,
+# the dict whose keys are the names the form stores, the number of keys the
+# review read, the reason). No name is typed here: the census reads the keys
+# from the code at walk time (_k_dict_keys) and records each as a store of
+# that name, so rule K-m refuses a method read by any of them. A row admits
+# its form only while all of these hold; otherwise the form is refused as
+# before ("a setattr whose name no constant gives"):
+# - the form occurs once in the function, inside a `for <name>, <x> in
+#   <dict>.items():` loop that is a statement of the place's own body; its
+#   name argument is that <name>, and nothing in the loop's body stores it;
+# - the function binds the dict once, to a dict display, and every other use
+#   of the name is a store under a constant str key or the iterable
+#   `<dict>.items()` of a for loop;
+# - every key is a constant str, and the keys number exactly the reviewed
+#   count (a fifth key or a missing one refuses).
+K_ADMITTED_STORES = (
+    # main.py:46006 at d16f9fc2
+    ("main.py", "_deletion_arm_every_statement", "_deletion_arm_every_statement",
+     "setattr(db, name, fn)", "installed", 4,
+     "the attempt's armed session methods, put on the attempt's own session"),
+    # main.py:46012 at d16f9fc2
+    ("main.py", "_deletion_arm_every_statement", "undo", "delattr(db, name)",
+     "installed", 4,
+     "the same methods taken back off the attempt's session, each one only "
+     "while the session still holds the function the arming put there"),
+)
+
+
+def _module_file(scope):
+    """The source file of module `scope`, or None (MDPL class K: a row of
+    K_ADMITTED_STORES names its module's file)."""
+    try:
+        src = _inspect.getsourcefile(scope)
+    except (OSError, TypeError):
+        src = None
+    return src
+
+
+def _k_items_of(expr, dname):
+    """Whether `expr` is `<dname>.items()` (MDPL class K)."""
+    return (isinstance(expr, _ast.Call) and isinstance(expr.func, _ast.Attribute)
+            and expr.func.attr == "items" and isinstance(expr.func.value, _ast.Name)
+            and expr.func.value.id == dname and not expr.args and not expr.keywords)
+
+
+def _k_target_of(n, kind, dname):
+    """Whether statement `n` is an assignment to one target of ast class
+    `kind` that names `dname`: the Name itself, or a Subscript of it (MDPL
+    class K)."""
+    if not isinstance(n, _ast.Assign) or len(n.targets) != 1:
+        return False
+    t = n.targets[0]
+    if not isinstance(t, kind):
+        return False
+    if isinstance(t, _ast.Subscript):
+        t = t.value
+    return isinstance(t, _ast.Name) and t.id == dname
+
+
+def _k_const_key(k):
+    """The str of constant `k`, or None (MDPL class K)."""
+    got = None
+    if isinstance(k, _ast.Constant) and isinstance(k.value, str):
+        got = k.value
+    return got
+
+
+def _k_dict_keys(top, dname, count):
+    """The keys of the dict `dname` that function `top` builds, read from the
+    code as K_ADMITTED_STORES states, or None (MDPL class K). Every Name
+    `dname` in the function must be one this reading accounts for: the one
+    binding, a store under a key, or a for loop's `<dname>.items()`."""
+    binds, subs, seen, names = [], [], [], []
+    for n in _ast.walk(top):
+        if isinstance(n, _ast.Name) and n.id == dname:
+            names.append(n)
+        if isinstance(n, _ast.For) and _k_items_of(n.iter, dname):
+            seen.append(n)
+        if _k_target_of(n, _ast.Name, dname):
+            binds.append(n.value)
+            seen.append(n)
+        if _k_target_of(n, _ast.Subscript, dname):
+            subs.append(n.targets[0])
+            seen.append(n)
+    if len(binds) != 1 or not isinstance(binds[0], _ast.Dict):
+        return None
+    shown = binds[0]
+    keys = [_k_const_key(k) for k in shown.keys]
+    for t in subs:
+        keys.append(_k_const_key(t.slice))
+    if None in keys or len(names) != len(seen):
+        return None
+    got = set(keys)
+    if len(got) == count:
+        return got
+    return None
+
+
+def _k_loop_admits(loop, call, dname):
+    """Whether statement `loop` is `for <name>, <x> in <dname>.items():`,
+    `call` is in it once with <name> as its second argument, and nothing in
+    the loop stores <name> but the loop's own target (MDPL class K)."""
+    if not (isinstance(loop, _ast.For) and _k_items_of(loop.iter, dname)
+            and isinstance(loop.target, _ast.Tuple) and len(loop.target.elts) == 2):
+        return False
+    var = loop.target.elts[0]
+    name = call.args[1]
+    if not (isinstance(var, _ast.Name) and isinstance(name, _ast.Name)
+            and var.id == name.id):
+        return False
+    inside = [n for n in _ast.walk(loop) if n is call]
+    stores = [n for n in _ast.walk(loop) if isinstance(n, _ast.Name)
+              and n.id == var.id and not isinstance(n.ctx, _ast.Load)]
+    return len(inside) == 1 and len(stores) == 1 and stores[0] is var
+
+
+def _k_admit_row(tree, row, base, out):
+    """Enter {id(call): the names it stores} in `out` when row `row` of
+    K_ADMITTED_STORES admits its form in module `tree`, read from a file
+    named `base` (MDPL class K)."""
+    file = row[0]
+    top_name = row[1]
+    place_name = row[2]
+    form = row[3]
+    dname = row[4]
+    tops = [st for st in tree.body if isinstance(st, (_ast.FunctionDef,
+                                                      _ast.AsyncFunctionDef))
+            and st.name == top_name]
+    if len(tops) != 1 or base != file:
+        return None
+    top = tops[0]
+    places = [st for st in top.body if isinstance(st, (_ast.FunctionDef,
+                                                       _ast.AsyncFunctionDef))
+              and st.name == place_name]
+    if place_name == top_name:
+        places = [top]
+    every = [c for c in _ast.walk(top) if isinstance(c, _ast.Call)
+             and _ast.unparse(c) == form]
+    keys = _k_dict_keys(top, dname, row[5])
+    if keys is None or len(places) != 1 or len(every) != 1:
+        return None
+    call = every[0]
+    place = places[0]
+    stmts = place.body
+    for loop in stmts:
+        ok = _k_loop_admits(loop, call, dname)
+        if ok:
+            out[id(call)] = keys
+    return None
+
+
+def _k_admitted(tree, path):
+    """{id(call): the names it stores} for each row of K_ADMITTED_STORES that
+    admits its form in module `tree`, read from file `path` (MDPL class K)."""
+    out = {}
+    if path is None:
+        return out
+    base = _os.path.basename(path)
+    for row in K_ADMITTED_STORES:
+        _k_admit_row(tree, row, base, out)
+    return out
 
 
 def reset_bound():
