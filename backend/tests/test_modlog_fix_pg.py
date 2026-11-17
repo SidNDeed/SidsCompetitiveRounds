@@ -797,18 +797,24 @@ def test_j3_the_add_route_stores_a_new_pattern_once_and_answers_duplicate_after(
     _j3_check(case, main.chat_moderate_spam_pattern_add)
 
 
-J3_MUTANTS = {
-    "select_list_cast_removed": ("SELECT CAST(:p AS VARCHAR(128)), :n", "SELECT :p, :n"),
-    "predicate_cast_removed": ("WHERE pattern = CAST(:p AS VARCHAR(128))", "WHERE pattern = :p"),
-}
+J3_SELECT_CAST = ("SELECT CAST(:p AS VARCHAR(128)), :n", "SELECT :p, :n")
+J3_PREDICATE_CAST = ("WHERE pattern = CAST(:p AS VARCHAR(128))", "WHERE pattern = :p")
 
 
-@pytest.mark.parametrize("mutant", sorted(J3_MUTANTS))
-def test_j3_mutant_with_one_cast_removed_is_red(case, admin_open, mutant):
-    handler = _mutant_of("chat_moderate_spam_pattern_add", J3_MUTANTS[mutant])
+def test_j3_mutant_with_both_casts_removed_is_red(case, admin_open):
+    handler = _mutant_of("chat_moderate_spam_pattern_add", J3_SELECT_CAST, J3_PREDICATE_CAST)
     with pytest.raises(AssertionError) as e:
         _j3_check(case, handler)
-    print("\nMUTANT-RED J3 %s: %s" % (mutant, str(e.value).splitlines()[0][:160]))
+    print("\nMUTANT-RED J3 both casts removed: %s" % str(e.value).splitlines()[0][:160])
+
+
+# Measured at the join: with ONE of the two CASTs removed the route still
+# passes, since the typed place fixes the parameter's type and the other place
+# takes it. A mutant of one CAST cannot turn the test red; the route keeps a
+# CAST at each place, and these two runs show that either one alone holds.
+@pytest.mark.parametrize("swap", [J3_SELECT_CAST, J3_PREDICATE_CAST], ids=["select_list", "predicate"])
+def test_j3_one_cast_alone_still_types_the_parameter(case, admin_open, swap):
+    _j3_check(case, _mutant_of("chat_moderate_spam_pattern_add", swap))
 
 
 # -- J4: the two unmute exemptions of the census, checked by behaviour ------------
