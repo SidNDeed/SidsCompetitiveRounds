@@ -26909,14 +26909,14 @@ def _modlog_part(details: dict):
             "parts": details.get("batch_parts"), "players_total": details.get("affected_total")}
 
 
-async def _modlog_runs_ended(db: AsyncSession, rows) -> dict:
+async def _modlog_runs_ended(db: AsyncSession, stored) -> dict:
     """run_id -> whether an end record of that run exists, for the start
-    records among `rows` (an action that commits in steps records a start
-    first, fix A1; the read says when no end followed it)."""
+    records among the decoded details values `stored` (an action that
+    commits in steps records a start first, fix A1; the read says when no
+    end followed it). Only an object has keys; any other value names no run."""
     runs = set()
-    for r in rows:
-        d = r["details"] if isinstance(r["details"], dict) else {}
-        if d.get("stage") == "started" and d.get("run_id"):
+    for d in stored:
+        if isinstance(d, dict) and d.get("stage") == "started" and d.get("run_id"):
             runs.add(str(d["run_id"]))
     if not runs:
         return {}
@@ -26945,8 +26945,8 @@ async def _modlog_answer(db: AsyncSession, f: dict, player_row=None) -> dict:
         "             FROM admin_actions aa"
         f"           WHERE {where} GROUP BY aa.action),"
         "     p AS (SELECT aa.id, aa.created_at, aa.action, aa.admin_steam_id, aa.affected_steam_ids,"
-        "                  aa.reason, aa.details, aa.target_steam_id, aa.target_match_id,"
-        "                  aa.target_series_id"
+        "                  aa.reason, CAST(aa.details AS text) AS details_text,"
+        "                  aa.target_steam_id, aa.target_match_id, aa.target_series_id"
         "             FROM admin_actions aa"
         f"           WHERE {where} AND {after}"
         f"           ORDER BY {order.format(t='aa')}"
@@ -26971,7 +26971,15 @@ async def _modlog_answer(db: AsyncSession, f: dict, player_row=None) -> dict:
         sids.update(s for s in (r["affected_steam_ids"] or []) if s)
     if f["player"]:
         sids.add(f["player"])
-    ended = await _modlog_runs_ended(db, rows)
+    # details is read as its jsonb text and decoded here once, by json.loads
+    # alone (fix F2b, the rule of the deletion's scrub), whatever JSON codec
+    # the connection carries: every stored JSON value is served as json.loads
+    # reads its text, with its own JSON type (an object, an array, a string,
+    # a number, true, false or null; a number with a fraction or an exponent
+    # is read as a float). An SQL NULL details stores no value and is served
+    # as {}.
+    stored = [{} if r["details_text"] is None else _json.loads(r["details_text"]) for r in rows]
+    ended = await _modlog_runs_ended(db, stored)
     names, dnames = {}, {}
     if sids or dids:
         for p in (await db.execute(text(
@@ -26984,16 +26992,11 @@ async def _modlog_answer(db: AsyncSession, f: dict, player_row=None) -> dict:
             if p["discord_id"] and p["discord_id"] in dids:
                 dnames[p["discord_id"]] = p["display_name"]
     out = []
-    for r in rows:
-        details = r["details"] if isinstance(r["details"], dict) else (r["details"] or {})
-        if isinstance(details, str):
-            try:
-                details = _json.loads(details)
-            except ValueError:
-                details = {"text": details}
+    for r, details in zip(rows, stored):
         # The sentence and the part read the details' keys. A record whose
-        # details is no object (a JSON array, a number, a string) has none for
-        # them, and is served as it stands; it is never an error (fix F2).
+        # details is no object (an array, a string, a number, true, false or
+        # null) has none for them, and is served as it stands; it is never an
+        # error (fix F2).
         facts = details if isinstance(details, dict) else {}
         actor = r["admin_steam_id"] or "unknown"
         out.append({

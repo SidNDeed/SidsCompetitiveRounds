@@ -665,3 +665,42 @@ def test_k2_mutant_without_the_press_number_check_is_red():
     with pytest.raises(AssertionError) as e:
         k2_two_presses_overlap(ns, api, "first")
     print("\nMUTANT-RED K2 press number check removed: %s" % str(e.value).splitlines()[0][:120])
+
+
+# F2b: the api serves each record's details as stored, so one page can hold a
+# details of every JSON kind. The renderer reads details only for the
+# carried-in mark, and from an object alone: a page of every kind renders, each
+# row on its line, and a string holding the mark's key as text is not marked.
+
+F2B_DETAILS = [{"note": "n"}, {}, None, [], ["x", 2], 0, 7.5, True, False, "", "a plain note",
+               json.dumps({"carried_from": "flagged_matches"})]
+
+
+def f2b_page_of_every_kind(ns):
+    _, body = n_records(len(F2B_DETAILS))({"sort": "n", "dir": "desc", "limit": str(len(F2B_DETAILS))})
+    for r, d in zip(body["rows"], F2B_DETAILS):
+        r["details"] = d
+    try:
+        out = ns["_modlog_render"](body, page=0, sort="n", action_idx=None, search="")
+    except Exception as e:  # the caller would answer MODLOG_SCHEMA
+        out = ("error", type(e).__name__, str(e)[:80])
+    assert isinstance(out, str), out
+    lines = out.split("\n")[3:]
+    assert len(lines) == len(F2B_DETAILS), lines
+    for i, line in enumerate(lines):
+        assert "Mod %d" % i in line, (i, line)
+    assert not any("carried in" in line for line in lines), lines
+
+
+def test_f2b_a_page_holding_details_of_every_kind_renders():
+    ns, api = bot(n_records(1))
+    f2b_page_of_every_kind(ns)
+
+
+def test_f2b_mutant_reading_a_key_of_any_details_is_red():
+    ns, api = bot(n_records(1))
+    _mutant(ns, "_modlog_carried", 'details.get("carried_from") if isinstance(details, dict) else None',
+            'details.get("carried_from")')
+    with pytest.raises(AssertionError) as e:
+        f2b_page_of_every_kind(ns)
+    print("\nMUTANT-RED F2b bot reading a key of any details: %s" % str(e.value).splitlines()[0][:120])

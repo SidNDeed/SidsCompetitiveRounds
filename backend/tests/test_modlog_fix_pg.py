@@ -30,6 +30,9 @@ read back against a real PostgreSQL, with its mutants.
         record whose details is no object
     F3  a page key whose sort value cannot be bound as text is refused with
         422 after_invalid on the read and on its internal twin
+    F2b the read and its internal twin serve a record's details as stored,
+        decoded once: every stored JSON value as itself with its own JSON
+        type, an SQL NULL details as {}
 
 Same harness as test_modlog_pg.py (its case schema, built by the ladder
 harness, sealed, dropped at the end):
@@ -1590,3 +1593,112 @@ def test_f3_mutant_without_the_check_is_red(case, admin_open, monkeypatch):
     with pytest.raises(AssertionError) as e:
         _f3_check(case)
     print("\nMUTANT-RED F3 check removed: %s" % str(e.value).splitlines()[0][:160])
+
+
+# -- F2b: the read serves a record's details as stored ----------------------------
+#
+# One record per stored kind, read through each route's own handler (the admin
+# read and its internal twin). The read decodes the stored jsonb text once:
+# every stored JSON value is served as itself, with its own JSON type; an SQL
+# NULL details, which stores no value, is served as {}. Each row still carries
+# a sentence. The object and the SQL NULL are the controls.
+
+F2B_KINDS = {   # kind: (the stored jsonb text, None for an SQL NULL; what the read serves)
+    "object": ('{"note": "n"}', {"note": "n"}),
+    "sql_null": (None, {}),
+    "json_null": ("null", None),
+    "empty_array": ("[]", []),
+    "array": ('["x", 2]', ["x", 2]),
+    "zero": ("0", 0),
+    "number": ("7.5", 7.5),
+    "true": ("true", True),
+    "false": ("false", False),
+    "empty_string": ('""', ""),
+    "plain_string": ('"a plain note"', "a plain note"),
+    "json_object_text": (json.dumps('{"note": "n"}'), '{"note": "n"}'),
+}
+F2B_CONTROLS = ("object", "sql_null")
+
+
+def _f2b_served(case, kind):
+    stored = F2B_KINDS[kind][0]
+
+    async def body(sm):
+        async def seed(db):
+            did = _did()
+            a, _ = await _admin(db, discord_id=did)
+            await db.execute(text(
+                "INSERT INTO admin_actions (admin_steam_id, action, reason, details)"
+                " VALUES (:a, 'chat_mute', :r, CAST(:d AS jsonb))"),
+                {"a": a, "r": "f2b " + kind, "d": stored})
+            return a, did
+        a, did = await _commit(sm, seed)
+        out = {}
+        for route in ("admin", "internal"):
+            # the actor filter keeps the page to this test's own record
+            kw = {"actor": a, "limit": 100}
+            try:
+                async with sm() as db:
+                    if route == "admin":
+                        ans = await main.admin_modlog(
+                            base._Req(admin_steam_id=a, hmac_signature="x", **kw), db=db)
+                    else:
+                        ans = await main.internal_modlog(
+                            base._Req(**kw), x_internal_key=INTERNAL_KEY, x_actor_discord_id=did, db=db)
+                out[route] = (ans["total"], [(r["reason"], r["details"], r["sentence"]) for r in ans["rows"]])
+            except HTTPException as e:
+                out[route] = (e.status_code, e.detail)
+            except Exception as e:  # what reaches the client as a 500
+                out[route] = ("error", type(e).__name__)
+        return out
+    return _with_sm(case, body)
+
+
+def _f2b_check(case, kind):
+    stored, want = F2B_KINDS[kind]
+    got = _f2b_served(case, kind)
+    for route in ("admin", "internal"):
+        assert isinstance(got[route][1], list), (kind, route, got[route])
+        total, rows = got[route]
+        assert total == len(rows) == 1, (kind, route, got[route])
+        reason, details, sentence = rows[0]
+        assert reason == "f2b " + kind, (kind, route, reason)
+        assert isinstance(sentence, str) and sentence, (kind, route, sentence)
+        assert json.dumps(details, sort_keys=True) == json.dumps(want, sort_keys=True), \
+            (kind, route, "served", details, "stored", stored)
+
+
+@pytest.mark.parametrize("kind", sorted(F2B_KINDS))
+def test_f2b_the_read_serves_details_as_stored(case, admin_open, kind):
+    _f2b_check(case, kind)
+
+
+F2B_FACTS = "        facts = details if isinstance(details, dict) else {}\n"
+F2B_MUTANTS = {
+    # the str the single decode gave decoded a second time
+    "second_decode": (((F2B_FACTS,
+                        "        if isinstance(details, str):\n"
+                        "            try:\n"
+                        "                details = _json.loads(details)\n"
+                        "            except ValueError:\n"
+                        "                details = {\"text\": details}\n" + F2B_FACTS),),
+                      ("json_object_text", "plain_string")),
+    # a falsy stored value served as {}
+    "falsy_coercion": ((("else _json.loads(r[\"details_text\"]) for r in rows]",
+                         "else (_json.loads(r[\"details_text\"]) or {}) for r in rows]"),),
+                       ("empty_array", "empty_string", "false", "json_null", "zero")),
+}
+
+
+@pytest.mark.parametrize("mutant,kind", [(m, k) for m in sorted(F2B_MUTANTS)
+                                         for k in F2B_MUTANTS[m][1] + F2B_CONTROLS])
+def test_f2b_mutant_is_red_and_the_controls_stay_green(case, admin_open, monkeypatch, mutant, kind):
+    swaps, red = F2B_MUTANTS[mutant]
+    monkeypatch.setattr(main, "_modlog_answer", _mutant_of("_modlog_answer", *swaps))
+    if kind in red:
+        with pytest.raises(AssertionError) as e:
+            _f2b_check(case, kind)
+        print("\nMUTANT-RED F2b %s %s: %s" % (mutant, kind, str(e.value).splitlines()[0][:160]))
+    else:
+        _f2b_check(case, kind)
+        print("\nMUTANT-CONTROL-GREEN F2b %s %s" % (mutant, kind))
