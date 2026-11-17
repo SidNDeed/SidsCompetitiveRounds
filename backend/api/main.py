@@ -25070,10 +25070,11 @@ async def _modlog_steam_ids(db: AsyncSession, player_ids) -> list:
 
 async def _modlog_linked_steam(db: AsyncSession, discord_ids) -> dict:
     """Discord id -> the Steam id of the LIVE account linked to it at this
-    moment (a deleted account is linked to no one). The one resolution of a
-    Discord id to a player: the moderator log's internal read uses it for
-    the asking moderator, and every chat-moderation record for a message's
-    Discord author. An empty input reads nothing."""
+    moment (a deleted account is linked to no one). The moderator log's
+    internal read uses it for the asking moderator, and every chat-deletion
+    record for a message's Discord author (a deletion resolves no player
+    itself). A mute record names the account the mute itself resolved
+    (_modlog_mute_named), not this. An empty input reads nothing."""
     ids = sorted({str(d) for d in (discord_ids or ()) if d})
     if not ids:
         return {}
@@ -25085,7 +25086,7 @@ async def _modlog_linked_steam(db: AsyncSession, discord_ids) -> dict:
 
 
 async def _modlog_chat_authors(db: AsyncSession, rows) -> tuple:
-    """The players a chat-moderation record names for stored chat_messages
+    """The players a chat-deletion record names for stored chat_messages
     rows (fix A2): a row's Steam author, or, for a row stored with only a
     Discord author, the live account linked to that Discord id now. Answers
     (the sorted Steam ids, the number of distinct Discord authors that no

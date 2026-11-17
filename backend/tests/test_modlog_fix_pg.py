@@ -291,9 +291,15 @@ def test_a2_a_discord_author_is_named_through_the_live_linked_account(case, admi
 
 @pytest.mark.parametrize("route", sorted(A2_ROUTES))
 def test_a2_mutant_without_the_resolution_is_red(case, admin_open, monkeypatch, route):
-    async def nobody(db, discord_ids):
-        return {}
-    monkeypatch.setattr(main, "_modlog_linked_steam", nobody)
+    if route in ("mute_by_message", "discord_mute"):
+        # A mute record names the account the mute itself resolved (fix F1):
+        # the mutant takes that resolution away inside the mute helper.
+        monkeypatch.setattr(main, "_apply_mute_for_row", _mutant_of(
+            "_apply_mute_for_row", ("        if linked:\n", "        linked = None\n        if linked:\n")))
+    else:
+        async def nobody(db, discord_ids):
+            return {}
+        monkeypatch.setattr(main, "_modlog_linked_steam", nobody)
     with pytest.raises(AssertionError) as e:
         _a2_check(case, route)
     print("\nMUTANT-RED A2 %s resolution removed: %s" % (route, str(e.value).splitlines()[0][:160]))
