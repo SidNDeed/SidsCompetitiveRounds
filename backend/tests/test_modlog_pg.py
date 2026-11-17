@@ -856,6 +856,16 @@ SETTINGS = [
      " too wherever the path is not pinned"),
     ("search_path=schema,pg_catalog+plants=false", (("search_path", "{schema},pg_catalog"),), "enters",
      "as above, every plant answering false"),
+    ("default path+format(text,text)", (), "enters",
+     "a format(text, text) in the table's schema: a call format('...', nsp) has an untyped literal,"
+     " so it is no exact match of pg_catalog's format(text, VARIADIC \"any\") and the path does not"
+     " decide between the two; a bare call takes the plant. 420 writes pg_catalog.format"),
+    ("default path+format(text,VARIADIC text[])", (), "enters",
+     "as above, with a VARIADIC text[] plant: a bare call takes it on the first apply as on a rerun"),
+    ("default path+jsonb arrows(jsonb,jsonb)", (), "enters",
+     "a ->> and a -> for jsonb with jsonb in the table's schema: an untyped literal on the right is"
+     " read as jsonb first, so a bare details->>'key' takes the plant (pg_catalog has no such pair)."
+     " 420 writes OPERATOR(pg_catalog.->>) and OPERATOR(pg_catalog.->)"),
 ]
 SETTING = {s[0]: s for s in SETTINGS}
 
@@ -1101,10 +1111,40 @@ def _reason_verdicts(schema):
 
 def _plant_of(name):
     """The objects an entry of SETTINGS plants in the table's own schema."""
-    for kind in ("shadows", "plants=true", "plants=false"):
+    for kind in ("shadows", "plants=true", "plants=false") + tuple(CALL_PLANTS):
         if name.endswith("+" + kind):
             return kind
     return None
+
+
+# Same-named objects in the table's schema whose argument types are NOT those
+# of pg_catalog's own (S1 of the fix order): the path decides only between
+# identical argument types, so each is taken by a bare call or operator whose
+# arguments are no exact match of pg_catalog's; only the schema written at the
+# call keeps pg_catalog's. (create, drop) per kind.
+CALL_PLANTS = {
+    "format(text,text)": (
+        "CREATE FUNCTION {s}.format(text, text) RETURNS text LANGUAGE sql IMMUTABLE"
+        " AS 'SELECT ''modlog_plant''';",
+        "DROP FUNCTION IF EXISTS {s}.format(text, text);"),
+    "format(text,VARIADIC text[])": (
+        "CREATE FUNCTION {s}.format(text, VARIADIC text[]) RETURNS text LANGUAGE sql IMMUTABLE"
+        " AS 'SELECT ''modlog_plant''';",
+        "DROP FUNCTION IF EXISTS {s}.format(text, VARIADIC text[]);"),
+    "jsonb arrows(jsonb,jsonb)": (
+        "CREATE FUNCTION {s}.modlog_arrow_text(jsonb, jsonb) RETURNS text LANGUAGE sql IMMUTABLE"
+        " AS 'SELECT ''modlog_plant''';"
+        " CREATE OPERATOR {s}.->> (LEFTARG = jsonb, RIGHTARG = jsonb, FUNCTION = {s}.modlog_arrow_text);"
+        " CREATE FUNCTION {s}.modlog_arrow_json(jsonb, jsonb) RETURNS jsonb LANGUAGE sql IMMUTABLE"
+        " AS 'SELECT ''\"modlog_plant\"''::jsonb';"
+        " CREATE OPERATOR {s}.-> (LEFTARG = jsonb, RIGHTARG = jsonb, FUNCTION = {s}.modlog_arrow_json);",
+        "DROP OPERATOR IF EXISTS {s}.->> (jsonb, jsonb); DROP FUNCTION IF EXISTS {s}.modlog_arrow_text(jsonb, jsonb);"
+        " DROP OPERATOR IF EXISTS {s}.-> (jsonb, jsonb); DROP FUNCTION IF EXISTS {s}.modlog_arrow_json(jsonb, jsonb);"),
+    "format_type(oid,text)": (
+        "CREATE FUNCTION {s}.format_type(oid, text) RETURNS text LANGUAGE sql IMMUTABLE"
+        " AS 'SELECT ''modlog_plant''';",
+        "DROP FUNCTION IF EXISTS {s}.format_type(oid, text);"),
+}
 
 
 # The pairs of argument types that pg_catalog has no `=` for exactly (it
@@ -1123,6 +1163,9 @@ def _plant(schema, kind, on):
     pair of PLANT_PAIRS that always answers true / false. All in the table's
     own schema."""
     s = harness.quoted(schema)
+    if kind in CALL_PLANTS:
+        _exec(schema, CALL_PLANTS[kind][0 if on else 1].format(s=s))
+        return
     if kind == "shadows":
         if on:
             _exec(schema, (
@@ -1157,7 +1200,7 @@ def _restore(schema, plant=None):
     """Back to the state every test starts from: 420 applied under the
     server's defaults. Planted operators go first; shadows go after the
     rollback (a CHECK a mutant bound to a shadow depends on it)."""
-    if plant in ("plants=true", "plants=false"):
+    if plant in ("plants=true", "plants=false") or plant in CALL_PLANTS:
         _plant(schema, plant, False)
     rc, err = _psql_apply(schema, R420)
     assert rc == 0, err
@@ -1335,13 +1378,21 @@ _OID_IDENTITY = ("  IF pg_catalog.to_regclass('admin_actions')::oid IS DISTINCT 
 _TBL_OID = ("  tbl pg_catalog.oid := pg_catalog.to_regclass(\n"
             "    pg_catalog.format('%I.admin_actions', pg_catalog.current_schema()))::pg_catalog.oid;\n")
 _CHAT_JOIN = "JOIN players p ON p.steam_id::text = cm.steam_id::text"
+# S1: the sites a same-named function or operator of other argument types
+# takes when written without pg_catalog (each mutant below drops the schema).
+_S1_IDX_FORMAT = "  idx := pg_catalog.to_regclass(pg_catalog.format('%I.ix_admin_actions_affected', nsp))::oid;\n"
+_S1_POST_FORMAT = ("       WHERE i.indexrelid = pg_catalog.to_regclass(pg_catalog.format("
+                   "'%I.ix_admin_actions_affected', nsp))::oid\n")
+_S1_REASON_OP = "   SET reason = pg_catalog.left(details OPERATOR(pg_catalog.->>) 'reason', 256)\n"
 
 
 @pytest.mark.parametrize("pin,old,new,setting,expect", [
     ("quote_all_identifiers off", _QAI_PIN, "", "quote_all_identifiers=on",
      ("SECOND-APPLY-RC", "FIRST-APPLY-RC")),
+    # The CHECK's char_length names pg_catalog itself (S1), so its behaviour
+    # no longer moves with the path; the deparsed text the file compares does.
     ("the search path pinned", _PATH_PIN, "", "search_path=schema,pg_catalog+shadows",
-     ("SECOND-APPLY-RC", "CHECK-BEHAVIOUR")),
+     ("SECOND-APPLY-RC",)),
     ("the tombstone test without a backslash", _TOMB, "a.target_steam_id::text NOT LIKE 'deleted\\_%'",
      "standard_conforming_strings=off", ("FILL-DIFFERS",)),
     ("the table's identity held as an oid", _TBL_OID,
@@ -1350,7 +1401,16 @@ _CHAT_JOIN = "JOIN players p ON p.steam_id::text = cm.steam_id::text"
      "default path+plants=false", ("SECOND-APPLY-RC",)),
     ("varchar ids compared as text", _CHAT_JOIN, "JOIN players p ON p.steam_id = cm.steam_id",
      "default path+plants=false", ("FILL-DIFFERS",)),
-], ids=["quote_all_identifiers", "search_path", "tombstone_literal", "oid_identity", "varchar_as_text"])
+    ("the index lookup's format names pg_catalog", _S1_IDX_FORMAT, _S1_IDX_FORMAT.replace("(pg_catalog.format(", "(format("),
+     "default path+format(text,text)", ("SECOND-APPLY-RC",)),
+    ("the post-check's format names pg_catalog", _S1_POST_FORMAT,
+     _S1_POST_FORMAT.replace("(pg_catalog.format(", "(format("),
+     "default path+format(text,VARIADIC text[])", ("SECOND-APPLY-RC", "FIRST-APPLY-RC")),
+    ("the reason copy's ->> names pg_catalog", _S1_REASON_OP,
+     _S1_REASON_OP.replace(" OPERATOR(pg_catalog.->>) ", "->>"),
+     "default path+jsonb arrows(jsonb,jsonb)", ("SECOND-APPLY-RC",)),
+], ids=["quote_all_identifiers", "search_path", "tombstone_literal", "oid_identity", "varchar_as_text",
+        "s1_idx_lookup", "s1_post_check", "s1_reason_op"])
 def test_mutant_420_without_its_pin_is_red_under_its_setting(mcase, m420, pin, old, new, setting,
                                                             expect, capsys):
     """One mutant per pinned line of the settings list: the file without that
@@ -1722,3 +1782,497 @@ def test_420_refuses_a_name_that_exists_with_another_shape(mcase, m420, label, d
         assert _snap(mcase) == before
     finally:
         _restore(mcase)
+
+
+def _refusal_beside_format_type_plant(schema, path):
+    """The refusal of a varchar[] affected_steam_ids with a format_type(oid,
+    text) in the table's schema: (rc, stderr). The refusal's message passes
+    an untyped NULL, so a bare format_type takes the plant."""
+    rc, err = _psql_apply(schema, R420)
+    assert rc == 0, err
+    try:
+        _exec(schema, "ALTER TABLE admin_actions ADD COLUMN affected_steam_ids varchar(17)[]")
+        _plant(schema, "format_type(oid,text)", True)
+        return _psql_apply(schema, path)
+    finally:
+        _plant(schema, "format_type(oid,text)", False)
+        _restore(schema)
+
+
+def test_420_refusal_names_the_type_beside_a_format_type_plant(mcase, m420, capsys):
+    rc, err = _refusal_beside_format_type_plant(mcase, M420)
+    with capsys.disabled():
+        print("\nMODLOG-FORMAT-TYPE-PLANT rc=%s %s" % (rc, _tail(err)))
+    assert rc != 0 and "affected_steam_ids is character varying" in err, (rc, _tail(err))
+
+
+# -- the fill's lookups: in the id's own type, by index (S2) ---------------------
+#
+# Every table the fill looks up gets 50,000 rows (ids in ranges of their own,
+# f5a0... to f5e2...; chat ids from 800000001), and 500 records name ids that
+# are absent from them. The plan read is that of the file's OWN fill
+# statement: a copy of 420 whose fill EXECUTE is turned into EXPLAIN (FORMAT
+# JSON) ... INTO, raised as a notice, and whose COMMIT is a ROLLBACK, so the
+# planned text is the file's text and nothing is applied.
+
+S2_LOOKED_UP = ("players", "matches", "ranked_series", "team_series", "pc_trades", "chat_messages")
+_S2_N = 50000
+S2_SEED = """
+INSERT INTO players (id, steam_id, display_name)
+SELECT CAST('f5a00000-0000-4000-8000-' || lpad(to_hex(i), 12, '0') AS uuid),
+       '76561180' || lpad(i::text, 9, '0'), 'S2 seed ' || i
+  FROM generate_series(1, {n} + 3) i;
+INSERT INTO matches (id, player1_id, player2_id, p1_rounds_won, p2_rounds_won)
+SELECT CAST('f5b00000-0000-4000-8000-' || lpad(to_hex(i), 12, '0') AS uuid),
+       CAST('f5a00000-0000-4000-8000-' || lpad(to_hex(i), 12, '0') AS uuid),
+       CAST('f5a00000-0000-4000-8000-' || lpad(to_hex(i + 1), 12, '0') AS uuid), 3, 1
+  FROM generate_series(1, {n}) i;
+INSERT INTO ranked_series (id, player1_id, player2_id, p1_series_wins, p2_series_wins, status, created_at,
+                           live_p1_points, live_p2_points, is_tournament, is_private)
+SELECT CAST('f5c00000-0000-4000-8000-' || lpad(to_hex(i), 12, '0') AS uuid),
+       CAST('f5a00000-0000-4000-8000-' || lpad(to_hex(i), 12, '0') AS uuid),
+       CAST('f5a00000-0000-4000-8000-' || lpad(to_hex(i + 1), 12, '0') AS uuid),
+       2, 0, 'completed', NOW(), 0, 0, false, false
+  FROM generate_series(1, {n}) i;
+INSERT INTO team_series (id, t1a_id, t1b_id, t2a_id, t2b_id, status)
+SELECT CAST('f5d00000-0000-4000-8000-' || lpad(to_hex(i), 12, '0') AS uuid),
+       CAST('f5a00000-0000-4000-8000-' || lpad(to_hex(i), 12, '0') AS uuid),
+       CAST('f5a00000-0000-4000-8000-' || lpad(to_hex(i + 1), 12, '0') AS uuid),
+       CAST('f5a00000-0000-4000-8000-' || lpad(to_hex(i + 2), 12, '0') AS uuid),
+       CAST('f5a00000-0000-4000-8000-' || lpad(to_hex(i + 3), 12, '0') AS uuid), 'completed'
+  FROM generate_series(1, {n}) i;
+INSERT INTO chat_messages (id, source, display_name, message, steam_id)
+SELECT 800000000 + i, 'game', 'S2 seed', 'x', '76561180' || lpad(i::text, 9, '0')
+  FROM generate_series(1, {n}) i;
+INSERT INTO pc_trades (id, pair_lo, pair_hi, proposer, a_prints, b_prints, digest, propose_nonce,
+                       proposer_generation, counterparty_generation, expires_at)
+SELECT CAST('f5e00000-0000-4000-8000-' || lpad(to_hex(i), 12, '0') AS uuid),
+       CAST('f5a00000-0000-4000-8000-' || lpad(to_hex(i), 12, '0') AS uuid),
+       CAST('f5a00000-0000-4000-8000-' || lpad(to_hex(i + 1), 12, '0') AS uuid),
+       CAST('f5a00000-0000-4000-8000-' || lpad(to_hex(i), 12, '0') AS uuid),
+       ARRAY[CAST('f5e10000-0000-4000-8000-' || lpad(to_hex(i), 12, '0') AS uuid)],
+       ARRAY[CAST('f5e20000-0000-4000-8000-' || lpad(to_hex(i), 12, '0') AS uuid)],
+       'd', 'modlogs2' || lpad(i::text, 6, '0'), 0, 0, NOW() + interval '1 day'
+  FROM generate_series(1, {n}) i;
+INSERT INTO admin_actions (id, admin_steam_id, action, target_steam_id, target_match_id, target_series_id, details)
+SELECT CAST('f5f00000-0000-4000-8000-' || lpad(to_hex(i), 12, '0') AS uuid), '76561190000000099',
+       CASE i % 6 WHEN 0 THEN 'record_exclude' WHEN 1 THEN 'chat_delete' WHEN 2 THEN 'pc_trade_reverse'
+                  WHEN 3 THEN 'reverse_series' WHEN 4 THEN 'resolve_team_series' ELSE 'flag_review' END,
+       CASE WHEN i % 6 = 2 THEN 'f5ff0000-0000-4000-8000-' || lpad(to_hex(i), 12, '0') END,
+       CASE WHEN i % 6 = 5 THEN CAST('f5ff0000-0000-4000-8000-' || lpad(to_hex(i), 12, '0') AS uuid) END,
+       CASE WHEN i % 6 IN (3, 4) THEN CAST('f5ff0000-0000-4000-8000-' || lpad(to_hex(i), 12, '0') AS uuid) END,
+       CASE i % 6 WHEN 0 THEN jsonb_build_object('board', '*', 'match_id',
+                                                 'f5ff0000-0000-4000-8000-' || lpad(to_hex(i), 12, '0'))
+                  WHEN 1 THEN CASE WHEN i % 12 = 1 THEN jsonb_build_object('message_id', 900000000 + i)
+                                   ELSE jsonb_build_object('message_ids',
+                                                           jsonb_build_array(900000000 + i, 900100000 + i)) END
+                  ELSE '{{}}'::jsonb END
+  FROM generate_series(1, 500) i;
+ANALYZE players; ANALYZE matches; ANALYZE ranked_series; ANALYZE team_series;
+ANALYZE chat_messages; ANALYZE pc_trades; ANALYZE admin_actions;
+""".format(n=_S2_N)
+@pytest.fixture(scope="module")
+def scase():
+    """A third case schema of its own for the 50,000-row tables: built as
+    mcase, 420 rolled back, S2_SEED written once, dropped at the end (a
+    delete of 50,000 players rows checks every foreign key that names them
+    and takes many minutes; the drop of the schema does not)."""
+    lh._require_live_pg()
+    built = {}
+
+    async def build():
+        c = harness.CaseSchema(lh.DSN, "modlogs")
+        await c.__aenter__()
+        try:
+            await lh._build(c)
+        except BaseException:
+            await c.__aexit__(None, None, None)
+            raise
+        built.update(schema=c.schema, own=c.own)
+        await c.conn.close()
+    _run(build())
+    try:
+        rc, err = _psql_apply(built["schema"], R420)
+        assert rc == 0, err
+        _exec(built["schema"], S2_SEED)
+        yield built["schema"]
+    finally:
+        async def drop():
+            conn = await harness.connect_bound(lh.DSN, built["schema"])
+            try:
+                await harness.drop_case_schema(conn, built["schema"], built["own"])
+            finally:
+                await conn.close()
+        _run(drop())
+
+
+def _fill_plan_variant(path):
+    """A copy of the file at `path` whose fill statement is planned, not run:
+    its EXECUTE becomes EXECUTE 'EXPLAIN (FORMAT JSON) ' || <the same text>
+    INTO a variable, raised as a notice; its COMMIT a ROLLBACK."""
+    src = io.open(path, encoding="utf-8").read()
+    for anchor in ("DO $fill420$\nDECLARE\n", "  EXECUTE $q$\n", "  $q$;\nEND $fill420$;"):
+        assert src.count(anchor) == 1, ("the fill's anchor is not in the file exactly once", anchor)
+    src = src.replace("DO $fill420$\nDECLARE\n", "DO $fill420$\nDECLARE\n  modlog_plan pg_catalog.text;\n")
+    src = src.replace("  EXECUTE $q$\n", "  EXECUTE 'EXPLAIN (FORMAT JSON) ' || $q$\n")
+    src = src.replace("  $q$;\nEND $fill420$;",
+                      "  $q$ INTO modlog_plan;\n  RAISE NOTICE 'MODLOG-PLAN %', modlog_plan;\nEND $fill420$;")
+    body, tail = src.rstrip().rsplit("\n", 1)
+    assert tail.strip() == "COMMIT;", tail
+    fd, out = tempfile.mkstemp(prefix="modlog420_", suffix=".sql")
+    with io.open(fd, "w", encoding="utf-8", newline="") as fh:
+        fh.write(body + "\nROLLBACK;\n")
+    return out
+
+
+def _plan_nodes(plan):
+    """Every node of an EXPLAIN (FORMAT JSON) tree, subplans included."""
+    stack = [n["Plan"] for n in plan]
+    while stack:
+        node = stack.pop()
+        yield node
+        stack.extend(node.get("Plans", ()))
+
+
+def _s2_failures(schema, path):
+    """On scase from the rollback state: the fill's plan read from `path`,
+    then a real apply of `path` timed (the next call rolls it back first).
+    Answers (failures, the apply's wall seconds, {table: node types})."""
+    import time
+    rc, err = _psql_apply(schema, R420)
+    assert rc == 0, err
+    fails, wall, seen = [], None, {}
+    variant = _fill_plan_variant(path)
+    try:
+        rc, err = _psql_apply(schema, variant)
+    finally:
+        os.unlink(variant)
+    at = err.find("MODLOG-PLAN ")
+    if rc != 0 or at < 0:
+        return ["PLAN-RUN rc=%s %s" % (rc, _tail(err))], wall, seen
+    plan, _ = json.JSONDecoder().raw_decode(err[at + len("MODLOG-PLAN "):])
+    for node in _plan_nodes(plan):
+        rel = node.get("Relation Name")
+        if rel in S2_LOOKED_UP:
+            seen.setdefault(rel, set()).add(node["Node Type"])
+            if node["Node Type"] == "Seq Scan":
+                fails.append("SEQ-SCAN %s" % rel)
+    missing = [t for t in S2_LOOKED_UP if t not in seen]
+    if missing:
+        fails.append("NOT-PLANNED %s" % missing)
+    t0 = time.monotonic()
+    rc, err = _psql_apply(schema, path)
+    wall = time.monotonic() - t0
+    if rc != 0:
+        fails.append("APPLY-RC rc=%s %s" % (rc, _tail(err)))
+    return sorted(set(fails)), wall, seen
+
+
+def test_the_fill_looks_up_every_table_by_its_index_on_50000_rows(scase, capsys):
+    """S2: no node of the fill's plan on a looked-up table is a sequential
+    scan, with 50,000 rows in each and 500 records naming absent ids; the
+    apply's wall time is printed."""
+    fails, wall, seen = _s2_failures(scase, M420)
+    with capsys.disabled():
+        print("\nMODLOG-S2-PLAN %s; apply wall %s s; %s"
+              % (fails or "no sequential scan on a looked-up table",
+                 "-" if wall is None else "%.2f" % wall,
+                 {k: sorted(v) for k, v in sorted(seen.items())}))
+    assert not fails, fails
+
+
+def _variant_pairs(path, pairs):
+    """A copy of the file at `path` with each `old` of `pairs` (each in the
+    file exactly once) replaced by its `new`."""
+    src = io.open(path, encoding="utf-8").read()
+    for old, new in pairs:
+        assert src.count(old) == 1, ("the mutant's text is not in the file exactly once", old)
+        src = src.replace(old, new)
+    fd, out = tempfile.mkstemp(prefix="modlog420_", suffix=".sql")
+    with io.open(fd, "w", encoding="utf-8", newline="") as fh:
+        fh.write(src)
+    return out
+
+
+@pytest.mark.parametrize("pairs,table", [
+    ([("WHERE m.id = ANY (ARRAY[a.target_match_id,", "WHERE m.id::text = ANY (ARRAY[a.target_match_id::text,"),
+      ("THEN CAST(a.details OPERATOR(pg_catalog.->>) 'match_id' AS pg_catalog.uuid)",
+       "THEN a.details OPERATOR(pg_catalog.->>) 'match_id'")], "matches"),
+    ([("AND t.id = CASE WHEN", "AND t.id::text = CASE WHEN"),
+      ("THEN CAST(a.target_steam_id::text AS pg_catalog.uuid) END", "THEN a.target_steam_id::text END")],
+     "pc_trades"),
+    ([("AND cm.id = ANY (ARRAY(", "AND cm.id::text = ANY (ARRAY("),
+      ("THEN CAST(v.e AS pg_catalog.int8) END", "THEN v.e END")], "chat_messages"),
+], ids=["matches", "pc_trades", "chat_messages"])
+def test_mutant_a_lookup_compared_as_text_scans_its_table(scase, pairs, table, capsys):
+    """S2: each lookup with the text-side comparison restored (the column
+    cast to text) plans a sequential scan of its table on 50,000 rows."""
+    path = _variant_pairs(M420, pairs)
+    try:
+        fails, wall, _ = _s2_failures(scase, path)
+    finally:
+        os.unlink(path)
+    with capsys.disabled():
+        print("\nMODLOG-MUTANT s2 %s: %s; apply wall %s s"
+              % (table, fails, "-" if wall is None else "%.2f" % wall))
+    assert "SEQ-SCAN %s" % table in fails, fails
+
+
+# -- carried in: reviewed flags that no record names (S3) -----------------------
+#
+# From the rollback state: a live reviewer, a deleted account (its players row
+# rewritten to a tombstone, as delete_player_data does; flagged_matches keeps
+# its raw id, which delete_player_data does not touch), and five flags:
+#   C1 reviewed by the live reviewer, two live players       -> carried
+#   C2 reviewed by the live reviewer, the deleted id a player -> carried, naming only the live one
+#   C3 reviewed by the deleted id                            -> carried, the actor a tombstone
+#   C4 reviewed, with a flag_review record (its id upper-case, as a client may send it) -> not carried
+#   C5 not reviewed                                          -> not carried
+_S3_LIVE_REVIEWER = "76561190000000420"
+_S3_GONE = "76561190000000777"
+_S3_F = "00000000-0000-4000-8000-0000000003c%d"
+S3_SEED = """
+INSERT INTO players (id, steam_id, display_name) VALUES
+ ('00000000-0000-4000-8000-0000000003a1', '{rev}', 'S3 reviewer');
+INSERT INTO players (id, steam_id, display_name, deleted_at) VALUES
+ ('00000000-0000-4000-8000-0000000003a2', 'deleted_s3000001', '[Deleted User]', NOW());
+INSERT INTO flagged_matches (id, match_id, player_steam_ids, flag_reason, auto_invalidated,
+                             reviewed_at, reviewed_by_steam_id, review_action, restoration_required,
+                             discord_evidence_revision, created_at)
+VALUES ('{f1}', '00000000-0000-0000-0000-0000000000d1', ARRAY['76561190000000005', '76561190000000006'],
+        'inactive_player', false, '2026-04-24 10:00:00+00', '{rev}', 'false_positive', false, 1, NOW()),
+       ('{f2}', '00000000-0000-0000-0000-0000000000d1', ARRAY['{gone}', '76561190000000005'],
+        'too_many_cards', true, '2026-05-09 11:00:00+00', '{rev}', 'false_positive', true, 2, NOW()),
+       ('{f3}', '00000000-0000-0000-0000-0000000000d1', ARRAY['76561190000000005', '76561190000000006'],
+        'inactive_player', false, '2026-05-01 12:00:00+00', '{gone}', 'confirmed_cheat', false, 1, NOW()),
+       ('{f4}', '00000000-0000-0000-0000-0000000000d1', ARRAY['76561190000000005', '76561190000000006'],
+        'inactive_player', false, '2026-06-01 13:00:00+00', '{rev}', 'false_positive', false, 1, NOW());
+INSERT INTO flagged_matches (id, match_id, player_steam_ids, flag_reason, auto_invalidated,
+                             restoration_required, discord_evidence_revision, created_at)
+VALUES ('{f5}', '00000000-0000-0000-0000-0000000000d1', ARRAY['76561190000000005'], 'inactive_player',
+        false, false, 1, NOW());
+INSERT INTO admin_actions (id, admin_steam_id, action, target_match_id, details) VALUES
+ ('00000000-0000-4000-8000-0000000003b4', '{rev}', 'flag_review', '00000000-0000-0000-0000-0000000000d1',
+  jsonb_build_object('flag_id', upper('{f4}'), 'review_action', 'false_positive'));
+""".format(rev=_S3_LIVE_REVIEWER, gone=_S3_GONE, f1=_S3_F % 1, f2=_S3_F % 2, f3=_S3_F % 3,
+           f4=_S3_F % 4, f5=_S3_F % 5)
+S3_UNSEED = """
+DELETE FROM admin_actions WHERE id = '00000000-0000-4000-8000-0000000003b4'
+   OR (action = 'flag_review' AND details->>'flag_id' LIKE '00000000-0000-4000-8000-0000000003c_');
+DELETE FROM flagged_matches WHERE CAST(id AS text) LIKE '00000000-0000-4000-8000-0000000003c_';
+DELETE FROM players WHERE id IN ('00000000-0000-4000-8000-0000000003a1', '00000000-0000-4000-8000-0000000003a2');
+"""
+# The count statement of the header (source 5), as the landing runs it.
+S3_COUNT = ("SELECT COUNT(*) FROM flagged_matches fm WHERE fm.reviewed_at IS NOT NULL AND NOT EXISTS"
+            " (SELECT 1 FROM admin_actions aa WHERE aa.action = 'flag_review'"
+            " AND lower(aa.details->>'flag_id') = CAST(fm.id AS text))")
+S3_CARRIED_SQL = (
+    "SELECT coalesce(json_agg(json_build_object('flag', a.details->>'flag_id', 'actor', a.admin_steam_id,"
+    " 'at', to_char(a.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS'), 'match', a.target_match_id,"
+    " 'target', a.target_steam_id, 'series', a.target_series_id, 'affected', a.affected_steam_ids,"
+    " 'reason', a.reason, 'details', a.details) ORDER BY a.details->>'flag_id'), '[]')::text"
+    " FROM admin_actions a WHERE a.details->>'carried_from' = 'flagged_matches'")
+_S3_DETAILS = lambda f, verdict, restore, rev: {  # noqa: E731
+    "flag_id": f, "review_action": verdict, "evidence_revision": rev,
+    "restoration_required": restore, "carried_from": "flagged_matches"}
+S3_EXPECT = [
+    {"flag": _S3_F % 1, "actor": _S3_LIVE_REVIEWER, "at": "2026-04-24 10:00:00",
+     "match": "00000000-0000-0000-0000-0000000000d1", "target": None, "series": None,
+     "affected": ["76561190000000005", "76561190000000006"], "reason": None,
+     "details": _S3_DETAILS(_S3_F % 1, "false_positive", False, 1)},
+    {"flag": _S3_F % 2, "actor": _S3_LIVE_REVIEWER, "at": "2026-05-09 11:00:00",
+     "match": "00000000-0000-0000-0000-0000000000d1", "target": None, "series": None,
+     "affected": ["76561190000000005"], "reason": None,
+     "details": _S3_DETAILS(_S3_F % 2, "false_positive", True, 2)},
+    {"flag": _S3_F % 3, "actor": "TOMBSTONE", "at": "2026-05-01 12:00:00",
+     "match": "00000000-0000-0000-0000-0000000000d1", "target": None, "series": None,
+     "affected": ["76561190000000005", "76561190000000006"], "reason": None,
+     "details": _S3_DETAILS(_S3_F % 3, "confirmed_cheat", False, 1)},
+]
+
+
+def _s3_carried(schema):
+    rows = json.loads(_fetch(schema, S3_CARRIED_SQL))
+    for r in rows:
+        a = r["actor"] or ""
+        if a.startswith("deleted_") and len(a) == len("deleted_") + 8 and a != "deleted_s3000001":
+            r["actor"] = "TOMBSTONE"
+    return rows
+
+
+def _s3_failures(schema, path=M420, rpath=R420):
+    """The carry-in from the rollback state with S3_SEED: the first apply, an
+    apply again, the rollback, a rollback again, and an apply after it.
+    Answers the labelled failures."""
+    rc, err = _psql_apply(schema, R420)
+    assert rc == 0, err
+    _exec(schema, S3_SEED)
+    fails = []
+    try:
+        if _fetch(schema, S3_COUNT) != 3:
+            return ["SEED-COUNT %s" % _fetch(schema, S3_COUNT)]
+        rc, err = _psql_apply(schema, path)
+        if rc != 0:
+            return ["FIRST-APPLY-RC rc=%s %s" % (rc, _tail(err))]
+        got = _s3_carried(schema)
+        if got != S3_EXPECT:
+            fails.append("CARRIED %r" % (got,))
+        everything = _fetch(schema, "SELECT coalesce(string_agg(to_jsonb(a)::text, ' '), '') FROM admin_actions a")
+        if _S3_GONE in everything:
+            fails.append("DELETED-ID-SERVED")
+        if _fetch(schema, S3_COUNT) != 0:
+            fails.append("COUNT-AFTER %s" % _fetch(schema, S3_COUNT))
+        before = _snap(schema)
+        rc, err = _psql_apply(schema, path)
+        if rc != 0:
+            fails.append("RERUN-RC rc=%s %s" % (rc, _tail(err)))
+        elif _snap(schema) != before:
+            fails.append("RERUN-CHANGED")
+        rc, err = _psql_apply(schema, rpath)
+        if rc != 0:
+            fails.append("ROLLBACK-RC rc=%s %s" % (rc, _tail(err)))
+        left = _fetch(schema, "SELECT count(*) FROM admin_actions WHERE details->>'carried_from' IS NOT NULL")
+        kept = _fetch(schema, "SELECT count(*) FROM admin_actions"
+                              " WHERE id = '00000000-0000-4000-8000-0000000003b4'")
+        if left != 0:
+            fails.append("ROLLBACK-LEFT-CARRIED %s" % left)
+        if kept != 1:
+            fails.append("ROLLBACK-TOOK-A-RECORD")
+        before = _snap(schema)
+        rc, err = _psql_apply(schema, rpath)
+        if rc != 0:
+            fails.append("ROLLBACK-RERUN-RC rc=%s %s" % (rc, _tail(err)))
+        elif _snap(schema) != before:
+            fails.append("ROLLBACK-RERUN-CHANGED")
+        rc, err = _psql_apply(schema, path)
+        if rc != 0 or _s3_carried(schema) != S3_EXPECT:
+            fails.append("REAPPLY rc=%s" % rc)
+        return fails
+    finally:
+        _exec(schema, S3_UNSEED)
+        _restore(schema)
+
+
+def test_reviewed_flags_without_a_record_are_carried_in_once(mcase, m420, capsys):
+    """S3: each reviewed flag that no flag_review record names gets one
+    record as the review writer writes it, at the flag's reviewed_at, marked
+    carried_from; a deleted account is named nowhere (a player is named only
+    through a live players row; a reviewer with none is a tombstone); a
+    second run inserts nothing; the rollback removes exactly the carried
+    rows, and an apply after it carries them in again."""
+    fails = _s3_failures(mcase)
+    with capsys.disabled():
+        print("\nMODLOG-S3-CARRY: %s" % (fails or "3 carried, keyed, no deleted id, rollback exact"))
+    assert not fails, fails
+
+
+# The dry run on a seed of the live shape (made-up ids; counts only taken
+# from the primary): 132 flags, 20 of them reviewed; 29 flag_review records
+# name 13 of those (8 flags with 1, 2 with 2, 2 with 4, 1 with 9); the other
+# 7 are false_positive, each with a 17-digit reviewer who has a players row,
+# auto_invalidated false for 4 and true for 3, and name 14 players between
+# them, each with a players row.
+_D_FLAG = "00000000-0000-4000-8000-00000000d"   # + 3 digits
+_D_PLAYER = "00000000-0000-4000-8000-0000000e"  # + 4 digits
+_D_REC = "00000000-0000-4000-8000-0000000f"     # + 4 digits
+S3_DRY_SEED = """
+INSERT INTO players (id, steam_id, display_name)
+SELECT CAST('{p}' || lpad(n::text, 4, '0') AS uuid), '76561190000006' || lpad(n::text, 3, '0'), 'S3 dry ' || n
+  FROM generate_series(1, 14) n
+UNION ALL
+SELECT CAST('{p}' || lpad((100 + n)::text, 4, '0') AS uuid), '76561190000005' || lpad(n::text, 3, '0'),
+       'S3 dry reviewer ' || n
+  FROM generate_series(1, 3) n;
+INSERT INTO flagged_matches (id, match_id, player_steam_ids, flag_reason, auto_invalidated, reviewed_at,
+                             reviewed_by_steam_id, review_action, restoration_required,
+                             discord_evidence_revision, created_at)
+SELECT CAST('{f}' || lpad(i::text, 3, '0') AS uuid), '00000000-0000-0000-0000-0000000000d1',
+       CASE WHEN i BETWEEN 14 AND 20
+            THEN ARRAY['76561190000006' || lpad((2 * (i - 13) - 1)::text, 3, '0'),
+                       '76561190000006' || lpad((2 * (i - 13))::text, 3, '0')]
+            ELSE ARRAY['76561190000006001', '76561190000006002'] END,
+       'inactive_player', i BETWEEN 18 AND 20,
+       CASE WHEN i <= 20 THEN TIMESTAMPTZ '2026-04-20 00:00:00+00' + make_interval(days => i) END,
+       CASE WHEN i <= 20 THEN '76561190000005' || lpad((1 + i % 3)::text, 3, '0') END,
+       CASE WHEN i = 13 THEN 'confirmed_cheat' WHEN i <= 20 THEN 'false_positive' END,
+       false, 1, NOW()
+  FROM generate_series(1, 132) i;
+INSERT INTO admin_actions (id, admin_steam_id, action, target_match_id, details)
+SELECT CAST('{r}' || lpad((row_number() OVER ())::text, 4, '0') AS uuid), '76561190000005001', 'flag_review',
+       '00000000-0000-0000-0000-0000000000d1',
+       jsonb_build_object('flag_id', '{f}' || lpad(i::text, 3, '0'),
+                          'review_action', CASE WHEN i = 13 THEN 'confirmed_cheat' ELSE 'false_positive' END)
+  FROM generate_series(1, 13) i,
+       generate_series(1, CASE WHEN i <= 8 THEN 1 WHEN i <= 10 THEN 2 WHEN i <= 12 THEN 4 ELSE 9 END) k;
+""".format(p=_D_PLAYER, f=_D_FLAG, r=_D_REC)
+S3_DRY_UNSEED = """
+DELETE FROM admin_actions WHERE action = 'flag_review' AND details->>'flag_id' LIKE '{f}%';
+DELETE FROM flagged_matches WHERE CAST(id AS text) LIKE '{f}%';
+DELETE FROM players WHERE CAST(id AS text) LIKE '{p}%';
+""".format(p=_D_PLAYER, f=_D_FLAG)
+_S3_RECORDS = "SELECT count(*) FROM admin_actions WHERE action = 'flag_review'"
+_S3_MARKED = "SELECT count(*) FROM admin_actions WHERE details->>'carried_from' = 'flagged_matches'"
+
+
+def test_carry_in_dry_run_on_a_seed_of_the_live_shape(mcase, m420, capsys):
+    """S3 dry run: the count statement, the apply, the count again, a second
+    apply, and the rollback, each with the records before and after."""
+    rc, err = _psql_apply(mcase, R420)
+    assert rc == 0, err
+    _exec(mcase, S3_DRY_SEED)
+    steps = []
+    try:
+        steps.append(("seed", _fetch(mcase, S3_COUNT), _fetch(mcase, _S3_RECORDS), _fetch(mcase, _S3_MARKED)))
+        for label, path in (("apply", M420), ("apply again", M420), ("rollback", R420)):
+            rc, err = _psql_apply(mcase, path)
+            assert rc == 0, (label, _tail(err))
+            steps.append((label, _fetch(mcase, S3_COUNT), _fetch(mcase, _S3_RECORDS), _fetch(mcase, _S3_MARKED)))
+        named = _fetch(mcase, "SELECT count(*) FROM flagged_matches WHERE reviewed_at IS NOT NULL")
+    finally:
+        _exec(mcase, S3_DRY_UNSEED)
+        _restore(mcase)
+    with capsys.disabled():
+        print("\nMODLOG-S3-DRYRUN reviewed %s; (step, count, flag_review records, carried): %s" % (named, steps))
+    assert named == 20
+    assert steps == [("seed", 7, 29, 0), ("apply", 0, 36, 7), ("apply again", 0, 36, 7),
+                     ("rollback", 7, 29, 0)], steps
+
+
+_S3_KEY = ("       AND NOT EXISTS (SELECT 1 FROM admin_actions aa\n"
+           "                        WHERE aa.action::text = 'flag_review'\n")
+_R_CARRY_DELETE = ("DELETE FROM admin_actions\n"
+                   " WHERE pg_catalog.jsonb_typeof(details) = 'object'\n"
+                   "   AND (details OPERATOR(pg_catalog.->>) 'carried_from') IS NOT NULL;\n")
+_R_CARRY_CHECK = ("    UNION ALL\n"
+                  "    SELECT 'carried-in records ' || pg_catalog.count(*)::text FROM admin_actions a\n"
+                  "     WHERE pg_catalog.jsonb_typeof(a.details) = 'object'\n"
+                  "       AND (a.details OPERATOR(pg_catalog.->>) 'carried_from') IS NOT NULL\n"
+                  "    HAVING pg_catalog.count(*) > 0")
+
+
+@pytest.mark.parametrize("m_pairs,r_pairs,expect", [
+    ([("SELECT DISTINCT p.steam_id::text FROM players p",
+       "SELECT DISTINCT u.s FROM pg_catalog.unnest(fm.player_steam_ids) u(s), players p")], [],
+     ("DELETED-ID-SERVED",)),
+    ([("WHEN fm.reviewed_by_steam_id::text !~ '^[0-9]{17}$'", "WHEN true")], [], ("DELETED-ID-SERVED",)),
+    ([(_S3_KEY, _S3_KEY.replace("WHERE aa.action", "WHERE false AND aa.action"))], [],
+     ("CARRIED", "RERUN-CHANGED")),
+    ([("           NULL, fm.reviewed_at\n", "           NULL, pg_catalog.now()\n")], [], ("CARRIED",)),
+    ([], [(_R_CARRY_DELETE, "")], ("ROLLBACK-RC", "ROLLBACK-LEFT-CARRIED")),
+    ([], [(_R_CARRY_DELETE, ""), (_R_CARRY_CHECK, "")], ("ROLLBACK-LEFT-CARRIED",)),
+], ids=["players_from_the_list", "actor_as_stored", "no_key", "time_of_the_run", "rollback_no_delete",
+        "rollback_no_delete_no_check"])
+def test_mutant_the_carry_in_without_its_rule_is_red(mcase, m420, m_pairs, r_pairs, expect, capsys):
+    path = _variant_pairs(M420, m_pairs)
+    rpath = _variant_pairs(R420, r_pairs)
+    try:
+        fails = _s3_failures(mcase, path, rpath)
+    finally:
+        os.unlink(path)
+        os.unlink(rpath)
+    with capsys.disabled():
+        print("\nMODLOG-MUTANT s3: %s" % fails)
+    for label in expect:
+        assert any(f.startswith(label) for f in fails), (label, fails)
+    if "ROLLBACK-RC" not in expect:
+        assert not any(f.startswith("ROLLBACK-RC") for f in fails), fails

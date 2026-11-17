@@ -30,11 +30,83 @@
 --        rewrites chat_messages.steam_id to the tombstone too).
 --    A source whose table this database does not have adds nothing (the
 --    test schemas replay migrations out of order; pc_trades comes with 353).
---    No id is read from details: delete_player_data does not scrub details,
---    so an id copied there may be a deleted account's raw id. A row whose
---    target_steam_id is already a tombstone keeps '{}'. Only rows still at
---    '{}' are filled (and only reasons still NULL), so a second run changes
---    no row.
+--    No Steam id is read from details: delete_player_data does not scrub
+--    details, so an id copied there may be a deleted account's raw id. A
+--    row whose target_steam_id is already a tombstone keeps '{}'. Only rows
+--    still at '{}' are filled (and only reasons still NULL), so a second
+--    run changes no row.
+--    THE LOOKUPS. Each compares in the looked-up id column's OWN type, so
+--    the column's primary key or unique index answers it: a uuid id with a
+--    uuid, the chat message id as int8, players.steam_id (varchar, which
+--    pg_catalog compares with its text operator, the one its index is built
+--    with) as text. A text taken from a record (a details value; the trade
+--    id kept in target_steam_id) is first checked for the id's form (the
+--    canonical lower-case UUID text; a decimal of at most 18 digits without
+--    a leading zero) and only then cast to the column's type; a text not of
+--    that form names no row, as the text comparison it replaces named none.
+--    No lookup casts an indexed column to another type (a varchar read as
+--    text is the same value relabelled, which its index serves). The bound:
+--    for N records, at most one index scan per record and source (a
+--    record's list of message ids is one scan over those ids), plus one
+--    index probe of players per row found, whatever the size of the
+--    looked-up tables (tests/test_modlog_pg.py reads the plan of this file's
+--    fill with 50,000 rows in each of them).
+-- 4. Actions recorded only in their own tables, carried in as records. One
+--    read-only count per source, of the source's rows that no record names,
+--    was read on the primary on 2026-11-16 between 20:46:48Z and 20:46:52Z.
+--    Each number is a READING of that moment, not a bound this file checks;
+--    the landing reads each again before the file runs. Each statement:
+--      a. bans, player_bans: rows with no 'ban' record whose target is the
+--         row's steam_id. Read: 0.
+--         SELECT COUNT(*) FROM player_bans pb WHERE NOT EXISTS (SELECT 1 FROM admin_actions aa WHERE aa.action = 'ban' AND aa.target_steam_id = pb.steam_id);
+--      b. unbans, player_bans: rows lifted by a person (unbanned_at set,
+--         unbanned_by not 'system:expired', the close a new ban makes of an
+--         ended one) with no 'unban' record whose target is the row's
+--         steam_id. Read: 0.
+--         SELECT COUNT(*) FROM player_bans pb WHERE pb.unbanned_at IS NOT NULL AND COALESCE(pb.unbanned_by_steam_id, '') <> 'system:expired' AND NOT EXISTS (SELECT 1 FROM admin_actions aa WHERE aa.action = 'unban' AND aa.target_steam_id = pb.steam_id);
+--      c. mutes, chat_mutes: rows with no chat_mute, chat_automute or
+--         chat_mute_msg record whose target is the row's steam_id. Read: 0.
+--         SELECT COUNT(*) FROM chat_mutes cm WHERE NOT EXISTS (SELECT 1 FROM admin_actions aa WHERE aa.action IN ('chat_mute', 'chat_automute', 'chat_mute_msg') AND aa.target_steam_id = CAST(cm.steam_id AS text));
+--      d. record exclusions, record_exclusions: rows with no record_exclude
+--         record of the same match and board whose target is the seat's
+--         player (none for a whole match). Read: 0.
+--         SELECT COUNT(*) FROM record_exclusions rx LEFT JOIN players p ON p.id = rx.player_id WHERE NOT EXISTS (SELECT 1 FROM admin_actions aa WHERE aa.action = 'record_exclude' AND aa.details->>'match_id' = CAST(rx.match_id AS text) AND aa.details->>'board' = CAST(rx.board AS text) AND ((rx.player_id IS NULL AND aa.target_steam_id IS NULL) OR aa.target_steam_id = CAST(p.steam_id AS text)));
+--      e. flag reviews, flagged_matches: reviewed flags (reviewed_at set)
+--         with no flag_review record whose details flag_id, lower-cased, is
+--         the flag's id. Read: 7. Carried in below.
+--         SELECT COUNT(*) FROM flagged_matches fm WHERE fm.reviewed_at IS NOT NULL AND NOT EXISTS (SELECT 1 FROM admin_actions aa WHERE aa.action = 'flag_review' AND lower(aa.details->>'flag_id') = CAST(fm.id AS text));
+--      f. held-report reviews, match_report_quarantine: rows accepted or
+--         discarded with no quarantine_accept or quarantine_discard record
+--         whose details quarantine_id is the row's id. Read: 0.
+--         SELECT COUNT(*) FROM match_report_quarantine q WHERE q.status IN ('accepted', 'discarded') AND NOT EXISTS (SELECT 1 FROM admin_actions aa WHERE aa.action IN ('quarantine_accept', 'quarantine_discard') AND aa.details->>'quarantine_id' = CAST(q.id AS text));
+--    Sources a to d and f read 0, so this file inserts nothing for them.
+--    Source e: each reviewed flag that statement e counts gets ONE record,
+--    keyed by statement e's own predicate, so a second run (and any number
+--    at the landing) inserts each flag once. The record is the one the
+--    review route writes (main.admin_review_flag's _modlog_write: actor,
+--    action flag_review, target_match_id, affected_steam_ids, details
+--    flag_id, review_action, evidence_revision, restoration_required; no
+--    reason), with:
+--      - its time the flag's reviewed_at, never this file's clock;
+--      - its actor the flag's reviewed_by_steam_id: 'unknown' when it is
+--        empty (as the writer's fallback), the value as stored when it is
+--        not a 17-digit Steam id or a live players row has it, and
+--        otherwise (a Steam id of no live account, such as a deleted
+--        account's raw id, which delete_player_data leaves in
+--        flagged_matches) a tombstone of the deletion's form, deleted_ and
+--        eight random hex digits, so no raw id of a deleted account is
+--        written;
+--      - its players those of player_steam_ids that a live players row has
+--        (17 digits, sorted, distinct, none past 16), so a deleted
+--        account's raw id is not named (the route names the flag's ids at
+--        review, when each is live);
+--      - flag_id the flag's id as canonical text, evidence_revision and
+--        restoration_required the flag's own columns (the route stores the
+--        revision it checked equal to the flag's, and sets the flag's
+--        restoration_required to the value it stores);
+--      - the details key carried_from = 'flagged_matches', which marks the
+--        row as carried in by this file. rollback_420 removes exactly the
+--        rows with that key.
 --
 -- Refusals (nothing is changed then, one transaction): no admin_actions in
 -- the session's current schema; the bare name admin_actions naming another
@@ -52,13 +124,23 @@
 -- current schema), then the path is pinned for the rest of the transaction:
 -- pg_catalog first, the table's schema second, the temporary schema last;
 -- the bare name must then resolve to the same table. The pinned path
--- settles an operator or function only where pg_catalog has one for
--- exactly the argument types, so every comparison here is of such a pair:
--- identities are oids compared as oid with oid, varchar columns are cast to
--- text, and the polymorphic calls (|| on arrays, unnest, array_agg,
--- cardinality) and to_regclass name pg_catalog. An operator or function of
--- the table's schema is then never taken; the CHECK's char_length and <=
--- (text and integer) are pg_catalog's. quote_all_identifiers is off for the
+-- decides between same-named functions or operators only where their
+-- argument types are IDENTICAL; one of the same name with other argument
+-- types in the table's schema competes with pg_catalog's on an equal
+-- footing wherever the call's arguments are no exact match of pg_catalog's
+-- (an untyped literal argument, as in format('%I...', nsp) or
+-- format_type(oid, NULL); a VARIADIC "any" function; jsonb ->> 'key', whose
+-- literal is read as jsonb first, and pg_catalog has no ->> for jsonb with
+-- jsonb). So every function call in this file, before the pin and after it,
+-- is written pg_catalog.<name>(, every jsonb path operator
+-- OPERATOR(pg_catalog.->>) or OPERATOR(pg_catalog.->), and the polymorphic
+-- || on arrays OPERATOR(pg_catalog.||) (tests/test_modlog_sql_census.py
+-- holds both files to this). Every other comparison is of a pair pg_catalog
+-- has an operator for exactly: identities are oids compared as oid with
+-- oid, varchar columns are cast to text, and a literal stands beside a
+-- value of the type it is read as (text, name, "char"). An operator or
+-- function of the table's schema is then never taken; the CHECK's
+-- char_length and <= (text and integer) are pg_catalog's. quote_all_identifiers is off for the
 -- rest of the transaction, for the one deparsed text the file compares (the
 -- CHECK's). Types and the index are compared by identity, not by printed
 -- text. No literal here holds a backslash, so standard_conforming_strings
@@ -95,8 +177,9 @@ SET LOCAL synchronous_commit = local;
 -- other pair (oid with regclass, regclass with regclass, varchar with
 -- varchar, text[] with text[]) an exact operator in the table's schema would
 -- be taken. So every identity here is held as an oid and compared as oid
--- with oid, every function before the pin and to_regclass after it is
--- qualified, and the fill below qualifies its polymorphic calls.
+-- with oid, and every function call, here and below, names pg_catalog (the
+-- header: the path does not settle a call whose arguments are no exact
+-- match).
 DO $m420$
 DECLARE
   tbl pg_catalog.oid := pg_catalog.to_regclass(
@@ -143,14 +226,14 @@ BEGIN
     FROM pg_attribute a WHERE a.attrelid = tbl AND a.attname = 'affected_steam_ids' AND NOT a.attisdropped;
   IF ty_aff IS NOT NULL AND ty_aff <> text_arr_oid THEN
     RAISE EXCEPTION '420: admin_actions.affected_steam_ids is %, not text[]; nothing changed',
-      format_type(ty_aff, NULL);
+      pg_catalog.format_type(ty_aff, NULL);
   END IF;
   SELECT a.atttypid INTO ty_reason
     FROM pg_attribute a WHERE a.attrelid = tbl AND a.attname = 'reason' AND NOT a.attisdropped;
   IF ty_reason IS NOT NULL AND ty_reason <> text_oid THEN
-    RAISE EXCEPTION '420: admin_actions.reason is %, not text; nothing changed', format_type(ty_reason, NULL);
+    RAISE EXCEPTION '420: admin_actions.reason is %, not text; nothing changed', pg_catalog.format_type(ty_reason, NULL);
   END IF;
-  idx := pg_catalog.to_regclass(format('%I.ix_admin_actions_affected', nsp))::oid;
+  idx := pg_catalog.to_regclass(pg_catalog.format('%I.ix_admin_actions_affected', nsp))::oid;
   IF idx IS NOT NULL THEN
     idx_ok := EXISTS (
       SELECT 1 FROM pg_index i JOIN pg_class ic ON ic.oid = i.indexrelid
@@ -162,12 +245,12 @@ BEGIN
       RAISE EXCEPTION '420: ix_admin_actions_affected is not the GIN index 420 creates on affected_steam_ids; nothing changed';
     END IF;
   END IF;
-  SELECT c.oid, (c.contype = 'c' AND c.convalidated AND pg_get_constraintdef(c.oid) = want)
+  SELECT c.oid, (c.contype = 'c' AND c.convalidated AND pg_catalog.pg_get_constraintdef(c.oid) = want)
     INTO con_oid, con_ok
     FROM pg_constraint c WHERE c.conrelid = tbl AND c.conname = 'ck_admin_actions_reason_len';
   IF con_oid IS NOT NULL AND NOT con_ok THEN
     RAISE EXCEPTION '420: ck_admin_actions_reason_len is %, not the check 420 creates; nothing changed',
-      pg_get_constraintdef(con_oid);
+      pg_catalog.pg_get_constraintdef(con_oid);
   END IF;
 
   -- The columns, the check and the index: each only when absent, so a run
@@ -184,7 +267,7 @@ BEGIN
   END IF;
   IF con_oid IS NULL THEN
     ALTER TABLE admin_actions ADD CONSTRAINT ck_admin_actions_reason_len
-      CHECK (reason IS NULL OR char_length(reason) <= 256);
+      CHECK (reason IS NULL OR pg_catalog.char_length(reason) <= 256);
   END IF;
   IF idx IS NULL THEN
     CREATE INDEX ix_admin_actions_affected ON admin_actions USING gin (affected_steam_ids);
@@ -199,7 +282,7 @@ BEGIN
   END IF;
   IF NOT EXISTS (
       SELECT 1 FROM pg_index i JOIN pg_class ic ON ic.oid = i.indexrelid
-       WHERE i.indexrelid = pg_catalog.to_regclass(format('%I.ix_admin_actions_affected', nsp))::oid
+       WHERE i.indexrelid = pg_catalog.to_regclass(pg_catalog.format('%I.ix_admin_actions_affected', nsp))::oid
          AND i.indrelid = tbl AND i.indisvalid AND i.indisready
          AND i.indnatts = 1 AND i.indkey[0] = att_aff
          AND i.indexprs IS NULL AND i.indpred IS NULL
@@ -209,20 +292,58 @@ BEGIN
   IF NOT EXISTS (
       SELECT 1 FROM pg_constraint c
        WHERE c.conrelid = tbl AND c.conname = 'ck_admin_actions_reason_len'
-         AND c.contype = 'c' AND c.convalidated AND pg_get_constraintdef(c.oid) = want) THEN
+         AND c.contype = 'c' AND c.convalidated AND pg_catalog.pg_get_constraintdef(c.oid) = want) THEN
     RAISE EXCEPTION '420: ck_admin_actions_reason_len is not the validated CHECK after the file';
   END IF;
 END $m420$;
+
+-- 4. The reviewed flags that no record names, carried in (header, point 4,
+-- source e). Under the lock the first block took, so a second run waits and
+-- then finds the first run's records. Added when flagged_matches exists; the
+-- statement is the fixed text below. Before the fill, which then finds a
+-- carried row already named, or names it by its match's live players.
+DO $carry420$
+BEGIN
+  IF pg_catalog.to_regclass('flagged_matches') IS NULL OR pg_catalog.to_regclass('players') IS NULL THEN
+    RETURN;
+  END IF;
+  EXECUTE $c$
+    INSERT INTO admin_actions (admin_steam_id, action, target_steam_id, target_match_id, target_series_id,
+                               details, affected_steam_ids, reason, created_at)
+    SELECT CASE WHEN COALESCE(fm.reviewed_by_steam_id::text, '') = '' THEN 'unknown'
+                WHEN fm.reviewed_by_steam_id::text !~ '^[0-9]{17}$'
+                  OR EXISTS (SELECT 1 FROM players r
+                              WHERE r.steam_id::text = fm.reviewed_by_steam_id::text AND r.deleted_at IS NULL)
+                  THEN fm.reviewed_by_steam_id::text
+                ELSE 'deleted_' || pg_catalog.substr(pg_catalog.md5(pg_catalog.gen_random_uuid()::text), 1, 8)
+           END,
+           'flag_review', NULL, fm.match_id, NULL,
+           pg_catalog.jsonb_build_object('flag_id', fm.id::text, 'review_action', fm.review_action::text,
+                                         'evidence_revision', fm.discord_evidence_revision,
+                                         'restoration_required', fm.restoration_required,
+                                         'carried_from', 'flagged_matches'),
+           (SELECT CASE WHEN pg_catalog.cardinality(n.ids) <= 16 THEN n.ids ELSE '{}'::text[] END
+              FROM (SELECT ARRAY(SELECT DISTINCT p.steam_id::text FROM players p
+                                  WHERE p.steam_id::text = ANY (fm.player_steam_ids::text[])
+                                    AND p.deleted_at IS NULL AND p.steam_id::text ~ '^[0-9]{17}$'
+                                  ORDER BY 1) AS ids) n),
+           NULL, fm.reviewed_at
+      FROM flagged_matches fm
+     WHERE fm.reviewed_at IS NOT NULL
+       AND NOT EXISTS (SELECT 1 FROM admin_actions aa
+                        WHERE aa.action::text = 'flag_review'
+                          AND pg_catalog.lower(aa.details OPERATOR(pg_catalog.->>) 'flag_id') = fm.id::text)
+  $c$;
+END $carry420$;
 
 -- 3. The old rows' players. Only a row still at '{}' whose target is not a
 -- tombstone; only 17-digit ids; at most 16 (a row's sources name at most 4).
 -- Each source is added when its tables exist (header, point 3); the
 -- statement is built from the fixed texts below and nothing else. Every
 -- comparison is of two values of one type that pg_catalog has an operator
--- for (varchar columns are cast to text), and the polymorphic calls (||
--- on arrays, unnest, array_agg, cardinality) name pg_catalog, so no
--- operator or function of the table's schema is taken (the head of the
--- block above).
+-- for (varchar columns are cast to text), and every function call, jsonb
+-- path operator and || on arrays names pg_catalog, so no operator or
+-- function of the table's schema is taken (the header).
 DO $fill420$
 DECLARE
   src text := 'ARRAY[a.target_steam_id::text]';
@@ -248,9 +369,12 @@ BEGIN
                      FROM matches m
                      JOIN players p1 ON p1.id = m.player1_id
                      JOIN players p2 ON p2.id = m.player2_id
-                    WHERE m.id = a.target_match_id
-                       OR (a.action::text = 'record_exclude' AND a.target_steam_id IS NULL
-                           AND m.id::text = a.details->>'match_id')
+                    WHERE m.id = ANY (ARRAY[a.target_match_id,
+                            CASE WHEN a.action::text = 'record_exclude' AND a.target_steam_id IS NULL
+                                  AND (a.details OPERATOR(pg_catalog.->>) 'match_id')
+                                      ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+                                 THEN CAST(a.details OPERATOR(pg_catalog.->>) 'match_id' AS pg_catalog.uuid)
+                            END])
                     LIMIT 1), '{}'::text[])$s$;
   END IF;
   IF pg_catalog.to_regclass('players') IS NOT NULL AND pg_catalog.to_regclass('pc_trades') IS NOT NULL THEN
@@ -260,7 +384,10 @@ BEGIN
                      JOIN players lo ON lo.id = t.pair_lo
                      JOIN players hi ON hi.id = t.pair_hi
                     WHERE a.action::text = 'pc_trade_reverse'
-                      AND t.id::text = a.target_steam_id::text), '{}'::text[])$s$;
+                      AND t.id = CASE WHEN a.target_steam_id::text
+                                           ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+                                      THEN CAST(a.target_steam_id::text AS pg_catalog.uuid) END),
+                  '{}'::text[])$s$;
   END IF;
   IF pg_catalog.to_regclass('players') IS NOT NULL AND pg_catalog.to_regclass('chat_messages') IS NOT NULL THEN
     src := src || $s$
@@ -268,10 +395,15 @@ BEGIN
                      FROM chat_messages cm
                      JOIN players p ON p.steam_id::text = cm.steam_id::text
                     WHERE a.action::text = 'chat_delete'
-                      AND jsonb_typeof(a.details) = 'object'
-                      AND (cm.id::text = a.details->>'message_id'
-                           OR (jsonb_typeof(a.details->'message_ids') = 'array'
-                               AND cm.id::text IN (SELECT jsonb_array_elements_text(a.details->'message_ids'))))),
+                      AND pg_catalog.jsonb_typeof(a.details) = 'object'
+                      AND cm.id = ANY (ARRAY(
+                            SELECT CASE WHEN v.e ~ '^(0|[1-9][0-9]{0,17})$' THEN CAST(v.e AS pg_catalog.int8) END
+                              FROM (SELECT a.details OPERATOR(pg_catalog.->>) 'message_id' AS e
+                                    UNION ALL
+                                    SELECT pg_catalog.jsonb_array_elements_text(
+                                             a.details OPERATOR(pg_catalog.->) 'message_ids')
+                                     WHERE pg_catalog.jsonb_typeof(
+                                             a.details OPERATOR(pg_catalog.->) 'message_ids') = 'array') v))),
                   '{}'::text[])$s$;
   END IF;
   EXECUTE $q$
@@ -300,8 +432,8 @@ END $fill420$;
 
 -- 3. The old rows' reasons, from the reason their details carry.
 UPDATE admin_actions
-   SET reason = left(details->>'reason', 256)
- WHERE reason IS NULL AND jsonb_typeof(details) = 'object'
-   AND COALESCE(details->>'reason', '') <> '';
+   SET reason = pg_catalog.left(details OPERATOR(pg_catalog.->>) 'reason', 256)
+ WHERE reason IS NULL AND pg_catalog.jsonb_typeof(details) = 'object'
+   AND COALESCE(details OPERATOR(pg_catalog.->>) 'reason', '') <> '';
 
 COMMIT;

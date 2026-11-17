@@ -1,31 +1,37 @@
 -- rollback_420_admin_actions_modlog.sql
--- Reverses migration 420: drops the index ix_admin_actions_affected, the
--- check ck_admin_actions_reason_len and the columns affected_steam_ids and
--- reason of admin_actions.
+-- Reverses migration 420: removes the records 420 carried in (each holds the
+-- details key carried_from), then drops the index ix_admin_actions_affected,
+-- the check ck_admin_actions_reason_len and the columns affected_steam_ids
+-- and reason of admin_actions.
 --
 -- ORDER: the api that writes the columns goes first (deploy the previous api,
 -- or every moderator action fails on the missing columns: the 420 writer
 -- names both).
 --
 -- What this loses: the players and the reasons stored in the two columns
--- (the rows themselves stay, with their actor, action, target columns and
--- details, which still hold every reason the api before 420 stored there).
+-- (the other rows stay, with their actor, action, target columns and
+-- details, which still hold every reason the api before 420 stored there),
+-- and the carried-in records, which 420 made from rows that stay in their
+-- own tables (flagged_matches), so an apply of 420 after this makes them
+-- again, each once.
 --
--- ONE RUN AT A TIME, and a rerun is a no-op: each drop is the IF EXISTS
--- form of the statement itself, which takes the table's ACCESS EXCLUSIVE
--- lock and then decides under it; a second run started while the first is
--- open waits at its first drop, then finds nothing to drop. After the drops
--- the file checks its own result: exit 0 means the index, the check and
--- both columns are gone; anything still standing ends the transaction in an
--- error and nothing is dropped.
+-- ONE RUN AT A TIME, and a rerun is a no-op: the file takes the table's
+-- ACCESS EXCLUSIVE lock first (the lock each drop takes in any case), so a
+-- second run started while the first is open waits there, then finds
+-- nothing to remove or drop; each drop is the IF EXISTS form. After the
+-- drops the file checks its own result: exit 0 means the index, the check,
+-- both columns and every carried-in record are gone; anything still
+-- standing ends the transaction in an error and nothing is changed.
 --
 -- THE ENVIRONMENT, setting by setting (420's header has the reasons): the
 -- isolation level is pinned to READ COMMITTED (line BEGIN); the table's
 -- identity is resolved by the session's path and the path is then pinned,
 -- pg_catalog first, the table's schema second, the temporary schema last
 -- (the env block), so the bare names below are the table and its index;
--- the identity is an oid compared as oid with oid, and the functions are
--- qualified, so no operator or function of the table's schema is taken;
+-- the identity is an oid compared as oid with oid, and every function call
+-- and jsonb path operator names pg_catalog (420's header has why the path
+-- alone does not settle a call whose arguments are no exact match), so no
+-- operator or function of the table's schema is taken;
 -- nothing is deparsed or compared as text, so quote_all_identifiers,
 -- IntervalStyle, DateStyle, TimeZone and extra_float_digits do not enter;
 -- no literal holds a backslash, so standard_conforming_strings does not
@@ -60,6 +66,15 @@ BEGIN
   END IF;
 END $env420r$;
 
+-- The lock the drops take, taken first, so a second run waits here before
+-- its delete and then finds nothing to delete or drop.
+LOCK TABLE admin_actions IN ACCESS EXCLUSIVE MODE;
+-- The records 420 carried in (420's header, point 4), and only those: each
+-- holds the details key carried_from. Their source rows stay, so an apply
+-- of 420 after this carries them in again.
+DELETE FROM admin_actions
+ WHERE pg_catalog.jsonb_typeof(details) = 'object'
+   AND (details OPERATOR(pg_catalog.->>) 'carried_from') IS NOT NULL;
 DROP INDEX IF EXISTS ix_admin_actions_affected;
 ALTER TABLE admin_actions DROP CONSTRAINT IF EXISTS ck_admin_actions_reason_len;
 ALTER TABLE admin_actions DROP COLUMN IF EXISTS affected_steam_ids;
@@ -81,7 +96,12 @@ BEGIN
     UNION ALL
     SELECT 'index ' || c.relname::text FROM pg_class c
      WHERE c.relname = 'ix_admin_actions_affected'
-       AND c.relnamespace = (SELECT t.relnamespace FROM pg_class t WHERE t.oid = tbl)) s;
+       AND c.relnamespace = (SELECT t.relnamespace FROM pg_class t WHERE t.oid = tbl)
+    UNION ALL
+    SELECT 'carried-in records ' || pg_catalog.count(*)::text FROM admin_actions a
+     WHERE pg_catalog.jsonb_typeof(a.details) = 'object'
+       AND (a.details OPERATOR(pg_catalog.->>) 'carried_from') IS NOT NULL
+    HAVING pg_catalog.count(*) > 0) s;
   IF tbl IS NULL OR left_over IS NOT NULL THEN
     RAISE EXCEPTION 'rollback 420: still standing after the drops: %; nothing changed',
       coalesce(left_over, 'admin_actions is not found');
