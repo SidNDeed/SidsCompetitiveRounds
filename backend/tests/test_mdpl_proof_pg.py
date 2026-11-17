@@ -509,39 +509,71 @@ def test_r4_control_with_the_steam_id_kept_the_send_does_not_wait(monkeypatch):
 
 # -- R5 ---------------------------------------------------------------------------------------
 
-def test_r5_control_the_ranked_step_above_the_lobby_locks_deadlocks(monkeypatch):
-    """R5's control, the ban scene with the deletion's ranked_queue rows
-    deleted at its key statement, above its lobby locks (a data-modifying
-    WITH, which always runs): the deletion holds X's ranked row, the ban
-    holds the lobby and waits for that row, the deletion then waits for the
-    lobby."""
-    async def body(env):
-        _arm(env)
-        _admin_armed(env)
-        _order_only(env)
-        _lid, (p, x) = await env.lobby("team", 2)
-        (mod,) = await env.players(1)
-        await env.conn.execute("INSERT INTO admin_users (steam_id, granted_at) VALUES ($1, NOW())"
-                               " ON CONFLICT DO NOTHING", mod.sid)
-        await _matched(env, p, x)
-        await _matched(env, x, p)
-        early = ("WITH rq AS (DELETE FROM ranked_queue WHERE player_id IN ("
-                 "SELECT player_id FROM ranked_queue WHERE player_id = '%s' OR matched_with = '%s'"
-                 " FOR UPDATE SKIP LOCKED)) SELECT pg_advisory_xact_lock(hashtext('pc_snapshot'))"
-                 % (p.id, p.id))
+async def _r5_scene(env, *, step4_waiting):
+    """R5's ban scene with the deletion's ranked_queue rows deleted at its key
+    statement, above its lobby locks (a data-modifying WITH, which always
+    runs): the deletion holds X's ranked row, the ban holds the lobby and
+    waits for that row, and the deletion comes to its step-4 lock of the
+    lobby. step4_waiting: step 4's locks taken with a wait, as at 8d920c07
+    (the form of _step4_scene's blocking mutant). Returns the deletion's and
+    the ban's answers."""
+    _arm(env)
+    _admin_armed(env)
+    _order_only(env)
+    if step4_waiting:
+        async def _wait_for_it(db, what, lock_stmt, seen_stmt, params):
+            await db.execute(main.text(str(lock_stmt).replace(" SKIP LOCKED", "")), params)
+        env.mp.setattr(main, "_deletion_take_or_yield", _wait_for_it)
+    _lid, (p, x) = await env.lobby("team", 2)
+    (mod,) = await env.players(1)
+    await env.conn.execute("INSERT INTO admin_users (steam_id, granted_at) VALUES ($1, NOW())"
+                           " ON CONFLICT DO NOTHING", mod.sid)
+    await _matched(env, p, x)
+    await _matched(env, x, p)
+    early = ("WITH rq AS (DELETE FROM ranked_queue WHERE player_id IN ("
+             "SELECT player_id FROM ranked_queue WHERE player_id = '%s' OR matched_with = '%s'"
+             " FOR UPDATE SKIP LOCKED)) SELECT pg_advisory_xact_lock(hashtext('pc_snapshot'))"
+             % (p.id, p.id))
 
-        at = _parks(env)
-        spot = at(KEY_SQL, "after")
-        with env.rewriting(KEY_EXACT, early) as moved:
-            td = asyncio.create_task(_delete(env, p))
-            await _parked(spot, td)                   # holds P's and X's ranked rows, no lobby yet
-            tb = asyncio.create_task(env.call(_ban_route(mod, x)))
-            state, w = await _settle(env, tb, by=spot.pid)
-            assert state == "waits", (state, w)
-            await _past_deadlock_check(env)
-            a, b = await _finish([td, tb], [spot])
-        assert moved, "the mutant did not apply"
+    at = _parks(env)
+    spot = at(KEY_SQL, "after")
+    with env.rewriting(KEY_EXACT, early) as moved:
+        td = asyncio.create_task(_delete(env, p))
+        await _parked(spot, td)                   # holds P's and X's ranked rows, no lobby yet
+        tb = asyncio.create_task(env.call(_ban_route(mod, x)))
+        state, w = await _settle(env, tb, by=spot.pid)
+        assert state == "waits", (state, w)
+        await _past_deadlock_check(env)
+        a, b = await _finish([td, tb], [spot])
+    assert moved, "the mutant did not apply"
+    return a, b
+
+
+def test_r5_control_the_ranked_step_above_the_lobby_locks_with_step_4_waiting_deadlocks(monkeypatch):
+    """R5's control: the ranked step above the lobby locks, and step 4's
+    locks taken with a wait as at 8d920c07. The deletion then waits for the
+    lobby the ban holds while the ban waits for X's ranked row: the circle
+    closes. With step 4 as at the tip the same order closes no circle (the
+    mirror below), so this control takes both changes back."""
+    async def body(env):
+        a, b = await _r5_scene(env, step4_waiting=True)
         assert _circle(a, b), ("no 40P01", _name(a), _name(b))
+    case(monkeypatch, body, prefix="mdpl")
+
+
+def test_r5_mirror_the_ranked_step_above_the_lobby_locks_yields_at_step_4_and_both_finish(monkeypatch, capsys):
+    """R5's mirror: the ranked step above the lobby locks, step 4 as at the
+    tip. The deletion meets the lobby the ban holds, ends its attempt with
+    the held signal (which lets X's ranked row go), and a later attempt
+    finishes after the ban: both answer 200, and neither is a 40P01."""
+    async def body(env):
+        capsys.readouterr()
+        a, b = await _r5_scene(env, step4_waiting=False)
+        out = capsys.readouterr().out
+        assert not _circle(a, b), ("a 40P01", _name(a), _name(b))
+        assert a.status == 200 and a["status"] == "anonymized", _name(a)
+        assert b.status == 200 and b["status"] == "banned", _name(b)
+        assert "met a held" in out, out[-2000:]
     case(monkeypatch, body, prefix="mdpl")
 
 
@@ -1330,6 +1362,12 @@ async def _outside_statements(env):
     lobby's refund (_refund_lobby_bets). Returns ([[call, [digest, ...]], ...],
     every statement in full)."""
     _arm(env)
+    # _service_player_uuids keeps its lookup for the process. The capture at
+    # 8d920c07 began with it unfilled or expired, so the first call carries the
+    # lookup (a savepoint, SELECT id::text FROM players, its release) and the
+    # later ones read the filled cache. Emptied here, whatever an earlier test
+    # of this process left, so the capture does not depend on the order.
+    env.mp.setattr(main, "_service_player_uuid_cache", None)
     h1, h2, q, r = await env.players(4)
     await env.conn.execute("UPDATE players SET gold_earned = 200, gold_spent = 100 WHERE id = $1", r.id)
     out, raw = [], []
