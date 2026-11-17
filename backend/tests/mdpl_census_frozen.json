@@ -454,13 +454,15 @@
    "fallback": "READ",
    "held": [
     "mail_inbox_rev",
-    "mail_recipients"
+    "mail_recipients",
+    "moderation_cases",
+    "pending_dms"
    ],
    "keys": [],
    "phases": [
     "B"
    ],
-   "why": "phase B: the ledger row it writes for a player (an ORM insert, FOR KEY SHARE on that players row) waits for the deletion when the player is P, and the entry may hold inbox-revision or recipient rows from ending invites or sending a notice earlier in the same transaction; the deletion afterwards deletes P's recipient and revision rows and bumps the revisions of the invitees of P's lobbies, so a circle is possible when a game of P's settles or is cleaned up during P's deletion; bound (iii); scene: test_a_route_holding_the_player_s_inbox_row_after_the_tombstone_and_a_deletion_both_finish"
+   "why": "phase B: the ledger row it writes for a player (an ORM insert, FOR KEY SHARE on that players row) waits for the deletion when the player is P, and the entry may hold inbox-revision or recipient rows from ending invites or sending a notice earlier in the same transaction; the deletion afterwards deletes P's recipient and revision rows and bumps the revisions of the invitees of P's lobbies, so a circle is possible when a game of P's settles or is cleaned up during P's deletion; bound (iii); scene: test_a_route_holding_the_player_s_inbox_row_after_the_tombstone_and_a_deletion_both_finish No-wait holds (NB_HOLDS): the reader also counts as held, through queue_cleanup_loop's hoist, the moderation_cases and pending_dms rows _mail_purge_due takes FOR NO KEY UPDATE SKIP LOCKED in the loop's mail-retention arm; that arm runs in a session of its own and commits (M:6126) before the loop reaches another arm, and every arm opens its own session, so those rows are never held while this statement waits and they add no circle."
   },
   "_credit_bet_fighter_tax | UPDATE players SET gold_earned = COALESCE(gold_earned,0) + :tax WHERE id | 0": {
    "class": "READ",
@@ -499,9 +501,11 @@
     "match_report_journal",
     "match_report_windows",
     "match_seat_holds",
+    "moderation_cases",
     "ovt_lobbies",
     "ovt_queue",
     "ovt_series",
+    "pending_dms",
     "players",
     "queue_leases",
     "ranked_queue",
@@ -515,7 +519,7 @@
     "A",
     "B"
    ],
-   "why": "phase A: it settles, reverses or cleans up a series, match or lobby that P plays in or hosts, holding that game's rows (its held tables) when it writes each party's players row, P's among them, and the deletion of P, holding P's players row from its first write, later waits on rows of the same tables when it cancels P's open series and lobbies and deletes P's queue rows, leases, seat holds and report rows, so a circle is possible while P's own game settles; bound (iii); scene: test_a_peer_that_began_to_wait_first_is_not_the_one_postgresql_ends; and phase B: the ledger row it writes for a player (an ORM insert, FOR KEY SHARE on that players row) waits for the deletion when the player is P, and the entry may hold inbox-revision or recipient rows from ending invites or sending a notice earlier in the same transaction; the deletion afterwards deletes P's recipient and revision rows and bumps the revisions of the invitees of P's lobbies, so a circle is possible when a game of P's settles or is cleaned up during P's deletion; bound (iii); scene: test_a_route_holding_the_player_s_inbox_row_after_the_tombstone_and_a_deletion_both_finish"
+   "why": "phase A: it settles, reverses or cleans up a series, match or lobby that P plays in or hosts, holding that game's rows (its held tables) when it writes each party's players row, P's among them, and the deletion of P, holding P's players row from its first write, later waits on rows of the same tables when it cancels P's open series and lobbies and deletes P's queue rows, leases, seat holds and report rows, so a circle is possible while P's own game settles; bound (iii); scene: test_a_peer_that_began_to_wait_first_is_not_the_one_postgresql_ends; and phase B: the ledger row it writes for a player (an ORM insert, FOR KEY SHARE on that players row) waits for the deletion when the player is P, and the entry may hold inbox-revision or recipient rows from ending invites or sending a notice earlier in the same transaction; the deletion afterwards deletes P's recipient and revision rows and bumps the revisions of the invitees of P's lobbies, so a circle is possible when a game of P's settles or is cleaned up during P's deletion; bound (iii); scene: test_a_route_holding_the_player_s_inbox_row_after_the_tombstone_and_a_deletion_both_finish No-wait holds (NB_HOLDS): the reader also counts as held, through queue_cleanup_loop's hoist, the moderation_cases and pending_dms rows _mail_purge_due takes FOR NO KEY UPDATE SKIP LOCKED in the loop's mail-retention arm; that arm runs in a session of its own and commits (M:6126) before the loop reaches another arm, and every arm opens its own session, so those rows are never held while this statement waits and they add no circle."
   },
   "_ffa_lobby_create_core | INSERT INTO ffa_lobbies (id, status, player_count, member_ids, host_play | 0": {
    "class": "CLEAR",
@@ -1195,7 +1199,7 @@
    "phases": [
     "A"
    ],
-   "why": "phase A: the portrait janitor's pass holds the portrait blob's key (_pc_lock_blob, class PC_P_LOCK_CLASS) and P's portrait rows when it clears P's active dance on P's players row; the deletion of P takes the same blob key and deletes P's portrait rows, so a circle is possible when the janitor works on P's portrait during P's deletion; bound (iii), the side that can be ended being a background pass whose next pass does the work; scene: test_a_peer_that_began_to_wait_first_is_not_the_one_postgresql_ends"
+   "why": "phase A, no circle: the reader flattens _pc_snapshot_janitor_step into one order and reads this UPDATE as a wait for P's players row with the portrait blob's key (_pc_lock_blob) and P's portrait, lease and nonce rows held; none of that is so. The step commits those locks (M:31499) before it calls _pc_motion_janitor; the helper commits its discovery read (M:35037), then takes P's players row FOR NO KEY UPDATE SKIP LOCKED (M:35042-35044) and runs the UPDATE only when that returned the row (M:35045-35049), committing after each row (M:35051). While the deletion of P holds P's row (from its first write, phase A, and from the tombstone, phase B) the guard skips P and the UPDATE does not run; when the guard got P's row the janitor already owns it, so the UPDATE waits for no one, and the deletion's own wait for that row (its first write) is on a transaction that holds nothing else of P's and ends at the commit after the row; bound (iii) is not needed here; no scene: there is no circle to stage"
   },
   "_pc_open_for | GoldTransaction(...) | 0": {
    "class": "CLEAR",
@@ -1529,7 +1533,9 @@
    "fallback": "READ",
    "held": [
     "mail_inbox_rev",
-    "mail_recipients"
+    "mail_recipients",
+    "moderation_cases",
+    "pending_dms"
    ],
    "keys": [
     "_identity_lock_many | SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text))) | 0"
@@ -1537,7 +1543,7 @@
    "phases": [
     "B"
    ],
-   "why": "phase B: the ledger row it writes for a player (an ORM insert, FOR KEY SHARE on that players row) waits for the deletion when the player is P, and the entry may hold inbox-revision or recipient rows from ending invites or sending a notice earlier in the same transaction; the deletion afterwards deletes P's recipient and revision rows and bumps the revisions of the invitees of P's lobbies, so a circle is possible when a game of P's settles or is cleaned up during P's deletion; bound (iii); scene: test_a_route_holding_the_player_s_inbox_row_after_the_tombstone_and_a_deletion_both_finish"
+   "why": "phase B: the ledger row it writes for a player (an ORM insert, FOR KEY SHARE on that players row) waits for the deletion when the player is P, and the entry may hold inbox-revision or recipient rows from ending invites or sending a notice earlier in the same transaction; the deletion afterwards deletes P's recipient and revision rows and bumps the revisions of the invitees of P's lobbies, so a circle is possible when a game of P's settles or is cleaned up during P's deletion; bound (iii); scene: test_a_route_holding_the_player_s_inbox_row_after_the_tombstone_and_a_deletion_both_finish No-wait holds (NB_HOLDS): the reader also counts as held, through queue_cleanup_loop's hoist, the moderation_cases and pending_dms rows _mail_purge_due takes FOR NO KEY UPDATE SKIP LOCKED in the loop's mail-retention arm; that arm runs in a session of its own and commits (M:6126) before the loop reaches another arm, and every arm opens its own session, so those rows are never held while this statement waits and they add no circle."
   },
   "_reconcile_team_series_bets | SELECT 1 FROM players WHERE id = :pid FOR NO KEY UPDATE | 0": {
    "class": "READ",
@@ -1563,9 +1569,11 @@
     "mail_recipients",
     "mail_send_receipts",
     "match_seat_holds",
+    "moderation_cases",
     "ovt_lobbies",
     "ovt_queue",
     "ovt_series",
+    "pending_dms",
     "players",
     "queue_leases",
     "ranked_queue",
@@ -1581,7 +1589,7 @@
     "A",
     "B"
    ],
-   "why": "phase A: it settles, reverses or cleans up a series, match or lobby that P plays in or hosts, holding that game's rows (its held tables) when it writes each party's players row, P's among them, and the deletion of P, holding P's players row from its first write, later waits on rows of the same tables when it cancels P's open series and lobbies and deletes P's queue rows, leases, seat holds and report rows, so a circle is possible while P's own game settles; bound (iii); scene: test_a_peer_that_began_to_wait_first_is_not_the_one_postgresql_ends; and phase B: the ledger row it writes for a player (an ORM insert, FOR KEY SHARE on that players row) waits for the deletion when the player is P, and the entry may hold inbox-revision or recipient rows from ending invites or sending a notice earlier in the same transaction; the deletion afterwards deletes P's recipient and revision rows and bumps the revisions of the invitees of P's lobbies, so a circle is possible when a game of P's settles or is cleaned up during P's deletion; bound (iii); scene: test_a_route_holding_the_player_s_inbox_row_after_the_tombstone_and_a_deletion_both_finish"
+   "why": "phase A: it settles, reverses or cleans up a series, match or lobby that P plays in or hosts, holding that game's rows (its held tables) when it writes each party's players row, P's among them, and the deletion of P, holding P's players row from its first write, later waits on rows of the same tables when it cancels P's open series and lobbies and deletes P's queue rows, leases, seat holds and report rows, so a circle is possible while P's own game settles; bound (iii); scene: test_a_peer_that_began_to_wait_first_is_not_the_one_postgresql_ends; and phase B: the ledger row it writes for a player (an ORM insert, FOR KEY SHARE on that players row) waits for the deletion when the player is P, and the entry may hold inbox-revision or recipient rows from ending invites or sending a notice earlier in the same transaction; the deletion afterwards deletes P's recipient and revision rows and bumps the revisions of the invitees of P's lobbies, so a circle is possible when a game of P's settles or is cleaned up during P's deletion; bound (iii); scene: test_a_route_holding_the_player_s_inbox_row_after_the_tombstone_and_a_deletion_both_finish No-wait holds (NB_HOLDS): the reader also counts as held, through queue_cleanup_loop's hoist, the moderation_cases and pending_dms rows _mail_purge_due takes FOR NO KEY UPDATE SKIP LOCKED in the loop's mail-retention arm; that arm runs in a session of its own and commits (M:6126) before the loop reaches another arm, and every arm opens its own session, so those rows are never held while this statement waits and they add no circle."
   },
   "_reconcile_team_series_bets | UPDATE players SET gold_earned = COALESCE(gold_earned,0) + :p WHERE id = | 0": {
    "class": "READ",
@@ -1607,9 +1615,11 @@
     "mail_recipients",
     "mail_send_receipts",
     "match_seat_holds",
+    "moderation_cases",
     "ovt_lobbies",
     "ovt_queue",
     "ovt_series",
+    "pending_dms",
     "players",
     "queue_leases",
     "ranked_queue",
@@ -1625,7 +1635,7 @@
     "A",
     "B"
    ],
-   "why": "phase A: it settles, reverses or cleans up a series, match or lobby that P plays in or hosts, holding that game's rows (its held tables) when it writes each party's players row, P's among them, and the deletion of P, holding P's players row from its first write, later waits on rows of the same tables when it cancels P's open series and lobbies and deletes P's queue rows, leases, seat holds and report rows, so a circle is possible while P's own game settles; bound (iii); scene: test_a_peer_that_began_to_wait_first_is_not_the_one_postgresql_ends; and phase B: the ledger row it writes for a player (an ORM insert, FOR KEY SHARE on that players row) waits for the deletion when the player is P, and the entry may hold inbox-revision or recipient rows from ending invites or sending a notice earlier in the same transaction; the deletion afterwards deletes P's recipient and revision rows and bumps the revisions of the invitees of P's lobbies, so a circle is possible when a game of P's settles or is cleaned up during P's deletion; bound (iii); scene: test_a_route_holding_the_player_s_inbox_row_after_the_tombstone_and_a_deletion_both_finish"
+   "why": "phase A: it settles, reverses or cleans up a series, match or lobby that P plays in or hosts, holding that game's rows (its held tables) when it writes each party's players row, P's among them, and the deletion of P, holding P's players row from its first write, later waits on rows of the same tables when it cancels P's open series and lobbies and deletes P's queue rows, leases, seat holds and report rows, so a circle is possible while P's own game settles; bound (iii); scene: test_a_peer_that_began_to_wait_first_is_not_the_one_postgresql_ends; and phase B: the ledger row it writes for a player (an ORM insert, FOR KEY SHARE on that players row) waits for the deletion when the player is P, and the entry may hold inbox-revision or recipient rows from ending invites or sending a notice earlier in the same transaction; the deletion afterwards deletes P's recipient and revision rows and bumps the revisions of the invitees of P's lobbies, so a circle is possible when a game of P's settles or is cleaned up during P's deletion; bound (iii); scene: test_a_route_holding_the_player_s_inbox_row_after_the_tombstone_and_a_deletion_both_finish No-wait holds (NB_HOLDS): the reader also counts as held, through queue_cleanup_loop's hoist, the moderation_cases and pending_dms rows _mail_purge_due takes FOR NO KEY UPDATE SKIP LOCKED in the loop's mail-retention arm; that arm runs in a session of its own and commits (M:6126) before the loop reaches another arm, and every arm opens its own session, so those rows are never held while this statement waits and they add no circle."
   },
   "_record_seat_attestation | INSERT INTO series_progress (surface, subject_id, player_id, observed_po | 0": {
    "class": "CLEAR",
@@ -1699,13 +1709,15 @@
    "fallback": "READ",
    "held": [
     "mail_inbox_rev",
-    "mail_recipients"
+    "mail_recipients",
+    "moderation_cases",
+    "pending_dms"
    ],
    "keys": [],
    "phases": [
     "B"
    ],
-   "why": "phase B: the ledger row it writes for a player (an ORM insert, FOR KEY SHARE on that players row) waits for the deletion when the player is P, and the entry may hold inbox-revision or recipient rows from ending invites or sending a notice earlier in the same transaction; the deletion afterwards deletes P's recipient and revision rows and bumps the revisions of the invitees of P's lobbies, so a circle is possible when a game of P's settles or is cleaned up during P's deletion; bound (iii); scene: test_a_route_holding_the_player_s_inbox_row_after_the_tombstone_and_a_deletion_both_finish"
+   "why": "phase B: the ledger row it writes for a player (an ORM insert, FOR KEY SHARE on that players row) waits for the deletion when the player is P, and the entry may hold inbox-revision or recipient rows from ending invites or sending a notice earlier in the same transaction; the deletion afterwards deletes P's recipient and revision rows and bumps the revisions of the invitees of P's lobbies, so a circle is possible when a game of P's settles or is cleaned up during P's deletion; bound (iii); scene: test_a_route_holding_the_player_s_inbox_row_after_the_tombstone_and_a_deletion_both_finish No-wait holds (NB_HOLDS): the reader also counts as held, through queue_cleanup_loop's hoist, the moderation_cases and pending_dms rows _mail_purge_due takes FOR NO KEY UPDATE SKIP LOCKED in the loop's mail-retention arm; that arm runs in a session of its own and commits (M:6126) before the loop reaches another arm, and every arm opens its own session, so those rows are never held while this statement waits and they add no circle."
   },
   "_return_stake_exactly | UPDATE players SET gold_spent = COALESCE(gold_spent, 0) - CAST(:amt AS i | 0": {
    "class": "READ",
@@ -1750,9 +1762,11 @@
     "mail_recipients",
     "mail_send_receipts",
     "match_seat_holds",
+    "moderation_cases",
     "ovt_lobbies",
     "ovt_queue",
     "ovt_series",
+    "pending_dms",
     "players",
     "queue_leases",
     "ranked_queue",
@@ -1768,7 +1782,7 @@
     "A",
     "B"
    ],
-   "why": "phase A: it settles, reverses or cleans up a series, match or lobby that P plays in or hosts, holding that game's rows (its held tables) when it writes each party's players row, P's among them, and the deletion of P, holding P's players row from its first write, later waits on rows of the same tables when it cancels P's open series and lobbies and deletes P's queue rows, leases, seat holds and report rows, so a circle is possible while P's own game settles; bound (iii); scene: test_a_peer_that_began_to_wait_first_is_not_the_one_postgresql_ends; and phase B: the ledger row it writes for a player (an ORM insert, FOR KEY SHARE on that players row) waits for the deletion when the player is P, and the entry may hold inbox-revision or recipient rows from ending invites or sending a notice earlier in the same transaction; the deletion afterwards deletes P's recipient and revision rows and bumps the revisions of the invitees of P's lobbies, so a circle is possible when a game of P's settles or is cleaned up during P's deletion; bound (iii); scene: test_a_route_holding_the_player_s_inbox_row_after_the_tombstone_and_a_deletion_both_finish"
+   "why": "phase A: it settles, reverses or cleans up a series, match or lobby that P plays in or hosts, holding that game's rows (its held tables) when it writes each party's players row, P's among them, and the deletion of P, holding P's players row from its first write, later waits on rows of the same tables when it cancels P's open series and lobbies and deletes P's queue rows, leases, seat holds and report rows, so a circle is possible while P's own game settles; bound (iii); scene: test_a_peer_that_began_to_wait_first_is_not_the_one_postgresql_ends; and phase B: the ledger row it writes for a player (an ORM insert, FOR KEY SHARE on that players row) waits for the deletion when the player is P, and the entry may hold inbox-revision or recipient rows from ending invites or sending a notice earlier in the same transaction; the deletion afterwards deletes P's recipient and revision rows and bumps the revisions of the invitees of P's lobbies, so a circle is possible when a game of P's settles or is cleaned up during P's deletion; bound (iii); scene: test_a_route_holding_the_player_s_inbox_row_after_the_tombstone_and_a_deletion_both_finish No-wait holds (NB_HOLDS): the reader also counts as held, through queue_cleanup_loop's hoist, the moderation_cases and pending_dms rows _mail_purge_due takes FOR NO KEY UPDATE SKIP LOCKED in the loop's mail-retention arm; that arm runs in a session of its own and commits (M:6126) before the loop reaches another arm, and every arm opens its own session, so those rows are never held while this statement waits and they add no circle."
   },
   "_reverse_match_gold_xp | GoldTransaction(...) | 0": {
    "class": "CLEAR",
@@ -1849,13 +1863,15 @@
    "fallback": "READ",
    "held": [
     "mail_inbox_rev",
-    "mail_recipients"
+    "mail_recipients",
+    "moderation_cases",
+    "pending_dms"
    ],
    "keys": [],
    "phases": [
     "B"
    ],
-   "why": "phase B: the ledger row it writes for a player (an ORM insert, FOR KEY SHARE on that players row) waits for the deletion when the player is P, and the entry may hold inbox-revision or recipient rows from ending invites or sending a notice earlier in the same transaction; the deletion afterwards deletes P's recipient and revision rows and bumps the revisions of the invitees of P's lobbies, so a circle is possible when a game of P's settles or is cleaned up during P's deletion; bound (iii); scene: test_a_route_holding_the_player_s_inbox_row_after_the_tombstone_and_a_deletion_both_finish"
+   "why": "phase B: the ledger row it writes for a player (an ORM insert, FOR KEY SHARE on that players row) waits for the deletion when the player is P, and the entry may hold inbox-revision or recipient rows from ending invites or sending a notice earlier in the same transaction; the deletion afterwards deletes P's recipient and revision rows and bumps the revisions of the invitees of P's lobbies, so a circle is possible when a game of P's settles or is cleaned up during P's deletion; bound (iii); scene: test_a_route_holding_the_player_s_inbox_row_after_the_tombstone_and_a_deletion_both_finish No-wait holds (NB_HOLDS): the reader also counts as held, through queue_cleanup_loop's hoist, the moderation_cases and pending_dms rows _mail_purge_due takes FOR NO KEY UPDATE SKIP LOCKED in the loop's mail-retention arm; that arm runs in a session of its own and commits (M:6126) before the loop reaches another arm, and every arm opens its own session, so those rows are never held while this statement waits and they add no circle."
   },
   "_settle_ffa_bets_for_game | SELECT 1 FROM players WHERE id = :pid FOR NO KEY UPDATE | 0": {
    "class": "READ",
@@ -1882,9 +1898,11 @@
     "mail_recipients",
     "mail_send_receipts",
     "match_seat_holds",
+    "moderation_cases",
     "ovt_lobbies",
     "ovt_queue",
     "ovt_series",
+    "pending_dms",
     "players",
     "queue_leases",
     "ranked_queue",
@@ -1898,7 +1916,7 @@
     "A",
     "B"
    ],
-   "why": "phase A: it settles, reverses or cleans up a series, match or lobby that P plays in or hosts, holding that game's rows (its held tables) when it writes each party's players row, P's among them, and the deletion of P, holding P's players row from its first write, later waits on rows of the same tables when it cancels P's open series and lobbies and deletes P's queue rows, leases, seat holds and report rows, so a circle is possible while P's own game settles; bound (iii); scene: test_a_peer_that_began_to_wait_first_is_not_the_one_postgresql_ends; and phase B: the ledger row it writes for a player (an ORM insert, FOR KEY SHARE on that players row) waits for the deletion when the player is P, and the entry may hold inbox-revision or recipient rows from ending invites or sending a notice earlier in the same transaction; the deletion afterwards deletes P's recipient and revision rows and bumps the revisions of the invitees of P's lobbies, so a circle is possible when a game of P's settles or is cleaned up during P's deletion; bound (iii); scene: test_a_route_holding_the_player_s_inbox_row_after_the_tombstone_and_a_deletion_both_finish"
+   "why": "phase A: it settles, reverses or cleans up a series, match or lobby that P plays in or hosts, holding that game's rows (its held tables) when it writes each party's players row, P's among them, and the deletion of P, holding P's players row from its first write, later waits on rows of the same tables when it cancels P's open series and lobbies and deletes P's queue rows, leases, seat holds and report rows, so a circle is possible while P's own game settles; bound (iii); scene: test_a_peer_that_began_to_wait_first_is_not_the_one_postgresql_ends; and phase B: the ledger row it writes for a player (an ORM insert, FOR KEY SHARE on that players row) waits for the deletion when the player is P, and the entry may hold inbox-revision or recipient rows from ending invites or sending a notice earlier in the same transaction; the deletion afterwards deletes P's recipient and revision rows and bumps the revisions of the invitees of P's lobbies, so a circle is possible when a game of P's settles or is cleaned up during P's deletion; bound (iii); scene: test_a_route_holding_the_player_s_inbox_row_after_the_tombstone_and_a_deletion_both_finish No-wait holds (NB_HOLDS): the reader also counts as held, through queue_cleanup_loop's hoist, the moderation_cases and pending_dms rows _mail_purge_due takes FOR NO KEY UPDATE SKIP LOCKED in the loop's mail-retention arm; that arm runs in a session of its own and commits (M:6126) before the loop reaches another arm, and every arm opens its own session, so those rows are never held while this statement waits and they add no circle."
   },
   "_settle_ffa_bets_for_game | UPDATE players SET gold_earned = COALESCE(gold_earned,0) + :g WHERE id = | 0": {
    "class": "READ",
@@ -1925,9 +1943,11 @@
     "mail_recipients",
     "mail_send_receipts",
     "match_seat_holds",
+    "moderation_cases",
     "ovt_lobbies",
     "ovt_queue",
     "ovt_series",
+    "pending_dms",
     "players",
     "queue_leases",
     "ranked_queue",
@@ -1941,7 +1961,7 @@
     "A",
     "B"
    ],
-   "why": "phase A: it settles, reverses or cleans up a series, match or lobby that P plays in or hosts, holding that game's rows (its held tables) when it writes each party's players row, P's among them, and the deletion of P, holding P's players row from its first write, later waits on rows of the same tables when it cancels P's open series and lobbies and deletes P's queue rows, leases, seat holds and report rows, so a circle is possible while P's own game settles; bound (iii); scene: test_a_peer_that_began_to_wait_first_is_not_the_one_postgresql_ends; and phase B: the ledger row it writes for a player (an ORM insert, FOR KEY SHARE on that players row) waits for the deletion when the player is P, and the entry may hold inbox-revision or recipient rows from ending invites or sending a notice earlier in the same transaction; the deletion afterwards deletes P's recipient and revision rows and bumps the revisions of the invitees of P's lobbies, so a circle is possible when a game of P's settles or is cleaned up during P's deletion; bound (iii); scene: test_a_route_holding_the_player_s_inbox_row_after_the_tombstone_and_a_deletion_both_finish"
+   "why": "phase A: it settles, reverses or cleans up a series, match or lobby that P plays in or hosts, holding that game's rows (its held tables) when it writes each party's players row, P's among them, and the deletion of P, holding P's players row from its first write, later waits on rows of the same tables when it cancels P's open series and lobbies and deletes P's queue rows, leases, seat holds and report rows, so a circle is possible while P's own game settles; bound (iii); scene: test_a_peer_that_began_to_wait_first_is_not_the_one_postgresql_ends; and phase B: the ledger row it writes for a player (an ORM insert, FOR KEY SHARE on that players row) waits for the deletion when the player is P, and the entry may hold inbox-revision or recipient rows from ending invites or sending a notice earlier in the same transaction; the deletion afterwards deletes P's recipient and revision rows and bumps the revisions of the invitees of P's lobbies, so a circle is possible when a game of P's settles or is cleaned up during P's deletion; bound (iii); scene: test_a_route_holding_the_player_s_inbox_row_after_the_tombstone_and_a_deletion_both_finish No-wait holds (NB_HOLDS): the reader also counts as held, through queue_cleanup_loop's hoist, the moderation_cases and pending_dms rows _mail_purge_due takes FOR NO KEY UPDATE SKIP LOCKED in the loop's mail-retention arm; that arm runs in a session of its own and commits (M:6126) before the loop reaches another arm, and every arm opens its own session, so those rows are never held while this statement waits and they add no circle."
   },
   "_settle_ovt_report | GoldTransaction(...) | 0": {
    "class": "CLEAR",
@@ -2787,34 +2807,52 @@
    "phases": []
   },
   "link_discord | ORM player.discord_display_name = | 0": {
-   "class": "CLEAR",
+   "class": "READ",
    "entries": [
     "link_discord"
    ],
-   "fallback": "CLEAR",
-   "held": [],
+   "fallback": "READ",
+   "held": [
+    "players"
+   ],
    "keys": [],
-   "phases": []
+   "phases": [
+    "A",
+    "B"
+   ],
+   "why": "phase A: the route releases the Discord id from the player X who held it (existing_player.discord_id = None, a key write: UPDATE on X's row, flushed before it reads the linking player) and then writes the linking player's row. When that player is P, the deletion of P holds P's row, and when it meanwhile makes X the host of a lobby P hosted (host_player_id, a foreign key: KEY SHARE on X's row) it waits for X's row while the route waits for P's: a circle is possible; bound (iii): the deletion's wait ends at the cap and its attempt runs again; scene: test_a_peer_that_began_to_wait_first_is_not_the_one_postgresql_ends. Phase B: the reader also reads the case scrub's write of reporter_id as a foreign key check; it sets reporter_id to NULL or to the value it had, which PostgreSQL does not check, so phase B adds no circle."
   },
   "link_discord | ORM player.discord_id = | 0": {
-   "class": "CLEAR",
+   "class": "READ",
    "entries": [
     "link_discord"
    ],
-   "fallback": "CLEAR",
-   "held": [],
+   "fallback": "READ",
+   "held": [
+    "players"
+   ],
    "keys": [],
-   "phases": []
+   "phases": [
+    "A",
+    "B"
+   ],
+   "why": "phase A: the route releases the Discord id from the player X who held it (existing_player.discord_id = None, a key write: UPDATE on X's row, flushed before it reads the linking player) and then writes the linking player's row. When that player is P, the deletion of P holds P's row, and when it meanwhile makes X the host of a lobby P hosted (host_player_id, a foreign key: KEY SHARE on X's row) it waits for X's row while the route waits for P's: a circle is possible; bound (iii): the deletion's wait ends at the cap and its attempt runs again; scene: test_a_peer_that_began_to_wait_first_is_not_the_one_postgresql_ends. Phase B: the reader also reads the case scrub's write of reporter_id as a foreign key check; it sets reporter_id to NULL or to the value it had, which PostgreSQL does not check, so phase B adds no circle."
   },
   "link_discord | ORM player.discord_username = | 0": {
-   "class": "CLEAR",
+   "class": "READ",
    "entries": [
     "link_discord"
    ],
-   "fallback": "CLEAR",
-   "held": [],
+   "fallback": "READ",
+   "held": [
+    "players"
+   ],
    "keys": [],
-   "phases": []
+   "phases": [
+    "A",
+    "B"
+   ],
+   "why": "phase A: the route releases the Discord id from the player X who held it (existing_player.discord_id = None, a key write: UPDATE on X's row, flushed before it reads the linking player) and then writes the linking player's row. When that player is P, the deletion of P holds P's row, and when it meanwhile makes X the host of a lobby P hosted (host_player_id, a foreign key: KEY SHARE on X's row) it waits for X's row while the route waits for P's: a circle is possible; bound (iii): the deletion's wait ends at the cap and its attempt runs again; scene: test_a_peer_that_began_to_wait_first_is_not_the_one_postgresql_ends. Phase B: the reader also reads the case scrub's write of reporter_id as a foreign key check; it sets reporter_id to NULL or to the value it had, which PostgreSQL does not check, so phase B adds no circle."
   },
   "mail_block_add | INSERT INTO mail_blocks (blocker_id, blocked_id) VALUES (:me, :t) ON CON | 0": {
    "class": "CLEAR",
@@ -2854,14 +2892,20 @@
    "phases": []
   },
   "mail_discord:mail_relay_pref | UPDATE players SET mail_discord_relay = :v WHERE discord_id = :d RETURNI | 0": {
-   "class": "CLEAR",
+   "class": "READ",
    "entries": [
     "mail_discord:mail_relay_pref"
    ],
-   "fallback": "CLEAR",
-   "held": [],
+   "fallback": "READ",
+   "held": [
+    "players"
+   ],
    "keys": [],
-   "phases": []
+   "phases": [
+    "A",
+    "B"
+   ],
+   "why": "phases A and B, no circle: the route's players statements address the row that holds the Discord id. Turning the relay off, RELAY_OFF_GATE_BY_DISCORD_SQL takes that row FOR UPDATE first and this UPDATE, by the same id, finds the same row (a re-link that moves the id writes the old holder's row first, and that row is held), so it waits for no one; turning it on, this UPDATE is the route's first statement. The deletion waits for another player's row only through a foreign key (a lobby's new host); the route waits for no row but the one that holds the id, and only before it holds anything, so when that row is P's it holds nothing the deletion waits for."
   },
   "mail_settings_put | SELECT steam_id FROM players WHERE id = :me FOR UPDATE | 0": {
    "class": "CLEAR",
@@ -2874,24 +2918,36 @@
    "phases": []
   },
   "mail_settings_put | UPDATE players SET mail_discord_relay = :r WHERE id = :me | 0": {
-   "class": "CLEAR",
+   "class": "READ",
    "entries": [
     "mail_settings_put"
    ],
-   "fallback": "CLEAR",
-   "held": [],
+   "fallback": "READ",
+   "held": [
+    "players"
+   ],
    "keys": [],
-   "phases": []
+   "phases": [
+    "A",
+    "B"
+   ],
+   "why": "phases A and B, no circle: every players statement of the route is on the caller's own row (the session check's stamp; RELAY_OFF_GATE_BY_ID_SQL, FOR UPDATE, when it turns the relay off; its two writes). The deletion waits for another player's row only through a foreign key (a lobby's new host), so a circle needs the route to hold that player's row and then wait for P's; the route waits for no row but the caller's, and only for its first statement on it, holding nothing the deletion waits for (after that it holds the row and this write waits for no one)."
   },
   "mail_settings_put | UPDATE players SET mail_from = :v WHERE id = :me | 0": {
-   "class": "CLEAR",
+   "class": "READ",
    "entries": [
     "mail_settings_put"
    ],
-   "fallback": "CLEAR",
-   "held": [],
+   "fallback": "READ",
+   "held": [
+    "players"
+   ],
    "keys": [],
-   "phases": []
+   "phases": [
+    "A",
+    "B"
+   ],
+   "why": "phases A and B, no circle: every players statement of the route is on the caller's own row (the session check's stamp; RELAY_OFF_GATE_BY_ID_SQL, FOR UPDATE, when it turns the relay off; its two writes). The deletion waits for another player's row only through a foreign key (a lobby's new host), so a circle needs the route to hold that player's row and then wait for P's; the route waits for no row but the caller's, and only for its first statement on it, holding nothing the deletion waits for (after that it holds the row and this write waits for no one)."
   },
   "match_hold:_claim_open_ledger | INSERT INTO match_hold_open_attempts (request_id, room_name, game_id, he | 0": {
    "class": "CLEAR",
@@ -3475,13 +3531,15 @@
    "fallback": "READ",
    "held": [
     "mail_inbox_rev",
-    "mail_recipients"
+    "mail_recipients",
+    "moderation_cases",
+    "pending_dms"
    ],
    "keys": [],
    "phases": [
     "B"
    ],
-   "why": "phase B: the ledger row it writes for a player (an ORM insert, FOR KEY SHARE on that players row) waits for the deletion when the player is P, and the entry may hold inbox-revision or recipient rows from ending invites or sending a notice earlier in the same transaction; the deletion afterwards deletes P's recipient and revision rows and bumps the revisions of the invitees of P's lobbies, so a circle is possible when a game of P's settles or is cleaned up during P's deletion; bound (iii); scene: test_a_route_holding_the_player_s_inbox_row_after_the_tombstone_and_a_deletion_both_finish"
+   "why": "phase B: the ledger row it writes for a player (an ORM insert, FOR KEY SHARE on that players row) waits for the deletion when the player is P, and the entry may hold inbox-revision or recipient rows from ending invites or sending a notice earlier in the same transaction; the deletion afterwards deletes P's recipient and revision rows and bumps the revisions of the invitees of P's lobbies, so a circle is possible when a game of P's settles or is cleaned up during P's deletion; bound (iii); scene: test_a_route_holding_the_player_s_inbox_row_after_the_tombstone_and_a_deletion_both_finish No-wait holds (NB_HOLDS): the reader also counts as held, through queue_cleanup_loop's hoist, the moderation_cases and pending_dms rows _mail_purge_due takes FOR NO KEY UPDATE SKIP LOCKED in the loop's mail-retention arm; that arm runs in a session of its own and commits (M:6126) before the loop reaches another arm, and every arm opens its own session, so those rows are never held while this statement waits and they add no circle."
   },
   "queue_cleanup_loop | SELECT 1 FROM players WHERE id = :pid FOR NO KEY UPDATE | 0": {
    "class": "READ",
@@ -3500,9 +3558,11 @@
     "mail_recipients",
     "mail_send_receipts",
     "match_seat_holds",
+    "moderation_cases",
     "ovt_lobbies",
     "ovt_queue",
     "ovt_series",
+    "pending_dms",
     "players",
     "queue_leases",
     "ranked_queue",
@@ -3516,7 +3576,7 @@
     "A",
     "B"
    ],
-   "why": "phase A: it settles, reverses or cleans up a series, match or lobby that P plays in or hosts, holding that game's rows (its held tables) when it writes each party's players row, P's among them, and the deletion of P, holding P's players row from its first write, later waits on rows of the same tables when it cancels P's open series and lobbies and deletes P's queue rows, leases, seat holds and report rows, so a circle is possible while P's own game settles; bound (iii); scene: test_a_peer_that_began_to_wait_first_is_not_the_one_postgresql_ends; and phase B: the ledger row it writes for a player (an ORM insert, FOR KEY SHARE on that players row) waits for the deletion when the player is P, and the entry may hold inbox-revision or recipient rows from ending invites or sending a notice earlier in the same transaction; the deletion afterwards deletes P's recipient and revision rows and bumps the revisions of the invitees of P's lobbies, so a circle is possible when a game of P's settles or is cleaned up during P's deletion; bound (iii); scene: test_a_route_holding_the_player_s_inbox_row_after_the_tombstone_and_a_deletion_both_finish"
+   "why": "phase A: it settles, reverses or cleans up a series, match or lobby that P plays in or hosts, holding that game's rows (its held tables) when it writes each party's players row, P's among them, and the deletion of P, holding P's players row from its first write, later waits on rows of the same tables when it cancels P's open series and lobbies and deletes P's queue rows, leases, seat holds and report rows, so a circle is possible while P's own game settles; bound (iii); scene: test_a_peer_that_began_to_wait_first_is_not_the_one_postgresql_ends; and phase B: the ledger row it writes for a player (an ORM insert, FOR KEY SHARE on that players row) waits for the deletion when the player is P, and the entry may hold inbox-revision or recipient rows from ending invites or sending a notice earlier in the same transaction; the deletion afterwards deletes P's recipient and revision rows and bumps the revisions of the invitees of P's lobbies, so a circle is possible when a game of P's settles or is cleaned up during P's deletion; bound (iii); scene: test_a_route_holding_the_player_s_inbox_row_after_the_tombstone_and_a_deletion_both_finish No-wait holds (NB_HOLDS): the reader also counts as held, through queue_cleanup_loop's hoist, the moderation_cases and pending_dms rows _mail_purge_due takes FOR NO KEY UPDATE SKIP LOCKED in the loop's mail-retention arm; that arm runs in a session of its own and commits (M:6126) before the loop reaches another arm, and every arm opens its own session, so those rows are never held while this statement waits and they add no circle."
   },
   "queue_cleanup_loop | UPDATE ffa_lobbies SET host_player_id=:h WHERE id=:lid | 0": {
    "class": "READ",
@@ -3526,13 +3586,15 @@
    "fallback": "READ",
    "held": [
     "mail_inbox_rev",
-    "mail_recipients"
+    "mail_recipients",
+    "moderation_cases",
+    "pending_dms"
    ],
    "keys": [],
    "phases": [
     "B"
    ],
-   "why": "phase B: the queue cleanup pass, in a loop that ends invites (inbox-revision and recipient rows), makes a remaining member a lobby's host (host_player_id, a foreign key: FOR KEY SHARE on that member's players row); when the new host is P after P's tombstone the update waits for the deletion, which afterwards deletes P's recipient and revision rows and bumps the revisions of the invitees of P's lobbies, so a circle is possible when the pass cleans a lobby of P's during P's deletion; bound (iii), the side that can be ended being a background pass whose next pass does the work; scene: test_a_route_holding_the_player_s_inbox_row_after_the_tombstone_and_a_deletion_both_finish"
+   "why": "phase B: the queue cleanup pass, in a loop that ends invites (inbox-revision and recipient rows), makes a remaining member a lobby's host (host_player_id, a foreign key: FOR KEY SHARE on that member's players row); when the new host is P after P's tombstone the update waits for the deletion, which afterwards deletes P's recipient and revision rows and bumps the revisions of the invitees of P's lobbies, so a circle is possible when the pass cleans a lobby of P's during P's deletion; bound (iii), the side that can be ended being a background pass whose next pass does the work; scene: test_a_route_holding_the_player_s_inbox_row_after_the_tombstone_and_a_deletion_both_finish No-wait holds (NB_HOLDS): the reader also counts as held, through queue_cleanup_loop's hoist, the moderation_cases and pending_dms rows _mail_purge_due takes FOR NO KEY UPDATE SKIP LOCKED in the loop's mail-retention arm; that arm runs in a session of its own and commits (M:6126) before the loop reaches another arm, and every arm opens its own session, so those rows are never held while this statement waits and they add no circle."
   },
   "queue_cleanup_loop | UPDATE players SET gold_earned = COALESCE(gold_earned,0) + :p WHERE id = | 0": {
    "class": "READ",
@@ -3551,9 +3613,11 @@
     "mail_recipients",
     "mail_send_receipts",
     "match_seat_holds",
+    "moderation_cases",
     "ovt_lobbies",
     "ovt_queue",
     "ovt_series",
+    "pending_dms",
     "players",
     "queue_leases",
     "ranked_queue",
@@ -3567,7 +3631,7 @@
     "A",
     "B"
    ],
-   "why": "phase A: it settles, reverses or cleans up a series, match or lobby that P plays in or hosts, holding that game's rows (its held tables) when it writes each party's players row, P's among them, and the deletion of P, holding P's players row from its first write, later waits on rows of the same tables when it cancels P's open series and lobbies and deletes P's queue rows, leases, seat holds and report rows, so a circle is possible while P's own game settles; bound (iii); scene: test_a_peer_that_began_to_wait_first_is_not_the_one_postgresql_ends; and phase B: the ledger row it writes for a player (an ORM insert, FOR KEY SHARE on that players row) waits for the deletion when the player is P, and the entry may hold inbox-revision or recipient rows from ending invites or sending a notice earlier in the same transaction; the deletion afterwards deletes P's recipient and revision rows and bumps the revisions of the invitees of P's lobbies, so a circle is possible when a game of P's settles or is cleaned up during P's deletion; bound (iii); scene: test_a_route_holding_the_player_s_inbox_row_after_the_tombstone_and_a_deletion_both_finish"
+   "why": "phase A: it settles, reverses or cleans up a series, match or lobby that P plays in or hosts, holding that game's rows (its held tables) when it writes each party's players row, P's among them, and the deletion of P, holding P's players row from its first write, later waits on rows of the same tables when it cancels P's open series and lobbies and deletes P's queue rows, leases, seat holds and report rows, so a circle is possible while P's own game settles; bound (iii); scene: test_a_peer_that_began_to_wait_first_is_not_the_one_postgresql_ends; and phase B: the ledger row it writes for a player (an ORM insert, FOR KEY SHARE on that players row) waits for the deletion when the player is P, and the entry may hold inbox-revision or recipient rows from ending invites or sending a notice earlier in the same transaction; the deletion afterwards deletes P's recipient and revision rows and bumps the revisions of the invitees of P's lobbies, so a circle is possible when a game of P's settles or is cleaned up during P's deletion; bound (iii); scene: test_a_route_holding_the_player_s_inbox_row_after_the_tombstone_and_a_deletion_both_finish No-wait holds (NB_HOLDS): the reader also counts as held, through queue_cleanup_loop's hoist, the moderation_cases and pending_dms rows _mail_purge_due takes FOR NO KEY UPDATE SKIP LOCKED in the loop's mail-retention arm; that arm runs in a session of its own and commits (M:6126) before the loop reaches another arm, and every arm opens its own session, so those rows are never held while this statement waits and they add no circle."
   },
   "queue_cleanup_loop | UPDATE {?t:ovt_lobbies|team_lobbies} SET host_player_id=:h WHERE id=:lid | 0": {
    "class": "READ",
@@ -3577,13 +3641,15 @@
    "fallback": "READ",
    "held": [
     "mail_inbox_rev",
-    "mail_recipients"
+    "mail_recipients",
+    "moderation_cases",
+    "pending_dms"
    ],
    "keys": [],
    "phases": [
     "B"
    ],
-   "why": "phase B: the queue cleanup pass, in a loop that ends invites (inbox-revision and recipient rows), makes a remaining member a lobby's host (host_player_id, a foreign key: FOR KEY SHARE on that member's players row); when the new host is P after P's tombstone the update waits for the deletion, which afterwards deletes P's recipient and revision rows and bumps the revisions of the invitees of P's lobbies, so a circle is possible when the pass cleans a lobby of P's during P's deletion; bound (iii), the side that can be ended being a background pass whose next pass does the work; scene: test_a_route_holding_the_player_s_inbox_row_after_the_tombstone_and_a_deletion_both_finish"
+   "why": "phase B: the queue cleanup pass, in a loop that ends invites (inbox-revision and recipient rows), makes a remaining member a lobby's host (host_player_id, a foreign key: FOR KEY SHARE on that member's players row); when the new host is P after P's tombstone the update waits for the deletion, which afterwards deletes P's recipient and revision rows and bumps the revisions of the invitees of P's lobbies, so a circle is possible when the pass cleans a lobby of P's during P's deletion; bound (iii), the side that can be ended being a background pass whose next pass does the work; scene: test_a_route_holding_the_player_s_inbox_row_after_the_tombstone_and_a_deletion_both_finish No-wait holds (NB_HOLDS): the reader also counts as held, through queue_cleanup_loop's hoist, the moderation_cases and pending_dms rows _mail_purge_due takes FOR NO KEY UPDATE SKIP LOCKED in the loop's mail-retention arm; that arm runs in a session of its own and commits (M:6126) before the loop reaches another arm, and every arm opens its own session, so those rows are never held while this statement waits and they add no circle."
   },
   "queue_decline | INSERT INTO queue_blocks (blocker_id, blocked_id, expires_at) VALUES (:b | 0": {
    "class": "CLEAR",
@@ -4811,6 +4877,7 @@
    "pc_portraits / NO KEY UPDATE",
    "pending_dms / UPDATE",
    "player_blocks / UPDATE",
+   "players / KEY SHARE",
    "players / UPDATE OWN ROW",
    "queue_blocks / UPDATE",
    "queue_leases / UPDATE",
@@ -4828,7 +4895,8 @@
    "mail_inbox_rev / UPDATE",
    "mail_recipients / UPDATE",
    "moderation_cases / NO KEY UPDATE",
-   "pending_dms / UPDATE"
+   "pending_dms / UPDATE",
+   "players / KEY SHARE"
   ]
  },
  "unread": {

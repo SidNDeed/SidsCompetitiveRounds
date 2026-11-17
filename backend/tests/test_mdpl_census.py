@@ -16,8 +16,12 @@ way, gives the frozen record (the control).
 A site whose class rests on an identity key (its fallback, the class without
 the key, is above it) names whose key covers whose row, or is judged to its
 fallback by hand (lesson 732). The regression control of the reader's
-widening: with its six switches off it computes mdpl_census_base.json, the
-census frozen before the widening, exactly. The foreign keys that migrations
+widening: with its eight switches off it computes mdpl_census_base.json, the
+census frozen before the widening, exactly (the test keeps the name it had
+with six). A lock taken without a wait (SKIP LOCKED, NOWAIT) is a hold: a
+planted route that takes the held row that way is READ, as with a wait, and a
+deletion lock on a players row taken that way is one of the deletion's holds.
+The foreign keys that migrations
 drop by dynamic SQL are read from each migration's own lookup. The reader
 holds a plain INSERT without a wait; that the deletion's plain inserts cannot
 wait (gold_transactions alone, keyed by its generated id) is read here too.
@@ -468,6 +472,9 @@ _NAME_P = ('    await db.execute(text("INSERT INTO gold_transactions (player_id,
 _PLANTS = {
     "clear": (_WRITE_P, "CLEAR"),                 # the negative control: it holds nothing
     "read": (_HOLD + _WRITE_P, "READ"),           # holds a row the deletion deletes later
+    # the same row taken without a wait still holds it (NB_HOLDS): the same class
+    "read_skip": (_HOLD.replace("FOR UPDATE", "FOR UPDATE SKIP LOCKED") + _WRITE_P, "READ"),
+    "read_nowait": (_HOLD.replace("FOR UPDATE", "FOR UPDATE NOWAIT") + _WRITE_P, "READ"),
     "key": (_KEY + _HOLD + _WRITE_P, "KEY"),      # the same, behind the identity key
     "upgrade": (_NAME_P + _WRITE_P, "UPGRADE"),   # names the player in an insert first
 }
@@ -491,6 +498,60 @@ def test_a_planted_route_is_a_new_site_of_its_class(name, planted, frozen):
     assert site not in frozen["sites"]            # so the comparison above would be red
     assert planted[site]["class"] == _PLANTS[name][1], planted[site]
     assert planted[site]["entries"] == ["mdpl_plant_" + name]
+
+
+_PARTY_LOCK = ('_DELETION_PARTY_LOCK_SQL = (\n'
+               '    "SELECT steam_id FROM players WHERE id = :pid FOR NO KEY UPDATE SKIP LOCKED")')
+
+
+def test_a_lock_the_deletion_takes_without_a_wait_on_a_players_row_is_a_hold(src):
+    """NB_HOLDS on the deletion's side: its party guard takes a bettor's players
+    row FOR NO KEY UPDATE SKIP LOCKED; made FOR UPDATE SKIP LOCKED, the deletion
+    holds UPDATE on a players row from phase A, so a route's KEY SHARE wait there
+    meets it. The control: phase A holds what its own row and its foreign keys
+    give, and no UPDATE."""
+    got = mc.deletion_holds(src)
+    assert got == {"A": {mc.KS, mc.NKU}, "B": {mc.KS, mc.NKU, mc.UPD}}, got
+    with open(os.path.join(mc.API, "main.py"), encoding="utf-8") as fh:
+        text = fh.read()
+    assert text.count(_PARTY_LOCK) == 1
+    msrc = mc.Source(main_text=text.replace(_PARTY_LOCK, _PARTY_LOCK.replace("FOR NO KEY UPDATE", "FOR UPDATE")))
+    assert mc.UPD in mc.deletion_holds(msrc)["A"]
+
+
+_PHASE_A_LINE = '    await db.execute(text("UPDATE players SET pc_shards = 0 WHERE id = :pid"), {"pid": pid})\n'
+_OTHER_ROW_UPD = '    await db.execute(text("SELECT 1 FROM players WHERE id = :other FOR UPDATE"), {"other": 1})\n'
+
+
+def test_a_lock_the_deletion_s_own_function_takes_on_a_players_row_is_a_hold(src):
+    """deletion_holds reads every players lock of the deletion, its own
+    functions' too: the reader does not tell rows apart, and delete_player_data
+    takes other players' rows (a lobby's new host's KEY SHARE, a case
+    reporter's). A FOR UPDATE planted in delete_player_data in phase A makes
+    phase A hold UPDATE. The control: unplanted, phase A holds no UPDATE."""
+    assert mc.UPD not in mc.deletion_holds(src)["A"]
+    with open(os.path.join(mc.API, "main.py"), encoding="utf-8") as fh:
+        text = fh.read()
+    msrc = mc.Source(main_text=_in_function(text, "async def delete_player_data(", _PHASE_A_LINE,
+                                            _PHASE_A_LINE + _OTHER_ROW_UPD))
+    assert mc.UPD in mc.deletion_holds(msrc)["A"]
+
+
+def test_a_foreign_key_the_deletion_s_own_function_checks_is_a_wait(src, monkeypatch):
+    """OWN_FK_WAITS: before the tombstone delete_player_data makes a live member
+    a lobby's host (host_player_id, a foreign key: KEY SHARE on that member's
+    players row), so step 1 holds ("players", KEY SHARE) in phase A, and
+    link_discord, which holds a players row in UPDATE mode (the release of the
+    Discord id) before it writes the linking player's row, is READ there. The
+    control: with the switch off, step 1 has no such wait and the site is CLEAR."""
+    site = "link_discord | ORM player.discord_id = | 0"
+    assert ("players", mc.KS) in mc.step1(src)["A"]
+    _s1, got = mc.sites(src, entries=["link_discord"])
+    assert got[site]["class"] == "READ" and "A" in got[site]["phases"], got[site]
+    monkeypatch.setattr(mc, "OWN_FK_WAITS", False)
+    assert ("players", mc.KS) not in mc.step1(src)["A"]
+    _s1, off = mc.sites(src, entries=["link_discord"])
+    assert off[site]["class"] == "CLEAR", off[site]
 
 
 # A route that takes the identity key, then the portrait blob's key, then

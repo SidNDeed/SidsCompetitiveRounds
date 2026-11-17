@@ -3,12 +3,13 @@ a players row, computed from the source (main.py, every other backend/api
 module that runs SQL, models.py and the sql migrations are read as text;
 nothing is imported or run).
 
-Six module-level switches widen or sharpen what is read; all six off is the
-census as first frozen (main.py alone, no triggers, no insert waits, the FOR
-clause read from the last SELECT before it, foreign keys by table, a Player
-known by select(Player)/get(Player) alone), kept as mdpl_census_base.json,
-which test_mdpl_census computes again with the six off (the regression
-control of the widening):
+Eight module-level switches widen or sharpen what is read; all eight off is
+the census as first frozen (main.py alone, no triggers, no insert waits, the
+FOR clause read from the last SELECT before it, foreign keys by table, a
+Player known by select(Player)/get(Player) alone, a no-wait acquisition read
+as taking nothing, every players lock of the deletion's own-row functions
+read as on P's row), kept as mdpl_census_base.json, which test_mdpl_census
+computes again with the eight off (the regression control of the widening):
 - MODULES: every backend/api/*.py that calls text(...) or .execute /
   .exec_driver_sql / .with_for_update (models.py and schemas.py keep their
   roles) is parsed. main.py's functions keep their bare names; module M's are
@@ -75,6 +76,26 @@ control of the widening):
   column, `X.attr = ...` in any function or method of a read module whose X is
   neither tracked nor known as another model that has that column, is listed
   in Source.untyped and measured as "untyped", never skipped silently.
+- NB_HOLDS: one lock event carries two facts, a wait and a hold. A SKIP
+  LOCKED or NOWAIT acquisition, or a try advisory key, waits for nothing but
+  holds what it returned from that statement until its transaction ends, as a
+  blocking one does: in a route it is a held lock for every later players
+  wait (and a loop's hoist), though never a wait and never an identity key
+  (a try key may be refused); on the deletion's side every lock it takes on
+  a players row, blocking or not and in any of its functions (the party
+  guards' FOR NO KEY UPDATE SKIP LOCKED, a credit's UPDATE, a foreign key's
+  KEY SHARE), is a hold a route's players wait can meet, beside its own
+  row's (deletion_holds).
+  Off: a no-wait acquisition is read as taking nothing, and the deletion
+  holds its own row alone.
+- OWN_FK_WAITS: in the deletion's own-row functions (OWN_ROW_FNS) a players
+  lock is on P's row, already held, so it is no wait unless it upgrades
+  that row; their own players statements take NO KEY UPDATE or UPDATE. A
+  KEY SHARE there comes from a write to another table checking a foreign
+  key, on another player's row: delete_player_data makes a live member a
+  lobby's host (host_player_id) and rewrites a case's reporter_id. That is
+  a wait like any other, ("players", KEY SHARE) in step 1 (_deletion_wait).
+  Off: every players lock in those functions is read as on P's row.
 
 The deletion (delete_player_data) holds its own players row from its first
 write of it (`UPDATE players SET pc_shards = 0`, FOR NO KEY UPDATE) to its
@@ -100,9 +121,12 @@ place that can happen:
    forms, an ORM store on a loaded Player, a foreign key's FOR KEY SHARE on
    the players row an INSERT names), each ENTRY that reaches it (a route,
    or a function that opens its own session), and the step-1 tables that
-   entry can hold there: its blocking locks earlier in its flattened order,
-   in a mode that conflicts with the deletion's at that table (a loop's
-   locks count as earlier for everything in the loop).
+   entry can hold there: its locks earlier in its flattened order (blocking
+   ones, and with NB_HOLDS no-wait ones too), in a mode that conflicts with
+   the deletion's at that table (a loop's locks count as earlier for
+   everything in the loop). The statement's wait counts in a phase when it
+   conflicts with a lock the deletion holds on a players row then (its own
+   row's, and with NB_HOLDS every other players row it locks).
 3. Rows are (the statement's place, the phase, the held tables), with their
    entries. Each gets one class: CLEAR (it holds none: computed), KEY (an
    identity key is taken before the statement and before every held lock:
@@ -174,16 +198,20 @@ ROUTE_METHODS = frozenset({"get", "post", "put", "delete", "patch", "api_route",
 KEY_COLUMNS = {"players": frozenset({"id", "steam_id", "discord_id"})}
 IDENTITY_KEYS = frozenset({"key:hashtext(:p)"})
 
-# The six widenings of the census, each a switch (all off = the census as first
+# The eight widenings of the census, each a switch (all off = the census as first
 # frozen, mdpl_census_base.json: main.py alone, no triggers, no insert waits, the
 # FOR clause of the last SELECT, a foreign key's parent locked by every INSERT of
-# its table, a Player known by select(Player)/get(Player) alone).
+# its table, a Player known by select(Player)/get(Player) alone, a no-wait
+# acquisition read as taking nothing, every players lock of the deletion's
+# own-row functions read as on P's row).
 MODULES = True          # every backend/api module that runs SQL is read, not main.py alone
 TRIGGERS = True         # a write fires the triggers backend/sql defines on its table
 INSERT_WAITS = True     # an INSERT holds (table, INS); one with ON CONFLICT waits for it
 FOR_DEPTH = True        # a FOR clause locks its own query's tables (its parenthesis depth), not a subquery's
 FK_COLUMNS = True       # a foreign key's KEY SHARE only when the write sets one of its columns
 ORM_TYPES = True        # a Player object is also known by annotation, return type, loop and copy; the rest is listed
+NB_HOLDS = True         # a SKIP LOCKED / NOWAIT / try acquisition waits for nothing but holds what it got
+OWN_FK_WAITS = True     # a KEY SHARE in the deletion's own-row functions is a foreign key's, on another row: a wait
 
 # Foreign keys a migration drops by dynamic SQL (EXECUTE format('ALTER TABLE ...
 # DROP CONSTRAINT %I', ...) over a pg_constraint lookup), which the reader cannot
@@ -213,9 +241,10 @@ CONFLICTS = {
     "KEY": frozenset({"KEY"}),
     INS: frozenset({INS}),
 }
-# An event's third field: True (a blocking wait), False (SKIP LOCKED, NOWAIT, a
-# try key: never waits, never counted) or HELD (held from there on, never a wait:
-# a plain INSERT's own key).
+# An event's third field: True (a blocking wait, held once granted), False (SKIP
+# LOCKED, NOWAIT, a try key: never waits; with NB_HOLDS held from there on, what
+# it returned, until the transaction ends; without it, counted as nothing) or
+# HELD (held from there on, never a wait: a plain INSERT's own key).
 HELD = "held"
 
 _W = r"[A-Za-z_][A-Za-z0-9_]*"
@@ -1808,16 +1837,17 @@ class Source:
 
 def walk(events):
     """One pass: (the held list, [(index, event, held length)] for every
-    blocking players lock, the first index of a blocking lock per table, the
-    identity keys taken [(index, event)]). A HOIST's locks count as held."""
+    blocking players lock, the first index of a lock held per table (a
+    blocking one, a HELD one and, with NB_HOLDS, a no-wait one), the identity
+    keys taken [(index, event)]). A HOIST's locks count as held."""
     held, players, first, keys = [], [], {}, []
     for i, e in enumerate(events):
         if e[0] == "HOIST":
-            held.extend((t, m) for (t, m, b) in e[1] if b)
+            held.extend((t, m) for (t, m, b) in e[1] if b or NB_HOLDS)
             continue
-        if not e[3]:
+        if not e[3] and not NB_HOLDS:
             continue
-        if e[3] == HELD:                        # held from here on, never a wait
+        if not e[3] or e[3] == HELD:            # held from here on, never a wait (NB_HOLDS: a no-wait acquisition)
             first.setdefault(e[1], i)
             held.append((e[1], e[2]))
             continue
@@ -1839,7 +1869,10 @@ def _deletion_wait(e):
         if fn in GUARDED_FNS:
             return None
         if fn in OWN_ROW_FNS:
-            return ("players", OWN_UP) if e[2] == UPD else None
+            if e[2] == UPD:
+                return ("players", OWN_UP)
+            # OWN_FK_WAITS: a foreign key's KEY SHARE, on another player's row
+            return ("players", KS) if OWN_FK_WAITS and e[2] == KS else None
     if e[1] in IDENTITY_KEYS and fn in OWN_KEY_FNS:
         return None
     return (e[1], e[2])
@@ -1865,12 +1898,36 @@ def step1(src):
 HELD_BY_DELETION = {"A": NKU, "B": UPD}
 
 
+def deletion_holds(src):
+    """{'A': {modes}, 'B': {modes}}: the row-lock modes the deletion can hold on a
+    players row in each phase: its own row's (HELD_BY_DELETION) and, with
+    NB_HOLDS, every lock it takes on a players row, blocking or not, before the
+    phase ends: a party guard's FOR NO KEY UPDATE SKIP LOCKED, a credit's
+    UPDATE, a foreign key's KEY SHARE, in its own functions as in the others
+    (delete_player_data's writes of a lobby's new host and of a case's reporter
+    take the KEY SHARE of another player's row). The reader does not tell rows
+    apart, so no function's locks are taken for its own row's alone, and a
+    route's wait for any players row meets each of them."""
+    out = {ph: {HELD_BY_DELETION[ph]} for ph in ("A", "B")}
+    if not NB_HOLDS:
+        return out
+    ev = [e for e in src.events(DELETION) if e[0] == "L"]
+    b_at = next(i for i, e in enumerate(ev) if e[4][0] == DELETION and e[4][1] == PHASE_B_HEAD)
+    for i, e in enumerate(ev):
+        if e[1] == "players" and e[2] in CONFLICTS:
+            out["B"].add(e[2])
+            if i < b_at:
+                out["A"].add(e[2])
+    return out
+
+
 def census(src=None, entries=None):
     """(step 1, rows): rows = {(place, phase, held tables): {"entries": [...],
     "class": CLEAR|KEY|UPGRADE|READ, "fallback": the class without the
     identity key, "key": the identity key's place, for KEY}}."""
     src = src or Source()
     s1 = step1(src)
+    dheld = deletion_holds(src)
     rows = defaultdict(lambda: {"entries": set(), "keys": set(), "nokey": False, "beyond_upgrade": False})
     for entry in sorted(src.roots if entries is None else entries):
         if entry == DELETION:
@@ -1878,7 +1935,7 @@ def census(src=None, entries=None):
         held, players, first, keys = walk(src.events(entry))
         for i, e, n in players:
             for phase in ("A", "B"):
-                if not conflicts(HELD_BY_DELETION[phase], e[2]):
+                if not any(conflicts(m, e[2]) for m in dheld[phase]):
                     continue
                 hit = sorted({t for (t, m) in held[:n]
                               if any((t == dt or "?" in (t, dt)) and conflicts(m, dm) for (dt, dm) in s1[phase])})
@@ -1941,10 +1998,11 @@ def sites(src=None, entries=None):
 
 FROZEN = os.path.join(HERE, "mdpl_census_frozen.json")
 COMPARED = ("class", "fallback", "phases", "held", "entries", "keys")
-# The census as first frozen, before the six switches (the regression control's file), and what it records.
+# The census as first frozen, before the switches (the regression control's file), and what it records.
 BASE = os.path.join(HERE, "mdpl_census_base.json")
 BASE_FIELDS = ("class", "phases", "held", "entries", "keys")
-SWITCHES = ("MODULES", "TRIGGERS", "INSERT_WAITS", "FOR_DEPTH", "FK_COLUMNS", "ORM_TYPES")
+SWITCHES = ("MODULES", "TRIGGERS", "INSERT_WAITS", "FOR_DEPTH", "FK_COLUMNS", "ORM_TYPES", "NB_HOLDS",
+            "OWN_FK_WAITS")
 
 
 def measured(src=None):
