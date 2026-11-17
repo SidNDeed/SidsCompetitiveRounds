@@ -458,6 +458,15 @@ PREREQ = {
     # replaces 297's check on mail_messages.kind (_mail_tables_prereq: the
     # check as 297 declares it, over a direct message and two broadcasts).
     "416": _mail_tables_prereq(),
+    # 419 adds digest_posted_at and digest_reminded_at to
+    # match_report_quarantine and comments its status column: 169 itself,
+    # over a pending row and a filed one.
+    "419": ("CREATE TABLE players (id UUID PRIMARY KEY);\n"
+            + (SQL_DIR / "169_match_report_quarantine.sql").read_text(encoding="utf-8") + """
+        INSERT INTO match_report_quarantine (mode, reason, http_status, payload, status)
+             VALUES ('ffa', 'lobby_completed', 409, '{}'::jsonb, 'pending'),
+                    ('ffa', 'ffa_game_contradiction', 409, '{}'::jsonb, 'filed');
+    """),
 }
 
 # The tables whose CONTENT this file is responsible for. Fingerprinted
@@ -482,6 +491,7 @@ TABLES = {
     "410": ("i18n_keys", "i18n_entries", "i18n_proposals", "i18n_review_events"),
     "415": ("mail_send_receipts", "mail_messages"),
     "416": ("lobby_invites", "invite_receipts", "mail_messages"),
+    "419": ("match_report_quarantine",),
 }
 
 MIGRATION_FILES = {
@@ -502,6 +512,7 @@ MIGRATION_FILES = {
     "410": _F410,
     "415": "415_mail_send_receipts.sql",
     "416": "416_lobby_invites.sql",
+    "419": "419_quarantine_digest_posted.sql",
 }
 
 
@@ -667,7 +678,7 @@ async def _apply_twice(number, *, between=None, prereq_extra="", cleanup=None):
 # ── The bar: a second run changes nothing ───────────────────────────────────
 
 @pytest.mark.parametrize("number", ["331", "332", "333", "336", "337", "365", "366", "377", "391", "396",
-                                    "397", "398", "399", "401", "415", "416"])
+                                    "397", "398", "399", "401", "415", "416", "419"])
 def test_a_second_run_writes_no_row(number):
     """Applied twice, back to back, on the state the first run left."""
     applied = _run(_apply_twice(number))
@@ -680,7 +691,7 @@ def test_a_second_run_writes_no_row(number):
 
 
 @pytest.mark.parametrize("number", ["331", "332", "333", "336", "337", "365", "366", "377", "391", "396",
-                                    "397", "398", "399", "401", "415", "416"])
+                                    "397", "398", "399", "401", "415", "416", "419"])
 def test_a_second_run_leaves_every_row_byte_identical(number):
     """The value half of the bar, stated separately so a failure says which
     of the two properties broke."""
@@ -694,7 +705,7 @@ def test_a_second_run_leaves_every_row_byte_identical(number):
 
 
 @pytest.mark.parametrize("number", ["331", "332", "333", "336", "337", "365", "366", "377", "391", "396",
-                                    "397", "398", "399", "401", "410", "415", "416"])
+                                    "397", "398", "399", "401", "410", "415", "416", "419"])
 def test_a_second_run_replaces_no_constraint_or_index(number):
     """OIDs, not definitions. A dropped-and-recreated constraint has the same
     definition, a new OID, and cost an ACCESS EXCLUSIVE lock plus a validating
@@ -714,7 +725,7 @@ def test_a_second_run_replaces_no_constraint_or_index(number):
 
 
 @pytest.mark.parametrize("number", ["331", "332", "333", "336", "337", "365", "366", "377", "391", "396",
-                                    "397", "398", "399", "401", "410", "415", "416"])
+                                    "397", "398", "399", "401", "410", "415", "416", "419"])
 def test_a_second_run_removes_no_relation_from_the_database(number):
     """THE THIRD MEASUREMENT, AND THE ONE THE OTHER TWO CANNOT MAKE.
 

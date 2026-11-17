@@ -841,15 +841,74 @@ def sig(action: str, target: str) -> str:
 def _redirect_for(url):
     """database.py's engines, as the routes get them: pointed at the lane
     database, and bound to BOUND_SCHEMA at connect, because the routes' own
-    SQL names no schema."""
+    SQL names no schema. The listener opens the connection itself, from a
+    copy of the engine's connect parameters, and returns it: SQLAlchemy
+    hands every do_connect listener the engine's own parameter dict, made
+    once per engine, so an edit in place outlives the listener's removal,
+    and every later module in the same process that connects through
+    database.py's engines reaches this file's lane database (lesson 1240;
+    discord_collection_harness._redirect_for has the same form). This
+    listener writes nothing to that dict; the binding test checks it."""
     def redirect(dialect, conn_rec, cargs, cparams):
-        cparams.update(host=url.host, port=url.port, user=url.username, database=url.database)
+        params = dict(cparams, host=url.host, port=url.port, user=url.username, database=url.database)
         if url.password:
-            cparams["password"] = url.password
+            params["password"] = url.password
         else:
-            cparams.pop("password", None)
-        cparams["server_settings"] = dict(cparams.get("server_settings") or {}, search_path=BOUND_SCHEMA)
+            params.pop("password", None)
+        params["server_settings"] = dict(params.get("server_settings") or {}, search_path=BOUND_SCHEMA)
+        return dialect.connect(*cargs, **params)
     return redirect
+
+
+class _ConnectProbeStop(Exception):
+    """Raised by the probe below, so the probe opens no connection."""
+
+
+def _engine_connect_params(eng):
+    """What `eng` would connect with now (the probe of
+    test_discord_collection_server.py, in the same form). A do_connect
+    listener placed ahead of any other records the parameter dict SQLAlchemy
+    hands it and stops the connect before a socket opens; the pool is first
+    swapped for an empty one, without closing, so the connect cannot be
+    served from a pooled connection. It runs on an event loop of its own and
+    leaves the thread's current loop as it was, because it also runs when
+    this module is imported (below), before any test body."""
+    seen = []
+
+    def probe(dialect, conn_rec, cargs, cparams):
+        seen.append({k: (dict(v) if isinstance(v, dict) else v) for k, v in cparams.items()})
+        raise _ConnectProbeStop()
+
+    async def attempt():
+        await eng.dispose(close=False)
+        with pytest.raises(_ConnectProbeStop):
+            async with eng.connect():
+                pass
+
+    event.listen(eng.sync_engine, "do_connect", probe, insert=True)
+    loop = asyncio.new_event_loop()
+    try:
+        loop.run_until_complete(attempt())
+    finally:
+        event.remove(eng.sync_engine, "do_connect", probe)
+        loop.close()
+    assert len(seen) == 1, len(seen)
+    return seen[0]
+
+
+# The baseline of database.py's two engines, captured when this module is
+# imported: pytest imports every module before it runs any test body, so no
+# test in the process has run yet.
+_APP_ENGINE_PARAMS_AT_IMPORT = [_engine_connect_params(e) for e in (database.engine, database.release_engine)]
+
+
+def _moved_app_engine_params():
+    """(engine index, key) of every connect parameter of database.py's two
+    engines that differs now from this module's import-time baseline. Names
+    only, never values."""
+    after = [_engine_connect_params(e) for e in (database.engine, database.release_engine)]
+    return [(i, k) for i, (b, a) in enumerate(zip(_APP_ENGINE_PARAMS_AT_IMPORT, after))
+            for k in sorted(set(b) | set(a)) if b.get(k) != a.get(k)]
 
 
 async def _clean_slate(url, sent):
@@ -1809,8 +1868,12 @@ def test_pg_the_harness_refuses_a_same_named_object_ahead_of_public(monkeypatch,
 def test_pg_every_harness_connection_is_bound_to_one_schema(monkeypatch, tmp_path):
     """The BINDING: the seed engine, and both of database.py's engines as the
     routes get them, run with search_path = BOUND_SCHEMA; the harness's own
-    DDL, create_all's included, names every table it creates with it; and
-    the case's record names no fixture object without it."""
+    DDL, create_all's included, names every table it creates with it; the
+    case's record names no fixture object without it; and after the case,
+    the connect parameters of database.py's two engines equal the ones this
+    module captured at import, so the binding stayed inside the harness
+    (lesson 1240). Only the names of changed keys are reported, never their
+    values."""
     async def body():
         async with Env(monkeypatch, tmp_path) as env:
             paths = {}
@@ -1826,6 +1889,8 @@ def test_pg_every_harness_connection_is_bound_to_one_schema(monkeypatch, tmp_pat
     expected = {f"{BOUND_SCHEMA}.{t}" for t in HARNESS_TABLES if t != "steam_sessions"}
     assert expected <= created, f"the harness's DDL did not name {sorted(expected - created)}: {sorted(created)}"
     assert _unbound_references(sent) == [], _unbound_references(sent)
+    moved = _moved_app_engine_params()
+    assert not moved, f"connect parameters changed since this module was imported (engine index, key): {moved}"
     print(f"BOUND: {paths}; created {sorted(created)}")
 
 

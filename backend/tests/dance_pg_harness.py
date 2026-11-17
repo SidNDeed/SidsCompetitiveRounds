@@ -210,8 +210,11 @@ async def ban(lane, steam, admin="76561190000009999"):
         have = (await db.execute(text("SELECT 1 FROM admin_users WHERE steam_id = :a"), {"a": admin})).first()
         if have is None:
             await lh._insert(db, "admin_users", {"steam_id": admin})
+        # an end (migration 418's CHECK: every ban ends within the maximum)
+        from datetime import datetime, timedelta, timezone
         await lh._insert(db, "player_bans", {"steam_id": steam, "reason": "test",
-                                              "banned_by_steam_id": admin})
+                                              "banned_by_steam_id": admin,
+                                              "expires_at": datetime.now(timezone.utc) + timedelta(days=30)})
         await db.commit()
 
 

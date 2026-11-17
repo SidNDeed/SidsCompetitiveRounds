@@ -54,6 +54,28 @@ ADMIN = 4242
 OTHER_CHANNEL = 4343
 DELAY_S = 5.0
 
+# The bot's non-page answers (AER-POPGATE-1), written out in full here so a
+# change of any text is a change of this table.
+AGAIN = "Try again in a minute; if it repeats, report it."
+SCHEMA_WORD = ("Evidence report: the server's answer was not in a form this bot reads, so "
+               "nothing was posted. Trying again will not help; report it. (schema)")
+REFUSED_WORD = ("Evidence report refused: it runs only for authorized admins, in the admin "
+                "channel. Trying again will not help; if you should have access, report "
+                "it. (refused)")
+UNREACHABLE_WORD = ("Evidence report: the server could not answer just now (no connection, or "
+                    "no answer in time). " + AGAIN + " (api_unreachable)")
+NOT_FOUND_WORD = ("Evidence report: nothing to report: no game, series or player matches that, "
+                  "or there are no games the report can use. Check the code or id; asking "
+                  "again at once will not change it. (not_found)")
+SERVER_ERROR_WORD = ("Evidence report: the server could not answer just now. " + AGAIN
+                     + " (server_error)")
+RATE_NO_NUMBER_WORD = ("Evidence report: too many reports in a short time. Wait a little and "
+                       "try again. (rate)")
+PAGE_WORD = ("Evidence report: the server did not accept the request (page). Correct it and "
+             "try again. (bad_argument)")
+TOO_LARGE_WORD = ("Evidence report: the report is too large to send. Ask for fewer games, or "
+                  "for one game; the same request will fail again. (too_large)")
+
 
 # ── fakes ──────────────────────────────────────────────────────────────────
 
@@ -449,7 +471,7 @@ def test_m19_command_rejects_a_cross_shape_response():
     ns = bot_ns(api, events)
     interaction = _Interaction(events, ADMIN)
     run(_command(ns, interaction, "game"))
-    assert interaction.ephemeral == ["Evidence report: unavailable (schema)."]
+    assert interaction.ephemeral == [SCHEMA_WORD]
     assert _public(events) == []
 
 
@@ -461,7 +483,7 @@ def test_m19_button_rejects_a_wrong_page_response():
     cid = "aer:g:%s:2" % ("0" * 12)
     interaction = _Interaction(events, ADMIN, custom_id=cid, message=message)
     run(_click(ns, interaction))
-    assert interaction.ephemeral == ["Evidence report: unavailable (schema)."]
+    assert interaction.ephemeral == [SCHEMA_WORD]
     assert message.edits == []
 
 
@@ -835,7 +857,7 @@ def _deliver_body(body, req, via):
 
 def _assert_schema_delivery(body, req, via):
     interaction, message, events = _deliver_body(body, req, via)
-    assert interaction.ephemeral == ["Evidence report: unavailable (schema)."]
+    assert interaction.ephemeral == [SCHEMA_WORD]
     assert _public(events) == []
     assert message.edits == []
 
@@ -976,7 +998,7 @@ def test_p3_local_gate_refuses_dm_other_channel_and_thread_before_any_api_call()
                 run(_click(ns, it))
             out.append((label, via, it.ephemeral, len(api.calls), len(_public(events)), msg.edits))
     for label, via, eph, calls, public, edits in out:
-        assert (eph, calls, public, edits) == (["Evidence report refused."], 0, 0, []), (label, via)
+        assert (eph, calls, public, edits) == ([REFUSED_WORD], 0, 0, []), (label, via)
     print("GATE p3 bot gate: dm, other channel, thread x command, button: refused, "
           "no api call, nothing public")
 
@@ -1009,7 +1031,7 @@ def test_p3_a_delayed_refusal_and_a_non_roster_actor_publish_nothing():
         ns = bot_ns(api, events)
         it = _Interaction(events, ADMIN, user_id=777)
         run(_command(ns, it))
-        assert it.ephemeral == ["Evidence report refused."] and _public(events) == []
+        assert it.ephemeral == [REFUSED_WORD] and _public(events) == []
         assert [e[0] for e in events] == ["deferred", "api asked", "api answered", "ephemeral"]
 
 
@@ -1023,31 +1045,120 @@ def test_p3_an_authorized_actor_without_manage_guild_is_served():
 
 
 WORDS = [
-    ("page", 400, {"detail": "bad_argument (page)"}, {}, "Evidence report: bad argument (page)."),
-    ("bad code", 400, {"detail": "bad_argument"}, {}, "Evidence report: bad argument."),
+    ("page", 400, {"detail": "bad_argument (page)"}, {}, PAGE_WORD),
+    ("bad code", 400, {"detail": "bad_argument"}, {},
+     "Evidence report: the server did not accept the request. Correct it and try again. "
+     "(bad_argument)"),
     ("ambiguous", 400, {"detail": "bad_argument (code ambiguous; use the full id)"}, {},
-     "Evidence report: bad argument (code ambiguous; use the full id)."),
-    ("not found", 404, {"detail": "not_found"}, {}, "Evidence report: not found."),
-    ("replica", 409, {"detail": "primary_only"}, {}, "Evidence report: primary unavailable."),
+     "Evidence report: the server did not accept the request (code ambiguous; use the full "
+     "id). Correct it and try again. (bad_argument)"),
+    ("not found", 404, {"detail": "not_found"}, {}, NOT_FOUND_WORD),
+    ("replica", 409, {"detail": "primary_only"}, {},
+     "Evidence report: the request reached the standby server, which does not run reports. "
+     + AGAIN + " (primary_only)"),
     ("rate", 429, {"detail": "rate"}, {"Retry-After": "37"},
-     "Evidence report: rate limit, retry in 37 s."),
-    ("rate without a retry", 429, {"detail": "rate"}, {}, "Evidence report: unavailable (schema)."),
+     "Evidence report: too many reports in a short time. Try again in 37 s. (rate)"),
+    ("rate without a retry", 429, {"detail": "rate"}, {}, RATE_NO_NUMBER_WORD),
     ("population", 503, {"detail": "unavailable (population)"}, {},
-     "Evidence report: unavailable (population)."),
-    ("deadline", 503, {"detail": "deadline"}, {}, "Evidence report: unavailable (deadline)."),
+     "Evidence report: the server could not prepare its comparison data. " + AGAIN
+     + " (population)"),
+    ("deadline", 503, {"detail": "deadline"}, {},
+     "Evidence report: the server took too long to build the report. " + AGAIN
+     + " (deadline)"),
     ("audit", 503, {"detail": "audit_unavailable"}, {},
-     "Evidence report: unavailable (audit_unavailable)."),
-    ("too large, 11-game series", 500, {"detail": "too_large"}, {},
-     "Evidence report: unavailable (too_large)."),
-    ("too large, 10,000-game series", 500, {"detail": "too_large"}, {},
-     "Evidence report: unavailable (too_large)."),
-    ("too large, forced oversized body", 500, {"detail": "too_large"}, {},
-     "Evidence report: unavailable (too_large)."),
-    ("server error", 500, b"Internal Server Error", {}, "Evidence report: unavailable (schema)."),
-    ("schema", 200, dict(game_body(), rules={"report": "armed"}), {},
-     "Evidence report: unavailable (schema)."),
-    ("refused", 403, {"detail": "refused"}, {}, "Evidence report refused."),
+     "Evidence report: the server could not record the report in its audit log, so it sent "
+     "nothing. " + AGAIN + " (audit_unavailable)"),
+    ("another 503 word", 503, {"detail": "unavailable (sections)"}, {},
+     "Evidence report: the server could not answer just now. " + AGAIN + " (sections)"),
+    ("too large, 11-game series", 500, {"detail": "too_large"}, {}, TOO_LARGE_WORD),
+    ("too large, 10,000-game series", 500, {"detail": "too_large"}, {}, TOO_LARGE_WORD),
+    ("too large, forced oversized body", 500, {"detail": "too_large"}, {}, TOO_LARGE_WORD),
+    ("server error", 500, b"Internal Server Error", {}, SERVER_ERROR_WORD),
+    ("proxy, no upstream", 502, None, {}, SERVER_ERROR_WORD),
+    ("proxy, upstream timeout", 504, None, {}, SERVER_ERROR_WORD),
+    ("schema", 200, dict(game_body(), rules={"report": "armed"}), {}, SCHEMA_WORD),
+    ("refused", 403, {"detail": "refused"}, {}, REFUSED_WORD),
 ]
+
+
+def test_popgate_every_non_page_answer_is_plain_and_ends_with_its_word():
+    """AER-POPGATE-1: every answer that is not a served page is plain ASCII,
+    says nothing of memory, and ends with its reason word in brackets."""
+    ns = bot_ns()
+    texts = [w for _l, _s, _b, _h, w in WORDS] + [UNREACHABLE_WORD]
+    assert ns["AER_REFUSED"] == REFUSED_WORD
+    words = set()
+    for t in texts:
+        assert t.isascii() and t.startswith("Evidence report"), t
+        m = re.search(r" \(([a-z_]+)\)$", t)
+        assert m, t
+        words.add(m.group(1))
+        assert not re.search(r"(?i)\b(memory|MB|MiB|bytes|budget|rss)\b", t), t
+    assert words == {"bad_argument", "not_found", "primary_only", "rate", "population",
+                     "deadline", "audit_unavailable", "sections", "too_large", "schema",
+                     "refused", "api_unreachable", "server_error"}, words
+    assert sorted(ns["AER_TEXTS"]) == sorted(words - {"refused", "sections", "rate"})
+
+
+def test_popgate_m1_one_404_sentence_is_true_for_every_404_the_routes_give():
+    """popgate-r1 M1: the four report routes answer 404 only through
+    `_aer_fail(404, "not_found")`, for an unknown code or id and for a cohort
+    of zero games alike, so the answer cannot tell the two apart and the one
+    sentence names both."""
+    import ast
+    with open(os.path.join(HERE, "..", "api", "admin_evidence.py"), encoding="utf-8") as fh:
+        tree = ast.parse(fh.read())
+    fours = [n for n in ast.walk(tree) if isinstance(n, ast.Constant) and n.value == 404
+             and type(n.value) is int]
+    sites = [n for n in ast.walk(tree) if isinstance(n, ast.Call)
+             and any(a in fours for a in list(n.args) + [k.value for k in n.keywords])]
+    shapes = [ast.dump(n) for n in sites]
+    want = ast.dump(ast.parse('_aer_fail(404, "not_found")', mode="eval").body)
+    assert len(fours) == len(sites) == 4 and set(shapes) == {want}, shapes
+    ns = bot_ns()
+    got = ns["_aer_word"](404, {"detail": "not_found"})
+    assert got == NOT_FOUND_WORD, got
+    assert "no games the report can use" in got and "matches that" in got, got
+
+
+def test_popgate_m2_unknown_server_answers_and_transport_failures_say_try_again():
+    """popgate-r1 M2: every 5xx outside the api's own words (a 500, a proxy's
+    502 or 504, a 503 without a readable word) and every transport failure
+    (status 0: a timeout, a refused connection) say the server could not answer
+    just now and that a minute later is right; `schema` keeps only the answers
+    it is true for."""
+    ns = bot_ns()
+    word = ns["_aer_word"]
+    for status, body in ((500, None), (500, {"detail": "boom"}), (501, None), (502, None),
+                         (504, None), (599, None), (503, None), (503, {"detail": "Bad"})):
+        assert word(status, body) == SERVER_ERROR_WORD, (status, body, word(status, body))
+    assert word(0, None) == UNREACHABLE_WORD, word(0, None)
+    for status, body in ((200, None), (400, {"detail": "nope"}), (401, None), (418, None),
+                         (302, None)):
+        assert word(status, body) == SCHEMA_WORD, (status, body)
+
+
+def test_popgate_l3_retry_after_is_bounded_and_never_raises():
+    """popgate-r1 L3: only 1 to 5 ASCII digits are read, held within 1 to
+    3600 seconds; any other header value gives the sentence without a
+    number; nothing raises and every answer stays far under 2,000 characters."""
+    ns = bot_ns()
+    word = ns["_aer_word"]
+    with_n = "Evidence report: too many reports in a short time. Try again in %d s. (rate)"
+    cases = [("99999", with_n % 3600), ("37", with_n % 37), ("0", with_n % 1),
+             ("3600", with_n % 3600), ("3601", with_n % 3600), ("123456", RATE_NO_NUMBER_WORD),
+             ("9" * 5000, RATE_NO_NUMBER_WORD), ("9" * 50000, RATE_NO_NUMBER_WORD),
+             ("²", RATE_NO_NUMBER_WORD), ("٣", RATE_NO_NUMBER_WORD),
+             (" 5", RATE_NO_NUMBER_WORD), ("5\n", RATE_NO_NUMBER_WORD),
+             ("-5", RATE_NO_NUMBER_WORD), ("", RATE_NO_NUMBER_WORD)]
+    for value, want in cases:
+        got = word(429, {"detail": "rate"}, {"Retry-After": value})
+        assert got == want, (value[:20], got[:120])
+        assert len(got) < 2000
+    for headers in (None, {}, {"retry-after": 7}, {"RETRY-AFTER": "7"}):
+        got = word(429, {"detail": "rate"}, headers)
+        want = with_n % 7 if headers == {"RETRY-AFTER": "7"} else RATE_NO_NUMBER_WORD
+        assert got == want, (headers, got)
 
 
 def _metadata_extra(part, key):
@@ -1058,7 +1169,7 @@ def _metadata_extra(part, key):
 
 @pytest.mark.parametrize("via", ["command", "button"])
 def test_p3_metadata_schema_failures_publish_nothing(via):
-    word = "Evidence report: unavailable (schema)."
+    word = SCHEMA_WORD
     for part, key in (("population", "cls"), ("baseline", "mark"),
                       ("registry", "legend")):
         events = []
@@ -1115,7 +1226,7 @@ def test_p3_every_status_word_by_command_and_button_publishes_nothing(via):
     ns = bot_ns(None, events)                      # no session: the api is unreachable
     it = _Interaction(events, ADMIN)
     run(_command(ns, it))
-    assert it.ephemeral == ["Evidence report: api unreachable."] and _public(events) == []
+    assert it.ephemeral == [UNREACHABLE_WORD] and _public(events) == []
     print("GATE p3 words (%s): %d words, each ephemeral, zero public sends, message unchanged"
           % (via, len(WORDS) + 1))
 
@@ -1154,8 +1265,8 @@ def test_p24_pages_by_command_and_button():
         out.append((page, cmd, (it.ephemeral, len(msg.edits)), msg.edits))
     by = {p: (c, b, e) for p, c, b, e in out}
     for p in (0, LAST + 1):
-        assert by[p][0] == (["Evidence report: bad argument (page)."], 0), p
-        assert by[p][1] == (["Evidence report: bad argument (page)."], 0), p
+        assert by[p][0] == ([PAGE_WORD], 0), p
+        assert by[p][1] == ([PAGE_WORD], 0), p
     for p in (1, LAST):
         assert by[p][0] == (["Posted."], 1) and by[p][1] == (["Posted."], 1), p
         view = by[p][2][0]["view"]
@@ -1171,7 +1282,7 @@ def test_p24_pages_by_command_and_button():
             ns = bot_ns(api, events)
             it = _Interaction(events, ADMIN)
             run(ns["_aer_command"](it, dict(target, page=page)))
-            assert it.ephemeral == ["Evidence report: not found."] and _public(events) == []
+            assert it.ephemeral == [NOT_FOUND_WORD] and _public(events) == []
             events = []
             api = _Api(_paged, events)
             ns = bot_ns(api, events)
@@ -1179,7 +1290,7 @@ def test_p24_pages_by_command_and_button():
             it = _Interaction(events, ADMIN, custom_id=ns["_aer_custom_id"](target, page),
                               message=msg)
             run(_click(ns, it))
-            assert it.ephemeral == ["Evidence report: not found."] and msg.edits == []
+            assert it.ephemeral == [NOT_FOUND_WORD] and msg.edits == []
     print("GATE p24: pages 0 and %d refused by command and button, 1 and %d served with "
           "Prev/Next disabled at the ends; zero cohorts at pages 1, 2: not found, nothing posted"
           % (LAST + 1, LAST))

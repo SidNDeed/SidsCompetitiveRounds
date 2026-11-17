@@ -327,12 +327,12 @@ CONTROLS = [
 
     ("variant-scan-unbounded", MAIN,
      '            " WHERE mode = :m AND group_id = :g AND photon_room_id IS NULL"\n'
-     '            "   AND status = \'pending\'"\n'
+     '            "   AND status IN (\'pending\', \'filed\')"\n'
      '            " ORDER BY created_at, id"\n'
      '            " LIMIT 50"\n',
      '            " WHERE mode = :m AND group_id = :g AND photon_room_id IS NULL"\n',
      '            " WHERE mode = :m AND group_id = :g AND photon_room_id IS NULL"\n'
-     '            "   AND status = \'pending\'"\n'
+     '            "   AND status IN (\'pending\', \'filed\')"\n'
      '            " ORDER BY created_at , id"\n'
      '            " LIMIT 50"\n',
      "test_the_variant_scan_is_bounded_by_the_quota_it_claims"),

@@ -4967,9 +4967,8 @@ def _fix9_population_namespace():
     from array import array
     from dataclasses import dataclass, field
 
-    wanted = {"AER_CONTRACT_BOUNDS", "SIZING_BASE_RSS_MB", "BASE_RSS_FLOOR_MB",
-              "Generation", "PopulationUnavailable", "budget_bytes", "PopulationCache",
-              "_Report", "_summary_page", "_code"}
+    wanted = {"AER_CONTRACT_BOUNDS", "Generation", "PopulationUnavailable",
+              "PopulationCache", "_Report", "_summary_page", "_code"}
     selected, found = [], set()
     for node in ast.parse(_read(API), filename=API).body:
         names = {node.name} if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef,
@@ -5096,8 +5095,9 @@ def test_fix9_admit_preserves_broadcast_newcomer_and_deadline():
     asyncio, time = ns["asyncio"], ns["time"]
 
     def make_cache(retired_count):
-        base = ns["AER_CONTRACT_BOUNDS"]["POP_MEM_BUDGET_MB"] / 1.25 - 2 - 80 / (1024 * 1024)
-        cache = ns["PopulationCache"](base_rss_mb=base)
+        # An allowance of 80 bytes, on this executed copy's own bounds only.
+        ns["AER_CONTRACT_BOUNDS"]["POP_CACHE_MAX_MB"] = 80 / (1024 * 1024)
+        cache = ns["PopulationCache"]()
         cache.live = {("live",): _fix9_generation(ns, ("live",), count=5)}
         cache.retired = [_fix9_generation(ns, ("old", i), gen=i + 2, count=5, leases=1)
                          for i in range(retired_count)]

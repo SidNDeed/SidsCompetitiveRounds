@@ -300,6 +300,36 @@ MAIN_PY = os.path.join(HERE, "..", "api", "main.py")
 MAIL_LOCK_TAKERS = {"mail_send", "_mail_reply_core", "admin_mail_broadcast", "invite_send"}
 _ROW_LOCK = re.compile(r"FOR (NO KEY )?UPDATE")
 _LOBBY_ROW = re.compile(r"\b(team|ovt|ffa)_lobbies\b|_INVITE_LOBBY_TABLES|\[.lobbies.\]")
+# A line as ast numbers lines: it ends at \r\n, \r or \n and at nothing else (str.splitlines
+# also ends one at \f, \v, \x1c to \x1e, \x85, \u2028 and \u2029, which ast does not count).
+_LINE = re.compile(r"[^\r\n]*(?:\r\n|\r|\n)|[^\r\n]+\Z")
+
+
+def _segments(src):
+    """A function giving ast.get_source_segment(src, node) for any node of
+    `src`, with the source split into lines ONCE. The stdlib splits the
+    source again on every call, from its first line down to the node's last
+    (3.12: _splitlines_no_ff(source, maxlines=end_lineno+1)), so one call per
+    node costs time quadratic in the file's length: about 30,700 calls on
+    main.py made one _lock_order take about an hour. The slicing is the
+    stdlib's: columns are UTF-8 byte offsets, a segment over several lines
+    joins the first line's tail, the whole lines between and the last
+    line's head."""
+    lines = _LINE.findall(src)
+
+    def segment(node):
+        try:
+            if node.end_lineno is None or node.end_col_offset is None:
+                return None
+            first, last = node.lineno - 1, node.end_lineno - 1
+            col, end_col = node.col_offset, node.end_col_offset
+        except AttributeError:
+            return None
+        if first == last:
+            return lines[first].encode()[col:end_col].decode()
+        return "".join([lines[first].encode()[col:].decode()] + lines[first + 1:last]
+                       + [lines[last].encode()[:end_col].decode()])
+    return segment
 
 
 def _lock_order(src):
@@ -310,11 +340,12 @@ def _lock_order(src):
     holder is _mail_lock_sender or a function that reaches it. A problem is
     a call that reaches the mail lock below the function's first lobby lock."""
     tree = ast.parse(src)
+    segment = _segments(src)
     fns = {n.name: n for n in tree.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
     const_locks = set()
     for n in tree.body:
         if isinstance(n, ast.Assign) and len(n.targets) == 1 and isinstance(n.targets[0], ast.Name):
-            seg = ast.get_source_segment(src, n.value) or ""
+            seg = segment(n.value) or ""
             if _ROW_LOCK.search(seg) and _LOBBY_ROW.search(seg):
                 const_locks.add(n.targets[0].id)
 
@@ -332,7 +363,7 @@ def _lock_order(src):
         for node in ast.walk(fn):
             if isinstance(node, (ast.Constant, ast.JoinedStr)) and not (
                     isinstance(node, ast.Constant) and not isinstance(node.value, str)):
-                seg = ast.get_source_segment(src, node) or ""
+                seg = segment(node) or ""
                 if _ROW_LOCK.search(seg) and _LOBBY_ROW.search(seg):
                     lines.append(node.lineno)
             elif isinstance(node, ast.Name) and node.id in const_locks:
@@ -390,6 +421,25 @@ def test_no_path_takes_the_per_sender_mail_lock_after_a_lobby_lock():
         mutant = mutant.replace(old, new)
     bad, _facts = _lock_order(mutant)
     assert [p[0] for p in bad] == ["invite_send"], bad
+
+
+def test_the_lock_order_checker_slices_segments_as_the_stdlib_does():
+    """_segments against ast.get_source_segment on main.py, on the string
+    nodes _lock_order slices: the first and the last, every 1500th, and up to
+    eight that span lines and eight whose text is not ASCII (columns are
+    UTF-8 byte offsets). About forty stdlib calls, each of which splits
+    main.py again."""
+    src = open(MAIN_PY, encoding="utf-8").read()
+    segment = _segments(src)
+    nodes = [n for n in ast.walk(ast.parse(src)) if isinstance(n, ast.JoinedStr)
+             or (isinstance(n, ast.Constant) and isinstance(n.value, str))]
+    assert len(nodes) > 10000, len(nodes)
+    wide = [n for n in nodes if n.end_lineno > n.lineno][:8]
+    other = [n for n in nodes if not (segment(n) or "").isascii()][:8]
+    assert len(wide) == 8 and len(other) == 8, (len(wide), len(other))
+    sample = [nodes[0], nodes[-1]] + nodes[::1500] + wide + other
+    for n in sample:
+        assert segment(n) == ast.get_source_segment(src, n), (n.lineno, n.col_offset)
 
 
 # -- no answer carries a room name or a password (section 11) ------------------
@@ -1081,8 +1131,8 @@ def test_a_banned_deleted_or_service_invitee_gets_the_joins_own_refusal(monkeypa
         if why == "banned":
             await env.conn.execute("INSERT INTO admin_users (steam_id, granted_at) VALUES ($1, NOW())"
                                    " ON CONFLICT DO NOTHING", h.sid)
-            await env.conn.execute("INSERT INTO player_bans (steam_id, reason, banned_by_steam_id)"
-                                   " VALUES ($1, 'test', $2)", x.sid, h.sid)
+            await env.conn.execute("INSERT INTO player_bans (steam_id, reason, banned_by_steam_id, expires_at)"
+                                   " VALUES ($1, 'test', $2, NOW() + INTERVAL '30 days')", x.sid, h.sid)
         elif why == "deleted":
             monkeypatch.setattr(main, "MATCH_HMAC_SECRET", "inv-case-secret")
             await env.conn.execute("INSERT INTO deleted_steam_ids (steam_id_hash) VALUES ($1)",
