@@ -163,9 +163,16 @@ def test_r11_res_sweep_production_settings_statements():
     # settings statement, main._EVC_SETTINGS_SQL, three set_config calls with
     # is_local the literal true and literal names; synchronous_commit has a
     # pg_settings row, so the existing pg_settings reading measures it.
+    # Judged, +3 (MODLOG-1): the moderator log's read sets one text, SET LOCAL
+    # statement_timeout = '5s', in main.admin_modlog and main.internal_modlog
+    # (each route's first statement, which begins the request's transaction)
+    # and in main._modlog_answer (inside that transaction, ahead of the
+    # statements it bounds); get_db never commits and both routes hold no
+    # commit, so the setting bounds every later statement of the read;
+    # statement_timeout is a literal name with a pg_settings row.
     assert names == {"lock_timeout", "statement_timeout",
                      "idle_in_transaction_session_timeout", "synchronous_commit"}, names
-    assert len(got) == 17, got
+    assert len(got) == 20, got
     assert [sql for _w, sql in got if "synchronous_commit" in sql] == [
         "SELECT set_config('lock_timeout', '2s', true), "
         "set_config('statement_timeout', '10s', true), "
