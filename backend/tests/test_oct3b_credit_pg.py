@@ -111,10 +111,41 @@ MUTANTS = {
                                 "ffa_gold_earned = COALESCE(pl.ffa_gold_earned, 0)", "T6"),
     "reward-400": (M421, "ELSE 500 END", "ELSE 400 END", "T7"),
     "threshold": (M421, "10000::pg_catalog.numeric", "10001::pg_catalog.numeric", "T7"),
-    "lock-timeout": (M421, "SET LOCAL lock_timeout = '5s';", "SET LOCAL lock_timeout = '60s';", "T8"),
+    "lock-timeout": (M421, "SET LOCAL lock_timeout = '5s';", "SET LOCAL lock_timeout = '60s';",
+                     "T8 table-lock"),
+    "held-lock-waits": (M421, "ORDER BY q.id FOR NO KEY UPDATE NOWAIT;", "ORDER BY q.id FOR NO KEY UPDATE;",
+                        "T8 421-held"),
+    "player-lock-waits": (M421, "WHERE pl.id = pid FOR NO KEY UPDATE NOWAIT;",
+                          "WHERE pl.id = pid FOR NO KEY UPDATE;", "T8 421-player"),
+    "rollback-held-lock-waits": (R421, "ORDER BY q.id FOR NO KEY UPDATE NOWAIT;",
+                                 "ORDER BY q.id FOR NO KEY UPDATE;", "T8 rollback-held"),
+    "rollback-player-lock-waits": (R421, "WHERE pl.id = pid FOR NO KEY UPDATE NOWAIT;",
+                                   "WHERE pl.id = pid FOR NO KEY UPDATE;", "T8 rollback-player"),
     "modlog-writes-old-insert": (M421, "    IF modlog THEN\n", "    IF false THEN\n", "T9"),
     "one-column-as-absent": (M421, "IF aa_rel IS NULL OR (aff_t IS NULL) <> (reason_t IS NULL) THEN",
                              "IF aa_rel IS NULL THEN", "T10"),
+    # the receipts check narrowed to placement rows (the audit side and the
+    # ledger side alike), in both files alike
+    "receipts-placement-only": ((M421, R421),
+                                "             AND k.amount > 0\n        ), have AS (\n"
+                                "          SELECT g.reference_id::pg_catalog.text AS ref, g.player_id AS pid,"
+                                " g.reason::pg_catalog.text AS reason,\n"
+                                "                 g.amount::pg_catalog.int8 AS amount\n"
+                                "            FROM gold_transactions g\n"
+                                "           WHERE g.reference_id = ANY (qids::pg_catalog.text[])\n",
+                                "             AND k.amount > 0 AND k.reason = 'ffa_placement'::pg_catalog.text\n"
+                                "        ), have AS (\n"
+                                "          SELECT g.reference_id::pg_catalog.text AS ref, g.player_id AS pid,"
+                                " g.reason::pg_catalog.text AS reason,\n"
+                                "                 g.amount::pg_catalog.int8 AS amount\n"
+                                "            FROM gold_transactions g\n"
+                                "           WHERE g.reference_id = ANY (qids::pg_catalog.text[])"
+                                " AND g.reason = 'ffa_placement'\n", "T11"),
+    "guard-keyed-by-action": (M421, "                 WHERE (aa.target_steam_id = ANY",
+                              "                 WHERE aa.action = 'quarantine_credit'::pg_catalog.text"
+                              " AND (aa.target_steam_id = ANY", "T3 audit cases"),
+    "rollback-no-balance-refusal": (R421, "  IF n > 0 THEN\n    RAISE EXCEPTION 'rollback 421: % player(s)",
+                                    "  IF false THEN\n    RAISE EXCEPTION 'rollback 421: % player(s)", "T13"),
 }
 
 NOTE = "Migration 421, option B: gold and XP credited, ratings not applied."
@@ -132,7 +163,7 @@ def _text(path: Path) -> str:
     text = path.read_text(encoding="utf-8")
     if MUTANT:
         f, old, new, _ = MUTANTS[MUTANT]
-        if f == path:
+        if path in (f if isinstance(f, tuple) else (f,)):
             assert text.count(old) == 1, ("mutant site not found once", MUTANT)
             text = text.replace(old, new)
     return text
@@ -182,7 +213,8 @@ CREATE TABLE players (
     total_xp INTEGER NOT NULL DEFAULT 0,
     ffa_xp_earned INTEGER NOT NULL DEFAULT 0,
     gold_earned INTEGER NOT NULL DEFAULT 0,
-    ffa_gold_earned INTEGER NOT NULL DEFAULT 0);
+    ffa_gold_earned INTEGER NOT NULL DEFAULT 0,
+    gold_spent INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE gold_transactions (
     id BIGSERIAL PRIMARY KEY,
     player_id UUID NOT NULL REFERENCES players(id) ON DELETE CASCADE,
@@ -447,16 +479,40 @@ async def _mixed(c, how):
     elif how == "a-player-off-the-roster":
         await ex("UPDATE ffa_lobbies SET member_ids = array_replace(member_ids, $1, $2)",
                  c.pid[5], uuid.uuid4())
+    # Audit rows of other actions naming a held row, by each key the api and
+    # the moderator log lane write for one (F2c).
+    elif how == "an-audit-row-of-another-action-by-qid":
+        await ex("INSERT INTO admin_actions (admin_steam_id, action, details)"
+                 " VALUES ('system:test', 'note', $1::jsonb)", json.dumps({"qid": Q2}))
+    elif how == "an-accept-audit-row-by-quarantine-id":
+        await ex("INSERT INTO admin_actions (admin_steam_id, action, details)"
+                 " VALUES ('system:test', 'quarantine_accept', $1::jsonb)",
+                 json.dumps({"quarantine_id": Q3, "mode": "ffa"}))
+    elif how == "an-audit-row-by-target-match-id":
+        await ex("INSERT INTO admin_actions (admin_steam_id, action, target_match_id, details)"
+                 " VALUES ('system:test', 'reverse_series', $1, '{}'::jsonb)", q2)
+    elif how == "an-audit-row-naming-it-elsewhere-in-details":
+        await ex("INSERT INTO admin_actions (admin_steam_id, action, details)"
+                 " VALUES ('system:test', 'note', $1::jsonb)", json.dumps({"refs": ["x", Q3]}))
     else:
         raise AssertionError(how)
 
 
 MIXED = ("one-absent", "one-credited", "both-accepted", "both-filed", "credited-without-ledger",
-         "a-kill-changed", "a-deleted-player", "an-existing-ledger-row", "a-player-off-the-roster")
+         "a-kill-changed", "a-deleted-player", "an-existing-ledger-row", "a-player-off-the-roster",
+         "an-audit-row-of-another-action-by-qid", "an-accept-audit-row-by-quarantine-id",
+         "an-audit-row-by-target-match-id", "an-audit-row-naming-it-elsewhere-in-details")
 
 
 @pytest.mark.parametrize("how", MIXED)
-def test_t3_every_other_state_raises_with_nothing_applied(how):
+def test_t3_each_listed_state_raises_with_nothing_applied(how):
+    """Each state named in MIXED (and only those: the list is the claim)
+    makes 421 raise with every table as it was: a held row absent, credited
+    alone, accepted or filed; both credited with no receipts; a pinned body
+    changed; a deleted player; a ledger row already naming a held row; a
+    player off the lobby's roster; an audit row of any action naming a held
+    row by details qid, details quarantine_id, target_match_id or anywhere
+    else in its details."""
     require_pg()
 
     async def body_():
@@ -624,7 +680,48 @@ def test_t7_the_sql_level_expression_is_level_from_xp_and_level_reward_for():
 
 # ── T8 ──────────────────────────────────────────────────────────────────────
 
-def test_t8_a_held_player_lock_fails_the_run_inside_its_lock_timeout():
+T8_CASES = ("421-player", "421-held", "rollback-player", "rollback-held")
+
+
+@pytest.mark.parametrize("case", T8_CASES)
+def test_t8_a_row_held_elsewhere_fails_the_run_at_once_with_nothing_written(case):
+    """A player row or a held quarantine row locked by another session makes
+    the file fail with 55P03 well inside its 5 s lock_timeout (NOWAIT), with
+    every table as it was."""
+    require_pg()
+    which, row = case.split("-")
+
+    async def body_():
+        async with Case() as c:
+            if which == "rollback":
+                await c.apply()
+            before = await c.fingerprint()
+            other = await c.connect()
+            try:
+                await other.execute("BEGIN")
+                if row == "player":
+                    await other.execute("SELECT 1 FROM players WHERE id = $1 FOR NO KEY UPDATE", c.pid[3])
+                else:
+                    await other.execute("SELECT 1 FROM match_report_quarantine WHERE id = $1"
+                                        " FOR NO KEY UPDATE", uuid.UUID(Q3))
+                t0 = time.monotonic()
+                with pytest.raises(asyncpg.exceptions.LockNotAvailableError):
+                    if which == "rollback":
+                        await c.rollback_file()
+                    else:
+                        await c.apply()
+                took = time.monotonic() - t0
+                assert took < 1.5, took
+            finally:
+                await other.execute("ROLLBACK")
+                await other.close()
+            assert await c.fingerprint() == before
+
+    run(body_())
+
+
+def test_t8_a_table_lock_held_elsewhere_fails_the_run_inside_its_lock_timeout():
+    """The backstop: a table lock is waited for, up to lock_timeout."""
     require_pg()
 
     async def body_():
@@ -633,7 +730,7 @@ def test_t8_a_held_player_lock_fails_the_run_inside_its_lock_timeout():
             other = await c.connect()
             try:
                 await other.execute("BEGIN")
-                await other.execute("SELECT 1 FROM players WHERE id = $1 FOR NO KEY UPDATE", c.pid[3])
+                await other.execute("LOCK TABLE admin_actions IN ACCESS EXCLUSIVE MODE")
                 t0 = time.monotonic()
                 with pytest.raises(asyncpg.exceptions.LockNotAvailableError):
                     await c.apply()
@@ -692,11 +789,107 @@ def test_t10_a_partial_or_other_audit_form_raises_with_nothing_applied(form):
     run(body_())
 
 
+# ── T11 / T12: the receipts check ──────────────────────────────────────────
+
+T11_TAMPERS = ("an-ffa-xp-row-deleted", "a-ledger-amount-changed", "a-ledger-row-added",
+               "an-audit-row-deleted")
+
+
+async def _tamper(c, how):
+    ex = c.conn.execute
+    if how == "an-ffa-xp-row-deleted":
+        n = await c.conn.fetchval("SELECT count(*) FROM gold_transactions WHERE reason = 'ffa_xp'"
+                                  " AND reference_id IN ($1, $2)", Q2, Q3)
+        assert n > 0
+        await ex("DELETE FROM gold_transactions WHERE id = (SELECT min(id) FROM gold_transactions"
+                 " WHERE reason = 'ffa_xp' AND reference_id IN ($1, $2))", Q2, Q3)
+    elif how == "a-ledger-amount-changed":
+        await ex("UPDATE gold_transactions SET amount = amount + 1 WHERE id = (SELECT min(id)"
+                 " FROM gold_transactions WHERE reason = 'ffa_xp' AND reference_id IN ($1, $2))", Q2, Q3)
+    elif how == "a-ledger-row-added":
+        await ex("INSERT INTO gold_transactions (player_id, amount, reason, reference_id)"
+                 " VALUES ($1, 5, 'admin_grant', $2)", c.pid[1], Q3)
+    elif how == "an-audit-row-deleted":
+        await ex("DELETE FROM admin_actions WHERE id = (SELECT id FROM admin_actions"
+                 " WHERE details->>'qid' = $1 ORDER BY id LIMIT 1)", Q2)
+    else:
+        raise AssertionError(how)
+
+
+@pytest.mark.parametrize("how", T11_TAMPERS)
+def test_t11_after_a_credit_a_receipt_out_of_place_fails_the_rerun_and_the_rollback(how):
+    require_pg()
+
+    async def body_():
+        async with Case() as c:
+            await c.apply()
+            await _tamper(c, how)
+            before = await c.fingerprint()
+            with pytest.raises(asyncpg.exceptions.RaiseError) as ei:
+                await c.apply()
+            assert "receipts are not exactly" in str(ei.value), str(ei.value)
+            assert await c.fingerprint() == before
+            with pytest.raises(asyncpg.exceptions.RaiseError) as ei:
+                await c.rollback_file()
+            assert "not credited with exactly 421's receipts" in str(ei.value), str(ei.value)
+            assert await c.fingerprint() == before
+
+    run(body_())
+
+
+def _receipts(path):
+    text = path.read_text(encoding="utf-8")
+    assert text.count("-- oct3b:receipts-begin") == 1 and text.count("-- oct3b:receipts-end") == 1, path
+    return text[text.index("-- oct3b:receipts-begin"):text.index("-- oct3b:receipts-end")]
+
+
+def test_t12_the_receipts_check_and_the_amounts_are_one_text_in_both_files():
+    assert _receipts(M421) == _receipts(R421)
+    lits = [re.findall(r"amounts CONSTANT pg_catalog\.jsonb := '(\[.*?\])';", p.read_text(encoding="utf-8"), re.S)
+            for p in (M421, R421)]
+    assert len(lits[0]) == 1 and lits[0] == lits[1]
+
+
+# ── T13: the rollback leaves nobody below zero ─────────────────────────────
+
+@pytest.mark.parametrize("spent", ("all-of-it", "all-but-the-credit"))
+def test_t13_the_rollback_refuses_to_leave_spendable_gold_below_zero(spent):
+    """After a credit, slot 3 spends everything (the rollback would leave it
+    below zero: refused, nothing changed) or everything but the credit (it
+    would leave exactly zero: the rollback runs)."""
+    require_pg()
+
+    async def body_():
+        async with Case() as c:
+            pre_players = await c.players()
+            await c.apply()
+            per_player, _, _ = expected(c)
+            gold = per_player[3][1]
+            assert gold > 0
+            if spent == "all-of-it":
+                await c.conn.execute("UPDATE players SET gold_spent = gold_earned WHERE id = $1", c.pid[3])
+                before = await c.fingerprint()
+                with pytest.raises(asyncpg.exceptions.RaiseError) as ei:
+                    await c.rollback_file()
+                assert "below zero gold to spend" in str(ei.value), str(ei.value)
+                assert await c.fingerprint() == before
+            else:
+                await c.conn.execute("UPDATE players SET gold_spent = gold_earned - $2 WHERE id = $1",
+                                     c.pid[3], gold)
+                await c.rollback_file()
+                assert await c.players() == pre_players
+                assert await c.conn.fetchval(
+                    "SELECT gold_earned - gold_spent FROM players WHERE id = $1", c.pid[3]) == 0
+
+    run(body_())
+
+
 # ── the mutant table itself ────────────────────────────────────────────────
 
 def test_every_mutant_site_stands_once():
     """A mutant whose site has moved would mutate nothing and pass as a
-    kill; each names text that stands exactly once in its file."""
+    kill; each names text that stands exactly once in each of its files."""
     for name, (f, old, new, _) in MUTANTS.items():
-        assert f.read_text(encoding="utf-8").count(old) == 1, name
+        for p in (f if isinstance(f, tuple) else (f,)):
+            assert p.read_text(encoding="utf-8").count(old) == 1, (name, p)
         assert old != new, name

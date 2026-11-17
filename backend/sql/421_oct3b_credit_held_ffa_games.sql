@@ -37,13 +37,19 @@
 -- Each held body is pinned by md5(payload::text); each slot's Steam id is
 -- read from the pinned body and checked against the lobby's roster.
 --
--- STATES (the held rows are locked FOR NO KEY UPDATE first):
+-- STATES (the held rows are locked FOR NO KEY UPDATE NOWAIT first):
 --   neither row present        NOTICE, nothing written (every test database);
 --   both pending               the guards, then the credit;
---   both credited, with their  NOTICE, nothing written (a second run);
---   ledger and audit rows
+--   both credited, and the     NOTICE, nothing written (a second run);
+--   receipts check exact
 --   anything else              RAISE, nothing applied.
--- A held lock makes the run fail inside lock_timeout with nothing applied.
+-- LOCKS. Live writers lock players and held rows in orders of their own (a
+-- shop purchase: the buyer, then the item's artist; the digest's posted
+-- acknowledgement: held rows in scan order), so no order of this file's can
+-- be one they share. Every lock the file waits for is therefore taken NOWAIT:
+-- a row held elsewhere fails the run at once (SQLSTATE 55P03) with nothing
+-- applied, and it can be run again. lock_timeout stays as a backstop for
+-- table-level locks.
 --
 -- DEPLOY ORDER: THIS FILE FIRST and alone: it ships with no code change and
 -- runs under the build that is live. Rollback:
@@ -107,13 +113,14 @@ DECLARE
   aff_t pg_catalog.oid;
   reason_t pg_catalog.oid;
   modlog pg_catalog.bool;
+  exact pg_catalog.bool;
 BEGIN
   SELECT pg_catalog.array_agg((p->>'q')::pg_catalog.uuid ORDER BY (p->>'game')::pg_catalog.int4)
     INTO qids FROM pg_catalog.jsonb_array_elements(pins) AS p;
 
   -- 1. The held rows, locked; their state decides everything after.
   PERFORM 1 FROM match_report_quarantine q
-    WHERE q.id = ANY (qids) ORDER BY q.id FOR NO KEY UPDATE;
+    WHERE q.id = ANY (qids) ORDER BY q.id FOR NO KEY UPDATE NOWAIT;
   SELECT pg_catalog.count(*),
          pg_catalog.count(*) FILTER (WHERE q.status = 'pending'::pg_catalog.text),
          pg_catalog.count(*) FILTER (WHERE q.status = 'credited'::pg_catalog.text)
@@ -129,32 +136,66 @@ BEGIN
   END IF;
 
   IF n_credited = 2 THEN
-    -- A second run: both rows carry this migration's note, every placement
-    -- ledger row is the literal for its (held row, player), and the 12 audit
-    -- rows stand. Anything less is a state this file did not leave.
-    SELECT pg_catalog.count(*) INTO n FROM match_report_quarantine q
-     WHERE q.id = ANY (qids) AND q.review_note = note;
-    SELECT pg_catalog.count(*) INTO m
-      FROM pg_catalog.jsonb_array_elements(amounts) AS a
-      JOIN match_report_quarantine q ON q.id = (a->>'q')::pg_catalog.uuid
-      JOIN LATERAL pg_catalog.jsonb_array_elements(q.payload->'players') AS e
-        ON (e->>'slot')::pg_catalog.int4 = (a->>'slot')::pg_catalog.int4
-      JOIN players pl ON pl.steam_id = (e->>'steam_id')
-      JOIN gold_transactions g ON g.player_id = pl.id
-                              AND g.reference_id = (a->>'q')
-                              AND g.reason = 'ffa_placement'::pg_catalog.text
-                              AND g.amount = (a->>'place_gold')::pg_catalog.int4;
-    IF n = 2 AND m = 12
-       AND (SELECT pg_catalog.count(*) FROM gold_transactions g
-             WHERE g.reference_id = ANY (qids::pg_catalog.text[])
-               AND g.reason = 'ffa_placement'::pg_catalog.text) = 12
-       AND (SELECT pg_catalog.count(*) FROM admin_actions aa
-             WHERE aa.action = 'quarantine_credit'::pg_catalog.text AND aa.admin_steam_id = actor
-               AND (aa.details->>'qid') = ANY (qids::pg_catalog.text[])) = 12 THEN
-      RAISE NOTICE '421: already applied (both held reports credited, their ledger and audit rows present); nothing written';
+    -- A second run: accepted only when the receipts check is exact; any
+    -- other credited state is one this file did not leave.
+    SELECT
+    -- oct3b:receipts-begin
+      -- (1) both held rows read credited with this file's note
+      (SELECT pg_catalog.count(*) FROM match_report_quarantine q
+        WHERE q.id = ANY (qids) AND q.status = 'credited'::pg_catalog.text AND q.review_note = note) = 2
+      -- (2) exactly 12 audit rows of this file, one per (held row, player)
+      AND (SELECT pg_catalog.count(*) FROM admin_actions aa
+            WHERE aa.action = 'quarantine_credit'::pg_catalog.text AND aa.admin_steam_id = actor
+              AND (aa.details->>'qid') = ANY (qids::pg_catalog.text[])) = 12
+      AND (SELECT pg_catalog.count(DISTINCT ((aa.details->>'qid'), aa.target_steam_id)) FROM admin_actions aa
+            WHERE aa.action = 'quarantine_credit'::pg_catalog.text AND aa.admin_steam_id = actor
+              AND (aa.details->>'qid') = ANY (qids::pg_catalog.text[])) = 12
+      -- (3) each names the player of its (held row, slot) and that slot's XP
+      --     and placement-gold literals
+      AND (SELECT pg_catalog.count(*)
+             FROM pg_catalog.jsonb_array_elements(amounts) AS a
+             JOIN match_report_quarantine q ON q.id = (a->>'q')::pg_catalog.uuid
+             JOIN LATERAL pg_catalog.jsonb_array_elements(q.payload->'players') AS e
+               ON (e->>'slot')::pg_catalog.int4 = (a->>'slot')::pg_catalog.int4
+             JOIN admin_actions aa
+               ON aa.action = 'quarantine_credit'::pg_catalog.text AND aa.admin_steam_id = actor
+              AND (aa.details->>'qid') = (a->>'q')
+              AND aa.target_steam_id = (e->>'steam_id')
+              AND (aa.details->>'slot') = (a->>'slot')
+              AND (aa.details->>'xp') = (a->>'xp')
+              AND (aa.details->>'gold_ffa_placement') = (a->>'place_gold')) = 12
+      -- (4) the ledger rows naming either held row are exactly the receipts
+      --     the audit rows state: per (held row, player), one row of each
+      --     kind whose figure is above 0, of that amount, and no other row
+      AND NOT EXISTS (
+        WITH want AS (
+          SELECT (aa.details->>'qid') AS ref, pl.id AS pid, k.reason, k.amount
+            FROM admin_actions aa
+            JOIN players pl ON pl.steam_id = aa.target_steam_id
+            CROSS JOIN LATERAL (VALUES
+              ('ffa_xp'::pg_catalog.text, (aa.details->>'gold_ffa_xp')::pg_catalog.int8),
+              ('ffa_placement'::pg_catalog.text, (aa.details->>'gold_ffa_placement')::pg_catalog.int8),
+              ('level_reward'::pg_catalog.text, (aa.details->>'gold_level_reward')::pg_catalog.int8)
+            ) AS k(reason, amount)
+           WHERE aa.action = 'quarantine_credit'::pg_catalog.text AND aa.admin_steam_id = actor
+             AND (aa.details->>'qid') = ANY (qids::pg_catalog.text[])
+             AND k.amount > 0
+        ), have AS (
+          SELECT g.reference_id::pg_catalog.text AS ref, g.player_id AS pid, g.reason::pg_catalog.text AS reason,
+                 g.amount::pg_catalog.int8 AS amount
+            FROM gold_transactions g
+           WHERE g.reference_id = ANY (qids::pg_catalog.text[])
+        )
+        (SELECT * FROM want EXCEPT ALL SELECT * FROM have)
+        UNION ALL
+        (SELECT * FROM have EXCEPT ALL SELECT * FROM want))
+    -- oct3b:receipts-end
+      INTO exact;
+    IF exact THEN
+      RAISE NOTICE '421: already applied (both held reports credited, every receipt exact); nothing written';
       RETURN;
     END IF;
-    RAISE EXCEPTION '421: both held reports read credited but their ledger or audit rows do not match this file; nothing applied';
+    RAISE EXCEPTION '421: both held reports read credited but their receipts are not exactly this file''s; nothing applied';
   END IF;
 
   IF n_pending <> 2 THEN
@@ -243,7 +284,7 @@ BEGIN
   END IF;
   modlog := aff_t IS NOT NULL;
 
-  -- 4. The six players, locked in settlement's order (str(player_id): byte
+  -- 4. The six players, locked NOWAIT in a fixed order (str(player_id): byte
   -- order of the text form), then re-read under the lock.
   FOR pid IN
     SELECT pl.id FROM players pl
@@ -252,8 +293,19 @@ BEGIN
                             WHERE q.id = ANY (qids))
      ORDER BY pl.id::pg_catalog.text COLLATE "C"
   LOOP
-    PERFORM 1 FROM players pl WHERE pl.id = pid FOR NO KEY UPDATE;
+    PERFORM 1 FROM players pl WHERE pl.id = pid FOR NO KEY UPDATE NOWAIT;
   END LOOP;
+  -- From here on the file waits for no row lock. Every later statement that
+  -- takes one takes it on a row this transaction already holds:
+  --   UPDATE players (XP, then gold): the six rows held FOR NO KEY UPDATE
+  --     just above, the mode a non-key UPDATE takes;
+  --   INSERT INTO gold_transactions: its foreign key takes FOR KEY SHARE on
+  --     the player's row, held here in a stronger mode by this transaction;
+  --   INSERT INTO admin_actions: a new row; the table has no foreign key
+  --     (192);
+  --   UPDATE match_report_quarantine: the two held rows, held FOR NO KEY
+  --     UPDATE in step 1; reviewed_by is set NULL, which checks no key, and
+  --     no other key column changes.
   SELECT pg_catalog.count(*), pg_catalog.count(DISTINCT pl.steam_id) INTO n, m
     FROM players pl
    WHERE pl.deleted_at IS NULL
@@ -267,11 +319,21 @@ BEGIN
     RAISE EXCEPTION '421: % of the 6 players exist once and are not deleted; nothing applied', n;
   END IF;
 
-  -- 5. Nothing has been paid against either held row yet.
+  -- 5. Nothing has been paid against either held row yet, and no audit row
+  -- of any action names either one: not by this file's key (details qid),
+  -- not by the key the moderator log writes for an accept or a discard
+  -- (details quarantine_id, migration 420's lane), not in a target column,
+  -- and not anywhere else in its details.
   IF EXISTS (SELECT 1 FROM gold_transactions g WHERE g.reference_id = ANY (qids::pg_catalog.text[]))
      OR EXISTS (SELECT 1 FROM admin_actions aa
-                 WHERE aa.action = 'quarantine_credit'::pg_catalog.text
-                   AND (aa.details->>'qid') = ANY (qids::pg_catalog.text[])) THEN
+                 WHERE (aa.target_steam_id = ANY (qids::pg_catalog.text[])
+                        OR aa.target_match_id = ANY (qids)
+                        OR aa.target_series_id = ANY (qids)
+                        OR (aa.details->>'qid') = ANY (qids::pg_catalog.text[])
+                        OR (aa.details->>'quarantine_id') = ANY (qids::pg_catalog.text[])
+                        OR EXISTS (SELECT 1 FROM pg_catalog.unnest(qids) AS u(q)
+                                    WHERE pg_catalog.strpos(aa.details::pg_catalog.text,
+                                                            u.q::pg_catalog.text) > 0))) THEN
     RAISE EXCEPTION '421: a ledger or audit row already references a held report; nothing applied';
   END IF;
 
