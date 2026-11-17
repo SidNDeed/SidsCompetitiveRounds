@@ -163,9 +163,17 @@ def test_r11_res_sweep_production_settings_statements():
     # settings statement, main._EVC_SETTINGS_SQL, three set_config calls with
     # is_local the literal true and literal names; synchronous_commit has a
     # pg_settings row, so the existing pg_settings reading measures it.
+    # From 17, +1 (claude/mdpl-1116): the account deletion's arming
+    # statement, main._DELETION_ARM_SQL, run before every statement of a
+    # deletion attempt: two set_config calls with is_local the literal true
+    # and the literal names lock_timeout and statement_timeout, both already
+    # measured.
     assert names == {"lock_timeout", "statement_timeout",
                      "idle_in_transaction_session_timeout", "synchronous_commit"}, names
-    assert len(got) == 17, got
+    assert len(got) == 18, got
+    assert [sql for _w, sql in got if "'statement_timeout', :st," in sql] == [
+        "SELECT set_config('lock_timeout', :lt, true), "
+        "set_config('statement_timeout', :st, true)"], got
     assert [sql for _w, sql in got if "synchronous_commit" in sql] == [
         "SELECT set_config('lock_timeout', '2s', true), "
         "set_config('statement_timeout', '10s', true), "
