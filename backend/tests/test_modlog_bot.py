@@ -28,7 +28,8 @@ for _p in (API, HERE):
 import modlog  # noqa: E402
 
 SRC = os.path.abspath(os.path.join(HERE, "..", "discord_bot.py"))
-TREE = ast.parse(open(SRC, encoding="utf-8").read())
+TEXT = open(SRC, encoding="utf-8").read()
+TREE = ast.parse(TEXT)
 ADMIN = 4242
 OTHER = 4343
 PLAYER = "76561190420000777"
@@ -192,13 +193,15 @@ def test_twelve_records_two_pages_and_the_buttons(capsys):
     assert api.calls[0][2] == {"X-Internal-Key": "internal-key", "X-Actor-Discord-Id": str(ASKER)}
     assert ("limit", "10") in api.calls[0][1]
     assert not [p for p, _ in api.calls[0][1] if p in ("offset", "after")]
-    assert [b.kw["label"] for b in kw["view"].children] == ["Next"]      # no Previous (fix A7)
+    assert [b.kw["label"] for b in kw["view"].children] == ["Previous", "Next"]
+    assert kw["view"].children[0].kw["disabled"] is True       # Previous on the first page
     click = _Inter()
     run(ns["_modlog_click"](click, nxt["custom_id"]))
     (edit,) = click.edits
     assert "page 2 of 2" in edit["content"] and edit["content"].count("\n") == 4   # name, page line, totals, two rows
     assert ("after", "k9") in api.calls[1][1]          # after the last row shown
-    assert edit["view"] is None                       # the last page has no button
+    last = edit["view"].children                      # the last page: Previous only
+    assert [b.kw["label"] for b in last] == ["Previous"] and last[0].kw["disabled"] is False
     with capsys.disabled():
         print("\nMODLOG-BOT-PAGE-1\n" + text + "\nMODLOG-BOT-PAGE-2\n" + edit["content"])
 
@@ -248,24 +251,25 @@ def test_the_gate_on_the_command_and_on_every_press(channel, guild):
     it = _Inter(channel, guild)
     run(ns["_modlog_command"](it, PLAYER, "", "", "n"))
     assert it.sent == [(ns["MODLOG_GATE"], {"ephemeral": True})]
-    press = _Inter(channel, guild)
-    run(ns["_modlog_click"](press, ns["_modlog_hold"]((PLAYER, "n", None, 1, "", "k9"))))
-    assert press.sent == [(ns["MODLOG_GATE"], {"ephemeral": True})] and press.edits == []
+    tok = ns["_modlog_hold"]((PLAYER, "n", None, ""))
+    for way in "pn":
+        press = _Inter(channel, guild)
+        run(ns["_modlog_click"](press, "modlog:%s:%s" % (tok, way)))
+        assert press.sent == [(ns["MODLOG_GATE"], {"ephemeral": True})] and press.edits == []
     assert api.calls == []
 
 
-def test_the_button_holds_the_request_and_an_unheld_token_is_a_plain_sentence():
+def test_the_view_is_held_under_one_token_and_a_malformed_id_is_not_read():
     ns, api = bot(twelve_records)
-    req = (PLAYER, "o", 3, 1, "a:b:c 50% " + "é" * 30, "k" * 300)
-    cid = ns["_modlog_hold"](req)
-    assert len(cid) <= 100 and ns["_modlog_parse_custom_id"](cid) == req
-    for bad in ("modlog:", "modlog:0123456789abcdef01234567", "other:x", None):
+    base = (PLAYER, "o", 3, "a:b:c 50% " + "é" * 30)
+    tok = ns["_modlog_hold"](base)
+    for way in "pn":
+        cid = "modlog:%s:%s" % (tok, way)
+        assert len(cid) <= 100 and ns["_modlog_parse_custom_id"](cid) == (tok, way)
+    assert ns["_modlog_held"][tok]["base"] == base
+    for bad in ("modlog:", "modlog:" + tok, "modlog:%s:x" % tok, "modlog:%s:p:n" % tok,
+                "modlog:0123456789abcdef01234567:n", "other:x", None):
         assert ns["_modlog_parse_custom_id"](bad) is None, bad
-    press = _Inter()
-    run(ns["_modlog_click"](press, "modlog:0123456789abcdef01234567"))
-    assert press.sent == [(ns["MODLOG_EXPIRED"], {"ephemeral": True})] and api.calls == []
-    ns["_modlog_held"][cid[len("modlog:"):]] = (0, req)          # expired
-    assert ns["_modlog_parse_custom_id"](cid) is None
 
 
 def test_a_search_too_long_is_refused_never_cut_and_a_wide_one_is_served():
@@ -365,3 +369,184 @@ def test_a9_mutant_without_the_row_budget_is_red(monkeypatch):
         first, _ = _a9_pages(ns, api)
         assert [_stamp(i) in first for i in range(10)] == [True] * 10
     print("\nMUTANT-RED A9 budget removed: %s" % str(e.value).splitlines()[0][:120])
+
+
+# -- J5: Previous returns; the store of views is bounded ------------------------
+
+def n_records(n):
+    """The api's answer for PLAYER with `n` records, newest first, paged by
+    key; each row's own minute and moderator name mark it."""
+    t0 = datetime(2026, 11, 1, 12, 0, tzinfo=timezone.utc)
+
+    def answer(params):
+        rows = []
+        for i in range(n):
+            word, why = KINDS[i % 5]
+            rows.append({"id": "q%d" % i, "key": "k%d" % i,
+                         "at": (t0 - timedelta(minutes=i)).isoformat(), "action": word,
+                         "action_label": modlog.label(word), "actor": "76561190420000001",
+                         "actor_name": "Mod %d" % i, "players": [{"steam_id": PLAYER, "name": "P"}],
+                         "reason": why, "sentence": modlog.sentence(word, {"duration_minutes": 60}),
+                         "target_steam_id": PLAYER, "target_match_id": None,
+                         "target_series_id": None, "details": {}})
+        start = [r["key"] for r in rows].index(params["after"]) + 1 if "after" in params else 0
+        lim = int(params["limit"])
+        page = rows[start:start + lim]
+        nxt = page[-1]["key"] if start + lim < len(rows) else None
+        return 200, {"total": n, "limit": lim, "next": nxt, "sort": params["sort"], "dir": params["dir"],
+                     "counts_by_action": [{"action": "ban", "label": "Ban", "count": n}],
+                     "player": {"steam_id": PLAYER, "name": "Fixture_Player"}, "rows": page}
+    return answer
+
+
+def _first(ns):
+    it = _Inter()
+    run(ns["_modlog_command"](it, PLAYER, "", "", "n"))
+    (text, kw), = it.sent
+    return text, kw.get("view")
+
+
+def _press(ns, view, label):
+    """Press the button `label` of `view`: (the edited text or None, the new
+    view, every message sent)."""
+    b = [c.kw for c in view.children if c.kw["label"] == label][0]
+    it = _Inter()
+    run(ns["_modlog_click"](it, b["custom_id"]))
+    if not it.edits:
+        return None, view, it.sent
+    return it.edits[0]["content"], it.edits[0]["view"], it.sent
+
+
+def _walk(ns, moves):
+    text, view = _first(ns)
+    shown = [text]
+    for label in moves:
+        text, view, _ = _press(ns, view, label)
+        shown.append(text)
+    return shown, view
+
+
+def _mutant(ns, fname, old, new):
+    """Redefine the lifted function `fname` in `ns` from its own source with
+    `old` (which must stand there exactly once) replaced by `new`."""
+    node = [n for n in TREE.body if getattr(n, "name", None) == fname][0]
+    src = ast.get_source_segment(TEXT, node)
+    assert src.count(old) == 1, (fname, old)
+    exec(compile(src.replace(old, new), SRC, "exec"), ns)
+
+
+def j5_forward_and_back(ns, api):
+    shown, _ = _walk(ns, ["Next", "Next", "Previous", "Previous"])
+    assert "page 1 of 3" in shown[0] and "page 2 of 3" in shown[1] and "page 3 of 3" in shown[2], shown
+    assert len(set(shown[:3])) == 3
+    assert shown[3] == shown[1] and shown[4] == shown[0], shown
+    afters = [dict(c[1]).get("after") for c in api.calls]
+    assert afters == [None, "k9", "k19", "k9", None], afters
+
+
+def test_j5_forward_two_pages_and_back_two_show_the_same_rows():
+    ns, api = bot(n_records(25))
+    j5_forward_and_back(ns, api)
+
+
+def test_j5_mutant_previous_without_the_kept_key_is_red():
+    ns, api = bot(n_records(25))
+    _mutant(ns, "_modlog_click", 'page = max(0, held["page"] - 1)\n        after = held["afters"][page]',
+            'page = max(0, held["page"] - 1)\n        after = ""')
+    with pytest.raises(AssertionError) as e:
+        j5_forward_and_back(ns, api)
+    print("\nMUTANT-RED J5 previous without the kept key: %s" % str(e.value).splitlines()[0][:120])
+
+
+def j5_back_on_the_first_page(ns, api):
+    first, view = _first(ns)
+    assert [c.kw["disabled"] for c in view.children if c.kw["label"] == "Previous"] == [True]
+    again, view2, sent = _press(ns, view, "Previous")
+    assert again == first and sent == [], (again, sent)
+    assert [c.kw["label"] for c in view2.children] == ["Previous", "Next"]
+    shown, _ = _walk(ns, ["Next", "Previous", "Previous"])
+    assert shown[2] == shown[0] and shown[3] == shown[0], shown
+    assert all(dict(c[1]).get("after") is None for i, c in enumerate(api.calls) if i in (0, 1, 2, 4, 5))
+
+
+def test_j5_back_on_the_first_page_stays_on_it():
+    ns, api = bot(n_records(25))
+    j5_back_on_the_first_page(ns, api)
+
+
+def test_j5_mutant_previous_without_the_first_page_floor_is_red():
+    ns, api = bot(n_records(25))
+    _mutant(ns, "_modlog_click", 'page = max(0, held["page"] - 1)', 'page = held["page"] - 1')
+    with pytest.raises(AssertionError) as e:
+        j5_back_on_the_first_page(ns, api)
+    print("\nMUTANT-RED J5 no first-page floor: %s" % str(e.value).splitlines()[0][:120])
+
+
+def j5_a_view_not_held_is_one_sentence(ns, api):
+    _, view = _first(ns)
+    tok = view.children[0].kw["custom_id"].split(":")[1]
+    calls = len(api.calls)
+    # a token never held, and a view held by another run of the bot (a restart)
+    other, _ = bot(n_records(25))
+    for cid in ("modlog:0123456789abcdef01234567:n", "modlog:%s:p" % tok):
+        it = _Inter()
+        run(other["_modlog_click"](it, cid))
+        assert it.sent == [(ns["MODLOG_EXPIRED"], {"ephemeral": True})] and it.edits == [], cid
+    # a view unused for longer than its age
+    ns["_modlog_held"][tok]["exp"] = 0
+    for label in ("Next", "Previous"):
+        text, _, sent = _press(ns, view, label)
+        assert text is None and sent == [(ns["MODLOG_EXPIRED"], {"ephemeral": True})], (label, text, sent)
+    assert len(api.calls) == calls
+
+
+def test_j5_a_view_the_bot_no_longer_holds_answers_one_sentence():
+    ns, api = bot(n_records(25))
+    j5_a_view_not_held_is_one_sentence(ns, api)
+    assert ns["MODLOG_EXPIRED"] == "This moderator log view has ended. Run /modlog again to read the log."
+
+
+def test_j5_mutant_reading_an_expired_view_is_red():
+    ns, api = bot(n_records(25))
+    _mutant(ns, "_modlog_parse_custom_id", 'if held is None or held["exp"] <= time.monotonic():',
+            "if held is None:")
+    with pytest.raises(AssertionError) as e:
+        j5_a_view_not_held_is_one_sentence(ns, api)
+    print("\nMUTANT-RED J5 expired view read: %s" % str(e.value).splitlines()[0][:120])
+
+
+def j5_the_bound(ns, api):
+    held = ns["_modlog_held"]
+    ns["MODLOG_HOLD_MAX"] = 3
+    views = [_first(ns)[1] for _ in range(3)]
+    toks = [v.children[0].kw["custom_id"].split(":")[1] for v in views]
+    assert list(held) == toks
+    _first(ns)                                          # a fourth view: the oldest is dropped
+    assert len(held) == 3 and toks[0] not in held and toks[1] in held, list(held)
+    _press(ns, views[1], "Next")                        # the second is used: it is now the newest
+    _first(ns)
+    assert len(held) == 3 and toks[1] in held and toks[2] not in held, list(held)
+    keep, old = list(held)[0], list(held)[-1]
+    held[old]["exp"] = 0                                # the newest, unused past its age
+    _first(ns)
+    assert old not in held and keep in held and len(held) == 3, list(held)
+
+
+def test_j5_the_store_of_views_is_bounded_by_a_count_and_an_age():
+    ns, api = bot(n_records(25))
+    assert (ns["MODLOG_HOLD_MAX"], ns["MODLOG_HOLD_S"]) == (2000, 900)
+    j5_the_bound(ns, api)
+
+
+@pytest.mark.parametrize("fname,old,new", [
+    ("_modlog_hold", "    while len(_modlog_held) >= MODLOG_HOLD_MAX:\n"
+                     "        _modlog_held.pop(next(iter(_modlog_held)))\n", ""),
+    ("_modlog_hold", "        _modlog_held.pop(tok, None)", "        pass"),
+    ("_modlog_shown", "held = _modlog_held.pop(tok)", "held = _modlog_held[tok]"),
+], ids=["count_bound_removed", "age_bound_removed", "use_not_counted"])
+def test_j5_mutant_of_the_bound_is_red(fname, old, new):
+    ns, api = bot(n_records(25))
+    _mutant(ns, fname, old, new)
+    with pytest.raises(AssertionError) as e:
+        j5_the_bound(ns, api)
+    print("\nMUTANT-RED J5 %s: %s" % (fname, str(e.value).splitlines()[0][:120]))

@@ -15337,9 +15337,9 @@ async def on_interaction(interaction: discord.Interaction):
             await _aer_click(interaction, cid)
             return
         if cid.startswith("modlog:"):
-            # /modlog Next button (MODLOG-1): the bot holds the request the
-            # custom_id names, the gate is applied again, the api decides
-            # with the presser's id.
+            # /modlog Previous and Next buttons (MODLOG-1): the bot holds the
+            # view the custom_id names, the gate is applied again, the api
+            # decides with the presser's id.
             await _modlog_click(interaction, cid)
             return
         if cid.startswith("modcase:"):
@@ -18406,40 +18406,64 @@ MODLOG_SEARCH_LONG = ("That search is longer than %d characters. Shorten it and 
                       % MODLOG_SEARCH_MAX)
 
 
-# The read pages by key (MODLOG-1 fix A7): a Next press asks for the rows
-# after the last row shown. The key with the request is longer than a button's
-# custom_id holds, so the bot keeps each next page's request here and the
-# button carries a random token for it; a token not held (expired, or the
-# bot restarted) answers MODLOG_EXPIRED. There is no Previous button.
+# The read pages by key (MODLOG-1 fix A7): Next asks for the rows after the
+# last row shown. A page's key is longer than a button's custom_id holds, so
+# one /modlog answer with more than one page is one VIEW held here under a
+# random token: its request, the key each page it has shown was read after
+# ("" for the first page), the page shown now, and the key Next reads after.
+# Both buttons carry the token ("modlog:<token>:p" for Previous, ":n" for
+# Next). Previous reads the page before the one shown with the key that page
+# was read with (on the first page, the first page again); Next reads the rows
+# after the last row shown. A token the bot does not hold (the view went
+# unused for MODLOG_HOLD_S seconds, the count bound dropped it, or the bot
+# restarted) answers MODLOG_EXPIRED and shows no page. The store holds at most
+# MODLOG_HOLD_MAX views: expired views are dropped first, then the view used
+# longest ago.
 MODLOG_HOLD_S = 15 * 60
 MODLOG_HOLD_MAX = 2000
-MODLOG_EXPIRED = "This page is no longer held. Ask /modlog again for the first page."
+MODLOG_EXPIRED = "This moderator log view has ended. Run /modlog again to read the log."
 _modlog_held = {}
 
 
-def _modlog_hold(req):
-    """Keep `(steam id, sort, action index or None, page, search, after key)`
-    for one Next button and return that button's custom_id."""
+def _modlog_hold(base):
+    """A new view of `base` = (steam id, sort, action index or None, search)
+    at its first page; its token."""
     now = time.monotonic()
-    for tok in [t for t, (exp, _) in _modlog_held.items() if exp <= now]:
+    for tok in [t for t, v in _modlog_held.items() if v["exp"] <= now]:
         _modlog_held.pop(tok, None)
     while len(_modlog_held) >= MODLOG_HOLD_MAX:
         _modlog_held.pop(next(iter(_modlog_held)))
     tok = secrets.token_hex(12)
-    _modlog_held[tok] = (now + MODLOG_HOLD_S, tuple(req))
-    cid = "modlog:" + tok
-    assert len(cid) <= MODLOG_CID_MAX
-    return cid
+    _modlog_held[tok] = {"exp": now + MODLOG_HOLD_S, "base": tuple(base), "afters": [""],
+                         "page": 0, "next": None}
+    assert len("modlog:%s:p" % tok) <= MODLOG_CID_MAX
+    return tok
 
 
 def _modlog_parse_custom_id(cid):
-    """The request a button holds, or None (not a modlog id, or not held)."""
+    """`(token, "p" or "n")` for a button of a view the bot holds, or None
+    (not a modlog id, a malformed one, or a view not held)."""
     if not isinstance(cid, str) or not cid.startswith("modlog:"):
         return None
-    held = _modlog_held.get(cid[len("modlog:"):])
-    if held is None or held[0] <= time.monotonic():
+    parts = cid.split(":")
+    if len(parts) != 3 or parts[2] not in ("p", "n"):
         return None
-    return held[1]
+    held = _modlog_held.get(parts[1])
+    if held is None or held["exp"] <= time.monotonic():
+        return None
+    return parts[1], parts[2]
+
+
+def _modlog_shown(tok, page, after, body):
+    """Record in view `tok` that `page`, read after `after`, is shown now;
+    the view counts as used now (it moves to the end of the store)."""
+    held = _modlog_held.pop(tok)
+    rows = body.get("rows") or []
+    held["afters"] = held["afters"][:page] + [after]
+    held["page"] = page
+    held["next"] = rows[-1]["key"] if body.get("next") and rows else None
+    held["exp"] = time.monotonic() + MODLOG_HOLD_S
+    _modlog_held[tok] = held
 
 
 def _modlog_params(player, sort, action_idx, after, search):
@@ -18587,33 +18611,34 @@ def _modlog_render(body, *, page, sort, action_idx, search):
     return _modlog_cut("\n".join([head, totals] + lines), MODLOG_MSG_MAX)
 
 
-def _modlog_view(req, body):
-    """A Next button when the read says more rows follow: it holds the request
-    for the rows after the last row shown (every row of a page is shown)."""
-    rows = body.get("rows") or []
-    if not body.get("next") or not rows:
+def _modlog_view(tok):
+    """The buttons of view `tok` for the page it shows now: Previous (shown
+    disabled on the first page) and, when more rows follow, Next; None for a
+    first page that is also the last."""
+    held = _modlog_held[tok]
+    if held["page"] == 0 and not held["next"]:
         return None
-    sid, sort, action_idx, page, search, _after = req
     view = discord.ui.View(timeout=None)
-    view.add_item(discord.ui.Button(style=discord.ButtonStyle.secondary, label="Next",
-                                    custom_id=_modlog_hold((sid, sort, action_idx, page + 1, search,
-                                                            rows[-1]["key"]))))
+    view.add_item(discord.ui.Button(style=discord.ButtonStyle.secondary, label="Previous",
+                                    custom_id="modlog:%s:p" % tok, disabled=held["page"] == 0))
+    if held["next"]:
+        view.add_item(discord.ui.Button(style=discord.ButtonStyle.secondary, label="Next",
+                                        custom_id="modlog:%s:n" % tok))
     return view
 
 
 async def _modlog_page(actor_id, req):
-    """`(served, text, view)` for one page of `req` (steam id or name, sort,
-    action index, page number, search, after key or ""): a rendered page with
-    its button (or none for the last page), or one plain sentence (served
-    False)."""
+    """`(served, text, body)` for one page of `req` (steam id or name, sort,
+    action index, page number, search, after key or ""): a rendered page and
+    the read's body, or one plain sentence (served False, body None)."""
     player, sort, action_idx, page, search, after = req
     status, body = await _modlog_fetch(_modlog_params(player, sort, action_idx, after, search), actor_id)
     if status != 200:
         return False, _modlog_error(status, body), None
     try:
         text_out = _modlog_render(body, page=page, sort=sort, action_idx=action_idx, search=search)
-        sid = str(body["player"]["steam_id"])
-        return True, text_out, _modlog_view((sid, sort, action_idx, page, search, after), body)
+        str(body["player"]["steam_id"])
+        return True, text_out, body
     except Exception:
         return False, MODLOG_SCHEMA, None
 
@@ -18630,8 +18655,13 @@ async def _modlog_command(interaction, player, action, search, sort):
     words = [w for w, _ in MODLOG_BOT_ACTIONS]
     action_idx = words.index(action) if action in words else None
     await interaction.response.defer(ephemeral=True)
-    _served, text_out, view = await _modlog_page(
+    served, text_out, body = await _modlog_page(
         interaction.user.id, ((player or "").strip(), sort, action_idx, 0, search, ""))
+    view = None
+    if served and body.get("next") and body.get("rows"):
+        tok = _modlog_hold((str(body["player"]["steam_id"]), sort, action_idx, search))
+        _modlog_shown(tok, 0, "", body)
+        view = _modlog_view(tok)
     if view is None:
         await interaction.followup.send(text_out, ephemeral=True,
                                         allowed_mentions=discord.AllowedMentions.none())
@@ -18641,22 +18671,39 @@ async def _modlog_command(interaction, player, action, search, sort):
 
 
 async def _modlog_click(interaction, cid):
-    """A Next press: the command's gate again, then a fresh read with the
-    presser's id; the ephemeral page is edited in place."""
+    """A Previous or Next press: the command's gate again, then a fresh read
+    with the presser's id; the ephemeral page is edited in place."""
     if not _aer_local_gate(interaction):
         await interaction.response.send_message(MODLOG_GATE, ephemeral=True)
         return
-    req = _modlog_parse_custom_id(cid)
-    if req is None:
+    parsed = _modlog_parse_custom_id(cid)
+    if parsed is None:
         await interaction.response.send_message(MODLOG_EXPIRED, ephemeral=True)
         return
+    tok, way = parsed
+    held = _modlog_held[tok]
+    sid, sort, action_idx, search = held["base"]
+    if way == "n" and held["next"]:
+        page, after = held["page"] + 1, held["next"]
+    elif way == "n":
+        page = held["page"]
+        after = held["afters"][page]
+    else:
+        page = max(0, held["page"] - 1)
+        after = held["afters"][page]
     await interaction.response.defer()
-    served, text_out, view = await _modlog_page(interaction.user.id, req)
+    served, text_out, body = await _modlog_page(interaction.user.id,
+                                                (sid, sort, action_idx, page, search, after))
     if not served:
         # An error sentence: the page shown stays as it was.
         await interaction.followup.send(text_out, ephemeral=True)
         return
-    await interaction.edit_original_response(content=text_out, view=view,
+    if tok not in _modlog_held:
+        # The bound dropped the view during the read: the page is not shown.
+        await interaction.followup.send(MODLOG_EXPIRED, ephemeral=True)
+        return
+    _modlog_shown(tok, page, after, body)
+    await interaction.edit_original_response(content=text_out, view=_modlog_view(tok),
                                              allowed_mentions=discord.AllowedMentions.none())
 
 
