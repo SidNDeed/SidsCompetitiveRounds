@@ -163,7 +163,7 @@ V1_BUILD = ('    async def build(r):\n'
 V2_BUILD = ('    async def build(r):\n'
             '        return _triage_group_view(mode, gid, r)\n')
 D1_BUILD = ('    async def build(r):\n'
-            '        resp = {"hw": _triage_iso(r["hw"]), "page_size": _TRIAGE_D1_PAGE,\n')
+            '        resp = {"hw": _triage_iso(r["hw"]), "page_size": _TRIAGE_D1_PAGE, "qdig": QDIG_FEED_FORM,\n')
 BEFORE_HANDLE_CLASS = 'class _TriageReadBudgetSpent(Exception):\n'
 ROUND_LOOP = ('    for n, (content, mkeys) in enumerate(_qdigest_messages(lines, keys, header)):\n'
               '        if not await _qdigest_send(channel, content):\n'
