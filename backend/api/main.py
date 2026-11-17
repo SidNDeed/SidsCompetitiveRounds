@@ -25109,6 +25109,24 @@ def _modlog_unlinked(n: int) -> dict:
     return {"unlinked_discord_authors": int(n)} if n else {}
 
 
+def _modlog_mute_named(result: dict) -> tuple:
+    """The players a mute-by-message record names, taken from the answer of
+    _apply_mute_for_row, the resolution the mute itself acted on, and never
+    from a second read of the link (fix F1): the Steam id it muted for a
+    message with a Steam author ("muted" is "steam:<id>"), or the live
+    account it found linked to a Discord author and muted as well
+    ("linked_steam"). Answers (the sorted Steam ids, the number of Discord
+    authors it found no live account for, 1 or 0). A platform identity
+    names no player."""
+    muted = result.get("muted") or ""
+    if muted.startswith("steam:"):
+        return _modlog_named([muted[len("steam:"):]]), 0
+    if "linked_steam" in result:
+        linked = result.get("linked_steam")
+        return (_modlog_named([str(linked)]), 0) if linked else ([], 1)
+    return [], 0
+
+
 # ── The moderator log's one writer (MODLOG-1, migration 420) ──────────────
 #
 # Every admin_actions row of this module is written by _modlog_write, in the
@@ -26009,9 +26027,10 @@ async def chat_moderate_mute_by_message(req: _ChatModMuteMsgReq, request: Reques
     result = await _apply_mute_for_row(db, row, actor=req.steam_id, role=role,
                                        scope_channel=scope_channel, minutes=mins,
                                        reason=req.reason, purge=bool(req.purge))
-    # The player muted: the message's Steam author, or the live account
-    # linked to its Discord author (a platform identity names no player).
-    authors, unlinked = await _modlog_chat_authors(db, [row])
+    # The player muted, as the mute resolved it: the message's Steam author,
+    # or the live account the mute found linked to its Discord author (a
+    # platform identity names no player). Not read again (fix F1).
+    authors, unlinked = _modlog_mute_named(result)
     await _modlog_write(
         db, actor=req.steam_id, action="chat_mute_msg",
         affected=authors,
@@ -26447,7 +26466,8 @@ async def internal_chat_discord_mute(
                                        scope_channel=scope_channel, minutes=mins,
                                        reason=f"via Discord by {payload.get('actor_name', '')}"[:200],
                                        purge=True)
-    authors, unlinked = await _modlog_chat_authors(db, [row])
+    # The player muted, as the mute resolved it (fix F1): not read again.
+    authors, unlinked = _modlog_mute_named(result)
     await _modlog_write(db, actor=actor, action="chat_mute_msg",
                             affected=authors,
                             target_steam_id=row["steam_id"],

@@ -23,6 +23,8 @@ read back against a real PostgreSQL, with its mutants.
         written at the time of the review
     K1  a moderator route that changed nothing writes no record and does not
         commit, and answers as before
+    F1  a mute-by-message record names the player the mute changed, from the
+        mute's own resolution, when the Discord link moves before the record
 
 Same harness as test_modlog_pg.py (its case schema, built by the ladder
 harness, sealed, dropped at the end):
@@ -1272,3 +1274,111 @@ def test_k3_mutant_without_key_share_is_red(case, admin_open):
     with pytest.raises(AssertionError) as e:
         _k3_check(case, fn)
     print("\nMUTANT-RED K3 item_artist: %s" % str(e.value).splitlines()[0][:160])
+
+
+# -- F1: a mute record names the player the mute changed ---------------------------
+#
+# Each mute-by-message route resolves a Discord author to the live account
+# linked to it and mutes that account. The test wraps the mute helper: after
+# it returns, and before the route writes its record, a second session moves
+# that account's Discord link to another id and commits. The record must name
+# the account the mute changed, and the mute must stand.
+
+async def _f1_mute_by_message(sm, handler, a, did):
+    async with sm() as db:
+        mid = await _chat_row(db, source="discord", discord_id=did)
+        await db.commit()
+    async with sm() as db:
+        await handler(main._ChatModMuteMsgReq(
+            steam_id=a, message_id=mid, duration_minutes=30, reason="spam lines"), None, db=db)
+    return mid
+
+
+async def _f1_discord_mute(sm, handler, a, did):
+    dm = "dc-%s" % uuid.uuid4().hex[:12]
+    async with sm() as db:
+        mid = await _chat_row(db, source="discord", discord_id=did, mirror=("discord", dm))
+        await db.commit()
+    async with sm() as db:
+        await handler(
+            {"message_id": dm, "actor_discord_id": "420000000000000078", "actor_name": "Mod Example",
+             "actor_channel_lang": "global", "duration_minutes": 60},
+            x_internal_key=INTERNAL_KEY, db=db)
+    return mid
+
+
+F1_ROUTES = {"mute_by_message": ("chat_moderate_mute_by_message", _f1_mute_by_message),
+             "discord_mute": ("internal_chat_discord_mute", _f1_discord_mute)}
+F1_SWAP = ("authors, unlinked = _modlog_mute_named(result)",
+           "authors, unlinked = await _modlog_chat_authors(db, [row])")
+
+
+def _f1_check(case, monkeypatch, route, handler, relink):
+    real = main._apply_mute_for_row
+
+    async def body(sm):
+        async def seed(db):
+            a, _ = await _admin(db)
+            did = _did()
+            linked, _ = await _player(db, discord_id=did)
+            return a, linked, did
+        a, linked, did = await _commit(sm, seed)
+        moved = []
+
+        async def mute_then_relink(db, row, **kw):
+            result = await real(db, row, **kw)
+            if relink:
+                async with sm() as other:
+                    await other.execute(text("SET LOCAL lock_timeout = '5s'"))
+                    await other.execute(text("UPDATE players SET discord_id = :d WHERE steam_id = :s"),
+                                        {"d": _did(), "s": linked})
+                    await other.commit()
+                moved.append(linked)
+            return result
+        monkeypatch.setattr(main, "_apply_mute_for_row", mute_then_relink)
+        try:
+            mid = await F1_ROUTES[route][1](sm, handler, a, did)
+        finally:
+            monkeypatch.setattr(main, "_apply_mute_for_row", real)
+        async with sm() as db:
+            recs = await _record_of_message(db, mid)
+            mutes = (await db.execute(text(
+                "SELECT count(*) FROM chat_mutes WHERE steam_id = :s AND revoked_at IS NULL"),
+                {"s": linked})).scalar()
+            now_did = (await db.execute(text("SELECT discord_id FROM players WHERE steam_id = :s"),
+                                        {"s": linked})).scalar()
+        return linked, did, moved, recs, mutes, now_did
+    linked, did, moved, recs, mutes, now_did = _with_sm(case, body)
+    # the setting: the link moved between the mute and its record (or, for
+    # the control, did not)
+    assert moved == ([linked] if relink else []), moved
+    assert (now_did != did) is relink, (route, now_did, did)
+    assert mutes == 1, (route, relink, "the linked account's mute", mutes)
+    assert len(recs) == 1, (route, relink, recs)
+    assert recs[0]["affected_steam_ids"] == [linked], (route, relink, recs[0]["affected_steam_ids"],
+                                                       recs[0]["details"])
+    assert "unlinked_discord_authors" not in recs[0]["details"], (route, relink, recs[0]["details"])
+
+
+@pytest.mark.parametrize("relink", [True, False], ids=["link_moved", "control_link_kept"])
+@pytest.mark.parametrize("route", sorted(F1_ROUTES))
+def test_f1_the_mute_record_names_the_account_the_mute_changed(case, admin_open, monkeypatch, route, relink):
+    _f1_check(case, monkeypatch, route, getattr(main, F1_ROUTES[route][0]), relink)
+
+
+@pytest.mark.parametrize("route", sorted(F1_ROUTES))
+def test_f1_mutant_with_the_second_lookup_is_red(case, admin_open, monkeypatch, route):
+    fn = _mutant_of(F1_ROUTES[route][0], F1_SWAP)
+    with pytest.raises(AssertionError) as e:
+        _f1_check(case, monkeypatch, route, fn, True)
+    print("\nMUTANT-RED F1 %s second lookup: %s" % (route, str(e.value).splitlines()[0][:160]))
+
+
+def test_f1_the_names_come_from_the_mute_answer_alone():
+    sid = "76561190420999901"
+    assert main._modlog_mute_named({"muted": "steam:" + sid}) == ([sid], 0)
+    assert main._modlog_mute_named({"muted": "discord:1", "linked_steam": sid}) == ([sid], 0)
+    assert main._modlog_mute_named({"muted": "discord:1", "linked_steam": None}) == ([], 1)
+    assert main._modlog_mute_named({"muted": "twitch:abc"}) == ([], 0)
+
+
