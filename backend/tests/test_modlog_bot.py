@@ -587,3 +587,81 @@ def test_j5_mutant_of_the_bound_is_red(fname, old, new):
     with pytest.raises(AssertionError) as e:
         j5_the_bound(ns, api)
     print("\nMUTANT-RED J5 %s: %s" % (fname, str(e.value).splitlines()[0][:120]))
+
+
+# K2: two presses of one view whose reads overlap. The newest press wins: each
+# press takes the view's next press number before its read, and a read that
+# ends after a newer press of the same view began is not shown and changes
+# nothing in the view's state. The fetch is a test double whose reads end in
+# the order the test chooses.
+
+def _gated_fetch(ns, answer):
+    """Replace the view's fetch: each read waits for its own gate; the list
+    holds (the read's after key, its gate) in the order the reads began."""
+    reads = []
+
+    async def fetch(params, actor_id):
+        gate = asyncio.Event()
+        reads.append((dict(params).get("after", ""), gate))
+        await gate.wait()
+        return answer(dict(params))
+    real = ns["_modlog_fetch"]
+    ns["_modlog_fetch"] = fetch
+    return reads, real
+
+
+def k2_two_presses_overlap(ns, api, last):
+    """On the third page, Next is pressed and then Previous before Next's read
+    ends; `last` names the press whose read ends last ("first" or "second")."""
+    _, view = _walk(ns, ["Next", "Next"])
+    tok = view.children[0].kw["custom_id"].split(":")[1]
+    held = ns["_modlog_held"][tok]
+    assert (held["page"], len(held["afters"])) == (2, 3), held
+    cid = {c.kw["label"]: c.kw["custom_id"] for c in view.children}
+    reads, real = _gated_fetch(ns, n_records(45))
+    first, second = _Inter(), _Inter()
+
+    async def go():
+        t1 = asyncio.ensure_future(ns["_modlog_click"](first, cid["Next"]))
+        while len(reads) < 1:
+            await asyncio.sleep(0)
+        t2 = asyncio.ensure_future(ns["_modlog_click"](second, cid["Previous"]))
+        while len(reads) < 2:
+            await asyncio.sleep(0)
+        order = [(reads[1][1], t2), (reads[0][1], t1)] if last == "first" else \
+            [(reads[0][1], t1), (reads[1][1], t2)]
+        for gate, task in order:
+            gate.set()
+            await task
+            held_now = ns["_modlog_held"][tok]
+            assert len(held_now["afters"]) == held_now["page"] + 1, held_now
+    run(go())
+    ns["_modlog_fetch"] = real
+    assert [r[0] for r in reads] == ["k29", "k9"], reads
+    # the newer press (Previous, to the second page) is shown; the older is not
+    assert first.edits == [] and first.sent == [] and len(first.deferred) == 1, (first.edits, first.sent)
+    assert len(second.edits) == 1 and second.sent == [], (second.edits, second.sent)
+    assert "page 2 of 5" in second.edits[0]["content"], second.edits[0]["content"][:200]
+    held = ns["_modlog_held"][tok]
+    assert (held["page"], held["afters"], held["next"]) == (1, ["", "k9"], "k19"), held
+    # the view goes on from the newer press's page: back to the first page,
+    # then forward to the third
+    text1, view1, _ = _press(ns, second.edits[0]["view"], "Previous")
+    assert "page 1 of 5" in text1, text1[:200]
+    text3, _, _ = _press(ns, _press(ns, view1, "Next")[1], "Next")
+    assert "page 3 of 5" in text3, text3[:200]
+    assert [dict(c[1]).get("after") for c in api.calls[-3:]] == [None, "k9", "k19"], api.calls[-3:]
+
+
+@pytest.mark.parametrize("last", ["first", "second"])
+def test_k2_the_newest_press_of_a_view_wins_when_two_reads_overlap(last):
+    ns, api = bot(n_records(45))
+    k2_two_presses_overlap(ns, api, last)
+
+
+def test_k2_mutant_without_the_press_number_check_is_red():
+    ns, api = bot(n_records(45))
+    _mutant(ns, "_modlog_click", 'if cur is not None and cur["press"] != press:', "if False:")
+    with pytest.raises(AssertionError) as e:
+        k2_two_presses_overlap(ns, api, "first")
+    print("\nMUTANT-RED K2 press number check removed: %s" % str(e.value).splitlines()[0][:120])

@@ -18435,7 +18435,7 @@ def _modlog_hold(base):
         _modlog_held.pop(next(iter(_modlog_held)))
     tok = secrets.token_hex(12)
     _modlog_held[tok] = {"exp": now + MODLOG_HOLD_S, "base": tuple(base), "afters": [""],
-                         "page": 0, "next": None}
+                         "page": 0, "next": None, "press": 0}
     assert len("modlog:%s:p" % tok) <= MODLOG_CID_MAX
     return tok
 
@@ -18698,6 +18698,11 @@ async def _modlog_click(interaction, cid):
         return
     tok, way = parsed
     held = _modlog_held[tok]
+    # The newest press of a view wins (MODLOG-1 K2): each press takes the
+    # view's next press number before its read; a read that ends after a newer
+    # press of this view began is not shown and changes nothing in the view.
+    held["press"] += 1
+    press = held["press"]
     sid, sort, action_idx, search = held["base"]
     if way == "n" and held["next"]:
         page, after = held["page"] + 1, held["next"]
@@ -18710,11 +18715,16 @@ async def _modlog_click(interaction, cid):
     await interaction.response.defer()
     served, text_out, body = await _modlog_page(interaction.user.id,
                                                 (sid, sort, action_idx, page, search, after))
+    cur = _modlog_held.get(tok)
+    if cur is not None and cur["press"] != press:
+        # A newer press of this view began during this read; that press
+        # decides what the view shows. The interaction is already deferred.
+        return
     if not served:
         # An error sentence: the page shown stays as it was.
         await interaction.followup.send(text_out, ephemeral=True)
         return
-    if tok not in _modlog_held:
+    if cur is None:
         # The bound dropped the view during the read: the page is not shown.
         await interaction.followup.send(MODLOG_EXPIRED, ephemeral=True)
         return
