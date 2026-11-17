@@ -34,10 +34,26 @@ The bound (R6a, R6b):
 - R6b: a deadlock victim inside a bet helper's savepoint runs the whole
   deletion again, and the bettor is refunded in its commit; a lock timeout
   there (55P03) refuses at once, with nothing written.
+Round 1's HIGH, by class, with its hold half (test_mdpl_deletion_lock_order_pg
+scenes 4 to 6 are the positive side):
+- Each scene's control removes the change's own seam: the party guard a
+  no-op (scene 4, the ban route's circle), the guard's identity key never
+  taken (scene 5, the bettor's cancel), the FFA bet guard a no-op (scene 6,
+  the stranded-bet sweep). The R5 control runs the ban's full route.
+- POINT 2, what a refusal costs (#430): a party's players row, or its
+  identity key, held for a moment ends one attempt; the holder lets go
+  inside the first pause, and the next attempt answers 200 within the
+  bound, with the log line naming what was held (#438).
+- POINT 3: inside an attempt, a party row that does not exist leaves the
+  stake refund as it is outside one (StakeRefundRefused, nothing written);
+  a row or key another transaction holds is the signal, with nothing moved;
+  a row and key the attempt holds itself pass. The FFA bet guard tells a
+  held bet from a settled one, and takes a free one.
 """
 
 import asyncio
 import contextlib
+import hashlib
 import json
 import os
 import re
@@ -62,8 +78,9 @@ from test_mail_case_scrub_pg import (  # noqa: E402
     BOUND, CROCKFORD, _arm, _bad, _deadlock, _delete, _finish, _name, _parked, _parks, _relay_row,
     _settle)
 from test_mdpl_deletion_lock_order_pg import (  # noqa: E402
-    INTERNAL, KEY_SQL, TO_MARK, _edition, _matched, _order_only, _past_deadlock_check, _print_of,
-    _sent)
+    INTERNAL, KEY_SQL, TO_MARK, _admin_armed, _ban_route, _cancel_scene, _cap_scene, _circle_closed, _edition,
+    _matched, _order_only, _past_deadlock_check, _print_of, _sent, _step4_scene, _sweep_scene,
+    _phase_b_scene, _upgrade_scene, _wager_ban_scene)
 
 BIND = r"(\$\d+|%s|%\(\w+\)s|:\w+)"          # a compiled bind, whatever the paramstyle
 KEY_EXACT = re.compile(r"^SELECT pg_advisory_xact_lock\(hashtext\('pc_snapshot'\)\)$")
@@ -500,6 +517,7 @@ def test_r5_control_the_ranked_step_above_the_lobby_locks_deadlocks(monkeypatch)
     lobby."""
     async def body(env):
         _arm(env)
+        _admin_armed(env)
         _order_only(env)
         _lid, (p, x) = await env.lobby("team", 2)
         (mod,) = await env.players(1)
@@ -512,18 +530,12 @@ def test_r5_control_the_ranked_step_above_the_lobby_locks_deadlocks(monkeypatch)
                  " FOR UPDATE SKIP LOCKED)) SELECT pg_advisory_xact_lock(hashtext('pc_snapshot'))"
                  % (p.id, p.id))
 
-        async def ban(db):
-            out = await main._apply_ban_core(db, admin_steam_id=mod.sid, target_steam_id=x.sid,
-                                             reason="mdpl staged ban")
-            await db.commit()
-            return out
-
         at = _parks(env)
         spot = at(KEY_SQL, "after")
         with env.rewriting(KEY_EXACT, early) as moved:
             td = asyncio.create_task(_delete(env, p))
             await _parked(spot, td)                   # holds P's and X's ranked rows, no lobby yet
-            tb = asyncio.create_task(env.call(ban))
+            tb = asyncio.create_task(env.call(_ban_route(mod, x)))
             state, w = await _settle(env, tb, by=spot.pid)
             assert state == "waits", (state, w)
             await _past_deadlock_check(env)
@@ -629,19 +641,22 @@ def test_c3_control_without_the_deadline_read_the_deletion_commits_late(monkeypa
 
 # -- R6a: one wait ends at the deadline -------------------------------------------------------
 
-LOCK_TIMEOUT_SET = "SELECT set_config('lock_timeout', "
-
-
 async def _key_held_past_the_budget(env, *, timeout_off):
     """A side session holds the pool snapshot key; the deletion of P, with a
-    budget of 4 s, waits for it there (its first wait). The side lets go 3 s
-    after the deadline. timeout_off: the mutant, the attempt's lock_timeout
-    statement made to set application_name instead. Returns (P, the answer,
-    the seconds from the call to the answer, P's row)."""
+    budget of 4 s, waits for it there. The side lets go 3 s after the
+    deadline. The wait cap is off (_DELETION_WAIT_CAP_S past the budget), so
+    the one wait is armed with the time left, as in lesson 689's control:
+    one long holder shows that the time-left arming fires. timeout_off: the
+    mutant, the statement arming made to set nothing (the arming SQL
+    replaced by a read of its two values). Returns (P, the answer, the
+    seconds from the call to the answer, P's row)."""
     _arm(env)
     (p,) = await env.players(1)
     env.mp.setattr(main, "_DELETION_BUDGET_S", 4.0)
     env.mp.setattr(main, "_DELETION_ATTEMPT_MIN_S", 1.0)
+    env.mp.setattr(main, "_DELETION_WAIT_CAP_S", 60.0, raising=False)
+    if timeout_off:
+        env.mp.setattr(main, "_DELETION_ARM_SQL", "SELECT CAST(:lt AS text), CAST(:st AS text)")
     side = await env.side()
     await side.execute("SELECT pg_advisory_lock(hashtext('pc_snapshot'))")
 
@@ -649,24 +664,18 @@ async def _key_held_past_the_budget(env, *, timeout_off):
         await asyncio.sleep(main._DELETION_BUDGET_S + 3.0)
         await side.execute("SELECT pg_advisory_unlock(hashtext('pc_snapshot'))")
 
-    hits = None
-    with contextlib.ExitStack() as stack:
-        if timeout_off:
-            hits = stack.enter_context(
-                env.rewriting(LOCK_TIMEOUT_SET, "SELECT set_config('application_name', "))
-        rel = asyncio.create_task(let_go())
-        t0 = time.monotonic()
-        a = await _delete(env, p)
-        spent = time.monotonic() - t0
-        await rel
-    assert hits is None or hits, "the mutant did not apply"
+    rel = asyncio.create_task(let_go())
+    t0 = time.monotonic()
+    a = await _delete(env, p)
+    spent = time.monotonic() - t0
+    await rel
     row = await env.conn.fetchrow("SELECT steam_id, deleted_at FROM players WHERE id = $1", p.id)
     return p, a, spent, row
 
 
 def test_r6a_a_wait_for_a_held_key_ends_at_the_deadline(monkeypatch):
-    """The attempt's lock_timeout ends its wait at the deadline: 503
-    account_cleanup_contended within the budget, nothing written."""
+    """The wait's timeouts, armed with the time left, end it at the deadline:
+    503 account_cleanup_contended within the budget, nothing written."""
     async def body(env):
         p, a, spent, row = await _key_held_past_the_budget(env, timeout_off=False)
         assert (a.status, a.body) == (503, main._DELETION_REFUSAL), a
@@ -677,7 +686,8 @@ def test_r6a_a_wait_for_a_held_key_ends_at_the_deadline(monkeypatch):
 
 def test_r6a_control_without_the_lock_timeout_the_wait_outlasts_the_deadline(monkeypatch):
     """The mutant: the wait lasts until the side lets go, past the deadline;
-    the commit check still refuses, so nothing is written."""
+    the next statement is refused before it starts (past the deadline), so
+    nothing is written."""
     async def body(env):
         p, a, spent, row = await _key_held_past_the_budget(env, timeout_off=True)
         assert spent >= main._DELETION_BUDGET_S + 3.0, spent
@@ -732,21 +742,39 @@ def test_r6b_a_deadlock_victim_in_a_bet_helper_runs_the_deletion_again(monkeypat
     assert "deletion attempt 1 ended by 40P01" in out, out[-3000:]
 
 
-def test_r6b_a_lock_timeout_in_a_bet_helper_refuses_at_once(monkeypatch, capsys):
-    """55P03 is the attempt's lock_timeout ending a wait: the deadline has
-    come. The helper hands it to the bound, which refuses at once: 503
-    account_cleanup_contended, nothing written, no second attempt."""
+def test_r6b_a_lock_wait_that_reached_the_cap_in_a_bet_helper_runs_the_deletion_again(monkeypatch, capsys):
+    """55P03 before the deadline is a lock wait that reached the cap (0.5 s):
+    a held lock. The statement arming raises it as the held signal, the
+    helper hands it back, and the bound runs the attempt again after the
+    pause: 200, the wager refunded once."""
     async def body(env):
         a, st, spent, calls, anon = await _wager_on_a_disbanded_lobby(env, flag_off=False, code="55P03")
+        assert a.status == 200 and a["status"] == "anonymized" and anon, (a, anon)
+        assert st == "refunded" and spent == 90, (st, spent)
+        assert calls >= 2, calls
+    case(monkeypatch, body, prefix="mdpl")
+    out = capsys.readouterr().out
+    assert ("deletion attempt 1 met a held %s;" % main._DELETION_WAIT_WHAT) in out, out[-3000:]
+
+
+def test_r6b_a_statement_timeout_in_a_bet_helper_refuses_at_once(monkeypatch, capsys):
+    """57014 is the statement_timeout armed with the time left: the deadline
+    has come. The statement arming raises it as the deadline, the helper
+    hands it back, and the bound refuses at once: 503
+    account_cleanup_contended, nothing written, no second attempt."""
+    async def body(env):
+        a, st, spent, calls, anon = await _wager_on_a_disbanded_lobby(env, flag_off=False, code="57014")
         assert (a.status, a.body) == (503, main._DELETION_REFUSAL), a
         assert not anon, "the refused deletion wrote the player's row"
         assert st == "open" and spent == 100, (st, spent)
         assert calls == 1, calls
     case(monkeypatch, body, prefix="mdpl")
-    assert "deletion attempt 1 ended" not in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "deletion attempt 1 reached its deadline" in out, out[-3000:]
+    assert "deletion attempt 1 ended" not in out and "met a held" not in out, out[-3000:]
 
 
-@pytest.mark.parametrize("code", ["40P01", "55P03"])
+@pytest.mark.parametrize("code", ["40P01", "55P03", "57014"])
 def test_r6b_control_without_the_flag_the_helper_keeps_the_wager_open(monkeypatch, capsys, code):
     """The mutant for both tests above: the helper keeps its error, the
     deletion goes on and commits (a forced error moves no clock), and the
@@ -856,7 +884,7 @@ def test_r6b_c1_control_a_predicate_that_ignores_the_flag_breaks_the_leave(monke
 
 
 def test_r6b_c2_a_call_after_a_refused_and_a_failed_deletion_sees_the_flag_off(monkeypatch, capsys):
-    """C2, in one task: (1) a deletion refused (a 55P03 in its bet helper,
+    """C2, in one task: (1) a deletion refused (a 57014 in its bet helper,
     503); (2) a deletion ended by another error (23505 at its pool key
     statement, which leaves the route as it came); after each, the deadline
     variable is unset in the caller's context; (3) then a leave of the
@@ -867,7 +895,7 @@ def test_r6b_c2_a_call_after_a_refused_and_a_failed_deletion_sees_the_flag_off(m
         assert main._deletion_deadline.get() is None
         lid, (p,) = await env.lobby("team", 1)
         b, bet = await _open_wager(env, lid, p)
-        await env.conn.execute(FAIL_ONCE % {"code": "55P03"})
+        await env.conn.execute(FAIL_ONCE % {"code": "57014"})
         try:
             with env.rewriting(BET_READ, "FROM lobby_bets WHERE mdpl_fail_once() AND mode = ",
                                where="ORDER BY created_at, id") as hits:
@@ -901,3 +929,478 @@ def test_r6b_c2_a_call_after_a_refused_and_a_failed_deletion_sees_the_flag_off(m
     case(monkeypatch, body, prefix="mdpl")
     printed = capsys.readouterr().out
     assert printed.count(REFUND_FAILED) == 1, printed[-3000:]
+
+
+# -- round 1's HIGH, by class: the scenes' controls, POINT 2 and POINT 3 ------------------------
+
+def test_r1h_scene4_control_without_the_guard_the_ban_s_circle_closes(monkeypatch, capsys):
+    """Scene 4 with _deletion_lock_party_row a no-op: the deletion waits for
+    the moderator's players row, which the ban route holds while it waits
+    for X's ranked row: the circle round 1 found."""
+    async def body(env):
+        a, b, st, spent, out = await _wager_ban_scene(env, capsys, guard_off=True)
+        assert _circle_closed(a, b, out), ("no circle", _name(a), _name(b), out[-1500:])
+    case(monkeypatch, body, prefix="mdpl")
+
+
+def test_r1h_scene5_control_without_the_identity_key_the_cancel_s_circle_closes(monkeypatch, capsys):
+    """Scene 5 with the guard's identity key never taken: the cancel claims
+    the L2 wager and waits for B's players row, which the deletion holds
+    from L1's refund; the deletion then waits for that wager row."""
+    async def body(env):
+        a, c, st, spent, out = await _cancel_scene(env, capsys, key_off=True)
+        assert _circle_closed(a, c, out), ("no circle", _name(a), _name(c), out[-1500:])
+    case(monkeypatch, body, prefix="mdpl")
+
+
+def test_r1h_scene6_control_without_the_bet_guard_the_sweep_s_circle_closes(monkeypatch, capsys):
+    """Scene 6 with _deletion_lock_ffa_bet a no-op: the deletion's claim
+    waits for the sweep's, while the sweep waits for P's players row."""
+    async def body(env):
+        a, s, kind, spent, out = await _sweep_scene(env, capsys, guard_off=True)
+        assert _circle_closed(a, s, out), ("no circle", _name(a), _name(s), out[-1500:])
+    case(monkeypatch, body, prefix="mdpl")
+
+
+async def _hold(env, kind, p):
+    """A side session in an open transaction holding `p`'s players row FOR NO
+    KEY UPDATE (kind "row") or `p`'s identity key (kind "key")."""
+    side = await env.side()
+    await side.execute("BEGIN")
+    if kind == "row":
+        assert await side.fetchval("SELECT id FROM players WHERE id = $1 FOR NO KEY UPDATE", p.id) == p.id
+    else:
+        await side.execute("SELECT pg_advisory_xact_lock(hashtext($1))", p.sid)
+    return side
+
+
+async def _held_for_a_moment(env, capsys, kind):
+    """POINT 2's scene. B's open wager on P's lobby; a side session holds B's
+    players row or identity key when the deletion starts, and lets it go
+    0.1 s after the deletion's first miss, inside the bound's first pause.
+    Returns (the answer, the misses, the wager's state, the seconds the
+    deletion took, everything printed)."""
+    _arm(env)
+    capsys.readouterr()
+    lid, (p,) = await env.lobby("team", 1)
+    b, bet = await _open_wager(env, lid, p)
+    side = await _hold(env, kind, b)
+    real = main._deletion_lock_party_row
+    misses, later = [], []
+
+    async def let_go():
+        await asyncio.sleep(0.1)
+        await side.execute("ROLLBACK")
+
+    async def spy(db, player_id, *, no_wait=False):
+        try:
+            await real(db, player_id, no_wait=no_wait)
+        except main._DeletionRowHeld as ex:
+            misses.append(ex.what)
+            if len(misses) == 1:
+                later.append(asyncio.ensure_future(let_go()))
+            raise
+    env.mp.setattr(main, "_deletion_lock_party_row", spy)
+    t0 = time.monotonic()
+    a = await asyncio.wait_for(_delete(env, p), 30)
+    took = time.monotonic() - t0
+    for t in later:
+        await t
+    return a, misses, await _wager_state(env, b, bet), took, capsys.readouterr().out
+
+
+@pytest.mark.parametrize("kind,what", [("row", "bet party row"), ("key", "bet party's identity key")])
+def test_r1h_point2_a_party_held_for_a_moment_costs_one_attempt_and_the_next_answers_200(
+        monkeypatch, capsys, kind, what):
+    """What a refusal costs (#430): ordinary traffic holding a party's row or
+    key for a moment ends one attempt; the next, after the 0.25 s pause,
+    answers 200 well inside the bound, and the log line names what was held
+    with the attempt's number (#438: the signal its rate is read from)."""
+    async def body(env):
+        a, misses, state, took, out = await _held_for_a_moment(env, capsys, kind)
+        assert a.status == 200 and a["status"] == "anonymized", a
+        assert misses == [what], misses
+        assert state == ("refunded", 90), state
+        assert ("deletion attempt 1 met a held %s;" % what) in out, out[-2000:]
+        assert "next attempt after 0.25s" in out, out[-2000:]
+        assert took < main._DELETION_BUDGET_S, took
+    case(monkeypatch, body, prefix="mdpl")
+
+
+def test_r1h_point3_an_absent_party_row_leaves_the_refund_as_it_was(monkeypatch):
+    """POINT 3, absent: no players row of that id. In the no-wait mode (as the
+    deletion's bet path calls it) the guard's two reads find nothing, raise
+    nothing, and the refund's own statement runs and refuses
+    (StakeRefundRefused), exactly as the same call does without it; nothing
+    is written."""
+    async def body(env):
+        ghost = uuid.uuid4()
+        for inside in (True, False):
+            async def go(db):
+                async def refund():
+                    await main._return_stake_exactly(db, ghost, 10, reason="mdpl_point3",
+                                                     reference_id="mdpl-point3", no_wait=inside)
+                try:
+                    await refund()
+                except main.StakeRefundRefused:
+                    await db.rollback()
+                    return {"refused": True}
+                await db.commit()
+                return {"refused": False}
+            ans = await asyncio.wait_for(env.call(go), 30)
+            assert ans.status == 200 and ans["refused"] is True, (inside, ans)
+        assert await env.conn.fetchval(
+            "SELECT COUNT(*) FROM gold_transactions WHERE reference_id = 'mdpl-point3'") == 0
+    case(monkeypatch, body, prefix="mdpl")
+
+
+@pytest.mark.parametrize("kind,what", [("row", "bet party row"), ("key", "bet party's identity key")])
+def test_r1h_point3_a_held_party_row_or_key_is_the_signal_and_moves_nothing(monkeypatch, kind, what):
+    """POINT 3, held: another transaction holds the party's players row, or
+    its identity key. In the no-wait mode: the signal, at once, and the
+    party's gold is as it was."""
+    async def body(env):
+        (b,) = await env.players(1)
+        await env.conn.execute("UPDATE players SET gold_earned = 200, gold_spent = 100 WHERE id = $1", b.id)
+        side = await _hold(env, kind, b)
+
+        async def go(db):
+            try:
+                await main._return_stake_exactly(
+                    db, b.id, 10, reason="mdpl_point3", reference_id="mdpl-point3", no_wait=True)
+            except main._DeletionRowHeld as ex:
+                await db.rollback()
+                return {"held": ex.what}
+            await db.commit()
+            return {"held": None}
+        try:
+            ans = await asyncio.wait_for(env.call(go), 30)
+        finally:
+            await side.execute("ROLLBACK")
+        assert ans.status == 200 and ans["held"] == what, ans
+        assert await env.conn.fetchval("SELECT gold_spent FROM players WHERE id = $1", b.id) == 100
+    case(monkeypatch, body, prefix="mdpl")
+
+
+def test_r1h_point3_a_row_and_key_the_attempt_holds_itself_pass(monkeypatch):
+    """The attempt's own lock on the row (as on the deleted player's own row)
+    is not skipped, and its own identity key is granted again: the refund
+    applies."""
+    async def body(env):
+        (b,) = await env.players(1)
+        await env.conn.execute("UPDATE players SET gold_earned = 200, gold_spent = 100 WHERE id = $1", b.id)
+
+        async def go(db):
+            await db.execute(main.text("SELECT id FROM players WHERE id = :pid FOR NO KEY UPDATE"), {"pid": b.id})
+            await db.execute(main.text(main._IDENTITY_KEY_SQL), {"sid": b.sid})
+            await main._return_stake_exactly(
+                db, b.id, 10, reason="mdpl_point3", reference_id="mdpl-point3", no_wait=True)
+            await db.commit()
+            return {"ok": True}
+        ans = await asyncio.wait_for(env.call(go), 30)
+        assert ans.status == 200, ans
+        assert await env.conn.fetchval("SELECT gold_spent FROM players WHERE id = $1", b.id) == 90
+    case(monkeypatch, body, prefix="mdpl")
+
+
+def test_r1h_the_ffa_bet_guard_tells_a_held_bet_from_a_settled_one(monkeypatch):
+    """In the no-wait mode: an unsettled bet another transaction holds is
+    the signal; a settled bet is passed over (no raise; its claim would find
+    it settled); a free unsettled bet is taken, so a NOWAIT probe from
+    another session fails while the caller's transaction is open."""
+    async def body(env):
+        p, q, b1, b2, b3 = await env.players(5)
+        lid = await env.create("ffa", p)
+        bets = []
+        for b in (b1, b2, b3):
+            bets.append(await env.conn.fetchval(
+                "INSERT INTO ffa_bets (lobby_id, game_number, player_id, bet_on_player_id, amount,"
+                " odds_multiplier) VALUES ($1, 1, $2, $3, 10, 2.0) RETURNING id", lid, b.id, q.id))
+        held, settled, free = bets
+        await env.conn.execute("UPDATE ffa_bets SET settled_at = NOW(), settlement_kind = 'refunded',"
+                               " payout = amount WHERE id = $1", settled)
+        side = await env.side()
+        await side.execute("BEGIN")
+        assert await side.fetchval("SELECT id FROM ffa_bets WHERE id = $1 FOR NO KEY UPDATE", held) == held
+
+        async def go(db):
+            out = {}
+            try:
+                await main._deletion_lock_ffa_bet(db, held, no_wait=True)
+                out["held"] = None
+            except main._DeletionRowHeld as ex:
+                out["held"] = ex.what
+            await db.rollback()
+            await main._deletion_lock_ffa_bet(db, settled, no_wait=True)
+            await main._deletion_lock_ffa_bet(db, free, no_wait=True)
+            probe = await env.side()
+            await probe.execute("BEGIN")
+            try:
+                await probe.fetchval("SELECT id FROM ffa_bets WHERE id = $1 FOR NO KEY UPDATE NOWAIT", free)
+                out["free_taken"] = False
+            except asyncpg.exceptions.LockNotAvailableError:
+                out["free_taken"] = True
+            finally:
+                await probe.execute("ROLLBACK")
+            await db.rollback()
+            return out
+        try:
+            ans = await asyncio.wait_for(env.call(go), 30)
+        finally:
+            await side.execute("ROLLBACK")
+        assert ans.status == 200 and ans.body == {"held": "FFA bet row", "free_taken": True}, ans
+    case(monkeypatch, body, prefix="mdpl")
+
+
+# -- (a), the option, point 4: controls ---------------------------------------------------------
+
+def test_r1h_a_control_with_the_step_4_lock_waiting_the_circle_closes(monkeypatch, capsys):
+    """(a)'s scene with the step-4 lock taken with a wait (8d920c07's form):
+    the deletion waits for L, which H holds while it waits for P's row."""
+    async def body(env):
+        a, h, out = await _step4_scene(env, capsys, blocking=True)
+        assert _circle_closed(a, h, out), ("no circle", _name(a), _name(h), out[-1500:])
+    case(monkeypatch, body, prefix="mdpl")
+
+
+def test_r1h_a_mirror_the_holder_gone_before_the_attempt_answers_200_at_once(monkeypatch, capsys):
+    """(a)'s mirror: H took L and let it go before the deletion came to it;
+    the first attempt takes L and answers 200, with no held row and no
+    second attempt."""
+    async def body(env):
+        a, h, out = await _step4_scene(env, capsys, gone_before=True)
+        assert a.status == 200 and a["status"] == "anonymized", a
+        assert h is None, h
+        assert "met a held" not in out and "deletion attempt 1 ended" not in out, out[-2000:]
+    case(monkeypatch, body, prefix="mdpl")
+
+
+def test_r1h_option_control_with_waits_of_the_time_left_postgresql_ends_the_peer(monkeypatch, capsys):
+    """The option's scene with the cap off (each wait armed with the time
+    left, as at 8d920c07): the deletion is still waiting at H's deadlock
+    check, and PostgreSQL ends H."""
+    async def body(env):
+        a, h, out = await _cap_scene(env, capsys, cap_off=True)
+        assert _circle_closed(a, h, out), ("no circle", _name(a), _name(h), out[-1500:])
+        assert _deadlock(h), ("the peer was not the one ended", _name(a), _name(h))
+    case(monkeypatch, body, prefix="mdpl")
+
+
+def test_r1h_upgrade_control_with_waits_of_the_time_left_the_deletion_is_ended(monkeypatch, capsys):
+    """The UPGRADE scene with the cap off (each wait armed with the time
+    left, as at 8d920c07): the deletion still waits at its tombstone when its
+    own deadlock check runs, and PostgreSQL ends it."""
+    async def body(env):
+        a, h, out = await _upgrade_scene(env, capsys, cap_off=True)
+        assert _circle_closed(a, h, out), ("no circle", _name(a), _name(h), out[-1500:])
+        assert _deadlock(a), ("the deletion was not the one ended", _name(a), _name(h))
+    case(monkeypatch, body, prefix="mdpl")
+
+
+def test_r1h_phase_b_control_with_waits_of_the_time_left_the_deletion_is_ended(monkeypatch, capsys):
+    """The phase-B scene with the cap off: the deletion still waits for H's
+    revision row when its own deadlock check runs, and PostgreSQL ends it."""
+    async def body(env):
+        a, h, out = await _phase_b_scene(env, capsys, cap_off=True)
+        assert _circle_closed(a, h, out), ("no circle", _name(a), _name(h), out[-1500:])
+        assert _deadlock(a), ("the deletion was not the one ended", _name(a), _name(h))
+    case(monkeypatch, body, prefix="mdpl")
+
+
+def test_r1h_point4_control_a_two_argument_key_does_not_hold_off_the_cancel(monkeypatch, capsys):
+    """Point 4's mutant: the guard's key in a two-argument form, a different
+    key from the one B's cancel takes. The cancel is not held off at its
+    first statement: it claims the wager and waits for B's players row, and
+    the circle closes as with no key at all."""
+    async def body(env):
+        a, c, st, spent, out = await _cancel_scene(
+            env, capsys, key_sql="SELECT pg_try_advisory_xact_lock(0, hashtext(CAST(:sid AS text)))")
+        assert _circle_closed(a, c, out), ("no circle", _name(a), _name(c), out[-1500:])
+    case(monkeypatch, body, prefix="mdpl")
+
+
+# -- the hold-time figure, lesson 689's form ------------------------------------------------------
+
+async def _staggered_holders(env, *, cap):
+    """Three holders on the three things the deletion of P waits for in turn
+    -- P's identity key, the pool snapshot key, P's players row (its
+    pc_shards write) -- released 2.5 s apart. Each single wait is under the
+    lock_timeout 8d920c07 armed once per attempt (the time left at its
+    start, 6 s); their sum, 7.5 s, passes the 6 s budget. cap: the wait cap
+    for the run (None: as built; 60.0: off, so every wait is armed with the
+    time left). Returns (P, the answer, the seconds from the call to the
+    answer, P's row)."""
+    _arm(env)
+    (p,) = await env.players(1)
+    env.mp.setattr(main, "_DELETION_BUDGET_S", 6.0)
+    env.mp.setattr(main, "_DELETION_ATTEMPT_MIN_S", 1.0)
+    if cap is not None:
+        env.mp.setattr(main, "_DELETION_WAIT_CAP_S", cap, raising=False)
+    s1, s2, s3 = await env.side(), await env.side(), await env.side()
+    await s1.execute("SELECT pg_advisory_lock(hashtext($1))", p.sid)
+    await s2.execute("SELECT pg_advisory_lock(hashtext('pc_snapshot'))")
+    await s3.execute("BEGIN")
+    assert await s3.fetchval("SELECT id FROM players WHERE id = $1 FOR NO KEY UPDATE", p.id) == p.id
+
+    async def let_go():
+        await asyncio.sleep(2.5)
+        await s1.execute("SELECT pg_advisory_unlock(hashtext($1))", p.sid)
+        await asyncio.sleep(2.5)
+        await s2.execute("SELECT pg_advisory_unlock(hashtext('pc_snapshot'))")
+        await asyncio.sleep(2.5)
+        await s3.execute("ROLLBACK")
+
+    rel = asyncio.create_task(let_go())
+    t0 = time.monotonic()
+    a = await _delete(env, p)
+    spent = time.monotonic() - t0
+    await rel
+    row = await env.conn.fetchrow("SELECT steam_id, deleted_at FROM players WHERE id = $1", p.id)
+    return p, a, spent, row
+
+
+@pytest.mark.parametrize("cap", [None, 60.0], ids=["cap_as_built", "cap_off"])
+def test_r1h_figure_staggered_holders_end_the_attempt_by_its_deadline(monkeypatch, cap):
+    """Lesson 689's form. With the time left armed before every statement the
+    third wait ends at the deadline (cap off), or every wait ends at the cap
+    (as built): 503 by the deadline, nothing written. At 8d920c07 this fails
+    at "spent": the three waits add up to 7.5 s and the attempt holds what
+    it took until its pre-commit check. Its control is R6a's: one holder past
+    the budget, where the time-left arming fires."""
+    async def body(env):
+        p, a, spent, row = await _staggered_holders(env, cap=cap)
+        assert spent < main._DELETION_BUDGET_S + 0.5, ("spent", spent)
+        assert (a.status, a.body) == (503, main._DELETION_REFUSAL), a
+        assert row["steam_id"] == p.sid and row["deleted_at"] is None, dict(row)
+    case(monkeypatch, body, prefix="mdpl")
+
+
+# -- point 6: a call outside a deletion issues the statements it issued before -------------------
+
+_EVERY_STATEMENT = re.compile(r"\A")
+# Measured at 8d920c07 (B's tree) by this file's capture with MDPL_CAPTURE_WRITE set: per call,
+# each statement it sent (whitespace collapsed, savepoints included) as its first 64 characters
+# and the first 12 hex digits of its md5.
+_OUTSIDE_STATEMENTS_8D920C07 = [
+    ["ffa_refund_pass", [
+        ["SAVEPOINT sa_savepoint_1", "7b295c9ab4d8"],
+        ["SELECT DISTINCT game_number FROM ffa_bets WHERE lobby_id = $1 AN", "47ab78fe8cc2"],
+        ["SELECT winner_id, score_target_frozen, score_target_played FROM ", "050980280a7f"],
+        ["RELEASE SAVEPOINT sa_savepoint_1", "04cba0342a98"],
+        ["SAVEPOINT sa_savepoint_2", "021c976aa7bd"],
+        ["SELECT id, player_id, amount FROM ffa_bets WHERE lobby_id = $1 A", "3c15f8b614ce"],
+        ["SAVEPOINT sa_savepoint_3", "527906cd5237"],
+        ["SELECT id::text FROM players WHERE steam_id = ANY(CAST($1 AS tex", "53fa53e24196"],
+        ["RELEASE SAVEPOINT sa_savepoint_3", "4cf8dfd57094"],
+        ["UPDATE ffa_bets SET payout = amount, settled_at = NOW(), settlem", "aea377f6539c"],
+        ["UPDATE players SET gold_spent = COALESCE(gold_spent, 0) - CAST($", "c88cc6868dd3"],
+        ["INSERT INTO gold_transactions (player_id, amount, reason, refere", "f909f3314cdd"],
+        ["RELEASE SAVEPOINT sa_savepoint_2", "ecdae5907008"],
+    ]],
+    ["ffa_settle", [
+        ["SELECT id, player_id, bet_on_player_id, amount, odds_multiplier ", "eed3b5646136"],
+        ["SELECT 1 FROM players WHERE id = $1 FOR NO KEY UPDATE", "b255d297c589"],
+        ["UPDATE ffa_bets SET payout = $1, settled_at = NOW(), settlement_", "f04b491bb385"],
+        ["UPDATE players SET gold_earned = COALESCE(gold_earned,0) + $1 WH", "f1925db06215"],
+        ["INSERT INTO gold_transactions (player_id, amount, reason, refere", "f909f3314cdd"],
+    ]],
+    ["team_lobby_refund", [
+        ["SAVEPOINT sa_savepoint_1", "7b295c9ab4d8"],
+        ["SELECT id, player_id FROM lobby_bets WHERE mode = $1 AND lobby_i", "162c5b7135f9"],
+        ["UPDATE lobby_bets SET status = 'refund_pending', resolved_at = N", "edc54e973ad7"],
+        ["SELECT player_id FROM lobby_bets WHERE id = $1 AND status = 'ref", "c8b818fa5dfd"],
+        ["UPDATE lobby_bets SET status = 'refunded', resolved_at = NOW() W", "cb8cef8bacbc"],
+        ["UPDATE players SET gold_spent = COALESCE(gold_spent, 0) - CAST($", "c88cc6868dd3"],
+        ["INSERT INTO gold_transactions (player_id, amount, reason, refere", "f909f3314cdd"],
+        ["RELEASE SAVEPOINT sa_savepoint_1", "04cba0342a98"],
+    ]],
+]
+
+
+def _digest(sql):
+    s = " ".join(sql.split())
+    return [s[:64], hashlib.md5(s.encode("utf-8")).hexdigest()[:12]]
+
+
+async def _outside_statements(env):
+    """The SQL three bet helpers send when called outside a deletion, each
+    with one open wager: the FFA refund pass (_reconcile_ffa_lobby_bets on a
+    closed lobby whose game has no result, through _refund_ffa_lobby_bets),
+    an FFA settlement (_settle_ffa_bets_for_game on a game Q won), and a team
+    lobby's refund (_refund_lobby_bets). Returns ([[call, [digest, ...]], ...],
+    every statement in full)."""
+    _arm(env)
+    h1, h2, q, r = await env.players(4)
+    await env.conn.execute("UPDATE players SET gold_earned = 200, gold_spent = 100 WHERE id = $1", r.id)
+    out, raw = [], []
+    for call, host in (("ffa_refund_pass", h1), ("ffa_settle", h2)):
+        lid = await env.create("ffa", host)
+        await env.conn.execute(
+            "UPDATE ffa_lobbies SET status = 'completed', completed_at = NOW() WHERE id = $1", lid)
+        await env.conn.execute(
+            "INSERT INTO ffa_bets (lobby_id, game_number, player_id, bet_on_player_id, amount, odds_multiplier)"
+            " VALUES ($1, 1, $2, $3, 10, 2.0)", lid, r.id, q.id)
+
+        async def go(db, call=call, lid=lid):
+            if call == "ffa_refund_pass":
+                await main._reconcile_ffa_lobby_bets(db, lid, "mdpl capture")
+            else:
+                await main._settle_ffa_bets_for_game(db, lid, 1, q.id)
+            await db.commit()
+            return {"ok": True}
+        with env.rewriting(_EVERY_STATEMENT, "") as hits:
+            ans = await env.call(go)
+        assert ans.status == 200, ans
+        out.append([call, [_digest(s) for s in hits]])
+        raw.extend(" ".join(s.split()) for s in hits)
+    lid, (p,) = await env.lobby("team", 1)
+    await _open_wager(env, lid, p)
+
+    async def refund(db):
+        await main._refund_lobby_bets(db, "team", lid, "mdpl capture")
+        await db.commit()
+        return {"ok": True}
+    with env.rewriting(_EVERY_STATEMENT, "") as hits:
+        ans = await env.call(refund)
+    assert ans.status == 200, ans
+    out.append(["team_lobby_refund", [_digest(s) for s in hits]])
+    raw.extend(" ".join(s.split()) for s in hits)
+    return out, raw
+
+
+def test_r1h_point6_a_call_outside_a_deletion_issues_the_statements_it_issued_before(monkeypatch):
+    """Point 6: the no-wait mode is off by default, so the janitor's and the
+    reports' calls of the bet helpers send exactly the SQL they sent at
+    8d920c07: no guard statement, nothing moved."""
+    async def body(env):
+        got, _raw = await _outside_statements(env)
+        path = os.environ.get("MDPL_CAPTURE_WRITE")
+        if path:
+            with open(path, "w", encoding="utf-8") as fh:
+                json.dump(got, fh, indent=1)
+            return
+        assert _OUTSIDE_STATEMENTS_8D920C07 is not None, "not measured at 8d920c07 yet"
+        assert got == _OUTSIDE_STATEMENTS_8D920C07, got
+    case(monkeypatch, body, prefix="mdpl")
+
+
+def test_r1h_point6_control_the_guards_on_for_every_caller_add_their_statements(monkeypatch):
+    """Point 6's mutant: both guards in the no-wait mode whatever their
+    caller says. The same calls then send the guards' statements too."""
+    async def body(env):
+        party, bet = main._deletion_lock_party_row, main._deletion_lock_ffa_bet
+
+        async def party_on(db, player_id, *, no_wait=False):
+            await party(db, player_id, no_wait=True)
+
+        async def bet_on(db, bet_id, *, no_wait=False):
+            await bet(db, bet_id, no_wait=True)
+        env.mp.setattr(main, "_deletion_lock_party_row", party_on)
+        env.mp.setattr(main, "_deletion_lock_ffa_bet", bet_on)
+        got, raw = await _outside_statements(env)
+        assert _OUTSIDE_STATEMENTS_8D920C07 is not None, "not measured at 8d920c07 yet"
+        assert got != _OUTSIDE_STATEMENTS_8D920C07
+        assert any("SKIP LOCKED" in s and "FROM players" in s for s in raw), raw
+        assert any("SKIP LOCKED" in s and "FROM ffa_bets" in s for s in raw), raw
+        assert any("pg_try_advisory_xact_lock" in s for s in raw), raw
+    case(monkeypatch, body, prefix="mdpl")
