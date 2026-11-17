@@ -925,6 +925,43 @@ EVIDENCE_HANDLERS = frozenset({
 # `_aer_click`. Every other function of discord_bot.py stays off `_aer_*`.
 EVIDENCE_BOT_HANDLERS = frozenset({"evidence_game", "evidence_series", "evidence_pair",
                                    "evidence_player", "on_interaction"})
+# The one AER helper another bot surface may name, and the exact functions
+# that may name it, each with its reason. `_aer_local_gate` is the admin
+# channel check (the guild and ADMIN_CHANNEL_ID): the moderator log
+# (MODLOG-1) answers only in the admin channel, as the evidence report does,
+# so it applies the same check rather than a second copy of it. Only this
+# helper is shared: every other `_aer_*` name stays with the evidence handlers.
+AER_SHARED_CALLERS = {
+    "_aer_local_gate": {
+        "_modlog_command": "the /modlog command answers only in the admin channel",
+        "_modlog_click": "a /modlog page button is checked again on every press",
+    },
+}
+
+
+def _bot_aer_outside(tree, shared=None):
+    """Every `_aer_*` name in discord_bot.py's tree outside the `_aer_*`
+    functions and the evidence handlers, as (function, name, line), less the
+    shared helper names each listed function may use (AER_SHARED_CALLERS)."""
+    shared = AER_SHARED_CALLERS if shared is None else shared
+    outside = []
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        if node.name.startswith("_aer_") or node.name in EVIDENCE_BOT_HANDLERS:
+            continue
+        for sub in ast.walk(node):
+            name = (sub.id if isinstance(sub, ast.Name)
+                    else sub.attr if isinstance(sub, ast.Attribute) else None)
+            if name and name.startswith("_aer_") and node.name not in shared.get(name, {}):
+                outside.append((node.name, name, sub.lineno))
+    # nested functions inside an allowed handler are walked as their own
+    # nodes too; a nested def is allowed only by its own name
+    return outside
+
+
+def _bot_tree():
+    return ast.parse((Path(__file__).parents[1] / "discord_bot.py").read_text(encoding="utf-8"))
 
 
 def test_aer_helpers_are_reached_only_from_the_evidence_handlers():
@@ -932,7 +969,9 @@ def test_aer_helpers_are_reached_only_from_the_evidence_handlers():
     an `_aer_*` binding through its reviewed closure (the gate's own walk,
     which follows attribute names, so `_admin_evidence._aer_x(...)` from a
     main.py handler counts), and in discord_bot.py only `_aer_*` functions
-    and the evidence handlers name one."""
+    and the evidence handlers name one, save the shared admin channel check
+    `_aer_local_gate`, which exactly the functions AER_SHARED_CALLERS lists
+    may name."""
     reaching = []
     evidence_seen = set()
     for route in main.app.routes:
@@ -950,22 +989,47 @@ def test_aer_helpers_are_reached_only_from_the_evidence_handlers():
     assert evidence_seen == EVIDENCE_HANDLERS
     assert reaching == [], reaching[:5]
 
-    bot = Path(__file__).parents[1] / "discord_bot.py"
-    tree = ast.parse(bot.read_text(encoding="utf-8"))
-    outside = []
-    for node in ast.walk(tree):
-        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            continue
-        if node.name.startswith("_aer_") or node.name in EVIDENCE_BOT_HANDLERS:
-            continue
-        for sub in ast.walk(node):
-            name = (sub.id if isinstance(sub, ast.Name)
-                    else sub.attr if isinstance(sub, ast.Attribute) else None)
-            if name and name.startswith("_aer_"):
-                outside.append((node.name, name, sub.lineno))
-    # nested functions inside an allowed handler are walked as their own
-    # nodes too; a nested def is allowed only by its own name
+    outside = _bot_aer_outside(_bot_tree())
     assert outside == [], outside[:5]
+
+
+def test_the_shared_aer_gate_admits_exactly_its_listed_callers():
+    """The allowance of AER_SHARED_CALLERS, each way it can fail: a third
+    function naming `_aer_local_gate` is refused; a listed modlog function
+    naming any other AER helper is refused; each listed caller is refused
+    once its own entry is taken away; the real tree passes."""
+    assert set(AER_SHARED_CALLERS) == {"_aer_local_gate"}
+    assert set(AER_SHARED_CALLERS["_aer_local_gate"]) == {"_modlog_command", "_modlog_click"}
+    assert all(isinstance(r, str) and r for r in AER_SHARED_CALLERS["_aer_local_gate"].values())
+
+    def fns(tree):
+        return {n.name: n for n in ast.walk(tree)
+                if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
+
+    # the control: both real callers name the gate, and the rule passes them
+    tree = _bot_tree()
+    for name in ("_modlog_command", "_modlog_click"):
+        assert any(isinstance(s, ast.Name) and s.id == "_aer_local_gate"
+                   for s in ast.walk(fns(tree)[name])), name
+    assert _bot_aer_outside(tree) == []
+
+    # a planted third caller of the gate is refused
+    tree = _bot_tree()
+    tree.body.append(ast.parse("def _modlog_planted(i):\n    return _aer_local_gate(i)\n").body[0])
+    assert [(f, n) for f, n, _l in _bot_aer_outside(tree)] == [("_modlog_planted", "_aer_local_gate")]
+
+    # a planted call of another AER helper from each modlog handler is refused
+    for name in ("_modlog_command", "_modlog_click"):
+        tree = _bot_tree()
+        fns(tree)[name].body.insert(0, ast.parse("_aer_message(None, None)").body[0])
+        assert [(f, n) for f, n, _l in _bot_aer_outside(tree)] == [(name, "_aer_message")], name
+
+    # each real caller is refused once its own entry is taken away
+    for name in ("_modlog_command", "_modlog_click"):
+        less = {"_aer_local_gate": {k: v for k, v in AER_SHARED_CALLERS["_aer_local_gate"].items()
+                                    if k != name}}
+        assert [(f, n) for f, n, _l in _bot_aer_outside(_bot_tree(), less)] == \
+            [(name, "_aer_local_gate")], name
 
 
 def test_the_helper_surface_is_computed_and_not_hand_curated():
