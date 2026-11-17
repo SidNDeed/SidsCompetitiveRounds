@@ -26127,19 +26127,26 @@ async def chat_moderate_spam_pattern_add(req: _ChatSpamPatternReq,
     norm = _squash_for_spam(req.pattern)[:128]
     if len(norm) < 4:
         raise HTTPException(400, "Pattern too short after normalization (need >= 4 alphanumerics)")
+    # The pattern bind stands in the select list and in the NOT EXISTS
+    # predicate: each place is typed by CAST to the column's own type
+    # (VARCHAR(128), migration 263), so PostgreSQL deduces one type for it.
     row_id = (await db.execute(text(
         "INSERT INTO bridge_spam_patterns (pattern, note, added_by)"
-        " SELECT :p, :n, :by"
+        " SELECT CAST(:p AS VARCHAR(128)), :n, :by"
         " WHERE NOT EXISTS (SELECT 1 FROM bridge_spam_patterns"
-        "                    WHERE pattern = :p AND revoked_at IS NULL)"
+        "                    WHERE pattern = CAST(:p AS VARCHAR(128)) AND revoked_at IS NULL)"
         " RETURNING id"
     ), {"p": norm, "n": (req.note or "")[:256] or None, "by": req.steam_id[:64]})).scalar()
+    if row_id is None:
+        # The pattern is already active: nothing was stored, so nothing is
+        # recorded and nothing is committed.
+        return {"status": "duplicate", "pattern": norm, "id": None}
     await _modlog_write(db, actor=req.steam_id, action="chat_spam_pattern", reason=req.note,
                             details={"op": "add", "raw": req.pattern[:128],
                                      "normalized": norm, "id": row_id})
     await db.commit()
     _spam_pat_cache["at"] = 0.0   # force refresh on next bridge message
-    return {"status": "ok" if row_id else "duplicate", "pattern": norm, "id": row_id}
+    return {"status": "ok", "pattern": norm, "id": row_id}
 
 
 @app.post("/api/v1/chat/moderate/spam-patterns/revoke", tags=["Chat"])

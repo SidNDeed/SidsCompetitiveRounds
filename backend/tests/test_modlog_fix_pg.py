@@ -13,6 +13,9 @@ read back against a real PostgreSQL, with its mutants.
     A7  the read pages by key, and its total agrees with its rows
     A8  a mute's length is stored; a ban says permanent only when it is
     A6  the no-change branches that commit before any record change nothing
+    J3  the spam pattern add route's statement runs on PostgreSQL: a new
+        pattern answers ok, a second add of it answers duplicate, and the
+        route records the one addition that stored a row
 
 Same harness as test_modlog_pg.py (its case schema, built by the ladder
 harness, sealed, dropped at the end):
@@ -452,15 +455,10 @@ def test_a5_a_supplied_reason_or_note_reaches_the_record(case, admin_open):
         async with sm() as db:
             await main.chat_moderate_unmute(main._ChatModMuteReq(
                 steam_id=a, target_steam_id=t, reason="appeal accepted"), None, db=db)
-        # The add route's own statement fails on PostgreSQL at the lane's base
-        # (reported, not fixed in this sitting): the pattern is seeded, and
-        # the add route's reason is proved by the census check alone.
         async with sm() as db:
-            pid = (await db.execute(text(
-                "INSERT INTO bridge_spam_patterns (pattern, note, added_by)"
-                " VALUES (:p, 'seeded', :a) RETURNING id"),
-                {"p": "buycheap%s" % uuid.uuid4().hex[:8], "a": a})).scalar()
-            await db.commit()
+            pid = (await main.chat_moderate_spam_pattern_add(main._ChatSpamPatternReq(
+                steam_id=a, pattern="buycheap%s" % uuid.uuid4().hex[:8], note="new spam wave"),
+                db=db))["id"]
         async with sm() as db:
             await main.chat_moderate_spam_pattern_revoke(main._ChatSpamPatternReq(
                 steam_id=a, pattern_id=pid, note="too broad"), db=db)
@@ -479,7 +477,8 @@ def test_a5_a_supplied_reason_or_note_reaches_the_record(case, admin_open):
     for r in rows:
         by.setdefault(r["action"], []).append(r)
     assert by["chat_unmute"][0]["reason"] == "appeal accepted", by["chat_unmute"]
-    assert [r["reason"] for r in by["chat_spam_pattern"]] == ["too broad"]
+    assert [(r["details"]["op"], r["reason"]) for r in by["chat_spam_pattern"]] == \
+        [("add", "new spam wave"), ("revoke", "too broad")], by["chat_spam_pattern"]
     assert by["ban_rate_blocked"][0]["reason"] == "repeat cheating", by["ban_rate_blocked"]
 
 
@@ -719,3 +718,89 @@ def test_a8_a_length_not_stored_is_never_read_as_permanent():
     assert modlog.sentence("ban_length", {"old_expires_at": None, "new_expires_at": None}) == \
         "Ban length changed from permanent to permanent."
     assert "length not recorded" in modlog.sentence("chat_purge_user", {"purged": 2, "platform": "twitch"})
+
+
+def _mutant_of(fname, *swaps):
+    """main.<fname> rebuilt from its own source with each (old, new) text swap
+    applied in order (each old text must stand exactly once at that point);
+    its route decorator is dropped, so the mutant registers no route."""
+    import inspect
+    src = inspect.getsource(getattr(main, fname))
+    for old, new in swaps:
+        assert src.count(old) == 1, (fname, old, src.count(old))
+        src = src.replace(old, new)
+    lines = src.splitlines(True)
+    while lines and lines[0].lstrip().startswith("@"):
+        lines.pop(0)
+    ns = {}
+    exec(compile("".join(lines), "<mutant of %s>" % fname, "exec"), main.__dict__, ns)
+    return ns[fname]
+
+
+# -- J3: the spam pattern add route on PostgreSQL --------------------------------
+#
+# The route's INSERT ... SELECT names its pattern bind in the select list and
+# again in the NOT EXISTS predicate. Each place types it by CAST to the
+# column's own type (VARCHAR(128), migration 263), so PostgreSQL deduces one
+# type for the parameter. The request goes through the route itself: its
+# model, its handler and its dependency, on the case schema.
+
+J3_PATH = "/api/v1/chat/moderate/spam-patterns/add"
+
+
+async def _j3_post(sm, handler, body):
+    import httpx
+    from fastapi import FastAPI
+    app = FastAPI()
+    app.add_api_route(J3_PATH, handler, methods=["POST"])
+
+    async def _db():
+        async with sm() as db:
+            yield db
+    app.dependency_overrides[main.get_db] = _db
+    transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)
+    async with httpx.AsyncClient(transport=transport, base_url="http://t") as client:
+        return await client.post(J3_PATH, json=body)
+
+
+def _j3_check(case, handler):
+    async def body(sm):
+        a, _ = await _commit(sm, _admin)
+        raw = "Buy Cheap Gold %s" % uuid.uuid4().hex[:8]
+        norm = main._squash_for_spam(raw)[:128]
+        first = await _j3_post(sm, handler, {"steam_id": a, "pattern": raw, "note": "new wave"})
+        second = await _j3_post(sm, handler, {"steam_id": a, "pattern": raw, "note": "again"})
+        async with sm() as db:
+            rows = (await db.execute(text(
+                "SELECT id FROM bridge_spam_patterns WHERE pattern = :p ORDER BY id"),
+                {"p": norm})).scalars().all()
+            recs = await _all_records(db, "chat_spam_pattern", normalized=norm)
+        return first, second, norm, rows, recs
+    first, second, norm, rows, recs = _with_sm(case, body)
+    assert first.status_code == 200, (first.status_code, first.text[:200])
+    assert second.status_code == 200, (second.status_code, second.text[:200])
+    one, two = first.json(), second.json()
+    assert (one["status"], one["pattern"]) == ("ok", norm) and one["id"] is not None, one
+    assert (two["status"], two["id"]) == ("duplicate", None), two
+    assert rows == [one["id"]], rows
+    assert len(recs) == 1, recs
+    assert recs[0]["details"]["op"] == "add" and recs[0]["details"]["id"] == one["id"], recs[0]
+    assert recs[0]["reason"] == "new wave", recs[0]
+
+
+def test_j3_the_add_route_stores_a_new_pattern_once_and_answers_duplicate_after(case, admin_open):
+    _j3_check(case, main.chat_moderate_spam_pattern_add)
+
+
+J3_MUTANTS = {
+    "select_list_cast_removed": ("SELECT CAST(:p AS VARCHAR(128)), :n", "SELECT :p, :n"),
+    "predicate_cast_removed": ("WHERE pattern = CAST(:p AS VARCHAR(128))", "WHERE pattern = :p"),
+}
+
+
+@pytest.mark.parametrize("mutant", sorted(J3_MUTANTS))
+def test_j3_mutant_with_one_cast_removed_is_red(case, admin_open, mutant):
+    handler = _mutant_of("chat_moderate_spam_pattern_add", J3_MUTANTS[mutant])
+    with pytest.raises(AssertionError) as e:
+        _j3_check(case, handler)
+    print("\nMUTANT-RED J3 %s: %s" % (mutant, str(e.value).splitlines()[0][:160]))
