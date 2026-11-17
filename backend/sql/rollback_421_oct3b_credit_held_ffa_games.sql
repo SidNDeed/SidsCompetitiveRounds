@@ -90,14 +90,44 @@ BEGIN
 
   SELECT
     -- oct3b:receipts-begin
+      -- The figures of every audit row are proved in their domains (2b)
+      -- before anything reads them as numbers: the CASE evaluates its
+      -- condition first, and the rest only when it holds.
+      CASE WHEN
       -- (1) both held rows read credited with this file's note
       (SELECT pg_catalog.count(*) FROM match_report_quarantine q
         WHERE q.id = ANY (qids) AND q.status = 'credited'::pg_catalog.text AND q.review_note = note) = 2
-      -- (2) exactly 12 audit rows of this file, one per (held row, player)
+      -- (2) exactly 12 audit rows of this file
       AND (SELECT pg_catalog.count(*) FROM admin_actions aa
             WHERE aa.action = 'quarantine_credit'::pg_catalog.text AND aa.admin_steam_id = actor
               AND (aa.details->>'qid') = ANY (qids::pg_catalog.text[])) = 12
-      AND (SELECT pg_catalog.count(DISTINCT ((aa.details->>'qid'), aa.target_steam_id)) FROM admin_actions aa
+      -- (2b) and each carries xp, gold_ffa_xp, gold_ffa_placement,
+      --      gold_level_reward and slot as JSON numbers, integral, in their
+      --      domains: xp 1 to 2147483647, each gold kind 0 to 2147483647,
+      --      slot 0 to 5. A figure missing, of another type, fractional or
+      --      out of range fails the check; it is never read as 0.
+      AND (SELECT pg_catalog.count(*) FROM admin_actions aa
+             CROSS JOIN LATERAL (SELECT
+               CASE WHEN pg_catalog.jsonb_typeof(aa.details->'xp') = 'number'::pg_catalog.text
+                    THEN (aa.details->'xp')::pg_catalog.numeric END AS xp,
+               CASE WHEN pg_catalog.jsonb_typeof(aa.details->'gold_ffa_xp') = 'number'::pg_catalog.text
+                    THEN (aa.details->'gold_ffa_xp')::pg_catalog.numeric END AS gx,
+               CASE WHEN pg_catalog.jsonb_typeof(aa.details->'gold_ffa_placement') = 'number'::pg_catalog.text
+                    THEN (aa.details->'gold_ffa_placement')::pg_catalog.numeric END AS gp,
+               CASE WHEN pg_catalog.jsonb_typeof(aa.details->'gold_level_reward') = 'number'::pg_catalog.text
+                    THEN (aa.details->'gold_level_reward')::pg_catalog.numeric END AS gl,
+               CASE WHEN pg_catalog.jsonb_typeof(aa.details->'slot') = 'number'::pg_catalog.text
+                    THEN (aa.details->'slot')::pg_catalog.numeric END AS slot) AS d
+            WHERE aa.action = 'quarantine_credit'::pg_catalog.text AND aa.admin_steam_id = actor
+              AND (aa.details->>'qid') = ANY (qids::pg_catalog.text[])
+              AND d.xp BETWEEN 1 AND 2147483647 AND d.xp = pg_catalog.trunc(d.xp)
+              AND d.gx BETWEEN 0 AND 2147483647 AND d.gx = pg_catalog.trunc(d.gx)
+              AND d.gp BETWEEN 0 AND 2147483647 AND d.gp = pg_catalog.trunc(d.gp)
+              AND d.gl BETWEEN 0 AND 2147483647 AND d.gl = pg_catalog.trunc(d.gl)
+              AND d.slot BETWEEN 0 AND 5 AND d.slot = pg_catalog.trunc(d.slot)) = 12
+      THEN
+      -- (2c) one audit row per (held row, player)
+      (SELECT pg_catalog.count(DISTINCT ((aa.details->>'qid'), aa.target_steam_id)) FROM admin_actions aa
             WHERE aa.action = 'quarantine_credit'::pg_catalog.text AND aa.admin_steam_id = actor
               AND (aa.details->>'qid') = ANY (qids::pg_catalog.text[])) = 12
       -- (3) each names the player of its (held row, slot) and that slot's XP
@@ -139,6 +169,7 @@ BEGIN
         (SELECT * FROM want EXCEPT ALL SELECT * FROM have)
         UNION ALL
         (SELECT * FROM have EXCEPT ALL SELECT * FROM want))
+      ELSE false END
     -- oct3b:receipts-end
     INTO exact;
   IF NOT exact THEN

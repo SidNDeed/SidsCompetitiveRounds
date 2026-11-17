@@ -141,6 +141,14 @@ MUTANTS = {
                                 "            FROM gold_transactions g\n"
                                 "           WHERE g.reference_id = ANY (qids::pg_catalog.text[])"
                                 " AND g.reason = 'ffa_placement'\n", "T11"),
+    # the audit figures' domain check (2b) removed, in both files alike
+    "domain-check-removed": ((M421, R421),
+                             "              AND d.xp BETWEEN 1 AND 2147483647 AND d.xp = pg_catalog.trunc(d.xp)\n"
+                             "              AND d.gx BETWEEN 0 AND 2147483647 AND d.gx = pg_catalog.trunc(d.gx)\n"
+                             "              AND d.gp BETWEEN 0 AND 2147483647 AND d.gp = pg_catalog.trunc(d.gp)\n"
+                             "              AND d.gl BETWEEN 0 AND 2147483647 AND d.gl = pg_catalog.trunc(d.gl)\n"
+                             "              AND d.slot BETWEEN 0 AND 5 AND d.slot = pg_catalog.trunc(d.slot)) = 12\n",
+                             "              ) = 12\n", "T11 figure cases"),
     "guard-keyed-by-action": (M421, "                 WHERE (aa.target_steam_id = ANY",
                               "                 WHERE aa.action = 'quarantine_credit'::pg_catalog.text"
                               " AND (aa.target_steam_id = ANY", "T3 audit cases"),
@@ -792,12 +800,39 @@ def test_t10_a_partial_or_other_audit_form_raises_with_nothing_applied(form):
 # ── T11 / T12: the receipts check ──────────────────────────────────────────
 
 T11_TAMPERS = ("an-ffa-xp-row-deleted", "a-ledger-amount-changed", "a-ledger-row-added",
-               "an-audit-row-deleted")
+               "an-audit-row-deleted",
+               # an audit row's figures out of their domain (F3)
+               "figure-zero-gold-key-removed", "figure-positive-gold-key-removed", "figure-minus-one-for-zero",
+               "figure-one-and-a-half", "figure-string-five", "figure-its-own-value-as-a-string",
+               "figure-xp-removed")
+
+# name -> (the audit row it picks, the details expression that replaces its details)
+FIGURE_TAMPERS = {
+    "figure-zero-gold-key-removed": ("details->>'gold_level_reward' = '0'", "details - 'gold_level_reward'"),
+    "figure-positive-gold-key-removed": ("(details->>'gold_ffa_placement')::int > 0",
+                                         "details - 'gold_ffa_placement'"),
+    "figure-minus-one-for-zero": ("details->>'gold_level_reward' = '0'",
+                                  "jsonb_set(details, '{gold_level_reward}', '-1')"),
+    "figure-one-and-a-half": ("details->>'gold_level_reward' = '0'",
+                              "jsonb_set(details, '{gold_level_reward}', '1.5')"),
+    "figure-string-five": ("details->>'gold_level_reward' = '0'",
+                           "jsonb_set(details, '{gold_level_reward}', '\"5\"')"),
+    # the same digits as a JSON string: every text comparison still matches
+    "figure-its-own-value-as-a-string": ("(details->>'gold_ffa_placement')::int > 0",
+                                         "jsonb_set(details, '{gold_ffa_placement}',"
+                                         " to_jsonb(details->>'gold_ffa_placement'))"),
+    "figure-xp-removed": ("true", "details - 'xp'"),
+}
 
 
 async def _tamper(c, how):
     ex = c.conn.execute
-    if how == "an-ffa-xp-row-deleted":
+    if how in FIGURE_TAMPERS:
+        pick, repl = FIGURE_TAMPERS[how]
+        done = await ex("UPDATE admin_actions SET details = %s WHERE id = (SELECT id FROM admin_actions"
+                        " WHERE action = 'quarantine_credit' AND %s ORDER BY id LIMIT 1)" % (repl, pick))
+        assert done == "UPDATE 1", (how, done)
+    elif how == "an-ffa-xp-row-deleted":
         n = await c.conn.fetchval("SELECT count(*) FROM gold_transactions WHERE reason = 'ffa_xp'"
                                   " AND reference_id IN ($1, $2)", Q2, Q3)
         assert n > 0
