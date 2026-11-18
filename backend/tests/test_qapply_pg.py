@@ -463,7 +463,9 @@ A8_ARMS = (
     ("roster does not bind", "roster", 403, "roster"),
     ("score shape (capture site)", "shape", 409, "shape"),
     ("lobby status not served (capture site)", "status", 409, "lobby_state"),
-    ("leave figure missing", "leave", 422, "leave_figure"),
+    # The stored-body reader refuses this one before the body runs (its 422
+    # is not reached under the replay); the held check names it, with 409.
+    ("leave figure missing", "leave", 409, "leave_figure"),
     ("recorded game contradicts (capture site)", "contradiction", 409, "recorded"),
 )
 

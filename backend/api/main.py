@@ -74947,7 +74947,7 @@ _QAPPLY_TEXTS = {
     "roster": "The report's players or seats are not this lobby's roster, so it cannot be applied or credited.",
     "shape": "The report's score is not a complete game, so it cannot be applied or credited.",
     "incomplete": "The stored report is not a complete game report, so it cannot be applied.",
-    "leave_figure": "The report lacks a leaver's score at the time they left, so it cannot be applied.",
+    "leave_figure": "The report lacks a leaver's score at the time they left, so it cannot be applied or credited.",
     "limit": "The lobby already holds its maximum number of games, so this game cannot be applied.",
     "downgrade": "The report uses an old signature this lobby does not accept, so it cannot be applied.",
     "reporter": "The player who sent this report could not report this game, so it cannot be applied or credited.",
@@ -75214,7 +75214,7 @@ def _qapply_held_check(row, body):
     if row["reason"] not in _QAPPLY_SERVABLE_REASONS:
         return "word"
     if not body.get("ok") or body.get("shape") != "ffa" or body.get("report") is None:
-        return "body"
+        return "leave_figure" if body.get("why") == "leave_figure" else "body"
     return None
 
 
