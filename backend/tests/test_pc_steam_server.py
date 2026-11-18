@@ -1539,6 +1539,9 @@ def test_the_recorded_snapshot_binds_to_this_train_its_label_its_age_and_the_lis
          "is not the form the wrapper mints for label"),
         ({"snapshot": _rt_minted(rt), "snapshot_recorded_at": "2026-11-18 11:20:01"},
          "is not a UTC time this tool wrote"),
+        # the minted shape, but its stamp is no calendar date and time (month 13, hour 25): recorded, not printed
+        ({"snapshot": _rt_minted(rt, stamp="20261345_256161"), "snapshot_recorded_at": _rt_utc(1)},
+         "is not the form the wrapper mints for label"),
     )
     for record, says in refused:
         w = _rt_world(monkeypatch, rt)
@@ -1888,7 +1891,7 @@ def test_the_push_url_gate_asks_git_where_a_push_would_really_go(monkeypatch, tm
 
     The configured literals are not where `git push` writes: `pushurl` adds destinations and
     `pushInsteadOf` rewrites them at push time. `git remote get-url --push --all origin` is the verb that
-    expands both, and its answer must be exactly the module's expected push address, once. The repository
+    expands both, and every destination it names must be the module's expected push address. The repository
     is public, so a push is a publication: a wrong answer refuses before the precursor commit is made."""
     rt, _src = _release_train()
     url = getattr(rt, "ORIGIN_PUSH_URL", "the module states no push address")
@@ -1962,7 +1965,7 @@ def test_the_remote_gate_names_the_repository_and_reads_only_what_succeeded(monk
     rt, _src = _release_train()
     url = getattr(rt, "ORIGIN_PUSH_URL", "the module states no push address")
     for i, (fails, answer, says) in enumerate(((True, [url], "did not succeed"),
-                                               (False, [FORK_URL], "not exactly"))):
+                                               (False, [FORK_URL], "differ from"))):
         _rt_bind(monkeypatch, rt, "ban-cap", tmp_path / ("case%d" % i))
         w = _rt_world(monkeypatch, rt)
         w.push_address_fails, w.push_urls = fails, answer
@@ -1973,6 +1976,45 @@ def test_the_remote_gate_names_the_repository_and_reads_only_what_succeeded(monk
         assert says in str(exc.value), str(exc.value)
         assert url not in said and FORK_URL not in said
         assert w.kinds("git", "push") == []
+
+
+def test_the_push_address_check_passes_only_when_every_destination_is_the_expected_one(monkeypatch):
+    """Every destination git names must be the expected one; the expected one named twice passes.
+
+    The check is driven with an invented expected address set on the module. It passes when the answer
+    names at least one destination and each of them equals the expected address; it refuses another
+    destination beside it or alone, an answer with no destination, and a command that did not succeed. A
+    refusal names no address."""
+    rt, _src = _release_train()
+    expected = "https://example.invalid/the-expected-owner/the-expected-repository.git"
+    monkeypatch.setattr(rt, "ORIGIN_PUSH_URL", expected)
+    asked = []
+
+    def answer_with(lines, fails=False):
+        def fake_run(cmd, check=True, quiet=False, **kw):
+            asked.append(list(cmd))
+            if fails:
+                raise rt.Fail("command failed (rc=2)")
+            return chr(10).join(lines)
+        monkeypatch.setattr(rt, "run", fake_run)
+
+    for lines in ([expected], [expected, expected], [expected, "", expected], ["  %s  " % expected]):
+        answer_with(lines)
+        rt.assert_push_address()
+    assert all(c == ["git", "remote", "get-url", "--push", "--all", "origin"] for c in asked), asked
+    for lines, fails, says in (([expected, FORK_URL], False, "1 destination(s) that differ"),
+                               ([FORK_URL, expected], False, "1 destination(s) that differ"),
+                               ([FORK_URL], False, "1 destination(s) that differ"),
+                               ([FORK_URL, FORK_URL], False, "2 destination(s) that differ"),
+                               ([], False, "names no destination"),
+                               (["", "  "], False, "names no destination"),
+                               ([expected], True, "did not succeed")):
+        answer_with(lines, fails)
+        with pytest.raises(rt.Fail) as exc:
+            rt.assert_push_address()
+        msg = str(exc.value)
+        assert says in msg and "nothing is pushed" in msg, (lines, fails, msg)
+        assert expected not in msg and FORK_URL not in msg
 
 
 def test_the_train_refuses_a_precursor_subject_that_describes_no_commit():
