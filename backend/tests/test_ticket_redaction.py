@@ -477,6 +477,7 @@ BOUND_SCHEMA = "public"
 DROP = """
 DROP TABLE IF EXISTS public.bug_report_events RESTRICT;
 DROP TABLE IF EXISTS public.bug_reports RESTRICT;
+DROP TABLE IF EXISTS public.player_bans RESTRICT;
 DROP SEQUENCE IF EXISTS public.bug_reports_number_seq RESTRICT;
 DROP TABLE IF EXISTS public.admin_users RESTRICT;
 DROP TABLE IF EXISTS public.players RESTRICT;
@@ -593,8 +594,10 @@ ROUTES = (
 SCRATCH_MARKER = "scr_ticket_redaction"
 SCRATCH_DB_RE = re.compile(re.escape(SCRATCH_MARKER) + r"(?:_[a-z0-9_]+)?")
 FIXTURE_IDS = (ADMIN, REPORTER)
-HARNESS_TABLES = ("bug_report_events", "bug_reports", "admin_users", "players", "shop_items",
-                  "steam_sessions")
+# player_bans: the bug report and log upload routes read the reporter's ban
+# (bans part 2a); the harness holds the table and no row in it.
+HARNESS_TABLES = ("bug_report_events", "bug_reports", "player_bans", "admin_users", "players",
+                  "shop_items", "steam_sessions")
 # BUG_DDL's own sequence. shop_items' serial id makes a second one, which the
 # census admits as the sequence a harness table's column owns.
 FIXTURE_SEQUENCES = ("bug_reports_number_seq",)
@@ -606,6 +609,7 @@ POPULATION = (
     ("bug_reports", "steam_id", False),
     ("bug_report_events", "actor_steam_id", True),    # the internal comment has no actor id
     ("steam_sessions", "steam_id", False),
+    ("player_bans", "steam_id", False),
     ("shop_items", None, False),
 )
 NAME_GATE_SQL = "SELECT pg_catalog.current_database() /* ticket-redaction scratch-name gate */"
@@ -981,7 +985,7 @@ class Env:
                     await conn.execute(text(stmt))
                 await conn.run_sync(models.Base.metadata.create_all,
                                     tables=[models.ShopItem.__table__, models.Player.__table__,
-                                            models.AdminUser.__table__])
+                                            models.AdminUser.__table__, models.PlayerBan.__table__])
                 # models.Player.mail_discord_relay (the v1.41.0 beta's migration 330)
                 # leaves its default to SQL (FetchedValue), which create_all does not
                 # render: the column gets migration 330's DEFAULT here, as it has in

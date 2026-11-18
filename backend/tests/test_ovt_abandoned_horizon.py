@@ -2270,6 +2270,16 @@ CREATE TABLE glicko_ratings (
     player_id UUID PRIMARY KEY,
     rating DOUBLE PRECISION NOT NULL
 )""",
+    # the 1v2 report reads every roster member's ban (bans part 2a)
+    """
+CREATE TABLE player_bans (
+    id UUID PRIMARY KEY,
+    steam_id VARCHAR(20) NOT NULL,
+    reason VARCHAR(512),
+    banned_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    unbanned_at TIMESTAMPTZ,
+    expires_at TIMESTAMPTZ
+)""",
 )
 
 
@@ -2284,7 +2294,7 @@ def _sink_schema() -> str:
     """
     schema = SCHEMA_120.read_text(encoding="utf-8")
     stmts = [f"DROP TABLE IF EXISTS {t}" for t in (
-        "ovt_match_cards", "gold_transactions", "glicko_ratings",
+        "ovt_match_cards", "gold_transactions", "glicko_ratings", "player_bans",
         "ovt_matches", "ovt_series", "players")]
     stmts.append(SINK_PLAYERS)
     for table in ("ovt_series", "ovt_matches"):

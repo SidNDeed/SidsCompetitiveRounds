@@ -140,6 +140,7 @@ DROP TABLE IF EXISTS glicko_ratings_ffa CASCADE;
 DROP TABLE IF EXISTS rating_history CASCADE;
 DROP TABLE IF EXISTS gold_transactions CASCADE;
 DROP TABLE IF EXISTS pc_packs CASCADE;
+DROP TABLE IF EXISTS player_bans CASCADE;
 DROP TABLE IF EXISTS admin_users CASCADE;
 DROP TABLE IF EXISTS players CASCADE;
 CREATE TABLE players (
@@ -150,6 +151,15 @@ CREATE TABLE players (
     total_xp INTEGER NOT NULL DEFAULT 0,
     deleted_at TIMESTAMPTZ,
     last_seen TIMESTAMPTZ
+);
+-- player_bans: the FFA report reads every roster member's ban (bans part 2a).
+CREATE TABLE player_bans (
+    id UUID PRIMARY KEY,
+    steam_id VARCHAR(20) NOT NULL,
+    reason VARCHAR(512),
+    banned_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    unbanned_at TIMESTAMPTZ,
+    expires_at TIMESTAMPTZ
 );
 CREATE TABLE admin_users (
     steam_id VARCHAR(20) PRIMARY KEY,
