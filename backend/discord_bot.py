@@ -18907,7 +18907,7 @@ def _modlog_error(status, body):
         return MODLOG_AMBIGUOUS
     if status in (400, 422):
         return ("The moderator log refused that request (%s). Trying again as it is will not help."
-                % _escape_md(str(detail or "bad request"))[:200])
+                % _escape_md(_modlog_cut(str(detail or "bad request"), 200)))
     if status == 429 or status >= 500:
         return ("The moderator log failed on the server (status %d). Trying again in a minute may help."
                 % int(status))
@@ -18925,8 +18925,26 @@ def _modlog_ts(iso):
 
 
 def _modlog_cut(text, n):
+    """`text`, raw (not yet escaped), shortened to at most `n` characters,
+    the cut marked with "…". It adds nothing else, and every caller escapes
+    its result: cut first, then escape (_escape_md's rule), so no escape pair
+    is cut in half. Text already escaped is cut by _modlog_fit instead."""
     text = str(text or "")
     return text if len(text) <= n else text[:max(0, n - 1)] + "…"
+
+
+MODLOG_ID_UNKNOWN = "unknown id"
+
+
+def _modlog_id(value):
+    """The player's Steam id as the header prints it inside a code span:
+    the value when it is 1 to 20 ASCII digits, MODLOG_ID_UNKNOWN otherwise.
+    A code span ends at a backtick in its text and shows a backslash as
+    typed, so no escape makes a value literal there; digits are literal
+    anywhere. The internal read answers with the 17 digits the bot asked
+    with, or, asked by a name, the players row's steam_id as it is stored."""
+    s = str(value) if value is not None else ""
+    return s if re.fullmatch(r"[0-9]{1,20}", s) else MODLOG_ID_UNKNOWN
 
 
 def _modlog_fit(text, n):
@@ -18979,7 +18997,7 @@ def _modlog_render(body, *, page, sort, action_idx, search):
     if (not isinstance(total, int) or isinstance(total, bool) or not isinstance(counts, list)
             or not isinstance(who, dict)):
         raise ValueError("shape")
-    sid = str(who.get("steam_id") or "")
+    sid = _modlog_id(who.get("steam_id"))
     name = _escape_md(_modlog_cut(who.get("name") or "unknown name", 40))
     filt = []
     if action_idx is not None:
@@ -19017,8 +19035,10 @@ def _modlog_render(body, *, page, sort, action_idx, search):
         lines.append(_modlog_fit(line, budget))
     # The budget keeps the page inside the limit while the header stays
     # within its own bounds (a 40-character name, a 64-character search);
-    # this cut stands so no page passes the limit even outside them.
-    return _modlog_cut("\n".join([head, totals] + lines), MODLOG_MSG_MAX)
+    # this cut stands so no page passes the limit even outside them. The
+    # page is escaped by now, so it is cut by _modlog_fit, which never ends
+    # inside an escape pair.
+    return _modlog_fit("\n".join([head, totals] + lines), MODLOG_MSG_MAX)
 
 
 def _modlog_view(tok):
