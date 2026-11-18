@@ -745,9 +745,25 @@ def test_every_surface_that_names_a_game_reads_the_column_not_the_room_string():
     # had not (see _ffa_with_settled). The endpoint keeps the RAW tail beside
     # it because _ffa_game_number_refusal's message distinguishes a missing
     # tail from an out-of-domain one, and `None` cannot say which it was.
+    # QAPPLY-1 adds three, each the same comparison and never a source: the
+    # held-report sentence for a number refusal (_qapply_refusal_text), the
+    # list's verdict (_qapply_verdict) and the Credit (_qapply_credit). Each
+    # passes the raw tail only to _ffa_game_number_refusal and the number
+    # sentence; the game a held report names comes from _ffa_named_game_number.
     assert calls == ['    tail = _ffa_room_game_no(room_id)',
-                     '    _room_tail = _ffa_room_game_no(report.photon_room_id)']
+                     '    _room_tail = _ffa_room_game_no(report.photon_room_id)',
+                     '        return _qapply_number_text(_ffa_room_game_no(report.photon_room_id),',
+                     '    tail = _ffa_room_game_no(room)',
+                     '    tail = _ffa_room_game_no(room)']
     assert calls[0] in inspect.getsource(main._ffa_named_game_number)
+    assert calls[2] in inspect.getsource(main._qapply_refusal_text)
+    for fn in (main._qapply_verdict, main._qapply_credit):
+        src = inspect.getsource(fn)
+        assert src.count(calls[3]) == 1 and "_ffa_named_game_number(room)" in src
+        uses = [ln.strip() for ln in src.splitlines() if re.search(r"\btail\b", ln)]
+        assert uses[0] == calls[3].strip() and all(
+            "_ffa_game_number_refusal(tail, expected)" in u or "_qapply_number_text(tail, expected)" in u
+            for u in uses[1:]), (fn.__name__, uses)
     # The raw tail's ONLY use in the endpoint is that refusal rule.
     endpoint = _endpoint_src()
     assert endpoint.count("_room_tail") == 2
@@ -1286,7 +1302,12 @@ def test_the_leave_rule_has_exactly_one_definition():
     calls = [node for node in ast.walk(tree)
              if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
              and node.func.id == "_ffa_leave_decision"]
-    assert len(calls) == 4
+    # QAPPLY-1 adds the fifth: the held-report Credit (_qapply_credit) asks the
+    # same helper, with the same two values, which seats settlement would
+    # have left unrated (read_absent=True: Credit refuses a readmission lobby,
+    # the one case where the endpoint passes False).
+    assert len(calls) == 5
+    assert "_ffa_leave_decision(" in inspect.getsource(main._qapply_credit)
     for call in calls:
         grace_passes = [kw.value for kw in call.keywords
                         if kw.arg == "grace_half"]
@@ -1970,6 +1991,17 @@ def test_the_two_503_arms_are_disjoint_on_the_answers_the_endpoint_builds():
     # dict in scope again.
     tree = ast.parse(inspect.getsource(main._ffa_record_and_refuse))
     raises = [n for n in ast.walk(tree) if isinstance(n, ast.Raise)]
+    # QAPPLY-1: the helper's first statement after its docstring is the
+    # held-report replay guard, whose raise answers an admin (no network
+    # client reads it) and captures nothing. It is set apart here, once, by
+    # its own test, and the split below is asserted over the other raises.
+    fn = tree.body[0]
+    guard = fn.body[1]
+    assert isinstance(guard, ast.If) and ast.unparse(guard.test) == "_QAPPLY_REPLAY.get() is not None", \
+        ast.unparse(guard)
+    assert len(guard.body) == 1 and isinstance(guard.body[0], ast.Raise) and \
+        ast.unparse(guard.body[0].exc.func) == "_QapplyRefused", ast.unparse(guard)
+    raises = [n for n in raises if n is not guard.body[0]]
     # WHICH SIDE OF THE RE-DERIVATION EACH EXIT SITS ON, asserted before the
     # total, because the total on its own is ambiguous and the helper's
     # docstring was read against it. "The two terminal answers" are two values
@@ -2117,7 +2149,11 @@ def test_no_terminal_refusal_on_the_ffa_report_path_is_answered_over_nothing():
     for reason in ('"ffa_room_other_lobby"', '"ffa_replay_roster_mismatch"',
                    '"ffa_lobby_no_roster"', '"lobby_game_limit"',
                    '"v1_canonical_downgrade"', 'f"lobby_{lobby[\'status\']}"'):
-        i = src.index(reason)
+        # The capture SITE is the `reason=` argument (QAPPLY-1 reads the
+        # closed-lobby word once before it, in the replay's servable-word
+        # test, which captures nothing).
+        assert src.count("reason=" + reason) == 1, reason
+        i = src.index("reason=" + reason)
         assert "_ffa_record_and_refuse" in src[max(0, i - 400):i], reason
     # The bare _quarantine_report call, whose answer nobody read, is gone from
     # this endpoint entirely.

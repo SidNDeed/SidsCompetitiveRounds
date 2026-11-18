@@ -1816,7 +1816,13 @@ def test_the_helper_closure_stays_affordable():
     # router and EVIDENCE_ROOT), and +2 the route does run, the admin_evidence
     # health word and its route tuple (the four report endpoints held as
     # values, not walked). Inside 596, so the bound stays.
-    assert code_worst <= 596, f"worst code closure {code_worst} of {total}"
+    # QAPPLY-1 (2026-11-18), on the base a82771f8: the worst is GET
+    # /api/v1/health at 597 (596 at the base), +1 by name, main's
+    # _QAPPLY_BUILD (the health word the route runs); no other code binding
+    # of that closure is new. The bound moves to 627, ~5% over the
+    # measurement, for that reason and no other. The other five bounds hold
+    # (code 86 / 219, whole 239 / 423 / 860 over 440 routes).
+    assert code_worst <= 627, f"worst code closure {code_worst} of {total}"
 
     # Imports are counted separately rather than folded in or waved through.
     # They roughly triple the closure -- measured 69 / 119 / 308 -- and that is

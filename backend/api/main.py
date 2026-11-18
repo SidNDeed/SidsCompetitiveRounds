@@ -69215,9 +69215,9 @@ async def _ffa_record_and_refuse(db: AsyncSession, *, report, lobby_uuid, id_by_
     the reporter is told that its account is not the one that was there.
 
     EVERY ANSWER GETS EXACTLY ONE DISPOSITION, AND THE TWO ARMS ARE DISJOINT BY
-    CONSTRUCTION. This helper has exactly two `raise` statements, and the side
-    of the re-derivation each one sits on IS the rule: the capture-failure arm
-    above it, and ONE terminal arm below it.
+    CONSTRUCTION. Past the replay guard at its top (QAPPLY-1, below), this
+    helper has two `raise` statements, and the side of the re-derivation each
+    sits on IS the rule: the capture-failure arm above it, ONE terminal below.
 
     THE TERMINAL ARM IS ONE STATEMENT ANSWERING TWO STATUSES — 409 for a
     lifecycle refusal, 403 for the signature downgrade — so "the two terminal
@@ -75390,7 +75390,7 @@ async def _qapply_credit(db, row, report, *, actor: str, note: str) -> dict:
         points_to_win_round=FFA_POINTS_TO_WIN_ROUND, read_absent=True)
     excluded = ghosts
     reasons = {p.steam_id: set() for p in report.players}
-    game_no = tail if (tail is not None and 1 <= int(tail) <= 999) else expected
+    game_no = named if named is not None else expected
     if lobby.get("assembly_v1"):
         excluded = await _asm_report_rules(
             db, lobby=lobby, lobby_uuid=lobby_uuid, g=game_no, report=report,
