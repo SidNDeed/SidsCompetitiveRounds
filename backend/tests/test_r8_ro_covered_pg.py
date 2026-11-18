@@ -1428,7 +1428,9 @@ def test_census_complete_layer_frozen_whole():
     one coarse form of the B10 merge (B10_MERGE_FROZEN, frozen by hand), plus
     the one coarse form of migration 415's change (MAIL_SEND_RECEIPTS_FROZEN,
     frozen by hand), plus the four coarse forms of migration 416's change
-    (LOBBY_INVITES_FROZEN, frozen by hand), plus the complete layer."""
+    (LOBBY_INVITES_FROZEN, frozen by hand), plus the five coarse forms of
+    the moderator log's change (MODLOG_FROZEN, frozen by hand), plus the
+    complete layer, which also holds that block's two complete forms."""
     import ro_census
     import ro_census_frozen as fz
     import test_r7_ro_role_pg as r7
@@ -1440,9 +1442,34 @@ def test_census_complete_layer_frozen_whole():
     # freeze lists only the files with a coarse form
     assert complete == {k + ro_census.COMPLETE for k in r7.CENSUS_FILES}
     assert coarse <= set(r7.CENSUS_FILES)
+    # The hand-frozen blocks that hold forms of BOTH layers, one row per lane:
+    # (the block, its count, its coarse forms, its complete forms). Each row's
+    # part is a term of its own in the three sums below.
+    BOTH_LAYER_BLOCKS = [
+        (fz.MODLOG_FROZEN, fz.MODLOG_COUNT, 5, 2),
+    ]
+    for block, count, n_coarse, n_complete in BOTH_LAYER_BLOCKS:
+        b_coarse = {k: v for k, v in block.items() if not k.endswith(ro_census.COMPLETE)}
+        b_complete = {k: v for k, v in block.items() if k.endswith(ro_census.COMPLETE)}
+        assert sum(len(v) for v in b_coarse.values()) == n_coarse
+        assert sum(len(v) for v in b_complete.values()) == n_complete
+        assert n_coarse + n_complete == count
+        assert set(b_coarse) <= coarse
+        assert set(b_complete) <= complete
+    rows_coarse = sum(row[2] for row in BOTH_LAYER_BLOCKS)
+    rows_complete = sum(row[3] for row in BOTH_LAYER_BLOCKS)
+    rows_count = sum(row[1] for row in BOTH_LAYER_BLOCKS)
+    # the moderator log (MODLOG-1): dsntext and opener forms in the coarse
+    # layer, ref forms in the complete layer
+    assert {f[0] for k, v in fz.MODLOG_FROZEN.items()
+            if not k.endswith(ro_census.COMPLETE) for f in v} == {"dsntext", "opener"}
+    assert {f[0] for k, v in fz.MODLOG_FROZEN.items()
+            if k.endswith(ro_census.COMPLETE) for f in v} == {"ref"}
+    assert fz.MODLOG_COUNT == 7
     assert sum(len(fz.FROZEN[k]) for k in coarse) == (fz.COARSE_COUNT + fz.B10_MERGE_COUNT
                                                       + fz.MAIL_SEND_RECEIPTS_COUNT
-                                                      + fz.LOBBY_INVITES_COUNT) == 371
+                                                      + fz.LOBBY_INVITES_COUNT
+                                                      + rows_coarse) == 371 + rows_coarse
     assert fz.COARSE_COUNT == 365
     # migration 416's change: four hand-frozen coarse kwarg forms in main.py
     # (the invite cores' explicit password=None on the four request models)
@@ -1472,11 +1499,12 @@ def test_census_complete_layer_frozen_whole():
     assert sum(len(v) for v in fz.R11_OPEN_FROZEN.values()) == fz.R11_OPEN_COUNT
     assert sum(len(fz.FROZEN[k]) for k in complete) == (fz.COMPLETE_COUNT + fz.R10_COUNT
                                                         + fz.R10_MERGE_COUNT
-                                                        + fz.R11_ID_COUNT + fz.R11_OPEN_COUNT)
+                                                        + fz.R11_ID_COUNT + fz.R11_OPEN_COUNT
+                                                        + rows_complete)
     assert fz.FROZEN_COUNT == (fz.COARSE_COUNT + fz.COMPLETE_COUNT + fz.R10_COUNT
                                + fz.R10_MERGE_COUNT + fz.R11_ID_COUNT + fz.R11_OPEN_COUNT
                                + fz.B10_MERGE_COUNT + fz.MAIL_SEND_RECEIPTS_COUNT
-                               + fz.LOBBY_INVITES_COUNT) == 860
+                               + fz.LOBBY_INVITES_COUNT + rows_count) == 860 + rows_count
     assert not [f for k in complete for f in fz.FROZEN[k] if f[0] == "refuse"]
     assert {f[0] for k in complete for f in fz.R10_FROZEN[k]} <= set(R10_KINDS)
     # the declared forwarding wrapper is bound whole, exactly once
