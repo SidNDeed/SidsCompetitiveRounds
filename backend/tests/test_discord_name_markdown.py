@@ -55,7 +55,13 @@ NAME_ATTR = {"display_name", "global_name", "nick", "name"}
 EXTRA_ATTR = {"name_a", "name_b", "t1_label", "t2_label", "side_label", "vs_name", "target_label"}
 # The escapes. The four after escape_markdown are this file's own wrappers of
 # discord.utils.escape_markdown; a value through any of them is literal.
-SAFE = {"_escape_md", "escape_markdown", "_md_name", "_pc_name", "_game_embed_plain", "_board_name"}
+# _qdig_md is the held-report digest's escape (QDIG-1): one line, cut to a
+# limit, URL schemes made inert, and every character of QDIG_MD_CHARS after a
+# backslash -- a superset of what _escape_md escapes, shown by
+# test_the_digest_escape_covers_every_character_escape_md_escapes. The body of
+# an escape is where a name is made literal, so it is not read as a site.
+SAFE = {"_escape_md", "escape_markdown", "_md_name", "_pc_name", "_game_embed_plain", "_board_name",
+        "_qdig_md"}
 MSG_KW = {"content", "description", "value", "title", "name", "text", "label", "placeholder"}
 MSG_CALLS = {"send", "reply", "edit", "send_message", "edit_message", "Embed", "add_field", "set_author",
              "set_footer", "respond", "edit_original_response", "Button", "SelectOption", "TextInput",
@@ -94,7 +100,10 @@ class _Census:
     comprehension); a parameter some call site passes such a value to, or one
     named in EXTRA_ATTR; or the result of a function that returns one. A call
     to a class is not followed into its __init__. A value through an escape in SAFE
-    carries nothing. Sites inside print() are logs and are not counted."""
+    carries nothing, and nothing inside the body of an escape in SAFE is a
+    site: the escape's parameter is a name by design, and its body is where
+    that name is made literal. Sites inside print() are logs and are not
+    counted."""
 
     def __init__(self, text):
         self.text = text
@@ -277,6 +286,11 @@ class _Census:
                 return False
         return False
 
+    def in_escape(self, node):
+        """True inside the body of a function named in SAFE (at any depth)."""
+        return any(isinstance(p, (ast.FunctionDef, ast.AsyncFunctionDef)) and p.name in SAFE
+                   for p in self.parents(node))
+
     def sites(self):
         out = []
         for node in ast.walk(self.tree):
@@ -314,7 +328,7 @@ class _Census:
                         if self.carries(a, t):
                             found.append(("K", node, a))
             for kind, where, expr in found:
-                if self.in_print(where):
+                if self.in_print(where) or self.in_escape(where):
                     continue
                 out.append((fn.name if fn else "<module>", self.seg(expr), kind, where.lineno))
         return sorted(out, key=lambda s: (s[3], s[1]))
@@ -398,18 +412,58 @@ _UNWRAPS = (
     ("cmd_graph", '", ".join(_escape_md(n) for n in not_linked)', '", ".join(not_linked)', "not_linked"),
 )
 
+# One unwrap of the held-report digest's escape _qdig_md (QDIG-1). Of its call
+# sites, the one whose argument is a player's name is _qdig_esc's (the others
+# take a yes/no word or a server sentence, which the census does not count as
+# names). Unwrapped, _qdig_esc returns the raw name, and the census reports
+# each place the digest puts that return into text: (escaped, raw, the sites).
+_QDIG_UNWRAP = (
+    'return _qdig_md(name, QDIG_NAME_MAX) or "unknown player"',
+    'return name or "unknown player"',
+    {("_qdig_diff_line", "_qdig_esc(d.get('player'))"),
+     ("_qdig_entry", '(_qdig_esc(n) for n in s.get("players") or [])'),
+     ("_qdig_entry", "_qdig_esc(p.get('name'))"),
+     ("_qdig_entry", "reporters[:QDIG_ENTRY_REPORTERS]")},
+)
 
-def test_the_census_finds_an_unescaped_name_of_each_kind():
+
+def test_the_census_finds_an_unescaped_name_of_each_kind(census_sites):
     """The census's own negative control: the same file with one escape
-    removed at an f-string, a %-format, a concatenation and a join. Each
-    unescaped site is reported, and nothing else is."""
+    removed at an f-string, a %-format, a concatenation and a join, and the
+    digest's _qdig_md removed from _qdig_esc. Each unescaped site is
+    reported, and nothing else is. Its twin, the file as it stands, reports
+    nothing, so every site reported below is a planted one (and the body of
+    _qdig_md, which the plant leaves without a name argument, is checked on
+    the twin)."""
+    assert _unexpected(census_sites) == ({}, {}), _unexpected(census_sites)
     text = TEXT
-    for _fn, escaped, raw, _expr in _UNWRAPS:
+    qdig_escaped, qdig_raw, qdig_sites = _QDIG_UNWRAP
+    for escaped, raw in [(e, r) for _fn, e, r, _expr in _UNWRAPS] + [(qdig_escaped, qdig_raw)]:
         assert text.count(escaped) == 1, escaped
         text = text.replace(escaped, raw)
     extra, stale = _unexpected(_Census(text).sites())
-    assert set(extra) == {(fn, expr) for fn, _e, _r, expr in _UNWRAPS}, extra
+    assert set(extra) == {(fn, expr) for fn, _e, _r, expr in _UNWRAPS} | qdig_sites, extra
     assert not stale
+
+
+def test_the_digest_escape_covers_every_character_escape_md_escapes():
+    """_qdig_md is in SAFE because it escapes at least what _escape_md
+    escapes. Both functions run here, lifted from the bot, on every BMP
+    character set between two letters (so _escape_md's line-start rule does
+    not apply): the characters each puts a backslash before are computed,
+    not listed. A control drops one character from QDIG_MD_CHARS and the
+    check must fail."""
+    ns = _lift(funcs=("_escape_md", "_qdig_md"), assigns=("QDIG_MD_CHARS",))
+
+    def escaped_by(fn):
+        return {c for c in map(chr, range(0x10000)) if fn("a" + c + "a") == "a\\" + c + "a"}
+
+    md = escaped_by(ns["_escape_md"])
+    qdig = escaped_by(lambda s: ns["_qdig_md"](s, 100))
+    assert md and md <= qdig, sorted(md - qdig)
+    dropped = sorted(md)[0]
+    ns["QDIG_MD_CHARS"] = ns["QDIG_MD_CHARS"].replace(dropped, "")
+    assert not md <= escaped_by(lambda s: ns["_qdig_md"](s, 100)), dropped
 
 
 # -- renderers, executed -------------------------------------------------------

@@ -163,7 +163,7 @@ V1_BUILD = ('    async def build(r):\n'
 V2_BUILD = ('    async def build(r):\n'
             '        return _triage_group_view(mode, gid, r)\n')
 D1_BUILD = ('    async def build(r):\n'
-            '        resp = {"hw": _triage_iso(r["hw"]), "page_size": _TRIAGE_D1_PAGE,\n')
+            '        resp = {"hw": _triage_iso(r["hw"]), "page_size": _TRIAGE_D1_PAGE, "qdig": QDIG_FEED_FORM,\n')
 BEFORE_HANDLE_CLASS = 'class _TriageReadBudgetSpent(Exception):\n'
 ROUND_LOOP = ('    for n, (content, mkeys) in enumerate(_qdigest_messages(lines, keys, header)):\n'
               '        if not await _qdigest_send(channel, content):\n'
@@ -908,6 +908,10 @@ CLS_BODY_BEFORE_C2 = ('    cur, seen = exc, set()\n'
                       '            return s if s in ("57014", "55P03", "25P03") or s.startswith("08") else None\n'
                       '        cur = getattr(cur, "orig", None) or cur.__cause__\n'
                       '    return None\n')
+# The walk's lines stand in other functions of main.py as well; the line above
+# the walk, which _triage_ended_early alone holds, keeps each plant on it.
+CLS_HEAD = '    gone, lost, stopped = None, False, None\n'
+CLS_WALK = CLS_HEAD + '    while todo:\n        cur = todo.pop(0)\n'
 mutant("K22-classifier-before-c2", "K22",
        "the classifier's body as before C2: the first link carrying any SQLSTATE decides, reached through .orig"
        " or __cause__ only, so a closed connection that carries no SQLSTATE is re-raised (500)",
@@ -915,7 +919,7 @@ mutant("K22-classifier-before-c2", "K22",
        [K22N("yielding", r) for r in ROUTES3])
 twin("K22-twin-walk-as-a-for-loop", "K22",
      "the same breadth-first walk written as a for loop over the growing list",
-     [(MAIN, "    while todo:\n        cur = todo.pop(0)\n", "    for cur in todo:\n")],
+     [(MAIN, CLS_WALK, CLS_HEAD + "    for cur in todo:\n")],
      [K22N("yielding", r) for r in ROUTES3])
 
 EDGES = '        todo.extend((getattr(cur, "orig", None), cur.__cause__, cur.__context__))\n'
@@ -994,9 +998,10 @@ twin("K23-twin-foreign-state-walked-past", "K23", "the same test on a foreign SQ
 GUARD = '        if not isinstance(cur, BaseException) or id(cur) in seen:\n'
 mutant("K23-only-none-skipped", "K23",
        "only None is skipped, so a value that is not an exception is walked and the walk itself raises",
-       [(MAIN, GUARD, '        if cur is None or id(cur) in seen:\n')], [K23B("not-an-exception")])
+       [(MAIN, CLS_WALK + GUARD, CLS_WALK + '        if cur is None or id(cur) in seen:\n')],
+       [K23B("not-an-exception")])
 twin("K23-twin-guard-with-a-class-tuple", "K23", "the guard written with a one-class tuple",
-     [(MAIN, GUARD, '        if not isinstance(cur, (BaseException,)) or id(cur) in seen:\n')],
+     [(MAIN, CLS_WALK + GUARD, CLS_WALK + '        if not isinstance(cur, (BaseException,)) or id(cur) in seen:\n')],
      [K23B("not-an-exception")])
 
 ORDER = '    if gone:\n        return gone\n    if lost:\n        return "08003"\n    return stopped\n'

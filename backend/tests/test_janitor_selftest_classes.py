@@ -85,6 +85,16 @@ OPTOUT = os.environ.get(OPTOUT_VAR) == "1"
 SQL_DIR = os.path.join(HERE, "..", "sql")
 PROBE_SEQ = "janitor_selftest_probe_seq"
 TRADE_STEP = "_pc_trade_janitor_step"
+QDIG_PASS = "_qdig_janitor_pass"
+# Every session statement of the live inventory, in harvest order, as
+# (func, first eighty characters): the full self-test executes and rolls
+# back each one, and names each in its report.
+SESSION_STATEMENTS = [
+    (TRADE_STEP, "SET LOCAL lock_timeout = '2s'"),
+    (QDIG_PASS, "SET LOCAL statement_timeout = '3s'"),
+    (QDIG_PASS, "SET LOCAL statement_timeout = '3s'"),
+    (QDIG_PASS, "SET LOCAL statement_timeout = '3s'"),
+]
 
 
 def _run(coro):
@@ -902,16 +912,28 @@ def test_pg_the_full_self_test_is_green_with_the_trading_schema(lane, monkeypatc
     assert counts["statements"] == len(inv["statements"]), counts
     assert counts["explained_ok"] == by_class["explain"], (counts, by_class)
     assert counts["failed"] == 0 and counts["unchecked"] == 0, counts
-    # Every older key keeps its meaning; the executed statement is counted
-    # apart, and each statement has its row, in harvest order.
-    assert counts["executed_rolled_back"] == by_class["session"] == 1, (counts, by_class)
+    # Every older key keeps its meaning; each executed statement is counted
+    # apart, and each statement has its row, in harvest order. The session
+    # statements are named one by one: the trading step's lock timeout and
+    # the held-report pass's three statement timeouts.
+    assert counts["executed_rolled_back"] == by_class["session"] == 4, (counts, by_class)
     assert counts["unclassified"] == 0 and "unclassified" not in by_class, counts
     assert counts["explained_ok"] + counts["executed_rolled_back"] == counts["statements"]
     rows = report["outcomes"]
     assert [(o["module"], o["func"], o["line"]) for o in rows] == [
         (s["module"], s["func"], s["line"]) for s in inv["statements"]]
     assert {o["outcome"] for o in rows if o["class"] == "explain"} == {"explained"}
-    (trade,) = [o for o in rows if o["outcome"] == "executed_rolled_back"]
+    assert [(o["func"], o["sql80"]) for o in rows
+            if o["class"] == "session"] == SESSION_STATEMENTS, rows
+    executed = [o for o in rows if o["outcome"] == "executed_rolled_back"]
+    assert [(o["func"], o["sql80"]) for o in executed] == SESSION_STATEMENTS, executed
+    lane_rows = [o for o in rows if o["func"] == QDIG_PASS
+                 and o["sql80"] == "SET LOCAL statement_timeout = '3s'"]
+    assert len(lane_rows) == 3, lane_rows
+    for o in lane_rows:
+        assert (o["class"], o["keyword"], o["outcome"]) == (
+            "session", "SET", "executed_rolled_back"), o
+    (trade,) = [o for o in executed if o["func"] == TRADE_STEP]
     want = _trade_session_statement()
     assert (trade["func"], trade["line"], trade["class"], trade["keyword"]) == (
         TRADE_STEP, want["line"], "session", "SET"), trade

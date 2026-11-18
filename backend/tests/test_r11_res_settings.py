@@ -16,7 +16,7 @@ sweep of every production statement that sets a setting, and, on the
 cluster CF_TEST_PG_DSN names (never skipped), the pg_settings answer itself,
 the GREEN control (a transaction-local set_config inside an ended
 transaction leaves nothing) and its session-scope counterpart. The driver
-controls (the report's case at main.py:17772 and one control per route) are
+controls (the report's case at main.py:17832 and one control per route) are
 in test_r8_ro_covered_pg.py.
 """
 
@@ -163,9 +163,27 @@ def test_r11_res_sweep_production_settings_statements():
     # settings statement, main._EVC_SETTINGS_SQL, three set_config calls with
     # is_local the literal true and literal names; synchronous_commit has a
     # pg_settings row, so the existing pg_settings reading measures it.
+    # Judged since 5b18949a, +3 (QDIG-1, 2026-11-17): the three statements
+    # SET LOCAL statement_timeout = '3s' in main._qdig_janitor_pass, before
+    # the candidate page read, before each candidate's lock, classify and
+    # file, and before the census read. Each is the first statement of the
+    # transaction the session's autobegin opens after the previous commit or
+    # rollback, and no commit stands between it and the statements it bounds;
+    # statement_timeout is a literal name with a pg_settings row. The count
+    # moves from 17 to 20 for these three and no other reason; a lane that
+    # lands later takes the incoming count at its merge and measures again.
+    # Judged, +3 (MODLOG-1, measured at its merge of main ac07e3e5): the
+    # moderator log's read sets one text, SET LOCAL statement_timeout = '5s',
+    # in main.admin_modlog and main.internal_modlog (each route's first
+    # statement, which begins the request's transaction) and in
+    # main._modlog_answer (inside that transaction, ahead of the statements it
+    # bounds); get_db never commits and both routes hold no commit, so the
+    # setting bounds every later statement of the read; statement_timeout is
+    # a literal name with a pg_settings row. The count moves from main's 20 to
+    # 23 for these three and no other reason.
     assert names == {"lock_timeout", "statement_timeout",
                      "idle_in_transaction_session_timeout", "synchronous_commit"}, names
-    assert len(got) == 17, got
+    assert len(got) == 23, got
     assert [sql for _w, sql in got if "synchronous_commit" in sql] == [
         "SELECT set_config('lock_timeout', '2s', true), "
         "set_config('statement_timeout', '10s', true), "

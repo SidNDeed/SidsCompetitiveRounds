@@ -13,6 +13,7 @@ The admin portrait clear's target is tested in test_pc_routes.py; the Discord de
 admin-actions action filter in test_chat_mute_target.py. The routes are called directly, with the database
 scripted and the admin check stubbed."""
 import asyncio
+import json
 from datetime import datetime, timezone
 from types import SimpleNamespace
 from uuid import UUID
@@ -31,6 +32,7 @@ MATCH = UUID("5f1c2b9e-8d3a-4c71-9e0b-2a6d4f8c1e37")
 P1, P2 = UUID("0b6e6f55-3a53-4f0e-8f55-7d1f6c3a9b21"), UUID("7c2d9a41-51b8-4e3c-a0d4-93e6f1b27c58")
 FLAG = UUID("3e9b7c1a-6d24-4f8b-9a15-c7e0d2b4f613")
 QID = UUID("a47c3e2b-19d5-4b6a-8e70-5f2c9d1b3e84")
+EXCLUSION_ID = UUID("c1d84e2f-7a36-4b59-9e02-6f3b8a1d5c47")
 # strings that are not UUIDs: empty, words, one hex digit short or over, a UUID's text followed by a NUL character,
 # a UUID's text with a lone surrogate in its last place, and the strings no text bind can carry
 NOT_UUIDS = ("", "not-a-uuid", "1234", str(FLAG)[:-1], str(FLAG) + "0", str(FLAG) + "\x00", str(FLAG)[:-1] + "\ud800",
@@ -53,6 +55,11 @@ class _Res:
     def first(self):
         return self._rows[0] if self._rows else None
 
+    def scalar(self):
+        """The first column of the first row, or None (the exclusion's insert reads its RETURNING id so)."""
+        row = self.first()
+        return None if row is None else row[0]
+
 
 class _Nested:
     async def __aenter__(self):
@@ -64,8 +71,8 @@ class _Nested:
 
 class _Db:
     """Logs every statement as normalised SQL with a copy of its binds. Answers the record exclusion's reads (the
-    match, P1 and P2 in its seats; the player P1) and the quarantine's row read (`row`); every other statement
-    reports `rowcount` rows."""
+    match, P1 and P2 in its seats; the player P1), its insert (the stored row's id EXCLUSION_ID, none when
+    `rowcount` is 0) and the quarantine's row read (`row`); every other statement reports `rowcount` rows."""
 
     def __init__(self, row=None, rowcount=1):
         self.log, self.committed, self.row, self.rowcount = [], 0, row, rowcount
@@ -79,6 +86,12 @@ class _Db:
             return _Res([(P1,)])
         if sql.startswith("SELECT player_ids, created_at, status, mode FROM match_report_quarantine"):
             return _Res([self.row] if self.row else [])
+        if sql.startswith("INSERT INTO record_exclusions") and sql.endswith("RETURNING id"):
+            # the exclusion's insert returns the id of the row it stored, none when one stood (MODLOG-1 K1)
+            return _Res([(EXCLUSION_ID,)] if self.rowcount else [])
+        if sql.startswith("UPDATE match_report_quarantine") and "RETURNING player_ids, mode" in sql:
+            # the discard's UPDATE returns the row it changed (MODLOG-1)
+            return _Res([{"player_ids": [], "mode": "1v1"}] if self.rowcount else [])
         return _Res(rowcount=self.rowcount)
 
     def begin_nested(self):
@@ -96,9 +109,13 @@ class _FlagDb:
 
     def __init__(self, fm=None):
         self.statements, self.added, self.committed, self.fm = [], [], 0, fm
+        self.records = []
 
     async def execute(self, statement, params=None):
         self.statements.append(statement)
+        if "INSERT INTO admin_actions" in str(statement):
+            # the moderator log's one record (MODLOG-1, _modlog_write)
+            self.records.append(dict(params or {}))
         return SimpleNamespace(scalar_one_or_none=lambda: self.fm)
 
     def add(self, row):
@@ -192,12 +209,13 @@ def test_the_flag_review_parses_the_flags_id_before_the_admin_check_and_reads_by
         assert len(db.statements) == 1 and _bound(db.statements[0]) == [FLAG], (sent, db.statements)
         assert type(_bound(db.statements[0])[0]) is UUID, sent
         fm = SimpleNamespace(discord_evidence_revision=1, reviewed_at=None, reviewed_by_steam_id=None,
-                             review_action=None, auto_invalidated=False, restoration_required=False, match_id=MATCH)
+                             review_action=None, auto_invalidated=False, restoration_required=False, match_id=MATCH,
+                             player_steam_ids=[])
         db = _FlagDb(fm)
         ans = asyncio.run(main.admin_review_flag(_review(sent), db=db))
         assert ans == {"status": "reviewed", "flag_id": sent, "review_action": "false_positive",
                        "restoration_required": False}, ans
-        assert [row.details["flag_id"] for row in db.added] == [sent] and db.committed == 1, (sent, db.added)
+        assert [json.loads(r["d"])["flag_id"] for r in db.records] == [sent] and db.committed == 1, (sent, db.records)
 
 
 def test_the_flag_restoration_parses_the_flags_id_before_the_admin_check_and_reads_by_the_parsed_uuid(monkeypatch):
@@ -220,11 +238,11 @@ def test_the_flag_restoration_parses_the_flags_id_before_the_admin_check_and_rea
         assert len(db.statements) == 1 and _bound(db.statements[0]) == [FLAG], (sent, db.statements)
         assert type(_bound(db.statements[0])[0]) is UUID, sent
         fm = SimpleNamespace(review_action="false_positive", reviewed_at=datetime(2026, 9, 15, tzinfo=timezone.utc),
-                             restoration_required=True, match_id=MATCH)
+                             restoration_required=True, match_id=MATCH, player_steam_ids=[])
         db = _FlagDb(fm)
         ans = asyncio.run(main.admin_resolve_flag_restoration(req(sent), db=db))
         assert ans == {"status": "restoration_completed", "flag_id": sent}, ans
-        assert [row.details for row in db.added] == [{"flag_id": sent}] and db.committed == 1, (sent, db.added)
+        assert [json.loads(r["d"]) for r in db.records] == [{"flag_id": sent}] and db.committed == 1, (sent, db.records)
 
 
 # ── the quarantine discard and accept ────────────────────────────────────────

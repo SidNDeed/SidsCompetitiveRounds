@@ -322,6 +322,7 @@ ADMIN_SIGNED: frozenset = frozenset({
     "/api/v1/admin/flagged-matches",
     "/api/v1/admin/i18n/grants/list",
     "/api/v1/admin/moderation-cases",
+    "/api/v1/admin/modlog",
     "/api/v1/admin/pc/trades",
     "/api/v1/admin/quarantine",
     "/api/v1/admin/quarantine/triage",

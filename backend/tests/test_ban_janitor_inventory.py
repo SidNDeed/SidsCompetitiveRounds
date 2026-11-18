@@ -24,6 +24,16 @@ _pc_take_snapshot, _pc_trade_janitor_step and four tournaments sites
 (_player_id_banned, _eligible_entrant_ids, _eligible_slot_tallies,
 _queue_availability_notices) were dynamic, the first two through the
 evaluator's depth bound and the rest through the call itself.
+
+Stacked on the mail spam case lock lane (claude/mscl-1116), the tree reads
+371 and 0: that lane adds eleven janitor statements (_mail_case_scrub_reporters
+1, _mail_case_scrub_resolvers 3, _mail_purge_due 7) and _mail_retention_sweep
+goes from 4 to 3, as main._janitor_sql_from_sources measures both trees.
+
+With QDIG-1 merged on that stack, the tree reads 382 and 0: QDIG-1's janitor
+pass adds eleven statements (_qdig_janitor_pass 7, _qdig_load 4), every one a
+module constant or literal, and no other function's count moves, as
+main._janitor_sql_from_sources measures this tree and the stack's.
 """
 import asyncio
 import os
@@ -39,7 +49,7 @@ sys.path.insert(0, os.path.normpath(os.path.join(HERE, "..", "api")))
 import main  # noqa: E402
 import models  # noqa: E402
 
-STATEMENTS, DYNAMIC = 361, 0
+STATEMENTS, DYNAMIC = 382, 0   # 371 before QDIG-1 (see the module docstring)
 ROOT = (("main", "root"),)
 DEF = re.compile(r"\((\w+)\.unbanned_at IS NULL AND \(\1\.expires_at IS NULL OR \1\.expires_at > NOW\(\)\)\)")
 # the sites that were dynamic on 88a0a2bf, and the alias each one's definition call names
