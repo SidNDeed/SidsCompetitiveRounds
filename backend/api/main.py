@@ -22217,7 +22217,8 @@ async def queue_decline(req: QueueDeclineRequest, request: Request, db: AsyncSes
     points back at the caller (v1.40.1: the partner write is SQL-conditional).
     """
     # A8: session enforcement — HMAC alone is forgeable by anyone with the DLL secret.
-    await _check_steam_session(request, req.steam_id, db)
+    # An exit of BAN-R17 (the 1v1 decline): open to an actively banned caller.
+    await _check_steam_session(request, req.steam_id, db, banned_ok=True)
     p1_result = await db.execute(select(Player).where(Player.steam_id == req.steam_id))
     p1 = p1_result.scalar_one_or_none()
     p2_result = await db.execute(select(Player).where(Player.steam_id == req.opponent_steam_id))

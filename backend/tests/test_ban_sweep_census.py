@@ -90,6 +90,69 @@ def test_the_banned_ok_callers_are_exactly_the_listed_exits():
         assert why.strip(), key
 
 
+def _all_rows_and_funcs():
+    """Every live route, reads included (the exits' comparison must see a
+    route whatever its method), with the same function tables."""
+    rows = []
+    for (method, path), r in sorted(_live_routes().items()):
+        d = getattr(r, "dependant", None)
+        rows.append((method, path, r.endpoint.__module__, r.endpoint.__name__,
+                     _deps(d, []) if d is not None else []))
+    mods = {r[2] for r in rows} | {m for r in rows for m, _ in r[4]}
+    funcs = {}
+    for m in mods:
+        f = os.path.join(API, m + ".py")
+        if os.path.exists(f):
+            with open(f, encoding="utf-8") as fh:
+                tree = ast.parse(fh.read())
+            funcs[m] = {n.name: n for n in tree.body
+                        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
+    return rows, funcs
+
+
+def test_the_server_exits_equal_ban_r17_both_ways():
+    rows, funcs = _all_rows_and_funcs()
+    server, bad = B.server_exits(rows, funcs)
+    bad = bad + B.exits_vs_r17(server)
+    assert bad == [], "\n".join(bad)
+
+
+def test_negative_control_the_exits_comparison_names_both_directions():
+    rows, funcs = _all_rows_and_funcs()
+    server, _ = B.server_exits(rows, funcs)
+    r17 = dict(B.BAN_R17_EXITS)
+    r17.pop(("POST", "/api/v1/queue/leave"))
+    r17[("POST", "/api/v1/planted/leave")] = "planted"
+    bad = B.exits_vs_r17(server, r17)
+    assert any("planted/leave" in b and "not an exit of the server" in b for b in bad), bad
+    assert any("/queue/leave" in b and "not on BAN-R17's list" in b for b in bad), bad
+
+
+def test_mutant_the_decline_without_its_exemption_fails_the_comparison():
+    rows, funcs = _all_rows_and_funcs()
+    funcs = copy.deepcopy(funcs)
+    n = 0
+    for call in ast.walk(funcs["main"]["queue_decline"]):
+        if isinstance(call, ast.Call) and B._call_name(call)[0] == B.SOFT_CALL:
+            call.keywords = [k for k in call.keywords if k.arg != B.BANNED_OK_KW]
+            n += 1
+    assert n == 1
+    server, _ = B.server_exits(rows, funcs)
+    assert B.exits_vs_r17(server) == [
+        "('POST', '/api/v1/queue/decline'): on BAN-R17's list and not an exit of the server"]
+
+
+def test_negative_control_a_strict_exit_that_reads_a_ban_is_not_an_exit():
+    rows, funcs = _all_rows_and_funcs()
+    funcs = copy.deepcopy(funcs)
+    fn = funcs["main"]["spectate_leave"]
+    fn.body.insert(0, ast.parse("await _ban_gate_or_raise(db, req.steam_id, request)").body[0])
+    key = ("POST", "/api/v1/spectate/leave")
+    server, bad = B.server_exits(rows, funcs, {key: "planted"})
+    assert key not in server
+    assert any("reads a ban" in b for b in bad), bad
+
+
 def test_every_listed_route_has_a_reason():
     for table in (B.OPEN_ROUTES, B.INTERNAL_ONLY):
         for key, why in table.items():

@@ -70,11 +70,107 @@ BANNED_OK_KW = "banned_ok"
 BANNED_OK = {
     ("main", "queues_escape"): "the queue escape: removes the caller's own queue rows in every mode",
     ("main", "queue_leave"): "the 1v1 queue leave: removes the caller's own queue row",
+    ("main", "queue_decline"): (
+        "the 1v1 queue decline: the caller's own row and, only while it still points back at the"
+        " caller, the matched partner's row back to searching"),
     ("main", "team_queue_leave"): "the team queue leave (the assembly abandon uses it too): the caller's own row",
     ("main", "ovt_queue_leave"): "the 1v2 queue leave: the caller's own row",
     ("main", "ffa_queue_leave"): "the FFA queue leave: the caller's own row; a banned caller records no departure",
     ("main", "_lobby_leave_impl"): "the team and 1v2 lobby leave (both routes call it): the caller's own seat",
 }
+
+# BAN-R17's list, typed from RULINGS.md (ban-part2-design): the calls a locked
+# client may still send. "A locked client may still send its own leave, decline
+# and escape calls: the queue escape, the 1v1 queue leave and decline, the team
+# queue leave (the assembly abandon uses it too), the 1v2 queue leave, the FFA
+# queue leave, the lobby leave and the direct queue leave of each mode, and the
+# spectate leave." The server's exits (server_exits) must equal it both ways.
+BAN_R17_EXITS = {
+    ("POST", "/api/v1/queues/escape"): "the queue escape",
+    ("POST", "/api/v1/queue/leave"): "the 1v1 queue leave",
+    ("POST", "/api/v1/queue/decline"): "the 1v1 queue decline",
+    ("POST", "/api/v1/team/queue/leave"): "the team queue leave (the assembly abandon uses it too)",
+    ("POST", "/api/v1/ovt/queue/leave"): "the 1v2 queue leave",
+    ("POST", "/api/v1/ffa/queue/leave"): "the FFA queue leave",
+    ("POST", "/api/v1/team/lobby/leave"): "the 2v2 lobby leave",
+    ("POST", "/api/v1/ovt/lobby/leave"): "the 1v2 lobby leave",
+    ("POST", "/api/v1/spectate/leave"): "the spectate leave",
+}
+
+# Exits that keep the STRICT session requirement for everyone and read no ban:
+# a banned account that holds a session reaches them, nobody without one does.
+# server_exits counts one only while its handler reaches no ban read.
+STRICT_EXITS = {
+    ("POST", "/api/v1/spectate/leave"): (
+        "revokes the caller's own spectate lease and writes its drain tombstone; strict session, no ban read"),
+}
+
+# Every call that reads an account's ban for a refusal.
+BAN_READS = frozenset({
+    "_is_banned", "_ban_gate_or_raise", "_ban_gate_any_or_raise", "_check_ban_or_raise",
+    "_is_banned_via_session", "_active_ban_details",
+})
+
+
+def _calls_in(fn):
+    for n in ast.walk(fn):
+        if isinstance(n, ast.Call):
+            yield n, (n.func.id if isinstance(n.func, ast.Name) else (
+                n.func.attr if isinstance(n.func, ast.Attribute) else None))
+
+
+def reaches(funcs_by_module, module, name, pred, _seen=None):
+    """Whether module.name, or a function of its module it calls (at any
+    position), holds a call for which pred(call node, call name) is true."""
+    seen = set() if _seen is None else _seen
+    if (module, name) in seen:
+        return False
+    seen.add((module, name))
+    fn = funcs_by_module.get(module, {}).get(name)
+    if fn is None:
+        return False
+    local = funcs_by_module.get(module, {})
+    for call, cn in _calls_in(fn):
+        if cn is not None and pred(call, cn):
+            return True
+        if isinstance(call.func, ast.Name) and cn in local and reaches(funcs_by_module, module, cn, pred, seen):
+            return True
+    return False
+
+
+def _soft_ok_call(call, cn):
+    return cn == SOFT_CALL and any(
+        k.arg == BANNED_OK_KW and not (isinstance(k.value, ast.Constant) and k.value.value is False)
+        for k in call.keywords)
+
+
+def server_exits(rows, funcs_by_module, strict_exits=None):
+    """The routes a banned account may still call: every route whose handler or
+    dependency reaches the soft check with banned_ok, and every STRICT_EXITS
+    route whose handler reaches no ban read. Returns ({key}, [problems])."""
+    strict_exits = STRICT_EXITS if strict_exits is None else strict_exits
+    out, bad = set(), []
+    for method, path, module, name, deps in rows:
+        key = (method, path)
+        targets = [(module, name), *deps]
+        if any(reaches(funcs_by_module, m, n, _soft_ok_call) for m, n in targets):
+            out.add(key)
+        if key in strict_exits:
+            if any(reaches(funcs_by_module, m, n, lambda c, cn: cn in BAN_READS) for m, n in targets):
+                bad.append(f"{key}: a STRICT_EXITS route that reads a ban")
+            else:
+                out.add(key)
+    for key in sorted(set(strict_exits) - {(r[0], r[1]) for r in rows}):
+        bad.append(f"{key}: a STRICT_EXITS entry no route matches")
+    return out, bad
+
+
+def exits_vs_r17(server, r17=None):
+    """Both directions of BAN-R17's list against the server's exits."""
+    r17 = BAN_R17_EXITS if r17 is None else r17
+    return ([f"{k}: on BAN-R17's list and not an exit of the server" for k in sorted(set(r17) - set(server))]
+            + [f"{k}: an exit of the server and not on BAN-R17's list" for k in sorted(set(server) - set(r17))])
+
 
 # Conditional refusals the AST walk does not model, each held to the call it
 # names: (method, path) -> (class, (calls an `if` that refuses must test), why).
@@ -95,6 +191,9 @@ BY_HAND: dict = {
 # route matches fails the census, and so does a route classed otherwise.
 OPEN_ROUTES = {
     ("POST", "/api/v1/queue/leave"): "an exit (BAN-R4): removes the caller's own 1v1 queue row",
+    ("POST", "/api/v1/queue/decline"): (
+        "an exit (BAN-R17): the 1v1 decline; a mismatched pair writes nothing, and the ban removed"
+        " the account's queue row"),
     ("POST", "/api/v1/queues/escape"): "an exit (BAN-R4): removes the caller's own rows in every mode",
     ("POST", "/api/v1/team/queue/leave"): "an exit (BAN-R4): the caller's own 2v2 row",
     ("POST", "/api/v1/ovt/queue/leave"): "an exit (BAN-R4): the caller's own 1v2 row",
