@@ -8,8 +8,9 @@ route's own harness: unsigned reports, the steam session check a no-op).
 Held rows are made by the report route itself: a report of a lobby that was
 closed is captured by _ffa_record_and_refuse, as on a live server.
 
-QAPPLY_TEST_PG_DSN names the database (postgresql+asyncpg://...); unset, every
-live case FAILS by that name. QAPPLY_TEST_PG_OPTOUT=1 waives them deliberately.
+QAPPLY_TEST_PG_DSN names the database (postgresql+asyncpg://...), else the
+harness's own CF_TEST_PG_DSN (cf_pg.DSN) does; with neither, every live case
+FAILS by name. QAPPLY_TEST_PG_OPTOUT=1 waives them deliberately.
 The checks without a database (T1, W1, H1, the A8 census, L1's word) run
 regardless.
 
@@ -49,6 +50,9 @@ _DSN = (os.environ.get(DSN_VAR) or "").replace("postgresql+asyncpg://", "postgre
 if _DSN and not cf_pg.DSN:
     # cf_pg and cf_pool read cf_pg.DSN when a case is made.
     cf_pg.DSN = _DSN
+# The cases run on cf_pg's pooled schemas, so the harness's own database
+# serves them when this file's variable is unset (the seats export it).
+_DSN = _DSN or cf_pg.DSN
 
 # The lane's base: settlement as it stood before the awards helper (S1).
 LANE_BASE_COMMIT = "a82771f82db558332392f40518c87c43fbe3d6d9"

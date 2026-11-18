@@ -74875,15 +74875,15 @@ async def _quarantine_later_rated(db, mode: str, player_ids, since) -> tuple:
 
 
 async def _quarantine_later_rated_count(db, mode: str, player_ids, since) -> int:
-    """The accept gate's count (_quarantine_later_rated's first number), for
-    the accept route and the triage view's c1."""
+    """The count of later rated results (_quarantine_later_rated's first
+    number), for the triage view's c1."""
     return (await _quarantine_later_rated(db, mode, player_ids, since))[0]
 
 
 def _quarantine_accept_verdict(results: int, players: int) -> tuple:
     """(can_accept, the blocked reason in words) from _quarantine_later_rated.
-    The ONE computation the Admin list and the digest feed both call, so the
-    two can never say different things about one row."""
+    No production caller since QAPPLY-1: the Admin list and the digest feed
+    both read _qapply_verdict, so the two still say one thing per row."""
     if not results:
         return True, ""
     who = max(int(players or 0), 1)
@@ -74900,15 +74900,15 @@ def _quarantine_accept_verdict(results: int, players: int) -> tuple:
 #     participant has a later FFA result and every participant's FFA rating
 #     is as the last recorded game left it.
 #   * Credit pays each participant the XP and the gold that settlement would
-#     have paid (_ffa_game_awards), moves no rating, and is refused exactly
-#     when Accept could apply the row now.
+#     have paid (_ffa_game_awards), moves no rating, and is refused when the
+#     gate and the game number would both let Accept apply the row now.
 # Both serve only the words of _QAPPLY_SERVABLE_REASONS, refuse team rows and
 # readmission lobbies, and write their moderator record through
 # _modlog_write in the same transaction as their effects.
 #
-# THE LOCK ORDER of both actions: the held row (FOR UPDATE), the lobby (FOR
-# NO KEY UPDATE), the participants' players rows in str(id) order (FOR NO KEY
-# UPDATE), then their glicko_ratings_ffa rows in the same order (FOR UPDATE).
+# THE LOCK ORDER: the held row (FOR UPDATE), the lobby (FOR NO KEY UPDATE),
+# the participants' players rows in str(id) order (FOR NO KEY UPDATE), then,
+# under Accept only, their glicko_ratings_ffa rows in that order (FOR UPDATE).
 # Every other path that locks or writes a held row takes no lobby, player or
 # rating lock while holding it: the discard route and the janitor's filing
 # write the held row alone (the janitor with SKIP LOCKED); the triage and
