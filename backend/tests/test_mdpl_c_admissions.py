@@ -18,7 +18,12 @@ closed_walk.py (the integrator's rulings of 17 Nov 2026: 09:13:52Z, 10:05:30Z, 1
    - refused: a third main.py exception class; a twin class statement in another module; the class statement,
      the uses or the name row taken out of or changed in the frozen rows; a member added or replaced; the base
      class changed;
-   - the frozen lines and the frozen uses equal main's.
+   - the frozen lines and the frozen uses equal main's;
+   - every condition of the admission has its own plant (MDPL class C2), each breaking that one condition, each
+     refused by its whole sentence, the real class admitted again after it: a class made by a metaclass (a); an
+     object main does not bind to the name (b); the class under another qualified name (c); a member of the frozen
+     statement taken off (d); a member whose code differs in its first line alone (e), in its file alone (f), or a
+     function on the real code under another qualified name (g).
 5. r7's READ-ONLY CENSUS (the ruling of 11:01:25Z): the 22 forms of ro_census_frozen.MDPL_FROZEN.
    - main.py and closed_walk.py census clean against the freeze;
    - the freeze less the block flags exactly the block's 22 forms;
@@ -365,6 +370,12 @@ def _route(scope, name, namedtuples=None):
         return e.args[0][1], line
 
 
+# Without its name row a class takes the named-tuple route, which refuses main's whole module by its root shape
+# (_admitted_scope); measured, whole.
+OUTSIDE_THE_SCOPE = (": a shape outside the definition scope at main.py:0: <root>>Module(body=[AnnAssign|Assert|"
+                     "Assign|AsyncFunctionDef|ClassDef|Expr|FunctionDef|Import|ImportFrom|Try],type_ignores=[])")
+
+
 @pytest.mark.parametrize("name", SIGNALS)
 def test_the_signal_class_is_admitted_by_the_route(main_mod, name):
     got, line = _route(main_mod, name)
@@ -377,7 +388,7 @@ def test_a_third_main_exception_class_is_refused(main_mod):
     assert ("<signal class>", THIRD) not in gs.A1_NAMEDTUPLES
     got, line = _route(main_mod, THIRD)
     print("THIRD %s at main.py:%d: %s" % (THIRD, line, got))
-    assert isinstance(got, str) and got.startswith(THIRD + ": "), got
+    assert got == THIRD + OUTSIDE_THE_SCOPE, got
 
 
 def _text_of(name):
@@ -417,7 +428,7 @@ def _is_signal_row(name, kind):
 def test_the_name_row_is_what_admits(main_mod, name):
     got, _line = _route(main_mod, name, _rows_without(_is_signal_row(name, "name")))
     print("NAME ROW of %s out: %s" % (name, got))
-    assert isinstance(got, str) and got.startswith(name + ": ") and "frozen signal class" not in got, got
+    assert got == name + OUTSIDE_THE_SCOPE, got
 
 
 @pytest.mark.parametrize("name", SIGNALS)
@@ -474,6 +485,127 @@ def test_a_changed_base_is_refused(main_mod):
     assert got == "_DeletionPastDeadline: not a plain Exception subclass", got
     assert cls.__bases__ == (Exception,)
     assert _route(main_mod, "_DeletionPastDeadline")[0] is cls
+
+
+# MDPL class C2: one plant per condition of _signal_class (a to g, the integrator's order of 18 Nov 17:44:44Z, 3).
+# Each breaks that ONE condition and passes every other (a mutant of closed_walk.py that takes the condition out
+# admits the plant), asserts its whole sentence, restores what it changed, and the route admits the real class again.
+# The plants use _DeletionRowHeld, whose frozen statement defines one function, __init__.
+
+HELD = "_DeletionRowHeld"
+NOT_ITS_MODULES = HELD + ": not the class its module defines"
+NOT_ITS_STATEMENTS = HELD + ": its member __init__ is not its frozen statement's"
+
+
+def _like(cls, meta=type):
+    """A new class made by `meta` with cls's name, module, qualified name, docstring and bases, and cls's own
+    functions as its members: the plain mro, and in main the name's real class statement and uses."""
+    ns = {"__module__": cls.__module__, "__qualname__": cls.__qualname__, "__doc__": cls.__doc__}
+    ns.update((k, v) for k, v in vars(cls).items() if isinstance(v, types.FunctionType))
+    made = meta(cls.__name__, cls.__bases__, ns)
+    assert made is not cls and made.__mro__ == (made, Exception, BaseException, object)
+    assert made.__qualname__ == cls.__qualname__ == HELD and made.__module__ == "main"
+    own = {k: v for k, v in vars(cls).items() if k not in cw._SIGNAL_SET_ASIDE}
+    assert {k: v for k, v in vars(made).items() if k not in cw._SIGNAL_SET_ASIDE} == own == {
+        "__init__": vars(cls)["__init__"]}
+    return made
+
+
+# a. identity, no metaclass
+def test_a_class_made_by_a_metaclass_is_refused(monkeypatch, main_mod):
+    cls = getattr(main_mod, HELD)
+    meta = type("_MdplC2Meta", (type,), {})
+    made = _like(cls, meta)
+    assert type(made) is meta
+    with monkeypatch.context() as m:
+        m.setattr(main_mod, HELD, made)
+        got, _line = _route(main_mod, HELD)
+    print("METACLASS: %s" % (got,))
+    assert got == NOT_ITS_MODULES, got
+    assert getattr(main_mod, HELD) is cls
+    assert _route(main_mod, HELD)[0] is cls
+
+
+# b. identity, the module's own binding
+def test_an_object_its_module_does_not_bind_is_refused(main_mod):
+    cls = getattr(main_mod, HELD)
+    made = _like(cls)
+    assert type(made) is type and getattr(main_mod, HELD) is cls
+    scope = types.ModuleType("mdpl_c2_scope")
+    setattr(scope, HELD, made)
+    got, _line = _route(scope, HELD)
+    print("NOT MAIN'S BINDING: %s" % (got,))
+    assert got == NOT_ITS_MODULES, got
+    assert _route(main_mod, HELD)[0] is cls
+
+
+# c. identity, the qualified name
+def test_the_class_under_another_qualified_name_is_refused(main_mod):
+    # set and restored by hand: monkeypatch would restore a type slot by deleting it, which Python refuses
+    cls = getattr(main_mod, HELD)
+    assert cls.__qualname__ == HELD
+    cls.__qualname__ = "_MdplC2Outer." + HELD
+    try:
+        got, _line = _route(main_mod, HELD)
+    finally:
+        cls.__qualname__ = HELD
+    print("QUALNAME changed: %s" % (got,))
+    assert got == NOT_ITS_MODULES, got
+    assert cls.__qualname__ == HELD
+    assert _route(main_mod, HELD)[0] is cls
+
+
+# d. members, none missing
+def test_a_member_taken_off_is_missing(monkeypatch, main_mod):
+    cls = getattr(main_mod, HELD)
+    real = vars(cls)["__init__"]
+    with monkeypatch.context() as m:
+        m.delattr(cls, "__init__")
+        assert "__init__" not in vars(cls)
+        got, _line = _route(main_mod, HELD)
+    print("MEMBER taken off: %s" % (got,))
+    assert got == HELD + ": its member __init__ is missing", got
+    assert vars(cls)["__init__"] is real
+    assert _route(main_mod, HELD)[0] is cls
+
+
+def _function(fn, code=None, qualname=None):
+    """A new function on `code` (fn's own by default) with fn's globals, name, defaults and closure, under
+    `qualname` (fn's by default)."""
+    made = types.FunctionType(code or fn.__code__, fn.__globals__, fn.__name__, fn.__defaults__, fn.__closure__)
+    made.__qualname__ = qualname or fn.__qualname__
+    return made
+
+
+def _elsewhere(code):
+    return os.path.join(os.path.dirname(code.co_filename), "mdpl_c2_elsewhere.py")
+
+
+# e, f, g: a member that differs from the real one in ONE of the three things _signal_member compares
+MEMBER_PLANTS = {
+    "e-line": lambda fn: _function(fn, code=fn.__code__.replace(co_firstlineno=fn.__code__.co_firstlineno + 1)),
+    "f-file": lambda fn: _function(fn, code=fn.__code__.replace(co_filename=_elsewhere(fn.__code__))),
+    "g-qualname": lambda fn: _function(fn, qualname="_DeletionPastDeadline.__init__"),
+}
+
+
+@pytest.mark.parametrize("which", list(MEMBER_PLANTS))
+def test_a_member_differing_in_one_thing_is_refused(monkeypatch, main_mod, which):
+    cls = getattr(main_mod, HELD)
+    real = vars(cls)["__init__"]
+    made = MEMBER_PLANTS[which](real)
+    c, r = made.__code__, real.__code__
+    differ = [k for k, x, y in (("e-line", c.co_firstlineno, r.co_firstlineno),
+                                ("f-file", os.path.basename(c.co_filename), os.path.basename(r.co_filename)),
+                                ("g-qualname", made.__qualname__, real.__qualname__)) if x != y]
+    assert differ == [which], differ
+    with monkeypatch.context() as m:
+        m.setattr(cls, "__init__", made)
+        got, _line = _route(main_mod, HELD)
+    print("MEMBER %s: %s" % (which, got))
+    assert got == NOT_ITS_STATEMENTS, got
+    assert vars(cls)["__init__"] is real
+    assert _route(main_mod, HELD)[0] is cls
 
 
 def test_the_frozen_lines_and_uses_are_mains(main_mod):

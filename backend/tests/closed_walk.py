@@ -566,7 +566,7 @@ def _signal_class(b, name, obj, line):
 def _signal_identity(home, name, obj):
     """Whether `obj` is a class, without a metaclass, that its own module
     `home` binds to `name`, its qualified name the plain one."""
-    if not isinstance(obj, type):
+    if not isinstance(obj, type):  # not reached by the route: namedtuple_class returns first
         return False
     if type(obj) is not type:
         return False
