@@ -19,10 +19,11 @@ local server, and the module skips unless its DSN is set:
     BINDER_SORT_TEST_PG_DSN="postgresql+asyncpg://postgres@127.0.0.1:55432/item20test" \\
         python -m pytest tests/test_binder_rating_sort.py -q
 
-Build that database first -- it needs the real schema, both halves of it
-(backend/sql for pc_*, models.py for matches/ranked_series). Set
-BINDER_SORT_TESTS_REQUIRED=1 to turn "no DSN" into a hard failure rather than
-a skip, so a verification run cannot pass by collecting nothing.
+The database may be EMPTY: the module builds every relation it needs in a
+schema of its own, made for the run and torn down after it, or refused and
+left standing (see "the schema this module builds" below). Set BINDER_SORT_TESTS_REQUIRED=1 to turn "no DSN"
+into a hard failure rather than a skip, so a verification run cannot pass by
+collecting nothing.
 
 There is no pytest-asyncio here, as in test_pc_edition_rollover.py and
 test_a1_predicate_sql.py: each test is a sync function that runs one
@@ -45,6 +46,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "..", "api"))
 
 import main  # noqa: E402
+import models  # noqa: E402
 
 DSN_VAR = "BINDER_SORT_TEST_PG_DSN"
 DSN = os.environ.get(DSN_VAR)
@@ -108,11 +110,266 @@ needs_pg = pytest.mark.skipif(
 # gate (the test at the bottom of this file always runs) so that moving one
 # behind the gate is a deliberate edit and not a silent extra "skipped" that
 # still reads as a clean run.
-LIVE_TESTS = 10
+LIVE_TESTS = 13
 
 
 def run(coro):
     return asyncio.run(coro)
+
+
+# ── the schema this module builds ────────────────────────────────────────────
+#
+# A seat gives each lane an EMPTY database (lesson 1030), and this module used
+# to need one the migrations had already filled, so its live half ran nowhere.
+# It now builds every relation its seed and the two statements touch, in a
+# schema made for this run. The shape is the one test_music_refund_413.py
+# (`_with_schema`) and test_shop_min_client_version.py (`_routes`) use: CREATE
+# SCHEMA, create_all over the named ORM tables with the search_path pointing
+# at it, and a default on every NOT NULL column that has none.
+#
+# The build is ONE transaction: CREATE SCHEMA (never IF NOT EXISTS), the eight
+# tables, the defaults. A build that fails leaves nothing standing. Before its
+# commit, inside that transaction, it reads THE SET (`_SET_SQL`): the schema,
+# the eight tables, and every object that depends on any of them in any
+# dependency class, transitively, by pg_depend. No other session can add to
+# what an uncommitted transaction made, so the set is what the build made, and
+# the fixture keeps it. A schema of the run's name that already stands fails
+# CREATE SCHEMA before anything is read, so nothing is kept (test_s14).
+#
+# The teardown removes exactly the kept set, or nothing. In ONE transaction,
+# with a 10 s lock_timeout, it takes ACCESS EXCLUSIVE locks on the eight
+# tables, then reads the set again with the same statement, starting after
+# the locks are held. Only when the two sets are equal does it drop the eight
+# tables and then the schema (both RESTRICT); the tables' own parts (indexes,
+# constraints, row types, owned sequences) go with them, and they are members
+# of the set. When the sets differ it raises `_TeardownRefused`, naming what
+# is more and what is missing, and drops nothing (test_s13: a view in public;
+# test_s15: an extended statistics object in public). The schema is known by
+# its oid from the kept set: when no schema of that oid stands, nothing of the
+# set stands, and the teardown has nothing to do. No kept set, no drop.
+#
+# THE BOUND. The locks cover the tables; the schema itself cannot be locked
+# that way. What another session attaches to the SCHEMA between the reading
+# and the drops: an object made in it, or another dependent of the normal
+# class, makes a drop fail, the transaction rolls back whole and nothing is
+# dropped; a dependent of the automatic class on the schema itself (a
+# publication's schema membership, a default privileges entry for the schema)
+# would go with the schema. That is the one residual.
+#
+# The seed and both statements under test name their tables unqualified, and
+# the search_path names the run's schema alone, so they read and empty only
+# the run's tables, never tables of the same names elsewhere in the database
+# (the migrated ones item20_board_cost.py --build leaves in public).
+
+_SCHEMA = "binder_sort_%s" % uuid.uuid4().hex[:16]
+
+# players, glicko_ratings, matches and ranked_series as models.py declares
+# them (ranked_series, matches.is_ranked and matches.series_id are declared
+# there and in no migration); shop_items and tournaments only because players
+# and ranked_series hold foreign keys to them.
+_ORM_TABLES = (models.Player.__table__, models.ShopItem.__table__,
+               models.Tournament.__table__, models.GlickoRating.__table__,
+               models.RankedSeries.__table__, models.Match.__table__)
+
+# pc_cards and pc_prints exist only in backend/sql: every column as
+# 308_player_cards.sql makes it, plus the one 353_pc_trades.sql adds. The seed
+# only empties them, so their references to pc_editions and pc_packs, which
+# nothing here reads or writes, are left out.
+_PC_DDL = ("""
+    CREATE TABLE pc_cards (
+        id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        subject_player_id   UUID NOT NULL REFERENCES players(id),
+        edition_id          INTEGER NOT NULL,
+        variant             TEXT NOT NULL DEFAULT 'base',
+        first_minted_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+        UNIQUE (subject_player_id, edition_id, variant)
+    )""", """
+    CREATE TABLE pc_prints (
+        id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        card_id          UUID NOT NULL REFERENCES pc_cards(id),
+        owner_player_id  UUID NOT NULL REFERENCES players(id),
+        minted_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+        snapshot_id      INTEGER NOT NULL,
+        rarity           TEXT NOT NULL,
+        foil             BOOLEAN NOT NULL DEFAULT false,
+        signed           BOOLEAN NOT NULL DEFAULT false,
+        pool_rank        INTEGER NOT NULL,
+        rating           DOUBLE PRECISION NULL,
+        peak_rating      DOUBLE PRECISION NULL,
+        board_rank       INTEGER NULL,
+        series_wins      INTEGER NULL,
+        series_losses    INTEGER NULL,
+        top_card         TEXT NULL,
+        title            TEXT NULL,
+        source           TEXT NOT NULL,
+        pack_id          UUID NULL,
+        slot             SMALLINT NULL,
+        discarded_at     TIMESTAMPTZ NULL,
+        discard_shards   INTEGER NULL,
+        acquired_by_trade BOOLEAN NOT NULL DEFAULT false
+    )""")
+
+# Every table the build makes, which is every table the teardown drops.
+_BUILT_TABLES = tuple(t.name for t in _ORM_TABLES) + ("pc_cards", "pc_prints")
+
+# THE SET: the schema of oid :nsp, its tables named in :tables, and every
+# object that depends on any member, in any dependency class, transitively.
+# One row per member: (classid, objid, objsubid) and its pg_identify_object
+# description for messages. The build and the teardown run this same text.
+_SET_SQL = """
+WITH RECURSIVE members(classid, objid, objsubid) AS (
+    SELECT CAST(CAST('pg_namespace' AS regclass) AS oid), n.oid, 0
+      FROM pg_namespace n
+     WHERE n.oid = CAST(:nsp AS oid)
+    UNION
+    SELECT CAST(CAST('pg_class' AS regclass) AS oid), c.oid, 0
+      FROM pg_class c
+     WHERE c.relnamespace = CAST(:nsp AS oid) AND c.relkind = 'r'
+       AND c.relname = ANY(CAST(:tables AS text[]))
+    UNION
+    SELECT d.classid, d.objid, d.objsubid
+      FROM pg_depend d
+      JOIN members m ON d.refclassid = m.classid AND d.refobjid = m.objid
+)
+SELECT CAST(m.classid AS bigint), CAST(m.objid AS bigint), m.objsubid,
+       (SELECT o.type || ' ' || o.identity
+          FROM pg_identify_object(m.classid, m.objid, m.objsubid) o) AS what
+  FROM members m
+"""
+
+
+class _TeardownRefused(RuntimeError):
+    """The objects standing are not the set the build committed: nothing was
+    dropped."""
+
+
+async def _read_set(c, nsp):
+    rows = (await c.execute(text(_SET_SQL), {"nsp": nsp,
+                                             "tables": list(_BUILT_TABLES)})).all()
+    return {(int(r[0]), int(r[1]), int(r[2])): r[3] for r in rows}
+
+# The ORM declares its defaults in Python, so create_all leaves NOT NULL
+# columns with no database default, and the seed's raw INSERTs name only the
+# columns they mean. Given a default here, as test_music_refund_413.py's
+# _FILL_DEFAULTS does; it reaches only the schema made above.
+_FILL_DEFAULTS = """
+DO $fill$
+DECLARE r RECORD;
+BEGIN
+  FOR r IN SELECT table_name AS t, column_name AS c, data_type AS d
+             FROM information_schema.columns
+            WHERE table_schema = current_schema()
+              AND is_nullable = 'NO' AND column_default IS NULL
+  LOOP
+    EXECUTE format('ALTER TABLE %I ALTER COLUMN %I SET DEFAULT %s', r.t, r.c,
+      CASE WHEN r.d LIKE 'timestamp%' THEN 'NOW()'
+           WHEN r.d = 'boolean' THEN 'FALSE'
+           WHEN r.d IN ('integer','bigint','smallint','numeric','double precision','real') THEN '0'
+           WHEN r.d = 'uuid' THEN 'gen_random_uuid()'
+           WHEN r.d = 'ARRAY' THEN quote_literal('{}')
+           ELSE quote_literal('') END);
+  END LOOP;
+END $fill$
+"""
+
+
+async def _build_schema(kept):
+    """The schema and every relation in it, in ONE transaction. Before the
+    commit, inside it, the set is read and put in `kept` ("nsp": the schema's
+    oid, "members": the set). A build that fails before that reading leaves
+    nothing standing and keeps nothing; a commit whose outcome is not learned
+    still has its set kept, for the teardown."""
+    _refuse_unless_throwaway(DSN)            # the guard first, every time
+    eng, _ = await _session()
+    try:
+        async with eng.begin() as c:
+            await c.execute(text('CREATE SCHEMA "%s"' % _SCHEMA))
+            schema = (await c.execute(text("SELECT current_schema()"))).scalar()
+            assert schema == _SCHEMA, ("the build's search_path", schema)
+            await c.run_sync(models.Base.metadata.create_all,
+                             tables=list(_ORM_TABLES))
+            for stmt in _PC_DDL:
+                await c.execute(text(stmt))
+            await c.exec_driver_sql(_FILL_DEFAULTS)
+            nsp = (await c.execute(text("SELECT oid FROM pg_namespace WHERE nspname = :s"),
+                                   {"s": _SCHEMA})).scalar()
+            kept.update(nsp=int(nsp), members=await _read_set(c, int(nsp)))
+    finally:
+        await eng.dispose()
+
+
+async def _drop_schema(kept):
+    """Remove exactly the kept set, or nothing (see the block above `_SCHEMA`).
+
+    "Nothing stands" and "something differs" are told apart by the schema's
+    oid: no schema of the kept oid means no member of the set stands (every
+    member is the schema, lives in it, or depends on one that does), and the
+    teardown returns; a schema of that oid whose set is not the kept one is a
+    refusal."""
+    if not kept:
+        return                               # no kept set, no drop
+    eng = create_async_engine(DSN)
+    try:
+        async with eng.begin() as c:
+            await c.execute(text("SET LOCAL lock_timeout = '10s'"))
+            name = (await c.execute(text(
+                "SELECT quote_ident(nspname) FROM pg_namespace WHERE oid = CAST(:n AS oid)"),
+                {"n": kept["nsp"]})).scalar()
+            if name is None:
+                return                       # nothing of the set stands
+            tables = (await c.execute(text(
+                "SELECT quote_ident(relname) FROM pg_class "
+                "WHERE relnamespace = CAST(:n AS oid) AND relkind = 'r' "
+                "AND relname = ANY(CAST(:t AS text[])) ORDER BY 1"),
+                {"n": kept["nsp"], "t": list(_BUILT_TABLES)})).scalars().all()
+            qualified = ", ".join("%s.%s" % (name, t) for t in tables)
+            if tables:
+                await c.execute(text("LOCK TABLE %s IN ACCESS EXCLUSIVE MODE" % qualified))
+            now = await _read_set(c, kept["nsp"])
+            want = kept["members"]
+            if now != want or len(tables) != len(_BUILT_TABLES):
+                more = sorted(str(now[k]) for k in set(now) - set(want))
+                missing = sorted(str(want[k]) for k in set(want) - set(now))
+                raise _TeardownRefused(
+                    "binder teardown refused, nothing dropped: the objects standing "
+                    "are not the set the build committed; more: %s; missing: %s; "
+                    "run tables standing: %d of %d"
+                    % (more, missing, len(tables), len(_BUILT_TABLES)))
+            await c.execute(text("DROP TABLE %s RESTRICT" % qualified))
+            await c.execute(text("DROP SCHEMA %s RESTRICT" % name))
+    finally:
+        await eng.dispose()
+
+
+def _build_owned(kept):
+    """The build; when it fails after its set was kept (an exception at the
+    commit), the teardown runs on that set before the failure goes on."""
+    try:
+        run(_build_schema(kept))
+    except BaseException:
+        if kept:
+            run(_drop_schema(kept))
+        raise
+
+
+# The set the module's build kept; the fixture's teardown and test_s13/s15 use it.
+_KEPT = {}
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _module_schema():
+    """Built once for the module, after the import-time guard has passed, and
+    torn down once after its last test; without a DSN there is nothing to do.
+    A teardown that refuses or fails is not caught: pytest reports it."""
+    if not DSN:
+        yield
+        return
+    _KEPT.clear()
+    _build_owned(_KEPT)
+    try:
+        yield
+    finally:
+        run(_drop_schema(_KEPT))
 
 
 # ── the fixture ──────────────────────────────────────────────────────────────
@@ -246,7 +503,8 @@ class _CountingSession:
 
 
 async def _session():
-    eng = create_async_engine(DSN)
+    eng = create_async_engine(
+        DSN, connect_args={"server_settings": {"search_path": _SCHEMA}})
     return eng, async_sessionmaker(eng, expire_on_commit=False)
 
 
@@ -963,6 +1221,139 @@ def test_s12_health_answers_binder_standings_1_on_both_arms(monkeypatch):
         r = TestClient(main.app, raise_server_exceptions=False).get("/api/v1/health")
         assert r.status_code == 200, r.text
         assert r.json().get("binder_standings") == 1, r.json()
+
+
+# ── the build's own teardown and ownership ───────────────────────────────────
+
+def _sqlstates(exc):
+    """The SQLSTATE of a database error, wherever SQLAlchemy's wrapping puts it."""
+    orig = getattr(exc, "orig", None)
+    return {getattr(x, "sqlstate", None)
+            for x in (exc, orig, getattr(orig, "__cause__", None))} - {None}
+
+
+def _teardown_refused_with(plant, probe, unplant):
+    """Plant one object outside the run's schema that depends on a run table,
+    call the teardown, and return (its refusal text, (the plant standing, the
+    schema of the kept oid standing, the eight tables standing)). The clean-up
+    guard begins before the plant; the plant is recorded inside its creating
+    transaction, right after the statement returned; the clean-up removes only
+    a recorded plant."""
+    made = []
+
+    async def go():
+        eng = create_async_engine(DSN)
+        try:
+            try:
+                async with eng.begin() as c:
+                    await c.execute(text(plant))
+                    made.append(True)
+                with pytest.raises(_TeardownRefused) as e:
+                    await _drop_schema(_KEPT)
+                async with eng.connect() as c:
+                    got = (await c.execute(text(probe))).scalar()
+                    schema = (await c.execute(text(
+                        "SELECT count(*) FROM pg_namespace WHERE oid = CAST(:n AS oid)"),
+                        {"n": _KEPT["nsp"]})).scalar()
+                    tables = (await c.execute(text(
+                        "SELECT count(*) FROM pg_class WHERE relnamespace = CAST(:n AS oid) "
+                        "AND relkind = 'r' AND relname = ANY(CAST(:t AS text[]))"),
+                        {"n": _KEPT["nsp"], "t": list(_BUILT_TABLES)})).scalar()
+                return str(e.value), (got, schema, tables)
+            finally:
+                if made:
+                    async with eng.begin() as c:
+                        await c.execute(text(unplant))
+        finally:
+            await eng.dispose()
+    return run(go())
+
+
+@needs_pg
+def test_s13_the_teardown_refuses_when_a_view_outside_depends_on_a_run_table():
+    """A view in public over the run's `players` is a dependent of the normal
+    class from OUTSIDE the schema. The teardown's own comparison refuses
+    (`_TeardownRefused`) before any drop runs, so PostgreSQL's RESTRICT never
+    gets to speak; the view, the schema and the eight tables stand. The test
+    removes its own view, and the module's ordinary teardown then succeeds.
+    """
+    view = "binder_sort_view_%s" % _SCHEMA[len("binder_sort_"):]
+    msg, got = _teardown_refused_with(
+        'CREATE VIEW public."%s" AS SELECT id FROM "%s".players' % (view, _SCHEMA),
+        "SELECT CAST(to_regclass('public.\"%s\"') IS NOT NULL AS integer)" % view,
+        'DROP VIEW IF EXISTS public."%s"' % view)
+    assert view in msg, msg
+    assert got == (1, 1, len(_BUILT_TABLES)), got
+
+
+@needs_pg
+def test_s15_the_teardown_refuses_an_automatic_dependent_in_another_schema():
+    """H1's regression. An extended statistics object in public over two
+    columns of the run's `players` is a dependent of the AUTOMATIC class:
+    RESTRICT would drop it with the table without a word. The comparison
+    refuses instead, and the statistics object (read from pg_statistic_ext),
+    the schema and the eight tables stand. The test removes its own plant.
+    """
+    stx = "binder_sort_stx_%s" % _SCHEMA[len("binder_sort_"):]
+    msg, got = _teardown_refused_with(
+        'CREATE STATISTICS public."%s" ON id, steam_id FROM "%s".players' % (stx, _SCHEMA),
+        "SELECT count(*) FROM pg_statistic_ext WHERE stxname = '%s' "
+        "AND stxnamespace = CAST('public' AS regnamespace)" % stx,
+        'DROP STATISTICS IF EXISTS public."%s"' % stx)
+    assert stx in msg, msg
+    assert got == (1, 1, len(_BUILT_TABLES)), got
+
+
+@needs_pg
+def test_s14_a_schema_of_the_runs_name_that_stands_is_refused_and_left(monkeypatch):
+    """A schema that already stands under the name the build is about to
+    create is refused (42P06, duplicate schema) and never adopted: the build
+    keeps no set, so its clean-up drops nothing, and the planted schema and
+    its `players` row still stand. The run's name is pointed at a fresh one
+    for this test, because the module's own schema stands under the real one.
+    The clean-up guard begins before the plant, the plant is recorded inside
+    its creating transaction, and only a recorded plant is removed.
+    """
+    planted = "binder_sort_%s" % uuid.uuid4().hex[:16]
+    made = []
+
+    async def sql(*stmts):
+        eng = create_async_engine(DSN)
+        try:
+            async with eng.begin() as c:
+                out = None
+                for s in stmts:
+                    r = await c.execute(text(s))
+                    out = r.scalar() if r.returns_rows else None
+                return out
+        finally:
+            await eng.dispose()
+
+    async def plant():
+        eng = create_async_engine(DSN)
+        try:
+            async with eng.begin() as c:
+                await c.execute(text('CREATE SCHEMA "%s"' % planted))
+                made.append(True)
+                await c.execute(text('CREATE TABLE "%s".players (id integer PRIMARY KEY)' % planted))
+                await c.execute(text('INSERT INTO "%s".players VALUES (1)' % planted))
+        finally:
+            await eng.dispose()
+
+    try:
+        run(plant())
+        monkeypatch.setattr(sys.modules[__name__], "_SCHEMA", planted)
+        kept = {}
+        with pytest.raises(Exception) as e:
+            _build_owned(kept)
+        assert "42P06" in _sqlstates(e.value), repr(e.value)
+        assert kept == {}, "a schema the build did not make was kept as its own"
+        assert run(sql("SELECT count(*) FROM pg_namespace WHERE nspname = '%s'" % planted)) == 1
+        assert run(sql('SELECT count(*) FROM "%s".players' % planted)) == 1
+    finally:
+        if made:
+            run(sql('DROP TABLE IF EXISTS "%s".players' % planted,
+                    'DROP SCHEMA IF EXISTS "%s"' % planted))
 
 
 # ── the gate's own guard, always outside it ──────────────────────────────────
