@@ -45,6 +45,7 @@ is not INTERNAL alone.
 from __future__ import annotations
 
 import ast
+import re
 
 STRICT, SOFT, BAN, ADMIN, INTERNAL, OPEN = "STRICT", "SOFT", "BAN", "ADMIN", "INTERNAL", "OPEN"
 # the two halves of an inline admin check: the roster (`not await
@@ -165,6 +166,103 @@ def server_exits(rows, funcs_by_module, strict_exits=None):
     return out, bad
 
 
+# M2: the READ class. A route outside the write scope (a GET that
+# read_gate.WRITE_ON_GET does not name) and refused by no class is READ, and a
+# READ handler may reach no writing statement: a text() statement that inserts,
+# updates, deletes, truncates or merges, a SQLAlchemy insert/update/delete
+# construct, or a session add/delete/merge/commit. Followed through every
+# function of the handler's own module that it calls, at any position.
+READ = "READ"
+_WRITE_SQL = re.compile(
+    r"\bINSERT\s+INTO\b|\bDELETE\s+FROM\b|\bTRUNCATE\b|\bMERGE\s+INTO\b"
+    r"|\bUPDATE\s+[\w.\"]+(?:\s+(?:AS\s+)?\w+)?\s+SET\b", re.I)
+_WRITE_NAMES = frozenset({"insert", "update", "delete", "pg_insert"})
+_WRITE_METHODS = frozenset({"add", "add_all", "delete", "merge", "commit"})
+
+
+def _write_call(call, cn):
+    if cn == "text":
+        return any(isinstance(c, ast.Constant) and isinstance(c.value, str) and _WRITE_SQL.search(c.value)
+                   for c in ast.walk(call))
+    if isinstance(call.func, ast.Name) and cn in _WRITE_NAMES:
+        return True
+    if not (isinstance(call.func, ast.Attribute) and cn in _WRITE_METHODS):
+        return False
+    # the receiver must be a database session (db, session, conn, ...), not a
+    # Python set or dict
+    recv = call.func.value
+    rname = recv.id if isinstance(recv, ast.Name) else (recv.attr if isinstance(recv, ast.Attribute) else "")
+    return bool(re.search(r"(^|_)(db|session|sess|conn)$", rname))
+
+
+# READ routes whose handler reaches a write, each with what it writes. None
+# writes for the caller's account: each write is a function of the clock or of
+# standings, or an audit row of the read itself.
+_PODIUM_SYNC = (
+    "the podium holder sync (_podium_player_ids -> _sync_podium_holders): grants and revokes the"
+    " podium title by the leaderboard's top three, the same for every caller and none, in its own"
+    " session; skipped on the read-only standby")
+READ_WRITES: dict = {
+    ("GET", "/api/v1/achievements/{key}/earners"): _PODIUM_SYNC,
+    ("GET", "/api/v1/chat/recent"): _PODIUM_SYNC,
+    ("GET", "/api/v1/ffa/leaderboard"): _PODIUM_SYNC,
+    ("GET", "/api/v1/ffa/lobbies"): _PODIUM_SYNC,
+    ("GET", "/api/v1/ffa/recent"): _PODIUM_SYNC,
+    ("GET", "/api/v1/leaderboard"): _PODIUM_SYNC,
+    ("GET", "/api/v1/ovt/leaderboard"): _PODIUM_SYNC,
+    ("GET", "/api/v1/ovt/lobbies"): _PODIUM_SYNC,
+    ("GET", "/api/v1/players/{steam_id}"): _PODIUM_SYNC,
+    ("GET", "/api/v1/players/{steam_id}/matches"): _PODIUM_SYNC,
+    ("GET", "/api/v1/presence/online"): _PODIUM_SYNC,
+    ("GET", "/api/v1/records"): _PODIUM_SYNC,
+    ("GET", "/api/v1/spectate/games"): _PODIUM_SYNC,
+    ("GET", "/api/v1/team/all-series-paged"): _PODIUM_SYNC,
+    ("GET", "/api/v1/team/leaderboard"): _PODIUM_SYNC,
+    ("GET", "/api/v1/team/lobbies"): _PODIUM_SYNC,
+    ("GET", "/api/v1/admin/quarantine/triage"): (
+        "_triage_read_txn commits its read-only transaction (lock and idle timeouts set); no row is written"),
+    ("GET", "/api/v1/admin/quarantine/triage/{mode}/{group_id}"): (
+        "_triage_read_txn commits its read-only transaction (lock and idle timeouts set); no row is written"),
+    ("GET", "/api/v1/chat/moderate/mutes"): (
+        "the session check's backfill of steam_auth_seen_at on the caller's own player row (a verified"
+        " mint's stamp); no game state"),
+    ("GET", "/api/v1/internal/evidence-report/game/{code}"): (
+        "the admin evidence report's audit row of the read (admin_evidence._audit)"),
+    ("GET", "/api/v1/internal/evidence-report/pair"): (
+        "the admin evidence report's audit row of the read (admin_evidence._audit)"),
+    ("GET", "/api/v1/internal/evidence-report/player/{steam_id}"): (
+        "the admin evidence report's audit row of the read (admin_evidence._audit)"),
+    ("GET", "/api/v1/internal/evidence-report/series/{code}"): (
+        "the admin evidence report's audit row of the read (admin_evidence._audit)"),
+    ("GET", "/api/v1/music/ratings"): (
+        "the ratings fold: deletes rating rows already folded into the published figures, by the clock"),
+}
+
+
+def read_failures(read_rows, funcs_by_module, read_writes=None, by_hand=None):
+    """The READ census: (rows, [problems]). Each read route is classed as the
+    write census classes it, and one refused by no class is READ; a READ route
+    that reaches a write and is not on READ_WRITES is a problem."""
+    read_writes = READ_WRITES if read_writes is None else read_writes
+    result, _ = census(read_rows, funcs_by_module, by_hand)
+    rowmap = {(r[0], r[1]): r for r in read_rows}
+    out, bad = {}, []
+    for key, (prim, cls) in sorted(result.items()):
+        if prim != OPEN:
+            out[key] = prim
+            continue
+        out[key] = READ
+        _, _, module, name, deps = rowmap[key]
+        if any(reaches(funcs_by_module, m, n, _write_call) for m, n in [(module, name), *deps]):
+            if key not in read_writes:
+                bad.append(f"{key}: a READ route that reaches a writing statement and is not on READ_WRITES")
+        elif key in read_writes:
+            bad.append(f"{key}: on READ_WRITES but reaches no writing statement")
+    for key in sorted(set(read_writes) - set(result)):
+        bad.append(f"{key}: a READ_WRITES entry no read route matches")
+    return out, bad
+
+
 def exits_vs_r17(server, r17=None):
     """Both directions of BAN-R17's list against the server's exits."""
     r17 = BAN_R17_EXITS if r17 is None else r17
@@ -207,13 +305,20 @@ OPEN_ROUTES = {
     ("DELETE", "/api/v1/players/{steam_id}/data"): (
         "account data deletion (BAN-R11): open to a banned account by design"),
     ("GET", "/api/v1/presence/ping"): (
-        "stamps last_seen and presence only under the caller's verified session, which a ban"
+        "WRITES: stamps last_seen and presence only under the caller's verified session, which a ban"
         " deletes; otherwise answers the online count and writes no row"),
-    ("GET", "/api/v1/tournaments/players/{steam_id}/penalty"): (
-        "a read of a player's penalty state; no caller identity, acts for no one"),
-    ("GET", "/api/v1/series/active"): "a read of the open series list; no caller identity, acts for no one",
+    ("GET", "/api/v1/series/active"): (
+        "WRITES: _prune_stale_series marks a ranked series older than 30 minutes with no reported game"
+        " 'abandoned' and refunds its bets, and commits. No caller identity: the 1.41.0 client's bet UI"
+        " (ApiClient /series/active) and the bot poll it with none, so there is no account to refuse."
+        " Any request, a banned caller's too, can only run that clock-earned prune earlier"),
     ("GET", "/api/v1/team/series/{series_id}/state"): (
-        "a read of one series' state; no caller identity, acts for no one"),
+        "WRITES: an 'active' series past its assembly deadline with fewer than four spawn-confirms"
+        " becomes 'canceled' (assembly_timeout) with its bets reconciled, and a 'dc_paused' series past"
+        " its deadline becomes 'dc_incomplete'; both commit. No caller identity: the 1.41.0 client polls"
+        " it after ready_join as the lifecycle route (there is no read-only probe), so there is no"
+        " account to refuse. Any request can only run those clock-earned transitions earlier, and a"
+        " series a ban voided is terminal, so neither arm finds it"),
 }
 
 # Routes whose only class is INTERNAL: what each acts on. None acts for a

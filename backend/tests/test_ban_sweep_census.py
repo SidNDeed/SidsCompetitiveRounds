@@ -110,6 +110,73 @@ def _all_rows_and_funcs():
     return rows, funcs
 
 
+def _read_rows():
+    """The routes the write census does not walk: every other live route."""
+    rows, funcs = _all_rows_and_funcs()
+    write_keys = {(r[0], r[1]) for r in _rows_and_funcs()[0]}
+    return [r for r in rows if (r[0], r[1]) not in write_keys], funcs
+
+
+def test_every_registered_route_is_named_in_exactly_one_class():
+    """M2: the census sees every registered route, reads included. The write
+    census and the READ census together name each live route once."""
+    rows, _ = _all_rows_and_funcs()
+    w_rows, w_funcs = _rows_and_funcs()
+    write, _ = B.census(w_rows, w_funcs)
+    r_rows, r_funcs = _read_rows()
+    read, _ = B.read_failures(r_rows, r_funcs)
+    assert set(write).isdisjoint(read)
+    assert set(write) | set(read) == {(r[0], r[1]) for r in rows}
+    assert len(read) > 150 and B.READ in set(read.values()), len(read)
+
+
+def test_no_read_route_reaches_an_unlisted_write():
+    r_rows, r_funcs = _read_rows()
+    _, bad = B.read_failures(r_rows, r_funcs)
+    assert bad == [], "\n".join(bad)
+    for key, why in B.READ_WRITES.items():
+        assert why.strip(), key
+
+
+_PLANTED_PAY = '''
+async def _planted_pay(db, pid):
+    await db.execute(text("UPDATE players SET gold = gold + 100 WHERE id = :p"), {"p": pid})
+
+async def planted_read(pid, db):
+    await _planted_pay(db, pid)
+    return {"ok": True}
+'''
+
+
+def test_mutant_a_get_route_that_pays_gold_through_a_helper_fails_the_census():
+    r_rows, r_funcs = _read_rows()
+    funcs = copy.deepcopy(r_funcs)
+    for n in ast.parse(_PLANTED_PAY).body:
+        funcs["main"][n.name] = n
+    key = ("GET", "/api/v1/planted/read")
+    rows = r_rows + [(key[0], key[1], "main", "planted_read", [])]
+    out, bad = B.read_failures(rows, funcs)
+    assert out[key] == B.READ
+    assert bad == [f"{key}: a READ route that reaches a writing statement and is not on READ_WRITES"], bad
+    # the write census's walk (the route filter it had) never saw such a route
+    assert not _in_scope(*key)
+
+
+def test_an_open_get_route_that_writes_says_what_it_writes():
+    """M1: a GET route open to a banned account whose handler reaches a write
+    states, in its OPEN_ROUTES reason, what it WRITES."""
+    rows, funcs = _rows_and_funcs()
+    bad = []
+    for method, path, module, name, deps in rows:
+        key = (method, path)
+        if method != "GET" or key not in B.OPEN_ROUTES:
+            continue
+        if any(B.reaches(funcs, m, n, B._write_call) for m, n in [(module, name), *deps]):
+            if "WRITES" not in B.OPEN_ROUTES[key]:
+                bad.append(f"{key}: writes and its reason does not say what")
+    assert bad == [], "\n".join(bad)
+
+
 def test_the_server_exits_equal_ban_r17_both_ways():
     rows, funcs = _all_rows_and_funcs()
     server, bad = B.server_exits(rows, funcs)
