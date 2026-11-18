@@ -171,7 +171,7 @@ class Env:
         assert '"       mail_discord_relay, discord_id"' in src
         mp.setattr(main, "_mail_caller", _caller)
 
-        async def _no_session(request, steam_id, db):
+        async def _no_session(request, steam_id, db, **_kw):
             return None
         mp.setattr(main, "_check_steam_session", _no_session)
         mp.setattr(main, "_presence_seen", {})

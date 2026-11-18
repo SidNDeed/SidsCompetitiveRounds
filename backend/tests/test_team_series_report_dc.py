@@ -3772,7 +3772,7 @@ def test_the_tokenless_tests_can_fail(wired, monkeypatch, mutant):
 def resolving(wired, monkeypatch):
     """`wired`, plus the lobby resolve's Steam session check stubbed (it reads
     steam_sessions, which the lab does not build)."""
-    async def _checked(request, steam_id, db):
+    async def _checked(request, steam_id, db, **_kw):
         return None
 
     monkeypatch.setattr(main, "_check_steam_session", _checked)

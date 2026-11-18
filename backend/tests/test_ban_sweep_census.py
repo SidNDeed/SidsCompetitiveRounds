@@ -251,3 +251,77 @@ def test_mutant_an_exit_without_banned_ok_fails_the_census():
     assert any("('main', 'queue_leave'): in BANNED_OK but makes no banned_ok call" in b for b in bad), bad
     assert any("('POST', '/api/v1/queue/leave'): is in OPEN_ROUTES but is classed SOFT" in b
                for b in bad), bad
+
+
+# ---- the exits' keyword reaches every test stand-in of the soft check ----
+#
+# The exits call _check_steam_session(..., banned_ok=True). A test that puts
+# its own function in as main._check_steam_session takes the place of the real
+# one for every route, the exits too; a stand-in that cannot take banned_ok
+# raises TypeError at the first exit it meets.
+
+
+def _stub_names_patched_into_main(tree) -> set:
+    out = set()
+    for n in ast.walk(tree):
+        if (isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+                and n.func.attr == "setattr" and len(n.args) >= 3
+                and isinstance(n.args[0], ast.Name) and n.args[0].id == "main"
+                and isinstance(n.args[1], ast.Constant)
+                and n.args[1].value == "_check_steam_session"):
+            v = n.args[2]
+        elif (isinstance(n, ast.Assign) and len(n.targets) == 1
+              and isinstance(n.targets[0], ast.Attribute)
+              and n.targets[0].attr == "_check_steam_session"
+              and isinstance(n.targets[0].value, ast.Name)
+              and n.targets[0].value.id == "main"):
+            v = n.value
+        else:
+            continue
+        name = v.attr if isinstance(v, ast.Attribute) else getattr(v, "id", None)
+        if name:
+            out.add(name)
+    return out
+
+
+def _stubs_without_banned_ok(sources: dict) -> list:
+    """(file, function) for every function defined in a file under the name
+    that file patches in as main._check_steam_session, when it takes neither
+    banned_ok nor **kwargs."""
+    bad = []
+    for fname, src in sorted(sources.items()):
+        tree = ast.parse(src)
+        names = _stub_names_patched_into_main(tree)
+        for n in ast.walk(tree):
+            if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name in names:
+                a = n.args
+                if a.kwarg is None and not any(x.arg == "banned_ok"
+                                               for x in a.args + a.kwonlyargs):
+                    bad.append((fname, n.name))
+    return bad
+
+
+def _test_sources() -> dict:
+    out = {}
+    for fname in sorted(os.listdir(HERE)):
+        if fname.endswith(".py"):
+            with open(os.path.join(HERE, fname), encoding="utf-8") as fh:
+                out[fname] = fh.read()
+    return out
+
+
+def test_every_stand_in_for_the_soft_check_takes_banned_ok():
+    sources = _test_sources()
+    patched = sum(len(_stub_names_patched_into_main(ast.parse(s))) for s in sources.values())
+    assert patched >= 15, patched   # the walk finds the stand-ins it is about
+    assert _stubs_without_banned_ok(sources) == []
+
+
+def test_negative_control_a_stand_in_without_banned_ok_is_named():
+    planted = {
+        "planted_a.py": ("async def stub(request, steam_id, db):\n    return None\n"
+                         "monkeypatch.setattr(main, '_check_steam_session', stub)\n"),
+        "planted_b.py": ("async def stub2(request, steam_id, db, **_kw):\n    return None\n"
+                         "main._check_steam_session = stub2\n"),
+    }
+    assert _stubs_without_banned_ok(planted) == [("planted_a.py", "stub")]

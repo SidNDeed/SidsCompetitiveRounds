@@ -446,7 +446,7 @@ class _FakeRequest:
 def opened(monkeypatch):
     """The signature and session checks out of the way (module docstring),
     and an internal key for the admin route. Returns that key."""
-    async def _no_session_check(request, steam_id, db):
+    async def _no_session_check(request, steam_id, db, **_kw):
         return None
     monkeypatch.setattr(main, "MATCH_HMAC_SECRET", "")
     monkeypatch.setattr(main, "_check_steam_session", _no_session_check)

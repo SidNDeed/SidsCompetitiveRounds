@@ -992,7 +992,7 @@ class Env:
         proxy.monotonic = lambda: self.mono
         mp.setattr(main, "time", proxy)
 
-        async def _no_session(request, steam_id, db):
+        async def _no_session(request, steam_id, db, **_kw):
             return None
         mp.setattr(main, "_check_steam_session", _no_session)
         # Reports are submitted unsigned (the ladder suite's `opened`): the

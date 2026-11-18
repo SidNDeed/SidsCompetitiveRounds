@@ -368,7 +368,7 @@ def seeded():
 
 @pytest.fixture()
 def rig(seeded, monkeypatch):
-    async def _session_ok(request, steam_id, db):
+    async def _session_ok(request, steam_id, db, **_kw):
         return None
     monkeypatch.setattr(main, "MATCH_HMAC_SECRET", SECRET)
     monkeypatch.setattr(main, "_check_steam_session", _session_ok)

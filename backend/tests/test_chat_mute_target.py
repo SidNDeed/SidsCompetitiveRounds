@@ -114,7 +114,7 @@ def _client(monkeypatch):
         seen["hmac"].append((action, target))
         return True
 
-    async def session_ok(request, sid, _db):
+    async def session_ok(request, sid, _db, **_kw):
         seen["session"].append(sid)
 
     async def admin_ok(_db, adm, action, target, sig):

@@ -4108,7 +4108,7 @@ async def _call_endpoint(sm, report):
     saved_secret = main.MATCH_HMAC_SECRET
     saved_session = main._check_steam_session
 
-    async def _no_session_check(request, steam_id, db):
+    async def _no_session_check(request, steam_id, db, **_kw):
         return None
 
     main.MATCH_HMAC_SECRET = ""

@@ -2389,7 +2389,7 @@ def _sink_patch(monkeypatch):
     a test key, so the REAL signature check runs on every report. Nothing
     that records, pays, compares or locks is replaced.
     """
-    async def _no_session(request, steam_id, db):
+    async def _no_session(request, steam_id, db, **_kw):
         return None
 
     async def _no_podium(db):
