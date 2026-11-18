@@ -46,6 +46,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker  # noqa: E402
 from starlette.requests import Request  # noqa: E402
 
 import main  # noqa: E402
+import schemas  # noqa: E402
 import ladder_pg_harness as harness  # noqa: E402
 import test_title_ladder_hooks_live as lh  # noqa: E402
 
@@ -411,9 +412,9 @@ def test_t4_a_timed_ban_whose_end_has_passed_admits_again(case, mode):
 # -- T5: the reports ----------------------------------------------------------
 
 def _report(p1, p2, reporter, ranked):
-    return main.MatchReport(
-        player1=main.PlayerMatchData(steam_id=p1, display_name="p1"),
-        player2=main.PlayerMatchData(steam_id=p2, display_name="p2"),
+    return schemas.MatchReport(
+        player1=schemas.PlayerMatchData(steam_id=p1, display_name="p1"),
+        player2=schemas.PlayerMatchData(steam_id=p2, display_name="p2"),
         p1_rounds_won=3, p2_rounds_won=1, is_ranked=ranked, reported_by_steam_id=reporter,
         photon_room_id="bs_room_" + uuid.uuid4().hex[:8])
 
