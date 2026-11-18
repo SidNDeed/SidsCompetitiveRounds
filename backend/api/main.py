@@ -50442,7 +50442,7 @@ async def _ban_void_lock(db: AsyncSession, pid) -> dict:
     return found
 
 
-async def _ban_void_apply(db: AsyncSession, pid, found: dict) -> list:
+async def _ban_void_apply(db: AsyncSession, pid, found: dict) -> None:
     """Bans part 2a (S4, BAN-R5), second half: end as void every record
     _ban_void_lock found and locked, so the other players are free at once.
     Each UPDATE re-checks the status. Games recorded before the ban stand;
@@ -50459,10 +50459,11 @@ async def _ban_void_apply(db: AsyncSession, pid, found: dict) -> list:
       - 1v2: status 'canceled' (member_banned), dissolved the same way;
     and an open hold of a voided 2v2 or 1v2 series closes (member_banned).
     No rating, gold, XP, win, loss or disconnect count is written here.
-    Returns the (mode, id) leases the core deletes after the queue rows:
-    each voided FFA lobby's group leases, and each 1v1 partner's ranked
-    lease ("ranked-player", partner id)."""
-    leases = []
+    Each reset or delete of another player's queue row is followed, in this
+    function and transaction, by the release of the lease that held it (the
+    voided FFA lobby's group leases; the 1v1 partner's ranked lease), as
+    _dissolve_group_rows does for a 2v2 or 1v2 group: a seat put back to
+    searching with its lease still held looks free and cannot be formed."""
     ended = 0
     for _lid in found["ffa"]:
         _ended = (await db.execute(text(
@@ -50491,7 +50492,9 @@ async def _ban_void_apply(db: AsyncSession, pid, found: dict) -> list:
                       held_until=NULL, held_lobby=NULL
                 WHERE series_id=:lid AND player_id <> :pid"""),
             {"lid": _lid, "pid": pid})
-        leases.append(("ffa", _lid))
+        await db.execute(text(
+            "DELETE FROM queue_leases WHERE mode = 'ffa' AND group_id = :g"),
+            {"g": _lid})
     for _sid in found["ranked"]:
         _ended = (await db.execute(text(
             "UPDATE ranked_series SET status = 'abandoned', invalidated_at = NOW(),"
@@ -50506,7 +50509,10 @@ async def _ban_void_apply(db: AsyncSession, pid, found: dict) -> list:
             " (SELECT CASE WHEN player1_id = :pid THEN player2_id ELSE player1_id END"
             "    FROM ranked_series WHERE id = :sid)"
             " RETURNING player_id"), {"pid": pid, "sid": _sid})).scalars().all()
-        leases.extend(("ranked-player", _x) for _x in _partners)
+        for _x in _partners:
+            await db.execute(text(
+                "DELETE FROM queue_leases WHERE player_id = :pid AND mode = 'ranked'"),
+                {"pid": _x})
     _voided = []
     for _mode, _cancel in (
             ("team", "UPDATE team_series SET status='cancelled', invalidated_at=NOW(),"
@@ -50531,7 +50537,6 @@ async def _ban_void_apply(db: AsyncSession, pid, found: dict) -> list:
             {"ids": [str(g) for g in _voided]})
     if ended:
         print(f"[BAN] ended {ended} open record(s) of the banned account as void")
-    return leases
 
 
 async def _ban_open_lobby_host_left(db: AsyncSession, mode: str, lobby_id, pid) -> list:
@@ -50672,7 +50677,7 @@ async def _apply_ban_core(db: AsyncSession, *, admin_steam_id: str, target_steam
                 # and before the 2v2 and 1v2 lobby rows (deletion's order).
                 _ban_void_found = await _ban_void_lock(db, _bpid)
         # ...and ended as void, before the queue rows below.
-        _ban_void_leases = await _ban_void_apply(db, _bpid, _ban_void_found)
+        await _ban_void_apply(db, _bpid, _ban_void_found)
         # ALL-status row delete (round-18 find 1). Round 15's pair-DISSOLUTION
         # branch was racy because it did partner WRITES from a status-filtered
         # snapshot; a bare unconditional DELETE of the banned player's own
@@ -50697,21 +50702,11 @@ async def _apply_ban_core(db: AsyncSession, *, admin_steam_id: str, target_steam
             # remaining member as host, or, with none left, is disbanded
             # (account deletion's step; its row is locked above).
             _ban_inv_ended += await _ban_open_lobby_host_left(db, _lmode, _blid, _bpid)
-        # The seat leases last, after every parent, queue row and invite (the
-        # order account deletion keeps): the account's own, each voided FFA
-        # lobby's, and each voided 1v1 partner's (bans part 2a; a voided 2v2
-        # or 1v2 group's leases went with its dissolution).
+        # The account's own seat lease last, after every parent, queue row and
+        # invite (the order account deletion keeps). The leases of the records
+        # the void ended were released by _ban_void_apply beside each reset.
         await db.execute(text("DELETE FROM queue_leases WHERE player_id = :pid"),
                          {"pid": _bpid})
-        for _vmode, _vid in _ban_void_leases:
-            if _vmode == "ranked-player":
-                await db.execute(text(
-                    "DELETE FROM queue_leases WHERE player_id = :pid AND mode = 'ranked'"),
-                    {"pid": _vid})
-            else:
-                await db.execute(text(
-                    "DELETE FROM queue_leases WHERE mode = :m AND group_id = :g"),
-                    {"m": _vmode, "g": _vid})
         # The candidate scans additionally exclude active bans (round-16) and
         # the issuance branches re-check all members (round-17) — those stay
         # as defense-in-depth around this serialization.
