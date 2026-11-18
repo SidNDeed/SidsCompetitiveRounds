@@ -704,3 +704,197 @@ def test_f2b_mutant_reading_a_key_of_any_details_is_red():
     with pytest.raises(AssertionError) as e:
         f2b_page_of_every_kind(ns)
     print("\nMUTANT-RED F2b bot reading a key of any details: %s" % str(e.value).splitlines()[0][:120])
+
+
+# -- LANDFIX-1: every string a person typed, or the server passes through, is literal --
+#
+# The text of /modlog prints the player's name, the search word, and for each
+# record the moderator's name, the reason, the server's sentence and the
+# kind's label, and the totals' labels. Each of them here holds one of the
+# names of tests/test_discord_name_markdown.py's HOSTILE list (a masked link,
+# bold, a heading, a code span, a mention, a list marker, a line break, a
+# backslash), checked by that file's written-out expectation _expect, so the
+# moderator log is held to the one list and the one expectation every other
+# renderer of the bot is. Every form of the text: no record, one page,
+# several pages walked with the buttons, with the filter text, each sort.
+# The census of that file counts only values under its name keys (here the
+# player's and the moderator's names); these tests are what show the reason,
+# the sentence, the labels and the search word.
+
+from test_discord_name_markdown import (HOSTILE, HOSTILE_IDS, _MASKED_LINK,  # noqa: E402
+                                        _expect, _markup, _shows_literally)
+
+ROW_FIELDS = ("actor", "reason", "sentence", "kind")
+HEAD_FIELDS = ("player", "search", "total")
+# The words the header shows in its code span for a Steam id that is not 1 to
+# 20 ASCII digits.
+UNKNOWN_ID = "unknown id"
+
+
+def _tagged(s):
+    """`s` once per field, each copy tagged with its field's name, so each
+    field's own copy is looked for."""
+    return {f: "%s %s" % (s, f) for f in ROW_FIELDS + HEAD_FIELDS}
+
+
+def hostile_records(v, total, steam_id=PLAYER):
+    """The api's answer for a player of `total` records, paged by key as the
+    route pages them (the bot's limit, either direction). Row i carries its
+    hostile copy in field ROW_FIELDS[i % 4] and plain words in the others, so
+    every row stays inside its share of the message and every page of 4 or
+    more rows shows each field."""
+    plain = {"actor": "Mod", "reason": "r", "sentence": "s.", "kind": "Ban"}
+    rows = []
+    for i in range(total):
+        f = dict(plain, **{ROW_FIELDS[i % 4]: v[ROW_FIELDS[i % 4]]})
+        rows.append({"id": "h%d" % i, "key": "k%d" % i, "at": "2026-11-01T10:%02d:00Z" % (59 - i),
+                     "action": "ban", "action_label": f["kind"], "actor": "76561190420000001",
+                     "actor_name": f["actor"], "players": [{"steam_id": steam_id, "name": v["player"]}],
+                     "reason": f["reason"], "sentence": f["sentence"], "target_steam_id": steam_id,
+                     "target_match_id": None, "target_series_id": None, "details": {}})
+
+    def answer(params):
+        ordered = rows[::-1] if params.get("dir") == "asc" else rows
+        start = [r["key"] for r in ordered].index(params["after"]) + 1 if params.get("after") else 0
+        lim = int(params["limit"])
+        page = ordered[start:start + lim]
+        nxt = page[-1]["key"] if start + lim < len(ordered) else None
+        return 200, {"total": total, "limit": lim, "next": nxt, "sort": params["sort"], "dir": params["dir"],
+                     "counts_by_action": [{"action": "ban", "label": v["total"], "count": total}] if total else [],
+                     "player": {"steam_id": steam_id, "name": v["player"]}, "rows": page}
+    return answer
+
+
+def _only_the_bots_markup(text, n_rows):
+    """Once every backslash-escaped character is dropped (what Discord
+    formats), the text holds the bot's own markup and nothing else: the bold
+    of the header and of each row's kind, the one code span of the Steam id,
+    no masked link, no tag but the rows' timestamps, and one line per row
+    below the header's two and the totals."""
+    shown = _markup(text)
+    assert shown.count("**") == 2 + 2 * n_rows, shown
+    assert shown.count("`") == 2, shown
+    assert not _MASKED_LINK.search(shown), shown
+    assert shown.count("<") == text.count("<t:") == n_rows, shown
+    assert text.count("\n") == (2 + n_rows if n_rows else 0), text
+
+
+@pytest.mark.parametrize("s", HOSTILE, ids=HOSTILE_IDS)
+def test_landfix_no_record_shows_the_name_and_the_search_literally(s):
+    v = _tagged(s)
+    ns, _ = bot(hostile_records(v, 0))
+    it = _Inter()
+    run(ns["_modlog_command"](it, "Some One", "ban", v["search"], "n"))
+    (text, kw), = it.sent
+    assert text.startswith("No moderator action is on record for **"), text
+    assert "(kind: Ban; search: " in text and "`%s`" % PLAYER in text, text
+    for f in ("player", "search"):
+        _shows_literally(text, v[f])
+    _only_the_bots_markup(text, 0)
+
+
+@pytest.mark.parametrize("s", HOSTILE, ids=HOSTILE_IDS)
+def test_landfix_one_page_shows_every_field_literally(s):
+    v = _tagged(s)
+    ns, _ = bot(hostile_records(v, 4))
+    it = _Inter()
+    run(ns["_modlog_command"](it, "Some One", "", v["search"], "n"))
+    (text, kw), = it.sent
+    assert "view" not in kw and "4 records, page 1 of 1, newest first." in text, text
+    for f in ROW_FIELDS + HEAD_FIELDS:
+        _shows_literally(text, v[f])
+    _only_the_bots_markup(text, 4)
+
+
+@pytest.mark.parametrize("sort", sorted(("n", "o", "a", "m")))
+@pytest.mark.parametrize("s", HOSTILE, ids=HOSTILE_IDS)
+def test_landfix_every_page_of_every_sort_shows_every_field_literally(s, sort):
+    """Twenty-four records: pages of 10, 10 and 4 rows, walked Next, Next,
+    then Previous, with the kind filter and the search word in the header."""
+    v = _tagged(s)
+    ns, api = bot(hostile_records(v, 24))
+    it = _Inter()
+    run(ns["_modlog_command"](it, "Some One", "ban", v["search"], sort))
+    (text, kw), = it.sent
+    shown, view = [(text, 10)], kw["view"]
+    for label, n_rows in (("Next", 10), ("Next", 4), ("Previous", 10)):
+        text, view, sent = _press(ns, view, label)
+        assert text is not None, sent
+        shown.append((text, n_rows))
+    assert "page 3 of 3, %s." % ns["MODLOG_SORTS"][sort][2] in shown[2][0], shown[2][0]
+    for text, n_rows in shown:
+        assert "(kind: Ban; search: " in text, text
+        for f in ROW_FIELDS + HEAD_FIELDS:
+            _shows_literally(text, v[f])
+        _only_the_bots_markup(text, n_rows)
+    assert len(api.calls) == 4
+
+
+@pytest.mark.parametrize("sid,shown", [
+    (PLAYER, PLAYER), ("1", "1"), ("9" * 20, "9" * 20),
+    ("`x`", UNKNOWN_ID), ("76561190420000777` **x** `", UNKNOWN_ID), ("<@123>", UNKNOWN_ID),
+    ("١٢٣", UNKNOWN_ID), ("１２３", UNKNOWN_ID), ("9" * 21, UNKNOWN_ID),
+    ("", UNKNOWN_ID), ("76561190420000777\n# h", UNKNOWN_ID), (" 76561190420000777", UNKNOWN_ID)],
+    ids=["steam-id", "one-digit", "twenty-digits", "code", "code-then-bold", "mention", "arabic-digits",
+         "fullwidth-digits", "twenty-one-digits", "empty", "break-then-heading", "leading-space"])
+def test_landfix_the_steam_id_in_the_code_span_is_ascii_digits_or_a_fixed_word(sid, shown):
+    """The header prints the player's Steam id inside a code span. A code span
+    ends at a backtick in its text and shows a backslash as typed, so no
+    escape makes a value literal there: the id is printed only when it is 1
+    to 20 ASCII digits, and UNKNOWN_ID otherwise. The internal read answers
+    with the 17 digits the bot asked with, or, asked by name, the players
+    row's steam_id as stored."""
+    v = _tagged("Plain")
+    for total in (0, 4):
+        ns, _ = bot(hostile_records(v, total, steam_id=sid))
+        it = _Inter()
+        run(ns["_modlog_command"](it, "Plain player", "", "", "n"))
+        (text, kw), = it.sent
+        if sid and shown != sid:
+            assert sid not in text, text
+        assert text.count("`") == 2 and "(`%s`)" % shown in text, text
+
+
+@pytest.mark.parametrize("status", [400, 422])
+def test_landfix_a_refusal_detail_is_cut_before_it_is_escaped(status):
+    """The api's refusal word is cut raw, then escaped: escaping first and
+    then cutting at 200 can keep the backslash of a pair and drop the
+    character it escaped, which leaves the backslash to escape the sentence's
+    own closing parenthesis."""
+    detail = "a" * 199 + "*" * 60
+    ns, _ = bot(lambda params: (status, {"detail": detail}))
+    it = _Inter()
+    run(ns["_modlog_command"](it, PLAYER, "", "", "n"))
+    (text, kw), = it.sent
+    assert "(%s). Trying again as it is will not help." % _expect("a" * 199 + "…") in text, text
+
+
+@pytest.mark.parametrize("s", HOSTILE, ids=HOSTILE_IDS)
+def test_landfix_a_refusal_detail_is_literal(s):
+    ns, _ = bot(lambda params: (400, {"detail": s}))
+    it = _Inter()
+    run(ns["_modlog_command"](it, PLAYER, "", "", "n"))
+    (text, kw), = it.sent
+    _shows_literally(text, s)
+    assert "\n" not in text and not _MASKED_LINK.search(_markup(text)), text
+
+
+def test_landfix_the_whole_page_cut_never_ends_inside_an_escape_pair():
+    """The page is cut whole to MODLOG_MSG_MAX as the last step, after every
+    value is escaped. Run at every limit from 10 to 400 characters with names,
+    a search word and rows made of backslashes, the page never passes the
+    limit, and where it is cut the run of backslashes before the mark is even:
+    no escape pair is cut in half."""
+    v = {f: "\\" * 30 for f in ROW_FIELDS + HEAD_FIELDS}
+    ns, _ = bot(lambda params: (200, {}))
+    _, body = hostile_records(v, 4)({"sort": "time", "dir": "desc", "limit": "10"})
+    cut = 0
+    for lim in range(10, 401):
+        ns["MODLOG_MSG_MAX"] = lim
+        text = ns["_modlog_render"](body, page=0, sort="n", action_idx=None, search="\\" * 64)
+        assert len(text) <= lim, (lim, len(text))
+        if text.endswith("…"):
+            cut += 1
+            head = text[:-1]
+            assert (len(head) - len(head.rstrip("\\"))) % 2 == 0, (lim, text[-12:])
+    assert cut > 300, cut

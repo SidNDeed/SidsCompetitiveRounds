@@ -446,6 +446,37 @@ def test_the_census_finds_an_unescaped_name_of_each_kind(census_sites):
     assert not stale
 
 
+# The moderator log's text (LANDFIX-1). Its header's player name and each
+# row's moderator name are cut raw by _modlog_cut and then escaped; its
+# header's Steam id is printed in a code span through _modlog_id. Each
+# unwrapped alone: (as shipped, unwrapped, what the census must then report).
+_MODLOG_UNWRAPS = (
+    ('_escape_md(_modlog_cut(who.get("name") or "unknown name", 40))',
+     '_modlog_cut(who.get("name") or "unknown name", 40)',
+     {("_modlog_render", "name"): 2}),
+    ('_escape_md(_modlog_cut(r.get("actor_name") or r.get("actor"), 40))',
+     '_modlog_cut(r.get("actor_name") or r.get("actor"), 40)',
+     {("_modlog_render", '_modlog_cut(r.get("actor_name") or r.get("actor"), 40)'): 1}),
+    ('sid = _modlog_id(who.get("steam_id"))',
+     'sid = str(who.get("steam_id") or "")',
+     {("_modlog_render", "sid"): 2}),
+)
+
+
+@pytest.mark.parametrize("escaped,raw,want", _MODLOG_UNWRAPS, ids=["player-name", "moderator-name", "steam-id"])
+def test_the_census_counts_each_moderator_log_value_left_unescaped(census_sites, escaped, raw, want):
+    """The census's control for the moderator log: the file as it stands
+    reports nothing (the twin); with the escape after _modlog_cut taken
+    away from the header's name, or from a row's moderator name, or with
+    the Steam id printed without _modlog_id, it reports exactly those sites
+    and their counts. A name that goes through _modlog_cut into a message
+    without an escape is still counted."""
+    assert _unexpected(census_sites) == ({}, {}), _unexpected(census_sites)
+    assert TEXT.count(escaped) == 1, escaped
+    extra, stale = _unexpected(_Census(TEXT.replace(escaped, raw)).sites())
+    assert (extra, stale) == (want, {}), (extra, stale)
+
+
 def test_the_digest_escape_covers_every_character_escape_md_escapes():
     """_qdig_md is in SAFE because it escapes at least what _escape_md
     escapes. Both functions run here, lifted from the bot, on every BMP
