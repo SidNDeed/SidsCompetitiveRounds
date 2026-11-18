@@ -34,6 +34,15 @@ With QDIG-1 merged on that stack, the tree reads 382 and 0: QDIG-1's janitor
 pass adds eleven statements (_qdig_janitor_pass 7, _qdig_load 4), every one a
 module constant or literal, and no other function's count moves, as
 main._janitor_sql_from_sources measures this tree and the stack's.
+
+With QAPPLY-1 (the held-report Accept and Credit), the tree reads 389 and 0:
+the report route's body, which the walk reaches from queue_cleanup_loop, now
+calls the held-report gate and its record (under the held-report replay
+only, which no janitor sets), so seven statements join the inventory
+(_qapply_gate 4, _qapply_finish 1, _modlog_write 1, _modlog_steam_ids 1),
+every one a module constant or literal and none a session statement, and no
+other function's count moves, as main._janitor_sql_from_sources measures
+this tree and the base's.
 """
 import asyncio
 import os
@@ -49,7 +58,7 @@ sys.path.insert(0, os.path.normpath(os.path.join(HERE, "..", "api")))
 import main  # noqa: E402
 import models  # noqa: E402
 
-STATEMENTS, DYNAMIC = 382, 0   # 371 before QDIG-1 (see the module docstring)
+STATEMENTS, DYNAMIC = 389, 0   # 382 before QAPPLY-1, 371 before QDIG-1 (see the module docstring)
 ROOT = (("main", "root"),)
 DEF = re.compile(r"\((\w+)\.unbanned_at IS NULL AND \(\1\.expires_at IS NULL OR \1\.expires_at > NOW\(\)\)\)")
 # the sites that were dynamic on 88a0a2bf, and the alias each one's definition call names
