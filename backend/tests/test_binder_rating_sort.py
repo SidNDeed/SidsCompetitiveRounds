@@ -19,10 +19,11 @@ local server, and the module skips unless its DSN is set:
     BINDER_SORT_TEST_PG_DSN="postgresql+asyncpg://postgres@127.0.0.1:55432/item20test" \\
         python -m pytest tests/test_binder_rating_sort.py -q
 
-Build that database first -- it needs the real schema, both halves of it
-(backend/sql for pc_*, models.py for matches/ranked_series). Set
-BINDER_SORT_TESTS_REQUIRED=1 to turn "no DSN" into a hard failure rather than
-a skip, so a verification run cannot pass by collecting nothing.
+The database may be EMPTY: the module builds every relation it needs in a
+schema of its own, made for the run and dropped after it (see "the schema
+this module builds" below). Set BINDER_SORT_TESTS_REQUIRED=1 to turn "no DSN"
+into a hard failure rather than a skip, so a verification run cannot pass by
+collecting nothing.
 
 There is no pytest-asyncio here, as in test_pc_edition_rollover.py and
 test_a1_predicate_sql.py: each test is a sync function that runs one
@@ -45,6 +46,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "..", "api"))
 
 import main  # noqa: E402
+import models  # noqa: E402
 
 DSN_VAR = "BINDER_SORT_TEST_PG_DSN"
 DSN = os.environ.get(DSN_VAR)
@@ -113,6 +115,150 @@ LIVE_TESTS = 10
 
 def run(coro):
     return asyncio.run(coro)
+
+
+# ── the schema this module builds ────────────────────────────────────────────
+#
+# A seat gives each lane an EMPTY database (lesson 1030), and this module used
+# to need one the migrations had already filled, so its live half ran nowhere.
+# It now builds every relation its seed and the two statements touch, in a
+# schema made for this run, and drops that schema -- and nothing else -- when
+# the module is done. The shape is the one test_music_refund_413.py
+# (`_with_schema`) and test_shop_min_client_version.py (`_routes`) use: CREATE
+# SCHEMA, create_all over the named ORM tables with the search_path pointing
+# at it, and a default on every NOT NULL column that has none.
+#
+# CREATE SCHEMA, never IF NOT EXISTS: a name that already stands is refused
+# rather than adopted, so the teardown can only drop what this run made. The
+# search_path names that schema alone, so relations of the same names
+# elsewhere in the database (the migrated ones item20_board_cost.py --build
+# leaves in public) are neither read nor emptied by the seed.
+
+_SCHEMA = "binder_sort_%s" % uuid.uuid4().hex[:16]
+
+# players, glicko_ratings, matches and ranked_series as models.py declares
+# them (ranked_series, matches.is_ranked and matches.series_id are declared
+# there and in no migration); shop_items and tournaments only because players
+# and ranked_series hold foreign keys to them.
+_ORM_TABLES = (models.Player.__table__, models.ShopItem.__table__,
+               models.Tournament.__table__, models.GlickoRating.__table__,
+               models.RankedSeries.__table__, models.Match.__table__)
+
+# pc_cards and pc_prints exist only in backend/sql: every column as
+# 308_player_cards.sql makes it, plus the one 353_pc_trades.sql adds. The seed
+# only empties them, so their references to pc_editions and pc_packs, which
+# nothing here reads or writes, are left out.
+_PC_DDL = ("""
+    CREATE TABLE pc_cards (
+        id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        subject_player_id   UUID NOT NULL REFERENCES players(id),
+        edition_id          INTEGER NOT NULL,
+        variant             TEXT NOT NULL DEFAULT 'base',
+        first_minted_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+        UNIQUE (subject_player_id, edition_id, variant)
+    )""", """
+    CREATE TABLE pc_prints (
+        id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        card_id          UUID NOT NULL REFERENCES pc_cards(id),
+        owner_player_id  UUID NOT NULL REFERENCES players(id),
+        minted_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+        snapshot_id      INTEGER NOT NULL,
+        rarity           TEXT NOT NULL,
+        foil             BOOLEAN NOT NULL DEFAULT false,
+        signed           BOOLEAN NOT NULL DEFAULT false,
+        pool_rank        INTEGER NOT NULL,
+        rating           DOUBLE PRECISION NULL,
+        peak_rating      DOUBLE PRECISION NULL,
+        board_rank       INTEGER NULL,
+        series_wins      INTEGER NULL,
+        series_losses    INTEGER NULL,
+        top_card         TEXT NULL,
+        title            TEXT NULL,
+        source           TEXT NOT NULL,
+        pack_id          UUID NULL,
+        slot             SMALLINT NULL,
+        discarded_at     TIMESTAMPTZ NULL,
+        discard_shards   INTEGER NULL,
+        acquired_by_trade BOOLEAN NOT NULL DEFAULT false
+    )""")
+
+# The ORM declares its defaults in Python, so create_all leaves NOT NULL
+# columns with no database default, and the seed's raw INSERTs name only the
+# columns they mean. Given a default here, as test_music_refund_413.py's
+# _FILL_DEFAULTS does; it reaches only the schema made above.
+_FILL_DEFAULTS = """
+DO $fill$
+DECLARE r RECORD;
+BEGIN
+  FOR r IN SELECT table_name AS t, column_name AS c, data_type AS d
+             FROM information_schema.columns
+            WHERE table_schema = current_schema()
+              AND is_nullable = 'NO' AND column_default IS NULL
+  LOOP
+    EXECUTE format('ALTER TABLE %I ALTER COLUMN %I SET DEFAULT %s', r.t, r.c,
+      CASE WHEN r.d LIKE 'timestamp%' THEN 'NOW()'
+           WHEN r.d = 'boolean' THEN 'FALSE'
+           WHEN r.d IN ('integer','bigint','smallint','numeric','double precision','real') THEN '0'
+           WHEN r.d = 'uuid' THEN 'gen_random_uuid()'
+           WHEN r.d = 'ARRAY' THEN quote_literal('{}')
+           ELSE quote_literal('') END);
+  END LOOP;
+END $fill$
+"""
+
+
+async def _build_schema(made):
+    """Make the schema and every relation in it. `made` gets True the moment
+    the schema exists, so a build that fails part-way still has it dropped."""
+    _refuse_unless_throwaway(DSN)            # the guard first, every time
+    eng = create_async_engine(DSN)
+    try:
+        async with eng.begin() as c:
+            await c.execute(text('CREATE SCHEMA "%s"' % _SCHEMA))
+        made.append(True)
+    finally:
+        await eng.dispose()
+    eng, _ = await _session()
+    try:
+        async with eng.begin() as c:
+            schema = (await c.execute(text("SELECT current_schema()"))).scalar()
+            assert schema == _SCHEMA, ("the build's search_path", schema)
+            await c.run_sync(models.Base.metadata.create_all,
+                             tables=list(_ORM_TABLES))
+            for stmt in _PC_DDL:
+                await c.execute(text(stmt))
+            await c.exec_driver_sql(_FILL_DEFAULTS)
+    finally:
+        await eng.dispose()
+
+
+async def _drop_schema():
+    eng = create_async_engine(DSN)
+    try:
+        async with eng.begin() as c:
+            await c.execute(text('DROP SCHEMA "%s" CASCADE' % _SCHEMA))
+    finally:
+        await eng.dispose()
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _module_schema():
+    """Built once for the module, after the import-time guard has passed, and
+    dropped once after its last test; without a DSN there is nothing to do."""
+    if not DSN:
+        yield
+        return
+    made = []
+    try:
+        run(_build_schema(made))
+    except BaseException:
+        if made:
+            run(_drop_schema())
+        raise
+    try:
+        yield
+    finally:
+        run(_drop_schema())
 
 
 # ── the fixture ──────────────────────────────────────────────────────────────
@@ -246,7 +392,8 @@ class _CountingSession:
 
 
 async def _session():
-    eng = create_async_engine(DSN)
+    eng = create_async_engine(
+        DSN, connect_args={"server_settings": {"search_path": _SCHEMA}})
     return eng, async_sessionmaker(eng, expire_on_commit=False)
 
 
