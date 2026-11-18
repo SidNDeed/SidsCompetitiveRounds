@@ -332,8 +332,9 @@ async def _drop_schema(kept):
                 missing = sorted(str(want[k]) for k in set(want) - set(now))
                 raise _TeardownRefused(
                     "binder teardown refused, nothing dropped: the objects standing "
-                    "are not the set the build committed; more: %s; missing: %s"
-                    % (more, missing))
+                    "are not the set the build committed; more: %s; missing: %s; "
+                    "run tables standing: %d of %d"
+                    % (more, missing, len(tables), len(_BUILT_TABLES)))
             await c.execute(text("DROP TABLE %s RESTRICT" % qualified))
             await c.execute(text("DROP SCHEMA %s RESTRICT" % name))
     finally:
