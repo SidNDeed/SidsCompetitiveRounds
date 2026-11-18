@@ -1009,6 +1009,7 @@ def test_the_release_train_runs_a_batch_that_adds_no_route(monkeypatch):
 import contextlib  # noqa: E402
 import json  # noqa: E402
 import re  # noqa: E402
+import subprocess  # noqa: E402
 from datetime import datetime, timedelta, timezone  # noqa: E402
 
 ABSENT_BATCH = "mscl"   # an entry with no migration and a skipped bot: the no-sql shape
@@ -1023,6 +1024,14 @@ _UNKNOWN = (True, False, False, ["one marker old and one new"])
 _DOWN = (False, False, True, ["control answered 503"])
 _TRAILER = "\n\nCo-Authored-By: A Test <test@example.invalid>"
 _DROP = object()
+
+
+def _rt_done(kw, stdout, stderr="", rc=0):
+    """A finished process as subprocess.run hands it back: text when the caller asked for text, bytes
+    otherwise, standard output and standard error kept apart."""
+    text = kw.get("text") or kw.get("universal_newlines") or kw.get("encoding")
+    conv = (lambda v: v) if text else (lambda v: v.encode("utf-8"))
+    return SimpleNamespace(returncode=rc, stdout=conv(stdout), stderr=conv(stderr))
 
 
 def _rt_minted(rt, stamp="20261118_112001", label=None):
@@ -1106,21 +1115,20 @@ class _RtWorld:
                    "HEAD^2": self.second_parent}.get(ref, "b" * 40 if ":" in ref else None)
         elif c[:3] == ["git", "--no-optional-locks", "status"]:
             out = ""
-        elif c[:5] == ["git", "remote", "get-url", "--push", "--all"]:
-            self.calls.append(("push-address",))
-            urls = self.push_sequence.pop(0) if self.push_sequence else self.push_urls
-            out = "\n".join(urls)
-            if self.push_address_fails:
-                if check:
-                    raise self.rt.Fail("command failed (rc=2):\n%s" % out)
-                return (out, 2) if want_rc else out
         elif c[:3] == ["python", "-m", "pyflakes"]:
             out = ""
         if out is None:
             raise AssertionError("a command the stubbed train should not issue: %r" % (c,))
         return (out, 0) if want_rc else out
 
-    def zap(self, playbook, limit=None, extra=None):
+    def push_address(self, kw):
+        """`git remote get-url --push --all origin` as the process call answers it: one line per destination
+        on standard output, return code 2 when the world says the question fails."""
+        self.calls.append(("push-address",))
+        urls = self.push_sequence.pop(0) if self.push_sequence else self.push_urls
+        return _rt_done(kw, "".join(u + "\n" for u in urls), "", 2 if self.push_address_fails else 0)
+
+    def zap(self, playbook, limit=None, extra=None, **kw):
         if playbook == "snapshot-scr.yml":
             self.calls.append(("snapshot",))
             if self.snapshot_out is not None:
@@ -1183,6 +1191,8 @@ def _rt_world(monkeypatch, rt):
         # the precursor asks `git cat-file -e <branch>:<file>` directly
         if isinstance(cmd, (list, tuple)) and list(cmd[:3]) == ["git", "cat-file", "-e"]:
             return SimpleNamespace(returncode=0, stdout="", stderr="")
+        if isinstance(cmd, (list, tuple)) and list(cmd[:5]) == ["git", "remote", "get-url", "--push", "--all"]:
+            return w.push_address(kw)
         return inner(cmd, *a, **kw)
     monkeypatch.setattr(_sp, "run", cat_file)
     return w
@@ -1819,6 +1829,15 @@ def test_every_lan_probe_the_check_makes_carries_the_version_header(monkeypatch,
             return ""
         return "0"
     monkeypatch.setattr(rt, "run", run)
+    import subprocess as _sp
+    inner = _sp.run
+
+    def process(cmd, *a, **kw):
+        if isinstance(cmd, (list, tuple)) and cmd and cmd[0] == "curl":
+            cmds.append(list(cmd))
+            return _rt_done(kw, "200")
+        return inner(cmd, *a, **kw)
+    monkeypatch.setattr(_sp, "run", process)
     rt.phase_check(PLAN, {})
     lan = [c for c in cmds if c[0] == "curl"
            and any("//%s:" % h in c[-1] for h in (rt.PRIMARY, rt.STANDBY))]
@@ -1958,10 +1977,10 @@ def test_the_merge_is_authenticated_and_the_remote_checked_before_the_push(monke
 def test_the_remote_gate_names_the_repository_and_reads_only_what_succeeded(monkeypatch, tmp_path, capsys):
     """A command that failed is no answer, and the refusal prints no address.
 
-    `run` reports a failed command's combined output, which can quote the very URL being asked about; a gate
-    that read it would pass on a question git never answered. The expected address is the module's own
-    constant, the command has to have succeeded, and neither the expected nor the answered address appears in
-    the refusal or in anything printed."""
+    A failed command's standard output can still hold the very address being asked about; a gate that read it
+    would pass on a question git never answered. The expected address is the module's own constant, the
+    command's return code has to be 0, and neither the expected nor the answered address appears in the
+    refusal or in anything printed."""
     rt, _src = _release_train()
     url = getattr(rt, "ORIGIN_PUSH_URL", "the module states no push address")
     for i, (fails, answer, says) in enumerate(((True, [url], "did not succeed"),
@@ -1978,43 +1997,163 @@ def test_the_remote_gate_names_the_repository_and_reads_only_what_succeeded(monk
         assert w.kinds("git", "push") == []
 
 
-def test_the_push_address_check_passes_only_when_every_destination_is_the_expected_one(monkeypatch):
-    """Every destination git names must be the expected one; the expected one named twice passes.
+_PUSH_E = "https://example.invalid/the-expected-owner/the-expected-repository.git"
+_PUSH_DIFFER1 = "1 destination(s) that differ"
+_PUSH_CASES = [
+    # (id, standard output with {e} the expected address and {x} another, standard error, return code,
+    #  what the process call raises, the refusal's words or None for a pass)
+    ("E", "{e}\n", "", 0, None, None),
+    ("E-without-a-final-line-end", "{e}", "", 0, None, None),
+    ("E-E", "{e}\n{e}\n", "", 0, None, None),
+    ("E-and-a-warning-on-standard-error", "{e}\n", "warning: a notice git printed\n", 0, None, None),
+    ("E-blank-E", "{e}\n\n{e}\n", "", 0, None, _PUSH_DIFFER1),
+    ("one-blank-line", "\n", "", 0, None, _PUSH_DIFFER1),
+    ("blank-before-E", " {e}\n", "", 0, None, _PUSH_DIFFER1),
+    ("blank-after-E", "{e} \n", "", 0, None, _PUSH_DIFFER1),
+    ("E-then-blank-before-E", "{e}\n {e}\n", "", 0, None, _PUSH_DIFFER1),
+    ("X", "{x}\n", "", 0, None, _PUSH_DIFFER1),
+    ("E-X", "{e}\n{x}\n", "", 0, None, _PUSH_DIFFER1),
+    ("X-E", "{x}\n{e}\n", "", 0, None, _PUSH_DIFFER1),
+    ("X-X", "{x}\n{x}\n", "", 0, None, "2 destination(s) that differ"),
+    ("E-phrase1-E", "{e}\nhttps://example.invalid/post-quantum/a-repository.git\n{e}\n", "", 0, None,
+     _PUSH_DIFFER1),
+    ("E-phrase2-E", "{e}\nhttps://example.invalid/store now, decrypt later/a-repository.git\n{e}\n", "", 0,
+     None, _PUSH_DIFFER1),
+    ("E-phrase3-E", "{e}\nhttps://example.invalid/openssh.com/pq/a-repository.git\n{e}\n", "", 0, None,
+     _PUSH_DIFFER1),
+    ("E-stars-E", "{e}\n**\n{e}\n", "", 0, None, _PUSH_DIFFER1),
+    ("empty", "", "", 0, None, "names no destination"),
+    ("rc2-with-E", "{e}\n", "", 2, None, "did not succeed"),
+    ("timeout", "{e}\n", "", 0, subprocess.TimeoutExpired(["git"], 60), "did not succeed"),
+    ("could-not-start", "", "", 0, FileNotFoundError(2, "no such program"), "did not succeed"),
+]
 
-    The check is driven with an invented expected address set on the module. It passes when the answer
-    names at least one destination and each of them equals the expected address; it refuses another
-    destination beside it or alone, an answer with no destination, and a command that did not succeed. A
-    refusal names no address."""
+
+@pytest.mark.parametrize("stdout,stderr,rc,raises,says",
+                         [pytest.param(*c[1:], id=c[0]) for c in _PUSH_CASES])
+def test_the_push_address_check_compares_git_standard_output_line_for_line(monkeypatch, capsys, stdout, stderr,
+                                                                           rc, raises, says):
+    """The check reads git's standard output alone and every line of it must be the expected address.
+
+    The process call is answered here (standard output, standard error, return code), so whatever the check
+    does to the answer is inside the test. Nothing is removed from the answer, nothing is stripped, nothing
+    is joined to it; one final line end is not a line. A blank line, an address with blanks around it, a
+    line that holds a phrase of the ssh notice, another address beside the expected one or alone: each is a
+    line that differs. An empty answer names no destination. A return code that is not 0, a timeout and a
+    program that cannot start did not succeed. Standard error is no part of the answer. A refusal names no
+    address."""
+    import subprocess as _sp
     rt, _src = _release_train()
-    expected = "https://example.invalid/the-expected-owner/the-expected-repository.git"
-    monkeypatch.setattr(rt, "ORIGIN_PUSH_URL", expected)
+    monkeypatch.setattr(rt, "ORIGIN_PUSH_URL", _PUSH_E)
+    out = stdout.format(e=_PUSH_E, x=FORK_URL)
     asked = []
 
-    def answer_with(lines, fails=False):
-        def fake_run(cmd, check=True, quiet=False, **kw):
-            asked.append(list(cmd))
-            if fails:
-                raise rt.Fail("command failed (rc=2)")
-            return chr(10).join(lines)
-        monkeypatch.setattr(rt, "run", fake_run)
-
-    for lines in ([expected], [expected, expected], [expected, "", expected], ["  %s  " % expected]):
-        answer_with(lines)
+    def process(cmd, *a, **kw):
+        asked.append(list(cmd))
+        if raises is not None:
+            raise raises
+        return _rt_done(kw, out, stderr, rc)
+    monkeypatch.setattr(_sp, "run", process)
+    capsys.readouterr()
+    if says is None:
         rt.assert_push_address()
-    assert all(c == ["git", "remote", "get-url", "--push", "--all", "origin"] for c in asked), asked
-    for lines, fails, says in (([expected, FORK_URL], False, "1 destination(s) that differ"),
-                               ([FORK_URL, expected], False, "1 destination(s) that differ"),
-                               ([FORK_URL], False, "1 destination(s) that differ"),
-                               ([FORK_URL, FORK_URL], False, "2 destination(s) that differ"),
-                               ([], False, "names no destination"),
-                               (["", "  "], False, "names no destination"),
-                               ([expected], True, "did not succeed")):
-        answer_with(lines, fails)
+    else:
         with pytest.raises(rt.Fail) as exc:
             rt.assert_push_address()
         msg = str(exc.value)
-        assert says in msg and "nothing is pushed" in msg, (lines, fails, msg)
-        assert expected not in msg and FORK_URL not in msg
+        assert says in msg and "nothing is pushed" in msg, msg
+        said = msg + capsys.readouterr().out
+        for line in out.split("\n"):
+            assert not line.strip() or line.strip() not in said, (line, said)
+    assert asked == [["git", "remote", "get-url", "--push", "--all", "origin"]], asked
+
+
+def test_the_status_code_is_curls_standard_output_alone(monkeypatch, tmp_path):
+    """The status code a box answers is curl's standard output, and nothing curl writes to standard error.
+
+    A route batch's build is read from the code its routes answer: 404 is the old build. A notice on standard
+    error joined to that code made `404` read as another code, and so as the NEW build, in the per-box check a
+    deploy waits on. The code is read alone and as it stands; a return code that is not 0 is a Fail."""
+    import subprocess as _sp
+    rt, _src = _release_train()
+    name = next(n for n, e in rt.BATCHES.items() if e.get("new_routes") and not e.get("json_markers"))
+    _rt_bind(monkeypatch, rt, name, tmp_path)
+    route = rt.NEW_ROUTES[0]
+    note = "Warning: a notice curl printed\n"
+    answers = {r: ("404", note, 0) for r in rt.NEW_ROUTES}
+
+    def process(cmd, *a, **kw):
+        assert cmd[0] == "curl" and "-w" in cmd, cmd
+        return _rt_done(kw, *answers.get(cmd[-1].split(":8443", 1)[1], ("200", "", 0)))
+    monkeypatch.setattr(_sp, "run", process)
+    assert rt.http_code(rt.PRIMARY, route) == "404"
+    ok, present, absent, readings = rt.code_state(rt.PRIMARY)
+    assert (ok, present, absent) == (True, False, True), readings
+    with pytest.raises(rt.Fail) as exc:
+        rt.assert_box_build(rt.PRIMARY, "new", "a" * 40)
+    assert "it serves the OLD build" in str(exc.value)
+    answers[route] = ("200", "", 0)
+    assert rt.http_code(rt.PRIMARY, route) == "200"
+    answers[route] = ("000", "curl: (7) Failed to connect\n", 7)
+    with pytest.raises(rt.Fail) as exc:
+        rt.http_code(rt.PRIMARY, route)
+    assert "command failed (rc=7)" in str(exc.value)
+
+
+class _RtJobChild:
+    """A contained child as the job primitive hands it back: its two streams kept apart, unless the caller
+    sent standard error into standard output."""
+
+    def __init__(self, stdout, stderr, merged):
+        self.returncode = 0
+        self._streams = (stdout + stderr, None) if merged else (stdout, stderr)
+
+    def communicate(self, timeout=None):
+        return self._streams
+
+
+def test_the_snapshot_name_is_read_from_the_plays_standard_output_alone(monkeypatch, tmp_path):
+    """The snapshot phase counts the names in the play's standard output, with no line of it removed.
+
+    The child is answered at the job primitive, so what the train does to the play's output is inside the
+    test. A second name on a line that also holds a phrase of the ssh notice is still a second name, and the
+    phase refuses. A name that only standard error prints is no name; another name that only standard error
+    prints does not count against the one standard output names."""
+    import subprocess as _sp
+    rt, _src = _release_train()
+    recap = "PLAY RECAP box : ok=2 changed=1 unreachable=0 failed=0\n"
+    notice = "** WARNING: connection is not using a post-quantum key exchange algorithm.\n"
+    cases = (
+        ("the minted name; the ssh notice on standard error",
+         "TASK [snapshot] ok: created {new}\n" + recap, notice, None),
+        ("a second name on a line that holds a phrase of the ssh notice",
+         "TASK [snapshot] ok: created {new}\npruned {old} (post-quantum)\n" + recap, "", "different names"),
+        ("the name only on standard error", recap, "created {new}\n", "printed no name"),
+        ("another name only on standard error", "TASK [snapshot] ok: created {new}\n" + recap,
+         "pruned {old}\n", None),
+    )
+    for i, (why, stdout, stderr, says) in enumerate(cases):
+        _rt_bind(monkeypatch, rt, "ban-cap", tmp_path / ("case%d" % i))
+        names = dict(new=_rt_minted(rt, "20261118_112001"), old=_rt_minted(rt, "20261117_030000"))
+        spawned = []
+
+        def job_spawn(argv, job_name=None, before_resume=None, _o=stdout.format(**names),
+                      _e=stderr.format(**names), **kw):
+            spawned.append(kw.get("stderr"))
+            return _RtJobChild(_o, _e, kw.get("stderr") == _sp.STDOUT)
+        monkeypatch.setattr(rt, "job_spawn", job_spawn)
+        monkeypatch.setattr(rt, "job_end", lambda p, why="": {"empty": True})
+        monkeypatch.setattr(rt, "child_ended", lambda *a, **kw: None)
+        st = {}
+        if says is None:
+            rt.phase_snapshot(GO, st)
+            assert st["snapshot"] == names["new"], (why, st)
+        else:
+            with pytest.raises(rt.Fail) as exc:
+                rt.phase_snapshot(GO, st)
+            assert says in str(exc.value), (why, str(exc.value))
+            assert "snapshot" not in st, why
+        assert len(spawned) == 1, why
 
 
 def test_the_train_refuses_a_precursor_subject_that_describes_no_commit():
