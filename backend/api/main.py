@@ -8052,6 +8052,17 @@ _MAIL_SPAM_CASE_LOCK_BUILD = 2
 # construction, probed by the release train and read by nothing else
 # (#306). Absent on any build before it.
 _MODLOG_BUILD = 1
+# Bans part 2a: 1 = this build refuses an actively banned account on every
+# state-changing route (the soft session check's ban read, the ban gates of
+# the signature-only and bot routes, the report refusals, the admin check)
+# and voids a banned account's open series and lobbies in the ban's own
+# transaction, reported on /health as `ban_sweep_build`. It names build
+# identity only: what the batch changes is seen by no phase of the train, so
+# without it the train could not tell a box on the new build from a stale
+# one (learnings 780, 794). A code constant, equal on both boxes by
+# construction, probed by the release train and read by nothing else
+# (#306). Absent on any build before it.
+_BAN_SWEEP_BUILD = 1
 
 
 def _title_ladders_health_word() -> int:
@@ -8136,6 +8147,7 @@ async def health_check(db: AsyncSession = Depends(get_db)):
                               admin_evidence_population=_admin_evidence.population_health_word(),
                               mail_spam_case_lock_build=_MAIL_SPAM_CASE_LOCK_BUILD,
                               modlog_build=_MODLOG_BUILD,
+                              ban_sweep_build=_BAN_SWEEP_BUILD,
                               build_manifest=_build_manifest.health_word(),
                               review_eval=_review_rules.review_eval(),
                               review_rules=_review_rules.health_word(),
@@ -8210,6 +8222,7 @@ async def health_check(db: AsyncSession = Depends(get_db)):
                               admin_evidence_population=_admin_evidence.population_health_word(),
                               mail_spam_case_lock_build=_MAIL_SPAM_CASE_LOCK_BUILD,
                               modlog_build=_MODLOG_BUILD,
+                              ban_sweep_build=_BAN_SWEEP_BUILD,
                               build_manifest=_build_manifest.health_word(),
                               review_eval=_review_rules.review_eval(),
                               review_rules=_review_rules.health_word(),
