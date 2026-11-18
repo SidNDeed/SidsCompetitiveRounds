@@ -9,9 +9,9 @@ measurement (#302). Run it and you get the same table.
     python backend/tests/item20_board_cost.py --build      # fixture, ~1 minute
     python backend/tests/item20_board_cost.py              # measure only
 
-It also leaves behind the database `test_binder_rating_sort.py` wants, which is
-why `--build` exists at all: that suite skips unless BINDER_SORT_TEST_PG_DSN
-points at a schema this builds.
+`test_binder_rating_sort.py` does not need the database this builds: it makes
+the relations it reads in a schema of its own, so an empty database will do,
+and it skips only when BINDER_SORT_TEST_PG_DSN is unset.
 
 WHAT IT PROVES AND WHAT IT DOES NOT
 -----------------------------------
