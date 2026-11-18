@@ -2207,6 +2207,11 @@ async def upload_auto_log(request: Request, db: AsyncSession = Depends(get_db)):
         # from one where no client has ever called the route (#438/#443).
         print(f"[AUTO-LOG] refused 401: session check failed for {req.steam_id}")
         raise HTTPException(status_code=401, detail=_SESSION_REJECT)
+    # Bans part 2a (S5, BAN-R3): an actively banned claimed id uploads no log.
+    # A ban deletes the account's sessions, so the check above already refuses
+    # one; this read states the rule where the route admits.
+    from main import _ban_gate_or_raise   # late import: main imports this module
+    await _ban_gate_or_raise(db, req.steam_id, request)
 
     log_blob = (req.log_text or "").strip()
     if not log_blob:
