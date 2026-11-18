@@ -1746,15 +1746,22 @@ def test_a_distinct_account_of_a_captured_room_is_compared_and_kept():
 def test_a_variant_row_is_as_actionable_in_the_admin_queue_as_any_other():
     """Keeping a payload nobody can act on would be half a fix. The queue's
     three endpoints key on the row's id, its mode, its player_ids and its
-    created_at — never on photon_room_id, which the list only renders."""
+    created_at — never on photon_room_id, which the list only renders.
+    Since QAPPLY-1 the Accept and the Credit read the row through
+    _qapply_held, whose statement keys on the id alone."""
     listing = inspect.getsource(main.admin_list_quarantine)
     assert "q.status = 'pending'" in listing
     assert "photon_room_id = " not in listing
-    for fn in (main.admin_accept_quarantine, main.admin_discard_quarantine):
+    src = inspect.getsource(main.admin_discard_quarantine)
+    assert "WHERE id=CAST(:qid AS UUID)" in src or \
+           "WHERE id = CAST(:qid AS UUID)" in src
+    assert "photon_room_id" not in src
+    for fn in (main.admin_accept_quarantine, main.admin_credit_quarantine):
         src = inspect.getsource(fn)
-        assert "WHERE id=CAST(:qid AS UUID)" in src or \
-               "WHERE id = CAST(:qid AS UUID)" in src
-        assert "photon_room_id" not in src
+        assert "_qapply_held(db, qid_uuid)" in src and "photon_room_id" not in src
+    held = " ".join(main._QAPPLY_SQL_HELD.split())
+    assert held.split(" WHERE ", 1)[1].startswith("q.id = CAST(:qid AS uuid)")
+    assert "photon_room_id = " not in held
 
 
 def test_an_encoding_difference_is_not_a_distinct_account():

@@ -390,8 +390,12 @@ def test_grants_family_records(case, admin_open):
 
 
 def test_cards_and_quarantine_accept_records(case, admin_open):
-    """The cards family's portrait clear, and the quarantine accept (results
-    family): each one record naming its players, read back."""
+    """The cards family's portrait clear: one record naming its player, read
+    back. The quarantine accept (results family) writes its record only when
+    it applies the held report (QAPPLY-1); this 1v1 row is one it refuses
+    (409, the team-row sentence), twice, with no record and the row still
+    pending. The applied Accept's record (its players, its note, its game)
+    is read back in test_qapply_pg.py."""
     async def body(sm):
         async def seed(db):
             a, _ = await _admin(db)
@@ -406,22 +410,22 @@ def test_cards_and_quarantine_accept_records(case, admin_open):
         async with sm() as db:
             await main.admin_pc_portrait_clear({"admin_steam_id": a, "steam_id": t, "lock_days": 7,
                                                 "signature": "x"}, db=db)
-        async with sm() as db:
-            await main.admin_accept_quarantine(str(q), main._AdminQuarantineReq(
-                admin_steam_id=a, note="checked by hand"), db=db)
-        async with sm() as db:
-            again = None
-            try:
-                await main.admin_accept_quarantine(str(q), main._AdminQuarantineReq(admin_steam_id=a), db=db)
-            except HTTPException as exc:
-                again = exc.status_code
+        refused = []
+        for note in ("checked by hand", None):
+            async with sm() as db:
+                try:
+                    await main.admin_accept_quarantine(str(q), main._AdminQuarantineReq(
+                        admin_steam_id=a, note=note), db=db)
+                except HTTPException as exc:
+                    refused.append((exc.status_code, exc.detail))
         async with sm() as db:
             rows = await _records(db, a)
-        assert again == 409
-        assert [r["action"] for r in rows] == ["pc_portrait_clear", "quarantine_accept"], rows
+            status = (await db.execute(text(
+                "SELECT status FROM match_report_quarantine WHERE id = CAST(:q AS uuid)"), {"q": str(q)})).scalar()
+        assert refused == [(409, main._QAPPLY_TEXTS["team"])] * 2, refused
+        assert [r["action"] for r in rows] == ["pc_portrait_clear"], rows
         assert rows[0]["affected_steam_ids"] == [t] and rows[0]["details"]["lock_days"] == 7
-        assert rows[1]["affected_steam_ids"] == sorted([p[0][0], p[1][0]])
-        assert rows[1]["reason"] == "checked by hand" and rows[1]["details"]["quarantine_id"] == str(q)
+        assert status == "pending", status
     _with_sm(case, body)
 
 

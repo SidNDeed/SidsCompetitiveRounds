@@ -2243,19 +2243,37 @@ def test_k12_the_quarantine_table_is_written_only_by_the_capture_and_the_two_adm
     none of which can write 'accepted' or apply a result: the janitor's
     (status 'filed' and the review columns, nothing else; only from
     _qdig_janitor_pass) and the posted route's two (digest_posted_at or
-    digest_reminded_at alone; only from internal_quarantine_digest_posted)."""
+    digest_reminded_at alone; only from internal_quarantine_digest_posted).
+    QAPPLY-1 moves the Accept's UPDATE into a module constant and adds the
+    Credit's: _QAPPLY_SQL_ACCEPTED (status 'accepted' and the review
+    columns; only from _qapply_finish, which the report route's body calls
+    only under the held-report replay an admin's Accept sets) and
+    _QAPPLY_SQL_CREDITED (status 'credited' and the review columns; only
+    from _qapply_credit). Both key on the row's id alone: their status test
+    is _qapply_held's, made under that row's FOR UPDATE lock, and both
+    callers run only after it."""
     upd = r"update\s+match_report_quarantine"
-    assert [w for w in _writes_to(upd) if w is not None] == ["admin_accept_quarantine", "admin_discard_quarantine"]
+    assert [w for w in _writes_to(upd) if w is not None] == ["admin_discard_quarantine"]
     consts = _module_writer_constants(upd)
-    assert sorted(consts) == ["_QDIG_SQL_JANITOR_FILE", "_QDIG_SQL_POSTED_NEW", "_QDIG_SQL_POSTED_REMINDER"]
+    assert sorted(consts) == ["_QAPPLY_SQL_ACCEPTED", "_QAPPLY_SQL_CREDITED", "_QDIG_SQL_JANITOR_FILE",
+                              "_QDIG_SQL_POSTED_NEW", "_QDIG_SQL_POSTED_REMINDER"]
     assert _writes_to(upd).count(None) == len(consts)
-    sets = {k: " ".join(v.split()).split(" SET ", 1)[1].split(" WHERE ", 1)[0] for k, v in consts.items()}
+    sets = {k: " ".join(v.split()).split(" SET ", 1)[1].rsplit(" WHERE ", 1)[0] for k, v in consts.items()}
+    review = ("reviewed_at = NOW(), review_note = CAST(:note AS text), reviewed_by = (SELECT id FROM players "
+              "WHERE steam_id = CAST(:sid AS varchar))")
     assert sets == {
+        "_QAPPLY_SQL_ACCEPTED": "status = 'accepted', " + review,
+        "_QAPPLY_SQL_CREDITED": "status = 'credited', " + review,
         "_QDIG_SQL_JANITOR_FILE": "status = 'filed', reviewed_at = NOW(), reviewed_by = NULL, "
                                   "review_note = CAST(:note AS text)",
         "_QDIG_SQL_POSTED_NEW": "digest_posted_at = NOW()",
         "_QDIG_SQL_POSTED_REMINDER": "digest_reminded_at = NOW()"}
-    assert all("status = 'pending'" in " ".join(v.split()) for v in consts.values())
+    assert all("status = 'pending'" in " ".join(v.split()) for k, v in consts.items() if k.startswith("_QDIG_"))
+    assert all(" ".join(v.split()).rsplit(" WHERE ", 1)[1] == "id = CAST(:qid AS uuid) RETURNING id"
+               for k, v in consts.items() if k.startswith("_QAPPLY_"))
+    assert _users_of("_QAPPLY_SQL_ACCEPTED") == ["_qapply_finish"]
+    assert _users_of("_QAPPLY_SQL_CREDITED") == ["_qapply_credit"]
+    assert _users_of("_qapply_finish") == ["submit_ffa_match"]
     assert _users_of("_QDIG_SQL_JANITOR_FILE") == ["_qdig_janitor_pass"]
     assert _users_of("_QDIG_SQL_POSTED_NEW") == _users_of("_QDIG_SQL_POSTED_REMINDER") == \
         ["internal_quarantine_digest_posted"]
