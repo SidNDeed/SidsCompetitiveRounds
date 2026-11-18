@@ -181,9 +181,16 @@ async def _session(db, sid):
     return token
 
 
+async def _admin(db):
+    """An admin roster row (player_bans.banned_by_steam_id references it)."""
+    sid = _sid()
+    await lh._insert(db, "admin_users", {"steam_id": sid})
+    return sid
+
+
 async def _ban(sm, target, minutes=60):
-    admin = _sid()
     async with sm() as db:
+        admin = await _admin(db)
         ans = await main._apply_ban_core(db, admin_steam_id=admin, target_steam_id=target,
                                          reason="ban-sweep", duration_minutes=minutes)
         await db.commit()
@@ -658,8 +665,9 @@ async def _s10(sm, end_sql):
     """In ONE transaction: an open ban row whose end is `end_sql`, the wall
     clock run past it when the end is near, then a length change for the
     account. Returns (answer, the moderator log actions written)."""
-    admin, target = _sid(), _sid()
+    target = _sid()
     async with sm() as db:
+        admin = await _admin(db)
         await _player(db, target)
         await db.execute(text(
             "INSERT INTO player_bans (id, steam_id, reason, banned_by_steam_id, banned_at, expires_at)"
