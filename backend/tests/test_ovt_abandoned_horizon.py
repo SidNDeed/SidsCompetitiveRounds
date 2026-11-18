@@ -1897,7 +1897,12 @@ PIN_RE = re.compile(r'PIN main\.py:(\d+) "([^"]+)"')
 # photon_room_id FROM ovt_series ... FOR SHARE). It re-reads only the row
 # the live arm has just selected, by id, and keeps it only in the live arm's
 # statuses, so it opens no path to a row the live arm would not take.
-OVT_SERIES_STATUS_STATEMENTS = 32
+# 34 with the ban sweep (bans part 2a): _ban_void_lock's read of the banned
+# account's ACTIVE 1v2 series by roster, and _ban_void_apply's UPDATE of that
+# row from 'active' to 'canceled' (member_banned). Both take only 'active'
+# rows, by the banned account's seat; a 14-day-stuck active row holding the
+# account is ended by the ban like any other active one.
+OVT_SERIES_STATUS_STATEMENTS = 34
 
 
 def test_every_bug391_source_citation_resolves_to_what_it_names():
