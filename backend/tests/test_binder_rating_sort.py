@@ -110,7 +110,7 @@ needs_pg = pytest.mark.skipif(
 # gate (the test at the bottom of this file always runs) so that moving one
 # behind the gate is a deliberate edit and not a silent extra "skipped" that
 # still reads as a clean run.
-LIVE_TESTS = 10
+LIVE_TESTS = 12
 
 
 def run(coro):
@@ -122,17 +122,30 @@ def run(coro):
 # A seat gives each lane an EMPTY database (lesson 1030), and this module used
 # to need one the migrations had already filled, so its live half ran nowhere.
 # It now builds every relation its seed and the two statements touch, in a
-# schema made for this run, and drops that schema -- and nothing else -- when
-# the module is done. The shape is the one test_music_refund_413.py
+# schema made for this run. The shape is the one test_music_refund_413.py
 # (`_with_schema`) and test_shop_min_client_version.py (`_routes`) use: CREATE
 # SCHEMA, create_all over the named ORM tables with the search_path pointing
 # at it, and a default on every NOT NULL column that has none.
 #
-# CREATE SCHEMA, never IF NOT EXISTS: a name that already stands is refused
-# rather than adopted, so the teardown can only drop what this run made. The
-# search_path names that schema alone, so relations of the same names
-# elsewhere in the database (the migrated ones item20_board_cost.py --build
-# leaves in public) are neither read nor emptied by the seed.
+# CREATE SCHEMA, never IF NOT EXISTS: when a schema of the run's name already
+# stands, the statement fails before the fixture records the schema as its
+# own, so the fixture never drops it (test_s14). The record is made inside the
+# creating transaction, so there is no moment at which the schema stands and
+# the fixture does not know it made it.
+#
+# The teardown drops the eight tables of `_BUILT_TABLES` by schema-qualified
+# name in one statement, then the schema, both with RESTRICT, in ONE
+# transaction; nothing is dropped by dependency. Measured: once those eight
+# are dropped, nothing else of the build is left in the schema. An object
+# outside the schema that depends on one of its tables makes the teardown
+# fail with PostgreSQL's own error, and the transaction rolls back, so that
+# object, the schema and its tables all still stand (test_s13). Both drops
+# say IF EXISTS, for a creating transaction that was recorded but rolled back.
+#
+# The seed and both statements under test name their tables unqualified, and
+# the search_path names the run's schema alone, so they read and empty only
+# the run's tables, never tables of the same names elsewhere in the database
+# (the migrated ones item20_board_cost.py --build leaves in public).
 
 _SCHEMA = "binder_sort_%s" % uuid.uuid4().hex[:16]
 
@@ -182,6 +195,9 @@ _PC_DDL = ("""
         acquired_by_trade BOOLEAN NOT NULL DEFAULT false
     )""")
 
+# Every table the build makes, which is everything the teardown drops.
+_BUILT_TABLES = tuple(t.name for t in _ORM_TABLES) + ("pc_cards", "pc_prints")
+
 # The ORM declares its defaults in Python, so create_all leaves NOT NULL
 # columns with no database default, and the seed's raw INSERTs name only the
 # columns they mean. Given a default here, as test_music_refund_413.py's
@@ -208,14 +224,16 @@ END $fill$
 
 
 async def _build_schema(made):
-    """Make the schema and every relation in it. `made` gets True the moment
-    the schema exists, so a build that fails part-way still has it dropped."""
+    """Make the schema and every relation in it. `made` gets True inside the
+    creating transaction, directly after CREATE SCHEMA returned, so a build
+    that fails part-way, or a commit that is interrupted, still has the schema
+    dropped; a CREATE SCHEMA that fails records nothing."""
     _refuse_unless_throwaway(DSN)            # the guard first, every time
     eng = create_async_engine(DSN)
     try:
         async with eng.begin() as c:
             await c.execute(text('CREATE SCHEMA "%s"' % _SCHEMA))
-        made.append(True)
+            made.append(True)
     finally:
         await eng.dispose()
     eng, _ = await _session()
@@ -233,28 +251,39 @@ async def _build_schema(made):
 
 
 async def _drop_schema():
+    """The eight tables, then the schema, RESTRICT, in one transaction. A
+    dependent object outside the schema makes this raise and roll back."""
     eng = create_async_engine(DSN)
     try:
         async with eng.begin() as c:
-            await c.execute(text('DROP SCHEMA "%s" CASCADE' % _SCHEMA))
+            await c.execute(text("DROP TABLE IF EXISTS %s RESTRICT" % ", ".join(
+                '"%s"."%s"' % (_SCHEMA, t) for t in _BUILT_TABLES)))
+            await c.execute(text('DROP SCHEMA IF EXISTS "%s" RESTRICT' % _SCHEMA))
     finally:
         await eng.dispose()
 
 
-@pytest.fixture(scope="module", autouse=True)
-def _module_schema():
-    """Built once for the module, after the import-time guard has passed, and
-    dropped once after its last test; without a DSN there is nothing to do."""
-    if not DSN:
-        yield
-        return
-    made = []
+def _build_owned(made):
+    """The build; when it fails after the schema was recorded as this run's,
+    the schema is dropped before the failure goes on to pytest."""
     try:
         run(_build_schema(made))
     except BaseException:
         if made:
             run(_drop_schema())
         raise
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _module_schema():
+    """Built once for the module, after the import-time guard has passed, and
+    dropped once after its last test; without a DSN there is nothing to do.
+    A teardown that fails is not caught: pytest reports it."""
+    if not DSN:
+        yield
+        return
+    made = []
+    _build_owned(made)
     try:
         yield
     finally:
@@ -1110,6 +1139,95 @@ def test_s12_health_answers_binder_standings_1_on_both_arms(monkeypatch):
         r = TestClient(main.app, raise_server_exceptions=False).get("/api/v1/health")
         assert r.status_code == 200, r.text
         assert r.json().get("binder_standings") == 1, r.json()
+
+
+# ── the build's own teardown and ownership ───────────────────────────────────
+
+def _sqlstates(exc):
+    """The SQLSTATE of a database error, wherever SQLAlchemy's wrapping puts it."""
+    orig = getattr(exc, "orig", None)
+    return {getattr(x, "sqlstate", None)
+            for x in (exc, orig, getattr(orig, "__cause__", None))} - {None}
+
+
+@needs_pg
+def test_s13_the_teardown_fails_rather_than_drop_an_outside_dependent():
+    """A view in public over the run's `players` depends on the schema from
+    OUTSIDE it. The teardown must fail with PostgreSQL's own refusal (2BP01,
+    dependent objects still exist) and leave the view, the schema and every
+    table it made standing; a drop that followed dependencies would take the
+    view with it. The test then drops its own view, and the module's ordinary
+    teardown afterwards succeeds.
+    """
+    view = "binder_sort_view_%s" % _SCHEMA[len("binder_sort_"):]
+
+    async def standing(c):
+        schema = (await c.execute(text(
+            "SELECT count(*) FROM pg_namespace WHERE nspname = :s"), {"s": _SCHEMA})).scalar()
+        tables = (await c.execute(text(
+            "SELECT count(*) FROM pg_tables WHERE schemaname = :s"), {"s": _SCHEMA})).scalar()
+        has_view = (await c.execute(text("SELECT to_regclass(:v) IS NOT NULL"),
+                                    {"v": 'public."%s"' % view})).scalar()
+        return schema, tables, has_view
+
+    async def go():
+        eng = create_async_engine(DSN)
+        try:
+            async with eng.begin() as c:
+                await c.execute(text('CREATE VIEW public."%s" AS SELECT id FROM "%s".players'
+                                     % (view, _SCHEMA)))
+            try:
+                with pytest.raises(Exception) as e:
+                    await _drop_schema()
+                assert "2BP01" in _sqlstates(e.value), repr(e.value)
+                async with eng.connect() as c:
+                    assert await standing(c) == (1, len(_BUILT_TABLES), True)
+            finally:
+                async with eng.begin() as c:
+                    await c.execute(text('DROP VIEW IF EXISTS public."%s"' % view))
+        finally:
+            await eng.dispose()
+    run(go())
+
+
+@needs_pg
+def test_s14_a_schema_of_the_runs_name_that_stands_is_refused_and_left(monkeypatch):
+    """A schema that already stands under the name the build is about to
+    create is refused (42P06, duplicate schema) and never adopted: the build
+    records nothing, so the fixture's clean-up drops nothing, and the planted
+    schema and its `players` row still stand. The run's name is pointed at a
+    fresh one for this test, because the module's own schema stands under
+    the real one. The test removes its own plant.
+    """
+    planted = "binder_sort_%s" % uuid.uuid4().hex[:16]
+
+    async def sql(*stmts):
+        eng = create_async_engine(DSN)
+        try:
+            async with eng.begin() as c:
+                out = None
+                for s in stmts:
+                    r = await c.execute(text(s))
+                    out = r.scalar() if r.returns_rows else None
+                return out
+        finally:
+            await eng.dispose()
+
+    run(sql('CREATE SCHEMA "%s"' % planted,
+            'CREATE TABLE "%s".players (id integer PRIMARY KEY)' % planted,
+            'INSERT INTO "%s".players VALUES (1)' % planted))
+    try:
+        monkeypatch.setattr(sys.modules[__name__], "_SCHEMA", planted)
+        made = []
+        with pytest.raises(Exception) as e:
+            _build_owned(made)
+        assert "42P06" in _sqlstates(e.value), repr(e.value)
+        assert made == [], "a schema the build did not make was recorded as its own"
+        assert run(sql("SELECT count(*) FROM pg_namespace WHERE nspname = '%s'" % planted)) == 1
+        assert run(sql('SELECT count(*) FROM "%s".players' % planted)) == 1
+    finally:
+        run(sql('DROP TABLE IF EXISTS "%s".players' % planted,
+                'DROP SCHEMA IF EXISTS "%s"' % planted))
 
 
 # ── the gate's own guard, always outside it ──────────────────────────────────
