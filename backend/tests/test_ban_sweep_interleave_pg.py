@@ -5,7 +5,8 @@ the case schema of test_ban_sweep_live.
 Each case is the same interleave. A second connection runs the ban core
 (_apply_ban_core) and holds its transaction open, so it holds the target's
 identity lock without committing. The route is called and must WAIT: its
-own backend is seen waiting on an advisory lock in pg_locks. The ban then
+backend is seen waiting on an advisory lock in pg_locks (any backend of the
+case's database: the case runs alone there). The ban then
 commits, and the route must refuse and leave no row. The wait is observed,
 never assumed: the poll ends as soon as the route's backend waits or the
 route returns, within a bound, so the case cannot pass by timing.
@@ -67,10 +68,14 @@ async def _interleave(sm, target, route):
                 break
             if "pid" not in box:
                 continue
+            # Any backend of this database: a handler that ends a transaction
+            # (the bug report's T1) may take its writing one on another pooled
+            # connection, so the route's first pid is not the one that waits.
             async with sm() as probe:
                 waiting = (await probe.execute(text(
-                    "SELECT count(*) FROM pg_locks WHERE pid = :p AND NOT granted"
-                    " AND locktype = 'advisory'"), {"p": box["pid"]})).scalar()
+                    "SELECT count(*) FROM pg_locks l JOIN pg_stat_activity a ON a.pid = l.pid"
+                    " WHERE NOT l.granted AND l.locktype = 'advisory'"
+                    " AND a.datname = current_database() AND l.pid <> pg_backend_pid()"))).scalar()
             if waiting:
                 waited = True
                 break
