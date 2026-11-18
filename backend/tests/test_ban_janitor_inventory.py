@@ -34,6 +34,13 @@ With QDIG-1 merged on that stack, the tree reads 382 and 0: QDIG-1's janitor
 pass adds eleven statements (_qdig_janitor_pass 7, _qdig_load 4), every one a
 module constant or literal, and no other function's count moves, as
 main._janitor_sql_from_sources measures this tree and the stack's.
+
+With the ban sweep (bans part 2a) the tree reads 384 and 0: the janitor
+already reaches _check_steam_session and submit_ffa_match, and each now
+calls a ban read, so _is_banned (1, through the soft check's ban read) and
+_ban_gate_any_or_raise (1, through the FFA report's gate) are counted; both
+statements resolve, and no other function's count moves, as
+main._janitor_sql_from_sources measures this tree and e3c8b2a2's.
 """
 import asyncio
 import os
@@ -49,7 +56,7 @@ sys.path.insert(0, os.path.normpath(os.path.join(HERE, "..", "api")))
 import main  # noqa: E402
 import models  # noqa: E402
 
-STATEMENTS, DYNAMIC = 382, 0   # 371 before QDIG-1 (see the module docstring)
+STATEMENTS, DYNAMIC = 384, 0   # 382 before the ban sweep, 371 before QDIG-1 (see the module docstring)
 ROOT = (("main", "root"),)
 DEF = re.compile(r"\((\w+)\.unbanned_at IS NULL AND \(\1\.expires_at IS NULL OR \1\.expires_at > NOW\(\)\)\)")
 # the sites that were dynamic on 88a0a2bf, and the alias each one's definition call names
