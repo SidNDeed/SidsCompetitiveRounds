@@ -1362,6 +1362,13 @@ class HealthResponse(BaseModel):
     # 1186). Probed by the release train and read by nothing else (#306). No
     # default, as above. Absent on any build before it.
     modlog_build: int
+    # qapply_build: release-train verification plumbing, not a design
+    # mechanism (main._QAPPLY_BUILD; 1 = this build's Accept applies a held
+    # FFA report and its Credit route pays XP and gold without ratings). It
+    # names build identity only. A code constant, equal on both roles by
+    # construction. Probed by the release train and read by nothing else
+    # (#306). No default, as above. Absent on any build before it.
+    qapply_build: int
     # build_manifest: the SHA-256 of the build-manifest.json this image's build
     # wrote (build_manifest.py: the build context's digest and the identity of
     # every installed wheel and .deb), "absent" when the process was not

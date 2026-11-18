@@ -8048,6 +8048,16 @@ _MAIL_SPAM_CASE_LOCK_BUILD = 2
 # (#306). Absent on any build before it.
 _MODLOG_BUILD = 1
 
+# QAPPLY-1: 1 = this build's Accept of a held FFA report applies the game
+# through the report route's body (_qapply_run) and its Credit route pays XP
+# and gold without ratings, reported on /health as `qapply_build`. It names
+# build identity only: a stale box answers the same keys on every GET the
+# train reads, so without it the train could not tell a refreshed box from a
+# stale one (learnings 780, 794, 1186). A code constant, equal on both boxes
+# by construction, probed by the release train and read by nothing else
+# (#306). Absent on any build before it.
+_QAPPLY_BUILD = 1
+
 
 def _title_ladders_health_word() -> int:
     """/health `title_ladders`: how many ladders the catalogue this build
@@ -8131,6 +8141,7 @@ async def health_check(db: AsyncSession = Depends(get_db)):
                               admin_evidence_population=_admin_evidence.population_health_word(),
                               mail_spam_case_lock_build=_MAIL_SPAM_CASE_LOCK_BUILD,
                               modlog_build=_MODLOG_BUILD,
+                              qapply_build=_QAPPLY_BUILD,
                               build_manifest=_build_manifest.health_word(),
                               review_eval=_review_rules.review_eval(),
                               review_rules=_review_rules.health_word(),
@@ -8205,6 +8216,7 @@ async def health_check(db: AsyncSession = Depends(get_db)):
                               admin_evidence_population=_admin_evidence.population_health_word(),
                               mail_spam_case_lock_build=_MAIL_SPAM_CASE_LOCK_BUILD,
                               modlog_build=_MODLOG_BUILD,
+                              qapply_build=_QAPPLY_BUILD,
                               build_manifest=_build_manifest.health_word(),
                               review_eval=_review_rules.review_eval(),
                               review_rules=_review_rules.health_word(),
@@ -58595,6 +58607,42 @@ def _ffa_pool_shape(place: int, beaten: int, n_live: int) -> float:
     mirror at last, linear in the beaten-fraction, mean 1.0 absent ties."""
     frac = _ffa_place_frac(place, beaten, n_live)
     return (2.0 - FFA_SHAPE_TOP) + (2.0 * FFA_SHAPE_TOP - 2.0) * frac
+
+
+def _ffa_game_awards(*, place: int, beaten: int, n_live: int, paid_battles: float,
+                     opp_ratings, old_xp=None) -> dict:
+    """One rated-or-casual FFA seat's game XP and gold: pure, no database and
+    no clock. submit_ffa_match's award loop and the held-report Credit route
+    (QAPPLY-1) both call it, so the two cannot pay different amounts.
+
+    The pool is rate(n_live) x paid battles x placement shape x the opponent
+    tier factor NORMALISED to the x1.5 calibration field (FFA_G_PER_PLAYER_MIN
+    is calibrated "at tier x1.5", learning #258); with no opponent ratings
+    (a casual game) the tier is 1.0. XP is 45 % of the pool x 100, floored at
+    FFA_MIN_XP; placement gold is the other 55 %, FLOORED AT 1 (the
+    ffa_placement ledger row is the back-pay idempotency marker, so a live
+    seat always produces one). Returns {"xp", "place_gold", "tier"}; with
+    old_xp (the XP total before this game's XP) also "xp_gold" (one gold per
+    100 XP boundary crossed), "level_gold" (level_reward_for of every level
+    gained; bug #117) and "gold", their sum with the placement gold."""
+    tier_mult = (_tier_mult_for(sum(opp_ratings) / len(opp_ratings))[0]
+                 if opp_ratings else 1.0)
+    pool = (_ffa_battle_rate(n_live) * paid_battles
+            * _ffa_pool_shape(place, beaten, n_live)
+            * (tier_mult / 1.5))
+    xp = max(FFA_MIN_XP, int(round(pool * FFA_XP_SHARE * 100)))
+    out = {"xp": xp, "place_gold": max(1, int(round(pool * (1.0 - FFA_XP_SHARE)))),
+           "tier": tier_mult}
+    if old_xp is not None:
+        old_xp = int(old_xp)
+        new_xp = old_xp + xp
+        old_lvl = level_from_xp(old_xp)[0]
+        new_lvl = level_from_xp(new_xp)[0]
+        out["xp_gold"] = max(0, (new_xp // 100) - (old_xp // 100))
+        out["level_gold"] = (sum(level_reward_for(lv) for lv in range(old_lvl + 1, new_lvl + 1))
+                             if new_lvl > old_lvl else 0)
+        out["gold"] = out["xp_gold"] + out["place_gold"] + out["level_gold"]
+    return out
 # Rating movement per game is bounded: each player is compared against at
 # most this many placement-adjacent opponents (see submit_ffa_match).
 FFA_MAX_RATED_OPPONENTS = 4
@@ -67054,12 +67102,50 @@ _RDM_JOURNAL_MODE: contextvars.ContextVar = contextvars.ContextVar(
 
 async def _ffa_settle_report(report, db, *, journal: dict):
     """Settle one journaled report through the report route's body (V3 P3:
-    the same code as a direct report)."""
+    the same code as a direct report). Refused while the held-report replay
+    variable is set: the two modes are never both set (QAPPLY-1 R2)."""
+    if _QAPPLY_REPLAY.get() is not None:
+        raise RuntimeError("journal settlement refused: the held-report replay is set")
     tok = _RDM_JOURNAL_MODE.set(journal)
     try:
         return await submit_ffa_match(report, None, db)
     finally:
         _RDM_JOURNAL_MODE.reset(tok)
+
+
+# QAPPLY-1: an admin's action on a held FFA report (match_report_quarantine)
+# runs under this context variable. Accept ("kind": "accept") replays the
+# held body through the report route's own body, submit_ffa_match, with no
+# request, the way the journal settlement does above; Credit ("kind":
+# "credit") runs the seat rules it shares with that body. The value is the
+# held row's {qid, received_at (its created_at), actor, note, player_ids,
+# kind}. _qapply_run is the ONE function that sets and resets it, and it
+# refuses while either this variable or the journal's is set, so the two
+# modes are never both set. What the body does differently under it is
+# listed where it reads it: no session check and no settlement of the
+# lobby's journal windows, a closed lobby whose word is served goes on to
+# the checks, an active lobby is refused, no capture (_ffa_record_and_refuse
+# raises the refusal and writes nothing), the held row's created_at as the
+# clock, the gate after the players pass (_qapply_gate), a refusal after a
+# rollback of the game insert, and the held row's status and the moderator
+# record before the one commit (_qapply_finish).
+_QAPPLY_REPLAY: contextvars.ContextVar = contextvars.ContextVar(
+    "_qapply_replay", default=None)
+
+
+@asynccontextmanager
+async def _qapply_run(ctx: dict):
+    """`async with _qapply_run(ctx): ...` runs its block with _QAPPLY_REPLAY set to
+    ctx, and resets it after. Refuses (RuntimeError, the block not run)
+    while the replay or the journal variable is already set. A context
+    manager, so each route calls the body or the credit work by name."""
+    if _QAPPLY_REPLAY.get() is not None or _RDM_JOURNAL_MODE.get() is not None:
+        raise RuntimeError("held-report replay refused: a settlement mode is already set")
+    tok = _QAPPLY_REPLAY.set(ctx)
+    try:
+        yield ctx
+    finally:
+        _QAPPLY_REPLAY.reset(tok)
 
 
 async def _ffa_settle_due_windows_for_report(db, lobby_id_text) -> None:
@@ -69163,7 +69249,14 @@ async def _ffa_record_and_refuse(db: AsyncSession, *, report, lobby_uuid, id_by_
     is not merely dropped on the way out, it is never reachable from the
     response this arm builds, which is what makes the two arms disjoint by the
     shape of the code rather than by a rule somebody has to keep obeying.
-    This function always raises."""
+    This function always raises.
+
+    UNDER THE HELD-REPORT REPLAY (_QAPPLY_REPLAY set) it captures nothing:
+    the report is already held, and a capture would roll back the admin's
+    transaction. It raises the same status with the admin's sentence for
+    the word (_qapply_refusal_text) and writes nothing."""
+    if _QAPPLY_REPLAY.get() is not None:
+        raise _QapplyRefused(status, _qapply_refusal_text(reason, report, progress), progress)
     _kept = await _quarantine_report(
         db, mode="ffa", reason=reason, status_code=status,
         payload=report.model_dump(), group_id=lobby_uuid,
@@ -69235,7 +69328,15 @@ async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSe
         raise HTTPException(422, "game_points_at_leave is required on every left_early entry "
                                  "that is not absent; missing for " + ", ".join(_missing_figure))
     _rdm_journal = _RDM_JOURNAL_MODE.get()
-    if _rdm_journal is None:
+    # QAPPLY-1: the held-report replay (an admin's Accept, no request). Each
+    # site that reads it is named in _QAPPLY_REPLAY's comment.
+    _qapply = _QAPPLY_REPLAY.get()
+    if _qapply is not None and _qapply.get("kind") != "accept":
+        raise RuntimeError("submit_ffa_match runs under the replay only for Accept")
+    # The session check and the lobby's due journal windows belong to a
+    # report from the network only: neither the journal settlement nor the
+    # replay carries a request.
+    if _rdm_journal is None and _qapply is None:
         await _check_steam_session(request, report.reported_by_steam_id, db)
         await _ffa_settle_due_windows_for_report(db, report.lobby_id)
     canonical_form = _verify_ffa_hmac(report)
@@ -69428,11 +69529,21 @@ async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSe
                 reason="score_shape_mismatch",
                 why=f"target={_score_target} (lobby {lobby['status']}): {_closed_shape}",
                 detail=_closed_shape, progress=_progress)
-        await _ffa_record_and_refuse(
-            db, report=report, lobby_uuid=lobby_uuid, id_by_steam=id_by_steam,
-            reason=f"lobby_{lobby['status']}",
-            why=f"lobby status is {lobby['status']}",
-            detail="Lobby is not active", progress=_progress)
+        # QAPPLY-1: under the replay a closed lobby whose word is served
+        # (lobby_completed, lobby_canceled) goes on to every check below;
+        # any other status keeps today's refusal (without a capture).
+        if _qapply is None or f"lobby_{lobby['status']}" not in _QAPPLY_SERVABLE_REASONS:
+            await _ffa_record_and_refuse(
+                db, report=report, lobby_uuid=lobby_uuid, id_by_steam=id_by_steam,
+                reason=f"lobby_{lobby['status']}",
+                why=f"lobby status is {lobby['status']}",
+                detail="Lobby is not active", progress=_progress)
+    elif _qapply is not None:
+        # QAPPLY-1: the replay applies a game only to a CLOSED lobby. A live
+        # sitting's next report names the number this game would take, and
+        # a live lobby's admission expiry, above, writes its seats' queue
+        # rows and leases; this refusal rolls both back with the rest.
+        raise _QapplyRefused(409, _QAPPLY_TEXTS["lobby_open"], _progress)
     # Roster validation (review finds 1/3): member_ids is the lock-time roster
     # ORDERED BY SLOT (queue rows get pruned; this array doesn't). The report
     # must cover the roster EXACTLY — a subset would let a hostile reporter
@@ -69671,6 +69782,11 @@ async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSe
     # open and it is still the report the class order chooses.
     _rdm_settle = None
     _rdm_on = await _asm_readmit_on(db, lobby)
+    if _rdm_on and _qapply is not None:
+        # QAPPLY-1 (R13): a readmission lobby's reports settle through its
+        # journal; the replay refuses it before that branch, which would
+        # journal the held body and commit.
+        raise _QapplyRefused(409, _QAPPLY_TEXTS["readmit"], _progress)
     if _rdm_on:
         _rdm_gate = await _ffa_report_gate(
             db, lobby=lobby, lobby_uuid=lobby_uuid, g=_game_number, report=report,
@@ -69690,6 +69806,14 @@ async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSe
         await db.execute(text(
             "SELECT 1 FROM players WHERE id = :pid FOR NO KEY UPDATE"
         ), {"pid": pid})
+    # QAPPLY-1 (R4): the replay's gate, locked form, after the players pass,
+    # on rows read again under those locks (#208). It refuses unless no
+    # participant has a later result and every participant's FFA rating is
+    # as the last recorded game left it.
+    if _qapply is not None:
+        await _qapply_gate(db, lobby=lobby, lobby_uuid=lobby_uuid, game=_game_number,
+                           player_ids=reported_ids, received_at=_qapply["received_at"],
+                           locked=True, progress=_progress)
 
     # Server-side placements: (rounds desc, points desc, kills desc); ties
     # share the same placement, COMPETITION style (1,2,2,4 — not dense; Codex
@@ -69837,7 +69961,13 @@ async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSe
     # payable elapsed, defeating the pace ceiling. clock_timestamp() here runs
     # after the lobby lock above, and the identical value is bound into the
     # INSERT, so the next report's anchor is exactly this report's meter end.
-    _now_dt = (await db.execute(text("SELECT clock_timestamp()"))).scalar()
+    # QAPPLY-1 (R5): under the replay the clock is the held row's created_at,
+    # a server time at the report's receipt, which the gate has already
+    # checked is not earlier than this lobby's previous game.
+    if _qapply is not None:
+        _now_dt = _qapply["received_at"]
+    else:
+        _now_dt = (await db.execute(text("SELECT clock_timestamp()"))).scalar()
     _anchor = max(_anchor_candidates) if _anchor_candidates else _now_dt
     elapsed_seconds = max(30.0, (_now_dt - _anchor).total_seconds())
     paid_battles = _ffa_paid_battles(battles_total, elapsed_seconds, _n_live_meter)
@@ -69877,6 +70007,10 @@ async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSe
                "es": int(elapsed_seconds), "endts": _now_dt})
     except IntegrityError as ie:
         await db.rollback()
+        # QAPPLY-1: under the replay a rollback ends the admin's action; it
+        # answers a refusal and writes nothing more (no re-lock, no echo).
+        if _qapply is not None:
+            raise _QapplyRefused(409, _QAPPLY_TEXTS["insert_race"], {})
         # EVERY answer from here down re-reads the progress, because the
         # rollback released the lobby's lock and `_progress` is now a snapshot
         # from before it. Taken ONCE, above the branch, so the failure path
@@ -69934,6 +70068,9 @@ async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSe
         # connection mid-statement, a statement timeout) takes the same answer
         # for the same reason — the transaction is rolled back either way.
         await db.rollback()
+        if _qapply is not None:
+            # QAPPLY-1: the same end as the arm above, with the retry status.
+            raise _QapplyRefused(503, _QAPPLY_TEXTS["insert_failed"], {})
         _fail_progress = await _ffa_progress_relocked(db, lobby_uuid)
         print(f"[FFA-REPORT] insert refused by the database for lobby "
               f"{lobby_uuid} game {_game_number} — nothing committed: "
@@ -70017,42 +70154,29 @@ async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSe
         # IN this game — roster ghosts must not inflate the rate OR reach the
         # pace ceiling by roster padding.
         n_live = len(report.players) - len(unrated)
-        # Opponent-tier factor, NORMALISED to the x1.5 calibration field:
-        # FFA_G_PER_PLAYER_MIN is calibrated "at tier x1.5" (the default-1500
-        # field — learning #258), so the typical ranked lobby takes factor 1.0
-        # and a Grand-Master field roughly doubles the rate. `pre` is only
-        # populated for ranked games, so an unranked FFA takes tier 1.0 →
-        # factor ≈0.67, preserving "casual pays less than ranked".
+        # The amounts are _ffa_game_awards' (QAPPLY-1: the Credit route calls
+        # the same helper). `pre` is only populated for ranked games, so an
+        # unranked FFA has no opponent ratings and takes tier 1.0.
         opp_ratings = [pre[s][0] for s in pre
                        if s != sid_ and s not in unrated]
-        tier_mult = (_tier_mult_for(sum(opp_ratings) / len(opp_ratings))[0]
-                     if opp_ratings else 1.0)
-        pool = (_ffa_battle_rate(n_live) * paid_battles
-                * _ffa_pool_shape(place, beaten, n_live)
-                * (tier_mult / 1.5))
-        xp = max(FFA_MIN_XP, int(round(pool * FFA_XP_SHARE * 100)))
+        _aw = _ffa_game_awards(place=place, beaten=beaten, n_live=n_live,
+                               paid_battles=paid_battles, opp_ratings=opp_ratings)
+        xp = _aw["xp"]
         row = (await db.execute(text(
             "UPDATE players SET total_xp = COALESCE(total_xp,0) + :xp,"
             "       ffa_xp_earned = COALESCE(ffa_xp_earned,0) + :xp"
             " WHERE id = :pid"
             " RETURNING total_xp AS new_xp, (COALESCE(total_xp,0) - :xp) AS old_xp"
         ), {"xp": xp, "pid": pid})).mappings().first()
-        new_xp = row["new_xp"] if row else xp
         old_xp = row["old_xp"] if row else 0
-        gold_delta = max(0, (new_xp // 100) - (old_xp // 100))
-        # Flat 55% half, FLOORED AT 1g (§5c correction 3): the ffa_placement
-        # ledger row is the back-pay idempotency marker, so a live player must
-        # ALWAYS produce one — a zero-rounded payout would suppress the row
-        # and a later 164 rerun would back-pay this game at the legacy rate.
-        place_gold = max(1, int(round(pool * (1.0 - FFA_XP_SHARE))))
-        # Level-reward gold (bug #117 audit item: `_maybe_grant_level_rewards`
-        # is called from submit_match and inlined in the 2v2 path, but FFA had
-        # NO level rewards at all — an FFA-only player banked nothing for
-        # dinging. Inlined here because we hold `pid`, not an ORM object.)
-        old_lvl, _, _ = level_from_xp(old_xp)
-        new_lvl, _, _ = level_from_xp(new_xp)
-        level_gold = (sum(level_reward_for(lv) for lv in range(old_lvl + 1, new_lvl + 1))
-                      if new_lvl > old_lvl else 0)
+        # The XP drip gold and the level-reward gold read the XP total as the
+        # UPDATE above found it.
+        _aw = _ffa_game_awards(place=place, beaten=beaten, n_live=n_live,
+                               paid_battles=paid_battles, opp_ratings=opp_ratings,
+                               old_xp=old_xp)
+        gold_delta = _aw["xp_gold"]
+        place_gold = _aw["place_gold"]
+        level_gold = _aw["level_gold"]
         # ONE players UPDATE per player: the canonical tuple-lock order
         # (#197/#202) must not gain a second write site inside the loop.
         total_gold = gold_delta + place_gold + level_gold
@@ -70548,6 +70672,11 @@ async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSe
                                          _rdm_settle, match_id)
     await _asm_report_entered(db, lobby, lobby_uuid, _game_number)
     await _ffa_advance_lobby_slot(db, lobby_uuid)
+    if _qapply is not None:
+        # QAPPLY-1 (R7, G4): the held row's status and the moderator record,
+        # in this transaction, before its one commit.
+        await _qapply_finish(db, _qapply, match_id=match_id, game=_game_number,
+                             player_ids=reported_ids)
     await db.commit()
     for _asm_line in _asm_log_expired(lobby_uuid, _asm_rep_expired):
         print(_asm_line)
@@ -74762,6 +74891,566 @@ def _quarantine_accept_verdict(results: int, players: int) -> tuple:
                    "adding this game now would need a full replay")
 
 
+# ── QAPPLY-1: Accept applies a held FFA report; Credit pays without ratings ──
+# Two admin actions on a held FFA report (match_report_quarantine):
+#   * Accept replays the held body through submit_ffa_match under
+#     _QAPPLY_REPLAY (_qapply_run), so every check and effect of a network
+#     report runs on it, in one transaction, at the held row's own receipt
+#     time. It applies only when the gate (_qapply_gate) passes: no
+#     participant has a later FFA result and every participant's FFA rating
+#     is as the last recorded game left it.
+#   * Credit pays each participant the XP and the gold that settlement would
+#     have paid (_ffa_game_awards), moves no rating, and is refused exactly
+#     when Accept could apply the row now.
+# Both serve only the words of _QAPPLY_SERVABLE_REASONS, refuse team rows and
+# readmission lobbies, and write their moderator record through
+# _modlog_write in the same transaction as their effects.
+#
+# THE LOCK ORDER of both actions: the held row (FOR UPDATE), the lobby (FOR
+# NO KEY UPDATE), the participants' players rows in str(id) order (FOR NO KEY
+# UPDATE), then their glicko_ratings_ffa rows in the same order (FOR UPDATE).
+# Every other path that locks or writes a held row takes no lobby, player or
+# rating lock while holding it: the discard route and the janitor's filing
+# write the held row alone (the janitor with SKIP LOCKED); the triage and
+# digest reads take no row lock; the capture (_quarantine_report) reads held
+# rows with no row lock and inserts new ones, under an advisory lock on the
+# group (outside a journal window it first rolls the report's transaction
+# back, releasing its lobby lock).
+
+# The reason words both actions serve; every other word, a word added later
+# included, is refused and the row stays held.
+_QAPPLY_SERVABLE_REASONS = frozenset({"lobby_completed", "lobby_canceled", "ffa_game_number_mismatch"})
+
+# Part 2 of the gate compares glicko_ratings_ffa.rating with a row's
+# rating_after, both DOUBLE PRECISION. Settlement stores rating = the new
+# rating and rating_after = rating_before + rating_change, where
+# rating_change is rounded to 0.1, so the two differ by at most 0.05 on a row
+# a real settle wrote; the comparison allows that and a little float error.
+_QAPPLY_RATING_TOLERANCE = 0.051
+
+# Every sentence an admin can receive from the list, Accept and Credit of
+# this lane: plain words and numbers, at most 180 characters with the widest
+# numbers the code formats into them (the released client cuts there).
+_QAPPLY_TEXTS = {
+    "not_found": "This held report was not found.",
+    "reviewed": "This held report was already reviewed.",
+    "team": "Only FFA reports can be applied or credited; this report stays held.",
+    "word": "This report was held for a reason that is never applied or credited; discard it if it is not needed.",
+    "body": "The stored report cannot be read, so it cannot be applied or credited.",
+    "unsigned": "The stored report's signature does not check out, so it cannot be applied or credited.",
+    "no_lobby": "The lobby of this report no longer exists, so it cannot be applied or credited.",
+    "readmit": "This lobby used seat readmission; its held reports cannot be applied or credited yet.",
+    "lobby_open": "This lobby is still open; act on this report after the lobby closes.",
+    "lobby_state": "This lobby's state does not allow the game to be applied or credited.",
+    "service": "A player of this report is a service account, so it cannot be applied or credited.",
+    "account": "A player of this report no longer has an account, so it cannot be applied or credited.",
+    "roster": "The report's players or seats are not this lobby's roster, so it cannot be applied or credited.",
+    "shape": "The report's score is not a complete game, so it cannot be applied or credited.",
+    "incomplete": "The stored report is not a complete game report, so it cannot be applied.",
+    "leave_figure": "The report lacks a leaver's score at the time they left, so it cannot be applied.",
+    "limit": "The lobby already holds its maximum number of games, so this game cannot be applied.",
+    "downgrade": "The report uses an old signature this lobby does not accept, so it cannot be applied.",
+    "reporter": "The player who sent this report could not report this game, so it cannot be applied or credited.",
+    "recorded": "This game is already recorded; there is nothing to apply or credit. Discard this report.",
+    "other_lobby": "This game's room is recorded under another lobby; discard this report.",
+    "clock": ("This report was received before the lobby's previous game ended, "
+              "so it cannot be applied or credited here; it stays held."),
+    "later": ("{n} of its players played a later game, so this game cannot be applied now. "
+              "Credit can pay its XP and gold."),
+    "rating": ("{n} of its players have a rating that changed outside a recorded game, so this game "
+               "cannot be applied now. Credit can pay its XP and gold."),
+    "ahead": "This report is game {tail}; the lobby is on game {next}. Apply game {next} of this lobby first.",
+    "behind": ("This report is game {tail}, a number the lobby has passed, so it cannot be applied. "
+               "Credit can pay its XP and gold."),
+    "no_number": "This report names no game number, so it cannot be applied. Credit can pay its XP and gold.",
+    "insert_race": "Another account of this game was recorded at the same moment; nothing was applied. Refresh the list.",
+    "insert_failed": "The server could not record this game; nothing was applied. Try again.",
+    "wagers": "This game's wagers could not be settled; nothing was applied. Try again.",
+    "retry": "The server could not finish this action now; nothing was changed. Try again.",
+    "refused": "The server refused to apply this report; it stays held.",
+    "can_accept": "Accept can apply this game now, with its ratings; use Accept instead of Credit.",
+    "credited_before": "This report's XP and gold were already credited.",
+}
+
+# Which sentence a refusal of the body's capture helper carries under the
+# replay, by the word it would have stored. ffa_game_number_mismatch is
+# _qapply_number_text's.
+_QAPPLY_WORD_TEXT = {
+    "score_shape_mismatch": "shape",
+    "ffa_lobby_no_roster": "roster",
+    "lobby_game_limit": "limit",
+    "v1_canonical_downgrade": "downgrade",
+    "ffa_game_contradiction": "recorded",
+    "ffa_replay_roster_mismatch": "recorded",
+    "ffa_room_other_lobby": "other_lobby",
+    "late_reporter": "reporter",
+    "left_reporter": "reporter",
+    "lag_reporter": "reporter",
+}
+
+# The body's own refusals (HTTPException detail -> sentence), for the route's
+# answer. A detail outside this table answers "refused" (a 5xx "retry").
+_QAPPLY_BODY_TEXT = {
+    "Invalid FFA match signature": "unsigned",
+    "Invalid lobby_id format": "incomplete",
+    "Need at least two distinct players": "incomplete",
+    "Winner is not among the players": "incomplete",
+    "Reporter is not a participant": "incomplete",
+    "photon_room_id is required": "incomplete",
+    "One or more players not registered": "account",
+    "Lobby not found": "no_lobby",
+    "service_account_forbidden": "service",
+    "Report must cover exactly the lobby roster": "roster",
+    "Report player count does not match the lobby": "roster",
+    "Lobby is not active": "lobby_state",
+    "Could not settle this game's wagers - retry": "wagers",
+}
+
+
+class _QapplyRefused(FfaReportRefusal):
+    """A refusal raised under the held-report replay. Its detail is already
+    an admin's sentence (_QAPPLY_TEXTS); the route answers it as raised."""
+
+
+def _qapply_number_text(tail, expected: int) -> str:
+    """The sentence for a report whose game number is not the lobby's next."""
+    if tail is None:
+        return _QAPPLY_TEXTS["no_number"]
+    if int(tail) > int(expected):
+        return _QAPPLY_TEXTS["ahead"].format(tail=int(tail), next=int(expected))
+    return _QAPPLY_TEXTS["behind"].format(tail=int(tail))
+
+
+def _qapply_refusal_text(reason: str, report, progress) -> str:
+    """The admin's sentence for a refusal of the body's capture helper under
+    the replay (the word it would have stored)."""
+    if reason == "ffa_game_number_mismatch":
+        return _qapply_number_text(_ffa_room_game_no(report.photon_room_id),
+                                   int((progress or {}).get("expected_game") or 0))
+    if reason.startswith("lobby_"):
+        return _QAPPLY_TEXTS["lobby_state"]
+    return _QAPPLY_TEXTS[_QAPPLY_WORD_TEXT.get(reason, "refused")]
+
+
+def _qapply_answer(ex: HTTPException) -> HTTPException:
+    """The route's answer for a refusal out of the body or the credit path:
+    the same status, with an admin's sentence."""
+    if isinstance(ex, _QapplyRefused):
+        return HTTPException(ex.status_code, str(ex.detail))
+    d = str(ex.detail)
+    key = _QAPPLY_BODY_TEXT.get(d)
+    if key is None and d.startswith("Slot mismatch for "):
+        key = "roster"
+    if key is None and d.startswith("game_points_at_leave is required"):
+        key = "leave_figure"
+    if key is None:
+        key = "retry" if ex.status_code >= 500 else "refused"
+    return HTTPException(ex.status_code, _QAPPLY_TEXTS[key])
+
+
+# The held row as both actions read it: locked, with its body as text bound
+# by the same size limit as the QDIG reader (_qdig_read_body).
+_QAPPLY_SQL_HELD = """
+    SELECT q.id, q.mode, q.reason, q.group_id, q.photon_room_id, q.player_ids, q.status,
+           q.created_at,
+           CASE WHEN octet_length(q.payload::text) <= CAST(:body_max AS bigint)
+                THEN q.payload::text END AS payload,
+           octet_length(q.payload::text) > CAST(:body_max AS bigint) AS payload_oversize,
+           false AS payload_unread
+      FROM match_report_quarantine q
+     WHERE q.id = CAST(:qid AS uuid)
+       FOR UPDATE
+"""
+# The lobby as the read form sees it, with no lock.
+_QAPPLY_SQL_LOBBY_READ = """
+    SELECT l.id, l.status, l.created_at, l.games_played, l.readmit_v1,
+           (SELECT COALESCE(MAX(m.game_number), 0) FROM ffa_matches m WHERE m.lobby_id = l.id) AS highest
+      FROM ffa_lobbies l
+     WHERE l.id = CAST(:lid AS uuid)
+"""
+# Has this game been recorded: its room, or the number it names in its lobby.
+_QAPPLY_SQL_RECORDED = """
+    SELECT EXISTS (SELECT 1 FROM ffa_matches m WHERE m.photon_room_id = CAST(:room AS varchar))
+        OR EXISTS (SELECT 1 FROM ffa_matches m
+                    WHERE m.lobby_id = CAST(:lid AS uuid)
+                      AND m.game_number = CAST(:g AS smallint))
+"""
+# Gate part 1: the participants' FFA rows of games that ended after T, of
+# every kind (ranked, casual, invalidated).
+_QAPPLY_SQL_LATER = """
+    SELECT COUNT(*) AS n, COUNT(DISTINCT f.player_id) AS players
+      FROM ffa_match_players f
+      JOIN ffa_matches m ON m.id = f.match_id
+     WHERE f.player_id = ANY(CAST(:pids AS uuid[]))
+       AND m.ended_at > CAST(:t AS timestamptz)
+"""
+# Gate part 2: the participants whose stored FFA rating is not the
+# rating_after of their last rated FFA row at or before T (or who have a
+# rating row and no such row, or such a row and no rating row).
+_QAPPLY_SQL_DRIFT = """
+    SELECT COUNT(*) FROM (
+        SELECT (SELECT g.rating FROM glicko_ratings_ffa g WHERE g.player_id = p.pid) AS stored,
+               (SELECT f.rating_after
+                  FROM ffa_match_players f
+                  JOIN ffa_matches m ON m.id = f.match_id
+                 WHERE f.player_id = p.pid AND f.rating_after IS NOT NULL
+                   AND m.ended_at <= CAST(:t AS timestamptz)
+                 ORDER BY m.ended_at DESC, m.id DESC
+                 LIMIT 1) AS last_after
+          FROM unnest(CAST(:pids AS uuid[])) AS p(pid)) s
+     WHERE NOT ((s.stored IS NULL AND s.last_after IS NULL)
+                OR (s.stored IS NOT NULL AND s.last_after IS NOT NULL
+                    AND abs(s.stored - s.last_after) <= CAST(:tol AS double precision)))
+"""
+# The rating rows, locked one by one in str(id) order (the body's statement).
+_QAPPLY_SQL_LOCK_RATING = "SELECT 1 FROM glicko_ratings_ffa WHERE player_id = :pid FOR UPDATE"
+# Credit's tier ratings: each participant's rating_before on their first
+# rated FFA row after T, and the stored rating.
+_QAPPLY_SQL_TIER = """
+    SELECT p.pid,
+           (SELECT f.rating_before
+              FROM ffa_match_players f
+              JOIN ffa_matches m ON m.id = f.match_id
+             WHERE f.player_id = p.pid AND f.rating_before IS NOT NULL
+               AND m.ended_at > CAST(:t AS timestamptz)
+             ORDER BY m.ended_at, m.id
+             LIMIT 1) AS first_before,
+           (SELECT g.rating FROM glicko_ratings_ffa g WHERE g.player_id = p.pid) AS stored
+      FROM unnest(CAST(:pids AS uuid[])) AS p(pid)
+"""
+# A credit receipt already on file for this held row.
+_QAPPLY_SQL_RECEIPT = """
+    SELECT EXISTS (SELECT 1 FROM gold_transactions WHERE reference_id = CAST(:qid AS varchar))
+"""
+_QAPPLY_SQL_ACCEPTED = """
+    UPDATE match_report_quarantine
+       SET status = 'accepted', reviewed_at = NOW(), review_note = CAST(:note AS text),
+           reviewed_by = (SELECT id FROM players WHERE steam_id = CAST(:sid AS varchar))
+     WHERE id = CAST(:qid AS uuid)
+     RETURNING id
+"""
+_QAPPLY_SQL_CREDITED = """
+    UPDATE match_report_quarantine
+       SET status = 'credited', reviewed_at = NOW(), review_note = CAST(:note AS text),
+           reviewed_by = (SELECT id FROM players WHERE steam_id = CAST(:sid AS varchar))
+     WHERE id = CAST(:qid AS uuid)
+     RETURNING id
+"""
+_QAPPLY_SQL_CREDIT_XP = """
+    UPDATE players SET total_xp = COALESCE(total_xp, 0) + CAST(:xp AS integer),
+                       ffa_xp_earned = COALESCE(ffa_xp_earned, 0) + CAST(:xp AS integer)
+     WHERE id = CAST(:pid AS uuid)
+     RETURNING (COALESCE(total_xp, 0) - CAST(:xp AS integer)) AS old_xp
+"""
+_QAPPLY_SQL_CREDIT_GOLD = """
+    UPDATE players SET gold_earned = COALESCE(gold_earned, 0) + CAST(:g AS integer),
+                       ffa_gold_earned = COALESCE(ffa_gold_earned, 0) + CAST(:g AS integer)
+     WHERE id = CAST(:pid AS uuid)
+"""
+_QAPPLY_SQL_LIVE_PLAYERS = """
+    SELECT id, steam_id FROM players
+     WHERE steam_id = ANY(CAST(:sids AS varchar[])) AND deleted_at IS NULL
+"""
+_QAPPLY_SQL_LOCK_PLAYER = "SELECT 1 FROM players WHERE id = :pid FOR NO KEY UPDATE"
+
+
+async def _qapply_gate(db, *, lobby, lobby_uuid, game: int, player_ids, received_at,
+                       locked: bool, progress=None) -> dict:
+    """THE gate of both actions (R4), one function in two forms.
+
+    T is the pace anchor the body uses: the latest end among the lobby's
+    other recorded games (_FFA_PACE_ANCHOR_SQL, every game but `game`), or
+    the lobby's creation when it is later or there is none. A held row
+    received before T is refused by the caller (clock_ok false). Part 1: no
+    FFA row of a participant belongs to a game that ended after T, of any
+    kind (ranked, casual, invalidated). Part 2: each participant's stored
+    FFA rating equals the rating_after of their last rated FFA row at or
+    before T (within _QAPPLY_RATING_TOLERANCE), or they have neither.
+    Part 2 does not see a deviation or a volatility that changed while the
+    rating stayed equal, nor a rating change of at most the tolerance.
+
+    locked=True (Accept, inside the replay, after the body's players pass,
+    whose locks keep any settle of these players from committing a row
+    until this transaction ends): the participants' rating rows are locked
+    too, in str(id) order, and a block raises _QapplyRefused (409).
+    locked=False (the list and the digest, which hold no lock, and Credit,
+    which holds the players' locks itself): no row lock here; returns the
+    verdict. Returns {"t", "clock_ok", "later", "later_players", "drift",
+    "ok"}."""
+    prev = (await db.execute(text(_FFA_PACE_ANCHOR_SQL),
+                             {"lid": lobby_uuid, "g": int(game)})).scalar()
+    t = max(lobby["created_at"], prev) if prev is not None else lobby["created_at"]
+    out = {"t": t, "clock_ok": received_at >= t, "later": 0, "later_players": 0, "drift": 0}
+    pids = sorted(player_ids or (), key=str)
+    if out["clock_ok"]:
+        if locked:
+            for pid in pids:
+                await db.execute(text(_QAPPLY_SQL_LOCK_RATING), {"pid": pid})
+        later = (await db.execute(text(_QAPPLY_SQL_LATER),
+                                  {"pids": pids, "t": t})).mappings().first()
+        out["later"] = int(later["n"] or 0)
+        out["later_players"] = int(later["players"] or 0)
+        out["drift"] = int((await db.execute(text(_QAPPLY_SQL_DRIFT), {
+            "pids": pids, "t": t, "tol": _QAPPLY_RATING_TOLERANCE})).scalar() or 0)
+    out["ok"] = out["clock_ok"] and not out["later"] and not out["drift"]
+    if locked and not out["ok"]:
+        raise _QapplyRefused(409, _qapply_gate_text(out), progress or {})
+    return out
+
+
+def _qapply_gate_text(g: dict) -> str:
+    if not g["clock_ok"]:
+        return _QAPPLY_TEXTS["clock"]
+    if g["later"]:
+        return _QAPPLY_TEXTS["later"].format(n=max(1, int(g["later_players"])))
+    return _QAPPLY_TEXTS["rating"].format(n=max(1, int(g["drift"])))
+
+
+def _qapply_held_check(row, body):
+    """The refusals both actions share before they touch the lobby: the mode,
+    the word, and the stored body. Returns a _QAPPLY_TEXTS key, or None."""
+    if row["mode"] != "ffa":
+        return "team"
+    if row["reason"] not in _QAPPLY_SERVABLE_REASONS:
+        return "word"
+    if not body.get("ok") or body.get("shape") != "ffa" or body.get("report") is None:
+        return "body"
+    return None
+
+
+async def _qapply_verdict(db, row, body) -> dict:
+    """The list's and the digest's verdict for one held row, from the gate's
+    READ form (no row lock; advisory: Accept and Credit decide again under
+    their locks). {"can_accept", "accept_blocked_reason", "can_credit"}."""
+    def no(key, credit=False, **kw):
+        return {"can_accept": False, "accept_blocked_reason": _QAPPLY_TEXTS[key].format(**kw),
+                "can_credit": credit}
+    key = _qapply_held_check(row, body)
+    if key is not None:
+        return no(key)
+    report = body["report"]
+    if row["group_id"] is None:
+        return no("no_lobby")
+    lobby = (await db.execute(text(_QAPPLY_SQL_LOBBY_READ),
+                              {"lid": str(row["group_id"])})).mappings().first()
+    if lobby is None:
+        return no("no_lobby")
+    if lobby["readmit_v1"]:
+        return no("readmit")
+    if lobby["status"] == "active":
+        return no("lobby_open")
+    if f"lobby_{lobby['status']}" not in _QAPPLY_SERVABLE_REASONS:
+        return no("lobby_state")
+    expected = max(int(lobby["games_played"] or 0), int(lobby["highest"] or 0)) + 1
+    room = (report.photon_room_id or "")[:64]
+    tail = _ffa_room_game_no(room)
+    named = _ffa_named_game_number(room)
+    if (await db.execute(text(_QAPPLY_SQL_RECORDED), {
+            "room": room, "lid": str(row["group_id"]),
+            "g": named if named is not None else 0})).scalar():
+        return no("recorded")
+    gate = await _qapply_gate(db, lobby=lobby, lobby_uuid=row["group_id"], game=expected,
+                              player_ids=row["player_ids"], received_at=row["created_at"],
+                              locked=False)
+    if not gate["clock_ok"]:
+        return no("clock")
+    if not gate["ok"]:
+        return {"can_accept": False, "accept_blocked_reason": _qapply_gate_text(gate),
+                "can_credit": True}
+    if _ffa_game_number_refusal(tail, expected):
+        return {"can_accept": False, "accept_blocked_reason": _qapply_number_text(tail, expected),
+                "can_credit": True}
+    return {"can_accept": True, "accept_blocked_reason": "", "can_credit": False}
+
+
+async def _qapply_finish(db, ctx: dict, *, match_id, game: int, player_ids) -> None:
+    """Accept's last two writes, in the game's transaction before its one
+    commit: the held row 'accepted' and the moderator record that says the
+    report was applied and names the match. The route tested the row's
+    status under its lock, so this UPDATE finds it by id."""
+    done = (await db.execute(text(_QAPPLY_SQL_ACCEPTED), {
+        "qid": ctx["qid"], "sid": ctx["actor"], "note": ctx["note"] or None})).scalar()
+    if done is None:
+        raise _QapplyRefused(409, _QAPPLY_TEXTS["reviewed"], {})
+    await _modlog_write(db, actor=ctx["actor"], action="quarantine_accept",
+                        affected=await _modlog_steam_ids(db, sorted(player_ids, key=str)),
+                        reason=ctx["note"] or None, target_match_id=match_id,
+                        details={"quarantine_id": ctx["qid"], "mode": "ffa", "applied": True,
+                                 "match_id": str(match_id), "game": int(game)})
+    ctx["applied"] = match_id
+
+
+async def _qapply_held(db, qid_uuid):
+    """The held row, locked, and its body read once (_qdig_read_body)."""
+    row = (await db.execute(text(_QAPPLY_SQL_HELD), {
+        "qid": str(qid_uuid), "body_max": QDIG_BODY_MAX_BYTES})).mappings().first()
+    if row is None:
+        raise _QapplyRefused(404, _QAPPLY_TEXTS["not_found"], {})
+    # THE status test of both actions, under the held row's lock: Accept,
+    # Credit and Discard each change a pending row only.
+    if row["status"] != "pending":
+        raise _QapplyRefused(409, _QAPPLY_TEXTS["reviewed"], {})
+    # A ledger row that references the held row is a credit already paid
+    # (this route's, or migration 421's): neither action pays it again, even
+    # where the row was set back to pending.
+    if (await db.execute(text(_QAPPLY_SQL_RECEIPT), {"qid": str(row["id"])})).scalar():
+        raise _QapplyRefused(409, _QAPPLY_TEXTS["credited_before"], {})
+    row = dict(row)
+    try:
+        await _assert_no_service_subject(db, affected_player_ids=row["player_ids"] or ())
+    except HTTPException as ex:
+        raise _QapplyRefused(ex.status_code, _QAPPLY_TEXTS["service"], {})
+    body = _qdig_read_body(row)
+    key = _qapply_held_check(row, body)
+    if key is None and row["group_id"] is None:
+        key = "no_lobby"
+    if key is not None:
+        raise _QapplyRefused(409, _QAPPLY_TEXTS[key], {})
+    return row, body["report"]
+
+
+async def _qapply_credit(db, row, report, *, actor: str, note: str) -> dict:
+    """Credit's work, under the replay variable (kind "credit"), so the seat
+    rules it shares with the body refuse without a capture. Locks in the
+    order of _qapply_gate's comment; writes deltas only (#326); commits
+    nothing (the route commits)."""
+    qid = str(row["id"])
+    canonical = _verify_ffa_hmac(report)
+    if not canonical:
+        raise _QapplyRefused(409, _QAPPLY_TEXTS["unsigned"], {})
+    try:
+        lobby_uuid = UUID(report.lobby_id)
+    except (ValueError, TypeError):
+        raise _QapplyRefused(409, _QAPPLY_TEXTS["incomplete"], {})
+    if str(lobby_uuid) != str(row["group_id"]):
+        raise _QapplyRefused(409, _QAPPLY_TEXTS["incomplete"], {})
+    lobby = (await db.execute(text(_FFA_LOBBY_LOCK_SQL), {"lid": lobby_uuid})).mappings().first()
+    if lobby is None:
+        raise _QapplyRefused(409, _QAPPLY_TEXTS["no_lobby"], {})
+    if lobby.get("readmit_v1"):
+        raise _QapplyRefused(409, _QAPPLY_TEXTS["readmit"], {})
+    if lobby["status"] == "active":
+        raise _QapplyRefused(409, _QAPPLY_TEXTS["lobby_open"], {})
+    if f"lobby_{lobby['status']}" not in _QAPPLY_SERVABLE_REASONS:
+        raise _QapplyRefused(409, _QAPPLY_TEXTS["lobby_state"], {})
+    highest = int((await db.execute(text(_FFA_LOBBY_HIGHEST_GAME_SQL),
+                                    {"lid": lobby_uuid})).scalar() or 0)
+    expected = max(int(lobby["games_played"] or 0), highest) + 1
+    steams = [p.steam_id for p in report.players]
+    prows = (await db.execute(text(_QAPPLY_SQL_LIVE_PLAYERS), {"sids": steams})).all()
+    id_by_steam = {r.steam_id: r.id for r in prows}
+    if len(id_by_steam) != len(steams) or len(set(steams)) != len(steams):
+        raise _QapplyRefused(409, _QAPPLY_TEXTS["account"], {})
+    reported_ids = set(id_by_steam.values())
+    members = list(lobby["member_ids"] or [])
+    if (not members or reported_ids != set(members)
+            or report.reported_by_steam_id not in id_by_steam
+            or len(report.players) != int(lobby["player_count"] or len(members))
+            or any(members.index(id_by_steam[p.steam_id]) != p.slot for p in report.players)):
+        raise _QapplyRefused(409, _QAPPLY_TEXTS["roster"], {})
+    _cfg = _ffa_lobby_config(lobby)
+    if _ffa_score_shape_error(report, _cfg["score_target"], len(report.players)):
+        raise _QapplyRefused(409, _QAPPLY_TEXTS["shape"], {})
+    room = (report.photon_room_id or "")[:64]
+    tail = _ffa_room_game_no(room)
+    named = _ffa_named_game_number(room)
+    if (await db.execute(text(_QAPPLY_SQL_RECORDED), {
+            "room": room, "lid": str(lobby_uuid),
+            "g": named if named is not None else 0})).scalar():
+        raise _QapplyRefused(409, _QAPPLY_TEXTS["recorded"], {})
+    for pid in sorted(reported_ids, key=str):
+        await db.execute(text(_QAPPLY_SQL_LOCK_PLAYER), {"pid": pid})
+    gate = await _qapply_gate(db, lobby=lobby, lobby_uuid=lobby_uuid, game=expected,
+                              player_ids=reported_ids, received_at=row["created_at"],
+                              locked=False)
+    if not gate["clock_ok"]:
+        raise _QapplyRefused(409, _QAPPLY_TEXTS["clock"], {})
+    if gate["ok"] and not _ffa_game_number_refusal(tail, expected):
+        raise _QapplyRefused(409, _QAPPLY_TEXTS["can_accept"], {})
+    # Who played, as settlement decides it: placements, the ghosts and the
+    # early-leave grace (_ffa_leave_decision), and in an assembly lobby the
+    # seat rules (_asm_report_rules, whose reporter refusals raise here
+    # without a capture).
+    kills_in_canonical = canonical == "v2"
+    kills_break_ties = kills_in_canonical and bool(lobby.get("kills_tiebreak"))
+
+    def _place_key(p) -> tuple:
+        return (p.rounds_won, p.points_total, p.kills if kills_break_ties else 0)
+    entries = sorted(report.players, key=lambda p: tuple(-v for v in _place_key(p))
+                     + (_ffa_sort_key(p.steam_id),))
+    placements: dict = {}
+    prev_key, prev_place = None, 0
+    for i, p in enumerate(entries):
+        k = _place_key(p)
+        placements[p.steam_id] = prev_place if k == prev_key else i + 1
+        prev_key, prev_place = k, placements[p.steam_id]
+    ghosts, graced, _log = _ffa_leave_decision(
+        report, kills_in_canonical,
+        grace_half=_ffa_leave_grace_half_points(FFA_POINTS_TO_WIN_ROUND),
+        points_to_win_round=FFA_POINTS_TO_WIN_ROUND, read_absent=True)
+    excluded = ghosts
+    reasons = {p.steam_id: set() for p in report.players}
+    game_no = tail if (tail is not None and 1 <= int(tail) <= 999) else expected
+    if lobby.get("assembly_v1"):
+        excluded = await _asm_report_rules(
+            db, lobby=lobby, lobby_uuid=lobby_uuid, g=game_no, report=report,
+            id_by_steam=id_by_steam, unrated=excluded, progress={}, reasons=reasons,
+            settled_cls=None, gone_in_game=set())
+    unrated = excluded | graced
+    n_live = len(report.players) - len(unrated)
+    beaten = {p.steam_id: sum(1 for q in report.players if q.steam_id not in unrated
+                              and placements[q.steam_id] > placements[p.steam_id])
+              for p in report.players}
+    battles_total = sum(max(0, int(p.points_total)) for p in report.players)
+    elapsed = max(30.0, (row["created_at"] - gate["t"]).total_seconds())
+    paid = _ffa_paid_battles(battles_total, elapsed, n_live)
+    # The tier's ratings at the game's time: each participant's rating_before
+    # on their first rated FFA row after T, else the stored rating, else the
+    # default. A casual lobby rates nobody, so it takes no ratings (tier 1.0).
+    rating_of: dict = {}
+    if bool(lobby["is_ranked"]) if lobby.get("is_ranked") is not None else True:
+        trows = (await db.execute(text(_QAPPLY_SQL_TIER), {
+            "pids": sorted(reported_ids, key=str), "t": gate["t"]})).mappings().all()
+        by_pid = {r["pid"]: r for r in trows}
+        for sid_, pid in id_by_steam.items():
+            r = by_pid.get(pid) or {}
+            v = r.get("first_before")
+            if v is None:
+                v = r.get("stored")
+            rating_of[sid_] = float(v) if v is not None else 1500.0
+    paid_out = {}
+    for pid in sorted(reported_ids, key=str):
+        sid_ = next(s for s, i2 in id_by_steam.items() if i2 == pid)
+        if sid_ in unrated:
+            continue
+        opp = [rating_of[s] for s in rating_of if s != sid_ and s not in unrated]
+        aw = _ffa_game_awards(place=placements[sid_], beaten=beaten[sid_], n_live=n_live,
+                              paid_battles=paid, opp_ratings=opp)
+        got = (await db.execute(text(_QAPPLY_SQL_CREDIT_XP),
+                                {"xp": aw["xp"], "pid": pid})).mappings().first()
+        aw = _ffa_game_awards(place=placements[sid_], beaten=beaten[sid_], n_live=n_live,
+                              paid_battles=paid, opp_ratings=opp,
+                              old_xp=(got["old_xp"] if got else 0))
+        if aw["gold"] > 0:
+            await db.execute(text(_QAPPLY_SQL_CREDIT_GOLD), {"g": aw["gold"], "pid": pid})
+        for kind, amount in (("ffa_xp", aw["xp_gold"]), ("ffa_placement", aw["place_gold"]),
+                             ("level_reward", aw["level_gold"])):
+            if amount > 0:
+                db.add(GoldTransaction(player_id=pid, amount=amount, reason=kind, reference_id=qid))
+        paid_out[sid_] = {"xp": aw["xp"], "gold": aw["gold"], "gold_ffa_xp": aw["xp_gold"],
+                          "gold_ffa_placement": aw["place_gold"], "gold_level_reward": aw["level_gold"]}
+    await db.flush()
+    done = (await db.execute(text(_QAPPLY_SQL_CREDITED), {
+        "qid": qid, "sid": actor, "note": note or None})).scalar()
+    if done is None:
+        raise _QapplyRefused(409, _QAPPLY_TEXTS["reviewed"], {})
+    await _modlog_write(db, actor=actor, action="quarantine_credit",
+                        affected=await _modlog_steam_ids(db, sorted(reported_ids, key=str)),
+                        reason=note or None,
+                        details={"quarantine_id": qid, "mode": "ffa", "players": paid_out})
+    return paid_out
+
+
 # ── Routes: match-report quarantine (July 30 lifecycle sweep) ──────────────
 # Sid: "if it fails again, send it to the admin tab instead of having it
 # straight deleted." Capture happens at the lifecycle rejection sites via
@@ -74775,12 +75464,11 @@ async def admin_list_quarantine(
 ):
     """Pending rejected reports, newest first.
 
-    `can_accept` is computed SERVER-side and is authoritative — the client only
-    renders it. Accepting a report re-applies Glicko, and Glicko is order
-    dependent: if any participant has been rated since this report was rejected,
-    applying it now would write a rating that never existed in that order. The
-    July 30 recovery needed a full chronological ladder replay for exactly this
-    reason, so Accept is offered only when nothing has moved since.
+    `can_accept`, `accept_blocked_reason` and `can_credit` are computed
+    SERVER-side from the read form of the held-report gate (_qapply_verdict:
+    no row lock, so the verdict is advisory; Accept and Credit decide again
+    under their locks). The client only renders them; the released client
+    ignores `can_credit`.
     """
     await _require_admin(db, admin_steam_id, "quarantine", "list", hmac_signature)
     # QDIG-1: the stored body is selected through its size (the same CASE as
@@ -74821,19 +75509,17 @@ async def admin_list_quarantine(
         facts = _qdig_empty_facts()
     out = []
     for r, body in pairs:
-        # Has anything rated these players since? Any later result for a
-        # participant means an accept would land out of order. The verdict
-        # and its words are _quarantine_accept_verdict, which D1 also calls.
-        # A failed check answers one fixed sentence, never the exception's
+        # QAPPLY-1: the verdict is _qapply_verdict's, which D1 also calls. A
+        # failed check answers one fixed sentence, never the exception's
         # text (which can carry a statement and runs past 140 characters).
         try:
             async with db.begin_nested():
-                later = await _quarantine_later_rated(
-                    db, r["mode"], r["player_ids"], r["created_at"])
-            can_accept, blocked = _quarantine_accept_verdict(*later)
+                verdict = await _qapply_verdict(db, r, body)
+            can_accept, blocked = verdict["can_accept"], verdict["accept_blocked_reason"]
+            can_credit = verdict["can_credit"]
         except Exception as ex:
             print(f"[QDIG] admin list eligibility for {r['id']} not checked: {type(ex).__name__}")
-            can_accept, blocked = False, QDIG_ELIGIBILITY_FAILED
+            can_accept, blocked, can_credit = False, QDIG_ELIGIBILITY_FAILED, False
         # The human-readable result and reason, derived from the stored body
         # (the verbatim report, never trusted as authority): the score with
         # numbers, winner first, within the 64 characters the shipped client
@@ -74853,6 +75539,7 @@ async def admin_list_quarantine(
             "room": r["photon_room_id"], "status": r["status"],
             "can_accept": bool(can_accept),
             "accept_blocked_reason": blocked or "",
+            "can_credit": bool(can_credit),
         })
     return {"reports": out}
 
@@ -74891,50 +75578,82 @@ async def admin_discard_quarantine(qid: str, req: _AdminQuarantineReq,
 @app.post("/api/v1/admin/quarantine/{qid}/accept", tags=["Admin"])
 async def admin_accept_quarantine(qid: str, req: _AdminQuarantineReq,
                                   db: AsyncSession = Depends(get_db)):
-    """Marks a quarantined report approved for recovery.
+    """Applies a held FFA report (QAPPLY-1).
 
-    Deliberately does NOT re-run the submit path. Re-applying an old report
-    inline would rate it at today's ratings rather than at its own point in
-    history, which is precisely the corruption the July 30 recovery had to undo
-    with a chronological replay. This route records the admin's decision and
-    locks the row; the actual application is an ordered replay, run deliberately.
+    The held row is locked and its status tested under that lock; then its
+    stored body runs through the report route's own body, submit_ffa_match,
+    under the held-report replay (_qapply_run): every check of a network
+    report runs on it, the clock is the held row's created_at, and the gate
+    (_qapply_gate) runs after the body's players pass. When the game is
+    recorded, the held row is 'accepted' and the moderator record (which
+    says the report was applied and names the match) are written before the
+    body's one commit. Any refusal rolls back and writes nothing; the row
+    stays pending. Served: _QAPPLY_SERVABLE_REASONS; team rows and
+    readmission lobbies are refused.
 
-    The report's id is parsed before the admin check, and both statements bind
+    The report's id is parsed before the admin check, and the statements bind
     the parsed id's canonical text; the signature keeps the id as sent (review
     r15 sweep: a string that is not a UUID failed the uuid bind, 500).
     """
     qid_uuid = _mail_parse_uuid(qid, "qid")   # quarantine accept: the report's id, before the admin check and its reads (r15 sweep)
+    note = (req.note or "")[:500]
+    if not _pg_text_ok(note):
+        raise HTTPException(422, "note is not storable text")
     await _require_admin(db, req.admin_steam_id, "quarantine_action", qid, req.hmac_signature)
-    row = (await db.execute(text(
-        "SELECT player_ids, created_at, status, mode FROM match_report_quarantine"
-        " WHERE id = CAST(:qid AS UUID) FOR UPDATE"), {"qid": str(qid_uuid)})).mappings().first()
-    if row is None:
-        raise HTTPException(404, "Not found")
-    if row["status"] != "pending":
-        raise HTTPException(409, "Already reviewed")
-    # Acceptance is the durable authorization for a later ordered replay, so
-    # enforce the subject policy here even though this request does not apply
-    # ratings or rewards inline.
-    await _assert_no_service_subject(db, affected_player_ids=row["player_ids"] or ())
-    later = await _quarantine_later_rated_count(
-        db, row["mode"], row["player_ids"], row["created_at"])
-    if later:
-        # Re-checked under the row lock, not just at list time (#178/#208): the
-        # admin may have been looking at a stale screen.
-        raise HTTPException(409, f"{later} later rated game(s) — needs an ordered replay")
-    await db.execute(text("""
-        UPDATE match_report_quarantine
-           SET status='accepted', reviewed_at=NOW(),
-               reviewed_by=(SELECT id FROM players WHERE steam_id=:sid)
-         WHERE id=CAST(:qid AS UUID) AND status='pending'
-    """), {"qid": str(qid_uuid), "sid": req.admin_steam_id})
-    await _modlog_write(db, actor=req.admin_steam_id, action="quarantine_accept",
-                        affected=await _modlog_steam_ids(db, row["player_ids"] or ()),
-                        reason=(req.note or "")[:500] or None,
-                        details={"quarantine_id": str(qid_uuid), "mode": row["mode"]})
-    await db.commit()
-    print(f"[QUARANTINE] {qid} accepted by {req.admin_steam_id}")
-    return {"status": "accepted"}
+    try:
+        row, report = await _qapply_held(db, qid_uuid)
+        ctx = {"kind": "accept", "qid": str(qid_uuid), "received_at": row["created_at"],
+               "actor": req.admin_steam_id, "note": note, "applied": None}
+        async with _qapply_run(ctx):
+            await submit_ffa_match(report, None, db)
+    except HTTPException as ex:
+        await _asm_rollback(db)
+        raise _qapply_answer(ex)
+    except BaseException:
+        await _asm_rollback(db)
+        raise
+    if ctx.get("applied") is None:
+        # The body answered without recording a game (an echo of a game
+        # already recorded): nothing of this action is kept.
+        await _asm_rollback(db)
+        raise HTTPException(409, _QAPPLY_TEXTS["recorded"])
+    print(f"[QUARANTINE] {qid} accepted by {req.admin_steam_id}: applied as match {ctx['applied']}")
+    return {"status": "accepted", "applied": True, "match_id": str(ctx["applied"])}
+
+
+@app.post("/api/v1/admin/quarantine/{qid}/credit", tags=["Admin"])
+async def admin_credit_quarantine(qid: str, req: _AdminQuarantineReq,
+                                  db: AsyncSession = Depends(get_db)):
+    """Pays each participant of a held FFA report the XP and the gold that
+    settlement would have paid (_ffa_game_awards), moves no rating, and ends
+    the row 'credited' (QAPPLY-1). Signed with its own action word
+    (quarantine_credit). Refused exactly when Accept could apply the row now,
+    for every word outside _QAPPLY_SERVABLE_REASONS, for team rows and
+    readmission lobbies, and when a ledger row already references the held
+    row. One transaction: deltas, one ledger row per kind above 0 referencing
+    the held row, the held row's status and the moderator record."""
+    qid_uuid = _mail_parse_uuid(qid, "qid")
+    note = (req.note or "")[:500]
+    if not _pg_text_ok(note):
+        raise HTTPException(422, "note is not storable text")
+    await _require_admin(db, req.admin_steam_id, "quarantine_credit", qid, req.hmac_signature)
+    try:
+        row, report = await _qapply_held(db, qid_uuid)
+        ctx = {"kind": "credit", "qid": str(qid_uuid), "received_at": row["created_at"],
+               "actor": req.admin_steam_id, "note": note}
+        async with _qapply_run(ctx):
+            paid = await _qapply_credit(db, row, report, actor=req.admin_steam_id, note=note)
+            await db.commit()
+    except HTTPException as ex:
+        await _asm_rollback(db)
+        raise _qapply_answer(ex)
+    except BaseException:
+        await _asm_rollback(db)
+        raise
+    print(f"[QUARANTINE] {qid} credited by {req.admin_steam_id}: {len(paid)} player(s)")
+    return {"status": "credited",
+            "players": [{"steam_id": s, "xp": v["xp"], "gold": v["gold"]}
+                        for s, v in sorted(paid.items())]}
 
 
 # ── Quarantine triage: a read-only operator view (RJ-TRIAGE part 1) ────────
@@ -76048,9 +76767,8 @@ async def internal_quarantine_digest(
             for d, _b in sorted(qd["detail"], key=lambda db_: (db_[0]["digest_posted_at"] is not None,
                                                                  db_[0]["created_at"], str(db_[0]["id"]))):
                 try:
-                    qd["gates"][str(d["id"])] = await h.run(
-                        _quarantine_later_rated, d["mode"], d["player_ids"], d["created_at"],
-                        savepoint=True)
+                    # QAPPLY-1: the list's verdict, read form (no row lock).
+                    qd["gates"][str(d["id"])] = await h.run(_qapply_verdict, d, _b, savepoint=True)
                 except _TriageReadBudgetSpent:
                     raise
                 except Exception as ex:
@@ -76906,7 +77624,7 @@ def _qdig_feed_keys(row, v, facts, gate) -> dict:
     if gate is None:
         can_accept, blocked = None, "not computed within the read budget"
     else:
-        can_accept, blocked = _quarantine_accept_verdict(*gate)
+        can_accept, blocked = gate["can_accept"], gate["accept_blocked_reason"]
     report_names = {p["steam_id"]: p["name"] for p in body["players"]}
     played = _qdig_played_at(row, body)
     return {

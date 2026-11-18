@@ -52,6 +52,7 @@ ACTIONS: dict[str, str] = {
     "record_exclude": "Record excluded",
     "quarantine_accept": "Held report accepted",
     "quarantine_discard": "Held report discarded",
+    "quarantine_credit": "Held report credited",
     # Player Cards, cosmetics, roles
     "pc_trade_reverse": "Card trade reversed",
     "pc_portrait_clear": "Portrait cleared",
@@ -372,9 +373,32 @@ def _sentence(word: str, details, ended=None) -> str:
         board = d.get("board")
         return f"Excluded a record from the {board} board." if board else "Excluded a record."
     if word == "quarantine_accept":
-        return "Accepted a held match report for replay."
+        # QAPPLY-1: a record with details.applied names the game it recorded;
+        # a record without it is an Accept from before that build (marked
+        # only, nothing applied).
+        if d.get("applied"):
+            return (f"Accepted a held match report and applied it as game {_num(d.get('game'))}."
+                    if _num(d.get("game")) else "Accepted a held match report and applied it.")
+        return "Accepted a held match report for replay (not applied)."
     if word == "quarantine_discard":
         return "Discarded a held match report."
+    if word == "quarantine_credit":
+        # Two forms: the route's one record per report (details.players, by
+        # Steam id) and migration 421's one record per player (top-level xp
+        # and the three gold kinds).
+        players = d.get("players") if isinstance(d.get("players"), dict) else {}
+        rows = [v for v in players.values() if isinstance(v, dict)] if players else [d]
+        xp = sum(_num(v.get("xp")) or 0 for v in rows)
+        gold = sum((_num(v.get("gold")) if _num(v.get("gold")) is not None else
+                    sum(_num(v.get(k)) or 0 for k in ("gold_ffa_xp", "gold_ffa_placement",
+                                                      "gold_level_reward")))
+                   for v in rows)
+        if players:
+            return (f"Credited a held match report: {_plural(len(players), 'player')} paid "
+                    f"{xp} XP and {gold} gold in all, no rating moved.")
+        if _num(d.get("xp")) is not None:
+            return f"Credited a held match report: {xp} XP and {gold} gold, no rating moved."
+        return "Credited a held match report's XP and gold, no rating moved."
     if word == "pc_trade_reverse":
         mb = d.get("moved_back") if isinstance(d.get("moved_back"), dict) else {}
         n = sum(len(v) for v in mb.values() if isinstance(v, list))
