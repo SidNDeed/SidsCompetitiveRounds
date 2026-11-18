@@ -646,28 +646,27 @@ FROZEN = {'api/admin_evidence.py': [('import', 'from sqlalchemy import text'),
                   '    500 surfacing from postgres several layers down, or a half-applied write.\n'
                   '\n'
                   '    Registered after every other gate but one, so it refuses before them. The\n'
-                  '    one layer outside it is `evidence_key_gate` (admin_evidence.py), '
-                  'registered\n'
+                  '    one layer outside it is `evidence_key_gate` (admin_evidence.py), registered\n'
                   '    right after this function: for the evidence report paths only it requires\n'
                   '    the internal key before anything else runs, in every server state, and\n'
                   '    passes every other path untouched. Inert on the primary: one boolean per\n'
                   '    request.\n'
                   '\n'
                   '    WHAT IT DOES NOT COVER, stated because a gate is easy to over-read:\n'
-                  "      * WRITE-ON-GET. This codebase's dominant write shape is a GET that "
-                  'writes\n'
+                  "      * WRITE-ON-GET. This codebase's dominant write shape is a GET that writes\n"
                   '        through a shared helper, and no method test can see those. They are\n'
                   '        handled individually at their choke points (grep IS_REPLICA), and the\n'
-                  "        real control for them is the edge's read allowlist, which is a regex "
-                  'of\n'
+                  "        real control for them is the edge's read allowlist, which is a regex of\n"
                   '        analytics reads and routes nothing else here.\n'
                   "      * WEBSOCKETS. Starlette's http middleware never runs for a websocket\n"
-                  '        scope, so the chat socket bypasses this entirely. It is not in the '
-                  'edge\n'
-                  '        allowlist either, so it cannot arrive here through the documented '
-                  'path.\n'
+                  '        scope, so the chat socket bypasses this entirely. It is not in the edge\n'
+                  '        allowlist either, so it cannot arrive here through the documented path.\n'
                   '    This gate is a backstop for the one case a method test CAN catch: a\n'
                   '    non-GET arriving at a read replica.\n'
+                  '\n'
+                  "    It also hands the request's scope to _ban_gate_route (bans part 2a), so a\n"
+                  '    ban refusal made by a check that is given no request still names the\n'
+                  '    route; it reads and writes nothing else.\n'
                   '    '),
                  ('dsntext',
                   'One pass of the deferred-fallback sweep. Returns the number settled.\n'
