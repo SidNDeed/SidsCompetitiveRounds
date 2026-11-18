@@ -128,6 +128,17 @@ class Grammar:
     such a module gains anywhere, a store to the class or its attributes
     included, is refused by shape.
 
+    The definition scope also holds the SIGNAL CLASS rows (MDPL class C,
+    the integrator's rulings of 17 Nov 09:13:52Z and 10:05:30Z, question
+    2): ("<signal class>", name), ("<signal class>", name, file, the class
+    statement's whole ast.dump, docstring included) and ("<signal class>",
+    name, file, "uses", rule N's census of the name in that file), admitting
+    BY NAME the account deletion's two signal classes, which the bet helpers
+    the walks reach construct, exactly as frozen: the class statement, every
+    use of the name in its module, and the class object itself
+    (Bindings.namedtuple_class, _signal_class). Any other class keeps the
+    scope's rule.
+
     Any refusal raises Unclassified((line, sentence)), the sentence naming
     the file, the absolute line and the shape or anchor. `admitted` maps
     each span (file, line, name) to the number of nodes checked (the
@@ -468,6 +479,126 @@ def _admitted_scope(name, scope, g, line):
     if len(got) > 0:
         raise Unclassified((line, f"{name}: {got[0][1]}"))
     return tree
+
+
+# MDPL class C (the integrator's rulings of 17 Nov 09:13:52Z and 10:05:30Z,
+# question 2): the definition scope's SIGNAL CLASS rows. The members a class
+# statement's own machinery puts in a class's namespace are set aside by the
+# member check.
+_SIGNAL = "<signal class>"
+_SIGNAL_SET_ASIDE = frozenset({"__module__", "__doc__", "__weakref__",
+                               "__dict__", "__qualname__", "__firstlineno__",
+                               "__static_attributes__"})
+
+
+def signal_name_key(name):
+    """The definition-scope row ("<signal class>", name) that names `name`
+    a signal class."""
+    return (_SIGNAL, name)
+
+
+def signal_key(name, filename, made):
+    """The definition-scope row ("<signal class>", name, file, ast.dump of
+    the class statement, its docstring included) that signal class `name`'s
+    one binding `made` in `filename` must match; None when `made` is not a
+    class statement."""
+    if not isinstance(made, _ast.ClassDef):
+        return None
+    return (_SIGNAL, name, filename, _ast.dump(made))
+
+
+def signal_uses_key(name, filename, rows):
+    """The definition-scope row ("<signal class>", name, file, "uses",
+    rows) that rule N's census of signal class `name` in its module
+    (_n_census: every occurrence of the name, each attribute and string
+    spelling of it) must equal, whole."""
+    return (_SIGNAL, name, filename, "uses", rows)
+
+
+def _signal_class(b, name, obj, line):
+    """The signal class `obj` that plain name `name` denotes (the resolver's
+    module binding, Bindings.namedtuple_class), admitted by the frozen
+    definition scope's SIGNAL CLASS rows; refused unless all of these hold:
+    `obj` is the class its own module defines (that module's binding of
+    the name, its qualified name the plain one, no metaclass); that module
+    binds the name once, by a class statement whose row (signal_key: its
+    whole ast.dump, docstring included) the scope holds; rule N's census of
+    the name in that module equals its frozen uses row, whole
+    (signal_uses_key: a use added, removed or changed anywhere in the
+    module refuses); the class is a plain Exception subclass (mro (cls,
+    Exception, BaseException, object)); and its members are its frozen
+    statement's functions alone, each one's code at its definition's line
+    in that file (_signal_member)."""
+    g = b.grammar
+    home = _inspect.getmodule(obj)
+    f = _os.path.basename(getattr(home, "__file__", "?"))
+    if not _signal_identity(home, name, obj):
+        raise Unclassified((line, f"{name}: not the class its module defines"))
+    tree = _module_tree(home)
+    made = _one_top_binding(tree, name)
+    if signal_key(name, f, made) not in g.namedtuples:
+        raise Unclassified((line, f"{name}: its class statement in {f} is "
+                                  "not its frozen signal class"))
+    rows = _n_census(home, name)
+    if signal_uses_key(name, f, rows) not in g.namedtuples:
+        raise Unclassified((line, f"{name}: its uses in {f} are not its "
+                                  "frozen uses"))
+    want = (obj, Exception, BaseException, object)
+    if getattr(obj, "__mro__", None) != want:
+        raise Unclassified((line, f"{name}: not a plain Exception subclass"))
+    lines = {}
+    for s in made.body:
+        _signal_def_line(lines, s)
+    members = vars(obj)
+    for k in members:
+        if k in _SIGNAL_SET_ASIDE:
+            continue
+        v = members[k]
+        if not _signal_member(name, k, v, lines, f):
+            raise Unclassified((line, f"{name}: its member {k} is not its "
+                                      "frozen statement's"))
+    for k in lines:
+        if k not in members:
+            raise Unclassified((line, f"{name}: its member {k} is missing"))
+    return obj
+
+
+def _signal_identity(home, name, obj):
+    """Whether `obj` is a class, without a metaclass, that its own module
+    `home` binds to `name`, its qualified name the plain one."""
+    if not isinstance(obj, type):
+        return False
+    if type(obj) is not type:
+        return False
+    if getattr(home, name, None) is not obj:
+        return False
+    if getattr(obj, "__qualname__", None) != name:
+        return False
+    return True
+
+
+def _signal_def_line(lines, s):
+    """Record statement `s`'s line under its name when it defines a
+    function (a signal class statement's members)."""
+    if isinstance(s, _ast.FunctionDef):
+        lines[s.name] = s.lineno
+
+
+def _signal_member(name, k, v, lines, filename):
+    """Whether member `k` (value `v`) of signal class `name` is the function
+    its frozen statement defines at lines[k] in `filename`."""
+    if k not in lines:
+        return False
+    code = getattr(v, "__code__", None)
+    at = lines[k]
+    if getattr(code, "co_firstlineno", None) != at:
+        return False
+    if _os.path.basename(getattr(code, "co_filename", "?")) != filename:
+        return False
+    want = f"{name}.{k}"
+    if getattr(v, "__qualname__", None) != want:
+        return False
+    return True
 
 
 def source_of(fn):
@@ -1318,7 +1449,15 @@ class Bindings:
         constructor-pure. Within the admitted scope the module binds the
         name exactly once, by a top-level `X = <maker>(...)`, and the
         maker's root name exactly once. None for a callee that is not a
-        class, and always None without a grammar."""
+        class, and always None without a grammar.
+
+        MDPL class C (the integrator's rulings of 17 Nov 09:13:52Z and
+        10:05:30Z, question 2): a name the scope's ("<signal class>", name)
+        row names is admitted by that row instead, when its module's class
+        statement, its uses (rule N's census, whole) and the class itself
+        are as frozen (_signal_class); any difference refuses. The walk's
+        call route and receiver provenance admit it as they admit a named
+        tuple (the route counts it under the named-tuple label)."""
         if not isinstance(func, _ast.Name):
             return None
         line = line or getattr(func, "lineno", 0)
@@ -1326,6 +1465,9 @@ class Bindings:
         g = self.grammar
         if g is None or not isinstance(obj, type):
             return None
+        row = signal_name_key(func.id)
+        if row in g.namedtuples:
+            return _signal_class(self, func.id, obj, line)
         tree = _admitted_scope(func.id, self.scope, g, line)
         made = _one_top_binding(tree, func.id)
         if not (isinstance(made, _ast.Assign)

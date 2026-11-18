@@ -59,6 +59,8 @@ COVERED = (
     ('a1', 'main.py', 19744, 19747, '_group_region'),
     ('a1', 'main.py', 21657, 21659, 'queue_poll'),
     ('a1', 'main.py', 21660, 21662, 'queue_poll'),
+    # MDPL class C (ruling 10:53:36Z): _deletion_lock_party_row's plain read, at its line in C's tree (1b1ecbe6)
+    ('a1', 'main.py', 46067, 46067, '_deletion_lock_party_row'),
     ('a1', 'main.py', 51477, 51480, 'team_queue_poll'),
     ('a1', 'main.py', 51508, 51510, 'team_queue_poll'),
     ('a1', 'main.py', 51632, 51636, 'team_queue_poll'),
@@ -96,6 +98,10 @@ WRITERS = (
     ('a1', 'main.py', 17838, 17840, '_lease_admission_gate'),
     ('a1', 'main.py', 17844, 17846, '_lease_admission_gate'),
     ('a1', 'main.py', 18393, 18396, '_lock_snapshot_rows'),
+    # MDPL class C (ruling 10:53:36Z): _deletion_lock_party_row's no-wait lock, at its line in C's tree (1b1ecbe6)
+    ('a1', 'main.py', 46065, 46065, '_deletion_lock_party_row'),
+    # MDPL class C (ruling 12:03:04Z, Q2): _deletion_lock_party_row's identity-key try-lock, at its line in C's tree
+    ('a1', 'main.py', 46073, 46073, '_deletion_lock_party_row'),
     ('a1', 'main.py', 52776, 52780, '_reconcile_team_series_bets'),
     ('a1', 'main.py', 52799, 52801, '_reconcile_team_series_bets'),
     ('a1', 'main.py', 53392, 53394, '_team_quartet_lock'),
@@ -131,6 +137,8 @@ OUTCOME = {
     ('a1', 'main.py', 19744, 19747, '_group_region'): 'ok',
     ('a1', 'main.py', 21657, 21659, 'queue_poll'): ('not reached', 'main.py:21114', '25006'),
     ('a1', 'main.py', 21660, 21662, 'queue_poll'): ('not reached', 'main.py:21114', '25006'),
+    # MDPL class C: the plain read, not reached under the role (the lock before it is refused)
+    ('a1', 'main.py', 46067, 46067, '_deletion_lock_party_row'): ('not reached', 'main.py:46065', '25006'),
     ('a1', 'main.py', 51477, 51480, 'team_queue_poll'): ('not reached', 'main.py:17380', '25006'),
     ('a1', 'main.py', 51508, 51510, 'team_queue_poll'): ('not reached', 'main.py:17380', '25006'),
     ('a1', 'main.py', 51632, 51636, 'team_queue_poll'): ('not reached', 'main.py:17380', '25006'),
@@ -187,6 +195,10 @@ WRITER_OUTCOME = {
     ('a1', 'main.py', 17838, 17840, '_lease_admission_gate'): '25006',
     ('a1', 'main.py', 17844, 17846, '_lease_admission_gate'): ('not reached', 'main.py:17838', '25006'),
     ('a1', 'main.py', 18393, 18396, '_lock_snapshot_rows'): '25006',
+    # MDPL class C: the no-wait lock, refused under the role
+    ('a1', 'main.py', 46065, 46065, '_deletion_lock_party_row'): '25006',
+    # MDPL class C: the identity-key try-lock, not reached under the role (the lock before it is refused)
+    ('a1', 'main.py', 46073, 46073, '_deletion_lock_party_row'): ('not reached', 'main.py:46065', '25006'),
     ('a1', 'main.py', 52776, 52780, '_reconcile_team_series_bets'): '25006',
     ('a1', 'main.py', 52799, 52801, '_reconcile_team_series_bets'): ('not reached', 'main.py:52776', '25006'),
     ('a1', 'main.py', 53392, 53394, '_team_quartet_lock'): ('lock', ('advisory ExclusiveLock',)),
@@ -323,6 +335,9 @@ GRANT_OUTCOME = {
         ('not reached under grant', ('DELETE ovt_queue', 'UPDATE ovt_queue'), None),
     ('a1', 'main.py', 67103, 67105, '_ffa_queue_poll_inner'):
         ('not reached under grant', ('DELETE ffa_queue', 'UPDATE ffa_assembly_seats', 'UPDATE ffa_lobbies', 'UPDATE ffa_queue'), None),
+    # MDPL class C: the plain read under UPDATE players, reached with no row, holding the lock's locks
+    ('a1', 'main.py', 46067, 46067, '_deletion_lock_party_row'):
+        ('lock under grant', ('UPDATE players',), ('relation RowShareLock idx_players_active', 'relation RowShareLock idx_players_discord', 'relation RowShareLock idx_players_last_seen', 'relation RowShareLock idx_players_mod_version', 'relation RowShareLock idx_players_steam', 'relation RowShareLock players', 'relation RowShareLock players_discord_id_key', 'relation RowShareLock players_pc_game_portrait_hash_idx', 'relation RowShareLock players_pc_steam_portrait_hash_idx', 'relation RowShareLock players_pc_steam_portrait_next_at_idx', 'relation RowShareLock players_pkey', 'relation RowShareLock players_steam_id_key')),
 }
 
 
@@ -1287,6 +1302,8 @@ REFUSER_GRANTS = {
     "main.py:52776": ("UPDATE team_series",),
     "main.py:53457": ("UPDATE team_series",),
     "match_hold.py:380": ("UPDATE team_series",),
+    # MDPL class C: _deletion_lock_party_row's no-wait lock (main.py:46065), FOR NO KEY UPDATE of players
+    "main.py:46065": ("UPDATE players",),
 }
 
 

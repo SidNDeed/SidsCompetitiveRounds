@@ -15,6 +15,7 @@ namespace (M4), A1_NAMEDTUPLES is the complete definition scope of
 region_pick.py (M5), and the census block below is ga1's round-7 freeze
 restored, minus three removed shapes (M4, M7, M8).
 """
+import ast as _ast
 
 
 # (file, def line, name, nodes) of every span the a1 walks admit
@@ -36,13 +37,16 @@ A1_SPANS = (
     ('main.py', 19709, '_group_region', 706),
     ('main.py', 21077, 'queue_poll', 2650),
     ('main.py', 29487, '_bet_fighter_tax', 88),
-    ('main.py', 29506, '_credit_bet_fighter_tax', 113),
-    ('main.py', 29531, '_credit_team_bet_fighter_tax', 115),
-    ('main.py', 39034, '_return_stake_exactly', 96),
+    ('main.py', 29506, '_credit_bet_fighter_tax', 129),  # MDPL class C: the lane's count at 1b1ecbe6 (+16)
+    ('main.py', 29531, '_credit_team_bet_fighter_tax', 125),  # MDPL class C: the lane's count at 1b1ecbe6 (+10)
+    ('main.py', 39034, '_return_stake_exactly', 112),  # MDPL class C: the lane's count at 1b1ecbe6 (+16)
+    ('main.py', 45770, '_deletion_bound_acts_on', 26),  # MDPL class C (ruling 10:53:36Z): the lane's helper (bcc99529), reached by the real walks
+    ('main.py', 45778, '_retryable_for_caller', 47),  # MDPL class C (ruling 10:53:36Z): the lane's helper (4e2841f1), reached by the real walks
+    ('main.py', 46030, '_deletion_lock_party_row', 136),  # MDPL class C (ruling 10:53:36Z): the lane's helper (4841af70), reached by the real walks
     ('main.py', 50476, '_balance_teams', 230),
     ('main.py', 50496, '_team_balance_rating', 49),
     ('main.py', 50853, 'team_queue_poll', 4249),
-    ('main.py', 52739, '_reconcile_team_series_bets', 606),
+    ('main.py', 52739, '_reconcile_team_series_bets', 656),  # MDPL class C: the lane's count at 1b1ecbe6 (+50)
     ('main.py', 53372, '_team_quartet_key', 26),
     ('main.py', 53380, '_team_quartet_lock', 27),
     ('main.py', 53397, '_team_series_resumable', 139),
@@ -67,7 +71,7 @@ A1_SPANS = (
     ('main.py', 63902, '_asm_sqlstate', 119),
     ('main.py', 66502, '_ffa_queue_poll_inner', 2939),
     ('main.py', 75300, '_assert_no_service_subject', 96),
-    ('main.py', 75348, '_service_player_uuids', 183),
+    ('main.py', 75348, '_service_player_uuids', 191),  # MDPL class C: the lane's count at 1b1ecbe6 (+8)
     ('match_hold.py', 212, 'caps_token_sql', 16),
     ('match_hold.py', 235, '_mode_or_400', 23),
     ('match_hold.py', 351, '_latch_sql', 78),
@@ -87,7 +91,7 @@ A1_SPANS = (
 )
 
 
-A1_NODES = 20183
+A1_NODES = 20492  # MDPL class C: 20183 + 100, the five spans' lane nodes, + 209, the three helpers' spans (26 + 47 + 136)
 
 
 A1_SHAPES = frozenset({
@@ -1707,6 +1711,37 @@ A1_SHAPES = frozenset({
     'keyword.value>Tuple(elts=[Constant|Subscript],ctx=Load)',  # main.py:51145
     'keyword.value>Tuple(elts=[Tuple],ctx=Load)',  # main.py:21476
     'withitem.context_expr>Call(func=Attribute,args=[],keywords=[])',  # main.py:4491
+    # MDPL class C (the integrator's rulings of 17 Nov 2026, 09:13:52Z and 10:05:30Z): the lane's own
+    # shapes in the five a1 spans it changed, admitted BY HAND; each with its first real file:line at
+    # 1b1ecbe6 and the reason. A1_SHAPES is a vocabulary shared by every span: a shape stands only
+    # where a frozen order key holds the statement it is in (measured for condition 1, 17 Nov 10:11Z;
+    # the ruling of 10:12:24Z: no keying rule).
+    'AsyncFunctionDef.args>arguments(posonlyargs=[],args=[arg],vararg=-,kwonlyargs=[arg],kw_defaults=[Constant],kwarg=-,defaults=[Constant|Name])',  # main.py:53178 _reconcile_team_series_bets' arguments with the lane's keyword-only no_wait (4841af70)
+    'AsyncFunctionDef.args>arguments(posonlyargs=[],args=[arg],vararg=-,kwonlyargs=[arg],kw_defaults=[Constant],kwarg=-,defaults=[Constant])',  # main.py:29513 _credit_bet_fighter_tax's arguments with the lane's keyword-only no_wait (4841af70)
+    'AsyncFunctionDef.args>arguments(posonlyargs=[],args=[arg],vararg=-,kwonlyargs=[arg],kw_defaults=[Constant],kwarg=-,defaults=[Tuple])',  # main.py:29543 _credit_team_bet_fighter_tax's arguments with the lane's keyword-only no_wait (4841af70)
+    'AsyncFunctionDef.args>arguments(posonlyargs=[],args=[arg],vararg=-,kwonlyargs=[arg],kw_defaults=[Constant|NoneType],kwarg=-,defaults=[])',  # main.py:39054 _return_stake_exactly's arguments with the lane's keyword-only no_wait (4841af70)
+    'arguments.defaults>Constant(value=bool)',  # main.py:53180 the lane's positional raise_retryable: bool = False (4e2841f1)
+    'Try.handlers>ExceptHandler(type=Tuple,name=-,body=[Raise])',  # main.py:75863 the lane's hand-back clause `except (_DeletionRowHeld, _DeletionPastDeadline): raise` (4841af70)
+    'ExceptHandler.type>Tuple(elts=[Name],ctx=Load)',  # main.py:75863 the hand-back clause's tuple of the two signal classes (4841af70)
+    "Call.keywords>keyword(arg='no_wait',value=Name)",  # main.py:29529 the lane's `no_wait=no_wait`, handed on at 8 sites in the five spans (4841af70)
+    'Await.value>Call(func=Name,args=[Call|Name|Subscript],keywords=[keyword])',  # main.py:53288 _credit_team_bet_fighter_tax(..., no_wait=no_wait) in the payout (4841af70)
+    'Try.handlers>ExceptHandler(type=Name,name=str,body=[Expr|If])',  # main.py:53303 the reconcile catch with the lane's retryable re-raise before its print (4e2841f1)
+    'ExceptHandler.body>If(test=Call,body=[Raise],orelse=[])',  # main.py:53304 the lane's `if _retryable_for_caller(ex, raise_retryable): raise` (4e2841f1)
+    'If.body>Raise(exc=-,cause=-)',  # main.py:53305 the bare raise of that re-raise (4e2841f1)
+    # MDPL class C (the integrator's ruling of 17 Nov 2026, 10:53:36Z): the shapes of the three lane
+    # helpers the real a1 walks reach (_deletion_bound_acts_on, _retryable_for_caller,
+    # _deletion_lock_party_row), admitted BY HAND; each with its first real file:line at 1b1ecbe6 and
+    # the reason (the commit is git blame's for that line).
+    'BoolOp.values>Compare(left=Name,ops=[In],comparators=[Name])',  # main.py:45774 _deletion_bound_acts_on: `code in _DELETION_RETRY_SQLSTATES`, the retry set read when called (4841af70)
+    'BoolOp.values>Compare(left=Name,ops=[In],comparators=[Tuple])',  # main.py:45774 _deletion_bound_acts_on: `code in (_DELETION_TIMEOUT_SQLSTATE, _DELETION_DEADLINE_SQLSTATE)`, the two timeouts (4841af70)
+    'FunctionDef.body>If(test=Call,body=[Return],orelse=[])',  # main.py:45793 _retryable_for_caller: `if isinstance(ex, (_DeletionRowHeld, _DeletionPastDeadline)): return True`, the two signals come back whatever raise_retryable says (4841af70)
+    'Return.value>BoolOp(op=And,values=[Call])',  # main.py:45795 _retryable_for_caller: `return bool(raise_retryable) and _deletion_bound_acts_on(...)` (bcc99529)
+    'BoolOp.values>Call(func=Name,args=[Call],keywords=[])',  # main.py:45795 _retryable_for_caller: `_deletion_bound_acts_on(getattr(...))`, the error's SQLSTATE read through the bound's own sets (bcc99529)
+    'Call.args>Call(func=Name,args=[Call|Constant],keywords=[])',  # main.py:45796 _retryable_for_caller: `getattr(getattr(ex, "orig", None), "sqlstate", None)`, the driver error's SQLSTATE or None (bcc99529)
+    'AsyncFunctionDef.body>If(test=Compare,body=[Assign|If|Return],orelse=[])',  # main.py:46066 _deletion_lock_party_row: `if got is None:`, the plain read that tells a row another transaction holds from a missing row (4841af70)
+    'If.body>If(test=Compare,body=[Raise],orelse=[])',  # main.py:46068 _deletion_lock_party_row: `if seen is not None: raise _DeletionRowHeld("bet party row")` (4841af70)
+    'If.test>Compare(left=Subscript,ops=[Is],comparators=[Constant])',  # main.py:46071 _deletion_lock_party_row: `if got[0] is None: return`, a row with no steam id takes no key (4841af70)
+    'UnaryOp.operand>BoolOp(op=And,values=[Compare])',  # main.py:46074 _deletion_lock_party_row: `if not (key is not None and key[0] is True)`, the key's try form refused (4841af70)
 })
 
 
@@ -2439,8 +2474,6 @@ A1_POSITIONS = frozenset({
     ("'          FROM team_queue q WHERE q.player_id = :pid) AS me_s2  FROM team_series s WHERE s.id = :sid'", 'const', 'team_queue_poll', ('body[19]', 'body[14]', 'body[2]', 'value', 'func', 'value', 'func', 'value', 'value', 'args[0]', 'args[0]', 'values[2]')),
     ("' ('", 'const', '_reconcile_team_series_bets', ('body[1]', 'body[0]', 'body[11]', 'body[0]', 'value', 'args[0]', 'values[2]')),
     ("' ('", 'const', '_reconcile_team_series_bets', ('body[1]', 'body[0]', 'body[3]', 'body[0]', 'value', 'args[0]', 'values[2]')),
-    ("' ('", 'const', '_reconcile_team_series_bets', ('body[1]', 'handlers[0]', 'body[0]', 'value', 'args[0]', 'values[2]')),
-    ("' ('", 'const', '_return_stake_exactly', ('body[2]', 'body[0]', 'exc', 'args[0]', 'values[4]')),
     ("' ('", 'const', 'team_queue_poll', ('body[19]', 'body[14]', 'body[1]', 'body[4]', 'body[0]', 'value', 'args[0]', 'values[4]')),
     ("' ('", 'const', 'team_queue_poll', ('body[19]', 'body[1]', 'body[2]', 'value', 'args[0]', 'values[2]')),
     ("' (family resolve, caller='", 'const', '_team_lock_family_pick', ('body[10]', 'body[4]', 'value', 'args[0]', 'values[2]')),
@@ -2472,7 +2505,6 @@ A1_POSITIONS = frozenset({
     ("' found_others='", 'const', 'team_queue_poll', ('body[35]', 'body[2]', 'body[0]', 'value', 'args[0]', 'values[4]')),
     ("' from lobby '", 'const', '_ffa_queue_poll_inner', ('body[14]', 'body[8]', 'body[2]', 'value', 'args[0]', 'values[2]')),
     ("' gain='", 'const', '_group_region', ('body[6]', 'value', 'args[0]', 'left', 'values[22]')),
-    ("' gold to player '", 'const', '_return_stake_exactly', ('body[2]', 'body[0]', 'exc', 'args[0]', 'values[2]')),
     ("' is already committed ('", 'const', '_ffa_queue_poll_inner', ('body[33]', 'body[6]', 'body[1]', 'body[0]', 'value', 'args[0]', 'values[2]')),
     ("' is already committed ('", 'const', '_team_resolve_live_family', ('body[7]', 'body[0]', 'value', 'args[0]', 'values[2]')),
     ("' is already committed ('", 'const', 'ovt_queue_poll', ('body[21]', 'body[13]', 'body[0]', 'value', 'args[0]', 'values[2]')),
@@ -2534,12 +2566,10 @@ A1_POSITIONS = frozenset({
     ("'(release the gather?, seconds left) for a roster of `seats` seats.\\n\\n    A function rather than a run of locals because the decision is taken\\n    TWICE: once on the discovered roster, and again on the REDISCOVERED one\\n    after a contended attempt. A roster released only because it was FULL\\n    \u2014 the one release that waits for nothing \u2014 and which then shrank under\\n    the identity barrier must not still be released: what the players would\\n    get is a three-seat game the window had not yet opened for, after being\\n    told the lobby was full.\\n\\n    Reads no module state and writes none. The started/last-join stamps\\n    belong to the poll above and to the join endpoint, and a second\\n    evaluation must not restart the window it is evaluating.'", 'const', '_ffa_gather_decide', ('body[0]', 'value')),
     ("')                     AND '", 'const', '_latch_sql', ('body[2]', 'value', 'values[8]')),
     ("') WHERE s.id = CAST(:sid AS uuid)   AND s.hold_room IS DISTINCT FROM CAST(:room AS varchar)'", 'const', '_latch_sql', ('body[2]', 'value', 'values[10]')),
-    ("') was refused: the balance does not cover the stake the wager records, so no gold and no ledger row were written'", 'const', '_return_stake_exactly', ('body[2]', 'body[0]', 'exc', 'args[0]', 'values[6]')),
     ("') \u2014 dissolving own row'", 'const', 'queue_poll', ('body[24]', 'body[9]', 'body[4]', 'orelse[0]', 'body[0]', 'value', 'args[0]', 'values[6]')),
     ("') \u2014 dissolving own row'", 'const', 'queue_poll', ('body[24]', 'body[9]', 'body[8]', 'body[0]', 'value', 'args[0]', 'values[6]')),
     ("') \u2014 group '", 'const', 'team_queue_poll', ('body[19]', 'body[1]', 'body[2]', 'value', 'args[0]', 'values[4]')),
     ("') \u2014 healing'", 'const', '_ffa_queue_poll_inner', ('body[13]', 'body[1]', 'body[0]', 'body[0]', 'value', 'args[0]', 'values[4]')),
-    ("') \u2014 janitor retries: '", 'const', '_reconcile_team_series_bets', ('body[1]', 'handlers[0]', 'body[0]', 'value', 'args[0]', 'values[4]')),
     ("') \u2014 resetting own row'", 'const', 'queue_poll', ('body[24]', 'body[3]', 'body[0]', 'value', 'args[0]', 'values[6]')),
     ("')'", 'const', '_ffa_queue_poll_inner', ('body[13]', 'body[4]', 'body[3]', 'value', 'args[0]', 'values[4]')),
     ("')'", 'const', '_ffa_queue_poll_inner', ('body[14]', 'body[13]', 'body[4]', 'value', 'args[0]', 'values[6]')),
@@ -2622,7 +2652,6 @@ A1_POSITIONS = frozenset({
     ("'SELECT 1 FROM '", 'const', '_lock_snapshot_rows', ('body[2]', 'body[1]', 'value', 'value', 'args[0]', 'args[0]', 'values[0]')),
     ("'SELECT 1 FROM ffa_queue WHERE player_id = :pid FOR UPDATE'", 'const', '_lock_queue_rows_ordered', ('body[4]', 'body[1]', 'orelse[0]', 'orelse[0]', 'orelse[0]', 'body[0]', 'value', 'value', 'args[0]', 'args[0]')),
     ("'SELECT 1 FROM ovt_queue WHERE player_id = :pid FOR UPDATE'", 'const', '_lock_queue_rows_ordered', ('body[4]', 'body[1]', 'orelse[0]', 'orelse[0]', 'body[0]', 'value', 'value', 'args[0]', 'args[0]')),
-    ("'SELECT 1 FROM players WHERE id = :pid FOR NO KEY UPDATE'", 'const', '_reconcile_team_series_bets', ('body[1]', 'body[0]', 'body[5]', 'body[0]', 'value', 'value', 'args[0]', 'args[0]')),
     ("'SELECT 1 FROM ranked_queue WHERE player_id = :pid FOR UPDATE'", 'const', '_lock_queue_rows_ordered', ('body[4]', 'body[1]', 'body[0]', 'value', 'value', 'args[0]', 'args[0]')),
     ("'SELECT 1 FROM team_queue WHERE player_id = :pid FOR UPDATE'", 'const', '_lock_queue_rows_ordered', ('body[4]', 'body[1]', 'orelse[0]', 'body[0]', 'value', 'value', 'args[0]', 'args[0]')),
     ("'SELECT COALESCE(MAX(m.ended_at),                (SELECT l.start_granted_at FROM ffa_lobbies l                  WHERE l.id = :lid))  FROM ffa_matches m WHERE m.lobby_id = :lid'", 'const', '_ffa_queue_poll_inner', ('body[14]', 'body[11]', 'body[2]', 'body[0]', 'value', 'func', 'value', 'value', 'args[0]', 'args[0]')),
@@ -2664,9 +2693,6 @@ A1_POSITIONS = frozenset({
     ("'UPDATE '", 'const', '_latch_sql', ('body[2]', 'value', 'values[0]')),
     ("'UPDATE ffa_queue SET last_polled = NOW() WHERE player_id = :pid'", 'const', '_ffa_queue_poll_inner', ('body[9]', 'value', 'value', 'args[0]', 'args[0]')),
     ("'UPDATE ovt_queue SET last_polled = NOW(), mod_version = :mv WHERE player_id = :pid'", 'const', 'ovt_queue_poll', ('body[11]', 'value', 'value', 'args[0]', 'args[0]')),
-    ("'UPDATE players SET gold_earned = COALESCE(gold_earned,0) + :p WHERE id = :pid'", 'const', '_reconcile_team_series_bets', ('body[1]', 'body[0]', 'body[9]', 'body[3]', 'body[1]', 'body[0]', 'value', 'value', 'args[0]', 'args[0]')),
-    ("'UPDATE players SET gold_earned = COALESCE(gold_earned,0) + :tax WHERE id = :pid'", 'const', '_credit_bet_fighter_tax', ('body[3]', 'value', 'value', 'args[0]', 'args[0]')),
-    ("'UPDATE players SET gold_spent = COALESCE(gold_spent, 0) - CAST(:amt AS integer) WHERE id = :pid AND COALESCE(gold_spent, 0) >= CAST(:amt AS integer) RETURNING gold_spent'", 'const', '_return_stake_exactly', ('body[1]', 'value', 'func', 'value', 'value', 'args[0]', 'args[0]')),
     ("'UPDATE ranked_queue SET last_polled = NOW(), mod_version = :mv WHERE player_id = :pid'", 'const', 'queue_poll', ('body[22]', 'orelse[0]', 'value', 'value', 'args[0]', 'args[0]')),
     ("'UPDATE ranked_queue\\n                       SET last_polled = NOW(),\\n                           mod_version = :mv,\\n                           region_pings = CAST(:region_pings AS JSONB),\\n                           region_pings_at = CAST(:region_pings_at AS TIMESTAMPTZ)\\n                     WHERE player_id = :pid'", 'const', 'queue_poll', ('body[22]', 'body[1]', 'value', 'value', 'args[0]', 'args[0]')),
     ("'UPDATE team_bets SET payout = :p, settled_at = NOW(), settlement_kind = :k WHERE id = :bid AND settled_at IS NULL RETURNING id'", 'const', '_reconcile_team_series_bets', ('body[1]', 'body[0]', 'body[9]', 'body[1]', 'orelse[0]', 'value', 'func', 'value', 'value', 'args[0]', 'args[0]')),
@@ -2704,10 +2730,6 @@ A1_POSITIONS = frozenset({
     ("'[QUEUE-POLL] '", 'const', 'queue_poll', ('body[24]', 'body[9]', 'body[8]', 'body[0]', 'value', 'args[0]', 'values[0]')),
     ("'[QUEUE-POLL] '", 'const', 'queue_poll', ('body[28]', 'body[16]', 'body[0]', 'value', 'args[0]', 'values[0]')),
     ("'[QUEUE-POLL] '", 'const', 'queue_poll', ('body[28]', 'orelse[1]', 'value', 'args[0]', 'values[0]')),
-    ("'[SERVICE-POLICY] uuid cache could not be filled: '", 'const', '_service_player_uuids', ('body[4]', 'body[0]', 'handlers[0]', 'body[0]', 'body[0]', 'value', 'args[0]', 'values[0]')),
-    ("'[SERVICE-POLICY] uuid cache refresh failed and the previous set is past its age bound: '", 'const', '_service_player_uuids', ('body[4]', 'body[0]', 'handlers[0]', 'body[2]', 'body[0]', 'value', 'args[0]', 'values[0]')),
-    ("'[SERVICE-POLICY] uuid cache refresh failed, keeping the previous set within its age bound: '", 'const', '_service_player_uuids', ('body[4]', 'body[0]', 'handlers[0]', 'body[3]', 'value', 'args[0]', 'values[0]')),
-    ("'[TEAM-BETS] reconcile failed for '", 'const', '_reconcile_team_series_bets', ('body[1]', 'handlers[0]', 'body[0]', 'value', 'args[0]', 'values[0]')),
     ("'[TEAM-BETS] reconcile skipped for '", 'const', '_reconcile_team_series_bets', ('body[1]', 'body[0]', 'body[3]', 'body[0]', 'value', 'args[0]', 'values[0]')),
     ("'[TEAM-BETS] reconciled series '", 'const', '_reconcile_team_series_bets', ('body[1]', 'body[0]', 'body[11]', 'body[0]', 'value', 'args[0]', 'values[0]')),
     ("'[TEAM-FAMILY] relock refused: '", 'const', '_team_resolve_live_family', ('body[7]', 'body[0]', 'value', 'args[0]', 'values[0]')),
@@ -2775,7 +2797,6 @@ A1_POSITIONS = frozenset({
     ("'amount'", 'const', '_reconcile_team_series_bets', ('body[1]', 'body[0]', 'body[9]', 'body[0]', 'body[2]', 'value', 'body', 'args[0]', 'slice')),
     ("'amount'", 'const', '_reconcile_team_series_bets', ('body[1]', 'body[0]', 'body[9]', 'body[0]', 'orelse[0]', 'value', 'slice')),
     ("'amount'", 'const', '_reconcile_team_series_bets', ('body[1]', 'body[0]', 'body[9]', 'body[3]', 'orelse[1]', 'value', 'value', 'args[2]', 'slice')),
-    ("'amt'", 'const', '_return_stake_exactly', ('body[1]', 'value', 'func', 'value', 'value', 'args[1]', 'keys[0]')),
     ("'an FFA lobby'", 'const', '_ffa_queue_poll_inner', ('body[49]', 'value', 'value', 'args[3]')),
     ("'assembly_failed'", 'const', '_ffa_queue_poll_inner', ('body[14]', 'body[13]', 'body[0]', 'body[0]', 'value', 'body')),
     ("'assembly_failed'", 'const', 'ovt_queue_poll', ('body[16]', 'body[11]', 'body[0]', 'body[0]', 'value', 'body')),
@@ -2898,7 +2919,6 @@ A1_POSITIONS = frozenset({
     ("'gen_seq'", 'const', '_group_region', ('body[2]', 'body[2]', 'body[1]', 'body[0]', 'value', 'body', 'elts[1]', 'slice')),
     ("'get'", 'const', '_get', ('body[0]', 'value', 'test', 'args[1]')),
     ("'gid'", 'const', '_lease_acquire', ('body[3]', 'value', 'value', 'args[1]', 'keys[2]')),
-    ("'gold_earned'", 'const', '_credit_bet_fighter_tax', ('body[4]', 'body[0]', 'value', 'args[1]', 'elts[0]')),
     ("'group_id'", 'const', '_formation_lease_conflict', ('body[3]', 'body[3]', 'value', 'elts[1]', 'slice')),
     ("'group_id'", 'const', '_lease_admission_gate', ('body[14]', 'test', 'args[0]', 'elt', 'left', 'args[1]', 'slice')),
     ("'group_id'", 'const', '_lease_admission_gate', ('body[17]', 'body[0]', 'value', 'args[1]', 'slice')),
@@ -3147,11 +3167,9 @@ A1_POSITIONS = frozenset({
     ("'ovt_queue'", 'const', 'ovt_queue_poll', ('body[6]', 'value', 'value', 'args[1]')),
     ("'p'", 'const', '_reconcile_team_series_bets', ('body[1]', 'body[0]', 'body[9]', 'body[1]', 'body[0]', 'value', 'func', 'value', 'value', 'args[1]', 'keys[0]')),
     ("'p'", 'const', '_reconcile_team_series_bets', ('body[1]', 'body[0]', 'body[9]', 'body[1]', 'orelse[0]', 'value', 'func', 'value', 'value', 'args[1]', 'keys[0]')),
-    ("'p'", 'const', '_reconcile_team_series_bets', ('body[1]', 'body[0]', 'body[9]', 'body[3]', 'body[1]', 'body[0]', 'value', 'value', 'args[1]', 'keys[0]')),
     ("'pgcode'", 'const', '_asm_sqlstate', ('body[3]', 'body[3]', 'iter', 'elts[1]')),
     ("'picked'", 'const', '_team_lock_family_pick', ('body[12]', 'value', 'elts[0]')),
     ("'picked'", 'const', '_team_resolve_live_family', ('body[3]', 'test', 'comparators[0]')),
-    ("'pid'", 'const', '_credit_bet_fighter_tax', ('body[3]', 'value', 'value', 'args[1]', 'keys[1]')),
     ("'pid'", 'const', '_ffa_queue_poll_inner', ('body[12]', 'body[1]', 'body[0]', 'value', 'value', 'args[1]', 'keys[0]')),
     ("'pid'", 'const', '_ffa_queue_poll_inner', ('body[13]', 'body[1]', 'body[1]', 'value', 'value', 'args[1]', 'keys[0]')),
     ("'pid'", 'const', '_ffa_queue_poll_inner', ('body[13]', 'body[4]', 'body[0]', 'value', 'value', 'args[1]', 'keys[0]')),
@@ -3168,9 +3186,6 @@ A1_POSITIONS = frozenset({
     ("'pid'", 'const', '_lock_queue_rows_ordered', ('body[4]', 'body[1]', 'orelse[0]', 'orelse[0]', 'orelse[0]', 'body[0]', 'value', 'value', 'args[1]', 'keys[0]')),
     ("'pid'", 'const', '_lock_snapshot_rows', ('body[2]', 'body[1]', 'value', 'value', 'args[1]', 'keys[0]')),
     ("'pid'", 'const', '_player_body_color', ('body[1]', 'body[0]', 'value', 'func', 'value', 'value', 'args[1]', 'keys[0]')),
-    ("'pid'", 'const', '_reconcile_team_series_bets', ('body[1]', 'body[0]', 'body[5]', 'body[0]', 'value', 'value', 'args[1]', 'keys[0]')),
-    ("'pid'", 'const', '_reconcile_team_series_bets', ('body[1]', 'body[0]', 'body[9]', 'body[3]', 'body[1]', 'body[0]', 'value', 'value', 'args[1]', 'keys[1]')),
-    ("'pid'", 'const', '_return_stake_exactly', ('body[1]', 'value', 'func', 'value', 'value', 'args[1]', 'keys[1]')),
     ("'pid'", 'const', '_team_relock_existing_series', ('body[3]', 'body[1]', 'value', 'value', 'args[1]', 'keys[2]')),
     ("'pid'", 'const', 'ovt_queue_poll', ('body[11]', 'value', 'value', 'args[1]', 'keys[0]')),
     ("'pid'", 'const', 'ovt_queue_poll', ('body[14]', 'body[1]', 'body[0]', 'value', 'value', 'args[1]', 'keys[0]')),
@@ -3241,8 +3256,6 @@ A1_POSITIONS = frozenset({
     ("'player_id'", 'const', '_lease_admission_gate', ('body[13]', 'value', 'key', 'args[0]', 'slice')),
     ("'player_id'", 'const', '_lease_admission_gate', ('body[17]', 'body[3]', 'value', 'args[0]', 'args[0]', 'slice')),
     ("'player_id'", 'const', '_reconcile_team_series_bets', ('body[1]', 'body[0]', 'body[7]', 'value', 'value', 'keywords[0]', 'value', 'left', 'elt', 'slice')),
-    ("'player_id'", 'const', '_reconcile_team_series_bets', ('body[1]', 'body[0]', 'body[9]', 'body[3]', 'body[1]', 'body[0]', 'value', 'value', 'args[1]', 'values[1]', 'slice')),
-    ("'player_id'", 'const', '_reconcile_team_series_bets', ('body[1]', 'body[0]', 'body[9]', 'body[3]', 'body[1]', 'body[1]', 'value', 'args[0]', 'keywords[0]', 'value', 'slice')),
     ("'player_id'", 'const', '_reconcile_team_series_bets', ('body[1]', 'body[0]', 'body[9]', 'body[3]', 'orelse[1]', 'value', 'value', 'args[1]', 'slice')),
     ("'player_id'", 'const', '_rules_members', ('body[6]', 'body[0]', 'targets[0]', 'slice', 'args[0]', 'slice')),
     ("'player_id'", 'const', 'ovt_queue_poll', ('body[10]', 'value', 'value', 'keywords[0]', 'value', 'elts[0]', 'slice')),
@@ -3442,7 +3455,6 @@ A1_POSITIONS = frozenset({
     ("'rec_path'", 'const', '_ffa_queue_poll_inner', ('body[14]', 'body[13]', 'body[0]', 'body[1]', 'value', 'value', 'args[1]', 'keys[2]')),
     ("'rec_trigger'", 'const', '_ffa_queue_poll_inner', ('body[14]', 'body[12]', 'body[0]', 'value', 'value', 'args[1]', 'keys[2]')),
     ("'rec_trigger'", 'const', '_ffa_queue_poll_inner', ('body[14]', 'body[13]', 'body[0]', 'body[1]', 'value', 'value', 'args[1]', 'keys[3]')),
-    ("'refund of '", 'const', '_return_stake_exactly', ('body[2]', 'body[0]', 'exc', 'args[0]', 'values[0]')),
     ("'refunded'", 'const', '_reconcile_team_series_bets', ('body[1]', 'body[0]', 'body[9]', 'body[0]', 'orelse[2]', 'value')),
     ("'refusing rules read for unknown table '", 'const', '_rules_members', ('body[1]', 'body[0]', 'exc', 'args[0]', 'values[0]')),
     ("'refusing to lock unknown parent table '", 'const', '_lock_snapshot_rows', ('body[2]', 'body[0]', 'body[0]', 'exc', 'args[0]', 'values[0]')),
@@ -3656,8 +3668,6 @@ A1_POSITIONS = frozenset({
     ("'service_ids'", 'const', 'ovt_queue_poll', ('body[18]', 'value', 'keys[0]')),
     ("'service_ids'", 'const', 'queue_poll', ('body[28]', 'body[7]', 'value', 'keys[5]')),
     ("'service_ids'", 'const', 'team_queue_poll', ('body[28]', 'value', 'keys[4]')),
-    ("'service_policy_unavailable'", 'const', '_service_player_uuids', ('body[4]', 'body[0]', 'handlers[0]', 'body[0]', 'body[1]', 'exc', 'keywords[1]', 'value')),
-    ("'service_policy_unavailable'", 'const', '_service_player_uuids', ('body[4]', 'body[0]', 'handlers[0]', 'body[2]', 'body[1]', 'exc', 'keywords[1]', 'value')),
     ("'session_required'", 'const', 'queue_poll', ('body[2]', 'body[0]', 'exc', 'keywords[1]', 'value')),
     ("'set[str]'", 'const', '_service_player_uuids', ('returns',)),
     ("'settings_changed_at'", 'const', '_ffa_queue_poll_inner', ('body[13]', 'body[11]', 'test', 'left', 'slice')),
@@ -3858,7 +3868,6 @@ A1_POSITIONS = frozenset({
     ("'t2b_id'", 'const', 'team_queue_poll', ('body[31]', 'body[0]', 'value', 'elts[3]', 'slice')),
     ("'t2h'", 'const', '_stamp_team_series_colors', ('body[3]', 'body[0]', 'body[0]', 'value', 'value', 'args[1]', 'keys[4]')),
     ("'t2n'", 'const', '_stamp_team_series_colors', ('body[3]', 'body[0]', 'body[0]', 'value', 'value', 'args[1]', 'keys[3]')),
-    ("'tax'", 'const', '_credit_bet_fighter_tax', ('body[3]', 'value', 'value', 'args[1]', 'keys[0]')),
     ("'tax'", 'const', '_reconcile_team_series_bets', ('body[1]', 'body[0]', 'body[9]', 'body[1]', 'body[0]', 'value', 'func', 'value', 'value', 'args[1]', 'keys[2]')),
     ("'team'", 'const', '_lease_admission_gate', ('body[17]', 'body[1]', 'test', 'values[1]', 'comparators[0]', 'elts[0]')),
     ("'team'", 'const', '_team_relock_existing_series', ('body[4]', 'test', 'left', 'value', 'args[2]')),
@@ -3886,7 +3895,6 @@ A1_POSITIONS = frozenset({
     ("'team_assigned'", 'const', 'team_queue_poll', ('body[68]', 'value', 'generators[0]', 'ifs[0]', 'left', 'slice')),
     ("'team_assigned'", 'const', 'team_queue_poll', ('body[69]', 'value', 'elt', 'keywords[4]', 'value', 'slice')),
     ("'team_assigned'", 'const', 'team_queue_poll', ('body[69]', 'value', 'generators[0]', 'ifs[0]', 'left', 'slice')),
-    ("'team_bet_payout'", 'const', '_reconcile_team_series_bets', ('body[1]', 'body[0]', 'body[9]', 'body[3]', 'body[1]', 'body[1]', 'value', 'args[0]', 'keywords[2]', 'value')),
     ("'team_bet_refund'", 'const', '_reconcile_team_series_bets', ('body[1]', 'body[0]', 'body[9]', 'body[3]', 'orelse[1]', 'value', 'value', 'keywords[0]', 'value')),
     ("'team_bet_tax'", 'const', '_credit_team_bet_fighter_tax', ('body[5]', 'value', 'value', 'args[3]')),
     ("'team_bet_tax'", 'const', '_credit_team_bet_fighter_tax', ('body[6]', 'value', 'value', 'args[3]')),
@@ -4086,7 +4094,6 @@ A1_POSITIONS = frozenset({
     ('0', 'const', '_reconcile_team_series_bets', ('body[1]', 'body[0]', 'body[9]', 'body[0]', 'body[2]', 'value', 'orelse', 'elts[0]')),
     ('0', 'const', '_reconcile_team_series_bets', ('body[1]', 'body[0]', 'body[9]', 'body[0]', 'body[2]', 'value', 'orelse', 'elts[1]')),
     ('0', 'const', '_reconcile_team_series_bets', ('body[1]', 'body[0]', 'body[9]', 'body[0]', 'orelse[1]', 'value')),
-    ('0', 'const', '_reconcile_team_series_bets', ('body[1]', 'body[0]', 'body[9]', 'body[3]', 'body[1]', 'body[2]', 'value', 'value', 'args[1]', 'slice')),
     ('0', 'const', '_reconcile_team_series_bets', ('body[1]', 'body[0]', 'body[9]', 'body[3]', 'body[1]', 'test', 'comparators[0]')),
     ('0', 'const', '_region_current', ('body[2]', 'value', 'elts[1]', 'slice')),
     ('0', 'const', '_region_mode_of', ('body[2]', 'body[1]', 'body[0]', 'value', 'left', 'args[1]')),
@@ -4195,7 +4202,6 @@ A1_POSITIONS = frozenset({
     ('1', 'const', '_reconcile_team_series_bets', ('body[1]', 'body[0]', 'body[2]', 'value', 'test', 'values[1]', 'comparators[0]', 'elts[0]')),
     ('1', 'const', '_reconcile_team_series_bets', ('body[1]', 'body[0]', 'body[4]', 'value', 'test', 'comparators[0]')),
     ('1', 'const', '_reconcile_team_series_bets', ('body[1]', 'body[0]', 'body[9]', 'body[3]', 'body[0]', 'value')),
-    ('1', 'const', '_reconcile_team_series_bets', ('body[1]', 'body[0]', 'body[9]', 'body[3]', 'body[1]', 'body[2]', 'value', 'value', 'args[2]', 'slice')),
     ('1', 'const', '_reconcile_team_series_bets', ('body[1]', 'body[0]', 'body[9]', 'body[3]', 'orelse[0]', 'value')),
     ('1', 'const', '_region_current', ('body[2]', 'value', 'elts[2]', 'slice')),
     ('1', 'const', '_region_mode_of', ('body[2]', 'body[1]', 'body[0]', 'value', 'right')),
@@ -4299,8 +4305,6 @@ A1_POSITIONS = frozenset({
     ('503', 'const', '_ffa_queue_poll_inner', ('body[33]', 'orelse[2]', 'exc', 'keywords[0]', 'value')),
     ('503', 'const', '_ffa_queue_poll_inner', ('body[45]', 'body[1]', 'exc', 'keywords[0]', 'value')),
     ('503', 'const', '_lease_admission_gate', ('body[5]', 'handlers[0]', 'body[1]', 'body[0]', 'exc', 'keywords[0]', 'value')),
-    ('503', 'const', '_service_player_uuids', ('body[4]', 'body[0]', 'handlers[0]', 'body[0]', 'body[1]', 'exc', 'keywords[0]', 'value')),
-    ('503', 'const', '_service_player_uuids', ('body[4]', 'body[0]', 'handlers[0]', 'body[2]', 'body[1]', 'exc', 'keywords[0]', 'value')),
     ('503', 'const', '_team_relock_existing_series', ('body[4]', 'body[1]', 'exc', 'keywords[0]', 'value')),
     ('503', 'const', 'ovt_queue_poll', ('body[21]', 'orelse[2]', 'exc', 'keywords[0]', 'value')),
     ('503', 'const', 'ovt_queue_poll', ('body[35]', 'body[1]', 'exc', 'keywords[0]', 'value')),
@@ -4386,7 +4390,6 @@ A1_POSITIONS = frozenset({
     ('None', 'const', '_clean_map', ('body[4]', 'value', 'values[1]')),
     ('None', 'const', '_credit_bet_fighter_tax', ('args', 'args[5]', 'annotation', 'right')),
     ('None', 'const', '_credit_bet_fighter_tax', ('args', 'defaults[0]')),
-    ('None', 'const', '_credit_bet_fighter_tax', ('body[4]', 'test', 'values[0]', 'comparators[0]')),
     ('None', 'const', '_credit_bet_fighter_tax', ('returns',)),
     ('None', 'const', '_credit_team_bet_fighter_tax', ('returns',)),
     ('None', 'const', '_ffa_queue_poll_inner', ('body[12]', 'test', 'values[1]', 'comparators[0]')),
@@ -4501,7 +4504,6 @@ A1_POSITIONS = frozenset({
     ('None', 'const', '_request_mod_version', ('body[1]', 'body[0]', 'value', 'orelse')),
     ('None', 'const', '_request_mod_version', ('body[1]', 'body[0]', 'value', 'test', 'comparators[0]')),
     ('None', 'const', '_request_mod_version', ('body[1]', 'handlers[0]', 'body[0]', 'value')),
-    ('None', 'const', '_return_stake_exactly', ('body[2]', 'test', 'comparators[0]')),
     ('None', 'const', '_return_stake_exactly', ('returns',)),
     ('None', 'const', '_rules_for_members', ('args', 'defaults[0]')),
     ('None', 'const', '_rules_for_members', ('args', 'defaults[1]')),
@@ -4509,7 +4511,6 @@ A1_POSITIONS = frozenset({
     ('None', 'const', '_rules_for_members', ('body[3]', 'body[1]', 'test', 'values[2]', 'comparators[0]')),
     ('None', 'const', '_rules_members', ('body[3]', 'value', 'value', 'elts[1]')),
     ('None', 'const', '_rules_normalize', ('body[2]', 'body[0]', 'handlers[0]', 'body[0]', 'value')),
-    ('None', 'const', '_service_player_uuids', ('body[4]', 'body[0]', 'handlers[0]', 'body[2]', 'test', 'values[0]', 'comparators[0]')),
     ('None', 'const', '_service_player_uuids', ('body[4]', 'test', 'values[0]', 'comparators[0]')),
     ('None', 'const', '_stamp_team_series_colors', ('body[1]', 'value')),
     ('None', 'const', '_stamp_team_series_colors', ('body[2]', 'body[2]', 'value', 'orelse', 'elts[0]')),
@@ -4758,6 +4759,141 @@ A1_POSITIONS = frozenset({
     ('rollback', 'end', 'team_queue_poll', ('body[34]', 'orelse[0]', 'value', 'value')),
     ('rollback', 'end', 'team_queue_poll', ('body[35]', 'body[3]', 'value', 'value')),
     ('rollback', 'end', 'team_queue_poll', ('body[61]', 'body[0]', 'value', 'value')),
+    # MDPL class C (the integrator's rulings of 17 Nov 2026, 09:13:52Z, 10:05:30Z and 10:12:24Z): the
+    # lane's own positions in the five a1 spans it changed (MDPL r1: 4841af70 and 4e2841f1), admitted BY HAND, nothing
+    # regenerated; each with its first real file:line at 1b1ecbe6 (re-anchored at the merge with main)
+    # and the lane's reason. The 34 positions its insertions vacated are removed (c3probe/keys-new-dead-
+    # 1b1ecbe6.txt): 2322 - 34 + 40 = 2328.
+    # main.py:29521 _credit_bet_fighter_tax: the lane's keyword-only no_wait default False (4841af70)
+    ('False', 'const', '_credit_bet_fighter_tax', ('args', 'kw_defaults[0]')),
+    # main.py:29531 _credit_bet_fighter_tax: moved one place by the lane's lock call on the fighter's row before it at main.py:29529 (4841af70)
+    ("'UPDATE players SET gold_earned = COALESCE(gold_earned,0) + :tax WHERE id = :pid'", 'const', '_credit_bet_fighter_tax', ('body[4]', 'value', 'value', 'args[0]', 'args[0]')),
+    # main.py:29532 _credit_bet_fighter_tax: moved one place by the lane's lock call on the fighter's row before it at main.py:29529 (4841af70)
+    ("'pid'", 'const', '_credit_bet_fighter_tax', ('body[4]', 'value', 'value', 'args[1]', 'keys[1]')),
+    # main.py:29532 _credit_bet_fighter_tax: moved one place by the lane's lock call on the fighter's row before it at main.py:29529 (4841af70)
+    ("'tax'", 'const', '_credit_bet_fighter_tax', ('body[4]', 'value', 'value', 'args[1]', 'keys[0]')),
+    # main.py:29535 _credit_bet_fighter_tax: moved one place by the lane's lock call on the fighter's row before it at main.py:29529 (4841af70)
+    ('None', 'const', '_credit_bet_fighter_tax', ('body[5]', 'test', 'values[0]', 'comparators[0]')),
+    # main.py:29536 _credit_bet_fighter_tax: moved one place by the lane's lock call on the fighter's row before it at main.py:29529 (4841af70)
+    ("'gold_earned'", 'const', '_credit_bet_fighter_tax', ('body[5]', 'body[0]', 'value', 'args[1]', 'elts[0]')),
+    # main.py:29551 _credit_team_bet_fighter_tax: the lane's keyword-only no_wait default False (4841af70)
+    ('False', 'const', '_credit_team_bet_fighter_tax', ('args', 'kw_defaults[0]')),
+    # main.py:39056 _return_stake_exactly: the lane's keyword-only no_wait default False (4841af70)
+    ('False', 'const', '_return_stake_exactly', ('args', 'kw_defaults[2]')),
+    # main.py:39133 _return_stake_exactly: moved one place by the lane's lock call on the bettor's row before it at main.py:39131 (4841af70)
+    ("'UPDATE players SET gold_spent = COALESCE(gold_spent, 0) - CAST(:amt AS integer) WHERE id = :pid AND COALESCE(gold_spent, 0) >= CAST(:amt AS integer) RETURNING gold_spent'", 'const', '_return_stake_exactly', ('body[2]', 'value', 'func', 'value', 'value', 'args[0]', 'args[0]')),
+    # main.py:39136 _return_stake_exactly: moved one place by the lane's lock call on the bettor's row before it at main.py:39131 (4841af70)
+    ("'amt'", 'const', '_return_stake_exactly', ('body[2]', 'value', 'func', 'value', 'value', 'args[1]', 'keys[0]')),
+    # main.py:39136 _return_stake_exactly: moved one place by the lane's lock call on the bettor's row before it at main.py:39131 (4841af70)
+    ("'pid'", 'const', '_return_stake_exactly', ('body[2]', 'value', 'func', 'value', 'value', 'args[1]', 'keys[1]')),
+    # main.py:39137 _return_stake_exactly: moved one place by the lane's lock call on the bettor's row before it at main.py:39131 (4841af70)
+    ('None', 'const', '_return_stake_exactly', ('body[3]', 'test', 'comparators[0]')),
+    # main.py:39139 _return_stake_exactly: moved one place by the lane's lock call on the bettor's row before it at main.py:39131 (4841af70)
+    ("' ('", 'const', '_return_stake_exactly', ('body[3]', 'body[0]', 'exc', 'args[0]', 'values[4]')),
+    # main.py:39139 _return_stake_exactly: moved one place by the lane's lock call on the bettor's row before it at main.py:39131 (4841af70)
+    ("' gold to player '", 'const', '_return_stake_exactly', ('body[3]', 'body[0]', 'exc', 'args[0]', 'values[2]')),
+    # main.py:39139 _return_stake_exactly: moved one place by the lane's lock call on the bettor's row before it at main.py:39131 (4841af70)
+    ("') was refused: the balance does not cover the stake the wager records, so no gold and no ledger row were written'", 'const', '_return_stake_exactly', ('body[3]', 'body[0]', 'exc', 'args[0]', 'values[6]')),
+    # main.py:39139 _return_stake_exactly: moved one place by the lane's lock call on the bettor's row before it at main.py:39131 (4841af70)
+    ("'refund of '", 'const', '_return_stake_exactly', ('body[3]', 'body[0]', 'exc', 'args[0]', 'values[0]')),
+    # main.py:53180 _reconcile_team_series_bets: raise_retryable's default False, the lane's (4e2841f1)
+    ('False', 'const', '_reconcile_team_series_bets', ('args', 'defaults[1]')),
+    # main.py:53180 _reconcile_team_series_bets: the lane's keyword-only no_wait default False (4841af70)
+    ('False', 'const', '_reconcile_team_series_bets', ('args', 'kw_defaults[0]')),
+    # main.py:53241 _reconcile_team_series_bets: moved one place by the lane's lock call on each winner's row before it at main.py:53239 (4841af70)
+    ("'SELECT 1 FROM players WHERE id = :pid FOR NO KEY UPDATE'", 'const', '_reconcile_team_series_bets', ('body[1]', 'body[0]', 'body[5]', 'body[1]', 'value', 'value', 'args[0]', 'args[0]')),
+    # main.py:53242 _reconcile_team_series_bets: moved one place by the lane's lock call on each winner's row before it at main.py:53239 (4841af70)
+    ("'pid'", 'const', '_reconcile_team_series_bets', ('body[1]', 'body[0]', 'body[5]', 'body[1]', 'value', 'value', 'args[1]', 'keys[0]')),
+    # main.py:53282 _reconcile_team_series_bets: inside the lane's lock call on the payee's row at main.py:53282 (4841af70)
+    ("'player_id'", 'const', '_reconcile_team_series_bets', ('body[1]', 'body[0]', 'body[9]', 'body[3]', 'body[1]', 'body[0]', 'value', 'value', 'args[1]', 'slice')),
+    # main.py:53284 _reconcile_team_series_bets: moved one place by the lane's lock call on the payee's row before it at main.py:53282 (4841af70)
+    ("'UPDATE players SET gold_earned = COALESCE(gold_earned,0) + :p WHERE id = :pid'", 'const', '_reconcile_team_series_bets', ('body[1]', 'body[0]', 'body[9]', 'body[3]', 'body[1]', 'body[1]', 'value', 'value', 'args[0]', 'args[0]')),
+    # main.py:53285 _reconcile_team_series_bets: moved one place by the lane's lock call on the payee's row before it at main.py:53282 (4841af70)
+    ("'p'", 'const', '_reconcile_team_series_bets', ('body[1]', 'body[0]', 'body[9]', 'body[3]', 'body[1]', 'body[1]', 'value', 'value', 'args[1]', 'keys[0]')),
+    # main.py:53285 _reconcile_team_series_bets: moved one place by the lane's lock call on the payee's row before it at main.py:53282 (4841af70)
+    ("'pid'", 'const', '_reconcile_team_series_bets', ('body[1]', 'body[0]', 'body[9]', 'body[3]', 'body[1]', 'body[1]', 'value', 'value', 'args[1]', 'keys[1]')),
+    # main.py:53285 _reconcile_team_series_bets: moved one place by the lane's lock call on the payee's row before it at main.py:53282 (4841af70)
+    ("'player_id'", 'const', '_reconcile_team_series_bets', ('body[1]', 'body[0]', 'body[9]', 'body[3]', 'body[1]', 'body[1]', 'value', 'value', 'args[1]', 'values[1]', 'slice')),
+    # main.py:53286 _reconcile_team_series_bets: moved one place by the lane's lock call on the payee's row before it at main.py:53282 (4841af70)
+    ("'player_id'", 'const', '_reconcile_team_series_bets', ('body[1]', 'body[0]', 'body[9]', 'body[3]', 'body[1]', 'body[2]', 'value', 'args[0]', 'keywords[0]', 'value', 'slice')),
+    # main.py:53287 _reconcile_team_series_bets: moved one place by the lane's lock call on the payee's row before it at main.py:53282 (4841af70)
+    ("'team_bet_payout'", 'const', '_reconcile_team_series_bets', ('body[1]', 'body[0]', 'body[9]', 'body[3]', 'body[1]', 'body[2]', 'value', 'args[0]', 'keywords[2]', 'value')),
+    # main.py:53289 _reconcile_team_series_bets: moved one place by the lane's lock call on the payee's row before it at main.py:53282 (4841af70)
+    ('0', 'const', '_reconcile_team_series_bets', ('body[1]', 'body[0]', 'body[9]', 'body[3]', 'body[1]', 'body[3]', 'value', 'value', 'args[1]', 'slice')),
+    # main.py:53289 _reconcile_team_series_bets: moved one place by the lane's lock call on the payee's row before it at main.py:53282 (4841af70)
+    ('1', 'const', '_reconcile_team_series_bets', ('body[1]', 'body[0]', 'body[9]', 'body[3]', 'body[1]', 'body[3]', 'value', 'value', 'args[2]', 'slice')),
+    # main.py:53306 _reconcile_team_series_bets: moved one place by the lane's retryable re-raise in the catch before it at main.py:53304 (4e2841f1)
+    ("' ('", 'const', '_reconcile_team_series_bets', ('body[1]', 'handlers[0]', 'body[1]', 'value', 'args[0]', 'values[2]')),
+    # main.py:53306 _reconcile_team_series_bets: moved one place by the lane's retryable re-raise in the catch before it at main.py:53304 (4e2841f1)
+    ("') \u2014 janitor retries: '", 'const', '_reconcile_team_series_bets', ('body[1]', 'handlers[0]', 'body[1]', 'value', 'args[0]', 'values[4]')),
+    # main.py:53306 _reconcile_team_series_bets: moved one place by the lane's retryable re-raise in the catch before it at main.py:53304 (4e2841f1)
+    ("'[TEAM-BETS] reconcile failed for '", 'const', '_reconcile_team_series_bets', ('body[1]', 'handlers[0]', 'body[1]', 'value', 'args[0]', 'values[0]')),
+    # main.py:75888 _service_player_uuids: moved one place by the lane's hand-back clause before it at main.py:75863 (4841af70)
+    ("'[SERVICE-POLICY] uuid cache could not be filled: '", 'const', '_service_player_uuids', ('body[4]', 'body[0]', 'handlers[1]', 'body[0]', 'body[0]', 'value', 'args[0]', 'values[0]')),
+    # main.py:75890 _service_player_uuids: moved one place by the lane's hand-back clause before it at main.py:75863 (4841af70)
+    ('503', 'const', '_service_player_uuids', ('body[4]', 'body[0]', 'handlers[1]', 'body[0]', 'body[1]', 'exc', 'keywords[0]', 'value')),
+    # main.py:75891 _service_player_uuids: moved one place by the lane's hand-back clause before it at main.py:75863 (4841af70)
+    ("'service_policy_unavailable'", 'const', '_service_player_uuids', ('body[4]', 'body[0]', 'handlers[1]', 'body[0]', 'body[1]', 'exc', 'keywords[1]', 'value')),
+    # main.py:75902 _service_player_uuids: moved one place by the lane's hand-back clause before it at main.py:75863 (4841af70)
+    ('None', 'const', '_service_player_uuids', ('body[4]', 'body[0]', 'handlers[1]', 'body[2]', 'test', 'values[0]', 'comparators[0]')),
+    # main.py:75904 _service_player_uuids: moved one place by the lane's hand-back clause before it at main.py:75863 (4841af70)
+    ("'[SERVICE-POLICY] uuid cache refresh failed and the previous set is past its age bound: '", 'const', '_service_player_uuids', ('body[4]', 'body[0]', 'handlers[1]', 'body[2]', 'body[0]', 'value', 'args[0]', 'values[0]')),
+    # main.py:75907 _service_player_uuids: moved one place by the lane's hand-back clause before it at main.py:75863 (4841af70)
+    ('503', 'const', '_service_player_uuids', ('body[4]', 'body[0]', 'handlers[1]', 'body[2]', 'body[1]', 'exc', 'keywords[0]', 'value')),
+    # main.py:75908 _service_player_uuids: moved one place by the lane's hand-back clause before it at main.py:75863 (4841af70)
+    ("'service_policy_unavailable'", 'const', '_service_player_uuids', ('body[4]', 'body[0]', 'handlers[1]', 'body[2]', 'body[1]', 'exc', 'keywords[1]', 'value')),
+    # main.py:75910 _service_player_uuids: moved one place by the lane's hand-back clause before it at main.py:75863 (4841af70)
+    ("'[SERVICE-POLICY] uuid cache refresh failed, keeping the previous set within its age bound: '", 'const', '_service_player_uuids', ('body[4]', 'body[0]', 'handlers[1]', 'body[3]', 'value', 'args[0]', 'values[0]')),
+    # MDPL class C (the integrator's ruling of 17 Nov 2026, 10:53:36Z): the three lane helpers the real a1
+    # walks reach from the changed bet helpers (_deletion_bound_acts_on bcc99529, _retryable_for_caller 4e2841f1,
+    # _deletion_lock_party_row 4841af70), admitted as spans BY HAND: every position of each, as measured at
+    # 1b1ecbe6 (c3probe/keys-spans3-1b1ecbe6.txt), each with its line and the text it stands on: 2328 + 23 = 2351.
+    # main.py:45771 _deletion_bound_acts_on: a constant on `"""The errors the deletion's bound acts on: the retry set and the two` (4841af70)
+    ('"The errors the deletion\'s bound acts on: the retry set and the two\\n    timeouts, all read when called, so the bound and the bet helpers\\n    always agree on them."', 'const', '_deletion_bound_acts_on', ('body[0]', 'value')),
+    # main.py:45779 _retryable_for_caller: a constant on `"""MDPL R6b. The bet helpers end their savepoint on an error and go on,` (4e2841f1)
+    ('"MDPL R6b. The bet helpers end their savepoint on an error and go on,\\n    which is right for the errors they were built for. A caller that runs\\n    whole bounded attempts -- only the account deletion passes\\n    raise_retryable=True -- gets back, as its own error, every error its\\n    bound acts on (_deletion_bound_acts_on): a deadlock victim or a\\n    serialization failure, which a new attempt can get past, and a wait its\\n    lock_timeout ended, which the bound refuses at once rather than letting\\n    the attempt go on to later waits. Every other caller, and every other\\n    error, keeps the helper\'s present behaviour (its janitor sweep finishes\\n    the work). A held row (_DeletionRowHeld) and a statement past the\\n    attempt\'s deadline (_DeletionPastDeadline) come back whatever\\n    raise_retryable says: only the deletion raises them (its no-wait guards,\\n    its step-4 locks and its statement arming), and its bound must see\\n    both."', 'const', '_retryable_for_caller', ('body[0]', 'value')),
+    # main.py:45794 _retryable_for_caller: a constant on `return True` (4841af70)
+    ('True', 'const', '_retryable_for_caller', ('body[1]', 'body[0]', 'value')),
+    # main.py:45796 _retryable_for_caller: a constant on `getattr(getattr(ex, "orig", None), "sqlstate", None))` (bcc99529)
+    ("'orig'", 'const', '_retryable_for_caller', ('body[2]', 'value', 'values[1]', 'args[0]', 'args[0]', 'args[1]')),
+    # main.py:45796 _retryable_for_caller: a constant on `getattr(getattr(ex, "orig", None), "sqlstate", None))` (bcc99529)
+    ("'sqlstate'", 'const', '_retryable_for_caller', ('body[2]', 'value', 'values[1]', 'args[0]', 'args[1]')),
+    # main.py:45796 _retryable_for_caller: a constant on `getattr(getattr(ex, "orig", None), "sqlstate", None))` (bcc99529)
+    ('None', 'const', '_retryable_for_caller', ('body[2]', 'value', 'values[1]', 'args[0]', 'args[0]', 'args[2]')),
+    # main.py:45796 _retryable_for_caller: a constant on `getattr(getattr(ex, "orig", None), "sqlstate", None))` (bcc99529)
+    ('None', 'const', '_retryable_for_caller', ('body[2]', 'value', 'values[1]', 'args[0]', 'args[2]')),
+    # main.py:46030 _deletion_lock_party_row: a constant on `async def _deletion_lock_party_row(db: AsyncSession, player_id, *, no_wait: bool = False) -...` (4841af70)
+    ('False', 'const', '_deletion_lock_party_row', ('args', 'kw_defaults[0]')),
+    # main.py:46030 _deletion_lock_party_row: a constant on `async def _deletion_lock_party_row(db: AsyncSession, player_id, *, no_wait: bool = False) -...` (4841af70)
+    ('None', 'const', '_deletion_lock_party_row', ('returns',)),
+    # main.py:46031 _deletion_lock_party_row: a constant on `"""MDPL r1 HIGH. The canonical order takes a player's identity -- the` (4841af70)
+    ('"MDPL r1 HIGH. The canonical order takes a player\'s identity -- the\\n    identity key, the players row, or both -- before lobby, series, queue or\\n    bet rows (admin_ban takes both identities\' rows FOR NO KEY UPDATE before\\n    its core; cancel_lobby_bet takes the bettor\'s key before the wager row),\\n    while a deletion reaches a bet party\'s row (a stake refund, a payout, a\\n    fighter\'s tax) only after its own lobby, series and queue rows. Two\\n    halves of one circle follow:\\n    - a wait for that row closes a circle with any route that holds the row\\n      and waits for one of the deletion\'s rows;\\n    - holding that row while the deletion waits for a later row (another\\n      lobby\'s wager row) closes one with any route that holds that later\\n      row and waits for the party\'s row: cancel_lobby_bet holds the wager\\n      row and then writes the bettor\'s players row.\\n    So in the no-wait mode (no_wait=True: the deletion\'s bet path alone)\\n    the party\'s identity is taken without a wait, both parts of it: the row\\n    SKIP LOCKED, then a plain read, which tells a row another transaction\\n    holds from a row that does not exist; then the identity key in its try\\n    form, exclusive, the same key the routes take (_IDENTITY_KEY_ARG): a\\n    route that takes that key before anything else either holds it already\\n    (the try fails) or then waits for it at its first statement, holding\\n    nothing. A route that writes the party\'s row WITHOUT taking the key\\n    first is not closed by the key; the census of every players-row\\n    statement (test_mdpl_census) classes each such route. A held row or key\\n    ends the attempt (_DeletionRowHeld); a missing row is left to the\\n    caller\'s own statement, as before. A row or key the attempt itself\\n    already holds -- the deleted player\'s own -- is not refused: SKIP LOCKED\\n    passes over rows only other transactions hold, and a session\'s own\\n    advisory lock is granted again. With the default (no_wait=False) this\\n    runs no statement, and each caller issues exactly the statements it\\n    issued before. Called right before each players statement of the bet\\n    helpers on the deletion\'s bet path, each handing on its own no_wait\\n    (#612\'s rule, for the deletion itself)."', 'const', '_deletion_lock_party_row', ('body[0]', 'value')),
+    # main.py:46065 _deletion_lock_party_row: a constant on `got = (await db.execute(text(_DELETION_PARTY_LOCK_SQL), {"pid": player_id})).first()` (4841af70)
+    ("'pid'", 'const', '_deletion_lock_party_row', ('body[2]', 'value', 'func', 'value', 'value', 'args[1]', 'keys[0]')),
+    # main.py:46066 _deletion_lock_party_row: a constant on `if got is None:` (4841af70)
+    ('None', 'const', '_deletion_lock_party_row', ('body[3]', 'test', 'comparators[0]')),
+    # main.py:46067 _deletion_lock_party_row: a constant on `seen = (await db.execute(text(_DELETION_PARTY_SEEN_SQL), {"pid": player_id})).first()` (4841af70)
+    ("'pid'", 'const', '_deletion_lock_party_row', ('body[3]', 'body[0]', 'value', 'func', 'value', 'value', 'args[1]', 'keys[0]')),
+    # main.py:46068 _deletion_lock_party_row: a constant on `if seen is not None:` (4841af70)
+    ('None', 'const', '_deletion_lock_party_row', ('body[3]', 'body[1]', 'test', 'comparators[0]')),
+    # main.py:46069 _deletion_lock_party_row: a constant on `raise _DeletionRowHeld("bet party row")` (4841af70)
+    ("'bet party row'", 'const', '_deletion_lock_party_row', ('body[3]', 'body[1]', 'body[0]', 'exc', 'args[0]')),
+    # main.py:46071 _deletion_lock_party_row: a constant on `if got[0] is None:` (4841af70)
+    ('0', 'const', '_deletion_lock_party_row', ('body[4]', 'test', 'left', 'slice')),
+    # main.py:46071 _deletion_lock_party_row: a constant on `if got[0] is None:` (4841af70)
+    ('None', 'const', '_deletion_lock_party_row', ('body[4]', 'test', 'comparators[0]')),
+    # main.py:46073 _deletion_lock_party_row: a constant on `key = (await db.execute(text(_DELETION_PARTY_KEY_SQL), {"sid": got[0]})).first()` (4841af70)
+    ("'sid'", 'const', '_deletion_lock_party_row', ('body[5]', 'value', 'func', 'value', 'value', 'args[1]', 'keys[0]')),
+    # main.py:46073 _deletion_lock_party_row: a constant on `key = (await db.execute(text(_DELETION_PARTY_KEY_SQL), {"sid": got[0]})).first()` (4841af70)
+    ('0', 'const', '_deletion_lock_party_row', ('body[5]', 'value', 'func', 'value', 'value', 'args[1]', 'values[0]', 'slice')),
+    # main.py:46074 _deletion_lock_party_row: a constant on `if not (key is not None and key[0] is True):` (4841af70)
+    ('0', 'const', '_deletion_lock_party_row', ('body[6]', 'test', 'operand', 'values[1]', 'left', 'slice')),
+    # main.py:46074 _deletion_lock_party_row: a constant on `if not (key is not None and key[0] is True):` (4841af70)
+    ('None', 'const', '_deletion_lock_party_row', ('body[6]', 'test', 'operand', 'values[0]', 'comparators[0]')),
+    # main.py:46074 _deletion_lock_party_row: a constant on `if not (key is not None and key[0] is True):` (4841af70)
+    ('True', 'const', '_deletion_lock_party_row', ('body[6]', 'test', 'operand', 'values[1]', 'comparators[0]')),
+    # main.py:46075 _deletion_lock_party_row: a constant on `raise _DeletionRowHeld("bet party's identity key")` (4841af70)
+    ('"bet party\'s identity key"', 'const', '_deletion_lock_party_row', ('body[6]', 'body[0]', 'exc', 'args[0]')),
 })
 A1_BINDINGS = A1_BINDINGS | A1_POSITIONS | frozenset({("<positions>",)})
 
@@ -4797,7 +4933,6 @@ A1_ORDERS = frozenset({
     ('055cc680d3a98c49', 'order', 'queue_poll', ('body[28]', 'body[16]', 'body[0]')),
     ('0563c09f9c73a997', 'order', 'ovt_queue_poll', ('body[8]',)),
     ('05735a02d59b177e', 'order', '_clean_map', ('body[4]',)),
-    ('05e98e1c0a0bb96a', 'order', '_reconcile_team_series_bets', ()),
     ('05eed66686a6e56e', 'order', 'team_queue_poll', ('body[19]', 'body[14]', 'body[1]', 'body[2]', 'body[0]')),
     ('0632018cdfaee96a', 'order', 'team_queue_poll', ('body[34]', 'body[2]', 'body[0]')),
     ('063b8b246d7cbca0', 'order', 'ovt_queue_poll', ('body[16]', 'body[9]', 'body[2]', 'orelse[0]')),
@@ -4884,7 +5019,6 @@ A1_ORDERS = frozenset({
     ('146aaca05b77eb36', 'order', '_team_series_resumable', ('body[5]',)),
     ('149b70a756c9fb62', 'order', '_ffa_queue_poll_inner', ('body[45]',)),
     ('14c73db9c40d66ba', 'order', 'queue_poll', ('body[28]', 'body[15]')),
-    ('14ddac345e8eab66', 'order', '_service_player_uuids', ('body[4]', 'body[0]', 'handlers[0]', 'body[0]')),
     ('14e7bd848b7d6c7c', 'order', '_baseline', ('body[8]', 'body[0]')),
     ('14f8e204f9d48ca4', 'order', 'team_queue_poll', ('body[49]',)),
     ('14fa293eeda8c5bb', 'order', 'team_queue_poll', ('body[58]', 'body[0]')),
@@ -4894,7 +5028,6 @@ A1_ORDERS = frozenset({
     ('16237feb29ebbbee', 'order', '_region_mode_of', ('body[3]', 'body[0]')),
     ('163d55c7c7f9fc8b', 'order', '_reconcile_team_series_bets', ('body[1]', 'body[0]', 'body[9]', 'body[0]', 'orelse[2]')),
     ('167b6fb2352678e6', 'order', 'ovt_queue_poll', ('body[21]', 'body[1]')),
-    ('1680faf32a6b7e16', 'order', '_reconcile_team_series_bets', ('body[1]', 'body[0]', 'body[9]', 'body[3]', 'body[1]', 'body[2]')),
     ('16a040a2e71c9007', 'order', '_mode_or_400', ('body[0]',)),
     ('16a75d244fea5140', 'order', '_ffa_queue_poll_inner', ('body[11]',)),
     ('16cdb106c7c6f6ef', 'order', '_ffa_queue_poll_inner', ('body[14]', 'body[17]')),
@@ -4927,7 +5060,6 @@ A1_ORDERS = frozenset({
     ('1e2f37cec0a57556', 'order', '_pick', ('body[8]', 'body[1]')),
     ('1e98137f7188db89', 'order', '_team_lock_family_pick', ('body[10]',)),
     ('1ee088a4c431a822', 'order', 'anchor_fresh', ('body[0]',)),
-    ('1f83700e727e0ebf', 'order', '_credit_team_bet_fighter_tax', ('body[5]',)),
     ('1fb88552705757ed', 'order', '_ffa_queue_poll_inner', ('body[14]', 'body[8]', 'body[2]')),
     ('1fd2ee6b8399077f', 'order', 'team_queue_poll', ('body[40]', 'body[1]', 'body[1]', 'orelse[0]', 'orelse[0]')),
     ('203b7dfb4dfebd9c', 'order', '_team_lock_family_pick', ('body[4]', 'body[2]')),
@@ -4989,13 +5121,11 @@ A1_ORDERS = frozenset({
     ('28e026db02287871', 'order', 'team_queue_poll', ('body[18]', 'body[4]', 'body[0]', 'body[0]')),
     ('292f866828e518bf', 'order', 'team_queue_poll', ('body[34]', 'body[4]')),
     ('2942b22d4b923bc5', 'order', '_ffa_queue_poll_inner', ('body[13]',)),
-    ('299ab986695829dd', 'order', '_credit_team_bet_fighter_tax', ()),
     ('2a0223875e20b561', 'order', '_bet_fighter_tax', ('body[0]',)),
     ('2a122c7662aba3b5', 'order', 'ovt_queue_poll', ('body[39]',)),
     ('2a378f92acb9a31b', 'order', '_pick', ('body[24]',)),
     ('2a8cdade3c8c7fae', 'order', 'ovt_queue_poll', ('body[16]', 'body[13]')),
     ('2a8ddff9fc76eb44', 'order', 'team_queue_poll', ('body[31]', 'body[2]', 'body[10]')),
-    ('2abe10cb71dffd66', 'order', '_service_player_uuids', ('body[4]', 'body[0]', 'handlers[0]', 'body[3]')),
     ('2c0228f09182318b', 'order', '_rules_for_queue_match', ('body[1]',)),
     ('2c031254eb8c69dd', 'order', 'ovt_queue_poll', ('body[16]', 'body[0]')),
     ('2c330794998aea1a', 'order', 'team_queue_poll', ('body[18]', 'body[1]')),
@@ -5034,7 +5164,6 @@ A1_ORDERS = frozenset({
     ('31670479b09e6dd2', 'order', 'team_queue_poll', ('body[8]', 'body[0]')),
     ('316ca025940ca19f', 'order', 'team_queue_poll', ('body[19]', 'body[14]', 'body[1]', 'body[4]', 'body[0]')),
     ('3173a71642c13d8c', 'order', '_lease_admission_gate', ('body[19]',)),
-    ('3181f8f68e9daf05', 'order', '_reconcile_team_series_bets', ('body[1]', 'body[0]', 'body[5]')),
     ('31aab3c6894b8db5', 'order', '_group_region', ('body[2]', 'body[2]', 'body[1]')),
     ('31ea0f85ab371dac', 'order', 'team_queue_poll', ('body[21]',)),
     ('31ea0f85ab371dac', 'order', 'team_queue_poll', ('body[34]', 'body[11]')),
@@ -5185,7 +5314,6 @@ A1_ORDERS = frozenset({
     ('41160a1184d4c681', 'order', 'team_queue_poll', ('body[41]',)),
     ('4153e2e9d38eee07', 'order', 'team_queue_poll', ('body[19]', 'body[14]', 'body[1]', 'body[12]')),
     ('41622fc3a49af6c6', 'order', '_ffa_queue_poll_inner', ('body[33]', 'body[1]')),
-    ('416c33d71216a91f', 'order', '_reconcile_team_series_bets', ('body[1]', 'body[0]', 'body[5]', 'body[0]')),
     ('41fa13565cd0ecd6', 'order', '_group_region', ('body[2]', 'body[4]')),
     ('42040de90f99567a', 'order', 'team_queue_poll', ('body[19]', 'body[14]', 'body[2]')),
     ('427087ad474205d0', 'order', 'queue_poll', ('body[16]', 'body[2]')),
@@ -5196,7 +5324,6 @@ A1_ORDERS = frozenset({
     ('438ba6c6006ecb9f', 'order', 'pick_region_for_group', ('body[0]',)),
     ('43cd379936dff239', 'order', '_player_body_color', ('body[2]', 'body[0]')),
     ('43f0bb1bad92655e', 'order', 'queue_poll', ('body[22]', 'orelse[0]')),
-    ('442805385064e7db', 'order', '_reconcile_team_series_bets', ('body[1]', 'handlers[0]', 'body[0]')),
     ('444c4b56f817f6ff', 'order', '_group_region', ('body[6]',)),
     ('4477242f2ebac6d6', 'order', 'team_queue_poll', ('body[11]',)),
     ('448c7a24c3c6e6b4', 'order', 'ovt_queue_poll', ('body[4]',)),
@@ -5211,8 +5338,6 @@ A1_ORDERS = frozenset({
     ('4633837fcacd3989', 'order', '_player_body_color', ('body[0]',)),
     ('46410ac88c993cc8', 'order', '_ffa_queue_poll_inner', ('body[31]',)),
     ('46410ac88c993cc8', 'order', 'ovt_queue_poll', ('body[21]', 'body[5]')),
-    ('464276c09d5d4cb6', 'order', '_service_player_uuids', ('body[4]', 'body[0]', 'handlers[0]', 'body[0]', 'body[1]')),
-    ('464276c09d5d4cb6', 'order', '_service_player_uuids', ('body[4]', 'body[0]', 'handlers[0]', 'body[2]', 'body[1]')),
     ('465001913bd87f37', 'order', '_ffa_queue_poll_inner', ('body[13]', 'body[12]')),
     ('4651add04453b8b8', 'order', '_team_lock_family_pick', ('body[0]',)),
     ('467feacab8b3e98f', 'order', 'team_queue_poll', ('body[40]', 'body[1]', 'body[1]', 'orelse[0]', 'body[0]')),
@@ -5265,7 +5390,6 @@ A1_ORDERS = frozenset({
     ('4eea83856361419c', 'order', '_team_resolve_live_family', ('body[7]', 'body[1]')),
     ('4f0b24524d96da6b', 'order', 'held_overlap', ('body[2]', 'body[5]')),
     ('4f9316d813ac54ad', 'order', '_clean_map', ('body[3]',)),
-    ('5181a3eb85fa847d', 'order', '_credit_bet_fighter_tax', ('body[3]',)),
     ('51829adafdc1607a', 'order', '_clean_map', ('body[3]', 'body[3]')),
     ('51c46058e33e22ba', 'order', '_region_volumes', ()),
     ('51f735bdca72ce81', 'order', '_rules_normalize', ('body[3]', 'body[1]')),
@@ -5292,11 +5416,9 @@ A1_ORDERS = frozenset({
     ('54bf297a68808c8a', 'order', 'ovt_queue_poll', ('body[21]', 'body[7]')),
     ('54c2faf5c00b0ecd', 'order', 'held_overlap', ('body[2]', 'body[3]', 'body[0]')),
     ('553aba640ac90dba', 'order', '_reconcile_team_series_bets', ('body[1]', 'body[0]', 'body[6]')),
-    ('559e8abf6c6804c2', 'order', '_return_stake_exactly', ('body[1]',)),
     ('55e71264a9e7bfb0', 'order', '_reconcile_team_series_bets', ('body[1]', 'body[0]', 'body[9]', 'body[0]', 'body[1]')),
     ('55ff0bed8ab0c98a', 'order', '_team_relock_existing_series', ()),
     ('562c0a71b940d04b', 'order', '_ffa_queue_poll_inner', ('body[13]', 'body[11]', 'body[3]')),
-    ('562fcc3a3a100e52', 'order', '_return_stake_exactly', ('body[2]',)),
     ('5638332df2804b31', 'order', 'queue_poll', ('body[28]',)),
     ('565a38c81b445a5e', 'order', 'queue_poll', ('body[32]',)),
     ('5674d02dfcc83266', 'order', '_is_number', ()),
@@ -5404,7 +5526,6 @@ A1_ORDERS = frozenset({
     ('694934aacf93dfa9', 'order', 'ovt_queue_poll', ('body[14]',)),
     ('694df24b2f739276', 'order', 'team_queue_poll', ('body[42]',)),
     ('697e6ecb057d0eee', 'order', '_balance_teams', ('body[3]',)),
-    ('69c229485c98680f', 'order', '_reconcile_team_series_bets', ('body[1]', 'body[0]', 'body[9]', 'body[3]', 'body[1]', 'body[1]')),
     ('69c662b24927bf16', 'order', 'team_queue_poll', ('body[31]', 'body[1]')),
     ('69da9047e37c4c9a', 'order', 'queue_poll', ('body[2]',)),
     ('6a00fef6e2dfada3', 'order', 'team_queue_poll', ('body[19]', 'body[1]')),
@@ -5421,7 +5542,6 @@ A1_ORDERS = frozenset({
     ('6dd826efc04383ad', 'order', '_pick', ('body[6]',)),
     ('6e9561f22c3f395e', 'order', '_ffa_gather_decide', ('body[1]',)),
     ('6ea87e258e23f1db', 'order', 'team_queue_poll', ('body[40]', 'body[2]', 'body[0]')),
-    ('6ebeaf4b24251b13', 'order', '_return_stake_exactly', ()),
     ('6eca8ceeaa8f3e30', 'order', '_team_resolve_live_family', ('body[6]',)),
     ('6ed2dc0617354e91', 'order', '_stamp_team_series_colors', ('body[3]',)),
     ('6efc8df8621048b2', 'order', '_pick', ('body[19]', 'body[0]')),
@@ -5430,7 +5550,6 @@ A1_ORDERS = frozenset({
     ('6ffc0afa9220cd89', 'order', '_hold_latch', ('body[0]',)),
     ('700a9c994517fc89', 'order', '_lease_admission_gate', ('body[0]',)),
     ('7010117f5679e27c', 'order', 'home_of', ('body[3]',)),
-    ('707e33823583618d', 'order', '_reconcile_team_series_bets', ('body[1]', 'body[0]', 'body[9]', 'body[3]', 'orelse[1]')),
     ('7083a85ce44089c9', 'order', '_group_region', ('body[8]',)),
     ('70994e5635df9760', 'order', '_is_number', ('body[0]',)),
     ('70be4cd962492b09', 'order', 'queue_poll', ('body[16]',)),
@@ -5601,7 +5720,6 @@ A1_ORDERS = frozenset({
     ('91304b383c8fe2c9', 'order', 'ovt_queue_poll', ('body[16]', 'body[9]', 'body[1]')),
     ('92561f3c890b5fa1', 'order', '_team_resolve_live_family', ('body[7]',)),
     ('926543293f7163d5', 'order', 'team_queue_poll', ('body[19]', 'body[14]', 'body[1]', 'body[2]', 'body[3]')),
-    ('928e612937074baf', 'order', '_reconcile_team_series_bets', ('body[1]', 'body[0]', 'body[9]', 'body[3]', 'body[1]', 'body[0]')),
     ('92a5789302f8924b', 'order', '_team_lock_family_pick', ('body[4]',)),
     ('92ac1a5bc8761da5', 'order', '_team_series_resumable', ('body[7]', 'body[0]')),
     ('92da1267ece979b1', 'order', '_team_lock_family_pick', ('body[10]', 'body[2]')),
@@ -5614,7 +5732,6 @@ A1_ORDERS = frozenset({
     ('93c3d9716d6c7f29', 'order', '_team_quartet_key', ()),
     ('943b3b7ec8b13cd6', 'order', 'queue_poll', ('body[28]', 'body[3]')),
     ('943de9fb7def16d2', 'order', 'queue_poll', ('body[28]', 'body[12]')),
-    ('946ad944d2daf1ce', 'order', '_return_stake_exactly', ('body[3]',)),
     ('9564eed769b83850', 'order', '_pick', ('body[18]', 'body[5]')),
     ('95a7a0f20d004b2d', 'order', 'ovt_queue_poll', ('body[21]', 'body[13]', 'body[0]')),
     ('95b8267bf888ec5b', 'order', '_ffa_queue_poll_inner', ('body[3]',)),
@@ -5702,7 +5819,6 @@ A1_ORDERS = frozenset({
     ('a3c744cb74e82a63', 'order', 'ovt_queue_poll', ('body[23]',)),
     ('a4226db78f3ce26e', 'order', 'queue_poll', ('body[24]', 'body[9]', 'body[4]', 'body[1]')),
     ('a4307684a3f1b804', 'order', '_ffa_queue_poll_inner', ('body[13]', 'body[11]', 'body[0]')),
-    ('a45698f909669e8b', 'order', '_credit_bet_fighter_tax', ('body[4]', 'body[0]')),
     ('a47de389bc4b22ae', 'order', 'team_queue_poll', ('body[34]', 'body[7]')),
     ('a48c99b2a3ab88c4', 'order', '_reconcile_team_series_bets', ('body[1]', 'body[0]', 'body[3]', 'body[0]')),
     ('a48d1642891bff80', 'order', '_group_region', ()),
@@ -5734,7 +5850,6 @@ A1_ORDERS = frozenset({
     ('a9e0fdeedba27003', 'order', '_credit_team_bet_fighter_tax', ('body[3]',)),
     ('a9e8d5fc73cbf91c', 'order', '_pick', ('body[22]',)),
     ('a9f94e6c1a82fe92', 'order', '_rules_json', ('body[2]',)),
-    ('aa091f19b9a3e90e', 'order', '_return_stake_exactly', ('body[2]', 'body[0]')),
     ('aa3279ea5b05c8b7', 'order', '_ffa_queue_poll_inner', ('body[14]', 'body[13]', 'body[0]', 'body[2]')),
     ('aa35888fa5d41911', 'order', '_reconcile_team_series_bets', ('body[1]', 'body[0]', 'body[8]')),
     ('aa87790582aec52f', 'order', 'team_queue_poll', ('body[31]', 'body[2]')),
@@ -5784,7 +5899,6 @@ A1_ORDERS = frozenset({
     ('b2326d7e085bc2f2', 'order', 'ovt_queue_poll', ('body[15]',)),
     ('b286fd7ba7b78cfa', 'order', 'team_queue_poll', ('body[31]', 'body[2]', 'body[2]')),
     ('b2978bb33e6add82', 'order', '_lock_queue_rows_ordered', ('body[3]', 'body[0]', 'body[0]')),
-    ('b2db8feac9a9a697', 'order', '_service_player_uuids', ('body[4]', 'body[0]', 'handlers[0]', 'body[1]')),
     ('b2e4ab2737c3d0df', 'order', 'team_queue_poll', ('body[19]', 'body[10]', 'body[1]', 'body[1]')),
     ('b2e6ec2f094ef0bb', 'order', '_lease_admission_gate', ('body[17]', 'body[1]')),
     ('b365047f445b8047', 'order', '_reconcile_team_series_bets', ('body[1]', 'body[0]', 'body[11]', 'body[0]')),
@@ -5808,7 +5922,6 @@ A1_ORDERS = frozenset({
     ('b5c75a7a70b2a6ae', 'order', '_ffa_queue_poll_inner', ('body[14]', 'body[11]', 'body[2]', 'orelse[0]', 'body[0]')),
     ('b5c75a7a70b2a6ae', 'order', 'ovt_queue_poll', ('body[16]', 'body[9]', 'body[2]', 'orelse[0]', 'body[0]')),
     ('b5c944e9563b3c18', 'order', '_ffa_queue_poll_inner', ('body[14]', 'body[14]')),
-    ('b5d3bca81644a506', 'order', '_reconcile_team_series_bets', ('body[1]', 'body[0]', 'body[9]', 'body[3]', 'body[1]')),
     ('b6259a7360f0390c', 'order', '_region_volumes', ('body[3]',)),
     ('b6739fb175292af8', 'order', '_rules_for_queue_match', ('body[0]',)),
     ('b68c39b95a20d7bf', 'order', 'queue_poll', ('body[28]', 'body[2]')),
@@ -5843,7 +5956,6 @@ A1_ORDERS = frozenset({
     ('bb3c1ed92b32d3ad', 'order', '_region_pings_newer', ('body[2]',)),
     ('bbe5faa22a7b74c6', 'order', 'team_queue_poll', ('body[47]', 'body[0]')),
     ('bc0819bbfe03e732', 'order', '_group_region', ('body[2]', 'body[5]', 'body[2]')),
-    ('bc3c1f281bcaaa15', 'order', '_reconcile_team_series_bets', ('body[1]',)),
     ('bc5110a91d058a9a', 'order', 'anchor_fresh', ('body[2]',)),
     ('bc793d5e05a132f3', 'order', 'team_queue_poll', ('body[34]', 'body[13]', 'body[0]')),
     ('bc87be51ef20c447', 'order', 'team_queue_poll', ('body[19]', 'body[14]', 'body[1]', 'body[11]')),
@@ -5919,7 +6031,6 @@ A1_ORDERS = frozenset({
     ('c695097504d14410', 'order', '_ffa_queue_poll_inner', ('body[13]', 'body[11]')),
     ('c6b9f7c20b1d10c0', 'order', '_rules_members', ('body[6]',)),
     ('c706ed47a64880c0', 'order', '_pick', ('body[1]',)),
-    ('c790f305eb592372', 'order', '_service_player_uuids', ('body[4]', 'body[0]', 'handlers[0]', 'body[2]')),
     ('c7a112dd0dd7f6d5', 'order', '_region_volumes', ('body[3]', 'body[0]')),
     ('c7a112dd0dd7f6d5', 'order', '_region_volumes', ('body[5]',)),
     ('c7fcaf1af7954687', 'order', 'team_queue_poll', ('body[19]', 'body[14]', 'body[1]', 'body[3]')),
@@ -5965,7 +6076,6 @@ A1_ORDERS = frozenset({
     ('cf5bec6ca446b14b', 'order', '_lease_live_claim_strict', ()),
     ('cf853744717cb633', 'order', '_lease_admission_gate', ('body[18]',)),
     ('cfa6bc4957779e21', 'order', '_lease_live_claim_strict', ('body[0]',)),
-    ('cfae5076060f06b4', 'order', '_service_player_uuids', ('body[4]', 'body[0]')),
     ('cfd7b006b00bfdc1', 'order', '_pick', ('body[5]', 'body[1]')),
     ('cffcf026086bce0c', 'order', '_hold_latch', ('body[7]',)),
     ('d0ef3c353d7be5eb', 'order', 'team_queue_poll', ('body[19]', 'body[2]')),
@@ -6098,7 +6208,6 @@ A1_ORDERS = frozenset({
     ('e96bfae4d0bb39e6', 'order', 'ovt_queue_poll', ('body[16]', 'body[10]', 'body[1]')),
     ('e981f68a91c593f3', 'order', 'team_queue_poll', ('body[40]',)),
     ('e9a73f56c17166b1', 'order', 'ovt_queue_poll', ('body[25]', 'body[1]')),
-    ('e9b6ddf2b4fb791b', 'order', '_service_player_uuids', ('body[4]', 'body[0]', 'handlers[0]', 'body[0]', 'body[0]')),
     ('ea37fd81c3c6acc3', 'order', '_team_relock_existing_series', ('body[0]',)),
     ('ea3a86f949ed84b7', 'order', '_region_volumes', ('body[4]', 'body[1]', 'body[0]')),
     ('ea642f0352f5bc8f', 'order', '_ffa_queue_poll_inner', ('body[33]', 'body[4]')),
@@ -6256,7 +6365,6 @@ A1_ORDERS = frozenset({
     ('f7a6932a9c9be5c6', 'order', 'queue_poll', ('body[24]', 'body[0]')),
     ('f7f20a0ca9ae26c0', 'order', '_balance_teams', ('body[2]',)),
     ('f89af2aa8fe6e09e', 'order', 'team_queue_poll', ('body[25]',)),
-    ('f8abc98c023ce61b', 'order', '_credit_team_bet_fighter_tax', ('body[6]',)),
     ('f8e211bd496e62be', 'order', '_team_clear_dc_fallback_marker', ('body[1]', 'handlers[0]', 'body[0]')),
     ('f8e211bd496e62be', 'order', '_team_relock_existing_series', ('body[6]', 'handlers[0]', 'body[0]')),
     ('f952fbfbb1944777', 'order', 'team_queue_poll', ('body[16]',)),
@@ -6275,7 +6383,6 @@ A1_ORDERS = frozenset({
     ('fc19b4801c801499', 'order', '_group_region', ('body[7]',)),
     ('fc209b80f7552cb6', 'order', '_rules_json', ('body[3]',)),
     ('fc487e62deb9f3c4', 'order', 'team_queue_poll', ('body[31]', 'body[2]', 'body[12]', 'body[1]')),
-    ('fca8da89bd1bec36', 'order', '_service_player_uuids', ('body[4]', 'body[0]', 'handlers[0]', 'body[2]', 'body[0]')),
     ('fcd523d6dd605216', 'order', '_rules_normalize', ()),
     ('fceecc00006692a1', 'order', '_pick', ('body[3]', 'body[1]')),
     ('fcefc0b345a3e845', 'order', '_hold_latch', ('body[3]',)),
@@ -6288,9 +6395,7 @@ A1_ORDERS = frozenset({
     ('fe35be7d7f401cbd', 'order', 'home_of', ('body[0]',)),
     ('fe5bdbed4fede82c', 'order', '_group_region', ('body[3]', 'body[0]')),
     ('fe5c3378168e98b0', 'order', '_balance_teams', ('body[4]', 'body[2]')),
-    ('fe6ef4a5fa6289c2', 'order', '_credit_bet_fighter_tax', ('body[4]',)),
     ('fe8a67c1f5f1e48d', 'order', 'ovt_queue_poll', ('body[33]',)),
-    ('feecdb32460870c3', 'order', '_credit_bet_fighter_tax', ('body[5]',)),
     ('feee23206e3d5dd9', 'order', '_rules_for_members', ('body[3]', 'body[1]')),
     ('ff0d372f51ce8cfa', 'order', 'queue_poll', ('body[24]', 'body[10]', 'body[3]')),
     ('ff0d372f51ce8cfa', 'order', 'queue_poll', ('body[24]', 'body[9]', 'body[4]', 'orelse[0]', 'orelse[0]')),
@@ -6298,7 +6403,6 @@ A1_ORDERS = frozenset({
     ('ff392cdc7d3ffa7d', 'order', '_ffa_queue_poll_inner', ('body[14]', 'body[11]', 'body[2]', 'body[1]')),
     ('ff392cdc7d3ffa7d', 'order', 'ovt_queue_poll', ('body[16]', 'body[9]', 'body[2]', 'body[1]')),
     ('ff541e9591afb190', 'order', '_pick', ('body[3]',)),
-    ('ff977917d47ee26d', 'order', '_credit_bet_fighter_tax', ()),
     ('ff9d0a6e8fee8525', 'order', 'queue_poll', ('body[11]',)),
     ('ffca8955471f4d73', 'order', 'queue_poll', ('body[24]', 'body[9]', 'body[8]')),
     ('ffe28aadcd8089ad', 'order', '_ffa_queue_poll_inner', ('body[34]', 'body[2]')),
@@ -6308,6 +6412,139 @@ A1_ORDERS = frozenset({
     ('fff646cfc0aab315', 'order', '_rules_normalize', ('body[2]', 'body[0]')),
     ('fff646cfc0aab315', 'order', '_team_clear_dc_fallback_marker', ('body[1]',)),
     ('fff646cfc0aab315', 'order', '_team_relock_existing_series', ('body[6]',)),
+    # MDPL class C (the integrator's rulings of 17 Nov 2026, 09:13:52Z, 10:05:30Z and 10:12:24Z): the
+    # lane's own order keys in the five a1 spans it changed (MDPL r1: 4841af70 and 4e2841f1), admitted BY HAND, nothing
+    # regenerated; each with its first real file:line at 1b1ecbe6 (re-anchored at the merge with main)
+    # and the lane's reason. The 32 order keys its insertions vacated are removed (c3probe/keys-new-dead-
+    # 1b1ecbe6.txt): 1537 - 32 + 39 = 1544.
+    # main.py:29513 _credit_bet_fighter_tax: its def's header: the lane's keyword-only no_wait (4841af70)
+    ('1acc509eaedfdb8e', 'order', '_credit_bet_fighter_tax', ()),
+    # main.py:29529 _credit_bet_fighter_tax: the lane's lock call on the fighter's row at main.py:29529 (4841af70)
+    ('2d2503f557198a60', 'order', '_credit_bet_fighter_tax', ('body[3]',)),
+    # main.py:29530 _credit_bet_fighter_tax: moved one place by the lane's lock call on the fighter's row before it at main.py:29529 (4841af70)
+    ('5181a3eb85fa847d', 'order', '_credit_bet_fighter_tax', ('body[4]',)),
+    # main.py:29535 _credit_bet_fighter_tax: moved one place by the lane's lock call on the fighter's row before it at main.py:29529 (4841af70)
+    ('fe6ef4a5fa6289c2', 'order', '_credit_bet_fighter_tax', ('body[5]',)),
+    # main.py:29536 _credit_bet_fighter_tax: moved one place by the lane's lock call on the fighter's row before it at main.py:29529 (4841af70)
+    ('a45698f909669e8b', 'order', '_credit_bet_fighter_tax', ('body[5]', 'body[0]')),
+    # main.py:29537 _credit_bet_fighter_tax: moved one place by the lane's lock call on the fighter's row before it at main.py:29529 (4841af70)
+    ('feecdb32460870c3', 'order', '_credit_bet_fighter_tax', ('body[6]',)),
+    # main.py:29543 _credit_team_bet_fighter_tax: its def's header: the lane's keyword-only no_wait (4841af70)
+    ('21133a8e63710e97', 'order', '_credit_team_bet_fighter_tax', ()),
+    # main.py:29559 _credit_team_bet_fighter_tax: its call hands no_wait on (4841af70)
+    ('0e46163e4084d409', 'order', '_credit_team_bet_fighter_tax', ('body[5]',)),
+    # main.py:29564 _credit_team_bet_fighter_tax: its call hands no_wait on (4841af70)
+    ('f3a5e969fde7927f', 'order', '_credit_team_bet_fighter_tax', ('body[6]',)),
+    # main.py:39054 _return_stake_exactly: its def's header: the lane's keyword-only no_wait (4841af70)
+    ('eb00c2e947b68ebe', 'order', '_return_stake_exactly', ()),
+    # main.py:39131 _return_stake_exactly: the lane's lock call on the bettor's row at main.py:39131 (4841af70)
+    ('688e85fa0dcbd1ed', 'order', '_return_stake_exactly', ('body[1]',)),
+    # main.py:39132 _return_stake_exactly: moved one place by the lane's lock call on the bettor's row before it at main.py:39131 (4841af70)
+    ('559e8abf6c6804c2', 'order', '_return_stake_exactly', ('body[2]',)),
+    # main.py:39137 _return_stake_exactly: moved one place by the lane's lock call on the bettor's row before it at main.py:39131 (4841af70)
+    ('562fcc3a3a100e52', 'order', '_return_stake_exactly', ('body[3]',)),
+    # main.py:39138 _return_stake_exactly: moved one place by the lane's lock call on the bettor's row before it at main.py:39131 (4841af70)
+    ('aa091f19b9a3e90e', 'order', '_return_stake_exactly', ('body[3]', 'body[0]')),
+    # main.py:39142 _return_stake_exactly: moved one place by the lane's lock call on the bettor's row before it at main.py:39131 (4841af70)
+    ('946ad944d2daf1ce', 'order', '_return_stake_exactly', ('body[4]',)),
+    # main.py:53178 _reconcile_team_series_bets: its def's header: the lane's no_wait (4841af70) and raise_retryable (4e2841f1)
+    ('b7659af1cc7d98bb', 'order', '_reconcile_team_series_bets', ()),
+    # main.py:53213 _reconcile_team_series_bets: its header: the lane's retryable re-raise in the catch at main.py:53304 inside it (4e2841f1)
+    ('2b21dec4d60efb69', 'order', '_reconcile_team_series_bets', ('body[1]',)),
+    # main.py:53237 _reconcile_team_series_bets: its header: the lane's lock call on each winner's row at main.py:53239 inside it (4841af70)
+    ('40bcf018965bfa6f', 'order', '_reconcile_team_series_bets', ('body[1]', 'body[0]', 'body[5]')),
+    # main.py:53239 _reconcile_team_series_bets: the lane's lock call on each winner's row at main.py:53239 (4841af70)
+    ('8c19ad55962b53ff', 'order', '_reconcile_team_series_bets', ('body[1]', 'body[0]', 'body[5]', 'body[0]')),
+    # main.py:53240 _reconcile_team_series_bets: moved one place by the lane's lock call on each winner's row before it at main.py:53239 (4841af70)
+    ('416c33d71216a91f', 'order', '_reconcile_team_series_bets', ('body[1]', 'body[0]', 'body[5]', 'body[1]')),
+    # main.py:53280 _reconcile_team_series_bets: its header: the lane's lock call on the payee's row at main.py:53282 inside it (4841af70)
+    ('cffecc08fb59534c', 'order', '_reconcile_team_series_bets', ('body[1]', 'body[0]', 'body[9]', 'body[3]', 'body[1]')),
+    # main.py:53282 _reconcile_team_series_bets: the lane's lock call on the payee's row at main.py:53282 (4841af70)
+    ('cbe6b38e2e522319', 'order', '_reconcile_team_series_bets', ('body[1]', 'body[0]', 'body[9]', 'body[3]', 'body[1]', 'body[0]')),
+    # main.py:53283 _reconcile_team_series_bets: moved one place by the lane's lock call on the payee's row before it at main.py:53282 (4841af70)
+    ('928e612937074baf', 'order', '_reconcile_team_series_bets', ('body[1]', 'body[0]', 'body[9]', 'body[3]', 'body[1]', 'body[1]')),
+    # main.py:53286 _reconcile_team_series_bets: moved one place by the lane's lock call on the payee's row before it at main.py:53282 (4841af70)
+    ('69c229485c98680f', 'order', '_reconcile_team_series_bets', ('body[1]', 'body[0]', 'body[9]', 'body[3]', 'body[1]', 'body[2]')),
+    # main.py:53288 _reconcile_team_series_bets: moved one place by the lane's lock call on the payee's row before it at main.py:53282 (4841af70); its call hands no_wait on (4841af70)
+    ('1f3cc920cb244966', 'order', '_reconcile_team_series_bets', ('body[1]', 'body[0]', 'body[9]', 'body[3]', 'body[1]', 'body[3]')),
+    # main.py:53293 _reconcile_team_series_bets: its call hands no_wait on (4841af70)
+    ('2ed8ad1468baf4db', 'order', '_reconcile_team_series_bets', ('body[1]', 'body[0]', 'body[9]', 'body[3]', 'orelse[1]')),
+    # main.py:53304 _reconcile_team_series_bets: the lane's retryable re-raise in the catch at main.py:53304 (4e2841f1)
+    ('c2fad59b8878dc74', 'order', '_reconcile_team_series_bets', ('body[1]', 'handlers[0]', 'body[0]')),
+    # main.py:53305 _reconcile_team_series_bets: inside the lane's retryable re-raise in the catch at main.py:53304 (4e2841f1)
+    ('5b7bd4df8c70d269', 'order', '_reconcile_team_series_bets', ('body[1]', 'handlers[0]', 'body[0]', 'body[0]')),
+    # main.py:53306 _reconcile_team_series_bets: moved one place by the lane's retryable re-raise in the catch before it at main.py:53304 (4e2841f1)
+    ('442805385064e7db', 'order', '_reconcile_team_series_bets', ('body[1]', 'handlers[0]', 'body[1]')),
+    # main.py:75838 _service_player_uuids: its header: the lane's hand-back clause at main.py:75863 inside it (4841af70)
+    ('4e8d9f8a2e65a3aa', 'order', '_service_player_uuids', ('body[4]', 'body[0]')),
+    # main.py:75866 _service_player_uuids: inside the lane's hand-back clause at main.py:75863 (4841af70)
+    ('5b7bd4df8c70d269', 'order', '_service_player_uuids', ('body[4]', 'body[0]', 'handlers[0]', 'body[0]')),
+    # main.py:75887 _service_player_uuids: moved one place by the lane's hand-back clause before it at main.py:75863 (4841af70)
+    ('14ddac345e8eab66', 'order', '_service_player_uuids', ('body[4]', 'body[0]', 'handlers[1]', 'body[0]')),
+    # main.py:75888 _service_player_uuids: moved one place by the lane's hand-back clause before it at main.py:75863 (4841af70)
+    ('e9b6ddf2b4fb791b', 'order', '_service_player_uuids', ('body[4]', 'body[0]', 'handlers[1]', 'body[0]', 'body[0]')),
+    # main.py:75889 _service_player_uuids: moved one place by the lane's hand-back clause before it at main.py:75863 (4841af70)
+    ('464276c09d5d4cb6', 'order', '_service_player_uuids', ('body[4]', 'body[0]', 'handlers[1]', 'body[0]', 'body[1]')),
+    # main.py:75901 _service_player_uuids: moved one place by the lane's hand-back clause before it at main.py:75863 (4841af70)
+    ('b2db8feac9a9a697', 'order', '_service_player_uuids', ('body[4]', 'body[0]', 'handlers[1]', 'body[1]')),
+    # main.py:75902 _service_player_uuids: moved one place by the lane's hand-back clause before it at main.py:75863 (4841af70)
+    ('c790f305eb592372', 'order', '_service_player_uuids', ('body[4]', 'body[0]', 'handlers[1]', 'body[2]')),
+    # main.py:75904 _service_player_uuids: moved one place by the lane's hand-back clause before it at main.py:75863 (4841af70)
+    ('fca8da89bd1bec36', 'order', '_service_player_uuids', ('body[4]', 'body[0]', 'handlers[1]', 'body[2]', 'body[0]')),
+    # main.py:75906 _service_player_uuids: moved one place by the lane's hand-back clause before it at main.py:75863 (4841af70)
+    ('464276c09d5d4cb6', 'order', '_service_player_uuids', ('body[4]', 'body[0]', 'handlers[1]', 'body[2]', 'body[1]')),
+    # main.py:75910 _service_player_uuids: moved one place by the lane's hand-back clause before it at main.py:75863 (4841af70)
+    ('2abe10cb71dffd66', 'order', '_service_player_uuids', ('body[4]', 'body[0]', 'handlers[1]', 'body[3]')),
+    # MDPL class C (the integrator's ruling of 17 Nov 2026, 10:53:36Z): the three lane helpers the real a1
+    # walks reach from the changed bet helpers (_deletion_bound_acts_on bcc99529, _retryable_for_caller 4e2841f1,
+    # _deletion_lock_party_row 4841af70), admitted as spans BY HAND: every order key of each, as measured at
+    # 1b1ecbe6 (c3probe/keys-spans3-1b1ecbe6.txt), each with its line and the text it stands on: 1544 + 23 = 1567.
+    # main.py:45770 _deletion_bound_acts_on: its def's header (bcc99529)
+    ('34e2c1af5199c5d1', 'order', '_deletion_bound_acts_on', ()),
+    # main.py:45771 _deletion_bound_acts_on: the statement `"""The errors the deletion's bound acts on: the retry set and the two` (4841af70)
+    ('e80cc75f3ad9e691', 'order', '_deletion_bound_acts_on', ('body[0]',)),
+    # main.py:45774 _deletion_bound_acts_on: the statement `return code in _DELETION_RETRY_SQLSTATES or code in (` (4841af70)
+    ('0e2dcc200b0e06de', 'order', '_deletion_bound_acts_on', ('body[1]',)),
+    # main.py:45778 _retryable_for_caller: its def's header (4e2841f1)
+    ('ee6e1126689375a5', 'order', '_retryable_for_caller', ()),
+    # main.py:45779 _retryable_for_caller: the statement `"""MDPL R6b. The bet helpers end their savepoint on an error and go on,` (4e2841f1)
+    ('85a1ed41d295f9e3', 'order', '_retryable_for_caller', ('body[0]',)),
+    # main.py:45793 _retryable_for_caller: the statement `if isinstance(ex, (_DeletionRowHeld, _DeletionPastDeadline)):` (4841af70)
+    ('d52bb9771a8323f2', 'order', '_retryable_for_caller', ('body[1]',)),
+    # main.py:45794 _retryable_for_caller: the statement `return True` (4841af70)
+    ('7c4f2b739751f105', 'order', '_retryable_for_caller', ('body[1]', 'body[0]')),
+    # main.py:45795 _retryable_for_caller: the statement `return bool(raise_retryable) and _deletion_bound_acts_on(` (bcc99529)
+    ('5c2cd4d4afb91f14', 'order', '_retryable_for_caller', ('body[2]',)),
+    # main.py:46030 _deletion_lock_party_row: its def's header (4841af70)
+    ('8f0dfdc1911e48e4', 'order', '_deletion_lock_party_row', ()),
+    # main.py:46031 _deletion_lock_party_row: the statement `"""MDPL r1 HIGH. The canonical order takes a player's identity -- the` (4841af70)
+    ('3aa6db7f63a5de9e', 'order', '_deletion_lock_party_row', ('body[0]',)),
+    # main.py:46063 _deletion_lock_party_row: the statement `if not no_wait:` (4841af70)
+    ('55ce9eb47440e157', 'order', '_deletion_lock_party_row', ('body[1]',)),
+    # main.py:46064 _deletion_lock_party_row: the statement `return` (4841af70)
+    ('8a5781016b19ae9a', 'order', '_deletion_lock_party_row', ('body[1]', 'body[0]')),
+    # main.py:46065 _deletion_lock_party_row: the statement `got = (await db.execute(text(_DELETION_PARTY_LOCK_SQL), {"pid": player_id})).first()` (4841af70)
+    ('9eb7e4568f7b79da', 'order', '_deletion_lock_party_row', ('body[2]',)),
+    # main.py:46066 _deletion_lock_party_row: the statement `if got is None:` (4841af70)
+    ('a921ac795004e375', 'order', '_deletion_lock_party_row', ('body[3]',)),
+    # main.py:46067 _deletion_lock_party_row: the statement `seen = (await db.execute(text(_DELETION_PARTY_SEEN_SQL), {"pid": player_id})).first()` (4841af70)
+    ('5b46907456398a2d', 'order', '_deletion_lock_party_row', ('body[3]', 'body[0]')),
+    # main.py:46068 _deletion_lock_party_row: the statement `if seen is not None:` (4841af70)
+    ('08c2ecb57f933b3b', 'order', '_deletion_lock_party_row', ('body[3]', 'body[1]')),
+    # main.py:46069 _deletion_lock_party_row: the statement `raise _DeletionRowHeld("bet party row")` (4841af70)
+    ('c3f014fb45b88e5b', 'order', '_deletion_lock_party_row', ('body[3]', 'body[1]', 'body[0]')),
+    # main.py:46070 _deletion_lock_party_row: the statement `return` (4841af70)
+    ('8a5781016b19ae9a', 'order', '_deletion_lock_party_row', ('body[3]', 'body[2]')),
+    # main.py:46071 _deletion_lock_party_row: the statement `if got[0] is None:` (4841af70)
+    ('d7bbdedf3c9e0f87', 'order', '_deletion_lock_party_row', ('body[4]',)),
+    # main.py:46072 _deletion_lock_party_row: the statement `return` (4841af70)
+    ('8a5781016b19ae9a', 'order', '_deletion_lock_party_row', ('body[4]', 'body[0]')),
+    # main.py:46073 _deletion_lock_party_row: the statement `key = (await db.execute(text(_DELETION_PARTY_KEY_SQL), {"sid": got[0]})).first()` (4841af70)
+    ('61bfb62a288280fe', 'order', '_deletion_lock_party_row', ('body[5]',)),
+    # main.py:46074 _deletion_lock_party_row: the statement `if not (key is not None and key[0] is True):` (4841af70)
+    ('668bafce880a1017', 'order', '_deletion_lock_party_row', ('body[6]',)),
+    # main.py:46075 _deletion_lock_party_row: the statement `raise _DeletionRowHeld("bet party's identity key")` (4841af70)
+    ('b1ea3ab685bdfdba', 'order', '_deletion_lock_party_row', ('body[6]', 'body[0]')),
 })
 A1_BINDINGS = A1_BINDINGS | A1_ORDERS | frozenset({("<orders>",)})
 
@@ -6883,6 +7120,78 @@ A1_NAMEDTUPLES = frozenset({
     'Tuple.elts>Name(id=str,ctx=Load)#pick',  # region_pick:277
     'Tuple.elts>Name(id=str,ctx=Load)#why',  # region_pick:277
 })
+
+
+# MDPL class C (the integrator's rulings of 17 Nov 2026, 09:13:52Z, question 2, and 10:05:30Z,
+# condition 4): the account deletion's two SIGNAL CLASSES, which the bet helpers the a1 walks
+# reach construct, admitted BY NAME to the definition scope (closed_walk._signal_class). Each is
+# frozen as its whole class statement, docstring included: the row ("<signal class>", name,
+# file, ast.dump of the text below) must equal the dump of the one class statement that binds the
+# name in its module. Each stays a plain Exception subclass; _DeletionRowHeld keeps its one
+# attribute `what` and nothing else. Every use of each name in main.py is frozen too:
+# A1_SIGNAL_USES holds rule N's census of the name there (closed_walk._n_census: each occurrence
+# as (the top-level definition holding it, its line relative to that definition's, its context,
+# the text of the expression around it), and each attribute or string spelling of the name),
+# compared WHOLE, so a use added, removed or changed anywhere in main.py refuses the class.
+# A1_SIGNAL_LINES holds each definition's file:line. The lines and the census rows were measured
+# at 1b1ecbe6 and re-anchor at the merge with main, with the same tool, with the spans' lines.
+_SIGNAL_TEXT_DELETIONROWHELD = '''class _DeletionRowHeld(Exception):
+    """MDPL r1 HIGH: inside a deletion attempt, another transaction held
+    what the deletion came to take without a wait: a bet party's players
+    row or identity key (_deletion_lock_party_row), an FFA bet row
+    (_deletion_lock_ffa_bet), or one of the deletion's own lobby and series
+    rows (its step-4 locks). The attempt ends without waiting, and the bound
+    runs it again from fresh reads after a pause; every bet helper's catch
+    hands it back (_retryable_for_caller). The two guards raise it only in
+    the no-wait mode, which the deletion alone turns on (no_wait=True).
+    `what` names the held thing for the bound's log line."""
+
+    def __init__(self, what):
+        super().__init__(what)
+        self.what = what
+'''
+_SIGNAL_TEXT_DELETIONPASTDEADLINE = '''class _DeletionPastDeadline(Exception):
+    """MDPL r1, the hold-time figure: inside a deletion attempt, a statement
+    was about to start after the attempt's deadline
+    (_deletion_arm_every_statement). Handed back through every bet helper's
+    catch, as the held signal is; the bound answers it with the refusal,
+    nothing written."""
+'''
+A1_SIGNAL_LINES = (
+    ('main.py', 45746, '_DeletionRowHeld'),
+    ('main.py', 45762, '_DeletionPastDeadline'),
+)
+A1_SIGNAL_USES = (
+    ('main.py', '_DeletionRowHeld', (
+        ('_deletion_bounded', 53, 'Load', '(_DeletionRowHeld, _DeletionPastDeadline)'),
+        ('_deletion_lock_ffa_bet', 23, 'Load', "_DeletionRowHeld('FFA bet row')"),
+        ('_deletion_lock_party_row', 39, 'Load', "_DeletionRowHeld('bet party row')"),
+        ('_deletion_lock_party_row', 45, 'Load', '_DeletionRowHeld("bet party\'s identity key")'),
+        ('_deletion_signal_of', 12, 'Load', '_DeletionRowHeld(_DELETION_WAIT_WHAT)'),
+        ('_deletion_take_or_yield', 14, 'Load', '_DeletionRowHeld(what)'),
+        ('_pc_trade_schema', 14, 'Load', '(_DeletionRowHeld, _DeletionPastDeadline)'),
+        ('_retryable_for_caller', 15, 'Load', '(_DeletionRowHeld, _DeletionPastDeadline)'),
+        ('_service_player_uuids', 58, 'Load', '(_DeletionRowHeld, _DeletionPastDeadline)'),
+        ('delete_player_data', 71, 'Load', '(_DeletionRowHeld, _DeletionPastDeadline)'),
+    )),
+    ('main.py', '_DeletionPastDeadline', (
+        ('_deletion_arm_every_statement', 54, 'Load', '_DeletionPastDeadline()'),
+        ('_deletion_arm_every_statement', 91, 'Load', '_DeletionPastDeadline()'),
+        ('_deletion_bounded', 53, 'Load', '(_DeletionRowHeld, _DeletionPastDeadline)'),
+        ('_deletion_bounded', 62, 'Load', 'isinstance(signal, _DeletionPastDeadline)'),
+        ('_deletion_signal_of', 10, 'Load', '_DeletionPastDeadline()'),
+        ('_pc_trade_schema', 14, 'Load', '(_DeletionRowHeld, _DeletionPastDeadline)'),
+        ('_retryable_for_caller', 15, 'Load', '(_DeletionRowHeld, _DeletionPastDeadline)'),
+        ('_service_player_uuids', 58, 'Load', '(_DeletionRowHeld, _DeletionPastDeadline)'),
+        ('delete_player_data', 71, 'Load', '(_DeletionRowHeld, _DeletionPastDeadline)'),
+    )),
+)
+A1_SIGNAL_CLASSES = frozenset(
+    [("<signal class>", _n) for _f, _l, _n in A1_SIGNAL_LINES]
+    + [("<signal class>", _n, _f, _ast.dump(_ast.parse(_t).body[0]))
+       for (_f, _l, _n), _t in zip(A1_SIGNAL_LINES, (_SIGNAL_TEXT_DELETIONROWHELD, _SIGNAL_TEXT_DELETIONPASTDEADLINE))]
+    + [("<signal class>", _n, _f, "uses", _rows) for _f, _n, _rows in A1_SIGNAL_USES])
+A1_NAMEDTUPLES = A1_NAMEDTUPLES | A1_SIGNAL_CLASSES
 
 # --- the census grammar ------------------------------------------
 # Every node shape of every walker span the census reads

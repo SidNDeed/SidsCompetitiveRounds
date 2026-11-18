@@ -3764,3 +3764,147 @@ for _k, _v in LOBBY_INVITES_FROZEN.items():
 FROZEN_COUNT = (COARSE_COUNT + COMPLETE_COUNT + R10_COUNT + R10_MERGE_COUNT
                 + R11_ID_COUNT + R11_OPEN_COUNT + B10_MERGE_COUNT
                 + MAIL_SEND_RECEIPTS_COUNT + LOBBY_INVITES_COUNT)
+
+
+# Hand edit for MDPL, the account deletion's bound (the integrator's rulings of 17 Nov 2026: 09:13:52Z,
+# question 3, for main.py's eight forms, and 11:01:25Z for all 22): the 22 forms the lane adds to the
+# census files, 5 coarse and 17 complete, each row below with its file:line at 1b1ecbe6 and its reason.
+# main.py's eight are the deletion bound's own (three docstrings, the event listener's two imports, and
+# the attempt's armed session methods put on and taken back); closed_walk.py's fourteen are MDPL class
+# C's signal-class route, each reading a class or a module the walk already resolved and comparing it.
+# None reaches an opener, a DSN, a role or an identity statement. Frozen by hand, not by a
+# re-derivation; FROZEN_COUNT is 882.
+MDPL_FROZEN = {
+    'api/main.py': [
+        # main.py:45846, the docstring of _deletion_arm_every_statement, prose matched by the word PostgreSQL;
+        #  it holds no DSN
+        ('dsntext', ('MDPL r1, the hold-time figure; r2 HIGH 1, one armed path. For the\n'
+                     "    length of one attempt, every statement the attempt's connection sends\n"
+                     "    is preceded by arming two settings, from SQLAlchemy's\n"
+                     '    before_cursor_execute on that connection: statement_timeout to the\n'
+                     '    time left, so a statement -- with every lock wait in it, however many\n'
+                     '    rows it waits for in turn (#689: lock_timeout applies to each lock\n'
+                     "    separately) -- ends by the deadline plus its own arming's round trip;\n"
+                     '    and lock_timeout to the smaller of the time left and\n'
+                     '    _DELETION_WAIT_CAP_S. The deadline is checked before the arming and\n'
+                     '    after it, and nothing is awaited between that check and the send: no\n'
+                     '    statement starts after the deadline. The event sees what a wrapper of\n'
+                     "    the session's methods cannot: each statement of a flush (an explicit\n"
+                     '    one, an autoflush, the flush a savepoint or the commit runs first)\n'
+                     '    and each batch of an insert of many rows. An executemany of n runs is\n'
+                     '    armed once for all of them with statement_timeout an n-th of the time\n'
+                     '    left, since PostgreSQL restarts the timeout for each run. SAVEPOINT,\n'
+                     '    RELEASE SAVEPOINT and ROLLBACK TO SAVEPOINT go unarmed\n'
+                     "    (_DELETION_UNARMED). The COMMIT is not a statement of the connection's\n"
+                     '    cursor: db.commit flushes first (each statement armed), then arms the\n'
+                     '    COMMIT and checks the deadline. The connection: db.execute, db.flush,\n'
+                     '    db.commit and db.begin_nested each hold it first -- a checkout waits\n'
+                     "    at most the time left (the pool's own wait is pool_timeout, 30 s) --\n"
+                     '    check the deadline after the checkout, and attach the arming to a\n'
+                     '    connection this attempt has not armed (a rollback releases the\n'
+                     '    connection; the next statement checks one out). test_mdpl_bound pins\n'
+                     "    that the deletion's reach calls no other session method that could\n"
+                     '    check one out. A lock wait that reaches the cap before the deadline is\n'
+                     '    a held row or key (_DeletionRowHeld); a statement or wait ended at the\n'
+                     '    deadline, or a checkout still waiting there, is _DeletionPastDeadline\n'
+                     '    (_deletion_signal_of). Both are raised here, from the PostgreSQL\n'
+                     '    error, so every catch in the reach sees a signal the bound acts on.\n'
+                     "    Armed once at the attempt's start, a wait could last the whole time\n"
+                     '    left at the start however late it began, and the waits after a guard\n'
+                     "    added up: an attempt could hold a party's key and row (or its own\n"
+                     '    lobby rows) long past its deadline before the pre-commit check refused\n'
+                     '    it. Armed before every statement, the attempt holds what it took at\n'
+                     '    most until its deadline (at most _DELETION_BUDGET_S after arrival)\n'
+                     "    plus one arming's round trip, then its rollback. Returns the undo,\n"
+                     '    which the bound runs when the attempt ends.')),
+        # main.py:46131, the docstring of _deletion_bounded, prose matched by the word PostgreSQL; it holds no
+        #  DSN
+        ('dsntext', ("The account deletion's bound (MDPL R6). The whole transaction runs\n"
+                     '    again from fresh reads when PostgreSQL ends it as a deadlock victim or\n'
+                     '    a serialization failure, or when it met a row it takes without a wait\n'
+                     '    held by another transaction (_DeletionRowHeld, MDPL r1 HIGH), while\n'
+                     '    the time left covers one attempt; a lock wait that reached\n'
+                     '    _DELETION_WAIT_CAP_S is such a held row. No attempt starts, no\n'
+                     '    statement of one starts, and none commits, after the deadline: every\n'
+                     "    statement the attempt's connection sends -- each statement of a flush\n"
+                     '    included -- and its COMMIT is armed first, on that connection, with\n'
+                     '    statement_timeout the time left, and the deadline is checked after the\n'
+                     '    checkout and after each arming (_deletion_arm_every_statement), so none\n'
+                     "    starts after it and none outlasts it by more than its own arming's\n"
+                     '    round trip. Used up: 503 account_cleanup_contended with nothing written;\n'
+                     '    the client\'s line reads "Deletion failed", which is true, and a second\n'
+                     "    click starts afresh. FastAPI reads the wrapped function's signature.")),
+        # main.py:45812, the docstring of _deletion_signal_of, prose matched by the word PostgreSQL; it holds
+        #  no DSN
+        ('dsntext', ("The deletion's signal for a PostgreSQL error inside an attempt, or\n"
+                     '    None when the error is not one of its two timeouts: a 57014\n'
+                     '    (statement_timeout, armed to the time left), or a 55P03 once the\n'
+                     '    deadline has passed, is _DeletionPastDeadline; a 55P03 before it is a\n'
+                     '    lock wait that reached _DELETION_WAIT_CAP_S, a held row or key\n'
+                     '    (_DeletionRowHeld).')),
+        # main.py:45836, _deletion_listen: SQLAlchemy's event module, to add the before_cursor_execute
+        #  listener that arms one attempt's statements on that attempt's own connection
+        ('import', 'from sqlalchemy import event'),
+        # main.py:45841, _deletion_unlisten: the same module, to remove that listener
+        ('import', 'from sqlalchemy import event'),
+    ],
+    'api/main.py#complete': [
+        # main.py:46009, `getattr(db, "__dict__", {})` in the attempt's undo: the session's own instance
+        #  attributes, so that only the methods the attempt set are taken back
+        ('alias', 'str __dict__'),
+        # main.py:46012, the undo removes a method the attempt set, only while the session still holds that
+        #  same function
+        ('dynamic', 'delattr(db, name)'),
+        # main.py:46006, puts the attempt's armed flush, commit and begin_nested on the session
+        ('dynamic', 'setattr(db, name, fn)'),
+    ],
+    'tests/closed_walk.py#complete': [
+        # closed_walk.py:592, `getattr(v, "__code__", None)`: each member's own definition line and file
+        ('alias', 'str __code__'),
+        # closed_walk.py:490, in _SIGNAL_SET_ASIDE, a member every class carries, skipped when the class's own
+        #  members are compared to its frozen statement
+        ('alias', 'str __dict__'),
+        # closed_walk.py:489, in _SIGNAL_SET_ASIDE, a member every class carries, skipped when the class's own
+        #  members are compared to its frozen statement
+        ('alias', 'str __doc__'),
+        # closed_walk.py:534, `getattr(home, "__file__", "?")`: the home module's file name for the frozen
+        #  rows
+        ('alias', 'str __file__'),
+        # closed_walk.py:490, in _SIGNAL_SET_ASIDE, a member every class carries, skipped when the class's own
+        #  members are compared to its frozen statement
+        ('alias', 'str __firstlineno__'),
+        # closed_walk.py:489, in _SIGNAL_SET_ASIDE, a member every class carries, skipped when the class's own
+        #  members are compared to its frozen statement
+        ('alias', 'str __module__'),
+        # closed_walk.py:547, `getattr(obj, "__mro__", None)`: the plain-Exception-subclass check
+        ('alias', 'str __mro__'),
+        # closed_walk.py:490, in _SIGNAL_SET_ASIDE, a member every class carries, skipped when the class's own
+        #  members are compared to its frozen statement
+        ('alias', 'str __qualname__'),
+        # closed_walk.py:575, `getattr(obj, "__qualname__", None)`: the class's qualified name is its plain
+        #  name
+        ('alias', 'str __qualname__'),
+        # closed_walk.py:599, `getattr(v, "__qualname__", None)`: each member's qualified name is the class's
+        #  own
+        ('alias', 'str __qualname__'),
+        # closed_walk.py:491, in _SIGNAL_SET_ASIDE, a member every class carries, skipped when the class's own
+        #  members are compared to its frozen statement
+        ('alias', 'str __static_attributes__'),
+        # closed_walk.py:489, in _SIGNAL_SET_ASIDE, a member every class carries, skipped when the class's own
+        #  members are compared to its frozen statement
+        ('alias', 'str __weakref__'),
+        # closed_walk.py:573, `getattr(home, name, None) is not obj`: the identity check, that the class is
+        #  its home module's own binding of the name
+        ('dynamic', 'getattr(home, name, None)'),
+        # closed_walk.py:552, the class's own members, compared to its frozen statement's functions
+        ('dynamic', 'vars(obj)'),
+    ],
+}
+MDPL_COARSE_COUNT = 5
+MDPL_COMPLETE_COUNT = 17
+MDPL_COUNT = MDPL_COARSE_COUNT + MDPL_COMPLETE_COUNT
+for _k, _v in MDPL_FROZEN.items():
+    FROZEN[_k] = list(FROZEN.get(_k, [])) + list(_v)
+FROZEN_COUNT = (COARSE_COUNT + COMPLETE_COUNT + R10_COUNT + R10_MERGE_COUNT
+                + R11_ID_COUNT + R11_OPEN_COUNT + B10_MERGE_COUNT
+                + MAIL_SEND_RECEIPTS_COUNT + LOBBY_INVITES_COUNT + MDPL_COUNT)

@@ -965,6 +965,13 @@ def _a1_grammar():
 _A1_GRAMMAR = _a1_grammar()
 
 
+# MDPL class C (the ruling of 17 Nov 2026 14:10:47Z, 2): the frozen grammar's
+# SIGNAL CLASS rows, and nothing else of its definition scope, for the
+# recording grammar of structural_only.
+_A1_SIGNAL_ROWS = frozenset(r for r in _A1_GRAMMAR.namedtuples
+                            if r[0] == "<signal class>")
+
+
 def _admit_source(d, scope, src):
     """Admit the parsed definition `d` of source `src` under the grammar of
     the a1 policy over `scope`: positioned at its real file and line when
@@ -1076,11 +1083,19 @@ def structural_only(monkeypatch):
     child owns is ALSO a round-7 control under the frozen grammar
     (test_r7_a1_findings_are_refused_under_the_frozen_grammar). The
     recording grammar keeps the frozen callee table (round 8, M4): it is
-    the only route to a callee outside a module's own namespace."""
+    the only route to a callee outside a module's own namespace. It also
+    keeps the frozen grammar's SIGNAL CLASS rows (_A1_SIGNAL_ROWS) and
+    nothing else of its definition scope (MDPL class C, the ruling of 17
+    Nov 2026 14:10:47Z, 2): the bet helpers the walks reach construct the
+    account deletion's two signal classes, which only those rows admit
+    (Bindings.namedtuple_class), so without them the relock walk was
+    refused at the first such construction; any other class constructed
+    in a walked span is refused by the definition scope as before (the
+    controls after test_the_resolver_walk_reads_an_awaited_committing_helper)."""
     import sys as _sys
     me = _sys.modules[__name__]
     none = frozenset()
-    g = _cw.Grammar(none, none, none, _A1_CALLEES, record=True)
+    g = _cw.Grammar(none, none, none, _A1_CALLEES, _A1_SIGNAL_ROWS, record=True)
     monkeypatch.setattr(me, "_A1_GRAMMAR", g)
     monkeypatch.setattr(me, "_POLICIES", {})
 
@@ -4183,6 +4198,100 @@ def test_the_resolver_walk_reads_an_awaited_committing_helper(structural_only):
         assert any("ends the transaction" in g for g in got), (names[k], got)
 
 
+# --- MDPL class C: structural_only's signal class rows ---------------------
+#
+# The ruling of 17 Nov 2026 14:10:47Z, 2: the recording grammar of
+# structural_only carries the frozen grammar's SIGNAL CLASS rows and nothing
+# else of its definition scope, so the relock walk's bet helpers construct
+# the account deletion's two signal classes as the frozen grammar admits
+# them. Without the rows the walk was refused at _DeletionRowHeld (red from
+# 4841af70, unnamed until 17 Nov). Controls: a third class constructed in
+# the walked span still refuses (its twin constructs a signal class and is
+# admitted), and a changed signal row refuses (each kind of row, for each
+# signal class the walk reaches; the rows as frozen are the control).
+_RELOCK_NAMES = ("_team_resolve_live_family", "_team_lock_family_pick",
+                 "_team_relock_existing_series")
+# The signal classes the real relock walk admits by their rows, as measured
+# (a spy on closed_walk._signal_class); a class added or gone refuses.
+_RELOCK_SIGNALS_REACHED = ["_DeletionRowHeld"]
+
+
+def test_mdpl_c_the_recording_grammar_carries_the_signal_rows_alone(structural_only):
+    g = _A1_GRAMMAR
+    assert g.record and _A1_SIGNAL_ROWS
+    assert _A1_SIGNAL_ROWS == _gs.A1_SIGNAL_CLASSES
+    assert (g.shapes, g.meaningful, g.allowed) == (frozenset(), frozenset(), frozenset())
+    assert g.namedtuples == _A1_SIGNAL_ROWS
+    assert g.imports == dict(_A1_CALLEES)
+
+
+@pytest.mark.parametrize("cls, refused", [("_NotOwnSeat", True), ("_DeletionRowHeld", False)],
+                         ids=["a third class", "a signal class, its twin"])
+def test_mdpl_c_a_third_class_constructed_in_the_walked_span_still_refuses(structural_only, cls, refused):
+    srcs = [_inspect.getsource(getattr(main, n)) for n in _RELOCK_NAMES]
+    made = getattr(main, cls)
+    assert isinstance(made, type) and made.__mro__[1:] == (Exception, BaseException, object)
+    assert _relock_outcome_problems(*srcs) == []
+    tree = _ast.parse(_textwrap.dedent(srcs[0]))
+    tree.body[0].body.insert(1, _ast.parse(cls + "('x')").body[0])
+    got = _relock_outcome_problems(_ast.unparse(tree), srcs[1], srcs[2])
+    if refused:
+        assert got and all(cls in p and "outside the definition scope" in p for p in got), got
+    else:
+        assert got == [], got
+
+
+# Each kind of signal row (by its length), how the control changes it, and
+# the sentence each refusal carries: the row naming the class removed (the
+# name then reads as any class, refused by the definition scope), the class
+# statement's dump changed, one use dropped from the uses row.
+_SIGNAL_ROW_CHANGES = {
+    "name row removed": (2, "a shape outside the definition scope"),
+    "class statement row changed": (4, "is not its frozen signal class"),
+    "uses row changed": (5, "are not its frozen uses"),
+}
+
+
+@pytest.mark.parametrize("kind", sorted(_SIGNAL_ROW_CHANGES))
+def test_mdpl_c_a_changed_signal_row_refuses(structural_only, monkeypatch, kind):
+    import sys as _sys
+    me = _sys.modules[__name__]
+    srcs = [_inspect.getsource(getattr(main, n)) for n in _RELOCK_NAMES]
+    seen = []
+    real = _cw._signal_class
+
+    def spy(b, name, obj, line):
+        seen.append(name)
+        return real(b, name, obj, line)
+
+    def changed(rows, name, size):
+        out = set(rows)
+        row = [r for r in rows if r[1] == name and len(r) == size]
+        assert len(row) == 1, (name, size, row)
+        out.discard(row[0])
+        if size == 4:
+            out.add(row[0][:3] + (row[0][3] + " ",))
+        if size == 5:
+            uses = row[0][4]
+            out.add(row[0][:4] + (type(uses)(list(uses)[:-1]),))
+        return frozenset(out)
+
+    monkeypatch.setattr(_cw, "_signal_class", spy)
+    assert _relock_outcome_problems(*srcs) == []
+    reached = sorted(set(seen))
+    assert reached == _RELOCK_SIGNALS_REACHED, reached
+    size, want = _SIGNAL_ROW_CHANGES[kind]
+    none = frozenset()
+    for name in reached:
+        rows = changed(_A1_SIGNAL_ROWS, name, size)
+        assert len(rows) == len(_A1_SIGNAL_ROWS) - (size == 2)
+        monkeypatch.setattr(me, "_A1_GRAMMAR", _cw.Grammar(
+            none, none, none, _A1_CALLEES, rows, record=True))
+        monkeypatch.setattr(me, "_POLICIES", {})
+        got = _relock_outcome_problems(*srcs)
+        assert got and all(name in p and want in p for p in got), (kind, name, got)
+
+
 # --- ruling REHEARSAL-FOUR-R4 item 1: the acceptance bound ----------------
 
 # The names of the bound, spelled by joining so this test's own source is not
@@ -5438,7 +5547,10 @@ def test_r9_queue_poll_refusals_roll_back():
     it by a rollback; the two conformed sites are among them; and the
     committing-refusal anchors are gone from the frozen anchors, which are
     the round-8 set less exactly those two (69, pinned by digest), the
-    position rule's 2322 positions pinned beside them."""
+    position rule's 2351 positions pinned beside them (2322 at round 9;
+    MDPL class C, by hand: 2322 - 34 + 40 + 23 = 2351, the 34 positions
+    the lane's insertions vacated removed, its 40 added, and the 23 of the
+    three lane helpers the real walks reach)."""
     import hashlib
     tree = _ast.parse(_textwrap.dedent(_inspect.getsource(main.queue_poll)))
     off = main.queue_poll.__code__.co_firstlineno - 1
@@ -5470,7 +5582,7 @@ def test_r9_queue_poll_refusals_roll_back():
                         if b not in pos and b != _cw.POSITIONED
                         and b not in _gs.A1_ORDERS and b != _cw.ORDERED)
     for lit, size, want in ((anchors, 69, "419ade3900e75191"),
-                            (pos, 2322, "f9f0a2e4dbae2cd3")):
+                            (pos, 2351, "8988bad762227ed9")):
         digest = hashlib.sha256(repr(sorted(lit, key=repr)).encode(
             "utf-8")).hexdigest()[:16]
         assert (len(lit), digest) == (size, want), (len(lit), digest)
@@ -5486,7 +5598,8 @@ def test_r9_statement_order_is_bound():
     its place, but a permutation of consecutive statements none of which
     holds a position kept every position. Now every statement of every a1
     span stands at its frozen order key (grammar_shapes_a1.A1_ORDERS, pinned
-    here by size and digest). The class sweep: in every span, every
+    here by size and digest: 1537 at round 9; MDPL class C, by hand:
+    1537 - 32 + 39 + 23 = 1567). The class sweep: in every span, every
     adjacent pair of statements of one list, neither holding a position
     and with different headers, is swapped in a copy of the real
     definition; with the order marker the swap is refused by the order
@@ -5501,7 +5614,7 @@ def test_r9_statement_order_is_bound():
     import shape_grammar as _sg
     orders = sorted(_gs.A1_ORDERS)
     digest = hashlib.sha256(repr(orders).encode("utf-8")).hexdigest()[:16]
-    assert (len(orders), digest) == (1537, "f6e1af03c9867031"), (len(orders), digest)
+    assert (len(orders), digest) == (1567, "fbe6907f8758334e"), (len(orders), digest)
     assert _cw.ORDERED in _gs.A1_BINDINGS
     assert _gs.A1_ORDERS <= _gs.A1_BINDINGS
     on = _gs.A1_BINDINGS
@@ -5514,6 +5627,7 @@ def test_r9_statement_order_is_bound():
                 if why != own]
 
     swapped = 0
+    pairs = []
     for f, ln, name, _n in _gs.A1_SPANS:
         d = copy.deepcopy(_span_def(f, ln, name))
         assert refusals(d, on) == [], (name, refusals(d, on)[:2])
@@ -5545,8 +5659,19 @@ def test_r9_statement_order_is_bound():
                            for w in got_on), (name, path, got_on[:2])
                 assert all("outside its frozen order" in w for w in got_on), (
                     name, path, got_on[:3])
+                pairs.append((name, path))
                 swapped += 1
-    assert swapped == 57, swapped
+    # 57 at round 9. MDPL class C adds exactly one free pair, named (the
+    # ruling of 17 Nov 2026 14:10:47Z, 3): the lane's two awaited calls at
+    # the head of _credit_bet_fighter_tax, the service-subject check then
+    # the party row's lock. The other 57 are pinned by their digest, as
+    # measured on class C's final tree; a 59th pair, or a different one,
+    # refuses.
+    new = ("_credit_bet_fighter_tax", ("body[2]",))
+    rest = sorted(p for p in pairs if p != new)
+    digest = hashlib.sha256(repr(rest).encode("utf-8")).hexdigest()[:16]
+    got = (swapped, len(set(pairs)), pairs.count(new), len(rest), digest)
+    assert got == (58, 58, 1, 57, "af6043276f0f788e"), got
     d = copy.deepcopy(_span_def(*next(
         (f, ln, name) for f, ln, name, _n in _gs.A1_SPANS
         if name == "_team_resolve_live_family")))
@@ -5726,7 +5851,9 @@ def test_r8_sr_the_lookup_reads_only_the_covered_ok_positions():
     ok = {e[1:4] for e in _ro.COVERED if _ro.green(_ro.OUTCOME[e])}
     assert _A1_READS == ok, sorted(_A1_READS ^ ok)
     locks = {e[1:4] for e in _ro.WRITERS}
-    assert len(locks) == 14 and {k for p, k in _A1_TABLE.items() if p in locks} == {"lock"}
+    # 14, and MDPL class C's no-wait lock of a bet party's row (main.py:46065)
+    # and its identity-key try-lock (main.py:46073)
+    assert len(locks) == 16 and {k for p, k in _A1_TABLE.items() if p in locks} == {"lock"}
     assert set(_A1_TABLE) == ok | locks
     for e in _ro.COVERED + _ro.WRITERS:
         b, c = _sr_placed(e)
