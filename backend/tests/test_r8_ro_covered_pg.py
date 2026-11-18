@@ -25,7 +25,7 @@ REHEARSAL-FOUR-R7-A1 M1, R7-A2).
    proof by the role, or, for the two statements the role cannot refuse,
    the effect the harness measures: main.py:17901, a transaction-local
    set_config of lock_timeout, ('continuity', the changed setting) by the
-   round-10 residue reading, and main.py:54564, pg_advisory_xact_lock,
+   round-10 residue reading, and main.py:54685, pg_advisory_xact_lock,
    ('lock', advisory) by the lock read.
 
 4. Transaction continuity (ruling REHEARSAL-R9-A1 (B)): every measured
