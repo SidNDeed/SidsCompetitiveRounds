@@ -259,7 +259,7 @@
           ],
           "main",
           "admin_quarantine_triage_group",
-          "b35fe59fcc240ff8e786140544185fe7e1b9b436"
+          "b4dc8a2383109064be817a4fbdc8505d39cf9eaf"
         ],
         [
           "/api/v1/admin/quarantine/{qid}/accept",
