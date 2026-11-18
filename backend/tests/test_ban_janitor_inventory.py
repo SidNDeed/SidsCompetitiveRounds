@@ -41,6 +41,12 @@ calls a ban read, so _is_banned (1, through the soft check's ban read) and
 _ban_gate_any_or_raise (1, through the FFA report's gate) are counted; both
 statements resolve, and no other function's count moves, as
 main._janitor_sql_from_sources measures this tree and e3c8b2a2's.
+
+With the ban sweep's fix sitting (FIX-1) the tree reads 385 and 0: the
+report window's settle bodies now read the ban themselves under the
+identity lock (_settle_writer_ban_check -> _ban_lock_and_gate), and the one
+new statement the janitor reaches is that helper's shared identity lock
+(1); its ban reads are the gates already counted above.
 """
 import asyncio
 import os
@@ -56,7 +62,7 @@ sys.path.insert(0, os.path.normpath(os.path.join(HERE, "..", "api")))
 import main  # noqa: E402
 import models  # noqa: E402
 
-STATEMENTS, DYNAMIC = 384, 0   # 382 before the ban sweep, 371 before QDIG-1 (see the module docstring)
+STATEMENTS, DYNAMIC = 385, 0   # 384 before FIX-1, 382 before the ban sweep, 371 before QDIG-1 (see the module docstring)
 ROOT = (("main", "root"),)
 DEF = re.compile(r"\((\w+)\.unbanned_at IS NULL AND \(\1\.expires_at IS NULL OR \1\.expires_at > NOW\(\)\)\)")
 # the sites that were dynamic on 88a0a2bf, and the alias each one's definition call names
