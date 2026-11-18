@@ -88,7 +88,7 @@
           ],
           "main",
           "admin_ban",
-          "c96b801abc24a099e46ffd4b55c3378fb1528cf3"
+          "8e59ddf7bf1e529624c666495399f30008ab183d"
         ],
         [
           "/api/v1/admin/banned-users",
@@ -376,7 +376,7 @@
           ],
           "main",
           "admin_resolve_team_series",
-          "a2b0ff42f31631ddf312fcf7dae77ecc6eedd380"
+          "fb24c49ede891339a1bd607426a90f96ad7be836"
         ],
         [
           "/api/v1/admin/unban",
@@ -403,7 +403,7 @@
           ],
           "main",
           "submit_bug_report",
-          "74c2f258273bbf0db15693140a1518b767404c74"
+          "5601e9159bcfd16da1beca05fb6aa90078eeeaf9"
         ],
         [
           "/api/v1/bug-reports/events/recent",
@@ -655,7 +655,7 @@
           ],
           "main",
           "submit_ovt_match",
-          "fe910ce51b4107a2d3eb116144040934cd3f210a"
+          "3e7c9841990566e33b8f42b51b45979fa3697a5c"
         ],
         [
           "/api/v1/ovt/series/active",
@@ -1186,7 +1186,7 @@
           ],
           "main",
           "submit_team_match",
-          "1b191266718a8b601bd79999e951a116d0a24c13"
+          "96c4c1ea396b80d5d6e79368799846522d53185a"
         ],
         [
           "/api/v1/team/players/{steam_id}/team-matches",
@@ -1993,7 +1993,7 @@
           ],
           "main",
           "booster_grant",
-          "d1cbb7dd0599c175bceeb422c8198d7a304f3bef"
+          "cf4a16653e7a505ef0ce512188cff16011de29a8"
         ],
         [
           "/api/v1/internal/channel-posts/ack",
@@ -2479,7 +2479,7 @@
           ],
           "main",
           "queue_decline",
-          "0406f987868798cd2aeba62505dc59fc9fae2951"
+          "00dfb28338a935a10133c003a73b6feb6c0b4112"
         ],
         [
           "/api/v1/queue/join",
@@ -2668,7 +2668,7 @@
           ],
           "main",
           "spectate_leave",
-          "37b9400bd59bddd1ab9b288ed11f2c7ea6066946"
+          "a3728935e86b2c2bf3abf474d0470593d070cf65"
         ],
         [
           "/api/v1/spectate/participant-attest",
@@ -2936,7 +2936,7 @@
           ],
           "main",
           "admin_moderation_case_act",
-          "4313425117e47413e221063da469049983c956df"
+          "18377266a34c9c180b85110ce4aa46198ab4ec94"
         ],
         [
           "/api/v1/admin/moderation-cases/{case_id}/notified",
@@ -2981,7 +2981,7 @@
           ],
           "main",
           "internal_moderation_case_act",
-          "51347dfe52dd758a85b837b17ecc61370148ed09"
+          "69adf540555e11221c1261c5017f5eee2675ad2d"
         ],
         [
           "/api/v1/internal/moderation-cases/{case_id}/notified",
@@ -3446,7 +3446,7 @@
           ],
           "tournaments",
           "player_penalty",
-          "ecbe720f1184c751dd4a0c858398778e3f47067e"
+          "c2fd2b9a12c23eab3312dcf2ab3c8262aaabf15e"
         ],
         [
           "/api/v1/tournaments/players/{steam_id}/tournaments",
@@ -3659,7 +3659,7 @@
           ],
           "auto_logs",
           "upload_auto_log",
-          "230acde952b7157f157e34e87da5039d1a6fbaf8"
+          "db8efa4d4f41bc3bf5e593bf398c315afaab599c"
         ],
         [
           "/api/v1/internal/logs/auto/prune",
@@ -3869,7 +3869,7 @@
           ],
           "match_hold",
           "match_hold_entered",
-          "9d342bec1fdc6b753861e63b958ad46069fe3734"
+          "2e54de95e3c7e88c15c452ed14a91d8ae1b0bc41"
         ],
         [
           "/api/v1/match/hold/{hold_id}/state",
@@ -4112,7 +4112,7 @@
       [
         "main",
         "lifespan",
-        "6eb1cf99e391117fcb096a6f87fa7aa484007613"
+        "296653447e425c34a8a208cc124806ff786494b8"
       ]
     ]
   },
