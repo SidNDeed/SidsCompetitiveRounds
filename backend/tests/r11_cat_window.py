@@ -141,6 +141,12 @@ ENV_ALLOWED = {"PGCLIENTENCODING": "UTF8"}
 # rollback file at rollback_401's (one test_zz start, two _connect opens). So
 # _connect 1153 -> 1157, record 438 -> 439, run 389 -> 390, test_zz 29 -> 30;
 # every other count is unchanged.
+# Then 421_oct3b_credit_held_ffa_games.sql and its rollback file, neither
+# with a d2_seed prerequisite and neither with a resume file: the numbered
+# file at 401's cost (one run start, one record start, two _connect opens)
+# and the rollback file at rollback_401's (one test_zz start, two _connect
+# opens). So _connect 1153 -> 1157, record 438 -> 439, run 389 -> 390,
+# test_zz 29 -> 30; every other count is unchanged.
 OPEN_COUNTS = {
     "_admin": 315, "_clone_with_oid": 2, "_connect": 1157, "_fetchval": 6, "_orm": 1,
     "_probe_problems": 2, "_r10_authid_reading": 1, "_r10_inplace_bound": 1,
