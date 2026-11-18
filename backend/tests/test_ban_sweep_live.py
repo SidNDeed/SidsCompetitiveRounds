@@ -711,3 +711,216 @@ def test_s10_mutant_without_the_wall_clock_comparison_the_plant_takes_the_early_
     monkeypatch.setattr(main, "_ban_active_by_wall_clock", always_active)
     ans, acts = _with_sm(case, lambda sm: _s10(sm, PLANT_END))
     assert ans["status"] == "length_changed" and acts == ["ban_length"], (ans, acts)
+
+
+# -- F2: the void is complete for every live status, and spectating ends -------
+
+async def _team_world(sm, team_status):
+    async with sm() as db:
+        sids = {k: _sid() for k in ("x", "t1", "t2", "t3")}
+        pids = {k: await _player(db, s) for k, s in sids.items()}
+        ts = uuid.uuid4()
+        await lh._insert(db, "team_series", {"id": ts, "t1a_id": pids["x"], "t1b_id": pids["t1"],
+                                             "t2a_id": pids["t2"], "t2b_id": pids["t3"],
+                                             "status": team_status})
+        for k in ("t1", "t2", "t3"):
+            await lh._insert(db, "team_queue", {"player_id": pids[k], "status": "matched", "series_id": ts})
+            await _lease(db, pids[k], "team", ts)
+        await db.commit()
+    return sids, pids, ts
+
+
+async def _team_observe(sm, pids, ts):
+    async with sm() as db:
+        st = tuple((await db.execute(text(
+            "SELECT status, invalidation_reason FROM team_series WHERE id = :i"), {"i": ts})).first())
+        leases = {k: await main._lease_live_mode(db, pids[k]) for k in ("t1", "t2", "t3")}
+    return st, leases
+
+
+_TEAM_LIVE = ["active", "dc_incomplete", "dc_paused"]
+
+
+def test_f2_a_the_live_cases_below_are_the_live_set():
+    assert _TEAM_LIVE == sorted(
+        w for w, c in main.BAN_RECORD_STATUSES["team_series"].items() if c == "live")
+
+
+@pytest.mark.parametrize("team_status", _TEAM_LIVE)
+def test_f2_a_team_series_in_every_live_status_is_voided_and_frees_the_others(case, team_status):
+    async def body(sm):
+        sids, pids, ts = await _team_world(sm, team_status)
+        await _ban(sm, sids["x"])
+        return await _team_observe(sm, pids, ts)
+    st, leases = _with_sm(case, body)
+    assert st == ("cancelled", "member_banned"), st
+    assert leases == {k: None for k in leases}, leases
+
+
+def test_f2_a_mutant_a_status_left_out_of_the_live_set_stays_held(case, monkeypatch):
+    table = {k: dict(v) for k, v in main.BAN_RECORD_STATUSES.items()}
+    table["team_series"]["dc_incomplete"] = "terminal"
+    monkeypatch.setattr(main, "BAN_RECORD_STATUSES", table)
+
+    async def body(sm):
+        sids, pids, ts = await _team_world(sm, "dc_incomplete")
+        await _ban(sm, sids["x"])
+        return await _team_observe(sm, pids, ts)
+    st, leases = _with_sm(case, body)
+    assert st[0] == "dc_incomplete", st
+    assert any(v is not None for v in leases.values()), leases
+
+
+async def _spectate_world(sm):
+    async with sm() as db:
+        sid = _sid()
+        await _player(db, sid)
+        gid = uuid.uuid4()
+        room = "bs-room-" + uuid.uuid4().hex[:8]
+        await lh._insert(db, "spectate_games", {"id": gid, "mode": "ranked", "room_name": room,
+                                                "fighter_target": 2})
+        lid = uuid.uuid4()
+        await db.execute(text(
+            "INSERT INTO spectate_leases (id, token_hash, game_id, spectator_steam_id,"
+            " join_expires_at, heartbeat_expires_at)"
+            " VALUES (:i, :th, :g, :s, NOW() + INTERVAL '1 minute', NOW() + INTERVAL '1 minute')"),
+            {"i": lid, "th": uuid.uuid4().hex, "g": gid, "s": sid})
+        await db.commit()
+    return sid, lid, room
+
+
+async def _spectate_observe(sm, sid, lid, room):
+    async with sm() as db:
+        revoked = (await db.execute(text(
+            "SELECT revoked_at IS NOT NULL FROM spectate_leases WHERE id = :i"), {"i": lid})).scalar()
+        tomb = (await db.execute(text(
+            "SELECT count(*) FROM spectate_drain_tombstones WHERE room_name = :r AND ghost_steam_id = :s"),
+            {"r": room, "s": sid})).scalar()
+    return revoked, tomb
+
+
+def test_f2_d_a_ban_ends_the_accounts_spectate_lease_as_the_leave_does(case):
+    async def body(sm):
+        sid, lid, room = await _spectate_world(sm)
+        await _ban(sm, sid)
+        banned = await _spectate_observe(sm, sid, lid, room)
+        # the twin: the same world ended by the spectate leave route
+        sid2, lid2, room2 = await _spectate_world(sm)
+        async with sm() as db:
+            token = await _session(db, sid2)
+            await db.commit()
+        async with sm() as db:
+            await _call(main.spectate_leave,
+                        req=schemas.SpectateLeaseBody(steam_id=sid2, lease_id=str(lid2)),
+                        request=_req("/api/v1/spectate/leave", token), db=db)
+        left = await _spectate_observe(sm, sid2, lid2, room2)
+        return banned, left
+    banned, left = _with_sm(case, body)
+    assert banned == (True, 1), banned
+    assert banned == left, (banned, left)
+
+
+def test_f2_d_mutant_without_the_spectate_end_the_lease_outlives_the_ban(case, monkeypatch):
+    async def nothing(db, steam_id, lease_id=None):
+        return None
+    monkeypatch.setattr(main, "_spectate_leave_rows", nothing)
+
+    async def body(sm):
+        sid, lid, room = await _spectate_world(sm)
+        await _ban(sm, sid)
+        return await _spectate_observe(sm, sid, lid, room)
+    assert _with_sm(case, body) == (False, 0)
+
+
+# -- F1: the check lives in the writer -----------------------------------------
+
+def _ovt_report(series_id, solo, a, b, reporter):
+    return schemas.OvtMatchReport(
+        series_id=str(series_id),
+        solo=schemas.PlayerMatchData(steam_id=solo, display_name="s"),
+        duo_a=schemas.PlayerMatchData(steam_id=a, display_name="a"),
+        duo_b=schemas.PlayerMatchData(steam_id=b, display_name="b"),
+        solo_rounds_won=3, duo_rounds_won=1, winner_side=1,
+        photon_room_id="bs_ovt_" + uuid.uuid4().hex[:8], reported_by_steam_id=reporter)
+
+
+async def _ovt_world(sm, status="active", reason=None):
+    async with sm() as db:
+        sids = [_sid() for _ in range(3)]
+        pids = [await _player(db, s) for s in sids]
+        os_id = uuid.uuid4()
+        row = {"id": os_id, "solo_id": pids[0], "duo_a_id": pids[1], "duo_b_id": pids[2],
+               "status": status}
+        if reason is not None:
+            row["invalidation_reason"] = reason
+        await lh._insert(db, "ovt_series", row)
+        await db.commit()
+    return sids, pids, os_id
+
+
+async def _ovt_rows(sm, os_id):
+    async with sm() as db:
+        return (await db.execute(text(
+            "SELECT count(*) FROM ovt_matches WHERE series_id = :s"), {"s": os_id})).scalar()
+
+
+def _permanent(exc):
+    import match_report_window as mrw
+    return isinstance(exc, mrw.PermanentReportRefusal)
+
+
+def test_f1_a_journaled_1v2_settle_naming_a_banned_account_is_refused_for_good(case):
+    """The janitor's path: the settle body called in a report window reads the
+    ban itself and refuses PERMANENTLY, so the window closes as refused."""
+    async def body(sm):
+        sids, pids, os_id = await _ovt_world(sm)
+        await _ban(sm, sids[1])
+        async with sm() as db:
+            try:
+                await main._settle_ovt_report(db, _ovt_report(os_id, *sids, sids[0]), in_window=True)
+                got = "admitted"
+            except HTTPException as e:
+                got = (e.status_code, str(e.detail), _permanent(e))
+            await db.rollback()
+        return got, await _ovt_rows(sm, os_id)
+    got, rows = _with_sm(case, body)
+    assert got == (409, "Banned: participant", True), got
+    assert rows == 0
+
+
+def test_f1_b_a_series_the_ban_ended_pays_nothing_after_the_ban_has_run_out(case):
+    async def body(sm):
+        sids, pids, os_id = await _ovt_world(sm, "canceled", "member_banned")
+        async with sm() as db:
+            try:
+                await main._settle_ovt_report(db, _ovt_report(os_id, *sids, sids[0]), in_window=True)
+                got = "admitted"
+            except HTTPException as e:
+                got = (e.status_code, str(e.detail), _permanent(e))
+            await db.rollback()
+        return got, await _ovt_rows(sm, os_id)
+    got, rows = _with_sm(case, body)
+    assert got == (409, "series_ended_by_ban", True), got
+    assert rows == 0
+
+
+def test_f1_mutant_without_the_writers_check_the_journaled_settle_passes_the_ban(case, monkeypatch):
+    async def nothing(db, steam_ids, reporter, *, in_window=False):
+        return None
+    monkeypatch.setattr(main, "_settle_writer_ban_check", nothing)
+
+    async def body(sm):
+        sids, pids, os_id = await _ovt_world(sm)
+        await _ban(sm, sids[1])
+        async with sm() as db:
+            try:
+                await main._settle_ovt_report(db, _ovt_report(os_id, *sids, sids[0]), in_window=True)
+                got = "admitted"
+            except HTTPException as e:
+                got = (e.status_code, str(e.detail))
+            await db.rollback()
+        return got
+    got = _with_sm(case, body)
+    # past the writer's check the settle goes on to its own validations;
+    # what matters is that the ban no longer stops it
+    assert got == "admitted" or not str(got[1]).startswith("Banned"), got

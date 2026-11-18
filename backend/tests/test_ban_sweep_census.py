@@ -455,3 +455,71 @@ def test_negative_control_a_stand_in_without_banned_ok_is_named():
                          "main._check_steam_session = stub2\n"),
     }
     assert _stubs_without_banned_ok(planted) == [("planted_a.py", "stub")]
+
+
+# -- F2 a: every status a record table is written with is classed once --------
+
+_RECORD_TABLES = ("ffa_lobbies", "ranked_series", "team_series", "ovt_series")
+
+
+def _written_statuses(sources):
+    """{table: {status word}}: each word an UPDATE ... SET status = '<w>' or an
+    INSERT INTO <table> statement's literal writes, over the api modules'
+    string constants, plus each ORM model's status default."""
+    import re as _re
+    out = {t: set() for t in _RECORD_TABLES}
+    for src in sources.values():
+        for n in ast.walk(ast.parse(src)):
+            if not (isinstance(n, ast.Constant) and isinstance(n.value, str)):
+                continue
+            for t in _RECORD_TABLES:
+                for m in _re.finditer(r"UPDATE\s+" + t + r"\b(?:\s+\w+)?\s+SET\b(.*?)(?:\bWHERE\b|$)",
+                                      n.value, _re.S | _re.I):
+                    out[t].update(_re.findall(r"\bstatus\s*=\s*'(\w+)'", m.group(1)))
+                for m in _re.finditer(r"INSERT\s+INTO\s+" + t + r"\b(.*?)(?:;|$)", n.value, _re.S | _re.I):
+                    out[t].update(_re.findall(r"'(\w+)'", m.group(1)))
+    import models
+    for cls in vars(models).values():
+        tbl = getattr(cls, "__tablename__", None)
+        if tbl in out and "status" in getattr(cls, "__table__").c:
+            col = cls.__table__.c.status
+            for d in (getattr(col.default, "arg", None),
+                      getattr(getattr(col.server_default, "arg", None), "text", None)):
+                if isinstance(d, str):
+                    out[tbl].add(d.strip("'"))
+    return out
+
+
+def _api_sources():
+    out = {}
+    for fname in sorted(os.listdir(API)):
+        if fname.endswith(".py"):
+            with open(os.path.join(API, fname), encoding="utf-8") as fh:
+                out[fname] = fh.read()
+    return out
+
+
+def test_every_written_record_status_is_classed_live_or_terminal():
+    written = _written_statuses(_api_sources())
+    classes = main.BAN_RECORD_STATUSES
+    assert set(classes) == set(_RECORD_TABLES)
+    bad = [f"{t}: '{w}' is written and BAN_RECORD_STATUSES does not class it"
+           for t in _RECORD_TABLES for w in sorted(written[t] - set(classes[t]))]
+    assert bad == [], "\n".join(bad)
+    assert all(c in ("live", "terminal", "open_lobby") for t in classes for c in classes[t].values())
+    assert all(written[t] for t in _RECORD_TABLES), written     # the collector saw each table
+
+
+def test_negative_control_a_new_status_word_turns_the_status_census_red():
+    planted = {"planted.py": "X = \"UPDATE team_series SET status = 'parked_forever' WHERE id = :i\""}
+    written = _written_statuses(planted)
+    assert "parked_forever" in written["team_series"]
+    assert "parked_forever" not in main.BAN_RECORD_STATUSES["team_series"]
+
+
+def test_the_void_discovery_reads_the_live_statuses_of_every_table():
+    import inspect
+    src = inspect.getsource(main._ban_void_lock)
+    for t in _RECORD_TABLES:
+        assert f'_ban_live_statuses_sql("{t}")' in src, t
+    assert "status = 'active'" not in src and "'dc_paused'" not in src

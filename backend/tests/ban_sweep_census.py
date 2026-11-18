@@ -58,6 +58,8 @@ PRECEDENCE = (BAN, STRICT, ADMIN, SOFT, INTERNAL)
 RAISING_CALLS = {
     "_check_ban_or_raise": BAN,
     "_ban_gate_or_raise": BAN,
+    "_ban_lock_and_gate": BAN,
+    "_settle_writer_ban_check": BAN,
     "_ban_gate_any_or_raise": BAN,
     "_require_admin": ADMIN,
     "_require_internal_key": INTERNAL,
@@ -109,7 +111,7 @@ STRICT_EXITS = {
 # Every call that reads an account's ban for a refusal.
 BAN_READS = frozenset({
     "_is_banned", "_ban_gate_or_raise", "_ban_gate_any_or_raise", "_check_ban_or_raise",
-    "_is_banned_via_session", "_active_ban_details",
+    "_is_banned_via_session", "_active_ban_details", "_ban_lock_and_gate", "_settle_writer_ban_check",
 })
 
 
