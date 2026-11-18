@@ -2526,6 +2526,20 @@ async def upload_auto_log(request: Request, db: AsyncSession = Depends(get_db)):
             # volume. A refusal here has a blob to discard, and discards it the
             # way every refusal after the write does: transaction ended FIRST,
             # then the cleanup, answered as a sentence and never raised.
+            # Bans part 2a (F4): the ban is read again under the identity lock
+            # (shared), the FIRST lock this transaction takes, so a ban that
+            # commits after T1's read does not let the upload stand. A refusal
+            # discards the stored blob the way every refusal after the write
+            # does: the transaction ended first, then the cleanup.
+            from main import _ban_lock_and_gate   # late import: main imports this module
+            try:
+                await _ban_lock_and_gate(db, [req.steam_id], request)
+            except HTTPException:
+                await _end_transaction(db)
+                outcome = await _discard_for_refusal(own)
+                print(f"[AUTO-LOG] refused 409 for {report_id}: an active ban read "
+                      f"in the writing transaction; {outcome}")
+                raise
             try:
                 count, oldest = await asyncio.wait_for(
                     _lock_and_count(db, req.steam_id), _span_budget(span_deadline))

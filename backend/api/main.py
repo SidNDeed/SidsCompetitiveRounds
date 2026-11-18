@@ -21080,8 +21080,9 @@ async def booster_grant(
     )).scalar_one_or_none()
     if player is None:
         return {"status": "not_linked", "discord_id": discord_id}
-    # Bans part 2a (S6): no gold is granted to an actively banned player.
-    await _ban_gate_or_raise(db, player.steam_id)
+    # Bans part 2a (S6, F4): no gold is granted to an actively banned player.
+    # The check and the grant hold one lock: the identity lock, shared, first.
+    await _ban_lock_and_gate(db, [player.steam_id])
     await _assert_no_service_subject(db, affected_player_ids=[player.id])
     existing = (await db.execute(
         select(BoosterGrant).where(BoosterGrant.discord_id == discord_id,
@@ -48941,6 +48942,14 @@ async def submit_bug_report(req: BugReportRequest, request: Request, db: AsyncSe
         # before this point needs the row, and an object read in a
         # transaction that has since ended is a snapshot this one would be
         # acting on (#208).
+        #
+        # Bans part 2a (F4): the ban is read again HERE, under the identity
+        # lock (shared), the first lock this transaction takes: T1's read is
+        # a transaction ago, and a ban that commits between the two must not
+        # let the report stand. A refusal commits nothing, so an attachment
+        # stored above stays under its marker and the orphan sweep removes it,
+        # as for every T2 that does not commit.
+        await _ban_lock_and_gate(db, [req.steam_id], request)
         player = await db.execute(select(Player).where(Player.steam_id == req.steam_id))
         player = player.scalar_one_or_none()
         if player:
@@ -50105,6 +50114,83 @@ async def _ban_gate_any_or_raise(db: AsyncSession, actor: str, others, request=N
     raise HTTPException(status_code=409, detail="Banned: participant")
 
 
+async def _ban_lock_and_gate(db: AsyncSession, steam_ids, request=None, actor=None) -> None:
+    """Bans part 2a (F4, lesson 208): check and write under ONE lock. Takes the
+    identity lock the ban core takes (pg_advisory_xact_lock(hashtext(steam_id)),
+    exclusive in _apply_ban_core) in SHARED mode for every id, in id order, then
+    reads the ban of every id and refuses (409, one [BAN-GATE] line): a ban
+    that commits after this read waits for this transaction, and a ban that
+    committed before it is read here. `actor` answers with its own reason; any
+    other id answers "Banned: participant".
+
+    LOCK ORDER. The ban core takes the target's identity lock FIRST and only
+    then locks rows (ffa_lobbies -> series -> team_lobbies -> ovt_lobbies ->
+    queue rows -> leases). So this must be the FIRST statement that locks in
+    the transaction that writes: a caller that took a row lock before it could
+    hold a row the ban core waits for while waiting on the ban core's identity
+    lock. Shared locks of several ids are taken in id order, so two callers
+    never wait on each other. A caller that already holds the exclusive
+    identity lock of an id in this transaction takes the shared one at once
+    (both are this session's). Does NOT commit."""
+    ids = sorted({str(s) for s in (steam_ids or ()) if s})
+    for sid in ids:
+        await db.execute(text("SELECT pg_advisory_xact_lock_shared(hashtext(CAST(:sid AS text)))"),
+                         {"sid": sid})
+    if not ids:
+        return
+    if actor is None and len(ids) == 1:
+        await _ban_gate_or_raise(db, ids[0], request)
+    else:
+        await _ban_gate_any_or_raise(db, actor, ids, request)
+
+
+# Bans part 2a (F1 b): the ONE place that says which records no writer may pay.
+# A record the ban void ended carries one of these invalidation reasons
+# (_ban_void_apply writes them); it stays ended for every writer -- a report,
+# a journaled window, a horizon settle, a replay, an admin completion -- also
+# after the ban has run out.
+BAN_VOID_REASONS = frozenset({"member_banned", "member_banned_played"})
+
+
+def _record_ended_by_ban(row) -> bool:
+    """Whether a series or lobby row (a mapping with invalidation_reason) was
+    ended by the ban void, so that no writer may record or pay on it."""
+    try:
+        return row["invalidation_reason"] in BAN_VOID_REASONS
+    except (KeyError, TypeError):
+        return False
+
+
+def _ban_writer_refusal(exc: HTTPException, in_window: bool):
+    """A writer's ban refusal: inside a report window it is PERMANENT, so the
+    journaled window closes as refused and the janitor does not take it up
+    again; elsewhere the HTTP refusal itself."""
+    if in_window:
+        return _mrw_mod().PermanentReportRefusal(exc)
+    return exc
+
+
+async def _settle_writer_ban_check(db: AsyncSession, steam_ids, reporter, *,
+                                   in_window: bool = False) -> None:
+    """Bans part 2a (F1 a): a settle body's own ban check, whatever path
+    reached it (the route, the report window's janitor, a replay). Under the
+    identity locks of every account it names (_ban_lock_and_gate, shared, in
+    id order) and BEFORE the settle locks its series row, so a ban that
+    commits after this read waits for the settle to commit."""
+    try:
+        await _ban_lock_and_gate(db, steam_ids, None, actor=reporter)
+    except HTTPException as exc:
+        raise _ban_writer_refusal(exc, in_window) from exc
+
+
+def _refuse_record_ended_by_ban(row, in_window: bool) -> None:
+    """Refuse a write onto a record the ban void ended (F1 b)."""
+    if _record_ended_by_ban(row):
+        _ban_gate_refused()
+        raise _ban_writer_refusal(
+            HTTPException(status_code=409, detail="series_ended_by_ban"), in_window)
+
+
 async def _is_banned_via_session(steam_id: str) -> bool:
     """Standalone version for code paths that don't have a Depends-injected session
     (e.g., the chat WebSocket handler). Opens its own short-lived session."""
@@ -50407,13 +50493,37 @@ async def _ban_active_by_wall_clock(db: AsyncSession, ban_id) -> bool:
     ), {"wall": wall, "id": ban_id})).scalar())
 
 
+# Bans part 2a (F2, BAN-R4/R5/R22): every status each record table is written
+# with, classed ONCE. "live": the record still holds its members, and a ban of
+# any member ends it as void (_ban_void_lock/_ban_void_apply read this table).
+# "open_lobby": a lobby that has not started; the ban removes the account as an
+# ordinary leave does (BAN-R21). "terminal": the record holds nobody. A status
+# word the code writes to one of these tables and this table does not class
+# fails test_ban_sweep_census's status census.
+BAN_RECORD_STATUSES = {
+    "ffa_lobbies": {"open": "open_lobby", "active": "live",
+                    "canceled": "terminal", "completed": "terminal"},
+    "ranked_series": {"active": "live", "completed": "terminal", "abandoned": "terminal"},
+    "team_series": {"active": "live", "dc_paused": "live", "dc_incomplete": "live",
+                    "completed": "terminal", "canceled": "terminal", "cancelled": "terminal"},
+    "ovt_series": {"active": "live", "completed": "terminal", "canceled": "terminal"},
+}
+
+
+def _ban_live_statuses_sql(table: str) -> str:
+    """The table's live statuses as a SQL list literal, e.g. ('active', 'dc_paused')."""
+    live = sorted(w for w, c in BAN_RECORD_STATUSES[table].items() if c == "live")
+    assert live and all(w.replace("_", "").isalnum() for w in live)
+    return "(" + ", ".join("'" + w + "'" for w in live) + ")"
+
+
 async def _ban_void_lock(db: AsyncSession, pid) -> dict:
     """Bans part 2a (S4, BAN-R5), first half: find every open series and
     started lobby the account `pid` is in and lock each record. Membership is
     read from each record's frozen roster, never from queue rows (a repeat
     ban finds the rows gone): a 1v1 ranked_series 'active', an ffa_lobbies
-    row 'active', a team_series 'active' or 'dc_paused', an ovt_series
-    'active'. Each is locked FOR NO KEY UPDATE in id order, table by table
+    row, a team_series or an ovt_series in a status BAN_RECORD_STATUSES
+    classes "live". Each is locked FOR NO KEY UPDATE in id order, table by table
     in account deletion's order (FFA lobbies, then the series), under the
     target's identity lock. _apply_ban_core calls this after the FFA
     open-lobby lock and before the 2v2 and 1v2 open-lobby locks, so the ban
@@ -50422,17 +50532,18 @@ async def _ban_void_lock(db: AsyncSession, pid) -> dict:
     p = {"pid": pid}
     found = {
         "ffa": (await db.execute(text(
-            "SELECT id FROM ffa_lobbies WHERE status = 'active' AND :pid = ANY(member_ids)"),
+            "SELECT id FROM ffa_lobbies WHERE status IN " + _ban_live_statuses_sql("ffa_lobbies")
+            + " AND :pid = ANY(member_ids)"),
             p)).scalars().all(),
         "ranked": (await db.execute(text(
-            "SELECT id FROM ranked_series WHERE status = 'active'"
-            " AND (player1_id = :pid OR player2_id = :pid)"), p)).scalars().all(),
+            "SELECT id FROM ranked_series WHERE status IN " + _ban_live_statuses_sql("ranked_series")
+            + " AND (player1_id = :pid OR player2_id = :pid)"), p)).scalars().all(),
         "team": (await db.execute(text(
-            "SELECT id FROM team_series WHERE status IN ('active', 'dc_paused')"
-            " AND :pid IN (t1a_id, t1b_id, t2a_id, t2b_id)"), p)).scalars().all(),
+            "SELECT id FROM team_series WHERE status IN " + _ban_live_statuses_sql("team_series")
+            + " AND :pid IN (t1a_id, t1b_id, t2a_id, t2b_id)"), p)).scalars().all(),
         "ovt": (await db.execute(text(
-            "SELECT id FROM ovt_series WHERE status = 'active'"
-            " AND :pid IN (solo_id, duo_a_id, duo_b_id)"), p)).scalars().all(),
+            "SELECT id FROM ovt_series WHERE status IN " + _ban_live_statuses_sql("ovt_series")
+            + " AND :pid IN (solo_id, duo_a_id, duo_b_id)"), p)).scalars().all(),
     }
     for _key, _tbl in (("ffa", "ffa_lobbies"), ("ranked", "ranked_series"),
                        ("team", "team_series"), ("ovt", "ovt_series")):
@@ -50518,10 +50629,12 @@ async def _ban_void_apply(db: AsyncSession, pid, found: dict) -> None:
     for _mode, _cancel in (
             ("team", "UPDATE team_series SET status='cancelled', invalidated_at=NOW(),"
                      " invalidation_reason='member_banned'"
-                     " WHERE id=:sid AND status IN ('active', 'dc_paused') RETURNING id"),
+                     " WHERE id=:sid AND status IN " + _ban_live_statuses_sql("team_series")
+                     + " RETURNING id"),
             ("ovt", "UPDATE ovt_series SET status='canceled', invalidated_at=NOW(),"
                     " invalidation_reason='member_banned'"
-                    " WHERE id=:sid AND status='active' RETURNING id")):
+                    " WHERE id=:sid AND status IN " + _ban_live_statuses_sql("ovt_series")
+                    + " RETURNING id")):
         for _sid in found[_mode]:
             if (await db.execute(text(_cancel), {"sid": _sid})).scalar() is None:
                 continue
@@ -50679,6 +50792,10 @@ async def _apply_ban_core(db: AsyncSession, *, admin_steam_id: str, target_steam
                 _ban_void_found = await _ban_void_lock(db, _bpid)
         # ...and ended as void, before the queue rows below.
         await _ban_void_apply(db, _bpid, _ban_void_found)
+        # The account's spectate leases end as the spectate leave ends one
+        # (F2 d): drain tombstone, then the lease revoked, through the one
+        # helper the leave route uses, so the seat is free at once.
+        await _spectate_leave_rows(db, target_steam_id)
         # ALL-status row delete (round-18 find 1). Round 15's pair-DISSOLUTION
         # branch was racy because it did partner WRITES from a status-filtered
         # snapshot; a bare unconditional DELETE of the banned player's own
@@ -54034,11 +54151,14 @@ async def admin_resolve_team_series(
     except (ValueError, TypeError):
         raise HTTPException(400, "Invalid series_id")
     srow = (await db.execute(
-        text("SELECT status, t1a_id, t1b_id, t2a_id, t2b_id "
+        text("SELECT status, invalidation_reason, t1a_id, t1b_id, t2a_id, t2b_id "
              "FROM team_series WHERE id=:sid FOR UPDATE"), {"sid": sid_uuid},
     )).mappings().first()
     if srow is None:
         raise HTTPException(404, "Series not found")
+    # Bans part 2a (F1 b): a series the ban void ended is never completed.
+    if _record_ended_by_ban(srow):
+        return {"status": "noop", "reason": "ended by a ban"}
     # Guard against re-resolution: a completed OR already-voided series must not be
     # re-paid (void→complete would otherwise double-credit). The helper has its own
     # status guard too, but bail early for a clean response.
@@ -57536,6 +57656,9 @@ async def _settle_ovt_report(db: AsyncSession, report: OvtMatchReport, *,
     steams = {report.solo.steam_id, report.duo_a.steam_id, report.duo_b.steam_id}
     if len(steams) != 3:
         raise HTTPException(400, "Need three distinct players")
+    # Bans part 2a (F1): the writer's own check, under the identity locks,
+    # before the series row lock below.
+    await _settle_writer_ban_check(db, steams, report.reported_by_steam_id, in_window=in_window)
     await _assert_no_service_subject(db, affected_steam_ids=steams)
 
     prows = (await db.execute(
@@ -57573,6 +57696,8 @@ async def _settle_ovt_report(db: AsyncSession, report: OvtMatchReport, *,
     ), {"sid": series_uuid})).mappings().first()
     if series is None:
         raise HTTPException(404, "Series not found")
+    # Bans part 2a (F1 b): a series the ban void ended records and pays nothing.
+    _refuse_record_ended_by_ban(series, in_window)
     await _assert_no_service_subject(
         db, affected_player_ids=[series["solo_id"], series["duo_a_id"], series["duo_b_id"]])
     # Round-20 find 4: bind the report to the sitting's issued room. Report
@@ -73271,6 +73396,9 @@ async def _settle_team_report(db: AsyncSession, report: TeamMatchReport, *,
     steams = {report.t1a.steam_id, report.t1b.steam_id, report.t2a.steam_id, report.t2b.steam_id}
     if len(steams) != 4:
         raise HTTPException(400, "All four players must be distinct")
+    # Bans part 2a (F1): the writer's own check, under the identity locks,
+    # before the series row lock below.
+    await _settle_writer_ban_check(db, steams, report.reported_by_steam_id, in_window=in_window)
     await _assert_no_service_subject(db, affected_steam_ids=steams)
     if report.t1_rounds_won == report.t2_rounds_won:
         raise HTTPException(400, "Match must have a winner")
@@ -73308,6 +73436,8 @@ async def _settle_team_report(db: AsyncSession, report: TeamMatchReport, *,
         # incident class (a live series cancelled mid-game) always leaves the
         # row behind, so nothing recoverable is lost by rejecting outright.
         raise HTTPException(404, "team_series not found")
+    # Bans part 2a (F1 b): a series the ban void ended records and pays nothing.
+    _refuse_record_ended_by_ban(series, in_window)
     await _assert_no_service_subject(
         db, affected_player_ids=[series["t1a_id"], series["t1b_id"],
                                  series["t2a_id"], series["t2b_id"]])
@@ -79853,26 +79983,35 @@ async def spectate_heartbeat(req: SpectateLeaseBody, request: Request,
     return {"status": "ok"}
 
 
-@app.post("/api/v1/spectate/leave", tags=["Spectate"])
-async def spectate_leave(req: SpectateLeaseBody, request: Request,
-                         db: AsyncSession = Depends(get_db)):
-    if not await _strict_steam_session_ok(request, req.steam_id, db):
-        raise HTTPException(status_code=401, detail="session_required")
-    # Leave is intent, not departure proof. Enter durable drain first; only a
-    # later complete master inventory may clear it.
+async def _spectate_leave_rows(db: AsyncSession, steam_id: str, lease_id=None) -> None:
+    """The spectate leave's writes, for one lease of `steam_id` (`lease_id`) or,
+    with None, for every lease of it not yet revoked (the ban, F2 d): enter
+    durable drain first (a tombstone per game), then revoke the lease, so the
+    seat is free at once. Leave is intent, not departure proof; only a later
+    complete master inventory may clear the drain. Does NOT commit."""
+    pick = ("l.id = CAST(:lid AS UUID)" if lease_id is not None else "l.revoked_at IS NULL")
+    params = {"sid": steam_id, **({"lid": lease_id} if lease_id is not None else {})}
     await db.execute(text("""
         INSERT INTO spectate_drain_tombstones
             (room_name, region, ghost_steam_id, created_at)
         SELECT g.room_name, COALESCE(g.room_region, ''),
                l.spectator_steam_id, clock_timestamp()
           FROM spectate_leases l JOIN spectate_games g ON g.id = l.game_id
-         WHERE l.id = CAST(:lid AS UUID) AND l.spectator_steam_id = :sid
+         WHERE """ + pick + """ AND l.spectator_steam_id = :sid
         ON CONFLICT (room_name, region, ghost_steam_id) DO NOTHING
-    """), {"lid": req.lease_id, "sid": req.steam_id})
+    """), params)
     await db.execute(text("""
-        UPDATE spectate_leases SET revoked_at = COALESCE(revoked_at, clock_timestamp())
-         WHERE id = CAST(:lid AS UUID) AND spectator_steam_id = :sid
-    """), {"lid": req.lease_id, "sid": req.steam_id})
+        UPDATE spectate_leases l SET revoked_at = COALESCE(l.revoked_at, clock_timestamp())
+         WHERE """ + pick + """ AND l.spectator_steam_id = :sid
+    """), params)
+
+
+@app.post("/api/v1/spectate/leave", tags=["Spectate"])
+async def spectate_leave(req: SpectateLeaseBody, request: Request,
+                         db: AsyncSession = Depends(get_db)):
+    if not await _strict_steam_session_ok(request, req.steam_id, db):
+        raise HTTPException(status_code=401, detail="session_required")
+    await _spectate_leave_rows(db, req.steam_id, req.lease_id)
     await db.commit()
     return {"status": "ok"}
 
