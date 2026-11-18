@@ -88,7 +88,7 @@
           ],
           "main",
           "admin_ban",
-          "7db5e1c509a267c247daf0b50711b1c2245d0312"
+          "c96b801abc24a099e46ffd4b55c3378fb1528cf3"
         ],
         [
           "/api/v1/admin/banned-users",
@@ -2936,7 +2936,7 @@
           ],
           "main",
           "admin_moderation_case_act",
-          "bd2b30b54cca89615ca16bf8f69c64b2cf3a855d"
+          "4313425117e47413e221063da469049983c956df"
         ],
         [
           "/api/v1/admin/moderation-cases/{case_id}/notified",
@@ -2981,7 +2981,7 @@
           ],
           "main",
           "internal_moderation_case_act",
-          "30756ff1e7e116751aac6c8c13414ee980c81866"
+          "51347dfe52dd758a85b837b17ecc61370148ed09"
         ],
         [
           "/api/v1/internal/moderation-cases/{case_id}/notified",
@@ -4112,7 +4112,7 @@
       [
         "main",
         "lifespan",
-        "0f246ada7371f787d5558b45ba9d2ec05dc13c19"
+        "6eb1cf99e391117fcb096a6f87fa7aa484007613"
       ]
     ]
   },
