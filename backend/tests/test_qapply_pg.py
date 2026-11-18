@@ -204,10 +204,10 @@ async def other_game(conn, pids, *, at, ranked=True, invalidated=False, before=N
     ]
     for i, p in enumerate(pids):
         stmts.append((
-            "INSERT INTO ffa_match_players (match_id, player_id, slot, rounds_won, points_total, kills,"
-            "  rating_before, rating_after)"
-            " VALUES (CAST(:m AS uuid), CAST(:p AS uuid), :s, :r, :pt, 0, :b, :a)",
-            {"m": str(mid), "p": str(p), "s": i, "r": 5 if i == 0 else 0, "pt": 10 - i,
+            "INSERT INTO ffa_match_players (match_id, player_id, slot, placement, rounds_won, points_total,"
+            "  kills, rating_before, rating_after)"
+            " VALUES (CAST(:m AS uuid), CAST(:p AS uuid), :s, :pl, :r, :pt, 0, :b, :a)",
+            {"m": str(mid), "p": str(p), "s": i, "pl": i + 1, "r": 5 if i == 0 else 0, "pt": 10 - i,
              "b": None if before is None else before[i], "a": None if after is None else after[i]}))
     if hasattr(conn, "fetchval"):
         for sql, args in stmts:
@@ -348,7 +348,7 @@ def test_a2_a_settle_committed_while_accept_waits_blocks_it(monkeypatch):
             await other_game(s, [lob.pids[0]], at=await now(env))
             await s.commit()
         ans = await asyncio.wait_for(task, 15)
-        assert ans.status == 409 and ans.detail == T["later"].format(n=1), ("A2 refused", ans)
+        assert ans.status == 409 and ans.body == T["later"].format(n=1), ("A2 refused", ans)
         after = await tables(env)
         assert {k: v for k, v in after.items() if k not in ("matches", "seats", "lobbies")} == \
             {k: v for k, v in before.items() if k not in ("matches", "seats", "lobbies")}, ("A2 nothing written",)
@@ -365,7 +365,7 @@ def test_a3_a_rating_changed_outside_settlement_blocks_accept(monkeypatch):
                                lob.pids[0])
         before = await tables(env)
         ans = await accept(env, qid)
-        assert ans.status == 409 and ans.detail == T["rating"].format(n=1), ("A3 refused", ans)
+        assert ans.status == 409 and ans.body == T["rating"].format(n=1), ("A3 refused", ans)
         assert await tables(env) == before, "A3 nothing written"
     run_env(monkeypatch, body)
 
@@ -384,7 +384,7 @@ def test_a4_a_later_casual_game_and_a_later_invalidated_game_each_block(monkeypa
                 await later_for(env, lob, invalidated=True, before=[r], after=[r])
             before = await tables(env)
             ans = await accept(env, qid)
-            assert ans.status == 409 and ans.detail == T["later"].format(n=1), ("A4 " + kind, ans)
+            assert ans.status == 409 and ans.body == T["later"].format(n=1), ("A4 " + kind, ans)
             assert await tables(env) == before, ("A4 nothing written", kind)
     run_env(monkeypatch, body)
 
@@ -398,7 +398,7 @@ def test_a5_a_game_after_the_lobbys_previous_game_blocks_accept(monkeypatch):
         await set_received(env, qid, t + _dt.timedelta(seconds=300))
         await later_for(env, lob, at=t + _dt.timedelta(seconds=100), ranked=False)
         ans = await accept(env, qid)
-        assert ans.status == 409 and ans.detail == T["later"].format(n=1), ("A5 refused", ans)
+        assert ans.status == 409 and ans.body == T["later"].format(n=1), ("A5 refused", ans)
         assert await game_rows(env, lob, 2) == 0
     run_env(monkeypatch, body)
 
@@ -412,8 +412,8 @@ def test_a6_game_3_before_game_2_names_game_2_then_both_apply_in_order(monkeypat
         q2 = await held(env, lob, 2)
         q3 = await held(env, lob, 3)
         ans = await accept(env, q3)
-        assert ans.status == 409 and ans.detail == T["ahead"].format(tail=3, next=2), ("A6 names game 2", ans)
-        assert "Apply game 2 of this lobby first." in ans.detail
+        assert ans.status == 409 and ans.body == T["ahead"].format(tail=3, next=2), ("A6 names game 2", ans)
+        assert "Apply game 2 of this lobby first." in ans.body
         assert (await accept(env, q2)).status == 200, "A6 game 2 applies"
         ans = await accept(env, q3)
         assert ans.status == 200, ("A6 game 3 applies", ans)
@@ -440,14 +440,14 @@ def test_a7_every_word_outside_the_set_and_a_team_row_are_refused_by_both(monkey
                                    uuid.UUID(qid), word)
             for act in (accept, credit):
                 ans = await act(env, qid)
-                assert ans.status == 409 and ans.detail == T["word"], ("A7", word, act.__name__, ans)
+                assert ans.status == 409 and ans.body == T["word"], ("A7", word, act.__name__, ans)
             assert await tables(env) == before, ("A7 nothing written", word)
         for word in TEAM_WORDS:
             await env.conn.execute("UPDATE match_report_quarantine SET mode = 'team', reason = $2 WHERE id = $1",
                                    uuid.UUID(qid), word)
             for act in (accept, credit):
                 ans = await act(env, qid)
-                assert ans.status == 409 and ans.detail == T["team"], ("A7 team", word, act.__name__, ans)
+                assert ans.status == 409 and ans.body == T["team"], ("A7 team", word, act.__name__, ans)
         assert await tables(env) == before, "A7 nothing written (team)"
     run_env(monkeypatch, body)
 
@@ -501,8 +501,9 @@ async def _a8_make(env, lob, qid, how):
             "  clock_timestamp(), 2)", mid, lob.lid, room, lob.pids[1])
         for i, p in enumerate(lob.pids):
             await env.conn.execute(
-                "INSERT INTO ffa_match_players (match_id, player_id, slot, rounds_won, points_total, kills)"
-                " VALUES ($1, $2, $3, $4, $5, 0)", mid, p, i, 5 if i == 1 else 0, 9 - i)
+                "INSERT INTO ffa_match_players (match_id, player_id, slot, placement, rounds_won, points_total,"
+                " kills) VALUES ($1, $2, $3, $4, $5, $6, 0)", mid, p, i, 1 if i == 1 else (2 if i == 0 else i + 1),
+                5 if i == 1 else 0, 9 - i)
 
 
 @pytest.mark.parametrize("arm", A8_ARMS, ids=[a[1] for a in A8_ARMS])
@@ -514,12 +515,13 @@ def test_a8_each_body_refusal_answers_its_status_and_keeps_the_row_pending(arm, 
         await _a8_make(env, lob, qid, how)
         n_held = await env.conn.fetchval("SELECT count(*) FROM match_report_quarantine")
         row = dict(await env.conn.fetchrow("SELECT * FROM match_report_quarantine WHERE id = $1", uuid.UUID(qid)))
+        before = len(env.lines)   # the setup's own network report was captured (its line stays)
         ans = await accept(env, qid)
-        assert (ans.status, ans.detail) == (status, T[key]), ("A8 " + name, ans)
+        assert (ans.status, ans.body) == (status, T[key]), ("A8 " + name, ans)
         assert await env.conn.fetchval("SELECT count(*) FROM match_report_quarantine") == n_held, ("A8 no row made",)
         assert dict(await env.conn.fetchrow("SELECT * FROM match_report_quarantine WHERE id = $1",
                                             uuid.UUID(qid))) == row, ("A8 row unchanged", name)
-        assert not [ln for ln in env.lines if ln.startswith("[QUARANTINE]")], ("A8 no capture line", name)
+        assert not [ln for ln in env.lines[before:] if ln.startswith("[QUARANTINE]")], ("A8 no capture line", name)
     run_env(monkeypatch, body)
 
 
@@ -570,7 +572,7 @@ def test_a9_a_row_received_before_the_lobbys_previous_game_is_refused_by_both(mo
         before = await tables(env)
         for act in (accept, credit):
             ans = await act(env, qid)
-            assert ans.status == 409 and ans.detail == T["clock"], ("A9", act.__name__, ans)
+            assert ans.status == 409 and ans.body == T["clock"], ("A9", act.__name__, ans)
         assert await tables(env) == before, "A9 nothing written"
     run_env(monkeypatch, body)
 
@@ -681,7 +683,7 @@ def test_a13_a_readmission_lobby_is_refused_before_its_journal(monkeypatch):
         before = await tables(env)
         for act in (accept, credit):
             ans = await act(env, qid)
-            assert ans.status == 409 and ans.detail == T["readmit"], ("A13", act.__name__, ans)
+            assert ans.status == 409 and ans.body == T["readmit"], ("A13", act.__name__, ans)
         assert await env.conn.fetchval("SELECT count(*) FROM ffa_report_journal") == 0, "A13 nothing journaled"
         assert await tables(env) == before, "A13 nothing written"
     run_env(monkeypatch, body)
@@ -719,11 +721,12 @@ def test_a14_exp_an_open_lobby_is_refused_and_its_live_rows_stay(monkeypatch):
         qid = await held(env, lob, 3)       # ahead of an active lobby: ffa_game_number_mismatch
         assert await env.conn.fetchval("SELECT reason FROM match_report_quarantine WHERE id = $1",
                                        uuid.UUID(qid)) == "ffa_game_number_mismatch"
-        await env.conn.execute("UPDATE ffa_lobbies SET short_started_at = created_at WHERE id = $1", lob.lid)
+        await env.conn.execute("UPDATE ffa_lobbies SET short_started_at = created_at, bets_disabled = true"
+                               " WHERE id = $1", lob.lid)
         snap, before = await env.snapshot(), await tables(env)
         for act in (accept, credit):
             ans = await act(env, qid)
-            assert ans.status == 409 and ans.detail == T["lobby_open"], ("A14-EXP", act.__name__, ans)
+            assert ans.status == 409 and ans.body == T["lobby_open"], ("A14-EXP", act.__name__, ans)
         assert await env.snapshot() == snap and await tables(env) == before, "A14-EXP nothing written"
     run_env(monkeypatch, body)
 
@@ -876,9 +879,10 @@ def test_c1_credit_reproduces_migration_421s_twelve_pairs(monkeypatch):
                         "  reported_by, ended_at, created_at, game_number)"
                         " VALUES ($1, $2, 'ffa_qapc1_r1', 6, $3, $3, $4, $4, 1)", g1, lobby, pids[3], t1)
         for s, p in enumerate(pids):
-            await c.execute("INSERT INTO ffa_match_players (match_id, player_id, slot, rounds_won, points_total,"
-                            "  kills, rating_before, rating_after) VALUES ($1, $2, $3, 0, 0, 0, $4, $5)",
-                            g1, p, s, O.G1[s][1], O.RATING_AFTER_G1[s])
+            await c.execute("INSERT INTO ffa_match_players (match_id, player_id, slot, placement, rounds_won,"
+                            "  points_total, kills, rating_before, rating_after)"
+                            " VALUES ($1, $2, $3, $4, 0, 0, 0, $5, $6)",
+                            g1, p, s, O.G1[s][0], O.G1[s][1], O.RATING_AFTER_G1[s])
         received = {O.Q2: t1 + _dt.timedelta(seconds=2000), O.Q3: t1 + _dt.timedelta(seconds=4000)}
         for q in (O.Q2, O.Q3):
             await c.execute(
@@ -921,7 +925,7 @@ def test_c2_credit_is_refused_while_accept_could_apply_and_allowed_once_blocked(
         lob, qid = await closed_held(env)
         before = await tables(env)
         ans = await credit(env, qid)
-        assert ans.status == 409 and ans.detail == T["can_accept"], ("C2 refused", ans)
+        assert ans.status == 409 and ans.body == T["can_accept"], ("C2 refused", ans)
         assert await tables(env) == before
         await later_for(env, lob)
         ans = await credit(env, qid)
@@ -937,27 +941,27 @@ def test_c3_every_second_action_answers_409_and_changes_nothing(monkeypatch):
         assert (await credit(env, qid)).status == 200
         before = await tables(env)
         ans = await credit(env, qid)
-        assert ans.status == 409 and ans.detail == T["reviewed"], ("C3 credit twice", ans)
+        assert ans.status == 409 and ans.body == T["reviewed"], ("C3 credit twice", ans)
         await env.conn.execute("UPDATE match_report_quarantine SET status = 'pending', reviewed_at = NULL"
                                " WHERE id = $1", uuid.UUID(qid))
         before = await tables(env)
         for act in (credit, accept):
             ans = await act(env, qid)
-            assert ans.status == 409 and ans.detail == T["credited_before"], ("C3 receipt", act.__name__, ans)
+            assert ans.status == 409 and ans.body == T["credited_before"], ("C3 receipt", act.__name__, ans)
         assert await tables(env) == before, "C3 nothing changed"
         # Accept, then Credit; Credit, then Accept.
         lob, qid = await closed_held(env)
         assert (await accept(env, qid)).status == 200
         before = await tables(env)
         ans = await credit(env, qid)
-        assert ans.status == 409 and ans.detail == T["reviewed"], ("C3 credit after accept", ans)
+        assert ans.status == 409 and ans.body == T["reviewed"], ("C3 credit after accept", ans)
         assert await tables(env) == before
         lob, qid = await closed_held(env)
         await later_for(env, lob)
         assert (await credit(env, qid)).status == 200
         before = await tables(env)
         ans = await accept(env, qid)
-        assert ans.status == 409 and ans.detail == T["reviewed"], ("C3 accept after credit", ans)
+        assert ans.status == 409 and ans.body == T["reviewed"], ("C3 accept after credit", ans)
         assert await tables(env) == before
     run_env(monkeypatch, body)
 
@@ -985,9 +989,9 @@ def test_c5_each_action_word_signs_its_own_action_only(monkeypatch):
         lob, qid = await closed_held(env)
         before = await tables(env)
         ans = await credit(env, qid, word="quarantine_action")
-        assert (ans.status, ans.detail) == (403, "Bad admin signature"), ("C5 credit with accept's word", ans)
+        assert (ans.status, ans.body) == (403, "Bad admin signature"), ("C5 credit with accept's word", ans)
         ans = await accept(env, qid, word="quarantine_credit")
-        assert (ans.status, ans.detail) == (403, "Bad admin signature"), ("C5 accept with credit's word", ans)
+        assert (ans.status, ans.body) == (403, "Bad admin signature"), ("C5 accept with credit's word", ans)
         assert await tables(env) == before
     run_env(monkeypatch, body)
 
@@ -1036,7 +1040,7 @@ def test_g2_the_lists_verdict_is_what_accept_then_does(monkeypatch):
             v = verdicts[qid]
             assert (v["can_accept"], v["accept_blocked_reason"]) == want[name], ("G2 verdict", name, v)
             ans = await accept(env, qid)
-            got = (ans.status == 200, "" if ans.status == 200 else ans.detail)
+            got = (ans.status == 200, "" if ans.status == 200 else ans.body)
             assert got == (v["can_accept"], v["accept_blocked_reason"]), ("G2 accept", name, ans, v)
     run_env(monkeypatch, body)
 
