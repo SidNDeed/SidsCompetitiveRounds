@@ -38,6 +38,11 @@ def run(coro):
 # ── the feed's rows, built by the api's own functions ──────────────────────
 
 def feed_row(r, f, gate=(40, 6)):
+    # QAPPLY-1: D1's gate is the list's verdict (_qapply_verdict's dict);
+    # the pinned texts were written for the verdict of (later games, players).
+    if isinstance(gate, tuple):
+        ok, why = main._quarantine_accept_verdict(*gate)
+        gate = {"can_accept": ok, "accept_blocked_reason": why, "can_credit": not ok}
     v = fx.judge(main, r, f)
     out = {"id": str(r["id"]), "mode": r["mode"], "group": str(r["group_id"]) if r.get("group_id") else None,
            "family": main._triage_family(r["mode"], r["reason"], v["match"] is not None),

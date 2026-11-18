@@ -294,7 +294,12 @@ def test_census_one_accept_verdict():
 
     def calls(fn):
         return {n.func.id for n in ast.walk(fn) if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)}
-    assert "_quarantine_accept_verdict" in calls(fns["admin_list_quarantine"])
-    assert "_quarantine_accept_verdict" in calls(fns["_qdig_feed_keys"])
+    # QAPPLY-1: the list and D1 read one verdict, _qapply_verdict's; the
+    # feed keys take it as D1's gate.
+    assert "_qapply_verdict" in calls(fns["admin_list_quarantine"])
+    d1 = [n for n, fn in fns.items() if "_qapply_verdict" in {
+        a.id for c in ast.walk(fn) if isinstance(c, ast.Call) for a in c.args if isinstance(a, ast.Name)}]
+    assert d1, "D1 reads _qapply_verdict"
+    assert "_quarantine_accept_verdict" not in calls(fns["_qdig_feed_keys"])
     src = open(MAIN_SRC, encoding="utf-8").read()
     assert src.count("played rated games since") == 1

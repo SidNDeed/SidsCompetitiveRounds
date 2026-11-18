@@ -553,7 +553,7 @@ def test_pg_qdig_both_bots_read_the_real_answer(monkeypatch):
 # ── the Admin list ─────────────────────────────────────────────────────────
 
 ADMIN_KEYS = {"id", "mode", "reason", "score", "http_status", "created_at", "player_names", "room", "status",
-              "can_accept", "accept_blocked_reason"}
+              "can_accept", "accept_blocked_reason", "can_credit"}
 
 
 def test_pg_qdig_the_admin_lists_strings(monkeypatch):
@@ -582,8 +582,10 @@ def test_pg_qdig_the_admin_lists_strings(monkeypatch):
     assert c2["reason"] == ("The lobby had already been closed when this report arrived, so the game was "
                             "never recorded. [lobby_completed]")
     assert c2["score"] == "Dune 5r 11p | Elm 2r 5p | Ash 0r 2p | Birch 0r 2p | +2"
-    assert c2["accept_blocked_reason"] == ("6 players have played rated games since; adding this game now "
-                                           "would need a full replay")
+    # QAPPLY-1: the verdict is _qapply_verdict's. The later game is game 9 of
+    # C2's own lobby, so its end is the lobby's previous game for C2, and C2
+    # was received before it (R5).
+    assert c2["accept_blocked_reason"] == main._QAPPLY_TEXTS["clock"]
 
 
 # ── /health ────────────────────────────────────────────────────────────────
@@ -909,7 +911,8 @@ def test_pg_qdig_a_failed_eligibility_check_answers_one_fixed_sentence(monkeypat
 
             async def fails(*a, **k):
                 raise RuntimeError("SELECT count(*) FROM ffa_match_players WHERE " + "x = 1 AND " * 40)
-            monkeypatch.setattr(main, "_quarantine_later_rated", fails)
+            # QAPPLY-1: the list's eligibility is _qapply_verdict's.
+            monkeypatch.setattr(main, "_qapply_verdict", fails)
             return tq.ok(await env.client.get(ADMIN_LIST, params={"admin_steam_id": tq.ADMIN,
                                                                  "hmac_signature": tq.sig("list")}))
 
