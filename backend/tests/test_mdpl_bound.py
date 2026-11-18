@@ -1329,36 +1329,137 @@ _SESSION_METHODS = _SESSION_ALLOWED | {
     "expire_all", "expunge", "reset"}
 
 
-def test_every_session_method_the_deletion_reaches_holds_its_connection_first_or_sends_nothing():
-    """r2 HIGH 1, by class: the deletion's reach calls on a session (db, or a
-    parameter annotated AsyncSession) only the four methods that hold the
-    connection first and three that send nothing and check nothing out; and
-    every begin_nested is used as `async with`, the one form the arming wraps
-    (six of them). Another method (AsyncSession.scalar, get or refresh can
-    check a connection out outside the four) or another form fails here."""
-    with open(main.__file__, encoding="utf-8") as fh:
-        source = fh.read()
+def _deletion_reach_of(source):
+    """The deletion's reach as the session-method test reads it: the
+    functions delete_player_data and _pc_lease_drain call by name, transitively."""
     reach = dict(_reach(source, "delete_player_data"))
     reach.update(_reach(source, "_pc_lease_drain"))
-    calls, nested_with, nested_all = {}, 0, 0
+    return reach
+
+
+def _names_begin_nested(x, sessions):
+    """Whether x names a session's begin_nested: `<session>.begin_nested` or
+    `getattr(<session>, "begin_nested", ...)`."""
+    attr = (isinstance(x, ast.Attribute) and x.attr == "begin_nested"
+            and isinstance(x.value, ast.Name) and x.value.id in sessions)
+    dyn = (isinstance(x, ast.Call) and isinstance(x.func, ast.Name) and x.func.id == "getattr"
+           and len(x.args) >= 2 and isinstance(x.args[0], ast.Name) and x.args[0].id in sessions
+           and isinstance(x.args[1], ast.Constant) and x.args[1].value == "begin_nested")
+    return attr or dyn
+
+
+def _session_reading(reach):
+    """What `reach` calls on a session, as the session-method test reads it:
+    {method: the functions that call it} for each call `<session>.<method>(...)`
+    of a method of _SESSION_METHODS, and [(function, line)] for each call of a
+    session's begin_nested that is not itself the expression of an `async with`
+    item. A session is db or a parameter annotated AsyncSession. A call of
+    begin_nested is `<session>.begin_nested(...)`,
+    `getattr(<session>, "begin_nested", ...)(...)`, or a call of a name the
+    function binds to either by a plain assignment (`x = ...`). The list counts
+    calls, not the name: an awaited call is in it, and so is a call held in a
+    name and entered or awaited later (refused alike, though `async with` on
+    the held object would be sound); an `async with` item's own call is not."""
+    calls, outside = {}, []
     for name, fns in reach.items():
         for fn in fns:
             sessions = {"db"} | {a.arg for a in fn.args.args + fn.args.kwonlyargs
                                  if a.annotation is not None and "AsyncSession" in ast.unparse(a.annotation)}
+            aliases = {t.id for n in ast.walk(fn)
+                       if isinstance(n, ast.Assign) and _names_begin_nested(n.value, sessions)
+                       for t in n.targets if isinstance(t, ast.Name)}
+            in_with = {id(it.context_expr) for n in ast.walk(fn) if isinstance(n, ast.AsyncWith)
+                       for it in n.items}
             for n in ast.walk(fn):
-                if isinstance(n, ast.AsyncWith):
-                    nested_with += sum(1 for it in n.items
-                                       if isinstance(it.context_expr, ast.Call)
-                                       and isinstance(it.context_expr.func, ast.Attribute)
-                                       and it.context_expr.func.attr == "begin_nested")
-                if (isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
-                        and isinstance(n.func.value, ast.Name) and n.func.value.id in sessions
-                        and n.func.attr in _SESSION_METHODS):
+                if not isinstance(n, ast.Call):
+                    continue
+                if (isinstance(n.func, ast.Attribute) and isinstance(n.func.value, ast.Name)
+                        and n.func.value.id in sessions and n.func.attr in _SESSION_METHODS):
                     calls.setdefault(n.func.attr, set()).add(name)
-                    nested_all += n.func.attr == "begin_nested"
-    assert set(calls) <= _SESSION_ALLOWED, {m: sorted(v) for m, v in calls.items() if m not in _SESSION_ALLOWED}
-    assert _SESSION_HELD <= set(calls), sorted(calls)
-    assert nested_with == nested_all == 6, (nested_with, nested_all)
+                if id(n) not in in_with and (_names_begin_nested(n.func, sessions)
+                                             or (isinstance(n.func, ast.Name) and n.func.id in aliases)):
+                    outside.append((name, n.lineno))
+    return calls, sorted(outside)
+
+
+def _session_problems(reach):
+    """The session-method test's refusals over `reach`, each a (what, which)
+    pair: methods outside the seven, held methods the reach never calls, and
+    the begin_nested calls outside `async with` (_session_reading)."""
+    calls, outside = _session_reading(reach)
+    problems = []
+    extra = {m: sorted(v) for m, v in calls.items() if m not in _SESSION_ALLOWED}
+    if extra:
+        problems.append(("methods outside the seven", extra))
+    if not _SESSION_HELD <= set(calls):
+        problems.append(("held methods never called", sorted(_SESSION_HELD - set(calls))))
+    if outside:
+        problems.append(("begin_nested outside async with", outside))
+    return problems
+
+
+def test_every_session_method_the_deletion_reaches_holds_its_connection_first_or_sends_nothing():
+    """r2 HIGH 1, by class: the deletion's reach calls on a session (db, or a
+    parameter annotated AsyncSession) only the four methods that hold the
+    connection first and three that send nothing and check nothing out; and
+    every begin_nested is used as `async with`, the one form the arming wraps:
+    the begin_nested the arming puts on the attempt's session (_HeldNested, in
+    _deletion_arm_every_statement) supports `async with` and not `await`.
+    Another method (AsyncSession.scalar, get or refresh can check a connection
+    out outside the four) or another form fails here. The begin_nested count is
+    of the calls outside `async with`, not of the name, and it must be 0: an
+    awaited begin_nested refuses and its `async with` twin does not (the ruling
+    of 17 Nov 2026 14:10:47Z, 5; the controls below)."""
+    with open(main.__file__, encoding="utf-8") as fh:
+        source = fh.read()
+    reach = _deletion_reach_of(source)
+    assert _session_problems(reach) == [], _session_problems(reach)
+
+
+def test_the_session_reading_counts_main_s_one_awaited_begin_nested_outside_the_reach():
+    """The count's control in main.py itself: main's one awaited begin_nested,
+    in _settle_ovt_report's OVT report path, is outside the deletion's reach,
+    and the same reading counts it in that function's own reach."""
+    with open(main.__file__, encoding="utf-8") as fh:
+        source = fh.read()
+    assert "_settle_ovt_report" not in _deletion_reach_of(source)
+    _calls, found = _session_reading(_reach(source, "_settle_ovt_report"))
+    lines = source.splitlines()
+    assert [(fn, "= await db.begin_nested()" in lines[line - 1]) for fn, line in found] == [
+        ("_settle_ovt_report", True)], found
+
+
+# The count's controls: each form planted at the head of a function of the
+# reach (its lines moved past main.py's end). The awaited forms are the
+# mutants and must be refused at their line; each `async with` twin makes the
+# same call as an `async with` item and must not be.
+_NESTED_PLANTS = {
+    "awaited": ("x = await db.begin_nested()", True),
+    "awaited, its twin": ("async with db.begin_nested():\n    pass", False),
+    "alias awaited": ("nested = getattr(db, 'begin_nested', None)\nx = await nested()", True),
+    "alias, its twin": ("nested = getattr(db, 'begin_nested', None)\nasync with nested():\n    pass", False),
+}
+
+
+@pytest.mark.parametrize("where", ["delete_player_data", "_deletion_lock_party_row"])
+@pytest.mark.parametrize("plant", sorted(_NESTED_PLANTS))
+def test_the_session_method_count_refuses_an_awaited_begin_nested_and_not_its_async_with_twin(plant, where):
+    form, refused = _NESTED_PLANTS[plant]
+    with open(main.__file__, encoding="utf-8") as fh:
+        source = fh.read()
+    reach = _deletion_reach_of(source)
+    assert where in reach and _session_problems(reach) == [], sorted(reach)
+    body = ast.parse("async def _plant(db):\n" + "".join(
+        "    %s\n" % line for line in form.split("\n"))).body[0].body
+    for stmt in body:
+        ast.increment_lineno(stmt, 10 ** 6)
+    reach[where][0].body[0:0] = body
+    calls = [n.lineno for stmt in body for n in ast.walk(stmt)
+             if isinstance(n, ast.Call) and not (isinstance(n.func, ast.Name) and n.func.id == "getattr")]
+    assert len(calls) == 1, calls
+    got = _session_problems(reach)
+    want = [("begin_nested outside async with", [(where, calls[0])])] if refused else []
+    assert got == want, (plant, where, got)
 
 
 def test_the_wait_cap_is_below_the_primary_s_deadlock_timeout():
