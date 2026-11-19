@@ -494,7 +494,9 @@ NAME = _lift(("_escape_md",))["_escape_md"]
 # -- the api's copy of the two helpers is the bot's, case for case --------------
 
 # Names that hold an address (stage 3): the name helpers put a zero-width
-# space after every scheme's colon, so a name is never a link.
+# space after the colon of every scheme that is followed by a slash, so a
+# name is never a link. Discord makes a link only of a scheme followed by
+# ":/"; a "word:" with no slash after it (Re:Zero, mailto:x) is left as typed.
 ZW = "​"
 NAME_ADDRESS_CASES = [
     ("http-at-start", "http://x.example", "http:" + ZW + "//x.example"),
@@ -503,13 +505,14 @@ NAME_ADDRESS_CASES = [
     ("mixed-case-one-slash", "HtTp:/one", "HtTp:" + ZW + "/one"),
     ("two-addresses", "a http://b and https://c", "a http:" + ZW + "//b and https:" + ZW + "//c"),
     ("address-with-marks", "[go](https://e.example/a_b)", "\\[go\\](https:" + ZW + "//e.example/a\\_b)"),
-    # FIX-1 (L4): every address scheme, not only http and https
+    # FIX-1 (L4): every scheme that is followed by a slash, not only http and https
     ("any-scheme", "httpx://a and http:x", "httpx:" + ZW + "//a and http:x"),
     ("ftp", "ftp://x.example", "ftp:" + ZW + "//x.example"),
     ("steam", "steam://run/1557740", "steam:" + ZW + "//run/1557740"),
     ("scheme-with-marks", "a+b.c-d://x", "a+b.c-d:" + ZW + "//x"),
     ("one-slash", "File:/x", "File:" + ZW + "/x"),
     ("no-slash-no-break", "mailto:x and 12:/y", "mailto:x and 12:/y"),
+    ("word-colon-no-break", "Re:Zero", "Re:Zero"),
 ]
 NAME_TEXTS = ([c[1] for c in CASES] + CUT_TEXTS + ["@everyone", "<@123>", "a\r\nb", "  # x", "12) y", ""]
               + [c[1] for c in NAME_ADDRESS_CASES] + ["a" * 10 + "https://q.example", "x" * 37 + "HTTP://z"])
@@ -1240,15 +1243,73 @@ def test_a_discord_name_after_an_at_sign_passes_the_helper_with_it():
     assert "@{_escape_md(" not in TEXT and "**@{" not in TEXT
 
 
-def test_the_digest_names_pass_the_name_helper():
-    """C: the held-report digest's escape is a thin call of _escape_md; its
-    limits apply to the escaped text."""
+# The layout table (FIX-2, IV): each input with the one-line text the
+# digest's layout makes of it, written out. The layout escapes nothing; the
+# escape is the ONE call of the name helper after it.
+JOINED = "\U0001F469\u200d\U0001F4BB"          # a joined emoji: woman, joiner, laptop
+QDIG_LAYOUT = [
+    (JOINED, JOINED),
+    ("\u2764\ufe0f ok", "\u2764\ufe0f ok"),       # a variation selector stays
+    ("a\u202eb", "a b"),                          # a right-to-left override becomes a space
+    ("a\tb", "a b"),
+    ("a\nb\r\nc", "a b c"),
+    ("a\u00a0b", "a b"),                          # a no-break space
+    ("a     b", "a b"),
+    (" *Bob* <@1> ", "*Bob* <@1>"),
+    ("https://x.example", "https://x.example"),
+    ("_" * 40, "_" * 40),
+    ("line\nbreak\x07bell", "line break bell"),
+]
+
+
+def test_the_digest_lays_a_value_out_then_calls_the_name_helper_once():
+    """IV: _qdig_md(x, n) == _escape_md(layout(x), n), the layout written
+    out per input; a joined emoji keeps every code point."""
     ns = _lift(("_qdig_md", "_qdig_esc", "_escape_md"), ("QDIG_NAME_MAX",))
-    for s in ["https://x.example", "*Bob* <@1>", "_" * 40, "ftp://a", "line\nbreak\x07bell"]:
-        flat = " ".join("".join(c if c.isprintable() else " " for c in s).split())
-        assert ns["_qdig_esc"](s) == NAME(flat, ns["QDIG_NAME_MAX"]), s
-        assert len(ns["_qdig_md"](s, 12)) <= 12
+    for raw, laid in QDIG_LAYOUT:
+        for n in (12, 40, 200):
+            assert ns["_qdig_md"](raw, n) == NAME(laid, n), (raw, n)
+        assert ns["_qdig_esc"](raw) == NAME(laid, ns["QDIG_NAME_MAX"]), raw
+    assert ns["_qdig_md"](JOINED, 50) == JOINED
     assert ns["_qdig_esc"]("") == "unknown player"
+
+
+def test_the_digest_layout_mutant_that_drops_the_joiner_fails():
+    """Mutant: the joiner the layout keeps replaced by another character; the
+    joined emoji then splits and the test above fails for it."""
+    old = 'ch.isprintable() or ch == "\\u200d" else'
+    assert TEXT.count(old) == 1
+    ns = _lift_bot(TEXT.replace(old, 'ch.isprintable() or ch == "\\u200c" else', 1),
+                   ("_qdig_md", "_escape_md"))
+    assert ns["_qdig_md"](JOINED, 50) != JOINED
+    assert ns["_qdig_md"](JOINED, 50) != NAME(JOINED, 50)
+
+
+def _board_name_fn(source=None):
+    tree = ast.parse(TEXT if source is None else source)
+    (fn,) = [n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == "_board_name"]
+    ns = _lift_bot(TEXT if source is None else source, ("_escape_md",))
+    exec(compile(ast.Module(body=[copy.deepcopy(fn)], type_ignores=[]), SRC, "exec"), ns)
+    return ns["_board_name"]
+
+
+def test_the_other_thin_calls_equal_the_helper_on_their_layout():
+    """IV: _md_name (layout: the ends' white space stripped), _pc_name and
+    _game_embed_plain (no layout) and _board_name (layout: each run of white
+    space one space) each equal _escape_md of their layout over the table."""
+    ns = _lift(("_md_name", "_pc_name", "_game_embed_plain", "_escape_md"))
+    board = _board_name_fn()
+    for raw, _laid in QDIG_LAYOUT:
+        assert ns["_md_name"](raw) == NAME(raw.strip()), raw
+        assert ns["_pc_name"](raw) == NAME(raw), raw
+        assert ns["_game_embed_plain"](raw) == NAME(raw), raw
+        assert board(raw) == NAME(" ".join(raw.split())), raw
+    assert ns["_md_name"](JOINED) == ns["_pc_name"](JOINED) == board(JOINED) == JOINED
+    # control: a wrapper that escapes again is not equal to the helper
+    twice = _lift_bot(TEXT.replace("    return _escape_md(str(s or \"?\"))\n",
+                                   "    return _escape_md(_escape_md(str(s or \"?\")))\n", 1),
+                      ("_pc_name", "_escape_md"))["_pc_name"]
+    assert twice("*Bob*") != NAME("*Bob*")
 
 
 RELEASE = {"tag_name": "v1.0", "name": "@everyone *x* https://y.example", "body": "**notes** <@1>\n- item",
@@ -1479,7 +1540,14 @@ SINK_KW = {
 SUPER_KW = ("title", "label", "placeholder")
 NONTEXT = {"int", "float", "len", "bool", "round", "abs", "sum", "min", "max", "isinstance", "hash", "id",
            "range", "type", "divmod", "any", "all", "hex", "ord", "callable", "hasattr"}
-HELPERS = {"_escape_md": "name", "_escape_text": "text"}
+# _aer_refusal_word counts as one free-text pass: it shows only a word that
+# fully matches its own grammar [a-z_ ;]{1,60} (else a fixed word), as the
+# text _escape_text writes for that grammar (the evidence privacy pass's
+# display writer, then the underscore escaped). Its grammar test and the
+# per-mark widening mutants are test_the_evidence_refusal_word_equals_the_
+# free_text_pass_over_its_grammar and test_the_evidence_refusal_grammar_widened_
+# by_one_mark_fails.
+HELPERS = {"_escape_md": "name", "_escape_text": "text", "_aer_refusal_word": "text"}
 # Mention or link syntax a composer must not put directly against a typed value.
 GLUE = ("@", "#", "<@&", "[", "`")
 _EMPTY = {}                      # the one empty binding (its id is part of a walk key)
@@ -1985,51 +2053,59 @@ class _Census:
 #   admin   text an admin or moderator typed  (the same rule as free)
 #   system  the server's own value: numbers, ids, codes, statuses, times, labels, card names,
 #           server sentences, the FAQ text
-#   api     text the api composed and escaped itself (channel posts, stream posts, DMs, the
-#           api's refusal sentences, an older api's escaped mail subject): shown as the api
-#           sent it
+#   api     text the api composed and escaped itself (channel posts, stream posts, DMs, an
+#           older api's escaped mail subject): shown as the api sent it
+# An api refusal's `detail` and `error` are free text: the api composes a refusal plain and
+# one can hold a typed value (a stored ban reason), so the bot passes it through
+# _api_refusal_text (one _escape_text pass, bounded) where it takes it from the answer. A
+# refusal token the bot only compares never reaches a slot and is not walked.
 # A key read from an api answer: x["key"] or x.get("key").
 KEY_CLASSES = {
     "name": """
         actor actor_name bet_on_name bettor_name discord_display_name display_name host_name name names
         next_opponent opponent opponent_name owner_name p1_display_name p1_name p2_display_name p2_name
         player player1_name player2_name players reporter_name sender_name sender_name_raw subject_name
-        t1a_name t1b_name t2a_name t2b_name waiting_on winner_name""",
+        t1a_name t1b_name t2a_name t2b_name tag_name waiting_on winner_name
+        card_name cards pending_match pending_match_label reason_text region_breakdown sentence
+        top_card top_card_names held mod_version muted recorded""",
     "free": """
-        body comment description description_snippet message subject_raw""",
+        body comment description description_snippet detail error message subject subject_raw
+        cards_summary connection_summary evidence_summary line match_context point_progress
+        telemetry_summary""",
     "admin": """
         invalidation_reason reason""",
     "api": """
-        a b content detail error subject""",
+        content""",
     "system": """
+        a b
         accept_blocked_reason action_label amount answer api_unreachable assumption avg_fps
         bad_argument banned_by_steam_id base best_casual_streak best_ranked_streak
         dup_at_pull pay slot
         blocks_activated blocks_successful bracket_side bug_number bullets_fired bullets_hit cap
-        card_name cards cards_summary carried_from case_id case_status casual_losses casual_wins
-        category channel code connection_summary created_at current_streak custom_id damage_dealt
+        carried_from case_id case_status casual_losses casual_wins
+        category channel code created_at current_streak custom_id damage_dealt
         deadline_at default_start_ts discord_id duo_rounds_won duration_seconds ended_at entries
-        error_answer evidence_summary family field final_placement flag_reason fps_avg game_code
+        error_answer family field final_placement flag_reason fps_avg game_code
         game_codes game_number gold_earned gold_gained gold_spent group h2h_casual_losses
-        h2h_casual_wins h2h_ranked_losses h2h_ranked_wins h2h_series_losses h2h_series_wins held
-        html_url id kind label latest_mod_version level line lobby_id lobby_members lock_at loss_delta
-        losses match_context match_id match_invalidation_reason match_label max_players min_players
-        mod_version mode modes muted new_status next_match_label not_found noun odds_multiplier
+        h2h_casual_wins h2h_ranked_losses h2h_ranked_wins h2h_series_losses h2h_series_wins
+        html_url id kind label latest_mod_version level lobby_id lobby_members lock_at loss_delta
+        losses match_id match_invalidation_reason match_label max_players min_players
+        mode modes new_status next_match_label not_found noun odds_multiplier
         old_status opponent_rounds_won p1_odds p1_rating p1_rating_change
         p1_score p1_series_wins p1_steam_id p1_streak p1_wins p2_odds p2_rating
         p2_rating_change p2_score p2_series_wins p2_steam_id p2_streak p2_wins page payout peak
-        peak_rating pending pending_match pending_match_label ping_avg ping_max placement
-        picks player_count player_rounds_won point_progress pool_rank price
+        peak_rating pending ping_avg ping_max placement
+        picks player_count player_rounds_won pool_rank price
         primary_only prize_gold prize_players prize_xp queue_size rank rank_name ranked_dc_count
         ranked_series_losses ranked_series_wins rarity rating rating_after rating_before rating_change
-        rating_deviation reason_head reason_text recorded region_breakdown relay_code
+        rating_deviation reason_head relay_code
         resolution result round rounds_won runner_up_signup_id scheduled_start_ts schema
-        score_summary score_target seed sentence series_id series_losses series_status series_wins
+        score_summary score_target seed series_id series_losses series_status series_wins
         server_error settings severity side slots solo_rounds_won status steam_id subject_steam_id
         suspect_steam_text sweeps_given sweeps_taken t1_odds t1_rounds_won t1_series_wins t1_wins
         t1a_rating t1b_rating t2_odds t2_rounds_won t2_series_wins t2_wins t2a_rating
-        t2b_rating tag_name team team_a team_b telemetry_summary third_place_signup_id times_picked
-        title too_large top_card top_card_names top_card_picks total total_matches total_players
+        t2b_rating team team_a team_b third_place_signup_id times_picked
+        title too_large top_card_picks total total_matches total_players
         total_xp tournament_kind tournament_label value votes win_delta win_probability
         winner_signup_id wins xp_earned xp_for_next_level xp_gained xp_into_level""",
 }
@@ -2066,6 +2142,22 @@ OVERRIDES = {
     ("_format_release_message", "body"): (
         "system", "the slot: the body of a release read from the release source, the project's release "
                   "notes written as markdown and shown as written"),
+    ("_aer_message", "a"): ("name", "the admin's own /evidence argument (a Steam id), shown by the bot in "
+                                    "the one-line page header"),
+    ("_aer_message", "b"): ("name", "the admin's own /evidence argument (a Steam id), shown by the bot in "
+                                    "the one-line page header"),
+    ("_aer_message", "code"): ("name", "the admin's own /evidence argument (a game or series code), shown "
+                                       "by the bot in the one-line page header"),
+    ("_aer_message", "steam_id"): ("name", "the admin's own /evidence argument (a Steam id), shown by the "
+                                           "bot in the one-line page header"),
+    ("poll_tournaments", "mod_version"): ("system", "players.mod_version, stored only when it fully "
+                                                    "matches [0-9]+(?:[.][0-9]+)* (main.py's "
+                                                    "_player_mod_version_stamp_value): digits and dots"),
+    ("__init__", "label"): ("name", "a lobby's bet target: the player's display name (the api's "
+                                    "bet_targets), in a select option's label, a plain slot"),
+    ("_release_url", "tag_name"): (
+        "system", "the slot: the tag inside the address the bot composes when the release names no "
+                  "html_url; an address keeps the tag raw"),
     ("cmd_cards", "param:filter"): ("system", "a Literal of ranked, casual and all: discord.py refuses any "
                                               "other value before the command runs"),
     ("cmd_game", "param:code"): ("system", "reduced to the hex digits 0-9a-f before it is shown"),
@@ -2163,7 +2255,7 @@ CENSUS_MUTANTS = [
      "Discord: **@{_escape_md(str(_dname))}**", "is glued to '@'"),
     ("the digest's names", "    return _escape_md(s, limit)\n", "    return s\n", "reaches a md slot raw"),
     ("a release title", 'name = _escape_md(release_json.get("name") or tag, 200)',
-     'name = release_json.get("name") or tag', "'name' reaches a md slot raw at _format_release_message"),
+     'name = release_json.get("name") or tag', "name' reaches a md slot raw at _format_release_message"),
     ("an older api's mail name",
      'who = _escape_md(_mail_legacy_plain(t.get("sender_name")).strip() or "?", MAIL_NAME_SHOWN_MAX)',
      'who = _mail_legacy_plain(t.get("sender_name")).strip() or "?"', "'sender_name' reaches a md slot raw"),
@@ -2171,6 +2263,119 @@ CENSUS_MUTANTS = [
      'f"**{fmt(n)}**" for n in unlinked', "cannot resolve ?call:fmt"),
     ("exception text", 'f"Mute failed: {_escape_text(str(e), 300)}"', 'f"Mute failed: {e}"',
      "'<exception>' reaches a md slot raw"),
+    # FIX-2: every reclassified key refuses zero passes and two passes (one site each).
+    ("refusal detail, none", '_api_refusal_text(json.loads(err).get("detail") or err)',
+     '(json.loads(err).get("detail") or err)', "reaches a md slot raw at _discord_bet_error"),
+    ("refusal detail, two", '_api_refusal_text(json.loads(err).get("detail") or err)',
+     '_api_refusal_text(_escape_text(json.loads(err).get("detail") or err))',
+     "reaches a md slot through text + text at _discord_bet_error"),
+    ("refusal error, none", "{_api_refusal_text(result['error'])}", "{result['error']}",
+     "'error' reaches a md slot raw at cmd_link"),
+    ("refusal error, two", "{_api_refusal_text(result['error'])}",
+     "{_api_refusal_text(_escape_text(result['error']))}", "'error' reaches a md slot through text + text"),
+    ("evidence refusal word, none", 'field = _aer_refusal_word(detail[len("bad_argument"):].strip()[1:-1])',
+     'field = detail[len("bad_argument"):].strip()[1:-1]', "'detail' reaches a md slot raw"),
+    ("evidence refusal word, two", 'field = _aer_refusal_word(detail[len("bad_argument"):].strip()[1:-1])',
+     'field = _aer_refusal_word(_escape_text(detail[len("bad_argument"):].strip()[1:-1]))',
+     "'detail' reaches a md slot through text + text"),
+    ("release tag, none", 'f"Posted {_escape_md(tag, 100)} to', 'f"Posted {tag} to',
+     "'tag_name' reaches a md slot raw at announce_release"),
+    ("release tag, two", 'f"Posted {_escape_md(tag, 100)} to', 'f"Posted {_escape_md(_escape_md(tag), 100)} to',
+     "'tag_name' reaches a md slot through name + name at announce_release"),
+    ("older api subject, none",
+     '_escape_text(_mail_legacy_plain(info.get("subject")).strip() or "(no subject)",\n'
+     '                            MAIL_SUBJECT_SHOWN_MAX)',
+     '(_mail_legacy_plain(info.get("subject")).strip() or "(no subject)")',
+     "'subject' reaches a md slot raw at _mail_sent_line"),
+    ("older api subject, two", 'subj = _escape_text(_mail_legacy_plain(info.get("subject"))',
+     'subj = _escape_text(_escape_text(_mail_legacy_plain(info.get("subject")))',
+     "'subject' reaches a md slot through text + text at _mail_sent_line"),
+    ("card name, none", "names.append(_escape_md(str(nm), 64))", "names.append(str(nm))",
+     "'card_name' reaches a md slot raw"),
+    ("card name, two", "names.append(_escape_md(str(nm), 64))", "names.append(_escape_md(_escape_md(str(nm)), 64))",
+     "'card_name' reaches a md slot through name + name"),
+    ("legacy card names, none", 'lines.append(f"**{_escape_md(names[i], 64)}**{p}")',
+     'lines.append(f"**{names[i]}**{p}")', "'top_card_names' reaches a md slot raw"),
+    ("legacy card names, two", 'lines.append(f"**{_escape_md(names[i], 64)}**{p}")',
+     'lines.append(f"**{_escape_md(_escape_md(names[i]), 64)}**{p}")',
+     "'top_card_names' reaches a md slot through name + name"),
+    ("top card, none", 'tc = f" · 🃏 {_pc_name(top)}" if top else ""', 'tc = f" · 🃏 {top}" if top else ""',
+     "'top_card' reaches a md slot raw"),
+    ("top card, two", 'tc = f" · 🃏 {_pc_name(top)}" if top else ""',
+     'tc = f" · 🃏 {_escape_md(_pc_name(top))}" if top else ""', "'top_card' reaches a md slot through name + name"),
+    ("game cards, none", "        value = _game_embed_plain(item)\n", "        value = str(item)\n",
+     "reaches a md slot raw at _game_card_lines"),
+    ("game cards, two", "        value = _game_embed_plain(item)\n", "        value = _escape_md(_game_embed_plain(item))\n",
+     "reaches a md slot through name + name at _game_card_lines"),
+    ("digest reason, none",
+     "_qdig_md(r0.get('reason_head') or r0.get('reason_text') or 'held for review.', QDIG_REASON_MAX)",
+     "(r0.get('reason_head') or r0.get('reason_text') or 'held for review.')", "'reason_text' reaches a md slot raw"),
+    ("digest reason, two",
+     "_qdig_md(r0.get('reason_head') or r0.get('reason_text') or 'held for review.', QDIG_REASON_MAX)",
+     "_qdig_md(_escape_md(r0.get('reason_head') or r0.get('reason_text') or 'held for review.'), QDIG_REASON_MAX)",
+     "'reason_text' reaches a md slot through name + name"),
+    ("modlog sentence, none", '_escape_md(_modlog_cut(r.get("sentence"), 600))', '_modlog_cut(r.get("sentence"), 600)',
+     "'sentence' reaches a md slot raw"),
+    ("modlog sentence, two", '_escape_md(_modlog_cut(r.get("sentence"), 600))',
+     '_escape_md(_escape_md(_modlog_cut(r.get("sentence"), 600)))', "'sentence' reaches a md slot through name + name"),
+    ("flag evidence, none", "value=_flag_embed_text(evidence, 700)", "value=evidence",
+     "reaches a md slot raw at "),
+    ("flag evidence, two", "value=_flag_embed_text(evidence, 700)", "value=_flag_embed_text(_escape_text(evidence), 700)",
+     "reaches a md slot through text + text"),
+    ("review line, two", '    return line if isinstance(line, str) and line else "review: no line"',
+     '    return _escape_text(line) if isinstance(line, str) and line else "review: no line"',
+     "'line' reaches a md slot through text + text"),
+    ("flag cards, none", 'value=_flag_embed_text(f.get("cards_summary"), 650)', 'value=f.get("cards_summary")',
+     "'cards_summary' reaches a md slot raw"),
+    ("flag cards, two", 'value=_flag_embed_text(f.get("cards_summary"), 650)',
+     'value=_flag_embed_text(_escape_text(f.get("cards_summary")), 650)', "'cards_summary' reaches a md slot through text + text"),
+    ("flag telemetry, none", 'value=_flag_embed_text(f.get("telemetry_summary"), 750)', 'value=f.get("telemetry_summary")',
+     "'telemetry_summary' reaches a md slot raw"),
+    ("flag telemetry, two", 'value=_flag_embed_text(f.get("telemetry_summary"), 750)',
+     'value=_flag_embed_text(_escape_text(f.get("telemetry_summary")), 750)',
+     "'telemetry_summary' reaches a md slot through text + text"),
+    ("flag connection, none", 'value=_flag_embed_text(f.get("connection_summary"), 750)',
+     'value=f.get("connection_summary")', "'connection_summary' reaches a md slot raw"),
+    ("flag connection, two", 'value=_flag_embed_text(f.get("connection_summary"), 750)',
+     'value=_flag_embed_text(_escape_text(f.get("connection_summary")), 750)',
+     "'connection_summary' reaches a md slot through text + text"),
+    ("flag context, none", 'value=_flag_embed_text(f.get("match_context"), 400)', 'value=f.get("match_context")',
+     "'match_context' reaches a md slot raw"),
+    ("flag context, two", 'value=_flag_embed_text(f.get("match_context"), 400)',
+     'value=_flag_embed_text(_escape_text(f.get("match_context")), 400)',
+     "'match_context' reaches a md slot through text + text"),
+    ("evidence header, none", "shown = _escape_md(target, 120)", "shown = target",
+     "reaches a md slot raw at _aer_message"),
+    ("evidence header, two", "shown = _escape_md(target, 120)", "shown = _escape_md(_escape_md(target), 120)",
+     "reaches a md slot through name + name at _aer_message"),
+    ("notice pending, none", 'f"**{_md_name(pending)}**.")', 'f"**{pending}**.")',
+     "reaches a md slot raw at _tmatch_notice_message"),
+    ("notice pending, two", 'f"**{_md_name(pending)}**.")', 'f"**{_escape_md(_md_name(pending))}**.")',
+     "reaches a md slot through name + name at _tmatch_notice_message"),
+    ("lobby label, plain slot escaped", "options.append(discord.SelectOption(label=lab, value=val[:100],",
+     "options.append(discord.SelectOption(label=_escape_md(lab), value=val[:100],",
+     "reaches a plain slot through name"),
+    ("bug report mod version, none", 'mod = _escape_md(r.get("mod_version") or "?", 64)',
+     'mod = r.get("mod_version") or "?"', "'mod_version' reaches a md slot raw at poll_bug_reports"),
+    ("bug report mod version, two", 'mod = _escape_md(r.get("mod_version") or "?", 64)',
+     'mod = _escape_md(_escape_md(r.get("mod_version") or "?"), 64)',
+     "'mod_version' reaches a md slot through name + name at poll_bug_reports"),
+    ("muted identity, none", "{_escape_md(body.get('muted') or '?', 80)}", "{body.get('muted')}",
+     "'muted' reaches a md slot raw"),
+    ("muted identity, two", "{_escape_md(body.get('muted') or '?', 80)}",
+     "{_escape_md(_escape_md(body.get('muted') or '?'), 80)}", "'muted' reaches a md slot through name + name"),
+    ("digest recorded value, none", "{_qdig_md(yes_no(d.get('recorded')), QDIG_NAME_MAX)} recorded",
+     "{yes_no(d.get('recorded'))} recorded", "'recorded' reaches a md slot raw"),
+    ("digest held value, two", "{_qdig_md(yes_no(d.get('held')), QDIG_NAME_MAX)} here",
+     "{_qdig_md(_escape_md(yes_no(d.get('held'))), QDIG_NAME_MAX)} here",
+     "'held' reaches a md slot through name + name"),
+    ("point progress, none", "value=_flag_embed_text(progress, 650)", "value=progress",
+     "reaches a md slot raw at poll_anticheat_flags"),
+    ("point progress, two", "Points: {f.get('point_progress')}\"", "Points: {_escape_text(f.get('point_progress'))}\"",
+     "'point_progress' reaches a md slot through text + text"),
+    ("regions, plain slot escaped", 'rows = sorted([r for r in (s.get("region_breakdown") or [])',
+     'rows = sorted([r for r in _escape_md(s.get("region_breakdown") or [])',
+     "'region_breakdown' reaches a plain slot through name"),
 ]
 
 
@@ -2236,3 +2441,552 @@ def test_a_comment_only_edit_leaves_the_census_unchanged():
     assert _census_problems(edited) == []
     assert sorted(map(repr, (r[:4] for r in _Census(edited).reads))) == \
         sorted(map(repr, (r[:4] for r in _Census(TEXT).reads)))
+
+
+def test_no_key_stands_in_two_classes():
+    """A key listed under two classes would take the last one silently.
+    Control: a table with one key listed twice is found."""
+    def twice(classes):
+        seen, out = {}, []
+        for cls, ks in classes.items():
+            for k in ks.split():
+                if k in seen:
+                    out.append((k, seen[k], cls))
+                seen[k] = cls
+        return out
+
+    assert twice(KEY_CLASSES) == []
+    planted = dict(KEY_CLASSES, system=KEY_CLASSES["system"] + " card_name")
+    assert twice(planted) == [("card_name", "name", "system")]
+
+
+# -- FIX-2: the bot lifted from a source of the test's choosing ---------------------
+
+import json  # noqa: E402  (the refusal fakes encode an api body)
+
+
+def _lift_bot(source, funcs=(), assigns=(), extra=None):
+    """_lift over `source` (the bot's text or a changed copy of it)."""
+    tree = ast.parse(source)
+    picked, seen = [], set()
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name in funcs:
+            fn = copy.deepcopy(node)
+            fn.decorator_list = []
+            picked.append(fn)
+            seen.add(node.name)
+        elif isinstance(node, ast.Assign) and any(isinstance(t, ast.Name) and t.id in assigns
+                                                  for t in node.targets):
+            picked.append(node)
+            seen.update(t.id for t in node.targets if isinstance(t, ast.Name))
+    assert seen >= set(funcs) | set(assigns), (set(funcs) | set(assigns)) - seen
+    ns = {"re": re, "json": json}
+    ns.update(extra or {})
+    exec(compile(ast.Module(body=picked, type_ignores=[]), SRC, "exec"), ns)
+    return ns
+
+
+# -- I. an api refusal's text: one _escape_text pass, bounded, where the bot takes it ----
+
+REFUSAL = "Banned: **spam** @everyone <@&1> [x](https://e.example/a_b) _y_ ~~z~~"
+REFUSAL_LONG = REFUSAL * 12
+REFUSAL_PARTS = ("_api_refusal_text", "_escape_text")
+REFUSAL_ASSIGNS = HELPER_PARTS + ("API_REFUSAL_SHOWN_MAX",)
+
+
+class _Resp:
+    def __init__(self, status, payload):
+        self.status, self._payload, self.content_type = status, payload, "application/json"
+
+    async def json(self, **kw):
+        return self._payload
+
+    async def text(self):
+        return json.dumps(self._payload)
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *a):
+        return False
+
+
+class _Session:
+    def __init__(self, status, payload):
+        self.resp = _Resp(status, payload)
+
+    def post(self, *a, **kw):
+        return self.resp
+
+    get = post
+
+
+_AIOHTTP = types.SimpleNamespace(ClientTimeout=lambda **kw: None)
+
+
+def _site_bet_json(src, typed):
+    ns = _lift_bot(src, ("_discord_bet_error",) + REFUSAL_PARTS, REFUSAL_ASSIGNS)
+    return ns["_discord_bet_error"]({"error": json.dumps({"detail": typed}), "status": 403}), typed, 300
+
+
+def _site_bet_raw(src, typed):
+    ns = _lift_bot(src, ("_discord_bet_error",) + REFUSAL_PARTS, REFUSAL_ASSIGNS)
+    return ns["_discord_bet_error"]({"error": "<" + typed, "status": 502}), "<" + typed, 300
+
+
+def _site_modcase(src, typed):
+    ns = _lift_bot(src, ("_modcase_render", "_escape_md") + REFUSAL_PARTS, REFUSAL_ASSIGNS)
+    return ns["_modcase_render"](500, {"detail": {"error": typed}}, {"label": "Mute", "case_id": "abcdef12"},
+                                 "Mod"), typed, 180
+
+
+def _site_modlog(src, typed):
+    ns = _lift_bot(src, ("_modlog_error",) + REFUSAL_PARTS, REFUSAL_ASSIGNS + (
+        "MODLOG_UNREACHABLE", "MODLOG_REFUSED", "MODLOG_NOT_FOUND", "MODLOG_AMBIGUOUS"))
+    return ns["_modlog_error"](422, {"detail": typed}), typed, 200
+
+
+_AER_ASSIGNS = ("AER_PREFIX", "_AER_AGAIN", "AER_TEXTS", "_AER_UNAVAILABLE", "AER_REFUSED")
+
+
+_AER_WORD_PARTS = ("_aer_word", "_aer_text", "_aer_refusal_word", "_aer_enc_text", "_aer_escaped_set")
+
+
+def _aer_word_of(src):
+    return _lift_bot(src, _AER_WORD_PARTS + REFUSAL_PARTS,
+                     REFUSAL_ASSIGNS + _AER_ASSIGNS + ("AER_ESC",))["_aer_word"]
+
+
+def _site_aer_field(src, typed):
+    typed = "a_b_ c;d_e_"                   # the grammar the bot reads: [a-z_ ;]{1,60}
+    return _aer_word_of(src)(400, {"detail": "bad_argument (%s)" % typed}), typed, 60
+
+
+def _site_aer_word(src, typed):
+    typed = "x_y_"                          # the grammar the bot reads: [a-z_]{1,40}
+    return _aer_word_of(src)(503, {"detail": "unavailable (%s)" % typed}), typed, 40
+
+
+def _site_mail_reply(src, typed):
+    sent = []
+
+    async def post(payload):
+        return 403, {"detail": typed}
+
+    class _Ch:
+        async def send(self, text, **kw):
+            sent.append(text)
+
+    ns = _lift_bot(src, ("_post_mail_reply",) + REFUSAL_PARTS, REFUSAL_ASSIGNS, {"_mail_reply_post": post})
+    assert _run(ns["_post_mail_reply"](_Ch(), 1, "SCR-X", "hi", "9")) == "HANDLED"
+    return sent[0], typed, 300
+
+
+def _site_mute(src, typed):
+    sent = []
+
+    async def defer(**kw):
+        return None
+
+    async def fsend(text, **kw):
+        sent.append(text)
+
+    inter = types.SimpleNamespace(
+        channel=types.SimpleNamespace(id=5), user=types.SimpleNamespace(id=7, display_name="Mod", name="mod"),
+        response=types.SimpleNamespace(defer=defer, send_message=fsend), followup=types.SimpleNamespace(send=fsend))
+    ns = _lift_bot(src, ("ctx_mute_chatter",) + REFUSAL_PARTS, REFUSAL_ASSIGNS, {
+        "CHAT_LANG_BY_CHAN": {5: "en"}, "_chat_mod_perms_ok": lambda ch, u: True,
+        "http_session": _Session(403, {"detail": typed}), "API_SECRET_KEY": "k", "API_BASE_URL": "http://api",
+        "aiohttp": _AIOHTTP, "discord": types.SimpleNamespace(Interaction=object, Message=object)})
+    _run(ns["ctx_mute_chatter"](inter, types.SimpleNamespace(id=11)))
+    return sent[-1], typed, 180
+
+
+def _site_link(src, typed):
+    sent = []
+
+    async def api_post(path, params=None, timeout=None):
+        return {"error": typed, "status": 400}
+
+    class _Ctx:
+        author = types.SimpleNamespace(id=3, name="n", global_name="g", display_name="g")
+
+        async def send(self, text, **kw):
+            sent.append(text)
+
+    ns = _lift_bot(src, ("cmd_link",) + REFUSAL_PARTS, REFUSAL_ASSIGNS, {"api_post": api_post})
+    _run(ns["cmd_link"](_Ctx(), code="abc123"))
+    return sent[0], typed, 300
+
+
+def _site_unsignup(src, typed):
+    ns = _lift_bot(src, ("_tournament_unsignup",) + REFUSAL_PARTS, REFUSAL_ASSIGNS, {
+        "http_session": _Session(409, {"detail": typed}), "API_SECRET_KEY": "k", "API_BASE_URL": "http://api",
+        "aiohttp": _AIOHTTP})
+    ok, detail = _run(ns["_tournament_unsignup"]("t", "765", 1))
+    assert ok is False
+    return detail, typed, 300
+
+
+def _site_checkin(src, typed):
+    ns = _lift_bot(src, ("_tournament_checkin_response",) + REFUSAL_PARTS, REFUSAL_ASSIGNS, {
+        "http_session": _Session(409, {"detail": typed}), "API_SECRET_KEY": "k", "API_BASE_URL": "http://api",
+        "aiohttp": _AIOHTTP, "_TDLC_RESULTS": ()})
+    ok, _r, _d, detail = _run(ns["_tournament_checkin_response"]("m", "765", "yes"))
+    assert ok is False
+    return detail, typed, 300
+
+
+# (site, driver, the helper call at that site, the same text with the helper taken out)
+REFUSAL_SITES = [
+    ("bet, the api's detail", _site_bet_json, '_api_refusal_text(json.loads(err).get("detail") or err)',
+     '(json.loads(err).get("detail") or err)'),
+    ("bet, a body that is not JSON", _site_bet_raw, "            return _api_refusal_text(err)\n",
+     "            return err\n"),
+    ("moderation case", _site_modcase, 'detail = _api_refusal_text(raw or "", 180)', 'detail = str(raw or "")[:180]'),
+    ("moderator log", _site_modlog,
+     '(_api_refusal_text(" ".join(str(detail).split()), 200) if detail else "bad request")',
+     '(" ".join(str(detail).split()) if detail else "bad request")'),
+    ("evidence, bad argument", _site_aer_field,
+     'field = _aer_refusal_word(detail[len("bad_argument"):].strip()[1:-1])',
+     'field = detail[len("bad_argument"):].strip()[1:-1]'),
+    ("evidence, unavailable word", _site_aer_word, "shown, sentence = _aer_refusal_word(word), _AER_UNAVAILABLE",
+     "shown, sentence = word, _AER_UNAVAILABLE"),
+    ("mail reply", _site_mail_reply, "{_api_refusal_text(detail)}. The same rules", "{detail}. The same rules"),
+    ("chat mute", _site_mute, '_api_refusal_text(body.get("detail") or "", 180)', 'str(body.get("detail") or "")[:180]'),
+    ("link", _site_link, "{_api_refusal_text(result['error'])}", "{result['error']}"),
+    ("tournament leave", _site_unsignup, "return False, _api_refusal_text(detail, 300)", "return False, str(detail)[:300]"),
+    ("tournament check-in", _site_checkin, "return False, None, None, _api_refusal_text(detail or txt, 300)",
+     "return False, None, None, str(detail or txt)[:300]"),
+]
+
+
+def _refusal_ok(out, typed, limit):
+    """What is shown is the typed characters: the slot holds exactly one
+    _escape_text pass of the refusal within the slot's limit, and the typed
+    text does not stand raw in it."""
+    want = ESC(typed, limit)
+    return isinstance(out, str) and want in out and typed not in out and len(want) <= limit
+
+
+@pytest.mark.parametrize("site", [s[0] for s in REFUSAL_SITES])
+def test_each_refusal_site_shows_the_refusal_as_typed_within_its_bound(site):
+    (s,) = [s for s in REFUSAL_SITES if s[0] == site]
+    for typed in (REFUSAL, REFUSAL_LONG):
+        out, typed_used, limit = s[1](TEXT, typed)
+        assert _refusal_ok(out, typed_used, limit), (site, out)
+        if len(ESC(typed_used)) <= limit:
+            assert shown(ESC(typed_used, limit)) == typed_used and not live(ESC(typed_used, limit))
+
+
+@pytest.mark.parametrize("site", [s[0] for s in REFUSAL_SITES])
+def test_each_refusal_site_without_its_helper_fails(site):
+    (s,) = [s for s in REFUSAL_SITES if s[0] == site]
+    assert TEXT.count(s[2]) == 1, s[2]
+    out, typed_used, limit = s[1](TEXT.replace(s[2], s[3], 1), REFUSAL)
+    assert not _refusal_ok(out, typed_used, limit), (site, out)
+
+
+def test_a_doubled_refusal_pass_or_a_helper_that_escapes_nothing_fails():
+    """Two passes show backslashes; a helper whose body escapes nothing fails
+    every site."""
+    old = 'detail = _api_refusal_text(raw or "", 180)'
+    out, typed, limit = _site_modcase(TEXT.replace(old, 'detail = _api_refusal_text(_escape_text(raw or ""), 180)', 1),
+                                      REFUSAL)
+    assert not _refusal_ok(out, typed, limit), out
+    body = "    return _escape_text(value, limit)\n"
+    assert TEXT.count(body) == 1
+    hollow = TEXT.replace(body, "    return str(value)[:limit]\n", 1)
+    # The evidence report's words pass _aer_refusal_word (its privacy pass's
+    # display writer, then the grammar's one mark): hollowed the same way.
+    aer_body = '    return _aer_enc_text(s).replace("_", chr(0x5C) + "_")\n'
+    assert hollow.count(aer_body) == 1
+    hollow = hollow.replace(aer_body, "    return _aer_enc_text(s)\n", 1)
+    for s in REFUSAL_SITES:
+        out, typed, limit = s[1](hollow, REFUSAL)
+        assert not _refusal_ok(out, typed, limit), s[0]
+
+
+_AER_GRAMMAR = 'if not re.fullmatch(r"[a-z_ ;]{1,60}", s):'
+_AER_GRAMMAR_WORDS = ("a", "_", "__x__", "a_b_ c;d_e_", " _y_ ", ";;", "x" * 60, "_" * 60, "a b" * 20)
+# Every mark a markdown slot reads, each inside a word and each line-opening
+# mark at the start of a line, and values outside the grammar's alphabet or
+# its bound.
+_AER_MARKS = "*~`|>#-+.()[]<@:/!" + chr(0x5C)
+_AER_OUTSIDE = tuple("a%sb" % m for m in _AER_MARKS) + tuple("%s a" % m for m in "#>-+*") + (
+    "1. a", "", "A", "x" * 61, "a" + chr(10) + "b", "https://e.example", "<@&1>", "1",
+    "a" + chr(0x200B) + "b")
+
+
+def _aer_word_ok(ns):
+    """The values shown wrong: every value must show either as the fixed word
+    or as the free-text pass of exactly what was typed, and every grammar
+    word must show."""
+    f, esc = ns["_aer_refusal_word"], ns["_escape_text"]
+    bad = [w for w in _AER_OUTSIDE if f(w) not in ("unreadable", esc(w))]
+    bad += [w for w in _AER_GRAMMAR_WORDS if f(w) != esc(w)]
+    return bad
+
+
+def _aer_word_ns(src):
+    return _lift_bot(src, ("_aer_refusal_word", "_aer_enc_text", "_aer_escaped_set") + REFUSAL_PARTS,
+                     REFUSAL_ASSIGNS + ("AER_ESC",))
+
+
+def test_the_evidence_refusal_word_equals_the_free_text_pass_over_its_grammar():
+    """The helper checks its own grammar ([a-z_ ;]{1,60}): a grammar word is
+    shown as _escape_text writes it, uncut; any other value (each markdown
+    mark, an address, a mention, a line break, past the bound) is the fixed
+    word `unreadable`."""
+    ns = _aer_word_ns(TEXT)
+    assert _aer_word_ok(ns) == []
+    assert [w for w in _AER_OUTSIDE if ns["_aer_refusal_word"](w) != "unreadable"] == []
+
+
+@pytest.mark.parametrize("mark", list("*~`|>#[]<@-+"))
+def test_the_evidence_refusal_grammar_widened_by_one_mark_fails(mark):
+    """Mutant per mark: the helper's grammar admits one more markdown mark and
+    the check above turns red; the helper without its check fails too. (A
+    backslash is not among them: the report's encoder doubles it, which is
+    what _escape_text writes, so a grammar that admitted it would still show
+    it as typed.)"""
+    assert TEXT.count(_AER_GRAMMAR) == 1
+    widened = _AER_GRAMMAR.replace("[a-z_ ;]", "[a-z_ ;%s]" % re.escape(mark))
+    assert _aer_word_ok(_aer_word_ns(TEXT.replace(_AER_GRAMMAR, widened, 1)))
+    assert _aer_word_ok(_aer_word_ns(TEXT.replace(_AER_GRAMMAR, "if False:", 1)))
+
+
+def test_the_refusal_check_is_not_blind_and_fixed_sentences_stay_as_written():
+    """Control: the check refuses the raw refusal and a cut one, and the
+    bot's own sentences pass no helper."""
+    assert not _refusal_ok("x " + REFUSAL, REFUSAL, 300)
+    assert not _refusal_ok("x " + ESC(REFUSAL_LONG), REFUSAL_LONG, 300)
+    ns = _lift_bot(TEXT, ("_discord_bet_error", "_modlog_error") + _AER_WORD_PARTS + REFUSAL_PARTS,
+                   REFUSAL_ASSIGNS + _AER_ASSIGNS + ("AER_ESC", "MODLOG_UNREACHABLE", "MODLOG_REFUSED", "MODLOG_NOT_FOUND",
+                                                     "MODLOG_AMBIGUOUS"))
+    assert ns["_discord_bet_error"](None) == "Bet failed: backend unreachable."
+    assert "(bad request)" in ns["_modlog_error"](400, {})
+    assert ns["_aer_word"](503, {"detail": "audit_unavailable"}).endswith(" (audit_unavailable)")
+    ns2 = _lift_bot(TEXT, ("_tournament_checkin_response",) + REFUSAL_PARTS, REFUSAL_ASSIGNS, {
+        "http_session": _Session(409, None), "API_SECRET_KEY": "k", "API_BASE_URL": "http://api",
+        "aiohttp": _AIOHTTP, "_TDLC_RESULTS": ()})
+    ns2["http_session"].resp.text = lambda: _empty()
+    assert _run(ns2["_tournament_checkin_response"]("m", "765", "yes"))[3] == "HTTP 409"
+
+
+async def _empty():
+    return ""
+
+
+_DETAIL_READ = re.compile(r'\.get\("detail"|\["detail"\]|\.get\("error"|\["error"\]|"error" in '
+                          r"|\.get\('detail'|\['detail'\]|\.get\('error'|\['error'\]|'error' in ")
+
+
+def _detail_reads(source):
+    """{innermost function: number of lines} of every line that reads an
+    answer's `detail` or `error`."""
+    spans = [(n.lineno, n.end_lineno, n.name) for n in ast.walk(ast.parse(source))
+             if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]
+    found = {}
+    for i, line in enumerate(source.split("\n"), 1):
+        if _DETAIL_READ.search(line):
+            inner = sorted((s for s in spans if s[0] <= i <= s[1]), key=lambda s: s[1] - s[0])
+            fn = inner[0][2] if inner else "<module>"
+            found[fn] = found.get(fn, 0) + 1
+    return found
+
+
+# Each function that reads `detail` or `error` (the order's 31 lines plus the
+# two single-quoted ones), sorted: (s) shows the text, through _api_refusal_text
+# (_aer_word: through _aer_refusal_word, the evidence report's grammar-checked
+# word helper); (t) compares a token or logs it and never shows it.
+_SHOWN_THROUGH = {"_aer_word": "_aer_refusal_word("}
+DETAIL_READS = {
+    "_post_mail_reply": ("s", 1), "ctx_mute_chatter": ("s", 1), "cmd_link": ("s", 2),
+    "_modcase_render": ("s", 2), "_tournament_unsignup": ("s", 1), "_tournament_checkin_response": ("s", 1),
+    "_discord_bet_error": ("s", 3), "_aer_word": ("s", 1), "_modlog_error": ("s", 1),
+    "_relay_threads": ("t", 1), "_access_token": ("t", 1), "_yt_get": ("t", 1), "_pc_detail": ("t", 1),
+    "_pc_api_bytes": ("t", 2), "cmd_pc_daily": ("t", 3), "_pc_open_verdict": ("t", 1),
+    "_pc_open_refusal": ("t", 1), "_pc_buy_bound": ("t", 1), "cmd_pc_collection": ("t", 1),
+    "cmd_pc_card": ("t", 1), "_pc_reveal_bytes": ("t", 1), "_pc_reveal_run": ("t", 1),
+    "_pc_reveal_refusal": ("t", 2), "_pc_reveal_opened": ("t", 1), "_pc_reveal_binder": ("t", 1),
+}
+
+
+def test_every_detail_or_error_read_of_the_bot_is_sorted():
+    """Every read stands in DETAIL_READS with its count; every (s) function
+    passes its helper; every (t) function does not need it. Control: a
+    planted read in a new function is found."""
+    assert _detail_reads(TEXT) == {fn: n for fn, (_k, n) in DETAIL_READS.items()}
+    assert sum(n for _k, n in DETAIL_READS.values()) == 33
+    funcs = {n.name: n for n in ast.walk(TREE) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
+    for fn, (kind, _n) in DETAIL_READS.items():
+        if kind == "s":
+            assert _SHOWN_THROUGH.get(fn, "_api_refusal_text(") in ast.get_source_segment(TEXT, funcs[fn]), fn
+    planted = TEXT + '\n\ndef _planted(b):\n    return b.get("detail")\n'
+    assert _detail_reads(planted).get("_planted") == 1
+
+
+# The api composes its refusals plain: a refusal detail built with an escape
+# helper would pass twice (once in the api, once in the bot's _api_refusal_text).
+_API_ESCAPES = re.compile(r"escape|_mail_discord_safe|_stream_md_escape")
+
+
+def _api_refusal_findings(source, path):
+    out, seen = [], 0
+    for c in ast.walk(ast.parse(source)):
+        if not isinstance(c, ast.Call):
+            continue
+        f = c.func
+        name = f.attr if isinstance(f, ast.Attribute) else getattr(f, "id", "")
+        if name == "HTTPException":
+            parts = [k.value for k in c.keywords if k.arg == "detail"] + list(c.args[1:2])
+        elif name == "_aer_fail":
+            parts = list(c.args[1:2])
+        else:
+            continue
+        seen += 1
+        for p in parts:
+            for inner in ast.walk(p):
+                if isinstance(inner, ast.Call):
+                    g = inner.func
+                    gname = g.attr if isinstance(g, ast.Attribute) else getattr(g, "id", "")
+                    if _API_ESCAPES.search(gname):
+                        out.append("%s:%d refusal detail built with %s" % (path, c.lineno, gname))
+    return out, seen
+
+
+def test_no_api_refusal_is_built_with_an_escape_helper():
+    """Control: the scan sees the api's refusals (more than 1000), and a copy
+    of main.py whose ban refusal escapes the stored reason is a finding."""
+    total = 0
+    api_dir = os.path.join(os.path.dirname(SRC), "api")
+    for name in sorted(os.listdir(api_dir)):
+        if name.endswith(".py"):
+            src = _api_source(name)
+            found, seen = _api_refusal_findings(src, name)
+            assert found == [], found
+            total += seen
+    assert total > 1000, total
+    main = _api_source("main.py")
+    old = "detail=f\"Banned: {reason or 'violation'}\""
+    assert main.count(old) == 1
+    found, _ = _api_refusal_findings(main.replace(
+        old, "detail=f\"Banned: {_dtext.escape_text(reason or 'violation')}\"", 1), "main.py")
+    assert len(found) == 1 and "escape_text" in found[0], found
+
+
+# -- II. the release tag: escaped where shown, raw as anchor, cursor and address -------
+
+TAG = "_v1_ x__y__"
+
+
+def _announce(src, sent_ok):
+    replies, cursors = [], []
+
+    async def send_chunks(tag, msgs):
+        cursors.append(tag)
+        return sent_ok
+
+    class _GH:
+        def __init__(self, *a, **kw):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        def get(self, *a, **kw):
+            return _Resp(200, {"tag_name": TAG, "name": "n", "body": ""})
+
+    class _Ctx:
+        author = types.SimpleNamespace(guild_permissions=types.SimpleNamespace(manage_messages=True))
+
+        async def reply(self, text, **kw):
+            replies.append(text)
+
+    ns = _lift_bot(src, ("announce_release", "_escape_md", "_escape_text") + (), HELPER_PARTS, {
+        "aiohttp": types.SimpleNamespace(ClientSession=_GH, ClientTimeout=lambda **kw: None),
+        "GITHUB_RELEASES_REPO": "o/r", "_format_release_message": lambda p: ["m"],
+        "_send_release_chunks": send_chunks, "_last_release_tag": None, "_release_poller_initialized": False})
+    _run(ns["announce_release"](_Ctx()))
+    return replies, cursors, ns
+
+
+@pytest.mark.parametrize("sent_ok,lead", [(True, "Posted "), (False, "Posting ")])
+def test_the_release_confirmations_show_the_tag_as_typed(sent_ok, lead):
+    replies, cursors, ns = _announce(TEXT, sent_ok)
+    assert len(replies) == 1 and replies[0].startswith(lead + NAME(TAG, 100) + " "), replies
+    assert TAG not in replies[0] and shown(NAME(TAG, 100)) == TAG
+    # control: the cursor and the stored anchor keep the raw tag
+    assert cursors == [TAG]
+    assert ns["_last_release_tag"] == (TAG if sent_ok else None)
+
+
+RELEASE_TAG_MUTANTS = [
+    ('f"Posted {_escape_md(tag, 100)} to', 'f"Posted {tag} to', True),
+    ('f"Posting {_escape_md(tag, 100)} stopped', 'f"Posting {tag} stopped', False),
+]
+
+
+@pytest.mark.parametrize("old,new,sent_ok", RELEASE_TAG_MUTANTS)
+def test_a_release_confirmation_without_the_helper_fails(old, new, sent_ok):
+    assert TEXT.count(old) == 1
+    replies, _c, _ns = _announce(TEXT.replace(old, new, 1), sent_ok)
+    assert TAG in replies[0] and NAME(TAG, 100) not in replies[0]
+
+
+def test_a_composed_release_address_keeps_the_raw_tag():
+    url = _lift(("_release_url",), extra={"GITHUB_RELEASES_REPO": "o/r"})["_release_url"]
+    assert url({"tag_name": TAG}) == "https://github.com/o/r/releases/tag/" + TAG
+    assert url({"tag_name": TAG, "html_url": "https://h/x"}) == "https://h/x"
+
+
+# Every key the bot reads from a release, with its class (II).
+RELEASE_KEYS = {"tag_name": "name", "name": "name", "body": "free", "html_url": "system"}
+
+
+def test_every_release_key_the_bot_reads_has_its_class():
+    """`body` is system only through its OVERRIDES row (shown as written, the
+    standing ruling); the tag is raw only in the address (OVERRIDES)."""
+    fns = ("_format_release_message", "_release_url", "_release_footer", "announce_release",
+           "poll_github_releases", "_tag_announced_in_channel")
+    keys = set()
+    for n in TREE.body:
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name in fns:
+            for c in ast.walk(n):
+                if isinstance(c, ast.Call) and isinstance(c.func, ast.Attribute) and c.func.attr == "get" \
+                        and isinstance(getattr(c.func.value, "id", None), str) \
+                        and c.func.value.id in ("release_json", "payload", "_ppayload") \
+                        and c.args and isinstance(c.args[0], ast.Constant):
+                    keys.add(c.args[0].value)
+    assert keys == set(RELEASE_KEYS), keys
+    for k, cls in RELEASE_KEYS.items():
+        assert KEYS[k] == cls, k
+    assert OVERRIDES[("_format_release_message", "body")][0] == "system"
+    assert OVERRIDES[("_release_url", "tag_name")][0] == "system"
+
+
+# -- the two helper copies' sources hold no literal line break but CR and LF ------------
+# str.splitlines breaks a line at these and the tokenizer does not, so a literal
+# one shifts every line index taken with splitlines below it (the route
+# manifest's indexed segments). The patterns write them as escapes.
+_SPLITLINES_ONLY = tuple(chr(c) for c in (0x0B, 0x0C, 0x1C, 0x1D, 0x1E, 0x85, 0x2028, 0x2029))
+
+
+def _literal_breaks(text):
+    return [(i, hex(ord(ch))) for i, line in enumerate(text.split(chr(10)), 1)
+            for ch in line if ch in _SPLITLINES_ONLY]
+
+
+def test_the_helper_sources_hold_no_literal_line_or_paragraph_separator():
+    """discord_bot.py and api/discord_text.py: no line or paragraph separator
+    (nor any other break only str.splitlines sees) stands in the source as a
+    literal character. Control: one planted in a copy of each is found."""
+    for src in (TEXT, _api_source("discord_text.py")):
+        assert _literal_breaks(src) == []
+        for ch in (chr(0x2028), chr(0x2029)):
+            planted = src.replace("import re", "import re  # " + ch, 1)
+            assert planted != src and _literal_breaks(planted), hex(ord(ch))
