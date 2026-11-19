@@ -52,7 +52,7 @@
           ],
           "main",
           "admin_alert_create",
-          "1fe58944274c741c81ef8f62a33ca1cec2e95585"
+          "7f0eaadf7cb1f51437968202a7f909df7282c362"
         ],
         [
           "/api/v1/admin/alerts/list",
@@ -133,7 +133,7 @@
           ],
           "main",
           "admin_cosmetic_review",
-          "c4d26584fbe559da90b1924f1840c291bee50182"
+          "dd825dd4ac4738ec365d37a9820696957d3f6e6a"
         ],
         [
           "/api/v1/admin/cosmetic-submissions",
@@ -754,7 +754,7 @@
           ],
           "main",
           "pc_discard_print",
-          "59e14f1e5ef5f916b493c763700be95f315fb840"
+          "1eb8491bb9427c14b3bf72548b21ae42de284a42"
         ],
         [
           "/api/v1/pc/settings",
@@ -1525,7 +1525,7 @@
           ],
           "main",
           "broadcast_target",
-          "f6b7ed4fb3fd6c895f7fe1d4f95d73b32d109671"
+          "ff8fc668b36ead04953831371ea4e743abd633c3"
         ],
         [
           "/api/v1/chat/moderate/bridge-unmute",
@@ -1597,7 +1597,7 @@
           ],
           "main",
           "chat_moderate_spam_pattern_add",
-          "c4303106c3f9827e5d133d787ac53d73e98fe784"
+          "fff757bf867e4c26c1cd60ae8d56a448e73b6456"
         ],
         [
           "/api/v1/chat/moderate/spam-patterns/revoke",
@@ -1624,7 +1624,7 @@
           ],
           "main",
           "post_chat_from_discord",
-          "1ed05165cc73567d2decabb508de3b92c5556dd1"
+          "8f213dc2282f1a3618ead0b6a66856ef23be5da8"
         ],
         [
           "/api/v1/chat/recent",
@@ -1867,7 +1867,7 @@
           ],
           "main",
           "health_check",
-          "b37d3b6bb42250933c78b80163562c05bf6c63f7"
+          "59929d3d9be84ac8ad58fb918fac93924718a1a0"
         ],
         [
           "/api/v1/i18n/approved",
@@ -2020,7 +2020,7 @@
           ],
           "main",
           "bridge_stream_chat",
-          "7dad6ec2207a5b8978895507791be2313540b2c6"
+          "b2174c7b1f4535403626812fcefb4721fa0b0d71"
         ],
         [
           "/api/v1/internal/chat/bridge-moderation",
@@ -2873,7 +2873,7 @@
           [],
           "main",
           "ws_chat",
-          "950c1c842a57859a2bd53ceaa926c683a152aa9f"
+          "4da5ed47cd30baae70b107babbc579bae0c00db2"
         ],
         [
           "/api/v1/rating-preview/2v2",
@@ -3062,7 +3062,7 @@
           ],
           "main",
           "mail_send",
-          "ac3a186845b12aeb150ea8c693210e96b03200a2"
+          "dd54474cd2b97c6baff2d340bf51dec466244677"
         ],
         [
           "/api/v1/mail/blocks",
@@ -3170,7 +3170,7 @@
           ],
           "main",
           "mail_reply",
-          "55a5db7876a0d017d2d6362161e718187c0ac8ab"
+          "4569a0dbd4f1e8462b79d3e0bb5f0d71c29a6f23"
         ],
         [
           "/api/v1/mail/{message_id}/report",
@@ -3179,7 +3179,7 @@
           ],
           "main",
           "mail_report",
-          "44c271b6f25eb8c7d5318eb874cf179d0128d0fc"
+          "8ef7b1c3326a95c673a952d605bdf09b31d9fc11"
         ],
         [
           "/api/v1/report",
@@ -3473,7 +3473,7 @@
           ],
           "tournaments",
           "force_vote",
-          "9d0190a1999d21f686223527a81505c5e462f6be"
+          "86d17c8bb97ea6175ade67a50b86f52b9cadd583"
         ],
         [
           "/api/v1/tournaments/{tournament_id}/matches/{match_id}/forfeit",
@@ -3509,7 +3509,7 @@
           ],
           "tournaments",
           "signup",
-          "cea371a794b9cf5f23a6198b04c9a3e7bee8a515"
+          "c076491db839e7b6beed9cb56f56257fb14f94c6"
         ],
         [
           "/api/v1/tournaments/{tournament_id}/time-vote",
@@ -3518,7 +3518,7 @@
           ],
           "tournaments",
           "time_vote",
-          "ca15ea5040b384a2dc24f0d0a7df2f06a61e42b1"
+          "cec794b2e4e86ee7b3b2656ed0bbfff65cca5bcd"
         ],
         [
           "/api/v1/tournaments/{tournament_id}/unsignup",
@@ -3692,7 +3692,7 @@
           ],
           "main",
           "admin_seat_evidence",
-          "c2fb102296cbface260c5c3695d75defa6d57343"
+          "dc50cb5efe0838b32e3f9f067558c6e6c7c436a7"
         ],
         [
           "/api/v1/client/compat-outcome",
@@ -3734,7 +3734,7 @@
           ],
           "mail_discord",
           "mail_relay_threads",
-          "b2d07aaa7306f4ce1714f97de54c485adce2adeb"
+          "d4432b6fcf282c53d5d07af050ba90a738cbc701"
         ],
         [
           "/api/v1/internal/mail/reply-from-discord",
@@ -3743,7 +3743,7 @@
           ],
           "mail_discord",
           "mail_reply_from_discord",
-          "766ed17d976f50cb2a536f3c158f3b253000e9ad"
+          "b71168e8c8f7115aed619dc195732ae30b30ceed"
         ]
       ]
     },
@@ -3773,7 +3773,7 @@
           ],
           "main",
           "pc_discard_batch",
-          "af30865ba6e603408db23034e5a58042312bf90d"
+          "30de058c9fe3ca5cc4e59e6b07318e62c2ecc0c6"
         ],
         [
           "/api/v1/pc/face/preview",
@@ -3833,7 +3833,7 @@
           ],
           "match_hold",
           "match_hold_open",
-          "3000b48c40d5d359066cc0c05133756a4623e3f2"
+          "651543fb3378180108bee5a6e19f1baa3f6c8dbe"
         ],
         [
           "/api/v1/match/hold/{hold_id}/bind",
@@ -3926,7 +3926,7 @@
           ],
           "main",
           "admin_card_evidence",
-          "b097c2081a7d8a80ab54ef5e309f6eff5ab91f50"
+          "e2b4b82be2fc6baba3d331a1e8b6c99a52ebd0c4"
         ],
         [
           "/api/v1/admin/card-pool-census",
@@ -3959,7 +3959,7 @@
           ],
           "main",
           "admin_combat_evidence",
-          "f8bd77e59c45a48299da3b4fff90968af9bec077"
+          "d3e60494c18f580ddc387567a2f4e0f2ef27ff0b"
         ],
         [
           "/api/v1/matches/combat-evidence",
@@ -3983,7 +3983,7 @@
           ],
           "main",
           "invite_send",
-          "d90267e4b93c033cdc827c75cba3dce1c5a52062"
+          "66687816151bb9f5001869c39751abb94178734f"
         ],
         [
           "/api/v1/invites/{invite_id}/accept",
@@ -4112,7 +4112,7 @@
       [
         "main",
         "lifespan",
-        "0b18c6f2d93651416567d808dd885340b63e0e69"
+        "92f5c370a9a73925d14120c3237b2d96bf57599a"
       ]
     ]
   },
