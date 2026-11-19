@@ -7977,9 +7977,10 @@ async def poll_bug_reports():
             bug_num = r.get("bug_number") or 0
             who = r.get("display_name") or r.get("steam_id") or "Unknown"
             mod = r.get("mod_version") or "?"
-            desc = (r.get("description") or "").strip()
-            if len(desc) > 1500:
-                desc = desc[:1500] + "... (truncated — full text in F5 admin viewer)"
+            # The player's own text: escaped once, here, and cut on the escaped
+            # form (_escape_text), so no escape pair is split.
+            desc = _escape_text((r.get("description") or "").strip(), 1560,
+                                more="... (truncated — full text in F5 admin viewer)")
             embed = discord.Embed(
                 title=f"#{bug_num} — [{sev.upper()} / {cat.upper()}]",
                 description=desc or "(no description)",
@@ -8099,9 +8100,9 @@ async def poll_bug_report_events():
 
             bug_num = e.get("bug_number") or 0
             actor = e.get("actor_name") or "Someone"
-            snippet = (e.get("description_snippet") or "").strip()
-            if len(snippet) > 100:
-                snippet = snippet[:100] + "..."
+            # The report's opening words and every comment below are typed
+            # text: each is escaped once, where its field is built.
+            snippet = _escape_text((e.get("description_snippet") or "").strip(), 103)
             if etype == "created":
                 embed = discord.Embed(
                     title=f"✅ Bug report #{bug_num} received",
@@ -8131,7 +8132,7 @@ async def poll_bug_report_events():
                 if snippet:
                     embed.add_field(name="Your report", value=snippet, inline=False)
                 if e.get("comment"):
-                    embed.add_field(name="Note from " + _escape_md(actor), value=e["comment"][:1024], inline=False)
+                    embed.add_field(name="Note from " + _escape_md(actor), value=_escape_text(e["comment"], 1024), inline=False)
             elif etype == "comment":
                 comment_text = (e.get("comment") or "").strip()
                 if not comment_text:
@@ -8143,7 +8144,7 @@ async def poll_bug_report_events():
                 )
                 if snippet:
                     embed.add_field(name="Your report", value=snippet, inline=False)
-                embed.add_field(name=f"{_escape_md(actor)} says", value=comment_text[:1024], inline=False)
+                embed.add_field(name=f"{_escape_md(actor)} says", value=_escape_text(comment_text, 1024), inline=False)
             else:
                 # Unknown event type — nothing to send; ack so it doesn't loop.
                 seen_bug_events.add(eid)
@@ -8192,9 +8193,9 @@ async def _post_bug_event_to_thread(e):
         new_s = (e.get("new_status") or "?").upper()
         text_out = f"**{_escape_md(actor)}** → **{new_s}**"
         if e.get("comment"):
-            text_out += f"\n{e['comment'][:1500]}"
+            text_out += "\n" + _escape_text(e["comment"], 1500)
     else:
-        text_out = f"**{_escape_md(actor)}:** {(e.get('comment') or '')[:1800]}"
+        text_out = f"**{_escape_md(actor)}:** {_escape_text(e.get('comment'), 1800)}"
     try:
         if getattr(thread, "archived", False):
             await thread.edit(archived=False)

@@ -287,3 +287,161 @@ def test_the_helper_calls_no_library_escape():
     assert len(picked) == 1
     calls = {ast.unparse(c.func) for c in ast.walk(picked[0]) if isinstance(c, ast.Call)}
     assert not any("discord" in c or "escape_markdown" in c or "escape_mentions" in c for c in calls), calls
+
+
+# -- 2. the sites ----------------------------------------------------------------
+
+TYPED = "**b** <@&42> @here\n# h\n[x](https://e.example/a_b)"
+SHOWN = "\\*\\*b\\*\\* \\<\\@&42\\> \\@here\n\\# h\n\\[x\\](https://e.example/a_b)"
+
+
+def test_the_site_text_is_shown_as_typed():
+    """The text the site tests send, checked once against the helper."""
+    assert ESC(TYPED) == SHOWN and shown(SHOWN) == TYPED and live(SHOWN) == []
+
+
+class _Embed:
+    def __init__(self, title=None, description=None, color=None, timestamp=None, **kw):
+        self.title, self.description = title, description
+        self.fields, self.footer = [], None
+
+    def add_field(self, name=None, value=None, inline=True):
+        self.fields.append((name, value))
+
+    def set_footer(self, text=None, **kw):
+        self.footer = text
+
+    def field(self, name):
+        (value,) = [v for n, v in self.fields if n == name]
+        return value
+
+
+class _NotFound(Exception):
+    pass
+
+
+class _Forbidden(Exception):
+    pass
+
+
+def _discord():
+    return types.SimpleNamespace(
+        Embed=_Embed, NotFound=_NotFound, Forbidden=_Forbidden,
+        AllowedMentions=types.SimpleNamespace(none=lambda: "none"),
+        utils=types.SimpleNamespace(escape_markdown=lambda s: re.sub(r"([\\*_~|`])", r"\\\1", s)))
+
+
+class _Sink:
+    def __init__(self):
+        self.sent = []
+
+    async def send(self, content=None, embed=None, **kw):
+        self.sent.append(embed if embed is not None else content)
+        return self
+
+    async def create_thread(self, **kw):
+        return None
+
+    async def edit(self, **kw):
+        return None
+
+
+async def _noop(*a, **kw):
+    return None
+
+
+def _run(coro):
+    return asyncio.run(coro)
+
+
+def test_a_bug_report_post_shows_the_description_as_typed():
+    channel = _Sink()
+
+    async def api_get(path, timeout=8.0):
+        return {"reports": [{"id": "r1", "bug_number": 7, "display_name": "P", "mod_version": "1",
+                             "severity": "low", "category": "ui", "description": "  " + TYPED + " "}]}
+
+    ns = _lift(("poll_bug_reports", "_escape_md", "_escape_text"), HELPER_PARTS, {
+        "discord": _discord(), "BUG_REPORTS_CHANNEL_ID": 1, "api_get": api_get, "api_post": _noop,
+        "bot": types.SimpleNamespace(get_channel=lambda i: channel), "seen_bug_reports": set()})
+    _run(ns["poll_bug_reports"]())
+    (embed,) = channel.sent
+    assert embed.description == SHOWN
+
+
+def test_a_long_bug_report_is_cut_on_the_escaped_text():
+    channel = _Sink()
+
+    async def api_get(path, timeout=8.0):
+        return {"reports": [{"id": "r2", "bug_number": 8, "display_name": "P", "description": "*" * 2000}]}
+
+    ns = _lift(("poll_bug_reports", "_escape_md", "_escape_text"), HELPER_PARTS, {
+        "discord": _discord(), "BUG_REPORTS_CHANNEL_ID": 1, "api_get": api_get, "api_post": _noop,
+        "bot": types.SimpleNamespace(get_channel=lambda i: channel), "seen_bug_reports": set()})
+    _run(ns["poll_bug_reports"]())
+    (embed,) = channel.sent
+    more = "... (truncated — full text in F5 admin viewer)"
+    assert len(embed.description) <= 1560 and embed.description.endswith(more)
+    assert live(embed.description[:-len(more)]) == []
+
+
+def _bug_events(events):
+    user = _Sink()
+
+    async def api_get(path, timeout=8.0):
+        return {"events": events}
+
+    ns = _lift(("poll_bug_report_events", "_escape_md", "_escape_text"), HELPER_PARTS, {
+        "discord": _discord(), "api_get": api_get, "_post_bug_event_to_thread": _noop,
+        "_ack_bug_events": _noop, "seen_bug_events": set(),
+        "bot": types.SimpleNamespace(get_user=lambda i: user, fetch_user=_noop)})
+    _run(ns["poll_bug_report_events"]())
+    return user.sent
+
+
+def _event(eid, etype, **kw):
+    e = {"event_id": eid, "event_type": etype, "bug_number": 9, "reporter_discord_id": "5",
+         "reporter_steam_id": "1", "actor_steam_id": "2", "actor_name": "Admin", "description_snippet": ""}
+    e.update(kw)
+    return e
+
+
+def test_a_bug_report_dm_shows_the_report_snippet_as_typed():
+    (embed,) = _bug_events([_event("e1", "created", description_snippet=TYPED)])
+    assert embed.field("Your report") == SHOWN
+
+
+def test_a_status_change_dm_shows_the_note_as_typed():
+    (embed,) = _bug_events([_event("e2", "status_change", old_status="open", new_status="triaged",
+                                   comment=TYPED)])
+    assert embed.field("Note from Admin") == SHOWN
+
+
+def test_a_comment_dm_shows_the_comment_as_typed():
+    (embed,) = _bug_events([_event("e3", "comment", comment=TYPED)])
+    assert embed.field("Admin says") == SHOWN
+
+
+def _thread_post(event):
+    thread = _Sink()
+
+    async def bug_thread_for(channel, bug_num):
+        return thread
+
+    ns = _lift(("_post_bug_event_to_thread", "_escape_md", "_escape_text"), HELPER_PARTS, {
+        "BUG_REPORTS_CHANNEL_ID": 1, "_bug_thread_for": bug_thread_for,
+        "bot": types.SimpleNamespace(get_channel=lambda i: object())})
+    _run(ns["_post_bug_event_to_thread"](event))
+    (text,) = thread.sent
+    return text
+
+
+def test_a_thread_status_change_shows_the_comment_as_typed():
+    text = _thread_post({"event_type": "status_change", "bug_number": 9, "actor_name": "P",
+                         "new_status": "resolved", "comment": TYPED})
+    assert text == "**P** → **RESOLVED**\n" + SHOWN
+
+
+def test_a_thread_comment_shows_the_comment_as_typed():
+    text = _thread_post({"event_type": "comment", "bug_number": 9, "actor_name": "P", "comment": TYPED})
+    assert text == "**P:** " + SHOWN
