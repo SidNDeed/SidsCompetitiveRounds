@@ -133,6 +133,18 @@ ROW_SERIALIZED = {
         1, "a plain pre-check: the window's receipt takes the EXCLUSIVE identity guards of the "
            "game next, so a shared key here would be made exclusive there and two reporters of "
            "one game would wait for each other; the settle reads the ban again under the guards"),
+    # FIX-2: reads made under identity keys a helper of the transaction's one
+    # taking call already holds (exclusive), or a read that writes nothing.
+    ("main", "steam_auth"): (
+        1, "the early read before the Steam call takes no key and writes nothing: the transaction "
+           "ends before the call, and the writing transaction reads the ban again under the "
+           "account's exclusive key (_ban_lock_and_gate, exclusive=) before its first write"),
+    ("main", "_report_window_receive"): (
+        1, "the receipt's read, under the EXCLUSIVE identity guards _guard_identities took just "
+           "before for every account of the report, before its first write"),
+    ("main", "_moderation_case_act"): (
+        1, "the actor's read, under the EXCLUSIVE identity key _mail_lock_identities took just "
+           "before (actor and subject in one ordered pass), before its first write"),
 }
 # A row lock written before a locking-helper call in the same function, on a
 # table the ban core never locks.
@@ -613,10 +625,8 @@ _IDENTITY_KEY = re.compile(
     r"pg_advisory_xact_lock(_shared)?\(\s*hashtext\(\s*(:sid|CAST\(\s*:sid\s+AS\s+text\s*\))\s*\)\s*\)", re.I)
 _ONE = "takes the key of one account per transaction; it orders nothing"
 SINGLE_KEY_TAKERS = {
-    ("main", "steam_auth"): _ONE,
     ("main", "_enrollment_identity_gate"): _ONE,
     ("main", "_region_pings_store_task"): _ONE,
-    ("main", "report_casual_dc"): _ONE,
     ("main", "_portal_auth"): _ONE,
     ("main", "i18n_portal_session"): _ONE,
     ("main", "admin_i18n_sync_keys"): _ONE,
@@ -648,18 +658,12 @@ _EXCL_FIRST = "the key it takes exclusive later is taken exclusive in the helper
 SHARED_AND_EXCLUSIVE = {
     ("main", "submit_match"): "every player's key is taken exclusive first (_identity_lock_many); the "
                               "shared read then finds its keys held",
-    ("main", "steam_auth"): _EXCL_FIRST,
-    ("main", "report_casual_dc"): _EXCL_FIRST,
     ("main", "place_lobby_bet"): _EXCL_FIRST,
     ("main", "place_discord_lobby_bet"): _EXCL_FIRST + " (through place_lobby_bet)",
     ("main", "submit_ovt_match"): "the receipt's exclusive guards come before the settle's shared read; "
                                   "the route's own read is plain (ROW_SERIALIZED)",
     ("main", "submit_team_match"): "the receipt's exclusive guards come before the settle's shared read; "
                                    "the route's own read is plain (ROW_SERIALIZED)",
-    ("main", "internal_moderation_case_act"): (
-        "RESIDUAL: the moderator's shared key, then the target's exclusive key in the ban core. Two "
-        "moderators acting on each other at the same moment wait for each other until the server ends "
-        "one request; it moves no match result, rating, gold or another player's game"),
 }
 _EXCLUSIVE_KEY = re.compile(
     r"pg_advisory_xact_lock\(\s*hashtext\(\s*(:sid|CAST\(\s*:sid\s+AS\s+text\s*\))\s*\)\s*\)", re.I)

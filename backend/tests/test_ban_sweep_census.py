@@ -706,12 +706,14 @@ def test_mutant_a_row_lock_before_the_identity_lock_fails_the_census():
 def test_negative_control_the_row_serialized_entry_is_load_bearing():
     bad = B.unlocked_gate_reads(_api_modules(), row_serialized={})
     # every entry is load-bearing: the 2v2 DC report, and the 1v2 and 2v2
-    # report routes' plain pre-checks (FIX-1B point 3)
+    # report routes' plain pre-checks (FIX-1B point 3), and FIX-2's three:
+    # steam_auth's read before the Steam call, the receipt's read under the
+    # window guards, the case act's actor read under the mail lock
+    names = ("team_series_report_dc", "submit_ovt_match", "submit_team_match",
+             "steam_auth", "_report_window_receive", "_moderation_case_act")
     assert sorted(bad) == sorted(
-        "main.%s: 1 ban read(s) outside _ban_lock_and_gate, 0 listed" % n
-        for n in ("team_series_report_dc", "submit_ovt_match", "submit_team_match")), bad
-    assert set(B.ROW_SERIALIZED) == {("main", "team_series_report_dc"), ("main", "submit_ovt_match"),
-                                     ("main", "submit_team_match")}, sorted(B.ROW_SERIALIZED)
+        "main.%s: 1 ban read(s) outside _ban_lock_and_gate, 0 listed" % n for n in names), bad
+    assert set(B.ROW_SERIALIZED) == {("main", n) for n in names}, sorted(B.ROW_SERIALIZED)
     bad = B.row_locks_before_the_gate(_api_modules(), ok={})
     assert [b.split(":")[0] for b in bad] == ["main.link_discord"], bad
 

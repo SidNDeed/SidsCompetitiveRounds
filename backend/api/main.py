@@ -50264,11 +50264,13 @@ async def _pair_sitting_ended_by_ban(db, pid_a, pid_b, room, ranked: bool) -> bo
 
 
 def _ban_writer_refusal(exc: HTTPException, in_window: bool):
-    """A writer's ban refusal: inside a report window it is PERMANENT, so the
-    journaled window closes as refused and the janitor does not take it up
-    again; elsewhere the HTTP refusal itself."""
+    """A writer's ban refusal: inside a report window it is PERMANENT and no
+    report of the game gets past it, so the attempt is kept and the window is
+    closed as refused (match_report_window.close_refused: superseded_at set,
+    every held or journaled report of the game kept), and nothing settles it
+    afterwards; elsewhere the HTTP refusal itself."""
     if in_window:
-        return _mrw_mod().PermanentReportRefusal(exc)
+        return _mrw_mod().PermanentReportRefusal(exc, closes_window=True)
     return exc
 
 
@@ -57580,6 +57582,19 @@ async def _report_window_receive(db, mode, report):
         by_steam = await _match_hold._guard_identities(db, keys)
     if any(key not in by_steam for key in keys):
         raise HTTPException(404, "One or more players not registered")
+    # Bans part 2a (F4, FIX-2 class IV): every account the report names is
+    # read for a ban under the identity keys just taken (_guard_identities,
+    # exclusive, every key of the report in one ordered pass), BEFORE the first
+    # write of this transaction (a receipt, a journal row, a window row). A ban
+    # committed before this read refuses the report and nothing is journaled;
+    # a ban that commits after it waits for this transaction. The series row is
+    # read again under the same keys: one a ban's void ended answers as the
+    # settle cores answer (409 series_ended_by_ban), and nothing is journaled.
+    # At this point the transaction holds the identity keys only, no row lock.
+    await _ban_gate_any_or_raise(db, report.reported_by_steam_id, sorted(keys), None)
+    _refuse_record_ended_by_ban((await db.execute(
+        text("SELECT * FROM " + stable + " WHERE id = :sid"), {"sid": series_id})).mappings().first()
+        or {}, False)
     if (len(by_steam) != len(members) or set(by_steam.values()) != set(members)
             or report.reported_by_steam_id not in by_steam):
         return None
@@ -57753,6 +57768,11 @@ async def _report_window_janitor() -> dict:
                 if not mrw._window_terminal(window):
                     await mrw._keep_permanently_refused(
                         db, w["room_name"], w["game_id"], attempt)
+                    if ex.closes_window:
+                        # A ban refusal no report of this game gets past:
+                        # the window closes as refused (FIX-2 class IV).
+                        await mrw.close_refused(db, w["room_name"], w["game_id"],
+                                                await _match_hold._ctx_now(db))
                 await db.commit()
                 print(f"[HOLD] report window settle refused room={w['room_name']}: "
                       f"{type(ex).__name__}: {ex}")
