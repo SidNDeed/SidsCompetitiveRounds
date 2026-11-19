@@ -10588,6 +10588,13 @@ async def submit_match(report: MatchReport, request: Request, db: AsyncSession =
     # gate factored into get_or_create_player itself so every creator shares
     # it — deliberately not done here (it touches every caller); see TODO.
     _sids = [report.player1.steam_id, report.player2.steam_id]
+    # F2 hardening, checked BEFORE any lock: the reporter MUST be one of the
+    # two match participants (previously this defaulted to p2 when reported_by
+    # matched neither). Here, so that every identity key the transaction takes
+    # is taken by _identity_lock_many below: the ban read after it asks for the
+    # reporter's key too, and that key is then one it already holds.
+    if report.reported_by_steam_id not in _sids:
+        raise HTTPException(status_code=400, detail="reporter is not a participant in this match")
     # CAST spelled out: hashtext() has a single text signature, but an explicit
     # cast keeps asyncpg from having to infer the parameter type at all. A hash
     # collision between two different steam_ids is harmless — it costs one
@@ -10749,12 +10756,8 @@ async def submit_match(report: MatchReport, request: Request, db: AsyncSession =
     # Determine winner
     winner = p1 if report.p1_rounds_won > report.p2_rounds_won else p2
 
-    # Find the reporting player. F2 hardening: the reporter MUST be one of the two
-    # match participants. Previously this defaulted to p2 when reported_by matched
-    # neither — silently crediting/stamping a non-participant and accepting a report
-    # from someone who wasn't in the match. Reject instead.
-    if report.reported_by_steam_id not in (report.player1.steam_id, report.player2.steam_id):
-        raise HTTPException(status_code=400, detail="reporter is not a participant in this match")
+    # Find the reporting player: one of the two participants, refused otherwise
+    # before the identity locks above (F2 hardening).
     reporter = p1 if report.reported_by_steam_id == report.player1.steam_id else p2
     # The session check above binds this request to the reporter.
     await _mark_mod_seen(db, reporter, stamp_version=True)
@@ -23072,9 +23075,12 @@ async def report_casual_dc(
         raise HTTPException(status_code=400, detail="Cannot report yourself")
     await _check_steam_session(request, reporter_steam_id, db)
     # Bans part 2a (S4, BAN-R5): before the leaver's row can be created or a
-    # casual disconnect recorded.
-    await _ban_lock_and_gate(db, [leaver_steam_id], request, actor=reporter_steam_id,
-                             exclusive=[leaver_steam_id])
+    # casual disconnect recorded. The leaver's id as it is stored (stripped)
+    # is the key: its exclusive key below serializes the row's creator, and it
+    # is taken here, in the transaction's one taking call.
+    _lv = (leaver_steam_id or "").strip()
+    await _ban_lock_and_gate(db, [_lv], request, actor=reporter_steam_id,
+                             exclusive=[_lv])
 
     # The leaver may have NO players row, and that is the headline case rather
     # than an edge one: a vanilla opponent whose FIRST ever contact with a mod
@@ -23102,27 +23108,22 @@ async def report_casual_dc(
     # production are the two `photon_N` rows that leaked in once, and
     # photon_/unity_ are precisely the client's own "I could not resolve an
     # identity" fallbacks. 4..20 digits keeps it inside String(20).
-    _lv = (leaver_steam_id or "").strip()
     if not (4 <= len(_lv) <= 20 and _lv.isdigit()):
         raise HTTPException(status_code=422,
                             detail="leaver_steam_id must be a numeric account id")
     # Same discover-then-create advisory gate submit_match uses (#207): the
-    # lock keys on the VALUE, so it exists before the row does and makes this
-    # path serialize against the other creator of the same steam_id rather than
-    # racing it into a unique violation.
+    # leaver's identity key, taken EXCLUSIVE above (exclusive=), keys on the
+    # VALUE, so it exists before the row does and makes this path serialize
+    # against the other creator of the same steam_id rather than racing it
+    # into a unique violation.
     #
-    # Two locks are taken in this transaction, always in this order: the
-    # leaver's id key, then the 'casualdc:' rate key below. Nothing else in the
-    # codebase takes a 'casualdc:' key, and submit_match — the only other
-    # holder of id keys — takes id keys ONLY, so neither can be the middle of a
-    # wait chain. (The one residual is a hashtext collision between an id key
-    # and the rate key, which submit_match's own comment already accepts: it
+    # The identity keys of this transaction are all taken in that one ordered
+    # pass (the leaver exclusive, the reporter shared); the 'casualdc:' rate
+    # key below comes after them. Nothing else in the codebase takes a
+    # 'casualdc:' key, so it cannot be the middle of a wait chain. (The one
+    # residual is a hashtext collision between an id key and the rate key: it
     # costs a needless serialization, and in the worst case Postgres aborts one
     # side on its deadlock timeout and the client retries.)
-    await db.execute(
-        text("SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text)))"),
-        {"sid": _lv},
-    )
     # Fall back to the id when no name was sent: _clean_display_name treats the
     # id as "no name offered", which keeps a real stored name from being
     # clobbered and leaves a brand-new row with the placeholder rather than a
@@ -28699,31 +28700,34 @@ async def i18n_review(payload: dict, request: Request,
         " key_id, action, detail) VALUES (:sid, :role, :lang, :k, :act, :d)"
     ), {"sid": steam_id, "role": role, "lang": lang, "k": prop["key_id"],
         "act": action, "d": f"proposal {pid}" + (" (self-approved)" if action == "approve" and prop["proposer_steam_id"] == steam_id else "")})
-    if action == "approve":
-        # Translator titles for BOTH people behind the now-live string, in a
-        # SAVEPOINT each (learning #187): the review is the durable work and
-        # must commit even if a title grant hits a schema/data problem.
-        #
-        # CANONICAL ORDER, not proposer-first (find 2): each grant takes the
-        # contributor's advisory identity lock, so two approvals whose
-        # (proposer, reviewer) pairs are mirror images — A proposes/B reviews
-        # and B proposes/A reviews, committing concurrently — would take the
-        # two locks in opposite orders and ABBA-deadlock. Sorting the distinct
-        # contributors makes every caller take them in the same order.
-        #
-        # HONEST FAILURE MODE (find 3): a failed grant is re-evaluated only if
-        # that person contributes again. It does NOT self-heal on its own — an
-        # earlier comment here claimed it did, which was wrong. The backstop is
-        # re-running the back-grant half of migration 214, which is idempotent
-        # and grants exactly the tiers a contributor has earned.
-        for _who in sorted({w for w in (prop["proposer_steam_id"], steam_id) if w}):
-            try:
-                async with db.begin_nested():
-                    await _grant_translator_achievements(db, _who)
-            except Exception as _tex:  # noqa: BLE001
-                print(f"[I18N] translator title grant failed for {_who}: {_tex}"
-                      f" — re-run migration 214's back-grant to repair")
+    # The review commits FIRST, holding one identity key: the reviewer's,
+    # taken by _portal_auth.
+    _grant_to = (sorted({w for w in (prop["proposer_steam_id"], steam_id) if w}, key=identity_lock_key)
+                 if action == "approve" else [])
     await db.commit()
+    # Translator titles for BOTH people behind the now-live string, AFTER the
+    # review has committed, each in a transaction of its own that holds that
+    # contributor's identity key and no other (lesson 204: a transaction that
+    # holds at most one key is never the middle of a wait chain). Best-effort
+    # (learning #187): a failed grant is rolled back and logged, and never
+    # fails the review, which has already committed. No key is taken inside a
+    # savepoint (lesson 718).
+    #
+    # HONEST FAILURE MODE (find 3): a failed grant is re-evaluated only if
+    # that person contributes again. It does NOT self-heal on its own. The
+    # backstop is re-running the back-grant half of migration 214, which is
+    # idempotent and grants exactly the tiers a contributor has earned.
+    for _who in _grant_to:
+        try:
+            await _grant_translator_achievements(db, _who)
+            await db.commit()
+        except Exception as _tex:  # noqa: BLE001
+            try:
+                await db.rollback()
+            except Exception:  # noqa: BLE001
+                pass
+            print(f"[I18N] translator title grant failed for {_who}: {_tex}"
+                  f" — re-run migration 214's back-grant to repair")
     return {"proposal_id": pid, "status": "approved" if action == "approve" else "rejected"}
 
 
@@ -83812,6 +83816,12 @@ async def _moderation_case_act(db: AsyncSession, *, case_id: str, actor_steam_id
         db, actor_steam_id, subject_sid_pre, missing={subject_sid_pre: (400, "subject_deleted")},
         optional=optional, handles={subject_sid_pre: subject_pre["subject_id"]})
     _mail_actor_live_or_raise(rows, actor_steam_id)
+    # Bans part 2a (S6): the acting account must not be actively banned. Read
+    # under its EXCLUSIVE identity key, which _mail_lock_identities took just
+    # above in the transaction's one ordered pass (actor and subject), so a
+    # ban of the actor either committed before this read or waits for this
+    # transaction.
+    await _ban_gate_or_raise(db, actor_steam_id)
     actor_w = _mail_identity_to_write(rows, actor_steam_id)
     subject_w = _mail_identity_to_write(rows, subject_sid_pre)
     role, _langs = await _chat_moderator_scope(db, actor_steam_id)
@@ -83872,8 +83882,13 @@ async def _moderation_case_act(db: AsyncSession, *, case_id: str, actor_steam_id
                                       reason=reason_txt)
         # The ban core's own record ("ban", or "ban_repeat" for a subject
         # already banned) carries the case: one record per action (MODLOG-1).
+        # The subject is banned by its RAW id, as admin_ban bans its target:
+        # the ban row's key, and the identity key _mail_lock_identities took
+        # above, so the core's own take of that key is one this transaction
+        # already holds. (A ban needs a live subject: the lattice refused a
+        # deleted one, so the re-read id is this one.)
         res = await _apply_ban_core(db, admin_steam_id=actor_w,
-                                    target_steam_id=subject_sid, reason=reason_txt,
+                                    target_steam_id=subject_sid_pre, reason=reason_txt,
                                     record_reason=reason_txt,
                                     record_details={"case_id": str(cid), "kind": case["kind"],
                                                     "via": via, "role": role,
@@ -83994,8 +84009,9 @@ async def internal_moderation_case_act(
     if not linked:
         raise HTTPException(status_code=403, detail="not_linked")
     # Bans part 2a (S6): the bot acts for the linked moderator, who must not
-    # be actively banned (the in-game route's admin check refuses one too).
-    await _ban_lock_and_gate(db, [linked])
+    # be actively banned (the in-game route's admin check refuses one too):
+    # _moderation_case_act reads the actor's ban under the actor's exclusive
+    # identity key, in its one ordered pass with the subject's key.
     result = await _moderation_case_act(
         db, case_id=case_id, actor_steam_id=linked, action=str(payload.get("action", "") or ""),
         hours=payload.get("hours"), reason=str(payload.get("reason", "") or ""),
