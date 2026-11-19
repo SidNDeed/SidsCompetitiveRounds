@@ -5554,6 +5554,75 @@ def _escape_md(text) -> str:
     return re.sub(r"^(\s*\d+)([.)])", r"\1\\\2", escaped)
 
 
+# _escape_text: the ONE helper for free text a person typed (a bug report's
+# description, a comment, a ban's reason). Its rules, each shown by
+# tests/test_bot_text_escape.py:
+#   - every line break is kept, as "\n" (CRLF, CR, VT, FF, FS, GS, RS, NEL and
+#     the Unicode line and paragraph separators each become one "\n"), so the
+#     start of every line is known;
+#   - each of \ * _ ~ | ` [ ] < > @ gets a backslash wherever it stands:
+#     emphasis, bold, underline, strike, spoiler, code span and code block,
+#     quote, masked link, and every mention form (<@id> <@!id> <@&id> <#id>
+#     </name:id> <t:...> @everyone @here) are then shown as their characters;
+#   - at the start of each line, after spaces or tabs: a # (heading), a - or
+#     + (list item, small text) gets a backslash, and so does the . or ) after
+#     a run of digits (numbered list);
+#   - a bare web address (http:// or https://, not glued to a letter, digit or
+#     _ before it) is left exactly as typed, to its last character that is not
+#     . , : ; " ' ) ] (the characters Discord leaves outside a link), so it
+#     stays one whole address; what follows it is escaped like any text;
+#   - with a limit, the result is at most `limit` characters and is cut
+#     between whole pieces (one character with its backslash, a line-opening
+#     mark, a whole address), never inside one, and `more` is appended after a
+#     cut. A cut keeps the escape of every piece it keeps.
+# Discord shows a backslash before any of these marks as the mark alone, so
+# the text reads as typed. It calls no library escape: the bot image installs
+# discord.py without a version pin, and this rule must not move with it.
+# Escape ONCE, at the line that builds the message from the raw value the api
+# served; never feed an escaped text back in.
+_TEXT_BREAKS = re.compile(r"\r\n|[\r\v\f\x1c-\x1e\x85  ]")
+_TEXT_URL = re.compile(r"(?<![0-9A-Za-z_])https?://[^\s<]*[^\s<.,:;\"')\]]", re.IGNORECASE)
+_TEXT_LINE_MARK = re.compile(r"([ \t]*)([#+-]|[0-9]+[.)])")
+_TEXT_ALWAYS = frozenset("\\*_~|`[]<>@")
+
+
+def _escape_text(text, limit=None, more="...") -> str:
+    """Free text a person typed, shown in Discord as the characters typed.
+    The rules are listed above _TEXT_BREAKS. None is the empty text."""
+    s = _TEXT_BREAKS.sub("\n", "" if text is None else str(text))
+    pieces = []
+    for n, line in enumerate(s.split("\n")):
+        if n:
+            pieces.append("\n")
+        pos = 0
+        m = _TEXT_LINE_MARK.match(line)
+        if m:
+            pieces.extend(m.group(1))
+            mark = m.group(2)
+            pieces.append(mark[:-1] + "\\" + mark[-1])
+            pos = m.end()
+        while pos < len(line):
+            u = _TEXT_URL.match(line, pos)
+            if u:
+                pieces.append(u.group(0))
+                pos = u.end()
+                continue
+            ch = line[pos]
+            pieces.append("\\" + ch if ch in _TEXT_ALWAYS else ch)
+            pos += 1
+    out = "".join(pieces)
+    if limit is None or len(out) <= limit:
+        return out
+    room = max(limit - len(more), 0)
+    kept, used = [], 0
+    for p in pieces:
+        if used + len(p) > room:
+            break
+        kept.append(p)
+        used += len(p)
+    return "".join(kept) + more if limit >= len(more) else more[:limit]
+
+
 _LB_NAME_BREAKS = re.compile(r"[\r\n  ]+")
 
 
