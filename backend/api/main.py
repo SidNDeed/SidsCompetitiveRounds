@@ -10597,7 +10597,7 @@ async def submit_match(report: MatchReport, request: Request, db: AsyncSession =
     # identity locks a ban also takes, before any row is written: no match,
     # rating, gold, XP, win or loss is created for anyone. (It used to be
     # recorded as a casual match.)
-    await _ban_gate_any_or_raise(db, report.reported_by_steam_id, _sids, request)
+    await _ban_lock_and_gate(db, _sids, request, actor=report.reported_by_steam_id)
     _known_pids = (await db.execute(
         text("SELECT id FROM players WHERE steam_id = ANY(:sids)"),
         {"sids": _sids},
@@ -15057,7 +15057,7 @@ async def set_player_card_tier(
         raise HTTPException(403, "Invalid signature")
     # Bans part 2a (S3): the shared-secret signature names no session, so the
     # acting id's ban is read here.
-    await _ban_gate_or_raise(db, steam_id)
+    await _ban_lock_and_gate(db, [steam_id])
 
     f = filter.lower()
     if f not in ("casual", "ranked", "all"):
@@ -16901,7 +16901,7 @@ async def steam_auth(req: SteamAuthRequest, db: AsyncSession = Depends(get_db)):
     # heartbeat") — a banned account could immediately obtain a fresh verified
     # session and keep using every session-gated endpoint that lacks a
     # usage-site ban check. Bans must also stop the mint.
-    await _check_ban_or_raise(db, req.steam_id)
+    await _ban_lock_and_gate(db, [req.steam_id])
     key = os.getenv("STEAM_WEB_API_KEY", "")
     verified = False
     if key:
@@ -16941,7 +16941,7 @@ async def steam_auth(req: SteamAuthRequest, db: AsyncSession = Depends(get_db)):
     # missing player row alone proves nothing (players are created lazily).
     await db.execute(text("SELECT pg_advisory_xact_lock(hashtext(:sid))"),
                      {"sid": req.steam_id})
-    await _check_ban_or_raise(db, req.steam_id)
+    await _ban_lock_and_gate(db, [req.steam_id])
     if MATCH_HMAC_SECRET:
         _tombed = (await db.execute(text(
             "SELECT 1 FROM deleted_steam_ids WHERE steam_id_hash = :h"
@@ -22485,7 +22485,7 @@ async def _report_disconnect_once(
     await _check_steam_session(request, reporter_steam_id, db)
     # Bans part 2a (S4, BAN-R5): a disconnect report naming an actively banned
     # account, as reporter or as leaver, creates no disconnect count.
-    await _ban_gate_any_or_raise(db, reporter_steam_id, [disconnected_steam_id], request)
+    await _ban_lock_and_gate(db, [disconnected_steam_id], request, actor=reporter_steam_id)
     await _assert_no_service_subject(
         db, affected_steam_ids=[reporter_steam_id, disconnected_steam_id])
     # Validate both players exist
@@ -23066,7 +23066,7 @@ async def report_casual_dc(
     await _check_steam_session(request, reporter_steam_id, db)
     # Bans part 2a (S4, BAN-R5): before the leaver's row can be created or a
     # casual disconnect recorded.
-    await _ban_gate_any_or_raise(db, reporter_steam_id, [leaver_steam_id], request)
+    await _ban_lock_and_gate(db, [leaver_steam_id], request, actor=reporter_steam_id)
 
     # The leaver may have NO players row, and that is the headline case rather
     # than an edge one: a vanilla opponent whose FIRST ever contact with a mod
@@ -23291,6 +23291,17 @@ async def link_discord(
     if not link:
         raise HTTPException(status_code=404, detail="Invalid or expired code")
 
+    # The code's player, read before any players row is written here.
+    player_result = await db.execute(select(Player).where(Player.id == link.player_id))
+    player = player_result.scalar_one_or_none()
+    if not player:
+        raise HTTPException(status_code=404, detail="Player not found")
+    # Bans part 2a (S6): the bot acts for the code's player; an actively
+    # banned player links nothing (the request's writes roll back with it).
+    # Under the shared identity lock (F4), before the unlink below writes a
+    # players row.
+    await _ban_lock_and_gate(db, [player.steam_id])
+
     # Check if discord_id is already linked to another player
     existing = await db.execute(
         select(Player).where(Player.discord_id == discord_id)
@@ -23302,15 +23313,6 @@ async def link_discord(
         print(f"[LINK] rebind: discord_id={discord_id} released from "
               f"steam_id={existing_player.steam_id}")
         existing_player.discord_id = None
-
-    # Link the discord account
-    player_result = await db.execute(select(Player).where(Player.id == link.player_id))
-    player = player_result.scalar_one_or_none()
-    if not player:
-        raise HTTPException(status_code=404, detail="Player not found")
-    # Bans part 2a (S6): the bot acts for the code's player; an actively
-    # banned player links nothing (the request's writes roll back with it).
-    await _ban_gate_or_raise(db, player.steam_id)
 
     if player.discord_id and player.discord_id != discord_id:
         print(f"[LINK] rebind: steam_id={player.steam_id} "
@@ -25550,7 +25552,7 @@ async def chat_moderate_delete(req: _ChatModDeleteReq, request: Request,
     over `admin:{admin}:chat_delete:{message_id}`; moderators prove identity
     with their Steam session (they have no admin secret)."""
     # Bans part 2a: an actively banned moderator is refused on both branches.
-    await _ban_gate_or_raise(db, req.steam_id, request)
+    await _ban_lock_and_gate(db, [req.steam_id], request)
     role, langs = await _chat_moderator_scope(db, req.steam_id)
     if role is None:
         raise HTTPException(403, "Not a chat moderator")
@@ -25651,7 +25653,7 @@ async def _chat_mod_authn(db: AsyncSession, request: Request, req, action: str, 
     """Shared identity proof for the mute/unmute pair: admin HMAC for admins,
     Steam session for scoped moderators. An actively banned moderator is
     refused first, on both branches (bans part 2a)."""
-    await _ban_gate_or_raise(db, req.steam_id, request)
+    await _ban_lock_and_gate(db, [req.steam_id], request)
     role, langs = await _chat_moderator_scope(db, req.steam_id)
     if role is None:
         raise HTTPException(403, "Not a chat moderator")
@@ -41074,7 +41076,7 @@ async def update_live_points(
     if not hmac.compare_digest(sig, expected):
         raise HTTPException(status_code=403, detail="Invalid signature")
     # Bans part 2a (S3): before the presence touch and any series read.
-    await _ban_gate_or_raise(db, reporter_steam_id, request)
+    await _ban_lock_and_gate(db, [reporter_steam_id], request)
 
     _presence_touch(reporter_steam_id)
     try:
@@ -41271,7 +41273,7 @@ async def update_team_live_points(
     _token = _team_game_post_token(series_id, reporter_steam_id, t1_points, t2_points,
                                    game_number, photon_room_id, game_token, token_sig)
     # Bans part 2a (S3): before the presence touch and any series read.
-    await _ban_gate_or_raise(db, reporter_steam_id, request)
+    await _ban_lock_and_gate(db, [reporter_steam_id], request)
 
     _presence_touch(reporter_steam_id)
     try:
@@ -42126,7 +42128,7 @@ async def update_ffa_live_points(
     if not hmac.compare_digest(sig, expected):
         raise HTTPException(status_code=403, detail="Invalid signature")
     # Bans part 2a (S3): before the presence touch and any lobby read.
-    await _ban_gate_or_raise(db, reporter_steam_id, request)
+    await _ban_lock_and_gate(db, [reporter_steam_id], request)
 
     _presence_touch(reporter_steam_id)
     try:
@@ -42275,7 +42277,7 @@ async def place_bet(
         raise HTTPException(status_code=403, detail="Invalid signature")
 
     # Banned players can't bet (alongside queue + chat).
-    await _check_ban_or_raise(db, steam_id)
+    await _ban_lock_and_gate(db, [steam_id])
 
     bettor = (await db.execute(select(Player).where(Player.steam_id == steam_id))).scalar_one_or_none()
     if bettor is None:
@@ -42511,7 +42513,7 @@ async def place_team_bet(
     if not hmac.compare_digest(sig, expected):
         raise HTTPException(status_code=403, detail="Invalid signature")
 
-    await _check_ban_or_raise(db, steam_id)
+    await _ban_lock_and_gate(db, [steam_id])
     bettor = (await db.execute(select(Player).where(Player.steam_id == steam_id))).scalar_one_or_none()
     if bettor is None:
         raise HTTPException(status_code=404, detail="Player not found")
@@ -44702,7 +44704,7 @@ async def artist_gift(
     # Bans part 2a (S5): an actively banned RECEIVER is refused (the giver's own
     # ban is refused by the strict session above). The answer is "Banned:
     # participant"; it never carries the receiver's reason.
-    await _ban_gate_any_or_raise(db, steam_id, [target_steam_id], request)
+    await _ban_lock_and_gate(db, [target_steam_id], request, actor=steam_id)
     # Per-item client floor (migration 397), judged on the RECIPIENT's
     # last-seen version: a gift to a client that cannot equip the item is
     # refused, and so is one to a recipient with no recorded version.
@@ -45758,7 +45760,7 @@ async def internal_tournament_checkin_response(
     if not expected or x_internal_key != expected:
         raise HTTPException(status_code=403, detail="Invalid internal key")
     # Bans part 2a (S6): the bot answers for the named player.
-    await _ban_gate_or_raise(db, body.steam_id)
+    await _ban_lock_and_gate(db, [body.steam_id])
     from tournaments import handle_tournament_checkin_response
     result = await handle_tournament_checkin_response(
         db, body.match_id, body.steam_id, body.answer)
@@ -48522,7 +48524,7 @@ async def submit_bug_report(req: BugReportRequest, request: Request, db: AsyncSe
         category = "other"
     # Bans part 2a (S5, BAN-R3): the route requires no session, so the claimed
     # id's ban is read here; an actively banned claimed id files no report.
-    await _ban_gate_or_raise(db, req.steam_id, request)
+    await _ban_lock_and_gate(db, [req.steam_id], request)
 
     # Rate limit: 10 reports per 24h per Steam ID. Returns 429 so the client
     # can show a "slow down" toast. Admins are exempt (July 28, Sid hit the
@@ -49791,7 +49793,7 @@ async def user_comment_on_bug_report(
         raise HTTPException(403, "not_owner")
     # Bans part 2a (S5, S6, BAN-R3): an actively banned reporter adds nothing
     # to its bug report through the bot either.
-    await _ban_gate_or_raise(db, report.steam_id)
+    await _ban_lock_and_gate(db, [report.steam_id])
     actor_name = (report.display_name
                   or (owner.display_name if owner else None)
                   or "Reporter")
@@ -50117,22 +50119,27 @@ async def _ban_gate_any_or_raise(db: AsyncSession, actor: str, others, request=N
 async def _ban_lock_and_gate(db: AsyncSession, steam_ids, request=None, actor=None) -> None:
     """Bans part 2a (F4, lesson 208): check and write under ONE lock. Takes the
     identity lock the ban core takes (pg_advisory_xact_lock(hashtext(steam_id)),
-    exclusive in _apply_ban_core) in SHARED mode for every id, in id order, then
-    reads the ban of every id and refuses (409, one [BAN-GATE] line): a ban
-    that commits after this read waits for this transaction, and a ban that
-    committed before it is read here. `actor` answers with its own reason; any
-    other id answers "Banned: participant".
+    exclusive in _apply_ban_core) in SHARED mode for every id and for `actor`,
+    then reads the ban of every id and refuses (409, one [BAN-GATE] line): a
+    ban that commits after this read waits for this transaction, and a ban
+    that committed before it is read here. `actor` answers with its own
+    reason; any other id answers "Banned: participant". Every route's sweep
+    gate reads the ban through this helper; the one read outside it
+    (team_series_report_dc's roster read) is taken under the team series row
+    lock, which the ban core takes after its identity lock.
 
     LOCK ORDER. The ban core takes the target's identity lock FIRST and only
     then locks rows (ffa_lobbies -> series -> team_lobbies -> ovt_lobbies ->
-    queue rows -> leases). So this must be the FIRST statement that locks in
-    the transaction that writes: a caller that took a row lock before it could
-    hold a row the ban core waits for while waiting on the ban core's identity
-    lock. Shared locks of several ids are taken in id order, so two callers
-    never wait on each other. A caller that already holds the exclusive
-    identity lock of an id in this transaction takes the shared one at once
-    (both are this session's). Does NOT commit."""
-    ids = sorted({str(s) for s in (steam_ids or ()) if s})
+    queue rows -> leases). So this comes before any lock the transaction that
+    writes takes on such a row: a caller that took one first could hold a row
+    the ban core waits for while waiting on the ban core's identity lock. The
+    ids are locked in the canonical identity order (_ffa_sort_key, the order
+    _identity_lock_many takes its exclusive locks of the same keys), so this
+    and an exclusive holder of two of them never take them in opposite
+    orders. A caller that already holds the exclusive identity lock of an id
+    in this transaction takes the shared one at once (both are this
+    session's). Does NOT commit."""
+    ids = sorted({str(s) for s in [*(steam_ids or ()), actor] if s}, key=_ffa_sort_key)
     for sid in ids:
         await db.execute(text("SELECT pg_advisory_xact_lock_shared(hashtext(CAST(:sid AS text)))"),
                          {"sid": sid})
@@ -53316,7 +53323,7 @@ async def team_series_spawn_confirm(
         raise HTTPException(403, "Invalid spawn-confirm signature")
     # Bans part 2a (S3): the signature names no session; the acting id's ban
     # is read before the confirmation is counted.
-    await _ban_gate_or_raise(db, steam_id)
+    await _ban_lock_and_gate(db, [steam_id])
     try:
         sid_uuid = UUID(series_id)
     except (ValueError, TypeError):
@@ -55014,7 +55021,7 @@ async def team_series_report_dc(
     # Bans part 2a (S3, S4): the signature names no session; a report whose
     # reporter or named leaver is actively banned records nothing. The rest of
     # the roster is read under the series lock below.
-    await _ban_gate_any_or_raise(db, reporter_steam_id, [dc_player_steam_id])
+    await _ban_lock_and_gate(db, [dc_player_steam_id], actor=reporter_steam_id)
     try:
         sid_uuid = UUID(series_id)
     except (ValueError, TypeError):
@@ -55047,7 +55054,11 @@ async def team_series_report_dc(
     if s is None:
         raise HTTPException(404, "Series not found")
     # Bans part 2a (S4, BAN-R5): any roster member under an active ban, read
-    # under the series lock, refuses the report before any write.
+    # under the series lock, refuses the report before any write. Not through
+    # _ban_lock_and_gate: an identity lock taken after this row lock would
+    # invert the ban core's order. The row lock serializes instead: the ban
+    # core locks this row after the identity lock, so a ban of a member
+    # either committed before this read (and voided the row) or waits here.
     await _ban_gate_any_or_raise(db, reporter_steam_id, await _modlog_steam_ids(
         db, [s["t1a_id"], s["t1b_id"], s["t2a_id"], s["t2b_id"]]))
     if s["status"] not in ("active", "dc_paused"):
@@ -57631,8 +57642,8 @@ async def submit_ovt_match(report: OvtMatchReport, request: Request, db: AsyncSe
         raise HTTPException(403, "Invalid 1v2 match signature")
     # Bans part 2a (S4, BAN-R5): refused before it is journaled or settled
     # when the reporter or any of the three is actively banned.
-    await _ban_gate_any_or_raise(db, report.reported_by_steam_id,
-                                 _report_steams("ovt", report), request)
+    await _ban_lock_and_gate(db, _report_steams("ovt", report), request,
+                             actor=report.reported_by_steam_id)
     _windowed = await _report_window_receive(db, "ovt", report)
     if _windowed is not None:
         return _windowed
@@ -69743,8 +69754,8 @@ async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSe
     # Bans part 2a (S4, BAN-R5): on both paths (a request, and a journaled
     # payload settled with none), a report whose reporter or any listed player
     # is actively banned is refused before anything is written.
-    await _ban_gate_any_or_raise(db, report.reported_by_steam_id,
-                                 [p.steam_id for p in report.players], request)
+    await _ban_lock_and_gate(db, [p.steam_id for p in report.players], request,
+                             actor=report.reported_by_steam_id)
     # Two INDEPENDENT facts derived from the verified form:
     #   kills_in_canonical — the kills values are covered by the signature
     #     (v2 form). Three things read it: the absent-refutation guard, the
@@ -72257,7 +72268,7 @@ async def place_ffa_bet(
     ).hexdigest()
     if not hmac.compare_digest(sig, expected):
         raise HTTPException(status_code=403, detail="Invalid signature")
-    await _check_ban_or_raise(db, steam_id)
+    await _ban_lock_and_gate(db, [steam_id])
 
     bettor = (await db.execute(select(Player).where(Player.steam_id == steam_id))).scalar_one_or_none()
     if bettor is None:
@@ -72916,7 +72927,7 @@ async def place_lobby_bet(
     if not hmac.compare_digest(sig, expected):
         raise HTTPException(status_code=403, detail="Invalid signature")
 
-    await _check_ban_or_raise(db, steam_id)
+    await _ban_lock_and_gate(db, [steam_id])
 
     # Validate mode against the closed set BEFORE it reaches any interpolated
     # SQL (#188).
@@ -73374,8 +73385,8 @@ async def submit_team_match(report: TeamMatchReport, request: Request, db: Async
         raise HTTPException(403, "Invalid team match signature")
     # Bans part 2a (S4, BAN-R5): refused before it is journaled or settled
     # when the reporter or any of the four is actively banned.
-    await _ban_gate_any_or_raise(db, report.reported_by_steam_id,
-                                 _report_steams("team", report), request)
+    await _ban_lock_and_gate(db, _report_steams("team", report), request,
+                             actor=report.reported_by_steam_id)
     _windowed = await _report_window_receive(db, "team", report)
     if _windowed is not None:
         return _windowed
@@ -83933,7 +83944,7 @@ async def internal_moderation_case_act(
         raise HTTPException(status_code=403, detail="not_linked")
     # Bans part 2a (S6): the bot acts for the linked moderator, who must not
     # be actively banned (the in-game route's admin check refuses one too).
-    await _ban_gate_or_raise(db, linked)
+    await _ban_lock_and_gate(db, [linked])
     result = await _moderation_case_act(
         db, case_id=case_id, actor_steam_id=linked, action=str(payload.get("action", "") or ""),
         hours=payload.get("hours"), reason=str(payload.get("reason", "") or ""),

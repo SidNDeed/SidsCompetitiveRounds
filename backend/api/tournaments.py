@@ -5736,7 +5736,7 @@ async def player_penalty(steam_id: str, request: Request, db: AsyncSession = Dep
     # and acts for the account its path names; no client calls it, so an
     # actively banned account is refused like every route of the BAN class.
     import main as _main
-    await _main._ban_gate_or_raise(db, steam_id, request)
+    await _main._ban_lock_and_gate(db, [steam_id], request)
     player = await _get_player_by_steam(db, steam_id)
     await _recompute_player_penalty(db, player.id)
     await db.commit()
