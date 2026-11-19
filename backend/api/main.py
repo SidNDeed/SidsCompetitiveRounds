@@ -50849,6 +50849,9 @@ async def _apply_ban_core(db: AsyncSession, *, admin_steam_id: str, target_steam
             # remaining member as host, or, with none left, is disbanded
             # (account deletion's step; its row is locked above).
             _ban_inv_ended += await _ban_open_lobby_host_left(db, _lmode, _blid, _bpid)
+            # BAN-R21: no wager of the account's own stays on the lobby it left
+            # (a disband above refunded every wager; this is a no-op then).
+            await _refund_lobby_bets(db, _lmode, _blid, "bettor_banned", bettor=_bpid)
         # The account's own seat lease last, after every parent, queue row and
         # invite (the order account deletion keeps). The leases of the records
         # the void ended were released by _ban_void_apply beside each reset.
@@ -72638,8 +72641,14 @@ async def _flush_lobby_bet_refunds(db: AsyncSession, mode: str | None = None,
     return n
 
 
-async def _refund_lobby_bets(db: AsyncSession, mode: str, lobby_id, reason: str) -> int:
+async def _refund_lobby_bets(db: AsyncSession, mode: str, lobby_id, reason: str,
+                            bettor=None) -> int:
     """Refund every OPEN wager on a lobby that died WITHOUT ever starting.
+
+    With `bettor` (a players.id), only that account's own open wagers on the
+    lobby: the ban's step for a banned member of a lobby that stays (BAN-R21:
+    the account keeps no wager of that lobby). The lobby is not dissolved and
+    every other wager on it stays live.
 
     Runs inside the CALLER's transaction, inside a savepoint: a refund problem
     must never take down the disband/abandon/deletion that called it (#187),
@@ -72665,10 +72674,12 @@ async def _refund_lobby_bets(db: AsyncSession, mode: str, lobby_id, reason: str)
             rows = (await db.execute(text("""
                 SELECT id, player_id FROM lobby_bets
                  WHERE mode = :m AND lobby_id = :l AND status = 'open'
+                   AND (CAST(:b AS uuid) IS NULL OR player_id = CAST(:b AS uuid))
                  ORDER BY created_at, id
                  LIMIT 100
                  FOR NO KEY UPDATE
-            """), {"m": mode, "l": lobby_id})).mappings().all()
+            """), {"m": mode, "l": lobby_id,
+                    "b": str(bettor) if bettor is not None else None})).mappings().all()
             await _assert_no_service_subject(
                 db, affected_player_ids=[r["player_id"] for r in rows])
             for row in rows:
