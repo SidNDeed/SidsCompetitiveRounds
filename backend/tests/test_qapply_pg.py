@@ -1050,7 +1050,18 @@ def test_g2_the_lists_verdict_is_what_accept_then_does(monkeypatch):
 # ── T1, W1, L1, H1 ─────────────────────────────────────────────────────────
 
 def _widest(s):
-    return s.format(n=999, tail=999, next=999)
+    return s.format(n=999, tail=999, next=999, g=999)
+
+
+def _texts_table():
+    """qapply_texts.tsv beside this file: key -> sentence."""
+    rows = {}
+    with open(os.path.join(HERE, "qapply_texts.tsv"), encoding="utf-8") as f:
+        assert f.readline() == "key\tsentence\n"
+        for line in f:
+            key, sentence = line.rstrip("\n").split("\t")
+            rows[key] = sentence
+    return rows
 
 
 def test_t1_every_sentence_is_within_180_characters_and_is_what_the_code_sends():
@@ -1067,9 +1078,27 @@ def test_t1_every_sentence_is_within_180_characters_and_is_what_the_code_sends()
     assert main._qapply_number_text(3, 2) == T["ahead"].format(tail=3, next=2)
     assert main._qapply_number_text(1, 2) == T["behind"].format(tail=1)
     assert main._qapply_number_text(None, 2) == T["no_number"]
-    for blocked in (T["later"], T["rating"], T["behind"], T["no_number"]):
+    for blocked in (T["later"], T["rating"], T["behind"]):
         assert "Credit can pay" in blocked
+    assert "Credit" not in T["no_number"], "Credit does not pay a report naming no game"
     assert T["ahead"].endswith("Apply game {next} of this lobby first.")
+    # The table the routes' sentences are reviewed from is what the code
+    # holds, the list's eligibility sentence (outside _QAPPLY_TEXTS) included.
+    table = _texts_table()
+    assert table == dict(T, eligibility=main.QDIG_ELIGIBILITY_FAILED), sorted(
+        set(table.items()) ^ set(dict(T, eligibility=main.QDIG_ELIGIBILITY_FAILED).items()))
+    (lst,) = [n for n in ast.walk(_tree()) if isinstance(n, ast.AsyncFunctionDef)
+              and n.name == "admin_list_quarantine"]
+    assert "QDIG_ELIGIBILITY_FAILED" in {n.id for n in ast.walk(lst) if isinstance(n, ast.Name)}
+    # Every HTTPException the four routes raise themselves carries a table
+    # sentence (a _QAPPLY_TEXTS entry), never a literal.
+    for route in ("admin_list_quarantine", "admin_discard_quarantine", "admin_accept_quarantine",
+                  "admin_credit_quarantine"):
+        (fn,) = [n for n in ast.walk(_tree()) if isinstance(n, ast.AsyncFunctionDef) and n.name == route]
+        for c in ast.walk(fn):
+            if isinstance(c, ast.Call) and isinstance(c.func, ast.Name) and c.func.id == "HTTPException":
+                detail = ast.unparse(c.args[1]) if len(c.args) > 1 else ""
+                assert detail.startswith("_QAPPLY_TEXTS["), ("T1 a literal answer", route, detail)
     for word, label in modlog.ACTIONS.items():
         if word.startswith("quarantine_"):
             assert len(label) <= 180
@@ -1583,4 +1612,39 @@ def test_f4_a_replay_that_commits_or_rolls_back_leaves_process_state_as_it_was(m
             after = _f4_snapshot(names)
             changed = sorted(n for n in names if before[n] != after[n])
             assert not changed, (name, "process state written under the replay", changed)
+    run_env(monkeypatch, body)
+
+
+# ── M2: every early failure of the four routes answers a table sentence ───
+
+def test_m2_malformed_input_to_each_route_answers_its_table_sentence(monkeypatch):
+    async def body(env):
+        table = _texts_table()
+        lob, qid = await closed_held(env)
+        routes = (("accept", main.admin_accept_quarantine, "quarantine_action"),
+                  ("credit", main.admin_credit_quarantine, "quarantine_credit"),
+                  ("discard", main.admin_discard_quarantine, "quarantine_action"))
+        before = await tables(env)
+        for name, route, word in routes:
+            for target, signed, note, want in (
+                    ("not-a-uuid", "not-a-uuid", None, (400, "bad_id")),
+                    (qid, "0" * 64, None, (403, "admin")),
+                    (qid, qid, "bad\x00note", (422, "note")),
+                    (str(uuid.uuid4()), None, None, (404, "not_found"))):
+                req = main._AdminQuarantineReq(admin_steam_id=ADMIN, note=note,
+                                               hmac_signature=signed if signed and len(signed) == 64
+                                               else sig(word, signed or target))
+
+                async def go(route=route, target=target, req=req):
+                    async with env.sm() as db:
+                        return await route(target, req, db)
+                ans = await env._call(go)
+                assert (ans.status, ans.body) == (want[0], table[want[1]]), (name, target, ans)
+
+        async def go_list():
+            async with env.sm() as db:
+                return await main.admin_list_quarantine(admin_steam_id=ADMIN, hmac_signature="0" * 64, db=db)
+        ans = await env._call(go_list)
+        assert (ans.status, ans.body) == (403, table["admin"]), ("list", ans)
+        assert await tables(env) == before, "M2 nothing changed"
     run_env(monkeypatch, body)

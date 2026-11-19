@@ -75081,6 +75081,9 @@ _QAPPLY_TEXTS = {
     "retry": "The server could not finish this action now; nothing was changed. Try again.",
     "busy": ("Another request is using this game's players or lobby, so the action stopped at its time "
              "limit; nothing was changed. Try again in a moment."),
+    "bad_id": "This held report's id is not valid, so nothing was changed.",
+    "note": "The note holds characters that cannot be stored; remove them and try again.",
+    "admin": "This action needs an admin account and a valid admin signature; nothing was changed.",
     "refused": "The server refused to apply this report; it stays held.",
     "can_accept": "Accept can apply this game now, with its ratings; use Accept instead of Credit.",
     "credited_before": "This report's XP and gold were already credited.",
@@ -75266,6 +75269,7 @@ _QAPPLY_SQL_CLAIM = """
     RETURNING game_number
 """
 # The credited games of a lobby, for the list's sentence about a sibling row.
+_QAPPLY_SQL_EXISTS = "SELECT EXISTS (SELECT 1 FROM match_report_quarantine WHERE id = CAST(:qid AS uuid))"
 _QAPPLY_SQL_CLAIMS_CREDITED = """
     SELECT game_number FROM ffa_game_claims
      WHERE lobby_id = CAST(:lid AS uuid) AND kind = 'credit'
@@ -75441,8 +75445,8 @@ async def _qapply_verdict(db, row, body) -> dict:
     steams = [p.steam_id for p in report.players]
     try:
         await _assert_no_service_subject(db, affected_steam_ids=steams)
-    except HTTPException:
-        return no("service")
+    except HTTPException as ex:
+        return no("service" if ex.status_code == 403 else "retry")
     prows = (await db.execute(text(_QAPPLY_SQL_LIVE_PLAYERS), {"sids": steams})).all()
     word = _ffa_report_verify(report, canonical_form=canonical, lobby=lobby,
                               id_by_steam={r.steam_id: r.id for r in prows})
@@ -75523,7 +75527,7 @@ async def _qapply_held(db, qid_uuid):
     try:
         await _assert_no_service_subject(db, affected_player_ids=row["player_ids"] or ())
     except HTTPException as ex:
-        raise _QapplyRefused(ex.status_code, _QAPPLY_TEXTS["service"], {})
+        raise _QapplyRefused(ex.status_code, _QAPPLY_TEXTS["service" if ex.status_code == 403 else "retry"], {})
     body = _qdig_read_body(row)
     key = _qapply_held_check(row, body)
     if key is None and row["group_id"] is None:
@@ -75564,7 +75568,7 @@ async def _qapply_credit(db, row, report, *, actor: str, note: str) -> dict:
     try:
         await _assert_no_service_subject(db, affected_steam_ids=steams)
     except HTTPException as ex:
-        raise _QapplyRefused(ex.status_code, _QAPPLY_TEXTS["service"], {})
+        raise _QapplyRefused(ex.status_code, _QAPPLY_TEXTS["service" if ex.status_code == 403 else "retry"], {})
     prows = (await db.execute(text(_QAPPLY_SQL_LIVE_PLAYERS), {"sids": steams})).all()
     id_by_steam = {r.steam_id: r.id for r in prows}
     # Every verification the body makes of the report, in the body's order,
@@ -75702,7 +75706,10 @@ async def admin_list_quarantine(
     under their locks). The client only renders them; the released client
     ignores `can_credit`.
     """
-    await _require_admin(db, admin_steam_id, "quarantine", "list", hmac_signature)
+    try:
+        await _require_admin(db, admin_steam_id, "quarantine", "list", hmac_signature)
+    except HTTPException as ex:
+        raise HTTPException(ex.status_code, _QAPPLY_TEXTS["admin"])
     # QDIG-1: the stored body is selected through its size (the same CASE as
     # every statement of the lane that selects it: above QDIG_BODY_MAX_BYTES
     # it never reaches Python, and the 50 rows hand Python at most
@@ -75784,11 +75791,17 @@ async def admin_discard_quarantine(qid: str, req: _AdminQuarantineReq,
     # for a string that is not one, and binds the note, which fails for a
     # string no text bind can carry (500). It binds the parsed id's canonical
     # text; the signature keeps the id as sent.
-    qid_uuid = _mail_parse_uuid(qid, "qid")   # quarantine discard: the report's id, before the admin check and the UPDATE (r15 sweep)
+    try:
+        qid_uuid = _mail_parse_uuid(qid, "qid")   # quarantine discard: the report's id, before the admin check and the UPDATE (r15 sweep)
+    except HTTPException:
+        raise HTTPException(400, _QAPPLY_TEXTS["bad_id"])
     note = (req.note or "")[:500]
     if not _pg_text_ok(note):   # quarantine discard: the note, before the admin check and the UPDATE (r15 sweep)
-        raise HTTPException(422, "note is not storable text")
-    await _require_admin(db, req.admin_steam_id, "quarantine_action", qid, req.hmac_signature)
+        raise HTTPException(422, _QAPPLY_TEXTS["note"])
+    try:
+        await _require_admin(db, req.admin_steam_id, "quarantine_action", qid, req.hmac_signature)
+    except HTTPException as ex:
+        raise HTTPException(ex.status_code, _QAPPLY_TEXTS["admin"])
     done = (await db.execute(text("""
         UPDATE match_report_quarantine
            SET status='discarded', reviewed_at=NOW(), review_note=:note,
@@ -75798,7 +75811,9 @@ async def admin_discard_quarantine(qid: str, req: _AdminQuarantineReq,
     """), {"qid": str(qid_uuid), "sid": req.admin_steam_id, "note": note})).mappings().first()
     if done is None:
         # Nothing changed: refused before any record or commit.
-        raise HTTPException(409, "Already reviewed")
+        if (await db.execute(text(_QAPPLY_SQL_EXISTS), {"qid": str(qid_uuid)})).scalar():
+            raise HTTPException(409, _QAPPLY_TEXTS["reviewed"])
+        raise HTTPException(404, _QAPPLY_TEXTS["not_found"])
     await _modlog_write(db, actor=req.admin_steam_id, action="quarantine_discard",
                         affected=await _modlog_steam_ids(db, done["player_ids"] or ()),
                         reason=note or None,
@@ -75827,11 +75842,17 @@ async def admin_accept_quarantine(qid: str, req: _AdminQuarantineReq,
     the parsed id's canonical text; the signature keeps the id as sent (review
     r15 sweep: a string that is not a UUID failed the uuid bind, 500).
     """
-    qid_uuid = _mail_parse_uuid(qid, "qid")   # quarantine accept: the report's id, before the admin check and its reads (r15 sweep)
+    try:
+        qid_uuid = _mail_parse_uuid(qid, "qid")   # quarantine accept: the report's id, before the admin check and its reads (r15 sweep)
+    except HTTPException:
+        raise HTTPException(400, _QAPPLY_TEXTS["bad_id"])
     note = (req.note or "")[:500]
     if not _pg_text_ok(note):
-        raise HTTPException(422, "note is not storable text")
-    await _require_admin(db, req.admin_steam_id, "quarantine_action", qid, req.hmac_signature)
+        raise HTTPException(422, _QAPPLY_TEXTS["note"])
+    try:
+        await _require_admin(db, req.admin_steam_id, "quarantine_action", qid, req.hmac_signature)
+    except HTTPException as ex:
+        raise HTTPException(ex.status_code, _QAPPLY_TEXTS["admin"])
     try:
         async with asyncio.timeout(_QAPPLY_DEADLINE_S):
             await _qapply_bound(db)
@@ -75868,11 +75889,17 @@ async def admin_credit_quarantine(qid: str, req: _AdminQuarantineReq,
     readmission lobbies, and when a ledger row already references the held
     row. One transaction: deltas, one ledger row per kind above 0 referencing
     the held row, the held row's status and the moderator record."""
-    qid_uuid = _mail_parse_uuid(qid, "qid")
+    try:
+        qid_uuid = _mail_parse_uuid(qid, "qid")
+    except HTTPException:
+        raise HTTPException(400, _QAPPLY_TEXTS["bad_id"])
     note = (req.note or "")[:500]
     if not _pg_text_ok(note):
-        raise HTTPException(422, "note is not storable text")
-    await _require_admin(db, req.admin_steam_id, "quarantine_credit", qid, req.hmac_signature)
+        raise HTTPException(422, _QAPPLY_TEXTS["note"])
+    try:
+        await _require_admin(db, req.admin_steam_id, "quarantine_credit", qid, req.hmac_signature)
+    except HTTPException as ex:
+        raise HTTPException(ex.status_code, _QAPPLY_TEXTS["admin"])
     try:
         async with asyncio.timeout(_QAPPLY_DEADLINE_S):
             await _qapply_bound(db)
