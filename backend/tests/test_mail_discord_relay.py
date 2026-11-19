@@ -313,8 +313,11 @@ def _mail_dm(status=200, data=None, threads=None, thread_status=200):
           "print": lambda *a, **k: None}
     _lift_bot_names(("RELAY_CODE_ALPHABET", "RELAY_CODE_LEN", "_CODE_BODY",
                      "RELAY_CODE_RE", "RELAY_CODE_ANY_RE",
-                     "_RELAY_CODE_LEAD_RE"), ns)
-    for fname in ("_escape_md", "relay_code_line", "normalize_relay_code", "_mail_sent_line",
+                     "_RELAY_CODE_LEAD_RE", "MAIL_NAME_SHOWN_MAX", "MAIL_SUBJECT_SHOWN_MAX",
+                     "_TEXT_BREAKS", "_TEXT_URL", "_TEXT_LINE_MARK", "_TEXT_ALWAYS"), ns)
+    # the mail lines' two helpers and the older api's field reader (BOT-TEXT-ESCAPE-1)
+    for fname in ("_escape_md", "_escape_text", "_mail_legacy_plain",
+                  "relay_code_line", "normalize_relay_code", "_mail_sent_line",
                   "_mailpick_view", "_post_mail_reply", "_ask_which_mail",
                   "_mailpick_click", "_handle_mail_dm"):
         _lift_bot(fname, ns)
@@ -2233,6 +2236,8 @@ def test_the_confirmation_does_not_invent_a_thread_it_could_not_read():
     the bot does not have, about a reply that did send."""
     ns = {"re": _sql_re}
     _lift_bot("_escape_md", ns)       # the name is escaped for Discord (round 4, finding 23)
+    _lift_bot("_mail_legacy_plain", ns)   # an older api's field read back (BOT-TEXT-ESCAPE-1)
+    _lift_bot_names(("MAIL_NAME_SHOWN_MAX", "MAIL_SUBJECT_SHOWN_MAX"), ns)
     line = _lift_bot("_mail_sent_line", ns)
     assert line({"known": False, "subject": "", "sender_name": ""}) \
         == "\u2709\ufe0f Sent your reply."
