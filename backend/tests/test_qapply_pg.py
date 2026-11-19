@@ -1506,3 +1506,81 @@ def test_f3_a_report_waiting_on_an_actions_rows_is_answered_within_the_bound(act
         assert (ans.status, ans.body) == (503, T["busy"]), (act.__name__, ans)
         assert await status_of(env, qid) == "pending"
     run_env(monkeypatch, body)
+
+
+# ── F4: a replay writes no process state another request trusts ───────────
+# The module-level names that the code the actions reach can write, derived
+# from the source (bare-name calls, transitively): `global` rebinding, stores
+# into a module name, and mutating method calls on one.
+
+_F4_ROOTS = ("admin_accept_quarantine", "admin_credit_quarantine", "submit_ffa_match")
+_F4_MUT = {"append", "add", "update", "pop", "popitem", "clear", "setdefault", "remove", "discard",
+           "extend", "insert", "appendleft", "popleft", "move_to_end"}
+
+
+def _f4_written_names():
+    tree = _tree()
+    funcs = {n.name: n for n in tree.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
+    mod = set()
+    for n in tree.body:
+        ts = n.targets if isinstance(n, ast.Assign) else [n.target] if isinstance(n, (ast.AnnAssign, ast.AugAssign)) else []
+        mod |= {t.id for t in ts if isinstance(t, ast.Name)}
+    seen, todo = set(), list(_F4_ROOTS)
+    while todo:
+        f = todo.pop()
+        if f in seen or f not in funcs:
+            continue
+        seen.add(f)
+        todo += [c.id for c in ast.walk(funcs[f]) if isinstance(c, ast.Name) and c.id in funcs]
+    out = {}
+    for f in seen:
+        fn = funcs[f]
+        globs = {g for c in ast.walk(fn) if isinstance(c, ast.Global) for g in c.names}
+        local = ({a.arg for a in fn.args.args + fn.args.kwonlyargs}
+                 | {c.id for c in ast.walk(fn) if isinstance(c, ast.Name) and isinstance(c.ctx, ast.Store)}) - globs
+        hit = set(globs)
+        for c in ast.walk(fn):
+            base = None
+            if isinstance(c, (ast.Assign, ast.AugAssign, ast.AnnAssign)):
+                for t in (c.targets if isinstance(c, ast.Assign) else [c.target]):
+                    if isinstance(t, (ast.Subscript, ast.Attribute)):
+                        base = t.value
+            elif isinstance(c, ast.Call) and isinstance(c.func, ast.Attribute) and c.func.attr in _F4_MUT:
+                base = c.func.value
+            while isinstance(base, (ast.Subscript, ast.Attribute)):
+                base = base.value
+            if isinstance(base, ast.Name) and base.id in mod and base.id not in local:
+                hit.add(base.id)
+        for name in hit:
+            out.setdefault(name, set()).add(f)
+    return out
+
+
+def _f4_snapshot(names):
+    import copy
+    return {n: copy.deepcopy(getattr(main, n, "<absent>")) for n in names}
+
+
+def test_f4_a_replay_that_commits_or_rolls_back_leaves_process_state_as_it_was(monkeypatch):
+    names = _f4_written_names()
+    assert "_service_player_uuid_cache" in names, ("the census sees the policy cache", sorted(names))
+
+    async def body(env):
+        lob_ok, q_ok = await closed_held(env)
+        lob_no, q_no = await closed_held(env)
+        await later_for(env, lob_no)
+        lob_cr, q_cr = await closed_held(env)
+        await later_for(env, lob_cr)
+        for name, act, qid, want in (("commit", accept, q_ok, 200), ("rollback", accept, q_no, 409),
+                                     ("credit", credit, q_cr, 200)):
+            # An empty cache, as after a restart: the first lookup would fill it.
+            monkeypatch.setattr(main, "_service_player_uuid_cache", None)
+            monkeypatch.setattr(main, "_service_uuid_cache_monotonic", 0.0)
+            monkeypatch.setattr(main, "_service_uuid_cache_filled_monotonic", None)
+            before = _f4_snapshot(names)
+            ans = await act(env, qid)
+            assert ans.status == want, (name, ans)
+            after = _f4_snapshot(names)
+            changed = sorted(n for n in names if before[n] != after[n])
+            assert not changed, (name, "process state written under the replay", changed)
+    run_env(monkeypatch, body)

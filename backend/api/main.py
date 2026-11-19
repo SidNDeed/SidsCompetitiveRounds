@@ -78244,6 +78244,12 @@ _SERVICE_UUID_REFRESH_SECONDS = 3000.0
 _SERVICE_UUID_MAX_AGE_SECONDS = 3600.0
 
 
+_SERVICE_UUIDS_SQL = """
+                    SELECT id::text FROM players
+                     WHERE steam_id = ANY(CAST(:sids AS text[]))
+                """
+
+
 async def _service_player_uuids(db: AsyncSession) -> "set[str]":
     """Player-UUID mirror of SPECTATE_BROADCAST_STEAM_IDS, cached hourly.
 
@@ -78263,6 +78269,19 @@ async def _service_player_uuids(db: AsyncSession) -> "set[str]":
     """
     global _service_player_uuid_cache, _service_uuid_cache_monotonic
     global _service_uuid_cache_filled_monotonic
+    if _QAPPLY_REPLAY.get() is not None:
+        # Under a held-report action (QAPPLY-1 FIX-1) the set is read fresh
+        # for this request alone: neither the cache nor its two clocks is
+        # read or written, so nothing another request trusts comes from a
+        # transaction that may roll back.
+        try:
+            async with db.begin_nested():
+                rows = (await db.execute(text(_SERVICE_UUIDS_SQL), {
+                    "sids": sorted(SPECTATE_BROADCAST_STEAM_IDS)})).scalars().all()
+        except Exception as ex:
+            print(f"[SERVICE-POLICY] request-local read failed: {ex}")
+            raise HTTPException(status_code=503, detail="service_policy_unavailable")
+        return {str(r) for r in rows}
     now_mono = time.monotonic()
     if (_service_player_uuid_cache is None
             or now_mono - _service_uuid_cache_monotonic > _SERVICE_UUID_REFRESH_SECONDS):
@@ -78279,10 +78298,8 @@ async def _service_player_uuids(db: AsyncSession) -> "set[str]":
         # answer to it (r3 finding).
         try:
             async with db.begin_nested():
-                rows = (await db.execute(text("""
-                    SELECT id::text FROM players
-                     WHERE steam_id = ANY(CAST(:sids AS text[]))
-                """), {"sids": sorted(SPECTATE_BROADCAST_STEAM_IDS)})).scalars().all()
+                rows = (await db.execute(text(_SERVICE_UUIDS_SQL), {
+                    "sids": sorted(SPECTATE_BROADCAST_STEAM_IDS)})).scalars().all()
             _service_player_uuid_cache = {str(r) for r in rows}
             # An EMPTY result is not a normal steady state — these accounts are
             # a hand-edited constant whose players rows predate the policy — so
