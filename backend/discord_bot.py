@@ -18963,8 +18963,10 @@ def _modlog_fit(text, n):
 MODLOG_TOTALS_MAX = 400
 # A record carried in by a migration from another table's own data names that
 # table in its details' carried_from (the api's modlog.CARRIED_FROM). The
-# mark stands right after the kind of action, ahead of every text a row's
-# budget can shorten.
+# mark stands right after the kind of action, ahead of the moderator, the
+# reason and the sentence, so a row's budget shortens those first; a budget
+# smaller than the time, the kind and the mark cuts the mark as well (and
+# never inside the kind's bold pair).
 MODLOG_CARRIED = {"flagged_matches": " (carried in from the flag's review data, not written at the review)"}
 MODLOG_CARRIED_OTHER = " (carried in from stored data, not written at the time)"
 
@@ -19025,14 +19027,21 @@ def _modlog_render(body, *, page, sort, action_idx, search):
     for r in rows:
         if not isinstance(r, dict) or not isinstance(r.get("key"), str):
             raise ValueError("row")
-        line = "%s **%s**%s by %s" % (_modlog_ts(r.get("at")),
-                                      _escape_md(_modlog_cut(r.get("action_label"), 40)),
-                                      _modlog_carried(r),
-                                      _escape_md(_modlog_cut(r.get("actor_name") or r.get("actor"), 40)))
+        lead = _modlog_ts(r.get("at"))
+        bold = "**%s**" % _escape_md(_modlog_cut(r.get("action_label"), 40))
+        line = "%s %s%s by %s" % (lead, bold, _modlog_carried(r),
+                                  _escape_md(_modlog_cut(r.get("actor_name") or r.get("actor"), 40)))
         if r.get("reason"):
             line += " — reason: " + _escape_md(_modlog_cut(r.get("reason"), 256))
         line += " — " + _escape_md(_modlog_cut(r.get("sentence"), 600))
-        lines.append(_modlog_fit(line, budget))
+        shown = _modlog_fit(line, budget)
+        kept = len(line) if shown == line else len(shown) - 1
+        if len(lead) + 1 < kept < len(lead) + 1 + len(bold):
+            # The cut fell inside the kind's own bold pair: it falls before
+            # the pair's opening mark instead, so no bold is left open. The
+            # cut kept more than the time and the space, so this is shorter.
+            shown = lead + " …"
+        lines.append(shown)
     # The budget keeps the page inside the limit while the header stays
     # within its own bounds (a 40-character name, a 64-character search);
     # this cut stands so no page passes the limit even outside them. The

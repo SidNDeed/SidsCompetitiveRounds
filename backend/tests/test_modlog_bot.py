@@ -12,6 +12,7 @@ import asyncio
 import copy
 import json
 import os
+import re
 import sys
 import types
 import urllib.parse
@@ -898,3 +899,77 @@ def test_landfix_the_whole_page_cut_never_ends_inside_an_escape_pair():
             head = text[:-1]
             assert (len(head) - len(head.rstrip("\\"))) % 2 == 0, (lim, text[-12:])
     assert cut > 300, cut
+
+
+def test_landfix_the_record_time_is_a_timestamp_tag_or_a_fixed_phrase():
+    """Each row opens with the record's time: a Discord timestamp tag of a
+    whole number, or the fixed phrase "(time unknown)" for a value that is
+    no time. No part of the value itself is ever printed there -- not a
+    name, not a mention after a valid time, not other scripts' digits."""
+    ns, _ = bot(lambda params: (200, {}))
+    cases = [None, "", 12345, True, ["2026-11-01"], "2026-11-01T10:59:00Z<@1>",
+             "２０２６-11-01", "0001-01-01T00:00:00Z"] + HOSTILE
+    for v in cases:
+        out = ns["_modlog_ts"](v)
+        assert re.fullmatch(r"<t:-?[0-9]+:f>", out) or out == "(time unknown)", (v, out)
+        s = str(v)
+        parts = [s] + [p for p in re.split(r"[\s\[\]()<>@`*#_:.\\-]+", s) if len(p) >= 3]
+        assert not [p for p in parts if p and p in out], (v, out)
+    assert ns["_modlog_ts"]("0001-01-01T00:00:00Z") == "<t:-62135596800:f>"
+    assert ns["_modlog_ts"]("2026-11-01T10:59:00Z") == "<t:%d:f>" % int(
+        datetime(2026, 11, 1, 10, 59, tzinfo=timezone.utc).timestamp())
+
+
+def dense_rows(n=10):
+    """Rows whose fixed parts are long: a 40-character kind with characters
+    the escape doubles, the 68-character carried mark on every third row and
+    the other carried mark on the next, a long moderator, reason and
+    sentence."""
+    kinds = ["Ban", "Other (" + "chat_x_" * 4 + ")", "Mute*Star|x", "Other (" + "a_" * 16 + ")"]
+    rows = []
+    for i in range(n):
+        details = ({"carried_from": "flagged_matches"} if i % 3 == 0 else
+                   {"carried_from": "other_table"} if i % 3 == 1 else {})
+        rows.append({"id": "d%d" % i, "key": "k%d" % i, "at": "2026-11-01T10:%02d:00Z" % (59 - i),
+                     "action": "ban", "action_label": kinds[i % 4], "actor": "76561190420000001",
+                     "actor_name": "Moderator_" + "m" * 30, "players": [], "reason": "r_" * 128,
+                     "sentence": "s*" * 300, "target_steam_id": PLAYER, "target_match_id": None,
+                     "target_series_id": None, "details": details})
+    return {"total": n, "limit": 10, "next": None, "sort": "time", "dir": "desc",
+            "counts_by_action": [{"action": "ban", "label": "Ban", "count": n}],
+            "player": {"steam_id": PLAYER, "name": "P"}, "rows": rows}
+
+
+def _bold_pairs_hold(ns, body):
+    """Render `body` at every message limit from 200 to 2000; for every limit
+    whose rows get a budget of at least one character, each row's length
+    holds the budget and each row, once escaped characters are dropped,
+    holds an even count of `**`. Returns how many rows were cut before the
+    kind's opening mark, and how many were cut after its closing mark."""
+    before = after = 0
+    for lim in range(200, 2001):
+        ns["MODLOG_MSG_MAX"] = lim
+        lines = ns["_modlog_render"](body, page=0, sort="n", action_idx=None, search="").split("\n")
+        rows = lines[3:]
+        budget = ns["_modlog_row_budget"](lim, "\n".join(lines[:2]), lines[2], len(rows))
+        if budget < 1:
+            continue
+        for row in rows:
+            assert len(row) <= budget, (lim, budget, row)
+            assert _markup(row).count("**") % 2 == 0, (lim, budget, row)
+            if row.endswith("…"):
+                if "**" in row:
+                    after += 1
+                else:
+                    before += 1
+    return before, after
+
+
+def test_landfix_a_row_cut_never_ends_inside_the_kinds_bold_pair():
+    """A row whose time, kind and carried mark outgrow its budget is cut
+    before the kind's opening mark, never between the two marks, so no
+    bold is left open to run into the next row. Both cases occur: rows cut
+    before the pair, and rows cut after it."""
+    ns, _ = bot(lambda params: (200, {}))
+    before, after = _bold_pairs_hold(ns, dense_rows())
+    assert before > 0 and after > 0, (before, after)
