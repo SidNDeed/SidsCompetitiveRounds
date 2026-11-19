@@ -87,7 +87,7 @@ async def _world(sm, room_kind):
             await lh._insert(db, "matches", {"player1_id": pa, "player2_id": pb, "winner_id": pa,
                                              "p1_rounds_won": 3, "p2_rounds_won": 1, "is_ranked": True,
                                              "photon_room_id": room, "series_id": rs,
-                                             "reported_by_id": pa})
+                                             "reported_by": pa})
         await db.commit()
     await L._ban(sm, b)
     async with sm() as db:
@@ -192,8 +192,8 @@ async def _team_world(sm, ban_state):
                                              "t2a_id": pids[2], "t2b_id": pids[3], "status": "active"})
         admin = await L._admin(db)
         await db.execute(text(
-            "INSERT INTO player_bans (steam_id, reason, banned_by_steam_id, banned_at)"
-            " VALUES (:s, 'ban-sweep', :a, NOW())"), {"s": sids[3], "a": admin})
+            "INSERT INTO player_bans (steam_id, reason, banned_by_steam_id, banned_at, expires_at)"
+            " VALUES (:s, 'ban-sweep', :a, NOW(), NOW() + INTERVAL '1 hour')"), {"s": sids[3], "a": admin})
         await db.commit()
     await _set_state(sm, sids[3], ban_state)
     return sids, pids, ts

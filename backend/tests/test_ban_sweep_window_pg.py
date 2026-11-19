@@ -10,9 +10,17 @@ hold suite's case schema (test_match_hold_pg, test_match_hold_reports_pg).
     terminal field superseded_at is set and every report of the game is kept;
     a later janitor tick settles nothing.
 Each with a mutant that removes the read (or the close) and turns it red.
+  * The settle's ban gate under a report window asks only for keys the
+    window's guard already holds (the TYPED P2a entry of the lock census): an
+    instrument reads this backend's granted advisory locks at every gate call
+    made while the transaction holds any; the mutant that adds an id is seen.
+
+The seats get numeric ids (a ban row's key is numeric, player_bans'
+check), made up per case.
 """
 import os
 import sys
+import uuid
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 API = os.path.normpath(os.path.join(HERE, "..", "api"))
@@ -21,6 +29,7 @@ for _p in (API, HERE):
         sys.path.insert(0, _p)
 
 import pytest  # noqa: E402
+from sqlalchemy import text  # noqa: E402
 
 import main  # noqa: E402
 import test_ban_sweep_live as L  # noqa: E402
@@ -28,6 +37,22 @@ import test_match_hold_pg as hold_test  # noqa: E402
 import test_match_hold_reports_pg as R  # noqa: E402
 
 MODES = ("team", "ovt")
+
+
+async def _seed_numeric(conn, n):
+    out = []
+    for _ in range(n):
+        steam = "7656119" + "%010d" % (uuid.uuid4().int % 10 ** 10)
+        pid = await conn.fetchval(
+            "INSERT INTO players (steam_id, display_name) VALUES ($1, $2) RETURNING id",
+            steam, "bsw " + steam[-4:])
+        out.append((pid, steam))
+    return out
+
+
+@pytest.fixture(autouse=True)
+def _numeric_seats(monkeypatch):
+    monkeypatch.setattr(hold_test, "seed_players", _seed_numeric)
 
 
 async def _rows(env, s):
@@ -112,3 +137,60 @@ def test_iv_a_window_a_ban_refuses_is_closed_as_refused(monkeypatch, mode):
 def test_iv_mutant_a_refusal_that_does_not_close_leaves_the_window_open(monkeypatch, mode):
     out = _window_case(monkeypatch, mode, mutant=True)
     assert out["superseded"] is False and out["second"].get("refused") == 1, out
+
+
+# The settle gate under a window (moved from test_ban_sweep_locks_pg.py: the hold
+# harness builds its own case schema, which the module-wide one there refuses).
+_HELD_SQL = (
+    "SELECT l.mode, ((l.classid::bigint << 32) | l.objid::bigint) AS k FROM pg_locks l"
+    " WHERE l.pid = pg_backend_pid() AND l.locktype = 'advisory' AND l.granted")
+
+def _instrument(monkeypatch, book):
+    orig = main._ban_lock_and_gate
+
+    async def inst(db, steam_ids, *a, actor=None, exclusive=(), **kw):
+        held = (await db.execute(text(_HELD_SQL))).all()
+        if held:
+            keys = {}
+            for mode_, k in held:
+                keys[k] = keys.get(k) == "ExclusiveLock" and "ExclusiveLock" or mode_
+            want = [(s, "ShareLock") for s in [*steam_ids, actor] if s] + \
+                   [(s, "ExclusiveLock") for s in (exclusive or ()) if s]
+            for s, m in want:
+                h = (await db.execute(text("SELECT hashtext(CAST(:s AS text))::bigint"), {"s": s})).scalar()
+                ok = h in keys and (m == "ShareLock" or keys[h] == "ExclusiveLock")
+                book.append((s, m, ok))
+        return await orig(db, steam_ids, *a, actor=actor, exclusive=exclusive, **kw)
+    monkeypatch.setattr(main, "_ban_lock_and_gate", inst)
+
+
+def _window_settles(monkeypatch, extra=None):
+    import test_match_hold_pg as hold_test
+    import test_match_hold_reports_pg as R
+    book = []
+    _instrument(monkeypatch, book)
+    if extra is not None:
+        orig = main._settle_writer_ban_check
+
+        async def mut(db, steam_ids, reporter, **kw):
+            return await orig(db, [*steam_ids, extra], reporter, **kw)
+        monkeypatch.setattr(main, "_settle_writer_ban_check", mut)
+
+    async def body(env):
+        R._mount(env, monkeypatch)
+        for mode_ in ("team", "ovt"):
+            s, g, _want = await R._two_filed(env, mode_)
+            out = await main._report_window_janitor()
+            assert out.get("settled") == 1, (mode_, out)
+    hold_test.run_env(monkeypatch, body, prefix="bsv")
+    return book
+
+
+def test_v_the_settle_gate_asks_only_keys_the_window_guard_holds(monkeypatch):
+    book = _window_settles(monkeypatch)
+    assert book and all(ok for _s, _m, ok in book), book
+
+
+def test_v_mutant_a_settle_gate_asking_a_new_key_is_seen(monkeypatch):
+    book = _window_settles(monkeypatch, extra="76561190529999999")
+    assert [b for b in book if b[0] == "76561190529999999" and not b[2]], book

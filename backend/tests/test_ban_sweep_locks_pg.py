@@ -7,10 +7,7 @@ static census (test_ban_sweep_locks.py) cannot read from the syntax.
     it wait; the mutant that asks the key shared does not wait).
   * report_casual_dc takes the leaver's key EXCLUSIVE in its one taking call
     (the merged take: a shared holder makes it wait; the shared mutant not).
-  * the settle's ban gate under a report window asks only for keys the
-    window's guard already holds (the TYPED P2a entry of the census): an
-    instrument reads this backend's granted advisory locks at every gate call
-    made while the transaction holds any; the mutant that adds an id is seen.
+  * the settle gate's TYPED P2a entry is tested in test_ban_sweep_window_pg.py.
 
     LADDER_TEST_PG_DSN / CF_TEST_PG_DSN = the lane database
 """
@@ -33,10 +30,6 @@ from sqlalchemy import text  # noqa: E402
 import main  # noqa: E402
 import test_ban_sweep_live as L  # noqa: E402
 from test_ban_sweep_live import case, soft  # noqa: E402,F401  (fixtures)
-
-_HELD_SQL = (
-    "SELECT l.mode, ((l.classid::bigint << 32) | l.objid::bigint) AS k FROM pg_locks l"
-    " WHERE l.pid = pg_backend_pid() AND l.locktype = 'advisory' AND l.granted")
 
 
 async def _waiting(sm):
@@ -215,55 +208,3 @@ def test_v_mutant_casual_dc_asking_the_leaver_key_shared_does_not_wait(case, sof
     waited, got = L._with_sm(case, _casual_body(rep, lv))
     assert not waited and got[0] == "admitted", (waited, got)
 
-
-# ------------------------------------------------------------- the window guard
-
-def _instrument(monkeypatch, book):
-    orig = main._ban_lock_and_gate
-
-    async def inst(db, steam_ids, *a, actor=None, exclusive=(), **kw):
-        held = (await db.execute(text(_HELD_SQL))).all()
-        if held:
-            keys = {}
-            for mode_, k in held:
-                keys[k] = keys.get(k) == "ExclusiveLock" and "ExclusiveLock" or mode_
-            want = [(s, "ShareLock") for s in [*steam_ids, actor] if s] + \
-                   [(s, "ExclusiveLock") for s in (exclusive or ()) if s]
-            for s, m in want:
-                h = (await db.execute(text("SELECT hashtext(CAST(:s AS text))::bigint"), {"s": s})).scalar()
-                ok = h in keys and (m == "ShareLock" or keys[h] == "ExclusiveLock")
-                book.append((s, m, ok))
-        return await orig(db, steam_ids, *a, actor=actor, exclusive=exclusive, **kw)
-    monkeypatch.setattr(main, "_ban_lock_and_gate", inst)
-
-
-def _window_settles(monkeypatch, extra=None):
-    import test_match_hold_pg as hold_test
-    import test_match_hold_reports_pg as R
-    book = []
-    _instrument(monkeypatch, book)
-    if extra is not None:
-        orig = main._settle_writer_ban_check
-
-        async def mut(db, steam_ids, reporter, **kw):
-            return await orig(db, [*steam_ids, extra], reporter, **kw)
-        monkeypatch.setattr(main, "_settle_writer_ban_check", mut)
-
-    async def body(env):
-        R._mount(env, monkeypatch)
-        for mode_ in ("team", "ovt"):
-            s, g, _want = await R._two_filed(env, mode_)
-            out = await main._report_window_janitor()
-            assert out.get("settled") == 1, (mode_, out)
-    hold_test.run_env(monkeypatch, body, prefix="bsv")
-    return book
-
-
-def test_v_the_settle_gate_asks_only_keys_the_window_guard_holds(monkeypatch):
-    book = _window_settles(monkeypatch)
-    assert book and all(ok for _s, _m, ok in book), book
-
-
-def test_v_mutant_a_settle_gate_asking_a_new_key_is_seen(monkeypatch):
-    book = _window_settles(monkeypatch, extra="76561190529999999")
-    assert [b for b in book if b[0] == "76561190529999999" and not b[2]], book

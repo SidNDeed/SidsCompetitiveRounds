@@ -222,7 +222,7 @@ PROOFS = {
         how="P2a-typed", base=False, entries={"main.submit_ovt_match", "main.submit_team_match"},
         typed=("the report window's guard (_guard_identities, exclusive) holds every id the settle's "
                "gate asks for: the report's players and its reporter",
-               "test_ban_sweep_locks_pg.py::test_v_the_settle_gate_asks_only_keys_the_window_guard_holds"),
+               "test_ban_sweep_window_pg.py::test_v_the_settle_gate_asks_only_keys_the_window_guard_holds"),
         facts=[("arg", "_settle_ovt_report", "_settle_writer_ban_check", 1, "steams"),
                ("arg", "_settle_team_report", "_settle_writer_ban_check", 1, "steams"),
                ("nokw", "_settle_writer_ban_check", "_ban_lock_and_gate", "exclusive")]),
@@ -413,3 +413,33 @@ def test_vi_steam_auth_holds_no_key_across_the_steam_call():
     assert src.index("asyncio.to_thread(_steam_http_get_json") < src.index("_ban_lock_and_gate(")
     assert src.index("await db.rollback()") < src.index("asyncio.to_thread(")
     assert _raw_takes(fn) == []
+
+
+def _typed_test_failures(proofs):
+    """Every TYPED entry names a test function that exists in the named file
+    (the test that is red when the typed fact is false)."""
+    out = []
+    for takers, p in proofs.items():
+        if not p["how"].endswith("typed"):
+            continue
+        fname, _, test = p["typed"][1].partition("::")
+        path = os.path.join(HERE, fname)
+        names = set()
+        if os.path.exists(path):
+            with open(path, encoding="utf-8") as fh:
+                names = {n.name for n in ast.parse(fh.read()).body if isinstance(n, ast.FunctionDef)}
+        if test not in names:
+            out.append("%s: typed test %s not found" % (takers, p["typed"][1]))
+    return out
+
+
+def test_v_every_typed_entry_names_a_test_that_exists():
+    assert _typed_test_failures(PROOFS) == []
+
+
+def test_v_control_a_typed_entry_naming_a_missing_test_is_red():
+    k = next(k for k, p in PROOFS.items() if p["how"].endswith("typed"))
+    bad = dict(PROOFS)
+    bad[k] = dict(PROOFS[k], typed=(PROOFS[k]["typed"][0], "test_ban_sweep_window_pg.py::test_v_absent"))
+    assert _typed_test_failures(bad) == ["%s: typed test %s not found" % (
+        k, "test_ban_sweep_window_pg.py::test_v_absent")]
