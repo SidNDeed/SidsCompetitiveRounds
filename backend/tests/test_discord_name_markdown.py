@@ -55,9 +55,9 @@ NAME_ATTR = {"display_name", "global_name", "nick", "name"}
 EXTRA_ATTR = {"name_a", "name_b", "t1_label", "t2_label", "side_label", "vs_name", "target_label"}
 # The escapes. The four after escape_markdown are this file's own wrappers of
 # discord.utils.escape_markdown; a value through any of them is literal.
-# _qdig_md is the held-report digest's escape (QDIG-1): one line, cut to a
-# limit, URL schemes made inert, and every character of QDIG_MD_CHARS after a
-# backslash -- a superset of what _escape_md escapes, shown by
+# _qdig_md is the held-report digest's escape (QDIG-1): the value on one line,
+# then one call of _escape_md with the digest's limit (BOT-TEXT-ESCAPE-1), so
+# it escapes what _escape_md escapes, shown by
 # test_the_digest_escape_covers_every_character_escape_md_escapes. The body of
 # an escape is where a name is made literal, so it is not read as a site.
 # _modlog_id is the moderator log's Steam id for its header's code span
@@ -78,7 +78,9 @@ MSG_KW = {"content", "description", "value", "title", "name", "text", "label", "
 MSG_CALLS = {"send", "reply", "edit", "send_message", "edit_message", "Embed", "add_field", "set_author",
              "set_footer", "respond", "edit_original_response", "Button", "SelectOption", "TextInput",
              "_dm_user", "_announce_in_channel", "_post_ingame_chat"}
-WRAP_CALLS = {"str", "strip", "lstrip", "rstrip", "get", "title", "upper", "lower"}
+# _mail_legacy_plain takes an older api's escaped mail field back to the text
+# typed (BOT-TEXT-ESCAPE-1): a call of it carries what its argument carries.
+WRAP_CALLS = {"str", "strip", "lstrip", "rstrip", "get", "title", "upper", "lower", "_mail_legacy_plain"}
 _SHARED_NODES = (ast.expr_context, ast.operator, ast.boolop, ast.unaryop, ast.cmpop)
 
 
@@ -307,6 +309,17 @@ class _Census:
         return any(isinstance(p, (ast.FunctionDef, ast.AsyncFunctionDef)) and p.name in SAFE
                    for p in self.parents(node))
 
+    def in_escape_arg(self, node):
+        """True when the text is built inside the argument of an escape call
+        (the at-sign and the name passed to _escape_md as one string,
+        BOT-TEXT-ESCAPE-1): the escape makes the whole of it literal."""
+        for p in self.parents(node):
+            if isinstance(p, ast.Call) and _call_name(p) in SAFE:
+                return True
+            if isinstance(p, (ast.stmt, ast.FunctionDef, ast.AsyncFunctionDef)):
+                return False
+        return False
+
     def in_pass(self, node):
         """True inside the body of a function named in PASS (at any depth)."""
         return any(isinstance(p, (ast.FunctionDef, ast.AsyncFunctionDef)) and p.name in PASS
@@ -349,7 +362,8 @@ class _Census:
                         if self.carries(a, t):
                             found.append(("K", node, a))
             for kind, where, expr in found:
-                if self.in_print(where) or self.in_escape(where) or self.in_pass(where):
+                if self.in_print(where) or self.in_escape(where) or self.in_pass(where) \
+                        or self.in_escape_arg(where):
                     continue
                 out.append((fn.name if fn else "<module>", self.seg(expr), kind, where.lineno))
         return sorted(out, key=lambda s: (s[3], s[1]))
@@ -377,7 +391,6 @@ ALLOW = {
     ("cmd_game", "p.get('side')"): (1, "the 1v2 side, solo or duo, not a name"),
     ("poll_ffa_queue_beacon", "members"): (1, "the lobby's member count"),
     ("poll_bug_reports", "who[:40]"): (1, "a thread name: plain text, no Markdown"),
-    ("_format_release_message", "name"): (1, "the GitHub release's title, not a player's name"),
     ("dm_opponent", "opp_id"): (1, "the Discord id _dm_user sends to, not text"),
     ("_tmatch_notice_message", "match_label"): (1, _LABEL),
     ("_tmatch_notice_message", "dest"): (4, _LABEL),
@@ -426,7 +439,7 @@ def test_every_player_name_in_markdown_goes_through_an_escape(census_sites):
 _UNWRAPS = (
     ("_faq_top_player", "**{_escape_md(top['display_name'])}**", "**{top['display_name']}**",
      "top['display_name']"),
-    ("_mail_sent_line", "% (_escape_md(who), subj)", "% (who, subj)", "who"),
+    ("_mail_sent_line", "% (_escape_md(who, MAIL_NAME_SHOWN_MAX), subj)", "% (who, subj)", "who"),
     ("poll_bug_report_events", '"Note from " + _escape_md(actor)', '"Note from " + actor', "actor"),
     ("cmd_graph", '", ".join(_escape_md(n) for n in not_linked)', '", ".join(not_linked)', "not_linked"),
 )
@@ -550,12 +563,13 @@ def test_the_moderator_logs_steam_id_is_ascii_digits_or_a_fixed_word():
 
 def test_the_digest_escape_covers_every_character_escape_md_escapes():
     """_qdig_md is in SAFE because it escapes at least what _escape_md
-    escapes. Both functions run here, lifted from the bot, on every BMP
-    character set between two letters (so _escape_md's line-start rule does
-    not apply): the characters each puts a backslash before are computed,
-    not listed. A control drops one character from QDIG_MD_CHARS and the
-    check must fail."""
-    ns = _lift(funcs=("_escape_md", "_qdig_md"), assigns=("QDIG_MD_CHARS",))
+    escapes (it is a thin call of it). Both functions run here, lifted from
+    the bot, on every BMP character set between two letters (so _escape_md's
+    line-start rule does not apply): the characters each puts a backslash
+    before are computed, not listed. A control gives the digest a name
+    helper that leaves one of those characters alone, and the check must
+    fail."""
+    ns = _lift(funcs=("_escape_md", "_qdig_md"))
 
     def escaped_by(fn):
         return {c for c in map(chr, range(0x10000)) if fn("a" + c + "a") == "a\\" + c + "a"}
@@ -564,7 +578,8 @@ def test_the_digest_escape_covers_every_character_escape_md_escapes():
     qdig = escaped_by(lambda s: ns["_qdig_md"](s, 100))
     assert md and md <= qdig, sorted(md - qdig)
     dropped = sorted(md)[0]
-    ns["QDIG_MD_CHARS"] = ns["QDIG_MD_CHARS"].replace(dropped, "")
+    real = ns["_escape_md"]
+    ns["_escape_md"] = lambda s, limit=None, more="...": real(s, limit, more).replace("\\" + dropped, dropped)
     assert not md <= escaped_by(lambda s: ns["_qdig_md"](s, 100)), dropped
 
 
@@ -716,8 +731,12 @@ def test_a_mail_confirmation_and_a_moderation_result_print_names_literally(name)
     """Two replies that name a player to someone else: the mail relay's
     "sent your reply to NAME" and a moderation button's "applied by NAME to
     NAME"."""
-    ns = _lift(funcs=("_escape_md", "_mail_sent_line", "_modcase_render"))
-    _shows_literally(ns["_mail_sent_line"]({"known": True, "sender_name": name, "subject": "hi"}), name)
+    ns = _lift(funcs=("_escape_md", "_escape_text", "_mail_sent_line", "_mail_legacy_plain", "_modcase_render"),
+               assigns=("MAIL_NAME_SHOWN_MAX", "MAIL_SUBJECT_SHOWN_MAX", "_TEXT_BREAKS", "_TEXT_URL",
+                        "_TEXT_LINE_MARK", "_TEXT_ALWAYS"))
+    # the typed name as the api serves it beside its older escaped field (BOT-TEXT-ESCAPE-1)
+    _shows_literally(ns["_mail_sent_line"]({"known": True, "sender_name": "?", "subject": "hi",
+                                            "sender_name_raw": name, "subject_raw": "hi"}), name)
     body = {"status": "ok", "subject_name": name, "subject_steam_id": "76561190000000000"}
     spec = {"label": "Mute", "case_id": "abcdef0123456789"}
     text = ns["_modcase_render"](200, body, spec, "**Mod**")
