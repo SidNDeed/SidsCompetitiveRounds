@@ -1069,6 +1069,36 @@ def test_g2_the_lists_verdict_is_what_accept_then_does(monkeypatch):
             ans = await accept(env, qid)
             got = (ans.status == 200, "" if ans.status == 200 else ans.body)
             assert got == (v["can_accept"], v["accept_blocked_reason"]), ("G2 accept", name, ans, v)
+        # can_credit: what Credit then does, on fresh rows, every refusal
+        # outcome included (the gate, the number, the word, the clock, a
+        # verification, the game's claim).
+        cases = {}
+        lob, cases["accept"] = await closed_held(env)
+        lob, cases["later"] = await closed_held(env)
+        await later_for(env, lob)
+        lob = await played(env)
+        await close(env, lob)
+        await held(env, lob, 2)
+        cases["ahead"] = await held(env, lob, 3)
+        lob, cases["word"] = await closed_held(env)
+        await env.conn.execute("UPDATE match_report_quarantine SET reason = 'lobby_game_limit' WHERE id = $1",
+                               uuid.UUID(cases["word"]))
+        lob, cases["clock"] = await closed_held(env)
+        await set_received(env, cases["clock"], await anchor(env, lob) - _dt.timedelta(seconds=5))
+        lob, cases["count"] = await closed_held(env)
+        await later_for(env, lob)
+        await env.conn.execute("UPDATE ffa_lobbies SET player_count = 5 WHERE id = $1", lob.lid)
+        lob, q_first, cases["paid"] = await siblings(env, 2)
+        await later_for(env, lob)
+        assert (await credit(env, q_first)).status == 200
+        want = {"accept": False, "later": True, "ahead": True, "word": False, "clock": False,
+                "count": False, "paid": False}
+        verdicts = await listing(env)
+        for name, qid in cases.items():
+            v = verdicts[qid]
+            assert v["can_credit"] is want[name], ("G2 can_credit", name, v)
+            ans = await credit(env, qid)
+            assert (ans.status == 200) is v["can_credit"], ("G2 credit", name, ans, v)
     run_env(monkeypatch, body)
 
 
