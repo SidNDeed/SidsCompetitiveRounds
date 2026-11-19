@@ -559,7 +559,7 @@ def test_a_name_holding_an_address_is_never_a_link_in_either_helper(text, want):
 
 
 @pytest.mark.parametrize("text", ["a" * 10 + "https://q.example", "x" * 37 + "HTTP://z", "http://" * 9,
-                                  "_" * 20 + "ftp://f.example", "steam://" * 5],
+                                  "a" * 10 + "ftp://f.example", "steam://" * 5],
                          ids=["middle", "edge", "many", "ftp", "steam"])
 def test_the_scheme_break_holds_at_every_cut(text):
     """The break is made before the cut: at every limit the result fits,
@@ -1160,6 +1160,29 @@ def test_a_stream_composer_mutant_fails(old, new):
     src = _api_source("main.py")
     assert src.count(old) == 1, old
     assert not _stream_ok(_stream(src.replace(old, new, 1)))
+
+
+MODE_TYPED = "**x** <@1> @everyone https://a.example " + "_" * 60
+MODE_HELPER = '_dtext.escape_name(_dtext.flat(raw_mode) or "?", 40)'
+
+
+def _mode_ok(ns):
+    f = ns["_stream_mode_label"]
+    out = f({"mode": MODE_TYPED})
+    return (f({"mode": "ffa"}) == "FFA" and f({"mode": "1v1", "is_tournament": True}) == "Tournament 1v1"
+            and out == discord_text.escape_name(MODE_TYPED, 40) and len(out) <= 40)
+
+
+@pytest.mark.parametrize("mutant", [False, True], ids=["as-is", "helper-removed"])
+def test_a_stream_mode_outside_the_table_passes_the_name_helper(mutant):
+    """A2: a listed mode shows its label; any other mode passes the name
+    helper, 40 characters of escaped text. The mutant takes the helper
+    off and must fail."""
+    src = _api_source("main.py")
+    assert src.count(MODE_HELPER) == 1
+    if mutant:
+        src = src.replace(MODE_HELPER, '(_dtext.flat(raw_mode) or "?")', 1)
+    assert _mode_ok(_stream(src)) is not mutant
 
 
 def test_a_stored_matchup_line_keeps_whole_names():
@@ -2034,6 +2057,9 @@ PARAM_CLASSES = {
 }
 for _table in (ATTR_CLASSES, PARAM_CLASSES):
     KEYS.update({k: c for c, ks in _table.items() for k in ks.split()})
+# An exception's own text (str(e) of an `except ... as e`): judged as free
+# text, one _escape_text pass with a bound, in every slot it reaches.
+KEYS["<exception>"] = "free"
 
 # A source whose class differs in one function: (function, key) -> (class, why).
 OVERRIDES = {
@@ -2051,8 +2077,6 @@ OVERRIDES = {
 # What the walk cannot resolve, by kind, with the number of reads and why
 # none of them is a typed value. Any other unresolved read is a problem.
 UNRESOLVED = {
-    "<exception>": (14, "an exception's own text (str(e)) in an error line: the library's or the "
-                        "server's words"),
     "?call:handler": (3, "_faq_resolve_answer calls an FAQ entry's handler; every handler the FAQ table "
                          "names is walked as a markdown slot of its own"),
     "?no-caller:_dm_all_signups.body": (1, "no call of _dm_all_signups stands in the bot: nothing "
@@ -2067,7 +2091,7 @@ def _census_problems(source, keys=None, census=None):
     reads = (census or _Census)(source).reads
     problems, unresolved = [], {}
     for key, treat, kind, fn, line, glue in reads:
-        if key.startswith("?") or key == "<exception>":
+        if key.startswith("?"):
             unresolved[key] = unresolved.get(key, 0) + 1
             continue
         if key not in keys:
@@ -2145,7 +2169,31 @@ CENSUS_MUTANTS = [
      'who = _mail_legacy_plain(t.get("sender_name")).strip() or "?"', "'sender_name' reaches a md slot raw"),
     ("a call the walk cannot follow", 'f"**{_escape_md(n)}**" for n in unlinked',
      'f"**{fmt(n)}**" for n in unlinked', "cannot resolve ?call:fmt"),
+    ("exception text", 'f"Mute failed: {_escape_text(str(e), 300)}"', 'f"Mute failed: {e}"',
+     "'<exception>' reaches a md slot raw"),
 ]
+
+
+def test_every_exception_text_shown_passes_the_text_helper_with_a_bound():
+    """An exception's text that reaches a slot passes _escape_text once (the
+    census) and with a bound: every _escape_text call on an `except ... as
+    NAME` name has a limit. Control: the same check on a copy with one bound
+    taken away finds that call."""
+    def unbounded(source):
+        out = []
+        for h in ast.walk(ast.parse(source)):
+            if isinstance(h, ast.ExceptHandler) and h.name:
+                for c in ast.walk(h):
+                    if isinstance(c, ast.Call) and isinstance(c.func, ast.Name) and c.func.id == "_escape_text" \
+                            and h.name in {n.id for n in ast.walk(c.args[0]) if isinstance(n, ast.Name)} \
+                            and len(c.args) + len(c.keywords) < 2:
+                        out.append(c.lineno)
+        return out
+
+    assert unbounded(TEXT) == []
+    old = 'f"Mute failed: {_escape_text(str(e), 300)}"'
+    assert TEXT.count(old) == 1
+    assert len(unbounded(TEXT.replace(old, 'f"Mute failed: {_escape_text(str(e))}"'))) == 1
 
 
 def _mutant_ok(problems, word):

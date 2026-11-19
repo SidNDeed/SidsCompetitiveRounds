@@ -15,8 +15,7 @@ of its AST and executed against fakes. Two layers:
 1. A CENSUS of the whole file. Every place a player's Steam or Discord name
    is put into text -- an f-string, a %-format, a concatenation, a join, a
    direct message or embed argument -- passes it through an escape helper
-   (_escape_md, discord.utils.escape_markdown, or one of the file's wrappers
-   of it), or is listed in ALLOW with the reason it is not Markdown or not a
+   (_escape_md, or one of the bot's thin calls of it), or is listed in ALLOW with the reason it is not Markdown or not a
    player's name. A new unescaped site fails; so does an ALLOW entry that no
    longer matches anything. _Census.carries says what counts as a name: it
    follows a name through locals, lists, parameters and return values, but
@@ -53,8 +52,10 @@ NAME_KEY = re.compile(
     r"|^(?!(card|rank|tag|role|file)_name$)[a-z0-9_]*_name$")
 NAME_ATTR = {"display_name", "global_name", "nick", "name"}
 EXTRA_ATTR = {"name_a", "name_b", "t1_label", "t2_label", "side_label", "vs_name", "target_label"}
-# The escapes. The four after escape_markdown are this file's own wrappers of
-# discord.utils.escape_markdown; a value through any of them is literal.
+# The escapes: functions the bot defines (checked by
+# test_every_safe_name_is_a_function_the_bot_defines). The four after
+# _escape_md are the bot's thin calls of it (_board_name is nested in the
+# tournament board's builder); a value through any of them is literal.
 # _qdig_md is the held-report digest's escape (QDIG-1): the value on one line,
 # then one call of _escape_md with the digest's limit (BOT-TEXT-ESCAPE-1), so
 # it escapes what _escape_md escapes, shown by
@@ -65,8 +66,7 @@ EXTRA_ATTR = {"name_a", "name_b", "t1_label", "t2_label", "side_label", "vs_name
 # otherwise. Inside a code span no escape is literal (a backtick ends the
 # span, a backslash shows as typed); digits are literal anywhere. Shown by
 # test_the_moderator_logs_steam_id_is_ascii_digits_or_a_fixed_word.
-SAFE = {"_escape_md", "escape_markdown", "_md_name", "_pc_name", "_game_embed_plain", "_board_name",
-        "_qdig_md", "_modlog_id"}
+SAFE = {"_escape_md", "_md_name", "_pc_name", "_game_embed_plain", "_board_name", "_qdig_md", "_modlog_id"}
 # Helpers that pass raw text through, only shortened (LANDFIX-1). A call of
 # one carries what its first argument carries, and nothing in its body is a
 # site: it puts its argument into no text but its own return, which the
@@ -559,6 +559,19 @@ def test_the_moderator_logs_steam_id_is_ascii_digits_or_a_fixed_word():
     assert re.fullmatch(r"[a-z ]+", fixed), fixed
     assert _id_gate_misses(ns["_modlog_id"], fixed) == []
     assert _id_gate_misses(lambda v: str(v) if str(v).isdigit() and len(str(v)) <= 20 else fixed, fixed)
+
+
+def _undefined(names):
+    defined = {n.name for n in ast.walk(TREE) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
+    return sorted(set(names) - defined)
+
+
+def test_every_safe_name_is_a_function_the_bot_defines():
+    """SAFE names only escapes the bot defines (at any depth), so no entry
+    stands for a function that is not there. Control: a planted name that
+    the bot does not define is found."""
+    assert _undefined(SAFE) == []
+    assert _undefined(SAFE | {"_census_planted_escape"}) == ["_census_planted_escape"]
 
 
 def test_the_digest_escape_covers_every_character_escape_md_escapes():
