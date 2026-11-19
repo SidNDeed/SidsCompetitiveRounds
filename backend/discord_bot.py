@@ -4743,7 +4743,7 @@ async def ctx_mute_chatter(interaction: discord.Interaction, message: discord.Me
                 await interaction.followup.send(
                     f"Mute refused (HTTP {resp.status}). {detail}", ephemeral=True)
     except Exception as e:
-        await interaction.followup.send(f"Mute failed: {e}", ephemeral=True)
+        await interaction.followup.send(f"Mute failed: {_escape_text(str(e), 300)}", ephemeral=True)
 
 
 @bot.hybrid_command(name="chatlockdown",
@@ -4785,7 +4785,7 @@ async def cmd_chatlockdown(ctx, state: str = ""):
             else:
                 await ctx.reply(f"Lockdown toggle failed (HTTP {resp.status}).", ephemeral=True)
     except Exception as e:
-        await ctx.reply(f"Lockdown toggle failed: {e}", ephemeral=True)
+        await ctx.reply(f"Lockdown toggle failed: {_escape_text(str(e), 300)}", ephemeral=True)
 
 
 # ── Twitch outbound mirror (design S8) ───────────────────────────────────────
@@ -8637,7 +8637,7 @@ async def setup_rank_roles(ctx):
         except discord.Forbidden:
             failed.append(f"{new_name} (missing permission — is the bot's top role above the rank roles?)")
         except Exception as ex:
-            failed.append(f"{new_name} ({ex})")
+            failed.append(f"{new_name} ({_escape_text(str(ex), 200)})")
     # Push the (possibly recolored-by-rename) roles into rank_role_colors
     # right away so in-game rank titles pick up the new names without
     # waiting for the 6-hour color loop.
@@ -9972,7 +9972,7 @@ async def _modcase_click(interaction, custom_id):
             except Exception:
                 body = {}
     except Exception as e:
-        await interaction.followup.send(f"Action failed: {e}", ephemeral=True)
+        await interaction.followup.send(f"Action failed: {_escape_text(str(e), 300)}", ephemeral=True)
         return
     rendered = _modcase_render(status, body, spec, actor_name)
     if status == 200 and isinstance(body, dict) and body.get("status") in ("ok", "already_resolved"):
@@ -13845,7 +13845,7 @@ async def announce_release(ctx):
                     return
                 payload = await resp.json()
     except Exception as e:
-        await ctx.reply(f"Fetch failed: {e}", ephemeral=True)
+        await ctx.reply(f"Fetch failed: {_escape_text(str(e), 300)}", ephemeral=True)
         return
 
     tag = payload.get("tag_name") or "?"
@@ -14450,7 +14450,7 @@ async def opp_online(ctx):
         label = {"online": "online", "idle": "idle", "dnd": "do not disturb"}.get(status, "offline")
         await ctx.reply(f"{icon} **{_escape_md(opp_name)}** is currently **{label}** in Discord.", ephemeral=True)
     except Exception as e:
-        await ctx.reply(f"Couldn't resolve presence: {e}", ephemeral=True)
+        await ctx.reply(f"Couldn't resolve presence: {_escape_text(str(e), 300)}", ephemeral=True)
 
 
 @bot.hybrid_command(name="dm-opponent", description="DM your current tournament opponent (8/min)")
@@ -15708,7 +15708,7 @@ async def _tournament_unsignup(tournament_id, steam_id, discord_id):
                 detail = txt
             return False, str(detail)[:300]
     except Exception as ex:
-        return False, f"request failed: {ex}"
+        return False, f"request failed: {_escape_text(str(ex), 300)}"
 
 
 async def _tournament_checkin_response(match_id, steam_id, answer):
@@ -15742,7 +15742,7 @@ async def _tournament_checkin_response(match_id, steam_id, answer):
                 return False, None, None, f"backend returned unknown result '{result}'"
             return True, result, _unix_ts(data.get("new_deadline_epoch")), ""
     except Exception as ex:
-        return False, None, None, f"request failed: {ex}"
+        return False, None, None, f"request failed: {_escape_text(str(ex), 300)}"
 
 
 def _discord_tail(discord_id) -> str:
@@ -16553,7 +16553,7 @@ async def _place_discord_bet(interaction: discord.Interaction, series_id: str,
             },
         )
     except Exception as e:
-        await _bet_reply(interaction, f"Bet failed: {e}")
+        await _bet_reply(interaction, f"Bet failed: {_escape_text(str(e), 300)}")
         return
     if not result:
         await _bet_reply(interaction, "Bet failed: backend unreachable.")
@@ -16832,7 +16832,7 @@ async def _place_discord_team_bet(interaction: discord.Interaction,
             },
         )
     except Exception as e:
-        await _bet_reply(interaction, f"Bet failed: {e}")
+        await _bet_reply(interaction, f"Bet failed: {_escape_text(str(e), 300)}")
         return
     err = _discord_bet_error(result)
     if err:
@@ -16968,7 +16968,7 @@ class FfaBetModal(discord.ui.Modal):
         try:
             result = await api_post("/discord-ffa-bets", params=params)
         except Exception as e:
-            await _bet_reply(interaction, f"Bet failed: {e}")
+            await _bet_reply(interaction, f"Bet failed: {_escape_text(str(e), 300)}")
             return
         perr = _discord_bet_error(result)
         if perr:
@@ -17577,7 +17577,7 @@ class LobbyBetModal(discord.ui.Modal):
                 },
             )
         except Exception as e:
-            await _bet_reply(interaction, f"Bet failed: {e}")
+            await _bet_reply(interaction, f"Bet failed: {_escape_text(str(e), 300)}")
             return
         perr = _discord_bet_error(result)
         if perr:

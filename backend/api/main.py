@@ -78702,9 +78702,11 @@ def _stream_mode_label(candidate: dict) -> str:
     """Bug 250: THE mode label for stream surfaces — one helper for both the
     live body and the stored matchup line (#330). A tournament 1v1 says so
     in the text itself; the 🏆 prefix alone left the line reading
-    "Ranked 1v1" for every tournament game."""
-    mode = _STREAM_MODE_LABELS.get(candidate.get("mode") or "",
-                                   candidate.get("mode") or "?")
+    "Ranked 1v1" for every tournament game. A mode outside the table is
+    shown through the name helper, 40 characters of escaped text
+    (BOT-TEXT-ESCAPE-1), so a mode added later still reads."""
+    raw_mode = candidate.get("mode") or ""
+    mode = _STREAM_MODE_LABELS.get(raw_mode) or _dtext.escape_name(_dtext.flat(raw_mode) or "?", 40)
     if candidate.get("is_tournament") and (candidate.get("mode") or "") == "1v1":
         return "Tournament 1v1"
     return mode
