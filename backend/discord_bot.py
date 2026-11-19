@@ -18418,7 +18418,8 @@ def _aer_word(status, body, headers=None):
     if status == 403:
         return AER_REFUSED
     if status == 400 and re.fullmatch(r"bad_argument( \([a-z_ ;]{1,60}\))?", detail):
-        field = _aer_refusal_word(detail[len("bad_argument"):].strip()[1:-1])
+        named = detail[len("bad_argument"):].strip()[1:-1]
+        field = _aer_refusal_word(named) if named else ""
         return _aer_text("bad_argument",
                          AER_TEXTS["bad_argument"] % (" (%s)" % field if field else ""))
     if status == 404:
