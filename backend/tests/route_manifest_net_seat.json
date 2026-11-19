@@ -268,7 +268,7 @@
           ],
           "main",
           "admin_accept_quarantine",
-          "a09743a93ca01ecfcbcac9aceb74af2393d94e89"
+          "8352e5abe0bc3d71570e99af7f1294de488fbf28"
         ],
         [
           "/api/v1/admin/quarantine/{qid}/credit",
@@ -277,7 +277,7 @@
           ],
           "main",
           "admin_credit_quarantine",
-          "a91b55e076ba11f4e334dc22b94899980e048834"
+          "e4106616ba7661b4e83dee1738ff35760a3c2c02"
         ],
         [
           "/api/v1/admin/quarantine/{qid}/discard",
