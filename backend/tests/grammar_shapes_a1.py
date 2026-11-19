@@ -65,9 +65,9 @@ A1_SPANS = (
     ('main.py', 59770, '_team_color_holders', 51),
     ('main.py', 59790, '_stamp_team_series_colors', 249),
     ('main.py', 64770, '_asm_sqlstate', 119),
-    ('main.py', 67411, '_ffa_queue_poll_inner', 2939),
-    ('main.py', 77959, '_assert_no_service_subject', 96),
-    ('main.py', 78007, '_service_player_uuids', 183),
+    ('main.py', 67432, '_ffa_queue_poll_inner', 2939),
+    ('main.py', 78267, '_assert_no_service_subject', 96),
+    ('main.py', 78315, '_service_player_uuids', 183),
     ('match_hold.py', 212, 'caps_token_sql', 16),
     ('match_hold.py', 235, '_mode_or_400', 23),
     ('match_hold.py', 351, '_latch_sql', 78),
@@ -91,7 +91,7 @@ A1_NODES = 20183
 
 
 A1_SHAPES = frozenset({
-    '<root>>AsyncFunctionDef(name=str,args=arguments,body=[Assign|Expr|For|Global|If|Return],decorator_list=[],returns=-,type_comment=-,type_params=[])',  # main.py:67411
+    '<root>>AsyncFunctionDef(name=str,args=arguments,body=[Assign|Expr|For|Global|If|Return],decorator_list=[],returns=-,type_comment=-,type_params=[])',  # main.py:67432
     '<root>>AsyncFunctionDef(name=str,args=arguments,body=[Assign|Expr|For|If],decorator_list=[],returns=Constant,type_comment=-,type_params=[])',  # main.py:17379
     '<root>>AsyncFunctionDef(name=str,args=arguments,body=[Assign|Expr|For|If|Import|Return|While],decorator_list=[Call],returns=-,type_comment=-,type_params=[])',  # main.py:21127
     '<root>>AsyncFunctionDef(name=str,args=arguments,body=[Assign|Expr|For|If|Return],decorator_list=[Call],returns=-,type_comment=-,type_params=[])',  # main.py:56010
@@ -102,7 +102,7 @@ A1_SHAPES = frozenset({
     '<root>>AsyncFunctionDef(name=str,args=arguments,body=[Assign|Expr|For|Return],decorator_list=[],returns=-,type_comment=-,type_params=[])',  # main.py:59770
     '<root>>AsyncFunctionDef(name=str,args=arguments,body=[Assign|Expr|For|Return],decorator_list=[],returns=Name,type_comment=-,type_params=[])',  # main.py:58934
     '<root>>AsyncFunctionDef(name=str,args=arguments,body=[Assign|Expr|FunctionDef|If|Return|Try],decorator_list=[],returns=-,type_comment=-,type_params=[])',  # main.py:19759
-    '<root>>AsyncFunctionDef(name=str,args=arguments,body=[Assign|Expr|Global|If|Return],decorator_list=[],returns=Constant,type_comment=-,type_params=[])',  # main.py:78007
+    '<root>>AsyncFunctionDef(name=str,args=arguments,body=[Assign|Expr|Global|If|Return],decorator_list=[],returns=Constant,type_comment=-,type_params=[])',  # main.py:78315
     '<root>>AsyncFunctionDef(name=str,args=arguments,body=[Assign|Expr|If],decorator_list=[],returns=Constant,type_comment=-,type_params=[])',  # main.py:30345
     '<root>>AsyncFunctionDef(name=str,args=arguments,body=[Assign|Expr|If|Return],decorator_list=[],returns=-,type_comment=-,type_params=[])',  # main.py:17975
     '<root>>AsyncFunctionDef(name=str,args=arguments,body=[Assign|Expr|If|Return],decorator_list=[],returns=Name,type_comment=-,type_params=[])',  # match_hold.py:364
@@ -139,7 +139,7 @@ A1_SHAPES = frozenset({
     'Assert.test>Compare(left=Call,ops=[Eq],comparators=[Constant])',  # main.py:51277
     'Assert.test>Compare(left=Name,ops=[Gt],comparators=[Name])',  # main.py:30316
     'Assign.targets>Name(id=str,ctx=Store)',  # main.py:17414
-    'Assign.targets>Subscript(value=Call,slice=Constant,ctx=Store)',  # main.py:67868
+    'Assign.targets>Subscript(value=Call,slice=Constant,ctx=Store)',  # main.py:67889
     'Assign.targets>Subscript(value=Name,slice=Call,ctx=Store)',  # main.py:58930
     'Assign.targets>Subscript(value=Name,slice=Constant,ctx=Store)',  # main.py:19848
     'Assign.targets>Subscript(value=Name,slice=Name,ctx=Store)',  # main.py:19718
@@ -154,7 +154,7 @@ A1_SHAPES = frozenset({
     'Assign.value>BinOp(left=Name,op=Sub,right=Call)',  # main.py:21320
     'Assign.value>BinOp(left=Name,op=Sub,right=Name)',  # main.py:30311
     'Assign.value>BoolOp(op=And,values=[Call])',  # main.py:58896
-    'Assign.value>BoolOp(op=And,values=[Call|Compare])',  # main.py:68018
+    'Assign.value>BoolOp(op=And,values=[Call|Compare])',  # main.py:68039
     'Assign.value>BoolOp(op=And,values=[Compare])',  # main.py:51870
     'Assign.value>BoolOp(op=Or,values=[BoolOp|Compare])',  # main.py:56175
     'Assign.value>BoolOp(op=Or,values=[Call|Constant])',  # main.py:19834
@@ -173,19 +173,19 @@ A1_SHAPES = frozenset({
     'Assign.value>Call(func=Attribute,args=[],keywords=[keyword])',  # main.py:19815
     'Assign.value>Call(func=Name,args=[Attribute],keywords=[])',  # main.py:21469
     'Assign.value>Call(func=Name,args=[BinOp],keywords=[])',  # main.py:30314
-    'Assign.value>Call(func=Name,args=[BinOp|Call],keywords=[])',  # main.py:67895
-    'Assign.value>Call(func=Name,args=[BinOp|Constant],keywords=[])',  # main.py:67568
+    'Assign.value>Call(func=Name,args=[BinOp|Call],keywords=[])',  # main.py:67916
+    'Assign.value>Call(func=Name,args=[BinOp|Constant],keywords=[])',  # main.py:67589
     'Assign.value>Call(func=Name,args=[BinOp|Name],keywords=[])',  # main.py:58317
     'Assign.value>Call(func=Name,args=[BoolOp],keywords=[])',  # main.py:51868
     'Assign.value>Call(func=Name,args=[Call],keywords=[])',  # main.py:19721
-    'Assign.value>Call(func=Name,args=[Call|Name],keywords=[])',  # main.py:68015
+    'Assign.value>Call(func=Name,args=[Call|Name],keywords=[])',  # main.py:68036
     'Assign.value>Call(func=Name,args=[Constant],keywords=[])',  # match_report_window.py:54
     'Assign.value>Call(func=Name,args=[Constant|Name],keywords=[])',  # main.py:52379
     'Assign.value>Call(func=Name,args=[GeneratorExp],keywords=[])',  # main.py:51285
-    'Assign.value>Call(func=Name,args=[GeneratorExp],keywords=[keyword])',  # main.py:67565
+    'Assign.value>Call(func=Name,args=[GeneratorExp],keywords=[keyword])',  # main.py:67586
     'Assign.value>Call(func=Name,args=[Name],keywords=[])',  # main.py:18508
     'Assign.value>Call(func=Name,args=[Name],keywords=[keyword])',  # main.py:19824
-    'Assign.value>Call(func=Name,args=[Name|Subscript],keywords=[])',  # main.py:67556
+    'Assign.value>Call(func=Name,args=[Name|Subscript],keywords=[])',  # main.py:67577
     'Assign.value>Call(func=Name,args=[Name|Subscript],keywords=[keyword])',  # main.py:21448
     'Assign.value>Call(func=Name,args=[SetComp],keywords=[keyword])',  # main.py:17863
     'Assign.value>Call(func=Name,args=[Subscript],keywords=[])',  # main.py:17949
@@ -195,7 +195,7 @@ A1_SHAPES = frozenset({
     'Assign.value>Compare(left=Subscript,ops=[Eq],comparators=[Name])',  # main.py:53607
     'Assign.value>Constant(value=NoneType)',  # main.py:19813
     'Assign.value>Constant(value=bool)',  # main.py:17874
-    'Assign.value>Constant(value=float)',  # main.py:67566
+    'Assign.value>Constant(value=float)',  # main.py:67587
     'Assign.value>Constant(value=int)',  # main.py:21209
     'Assign.value>Constant(value=str)',  # main.py:53616
     'Assign.value>Dict(keys=[Constant],values=[Call])',  # main.py:56262
@@ -226,7 +226,7 @@ A1_SHAPES = frozenset({
     'Assign.value>IfExp(test=Name,body=Call,orelse=Tuple)',  # main.py:53609
     'Assign.value>IfExp(test=Name,body=Compare,orelse=Compare)',  # region_pick.py:248
     'Assign.value>IfExp(test=Name,body=Constant,orelse=Constant)',  # main.py:53612
-    'Assign.value>IfExp(test=Name,body=Name,orelse=BinOp)',  # main.py:78056
+    'Assign.value>IfExp(test=Name,body=Name,orelse=BinOp)',  # main.py:78374
     'Assign.value>IfExp(test=Name,body=Name,orelse=IfExp)',  # region_pick.py:250
     'Assign.value>JoinedStr(values=[Constant|FormattedValue])',  # main.py:21445
     'Assign.value>List(elts=[Dict],ctx=Load)',  # main.py:52503
@@ -282,7 +282,7 @@ A1_SHAPES = frozenset({
     'AsyncFunctionDef.body>Assign(targets=[Name],value=Name,type_comment=-)',  # main.py:19745
     'AsyncFunctionDef.body>Assign(targets=[Name],value=SetComp,type_comment=-)',  # main.py:17921
     'AsyncFunctionDef.body>Assign(targets=[Name],value=Subscript,type_comment=-)',  # main.py:17947
-    'AsyncFunctionDef.body>Assign(targets=[Subscript],value=Constant,type_comment=-)',  # main.py:68058
+    'AsyncFunctionDef.body>Assign(targets=[Subscript],value=Constant,type_comment=-)',  # main.py:68079
     'AsyncFunctionDef.body>Assign(targets=[Tuple],value=Await,type_comment=-)',  # main.py:18038
     'AsyncFunctionDef.body>Assign(targets=[Tuple],value=Call,type_comment=-)',  # main.py:21161
     'AsyncFunctionDef.body>Assign(targets=[Tuple],value=Tuple,type_comment=-)',  # main.py:19789
@@ -301,13 +301,13 @@ A1_SHAPES = frozenset({
     'AsyncFunctionDef.body>For(target=Name,iter=Name,body=[Expr|If],orelse=[],type_comment=-)',  # main.py:54312
     'AsyncFunctionDef.body>For(target=Name,iter=Name,body=[If],orelse=[],type_comment=-)',  # main.py:17415
     'AsyncFunctionDef.body>For(target=Name,iter=Tuple,body=[Expr],orelse=[],type_comment=-)',  # main.py:52611
-    'AsyncFunctionDef.body>For(target=Tuple,iter=Call,body=[Expr],orelse=[],type_comment=-)',  # main.py:68038
+    'AsyncFunctionDef.body>For(target=Tuple,iter=Call,body=[Expr],orelse=[],type_comment=-)',  # main.py:68059
     'AsyncFunctionDef.body>For(target=Tuple,iter=Call,body=[Expr|If],orelse=[],type_comment=-)',  # main.py:18437
     'AsyncFunctionDef.body>For(target=Tuple,iter=Name,body=[Assign|If|Return],orelse=[],type_comment=-)',  # main.py:18511
     'AsyncFunctionDef.body>FunctionDef(name=str,args=arguments,body=[Return],decorator_list=[],returns=-,type_comment=-,type_params=[])',  # main.py:19831
-    'AsyncFunctionDef.body>Global(names=[str])',  # main.py:67884
+    'AsyncFunctionDef.body>Global(names=[str])',  # main.py:67905
     'AsyncFunctionDef.body>If(test=Await,body=[Expr|Return],orelse=[])',  # main.py:52163
-    'AsyncFunctionDef.body>If(test=BoolOp,body=[Assign],orelse=[])',  # main.py:67889
+    'AsyncFunctionDef.body>If(test=BoolOp,body=[Assign],orelse=[])',  # main.py:67910
     'AsyncFunctionDef.body>If(test=BoolOp,body=[Assign|Expr|FunctionDef|If|Return],orelse=[])',  # main.py:51803
     'AsyncFunctionDef.body>If(test=BoolOp,body=[Assign|Expr|If|Return],orelse=[])',  # main.py:21349
     'AsyncFunctionDef.body>If(test=BoolOp,body=[Assign|Expr|If|Return|Try],orelse=[])',  # main.py:51736
@@ -315,14 +315,14 @@ A1_SHAPES = frozenset({
     'AsyncFunctionDef.body>If(test=BoolOp,body=[Expr],orelse=[])',  # main.py:30337
     'AsyncFunctionDef.body>If(test=BoolOp,body=[Expr|Return],orelse=[])',  # main.py:21340
     'AsyncFunctionDef.body>If(test=BoolOp,body=[Return],orelse=[])',  # main.py:19747
-    'AsyncFunctionDef.body>If(test=BoolOp,body=[Try],orelse=[])',  # main.py:78027
-    'AsyncFunctionDef.body>If(test=Call,body=[Raise],orelse=[])',  # main.py:77972
+    'AsyncFunctionDef.body>If(test=BoolOp,body=[Try],orelse=[])',  # main.py:78342
+    'AsyncFunctionDef.body>If(test=Call,body=[Raise],orelse=[])',  # main.py:78280
     'AsyncFunctionDef.body>If(test=Call,body=[Return],orelse=[])',  # main.py:17930
     'AsyncFunctionDef.body>If(test=Compare,body=[Assign],orelse=[])',  # main.py:19844
     'AsyncFunctionDef.body>If(test=Compare,body=[Assign|Expr],orelse=[Expr])',  # main.py:21304
     'AsyncFunctionDef.body>If(test=Compare,body=[Assign|Expr|For],orelse=[Assign])',  # main.py:52525
     'AsyncFunctionDef.body>If(test=Compare,body=[Assign|Expr|If|Return],orelse=[])',  # main.py:52479
-    'AsyncFunctionDef.body>If(test=Compare,body=[Assign|Expr|Return],orelse=[])',  # main.py:67986
+    'AsyncFunctionDef.body>If(test=Compare,body=[Assign|Expr|Return],orelse=[])',  # main.py:68007
     'AsyncFunctionDef.body>If(test=Compare,body=[Assign|Expr|While],orelse=[])',  # main.py:52240
     'AsyncFunctionDef.body>If(test=Compare,body=[Expr],orelse=[])',  # main.py:18509
     'AsyncFunctionDef.body>If(test=Compare,body=[Expr|Raise],orelse=[])',  # main.py:21282
@@ -356,7 +356,7 @@ A1_SHAPES = frozenset({
     'AsyncFunctionDef.body>While(test=Compare,body=[Assign|AugAssign|Break|Expr|If],orelse=[Expr|Raise])',  # main.py:52380
     'AsyncFunctionDef.decorator_list>Call(func=Attribute,args=[Constant],keywords=[keyword])',  # main.py:21126
     'AsyncFunctionDef.returns>Constant(value=NoneType)',  # main.py:4447
-    'AsyncFunctionDef.returns>Constant(value=str)',  # main.py:78007
+    'AsyncFunctionDef.returns>Constant(value=str)',  # main.py:78315
     'AsyncFunctionDef.returns>Name(id=str,ctx=Load)',  # main.py:58912
     'AsyncFunctionDef.returns>Subscript(value=Name,slice=Tuple,ctx=Load)',  # main.py:17847
     'AsyncWith.body>Assign(targets=[Name],value=Await,type_comment=-)',  # main.py:19752
@@ -379,7 +379,7 @@ A1_SHAPES = frozenset({
     'Attribute.value>BinOp(left=Call,op=Sub,right=Name)',  # main.py:56206
     'Attribute.value>BinOp(left=Call,op=Sub,right=Subscript)',  # main.py:56081
     'Attribute.value>BinOp(left=Name,op=Sub,right=BoolOp)',  # main.py:21293
-    'Attribute.value>BinOp(left=Name,op=Sub,right=Name)',  # main.py:67568
+    'Attribute.value>BinOp(left=Name,op=Sub,right=Name)',  # main.py:67589
     'Attribute.value>BinOp(left=Name,op=Sub,right=Subscript)',  # main.py:21390
     'Attribute.value>BoolOp(op=Or,values=[Call|Constant])',  # main.py:52138
     'Attribute.value>BoolOp(op=Or,values=[Constant|Name])',  # main.py:59807
@@ -437,7 +437,7 @@ A1_SHAPES = frozenset({
     'Await.value>Call(func=Name,args=[Name|Subscript],keywords=[keyword])',  # main.py:21466
     'Await.value>Call(func=Name,args=[],keywords=[])',  # main.py:17420
     'BinOp.left>BinOp(left=BoolOp,op=Add,right=BoolOp)',  # main.py:54326
-    'BinOp.left>BinOp(left=Constant,op=Add,right=Name)',  # main.py:67775
+    'BinOp.left>BinOp(left=Constant,op=Add,right=Name)',  # main.py:67796
     'BinOp.left>BinOp(left=Name,op=BitAnd,right=Name)',  # region_pick.py:244
     'BinOp.left>BinOp(left=Name,op=FloorDiv,right=Constant)',  # main.py:30357
     'BinOp.left>BinOp(left=Name,op=Sub,right=Name)',  # match_report_window.py:74
@@ -445,9 +445,9 @@ A1_SHAPES = frozenset({
     'BinOp.left>Call(func=Attribute,args=[Attribute],keywords=[])',  # main.py:21677
     'BinOp.left>Call(func=Attribute,args=[Constant|Name],keywords=[])',  # main.py:19718
     'BinOp.left>Call(func=Name,args=[Attribute],keywords=[])',  # region_pick.py:257
-    'BinOp.left>Constant(value=float)',  # main.py:67568
+    'BinOp.left>Constant(value=float)',  # main.py:67589
     'BinOp.left>Constant(value=int)',  # main.py:56082
-    'BinOp.left>Constant(value=str)',  # main.py:67775
+    'BinOp.left>Constant(value=str)',  # main.py:67796
     'BinOp.left>JoinedStr(values=[Constant|FormattedValue])',  # main.py:19837
     'BinOp.left>ListComp(elt=Subscript,generators=[comprehension])',  # main.py:52267
     'BinOp.left>ListComp(elt=Tuple,generators=[comprehension])',  # main.py:52308
@@ -461,17 +461,17 @@ A1_SHAPES = frozenset({
     'BinOp.op>Mult()',  # main.py:21340
     'BinOp.op>Sub()',  # main.py:19747
     'BinOp.right>BinOp(left=Name,op=Mod,right=Constant)',  # main.py:30357
-    'BinOp.right>BinOp(left=Name,op=Sub,right=Constant)',  # main.py:78058
+    'BinOp.right>BinOp(left=Name,op=Sub,right=Constant)',  # main.py:78376
     'BinOp.right>BoolOp(op=Or,values=[Constant|Subscript])',  # main.py:54326
     'BinOp.right>BoolOp(op=Or,values=[Subscript])',  # main.py:21293
-    'BinOp.right>Call(func=Attribute,args=[],keywords=[])',  # main.py:67568
+    'BinOp.right>Call(func=Attribute,args=[],keywords=[])',  # main.py:67589
     'BinOp.right>Call(func=Name,args=[Name],keywords=[])',  # main.py:53603
     'BinOp.right>Call(func=Name,args=[Subscript],keywords=[])',  # main.py:53608
     'BinOp.right>Call(func=Name,args=[],keywords=[keyword])',  # main.py:21320
     'BinOp.right>Constant(value=NoneType)',  # main.py:17832
-    'BinOp.right>Constant(value=float)',  # main.py:78058
+    'BinOp.right>Constant(value=float)',  # main.py:78376
     'BinOp.right>Constant(value=int)',  # main.py:19718
-    'BinOp.right>Constant(value=str)',  # main.py:67777
+    'BinOp.right>Constant(value=str)',  # main.py:67798
     'BinOp.right>IfExp(test=Compare,body=JoinedStr,orelse=Constant)',  # main.py:19843
     'BinOp.right>List(elts=[Name],ctx=Load)',  # main.py:51845
     'BinOp.right>List(elts=[Tuple],ctx=Load)',  # main.py:52309
@@ -486,7 +486,7 @@ A1_SHAPES = frozenset({
     'BoolOp.values>BoolOp(op=And,values=[Call|UnaryOp])',  # region_pick.py:232
     'BoolOp.values>BoolOp(op=And,values=[Compare])',  # main.py:54319
     'BoolOp.values>BoolOp(op=And,values=[Name|UnaryOp])',  # main.py:56176
-    'BoolOp.values>BoolOp(op=Or,values=[Compare])',  # main.py:67727
+    'BoolOp.values>BoolOp(op=Or,values=[Compare])',  # main.py:67748
     'BoolOp.values>Call(func=Attribute,args=[Constant],keywords=[])',  # main.py:19833
     'BoolOp.values>Call(func=Attribute,args=[GeneratorExp],keywords=[])',  # main.py:19834
     'BoolOp.values>Call(func=Attribute,args=[],keywords=[])',  # main.py:21807
@@ -495,14 +495,14 @@ A1_SHAPES = frozenset({
     'BoolOp.values>Call(func=Name,args=[Name],keywords=[])',  # main.py:19816
     'BoolOp.values>Call(func=Name,args=[Name|Subscript],keywords=[])',  # main.py:19804
     'BoolOp.values>Call(func=Name,args=[Name|Tuple],keywords=[])',  # region_pick.py:40
-    'BoolOp.values>Call(func=Name,args=[Subscript],keywords=[])',  # main.py:67637
+    'BoolOp.values>Call(func=Name,args=[Subscript],keywords=[])',  # main.py:67658
     'BoolOp.values>Call(func=Name,args=[],keywords=[])',  # main.py:56216
     'BoolOp.values>Compare(left=Attribute,ops=[Eq],comparators=[Name])',  # main.py:30337
     'BoolOp.values>Compare(left=Attribute,ops=[Is],comparators=[Constant])',  # main.py:19814
     'BoolOp.values>Compare(left=Attribute,ops=[NotEq],comparators=[Name])',  # region_pick.py:83
-    'BoolOp.values>Compare(left=Await,ops=[Is],comparators=[Constant])',  # main.py:67697
-    'BoolOp.values>Compare(left=BinOp,ops=[Gt],comparators=[Constant])',  # main.py:67889
-    'BoolOp.values>Compare(left=BinOp,ops=[Gt],comparators=[Name])',  # main.py:78028
+    'BoolOp.values>Compare(left=Await,ops=[Is],comparators=[Constant])',  # main.py:67718
+    'BoolOp.values>Compare(left=BinOp,ops=[Gt],comparators=[Constant])',  # main.py:67910
+    'BoolOp.values>Compare(left=BinOp,ops=[Gt],comparators=[Name])',  # main.py:78344
     'BoolOp.values>Compare(left=BinOp,ops=[LtE],comparators=[Name])',  # region_pick.py:202
     'BoolOp.values>Compare(left=BinOp,ops=[Lt],comparators=[Name])',  # main.py:19747
     'BoolOp.values>Compare(left=BoolOp,ops=[Gt],comparators=[Constant])',  # main.py:54332
@@ -510,21 +510,21 @@ A1_SHAPES = frozenset({
     'BoolOp.values>Compare(left=Call,ops=[Eq],comparators=[Call])',  # main.py:56190
     'BoolOp.values>Compare(left=Call,ops=[Eq],comparators=[Constant])',  # main.py:56162
     'BoolOp.values>Compare(left=Call,ops=[Eq],comparators=[Name])',  # main.py:17957
-    'BoolOp.values>Compare(left=Call,ops=[GtE],comparators=[Call])',  # main.py:67766
+    'BoolOp.values>Compare(left=Call,ops=[GtE],comparators=[Call])',  # main.py:67787
     'BoolOp.values>Compare(left=Call,ops=[GtE],comparators=[Constant])',  # main.py:56213
-    'BoolOp.values>Compare(left=Call,ops=[GtE],comparators=[Name])',  # main.py:67577
+    'BoolOp.values>Compare(left=Call,ops=[GtE],comparators=[Name])',  # main.py:67598
     'BoolOp.values>Compare(left=Call,ops=[Gt],comparators=[Constant])',  # main.py:56189
     'BoolOp.values>Compare(left=Call,ops=[Gt],comparators=[Name])',  # main.py:30312
     'BoolOp.values>Compare(left=Call,ops=[In],comparators=[Name])',  # main.py:64777
     'BoolOp.values>Compare(left=Call,ops=[Lt],comparators=[Call])',  # region_pick.py:261
     'BoolOp.values>Compare(left=Call,ops=[Lt],comparators=[Constant])',  # main.py:52529
-    'BoolOp.values>Compare(left=Call,ops=[Lt],comparators=[Name])',  # main.py:67969
+    'BoolOp.values>Compare(left=Call,ops=[Lt],comparators=[Name])',  # main.py:67990
     'BoolOp.values>Compare(left=Call,ops=[NotEq],comparators=[Call])',  # main.py:52437
     'BoolOp.values>Compare(left=Call,ops=[NotEq],comparators=[Constant])',  # main.py:52341
     'BoolOp.values>Compare(left=Call,ops=[NotEq],comparators=[Name])',  # main.py:52436
     'BoolOp.values>Compare(left=Name,ops=[Eq],comparators=[Call])',  # main.py:54319
     'BoolOp.values>Compare(left=Name,ops=[Eq],comparators=[Constant])',  # main.py:52529
-    'BoolOp.values>Compare(left=Name,ops=[Eq],comparators=[Subscript])',  # main.py:67577
+    'BoolOp.values>Compare(left=Name,ops=[Eq],comparators=[Subscript])',  # main.py:67598
     'BoolOp.values>Compare(left=Name,ops=[GtE],comparators=[Name])',  # main.py:58310
     'BoolOp.values>Compare(left=Name,ops=[Gt],comparators=[BinOp])',  # main.py:21340
     'BoolOp.values>Compare(left=Name,ops=[Gt],comparators=[Constant])',  # main.py:56162
@@ -536,12 +536,12 @@ A1_SHAPES = frozenset({
     'BoolOp.values>Compare(left=Name,ops=[LtE],comparators=[Name])',  # main.py:51300
     'BoolOp.values>Compare(left=Name,ops=[Lt],comparators=[Constant])',  # main.py:21243
     'BoolOp.values>Compare(left=Name,ops=[Lt],comparators=[Name])',  # main.py:19642
-    'BoolOp.values>Compare(left=Name,ops=[NotEq],comparators=[Call])',  # main.py:67970
+    'BoolOp.values>Compare(left=Name,ops=[NotEq],comparators=[Call])',  # main.py:67991
     'BoolOp.values>Compare(left=Name,ops=[NotIn],comparators=[Name])',  # main.py:17416
     'BoolOp.values>Compare(left=Subscript,ops=[Eq],comparators=[Constant])',  # main.py:21340
     'BoolOp.values>Compare(left=Subscript,ops=[Eq],comparators=[Name])',  # main.py:52085
     'BoolOp.values>Compare(left=Subscript,ops=[Eq],comparators=[Subscript])',  # main.py:54330
-    'BoolOp.values>Compare(left=Subscript,ops=[Gt],comparators=[Call])',  # main.py:67696
+    'BoolOp.values>Compare(left=Subscript,ops=[Gt],comparators=[Call])',  # main.py:67717
     'BoolOp.values>Compare(left=Subscript,ops=[Gt],comparators=[Name])',  # main.py:54248
     'BoolOp.values>Compare(left=Subscript,ops=[In],comparators=[Tuple])',  # main.py:17950
     'BoolOp.values>Compare(left=Subscript,ops=[IsNot],comparators=[Constant])',  # main.py:51736
@@ -575,9 +575,9 @@ A1_SHAPES = frozenset({
     "Call.args>Attribute(value=Name,attr='worst',ctx=Load)",  # region_pick.py:257
     "Call.args>Attribute(value=Subscript,attr='map',ctx=Load)",  # region_pick.py:237
     'Call.args>Await(value=Call)',  # main.py:54314
-    'Call.args>BinOp(left=BinOp,op=Add,right=Constant)',  # main.py:67775
+    'Call.args>BinOp(left=BinOp,op=Add,right=Constant)',  # main.py:67796
     'Call.args>BinOp(left=BinOp,op=Sub,right=Set)',  # region_pick.py:244
-    'Call.args>BinOp(left=Constant,op=Sub,right=Call)',  # main.py:67568
+    'Call.args>BinOp(left=Constant,op=Sub,right=Call)',  # main.py:67589
     'Call.args>BinOp(left=JoinedStr,op=Add,right=IfExp)',  # main.py:19837
     'Call.args>BinOp(left=ListComp,op=Add,right=List)',  # main.py:52267
     'Call.args>BinOp(left=Name,op=Add,right=Constant)',  # main.py:21657
@@ -591,7 +591,7 @@ A1_SHAPES = frozenset({
     'Call.args>BoolOp(op=Or,values=[Call|Name])',  # main.py:58944
     'Call.args>BoolOp(op=Or,values=[Constant|Name])',  # main.py:58860
     'Call.args>BoolOp(op=Or,values=[Constant|Subscript])',  # main.py:56162
-    'Call.args>BoolOp(op=Or,values=[List|Subscript])',  # main.py:67611
+    'Call.args>BoolOp(op=Or,values=[List|Subscript])',  # main.py:67632
     'Call.args>BoolOp(op=Or,values=[Name|Tuple])',  # main.py:18447
     'Call.args>Call(func=Attribute,args=[Constant],keywords=[])',  # main.py:19835
     'Call.args>Call(func=Attribute,args=[Name],keywords=[])',  # main.py:30361
@@ -599,7 +599,7 @@ A1_SHAPES = frozenset({
     'Call.args>Call(func=Name,args=[BinOp],keywords=[])',  # main.py:53608
     'Call.args>Call(func=Name,args=[BoolOp],keywords=[])',  # main.py:18447
     'Call.args>Call(func=Name,args=[Call],keywords=[])',  # match_hold.py:380
-    'Call.args>Call(func=Name,args=[Call|Name],keywords=[])',  # main.py:67572
+    'Call.args>Call(func=Name,args=[Call|Name],keywords=[])',  # main.py:67593
     'Call.args>Call(func=Name,args=[Constant],keywords=[])',  # main.py:4494
     'Call.args>Call(func=Name,args=[Constant|Name],keywords=[])',  # main.py:64784
     'Call.args>Call(func=Name,args=[GeneratorExp],keywords=[])',  # main.py:54206
@@ -609,7 +609,7 @@ A1_SHAPES = frozenset({
     'Call.args>Call(func=Name,args=[Subscript],keywords=[])',  # main.py:17955
     'Call.args>Call(func=Name,args=[],keywords=[keyword])',  # main.py:30339
     'Call.args>Constant(value=NoneType)',  # main.py:21779
-    'Call.args>Constant(value=float)',  # main.py:67568
+    'Call.args>Constant(value=float)',  # main.py:67589
     'Call.args>Constant(value=int)',  # main.py:19718
     'Call.args>Constant(value=str)',  # main.py:4495
     'Call.args>Dict(keys=[Constant],values=[Attribute|Name|Subscript])',  # main.py:52082
@@ -619,12 +619,12 @@ A1_SHAPES = frozenset({
     'Call.args>Dict(keys=[Constant],values=[Call|Compare|Name|Subscript])',  # main.py:51990
     'Call.args>Dict(keys=[Constant],values=[Call|IfExp|Name])',  # main.py:19817
     'Call.args>Dict(keys=[Constant],values=[Call|ListComp|Name])',  # region_pick.py:271
-    'Call.args>Dict(keys=[Constant],values=[Call|ListComp|Name|Subscript])',  # main.py:68035
+    'Call.args>Dict(keys=[Constant],values=[Call|ListComp|Name|Subscript])',  # main.py:68056
     'Call.args>Dict(keys=[Constant],values=[Call|Name])',  # main.py:17970
     'Call.args>Dict(keys=[Constant],values=[Call|Name|Subscript])',  # main.py:52593
     'Call.args>Dict(keys=[Constant],values=[Call|Subscript])',  # main.py:52511
-    'Call.args>Dict(keys=[Constant],values=[Constant|IfExp|Name|Subscript])',  # main.py:67798
-    'Call.args>Dict(keys=[Constant],values=[Constant|Subscript])',  # main.py:67778
+    'Call.args>Dict(keys=[Constant],values=[Constant|IfExp|Name|Subscript])',  # main.py:67819
+    'Call.args>Dict(keys=[Constant],values=[Constant|Subscript])',  # main.py:67799
     'Call.args>Dict(keys=[Constant],values=[ListComp])',  # main.py:52626
     'Call.args>Dict(keys=[Constant],values=[Name])',  # main.py:4498
     'Call.args>Dict(keys=[Constant],values=[Name|Subscript])',  # main.py:51763
@@ -663,7 +663,7 @@ A1_SHAPES = frozenset({
     "Call.func>Attribute(value=Await,attr='scalars',ctx=Load)",  # main.py:17961
     "Call.func>Attribute(value=BinOp,attr='total_seconds',ctx=Load)",  # main.py:21293
     "Call.func>Attribute(value=BoolOp,attr='lower',ctx=Load)",  # main.py:52138
-    "Call.func>Attribute(value=BoolOp,attr='lstrip',ctx=Load)",  # main.py:68019
+    "Call.func>Attribute(value=BoolOp,attr='lstrip',ctx=Load)",  # main.py:68040
     "Call.func>Attribute(value=BoolOp,attr='strip',ctx=Load)",  # match_hold.py:376
     "Call.func>Attribute(value=Call,attr='all',ctx=Load)",  # main.py:17923
     "Call.func>Attribute(value=Call,attr='fetchall',ctx=Load)",  # main.py:58923
@@ -681,7 +681,7 @@ A1_SHAPES = frozenset({
     "Call.func>Attribute(value=Name,attr='append',ctx=Load)",  # main.py:17417
     "Call.func>Attribute(value=Name,attr='begin_nested',ctx=Load)",  # main.py:4493
     "Call.func>Attribute(value=Name,attr='caps_token_sql',ctx=Load)",  # main.py:52079
-    "Call.func>Attribute(value=Name,attr='ceil',ctx=Load)",  # main.py:67572
+    "Call.func>Attribute(value=Name,attr='ceil',ctx=Load)",  # main.py:67593
     "Call.func>Attribute(value=Name,attr='choice',ctx=Load)",  # main.py:59799
     "Call.func>Attribute(value=Name,attr='commit',ctx=Load)",  # main.py:21178
     "Call.func>Attribute(value=Name,attr='dumps',ctx=Load)",  # main.py:58811
@@ -691,7 +691,7 @@ A1_SHAPES = frozenset({
     "Call.func>Attribute(value=Name,attr='flush',ctx=Load)",  # main.py:21512
     "Call.func>Attribute(value=Name,attr='format',ctx=Load)",  # main.py:52177
     "Call.func>Attribute(value=Name,attr='get',ctx=Load)",  # main.py:17955
-    "Call.func>Attribute(value=Name,attr='intersection',ctx=Load)",  # main.py:77972
+    "Call.func>Attribute(value=Name,attr='intersection',ctx=Load)",  # main.py:78280
     "Call.func>Attribute(value=Name,attr='items',ctx=Load)",  # main.py:19722
     "Call.func>Attribute(value=Name,attr='loads',ctx=Load)",  # main.py:19811
     "Call.func>Attribute(value=Name,attr='lower',ctx=Load)",  # main.py:59801
@@ -731,7 +731,7 @@ A1_SHAPES = frozenset({
     "Call.keywords>keyword(arg='completed_series',value=Name)",  # main.py:51881
     "Call.keywords>keyword(arg='content',value=Name)",  # main.py:51677
     "Call.keywords>keyword(arg='current',value=Call)",  # main.py:51965
-    "Call.keywords>keyword(arg='default',value=Constant)",  # main.py:67565
+    "Call.keywords>keyword(arg='default',value=Constant)",  # main.py:67586
     "Call.keywords>keyword(arg='detail',value=Constant)",  # main.py:17902
     "Call.keywords>keyword(arg='display_name',value=Subscript)",  # main.py:51875
     "Call.keywords>keyword(arg='elo_range',value=IfExp)",  # main.py:21818
@@ -834,15 +834,15 @@ A1_SHAPES = frozenset({
     "Compare.comparators>Attribute(value=Name,attr='map',ctx=Load)",  # region_pick.py:83
     'Compare.comparators>BinOp(left=Constant,op=Mult,right=Constant)',  # main.py:56082
     'Compare.comparators>BinOp(left=Name,op=Mult,right=Constant)',  # main.py:21340
-    'Compare.comparators>Call(func=Attribute,args=[Attribute],keywords=[])',  # main.py:67696
+    'Compare.comparators>Call(func=Attribute,args=[Attribute],keywords=[])',  # main.py:67717
     'Compare.comparators>Call(func=Attribute,args=[],keywords=[])',  # main.py:59801
-    'Compare.comparators>Call(func=Name,args=[BoolOp],keywords=[])',  # main.py:67766
-    'Compare.comparators>Call(func=Name,args=[GeneratorExp],keywords=[keyword])',  # main.py:67970
+    'Compare.comparators>Call(func=Name,args=[BoolOp],keywords=[])',  # main.py:67787
+    'Compare.comparators>Call(func=Name,args=[GeneratorExp],keywords=[keyword])',  # main.py:67991
     'Compare.comparators>Call(func=Name,args=[Name],keywords=[])',  # main.py:52277
     'Compare.comparators>Call(func=Name,args=[Subscript],keywords=[])',  # main.py:52437
     'Compare.comparators>Constant(value=NoneType)',  # main.py:17416
     'Compare.comparators>Constant(value=bool)',  # main.py:21542
-    'Compare.comparators>Constant(value=float)',  # main.py:67889
+    'Compare.comparators>Constant(value=float)',  # main.py:67910
     'Compare.comparators>Constant(value=int)',  # main.py:21243
     'Compare.comparators>Constant(value=str)',  # main.py:17426
     'Compare.comparators>Name(id=str,ctx=Load)',  # main.py:17412
@@ -857,7 +857,7 @@ A1_SHAPES = frozenset({
     'Compare.left>Await(value=Call)',  # main.py:21427
     'Compare.left>BinOp(left=BinOp,op=Sub,right=Call)',  # match_report_window.py:74
     'Compare.left>BinOp(left=Constant,op=Mult,right=Name)',  # region_pick.py:248
-    'Compare.left>BinOp(left=Name,op=Sub,right=Name)',  # main.py:67889
+    'Compare.left>BinOp(left=Name,op=Sub,right=Name)',  # main.py:67910
     'Compare.left>BinOp(left=Name,op=Sub,right=Subscript)',  # main.py:19747
     'Compare.left>BoolOp(op=Or,values=[Constant|Subscript])',  # main.py:54239
     'Compare.left>Call(func=Attribute,args=[Constant],keywords=[])',  # main.py:58799
@@ -885,14 +885,14 @@ A1_SHAPES = frozenset({
     "Dict.values>Attribute(value=Name,attr='HOLD_CAPS_TOKEN',ctx=Load)",  # main.py:52083
     "Dict.values>Attribute(value=Name,attr='id',ctx=Load)",  # region_pick.py:222
     'Dict.values>BinOp(left=Name,op=Add,right=Name)',  # main.py:52646
-    'Dict.values>BoolOp(op=And,values=[Compare])',  # main.py:67577
+    'Dict.values>BoolOp(op=And,values=[Compare])',  # main.py:67598
     'Dict.values>BoolOp(op=Or,values=[Constant|Name])',  # main.py:59836
     'Dict.values>Call(func=Attribute,args=[Constant],keywords=[])',  # main.py:52335
     'Dict.values>Call(func=Name,args=[Call],keywords=[])',  # main.py:52507
     'Dict.values>Call(func=Name,args=[Name],keywords=[])',  # main.py:17971
     'Dict.values>Call(func=Name,args=[Subscript],keywords=[])',  # main.py:19817
-    'Dict.values>Compare(left=Name,ops=[Eq],comparators=[Subscript])',  # main.py:67576
-    'Dict.values>Compare(left=Subscript,ops=[Eq],comparators=[Name])',  # main.py:67596
+    'Dict.values>Compare(left=Name,ops=[Eq],comparators=[Subscript])',  # main.py:67597
+    'Dict.values>Compare(left=Subscript,ops=[Eq],comparators=[Name])',  # main.py:67617
     'Dict.values>Compare(left=Subscript,ops=[IsNot],comparators=[Constant])',  # main.py:51991
     'Dict.values>Constant(value=NoneType)',  # region_pick.py:227
     'Dict.values>Constant(value=bool)',  # main.py:58899
@@ -900,18 +900,18 @@ A1_SHAPES = frozenset({
     'Dict.values>Constant(value=str)',  # main.py:56035
     'Dict.values>IfExp(test=Attribute,body=Call,orelse=Constant)',  # region_pick.py:223
     'Dict.values>IfExp(test=Compare,body=Call,orelse=Constant)',  # main.py:19818
-    'Dict.values>IfExp(test=Name,body=Constant,orelse=Constant)',  # main.py:67799
-    'Dict.values>IfExp(test=Subscript,body=Call,orelse=Constant)',  # main.py:67597
+    'Dict.values>IfExp(test=Name,body=Constant,orelse=Constant)',  # main.py:67820
+    'Dict.values>IfExp(test=Subscript,body=Call,orelse=Constant)',  # main.py:67618
     'Dict.values>JoinedStr(values=[Constant|FormattedValue])',  # main.py:19829
     'Dict.values>List(elts=[],ctx=Load)',  # region_pick.py:229
     'Dict.values>ListComp(elt=Call,generators=[comprehension])',  # main.py:54379
-    'Dict.values>ListComp(elt=Dict,generators=[comprehension])',  # main.py:67592
+    'Dict.values>ListComp(elt=Dict,generators=[comprehension])',  # main.py:67613
     'Dict.values>ListComp(elt=Subscript,generators=[comprehension])',  # main.py:52626
     'Dict.values>Name(id=str,ctx=Load)',  # main.py:4498
     'Dict.values>Subscript(value=BoolOp,slice=Slice,ctx=Load)',  # main.py:56369
     'Dict.values>Subscript(value=Name,slice=Constant,ctx=Load)',  # main.py:21362
     'Dict.values>Subscript(value=Subscript,slice=Constant,ctx=Load)',  # main.py:56368
-    'Dict.values>UnaryOp(op=USub,operand=Constant)',  # main.py:67872
+    'Dict.values>UnaryOp(op=USub,operand=Constant)',  # main.py:67893
     'DictComp.generators>comprehension(target=Name,iter=Name,ifs=[],is_async=0)',  # main.py:17929
     'DictComp.generators>comprehension(target=Tuple,iter=Call,ifs=[],is_async=0)',  # main.py:54377
     "DictComp.key>Attribute(value=Name,attr='id',ctx=Load)",  # main.py:30356
@@ -924,13 +924,13 @@ A1_SHAPES = frozenset({
     'DictComp.value>Subscript(value=Name,slice=Constant,ctx=Load)',  # main.py:52550
     'DictComp.value>Tuple(elts=[Constant],ctx=Load)',  # main.py:58920
     'ExceptHandler.body>Assign(targets=[Name],value=Constant,type_comment=-)',  # main.py:19813
-    'ExceptHandler.body>Assign(targets=[Name],value=Name,type_comment=-)',  # main.py:78099
+    'ExceptHandler.body>Assign(targets=[Name],value=Name,type_comment=-)',  # main.py:78420
     'ExceptHandler.body>Assign(targets=[Tuple],value=Tuple,type_comment=-)',  # main.py:19829
     'ExceptHandler.body>Expr(value=Await)',  # main.py:17900
     'ExceptHandler.body>Expr(value=Call)',  # main.py:19755
-    'ExceptHandler.body>If(test=BoolOp,body=[Expr|Raise],orelse=[])',  # main.py:78100
+    'ExceptHandler.body>If(test=BoolOp,body=[Expr|Raise],orelse=[])',  # main.py:78421
     'ExceptHandler.body>If(test=Compare,body=[Raise],orelse=[])',  # main.py:17901
-    'ExceptHandler.body>If(test=UnaryOp,body=[Expr|Raise],orelse=[])',  # main.py:78085
+    'ExceptHandler.body>If(test=UnaryOp,body=[Expr|Raise],orelse=[])',  # main.py:78406
     'ExceptHandler.body>Pass()',  # main.py:4500
     'ExceptHandler.body>Raise(exc=-,cause=-)',  # main.py:17903
     'ExceptHandler.body>Return(value=Constant)',  # main.py:58846
@@ -973,7 +973,7 @@ A1_SHAPES = frozenset({
     'For.body>For(target=Tuple,iter=List,body=[Expr],orelse=[],type_comment=-)',  # main.py:21752
     'For.body>If(test=BoolOp,body=[Assign],orelse=[])',  # main.py:19814
     'For.body>If(test=BoolOp,body=[Assign|Continue|Expr],orelse=[])',  # main.py:21713
-    'For.body>If(test=BoolOp,body=[Assign|Continue|Expr|If],orelse=[])',  # main.py:67940
+    'For.body>If(test=BoolOp,body=[Assign|Continue|Expr|If],orelse=[])',  # main.py:67961
     'For.body>If(test=BoolOp,body=[Assign|If],orelse=[])',  # main.py:54316
     'For.body>If(test=BoolOp,body=[Continue],orelse=[])',  # main.py:54330
     'For.body>If(test=BoolOp,body=[Expr],orelse=[Expr])',  # main.py:58943
@@ -984,7 +984,7 @@ A1_SHAPES = frozenset({
     'For.body>If(test=Call,body=[AugAssign],orelse=[])',  # main.py:19821
     'For.body>If(test=Call,body=[Try],orelse=[])',  # main.py:19809
     'For.body>If(test=Compare,body=[Assign],orelse=[Assign])',  # main.py:53606
-    'For.body>If(test=Compare,body=[Assign],orelse=[])',  # main.py:67937
+    'For.body>If(test=Compare,body=[Assign],orelse=[])',  # main.py:67958
     'For.body>If(test=Compare,body=[Assign|Break],orelse=[])',  # main.py:17891
     'For.body>If(test=Compare,body=[Assign|Continue|Expr],orelse=[])',  # main.py:56295
     'For.body>If(test=Compare,body=[Assign|Continue|Expr|If],orelse=[])',  # main.py:21734
@@ -1009,7 +1009,7 @@ A1_SHAPES = frozenset({
     'For.iter>Call(func=Attribute,args=[],keywords=[])',  # main.py:19798
     'For.iter>Call(func=Name,args=[BinOp],keywords=[])',  # region_pick.py:244
     'For.iter>Call(func=Name,args=[BinOp|Constant],keywords=[])',  # main.py:21657
-    'For.iter>Call(func=Name,args=[Name],keywords=[])',  # main.py:68038
+    'For.iter>Call(func=Name,args=[Name],keywords=[])',  # main.py:68059
     'For.iter>Call(func=Name,args=[Name],keywords=[keyword])',  # main.py:17418
     'For.iter>Call(func=Name,args=[SetComp],keywords=[keyword])',  # main.py:18437
     'For.iter>List(elts=[Tuple],ctx=Load)',  # main.py:21752
@@ -1106,7 +1106,7 @@ A1_SHAPES = frozenset({
     'GeneratorExp.elt>Subscript(value=Name,slice=Constant,ctx=Load)',  # main.py:51285
     'GeneratorExp.generators>comprehension(target=Name,iter=Call,ifs=[],is_async=0)',  # main.py:6662
     'GeneratorExp.generators>comprehension(target=Name,iter=Name,ifs=[Compare],is_async=0)',  # main.py:17913
-    'GeneratorExp.generators>comprehension(target=Name,iter=Name,ifs=[Subscript],is_async=0)',  # main.py:67565
+    'GeneratorExp.generators>comprehension(target=Name,iter=Name,ifs=[Subscript],is_async=0)',  # main.py:67586
     'GeneratorExp.generators>comprehension(target=Name,iter=Name,ifs=[],is_async=0)',  # main.py:17930
     'GeneratorExp.generators>comprehension(target=Tuple,iter=Call,ifs=[Compare],is_async=0)',  # main.py:19722
     'GeneratorExp.generators>comprehension(target=Tuple,iter=Call,ifs=[],is_async=0)',  # region_pick.py:247
@@ -1128,12 +1128,12 @@ A1_SHAPES = frozenset({
     'If.body>Assign(targets=[Name],value=Subscript,type_comment=-)',  # main.py:21384
     'If.body>Assign(targets=[Name],value=UnaryOp,type_comment=-)',  # main.py:21405
     'If.body>Assign(targets=[Subscript],value=BinOp,type_comment=-)',  # main.py:19718
-    'If.body>Assign(targets=[Subscript],value=Constant,type_comment=-)',  # main.py:67868
+    'If.body>Assign(targets=[Subscript],value=Constant,type_comment=-)',  # main.py:67889
     'If.body>Assign(targets=[Subscript],value=Name,type_comment=-)',  # main.py:19848
     'If.body>Assign(targets=[Subscript],value=Subscript,type_comment=-)',  # main.py:58800
     'If.body>Assign(targets=[Subscript],value=Tuple,type_comment=-)',  # main.py:19805
     'If.body>Assign(targets=[Tuple],value=Await,type_comment=-)',  # main.py:17987
-    'If.body>Assign(targets=[Tuple],value=Call,type_comment=-)',  # main.py:67965
+    'If.body>Assign(targets=[Tuple],value=Call,type_comment=-)',  # main.py:67986
     'If.body>Assign(targets=[Tuple],value=IfExp,type_comment=-)',  # main.py:53609
     'If.body>Assign(targets=[Tuple],value=Name,type_comment=-)',  # main.py:19802
     'If.body>Assign(targets=[Tuple],value=Tuple,type_comment=-)',  # main.py:52526
@@ -1151,14 +1151,14 @@ A1_SHAPES = frozenset({
     'If.body>FunctionDef(name=str,args=arguments,body=[Assign|Return],decorator_list=[],returns=-,type_comment=-,type_params=[])',  # main.py:51867
     'If.body>If(test=BoolOp,body=[Assign],orelse=[If])',  # main.py:56164
     'If.body>If(test=BoolOp,body=[Assign],orelse=[])',  # main.py:19804
-    'If.body>If(test=BoolOp,body=[Assign|Break],orelse=[])',  # main.py:67968
+    'If.body>If(test=BoolOp,body=[Assign|Break],orelse=[])',  # main.py:67989
     'If.body>If(test=BoolOp,body=[Assign|Expr],orelse=[])',  # main.py:56230
     'If.body>If(test=BoolOp,body=[Assign|Expr|If|Return],orelse=[])',  # main.py:21404
     'If.body>If(test=BoolOp,body=[Assign|Expr|Return],orelse=[])',  # main.py:51851
     'If.body>If(test=BoolOp,body=[Assign|If],orelse=[If])',  # main.py:56191
     'If.body>If(test=BoolOp,body=[Assign|If],orelse=[])',  # main.py:56183
-    'If.body>If(test=BoolOp,body=[Expr],orelse=[])',  # main.py:67504
-    'If.body>If(test=BoolOp,body=[Expr|If|Return],orelse=[])',  # main.py:67497
+    'If.body>If(test=BoolOp,body=[Expr],orelse=[])',  # main.py:67525
+    'If.body>If(test=BoolOp,body=[Expr|If|Return],orelse=[])',  # main.py:67518
     'If.body>If(test=BoolOp,body=[Expr|Return],orelse=[])',  # main.py:21391
     'If.body>If(test=BoolOp,body=[Return],orelse=[])',  # main.py:19639
     'If.body>If(test=Call,body=[Assign|If],orelse=[])',  # main.py:52338
@@ -1167,14 +1167,14 @@ A1_SHAPES = frozenset({
     'If.body>If(test=Compare,body=[Assign|Break],orelse=[])',  # main.py:52463
     'If.body>If(test=Compare,body=[Assign|Expr],orelse=[])',  # main.py:21503
     'If.body>If(test=Compare,body=[Assign|Expr|Return],orelse=[])',  # main.py:51813
-    'If.body>If(test=Compare,body=[Assign|If],orelse=[])',  # main.py:67564
+    'If.body>If(test=Compare,body=[Assign|If],orelse=[])',  # main.py:67585
     'If.body>If(test=Compare,body=[Break],orelse=[])',  # main.py:21740
     'If.body>If(test=Compare,body=[Expr],orelse=[Expr])',  # main.py:21432
     'If.body>If(test=Compare,body=[Expr],orelse=[])',  # main.py:52492
-    'If.body>If(test=Compare,body=[Expr|If],orelse=[])',  # main.py:67942
+    'If.body>If(test=Compare,body=[Expr|If],orelse=[])',  # main.py:67963
     'If.body>If(test=Compare,body=[Expr|Raise],orelse=[])',  # main.py:21539
     'If.body>If(test=Compare,body=[Expr|Return],orelse=[])',  # main.py:21528
-    'If.body>If(test=Compare,body=[Return],orelse=[])',  # main.py:67828
+    'If.body>If(test=Compare,body=[Return],orelse=[])',  # main.py:67849
     'If.body>If(test=Name,body=[Assign],orelse=[])',  # main.py:51904
     'If.body>If(test=Name,body=[Assign|Expr|If|Return],orelse=[])',  # main.py:51887
     'If.body>If(test=Name,body=[Assign|Expr|Return],orelse=[])',  # main.py:21591
@@ -1202,7 +1202,7 @@ A1_SHAPES = frozenset({
     'If.body>Return(value=Subscript)',  # main.py:19748
     'If.body>Return(value=Tuple)',  # main.py:17866
     'If.body>Try(body=[Assign],handlers=[ExceptHandler],orelse=[],finalbody=[])',  # main.py:19810
-    'If.body>Try(body=[Assign|AsyncWith],handlers=[ExceptHandler],orelse=[],finalbody=[])',  # main.py:78040
+    'If.body>Try(body=[Assign|AsyncWith],handlers=[ExceptHandler],orelse=[],finalbody=[])',  # main.py:78356
     'If.body>Try(body=[AsyncWith],handlers=[ExceptHandler],orelse=[],finalbody=[])',  # main.py:51770
     'If.body>While(test=Compare,body=[Assign|AugAssign|Break|Expr|If],orelse=[Expr|Raise])',  # main.py:52243
     'If.orelse>Assign(targets=[Name],value=Await,type_comment=-)',  # main.py:21471
@@ -1214,7 +1214,7 @@ A1_SHAPES = frozenset({
     'If.orelse>AugAssign(target=Name,op=Add,value=Constant)',  # main.py:53644
     'If.orelse>Expr(value=Await)',  # main.py:21334
     'If.orelse>Expr(value=Call)',  # main.py:52534
-    'If.orelse>If(test=BoolOp,body=[Assign],orelse=[If])',  # main.py:67637
+    'If.orelse>If(test=BoolOp,body=[Assign],orelse=[If])',  # main.py:67658
     'If.orelse>If(test=BoolOp,body=[Assign],orelse=[])',  # main.py:56209
     'If.orelse>If(test=BoolOp,body=[Expr],orelse=[Expr])',  # main.py:52531
     'If.orelse>If(test=Compare,body=[Expr],orelse=[If])',  # main.py:17429
@@ -1222,7 +1222,7 @@ A1_SHAPES = frozenset({
     'If.orelse>If(test=Compare,body=[Expr|Return],orelse=[Assign])',  # main.py:21484
     'If.orelse>If(test=Name,body=[Assign],orelse=[])',  # main.py:56170
     'If.test>Await(value=Call)',  # main.py:52163
-    'If.test>BoolOp(op=And,values=[BoolOp|Name])',  # main.py:67727
+    'If.test>BoolOp(op=And,values=[BoolOp|Name])',  # main.py:67748
     'If.test>BoolOp(op=And,values=[Call|Compare|Name|UnaryOp])',  # main.py:56209
     'If.test>BoolOp(op=And,values=[Call|Name])',  # main.py:64782
     'If.test>BoolOp(op=And,values=[Compare])',  # main.py:17416
@@ -1238,9 +1238,9 @@ A1_SHAPES = frozenset({
     'If.test>BoolOp(op=Or,values=[Compare|UnaryOp])',  # main.py:59765
     'If.test>BoolOp(op=Or,values=[Name])',  # main.py:53651
     'If.test>BoolOp(op=Or,values=[UnaryOp])',  # region_pick.py:52
-    'If.test>Call(func=Attribute,args=[Await],keywords=[])',  # main.py:77984
+    'If.test>Call(func=Attribute,args=[Await],keywords=[])',  # main.py:78292
     'If.test>Call(func=Attribute,args=[Constant],keywords=[])',  # main.py:58809
-    'If.test>Call(func=Attribute,args=[Name],keywords=[])',  # main.py:77972
+    'If.test>Call(func=Attribute,args=[Name],keywords=[])',  # main.py:78280
     'If.test>Call(func=Name,args=[GeneratorExp],keywords=[])',  # main.py:17930
     'If.test>Call(func=Name,args=[Name],keywords=[])',  # main.py:58792
     'If.test>Call(func=Name,args=[Name|Subscript],keywords=[])',  # main.py:19821
@@ -1248,11 +1248,11 @@ A1_SHAPES = frozenset({
     'If.test>Compare(left=Attribute,ops=[Is],comparators=[Constant])',  # region_pick.py:211
     'If.test>Compare(left=Await,ops=[IsNot],comparators=[Constant])',  # main.py:21642
     'If.test>Compare(left=Await,ops=[Is],comparators=[Constant])',  # main.py:21539
-    'If.test>Compare(left=Call,ops=[Eq],comparators=[Call])',  # main.py:67937
+    'If.test>Compare(left=Call,ops=[Eq],comparators=[Call])',  # main.py:67958
     'If.test>Compare(left=Call,ops=[Eq],comparators=[Constant])',  # main.py:52138
     'If.test>Compare(left=Call,ops=[In],comparators=[Tuple])',  # main.py:17901
     'If.test>Compare(left=Call,ops=[Lt],comparators=[Constant])',  # main.py:51832
-    'If.test>Compare(left=Call,ops=[Lt],comparators=[Name])',  # main.py:67869
+    'If.test>Compare(left=Call,ops=[Lt],comparators=[Name])',  # main.py:67890
     'If.test>Compare(left=Call,ops=[NotEq],comparators=[Call])',  # main.py:52277
     'If.test>Compare(left=Call,ops=[NotEq],comparators=[Constant])',  # main.py:52443
     'If.test>Compare(left=Call,ops=[NotEq],comparators=[Name])',  # main.py:58856
@@ -1266,7 +1266,7 @@ A1_SHAPES = frozenset({
     'If.test>Compare(left=Name,ops=[IsNot],comparators=[Constant])',  # main.py:17419
     'If.test>Compare(left=Name,ops=[Is],comparators=[Constant])',  # main.py:17891
     'If.test>Compare(left=Name,ops=[LtE],comparators=[Constant])',  # main.py:30329
-    'If.test>Compare(left=Name,ops=[Lt],comparators=[Name])',  # main.py:67865
+    'If.test>Compare(left=Name,ops=[Lt],comparators=[Name])',  # main.py:67886
     'If.test>Compare(left=Name,ops=[NotEq],comparators=[Constant])',  # main.py:51750
     'If.test>Compare(left=Name,ops=[NotEq],comparators=[Name])',  # main.py:56277
     'If.test>Compare(left=Name,ops=[NotIn],comparators=[Attribute])',  # region_pick.py:215
@@ -1274,7 +1274,7 @@ A1_SHAPES = frozenset({
     'If.test>Compare(left=Subscript,ops=[Eq],comparators=[Constant])',  # main.py:17953
     'If.test>Compare(left=Subscript,ops=[Eq],comparators=[Name])',  # main.py:21740
     'If.test>Compare(left=Subscript,ops=[In],comparators=[Name])',  # main.py:21437
-    'If.test>Compare(left=Subscript,ops=[IsNot],comparators=[Constant])',  # main.py:67564
+    'If.test>Compare(left=Subscript,ops=[IsNot],comparators=[Constant])',  # main.py:67585
     'If.test>Compare(left=Subscript,ops=[NotEq],comparators=[Constant])',  # main.py:21668
     'If.test>Compare(left=Subscript,ops=[NotEq],comparators=[Name])',  # main.py:21484
     'If.test>Compare(left=Subscript,ops=[NotEq],comparators=[Subscript])',  # main.py:21282
@@ -1308,12 +1308,12 @@ A1_SHAPES = frozenset({
     'IfExp.body>Tuple(elts=[Subscript],ctx=Load)',  # main.py:19799
     "IfExp.orelse>Attribute(value=Name,attr='p1_series_wins',ctx=Load)",  # main.py:21619
     "IfExp.orelse>Attribute(value=Name,attr='p2_series_wins',ctx=Load)",  # main.py:21620
-    'IfExp.orelse>BinOp(left=Name,op=Sub,right=BinOp)',  # main.py:78058
+    'IfExp.orelse>BinOp(left=Name,op=Sub,right=BinOp)',  # main.py:78376
     'IfExp.orelse>Call(func=Name,args=[Call],keywords=[])',  # main.py:51872
     'IfExp.orelse>Call(func=Name,args=[Name],keywords=[])',  # main.py:17833
     'IfExp.orelse>Compare(left=BinOp,ops=[GtE],comparators=[Name])',  # region_pick.py:248
     'IfExp.orelse>Constant(value=NoneType)',  # main.py:19716
-    'IfExp.orelse>Constant(value=bool)',  # main.py:67590
+    'IfExp.orelse>Constant(value=bool)',  # main.py:67611
     'IfExp.orelse>Constant(value=int)',  # main.py:52106
     'IfExp.orelse>Constant(value=str)',  # main.py:19843
     'IfExp.orelse>Dict(keys=[],values=[])',  # region_pick.py:190
@@ -1335,7 +1335,7 @@ A1_SHAPES = frozenset({
     'IfExp.test>Call(func=Name,args=[Constant|Name],keywords=[])',  # match_report_window.py:48
     'IfExp.test>Call(func=Name,args=[Name],keywords=[])',  # region_pick.py:190
     'IfExp.test>Compare(left=Attribute,ops=[Eq],comparators=[Name])',  # main.py:21582
-    'IfExp.test>Compare(left=BoolOp,ops=[Gt],comparators=[Constant])',  # main.py:67594
+    'IfExp.test>Compare(left=BoolOp,ops=[Gt],comparators=[Constant])',  # main.py:67615
     'IfExp.test>Compare(left=Constant,ops=[In],comparators=[Name])',  # main.py:19716
     'IfExp.test>Compare(left=Name,ops=[Eq],comparators=[Constant])',  # main.py:17912
     'IfExp.test>Compare(left=Name,ops=[Gt],comparators=[Name])',  # match_report_window.py:61
@@ -1382,7 +1382,7 @@ A1_SHAPES = frozenset({
     'ListComp.elt>Call(func=Name,args=[Name],keywords=[])',  # main.py:17867
     'ListComp.elt>Call(func=Name,args=[],keywords=[keyword])',  # main.py:52678
     'ListComp.elt>Dict(keys=[Constant],values=[Attribute|IfExp|Name])',  # region_pick.py:222
-    'ListComp.elt>Dict(keys=[Constant],values=[Call|Compare|IfExp|Subscript])',  # main.py:67593
+    'ListComp.elt>Dict(keys=[Constant],values=[Call|Compare|IfExp|Subscript])',  # main.py:67614
     'ListComp.elt>Name(id=str,ctx=Load)',  # main.py:21426
     'ListComp.elt>Subscript(value=Attribute,slice=Name,ctx=Load)',  # region_pick.py:240
     'ListComp.elt>Subscript(value=Name,slice=Constant,ctx=Load)',  # main.py:19791
@@ -1426,10 +1426,10 @@ A1_SHAPES = frozenset({
     'Return.value>Constant(value=NoneType)',  # main.py:18523
     'Return.value>Constant(value=bool)',  # main.py:17993
     'Return.value>Constant(value=str)',  # region_pick.py:212
-    'Return.value>Dict(keys=[Constant],values=[BoolOp|Call|Compare|Constant|IfExp|ListComp|Name|Subscript])',  # main.py:67573
+    'Return.value>Dict(keys=[Constant],values=[BoolOp|Call|Compare|Constant|IfExp|ListComp|Name|Subscript])',  # main.py:67594
     'Return.value>Dict(keys=[Constant],values=[Call|Constant])',  # main.py:56132
-    'Return.value>Dict(keys=[Constant],values=[Call|Constant|Name])',  # main.py:67900
-    'Return.value>Dict(keys=[Constant],values=[Call|Constant|Name|UnaryOp])',  # main.py:67871
+    'Return.value>Dict(keys=[Constant],values=[Call|Constant|Name])',  # main.py:67921
+    'Return.value>Dict(keys=[Constant],values=[Call|Constant|Name|UnaryOp])',  # main.py:67892
     'Return.value>Dict(keys=[Constant],values=[Constant])',  # main.py:56035
     'Return.value>Dict(keys=[Constant],values=[Constant|Name])',  # main.py:58899
     'Return.value>DictComp(key=Attribute,value=Call,generators=[comprehension])',  # tournaments.py:309
@@ -1461,9 +1461,9 @@ A1_SHAPES = frozenset({
     'SetComp.elt>Name(id=str,ctx=Load)',  # main.py:17863
     'SetComp.elt>Tuple(elts=[Name],ctx=Load)',  # main.py:18438
     'SetComp.generators>comprehension(target=Name,iter=BoolOp,ifs=[BoolOp],is_async=0)',  # region_pick.py:189
-    'SetComp.generators>comprehension(target=Name,iter=BoolOp,ifs=[Name],is_async=0)',  # main.py:77971
+    'SetComp.generators>comprehension(target=Name,iter=BoolOp,ifs=[Name],is_async=0)',  # main.py:78279
     'SetComp.generators>comprehension(target=Name,iter=Name,ifs=[Compare],is_async=0)',  # main.py:17863
-    'SetComp.generators>comprehension(target=Name,iter=Name,ifs=[],is_async=0)',  # main.py:78046
+    'SetComp.generators>comprehension(target=Name,iter=Name,ifs=[],is_async=0)',  # main.py:78364
     'SetComp.generators>comprehension(target=Tuple,iter=BoolOp,ifs=[BoolOp],is_async=0)',  # main.py:18438
     'Slice.lower>Constant(value=int)',  # region_pick.py:238
     'Slice.upper>Constant(value=int)',  # main.py:21445
@@ -1487,17 +1487,17 @@ A1_SHAPES = frozenset({
     'Subscript.value>BoolOp(op=Or,values=[Name])',  # region_pick.py:86
     'Subscript.value>Call(func=Attribute,args=[],keywords=[])',  # main.py:17876
     'Subscript.value>Call(func=Name,args=[Name],keywords=[])',  # main.py:17947
-    'Subscript.value>Call(func=Name,args=[],keywords=[])',  # main.py:67868
+    'Subscript.value>Call(func=Name,args=[],keywords=[])',  # main.py:67889
     'Subscript.value>Name(id=str,ctx=Load)',  # main.py:6660
     'Subscript.value>Subscript(value=Name,slice=Constant,ctx=Load)',  # main.py:56276
     'Try.body>Assign(targets=[Name],value=Await,type_comment=-)',  # main.py:19823
     'Try.body>Assign(targets=[Name],value=Call,type_comment=-)',  # main.py:19819
     'Try.body>Assign(targets=[Name],value=Dict,type_comment=-)',  # main.py:19792
-    'Try.body>Assign(targets=[Name],value=IfExp,type_comment=-)',  # main.py:78055
+    'Try.body>Assign(targets=[Name],value=IfExp,type_comment=-)',  # main.py:78373
     'Try.body>Assign(targets=[Name],value=List,type_comment=-)',  # main.py:19806
     'Try.body>Assign(targets=[Name],value=ListComp,type_comment=-)',  # main.py:19791
-    'Try.body>Assign(targets=[Name],value=Name,type_comment=-)',  # main.py:78064
-    'Try.body>Assign(targets=[Name],value=SetComp,type_comment=-)',  # main.py:78046
+    'Try.body>Assign(targets=[Name],value=Name,type_comment=-)',  # main.py:78382
+    'Try.body>Assign(targets=[Name],value=SetComp,type_comment=-)',  # main.py:78364
     'Try.body>Assign(targets=[Name],value=Subscript,type_comment=-)',  # main.py:17876
     'Try.body>Assign(targets=[Tuple],value=Call,type_comment=-)',  # main.py:19824
     'Try.body>Assign(targets=[Tuple],value=IfExp,type_comment=-)',  # main.py:59799
@@ -1521,7 +1521,7 @@ A1_SHAPES = frozenset({
     'Try.handlers>ExceptHandler(type=Name,name=-,body=[Return])',  # main.py:6663
     'Try.handlers>ExceptHandler(type=Name,name=str,body=[Assign])',  # main.py:19828
     'Try.handlers>ExceptHandler(type=Name,name=str,body=[Assign|Expr])',  # main.py:59809
-    'Try.handlers>ExceptHandler(type=Name,name=str,body=[Assign|Expr|If])',  # main.py:78065
+    'Try.handlers>ExceptHandler(type=Name,name=str,body=[Assign|Expr|If])',  # main.py:78383
     'Try.handlers>ExceptHandler(type=Name,name=str,body=[Expr])',  # main.py:19754
     'Try.handlers>ExceptHandler(type=Name,name=str,body=[Expr|If|Raise])',  # main.py:17897
     'Try.handlers>ExceptHandler(type=Name,name=str,body=[Return])',  # region_pick.py:182
@@ -1567,7 +1567,7 @@ A1_SHAPES = frozenset({
     'Tuple.elts>Tuple(elts=[Name],ctx=Store)',  # main.py:58941
     'Tuple.elts>UnaryOp(op=USub,operand=Call)',  # region_pick.py:257
     'UnaryOp.op>Not()',  # main.py:17864
-    'UnaryOp.op>USub()',  # main.py:67872
+    'UnaryOp.op>USub()',  # main.py:67893
     "UnaryOp.operand>Attribute(value=Name,attr='fresh',ctx=Load)",  # region_pick.py:213
     'UnaryOp.operand>Await(value=Call)',  # main.py:21152
     'UnaryOp.operand>BoolOp(op=And,values=[Name])',  # main.py:21391
@@ -1578,7 +1578,7 @@ A1_SHAPES = frozenset({
     'UnaryOp.operand>Call(func=Name,args=[Subscript],keywords=[])',  # main.py:56207
     'UnaryOp.operand>Call(func=Name,args=[],keywords=[])',  # main.py:56164
     'UnaryOp.operand>Compare(left=Name,ops=[LtE],comparators=[Name])',  # region_pick.py:56
-    'UnaryOp.operand>Constant(value=int)',  # main.py:67872
+    'UnaryOp.operand>Constant(value=int)',  # main.py:67893
     'UnaryOp.operand>Name(id=str,ctx=Load)',  # main.py:17864
     'UnaryOp.operand>Subscript(value=Name,slice=Constant,ctx=Load)',  # main.py:51889
     'While.body>Assign(targets=[Name],value=Await,type_comment=-)',  # main.py:52307
@@ -1649,8 +1649,8 @@ A1_SHAPES = frozenset({
     'comprehension.ifs>Compare(left=Subscript,ops=[NotEq],comparators=[Name])',  # main.py:51844
     'comprehension.ifs>Compare(left=Subscript,ops=[NotEq],comparators=[Subscript])',  # main.py:56340
     'comprehension.ifs>Compare(left=Subscript,ops=[NotIn],comparators=[Name])',  # main.py:51902
-    'comprehension.ifs>Name(id=str,ctx=Load)',  # main.py:77971
-    'comprehension.ifs>Subscript(value=Name,slice=Constant,ctx=Load)',  # main.py:67565
+    'comprehension.ifs>Name(id=str,ctx=Load)',  # main.py:78279
+    'comprehension.ifs>Subscript(value=Name,slice=Constant,ctx=Load)',  # main.py:67586
     'comprehension.iter>BoolOp(op=Or,values=[Name|Tuple])',  # main.py:18438
     'comprehension.iter>Call(func=Attribute,args=[Constant],keywords=[])',  # main.py:6662
     'comprehension.iter>Call(func=Attribute,args=[],keywords=[])',  # main.py:19722
@@ -2384,28 +2384,28 @@ A1_BINDINGS = frozenset({
         'Expr.value>Await(value=Call)',
         'Await.value>Call(func=Attribute,args=[],keywords=[])',
     )),
-    ('commit', 'end', (  # main.py:67509
+    ('commit', 'end', (  # main.py:67530
         'AsyncFunctionDef.body>If(test=BoolOp,body=[Assign|Expr|If|Return|Try],orelse=[])',
         'If.body>If(test=BoolOp,body=[Expr|If|Return],orelse=[])',
         'If.body>Expr(value=Await)',
         'Expr.value>Await(value=Call)',
         'Await.value>Call(func=Attribute,args=[],keywords=[])',
     )),
-    ('commit', 'end', (  # main.py:67700
+    ('commit', 'end', (  # main.py:67721
         'AsyncFunctionDef.body>If(test=BoolOp,body=[Assign|Expr|If|Return],orelse=[])',
         'If.body>If(test=BoolOp,body=[Expr|Return],orelse=[])',
         'If.body>Expr(value=Await)',
         'Expr.value>Await(value=Call)',
         'Await.value>Call(func=Attribute,args=[],keywords=[])',
     )),
-    ('rollback', 'end', (  # main.py:67941
+    ('rollback', 'end', (  # main.py:67962
         'AsyncFunctionDef.body>For(target=Name,iter=Call,body=[Assign|Break|Expr|If],orelse=[Expr|Raise],type_comment=-)',
         'For.body>If(test=BoolOp,body=[Assign|Continue|Expr|If],orelse=[])',
         'If.body>Expr(value=Await)',
         'Expr.value>Await(value=Call)',
         'Await.value>Call(func=Attribute,args=[],keywords=[])',
     )),
-    ('rollback', 'end', (  # main.py:67997
+    ('rollback', 'end', (  # main.py:68018
         'AsyncFunctionDef.body>If(test=Compare,body=[Assign|Expr|Return],orelse=[])',
         'If.body>Expr(value=Await)',
         'Expr.value>Await(value=Call)',
