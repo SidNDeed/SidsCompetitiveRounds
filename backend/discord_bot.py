@@ -431,6 +431,23 @@ def _is_registered_command(content):
         return True
 
 
+# The shown length of a mail's sender name and subject in the bot's own
+# lines, counted on the ESCAPED text (BOT-TEXT-ESCAPE-1): the pick list holds
+# five of each and must stay under Discord's 2000-character message limit.
+MAIL_NAME_SHOWN_MAX = 64
+MAIL_SUBJECT_SHOWN_MAX = 120
+
+
+def _mail_legacy_plain(value) -> str:
+    """An older api's escaped mail field (sender_name, subject) taken back
+    to the text typed. That api escapes with a backslash before each of
+    \\ * _ ~ | and a line-opening #, and never leaves a backslash on its own,
+    so undoing every backslash pair gives the typed text (with that api's
+    mention words and angle brackets already replaced). Not an escape: what
+    it returns is raw text, for a plain slot or for one pass of a helper."""
+    return re.sub(r"(?s)\\(.)", r"\1", str(value or ""))
+
+
 def _mail_sent_line(info):
     """The confirmation. `known` is false when the server could not read
     the thread back -- saying "to them - (no subject)" there states two
@@ -438,18 +455,19 @@ def _mail_sent_line(info):
     if not (info or {}).get("known"):
         return "\u2709\ufe0f Sent your reply."
     # BOT-TEXT-ESCAPE-1: an api that serves the raw values (*_raw) gets them
-    # escaped ONCE here; an older api's escaped fields are shown exactly as
-    # before (the name through _escape_md as well), so no mixed state shows
-    # less escaped text than the earlier code did.
+    # escaped ONCE here. An older api serves only its escaped fields: the
+    # subject is shown as that api escaped it (its one pass), and the name
+    # is taken back to its typed text (_mail_legacy_plain) and then passes
+    # _escape_md once, so the name is escaped once in every mix of api and bot.
     if isinstance(info.get("sender_name_raw"), str):
         who = info["sender_name_raw"].strip() or "them"
     else:
-        who = (info.get("sender_name") or "").strip() or "them"
+        who = _mail_legacy_plain(info.get("sender_name")).strip() or "them"
     if isinstance(info.get("subject_raw"), str):
-        subj = _escape_text(info["subject_raw"].strip() or "(no subject)")
+        subj = _escape_text(info["subject_raw"].strip() or "(no subject)", MAIL_SUBJECT_SHOWN_MAX)
     else:
         subj = (info.get("subject") or "").strip() or "(no subject)"
-    return "\u2709\ufe0f Sent your reply to **%s** — *%s*" % (_escape_md(who), subj)
+    return "\u2709\ufe0f Sent your reply to **%s** — *%s*" % (_escape_md(who, MAIL_NAME_SHOWN_MAX), subj)
 
 
 # ── Item 5: the thread marker ──────────────────────────────────────────────
@@ -556,13 +574,14 @@ def _mailpick_view(threads, disabled=False):
     buttons at :10915, so nothing here depends on a newer component API."""
     view = discord.ui.View(timeout=None)
     for t in threads[:5]:
-        # A button label renders no markdown: an api that serves the raw
-        # values gets them raw, cut to Discord's 80 (BOT-TEXT-ESCAPE-1); an
-        # older api's escaped fields are shown exactly as before.
+        # A button label renders no markdown: it gets the typed text, no
+        # backslash, cut to Discord's 80 (BOT-TEXT-ESCAPE-1) -- the raw
+        # values of an api that serves them, else an older api's escaped
+        # fields taken back to their typed text.
         sender = (t["sender_name_raw"] if isinstance(t.get("sender_name_raw"), str)
-                  else (t.get("sender_name") or "?"))
+                  else (_mail_legacy_plain(t.get("sender_name")) or "?"))
         subject = (t["subject_raw"] if isinstance(t.get("subject_raw"), str)
-                   else (t.get("subject") or "(no subject)"))
+                   else (_mail_legacy_plain(t.get("subject")) or "(no subject)"))
         label = "%s \u2014 %s" % (sender.strip() or "?", subject.strip() or "(no subject)")
         view.add_item(discord.ui.Button(
             style=discord.ButtonStyle.secondary, label=label[:80],
@@ -598,13 +617,16 @@ async def _ask_which_mail(message_or_ctx, body, *, discord_id, channel,
     lines = [lead, "Tap the one you meant \u2014 or use Discord\u2019s **Reply** on its DM."]
     for t in threads[:5]:
         # Raw values (an api that serves *_raw) escaped once here; an older
-        # api's escaped fields exactly as before (see _mail_sent_line).
+        # api's name taken back to its typed text and escaped once, its
+        # subject as that api escaped it (see _mail_sent_line). Each field
+        # is bounded on its escaped text, so five rows stay inside one
+        # message (MAIL_NAME_SHOWN_MAX, MAIL_SUBJECT_SHOWN_MAX).
         if isinstance(t.get("sender_name_raw"), str):
-            who = _escape_md(t["sender_name_raw"].strip() or "?")
+            who = _escape_md(t["sender_name_raw"].strip() or "?", MAIL_NAME_SHOWN_MAX)
         else:
-            who = _escape_md((t.get("sender_name") or "?").strip())
+            who = _escape_md(_mail_legacy_plain(t.get("sender_name")).strip() or "?", MAIL_NAME_SHOWN_MAX)
         if isinstance(t.get("subject_raw"), str):
-            subj = _escape_text(t["subject_raw"].strip() or "(no subject)")
+            subj = _escape_text(t["subject_raw"].strip() or "(no subject)", MAIL_SUBJECT_SHOWN_MAX)
         else:
             subj = (t.get("subject") or "(no subject)").strip()
         lines.append("**%s** \u2014 *%s* \u00b7 `%s`" % (who, subj, t.get("relay_code")))
@@ -2788,7 +2810,7 @@ async def _maybe_warn_invalid_room_code(message) -> None:
               else "it has only five letters")
     try:
         await message.reply(
-            f"⚠️ `{candidate}` is not a valid ROUNDS room code because {reason}. "
+            f"⚠️ **{_escape_text(candidate)}** is not a valid ROUNDS room code because {reason}. "
             "**Room codes are exactly six capital letters with no dash.** "
             "ROUNDS reports the host/player as offline for a malformed code, so ask them to resend the full code.",
             mention_author=False,
@@ -5563,9 +5585,10 @@ def _escape_md(text, limit=None, more="...") -> str:
     [ ] < > (a masked link, or a mention, emoji or timestamp tag), and @
     (BOT-TEXT-ESCAPE-1: @everyone and @here in a name show as text, not as a
     mention). Discord shows a backslash before any of these as the character
-    alone. A name is never a link: each http: or https: (any case) followed
-    by one or two slashes gets a zero-width space after its colon, before
-    any cut.
+    alone. A name is never a link: every address scheme (a letter, then
+    letters, digits, + . or -, any case: http, https, ftp, steam, ...)
+    whose colon is followed by a slash gets a zero-width space after its
+    colon, before any cut.
 
     A cut is made on the escaped text (`limit`, below) and never ends inside
     an escape pair. A caller that cuts the raw name first must not cut the
@@ -5592,7 +5615,7 @@ def _escape_md(text, limit=None, more="...") -> str:
     # stream lane's pattern; BOT-TEXT-ESCAPE-1 stage 3 brings it into the
     # name helper, before the cut). Free text (_escape_text) keeps an
     # address whole.
-    escaped = re.sub(r"(?i)(https?):(/{1,2})", "\\1:\u200b\\2", escaped)
+    escaped = re.sub(r"(?i)(?<![a-z0-9+.\-])([a-z][a-z0-9+.\-]*):(?=/)", "\\1:\u200b", escaped)
     # With a limit: at most `limit` characters, cut on the ESCAPED text with
     # `more` after the cut. Every backslash here opens or closes a pair, so a
     # cut that leaves an odd run of them at its end has split a pair and drops
@@ -6668,7 +6691,7 @@ async def _elo_refused(ctx, unlinked, error) -> bool:
         return True
     if unlinked:
         await ctx.send("❌ Not linked yet — they need `/link` first: "
-                       + ", ".join(f"**{n}**" for n in unlinked))
+                       + ", ".join(f"**{_escape_md(n)}**" for n in unlinked))
         return True
     return False
 
@@ -7504,7 +7527,7 @@ async def cmd_mystats(ctx, member: discord.Member = None):
     # nulls discord_display_name when show_discord is off). No real mention.
     _dname = s.get("discord_display_name")
     if _dname:
-        embed.description = f"Discord: **@{_escape_md(str(_dname))}**"
+        embed.description = f"Discord: **{_escape_md('@' + str(_dname))}**"
     embed.set_thumbnail(url=target.display_avatar.url)
 
     # Rating box
@@ -7642,7 +7665,7 @@ def _beacon_discord_suffix(j):
     dname = (j or {}).get("discord_display_name")
     if not dname:
         return ""
-    return f"  ·  Discord: @{_escape_md(str(dname))}"
+    return f"  ·  Discord: {_escape_md('@' + str(dname))}"
 
 
 @tasks.loop(seconds=15)
@@ -12991,25 +13014,20 @@ QDIG_HEADER_MORE = "Held game reports (continued):"
 QDIG_WHAT_YOU_CAN_DO = ("What you can do: in the Admin tab, Rejected Reports. Accept only marks the report "
                         "as approved for a later ordered replay; it records nothing now. "
                         "Discard marks it as dismissed.")
-# @ since BOT-TEXT-ESCAPE-1 stage 2: at least every character _escape_md escapes.
-QDIG_MD_CHARS = "\\*_~`|>[]()#<@"
-
-
 def _qdig_md(value, limit: int) -> str:
     """THE one function every string that goes to Discord from a D1 row
     passes: names, the reason sentence, the reporter, the winner, the
-    differences, the accept-blocked sentence. One line (control
-    characters, invisible format characters and line breaks become
-    spaces), cut to `limit` characters with a visible "...", URL schemes
-    made inert (": //", so nothing auto-links), and every markdown
-    character escaped. allowed_mentions stays none. The api sends these
-    strings PLAIN and the renderer calls this once per string at the slot
-    where it is formatted, so nothing is escaped twice."""
+    differences, the accept-blocked sentence. A thin call of the name
+    helper (BOT-TEXT-ESCAPE-1: two helpers only): the value on one line
+    (control characters, invisible format characters and line breaks become
+    spaces, runs of white space one space), then _escape_md once, which
+    escapes the marks, breaks every address scheme and cuts to `limit`
+    characters of the ESCAPED text with a visible "...". allowed_mentions
+    stays none. The api sends these strings PLAIN and the renderer calls
+    this once per string at the slot where it is formatted, so nothing is
+    escaped twice."""
     s = " ".join("".join(ch if ch.isprintable() else " " for ch in str(value if value is not None else "")).split())
-    if len(s) > limit:
-        s = s[:max(limit - 3, 0)].rstrip() + "..."
-    s = s.replace("://", ": //")
-    return "".join("\\" + ch if ch in QDIG_MD_CHARS else ch for ch in s)
+    return _escape_md(s, limit)
 
 
 def _qdig_esc(name) -> str:
@@ -13500,7 +13518,10 @@ async def _send_release_chunks_locked(tag: str, msgs: list) -> bool:
             st[tag] = 0
             _release_state_save(st)
         for i in range(start, len(msgs)):
-            await ch.send(msgs[i][:2000])
+            # A release post notifies nobody: no user, role, @everyone or
+            # @here in the notes pings (the client default, stated here so
+            # it holds at this send whatever the default becomes).
+            await ch.send(msgs[i][:2000], allowed_mentions=discord.AllowedMentions.none())
             st = _release_state_load()
             st[tag] = i + 1
             _release_state_save(st)
@@ -13526,7 +13547,12 @@ def _format_release_message(release_json):
     skips them (only the first message becomes a Home-tab fallback row — the
     Home tab's primary source is now the API's own uncut store)."""
     tag = release_json.get("tag_name") or "v?"
-    name = release_json.get("name") or tag
+    # The title is one line with no markup: it passes the name helper once.
+    # The body is the project's release notes, written as markdown, and is
+    # shown as written (BOT-TEXT-ESCAPE-1; the census keys that exception to
+    # this slot, the body of a release read from the release source). The
+    # send notifies nobody (_send_release_chunks_locked).
+    name = _escape_md(release_json.get("name") or tag, 200)
     url = _release_url(release_json)
     body = release_json.get("body") or ""
     body = body.replace("\r\n", "\n").strip()
@@ -14439,7 +14465,7 @@ async def dm_opponent(ctx, *, message: str):
         await ctx.reply(f"Rate limit: {_DM_OPPONENT_LIMIT} messages per {_DM_OPPONENT_WINDOW_SECS}s. Wait a moment.", ephemeral=True)
         return
     sender = getattr(ctx.author, "global_name", None) or ctx.author.name
-    body = f"**[Tournament Relay from {_escape_md(sender)}]** {message[:1500]}"
+    body = f"**[Tournament Relay from {_escape_md(sender)}]** {_escape_text(message, 1500)}"
     ok = await _dm_user(opp_id, body)
     if ok:
         await ctx.reply(f"Relayed to {_escape_md(opp_name)}.", ephemeral=True)

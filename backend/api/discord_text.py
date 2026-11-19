@@ -25,9 +25,10 @@ Rules, shared with the bot:
     line-opening # - + and the . or ) after leading digits on every line; a
     bare http(s) address is left whole;
   - escape_name turns every line break into a space and escapes the
-    line-opening marks once, at the start; a name is never a link: each
-    http: or https: (any case) before one or two slashes gets a zero-width
-    space after its colon, before the cut;
+    line-opening marks once, at the start; a name is never a link: every
+    address scheme (a letter, then letters, digits, + . or -, any case)
+    whose colon is followed by a slash gets a zero-width space after its
+    colon, before the cut;
   - with a limit the result is at most `limit` characters, cut on the escaped
     text and never inside an escape pair, `more` after a cut.
 Pure functions, no I/O.
@@ -91,7 +92,7 @@ def escape_name(text, limit=None, more="..."):
     escaped = re.sub(r"^(\s*\d+)([.)])", r"\1\\\2", escaped)
     # A name is never a link: a zero-width space after every address
     # scheme's colon, before the cut (the bot's _escape_md does the same).
-    escaped = re.sub(r"(?i)(https?):(/{1,2})", "\\1:\u200b\\2", escaped)
+    escaped = re.sub(r"(?i)(?<![a-z0-9+.\-])([a-z][a-z0-9+.\-]*):(?=/)", "\\1:\u200b", escaped)
     if limit is None or len(escaped) <= limit:
         return escaped
     if limit < len(more):
