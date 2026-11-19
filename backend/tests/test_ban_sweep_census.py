@@ -523,3 +523,186 @@ def test_the_void_discovery_reads_the_live_statuses_of_every_table():
     for t in _RECORD_TABLES:
         assert f'_ban_live_statuses_sql("{t}")' in src, t
     assert "status = 'active'" not in src and "'dc_paused'" not in src
+
+
+# ---- F4: every sweep ban read under the shared identity lock -------------
+
+def _api_modules():
+    return {f[:-3]: s for f, s in _api_sources().items()}
+
+
+def test_every_sweep_gate_read_is_under_the_identity_lock_or_a_listed_row_lock():
+    bad = B.unlocked_gate_reads(_api_modules())
+    assert bad == [], "\n".join(bad)
+
+
+def test_no_row_lock_is_written_before_the_identity_lock():
+    bad = B.row_locks_before_the_gate(_api_modules())
+    assert bad == [], "\n".join(bad)
+
+
+_PLANTED_F4 = '''
+async def planted_direct(db, steam_id):
+    await _ban_gate_or_raise(db, steam_id)
+
+async def planted_row_first(db, sid):
+    await db.execute(text("SELECT 1 FROM series WHERE id = :i FOR NO KEY UPDATE"), {"i": sid})
+    await _ban_lock_and_gate(db, [sid])
+'''
+
+
+def test_mutant_a_route_reading_the_ban_without_the_lock_fails_the_census():
+    mods = _api_modules()
+    mods["main"] = mods["main"] + _PLANTED_F4
+    bad = B.unlocked_gate_reads(mods)
+    assert bad == ["main.planted_direct: 1 ban read(s) outside _ban_lock_and_gate, 0 listed"], bad
+
+
+def test_mutant_a_row_lock_before_the_identity_lock_fails_the_census():
+    mods = _api_modules()
+    mods["main"] = mods["main"] + _PLANTED_F4
+    bad = B.row_locks_before_the_gate(mods)
+    assert len(bad) == 1 and bad[0].startswith("main.planted_row_first: a row lock at line"), bad
+
+
+def test_negative_control_the_row_serialized_entry_is_load_bearing():
+    bad = B.unlocked_gate_reads(_api_modules(), row_serialized={})
+    assert bad == ["main.team_series_report_dc: 1 ban read(s) outside _ban_lock_and_gate, 0 listed"], bad
+    bad = B.row_locks_before_the_gate(_api_modules(), ok={})
+    assert [b.split(":")[0] for b in bad] == ["main.link_discord"], bad
+
+
+class _RecDb:
+    def __init__(self):
+        self.calls = []
+
+    async def execute(self, stmt, params=None):
+        self.calls.append((str(stmt), dict(params or {})))
+
+        class _R:
+            def all(self):
+                return []
+        return _R()
+
+
+def _lock_order_failures(helper):
+    """The helper's locks for ids of two lengths and an actor: every id and
+    the actor, in _ffa_sort_key order, all before the ban read."""
+    import asyncio
+    db = _RecDb()
+    ids, actor = ["9000000000000002", "90000000000000001"], "1000000000000003"
+    asyncio.run(helper(db, ids, None, actor=actor))
+    locks = [p["sid"] for s, p in db.calls if "pg_advisory_xact_lock_shared" in s]
+    want = sorted({*ids, actor}, key=main._ffa_sort_key)
+    bad = []
+    if locks != want:
+        bad.append(f"locks {locks} != {want}")
+    reads = [i for i, (s, _p) in enumerate(db.calls) if "player_bans" in s]
+    if not reads or reads[0] < len(locks):
+        bad.append(f"ban read at {reads} before the locks end ({len(locks)})")
+    return bad
+
+
+def test_the_helper_locks_every_id_and_the_actor_in_the_canonical_order():
+    assert _lock_order_failures(main._ban_lock_and_gate) == []
+
+
+def _mutant_helper(old, new):
+    import inspect
+    import textwrap
+    src = textwrap.dedent(inspect.getsource(main._ban_lock_and_gate))
+    assert src.count(old) == 1, old
+    ns = dict(vars(main))
+    exec(compile(src.replace(old, new), "<mutant>", "exec"), ns)
+    return ns["_ban_lock_and_gate"]
+
+
+@pytest.mark.parametrize("old,new", [
+    ("[*(steam_ids or ()), actor]", "[*(steam_ids or ())]"),
+    (", key=_ffa_sort_key)", ")"),
+])
+def test_mutant_the_helper_without_the_actor_or_the_canonical_order_fails(old, new):
+    assert _lock_order_failures(_mutant_helper(old, new)) != []
+
+
+# ---- F1 c: every call site of each mode's insert core reaches the writer's check
+
+def test_every_insert_core_reads_the_ban_and_every_site_is_listed():
+    bad = B.insert_core_failures(_api_modules())
+    assert bad == [], "\n".join(bad)
+
+
+def test_mutant_a_new_call_site_of_an_insert_core_fails_the_census():
+    mods = _api_modules()
+    mods["main"] += "\n\nasync def planted_replay(db, report):\n    return await _settle_ovt_report(db, report)\n"
+    bad = B.insert_core_failures(mods)
+    assert bad == ["('main', 'planted_replay', '_settle_ovt_report', 'call'): named 1 time(s), 0 listed"], bad
+
+
+@pytest.mark.parametrize("core", sorted(B.INSERT_CORES))
+def test_mutant_an_insert_core_without_the_writers_check_fails_the_census(core):
+    mods = _api_modules()
+    tree = ast.parse(mods["main"])
+    for fn in B._functions(tree):
+        if fn.name == core:
+            for st in ast.walk(fn):
+                if isinstance(st, ast.Call) and B._name_of(st) in B.LOCK_CALLERS:
+                    st.func = ast.Name(id="_planted_noop", ctx=ast.Load())
+    mods["main"] = ast.unparse(tree)
+    bad = B.insert_core_failures(mods)
+    assert any(b.startswith(f"main.{core}: the ") for b in bad), bad
+
+
+# ---- F4: every BAN-class writer reads the ban under an identity lock ------
+
+_F4_ROWS = None
+
+
+def _f4_rows_and_funcs():
+    global _F4_ROWS
+    if _F4_ROWS is None:
+        _F4_ROWS = _all_rows_and_funcs()
+    return _F4_ROWS
+
+
+def test_every_ban_class_writer_reads_the_ban_under_an_identity_lock_or_is_listed():
+    rows, funcs = _f4_rows_and_funcs()
+    bad = B.ban_writers_without_the_lock(rows, funcs)
+    assert bad == [], "\n".join(bad)
+    for key, why in B.F4_LISTED.items():
+        assert why.strip(), key
+
+
+def _with_unlocked_check(funcs, name):
+    """funcs with main.<name>'s locking-helper calls turned into the plain
+    check e0ef1492 had (_check_ban_or_raise): still BAN, no lock."""
+    out = {m: dict(fs) for m, fs in funcs.items()}
+    fn = copy.deepcopy(out["main"][name])
+    n = 0
+    for c in ast.walk(fn):
+        if isinstance(c, ast.Call) and B._name_of(c) == "_ban_lock_and_gate":
+            c.func = ast.Name(id="_check_ban_or_raise", ctx=ast.Load())
+            n += 1
+    assert n == 1, (name, n)
+    out["main"][name] = fn
+    return out
+
+
+def test_mutant_a_bet_without_the_lock_fails_the_census():
+    rows, funcs = _f4_rows_and_funcs()
+    bad = B.ban_writers_without_the_lock(rows, _with_unlocked_check(funcs, "place_bet"))
+    assert "POST /api/v1/bets: a BAN-class writer that reads the ban under no identity lock" in bad, bad
+    assert all("bets: " in b for b in bad), bad   # the discord bet goes through place_bet
+
+
+def test_negative_control_the_listed_writers_and_the_lockers_are_load_bearing():
+    rows, funcs = _f4_rows_and_funcs()
+    bad = B.ban_writers_without_the_lock(rows, funcs, listed={})
+    assert len(bad) == len(B.F4_LISTED), bad
+    bad = B.ban_writers_without_the_lock(rows, funcs, lockers={**B.IDENTITY_LOCKERS, "_planted_locker": "x"})
+    assert bad == ["_planted_locker: listed as an identity locker and takes no identity lock"], bad
+    lockers = dict(B.IDENTITY_LOCKERS)
+    for k in [k for k in lockers if k.startswith("_pc_")]:
+        lockers.pop(k)
+    bad = B.ban_writers_without_the_lock(rows, funcs, lockers=lockers)
+    assert bad and all("/pc/" in b for b in bad), bad

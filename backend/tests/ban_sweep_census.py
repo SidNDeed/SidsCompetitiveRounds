@@ -115,6 +115,210 @@ BAN_READS = frozenset({
 })
 
 
+# F4: the sweep's two ban reads. Outside the locking helper each call is a
+# finding unless listed here with the row lock that serializes it against the
+# ban core (which takes that row after the target's identity lock).
+SWEEP_GATE_READS = frozenset({"_ban_gate_or_raise", "_ban_gate_any_or_raise"})
+LOCK_HELPER = "_ban_lock_and_gate"
+LOCK_CALLERS = frozenset({LOCK_HELPER, "_settle_writer_ban_check"})
+ROW_SERIALIZED = {
+    ("main", "team_series_report_dc"): (
+        1, "the roster read under the team_series FOR NO KEY UPDATE row lock; an identity "
+           "lock taken after that row lock would invert the ban core's order"),
+}
+# A row lock written before a locking-helper call in the same function, on a
+# table the ban core never locks.
+ROW_LOCK_BEFORE_OK = {
+    ("main", "link_discord"): "the expired link_codes prune (FOR UPDATE SKIP LOCKED); "
+                              "the ban core never locks link_codes",
+}
+_ROW_LOCK_SQL = re.compile(r"\bFOR\s+(UPDATE|NO\s+KEY\s+UPDATE|SHARE|KEY\s+SHARE)\b", re.I)
+
+
+# F4: a BAN-class handler that writes reaches the locking helper, or one of
+# these functions, each of which takes the identity lock of the same key
+# itself (shared, or exclusive, which is stronger) before its ban read.
+IDENTITY_LOCKERS = {
+    "_identity_lock_many": "exclusive identity locks of a roster, in the canonical order",
+    "_enrollment_identity_gate": "the exclusive identity lock, then the ban read",
+    "_pc_verified_actor": "the shared identity lock, then the ban read (player cards)",
+    "_pc_claim_daily": "the shared identity lock, then the ban read (the bot's daily claim)",
+    "_pc_bot_actor": "the shared identity lock, then the ban read (the bot's pack open)",
+}
+_IDENTITY_LOCK_SQL = re.compile(r"pg_advisory_xact_lock(_shared)?\(hashtext\(")
+_I18N = ("the translation portal: it writes the portal session (issue, refresh, touch) and translation "
+         "content rows a reviewer judges; no gold, XP, rating, match or series record, stored report or "
+         "another player's state")
+_CHAT = ("a chat line of the account's own, which moderators remove; no gold, XP, rating, match or "
+         "series record, stored report or another player's state")
+F4_LISTED = {
+    **{("GET", "/api/v1/i18n/" + p): _I18N for p in (
+        "approved", "contributors", "grants/mine", "history", "keys", "progress", "proposals")},
+    **{("POST", "/api/v1/i18n/" + p): _I18N for p in (
+        "portal-session", "portal-session/refresh", "proposals", "revert", "review")},
+    ("POST", "/api/v1/chat/post"): _CHAT,
+    ("WS", "/api/v1/ws/chat"): _CHAT,
+}
+
+
+def ban_writers_without_the_lock(rows, funcs_by_module, listed=None, lockers=None):
+    """Every BAN-class route that writes and reaches neither the locking
+    helper nor an identity locker, unless listed; every listed route that
+    no longer needs its entry; every locker whose own body holds no
+    identity lock."""
+    listed = F4_LISTED if listed is None else listed
+    lockers = IDENTITY_LOCKERS if lockers is None else lockers
+    res, _clf = census(rows, funcs_by_module)
+    out, need = [], set()
+    for method, path, module, name, _deps in rows:
+        if BAN not in res[(method, path)][1] or not reaches(funcs_by_module, module, name, _write_call):
+            continue
+        if reaches(funcs_by_module, module, name, lambda c, cn: cn in LOCK_CALLERS or cn in lockers):
+            continue
+        need.add((method, path))
+        if (method, path) not in listed:
+            out.append(f"{method} {path}: a BAN-class writer that reads the ban under no identity lock")
+    for key in sorted(set(listed) - need):
+        out.append(f"{key[0]} {key[1]}: listed for F4 and needs no entry")
+    for name in sorted(lockers):
+        fns = [f for m in funcs_by_module.values() for n, f in m.items() if n == name]
+        if not fns or not any(
+                (isinstance(c, ast.Constant) and isinstance(c.value, str) and _IDENTITY_LOCK_SQL.search(c.value))
+                or (isinstance(c, ast.Call) and _name_of(c) in lockers and _name_of(c) != name)
+                for f in fns for c in _own_nodes(f)):
+            out.append(f"{name}: listed as an identity locker and takes no identity lock")
+    return out
+
+
+# F1 c: each mode's insert core, and every place the code names it. Each core
+# reads the ban itself (a LOCK_CALLERS call in its own body), so every site
+# reaches the writer's check; a site not listed here turns the census red.
+INSERT_CORES = {
+    "submit_match": "1v1", "submit_ffa_match": "FFA",
+    "_settle_ovt_report": "1v2", "_settle_team_report": "2v2",
+}
+INSERT_CORE_SITES = {
+    ("main", "submit_ovt_match", "_settle_ovt_report", "call"): (1, "the 1v2 report route"),
+    ("main", "_report_window_settle", "_settle_ovt_report", "ref"): (
+        1, "the report window's settle: route receipt, janitor, horizon and release settle through it"),
+    ("main", "<module>", "_settle_ovt_report", "ref"): (2, "constant checks on its code object; no call"),
+    ("main", "submit_team_match", "_settle_team_report", "call"): (1, "the 2v2 report route"),
+    ("main", "_report_window_settle", "_settle_team_report", "ref"): (
+        1, "the report window's settle: route receipt, janitor, horizon and release settle through it"),
+    ("main", "<module>", "_settle_team_report", "ref"): (1, "the ladder hook sites tuple; no call"),
+    ("main", "_ffa_settle_report", "submit_ffa_match", "call"): (
+        1, "the FFA report journal: the janitor and the report route's due windows"),
+    ("main", "<module>", "submit_ffa_match", "ref"): (
+        6, "route-table, ladder-hook, writer and gate lists and code-object checks; no call"),
+    ("main", "<module>", "submit_match", "ref"): (1, "the ladder hook sites tuple; no call"),
+}
+
+
+def insert_core_failures(sources, sites=None, cores=None):
+    """sources: {module: source text}. A core whose own body does not call a
+    LOCK_CALLERS function, and every naming of a core whose (module,
+    enclosing function, core, call|ref) count differs from the list."""
+    sites = INSERT_CORE_SITES if sites is None else sites
+    cores = INSERT_CORES if cores is None else cores
+    out, seen = [], {}
+    for mod, src in sorted(sources.items()):
+        tree = ast.parse(src)
+        parent = {c: n for n in ast.walk(tree) for c in ast.iter_child_nodes(n)}
+        for fn in _functions(tree):
+            if fn.name in cores and not any(isinstance(c, ast.Call) and _name_of(c) in LOCK_CALLERS
+                                            for c in _own_nodes(fn)):
+                out.append(f"{mod}.{fn.name}: the {cores[fn.name]} insert core reads no ban under the lock")
+        for n in ast.walk(tree):
+            if not (isinstance(n, ast.Name) and n.id in cores and isinstance(n.ctx, ast.Load)):
+                continue
+            p, q, enc = parent.get(n), n, None
+            while q in parent and enc is None:
+                q = parent[q]
+                if isinstance(q, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    enc = q.name
+            kind = "call" if isinstance(p, ast.Call) and p.func is n else "ref"
+            key = (mod, enc or "<module>", n.id, kind)
+            seen[key] = seen.get(key, 0) + 1
+    for key, n in sorted(seen.items()):
+        want = sites.get(key, (0, ""))[0]
+        if n != want:
+            out.append(f"{key}: named {n} time(s), {want} listed")
+    for key in sorted(set(sites) - set(seen)):
+        out.append(f"{key}: listed and not found")
+    return out
+
+
+def _own_nodes(fn):
+    """The nodes of fn's body, nested function definitions left out (each is
+    a function of its own)."""
+    stack = list(fn.body)
+    while stack:
+        n = stack.pop()
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+            continue
+        yield n
+        stack.extend(ast.iter_child_nodes(n))
+
+
+def _functions(tree):
+    return [n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]
+
+
+def _name_of(call):
+    f = call.func
+    return f.id if isinstance(f, ast.Name) else (f.attr if isinstance(f, ast.Attribute) else None)
+
+
+def unlocked_gate_reads(sources, row_serialized=None):
+    """sources: {module: source text}. Every function that calls a sweep gate
+    read itself (not through the locking helper) more often than
+    row_serialized allows, and every listed entry that no longer matches."""
+    row_serialized = ROW_SERIALIZED if row_serialized is None else row_serialized
+    out, seen = [], {}
+    for mod, src in sorted(sources.items()):
+        for fn in _functions(ast.parse(src)):
+            if fn.name == LOCK_HELPER or fn.name in SWEEP_GATE_READS:
+                continue
+            n = sum(1 for c in _own_nodes(fn) if isinstance(c, ast.Call) and _name_of(c) in SWEEP_GATE_READS)
+            if not n:
+                continue
+            seen[(mod, fn.name)] = n
+            allowed = row_serialized.get((mod, fn.name), (0, ""))[0]
+            if n != allowed:
+                out.append(f"{mod}.{fn.name}: {n} ban read(s) outside {LOCK_HELPER}, {allowed} listed")
+    for key, (n, _why) in sorted(row_serialized.items()):
+        if key not in seen:
+            out.append(f"{key[0]}.{key[1]}: listed as row-serialized and calls no gate read")
+    return out
+
+
+def row_locks_before_the_gate(sources, ok=None):
+    """Every function in which SQL text that locks rows is written before its
+    first locking-helper call (by source position), unless listed."""
+    ok = ROW_LOCK_BEFORE_OK if ok is None else ok
+    out, seen = [], set()
+    for mod, src in sorted(sources.items()):
+        for fn in _functions(ast.parse(src)):
+            if fn.name in LOCK_CALLERS:
+                continue
+            nodes = list(_own_nodes(fn))
+            at = [c.lineno for c in nodes if isinstance(c, ast.Call) and _name_of(c) in LOCK_CALLERS]
+            if not at:
+                continue
+            first = min(at)
+            locks = sorted(c.lineno for c in nodes
+                           if isinstance(c, ast.Constant) and isinstance(c.value, str)
+                           and _ROW_LOCK_SQL.search(c.value) and c.lineno < first)
+            if not locks:
+                continue
+            seen.add((mod, fn.name))
+            if (mod, fn.name) not in ok:
+                out.append(f"{mod}.{fn.name}: a row lock at line {locks[0]} before the identity lock at {first}")
+    for key in sorted(set(ok) - seen):
+        out.append(f"{key[0]}.{key[1]}: listed and takes no row lock before the identity lock")
+    return out
+
+
 def _calls_in(fn):
     for n in ast.walk(fn):
         if isinstance(n, ast.Call):
