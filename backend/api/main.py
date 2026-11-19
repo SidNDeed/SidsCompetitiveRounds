@@ -10658,6 +10658,17 @@ async def submit_match(report: MatchReport, request: Request, db: AsyncSession =
     # existing current series for this pair is harmless when the report really
     # is casual (the row is simply left alone).
     await _take_early_series_lock(db, p1.id, p2.id, report.photon_room_id)
+    # Bans part 2a (FIX-2 class I a): a game of a sitting the ban void ended is
+    # refused here, before any match row or payment, as the other modes'
+    # cores refuse a write onto a record the void ended (409
+    # series_ended_by_ban) -- while the ban is active, after it ran out and
+    # after an unban alike. The lookup below (_find_current_active_series)
+    # sees active series only, so without this a result from such a sitting
+    # found no series, made a fresh one and was paid.
+    if await _pair_sitting_ended_by_ban(db, p1.id, p2.id, report.photon_room_id,
+                                        report.is_ranked):
+        _ban_gate_refused(request)
+        raise HTTPException(status_code=409, detail="series_ended_by_ban")
     # Server-side ranked enforcement (bug #42). ranked_enabled defaults TRUE
     # and every explicit opt-in path (queue join, toggle) sets it, so a FALSE
     # here means the player deliberately turned ranked off. The old behavior
@@ -50194,6 +50205,64 @@ def _record_ended_by_ban(row) -> bool:
         return False
 
 
+_PAIR_SQL = ("((player1_id = :a AND player2_id = :b)"
+             " OR (player1_id = :b AND player2_id = :a))")
+
+
+async def _pair_sitting_ended_by_ban(db, pid_a, pid_b, room, ranked: bool) -> bool:
+    """Whether a 1v1 report of this pair in `room` belongs to a sitting the ban
+    void ended (FIX-2 class I a). ranked_series carries no room, so the
+    sitting is resolved from the room's own binding, in this order:
+
+      tournament room  bound to its bracket match's series (tournament_matches,
+                       _TM_ROOM_MATCH_SQL): ended iff that series is.
+      a recorded game  of an ended series in this room: ended.
+      queue room       the room ledger (issued_room_regions, written only at
+                       queue issuance for this pair): ended iff issued at or
+                       before the newest ban void V of the pair.
+      private room     no binding: a RANKED report is ended iff no series of
+                       the pair was created after V (preflight creates the new
+                       sitting's series before its first game); a casual one
+                       is judged by the recorded-game rule only.
+
+    False whenever the pair has no series the void ended, so a pair no ban ever
+    touched pays nothing for this. Reads only; the caller holds the pair's
+    identity keys and the early series lock."""
+    ended = (await db.execute(text(
+        "SELECT id, invalidated_at FROM ranked_series WHERE " + _PAIR_SQL +
+        " AND invalidation_reason = ANY(CAST(:why AS text[]))"),
+        {"a": pid_a, "b": pid_b, "why": sorted(BAN_VOID_REASONS)})).all()
+    if not ended:
+        return False
+    ids = [str(r[0]) for r in ended]
+    stamps = [r[1] for r in ended if r[1] is not None]
+    room = (room or "").strip()
+    if room:
+        bound = (await db.execute(text(
+            "SELECT CAST(tm.series_id AS text) FROM tournament_matches tm WHERE "
+            + _TM_ROOM_MATCH_SQL), {"room": room})).scalars().all()
+        if bound:
+            return any(s in ids for s in bound if s)
+        if (await db.execute(text(
+                "SELECT 1 FROM matches WHERE photon_room_id = :room"
+                " AND series_id = ANY(CAST(:ids AS uuid[])) LIMIT 1"),
+                {"room": room, "ids": ids})).first() is not None:
+            return True
+        issued = (await db.execute(text(
+            "SELECT issued_at FROM issued_room_regions WHERE room_name = :room AND " + _PAIR_SQL),
+            {"room": room, "a": pid_a, "b": pid_b})).scalar()
+        if issued is not None:
+            return not stamps or issued <= max(stamps)
+    if not ranked:
+        return False
+    if not stamps:
+        return True
+    newer = (await db.execute(text(
+        "SELECT 1 FROM ranked_series WHERE " + _PAIR_SQL + " AND created_at > :v LIMIT 1"),
+        {"a": pid_a, "b": pid_b, "v": max(stamps)})).first()
+    return newer is None
+
+
 def _ban_writer_refusal(exc: HTTPException, in_window: bool):
     """A writer's ban refusal: inside a report window it is PERMANENT, so the
     journaled window closes as refused and the janitor does not take it up
@@ -54192,6 +54261,20 @@ async def admin_resolve_team_series(
         sid_uuid = UUID(series_id)
     except (ValueError, TypeError):
         raise HTTPException(400, "Invalid series_id")
+    if action == "complete":
+        # Bans part 2a (FIX-2 class I b): a completion pays the roster, so it
+        # reads the ban of every member under their identity keys, taken here
+        # in the transaction's one taking call (shared, one ordered pass)
+        # BEFORE the series row lock below: a ban that commits after this read
+        # waits for this transaction, and one committed before it refuses the
+        # completion (409 "Banned: participant") before anything is paid. The
+        # roster is read without a lock first; team_series rows never change
+        # their roster, and the locked read below is the one written from.
+        _roster = (await db.execute(text(
+            "SELECT p.steam_id FROM team_series s"
+            " JOIN players p ON p.id IN (s.t1a_id, s.t1b_id, s.t2a_id, s.t2b_id)"
+            " WHERE s.id = :sid"), {"sid": sid_uuid})).scalars().all()
+        await _ban_lock_and_gate(db, list(_roster), None)
     srow = (await db.execute(
         text("SELECT status, invalidation_reason, t1a_id, t1b_id, t2a_id, t2b_id "
              "FROM team_series WHERE id=:sid FOR UPDATE"), {"sid": sid_uuid},
