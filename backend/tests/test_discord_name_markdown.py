@@ -744,9 +744,10 @@ def test_a_mail_confirmation_and_a_moderation_result_print_names_literally(name)
     """Two replies that name a player to someone else: the mail relay's
     "sent your reply to NAME" and a moderation button's "applied by NAME to
     NAME"."""
-    ns = _lift(funcs=("_escape_md", "_escape_text", "_mail_sent_line", "_mail_legacy_plain", "_modcase_render"),
+    ns = _lift(funcs=("_escape_md", "_escape_text", "_mail_sent_line", "_mail_legacy_plain", "_modcase_render",
+                      "_api_refusal_text"),
                assigns=("MAIL_NAME_SHOWN_MAX", "MAIL_SUBJECT_SHOWN_MAX", "_TEXT_BREAKS", "_TEXT_URL",
-                        "_TEXT_LINE_MARK", "_TEXT_ALWAYS"))
+                        "_TEXT_LINE_MARK", "_TEXT_ALWAYS", "API_REFUSAL_SHOWN_MAX"))
     # the typed name as the api serves it beside its older escaped field (BOT-TEXT-ESCAPE-1)
     _shows_literally(ns["_mail_sent_line"]({"known": True, "sender_name": "?", "subject": "hi",
                                             "sender_name_raw": name, "subject_raw": "hi"}), name)

@@ -119,12 +119,14 @@ def _lift():
     for node in TREE.body:
         name = getattr(node, "name", None)
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and (
-                name.startswith("_modlog_") or name in ("_aer_local_gate", "_escape_md", "_escape_text")):
+                name.startswith("_modlog_") or name in ("_aer_local_gate", "_escape_md", "_escape_text",
+                                                        "_api_refusal_text")):
             node = copy.deepcopy(node)
             node.decorator_list = []
             picked.append(node)
         elif isinstance(node, ast.Assign) and any(
-                isinstance(t, ast.Name) and t.id.startswith(("MODLOG_", "_MD_", "_modlog_", "_TEXT_"))
+                isinstance(t, ast.Name) and t.id.startswith(("MODLOG_", "_MD_", "_modlog_", "_TEXT_",
+                                                             "API_REFUSAL_"))
                 for t in node.targets):
             picked.append(copy.deepcopy(node))
     return picked
@@ -882,16 +884,18 @@ def test_landfix_the_steam_id_in_the_code_span_is_ascii_digits_or_a_fixed_word(s
 
 @pytest.mark.parametrize("status", [400, 422])
 def test_landfix_a_refusal_detail_is_cut_before_it_is_escaped(status):
-    """The api's refusal word is cut raw, then escaped: escaping first and
-    then cutting at 200 can keep the backslash of a pair and drop the
-    character it escaped, which leaves the backslash to escape the sentence's
+    """The api's refusal text passes the refusal helper (BOT-TEXT-ESCAPE-1):
+    one _escape_text pass cut at 200 characters of the ESCAPED text, never
+    inside an escape pair, so no backslash is left to escape the sentence's
     own closing parenthesis."""
     detail = "a" * 199 + "*" * 60
     ns, _ = bot(lambda params: (status, {"detail": detail}))
     it = _Inter()
     run(ns["_modlog_command"](it, PLAYER, "", "", "n"))
     (text, kw), = it.sent
-    assert "(%s). Trying again as it is will not help." % _expect("a" * 199 + "…") in text, text
+    shown = ns["_escape_text"](detail, 200)
+    assert len(shown) <= 200 and shown.endswith("a...")
+    assert "(%s). Trying again as it is will not help." % shown in text, text
 
 
 @pytest.mark.parametrize("s", HOSTILE, ids=HOSTILE_IDS)
@@ -900,7 +904,13 @@ def test_landfix_a_refusal_detail_is_literal(s):
     it = _Inter()
     run(ns["_modlog_command"](it, PLAYER, "", "", "n"))
     (text, kw), = it.sent
-    _shows_literally(text, s)
+    # Refusal text is free text (BOT-TEXT-ESCAPE-1): one line, then the
+    # free-text rule, which keeps an address whole.
+    one_line = " ".join(s.split())
+    exp = _expect_reason(one_line)
+    assert exp in text, (s, exp, text)
+    if exp != one_line:
+        assert one_line not in text.replace(exp, ""), (s, text)
     assert "\n" not in text and not _MASKED_LINK.search(_markup(text)), text
 
 
