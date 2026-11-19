@@ -78316,7 +78316,8 @@ async def _service_player_uuids(db: AsyncSession) -> "set[str]":
     # may roll back.
     replay = _QAPPLY_REPLAY.get() is not None
     now_mono = time.monotonic()
-    if (replay or _service_player_uuid_cache is None
+    if (_service_player_uuid_cache is None
+            or replay
             or now_mono - _service_uuid_cache_monotonic > _SERVICE_UUID_REFRESH_SECONDS):
         # SAVEPOINT the refresh. This is the one hour-marked moment when a
         # ~90-call-site policy guard executes SQL, and several of those callers
@@ -78376,7 +78377,10 @@ async def _service_player_uuids(db: AsyncSession) -> "set[str]":
             # the set comes back empty. It was treated as suspect for cache
             # freshness and as authoritative for the guard decision, and only
             # one of those can be right.
-            if replay or not _service_player_uuid_cache:
+            if replay:
+                print(f"[SERVICE-POLICY] request-local read failed: {ex}")
+                raise HTTPException(status_code=503, detail="service_policy_unavailable")
+            if not _service_player_uuid_cache:
                 print(f"[SERVICE-POLICY] uuid cache could not be filled: {ex}")
                 raise HTTPException(
                     status_code=503,
