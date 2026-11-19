@@ -6,7 +6,7 @@ them. Each now checks them before the admin check and every statement:
     route's existing slice of it: its first 32, 40, 20 and 400 characters;
   * the flag review and the flag restoration parse the flag's id as a UUID (400 flag_id_invalid) and bind the
     parsed UUID in their read; the signature, the audit row and the answer keep the id as sent;
-  * the quarantine discard and accept parse the report's id as a UUID (400 qid_invalid) and bind the parsed id's
+  * the quarantine discard and accept parse the report's id as a UUID (400, the table's bad_id sentence) and bind the parsed id's
     canonical text in every statement, the signature keeping the id as sent; the discard refuses a note no text
     bind can carry (422), as the route's existing slice of it, its first 500 characters.
 The admin portrait clear's target is tested in test_pc_routes.py; the Discord delete event's ids and the
@@ -264,11 +264,11 @@ def test_the_quarantine_discard_checks_the_reports_id_and_note_before_the_admin_
     reached = _admin(monkeypatch)
     for bad in NOT_UUIDS:
         db = _Db()
-        _refused(main.admin_discard_quarantine(bad, _quarantine("n"), db=db), 400, "qid_invalid")
+        _refused(main.admin_discard_quarantine(bad, _quarantine("n"), db=db), 400, main._QAPPLY_TEXTS["bad_id"])
         assert db.log == [] and db.committed == 0 and reached == [], (repr(bad), db.log, reached)
     for bad in UNBINDABLE:
         db = _Db()
-        _refused(main.admin_discard_quarantine(str(QID), _quarantine(bad), db=db), 422, "note is not storable text")
+        _refused(main.admin_discard_quarantine(str(QID), _quarantine(bad), db=db), 422, main._QAPPLY_TEXTS["note"])
         assert db.log == [] and db.committed == 0 and reached == [], (repr(bad), db.log, reached)
     for sent, note in zip(_spellings(QID), CARRIED):
         for sent_note, bound_note in ((note, note), (None, "")):
@@ -299,7 +299,7 @@ def test_the_quarantine_accept_parses_the_reports_id_before_the_admin_check_and_
     monkeypatch.setattr(main, "_quarantine_later_rated_count", no_later_games)
     for bad in NOT_UUIDS:
         db = _Db()
-        _refused(main.admin_accept_quarantine(bad, _quarantine(), db=db), 400, "qid_invalid")
+        _refused(main.admin_accept_quarantine(bad, _quarantine(), db=db), 400, main._QAPPLY_TEXTS["bad_id"])
         assert db.log == [] and db.committed == 0 and reached == [], (repr(bad), db.log, reached)
     row = {"id": QID, "player_ids": [], "created_at": datetime(2026, 9, 15, tzinfo=timezone.utc),
            "status": "pending", "mode": "1v1", "reason": "lobby_completed", "group_id": None,

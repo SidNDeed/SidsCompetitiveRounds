@@ -43,6 +43,12 @@ only, which no janitor sets), so seven statements join the inventory
 every one a module constant or literal and none a session statement, and no
 other function's count moves, as main._janitor_sql_from_sources measures
 this tree and the base's.
+
+With the game's claim (QAPPLY-1 fix 1), the tree reads 391 and 0: the body
+reads the game's claim (_qapply_claim_of 1) and the record takes it
+(_qapply_claim 1), both module constants on the claims table, and no other
+function's count moves, as main._janitor_sql_from_sources measures this tree
+and the review's base.
 """
 import asyncio
 import os
@@ -58,7 +64,7 @@ sys.path.insert(0, os.path.normpath(os.path.join(HERE, "..", "api")))
 import main  # noqa: E402
 import models  # noqa: E402
 
-STATEMENTS, DYNAMIC = 389, 0   # 382 before QAPPLY-1, 371 before QDIG-1 (see the module docstring)
+STATEMENTS, DYNAMIC = 391, 0   # 389 before the game's claim, 382 before QAPPLY-1, 371 before QDIG-1 (see the module docstring)
 ROOT = (("main", "root"),)
 DEF = re.compile(r"\((\w+)\.unbanned_at IS NULL AND \(\1\.expires_at IS NULL OR \1\.expires_at > NOW\(\)\)\)")
 # the sites that were dynamic on 88a0a2bf, and the alias each one's definition call names
