@@ -702,11 +702,15 @@ def test_on_message_stops_only_for_the_two_verdicts_that_answered(verdict,
 def test_a_refusal_is_reported_and_not_passed_to_the_ticket_path():
     """A real refusal from the core -- blocked, too long, rate-limited -- is
     this path's business and is reported here. Falling through would hand the
-    player a bug-report usage message for a mail problem."""
+    player a bug-report usage message for a mail problem. The refusal's
+    text is shown through the bot's refusal helper (BOT-TEXT-ESCAPE-1): one
+    _escape_text pass, so the underscore is escaped once."""
     fn, posted, _asked, _ns = _mail_dm(status=429, data={"detail": "rate_limited"})
     msg = _Msg("yes", ref=_Ref(31, content=_dm_body(CODE_A)))
     assert _run(fn(msg)) == "HANDLED"
-    assert "rate_limited" in msg.sent[0]
+    shown = _ns["_escape_text"]("rate_limited")
+    assert shown == "rate" + chr(0x5C) + "_limited"
+    assert ": %s. The same rules" % shown in msg.sent[0], msg.sent[0]
     assert posted, "the refusal must come from the server, not from a guess here"
 
 
