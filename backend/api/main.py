@@ -78760,8 +78760,8 @@ def _stream_md_escape(s: str) -> str:
     "[watch](https://evil)" renders no masked link and no mention
     (AllowedMentions suppresses pings, not hyperlinks; review F10); keeps the
     name on one line, so it cannot forge an embed line (round-2 finding 5);
-    and puts a zero-width space after every address scheme's colon, so
-    Discord's auto-linker never fires on the name. The live post
+    and puts a zero-width space after the colon of every scheme that is
+    followed by a slash, so Discord's auto-linker never fires on it. The live post
     (_stream_post_content) and each stored matchup line
     (_stream_matchup_line) call it once per name; the final post
     (_stream_ended_content) shows the stored lines as they stand."""

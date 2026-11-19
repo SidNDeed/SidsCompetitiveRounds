@@ -35,7 +35,7 @@ Pure functions, no I/O.
 """
 import re
 
-_TEXT_BREAKS = re.compile(r"\r\n|[\r\v\f\x1c-\x1e\x85  ]")
+_TEXT_BREAKS = re.compile(r"\r\n|[\r\v\f\x1c-\x1e\x85\u2028\u2029]")
 _TEXT_URL = re.compile(r"(?<![0-9A-Za-z_])https?://[^\s<]*[^\s<.,:;\"')\]]", re.IGNORECASE)
 _TEXT_LINE_MARK = re.compile(r"([ \t]*)([#+-]|[0-9]+[.)])")
 _TEXT_ALWAYS = frozenset("\\*_~|`[]<>@")
@@ -86,12 +86,15 @@ def flat(text):
 
 def escape_name(text, limit=None, more="..."):
     """A name a person chose, one line, shown as typed (the bot's _escape_md)."""
-    one_line = re.sub(r"\r\n|[\n\r\v\f\x1c-\x1e\x85  ]", " ", str(text))
+    one_line = re.sub(r"\r\n|[\n\r\v\f\x1c-\x1e\x85\u2028\u2029]", " ", str(text))
     escaped = re.sub(r"([\\*_~|`\[\]<>@])", r"\\\1", one_line)
     escaped = re.sub(r"^(\s*)([#+-])", r"\1\\\2", escaped)
     escaped = re.sub(r"^(\s*\d+)([.)])", r"\1\\\2", escaped)
-    # A name is never a link: a zero-width space after every address
-    # scheme's colon, before the cut (the bot's _escape_md does the same).
+    # A name is never a link: a zero-width space after the colon of every
+    # scheme that is followed by a slash, before the cut (the bot's
+    # _escape_md does the same). Discord makes a link only of a scheme
+    # followed by ":/", so a "word:" with no slash after it (Re:Zero) is
+    # left as typed.
     escaped = re.sub(r"(?i)(?<![a-z0-9+.\-])([a-z][a-z0-9+.\-]*):(?=/)", "\\1:\u200b", escaped)
     if limit is None or len(escaped) <= limit:
         return escaped

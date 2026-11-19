@@ -327,13 +327,17 @@ RELAY_RAW_MAX = 200
 
 def older_bot_name(name) -> str:
     """The `sender_name` field, for a bot that predates the *_raw fields
-    (BOT-TEXT-ESCAPE-1). That bot shows this field only through its own name
-    escape, which backslash-escapes \\ * _ ~ | ` [ ] < > and a line-opening
-    mark but not @: so the field carries no backslash escape (that bot's
-    escape is the one pass), and keeps the neutralisation the field had
-    before -- < > as ( ), @everyone and @here without their @ -- so that bot
-    shows no mention form. One line, at most RELAY_NAME_MAX characters. A
-    bot that reads sender_name_raw never shows this field."""
+    (BOT-TEXT-ESCAPE-1). That bot shows this field on two paths. In its
+    markdown slots (the sent-reply line and the which-mail question) the
+    field passes that bot's own name escape, which backslash-escapes
+    \\ * _ ~ | ` [ ] < > and a line-opening mark but not @: so the field
+    carries no backslash escape (that bot's escape is the one pass). In the
+    mail picker's Button label, a plain slot that renders no markdown, the
+    field is shown raw, as a plain slot requires. On both paths the field
+    keeps the neutralisation it had before -- < > as ( ), @everyone and
+    @here without their @ -- so that bot shows no mention form. One line, at
+    most RELAY_NAME_MAX characters. A bot that reads sender_name_raw never
+    shows this field."""
     s = _dtext.flat(name).replace("<", "(").replace(">", ")")
     s = re.sub(r"@(everyone|here)", r"\1", s, flags=re.IGNORECASE)
     return s[:RELAY_NAME_MAX]
