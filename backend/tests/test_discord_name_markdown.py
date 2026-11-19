@@ -584,10 +584,12 @@ def _expect(name):
     from the bot's helper: every line break a space (a CRLF pair one space),
     each of \\ * _ ~ | ` [ ] < > @ after a backslash (@ since BOT-TEXT-ESCAPE-1
     stage 2), and a leading # - + or the dot of a leading 1. after a
-    backslash too."""
+    backslash too. Moved in stage 3: a zero-width space after every http: or
+    https: before a slash (a name is never a link)."""
     one = re.sub("\r\n", " ", name)
     one = "".join(" " if c in BREAKS else c for c in one)
     out = "".join("\\" + c if c in "\\*_~|`[]<>@" else c for c in one)
+    out = re.sub(r"(?i)(https?):(/)", lambda m: m.group(1) + ":​" + m.group(2), out)
     out = re.sub(r"^(\s*)([#+-])", lambda m: m.group(1) + "\\" + m.group(2), out)
     return re.sub(r"^(\s*\d+)([.)])", lambda m: m.group(1) + "\\" + m.group(2), out)
 

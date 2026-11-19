@@ -492,7 +492,20 @@ NAME = _lift(("_escape_md",))["_escape_md"]
 
 # -- the api's copy of the two helpers is the bot's, case for case --------------
 
-NAME_TEXTS = [c[1] for c in CASES] + CUT_TEXTS + ["@everyone", "<@123>", "a\r\nb", "  # x", "12) y", ""]
+# Names that hold an address (stage 3): the name helpers put a zero-width
+# space after every scheme's colon, so a name is never a link.
+ZW = "​"
+NAME_ADDRESS_CASES = [
+    ("http-at-start", "http://x.example", "http:" + ZW + "//x.example"),
+    ("https-in-middle", "see https://y.example now", "see https:" + ZW + "//y.example now"),
+    ("upper-case", "HTTPS://Z.EXAMPLE", "HTTPS:" + ZW + "//Z.EXAMPLE"),
+    ("mixed-case-one-slash", "HtTp:/one", "HtTp:" + ZW + "/one"),
+    ("two-addresses", "a http://b and https://c", "a http:" + ZW + "//b and https:" + ZW + "//c"),
+    ("address-with-marks", "[go](https://e.example/a_b)", "\\[go\\](https:" + ZW + "//e.example/a\\_b)"),
+    ("not-a-scheme", "httpx://a and http:x", "httpx://a and http:x"),
+]
+NAME_TEXTS = ([c[1] for c in CASES] + CUT_TEXTS + ["@everyone", "<@123>", "a\r\nb", "  # x", "12) y", ""]
+              + [c[1] for c in NAME_ADDRESS_CASES] + ["a" * 10 + "https://q.example", "x" * 37 + "HTTP://z"])
 
 
 @pytest.mark.parametrize("text", [c[1] for c in CASES] + CUT_TEXTS, ids=range(len(CASES) + len(CUT_TEXTS)))
@@ -528,6 +541,42 @@ def test_the_name_helper_escapes_a_mention_and_cuts_on_the_escaped_text():
         body = out[:-3] if out.endswith("...") else out
         assert (len(body) - len(body.rstrip("\\"))) % 2 == 0, (n, out)
     assert NAME("abc", 10) == "abc"
+
+
+# -- a name is never a link (stage 3: the scheme break is in both name helpers) --
+
+@pytest.mark.parametrize("text,want", [c[1:] for c in NAME_ADDRESS_CASES], ids=[c[0] for c in NAME_ADDRESS_CASES])
+def test_a_name_holding_an_address_is_never_a_link_in_either_helper(text, want):
+    assert NAME(text) == want
+    assert discord_text.escape_name(text) == want
+
+
+@pytest.mark.parametrize("text", ["a" * 10 + "https://q.example", "x" * 37 + "HTTP://z", "http://" * 9],
+                         ids=["middle", "edge", "many"])
+def test_the_scheme_break_holds_at_every_cut(text):
+    """The break is made before the cut: at every limit the result fits,
+    keeps no scheme followed by its slashes, and ends inside no pair."""
+    for helper in (NAME, discord_text.escape_name):
+        for n in range(0, len(text) + 12):
+            out = helper(text, n)
+            assert len(out) <= n, (n, out)
+            assert re.search(r"(?i)https?:/", out) is None, (n, out)
+            body = out[:-3] if out.endswith("...") else out
+            assert (len(body) - len(body.rstrip("\\"))) % 2 == 0, (n, out)
+
+
+def test_free_text_keeps_an_address_whole():
+    for helper in (ESC, discord_text.escape_text):
+        assert helper("see https://y.example now") == "see https://y.example now"
+        assert ZW not in helper("HTTP://Z http:/x")
+
+
+def test_the_scheme_break_control_fails_without_the_break():
+    """Failing-first control: a name helper without the break (its output
+    with the zero-width spaces taken out) fails every address case."""
+    for _id, text, want in NAME_ADDRESS_CASES:
+        if ZW in want:
+            assert NAME(text).replace(ZW, "") != want
 
 
 # -- A1 mail: the bot reads the raw value when the api serves it ---------------
@@ -751,7 +800,9 @@ def test_a_stream_post_name_follows_the_shared_name_rule():
     fn = _lift_api("main.py", ("_stream_md_escape",))["_stream_md_escape"]
     for s in NAME_TEXTS:
         assert fn(s) == discord_text.escape_name(discord_text.flat(s)), s
-    assert fn("[watch](https://evil.example)") == "\\[watch\\](https://evil.example)"
+    # moved in stage 3: the name helper now breaks the address scheme (a name is never a link)
+    assert fn("[watch](https://evil.example)") == "\\[watch\\](https:" + ZW + "//evil.example)"
+    assert fn("watch  HTTP://evil.example\nnow") == "watch HTTP:" + ZW + "//evil.example now"
 
 
 def _string_parts(tree):

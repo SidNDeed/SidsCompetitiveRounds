@@ -772,7 +772,8 @@ def _expect_reason(s):
     and each line written as _expect writes a name. That equals the free-text
     rule for every HOSTILE value -- none holds a bare address with a
     character the two rules treat differently."""
-    return "\n".join(_expect(line) for line in s.split("\n"))
+    # free text keeps an address whole: no scheme break, unlike a name (stage 3)
+    return "\n".join(_expect(line).replace("​", "") for line in s.split("\n"))
 
 
 def _field_literally(text, v, f):
