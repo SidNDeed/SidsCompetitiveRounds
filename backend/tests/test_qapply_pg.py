@@ -296,12 +296,35 @@ async def _game_state(env, lob, g):
                for r in await env.conn.fetch("SELECT * FROM players WHERE id = ANY($1::uuid[])", lob.pids)}
     ledger = sorted((slot[r["player_id"]], r["reason"], r["amount"]) for r in await env.conn.fetch(
         "SELECT player_id, reason, amount FROM gold_transactions WHERE reference_id = $1", str(m["id"])))
+
+    def by_slot(rows):
+        return sorted((slot[r["player_id"]], repr(sorted((k, v) for k, v in clean(r).items()
+                                                          if k not in ("reference_id", "nonce"))))
+                      for r in rows if r["player_id"] in slot)
+    cards = by_slot(await env.conn.fetch("SELECT * FROM ffa_match_cards WHERE match_id = $1", m["id"]))
+    offers = by_slot(await env.conn.fetch("SELECT * FROM ffa_card_offers WHERE match_id = $1", m["id"]))
+    achievements = by_slot(await env.conn.fetch(
+        "SELECT * FROM player_achievements WHERE player_id = ANY($1::uuid[])", lob.pids))
+    packs = by_slot(await env.conn.fetch(
+        "SELECT * FROM pc_packs WHERE source = 'earned' AND reference_id = $1", main._pc_earned_ref("ffa", m["id"])))
+    ladder = by_slot(await env.conn.fetch(
+        "SELECT * FROM title_ladder_progress WHERE player_id = ANY($1::uuid[])", lob.pids))
+    credits = by_slot(await env.conn.fetch(
+        "SELECT * FROM title_ladder_credits WHERE player_id = ANY($1::uuid[])", lob.pids))
     return {"match": clean(m), "winner": slot[m["winner_id"]], "seats": seats, "ratings": ratings,
-            "players": players, "ledger": ledger, "ended_at": m["ended_at"], "id": m["id"]}
+            "players": players, "ledger": ledger, "cards": cards, "offers": offers,
+            "achievements": achievements, "packs": packs, "ladder": ladder, "credits": credits,
+            "ended_at": m["ended_at"], "id": m["id"]}
 
 
 def test_a1_accept_writes_what_a_network_report_writes(monkeypatch):
     async def body(env):
+        # The earned pack, deterministically: a secret so the grant runs, a
+        # roll that always hits, and the signature check answering the
+        # signed form (the fixture's reports carry no signature).
+        monkeypatch.setattr(main, "MATCH_HMAC_SECRET", "qapply-a1-pack-roll")
+        monkeypatch.setattr(main, "_verify_ffa_hmac", lambda report: "v2")
+        monkeypatch.setattr(main._pc, "earned_pack_kind", lambda secret, mode, ref: "win")
         # Lobby B: game 2 by the network, 90 s after game 1 (the pace bound binds).
         lob_b = await played(env)
         await env.conn.execute("UPDATE ffa_matches SET ended_at = ended_at - interval '90 seconds',"
@@ -328,7 +351,9 @@ def test_a1_accept_writes_what_a_network_report_writes(monkeypatch):
         a2 = await _game_state(env, lob_a, 2)
         assert ans.body["match_id"] == str(a2["id"]), ("A1 match id", ans)
         assert a2["ended_at"] == anchor_a + (b2["ended_at"] - anchor_b), ("A1 replay clock", a2["ended_at"])
-        for k in ("match", "winner", "seats", "ratings", "players", "ledger"):
+        assert b2["packs"], ("A1 the network game granted its pack", b2["packs"])
+        for k in ("match", "winner", "seats", "ratings", "players", "ledger", "cards", "offers",
+                  "achievements", "packs", "ladder", "credits"):
             assert a2[k] == b2[k], ("A1 " + k, a2[k], b2[k])
         assert await status_of(env, qid) == "accepted"
     run_env(monkeypatch, body)
@@ -1648,3 +1673,39 @@ def test_m2_malformed_input_to_each_route_answers_its_table_sentence(monkeypatch
         assert (ans.status, ans.body) == (403, table["admin"]), ("list", ans)
         assert await tables(env) == before, "M2 nothing changed"
     run_env(monkeypatch, body)
+
+
+# ── M3: every effect a check is assigned is read by that check ────────────
+
+def _test_reads(test_name):
+    """The source of a test and of every module function it reaches."""
+    src = open(os.path.abspath(__file__), encoding="utf-8").read()
+    tree = ast.parse(src)
+    funcs = {n.name: n for n in tree.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
+    seen, todo = set(), [test_name]
+    while todo:
+        f = todo.pop()
+        if f in seen or f not in funcs:
+            continue
+        seen.add(f)
+        todo += [c.id for c in ast.walk(funcs[f]) if isinstance(c, ast.Name) and c.id in funcs]
+    return "\n".join(ast.get_source_segment(src, funcs[f]) for f in seen)
+
+
+def test_m3_each_check_reads_the_tables_its_effects_name():
+    import re
+    rows = []
+    with open(os.path.join(HERE, "qapply_effects.tsv"), encoding="utf-8") as f:
+        assert f.readline() == "id\ttables\tchecks\n"
+        for line in f:
+            eid, tbls, checks = line.rstrip("\n").split("\t")
+            rows.append((eid, tbls.split(","), checks.split(",")))
+    names = {n.name for n in ast.parse(open(os.path.abspath(__file__), encoding="utf-8").read()).body
+             if isinstance(n, ast.FunctionDef) and n.name.startswith("test_")}
+    for eid, tbls, checks in rows:
+        for check in checks:
+            (test,) = [n for n in names if n.startswith("test_%s_" % check.lower())][:1] or [None]
+            assert test is not None, (eid, check, "no such check")
+            src = _test_reads(test)
+            for t in tbls:
+                assert re.search(r"\b%s\b" % re.escape(t), src), (eid, check, test, "does not read", t)

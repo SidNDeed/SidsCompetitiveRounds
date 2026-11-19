@@ -1,0 +1,15 @@
+id	tables	checks
+E1	ffa_matches	A1
+E2	ffa_match_players	A1
+E3	ffa_match_cards	A1
+E4	ffa_card_offers	A1
+E5	ffa_match_players	A1
+E6	glicko_ratings_ffa	A1,A3
+E7	players	A1
+E8	players	A1
+E9	gold_transactions	A1
+E10	player_achievements,players,gold_transactions	A1
+E11	pc_packs	A1
+E12	title_ladder_progress,title_ladder_credits	A1
+E18	match_report_quarantine	A10,A11
+E19	admin_actions	A10,L1
