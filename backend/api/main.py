@@ -68585,6 +68585,113 @@ def _ffa_named_game_number(room_id: str | None) -> int | None:
     return int(tail)
 
 
+# ── The verifications of an FFA report, in one place (QAPPLY-1 FIX-1) ──────
+# Each check below is a verification submit_ffa_match makes of a report
+# between its hold sites and its payment. The body calls each at its own
+# place, with its own answer; _ffa_report_verify runs every one in the body's
+# order for the two callers that hold no request of their own: Credit and the
+# held list's flags. Neither holds a copy of a check, so a check changed here
+# changes all three. The signature (_verify_ffa_hmac) and the service-account
+# check (_assert_no_service_subject) are shared the same way, by name.
+# Each check answers None when the report passes it.
+
+def _ffa_check_participants(report) -> str | None:
+    """Two or more distinct players, with the winner and the reporter among them."""
+    steams = [p.steam_id for p in report.players]
+    if len(set(steams)) != len(steams) or len(steams) < 2:
+        return "players"
+    if report.winner_steam_id not in set(steams):
+        return "winner"
+    if report.reported_by_steam_id not in set(steams):
+        return "reporter"
+    return None
+
+
+def _ffa_check_room(report) -> str | None:
+    """The report names a room."""
+    return None if (report.photon_room_id or "").strip() else "room"
+
+
+def _ffa_check_accounts(report, id_by_steam) -> str | None:
+    """Every player of the report has a live account (id_by_steam is read
+    with deleted accounts left out)."""
+    return None if len(id_by_steam) == len(report.players) else "accounts"
+
+
+def _ffa_check_roster(report, members, id_by_steam) -> str | None:
+    """The report covers exactly the lobby's frozen roster, which is not
+    empty, and its reporter is one of the report's live players."""
+    member_set = set(members)
+    if (not member_set or set(id_by_steam.values()) != member_set
+            or report.reported_by_steam_id not in id_by_steam):
+        return "roster"
+    return None
+
+
+def _ffa_check_count(report, lobby, members) -> str | None:
+    """The report's player count is the lobby's."""
+    if len(report.players) != int(lobby["player_count"] or len(members)):
+        return "count"
+    return None
+
+
+def _ffa_check_slots(report, members, id_by_steam) -> str | None:
+    """Every player sits in the lobby's slot for them; the first steam id
+    that does not, or None."""
+    slot_by_pid = {pid: i for i, pid in enumerate(members)}
+    for p in report.players:
+        if slot_by_pid.get(id_by_steam[p.steam_id]) != p.slot:
+            return p.steam_id
+    return None
+
+
+def _ffa_check_game_limit(lobby) -> str | None:
+    """The lobby has room for one more game."""
+    if int(lobby["games_played"] or 0) >= FFA_MAX_GAMES_PER_LOBBY:
+        return "limit"
+    return None
+
+
+def _ffa_lobby_kills_capable(lobby) -> bool:
+    return bool(lobby["kills_tiebreak"]) if "kills_tiebreak" in lobby else False
+
+
+def _ffa_check_downgrade(canonical_form, lobby) -> str | None:
+    """A v1 signature is refused from a lobby whose roster signs v2."""
+    if canonical_form == "v1" and _ffa_lobby_kills_capable(lobby):
+        return "downgrade"
+    return None
+
+
+# The body's verifications, by name; the census test derives the body's set
+# from submit_ffa_match and compares it with this and with the runner.
+_FFA_REPORT_VERIFICATIONS = (
+    "_ffa_check_participants", "_ffa_check_room", "_ffa_check_accounts",
+    "_ffa_check_roster", "_ffa_check_count", "_ffa_check_slots",
+    "_ffa_score_shape_error", "_ffa_check_game_limit", "_ffa_check_downgrade",
+)
+
+
+def _ffa_report_verify(report, *, canonical_form, lobby, id_by_steam) -> str | None:
+    """Every check of _FFA_REPORT_VERIFICATIONS, in the body's order, on one
+    report and the lobby row as read; the first failing word, or None. Pure:
+    it reads nothing and writes nothing, so the list's flags call it as
+    they are and Credit calls it under its locks."""
+    members = list(lobby["member_ids"] or [])
+    word = (_ffa_check_participants(report) or _ffa_check_room(report)
+            or _ffa_check_accounts(report, id_by_steam)
+            or _ffa_check_roster(report, members, id_by_steam)
+            or _ffa_check_count(report, lobby, members))
+    if word:
+        return word
+    if _ffa_check_slots(report, members, id_by_steam) is not None:
+        return "slots"
+    if _ffa_score_shape_error(report, _ffa_lobby_config(lobby)["score_target"],
+                              len(report.players)):
+        return "shape"
+    return _ffa_check_game_limit(lobby) or _ffa_check_downgrade(canonical_form, lobby)
+
+
 def _ffa_with_settled(progress: dict, prior, named) -> dict:
     """The same progress, plus the number the recorded row holds -- but only
     when the report NAMED that number.
@@ -69366,14 +69473,15 @@ async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSe
     except (ValueError, TypeError):
         raise HTTPException(400, "Invalid lobby_id format")
     steams = [p.steam_id for p in report.players]
-    if len(set(steams)) != len(steams) or len(steams) < 2:
+    _who = _ffa_check_participants(report)
+    if _who == "players":
         raise HTTPException(400, "Need at least two distinct players")
-    if report.winner_steam_id not in set(steams):
+    if _who == "winner":
         raise HTTPException(400, "Winner is not among the players")
-    if report.reported_by_steam_id not in set(steams):
+    if _who == "reporter":
         raise HTTPException(400, "Reporter is not a participant")
     await _assert_no_service_subject(db, affected_steam_ids=steams)
-    if not (report.photon_room_id or "").strip():
+    if _ffa_check_room(report):
         raise HTTPException(400, "photon_room_id is required")
     # §6 casual path: the ranked AUTHORITY is the LOBBY ROW alone, decided
     # below the lobby lock as `rated = _lobby_ranked`; the report's is_ranked
@@ -69416,7 +69524,7 @@ async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSe
             Player.steam_id.in_(steams), Player.deleted_at.is_(None))
     )).all()
     id_by_steam = {r.steam_id: r.id for r in prows}
-    if len(id_by_steam) != len(steams):
+    if _ffa_check_accounts(report, id_by_steam):
         raise HTTPException(404, "One or more players not registered")
     # V3 P3: a journaled payload settles only while its window is open and it
     # is still the report the class order chooses, re-checked under the lobby
@@ -69457,7 +69565,7 @@ async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSe
     # duplicate comparison does not take this flag: it takes
     # kills_in_canonical, because a kills difference is settlement-deciding
     # wherever kills are signed and not only where they break a tie.
-    _lobby_kills_capable = bool(lobby["kills_tiebreak"]) if "kills_tiebreak" in lobby else False
+    _lobby_kills_capable = _ffa_lobby_kills_capable(lobby)
     kills_break_ties = kills_in_canonical and _lobby_kills_capable
     # Duplicate-room replay FIRST — before the status/shape/limit branches
     # below, every one of which quarantines (Codex Aug-3 r4 find 1: an honest
@@ -69515,10 +69623,7 @@ async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSe
         #   * both bind -> the lifecycle refusal, which does the same. Round 2
         #     ignored the capture's answer here, so a report that hit the
         #     pending bound was answered 409 "kept" with nothing kept.
-        _roster_bound = (member_set
-                         and reported_ids == member_set
-                         and report.reported_by_steam_id in id_by_steam)
-        if not _roster_bound:
+        if _ffa_check_roster(report, members, id_by_steam):
             raise FfaReportRefusal(403, "Report must cover exactly the lobby roster",
                                    _progress)
         _closed_shape = _ffa_score_shape_error(report, _score_target,
@@ -69558,17 +69663,17 @@ async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSe
             db, report=report, lobby_uuid=lobby_uuid, id_by_steam=id_by_steam,
             reason="ffa_lobby_no_roster", why="lobby row carries no member_ids",
             detail="Lobby has no recorded roster", progress=_progress)
-    if reported_ids != member_set:
+    # (The reporter is a live player of the report here: the participant and
+    # account checks above refused every other report.)
+    if _ffa_check_roster(report, members, id_by_steam):
         raise FfaReportRefusal(403, "Report must cover exactly the lobby roster",
                                _progress)
-    if len(report.players) != int(lobby["player_count"] or len(members)):
+    if _ffa_check_count(report, lobby, members):
         raise FfaReportRefusal(403, "Report player count does not match the lobby",
                                _progress)
-    slot_by_pid = {pid: i for i, pid in enumerate(members)}
-    for p in report.players:
-        pid = id_by_steam[p.steam_id]
-        if slot_by_pid.get(pid) != p.slot:
-            raise FfaReportRefusal(403, f"Slot mismatch for {p.steam_id}", _progress)
+    _slot_bad = _ffa_check_slots(report, members, id_by_steam)
+    if _slot_bad is not None:
+        raise FfaReportRefusal(403, f"Slot mismatch for {_slot_bad}", _progress)
     # Engine invariants (review find 2): the winner holds the unique round
     # maximum, and a complete game of this lobby ends at its frozen score
     # target — or at the module default, which is what a client that missed
@@ -69644,7 +69749,7 @@ async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSe
     # Rate ceiling: a lobby's games are real matches taking minutes each. This
     # bounds a compromised client's fabrication rate even inside a live lobby
     # (a full server-issued per-game nonce is the next hardening step).
-    if int(lobby["games_played"] or 0) >= FFA_MAX_GAMES_PER_LOBBY:
+    if _ffa_check_game_limit(lobby):
         # Status-checked like every other terminal refusal here: round 2 threw
         # the capture's answer away, so a report arriving once the per-group
         # pending bound was full got a 409 that said "kept" over nothing kept.
@@ -69667,7 +69772,7 @@ async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSe
     # capture itself runs in its own transaction after a rollback, so no lock
     # is held across it. Quarantined, not dropped, so the vanishing-rare
     # honest case (mid-sitting DLL downgrade) stays admin-recoverable.
-    if canonical_form == "v1" and _lobby_kills_capable:
+    if _ffa_check_downgrade(canonical_form, lobby):
         # 403, and status-checked for the same reason the 409s are: the client's
         # outbox spends the report either way, so an answer that depends on the
         # capture having happened must ask whether it did.
@@ -74955,8 +75060,8 @@ _QAPPLY_TEXTS = {
     "shape": "The report's score is not a complete game, so it cannot be applied or credited.",
     "incomplete": "The stored report is not a complete game report, so it cannot be applied.",
     "leave_figure": "The report lacks a leaver's score at the time they left, so it cannot be applied or credited.",
-    "limit": "The lobby already holds its maximum number of games, so this game cannot be applied.",
-    "downgrade": "The report uses an old signature this lobby does not accept, so it cannot be applied.",
+    "limit": "The lobby already holds its maximum number of games, so this game cannot be applied or credited.",
+    "downgrade": "The report uses an old signature this lobby does not accept, so it cannot be applied or credited.",
     "reporter": "The player who sent this report could not report this game, so it cannot be applied or credited.",
     "recorded": "This game is already recorded; there is nothing to apply or credit. Discard this report.",
     "other_lobby": "This game's room is recorded under another lobby; discard this report.",
@@ -74985,6 +75090,14 @@ _QAPPLY_TEXTS = {
     "claimed": "This game was already applied or credited from another held report; nothing was changed.",
     "sibling_credited": ("Another held report of this lobby was credited as game {g}; credit this one only "
                          "if it is a different game."),
+}
+
+# Which sentence each word of _ffa_report_verify carries in Credit and in the
+# list's flags.
+_QAPPLY_CHECK_TEXT = {
+    "players": "incomplete", "winner": "incomplete", "reporter": "reporter", "room": "incomplete",
+    "accounts": "account", "roster": "roster", "count": "roster", "slots": "roster",
+    "shape": "shape", "limit": "limit", "downgrade": "downgrade",
 }
 
 # Which sentence a refusal of the body's capture helper carries under the
@@ -75078,7 +75191,7 @@ _QAPPLY_SQL_HELD = """
 """
 # The lobby as the read form sees it, with no lock.
 _QAPPLY_SQL_LOBBY_READ = """
-    SELECT l.id, l.status, l.created_at, l.games_played, l.readmit_v1,
+    SELECT l.*,
            (SELECT COALESCE(MAX(m.game_number), 0) FROM ffa_matches m WHERE m.lobby_id = l.id) AS highest
       FROM ffa_lobbies l
      WHERE l.id = CAST(:lid AS uuid)
@@ -75291,6 +75404,21 @@ async def _qapply_verdict(db, row, body) -> dict:
         return no("lobby_open")
     if f"lobby_{lobby['status']}" not in _QAPPLY_SERVABLE_REASONS:
         return no("lobby_state")
+    # The verifications Credit makes, in their read form: the signature, the
+    # service accounts, then _ffa_report_verify on the live accounts.
+    canonical = _verify_ffa_hmac(report)
+    if not canonical:
+        return no("unsigned")
+    steams = [p.steam_id for p in report.players]
+    try:
+        await _assert_no_service_subject(db, affected_steam_ids=steams)
+    except HTTPException:
+        return no("service")
+    prows = (await db.execute(text(_QAPPLY_SQL_LIVE_PLAYERS), {"sids": steams})).all()
+    word = _ffa_report_verify(report, canonical_form=canonical, lobby=lobby,
+                              id_by_steam={r.steam_id: r.id for r in prows})
+    if word is not None:
+        return no(_QAPPLY_CHECK_TEXT[word])
     expected = max(int(lobby["games_played"] or 0), int(lobby["highest"] or 0)) + 1
     room = (report.photon_room_id or "")[:64]
     tail = _ffa_room_game_no(room)
@@ -75404,20 +75532,19 @@ async def _qapply_credit(db, row, report, *, actor: str, note: str) -> dict:
                                     {"lid": lobby_uuid})).scalar() or 0)
     expected = max(int(lobby["games_played"] or 0), highest) + 1
     steams = [p.steam_id for p in report.players]
+    try:
+        await _assert_no_service_subject(db, affected_steam_ids=steams)
+    except HTTPException as ex:
+        raise _QapplyRefused(ex.status_code, _QAPPLY_TEXTS["service"], {})
     prows = (await db.execute(text(_QAPPLY_SQL_LIVE_PLAYERS), {"sids": steams})).all()
     id_by_steam = {r.steam_id: r.id for r in prows}
-    if len(id_by_steam) != len(steams) or len(set(steams)) != len(steams):
-        raise _QapplyRefused(409, _QAPPLY_TEXTS["account"], {})
+    # Every verification the body makes of the report, in the body's order,
+    # under the lobby lock taken above (_ffa_report_verify; no copy here).
+    word = _ffa_report_verify(report, canonical_form=canonical, lobby=lobby, id_by_steam=id_by_steam)
+    if word is not None:
+        raise _QapplyRefused(409, _QAPPLY_TEXTS[_QAPPLY_CHECK_TEXT[word]], {})
     reported_ids = set(id_by_steam.values())
-    members = list(lobby["member_ids"] or [])
-    if (not members or reported_ids != set(members)
-            or report.reported_by_steam_id not in id_by_steam
-            or len(report.players) != int(lobby["player_count"] or len(members))
-            or any(members.index(id_by_steam[p.steam_id]) != p.slot for p in report.players)):
-        raise _QapplyRefused(409, _QAPPLY_TEXTS["roster"], {})
     _cfg = _ffa_lobby_config(lobby)
-    if _ffa_score_shape_error(report, _cfg["score_target"], len(report.players)):
-        raise _QapplyRefused(409, _QAPPLY_TEXTS["shape"], {})
     room = (report.photon_room_id or "")[:64]
     tail = _ffa_room_game_no(room)
     named = _ffa_named_game_number(room)
@@ -75448,7 +75575,7 @@ async def _qapply_credit(db, row, report, *, actor: str, note: str) -> dict:
     # seat rules (_asm_report_rules, whose reporter refusals raise here
     # without a capture).
     kills_in_canonical = canonical == "v2"
-    kills_break_ties = kills_in_canonical and bool(lobby.get("kills_tiebreak"))
+    kills_break_ties = kills_in_canonical and _ffa_lobby_kills_capable(lobby)
 
     def _place_key(p) -> tuple:
         return (p.rounds_won, p.points_total, p.kills if kills_break_ties else 0)

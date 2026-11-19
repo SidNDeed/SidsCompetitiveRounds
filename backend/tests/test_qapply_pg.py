@@ -1314,3 +1314,136 @@ def test_f1_a_network_report_to_a_closed_lobby_settles_nothing(monkeypatch):
         assert (ans.status, ans.body) == (409, T["lobby_open"]), ("F1 open lobby", ans)
         assert "once the lobby has closed" in T["lobby_open"]
     run_env(monkeypatch, body)
+
+
+# ── F2: Credit pays only a report the body's own verifications pass ───────
+# The verifications are the _ffa_check_* functions and _ffa_score_shape_error;
+# the body calls each at its own place, and Credit and the list call
+# _ffa_report_verify, which runs them all.
+
+OUTSIDER = str(cf_asm.STEAM_BASE + 999_777)
+
+
+def _calls_in(fn_name):
+    (fn,) = [n for n in ast.walk(_tree()) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+             and n.name == fn_name]
+    return {c.func.id for c in ast.walk(fn) if isinstance(c, ast.Call) and isinstance(c.func, ast.Name)}
+
+
+def _checks_called(fn_name):
+    return {n for n in _calls_in(fn_name) if n.startswith("_ffa_check_") or n == "_ffa_score_shape_error"}
+
+
+def test_f2_census_credit_and_the_list_make_the_bodys_verifications():
+    defined = {n.name for n in ast.walk(_tree()) if isinstance(n, ast.FunctionDef)
+               and n.name.startswith("_ffa_check_")} | {"_ffa_score_shape_error"}
+    body = _checks_called("submit_ffa_match")
+    runner = _checks_called("_ffa_report_verify")
+    assert body == defined, ("every check is one the body makes", sorted(defined ^ body))
+    assert runner == body, ("Credit's verifications are the body's", sorted(runner ^ body))
+    assert set(main._FFA_REPORT_VERIFICATIONS) == body
+    for fn in ("_qapply_credit", "_qapply_verdict"):
+        calls = _calls_in(fn)
+        assert "_ffa_report_verify" in calls, fn
+        assert not (_checks_called(fn)), ("no copy of a check", fn, _checks_called(fn))
+        src = ast.get_source_segment(main_src(), [n for n in ast.walk(_tree())
+                                                   if getattr(n, "name", None) == fn][0])
+        for copied in ("FFA_MAX_GAMES_PER_LOBBY", "player_count"):
+            assert copied not in src, ("no copy of a check's rule", fn, copied)
+    # The signature and the service-account check: one function each, called
+    # by the body and on Credit's path.
+    for shared in ("_verify_ffa_hmac", "_assert_no_service_subject"):
+        assert shared in _calls_in("submit_ffa_match"), shared
+        assert shared in _calls_in("_qapply_credit"), shared
+
+
+def main_src():
+    return open(MAIN_SRC, encoding="utf-8").read()
+
+
+async def _f2_parts(env):
+    lob = await played(env)
+    rep = await env.report_req(lob, 2, res(lob))
+    row = dict(await env.lobby_row(lob.lid))
+    ids = {r["steam_id"]: r["id"] for r in await env.conn.fetch(
+        "SELECT id, steam_id FROM players WHERE id = ANY($1::uuid[])", lob.pids)}
+    return lob, rep, row, ids
+
+
+def _f2_variants(rep, lobby, ids):
+    p = list(rep.players)
+
+    def players(ps):
+        return rep.model_copy(update={"players": ps})
+    swapped = [p[1].model_copy(update={"slot": p[0].slot}), p[0].model_copy(update={"slot": p[1].slot})] + p[2:]
+    zero = [x.model_copy(update={"rounds_won": 0}) for x in p]
+    one_gone = dict(list(ids.items())[1:])
+    stranger = list(lobby["member_ids"])
+    stranger[-1] = uuid.uuid4()
+    v2 = "v2"
+    return {
+        "players": (players([p[0], p[0]] + p[2:]), v2, lobby, ids),
+        "winner": (rep.model_copy(update={"winner_steam_id": OUTSIDER}), v2, lobby, ids),
+        "reporter": (rep.model_copy(update={"reported_by_steam_id": OUTSIDER}), v2, lobby, ids),
+        "room": (rep.model_copy(update={"photon_room_id": "  "}), v2, lobby, ids),
+        "accounts": (rep, v2, lobby, one_gone),
+        "roster": (rep, v2, dict(lobby, member_ids=stranger), ids),
+        "count": (rep, v2, dict(lobby, player_count=len(p) + 1), ids),
+        "slots": (players(swapped), v2, lobby, ids),
+        "shape": (players(zero), v2, lobby, ids),
+        "limit": (rep, v2, dict(lobby, games_played=main.FFA_MAX_GAMES_PER_LOBBY), ids),
+        "downgrade": (rep, "v1", dict(lobby, kills_tiebreak=True), ids),
+    }
+
+
+def test_f2_each_verification_refuses_its_report_in_the_runner(monkeypatch):
+    async def body(env):
+        lob, rep, row, ids = await _f2_parts(env)
+        assert main._ffa_report_verify(rep, canonical_form="v2", lobby=dict(row, kills_tiebreak=True),
+                                       id_by_steam=ids) is None, "the base report passes"
+        got = {w: main._ffa_report_verify(r, canonical_form=c, lobby=lb, id_by_steam=i)
+               for w, (r, c, lb, i) in _f2_variants(rep, row, ids).items()}
+        assert got == {w: w for w in got}, got
+        assert set(got) == set(main._QAPPLY_CHECK_TEXT), "every word has its sentence"
+    run_env(monkeypatch, body)
+
+
+F2_DB = ("accounts", "roster", "count", "slots", "shape", "limit", "downgrade")
+
+
+@pytest.mark.parametrize("word", F2_DB)
+def test_f2_credit_refuses_a_held_row_a_verification_fails_and_writes_nothing(word, monkeypatch):
+    async def body(env):
+        lob, qid = await closed_held(env)
+        await later_for(env, lob)
+        q = uuid.UUID(qid)
+        if word == "accounts":
+            await env.conn.execute("UPDATE players SET deleted_at = now() WHERE id = $1", lob.pids[3])
+        elif word == "roster":
+            await env.conn.execute("UPDATE ffa_lobbies SET member_ids[4] = $2 WHERE id = $1",
+                                   lob.lid, lob.pids[0])
+        elif word == "count":
+            await env.conn.execute("UPDATE ffa_lobbies SET player_count = 5 WHERE id = $1", lob.lid)
+        elif word == "slots":
+            await env.conn.execute(
+                "UPDATE match_report_quarantine SET payload = jsonb_set(jsonb_set(payload,"
+                " '{players,0,slot}', '1'), '{players,1,slot}', '0') WHERE id = $1", q)
+        elif word == "shape":
+            await env.conn.execute(
+                "UPDATE match_report_quarantine SET payload = jsonb_set(payload, '{players}',"
+                " (SELECT jsonb_agg(jsonb_set(e, '{rounds_won}', '0')) FROM jsonb_array_elements(payload->'players') e))"
+                " WHERE id = $1", q)
+        elif word == "limit":
+            await env.conn.execute("UPDATE ffa_lobbies SET games_played = $2 WHERE id = $1",
+                                   lob.lid, main.FFA_MAX_GAMES_PER_LOBBY)
+        elif word == "downgrade":
+            await env.conn.execute("UPDATE ffa_lobbies SET kills_tiebreak = true WHERE id = $1", lob.lid)
+            monkeypatch.setattr(main, "_verify_ffa_hmac", lambda report: "v1")
+        before = await tables(env)
+        ans = await credit(env, qid)
+        assert (ans.status, ans.body) == (409, T[main._QAPPLY_CHECK_TEXT[word]]), (word, ans)
+        assert await tables(env) == before, (word, "nothing written")
+        assert await status_of(env, qid) == "pending"
+        # The list's flag agrees (M1: the same verifications, read form).
+        assert (await listing(env))[qid]["can_credit"] is False, word
+    run_env(monkeypatch, body)
