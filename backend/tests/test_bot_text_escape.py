@@ -445,3 +445,32 @@ def test_a_thread_status_change_shows_the_comment_as_typed():
 def test_a_thread_comment_shows_the_comment_as_typed():
     text = _thread_post({"event_type": "comment", "bug_number": 9, "actor_name": "P", "comment": TYPED})
     assert text == "**P:** " + SHOWN
+
+
+def test_a_ban_notice_shows_the_reason_as_typed():
+    channel = _Sink()
+
+    class _Resp:
+        status = 200
+
+        async def json(self):
+            return {"bans": [{"id": "b2", "steam_id": "76561198000000001", "display_name": "N",
+                              "reason": TYPED, "banned_by_steam_id": "76561198000000002"}]}
+
+    class _Get:
+        async def __aenter__(self):
+            return _Resp()
+
+        async def __aexit__(self, *a):
+            return False
+
+    import datetime as _dt
+    ns = _lift(("poll_new_bans", "_ban_end_line", "_escape_text"), HELPER_PARTS + ("_BAN_END_LINE_UNREAD",), {
+        "discord": _discord(), "datetime": _dt.datetime, "http_session": types.SimpleNamespace(get=lambda *a, **k: _Get()),
+        "API_SECRET_KEY": "k", "API_BASE_URL": "http://api", "ADMIN_CHANNEL_ID": 3,
+        "aiohttp": types.SimpleNamespace(ClientTimeout=lambda **k: None),
+        "bot": types.SimpleNamespace(get_channel=lambda i: channel),
+        "_last_ban_id_posted": "b1", "_ban_poller_initialized": True})
+    _run(ns["poll_new_bans"]())
+    (embed,) = channel.sent
+    assert "\nReason: **" + SHOWN + "**\n" in embed.description, embed.description

@@ -9731,7 +9731,7 @@ async def poll_new_bans():
                 title="🔨 Player banned (mod-wide)",
                 description=(
                     f"**{discord.utils.escape_markdown(str(name))}** (`{b['steam_id']}`)\n"
-                    f"Reason: **{b.get('reason') or 'violation'}**\n"
+                    f"Reason: **{_escape_text(b.get('reason') or 'violation')}**\n"
                     f"By: `{b.get('banned_by_steam_id') or '—'}`"
                     + (f"\n{end_line}" if end_line else "")
                 ),
