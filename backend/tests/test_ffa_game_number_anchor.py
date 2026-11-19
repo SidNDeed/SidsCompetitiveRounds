@@ -1583,7 +1583,7 @@ def test_the_closed_lobby_capture_gate_reads_the_same_win_invariant():
     `max_rounds == _score_target` here would refuse to KEEP exactly the
     config-skew report the shape rule now settles (#279/#432)."""
     src = _endpoint_src()
-    block = src[src.index("_roster_bound = "):src.index('detail="Lobby is not active"')]
+    block = src[src.index("if _ffa_check_roster(report, members, id_by_steam):"):src.index('detail="Lobby is not active"')]
     assert "_ffa_score_shape_error" in block
     assert "max_rounds == _score_target" not in block
 
@@ -2192,7 +2192,7 @@ def test_a_closed_lobbys_unbound_report_is_not_answered_as_a_lifecycle_refusal()
     src = _endpoint_src()
     blk = src[src.index('if lobby["status"] != "active":'):
               src.index("# Roster validation")]
-    assert "_roster_bound" in blk
+    assert "_ffa_check_roster(report, members, id_by_steam)" in blk
     assert 'raise FfaReportRefusal(403, "Report must cover exactly the lobby roster"' in blk
     assert blk.count("_ffa_record_and_refuse") == 2
     assert "score_shape_mismatch" in blk
