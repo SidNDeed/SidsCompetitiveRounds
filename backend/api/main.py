@@ -78710,6 +78710,9 @@ def _stream_mode_label(candidate: dict) -> str:
     return mode
 
 
+_STREAM_MATCHUP_NAMES_MAX = 150    # the names of one stored matchup line, escaped
+
+
 def _stream_matchup_line(candidate: dict | None) -> str:
     """One display line identifying a watched matchup — names + elo + mode,
     deliberately NO score (a score change must not mint a second entry for
@@ -78730,11 +78733,22 @@ def _stream_matchup_line(candidate: dict | None) -> str:
     if len(names) == 2:
         vs = f"{_nm(0)} vs {_nm(1)}"
     else:
-        vs = ", ".join(_nm(i) for i in range(len(names))) or "?"
+        # Whole names only, within a budget on the ESCAPED text: a plain
+        # slice of the escaped line could end inside an escape pair or a
+        # bold pair (BOT-TEXT-ESCAPE-1). Two names always fit (each is cut
+        # to 24 typed characters before its one escape).
+        parts = []
+        for i in range(len(names)):
+            part = _nm(i)
+            if parts and len(", ".join(parts + [part])) > _STREAM_MATCHUP_NAMES_MAX:
+                parts.append(f"+{len(names) - i} more")
+                break
+            parts.append(part)
+        vs = ", ".join(parts) or "?"
     line = f"{vs} - {mode}"
     if candidate.get("is_tournament"):
         line = "🏆 " + line
-    return line[:200]
+    return line
 
 
 def _stream_md_escape(s: str) -> str:
@@ -78744,8 +78758,11 @@ def _stream_md_escape(s: str) -> str:
     "[watch](https://evil)" renders no masked link and no mention
     (AllowedMentions suppresses pings, not hyperlinks; review F10); keeps the
     name on one line, so it cannot forge an embed line (round-2 finding 5);
-    and puts a zero-width space after every http: or https: scheme, so
-    Discord's auto-linker never fires on the name."""
+    and puts a zero-width space after every address scheme's colon, so
+    Discord's auto-linker never fires on the name. The live post
+    (_stream_post_content) and each stored matchup line
+    (_stream_matchup_line) call it once per name; the final post
+    (_stream_ended_content) shows the stored lines as they stand."""
     return _dtext.escape_name(_dtext.flat(s))
 
 
@@ -83176,11 +83193,14 @@ async def mail_report(message_id: str, req: _MailReportReq, request: Request,
                 "sender_id": str(row["sender_id"]), "sender_steam_id": row["sender_steam_id"],
                 "sender_name": row["sender_name"], "sent_at": _mail_iso(row["created_at"]),
                 "reason": reason or None}
+    # The body keeps its lines: it passes the text helper once (cut on the
+    # escaped text), then each of its lines is quoted (BOT-TEXT-ESCAPE-1).
+    quoted_body = "\n".join("> " + ln for ln in _dtext.escape_text(row["body"] or "", 300).split("\n"))
     post = (f"\N{INCOMING ENVELOPE} **Mail report** — "
             f"**{_dtext.escape_name(row['sender_name'] or '?', 64)}** (`{row['sender_steam_id']}`)"
             f" reported by **{_dtext.escape_name(me.get('display_name') or '?', 64)}**\n"
             f"Subject: {_dtext.escape_text(_dtext.flat(row['subject']), 120)}\n"
-            f"> {_dtext.escape_text(_dtext.flat(row['body']), 300)}\n"
+            f"{quoted_body}\n"
             f"Reason: {_dtext.escape_text(_dtext.flat(reason), 200) or '(none given)'}")
     case_id, _inserted = await _mail_open_case(
         db, kind="mail_report", subject_player_id=row["sender_id"], reporter_id=me["id"],

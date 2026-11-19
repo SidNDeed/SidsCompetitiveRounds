@@ -1153,6 +1153,23 @@ async def _build_current_response(db: AsyncSession, t: Tournament, caller_player
 
 # ── Lifecycle ─────────────────────────────────────────────────────
 
+KICK_NAMES_MAX = 1500   # the lock post's list of removed players, escaped
+
+
+def _kicked_names_text(names: list) -> str:
+    """The removed players' names for the lock post: each passes the shared
+    name helper once (64 characters of escaped text), whole names only
+    within KICK_NAMES_MAX characters, then how many more, so the post stays
+    inside one Discord message (BOT-TEXT-ESCAPE-1)."""
+    shown = []
+    for i, n in enumerate(names):
+        part = _dtext.escape_name(n, 64) if n else "unknown"
+        if shown and len(", ".join(shown + [part])) > KICK_NAMES_MAX:
+            return ", ".join(shown) + f" and {len(names) - i} more"
+        shown.append(part)
+    return ", ".join(shown)
+
+
 async def lock_tournament(db: AsyncSession, t: Tournament, force: bool = False) -> bool:
     """Transition voting -> locked. For sync tournaments the lock requires
     min_players votes agreeing on a SINGLE offered slot (item 3 — voting is
@@ -1444,7 +1461,7 @@ async def lock_tournament(db: AsyncSession, t: Tournament, force: bool = False) 
                     # Each typed name through the shared name helper, once
                     # (BOT-TEXT-ESCAPE-1): channel posts go out with user
                     # mentions allowed, and every < and @ is escaped.
-                    f"{', '.join(_dtext.escape_name(n, 64) if n else 'unknown' for n in kicked_names)}. "
+                    f"{_kicked_names_text(list(kicked_names))}. "
                     f"No penalty; sign up again next week!")
             except Exception as e:
                 print(f"[TOURNAMENT] kick feed post failed: {e}")
