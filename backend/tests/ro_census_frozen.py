@@ -3767,13 +3767,18 @@ FROZEN_COUNT = (COARSE_COUNT + COMPLETE_COUNT + R10_COUNT + R10_MERGE_COUNT
 
 
 # Hand edit for MDPL, the account deletion's bound (the integrator's rulings of 17 Nov 2026: 09:13:52Z,
-# question 3, for main.py's eight forms, and 11:01:25Z for all 22): the 22 forms the lane adds to the
-# census files, 5 coarse and 17 complete, each row below with its file:line at 1b1ecbe6 and its reason.
-# main.py's eight are the deletion bound's own (three docstrings, the event listener's two imports, and
-# the attempt's armed session methods put on and taken back); closed_walk.py's fourteen are MDPL class
-# C's signal-class route, each reading a class or a module the walk already resolved and comparing it.
+# question 3, for main.py's eight forms, and 11:01:25Z for those 22; and its ruling of 19 Nov 2026
+# 07:50:20Z for the a1 test file's three): the 25 forms the lane adds to the census files, 5 coarse and
+# 20 complete, each row below with its file:line and its reason. The 22 of main.py and closed_walk.py
+# carry their file:line at 1b1ecbe6; the a1 test file's three carry theirs as of the commit that adds
+# them (601c442a's lines, which that commit does not move). main.py's eight are the deletion bound's own
+# (three docstrings, the event listener's two imports, and the attempt's armed session methods put on
+# and taken back); closed_walk.py's fourteen are MDPL class C's signal-class route, each reading a class
+# or a module the walk already resolved and comparing it; the a1 test file's three are MDPL class C's
+# relock controls, each reading from main, by a name the test fixes, a function whose source text is
+# parsed or a class that is checked, and calling neither.
 # None reaches an opener, a DSN, a role or an identity statement. Frozen by hand, not by a
-# re-derivation; FROZEN_COUNT is 882.
+# re-derivation; FROZEN_COUNT is 885.
 MDPL_FROZEN = {
     'api/main.py': [
         # main.py:45846, the docstring of _deletion_arm_every_statement, prose matched by the word PostgreSQL;
@@ -3899,9 +3904,23 @@ MDPL_FROZEN = {
         # closed_walk.py:552, the class's own members, compared to its frozen statement's functions
         ('dynamic', 'vars(obj)'),
     ],
+    'tests/test_a1_identity_formation.py#complete': [
+        # test_a1_identity_formation.py:4232, `made = getattr(main, cls)` in the test of a third class
+        #  constructed in the walked span: the class named by that test's parametrize list (_NotOwnSeat,
+        #  _DeletionRowHeld), checked to be a plain Exception subclass; it is not constructed
+        ('dynamic', 'getattr(main, cls)'),
+        # test_a1_identity_formation.py:4231, in the same test: the source text of the functions named in
+        #  the fixed tuple _RELOCK_NAMES. One of two MORE such reads, at 4231 and 4259, beside the two this
+        #  key already holds from earlier blocks (lines 4189 and 4876); not a repeat of those
+        ('dynamic', 'getattr(main, n)'),
+        # test_a1_identity_formation.py:4259, in the test that a changed signal row refuses: the source text
+        #  of the functions named in the fixed tuple _RELOCK_NAMES. The second of the two MORE such reads
+        #  (4231 and 4259), not a repeat of the two from earlier blocks (lines 4189 and 4876)
+        ('dynamic', 'getattr(main, n)'),
+    ],
 }
 MDPL_COARSE_COUNT = 5
-MDPL_COMPLETE_COUNT = 17
+MDPL_COMPLETE_COUNT = 20
 MDPL_COUNT = MDPL_COARSE_COUNT + MDPL_COMPLETE_COUNT
 for _k, _v in MDPL_FROZEN.items():
     FROZEN[_k] = list(FROZEN.get(_k, [])) + list(_v)

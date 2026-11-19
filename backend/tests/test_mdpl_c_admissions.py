@@ -24,9 +24,9 @@ closed_walk.py (the integrator's rulings of 17 Nov 2026: 09:13:52Z, 10:05:30Z, 1
      object main does not bind to the name (b); the class under another qualified name (c); a member of the frozen
      statement taken off (d); a member whose code differs in its first line alone (e), in its file alone (f), or a
      function on the real code under another qualified name (g).
-5. r7's READ-ONLY CENSUS (the ruling of 11:01:25Z): the 22 forms of ro_census_frozen.MDPL_FROZEN.
-   - main.py and closed_walk.py census clean against the freeze;
-   - the freeze less the block flags exactly the block's 22 forms;
+5. r7's READ-ONLY CENSUS (rulings of 11:01:25Z and 19 Nov 07:50:20Z): the 25 forms of ro_census_frozen.MDPL_FROZEN.
+   - main.py, closed_walk.py and test_a1_identity_formation.py census clean against the freeze;
+   - the freeze less the block flags exactly the block's 25 forms;
    - a near variant planted in the same block stays flagged, one form each: one more __qualname__ read, a new
      dunder read and vars() of another object in the signal route, and one more setattr in the attempt's
      arming; a plain statement at the same place, its twin, flags nothing.
@@ -617,13 +617,13 @@ def test_the_frozen_lines_and_uses_are_mains(main_mod):
 
 
 # ---------------------------------------------------------------------------
-# 5. r7's read-only census (the ruling of 17 Nov 11:01:25Z): the 22 forms of MDPL_FROZEN, frozen by hand.
+# 5. r7's read-only census (rulings of 17 Nov 11:01:25Z, 19 Nov 07:50:20Z): MDPL_FROZEN's 25 forms, frozen by hand.
 
 import ro_census  # noqa: E402
 import ro_census_frozen as fz  # noqa: E402
 
 BACKEND = os.path.dirname(HERE)
-R7_FILES = ("api/main.py", "tests/closed_walk.py")
+R7_FILES = ("api/main.py", "tests/closed_walk.py", "tests/test_a1_identity_formation.py")
 
 
 def _r7_source(rel):
@@ -649,12 +649,12 @@ def _plant_after(source, anchor, line):
     return "\n".join(lines[:at[0] + 1] + [indent + line] + lines[at[0] + 1:]), at[0] + 2
 
 
-def test_r7_the_two_files_census_clean_with_the_block():
+def test_r7_the_three_files_census_clean_with_the_block():
     for rel in R7_FILES:
         assert _r7_diff(rel, _r7_source(rel)) == [], rel
 
 
-def test_r7_the_block_is_what_admits_its_22_forms():
+def test_r7_the_block_is_what_admits_its_25_forms():
     bare = {k: list(v) for k, v in fz.FROZEN.items()}
     for k, v in fz.MDPL_FROZEN.items():
         for form in v:
@@ -662,7 +662,7 @@ def test_r7_the_block_is_what_admits_its_22_forms():
     got = [r for rel in R7_FILES for r in _r7_diff(rel, _r7_source(rel), bare)]
     want = [(k, "+") + tuple(f) for k, v in fz.MDPL_FROZEN.items() for f in v]
     assert sorted(got) == sorted(want), got
-    assert len(got) == fz.MDPL_COUNT == 22
+    assert len(got) == fz.MDPL_COUNT == 25
 
 
 R7_PLANTS = (

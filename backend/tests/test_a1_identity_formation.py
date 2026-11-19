@@ -4273,7 +4273,7 @@ def test_mdpl_c_a_changed_signal_row_refuses(structural_only, monkeypatch, kind)
             out.add(row[0][:3] + (row[0][3] + " ",))
         if size == 5:
             uses = row[0][4]
-            out.add(row[0][:4] + (type(uses)(list(uses)[:-1]),))
+            out.add(row[0][:4] + (uses[:-1],))
         return frozenset(out)
 
     monkeypatch.setattr(_cw, "_signal_class", spy)

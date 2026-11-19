@@ -1434,7 +1434,7 @@ def test_census_complete_layer_frozen_whole():
     the one coarse form of migration 415's change (MAIL_SEND_RECEIPTS_FROZEN,
     frozen by hand), plus the four coarse forms of migration 416's change
     (LOBBY_INVITES_FROZEN, frozen by hand), plus the five coarse forms of
-    MDPL's change (MDPL_FROZEN, frozen by hand; its seventeen complete forms
+    MDPL's change (MDPL_FROZEN, frozen by hand; its twenty complete forms
     join the complete layer), plus the complete layer."""
     import ro_census
     import ro_census_frozen as fz
@@ -1457,13 +1457,13 @@ def test_census_complete_layer_frozen_whole():
     assert sum(len(v) for v in fz.LOBBY_INVITES_FROZEN.values()) == fz.LOBBY_INVITES_COUNT == 4
     assert set(fz.LOBBY_INVITES_FROZEN) <= coarse
     assert {f[0] for v in fz.LOBBY_INVITES_FROZEN.values() for f in v} == {"kwarg"}
-    # MDPL's change (the account deletion's bound and MDPL class C's signal-class
-    # route): 22 hand-frozen forms, 5 coarse (main.py's three dsntext docstrings
-    # and two imports) and 17 complete (main.py's three, closed_walk.py's fourteen)
-    assert sum(len(v) for v in fz.MDPL_FROZEN.values()) == fz.MDPL_COUNT == 22
+    # MDPL's change (the deletion's bound, MDPL class C's signal-class route and relock
+    # controls): 25 hand-frozen forms, 5 coarse (main.py's three dsntext docstrings and two
+    # imports), 20 complete (main.py's three, closed_walk.py's fourteen, the a1 test file's three)
+    assert sum(len(v) for v in fz.MDPL_FROZEN.values()) == fz.MDPL_COUNT == 25
     assert set(fz.MDPL_FROZEN) <= coarse | complete
     assert sum(len(v) for k, v in fz.MDPL_FROZEN.items() if k in coarse) == fz.MDPL_COARSE_COUNT == 5
-    assert sum(len(v) for k, v in fz.MDPL_FROZEN.items() if k in complete) == fz.MDPL_COMPLETE_COUNT == 17
+    assert sum(len(v) for k, v in fz.MDPL_FROZEN.items() if k in complete) == fz.MDPL_COMPLETE_COUNT == 20
     assert {f[0] for k, v in fz.MDPL_FROZEN.items() if k in coarse for f in v} == {"dsntext", "import"}
     assert {f[0] for k, v in fz.MDPL_FROZEN.items() if k in complete for f in v} == {"alias", "dynamic"}
     # the B10 merge: one hand-frozen coarse import form (W30k)
@@ -1494,7 +1494,7 @@ def test_census_complete_layer_frozen_whole():
     assert fz.FROZEN_COUNT == (fz.COARSE_COUNT + fz.COMPLETE_COUNT + fz.R10_COUNT
                                + fz.R10_MERGE_COUNT + fz.R11_ID_COUNT + fz.R11_OPEN_COUNT
                                + fz.B10_MERGE_COUNT + fz.MAIL_SEND_RECEIPTS_COUNT
-                               + fz.LOBBY_INVITES_COUNT + fz.MDPL_COUNT) == 882
+                               + fz.LOBBY_INVITES_COUNT + fz.MDPL_COUNT) == 885
     assert not [f for k in complete for f in fz.FROZEN[k] if f[0] == "refuse"]
     assert {f[0] for k in complete for f in fz.R10_FROZEN[k]} <= set(R10_KINDS)
     # the declared forwarding wrapper is bound whole, exactly once
