@@ -88,7 +88,7 @@
           ],
           "main",
           "admin_ban",
-          "32896314e0ca725b67dcc1e26d1fe85de996d44c"
+          "475953d97f09d5875e4b004926c67dad4248de09"
         ],
         [
           "/api/v1/admin/banned-users",
@@ -376,7 +376,7 @@
           ],
           "main",
           "admin_resolve_team_series",
-          "fb24c49ede891339a1bd607426a90f96ad7be836"
+          "d15b13add36660c76fac37c46219a5533b2e0253"
         ],
         [
           "/api/v1/admin/unban",
@@ -619,7 +619,7 @@
           ],
           "main",
           "submit_match",
-          "d76a683045ba4bbd273c51ef377d8f66cede4991"
+          "cb14735d4f56bf3aea834eb61439c47be8cc5046"
         ],
         [
           "/api/v1/matches/casual-dc",
@@ -628,7 +628,7 @@
           ],
           "main",
           "report_casual_dc",
-          "7b99337521cf8c8e25cdb70365f898165e6b1c7d"
+          "be6493c678ab43ebbd4a8e56ce531d9c7459ad83"
         ],
         [
           "/api/v1/matches/macro-evidence",
@@ -655,7 +655,7 @@
           ],
           "main",
           "submit_ovt_match",
-          "d2bbbf9aab6a86247bcea216eb68df2518f1fe4d"
+          "c814bd10cf8d91b748d171879e00a8049fe89e26"
         ],
         [
           "/api/v1/ovt/series/active",
@@ -1186,7 +1186,7 @@
           ],
           "main",
           "submit_team_match",
-          "f24c21bb4b9c548e84941eda025621b5f394dbd0"
+          "5e5f1bb4e908fac2e74b9f29ace1ae6231897770"
         ],
         [
           "/api/v1/team/players/{steam_id}/team-matches",
@@ -1498,7 +1498,7 @@
           ],
           "main",
           "steam_auth",
-          "9d61060104ccedf2a0d6ead5e65dcd1f79372493"
+          "fe731e294f167a1d8e4c31dd1c5752c29302ab7a"
         ],
         [
           "/api/v1/bets",
@@ -1822,7 +1822,7 @@
           ],
           "main",
           "ffa_queue_leave",
-          "35fc49df9f0751a011e8738fb1fc16ab5548a27b"
+          "c3c58c287bd7f77b981b947a2b0a9d1a3471da99"
         ],
         [
           "/api/v1/ffa/queue/list",
@@ -1984,7 +1984,7 @@
           ],
           "main",
           "i18n_review",
-          "044223bc01b668550009c3d8d045a2f838f030aa"
+          "7882b957f90847297a0f2cce91cff9225cba55e7"
         ],
         [
           "/api/v1/internal/booster-grant",
@@ -2344,7 +2344,7 @@
           ],
           "main",
           "ovt_lobby_leave",
-          "1782976bef92ef12cd009fc4335bcdcae1b2141f"
+          "e1e9bb6c5f50abc1abda5afb06fd87d600e094ef"
         ],
         [
           "/api/v1/ovt/lobby/prefs",
@@ -2668,7 +2668,7 @@
           ],
           "main",
           "spectate_leave",
-          "a3728935e86b2c2bf3abf474d0470593d070cf65"
+          "2a92c1ec7aae97ea411fb206e8d895b33af848a5"
         ],
         [
           "/api/v1/spectate/participant-attest",
@@ -2740,7 +2740,7 @@
           ],
           "main",
           "team_lobby_leave",
-          "ec3e56bd116f57660903c6d1eac66eb960cf3962"
+          "2ff6ff4937ef42a638f8dacbbc11614bde79980a"
         ],
         [
           "/api/v1/team/lobby/prefs",
@@ -2936,7 +2936,7 @@
           ],
           "main",
           "admin_moderation_case_act",
-          "45983cca68aa88c760742a07b44ee7445432c130"
+          "918f7f93ce468c4a90538d4bb45b316e09c1dca2"
         ],
         [
           "/api/v1/admin/moderation-cases/{case_id}/notified",
@@ -2981,7 +2981,7 @@
           ],
           "main",
           "internal_moderation_case_act",
-          "bd86ca3c44f211334f78753a1a3533c1a80fcfe0"
+          "f26c0c16035d20f560f6b83ca89048c8c8bdacc7"
         ],
         [
           "/api/v1/internal/moderation-cases/{case_id}/notified",
@@ -3869,7 +3869,7 @@
           ],
           "match_hold",
           "match_hold_entered",
-          "f096d6170016f86d1569427fcbf13272c360c1be"
+          "bc75e55576d30f67e7de99a16ccb240cc2cbca36"
         ],
         [
           "/api/v1/match/hold/{hold_id}/state",
@@ -4112,7 +4112,7 @@
       [
         "main",
         "lifespan",
-        "0b8c274bb577d819066b85b964198b6951316362"
+        "83a902e532ddee12ac46ee38d7098f467ee1598b"
       ]
     ]
   },
