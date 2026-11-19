@@ -166,8 +166,12 @@ def test_every_soft_check_call_an_exit_can_reach_passes_banned_ok():
 
 
 def _mutant_ns(fn_name):
-    """main's namespace with fn_name's banned_ok=True turned to False."""
+    """main's namespace with fn_name's banned_ok=True turned to False. The
+    decorator is cut: executed, it would register a second route on main.app
+    for the rest of the process (the route manifest's order pin then reads an
+    extra POST /api/v1/queue/leave)."""
     src = textwrap.dedent(inspect.getsource(getattr(main, fn_name)))
+    src = src[min(i for i in (src.find("async def "), src.find("def ")) if i >= 0):]
     assert src.count("banned_ok=True") == 1, fn_name
     ns = dict(vars(main))
     exec(compile(src.replace("banned_ok=True", "banned_ok=False"), "<mutant>", "exec"), ns)

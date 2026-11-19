@@ -47,6 +47,13 @@ report window's settle bodies now read the ban themselves under the
 identity lock (_settle_writer_ban_check -> _ban_lock_and_gate), and the one
 new statement the janitor reaches is that helper's shared identity lock
 (1); its ban reads are the gates already counted above.
+
+The fix's second part (FIX-1B) reads 386 and 0: _ban_lock_and_gate takes the
+keys its `exclusive=` names in their exclusive form, one more statement the
+janitor reaches through the same helper (1); _refund_lobby_bets' open-bet
+read gained its bettor filter, a changed statement and not a new one. FIX-2
+adds none: the window's close-as-refused statements live in
+match_report_window, which this inventory does not read.
 """
 import asyncio
 import os
@@ -62,7 +69,7 @@ sys.path.insert(0, os.path.normpath(os.path.join(HERE, "..", "api")))
 import main  # noqa: E402
 import models  # noqa: E402
 
-STATEMENTS, DYNAMIC = 385, 0   # 384 before FIX-1, 382 before the ban sweep, 371 before QDIG-1 (see the module docstring)
+STATEMENTS, DYNAMIC = 386, 0   # 385 before FIX-1B, 384 before FIX-1, 382 before the ban sweep, 371 before QDIG-1 (see the module docstring)
 ROOT = (("main", "root"),)
 DEF = re.compile(r"\((\w+)\.unbanned_at IS NULL AND \(\1\.expires_at IS NULL OR \1\.expires_at > NOW\(\)\)\)")
 # the sites that were dynamic on 88a0a2bf, and the alias each one's definition call names
