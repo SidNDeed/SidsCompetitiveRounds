@@ -391,23 +391,28 @@ def test_mutant_an_exit_without_banned_ok_fails_the_census():
 # raises TypeError at the first exit it meets.
 
 
-def _stub_names_patched_into_main(tree) -> set:
-    out = set()
+def _patched_values(tree) -> list:
+    """Every expression a file puts in as main._check_steam_session."""
+    out = []
     for n in ast.walk(tree):
         if (isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
                 and n.func.attr == "setattr" and len(n.args) >= 3
                 and isinstance(n.args[0], ast.Name) and n.args[0].id == "main"
                 and isinstance(n.args[1], ast.Constant)
                 and n.args[1].value == "_check_steam_session"):
-            v = n.args[2]
+            out.append(n.args[2])
         elif (isinstance(n, ast.Assign) and len(n.targets) == 1
               and isinstance(n.targets[0], ast.Attribute)
               and n.targets[0].attr == "_check_steam_session"
               and isinstance(n.targets[0].value, ast.Name)
               and n.targets[0].value.id == "main"):
-            v = n.value
-        else:
-            continue
+            out.append(n.value)
+    return out
+
+
+def _stub_names_patched_into_main(tree) -> set:
+    out = set()
+    for v in _patched_values(tree):
         name = v.attr if isinstance(v, ast.Attribute) else getattr(v, "id", None)
         if name:
             out.add(name)
@@ -415,37 +420,109 @@ def _stub_names_patched_into_main(tree) -> set:
 
 
 # FIX-1 M3: the guard judges what a stand-in DOES with the keywords. A name a
-# file patches in that is bound there to a function must READ its banned_ok or
-# its **kwargs (record or forward them); taking them and dropping them is a
+# file patches in that is bound to a function must READ its banned_ok or its
+# **kwargs (record or forward them); taking them and dropping them is a
 # finding. A name bound to soft_check_standin.SoftCheckStandIn(...) records
-# every keyword and passes. Listed: stand-ins that drop banned_ok on purpose.
+# every keyword and passes. FIX-1B point 5: the binding is found where it is
+# made, in another file too (`hold_test._fake_session`, `H._fake_session`
+# through `H = R.hold_test`); a name bound to the value main._check_steam_session
+# held before (test_ffa_assembly_pg's `noop` and `_REAL_SESSION_CHECK`) puts
+# back the object that stood there, which is the real check or a stand-in
+# whose own patch is judged where it is made. A value whose binding cannot be
+# found is a finding. Listed: stand-ins that drop banned_ok on purpose.
 STANDIN_DROPS_OK = {
     ("test_ban_sweep_live.py", "without_banned_ok"):
         "the S2 mutant: drops banned_ok on purpose to show that the exit then refuses",
 }
 
+_TREES = {}
+
+
+def _tree(sources, fname):
+    key = (fname, hash(sources[fname]))
+    if key not in _TREES:
+        _TREES[key] = ast.parse(sources[fname])
+    return _TREES[key]
+
+
+def _resolve_module(sources, fname, alias, depth=0):
+    """The file an alias names in fname: `import x as alias`, `import alias`,
+    or `alias = other.attr` where other names a module."""
+    if fname not in sources or depth > 4:
+        return None
+    for n in ast.walk(_tree(sources, fname)):
+        if isinstance(n, ast.Import):
+            for a in n.names:
+                if (a.asname or a.name) == alias and a.name + ".py" in sources:
+                    return a.name + ".py"
+        elif (isinstance(n, ast.Assign) and len(n.targets) == 1
+              and isinstance(n.targets[0], ast.Name) and n.targets[0].id == alias
+              and isinstance(n.value, ast.Attribute) and isinstance(n.value.value, ast.Name)):
+            base = _resolve_module(sources, fname, n.value.value.id, depth + 1)
+            if base:
+                return _resolve_module(sources, base, n.value.attr, depth + 1)
+    return None
+
+
+def _is_soft_check_value(v):
+    return (isinstance(v, ast.Attribute) and v.attr == "_check_steam_session"
+            and isinstance(v.value, ast.Name) and v.value.id == "main")
+
+
+def _judge_def(fn):
+    a = fn.args
+    kw = ([a.kwarg.arg] if a.kwarg else []) + [x.arg for x in a.args + a.kwonlyargs if x.arg == "banned_ok"]
+    read = {x.id for x in ast.walk(fn) if isinstance(x, ast.Name) and isinstance(x.ctx, ast.Load)}
+    return "reads banned_ok" if any(k in read for k in kw) else "drops banned_ok"
+
+
+def _bindings(sources, fname, name, depth=0):
+    """[(file, name, verdict)] for every binding of `name` in fname."""
+    out = []
+    if fname not in sources or depth > 4:
+        return [(fname, name, "unresolved")]
+    for n in ast.walk(_tree(sources, fname)):
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name == name:
+            out.append((fname, name, _judge_def(n)))
+        elif isinstance(n, ast.Assign) and any(isinstance(t, ast.Name) and t.id == name for t in n.targets):
+            v = n.value
+            if isinstance(v, ast.Call) and B._name_of(v) == "SoftCheckStandIn":
+                out.append((fname, name, "records"))
+            elif _is_soft_check_value(v):
+                out.append((fname, name, "restore"))
+            elif isinstance(v, ast.Name):
+                out += _bindings(sources, fname, v.id, depth + 1)
+            else:
+                out.append((fname, name, "unresolved"))
+        elif isinstance(n, ast.ImportFrom) and n.module and n.module + ".py" in sources:
+            for a in n.names:
+                if (a.asname or a.name) == name:
+                    out += _bindings(sources, n.module + ".py", a.name, depth + 1)
+    return out or [(fname, name, "unresolved")]
+
+
+def _standin_verdicts(sources: dict) -> list:
+    """[(file of the binding, name, verdict)] for every value any file puts in
+    as main._check_steam_session, each binding judged where it is made."""
+    out = set()
+    for fname in sorted(sources):
+        for v in _patched_values(_tree(sources, fname)):
+            if isinstance(v, ast.Name):
+                out.update(_bindings(sources, fname, v.id))
+            elif isinstance(v, ast.Attribute) and isinstance(v.value, ast.Name):
+                mod = _resolve_module(sources, fname, v.value.id)
+                out.update(_bindings(sources, mod, v.attr) if mod else [(fname, ast.unparse(v), "unresolved")])
+            else:
+                out.add((fname, ast.unparse(v), "unresolved"))
+    return sorted(out)
+
 
 def _stubs_without_banned_ok(sources: dict, allowed=None) -> list:
-    """(file, function) for every function defined in a file under the name
-    that file patches in as main._check_steam_session, when it does not read
-    its banned_ok or its **kwargs (it takes neither, or drops them), unless
-    listed in STANDIN_DROPS_OK."""
+    """(file, name) for every stand-in binding that drops banned_ok or cannot
+    be found, unless listed in STANDIN_DROPS_OK."""
     allowed = STANDIN_DROPS_OK if allowed is None else allowed
-    bad = []
-    for fname, src in sorted(sources.items()):
-        tree = ast.parse(src)
-        names = _stub_names_patched_into_main(tree)
-        for n in ast.walk(tree):
-            if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name in names:
-                if (fname, n.name) in allowed:
-                    continue
-                a = n.args
-                kw = ([a.kwarg.arg] if a.kwarg else []) + [
-                    x.arg for x in a.args + a.kwonlyargs if x.arg == "banned_ok"]
-                read = {x.id for x in ast.walk(n) if isinstance(x, ast.Name) and isinstance(x.ctx, ast.Load)}
-                if not any(k in read for k in kw):
-                    bad.append((fname, n.name))
-    return bad
+    return sorted({(f, n) for f, n, v in _standin_verdicts(sources)
+                   if v in ("drops banned_ok", "unresolved") and (f, n) not in allowed})
 
 
 def _standin_bindings(sources: dict) -> list:
@@ -489,6 +566,28 @@ def test_negative_control_a_stand_in_without_banned_ok_is_named():
     # planted_b takes **_kw and drops it: the form the no-op stand-ins had (M3)
     assert _stubs_without_banned_ok(planted) == [("planted_a.py", "stub"), ("planted_b.py", "stub2")]
     assert _standin_bindings(planted) == [("planted_c.py", "stub4")]
+
+
+def test_the_stand_ins_bound_in_another_file_and_the_assembly_restore_are_judged():
+    v = _standin_verdicts(_test_sources())
+    assert ("test_match_hold_pg.py", "_fake_session", "records") in v, v
+    assert ("test_ffa_assembly_pg.py", "noop", "restore") in v, v
+    assert ("test_ffa_assembly_pg.py", "_REAL_SESSION_CHECK", "restore") in v, v
+    assert not [x for x in v if x[2] == "unresolved"], v
+
+
+def test_mutant_a_stand_in_bound_in_another_file_that_drops_banned_ok_is_named():
+    planted = {
+        "planted_helpers.py": "async def fake(request, steam_id, db, **_kw):\n    return None\n",
+        "planted_user.py": ("import planted_helpers as hx\n"
+                            "monkeypatch.setattr(main, '_check_steam_session', hx.fake)\n"),
+        "planted_chain.py": ("import planted_user as U\nH = U.hx\n"
+                             "main._check_steam_session = H.fake\n"),
+        "planted_odd.py": "main._check_steam_session = make_stub()\n",
+    }
+    assert _stubs_without_banned_ok(planted) == [
+        ("planted_helpers.py", "fake"), ("planted_odd.py", "make_stub()")]
+    assert _standin_verdicts(planted).count(("planted_helpers.py", "fake", "drops banned_ok")) == 1
 
 
 def test_negative_control_the_deliberate_mutant_is_listed():
@@ -606,7 +705,13 @@ def test_mutant_a_row_lock_before_the_identity_lock_fails_the_census():
 
 def test_negative_control_the_row_serialized_entry_is_load_bearing():
     bad = B.unlocked_gate_reads(_api_modules(), row_serialized={})
-    assert bad == ["main.team_series_report_dc: 1 ban read(s) outside _ban_lock_and_gate, 0 listed"], bad
+    # every entry is load-bearing: the 2v2 DC report, and the 1v2 and 2v2
+    # report routes' plain pre-checks (FIX-1B point 3)
+    assert sorted(bad) == sorted(
+        "main.%s: 1 ban read(s) outside _ban_lock_and_gate, 0 listed" % n
+        for n in ("team_series_report_dc", "submit_ovt_match", "submit_team_match")), bad
+    assert set(B.ROW_SERIALIZED) == {("main", "team_series_report_dc"), ("main", "submit_ovt_match"),
+                                     ("main", "submit_team_match")}, sorted(B.ROW_SERIALIZED)
     bad = B.row_locks_before_the_gate(_api_modules(), ok={})
     assert [b.split(":")[0] for b in bad] == ["main.link_discord"], bad
 
@@ -621,18 +726,25 @@ class _RecDb:
         class _R:
             def all(self):
                 return []
+
+            def mappings(self):
+                return self
+
+            def scalar(self):
+                return None
         return _R()
 
 
 def _lock_order_failures(helper):
     """The helper's locks for ids of two lengths and an actor: every id and
-    the actor, in _ffa_sort_key order, all before the ban read."""
+    the actor, in the ONE identity order, all before the ban read."""
     import asyncio
+    from identity_order import identity_lock_key
     db = _RecDb()
     ids, actor = ["9000000000000002", "90000000000000001"], "1000000000000003"
     asyncio.run(helper(db, ids, None, actor=actor))
-    locks = [p["sid"] for s, p in db.calls if "pg_advisory_xact_lock_shared" in s]
-    want = sorted({*ids, actor}, key=main._ffa_sort_key)
+    locks = [p["sid"] for s, p in db.calls if "pg_advisory_xact_lock" in s]
+    want = sorted({*ids, actor}, key=identity_lock_key)
     bad = []
     if locks != want:
         bad.append(f"locks {locks} != {want}")
@@ -657,11 +769,135 @@ def _mutant_helper(old, new):
 
 
 @pytest.mark.parametrize("old,new", [
-    ("[*(steam_ids or ()), actor]", "[*(steam_ids or ())]"),
-    (", key=_ffa_sort_key)", ")"),
+    ("[*(steam_ids or ()), actor, *(exclusive or ())]", "[*(steam_ids or ()), *(exclusive or ())]"),
+    ("key=identity_lock_key)", "key=None)"),
 ])
 def test_mutant_the_helper_without_the_actor_or_the_canonical_order_fails(old, new):
     assert _lock_order_failures(_mutant_helper(old, new)) != []
+
+
+# ---- FIX-1B point 3: ONE order for every taker of the identity key ----------
+#
+# Made-up ids of 4, 8 (a word), 16, 17, 18, 19 and 20 characters. Bare sorted()
+# and the one key disagree on them, which is why one key must serve all takers.
+
+_MIXED = ["90000000000000000019", "9000", "900000000000000018", "steamwrd",
+          "1000000000000000017", "9000000000000016", "10000000000000017"]
+_MIXED_ORDER = ["9000", "steamwrd", "9000000000000016", "10000000000000017",
+                "900000000000000018", "1000000000000000017", "90000000000000000019"]
+
+
+def test_the_one_identity_key_is_total_for_any_text():
+    from identity_order import identity_lock_key
+    assert sorted(_MIXED, key=identity_lock_key) == _MIXED_ORDER
+    assert sorted(reversed(_MIXED), key=identity_lock_key) == _MIXED_ORDER
+    digits = [x for x in _MIXED if x.isdigit()]
+    assert sorted(digits, key=identity_lock_key) == sorted(digits, key=int)
+    assert sorted(_MIXED) != _MIXED_ORDER          # bare sorted() orders them otherwise
+    assert identity_lock_key("") == (0, "") and identity_lock_key(None) == (0, "")
+    assert sorted(["", "a", "0"], key=identity_lock_key) == ["", "0", "a"]
+    assert identity_lock_key(9000) == identity_lock_key("9000")
+    assert main._ffa_sort_key("steamwrd") == identity_lock_key("steamwrd")
+
+
+def _taker_locks(taker):
+    import asyncio
+    import random
+    db = _RecDb()
+    ids = list(_MIXED)
+    random.Random(7).shuffle(ids)
+    asyncio.run(taker(db, ids))
+    return [p["sid"] for s, p in db.calls if "pg_advisory_xact_lock" in s and "sid" in p]
+
+
+def _takers():
+    import match_hold
+    return {
+        "_ban_lock_and_gate": main._ban_lock_and_gate,
+        "_identity_lock_many": main._identity_lock_many,
+        "_guard_identities": match_hold._guard_identities,
+    }
+
+
+@pytest.mark.parametrize("name", ["_ban_lock_and_gate", "_identity_lock_many", "_guard_identities"])
+def test_every_taker_of_several_identity_keys_takes_them_in_the_one_order(name):
+    assert _taker_locks(_takers()[name]) == _MIXED_ORDER
+
+
+def test_the_helper_takes_the_exclusive_keys_in_its_one_ordered_pass():
+    import asyncio
+    db = _RecDb()
+    asyncio.run(main._ban_lock_and_gate(db, ["9000000000000016", "9000"], None,
+                                         actor="steamwrd", exclusive=["9000000000000016"]))
+    locks = [(p["sid"], "shared" in s) for s, p in db.calls if "pg_advisory_xact_lock" in s]
+    assert locks == [("9000", True), ("steamwrd", True), ("9000000000000016", False)], locks
+
+
+def test_mutant_the_report_window_guard_back_on_bare_sorted_takes_another_order():
+    import inspect
+    import textwrap
+    import match_hold
+    src = textwrap.dedent(inspect.getsource(match_hold._guard_identities))
+    old = ", key=identity_lock_key)"
+    assert src.count(old) == 1
+    ns = dict(vars(match_hold))
+    exec(compile(src.replace(old, ")"), "<mutant>", "exec"), ns)
+    assert _taker_locks(ns["_guard_identities"]) != _MIXED_ORDER
+
+
+def test_every_identity_key_taker_orders_by_the_one_key_or_is_listed():
+    assert B.identity_lock_failures(_api_modules()) == []
+    assert all(r for r in B.SINGLE_KEY_TAKERS.values())
+
+
+def test_mutant_a_taker_back_on_bare_sorted_fails_the_identity_census():
+    mods = _api_modules()
+    old = "keys = sorted({str(s) for s in steam_ids if s is not None}, key=identity_lock_key)"
+    assert mods["match_hold"].count(old) == 1
+    mods["match_hold"] = mods["match_hold"].replace(
+        old, "keys = sorted({str(s) for s in steam_ids if s is not None})")
+    assert B.identity_lock_failures(mods) == [
+        "match_hold._guard_identities: takes several identity keys and does not order by identity_lock_key"]
+
+
+_PLANTED_KEYS = """
+async def planted_one(db, sid):
+    await db.execute(text("SELECT pg_advisory_xact_lock(hashtext(:sid))"), {"sid": sid})
+
+async def planted_bare(db, name):
+    await db.execute(text("SELECT pg_advisory_xact_lock(hashtext(:k))"), {"k": name})
+"""
+
+
+def test_negative_control_an_unlisted_single_taker_and_an_unprefixed_key_fail():
+    mods = _api_modules()
+    mods["main"] = mods["main"] + _PLANTED_KEYS
+    assert B.identity_lock_failures(mods) == [
+        "main.planted_one: takes one identity key and is not listed",
+        "main.planted_bare: an advisory key that is neither the identity key nor prefixed"]
+    bad = B.identity_lock_failures(_api_modules(), single={})
+    assert {b.split(":")[0] for b in bad} == {f"{m}.{n}" for m, n in B.SINGLE_KEY_TAKERS}
+
+
+def test_every_function_with_the_shared_read_and_an_exclusive_key_is_listed():
+    assert B.shared_and_exclusive_failures(_api_modules()) == []
+    assert all(r for r in B.SHARED_AND_EXCLUSIVE.values())
+
+
+_PLANTED_UPGRADE = """
+async def planted_upgrade(db, sid):
+    await _ban_lock_and_gate(db, [sid])
+    await _identity_lock_many(db, [sid])
+"""
+
+
+def test_mutant_a_shared_read_then_an_exclusive_key_fails_the_census():
+    mods = _api_modules()
+    mods["main"] = mods["main"] + _PLANTED_UPGRADE
+    assert B.shared_and_exclusive_failures(mods) == [
+        "main.planted_upgrade: reaches the shared read and an exclusive identity key, not listed"]
+    bad = B.shared_and_exclusive_failures(_api_modules(), listed={})
+    assert len(bad) == len(B.SHARED_AND_EXCLUSIVE), bad
 
 
 # ---- F1 c: every call site of each mode's insert core reaches the writer's check
@@ -745,3 +981,201 @@ def test_negative_control_the_listed_writers_and_the_lockers_are_load_bearing():
         lockers.pop(k)
     bad = B.ban_writers_without_the_lock(rows, funcs, lockers=lockers)
     assert bad and all("/pc/" in b for b in bad), bad
+
+
+# ---- FIX-1B point 4: the second read in the LAST transaction ----------------
+
+def test_every_multi_commit_ban_writer_reads_the_ban_in_its_last_transaction_or_is_listed():
+    rows, funcs = _f4_rows_and_funcs()
+    assert B.last_transaction_failures(rows, funcs) == []
+    assert B.return_guard_failures(funcs) == []
+    assert all(why.strip() for why in B.MULTI_COMMIT_LISTED.values())
+    assert all(why.strip() for _k, why in B.RETURN_GUARDED.values())
+    assert all(why.strip() for why in B.TRAILING_REMOVALS.values())
+
+
+def _without_call(funcs, fn_name, callee):
+    out = {m: dict(fs) for m, fs in funcs.items()}
+    fn = copy.deepcopy(out["main"][fn_name])
+    n = 0
+    for c in ast.walk(fn):
+        if isinstance(c, ast.Call) and B._name_of(c) == callee:
+            c.func = ast.Name(id="_planted_no_read", ctx=ast.Load())
+            n += 1
+    assert n == 1, (fn_name, callee, n)
+    out["main"][fn_name] = fn
+    return out
+
+
+def test_mutant_a_settle_without_its_second_read_fails_the_census():
+    # the 1v2 report: the window receipt commits, then the settle's own
+    # transaction reads the ban again under the guards; without that read
+    # the last transaction reads nothing
+    rows, funcs = _f4_rows_and_funcs()
+    bad = B.last_transaction_failures(rows, _without_call(funcs, "_settle_ovt_report",
+                                                          "_settle_writer_ban_check"))
+    assert any(b.startswith("POST /api/v1/ovt/matches: a path commits twice") for b in bad), bad
+
+
+def test_negative_control_the_listed_routes_and_the_guards_are_load_bearing():
+    rows, funcs = _f4_rows_and_funcs()
+    bad = B.last_transaction_failures(rows, funcs, listed={})
+    assert sorted(b.split(":")[0] for b in bad) == sorted(f"{m} {p}" for m, p in B.MULTI_COMMIT_LISTED), bad
+    bad = B.return_guard_failures(funcs, guarded={**B.RETURN_GUARDED, "_planted_helper": ("locked", "x")})
+    assert bad == ["_planted_helper: listed in RETURN_GUARDED and never called"], bad
+
+
+_PLANTED_TXN = """
+async def planted_two(db, sid):
+    await _ban_lock_and_gate(db, [sid])
+    await db.execute(text("UPDATE players SET gold_earned = gold_earned + 1 WHERE steam_id = :s"), {"s": sid})
+    await db.commit()
+    await db.execute(text("UPDATE players SET gold_earned = gold_earned + 1 WHERE steam_id = :s"), {"s": sid})
+    await db.commit()
+
+async def planted_two_read(db, sid):
+    await _ban_lock_and_gate(db, [sid])
+    await db.execute(text("UPDATE players SET gold_earned = gold_earned + 1 WHERE steam_id = :s"), {"s": sid})
+    await db.commit()
+    await _ban_lock_and_gate(db, [sid])
+    await db.execute(text("UPDATE players SET gold_earned = gold_earned + 1 WHERE steam_id = :s"), {"s": sid})
+    await db.commit()
+
+async def planted_quiet(db, sid, sp):
+    await _ban_lock_and_gate(db, [sid])
+    await db.commit()
+    await db.execute(text("UPDATE players SET gold_earned = gold_earned + 1 WHERE steam_id = :s"), {"s": sid})
+    await sp.commit()
+    async with async_session() as other:
+        await other.execute(text("DELETE FROM pc_jobs WHERE id = 1"))
+        await other.commit()
+    await db.commit()
+
+async def planted_guarded(db, sid):
+    await db.execute(text("UPDATE players SET seen = now() WHERE steam_id = :s"), {"s": sid})
+    await db.commit()
+    got = await _planted_snapshot(db, sid)
+    if got is None:
+        return None
+    await db.execute(text("UPDATE players SET gold_earned = gold_earned + 1 WHERE steam_id = :s"), {"s": sid})
+    await db.commit()
+
+async def _planted_snapshot(db, sid):
+    if sid:
+        await db.rollback()
+        return None
+    await _ban_lock_and_gate(db, [sid])
+    return 1
+"""
+
+
+def _planted_txn_funcs():
+    tree = ast.parse(_PLANTED_TXN.replace("sp.commit", "sp_savepoint.commit"))
+    return {"main": {n.name: n for n in tree.body if isinstance(n, ast.AsyncFunctionDef)}}
+
+
+def _ends_bad(funcs, name, guarded=None):
+    saved = dict(B.RETURN_GUARDED)
+    try:
+        if guarded is not None:
+            B.RETURN_GUARDED.clear()
+            B.RETURN_GUARDED.update(guarded)
+        ends = B.last_transaction_paths(funcs, "main", name)
+    finally:
+        B.RETURN_GUARDED.clear()
+        B.RETURN_GUARDED.update(saved)
+    return any(n >= 2 and p is False for n, _r, _w, p, _a in ends)
+
+
+def test_the_walk_tells_a_second_read_a_savepoint_another_session_and_a_guarded_return():
+    funcs = _planted_txn_funcs()
+    assert _ends_bad(funcs, "planted_two")              # the mutant shape: no second read
+    assert not _ends_bad(funcs, "planted_two_read")     # the second read in the last transaction
+    assert not _ends_bad(funcs, "planted_quiet")        # empty commit, savepoint, own session
+    assert _ends_bad(funcs, "planted_guarded", guarded={})
+    assert not _ends_bad(funcs, "planted_guarded", guarded={"_planted_snapshot": ("locked", "x")})
+
+
+# ---------------------------------------------------------------------------
+# F2 b: the table census. Every table standing after the migrations is
+# classed by name (ban_sweep_tables.TABLE_CLASSES), both ways, and every LIVE
+# table is named by the void; the live census (test_ban_sweep_live_census_pg)
+# proves each LIVE table's rows of a banned account end.
+import glob as _glob  # noqa: E402
+
+from ban_sweep_tables import TABLE_CLASSES  # noqa: E402
+
+_SQL_DIR = os.path.normpath(os.path.join(HERE, "..", "sql"))
+
+
+def _sql_files():
+    out = {}
+    for f in _glob.glob(os.path.join(_SQL_DIR, "*.sql")):
+        with open(f, encoding="utf-8", errors="replace") as fh:
+            out[os.path.basename(f)] = fh.read()
+    return out
+
+
+def _orm():
+    with open(os.path.join(API, "models.py"), encoding="utf-8") as fh:
+        return fh.read()
+
+
+def _main_source():
+    with open(os.path.join(API, "main.py"), encoding="utf-8") as fh:
+        return fh.read()
+
+
+def _void_text(src):
+    tree = ast.parse(src)
+    funcs = {"main": {n.name: n for n in tree.body
+                      if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}}
+    return B.void_sql_text(funcs, module_source=src)
+
+
+def test_every_standing_table_is_classed_and_every_classed_table_stands():
+    standing = B.standing_tables(_sql_files(), _orm())
+    assert len(standing) > 150, len(standing)
+    assert B.table_class_failures(standing, TABLE_CLASSES) == []
+
+
+def test_every_live_table_is_named_by_the_void():
+    text, seen = _void_text(_main_source())
+    assert "_apply_ban_core" in seen and "_ban_void_apply" in seen, sorted(seen)
+    live = [t for t, (c, _w) in TABLE_CLASSES.items() if c == B.LIVE]
+    assert len(live) >= 20, live
+    assert B.void_coverage_failures(TABLE_CLASSES, text) == []
+
+
+def test_the_standing_set_follows_creates_drops_renames_and_skips_temp_and_side_files():
+    files = {
+        "001_a.sql": "CREATE TABLE IF NOT EXISTS alpha (id int); CREATE TABLE beta (id int);"
+                     " CREATE TEMP TABLE scratch (id int); -- CREATE TABLE commented (id int)",
+        "002_b.sql": "DROP TABLE IF EXISTS beta; ALTER TABLE alpha RENAME TO gamma;",
+        "rollback_002_b.sql": "CREATE TABLE rollback_only (id int);",
+        "003_c.sql": "/* CREATE TABLE in_a_comment (id int) */ CREATE TABLE delta (id int);",
+    }
+    got = B.standing_tables(files, 'class X:\n    __tablename__ = "orm_only"\n')
+    assert got == {"gamma", "delta", "orm_only"}, got
+
+
+def test_mutant_a_planted_table_that_is_not_classed_fails_the_census():
+    files = _sql_files()
+    files["999_planted.sql"] = "CREATE TABLE IF NOT EXISTS planted_account_state (steam_id text);"
+    fails = B.table_class_failures(B.standing_tables(files, _orm()), TABLE_CLASSES)
+    assert fails == ["planted_account_state: stands after the migrations and is not classed"], fails
+    files["999_planted.sql"] = "DROP TABLE IF EXISTS chat_mirrors;"
+    fails = B.table_class_failures(B.standing_tables(files, _orm()), TABLE_CLASSES)
+    assert fails == ["chat_mirrors: classed and does not stand"], fails
+
+
+def test_mutant_a_live_table_left_out_of_the_void_fails_the_census():
+    src = _main_source()
+    stmt = '"DELETE FROM lfp_pings WHERE steam_id = :sid AND posted_at IS NULL"'
+    assert src.count(stmt) == 1
+    text, _seen = _void_text(src.replace(stmt, '"SELECT 1"'))
+    assert B.void_coverage_failures(TABLE_CLASSES, text) == [
+        "lfp_pings: a LIVE table the void never names"]
+    classes = dict(TABLE_CLASSES, chat_mutes=(B.LIVE, "planted: a mute the ban must end"))
+    text, _seen = _void_text(src)
+    assert B.void_coverage_failures(classes, text) == ["chat_mutes: a LIVE table the void never names"]

@@ -125,6 +125,14 @@ ROW_SERIALIZED = {
     ("main", "team_series_report_dc"): (
         1, "the roster read under the team_series FOR NO KEY UPDATE row lock; an identity "
            "lock taken after that row lock would invert the ban core's order"),
+    ("main", "submit_ovt_match"): (
+        1, "a plain pre-check: the window's receipt takes the EXCLUSIVE identity guards of the "
+           "game next, so a shared key here would be made exclusive there and two reporters of "
+           "one game would wait for each other; the settle reads the ban again under the guards"),
+    ("main", "submit_team_match"): (
+        1, "a plain pre-check: the window's receipt takes the EXCLUSIVE identity guards of the "
+           "game next, so a shared key here would be made exclusive there and two reporters of "
+           "one game would wait for each other; the settle reads the ban again under the guards"),
 }
 # A row lock written before a locking-helper call in the same function, on a
 # table the ban core never locks.
@@ -187,6 +195,579 @@ def ban_writers_without_the_lock(rows, funcs_by_module, listed=None, lockers=Non
                 or (isinstance(c, ast.Call) and _name_of(c) in lockers and _name_of(c) != name)
                 for f in fns for c in _own_nodes(f)):
             out.append(f"{name}: listed as an identity locker and takes no identity lock")
+    return out
+
+
+# FIX-1B point 4: a transaction after the first reads its row again and
+# checks the condition again. A BAN-class writer that can commit more than
+# once on one path reads the ban under the lock (LOCK_CALLERS or an identity
+# locker) in the transaction that ends at its LAST commit on that path, or is
+# listed with its reason. The walk follows each path through the statements of
+# the route and of the census's functions it calls (its own module's first) (if/else, loops, try,
+# raise and return), carrying a small state: commits so far (0, 1, 2+),
+# whether the open transaction has read the ban, and whether the transaction
+# the last commit closed had. A savepoint's commit closes no transaction.
+# Helpers whose transaction only removes the caller's live rows or prunes its
+# own old rows are TRAILING_REMOVALS: their commits close no writing
+# transaction. A commit of a session the function opens itself
+# (`async with async_session() as x`) is that session's, not the route's. F4_LISTED routes read no ban under a lock at all and carry
+# their reason there.
+TRAILING_REMOVALS = {
+    "_evict_other_queue_searching": (
+        "after the caller's own commit, deletes the account's still-searching rows in the other "
+        "queues (and returns a pre-room 1v1 partner to searching): it only ends live state, so a "
+        "ban that commits first leaves it nothing to create"),
+    "prune_auto_logs": "deletes the account's own auto logs past the keep count; it creates nothing",
+}
+MULTI_COMMIT_LISTED = {
+    ("POST", "/api/v1/matches"): (
+        "the closing transaction after the match commit advances a tournament bracket "
+        "(advance_tournament_match); the ban core reads and writes no tournament row, so a ban "
+        "committed between the two transactions leaves the bracket as one committed after both, "
+        "and the result, rating and gold were written in the first transaction under the read"),
+    ("GET", "/api/v1/team/queue/poll/{steam_id}"): (
+        "after the preflight commit every writing transaction (a resume, the fresh formation) "
+        "takes _identity_lock_many over the caller and the roster and revalidates their rows under "
+        "it, and the ban core deletes a banned account's team_queue row under the same key. The "
+        "walk also follows two paths that do not run: the formation loop with no pass (it runs "
+        "at least once: max(_form_left, 1)) and its unlocked `break` with fewer than three, "
+        "after which `if len(others) < 3` returns"),
+    ("POST", "/api/v1/ffa/matches"): (
+        "the transactions before the route's own are other due windows' settles: each is "
+        "submit_ffa_match in journal mode, which reads the ban under the lock itself (the walk "
+        "sees that recursion as its entry state), and the write after its 4xx only marks that "
+        "report superseded, which moves no result, rating, gold or other player's game"),
+}
+# Helpers whose paths that drop the lock or commit end in a value every caller
+# returns at once; the walk cannot tie that value to the caller's test, so it
+# keeps only the helper's paths the caller continues on. Each entry names the
+# test its callers make, and return_guard_failures checks every caller makes it.
+RETURN_GUARDED = {
+    "_lock_group_snapshot": (
+        "locked", "returns None after a rollback (no lock) and the caller returns at once on None; "
+        "every row it returns is read under _identity_lock_many"),
+    "_ffa_report_gate": (
+        "uncommitted", "its commit (a journal row) returns mode 'answer' and the caller returns "
+        "that answer at once; the path the caller continues on commits nothing"),
+}
+_END = "end"
+
+
+def _is_txn_commit(c):
+    if not (isinstance(c, ast.Call) and _name_of(c) == "commit" and isinstance(c.func, ast.Attribute)):
+        return False
+    base = c.func.value
+    nm = base.id if isinstance(base, ast.Name) else getattr(base, "attr", "")
+    return "savepoint" not in nm.lower() and "nested" not in nm.lower()
+
+
+def _runs_once(loop):
+    it = getattr(loop, "iter", None)
+    if not (isinstance(it, ast.Call) and _name_of(it) == "range" and it.args):
+        return False
+    vals = [a.value if isinstance(a, ast.Constant) else None for a in it.args]
+    if len(vals) == 1:
+        return isinstance(vals[0], int) and vals[0] >= 1
+    lo, hi = vals[0], vals[1]
+    if isinstance(lo, int) and isinstance(it.args[1], ast.BinOp) and isinstance(it.args[1].op, ast.Add):
+        # range(1, x + 1) with a positive constant x
+        l, r = it.args[1].left, it.args[1].right
+        if isinstance(r, ast.Constant) and r.value == 1 and lo == 1:
+            return True     # range(1, n + 1): n is a positive attempt count wherever it is used here
+    return isinstance(lo, int) and isinstance(hi, int) and hi > lo
+
+
+class _TxnWalk:
+    """State: (writing commits 0/1/2, read in the open transaction, wrote in
+    the open transaction, read in the writing transaction the last writing
+    commit closed or None). A commit of a transaction that wrote nothing
+    counts no transaction; it still ends the open one's lock."""
+
+    def __init__(self, funcs_by_module, module, lockers):
+        self.funcs = funcs_by_module
+        self.mods = [module]   # the module of the function being walked
+        self.lockers = lockers
+        self.memo = {}
+        self.own = [set()]     # per function: names bound to a session it opens itself
+        self.loops = []        # per loop being walked: [states at continue, states at break]
+        self.where = {}
+        for m, fs in funcs_by_module.items():
+            for n in fs:
+                self.where.setdefault(n, []).append(m)
+
+    def resolve(self, name):
+        """The module of a called name: the caller's own, else the one other
+        module of the census that defines it."""
+        if name in self.funcs.get(self.mods[-1], {}):
+            return self.mods[-1]
+        ms = self.where.get(name, [])
+        return ms[0] if len(ms) == 1 else None
+
+    def call(self, mod, name, states, stack):
+        out = set()
+        for st in states:
+            key = (mod, name, st)
+            if key not in self.memo:
+                self.memo[key] = {st}    # a recursion sees its entry state
+                if name not in stack and len(stack) <= 10:
+                    fn = self.funcs[mod][name]
+                    self.own.append(set())
+                    self.mods.append(mod)
+                    try:
+                        nxt, ret, _raised = self.block(fn.body, {st}, stack + (name,))
+                    finally:
+                        self.own.pop()
+                        self.mods.pop()
+                    outs = nxt | ret
+                    kind = RETURN_GUARDED.get(name, (None,))[0]
+                    if kind == "locked":
+                        outs = {o for o in outs if o[1]}
+                    elif kind == "uncommitted":
+                        outs = {o for o in outs if (o[0], o[4]) == (st[0], st[4])}
+                    self.memo[key] = outs
+            out |= self.memo[key]
+        return out
+
+    def expr(self, node, states, stack):
+        calls = sorted((c for c in ast.walk(node) if isinstance(c, ast.Call)),
+                       key=lambda c: (c.lineno, c.col_offset))
+        for c in calls:
+            cn = _name_of(c)
+            if _is_txn_commit(c) and not (isinstance(c.func.value, ast.Name)
+                                          and c.func.value.id in self.own[-1]):
+                at = f"{stack[-1]}:{c.lineno}"
+                states = {(min(n + 1, 2), False, False, r, at) if w else (n, False, False, p, a)
+                          for n, r, w, p, a in states}
+            elif cn == "rollback" and isinstance(c.func, ast.Attribute) and not (
+                    isinstance(c.func.value, ast.Name) and c.func.value.id in self.own[-1]):
+                states = {(n, False, False, p, a) for n, _r, _w, p, a in states}
+            elif cn in LOCK_CALLERS or cn in self.lockers:
+                states = {(n, True, w, p, a) for n, _r, w, p, a in states}
+            elif _write_call(c, cn):
+                states = {(n, r, True, p, a) for n, r, _w, p, a in states}
+            elif isinstance(c.func, ast.Name) and cn not in TRAILING_REMOVALS and self.resolve(cn):
+                states = self.call(self.resolve(cn), cn, states, stack)
+        return states
+
+    def block(self, stmts, states, stack):
+        """-> (states falling through, states returned, states raised)"""
+        ret, raised = set(), set()
+        for st in stmts:
+            if not states:
+                break
+            if isinstance(st, ast.Raise):
+                states = self.expr(st, states, stack)
+                raised |= states
+                return set(), ret, raised
+            if isinstance(st, ast.Return):
+                states = self.expr(st, states, stack) if st.value is not None else states
+                return set(), ret | states, raised
+            if isinstance(st, (ast.Continue, ast.Break)) and self.loops:
+                self.loops[-1][0 if isinstance(st, ast.Continue) else 1].update(states)
+                return set(), ret, raised
+            if isinstance(st, ast.If):
+                states = self.expr(st.test, states, stack)
+                a, ra, xa = self.block(st.body, states, stack)
+                b, rb, xb = self.block(st.orelse, states, stack)
+                states, ret, raised = a | b, ret | ra | rb, raised | xa | xb
+            elif isinstance(st, (ast.For, ast.AsyncFor, ast.While)):
+                head = st.iter if hasattr(st, "iter") else st.test
+                states = self.expr(head, states, stack)
+                self.loops.append([set(), set()])
+                try:
+                    once, r1, x1 = self.block(st.body, states, stack)
+                    once |= self.loops[-1][0]
+                    twice, r2, x2 = self.block(st.body, once, stack)
+                    twice |= self.loops[-1][0]
+                finally:
+                    brk = self.loops.pop()[1]
+                # a loop over range(a, b) with b - a >= 1 known runs at least once
+                entry = set() if _runs_once(st) else states
+                e, r3, x3 = self.block(st.orelse, entry | once | twice, stack)
+                states, ret, raised = e | brk, ret | r1 | r2 | r3, raised | x1 | x2 | x3
+            elif isinstance(st, (ast.With, ast.AsyncWith)):
+                for it in st.items:
+                    states = self.expr(it.context_expr, states, stack)
+                    # a session the function opens itself: its commits are another transaction
+                    if (isinstance(it.context_expr, ast.Call) and isinstance(it.optional_vars, ast.Name)
+                            and "session" in (_name_of(it.context_expr) or "").lower()):
+                        self.own[-1].add(it.optional_vars.id)
+                states, r, x = self.block(st.body, states, stack)
+                ret, raised = ret | r, raised | x
+            elif isinstance(st, ast.Try) or type(st).__name__ == "TryStar":
+                body, r, x = self.block(st.body, states, stack)
+                ret, raised = ret | r, raised | x
+                # a handler can start wherever the body could raise: approximate by
+                # the entry, the body's end and its explicit raises
+                h_in = states | body | x
+                after = set()
+                caught = set()
+                for h in st.handlers:
+                    hs, rh, xh = self.block(h.body, h_in, stack)
+                    after |= hs
+                    ret, caught = ret | rh, caught | xh
+                el, re_, xe = self.block(st.orelse, body, stack)
+                after |= el
+                ret, raised = ret | re_, raised | xe | caught
+                if st.finalbody:
+                    fin, rf, xf = self.block(st.finalbody, after | ret, stack)
+                    after = fin
+                    ret, raised = ret | rf, raised | xf
+                states = after
+            elif isinstance(st, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                continue
+            else:
+                states = self.expr(st, states, stack)
+        return states, ret, raised
+
+
+def last_transaction_paths(funcs_by_module, module, name, lockers=None):
+    """The end states of every path through module.name that ends without
+    raising (see _TxnWalk)."""
+    lockers = IDENTITY_LOCKERS if lockers is None else lockers
+    w = _TxnWalk(funcs_by_module, module, lockers)
+    fn = funcs_by_module.get(module, {}).get(name)
+    if fn is None:
+        return []
+    end, ret, _x = w.block(fn.body, {(0, False, False, None, None)}, (name,))
+    return sorted(end | ret, key=repr)
+
+
+def last_transaction_failures(rows, funcs_by_module, listed=None, lockers=None):
+    """Every BAN-class writer with a path that commits twice or more whose
+    last transaction read no ban under the lock, unless listed; every listed
+    route that no longer needs its entry; every TRAILING_REMOVALS helper that
+    does not exist."""
+    listed = MULTI_COMMIT_LISTED if listed is None else listed
+    res, _clf = census(rows, funcs_by_module)
+    out, need = [], set()
+    for method, path, module, name, _deps in rows:
+        if BAN not in res[(method, path)][1] or not reaches(funcs_by_module, module, name, _write_call):
+            continue
+        if (method, path) in F4_LISTED:
+            continue
+        ends = last_transaction_paths(funcs_by_module, module, name, lockers)
+        bad_at = sorted({a for n, _r, _w, p, a in ends if n >= 2 and p is False})
+        if not bad_at:
+            continue
+        need.add((method, path))
+        if (method, path) not in listed:
+            out.append(f"{method} {path}: a path commits twice or more and its last transaction "
+                       f"(to {', '.join(bad_at)}) reads the ban under no lock")
+    for key in sorted(set(listed) - need):
+        out.append(f"{key[0]} {key[1]}: listed for the last transaction and needs no entry")
+    names = {n for fs in funcs_by_module.values() for n in fs}
+    for h in sorted(set(TRAILING_REMOVALS) - names):
+        out.append(f"{h}: listed in TRAILING_REMOVALS and not defined")
+    return out
+
+
+def return_guard_failures(funcs_by_module, guarded=None):
+    """Every call of a RETURN_GUARDED helper that is not `x = await h(...)`
+    followed at once by an `if` on x whose body returns."""
+    guarded = RETURN_GUARDED if guarded is None else guarded
+    out, seen = [], set()
+    for mod, fs in sorted(funcs_by_module.items()):
+        for fname, fn in sorted(fs.items()):
+            for n in [fn, *_own_nodes(fn)]:
+                for field in ("body", "orelse", "finalbody"):
+                    block = getattr(n, field, None)
+                    if not isinstance(block, list):
+                        continue
+                    for i, st in enumerate(block):
+                        calls = [c for c in ast.walk(st) if isinstance(c, ast.Call) and _name_of(c) in guarded]
+                        if not calls or isinstance(st, (ast.If, ast.For, ast.AsyncFor, ast.While, ast.With,
+                                                         ast.AsyncWith, ast.Try)):
+                            continue
+                        for c in calls:
+                            seen.add(_name_of(c))
+                        ok = (isinstance(st, ast.Assign) and len(st.targets) == 1
+                              and isinstance(st.targets[0], ast.Name) and i + 1 < len(block)
+                              and isinstance(block[i + 1], ast.If)
+                              and any(isinstance(x, ast.Name) and x.id == st.targets[0].id
+                                      for x in ast.walk(block[i + 1].test))
+                              and isinstance(block[i + 1].body[-1], ast.Return))
+                        if not ok:
+                            out.append(f"{mod}.{fname}:{st.lineno}: calls {_name_of(calls[0])} "
+                                       f"without returning on its answer at once")
+    for h in sorted(set(guarded) - seen):
+        out.append(f"{h}: listed in RETURN_GUARDED and never called")
+    return out
+
+
+# F2 b: every table that stands after the migrations, classed by name. A
+# table is created by a numbered migration (NNN_*.sql; the rollback and resume
+# files are not migrations) and not dropped or renamed away by a later one, or
+# it is an ORM model's table that the bootstrap creates (ranked_series). Each
+# is classed: LIVE, live account state a ban must end; LEFT, rows linked to an
+# account that a ban leaves (history, ledgers, records, or state whose every
+# use refuses a banned account); NO_LINK, no account link. TABLE_CLASSES lives
+# in ban_sweep_tables.py (one line per table).
+LIVE, LEFT, NO_LINK = "live", "left", "no_link"
+_SQL_CREATE = re.compile(
+    r"\bcreate\s+(?:unlogged\s+)?table\s+(?:if\s+not\s+exists\s+)?(?:public\.)?\"?([a-z_][a-z_0-9]*)\"?", re.I)
+_SQL_TEMP = re.compile(r"\bcreate\s+(?:global\s+|local\s+)?(?:temp|temporary)\s+table\b", re.I)
+_SQL_DROP = re.compile(
+    r"\bdrop\s+table\s+(?:if\s+exists\s+)?((?:(?:public\.)?\"?[a-z_][a-z_0-9]*\"?\s*,\s*)*"
+    r"(?:public\.)?\"?[a-z_][a-z_0-9]*\"?)", re.I)
+_SQL_RENAME = re.compile(
+    r"\balter\s+table\s+(?:if\s+exists\s+)?(?:only\s+)?(?:public\.)?\"?([a-z_][a-z_0-9]*)\"?"
+    r"\s+rename\s+to\s+\"?([a-z_][a-z_0-9]*)\"?", re.I)
+_MIGRATION = re.compile(r"[0-9]{3}[a-z]?_.*\.sql$")
+
+
+def standing_tables(sql_files, orm_source=""):
+    """sql_files: {file name: text}; orm_source: models.py. The set of tables
+    standing after the numbered migrations in name order, plus the ORM's."""
+    events = []
+    for f in sorted(sql_files):
+        if not _MIGRATION.match(f):
+            continue
+        sql = re.sub(r"--[^\n]*", " ", re.sub(r"/\*.*?\*/", " ", sql_files[f], flags=re.S))
+        for m in _SQL_CREATE.finditer(sql):
+            if not _SQL_TEMP.match(sql, m.start()):
+                events.append((f, m.start(), "create", m.group(1).lower()))
+        for m in _SQL_DROP.finditer(sql):
+            for t in m.group(1).split(","):
+                events.append((f, m.start(), "drop", t.strip().replace('"', "").split(".")[-1].lower()))
+        for m in _SQL_RENAME.finditer(sql):
+            events.append((f, m.start(), "rename", (m.group(1).lower(), m.group(2).lower())))
+    out = set()
+    for _f, _p, kind, t in sorted(events, key=lambda e: (e[0], e[1])):
+        if kind == "create":
+            out.add(t)
+        elif kind == "drop":
+            out.discard(t)
+        elif t[0] in out:
+            out.discard(t[0])
+            out.add(t[1])
+    out |= set(re.findall(r'__tablename__\s*=\s*"([a-z_0-9]+)"', orm_source))
+    return out
+
+
+def table_class_failures(standing, classes):
+    """Both ways: a standing table not classed; a classed table not standing;
+    an entry with a class outside the three or an empty reason."""
+    out = [f"{t}: stands after the migrations and is not classed" for t in sorted(set(standing) - set(classes))]
+    out += [f"{t}: classed and does not stand" for t in sorted(set(classes) - set(standing))]
+    out += [f"{t}: class {c!r} or its reason is not valid" for t, (c, why) in sorted(classes.items())
+            if c not in (LIVE, LEFT, NO_LINK) or not str(why).strip()]
+    return out
+
+
+VOID_ROOTS = ("_apply_ban_core",)
+
+
+def void_sql_text(funcs_by_module, roots=VOID_ROOTS, module="main", module_source=""):
+    """Every string the void can run: the constants of the ban core and of
+    every function of its module it reaches, and the constants of the module
+    level tables those functions name (the f-string table maps)."""
+    local = funcs_by_module.get(module, {})
+    seen, stack = set(), list(roots)
+    while stack:
+        n = stack.pop()
+        if n in seen or n not in local:
+            continue
+        seen.add(n)
+        for c in ast.walk(local[n]):
+            if isinstance(c, ast.Call) and isinstance(c.func, ast.Name) and c.func.id in local:
+                stack.append(c.func.id)
+    texts, names = [], set()
+    for n in seen:
+        for c in ast.walk(local[n]):
+            if isinstance(c, ast.Constant) and isinstance(c.value, str):
+                texts.append(c.value)
+            elif isinstance(c, ast.Name):
+                names.add(c.id)
+    if module_source:
+        for node in ast.parse(module_source).body:
+            if isinstance(node, ast.Assign) and any(isinstance(t, ast.Name) and t.id in names
+                                                     for t in node.targets):
+                texts += [c.value for c in ast.walk(node.value)
+                          if isinstance(c, ast.Constant) and isinstance(c.value, str)]
+    return "\n".join(texts), seen
+
+
+def void_coverage_failures(classes, void_text):
+    """Every LIVE table must be named by the void: a statement that reads it
+    (its discovery) and one that writes it, or its name as a table-map value
+    the void interpolates into both."""
+    out = []
+    for t, (c, _why) in sorted(classes.items()):
+        if c != LIVE:
+            continue
+        word = re.compile(r"(?<![a-z_0-9])" + re.escape(t) + r"(?![a-z_0-9])")
+        if not word.search(void_text):
+            out.append(f"{t}: a LIVE table the void never names")
+    return out
+
+
+# FIX-1B point 3: ONE order for the identity advisory key. A call that takes
+# the bare identity key (hashtext of the steam id, shared or exclusive) inside
+# a loop must sit in a function that sorts by identity_order.identity_lock_key;
+# a function that takes one account's key is listed with its reason. Every
+# other advisory key carries a literal prefix, so it is another family.
+ORDER_KEY = "identity_lock_key"
+_ADVISORY = re.compile(r"pg_advisory_xact_lock(_shared)?\(\s*hashtext\(", re.I)
+_IDENTITY_KEY = re.compile(
+    r"pg_advisory_xact_lock(_shared)?\(\s*hashtext\(\s*(:sid|CAST\(\s*:sid\s+AS\s+text\s*\))\s*\)\s*\)", re.I)
+_ONE = "takes the key of one account per transaction; it orders nothing"
+SINGLE_KEY_TAKERS = {
+    ("main", "steam_auth"): _ONE,
+    ("main", "_enrollment_identity_gate"): _ONE,
+    ("main", "_region_pings_store_task"): _ONE,
+    ("main", "report_casual_dc"): _ONE,
+    ("main", "_portal_auth"): _ONE,
+    ("main", "i18n_portal_session"): _ONE,
+    ("main", "admin_i18n_sync_keys"): _ONE,
+    ("main", "_pc_verified_actor"): _ONE,
+    ("main", "_pc_claim_daily"): _ONE,
+    ("main", "_pc_bot_actor"): _ONE,
+    ("main", "_pc_steam_write"): _ONE,
+    ("main", "pc_portrait_upload"): _ONE,
+    ("main", "pc_motion_upload"): _ONE,
+    ("main", "pc_dance_select"): _ONE,
+    ("main", "admin_pc_portrait_clear"): _ONE,
+    ("main", "music_rate"): _ONE,
+    ("main", "delete_player_data"): _ONE,
+    ("main", "_grant_translator_achievements"): _ONE,
+    ("main", "_apply_ban_core"): _ONE,
+    ("main", "ffa_readmit_offer"): _ONE,
+    ("main", "place_lobby_bet"): _ONE,
+    ("main", "cancel_lobby_bet"): _ONE,
+    ("main", "set_allow_spectators"): _ONE,
+    ("main", "_invite_identity_lock"): _ONE,
+    ("tournaments", "signup"): _ONE,
+}
+
+# FIX-1B point 3: functions that reach both the shared read (LOCK_CALLERS) and an
+# EXCLUSIVE identity key. A shared key later asked for exclusive waits for every
+# other shared holder; two such transactions wait for each other. Each entry
+# says why that cannot happen there.
+_EXCL_FIRST = "the key it takes exclusive later is taken exclusive in the helper's own ordered pass (exclusive=)"
+SHARED_AND_EXCLUSIVE = {
+    ("main", "submit_match"): "every player's key is taken exclusive first (_identity_lock_many); the "
+                              "shared read then finds its keys held",
+    ("main", "steam_auth"): _EXCL_FIRST,
+    ("main", "report_casual_dc"): _EXCL_FIRST,
+    ("main", "place_lobby_bet"): _EXCL_FIRST,
+    ("main", "place_discord_lobby_bet"): _EXCL_FIRST + " (through place_lobby_bet)",
+    ("main", "submit_ovt_match"): "the receipt's exclusive guards come before the settle's shared read; "
+                                  "the route's own read is plain (ROW_SERIALIZED)",
+    ("main", "submit_team_match"): "the receipt's exclusive guards come before the settle's shared read; "
+                                   "the route's own read is plain (ROW_SERIALIZED)",
+    ("main", "internal_moderation_case_act"): (
+        "RESIDUAL: the moderator's shared key, then the target's exclusive key in the ban core. Two "
+        "moderators acting on each other at the same moment wait for each other until the server ends "
+        "one request; it moves no match result, rating, gold or another player's game"),
+}
+_EXCLUSIVE_KEY = re.compile(
+    r"pg_advisory_xact_lock\(\s*hashtext\(\s*(:sid|CAST\(\s*:sid\s+AS\s+text\s*\))\s*\)\s*\)", re.I)
+EXCLUSIVE_TAKERS_BY_NAME = frozenset({"_identity_lock_many", "_guard_identities", "_guard_player_ids"})
+
+
+def shared_and_exclusive_failures(sources, listed=None):
+    """sources: {module: text}. Every function (other than the helpers) that
+    reaches a LOCK_CALLERS call and an exclusive identity key, against the
+    list, both ways."""
+    listed = SHARED_AND_EXCLUSIVE if listed is None else listed
+    funcs = {}
+    for mod, src in sources.items():
+        tree = ast.parse(src)
+        funcs[mod] = {n.name: n for n in tree.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
+    takers = set(EXCLUSIVE_TAKERS_BY_NAME)
+    for fs in funcs.values():
+        for n, fn in fs.items():
+            if any(isinstance(c, ast.Call) and _name_of(c) != "text" and _EXCLUSIVE_KEY.search(_sql_texts(c))
+                   for c in _own_nodes(fn)):
+                takers.add(n)
+    # The helper's own exclusive keys (exclusive=) are taken in its one ordered
+    # pass, never after a shared key of the same transaction.
+    takers -= LOCK_CALLERS
+    found = set()
+    for mod, fs in funcs.items():
+        for n in fs:
+            if n in LOCK_CALLERS:
+                continue
+            if (reaches(funcs, mod, n, lambda c, cn: cn in LOCK_CALLERS)
+                    and (n in takers or reaches(funcs, mod, n, lambda c, cn: cn in takers))):
+                found.add((mod, n))
+    out = [f"{m}.{n}: reaches the shared read and an exclusive identity key, not listed"
+           for m, n in sorted(found - set(listed))]
+    out += [f"{m}.{n}: listed and no longer reaches both" for m, n in sorted(set(listed) - found)]
+    return out
+
+
+def _sql_texts(call):
+    """The string constants of a call's first argument (text("...") or a bare
+    string), concatenated parts included."""
+    if not call.args:
+        return ""
+    a = call.args[0]
+    if isinstance(a, ast.Call) and _name_of(a) == "text" and a.args:
+        a = a.args[0]
+    return "".join(c.value for c in ast.walk(a) if isinstance(c, ast.Constant) and isinstance(c.value, str))
+
+
+def _prefixed(v):
+    if isinstance(v, ast.BinOp) and isinstance(v.left, ast.Constant) and isinstance(v.left.value, str):
+        return bool(v.left.value) and not v.left.value.startswith("%")
+    if isinstance(v, ast.JoinedStr) and v.values and isinstance(v.values[0], ast.Constant):
+        return bool(v.values[0].value)
+    return False
+
+
+def _in_loop(fn, node):
+    for n in _own_nodes(fn):
+        if isinstance(n, (ast.For, ast.AsyncFor, ast.While, ast.ListComp, ast.SetComp,
+                          ast.GeneratorExp, ast.DictComp)):
+            if any(c is node for c in ast.walk(n)):
+                return True
+    return False
+
+
+def _orders_by_the_key(fn):
+    return any(isinstance(c, ast.Call) and _name_of(c) in ("sorted", "min", "max")
+               and any(k.arg == "key" and (getattr(k.value, "id", None) == ORDER_KEY
+                                           or getattr(k.value, "attr", None) == ORDER_KEY)
+                       for k in c.keywords)
+               for c in _own_nodes(fn))
+
+
+def identity_lock_failures(sources, single=None):
+    """sources: {module: text}. Takers of several identity keys that do not
+    order by the one key; single takers not listed (and listed ones that are
+    not single takers); other advisory keys without a literal prefix."""
+    single = SINGLE_KEY_TAKERS if single is None else single
+    out, seen = [], set()
+    for mod, src in sorted(sources.items()):
+        for fn in _functions(ast.parse(src)):
+            for c in _own_nodes(fn):
+                if not isinstance(c, ast.Call) or _name_of(c) == "text":
+                    continue
+                sql = _sql_texts(c)
+                if not _ADVISORY.search(sql):
+                    continue
+                if _IDENTITY_KEY.search(sql):
+                    if _in_loop(fn, c):
+                        if not _orders_by_the_key(fn):
+                            out.append(f"{mod}.{fn.name}: takes several identity keys and does not order "
+                                       f"by {ORDER_KEY}")
+                    else:
+                        seen.add((mod, fn.name))
+                        if (mod, fn.name) not in single:
+                            out.append(f"{mod}.{fn.name}: takes one identity key and is not listed")
+                    continue
+                if re.search(r"hashtext\(\s*'[^']+'", sql):
+                    continue
+                binds = [a for a in c.args[1:] if isinstance(a, ast.Dict)]
+                vals = [v for d in binds for k, v in zip(d.keys, d.values)
+                        if isinstance(k, ast.Constant) and f":{k.value}" in sql]
+                if not vals or not all(_prefixed(v) for v in vals):
+                    out.append(f"{mod}.{fn.name}: an advisory key that is neither the identity key "
+                               f"nor prefixed")
+    for key in sorted(set(single) - seen):
+        out.append(f"{key[0]}.{key[1]}: listed as a single identity-key taker and takes none")
     return out
 
 

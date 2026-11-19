@@ -94,8 +94,61 @@ def _exit_failures(ns, monkeypatch):
         if (method, path) in B.STRICT_EXITS:
             if kws:
                 out.append(f"{path}: a strict exit called the soft check {kws}")
-        elif not kws or kws[0].get("banned_ok") is not True:
+        elif not kws or any(k.get("banned_ok") is not True for k in kws):
+            # FIX-1B point 5: EVERY soft-check call of an exit, not the first
             out.append(f"{path}: the soft check was called with {kws}, not banned_ok=True")
+    return out
+
+
+def _exit_endpoints():
+    """{(method, path): endpoint function name} for the BAN-R17 exits."""
+    out = {}
+    for r in main.app.routes:
+        for m in getattr(r, "methods", None) or ():
+            if (m, getattr(r, "path", None)) in B.BAN_R17_EXITS:
+                out[(m, r.path)] = r.endpoint.__name__
+    return out
+
+
+def _soft_calls_reached(funcs, name, seen=None):
+    """Every _check_steam_session call in `name` and in every main function it
+    calls by name, transitively: [(function, line, banned_ok keyword or None)]."""
+    import ast
+    seen = set() if seen is None else seen
+    if name in seen or name not in funcs:
+        return []
+    seen.add(name)
+    out = []
+    for c in ast.walk(funcs[name]):
+        if not isinstance(c, ast.Call):
+            continue
+        callee = B._name_of(c)
+        if callee == "_check_steam_session":
+            kw = [k.value for k in c.keywords if k.arg == "banned_ok"]
+            out.append((name, c.lineno, ast.unparse(kw[0]) if kw else None))
+        elif callee in funcs:
+            out += _soft_calls_reached(funcs, callee, seen)
+    return out
+
+
+def _main_funcs(src=None):
+    import ast
+    src = inspect.getsource(main) if src is None else src
+    return {n.name: n for n in ast.parse(src).body
+            if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
+
+
+def _static_exit_failures(funcs):
+    """Every soft-check call an exit can reach, after its first database use
+    too (which the driven test does not pass), carries banned_ok=True."""
+    out = []
+    for key, ep in sorted(_exit_endpoints().items()):
+        calls = _soft_calls_reached(funcs, ep)
+        if key in B.STRICT_EXITS:
+            if calls:
+                out.append(f"{key[1]}: a strict exit reaches the soft check {calls}")
+        elif not calls or any(kw != "True" for _f, _l, kw in calls):
+            out.append(f"{key[1]}: soft-check calls {calls}")
     return out
 
 
@@ -105,6 +158,11 @@ def test_the_driven_exits_are_ban_r17s_list():
 
 def test_every_exit_passes_banned_ok_to_the_soft_check(monkeypatch):
     assert _exit_failures(vars(main), monkeypatch) == []
+
+
+def test_every_soft_check_call_an_exit_can_reach_passes_banned_ok():
+    assert set(_exit_endpoints()) == set(B.BAN_R17_EXITS)
+    assert _static_exit_failures(_main_funcs()) == []
 
 
 def _mutant_ns(fn_name):
@@ -128,3 +186,34 @@ def test_mutant_one_exit_with_banned_ok_false_fails(fn_name, path, monkeypatch):
         ns = vars(main)
     bad = _exit_failures(ns, monkeypatch)
     assert any(b.startswith(path + ":") for b in bad), bad
+
+
+# FIX-1B point 5: an exit whose SECOND soft-check call drops banned_ok. The
+# first-call check passed it; the every-call check and the static walk refuse it.
+_FIRST = "await _check_steam_session(request, steam_id, db, banned_ok=True)\n"
+
+
+def _second_call_mutant_src():
+    src = textwrap.dedent(inspect.getsource(main.queue_leave))
+    src = src[src.index("async def "):]     # no decorator: the mutant registers no route
+    assert src.count(_FIRST) == 1
+    return src.replace(_FIRST, _FIRST + "    await _check_steam_session(request, steam_id, db)\n")
+
+
+def test_mutant_an_exit_whose_second_soft_check_drops_banned_ok_fails(monkeypatch):
+    ns = dict(vars(main))
+    exec(compile(_second_call_mutant_src(), "<mutant>", "exec"), ns)
+    bad = _exit_failures(ns, monkeypatch)
+    assert [b.split(":")[0] for b in bad] == ["/api/v1/queue/leave"], bad
+    kws = _drive(ns, _calls(ns)[("POST", "/api/v1/queue/leave")], "/api/v1/queue/leave", monkeypatch)
+    assert len(kws) == 2 and kws[0].get("banned_ok") is True   # the first call alone passes
+
+
+def test_mutant_the_static_walk_sees_a_second_call_after_the_database():
+    import ast
+    funcs = _main_funcs()
+    src = textwrap.dedent(inspect.getsource(main.queue_leave))
+    mut = src.rstrip("\n") + "\n    await _check_steam_session(request, steam_id, db)\n"
+    funcs["queue_leave"] = ast.parse(mut).body[0]
+    bad = _static_exit_failures(funcs)
+    assert [b.split(":")[0] for b in bad] == ["/api/v1/queue/leave"], bad
