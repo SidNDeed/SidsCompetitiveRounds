@@ -50755,36 +50755,49 @@ async def _ban_void_apply(db: AsyncSession, pid, found: dict) -> None:
         print(f"[BAN] ended {ended} open record(s) of the banned account as void")
 
 
-async def _ban_open_lobby_host_left(db: AsyncSession, mode: str, lobby_id, pid) -> list:
-    """Bans part 2a: the open lobby `lobby_id` of `mode`, whose seat of the
-    banned account `pid` the ban has just removed (its row locked by the ban
-    core): when the account was its host, the first remaining member becomes
-    host; with no member left the lobby is disbanded, its lobby-phase wagers
-    refunded and its invites ended. Account deletion's step, with the same
-    statements. Returns the invites it ended."""
-    lt = {"ffa": "ffa_lobbies", "team": "team_lobbies", "ovt": "ovt_lobbies"}[mode]
-    qt = {"ffa": "ffa_queue", "team": "team_queue", "ovt": "ovt_queue"}[mode]
-    ol = (await db.execute(text(
-        f"SELECT id, host_player_id FROM {lt} WHERE id = :lid AND status = 'open'"),
+_LOBBY_SEAT_TABLES = {"ffa": ("ffa_queue", "ffa_lobbies"),
+                      "team": ("team_queue", "team_lobbies"),
+                      "ovt": ("ovt_queue", "ovt_lobbies")}
+
+
+async def _lobby_seat_left_core(db: AsyncSession, mode: str, lobby_id, leaver_pid) -> tuple:
+    """The ONE implementation of a member leaving an OPEN lobby of `mode`, after
+    the caller deleted the leaver's seat row (when it had one) under the
+    lobby's lock: the ordinary leave (team, 1v2 and FFA) and the ban (FIX-2
+    class III) both call it. The leaver's pending invites for the lobby end
+    (sender_left). Then, judged by the FRESH members only (a member whose
+    poll is older than the freshness bound counts as gone, as everywhere a
+    lobby is read): with none left the lobby is disbanded, its lobby-phase
+    wagers refunded and its invites ended (lobby_closed); otherwise, when the
+    leaver was the STORED host, the earliest fresh member becomes host.
+    Returns (invites ended, disbanded, the fresh members left); the caller
+    moves the invitees' revisions (_invite_bump) and commits."""
+    qt, lt = _LOBBY_SEAT_TABLES[mode]
+    inv = await _invite_end_departed(db, mode, lobby_id, [leaver_pid])
+    lrow = (await db.execute(text(
+        f"SELECT status, host_player_id FROM {lt} WHERE id = :lid"),
         {"lid": lobby_id})).mappings().first()
-    if ol is None or ol["host_player_id"] != pid:
-        return []
-    live = (await db.execute(text(
+    if lrow is None or lrow["status"] != "open":
+        return inv, False, []
+    remaining = (await db.execute(text(
         f"SELECT player_id FROM {qt} WHERE series_id = :lid AND status = 'lobby'"
-        f" AND player_id <> :pid ORDER BY joined_at, player_id::text"),
-        {"lid": lobby_id, "pid": pid})).scalars().all()
-    if live:
+        f" AND {LOBBY_MEMBER_FRESH_SQL} ORDER BY joined_at, player_id::text"),
+        {"lid": lobby_id})).scalars().all()
+    if not remaining:
+        killed = (await db.execute(text(
+            f"UPDATE {lt} SET status='canceled', invalidated_at=NOW(),"
+            f" invalidation_reason='lobby_disbanded' WHERE id = :lid AND status = 'open'"
+            f" RETURNING id"), {"lid": lobby_id})).scalar()
+        # Only when the TERMINAL transition landed (migration 207): a refund
+        # on a mere seat event would void live wagers on a lobby about to start.
+        if killed is not None:
+            await _refund_lobby_bets(db, mode, lobby_id, "lobby_disbanded")
+            inv += await _invite_end_lobby(db, mode, lobby_id, "lobby_closed")
+        return inv, True, []
+    if lrow["host_player_id"] == leaver_pid:
         await db.execute(text(f"UPDATE {lt} SET host_player_id = :h WHERE id = :lid"),
-                         {"h": live[0], "lid": lobby_id})
-        return []
-    killed = (await db.execute(text(
-        f"UPDATE {lt} SET status='canceled', invalidated_at=NOW(),"
-        f" invalidation_reason='lobby_disbanded' WHERE id = :lid AND status = 'open'"
-        f" RETURNING id"), {"lid": lobby_id})).scalar()
-    if killed is None:
-        return []
-    await _refund_lobby_bets(db, mode, lobby_id, "lobby_disbanded")
-    return await _invite_end_lobby(db, mode, lobby_id, "lobby_closed")
+                         {"h": remaining[0], "lid": lobby_id})
+    return inv, False, list(remaining)
 
 
 async def _apply_ban_core(db: AsyncSession, *, admin_steam_id: str, target_steam_id: str,
@@ -50879,10 +50892,14 @@ async def _apply_ban_core(db: AsyncSession, *, admin_steam_id: str, target_steam
         for _lmode, _lqt, _llt in (("ffa", "ffa_queue", "ffa_lobbies"),
                                    ("team", "team_queue", "team_lobbies"),
                                    ("ovt", "ovt_queue", "ovt_lobbies")):
-            _blid = (await db.execute(text(
-                f"SELECT series_id FROM {_lqt} WHERE player_id = :pid AND status = 'lobby'"
-            ), {"pid": _bpid})).scalar()
-            if _blid is not None:
+            # FIX-2 class III: every OPEN lobby the account hosts or holds a
+            # seat in, read from the lobby table itself (a host whose own
+            # expired seat row is already gone is found by host_player_id).
+            for _blid in (await db.execute(text(
+                    f"SELECT id FROM {_llt} WHERE status = 'open' AND (host_player_id = :pid"
+                    f" OR id IN (SELECT series_id FROM {_lqt}"
+                    f"           WHERE player_id = :pid AND status = 'lobby'))"
+                    f" ORDER BY id"), {"pid": _bpid})).scalars().all():
                 await db.execute(text(
                     f"SELECT 1 FROM {_llt} WHERE id = :lid FOR NO KEY UPDATE"
                 ), {"lid": _blid})
@@ -50919,11 +50936,13 @@ async def _apply_ban_core(db: AsyncSession, *, admin_steam_id: str, target_steam
                 f"DELETE FROM {_qt} WHERE player_id = :pid"
             ), {"pid": _bpid})
         for _lmode, _blid in _ban_lobbies:
-            _ban_inv_ended += await _invite_end_departed(db, _lmode, _blid, [_bpid])
-            # Bans part 2a: an open lobby the account hosted gets the first
-            # remaining member as host, or, with none left, is disbanded
-            # (account deletion's step; its row is locked above).
-            _ban_inv_ended += await _ban_open_lobby_host_left(db, _lmode, _blid, _bpid)
+            # FIX-2 class III: the account leaves each open lobby through the
+            # ordinary leave's own core (_lobby_seat_left_core): its invites
+            # end, then the lobby is disbanded with refunds when no fresh
+            # member is left, or the stored host's successor is the earliest
+            # fresh member. Its seat row was deleted just above.
+            _inv, _disb, _left = await _lobby_seat_left_core(db, _lmode, _blid, _bpid)
+            _ban_inv_ended += _inv
             # BAN-R21: no wager of the account's own stays on the lobby it left
             # (a disband above refunded every wager; this is a no-op then).
             await _refund_lobby_bets(db, _lmode, _blid, "bettor_banned", bettor=_bpid)
@@ -61177,40 +61196,12 @@ async def _lobby_leave_impl(mode: str, steam_id: str, expected_lobby_id: str | N
     await db.execute(text(
         "DELETE FROM queue_leases WHERE player_id = :pid AND group_id = CAST(:lid AS uuid)"
     ), {"pid": me["player_id"], "lid": str(lobby_id)})
-    # Migration 416's change: the leaver's pending invites for this lobby end
-    # with them (sender_left), and a disband ends the rest (lobby_closed);
-    # the invitees' revisions move as the transaction's last statement.
-    _inv_ended = await _invite_end_departed(db, mode, lobby_id, [me["player_id"]])
-    remaining = (await db.execute(text(f"""
-        SELECT player_id FROM {cfg['queue']}
-         WHERE series_id = :lid AND status = 'lobby' AND {LOBBY_MEMBER_FRESH_SQL}
-         ORDER BY joined_at, player_id::text
-    """), {"lid": lobby_id})).scalars().all()
-    disbanded = False
-    if not remaining:
-        _killed = (await db.execute(text(f"""
-            UPDATE {cfg['lobbies']} SET status='canceled', invalidated_at=NOW(),
-                   invalidation_reason='lobby_disbanded'
-             WHERE id=:lid AND status='open'
-            RETURNING id"""), {"lid": lobby_id})).scalar()
-        disbanded = True
-        # Only when the TERMINAL transition actually landed (migration 207):
-        # one member leaving a lobby that still has people in it does not
-        # dissolve anything, and refunding there would void live wagers on a
-        # lobby that is about to start. No-op for 'ovt' (no bet table).
-        if _killed is not None:
-            await _refund_lobby_bets(db, mode, lobby_id, "lobby_disbanded")
-            _inv_ended += await _invite_end_lobby(db, mode, lobby_id, "lobby_closed")
-    else:
-        # Promote only when the LEAVER was the stored host (a read never
-        # persists the derived host — see _lobby_effective_host).
-        _host = (await db.execute(text(
-            f"SELECT host_player_id FROM {cfg['lobbies']} WHERE id=:lid"
-        ), {"lid": lobby_id})).scalar()
-        if _host == me["player_id"]:
-            await db.execute(text(
-                f"UPDATE {cfg['lobbies']} SET host_player_id=:h WHERE id=:lid"
-            ), {"h": remaining[0], "lid": lobby_id})
+    # The rest is the one open-lobby leave core the ban also runs
+    # (_lobby_seat_left_core): the leaver's invites end, then disband with
+    # refunds when no fresh member is left, or the stored host's successor.
+    # The invitees' revisions move as the transaction's last statement.
+    _inv_ended, disbanded, remaining = await _lobby_seat_left_core(
+        db, mode, lobby_id, me["player_id"])
     await _invite_bump(db, _inv_ended)
     await db.commit()
     print(f"[{cfg['label']}-LOBBY] {steam_id} left lobby {lobby_id}"
@@ -63654,38 +63645,15 @@ async def ffa_queue_leave(request: Request, steam_id: str = Query(...),
     if me["status"] == "lobby" and lobby_id is not None:
         await db.execute(text("DELETE FROM ffa_queue WHERE player_id = :pid"),
                          {"pid": me["player_id"]})
-        # Migration 416's change: the leaver's pending invites for this lobby
-        # end with them (sender_left), and a disband ends the rest
-        # (lobby_closed); the invitees' revisions move as the last statement.
-        _inv_ended = await _invite_end_departed(db, "ffa", lobby_id, [me["player_id"]])
-        lrow = (await db.execute(text(
-            "SELECT status, host_player_id FROM ffa_lobbies WHERE id = :lid"
-        ), {"lid": lobby_id})).mappings().first()
-        if lrow is not None and lrow["status"] == "open":
-            live = await _ffa_live_lobby_members(db, lobby_id)
-            if not live:
-                _cancelled = (await db.execute(text(
-                    """UPDATE ffa_lobbies SET status='canceled', invalidated_at=NOW(),
-                              invalidation_reason='lobby_disbanded'
-                        WHERE id=:lid AND status='open'
-                     RETURNING id"""), {"lid": lobby_id})).scalar()
-                print(f"[FFA-LOBBY] lobby {lobby_id} disbanded (last member left: {steam_id})")
-                # Review find 1: this is a TERMINAL transition, so staged
-                # wagers must come back here rather than waiting on the
-                # 10-minute orphan janitor. Gated on the UPDATE having
-                # actually fired (the house rule: refund on the transition,
-                # never on a mere seat event).
-                if _cancelled is not None:
-                    try:
-                        await _refund_lobby_bets(db, "ffa", lobby_id, "lobby_disbanded")
-                    except Exception as _re:
-                        print(f"[FFA-LOBBY] lobby-bet refund deferred to janitor: {_re}")
-                    _inv_ended += await _invite_end_lobby(db, "ffa", lobby_id, "lobby_closed")
-            elif lrow["host_player_id"] == me["player_id"]:
-                await db.execute(text(
-                    "UPDATE ffa_lobbies SET host_player_id=:h WHERE id=:lid"
-                ), {"h": live[0]["player_id"], "lid": lobby_id})
-                print(f"[FFA-LOBBY] host left lobby {lobby_id} — promoted earliest member")
+        # The one open-lobby leave core the team and 1v2 leaves and the ban
+        # also run (_lobby_seat_left_core): the leaver's invites end, then
+        # disband with the lobby-phase wagers refunded on the terminal
+        # transition when no fresh member is left, or the stored host's
+        # successor. The invitees' revisions move as the last statement.
+        _inv_ended, _disb, _left = await _lobby_seat_left_core(
+            db, "ffa", lobby_id, me["player_id"])
+        if _disb:
+            print(f"[FFA-LOBBY] lobby {lobby_id} disbanded (last member left: {steam_id})")
         await _invite_bump(db, _inv_ended)
         await db.commit()
         return {"status": "ok"}

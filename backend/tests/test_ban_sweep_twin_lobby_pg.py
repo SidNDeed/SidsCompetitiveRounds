@@ -211,12 +211,12 @@ def test_r21_a_banned_sole_member_disbands_the_lobby_with_refunds_as_the_leave_d
 
 def test_r21_mutant_without_the_host_step_the_lobby_keeps_a_departed_host(monkeypatch):
     async def nothing(db, mode, lobby_id, pid):
-        return []
+        return [], False, []
 
     got = {}
 
     async def body(env):
-        got["ban"], got["leave"] = await _twins(env, "team", 3, ban_mutant=("_ban_open_lobby_host_left", nothing))
+        got["ban"], got["leave"] = await _twins(env, "team", 3, ban_mutant=("_lobby_seat_left_core", nothing))
     case(monkeypatch, body)
     assert got["ban"][0]["host"] == "departed", got["ban"][0]["host"]
     assert got["ban"][0] != got["leave"][0]
@@ -250,3 +250,114 @@ def test_r21_mutant_without_the_own_wager_step_the_banned_accounts_wager_stays(m
                                                 ban_mutant=("_refund_lobby_bets", all_but_own))
     case(monkeypatch, body)
     assert got["ban"][1]["wagers"] == 1, got["ban"][1]
+
+
+# ---------------------------------------------------------------- FIX-2 class III
+# The ban leaves every open lobby through the ordinary leave's own core
+# (_lobby_seat_left_core); the lobbies are found in the lobby tables.
+
+def _core_mutant(old, new):
+    """_lobby_seat_left_core with one branch changed (old occurs once)."""
+    import inspect
+    import textwrap
+    src = textwrap.dedent(inspect.getsource(main._lobby_seat_left_core))
+    assert src.count(old) == 1, old
+    ns = dict(vars(main))
+    exec(compile(src.replace(old, new), "<mutant>", "exec"), ns)
+    return ns["_lobby_seat_left_core"]
+
+
+_FRESH_BRANCH = (' AND {LOBBY_MEMBER_FRESH_SQL} ORDER BY', ' ORDER BY')
+_DISBAND_BRANCH = ('await _refund_lobby_bets(db, mode, lobby_id, "lobby_disbanded")', 'pass')
+_PROMOTE_BRANCH = ('if lrow["host_player_id"] == leaver_pid:', 'if False:')
+
+
+async def _stale_host_twins(env, mode, mutant=None):
+    """Reviewer case 1: the stored host's seat is stale and the departing
+    account is the only fresh non-host. One twin's account is banned, the
+    other's leaves by the route."""
+    env.mp.setattr(main, "_pc_lease_drain", _drain_now)
+    admin = await _admin(env)
+    out = []
+    for how in ("ban", "leave"):
+        lid, ps = await env.lobby(mode, 2)
+        await env.fresh(mode, lid)
+        await env.stale(mode, ps[0], lid)
+        bettor = (await env.players(1))[0]
+        bet = await _bet(env, mode, lid, bettor, ps[0])
+        if how == "ban":
+            real = main._lobby_seat_left_core
+            if mutant is not None:
+                main._lobby_seat_left_core = mutant
+            try:
+                await _ban(env, admin, ps[1])
+            finally:
+                main._lobby_seat_left_core = real
+        else:
+            left = await env.leave(mode, ps[1], lid)
+            assert left.status == 200, left
+        out.append((await env.lobby_status(mode, lid),
+                    await env.conn.fetchval("SELECT status FROM lobby_bets WHERE id = $1", bet)
+                    if bet else None))
+    return out
+
+
+@pytest.mark.parametrize("mode", MODES)
+def test_iii_case1_stale_host_and_the_only_fresh_member_departs_disbands_as_the_leave_does(monkeypatch, mode):
+    got = {}
+
+    async def body(env):
+        got["v"] = await _stale_host_twins(env, mode)
+    case(monkeypatch, body)
+    ban, leave = got["v"]
+    assert ban == leave and ban[0] == "canceled" and ban[1] in (None, "refunded"), got["v"]
+
+
+def test_iii_mutant_the_core_without_its_freshness_filter_keeps_the_stale_lobby(monkeypatch):
+    got = {}
+
+    async def body(env):
+        got["v"] = await _stale_host_twins(env, "team", _core_mutant(*_FRESH_BRANCH))
+    case(monkeypatch, body)
+    ban, leave = got["v"]
+    assert ban[0] == "open" and ban != leave, got["v"]
+
+
+def test_iii_mutant_the_core_without_its_disband_refund_leaves_the_wager_open(monkeypatch):
+    got = {}
+
+    async def body(env):
+        got["v"] = await _stale_host_twins(env, "team", _core_mutant(*_DISBAND_BRANCH))
+    case(monkeypatch, body)
+    ban, leave = got["v"]
+    assert ban[1] == "open" and ban != leave, got["v"]
+
+
+def test_iii_mutant_the_core_without_its_promote_branch_keeps_a_departed_host(monkeypatch):
+    got = {}
+
+    async def body(env):
+        got["ban"], got["leave"] = await _twins(
+            env, "team", 3, ban_mutant=("_lobby_seat_left_core", _core_mutant(*_PROMOTE_BRANCH)))
+    case(monkeypatch, body)
+    assert got["ban"][0]["host"] == "departed" and got["ban"][0] != got["leave"][0], got["ban"][0]["host"]
+
+
+@pytest.mark.parametrize("mode", MODES)
+def test_iii_case2_a_banned_host_whose_own_seat_row_is_gone_hands_the_lobby_on(monkeypatch, mode):
+    """Reviewer case 2: the account hosts an open lobby whose own expired seat
+    row is already gone. The lobby is found by its host column; the earliest
+    fresh member becomes host, as the core makes a stored host's successor."""
+    got = {}
+
+    async def body(env):
+        env.mp.setattr(main, "_pc_lease_drain", _drain_now)
+        admin = await _admin(env)
+        lid, ps = await env.lobby(mode, 2)
+        await env.fresh(mode, lid)
+        await env.conn.execute("DELETE FROM %s WHERE player_id = $1" % QUEUE_TABLE[mode], ps[0].id)
+        await _ban(env, admin, ps[0])
+        got["v"] = (await env.lobby_status(mode, lid), await env.conn.fetchval(
+            "SELECT host_player_id FROM %s WHERE id = $1" % LOBBY_TABLE[mode], lid) == ps[1].id)
+    case(monkeypatch, body)
+    assert got["v"] == ("open", True), got["v"]
