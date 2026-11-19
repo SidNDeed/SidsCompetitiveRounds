@@ -304,3 +304,86 @@ def test_f2_c_mutant_the_queued_post_delete_matching_nothing_leaves_the_post(cas
     monkeypatch.setattr(main, "text", rewritten)
     _before, after, _held = _with_sm(case, lambda sm: _run_census(sm, monkeypatch))
     assert {t: n for t, n in after.items() if n} == {"lfp_pings": 7}, after
+
+
+# ---------------------------------------------------------------- FIX-2 class II
+# Two account columns the census above did not seed: the spectator of a lease
+# held by an authenticated account with NO players row, and the INVITEE of a
+# pending invite. Each ends with the ban; each mutant leaves it standing.
+
+async def _no_row_spectator(sm):
+    """A session-only account (no players row) holding a spectate lease."""
+    sid = _sid()
+    async with sm() as db:
+        await db.execute(text(
+            "INSERT INTO steam_sessions (token_hash, steam_id, verified, issued_at, expires_at)"
+            " VALUES (:th, :s, true, NOW(), NOW() + INTERVAL '1 day')"),
+            {"th": "lc-" + uuid.uuid4().hex, "s": sid})
+        gid = uuid.uuid4()
+        await lh._insert(db, "spectate_games", {"id": gid, "mode": "ranked",
+                                                "room_name": "lc-room-" + uuid.uuid4().hex[:8],
+                                                "fighter_target": 2})
+        await db.execute(text(
+            "INSERT INTO spectate_leases (id, token_hash, game_id, spectator_steam_id,"
+            " join_expires_at, heartbeat_expires_at)"
+            " VALUES (:i, :th, :g, :s, NOW() + INTERVAL '1 minute', NOW() + INTERVAL '1 minute')"),
+            {"i": uuid.uuid4(), "th": uuid.uuid4().hex, "g": gid, "s": sid})
+        await db.commit()
+    return sid
+
+
+async def _live_spectate(sm, sid):
+    async with sm() as db:
+        return (await db.execute(text(
+            "SELECT count(*) FROM spectate_leases WHERE spectator_steam_id = :s AND revoked_at IS NULL"),
+            {"s": sid})).scalar()
+
+
+def test_ii_the_spectate_lease_of_an_account_without_a_players_row_ends(case, monkeypatch):
+    monkeypatch.setattr(main, "_pc_lease_drain", _drain_now)
+
+    async def body(sm):
+        sid = await _no_row_spectator(sm)
+        before = await _live_spectate(sm, sid)
+        await _ban(sm, sid)
+        return before, await _live_spectate(sm, sid)
+    assert _with_sm(case, body) == (1, 0)
+
+
+async def _incoming_invite(sm):
+    """X holds a pending invite from Y to Y's open 2v2 lobby."""
+    xs = _sid()
+    async with sm() as db:
+        xp = await _player(db, xs)
+        yp = await _player(db, _sid())
+        lid = uuid.uuid4()
+        await lh._insert(db, "team_lobbies", {"id": lid, "host_player_id": yp, "status": "open"})
+        iid = uuid.uuid4()
+        await lh._insert(db, "lobby_invites", {"id": iid, "mode": "team", "lobby_id": lid,
+                                               "sender_player_id": yp, "invitee_player_id": xp,
+                                               "state": "pending", "kind": "invite",
+                                               "expires_at": _SOON})
+        await db.commit()
+    return xs, iid
+
+
+def _invite_body(monkeypatch):
+    monkeypatch.setattr(main, "_pc_lease_drain", _drain_now)
+
+    async def body(sm):
+        xs, iid = await _incoming_invite(sm)
+        await _ban(sm, xs)
+        async with sm() as db:
+            return tuple((await db.execute(text(
+                "SELECT state, end_reason FROM lobby_invites WHERE id = :i"), {"i": iid})).first())
+    return body
+
+
+def test_ii_a_pending_invite_to_the_banned_account_ends(case, monkeypatch):
+    assert _with_sm(case, _invite_body(monkeypatch)) == ("void", "invitee_kicked")
+
+
+def test_ii_mutant_without_the_incoming_invite_end_the_invite_stays_pending(case, monkeypatch):
+    monkeypatch.setattr(main, "_INVITE_END_INVITEE_SQL",
+                        "SELECT CAST(NULL AS uuid) WHERE CAST(:pid AS uuid) IS NULL")
+    assert _with_sm(case, _invite_body(monkeypatch)) == ("pending", None)

@@ -50894,10 +50894,6 @@ async def _apply_ban_core(db: AsyncSession, *, admin_steam_id: str, target_steam
                 _ban_void_found = await _ban_void_lock(db, _bpid)
         # ...and ended as void, before the queue rows below.
         await _ban_void_apply(db, _bpid, _ban_void_found)
-        # The account's spectate leases end as the spectate leave ends one
-        # (F2 d): drain tombstone, then the lease revoked, through the one
-        # helper the leave route uses, so the seat is free at once.
-        await _spectate_leave_rows(db, target_steam_id)
         # F2 b: a looking-for-players post the account queued and the bot has
         # not posted yet is the account's live state too (the bot's poll
         # reads no ban).
@@ -50931,6 +50927,11 @@ async def _apply_ban_core(db: AsyncSession, *, admin_steam_id: str, target_steam
             # BAN-R21: no wager of the account's own stays on the lobby it left
             # (a disband above refunded every wager; this is a no-op then).
             await _refund_lobby_bets(db, _lmode, _blid, "bettor_banned", bettor=_bpid)
+        # FIX-2 class II: every pending invite TO the account ends too, in any
+        # lobby and mode (_INVITE_END_INVITEE_SQL); the invitees' revisions
+        # move with the others below (_invite_bump).
+        _ban_inv_ended += list((await db.execute(text(_INVITE_END_INVITEE_SQL),
+                                                 {"pid": str(_bpid)})).scalars().all())
         # The account's own seat lease last, after every parent, queue row and
         # invite (the order account deletion keeps). The leases of the records
         # the void ended were released by _ban_void_apply beside each reset.
@@ -50939,6 +50940,13 @@ async def _apply_ban_core(db: AsyncSession, *, admin_steam_id: str, target_steam
         # The candidate scans additionally exclude active bans (round-16) and
         # the issuance branches re-check all members (round-17) — those stay
         # as defense-in-depth around this serialization.
+    # The account's spectate leases end as the spectate leave ends one (F2 d;
+    # FIX-2 class II): drain tombstone, then the lease revoked, through the one
+    # helper the leave route uses. Keyed by the steam id and run whether or not
+    # the account has a players row: a spectate lease needs only an
+    # authenticated session. The lease is revoked at once; the drain mark keeps
+    # the slot taken until a later complete inventory ends it.
+    await _spectate_leave_rows(db, target_steam_id)
     # Player Cards, first (r7 H2): a Discord line in flight naming this
     # player -- as a card's subject or as a party of a pull -- is on Discord
     # before the ban commits; the writer waits for the bot to release its
@@ -84553,6 +84561,21 @@ _INVITE_END_LOBBY_SQL = (
     "       ended_at = c.at"
     "  FROM c"
     " WHERE mode = :mode AND lobby_id = :lid AND state = 'pending'"
+    " RETURNING mail_message_id"
+)
+
+# A ban ends every pending invite TO the banned account, in every lobby and
+# mode, as a kick ends them (FIX-2 class II): its accept would be refused by
+# the ban. Run by the ban core under the account's exclusive identity key,
+# which every accept and decline of the invitee takes first.
+_INVITE_END_INVITEE_SQL = (
+    "WITH c AS MATERIALIZED (SELECT clock_timestamp() AS at)"
+    " UPDATE lobby_invites"
+    "   SET state = CASE WHEN expires_at <= c.at THEN 'expired' ELSE 'void' END,"
+    "       end_reason = CASE WHEN expires_at <= c.at THEN NULL ELSE 'invitee_kicked' END,"
+    "       ended_at = c.at"
+    "  FROM c"
+    " WHERE state = 'pending' AND invitee_player_id = CAST(:pid AS uuid)"
     " RETURNING mail_message_id"
 )
 
