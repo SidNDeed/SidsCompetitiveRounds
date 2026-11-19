@@ -75079,6 +75079,8 @@ _QAPPLY_TEXTS = {
     "insert_failed": "The server could not record this game; nothing was applied. Try again.",
     "wagers": "This game's wagers could not be settled; nothing was applied. Try again.",
     "retry": "The server could not finish this action now; nothing was changed. Try again.",
+    "busy": ("Another request is using this game's players or lobby, so the action stopped at its time "
+             "limit; nothing was changed. Try again in a moment."),
     "refused": "The server refused to apply this report; it stays held.",
     "can_accept": "Accept can apply this game now, with its ratings; use Accept instead of Credit.",
     "credited_before": "This report's XP and gold were already credited.",
@@ -75269,6 +75271,33 @@ _QAPPLY_SQL_CLAIMS_CREDITED = """
      WHERE lobby_id = CAST(:lid AS uuid) AND kind = 'credit'
      ORDER BY game_number
 """
+# The bounds of Accept's and Credit's one transaction (FIX-1). In the
+# database: a lock wait ends at lock_timeout and a statement, its lock waits
+# included, at statement_timeout, both set transaction-local (is_local true)
+# as the transaction's first statement, before the held row's lock. In the
+# process: the whole unit, the COMMIT included (which neither database bound
+# covers), ends at _QAPPLY_DEADLINE_S. Either end rolls back and answers the
+# "busy" sentence with nothing written. A player's report that waits on a row
+# one of these actions holds therefore waits at most the deadline.
+_QAPPLY_LOCK_TIMEOUT_MS = 2000
+_QAPPLY_STATEMENT_TIMEOUT_MS = 5000
+_QAPPLY_DEADLINE_S = 8.0
+_QAPPLY_SQL_BOUNDS = ("SELECT set_config('lock_timeout', CAST(:lt AS text), true), "
+                      "set_config('statement_timeout', CAST(:st AS text), true)")
+
+
+async def _qapply_bound(db) -> None:
+    """The two database bounds, set before the first lock (see above)."""
+    await db.execute(text(_QAPPLY_SQL_BOUNDS), {
+        "lt": f"{int(_QAPPLY_LOCK_TIMEOUT_MS)}ms", "st": f"{int(_QAPPLY_STATEMENT_TIMEOUT_MS)}ms"})
+
+
+def _qapply_out_of_time(ex: BaseException) -> bool:
+    """The unit's deadline, or a database bound of this transaction
+    (55P03 lock_timeout, 57014 statement_timeout)."""
+    if isinstance(ex, TimeoutError):
+        return True
+    return _evc_reason(ex).endswith((" 55P03", " 57014"))
 
 
 async def _qapply_claim_of(db, lobby_uuid, game: int):
@@ -75804,16 +75833,20 @@ async def admin_accept_quarantine(qid: str, req: _AdminQuarantineReq,
         raise HTTPException(422, "note is not storable text")
     await _require_admin(db, req.admin_steam_id, "quarantine_action", qid, req.hmac_signature)
     try:
-        row, report = await _qapply_held(db, qid_uuid)
-        ctx = {"kind": "accept", "qid": str(qid_uuid), "received_at": row["created_at"],
-               "actor": req.admin_steam_id, "note": note, "applied": None}
-        async with _qapply_run(ctx):
-            await submit_ffa_match(report, None, db)
+        async with asyncio.timeout(_QAPPLY_DEADLINE_S):
+            await _qapply_bound(db)
+            row, report = await _qapply_held(db, qid_uuid)
+            ctx = {"kind": "accept", "qid": str(qid_uuid), "received_at": row["created_at"],
+                   "actor": req.admin_steam_id, "note": note, "applied": None}
+            async with _qapply_run(ctx):
+                await submit_ffa_match(report, None, db)
     except HTTPException as ex:
         await _asm_rollback(db)
         raise _qapply_answer(ex)
-    except BaseException:
+    except BaseException as ex:
         await _asm_rollback(db)
+        if _qapply_out_of_time(ex):
+            raise HTTPException(503, _QAPPLY_TEXTS["busy"])
         raise
     if ctx.get("applied") is None:
         # The body answered without recording a game (an echo of a game
@@ -75841,17 +75874,21 @@ async def admin_credit_quarantine(qid: str, req: _AdminQuarantineReq,
         raise HTTPException(422, "note is not storable text")
     await _require_admin(db, req.admin_steam_id, "quarantine_credit", qid, req.hmac_signature)
     try:
-        row, report = await _qapply_held(db, qid_uuid)
-        ctx = {"kind": "credit", "qid": str(qid_uuid), "received_at": row["created_at"],
-               "actor": req.admin_steam_id, "note": note}
-        async with _qapply_run(ctx):
-            paid = await _qapply_credit(db, row, report, actor=req.admin_steam_id, note=note)
-            await db.commit()
+        async with asyncio.timeout(_QAPPLY_DEADLINE_S):
+            await _qapply_bound(db)
+            row, report = await _qapply_held(db, qid_uuid)
+            ctx = {"kind": "credit", "qid": str(qid_uuid), "received_at": row["created_at"],
+                   "actor": req.admin_steam_id, "note": note}
+            async with _qapply_run(ctx):
+                paid = await _qapply_credit(db, row, report, actor=req.admin_steam_id, note=note)
+                await db.commit()
     except HTTPException as ex:
         await _asm_rollback(db)
         raise _qapply_answer(ex)
-    except BaseException:
+    except BaseException as ex:
         await _asm_rollback(db)
+        if _qapply_out_of_time(ex):
+            raise HTTPException(503, _QAPPLY_TEXTS["busy"])
         raise
     print(f"[QUARANTINE] {qid} credited by {req.admin_steam_id}: {len(paid)} player(s)")
     return {"status": "credited",

@@ -1447,3 +1447,62 @@ def test_f2_credit_refuses_a_held_row_a_verification_fails_and_writes_nothing(wo
         # The list's flag agrees (M1: the same verifications, read form).
         assert (await listing(env))[qid]["can_credit"] is False, word
     run_env(monkeypatch, body)
+
+
+# ── F3: neither action waits without a bound, nor makes a report wait ─────
+# A third session holds a participant's players row; the action needs it.
+
+F3_OWN_BOUND_S = 6.0     # the lock bound (2 s) and the work around it
+F3_REPORT_BOUND_S = 10.0  # what a player's report may wait at most
+
+
+async def _f3_case(env, act):
+    lob, qid = await closed_held(env)
+    if act is credit:
+        await later_for(env, lob)
+    return lob, qid
+
+
+@pytest.mark.parametrize("act", (accept, credit), ids=("accept", "credit"))
+def test_f3_an_action_meeting_a_held_row_refuses_within_its_bound_and_writes_nothing(act, monkeypatch):
+    async def body(env):
+        lob, qid = await _f3_case(env, act)
+        before = await tables(env)
+        async with env.sm() as s:
+            await s.execute(text("SELECT 1 FROM players WHERE id = CAST(:p AS uuid) FOR UPDATE"),
+                            {"p": str(lob.pids[1])})
+            t0 = asyncio.get_running_loop().time()
+            ans = await asyncio.wait_for(act(env, qid), F3_OWN_BOUND_S + 4)
+            took = asyncio.get_running_loop().time() - t0
+            await s.rollback()
+        assert (ans.status, ans.body) == (503, T["busy"]), (act.__name__, ans)
+        assert took < F3_OWN_BOUND_S, (act.__name__, "refused in %.1f s" % took)
+        assert await tables(env) == before, (act.__name__, "nothing written")
+        assert await status_of(env, qid) == "pending"
+        # Once the row is free the action goes through.
+        assert (await act(env, qid)).status == 200
+    run_env(monkeypatch, body)
+
+
+@pytest.mark.parametrize("act", (accept, credit), ids=("accept", "credit"))
+def test_f3_a_report_waiting_on_an_actions_rows_is_answered_within_the_bound(act, monkeypatch):
+    async def body(env):
+        lob, qid = await _f3_case(env, act)
+        rep = await env.report_req(lob, 3, res(lob))
+        async with env.sm() as s:
+            # The action takes the held row and the lobby, then waits on this row.
+            await s.execute(text("SELECT 1 FROM players WHERE id = CAST(:p AS uuid) FOR UPDATE"),
+                            {"p": str(lob.pids[1])})
+            t_act = asyncio.create_task(act(env, qid))
+            await asyncio.sleep(0.8)
+            t0 = asyncio.get_running_loop().time()
+            # A player's report of the same lobby waits on the lobby's row.
+            got = await asyncio.wait_for(env.submit(rep), F3_REPORT_BOUND_S + 2)
+            took = asyncio.get_running_loop().time() - t0
+            ans = await asyncio.wait_for(t_act, F3_REPORT_BOUND_S)
+            await s.rollback()
+        assert got.status != 500, ("the report is served or refused", got)
+        assert took < F3_REPORT_BOUND_S, ("the report waited %.1f s" % took)
+        assert (ans.status, ans.body) == (503, T["busy"]), (act.__name__, ans)
+        assert await status_of(env, qid) == "pending"
+    run_env(monkeypatch, body)
