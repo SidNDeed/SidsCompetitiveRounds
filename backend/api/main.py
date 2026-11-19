@@ -36,6 +36,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from pydantic import field_validator   # its own line: an import line is part of every fingerprint that reaches a name it binds
 from database import RELEASE_POOL_OVERFLOW, RELEASE_POOL_SIZE, get_db, get_release_db
 from database import get_asm_db
+from identity_order import identity_lock_key
 from flag_evidence import fetch_flag_context_rows, flag_payload
 import review_boot, seat_evidence as _sev   # review_boot FIRST: the review closure executes from source only
 import card_evidence as _cev
@@ -16901,7 +16902,7 @@ async def steam_auth(req: SteamAuthRequest, db: AsyncSession = Depends(get_db)):
     # heartbeat") — a banned account could immediately obtain a fresh verified
     # session and keep using every session-gated endpoint that lacks a
     # usage-site ban check. Bans must also stop the mint.
-    await _ban_lock_and_gate(db, [req.steam_id])
+    await _ban_lock_and_gate(db, [req.steam_id], exclusive=[req.steam_id])
     key = os.getenv("STEAM_WEB_API_KEY", "")
     verified = False
     if key:
@@ -18357,18 +18358,18 @@ async def _identity_lock_many(db: AsyncSession, steam_ids, *,
     Ordering is the whole point, not tidiness. Two formations overlapping on A
     and B that acquire in opposite orders deadlock on the advisory locks
     themselves, which no row ordering can repair (#197/#202/#282). The key is
-    _ffa_sort_key -- the repo's existing canonical (length, ordinal) order for
-    steam ids. Any total order would serialize correctly PROVIDED it is the
-    only one in the class, which is why every site routes through this function
-    rather than sorting for itself; _ffa_sort_key is chosen over bare sorted()
-    because the two agree on canonical 17-digit ids and diverge on anything
-    shorter, and this is not the place to assume the domain is clean.
+    identity_order.identity_lock_key -- (length, text), the ONE order every
+    taker of several identity keys uses (this function, _ban_lock_and_gate,
+    match_hold._guard_identities). Any total order would serialize correctly
+    PROVIDED it is the only one in the class; bare sorted() is not used
+    because it and (length, text) disagree on ids of different lengths, which
+    the stored ids include. It equals _ffa_sort_key on text.
 
     Returns the ordered list actually locked, so a test can assert the real
     bind sequence instead of trusting the loop (a check that reads the source
     cannot fail -- #441).
     """
-    ordered = sorted({s for s in steam_ids if s}, key=_ffa_sort_key)
+    ordered = sorted({s for s in steam_ids if s}, key=identity_lock_key)
     _wait_ms = int(timeout_ms) if timeout_ms is not None else FORMATION_LOCK_TIMEOUT_MS
     # Bound the WAIT, not just the retry count (self-review finding 2). The
     # SET and the handler below have deliberately IDENTICAL extent: armed
@@ -23066,7 +23067,8 @@ async def report_casual_dc(
     await _check_steam_session(request, reporter_steam_id, db)
     # Bans part 2a (S4, BAN-R5): before the leaver's row can be created or a
     # casual disconnect recorded.
-    await _ban_lock_and_gate(db, [leaver_steam_id], request, actor=reporter_steam_id)
+    await _ban_lock_and_gate(db, [leaver_steam_id], request, actor=reporter_steam_id,
+                             exclusive=[leaver_steam_id])
 
     # The leaver may have NO players row, and that is the headline case rather
     # than an edge one: a vanilla opponent whose FIRST ever contact with a mod
@@ -50116,7 +50118,8 @@ async def _ban_gate_any_or_raise(db: AsyncSession, actor: str, others, request=N
     raise HTTPException(status_code=409, detail="Banned: participant")
 
 
-async def _ban_lock_and_gate(db: AsyncSession, steam_ids, request=None, actor=None) -> None:
+async def _ban_lock_and_gate(db: AsyncSession, steam_ids, request=None, actor=None,
+                             exclusive=()) -> None:
     """Bans part 2a (F4, lesson 208): check and write under ONE lock. Takes the
     identity lock the ban core takes (pg_advisory_xact_lock(hashtext(steam_id)),
     exclusive in _apply_ban_core) in SHARED mode for every id and for `actor`,
@@ -50133,16 +50136,29 @@ async def _ban_lock_and_gate(db: AsyncSession, steam_ids, request=None, actor=No
     queue rows -> leases). So this comes before any lock the transaction that
     writes takes on such a row: a caller that took one first could hold a row
     the ban core waits for while waiting on the ban core's identity lock. The
-    ids are locked in the canonical identity order (_ffa_sort_key, the order
-    _identity_lock_many takes its exclusive locks of the same keys), so this
+    ids are locked in the ONE identity order (identity_order.identity_lock_key,
+    the order _identity_lock_many and _guard_identities take), so this
     and an exclusive holder of two of them never take them in opposite
     orders. A caller that already holds the exclusive identity lock of an id
     in this transaction takes the shared one at once (both are this
-    session's). Does NOT commit."""
-    ids = sorted({str(s) for s in [*(steam_ids or ()), actor] if s}, key=_ffa_sort_key)
+    session's).
+
+    `exclusive` names the ids whose key the caller takes EXCLUSIVE later in
+    the same transaction (a per-account cap or turn on the same key). Those
+    are taken exclusive HERE, in the same ordered pass: a shared key that the
+    transaction later asks to make exclusive waits for every other shared
+    holder, and two such transactions wait for each other until the server
+    ends one of them. Does NOT commit."""
+    ids = sorted({str(s) for s in [*(steam_ids or ()), actor, *(exclusive or ())] if s},
+                 key=identity_lock_key)
+    excl = {str(s) for s in (exclusive or ()) if s}
     for sid in ids:
-        await db.execute(text("SELECT pg_advisory_xact_lock_shared(hashtext(CAST(:sid AS text)))"),
-                         {"sid": sid})
+        if sid in excl:
+            await db.execute(text("SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text)))"),
+                             {"sid": sid})
+        else:
+            await db.execute(text("SELECT pg_advisory_xact_lock_shared(hashtext(CAST(:sid AS text)))"),
+                             {"sid": sid})
     if not ids:
         return
     if actor is None and len(ids) == 1:
@@ -57642,8 +57658,14 @@ async def submit_ovt_match(report: OvtMatchReport, request: Request, db: AsyncSe
         raise HTTPException(403, "Invalid 1v2 match signature")
     # Bans part 2a (S4, BAN-R5): refused before it is journaled or settled
     # when the reporter or any of the three is actively banned.
-    await _ban_lock_and_gate(db, _report_steams("ovt", report), request,
-                             actor=report.reported_by_steam_id)
+    # Not under the identity lock on purpose: the report window's receipt
+    # takes the EXCLUSIVE identity guards of the whole game next
+    # (_guard_identities), and a shared key taken here would have to become
+    # exclusive there, so two reporters of one game would wait for each other
+    # until the server ended one report. The settle reads the ban again under
+    # those guards (_settle_writer_ban_check), which is the read that holds.
+    await _ban_gate_any_or_raise(db, report.reported_by_steam_id,
+                                 _report_steams("ovt", report), request)
     _windowed = await _report_window_receive(db, "ovt", report)
     if _windowed is not None:
         return _windowed
@@ -72927,7 +72949,7 @@ async def place_lobby_bet(
     if not hmac.compare_digest(sig, expected):
         raise HTTPException(status_code=403, detail="Invalid signature")
 
-    await _ban_lock_and_gate(db, [steam_id])
+    await _ban_lock_and_gate(db, [steam_id], exclusive=[steam_id])
 
     # Validate mode against the closed set BEFORE it reaches any interpolated
     # SQL (#188).
@@ -73385,8 +73407,14 @@ async def submit_team_match(report: TeamMatchReport, request: Request, db: Async
         raise HTTPException(403, "Invalid team match signature")
     # Bans part 2a (S4, BAN-R5): refused before it is journaled or settled
     # when the reporter or any of the four is actively banned.
-    await _ban_lock_and_gate(db, _report_steams("team", report), request,
-                             actor=report.reported_by_steam_id)
+    # Not under the identity lock on purpose: the report window's receipt
+    # takes the EXCLUSIVE identity guards of the whole game next
+    # (_guard_identities), and a shared key taken here would have to become
+    # exclusive there, so two reporters of one game would wait for each other
+    # until the server ended one report. The settle reads the ban again under
+    # those guards (_settle_writer_ban_check), which is the read that holds.
+    await _ban_gate_any_or_raise(db, report.reported_by_steam_id,
+                                 _report_steams("team", report), request)
     _windowed = await _report_window_receive(db, "team", report)
     if _windowed is not None:
         return _windowed
