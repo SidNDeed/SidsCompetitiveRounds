@@ -75299,7 +75299,8 @@ _QAPPLY_SQL_CLAIMS_CREDITED = """
 # The bounds of Accept's and Credit's one transaction (FIX-1). In the
 # database: a lock wait ends at lock_timeout and a statement, its lock waits
 # included, at statement_timeout, both set transaction-local (is_local true)
-# as the transaction's first statement, before the held row's lock. In the
+# as the transaction's first statement, before the admin check's read and the
+# held row's lock. In the
 # process: the whole unit, the COMMIT included (which neither database bound
 # covers), ends at _QAPPLY_DEADLINE_S. Either end rolls back and answers the
 # "busy" sentence with nothing written. A player's report that waits on a row
@@ -75315,6 +75316,16 @@ async def _qapply_bound(db) -> None:
     """The two database bounds, set before the first lock (see above)."""
     await db.execute(text(_QAPPLY_SQL_BOUNDS), {
         "lt": f"{int(_QAPPLY_LOCK_TIMEOUT_MS)}ms", "st": f"{int(_QAPPLY_STATEMENT_TIMEOUT_MS)}ms"})
+
+
+async def _qapply_admin(db, req, action: str, qid: str) -> None:
+    """The admin check of Accept and Credit, inside their bounded unit (after
+    _qapply_bound): its read is the transaction's second statement. A
+    refusal answers the admin sentence with the check's own status."""
+    try:
+        await _require_admin(db, req.admin_steam_id, action, qid, req.hmac_signature)
+    except HTTPException as ex:
+        raise _QapplyRefused(ex.status_code, _QAPPLY_TEXTS["admin"], {})
 
 
 def _qapply_out_of_time(ex: BaseException) -> bool:
@@ -75886,12 +75897,9 @@ async def admin_accept_quarantine(qid: str, req: _AdminQuarantineReq,
     if not _pg_text_ok(note):
         raise HTTPException(422, _QAPPLY_TEXTS["note"])
     try:
-        await _require_admin(db, req.admin_steam_id, "quarantine_action", qid, req.hmac_signature)
-    except HTTPException as ex:
-        raise HTTPException(ex.status_code, _QAPPLY_TEXTS["admin"])
-    try:
         async with asyncio.timeout(_QAPPLY_DEADLINE_S), _qapply_unit("accept"):
             await _qapply_bound(db)
+            await _qapply_admin(db, req, "quarantine_action", qid)
             row, report = await _qapply_held(db, qid_uuid)
             ctx = {"kind": "accept", "qid": str(qid_uuid), "received_at": row["created_at"],
                    "actor": req.admin_steam_id, "note": note, "applied": None}
@@ -75938,12 +75946,9 @@ async def admin_credit_quarantine(qid: str, req: _AdminQuarantineReq,
     if not _pg_text_ok(note):
         raise HTTPException(422, _QAPPLY_TEXTS["note"])
     try:
-        await _require_admin(db, req.admin_steam_id, "quarantine_credit", qid, req.hmac_signature)
-    except HTTPException as ex:
-        raise HTTPException(ex.status_code, _QAPPLY_TEXTS["admin"])
-    try:
         async with asyncio.timeout(_QAPPLY_DEADLINE_S), _qapply_unit("credit"):
             await _qapply_bound(db)
+            await _qapply_admin(db, req, "quarantine_credit", qid)
             row, report = await _qapply_held(db, qid_uuid)
             ctx = {"kind": "credit", "qid": str(qid_uuid), "received_at": row["created_at"],
                    "actor": req.admin_steam_id, "note": note}
