@@ -1155,6 +1155,9 @@ def _faq_plainify(text: str, cap: int = 420) -> str:
     # backticks, not an escaped one, then every escape.
     t = _faq_re.sub(r"(?<!\\)`", "", t)
     t = _faq_re.sub(r"\\([^0-9A-Za-z\s])", r"\1", t)
+    # The name helper's zero-width space after an address scheme keeps a
+    # name from becoming a Discord link; in-game chat drops it.
+    t = t.replace("\u200b", "")
     for bad, good in (("—", "-"), ("–", "-"), ("×", "x"), ("•", "-"),
                       ("→", "->"), ("’", "'"), ("“", '"'), ("”", '"'),
                       ("·", "-"), ("✅", ""), ("❌", "")):
@@ -5560,7 +5563,9 @@ def _escape_md(text, limit=None, more="...") -> str:
     [ ] < > (a masked link, or a mention, emoji or timestamp tag), and @
     (BOT-TEXT-ESCAPE-1: @everyone and @here in a name show as text, not as a
     mention). Discord shows a backslash before any of these as the character
-    alone.
+    alone. A name is never a link: each http: or https: (any case) followed
+    by one or two slashes gets a zero-width space after its colon, before
+    any cut.
 
     A cut is made on the escaped text (`limit`, below) and never ends inside
     an escape pair. A caller that cuts the raw name first must not cut the
@@ -5582,6 +5587,12 @@ def _escape_md(text, limit=None, more="...") -> str:
     # keeps the marker text; Discord shows the marker alone.
     escaped = re.sub(r"^(\s*)([#+-])", r"\1\\\2", escaped)
     escaped = re.sub(r"^(\s*\d+)([.)])", r"\1\\\2", escaped)
+    # A name is never a link: every address scheme gets a zero-width space
+    # after its colon, so Discord's auto-linker does not fire on it (the
+    # stream lane's pattern; BOT-TEXT-ESCAPE-1 stage 3 brings it into the
+    # name helper, before the cut). Free text (_escape_text) keeps an
+    # address whole.
+    escaped = re.sub(r"(?i)(https?):(/{1,2})", "\\1:\u200b\\2", escaped)
     # With a limit: at most `limit` characters, cut on the ESCAPED text with
     # `more` after the cut. Every backslash here opens or closes a pair, so a
     # cut that leaves an odd run of them at its end has split a pair and drops

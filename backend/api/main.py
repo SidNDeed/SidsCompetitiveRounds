@@ -78738,22 +78738,14 @@ def _stream_matchup_line(candidate: dict | None) -> str:
 
 
 def _stream_md_escape(s: str) -> str:
-    """Names go into a Discord embed body — neutralize markdown metacharacters
-    (embeds never ping, and the bot sends AllowedMentions.none(), so mention
-    tokens are cosmetic-only here). Brackets/parens/angles included (review
-    F10): AllowedMentions suppresses pings, NOT hyperlinks, and a name like
-    "[watch](https://evil)" would otherwise render a clickable link in an
-    official embed. Round-2 finding 5: whitespace/control chars collapse to
-    single spaces (a newline in a name forges whole embed LINES) and bare
-    URLs get a zero-width space after the scheme so Discord's auto-linker
-    never fires on caller-authored text.
-
-    BOT-TEXT-ESCAPE-1 stage 2: a name here follows the SAME rule as every
-    other name the bot or the api shows: discord_text.escape_name over the
-    whitespace-collapsed name ([ ] < > and the marks escaped, so no masked
-    link and no mention; a line break cannot forge a line). The zero-width
-    space after a URL scheme is no longer added: the shared name rule does
-    not insert characters the player did not type."""
+    """A name for a stream post's embed body: discord_text.escape_name over
+    the name with every run of white space collapsed to one space. That
+    escapes the markdown marks and [ ] < > @, so a name like
+    "[watch](https://evil)" renders no masked link and no mention
+    (AllowedMentions suppresses pings, not hyperlinks; review F10); keeps the
+    name on one line, so it cannot forge an embed line (round-2 finding 5);
+    and puts a zero-width space after every http: or https: scheme, so
+    Discord's auto-linker never fires on the name."""
     return _dtext.escape_name(_dtext.flat(s))
 
 
