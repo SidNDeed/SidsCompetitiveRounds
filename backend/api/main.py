@@ -75415,9 +75415,11 @@ def _qapply_held_check(row, body):
 
 
 async def _qapply_verdict(db, row, body) -> dict:
-    """The list's and the digest's verdict for one held row, from the gate's
-    READ form (no row lock; advisory: Accept and Credit decide again under
-    their locks). {"can_accept", "accept_blocked_reason", "can_credit"}."""
+    """The list's and the digest's verdict for one held row, from the READ
+    form of the checks the actions make (the signature, the service
+    accounts, _ffa_report_verify, the record, the game's claim and the
+    gate), with no row lock; advisory: Accept and Credit decide again under
+    their locks. {"can_accept", "accept_blocked_reason", "can_credit"}."""
     def no(key, credit=False, **kw):
         return {"can_accept": False, "accept_blocked_reason": _QAPPLY_TEXTS[key].format(**kw),
                 "can_credit": credit}
@@ -75838,6 +75840,19 @@ async def admin_accept_quarantine(qid: str, req: _AdminQuarantineReq,
     stays pending. Served: _QAPPLY_SERVABLE_REASONS; team rows and
     readmission lobbies are refused.
 
+    Under the replay the body makes every verification of the report again
+    (the signature, the service accounts, _FFA_REPORT_VERIFICATIONS, the
+    game number, the seat rules and the gate) on the rows as they are now.
+    Two steps of a network report do not run: the reporter's session check
+    (_check_steam_session), because the replay carries no request, and the
+    settlement of the lobby's due journal windows, which settles other
+    reports, not this one. What stands in for the session check is the hold
+    itself: the session check is the body's first step for a network
+    report, so a report reached a hold site only after its reporter's
+    session checked out when it was sent. The transaction runs under
+    _QAPPLY_DEADLINE_S and _qapply_bound's database bounds, and takes the
+    game's claim (ffa_game_claims), so a game is applied or credited once.
+
     The report's id is parsed before the admin check, and the statements bind
     the parsed id's canonical text; the signature keeps the id as sent (review
     r15 sweep: a string that is not a UUID failed the uuid bind, 500).
@@ -75884,11 +75899,16 @@ async def admin_credit_quarantine(qid: str, req: _AdminQuarantineReq,
     """Pays each participant of a held FFA report the XP and the gold that
     settlement would have paid (_ffa_game_awards), moves no rating, and ends
     the row 'credited' (QAPPLY-1). Signed with its own action word
-    (quarantine_credit). Refused exactly when Accept could apply the row now,
-    for every word outside _QAPPLY_SERVABLE_REASONS, for team rows and
-    readmission lobbies, and when a ledger row already references the held
-    row. One transaction: deltas, one ledger row per kind above 0 referencing
-    the held row, the held row's status and the moderator record."""
+    (quarantine_credit). Refused when Accept could apply the row now, for
+    every word outside _QAPPLY_SERVABLE_REASONS, for team rows and
+    readmission lobbies, while the lobby is open, when a ledger row already
+    references the held row, when the report names no game number, when the
+    game already holds a claim (ffa_game_claims, from this or a sibling held
+    row), and when any verification the report route makes fails
+    (_ffa_report_verify, the signature, the service accounts). One
+    transaction under _QAPPLY_DEADLINE_S and _qapply_bound's bounds: the
+    game's claim, deltas, one ledger row per kind above 0 referencing the
+    held row, the held row's status and the moderator record."""
     try:
         qid_uuid = _mail_parse_uuid(qid, "qid")
     except HTTPException:
