@@ -362,7 +362,7 @@ _BUTTON = "a button label: plain text, Discord renders no Markdown there"
 _FOOTER = "embed footer text: plain text, no Markdown"
 _LABEL = "a bracket round label, not a player's name"
 ALLOW = {
-    ("_mailpick_view", '(t.get("sender_name") or "?").strip()'): (1, _BUTTON),
+    ("_mailpick_view", 'sender.strip() or "?"'): (1, _BUTTON),
     ("_maybe_answer_faq_ingame", "data.get('steam_id') or data.get('display_name') or ''"):
         (1, "an internal key for the answered-once check, never shown"),
     ("_fetch_rating_history", "steam_id"): (2, "a Steam id in an API path, not a name"),
@@ -377,8 +377,6 @@ ALLOW = {
     ("cmd_game", "p.get('side')"): (1, "the 1v2 side, solo or duo, not a name"),
     ("poll_ffa_queue_beacon", "members"): (1, "the lobby's member count"),
     ("poll_bug_reports", "who[:40]"): (1, "a thread name: plain text, no Markdown"),
-    ("poll_anticheat_flags", "f.get('p1_name')"): (1, "composed into ids, which _flag_embed_text escapes whole"),
-    ("poll_anticheat_flags", "f.get('p2_name')"): (1, "composed into ids, which _flag_embed_text escapes whole"),
     ("_format_release_message", "name"): (1, "the GitHub release's title, not a player's name"),
     ("dm_opponent", "opp_id"): (1, "the Discord id _dm_user sends to, not text"),
     ("_tmatch_notice_message", "match_label"): (1, _LABEL),
@@ -584,11 +582,12 @@ HOSTILE_IDS = ["link", "bold", "heading", "underscores", "code", "mention", "num
 def _expect(name):
     """The name as the bot must print it, written out here rather than taken
     from the bot's helper: every line break a space (a CRLF pair one space),
-    each of \\ * _ ~ | ` [ ] < > after a backslash, and a leading # - + or
-    the dot of a leading 1. after a backslash too."""
+    each of \\ * _ ~ | ` [ ] < > @ after a backslash (@ since BOT-TEXT-ESCAPE-1
+    stage 2), and a leading # - + or the dot of a leading 1. after a
+    backslash too."""
     one = re.sub("\r\n", " ", name)
     one = "".join(" " if c in BREAKS else c for c in one)
-    out = "".join("\\" + c if c in "\\*_~|`[]<>" else c for c in one)
+    out = "".join("\\" + c if c in "\\*_~|`[]<>@" else c for c in one)
     out = re.sub(r"^(\s*)([#+-])", lambda m: m.group(1) + "\\" + m.group(2), out)
     return re.sub(r"^(\s*\d+)([.)])", lambda m: m.group(1) + "\\" + m.group(2), out)
 

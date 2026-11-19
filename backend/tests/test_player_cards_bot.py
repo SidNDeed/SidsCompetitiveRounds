@@ -82,7 +82,7 @@ def test_identity_is_the_callers_discord_id_never_a_steam_id():
 
 
 def test_names_from_the_api_are_escaped_before_markdown():
-    assert "discord.utils.escape_markdown(str(s or" in BOT_SRC
+    assert "_escape_md(str(s or" in BOT_SRC          # the bot's own name helper (BOT-TEXT-ESCAPE-1)
     assert "_pc_name(first.get(\"puller_name\"))" in BOT_SRC and "_pc_name(first.get(\"subject_name\"))" in BOT_SRC
     assert "target.display_name)" in _fn(BOT_SRC, "cmd_pc_collection")
 

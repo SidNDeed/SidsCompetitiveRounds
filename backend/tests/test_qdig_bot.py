@@ -352,7 +352,8 @@ def test_names_are_escaped_and_kept_to_one_line():
     ns, channel, _ = new_bot(feed)
     run(ns["poll_quarantine_digest"]())
     (msg,) = texts(channel)
-    assert "- \\*\\*Du\\_ne\\*\\* @everyone: 5, 11, 31 (winner)" in msg
+    # @ is escaped too since BOT-TEXT-ESCAPE-1 stage 2 (QDIG_MD_CHARS covers _escape_md's set)
+    assert "- \\*\\*Du\\_ne\\*\\* \\@everyone: 5, 11, 31 (winner)" in msg
 
 
 # ── the two compatibility directions ───────────────────────────────────────

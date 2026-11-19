@@ -119,12 +119,12 @@ def _lift():
     for node in TREE.body:
         name = getattr(node, "name", None)
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and (
-                name.startswith("_modlog_") or name in ("_aer_local_gate", "_escape_md")):
+                name.startswith("_modlog_") or name in ("_aer_local_gate", "_escape_md", "_escape_text")):
             node = copy.deepcopy(node)
             node.decorator_list = []
             picked.append(node)
         elif isinstance(node, ast.Assign) and any(
-                isinstance(t, ast.Name) and t.id.startswith(("MODLOG_", "_MD_", "_modlog_"))
+                isinstance(t, ast.Name) and t.id.startswith(("MODLOG_", "_MD_", "_modlog_", "_TEXT_"))
                 for t in node.targets):
             picked.append(copy.deepcopy(node))
     return picked
@@ -766,18 +766,41 @@ def hostile_records(v, total, steam_id=PLAYER):
     return answer
 
 
-def _only_the_bots_markup(text, n_rows):
+def _expect_reason(s):
+    """The reason as the bot must print it (BOT-TEXT-ESCAPE-1 stage 2: free
+    text, the bot's _escape_text, not the name rule): its line breaks KEPT,
+    and each line written as _expect writes a name. That equals the free-text
+    rule for every HOSTILE value -- none holds a bare address with a
+    character the two rules treat differently."""
+    return "\n".join(_expect(line) for line in s.split("\n"))
+
+
+def _field_literally(text, v, f):
+    if f == "reason":
+        exp = _expect_reason(v[f])
+        assert exp in text, (v[f], exp, text)
+        if exp != v[f]:
+            assert v[f] not in text.replace(exp, ""), (v[f], text)
+    else:
+        _shows_literally(text, v[f])
+
+
+def _only_the_bots_markup(text, n_rows, v=None):
     """Once every backslash-escaped character is dropped (what Discord
     formats), the text holds the bot's own markup and nothing else: the bold
     of the header and of each row's kind, the one code span of the Steam id,
     no masked link, no tag but the rows' timestamps, and one line per row
-    below the header's two and the totals."""
+    below the header's two and the totals -- plus each line break a shown
+    reason keeps."""
     shown = _markup(text)
     assert shown.count("**") == 2 + 2 * n_rows, shown
     assert shown.count("`") == 2, shown
     assert not _MASKED_LINK.search(shown), shown
     assert shown.count("<") == text.count("<t:") == n_rows, shown
-    assert text.count("\n") == (2 + n_rows if n_rows else 0), text
+    kept = 0
+    if v is not None and "\n" in v["reason"]:
+        kept = text.count(_expect_reason(v["reason"])) * v["reason"].count("\n")
+    assert text.count("\n") == (2 + n_rows + kept if n_rows else 0), text
 
 
 @pytest.mark.parametrize("s", HOSTILE, ids=HOSTILE_IDS)
@@ -803,8 +826,8 @@ def test_landfix_one_page_shows_every_field_literally(s):
     (text, kw), = it.sent
     assert "view" not in kw and "4 records, page 1 of 1, newest first." in text, text
     for f in ROW_FIELDS + HEAD_FIELDS:
-        _shows_literally(text, v[f])
-    _only_the_bots_markup(text, 4)
+        _field_literally(text, v, f)
+    _only_the_bots_markup(text, 4, v)
 
 
 @pytest.mark.parametrize("sort", sorted(("n", "o", "a", "m")))
@@ -826,8 +849,8 @@ def test_landfix_every_page_of_every_sort_shows_every_field_literally(s, sort):
     for text, n_rows in shown:
         assert "(kind: Ban; search: " in text, text
         for f in ROW_FIELDS + HEAD_FIELDS:
-            _shows_literally(text, v[f])
-        _only_the_bots_markup(text, n_rows)
+            _field_literally(text, v, f)
+        _only_the_bots_markup(text, n_rows, v)
     assert len(api.calls) == 4
 
 
