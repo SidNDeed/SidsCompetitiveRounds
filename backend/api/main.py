@@ -57791,8 +57791,10 @@ async def submit_ovt_match(report: OvtMatchReport, request: Request, db: AsyncSe
     # takes the EXCLUSIVE identity guards of the whole game next
     # (_guard_identities), and a shared key taken here would have to become
     # exclusive there, so two reporters of one game would wait for each other
-    # until the server ended one report. The settle reads the ban again under
-    # those guards (_settle_writer_ban_check), which is the read that holds.
+    # until the server ended one report. The reads that hold come after it:
+    # the receipt reads the ban of every account the report names under those
+    # guards, before its first write (_report_window_receive), and the settle
+    # reads it again under its own (_settle_writer_ban_check).
     await _ban_gate_any_or_raise(db, report.reported_by_steam_id,
                                  _report_steams("ovt", report), request)
     _windowed = await _report_window_receive(db, "ovt", report)
@@ -73497,8 +73499,10 @@ async def submit_team_match(report: TeamMatchReport, request: Request, db: Async
     # takes the EXCLUSIVE identity guards of the whole game next
     # (_guard_identities), and a shared key taken here would have to become
     # exclusive there, so two reporters of one game would wait for each other
-    # until the server ended one report. The settle reads the ban again under
-    # those guards (_settle_writer_ban_check), which is the read that holds.
+    # until the server ended one report. The reads that hold come after it:
+    # the receipt reads the ban of every account the report names under those
+    # guards, before its first write (_report_window_receive), and the settle
+    # reads it again under its own (_settle_writer_ban_check).
     await _ban_gate_any_or_raise(db, report.reported_by_steam_id,
                                  _report_steams("team", report), request)
     _windowed = await _report_window_receive(db, "team", report)
@@ -80111,9 +80115,10 @@ async def spectate_heartbeat(req: SpectateLeaseBody, request: Request,
 async def _spectate_leave_rows(db: AsyncSession, steam_id: str, lease_id=None) -> None:
     """The spectate leave's writes, for one lease of `steam_id` (`lease_id`) or,
     with None, for every lease of it not yet revoked (the ban, F2 d): enter
-    durable drain first (a tombstone per game), then revoke the lease, so the
-    seat is free at once. Leave is intent, not departure proof; only a later
-    complete master inventory may clear the drain. Does NOT commit."""
+    durable drain first (a tombstone per game), then revoke the lease. The
+    lease is revoked at once; the drain mark keeps the slot taken until it
+    ends. Leave is intent, not departure proof; only a later complete master
+    inventory may clear the drain. Does NOT commit."""
     pick = ("l.id = CAST(:lid AS UUID)" if lease_id is not None else "l.revoked_at IS NULL")
     params = {"sid": steam_id, **({"lid": lease_id} if lease_id is not None else {})}
     await db.execute(text("""

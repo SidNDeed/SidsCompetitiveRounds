@@ -114,28 +114,65 @@ def test_f4_a_booster_grant_waits_for_a_committing_ban_and_pays_nothing(case, mo
     assert (grants, gold) == (0, 0)
 
 
-def test_f4_a_bug_report_waits_in_its_writing_transaction_and_stores_nothing(case, mode):
+def _bug_report_ban_between_t1_and_t2(case, mode, monkeypatch, *, drop_reread=False):
+    """The ban commits AFTER the report's first transaction (T1: its own ban
+    read, then _auto_logs._end_transaction) and BEFORE its writing one (T2).
+    Only T2's own read can refuse it. drop_reread: the mutant that removes that
+    read (the gate's second call answers without reading)."""
+    calls = {"gate": 0, "banned": False}
+    orig_end = main._auto_logs._end_transaction
+    orig_gate = main._ban_lock_and_gate
+
     async def body(sm):
         sid = L._sid()
         async with sm() as db:
             await L._player(db, sid)
             await db.commit()
 
-        async def route(db):
-            req = schemas.BugReportRequest(steam_id=sid, description="ban-sweep interleave")
-            return await L._call(main.submit_bug_report, req=req,
-                                 request=L._req("/api/v1/bug-reports"), db=db)
+        async def end_then_ban(db):
+            await orig_end(db)
+            if not calls["banned"]:
+                calls["banned"] = True
+                await L._ban(sm, sid)
 
-        waited, got = await _interleave(sm, sid, route)
+        async def gate(db, steam_ids, *a, **kw):
+            calls["gate"] += 1
+            if drop_reread and calls["gate"] == 2:
+                return None
+            return await orig_gate(db, steam_ids, *a, **kw)
+        monkeypatch.setattr(main._auto_logs, "_end_transaction", end_then_ban)
+        monkeypatch.setattr(main, "_ban_lock_and_gate", gate)
+
+        async with sm() as db:
+            req = schemas.BugReportRequest(steam_id=sid, description="ban-sweep interleave")
+            try:
+                out = ("admitted", await L._call(main.submit_bug_report, req=req,
+                                                 request=L._req("/api/v1/bug-reports"), db=db))
+            except HTTPException as e:
+                await db.rollback()
+                out = (e.status_code, str(e.detail))
         async with sm() as db:
             rows = (await db.execute(text(
                 "SELECT count(*) FROM bug_reports WHERE steam_id = :s"), {"s": sid})).scalar()
-        return waited, got, rows
+        return out, rows
 
-    waited, got, rows = L._with_sm(case, body, mode)
-    assert waited, got
+    got, rows = L._with_sm(case, body, mode)
+    return got, rows, calls
+
+
+def test_f4_a_bug_report_ban_between_its_transactions_is_refused_in_the_writing_one(
+        case, mode, monkeypatch):
+    got, rows, calls = _bug_report_ban_between_t1_and_t2(case, mode, monkeypatch)
+    assert calls == {"gate": 2, "banned": True}, calls     # T2 was reached
     assert got[0] == 409 and got[1].startswith("Banned: "), got
     assert rows == 0
+
+
+def test_f4_mutant_bug_report_without_the_writing_transactions_read_stores_the_report(
+        case, mode, monkeypatch):
+    got, rows, calls = _bug_report_ban_between_t1_and_t2(case, mode, monkeypatch, drop_reread=True)
+    assert calls == {"gate": 2, "banned": True}, calls
+    assert got[0] == "admitted" and rows == 1, (got, rows)
 
 
 def test_f4_control_without_a_ban_the_grant_pays_once(case, mode, monkeypatch):
