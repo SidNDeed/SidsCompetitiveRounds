@@ -50819,6 +50819,12 @@ async def _apply_ban_core(db: AsyncSession, *, admin_steam_id: str, target_steam
         # (F2 d): drain tombstone, then the lease revoked, through the one
         # helper the leave route uses, so the seat is free at once.
         await _spectate_leave_rows(db, target_steam_id)
+        # F2 b: a looking-for-players post the account queued and the bot has
+        # not posted yet is the account's live state too (the bot's poll
+        # reads no ban).
+        await db.execute(text(
+            "DELETE FROM lfp_pings WHERE steam_id = :sid AND posted_at IS NULL"
+        ), {"sid": target_steam_id})
         # ALL-status row delete (round-18 find 1). Round 15's pair-DISSOLUTION
         # branch was racy because it did partner WRITES from a status-filtered
         # snapshot; a bare unconditional DELETE of the banned player's own
