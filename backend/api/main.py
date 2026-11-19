@@ -45,6 +45,7 @@ import identity_clock_evidence as _ice
 import conn_ranges as _conn_ranges
 import build_manifest as _build_manifest   # standard library only: /health `build_manifest`
 import modlog as _modlog   # the moderator log's closed action list, labels and sentences (MODLOG-1)
+import discord_text as _dtext   # typed text in a Discord message the api composes (BOT-TEXT-ESCAPE-1)
 from glicko2 import calculate_new_rating
 import steamid64 as _sid64   # the SteamID64 rule, standard library only: the name cleanup, the bug-log scrubber and the Steam sweep read it
 import log_redaction as _logred   # the credential rule, standard library only: every receive path and read-back door of client log text applies it
@@ -23737,12 +23738,11 @@ async def _chat_censor_strike(steam_id: str, display_name: str, channel: str,
                                          "duration_minutes": int(minutes), "permanent": False,
                                          "source": source})
             # #scr-admin post via the durable outbox. The bot sends outbox
-            # content with users-allowed mentions (#261) — neutralize mention
-            # syntax; the quoted message goes angle-bracket-neutered too.
-            safe_msg = (message or "")[:200].replace("<", "(").replace(">", ")").replace("`", "'")
-            safe_msg = _re.sub(r"@everyone", "everyone", safe_msg, flags=_re.IGNORECASE)
-            safe_msg = _re.sub(r"@here", "here", safe_msg, flags=_re.IGNORECASE)
-            safe_name = (display_name or steam_id or "?").replace("<", "(").replace(">", ")").replace("`", "'")
+            # content with users-allowed mentions (#261): the typed name and
+            # message pass the shared helpers once here (BOT-TEXT-ESCAPE-1),
+            # which escape every < and @, so neither can add a mention.
+            safe_msg = _dtext.escape_text(message or "", 400)
+            safe_name = _dtext.escape_name(display_name or steam_id or "?", 128)
             try:
                 async with db.begin_nested():
                     await db.execute(text(
@@ -44468,8 +44468,8 @@ async def _admin_cosmetic_review_impl(
                 "WHERE id=:i"
             ), {"n": note, "a": admin_steam_id, "i": submission_id})
             dm_content = (
-                f'Your placement change for "{row["name"]}" was not approved. '
-                f"Your last approved placement remains active. Reason: {note}"
+                f'Your placement change for "{_dtext.escape_name(row["name"], 80)}" was not approved. '
+                f"Your last approved placement remains active. Reason: {_dtext.escape_text(note)}"
             )
             result_status = "placement_denied"
         else:
@@ -44487,7 +44487,7 @@ async def _admin_cosmetic_review_impl(
                 "WHERE id=:i"
             ), {"n": note, "a": admin_steam_id,
                 "pn": note, "pa": admin_steam_id, "i": submission_id})
-            dm_content = f'Your cosmetic "{row["name"]}" was not approved. Reason: {note}'
+            dm_content = f'Your cosmetic "{_dtext.escape_name(row["name"], 80)}" was not approved. Reason: {_dtext.escape_text(note)}'
             result_status = "denied"
         await _modlog_write(
             db, actor=admin_steam_id,
@@ -44540,7 +44540,7 @@ async def _admin_cosmetic_review_impl(
         ), {"sc": render_scale, "ox": render_offset_x, "oy": render_offset_y,
             "rev": expected_revision, "n": note, "a": admin_steam_id, "i": submission_id})
         dm_content = (
-            f'Your placement change for "{row["name"]}" was approved at '
+            f'Your placement change for "{_dtext.escape_name(row["name"], 80)}" was approved at '
             f"{render_scale:.2f}x, offset {render_offset_x:.3f}:{render_offset_y:.3f}. "
             "Your last published placement remains active until this revision ships in a mod update."
         )
@@ -44560,7 +44560,7 @@ async def _admin_cosmetic_review_impl(
             "ox": render_offset_x, "oy": render_offset_y,
             "rev": expected_revision, "i": submission_id})
         dm_content = (
-            f'Your cosmetic "{row["name"]}" was approved at {render_scale:.2f}x, '
+            f'Your cosmetic "{_dtext.escape_name(row["name"], 80)}" was approved at {render_scale:.2f}x, '
             f"offset {render_offset_x:.3f}:{render_offset_y:.3f}. It will appear in-game "
             "after its art and reviewed placement are included in a mod update."
         )
@@ -51146,18 +51146,18 @@ async def admin_alert_create(req: _AdminAlertCreateReq, db: AsyncSession = Depen
                                      "expires_minutes": exp_min or None})
     # Discord echo to #scr-admin via the durable outbox (the bot's 30s
     # poll_channel_posts loop delivers + acks; zero new bot code). The bot
-    # sends outbox content with users-allowed mentions, so neutralize mention
-    # syntax at compose time (#261's exact shape).
-    safe = msg.replace("<", "(").replace(">", ")")
-    safe = _re.sub(r"@everyone", "everyone", safe, flags=_re.IGNORECASE)
-    safe = _re.sub(r"@here", "here", safe, flags=_re.IGNORECASE)
+    # sends outbox content with users-allowed mentions, so the typed parts
+    # pass the shared helpers once at compose time (BOT-TEXT-ESCAPE-1): every
+    # < and @ escaped, so the admin's name and text cannot add a mention.
+    safe = _dtext.escape_text(msg)
+    safe_admin = _dtext.escape_name(str(admin_name), 128)
     try:
         async with db.begin_nested():
             await db.execute(text(
                 "INSERT INTO pending_channel_posts (channel_id, content) VALUES (:ch, :c)"
             ), {"ch": "1495392567687250061",  # #scr-admin (bot env default; migration-110 precedent)
                 "c": f"\N{LARGE ORANGE DIAMOND} **Server alert** [{req.category}] by "
-                     f"{str(admin_name)[:64]}: {safe}"})
+                     f"{safe_admin}: {safe}"})
     except Exception as ex:
         print(f"[ALERTS] channel-post queue failed (alert stands): {ex}")
     await db.commit()
@@ -78746,15 +78746,15 @@ def _stream_md_escape(s: str) -> str:
     official embed. Round-2 finding 5: whitespace/control chars collapse to
     single spaces (a newline in a name forges whole embed LINES) and bare
     URLs get a zero-width space after the scheme so Discord's auto-linker
-    never fires on caller-authored text."""
-    collapsed = " ".join((s or "").split())
-    out = []
-    for ch in collapsed:
-        if ch in "*_~`|\\[]()<>":
-            out.append("\\")
-        out.append(ch)
-    escaped = "".join(out)
-    return _re.sub(r"(?i)(https?):(/{1,2})", "\\1:\u200b\\2", escaped)
+    never fires on caller-authored text.
+
+    BOT-TEXT-ESCAPE-1 stage 2: a name here follows the SAME rule as every
+    other name the bot or the api shows: discord_text.escape_name over the
+    whitespace-collapsed name ([ ] < > and the marks escaped, so no masked
+    link and no mention; a line break cannot forge a line). The zero-width
+    space after a URL scheme is no longer added: the shared name rule does
+    not insert characters the player did not type."""
+    return _dtext.escape_name(_dtext.flat(s))
 
 
 async def _stream_series_score(db: AsyncSession, candidate: dict | None) -> str | None:
@@ -82424,10 +82424,10 @@ async def _mail_spam_case(db: AsyncSession, sender: dict, *, message_id, subject
         "updated_at": _mail_iso(_utc_now()), "hits": 1,
     }
     post = (f"\N{TRIANGULAR FLAG ON POST} **Mail spam** — "
-            f"**{_mail_discord_safe(sender.get('display_name') or '?', 64)}** (`{sender['steam_id']}`): "
+            f"**{_dtext.escape_name(sender.get('display_name') or '?', 64)}** (`{sender['steam_id']}`): "
             f"{int(same_body)} same-body message(s) today, {int(bulk_hour)} bulk send(s) "
             f"(> {MAIL_SPAM_BULK_RECIPIENTS} recipients) this hour, {int(censor_hits)} filter hit(s) today."
-            + (f" Latest subject: {_mail_discord_safe(subject, 120)}" if subject else ""))
+            + (f" Latest subject: {_dtext.escape_text(_dtext.flat(subject), 120)}" if subject else ""))
     await _mail_open_case(db, kind="mail_spam", subject_player_id=sender["id"], reporter_id=None,
                           message_id=message_id, evidence=evidence,
                           bucket_key=f"{sender['id']}:{day}", bump=True, post_text=post)
@@ -83185,11 +83185,11 @@ async def mail_report(message_id: str, req: _MailReportReq, request: Request,
                 "sender_name": row["sender_name"], "sent_at": _mail_iso(row["created_at"]),
                 "reason": reason or None}
     post = (f"\N{INCOMING ENVELOPE} **Mail report** — "
-            f"**{_mail_discord_safe(row['sender_name'] or '?', 64)}** (`{row['sender_steam_id']}`)"
-            f" reported by **{_mail_discord_safe(me.get('display_name') or '?', 64)}**\n"
-            f"Subject: {_mail_discord_safe(row['subject'], 120)}\n"
-            f"> {_mail_discord_safe(row['body'], 300)}\n"
-            f"Reason: {_mail_discord_safe(reason, 200) or '(none given)'}")
+            f"**{_dtext.escape_name(row['sender_name'] or '?', 64)}** (`{row['sender_steam_id']}`)"
+            f" reported by **{_dtext.escape_name(me.get('display_name') or '?', 64)}**\n"
+            f"Subject: {_dtext.escape_text(_dtext.flat(row['subject']), 120)}\n"
+            f"> {_dtext.escape_text(_dtext.flat(row['body']), 300)}\n"
+            f"Reason: {_dtext.escape_text(_dtext.flat(reason), 200) or '(none given)'}")
     case_id, _inserted = await _mail_open_case(
         db, kind="mail_report", subject_player_id=row["sender_id"], reporter_id=me["id"],
         message_id=row["id"], evidence=evidence, bucket_key=f"{row['id']}:{me['id']}",

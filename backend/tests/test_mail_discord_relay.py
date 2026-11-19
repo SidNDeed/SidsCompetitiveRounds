@@ -1005,8 +1005,12 @@ def test_a_relayed_mail_cannot_forge_the_footers_own_syntax():
         code="SCR-ABCDEFGHJKMN")
     assert "\n-# Reply to this message to answer in-game" in out, \
         "the real footer must still be there"
-    assert out.count("-# Reply to this message to answer in-game") == 1, \
+    # Only the real footer opens a line with an unescaped "-#"; the body's
+    # copy shows as text behind a backslash (BOT-TEXT-ESCAPE-1: escape_text).
+    assert _sql_re.findall(r"(?m)^-# Reply to this message to answer in-game", out) == \
+        ["-# Reply to this message to answer in-game"], \
         "the body's imitation of the footer was not escaped"
+    assert "\\-# Reply to this message to answer in-game" in out
 
 
 def test_keep_lines_bounds_blank_runs_so_the_footer_stays_visible():
