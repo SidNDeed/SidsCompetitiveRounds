@@ -16902,7 +16902,14 @@ async def steam_auth(req: SteamAuthRequest, db: AsyncSession = Depends(get_db)):
     # heartbeat") — a banned account could immediately obtain a fresh verified
     # session and keep using every session-gated endpoint that lacks a
     # usage-site ban check. Bans must also stop the mint.
-    await _ban_lock_and_gate(db, [req.steam_id], exclusive=[req.steam_id])
+    # This early read takes NO lock: the Steam call below waits up to 6 s, and
+    # an identity key held across it would hold every report that names the
+    # account for that long. A banned account is still refused here, before
+    # the call; the writing transaction below takes the key and reads again.
+    await _ban_gate_or_raise(db, req.steam_id)
+    # End the read's transaction: nothing is written yet, and no transaction
+    # stays open across the wait.
+    await db.rollback()
     key = os.getenv("STEAM_WEB_API_KEY", "")
     verified = False
     if key:
@@ -16940,9 +16947,8 @@ async def steam_auth(req: SteamAuthRequest, db: AsyncSession = Depends(get_db)):
     # revocation states after the await. Deletion rewrites players.steam_id,
     # so its durable tombstone is the deleted_steam_ids hash table — a
     # missing player row alone proves nothing (players are created lazily).
-    await db.execute(text("SELECT pg_advisory_xact_lock(hashtext(:sid))"),
-                     {"sid": req.steam_id})
-    await _ban_lock_and_gate(db, [req.steam_id])
+    # ONE taking call: the key exclusive, then the ban read under it.
+    await _ban_lock_and_gate(db, [req.steam_id], exclusive=[req.steam_id])
     if MATCH_HMAC_SECRET:
         _tombed = (await db.execute(text(
             "SELECT 1 FROM deleted_steam_ids WHERE steam_id_hash = :h"
