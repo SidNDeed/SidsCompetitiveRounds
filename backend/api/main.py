@@ -67148,6 +67148,27 @@ async def _qapply_run(ctx: dict):
         _QAPPLY_REPLAY.reset(tok)
 
 
+# QAPPLY-1 FIX-1: set for the whole transaction of Accept and of Credit
+# (_qapply_unit), from before the first lock to the commit or rollback; the
+# held row's own checks (_qapply_held) run before _qapply_run sets the replay.
+# A reader of process-wide state that a transaction which may roll back must
+# not write (_service_player_uuids) honours this variable as well as the
+# replay's.
+_QAPPLY_UNIT: contextvars.ContextVar = contextvars.ContextVar(
+    "_qapply_unit", default=None)
+
+
+@asynccontextmanager
+async def _qapply_unit(kind: str):
+    """`async with _qapply_unit(kind): ...` runs a held-report action's whole
+    transaction with _QAPPLY_UNIT set to kind, and resets it after."""
+    tok = _QAPPLY_UNIT.set(kind)
+    try:
+        yield kind
+    finally:
+        _QAPPLY_UNIT.reset(tok)
+
+
 async def _ffa_settle_due_windows_for_report(db, lobby_id_text) -> None:
     """The report route's settlement of its own lobby's expired windows,
     before the report it carries. A malformed id settles nothing (the body
@@ -75869,7 +75890,7 @@ async def admin_accept_quarantine(qid: str, req: _AdminQuarantineReq,
     except HTTPException as ex:
         raise HTTPException(ex.status_code, _QAPPLY_TEXTS["admin"])
     try:
-        async with asyncio.timeout(_QAPPLY_DEADLINE_S):
+        async with asyncio.timeout(_QAPPLY_DEADLINE_S), _qapply_unit("accept"):
             await _qapply_bound(db)
             row, report = await _qapply_held(db, qid_uuid)
             ctx = {"kind": "accept", "qid": str(qid_uuid), "received_at": row["created_at"],
@@ -75921,7 +75942,7 @@ async def admin_credit_quarantine(qid: str, req: _AdminQuarantineReq,
     except HTTPException as ex:
         raise HTTPException(ex.status_code, _QAPPLY_TEXTS["admin"])
     try:
-        async with asyncio.timeout(_QAPPLY_DEADLINE_S):
+        async with asyncio.timeout(_QAPPLY_DEADLINE_S), _qapply_unit("credit"):
             await _qapply_bound(db)
             row, report = await _qapply_held(db, qid_uuid)
             ctx = {"kind": "credit", "qid": str(qid_uuid), "received_at": row["created_at"],
@@ -78310,11 +78331,13 @@ async def _service_player_uuids(db: AsyncSession) -> "set[str]":
     """
     global _service_player_uuid_cache, _service_uuid_cache_monotonic
     global _service_uuid_cache_filled_monotonic
-    # Under a held-report action (QAPPLY-1 FIX-1) the set is read fresh for
-    # this request alone, and neither the cache nor its two clocks is read or
-    # written: nothing another request trusts comes from a transaction that
-    # may roll back.
-    replay = _QAPPLY_REPLAY.get() is not None
+    # Under a held-report action (QAPPLY-1 FIX-1: its whole transaction,
+    # _QAPPLY_UNIT, and the replay inside it, _QAPPLY_REPLAY) the set is read
+    # fresh for this request alone, and neither the cache nor its two clocks
+    # is read or written: nothing another request trusts comes from a
+    # transaction that may roll back.
+    replay = (_QAPPLY_REPLAY.get() is not None
+              or _QAPPLY_UNIT.get() is not None)
     now_mono = time.monotonic()
     if (_service_player_uuid_cache is None
             or replay
