@@ -114,8 +114,10 @@ def _client(monkeypatch):
         seen["hmac"].append((action, target))
         return True
 
-    async def session_ok(request, sid, _db, **_kw):
+    async def _session_ok_body(request, sid, _db, **_kw):
         seen["session"].append(sid)
+    from soft_check_standin import SoftCheckStandIn
+    session_ok = SoftCheckStandIn(behave=_session_ok_body)   # records keywords (M3)
 
     async def admin_ok(_db, adm, action, target, sig):
         seen["hmac"].append((action, target))

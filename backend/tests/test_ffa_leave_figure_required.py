@@ -67,8 +67,10 @@ def _submit(monkeypatch, report, *, journal=False):
     HTTPException it raised, or the string "reached" when it got past the
     check (the session check, or on the settlement path the HMAC verification
     _verify_ffa_hmac, raised _Reached)."""
-    async def session(*_a, **_k):
+    async def _session_body(*_a, **_k):
         raise _Reached()
+    from soft_check_standin import SoftCheckStandIn
+    session = SoftCheckStandIn(behave=_session_body)   # records keywords (M3)
 
     monkeypatch.setattr(main, "_check_steam_session", session)
 

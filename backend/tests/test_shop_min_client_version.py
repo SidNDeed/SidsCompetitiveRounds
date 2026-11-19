@@ -341,8 +341,8 @@ def test_the_listings_hide_a_floored_item_from_an_older_caller(version, shown):
 
 
 def _patch_auth(monkeypatch):
-    async def _none(*a, **k):
-        return None
+    from soft_check_standin import SoftCheckStandIn
+    _none = SoftCheckStandIn()   # admits every caller; records keywords (M3)
 
     async def _true(*a, **k):
         return True

@@ -368,8 +368,8 @@ def seeded():
 
 @pytest.fixture()
 def rig(seeded, monkeypatch):
-    async def _session_ok(request, steam_id, db, **_kw):
-        return None
+    from soft_check_standin import SoftCheckStandIn
+    _session_ok = SoftCheckStandIn()   # admits every caller; records keywords (M3)
     monkeypatch.setattr(main, "MATCH_HMAC_SECRET", SECRET)
     monkeypatch.setattr(main, "_check_steam_session", _session_ok)
     # raising=False: the pre-fix main has no such name, and the red run

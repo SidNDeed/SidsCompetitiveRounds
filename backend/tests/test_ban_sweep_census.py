@@ -414,21 +414,49 @@ def _stub_names_patched_into_main(tree) -> set:
     return out
 
 
-def _stubs_without_banned_ok(sources: dict) -> list:
+# FIX-1 M3: the guard judges what a stand-in DOES with the keywords. A name a
+# file patches in that is bound there to a function must READ its banned_ok or
+# its **kwargs (record or forward them); taking them and dropping them is a
+# finding. A name bound to soft_check_standin.SoftCheckStandIn(...) records
+# every keyword and passes. Listed: stand-ins that drop banned_ok on purpose.
+STANDIN_DROPS_OK = {
+    ("test_ban_sweep_live.py", "without_banned_ok"):
+        "the S2 mutant: drops banned_ok on purpose to show that the exit then refuses",
+}
+
+
+def _stubs_without_banned_ok(sources: dict, allowed=None) -> list:
     """(file, function) for every function defined in a file under the name
-    that file patches in as main._check_steam_session, when it takes neither
-    banned_ok nor **kwargs."""
+    that file patches in as main._check_steam_session, when it does not read
+    its banned_ok or its **kwargs (it takes neither, or drops them), unless
+    listed in STANDIN_DROPS_OK."""
+    allowed = STANDIN_DROPS_OK if allowed is None else allowed
     bad = []
     for fname, src in sorted(sources.items()):
         tree = ast.parse(src)
         names = _stub_names_patched_into_main(tree)
         for n in ast.walk(tree):
             if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name in names:
+                if (fname, n.name) in allowed:
+                    continue
                 a = n.args
-                if a.kwarg is None and not any(x.arg == "banned_ok"
-                                               for x in a.args + a.kwonlyargs):
+                kw = ([a.kwarg.arg] if a.kwarg else []) + [
+                    x.arg for x in a.args + a.kwonlyargs if x.arg == "banned_ok"]
+                read = {x.id for x in ast.walk(n) if isinstance(x, ast.Name) and isinstance(x.ctx, ast.Load)}
+                if not any(k in read for k in kw):
                     bad.append((fname, n.name))
     return bad
+
+
+def _standin_bindings(sources: dict) -> list:
+    """(file, name) for every name bound to SoftCheckStandIn(...)."""
+    out = []
+    for fname, src in sorted(sources.items()):
+        for n in ast.walk(ast.parse(src)):
+            if (isinstance(n, ast.Assign) and isinstance(n.value, ast.Call)
+                    and B._name_of(n.value) == "SoftCheckStandIn"):
+                out += [(fname, t.id) for t in n.targets if isinstance(t, ast.Name)]
+    return out
 
 
 def _test_sources() -> dict:
@@ -445,6 +473,7 @@ def test_every_stand_in_for_the_soft_check_takes_banned_ok():
     patched = sum(len(_stub_names_patched_into_main(ast.parse(s))) for s in sources.values())
     assert patched >= 15, patched   # the walk finds the stand-ins it is about
     assert _stubs_without_banned_ok(sources) == []
+    assert len(_standin_bindings(sources)) >= 20, _standin_bindings(sources)
 
 
 def test_negative_control_a_stand_in_without_banned_ok_is_named():
@@ -453,8 +482,18 @@ def test_negative_control_a_stand_in_without_banned_ok_is_named():
                          "monkeypatch.setattr(main, '_check_steam_session', stub)\n"),
         "planted_b.py": ("async def stub2(request, steam_id, db, **_kw):\n    return None\n"
                          "main._check_steam_session = stub2\n"),
+        "planted_c.py": ("async def stub3(request, steam_id, db, **kw):\n    return await rec(**kw)\n"
+                         "main._check_steam_session = stub3\n"
+                         "stub4 = SoftCheckStandIn()\nmain._check_steam_session = stub4\n"),
     }
-    assert _stubs_without_banned_ok(planted) == [("planted_a.py", "stub")]
+    # planted_b takes **_kw and drops it: the form the no-op stand-ins had (M3)
+    assert _stubs_without_banned_ok(planted) == [("planted_a.py", "stub"), ("planted_b.py", "stub2")]
+    assert _standin_bindings(planted) == [("planted_c.py", "stub4")]
+
+
+def test_negative_control_the_deliberate_mutant_is_listed():
+    sources = {f: s for f, s in _test_sources().items() if f == "test_ban_sweep_live.py"}
+    assert _stubs_without_banned_ok(sources, allowed={}) == [("test_ban_sweep_live.py", "without_banned_ok")]
 
 
 # -- F2 a: every status a record table is written with is classed once --------

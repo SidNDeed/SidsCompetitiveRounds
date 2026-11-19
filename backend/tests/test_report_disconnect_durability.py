@@ -522,8 +522,8 @@ def _stub_the_gates(monkeypatch):
     taken when the report named a series."""
     calls = {"find_current": 0}
 
-    async def _noop(*args, **kwargs):
-        return None
+    from soft_check_standin import SoftCheckStandIn
+    _noop = SoftCheckStandIn()   # admits every caller; records keywords (M3)
 
     async def _series(*args, **kwargs):
         calls["find_current"] += 1

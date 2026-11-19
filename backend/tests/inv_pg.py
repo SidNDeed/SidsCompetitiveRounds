@@ -171,8 +171,8 @@ class Env:
         assert '"       mail_discord_relay, discord_id"' in src
         mp.setattr(main, "_mail_caller", _caller)
 
-        async def _no_session(request, steam_id, db, **_kw):
-            return None
+        from soft_check_standin import SoftCheckStandIn
+        _no_session = SoftCheckStandIn()   # admits every caller; records keywords (M3)
         mp.setattr(main, "_check_steam_session", _no_session)
         mp.setattr(main, "_presence_seen", {})
         event.listen(self.engine.sync_engine, "before_cursor_execute", self._before, retval=True)

@@ -84,11 +84,13 @@ def _run(coro):
     return asyncio.run(coro)
 
 
-async def _fake_session(request, steam_id, db, **_kw):
+async def _fake_session_body(request, steam_id, db, **_kw):
     token = request.headers.get("X-Session-Token") if request is not None else None
     if token != "tok:" + str(steam_id):
         raise HTTPException(401, "session")
     request.state.scr_session_verified = True
+from soft_check_standin import SoftCheckStandIn
+_fake_session = SoftCheckStandIn(behave=_fake_session_body)   # records keywords (M3)
 
 
 class _SessionLookupUnavailable(RuntimeError):
@@ -164,8 +166,10 @@ def test_m2_deadline_covers_checkout_before_any_route_work(monkeypatch):
     monkeypatch.setattr(match_hold, "DB_REQUEST_TIMEOUT_S", 0.03)
     monkeypatch.setattr(match_hold, "DB_ROLLBACK_TIMEOUT_S", 0.03)
 
-    async def verified(request, steam_id, db, **_kw):
+    async def _verified_body(request, steam_id, db, **_kw):
         request.state.scr_session_verified = True
+    from soft_check_standin import SoftCheckStandIn
+    verified = SoftCheckStandIn(behave=_verified_body)   # records keywords (M3)
 
     async def _db():
         yield fake
@@ -266,8 +270,8 @@ def test_m2_gate_loser_rearms_transaction_timeouts(monkeypatch):
     now = object()
     writes = []
 
-    async def verified(request, steam_id, db, **_kw):
-        return None
+    from soft_check_standin import SoftCheckStandIn
+    verified = SoftCheckStandIn()   # admits every caller; records keywords (M3)
 
     async def player_id(db, steam_id):
         return opener if steam_id == "s2opener" else held

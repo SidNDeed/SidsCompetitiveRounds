@@ -2389,8 +2389,8 @@ def _sink_patch(monkeypatch):
     a test key, so the REAL signature check runs on every report. Nothing
     that records, pays, compares or locks is replaced.
     """
-    async def _no_session(request, steam_id, db, **_kw):
-        return None
+    from soft_check_standin import SoftCheckStandIn
+    _no_session = SoftCheckStandIn()   # admits every caller; records keywords (M3)
 
     async def _no_podium(db):
         return []

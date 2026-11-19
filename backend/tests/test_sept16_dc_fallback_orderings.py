@@ -1374,8 +1374,8 @@ def _presence_harness():
     old_check = main._check_steam_session
     old_renew = main._lease_renew
 
-    async def _session_ok(request, steam_id, db, **_kw):
-        return None
+    from soft_check_standin import SoftCheckStandIn
+    _session_ok = SoftCheckStandIn()   # admits every caller; records keywords (M3)
 
     async def _renew(db, pid, mode, gid, ttl, **kwargs):
         renewals.append((str(pid), mode, str(gid)))

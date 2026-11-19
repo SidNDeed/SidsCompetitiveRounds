@@ -4108,8 +4108,8 @@ async def _call_endpoint(sm, report):
     saved_secret = main.MATCH_HMAC_SECRET
     saved_session = main._check_steam_session
 
-    async def _no_session_check(request, steam_id, db, **_kw):
-        return None
+    from soft_check_standin import SoftCheckStandIn
+    _no_session_check = SoftCheckStandIn()   # admits every caller; records keywords (M3)
 
     main.MATCH_HMAC_SECRET = ""
     main._check_steam_session = _no_session_check
