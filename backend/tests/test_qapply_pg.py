@@ -1244,14 +1244,18 @@ def test_h1_health_carries_qapply_build_in_both_forms():
 
 async def siblings(env, g, *, games=1):
     """A lobby of four with `games` games recorded, closed, and two members'
-    reports of game g held: two pending rows of one game, by two reporters."""
+    reports of game g held: two pending rows of one game, by two reporters.
+    The second report names the room the first one took, so the capture keeps
+    it as its own row with the room column empty; the room it names is in its
+    payload, which is where the routes read the game number from."""
     lob = await played(env, games=games)
     await close(env, lob)
     for who in (lob.sids[0], lob.sids[1]):
         a = await env.report(lob, g, res(lob), reporter=who)
         assert a.status != 200, ("fixture: sibling report of game %d held" % g, a)
     rows = await env.conn.fetch(
-        "SELECT id FROM match_report_quarantine WHERE group_id = $1 AND photon_room_id LIKE $2"
+        "SELECT id FROM match_report_quarantine WHERE group_id = $1"
+        "   AND COALESCE(photon_room_id, payload->>'photon_room_id') LIKE $2"
         "   AND status = 'pending' ORDER BY created_at, id", lob.lid, "%%_r%d" % g)
     assert len(rows) == 2, ("fixture: two held rows of game %d" % g, len(rows))
     return lob, str(rows[0]["id"]), str(rows[1]["id"])
