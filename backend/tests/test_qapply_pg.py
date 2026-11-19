@@ -1151,3 +1151,166 @@ def test_h1_health_carries_qapply_build_in_both_forms():
     assert field is not None and field.annotation is int and field.is_required(), field
     answer = asyncio.run(main.health_check(db=_DownSession())).model_dump()
     assert answer["status"] == "degraded" and answer["qapply_build"] == 1, answer
+
+
+# ── F1: one game is applied or paid once, whatever rows describe it ───────
+# Two members' reports of one game are two held rows with the same lobby and
+# the same room (so the same named game number). The claim on the game
+# (migration 426, _qapply_claim) is what a second action of either kind meets.
+
+async def siblings(env, g, *, games=1):
+    """A lobby of four with `games` games recorded, closed, and two members'
+    reports of game g held: two pending rows of one game, by two reporters."""
+    lob = await played(env, games=games)
+    await close(env, lob)
+    for who in (lob.sids[0], lob.sids[1]):
+        a = await env.report(lob, g, res(lob), reporter=who)
+        assert a.status != 200, ("fixture: sibling report of game %d held" % g, a)
+    rows = await env.conn.fetch(
+        "SELECT id FROM match_report_quarantine WHERE group_id = $1 AND photon_room_id LIKE $2"
+        "   AND status = 'pending' ORDER BY created_at, id", lob.lid, "%%_r%d" % g)
+    assert len(rows) == 2, ("fixture: two held rows of game %d" % g, len(rows))
+    return lob, str(rows[0]["id"]), str(rows[1]["id"])
+
+
+async def paid(env, lob):
+    """The players' XP and gold and every ledger row of them, for comparing."""
+    players = sorted(tuple(r) for r in await env.conn.fetch(
+        "SELECT steam_id, total_xp, gold_earned, ffa_xp_earned, ffa_gold_earned FROM players"
+        " WHERE id = ANY($1::uuid[])", lob.pids))
+    ledger = sorted(tuple(r) for r in await env.conn.fetch(
+        "SELECT player_id::text, reason, amount, reference_id FROM gold_transactions"
+        " WHERE player_id = ANY($1::uuid[])", lob.pids))
+    return players, ledger
+
+
+async def claims(env, lob):
+    return sorted(tuple(r) for r in await env.conn.fetch(
+        "SELECT game_number, kind, quarantine_id::text FROM ffa_game_claims WHERE lobby_id = $1", lob.lid))
+
+
+async def _pair_rows(env, lob, one, two):
+    """Hold the lobby's row in a third session, queue one=(action, qid), then
+    two, release; both answers."""
+    async with env.sm() as s:
+        await s.execute(text("SELECT 1 FROM ffa_lobbies WHERE id = CAST(:l AS uuid) FOR UPDATE"),
+                        {"l": str(lob.lid)})
+        t1 = asyncio.create_task(one[0](env, one[1]))
+        await asyncio.sleep(0.8)
+        t2 = asyncio.create_task(two[0](env, two[1]))
+        await asyncio.sleep(0.8)
+        await s.rollback()
+    return await asyncio.wait_for(asyncio.gather(t1, t2), 30)
+
+
+def test_f1_a_second_credit_of_one_game_is_refused_with_its_sentence(monkeypatch):
+    async def body(env):
+        lob, qa, qb = await siblings(env, 2)
+        await later_for(env, lob)
+        assert (await credit(env, qa)).status == 200
+        before = await paid(env, lob)
+        ans = await credit(env, qb)
+        assert (ans.status, ans.body) == (409, T["game_paid"]), ("F1 credit of a sibling row", ans)
+        assert await paid(env, lob) == before, "F1 nothing paid twice"
+        assert await status_of(env, qb) == "pending"
+        assert await claims(env, lob) == [(2, "credit", qa)]
+        # The list says so before the admin tries.
+        assert (await listing(env))[qb]["can_credit"] is False
+    run_env(monkeypatch, body)
+
+
+def test_f1_the_key_refuses_a_second_claim_of_one_game(monkeypatch):
+    async def body(env):
+        lob, qa, qb = await siblings(env, 2)
+        await later_for(env, lob)
+        assert (await credit(env, qa)).status == 200
+        before = await paid(env, lob)
+        ans = await credit(env, qb)
+        assert ans.status == 409, ("F1 the second credit is refused", ans)
+        assert await paid(env, lob) == before, "F1 nothing paid twice"
+        assert len(await claims(env, lob)) == 1
+        # The key itself, without any read: a second claim returns nothing.
+        async with env.sm() as db:
+            with pytest.raises(main._QapplyRefused) as ex:
+                await main._qapply_claim(db, lob.lid, 2, kind="credit", qid=qb)
+            await db.rollback()
+        assert str(ex.value.detail) == T["claimed"]
+    run_env(monkeypatch, body)
+
+
+def test_f1_credit_then_accept_of_a_sibling_row_is_refused(monkeypatch):
+    async def body(env):
+        # Game 3 held twice while the lobby is on game 2: Credit pays one row
+        # of game 3; game 2 is applied; the sibling row of game 3 then meets
+        # the claim under Accept.
+        lob, q3a, q3b = await siblings(env, 3)
+        assert (await credit(env, q3a)).status == 200
+        q2 = await held(env, lob, 2)
+        assert (await accept(env, q2)).status == 200
+        before = (await paid(env, lob), await game_rows(env, lob, 3))
+        ans = await accept(env, q3b)
+        assert (ans.status, ans.body) == (409, T["game_credited"]), ("F1 accept of a credited game", ans)
+        assert (await paid(env, lob), await game_rows(env, lob, 3)) == before
+        assert await status_of(env, q3b) == "pending"
+    run_env(monkeypatch, body)
+
+
+def test_f1_accept_then_credit_of_a_sibling_row_is_refused(monkeypatch):
+    async def body(env):
+        lob, qa, qb = await siblings(env, 2)
+        assert (await accept(env, qa)).status == 200
+        await later_for(env, lob)
+        before = await paid(env, lob)
+        ans = await credit(env, qb)
+        assert (ans.status, ans.body) == (409, T["recorded"]), ("F1 credit of an applied game", ans)
+        assert await paid(env, lob) == before
+        assert await claims(env, lob) == [(2, "accept", qa)]
+    run_env(monkeypatch, body)
+
+
+def test_f1_two_sibling_actions_at_once_take_effect_once(monkeypatch):
+    async def body(env):
+        for first, second in ((credit, credit), (credit, accept), (accept, credit)):
+            lob, qa, qb = await siblings(env, 2)
+            # Two Credits need a later game (Credit pays only where Accept
+            # cannot apply); the mixed pairs leave the gate open, so the game
+            # is Accept's and Credit is refused either way.
+            if (first, second) == (credit, credit):
+                await later_for(env, lob)
+            start = await paid(env, lob)
+            a, b = await _pair_rows(env, lob, (first, qa), (second, qb))
+            ok = [x for x in (a, b) if x.status == 200]
+            assert len(ok) <= 1, ("F1 at most one takes effect", first.__name__, second.__name__, a, b)
+            got = await claims(env, lob)
+            assert len(got) == len(ok), ("F1 one claim per effect", got, a, b)
+            if not ok:
+                assert await paid(env, lob) == start
+            n = await game_rows(env, lob, 2)
+            assert n == (1 if got and got[0][1] == "accept" else 0), ("F1 game rows", n, got)
+            ledger = (await paid(env, lob))[1]
+            refs = {r[3] for r in ledger} - {r[3] for r in start[1]}
+            assert len(refs) <= 1, ("F1 one payment's references", refs)
+    run_env(monkeypatch, body)
+
+
+def test_f1_a_network_report_to_a_closed_lobby_settles_nothing(monkeypatch):
+    # The premise of Credit's open-lobby refusal: once the lobby has closed,
+    # no network report settles a game of it, so a game Credit paid is not
+    # also settled by a late report.
+    async def body(env):
+        lob = await played(env)
+        await close(env, lob)
+        before = await tables(env)
+        a = await env.report(lob, 2, res(lob))
+        assert a.status != 200, ("F1 a closed lobby's report is not settled", a)
+        assert await game_rows(env, lob, 2) == 0
+        after = await tables(env)
+        for k in ("matches", "seats", "ledger", "players", "ratings"):
+            assert after[k] == before[k], ("F1 nothing settled", k)
+        # And Credit's refusal while the lobby is open says when it works.
+        lob2 = await played(env)
+        q = await held(env, lob2, 3)
+        ans = await credit(env, q)
+        assert (ans.status, ans.body) == (409, T["lobby_open"]), ("F1 open lobby", ans)
+        assert "once the lobby has closed" in T["lobby_open"]
+    run_env(monkeypatch, body)

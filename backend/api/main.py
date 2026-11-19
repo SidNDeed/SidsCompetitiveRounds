@@ -69814,6 +69814,13 @@ async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSe
         await _qapply_gate(db, lobby=lobby, lobby_uuid=lobby_uuid, game=_game_number,
                            player_ids=reported_ids, received_at=_qapply["received_at"],
                            locked=True, progress=_progress)
+        # The game's claim, under the lobby lock: a game that a Credit paid
+        # from a sibling held row is not applied (a recorded game is refused
+        # above as recorded; an 'accept' claim comes with its game's rows).
+        _claim = await _qapply_claim_of(db, lobby_uuid, _game_number)
+        if _claim is not None:
+            raise _QapplyRefused(409, _QAPPLY_TEXTS[
+                "game_credited" if _claim == "credit" else "recorded"], {})
 
     # Server-side placements: (rounds desc, points desc, kills desc); ties
     # share the same placement, COMPETITION style (1,2,2,4 — not dense; Codex
@@ -70675,8 +70682,8 @@ async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSe
     if _qapply is not None:
         # QAPPLY-1 (R7, G4): the held row's status and the moderator record,
         # in this transaction, before its one commit.
-        await _qapply_finish(db, _qapply, match_id=match_id, game=_game_number,
-                             player_ids=reported_ids)
+        await _qapply_finish(db, _qapply, lobby_uuid=lobby_uuid, match_id=match_id,
+                             game=_game_number, player_ids=reported_ids)
     await db.commit()
     for _asm_line in _asm_log_expired(lobby_uuid, _asm_rep_expired):
         print(_asm_line)
@@ -74940,7 +74947,7 @@ _QAPPLY_TEXTS = {
     "unsigned": "The stored report's signature does not check out, so it cannot be applied or credited.",
     "no_lobby": "The lobby of this report no longer exists, so it cannot be applied or credited.",
     "readmit": "This lobby used seat readmission; its held reports cannot be applied or credited yet.",
-    "lobby_open": "This lobby is still open; act on this report after the lobby closes.",
+    "lobby_open": "This lobby is still open; Accept and Credit work on this report once the lobby has closed.",
     "lobby_state": "This lobby's state does not allow the game to be applied or credited.",
     "service": "A player of this report is a service account, so it cannot be applied or credited.",
     "account": "A player of this report no longer has an account, so it cannot be applied or credited.",
@@ -74962,7 +74969,7 @@ _QAPPLY_TEXTS = {
     "ahead": "This report is game {tail}; the lobby is on game {next}. Apply game {next} of this lobby first.",
     "behind": ("This report is game {tail}, a number the lobby has passed, so it cannot be applied. "
                "Credit can pay its XP and gold."),
-    "no_number": "This report names no game number, so it cannot be applied. Credit can pay its XP and gold.",
+    "no_number": "This report names no game number, so it cannot be applied or credited.",
     "insert_race": "Another account of this game was recorded at the same moment; nothing was applied. Refresh the list.",
     "insert_failed": "The server could not record this game; nothing was applied. Try again.",
     "wagers": "This game's wagers could not be settled; nothing was applied. Try again.",
@@ -74970,6 +74977,14 @@ _QAPPLY_TEXTS = {
     "refused": "The server refused to apply this report; it stays held.",
     "can_accept": "Accept can apply this game now, with its ratings; use Accept instead of Credit.",
     "credited_before": "This report's XP and gold were already credited.",
+    "game_credited": "This game was already credited from another held report of it, so it cannot be applied.",
+    "game_applied": ("This game was already applied from another held report of it; there is nothing to "
+                     "credit. Discard this report."),
+    "game_paid": ("This game was already credited from another held report of it; it is not paid twice. "
+                  "Discard this report."),
+    "claimed": "This game was already applied or credited from another held report; nothing was changed.",
+    "sibling_credited": ("Another held report of this lobby was credited as game {g}; credit this one only "
+                         "if it is a different game."),
 }
 
 # Which sentence a refusal of the body's capture helper carries under the
@@ -75122,6 +75137,41 @@ _QAPPLY_SQL_TIER = """
 _QAPPLY_SQL_RECEIPT = """
     SELECT EXISTS (SELECT 1 FROM gold_transactions WHERE reference_id = CAST(:qid AS varchar))
 """
+# The game's claim (migration 426): one row per lobby and game number that an
+# Accept applied or a Credit paid from a held report. Read under the lobby's
+# row lock by both actions; the insert takes the key or returns nothing.
+_QAPPLY_SQL_CLAIM_READ = """
+    SELECT kind FROM ffa_game_claims
+     WHERE lobby_id = CAST(:lid AS uuid) AND game_number = CAST(:g AS smallint)
+"""
+_QAPPLY_SQL_CLAIM = """
+    INSERT INTO ffa_game_claims (lobby_id, game_number, kind, quarantine_id)
+    VALUES (CAST(:lid AS uuid), CAST(:g AS smallint), CAST(:kind AS text), CAST(:qid AS uuid))
+    ON CONFLICT ON CONSTRAINT pk_ffa_game_claims DO NOTHING
+    RETURNING game_number
+"""
+# The credited games of a lobby, for the list's sentence about a sibling row.
+_QAPPLY_SQL_CLAIMS_CREDITED = """
+    SELECT game_number FROM ffa_game_claims
+     WHERE lobby_id = CAST(:lid AS uuid) AND kind = 'credit'
+     ORDER BY game_number
+"""
+
+
+async def _qapply_claim_of(db, lobby_uuid, game: int):
+    """The kind of the claim on one game ('accept', 'credit'), or None."""
+    return (await db.execute(text(_QAPPLY_SQL_CLAIM_READ), {
+        "lid": str(lobby_uuid), "g": int(game)})).scalar()
+
+
+async def _qapply_claim(db, lobby_uuid, game: int, *, kind: str, qid: str) -> None:
+    """Takes the game's claim in the caller's transaction. The primary key
+    refuses a second claim of the game even where the caller's read of the
+    claim was skipped: the insert then returns nothing and this refuses."""
+    took = (await db.execute(text(_QAPPLY_SQL_CLAIM), {
+        "lid": str(lobby_uuid), "g": int(game), "kind": kind, "qid": qid})).scalar()
+    if took is None:
+        raise _QapplyRefused(409, _QAPPLY_TEXTS["claimed"], {})
 _QAPPLY_SQL_ACCEPTED = """
     UPDATE match_report_quarantine
        SET status = 'accepted', reviewed_at = NOW(), review_note = CAST(:note AS text),
@@ -75249,25 +75299,42 @@ async def _qapply_verdict(db, row, body) -> dict:
             "room": room, "lid": str(row["group_id"]),
             "g": named if named is not None else 0})).scalar():
         return no("recorded")
+    if named is not None:
+        claim = await _qapply_claim_of(db, row["group_id"], named)
+        if claim is not None:
+            return no("game_paid" if claim == "credit" else "game_applied")
     gate = await _qapply_gate(db, lobby=lobby, lobby_uuid=row["group_id"], game=expected,
                               player_ids=row["player_ids"], received_at=row["created_at"],
                               locked=False)
     if not gate["clock_ok"]:
         return no("clock")
+    # Credit pays only a report that names its game (see _qapply_credit). A
+    # credited sibling of this lobby under another number is named to the
+    # admin in place of the reason, since the two may be one game.
+    credited = (await db.execute(text(_QAPPLY_SQL_CLAIMS_CREDITED), {
+        "lid": str(row["group_id"])})).scalars().all()
+
+    def blocked(reason: str) -> dict:
+        can_credit = named is not None
+        if not can_credit:
+            reason = _QAPPLY_TEXTS["no_number"]
+        elif credited:
+            reason = _QAPPLY_TEXTS["sibling_credited"].format(g=int(credited[-1]))
+        return {"can_accept": False, "accept_blocked_reason": reason, "can_credit": can_credit}
     if not gate["ok"]:
-        return {"can_accept": False, "accept_blocked_reason": _qapply_gate_text(gate),
-                "can_credit": True}
+        return blocked(_qapply_gate_text(gate))
     if _ffa_game_number_refusal(tail, expected):
-        return {"can_accept": False, "accept_blocked_reason": _qapply_number_text(tail, expected),
-                "can_credit": True}
+        return blocked(_qapply_number_text(tail, expected))
     return {"can_accept": True, "accept_blocked_reason": "", "can_credit": False}
 
 
-async def _qapply_finish(db, ctx: dict, *, match_id, game: int, player_ids) -> None:
-    """Accept's last two writes, in the game's transaction before its one
-    commit: the held row 'accepted' and the moderator record that says the
-    report was applied and names the match. The route tested the row's
-    status under its lock, so this UPDATE finds it by id."""
+async def _qapply_finish(db, ctx: dict, *, lobby_uuid, match_id, game: int, player_ids) -> None:
+    """Accept's last writes, in the game's transaction before its one
+    commit: the game's claim (kind 'accept'), the held row 'accepted' and the
+    moderator record that says the report was applied and names the match.
+    The route tested the row's status under its lock, so this UPDATE finds it
+    by id."""
+    await _qapply_claim(db, lobby_uuid, game, kind="accept", qid=ctx["qid"])
     done = (await db.execute(text(_QAPPLY_SQL_ACCEPTED), {
         "qid": ctx["qid"], "sid": ctx["actor"], "note": ctx["note"] or None})).scalar()
     if done is None:
@@ -75358,6 +75425,14 @@ async def _qapply_credit(db, row, report, *, actor: str, note: str) -> dict:
             "room": room, "lid": str(lobby_uuid),
             "g": named if named is not None else 0})).scalar():
         raise _QapplyRefused(409, _QAPPLY_TEXTS["recorded"], {})
+    # The game a Credit pays is the number the report names: a report that
+    # names none cannot be told apart from its siblings, so it is not paid.
+    # The claim is read under the lobby lock taken above.
+    if named is None:
+        raise _QapplyRefused(409, _QAPPLY_TEXTS["no_number"], {})
+    claim = await _qapply_claim_of(db, lobby_uuid, named)
+    if claim is not None:
+        raise _QapplyRefused(409, _QAPPLY_TEXTS["game_paid" if claim == "credit" else "game_applied"], {})
     for pid in sorted(reported_ids, key=str):
         await db.execute(text(_QAPPLY_SQL_LOCK_PLAYER), {"pid": pid})
     gate = await _qapply_gate(db, lobby=lobby, lobby_uuid=lobby_uuid, game=expected,
@@ -75367,6 +75442,7 @@ async def _qapply_credit(db, row, report, *, actor: str, note: str) -> dict:
         raise _QapplyRefused(409, _QAPPLY_TEXTS["clock"], {})
     if gate["ok"] and not _ffa_game_number_refusal(tail, expected):
         raise _QapplyRefused(409, _QAPPLY_TEXTS["can_accept"], {})
+    await _qapply_claim(db, lobby_uuid, named, kind="credit", qid=qid)
     # Who played, as settlement decides it: placements, the ghosts and the
     # early-leave grace (_ffa_leave_decision), and in an assembly lobby the
     # seat rules (_asm_report_rules, whose reporter refusals raise here
@@ -75390,7 +75466,7 @@ async def _qapply_credit(db, row, report, *, actor: str, note: str) -> dict:
         points_to_win_round=FFA_POINTS_TO_WIN_ROUND, read_absent=True)
     excluded = ghosts
     reasons = {p.steam_id: set() for p in report.players}
-    game_no = named if named is not None else expected
+    game_no = named
     if lobby.get("assembly_v1"):
         excluded = await _asm_report_rules(
             db, lobby=lobby, lobby_uuid=lobby_uuid, g=game_no, report=report,

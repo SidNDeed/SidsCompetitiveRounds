@@ -495,6 +495,9 @@ PREREQ = {
         INSERT INTO match_report_quarantine (mode, reason, http_status, payload, status)
              VALUES ('ffa', 'lobby_completed', 409, '{}'::jsonb, 'pending');
     """),
+    # 426 creates ffa_game_claims (one claim per game applied or credited
+    # from a held report); it reads nothing, so it needs no table first.
+    "426": "",
 }
 
 # The tables whose CONTENT this file is responsible for. Fingerprinted
@@ -521,6 +524,7 @@ TABLES = {
     "416": ("lobby_invites", "invite_receipts", "mail_messages"),
     "419": ("match_report_quarantine",),
     "421": ("players", "gold_transactions", "admin_actions", "match_report_quarantine", "ffa_lobbies"),
+    "426": ("ffa_game_claims",),
 }
 
 MIGRATION_FILES = {
@@ -543,6 +547,7 @@ MIGRATION_FILES = {
     "416": "416_lobby_invites.sql",
     "419": "419_quarantine_digest_posted.sql",
     "421": "421_oct3b_credit_held_ffa_games.sql",
+    "426": "426_ffa_game_claims.sql",
 }
 
 
@@ -708,7 +713,7 @@ async def _apply_twice(number, *, between=None, prereq_extra="", cleanup=None):
 # ── The bar: a second run changes nothing ───────────────────────────────────
 
 @pytest.mark.parametrize("number", ["331", "332", "333", "336", "337", "365", "366", "377", "391", "396",
-                                    "397", "398", "399", "401", "415", "416", "419", "421"])
+                                    "397", "398", "399", "401", "415", "416", "419", "421", "426"])
 def test_a_second_run_writes_no_row(number):
     """Applied twice, back to back, on the state the first run left."""
     applied = _run(_apply_twice(number))
@@ -721,7 +726,7 @@ def test_a_second_run_writes_no_row(number):
 
 
 @pytest.mark.parametrize("number", ["331", "332", "333", "336", "337", "365", "366", "377", "391", "396",
-                                    "397", "398", "399", "401", "415", "416", "419", "421"])
+                                    "397", "398", "399", "401", "415", "416", "419", "421", "426"])
 def test_a_second_run_leaves_every_row_byte_identical(number):
     """The value half of the bar, stated separately so a failure says which
     of the two properties broke."""
@@ -735,7 +740,7 @@ def test_a_second_run_leaves_every_row_byte_identical(number):
 
 
 @pytest.mark.parametrize("number", ["331", "332", "333", "336", "337", "365", "366", "377", "391", "396",
-                                    "397", "398", "399", "401", "410", "415", "416", "419", "421"])
+                                    "397", "398", "399", "401", "410", "415", "416", "419", "421", "426"])
 def test_a_second_run_replaces_no_constraint_or_index(number):
     """OIDs, not definitions. A dropped-and-recreated constraint has the same
     definition, a new OID, and cost an ACCESS EXCLUSIVE lock plus a validating
@@ -755,7 +760,7 @@ def test_a_second_run_replaces_no_constraint_or_index(number):
 
 
 @pytest.mark.parametrize("number", ["331", "332", "333", "336", "337", "365", "366", "377", "391", "396",
-                                    "397", "398", "399", "401", "410", "415", "416", "419", "421"])
+                                    "397", "398", "399", "401", "410", "415", "416", "419", "421", "426"])
 def test_a_second_run_removes_no_relation_from_the_database(number):
     """THE THIRD MEASUREMENT, AND THE ONE THE OTHER TWO CANNOT MAKE.
 
