@@ -1463,7 +1463,7 @@ def test_f1_a_later_action_names_the_state_the_earlier_one_made(monkeypatch):
         lob, qa, qb = await siblings(env, 2)
         assert (await accept(env, qa)).status == 200
         before = (await paid(env, lob), await game_rows(env, lob, 2), await claims(env, lob))
-        for qid, want in ((qa, "reviewed"), (qb, "recorded")):
+        for qid, want in ((qa, "held_applied"), (qb, "recorded")):
             ans = await accept(env, qid)
             assert (ans.status, ans.body) == (409, T[want]), ("F1 accept after accept", want, ans)
         assert (await paid(env, lob), await game_rows(env, lob, 2), await claims(env, lob)) == before
