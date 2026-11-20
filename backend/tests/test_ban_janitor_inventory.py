@@ -49,6 +49,31 @@ reads the game's claim (_qapply_claim_of 1) and the record takes it
 (_qapply_claim 1), both module constants on the claims table, and no other
 function's count moves, as main._janitor_sql_from_sources measures this tree
 and the review's base.
+With the ban sweep (bans part 2a) the tree reads 384 and 0: the janitor
+already reaches _check_steam_session and submit_ffa_match, and each now
+calls a ban read, so _is_banned (1, through the soft check's ban read) and
+_ban_gate_any_or_raise (1, through the FFA report's gate) are counted; both
+statements resolve, and no other function's count moves, as
+main._janitor_sql_from_sources measures this tree and e3c8b2a2's.
+
+With the ban sweep's fix sitting (FIX-1) the tree reads 385 and 0: the
+report window's settle bodies now read the ban themselves under the
+identity lock (_settle_writer_ban_check -> _ban_lock_and_gate), and the one
+new statement the janitor reaches is that helper's shared identity lock
+(1); its ban reads are the gates already counted above.
+
+The fix's second part (FIX-1B) reads 386 and 0: _ban_lock_and_gate takes the
+keys its `exclusive=` names in their exclusive form, one more statement the
+janitor reaches through the same helper (1); _refund_lobby_bets' open-bet
+read gained its bettor filter, a changed statement and not a new one. FIX-2
+adds none: the window's close-as-refused statements live in
+match_report_window, which this inventory does not read.
+
+With QAPPLY-1 and the ban sweep on one branch (claude/stack-1120) the tree
+reads 395 and 0: both lanes counted from the same 382 (QDIG-1), QAPPLY-1
+adds nine (382 -> 391) and the ban sweep four (382 -> 386), and no function
+is counted by both, so 382 + 9 + 4 = 395, as main._janitor_sql_from_sources
+measures the merged tree.
 """
 import asyncio
 import os
@@ -64,7 +89,7 @@ sys.path.insert(0, os.path.normpath(os.path.join(HERE, "..", "api")))
 import main  # noqa: E402
 import models  # noqa: E402
 
-STATEMENTS, DYNAMIC = 391, 0   # 389 before the game's claim, 382 before QAPPLY-1, 371 before QDIG-1 (see the module docstring)
+STATEMENTS, DYNAMIC = 395, 0   # 391 QAPPLY-1 alone, 386 the ban sweep alone, 382 before both, 371 before QDIG-1 (see the module docstring)
 ROOT = (("main", "root"),)
 DEF = re.compile(r"\((\w+)\.unbanned_at IS NULL AND \(\1\.expires_at IS NULL OR \1\.expires_at > NOW\(\)\)\)")
 # the sites that were dynamic on 88a0a2bf, and the alias each one's definition call names

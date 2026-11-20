@@ -52,6 +52,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 import database
 import main
 import schemas
+from ban_read_tables import ban_read_ddl
 
 MAIN_SRC = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "api", "main.py"))
 MODELS_SRC = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "api", "models.py"))
@@ -140,6 +141,7 @@ DROP TABLE IF EXISTS glicko_ratings_ffa CASCADE;
 DROP TABLE IF EXISTS rating_history CASCADE;
 DROP TABLE IF EXISTS gold_transactions CASCADE;
 DROP TABLE IF EXISTS pc_packs CASCADE;
+DROP TABLE IF EXISTS player_bans CASCADE;
 DROP TABLE IF EXISTS admin_users CASCADE;
 DROP TABLE IF EXISTS players CASCADE;
 CREATE TABLE players (
@@ -510,6 +512,10 @@ class Env:
         async with self.seed.begin() as conn:
             await conn.execute(text("SET LOCAL lock_timeout = '5s'"))
             for stmt in [s for s in SCHEMA.split(";") if s.strip()]:
+                await conn.execute(text(stmt))
+            # player_bans: the FFA report reads every roster member's ban
+            # (bans part 2a); from the model metadata, after admin_users.
+            for stmt in ban_read_ddl(include_admin_users=False):
                 await conn.execute(text(stmt))
             await conn.execute(text("INSERT INTO admin_users (steam_id) VALUES (:s)"), {"s": ADMIN})
         self.app = _app()

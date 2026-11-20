@@ -31,6 +31,7 @@ from fastapi import HTTPException
 
 import main
 import mail_discord
+from ban_read_tables import ban_read_ddl
 
 try:
     import asyncpg
@@ -164,6 +165,9 @@ def _base_sql():
             "ALTER TABLE mail_messages ADD COLUMN IF NOT EXISTS recipient_count INTEGER NULL;")),
         "ALTER TABLE mail_messages " + _from_file("330_mail_discord_relay.sql", re.escape(
             "ADD COLUMN IF NOT EXISTS via TEXT NOT NULL DEFAULT 'game';")),
+        # the sender gates and the recipient cap read the ban (bans part 2a):
+        # the ban read's tables, from the model metadata, no rows
+        *(stmt + ";" for stmt in ban_read_ddl()),
         "INSERT INTO players (id, steam_id, display_name) VALUES "
         "('%s', '1', 'A'), ('%s', '2', 'B'), ('%s', '3', 'C'), ('%s', '4', 'D');" % (A, B, C, D),
     ])

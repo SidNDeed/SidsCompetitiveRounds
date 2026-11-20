@@ -34,6 +34,7 @@ from fastapi import FastAPI, HTTPException  # noqa: E402
 
 import database  # noqa: E402
 import main  # noqa: E402
+import ban_gate_statements as _GATE  # noqa: E402
 
 # The mutant directory goes first only now: the imports above put the api
 # directory back at the head of sys.path, which hid the copy (census, run
@@ -84,11 +85,13 @@ def _run(coro):
     return asyncio.run(coro)
 
 
-async def _fake_session(request, steam_id, db):
+async def _fake_session_body(request, steam_id, db, **_kw):
     token = request.headers.get("X-Session-Token") if request is not None else None
     if token != "tok:" + str(steam_id):
         raise HTTPException(401, "session")
     request.state.scr_session_verified = True
+from soft_check_standin import SoftCheckStandIn
+_fake_session = SoftCheckStandIn(behave=_fake_session_body)   # records keywords (M3)
 
 
 class _SessionLookupUnavailable(RuntimeError):
@@ -106,9 +109,19 @@ class _NoopSavepoint:
 
 
 class _SessionLookupErrorDB:
-    def __init__(self):
+    """The datastore fault this file's H1 rule is about: the session lookup
+    errors. Bans part 2a added one statement to the soft check's path, the
+    ban read (main._is_banned), before the request is admitted with no
+    verified session; it is answered with no row (no active ban), matched by
+    the product's own text (ban_gate_statements, read from main._is_banned).
+    Every other statement errors as before.
+    `ban_read_errors=True` models the other fault, the ban read erroring;
+    then any statement but that read is an unexpected one."""
+    def __init__(self, ban_read_errors=False):
         self.info = {}
         self.timeout_setups = 0
+        self.ban_reads = 0
+        self.ban_read_errors = ban_read_errors
 
     def begin_nested(self):
         return _NoopSavepoint()
@@ -120,6 +133,13 @@ class _SessionLookupErrorDB:
             assert args[1] == {"lock_ms": "5000ms", "statement_ms": "7000ms"}
             self.timeout_setups += 1
             return None
+        if _GATE.norm(sql) in _GATE.BAN_READS:
+            self.ban_reads += 1
+            if self.ban_read_errors:
+                raise _SessionLookupUnavailable("ban read unavailable")
+            return _EmptyResult()
+        if self.ban_read_errors:
+            raise AssertionError(f"unexpected statement: {sql[:90]}")
         raise _SessionLookupUnavailable("session lookup unavailable")
 
 
@@ -164,8 +184,10 @@ def test_m2_deadline_covers_checkout_before_any_route_work(monkeypatch):
     monkeypatch.setattr(match_hold, "DB_REQUEST_TIMEOUT_S", 0.03)
     monkeypatch.setattr(match_hold, "DB_ROLLBACK_TIMEOUT_S", 0.03)
 
-    async def verified(request, steam_id, db):
+    async def _verified_body(request, steam_id, db, **_kw):
         request.state.scr_session_verified = True
+    from soft_check_standin import SoftCheckStandIn
+    verified = SoftCheckStandIn(behave=_verified_body)   # records keywords (M3)
 
     async def _db():
         yield fake
@@ -266,8 +288,8 @@ def test_m2_gate_loser_rearms_transaction_timeouts(monkeypatch):
     now = object()
     writes = []
 
-    async def verified(request, steam_id, db):
-        return None
+    from soft_check_standin import SoftCheckStandIn
+    verified = SoftCheckStandIn()   # admits every caller; records keywords (M3)
 
     async def player_id(db, steam_id):
         return opener if steam_id == "s2opener" else held
@@ -384,8 +406,89 @@ def test_h1_real_helper_soft_fail_paths_require_verified_session(
         assert lookup_error.json() == {"detail": "session_check_unavailable"}
         assert len(seen_dbs) == 2
         assert [db.timeout_setups for db in seen_dbs] == [1, 1]
+        # the log-only request passed the soft check's ban read (no row)
+        assert seen_dbs[0].ban_reads == 1
 
     _run(exercise())
+
+
+# The mutant's soft check, held here so the stand-in census (test_ban_sweep_census)
+# resolves the binding: a def that passes banned_ok on.
+_MUTANT_CHECK = []
+
+
+async def _mutant_check(request, steam_id, db, banned_ok=False):
+    return await _MUTANT_CHECK[0](request, steam_id, db, banned_ok=banned_ok)
+
+
+def _log_only_answer(monkeypatch, method, path, body, params, mutant=False):
+    """One request with no session token through the match_hold router on a
+    session whose ban read errors, under the real soft check or (mutant) the
+    one in _MUTANT_CHECK; returns (response or None, the double)."""
+    app = FastAPI()
+    app.include_router(match_hold.router)
+    seen = []
+
+    async def _db():
+        fake = _SessionLookupErrorDB(ban_read_errors=True)
+        seen.append(fake)
+        yield fake
+
+    app.dependency_overrides[database.get_db] = _db
+    if mutant:
+        monkeypatch.setattr(main, "_check_steam_session", _mutant_check)
+    monkeypatch.setattr(main.os, "getenv", lambda *args, **kwargs: "")
+
+    async def exercise():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://t") as client:
+            try:
+                return await client.request(method, "/api/v1/match" + path,
+                                            json=body, params=params)
+            except _SessionLookupUnavailable:
+                return None
+    return _run(exercise()), seen
+
+
+_BAN_READ_ROUTES = [
+    ("POST", "/hold/beat",
+     {"steam_id": "s2auth", "mode": "team", "series_id": str(uuid.uuid4()), "room": "r"}, None),
+    ("GET", "/hold/mine", None, {"steam_id": "s2auth"}),
+]
+
+
+@pytest.mark.parametrize("method,path,body,params", _BAN_READ_ROUTES)
+def test_h1_a_ban_read_that_errors_is_answered_session_check_unavailable(
+        monkeypatch, method, path, body, params):
+    """Bans part 2a: on the soft path (no verified session) the check reads the
+    claimed id's ban before admitting the request. A ban read that does not
+    complete is answered 503 session_check_unavailable by the check, as an
+    erroring session lookup is, and the route does not run."""
+    response, seen = _log_only_answer(monkeypatch, method, path, body, params)
+    assert response is not None and response.status_code == 503, response
+    assert response.json() == {"detail": "session_check_unavailable"}
+    assert [db.ban_reads for db in seen] == [1]
+
+
+_BAN_READ_REFUSAL = (
+    'print(f"[STEAM-AUTH] ban read UNDETERMINED: {type(ex).__name__}")\n'
+    '            raise HTTPException(status_code=503, detail="session_check_unavailable")')
+
+
+@pytest.mark.parametrize("method,path,body,params", _BAN_READ_ROUTES)
+def test_h1_mutant_without_the_ban_reads_refusal_the_error_escapes(
+        monkeypatch, method, path, body, params):
+    """The mutant of the test above: the check with the ban read's except arm
+    re-raising instead of answering 503. The fault then escapes the check
+    (no answer of the route), so the 503 above is that arm's."""
+    import textwrap
+    src = textwrap.dedent(inspect.getsource(main._check_steam_session))
+    assert src.count(_BAN_READ_REFUSAL) == 1
+    ns = dict(vars(main))
+    exec(compile(src.replace(_BAN_READ_REFUSAL, "raise"), "<mutant>", "exec"), ns)
+    monkeypatch.setattr(sys.modules[__name__], "_MUTANT_CHECK", [ns["_check_steam_session"]])
+    response, seen = _log_only_answer(monkeypatch, method, path, body, params, mutant=True)
+    assert response is None and [db.ban_reads for db in seen] == [1], response
 
 
 class Env:

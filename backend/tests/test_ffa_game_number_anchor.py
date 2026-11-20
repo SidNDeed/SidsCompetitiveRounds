@@ -579,6 +579,11 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "api"))
 
 import main
 import schemas
+from ban_read_tables import BAN_READ_DROP_ORDER, ban_read_ddl
+# The ban read's tables (bans part 2a): every schema builder below runs
+# these after its own statements, from the model metadata.
+_BAN_READ_SETUP = (["DROP TABLE IF EXISTS %s" % t for t in BAN_READ_DROP_ORDER]
+                   + ban_read_ddl())
 
 MIGRATION = (pathlib.Path(__file__).resolve().parents[1]
              / "sql" / "327_ffa_game_number.sql")
@@ -2858,6 +2863,8 @@ async def _setup(rows, games_played=None):
     async with engine.begin() as conn:
         for stmt in [s for s in SCHEMA.split(";") if s.strip()]:
             await conn.execute(text(stmt))
+        for stmt in _BAN_READ_SETUP:
+            await conn.execute(text(stmt))
         if games_played is not None:
             await conn.execute(text(
                 "INSERT INTO ffa_lobbies (id, games_played, created_at)"
@@ -4106,6 +4113,8 @@ async def _endpoint_fixture(games_played, recorded_number, recorded_room,
     async with engine.begin() as conn:
         for stmt in [s for s in SCHEMA.split(";") if s.strip()]:
             await conn.execute(text(stmt))
+        for stmt in _BAN_READ_SETUP:
+            await conn.execute(text(stmt))
     pids = {}
     match_id = uuid.uuid4()
     async with sm() as db:
@@ -4151,8 +4160,8 @@ async def _call_endpoint(sm, report):
     saved_secret = main.MATCH_HMAC_SECRET
     saved_session = main._check_steam_session
 
-    async def _no_session_check(request, steam_id, db):
-        return None
+    from soft_check_standin import SoftCheckStandIn
+    _no_session_check = SoftCheckStandIn()   # admits every caller; records keywords (M3)
 
     main.MATCH_HMAC_SECRET = ""
     main._check_steam_session = _no_session_check
@@ -4893,6 +4902,8 @@ async def _money_setup(players):
     sm = async_sessionmaker(engine, expire_on_commit=False)
     async with engine.begin() as conn:
         for stmt in [s for s in MONEY_SCHEMA.split(";") if s.strip()]:
+            await conn.execute(text(stmt))
+        for stmt in _BAN_READ_SETUP:
             await conn.execute(text(stmt))
     pids = {}
     async with sm() as db:
@@ -6048,6 +6059,8 @@ async def _settling_fixture(games_played, recorded_number, recorded_room):
         recorded_room=recorded_room)
     async with engine.begin() as conn:
         for stmt in [s for s in _SETTLE_SCHEMA.split(";") if s.strip()]:
+            await conn.execute(text(stmt))
+        for stmt in _BAN_READ_SETUP:
             await conn.execute(text(stmt))
     return engine, sm, pids, mid
 

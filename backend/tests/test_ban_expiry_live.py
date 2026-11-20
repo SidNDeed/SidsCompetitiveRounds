@@ -382,8 +382,8 @@ async def _obs_bets(sm, sid, pid):
     propagates."""
     saved = (main._check_steam_session, main.MATCH_HMAC_SECRET)
 
-    async def _session_ok(*a, **k):
-        return None
+    from soft_check_standin import SoftCheckStandIn
+    _session_ok = SoftCheckStandIn()   # admits every caller; records keywords (M3)
     main._check_steam_session = _session_ok
     main.MATCH_HMAC_SECRET = "ban-expiry-bets"
     series = str(uuid.uuid4())

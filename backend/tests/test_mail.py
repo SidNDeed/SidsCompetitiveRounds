@@ -37,6 +37,7 @@ from sqlalchemy.sql.elements import TextClause
 
 import main
 import models
+import ban_gate_statements as _GATE
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 PLUGIN_DIR = os.path.join(HERE, "..", "..", "plugin")
@@ -989,10 +990,24 @@ class FakeDb:
         if any(f"DELETE FROM {t} WHERE player_id = :pid" in sql
                for t in ("ranked_queue", "team_queue", "ovt_queue", "ffa_queue")):
             return _Res()
-        # the ban's open-lobby seat read (migration 416's change): this fake
-        # seats nobody in a lobby, so there is no lobby row to lock
-        if any(sql.startswith(f"SELECT series_id FROM {t} WHERE player_id = :pid AND status = 'lobby'")
-               for t in ("team_queue", "ovt_queue", "ffa_queue")):
+        # the ban's open-lobby read (migration 416's change; since bans part 2a,
+        # FIX-2 class III, every open lobby the account hosts or sits in, read
+        # from the lobby table): matched by the product's own text
+        # (ban_gate_statements.BAN_LOBBY_READS). This fake seats nobody in a
+        # lobby, so there is no lobby row to lock
+        if " ".join(sql.split()) in _GATE.BAN_LOBBY_READS:
+            return _Res([])
+        # ...and the live series and started lobbies it is in (bans part 2a,
+        # S4; ban_gate_statements.BAN_VOID_READS): none here, nothing to void
+        if " ".join(sql.split()) in _GATE.BAN_VOID_READS:
+            return _Res([])
+        # ...and its purges of the account's queued post, received invites and
+        # queue leases (ban_gate_statements.BAN_CORE_PURGES): nothing held here
+        if " ".join(sql.split()) in _GATE.BAN_CORE_PURGES:
+            return _Res([])
+        # ...and the spectate leave of every live lease it holds (F2 d;
+        # ban_gate_statements.BAN_SPECTATE_LEAVE): it spectates nothing here
+        if " ".join(sql.split()) in _GATE.BAN_SPECTATE_LEAVE:
             return _Res([])
         if "SELECT COUNT(*) FROM player_bans" in sql:
             return _Res([(self.recent_bans_by_admin.get(params["adm"], 0),)])

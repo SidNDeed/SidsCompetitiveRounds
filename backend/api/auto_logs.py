@@ -2207,6 +2207,16 @@ async def upload_auto_log(request: Request, db: AsyncSession = Depends(get_db)):
         # from one where no client has ever called the route (#438/#443).
         print(f"[AUTO-LOG] refused 401: session check failed for {req.steam_id}")
         raise HTTPException(status_code=401, detail=_SESSION_REJECT)
+    # Bans part 2a (S5, BAN-R3): an actively banned claimed id uploads no log.
+    # A ban deletes the account's sessions, so the check above already refuses
+    # one; this read states the rule where the route admits. It is a read
+    # WITHOUT the identity lock: a refusal before admission takes no advisory
+    # lock and the scrub stays outside every lock (the rules this route held
+    # before bans part 2a). The read under the identity lock is T2's, below,
+    # in the transaction that writes, so a ban that commits after this read
+    # still does not let the upload stand.
+    from main import _ban_gate_or_raise   # late import: main imports this module
+    await _ban_gate_or_raise(db, req.steam_id, request)
 
     log_blob = (req.log_text or "").strip()
     if not log_blob:
@@ -2521,6 +2531,20 @@ async def upload_auto_log(request: Request, db: AsyncSession = Depends(get_db)):
             # volume. A refusal here has a blob to discard, and discards it the
             # way every refusal after the write does: transaction ended FIRST,
             # then the cleanup, answered as a sentence and never raised.
+            # Bans part 2a (F4): the ban is read again under the identity lock
+            # (shared), the FIRST lock this transaction takes, so a ban that
+            # commits after T1's read does not let the upload stand. A refusal
+            # discards the stored blob the way every refusal after the write
+            # does: the transaction ended first, then the cleanup.
+            from main import _ban_lock_and_gate   # late import: main imports this module
+            try:
+                await _ban_lock_and_gate(db, [req.steam_id], request)
+            except HTTPException:
+                await _end_transaction(db)
+                outcome = await _discard_for_refusal(own)
+                print(f"[AUTO-LOG] refused 409 for {report_id}: an active ban read "
+                      f"in the writing transaction; {outcome}")
+                raise
             try:
                 count, oldest = await asyncio.wait_for(
                     _lock_and_count(db, req.steam_id), _span_budget(span_deadline))

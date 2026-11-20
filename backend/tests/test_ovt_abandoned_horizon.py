@@ -50,6 +50,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
 
 import main
+from ban_read_tables import BAN_READ_DROP_ORDER, ban_read_ddl
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -1905,7 +1906,12 @@ PIN_RE = re.compile(r'PIN main\.py:(\d+) "([^"]+)"')
 # photon_room_id FROM ovt_series ... FOR SHARE). It re-reads only the row
 # the live arm has just selected, by id, and keeps it only in the live arm's
 # statuses, so it opens no path to a row the live arm would not take.
-OVT_SERIES_STATUS_STATEMENTS = 32
+# 34 with the ban sweep (bans part 2a): _ban_void_lock's read of the banned
+# account's ACTIVE 1v2 series by roster, and _ban_void_apply's UPDATE of that
+# row from 'active' to 'canceled' (member_banned). Both take only 'active'
+# rows, by the banned account's seat; a 14-day-stuck active row holding the
+# account is ended by the ban like any other active one.
+OVT_SERIES_STATUS_STATEMENTS = 34
 
 
 def test_every_bug391_source_citation_resolves_to_what_it_names():
@@ -2287,7 +2293,7 @@ def _sink_schema() -> str:
     """
     schema = SCHEMA_120.read_text(encoding="utf-8")
     stmts = [f"DROP TABLE IF EXISTS {t}" for t in (
-        "ovt_match_cards", "gold_transactions", "glicko_ratings",
+        "ovt_match_cards", "gold_transactions", "glicko_ratings", *BAN_READ_DROP_ORDER,
         "ovt_matches", "ovt_series", "players")]
     stmts.append(SINK_PLAYERS)
     for table in ("ovt_series", "ovt_matches"):
@@ -2306,6 +2312,9 @@ def _sink_schema() -> str:
     # A count of zero would build the pre-201 table and still pass (#342).
     assert added >= 7, added
     stmts.extend(SINK_EXTRAS)
+    # the 1v2 report reads every roster member's ban (bans part 2a): the ban
+    # read's tables, from the model metadata
+    stmts.extend(ban_read_ddl())
     out = [re.sub(r"--[^\n]*", "", s).strip() for s in stmts]
     assert not any(";" in s for s in out), "a statement still carries a ';'"
     return ";\n".join(out) + ";"
@@ -2382,8 +2391,8 @@ def _sink_patch(monkeypatch):
     a test key, so the REAL signature check runs on every report. Nothing
     that records, pays, compares or locks is replaced.
     """
-    async def _no_session(request, steam_id, db):
-        return None
+    from soft_check_standin import SoftCheckStandIn
+    _no_session = SoftCheckStandIn()   # admits every caller; records keywords (M3)
 
     async def _no_podium(db):
         return []

@@ -1822,6 +1822,21 @@ def test_the_helper_closure_stays_affordable():
     # of that closure is new. The bound moves to 627, ~5% over the
     # measurement, for that reason and no other. The other five bounds hold
     # (code 86 / 219, whole 239 / 423 / 860 over 440 routes).
+    # voided-streak lane on the moderator log stack (2026-11-18), the merge
+    # of e3c8b2a2: 597 measured at GET /api/v1/health (596 at e3c8b2a2, the
+    # same walk over that tree): +1 by name, main._VOIDED_STREAK_BUILD, the
+    # lane's build marker, which the health route reads in both arms. The
+    # bound moves to 597, the measured value, for that reason and no other.
+    # ban sweep (bans part 2a), merged onto main 234ea0f8: 598 measured at
+    # GET /api/v1/health (597 on main 234ea0f8): +1 by name,
+    # main._BAN_SWEEP_BUILD, the lane's build marker, which the health route
+    # reads in both arms. The bound moves to 598, the measured value, for that
+    # reason and no other.
+    # The stack of QAPPLY-1 and the ban sweep (claude/stack-1120), at its
+    # merge of the ban sweep: the two lanes' bounds were set on two trees
+    # (627 over QAPPLY-1's base, 598 over main 234ea0f8); the merge keeps
+    # QAPPLY-1's 627, which holds both lanes' measurements, until the stack's
+    # closing item measures its own tip and records the value here.
     assert code_worst <= 627, f"worst code closure {code_worst} of {total}"
 
     # Imports are counted separately rather than folded in or waved through.

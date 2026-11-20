@@ -1330,6 +1330,13 @@ class HealthResponse(BaseModel):
     # by construction; probed by the release train and read by nothing else
     # (#306). No default, as above. Absent on any build before it.
     aer_popgate_build: int
+    # voided_streak_build: release-train verification plumbing, not a design
+    # mechanism (main._VOIDED_STREAK_BUILD; 1 = in this build every streak
+    # walk leaves a voided series or game out). It names build identity only,
+    # equal on both roles by construction; probed by the release train and
+    # read by nothing else (#306). No default, as above. Absent on any build
+    # before it.
+    voided_streak_build: int
     # admin_evidence_population: the outcome of this process's most recent
     # build attempt of the evidence report's display population, or of a
     # start-up build that failed before it reached an attempt
@@ -1369,6 +1376,16 @@ class HealthResponse(BaseModel):
     # construction. Probed by the release train and read by nothing else
     # (#306). No default, as above. Absent on any build before it.
     qapply_build: int
+    # ban_sweep_build: release-train verification plumbing, not a design
+    # mechanism (main._BAN_SWEEP_BUILD; 1 = this build refuses an actively
+    # banned account on every state-changing route and voids its open series
+    # and lobbies when the ban is written). It names build identity only. A
+    # code constant, equal on both roles by construction, so the train can
+    # read it through the edge; this is the key that tells a stale box from a
+    # refreshed one (learnings 780, 794). Probed by the release train and read
+    # by nothing else (#306). No default, as above. Absent on any build before
+    # it.
+    ban_sweep_build: int
     # build_manifest: the SHA-256 of the build-manifest.json this image's build
     # wrote (build_manifest.py: the build context's digest and the identity of
     # every installed wheel and .deb), "absent" when the process was not
