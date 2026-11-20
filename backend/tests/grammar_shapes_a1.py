@@ -37,16 +37,16 @@ A1_SPANS = (
     ('main.py', 19795, '_group_region', 706),
     ('main.py', 21163, 'queue_poll', 2650),
     ('main.py', 30339, '_bet_fighter_tax', 88),
-    ('main.py', 30351, '_credit_bet_fighter_tax', 129),  # MDPL class C: the lane's count at 1b1ecbe6 (+16)
-    ('main.py', 30376, '_credit_team_bet_fighter_tax', 125),  # MDPL class C: the lane's count at 1b1ecbe6 (+10)
-    ('main.py', 39884, '_return_stake_exactly', 112),  # MDPL class C: the lane's count at 1b1ecbe6 (+16)
+    ('main.py', 30358, '_credit_bet_fighter_tax', 129),  # MDPL class C: the lane's count at 1b1ecbe6 (+16)
+    ('main.py', 30388, '_credit_team_bet_fighter_tax', 125),  # MDPL class C: the lane's count at 1b1ecbe6 (+10)
+    ('main.py', 39904, '_return_stake_exactly', 112),  # MDPL class C: the lane's count at 1b1ecbe6 (+16)
     ('main.py', 46639, '_deletion_bound_acts_on', 26),  # MDPL class C (ruling 10:53:36Z): the lane's helper (bcc99529), reached by the real walks
     ('main.py', 46647, '_retryable_for_caller', 47),  # MDPL class C (ruling 10:53:36Z): the lane's helper (4e2841f1), reached by the real walks
     ('main.py', 46899, '_deletion_lock_party_row', 136),  # MDPL class C (ruling 10:53:36Z): the lane's helper (4841af70), reached by the real walks
     ('main.py', 51921, '_balance_teams', 230),
     ('main.py', 51941, '_team_balance_rating', 49),
     ('main.py', 52298, 'team_queue_poll', 4249),
-    ('main.py', 53745, '_reconcile_team_series_bets', 656),  # MDPL class C: the lane's count at 1b1ecbe6 (+50)
+    ('main.py', 54184, '_reconcile_team_series_bets', 656),  # MDPL class C: the lane's count at 1b1ecbe6 (+50)
     ('main.py', 54858, '_team_quartet_key', 26),
     ('main.py', 54866, '_team_quartet_lock', 27),
     ('main.py', 54883, '_team_series_resumable', 139),
@@ -71,7 +71,7 @@ A1_SPANS = (
     ('main.py', 65391, '_asm_sqlstate', 119),
     ('main.py', 67994, '_ffa_queue_poll_inner', 2939),
     ('main.py', 77935, '_assert_no_service_subject', 96),
-    ('main.py', 76453, '_service_player_uuids', 191),  # MDPL class C: the lane's count at 1b1ecbe6 (+8)
+    ('main.py', 77983, '_service_player_uuids', 191),  # MDPL class C: the lane's count at 1b1ecbe6 (+8)
     ('match_hold.py', 212, 'caps_token_sql', 16),
     ('match_hold.py', 235, '_mode_or_400', 23),
     ('match_hold.py', 351, '_latch_sql', 78),
