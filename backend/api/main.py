@@ -67158,11 +67158,59 @@ _QAPPLY_UNIT: contextvars.ContextVar = contextvars.ContextVar(
     "_qapply_unit", default=None)
 
 
+class _QapplyUnitMark:
+    """The open unit's value of _QAPPLY_UNIT (F6): its kind, and whether a
+    database bound error (_qapply_out_of_time) was raised by a statement run
+    in this unit's context, whoever caught it."""
+    __slots__ = ("kind", "bound")
+
+    def __init__(self, kind: str):
+        self.kind, self.bound = kind, False
+
+
+class _QapplyBoundHit(TimeoutError):
+    """_qapply_check_bound's refusal. A TimeoutError, so the routes'
+    classifier (_qapply_out_of_time) answers it busy and rolls back."""
+
+
+def _qapply_on_db_error(ctx) -> None:
+    """handle_error listener, registered once for every Engine (below). It
+    does nothing unless a held-report unit is open in the calling context:
+    the greenlet that runs a statement takes the calling task's context, so
+    another request's statements never see this unit. Then it marks the unit
+    when the error is a bound error by the routes' one classifier. A handler
+    that catches the error later cannot unmark it. It never raises."""
+    try:
+        mark = _QAPPLY_UNIT.get()
+        if mark is not None and _qapply_out_of_time(ctx.sqlalchemy_exception or ctx.original_exception):
+            mark.bound = True
+    except Exception:
+        pass
+
+
+from sqlalchemy import event as _sa_event  # noqa: E402
+from sqlalchemy.engine import Engine as _SaEngine  # noqa: E402
+
+_sa_event.listen(_SaEngine, "handle_error", _qapply_on_db_error)
+
+
+def _qapply_check_bound() -> None:
+    """The mark's read (F6), directly before every commit a unit reaches:
+    the last statement of _qapply_finish (directly before the report body's
+    one commit) and the statement before Credit's commit. A bound error
+    raised anywhere in the unit, caught or not, refuses the commit: the
+    action answers busy and rolls back whole."""
+    mark = _QAPPLY_UNIT.get()
+    if mark is not None and mark.bound:
+        raise _QapplyBoundHit("a database bound fired inside the unit")
+
+
 @asynccontextmanager
 async def _qapply_unit(kind: str):
     """`async with _qapply_unit(kind): ...` runs a held-report action's whole
-    transaction with _QAPPLY_UNIT set to kind, and resets it after."""
-    tok = _QAPPLY_UNIT.set(kind)
+    transaction with _QAPPLY_UNIT set to a fresh mark of that kind, and
+    resets it after."""
+    tok = _QAPPLY_UNIT.set(_QapplyUnitMark(kind))
     try:
         yield kind
     finally:
@@ -75612,6 +75660,7 @@ async def _qapply_finish(db, ctx: dict, *, lobby_uuid, match_id, game: int, play
                         details={"quarantine_id": ctx["qid"], "mode": "ffa", "applied": True,
                                  "match_id": str(match_id), "game": int(game)})
     ctx["applied"] = match_id
+    _qapply_check_bound()
 
 
 async def _qapply_held(db, qid_uuid):
@@ -76043,6 +76092,7 @@ async def admin_credit_quarantine(qid: str, req: _AdminQuarantineReq,
                    "actor": req.admin_steam_id, "note": note}
             async with _qapply_run(ctx):
                 paid = await _qapply_credit(db, row, report, actor=req.admin_steam_id, note=note)
+                _qapply_check_bound()
                 await db.commit()
     except HTTPException as ex:
         await _asm_rollback(db)
