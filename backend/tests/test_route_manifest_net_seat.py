@@ -1826,7 +1826,21 @@ def test_the_helper_closure_stays_affordable():
     # name, main._BOT_TEXT_BUILD, which the health route reads in both arms;
     # the two trees' reached sets are otherwise equal by name. The bound
     # moves to 598, the measured value, for that reason and no other.
-    assert code_worst <= 598, f"worst code closure {code_worst} of {total}"
+    # account deletion lock lane (2026-11-20), claude/mdpl-1116 at its merge of
+    # the bot text lane f5de122a (33aa143d): 601 measured at GET
+    # /api/v1/health, of 5776 indexed bindings (598 at f5de122a, of 5737, the
+    # same walk over that tree): +3 by name, none leaves.
+    # main._ACCOUNT_DELETION_LOCK_BUILD, the lane's build marker, which the
+    # health route reads in both arms; and main's _DeletionRowHeld and
+    # _DeletionPastDeadline, the two signal classes of an account deletion's
+    # bound: _pc_trade_schema, which the connected arm of /health runs through
+    # _pc_trading_word, names them in the except clause that hands them back to
+    # that bound, and they arise only inside a deletion attempt. The bound
+    # moves to 601, the measured value, for that reason and no other. The
+    # median (86 against 87) and p90 (216 against 225) bounds stay, and so do
+    # the three bounds of the whole closure (240 against 245, 402 against 425,
+    # and 865 against 897 at the health route, +3 by the same three names).
+    assert code_worst <= 601, f"worst code closure {code_worst} of {total}"
 
     # Imports are counted separately rather than folded in or waved through.
     # They roughly triple the closure -- measured 69 / 119 / 308 -- and that is
