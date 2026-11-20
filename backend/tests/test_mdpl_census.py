@@ -16,7 +16,7 @@ way, gives the frozen record (the control).
 A site whose class rests on an identity key (its fallback, the class without
 the key, is above it) names whose key covers whose row, or is judged to its
 fallback by hand (lesson 732). The regression control of the reader's
-widening: with its eight switches off it computes mdpl_census_base.json, the
+widening: with its nine switches off it computes mdpl_census_base.json, the
 census frozen before the widening, exactly (the test keeps the name it had
 with six). A lock taken without a wait (SKIP LOCKED, NOWAIT) is a hold: a
 planted route that takes the held row that way is READ, as with a wait, and a
@@ -552,6 +552,34 @@ def test_a_foreign_key_the_deletion_s_own_function_checks_is_a_wait(src, monkeyp
     assert ("players", mc.KS) not in mc.step1(src)["A"]
     _s1, off = mc.sites(src, entries=["link_discord"])
     assert off[site]["class"] == "CLEAR", off[site]
+
+
+_HOST_UPDATE = ("_lobby_seat_left_core | UPDATE {?t:ffa_lobbies|ovt_lobbies|team_lobbies} "
+                "SET host_player_id = :h | 0")
+
+
+def _q_held(got):
+    return sorted(k for k, d in got.items() if "?" in d["held"])
+
+
+def test_no_held_set_of_the_measured_census_holds_an_unread_table(measured):
+    """A statement whose table the reader cannot name reads as "?", which
+    conflicts with every table: a held set that holds it stands for a
+    statement the census lost (RULING CENSUS-1, section 1)."""
+    assert _q_held(measured["sites"]) == []
+    assert not [w for ws in measured["step1"].values() for w in ws if w.startswith("? ")]
+
+
+def test_a_name_unpacked_from_a_dictionary_of_table_tuples_reads_its_tables(src, monkeypatch):
+    """DICT_TUPLES: `qt, lt = _LOBBY_SEAT_TABLES[mode]` in _lobby_seat_left_core
+    reads lt as the three lobby tables, so its host update is a site and the
+    statements after it hold their tables. The control: with the switch off
+    the update is no site and the rows after it hold "?"."""
+    _s1, on = mc.sites(src, entries=["ffa_queue_leave"])
+    assert _HOST_UPDATE in on and _q_held(on) == [], (_q_held(on), sorted(on)[:10])
+    monkeypatch.setattr(mc, "DICT_TUPLES", False)
+    _s1, off = mc.sites(mc.Source(), entries=["ffa_queue_leave"])
+    assert _HOST_UPDATE not in off and _q_held(off) != [], _q_held(off)
 
 
 # A route that takes the identity key, then the portrait blob's key, then

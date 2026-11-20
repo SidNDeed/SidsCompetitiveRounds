@@ -3,13 +3,14 @@ a players row, computed from the source (main.py, every other backend/api
 module that runs SQL, models.py and the sql migrations are read as text;
 nothing is imported or run).
 
-Eight module-level switches widen or sharpen what is read; all eight off is
+Nine module-level switches widen or sharpen what is read; all nine off is
 the census as first frozen (main.py alone, no triggers, no insert waits, the
 FOR clause read from the last SELECT before it, foreign keys by table, a
 Player known by select(Player)/get(Player) alone, a no-wait acquisition read
 as taking nothing, every players lock of the deletion's own-row functions
-read as on P's row), kept as mdpl_census_base.json, which test_mdpl_census
-computes again with the eight off (the regression control of the widening):
+read as on P's row, a name unpacked from a dictionary of string tuples
+unread), kept as mdpl_census_base.json, which test_mdpl_census computes
+again with the nine off (the regression control of the widening):
 - MODULES: every backend/api/*.py that calls text(...) or .execute /
   .exec_driver_sql / .with_for_update (models.py and schemas.py keep their
   roles) is parsed. main.py's functions keep their bare names; module M's are
@@ -96,6 +97,12 @@ computes again with the eight off (the regression control of the widening):
   lobby's host (host_player_id) and rewrites a case's reporter_id. That is
   a wait like any other, ("players", KEY SHARE) in step 1 (_deletion_wait).
   Off: every players lock in those functions is read as on P's row.
+- DICT_TUPLES: a name bound by unpacking a subscript of a module-level
+  dictionary whose every value is a tuple of string constants, of the
+  target's length (`qt, lt = _LOBBY_SEAT_TABLES[mode]`), reads as that
+  position's element of every value, as the alternatives form reads them.
+  Off: the names are unread, so a statement that uses one reads its table
+  as "?" or is not read at all.
 
 The deletion (delete_player_data) holds its own players row from its first
 write of it (`UPDATE players SET pc_shards = 0`, FOR NO KEY UPDATE) to its
@@ -198,12 +205,13 @@ ROUTE_METHODS = frozenset({"get", "post", "put", "delete", "patch", "api_route",
 KEY_COLUMNS = {"players": frozenset({"id", "steam_id", "discord_id"})}
 IDENTITY_KEYS = frozenset({"key:hashtext(:p)"})
 
-# The eight widenings of the census, each a switch (all off = the census as first
+# The nine widenings of the census, each a switch (all off = the census as first
 # frozen, mdpl_census_base.json: main.py alone, no triggers, no insert waits, the
 # FOR clause of the last SELECT, a foreign key's parent locked by every INSERT of
 # its table, a Player known by select(Player)/get(Player) alone, a no-wait
 # acquisition read as taking nothing, every players lock of the deletion's
-# own-row functions read as on P's row).
+# own-row functions read as on P's row, a name unpacked from a dictionary of
+# string tuples unread).
 MODULES = True          # every backend/api module that runs SQL is read, not main.py alone
 TRIGGERS = True         # a write fires the triggers backend/sql defines on its table
 INSERT_WAITS = True     # an INSERT holds (table, INS); one with ON CONFLICT waits for it
@@ -212,6 +220,7 @@ FK_COLUMNS = True       # a foreign key's KEY SHARE only when the write sets one
 ORM_TYPES = True        # a Player object is also known by annotation, return type, loop and copy; the rest is listed
 NB_HOLDS = True         # a SKIP LOCKED / NOWAIT / try acquisition waits for nothing but holds what it got
 OWN_FK_WAITS = True     # a KEY SHARE in the deletion's own-row functions is a foreign key's, on another row: a wait
+DICT_TUPLES = True      # a, b = D[k], D a module dictionary of string tuples: each name reads as its position's values
 
 # Foreign keys a migration drops by dynamic SQL (EXECUTE format('ALTER TABLE ...
 # DROP CONSTRAINT %I', ...) over a pg_constraint lookup), which the reader cannot
@@ -468,7 +477,8 @@ class Source:
 
     def _space(self, m):
         if m not in self._ns:
-            self._ns[m] = {"consts": {}, "dicts": defaultdict(set), "dictvals": {}, "listvals": {}}
+            self._ns[m] = {"consts": {}, "dicts": defaultdict(set), "dictvals": {}, "listvals": {},
+                           "dicttuples": {}}
         return self._ns[m]
 
     # The current module's constants (main.py's outside a flattening).
@@ -476,6 +486,7 @@ class Source:
     dicts = property(lambda self: self._space(self._cur)["dicts"])
     dictvals = property(lambda self: self._space(self._cur)["dictvals"])
     listvals = property(lambda self: self._space(self._cur)["listvals"])
+    dicttuples = property(lambda self: self._space(self._cur)["dicttuples"])
 
     def _import_targets(self, node):
         """{bound name: ("mod", X) | ("name", X, n)} of an import of an api module."""
@@ -1060,6 +1071,10 @@ class Source:
 
     def _const(self, name, v):
         if isinstance(v, ast.Dict):
+            if v.values and all(isinstance(x, ast.Tuple) and x.elts and len(x.elts) == len(v.values[0].elts)
+                                and all(isinstance(e, ast.Constant) and isinstance(e.value, str) for e in x.elts)
+                                for x in v.values):     # DICT_TUPLES reads these (only where it is on)
+                self.dicttuples[name] = [[e.value for e in x.elts] for x in v.values]
             vals = [self.text(x, {}) for x in v.values]
             if vals and all(t is not None for t in vals):
                 self.dictvals[name] = vals
@@ -1725,6 +1740,16 @@ class Source:
         if ORM_TYPES and isinstance(st, ast.Assign) and len(st.targets) == 1 \
                 and isinstance(st.targets[0], ast.Tuple):     # rule 2: p, created = await helper(...)
             self._player_track(st, ctx["players_vars"], ctx["fn"])
+        if DICT_TUPLES and isinstance(st, ast.Assign) and len(st.targets) == 1 \
+                and isinstance(st.targets[0], ast.Tuple) and isinstance(st.value, ast.Subscript) \
+                and isinstance(st.value.value, ast.Name):    # qt, lt = _LOBBY_SEAT_TABLES[mode]
+            rows = self.dicttuples.get(st.value.value.id)
+            if rows is None and MODULES:
+                rows = self._imported_value(st.value.value.id, "dicttuples")
+            if rows and all(len(r) == len(st.targets[0].elts) for r in rows):
+                for i, tg in enumerate(st.targets[0].elts):
+                    if isinstance(tg, ast.Name):
+                        ctx["local"][tg.id] = self._alternatives([r[i] for r in rows])
         if isinstance(st, ast.Assign) and len(st.targets) == 1 and isinstance(st.targets[0], ast.Tuple) \
                 and isinstance(st.value, ast.Tuple) and len(st.value.elts) == len(st.targets[0].elts):
             for tg, v in zip(st.targets[0].elts, st.value.elts):
@@ -2002,7 +2027,7 @@ COMPARED = ("class", "fallback", "phases", "held", "entries", "keys")
 BASE = os.path.join(HERE, "mdpl_census_base.json")
 BASE_FIELDS = ("class", "phases", "held", "entries", "keys")
 SWITCHES = ("MODULES", "TRIGGERS", "INSERT_WAITS", "FOR_DEPTH", "FK_COLUMNS", "ORM_TYPES", "NB_HOLDS",
-            "OWN_FK_WAITS")
+            "OWN_FK_WAITS", "DICT_TUPLES")
 
 
 def measured(src=None):
