@@ -2207,3 +2207,43 @@ def test_f5_control_another_game_of_that_lobby_is_not_refused_by_the_seed(monkey
         assert ans.body not in (T["game_paid"], T["game_applied"]), ("refused as a paid game", ans)
         await _f5_invariant(env)
     run_env(monkeypatch, body)
+
+
+# ── M1: a repeat on the same held row answers what the earlier action did ──
+
+def test_m1_a_repeat_on_one_held_row_names_what_the_earlier_action_did(monkeypatch):
+    async def body(env):
+        async def refused(name, q, act, want):
+            before = await tables(env)
+            ans = await act(env, q)
+            assert (ans.status, ans.body) == (409, want), (name, ans)
+            assert await tables(env) == before, (name, "a change stood")
+        # Credit, then Credit and Accept on the same row.
+        lob, q = await closed_held(env)
+        await later_for(env, lob)
+        assert (await credit(env, q)).status == 200
+        await refused("credit then credit", q, credit, T["held_credited"])
+        await refused("credit then accept", q, accept, T["held_credited"])
+        # Accept, then Accept and Credit on the same row.
+        lob, q = await closed_held(env)
+        assert (await accept(env, q)).status == 200
+        await refused("accept then accept", q, accept, T["held_applied"])
+        await refused("accept then credit", q, credit, T["held_applied"])
+        # Rows with no claim answer as before: a row main's Accept only marked
+        # (never applied), a discarded row, a filed row (main's triage state).
+        for how in ("accepted", "discarded", "filed"):
+            lob, q = await closed_held(env)
+            if how == "discarded":
+                assert (await discard(env, q)).status == 200
+            else:
+                await env.conn.execute("UPDATE match_report_quarantine SET status = $2, reviewed_at = now()"
+                                       " WHERE id = $1", uuid.UUID(q), how)
+            assert await status_of(env, q) == how, how
+            await refused("%s, accept" % how, q, accept, T["reviewed"])
+            await refused("%s, credit" % how, q, credit, T["reviewed"])
+        # A row migration 421 credited, after 426's seed: the credited sentence.
+        lob, q2, q3, q3b = await _f5_421_end_state(env)
+        for q in (q2, q3):
+            await refused("421, accept", q, accept, T["held_credited"])
+            await refused("421, credit", q, credit, T["held_credited"])
+    run_env(monkeypatch, body)
