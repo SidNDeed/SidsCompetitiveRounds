@@ -31,8 +31,9 @@ def _load(*names):
     ns = {
         "discord": SimpleNamespace(utils=SimpleNamespace(escape_markdown=lambda s: s)),
         "_PC_RARITY_EMOJI": EMOJI,
+        "re": re,
     }
-    for n in names:
+    for n in ("_escape_md",) + names:      # _pc_name calls the bot's name helper
         exec(compile(_fn(BOT_SRC, n), "<discord_bot>", "exec"), ns)
     return ns
 
@@ -81,8 +82,7 @@ def test_the_top_card_is_escaped_like_every_other_api_name():
     # the one unescaped api string on the surface
     ns = _load("_pc_name", "_pc_print_line")
     marks = []
-    ns["discord"] = SimpleNamespace(utils=SimpleNamespace(
-        escape_markdown=lambda s: marks.append(s) or s))
+    ns["_escape_md"] = lambda s, *a, **k: marks.append(s) or s
     ns["_pc_print_line"](_binder(top_card="Poison"))
     assert "Poison" in marks
 

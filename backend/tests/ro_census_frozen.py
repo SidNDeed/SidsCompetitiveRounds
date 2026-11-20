@@ -569,10 +569,6 @@ FROZEN = {'api/admin_evidence.py': [('import', 'from sqlalchemy import text'),
                  ('dsntext', '@\\w'),
                  ('dsntext', '@everyone'),
                  ('dsntext', '@everyone'),
-                 ('dsntext', '@everyone'),
-                 ('dsntext', '@everyone'),
-                 ('dsntext', '@here'),
-                 ('dsntext', '@here'),
                  ('dsntext', '@here'),
                  ('dsntext', '@here'),
                  ('dsntext',
@@ -621,15 +617,17 @@ FROZEN = {'api/admin_evidence.py': [('import', 'from sqlalchemy import text'),
                   'counterparty is still holding, and waiting inside the request is worse for the\n'
                   'caller than answering something its outbox will bring back.'),
                  ('dsntext',
-                  'Names go into a Discord embed body — neutralize markdown metacharacters\n'
-                  '    (embeds never ping, and the bot sends AllowedMentions.none(), so mention\n'
-                  '    tokens are cosmetic-only here). Brackets/parens/angles included (review\n'
-                  '    F10): AllowedMentions suppresses pings, NOT hyperlinks, and a name like\n'
-                  '    "[watch](https://evil)" would otherwise render a clickable link in an\n'
-                  '    official embed. Round-2 finding 5: whitespace/control chars collapse to\n'
-                  '    single spaces (a newline in a name forges whole embed LINES) and bare\n'
-                  "    URLs get a zero-width space after the scheme so Discord's auto-linker\n"
-                  '    never fires on caller-authored text.'),
+                  "A name for a stream post's embed body: discord_text.escape_name over\n"
+                  '    the name with every run of white space collapsed to one space. That\n'
+                  '    escapes the markdown marks and [ ] < > @, so a name like\n'
+                  '    "[watch](https://evil)" renders no masked link and no mention\n'
+                  '    (AllowedMentions suppresses pings, not hyperlinks; review F10); keeps the\n'
+                  '    name on one line, so it cannot forge an embed line (round-2 finding 5);\n'
+                  '    and puts a zero-width space after the colon of every scheme that is\n'
+                  "    followed by a slash, so Discord's auto-linker never fires on it. The live post\n"
+                  '    (_stream_post_content) and each stored matchup line\n'
+                  '    (_stream_matchup_line) call it once per name; the final post\n'
+                  '    (_stream_ended_content) shows the stored lines as they stand.'),
                  ('dsntext',
                   'On a read replica, refuse anything that is not a read.\n'
                   '\n'
@@ -2151,7 +2149,12 @@ R11_COARSE_FROZEN = {'tests/test_match_hold_admission_gate_pg.py': [('dsntext',
                                                  '(4)).')]}
 for _k, _v in R11_COARSE_FROZEN.items():
     FROZEN[_k] = list(FROZEN.get(_k, [])) + list(_v)
-COARSE_COUNT = 365
+# 365 as derived at round 11, less the four forms BOT-TEXT-ESCAPE-1 took out of
+# the coarse list above by hand (two '@everyone' and two '@here' under
+# 'api/main.py'; see the BOT_TEXT_ESCAPE block at the end). The FROZEN_COUNT
+# figures that the later blocks' comments give (855, 856, 860, 867) are the
+# figures at those blocks' own edits, with the coarse 365.
+COARSE_COUNT = 361
 COMPLETE_COUNT = 218
 # Hand edit at the round-9 merge (W30b; the ro child's question 1; reviewed
 # in the round-9 notes): two dynamic forms the gr child's G2/G3 code adds,
@@ -3807,6 +3810,53 @@ MODLOG_FROZEN = {'api/main.py': [
 MODLOG_COUNT = 7
 for _k, _v in MODLOG_FROZEN.items():
     FROZEN[_k] = list(FROZEN.get(_k, [])) + list(_v)
+FROZEN_COUNT = (COARSE_COUNT + COMPLETE_COUNT + R10_COUNT + R10_MERGE_COUNT
+                + R11_ID_COUNT + R11_OPEN_COUNT + B10_MERGE_COUNT
+                + MAIL_SEND_RECEIPTS_COUNT + LOBBY_INVITES_COUNT + MODLOG_COUNT)
+
+
+# Hand edit for the bot text escape (BOT-TEXT-ESCAPE-1): the forms its change
+# takes out of the census, changes and adds. None is an import, a kwarg, an
+# identity or an env form; none opens a connection, and none is a text a DSN
+# is built from.
+# - Taken out where they stood in the coarse list above: two '@everyone' and
+#   two '@here' dsntext forms under 'api/main.py', the patterns of the two
+#   mention-word substitutions that the compose-time paths of the admin post
+#   and the channel post no longer run (they pass the shared discord_text
+#   helpers instead). The two of each that remain are other call sites.
+#   COARSE_COUNT is 361 for that reason.
+# - Replaced in place in the coarse list above (same position, the count
+#   unchanged): the docstring of _stream_md_escape, which no longer begins
+#   "Names go into a Discord embed body" and now begins "A name for a stream
+#   post's embed body", a text about how a name is escaped for an embed.
+# - Two dsntext forms added under 'api/mail_discord.py', in this block: the
+#   pattern '@(everyone|here)' of older_bot_name, a pattern for a Discord
+#   mention word (the census reads the @), and older_bot_name's docstring,
+#   which names the @everyone and @here it neutralises, a text about how a
+#   name is shown to an older bot.
+# Frozen by hand, not by a re-derivation; FROZEN_COUNT is 865.
+BOT_TEXT_ESCAPE_FROZEN = {'api/mail_discord.py': [
+    ('dsntext', '@(everyone|here)'),
+    ('dsntext',
+     "The `sender_name` field, for a bot that predates the *_raw fields\n"
+     '    (BOT-TEXT-ESCAPE-1). That bot shows this field on two paths. In its\n'
+     '    markdown slots (the sent-reply line and the which-mail question) the\n'
+     "    field passes that bot's own name escape, which backslash-escapes\n"
+     '    \\ * _ ~ | ` [ ] < > and a line-opening mark but not @: so the field\n'
+     "    carries no backslash escape (that bot's escape is the one pass). In the\n"
+     "    mail picker's Button label, a plain slot that renders no markdown, the\n"
+     '    field is shown raw, as a plain slot requires. On both paths the field\n'
+     '    keeps the neutralisation it had before -- < > as ( ), @everyone and\n'
+     '    @here without their @ -- so that bot shows no mention form. One line, at\n'
+     '    most RELAY_NAME_MAX characters. A bot that reads sender_name_raw never\n'
+     '    shows this field.')]}
+BOT_TEXT_ESCAPE_COUNT = 2
+for _k, _v in BOT_TEXT_ESCAPE_FROZEN.items():
+    FROZEN[_k] = list(FROZEN.get(_k, [])) + list(_v)
+FROZEN_COUNT = (COARSE_COUNT + COMPLETE_COUNT + R10_COUNT + R10_MERGE_COUNT
+                + R11_ID_COUNT + R11_OPEN_COUNT + B10_MERGE_COUNT
+                + MAIL_SEND_RECEIPTS_COUNT + LOBBY_INVITES_COUNT + MODLOG_COUNT
+                + BOT_TEXT_ESCAPE_COUNT)
 
 
 # Hand edit for MDPL, the account deletion's bound (the integrator's rulings of 17 Nov 2026: 09:13:52Z,
@@ -3821,7 +3871,7 @@ for _k, _v in MODLOG_FROZEN.items():
 # relock controls, each reading from main, by a name the test fixes, a function whose source text is
 # parsed or a class that is checked, and calling neither.
 # None reaches an opener, a DSN, a role or an identity statement. Frozen by hand, not by a
-# re-derivation; FROZEN_COUNT is 892.
+# re-derivation; FROZEN_COUNT is 890.
 MDPL_FROZEN = {
     'api/main.py': [
         # main.py:45846, the docstring of _deletion_arm_every_statement, prose matched by the word PostgreSQL;
@@ -3970,4 +4020,4 @@ for _k, _v in MDPL_FROZEN.items():
 FROZEN_COUNT = (COARSE_COUNT + COMPLETE_COUNT + R10_COUNT + R10_MERGE_COUNT
                 + R11_ID_COUNT + R11_OPEN_COUNT + B10_MERGE_COUNT
                 + MAIL_SEND_RECEIPTS_COUNT + LOBBY_INVITES_COUNT + MODLOG_COUNT
-                + MDPL_COUNT)
+                + BOT_TEXT_ESCAPE_COUNT + MDPL_COUNT)

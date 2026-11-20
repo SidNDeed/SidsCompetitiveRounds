@@ -31,8 +31,11 @@ TID = "6f1c2d3e-0000-4000-8000-000000000001"
 STEAM = H.steam_of(7)                 # synthetic, not an individual SteamID64
 CID = "tavail:%s:%s:no" % (TID, STEAM)
 FUNCS = {"on_interaction", "_tdlc_verify_clicker", "_tournament_unsignup",
-         "_discord_tail", "_scrub_discord_id"}
-ASSIGNS = {"_tavail_locks", "_tavail_withdrawn"}
+         "_discord_tail", "_scrub_discord_id",
+         # an api refusal of the leave passes the refusal helper (BOT-TEXT-ESCAPE-1)
+         "_api_refusal_text", "_escape_text"}
+ASSIGNS = {"_tavail_locks", "_tavail_withdrawn",
+           "API_REFUSAL_SHOWN_MAX", "_TEXT_BREAKS", "_TEXT_URL", "_TEXT_LINE_MARK", "_TEXT_ALWAYS"}
 
 
 class _User:
