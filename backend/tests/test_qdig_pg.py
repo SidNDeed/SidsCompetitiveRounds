@@ -570,9 +570,18 @@ def test_pg_qdig_the_admin_lists_strings(monkeypatch):
                              [{"m": mid, "p": pid(s)} for s in fx.GAMES["C2"]["seats"]])
             resp = await env.client.get(ADMIN_LIST, params={"admin_steam_id": tq.ADMIN,
                                                             "hmac_signature": tq.sig("list")})
-            return tq.ok(resp)
+            first = tq.ok(resp)
+            # Lobby C as the live rows left it carries no frozen roster
+            # (member_ids is the column's empty default); with its six seats
+            # as its roster, the verdict reaches the gate.
+            await env.ex("UPDATE ffa_lobbies SET member_ids = CAST(:m AS uuid[]) WHERE id = :l",
+                         {"m": [pid(s) for s in fx.GAMES["C2"]["seats"]], "l": fx.LOBBY_C})
+            resp = await env.client.get(ADMIN_LIST, params={"admin_steam_id": tq.ADMIN,
+                                                            "hmac_signature": tq.sig("list")})
+            return first, tq.ok(resp)
 
-    rep = run(body())["reports"]
+    listed, rostered = run(body())
+    rep = listed["reports"]
     assert [r["id"] for r in rep] == [C3, C2]
     for r in rep:
         assert set(r) == ADMIN_KEYS
@@ -582,10 +591,15 @@ def test_pg_qdig_the_admin_lists_strings(monkeypatch):
     assert c2["reason"] == ("The lobby had already been closed when this report arrived, so the game was "
                             "never recorded. [lobby_completed]")
     assert c2["score"] == "Dune 5r 11p | Elm 2r 5p | Ash 0r 2p | Birch 0r 2p | +2"
-    # QAPPLY-1: the verdict is _qapply_verdict's. The later game is game 9 of
-    # C2's own lobby, so its end is the lobby's previous game for C2, and C2
-    # was received before it (R5).
-    assert c2["accept_blocked_reason"] == main._QAPPLY_TEXTS["clock"]
+    # QAPPLY-1: the verdict is _qapply_verdict's, from the verifications
+    # Accept's body and Credit make, in the body's order. With no frozen
+    # roster, the report's players are not the lobby's roster.
+    assert c2["accept_blocked_reason"] == main._QAPPLY_TEXTS["roster"]
+    # With the roster, the gate decides: the later game is game 9 of C2's own
+    # lobby, so its end is the lobby's previous game for C2, and C2 was
+    # received before it (R5).
+    c2 = {r["id"]: r for r in rostered["reports"]}[C2]
+    assert (c2["can_accept"], c2["accept_blocked_reason"]) == (False, main._QAPPLY_TEXTS["clock"])
 
 
 # ── /health ────────────────────────────────────────────────────────────────
