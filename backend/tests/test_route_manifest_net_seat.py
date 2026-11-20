@@ -1821,7 +1821,12 @@ def test_the_helper_closure_stays_affordable():
     # same walk over that tree): +1 by name, main._VOIDED_STREAK_BUILD, the
     # lane's build marker, which the health route reads in both arms. The
     # bound moves to 597, the measured value, for that reason and no other.
-    assert code_worst <= 597, f"worst code closure {code_worst} of {total}"
+    # bot text lane (2026-11-20), its build marker: 598 measured at GET
+    # /api/v1/health (597 at 0a3faa13, the same walk over that tree): +1 by
+    # name, main._BOT_TEXT_BUILD, which the health route reads in both arms;
+    # the two trees' reached sets are otherwise equal by name. The bound
+    # moves to 598, the measured value, for that reason and no other.
+    assert code_worst <= 598, f"worst code closure {code_worst} of {total}"
 
     # Imports are counted separately rather than folded in or waved through.
     # They roughly triple the closure -- measured 69 / 119 / 308 -- and that is
