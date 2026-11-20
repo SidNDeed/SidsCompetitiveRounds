@@ -542,16 +542,20 @@ def test_a_foreign_key_the_deletion_s_own_function_checks_is_a_wait(src, monkeyp
     a lobby's host (host_player_id, a foreign key: KEY SHARE on that member's
     players row), so step 1 holds ("players", KEY SHARE) in phase A, and
     link_discord, which holds a players row in UPDATE mode (the release of the
-    Discord id) before it writes the linking player's row, is READ there. The
-    control: with the switch off, step 1 has no such wait and the site is CLEAR."""
+    Discord id) before it writes the linking player's row, is READ there
+    without its key. Since the ban gate, the route keys the linking player
+    before it holds any row, so the class is KEY and the READ the switch makes
+    stands as the fallback. The control: with the switch off, step 1 has no
+    such wait and the site's class and fallback are CLEAR."""
     site = "link_discord | ORM player.discord_id = | 0"
     assert ("players", mc.KS) in mc.step1(src)["A"]
     _s1, got = mc.sites(src, entries=["link_discord"])
-    assert got[site]["class"] == "READ" and "A" in got[site]["phases"], got[site]
+    assert got[site]["class"] == "KEY" and got[site]["fallback"] == "READ" \
+        and "A" in got[site]["phases"], got[site]
     monkeypatch.setattr(mc, "OWN_FK_WAITS", False)
     assert ("players", mc.KS) not in mc.step1(src)["A"]
     _s1, off = mc.sites(src, entries=["link_discord"])
-    assert off[site]["class"] == "CLEAR", off[site]
+    assert off[site]["class"] == "CLEAR" and off[site]["fallback"] == "CLEAR", off[site]
 
 
 _HOST_UPDATE = ("_lobby_seat_left_core | UPDATE {?t:ffa_lobbies|ovt_lobbies|team_lobbies} "
