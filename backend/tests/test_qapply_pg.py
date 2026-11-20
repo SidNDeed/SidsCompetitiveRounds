@@ -2469,6 +2469,62 @@ def test_f6_a_lock_bound_caught_in_credits_reach_ends_the_credit(monkeypatch):
     run_env(monkeypatch, body)
 
 
+_F7_PLAYERS_WRITE = (r"\bINSERT\s+INTO\s+players\b|\bDELETE\s+FROM\s+players\b"
+                     r"|\bUPDATE\s+players\s+SET\s+(?:(?!\bWHERE\b).)*?\b(?:steam_id|id)\s*=")
+# A function of the reach that writes such a row, with the reason the row it
+# writes cannot be a service account's. Empty: none does.
+_F7_WRITERS_ALLOWED = {}
+
+
+def _f7_players_writers(src):
+    """Leg 2 of F4 (F7): the functions of the unit's reach that insert or
+    delete a players row or write players.steam_id or players.id, by text
+    statement or ORM form."""
+    import re
+    pat = re.compile(_F7_PLAYERS_WRITE, re.I | re.S)
+    tree = ast.parse(src)
+    funcs = {n.name: n for n in tree.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
+    seen, todo = set(), list(_F4_ROOTS)
+    while todo:
+        f = todo.pop()
+        if f in seen or f not in funcs:
+            continue
+        seen.add(f)
+        todo += [c.id for c in ast.walk(funcs[f]) if isinstance(c, ast.Name) and c.id in funcs]
+    out = set()
+    for f in seen:
+        for n in ast.walk(funcs[f]):
+            if isinstance(n, ast.Constant) and isinstance(n.value, str) and pat.search(n.value):
+                out.add((f, "text"))
+            if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == "Player":
+                out.add((f, "orm Player()"))
+            if (isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id in ("insert", "delete", "update")
+                    and n.args and isinstance(n.args[0], ast.Name) and n.args[0].id == "Player"):
+                out.add((f, "orm %s(Player)" % n.func.id))
+            if isinstance(n, (ast.Assign, ast.AugAssign, ast.AnnAssign)):
+                for t in (n.targets if isinstance(n, ast.Assign) else [n.target]):
+                    if isinstance(t, ast.Attribute) and t.attr in ("steam_id", "id"):
+                        out.add((f, "orm attribute %s" % t.attr))
+    return out, seen
+
+
+def test_f7_nothing_in_the_unit_changes_what_the_service_lookup_reads():
+    """Leg 2: inside a unit no statement inserts or deletes a players row or
+    writes its steam_id or id, so a fill of the service set there reads what
+    a fill on any other connection reads at that instant (the unit reads at
+    READ COMMITTED). A new writer in the reach turns this red."""
+    with open(MAIN_SRC, encoding="utf-8") as f:
+        src = f.read()
+    found, reach = _f7_players_writers(src)
+    assert len(reach) > 100, len(reach)
+    assert {f for f, _ in found} == set(_F7_WRITERS_ALLOWED), sorted(found)
+    # The planted red: a writer reached from _qapply_finish is named.
+    planted = src.replace("    ctx[\"applied\"] = match_id\n", "    ctx[\"applied\"] = match_id\n    _f7_plant()\n", 1) + (
+        "\n\nasync def _f7_plant():\n    return \"INSERT INTO players (steam_id) VALUES ('1')\"\n")
+    assert planted.count("_f7_plant") == 2
+    assert {f for f, _ in _f7_players_writers(planted)[0]} == {"_f7_plant"}
+
+
 def test_f6_control_a_non_bound_error_in_a_best_effort_block_keeps_the_game(monkeypatch):
     async def body(env):
         lob, q = await closed_held(env)
