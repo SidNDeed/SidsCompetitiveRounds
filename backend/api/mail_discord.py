@@ -63,6 +63,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from database import get_db
+import discord_text as _dtext   # BOT-TEXT-ESCAPE-1: typed text in composed Discord text
 
 router = APIRouter()
 
@@ -319,6 +320,27 @@ def reply_idempotency_key(source_message_id: str) -> str:
 RELAY_NAME_MAX = 64
 RELAY_SUBJECT_MAX = 120
 RELAY_BODY_MAX = 1500
+# The bound of a *_raw field (a name or a subject served unescaped for the
+# bot to escape once itself). The bot cuts each to its own slot after that.
+RELAY_RAW_MAX = 200
+
+
+def older_bot_name(name) -> str:
+    """The `sender_name` field, for a bot that predates the *_raw fields
+    (BOT-TEXT-ESCAPE-1). That bot shows this field on two paths. In its
+    markdown slots (the sent-reply line and the which-mail question) the
+    field passes that bot's own name escape, which backslash-escapes
+    \\ * _ ~ | ` [ ] < > and a line-opening mark but not @: so the field
+    carries no backslash escape (that bot's escape is the one pass). In the
+    mail picker's Button label, a plain slot that renders no markdown, the
+    field is shown raw, as a plain slot requires. On both paths the field
+    keeps the neutralisation it had before -- < > as ( ), @everyone and
+    @here without their @ -- so that bot shows no mention form. One line, at
+    most RELAY_NAME_MAX characters. A bot that reads sender_name_raw never
+    shows this field."""
+    s = _dtext.flat(name).replace("<", "(").replace(">", ")")
+    s = re.sub(r"@(everyone|here)", r"\1", s, flags=re.IGNORECASE)
+    return s[:RELAY_NAME_MAX]
 
 RELAY_FOOTER = (
     "\n\n-# Reply to this message to answer in-game "
@@ -328,11 +350,15 @@ RELAY_FOOTER = (
 def relay_dm_text(safe, *, sender_name: str, sender_steam_id: str,
                   subject: str, body: str, code: str) -> str:
     """The DM a relayed mail becomes. Every field is player-authored and is
-    therefore hostile text (#253): `safe` neutralises mention syntax, code
-    fences and angle brackets. The body keeps its line breaks -- a relayed
-    mail collapsed onto one line is unreadable -- and the same neutralisation
-    is applied either way, so nothing is escaped in one field and not
-    another.
+    therefore hostile text (#253). Since BOT-TEXT-ESCAPE-1 each passes the
+    shared helpers of discord_text once, here, where the DM is composed: the
+    name escape_name, the subject and the body escape_text, so the player
+    sees the characters the sender typed and no mark or mention form takes
+    effect. `safe` is still accepted from the callers and no longer used.
+    The body keeps its line breaks -- a relayed mail collapsed onto one line
+    is unreadable -- with runs of spaces and of blank lines collapsed first
+    (layout only, as before); a line of the body can never read as the
+    marker line, whose leading "-#" escape_text escapes.
 
     The marker line is LAST and the bot sends `content[:2000]`, so the body
     budget is computed from the assembled head, footer and marker rather than
@@ -344,13 +370,30 @@ def relay_dm_text(safe, *, sender_name: str, sender_steam_id: str,
     head = ("\U0001f4ec **New in-game mail** from "
             "**%s** (`%s`)\n"
             "**%s**\n\n" % (
-                safe(sender_name or "?", RELAY_NAME_MAX),
+                _dtext.escape_name(_dtext.flat(sender_name) or "?", RELAY_NAME_MAX),
                 sender_steam_id or "?",
-                safe(subject or "(no subject)", RELAY_SUBJECT_MAX)))
+                _dtext.escape_text(_dtext.flat(subject) or "(no subject)", RELAY_SUBJECT_MAX)))
     budget = RELAY_DM_MAX - len(head) - len(RELAY_FOOTER) - len(line)
     return (head
-            + safe(body or "", max(0, min(RELAY_BODY_MAX, budget)), keep_lines=True)
+            + _dtext.escape_text(_relay_body_layout(body), max(0, min(RELAY_BODY_MAX, budget)))
             + RELAY_FOOTER + line)
+
+
+def _relay_body_layout(body) -> str:
+    """Layout only, no escape: per line, runs of spaces collapse; at most one
+    blank line survives in a row; the whole is stripped (the earlier
+    keep_lines handling of _mail_discord_safe, without its escape)."""
+    kept, blanks = [], 0
+    for line in str(body or "").splitlines():
+        line = " ".join(line.split())
+        if line:
+            blanks = 0
+            kept.append(line)
+        else:
+            blanks += 1
+            if blanks <= 1:
+                kept.append("")
+    return "\n".join(kept).strip()
 
 
 async def queue_mail_relay(db: AsyncSession, *, mail_id, sender_name: str,
@@ -537,11 +580,15 @@ async def mail_reply_from_discord(
             print("[MAIL-RELAY] replied_to lookup failed for %s: %s" % (rid, ex))
     safe = _need("discord_safe")
     out["replied_to"] = {
-        # Escaped here, not in the bot: these are player-authored and the
-        # bot interpolates them into markdown. Same helper as the DM text,
-        # so no caller of this surface is more permissive than another.
+        # For a bot that does not read *_raw: the subject escaped here (that
+        # bot shows it as it stands), the name in the form that bot's own
+        # name escape shows once (older_bot_name).
         "subject": safe((ctx["subject"] if ctx else "") or "", RELAY_SUBJECT_MAX),
-        "sender_name": safe((ctx["sender_name"] if ctx else "") or "", RELAY_NAME_MAX),
+        "sender_name": older_bot_name((ctx["sender_name"] if ctx else "") or ""),
+        # BOT-TEXT-ESCAPE-1: the same two values RAW. A bot that reads *_raw
+        # escapes each once with its own helper.
+        "subject_raw": str((ctx["subject"] if ctx else "") or "")[:RELAY_RAW_MAX],
+        "sender_name_raw": str((ctx["sender_name"] if ctx else "") or "")[:RELAY_RAW_MAX],
         # False when the thread could not be read back at all -- the bot
         # must not print "replied to them - (no subject)" as if it knew.
         "known": ctx is not None,
@@ -608,12 +655,12 @@ async def mail_relay_threads(
     safe = _need("discord_safe")
     return {"threads": [{
         "relay_code": r["relay_code"],
-        # The SAME neutralisation the DM text uses. These are player-authored
-        # and the bot interpolates them into markdown and into button labels,
-        # so a surface that escaped them differently would be the permissive
-        # one (#412).
+        # For a bot that does not read *_raw, as in the replied_to block.
         "subject": safe(r["subject"] or "", RELAY_SUBJECT_MAX),
-        "sender_name": safe(r["sender_name"] or "", RELAY_NAME_MAX),
+        "sender_name": older_bot_name(r["sender_name"] or ""),
+        # BOT-TEXT-ESCAPE-1: raw (see the replied_to block).
+        "subject_raw": str(r["subject"] or "")[:RELAY_RAW_MAX],
+        "sender_name_raw": str(r["sender_name"] or "")[:RELAY_RAW_MAX],
         "created_at": r["created_at"].isoformat() if r["created_at"] else "",
     } for r in rows]}
 

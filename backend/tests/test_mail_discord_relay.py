@@ -313,8 +313,13 @@ def _mail_dm(status=200, data=None, threads=None, thread_status=200):
           "print": lambda *a, **k: None}
     _lift_bot_names(("RELAY_CODE_ALPHABET", "RELAY_CODE_LEN", "_CODE_BODY",
                      "RELAY_CODE_RE", "RELAY_CODE_ANY_RE",
-                     "_RELAY_CODE_LEAD_RE"), ns)
-    for fname in ("_escape_md", "relay_code_line", "normalize_relay_code", "_mail_sent_line",
+                     "_RELAY_CODE_LEAD_RE", "MAIL_NAME_SHOWN_MAX", "MAIL_SUBJECT_SHOWN_MAX",
+                     "_TEXT_BREAKS", "_TEXT_URL", "_TEXT_LINE_MARK", "_TEXT_ALWAYS",
+                     "API_REFUSAL_SHOWN_MAX"), ns)
+    # the mail lines' two helpers, the older api's field reader and the
+    # refusal helper a refused reply is shown through (BOT-TEXT-ESCAPE-1)
+    for fname in ("_escape_md", "_escape_text", "_mail_legacy_plain", "_api_refusal_text",
+                  "relay_code_line", "normalize_relay_code", "_mail_sent_line",
                   "_mailpick_view", "_post_mail_reply", "_ask_which_mail",
                   "_mailpick_click", "_handle_mail_dm"):
         _lift_bot(fname, ns)
@@ -697,11 +702,15 @@ def test_on_message_stops_only_for_the_two_verdicts_that_answered(verdict,
 def test_a_refusal_is_reported_and_not_passed_to_the_ticket_path():
     """A real refusal from the core -- blocked, too long, rate-limited -- is
     this path's business and is reported here. Falling through would hand the
-    player a bug-report usage message for a mail problem."""
+    player a bug-report usage message for a mail problem. The refusal's
+    text is shown through the bot's refusal helper (BOT-TEXT-ESCAPE-1): one
+    _escape_text pass, so the underscore is escaped once."""
     fn, posted, _asked, _ns = _mail_dm(status=429, data={"detail": "rate_limited"})
     msg = _Msg("yes", ref=_Ref(31, content=_dm_body(CODE_A)))
     assert _run(fn(msg)) == "HANDLED"
-    assert "rate_limited" in msg.sent[0]
+    shown = _ns["_escape_text"]("rate_limited")
+    assert shown == "rate" + chr(0x5C) + "_limited"
+    assert ": %s. The same rules" % shown in msg.sent[0], msg.sent[0]
     assert posted, "the refusal must come from the server, not from a guess here"
 
 
@@ -1005,8 +1014,12 @@ def test_a_relayed_mail_cannot_forge_the_footers_own_syntax():
         code="SCR-ABCDEFGHJKMN")
     assert "\n-# Reply to this message to answer in-game" in out, \
         "the real footer must still be there"
-    assert out.count("-# Reply to this message to answer in-game") == 1, \
+    # Only the real footer opens a line with an unescaped "-#"; the body's
+    # copy shows as text behind a backslash (BOT-TEXT-ESCAPE-1: escape_text).
+    assert _sql_re.findall(r"(?m)^-# Reply to this message to answer in-game", out) == \
+        ["-# Reply to this message to answer in-game"], \
         "the body's imitation of the footer was not escaped"
+    assert "\\-# Reply to this message to answer in-game" in out
 
 
 def test_keep_lines_bounds_blank_runs_so_the_footer_stays_visible():
@@ -2229,6 +2242,10 @@ def test_the_confirmation_does_not_invent_a_thread_it_could_not_read():
     the bot does not have, about a reply that did send."""
     ns = {"re": _sql_re}
     _lift_bot("_escape_md", ns)       # the name is escaped for Discord (round 4, finding 23)
+    _lift_bot("_mail_legacy_plain", ns)   # an older api's field read back (BOT-TEXT-ESCAPE-1)
+    _lift_bot("_escape_text", ns)         # ...and its subject escaped once (BOT-TEXT-ESCAPE-1)
+    _lift_bot_names(("MAIL_NAME_SHOWN_MAX", "MAIL_SUBJECT_SHOWN_MAX",
+                     "_TEXT_BREAKS", "_TEXT_URL", "_TEXT_LINE_MARK", "_TEXT_ALWAYS"), ns)
     line = _lift_bot("_mail_sent_line", ns)
     assert line({"known": False, "subject": "", "sender_name": ""}) \
         == "\u2709\ufe0f Sent your reply."

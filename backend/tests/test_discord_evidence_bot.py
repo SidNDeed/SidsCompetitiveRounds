@@ -210,14 +210,20 @@ class _Interaction:
 
 # ── lifting ───────────────────────────────────────────────────────────────
 
+# The bot's text helpers the evidence code calls (BOT-TEXT-ESCAPE-1): an api
+# refusal's word passes _api_refusal_text, the header's typed argument _escape_md.
+TEXT_HELPERS = {"_api_refusal_text", "_escape_text", "_escape_md"}
+TEXT_HELPER_ASSIGNS = {"API_REFUSAL_SHOWN_MAX", "_TEXT_BREAKS", "_TEXT_URL", "_TEXT_LINE_MARK", "_TEXT_ALWAYS"}
+
+
 def _wanted(node):
     if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
         return node.name.startswith("_aer_") or node.name in HANDLERS or \
-            node.name == "AerSchemaError"
+            node.name == "AerSchemaError" or node.name in TEXT_HELPERS
     if isinstance(node, ast.Assign):
         names = [t.id for t in node.targets if isinstance(t, ast.Name)]
         return any(n.startswith(("AER_", "_AER_", "_aer_")) or n in ("BotPage", "AerItem")
-                   for n in names)
+                   or n in TEXT_HELPER_ASSIGNS for n in names)
     return False
 
 

@@ -1369,6 +1369,15 @@ class HealthResponse(BaseModel):
     # 1186). Probed by the release train and read by nothing else (#306). No
     # default, as above. Absent on any build before it.
     modlog_build: int
+    # bot_text_build: release-train verification plumbing, not a design
+    # mechanism (main._BOT_TEXT_BUILD; 1 = in this build typed text in the
+    # api's Discord posts and DMs and in the bot's messages passes one helper
+    # once). It names build identity only. A code constant, equal on both
+    # roles by construction, so the train can read it through the edge; this
+    # is the key that tells a stale box from a refreshed one (learnings 780,
+    # 794). Probed by the release train and read by nothing else (#306). No
+    # default, as above. Absent on any build before it.
+    bot_text_build: int
     # build_manifest: the SHA-256 of the build-manifest.json this image's build
     # wrote (build_manifest.py: the build context's digest and the identity of
     # every installed wheel and .deb), "absent" when the process was not

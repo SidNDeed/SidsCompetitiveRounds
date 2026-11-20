@@ -147,8 +147,9 @@ def test_player_text_cannot_render_as_the_marker_line():
     line-leading `-#` and collapses intra-line whitespace, so a body that
     LOOKS like the marker cannot come out of `relay_dm_text` as one.
 
-    MUTATION: drop the line-leading `-#` escape from `_mail_discord_safe`, or
-    relax the anchor. Either must fail."""
+    MUTATION: drop the line-leading mark escape from discord_text.escape_text
+    (relay_dm_text's body escape since BOT-TEXT-ESCAPE-1), or relax the
+    anchor. Either must fail."""
     ns = _lift(API_SRC, SHARED)
     strict = ns["RELAY_CODE_RE"]
     real = "SCR-ABCDEFGHJKMN"
