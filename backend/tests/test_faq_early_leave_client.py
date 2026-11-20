@@ -350,9 +350,12 @@ def test_the_credit_action_reads_the_grace_set_as_the_route_does():
     code lines naming `graced` are exactly two, the decision that returns it
     and `unrated = excluded | graced`, and the decision is
     _ffa_leave_decision with the route's grace_half and points_to_win_round
-    arguments. Its read_absent is True where the route's is `not _rdm_on`:
-    that arm decides ghost or grace for a zero-tally absent claim, and both
-    land in `unrated`, so it moves no seat into the game XP and Gold."""
+    arguments. Its read_absent is True and the route's is `not _rdm_on`; the
+    two are the same call wherever the Credit action decides, because it
+    refuses a readmission lobby (409) before its decision and
+    `_asm_readmit_on` is that lobby's readmit_v1 flag alone, so the route's
+    switch is True for every lobby the Credit action decides on
+    (_readmit_problems checks each step)."""
     problems = _credit_grace_problems(ladder._read(MAIN))
     assert problems == [], problems
 
@@ -393,6 +396,110 @@ def test_control_the_two_paths_pins_read_changed_source(name, want):
     src = _control_source(name)
     words = sorted({p[0] for p in _unrated_problems(src) + _credit_grace_problems(src)})
     assert words == sorted(want), (name, words, _unrated_problems(src), _credit_grace_problems(src))
+
+
+def _fn_node(src, name):
+    node = ast.parse(_function_body(src, name)).body[0]
+    assert isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == name, name
+    return node
+
+
+def _readmit_problems(src):
+    """Why the Credit action's read_absent=True and the route's
+    read_absent=not _rdm_on might NOT be the same call, each by a word:
+    the two keywords; the route's one binding of _rdm_on from
+    `await _asm_readmit_on(db, lobby)`; _asm_readmit_on's one return, the
+    lobby's readmit_v1 flag; and, in _qapply_credit, an
+    `if lobby.get('readmit_v1'):` raising _QapplyRefused as a top-level
+    statement before the one holding the decision, with `lobby` not bound
+    again from it to the decision."""
+    out = []
+    if _decision_call(_function_body(src, "_qapply_credit"), "_qapply_credit").get("read_absent") != "True":
+        out.append(("credit_read_absent",))
+    if _decision_call(_function_body(src, "submit_ffa_match"), "submit_ffa_match").get("read_absent") \
+            != "not _rdm_on":
+        out.append(("route_switch",))
+    route = _fn_node(src, "submit_ffa_match")
+    binds = [n for n in ast.walk(route) if isinstance(n, ast.Assign)
+             and any(isinstance(t, ast.Name) and t.id == "_rdm_on" for t in n.targets)]
+    stores = [n for n in ast.walk(route) if isinstance(n, ast.Name) and n.id == "_rdm_on"
+              and isinstance(n.ctx, (ast.Store, ast.Del))]
+    if len(binds) != 1 or len(stores) != 1 or ast.unparse(binds[0].value) != "await _asm_readmit_on(db, lobby)":
+        out.append(("route_binding", [ast.unparse(b) for b in binds]))
+    rets = [n for n in ast.walk(_fn_node(src, "_asm_readmit_on")) if isinstance(n, ast.Return)]
+    if len(rets) != 1 or ast.unparse(rets[0].value) != "bool(lobby is not None and lobby.get('readmit_v1'))":
+        out.append(("readmit_flag", [ast.unparse(r) for r in rets]))
+    credit = _fn_node(src, "_qapply_credit")
+
+    def refuses(st):
+        return (isinstance(st, ast.If) and ast.unparse(st.test) == "lobby.get('readmit_v1')"
+                and any(isinstance(b, ast.Raise) and isinstance(b.exc, ast.Call)
+                        and isinstance(b.exc.func, ast.Name) and b.exc.func.id == "_QapplyRefused"
+                        for b in st.body))
+
+    def decides(st):
+        return any(isinstance(c, ast.Call) and isinstance(c.func, ast.Name) and c.func.id == "_ffa_leave_decision"
+                   for c in ast.walk(st))
+    ref = [i for i, st in enumerate(credit.body) if refuses(st)]
+    dec = [i for i, st in enumerate(credit.body) if decides(st)]
+    if len(ref) != 1 or len(dec) != 1 or ref[0] > dec[0]:
+        out.append(("refusal", ref, dec))
+    else:
+        between = credit.body[ref[0] + 1:dec[0] + 1]
+        if any(isinstance(n, ast.Name) and n.id == "lobby" and isinstance(n.ctx, (ast.Store, ast.Del))
+               for st in between for n in ast.walk(st)):
+            out.append(("lobby_rebound",))
+    return out
+
+
+def test_the_credit_action_decides_only_where_the_routes_absent_switch_is_on():
+    """The checked statement behind the two read_absent keywords: wherever
+    the Credit action reaches its decision the lobby is no readmission lobby,
+    and for that lobby the route's `not _rdm_on` is True, so the two calls
+    are the same call."""
+    problems = _readmit_problems(ladder._read(MAIN))
+    assert problems == [], problems
+
+
+_REFUSAL = '    if lobby.get("readmit_v1"):\n        raise _QapplyRefused(409, _QAPPLY_TEXTS["readmit"], {})\n'
+_CREDIT_DECISION_END = "points_to_win_round=FFA_POINTS_TO_WIN_ROUND, read_absent=True)\n"
+
+
+def _readmit_control_source(name):
+    src = ladder._read(MAIN)
+    if name == "refusal_out":
+        return _in_span(src, "_qapply_credit", _REFUSAL, "")
+    if name == "refusal_below_decision":
+        src = _in_span(src, "_qapply_credit", _REFUSAL, "")
+        return _in_span(src, "_qapply_credit", _CREDIT_DECISION_END, _CREDIT_DECISION_END + _REFUSAL)
+    if name == "credit_read_absent_false":
+        return _in_span(src, "_qapply_credit", _CREDIT_DECISION_END,
+                        _CREDIT_DECISION_END.replace("read_absent=True", "read_absent=False"))
+    if name == "route_switch_true":
+        return _in_span(src, "submit_ffa_match", "read_absent=not _rdm_on)", "read_absent=True)")
+    if name == "flag_reads_another_key":
+        return _in_span(src, "_asm_readmit_on", 'lobby.get("readmit_v1")', 'lobby.get("assembly_v1")')
+    if name == "lobby_bound_again":
+        return _in_span(src, "_qapply_credit", _REFUSAL, _REFUSAL + "    lobby = dict(lobby)\n")
+    assert name == "as_it_stands", name
+    return src
+
+
+@pytest.mark.parametrize("name,want", [
+    ("refusal_out", ("refusal",)),
+    ("refusal_below_decision", ("refusal",)),
+    ("credit_read_absent_false", ("credit_read_absent",)),
+    ("route_switch_true", ("route_switch",)),
+    ("flag_reads_another_key", ("readmit_flag",)),
+    ("lobby_bound_again", ("lobby_rebound",)),
+    ("as_it_stands", ()),
+])
+def test_control_the_read_absent_pins_read_changed_source(name, want):
+    """Each control changes main.py's text in memory, never a file, and is
+    reported by its own word; the text as it stands is clean."""
+    src = _readmit_control_source(name)
+    words = sorted({p[0] for p in _readmit_problems(src)})
+    assert words == sorted(want), (name, words, _readmit_problems(src))
 
 
 def test_each_site_states_the_rule_exactly_once():
