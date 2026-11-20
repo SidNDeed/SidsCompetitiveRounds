@@ -766,7 +766,7 @@ def test_route_manifest_net_seat_is_exhaustive_and_fails_closed_on_drift():
     # mail relay routes, the pending-DM recheck, the face preview, the batch discard) plus main's 6
     # verified-reads control routes; the auto-log upload and prune, added on both sides, count once.
     # The two sides' own histories follow: the lane's on the assertion, main's below it.
-    assert len(manifest) == 436   # QDIG-1 (migration 419): 435 plus the digest posted route (statically-nonconsumer); lobby invites (migration 416): 430 plus the five invite routes; first fingerprints by the re-pin tool, confirmed by its dry run after the write
+    assert len(manifest) == 438   # MODLOG-1 at its merge of main ac07e3e5 (migration 420): 436 plus the moderator log's two read routes (statically-nonconsumer); QDIG-1 (migration 419): 435 plus the digest posted route (statically-nonconsumer); lobby invites (migration 416): 430 plus the five invite routes; first fingerprints by the re-pin tool, confirmed by its dry run after the write
     # admin evidence report re-land (2026-10-29), claude/admin-evidence-server refit onto main 3fc331e2: main's 426 plus the lane's 4 (the four GET report routes under /api/v1/internal/evidence-report/: game, series, pair and player, the admin-authorized-consumer class), confirmed by the re-pin dry run
     # combat evidence re-land (2026-10-29), claude/combat-evidence-server refit onto main 3f4c9fc9: main's 424 plus the lane's 2 (the combat record route and the admin combat-evidence view), confirmed by the re-pin dry run
     # card draw evidence re-land (2026-10-29), claude/card-draw-server refit onto main 15da9a83: main's 421 plus the lane's 3 (the card record route, the admin card-evidence view and the card-pool census registration), measured by the step 5 dry re-pin of the refit (424 live) and written by its commit (b)
@@ -820,7 +820,7 @@ def test_route_manifest_net_seat_is_exhaustive_and_fails_closed_on_drift():
     # trunk fold (2026-10-15): the union of the lane's 395 and main's 395 over their shared 387 is
     # 401: the lane's 6 plus main's 6 plus the 2 auto-log routes both sides added (all
     # statically-nonconsumer). The lane's history is on the assertion, main's below it.
-    assert len(static) == 431   # QDIG-1 (migration 419): 430 plus the digest posted route; lobby invites (migration 416): 425 plus the five invite routes; all statically-nonconsumer (first fingerprints by the re-pin tool)
+    assert len(static) == 433   # MODLOG-1 at its merge of main ac07e3e5 (migration 420): 431 plus the moderator log's two read routes; QDIG-1 (migration 419): 430 plus the digest posted route; lobby invites (migration 416): 425 plus the five invite routes; all statically-nonconsumer (first fingerprints by the re-pin tool)
     # combat evidence re-land (2026-10-29): main's 423 plus the lane's 2, both statically-nonconsumer (426 rows, one sentinel-exercised)
     # card draw evidence re-land (2026-10-29): main's 420 plus the lane's 3, all statically-nonconsumer (424 rows, one sentinel-exercised; measured by the step 5 dry re-pin of the refit, written by its commit (b))
     # identity-clock evidence re-land (2026-10-29): main's 417 plus the lane's 3, all statically-nonconsumer (421 rows, one sentinel-exercised)
@@ -925,6 +925,43 @@ EVIDENCE_HANDLERS = frozenset({
 # `_aer_click`. Every other function of discord_bot.py stays off `_aer_*`.
 EVIDENCE_BOT_HANDLERS = frozenset({"evidence_game", "evidence_series", "evidence_pair",
                                    "evidence_player", "on_interaction"})
+# The one AER helper another bot surface may name, and the exact functions
+# that may name it, each with its reason. `_aer_local_gate` is the admin
+# channel check (the guild and ADMIN_CHANNEL_ID): the moderator log
+# (MODLOG-1) answers only in the admin channel, as the evidence report does,
+# so it applies the same check rather than a second copy of it. Only this
+# helper is shared: every other `_aer_*` name stays with the evidence handlers.
+AER_SHARED_CALLERS = {
+    "_aer_local_gate": {
+        "_modlog_command": "the /modlog command answers only in the admin channel",
+        "_modlog_click": "a /modlog page button is checked again on every press",
+    },
+}
+
+
+def _bot_aer_outside(tree, shared=None):
+    """Every `_aer_*` name in discord_bot.py's tree outside the `_aer_*`
+    functions and the evidence handlers, as (function, name, line), less the
+    shared helper names each listed function may use (AER_SHARED_CALLERS)."""
+    shared = AER_SHARED_CALLERS if shared is None else shared
+    outside = []
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        if node.name.startswith("_aer_") or node.name in EVIDENCE_BOT_HANDLERS:
+            continue
+        for sub in ast.walk(node):
+            name = (sub.id if isinstance(sub, ast.Name)
+                    else sub.attr if isinstance(sub, ast.Attribute) else None)
+            if name and name.startswith("_aer_") and node.name not in shared.get(name, {}):
+                outside.append((node.name, name, sub.lineno))
+    # nested functions inside an allowed handler are walked as their own
+    # nodes too; a nested def is allowed only by its own name
+    return outside
+
+
+def _bot_tree():
+    return ast.parse((Path(__file__).parents[1] / "discord_bot.py").read_text(encoding="utf-8"))
 
 
 def test_aer_helpers_are_reached_only_from_the_evidence_handlers():
@@ -932,7 +969,9 @@ def test_aer_helpers_are_reached_only_from_the_evidence_handlers():
     an `_aer_*` binding through its reviewed closure (the gate's own walk,
     which follows attribute names, so `_admin_evidence._aer_x(...)` from a
     main.py handler counts), and in discord_bot.py only `_aer_*` functions
-    and the evidence handlers name one."""
+    and the evidence handlers name one, save the shared admin channel check
+    `_aer_local_gate`, which exactly the functions AER_SHARED_CALLERS lists
+    may name."""
     reaching = []
     evidence_seen = set()
     for route in main.app.routes:
@@ -950,22 +989,47 @@ def test_aer_helpers_are_reached_only_from_the_evidence_handlers():
     assert evidence_seen == EVIDENCE_HANDLERS
     assert reaching == [], reaching[:5]
 
-    bot = Path(__file__).parents[1] / "discord_bot.py"
-    tree = ast.parse(bot.read_text(encoding="utf-8"))
-    outside = []
-    for node in ast.walk(tree):
-        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            continue
-        if node.name.startswith("_aer_") or node.name in EVIDENCE_BOT_HANDLERS:
-            continue
-        for sub in ast.walk(node):
-            name = (sub.id if isinstance(sub, ast.Name)
-                    else sub.attr if isinstance(sub, ast.Attribute) else None)
-            if name and name.startswith("_aer_"):
-                outside.append((node.name, name, sub.lineno))
-    # nested functions inside an allowed handler are walked as their own
-    # nodes too; a nested def is allowed only by its own name
+    outside = _bot_aer_outside(_bot_tree())
     assert outside == [], outside[:5]
+
+
+def test_the_shared_aer_gate_admits_exactly_its_listed_callers():
+    """The allowance of AER_SHARED_CALLERS, each way it can fail: a third
+    function naming `_aer_local_gate` is refused; a listed modlog function
+    naming any other AER helper is refused; each listed caller is refused
+    once its own entry is taken away; the real tree passes."""
+    assert set(AER_SHARED_CALLERS) == {"_aer_local_gate"}
+    assert set(AER_SHARED_CALLERS["_aer_local_gate"]) == {"_modlog_command", "_modlog_click"}
+    assert all(isinstance(r, str) and r for r in AER_SHARED_CALLERS["_aer_local_gate"].values())
+
+    def fns(tree):
+        return {n.name: n for n in ast.walk(tree)
+                if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
+
+    # the control: both real callers name the gate, and the rule passes them
+    tree = _bot_tree()
+    for name in ("_modlog_command", "_modlog_click"):
+        assert any(isinstance(s, ast.Name) and s.id == "_aer_local_gate"
+                   for s in ast.walk(fns(tree)[name])), name
+    assert _bot_aer_outside(tree) == []
+
+    # a planted third caller of the gate is refused
+    tree = _bot_tree()
+    tree.body.append(ast.parse("def _modlog_planted(i):\n    return _aer_local_gate(i)\n").body[0])
+    assert [(f, n) for f, n, _l in _bot_aer_outside(tree)] == [("_modlog_planted", "_aer_local_gate")]
+
+    # a planted call of another AER helper from each modlog handler is refused
+    for name in ("_modlog_command", "_modlog_click"):
+        tree = _bot_tree()
+        fns(tree)[name].body.insert(0, ast.parse("_aer_message(None, None)").body[0])
+        assert [(f, n) for f, n, _l in _bot_aer_outside(tree)] == [(name, "_aer_message")], name
+
+    # each real caller is refused once its own entry is taken away
+    for name in ("_modlog_command", "_modlog_click"):
+        less = {"_aer_local_gate": {k: v for k, v in AER_SHARED_CALLERS["_aer_local_gate"].items()
+                                    if k != name}}
+        assert [(f, n) for f, n, _l in _bot_aer_outside(_bot_tree(), less)] == \
+            [(name, "_aer_local_gate")], name
 
 
 def test_the_helper_surface_is_computed_and_not_hand_curated():
@@ -1752,7 +1816,12 @@ def test_the_helper_closure_stays_affordable():
     # router and EVIDENCE_ROOT), and +2 the route does run, the admin_evidence
     # health word and its route tuple (the four report endpoints held as
     # values, not walked). Inside 596, so the bound stays.
-    assert code_worst <= 596, f"worst code closure {code_worst} of {total}"
+    # voided-streak lane on the moderator log stack (2026-11-18), the merge
+    # of e3c8b2a2: 597 measured at GET /api/v1/health (596 at e3c8b2a2, the
+    # same walk over that tree): +1 by name, main._VOIDED_STREAK_BUILD, the
+    # lane's build marker, which the health route reads in both arms. The
+    # bound moves to 597, the measured value, for that reason and no other.
+    assert code_worst <= 597, f"worst code closure {code_worst} of {total}"
 
     # Imports are counted separately rather than folded in or waved through.
     # They roughly triple the closure -- measured 69 / 119 / 308 -- and that is

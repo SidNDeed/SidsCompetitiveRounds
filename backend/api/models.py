@@ -957,10 +957,22 @@ class AdminAction(Base):
 
     The applied admin_steam_id and target_steam_id columns are TEXT (028): the
     String lengths below are declarations SQLAlchemy does not enforce. The
-    raw-SQL audit writers in main.py (_log_admin_action and its strict twin)
-    bind the actor whole since v4.13 -- a Discord moderator is recorded as
-    "discord:<id>", longer than twenty characters."""
+    one writer in main.py (_modlog_write, the moderator log, MODLOG-1) binds
+    the actor whole -- a Discord moderator is recorded as "discord:<id>",
+    longer than twenty characters.
+
+    Migration 420 adds affected_steam_ids (every player the action acts on,
+    by Steam id, at most 16; '{}' when it names none; GIN-indexed as
+    ix_admin_actions_affected) and reason (the reason the actor gave, at
+    most 256 characters by ck_admin_actions_reason_len). Both are declared
+    here so the model and the table agree (learning #346); the writer binds
+    them with typed casts."""
     __tablename__ = "admin_actions"
+    __table_args__ = (
+        CheckConstraint("reason IS NULL OR char_length(reason) <= 256",
+                        name="ck_admin_actions_reason_len"),
+        Index("ix_admin_actions_affected", "affected_steam_ids", postgresql_using="gin"),
+    )
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     admin_steam_id = Column(String(20), nullable=False)
@@ -970,6 +982,9 @@ class AdminAction(Base):
     target_series_id = Column(UUID(as_uuid=True), nullable=True)
     details = Column(JSONB, nullable=True)
     created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+    affected_steam_ids = Column(ARRAY(Text), nullable=False, default=list,
+                                server_default=text("'{}'::text[]"))
+    reason = Column(Text, nullable=True)
 
 
 # ── Tournaments (migration 047) ──────────────────────────────────────────

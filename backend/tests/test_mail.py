@@ -316,6 +316,7 @@ class FakeDb:
             for k in ("admin", "target"):
                 if a[k] == sid:
                     a[k] = tomb
+            a["affected"] = [tomb if s == sid else s for s in a.get("affected") or []]
         for c in self.cases.values():
             if c["resolved_by"] == sid:
                 c["resolved_by"] = tomb
@@ -978,7 +979,9 @@ class FakeDb:
             if self.fail_admin_actions:
                 raise RuntimeError("admin_actions insert refused (test)")
             self.admin_actions.append({"admin": params["a"], "action": params["act"],
-                                       "target": params["t"], "details": json.loads(params["d"])})
+                                       "target": params["t"], "details": json.loads(params["d"]),
+                                       "affected": list(params.get("aff") or []),
+                                       "reason": params.get("r")})
             return _Res()
         # ban core statements (no-ops here)
         if sql.lstrip().startswith("DELETE FROM steam_sessions") or "DELETE FROM i18n_portal_sessions" in sql:
@@ -1923,9 +1926,13 @@ def test_act_mute_uses_the_chat_mute_core_globally():
                          "expires_at": NOW + timedelta(hours=24), "by": ADMIN_SID, "reason": "button", "minutes": 1440}]
     case = db.cases[UUID(case_id)]
     assert case["status"] == "resolved" and case["resolved_by"] == ADMIN_SID and case["resolution"] == "mute:24h"
+    # MODLOG-1: one record per action. The mute's own record carries the
+    # case; no second modcase_act record is written for it.
     actions = [(a["action"], a["target"]) for a in db.admin_actions]
-    assert ("chat_mute", A_SID) in actions and ("modcase_act", A_SID) in actions
-    assert db.admin_actions[-1]["details"]["via"] == "discord:d-admin"
+    assert actions == [("chat_mute", A_SID)]
+    rec = db.admin_actions[-1]
+    assert rec["details"]["via"] == "discord:d-admin" and rec["details"]["case_id"] == case_id
+    assert rec["affected"] == [A_SID]
     # the muted sender can no longer mail
     assert _send_raises(db, to=[B_SID]).detail == "muted"
     # a second click is harmless
@@ -1945,8 +1952,11 @@ def test_act_ban_uses_the_ban_core_and_admin_hmac_route_agrees():
     res = _act_internal(db, case_id, "d-admin", "ban")
     assert res["status"] == "ok" and res["resolution"] == "ban"
     kinds = [type(o).__name__ for o in db.added]
-    assert kinds == ["PlayerBan", "AdminAction"]
+    assert kinds == ["PlayerBan"]
     assert db.added[0].steam_id == A_SID and db.added[0].banned_by_steam_id == ADMIN_SID
+    # MODLOG-1: the ban core's one record carries the case; no modcase_act
+    assert [(a["action"], a["target"], a["affected"]) for a in db.admin_actions] == [("ban", A_SID, [A_SID])]
+    assert db.admin_actions[-1]["details"]["case_id"] == case_id
     assert ("ban-rate", ADMIN_SID) in db.locks and ("identity", A_SID) in db.locks
     assert db.cases[UUID(case_id)]["status"] == "resolved"
     # the admin-HMAC route runs the same core; a signer/actor mismatch is refused
@@ -2458,7 +2468,8 @@ def test_a_case_mute_or_ban_whose_subject_id_is_outside_the_domain_is_refused_be
     assert ("identity", "photon_1") in db.locks and ("ban-rate", ADMIN_SID) not in db.locks
     db.players[ids[A_SID]]["steam_id"] = A_SID
     assert _act_internal(db, case_id, "d-admin", "ban")["resolution"] == "ban"
-    assert [type(o).__name__ for o in db.added[before[3]:]] == ["PlayerBan", "AdminAction"]
+    assert [type(o).__name__ for o in db.added[before[3]:]] == ["PlayerBan"]
+    assert [a["action"] for a in db.admin_actions[before[0]:]] == ["ban"]
     assert db.added[before[3]].steam_id == A_SID
     other, other_ids = _world()
     other_case = _open_case(other, other_ids)
@@ -2777,10 +2788,10 @@ def test_broadcast_obeys_the_sender_gates():
 
 
 def test_privileged_audit_rows_are_part_of_the_transaction():
-    """M10: mail's privileged actions use the STRICT audit helper — an
-    admin_actions insert that fails fails the action, nothing commits. The
-    soft helper the chat routes chose swallows the very same failure
-    (negative control), so the two are not interchangeable."""
+    """M10: mail's privileged actions use the STRICT audit writer — an
+    admin_actions insert that fails fails the action, nothing commits. Since
+    MODLOG-1 _modlog_write is the only writer and the soft helper is gone,
+    so no route can swallow the same failure."""
     db, ids = _world()
     db.add_player(ADMIN_SID, discord_id="d-admin")
     db.admins.add(ADMIN_SID)
@@ -2799,12 +2810,13 @@ def test_privileged_audit_rows_are_part_of_the_transaction():
     with pytest.raises(RuntimeError, match="admin_actions"):
         _act_internal(db, case_id, "d-admin", "dismiss")
     assert db.commits == before and not db.admin_actions
-    _run(main._log_admin_action(db, admin_steam_id=ADMIN_SID, action="x", target_steam_id=None, details={}))   # swallowed
+    # MODLOG-1: there is one writer, and it is strict everywhere (no soft
+    # twin remains to swallow the failure).
+    assert not hasattr(main, "_log_admin_action") and not hasattr(main, "_log_admin_action_strict")
     for fn in (main.admin_mail_broadcast, main.admin_mail_bulk_grant, main.admin_mail_bulk_grant_revoke,
                main._moderation_case_act):
-        src = inspect.getsource(fn)
-        assert "_log_admin_action_strict(" in src and "_log_admin_action(" not in src.replace("_log_admin_action_strict(", "")
-    assert "begin_nested" not in inspect.getsource(main._log_admin_action_strict)
+        assert "_modlog_write(" in inspect.getsource(fn)
+    assert "begin_nested" not in inspect.getsource(main._modlog_write)
 
 
 def test_case_without_its_outbox_row_does_not_commit():
@@ -3158,9 +3170,9 @@ def test_admin_without_a_players_row_acts_on_admin_users_authority():
         exc = _raises(main.admin_mail_broadcast(_bcast_req(), db))
     assert (exc.status_code, exc.detail) == (404, "admin_player_unknown")
     assert db.cases[UUID(case_id)]["resolved_by"] == ADMIN_SID and db.cases[UUID(case2)]["resolved_by"] == ADMIN_SID
-    assert [a["action"] for a in db.admin_actions] == ["mail_bulk_grant", "mail_bulk_grant_revoke", "modcase_act", "modcase_act"]
+    assert [a["action"] for a in db.admin_actions] == ["mail_bulk_grant", "mail_bulk_grant_revoke", "modcase_act", "ban"]
     assert {a["admin"] for a in db.admin_actions} == {ADMIN_SID}
-    assert [type(o).__name__ for o in db.added] == ["PlayerBan", "AdminAction"] and db.added[0].banned_by_steam_id == ADMIN_SID
+    assert [type(o).__name__ for o in db.added] == ["PlayerBan"] and db.added[0].banned_by_steam_id == ADMIN_SID
     assert ("identity", ADMIN_SID) in db.locks                        # the VALUE is still locked; there was simply no row to hold
     for fn in (main._mail_lock_admin, main._mail_lock_identities):
         assert "admin_identity_not_live" not in inspect.getsource(fn)
@@ -3315,7 +3327,7 @@ def test_every_ban_path_takes_the_identity_locks_before_the_ban_rate_lock():
     assert src.index("_mail_lock_identities(") < src.index("_mail_actor_live_or_raise(rows, req.admin_steam_id)") < src.index("_ban_rate_gate_or_raise(")
     assert "target_w=target_w" in src
     assert act.index("_mail_lock_identities(") < act.index("_mail_actor_live_or_raise(rows, actor_steam_id)") < act.index("_ban_rate_gate_or_raise(")
-    assert "_ban_rate_gate_or_raise(db, actor_steam_id, subject_sid_pre, target_w=subject_sid)" in act
+    assert "_ban_rate_gate_or_raise(db, actor_steam_id, subject_sid_pre, target_w=subject_sid," in act
     assert unban.index("_mail_lock_identities(") < unban.index("_mail_actor_live_or_raise(rows, req.admin_steam_id)") < unban.index("UPDATE player_bans")
 
 

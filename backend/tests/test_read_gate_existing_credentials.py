@@ -184,9 +184,10 @@ def test_portal_class_requires_token(client, route):
 
 
 def test_every_class_member_was_exercised():
-    """The parametrisation is the class list: 26 + 7, none dropped."""
+    """The parametrisation is the class list: 27 + 7, none dropped."""
     # admin evidence report re-land (2026-10-29): the four admin evidence views
     # (seat, card, combat, identity-clock) join ADMIN_SIGNED; 22 before.
-    assert len(ADMIN_ROUTES) == len(read_gate.ADMIN_SIGNED) == 26
+    # MODLOG-1: the moderator log read (/api/v1/admin/modlog) joins; 26 before.
+    assert len(ADMIN_ROUTES) == len(read_gate.ADMIN_SIGNED) == 27
     assert len(PORTAL_ROUTES) == len(read_gate.PORTAL) == 7
     assert set(NON_AUTH_ANSWER) <= set(read_gate.ADMIN_SIGNED) | set(read_gate.PORTAL)

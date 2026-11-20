@@ -584,9 +584,10 @@ FROZEN = {'api/admin_evidence.py': [('import', 'from sqlalchemy import text'),
                   '    it -- but the mute INSERT still binds it as text, and PostgreSQL text\n'
                   '    cannot hold a NUL character. Before this guard that INSERT failed, the\n'
                   "    route answered 500 and the mute rolled back, so a moderator's action was\n"
-                  '    lost to a character they cannot type. The audit row is not what failed:\n'
-                  '    it runs under a SAVEPOINT and only logs (#235/#187), which is exactly why\n'
-                  '    the 500 came from the mute and not from the log.\n'
+                  '    lost to a character they cannot type. The audit row was not what failed:\n'
+                  '    it ran under a SAVEPOINT then and only logged (#235/#187). (Since\n'
+                  "    MODLOG-1 the record is written in the mute's own transaction by\n"
+                  '    _modlog_write, which replaces such characters before it binds.)\n'
                   '\n'
                   '    REFUSED, not stripped. Storing something other than what was sent would\n'
                   '    leave the stored reason and the audit row describing different text, and a\n'
@@ -608,12 +609,12 @@ FROZEN = {'api/admin_evidence.py': [('import', 'from sqlalchemy import text'),
                   '    any read, the identity locks and the ban-rate gate, for two reasons. The\n'
                   '    target is the key the ban row is written with, and no ban may carry a key\n'
                   '    outside the domain (once migration 319 is applied the table refuses one\n'
-                  "    on an active row). And the gate's refusal writes a best-effort audit row\n"
-                  '    naming this target, then counts those rows to alert once per window\n'
-                  '    (#656): the audit column is TEXT (028), so no LENGTH fails that insert,\n'
-                  '    but a string PostgreSQL text cannot hold (a NUL character, for one) would\n'
-                  '    fail it silently and every refusal would alert again -- the domain keeps\n'
-                  '    every such string away from the gate.'),
+                  "    on an active row). And the gate's refusal writes an audit row naming this\n"
+                  '    target, then counts those rows to alert once per window (#656): the\n'
+                  '    audit column is TEXT (028), so no LENGTH fails that insert. (The\n'
+                  "    moderator log's writer, MODLOG-1, replaces the characters PostgreSQL text\n"
+                  '    cannot hold before it binds; the domain still keeps every such string\n'
+                  '    away from the gate.)'),
                  ('dsntext',
                   'How many times a DC report may be re-run after PostgreSQL picks it as a\n'
                   'deadlock victim (SQLSTATE 40P01). Two, not more: a second abort means the\n'
@@ -3764,3 +3765,48 @@ for _k, _v in LOBBY_INVITES_FROZEN.items():
 FROZEN_COUNT = (COARSE_COUNT + COMPLETE_COUNT + R10_COUNT + R10_MERGE_COUNT
                 + R11_ID_COUNT + R11_OPEN_COUNT + B10_MERGE_COUNT
                 + MAIL_SEND_RECEIPTS_COUNT + LOBBY_INVITES_COUNT)
+
+
+# Hand edit for the moderator log (MODLOG-1, migration 420's code): the forms
+# its change to main.py adds to the census, and two it changes. None is an
+# import, a kwarg, an identity or an env form; none opens a connection, and
+# none is a text a DSN is built from.
+# - Five dsntext forms: _modlog_text's docstring ("The value as text
+#   PostgreSQL can store"), a text about storable text; the WHERE fragment
+#   "aa.affected_steam_ids @> ARRAY[CAST(:mp AS text)]" of _modlog_where and
+#   the account deletion's "UPDATE admin_actions SET affected_steam_ids =
+#   array_replace(...)", SQL texts that hold the array operator @> (the census
+#   reads the @); they bind a player id (and the deletion's tombstone) and
+#   run on the caller's session.
+#   The other two are the CHANGED docstrings of the moderation reason check
+#   ("A moderation route's caller-sent FREE TEXT") and of the restriction
+#   target check ("A restriction's target (review r13"): their old texts are
+#   replaced in place in the coarse list above, as the ladder test's corrected
+#   docstring was (same position, the count unchanged), so they are not in
+#   this block.
+# - Two opener forms 'Load case' under 'api/main.py' and two ref forms
+#   "case['kind']" under 'api/main.py#complete': two more reads of the local
+#   variable `case` in _moderation_case_act (the mail moderation case row the
+#   action locked), in the records the mute and the ban now write. `case` is
+#   a name of the census's opener list; this one is a row, not an opener, and
+#   reaches no DSN and no role.
+# Frozen by hand, not by a re-derivation; FROZEN_COUNT is 867.
+MODLOG_FROZEN = {'api/main.py': [
+    ('dsntext',
+     'The value as text PostgreSQL can store: NUL and lone surrogates become\n    U+FFFD.'),
+    ('dsntext',
+     'UPDATE admin_actions   SET affected_steam_ids = array_replace(affected_steam_ids, CAST(:sid '
+     'AS text),                                          CAST(:tomb AS text)) WHERE '
+     'affected_steam_ids @> ARRAY[CAST(:sid AS text)]'),
+    ('dsntext', 'aa.affected_steam_ids @> ARRAY[CAST(:mp AS text)]'),
+    ('opener', 'Load case'),
+    ('opener', 'Load case')],
+                 'api/main.py#complete': [
+    ('ref', "case['kind']"),
+    ('ref', "case['kind']")]}
+MODLOG_COUNT = 7
+for _k, _v in MODLOG_FROZEN.items():
+    FROZEN[_k] = list(FROZEN.get(_k, [])) + list(_v)
+FROZEN_COUNT = (COARSE_COUNT + COMPLETE_COUNT + R10_COUNT + R10_MERGE_COUNT
+                + R11_ID_COUNT + R11_OPEN_COUNT + B10_MERGE_COUNT
+                + MAIL_SEND_RECEIPTS_COUNT + LOBBY_INVITES_COUNT + MODLOG_COUNT)
