@@ -331,7 +331,9 @@ async def field_with_a_speculative_entrant(env):
     adm = await env.admin()
     async with AsyncSession(env.seed) as s:
         for who in people[5:9]:
-            s.add(models.PlayerBan(steam_id=who.steam, reason="violation", banned_by_steam_id=adm.steam))
+            # an end (migration 418's CHECK: every ban ends within the maximum)
+            s.add(models.PlayerBan(steam_id=who.steam, reason="violation", banned_by_steam_id=adm.steam,
+                                   expires_at=datetime.now(timezone.utc) + timedelta(days=30)))
         await s.commit()
     return tid, slot, people
 

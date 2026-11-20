@@ -70,15 +70,15 @@ ALLOWED = {
     ("main.py", "get_recent_bans"): (
         1, "the cutoff lookup reads one row's banned_at BY ID (the bot's cursor), whatever its state"),
     ("main.py", "_apply_ban_core"): (
-        1, "the writer's close of an ENDED open row (expires_at <= NOW()): the complement of the definition, under the identity lock"),
+        2, "the writer's close of an ENDED open row (expires_at <= NOW()): the complement of the definition,"
+           " under the identity lock; and the INSERT of the new ban row (the cap ruling: start and end from one"
+           " clock read), which reads no row"),
     ("models.py", "PlayerBan"): (
         1, "__tablename__ of the model itself"),
 }
-# ORM uses of the PlayerBan model: (module, qualname) -> (uses, reason).
-ALLOWED_ORM = {
-    ("main.py", "_apply_ban_core"): (
-        1, "the ORM insert of a new ban row (the writer)"),
-}
+# ORM uses of the PlayerBan model: (module, qualname) -> (uses, reason). None
+# since the cap ruling: the writer inserts by SQL (main._apply_ban_core).
+ALLOWED_ORM = {}
 
 
 def _parents(tree):
@@ -313,7 +313,8 @@ def test_every_reader_of_player_bans_uses_the_one_definition(capsys):
               "allowed %(allowed)d orm %(orm)d" % counts)
     assert not problems, problems
     # the walk reached the readers this lane changed (no silent empty scan)
-    assert counts["covered"] >= 25 and counts["orm"] == 1, counts
+    assert counts["covered"] >= 25 and counts["orm"] == 0, counts
+    assert ("main.py", "_apply_ban_core") in readers and ("main.py", "_ban_set_length_core") in readers
     assert ("tournaments.py", "_player_id_banned") in readers
     assert ("main.py", "_is_banned") in readers
 

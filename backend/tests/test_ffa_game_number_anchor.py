@@ -229,7 +229,7 @@ All KILLED:
   refund-class-swept (r6)  main.py: put the clamped form back at ONE of the
                            five refund sites
   variant-scan-unbounded (r6)  _quarantine_on_file: drop the variant scan's
-                           `status = 'pending'` and its LIMIT
+                           status filter and its LIMIT
   settlement-takes-for-update (r6)  _FFA_LOBBY_LOCK_SQL back to FOR UPDATE
   settled-game-without-a-named-number (r6)  _ffa_with_settled: ignore `named`
                            and take the row's number unconditionally
@@ -4558,7 +4558,9 @@ def test_the_variant_scan_is_bounded_by_the_quota_it_claims():
     SQL does not have is the highest-risk kind (#351)."""
     src = inspect.getsource(main._quarantine_on_file)
     scan = src[src.index("photon_room_id IS NULL"):]
-    assert "status = 'pending'" in scan
+    # QDIG-1 M1: the scan reads the set the quota counts, held rows the
+    # janitor filed included.
+    assert "status IN ('pending', 'filed')" in scan
     assert "LIMIT 50" in scan
     # The LIMIT and the quota are the SAME number. Both are literals in their
     # own statements (the janitor's boot self-test refuses SQL assembled at

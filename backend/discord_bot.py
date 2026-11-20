@@ -5358,10 +5358,10 @@ async def cmd_rank(ctx, member: discord.Member = None):
     if br > 0: series_lines += f"\nBest Streak: **{br}W** 🔥"
     embed.add_field(name="🏆  Ranked Series", value=series_lines, inline=True)
 
-    # Current ranked streak — not a server field; recompute from recent match
-    # history exactly like the client's CalcStreak (NativeUI.cs:6681):
-    # newest-first consecutive same-result among ranked entries.
-    cur = await _current_streak(steam_id, ranked=True)
+    # Current ranked streak in GAMES, signed: the server's full-history walk
+    # (current_ranked_game_streak), which leaves voided games out. The bot
+    # walks no match list of its own: that list carries voided games unmarked.
+    cur = _streak_field(s, "current_ranked_game_streak")
     embed.add_field(name="📈  Current Streak", value=(streak_str(cur) or "—"), inline=True)
 
     # Sweeps (ranked 5-0s)
@@ -5414,32 +5414,12 @@ async def _maybe_defer(ctx):
         pass  # already deferred / prefix edge — never block the command
 
 
-def _calc_streak(entries, ranked=None):
-    """Mirror the client's CalcStreak (NativeUI.cs:6681): walk a newest-first
-    match list, count consecutive same-result games. +N = win streak,
-    -N = loss streak. ranked=True filters to ranked entries, False to casual,
-    None counts all modes."""
-    if not isinstance(entries, list) or not entries:
-        return 0
-    if ranked is not None:
-        entries = [m for m in entries if isinstance(m, dict) and bool(m.get("is_ranked")) == ranked]
-    if not entries:
-        return 0
-    first = bool(entries[0].get("won"))
-    c = 0
-    for m in entries:
-        if bool(m.get("won")) == first:
-            c += 1
-        else:
-            break
-    return c if first else -c
-
-
-async def _current_streak(steam_id, ranked=None):
-    """Current win/loss streak from the 50 most recent matches (the /matches
-    endpoint returns newest-first — ORDER BY m.ended_at DESC, main.py:2652)."""
-    hist = await api_get(f"/players/{steam_id}/matches?limit=50")
-    return _calc_streak(hist, ranked)
+def _streak_field(s, key):
+    """A signed streak field of a /players/{steam} answer as an int (0 when
+    absent or not a number). Every streak the bot shows is a field the api
+    computes; a voided series or game is left out there (one definition)."""
+    v = s.get(key) if isinstance(s, dict) else None
+    return v if isinstance(v, int) and not isinstance(v, bool) else 0
 
 
 def _top_cards_lines(s, limit=5):
@@ -7376,7 +7356,6 @@ async def cmd_mystats(ctx, member: discord.Member = None):
     await _maybe_defer(ctx)
     s = await api_get(f"/players/{steam_id}")
     if not s: await ctx.send("❌ Could not fetch stats."); return
-    hist = await api_get(f"/players/{steam_id}/matches?limit=50")
     rank = s.get("rank_name") or get_rank_name(s["rating"])
     embed = discord.Embed(title=f"{rank_emoji(rank)}  {_escape_md(s['display_name'])}  —  My Stats", color=0x9B59B6)
     # v1.34.1: surface the Discord @display name (opt-out honored — the API
@@ -7403,7 +7382,8 @@ async def cmd_mystats(ctx, member: discord.Member = None):
         inline=False,
     )
 
-    # Records box — total + ranked + casual, with live streaks from history.
+    # Records box — total + ranked + casual, with the server's current streaks
+    # (signed, in games: current_ranked_game_streak, current_casual_streak).
     tw, tl, tt = s.get("wins", 0), s.get("losses", 0), s.get("total_matches", 0)
     twr = f"{tw/tt*100:.1f}%" if tt > 0 else "—"
     rw, rl = s.get("ranked_series_wins", 0), s.get("ranked_series_losses", 0)
@@ -7412,8 +7392,8 @@ async def cmd_mystats(ctx, member: discord.Member = None):
     cw, cl = s.get("casual_wins", 0), s.get("casual_losses", 0)
     ct = cw + cl
     cwr = f"{cw/ct*100:.1f}%" if ct > 0 else "—"
-    r_streak = streak_str(_calc_streak(hist, ranked=True))
-    c_streak = streak_str(_calc_streak(hist, ranked=False))
+    r_streak = streak_str(_streak_field(s, "current_ranked_game_streak"))
+    c_streak = streak_str(_streak_field(s, "current_casual_streak"))
     rec_lines = [
         f"Total: **{tt}** — **{tw}**W / **{tl}**L ({twr})",
         f"Ranked series: **{rw}**W / **{rl}**L ({rwr})" + (f"  ·  {r_streak}" if r_streak else ""),
@@ -9613,23 +9593,28 @@ _last_ban_id_posted: str | None = None
 _ban_poller_initialized = False
 
 
+# The end line of a ban notice whose row carries no readable end. Every ban
+# ends at most a year after it began (the cap ruling of 16 Nov 2026), and the
+# api answers every row's end (a row written before migration 418 with the
+# end 418 gives it), so this line is for an answer the bot cannot read.
+_BAN_END_LINE_UNREAD = "Ends: **within one year of the ban** (end not readable)"
+
+
 def _ban_end_line(b) -> str:
     """The embed's end line for one /internal/recent-bans row: the end in
-    Discord's timestamp form, or "Permanent" when the row's expires_at is
-    null. An api that predates the key sends no expires_at; the line is then
-    left out (""), so the post is the one it was before. Never raises: an
-    unreadable value also gives "" (lesson 187 - the notice is optional and
-    stays out of the ban's failure domain; the ban is already written)."""
+    Discord's timestamp form. Never empty: a row without a readable end
+    (no expires_at key, a null, or a value that does not parse) gets
+    _BAN_END_LINE_UNREAD, since every ban ends within a year. Never raises
+    (lesson 187 - the notice stays out of the ban's failure domain; the ban
+    is already written)."""
     try:
-        if not isinstance(b, dict) or "expires_at" not in b:
-            return ""
-        raw = b.get("expires_at")
+        raw = b.get("expires_at") if isinstance(b, dict) else None
         if raw is None:
-            return "Ends: **Permanent**"
+            return _BAN_END_LINE_UNREAD
         end = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
         return f"Ends: <t:{int(end.timestamp())}:F>"
     except Exception:
-        return ""
+        return _BAN_END_LINE_UNREAD
 
 
 @tasks.loop(seconds=60)
@@ -12637,6 +12622,9 @@ _qdigest = {
     "first_pass_logged": False,
     "channel_logged": False,
     "first_post_logged": False,
+    "form": None,             # D1's `qdig` of the current pass's first page (QDIG-1); None = today's form
+    "unmarked": set(),        # QDIG-1: ids Discord accepted whose posted stamp is not yet recorded
+    "reminder_hold": None,    # QDIG-1: monotonic time of a reminder whose stamp could not be recorded
 }
 
 
@@ -12666,10 +12654,14 @@ async def _qdigest_pass():
     answer; every later request sends back hw and the last (created_at, id)
     read. The pass ends on a short page, or on a page that could not be read,
     which leaves it incomplete. The api bounds the cohort by hw, which is what
-    ends a pass over a table that keeps receiving captures."""
+    ends a pass over a table that keeps receiving captures. The first page's
+    `qdig` (QDIG-1) is kept in _qdigest["form"]: it says which form the
+    iteration posts in."""
+    _qdigest["form"] = None
     first = await _qdigest_page({})
     if not isinstance(first, dict):
         return [], None, False
+    _qdigest["form"] = first.get("qdig")
     rows = list(first.get("rows") or [])
     totals = first.get("totals")
     size = int(first.get("page_size") or 0)
@@ -12785,6 +12777,11 @@ async def _qdigest_iteration():
         return
     rows, totals, complete = await _qdigest_pass()
     totals = totals if isinstance(totals, dict) else None
+    if _qdigest.get("form") is not None and _qdigest["form"] == QDIG_FEED_FORM:
+        # QDIG-1: the api describes each row; post in plain words. Without
+        # the key (an api before QDIG-1, or one rolled back) the lines below
+        # post today's one-line form, unchanged.
+        return await _qdig_iteration(rows, totals, complete)
     st = _qdigest
     if complete:
         st["announced"] &= {r["id"] for r in rows}
@@ -12816,6 +12813,347 @@ async def _qdigest_iteration():
         await _qdigest_round(channel, new, quota)
     if reminder_due and await _qdigest_send(channel, _qdigest_totals_line(totals, "quarantine digest reminder")):
         st["reminder_at"] = time.monotonic()
+
+
+# ── QDIG-1: held game reports in plain words ────────────────────────────────
+# When D1's first page carries `qdig` == QDIG_FEED_FORM, each row comes
+# classified and described by the api (main._qdig_classify). The bot then
+# lists only NEEDS A DECISION rows that are not yet posted, one entry per GAME
+# (rows that hold the same room share a game_key), and records each accepted
+# message's ids through the posted route, so a row is listed once and a
+# restart posts nothing unless something is new. The daily reminder is one
+# line, posted only when D1's totals say reminder_due (the clock is the
+# rows' own digest_posted_at / digest_reminded_at, never this process's
+# memory), and its ids are recorded with kind "reminder". FOR THE RECORD rows
+# are never listed. The texts are plain ASCII apart from names.
+
+QDIG_FEED_FORM = 1
+QDIG_POSTED_PATH = "/api/v1/internal/quarantine/digest/posted"
+QDIG_POSTED_BATCH = 200               # the route's own bound per call
+QDIG_REMINDER_HOLD_S = 86400          # a reminder whose stamp failed is not repeated by this process
+QDIG_ENTRY_PLAYERS = 10               # the most players an entry lists
+QDIG_ENTRY_IDS = 5                    # the most row ids an entry closes with
+QDIG_ENTRY_REPORTERS = 3              # the most reporter names an entry lists
+QDIG_ENTRY_MAX = 1700                 # one game's entry, bounded by itself before packing
+QDIG_NAME_MAX = 32                    # a name, cut with a visible "..."
+QDIG_REASON_MAX = 240                 # the reason sentence, likewise
+QDIG_BLOCKED_MAX = 140                # the accept-blocked sentence, likewise
+QDIG_DIFF_WORDS = {"winner": "winner", "roster": "number of players", "rounds_won": "rounds",
+                   "points_total": "points", "kills": "kills", "left_early": "left early",
+                   "absent": "absent"}
+QDIG_HEADER = "Held game reports: results a player's game sent that the server did not record as sent."
+QDIG_HEADER_MORE = "Held game reports (continued):"
+QDIG_WHAT_YOU_CAN_DO = ("What you can do: in the Admin tab, Rejected Reports. Accept only marks the report "
+                        "as approved for a later ordered replay; it records nothing now. "
+                        "Discard marks it as dismissed.")
+QDIG_MD_CHARS = "\\*_~`|>[]()#<"
+
+
+def _qdig_md(value, limit: int) -> str:
+    """THE one function every string that goes to Discord from a D1 row
+    passes: names, the reason sentence, the reporter, the winner, the
+    differences, the accept-blocked sentence. One line (control
+    characters, invisible format characters and line breaks become
+    spaces), cut to `limit` characters with a visible "...", URL schemes
+    made inert (": //", so nothing auto-links), and every markdown
+    character escaped. allowed_mentions stays none. The api sends these
+    strings PLAIN and the renderer calls this once per string at the slot
+    where it is formatted, so nothing is escaped twice."""
+    s = " ".join("".join(ch if ch.isprintable() else " " for ch in str(value if value is not None else "")).split())
+    if len(s) > limit:
+        s = s[:max(limit - 3, 0)].rstrip() + "..."
+    s = s.replace("://", ": //")
+    return "".join("\\" + ch if ch in QDIG_MD_CHARS else ch for ch in s)
+
+
+def _qdig_esc(name) -> str:
+    """A display name for a Discord message (_qdig_md at QDIG_NAME_MAX)."""
+    return _qdig_md(name, QDIG_NAME_MAX) or "unknown player"
+
+
+def _qdig_unix(value):
+    try:
+        return int(datetime.fromisoformat(str(value)).timestamp())
+    except (TypeError, ValueError):
+        return None
+
+
+def _qdig_when(value) -> str:
+    """A Discord timestamp, so every reader sees local time."""
+    unix = _qdig_unix(value)
+    return f"<t:{unix}:f>" if unix is not None else "at an unknown time"
+
+
+def _qdig_numbers(row: dict) -> tuple:
+    """What two reports of one game are compared by: the players' numbers."""
+    return tuple((p.get("name"), p.get("rounds"), p.get("points"), p.get("kills"), p.get("left_early"),
+                  p.get("absent")) for p in row.get("players") or [])
+
+
+def _qdig_n(value) -> int:
+    """A number from a D1 row for a message (0 when it is not one)."""
+    try:
+        return int(value)
+    except (TypeError, ValueError, OverflowError):
+        return 0
+
+
+def _qdig_short_id(value) -> str:
+    """A row id's first eight characters, hex and dashes only."""
+    s = str(value or "")[:8]
+    return s if all(ch in "0123456789abcdef-" for ch in s) else "--------"
+
+
+def _qdig_diff_line(d: dict) -> str:
+    """One difference from the recorded game, held number first."""
+    def yes_no(x):
+        return ("yes" if x else "no") if isinstance(x, bool) else x
+    word = QDIG_DIFF_WORDS.get(d.get("field"), "a number")
+    who = f"{_qdig_esc(d.get('player'))}, " if d.get("player") else ""
+    return (f"- {who}{word}: {_qdig_md(yes_no(d.get('held')), QDIG_NAME_MAX)} here, "
+            f"{_qdig_md(yes_no(d.get('recorded')), QDIG_NAME_MAX)} recorded")
+
+
+def _qdig_fit(lines: list, room: int, what: str) -> list:
+    """As many of `lines` as fit in `room` characters (each with its line
+    break), the rest as one '- and N more <what>' line that always fits."""
+    out, used = [], 0
+    for i, ln in enumerate(lines):
+        rest = len(lines) - i - 1
+        reserve = len(f"- and {rest} more {what}") + 1 if rest else 0
+        if used + len(ln) + 1 + reserve > room:
+            return out + [f"- and {len(lines) - i} more {what}"]
+        out.append(ln)
+        used += len(ln) + 1
+    return out
+
+
+def _qdig_entry(rows: list) -> str:
+    """One game, in plain words: what, when, why held, the numbers, the
+    differences from the recorded game, who reported it, what an admin can
+    do. Closed by the rows' short ids. Bounded by itself at QDIG_ENTRY_MAX:
+    the head and tail lines are each cut, and the players and differences
+    that do not fit become a count. Every string from the row passes
+    _qdig_md (or _qdig_esc, which is _qdig_md for a name) once, here."""
+    r0 = rows[0]
+    players = list(r0.get("players") or [])
+    sides = r0.get("sides")
+    ranked = r0.get("ranked")
+    kind = "ranked" if ranked is True else ("casual" if ranked is False else "ranked or casual unknown")
+    if r0.get("malformed"):
+        title = f"**Held report, {kind}**"
+    elif sides:
+        title = f"**{len(sides[0].get('players') or [])}v{len(sides[-1].get('players') or [])}, {kind}**"
+    else:
+        title = f"**FFA, {len(players)} players, {kind}**"
+    game_no = _qdig_n(r0.get("game_number"))
+    head = [title + (f" - game {game_no} of its lobby" if game_no else "")
+            + f" - played {_qdig_when(r0.get('played_at'))}",
+            f"Why held: {_qdig_md(r0.get('reason_head') or r0.get('reason_text') or 'held for review.', QDIG_REASON_MAX)}"]
+    numbers, plines = [], []
+    if sides:
+        numbers.append("Score (rounds, points):")
+        for s in sides:
+            who = " + ".join(_qdig_esc(n) for n in s.get("players") or [])
+            numbers.append(f"- {who}: {_qdig_n(s.get('rounds'))}, {_qdig_n(s.get('points'))}"
+                           + (" (winner)" if s.get("winner") else ""))
+    elif players:
+        numbers.append("Numbers (rounds, points, kills), winner first:")
+        win = r0.get("winner_name")
+        order = sorted(range(len(players)),
+                       key=lambda i: (players[i].get("name") != win, -_qdig_n(players[i].get("rounds")),
+                                      -_qdig_n(players[i].get("points")), i))
+        for i in order[:QDIG_ENTRY_PLAYERS]:
+            p = players[i]
+            marks = [m for m, on in (("winner", p.get("name") == win and i == order[0]),
+                                     ("left early", p.get("left_early") is True),
+                                     ("absent", p.get("absent") is True)) if on]
+            plines.append(f"- {_qdig_esc(p.get('name'))}: {_qdig_n(p.get('rounds'))}, "
+                          f"{_qdig_n(p.get('points'))}, {_qdig_n(p.get('kills'))}"
+                          + (f" ({', '.join(marks)})" if marks else ""))
+        if len(players) > QDIG_ENTRY_PLAYERS:
+            plines.append(f"- and {len(players) - QDIG_ENTRY_PLAYERS} more")
+    diffs = [_qdig_diff_line(d) for d in r0.get("differences") or [] if isinstance(d, dict)]
+    reporters = []
+    for r in rows:
+        name = _qdig_esc(r.get("reporter_name"))
+        if name not in reporters:
+            reporters.append(name)
+    others = len(reporters) - QDIG_ENTRY_REPORTERS
+    who = " and ".join(reporters[:QDIG_ENTRY_REPORTERS]) + (
+        f" and {others} other{'s' if others != 1 else ''}" if others > 0 else "")
+    if len(rows) == 1:
+        count = "1 report."
+    elif len({_qdig_numbers(r) for r in rows}) == 1:
+        count = f"{len(rows)} reports, same numbers."
+    else:
+        count = f"{len(rows)} reports with different numbers (the numbers above are the first one's)."
+    blocked = [r for r in rows if r.get("can_accept") is False]
+    ids = [_qdig_short_id(r.get("id")) for r in rows]
+    more = f" +{len(ids) - QDIG_ENTRY_IDS} more" if len(ids) > QDIG_ENTRY_IDS else ""
+    tail = [f"Reported by {who}. {count}",
+            QDIG_WHAT_YOU_CAN_DO + (
+                f" Accept is blocked: "
+                f"{_qdig_md(blocked[0].get('accept_blocked_reason') or 'the server gave no reason', QDIG_BLOCKED_MAX)}."
+                if blocked else ""),
+            "[" + ", ".join(ids[:QDIG_ENTRY_IDS]) + more + "]"]
+    # The head and tail are bounded line by line (about 1,500 characters at
+    # the worst, every character escaped); what is left of QDIG_ENTRY_MAX
+    # goes to the players first, then the differences, the rest as counts.
+    label = "Differences from the recorded game:"
+    room = QDIG_ENTRY_MAX - len("\n".join(head + tail)) - 1 - sum(len(x) + 1 for x in numbers)
+    keep = (len(label) + 1 + len(f"- and {len(diffs)} more differences") + 1) if diffs else 0
+    body = numbers + _qdig_fit(plines, max(room - keep, 0), "players") if plines else list(numbers)
+    room -= sum(len(x) + 1 for x in body[len(numbers):])
+    if diffs:
+        body += [label] + _qdig_fit(diffs, max(room - len(label) - 1, 0), "differences")
+    text = "\n".join(head + body + tail)
+    if len(text) > QDIG_ENTRY_MAX:
+        # Not reachable with the cuts above; if it were, whole lines go,
+        # never a cut inside one (which could split an escape).
+        text = "\n".join(head + tail)
+    return text
+
+
+def _qdig_games(rows: list) -> list:
+    """Rows grouped into games by game_key, oldest game first."""
+    games, order = {}, []
+    for r in rows:
+        key = r.get("game_key") or ("row:" + str(r.get("id")))
+        if key not in games:
+            games[key] = []
+            order.append(key)
+        games[key].append(r)
+    return [games[k] for k in order]
+
+
+def _qdig_messages(games: list, quota: list) -> list:
+    """Whole entries packed into messages under QDIG_MESSAGE_LIMIT: the first
+    carries the header, the rest a short one. Each message is paired with the
+    row ids and the quota keys it carries."""
+    entries = []
+    for q in quota:
+        entries.append((f"A lobby or series holds {int(q.get('pending') or 0)} held reports, the most "
+                        "the server keeps; its next refused report will not be kept.",
+                        [], [(q.get("mode"), q.get("group"))]))
+    for rows in games:
+        entries.append((_qdig_entry(rows), [r["id"] for r in rows], []))
+    n = len(games)
+    header = QDIG_HEADER + (f" {n} game{'s' if n != 1 else ''} need{'s' if n == 1 else ''} a decision."
+                            if n else "")
+    out, cur, ids, qkeys = [], header, [], []
+    for text, eids, ekeys in entries:
+        if (ids or qkeys) and len(cur) + 2 + len(text) > QDIGEST_MESSAGE_LIMIT:
+            out.append((cur, ids, qkeys))
+            cur, ids, qkeys = QDIG_HEADER_MORE, [], []
+        cur = cur + "\n\n" + text
+        ids, qkeys = ids + eids, qkeys + ekeys
+    if ids or qkeys:
+        out.append((cur, ids, qkeys))
+    return out
+
+
+async def _qdig_mark(kind: str, ids: list) -> bool:
+    """Record through the posted route that Discord accepted a message
+    carrying these ids. True only when every batch answered 200."""
+    ok = True
+    for i in range(0, len(ids), QDIG_POSTED_BATCH):
+        try:
+            async with http_session.post(
+                f"{API_BASE_URL}{QDIG_POSTED_PATH}",
+                json={"kind": kind, "ids": ids[i:i + QDIG_POSTED_BATCH]},
+                headers={"X-Internal-Key": API_SECRET_KEY},
+                timeout=aiohttp.ClientTimeout(total=QDIGEST_PAGE_TIMEOUT_S),
+            ) as resp:
+                if resp.status != 200:
+                    print(f"[QDIGEST] posted stamp status={resp.status}")
+                    ok = False
+        except Exception as e:
+            print(f"[QDIGEST] posted stamp error: {type(e).__name__}: {e}")
+            ok = False
+    return ok
+
+
+async def _qdig_flush_marks():
+    st = _qdigest
+    if st["unmarked"]:
+        ids = sorted(st["unmarked"])
+        if await _qdig_mark("new", ids):
+            st["unmarked"] -= set(ids)
+
+
+def _qdig_needs_count(rows: list) -> tuple:
+    """Over every row of a complete pass (all pages): the games that need
+    a decision, the oldest one's played_at, and how many rows the api did
+    not describe (class None), which make the count a floor."""
+    needs = [r for r in rows if r.get("class") == "needs_decision"]
+    games = {r.get("game_key") or ("row:" + str(r.get("id"))) for r in needs}
+    played = [(u, r.get("played_at")) for r in needs for u in [_qdig_unix(r.get("played_at"))] if u is not None]
+    oldest = min(played)[1] if played else None
+    return len(games), oldest, sum(1 for r in rows if r.get("class") is None)
+
+
+def _qdig_reminder_line(rows: list) -> str:
+    """The reminder, counted over every page of the pass. When a row was not
+    described the number is a floor and the text says that counting
+    stopped; it is never a number that is silently short."""
+    n, oldest, unread = _qdig_needs_count(rows)
+    if unread:
+        return (f"Held game reports: at least {n} game{'s' if n != 1 else ''} still "
+                f"need{'s' if n == 1 else ''} a decision "
+                f"(counting stopped: {unread} held report{'s were' if unread != 1 else ' was'} not yet "
+                f"described); the oldest counted was played {_qdig_when(oldest)}. "
+                "See the Admin tab, Rejected Reports.")
+    return (f"Held game reports: {n} game{'s' if n != 1 else ''} still need{'s' if n == 1 else ''} "
+            f"a decision; the oldest was played {_qdig_when(oldest)}. See the Admin tab, Rejected Reports.")
+
+
+async def _qdig_iteration(rows: list, totals, complete: bool):
+    """One QDIG-1 posting step after a pass: new games (NEEDS A DECISION, not
+    yet posted) in the 600 s window, quota notices as today, and the
+    reminder when D1 says it is due. Each accepted message's ids are stamped
+    before the next message is sent; an id whose stamp failed is not posted
+    again by this process and its stamp is retried every iteration."""
+    st = _qdigest
+    await _qdig_flush_marks()
+    if complete:
+        live = {r["id"] for r in rows}
+        st["announced"] &= live
+        st["unmarked"] &= live
+        st["quota_named"] &= {(q.get("mode"), q.get("group")) for q in (totals or {}).get("at_quota") or []}
+        if not st["first_pass_logged"]:
+            st["first_pass_logged"] = True
+            _n, _o, _u = _qdig_needs_count(rows)
+            print(f"[QDIGEST] first pass complete: {int((totals or {}).get('pending') or 0)} pending, "
+                  f"{'at least ' if _u else ''}{_n} game(s) need a decision")
+    new = [r for r in rows if r.get("class") == "needs_decision" and not r.get("posted")
+           and r["id"] not in st["announced"]]
+    quota = [q for q in ((totals or {}).get("at_quota") or [])
+             if (q.get("mode"), q.get("group")) not in st["quota_named"]]
+    now = time.monotonic()
+    round_due = bool(new or quota) and (st["round_at"] is None or now - st["round_at"] >= QDIGEST_ROUND_EVERY_S)
+    reminder_due = (complete and totals is not None and bool(totals.get("reminder_due")) and not new
+                    and (st["reminder_hold"] is None or now - st["reminder_hold"] >= QDIG_REMINDER_HOLD_S))
+    if not (round_due or reminder_due):
+        return
+    channel = await _qdigest_channel()
+    if channel is None:
+        return
+    if round_due:
+        started = time.monotonic()
+        for n, (content, ids, qkeys) in enumerate(_qdig_messages(_qdig_games(new), quota)):
+            if not await _qdigest_send(channel, content):
+                break
+            if n == 0:
+                st["round_at"] = started
+            st["announced"] |= set(ids)
+            st["quota_named"] |= set(qkeys)
+            st["unmarked"] |= set(ids)
+            await _qdig_flush_marks()
+    if reminder_due and await _qdigest_send(channel, _qdig_reminder_line(rows)):
+        needs = [r["id"] for r in rows if r.get("class") == "needs_decision"]
+        if not await _qdig_mark("reminder", needs):
+            st["reminder_hold"] = time.monotonic()
 
 
 @tasks.loop(seconds=60)
@@ -15335,6 +15673,12 @@ async def on_interaction(interaction: discord.Interaction):
             # Admin evidence report page buttons (design 5.4): the request
             # rides the custom_id, the api decides with the clicker's id.
             await _aer_click(interaction, cid)
+            return
+        if cid.startswith("modlog:"):
+            # /modlog Previous and Next buttons (MODLOG-1): the bot holds the
+            # view the custom_id names, the gate is applied again, the api
+            # decides with the presser's id.
+            await _modlog_click(interaction, cid)
             return
         if cid.startswith("modcase:"):
             # Mail moderation buttons (Sept 6 item b, B-2): routed to the api
@@ -18405,6 +18749,426 @@ async def evidence_player(interaction: discord.Interaction, steam_id: str,
 
 
 bot.tree.add_command(evidence_group)
+
+
+# ── /modlog: one player's moderator log (MODLOG-1) ──────────────────────────
+# Who may read it is the api's decision (the internal key plus the asking
+# admin's Discord id, linked to a live account on the admin roster: the rule
+# of /evidence). The bot keeps the command to the admin channel, as /evidence
+# does (_aer_local_gate), applies that gate again on every button press, and
+# answers only the admin who asked (ephemeral). Ten rows a page, newest first
+# unless asked otherwise; every message stays under 2000 characters.
+MODLOG_PATH = "/api/v1/internal/modlog"
+MODLOG_PAGE = 10
+MODLOG_CID_MAX = 100
+MODLOG_SEARCH_MAX = 64
+MODLOG_TIMEOUT_S = 20
+MODLOG_MSG_MAX = 1990
+# sort code -> (the api's sort, its dir, the words shown in the header)
+MODLOG_SORTS = {"n": ("time", "desc", "newest first"),
+                "o": ("time", "asc", "oldest first"),
+                "a": ("action", "asc", "by kind of action"),
+                "m": ("actor", "asc", "by moderator")}
+# The `action` choices: words of the api's closed list (backend/api/modlog.py
+# ACTIONS) with their labels as stored there; the bot image does not copy that
+# file, so test_modlog_bot.py asserts each pair equals the api's.
+MODLOG_BOT_ACTIONS = (
+    ("ban", "Ban"), ("ban_length", "Ban length changed"), ("ban_repeat", "Repeat ban"),
+    ("unban", "Unban"), ("chat_mute", "Chat mute"), ("chat_automute", "Automatic chat mute"),
+    ("chat_mute_msg", "Chat mute from a message"), ("chat_unmute", "Chat unmute"),
+    ("chat_delete", "Chat message deleted"), ("modcase_act", "Mail case closed"),
+    ("reverse_series", "1v1 series reversed"), ("resolve_team_series", "2v2 series resolved"),
+    ("reverse_team_series", "2v2 series reversed"), ("flag_review", "Flagged match reviewed"),
+    ("record_exclude", "Record excluded"), ("quarantine_accept", "Held report accepted"),
+    ("quarantine_discard", "Held report discarded"), ("pc_trade_reverse", "Card trade reversed"),
+    ("pc_portrait_clear", "Portrait cleared"), ("grant_achievement", "Achievement granted"),
+    ("ffa_g3_seat", "FFA seat enrolment"), ("i18n_grant", "Language grant changed"),
+    ("mail_bulk_grant", "Mail bulk-send grant"), ("cosmetic-approve", "Cosmetic approved"),
+    ("cosmetic-deny", "Cosmetic denied"),
+)
+MODLOG_GATE = "The moderator log is answered only in the admin channel."
+MODLOG_UNREACHABLE = ("The moderator log could not be reached just now. "
+                      "Trying again in a minute may help.")
+MODLOG_REFUSED = ("The moderator log is for admins whose Discord account is linked to their "
+                  "game account. Trying again will not help.")
+MODLOG_NOT_FOUND = ("No player has that name or Steam id. Check the spelling; "
+                    "trying again as it is will not help.")
+MODLOG_AMBIGUOUS = "More than one player has that name. Ask again with their Steam id."
+MODLOG_SCHEMA = ("The moderator log answered in a form this bot does not read. "
+                 "Trying again will not help; tell the maintainer.")
+MODLOG_SEARCH_LONG = ("That search is longer than %d characters. Shorten it and ask again."
+                      % MODLOG_SEARCH_MAX)
+
+
+# The read pages by key (MODLOG-1 fix A7): Next asks for the rows after the
+# last row shown. A page's key is longer than a button's custom_id holds, so
+# one /modlog answer with more than one page is one VIEW held here under a
+# random token: its request, the key each page it has shown was read after
+# ("" for the first page), the page shown now, and the key Next reads after.
+# Both buttons carry the token ("modlog:<token>:p" for Previous, ":n" for
+# Next). Previous reads the page before the one shown with the key that page
+# was read with (on the first page, the first page again); Next reads the rows
+# after the last row shown. A token the bot does not hold (the view went
+# unused for MODLOG_HOLD_S seconds, the count bound dropped it, or the bot
+# restarted) answers MODLOG_EXPIRED and shows no page. The store holds at most
+# MODLOG_HOLD_MAX views: expired views are dropped first, then the view used
+# longest ago.
+MODLOG_HOLD_S = 15 * 60
+MODLOG_HOLD_MAX = 2000
+MODLOG_EXPIRED = "This moderator log view has ended. Run /modlog again to read the log."
+_modlog_held = {}
+
+
+def _modlog_hold(base):
+    """A new view of `base` = (steam id, sort, action index or None, search)
+    at its first page; its token."""
+    now = time.monotonic()
+    for tok in [t for t, v in _modlog_held.items() if v["exp"] <= now]:
+        _modlog_held.pop(tok, None)
+    while len(_modlog_held) >= MODLOG_HOLD_MAX:
+        _modlog_held.pop(next(iter(_modlog_held)))
+    tok = secrets.token_hex(12)
+    _modlog_held[tok] = {"exp": now + MODLOG_HOLD_S, "base": tuple(base), "afters": [""],
+                         "page": 0, "next": None, "press": 0}
+    assert len("modlog:%s:p" % tok) <= MODLOG_CID_MAX
+    return tok
+
+
+def _modlog_parse_custom_id(cid):
+    """`(token, "p" or "n")` for a button of a view the bot holds, or None
+    (not a modlog id, a malformed one, or a view not held)."""
+    if not isinstance(cid, str) or not cid.startswith("modlog:"):
+        return None
+    parts = cid.split(":")
+    if len(parts) != 3 or parts[2] not in ("p", "n"):
+        return None
+    held = _modlog_held.get(parts[1])
+    if held is None or held["exp"] <= time.monotonic():
+        return None
+    return parts[1], parts[2]
+
+
+def _modlog_shown(tok, page, after, body):
+    """Record in view `tok` that `page`, read after `after`, is shown now;
+    the view counts as used now (it moves to the end of the store)."""
+    held = _modlog_held.pop(tok)
+    rows = body.get("rows") or []
+    held["afters"] = held["afters"][:page] + [after]
+    held["page"] = page
+    held["next"] = rows[-1]["key"] if body.get("next") and rows else None
+    held["exp"] = time.monotonic() + MODLOG_HOLD_S
+    _modlog_held[tok] = held
+
+
+def _modlog_params(player, sort, action_idx, after, search):
+    api_sort, api_dir, _ = MODLOG_SORTS[sort]
+    params = [("player", str(player)), ("sort", api_sort), ("dir", api_dir),
+              ("limit", str(MODLOG_PAGE))]
+    if after:
+        params.append(("after", after))
+    if action_idx is not None:
+        params.append(("action", MODLOG_BOT_ACTIONS[action_idx][0]))
+    if search:
+        params.append(("q", search))
+    return params
+
+
+async def _modlog_fetch(params, actor_id):
+    """GET the internal read with the internal key and the asking admin's
+    Discord id: `(status, parsed JSON or None)`, `(0, None)` when the api
+    cannot be reached."""
+    if http_session is None or not API_SECRET_KEY:
+        return 0, None
+    try:
+        async with http_session.get(
+                API_BASE_URL + MODLOG_PATH, params=params,
+                headers={"X-Internal-Key": API_SECRET_KEY, "X-Actor-Discord-Id": str(actor_id)},
+                timeout=aiohttp.ClientTimeout(total=MODLOG_TIMEOUT_S)) as resp:
+            raw = await resp.read()
+            try:
+                body = json.loads(raw.decode("utf-8"))
+            except Exception:
+                body = None
+            return resp.status, body
+    except Exception:
+        return 0, None
+
+
+def _modlog_error(status, body):
+    """One plain sentence for an answer that is not a page."""
+    detail = body.get("detail") if isinstance(body, dict) else None
+    if status == 0:
+        return MODLOG_UNREACHABLE
+    if status == 403:
+        return MODLOG_REFUSED
+    if status == 404:
+        return MODLOG_NOT_FOUND
+    if status == 409:
+        return MODLOG_AMBIGUOUS
+    if status in (400, 422):
+        return ("The moderator log refused that request (%s). Trying again as it is will not help."
+                % _escape_md(_modlog_cut(str(detail or "bad request"), 200)))
+    if status == 429 or status >= 500:
+        return ("The moderator log failed on the server (status %d). Trying again in a minute may help."
+                % int(status))
+    return "The moderator log answered status %d. Trying again will not help." % int(status)
+
+
+def _modlog_ts(iso):
+    try:
+        dt = datetime.fromisoformat(str(iso).replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return "<t:%d:f>" % int(dt.timestamp())
+    except Exception:
+        return "(time unknown)"
+
+
+def _modlog_cut(text, n):
+    """`text`, raw (not yet escaped), shortened to at most `n` characters,
+    the cut marked with "…". It adds nothing else, and every caller escapes
+    its result: cut first, then escape (_escape_md's rule), so no escape pair
+    is cut in half. Text already escaped is cut by _modlog_fit instead."""
+    text = str(text or "")
+    return text if len(text) <= n else text[:max(0, n - 1)] + "…"
+
+
+MODLOG_ID_UNKNOWN = "unknown id"
+
+
+def _modlog_id(value):
+    """The player's Steam id as the header prints it inside a code span:
+    the value when it is 1 to 20 ASCII digits, MODLOG_ID_UNKNOWN otherwise.
+    A code span ends at a backtick in its text and shows a backslash as
+    typed, so no escape makes a value literal there; digits are literal
+    anywhere. The internal read answers with the 17 digits the bot asked
+    with, or, asked by a name, the players row's steam_id as it is stored."""
+    s = str(value) if value is not None else ""
+    return s if re.fullmatch(r"[0-9]{1,20}", s) else MODLOG_ID_UNKNOWN
+
+
+def _modlog_fit(text, n):
+    """`text` (already escaped) shortened to at most `n` characters, the cut
+    marked with "…". A cut never ends inside an escape pair: an odd run of
+    backslashes before the cut drops its last one."""
+    if len(text) <= n:
+        return text
+    cut = text[:max(0, n - 1)]
+    run = len(cut) - len(cut.rstrip("\\"))
+    if run % 2:
+        cut = cut[:-1]
+    return cut + "…"
+
+
+MODLOG_TOTALS_MAX = 400
+# A record carried in by a migration from another table's own data names that
+# table in its details' carried_from (the api's modlog.CARRIED_FROM). The
+# mark stands right after the kind of action, ahead of the moderator, the
+# reason and the sentence, so a row's budget shortens those first; a budget
+# smaller than the time, the kind and the mark cuts the mark as well (and
+# never inside the kind's bold pair).
+MODLOG_CARRIED = {"flagged_matches": " (carried in from the flag's review data, not written at the review)"}
+MODLOG_CARRIED_OTHER = " (carried in from stored data, not written at the time)"
+
+
+def _modlog_carried(row):
+    """The carried-in mark of a row ('' for a record written at the time)."""
+    details = row.get("details")
+    src = details.get("carried_from") if isinstance(details, dict) else None
+    if not src:
+        return ""
+    return MODLOG_CARRIED.get(str(src), MODLOG_CARRIED_OTHER)
+
+
+def _modlog_row_budget(limit, head, totals, n_rows):
+    """Each row's share of the message: what the header, the totals and the
+    line breaks leave, split evenly over the rows on the page."""
+    return max(0, (limit - len(head) - len(totals) - 1 - n_rows) // max(1, n_rows))
+
+
+def _modlog_render(body, *, page, sort, action_idx, search):
+    """The page's text: a header with the player's name and the totals by
+    action, then one line per record, every row of the page shown (each row
+    shortened to its budget, with a visible mark). Raises ValueError on a
+    body this function does not read (the caller answers MODLOG_SCHEMA)."""
+    if not isinstance(body, dict) or not isinstance(body.get("rows"), list):
+        raise ValueError("rows")
+    total = body.get("total")
+    counts = body.get("counts_by_action")
+    who = body.get("player")
+    if (not isinstance(total, int) or isinstance(total, bool) or not isinstance(counts, list)
+            or not isinstance(who, dict)):
+        raise ValueError("shape")
+    sid = _modlog_id(who.get("steam_id"))
+    name = _escape_md(_modlog_cut(who.get("name") or "unknown name", 40))
+    filt = []
+    if action_idx is not None:
+        filt.append("kind: " + MODLOG_BOT_ACTIONS[action_idx][1])
+    if search:
+        filt.append("search: " + _escape_md(_modlog_cut(search, 64)))
+    filt_txt = (" (" + "; ".join(filt) + ")") if filt else ""
+    if total == 0:
+        return "No moderator action is on record for **%s** (`%s`)%s." % (name, sid, filt_txt)
+    pages = max(1, -(-total // MODLOG_PAGE))
+    head = ("**Moderator log: %s** (`%s`)%s\n%d record%s, page %d of %d, %s."
+            % (name, sid, filt_txt, total, "" if total == 1 else "s", page + 1, pages,
+               MODLOG_SORTS[sort][2]))
+    tot = []
+    for c in counts:
+        if not isinstance(c, dict):
+            raise ValueError("count")
+        tot.append("%s %d" % (_escape_md(_modlog_cut(c.get("label"), 40)), int(c.get("count") or 0)))
+    totals = _modlog_fit("Totals: " + ", ".join(tot) + "." if tot else "", MODLOG_TOTALS_MAX)
+    rows = body["rows"]
+    if not rows:
+        return "%s\n%s\nNo records on this page." % (head, totals)
+    budget = _modlog_row_budget(MODLOG_MSG_MAX, head, totals, len(rows))
+    lines = []
+    for r in rows:
+        if not isinstance(r, dict) or not isinstance(r.get("key"), str):
+            raise ValueError("row")
+        lead = _modlog_ts(r.get("at"))
+        bold = "**%s**" % _escape_md(_modlog_cut(r.get("action_label"), 40))
+        line = "%s %s%s by %s" % (lead, bold, _modlog_carried(r),
+                                  _escape_md(_modlog_cut(r.get("actor_name") or r.get("actor"), 40)))
+        if r.get("reason"):
+            line += " — reason: " + _escape_md(_modlog_cut(r.get("reason"), 256))
+        line += " — " + _escape_md(_modlog_cut(r.get("sentence"), 600))
+        shown = _modlog_fit(line, budget)
+        kept = len(line) if shown == line else len(shown) - 1
+        if len(lead) + 1 < kept < len(lead) + 1 + len(bold):
+            # The cut fell inside the kind's own bold pair: it falls before
+            # the pair's opening mark instead, so no bold is left open. The
+            # cut kept more than the time and the space, so this is shorter.
+            shown = lead + " …"
+        lines.append(shown)
+    # The budget keeps the page inside the limit while the header stays
+    # within its own bounds (a 40-character name, a 64-character search);
+    # this cut stands so no page passes the limit even outside them. The
+    # page is escaped by now, so it is cut by _modlog_fit, which never ends
+    # inside an escape pair.
+    return _modlog_fit("\n".join([head, totals] + lines), MODLOG_MSG_MAX)
+
+
+def _modlog_view(tok):
+    """The buttons of view `tok` for the page it shows now: Previous (shown
+    disabled on the first page) and, when more rows follow, Next; None for a
+    first page that is also the last."""
+    held = _modlog_held[tok]
+    if held["page"] == 0 and not held["next"]:
+        return None
+    view = discord.ui.View(timeout=None)
+    view.add_item(discord.ui.Button(style=discord.ButtonStyle.secondary, label="Previous",
+                                    custom_id="modlog:%s:p" % tok, disabled=held["page"] == 0))
+    if held["next"]:
+        view.add_item(discord.ui.Button(style=discord.ButtonStyle.secondary, label="Next",
+                                        custom_id="modlog:%s:n" % tok))
+    return view
+
+
+async def _modlog_page(actor_id, req):
+    """`(served, text, body)` for one page of `req` (steam id or name, sort,
+    action index, page number, search, after key or ""): a rendered page and
+    the read's body, or one plain sentence (served False, body None)."""
+    player, sort, action_idx, page, search, after = req
+    status, body = await _modlog_fetch(_modlog_params(player, sort, action_idx, after, search), actor_id)
+    if status != 200:
+        return False, _modlog_error(status, body), None
+    try:
+        text_out = _modlog_render(body, page=page, sort=sort, action_idx=action_idx, search=search)
+        str(body["player"]["steam_id"])
+        return True, text_out, body
+    except Exception:
+        return False, MODLOG_SCHEMA, None
+
+
+async def _modlog_command(interaction, player, action, search, sort):
+    if not _aer_local_gate(interaction):
+        await interaction.response.send_message(MODLOG_GATE, ephemeral=True)
+        return
+    search = (search or "").strip()
+    if len(search) > MODLOG_SEARCH_MAX:
+        await interaction.response.send_message(MODLOG_SEARCH_LONG, ephemeral=True)
+        return
+    sort = sort if sort in MODLOG_SORTS else "n"
+    words = [w for w, _ in MODLOG_BOT_ACTIONS]
+    action_idx = words.index(action) if action in words else None
+    await interaction.response.defer(ephemeral=True)
+    served, text_out, body = await _modlog_page(
+        interaction.user.id, ((player or "").strip(), sort, action_idx, 0, search, ""))
+    view = None
+    if served and body.get("next") and body.get("rows"):
+        tok = _modlog_hold((str(body["player"]["steam_id"]), sort, action_idx, search))
+        _modlog_shown(tok, 0, "", body)
+        view = _modlog_view(tok)
+    if view is None:
+        await interaction.followup.send(text_out, ephemeral=True,
+                                        allowed_mentions=discord.AllowedMentions.none())
+    else:
+        await interaction.followup.send(text_out, ephemeral=True, view=view,
+                                        allowed_mentions=discord.AllowedMentions.none())
+
+
+async def _modlog_click(interaction, cid):
+    """A Previous or Next press: the command's gate again, then a fresh read
+    with the presser's id; the ephemeral page is edited in place."""
+    if not _aer_local_gate(interaction):
+        await interaction.response.send_message(MODLOG_GATE, ephemeral=True)
+        return
+    parsed = _modlog_parse_custom_id(cid)
+    if parsed is None:
+        await interaction.response.send_message(MODLOG_EXPIRED, ephemeral=True)
+        return
+    tok, way = parsed
+    held = _modlog_held[tok]
+    # The newest press of a view wins (MODLOG-1 K2): each press takes the
+    # view's next press number before its read; a read that ends after a newer
+    # press of this view began is not shown and changes nothing in the view.
+    held["press"] += 1
+    press = held["press"]
+    sid, sort, action_idx, search = held["base"]
+    if way == "n" and held["next"]:
+        page, after = held["page"] + 1, held["next"]
+    elif way == "n":
+        page = held["page"]
+        after = held["afters"][page]
+    else:
+        page = max(0, held["page"] - 1)
+        after = held["afters"][page]
+    await interaction.response.defer()
+    served, text_out, body = await _modlog_page(interaction.user.id,
+                                                (sid, sort, action_idx, page, search, after))
+    cur = _modlog_held.get(tok)
+    if cur is not None and cur["press"] != press:
+        # A newer press of this view began during this read; that press
+        # decides what the view shows. The interaction is already deferred.
+        return
+    if not served:
+        # An error sentence: the page shown stays as it was.
+        await interaction.followup.send(text_out, ephemeral=True)
+        return
+    if cur is None:
+        # The bound dropped the view during the read: the page is not shown.
+        await interaction.followup.send(MODLOG_EXPIRED, ephemeral=True)
+        return
+    _modlog_shown(tok, page, after, body)
+    await interaction.edit_original_response(content=text_out, view=_modlog_view(tok),
+                                             allowed_mentions=discord.AllowedMentions.none())
+
+
+@bot.tree.command(name="modlog", description="A player's moderator log (admin channel)")
+@app_commands.describe(player="The player's name or Steam id",
+                       action="Only this kind of action",
+                       search="Words to find in the reason, the kind of action or the details",
+                       sort="Order of the rows (newest first if not set)")
+@app_commands.choices(
+    action=[app_commands.Choice(name=label, value=word) for word, label in MODLOG_BOT_ACTIONS],
+    sort=[app_commands.Choice(name=words, value=code) for code, (_, _, words) in MODLOG_SORTS.items()])
+async def modlog_command(interaction: discord.Interaction, player: str,
+                         action: app_commands.Choice[str] = None, search: str = "",
+                         sort: app_commands.Choice[str] = None):
+    await _modlog_command(interaction, player, action.value if action else "", search or "",
+                          sort.value if sort else "n")
 
 
 if __name__ == "__main__":

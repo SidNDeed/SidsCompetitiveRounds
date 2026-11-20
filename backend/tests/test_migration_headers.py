@@ -34,6 +34,7 @@ API_DIR = pathlib.Path(__file__).resolve().parents[1] / "api"
 # guard, the backfill cue's SELECT set_config() and the trigger's CREATE OR
 # REPLACE FUNCTION) likewise. 416 (lobby invites: two tables, their indexes
 # and mail_messages' kind check, every step inside a guard) likewise.
+# 421 (OCT3-B, a data migration with no code change) likewise.
 OWNED = ("331_animal_title_ladders.sql",
          "332_pc_edition_schedule.sql",
          "333_pc_card_themes.sql",
@@ -41,7 +42,9 @@ OWNED = ("331_animal_title_ladders.sql",
          "377_admin_evidence_indexes.sql",
          "401_contrib_match_provenance.sql",
          "415_mail_send_receipts.sql",
-         "416_lobby_invites.sql")
+         "416_lobby_invites.sql",
+         "419_quarantine_digest_posted.sql",
+         "421_oct3b_credit_held_ffa_games.sql")
 
 _ORDER_LINE = re.compile(r"^--\s*DEPLOY ORDER:\s*(.+)$", re.MULTILINE)
 

@@ -159,13 +159,23 @@ def test_one_pass_stays_affordable():
     directory; the ceiling moves from 56 to 64 MiB, about 7 MiB of headroom
     again.
 
-    Measured at the account deletion lock lane's round r2 (claude/mdpl-1116
-    over main 732d96b1, its lock census frozen): 64.28 MiB across 1249 files
-    as working files on a core.autocrlf=true checkout (63.49 MiB as LF, which
-    a seat's checkout reads), every file tracked, no new binary directory;
-    the lane's seven files are 0.50 MiB of it, the census reader and its two
-    frozen records 0.33 MiB of those; the ceiling moves from 64 to 72 MiB,
-    about 8 MiB of headroom again.
+    Measured at the held-report digest lane (QDIG-1, claude/qdig-1116-jst at
+    its test-only commit over the janitor self-test dcb80c81), 17 Nov 2026,
+    by this function called outside pytest: main aef342ab reads 63.98 MiB
+    across 1245 files as working files on a core.autocrlf=true checkout
+    (63.07 MiB as committed blobs); the lane reads 64.20 MiB across 1252
+    files (63.28 MiB as LF), so on such a checkout it crosses 64 MiB, every
+    file tracked (backend/tests 20.5 across 487, up 5.4 MiB and 108 files
+    since the last note; plugin 18.6 across 188, the Player Cards art 8.8
+    unchanged, backend/api 6.5, backend/sql 5.6 across 418, up 1.2, tools
+    3.2), no new binary directory; the ceiling moves from 64 to 72 MiB, about
+    7.8 MiB of headroom.
+
+    The account deletion lock lane (claude/mdpl-1116) had moved the same
+    ceiling from 64 to 72 MiB on its own branch, measured at its round r2 over
+    main 732d96b1 (64.28 MiB across 1249 files as working files on a
+    core.autocrlf=true checkout, the lane's seven files 0.50 MiB of it). Its
+    merge of main 234ea0f8 keeps main's 72 MiB.
     """
     # Ceiling from the measured budget (fix pass 4, logs d4-fix4-walk-measure.log
     # and d4-fix4-walk-commit.log): the fix-pass-4 working tree on 9b8e3cb0 reads

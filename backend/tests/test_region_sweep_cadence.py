@@ -247,7 +247,9 @@ def test_the_join_body_is_bounded_by_acceptance_not_by_issuance():
 
 def test_the_reported_age_rounds_up():
     """A map genuinely 180.9 s old must not be reported as 180. The server takes
-    the client's integer at face value and re-stamps from it (main.py:13740), so
+    the client's integer at face value (_region_pings_validate accepts any int
+    0..900) and re-stamps the map from it (_queue_join_upsert writes NOW() - age,
+    queue_poll writes now - age), and the issuance window judges that stamp, so
     truncating did not merely mis-report the age -- it bought a map that was over
     the line a fresh lease on the strength of a rounding error. Over-reporting is
     the safe direction.

@@ -860,8 +860,14 @@ class AdminUser(Base):
 
 class PlayerBan(Base):
     """Append-only ban log. A row is an ACTIVE ban while player_ban_active_sql
-    holds for it: not lifted (unbanned_at IS NULL) and its end time, if it has
-    one, still ahead (expires_at, migration 417; NULL = permanent).
+    holds for it: not lifted (unbanned_at IS NULL) and its end time still
+    ahead (expires_at, migration 417). Every ban ends at most BAN_MAX_HOURS
+    after its start (banned_at): the api writes an end on every row
+    (main._ban_end_sql) and migration 418's CHECK player_bans_max_one_year
+    holds the same bound in the table. A NULL end is a row written before
+    418 was applied; 418 sets it to banned_at plus the maximum. The api never
+    constructs this class to write a ban (main._apply_ban_core inserts by
+    SQL, so the start and the end are read from one clock).
 
     The applied steam_id column is TEXT (028); String(20) here is a declaration
     SQLAlchemy does not enforce on insert. Once migration 319 is applied the
@@ -884,9 +890,31 @@ class PlayerBan(Base):
     expires_at = Column(DateTime(timezone=True), nullable=True)
 
 
+# The longest a ban can last, measured from its row's start (banned_at): 8760
+# hours, 365 days of 24 hours (the owner's ruling of 16 Nov 2026: every ban
+# has a maximum length of one year). Written as HOURS in SQL and in Python,
+# never as days, months or a year: a day or month interval added to a
+# timestamptz depends on the session's time zone, and the table's CHECK
+# (migration 418, player_bans_max_one_year) must not. Every api writer of
+# player_bans.expires_at, every message naming the maximum and 418's literal
+# come from this constant (test_ban_cap_pg.py pins 418's literal to it).
+BAN_MAX_HOURS = 8760
+BAN_MAX_MINUTES = BAN_MAX_HOURS * 60
+BAN_MAX_DAYS = BAN_MAX_HOURS // 24
+
+
+def ban_cap_sql(start: str) -> str:
+    """The latest end a ban whose start is the SQL value `start` may have:
+    `start` plus BAN_MAX_HOURS, as an hours interval. `start` is a column
+    reference or a SQL value the caller builds, never request text."""
+    return f"({start} + INTERVAL '{int(BAN_MAX_HOURS)} hours')"
+
+
 # The ONE definition of an ACTIVE ban, as SQL over a player_bans row aliased
 # `alias` (the table's own name when the statement gives it no alias): the row
-# is not lifted and its end time, if it has one, is still ahead. The end is
+# is not lifted and its end time is still ahead. A NULL end (a row written
+# before migration 418 set every end) reads as no end; the branch stays until
+# 418 has run everywhere, so the api is correct on both sides of it. The end is
 # compared with the database's clock (NOW(), the transaction's start), never
 # the api process's, and a timed ban ends by this comparison at read time: no
 # job, sweep or timer closes it. Every SQL reader of player_bans in backend/api
@@ -929,10 +957,22 @@ class AdminAction(Base):
 
     The applied admin_steam_id and target_steam_id columns are TEXT (028): the
     String lengths below are declarations SQLAlchemy does not enforce. The
-    raw-SQL audit writers in main.py (_log_admin_action and its strict twin)
-    bind the actor whole since v4.13 -- a Discord moderator is recorded as
-    "discord:<id>", longer than twenty characters."""
+    one writer in main.py (_modlog_write, the moderator log, MODLOG-1) binds
+    the actor whole -- a Discord moderator is recorded as "discord:<id>",
+    longer than twenty characters.
+
+    Migration 420 adds affected_steam_ids (every player the action acts on,
+    by Steam id, at most 16; '{}' when it names none; GIN-indexed as
+    ix_admin_actions_affected) and reason (the reason the actor gave, at
+    most 256 characters by ck_admin_actions_reason_len). Both are declared
+    here so the model and the table agree (learning #346); the writer binds
+    them with typed casts."""
     __tablename__ = "admin_actions"
+    __table_args__ = (
+        CheckConstraint("reason IS NULL OR char_length(reason) <= 256",
+                        name="ck_admin_actions_reason_len"),
+        Index("ix_admin_actions_affected", "affected_steam_ids", postgresql_using="gin"),
+    )
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     admin_steam_id = Column(String(20), nullable=False)
@@ -942,6 +982,9 @@ class AdminAction(Base):
     target_series_id = Column(UUID(as_uuid=True), nullable=True)
     details = Column(JSONB, nullable=True)
     created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+    affected_steam_ids = Column(ARRAY(Text), nullable=False, default=list,
+                                server_default=text("'{}'::text[]"))
+    reason = Column(Text, nullable=True)
 
 
 # ── Tournaments (migration 047) ──────────────────────────────────────────

@@ -39,6 +39,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from database import get_db
 from read_gate import ReadGateRoute
+from log_lines import print_info_lines
 
 # ── Bounds and display defaults ────────────────────────────────────────────
 #
@@ -82,6 +83,11 @@ AER_CONTRACT_BOUNDS = {
     # Routes (design 4.6): reports per actor per window, in process.
     "RATE_MAX": 20,
     "RATE_WINDOW_S": 600,
+    # The rate map's ceiling: callers with a non-empty window held at once
+    # (_rate_charge). Callers are past the key and actor gates, so in
+    # practice this is the moderator count; at the ceiling a NEW caller is
+    # refused 429 until some caller's window empties.
+    "RATE_KEYS_MAX": 1024,
     "ACTOR_ID_MAX_DIGITS": 32,
     # Evidence sections (phase 2, B10): the per-statement row limits of the
     # card, combat and identity-clock reads, the contribution rows shown per
@@ -1051,7 +1057,11 @@ class PopulationUnavailable(Exception):
         self.reason = reason
 
 
-_aer_log = logging.getLogger("admin_evidence")
+# Its info lines (the population rebuilt, the warm-up ready or skipped, a
+# refusal's class) reach the container log through print(), as the api's own
+# lines do: without a handler of its own this logger's info records were
+# dropped (log_lines.py says why, and why the fix is per module).
+_aer_log = print_info_lines(logging.getLogger("admin_evidence"))
 
 
 async def rebuild_game_population(conn, key, pop_days, lag_s, ranked_only=False,
@@ -1629,17 +1639,47 @@ _REBUILDING = [False]
 _POLL_S = 0.01
 
 
+def _retry_after(seconds, window):
+    """A Retry-After value in whole seconds, bounded to 1..window."""
+    return str(max(1, min(int(window), int(math.ceil(seconds)))))
+
+
 def _rate_charge(actor, now=None):
     """At most RATE_MAX reports per actor per RATE_WINDOW_S, after the gate;
-    over it, `429 rate` with `Retry-After`."""
+    over it, `429 rate` with `Retry-After`.
+
+    The map is bounded: every charge drops each caller's stamps that left
+    the window, and the map is then rebuilt from the callers whose window
+    still holds a stamp, so a caller whose window is empty is no longer in
+    it; no key is ever removed from a map, the module's name is bound to the
+    rebuilt one (this function does not await, so no other charge runs in
+    between). The map holds at most RATE_KEYS_MAX callers. At the ceiling a
+    caller NOT in the map is refused `429 rate`, its Retry-After the time
+    until some caller's window is empty (that caller's newest stamp plus the
+    window, less now), bounded to 1..RATE_WINDOW_S: by then that caller's
+    window is empty and its slot opens at the next charge, so a refusal
+    names a time within RATE_WINDOW_S (another new caller may take that
+    slot first, and is then the one admitted). No caller in the
+    map loses a stamp that is still inside the window, so the per-caller
+    bound never weakens."""
+    global _RATE
     now = time.monotonic() if now is None else now
     window = AER_CONTRACT_BOUNDS["RATE_WINDOW_S"]
-    q = _RATE.setdefault(actor, collections.deque())
-    while q and now - q[0] >= window:
-        q.popleft()
+    kept = {}
+    for key, kq in _RATE.items():
+        while kq and now - kq[0] >= window:
+            kq.popleft()
+        if kq:
+            kept[key] = kq
+    _RATE = kept
+    q = kept.get(actor)
+    if q is None:
+        if len(kept) >= AER_CONTRACT_BOUNDS["RATE_KEYS_MAX"]:
+            free_at = min(kq[-1] for kq in kept.values()) + window
+            _aer_fail(429, "rate", headers={"Retry-After": _retry_after(free_at - now, window)})
+        q = kept[actor] = collections.deque()
     if len(q) >= AER_CONTRACT_BOUNDS["RATE_MAX"]:
-        retry = max(1, int(math.ceil(window - (now - q[0]))))
-        _aer_fail(429, "rate", headers={"Retry-After": str(retry)})
+        _aer_fail(429, "rate", headers={"Retry-After": _retry_after(window - (now - q[0]), window)})
     q.append(now)
 
 

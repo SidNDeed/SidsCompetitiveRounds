@@ -1131,8 +1131,8 @@ def test_a_banned_deleted_or_service_invitee_gets_the_joins_own_refusal(monkeypa
         if why == "banned":
             await env.conn.execute("INSERT INTO admin_users (steam_id, granted_at) VALUES ($1, NOW())"
                                    " ON CONFLICT DO NOTHING", h.sid)
-            await env.conn.execute("INSERT INTO player_bans (steam_id, reason, banned_by_steam_id)"
-                                   " VALUES ($1, 'test', $2)", x.sid, h.sid)
+            await env.conn.execute("INSERT INTO player_bans (steam_id, reason, banned_by_steam_id, expires_at)"
+                                   " VALUES ($1, 'test', $2, NOW() + INTERVAL '30 days')", x.sid, h.sid)
         elif why == "deleted":
             monkeypatch.setattr(main, "MATCH_HMAC_SECRET", "inv-case-secret")
             await env.conn.execute("INSERT INTO deleted_steam_ids (steam_id_hash) VALUES ($1)",

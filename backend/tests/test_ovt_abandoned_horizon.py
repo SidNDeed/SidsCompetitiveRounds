@@ -1718,6 +1718,10 @@ def test_the_janitor_lock_census_sees_orm_locks_and_not_only_sql():
     # the case, relay and invite rows that name them (FOR NO KEY UPDATE); and
     # the two halves of the case scrub, _mail_case_scrub_reporters and
     # _mail_case_scrub_resolvers (FOR NO KEY UPDATE). Before: 32/31/29/28.
+    # QDIG-1 adds one decline at one site and no waiter: the held-report
+    # janitor's row lock (_QDIG_SQL_JANITOR_LOCK, FOR UPDATE SKIP LOCKED, in
+    # _qdig_janitor_pass). Before it: 42/31/39/28.
+    assert [r["func"] for r in census["declines"]].count("_qdig_janitor_pass") == 1, census["declines"]
     # The account deletion lane (claude/mdpl-1116) adds two declines at two
     # sites, both SKIP LOCKED, and no waiter: the deletion's two guards,
     # _deletion_lock_party_row (a bet party's players row, FOR NO KEY UPDATE;
@@ -1726,10 +1730,10 @@ def test_the_janitor_lock_census_sees_orm_locks_and_not_only_sql():
     # FOR NO KEY UPDATE; reached from queue_cleanup_loop), through the bet
     # helpers that call them. A guard issues its statements only when its
     # caller passes no_wait=True, which the deletion alone does; the census
-    # counts what the function can reach. Before: 42/31/39/28.
-    assert len(census["declines"]) == 44, census["declines"]
+    # counts what the function can reach. Before both lanes: 42/31/39/28.
+    assert len(census["declines"]) == 45, census["declines"]
     assert len(census["waits"]) == 31, census["waits"]   # 25 before the queue-row lock became visible
-    assert len(census["decline_sites"]) == 41, census["decline_sites"]
+    assert len(census["decline_sites"]) == 42, census["decline_sites"]
     assert len(census["wait_sites"]) == 28, census["wait_sites"]   # 22 before: the four queue-row lock literals
 
 

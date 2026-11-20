@@ -969,7 +969,7 @@ def test_a_ban_withdraws_the_binder_and_the_announcements():
     # so a settings compare-and-set read before the ban is refused as stale
     assert ban.index("pg_advisory_xact_lock(hashtext(") < ban.index("DELETE FROM steam_sessions") \
         < ban.index(head) < ban.index(tail) < ban.index('"already_banned"')
-    assert ban.index('"already_banned"') < ban.index("db.add(PlayerBan(steam_id=target_steam_id")
+    assert ban.index('"already_banned"') < ban.index('"INSERT INTO player_bans (')
     # the Discord daily path has no session to purge: it refuses an active ban itself (c5)
     daily = inspect.getsource(main._pc_claim_daily)
     assert daily.index("SELECT deleted_at FROM players WHERE id = CAST(:pid AS uuid)") \

@@ -1300,6 +1300,29 @@ class HealthResponse(BaseModel):
     # read by nothing else (#306). No default, as above. Absent on any build
     # before it.
     ban_expiry_build: int
+    # qdig_build: release-train verification plumbing, not a design mechanism
+    # (main._QDIG_BUILD; 1 = this build classifies held game reports, files
+    # the ones with the recorded game's result and gives the digest feed its
+    # plain-words keys). It names build identity only, equal on both roles
+    # by construction. Probed by the release train and read by nothing else
+    # (#306). No default, as above. Absent on any build before it.
+    qdig_build: int
+    # quarantine_needs_decision: how many pending held GAMES need an admin's
+    # decision, by the last census of this process's janitor pass
+    # (main._qdig_needs_decision_word); -1 on a box that does not compute it
+    # (the standby, and the primary before its first census). A measured
+    # value, not a marker.
+    quarantine_needs_decision: int
+    # ban_cap_build: release-train verification plumbing, not a design
+    # mechanism (main._BAN_CAP_BUILD; 1 = this build writes an end on every
+    # ban, at most models.BAN_MAX_HOURS after its start). It names build
+    # identity only. A code constant, equal on both roles by construction,
+    # so the train can read it through the edge; what the batch changes is
+    # seen by no phase of the train, and this is the key that tells a stale
+    # box from a refreshed one (learnings 780, 794, 1186). Probed by the
+    # release train and read by nothing else (#306). No default, as above.
+    # Absent on any build before it.
+    ban_cap_build: int
     # aer_popgate_build: release-train verification plumbing, not a design
     # mechanism (main._AER_POPGATE_BUILD; 1 = this build's evidence report
     # cache has a fixed byte allowance and builds the display population
@@ -1307,6 +1330,13 @@ class HealthResponse(BaseModel):
     # by construction; probed by the release train and read by nothing else
     # (#306). No default, as above. Absent on any build before it.
     aer_popgate_build: int
+    # voided_streak_build: release-train verification plumbing, not a design
+    # mechanism (main._VOIDED_STREAK_BUILD; 1 = in this build every streak
+    # walk leaves a voided series or game out). It names build identity only,
+    # equal on both roles by construction; probed by the release train and
+    # read by nothing else (#306). No default, as above. Absent on any build
+    # before it.
+    voided_streak_build: int
     # admin_evidence_population: the outcome of this process's most recent
     # build attempt of the evidence report's display population, or of a
     # start-up build that failed before it reached an attempt
@@ -1330,6 +1360,15 @@ class HealthResponse(BaseModel):
     # 780, 794). Probed by the release train and read by nothing else (#306).
     # No default, as above. Absent on any build before it.
     mail_spam_case_lock_build: int
+    # modlog_build: release-train verification plumbing, not a design
+    # mechanism (main._MODLOG_BUILD; 1 = this build writes the moderator
+    # log's records with the columns of migration 420 and serves its read).
+    # It names build identity only. A code constant, equal on both roles by
+    # construction, so the train can read it through the edge; this is the
+    # key that tells a stale box from a refreshed one (learnings 780, 794,
+    # 1186). Probed by the release train and read by nothing else (#306). No
+    # default, as above. Absent on any build before it.
+    modlog_build: int
     # account_deletion_lock_build: release-train verification plumbing, not
     # a design mechanism (main._ACCOUNT_DELETION_LOCK_BUILD; 1 = in this
     # build delete_player_data and the pending_dms writers take their locks

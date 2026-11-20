@@ -302,7 +302,7 @@ pair("M3-bind-seed", "the seed engine is no longer bound to one schema at connec
      "                                        connect_args=_BOUND_CONNECT,\n", "",
      "the seed engine's binding", [BIND], TESTS)
 pair("M3-bind-routes", "database.py's engines, as the routes get them, are no longer bound at connect",
-     '        cparams["server_settings"] = dict(cparams.get("server_settings") or {}, search_path=BOUND_SCHEMA)\n',
+     '        params["server_settings"] = dict(params.get("server_settings") or {}, search_path=BOUND_SCHEMA)\n',
      "", "the routes' binding", [BIND], TESTS)
 # A drop line is SQL, so its inert twin is a SQL comment inside the statement.
 M3_DROP_LINE = "DROP TABLE IF EXISTS public.players RESTRICT;\n"
