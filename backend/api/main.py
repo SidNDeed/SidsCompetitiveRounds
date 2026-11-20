@@ -69536,6 +69536,19 @@ async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSe
         # payloads). The recoverable incident class — a live lobby closed
         # mid-game — always leaves the row behind.
         raise HTTPException(404, "Lobby not found")
+    # QAPPLY-1 (F1): under the replay, the game's claim is the first check
+    # below the lobby lock, read for the game the report names (a report
+    # that names none would be the lobby's next game): a game that a Credit
+    # paid from a sibling held row is refused as credited, and one an Accept
+    # applied as recorded, before any check that a later write to the lobby
+    # moves (the game number, the gate's pace anchor, the game limit).
+    if _qapply is not None:
+        _claim_no = _ffa_named_game_number(report.photon_room_id)
+        _claim = await _qapply_claim_of(
+            db, lobby_uuid, _expected_game if _claim_no is None else _claim_no)
+        if _claim is not None:
+            raise _QapplyRefused(409, _QAPPLY_TEXTS[
+                "game_credited" if _claim == "credit" else "recorded"], {})
     # The early lookup preserves validation order, but it cannot authorize a
     # journal or settlement after waiting for this lobby lock.  Rebuild the
     # complete participant map from live identities below the lock so account
@@ -69940,13 +69953,6 @@ async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSe
         await _qapply_gate(db, lobby=lobby, lobby_uuid=lobby_uuid, game=_game_number,
                            player_ids=reported_ids, received_at=_qapply["received_at"],
                            locked=True, progress=_progress)
-        # The game's claim, under the lobby lock: a game that a Credit paid
-        # from a sibling held row is not applied (a recorded game is refused
-        # above as recorded; an 'accept' claim comes with its game's rows).
-        _claim = await _qapply_claim_of(db, lobby_uuid, _game_number)
-        if _claim is not None:
-            raise _QapplyRefused(409, _QAPPLY_TEXTS[
-                "game_credited" if _claim == "credit" else "recorded"], {})
 
     # Server-side placements: (rounds desc, points desc, kills desc); ties
     # share the same placement, COMPETITION style (1,2,2,4 — not dense; Codex
@@ -75465,6 +75471,20 @@ async def _qapply_verdict(db, row, body) -> dict:
                               {"lid": str(row["group_id"])})).mappings().first()
     if lobby is None:
         return no("no_lobby")
+    # The game's state first, as Accept reads it below the lobby lock (F1):
+    # recorded, or claimed (for the game the report names, or the lobby's
+    # next game when it names none), in Accept's sentences.
+    expected = max(int(lobby["games_played"] or 0), int(lobby["highest"] or 0)) + 1
+    room = (report.photon_room_id or "")[:64]
+    tail = _ffa_room_game_no(room)
+    named = _ffa_named_game_number(room)
+    if (await db.execute(text(_QAPPLY_SQL_RECORDED), {
+            "room": room, "lid": str(row["group_id"]),
+            "g": named if named is not None else 0})).scalar():
+        return no("recorded")
+    claim = await _qapply_claim_of(db, row["group_id"], expected if named is None else named)
+    if claim is not None:
+        return no("game_credited" if claim == "credit" else "recorded")
     if lobby["readmit_v1"]:
         return no("readmit")
     if lobby["status"] == "active":
@@ -75486,18 +75506,6 @@ async def _qapply_verdict(db, row, body) -> dict:
                               id_by_steam={r.steam_id: r.id for r in prows})
     if word is not None:
         return no(_QAPPLY_CHECK_TEXT[word])
-    expected = max(int(lobby["games_played"] or 0), int(lobby["highest"] or 0)) + 1
-    room = (report.photon_room_id or "")[:64]
-    tail = _ffa_room_game_no(room)
-    named = _ffa_named_game_number(room)
-    if (await db.execute(text(_QAPPLY_SQL_RECORDED), {
-            "room": room, "lid": str(row["group_id"]),
-            "g": named if named is not None else 0})).scalar():
-        return no("recorded")
-    if named is not None:
-        claim = await _qapply_claim_of(db, row["group_id"], named)
-        if claim is not None:
-            return no("game_paid" if claim == "credit" else "game_applied")
     gate = await _qapply_gate(db, lobby=lobby, lobby_uuid=row["group_id"], game=expected,
                               player_ids=row["player_ids"], received_at=row["created_at"],
                               locked=False)
@@ -75589,6 +75597,21 @@ async def _qapply_credit(db, row, report, *, actor: str, note: str) -> dict:
     lobby = (await db.execute(text(_FFA_LOBBY_LOCK_SQL), {"lid": lobby_uuid})).mappings().first()
     if lobby is None:
         raise _QapplyRefused(409, _QAPPLY_TEXTS["no_lobby"], {})
+    # The game's state first below the lobby lock (F1): a game an Accept
+    # recorded, or one a Credit or an Accept claimed, is refused with the
+    # sentence of that state before any check that a later write to the
+    # lobby moves (the game limit, the number, the gate).
+    room = (report.photon_room_id or "")[:64]
+    tail = _ffa_room_game_no(room)
+    named = _ffa_named_game_number(room)
+    if (await db.execute(text(_QAPPLY_SQL_RECORDED), {
+            "room": room, "lid": str(lobby_uuid),
+            "g": named if named is not None else 0})).scalar():
+        raise _QapplyRefused(409, _QAPPLY_TEXTS["recorded"], {})
+    if named is not None:
+        claim = await _qapply_claim_of(db, lobby_uuid, named)
+        if claim is not None:
+            raise _QapplyRefused(409, _QAPPLY_TEXTS["game_paid" if claim == "credit" else "game_applied"], {})
     if lobby.get("readmit_v1"):
         raise _QapplyRefused(409, _QAPPLY_TEXTS["readmit"], {})
     if lobby["status"] == "active":
@@ -75612,21 +75635,11 @@ async def _qapply_credit(db, row, report, *, actor: str, note: str) -> dict:
         raise _QapplyRefused(409, _QAPPLY_TEXTS[_QAPPLY_CHECK_TEXT[word]], {})
     reported_ids = set(id_by_steam.values())
     _cfg = _ffa_lobby_config(lobby)
-    room = (report.photon_room_id or "")[:64]
-    tail = _ffa_room_game_no(room)
-    named = _ffa_named_game_number(room)
-    if (await db.execute(text(_QAPPLY_SQL_RECORDED), {
-            "room": room, "lid": str(lobby_uuid),
-            "g": named if named is not None else 0})).scalar():
-        raise _QapplyRefused(409, _QAPPLY_TEXTS["recorded"], {})
     # The game a Credit pays is the number the report names: a report that
     # names none cannot be told apart from its siblings, so it is not paid.
-    # The claim is read under the lobby lock taken above.
+    # Its claim was read under the lobby lock above.
     if named is None:
         raise _QapplyRefused(409, _QAPPLY_TEXTS["no_number"], {})
-    claim = await _qapply_claim_of(db, lobby_uuid, named)
-    if claim is not None:
-        raise _QapplyRefused(409, _QAPPLY_TEXTS["game_paid" if claim == "credit" else "game_applied"], {})
     for pid in sorted(reported_ids, key=str):
         await db.execute(text(_QAPPLY_SQL_LOCK_PLAYER), {"pid": pid})
     gate = await _qapply_gate(db, lobby=lobby, lobby_uuid=lobby_uuid, game=expected,

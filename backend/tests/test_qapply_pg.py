@@ -1355,6 +1355,49 @@ def test_f1_accept_then_credit_of_a_sibling_row_is_refused(monkeypatch):
     run_env(monkeypatch, body)
 
 
+def test_f1_a_later_action_names_the_state_the_earlier_one_made(monkeypatch):
+    # The cells the tests above leave: each later action answers the state
+    # the earlier action made, never a check that a write to the lobby moved.
+    async def body(env):
+        # Accept, then Accept of the same row and of a sibling row.
+        lob, qa, qb = await siblings(env, 2)
+        assert (await accept(env, qa)).status == 200
+        before = (await paid(env, lob), await game_rows(env, lob, 2), await claims(env, lob))
+        for qid, want in ((qa, "reviewed"), (qb, "recorded")):
+            ans = await accept(env, qid)
+            assert (ans.status, ans.body) == (409, T[want]), ("F1 accept after accept", want, ans)
+        assert (await paid(env, lob), await game_rows(env, lob, 2), await claims(env, lob)) == before
+        assert await status_of(env, qb) == "pending"
+        # Credit of game 3 while the lobby is on game 2: the sibling row's
+        # Accept names the credit, not the number it would also refuse.
+        lob, q3a, q3b = await siblings(env, 3)
+        assert (await credit(env, q3a)).status == 200
+        v = (await listing(env))[q3b]
+        assert (v["can_accept"], v["accept_blocked_reason"], v["can_credit"]) == (
+            False, T["game_credited"], False), ("F1 the list names the credit", v)
+        before = (await paid(env, lob), await game_rows(env, lob, 3))
+        ans = await accept(env, q3b)
+        assert (ans.status, ans.body) == (409, T["game_credited"]), ("F1 credited before the number", ans)
+        assert (await paid(env, lob), await game_rows(env, lob, 3)) == before
+        assert await status_of(env, q3b) == "pending"
+        # The control: a row of another game of the same lobby is not refused
+        # by that claim.
+        q2 = await held(env, lob, 2)
+        assert (await listing(env))[q2]["can_accept"] is True
+        assert (await accept(env, q2)).status == 200, "F1 another game of the lobby applies"
+        # Accept records the lobby's last game; Credit of the sibling row
+        # names the recorded game, not the game limit that record reached.
+        monkeypatch.setattr(main, "FFA_MAX_GAMES_PER_LOBBY", 2)
+        lob, qa, qb = await siblings(env, 2)
+        assert (await accept(env, qa)).status == 200
+        await later_for(env, lob)
+        before = await paid(env, lob)
+        ans = await credit(env, qb)
+        assert (ans.status, ans.body) == (409, T["recorded"]), ("F1 recorded before the limit", ans)
+        assert await paid(env, lob) == before
+    run_env(monkeypatch, body)
+
+
 def test_f1_two_sibling_actions_at_once_take_effect_once(monkeypatch):
     async def body(env):
         for first, second in ((credit, credit), (credit, accept), (accept, credit)):
