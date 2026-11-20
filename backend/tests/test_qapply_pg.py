@@ -985,7 +985,7 @@ def test_c3_every_second_action_answers_409_and_changes_nothing(monkeypatch):
         assert (await credit(env, qid)).status == 200
         before = await tables(env)
         ans = await credit(env, qid)
-        assert ans.status == 409 and ans.body == T["reviewed"], ("C3 credit twice", ans)
+        assert ans.status == 409 and ans.body == T["held_credited"], ("C3 credit twice", ans)
         await env.conn.execute("UPDATE match_report_quarantine SET status = 'pending', reviewed_at = NULL"
                                " WHERE id = $1", uuid.UUID(qid))
         before = await tables(env)
@@ -998,14 +998,14 @@ def test_c3_every_second_action_answers_409_and_changes_nothing(monkeypatch):
         assert (await accept(env, qid)).status == 200
         before = await tables(env)
         ans = await credit(env, qid)
-        assert ans.status == 409 and ans.body == T["reviewed"], ("C3 credit after accept", ans)
+        assert ans.status == 409 and ans.body == T["held_applied"], ("C3 credit after accept", ans)
         assert await tables(env) == before
         lob, qid = await closed_held(env)
         await later_for(env, lob)
         assert (await credit(env, qid)).status == 200
         before = await tables(env)
         ans = await accept(env, qid)
-        assert ans.status == 409 and ans.body == T["reviewed"], ("C3 accept after credit", ans)
+        assert ans.status == 409 and ans.body == T["held_credited"], ("C3 accept after credit", ans)
         assert await tables(env) == before
     run_env(monkeypatch, body)
 
