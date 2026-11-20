@@ -49,64 +49,64 @@ GATE_WALK = (
 
 # Frozen at 3130bb9d from the ro_spy enumeration of both walks (35 positions).
 COVERED = (
-    ('a1', 'main.py', 17948, 17948, '_lease_admission_gate'),
-    ('a1', 'main.py', 17988, 17988, '_lease_admission_gate'),
-    ('a1', 'main.py', 17991, 17991, '_lease_admission_gate'),
-    ('a1', 'main.py', 18006, 18011, '_lease_admission_gate'),
-    ('a1', 'main.py', 18017, 18029, '_lease_admission_gate'),
-    ('a1', 'main.py', 18044, 18054, '_lease_admission_gate'),
-    ('a1', 'main.py', 18553, 18556, '_lease_live_claim_strict'),
-    ('a1', 'main.py', 19877, 19880, '_group_region'),
-    ('a1', 'main.py', 21797, 21799, 'queue_poll'),
-    ('a1', 'main.py', 21800, 21802, 'queue_poll'),
+    ('a1', 'main.py', 17964, 17964, '_lease_admission_gate'),
+    ('a1', 'main.py', 18004, 18004, '_lease_admission_gate'),
+    ('a1', 'main.py', 18007, 18007, '_lease_admission_gate'),
+    ('a1', 'main.py', 18022, 18027, '_lease_admission_gate'),
+    ('a1', 'main.py', 18033, 18045, '_lease_admission_gate'),
+    ('a1', 'main.py', 18060, 18070, '_lease_admission_gate'),
+    ('a1', 'main.py', 18576, 18579, '_lease_live_claim_strict'),
+    ('a1', 'main.py', 19900, 19903, '_group_region'),
+    ('a1', 'main.py', 21820, 21822, 'queue_poll'),
+    ('a1', 'main.py', 21823, 21825, 'queue_poll'),
     # MDPL class C (ruling 10:53:36Z): _deletion_lock_party_row's plain read, at its line in C's tree (1b1ecbe6)
-    ('a1', 'main.py', 46936, 46936, '_deletion_lock_party_row'),
-    ('a1', 'main.py', 52942, 52945, 'team_queue_poll'),
-    ('a1', 'main.py', 52973, 52975, 'team_queue_poll'),
-    ('a1', 'main.py', 53097, 53101, 'team_queue_poll'),
-    ('a1', 'main.py', 53102, 53103, 'team_queue_poll'),
-    ('a1', 'main.py', 53152, 53154, 'team_queue_poll'),
-    ('a1', 'main.py', 54269, 54273, '_reconcile_team_series_bets'),
-    ('a1', 'main.py', 54968, 54970, '_team_lock_family_pick'),
-    ('a1', 'main.py', 55000, 55000, '_team_lock_family_pick'),
-    ('a1', 'main.py', 55066, 55068, '_team_resolve_live_family'),
-    ('a1', 'main.py', 56995, 56997, 'ovt_queue_poll'),
-    ('a1', 'main.py', 57035, 57038, 'ovt_queue_poll'),
-    ('a1', 'main.py', 59661, 59666, '_rules_members'),
-    ('a1', 'main.py', 60496, 60502, '_player_body_color'),
-    ('a1', 'main.py', 68711, 68713, '_ffa_queue_poll_inner'),
-    ('a1', 'main.py', 68733, 68735, '_ffa_queue_poll_inner'),
-    ('a1', 'main.py', 68776, 68780, '_ffa_queue_poll_inner'),
-    ('a1', 'main.py', 68790, 68792, '_ffa_queue_poll_inner'),
-    ('a1', 'main.py', 79248, 79251, '_service_player_uuids'),
+    ('a1', 'main.py', 47043, 47043, '_deletion_lock_party_row'),
+    ('a1', 'main.py', 53576, 53579, 'team_queue_poll'),
+    ('a1', 'main.py', 53607, 53609, 'team_queue_poll'),
+    ('a1', 'main.py', 53731, 53735, 'team_queue_poll'),
+    ('a1', 'main.py', 53736, 53737, 'team_queue_poll'),
+    ('a1', 'main.py', 53786, 53788, 'team_queue_poll'),
+    ('a1', 'main.py', 54906, 54910, '_reconcile_team_series_bets'),
+    ('a1', 'main.py', 55610, 55612, '_team_lock_family_pick'),
+    ('a1', 'main.py', 55642, 55642, '_team_lock_family_pick'),
+    ('a1', 'main.py', 55708, 55710, '_team_resolve_live_family'),
+    ('a1', 'main.py', 57637, 57639, 'ovt_queue_poll'),
+    ('a1', 'main.py', 57677, 57680, 'ovt_queue_poll'),
+    ('a1', 'main.py', 60303, 60308, '_rules_members'),
+    ('a1', 'main.py', 61138, 61144, '_player_body_color'),
+    ('a1', 'main.py', 69353, 69355, '_ffa_queue_poll_inner'),
+    ('a1', 'main.py', 69375, 69377, '_ffa_queue_poll_inner'),
+    ('a1', 'main.py', 69418, 69422, '_ffa_queue_poll_inner'),
+    ('a1', 'main.py', 69432, 69434, '_ffa_queue_poll_inner'),
+    ('a1', 'main.py', 79911, 79914, '_service_player_uuids'),
     ('a1', 'match_hold.py', 382, 385, '_hold_latch'),
     ('a1', 'match_report_window.py', 87, 89, 'series_holds'),
     ('a1', 'tournaments.py', 303, 309, '_region_candidate_volumes'),
-    ('gate', 'main.py', 67021, 67024, '_rdm_row'),
-    ('gate', 'main.py', 67107, 67110, '_rdm_claim'),
+    ('gate', 'main.py', 67663, 67666, '_rdm_row'),
+    ('gate', 'main.py', 67749, 67752, '_rdm_claim'),
     ('gate', 'match_hold.py', 243, 243, '_ctx_now'),
     ('gate', 'match_hold.py', 819, 822, '_open_attempt_row'),
 )
 
 # The same enumeration's 'lock' positions (14): writers, never in the claim.
 WRITERS = (
-    ('a1', 'main.py', 17510, 17511, '_lock_queue_rows_ordered'),
-    ('a1', 'main.py', 17513, 17514, '_lock_queue_rows_ordered'),
-    ('a1', 'main.py', 17516, 17517, '_lock_queue_rows_ordered'),
-    ('a1', 'main.py', 17519, 17520, '_lock_queue_rows_ordered'),
-    ('a1', 'main.py', 17959, 17969, '_lease_admission_gate'),
-    ('a1', 'main.py', 17971, 17973, '_lease_admission_gate'),
-    ('a1', 'main.py', 17977, 17979, '_lease_admission_gate'),
-    ('a1', 'main.py', 18526, 18529, '_lock_snapshot_rows'),
+    ('a1', 'main.py', 17526, 17527, '_lock_queue_rows_ordered'),
+    ('a1', 'main.py', 17529, 17530, '_lock_queue_rows_ordered'),
+    ('a1', 'main.py', 17532, 17533, '_lock_queue_rows_ordered'),
+    ('a1', 'main.py', 17535, 17536, '_lock_queue_rows_ordered'),
+    ('a1', 'main.py', 17975, 17985, '_lease_admission_gate'),
+    ('a1', 'main.py', 17987, 17989, '_lease_admission_gate'),
+    ('a1', 'main.py', 17993, 17995, '_lease_admission_gate'),
+    ('a1', 'main.py', 18549, 18552, '_lock_snapshot_rows'),
     # MDPL class C (ruling 10:53:36Z): _deletion_lock_party_row's no-wait lock, at its line in C's tree (1b1ecbe6)
-    ('a1', 'main.py', 46934, 46934, '_deletion_lock_party_row'),
+    ('a1', 'main.py', 47041, 47041, '_deletion_lock_party_row'),
     # MDPL class C (ruling 12:03:04Z, Q2): _deletion_lock_party_row's identity-key try-lock, at its line in C's tree
-    ('a1', 'main.py', 46942, 46942, '_deletion_lock_party_row'),
-    ('a1', 'main.py', 54243, 54247, '_reconcile_team_series_bets'),
-    ('a1', 'main.py', 54266, 54268, '_reconcile_team_series_bets'),
-    ('a1', 'main.py', 54910, 54912, '_team_quartet_lock'),
-    ('a1', 'main.py', 54975, 54990, '_team_lock_family_pick'),
-    ('gate', 'main.py', 67117, 67119, '_rdm_claim'),
+    ('a1', 'main.py', 47049, 47049, '_deletion_lock_party_row'),
+    ('a1', 'main.py', 54878, 54882, '_reconcile_team_series_bets'),
+    ('a1', 'main.py', 54903, 54905, '_reconcile_team_series_bets'),
+    ('a1', 'main.py', 55552, 55554, '_team_quartet_lock'),
+    ('a1', 'main.py', 55617, 55632, '_team_lock_family_pick'),
+    ('gate', 'main.py', 67759, 67761, '_rdm_claim'),
     ('gate', 'match_hold.py', 570, 570, '_hold_row'),
 )
 
@@ -119,49 +119,49 @@ WRITERS = (
 # the transaction at the end of every run of the position found no row
 # beyond the declared expected ones (unexpected_locks); a position that ran
 # but whose read found one is ('lock', rows) and leaves the claim: measured
-# at 54968 (the advisory transaction lock 54910 took earlier in the same
+# at 55610 (the advisory transaction lock 55552 took earlier in the same
 # transaction; r9-ro-measure1, RF/r9/ro). A position read under a grant whose
 # read found one keeps its role outcome here and its grant outcome in
-# GRANT_OUTCOME ('lock under grant'): 17991, 18006, 18017, 18044 (the
-# FOR NO KEY UPDATE of 17971), 55000 (54975's FOR UPDATE), 68711 (an
+# GRANT_OUTCOME ('lock under grant'): 18007, 18022, 18033, 18060 (the
+# FOR NO KEY UPDATE of 17987), 55642 (55617's FOR UPDATE), 69353 (an
 # advisory lock and ffa_queue row locks) and match_hold.py:382 (380's
 # UPDATE).
 OUTCOME = {
-    ('a1', 'main.py', 17948, 17948, '_lease_admission_gate'): 'ok',
-    ('a1', 'main.py', 17988, 17988, '_lease_admission_gate'): ('not reached', 'main.py:17971', '25006'),
-    ('a1', 'main.py', 17991, 17991, '_lease_admission_gate'): ('not reached', 'main.py:17971', '25006'),
-    ('a1', 'main.py', 18006, 18011, '_lease_admission_gate'): ('not reached', 'main.py:17971', '25006'),
-    ('a1', 'main.py', 18017, 18029, '_lease_admission_gate'): ('not reached', 'main.py:17971', '25006'),
-    ('a1', 'main.py', 18044, 18054, '_lease_admission_gate'): ('not reached', 'main.py:17971', '25006'),
-    ('a1', 'main.py', 18553, 18556, '_lease_live_claim_strict'): 'ok',
-    ('a1', 'main.py', 19877, 19880, '_group_region'): 'ok',
-    ('a1', 'main.py', 21797, 21799, 'queue_poll'): ('not reached', 'main.py:21254', '25006'),
-    ('a1', 'main.py', 21800, 21802, 'queue_poll'): ('not reached', 'main.py:21254', '25006'),
+    ('a1', 'main.py', 17964, 17964, '_lease_admission_gate'): 'ok',
+    ('a1', 'main.py', 18004, 18004, '_lease_admission_gate'): ('not reached', 'main.py:17987', '25006'),
+    ('a1', 'main.py', 18007, 18007, '_lease_admission_gate'): ('not reached', 'main.py:17987', '25006'),
+    ('a1', 'main.py', 18022, 18027, '_lease_admission_gate'): ('not reached', 'main.py:17987', '25006'),
+    ('a1', 'main.py', 18033, 18045, '_lease_admission_gate'): ('not reached', 'main.py:17987', '25006'),
+    ('a1', 'main.py', 18060, 18070, '_lease_admission_gate'): ('not reached', 'main.py:17987', '25006'),
+    ('a1', 'main.py', 18576, 18579, '_lease_live_claim_strict'): 'ok',
+    ('a1', 'main.py', 19900, 19903, '_group_region'): 'ok',
+    ('a1', 'main.py', 21820, 21822, 'queue_poll'): ('not reached', 'main.py:21277', '25006'),
+    ('a1', 'main.py', 21823, 21825, 'queue_poll'): ('not reached', 'main.py:21277', '25006'),
     # MDPL class C: the plain read, not reached under the role (the lock before it is refused)
-    ('a1', 'main.py', 46936, 46936, '_deletion_lock_party_row'): ('not reached', 'main.py:46934', '25006'),
-    ('a1', 'main.py', 52942, 52945, 'team_queue_poll'): ('not reached', 'main.py:17513', '25006'),
-    ('a1', 'main.py', 52973, 52975, 'team_queue_poll'): ('not reached', 'main.py:17513', '25006'),
-    ('a1', 'main.py', 53097, 53101, 'team_queue_poll'): ('not reached', 'main.py:17513', '25006'),
-    ('a1', 'main.py', 53102, 53103, 'team_queue_poll'): ('not reached', 'main.py:17513', '25006'),
-    ('a1', 'main.py', 53152, 53154, 'team_queue_poll'): ('ok-under-grant', ('UPDATE team_queue',), 0, ('not reached', 'main.py:17513', '25006')),
-    ('a1', 'main.py', 54269, 54273, '_reconcile_team_series_bets'): ('not reached', 'main.py:54243', '25006'),
-    ('a1', 'main.py', 54968, 54970, '_team_lock_family_pick'): ('lock', ('advisory ExclusiveLock',)),
-    ('a1', 'main.py', 55000, 55000, '_team_lock_family_pick'): ('not reached', 'main.py:54975', '25006'),
-    ('a1', 'main.py', 55066, 55068, '_team_resolve_live_family'): ('not reached', 'main.py:54975', '25006'),
-    ('a1', 'main.py', 56995, 56997, 'ovt_queue_poll'): ('not reached', 'main.py:17516', '25006'),
-    ('a1', 'main.py', 57035, 57038, 'ovt_queue_poll'): ('ok-under-grant', ('DELETE ovt_queue', 'UPDATE ovt_queue'), 0, ('not reached', 'main.py:17516', '25006')),
-    ('a1', 'main.py', 59661, 59666, '_rules_members'): 'ok',
-    ('a1', 'main.py', 60496, 60502, '_player_body_color'): 'ok',
-    ('a1', 'main.py', 68711, 68713, '_ffa_queue_poll_inner'): ('not reached', 'main.py:18526', '25006'),
-    ('a1', 'main.py', 68733, 68735, '_ffa_queue_poll_inner'): ('ok-under-grant', ('DELETE ffa_queue', 'UPDATE ffa_assembly_seats', 'UPDATE ffa_lobbies', 'UPDATE ffa_queue'), 0, ('not reached', 'main.py:18526', '25006')),
-    ('a1', 'main.py', 68776, 68780, '_ffa_queue_poll_inner'): ('ok-under-grant', ('DELETE ffa_queue', 'UPDATE ffa_assembly_seats', 'UPDATE ffa_lobbies', 'UPDATE ffa_queue'), 0, ('not reached', 'main.py:18526', '25006')),
-    ('a1', 'main.py', 68790, 68792, '_ffa_queue_poll_inner'): ('not reached', 'main.py:18526', '25006'),
-    ('a1', 'main.py', 79248, 79251, '_service_player_uuids'): 'ok',
+    ('a1', 'main.py', 47043, 47043, '_deletion_lock_party_row'): ('not reached', 'main.py:47041', '25006'),
+    ('a1', 'main.py', 53576, 53579, 'team_queue_poll'): ('not reached', 'main.py:17529', '25006'),
+    ('a1', 'main.py', 53607, 53609, 'team_queue_poll'): ('not reached', 'main.py:17529', '25006'),
+    ('a1', 'main.py', 53731, 53735, 'team_queue_poll'): ('not reached', 'main.py:17529', '25006'),
+    ('a1', 'main.py', 53736, 53737, 'team_queue_poll'): ('not reached', 'main.py:17529', '25006'),
+    ('a1', 'main.py', 53786, 53788, 'team_queue_poll'): ('ok-under-grant', ('UPDATE team_queue',), 0, ('not reached', 'main.py:17529', '25006')),
+    ('a1', 'main.py', 54906, 54910, '_reconcile_team_series_bets'): ('not reached', 'main.py:54878', '25006'),
+    ('a1', 'main.py', 55610, 55612, '_team_lock_family_pick'): ('lock', ('advisory ExclusiveLock',)),
+    ('a1', 'main.py', 55642, 55642, '_team_lock_family_pick'): ('not reached', 'main.py:55617', '25006'),
+    ('a1', 'main.py', 55708, 55710, '_team_resolve_live_family'): ('not reached', 'main.py:55617', '25006'),
+    ('a1', 'main.py', 57637, 57639, 'ovt_queue_poll'): ('not reached', 'main.py:17532', '25006'),
+    ('a1', 'main.py', 57677, 57680, 'ovt_queue_poll'): ('ok-under-grant', ('DELETE ovt_queue', 'UPDATE ovt_queue'), 0, ('not reached', 'main.py:17532', '25006')),
+    ('a1', 'main.py', 60303, 60308, '_rules_members'): 'ok',
+    ('a1', 'main.py', 61138, 61144, '_player_body_color'): 'ok',
+    ('a1', 'main.py', 69353, 69355, '_ffa_queue_poll_inner'): ('not reached', 'main.py:18549', '25006'),
+    ('a1', 'main.py', 69375, 69377, '_ffa_queue_poll_inner'): ('ok-under-grant', ('DELETE ffa_queue', 'UPDATE ffa_assembly_seats', 'UPDATE ffa_lobbies', 'UPDATE ffa_queue'), 0, ('not reached', 'main.py:18549', '25006')),
+    ('a1', 'main.py', 69418, 69422, '_ffa_queue_poll_inner'): ('ok-under-grant', ('DELETE ffa_queue', 'UPDATE ffa_assembly_seats', 'UPDATE ffa_lobbies', 'UPDATE ffa_queue'), 0, ('not reached', 'main.py:18549', '25006')),
+    ('a1', 'main.py', 69432, 69434, '_ffa_queue_poll_inner'): ('not reached', 'main.py:18549', '25006'),
+    ('a1', 'main.py', 79911, 79914, '_service_player_uuids'): 'ok',
     ('a1', 'match_hold.py', 382, 385, '_hold_latch'): ('not reached', 'match_hold.py:381', '25006'),
     ('a1', 'match_report_window.py', 87, 89, 'series_holds'): 'ok',
     ('a1', 'tournaments.py', 303, 309, '_region_candidate_volumes'): 'ok',
-    ('gate', 'main.py', 67021, 67024, '_rdm_row'): 'ok',
-    ('gate', 'main.py', 67107, 67110, '_rdm_claim'): 'ok',
+    ('gate', 'main.py', 67663, 67666, '_rdm_row'): 'ok',
+    ('gate', 'main.py', 67749, 67752, '_rdm_claim'): 'ok',
     ('gate', 'match_hold.py', 243, 243, '_ctx_now'): 'ok',
     ('gate', 'match_hold.py', 819, 822, '_open_attempt_row'): 'ok',
 }
@@ -172,38 +172,38 @@ OUTCOME = {
 # those two are writers by S whose bound the role does not measure.
 # Ruling R-A: every WRITERS position answers 'lock' in the walks' lookup,
 # and each lock moves to the bound measured here: refused under the role
-# (25006) for the 10 reached (17510, 17513, 17516, 17519, 17971, 18526,
-# 54243, 54975, 67117, match_hold.py:570); not reached for 17977 (after
-# 17971) and 54266 (after 54243); and for main.py:17959 (a transaction-local
-# set_config of lock_timeout) and main.py:54910 (pg_advisory_xact_lock),
+# (25006) for the 10 reached (17526, 17529, 17532, 17535, 17987, 18549,
+# 54878, 55617, 67759, match_hold.py:570); not reached for 17993 (after
+# 17987) and 54903 (after 54878); and for main.py:17975 (a transaction-local
+# set_config of lock_timeout) and main.py:55552 (pg_advisory_xact_lock),
 # 'ok' under the role, so their bound is the walk's lock rule alone (a
 # QUESTION for the reviewer). Round 9 (E2): the lock read now measures the
-# writers too: 54910 is ('lock', ('advisory ExclusiveLock',)), its advisory
-# lock measured; 17959 holds no lock beyond the expected rows. Round 10
+# writers too: 55552 is ('lock', ('advisory ExclusiveLock',)), its advisory
+# lock measured; 17975 holds no lock beyond the expected rows. Round 10
 # (REHEARSAL-R9-A1 (B)): its transaction-local set_config of lock_timeout
 # is now MEASURED as an effect by the continuity bracket's residue reading
 # (pg_settings lock_timeout 0 -> 1000 across the position; r10-ro-measure1,
 # RF/r10/ro), so its bound is a measurement, no longer the walk's lock rule
 # alone; it stays 'lock' in the lookup (every WRITERS position does).
 WRITER_OUTCOME = {
-    ('a1', 'main.py', 17510, 17511, '_lock_queue_rows_ordered'): '25006',
-    ('a1', 'main.py', 17513, 17514, '_lock_queue_rows_ordered'): '25006',
-    ('a1', 'main.py', 17516, 17517, '_lock_queue_rows_ordered'): '25006',
-    ('a1', 'main.py', 17519, 17520, '_lock_queue_rows_ordered'): '25006',
-    ('a1', 'main.py', 17959, 17969, '_lease_admission_gate'):
+    ('a1', 'main.py', 17526, 17527, '_lock_queue_rows_ordered'): '25006',
+    ('a1', 'main.py', 17529, 17530, '_lock_queue_rows_ordered'): '25006',
+    ('a1', 'main.py', 17532, 17533, '_lock_queue_rows_ordered'): '25006',
+    ('a1', 'main.py', 17535, 17536, '_lock_queue_rows_ordered'): '25006',
+    ('a1', 'main.py', 17975, 17985, '_lease_admission_gate'):
         ('continuity', ('setting lock_timeout=0', 'setting lock_timeout=1000')),
-    ('a1', 'main.py', 17971, 17973, '_lease_admission_gate'): '25006',
-    ('a1', 'main.py', 17977, 17979, '_lease_admission_gate'): ('not reached', 'main.py:17971', '25006'),
-    ('a1', 'main.py', 18526, 18529, '_lock_snapshot_rows'): '25006',
+    ('a1', 'main.py', 17987, 17989, '_lease_admission_gate'): '25006',
+    ('a1', 'main.py', 17993, 17995, '_lease_admission_gate'): ('not reached', 'main.py:17987', '25006'),
+    ('a1', 'main.py', 18549, 18552, '_lock_snapshot_rows'): '25006',
     # MDPL class C: the no-wait lock, refused under the role
-    ('a1', 'main.py', 46934, 46934, '_deletion_lock_party_row'): '25006',
+    ('a1', 'main.py', 47041, 47041, '_deletion_lock_party_row'): '25006',
     # MDPL class C: the identity-key try-lock, not reached under the role (the lock before it is refused)
-    ('a1', 'main.py', 46942, 46942, '_deletion_lock_party_row'): ('not reached', 'main.py:46934', '25006'),
-    ('a1', 'main.py', 54243, 54247, '_reconcile_team_series_bets'): '25006',
-    ('a1', 'main.py', 54266, 54268, '_reconcile_team_series_bets'): ('not reached', 'main.py:54243', '25006'),
-    ('a1', 'main.py', 54910, 54912, '_team_quartet_lock'): ('lock', ('advisory ExclusiveLock',)),
-    ('a1', 'main.py', 54975, 54990, '_team_lock_family_pick'): '25006',
-    ('gate', 'main.py', 67117, 67119, '_rdm_claim'): '25006',
+    ('a1', 'main.py', 47049, 47049, '_deletion_lock_party_row'): ('not reached', 'main.py:47041', '25006'),
+    ('a1', 'main.py', 54878, 54882, '_reconcile_team_series_bets'): '25006',
+    ('a1', 'main.py', 54903, 54905, '_reconcile_team_series_bets'): ('not reached', 'main.py:54878', '25006'),
+    ('a1', 'main.py', 55552, 55554, '_team_quartet_lock'): ('lock', ('advisory ExclusiveLock',)),
+    ('a1', 'main.py', 55617, 55632, '_team_lock_family_pick'): '25006',
+    ('gate', 'main.py', 67759, 67761, '_rdm_claim'): '25006',
     ('gate', 'match_hold.py', 570, 570, '_hold_row'): '25006',
 }
 
@@ -217,33 +217,33 @@ WRITER_OUTCOME = {
 # (RF/r8/sr/enum-sr.json at 0ef7ccbf).
 VISITED_WRITES = (
     ('a1', 'main.py', 4496, 4500, '_team_clear_dc_fallback_marker'),
-    ('a1', 'main.py', 18078, 18098, '_lease_acquire'),
-    ('a1', 'main.py', 21843, 21851, 'queue_poll'),
-    ('a1', 'main.py', 30442, 30444, '_credit_bet_fighter_tax'),
-    ('a1', 'main.py', 40032, 40036, '_return_stake_exactly'),
-    ('a1', 'main.py', 53255, 53269, 'team_queue_poll'),
-    ('a1', 'main.py', 53288, 53296, 'team_queue_poll'),
-    ('a1', 'main.py', 53299, 53318, 'team_queue_poll'),
-    ('a1', 'main.py', 54290, 54295, '_reconcile_team_series_bets'),
-    ('a1', 'main.py', 54298, 54301, '_reconcile_team_series_bets'),
-    ('a1', 'main.py', 54307, 54309, '_reconcile_team_series_bets'),
-    ('a1', 'main.py', 55028, 55033, '_team_lock_family_pick'),
-    ('a1', 'main.py', 55118, 55129, '_team_relock_existing_series'),
-    ('a1', 'main.py', 55138, 55160, '_team_relock_existing_series'),
-    ('a1', 'main.py', 55167, 55169, '_team_relock_existing_series'),
-    ('a1', 'main.py', 57066, 57073, 'ovt_queue_poll'),
-    ('a1', 'main.py', 57079, 57084, 'ovt_queue_poll'),
-    ('a1', 'main.py', 60569, 60575, '_stamp_team_series_colors'),
-    ('a1', 'main.py', 68807, 68815, '_ffa_queue_poll_inner'),
-    ('a1', 'main.py', 68817, 68823, '_ffa_queue_poll_inner'),
+    ('a1', 'main.py', 18094, 18114, '_lease_acquire'),
+    ('a1', 'main.py', 21866, 21874, 'queue_poll'),
+    ('a1', 'main.py', 30470, 30472, '_credit_bet_fighter_tax'),
+    ('a1', 'main.py', 40077, 40081, '_return_stake_exactly'),
+    ('a1', 'main.py', 53889, 53903, 'team_queue_poll'),
+    ('a1', 'main.py', 53922, 53930, 'team_queue_poll'),
+    ('a1', 'main.py', 53933, 53952, 'team_queue_poll'),
+    ('a1', 'main.py', 54927, 54932, '_reconcile_team_series_bets'),
+    ('a1', 'main.py', 54935, 54938, '_reconcile_team_series_bets'),
+    ('a1', 'main.py', 54946, 54948, '_reconcile_team_series_bets'),
+    ('a1', 'main.py', 55670, 55675, '_team_lock_family_pick'),
+    ('a1', 'main.py', 55760, 55771, '_team_relock_existing_series'),
+    ('a1', 'main.py', 55780, 55802, '_team_relock_existing_series'),
+    ('a1', 'main.py', 55809, 55811, '_team_relock_existing_series'),
+    ('a1', 'main.py', 57708, 57715, 'ovt_queue_poll'),
+    ('a1', 'main.py', 57721, 57726, 'ovt_queue_poll'),
+    ('a1', 'main.py', 61211, 61217, '_stamp_team_series_colors'),
+    ('a1', 'main.py', 69449, 69457, '_ffa_queue_poll_inner'),
+    ('a1', 'main.py', 69459, 69465, '_ffa_queue_poll_inner'),
     ('a1', 'match_hold.py', 381, 381, '_hold_latch'),
-    ('gate', 'main.py', 64652, 64664, '_asm_deferred_departure'),
-    ('gate', 'main.py', 64667, 64669, '_asm_deferred_departure'),
-    ('gate', 'main.py', 64670, 64672, '_asm_deferred_departure'),
-    ('gate', 'main.py', 66736, 66738, '_rdm_attempt'),
-    ('gate', 'main.py', 66837, 66841, '_rdm_end_hold'),
-    ('gate', 'main.py', 66846, 66850, '_rdm_end_hold'),
-    ('gate', 'main.py', 66852, 66857, '_rdm_end_hold'),
+    ('gate', 'main.py', 65294, 65306, '_asm_deferred_departure'),
+    ('gate', 'main.py', 65309, 65311, '_asm_deferred_departure'),
+    ('gate', 'main.py', 65312, 65314, '_asm_deferred_departure'),
+    ('gate', 'main.py', 67378, 67380, '_rdm_attempt'),
+    ('gate', 'main.py', 67479, 67483, '_rdm_end_hold'),
+    ('gate', 'main.py', 67488, 67492, '_rdm_end_hold'),
+    ('gate', 'main.py', 67494, 67499, '_rdm_end_hold'),
     # Round 11, rule N member (B) (ruling FOUR-R11-A20 (1)): the gate walk
     # discharges _guard_identities' sorted and .mappings().all by their bound
     # and now walks on, reaching three more executes (the live enumeration at
@@ -299,44 +299,44 @@ def role_outcome(entry):
 # without a waiter). The first seven entries were 'ok-under-grant' in
 # round 8 and leave the read-only claim (r9-ro-measure1, RF/r9/ro).
 GRANT_OUTCOME = {
-    ('a1', 'main.py', 17991, 17991, '_lease_admission_gate'):
+    ('a1', 'main.py', 18007, 18007, '_lease_admission_gate'):
         ('lock under grant', ('UPDATE players',), ('relation RowShareLock idx_players_active', 'relation RowShareLock idx_players_discord', 'relation RowShareLock idx_players_last_seen', 'relation RowShareLock idx_players_mod_version', 'relation RowShareLock idx_players_steam', 'relation RowShareLock players', 'relation RowShareLock players_discord_id_key', 'relation RowShareLock players_pc_game_portrait_hash_idx', 'relation RowShareLock players_pc_steam_portrait_hash_idx', 'relation RowShareLock players_pc_steam_portrait_next_at_idx', 'relation RowShareLock players_pkey', 'relation RowShareLock players_steam_id_key', 'transactionid ExclusiveLock')),
-    ('a1', 'main.py', 18006, 18011, '_lease_admission_gate'):
+    ('a1', 'main.py', 18022, 18027, '_lease_admission_gate'):
         ('lock under grant', ('UPDATE players',), ('relation RowShareLock idx_players_active', 'relation RowShareLock idx_players_discord', 'relation RowShareLock idx_players_last_seen', 'relation RowShareLock idx_players_mod_version', 'relation RowShareLock idx_players_steam', 'relation RowShareLock players', 'relation RowShareLock players_discord_id_key', 'relation RowShareLock players_pc_game_portrait_hash_idx', 'relation RowShareLock players_pc_steam_portrait_hash_idx', 'relation RowShareLock players_pc_steam_portrait_next_at_idx', 'relation RowShareLock players_pkey', 'relation RowShareLock players_steam_id_key', 'transactionid ExclusiveLock')),
-    ('a1', 'main.py', 18017, 18029, '_lease_admission_gate'):
+    ('a1', 'main.py', 18033, 18045, '_lease_admission_gate'):
         ('lock under grant', ('UPDATE players',), ('relation RowShareLock idx_players_active', 'relation RowShareLock idx_players_discord', 'relation RowShareLock idx_players_last_seen', 'relation RowShareLock idx_players_mod_version', 'relation RowShareLock idx_players_steam', 'relation RowShareLock players', 'relation RowShareLock players_discord_id_key', 'relation RowShareLock players_pc_game_portrait_hash_idx', 'relation RowShareLock players_pc_steam_portrait_hash_idx', 'relation RowShareLock players_pc_steam_portrait_next_at_idx', 'relation RowShareLock players_pkey', 'relation RowShareLock players_steam_id_key', 'transactionid ExclusiveLock')),
-    ('a1', 'main.py', 18044, 18054, '_lease_admission_gate'):
+    ('a1', 'main.py', 18060, 18070, '_lease_admission_gate'):
         ('lock under grant', ('UPDATE players',), ('relation RowShareLock idx_players_active', 'relation RowShareLock idx_players_discord', 'relation RowShareLock idx_players_last_seen', 'relation RowShareLock idx_players_mod_version', 'relation RowShareLock idx_players_steam', 'relation RowShareLock players', 'relation RowShareLock players_discord_id_key', 'relation RowShareLock players_pc_game_portrait_hash_idx', 'relation RowShareLock players_pc_steam_portrait_hash_idx', 'relation RowShareLock players_pc_steam_portrait_next_at_idx', 'relation RowShareLock players_pkey', 'relation RowShareLock players_steam_id_key', 'transactionid ExclusiveLock')),
-    ('a1', 'main.py', 55000, 55000, '_team_lock_family_pick'):
+    ('a1', 'main.py', 55642, 55642, '_team_lock_family_pick'):
         ('lock under grant', ('UPDATE team_series',), ('relation RowShareLock idx_team_series_dc_fallback_at', 'relation RowShareLock idx_team_series_dc_grace', 'relation RowShareLock idx_team_series_status', 'relation RowShareLock idx_team_series_t1a', 'relation RowShareLock idx_team_series_t1b', 'relation RowShareLock idx_team_series_t2a', 'relation RowShareLock idx_team_series_t2b', 'relation RowShareLock team_series', 'relation RowShareLock team_series_pkey', 'transactionid ExclusiveLock')),
-    ('a1', 'main.py', 68711, 68713, '_ffa_queue_poll_inner'):
+    ('a1', 'main.py', 69353, 69355, '_ffa_queue_poll_inner'):
         ('lock under grant', ('DELETE ffa_queue', 'UPDATE ffa_assembly_seats', 'UPDATE ffa_lobbies', 'UPDATE ffa_queue'), ('advisory ExclusiveLock', 'relation RowShareLock ffa_queue', 'relation RowShareLock ffa_queue_pkey', 'relation RowShareLock idx_ffa_queue_held_until', 'relation RowShareLock idx_ffa_queue_lobby', 'relation RowShareLock idx_ffa_queue_status', 'transactionid ExclusiveLock')),
     ('a1', 'match_hold.py', 382, 385, '_hold_latch'):
         ('lock under grant', ('UPDATE team_series',), ('relation RowExclusiveLock idx_team_series_dc_fallback_at', 'relation RowExclusiveLock idx_team_series_dc_grace', 'relation RowExclusiveLock idx_team_series_status', 'relation RowExclusiveLock idx_team_series_t1a', 'relation RowExclusiveLock idx_team_series_t1b', 'relation RowExclusiveLock idx_team_series_t2a', 'relation RowExclusiveLock idx_team_series_t2b', 'relation RowExclusiveLock team_series', 'relation RowExclusiveLock team_series_pkey', 'transactionid ExclusiveLock')),
-    ('a1', 'main.py', 17988, 17988, '_lease_admission_gate'):
+    ('a1', 'main.py', 18004, 18004, '_lease_admission_gate'):
         ('not reached under grant', ('UPDATE players',), None),
-    ('a1', 'main.py', 21797, 21799, 'queue_poll'):
+    ('a1', 'main.py', 21820, 21822, 'queue_poll'):
         ('not reached under grant', ('DELETE queue_blocks', 'UPDATE queue_blocks', 'UPDATE ranked_queue'), None),
-    ('a1', 'main.py', 21800, 21802, 'queue_poll'):
+    ('a1', 'main.py', 21823, 21825, 'queue_poll'):
         ('not reached under grant', ('DELETE queue_blocks', 'UPDATE queue_blocks', 'UPDATE ranked_queue'), None),
-    ('a1', 'main.py', 52942, 52945, 'team_queue_poll'):
+    ('a1', 'main.py', 53576, 53579, 'team_queue_poll'):
         ('not reached under grant', ('UPDATE team_queue',), None),
-    ('a1', 'main.py', 52973, 52975, 'team_queue_poll'):
+    ('a1', 'main.py', 53607, 53609, 'team_queue_poll'):
         ('not reached under grant', ('UPDATE team_queue',), None),
-    ('a1', 'main.py', 53097, 53101, 'team_queue_poll'):
+    ('a1', 'main.py', 53731, 53735, 'team_queue_poll'):
         ('not reached under grant', ('UPDATE team_queue',), None),
-    ('a1', 'main.py', 53102, 53103, 'team_queue_poll'):
+    ('a1', 'main.py', 53736, 53737, 'team_queue_poll'):
         ('not reached under grant', ('UPDATE team_queue',), None),
-    ('a1', 'main.py', 54269, 54273, '_reconcile_team_series_bets'):
+    ('a1', 'main.py', 54906, 54910, '_reconcile_team_series_bets'):
         ('not reached under grant', ('UPDATE team_series',), None),
-    ('a1', 'main.py', 55066, 55068, '_team_resolve_live_family'):
+    ('a1', 'main.py', 55708, 55710, '_team_resolve_live_family'):
         ('not reached under grant', ('UPDATE team_series',), None),
-    ('a1', 'main.py', 56995, 56997, 'ovt_queue_poll'):
+    ('a1', 'main.py', 57637, 57639, 'ovt_queue_poll'):
         ('not reached under grant', ('DELETE ovt_queue', 'UPDATE ovt_queue'), None),
-    ('a1', 'main.py', 68790, 68792, '_ffa_queue_poll_inner'):
+    ('a1', 'main.py', 69432, 69434, '_ffa_queue_poll_inner'):
         ('not reached under grant', ('DELETE ffa_queue', 'UPDATE ffa_assembly_seats', 'UPDATE ffa_lobbies', 'UPDATE ffa_queue'), None),
     # MDPL class C: the plain read under UPDATE players, reached with no row, holding the lock's locks
-    ('a1', 'main.py', 46936, 46936, '_deletion_lock_party_row'):
+    ('a1', 'main.py', 47043, 47043, '_deletion_lock_party_row'):
         ('lock under grant', ('UPDATE players',), ('relation RowShareLock idx_players_active', 'relation RowShareLock idx_players_discord', 'relation RowShareLock idx_players_last_seen', 'relation RowShareLock idx_players_mod_version', 'relation RowShareLock idx_players_steam', 'relation RowShareLock players', 'relation RowShareLock players_discord_id_key', 'relation RowShareLock players_pc_game_portrait_hash_idx', 'relation RowShareLock players_pc_steam_portrait_hash_idx', 'relation RowShareLock players_pc_steam_portrait_next_at_idx', 'relation RowShareLock players_pkey', 'relation RowShareLock players_steam_id_key')),
 }
 
@@ -1278,32 +1278,32 @@ class CountingSession(RecordingSession):
 # position is reached or a refusal other than 42501 occurs; each added
 # grant carries the measured refusal that required it.
 REFUSER_GRANTS = {
-    "main.py:17971": ("UPDATE players",),
-    "main.py:17513": ("UPDATE team_queue",),
-    # then main.py:56763 (DELETE ovt_queue ... FOR UPDATE), 42501 under
+    "main.py:17987": ("UPDATE players",),
+    "main.py:17529": ("UPDATE team_queue",),
+    # then main.py:57405 (DELETE ovt_queue ... FOR UPDATE), 42501 under
     # UPDATE ovt_queue alone (rb-measure-2)
-    "main.py:17516": ("UPDATE ovt_queue", "DELETE ovt_queue"),
-    # then main.py:17519 (ffa_queue FOR UPDATE, a WRITERS lock), 42501
-    # under UPDATE ffa_lobbies alone (rb-measure-2); then main.py:68219
+    "main.py:17532": ("UPDATE ovt_queue", "DELETE ovt_queue"),
+    # then main.py:17535 (ffa_queue FOR UPDATE, a WRITERS lock), 42501
+    # under UPDATE ffa_lobbies alone (rb-measure-2); then main.py:68861
     # (DELETE FROM ffa_queue ... FOR UPDATE SKIP LOCKED), 42501 under those
     # two (r8-w30b-sr-widen-measure-1)
-    # then main.py:66373 (UPDATE ffa_assembly_seats), 42501 under the grants before it (r8-w30b-sr-widen-measure-2)
-    "main.py:18526": (
+    # then main.py:67015 (UPDATE ffa_assembly_seats), 42501 under the grants before it (r8-w30b-sr-widen-measure-2)
+    "main.py:18549": (
         "UPDATE ffa_lobbies",
         "UPDATE ffa_queue",
         "DELETE ffa_queue",
         "UPDATE ffa_assembly_seats",
     ),
-    # 21254 is a DELETE whose subquery locks FOR UPDATE SKIP LOCKED: 42501
+    # 21277 is a DELETE whose subquery locks FOR UPDATE SKIP LOCKED: 42501
     # under DELETE queue_blocks alone (rb-measure-2), so UPDATE too; then
-    # main.py:17510 (ranked_queue FOR UPDATE, a WRITERS lock), 42501 under
+    # main.py:17526 (ranked_queue FOR UPDATE, a WRITERS lock), 42501 under
     # those two (r8-w30b-sr-widen-measure-1)
-    "main.py:21254": ("DELETE queue_blocks", "UPDATE queue_blocks", "UPDATE ranked_queue"),
-    "main.py:54243": ("UPDATE team_series",),
-    "main.py:54975": ("UPDATE team_series",),
+    "main.py:21277": ("DELETE queue_blocks", "UPDATE queue_blocks", "UPDATE ranked_queue"),
+    "main.py:54878": ("UPDATE team_series",),
+    "main.py:55617": ("UPDATE team_series",),
     "match_hold.py:381": ("UPDATE team_series",),
-    # MDPL class C: _deletion_lock_party_row's no-wait lock (main.py:46934), FOR NO KEY UPDATE of players
-    "main.py:46934": ("UPDATE players",),
+    # MDPL class C: _deletion_lock_party_row's no-wait lock (main.py:47041), FOR NO KEY UPDATE of players
+    "main.py:47041": ("UPDATE players",),
 }
 
 

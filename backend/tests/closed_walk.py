@@ -283,7 +283,7 @@ def anchored_refusals(d, meaningful, allowed, filename):
 # Round 9 (ruling REHEARSAL-R8-A1, G2 and G3): the POSITION rule. An anchor
 # (above) binds a node's shape chain but not WHICH of the equal chains it
 # stands at, nor where among its siblings: a commit at the place of the
-# rollback at main.py:21870 matched the committing refusal at :21764
+# rollback at main.py:21893 matched the committing refusal at :21787
 # (finding grammar_shapes_a1:2106), and a commit moved up its block kept
 # its chain. A constant's shape binds its type, not its value. When
 # `allowed` holds POSITIONED, every anchored node and every constant of a
@@ -2270,11 +2270,11 @@ _STORE_CENSUS = {}
 # - every key is a constant str, and the keys number exactly the reviewed
 #   count (a fifth key or a missing one refuses).
 K_ADMITTED_STORES = (
-    # main.py:46875 at d16f9fc2
+    # main.py:46982 at d16f9fc2
     ("main.py", "_deletion_arm_every_statement", "_deletion_arm_every_statement",
      "setattr(db, name, fn)", "installed", 4,
      "the attempt's armed session methods, put on the attempt's own session"),
-    # main.py:46881 at d16f9fc2
+    # main.py:46988 at d16f9fc2
     ("main.py", "_deletion_arm_every_statement", "undo", "delattr(db, name)",
      "installed", 4,
      "the same methods taken back off the attempt's session, each one only "
