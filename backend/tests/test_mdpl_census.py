@@ -637,6 +637,149 @@ def test_a_module_tuple_bound_twice_is_not_read_by_the_loop_form():
     assert q, "a twice-bound module tuple was read"
 
 
+# Section 5 of RULING CENSUS-1: the identity key the two lanes now share is
+# ONE key. Read from the syntax tree of main.py; the deletion census's own
+# normal form (mc.key_name) says when two spellings are one key.
+_ADVISORY_FORM = re.compile(r"\bpg_(try_)?advisory_xact_lock(_shared)?\(", re.I)
+
+
+def _identity_pin_failures(text, src):
+    """[] when (i) _ban_lock_and_gate takes, for every id it locks and for the
+    actor, one of exactly two statements, the shared and the exclusive lock of
+    ONE key; (ii) delete_player_data takes the exclusive form of that key on
+    its own steam id before its first statement that locks or writes a row;
+    (iii) the lane's constant, the gate's two statements and the deletion's
+    statement are one key by mc.key_name. Else what fails, by half."""
+    tree = ast.parse(text)
+    top = {n.name: n for n in tree.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
+    binds = {}
+    for st in tree.body:
+        if isinstance(st, ast.Assign):
+            for t in st.targets:
+                if isinstance(t, ast.Name):
+                    binds.setdefault(t.id, []).append(st.value)
+
+    def read(x, seen=()):
+        if isinstance(x, ast.Constant) and isinstance(x.value, str):
+            return x.value
+        if isinstance(x, ast.BinOp) and isinstance(x.op, ast.Add):
+            a, b = read(x.left, seen), read(x.right, seen)
+            return None if a is None or b is None else a + b
+        if isinstance(x, ast.Name) and x.id not in seen and len(binds.get(x.id, [])) == 1:
+            return read(binds[x.id][0], seen + (x.id,))
+        return None
+
+    def key(sql):
+        m = mc.RX_KEY.search(mc._norm(sql))
+        return None if m is None else mc.key_name(mc._balanced(m.group(2)))
+
+    def takes(node):
+        """(call, text, try, shared) of every advisory statement executed under node."""
+        out = []
+        for c in ast.walk(node):
+            if isinstance(c, ast.Call) and getattr(c.func, "attr", "") == "execute" and c.args \
+                    and isinstance(c.args[0], ast.Call) and getattr(c.args[0].func, "id", "") == "text":
+                t = read(c.args[0].args[0])
+                m = _ADVISORY_FORM.search(t or "")
+                if m:
+                    out.append((c, t, bool(m.group(1)), bool(m.group(2))))
+        return sorted(out, key=lambda x: (x[0].lineno, x[0].col_offset))
+
+    def sid_bind(call):
+        d = next((a for a in call.args[1:] if isinstance(a, ast.Dict)), None)
+        return None if d is None else next((ast.unparse(v) for k, v in zip(d.keys, d.values)
+                                            if isinstance(k, ast.Constant) and k.value == "sid"), None)
+
+    out = []
+    gate = top["_ban_lock_and_gate"]
+    gt = takes(gate)
+    forms = sorted((tr, sh) for _c, _t, tr, sh in gt)
+    gkeys = {key(t) for _c, t, _tr, _sh in gt}
+    if forms != [(False, False), (False, True)] or len(gkeys) != 1:
+        out.append("(i) the gate's statements are not the shared and the exclusive lock of one key: %s %s"
+                   % (forms, sorted(map(str, gkeys))))
+    loops = [n for n in ast.walk(gate) if isinstance(n, (ast.For, ast.AsyncFor))
+             and any(c is n2 for n2 in ast.walk(n) for c, *_ in gt)]
+    if len(loops) != 1 or not (isinstance(loops[0].iter, ast.Name) and loops[0].iter.id == "ids"
+                               and len(loops[0].body) == 1 and isinstance(loops[0].body[0], ast.If)):
+        out.append("(i) the gate's two statements are not the one if/else of one loop over ids")
+    else:
+        loop, branch = loops[0], loops[0].body[0]
+        arms = [branch.body, branch.orelse]
+        if not all(len(a) == 1 and len(takes(ast.Module(body=a, type_ignores=[]))) == 1 for a in arms):
+            out.append("(i) a path through the gate's loop takes neither statement, or more than one")
+        if {sid_bind(c) for c, *_ in gt} != {loop.target.id if isinstance(loop.target, ast.Name) else None}:
+            out.append("(i) a statement of the gate does not key the loop's id")
+        ids = [n for n in ast.walk(gate) if isinstance(n, ast.Assign) and any(
+            isinstance(t, ast.Name) and t.id == "ids" for t in n.targets)]
+        names = {n.id for a in ids for n in ast.walk(a.value) if isinstance(n, ast.Name)}
+        if len(ids) != 1 or not {"steam_ids", "actor", "exclusive"} <= names:
+            out.append("(i) the ids the gate locks are not steam_ids, the actor and exclusive, bound once")
+    dele = top["delete_player_data"]
+    first = next(((c, t, tr, sh) for st in dele.body if isinstance(st, ast.Expr)
+                  for (c, t, tr, sh) in takes(st)), None)
+    if first is None or first[2] or first[3] or sid_bind(first[0]) != "steam_id":
+        out.append("(ii) the deletion's first top-level advisory statement is not the exclusive key "
+                   "of its own steam id: %r" % ((None if first is None else (first[1], sid_bind(first[0]))),))
+    else:
+        before = []
+        for c in (n for st in dele.body for n in ast.walk(st)):      # the body: not decorators, not defaults
+            if not isinstance(c, ast.Call) or c.lineno >= first[0].lineno:
+                continue
+            fname, attr = getattr(c.func, "id", None), getattr(c.func, "attr", None)
+            if fname == "text" and c.args:
+                t = read(c.args[0])
+                if t is None or any(not tb.startswith("key:") for tb, _m, _b in src.locks_of_sql(t)):
+                    before.append((c.lineno, (t or ast.unparse(c.args[0]))[:60]))
+            elif fname in ("update", "delete", "insert") or attr in (
+                    "with_for_update", "add", "add_all", "delete", "merge", "flush"):
+                before.append((c.lineno, ast.unparse(c)[:60]))
+            elif fname in top and any(e[0] == "L" and not e[1].startswith("key:") for e in src.events(fname)):
+                before.append((c.lineno, fname))
+        if before:
+            out.append("(ii) the deletion locks or writes a row before its identity key: %s" % before)
+    spell = {"_IDENTITY_KEY_SQL": key(read(ast.Name(id="_IDENTITY_KEY_SQL")) or "")}
+    for i, (_c, t, _tr, _sh) in enumerate(gt):
+        spell["gate %d" % i] = key(t)
+    if first is not None:
+        spell["deletion"] = key(first[1])
+    if len(set(spell.values())) != 1 or not set(spell.values()) <= mc.IDENTITY_KEYS:
+        out.append("(iii) the spellings are not one identity key: %s" % sorted(spell.items()))
+    return out
+
+
+def test_the_gate_and_the_deletion_take_one_identity_key(src):
+    """Section 5 (i) to (iii) on the tree as it stands."""
+    assert _identity_pin_failures(_main_text(), src) == []
+
+
+_PIN_MUTANTS = {
+    "the deletion's key made shared": (
+        "async def delete_player_data(",
+        'text("SELECT pg_advisory_xact_lock(hashtext(:sid))"), {"sid": steam_id})\n    player = ',
+        'text("SELECT pg_advisory_xact_lock_shared(hashtext(:sid))"), {"sid": steam_id})\n    player = ', "(ii)"),
+    "the gate's shared statement given another key expression": (
+        "async def _ban_lock_and_gate(", "pg_advisory_xact_lock_shared(hashtext(CAST(:sid AS text)))",
+        "pg_advisory_xact_lock_shared(hashtext(CAST(:sid AS text) || ':x'))", "(i)"),
+    "the lane's constant given another key expression": (
+        None, '_IDENTITY_KEY_ARG = "hashtext(CAST(:sid AS text))"',
+        "_IDENTITY_KEY_ARG = \"hashtext(CAST(:sid AS text) || ':x')\"", "(iii)"),
+}
+
+
+@pytest.mark.parametrize("name", sorted(_PIN_MUTANTS))
+def test_a_mutant_of_the_shared_identity_key_is_named(name, src):
+    head, old, new, half = _PIN_MUTANTS[name]
+    text = _main_text()
+    if head is None:
+        assert text.count(old) == 1, old
+        text = text.replace(old, new)
+    else:
+        text = _in_function(text, head, old, new)
+    bad = _identity_pin_failures(text, src)
+    assert any(b.startswith(half) for b in bad), bad
+
+
 # A route that takes the identity key, then the portrait blob's key, then
 # writes the player's row (KEY), and a site reached from one entry alone.
 _KEY_ROUTE = "async def admin_pc_portrait_clear("
