@@ -67151,9 +67151,11 @@ async def _qapply_run(ctx: dict):
 # QAPPLY-1 FIX-1: set for the whole transaction of Accept and of Credit
 # (_qapply_unit), from before the first lock to the commit or rollback; the
 # held row's own checks (_qapply_held) run before _qapply_run sets the replay.
-# It marks the unit for the tests that count what runs inside it; the service
-# policy cache is kept out of the unit by _qapply_service_ready, not by a
-# reader of this variable.
+# Its value is the unit's mark (_QapplyUnitMark): the handle_error listener
+# reads it to mark the unit on a bound error (F6), and the tests count what
+# runs inside the unit by it. A fill of the service-policy cache is kept out
+# of the unit by _qapply_service_ready except in the one interleaving its
+# docstring names, never by a reader of this variable.
 _QAPPLY_UNIT: contextvars.ContextVar = contextvars.ContextVar(
     "_qapply_unit", default=None)
 
@@ -75376,7 +75378,9 @@ _QAPPLY_SQL_CLAIMS_CREDITED = """
 # held row's lock. In the
 # process: the whole unit, the COMMIT included (which neither database bound
 # covers), ends at _QAPPLY_DEADLINE_S. Either end rolls back and answers the
-# "busy" sentence with nothing written. A player's report that waits on a row
+# "busy" sentence with nothing written, also when a best-effort block of the
+# body caught the database bound's error (F6: the unit's mark, read before
+# each commit the unit reaches). A player's report that waits on a row
 # one of these actions holds therefore waits at most the deadline.
 _QAPPLY_LOCK_TIMEOUT_MS = 2000
 _QAPPLY_STATEMENT_TIMEOUT_MS = 5000
@@ -75424,10 +75428,20 @@ async def _qapply_service_ready(db) -> None:
     it refuses with 503 service_policy_unavailable and a Retry-After of the
     whole seconds until the next refresh is due, plus 1, unless that refresh
     is due no sooner than _QAPPLY_DEADLINE_S plus _QAPPLY_SERVICE_MARGIN_S
-    from now. The unit is cancelled at its deadline, so a lookup inside it
-    begins before the refresh is due and finds the cache filled: it reads no
-    row and writes neither the cache nor its two clocks. A refusal writes
-    nothing."""
+    from now. A refusal writes nothing.
+
+    This is leg 1 of two (F7). The unit is cancelled at its deadline, so a
+    lookup inside it normally finds the cache filled and reads no row. In one
+    interleaving it does not: the lookup stamps its schedule with the time it
+    STARTED, and no lock orders two lookups, so a lookup that began before
+    this one and ends inside the unit can move the schedule back; with the
+    60 s schedule of an empty set and a read stalled for about 50 s, the
+    refresh falls due inside the unit and the guard fills the cache from the
+    unit's transaction. Leg 2 is why that fill caches what any request would:
+    nothing in the unit's reach inserts or deletes a players row or writes
+    its steam_id or id (test_f7_nothing_in_the_unit_changes_what_the_service_
+    lookup_reads), and the unit's transaction reads at READ COMMITTED, so its
+    fill reads the rows a fill on another connection reads at that instant."""
     await _service_player_uuids(db)
     left = _SERVICE_UUID_REFRESH_SECONDS - (time.monotonic() - _service_uuid_cache_monotonic)
     if left < _QAPPLY_DEADLINE_S + _QAPPLY_SERVICE_MARGIN_S:
