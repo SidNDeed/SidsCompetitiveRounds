@@ -255,11 +255,13 @@ async def _tournament_bind(sm, room, series_id):
     async with sm() as db:
         tid = uuid.uuid4()
         await db.execute(text(
-            "INSERT INTO tournaments (id, default_start_ts, lock_at) VALUES (:t, NOW(), NOW())"), {"t": tid})
+            # kind is a column of tournaments (sql/047), not of tournament_matches
+            "INSERT INTO tournaments (id, kind, default_start_ts, lock_at)"
+            " VALUES (:t, 'sync', NOW(), NOW())"), {"t": tid})
         await db.execute(text(
             "INSERT INTO tournament_matches (id, tournament_id, round, bracket_side, slot_idx, prereq_match_ids,"
-            " is_bye, status, kind, series_id, photon_room_name)"
-            " VALUES (:i, :t, 1, 'W', 0, '{}', false, 'pending', 'sync', :s, :r)"),
+            " is_bye, status, series_id, photon_room_name)"
+            " VALUES (:i, :t, 1, 'W', 0, '{}', false, 'pending', :s, :r)"),
             {"i": uuid.uuid4(), "t": tid, "s": series_id, "r": room})
         await db.commit()
 
