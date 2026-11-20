@@ -16,7 +16,9 @@
 -- transaction, after the table exists, the seed covers every held row with
 -- mode 'ffa' and status 'credited', and writes for each one claim of kind
 -- 'credit': lobby_id = the row's group_id, game_number = the number its room
--- names, quarantine_id = the row's id; ON CONFLICT DO NOTHING.
+-- names, quarantine_id = the row's id; ON CONFLICT DO NOTHING. The room is
+-- the one the held report's body names (payload photon_room_id), which is
+-- the room the api reads; a sibling report's room column can be empty.
 --
 -- THE STRICT RULE. A room names a game here exactly when it ends with _r,
 -- then one or more ASCII digits 0-9, then at most one final newline, and the
@@ -85,13 +87,13 @@ BEGIN
   FOR r IN
     -- SEED SELECT BEGIN
     SELECT q.id AS quarantine_id,
-           q.photon_room_id AS room,
+           (q.payload->>'photon_room_id') AS room,
            q.group_id AS lobby_id,
-           CASE WHEN CAST(substring(q.photon_room_id FROM '_r([0-9]+)\n?$') AS numeric) BETWEEN 1 AND 999
-                THEN CAST(CAST(substring(q.photon_room_id FROM '_r([0-9]+)\n?$') AS numeric) AS int4)
+           CASE WHEN CAST(substring((q.payload->>'photon_room_id') FROM '_r([0-9]+)\n?$') AS numeric) BETWEEN 1 AND 999
+                THEN CAST(CAST(substring((q.payload->>'photon_room_id') FROM '_r([0-9]+)\n?$') AS numeric) AS int4)
            END AS game_number,
            CASE WHEN q.group_id IS NOT NULL
-                 AND CAST(substring(q.photon_room_id FROM '_r([0-9]+)\n?$') AS numeric) BETWEEN 1 AND 999
+                 AND CAST(substring((q.payload->>'photon_room_id') FROM '_r([0-9]+)\n?$') AS numeric) BETWEEN 1 AND 999
                 THEN 'seed' ELSE 'refuse'
            END AS decision
       FROM match_report_quarantine q
