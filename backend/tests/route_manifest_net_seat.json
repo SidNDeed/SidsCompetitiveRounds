@@ -655,7 +655,7 @@
           ],
           "main",
           "submit_ovt_match",
-          "5f0e3130b7adb2040169af5f9f111284fca2fb88"
+          "a0e8a8e50fa713c3aefab94b0e42c6402a48d733"
         ],
         [
           "/api/v1/ovt/series/active",
@@ -1186,7 +1186,7 @@
           ],
           "main",
           "submit_team_match",
-          "8f76803debcee558680b88c5c5edf696980b6577"
+          "c9796582a0a0fac696596a89cab8f787b62a57c2"
         ],
         [
           "/api/v1/team/players/{steam_id}/team-matches",
@@ -1867,7 +1867,7 @@
           ],
           "main",
           "health_check",
-          "59929d3d9be84ac8ad58fb918fac93924718a1a0"
+          "5cd6747b98ca09238e734cdf63596c6c8e8aaa01"
         ],
         [
           "/api/v1/i18n/approved",
@@ -3869,7 +3869,7 @@
           ],
           "match_hold",
           "match_hold_entered",
-          "052291c646f5771004f01866d378b195b384676d"
+          "e1fa32725edeb3c4d08589230566688e07ba5610"
         ],
         [
           "/api/v1/match/hold/{hold_id}/state",
@@ -4112,7 +4112,7 @@
       [
         "main",
         "lifespan",
-        "92f5c370a9a73925d14120c3237b2d96bf57599a"
+        "05d5b6fd0159b6deb80daba97aaea0602166a5ab"
       ]
     ]
   },
