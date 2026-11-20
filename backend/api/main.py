@@ -67151,9 +67151,9 @@ async def _qapply_run(ctx: dict):
 # QAPPLY-1 FIX-1: set for the whole transaction of Accept and of Credit
 # (_qapply_unit), from before the first lock to the commit or rollback; the
 # held row's own checks (_qapply_held) run before _qapply_run sets the replay.
-# A reader of process-wide state that a transaction which may roll back must
-# not write (_service_player_uuids) honours this variable as well as the
-# replay's.
+# It marks the unit for the tests that count what runs inside it; the service
+# policy cache is kept out of the unit by _qapply_service_ready, not by a
+# reader of this variable.
 _QAPPLY_UNIT: contextvars.ContextVar = contextvars.ContextVar(
     "_qapply_unit", default=None)
 
@@ -75192,7 +75192,10 @@ def _qapply_refusal_text(reason: str, report, progress) -> str:
 
 def _qapply_answer(ex: HTTPException) -> HTTPException:
     """The route's answer for a refusal out of the body or the credit path:
-    the same status, with an admin's sentence."""
+    the same status, with an admin's sentence. The service-policy wait of
+    _qapply_service_ready is answered as raised, with its Retry-After."""
+    if isinstance(ex, _QapplyServiceWait):
+        return ex
     if isinstance(ex, _QapplyRefused):
         return HTTPException(ex.status_code, str(ex.detail))
     d = str(ex.detail)
@@ -75330,6 +75333,41 @@ async def _qapply_admin(db, req, action: str, qid: str) -> None:
         await _require_admin(db, req.admin_steam_id, action, qid, req.hmac_signature)
     except HTTPException as ex:
         raise _QapplyRefused(ex.status_code, _QAPPLY_TEXTS["admin"], {})
+
+
+# QAPPLY-1 (F4): the seconds kept between the end of a held-report unit (its
+# deadline, _QAPPLY_DEADLINE_S) and the service-policy cache's next scheduled
+# refresh. test_f4_the_deadline_and_margin_fit_inside_the_shortest_schedule
+# holds the deadline plus this margin below the shortest schedule a fill
+# leaves.
+_QAPPLY_SERVICE_MARGIN_S = 2.0
+
+
+class _QapplyServiceWait(HTTPException):
+    """_qapply_service_ready's refusal: 503 service_policy_unavailable with
+    Retry-After, answered by the route as raised (_qapply_answer)."""
+
+
+async def _qapply_service_ready(db) -> None:
+    """Awaited as the last statement before each held-report unit
+    (`async with asyncio.timeout(_QAPPLY_DEADLINE_S), _qapply_unit(...)`).
+
+    It reads the service set as any request does (_service_player_uuids: a
+    fill when the cache is empty or its refresh is due; the lookup's own 503
+    passes through, so no unit starts). Then, with no await after that read,
+    it refuses with 503 service_policy_unavailable and a Retry-After of the
+    whole seconds until the next refresh is due, plus 1, unless that refresh
+    is due no sooner than _QAPPLY_DEADLINE_S plus _QAPPLY_SERVICE_MARGIN_S
+    from now. The unit is cancelled at its deadline, so a lookup inside it
+    begins before the refresh is due and finds the cache filled: it reads no
+    row and writes neither the cache nor its two clocks. A refusal writes
+    nothing."""
+    await _service_player_uuids(db)
+    left = _SERVICE_UUID_REFRESH_SECONDS - (time.monotonic() - _service_uuid_cache_monotonic)
+    if left < _QAPPLY_DEADLINE_S + _QAPPLY_SERVICE_MARGIN_S:
+        raise _QapplyServiceWait(
+            status_code=503, detail="service_policy_unavailable",
+            headers={"Retry-After": str(max(0, int(left)) + 1)})
 
 
 def _qapply_out_of_time(ex: BaseException) -> bool:
@@ -75916,6 +75954,7 @@ async def admin_accept_quarantine(qid: str, req: _AdminQuarantineReq,
     if not _pg_text_ok(note):
         raise HTTPException(422, _QAPPLY_TEXTS["note"])
     try:
+        await _qapply_service_ready(db)
         async with asyncio.timeout(_QAPPLY_DEADLINE_S), _qapply_unit("accept"):
             await _qapply_bound(db)
             await _qapply_admin(db, req, "quarantine_action", qid)
@@ -75965,6 +76004,7 @@ async def admin_credit_quarantine(qid: str, req: _AdminQuarantineReq,
     if not _pg_text_ok(note):
         raise HTTPException(422, _QAPPLY_TEXTS["note"])
     try:
+        await _qapply_service_ready(db)
         async with asyncio.timeout(_QAPPLY_DEADLINE_S), _qapply_unit("credit"):
             await _qapply_bound(db)
             await _qapply_admin(db, req, "quarantine_credit", qid)
@@ -78355,16 +78395,8 @@ async def _service_player_uuids(db: AsyncSession) -> "set[str]":
     """
     global _service_player_uuid_cache, _service_uuid_cache_monotonic
     global _service_uuid_cache_filled_monotonic
-    # Under a held-report action (QAPPLY-1 FIX-1: its whole transaction,
-    # _QAPPLY_UNIT, and the replay inside it, _QAPPLY_REPLAY) the set is read
-    # fresh for this request alone, and neither the cache nor its two clocks
-    # is read or written: nothing another request trusts comes from a
-    # transaction that may roll back.
-    replay = (_QAPPLY_REPLAY.get() is not None
-              or _QAPPLY_UNIT.get() is not None)
     now_mono = time.monotonic()
     if (_service_player_uuid_cache is None
-            or replay
             or now_mono - _service_uuid_cache_monotonic > _SERVICE_UUID_REFRESH_SECONDS):
         # SAVEPOINT the refresh. This is the one hour-marked moment when a
         # ~90-call-site policy guard executes SQL, and several of those callers
@@ -78383,8 +78415,6 @@ async def _service_player_uuids(db: AsyncSession) -> "set[str]":
                     SELECT id::text FROM players
                      WHERE steam_id = ANY(CAST(:sids AS text[]))
                 """), {"sids": sorted(SPECTATE_BROADCAST_STEAM_IDS)})).scalars().all()
-            if replay:
-                return {str(r) for r in rows}
             _service_player_uuid_cache = {str(r) for r in rows}
             # An EMPTY result is not a normal steady state — these accounts are
             # a hand-edited constant whose players rows predate the policy — so
@@ -78424,9 +78454,6 @@ async def _service_player_uuids(db: AsyncSession) -> "set[str]":
             # the set comes back empty. It was treated as suspect for cache
             # freshness and as authoritative for the guard decision, and only
             # one of those can be right.
-            if replay:
-                print(f"[SERVICE-POLICY] request-local read failed: {ex}")
-                raise HTTPException(status_code=503, detail="service_policy_unavailable")
             if not _service_player_uuid_cache:
                 print(f"[SERVICE-POLICY] uuid cache could not be filled: {ex}")
                 raise HTTPException(
