@@ -6,7 +6,10 @@
 --
 -- What this loses: the record of which games were applied or credited from
 -- held reports. The payments, the games' rows, the held rows' statuses and
--- the moderator records stay. A rerun is a no-op (IF EXISTS).
+-- the moderator records stay. A rerun is a no-op (IF EXISTS). The claims
+-- 426 seeded for games credited before the table existed are rows of the
+-- table, so the drop removes them too; this file needs nothing more for
+-- them.
 
 BEGIN;
 
