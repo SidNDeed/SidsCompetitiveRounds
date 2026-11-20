@@ -110,7 +110,11 @@ async def credit(env, qid, *, word="quarantine_credit", note=None):
     async def go():
         async with env.sm() as db:
             return await main.admin_credit_quarantine(qid, req, db)
-    return await env._call(go)
+    ans = await env._call(go)
+    # F5: after every Credit of these tests, every credited held row has
+    # its game's claim, whoever credited it.
+    await _f5_invariant(env)
+    return ans
 
 
 async def discard(env, qid):
@@ -2001,3 +2005,205 @@ def test_m3_each_check_reads_the_tables_its_effects_name():
             src = _test_reads(test)
             for t in tbls:
                 assert re.search(r"\b%s\b" % re.escape(t), src), (eid, check, test, "does not read", t)
+
+
+# ── F5: 426 seeds a claim for every game already credited from a held row ──
+
+M426 = os.path.join(HERE, "..", "sql", "426_ffa_game_claims.sql")
+SEED_SELECT = os.path.join(HERE, "qapply_seed_select.sql")
+# The words the read-only verb refuses, as substrings in any letter case.
+_F5_REFUSED_WORDS = ("CREATE", "INSERT", "UPDATE", "DELETE", "ALTER", "DROP", "TRUNCATE", "GRANT",
+                     "REVOKE", "COPY")
+# Every strict name (Addendum 3, C1): _r, ASCII digits, at most one final
+# newline, 1 to 999; leading zeros and the final newline among them.
+_F5_STRICT = ("ffa_58e81a62609a_040746_r2", "ffa_58e81a62609a_042203_r3", "ffa_q_r1", "ffa_q_r999",
+              "ffa_q_r007", "ffa_q_r12\n", "ffa_q_r_r45", "r5_r6", "_r9")
+# Each covered row outside the strict rule refuses the whole file (C2, C3).
+_F5_REFUSE = (("arabic-indic digit", "ffa_q_r٣"), ("devanagari digit", "ffa_q_r३"),
+              ("fullwidth digit", "ffa_q_r３"), ("no tail", "ffa_q"), ("tail 0", "ffa_q_r0"),
+              ("tail 1000", "ffa_q_r1000"), ("a tail with a letter", "ffa_q_r3a"),
+              ("two final newlines", "ffa_q_r3\n\n"), ("no room", None), ("no lobby", "ffa_q_r4"))
+_F5_NOTE_421 = "Migration 421, option B: gold and XP credited, ratings not applied."
+
+
+def _f5_text(path):
+    with open(path, encoding="utf-8") as f:
+        return f.read()
+
+
+def _f5_seed_block():
+    src = _f5_text(M426)
+    a = src.index("-- SEED SELECT BEGIN") + len("-- SEED SELECT BEGIN")
+    return src[a:src.index("-- SEED SELECT END")]
+
+
+def _f5_credit_writers_without_claims(sql_dir):
+    """Migrations numbered above 426 that set a held row to 'credited' and
+    never name ffa_game_claims (426's header states the rule)."""
+    import re
+    out = []
+    for name in sorted(os.listdir(sql_dir)):
+        m = re.match(r"^(\d{3,})_.*\.sql$", name)
+        if not m or int(m.group(1)) <= 426:
+            continue
+        src = _f5_text(os.path.join(sql_dir, name))
+        if re.search(r"status\s*=\s*'credited'", src, re.I) and "ffa_game_claims" not in src:
+            out.append(name)
+    return out
+
+
+def test_f5_the_seed_select_file_is_the_migrations_reading_and_holds_no_refused_word():
+    def norm(s):
+        return " ".join(s.replace(";", " ").split())
+    alone = _f5_text(SEED_SELECT)
+    assert norm(alone) == norm(_f5_seed_block()), "the standalone SELECT is the seed's own text"
+    assert alone.rstrip().endswith(";") and alone.count(";") == 1, "one plain statement"
+    assert [w for w in _F5_REFUSED_WORDS if w in alone.upper()] == [], "a word the read-only verb refuses"
+    assert alone.lstrip().upper().startswith("SELECT ")
+
+
+def test_f5_every_later_file_that_credits_a_held_row_writes_its_claim(tmp_path):
+    assert _f5_credit_writers_without_claims(os.path.join(HERE, "..", "sql")) == []
+    # The planted red: a later file that credits without a claim is named;
+    # one that writes the claim, and 421 itself, are not.
+    (tmp_path / "421_old.sql").write_text("UPDATE match_report_quarantine SET status = 'credited';")
+    (tmp_path / "998_with_claim.sql").write_text(
+        "UPDATE match_report_quarantine SET status = 'credited';\nINSERT INTO ffa_game_claims VALUES (1);")
+    (tmp_path / "999_planted.sql").write_text("UPDATE match_report_quarantine q SET status='CREDITED';")
+    assert _f5_credit_writers_without_claims(str(tmp_path)) == ["999_planted.sql"]
+
+
+async def _f5_row(c, room, *, lobby=None, no_lobby=False, status="credited"):
+    """One covered held row (FFA, status credited) whose body names `room`."""
+    qid = uuid.uuid4()
+    body = {} if room is None else {"photon_room_id": room}
+    await c.execute(
+        "INSERT INTO match_report_quarantine (id, mode, reason, http_status, group_id, photon_room_id,"
+        "  payload, status) VALUES ($1, 'ffa', 'lobby_completed', 409, $2, $3, $4::jsonb, $5)",
+        qid, None if no_lobby else (lobby or uuid.uuid4()), room, json.dumps(body), status)
+    return qid
+
+
+async def _f5_run_426(c):
+    """426 run whole on the case's connection; None, or the error's text
+    (the transaction it left is rolled back)."""
+    try:
+        await c.execute(_f5_text(M426))
+    except Exception as ex:
+        await c.execute("ROLLBACK")
+        return str(ex)
+    return None
+
+
+async def _f5_claims(c):
+    return sorted((str(r["lobby_id"]), r["game_number"], r["kind"], str(r["quarantine_id"]))
+                  for r in await c.fetch("SELECT * FROM ffa_game_claims"))
+
+
+async def _f5_invariant(env):
+    """Every held row with status 'credited' has a claim for its game (the
+    game its body names, in its lobby)."""
+    missing = await env.conn.fetch(
+        "SELECT q.id FROM match_report_quarantine q"
+        " WHERE q.mode = 'ffa' AND q.status = 'credited' AND NOT EXISTS ("
+        "   SELECT 1 FROM ffa_game_claims g WHERE g.lobby_id = q.group_id"
+        "      AND g.game_number = CAST(substring(q.payload->>'photon_room_id' FROM '_r([0-9]+)\\n?$')"
+        "          AS numeric))")
+    assert [str(r["id"]) for r in missing] == [], "a credited held row without its game's claim"
+
+
+def test_f5_the_strict_rule_reads_what_the_api_reads_and_refuses_the_rest(monkeypatch):
+    async def body(env):
+        c = env.conn
+        # (1) every strict name: the api's number and the seed's, side by side.
+        ids = {await _f5_row(c, room): room for room in _F5_STRICT}
+        rows = {r["quarantine_id"]: r for r in await c.fetch(_f5_text(SEED_SELECT))}
+        assert set(rows) == set(ids), "the SELECT covers exactly the covered rows"
+        table = [(room, main._ffa_named_game_number(room), rows[q]["game_number"], rows[q]["decision"])
+                 for q, room in ids.items()]
+        print("F5 TABLE strict (room, api, seed, decision)", table)
+        bad = [t for t in table if not (t[1] is not None and t[1] == t[2] and t[3] == "seed")]
+        assert bad == [], ("the strict rule and the api differ on a strict name", bad)
+        await c.execute("DELETE FROM match_report_quarantine WHERE id = ANY($1::uuid[])", list(ids))
+        lob = uuid.uuid4()
+        q2 = await _f5_row(c, "ffa_58e81a62609a_040746_r2", lobby=lob)
+        q3 = await _f5_row(c, "ffa_58e81a62609a_042203_r3", lobby=lob)
+        # (2) one covered row outside the strict rule refuses the whole file.
+        for case, room in _F5_REFUSE:
+            q = await _f5_row(c, room, no_lobby=(case == "no lobby"))
+            r = {x["quarantine_id"]: x for x in await c.fetch(_f5_text(SEED_SELECT))}[q]
+            before = await tables(env)
+            err = await _f5_run_426(c)
+            print("F5 TABLE refuse", case, repr(room), "api", main._ffa_named_game_number(room),
+                  "seed", r["game_number"], r["decision"], "|", err)
+            assert r["decision"] == "refuse", (case, dict(r))
+            assert r["game_number"] is None or case == "no lobby", (case, dict(r))
+            assert err is not None and ("426: credited FFA held report %s has" % q) in err, (case, err)
+            assert await _f5_claims(c) == [] and await tables(env) == before, (case, "a change stood")
+            await c.execute("DELETE FROM match_report_quarantine WHERE id = $1", q)
+        # Two covered rows of one game: refused, nothing applied.
+        q3b = await _f5_row(c, "ffa_58e81a62609a_042203_r3", lobby=lob)
+        err = await _f5_run_426(c)
+        assert err is not None and "credited from two or more held reports" in err, err
+        assert await _f5_claims(c) == []
+        await c.execute("DELETE FROM match_report_quarantine WHERE id = $1", q3b)
+        # (4) control: the primary's two shapes seed exactly two claims.
+        assert await _f5_run_426(c) is None
+        want = sorted([(str(lob), 2, "credit", str(q2)), (str(lob), 3, "credit", str(q3))])
+        assert await _f5_claims(c) == want
+        await _f5_invariant(env)
+        # A second run changes nothing.
+        stamps = await c.fetch("SELECT * FROM ffa_game_claims ORDER BY game_number")
+        assert await _f5_run_426(c) is None
+        assert await c.fetch("SELECT * FROM ffa_game_claims ORDER BY game_number") == stamps
+    run_env(monkeypatch, body)
+
+
+async def _f5_421_end_state(env):
+    """421's end state on a lobby of the harness: two members' reports of game
+    3 held (siblings) and one of game 2; the game 2 row and the first game 3
+    row marked credited as 421 marks its two (status, reviewed_at, no
+    reviewer, its note), with no claim; then 426 runs whole."""
+    lob, q3, q3b = await siblings(env, 3)
+    q2 = await held(env, lob, 2)
+    await env.conn.execute(
+        "UPDATE match_report_quarantine SET status = 'credited', reviewed_at = now(), reviewed_by = NULL,"
+        "  review_note = $2 WHERE id = ANY($1::uuid[])", [uuid.UUID(q2), uuid.UUID(q3)], _F5_NOTE_421)
+    assert await env.conn.fetchval("SELECT count(*) FROM ffa_game_claims WHERE lobby_id = $1", lob.lid) == 0
+    err = await _f5_run_426(env.conn)
+    assert err is None, ("426 on 421's end state", err)
+    await _f5_invariant(env)
+    return lob, q2, q3, q3b
+
+
+def test_f5_a_game_421_credited_is_not_paid_again(monkeypatch):
+    async def body(env):
+        lob, q2, q3, q3b = await _f5_421_end_state(env)
+        assert await _f5_claims(env.conn) == sorted([(str(lob.lid), 2, "credit", q2),
+                                                      (str(lob.lid), 3, "credit", q3)])
+        v = (await listing(env))[q3b]
+        assert (v["can_accept"], v["accept_blocked_reason"], v["can_credit"]) == (
+            False, T["game_credited"], False), ("the list names the credit", v)
+        before = (await tables(env), await paid(env, lob), await _f5_claims(env.conn))
+        ans = await credit(env, q3b)
+        assert (ans.status, ans.body) == (409, T["game_paid"]), ("Credit of a sibling", ans)
+        assert (await tables(env), await paid(env, lob), await _f5_claims(env.conn)) == before
+        ans = await accept(env, q3b)
+        assert (ans.status, ans.body) == (409, T["game_credited"]), ("Accept of a sibling", ans)
+        assert (await tables(env), await paid(env, lob), await _f5_claims(env.conn)) == before
+        assert await status_of(env, q3b) == "pending"
+        await _f5_invariant(env)
+    run_env(monkeypatch, body)
+
+
+def test_f5_control_another_game_of_that_lobby_is_not_refused_by_the_seed(monkeypatch):
+    async def body(env):
+        lob, q2, q3, q3b = await _f5_421_end_state(env)
+        q4 = await held(env, lob, 4)
+        v = (await listing(env))[q4]
+        assert v["accept_blocked_reason"] not in (T["game_credited"], T["recorded"]), v
+        ans = await credit(env, q4)
+        print("F5 control credit of game 4:", ans.status, ans.body)
+        assert ans.body not in (T["game_paid"], T["game_applied"]), ("refused as a paid game", ans)
+        await _f5_invariant(env)
+    run_env(monkeypatch, body)
