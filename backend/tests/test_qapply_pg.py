@@ -2723,3 +2723,147 @@ def test_f6_control_a_non_bound_error_in_a_best_effort_block_keeps_the_game(monk
         assert ans.status == 200, ("a network report's meaning: the game stands", ans)
         assert await status_of(env, q) == "accepted"
     run_env(monkeypatch, body)
+
+
+# F6's sweep (the design note's list, fix2/f6_sweep.py's rule): every except
+# in the reach of the two routes and the report body that can catch a
+# database error, in line order per function, with what it does after the
+# catch. The test below is parametrised over this list; a change of the code
+# that moves it is a re-pin here, with its reason.
+_F6_DB_CATCHERS = {None, "Exception", "BaseException", "SQLAlchemyError", "DBAPIError", "OperationalError",
+                   "_sa_exc.SQLAlchemyError", "_sa_exc.DBAPIError", "_sa_exc.OperationalError", "TimeoutError"}
+# A swept handler that no statement of Accept or Credit reaches through its
+# try body, with the reason (by function: every handler of that function).
+_F6_NOT_REACHED = {
+    "_asm_rollback": "its try body is a rollback, which issues no statement a lock can hold",
+    "_check_steam_session": "the reporter's session check does not run under the replay",
+    "_mark_session_verified": "called only from the session check, which does not run under the replay",
+    "_ffa_settle_window": "the due windows settle for a network report only",
+    "_mail_parse_uuid": "parses the id before the unit; its try body issues no statement",
+    "_parse_version": "its try body issues no statement",
+    "_qdig_read_body": "parses a held body; its try body issues no statement",
+    "_qdig_strict_model": "parses a held body; its try body issues no statement",
+    "_quarantine_report": "under the replay no hold site captures",
+    "_quarantine_same_payload": "compares two bodies; its try body issues no statement",
+}
+
+
+def _f6_handlers():
+    """(function, ordinal, after, (first, last) line of the try body) for
+    each swept handler, from the syntax tree of the main.py under test."""
+    tree = _tree()
+    funcs = {n.name: n for n in tree.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
+    seen, todo = set(), list(_F4_ROOTS)
+    while todo:
+        f = todo.pop()
+        if f in seen or f not in funcs:
+            continue
+        seen.add(f)
+        todo += [c.id for c in ast.walk(funcs[f]) if isinstance(c, ast.Name) and c.id in funcs]
+    out = []
+    for f in sorted(seen):
+        rows = []
+        for t in ast.walk(funcs[f]):
+            for h in getattr(t, "handlers", None) or ():
+                names = [None] if h.type is None else [
+                    ast.unparse(x) for x in (h.type.elts if isinstance(h.type, ast.Tuple) else [h.type])]
+                if not any(n in _F6_DB_CATCHERS for n in names):
+                    continue
+                after = "re-raises" if any(isinstance(s, ast.Raise) for s in ast.walk(h)) else (
+                    "returns" if any(isinstance(s, ast.Return) for s in h.body) else "goes on")
+                rows.append((h.lineno, after, (t.body[0].lineno, t.body[-1].end_lineno)))
+        for i, (_, after, span) in enumerate(sorted(rows)):
+            out.append((f, i, after, span))
+    return out
+
+
+def _f6_inject(monkeypatch, key):
+    """Arms a lock wait: before the first statement issued, inside a unit,
+    while the armed function's frame stands in its try body's lines, the
+    same session waits on the advisory lock `key` (held by another session),
+    so the lock bound (55P03) is raised there, as by that statement."""
+    import sys as _sys
+    from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession
+    state = {"target": None, "fired": 0}
+    orig = {(c, n): getattr(c, n) for c, ns in ((AsyncSession, ("execute", "scalar", "scalars", "flush", "get")),
+                                               (AsyncConnection, ("execute", "scalar"))) for n in ns}
+
+    def armed_here():
+        fname, (lo, hi) = state["target"]
+        f = _sys._getframe(2)
+        while f is not None:
+            if f.f_code.co_qualname == fname and lo <= f.f_lineno <= hi:
+                return True
+            f = f.f_back
+        return False
+
+    for (cls, name), fn in orig.items():
+        async def spy(self, *a, _fn=fn, _cls=cls, **k):
+            if state["target"] and not state["fired"] and main._QAPPLY_UNIT.get() is not None and armed_here():
+                state["fired"] += 1
+                await orig[(_cls, "execute")](self, text("SELECT pg_advisory_xact_lock(:k)"), {"k": key})
+            return await _fn(self, *a, **k)
+        monkeypatch.setattr(cls, name, spy)
+    return state
+
+
+def test_f6_each_swept_handler_that_a_lock_reaches_ends_the_action(monkeypatch):
+    """F6, per handler: for each swept handler and each route, a lock wait
+    past the lock bound at the first statement its try body issues inside
+    the unit. Wherever it is raised and whoever catches it, the action
+    answers busy and nothing of it stands. A handler that neither route
+    reaches is named in _F6_NOT_REACHED with the reason; a named one that a
+    route reaches turns this red. The service lookup's handler is reached
+    by making its refresh fall due inside the unit (F7's interleaving)."""
+    handlers = _f6_handlers()
+    assert len(handlers) == 35 and sum(1 for h in handlers if h[2] == "goes on") == 17, (
+        "the sweep moved: re-pin with its reason", [(f, i, a) for f, i, a, _ in handlers])
+    key = 0x5F6A11
+
+    async def body(env):
+        state = _f6_inject(monkeypatch, key)
+        orig_unit = main._qapply_unit
+
+        @contextlib.asynccontextmanager
+        async def unit(kind):
+            async with orig_unit(kind) as k:
+                if state["target"] and state["target"][0] == "_service_player_uuids":
+                    main._service_uuid_cache_monotonic = main.time.monotonic() - main._SERVICE_UUID_REFRESH_SECONDS - 1.0
+                yield k
+        monkeypatch.setattr(main, "_qapply_unit", unit)
+        table, bad = [], []
+        for f, i, after, span in handlers:
+            reached = []
+            for name, act in (("accept", accept), ("credit", credit)):
+                if name == "accept":
+                    lob, q, _pid = await _f6_held_kills(env)
+                else:
+                    lob, q = await closed_held(env)
+                    await later_for(env, lob)
+                # A previous fill within its age, so the lookup's handler keeps it.
+                _f4_cache(monkeypatch, {str(uuid.uuid4())}, 60.0, 60.0)
+                before = (await tables(env), await _f5_claims(env.conn))
+                state.update(target=(f, span), fired=0)
+                async with env.sm() as other:
+                    await other.execute(text("SELECT pg_advisory_xact_lock(:k)"), {"k": key})
+                    try:
+                        ans = await act(env, q)
+                    finally:
+                        state["target"] = None
+                        await other.rollback()
+                if not state["fired"]:
+                    continue
+                reached.append(name)
+                after_state = (await tables(env), await _f5_claims(env.conn))
+                ok = (ans.status, ans.body) == (503, T["busy"]) and after_state == before
+                if not ok:
+                    bad.append((f, i, after, name, ans.status, ans.body, after_state == before))
+            table.append((f, i, after, reached))
+            if not reached and f not in _F6_NOT_REACHED:
+                bad.append((f, i, after, "reached by neither route, and no reason is named"))
+            if reached and f in _F6_NOT_REACHED:
+                bad.append((f, i, after, "named as not reached, reached by", reached))
+        for row in table:
+            print("F6 handler", row)
+        assert bad == [], bad
+    run_env(monkeypatch, body)
