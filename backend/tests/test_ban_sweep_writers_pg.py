@@ -259,9 +259,11 @@ async def _tournament_bind(sm, room, series_id):
             "INSERT INTO tournaments (id, kind, default_start_ts, lock_at)"
             " VALUES (:t, 'sync', NOW(), NOW())"), {"t": tid})
         await db.execute(text(
+            # every NOT NULL column named: in this case schema the ORM built the
+            # array columns without their migration defaults (sql/049, sql/132)
             "INSERT INTO tournament_matches (id, tournament_id, round, bracket_side, slot_idx, prereq_match_ids,"
-            " is_bye, status, series_id, photon_room_name)"
-            " VALUES (:i, :t, 1, 'W', 0, '{}', false, 'pending', :s, :r)"),
+            " prereq_roles, early_ok_signup_ids, is_bye, status, series_id, photon_room_name)"
+            " VALUES (:i, :t, 1, 'W', 0, '{}', '{}', '{}', false, 'pending', :s, :r)"),
             {"i": uuid.uuid4(), "t": tid, "s": series_id, "r": room})
         await db.commit()
 
