@@ -70,8 +70,8 @@ A1_SPANS = (
     ('main.py', 78004, '_service_player_uuids', 183),
     ('match_hold.py', 212, 'caps_token_sql', 16),
     ('match_hold.py', 235, '_mode_or_400', 23),
-    ('match_hold.py', 351, '_latch_sql', 78),
-    ('match_hold.py', 364, '_hold_latch', 108),
+    ('match_hold.py', 352, '_latch_sql', 78),
+    ('match_hold.py', 365, '_hold_latch', 108),
     ('match_report_window.py', 47, '_get', 25),
     ('match_report_window.py', 51, 'held_overlap', 115),
     ('match_report_window.py', 68, 'anchor_fresh', 42),
@@ -6329,7 +6329,7 @@ A1_IMPORTS = frozenset({
 A1_CALLEES = frozenset({
     ('from tournaments import _region_candidate_volumes', 'tournaments.py',
      280, '_region_candidate_volumes'),
-    ('_match_hold._hold_latch', 'match_hold.py', 364, '_hold_latch'),
+    ('_match_hold._hold_latch', 'match_hold.py', 365, '_hold_latch'),
     ('_mrw_mod().series_fresh', 'match_report_window.py', 77, 'series_fresh'),
     ('_mrw_mod().series_holds', 'match_report_window.py', 85, 'series_holds'),
 })
