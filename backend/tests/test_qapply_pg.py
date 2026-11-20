@@ -104,7 +104,7 @@ async def accept(env, qid, *, word="quarantine_action", note=None):
     return await env._call(go)
 
 
-async def credit(env, qid, *, word="quarantine_credit", note=None):
+async def credit(env, qid, *, word="quarantine_credit", note=None, invariant=True):
     req = main._AdminQuarantineReq(admin_steam_id=ADMIN, hmac_signature=sig(word, qid), note=note)
 
     async def go():
@@ -112,8 +112,11 @@ async def credit(env, qid, *, word="quarantine_credit", note=None):
             return await main.admin_credit_quarantine(qid, req, db)
     ans = await env._call(go)
     # F5: after every Credit of these tests, every credited held row has
-    # its game's claim, whoever credited it.
-    await _f5_invariant(env)
+    # its game's claim, whoever credited it. (invariant=False: M2's pairs,
+    # which run two actions at once and read the invariant after both, on
+    # the one test connection.)
+    if invariant:
+        await _f5_invariant(env)
     return ans
 
 
@@ -1310,10 +1313,13 @@ async def _lock_waiters(env, n):
 
 
 async def _timed(act, env, qid):
-    """The action's answer and its own elapsed seconds."""
+    """The action's answer and its own elapsed seconds. The test connection
+    (env.conn) is never used inside: two of these run at once beside
+    _lock_waiters, and asyncpg refuses a second operation on one
+    connection; _pair_rows reads Credit's F5 invariant after both answer."""
     loop = asyncio.get_running_loop()
     t0 = loop.time()
-    ans = await act(env, qid)
+    ans = await (act(env, qid, invariant=False) if act is credit else act(env, qid))
     return ans, loop.time() - t0
 
 
@@ -1333,7 +1339,9 @@ async def _pair_rows(env, lob, one, two, *, release=True):
             await _lock_waiters(env, 2)
             if release:
                 await s.rollback()
-            return await asyncio.wait_for(asyncio.gather(t1, t2), main._QAPPLY_DEADLINE_S + 2.0)
+            got = await asyncio.wait_for(asyncio.gather(t1, t2), main._QAPPLY_DEADLINE_S + 2.0)
+            await _f5_invariant(env)
+            return got
         finally:
             await s.rollback()
             for t in (t1, t2):
@@ -2258,6 +2266,44 @@ def test_f5_the_strict_rule_reads_what_the_api_reads_and_refuses_the_rest(monkey
     run_env(monkeypatch, body)
 
 
+def test_f5_the_strict_rule_reads_the_same_names_under_every_collation(monkeypatch):
+    """The seed's rule reads ASCII digits alone whatever the database's
+    collation: a regular expression's character class follows the collation
+    of the text it reads (under an ICU collation a locale class such as
+    [[:digit:]] takes the Arabic-Indic, Devanagari and fullwidth digits),
+    while a code-point range such as [0-9] does not. Every pattern of the
+    migration's seed block and of the SELECT file is read under "C", under
+    the database's default and under an ICU collation, over every strict and
+    every refused name; each answer must be the "C" answer, and no
+    non-ASCII digit may be read as a game number under any of them."""
+    import re as _re
+    pats = sorted(set(_re.findall(r"FROM '([^']*)'", _f5_seed_block()))
+                  | set(_re.findall(r"FROM '([^']*)'", _f5_text(SEED_SELECT))))
+    assert pats, "the seed block names no pattern"
+    rooms = [r for r in _F5_STRICT] + [room for _case, room in _F5_REFUSE if room is not None]
+    non_ascii = [room for case, room in _F5_REFUSE if room is not None and "digit" in case]
+    assert len(non_ascii) == 3
+
+    async def body(env):
+        c = env.conn
+        icu = await c.fetchval(
+            "SELECT collname FROM pg_collation WHERE collprovider = 'i' AND collisdeterministic"
+            " ORDER BY (collname = 'und-x-icu') DESC, collname LIMIT 1")
+        assert icu, "this database has no ICU collation; the rule's reading under one cannot be shown"
+        bad = []
+        for pat in pats:
+            for room in rooms:
+                ans = {}
+                for name, expr in (("C", 'CAST($1 AS text) COLLATE "C"'), ("default", "CAST($1 AS text)"),
+                                   (icu, 'CAST($1 AS text) COLLATE "%s"' % icu.replace('"', '""'))):
+                    ans[name] = await c.fetchval("SELECT substring(%s FROM CAST($2 AS text))" % expr, room, pat)
+                if len(set(ans.values())) != 1 or (room in non_ascii and ans["C"] is not None):
+                    bad.append((pat, room, ans))
+        print("F5 COLLATION", icu, len(pats), "patterns", len(rooms), "names", "bad", len(bad))
+        assert bad == [], bad
+    run_env(monkeypatch, body)
+
+
 async def _f5_421_end_state(env):
     """421's end state on a lobby of the harness: two members' reports of game
     3 held (siblings) and one of game 2; the game 2 row and the first game 3
@@ -2745,7 +2791,39 @@ _F6_NOT_REACHED = {
     "_qdig_strict_model": "parses a held body; its try body issues no statement",
     "_quarantine_report": "under the replay no hold site captures",
     "_quarantine_same_payload": "compares two bodies; its try body issues no statement",
+    "_ffa_progress_relocked": ("called on the body's insert-race and insert-failure arms, each of which raises"
+                               " QAPPLY's refusal first under the replay, and after a capture, which the"
+                               " replay never makes"),
+    "_qapply_unit": ("its try body is the unit's own yield, which issues no statement of its own; its handler"
+                     " is the point that ends every action busy once the mark is set"),
 }
+
+
+async def _f6_skewed(env):
+    """A closed ranked lobby's held game 2 played to the module's target in a
+    lobby frozen at 3 (a score-target skew, _ffa_score_shape_error admits
+    it), with game 1 recorded as a skew too and an unsettled wager on each
+    game: Accept's replay refunds game 2's wagers strictly (the body's skew
+    block) and game 1's leftover through the fail-soft lobby refund."""
+    lob, q = await closed_held(env)
+    await env.conn.execute("UPDATE ffa_lobbies SET score_target = 3 WHERE id = $1", lob.lid)
+    await env.conn.execute("UPDATE ffa_matches SET score_target_frozen = 3, score_target_played = 5"
+                           " WHERE lobby_id = $1 AND game_number = 1", lob.lid)
+    bp, _sid = await env.bettor()
+    for g in (1, 2):
+        await env.wager(lob, bp, lob.pids[0], game=g)
+    return lob, q
+
+
+# The handlers each route reaches only with a fixture or a stand-in of its
+# own (by (function, ordinal)): the skew fixture above; the earned-pack roll,
+# which returns before its first statement where the harness signs nothing
+# (MATCH_HMAC_SECRET is empty), so the stand-in issues one statement first;
+# the achievement's title grant, reached when the granted achievement
+# carries a title (ffa_kills_50 is given one for that case).
+_F6_SKEWED = {("submit_ffa_match", 6), ("_refund_ffa_lobby_bets", 0)}
+_F6_PACK_ROLL = ("submit_ffa_match", 3)
+_F6_TITLE = ("_ensure_achievement_title", 0)
 
 
 def _f6_handlers():
@@ -2816,7 +2894,7 @@ def test_f6_each_swept_handler_that_a_lock_reaches_ends_the_action(monkeypatch):
     route reaches turns this red. The service lookup's handler is reached
     by making its refresh fall due inside the unit (F7's interleaving)."""
     handlers = _f6_handlers()
-    assert len(handlers) == 35 and sum(1 for h in handlers if h[2] == "goes on") == 17, (
+    assert len(handlers) == 36 and sum(1 for h in handlers if h[2] == "goes on") == 17, (
         "the sweep moved: re-pin with its reason", [(f, i, a) for f, i, a, _ in handlers])
     key = 0x5F6A11
 
@@ -2832,10 +2910,23 @@ def test_f6_each_swept_handler_that_a_lock_reaches_ends_the_action(monkeypatch):
                 yield k
         monkeypatch.setattr(main, "_qapply_unit", unit)
         table, bad = [], []
+        orig_pc = main._pc_grant_earned_packs
+
+        async def pc_stand_in(db, *a, **k):
+            await db.execute(text("SELECT 1"))
+            return await orig_pc(db, *a, **k)
         for f, i, after, span in handlers:
             reached = []
+            monkeypatch.setattr(main, "_pc_grant_earned_packs",
+                                pc_stand_in if (f, i) == _F6_PACK_ROLL else orig_pc)
+            if (f, i) == _F6_TITLE:
+                monkeypatch.setitem(main.ACHIEVEMENT_TITLE_SKUS, "ffa_kills_50", "f6_title")
+            else:
+                monkeypatch.delitem(main.ACHIEVEMENT_TITLE_SKUS, "ffa_kills_50", raising=False)
             for name, act in (("accept", accept), ("credit", credit)):
-                if name == "accept":
+                if name == "accept" and (f, i) in _F6_SKEWED:
+                    lob, q = await _f6_skewed(env)
+                elif name == "accept":
                     lob, q, _pid = await _f6_held_kills(env)
                 else:
                     lob, q = await closed_held(env)
@@ -2865,5 +2956,7 @@ def test_f6_each_swept_handler_that_a_lock_reaches_ends_the_action(monkeypatch):
                 bad.append((f, i, after, "named as not reached, reached by", reached))
         for row in table:
             print("F6 handler", row)
+        for row in bad:
+            print("F6 BAD", row)
         assert bad == [], bad
     run_env(monkeypatch, body)

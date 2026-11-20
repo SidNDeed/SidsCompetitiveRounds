@@ -67904,10 +67904,24 @@ def _qapply_check_bound() -> None:
 async def _qapply_unit(kind: str):
     """`async with _qapply_unit(kind): ...` runs a held-report action's whole
     transaction with _QAPPLY_UNIT set to a fresh mark of that kind, and
-    resets it after."""
-    tok = _QAPPLY_UNIT.set(_QapplyUnitMark(kind))
+    resets it after.
+
+    F6, the unit's exit: once the mark is set, an error that leaves the unit
+    leaves it as _QapplyBoundHit, whatever it is. A handler that caught the
+    bound error may have gone on to raise something else (the body's skew
+    refund turns any error into its 503 wagers refusal; a statement after a
+    caught error with no savepoint fails as an aborted transaction), and the
+    action must still answer busy. Nothing commits on that path either way:
+    the routes roll back on every error. A bound error itself, and an exit
+    with the mark unset, leave as they were."""
+    mark = _QapplyUnitMark(kind)
+    tok = _QAPPLY_UNIT.set(mark)
     try:
         yield kind
+    except Exception as ex:
+        if mark.bound and not _qapply_out_of_time(ex):
+            raise _QapplyBoundHit("the unit ended after a database bound fired in it") from ex
+        raise
     finally:
         _QAPPLY_UNIT.reset(tok)
 
