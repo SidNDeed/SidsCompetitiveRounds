@@ -295,8 +295,14 @@ def test_the_quarantine_accept_parses_the_reports_id_before_the_admin_check_and_
     async def no_later_games(*_a, **_kw):
         return 0
 
+    async def service_ready(_db):
+        return None
+
     monkeypatch.setattr(main, "_assert_no_service_subject", no_service_subject)
     monkeypatch.setattr(main, "_quarantine_later_rated_count", no_later_games)
+    # The service set is read before the unit (_qapply_service_ready, tested
+    # on PostgreSQL in test_qapply_pg.py); this fake cannot run that read.
+    monkeypatch.setattr(main, "_qapply_service_ready", service_ready)
     for bad in NOT_UUIDS:
         db = _Db()
         _refused(main.admin_accept_quarantine(bad, _quarantine(), db=db), 400, main._QAPPLY_TEXTS["bad_id"])
