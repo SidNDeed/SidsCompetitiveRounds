@@ -17040,9 +17040,9 @@ def _format_ffa_live_bet_embed(lobby):
     lines = []
     for p in lobby.get("players") or []:
         odds = p.get("odds_multiplier") or 0
-        # escape_markdown: a display name is user-authored, and without it a
-        # name carrying bold markers plus a newline can break out of its span
-        # and forge a convincing state line inside this embed (Codex F7).
+        # _escape_md, one pass: the display name a player chose is shown on one
+        # line (every line break a space) with its markdown marks escaped, so it
+        # stays inside its bold span and adds no line to this embed.
         nm = _escape_md(str(p.get("display_name") or "?"))
         lines.append(f"**{nm}** ({p.get('rating')}) — x{odds:.2f}")
     if locked:
@@ -17535,8 +17535,8 @@ async def _fetch_bettable_lobbies():
 def _format_lobby_bet_embed(lob) -> discord.Embed:
     label = _LOBBY_BET_MODE_LABEL.get(lob["mode"], lob["mode"].upper())
     host = _escape_md(str(lob["host_name"]))
-    # escape_markdown on every user-authored name — an unescaped name carrying
-    # bold markers and a newline can forge a state line inside the embed.
+    # _escape_md, one pass per name: each name a player chose is shown on one
+    # line with its markdown marks escaped, so the roster keeps its layout.
     roster = ", ".join(_escape_md(n) for n in lob["names"]) or "-"
     lines = [
         f"Host: **{host}**" + ("  🔒 private" if lob["has_password"] else ""),
