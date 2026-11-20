@@ -2791,7 +2791,37 @@ _F6_NOT_REACHED = {
     "_qdig_strict_model": "parses a held body; its try body issues no statement",
     "_quarantine_report": "under the replay no hold site captures",
     "_quarantine_same_payload": "compares two bodies; its try body issues no statement",
+    "_ffa_progress_relocked": ("called on the body's insert-race and insert-failure arms, each of which raises"
+                               " QAPPLY's refusal first under the replay, and after a capture, which the"
+                               " replay never makes"),
 }
+
+
+async def _f6_skewed(env):
+    """A closed ranked lobby's held game 2 played to the module's target in a
+    lobby frozen at 3 (a score-target skew, _ffa_score_shape_error admits
+    it), with game 1 recorded as a skew too and an unsettled wager on each
+    game: Accept's replay refunds game 2's wagers strictly (the body's skew
+    block) and game 1's leftover through the fail-soft lobby refund."""
+    lob, q = await closed_held(env)
+    await env.conn.execute("UPDATE ffa_lobbies SET score_target = 3 WHERE id = $1", lob.lid)
+    await env.conn.execute("UPDATE ffa_matches SET score_target_frozen = 3, score_target_played = 5"
+                           " WHERE lobby_id = $1 AND game_number = 1", lob.lid)
+    bp, _sid = await env.bettor()
+    for g in (1, 2):
+        await env.wager(lob, bp, lob.pids[0], game=g)
+    return lob, q
+
+
+# The handlers each route reaches only with a fixture or a stand-in of its
+# own (by (function, ordinal)): the skew fixture above; the earned-pack roll,
+# which returns before its first statement where the harness signs nothing
+# (MATCH_HMAC_SECRET is empty), so the stand-in issues one statement first;
+# the achievement's title grant, reached when the granted achievement
+# carries a title (ffa_kills_50 is given one for that case).
+_F6_SKEWED = {("submit_ffa_match", 6), ("_refund_ffa_lobby_bets", 0)}
+_F6_PACK_ROLL = ("submit_ffa_match", 3)
+_F6_TITLE = ("_ensure_achievement_title", 0)
 
 
 def _f6_handlers():
@@ -2878,10 +2908,23 @@ def test_f6_each_swept_handler_that_a_lock_reaches_ends_the_action(monkeypatch):
                 yield k
         monkeypatch.setattr(main, "_qapply_unit", unit)
         table, bad = [], []
+        orig_pc = main._pc_grant_earned_packs
+
+        async def pc_stand_in(db, *a, **k):
+            await db.execute(text("SELECT 1"))
+            return await orig_pc(db, *a, **k)
         for f, i, after, span in handlers:
             reached = []
+            monkeypatch.setattr(main, "_pc_grant_earned_packs",
+                                pc_stand_in if (f, i) == _F6_PACK_ROLL else orig_pc)
+            if (f, i) == _F6_TITLE:
+                monkeypatch.setitem(main.ACHIEVEMENT_TITLE_SKUS, "ffa_kills_50", "f6_title")
+            else:
+                monkeypatch.delitem(main.ACHIEVEMENT_TITLE_SKUS, "ffa_kills_50", raising=False)
             for name, act in (("accept", accept), ("credit", credit)):
-                if name == "accept":
+                if name == "accept" and (f, i) in _F6_SKEWED:
+                    lob, q = await _f6_skewed(env)
+                elif name == "accept":
                     lob, q, _pid = await _f6_held_kills(env)
                 else:
                     lob, q = await closed_held(env)
@@ -2911,5 +2954,7 @@ def test_f6_each_swept_handler_that_a_lock_reaches_ends_the_action(monkeypatch):
                 bad.append((f, i, after, "named as not reached, reached by", reached))
         for row in table:
             print("F6 handler", row)
+        for row in bad:
+            print("F6 BAD", row)
         assert bad == [], bad
     run_env(monkeypatch, body)
