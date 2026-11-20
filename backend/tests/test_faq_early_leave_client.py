@@ -28,6 +28,7 @@ registered, derived from 386's own text (an earlier wording of the grace, as
 "two full points"). Source-reading only:
 no database, no game, no dotnet; test_migration_reruns.py runs 396.
 """
+import ast
 import hashlib
 import importlib.util
 import json
@@ -35,6 +36,8 @@ import os
 import re
 import sys
 from pathlib import Path
+
+import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import test_faq_client_ladder as ladder  # noqa: E402  (its readers and catalogue parser)
@@ -229,14 +232,80 @@ def _ids_in(text):
     return set(re.findall(r"'([0-9a-f]{16})'", text))
 
 
+# The functions that apply the grace rule to a game's seats, each computing
+# `unrated = excluded | graced` exactly once: the two paths that rate or pay
+# a game. A third copy anywhere in main.py fails the count below, so a person
+# reads it and names it here.
+UNRATED_FUNCTIONS = {
+    "submit_ffa_match": "the report route: settles a game's report, rates it and pays its game XP and Gold",
+    "_qapply_credit": "the Credit action of a held report (QAPPLY-1): pays a quarantined report's game XP "
+                      "and Gold by the same decision",
+}
+UNRATED_LINE = "    unrated = excluded | graced\n"
+
+
+def _function_body(src, name):
+    """The text of the top-level function `name`, from its def to the next
+    top-level def, class or decorator (the span the route's test reads)."""
+    starts = [m.start() for m in re.finditer(r"^(?:async def|def) %s\(" % re.escape(name), src, re.M)]
+    assert len(starts) == 1, (name, len(starts))
+    nxt = re.compile(r"^(?:@|async def |def |class )", re.M).search(src, starts[0] + 10)
+    return src[starts[0]:nxt.start() if nxt else len(src)]
+
+
+def _graced_lines(body):
+    return [line.strip() for line in body.split("\n")
+            if re.search(r"\bgraced\b", line) and not line.strip().startswith("#")]
+
+
+def _unrated_problems(src):
+    """Each function of UNRATED_FUNCTIONS computes `unrated` this way exactly
+    once inside its own span, and main.py holds the line nowhere else."""
+    out = [("span", fn, _function_body(src, fn).count(UNRATED_LINE))
+           for fn in UNRATED_FUNCTIONS if _function_body(src, fn).count(UNRATED_LINE) != 1]
+    if src.count(UNRATED_LINE) != len(UNRATED_FUNCTIONS):
+        out.append(("file", src.count(UNRATED_LINE), len(UNRATED_FUNCTIONS)))
+    return out
+
+
+def _decision_call(body, fn):
+    calls = [n for n in ast.walk(ast.parse(body)) if isinstance(n, ast.Call)
+             and isinstance(n.func, ast.Name) and n.func.id == "_ffa_leave_decision"]
+    assert len(calls) == 1, (fn, len(calls))
+    return {k.arg: ast.unparse(k.value) for k in calls[0].keywords}
+
+
+GRACE_ARGUMENTS = {"grace_half": "_ffa_leave_grace_half_points(FFA_POINTS_TO_WIN_ROUND)",
+                   "points_to_win_round": "FFA_POINTS_TO_WIN_ROUND"}
+
+
+def _credit_grace_problems(src):
+    """The Credit action reads the grace set as the route does: its code
+    lines naming `graced` are the decision that returns it and the line that
+    joins it to `unrated`, and its decision takes the route's threshold
+    arguments, both the pinned text."""
+    out = []
+    lines = _graced_lines(_function_body(src, "_qapply_credit"))
+    if lines != ["ghosts, graced, _log = _ffa_leave_decision(", "unrated = excluded | graced"]:
+        out.append(("graced_lines", lines))
+    credit = _decision_call(_function_body(src, "_qapply_credit"), "_qapply_credit")
+    route = _decision_call(_function_body(src, "submit_ffa_match"), "submit_ffa_match")
+    for arg, want in GRACE_ARGUMENTS.items():
+        if credit.get(arg) != want or route.get(arg) != want:
+            out.append(("threshold", arg, credit.get(arg), route.get(arg)))
+    return out
+
+
 def test_the_rule_the_sites_state_is_the_rule_the_server_applies():
     """The threshold the sites state is the one the server computes, in the
     unit the client reports: FFA_LEAVE_GRACE_FULL_POINTS full points of
     FFA_POINTS_TO_WIN_ROUND half points each, and the client's own
-    FfaMode.PointsToWinRound is the server's. A graced seat joins `unrated`,
-    which the rating and the game XP and Gold read, while the achievement
-    candidates are every reported seat outside `excluded`, which grace does
-    not enter: what "can still be earned" says."""
+    FfaMode.PointsToWinRound is the server's. A graced seat joins `unrated`
+    on both paths that rate or pay a game, the report route and the Credit
+    action of a held report (UNRATED_FUNCTIONS); `unrated` is what the
+    route's rating and both paths' game XP and Gold read. The route's
+    achievement candidates are every reported seat outside `excluded`, which
+    grace does not enter: what "can still be earned" says."""
     main = ladder._read(MAIN)
     full = re.findall(r"^FFA_LEAVE_GRACE_FULL_POINTS = (\d+)$", main, re.M)
     per = re.findall(r"^FFA_POINTS_TO_WIN_ROUND = (\d+)$", main, re.M)
@@ -251,7 +320,7 @@ def test_the_rule_the_sites_state_is_the_rule_the_server_applies():
     phrase = "%s half points in total, whether or not any became" % THRESHOLD_WORDS[threshold]
     for site, (_path, _decl, rule) in SITES.items():
         assert " ".join(rule.split()).count(phrase) == 1, (site, phrase)
-    assert main.count("    unrated = excluded | graced\n") == 1
+    assert _unrated_problems(main) == [], _unrated_problems(main)
     assert len(re.findall(r"_ach_players = sorted\(\s*\(p for p in report\.players "
                           r"if p\.steam_id not in excluded\)", main)) == 1
 
@@ -273,6 +342,57 @@ def test_the_grace_set_is_read_only_by_unrated_and_the_reasons():
         '| ({"grace"} if p.steam_id in graced else set())',
         "unrated = excluded | graced",
     ], lines
+
+
+def test_the_credit_action_reads_the_grace_set_as_the_route_does():
+    """The Credit action of a held report (_qapply_credit, QAPPLY-1) applies
+    the rule the sites state by the route's own decision: inside its span the
+    code lines naming `graced` are exactly two, the decision that returns it
+    and `unrated = excluded | graced`, and the decision is
+    _ffa_leave_decision with the route's grace_half and points_to_win_round
+    arguments. Its read_absent is True where the route's is `not _rdm_on`:
+    that arm decides ghost or grace for a zero-tally absent claim, and both
+    land in `unrated`, so it moves no seat into the game XP and Gold."""
+    problems = _credit_grace_problems(ladder._read(MAIN))
+    assert problems == [], problems
+
+
+def _in_span(src, fn, old, new):
+    body = _function_body(src, fn)
+    assert body.count(old) == 1, (fn, old)
+    return src.replace(body, body.replace(old, new), 1)
+
+
+def _control_source(name):
+    src = ladder._read(MAIN)
+    if name == "line_out_of_credit":
+        return _in_span(src, "_qapply_credit", UNRATED_LINE, "    unrated = excluded\n")
+    if name == "third_copy":
+        return src + "\n\ndef _planted_third(excluded, graced):\n" + UNRATED_LINE + "    return unrated\n"
+    if name == "credit_threshold":
+        return _in_span(src, "_qapply_credit", "_ffa_leave_grace_half_points(FFA_POINTS_TO_WIN_ROUND)",
+                        "_ffa_leave_grace_half_points(FFA_POINTS_TO_WIN_ROUND + 1)")
+    if name == "credit_reads_graced_again":
+        return _in_span(src, "_qapply_credit", UNRATED_LINE, UNRATED_LINE + "    _seen = len(graced)\n")
+    assert name == "as_it_stands", name
+    return src
+
+
+@pytest.mark.parametrize("name,want", [
+    ("line_out_of_credit", ("span", "file", "graced_lines")),
+    ("third_copy", ("file",)),
+    ("credit_threshold", ("threshold",)),
+    ("credit_reads_graced_again", ("graced_lines",)),
+    ("as_it_stands", ()),
+])
+def test_control_the_two_paths_pins_read_changed_source(name, want):
+    """Each control changes main.py's text in memory, never a file: the
+    count by span, the count over the file and the Credit action's reading
+    of the grace set each report it by its own word; the text as it stands
+    is clean."""
+    src = _control_source(name)
+    words = sorted({p[0] for p in _unrated_problems(src) + _credit_grace_problems(src)})
+    assert words == sorted(want), (name, words, _unrated_problems(src), _credit_grace_problems(src))
 
 
 def test_each_site_states_the_rule_exactly_once():
