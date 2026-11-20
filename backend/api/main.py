@@ -23388,11 +23388,11 @@ async def link_discord(
     )
     existing_player = existing.scalar_one_or_none()
     if existing_player and existing_player.id != link.player_id:
-        # Unlink old player. Logged because there is no audit row anywhere for a
-        # discord_id change: before this, a takeover was retroactively invisible.
+        # Unlink old player, logged: no audit row anywhere records a discord_id change.
         print(f"[LINK] rebind: discord_id={discord_id} released from "
               f"steam_id={existing_player.steam_id}")
         existing_player.discord_id = None
+        await db.flush()  # discord_id is unique: the release is sent before the new holder's store
 
     if player.discord_id and player.discord_id != discord_id:
         print(f"[LINK] rebind: steam_id={player.steam_id} "
