@@ -1888,6 +1888,15 @@
    "keys": [],
    "phases": []
   },
+  "admin_grant_achievement | INSERT INTO player_items (player_id, item_id, purchase_price, royalty_pa | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "admin_grant_achievement"
+   ],
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
   "admin_grant_achievement | PlayerAchievement(...) | 0": {
    "class": "CLEAR",
    "entries": [
