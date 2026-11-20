@@ -2528,6 +2528,94 @@ def test_f7_nothing_in_the_unit_changes_what_the_service_lookup_reads():
     assert {f for f, _ in _f7_players_writers(planted)[0]} == {"_f7_plant"}
 
 
+async def _f7_fill_on(env, orig):
+    """A fill of the service set on a connection of its own, from an empty
+    cache: the three module values it leaves. The values that stood before
+    are put back."""
+    keep = _f4_snapshot(_F4_CACHE)
+    main._service_player_uuid_cache = None
+    main._service_uuid_cache_monotonic = 0.0
+    main._service_uuid_cache_filled_monotonic = None
+    try:
+        async with env.sm() as db2:
+            await orig(db2)
+            await db2.rollback()
+        return _f4_snapshot(_F4_CACHE)
+    finally:
+        for n, v in keep.items():
+            setattr(main, n, v)
+
+
+def test_f7_a_fill_inside_the_unit_caches_what_another_connection_reads(monkeypatch):
+    """F7's interleaving, for Accept and Credit, committing and rolling back
+    (the rollback by the unit's own F6 mark: busy, nothing kept). The service
+    check before the unit passes on a fresh cache; then, inside the unit,
+    the schedule is moved back as an older lookup's stamp would move it (a
+    lookup that began 61 s ago and read an empty set), so the guard's next
+    call fills the cache from the unit's transaction. That fill is compared
+    with a fill made on a second connection at that point: the set and both
+    clocks equal. In the second case of each pair another session inserts
+    and commits a players row of a service Steam id AFTER the unit's first
+    statement and BEFORE the fill (A3): both fills hold its id, which a unit
+    reading from one snapshot (REPEATABLE READ) would not. After the action
+    ends, whichever way, the cache it left equals a fill on a fresh
+    connection: nothing another request trusts depends on its end."""
+    orig = main._service_player_uuids
+    sid = sorted(main.SPECTATE_BROADCAST_STEAM_IDS)[0]
+
+    async def body(env):
+        seen = _f4_spies(monkeypatch, _F4_CACHE)
+        case = {}
+
+        async def wrap(db):
+            mark = main._QAPPLY_UNIT.get()
+            if mark is None or case.get("done"):
+                return await orig(db)
+            case["done"] = True
+            now = main.time.monotonic()
+            main._service_uuid_cache_monotonic = now - 61.0 - (main._SERVICE_UUID_REFRESH_SECONDS - 60.0)
+            if case["insert"]:
+                case["new"] = str(await env.conn.fetchval(
+                    "INSERT INTO players (id, steam_id, display_name) VALUES (gen_random_uuid(), $1,"
+                    " 'qap service') RETURNING id", sid))
+            reads = seen["in_unit"]
+            out = await orig(db)
+            case["reads"] = seen["in_unit"] - reads
+            case["unit"] = _f4_snapshot(_F4_CACHE)
+            case["other"] = await _f7_fill_on(env, orig)
+            if case["end"] == "rollback":
+                mark.bound = True
+            return out
+        monkeypatch.setattr(main, "_service_player_uuids", wrap)
+        for name, act in (("accept", accept), ("credit", credit)):
+            for end in ("commit", "rollback"):
+                for insert in (False, True):
+                    tag = (name, end, "insert" if insert else "no insert")
+                    lob, q = await closed_held(env)
+                    if name == "credit":
+                        await later_for(env, lob)
+                    _f4_cache(monkeypatch, set(), main._SERVICE_UUID_REFRESH_SECONDS - 60.0, 0.0)
+                    case.clear()
+                    case.update(insert=insert, end=end)
+                    ans = await act(env, q)
+                    print("F7 interleaving", tag, ans.status, case.get("unit"), case.get("other"))
+                    assert case.get("done"), (tag, "the guard was not called inside the unit")
+                    assert case["reads"] == 1, (tag, "the fill read inside the unit", case)
+                    assert case["unit"] == case["other"], (tag, "the unit's fill and another connection's differ")
+                    want = {case["new"]} if insert else set()
+                    assert case["unit"]["_service_player_uuid_cache"] == want, (tag, case["unit"])
+                    if end == "commit":
+                        assert ans.status == 200, (tag, ans)
+                    else:
+                        assert (ans.status, ans.body) == (503, T["busy"]), (tag, ans)
+                        assert await status_of(env, q) == "pending", tag
+                    assert _f4_snapshot(_F4_CACHE) == case["unit"], (tag, "the cache moved after the fill")
+                    assert await _f7_fill_on(env, orig) == case["unit"], (tag, "a fresh fill after the end differs")
+                    if insert:
+                        await env.conn.execute("DELETE FROM players WHERE steam_id = $1", sid)
+    run_env(monkeypatch, body)
+
+
 def test_f6_control_a_non_bound_error_in_a_best_effort_block_keeps_the_game(monkeypatch):
     async def body(env):
         lob, q = await closed_held(env)
