@@ -1423,14 +1423,17 @@ def test_census_refuses_incomplete_opener_form(name):
 def test_census_complete_layer_frozen_whole():
     """G1: the complete layer is frozen for every census file, holds no
     refuse form, and each declared FORWARDING exception is frozen exactly
-    once as a call; the count is the coarse 365 (363, plus the two coarse forms
-    of the round-11 merge, re-frozen once from the seat derivation), plus the
+    once as a call; the count is the coarse 361 (363, plus the two coarse forms
+    of the round-11 merge, re-frozen once from the seat derivation, less the
+    four the bot text escape took out by hand), plus the
     one coarse form of the B10 merge (B10_MERGE_FROZEN, frozen by hand), plus
     the one coarse form of migration 415's change (MAIL_SEND_RECEIPTS_FROZEN,
     frozen by hand), plus the four coarse forms of migration 416's change
-    (LOBBY_INVITES_FROZEN, frozen by hand), plus the five coarse forms of
-    the moderator log's change (MODLOG_FROZEN, frozen by hand), plus the
-    complete layer, which also holds that block's two complete forms."""
+    (LOBBY_INVITES_FROZEN, frozen by hand), plus the two coarse forms of the
+    bot text escape (BOT_TEXT_ESCAPE_FROZEN, frozen by hand), plus the five
+    coarse forms of the moderator log's change (MODLOG_FROZEN, frozen by
+    hand), plus the complete layer, which also holds that block's two
+    complete forms."""
     import ro_census
     import ro_census_frozen as fz
     import test_r7_ro_role_pg as r7
@@ -1469,8 +1472,14 @@ def test_census_complete_layer_frozen_whole():
     assert sum(len(fz.FROZEN[k]) for k in coarse) == (fz.COARSE_COUNT + fz.B10_MERGE_COUNT
                                                       + fz.MAIL_SEND_RECEIPTS_COUNT
                                                       + fz.LOBBY_INVITES_COUNT
-                                                      + rows_coarse) == 371 + rows_coarse
-    assert fz.COARSE_COUNT == 365
+                                                      + fz.BOT_TEXT_ESCAPE_COUNT
+                                                      + rows_coarse) == 369 + rows_coarse
+    assert fz.COARSE_COUNT == 361
+    # the bot text escape (BOT-TEXT-ESCAPE-1): two hand-frozen coarse dsntext
+    # forms in mail_discord.py (older_bot_name's pattern and its docstring)
+    assert sum(len(v) for v in fz.BOT_TEXT_ESCAPE_FROZEN.values()) == fz.BOT_TEXT_ESCAPE_COUNT == 2
+    assert set(fz.BOT_TEXT_ESCAPE_FROZEN) <= coarse
+    assert {f[0] for v in fz.BOT_TEXT_ESCAPE_FROZEN.values() for f in v} == {"dsntext"}
     # migration 416's change: four hand-frozen coarse kwarg forms in main.py
     # (the invite cores' explicit password=None on the four request models)
     assert sum(len(v) for v in fz.LOBBY_INVITES_FROZEN.values()) == fz.LOBBY_INVITES_COUNT == 4
@@ -1504,7 +1513,8 @@ def test_census_complete_layer_frozen_whole():
     assert fz.FROZEN_COUNT == (fz.COARSE_COUNT + fz.COMPLETE_COUNT + fz.R10_COUNT
                                + fz.R10_MERGE_COUNT + fz.R11_ID_COUNT + fz.R11_OPEN_COUNT
                                + fz.B10_MERGE_COUNT + fz.MAIL_SEND_RECEIPTS_COUNT
-                               + fz.LOBBY_INVITES_COUNT + rows_count) == 860 + rows_count
+                               + fz.LOBBY_INVITES_COUNT + fz.BOT_TEXT_ESCAPE_COUNT
+                               + rows_count) == 858 + rows_count
     assert not [f for k in complete for f in fz.FROZEN[k] if f[0] == "refuse"]
     assert {f[0] for k in complete for f in fz.R10_FROZEN[k]} <= set(R10_KINDS)
     # the declared forwarding wrapper is bound whole, exactly once
