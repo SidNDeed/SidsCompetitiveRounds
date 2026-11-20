@@ -3,14 +3,15 @@ a players row, computed from the source (main.py, every other backend/api
 module that runs SQL, models.py and the sql migrations are read as text;
 nothing is imported or run).
 
-Nine module-level switches widen or sharpen what is read; all nine off is
+Ten module-level switches widen or sharpen what is read; all ten off is
 the census as first frozen (main.py alone, no triggers, no insert waits, the
 FOR clause read from the last SELECT before it, foreign keys by table, a
 Player known by select(Player)/get(Player) alone, a no-wait acquisition read
 as taking nothing, every players lock of the deletion's own-row functions
 read as on P's row, a name unpacked from a dictionary of string tuples
-unread), kept as mdpl_census_base.json, which test_mdpl_census computes
-again with the nine off (the regression control of the widening):
+unread, a loop's literal texts unread), kept as mdpl_census_base.json, which
+test_mdpl_census computes again with the ten off (the regression control of
+the widening):
 - MODULES: every backend/api/*.py that calls text(...) or .execute /
   .exec_driver_sql / .with_for_update (models.py and schemas.py keep their
   roles) is parsed. main.py's functions keep their bare names; module M's are
@@ -103,6 +104,12 @@ again with the nine off (the regression control of the widening):
   position's element of every value, as the alternatives form reads them.
   Off: the names are unread, so a statement that uses one reads its table
   as "?" or is not read at all.
+- LOOP_TEXTS: an unpacked loop target over a literal tuple of tuples whose
+  elements at its position are texts, not names (`for _mode, _cancel in
+  (("team", "UPDATE ..."), ("ovt", "UPDATE ..."))`), reads as those texts,
+  and `text(<that name>)` is read as each text, a statement of its own with
+  its own place; a call inside a text reads as an unreadable part, as in any
+  text. Off: the name is unread, and so is the statement.
 
 The deletion (delete_player_data) holds its own players row from its first
 write of it (`UPDATE players SET pc_shards = 0`, FOR NO KEY UPDATE) to its
@@ -205,13 +212,13 @@ ROUTE_METHODS = frozenset({"get", "post", "put", "delete", "patch", "api_route",
 KEY_COLUMNS = {"players": frozenset({"id", "steam_id", "discord_id"})}
 IDENTITY_KEYS = frozenset({"key:hashtext(:p)"})
 
-# The nine widenings of the census, each a switch (all off = the census as first
+# The ten widenings of the census, each a switch (all off = the census as first
 # frozen, mdpl_census_base.json: main.py alone, no triggers, no insert waits, the
 # FOR clause of the last SELECT, a foreign key's parent locked by every INSERT of
 # its table, a Player known by select(Player)/get(Player) alone, a no-wait
 # acquisition read as taking nothing, every players lock of the deletion's
 # own-row functions read as on P's row, a name unpacked from a dictionary of
-# string tuples unread).
+# string tuples unread, a loop's literal texts unread).
 MODULES = True          # every backend/api module that runs SQL is read, not main.py alone
 TRIGGERS = True         # a write fires the triggers backend/sql defines on its table
 INSERT_WAITS = True     # an INSERT holds (table, INS); one with ON CONFLICT waits for it
@@ -221,6 +228,7 @@ ORM_TYPES = True        # a Player object is also known by annotation, return ty
 NB_HOLDS = True         # a SKIP LOCKED / NOWAIT / try acquisition waits for nothing but holds what it got
 OWN_FK_WAITS = True     # a KEY SHARE in the deletion's own-row functions is a foreign key's, on another row: a wait
 DICT_TUPLES = True      # a, b = D[k], D a module dictionary of string tuples: each name reads as its position's values
+LOOP_TEXTS = True       # for a, b in ((x, "SQL"), ...): b reads as those texts, text(b) as each a statement of its own
 
 # Foreign keys a migration drops by dynamic SQL (EXECUTE format('ALTER TABLE ...
 # DROP CONSTRAINT %I', ...) over a pg_constraint lookup), which the reader cannot
@@ -1616,7 +1624,7 @@ class Source:
         self._memo[name] = []                   # a cycle inlines nothing
         params = self.params.get(name, {}) if MODULES else self.params.get(name.rsplit(".", 1)[-1], {})
         ctx = {"seen": defaultdict(int), "local": dict(params), "fn": name,
-               "players_vars": set(), "modvars": {}}
+               "players_vars": set(), "modvars": {}, "multi": {}}
         if ORM_TYPES:                           # rule 1: a parameter annotated Player
             ctx["players_vars"].update(self._player_params(self.qdefs.get(name) or self.defs[name]))
         self._fn_stack.append(name)
@@ -1693,6 +1701,11 @@ class Source:
                                 isinstance(v, ast.Constant) and isinstance(v.value, str) and re.fullmatch(_W, v.value)
                                 for v in vals):
                             ctx["local"][tg.id] = "{?t:%s}" % "|".join(sorted({v.value for v in vals}))
+                        elif LOOP_TEXTS and isinstance(tg, ast.Name):   # texts, not names: each a statement
+                            texts = [self.text(v, ctx["local"]) for v in vals]
+                            if all(t is not None for t in texts):
+                                ctx["multi"][tg.id] = texts
+                                ctx["local"][tg.id] = self._alternatives(texts)
             body = self._body(st.body, ctx) + self._body(st.orelse, ctx)
             hoist = [e[1:4] for e in body if e[0] == "L"] + [x for e in body if e[0] == "HOIST" for x in e[1]]
             return head + ([("HOIST", hoist)] if hoist else []) + body
@@ -1716,6 +1729,7 @@ class Source:
                 out.extend(self._body(h.body, ctx))
             return out + self._body(st.orelse, ctx) + self._body(st.finalbody, ctx)
         if isinstance(st, ast.Assign) and len(st.targets) == 1 and isinstance(st.targets[0], ast.Name):
+            ctx["multi"].pop(st.targets[0].id, None)    # rebound: no longer a loop's texts
             t = self.text(st.value, ctx["local"])
             if t is not None:
                 prev = ctx["local"].get(st.targets[0].id)
@@ -1749,6 +1763,7 @@ class Source:
             if rows and all(len(r) == len(st.targets[0].elts) for r in rows):
                 for i, tg in enumerate(st.targets[0].elts):
                     if isinstance(tg, ast.Name):
+                        ctx["multi"].pop(tg.id, None)
                         ctx["local"][tg.id] = self._alternatives([r[i] for r in rows])
         if isinstance(st, ast.Assign) and len(st.targets) == 1 and isinstance(st.targets[0], ast.Tuple) \
                 and isinstance(st.value, ast.Tuple) and len(st.value.elts) == len(st.targets[0].elts):
@@ -1805,7 +1820,13 @@ class Source:
             fname = getattr(c.func, "id", None)
             attr = getattr(c.func, "attr", None)
             first = getattr(c.args[0], "id", "") if c.args else ""
-            if fname == "text" and c.args:
+            if fname == "text" and c.args and isinstance(c.args[0], ast.Name) \
+                    and c.args[0].id in ctx.get("multi", {}):     # LOOP_TEXTS: each text its own statement
+                for sql in ctx["multi"][c.args[0].id]:
+                    place = self._place(ctx, _norm(sql)[:72])
+                    for t, mode, b in self.locks_of_sql(sql):
+                        out.append(("L", t, mode, b, place))
+            elif fname == "text" and c.args:
                 sql = self.text(c.args[0], ctx["local"])
                 if sql is None:
                     self.unread.add("%s | text(%s)" % (ctx["fn"], ast.unparse(c.args[0])[:60]))
@@ -2027,7 +2048,7 @@ COMPARED = ("class", "fallback", "phases", "held", "entries", "keys")
 BASE = os.path.join(HERE, "mdpl_census_base.json")
 BASE_FIELDS = ("class", "phases", "held", "entries", "keys")
 SWITCHES = ("MODULES", "TRIGGERS", "INSERT_WAITS", "FOR_DEPTH", "FK_COLUMNS", "ORM_TYPES", "NB_HOLDS",
-            "OWN_FK_WAITS", "DICT_TUPLES")
+            "OWN_FK_WAITS", "DICT_TUPLES", "LOOP_TEXTS")
 
 
 def measured(src=None):

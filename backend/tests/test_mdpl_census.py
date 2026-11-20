@@ -16,7 +16,7 @@ way, gives the frozen record (the control).
 A site whose class rests on an identity key (its fallback, the class without
 the key, is above it) names whose key covers whose row, or is judged to its
 fallback by hand (lesson 732). The regression control of the reader's
-widening: with its nine switches off it computes mdpl_census_base.json, the
+widening: with its ten switches off it computes mdpl_census_base.json, the
 census frozen before the widening, exactly (the test keeps the name it had
 with six). A lock taken without a wait (SKIP LOCKED, NOWAIT) is a hold: a
 planted route that takes the held row that way is READ, as with a wait, and a
@@ -580,6 +580,26 @@ def test_a_name_unpacked_from_a_dictionary_of_table_tuples_reads_its_tables(src,
     monkeypatch.setattr(mc, "DICT_TUPLES", False)
     _s1, off = mc.sites(mc.Source(), entries=["ffa_queue_leave"])
     assert _HOST_UPDATE not in off and _q_held(off) != [], _q_held(off)
+
+
+def test_a_loop_s_literal_texts_are_each_read_as_a_statement(src, measured, monkeypatch):
+    """LOOP_TEXTS: `for _mode, _cancel in (("team", "UPDATE team_series ..."),
+    ("ovt", "UPDATE ovt_series ..."))` in _ban_void_apply reads text(_cancel)
+    as each text, each a statement with its own place. The control: with the
+    switch off the statement is unread and neither place stands."""
+    unread = "_ban_void_apply | text(_cancel)"
+    heads = [p[1] for e in src.events("_ban_void_apply") if e[0] == "L" for p in [e[4]]
+             if p[0] == "_ban_void_apply"]
+    assert unread not in measured["unread"]
+    assert any(h.startswith("UPDATE team_series SET status='cancelled'") for h in heads), heads
+    assert any(h.startswith("UPDATE ovt_series SET status='canceled'") for h in heads), heads
+    monkeypatch.setattr(mc, "LOOP_TEXTS", False)
+    off = mc.Source()
+    heads = [p[1] for e in off.events("_ban_void_apply") if e[0] == "L" for p in [e[4]]
+             if p[0] == "_ban_void_apply"]
+    assert unread in off.unread
+    assert not any(h.startswith(("UPDATE team_series SET status='cancelled'",
+                                 "UPDATE ovt_series SET status='canceled'")) for h in heads), heads
 
 
 # A route that takes the identity key, then the portrait blob's key, then
