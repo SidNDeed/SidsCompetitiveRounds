@@ -222,6 +222,12 @@ def test_standby_expired_row_401(env, monkeypatch):
 
 
 BASE = "0e75199339b72dd132a2114fee90fa6116c5d2e1"
+# The verified-reads lane's own tip (the second parent of its landing merge,
+# 154a408d). test_auth_steam_untouched is a claim about THAT lane's change, so
+# it reads the diff BASE..READ_GATE_TIP: a later lane may change /auth/steam on
+# purpose (bans part 2a: sign-in reads the ban without a lock before the Steam
+# call and again under the identity key in the writing transaction).
+READ_GATE_TIP = "4d1ede00bd33cc6a4b611bb7a2aa94d3f32bb9be"
 
 
 def _auth_steam_span(source: str):
@@ -237,13 +243,15 @@ def _auth_steam_span(source: str):
 
 
 def test_auth_steam_untouched():
-    """The session mint is not modified in any way: no line of main.py's diff
-    from the lane base falls inside the /auth/steam handler's span there."""
+    """The verified-reads lane did not modify the session mint in any way: no
+    line of main.py's diff from the lane base to the lane's tip falls inside
+    the /auth/steam handler's span there."""
     repo = Path(main.__file__).resolve().parents[2]
     base_src = subprocess.run(["git", "-C", str(repo), "show", f"{BASE}:backend/api/main.py"],
                               capture_output=True, text=True, encoding="utf-8", check=True).stdout
     lo, hi = _auth_steam_span(base_src)
-    diff = subprocess.run(["git", "-C", str(repo), "diff", "-U0", BASE, "--", "backend/api/main.py"],
+    diff = subprocess.run(["git", "-C", str(repo), "diff", "-U0", BASE, READ_GATE_TIP,
+                           "--", "backend/api/main.py"],
                           capture_output=True, text=True, encoding="utf-8", check=True).stdout
     import re
     touched = []

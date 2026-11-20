@@ -1784,6 +1784,11 @@ ENDS_A_DEFERRAL = {
     "team_queue_leave": {"cancelled"},
     "team_queue_poll": {"cancelled", CLEARS_THE_MARKER},
     "delete_player_data": {"cancelled"},
+    # Bans part 2a (S4): the ban voids every live 2v2 series of the banned
+    # account (the live statuses of BAN_RECORD_STATUSES) by moving it to
+    # 'cancelled' with invalidated_at; a deferred row ends by the first way,
+    # the row leaving the open statuses, as account deletion's does.
+    "_ban_void_apply": {"cancelled"},
     "_team_lock_family_pick": {"cancelled"},
     "_team_relock_existing_series": {CLEARS_THE_MARKER},
     "team_lobby_start": {CLEARS_THE_MARKER},

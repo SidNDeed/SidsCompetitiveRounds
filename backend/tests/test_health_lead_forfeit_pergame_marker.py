@@ -27,6 +27,7 @@ import os
 import pathlib
 import re
 import shutil
+from tree_copy_imports import local_test_imports  # noqa: E402
 import subprocess
 import sys
 
@@ -302,7 +303,7 @@ def _copy_tree(dst: pathlib.Path) -> pathlib.Path:
         shutil.copyfile(p, api / p.name)
     for p in (BACKEND / "sql").glob("*.sql"):
         shutil.copyfile(p, sql / p.name)
-    for name in ("conftest.py", "pc_themes_data.py", "test_team_series_report_dc.py"):
+    for name in local_test_imports(("conftest.py", "pc_themes_data.py", "test_team_series_report_dc.py")):
         shutil.copyfile(BACKEND / "tests" / name, tests / name)
     shutil.copyfile(BACKEND / "tools" / "review_tripwire.py", tools / "review_tripwire.py")
     return api / "main.py"
