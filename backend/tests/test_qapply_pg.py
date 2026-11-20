@@ -2258,6 +2258,44 @@ def test_f5_the_strict_rule_reads_what_the_api_reads_and_refuses_the_rest(monkey
     run_env(monkeypatch, body)
 
 
+def test_f5_the_strict_rule_reads_the_same_names_under_every_collation(monkeypatch):
+    """The seed's rule reads ASCII digits alone whatever the database's
+    collation: a regular expression's character class follows the collation
+    of the text it reads (under an ICU collation a locale class such as
+    [[:digit:]] takes the Arabic-Indic, Devanagari and fullwidth digits),
+    while a code-point range such as [0-9] does not. Every pattern of the
+    migration's seed block and of the SELECT file is read under "C", under
+    the database's default and under an ICU collation, over every strict and
+    every refused name; each answer must be the "C" answer, and no
+    non-ASCII digit may be read as a game number under any of them."""
+    import re as _re
+    pats = sorted(set(_re.findall(r"FROM '([^']*)'", _f5_seed_block()))
+                  | set(_re.findall(r"FROM '([^']*)'", _f5_text(SEED_SELECT))))
+    assert pats, "the seed block names no pattern"
+    rooms = [r for r in _F5_STRICT] + [room for _case, room in _F5_REFUSE if room is not None]
+    non_ascii = [room for case, room in _F5_REFUSE if room is not None and "digit" in case]
+    assert len(non_ascii) == 3
+
+    async def body(env):
+        c = env.conn
+        icu = await c.fetchval(
+            "SELECT collname FROM pg_collation WHERE collprovider = 'i' AND collisdeterministic"
+            " ORDER BY (collname = 'und-x-icu') DESC, collname LIMIT 1")
+        assert icu, "this database has no ICU collation; the rule's reading under one cannot be shown"
+        bad = []
+        for pat in pats:
+            for room in rooms:
+                ans = {}
+                for name, expr in (("C", 'CAST($1 AS text) COLLATE "C"'), ("default", "CAST($1 AS text)"),
+                                   (icu, 'CAST($1 AS text) COLLATE "%s"' % icu.replace('"', '""'))):
+                    ans[name] = await c.fetchval("SELECT substring(%s FROM CAST($2 AS text))" % expr, room, pat)
+                if len(set(ans.values())) != 1 or (room in non_ascii and ans["C"] is not None):
+                    bad.append((pat, room, ans))
+        print("F5 COLLATION", icu, len(pats), "patterns", len(rooms), "names", "bad", len(bad))
+        assert bad == [], bad
+    run_env(monkeypatch, body)
+
+
 async def _f5_421_end_state(env):
     """421's end state on a lobby of the harness: two members' reports of game
     3 held (siblings) and one of game 2; the game 2 row and the first game 3
