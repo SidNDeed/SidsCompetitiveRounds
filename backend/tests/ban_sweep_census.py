@@ -139,6 +139,11 @@ ROW_SERIALIZED = {
         1, "the early read before the Steam call takes no key and writes nothing: the transaction "
            "ends before the call, and the writing transaction reads the ban again under the "
            "account's exclusive key (_ban_lock_and_gate, exclusive=) before its first write"),
+    ("auto_logs", "upload_auto_log"): (
+        1, "the admission read takes no key and writes nothing: a refused upload takes no advisory "
+           "lock and the scrub stays outside every lock (the route's rules before bans part 2a); "
+           "the writing transaction (T2) reads the ban again under the account's shared key "
+           "(_ban_lock_and_gate) before its INSERT"),
     ("main", "_report_window_receive"): (
         1, "the receipt's read, under the EXCLUSIVE identity guards _guard_identities took just "
            "before for every account of the report, before its first write"),

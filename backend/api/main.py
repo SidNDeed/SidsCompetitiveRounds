@@ -49898,15 +49898,21 @@ async def _is_admin(db: AsyncSession, steam_id: str) -> bool:
     banned admin is no admin to any check built on this one (_require_admin
     and every inline admin check), and the refusal writes the [BAN-GATE]
     line. The ban is read only for a roster member."""
-    if not steam_id:
-        return False
-    r = await db.execute(select(AdminUser).where(AdminUser.steam_id == steam_id))
-    if r.scalar_one_or_none() is None:
+    if not await _is_admin_roster(db, steam_id):
         return False
     if (await _is_banned(db, steam_id)) is not None:
         _ban_gate_refused()
         return False
     return True
+
+
+async def _is_admin_roster(db: AsyncSession, steam_id: str) -> bool:
+    """On the admin roster (admin_users), the ban not read. Only _is_admin and
+    _require_admin_roster call it; see the latter for the one route that may."""
+    if not steam_id:
+        return False
+    r = await db.execute(select(AdminUser).where(AdminUser.steam_id == steam_id))
+    return r.scalar_one_or_none() is not None
 
 
 # The moderation target (v4.13, review r14): the ONE domain for the player a
@@ -50026,6 +50032,22 @@ def _mod_reason_or_422(value, field: str = "reason"):
 
 async def _require_admin(db: AsyncSession, admin_steam_id: str, action: str, target: str, signature) -> None:
     if not await _is_admin(db, admin_steam_id):
+        raise HTTPException(403, "Not an admin")
+    if not _verify_admin_hmac(admin_steam_id, action, target, signature):
+        raise HTTPException(403, "Bad admin signature")
+
+
+async def _require_admin_roster(db: AsyncSession, admin_steam_id: str, action: str, target: str,
+                                signature) -> None:
+    """_require_admin without its ban read, for the one admin route whose own
+    gate reads the acting admin's ban later in the same request and answers
+    it as it did before bans part 2a: admin_mail_broadcast, whose sender gates
+    (_mail_sender_gates) answer an actively banned sender 403 "banned", after
+    the idempotency replay (a retry of a broadcast that already went out gets
+    its stored answer). A banned admin still broadcasts nothing new: the
+    sender gates refuse before any write. test_ban_sweep_admin_pairs.py
+    holds the callers to that route and the gate to its place."""
+    if not await _is_admin_roster(db, admin_steam_id):
         raise HTTPException(403, "Not an admin")
     if not _verify_admin_hmac(admin_steam_id, action, target, signature):
         raise HTTPException(403, "Bad admin signature")
@@ -50818,6 +50840,15 @@ async def _lobby_seat_left_core(db: AsyncSession, mode: str, lobby_id, leaver_pi
     return inv, False, list(remaining)
 
 
+# The lobby kinds the ban core reads an account's open lobbies from, in the
+# order account deletion locks them (FFA, then 2v2, then 1v2): (mode, queue
+# table, lobby table). A closed list of code constants; the ban core's lobby
+# read interpolates these table names and nothing else.
+_BAN_LOBBY_TABLES = (("ffa", "ffa_queue", "ffa_lobbies"),
+                     ("team", "team_queue", "team_lobbies"),
+                     ("ovt", "ovt_queue", "ovt_lobbies"))
+
+
 async def _apply_ban_core(db: AsyncSession, *, admin_steam_id: str, target_steam_id: str,
                           reason: str, duration_minutes: int | None = None,
                           length_sent: bool = False, record_reason: str | None = None,
@@ -50907,16 +50938,16 @@ async def _apply_ban_core(db: AsyncSession, *, admin_steam_id: str, target_steam
         # to another lobby meanwhile; a seat that left in between leaves the
         # end below with nothing to end.
         _ban_lobbies = []
-        for _lmode, _lqt, _llt in (("ffa", "ffa_queue", "ffa_lobbies"),
-                                   ("team", "team_queue", "team_lobbies"),
-                                   ("ovt", "ovt_queue", "ovt_lobbies")):
+        for _lmode, _lqt, _llt in _BAN_LOBBY_TABLES:
             # FIX-2 class III: every OPEN lobby the account hosts or holds a
             # seat in, read from the lobby table itself (a host whose own
             # expired seat row is already gone is found by host_player_id).
+            # The statement's interpolated parts are the table names of the
+            # closed list _BAN_LOBBY_TABLES alone; the account is a typed bind.
             for _blid in (await db.execute(text(
-                    f"SELECT id FROM {_llt} WHERE status = 'open' AND (host_player_id = :pid"
+                    f"SELECT id FROM {_llt} WHERE status = 'open' AND (host_player_id = CAST(:pid AS uuid)"
                     f" OR id IN (SELECT series_id FROM {_lqt}"
-                    f"           WHERE player_id = :pid AND status = 'lobby'))"
+                    f"           WHERE player_id = CAST(:pid AS uuid) AND status = 'lobby'))"
                     f" ORDER BY id"), {"pid": _bpid})).scalars().all():
                 await db.execute(text(
                     f"SELECT 1 FROM {_llt} WHERE id = :lid FOR NO KEY UPDATE"
@@ -84151,7 +84182,9 @@ async def admin_mail_broadcast(req: _AdminMailBroadcastReq, db: AsyncSession = D
     key = _mail_parse_key(req.idempotency_key)
     fp = _mail_request_fp("broadcast", subject=req.subject, body=req.body)
     mfp = _mail_request_message_fp("broadcast", subject=req.subject, body=req.body)
-    await _require_admin(db, req.admin_steam_id, "mail_broadcast", str(key), req.hmac_signature)
+    # The roster check alone: the acting admin's ban is the sender gates'
+    # (below, after the replay), answered "banned" (_require_admin_roster).
+    await _require_admin_roster(db, req.admin_steam_id, "mail_broadcast", str(key), req.hmac_signature)
     if req.actor_steam_id and req.actor_steam_id != req.admin_steam_id:
         raise HTTPException(status_code=400, detail="actor_mismatch")
     # Identity lock + re-read + grant re-proof BEFORE the sender row is read
