@@ -2291,3 +2291,192 @@ def test_f5_a_lobby_made_before_the_168_bound_is_refused_by_both_routes(monkeypa
             ans = await act(env, q)
             assert ans.status == 200, (name, "at the instant", ans)
     run_env(monkeypatch, body)
+
+
+# ── F6: a database bound that fires inside the unit ends the action ───────
+# The commits a unit's transaction can reach (from the roots, bare-name calls
+# transitively), each with what stands directly before it. The four that are
+# not the unit's are named with the reason the unit never reaches them.
+_F6_COMMITS_EXEMPT = {
+    # journals a readmission lobby's report; the body refuses a readmission
+    # lobby under the replay first (readmit), and Credit refuses it in its own checks
+    "_ffa_report_gate": "readmission lobbies are refused under the replay before the gate",
+    # reached only from _ffa_settle_due_windows_for_report, which the body
+    # calls only for a network report (_qapply is None)
+    "_ffa_settle_window": "the due windows settle for a network report only",
+    # the capture of a held report: under the replay the hold sites raise before it
+    # (_ffa_hold_or_raise's _QAPPLY_REPLAY test); the team settlement is never an FFA row's
+    "_quarantine_report": "under the replay no hold site captures",
+}
+
+
+def _f6_commits():
+    tree = _tree()
+    funcs = {n.name: n for n in tree.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
+    seen, todo = set(), list(_F4_ROOTS)
+    while todo:
+        f = todo.pop()
+        if f in seen or f not in funcs:
+            continue
+        seen.add(f)
+        todo += [c.id for c in ast.walk(funcs[f]) if isinstance(c, ast.Name) and c.id in funcs]
+    out = []
+    for f in sorted(seen):
+        for blk in ast.walk(funcs[f]):
+            for field in ("body", "orelse", "finalbody"):
+                stmts = getattr(blk, field, None)
+                if not isinstance(stmts, list):
+                    continue
+                for i, s in enumerate(stmts):
+                    v = s.value if isinstance(s, ast.Expr) else None
+                    if (isinstance(v, ast.Await) and isinstance(v.value, ast.Call)
+                            and isinstance(v.value.func, ast.Attribute) and v.value.func.attr == "commit"):
+                        out.append((f, stmts[i - 1] if i else None))
+    return funcs, out
+
+
+def _f6_is_mark_read(stmt):
+    return (isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Call)
+            and isinstance(stmt.value.func, ast.Name) and stmt.value.func.id == "_qapply_check_bound")
+
+
+def test_f6_every_commit_a_unit_reaches_is_directly_preceded_by_the_marks_read():
+    funcs, commits = _f6_commits()
+    unit = [(f, prev) for f, prev in commits if f not in _F6_COMMITS_EXEMPT]
+    assert sorted({f for f, _ in commits} - set(_F6_COMMITS_EXEMPT)) == [
+        "admin_credit_quarantine", "submit_ffa_match"], sorted({f for f, _ in commits})
+    for f, prev in unit:
+        if f == "admin_credit_quarantine":
+            assert _f6_is_mark_read(prev), ("Credit's commit", ast.unparse(prev) if prev else None)
+        else:
+            # The body's one commit follows the If whose last statement is
+            # _qapply_finish, and _qapply_finish ends with the mark's read.
+            assert isinstance(prev, ast.If) and "_qapply_finish" in ast.unparse(prev.body[-1]), ast.unparse(prev)
+    assert _f6_is_mark_read(funcs["_qapply_finish"].body[-1]), "_qapply_finish ends with the mark's read"
+    assert len([c for c in commits if c[0] == "submit_ffa_match"]) == 1
+    # The listener: registered for every Engine, and it classifies with the
+    # one classifier (no second copy of the two codes).
+    from sqlalchemy import event
+    from sqlalchemy.engine import Engine
+    assert event.contains(Engine, "handle_error", main._qapply_on_db_error)
+    lsrc = ast.unparse(funcs["_qapply_on_db_error"])
+    assert "_qapply_out_of_time" in lsrc and "55P03" not in lsrc and "57014" not in lsrc
+
+
+async def _f6_bound_error(env):
+    """One statement ended by statement_timeout (57014), its error caught here."""
+    async with env.sm() as s:
+        await s.execute(text("SELECT set_config('statement_timeout', '50ms', true)"))
+        try:
+            await s.execute(text("SELECT pg_sleep(1)"))
+        except Exception:
+            pass
+        await s.rollback()
+
+
+def test_f6_the_mark_is_the_calling_units_alone(monkeypatch):
+    import contextvars
+
+    async def body(env):
+        async with main._qapply_unit("accept"):
+            mark = main._QAPPLY_UNIT.get()
+            # Another request: its own context, no unit of its own.
+            await asyncio.get_running_loop().create_task(_f6_bound_error(env), context=contextvars.Context())
+            assert mark.bound is False, "a bound error of another request marked this unit"
+            # This unit's own context: marked.
+            await _f6_bound_error(env)
+            assert mark.bound is True, "the unit's own bound error left it unmarked"
+        # No unit open: nothing to mark, nothing raised.
+        await _f6_bound_error(env)
+        assert main._QAPPLY_UNIT.get() is None
+    run_env(monkeypatch, body)
+
+
+async def _f6_held_kills(env):
+    """A closed lobby's held game 2 whose body gives its first player 60
+    kills. The harness runs with no signing secret, so the signature check
+    answers v2 and kills count: Accept grants that player ffa_kills_50."""
+    lob, q = await closed_held(env)
+    await env.conn.execute("UPDATE match_report_quarantine SET payload = jsonb_set(payload,"
+                           " '{players,0,kills}', '60') WHERE id = $1", uuid.UUID(q))
+    sid = await env.conn.fetchval("SELECT payload->'players'->0->>'steam_id' FROM match_report_quarantine"
+                                  " WHERE id = $1", uuid.UUID(q))
+    return lob, q, await env.conn.fetchval("SELECT id FROM players WHERE steam_id = $1", sid)
+
+
+async def _f6_state(env, lob, pid):
+    return (await tables(env), await paid(env, lob), await _f5_claims(env.conn),
+            await env.conn.fetchval("SELECT count(*) FROM player_achievements WHERE player_id = $1", pid))
+
+
+def test_f6_a_lock_bound_inside_the_achievement_block_ends_the_accept(monkeypatch):
+    async def body(env):
+        lob, q, pid = await _f6_held_kills(env)
+        before = await _f6_state(env, lob, pid)
+        loop = asyncio.get_running_loop()
+        async with env.sm() as other:
+            # Another session holds the achievement row's key past the lock bound.
+            other.add(main.PlayerAchievement(player_id=pid, achievement_key="ffa_kills_50"))
+            await other.flush()
+            t0 = loop.time()
+            ans = await accept(env, q)
+            took = loop.time() - t0
+            await other.rollback()
+        print("F6 accept under the held achievement key:", ans.status, ans.body, "%.3f s" % took)
+        assert (ans.status, ans.body) == (503, T["busy"]), ans
+        assert took < main._QAPPLY_DEADLINE_S, took
+        assert await _f6_state(env, lob, pid) == before, "a change stood"
+        assert await status_of(env, q) == "pending"
+        # Released: a retry applies the game WITH the achievement and its gold.
+        ans = await accept(env, q)
+        assert ans.status == 200, ans
+        assert await env.conn.fetchval("SELECT count(*) FROM player_achievements WHERE player_id = $1"
+                                       " AND achievement_key = 'ffa_kills_50'", pid) == 1
+        assert await env.conn.fetchval("SELECT count(*) FROM gold_transactions WHERE player_id = $1"
+                                       " AND reason = 'achievement' AND reference_id = 'ffa_kills_50'", pid) == 1
+    run_env(monkeypatch, body)
+
+
+def test_f6_a_lock_bound_caught_in_credits_reach_ends_the_credit(monkeypatch):
+    async def body(env):
+        lob, q = await closed_held(env)
+        await later_for(env, lob)
+        pid = lob.pids[0]
+        orig = main._modlog_steam_ids
+        key = 0x5F6C12
+
+        async def swallowed(db, *a, **k):
+            # A best-effort block in Credit's reach: a lock wait past the
+            # bound inside a savepoint (on a lock nothing else of Credit
+            # takes), its error caught and dropped.
+            try:
+                async with db.begin_nested():
+                    await db.execute(text("SELECT pg_advisory_xact_lock(:k)"), {"k": key})
+            except Exception:
+                pass
+            return await orig(db, *a, **k)
+        monkeypatch.setattr(main, "_modlog_steam_ids", swallowed)
+        before = await _f6_state(env, lob, pid)
+        async with env.sm() as other:
+            await other.execute(text("SELECT pg_advisory_xact_lock(:k)"), {"k": key})
+            ans = await credit(env, q)
+            await other.rollback()
+        assert (ans.status, ans.body) == (503, T["busy"]), ans
+        assert await _f6_state(env, lob, pid) == before, "a change stood"
+        assert await status_of(env, q) == "pending"
+        monkeypatch.setattr(main, "_modlog_steam_ids", orig)
+        assert (await credit(env, q)).status == 200
+    run_env(monkeypatch, body)
+
+
+def test_f6_control_a_non_bound_error_in_a_best_effort_block_keeps_the_game(monkeypatch):
+    async def body(env):
+        lob, q = await closed_held(env)
+
+        async def broken(*a, **k):
+            raise RuntimeError("the earned-pack roll fails (forced by the test)")
+        monkeypatch.setattr(main, "_pc_grant_earned_packs", broken)
+        ans = await accept(env, q)
+        assert ans.status == 200, ("a network report's meaning: the game stands", ans)
+        assert await status_of(env, q) == "accepted"
+    run_env(monkeypatch, body)
