@@ -3874,7 +3874,7 @@ FROZEN_COUNT = (COARSE_COUNT + COMPLETE_COUNT + R10_COUNT + R10_MERGE_COUNT
 # re-derivation; FROZEN_COUNT is 890.
 MDPL_FROZEN = {
     'api/main.py': [
-        # main.py:45846, the docstring of _deletion_arm_every_statement, prose matched by the word PostgreSQL;
+        # main.py:46715, the docstring of _deletion_arm_every_statement, prose matched by the word PostgreSQL;
         #  it holds no DSN
         ('dsntext', ('MDPL r1, the hold-time figure; r2 HIGH 1, one armed path. For the\n'
                      "    length of one attempt, every statement the attempt's connection sends\n"
@@ -3915,7 +3915,7 @@ MDPL_FROZEN = {
                      '    most until its deadline (at most _DELETION_BUDGET_S after arrival)\n'
                      "    plus one arming's round trip, then its rollback. Returns the undo,\n"
                      '    which the bound runs when the attempt ends.')),
-        # main.py:46131, the docstring of _deletion_bounded, prose matched by the word PostgreSQL; it holds no
+        # main.py:47000, the docstring of _deletion_bounded, prose matched by the word PostgreSQL; it holds no
         #  DSN
         ('dsntext', ("The account deletion's bound (MDPL R6). The whole transaction runs\n"
                      '    again from fresh reads when PostgreSQL ends it as a deadlock victim or\n'
@@ -3932,7 +3932,7 @@ MDPL_FROZEN = {
                      '    round trip. Used up: 503 account_cleanup_contended with nothing written;\n'
                      '    the client\'s line reads "Deletion failed", which is true, and a second\n'
                      "    click starts afresh. FastAPI reads the wrapped function's signature.")),
-        # main.py:45812, the docstring of _deletion_signal_of, prose matched by the word PostgreSQL; it holds
+        # main.py:46681, the docstring of _deletion_signal_of, prose matched by the word PostgreSQL; it holds
         #  no DSN
         ('dsntext', ("The deletion's signal for a PostgreSQL error inside an attempt, or\n"
                      '    None when the error is not one of its two timeouts: a 57014\n'
@@ -3940,20 +3940,20 @@ MDPL_FROZEN = {
                      '    deadline has passed, is _DeletionPastDeadline; a 55P03 before it is a\n'
                      '    lock wait that reached _DELETION_WAIT_CAP_S, a held row or key\n'
                      '    (_DeletionRowHeld).')),
-        # main.py:45836, _deletion_listen: SQLAlchemy's event module, to add the before_cursor_execute
+        # main.py:46705, _deletion_listen: SQLAlchemy's event module, to add the before_cursor_execute
         #  listener that arms one attempt's statements on that attempt's own connection
         ('import', 'from sqlalchemy import event'),
-        # main.py:45841, _deletion_unlisten: the same module, to remove that listener
+        # main.py:46710, _deletion_unlisten: the same module, to remove that listener
         ('import', 'from sqlalchemy import event'),
     ],
     'api/main.py#complete': [
-        # main.py:46009, `getattr(db, "__dict__", {})` in the attempt's undo: the session's own instance
+        # main.py:46878, `getattr(db, "__dict__", {})` in the attempt's undo: the session's own instance
         #  attributes, so that only the methods the attempt set are taken back
         ('alias', 'str __dict__'),
-        # main.py:46012, the undo removes a method the attempt set, only while the session still holds that
+        # main.py:46881, the undo removes a method the attempt set, only while the session still holds that
         #  same function
         ('dynamic', 'delattr(db, name)'),
-        # main.py:46006, puts the attempt's armed flush, commit and begin_nested on the session
+        # main.py:46875, puts the attempt's armed flush, commit and begin_nested on the session
         ('dynamic', 'setattr(db, name, fn)'),
     ],
     'tests/closed_walk.py#complete': [
