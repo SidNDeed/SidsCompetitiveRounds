@@ -19,7 +19,7 @@ Acceptance items from ai-collab/rejoin/A1-BRIEF.md covered here:
           numerically, and no such pair exists -- canonical SteamID64s are
           fixed-width 17-digit ASCII decimals, so the two orders coincide.
           The bind-sequence assertion replaces it, and the short-id case below
-          is what actually separates _ffa_sort_key from bare sorted().
+          is what actually separates identity_lock_key from bare sorted().
 """
 
 import asyncio
@@ -28,7 +28,7 @@ import re
 import pytest
 
 import main
-
+from identity_order import identity_lock_key  # the ONE identity order (FIX-1B point 3)
 
 # --- fake session -----------------------------------------------------------
 
@@ -132,9 +132,9 @@ def run(coro):
 
 def assert_canonical_identity_order(binds, expected_sids):
     """The one oracle for item 4. Raises AssertionError on any violation."""
-    assert binds == sorted(set(expected_sids), key=main._ffa_sort_key), (
+    assert binds == sorted(set(expected_sids), key=identity_lock_key), (
         f"identity binds {binds!r} are not the canonical order of "
-        f"{sorted(set(expected_sids), key=main._ffa_sort_key)!r}"
+        f"{sorted(set(expected_sids), key=identity_lock_key)!r}"
     )
     assert len(binds) == len(set(binds)), f"duplicate identity binds: {binds!r}"
 
@@ -161,7 +161,7 @@ def test_identity_binds_collapse_duplicates_and_drop_empties():
     db = FakeSession()
     given = [SIDS[0], SIDS[1], SIDS[0], None, "", SIDS[1]]
     returned = run(main._identity_lock_many(db, given))
-    assert returned == sorted({SIDS[0], SIDS[1]}, key=main._ffa_sort_key)
+    assert returned == sorted({SIDS[0], SIDS[1]}, key=identity_lock_key)
     assert db.identity_binds() == returned
     assert len(db.identity_binds()) == 2, (
         "a duplicate sid must be bound ONCE; binding it twice is harmless for "
@@ -197,7 +197,7 @@ def test_identity_lock_uses_the_lattice_key_not_a_private_one():
 
 
 def test_short_ids_order_by_length_then_ordinal_not_bare_lexical():
-    """This is the case that actually distinguishes _ffa_sort_key from
+    """This is the case that actually distinguishes identity_lock_key from
     sorted(). On canonical 17-digit ids the two agree, so a test built only
     from real steam ids cannot tell which key is in use."""
     db = FakeSession()
@@ -216,13 +216,13 @@ def test_planted_misordered_trace_is_rejected_by_the_oracle():
 
 
 def test_planted_duplicate_trace_is_rejected_by_the_oracle():
-    dup = sorted(SIDS, key=main._ffa_sort_key)
+    dup = sorted(SIDS, key=identity_lock_key)
     with pytest.raises(AssertionError):
         assert_canonical_identity_order(dup + dup[:1], SIDS)
 
 
 def test_source_mutation_reversing_the_key_is_caught(monkeypatch):
-    """Negative control against the SOURCE, not just against a trace.
+    """Negative control against the SOURCE (main.identity_lock_key, read by _identity_lock_many).
 
     The key is REVERSED rather than collapsed to a constant. A constant key
     looks like the more natural mutation, but sorted() is stable, so the binds
@@ -233,14 +233,14 @@ def test_source_mutation_reversing_the_key_is_caught(monkeypatch):
     ones you believe.
     """
     monkeypatch.setattr(
-        main, "_ffa_sort_key",
+        main, "identity_lock_key",
         lambda s: (-len(s or ""), tuple(-ord(c) for c in (s or ""))))
     db = FakeSession()
     given = [SIDS[2], SIDS[0], SIDS[1]]
     run(main._identity_lock_many(db, given))
     monkeypatch.undo()
     binds = db.identity_binds()
-    assert binds == list(reversed(sorted(set(given), key=main._ffa_sort_key))), (
+    assert binds == list(reversed(sorted(set(given), key=identity_lock_key))), (
         "premise check: the mutated key really did reverse the order"
     )
     with pytest.raises(AssertionError):
