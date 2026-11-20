@@ -496,8 +496,19 @@ PREREQ = {
              VALUES ('ffa', 'lobby_completed', 409, '{}'::jsonb, 'pending');
     """),
     # 426 creates ffa_game_claims (one claim per game applied or credited
-    # from a held report); it reads nothing, so it needs no table first.
-    "426": "",
+    # from a held report) and seeds a claim for every credited FFA held row
+    # (F5): 169 and 419, over one credited row whose body names game 2 of a
+    # lobby, so the first run seeds one claim and the second finds it held,
+    # beside a pending row and a filed one, which it does not cover.
+    "426": ("CREATE TABLE players (id UUID PRIMARY KEY);\n"
+            + (SQL_DIR / "169_match_report_quarantine.sql").read_text(encoding="utf-8")
+            + (SQL_DIR / "419_quarantine_digest_posted.sql").read_text(encoding="utf-8") + """
+        INSERT INTO match_report_quarantine (mode, reason, http_status, group_id, payload, status)
+             VALUES ('ffa', 'lobby_completed', 409, '00000000-0000-4000-8000-000000000426',
+                     '{"photon_room_id": "ffa_0426aa_000000_r2"}'::jsonb, 'credited'),
+                    ('ffa', 'lobby_completed', 409, NULL, '{}'::jsonb, 'pending'),
+                    ('ffa', 'ffa_game_contradiction', 409, NULL, '{}'::jsonb, 'filed');
+    """),
 }
 
 # The tables whose CONTENT this file is responsible for. Fingerprinted
@@ -524,7 +535,7 @@ TABLES = {
     "416": ("lobby_invites", "invite_receipts", "mail_messages"),
     "419": ("match_report_quarantine",),
     "421": ("players", "gold_transactions", "admin_actions", "match_report_quarantine", "ffa_lobbies"),
-    "426": ("ffa_game_claims",),
+    "426": ("ffa_game_claims", "match_report_quarantine"),
 }
 
 MIGRATION_FILES = {
@@ -799,6 +810,16 @@ _PLANTS_415 = (
      "DO $$ BEGIN IF to_regclass('planted_probe') IS NULL THEN CREATE TABLE planted_probe (x int);"
      " ELSE DROP TABLE planted_probe; END IF; END $$;"),
 )
+
+
+def test_426_seeds_the_credited_row_once_and_its_second_run_finds_it_held():
+    """426's rerun cases run on a state the seed writes to: the first run
+    seeds one claim, for the one credited FFA row, and the second run, whose
+    fingerprint the cases above compare, finds that claim held."""
+    applied = _run(_apply_twice("426"))
+    claims = applied.first["ffa_game_claims"]
+    assert len(claims) == 1 and "00000000-0000-4000-8000-000000000426,2,credit," in claims[0]["row_text"], claims
+    assert applied.second["ffa_game_claims"] == claims
 
 
 def test_415s_four_rerun_cases_fail_a_planted_second_run_defect(monkeypatch):
