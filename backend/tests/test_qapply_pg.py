@@ -2794,6 +2794,8 @@ _F6_NOT_REACHED = {
     "_ffa_progress_relocked": ("called on the body's insert-race and insert-failure arms, each of which raises"
                                " QAPPLY's refusal first under the replay, and after a capture, which the"
                                " replay never makes"),
+    "_qapply_unit": ("its try body is the unit's own yield, which issues no statement of its own; its handler"
+                     " is the point that ends every action busy once the mark is set"),
 }
 
 
@@ -2892,7 +2894,7 @@ def test_f6_each_swept_handler_that_a_lock_reaches_ends_the_action(monkeypatch):
     route reaches turns this red. The service lookup's handler is reached
     by making its refresh fall due inside the unit (F7's interleaving)."""
     handlers = _f6_handlers()
-    assert len(handlers) == 35 and sum(1 for h in handlers if h[2] == "goes on") == 17, (
+    assert len(handlers) == 36 and sum(1 for h in handlers if h[2] == "goes on") == 17, (
         "the sweep moved: re-pin with its reason", [(f, i, a) for f, i, a, _ in handlers])
     key = 0x5F6A11
 
