@@ -3856,3 +3856,38 @@ FROZEN_COUNT = (COARSE_COUNT + COMPLETE_COUNT + R10_COUNT + R10_MERGE_COUNT
                 + R11_ID_COUNT + R11_OPEN_COUNT + B10_MERGE_COUNT
                 + MAIL_SEND_RECEIPTS_COUNT + LOBBY_INVITES_COUNT + MODLOG_COUNT
                 + BOT_TEXT_ESCAPE_COUNT)
+
+# The stack of QAPPLY-1, the ban sweep and the bot text lane (claude/stack-1120,
+# 20 Nov 2026). Each lane left its census forms to the stack's closing items;
+# the census at the stack's tip reads 873 forms against 865 frozen, and the
+# eight it adds are exactly the two lanes' own (each lane's tip reads the same
+# forms against main's 867, and no other difference):
+# - QAPPLY_FROZEN: two coarse import forms in api/main.py, the SQLAlchemy event
+#   hook and the Engine class that main.py imports under private names.
+# - BAN_SWEEP_FROZEN: six forms of tests/test_match_hold_pg.py, the ban read
+#   mutant check of the lane's D2 part: one coarse dsntext form (the double's
+#   URL 'http://t') and five complete forms (the exec alias, the mutant check's
+#   constructed call, and three dynamic forms: the compiled mutant source,
+#   sys.modules and vars(main)).
+# Frozen by hand, not by a re-derivation; FROZEN_COUNT is 873.
+QAPPLY_FROZEN = {'api/main.py': [
+    ('import', 'from sqlalchemy import event as _sa_event'),
+    ('import', 'from sqlalchemy.engine import Engine as _SaEngine')]}
+QAPPLY_COUNT = 2
+for _k, _v in QAPPLY_FROZEN.items():
+    FROZEN[_k] = list(FROZEN.get(_k, [])) + list(_v)
+BAN_SWEEP_FROZEN = {
+    'tests/test_match_hold_pg.py': [('dsntext', 'http://t')],
+    'tests/test_match_hold_pg.py#complete': [
+        ('alias', 'str exec'),
+        ('constructed', '_MUTANT_CHECK[0](request, steam_id, db, banned_ok=banned_ok)'),
+        ('dynamic', "exec(compile(src.replace(_BAN_READ_REFUSAL, 'raise'), '<mutant>', 'exec'), ns)"),
+        ('dynamic', 'sys.modules'),
+        ('dynamic', 'vars(main)')]}
+BAN_SWEEP_COUNT = 6
+for _k, _v in BAN_SWEEP_FROZEN.items():
+    FROZEN[_k] = list(FROZEN.get(_k, [])) + list(_v)
+FROZEN_COUNT = (COARSE_COUNT + COMPLETE_COUNT + R10_COUNT + R10_MERGE_COUNT
+                + R11_ID_COUNT + R11_OPEN_COUNT + B10_MERGE_COUNT
+                + MAIL_SEND_RECEIPTS_COUNT + LOBBY_INVITES_COUNT + MODLOG_COUNT
+                + BOT_TEXT_ESCAPE_COUNT + QAPPLY_COUNT + BAN_SWEEP_COUNT)

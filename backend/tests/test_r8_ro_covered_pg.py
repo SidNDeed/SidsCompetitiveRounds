@@ -1432,8 +1432,10 @@ def test_census_complete_layer_frozen_whole():
     (LOBBY_INVITES_FROZEN, frozen by hand), plus the two coarse forms of the
     bot text escape (BOT_TEXT_ESCAPE_FROZEN, frozen by hand), plus the five
     coarse forms of the moderator log's change (MODLOG_FROZEN, frozen by
-    hand), plus the complete layer, which also holds that block's two
-    complete forms."""
+    hand), plus the two coarse forms of QAPPLY-1 (QAPPLY_FROZEN) and the one
+    coarse form of the ban sweep (BAN_SWEEP_FROZEN), both frozen by hand at
+    the stack, plus the complete layer, which also holds the moderator log
+    block's two complete forms and the ban sweep block's five."""
     import ro_census
     import ro_census_frozen as fz
     import test_r7_ro_role_pg as r7
@@ -1450,6 +1452,7 @@ def test_census_complete_layer_frozen_whole():
     # part is a term of its own in the three sums below.
     BOTH_LAYER_BLOCKS = [
         (fz.MODLOG_FROZEN, fz.MODLOG_COUNT, 5, 2),
+        (fz.BAN_SWEEP_FROZEN, fz.BAN_SWEEP_COUNT, 1, 5),
     ]
     for block, count, n_coarse, n_complete in BOTH_LAYER_BLOCKS:
         b_coarse = {k: v for k, v in block.items() if not k.endswith(ro_census.COMPLETE)}
@@ -1473,8 +1476,19 @@ def test_census_complete_layer_frozen_whole():
                                                       + fz.MAIL_SEND_RECEIPTS_COUNT
                                                       + fz.LOBBY_INVITES_COUNT
                                                       + fz.BOT_TEXT_ESCAPE_COUNT
-                                                      + rows_coarse) == 369 + rows_coarse
+                                                      + fz.QAPPLY_COUNT
+                                                      + rows_coarse) == 371 + rows_coarse
     assert fz.COARSE_COUNT == 361
+    # the stack (claude/stack-1120): QAPPLY-1's two hand-frozen coarse import
+    # forms in main.py; the ban sweep's six forms are a row of
+    # BOTH_LAYER_BLOCKS above (one coarse dsntext, five complete)
+    assert sum(len(v) for v in fz.QAPPLY_FROZEN.values()) == fz.QAPPLY_COUNT == 2
+    assert set(fz.QAPPLY_FROZEN) <= coarse
+    assert {f[0] for v in fz.QAPPLY_FROZEN.values() for f in v} == {"import"}
+    assert {f[0] for k, v in fz.BAN_SWEEP_FROZEN.items()
+            if not k.endswith(ro_census.COMPLETE) for f in v} == {"dsntext"}
+    assert {f[0] for k, v in fz.BAN_SWEEP_FROZEN.items()
+            if k.endswith(ro_census.COMPLETE) for f in v} == {"alias", "constructed", "dynamic"}
     # the bot text escape (BOT-TEXT-ESCAPE-1): two hand-frozen coarse dsntext
     # forms in mail_discord.py (older_bot_name's pattern and its docstring)
     assert sum(len(v) for v in fz.BOT_TEXT_ESCAPE_FROZEN.values()) == fz.BOT_TEXT_ESCAPE_COUNT == 2
@@ -1514,7 +1528,8 @@ def test_census_complete_layer_frozen_whole():
                                + fz.R10_MERGE_COUNT + fz.R11_ID_COUNT + fz.R11_OPEN_COUNT
                                + fz.B10_MERGE_COUNT + fz.MAIL_SEND_RECEIPTS_COUNT
                                + fz.LOBBY_INVITES_COUNT + fz.BOT_TEXT_ESCAPE_COUNT
-                               + rows_count) == 858 + rows_count
+                               + fz.QAPPLY_COUNT
+                               + rows_count) == 860 + rows_count
     assert not [f for k in complete for f in fz.FROZEN[k] if f[0] == "refuse"]
     assert {f[0] for k in complete for f in fz.R10_FROZEN[k]} <= set(R10_KINDS)
     # the declared forwarding wrapper is bound whole, exactly once
