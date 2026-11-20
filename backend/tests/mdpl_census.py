@@ -3,15 +3,15 @@ a players row, computed from the source (main.py, every other backend/api
 module that runs SQL, models.py and the sql migrations are read as text;
 nothing is imported or run).
 
-Ten module-level switches widen or sharpen what is read; all ten off is
+Eleven module-level switches widen or sharpen what is read; all eleven off is
 the census as first frozen (main.py alone, no triggers, no insert waits, the
 FOR clause read from the last SELECT before it, foreign keys by table, a
 Player known by select(Player)/get(Player) alone, a no-wait acquisition read
 as taking nothing, every players lock of the deletion's own-row functions
 read as on P's row, a name unpacked from a dictionary of string tuples
-unread, a loop's literal texts unread), kept as mdpl_census_base.json, which
-test_mdpl_census computes again with the ten off (the regression control of
-the widening):
+unread, a loop's literal texts unread, a loop over a module tuple of string
+tuples unread), kept as mdpl_census_base.json, which test_mdpl_census
+computes again with the eleven off (the regression control of the widening):
 - MODULES: every backend/api/*.py that calls text(...) or .execute /
   .exec_driver_sql / .with_for_update (models.py and schemas.py keep their
   roles) is parsed. main.py's functions keep their bare names; module M's are
@@ -110,6 +110,13 @@ the widening):
   and `text(<that name>)` is read as each text, a statement of its own with
   its own place; a call inside a text reads as an unreadable part, as in any
   text. Off: the name is unread, and so is the statement.
+- NAME_LOOPS: an unpacked loop target over a module-level name bound exactly
+  once (_module_bind_count) to a tuple or list literal whose every element
+  is a tuple of string constants of the target's length (`for _lmode, _lqt,
+  _llt in _BAN_LOBBY_TABLES` in _apply_ban_core) reads, name by name, as its
+  position's element of every tuple. Any other shape, a name bound twice
+  among them, stays unread, and a table it names reads "?". Off: the names
+  are unread.
 
 The deletion (delete_player_data) holds its own players row from its first
 write of it (`UPDATE players SET pc_shards = 0`, FOR NO KEY UPDATE) to its
@@ -212,13 +219,14 @@ ROUTE_METHODS = frozenset({"get", "post", "put", "delete", "patch", "api_route",
 KEY_COLUMNS = {"players": frozenset({"id", "steam_id", "discord_id"})}
 IDENTITY_KEYS = frozenset({"key:hashtext(:p)"})
 
-# The ten widenings of the census, each a switch (all off = the census as first
+# The eleven widenings of the census, each a switch (all off = the census as first
 # frozen, mdpl_census_base.json: main.py alone, no triggers, no insert waits, the
 # FOR clause of the last SELECT, a foreign key's parent locked by every INSERT of
 # its table, a Player known by select(Player)/get(Player) alone, a no-wait
 # acquisition read as taking nothing, every players lock of the deletion's
 # own-row functions read as on P's row, a name unpacked from a dictionary of
-# string tuples unread, a loop's literal texts unread).
+# string tuples unread, a loop's literal texts unread, a loop over a module
+# tuple of string tuples unread).
 MODULES = True          # every backend/api module that runs SQL is read, not main.py alone
 TRIGGERS = True         # a write fires the triggers backend/sql defines on its table
 INSERT_WAITS = True     # an INSERT holds (table, INS); one with ON CONFLICT waits for it
@@ -229,6 +237,7 @@ NB_HOLDS = True         # a SKIP LOCKED / NOWAIT / try acquisition waits for not
 OWN_FK_WAITS = True     # a KEY SHARE in the deletion's own-row functions is a foreign key's, on another row: a wait
 DICT_TUPLES = True      # a, b = D[k], D a module dictionary of string tuples: each name reads as its position's values
 LOOP_TEXTS = True       # for a, b in ((x, "SQL"), ...): b reads as those texts, text(b) as each a statement of its own
+NAME_LOOPS = True       # for a, b in T, T a module tuple of string tuples bound once: each name reads as its position's values
 
 # Foreign keys a migration drops by dynamic SQL (EXECUTE format('ALTER TABLE ...
 # DROP CONSTRAINT %I', ...) over a pg_constraint lookup), which the reader cannot
@@ -321,6 +330,32 @@ def key_name(arg):
 
 def conflicts(held_mode, wait_mode):
     return wait_mode in CONFLICTS.get(held_mode, ())
+
+
+def _module_bind_count(tree, name):
+    """How many times a module binds `name` outside its functions and classes:
+    every assignment, augmented or annotated assignment, loop or with target,
+    walrus, except-handler name, import, def and class of that name counts (a
+    comprehension's own target counts too, which only ever counts more)."""
+    n, todo = 0, list(tree.body)
+    while todo:
+        st = todo.pop()
+        if isinstance(st, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            n += st.name == name
+            continue
+        if isinstance(st, (ast.Import, ast.ImportFrom)):
+            n += sum((a.asname or a.name).split(".")[0] == name for a in st.names)
+            continue
+        for x in ast.iter_child_nodes(st):
+            if isinstance(x, ast.stmt):
+                todo.append(x)
+            elif isinstance(x, ast.excepthandler):
+                n += x.name == name
+                todo.extend(x.body)
+            else:
+                n += sum(isinstance(s, ast.Name) and s.id == name and isinstance(s.ctx, ast.Store)
+                         for s in ast.walk(x))
+    return n
 
 
 def _own_nodes(fn):
@@ -486,7 +521,7 @@ class Source:
     def _space(self, m):
         if m not in self._ns:
             self._ns[m] = {"consts": {}, "dicts": defaultdict(set), "dictvals": {}, "listvals": {},
-                           "dicttuples": {}}
+                           "dicttuples": {}, "tupletuples": {}}
         return self._ns[m]
 
     # The current module's constants (main.py's outside a flattening).
@@ -495,6 +530,7 @@ class Source:
     dictvals = property(lambda self: self._space(self._cur)["dictvals"])
     listvals = property(lambda self: self._space(self._cur)["listvals"])
     dicttuples = property(lambda self: self._space(self._cur)["dicttuples"])
+    tupletuples = property(lambda self: self._space(self._cur)["tupletuples"])
 
     def _import_targets(self, node):
         """{bound name: ("mod", X) | ("name", X, n)} of an import of an api module."""
@@ -1094,6 +1130,12 @@ class Source:
                         if isinstance(k2, ast.Constant) and isinstance(x2, ast.Constant) and isinstance(x2.value, str):
                             self.dicts[str(k2.value)].add(x2.value)
             return
+        if isinstance(v, (ast.Tuple, ast.List)) and v.elts and all(
+                isinstance(x, ast.Tuple) and x.elts and len(x.elts) == len(v.elts[0].elts)
+                and all(isinstance(e, ast.Constant) and isinstance(e.value, str) for e in x.elts)
+                for x in v.elts) and _module_bind_count(self.trees[self._cur], name) == 1:
+            # NAME_LOOPS reads these (only where it is on); a name bound more than once stays unread
+            self.tupletuples[name] = [[e.value for e in x.elts] for x in v.elts]
         if isinstance(v, (ast.Tuple, ast.List, ast.Set, ast.ListComp, ast.GeneratorExp, ast.SetComp)) \
                 or isinstance(v, ast.BinOp) and isinstance(v.op, ast.BitOr) \
                 or isinstance(v, ast.Call) and getattr(v.func, "id", "") in ("frozenset", "set", "tuple", "list",
@@ -1706,6 +1748,16 @@ class Source:
                             if all(t is not None for t in texts):
                                 ctx["multi"][tg.id] = texts
                                 ctx["local"][tg.id] = self._alternatives(texts)
+                if NAME_LOOPS and isinstance(st.target, ast.Tuple) and isinstance(st.iter, ast.Name) \
+                        and st.iter.id not in ctx["local"]:     # for a, b, c in _BAN_LOBBY_TABLES
+                    rows = self.tupletuples.get(st.iter.id)
+                    if rows is None and MODULES:
+                        rows = self._imported_value(st.iter.id, "tupletuples")
+                    if rows and all(len(r) == len(st.target.elts) for r in rows):
+                        for i, tg in enumerate(st.target.elts):
+                            if isinstance(tg, ast.Name):
+                                ctx["multi"].pop(tg.id, None)
+                                ctx["local"][tg.id] = self._alternatives([r[i] for r in rows])
             body = self._body(st.body, ctx) + self._body(st.orelse, ctx)
             hoist = [e[1:4] for e in body if e[0] == "L"] + [x for e in body if e[0] == "HOIST" for x in e[1]]
             return head + ([("HOIST", hoist)] if hoist else []) + body
@@ -2048,7 +2100,7 @@ COMPARED = ("class", "fallback", "phases", "held", "entries", "keys")
 BASE = os.path.join(HERE, "mdpl_census_base.json")
 BASE_FIELDS = ("class", "phases", "held", "entries", "keys")
 SWITCHES = ("MODULES", "TRIGGERS", "INSERT_WAITS", "FOR_DEPTH", "FK_COLUMNS", "ORM_TYPES", "NB_HOLDS",
-            "OWN_FK_WAITS", "DICT_TUPLES", "LOOP_TEXTS")
+            "OWN_FK_WAITS", "DICT_TUPLES", "LOOP_TEXTS", "NAME_LOOPS")
 
 
 def measured(src=None):

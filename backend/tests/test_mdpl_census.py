@@ -16,7 +16,7 @@ way, gives the frozen record (the control).
 A site whose class rests on an identity key (its fallback, the class without
 the key, is above it) names whose key covers whose row, or is judged to its
 fallback by hand (lesson 732). The regression control of the reader's
-widening: with its ten switches off it computes mdpl_census_base.json, the
+widening: with its eleven switches off it computes mdpl_census_base.json, the
 census frozen before the widening, exactly (the test keeps the name it had
 with six). A lock taken without a wait (SKIP LOCKED, NOWAIT) is a hold: a
 planted route that takes the held row that way is READ, as with a wait, and a
@@ -600,6 +600,37 @@ def test_a_loop_s_literal_texts_are_each_read_as_a_statement(src, measured, monk
     assert unread in off.unread
     assert not any(h.startswith(("UPDATE team_series SET status='cancelled'",
                                  "UPDATE ovt_series SET status='canceled'")) for h in heads), heads
+
+
+def test_a_loop_over_a_module_tuple_of_table_tuples_reads_its_tables(src, monkeypatch):
+    """NAME_LOOPS: `for _lmode, _lqt, _llt in _BAN_LOBBY_TABLES` in
+    _apply_ban_core reads _llt as the three lobby tables, so its lobby row
+    lock names them and the ban's later rows hold no "?". The control: with
+    the switch off the lock reads "?" and the ban's rows after it hold it."""
+    q = [e for e in src.events("_apply_ban_core") if e[0] == "L" and e[1] == "?"]
+    _s1, on = mc.sites(src, entries=["admin_ban"])
+    assert q == [] and _q_held(on) == [], (q, _q_held(on))
+    monkeypatch.setattr(mc, "NAME_LOOPS", False)
+    off = mc.Source()
+    q = [e for e in off.events("_apply_ban_core") if e[0] == "L" and e[1] == "?"]
+    _s1, got = mc.sites(off, entries=["admin_ban"])
+    assert q and _q_held(got) != [], (q, _q_held(got))
+
+
+def _main_text():
+    with open(os.path.join(mc.API, "main.py"), encoding="utf-8") as fh:
+        return fh.read()
+
+
+def test_a_module_tuple_bound_twice_is_not_read_by_the_loop_form():
+    """NAME_LOOPS reads a name bound exactly once at module level; the mutant
+    binds _BAN_LOBBY_TABLES a second time (the same shape), and the lobby row
+    lock of _apply_ban_core reads "?" again, which the no-"?" test refuses."""
+    text = _main_text()
+    assert text.count("\n_BAN_LOBBY_TABLES = (") == 1
+    mut = mc.Source(main_text=text + '\n_BAN_LOBBY_TABLES = (("ffa", "ffa_queue", "ffa_lobbies"),)\n')
+    q = [e for e in mut.events("_apply_ban_core") if e[0] == "L" and e[1] == "?"]
+    assert q, "a twice-bound module tuple was read"
 
 
 # A route that takes the identity key, then the portrait blob's key, then
