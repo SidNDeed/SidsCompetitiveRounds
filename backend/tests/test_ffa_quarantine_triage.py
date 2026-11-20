@@ -282,6 +282,13 @@ CREATE INDEX IF NOT EXISTS idx_quarantine_pending
 CREATE INDEX IF NOT EXISTS idx_quarantine_group
     ON match_report_quarantine (group_id) WHERE group_id IS NOT NULL
 """
+# The claims table (QAPPLY-1), whose rows the Admin list's verdict reads
+# (_qapply_claim_of): its DDL as migration 426 writes it, read from that file.
+_M426_TABLE = re.search(
+    r"CREATE TABLE IF NOT EXISTS ffa_game_claims \(.*?\n\);",
+    open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "sql", "426_ffa_game_claims.sql"),
+         encoding="utf-8").read(), re.S).group(0)
+SCHEMA += ";\nDROP TABLE IF EXISTS ffa_game_claims CASCADE;\n" + _M426_TABLE[:-1]
 
 WATCHED = ("match_report_quarantine", "ffa_matches", "ffa_match_players", "ffa_lobbies", "team_series")
 TEN = WATCHED[:4] + ("players", "glicko_ratings_ffa", "rating_history", "gold_transactions",
