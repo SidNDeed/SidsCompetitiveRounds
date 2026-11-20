@@ -50960,12 +50960,6 @@ async def _apply_ban_core(db: AsyncSession, *, admin_steam_id: str, target_steam
                 _ban_void_found = await _ban_void_lock(db, _bpid)
         # ...and ended as void, before the queue rows below.
         await _ban_void_apply(db, _bpid, _ban_void_found)
-        # F2 b: a looking-for-players post the account queued and the bot has
-        # not posted yet is the account's live state too (the bot's poll
-        # reads no ban).
-        await db.execute(text(
-            "DELETE FROM lfp_pings WHERE steam_id = :sid AND posted_at IS NULL"
-        ), {"sid": target_steam_id})
         # ALL-status row delete (round-18 find 1). Round 15's pair-DISSOLUTION
         # branch was racy because it did partner WRITES from a status-filtered
         # snapshot; a bare unconditional DELETE of the banned player's own
@@ -51008,6 +51002,13 @@ async def _apply_ban_core(db: AsyncSession, *, admin_steam_id: str, target_steam
         # The candidate scans additionally exclude active bans (round-16) and
         # the issuance branches re-check all members (round-17) — those stay
         # as defense-in-depth around this serialization.
+    # F2 b: a looking-for-players post the account queued and the bot has not
+    # posted yet is the account's live state too (the bot's poll reads no ban).
+    # Keyed by the steam id and run whether or not the account has a players
+    # row (FIX-3 1.4): queueing a post needs only the steam id.
+    await db.execute(text(
+        "DELETE FROM lfp_pings WHERE steam_id = :sid AND posted_at IS NULL"
+    ), {"sid": target_steam_id})
     # The account's spectate leases end as the spectate leave ends one (F2 d;
     # FIX-2 class II): drain tombstone, then the lease revoked, through the one
     # helper the leave route uses. Keyed by the steam id and run whether or not
