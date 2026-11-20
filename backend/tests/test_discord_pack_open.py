@@ -2089,3 +2089,42 @@ def test_low2r5_a_pointer_seen_before_its_send_failed_may_repeat_and_nothing_els
         assert journal(after) == {}
         assert await holdings(env, own) == (price, 1, 1)
     e2e(monkeypatch, tmp_path, body)
+
+
+# -- F8: a rebind releases the Discord id before the new holder takes it ------------------------------
+
+_F8_LOW = uuid.UUID("00000000-0000-4000-8000-0000000000f8")
+_F8_HIGH = uuid.UUID("ffffffff-ffff-4fff-bfff-0000000000f8")
+
+
+async def _f8_player(env, tag, pid, discord_id):
+    """One players row whose primary key the test chooses; the harness's player() lets the ORM draw it."""
+    import models
+    from sqlalchemy.ext.asyncio import AsyncSession
+    env._n += 1
+    sid = H.steam_of(env._n)
+    async with AsyncSession(env.seed) as s:
+        s.add(models.Player(id=pid, steam_id=sid, display_name=f"Fixture {tag}", discord_id=discord_id))
+        await s.commit()
+    return SimpleNamespace(tag=tag, id=str(pid), steam=sid, discord=discord_id)
+
+
+@pytest.mark.parametrize("new_holder_sorts", ["below", "above"])
+def test_f8_a_rebind_answers_200_whichever_holder_sorts_first(monkeypatch, tmp_path, new_holder_sorts):
+    """link_discord moves a Discord id from its earlier holder to the code's
+    player, and players.discord_id is unique, so the release must reach the
+    database before the new holder's store. Both orders of the two players'
+    primary keys are run, with ids this test chooses: each rebind answers 200
+    (env.rebind asserts it), the earlier holder ends with no Discord id and
+    the new holder with it."""
+    async def body(env):
+        env._n += 1
+        did = H.discord_of(env._n)
+        new_id, old_id = (_F8_LOW, _F8_HIGH) if new_holder_sorts == "below" else (_F8_HIGH, _F8_LOW)
+        earlier = await _f8_player(env, "earlier", old_id, did)
+        new = await _f8_player(env, "new", new_id, None)
+        await env.rebind(did, new)
+        q = f"SELECT discord_id FROM {SCHEMA}.players WHERE id = CAST(:p AS uuid)"
+        assert await env.val(q, {"p": earlier.id}) is None
+        assert await env.val(q, {"p": new.id}) == did
+    e2e(monkeypatch, tmp_path, body)
