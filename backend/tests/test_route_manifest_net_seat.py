@@ -1883,7 +1883,18 @@ def test_the_helper_closure_stays_affordable():
     # (600 on the stack, 601 on the lane); the merge keeps the lane's 601,
     # the larger, until the closing item measures the merged tree and
     # records the value here.
-    assert code_worst <= 601, f"worst code closure {code_worst} of {total}"
+    # Its closing item (2026-11-20): 603 measured at GET /api/v1/health on
+    # the merged tree (600 on the stack's tip 77969323 and 601 on the lane's
+    # tip 4dfe6527, the same walk over each tree): +3 by name against the
+    # stack, main._ACCOUNT_DELETION_LOCK_BUILD, _DeletionRowHeld and
+    # _DeletionPastDeadline (the lane's three, read above), and +2 against
+    # the lane, main._QAPPLY_BUILD and main._BAN_SWEEP_BUILD (the stack's
+    # build markers the lane did not hold); no other code binding of that
+    # closure is new. The bound moves to 603, the measured value, for that
+    # reason and no other. The median (87 against 87) and p90 (230 against
+    # 239) bounds stay, and so do the three bounds of the whole closure (244
+    # against 245, 425 against 425, 867 against 897 at the health route).
+    assert code_worst <= 603, f"worst code closure {code_worst} of {total}"
 
     # Imports are counted separately rather than folded in or waved through.
     # They roughly triple the closure -- measured 69 / 119 / 308 -- and that is
