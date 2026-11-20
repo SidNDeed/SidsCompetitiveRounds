@@ -5513,8 +5513,8 @@ async def _s64_lobby(env, t=32.0, **kw):
 
 
 def _pool_spy(env):
-    """Every (place, beaten, n_live) the report route pays with, in its award
-    order (sorted player id): the beaten counts the settlement used."""
+    """Every (place, beaten, n_live) the report route pays with, in its award order (sorted player id),
+    two per seat: _ffa_game_awards is asked for the XP and again, with old_xp, for the gold parts."""
     calls = []
     orig = main._ffa_pool_shape
 
@@ -5527,16 +5527,16 @@ def _pool_spy(env):
 
 async def _beaten(env, lob, g, calls, tag):
     """Game g was paid with the beaten counts computed from its settled rows
-    over the seats outside the effective unrated set: a seat in that set is
-    in nobody's count, and every other seat is in the count of each seat it
-    placed below."""
+    over the seats outside the effective unrated set (a seat in that set is in
+    nobody's count; every other seat is in the count of each seat it placed below),
+    each seat's twice in a row: the XP ask and the gold ask must carry the same counts."""
     rows = await _mp(env, lob, g)
     live = {s: r for s, r in rows.items() if not r["absent"]}
     order = sorted(live, key=lambda s: str(live[s]["player_id"]))
     want = [(live[s]["placement"],
              sum(1 for x in live if live[x]["placement"] > live[s]["placement"]),
              len(live)) for s in order]
-    assert calls == want, (tag + " beaten", calls, want)
+    assert calls == [t for t in want for _ in range(2)], (tag + " beaten", calls, want)
 
 
 async def _econ(env, pid):
