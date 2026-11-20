@@ -446,8 +446,8 @@ class _FakeRequest:
 def opened(monkeypatch):
     """The signature and session checks out of the way (module docstring),
     and an internal key for the admin route. Returns that key."""
-    async def _no_session_check(request, steam_id, db):
-        return None
+    from soft_check_standin import SoftCheckStandIn
+    _no_session_check = SoftCheckStandIn()   # admits every caller; records keywords (M3)
     monkeypatch.setattr(main, "MATCH_HMAC_SECRET", "")
     monkeypatch.setattr(main, "_check_steam_session", _no_session_check)
     key = "ladder-hooks-" + uuid.uuid4().hex
@@ -1934,7 +1934,7 @@ async def _r3_run(how, tag, armed=None):
 @pytest.mark.parametrize("how", ["fail", "one_commit"])
 def test_pg_r3_the_1v1_credit_rides_the_reports_one_commit(opened, monkeypatch, how):
     """LOW-R3 (design V3 section 12.6): "Forcing the 1v1 T2 pass to fail or
-    take the skip at `backend/api/main.py:8753-8765` leaves the T1 credit
+    take the skip at `backend/api/main.py:8768-8780` leaves the T1 credit
     committed without a rating update; the credit must not cause a match,
     gold or unrelated-ladder mutation." (The line numbers are the base
     tree's.) Re-read for the tree this file runs on: the v1.41.0 candidate

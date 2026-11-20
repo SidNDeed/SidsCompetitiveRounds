@@ -45,6 +45,7 @@ from uuid import UUID, uuid4
 import pytest
 
 import main
+import ban_gate_statements as _GATE
 from sqlalchemy.exc import DBAPIError
 
 
@@ -333,6 +334,14 @@ class FakeSession:
     async def execute(self, statement, params=None):
         sql = " ".join(str(statement).split())
         self.statements.append(sql)
+        # Bans part 2a: the ban gate's identity key and ban read, matched by
+        # the product's own text (ban_gate_statements), answered as a database
+        # with no active ban answers them. Every other statement this double
+        # does not script is still refused below.
+        if sql in _GATE.GATE_LOCKS:
+            return _GATE.KeyGranted()
+        if sql in _GATE.BAN_READS:
+            return _GATE.NoBanResult()
         if sql.startswith("SELECT 1 FROM players") and "FOR NO KEY UPDATE" in sql:
             if not self.lock_order or self.lock_order[-1] == "series":
                 self.attempts += 1
@@ -522,8 +531,8 @@ def _stub_the_gates(monkeypatch):
     taken when the report named a series."""
     calls = {"find_current": 0}
 
-    async def _noop(*args, **kwargs):
-        return None
+    from soft_check_standin import SoftCheckStandIn
+    _noop = SoftCheckStandIn()   # admits every caller; records keywords (M3)
 
     async def _series(*args, **kwargs):
         calls["find_current"] += 1
@@ -556,6 +565,21 @@ def test_the_request_that_inserts_the_row_is_the_one_that_counts():
     assert session.inserts == 1
     assert session.increments == 1
     assert session.commits == 1
+
+
+def test_the_ban_gate_runs_before_the_first_write_and_the_rule_holds():
+    """Bans part 2a put the ban gate (an identity key per account, then the
+    ban read) on this route. Its statements all come before the first write
+    (the dc_events insert, the counter's update), so the durability rule
+    above is unchanged: one insert decides, and only its request counts."""
+    session = FakeSession(_players(), stored_count=4)
+    assert _call(session)["status"] == "recorded"
+    gate = [i for i, s in enumerate(session.statements)
+            if s in _GATE.GATE_LOCKS or s in _GATE.BAN_READS]
+    writes = [i for i, s in enumerate(session.statements)
+              if s.startswith(("INSERT", "UPDATE"))]
+    assert gate and writes and max(gate) < min(writes), (gate, writes)
+    assert session.inserts == 1 and session.increments == 1 and session.commits == 1
 
 
 def test_the_inserted_row_carries_the_leave_anchor():

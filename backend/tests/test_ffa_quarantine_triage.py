@@ -52,6 +52,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 import database
 import main
 import schemas
+from ban_read_tables import ban_read_ddl
 
 MAIN_SRC = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "api", "main.py"))
 MODELS_SRC = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "api", "models.py"))
@@ -140,6 +141,7 @@ DROP TABLE IF EXISTS glicko_ratings_ffa CASCADE;
 DROP TABLE IF EXISTS rating_history CASCADE;
 DROP TABLE IF EXISTS gold_transactions CASCADE;
 DROP TABLE IF EXISTS pc_packs CASCADE;
+DROP TABLE IF EXISTS player_bans CASCADE;
 DROP TABLE IF EXISTS admin_users CASCADE;
 DROP TABLE IF EXISTS players CASCADE;
 CREATE TABLE players (
@@ -282,6 +284,13 @@ CREATE INDEX IF NOT EXISTS idx_quarantine_pending
 CREATE INDEX IF NOT EXISTS idx_quarantine_group
     ON match_report_quarantine (group_id) WHERE group_id IS NOT NULL
 """
+# The claims table (QAPPLY-1), whose rows the Admin list's verdict reads
+# (_qapply_claim_of): its DDL as migration 426 writes it, read from that file.
+_M426_TABLE = re.search(
+    r"CREATE TABLE IF NOT EXISTS ffa_game_claims \(.*?\n\);",
+    open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "sql", "426_ffa_game_claims.sql"),
+         encoding="utf-8").read(), re.S).group(0)
+SCHEMA += ";\nDROP TABLE IF EXISTS ffa_game_claims CASCADE;\n" + _M426_TABLE[:-1]
 
 WATCHED = ("match_report_quarantine", "ffa_matches", "ffa_match_players", "ffa_lobbies", "team_series")
 TEN = WATCHED[:4] + ("players", "glicko_ratings_ffa", "rating_history", "gold_transactions",
@@ -510,6 +519,10 @@ class Env:
         async with self.seed.begin() as conn:
             await conn.execute(text("SET LOCAL lock_timeout = '5s'"))
             for stmt in [s for s in SCHEMA.split(";") if s.strip()]:
+                await conn.execute(text(stmt))
+            # player_bans: the FFA report reads every roster member's ban
+            # (bans part 2a); from the model metadata, after admin_users.
+            for stmt in ban_read_ddl(include_admin_users=False):
                 await conn.execute(text(stmt))
             await conn.execute(text("INSERT INTO admin_users (steam_id) VALUES (:s)"), {"s": ADMIN})
         self.app = _app()
@@ -2243,19 +2256,37 @@ def test_k12_the_quarantine_table_is_written_only_by_the_capture_and_the_two_adm
     none of which can write 'accepted' or apply a result: the janitor's
     (status 'filed' and the review columns, nothing else; only from
     _qdig_janitor_pass) and the posted route's two (digest_posted_at or
-    digest_reminded_at alone; only from internal_quarantine_digest_posted)."""
+    digest_reminded_at alone; only from internal_quarantine_digest_posted).
+    QAPPLY-1 moves the Accept's UPDATE into a module constant and adds the
+    Credit's: _QAPPLY_SQL_ACCEPTED (status 'accepted' and the review
+    columns; only from _qapply_finish, which the report route's body calls
+    only under the held-report replay an admin's Accept sets) and
+    _QAPPLY_SQL_CREDITED (status 'credited' and the review columns; only
+    from _qapply_credit). Both key on the row's id alone: their status test
+    is _qapply_held's, made under that row's FOR UPDATE lock, and both
+    callers run only after it."""
     upd = r"update\s+match_report_quarantine"
-    assert [w for w in _writes_to(upd) if w is not None] == ["admin_accept_quarantine", "admin_discard_quarantine"]
+    assert [w for w in _writes_to(upd) if w is not None] == ["admin_discard_quarantine"]
     consts = _module_writer_constants(upd)
-    assert sorted(consts) == ["_QDIG_SQL_JANITOR_FILE", "_QDIG_SQL_POSTED_NEW", "_QDIG_SQL_POSTED_REMINDER"]
+    assert sorted(consts) == ["_QAPPLY_SQL_ACCEPTED", "_QAPPLY_SQL_CREDITED", "_QDIG_SQL_JANITOR_FILE",
+                              "_QDIG_SQL_POSTED_NEW", "_QDIG_SQL_POSTED_REMINDER"]
     assert _writes_to(upd).count(None) == len(consts)
-    sets = {k: " ".join(v.split()).split(" SET ", 1)[1].split(" WHERE ", 1)[0] for k, v in consts.items()}
+    sets = {k: " ".join(v.split()).split(" SET ", 1)[1].rsplit(" WHERE ", 1)[0] for k, v in consts.items()}
+    review = ("reviewed_at = NOW(), review_note = CAST(:note AS text), reviewed_by = (SELECT id FROM players "
+              "WHERE steam_id = CAST(:sid AS varchar))")
     assert sets == {
+        "_QAPPLY_SQL_ACCEPTED": "status = 'accepted', " + review,
+        "_QAPPLY_SQL_CREDITED": "status = 'credited', " + review,
         "_QDIG_SQL_JANITOR_FILE": "status = 'filed', reviewed_at = NOW(), reviewed_by = NULL, "
                                   "review_note = CAST(:note AS text)",
         "_QDIG_SQL_POSTED_NEW": "digest_posted_at = NOW()",
         "_QDIG_SQL_POSTED_REMINDER": "digest_reminded_at = NOW()"}
-    assert all("status = 'pending'" in " ".join(v.split()) for v in consts.values())
+    assert all("status = 'pending'" in " ".join(v.split()) for k, v in consts.items() if k.startswith("_QDIG_"))
+    assert all(" ".join(v.split()).rsplit(" WHERE ", 1)[1] == "id = CAST(:qid AS uuid) RETURNING id"
+               for k, v in consts.items() if k.startswith("_QAPPLY_"))
+    assert _users_of("_QAPPLY_SQL_ACCEPTED") == ["_qapply_finish"]
+    assert _users_of("_QAPPLY_SQL_CREDITED") == ["_qapply_credit"]
+    assert _users_of("_qapply_finish") == ["submit_ffa_match"]
     assert _users_of("_QDIG_SQL_JANITOR_FILE") == ["_qdig_janitor_pass"]
     assert _users_of("_QDIG_SQL_POSTED_NEW") == _users_of("_QDIG_SQL_POSTED_REMINDER") == \
         ["internal_quarantine_digest_posted"]

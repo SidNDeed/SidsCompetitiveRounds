@@ -376,8 +376,8 @@ def test_m3_both_seats_and_two_passes_racing_on_separate_connections(live, signi
 # -- M10 / B11: the match path never waits on, or fails with, this lane ---------
 
 def test_m10_the_match_commits_while_every_worker_statement_fails(live, monkeypatch, revs):
-    async def no_session_check(request, steam_id, db):
-        return None
+    from soft_check_standin import SoftCheckStandIn
+    no_session_check = SoftCheckStandIn()   # admits every caller; records keywords (M3)
 
     async def broken_mark(db, rs, limit):
         await db.execute(text("SELECT * FROM sev_no_such_table"))
@@ -417,8 +417,8 @@ def test_a3_absent_reads_absent_passes_evaluate_nothing_and_the_match_body_is_un
     from fastapi.responses import JSONResponse
     from sqlalchemy.ext.asyncio import AsyncSession
 
-    async def no_session_check(request, steam_id, db):
-        return None
+    from soft_check_standin import SoftCheckStandIn
+    no_session_check = SoftCheckStandIn()   # admits every caller; records keywords (M3)
     monkeypatch.setattr(main, "MATCH_HMAC_SECRET", "")
     monkeypatch.setattr(main, "_check_steam_session", no_session_check)
     from sqlalchemy import event

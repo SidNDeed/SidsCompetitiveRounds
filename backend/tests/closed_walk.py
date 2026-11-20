@@ -283,7 +283,7 @@ def anchored_refusals(d, meaningful, allowed, filename):
 # Round 9 (ruling REHEARSAL-R8-A1, G2 and G3): the POSITION rule. An anchor
 # (above) binds a node's shape chain but not WHICH of the equal chains it
 # stands at, nor where among its siblings: a commit at the place of the
-# rollback at main.py:21816 matched the committing refusal at :21710
+# rollback at main.py:21870 matched the committing refusal at :21764
 # (finding grammar_shapes_a1:2106), and a commit moved up its block kept
 # its chain. A constant's shape binds its type, not its value. When
 # `allowed` holds POSITIONED, every anchored node and every constant of a

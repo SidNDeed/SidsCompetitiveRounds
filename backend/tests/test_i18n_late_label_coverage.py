@@ -209,6 +209,24 @@ def _kind(text):
     return "template" if re.search(r"\{\d\}", text) else "exact"
 
 
+def _detail_builder_texts(funcs, det):
+    """For a detail that calls a function of main whose every return is a
+    string constant or an f-string (a detail builder), the closed list of the
+    texts it can return; None for any other detail."""
+    if not (isinstance(det, ast.Call) and isinstance(det.func, ast.Name) and det.func.id in funcs):
+        return None
+    rets = [r.value for r in ast.walk(funcs[det.func.id]) if isinstance(r, ast.Return)]
+    if not rets or not all(_str(v) is not None or isinstance(v, ast.JoinedStr) for v in rets):
+        return None
+    out = set()
+    for v in rets:
+        if _str(v) is not None:
+            out.add(v.value)
+        else:
+            out.update(_fstring_variants(v))
+    return out
+
+
 def route_refusals(funcs, routes):
     """{(status, kind, text)} the routes and their callees raise; kind is
     exact, template or dict."""
@@ -248,6 +266,12 @@ def route_refusals(funcs, routes):
             elif isinstance(det, ast.Dict):
                 keys = [_str(k) for k in det.keys]
                 items.add((status, "dict", det.values[keys.index("error")].value))
+            elif _detail_builder_texts(funcs, det) is not None:
+                # a call of a detail builder of main (bans part 2a:
+                # _ban_gate_detail): every text it can return, classed as if
+                # written here
+                for s in _detail_builder_texts(funcs, det):
+                    items.add((status, _kind(s), s))
             elif not (uses_var and isinstance(det, ast.Call) and getattr(det.func, "id", None) == "str"):
                 raise AssertionError("unclassified detail at main.py:%d" % c.lineno)
             if uses_var:
@@ -359,9 +383,27 @@ TEXT_HOLES = {
 }
 
 
+# Bans part 2a: the ban gate's answer (main._ban_gate_detail) reaches the shop
+# and artist routes, through the soft session check (an actively banned claimed
+# id with no verified session) and the gate of the account's own writes. The
+# released 1.41.0 client has no label row for it, and none is added here: the
+# server lane changes no client. The text is the shape _check_ban_or_raise
+# already answers ("Banned: <reason>"); its hole is the moderator's own
+# reason, which no catalogue translates; and only an account under an active
+# ban is answered it. Label rows come with the next client;
+# test_ban_answers_unlabelled_are_reachable keeps this list to what the
+# routes can send.
+BAN_ANSWERS_UNLABELLED = {
+    (409, "template", "Banned: {0}"): "the acting account's own ban, its reason as written",
+    (409, "exact", "Banned: participant"): "a ban of another account the request names",
+}
+
+
 def coverage_gaps(server, client):
     gaps = []
     for status, kind, text in sorted(server):
+        if (status, kind, text) in BAN_ANSWERS_UNLABELLED:
+            continue
         if kind == "dict":
             ok = (status, text) in client["dict"] | SENTINEL_DICT
         elif kind == "exact":
@@ -1130,3 +1172,18 @@ def test_every_label_and_refusal_key_ships_in_every_bundled_catalogue():
     reg = _read("plugin/I18nSourceKeys.g.cs")
     for s in sorted(keys):
         assert reg.count('"%s",' % s) == 1, s
+
+
+def test_ban_answers_unlabelled_are_reachable():
+    """Each unlabelled ban answer is one the display routes can send (no stale
+    row), and without the list each is reported as a gap (the list is what
+    admits them)."""
+    server = server_refusals()
+    assert set(BAN_ANSWERS_UNLABELLED) <= server, sorted(set(BAN_ANSWERS_UNLABELLED) - server)
+    client = client_refusals()
+    saved = dict(BAN_ANSWERS_UNLABELLED)
+    try:
+        BAN_ANSWERS_UNLABELLED.clear()
+        assert set(coverage_gaps(server, client)) == set(saved)
+    finally:
+        BAN_ANSWERS_UNLABELLED.update(saved)

@@ -992,8 +992,8 @@ class Env:
         proxy.monotonic = lambda: self.mono
         mp.setattr(main, "time", proxy)
 
-        async def _no_session(request, steam_id, db):
-            return None
+        from soft_check_standin import SoftCheckStandIn
+        _no_session = SoftCheckStandIn()   # admits every caller; records keywords (M3)
         mp.setattr(main, "_check_steam_session", _no_session)
         # Reports are submitted unsigned (the ladder suite's `opened`): the
         # HMAC is not what these controls test.

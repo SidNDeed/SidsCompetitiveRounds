@@ -6,7 +6,7 @@ them. Each now checks them before the admin check and every statement:
     route's existing slice of it: its first 32, 40, 20 and 400 characters;
   * the flag review and the flag restoration parse the flag's id as a UUID (400 flag_id_invalid) and bind the
     parsed UUID in their read; the signature, the audit row and the answer keep the id as sent;
-  * the quarantine discard and accept parse the report's id as a UUID (400 qid_invalid) and bind the parsed id's
+  * the quarantine discard and accept parse the report's id as a UUID (400, the table's bad_id sentence) and bind the parsed id's
     canonical text in every statement, the signature keeping the id as sent; the discard refuses a note no text
     bind can carry (422), as the route's existing slice of it, its first 500 characters.
 The admin portrait clear's target is tested in test_pc_routes.py; the Discord delete event's ids and the
@@ -85,6 +85,9 @@ class _Db:
         if sql.startswith("SELECT id FROM players WHERE steam_id"):
             return _Res([(P1,)])
         if sql.startswith("SELECT player_ids, created_at, status, mode FROM match_report_quarantine"):
+            return _Res([self.row] if self.row else [])
+        if sql.startswith("SELECT q.id, q.mode, q.reason,") and "FROM match_report_quarantine q" in sql:
+            # the held-report Accept's locked row read (QAPPLY-1, _QAPPLY_SQL_HELD)
             return _Res([self.row] if self.row else [])
         if sql.startswith("INSERT INTO record_exclusions") and sql.endswith("RETURNING id"):
             # the exclusion's insert returns the id of the row it stored, none when one stood (MODLOG-1 K1)
@@ -261,11 +264,11 @@ def test_the_quarantine_discard_checks_the_reports_id_and_note_before_the_admin_
     reached = _admin(monkeypatch)
     for bad in NOT_UUIDS:
         db = _Db()
-        _refused(main.admin_discard_quarantine(bad, _quarantine("n"), db=db), 400, "qid_invalid")
+        _refused(main.admin_discard_quarantine(bad, _quarantine("n"), db=db), 400, main._QAPPLY_TEXTS["bad_id"])
         assert db.log == [] and db.committed == 0 and reached == [], (repr(bad), db.log, reached)
     for bad in UNBINDABLE:
         db = _Db()
-        _refused(main.admin_discard_quarantine(str(QID), _quarantine(bad), db=db), 422, "note is not storable text")
+        _refused(main.admin_discard_quarantine(str(QID), _quarantine(bad), db=db), 422, main._QAPPLY_TEXTS["note"])
         assert db.log == [] and db.committed == 0 and reached == [], (repr(bad), db.log, reached)
     for sent, note in zip(_spellings(QID), CARRIED):
         for sent_note, bound_note in ((note, note), (None, "")):
@@ -278,9 +281,12 @@ def test_the_quarantine_discard_checks_the_reports_id_and_note_before_the_admin_
 
 def test_the_quarantine_accept_parses_the_reports_id_before_the_admin_check_and_binds_its_canonical_text(
         monkeypatch, capsys):
-    """The quarantine accept binds the report's id as a uuid in its row read and its UPDATE. An id that is not a
-    UUID is refused 400 qid_invalid before the admin check and any statement. An id the parse admits is signed as
-    sent, and both statements bind the parsed id's canonical text."""
+    """The quarantine accept binds the report's id as a uuid in its locked row read. An id that is not a UUID is
+    refused 400 qid_invalid before the admin check and any statement. An id the parse admits is signed as sent,
+    and the row read binds the parsed id's canonical text. Since QAPPLY-1 the Accept applies the held report
+    through the report route's body, which this fake cannot run: the held row here is a 1v1 row, which the
+    Accept refuses (409, the team-row sentence) after its row read, with no UPDATE and no commit. The applying
+    path, its UPDATE and its commit are tested on PostgreSQL in test_qapply_pg.py."""
     reached = _admin(monkeypatch)
 
     async def no_service_subject(_db, **_kw):
@@ -289,18 +295,24 @@ def test_the_quarantine_accept_parses_the_reports_id_before_the_admin_check_and_
     async def no_later_games(*_a, **_kw):
         return 0
 
+    async def service_ready(_db):
+        return None
+
     monkeypatch.setattr(main, "_assert_no_service_subject", no_service_subject)
     monkeypatch.setattr(main, "_quarantine_later_rated_count", no_later_games)
+    # The service set is read before the unit (_qapply_service_ready, tested
+    # on PostgreSQL in test_qapply_pg.py); this fake cannot run that read.
+    monkeypatch.setattr(main, "_qapply_service_ready", service_ready)
     for bad in NOT_UUIDS:
         db = _Db()
-        _refused(main.admin_accept_quarantine(bad, _quarantine(), db=db), 400, "qid_invalid")
+        _refused(main.admin_accept_quarantine(bad, _quarantine(), db=db), 400, main._QAPPLY_TEXTS["bad_id"])
         assert db.log == [] and db.committed == 0 and reached == [], (repr(bad), db.log, reached)
-    row = {"player_ids": [], "created_at": datetime(2026, 9, 15, tzinfo=timezone.utc), "status": "pending",
-           "mode": "1v1"}
+    row = {"id": QID, "player_ids": [], "created_at": datetime(2026, 9, 15, tzinfo=timezone.utc),
+           "status": "pending", "mode": "1v1", "reason": "lobby_completed", "group_id": None,
+           "photon_room_id": None, "payload": None, "payload_oversize": False, "payload_unread": False}
     for sent in _spellings(QID):
         db = _Db(row=row)
-        assert asyncio.run(main.admin_accept_quarantine(sent, _quarantine(), db=db)) == {"status": "accepted"}
+        _refused(main.admin_accept_quarantine(sent, _quarantine(), db=db), 409, main._QAPPLY_TEXTS["team"])
         assert reached[-1] == ("quarantine_action", sent), (sent, reached)
-        assert db.binds("FROM match_report_quarantine WHERE id = CAST(:qid AS UUID) FOR UPDATE", "qid") == [str(QID)]
-        assert db.binds("UPDATE match_report_quarantine", "qid") == [str(QID)] and db.committed == 1, (sent, db.log)
-    assert capsys.readouterr().out.count("[QUARANTINE]") == len(_spellings(QID))
+        assert db.binds("FROM match_report_quarantine q WHERE q.id = CAST(:qid AS uuid)", "qid") == [str(QID)]
+        assert db.binds("UPDATE match_report_quarantine", "qid") == [] and db.committed == 0, (sent, db.log)

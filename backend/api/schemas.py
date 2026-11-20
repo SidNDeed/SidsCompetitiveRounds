@@ -1369,6 +1369,23 @@ class HealthResponse(BaseModel):
     # 1186). Probed by the release train and read by nothing else (#306). No
     # default, as above. Absent on any build before it.
     modlog_build: int
+    # qapply_build: release-train verification plumbing, not a design
+    # mechanism (main._QAPPLY_BUILD; 1 = this build's Accept applies a held
+    # FFA report and its Credit route pays XP and gold without ratings). It
+    # names build identity only. A code constant, equal on both roles by
+    # construction. Probed by the release train and read by nothing else
+    # (#306). No default, as above. Absent on any build before it.
+    qapply_build: int
+    # ban_sweep_build: release-train verification plumbing, not a design
+    # mechanism (main._BAN_SWEEP_BUILD; 1 = this build refuses an actively
+    # banned account on every state-changing route and voids its open series
+    # and lobbies when the ban is written). It names build identity only. A
+    # code constant, equal on both roles by construction, so the train can
+    # read it through the edge; this is the key that tells a stale box from a
+    # refreshed one (learnings 780, 794). Probed by the release train and read
+    # by nothing else (#306). No default, as above. Absent on any build before
+    # it.
+    ban_sweep_build: int
     # bot_text_build: release-train verification plumbing, not a design
     # mechanism (main._BOT_TEXT_BUILD; 1 = in this build typed text in the
     # api's Discord posts and DMs and in the bot's messages passes one helper

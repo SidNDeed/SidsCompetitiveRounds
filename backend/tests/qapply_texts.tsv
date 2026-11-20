@@ -1,0 +1,48 @@
+key	sentence
+account	A player of this report no longer has an account, so it cannot be applied or credited.
+admin	This action needs an admin account and a valid admin signature; nothing was changed.
+ahead	This report is game {tail}; the lobby is on game {next}. Apply game {next} of this lobby first.
+bad_id	This held report's id is not valid, so nothing was changed.
+behind	This report is game {tail}, a number the lobby has passed, so it cannot be applied. Credit can pay its XP and gold.
+body	The stored report cannot be read, so it cannot be applied or credited.
+busy	Another request is using this game's players or lobby, so the action stopped at its time limit; nothing was changed. Try again in a moment.
+can_accept	Accept can apply this game now, with its ratings; use Accept instead of Credit.
+claimed	This game was already applied or credited from another held report; nothing was changed.
+clock	This report was received before the lobby's previous game ended, so it cannot be applied or credited here; it stays held.
+credited_before	This report's XP and gold were already credited.
+downgrade	The report uses an old signature this lobby does not accept, so it cannot be applied or credited.
+eligibility	The server could not check whether these players have played since; try again later.
+game_applied	This game was already applied from another held report of it; there is nothing to credit. Discard this report.
+game_credited	This game was already credited from another held report of it, so it cannot be applied.
+game_paid	This game was already credited from another held report of it; it is not paid twice. Discard this report.
+held_applied	This held report was already applied as a match.
+held_credited	This held report was already credited.
+incomplete	The stored report is not a complete game report, so it cannot be applied.
+insert_failed	The server could not record this game; nothing was applied. Try again.
+insert_race	Another account of this game was recorded at the same moment; nothing was applied. Refresh the list.
+later	{n} of its players played a later game, so this game cannot be applied now. Credit can pay its XP and gold.
+leave_figure	The report lacks a leaver's score at the time they left, so it cannot be applied or credited.
+limit	The lobby already holds its maximum number of games, so this game cannot be applied or credited.
+lobby_open	This lobby is still open; Accept and Credit work on this report once the lobby has closed.
+lobby_state	This lobby's state does not allow the game to be applied or credited.
+no_lobby	The lobby of this report no longer exists, so it cannot be applied or credited.
+no_number	This report names no game number, so it cannot be applied or credited.
+not_found	This held report was not found.
+note	The note holds characters that cannot be stored; remove them and try again.
+other_lobby	This game's room is recorded under another lobby; discard this report.
+rating	{n} of its players have a rating that changed outside a recorded game, so this game cannot be applied now. Credit can pay its XP and gold.
+readmit	This lobby used seat readmission; its held reports cannot be applied or credited yet.
+recorded	This game is already recorded; there is nothing to apply or credit. Discard this report.
+refused	The server refused to apply this report; it stays held.
+reporter	The player who sent this report could not report this game, so it cannot be applied or credited.
+retry	The server could not finish this action now; nothing was changed. Try again.
+reviewed	This held report was already reviewed.
+roster	The report's players or seats are not this lobby's roster, so it cannot be applied or credited.
+service	A player of this report is a service account, so it cannot be applied or credited.
+settled_by_hand	This lobby is from before 31 Jul 2026. Its lost games were settled by hand, so this report cannot be applied. Discard it.
+shape	The report's score is not a complete game, so it cannot be applied or credited.
+sibling_credited	Another held report of this lobby was credited as game {g}; credit this one only if it is a different game.
+team	Only FFA reports can be applied or credited; this report stays held.
+unsigned	The stored report's signature does not check out, so it cannot be applied or credited.
+wagers	This game's wagers could not be settled; nothing was applied. Try again.
+word	This report was held for a reason that is never applied or credited; discard it if it is not needed.

@@ -70,6 +70,7 @@ from fastapi import HTTPException
 
 import main
 import models
+from ban_read_tables import with_ban_read_tables
 
 try:
     import asyncpg
@@ -389,8 +390,9 @@ class _Lab:
         self.sm = async_sessionmaker(self.engine, expire_on_commit=False)
         async with self.engine.begin() as c:
             await c.run_sync(models.Base.metadata.create_all,
-                             tables=[models.ShopItem.__table__, models.Player.__table__,
-                                     models.TeamSeries.__table__, models.TeamMatch.__table__])
+                             tables=with_ban_read_tables(
+                                 [models.ShopItem.__table__, models.Player.__table__,
+                                  models.TeamSeries.__table__, models.TeamMatch.__table__]))
         conn = await asyncpg.connect(PLAIN_DSN)
         try:
             await conn.execute('SET search_path TO "%s"' % self.schema)
@@ -3772,8 +3774,8 @@ def test_the_tokenless_tests_can_fail(wired, monkeypatch, mutant):
 def resolving(wired, monkeypatch):
     """`wired`, plus the lobby resolve's Steam session check stubbed (it reads
     steam_sessions, which the lab does not build)."""
-    async def _checked(request, steam_id, db):
-        return None
+    from soft_check_standin import SoftCheckStandIn
+    _checked = SoftCheckStandIn()   # admits every caller; records keywords (M3)
 
     monkeypatch.setattr(main, "_check_steam_session", _checked)
     return wired

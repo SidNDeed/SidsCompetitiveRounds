@@ -35,6 +35,46 @@ pass adds eleven statements (_qdig_janitor_pass 7, _qdig_load 4), every one a
 module constant or literal, and no other function's count moves, as
 main._janitor_sql_from_sources measures this tree and the stack's.
 
+With QAPPLY-1 (the held-report Accept and Credit), the tree reads 389 and 0:
+the report route's body, which the walk reaches from queue_cleanup_loop, now
+calls the held-report gate and its record (under the held-report replay
+only, which no janitor sets), so seven statements join the inventory
+(_qapply_gate 4, _qapply_finish 1, _modlog_write 1, _modlog_steam_ids 1),
+every one a module constant or literal and none a session statement, and no
+other function's count moves, as main._janitor_sql_from_sources measures
+this tree and the base's.
+
+With the game's claim (QAPPLY-1 fix 1), the tree reads 391 and 0: the body
+reads the game's claim (_qapply_claim_of 1) and the record takes it
+(_qapply_claim 1), both module constants on the claims table, and no other
+function's count moves, as main._janitor_sql_from_sources measures this tree
+and the review's base.
+With the ban sweep (bans part 2a) the tree reads 384 and 0: the janitor
+already reaches _check_steam_session and submit_ffa_match, and each now
+calls a ban read, so _is_banned (1, through the soft check's ban read) and
+_ban_gate_any_or_raise (1, through the FFA report's gate) are counted; both
+statements resolve, and no other function's count moves, as
+main._janitor_sql_from_sources measures this tree and e3c8b2a2's.
+
+With the ban sweep's fix sitting (FIX-1) the tree reads 385 and 0: the
+report window's settle bodies now read the ban themselves under the
+identity lock (_settle_writer_ban_check -> _ban_lock_and_gate), and the one
+new statement the janitor reaches is that helper's shared identity lock
+(1); its ban reads are the gates already counted above.
+
+The fix's second part (FIX-1B) reads 386 and 0: _ban_lock_and_gate takes the
+keys its `exclusive=` names in their exclusive form, one more statement the
+janitor reaches through the same helper (1); _refund_lobby_bets' open-bet
+read gained its bettor filter, a changed statement and not a new one. FIX-2
+adds none: the window's close-as-refused statements live in
+match_report_window, which this inventory does not read.
+
+With QAPPLY-1 and the ban sweep on one branch (claude/stack-1120) the tree
+reads 395 and 0: both lanes counted from the same 382 (QDIG-1), QAPPLY-1
+adds nine (382 -> 391) and the ban sweep four (382 -> 386), and no function
+is counted by both, so 382 + 9 + 4 = 395, as main._janitor_sql_from_sources
+measures the merged tree.
+
 With the account deletion lane (claude/mdpl-1116) merged after it, the tree
 reads 387 and 0: that lane adds five janitor statements, every one a SELECT of
 the deletion's two guards, which issue their statements only when the
@@ -46,6 +86,13 @@ team_queue_cleanup_loop and
 tournament_tick) and _deletion_lock_ffa_bet 2 (the unsettled bet row FOR NO
 KEY UPDATE SKIP LOCKED and its plain read; reached from queue_cleanup_loop),
 as main._janitor_sql_inventory() measures both trees.
+
+With the stack and the account deletion lane on one branch
+(claude/mdpl-stack-1120) the tree reads 400 and 0: both counted from the
+same 382 (QDIG-1), the stack adds thirteen (382 -> 395) and the account
+deletion lane five (382 -> 387), and no function is counted by both, so
+382 + 13 + 5 = 400, as main._janitor_sql_from_sources measures the merged
+tree.
 """
 import asyncio
 import os
@@ -61,7 +108,7 @@ sys.path.insert(0, os.path.normpath(os.path.join(HERE, "..", "api")))
 import main  # noqa: E402
 import models  # noqa: E402
 
-STATEMENTS, DYNAMIC = 387, 0   # 371 before QDIG-1, 382 before the account deletion lane (see the module docstring)
+STATEMENTS, DYNAMIC = 400, 0   # 395 the stack alone, 387 the account deletion lane alone, 382 before both, 371 before QDIG-1 (see the module docstring)
 ROOT = (("main", "root"),)
 DEF = re.compile(r"\((\w+)\.unbanned_at IS NULL AND \(\1\.expires_at IS NULL OR \1\.expires_at > NOW\(\)\)\)")
 # the sites that were dynamic on 88a0a2bf, and the alias each one's definition call names

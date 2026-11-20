@@ -147,16 +147,22 @@ ENV_ALLOWED = {"PGCLIENTENCODING": "UTF8"}
 # and the rollback file at rollback_401's (one test_zz start, two _connect
 # opens). So _connect 1157 -> 1161, record 439 -> 440, run 390 -> 391,
 # test_zz 30 -> 31; every other count is unchanged.
+# Then 426_ffa_game_claims.sql and its rollback file (QAPPLY-1), neither with
+# a d2_seed prerequisite (SEEDS names no 426 file) and neither with a resume
+# file: the numbered file at 401's cost (one run start, one record start, two
+# _connect opens) and the rollback file at rollback_401's (one test_zz start,
+# two _connect opens). So _connect 1161 -> 1165, record 440 -> 441, run
+# 391 -> 392, test_zz 31 -> 32; every other count is unchanged.
 OPEN_COUNTS = {
-    "_admin": 315, "_clone_with_oid": 2, "_connect": 1161, "_fetchval": 6, "_orm": 1,
+    "_admin": 315, "_clone_with_oid": 2, "_connect": 1165, "_fetchval": 6, "_orm": 1,
     "_probe_problems": 2, "_r10_authid_reading": 1, "_r10_inplace_bound": 1,
     "_r10_outside_across_drop": 2, "_r10_routes": 1, "_r10_settings": 2, "_r9_databases": 1,
     "_template_problem": 3, "_whoami": 3}
 START_COUNTS = {
-    "_apply_tail": 2, "_blobs": 1, "_build": 1, "_build.<locals>.record": 440,
-    "_build.<locals>.run": 391, "_git": 2, "_route_run": 56,
+    "_apply_tail": 2, "_blobs": 1, "_build": 1, "_build.<locals>.record": 441,
+    "_build.<locals>.run": 392, "_git": 2, "_route_run": 56,
     "test_migrations_are_applied_from_the_object_store": 2,
-    "test_zz_rollback_and_resume_files_do_not_change_mail_inbox_rev": 31}
+    "test_zz_rollback_and_resume_files_do_not_change_mail_inbox_rev": 32}
 
 REUSE_REFUSAL = ("D2_REUSE_DB is set: the chain was not built in this run, so the run is not "
                  "one the packet cites (ruling FOUR-R11-A17 (g))")

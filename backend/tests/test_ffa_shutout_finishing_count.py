@@ -63,6 +63,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "api"))
 
 import main  # noqa: E402
 import schemas  # noqa: E402
+from ban_read_tables import BAN_READ_DROP_ORDER, ban_read_ddl  # noqa: E402
 
 SQL_DIR = pathlib.Path(__file__).resolve().parents[1] / "sql"
 MIGRATION = SQL_DIR / "363_revoke_ffa_shutouts_below_finishing_count.sql"
@@ -316,7 +317,10 @@ def test_every_departed_ids_writer_updates_the_lobby_row_the_report_locks():
 HARNESS_SCHEMA = "ffa_trophies_harness"
 LANE_MARKER = re.compile(r"(?:^|_)ffa_trophies(?:_|$)")
 # Dependency order: each table is dropped before the tables it references.
-HARNESS_TABLES = ("ffa_report_windows", "player_achievements", "gold_transactions",
+# The ban read's tables (bans part 2a) come first: player_bans references
+# admin_users and nothing here references either.
+HARNESS_TABLES = BAN_READ_DROP_ORDER + (
+                  "ffa_report_windows", "player_achievements", "gold_transactions",
                   "glicko_ratings_ffa",
                   "match_report_quarantine", "ffa_match_players", "ffa_matches",
                   "ffa_lobbies", "players")
@@ -503,6 +507,8 @@ def _readmit_ddl(sql):
 
 
 HARNESS_DDL = HARNESS_DDL + _readmit_ddl(READMIT_MIGRATION.read_text(encoding="utf-8"))
+# The ban read's tables, from the model metadata, in the harness schema.
+HARNESS_DDL = HARNESS_DDL + ban_read_ddl(HARNESS_SCHEMA)
 
 # Every relation outside the system schemas, with the table an index or a
 # column-owned sequence belongs to. Temporary schemas are other sessions'
@@ -692,8 +698,8 @@ async def _call_endpoint(sm, report):
     saved_secret = main.MATCH_HMAC_SECRET
     saved_session = main._check_steam_session
 
-    async def _no_session_check(request, steam_id, db):
-        return None
+    from soft_check_standin import SoftCheckStandIn
+    _no_session_check = SoftCheckStandIn()   # admits every caller; records keywords (M3)
 
     main.MATCH_HMAC_SECRET = ""
     main._check_steam_session = _no_session_check

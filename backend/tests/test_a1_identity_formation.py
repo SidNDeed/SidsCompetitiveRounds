@@ -19,7 +19,7 @@ Acceptance items from ai-collab/rejoin/A1-BRIEF.md covered here:
           numerically, and no such pair exists -- canonical SteamID64s are
           fixed-width 17-digit ASCII decimals, so the two orders coincide.
           The bind-sequence assertion replaces it, and the short-id case below
-          is what actually separates _ffa_sort_key from bare sorted().
+          is what actually separates identity_lock_key from bare sorted().
 """
 
 import asyncio
@@ -28,7 +28,7 @@ import re
 import pytest
 
 import main
-
+from identity_order import identity_lock_key  # the ONE identity order (FIX-1B point 3)
 
 # --- fake session -----------------------------------------------------------
 
@@ -132,9 +132,9 @@ def run(coro):
 
 def assert_canonical_identity_order(binds, expected_sids):
     """The one oracle for item 4. Raises AssertionError on any violation."""
-    assert binds == sorted(set(expected_sids), key=main._ffa_sort_key), (
+    assert binds == sorted(set(expected_sids), key=identity_lock_key), (
         f"identity binds {binds!r} are not the canonical order of "
-        f"{sorted(set(expected_sids), key=main._ffa_sort_key)!r}"
+        f"{sorted(set(expected_sids), key=identity_lock_key)!r}"
     )
     assert len(binds) == len(set(binds)), f"duplicate identity binds: {binds!r}"
 
@@ -161,7 +161,7 @@ def test_identity_binds_collapse_duplicates_and_drop_empties():
     db = FakeSession()
     given = [SIDS[0], SIDS[1], SIDS[0], None, "", SIDS[1]]
     returned = run(main._identity_lock_many(db, given))
-    assert returned == sorted({SIDS[0], SIDS[1]}, key=main._ffa_sort_key)
+    assert returned == sorted({SIDS[0], SIDS[1]}, key=identity_lock_key)
     assert db.identity_binds() == returned
     assert len(db.identity_binds()) == 2, (
         "a duplicate sid must be bound ONCE; binding it twice is harmless for "
@@ -197,7 +197,7 @@ def test_identity_lock_uses_the_lattice_key_not_a_private_one():
 
 
 def test_short_ids_order_by_length_then_ordinal_not_bare_lexical():
-    """This is the case that actually distinguishes _ffa_sort_key from
+    """This is the case that actually distinguishes identity_lock_key from
     sorted(). On canonical 17-digit ids the two agree, so a test built only
     from real steam ids cannot tell which key is in use."""
     db = FakeSession()
@@ -216,13 +216,13 @@ def test_planted_misordered_trace_is_rejected_by_the_oracle():
 
 
 def test_planted_duplicate_trace_is_rejected_by_the_oracle():
-    dup = sorted(SIDS, key=main._ffa_sort_key)
+    dup = sorted(SIDS, key=identity_lock_key)
     with pytest.raises(AssertionError):
         assert_canonical_identity_order(dup + dup[:1], SIDS)
 
 
 def test_source_mutation_reversing_the_key_is_caught(monkeypatch):
-    """Negative control against the SOURCE, not just against a trace.
+    """Negative control against the SOURCE (main.identity_lock_key, read by _identity_lock_many).
 
     The key is REVERSED rather than collapsed to a constant. A constant key
     looks like the more natural mutation, but sorted() is stable, so the binds
@@ -233,14 +233,14 @@ def test_source_mutation_reversing_the_key_is_caught(monkeypatch):
     ones you believe.
     """
     monkeypatch.setattr(
-        main, "_ffa_sort_key",
+        main, "identity_lock_key",
         lambda s: (-len(s or ""), tuple(-ord(c) for c in (s or ""))))
     db = FakeSession()
     given = [SIDS[2], SIDS[0], SIDS[1]]
     run(main._identity_lock_many(db, given))
     monkeypatch.undo()
     binds = db.identity_binds()
-    assert binds == list(reversed(sorted(set(given), key=main._ffa_sort_key))), (
+    assert binds == list(reversed(sorted(set(given), key=identity_lock_key))), (
         "premise check: the mutated key really did reverse the order"
     )
     with pytest.raises(AssertionError):
@@ -3278,7 +3278,7 @@ def test_the_lease_gate_is_never_wrapped_in_a_swallowing_scope(site):
 # commitment point by definition, whether or not anyone remembered to list it.
 #
 # The walk is interprocedural because the code is: team_lobby_start and
-# ovt_lobby_start acquire in their OWN bodies (team_lobby_start's one _lease_acquire_many call at main.py:62160, ovt_lobby_start's at main.py:62304) while the gate
+# ovt_lobby_start acquire in their OWN bodies (team_lobby_start's one _lease_acquire_many call at main.py:62251, ovt_lobby_start's at main.py:62395) while the gate
 # that covers them lives in _lobby_start_common, which they call. A per-function
 # pass calls those two ungated and is simply wrong, which is the kind of
 # false positive that gets a test deleted rather than fixed.
@@ -5004,8 +5004,8 @@ def _r7_src(name):
     return _textwrap.dedent(_inspect.getsource(getattr(main, name)))
 
 
-# Round 9 (G2, G3): queue_poll's admission refusal (main.py:21816), its
-# success commit (:21818) and the lease acquire both stand under.
+# Round 9 (G2, G3): queue_poll's admission refusal (main.py:21870), its
+# success commit (:21872) and the lease acquire both stand under.
 _R9_Q_ADMISSION = ("            await db.rollback()\n"
                    "            raise HTTPException(status_code=503, "
                    "detail=\"admission_contended\")\n")
@@ -5129,7 +5129,7 @@ def _r7_programs():
              "        return None\n\n\n"
              "class Evil(tuple, metaclass=Meta):\n    __new__ = _Nt.__new__\n",))),
         # round 9 (ruling REHEARSAL-R8-A1, G2): the reviewer's live mutant, a
-        # commit in place of the admission refusal's rollback (main.py:21816)
+        # commit in place of the admission refusal's rollback (main.py:21870)
         ("r8 grammar_shapes_a1:2106 a commit in place of the admission "
          "refusal's rollback", "return",
          _r7_put(q, _R9_Q_ADMISSION, _R9_Q_ADMISSION.replace(
@@ -5536,8 +5536,8 @@ def test_r9_the_gate_receiver_chain_is_checked():
 def test_r9_queue_poll_refusals_roll_back():
     """Production conformation (round 9, ruling REHEARSAL-R8-A1, G2; finding
     grammar_shapes_a1:2106). queue_poll's two committing refusals, the
-    pair-inversion give-up (main.py:21323) and the formation loop's
-    status re-read (:21710), each `await db.commit()` then `raise
+    pair-inversion give-up (main.py:21377) and the formation loop's
+    status re-read (:21764), each `await db.commit()` then `raise
     HTTPException(503, "queue_contended")`, now roll back: their
     transactions hold only reads and locks since the last end (the
     discovery and identity locks of the inversion loop; the loop's own
@@ -5809,7 +5809,7 @@ def test_r8_frozen_callee_picks_one_name_of_a_frozen_statement():
 # --- round 8, M1: the static S analysis retired; a frozen execute lookup ----
 # Ruling REHEARSAL-FOUR-R7-A1 M1 and W30b's rulings (a) and (b): an execute
 # is 'read' only at a ro_covered.COVERED position whose OUTCOME is 'ok';
-# WRITERS (main.py:17905 and :54878 included: grammar/lookup writers, not
+# WRITERS (main.py:17959 and :54910 included: grammar/lookup writers, not
 # role-bound), the covered positions the role did not reach, and every
 # position in neither table are 'write'.
 
@@ -5824,7 +5824,7 @@ _SR_RETIRED = ("SqlLists", "_SQL_END_WORDS", "_SQL_OTHER_COMMANDS", "_DML",
 def test_r8_sr_the_lookup_reads_only_the_covered_ok_positions():
     """The lookup, position by position (ruling R-A): every COVERED
     position whose OUTCOME is green reads; every WRITERS position locks
-    (main.py:17905 and :54878 named: 'ok' under the role, so the walk's lock
+    (main.py:17959 and :54910 named: 'ok' under the role, so the walk's lock
     rule alone bounds them); every other COVERED position (the reads the
     role did not reach) and a real execute in no table is a write; the key
     holds the file (a WRITERS line under another file's name is a write)."""
@@ -5859,7 +5859,7 @@ def test_r8_sr_the_lookup_reads_only_the_covered_ok_positions():
         b, c = _sr_placed(e)
         want = "read" if e[1:4] in ok else "lock" if e[1:4] in locks else "write"
         assert b.execute_kind(c, _A1_TABLE) == want, (e, want)
-    for ln in (17905, 54878):
+    for ln in (17959, 54910):
         e = [w for w in _ro.WRITERS if w[1] == "main.py" and w[2] == ln][0]
         b, c = _sr_placed(e)
         assert b.execute_kind(c, _A1_TABLE) == "lock", e
