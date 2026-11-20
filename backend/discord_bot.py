@@ -431,15 +431,44 @@ def _is_registered_command(content):
         return True
 
 
+# The shown length of a mail's sender name and subject in the bot's own
+# lines, counted on the ESCAPED text (BOT-TEXT-ESCAPE-1): the pick list holds
+# five of each and must stay under Discord's 2000-character message limit.
+MAIL_NAME_SHOWN_MAX = 64
+MAIL_SUBJECT_SHOWN_MAX = 120
+
+
+def _mail_legacy_plain(value) -> str:
+    """An older api's escaped mail field (sender_name, subject) taken back
+    to the text typed. That api escapes with a backslash before each of
+    \\ * _ ~ | and a line-opening #, and never leaves a backslash on its own,
+    so undoing every backslash pair gives the typed text (with that api's
+    mention words and angle brackets already replaced). Not an escape: what
+    it returns is raw text, for a plain slot or for one pass of a helper."""
+    return re.sub(r"(?s)\\(.)", r"\1", str(value or ""))
+
+
 def _mail_sent_line(info):
     """The confirmation. `known` is false when the server could not read
     the thread back -- saying "to them - (no subject)" there states two
     facts it does not have, about a reply that did send."""
     if not (info or {}).get("known"):
         return "\u2709\ufe0f Sent your reply."
-    who = (info.get("sender_name") or "").strip() or "them"
-    subj = (info.get("subject") or "").strip() or "(no subject)"
-    return "\u2709\ufe0f Sent your reply to **%s** — *%s*" % (_escape_md(who), subj)
+    # BOT-TEXT-ESCAPE-1: an api that serves the raw values (*_raw) gets them
+    # escaped ONCE here. An older api serves only its escaped fields: each is
+    # taken back to its typed text (_mail_legacy_plain), then the name passes
+    # _escape_md once and the subject _escape_text once, so each is escaped
+    # once in every mix of api and bot.
+    if isinstance(info.get("sender_name_raw"), str):
+        who = info["sender_name_raw"].strip() or "them"
+    else:
+        who = _mail_legacy_plain(info.get("sender_name")).strip() or "them"
+    if isinstance(info.get("subject_raw"), str):
+        subj = _escape_text(info["subject_raw"].strip() or "(no subject)", MAIL_SUBJECT_SHOWN_MAX)
+    else:
+        subj = _escape_text(_mail_legacy_plain(info.get("subject")).strip() or "(no subject)",
+                            MAIL_SUBJECT_SHOWN_MAX)
+    return "\u2709\ufe0f Sent your reply to **%s** — *%s*" % (_escape_md(who, MAIL_NAME_SHOWN_MAX), subj)
 
 
 # ── Item 5: the thread marker ──────────────────────────────────────────────
@@ -546,8 +575,15 @@ def _mailpick_view(threads, disabled=False):
     buttons at :10915, so nothing here depends on a newer component API."""
     view = discord.ui.View(timeout=None)
     for t in threads[:5]:
-        label = "%s \u2014 %s" % ((t.get("sender_name") or "?").strip(),
-                                  (t.get("subject") or "(no subject)").strip())
+        # A button label renders no markdown: it gets the typed text, no
+        # backslash, cut to Discord's 80 (BOT-TEXT-ESCAPE-1) -- the raw
+        # values of an api that serves them, else an older api's escaped
+        # fields taken back to their typed text.
+        sender = (t["sender_name_raw"] if isinstance(t.get("sender_name_raw"), str)
+                  else (_mail_legacy_plain(t.get("sender_name")) or "?"))
+        subject = (t["subject_raw"] if isinstance(t.get("subject_raw"), str)
+                   else (_mail_legacy_plain(t.get("subject")) or "(no subject)"))
+        label = "%s \u2014 %s" % (sender.strip() or "?", subject.strip() or "(no subject)")
         view.add_item(discord.ui.Button(
             style=discord.ButtonStyle.secondary, label=label[:80],
             custom_id="scrmail:%s" % t.get("relay_code"), disabled=disabled))
@@ -581,10 +617,21 @@ async def _ask_which_mail(message_or_ctx, body, *, discord_id, channel,
             "\u2753 I couldn\u2019t tell which mail that answers.")
     lines = [lead, "Tap the one you meant \u2014 or use Discord\u2019s **Reply** on its DM."]
     for t in threads[:5]:
-        lines.append("**%s** \u2014 *%s* \u00b7 `%s`"
-                     % (_escape_md((t.get("sender_name") or "?").strip()),
-                        (t.get("subject") or "(no subject)").strip(),
-                        t.get("relay_code")))
+        # Raw values (an api that serves *_raw) escaped once here; an older
+        # api's name and subject taken back to their typed text and escaped
+        # once each (see _mail_sent_line). Each field
+        # is bounded on its escaped text, so five rows stay inside one
+        # message (MAIL_NAME_SHOWN_MAX, MAIL_SUBJECT_SHOWN_MAX).
+        if isinstance(t.get("sender_name_raw"), str):
+            who = _escape_md(t["sender_name_raw"].strip() or "?", MAIL_NAME_SHOWN_MAX)
+        else:
+            who = _escape_md(_mail_legacy_plain(t.get("sender_name")).strip() or "?", MAIL_NAME_SHOWN_MAX)
+        if isinstance(t.get("subject_raw"), str):
+            subj = _escape_text(t["subject_raw"].strip() or "(no subject)", MAIL_SUBJECT_SHOWN_MAX)
+        else:
+            subj = _escape_text(_mail_legacy_plain(t.get("subject")).strip() or "(no subject)",
+                                MAIL_SUBJECT_SHOWN_MAX)
+        lines.append("**%s** \u2014 *%s* \u00b7 `%s`" % (who, subj, t.get("relay_code")))
     lines.append("-# Or send `SCR-XXXXXXXXXXXX your message` at any time.")
     sent = await channel.send("\n".join(lines), view=_mailpick_view(threads))
     if sent is not None:
@@ -636,7 +683,7 @@ async def _post_mail_reply(channel, discord_id, code, body, source_message_id):
     # Everything else is a real refusal from the SAME rules the in-game reply
     # obeys (blocked, rate-limited, too long, censor). Surface the reason.
     await channel.send(
-        f"\u274c Couldn\u2019t send that reply: `{detail}`. The same rules apply as "
+        f"\u274c Couldn\u2019t send that reply: {_api_refusal_text(detail)}. The same rules apply as "
         f"in-game (blocks, length, and a short rate limit).")
     return "HANDLED"
 
@@ -1132,6 +1179,9 @@ def _faq_plainify(text: str, cap: int = 420) -> str:
     # backticks, not an escaped one, then every escape.
     t = _faq_re.sub(r"(?<!\\)`", "", t)
     t = _faq_re.sub(r"\\([^0-9A-Za-z\s])", r"\1", t)
+    # The name helper's zero-width space after an address scheme keeps a
+    # name from becoming a Discord link; in-game chat drops it.
+    t = t.replace("\u200b", "")
     for bad, good in (("—", "-"), ("–", "-"), ("×", "x"), ("•", "-"),
                       ("→", "->"), ("’", "'"), ("“", '"'), ("”", '"'),
                       ("·", "-"), ("✅", ""), ("❌", "")):
@@ -2762,7 +2812,7 @@ async def _maybe_warn_invalid_room_code(message) -> None:
               else "it has only five letters")
     try:
         await message.reply(
-            f"⚠️ `{candidate}` is not a valid ROUNDS room code because {reason}. "
+            f"⚠️ **{_escape_text(candidate)}** is not a valid ROUNDS room code because {reason}. "
             "**Room codes are exactly six capital letters with no dash.** "
             "ROUNDS reports the host/player as offline for a malformed code, so ask them to resend the full code.",
             mention_author=False,
@@ -2996,7 +3046,7 @@ async def _maybe_answer_faq_ingame(data: dict) -> None:
         try:
             channel = bot.get_channel(_mirror_id) or await bot.fetch_channel(_mirror_id)
             if channel is not None:
-                asker = discord.utils.escape_markdown(data.get("display_name") or "player")
+                asker = _escape_md(data.get("display_name") or "player")
                 await channel.send(content=f"-# answering **{asker}** (in-game):",
                                    embed=_faq_embed(entry, answer),
                                    # SECOND unguarded sink on the in-game ->
@@ -3576,13 +3626,16 @@ async def _forward_ingame_to_discord(data: dict) -> str:
     src_label = "(in-game)" if src == "ingame" else "(Twitch)" if src == "twitch" else "(YouTube)"
     try:
         _sent_msg = await channel.send(
-            f"{lang_prefix}**{discord.utils.escape_markdown(name)}"
-            f"{discord.utils.escape_markdown(title_str)}"
+            f"{lang_prefix}**{_escape_md(name)}"
+            f"{_escape_md(title_str)}"
             f"{rating_str}** {src_label}: "
-            f"{discord.utils.escape_markdown(content)[:1900]}",
+            f"{_escape_text(content, 1900)}",
+            # The chat line is the player's free text: _escape_text shows it as
+            # typed (marks and mention forms escaped, lines kept) and cuts it on
+            # the escaped text (BOT-TEXT-ESCAPE-1).
             # Bug #125 adjacent (found by the independent audit of this feature).
-            # escape_markdown handles * _ ~ | ` and nothing else — it does NOT
-            # touch `<`, `@`, `#` or `&`. Nothing on the in-game path strips them
+            # The library escape this used to call handled * _ ~ | ` and nothing
+            # else — not `<`, `@`, `#` or `&`. Nothing on the in-game path strips them
             # either (the mod only JSON-escapes, the API only truncates), and the
             # Bot constructor sets no allowed_mentions default, so a player typing
             # `<@id>` / `<@&roleid>` / `@everyone` in T-chat produced a REAL ping
@@ -4680,7 +4733,9 @@ async def ctx_mute_chatter(interaction: discord.Interaction, message: discord.Me
             if resp.status == 200 and body.get("status") == "ok":
                 purged = int(body.get("purged") or 0)
                 await interaction.followup.send(
-                    f"Muted `{body.get('muted')}` everywhere and removed {purged} "
+                    # The muted identity holds a bridge author id as the
+                    # bridge sent it: one name-helper pass, no code span.
+                    f"Muted {_escape_md(body.get('muted') or '?', 80)} everywhere and removed {purged} "
                     f"recent message(s).", ephemeral=True)
             elif resp.status == 200 and body.get("status") == "unknown_message":
                 await interaction.followup.send(
@@ -4688,11 +4743,11 @@ async def ctx_mute_chatter(interaction: discord.Interaction, message: discord.Me
                     "the mirror map, or it isn't part of the cross-platform chat).",
                     ephemeral=True)
             else:
-                detail = str(body.get("detail") or "")[:180]
+                detail = _api_refusal_text(body.get("detail") or "", 180)
                 await interaction.followup.send(
                     f"Mute refused (HTTP {resp.status}). {detail}", ephemeral=True)
     except Exception as e:
-        await interaction.followup.send(f"Mute failed: {e}", ephemeral=True)
+        await interaction.followup.send(f"Mute failed: {_escape_text(str(e), 300)}", ephemeral=True)
 
 
 @bot.hybrid_command(name="chatlockdown",
@@ -4734,7 +4789,7 @@ async def cmd_chatlockdown(ctx, state: str = ""):
             else:
                 await ctx.reply(f"Lockdown toggle failed (HTTP {resp.status}).", ephemeral=True)
     except Exception as e:
-        await ctx.reply(f"Lockdown toggle failed: {e}", ephemeral=True)
+        await ctx.reply(f"Lockdown toggle failed: {_escape_text(str(e), 300)}", ephemeral=True)
 
 
 # ── Twitch outbound mirror (design S8) ───────────────────────────────────────
@@ -5195,7 +5250,8 @@ async def cmd_link(ctx, code: str = None):
     })
     if not result: await ctx.send("❌ API unreachable."); return
     if "error" in result:
-        await ctx.send("❌ Invalid or expired code." if result.get("status") == 404 else f"❌ {result['error']}"); return
+        await ctx.send("❌ Invalid or expired code." if result.get("status") == 404
+                       else f"❌ {_api_refusal_text(result['error'])}"); return
     await ctx.send(f"✅ Linked! **{_escape_md(ctx.author.display_name)}** → Steam **{_escape_md(result.get('display_name'))}** (`{result.get('steam_id')}`)")
     data = await api_get(f"/players/by-discord/{ctx.author.id}")
     if data and "rating" in data:
@@ -5425,17 +5481,19 @@ def _streak_field(s, key):
 def _top_cards_lines(s, limit=5):
     """Top-cards lines from /players/{steam}. top_cards is a list of dicts
     ({card_name, times_picked, ...} — main.py:2086); tolerate the legacy
-    parallel-list shape too."""
+    parallel-list shape too. A card name is the name the mod reported, which
+    the api stores without checking it against a card list: it passes the
+    name helper once."""
     lines = []
     for c in (s.get("top_cards") or [])[:limit]:
         if isinstance(c, dict) and c.get("card_name"):
-            lines.append(f"**{c['card_name']}** ({c.get('times_picked', 0)}x)")
+            lines.append(f"**{_escape_md(c['card_name'], 64)}** ({c.get('times_picked', 0)}x)")
     if not lines:
         names = s.get("top_card_names") or []
         picks = s.get("top_card_picks") or []
         for i in range(min(limit, len(names))):
             p = f" ({picks[i]}x)" if i < len(picks) else ""
-            lines.append(f"**{names[i]}**{p}")
+            lines.append(f"**{_escape_md(names[i], 64)}**{p}")
     return lines
 
 
@@ -5519,23 +5577,30 @@ async def cmd_stats(ctx, member: discord.Member = None):
     embed.set_footer(text=f"Steam: {s['steam_id']}")
     await ctx.send(embed=embed)
 
-def _escape_md(text) -> str:
+def _escape_md(text, limit=None, more="...") -> str:
     """A player's name made literal in Discord Markdown. First written for
     the **bold** of every leaderboard row: _lb_line here and the mode
     boards' _lb_line_2v2, _lb_line_ffa and _lb_line_ovt (v1.41.0 beta round 3
     finding 16). Since round 4 (finding 23) the other replies, DMs, posts and
     embeds that print a player's Steam or Discord name use it as well, as
-    the census in tests/test_discord_name_markdown.py finds them; the few
-    that already used discord.utils.escape_markdown keep it.
+    the census in tests/test_discord_name_markdown.py finds them. Since
+    BOT-TEXT-ESCAPE-1 it is THE name helper: no library escape stands
+    between a typed name and a slot (tests/test_bot_text_escape.py's census).
     Backslash-escapes * _ ~ | and the backtick (bold, italics
     and underline, strikethrough, spoiler, inline code), the backslash
     itself (a trailing one would escape the row's own closing **), and
-    [ ] < > (a masked link, or a mention, emoji or timestamp tag). Discord
-    shows a backslash before any of these as the character alone.
+    [ ] < > (a masked link, or a mention, emoji or timestamp tag), and @
+    (BOT-TEXT-ESCAPE-1: @everyone and @here in a name show as text, not as a
+    mention). Discord shows a backslash before any of these as the character
+    alone. A name is never a link: every address scheme (a letter, then
+    letters, digits, + . or -, any case: http, https, ftp, steam, ...)
+    whose colon is followed by a slash gets a zero-width space after its
+    colon, before any cut.
 
-    TRUNCATE FIRST, then escape -- never the other way round. Cutting an
-    escaped name can strand a lone backslash at its end, and that escapes
-    the row's closing ** instead.
+    A cut is made on the escaped text (`limit`, below) and never ends inside
+    an escape pair. A caller that cuts the raw name first must not cut the
+    escaped one again with a plain slice: that can strand a lone backslash,
+    which escapes the row's closing ** instead.
 
     A row is one line whatever the name holds (round 4, finding 16's newline
     half): every line break becomes a single space before anything is
@@ -5545,16 +5610,125 @@ def _escape_md(text) -> str:
     "Alice\\n# 2 Fake" no longer starts a line of its own, so it can
     neither fake an extra row nor open a heading, a list or a quote."""
     one_line = re.sub(r"\r\n|[\n\r\v\f\x1c-\x1e\x85\u2028\u2029]", " ", str(text))
-    escaped = re.sub(r"([\\*_~|`\[\]<>])", r"\\\1", one_line)
+    escaped = re.sub(r"([\\*_~|`\[\]<>@])", r"\\\1", one_line)
     # A name can open a line: a reply that starts with it, an embed field's
     # name. There a leading # opens a heading, a leading - or + a list item or
     # subtext, and 1. or 1) a numbered list (round 4, finding 23). A backslash
     # keeps the marker text; Discord shows the marker alone.
     escaped = re.sub(r"^(\s*)([#+-])", r"\1\\\2", escaped)
-    return re.sub(r"^(\s*\d+)([.)])", r"\1\\\2", escaped)
+    escaped = re.sub(r"^(\s*\d+)([.)])", r"\1\\\2", escaped)
+    # A name is never a link: every scheme that is followed by a slash gets
+    # a zero-width space after its colon, so Discord's auto-linker does not
+    # fire on it (the stream lane's pattern; BOT-TEXT-ESCAPE-1 stage 3 brings
+    # it into the name helper, before the cut). Discord makes a link only of
+    # a scheme followed by ":/", so a "word:" with no slash after it
+    # (Re:Zero) is left as typed. Free text (_escape_text) keeps an address
+    # whole.
+    escaped = re.sub(r"(?i)(?<![a-z0-9+.\-])([a-z][a-z0-9+.\-]*):(?=/)", "\\1:\u200b", escaped)
+    # With a limit: at most `limit` characters, cut on the ESCAPED text with
+    # `more` after the cut. Every backslash here opens or closes a pair, so a
+    # cut that leaves an odd run of them at its end has split a pair and drops
+    # its last one: a cut never ends inside an escape pair.
+    if limit is None or len(escaped) <= limit:
+        return escaped
+    if limit < len(more):
+        return more[:limit]
+    cut = escaped[:limit - len(more)]
+    if (len(cut) - len(cut.rstrip("\\"))) % 2:
+        cut = cut[:-1]
+    return cut + more
 
 
-_LB_NAME_BREAKS = re.compile(r"[\r\n  ]+")
+# _escape_text: the ONE helper for free text a person typed (a bug report's
+# description, a comment, a ban's reason). Its rules, each shown by
+# tests/test_bot_text_escape.py:
+#   - every line break is kept, as "\n" (CRLF, CR, VT, FF, FS, GS, RS, NEL and
+#     the Unicode line and paragraph separators each become one "\n"), so the
+#     start of every line is known;
+#   - each of \ * _ ~ | ` [ ] < > @ gets a backslash wherever it stands:
+#     emphasis, bold, underline, strike, spoiler, code span and code block,
+#     quote, masked link, and every mention form (<@id> <@!id> <@&id> <#id>
+#     </name:id> <t:...> @everyone @here) are then shown as their characters;
+#   - at the start of each line, after spaces or tabs: a # (heading), a - or
+#     + (list item, small text) gets a backslash, and so does the . or ) after
+#     a run of digits (numbered list);
+#   - a bare web address (http:// or https://, not glued to a letter, digit or
+#     _ before it) is left exactly as typed, to its last character that is not
+#     . , : ; " ' ) ] (the characters Discord leaves outside a link), so it
+#     stays one whole address; what follows it is escaped like any text;
+#   - with a limit, the result is at most `limit` characters and is cut
+#     between whole pieces (one character with its backslash, a line-opening
+#     mark, a whole address), never inside one, and `more` is appended after a
+#     cut. A cut keeps the escape of every piece it keeps.
+# Discord shows a backslash before any of these marks as the mark alone, so
+# the text reads as typed. It calls no library escape: the bot image installs
+# discord.py without a version pin, and this rule must not move with it.
+# Escape ONCE, at the line that builds the message from the raw value the api
+# served; never feed an escaped text back in.
+_TEXT_BREAKS = re.compile(r"\r\n|[\r\v\f\x1c-\x1e\x85\u2028\u2029]")
+_TEXT_URL = re.compile(r"(?<![0-9A-Za-z_])https?://[^\s<]*[^\s<.,:;\"')\]]", re.IGNORECASE)
+_TEXT_LINE_MARK = re.compile(r"([ \t]*)([#+-]|[0-9]+[.)])")
+_TEXT_ALWAYS = frozenset("\\*_~|`[]<>@")
+
+
+def _escape_text(text, limit=None, more="...") -> str:
+    """Free text a person typed, shown in Discord as the characters typed.
+    The rules are listed above _TEXT_BREAKS. None is the empty text."""
+    s = _TEXT_BREAKS.sub("\n", "" if text is None else str(text))
+    pieces = []
+    for n, line in enumerate(s.split("\n")):
+        if n:
+            pieces.append("\n")
+        pos = 0
+        m = _TEXT_LINE_MARK.match(line)
+        if m:
+            pieces.extend(m.group(1))
+            mark = m.group(2)
+            pieces.append(mark[:-1] + "\\" + mark[-1])
+            pos = m.end()
+        while pos < len(line):
+            u = _TEXT_URL.match(line, pos)
+            if u:
+                pieces.append(u.group(0))
+                pos = u.end()
+                continue
+            ch = line[pos]
+            pieces.append("\\" + ch if ch in _TEXT_ALWAYS else ch)
+            pos += 1
+    out = "".join(pieces)
+    if limit is None or len(out) <= limit:
+        return out
+    room = max(limit - len(more), 0)
+    kept, used = [], 0
+    for p in pieces:
+        if used + len(p) > room:
+            break
+        kept.append(p)
+        used += len(p)
+    return "".join(kept) + more if limit >= len(more) else more[:limit]
+
+
+# An api refusal's text: the `detail` or `error` of an answer that is not a
+# success. The api composes its refusals plain, and one can hold a value a
+# person typed (a stored ban reason), so every such text that reaches a
+# Discord slot passes _escape_text ONCE, with a bound, here, at the line that
+# takes it from the answer. The bot's own fixed sentences ("backend
+# unreachable") do not pass it. A refusal token the bot only compares
+# ("not_linked") is read raw and never shown. The evidence report's refusal
+# words are the server's own tokens and pass _aer_refusal_word instead: it
+# shows a word only when it fully matches a closed grammar (otherwise a fixed
+# word), as the text _escape_text writes for that grammar, uncut, in the form
+# the report's privacy pass reads.
+API_REFUSAL_SHOWN_MAX = 300
+
+
+def _api_refusal_text(value, limit=API_REFUSAL_SHOWN_MAX) -> str:
+    """An api refusal's text as the bot shows it: one _escape_text pass, at
+    most `limit` characters. A dict or list detail is shown as its text."""
+    return _escape_text(value, limit)
+
+
+_LB_NAME_BREAKS = re.compile(r"[\r\n\x0b\x0c\x85\u2028\u2029]+")
 
 
 def _lb_name(raw, width=24) -> str:
@@ -5562,8 +5736,8 @@ def _lb_name(raw, width=24) -> str:
     then markdown-escaped.
 
     The name is player-authored and lands inside a bold span in an embed
-    description. `escape_markdown` neutralises the characters it covers
-    (`* _ ~ | \\` and backticks), which is what stops a name closing a bold
+    description. The name helper (_escape_md) neutralises the marks
+    (`* _ ~ | \\`, backticks and the rest), which is what stops a name closing a bold
     run early and re-formatting the rest of the row; it does NOT touch line
     breaks, and a break inside a row splits that row in two, where the second
     half can be written to read like another player's rank. Both are
@@ -5577,7 +5751,7 @@ def _lb_name(raw, width=24) -> str:
     entry, so the row's own indexed read — and the test that watches which
     fields a renderer touches — stays where it is."""
     flat = _LB_NAME_BREAKS.sub(" ", str(raw if raw is not None else "?"))
-    return discord.utils.escape_markdown(flat[:width])
+    return _escape_md(flat[:width])
 
 
 def _lb_line(e, rank=None):
@@ -6115,13 +6289,15 @@ _GraphMetric = Literal["elo", "hit-block", "cards-per-game", "fps", "peak-elo",
 def _cards_str(cards, cap=8):
     """Join a match row's cards_picked/opponent_cards_picked (list of
     {card_name, pick_order, ...} dicts) into 'Card, Card, Card +N more' in
-    pick order. '—' when the row has no card data (pre-card-tracking games)."""
+    pick order. '—' when the row has no card data (pre-card-tracking games).
+    Each card name (mod-reported, stored unchecked) passes the name helper
+    once."""
     names = []
     for c in sorted([c for c in (cards or []) if isinstance(c, dict)],
                     key=lambda c: c.get("pick_order") or 0):
         nm = c.get("card_name")
         if nm:
-            names.append(str(nm))
+            names.append(_escape_md(str(nm), 64))
     if not names:
         return "—"
     out = ", ".join(names[:cap])
@@ -6295,7 +6471,7 @@ async def cmd_compare(ctx, player1: discord.Member, player2: discord.Member):
     h2h_cards = await api_get(f"/players/{steam_a}/vs/{steam_b}/top-cards?limit=6")
     if h2h_cards and (h2h_cards.get("player_cards") or h2h_cards.get("opponent_cards")):
         def _fmt_top(cl):
-            return ", ".join(f"{c['card_name']} ×{c['picks']}" for c in (cl or [])[:6]) or "—"
+            return ", ".join(f"{_escape_md(c['card_name'], 64)} ×{c['picks']}" for c in (cl or [])[:6]) or "—"
         cards_val = (f"**{_escape_md(name_a[:14])}:** {_fmt_top(h2h_cards.get('player_cards'))}\n"
                      f"**{_escape_md(name_b[:14])}:** {_fmt_top(h2h_cards.get('opponent_cards'))}")
 
@@ -6546,7 +6722,7 @@ async def _elo_refused(ctx, unlinked, error) -> bool:
         return True
     if unlinked:
         await ctx.send("❌ Not linked yet — they need `/link` first: "
-                       + ", ".join(f"**{n}**" for n in unlinked))
+                       + ", ".join(f"**{_escape_md(n)}**" for n in unlinked))
         return True
     return False
 
@@ -7093,15 +7269,15 @@ def _render_game_detail_png_locked(game):
 
 
 def _game_embed_plain(value) -> str:
-    """Markdown-safe embed text that cannot turn <@...> into a mention."""
-    inert = str(value or "?").replace("<", "[").replace(">", "]")
-    return discord.utils.escape_markdown(inert)
+    """A player's name for the /game embed through the name helper: shown as
+    typed, and < > are escaped, so <@...> cannot become a mention."""
+    return _escape_md(str(value or "?"))
 
 
 _LFP_EMOJI_TOKEN = re.compile(r"(:[A-Za-z0-9_~]{2,32}:)")
 
 
-def _lfp_render_message(text_in: str, guild) -> str:
+def _lfp_render_message(text_in: str, guild, limit=1500) -> str:
     """Aug 7 item 11: render :emojiname: tokens in the LFP optional message as
     real server emojis.
 
@@ -7113,17 +7289,35 @@ def _lfp_render_message(text_in: str, guild) -> str:
     regex, translate matched tokens, escape ONLY the non-token segments.
 
     Emoji strings are not mentions, so the caller's AllowedMentions needs no
-    change; an unmatched token survives as escaped literal text."""
+    change; an unmatched token survives as escaped literal text.
+
+    The message is the player's free text: every non-token segment passes
+    _escape_text (BOT-TEXT-ESCAPE-1), and the whole is cut to `limit` on the
+    escaped text: a segment is cut by _escape_text itself, an emoji is kept
+    whole or not at all, and "..." follows a cut."""
     parts = _LFP_EMOJI_TOKEN.split(text_in or "")
-    out = []
+    pieces = []                            # (shown text, raw text or None for an emoji)
     for i, part in enumerate(parts):
         if i % 2 == 1 and guild is not None:  # odd indexes = token matches
             name = part.strip(":")
             emoji = next((e for e in guild.emojis if e.name.lower() == name.lower()), None)
             if emoji is not None:
-                out.append(str(emoji))  # "<:name:id>" / "<a:name:id>" — animated free
+                pieces.append((str(emoji), None))  # "<:name:id>" / "<a:name:id>" — animated free
                 continue
-        out.append(discord.utils.escape_markdown(part))
+        pieces.append((_escape_text(part), part))
+    if sum(len(p[0]) for p in pieces) <= limit:
+        return "".join(p[0] for p in pieces)
+    out, used, more = [], 0, "..."
+    for shown, raw in pieces:
+        if used + len(shown) <= limit - len(more):
+            out.append(shown)
+            used += len(shown)
+            continue
+        if raw is not None:                # the cut falls in this text: cut it on its escaped form
+            out.append(_escape_text(raw, limit - used, more))
+        else:
+            out.append(more)
+        break
     return "".join(out)
 
 
@@ -7231,7 +7425,9 @@ async def cmd_game(ctx, code: str):
     if _rules_line:
         desc += f"\n⚙ {_rules_line}"
     if game.get("invalidated"):
-        desc += f"\n⚠ invalidated: {game.get('invalidation_reason') or 'admin'}"
+        # An admin's reverse can carry the admin's own words (up to 64): free
+        # text, escaped once here (BOT-TEXT-ESCAPE-1 census).
+        desc += f"\n⚠ invalidated: {_escape_text(game.get('invalidation_reason') or 'admin', 200)}"
     embed = discord.Embed(title=f"🎮 Game {game.get('code', norm[:12].upper())}",
                           description=desc, color=0x5865F2)
 
@@ -7362,7 +7558,7 @@ async def cmd_mystats(ctx, member: discord.Member = None):
     # nulls discord_display_name when show_discord is off). No real mention.
     _dname = s.get("discord_display_name")
     if _dname:
-        embed.description = f"Discord: **@{discord.utils.escape_markdown(str(_dname))}**"
+        embed.description = f"Discord: **{_escape_md('@' + str(_dname))}**"
     embed.set_thumbnail(url=target.display_avatar.url)
 
     # Rating box
@@ -7475,7 +7671,7 @@ async def cmd_cards(ctx, member: discord.Member = None,
         if not isinstance(c, dict):
             continue
         wr = float(c.get("win_rate") or 0) * 100  # server win_rate is 0-1
-        ln = f"**{c.get('card_name', '?')}** — {c.get('times_picked', 0)} picks · {wr:.0f}% WR"
+        ln = f"**{_escape_md(c.get('card_name', '?'), 64)}** — {c.get('times_picked', 0)} picks · {wr:.0f}% WR"
         if (c.get("times_offered") or 0) > 0:
             ln += f" · {float(c.get('pass_rate') or 0) * 100:.0f}% passed"
         lines.append(ln)
@@ -7500,7 +7696,7 @@ def _beacon_discord_suffix(j):
     dname = (j or {}).get("discord_display_name")
     if not dname:
         return ""
-    return f"  ·  Discord: @{discord.utils.escape_markdown(str(dname))}"
+    return f"  ·  Discord: {_escape_md('@' + str(dname))}"
 
 
 @tasks.loop(seconds=15)
@@ -7534,7 +7730,7 @@ async def poll_queue_beacon():
                     continue
 
             await channel.send(
-                f"🔍 **{discord.utils.escape_markdown(str(name))}** ({rating}) is searching for a ranked match!"
+                f"🔍 **{_escape_md(str(name))}** ({rating}) is searching for a ranked match!"
                 + _beacon_discord_suffix(j),
                 allowed_mentions=discord.AllowedMentions.none(),
             )
@@ -7576,7 +7772,7 @@ async def poll_team_queue_beacon():
                 except:
                     continue
             await channel.send(
-                f"🎯 **{discord.utils.escape_markdown(str(name))}** ({rating}) is searching for **2v2** — **{qsize}/4** queued!"
+                f"🎯 **{_escape_md(str(name))}** ({rating}) is searching for **2v2** — **{qsize}/4** queued!"
                 + _beacon_discord_suffix(j),
                 allowed_mentions=discord.AllowedMentions.none(),
             )
@@ -7619,7 +7815,7 @@ async def poll_ovt_queue_beacon():
                 except:
                     continue
             await channel.send(
-                f"⚔️ **{discord.utils.escape_markdown(str(name))}** ({rating}) is searching for **1v2** — **{qsize}/3** in the lobby!"
+                f"⚔️ **{_escape_md(str(name))}** ({rating}) is searching for **1v2** — **{qsize}/3** in the lobby!"
                 + _beacon_discord_suffix(j),
                 allowed_mentions=discord.AllowedMentions.none(),
             )
@@ -7666,10 +7862,10 @@ async def poll_ffa_queue_beacon():
             if lobby_id:
                 members = j.get("lobby_members") or 1
                 verb = "opened an **FFA lobby**" if j.get("is_host") else "joined an **FFA lobby**"
-                body = (f"🎯 **{discord.utils.escape_markdown(str(name))}** ({rating}) {verb} — "
+                body = (f"🎯 **{_escape_md(str(name))}** ({rating}) {verb} — "
                         f"**{members}**/10 in the lobby (the host can start at 3)!")
             else:
-                body = (f"🎯 **{discord.utils.escape_markdown(str(name))}** ({rating}) is searching for **FFA** — "
+                body = (f"🎯 **{_escape_md(str(name))}** ({rating}) is searching for **FFA** — "
                         f"**{qsize}** in the queue (starts at 3, up to 10)!")
             await channel.send(
                 body + _beacon_discord_suffix(j),
@@ -7806,7 +8002,7 @@ async def log_ffa_match_result(guild, m):
         left = ((" *(disconnected)*" if p.get("left_early_involuntary") else " *(left)*")
                 if p.get("left_early") else "")
         medal = {1: "🥇", 2: "🥈", 3: "🥉"}.get(p.get("placement", 0), f"#{p.get('placement', '?')}")
-        nm = discord.utils.escape_markdown(str(p.get("display_name") or p.get("steam_id")))
+        nm = _escape_md(str(p.get("display_name") or p.get("steam_id")))
         # Bug 215 (Sid): points AND unconverted half points, in the game's own
         # "N(P) N(H)" tokens, so this post and the F5 history row read
         # identically. Rendered even at 0 because the in-game (H) cell always
@@ -7824,7 +8020,7 @@ async def log_ffa_match_result(guild, m):
         color=(discord.Color.gold() if t_flag else discord.Color.purple()))
     _desc = "\n".join(lines[:12]) or "(no players?)"
     if t_flag and t_label:
-        _desc = f"🏆 **{discord.utils.escape_markdown(t_label)}**\n{_desc}"
+        _desc = f"🏆 **{_escape_md(t_label)}**\n{_desc}"
     embed.description = _desc
     # Room rules batch: the lobby settings the game was played under, from
     # the same record the F5 history shows.
@@ -7907,10 +8103,13 @@ async def poll_bug_reports():
             }.get(sev, 0xCCAA33)
             bug_num = r.get("bug_number") or 0
             who = r.get("display_name") or r.get("steam_id") or "Unknown"
-            mod = r.get("mod_version") or "?"
-            desc = (r.get("description") or "").strip()
-            if len(desc) > 1500:
-                desc = desc[:1500] + "... (truncated — full text in F5 admin viewer)"
+            # The mod version the report's sender stated, stored unchecked:
+            # one name-helper pass.
+            mod = _escape_md(r.get("mod_version") or "?", 64)
+            # The player's own text: escaped once, here, and cut on the escaped
+            # form (_escape_text), so no escape pair is split.
+            desc = _escape_text((r.get("description") or "").strip(), 1560,
+                                more="... (truncated — full text in F5 admin viewer)")
             embed = discord.Embed(
                 title=f"#{bug_num} — [{sev.upper()} / {cat.upper()}]",
                 description=desc or "(no description)",
@@ -8030,9 +8229,9 @@ async def poll_bug_report_events():
 
             bug_num = e.get("bug_number") or 0
             actor = e.get("actor_name") or "Someone"
-            snippet = (e.get("description_snippet") or "").strip()
-            if len(snippet) > 100:
-                snippet = snippet[:100] + "..."
+            # The report's opening words and every comment below are typed
+            # text: each is escaped once, where its field is built.
+            snippet = _escape_text((e.get("description_snippet") or "").strip(), 103)
             if etype == "created":
                 embed = discord.Embed(
                     title=f"✅ Bug report #{bug_num} received",
@@ -8062,7 +8261,7 @@ async def poll_bug_report_events():
                 if snippet:
                     embed.add_field(name="Your report", value=snippet, inline=False)
                 if e.get("comment"):
-                    embed.add_field(name="Note from " + _escape_md(actor), value=e["comment"][:1024], inline=False)
+                    embed.add_field(name="Note from " + _escape_md(actor), value=_escape_text(e["comment"], 1024), inline=False)
             elif etype == "comment":
                 comment_text = (e.get("comment") or "").strip()
                 if not comment_text:
@@ -8074,7 +8273,7 @@ async def poll_bug_report_events():
                 )
                 if snippet:
                     embed.add_field(name="Your report", value=snippet, inline=False)
-                embed.add_field(name=f"{_escape_md(actor)} says", value=comment_text[:1024], inline=False)
+                embed.add_field(name=f"{_escape_md(actor)} says", value=_escape_text(comment_text, 1024), inline=False)
             else:
                 # Unknown event type — nothing to send; ack so it doesn't loop.
                 seen_bug_events.add(eid)
@@ -8123,9 +8322,9 @@ async def _post_bug_event_to_thread(e):
         new_s = (e.get("new_status") or "?").upper()
         text_out = f"**{_escape_md(actor)}** → **{new_s}**"
         if e.get("comment"):
-            text_out += f"\n{e['comment'][:1500]}"
+            text_out += "\n" + _escape_text(e["comment"], 1500)
     else:
-        text_out = f"**{_escape_md(actor)}:** {(e.get('comment') or '')[:1800]}"
+        text_out = f"**{_escape_md(actor)}:** {_escape_text(e.get('comment'), 1800)}"
     try:
         if getattr(thread, "archived", False):
             await thread.edit(archived=False)
@@ -8205,7 +8404,7 @@ async def log_team_series_result(guild, s):
         f"`{score}`"
     )
     if t_flag and t_label:
-        _desc = f"🏆 **{discord.utils.escape_markdown(t_label)}**\n{_desc}"
+        _desc = f"🏆 **{_escape_md(t_label)}**\n{_desc}"
     embed.description = _desc
     embed.add_field(name="Winners",
                     value=f"{fmt_player(winners[0])}\n{fmt_player(winners[1])}",
@@ -8307,7 +8506,7 @@ async def log_series_result(guild, s):
         color=(discord.Color.gold() if t_flag else discord.Color.green()))
     _desc = f"**{_escape_md(s['winner_name'])}** wins {score}!"
     if t_flag and t_label:
-        _desc = f"🏆 **{discord.utils.escape_markdown(t_label)}**\n{_desc}"
+        _desc = f"🏆 **{_escape_md(t_label)}**\n{_desc}"
     embed.description = _desc
     # 1 decimal: Glicko changes for converged players are routinely sub-1.0, and :.0f
     # rounded a real +0.4 win to "0" — the series log read as "no rating change" for a
@@ -8471,7 +8670,7 @@ async def setup_rank_roles(ctx):
         except discord.Forbidden:
             failed.append(f"{new_name} (missing permission — is the bot's top role above the rank roles?)")
         except Exception as ex:
-            failed.append(f"{new_name} ({ex})")
+            failed.append(f"{new_name} ({_escape_text(str(ex), 200)})")
     # Push the (possibly recolored-by-rename) roles into rank_role_colors
     # right away so in-game rank titles pick up the new names without
     # waiting for the 6-hour color loop.
@@ -9660,8 +9859,8 @@ async def poll_new_bans():
             embed = discord.Embed(
                 title="🔨 Player banned (mod-wide)",
                 description=(
-                    f"**{discord.utils.escape_markdown(str(name))}** (`{b['steam_id']}`)\n"
-                    f"Reason: **{b.get('reason') or 'violation'}**\n"
+                    f"**{_escape_md(str(name))}** (`{b['steam_id']}`)\n"
+                    f"Reason: **{_escape_text(b.get('reason') or 'violation')}**\n"
                     f"By: `{b.get('banned_by_steam_id') or '—'}`"
                     + (f"\n{end_line}" if end_line else "")
                 ),
@@ -9756,10 +9955,10 @@ def _modcase_render(status, body, spec, actor_name):
     """Render the api's answer to a button click. 403 = the clicker is not
     (or no longer) authorised — the server's word, not this bot's."""
     body = body if isinstance(body, dict) else {}
-    detail = body.get("detail")
-    if isinstance(detail, dict):
-        detail = detail.get("error") or ""
-    detail = str(detail or "")[:180]
+    raw = body.get("detail")
+    if isinstance(raw, dict):
+        raw = raw.get("error") or ""
+    detail = _api_refusal_text(raw or "", 180)
     if status == 200 and body.get("status") == "ok":
         return (f"\N{WHITE HEAVY CHECK MARK} **{spec['label']}** applied by {_escape_md(actor_name)} "
                 f"to **{_escape_md(body.get('subject_name') or '?')}** (`{body.get('subject_steam_id') or '?'}`)"
@@ -9806,7 +10005,7 @@ async def _modcase_click(interaction, custom_id):
             except Exception:
                 body = {}
     except Exception as e:
-        await interaction.followup.send(f"Action failed: {e}", ephemeral=True)
+        await interaction.followup.send(f"Action failed: {_escape_text(str(e), 300)}", ephemeral=True)
         return
     rendered = _modcase_render(status, body, spec, actor_name)
     if status == 200 and isinstance(body, dict) and body.get("status") in ("ok", "already_resolved"):
@@ -9891,7 +10090,7 @@ def _pc_when(iso):
 
 
 def _pc_name(s):
-    return discord.utils.escape_markdown(str(s or "?"))
+    return _escape_md(str(s or "?"))
 
 
 def _pc_print_line(p):
@@ -9943,7 +10142,7 @@ def _pc_fit_field(lines, cap=1024):
 def _pc_not_linked(ctx, target):
     if target == ctx.author:
         return f"❌ Not linked. {_PC_LINK_HINT}"
-    return f"❌ {discord.utils.escape_markdown(target.display_name)} is not linked."
+    return f"❌ {_escape_md(target.display_name)} is not linked."
 
 
 # ── Player Cards faces on Discord (design v22 §6, r18 H1/H2) ──────────────
@@ -10896,7 +11095,7 @@ async def cmd_pc_collection(ctx, member: discord.Member = None):
         if status == 404:
             await ctx.send(_pc_not_linked(ctx, target)); return
         if status == 403 and _pc_detail(body).get("error") == "private":   # by token, not status alone (c3 G)
-            await ctx.send(f"🔒 {discord.utils.escape_markdown(target.display_name)}'s binder is private."); return
+            await ctx.send(f"🔒 {_escape_md(target.display_name)}'s binder is private."); return
         if status != 200 or not isinstance(body, dict):
             await ctx.send("❌ Couldn't fetch that binder right now."); return
         face, lease = await _pc_best_face(body, locale)
@@ -10952,7 +11151,7 @@ async def cmd_pc_card(ctx, member: discord.Member = None):
     if status == 404 and d.get("error") == "not_linked":
         await ctx.send(_pc_not_linked(ctx, target)); return
     if status == 404:
-        who = "You're" if target == ctx.author else f"{discord.utils.escape_markdown(target.display_name)} is"
+        who = "You're" if target == ctx.author else f"{_escape_md(target.display_name)} is"
         await ctx.send(f"🎴 {who} not in the current card pool (the pool is the players who have run the mod, re-taken daily; a banned player is out)."); return
     if status != 200 or not isinstance(body, dict):
         await ctx.send("❌ Couldn't fetch that card right now."); return
@@ -11469,7 +11668,7 @@ def _pc_reveal_refusal(ctx, status, body, what, target=None):
 def _pc_reveal_unposted(outcome, what, target=None):
     """The one line for a reveal whose re-read refused the post."""
     if outcome == "private" and target is not None:
-        return f"{discord.utils.escape_markdown(target.display_name)}'s binder is private."
+        return f"{_escape_md(target.display_name)}'s binder is private."
     if outcome == "unreachable":
         return "The card service did not answer - nothing was posted. Try again in a moment."
     if outcome == "pacing":
@@ -12543,8 +12742,12 @@ def _review_flag_line(details) -> str:
 
 
 def _flag_embed_text(value, limit=850):
-    rendered = discord.utils.escape_markdown(str(value or "not recorded"))
-    return rendered if len(rendered) <= limit else rendered[:limit - 3] + "..."
+    """An evidence text for a flag embed. The api's summaries hold typed
+    parts (players' names, values the mod reported), so the text passes
+    _escape_text once and is cut on the escaped text (never after an
+    escape). A name the caller shows on its own passes the name helper
+    there instead."""
+    return _escape_text(str(value or "not recorded"), limit)
 
 
 async def _ack_anticheat_flag(flag_id: str, evidence_revision: int) -> bool:
@@ -12846,24 +13049,24 @@ QDIG_HEADER_MORE = "Held game reports (continued):"
 QDIG_WHAT_YOU_CAN_DO = ("What you can do: in the Admin tab, Rejected Reports. Accept only marks the report "
                         "as approved for a later ordered replay; it records nothing now. "
                         "Discard marks it as dismissed.")
-QDIG_MD_CHARS = "\\*_~`|>[]()#<"
-
-
 def _qdig_md(value, limit: int) -> str:
     """THE one function every string that goes to Discord from a D1 row
     passes: names, the reason sentence, the reporter, the winner, the
-    differences, the accept-blocked sentence. One line (control
-    characters, invisible format characters and line breaks become
-    spaces), cut to `limit` characters with a visible "...", URL schemes
-    made inert (": //", so nothing auto-links), and every markdown
-    character escaped. allowed_mentions stays none. The api sends these
-    strings PLAIN and the renderer calls this once per string at the slot
-    where it is formatted, so nothing is escaped twice."""
-    s = " ".join("".join(ch if ch.isprintable() else " " for ch in str(value if value is not None else "")).split())
-    if len(s) > limit:
-        s = s[:max(limit - 3, 0)].rstrip() + "..."
-    s = s.replace("://", ": //")
-    return "".join("\\" + ch if ch in QDIG_MD_CHARS else ch for ch in s)
+    differences, the accept-blocked sentence. The digest's one-line layout,
+    then ONE call of _escape_md (BOT-TEXT-ESCAPE-1: one escape
+    implementation). The layout escapes nothing: every character that is
+    not printable (control characters, line breaks, invisible format
+    characters such as a right-to-left override, and white space other than
+    the plain space) becomes a space, except the zero-width joiner, which is
+    kept so a joined emoji stays one glyph; then each run of white space is
+    one space. _escape_md then escapes the marks, breaks every address
+    scheme that is followed by a slash, and cuts to `limit` characters of
+    the ESCAPED text with a visible "...". allowed_mentions stays none. The
+    api sends these strings PLAIN and the renderer calls this once per
+    string at the slot where it is formatted, so nothing is escaped twice."""
+    s = " ".join("".join(ch if ch.isprintable() or ch == "\u200d" else " "
+                         for ch in str(value if value is not None else "")).split())
+    return _escape_md(s, limit)
 
 
 def _qdig_esc(name) -> str:
@@ -13234,20 +13437,23 @@ async def poll_anticheat_flags():
             embed = discord.Embed(
                 title=f"{emoji} Match flagged: `{f['flag_reason']}`",
                 description=(
-                    f"**{discord.utils.escape_markdown(str(f['p1_name']))}** vs "
-                    f"**{discord.utils.escape_markdown(str(f['p2_name']))}** ({mode}, {dur_str})\n"
+                    f"**{_escape_md(str(f['p1_name']))}** vs "
+                    f"**{_escape_md(str(f['p2_name']))}** ({mode}, {dur_str})\n"
                     f"Status: **{verdict}**; {_flag_embed_text(match_state, 180)}\n"
                     f"Game code: `{f.get('game_code') or 'not recorded'}` | Match ID: `{f['match_id']}`"
                 ),
                 color=color,
                 timestamp=datetime.fromisoformat(f["created_at"].replace("Z", "+00:00")) if f.get("created_at") else None,
             )
+            # Each part escaped once by its own helper, each bounded on its
+            # escaped text, so the field (at most 120 + 120 + 200 characters
+            # plus the ids) needs no cut of the whole.
             ids = (
-                f"{f.get('p1_name')}: {f.get('p1_steam_id')}\n"
-                f"{f.get('p2_name')}: {f.get('p2_steam_id')}\n"
-                f"Suspect(s): {f.get('suspect_steam_text') or 'not attributable'}"
+                f"{_escape_md(f.get('p1_name'), 120)}: {_flag_embed_text(f.get('p1_steam_id'), 40)}\n"
+                f"{_escape_md(f.get('p2_name'), 120)}: {_flag_embed_text(f.get('p2_steam_id'), 40)}\n"
+                f"Suspect(s): {_flag_embed_text(f.get('suspect_steam_text') or 'not attributable', 200)}"
             )
-            embed.add_field(name="Steam IDs / suspect", value=_flag_embed_text(ids, 500), inline=False)
+            embed.add_field(name="Steam IDs / suspect", value=ids, inline=False)
             evidence = (_review_flag_line(f.get("flag_details"))
                         if f.get("flag_reason") == "review" else f.get("evidence_summary"))
             embed.add_field(name="Detector evidence", value=_flag_embed_text(evidence, 700), inline=False)
@@ -13351,7 +13557,10 @@ async def _send_release_chunks_locked(tag: str, msgs: list) -> bool:
             st[tag] = 0
             _release_state_save(st)
         for i in range(start, len(msgs)):
-            await ch.send(msgs[i][:2000])
+            # A release post notifies nobody: no user, role, @everyone or
+            # @here in the notes pings (the client default, stated here so
+            # it holds at this send whatever the default becomes).
+            await ch.send(msgs[i][:2000], allowed_mentions=discord.AllowedMentions.none())
             st = _release_state_load()
             st[tag] = i + 1
             _release_state_save(st)
@@ -13377,7 +13586,12 @@ def _format_release_message(release_json):
     skips them (only the first message becomes a Home-tab fallback row — the
     Home tab's primary source is now the API's own uncut store)."""
     tag = release_json.get("tag_name") or "v?"
-    name = release_json.get("name") or tag
+    # The title is one line with no markup: it passes the name helper once.
+    # The body is the project's release notes, written as markdown, and is
+    # shown as written (BOT-TEXT-ESCAPE-1; the census keys that exception to
+    # this slot, the body of a release read from the release source). The
+    # send notifies nobody (_send_release_chunks_locked).
+    name = _escape_md(release_json.get("name") or tag, 200)
     url = _release_url(release_json)
     body = release_json.get("body") or ""
     body = body.replace("\r\n", "\n").strip()
@@ -13670,7 +13884,7 @@ async def announce_release(ctx):
                     return
                 payload = await resp.json()
     except Exception as e:
-        await ctx.reply(f"Fetch failed: {e}", ephemeral=True)
+        await ctx.reply(f"Fetch failed: {_escape_text(str(e), 300)}", ephemeral=True)
         return
 
     tag = payload.get("tag_name") or "?"
@@ -13679,12 +13893,15 @@ async def announce_release(ctx):
     # sender — a partial send no longer advances the anchor (the poller
     # resumes the remaining chunks from the durable cursor).
     _release_poller_initialized = True
+    # The tag is a name the release's author typed: raw as the stored anchor
+    # and the sender's cursor, through the name helper where it is shown.
     if await _send_release_chunks(tag, msgs):
         _last_release_tag = tag
-        await ctx.reply(f"Posted {tag} to #releases ({len(msgs)} message(s)).", ephemeral=True)
+        await ctx.reply(f"Posted {_escape_md(tag, 100)} to #releases ({len(msgs)} message(s)).",
+                        ephemeral=True)
     else:
         await ctx.reply(
-            f"Posting {tag} stopped partway — the poller will resume the remaining "
+            f"Posting {_escape_md(tag, 100)} stopped partway — the poller will resume the remaining "
             f"chunks automatically.", ephemeral=True)
 
 
@@ -14275,7 +14492,7 @@ async def opp_online(ctx):
         label = {"online": "online", "idle": "idle", "dnd": "do not disturb"}.get(status, "offline")
         await ctx.reply(f"{icon} **{_escape_md(opp_name)}** is currently **{label}** in Discord.", ephemeral=True)
     except Exception as e:
-        await ctx.reply(f"Couldn't resolve presence: {e}", ephemeral=True)
+        await ctx.reply(f"Couldn't resolve presence: {_escape_text(str(e), 300)}", ephemeral=True)
 
 
 @bot.hybrid_command(name="dm-opponent", description="DM your current tournament opponent (8/min)")
@@ -14290,7 +14507,7 @@ async def dm_opponent(ctx, *, message: str):
         await ctx.reply(f"Rate limit: {_DM_OPPONENT_LIMIT} messages per {_DM_OPPONENT_WINDOW_SECS}s. Wait a moment.", ephemeral=True)
         return
     sender = getattr(ctx.author, "global_name", None) or ctx.author.name
-    body = f"**[Tournament Relay from {_escape_md(sender)}]** {message[:1500]}"
+    body = f"**[Tournament Relay from {_escape_md(sender)}]** {_escape_text(message, 1500)}"
     ok = await _dm_user(opp_id, body)
     if ok:
         await ctx.reply(f"Relayed to {_escape_md(opp_name)}.", ephemeral=True)
@@ -14439,7 +14656,7 @@ def _tdlc_view(match_id, steam_id):
 def _tdlc_message(opponent_name, deadline_unix, extension_available):
     """Render one deadline-day prompt. opponent_name is player-authored, so
     escape markdown here and keep AllowedMentions.none() on the send."""
-    opponent = discord.utils.escape_markdown(str(opponent_name or "opponent").strip())
+    opponent = _escape_md(str(opponent_name or "opponent").strip())
     opponent = opponent or "opponent"
     if deadline_unix:
         deadline = f"Deadline: <t:{deadline_unix}:F> (<t:{deadline_unix}:R>)."
@@ -14527,10 +14744,12 @@ _TMATCH_NOTICE_KINDS = {
 
 
 def _md_name(v, fallback="?"):
-    """Escape a server-supplied display name / matchup string for embed
-    markdown (#261's injection rule — names are player-authored)."""
+    """A server-supplied display name / matchup string for embed markdown
+    (#261's injection rule — names are player-authored): the layout strips
+    the white space at both ends, then ONE call of _escape_md; an empty
+    value shows `fallback`."""
     s = str(v).strip() if v is not None else ""
-    return discord.utils.escape_markdown(s) if s else fallback
+    return _escape_md(s) if s else fallback
 
 
 def _tmatch_next_steps(kind, deadline_unix, next_status="ready"):
@@ -15428,7 +15647,7 @@ async def poll_lfp_pings():
                 for part in modes.split(",") if part)
             dur_label = {15: "15min", 30: "30min", 60: "1h", 180: "3h"}.get(exp_min, f"{exp_min}min")
             content = (f"{mention} \N{LEFT-POINTING MAGNIFYING GLASS} "
-                       f"**{discord.utils.escape_markdown(str(display_name))}** "
+                       f"**{_escape_md(str(display_name))}** "
                        f"(<@{discord_id}>) LFP: ranked {modes_label} for {dur_label}!")
             if message:
                 content += f"\n> {_lfp_render_message(message, channel.guild)}"
@@ -15531,9 +15750,9 @@ async def _tournament_unsignup(tournament_id, steam_id, discord_id):
                 detail = json.loads(txt).get("detail") or txt
             except Exception:
                 detail = txt
-            return False, str(detail)[:300]
+            return False, _api_refusal_text(detail, 300)
     except Exception as ex:
-        return False, f"request failed: {ex}"
+        return False, f"request failed: {_escape_text(str(ex), 300)}"
 
 
 async def _tournament_checkin_response(match_id, steam_id, answer):
@@ -15559,7 +15778,9 @@ async def _tournament_checkin_response(match_id, steam_id, answer):
                 data = {}
             if resp.status != 200:
                 detail = data.get("detail") if isinstance(data, dict) else None
-                return False, None, None, str(detail or txt or f"HTTP {resp.status}")[:300]
+                if not (detail or txt):
+                    return False, None, None, f"HTTP {resp.status}"
+                return False, None, None, _api_refusal_text(detail or txt, 300)
             if not isinstance(data, dict) or data.get("ok") is not True:
                 return False, None, None, "backend returned an invalid response"
             result = str(data.get("result") or "")
@@ -15567,7 +15788,7 @@ async def _tournament_checkin_response(match_id, steam_id, answer):
                 return False, None, None, f"backend returned unknown result '{result}'"
             return True, result, _unix_ts(data.get("new_deadline_epoch")), ""
     except Exception as ex:
-        return False, None, None, f"request failed: {ex}"
+        return False, None, None, f"request failed: {_escape_text(str(ex), 300)}"
 
 
 def _discord_tail(discord_id) -> str:
@@ -15863,11 +16084,12 @@ def _bracket_progress_lines(t, max_lines=28):
     def _board_name(raw):
         # b3 find 2: player-authored names must not smuggle newlines or
         # Markdown into the public board embed — a name like
-        # "X\n# FAKE HEADING" rendered an extra line. escape_markdown
-        # alone keeps line breaks, so collapse ALL whitespace first; this
-        # is the common boundary every board line's names pass through.
+        # "X\n# FAKE HEADING" rendered an extra line. The layout makes each
+        # run of white space one space (it escapes nothing), then ONE call
+        # of _escape_md; this is the common boundary every board line's
+        # names pass through.
         s = " ".join(str(raw or "").split())
-        return discord.utils.escape_markdown(s) if s else s
+        return _escape_md(s) if s else ""
 
     for m in sorted([m for m in matches if isinstance(m, dict)], key=keyf):
         side_raw = m.get("bracket_side")
@@ -16378,7 +16600,7 @@ async def _place_discord_bet(interaction: discord.Interaction, series_id: str,
             },
         )
     except Exception as e:
-        await _bet_reply(interaction, f"Bet failed: {e}")
+        await _bet_reply(interaction, f"Bet failed: {_escape_text(str(e), 300)}")
         return
     if not result:
         await _bet_reply(interaction, "Bet failed: backend unreachable.")
@@ -16401,18 +16623,21 @@ def _discord_bet_error(result) -> str | None:
     Same shape as _place_discord_bet's inline handling, factored out because
     every mode now has a Discord placement path. api_post hands back
     {"error": <raw body>, "status": N} for any non-200 and the body is
-    FastAPI's {"detail": ...} — the server's own reason is surfaced VERBATIM
-    so a rule change (window closed, odds floor, already bet, banned) never
-    needs a matching bot change to stay truthful.
+    FastAPI's {"detail": ...} — the server's own reason is shown as the api
+    wrote it, through _api_refusal_text (one _escape_text pass, bounded: a
+    ban's refusal holds the moderator's typed reason), so a rule change
+    (window closed, odds floor, already bet, banned) never needs a matching
+    bot change to stay truthful. "backend unreachable" is the bot's own
+    sentence and is shown as it stands.
     """
     if not result:
         return "Bet failed: backend unreachable."
     if isinstance(result, dict) and "error" in result:
         err = result.get("error", "")
         try:
-            return json.loads(err).get("detail") or err
+            return _api_refusal_text(json.loads(err).get("detail") or err)
         except Exception:
-            return err
+            return _api_refusal_text(err)
     return None
 
 
@@ -16657,7 +16882,7 @@ async def _place_discord_team_bet(interaction: discord.Interaction,
             },
         )
     except Exception as e:
-        await _bet_reply(interaction, f"Bet failed: {e}")
+        await _bet_reply(interaction, f"Bet failed: {_escape_text(str(e), 300)}")
         return
     err = _discord_bet_error(result)
     if err:
@@ -16793,7 +17018,7 @@ class FfaBetModal(discord.ui.Modal):
         try:
             result = await api_post("/discord-ffa-bets", params=params)
         except Exception as e:
-            await _bet_reply(interaction, f"Bet failed: {e}")
+            await _bet_reply(interaction, f"Bet failed: {_escape_text(str(e), 300)}")
             return
         perr = _discord_bet_error(result)
         if perr:
@@ -16815,10 +17040,10 @@ def _format_ffa_live_bet_embed(lobby):
     lines = []
     for p in lobby.get("players") or []:
         odds = p.get("odds_multiplier") or 0
-        # escape_markdown: a display name is user-authored, and without it a
-        # name carrying bold markers plus a newline can break out of its span
-        # and forge a convincing state line inside this embed (Codex F7).
-        nm = discord.utils.escape_markdown(str(p.get("display_name") or "?"))
+        # _escape_md, one pass: the display name a player chose is shown on one
+        # line (every line break a space) with its markdown marks escaped, so it
+        # stays inside its bold span and adds no line to this embed.
+        nm = _escape_md(str(p.get("display_name") or "?"))
         lines.append(f"**{nm}** ({p.get('rating')}) — x{odds:.2f}")
     if locked:
         state = "🔒 **Bets closed** for this game"
@@ -17309,10 +17534,10 @@ async def _fetch_bettable_lobbies():
 
 def _format_lobby_bet_embed(lob) -> discord.Embed:
     label = _LOBBY_BET_MODE_LABEL.get(lob["mode"], lob["mode"].upper())
-    host = discord.utils.escape_markdown(str(lob["host_name"]))
-    # escape_markdown on every user-authored name — an unescaped name carrying
-    # bold markers and a newline can forge a state line inside the embed.
-    roster = ", ".join(discord.utils.escape_markdown(n) for n in lob["names"]) or "-"
+    host = _escape_md(str(lob["host_name"]))
+    # _escape_md, one pass per name: each name a player chose is shown on one
+    # line with its markdown marks escaped, so the roster keeps its layout.
+    roster = ", ".join(_escape_md(n) for n in lob["names"]) or "-"
     lines = [
         f"Host: **{host}**" + ("  🔒 private" if lob["has_password"] else ""),
         f"Players ({lob['player_count']}/{lob['max_players']}): {roster}",
@@ -17402,7 +17627,7 @@ class LobbyBetModal(discord.ui.Modal):
                 },
             )
         except Exception as e:
-            await _bet_reply(interaction, f"Bet failed: {e}")
+            await _bet_reply(interaction, f"Bet failed: {_escape_text(str(e), 300)}")
             return
         perr = _discord_bet_error(result)
         if perr:
@@ -18193,7 +18418,8 @@ def _aer_word(status, body, headers=None):
     if status == 403:
         return AER_REFUSED
     if status == 400 and re.fullmatch(r"bad_argument( \([a-z_ ;]{1,60}\))?", detail):
-        field = _aer_enc_text(detail[len("bad_argument"):].strip()[1:-1])
+        named = detail[len("bad_argument"):].strip()[1:-1]
+        field = _aer_refusal_word(named) if named else ""
         return _aer_text("bad_argument",
                          AER_TEXTS["bad_argument"] % (" (%s)" % field if field else ""))
     if status == 404:
@@ -18220,11 +18446,13 @@ def _aer_word(status, body, headers=None):
         m = re.fullmatch(r"(?:unavailable \(([a-z_]{1,40})\)|([a-z_]{1,40}))", detail)
         if m:
             word = m.group(1) or m.group(2)
-            sentence = _AER_UNAVAILABLE
+            # A known word is shown as the bot's own word; any other is the
+            # api's text, shown through _aer_refusal_word.
+            shown, sentence = _aer_refusal_word(word), _AER_UNAVAILABLE
             for known in ("population", "deadline", "audit_unavailable"):
                 if word == known:
-                    sentence = AER_TEXTS[known]
-            return _aer_text(_aer_enc_text(word), sentence)
+                    shown, sentence = known, AER_TEXTS[known]
+            return _aer_text(shown, sentence)
     if status == 500 and detail == "too_large":
         return _aer_text("too_large", AER_TEXTS["too_large"])
     # Any other server-side answer (a 500, a proxy's 502 or 504, a 503
@@ -18320,11 +18548,16 @@ async def _aer_message(page, req):
     comes back in time, the text fallback (design 5.2, 5.3). One message per
     page either way."""
     # the caller's own argument, shown as encoded display text (design 6.4,
-    # root (e)): every escaped-set code point is written as `\u{<hex>}`
+    # root (e)): every escaped-set code point is written as `\u{<hex>}`.
+    # That encoding is layout and escapes no mark; the argument is text the
+    # admin typed, so the header's copy then passes the name helper ONCE
+    # (BOT-TEXT-ESCAPE-1). The file name below is built from the encoded
+    # text, not the escaped one.
     target = _aer_enc_text(req.get("code") or req.get("steam_id")
                            or "%s %s" % (req.get("a"), req.get("b")))
+    shown = _escape_md(target, 120)
     header = ("Evidence report: %s %s, page %d of %d"
-              % (page.shape, target, page.page, page.pages))
+              % (page.shape, shown, page.page, page.pages))
     tag = re.sub("[^0-9A-Za-z]+", "-", target).strip("-")[:40] or "report"
     plan = _aer_plan(page)
     png = await _aer_render(plan)
@@ -18459,6 +18692,21 @@ def _aer_enc_text(value):
     bs = chr(0x5C)
     return "".join(bs * 2 if ch == bs else ("%su{%x}" % (bs, ord(ch)) if ord(ch) in AER_ESC else ch)
                    for ch in str(value))
+
+
+def _aer_refusal_word(value):
+    """An evidence refusal's word as the bot shows it: the server's own token,
+    shown only when it fully matches the closed grammar [a-z_ ;]{1,60},
+    checked here; any other value is shown as the fixed word `unreadable`.
+    The one markdown mark the grammar holds is the underscore: the report's
+    display writer _aer_enc_text, then each underscore backslash-escaped.
+    For that grammar this is the text _escape_text writes, uncut (the grammar
+    bounds it), in the form the report's privacy pass reads (its display
+    writer is _aer_enc_text)."""
+    s = str(value)
+    if not re.fullmatch(r"[a-z_ ;]{1,60}", s):
+        return "unreadable"
+    return _aer_enc_text(s).replace("_", chr(0x5C) + "_")
 
 
 def _aer_txt(value, state=None):
@@ -18906,8 +19154,10 @@ def _modlog_error(status, body):
     if status == 409:
         return MODLOG_AMBIGUOUS
     if status in (400, 422):
+        # The sentence is one line: the layout makes each run of white space
+        # one space (it escapes nothing), then the refusal helper's one pass.
         return ("The moderator log refused that request (%s). Trying again as it is will not help."
-                % _escape_md(_modlog_cut(str(detail or "bad request"), 200)))
+                % (_api_refusal_text(" ".join(str(detail).split()), 200) if detail else "bad request"))
     if status == 429 or status >= 500:
         return ("The moderator log failed on the server (status %d). Trying again in a minute may help."
                 % int(status))
@@ -19032,7 +19282,9 @@ def _modlog_render(body, *, page, sort, action_idx, search):
         line = "%s %s%s by %s" % (lead, bold, _modlog_carried(r),
                                   _escape_md(_modlog_cut(r.get("actor_name") or r.get("actor"), 40)))
         if r.get("reason"):
-            line += " — reason: " + _escape_md(_modlog_cut(r.get("reason"), 256))
+            # The moderator's reason is free text: _escape_text, line breaks
+            # kept, cut on the escaped text (BOT-TEXT-ESCAPE-1 stage 2).
+            line += " — reason: " + _escape_text(r.get("reason"), 512, more="…")
         line += " — " + _escape_md(_modlog_cut(r.get("sentence"), 600))
         shown = _modlog_fit(line, budget)
         kept = len(line) if shown == line else len(shown) - 1

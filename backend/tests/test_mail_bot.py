@@ -37,10 +37,13 @@ TREE = ast.parse(TEXT)
 WANT_FUNC = {"_modcase_uuid_ok", "_modcase_parse", "_modcase_custom_id", "_modcase_parse_custom_id",
              "_modcase_view", "_modcase_render", "_modcase_click", "poll_channel_posts", "on_interaction",
              "_escape_md",   # _modcase_render escapes the names it prints (round 4, finding 23)
+             # _modcase_render shows an api refusal through the refusal helper
+             "_api_refusal_text", "_escape_text",
              "_channel_post_ack_params", "_adopt_channel_post_message",
              "_release_channel_post_claim"}
 WANT_ASSIGN = {"MODCASE_MARKER", "_MODCASE_BUTTONS", "_channel_post_sent", "_TDLC_ANSWERS",
-               "_CHANNEL_POST_MAX_RENDERS"}
+               "_CHANNEL_POST_MAX_RENDERS", "API_REFUSAL_SHOWN_MAX",
+               "_TEXT_BREAKS", "_TEXT_URL", "_TEXT_LINE_MARK", "_TEXT_ALWAYS"}
 
 
 def _run(coro):

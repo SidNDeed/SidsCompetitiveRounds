@@ -52,7 +52,7 @@
           ],
           "main",
           "admin_alert_create",
-          "b8bf2e80fdd0229ffa458be11d369222268ba824"
+          "7f0eaadf7cb1f51437968202a7f909df7282c362"
         ],
         [
           "/api/v1/admin/alerts/list",
@@ -133,7 +133,7 @@
           ],
           "main",
           "admin_cosmetic_review",
-          "8ca0da94dd6c5b796d2f5c4777e2cbcafb7b5cf1"
+          "dd825dd4ac4738ec365d37a9820696957d3f6e6a"
         ],
         [
           "/api/v1/admin/cosmetic-submissions",
@@ -664,7 +664,7 @@
           ],
           "main",
           "submit_ovt_match",
-          "c814bd10cf8d91b748d171879e00a8049fe89e26"
+          "a0e8a8e50fa713c3aefab94b0e42c6402a48d733"
         ],
         [
           "/api/v1/ovt/series/active",
@@ -763,7 +763,7 @@
           ],
           "main",
           "pc_discard_print",
-          "59e14f1e5ef5f916b493c763700be95f315fb840"
+          "1eb8491bb9427c14b3bf72548b21ae42de284a42"
         ],
         [
           "/api/v1/pc/settings",
@@ -1195,7 +1195,7 @@
           ],
           "main",
           "submit_team_match",
-          "5e5f1bb4e908fac2e74b9f29ace1ae6231897770"
+          "c9796582a0a0fac696596a89cab8f787b62a57c2"
         ],
         [
           "/api/v1/team/players/{steam_id}/team-matches",
@@ -1534,7 +1534,7 @@
           ],
           "main",
           "broadcast_target",
-          "9697e4d642a6877ab0f4368e8dd30c7b0619d5b6"
+          "ff8fc668b36ead04953831371ea4e743abd633c3"
         ],
         [
           "/api/v1/chat/moderate/bridge-unmute",
@@ -1606,7 +1606,7 @@
           ],
           "main",
           "chat_moderate_spam_pattern_add",
-          "fc1880d00d9a1cf0df6eb48195761f363ce0ab54"
+          "fff757bf867e4c26c1cd60ae8d56a448e73b6456"
         ],
         [
           "/api/v1/chat/moderate/spam-patterns/revoke",
@@ -1633,7 +1633,7 @@
           ],
           "main",
           "post_chat_from_discord",
-          "4229370cd86209c397d27991c66550338d7a59cf"
+          "8f213dc2282f1a3618ead0b6a66856ef23be5da8"
         ],
         [
           "/api/v1/chat/recent",
@@ -1876,7 +1876,7 @@
           ],
           "main",
           "health_check",
-          "0b8c105ad1dea46a019b32c20cf0c96de2d6446f"
+          "5cd6747b98ca09238e734cdf63596c6c8e8aaa01"
         ],
         [
           "/api/v1/i18n/approved",
@@ -2029,7 +2029,7 @@
           ],
           "main",
           "bridge_stream_chat",
-          "7dad6ec2207a5b8978895507791be2313540b2c6"
+          "b2174c7b1f4535403626812fcefb4721fa0b0d71"
         ],
         [
           "/api/v1/internal/chat/bridge-moderation",
@@ -2882,7 +2882,7 @@
           [],
           "main",
           "ws_chat",
-          "4dc717f2385e03f4853a526a4ee4e720112e0de2"
+          "4da5ed47cd30baae70b107babbc579bae0c00db2"
         ],
         [
           "/api/v1/rating-preview/2v2",
@@ -3071,7 +3071,7 @@
           ],
           "main",
           "mail_send",
-          "4d8ff8764fb2429f7271538b3e6853323985d8ba"
+          "dd54474cd2b97c6baff2d340bf51dec466244677"
         ],
         [
           "/api/v1/mail/blocks",
@@ -3179,7 +3179,7 @@
           ],
           "main",
           "mail_reply",
-          "2b381708941c70906d5c1186a7ad6baf50a99afd"
+          "4569a0dbd4f1e8462b79d3e0bb5f0d71c29a6f23"
         ],
         [
           "/api/v1/mail/{message_id}/report",
@@ -3188,7 +3188,7 @@
           ],
           "main",
           "mail_report",
-          "155b6faba7ea738b9078780b99f595d36dc6ae5b"
+          "8ef7b1c3326a95c673a952d605bdf09b31d9fc11"
         ],
         [
           "/api/v1/report",
@@ -3482,7 +3482,7 @@
           ],
           "tournaments",
           "force_vote",
-          "ec0cb52cc0c248f47d2a41810356e3c39a515531"
+          "86d17c8bb97ea6175ade67a50b86f52b9cadd583"
         ],
         [
           "/api/v1/tournaments/{tournament_id}/matches/{match_id}/forfeit",
@@ -3518,7 +3518,7 @@
           ],
           "tournaments",
           "signup",
-          "6a0697408ab18d44cf961b8bd479e6759ae33a9a"
+          "c076491db839e7b6beed9cb56f56257fb14f94c6"
         ],
         [
           "/api/v1/tournaments/{tournament_id}/time-vote",
@@ -3527,7 +3527,7 @@
           ],
           "tournaments",
           "time_vote",
-          "c025514f28355ed9c52f6e601dcccc283f8e4e7b"
+          "cec794b2e4e86ee7b3b2656ed0bbfff65cca5bcd"
         ],
         [
           "/api/v1/tournaments/{tournament_id}/unsignup",
@@ -3701,7 +3701,7 @@
           ],
           "main",
           "admin_seat_evidence",
-          "73d2c8975a3b27b60ab496646c1ab6ead35f89cc"
+          "dc50cb5efe0838b32e3f9f067558c6e6c7c436a7"
         ],
         [
           "/api/v1/client/compat-outcome",
@@ -3743,7 +3743,7 @@
           ],
           "mail_discord",
           "mail_relay_threads",
-          "b2d07aaa7306f4ce1714f97de54c485adce2adeb"
+          "d4432b6fcf282c53d5d07af050ba90a738cbc701"
         ],
         [
           "/api/v1/internal/mail/reply-from-discord",
@@ -3752,7 +3752,7 @@
           ],
           "mail_discord",
           "mail_reply_from_discord",
-          "766ed17d976f50cb2a536f3c158f3b253000e9ad"
+          "b71168e8c8f7115aed619dc195732ae30b30ceed"
         ]
       ]
     },
@@ -3782,7 +3782,7 @@
           ],
           "main",
           "pc_discard_batch",
-          "af30865ba6e603408db23034e5a58042312bf90d"
+          "30de058c9fe3ca5cc4e59e6b07318e62c2ecc0c6"
         ],
         [
           "/api/v1/pc/face/preview",
@@ -3842,7 +3842,7 @@
           ],
           "match_hold",
           "match_hold_open",
-          "85af7b06c487677929931f7d68fc593e2ed8820e"
+          "651543fb3378180108bee5a6e19f1baa3f6c8dbe"
         ],
         [
           "/api/v1/match/hold/{hold_id}/bind",
@@ -3878,7 +3878,7 @@
           ],
           "match_hold",
           "match_hold_entered",
-          "bc75e55576d30f67e7de99a16ccb240cc2cbca36"
+          "e1fa32725edeb3c4d08589230566688e07ba5610"
         ],
         [
           "/api/v1/match/hold/{hold_id}/state",
@@ -3935,7 +3935,7 @@
           ],
           "main",
           "admin_card_evidence",
-          "33151e5550eb53337229330650ae0a2b55f98c8d"
+          "e2b4b82be2fc6baba3d331a1e8b6c99a52ebd0c4"
         ],
         [
           "/api/v1/admin/card-pool-census",
@@ -3968,7 +3968,7 @@
           ],
           "main",
           "admin_combat_evidence",
-          "b8df9cf62895732ff6e0efb2f3aec7aff9763379"
+          "d3e60494c18f580ddc387567a2f4e0f2ef27ff0b"
         ],
         [
           "/api/v1/matches/combat-evidence",
@@ -3992,7 +3992,7 @@
           ],
           "main",
           "invite_send",
-          "110c64d44c9eef626f8e1388e2eabaebb7efbe89"
+          "66687816151bb9f5001869c39751abb94178734f"
         ],
         [
           "/api/v1/invites/{invite_id}/accept",
@@ -4121,7 +4121,7 @@
       [
         "main",
         "lifespan",
-        "6fb245fe97d3e2b9d6ae155a0bba15935abe1959"
+        "05d5b6fd0159b6deb80daba97aaea0602166a5ab"
       ]
     ]
   },

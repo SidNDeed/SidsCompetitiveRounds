@@ -124,7 +124,7 @@ def _namespace(clock, feed, channel, source_tree, names):
           "http_session": feed, "API_SECRET_KEY": qb.KEY, "API_BASE_URL": "http://api:8000",
           "ADMIN_CHANNEL_ID": qb.ADMIN_CHANNEL, "time": types.SimpleNamespace(monotonic=lambda: clock.t),
           "asyncio": types.SimpleNamespace(sleep=sleep), "datetime": FakeDatetime, "timezone": timezone,
-          "timedelta": timedelta, "tasks": _fake_tasks(),
+          "timedelta": timedelta, "tasks": _fake_tasks(), "re": re,
           "print": lambda *a, **k: out.append(" ".join(str(x) for x in a))}
     body = []
     for node in source_tree.body:
@@ -144,7 +144,7 @@ def new_bot(feed, channel=None, clock=None):
     channel = channel or qb.FakeChannel(clock)
     ns = _namespace(clock, feed, channel, qb.TREE,
                     lambda n: n.startswith(("_qdigest", "_qdig", "QDIGEST_", "QDIG_"))
-                    or n == "poll_quarantine_digest")
+                    or n in ("poll_quarantine_digest", "_escape_md"))   # the digest's names pass _escape_md
     return ns, channel, clock
 
 
@@ -357,7 +357,8 @@ def test_names_are_escaped_and_kept_to_one_line():
     ns, channel, _ = new_bot(feed)
     run(ns["poll_quarantine_digest"]())
     (msg,) = texts(channel)
-    assert "- \\*\\*Du\\_ne\\*\\* @everyone: 5, 11, 31 (winner)" in msg
+    # @ is escaped too: the digest's names pass _escape_md (BOT-TEXT-ESCAPE-1)
+    assert "- \\*\\*Du\\_ne\\*\\* \\@everyone: 5, 11, 31 (winner)" in msg
 
 
 # ── the two compatibility directions ───────────────────────────────────────
@@ -409,7 +410,9 @@ def test_names_inside_the_reason_reach_discord_escaped_and_inert():
     (msg,) = texts(channel)
     assert "**ALERT**" not in msg, "a name reached Discord with its markdown live"
     assert "https://" not in msg, "a name reached Discord as a live link"
-    assert "\\*\\*ALERT\\*\\* https: //evil.example" in msg
+    # the name helper's scheme break: a zero-width space after the colon; the
+    # digest's name limit applies to the escaped text (BOT-TEXT-ESCAPE-1)
+    assert "\\*\\*ALERT\\*\\* https:​//evil.e..." in msg
 
 
 # Keys of a feed row that are structure, not text a person wrote; every

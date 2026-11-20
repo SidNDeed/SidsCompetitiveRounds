@@ -15,8 +15,7 @@ of its AST and executed against fakes. Two layers:
 1. A CENSUS of the whole file. Every place a player's Steam or Discord name
    is put into text -- an f-string, a %-format, a concatenation, a join, a
    direct message or embed argument -- passes it through an escape helper
-   (_escape_md, discord.utils.escape_markdown, or one of the file's wrappers
-   of it), or is listed in ALLOW with the reason it is not Markdown or not a
+   (_escape_md, or one of the bot's thin calls of it), or is listed in ALLOW with the reason it is not Markdown or not a
    player's name. A new unescaped site fails; so does an ALLOW entry that no
    longer matches anything. _Census.carries says what counts as a name: it
    follows a name through locals, lists, parameters and return values, but
@@ -53,11 +52,13 @@ NAME_KEY = re.compile(
     r"|^(?!(card|rank|tag|role|file)_name$)[a-z0-9_]*_name$")
 NAME_ATTR = {"display_name", "global_name", "nick", "name"}
 EXTRA_ATTR = {"name_a", "name_b", "t1_label", "t2_label", "side_label", "vs_name", "target_label"}
-# The escapes. The four after escape_markdown are this file's own wrappers of
-# discord.utils.escape_markdown; a value through any of them is literal.
-# _qdig_md is the held-report digest's escape (QDIG-1): one line, cut to a
-# limit, URL schemes made inert, and every character of QDIG_MD_CHARS after a
-# backslash -- a superset of what _escape_md escapes, shown by
+# The escapes: functions the bot defines (checked by
+# test_every_safe_name_is_a_function_the_bot_defines). The four after
+# _escape_md are the bot's thin calls of it (_board_name is nested in the
+# tournament board's builder); a value through any of them is literal.
+# _qdig_md is the held-report digest's escape (QDIG-1): the value on one line,
+# then one call of _escape_md with the digest's limit (BOT-TEXT-ESCAPE-1), so
+# it escapes what _escape_md escapes, shown by
 # test_the_digest_escape_covers_every_character_escape_md_escapes. The body of
 # an escape is where a name is made literal, so it is not read as a site.
 # _modlog_id is the moderator log's Steam id for its header's code span
@@ -65,8 +66,7 @@ EXTRA_ATTR = {"name_a", "name_b", "t1_label", "t2_label", "side_label", "vs_name
 # otherwise. Inside a code span no escape is literal (a backtick ends the
 # span, a backslash shows as typed); digits are literal anywhere. Shown by
 # test_the_moderator_logs_steam_id_is_ascii_digits_or_a_fixed_word.
-SAFE = {"_escape_md", "escape_markdown", "_md_name", "_pc_name", "_game_embed_plain", "_board_name",
-        "_qdig_md", "_modlog_id"}
+SAFE = {"_escape_md", "_md_name", "_pc_name", "_game_embed_plain", "_board_name", "_qdig_md", "_modlog_id"}
 # Helpers that pass raw text through, only shortened (LANDFIX-1). A call of
 # one carries what its first argument carries, and nothing in its body is a
 # site: it puts its argument into no text but its own return, which the
@@ -78,7 +78,9 @@ MSG_KW = {"content", "description", "value", "title", "name", "text", "label", "
 MSG_CALLS = {"send", "reply", "edit", "send_message", "edit_message", "Embed", "add_field", "set_author",
              "set_footer", "respond", "edit_original_response", "Button", "SelectOption", "TextInput",
              "_dm_user", "_announce_in_channel", "_post_ingame_chat"}
-WRAP_CALLS = {"str", "strip", "lstrip", "rstrip", "get", "title", "upper", "lower"}
+# _mail_legacy_plain takes an older api's escaped mail field back to the text
+# typed (BOT-TEXT-ESCAPE-1): a call of it carries what its argument carries.
+WRAP_CALLS = {"str", "strip", "lstrip", "rstrip", "get", "title", "upper", "lower", "_mail_legacy_plain"}
 _SHARED_NODES = (ast.expr_context, ast.operator, ast.boolop, ast.unaryop, ast.cmpop)
 
 
@@ -307,6 +309,17 @@ class _Census:
         return any(isinstance(p, (ast.FunctionDef, ast.AsyncFunctionDef)) and p.name in SAFE
                    for p in self.parents(node))
 
+    def in_escape_arg(self, node):
+        """True when the text is built inside the argument of an escape call
+        (the at-sign and the name passed to _escape_md as one string,
+        BOT-TEXT-ESCAPE-1): the escape makes the whole of it literal."""
+        for p in self.parents(node):
+            if isinstance(p, ast.Call) and _call_name(p) in SAFE:
+                return True
+            if isinstance(p, (ast.stmt, ast.FunctionDef, ast.AsyncFunctionDef)):
+                return False
+        return False
+
     def in_pass(self, node):
         """True inside the body of a function named in PASS (at any depth)."""
         return any(isinstance(p, (ast.FunctionDef, ast.AsyncFunctionDef)) and p.name in PASS
@@ -349,7 +362,8 @@ class _Census:
                         if self.carries(a, t):
                             found.append(("K", node, a))
             for kind, where, expr in found:
-                if self.in_print(where) or self.in_escape(where) or self.in_pass(where):
+                if self.in_print(where) or self.in_escape(where) or self.in_pass(where) \
+                        or self.in_escape_arg(where):
                     continue
                 out.append((fn.name if fn else "<module>", self.seg(expr), kind, where.lineno))
         return sorted(out, key=lambda s: (s[3], s[1]))
@@ -362,7 +376,7 @@ _BUTTON = "a button label: plain text, Discord renders no Markdown there"
 _FOOTER = "embed footer text: plain text, no Markdown"
 _LABEL = "a bracket round label, not a player's name"
 ALLOW = {
-    ("_mailpick_view", '(t.get("sender_name") or "?").strip()'): (1, _BUTTON),
+    ("_mailpick_view", 'sender.strip() or "?"'): (1, _BUTTON),
     ("_maybe_answer_faq_ingame", "data.get('steam_id') or data.get('display_name') or ''"):
         (1, "an internal key for the answered-once check, never shown"),
     ("_fetch_rating_history", "steam_id"): (2, "a Steam id in an API path, not a name"),
@@ -377,9 +391,6 @@ ALLOW = {
     ("cmd_game", "p.get('side')"): (1, "the 1v2 side, solo or duo, not a name"),
     ("poll_ffa_queue_beacon", "members"): (1, "the lobby's member count"),
     ("poll_bug_reports", "who[:40]"): (1, "a thread name: plain text, no Markdown"),
-    ("poll_anticheat_flags", "f.get('p1_name')"): (1, "composed into ids, which _flag_embed_text escapes whole"),
-    ("poll_anticheat_flags", "f.get('p2_name')"): (1, "composed into ids, which _flag_embed_text escapes whole"),
-    ("_format_release_message", "name"): (1, "the GitHub release's title, not a player's name"),
     ("dm_opponent", "opp_id"): (1, "the Discord id _dm_user sends to, not text"),
     ("_tmatch_notice_message", "match_label"): (1, _LABEL),
     ("_tmatch_notice_message", "dest"): (4, _LABEL),
@@ -428,7 +439,7 @@ def test_every_player_name_in_markdown_goes_through_an_escape(census_sites):
 _UNWRAPS = (
     ("_faq_top_player", "**{_escape_md(top['display_name'])}**", "**{top['display_name']}**",
      "top['display_name']"),
-    ("_mail_sent_line", "% (_escape_md(who), subj)", "% (who, subj)", "who"),
+    ("_mail_sent_line", "% (_escape_md(who, MAIL_NAME_SHOWN_MAX), subj)", "% (who, subj)", "who"),
     ("poll_bug_report_events", '"Note from " + _escape_md(actor)', '"Note from " + actor', "actor"),
     ("cmd_graph", '", ".join(_escape_md(n) for n in not_linked)', '", ".join(not_linked)', "not_linked"),
 )
@@ -550,14 +561,28 @@ def test_the_moderator_logs_steam_id_is_ascii_digits_or_a_fixed_word():
     assert _id_gate_misses(lambda v: str(v) if str(v).isdigit() and len(str(v)) <= 20 else fixed, fixed)
 
 
+def _undefined(names):
+    defined = {n.name for n in ast.walk(TREE) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
+    return sorted(set(names) - defined)
+
+
+def test_every_safe_name_is_a_function_the_bot_defines():
+    """SAFE names only escapes the bot defines (at any depth), so no entry
+    stands for a function that is not there. Control: a planted name that
+    the bot does not define is found."""
+    assert _undefined(SAFE) == []
+    assert _undefined(SAFE | {"_census_planted_escape"}) == ["_census_planted_escape"]
+
+
 def test_the_digest_escape_covers_every_character_escape_md_escapes():
     """_qdig_md is in SAFE because it escapes at least what _escape_md
-    escapes. Both functions run here, lifted from the bot, on every BMP
-    character set between two letters (so _escape_md's line-start rule does
-    not apply): the characters each puts a backslash before are computed,
-    not listed. A control drops one character from QDIG_MD_CHARS and the
-    check must fail."""
-    ns = _lift(funcs=("_escape_md", "_qdig_md"), assigns=("QDIG_MD_CHARS",))
+    escapes (it is a thin call of it). Both functions run here, lifted from
+    the bot, on every BMP character set between two letters (so _escape_md's
+    line-start rule does not apply): the characters each puts a backslash
+    before are computed, not listed. A control gives the digest a name
+    helper that leaves one of those characters alone, and the check must
+    fail."""
+    ns = _lift(funcs=("_escape_md", "_qdig_md"))
 
     def escaped_by(fn):
         return {c for c in map(chr, range(0x10000)) if fn("a" + c + "a") == "a\\" + c + "a"}
@@ -566,7 +591,8 @@ def test_the_digest_escape_covers_every_character_escape_md_escapes():
     qdig = escaped_by(lambda s: ns["_qdig_md"](s, 100))
     assert md and md <= qdig, sorted(md - qdig)
     dropped = sorted(md)[0]
-    ns["QDIG_MD_CHARS"] = ns["QDIG_MD_CHARS"].replace(dropped, "")
+    real = ns["_escape_md"]
+    ns["_escape_md"] = lambda s, limit=None, more="...": real(s, limit, more).replace("\\" + dropped, dropped)
     assert not md <= escaped_by(lambda s: ns["_qdig_md"](s, 100)), dropped
 
 
@@ -584,11 +610,14 @@ HOSTILE_IDS = ["link", "bold", "heading", "underscores", "code", "mention", "num
 def _expect(name):
     """The name as the bot must print it, written out here rather than taken
     from the bot's helper: every line break a space (a CRLF pair one space),
-    each of \\ * _ ~ | ` [ ] < > after a backslash, and a leading # - + or
-    the dot of a leading 1. after a backslash too."""
+    each of \\ * _ ~ | ` [ ] < > @ after a backslash (@ since BOT-TEXT-ESCAPE-1
+    stage 2), and a leading # - + or the dot of a leading 1. after a
+    backslash too. Moved in stage 3: a zero-width space after every http: or
+    https: before a slash (a name is never a link)."""
     one = re.sub("\r\n", " ", name)
     one = "".join(" " if c in BREAKS else c for c in one)
-    out = "".join("\\" + c if c in "\\*_~|`[]<>" else c for c in one)
+    out = "".join("\\" + c if c in "\\*_~|`[]<>@" else c for c in one)
+    out = re.sub(r"(?i)(https?):(/)", lambda m: m.group(1) + ":​" + m.group(2), out)
     out = re.sub(r"^(\s*)([#+-])", lambda m: m.group(1) + "\\" + m.group(2), out)
     return re.sub(r"^(\s*\d+)([.)])", lambda m: m.group(1) + "\\" + m.group(2), out)
 
@@ -715,8 +744,13 @@ def test_a_mail_confirmation_and_a_moderation_result_print_names_literally(name)
     """Two replies that name a player to someone else: the mail relay's
     "sent your reply to NAME" and a moderation button's "applied by NAME to
     NAME"."""
-    ns = _lift(funcs=("_escape_md", "_mail_sent_line", "_modcase_render"))
-    _shows_literally(ns["_mail_sent_line"]({"known": True, "sender_name": name, "subject": "hi"}), name)
+    ns = _lift(funcs=("_escape_md", "_escape_text", "_mail_sent_line", "_mail_legacy_plain", "_modcase_render",
+                      "_api_refusal_text"),
+               assigns=("MAIL_NAME_SHOWN_MAX", "MAIL_SUBJECT_SHOWN_MAX", "_TEXT_BREAKS", "_TEXT_URL",
+                        "_TEXT_LINE_MARK", "_TEXT_ALWAYS", "API_REFUSAL_SHOWN_MAX"))
+    # the typed name as the api serves it beside its older escaped field (BOT-TEXT-ESCAPE-1)
+    _shows_literally(ns["_mail_sent_line"]({"known": True, "sender_name": "?", "subject": "hi",
+                                            "sender_name_raw": name, "subject_raw": "hi"}), name)
     body = {"status": "ok", "subject_name": name, "subject_steam_id": "76561190000000000"}
     spec = {"label": "Mute", "case_id": "abcdef0123456789"}
     text = ns["_modcase_render"](200, body, spec, "**Mod**")

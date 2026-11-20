@@ -1715,12 +1715,86 @@ def test_report_snapshots_dedupes_and_posts_once():
     ch, content = db.outbox[0]
     assert ch == main.MAIL_ADMIN_CHANNEL_ID
     assert content.startswith(f"{main.MAIL_CASE_MARKER}{first['case_id']}]\n")
-    assert "<@" not in content and "@everyone" not in content and "`code`" not in content
+    # The post's typed text goes through discord_text (BOT-TEXT-ESCAPE-1):
+    # each < > @ and backtick keeps its character after a backslash, so no
+    # typed text forms a mention token. The literal lines, written out:
+    lines = content.split("\n")
+    assert r"> \<\@123\> \@everyone hi \`code\`" in lines
+    assert "Subject: Rude" in lines and lines[-1] == "Reason: harassment"
+    quoted = [ln for ln in lines if ln.startswith("> ")]
+    scanned = 0
+    for ln in quoted:
+        for i, ch in enumerate(ln):
+            if ch in "<@`":
+                scanned += 1
+                assert i > 0 and ln[i - 1] == "\\", (ln, i)        # no bare < @ or backtick
+    assert len(quoted) == 1 and scanned == 5
     again = _run(main.mail_report(res["id"], main._MailReportReq(reason="again"), _req("tokB"), db))
     assert again == first and len(db.cases) == 1 and len(db.outbox) == 1
     assert _raises(main.mail_report(res["id"], rep, _req("tokA"), db)).status_code == 404   # the sender is no recipient
     bmid = db.seed_message(ids[A_SID], [(ids[B_SID], "to", "delivered")], kind="system_broadcast")
     assert _raises(main.mail_report(str(bmid), rep, _req("tokB"), db)).detail == "cannot_report_broadcast"
+
+
+def test_channel_post_sends_allow_no_everyone_or_role_mention():
+    """The mail report post above reaches Discord only through the bot's
+    poll_channel_posts, so this test is the other half of its guarantee: the
+    escape keeps typed text from forming a mention token, and the everyone,
+    here and role mentions are held by these sends' allowed mentions, which
+    must pass AllowedMentions with everyone=False and roles=False at every
+    call that sends or edits a message, by the keyword or by a ** dict."""
+    with open(os.path.join(HERE, "..", "discord_bot.py"), encoding="utf-8") as fh:
+        tree = ast.parse(fh.read())
+    fns = [n for n in tree.body if isinstance(n, ast.AsyncFunctionDef) and n.name == "poll_channel_posts"]
+    assert len(fns) == 1
+    fn = fns[0]
+
+    def held(node):
+        # discord.AllowedMentions(...) or AllowedMentions(...), everyone and
+        # roles each the literal False, no ** that could override them
+        if not isinstance(node, ast.Call):
+            return False
+        f = node.func
+        name = f.attr if isinstance(f, ast.Attribute) else getattr(f, "id", None)
+        if name != "AllowedMentions" or node.args or any(k.arg is None for k in node.keywords):
+            return False
+        kw = {k.arg: k.value for k in node.keywords}
+        return all(isinstance(kw.get(a), ast.Constant) and kw[a].value is False for a in ("everyone", "roles"))
+
+    def dict_sources(name):
+        # every value the function stores as name's allowed_mentions: a dict
+        # literal's entry, a subscript store; a dict built any other way, or
+        # with no such entry, is a None source (refused)
+        out = []
+        for n in ast.walk(fn):
+            if isinstance(n, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
+                targets = n.targets if isinstance(n, ast.Assign) else [n.target]
+                for t in targets:
+                    if isinstance(t, ast.Name) and t.id == name:
+                        v = n.value
+                        if isinstance(v, ast.Dict) and not any(k is None for k in v.keys):
+                            out.extend(val for k, val in zip(v.keys, v.values)
+                                       if isinstance(k, ast.Constant) and k.value == "allowed_mentions")
+                        else:
+                            out.append(None)
+                    elif (isinstance(t, ast.Subscript) and isinstance(t.value, ast.Name) and t.value.id == name
+                          and isinstance(t.slice, ast.Constant) and t.slice.value == "allowed_mentions"):
+                        out.append(n.value)
+        return out
+
+    sends, good = 0, 0
+    for n in ast.walk(fn):
+        if not (isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+                and n.func.attr in ("send", "edit", "reply", "send_message", "edit_message")):
+            continue
+        sends += 1
+        sources = [k.value for k in n.keywords if k.arg == "allowed_mentions"]
+        for k in n.keywords:
+            if k.arg is None:
+                sources.extend(dict_sources(k.value.id) if isinstance(k.value, ast.Name) else [None])
+        if sources and all(held(s) for s in sources):
+            good += 1
+    assert sends == 3 and good == 3, (sends, good)
 
 
 def test_spam_same_body_opens_one_case_per_day_and_bumps(monkeypatch):

@@ -22,6 +22,7 @@ from typing import List, Optional
 from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
+import discord_text as _dtext   # BOT-TEXT-ESCAPE-1: typed names in composed channel posts
 from sqlalchemy import and_, func, or_, select, text, delete
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -743,7 +744,10 @@ async def _confirmed_mentions(db: AsyncSession, tournament_id: uuid.UUID) -> str
                 TournamentSignup.is_speculative == False,  # noqa: E712
             ))
         )).scalars().all()
-    return " ".join(f"<@{d}>" for d in rows if d)
+    # The one place the api writes a user mention into a channel post
+    # (BOT-TEXT-ESCAPE-1): only a stored Discord id, and only one that is all
+    # ASCII digits, so nothing a person typed can become or add a mention.
+    return " ".join(f"<@{d}>" for d in rows if d and str(d).isascii() and str(d).isdigit())
 
 
 # Row 32's start rule, the server's half (Discord fix round 3, item 6). A
@@ -1149,6 +1153,23 @@ async def _build_current_response(db: AsyncSession, t: Tournament, caller_player
 
 # ── Lifecycle ─────────────────────────────────────────────────────
 
+KICK_NAMES_MAX = 1500   # the lock post's list of removed players, escaped
+
+
+def _kicked_names_text(names: list) -> str:
+    """The removed players' names for the lock post: each passes the shared
+    name helper once (64 characters of escaped text), whole names only
+    within KICK_NAMES_MAX characters, then how many more, so the post stays
+    inside one Discord message (BOT-TEXT-ESCAPE-1)."""
+    shown = []
+    for i, n in enumerate(names):
+        part = _dtext.escape_name(n, 64) if n else "unknown"
+        if shown and len(", ".join(shown + [part])) > KICK_NAMES_MAX:
+            return ", ".join(shown) + f" and {len(names) - i} more"
+        shown.append(part)
+    return ", ".join(shown)
+
+
 async def lock_tournament(db: AsyncSession, t: Tournament, force: bool = False) -> bool:
     """Transition voting -> locked. For sync tournaments the lock requires
     min_players votes agreeing on a SINGLE offered slot (item 3 — voting is
@@ -1437,7 +1458,10 @@ async def lock_tournament(db: AsyncSession, t: Tournament, force: bool = False) 
                     f"The {_kind_label(t.kind)} tournament locked for "
                     f"{_dts(winning_slot)} — removed {len(kicked)} signup(s) "
                     f"that couldn't make the agreed time: "
-                    f"{', '.join(n or 'unknown' for n in kicked_names)}. "
+                    # Each typed name through the shared name helper, once
+                    # (BOT-TEXT-ESCAPE-1): channel posts go out with user
+                    # mentions allowed, and every < and @ is escaped.
+                    f"{_kicked_names_text(list(kicked_names))}. "
                     f"No penalty; sign up again next week!")
             except Exception as e:
                 print(f"[TOURNAMENT] kick feed post failed: {e}")

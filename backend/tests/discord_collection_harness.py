@@ -1177,6 +1177,10 @@ class BotRig:
               "print": self._print}
         if extra:
             ns.update(extra)
+        # The bot's two text helpers ride along with every lift: names and
+        # free text reach a message only through them (BOT-TEXT-ESCAPE-1).
+        funcs = set(funcs) | {"_escape_md", "_escape_text"}
+        assigns = set(assigns) | {"_TEXT_BREAKS", "_TEXT_URL", "_TEXT_LINE_MARK", "_TEXT_ALWAYS"}
         exec(compile(lift(funcs, assigns, source), str(BOT_PATH), "exec"), ns)
         self.ns = ns
 

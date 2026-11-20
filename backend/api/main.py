@@ -46,6 +46,7 @@ import identity_clock_evidence as _ice
 import conn_ranges as _conn_ranges
 import build_manifest as _build_manifest   # standard library only: /health `build_manifest`
 import modlog as _modlog   # the moderator log's closed action list, labels and sentences (MODLOG-1)
+import discord_text as _dtext   # typed text in a Discord message the api composes (BOT-TEXT-ESCAPE-1)
 from glicko2 import calculate_new_rating
 import steamid64 as _sid64   # the SteamID64 rule, standard library only: the name cleanup, the bug-log scrubber and the Steam sweep read it
 import log_redaction as _logred   # the credential rule, standard library only: every receive path and read-back door of client log text applies it
@@ -4913,7 +4914,7 @@ async def _ovt_horizon_candidates(db, days: int, limit: int):
     Idleness is measured from SERVER-CLOCK columns only: `ovt_series.created_at`
     (NOW() at insert) and, per game, `GREATEST(ovt_matches.ended_at,
     ovt_matches.created_at)` — the report sink writes `ended_at` as NOW()
-    (PIN main.py:58128 ":started, NOW(),") and `created_at` defaults to NOW()
+    (PIN main.py:57428 ":started, NOW(),") and `created_at` defaults to NOW()
     by schema. `ovt_matches.started_at`
     is the one client-supplied stamp on that row and is deliberately NOT read
     here: a client-attested value may only move the server toward the
@@ -4979,7 +4980,7 @@ async def _ovt_settle_horizon_row(db, series_id, days: int) -> bool:
     report advances the tally and can complete the series. The bound the code
     actually holds is the ordering one — this settlement and that report
     serialise on the same series row lock: the report sink's lock waits
-    (PIN main.py:57927 "SELECT * FROM ovt_series WHERE id = :sid FOR NO KEY UPDATE"),
+    (PIN main.py:57229 "SELECT * FROM ovt_series WHERE id = :sid FOR NO KEY UPDATE"),
     this one declines. Whichever commits second observes the first, and a
     report arriving after the void is recorded and paid on the settled-without
     -play arm of `submit_ovt_match` rather than lost.
@@ -5049,7 +5050,7 @@ async def _ovt_settle_horizon_row(db, series_id, days: int) -> bool:
         return False
     # 'canceled', one L. Every other ovt path uses that spelling and the
     # continuation's prior-series lookup filters on it
-    # (PIN main.py:57225 "WHERE status IN ('completed', 'canceled', 'cancelled')"); the
+    # (PIN main.py:56560 "WHERE status IN ('completed', 'canceled', 'cancelled')"); the
     # janitor's original 'cancelled' made its own rows invisible to that lookup
     # and backend/sql/145_ovt_status_spelling.sql had to normalise them. A third
     # spelling would reopen that hole, so the VOID is carried by
@@ -8082,6 +8083,15 @@ _BAN_SWEEP_BUILD = 1
 # by construction, probed by the release train and read by nothing else
 # (#306). Absent on any build before it.
 _QAPPLY_BUILD = 1
+# Release-train verification plumbing, not a design mechanism: the build
+# marker of the batch in which typed text in the api's Discord channel posts,
+# stream posts and DMs, and in the bot's own messages, passes one helper once
+# (discord_text.py for the text the api composes, the bot's own helpers for
+# its messages), reported on /health as `bot_text_build`. It names build
+# identity only; the batch adds no route (learnings 780, 794). A code
+# constant, equal on both boxes by construction, probed by the release train
+# and read by nothing else (#306). Absent on any build before it.
+_BOT_TEXT_BUILD = 1
 
 
 def _title_ladders_health_word() -> int:
@@ -8169,6 +8179,7 @@ async def health_check(db: AsyncSession = Depends(get_db)):
                               modlog_build=_MODLOG_BUILD,
                               qapply_build=_QAPPLY_BUILD,
                               ban_sweep_build=_BAN_SWEEP_BUILD,
+                              bot_text_build=_BOT_TEXT_BUILD,
                               build_manifest=_build_manifest.health_word(),
                               review_eval=_review_rules.review_eval(),
                               review_rules=_review_rules.health_word(),
@@ -8246,6 +8257,7 @@ async def health_check(db: AsyncSession = Depends(get_db)):
                               modlog_build=_MODLOG_BUILD,
                               qapply_build=_QAPPLY_BUILD,
                               ban_sweep_build=_BAN_SWEEP_BUILD,
+                              bot_text_build=_BOT_TEXT_BUILD,
                               build_manifest=_build_manifest.health_word(),
                               review_eval=_review_rules.review_eval(),
                               review_rules=_review_rules.health_word(),
@@ -23825,12 +23837,11 @@ async def _chat_censor_strike(steam_id: str, display_name: str, channel: str,
                                          "duration_minutes": int(minutes), "permanent": False,
                                          "source": source})
             # #scr-admin post via the durable outbox. The bot sends outbox
-            # content with users-allowed mentions (#261) — neutralize mention
-            # syntax; the quoted message goes angle-bracket-neutered too.
-            safe_msg = (message or "")[:200].replace("<", "(").replace(">", ")").replace("`", "'")
-            safe_msg = _re.sub(r"@everyone", "everyone", safe_msg, flags=_re.IGNORECASE)
-            safe_msg = _re.sub(r"@here", "here", safe_msg, flags=_re.IGNORECASE)
-            safe_name = (display_name or steam_id or "?").replace("<", "(").replace(">", ")").replace("`", "'")
+            # content with users-allowed mentions (#261): the typed name and
+            # message pass the shared helpers once here (BOT-TEXT-ESCAPE-1),
+            # which escape every < and @, so neither can add a mention.
+            safe_msg = _dtext.escape_text(message or "", 400)
+            safe_name = _dtext.escape_name(display_name or steam_id or "?", 128)
             try:
                 async with db.begin_nested():
                     await db.execute(text(
@@ -44569,8 +44580,8 @@ async def _admin_cosmetic_review_impl(
                 "WHERE id=:i"
             ), {"n": note, "a": admin_steam_id, "i": submission_id})
             dm_content = (
-                f'Your placement change for "{row["name"]}" was not approved. '
-                f"Your last approved placement remains active. Reason: {note}"
+                f'Your placement change for "{_dtext.escape_name(row["name"], 80)}" was not approved. '
+                f"Your last approved placement remains active. Reason: {_dtext.escape_text(note)}"
             )
             result_status = "placement_denied"
         else:
@@ -44588,7 +44599,7 @@ async def _admin_cosmetic_review_impl(
                 "WHERE id=:i"
             ), {"n": note, "a": admin_steam_id,
                 "pn": note, "pa": admin_steam_id, "i": submission_id})
-            dm_content = f'Your cosmetic "{row["name"]}" was not approved. Reason: {note}'
+            dm_content = f'Your cosmetic "{_dtext.escape_name(row["name"], 80)}" was not approved. Reason: {_dtext.escape_text(note)}'
             result_status = "denied"
         await _modlog_write(
             db, actor=admin_steam_id,
@@ -44641,7 +44652,7 @@ async def _admin_cosmetic_review_impl(
         ), {"sc": render_scale, "ox": render_offset_x, "oy": render_offset_y,
             "rev": expected_revision, "n": note, "a": admin_steam_id, "i": submission_id})
         dm_content = (
-            f'Your placement change for "{row["name"]}" was approved at '
+            f'Your placement change for "{_dtext.escape_name(row["name"], 80)}" was approved at '
             f"{render_scale:.2f}x, offset {render_offset_x:.3f}:{render_offset_y:.3f}. "
             "Your last published placement remains active until this revision ships in a mod update."
         )
@@ -44661,7 +44672,7 @@ async def _admin_cosmetic_review_impl(
             "ox": render_offset_x, "oy": render_offset_y,
             "rev": expected_revision, "i": submission_id})
         dm_content = (
-            f'Your cosmetic "{row["name"]}" was approved at {render_scale:.2f}x, '
+            f'Your cosmetic "{_dtext.escape_name(row["name"], 80)}" was approved at {render_scale:.2f}x, '
             f"offset {render_offset_x:.3f}:{render_offset_y:.3f}. It will appear in-game "
             "after its art and reviewed placement are included in a mod update."
         )
@@ -51798,18 +51809,18 @@ async def admin_alert_create(req: _AdminAlertCreateReq, db: AsyncSession = Depen
                                      "expires_minutes": exp_min or None})
     # Discord echo to #scr-admin via the durable outbox (the bot's 30s
     # poll_channel_posts loop delivers + acks; zero new bot code). The bot
-    # sends outbox content with users-allowed mentions, so neutralize mention
-    # syntax at compose time (#261's exact shape).
-    safe = msg.replace("<", "(").replace(">", ")")
-    safe = _re.sub(r"@everyone", "everyone", safe, flags=_re.IGNORECASE)
-    safe = _re.sub(r"@here", "here", safe, flags=_re.IGNORECASE)
+    # sends outbox content with users-allowed mentions, so the typed parts
+    # pass the shared helpers once at compose time (BOT-TEXT-ESCAPE-1): every
+    # < and @ escaped, so the admin's name and text cannot add a mention.
+    safe = _dtext.escape_text(msg)
+    safe_admin = _dtext.escape_name(str(admin_name), 128)
     try:
         async with db.begin_nested():
             await db.execute(text(
                 "INSERT INTO pending_channel_posts (channel_id, content) VALUES (:ch, :c)"
             ), {"ch": "1495392567687250061",  # #scr-admin (bot env default; migration-110 precedent)
                 "c": f"\N{LARGE ORANGE DIAMOND} **Server alert** [{req.category}] by "
-                     f"{str(admin_name)[:64]}: {safe}"})
+                     f"{safe_admin}: {safe}"})
     except Exception as ex:
         print(f"[ALERTS] channel-post queue failed (alert stands): {ex}")
     await db.commit()
@@ -80582,12 +80593,17 @@ def _stream_mode_label(candidate: dict) -> str:
     """Bug 250: THE mode label for stream surfaces — one helper for both the
     live body and the stored matchup line (#330). A tournament 1v1 says so
     in the text itself; the 🏆 prefix alone left the line reading
-    "Ranked 1v1" for every tournament game."""
-    mode = _STREAM_MODE_LABELS.get(candidate.get("mode") or "",
-                                   candidate.get("mode") or "?")
+    "Ranked 1v1" for every tournament game. A mode outside the table is
+    shown through the name helper, 40 characters of escaped text
+    (BOT-TEXT-ESCAPE-1), so a mode added later still reads."""
+    raw_mode = candidate.get("mode") or ""
+    mode = _STREAM_MODE_LABELS.get(raw_mode) or _dtext.escape_name(_dtext.flat(raw_mode) or "?", 40)
     if candidate.get("is_tournament") and (candidate.get("mode") or "") == "1v1":
         return "Tournament 1v1"
     return mode
+
+
+_STREAM_MATCHUP_NAMES_MAX = 150    # the names of one stored matchup line, escaped
 
 
 def _stream_matchup_line(candidate: dict | None) -> str:
@@ -80610,31 +80626,37 @@ def _stream_matchup_line(candidate: dict | None) -> str:
     if len(names) == 2:
         vs = f"{_nm(0)} vs {_nm(1)}"
     else:
-        vs = ", ".join(_nm(i) for i in range(len(names))) or "?"
+        # Whole names only, within a budget on the ESCAPED text: a plain
+        # slice of the escaped line could end inside an escape pair or a
+        # bold pair (BOT-TEXT-ESCAPE-1). Two names always fit (each is cut
+        # to 24 typed characters before its one escape).
+        parts = []
+        for i in range(len(names)):
+            part = _nm(i)
+            if parts and len(", ".join(parts + [part])) > _STREAM_MATCHUP_NAMES_MAX:
+                parts.append(f"+{len(names) - i} more")
+                break
+            parts.append(part)
+        vs = ", ".join(parts) or "?"
     line = f"{vs} - {mode}"
     if candidate.get("is_tournament"):
         line = "🏆 " + line
-    return line[:200]
+    return line
 
 
 def _stream_md_escape(s: str) -> str:
-    """Names go into a Discord embed body — neutralize markdown metacharacters
-    (embeds never ping, and the bot sends AllowedMentions.none(), so mention
-    tokens are cosmetic-only here). Brackets/parens/angles included (review
-    F10): AllowedMentions suppresses pings, NOT hyperlinks, and a name like
-    "[watch](https://evil)" would otherwise render a clickable link in an
-    official embed. Round-2 finding 5: whitespace/control chars collapse to
-    single spaces (a newline in a name forges whole embed LINES) and bare
-    URLs get a zero-width space after the scheme so Discord's auto-linker
-    never fires on caller-authored text."""
-    collapsed = " ".join((s or "").split())
-    out = []
-    for ch in collapsed:
-        if ch in "*_~`|\\[]()<>":
-            out.append("\\")
-        out.append(ch)
-    escaped = "".join(out)
-    return _re.sub(r"(?i)(https?):(/{1,2})", "\\1:\u200b\\2", escaped)
+    """A name for a stream post's embed body: discord_text.escape_name over
+    the name with every run of white space collapsed to one space. That
+    escapes the markdown marks and [ ] < > @, so a name like
+    "[watch](https://evil)" renders no masked link and no mention
+    (AllowedMentions suppresses pings, not hyperlinks; review F10); keeps the
+    name on one line, so it cannot forge an embed line (round-2 finding 5);
+    and puts a zero-width space after the colon of every scheme that is
+    followed by a slash, so Discord's auto-linker never fires on it. The live post
+    (_stream_post_content) and each stored matchup line
+    (_stream_matchup_line) call it once per name; the final post
+    (_stream_ended_content) shows the stored lines as they stand."""
+    return _dtext.escape_name(_dtext.flat(s))
 
 
 async def _stream_series_score(db: AsyncSession, candidate: dict | None) -> str | None:
@@ -84314,10 +84336,10 @@ async def _mail_spam_case(db: AsyncSession, sender: dict, *, message_id, subject
         "updated_at": _mail_iso(_utc_now()), "hits": 1,
     }
     post = (f"\N{TRIANGULAR FLAG ON POST} **Mail spam** — "
-            f"**{_mail_discord_safe(sender.get('display_name') or '?', 64)}** (`{sender['steam_id']}`): "
+            f"**{_dtext.escape_name(sender.get('display_name') or '?', 64)}** (`{sender['steam_id']}`): "
             f"{int(same_body)} same-body message(s) today, {int(bulk_hour)} bulk send(s) "
             f"(> {MAIL_SPAM_BULK_RECIPIENTS} recipients) this hour, {int(censor_hits)} filter hit(s) today."
-            + (f" Latest subject: {_mail_discord_safe(subject, 120)}" if subject else ""))
+            + (f" Latest subject: {_dtext.escape_text(_dtext.flat(subject), 120)}" if subject else ""))
     await _mail_open_case(db, kind="mail_spam", subject_player_id=sender["id"], reporter_id=None,
                           message_id=message_id, evidence=evidence,
                           bucket_key=f"{sender['id']}:{day}", bump=True, post_text=post)
@@ -85074,12 +85096,15 @@ async def mail_report(message_id: str, req: _MailReportReq, request: Request,
                 "sender_id": str(row["sender_id"]), "sender_steam_id": row["sender_steam_id"],
                 "sender_name": row["sender_name"], "sent_at": _mail_iso(row["created_at"]),
                 "reason": reason or None}
+    # The body keeps its lines: it passes the text helper once (cut on the
+    # escaped text), then each of its lines is quoted (BOT-TEXT-ESCAPE-1).
+    quoted_body = "\n".join("> " + ln for ln in _dtext.escape_text(row["body"] or "", 300).split("\n"))
     post = (f"\N{INCOMING ENVELOPE} **Mail report** — "
-            f"**{_mail_discord_safe(row['sender_name'] or '?', 64)}** (`{row['sender_steam_id']}`)"
-            f" reported by **{_mail_discord_safe(me.get('display_name') or '?', 64)}**\n"
-            f"Subject: {_mail_discord_safe(row['subject'], 120)}\n"
-            f"> {_mail_discord_safe(row['body'], 300)}\n"
-            f"Reason: {_mail_discord_safe(reason, 200) or '(none given)'}")
+            f"**{_dtext.escape_name(row['sender_name'] or '?', 64)}** (`{row['sender_steam_id']}`)"
+            f" reported by **{_dtext.escape_name(me.get('display_name') or '?', 64)}**\n"
+            f"Subject: {_dtext.escape_text(_dtext.flat(row['subject']), 120)}\n"
+            f"{quoted_body}\n"
+            f"Reason: {_dtext.escape_text(_dtext.flat(reason), 200) or '(none given)'}")
     case_id, _inserted = await _mail_open_case(
         db, kind="mail_report", subject_player_id=row["sender_id"], reporter_id=me["id"],
         message_id=row["id"], evidence=evidence, bucket_key=f"{row['id']}:{me['id']}",

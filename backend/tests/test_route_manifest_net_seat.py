@@ -1837,6 +1837,13 @@ def test_the_helper_closure_stays_affordable():
     # (627 over QAPPLY-1's base, 598 over main 234ea0f8); the merge keeps
     # QAPPLY-1's 627, which holds both lanes' measurements, until the stack's
     # closing item measures its own tip and records the value here.
+    # bot text lane (2026-11-20), its build marker: 598 measured at GET
+    # /api/v1/health (597 at 0a3faa13, the same walk over that tree): +1 by
+    # name, main._BOT_TEXT_BUILD, which the health route reads in both arms;
+    # the two trees' reached sets are otherwise equal by name. The bound
+    # moves to 598, the measured value, for that reason and no other.
+    # The stack, at its merge of the bot text lane: the 627 above stays (it
+    # holds all three lanes' measurements) until the closing item.
     assert code_worst <= 627, f"worst code closure {code_worst} of {total}"
 
     # Imports are counted separately rather than folded in or waved through.
