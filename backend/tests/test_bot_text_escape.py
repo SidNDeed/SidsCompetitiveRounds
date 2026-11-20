@@ -2376,6 +2376,20 @@ CENSUS_MUTANTS = [
     ("regions, plain slot escaped", 'rows = sorted([r for r in (s.get("region_breakdown") or [])',
      'rows = sorted([r for r in _escape_md(s.get("region_breakdown") or [])',
      "'region_breakdown' reaches a plain slot through name"),
+    # FIX-2B: the four sites FIX-2 changed that no row above plants.
+    ("top cards card name (dict shape), none",
+     "lines.append(f\"**{_escape_md(c['card_name'], 64)}** ({c.get('times_picked', 0)}x)\")",
+     "lines.append(f\"**{c['card_name']}** ({c.get('times_picked', 0)}x)\")",
+     "'card_name' reaches a md slot raw at _top_cards_lines"),
+    ("compare top cards card name, none", "\", \".join(f\"{_escape_md(c['card_name'], 64)} ",
+     "\", \".join(f\"{c['card_name']} ", "'card_name' reaches a md slot raw at _fmt_top"),
+    ("cards command card name, none", "ln = f\"**{_escape_md(c.get('card_name', '?'), 64)}**",
+     "ln = f\"**{c.get('card_name', '?')}**", "'card_name' reaches a md slot raw at cmd_cards"),
+    ("which-mail older api subject, none",
+     'subj = _escape_text(_mail_legacy_plain(t.get("subject")).strip() or "(no subject)",\n'
+     '                                MAIL_SUBJECT_SHOWN_MAX)',
+     'subj = (t.get("subject") or "(no subject)").strip()',
+     "'subject' reaches a md slot raw at _ask_which_mail"),
 ]
 
 
@@ -2989,3 +3003,103 @@ def test_the_helper_sources_hold_no_literal_line_or_paragraph_separator():
         for ch in (chr(0x2028), chr(0x2029)):
             planted = src.replace("import re", "import re  # " + ch, 1)
             assert planted != src and _literal_breaks(planted), hex(ord(ch))
+
+
+# -- every break character, in every helper ------------------------------------
+# The code points the break patterns treat as a line break (LF, VT, FF, CR, the
+# three information separators FS GS RS, NEL, LS and PS), and CR LF as one
+# break. A free-text helper writes one line break for each, a name helper one
+# space. _lb_name flattens with _LB_NAME_BREAKS and then passes _escape_md,
+# which breaks the whole set.
+BREAK_POINTS = (0x0A, 0x0B, 0x0C, 0x0D, 0x1C, 0x1D, 0x1E, 0x85, 0x2028, 0x2029)
+NOT_BREAK_POINTS = (0x09, 0x1B, 0x1F, 0x20, 0xA0, 0x1680, 0x200B, 0x2027, 0x202A, 0x3000)
+
+
+def _lift_from(source, funcs=(), assigns=()):
+    """_lift over another text of the bot (a mutant's)."""
+    picked, seen = [], set()
+    for node in ast.parse(source).body:
+        if isinstance(node, ast.FunctionDef) and node.name in funcs:
+            picked.append(node)
+            seen.add(node.name)
+        elif isinstance(node, ast.Assign) and any(isinstance(t, ast.Name) and t.id in assigns
+                                                  for t in node.targets):
+            picked.append(node)
+            seen.update(t.id for t in node.targets if isinstance(t, ast.Name))
+    assert seen >= set(funcs) | set(assigns), (set(funcs) | set(assigns)) - seen
+    ns = {"re": re}
+    exec(compile(ast.Module(body=picked, type_ignores=[]), SRC, "exec"), ns)
+    return ns
+
+
+def _break_helpers(bot_source, api_source):
+    """(free-text helpers, name helpers) as (label, function), built from the
+    two texts given: the bot's three and the api's two."""
+    esc = _lift_from(bot_source, ("_escape_text",), HELPER_PARTS)["_escape_text"]
+    name = _lift_from(bot_source, ("_escape_md",))["_escape_md"]
+    lb = _lift_from(bot_source, ("_lb_name", "_escape_md"), ("_LB_NAME_BREAKS",))["_lb_name"]
+    api = {"__name__": "discord_text_copy"}
+    exec(compile(api_source, os.path.join(API_DIR, "discord_text.py"), "exec"), api)
+    return ([("bot _escape_text", esc), ("api escape_text", api["escape_text"])],
+            [("bot _escape_md", name), ("bot _lb_name", lb), ("api escape_name", api["escape_name"])])
+
+
+def _break_problems(helpers, points=BREAK_POINTS):
+    """(helper, code point) for every break the helpers do not write as one
+    line break (free text) or one space (a name); CR LF counts as one break."""
+    texts, names = helpers
+    cases = [("U+%04X" % cp, chr(cp)) for cp in points] + [("CR LF", "\r\n")]
+    out = []
+    for what, ch in cases:
+        out += [(label, what) for label, h in texts if h("a" + ch + "b") != "a\nb"]
+        out += [(label, what) for label, h in names if h("a" + ch + "b") != "a b"]
+    return out
+
+
+def test_every_break_character_is_one_break_in_every_helper():
+    """Both copies: each break code point, and CR LF, is one line break in
+    free text and one space in a name."""
+    assert _break_problems(_break_helpers(TEXT, _api_source("discord_text.py"))) == []
+
+
+def test_control_a_character_outside_the_break_set_is_kept():
+    """A tab, a space, the unit separator, a no-break or ideographic space, a
+    zero-width space and other characters near the set are kept as typed by
+    every helper."""
+    texts, names = _break_helpers(TEXT, _api_source("discord_text.py"))
+    for cp in NOT_BREAK_POINTS:
+        typed = "a" + chr(cp) + "b"
+        for label, h in texts + names:
+            assert h(typed) == typed, (label, "U+%04X" % cp)
+
+
+# The four patterns whose U+2028 a mutant takes out, and the helpers that
+# must then turn red. _LB_NAME_BREAKS has no mutant here: _lb_name passes
+# _escape_md after it, which breaks U+2028 as well, so taking the code point
+# out of _LB_NAME_BREAKS alone changes no output.
+_BREAK_PATTERN_MUTANTS = [
+    ("bot _TEXT_BREAKS", "bot", '_TEXT_BREAKS = re.compile(r"\\r\\n|[\\r\\v\\f\\x1c-\\x1e\\x85\\u2028\\u2029]")',
+     {"bot _escape_text"}),
+    ("bot _escape_md", "bot", 'one_line = re.sub(r"\\r\\n|[\\n\\r\\v\\f\\x1c-\\x1e\\x85\\u2028\\u2029]", " ", str(text))',
+     {"bot _escape_md"}),
+    ("api _TEXT_BREAKS", "api", '_TEXT_BREAKS = re.compile(r"\\r\\n|[\\r\\v\\f\\x1c-\\x1e\\x85\\u2028\\u2029]")',
+     {"api escape_text"}),
+    ("api escape_name", "api", 'one_line = re.sub(r"\\r\\n|[\\n\\r\\v\\f\\x1c-\\x1e\\x85\\u2028\\u2029]", " ", str(text))',
+     {"api escape_name"}),
+]
+
+
+@pytest.mark.parametrize("which,where,line,red", [m for m in _BREAK_PATTERN_MUTANTS],
+                         ids=[m[0] for m in _BREAK_PATTERN_MUTANTS])
+def test_a_break_pattern_without_the_line_separator_turns_the_test_red(which, where, line, red):
+    """The mutant: U+2028 taken out of one pattern; the break test then names
+    exactly the helpers that pattern serves, at U+2028 alone."""
+    bot, api = TEXT, _api_source("discord_text.py")
+    source = bot if where == "bot" else api
+    assert source.count(line) == 1, which
+    mutated = source.replace(line, line.replace("\\u2028", ""), 1)
+    assert mutated != source
+    helpers = _break_helpers(mutated, api) if where == "bot" else _break_helpers(bot, mutated)
+    problems = _break_problems(helpers)
+    assert problems and {p[1] for p in problems} == {"U+2028"}, problems
+    assert {p[0] for p in problems} == red, problems
