@@ -28,6 +28,7 @@ from fastapi import HTTPException  # noqa: E402
 from sqlalchemy import text  # noqa: E402
 
 import main  # noqa: E402
+from ban_sweep_pg_bounds import bounded_pg  # noqa: E402,F401  (autouse: every session bounded)
 import schemas  # noqa: E402
 import test_ban_sweep_live as L  # noqa: E402
 from test_ban_sweep_live import case, mode  # noqa: E402,F401  (fixtures)
@@ -72,12 +73,19 @@ async def _interleave(sm, target, route):
             # (the bug report's T1) may take its writing one on another pooled
             # connection, so the route's first pid is not the one that waits.
             async with sm() as probe:
-                waiting = (await probe.execute(text(
-                    "SELECT count(*) FROM pg_locks l JOIN pg_stat_activity a ON a.pid = l.pid"
-                    " WHERE NOT l.granted AND l.locktype = 'advisory'"
-                    " AND a.datname = current_database() AND l.pid <> pg_backend_pid()"))).scalar()
+                waiting, blocked = (await probe.execute(text(
+                    "SELECT count(*) FILTER (WHERE l.locktype = 'advisory'), count(*)"
+                    " FROM pg_locks l JOIN pg_stat_activity a ON a.pid = l.pid"
+                    " WHERE NOT l.granted"
+                    " AND a.datname = current_database() AND l.pid <> pg_backend_pid()"))).one()
             if waiting:
                 waited = True
+                break
+            # A wait on anything else (a mutant without the identity key waits
+            # on the ban's row lock instead): the identity key was not what it
+            # waited on, so the answer is not-waited, and the ban commits now,
+            # inside the session's lock_timeout (ban_sweep_pg_bounds).
+            if blocked:
                 break
         await ban_db.commit()
     finally:

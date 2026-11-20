@@ -32,6 +32,7 @@ import pytest  # noqa: E402
 from sqlalchemy import text  # noqa: E402
 
 import main  # noqa: E402
+from ban_sweep_pg_bounds import bounded_pg  # noqa: E402,F401  (autouse: every session bounded)
 import test_ban_sweep_live as L  # noqa: E402
 import test_match_hold_pg as hold_test  # noqa: E402
 import test_match_hold_reports_pg as R  # noqa: E402

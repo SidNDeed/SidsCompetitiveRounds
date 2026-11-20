@@ -35,6 +35,7 @@ for _p in (os.path.normpath(os.path.join(HERE, "..", "api")), HERE):
 from sqlalchemy import text  # noqa: E402
 
 import main  # noqa: E402
+from ban_sweep_pg_bounds import bounded_pg  # noqa: E402,F401  (autouse: every session bounded)
 import test_title_ladder_hooks_live as lh  # noqa: E402
 from ban_sweep_census import LIVE  # noqa: E402
 from ban_sweep_tables import TABLE_CLASSES  # noqa: E402

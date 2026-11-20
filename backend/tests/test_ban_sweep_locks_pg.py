@@ -28,6 +28,7 @@ from fastapi import HTTPException  # noqa: E402
 from sqlalchemy import text  # noqa: E402
 
 import main  # noqa: E402
+from ban_sweep_pg_bounds import bounded_pg  # noqa: E402,F401  (autouse: every session bounded)
 import test_ban_sweep_live as L  # noqa: E402
 from test_ban_sweep_live import case, soft  # noqa: E402,F401  (fixtures)
 
@@ -208,3 +209,28 @@ def test_v_mutant_casual_dc_asking_the_leaver_key_shared_does_not_wait(case, sof
     waited, got = L._with_sm(case, _casual_body(rep, lv))
     assert not waited and got[0] == "admitted", (waited, got)
 
+
+
+def _session_bounds(case):
+    async def body(sm):
+        async with sm() as db:
+            return ((await db.execute(text("SHOW lock_timeout"))).scalar(),
+                    (await db.execute(text("SHOW statement_timeout"))).scalar())
+    return L._with_sm(case, body)
+
+
+def test_every_lane_session_runs_under_its_own_bounds(case):
+    """ban_sweep_pg_bounds: a session of the lane's harness starts with
+    lock_timeout 10s and statement_timeout 2min, so no lane test can wait on
+    a lock until the run's bound."""
+    assert _session_bounds(case) == ("10s", "2min")
+
+
+def test_mutant_without_the_bounds_fixture_a_session_waits_unbounded(case, monkeypatch):
+    """The control of the test above: with the harness's own engine back (the
+    fixture undone), the same session reports no bound (0), so the 10s and
+    2min above are the fixture's."""
+    import ladder_pg_harness as harness
+    import ban_sweep_pg_bounds as B
+    monkeypatch.setattr(harness, "bound_engine", B.ORIGINAL_BOUND_ENGINE)
+    assert _session_bounds(case) == ("0", "0")

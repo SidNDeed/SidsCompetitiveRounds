@@ -32,6 +32,7 @@ from fastapi import HTTPException  # noqa: E402
 from sqlalchemy import text  # noqa: E402
 
 import main  # noqa: E402
+from ban_sweep_pg_bounds import bounded_pg  # noqa: E402,F401  (autouse: every session bounded)
 import test_ban_sweep_live as L  # noqa: E402
 from test_ban_sweep_live import case, soft  # noqa: E402,F401  (fixtures)
 lh = L.lh

@@ -46,6 +46,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker  # noqa: E402
 from starlette.requests import Request  # noqa: E402
 
 import main  # noqa: E402
+from ban_sweep_pg_bounds import bounded_pg  # noqa: E402,F401  (autouse: every session bounded)
 import schemas  # noqa: E402
 import ladder_pg_harness as harness  # noqa: E402
 import test_title_ladder_hooks_live as lh  # noqa: E402

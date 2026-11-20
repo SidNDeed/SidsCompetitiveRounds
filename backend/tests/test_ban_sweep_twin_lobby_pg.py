@@ -32,6 +32,7 @@ sys.path.insert(0, HERE)
 from inv_pg import LOBBY_TABLE, MODES, QUEUE_TABLE, case  # noqa: E402
 
 import main  # noqa: E402
+from ban_sweep_pg_bounds import bounded_pg  # noqa: E402,F401  (autouse: every session bounded)
 
 # Columns that name an account or a row, or say when: they differ between the
 # twins by construction and are compared by role instead (the host below).
