@@ -104,7 +104,7 @@ async def accept(env, qid, *, word="quarantine_action", note=None):
     return await env._call(go)
 
 
-async def credit(env, qid, *, word="quarantine_credit", note=None):
+async def credit(env, qid, *, word="quarantine_credit", note=None, invariant=True):
     req = main._AdminQuarantineReq(admin_steam_id=ADMIN, hmac_signature=sig(word, qid), note=note)
 
     async def go():
@@ -112,8 +112,11 @@ async def credit(env, qid, *, word="quarantine_credit", note=None):
             return await main.admin_credit_quarantine(qid, req, db)
     ans = await env._call(go)
     # F5: after every Credit of these tests, every credited held row has
-    # its game's claim, whoever credited it.
-    await _f5_invariant(env)
+    # its game's claim, whoever credited it. (invariant=False: M2's pairs,
+    # which run two actions at once and read the invariant after both, on
+    # the one test connection.)
+    if invariant:
+        await _f5_invariant(env)
     return ans
 
 
@@ -1310,10 +1313,13 @@ async def _lock_waiters(env, n):
 
 
 async def _timed(act, env, qid):
-    """The action's answer and its own elapsed seconds."""
+    """The action's answer and its own elapsed seconds. The test connection
+    (env.conn) is never used inside: two of these run at once beside
+    _lock_waiters, and asyncpg refuses a second operation on one
+    connection; _pair_rows reads Credit's F5 invariant after both answer."""
     loop = asyncio.get_running_loop()
     t0 = loop.time()
-    ans = await act(env, qid)
+    ans = await (act(env, qid, invariant=False) if act is credit else act(env, qid))
     return ans, loop.time() - t0
 
 
@@ -1333,7 +1339,9 @@ async def _pair_rows(env, lob, one, two, *, release=True):
             await _lock_waiters(env, 2)
             if release:
                 await s.rollback()
-            return await asyncio.wait_for(asyncio.gather(t1, t2), main._QAPPLY_DEADLINE_S + 2.0)
+            got = await asyncio.wait_for(asyncio.gather(t1, t2), main._QAPPLY_DEADLINE_S + 2.0)
+            await _f5_invariant(env)
+            return got
         finally:
             await s.rollback()
             for t in (t1, t2):
