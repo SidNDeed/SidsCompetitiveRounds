@@ -150,10 +150,11 @@ def _copy_tree(dst: pathlib.Path) -> pathlib.Path:
         shutil.copyfile(p, api / p.name)
     for p in (BACKEND / "sql").glob("*.sql"):
         shutil.copyfile(p, sql / p.name)
-    for name in local_test_imports(("conftest.py", "pc_themes_data.py")):
+    # This file is one of the walk's names: it imports a module of the tests
+    # folder itself (tree_copy_imports), which the copy must carry.
+    for name in local_test_imports(("conftest.py", "pc_themes_data.py", THIS.name)):
         shutil.copyfile(BACKEND / "tests" / name, tests / name)
     shutil.copyfile(BACKEND / "tools" / "review_tripwire.py", tools / "review_tripwire.py")
-    shutil.copyfile(THIS, tests / THIS.name)
     return api / "main.py"
 
 
