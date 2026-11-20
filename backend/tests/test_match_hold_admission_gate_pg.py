@@ -42,6 +42,10 @@ from closed_walk import Unclassified  # noqa: E402
 from closed_walk import rule_p_roots  # noqa: E402
 from main import (  # noqa: E402
     LEASE_TTL_ASSEMBLY, _lease_acquire, _lease_admission_gate, _lease_release)
+# The callee table's third statement (match_hold._guard_identities' local
+# import of the one identity order), bound by this file's own static import.
+from identity_order import identity_lock_key  # noqa: E402
+import identity_order as _identity_order  # noqa: E402
 # The match_hold the hold suite loaded: the MATCH_HOLD_SRC copy when set
 # (a plain import here would bind the tracked copy main cached).
 match_hold = hold_test.match_hold
@@ -274,9 +278,12 @@ def _admitted_body(d, filename, offset):
 # Round 8 (closed_walk M4): a Bindings resolves a callee outside the walked
 # function's own module namespace only through its grammar's FROZEN callee
 # table, {import statement text: {bound name: object}}. The gate walks' table
-# holds the two `from main import` statements grammar_shapes_gate.IMPORTS
-# freezes (match_hold's late imports of the gate), each name bound to the
-# object this file's own static import of main binds
+# holds the `from` statements grammar_shapes_gate.IMPORTS freezes: the two
+# `from main import` statements (match_hold's late imports of the gate) and,
+# since FIX-3C (ruling RULING-H8-GATE-GRAMMAR (a), 20 Nov 2026), the
+# `from identity_order import identity_lock_key` of match_hold._guard_identities
+# (9d8da712: its keys sorted in the one identity order); each name bound to
+# the object this file's own static import binds
 # (test_r8_gate_callee_table_is_the_frozen_imports). The gate grammar keeps
 # no definition scope, so no class call is constructor-pure.
 _GATE_CALLEES = {
@@ -287,6 +294,8 @@ _GATE_CALLEES = {
     "from main import _lease_admission_gate, _lease_release": {
         "_lease_admission_gate": _lease_admission_gate,
         "_lease_release": _lease_release},
+    "from identity_order import identity_lock_key": {
+        "identity_lock_key": identity_lock_key},
 }
 _GATE_GRAMMAR = types.SimpleNamespace(
     imports=_GATE_CALLEES, namedtuples=frozenset(), admit=_admitted_body)
@@ -311,20 +320,25 @@ _N_B_FN = match_hold._guard_identities
 _N_B_ALL = ("(await db.execute(text('SELECT id, steam_id FROM players WHERE"
             " steam_id = ANY(CAST(:steams AS varchar[])) AND deleted_at IS"
             " NULL'), {'steams': keys})).mappings().all()")
-_N_B_SORTED = "sorted({str(s) for s in steam_ids if s is not None})"
+# FIX-3C (ruling RULING-H8-GATE-GRAMMAR (a)): the spelling and every row line
+# below re-frozen at 71e83a2e, after 9d8da712 added the local import of
+# identity_lock_key (one line) and the key= of the sorted call; old rows:
+# sorted 9, .all 18, rows 15 and 19, return 14 and 19, match_hold sorted 8.
+_N_B_SORTED = ("sorted({str(s) for s in steam_ids if s is not None},"
+               " key=identity_lock_key)")
 _N_B_CENSUS_ROWS = {
     ("F", "sorted"): (
-        (9, 11, "Load", "Assign.value", _N_B_SORTED, "keys = " + _N_B_SORTED),),
-    ("F", ".all"): ((18, 41, "Load", _N_B_ALL),),
+        (10, 11, "Load", "Assign.value", _N_B_SORTED, "keys = " + _N_B_SORTED),),
+    ("F", ".all"): ((19, 41, "Load", _N_B_ALL),),
     ("F", "rows"): (
-        (15, 4, "Store", "Assign.targets", "rows",
+        (16, 4, "Store", "Assign.targets", "rows",
          "rows = (await db.execute(text('SELECT id, steam_id FROM players WHERE"
          " steam_id = ANY(CAST(:steams AS varchar[])) AND del"),
-        (19, 44, "Load", "comprehension.iter", "rows",
+        (20, 44, "Load", "comprehension.iter", "rows",
          "return {r['steam_id']: r['id'] for r in rows}")),
     ("F", "return"): (
-        (14, "return", "return {}"),
-        (19, "return", "return {r['steam_id']: r['id'] for r in rows}")),
+        (15, "return", "return {}"),
+        (20, "return", "return {r['steam_id']: r['id'] for r in rows}")),
     ("match_hold", "_guard_identities"): (
         ("_guard_open_identities", 2, "Load",
          "_guard_identities(db, (req.held_steam_id, req.opener_steam_id))"),
@@ -333,7 +347,7 @@ _N_B_CENSUS_ROWS = {
         ("match_hold_beat", 11, "Load",
          "_guard_identities(db, [req.steam_id, *(s.u_id for s in req.seen)])")),
     ("match_hold", "sorted"): (
-        ("_guard_identities", 8, "Load", _N_B_SORTED),
+        ("_guard_identities", 9, "Load", _N_B_SORTED),
         ("_guard_player_ids", 6, "Load",
          "sorted({str(p) for p in player_ids if p is not None})"),
         ("_roster", 12, "Load", "sorted(seats.items(), key=lambda kv: kv[1][0])")),
@@ -2759,8 +2773,9 @@ def test_r8_prefix_walks_read_exactly_the_nodes_the_grammar_admits(monkeypatch):
 
 def test_r8_gate_callee_table_is_the_frozen_imports():
     """The gate walks' frozen callee table (_GATE_CALLEES) holds exactly the
-    `from main import` statements of grammar_shapes_gate.IMPORTS, in their
-    own name order, each name bound to main's own object; a walk resolves
+    `from` statements of grammar_shapes_gate.IMPORTS, in their own name
+    order, each name bound to its module's own object (main's, and since
+    FIX-3C identity_order's identity_lock_key); a walk resolves
     the gate through it (the real match_hold_claim hold branch), and a
     Bindings with no grammar does not."""
     froms = set()
@@ -2772,6 +2787,9 @@ def test_r8_gate_callee_table_is_the_frozen_imports():
     for text, table in _GATE_CALLEES.items():
         imp = ast.parse(text).body[0]
         assert [a.name for a in imp.names] == list(table), text
+        if imp.module == "identity_order":
+            assert table == {"identity_lock_key": _identity_order.identity_lock_key}, text
+            continue
         for name, obj in table.items():
             assert obj is getattr(main, name), (text, name)
     for real in (match_hold.match_hold_open, match_hold.match_hold_claim):
@@ -2903,7 +2921,9 @@ def test_r9_gate_statement_order_is_bound():
     import hashlib
     orders = sorted(_gg.GATE_ORDERS)
     digest = hashlib.sha256(repr(orders).encode("utf-8")).hexdigest()[:16]
-    assert (len(orders), digest) == (259, "d11b1fefc69ad25c"), (len(orders), digest)
+    # FIX-3C (ruling RULING-H8-GATE-GRAMMAR (a)): 259 keys, d11b1fefc69ad25c, until
+    # _guard_identities' nine keys at 71e83a2e replaced its eight
+    assert (len(orders), digest) == (260, "7a1349a027260198"), (len(orders), digest)
     assert _gg.ORDERED in _gg.ORDER_BINDINGS
     assert _gg.GATE_ORDERS <= _gg.ORDER_BINDINGS
     on = _gg.ORDER_BINDINGS
@@ -2985,8 +3005,36 @@ def test_r9_gate_statement_order_is_bound():
             assert got_on is not None and "outside its frozen order" in got_on, (
                 role, fn.name, i, got_on)
             free += 1
-    assert free == 692, free
+    # FIX-3C (ruling RULING-H8-GATE-GRAMMAR (a)): 692 until match_hold._guard_identities
+    # gained its local import (9d8da712): one more statement, one more free pair in
+    # each of the 13 traced units of its body: 78 = 13 x 6 at the tip by a tally per
+    # function, the other functions 627 = 692 - 65 (13 x 5), unchanged
+    assert free == 705, free
     print(f"r9 gate order: {len(orders)} keys, {len(units)} units, {free} free pairs refused")
+
+
+# FIX-3C (ruling RULING-H8-GATE-GRAMMAR (a), condition 2): the one identity
+# order the callee table binds, by this file's own static import, and its span
+# frozen: lines 19 to 21 of identity_order.py, and the digest of its definition's
+# syntax tree (ast.dump, sha256, first 16 hex).
+_IDENTITY_LOCK_KEY_SPAN = (19, 21, "f6fb6beb42dec040")
+
+
+def test_fix3c_identity_lock_key_is_bound_and_its_span_frozen():
+    """The callee table's identity_lock_key is identity_order's own object, the
+    one match_hold._guard_identities imports, and its definition is the frozen
+    span: a change of one statement of its body turns this red."""
+    import hashlib
+    assert identity_lock_key is _identity_order.identity_lock_key
+    assert _GATE_CALLEES["from identity_order import identity_lock_key"] == {
+        "identity_lock_key": identity_lock_key}
+    with open(_identity_order.__file__, encoding="utf-8") as fh:
+        tree = ast.parse(fh.read())
+    fns = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "identity_lock_key"]
+    assert len(fns) == 1
+    fn = fns[0]
+    got = (fn.lineno, fn.end_lineno, hashlib.sha256(ast.dump(fn).encode("utf-8")).hexdigest()[:16])
+    assert got == _IDENTITY_LOCK_KEY_SPAN, got
 
 
 def test_r9_module_sql_constant_is_bound():
