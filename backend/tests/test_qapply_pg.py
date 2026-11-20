@@ -1705,11 +1705,71 @@ def _f4_snapshot(names):
     return {n: copy.deepcopy(getattr(main, n, "<absent>")) for n in names}
 
 
-def test_f4_a_replay_that_commits_or_rolls_back_leaves_process_state_as_it_was(monkeypatch):
+_F4_CACHE = ("_service_player_uuid_cache", "_service_uuid_cache_monotonic",
+             "_service_uuid_cache_filled_monotonic")
+_F4_LOOKUP_SQL = "SELECT id::text FROM players WHERE steam_id = ANY(CAST(:sids AS text[]))"
+
+
+def _f4_spies(monkeypatch, names, fail=None):
+    """Counts the service lookup's statement by whether the action's unit
+    (main._QAPPLY_UNIT, the unit's mark) is open when it runs, refuses that
+    statement while fail[0] is true, and snapshots `names` as each unit
+    opens and closes."""
+    from sqlalchemy.ext.asyncio import AsyncSession
+    seen = {"in_unit": 0, "outside": 0, "units": []}
+    orig_exec, orig_unit = AsyncSession.execute, main._qapply_unit
+
+    async def spy_exec(self, stmt, *a, **k):
+        if " ".join(str(stmt).split()) == _F4_LOOKUP_SQL:
+            seen["in_unit" if main._QAPPLY_UNIT.get() is not None else "outside"] += 1
+            if fail and fail[0]:
+                raise RuntimeError("the service lookup's read is refused by the test")
+        return await orig_exec(self, stmt, *a, **k)
+
+    @contextlib.asynccontextmanager
+    async def spy_unit(kind):
+        async with orig_unit(kind) as k:
+            entry = _f4_snapshot(names)
+            try:
+                yield k
+            finally:
+                seen["units"].append((kind, entry, _f4_snapshot(names)))
+    monkeypatch.setattr(AsyncSession, "execute", spy_exec)
+    monkeypatch.setattr(main, "_qapply_unit", spy_unit)
+    return seen
+
+
+def _f4_cache(monkeypatch, cache, schedule_age, filled_age):
+    import time as _time
+    now = _time.monotonic()
+    monkeypatch.setattr(main, "_service_player_uuid_cache", cache)
+    monkeypatch.setattr(main, "_service_uuid_cache_monotonic",
+                        0.0 if schedule_age is None else now - schedule_age)
+    monkeypatch.setattr(main, "_service_uuid_cache_filled_monotonic",
+                        None if filled_age is None else now - filled_age)
+
+
+async def _f4_raw(env, route, qid, word):
+    """The route's own answer, headers kept (env._call drops them)."""
+    req = main._AdminQuarantineReq(admin_steam_id=ADMIN, hmac_signature=sig(word, qid))
+    async with env.sm() as db:
+        try:
+            out = await route(qid, req, db)
+        except main.HTTPException as ex:
+            return ex
+    return out
+
+
+_F4_ROUTES = (("accept", main.admin_accept_quarantine, "quarantine_action"),
+              ("credit", main.admin_credit_quarantine, "quarantine_credit"))
+
+
+def test_f4_a_unit_neither_reads_the_service_set_nor_writes_process_state(monkeypatch):
     names = _f4_written_names()
-    assert "_service_player_uuid_cache" in names, ("the census sees the policy cache", sorted(names))
+    assert set(_F4_CACHE) <= set(names), ("the census sees the policy cache", sorted(names))
 
     async def body(env):
+        seen = _f4_spies(monkeypatch, names)
         lob_ok, q_ok = await closed_held(env)
         lob_no, q_no = await closed_held(env)
         await later_for(env, lob_no)
@@ -1717,17 +1777,157 @@ def test_f4_a_replay_that_commits_or_rolls_back_leaves_process_state_as_it_was(m
         await later_for(env, lob_cr)
         for name, act, qid, want in (("commit", accept, q_ok, 200), ("rollback", accept, q_no, 409),
                                      ("credit", credit, q_cr, 200)):
-            # An empty cache, as after a restart: the first lookup would fill it.
-            monkeypatch.setattr(main, "_service_player_uuid_cache", None)
-            monkeypatch.setattr(main, "_service_uuid_cache_monotonic", 0.0)
-            monkeypatch.setattr(main, "_service_uuid_cache_filled_monotonic", None)
-            before = _f4_snapshot(names)
+            # An empty cache, as after a restart: the fill happens before the unit.
+            _f4_cache(monkeypatch, None, None, None)
+            seen.update(in_unit=0, outside=0, units=[])
             ans = await act(env, qid)
             assert ans.status == want, (name, ans)
-            after = _f4_snapshot(names)
-            changed = sorted(n for n in names if before[n] != after[n])
-            assert not changed, (name, "process state written under the replay", changed)
+            assert seen["outside"] == 1, (name, "the fill before the unit", seen["outside"])
+            assert seen["in_unit"] == 0, (name, "a read of the service set inside the unit", seen["in_unit"])
+            assert len(seen["units"]) == 1, (name, len(seen["units"]))
+            kind, entry, leave = seen["units"][0]
+            assert entry["_service_player_uuid_cache"] is not None, (name, "the cache was filled before the unit")
+            changed = sorted(n for n in names if entry[n] != leave[n])
+            assert not changed, (name, "process state written while the unit was open", changed)
     run_env(monkeypatch, body)
+
+
+def test_f4_the_last_seconds_before_a_refresh_refuse_before_the_unit(monkeypatch):
+    names = _f4_written_names()
+    bound = main._QAPPLY_DEADLINE_S + main._QAPPLY_SERVICE_MARGIN_S
+
+    async def body(env):
+        seen = _f4_spies(monkeypatch, names)
+        for name, route, word in _F4_ROUTES:
+            lob, qid = await closed_held(env)
+            if name == "credit":
+                await later_for(env, lob)
+            # The schedule leaves 5 s, inside the deadline plus the margin.
+            left = 5.0
+            _f4_cache(monkeypatch, {str(uuid.uuid4())}, main._SERVICE_UUID_REFRESH_SECONDS - left, 60.0)
+            cache = _f4_snapshot(_F4_CACHE)
+            before = await tables(env)
+            seen.update(in_unit=0, outside=0, units=[])
+            ans = await _f4_raw(env, route, qid, word)
+            assert isinstance(ans, main.HTTPException), (name, ans)
+            assert (ans.status_code, ans.detail) == (503, "service_policy_unavailable"), (name, ans)
+            ra = int(ans.headers["Retry-After"])
+            assert 1 <= ra <= int(bound) + 1 and ra <= int(left) + 1, (name, ra)
+            assert seen["units"] == [] and seen["in_unit"] == 0, (name, "a unit started", seen)
+            assert seen["outside"] == 0, (name, "the cache was not due: no read", seen["outside"])
+            assert _f4_snapshot(_F4_CACHE) == cache, (name, "a cache or clock value changed")
+            assert await tables(env) == before, (name, "a row changed")
+            # Control: the 60 s an empty fill leaves is outside the bound, and the action runs.
+            _f4_cache(monkeypatch, set(), main._SERVICE_UUID_REFRESH_SECONDS - 60.0, 0.0)
+            ans = await (accept if name == "accept" else credit)(env, qid)
+            assert ans.status == 200, (name, "control", ans)
+            assert len(seen["units"]) == 1, (name, "control unit", seen["units"])
+    run_env(monkeypatch, body)
+
+
+def test_f4_a_failing_lookup_refuses_before_the_unit(monkeypatch):
+    names = _f4_written_names()
+
+    async def body(env):
+        fail = [False]
+        seen = _f4_spies(monkeypatch, names, fail)
+        for name, route, word in _F4_ROUTES:
+            for state, setup in (
+                    ("no previous fill", (None, None, None)),
+                    ("a previous fill past its schedule",
+                     ({str(uuid.uuid4())}, main._SERVICE_UUID_REFRESH_SECONDS + 1.0,
+                      main._SERVICE_UUID_REFRESH_SECONDS + 1.0))):
+                lob, qid = await closed_held(env)
+                if name == "credit":
+                    await later_for(env, lob)
+                _f4_cache(monkeypatch, *setup)
+                before = await tables(env)
+                seen.update(in_unit=0, outside=0, units=[])
+                fail[0] = True
+                try:
+                    ans = await _f4_raw(env, route, qid, word)
+                finally:
+                    fail[0] = False
+                assert isinstance(ans, main.HTTPException) and ans.status_code == 503, (name, state, ans)
+                assert seen["outside"] == 1, (name, state, "the read was tried", seen["outside"])
+                assert seen["units"] == [] and seen["in_unit"] == 0, (name, state, "a unit started", seen)
+                assert await tables(env) == before, (name, state, "a row changed")
+                if setup[0] is not None:
+                    # The kept set leaves no time to the schedule: the helper's own refusal.
+                    assert ans.detail == "service_policy_unavailable" and ans.headers["Retry-After"] == "1", \
+                        (name, state, ans.detail, ans.headers)
+    run_env(monkeypatch, body)
+
+
+def test_f4_the_deadline_and_margin_fit_inside_the_shortest_schedule():
+    """R4: the unit's deadline plus the margin is below the shortest
+    schedule a fill leaves: the empty set's, read from the lookup's own
+    source, and the normal refresh interval."""
+    fn = _tree_fn("_service_player_uuids")
+    shortest = None
+    for c in ast.walk(fn):
+        if (isinstance(c, ast.BinOp) and isinstance(c.op, ast.Sub)
+                and isinstance(c.left, ast.Name) and c.left.id == "_SERVICE_UUID_REFRESH_SECONDS"
+                and isinstance(c.right, ast.Constant) and isinstance(c.right.value, (int, float))):
+            assert shortest is None, "one empty-fill schedule"
+            shortest = float(c.right.value)
+    assert shortest is not None, "the empty fill's schedule is read from the lookup"
+    bound = main._QAPPLY_DEADLINE_S + main._QAPPLY_SERVICE_MARGIN_S
+    assert main._QAPPLY_SERVICE_MARGIN_S >= 2.0
+    assert bound < shortest, (bound, shortest)
+    assert bound < main._SERVICE_UUID_REFRESH_SECONDS, (bound, main._SERVICE_UUID_REFRESH_SECONDS)
+
+
+def _tree_fn(name):
+    hits = [n for n in _tree().body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name == name]
+    assert len(hits) == 1, (name, len(hits))
+    return hits[0]
+
+
+def _is_await_of(stmt, name):
+    return (isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Await)
+            and isinstance(stmt.value.value, ast.Call) and isinstance(stmt.value.value.func, ast.Name)
+            and stmt.value.value.func.id == name)
+
+
+def test_f4_every_unit_entry_follows_the_service_check_and_only_there():
+    """R5, both ways, from the syntax tree: every `_qapply_unit(` entry is an
+    `async with` whose preceding statement awaits _qapply_service_ready;
+    every await of the helper is followed by such an entry; the helper
+    awaits the lookup and nothing after it."""
+    tree = _tree()
+    entries, checks = [], []
+    for node in ast.walk(tree):
+        for field in ("body", "orelse", "finalbody"):
+            body = getattr(node, field, None)
+            if not isinstance(body, list):
+                continue
+            for i, stmt in enumerate(body):
+                is_entry = isinstance(stmt, ast.AsyncWith) and any(
+                    isinstance(it.context_expr, ast.Call) and isinstance(it.context_expr.func, ast.Name)
+                    and it.context_expr.func.id == "_qapply_unit" for it in stmt.items)
+                if is_entry:
+                    entries.append(stmt.lineno)
+                    assert i > 0 and _is_await_of(body[i - 1], "_qapply_service_ready"), \
+                        ("a unit entry without the service check before it", stmt.lineno)
+                if _is_await_of(stmt, "_qapply_service_ready"):
+                    checks.append(stmt.lineno)
+                    nxt = body[i + 1] if i + 1 < len(body) else None
+                    assert isinstance(nxt, ast.AsyncWith) and any(
+                        isinstance(it.context_expr, ast.Call) and isinstance(it.context_expr.func, ast.Name)
+                        and it.context_expr.func.id == "_qapply_unit" for it in nxt.items), \
+                        ("a service check not followed by a unit entry", stmt.lineno)
+    calls = [c for c in ast.walk(tree) if isinstance(c, ast.Call) and isinstance(c.func, ast.Name)
+             and c.func.id == "_qapply_unit"]
+    assert len(calls) == len(entries) == len(checks) == 2, (len(calls), entries, checks)
+    helper = _tree_fn("_qapply_service_ready")
+    awaits = [a for a in ast.walk(helper) if isinstance(a, ast.Await)]
+    assert len(awaits) == 1 and _is_await_of(helper.body[1] if isinstance(helper.body[0], ast.Expr)
+                                             and isinstance(helper.body[0].value, ast.Constant)
+                                             else helper.body[0], "_service_player_uuids"), \
+        ("the helper awaits the lookup first and nothing after it", len(awaits))
+    from grammar_shapes_a1 import A1_SPANS
+    assert "_qapply_service_ready" not in {r[2] for r in A1_SPANS}, "the helper is in no frozen span"
 
 
 # ── M2: every early failure of the four routes answers a table sentence ───
