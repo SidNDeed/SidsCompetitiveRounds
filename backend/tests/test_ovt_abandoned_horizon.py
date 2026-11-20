@@ -50,6 +50,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
 
 import main
+from ban_read_tables import BAN_READ_DROP_ORDER, ban_read_ddl
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -2270,16 +2271,6 @@ CREATE TABLE glicko_ratings (
     player_id UUID PRIMARY KEY,
     rating DOUBLE PRECISION NOT NULL
 )""",
-    # the 1v2 report reads every roster member's ban (bans part 2a)
-    """
-CREATE TABLE player_bans (
-    id UUID PRIMARY KEY,
-    steam_id VARCHAR(20) NOT NULL,
-    reason VARCHAR(512),
-    banned_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    unbanned_at TIMESTAMPTZ,
-    expires_at TIMESTAMPTZ
-)""",
 )
 
 
@@ -2294,7 +2285,7 @@ def _sink_schema() -> str:
     """
     schema = SCHEMA_120.read_text(encoding="utf-8")
     stmts = [f"DROP TABLE IF EXISTS {t}" for t in (
-        "ovt_match_cards", "gold_transactions", "glicko_ratings", "player_bans",
+        "ovt_match_cards", "gold_transactions", "glicko_ratings", *BAN_READ_DROP_ORDER,
         "ovt_matches", "ovt_series", "players")]
     stmts.append(SINK_PLAYERS)
     for table in ("ovt_series", "ovt_matches"):
@@ -2313,6 +2304,9 @@ def _sink_schema() -> str:
     # A count of zero would build the pre-201 table and still pass (#342).
     assert added >= 7, added
     stmts.extend(SINK_EXTRAS)
+    # the 1v2 report reads every roster member's ban (bans part 2a): the ban
+    # read's tables, from the model metadata
+    stmts.extend(ban_read_ddl())
     out = [re.sub(r"--[^\n]*", "", s).strip() for s in stmts]
     assert not any(";" in s for s in out), "a statement still carries a ';'"
     return ";\n".join(out) + ";"

@@ -44,6 +44,7 @@ sys.path.insert(0, str(API))
 
 import main  # noqa: E402
 import models  # noqa: E402
+from ban_read_tables import with_ban_read_tables  # noqa: E402
 from fastapi import HTTPException  # noqa: E402
 
 DSN = os.environ.get("A1_TEST_PG_DSN")
@@ -279,9 +280,9 @@ async def _routes(schema, body):
     try:
         async with engine.begin() as c:
             await c.run_sync(models.Base.metadata.create_all,
-                             tables=[models.Player.__table__,
-                                     models.ShopItem.__table__,
-                                     models.PlayerItem.__table__])
+                             tables=with_ban_read_tables([models.Player.__table__,
+                                                          models.ShopItem.__table__,
+                                                          models.PlayerItem.__table__]))
         conn = await asyncpg.connect(_pg_dsn())
         try:
             await conn.execute('SET search_path TO "%s"' % schema)

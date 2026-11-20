@@ -79,6 +79,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 import main
+from ban_read_tables import BAN_READ_DROP_ORDER, ban_read_ddl
 
 
 DSN = os.environ.get("SEPT16DC_TEST_PG_DSN")
@@ -266,6 +267,11 @@ async def _take_clean_slate() -> None:
             " AND backend_type = 'client backend' AND usename = current_user")
         await conn.execute("SET lock_timeout = '5s'")
         await conn.execute(PRE_356_SCHEMA)
+        # The ban read's tables (bans part 2a), from the model metadata.
+        for _table in BAN_READ_DROP_ORDER:
+            await conn.execute("DROP TABLE IF EXISTS %s" % _table)
+        for _stmt in ban_read_ddl():
+            await conn.execute(_stmt)
     finally:
         await conn.close()
 

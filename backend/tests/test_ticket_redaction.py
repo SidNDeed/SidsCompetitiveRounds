@@ -76,6 +76,7 @@ import database
 import log_redaction
 import main
 import models
+from ban_read_tables import with_ban_read_tables
 import ticket_redaction_autolog_standin as standin
 
 LOG_REDACTION_SRC = os.path.abspath(os.path.join(
@@ -984,8 +985,8 @@ class Env:
                 for stmt in [s for s in DROP.split(";") if s.strip()]:
                     await conn.execute(text(stmt))
                 await conn.run_sync(models.Base.metadata.create_all,
-                                    tables=[models.ShopItem.__table__, models.Player.__table__,
-                                            models.AdminUser.__table__, models.PlayerBan.__table__])
+                                    tables=with_ban_read_tables(
+                                        [models.ShopItem.__table__, models.Player.__table__]))
                 # models.Player.mail_discord_relay (the v1.41.0 beta's migration 330)
                 # leaves its default to SQL (FetchedValue), which create_all does not
                 # render: the column gets migration 330's DEFAULT here, as it has in

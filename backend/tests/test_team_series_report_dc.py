@@ -70,6 +70,7 @@ from fastapi import HTTPException
 
 import main
 import models
+from ban_read_tables import with_ban_read_tables
 
 try:
     import asyncpg
@@ -389,8 +390,9 @@ class _Lab:
         self.sm = async_sessionmaker(self.engine, expire_on_commit=False)
         async with self.engine.begin() as c:
             await c.run_sync(models.Base.metadata.create_all,
-                             tables=[models.ShopItem.__table__, models.Player.__table__,
-                                     models.TeamSeries.__table__, models.TeamMatch.__table__])
+                             tables=with_ban_read_tables(
+                                 [models.ShopItem.__table__, models.Player.__table__,
+                                  models.TeamSeries.__table__, models.TeamMatch.__table__]))
         conn = await asyncpg.connect(PLAIN_DSN)
         try:
             await conn.execute('SET search_path TO "%s"' % self.schema)

@@ -52,6 +52,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 import database
 import main
 import schemas
+from ban_read_tables import ban_read_ddl
 
 MAIN_SRC = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "api", "main.py"))
 MODELS_SRC = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "api", "models.py"))
@@ -151,15 +152,6 @@ CREATE TABLE players (
     total_xp INTEGER NOT NULL DEFAULT 0,
     deleted_at TIMESTAMPTZ,
     last_seen TIMESTAMPTZ
-);
--- player_bans: the FFA report reads every roster member's ban (bans part 2a).
-CREATE TABLE player_bans (
-    id UUID PRIMARY KEY,
-    steam_id VARCHAR(20) NOT NULL,
-    reason VARCHAR(512),
-    banned_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    unbanned_at TIMESTAMPTZ,
-    expires_at TIMESTAMPTZ
 );
 CREATE TABLE admin_users (
     steam_id VARCHAR(20) PRIMARY KEY,
@@ -520,6 +512,10 @@ class Env:
         async with self.seed.begin() as conn:
             await conn.execute(text("SET LOCAL lock_timeout = '5s'"))
             for stmt in [s for s in SCHEMA.split(";") if s.strip()]:
+                await conn.execute(text(stmt))
+            # player_bans: the FFA report reads every roster member's ban
+            # (bans part 2a); from the model metadata, after admin_users.
+            for stmt in ban_read_ddl(include_admin_users=False):
                 await conn.execute(text(stmt))
             await conn.execute(text("INSERT INTO admin_users (steam_id) VALUES (:s)"), {"s": ADMIN})
         self.app = _app()

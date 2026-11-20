@@ -37,6 +37,7 @@ sys.path.insert(0, str(HERE))
 
 import main  # noqa: E402
 import models  # noqa: E402
+from ban_read_tables import with_ban_read_tables  # noqa: E402
 from fastapi import HTTPException  # noqa: E402
 
 DSN = os.environ.get("A1_TEST_PG_DSN")
@@ -254,9 +255,10 @@ async def _with_schema(name, body, seed=True):
     try:
         async with engine.begin() as c:
             await c.run_sync(models.Base.metadata.create_all,
-                             tables=[models.Player.__table__, models.ShopItem.__table__,
-                                     models.PlayerItem.__table__,
-                                     models.GoldTransaction.__table__])
+                             tables=with_ban_read_tables(
+                                 [models.Player.__table__, models.ShopItem.__table__,
+                                  models.PlayerItem.__table__,
+                                  models.GoldTransaction.__table__]))
         conn = await asyncpg.connect(_pg_dsn(), server_settings={"search_path": name})
         await conn.execute("ALTER TABLE shop_items ADD COLUMN IF NOT EXISTS "
                            "min_client_version VARCHAR(16)")
