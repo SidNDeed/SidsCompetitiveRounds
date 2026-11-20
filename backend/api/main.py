@@ -75379,9 +75379,11 @@ def _qapply_out_of_time(ex: BaseException) -> bool:
 
 
 def _qapply_game_of(report, expected: int) -> int:
-    """The game a held report is of, for its claim: the number it names
-    (_ffa_named_game_number, the one derivation), else the lobby's next
-    game, which is the number the body records a report naming none as."""
+    """The game number a held report's claim is looked up by: the number the
+    report names (_ffa_named_game_number, the one derivation), else the
+    lobby's next game. A report that names no number is never settled (the
+    body's game number check, _ffa_game_number_refusal, refuses it); the
+    next game is only the number its claim is looked up by."""
     named = _ffa_named_game_number(report.photon_room_id)
     return expected if named is None else named
 
