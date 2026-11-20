@@ -8056,6 +8056,15 @@ _MODLOG_BUILD = 1
 # boxes by construction, probed by the release train and read by nothing else
 # (#306). Absent on any build before it.
 _VOIDED_STREAK_BUILD = 1
+# Release-train verification plumbing, not a design mechanism: the build
+# marker of the batch in which typed text in the api's Discord channel posts,
+# stream posts and DMs, and in the bot's own messages, passes one helper once
+# (discord_text.py for the text the api composes, the bot's own helpers for
+# its messages), reported on /health as `bot_text_build`. It names build
+# identity only; the batch adds no route (learnings 780, 794). A code
+# constant, equal on both boxes by construction, probed by the release train
+# and read by nothing else (#306). Absent on any build before it.
+_BOT_TEXT_BUILD = 1
 
 
 def _title_ladders_health_word() -> int:
@@ -8141,6 +8150,7 @@ async def health_check(db: AsyncSession = Depends(get_db)):
                               admin_evidence_population=_admin_evidence.population_health_word(),
                               mail_spam_case_lock_build=_MAIL_SPAM_CASE_LOCK_BUILD,
                               modlog_build=_MODLOG_BUILD,
+                              bot_text_build=_BOT_TEXT_BUILD,
                               build_manifest=_build_manifest.health_word(),
                               review_eval=_review_rules.review_eval(),
                               review_rules=_review_rules.health_word(),
@@ -8216,6 +8226,7 @@ async def health_check(db: AsyncSession = Depends(get_db)):
                               admin_evidence_population=_admin_evidence.population_health_word(),
                               mail_spam_case_lock_build=_MAIL_SPAM_CASE_LOCK_BUILD,
                               modlog_build=_MODLOG_BUILD,
+                              bot_text_build=_BOT_TEXT_BUILD,
                               build_manifest=_build_manifest.health_word(),
                               review_eval=_review_rules.review_eval(),
                               review_rules=_review_rules.health_word(),
