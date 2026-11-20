@@ -39,6 +39,7 @@ retry	The server could not finish this action now; nothing was changed. Try agai
 reviewed	This held report was already reviewed.
 roster	The report's players or seats are not this lobby's roster, so it cannot be applied or credited.
 service	A player of this report is a service account, so it cannot be applied or credited.
+settled_by_hand	This lobby is from before 31 Jul 2026. Its lost games were settled by hand, so this report cannot be applied. Discard it.
 shape	The report's score is not a complete game, so it cannot be applied or credited.
 sibling_credited	Another held report of this lobby was credited as game {g}; credit this one only if it is a different game.
 team	Only FFA reports can be applied or credited; this report stays held.

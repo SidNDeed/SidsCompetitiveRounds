@@ -75073,6 +75073,8 @@ _QAPPLY_TEXTS = {
     "reviewed": "This held report was already reviewed.",
     "held_credited": "This held report was already credited.",
     "held_applied": "This held report was already applied as a match.",
+    "settled_by_hand": ("This lobby is from before 31 Jul 2026. Its lost games were settled by hand, "
+                        "so this report cannot be applied. Discard it."),
     "team": "Only FFA reports can be applied or credited; this report stays held.",
     "word": "This report was held for a reason that is never applied or credited; discard it if it is not needed.",
     "body": "The stored report cannot be read, so it cannot be applied or credited.",
@@ -75284,6 +75286,16 @@ _QAPPLY_SQL_TIER = """
 # A credit receipt already on file for this held row.
 _QAPPLY_SQL_RECEIPT = """
     SELECT EXISTS (SELECT 1 FROM gold_transactions WHERE reference_id = CAST(:qid AS varchar))
+"""
+# Migration 168 paid lost FFA games of 2026-07-30 by hand, outside a recorded
+# match and outside the hold, so no match row, held row or claim names them,
+# and a claim row (one held row, one game number) could not cover a lobby.
+# Accept and Credit therefore refuse EVERY held FFA report of a lobby made
+# before the end of that UTC day, read from the lobby row's created_at; a
+# lost game of such a lobby is settled by a migration, as 168 did.
+_QAPPLY_LOBBY_SETTLED_BEFORE = datetime(2026, 7, 31, tzinfo=timezone.utc)
+_QAPPLY_SQL_LOBBY_BEFORE_168 = """
+    SELECT created_at < CAST(:bound AS timestamptz) FROM ffa_lobbies WHERE id = CAST(:lid AS uuid)
 """
 # The kind of the claim made FROM one held row (M1), or none.
 _QAPPLY_SQL_CLAIM_OF_ROW = """
@@ -75633,6 +75645,11 @@ async def _qapply_held(db, qid_uuid):
         key = "no_lobby"
     if key is not None:
         raise _QapplyRefused(409, _QAPPLY_TEXTS[key], {})
+    # The 168 bound, for Accept and Credit alike (both call this function):
+    # the lobby row's own made-time decides; nothing the report says is read.
+    if (await db.execute(text(_QAPPLY_SQL_LOBBY_BEFORE_168), {
+            "lid": str(row["group_id"]), "bound": _QAPPLY_LOBBY_SETTLED_BEFORE})).scalar():
+        raise _QapplyRefused(410, _QAPPLY_TEXTS["settled_by_hand"], {})
     return row, body["report"]
 
 
