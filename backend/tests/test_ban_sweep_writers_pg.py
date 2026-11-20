@@ -253,18 +253,34 @@ def test_i_b_mutant_without_the_roster_read_the_banned_roster_is_paid(case, soft
 
 async def _tournament_bind(sm, room, series_id):
     async with sm() as db:
-        tid = uuid.uuid4()
-        await db.execute(text(
-            # kind is a column of tournaments (sql/047), not of tournament_matches
-            "INSERT INTO tournaments (id, kind, default_start_ts, lock_at)"
-            " VALUES (:t, 'sync', NOW(), NOW())"), {"t": tid})
+        # This file's database serves all its tests, and migration 089's unique
+        # index uniq_tournaments_active_per_kind admits one tournament of a kind in
+        # a status before completion (voting, locked, running; a new row is
+        # 'voting'). So a second call reuses the sync tournament that stands. The
+        # reads under test (_TM_ROOM_MATCH_SQL in main) select from
+        # tournament_matches alone and never read the tournaments row.
+        tid = (await db.execute(text(
+            "SELECT id FROM tournaments WHERE kind = 'sync'"
+            " AND status IN ('voting', 'locked', 'running') LIMIT 1"))).scalar()
+        if tid is None:
+            tid = uuid.uuid4()
+            await db.execute(text(
+                # kind is a column of tournaments (sql/047), not of tournament_matches
+                "INSERT INTO tournaments (id, kind, default_start_ts, lock_at)"
+                " VALUES (:t, 'sync', NOW(), NOW())"), {"t": tid})
+        # The shared tournament's matches take the next free slot: sql/047 keeps
+        # (tournament_id, round, bracket_side, slot_idx) unique, and the reads
+        # under test never read the slot.
+        slot = (await db.execute(text(
+            "SELECT COALESCE(MAX(slot_idx) + 1, 0) FROM tournament_matches"
+            " WHERE tournament_id = :t AND round = 1 AND bracket_side = 'W'"), {"t": tid})).scalar()
         await db.execute(text(
             # every NOT NULL column named: in this case schema the ORM built the
             # array columns without their migration defaults (sql/049, sql/132)
             "INSERT INTO tournament_matches (id, tournament_id, round, bracket_side, slot_idx, prereq_match_ids,"
             " prereq_roles, early_ok_signup_ids, is_bye, status, series_id, photon_room_name)"
-            " VALUES (:i, :t, 1, 'W', 0, '{}', '{}', '{}', false, 'pending', :s, :r)"),
-            {"i": uuid.uuid4(), "t": tid, "s": series_id, "r": room})
+            " VALUES (:i, :t, 1, 'W', :slot, '{}', '{}', '{}', false, 'pending', :s, :r)"),
+            {"i": uuid.uuid4(), "t": tid, "slot": slot, "s": series_id, "r": room})
         await db.commit()
 
 
