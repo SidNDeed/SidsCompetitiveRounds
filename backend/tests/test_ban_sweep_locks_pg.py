@@ -234,3 +234,47 @@ def test_mutant_without_the_bounds_fixture_a_session_waits_unbounded(case, monke
     import ban_sweep_pg_bounds as B
     monkeypatch.setattr(harness, "bound_engine", B.ORIGINAL_BOUND_ENGINE)
     assert _session_bounds(case) == ("0", "0")
+
+
+# FIX-3 2 h: the base shape -- the early read under the identity key, the key
+# then held across the Steam call (no end of the read's transaction).
+_EARLY_READ = "    await _ban_gate_or_raise(db, req.steam_id)\n"
+_EARLY_END = ("    # End the read's transaction: nothing is written yet, and no transaction\n"
+              "    # stays open across the wait.\n"
+              "    await db.rollback()\n")
+
+
+def _steam_auth_base_shape():
+    import inspect
+    import textwrap
+    src = textwrap.dedent(inspect.getsource(main.steam_auth))
+    assert src.count(_EARLY_READ) == 1 and src.count(_EARLY_END) == 1
+    src = src.replace(_EARLY_READ, "    await _ban_lock_and_gate(db, [req.steam_id])\n").replace(_EARLY_END, "")
+    src = src[src.index("async def steam_auth"):]          # the route decorator cut
+    ns = dict(vars(main))
+    exec(compile(src, "<mutant>", "exec"), ns)
+    return ns["steam_auth"]
+
+
+def test_vi_mutant_the_key_taken_before_the_steam_call_is_held_across_it(case, soft, monkeypatch):
+    sid = L._sid()
+    entered, release = _steam_stub(monkeypatch, sid)
+    monkeypatch.setattr(main, "steam_auth", _steam_auth_base_shape())
+
+    async def body(sm):
+        async with sm() as db:
+            await L._player(db, sid)
+            await db.commit()
+        task = asyncio.create_task(_run_route(sm, _steam_route(sid)))
+        try:
+            assert await _wait_entered(entered), "the Steam call was never reached"
+            async with sm() as probe:
+                free = (await probe.execute(text(
+                    "SELECT pg_try_advisory_xact_lock(hashtext(CAST(:s AS text)))"), {"s": sid})).scalar()
+                await probe.rollback()
+        finally:
+            release.set()
+        return free, await task
+
+    free, _got = L._with_sm(case, body)
+    assert free is False, "the base shape holds the key across the Steam call"

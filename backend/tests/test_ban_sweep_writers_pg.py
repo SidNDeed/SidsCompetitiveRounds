@@ -243,3 +243,105 @@ def test_i_b_mutant_without_the_roster_read_the_banned_roster_is_paid(case, soft
 
     got, status = L._with_sm(case, body)
     assert got[0] == "admitted" and status == "completed", (got, status)
+
+
+# ---------------------------------------------------------------- FIX-3 2 a
+# The tournament-room cell, and one mutant per rule of _pair_sitting_ended_by_ban,
+# each red in its own cell. In every refusal cell below the pair also has a
+# series created after the void (`newer`), so the private-room rule alone would
+# admit the report: the refusal is the named rule's own.
+
+async def _tournament_bind(sm, room, series_id):
+    async with sm() as db:
+        tid = uuid.uuid4()
+        await db.execute(text(
+            "INSERT INTO tournaments (id, default_start_ts, lock_at) VALUES (:t, NOW(), NOW())"), {"t": tid})
+        await db.execute(text(
+            "INSERT INTO tournament_matches (id, tournament_id, round, bracket_side, slot_idx, prereq_match_ids,"
+            " is_bye, status, kind, series_id, photon_room_name)"
+            " VALUES (:i, :t, 1, 'W', 0, '{}', false, 'pending', 'sync', :s, :r)"),
+            {"i": uuid.uuid4(), "t": tid, "s": series_id, "r": room})
+        await db.commit()
+
+
+async def _newer_series(sm, pa, pb):
+    async with sm() as db:
+        sid = uuid.uuid4()
+        await lh._insert(db, "ranked_series", {"id": sid, "player1_id": pa, "player2_id": pb,
+                                               "status": "active"})
+        await db.commit()
+    return sid
+
+
+async def _ended_series(sm, pa, pb):
+    async with sm() as db:
+        return (await db.execute(text(
+            "SELECT id FROM ranked_series WHERE invalidation_reason = ANY(CAST(:w AS text[]))"
+            " AND ((player1_id = :a AND player2_id = :b) OR (player1_id = :b AND player2_id = :a))"),
+            {"w": sorted(main.BAN_VOID_REASONS), "a": pa, "b": pb})).scalar()
+
+
+def _rule_cell(cell):
+    """cell: tournament_ended, tournament_live, recorded, queue, private."""
+    async def body(sm):
+        kind = {"tournament_ended": "private", "tournament_live": "private",
+                "recorded": "recorded", "queue": "queue", "private": "private"}[cell]
+        a, b, pa, pb, room = await _world(sm, kind)
+        await _set_state(sm, b, "run_out" if cell != "tournament_live" else "lifted")
+        ended = await _ended_series(sm, pa, pb)
+        if cell.startswith("tournament"):
+            room = "bs_tm_" + uuid.uuid4().hex[:8]
+        if cell != "private":
+            newer = await _newer_series(sm, pa, pb)
+        if cell == "tournament_ended":
+            await _tournament_bind(sm, room, ended)
+        elif cell == "tournament_live":
+            await _tournament_bind(sm, room, newer)
+        before = await _counts(sm, pa, pb)
+        got = await _attempt(sm, _submit(a, b, room))
+        return got, before, await _counts(sm, pa, pb)
+    return body
+
+
+_RULE_MUTANTS = {
+    "tournament_ended": ("        if bound:\n            return any(", "        if False:\n            return any("),
+    "recorded": ("                {\"room\": room, \"ids\": ids})).first() is not None:\n",
+                 "                {\"room\": room, \"ids\": ids})).first() is not None and False:\n"),
+    "queue": ("            return not stamps or issued <= max(stamps)\n", "            return not stamps\n"),
+    "private": ("    return newer is None\n", "    return False\n"),
+}
+
+
+def _rule_mutant(old, new):
+    import inspect
+    import textwrap
+    src = textwrap.dedent(inspect.getsource(main._pair_sitting_ended_by_ban))
+    assert src.count(old) == 1, old
+    ns = dict(vars(main))
+    exec(compile(src.replace(old, new), "<mutant>", "exec"), ns)
+    return ns["_pair_sitting_ended_by_ban"]
+
+
+@pytest.mark.parametrize("cell", sorted(_RULE_MUTANTS))
+def test_i_a_each_rule_refuses_its_own_cell(case, soft, monkeypatch, cell):
+    monkeypatch.setattr(main, "MATCH_HMAC_SECRET", "")
+    got, before, after = L._with_sm(case, _rule_cell(cell))
+    assert got == (409, "series_ended_by_ban") and after == before, (got, before, after)
+
+
+@pytest.mark.parametrize("cell", sorted(_RULE_MUTANTS))
+def test_i_a_mutant_per_rule_its_cell_is_admitted(case, soft, monkeypatch, cell):
+    monkeypatch.setattr(main, "MATCH_HMAC_SECRET", "")
+    monkeypatch.setattr(main, "_pair_sitting_ended_by_ban", _rule_mutant(*_RULE_MUTANTS[cell]))
+    got, before, after = L._with_sm(case, _rule_cell(cell))
+    # admitted: the refusal of the fixed rule is gone (in the recorded cell the
+    # route answers with the game already recorded in that room, no new row)
+    assert got[0] == "admitted", (got, before, after)
+
+
+def test_i_a_control_a_tournament_room_bound_to_a_live_series_is_admitted(case, soft, monkeypatch):
+    """The pair has a series the void ended; the room is bound to the bracket
+    match of a series the void did not end: admitted and recorded."""
+    monkeypatch.setattr(main, "MATCH_HMAC_SECRET", "")
+    got, before, after = L._with_sm(case, _rule_cell("tournament_live"))
+    assert got[0] == "admitted" and after[0] == before[0] + 1, (got, before, after)

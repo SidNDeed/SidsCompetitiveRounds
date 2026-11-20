@@ -122,7 +122,7 @@ def test_f4_a_booster_grant_waits_for_a_committing_ban_and_pays_nothing(case, mo
     assert (grants, gold) == (0, 0)
 
 
-def _bug_report_ban_between_t1_and_t2(case, mode, monkeypatch, *, drop_reread=False):
+def _bug_report_ban_between_t1_and_t2(case, mode, monkeypatch, *, drop_reread=False, no_ban=False):
     """The ban commits AFTER the report's first transaction (T1: its own ban
     read, then _auto_logs._end_transaction) and BEFORE its writing one (T2).
     Only T2's own read can refuse it. drop_reread: the mutant that removes that
@@ -139,7 +139,7 @@ def _bug_report_ban_between_t1_and_t2(case, mode, monkeypatch, *, drop_reread=Fa
 
         async def end_then_ban(db):
             await orig_end(db)
-            if not calls["banned"]:
+            if not calls["banned"] and not no_ban:
                 calls["banned"] = True
                 await L._ban(sm, sid)
 
@@ -180,6 +180,13 @@ def test_f4_mutant_bug_report_without_the_writing_transactions_read_stores_the_r
         case, mode, monkeypatch):
     got, rows, calls = _bug_report_ban_between_t1_and_t2(case, mode, monkeypatch, drop_reread=True)
     assert calls == {"gate": 2, "banned": True}, calls
+    assert got[0] == "admitted" and rows == 1, (got, rows)
+
+
+def test_f4_control_the_same_bug_report_with_no_ban_is_stored(case, mode, monkeypatch):
+    """FIX-3 2 i: the same report, both transactions, no ban anywhere: stored."""
+    got, rows, calls = _bug_report_ban_between_t1_and_t2(case, mode, monkeypatch, no_ban=True)
+    assert calls == {"gate": 2, "banned": False}, calls
     assert got[0] == "admitted" and rows == 1, (got, rows)
 
 

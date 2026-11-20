@@ -195,3 +195,74 @@ def test_v_the_settle_gate_asks_only_keys_the_window_guard_holds(monkeypatch):
 def test_v_mutant_a_settle_gate_asking_a_new_key_is_seen(monkeypatch):
     book = _window_settles(monkeypatch, extra="76561190529999999")
     assert [b for b in book if b[0] == "76561190529999999" and not b[2]], book
+
+
+# ---------------------------------------------------------------- FIX-3 2 e
+# The close in match_report_window._release_held: held reports released at the
+# hold's entry whose settle a ban refuses close the window as refused. The ban
+# is the player_bans row alone, written after the reports were held and before
+# the entry: a whole ban also voids the series and ends its holds, so no entry
+# and no release follow it (that path closes through the janitor, the tests
+# above). This proves what the release does when its settle reads a ban.
+_RELEASE_CLOSE = ("                await close_refused(db, room, game_id, now)\n"
+                  "                break\n")
+
+
+def _release_close_mutant():
+    import inspect
+    import textwrap
+    mrw = main._mrw_mod()
+    src = textwrap.dedent(inspect.getsource(mrw._release_held))
+    assert src.count(_RELEASE_CLOSE) == 1
+    ns = dict(vars(mrw))
+    exec(compile(src.replace(_RELEASE_CLOSE, "                break\n"), "<mutant>", "exec"), ns)
+    return ns["_release_held"]
+
+
+def _release_case(monkeypatch, mode, banned=True, mutant=False):
+    out = {}
+    if mutant:
+        monkeypatch.setattr(main._mrw_mod(), "_release_held", _release_close_mutant())
+
+    async def body(env):
+        R._mount(env, monkeypatch)
+        s, g, hid, present = await R._held_game_over(env, mode)
+        await hold_test.claim(env, s, 1, hid)
+        await hold_test.beat(env, s, present[0], seen=[(10 + present[0], s.steam(present[0])),
+                                                       (21, s.steam(1))])
+        await hold_test.bind(env, s, 1, hid, 21)
+        await hold_test.beat(env, s, present[-1], seen=[(10 + present[-1], s.steam(present[-1])),
+                                                        (21, s.steam(1))])
+        if banned:
+            await env.conn.execute(
+                "INSERT INTO admin_users (steam_id) VALUES ('76561190000000001') ON CONFLICT DO NOTHING")
+            await env.conn.execute(
+                "INSERT INTO player_bans (steam_id, reason, banned_by_steam_id, banned_at, expires_at)"
+                " VALUES ($1, 'ban-sweep release', '76561190000000001', NOW(), NOW() + INTERVAL '1 hour')",
+                s.steam(present[0]))
+        en = await hold_test.entered(env, s, 1, hid, g, 21)
+        w, j = await R.window_state(env, s, g)
+        out.update(entered=en.get("status"), superseded=w["superseded_at"] is not None,
+                   settled=w["settled_at"] is not None, states=sorted(v[1] for v in j.values()),
+                   held=len(present), recorded=len(await R.recorded(env, mode, s)))
+    hold_test.run_env(monkeypatch, body, prefix="bsive")
+    return out
+
+
+@pytest.mark.parametrize("mode", MODES)
+def test_iv_e_a_held_report_released_after_a_ban_is_refused_and_the_window_closes(monkeypatch, mode):
+    out = _release_case(monkeypatch, mode)
+    assert (out["superseded"], out["settled"], out["states"], out["recorded"]) == \
+        (True, False, ["kept"] * out["held"], 0), out
+
+
+@pytest.mark.parametrize("mode", MODES)
+def test_iv_e_mutant_without_the_release_close_the_window_stays_open(monkeypatch, mode):
+    out = _release_case(monkeypatch, mode, mutant=True)
+    assert out["superseded"] is False and out["settled"] is False and out["recorded"] == 0, out
+
+
+@pytest.mark.parametrize("mode", MODES)
+def test_iv_e_control_the_same_release_with_no_ban_settles(monkeypatch, mode):
+    out = _release_case(monkeypatch, mode, banned=False)
+    assert (out["entered"], out["settled"], out["recorded"]) == ("entered", True, 1), out

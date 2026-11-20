@@ -210,14 +210,16 @@ def test_r21_a_banned_sole_member_disbands_the_lobby_with_refunds_as_the_leave_d
     assert ban == leave, {k: (ban[k], leave[k]) for k in ban if ban[k] != leave[k]}
 
 
-def test_r21_mutant_without_the_host_step_the_lobby_keeps_a_departed_host(monkeypatch):
+@pytest.mark.parametrize("mode", MODES)
+def test_r21_mutant_without_the_host_step_the_lobby_keeps_a_departed_host(monkeypatch, mode):
     async def nothing(db, mode, lobby_id, pid):
         return [], False, []
 
     got = {}
 
     async def body(env):
-        got["ban"], got["leave"] = await _twins(env, "team", 3, ban_mutant=("_lobby_seat_left_core", nothing))
+        got["ban"], got["leave"] = await _twins(env, mode, 2 if mode == "ovt" else 3,
+                                                ban_mutant=("_lobby_seat_left_core", nothing))
     case(monkeypatch, body)
     assert got["ban"][0]["host"] == "departed", got["ban"][0]["host"]
     assert got["ban"][0] != got["leave"][0]
@@ -314,32 +316,38 @@ def test_iii_case1_stale_host_and_the_only_fresh_member_departs_disbands_as_the_
     assert ban == leave and ban[0] == "canceled" and ban[1] in (None, "refunded"), got["v"]
 
 
-def test_iii_mutant_the_core_without_its_freshness_filter_keeps_the_stale_lobby(monkeypatch):
+@pytest.mark.parametrize("mode", MODES)
+def test_iii_mutant_the_core_without_its_freshness_filter_keeps_the_stale_lobby(monkeypatch, mode):
     got = {}
 
     async def body(env):
-        got["v"] = await _stale_host_twins(env, "team", _core_mutant(*_FRESH_BRANCH))
+        got["v"] = await _stale_host_twins(env, mode, _core_mutant(*_FRESH_BRANCH))
     case(monkeypatch, body)
     ban, leave = got["v"]
     assert ban[0] == "open" and ban != leave, got["v"]
 
 
-def test_iii_mutant_the_core_without_its_disband_refund_leaves_the_wager_open(monkeypatch):
+# The modes that take a lobby-phase wager (a 1v2 lobby takes none, so the
+# disband branch has nothing to refund there).
+@pytest.mark.parametrize("mode", ("team", "ffa"))
+def test_iii_mutant_the_core_without_its_disband_refund_leaves_the_wager_open(monkeypatch, mode):
     got = {}
 
     async def body(env):
-        got["v"] = await _stale_host_twins(env, "team", _core_mutant(*_DISBAND_BRANCH))
+        got["v"] = await _stale_host_twins(env, mode, _core_mutant(*_DISBAND_BRANCH))
     case(monkeypatch, body)
     ban, leave = got["v"]
     assert ban[1] == "open" and ban != leave, got["v"]
 
 
-def test_iii_mutant_the_core_without_its_promote_branch_keeps_a_departed_host(monkeypatch):
+@pytest.mark.parametrize("mode", MODES)
+def test_iii_mutant_the_core_without_its_promote_branch_keeps_a_departed_host(monkeypatch, mode):
     got = {}
 
     async def body(env):
         got["ban"], got["leave"] = await _twins(
-            env, "team", 3, ban_mutant=("_lobby_seat_left_core", _core_mutant(*_PROMOTE_BRANCH)))
+            env, mode, 2 if mode == "ovt" else 3,
+            ban_mutant=("_lobby_seat_left_core", _core_mutant(*_PROMOTE_BRANCH)))
     case(monkeypatch, body)
     assert got["ban"][0]["host"] == "departed" and got["ban"][0] != got["leave"][0], got["ban"][0]["host"]
 
@@ -360,5 +368,39 @@ def test_iii_case2_a_banned_host_whose_own_seat_row_is_gone_hands_the_lobby_on(m
         await _ban(env, admin, ps[0])
         got["v"] = (await env.lobby_status(mode, lid), await env.conn.fetchval(
             "SELECT host_player_id FROM %s WHERE id = $1" % LOBBY_TABLE[mode], lid) == ps[1].id)
+    case(monkeypatch, body)
+    assert got["v"] == ("open", True), got["v"]
+
+
+# FIX-3 2 d: the base shape of the ban's lobby finder -- seats only, no read of
+# the host column -- misses the lobby whose host has no seat row: that lobby
+# keeps the banned host.
+_HOST_FINDER = ("AND (host_player_id = CAST(:pid AS uuid)\"", "AND (false\"")
+
+
+def _finder_mutant():
+    import inspect
+    import textwrap
+    src = textwrap.dedent(inspect.getsource(main._apply_ban_core))
+    assert src.count(_HOST_FINDER[0]) == 1, _HOST_FINDER[0]
+    ns = dict(vars(main))
+    exec(compile(src.replace(*_HOST_FINDER), "<mutant>", "exec"), ns)
+    return ns["_apply_ban_core"]
+
+
+@pytest.mark.parametrize("mode", MODES)
+def test_iii_mutant_case2_the_finder_reading_seats_only_keeps_the_banned_host(monkeypatch, mode):
+    got = {}
+
+    async def body(env):
+        env.mp.setattr(main, "_pc_lease_drain", _drain_now)
+        env.mp.setattr(main, "_apply_ban_core", _finder_mutant())
+        admin = await _admin(env)
+        lid, ps = await env.lobby(mode, 2)
+        await env.fresh(mode, lid)
+        await env.conn.execute("DELETE FROM %s WHERE player_id = $1" % QUEUE_TABLE[mode], ps[0].id)
+        await _ban(env, admin, ps[0])
+        got["v"] = (await env.lobby_status(mode, lid), await env.conn.fetchval(
+            "SELECT host_player_id FROM %s WHERE id = $1" % LOBBY_TABLE[mode], lid) == ps[0].id)
     case(monkeypatch, body)
     assert got["v"] == ("open", True), got["v"]
