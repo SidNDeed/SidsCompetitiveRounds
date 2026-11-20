@@ -75071,6 +75071,8 @@ _QAPPLY_RATING_TOLERANCE = 0.051
 _QAPPLY_TEXTS = {
     "not_found": "This held report was not found.",
     "reviewed": "This held report was already reviewed.",
+    "held_credited": "This held report was already credited.",
+    "held_applied": "This held report was already applied as a match.",
     "team": "Only FFA reports can be applied or credited; this report stays held.",
     "word": "This report was held for a reason that is never applied or credited; discard it if it is not needed.",
     "body": "The stored report cannot be read, so it cannot be applied or credited.",
@@ -75282,6 +75284,10 @@ _QAPPLY_SQL_TIER = """
 # A credit receipt already on file for this held row.
 _QAPPLY_SQL_RECEIPT = """
     SELECT EXISTS (SELECT 1 FROM gold_transactions WHERE reference_id = CAST(:qid AS varchar))
+"""
+# The kind of the claim made FROM one held row (M1), or none.
+_QAPPLY_SQL_CLAIM_OF_ROW = """
+    SELECT kind FROM ffa_game_claims WHERE quarantine_id = CAST(:qid AS uuid) LIMIT 1
 """
 # The game's claim (migration 426): one row per lobby and game number that an
 # Accept applied or a Credit paid from a held report. Read under the lobby's
@@ -75603,9 +75609,14 @@ async def _qapply_held(db, qid_uuid):
     if row is None:
         raise _QapplyRefused(404, _QAPPLY_TEXTS["not_found"], {})
     # THE status test of both actions, under the held row's lock: Accept,
-    # Credit and Discard each change a pending row only.
+    # Credit and Discard each change a pending row only. A row that is not
+    # pending answers what its own claim says (M1): read by the row's id,
+    # never from the status word, since a row main's Accept marked
+    # 'accepted' was never applied and holds no claim.
     if row["status"] != "pending":
-        raise _QapplyRefused(409, _QAPPLY_TEXTS["reviewed"], {})
+        kind = (await db.execute(text(_QAPPLY_SQL_CLAIM_OF_ROW), {"qid": str(row["id"])})).scalar()
+        raise _QapplyRefused(409, _QAPPLY_TEXTS[
+            "held_credited" if kind == "credit" else "held_applied" if kind == "accept" else "reviewed"], {})
     # A ledger row that references the held row is a credit already paid
     # (this route's, or migration 421's): neither action pays it again, even
     # where the row was set back to pending.

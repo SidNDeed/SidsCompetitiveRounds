@@ -15,6 +15,8 @@ eligibility	The server could not check whether these players have played since; 
 game_applied	This game was already applied from another held report of it; there is nothing to credit. Discard this report.
 game_credited	This game was already credited from another held report of it, so it cannot be applied.
 game_paid	This game was already credited from another held report of it; it is not paid twice. Discard this report.
+held_applied	This held report was already applied as a match.
+held_credited	This held report was already credited.
 incomplete	The stored report is not a complete game report, so it cannot be applied.
 insert_failed	The server could not record this game; nothing was applied. Try again.
 insert_race	Another account of this game was recorded at the same moment; nothing was applied. Refresh the list.
