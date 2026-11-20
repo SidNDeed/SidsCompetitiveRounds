@@ -1294,18 +1294,86 @@ async def claims(env, lob):
         "SELECT game_number, kind, quarantine_id::text FROM ffa_game_claims WHERE lobby_id = $1", lob.lid))
 
 
-async def _pair_rows(env, lob, one, two):
-    """Hold the lobby's row in a third session, queue one=(action, qid), then
-    two, release; both answers."""
+async def _lock_waiters(env, n):
+    """Returns once n sessions of this database wait on a lock (the
+    database's own record, pg_stat_activity), never by a fixed pause; fails
+    after 5 s."""
+    loop = asyncio.get_running_loop()
+    end = loop.time() + 5.0
+    while True:
+        got = await env.conn.fetchval("SELECT count(*) FROM pg_stat_activity WHERE datname = current_database()"
+                                      "   AND wait_event_type = 'Lock'")
+        if got >= n:
+            return
+        assert loop.time() < end, ("M2 sessions queued on the lobby's lock", got, n)
+        await asyncio.sleep(0.02)
+
+
+async def _timed(act, env, qid):
+    """The action's answer and its own elapsed seconds."""
+    loop = asyncio.get_running_loop()
+    t0 = loop.time()
+    ans = await act(env, qid)
+    return ans, loop.time() - t0
+
+
+async def _pair_rows(env, lob, one, two, *, release=True):
+    """Hold the lobby's row in a third session; start one=(action, qid) and
+    go on once the database shows it queued on that row; the same for two;
+    then release (release=False: hold until both have answered). Both
+    (answer, elapsed) pairs, waited for at most the unit's deadline plus 2 s."""
     async with env.sm() as s:
         await s.execute(text("SELECT 1 FROM ffa_lobbies WHERE id = CAST(:l AS uuid) FOR UPDATE"),
                         {"l": str(lob.lid)})
-        t1 = asyncio.create_task(one[0](env, one[1]))
-        await asyncio.sleep(0.8)
-        t2 = asyncio.create_task(two[0](env, two[1]))
-        await asyncio.sleep(0.8)
-        await s.rollback()
-    return await asyncio.wait_for(asyncio.gather(t1, t2), 30)
+        t1 = asyncio.create_task(_timed(one[0], env, one[1]))
+        t2 = None
+        try:
+            await _lock_waiters(env, 1)
+            t2 = asyncio.create_task(_timed(two[0], env, two[1]))
+            await _lock_waiters(env, 2)
+            if release:
+                await s.rollback()
+            return await asyncio.wait_for(asyncio.gather(t1, t2), main._QAPPLY_DEADLINE_S + 2.0)
+        finally:
+            await s.rollback()
+            for t in (t1, t2):
+                if t is not None and not t.done():
+                    t.cancel()
+
+
+async def _m2_state(env, lob, rows):
+    """Everything an action of `lob`'s rows can change, keyed by the lobby's
+    seat order and the rows' positions (so two lobbies of one shape compare):
+    each player's XP and gold, each ledger row, the claims, the game's rows
+    and both held rows' statuses."""
+    slot = {str(p): i for i, p in enumerate(lob.pids)}
+    label = {q: "row%d" % i for i, q in enumerate(rows)}
+    for r in await env.conn.fetch("SELECT id::text, game_number FROM ffa_matches WHERE lobby_id = $1", lob.lid):
+        label[r["id"]] = "match%d" % r["game_number"]
+    players = sorted((slot[str(r["id"])], r["total_xp"], r["gold_earned"], r["ffa_xp_earned"], r["ffa_gold_earned"])
+                     for r in await env.conn.fetch("SELECT id, total_xp, gold_earned, ffa_xp_earned, ffa_gold_earned"
+                                                   " FROM players WHERE id = ANY($1::uuid[])", lob.pids))
+    ledger = sorted((slot[r["player_id"]], r["reason"], r["amount"], label.get(r["reference_id"], r["reference_id"]))
+                    for r in await env.conn.fetch("SELECT player_id::text, reason, amount, reference_id"
+                                                  " FROM gold_transactions WHERE player_id = ANY($1::uuid[])",
+                                                  lob.pids))
+    got = sorted((g, k, label.get(q, q)) for g, k, q in await claims(env, lob))
+    held_rows = [await status_of(env, q) for q in rows]
+    return {"players": players, "ledger": ledger, "claims": got,
+            "games": await game_rows(env, lob, 2), "held": held_rows}
+
+
+def _m2_delta(before, after):
+    """after less before: players as per-seat differences, ledger rows as
+    the rows added (a multiset), the rest as they stand after."""
+    import collections
+    b = {r[0]: r[1:] for r in before["players"]}
+    players = sorted((s,) + tuple(x - y for x, y in zip(v, b[s])) for s, v in
+                     ((r[0], r[1:]) for r in after["players"]))
+    added = collections.Counter(after["ledger"]) - collections.Counter(before["ledger"])
+    gone = collections.Counter(before["ledger"]) - collections.Counter(after["ledger"])
+    return {"players": players, "ledger": sorted(added.elements()), "ledger_gone": sorted(gone.elements()),
+            "claims": after["claims"], "games": after["games"] - before["games"], "held": after["held"]}
 
 
 def test_f1_a_second_credit_of_one_game_is_refused_with_its_sentence(monkeypatch):
@@ -1417,27 +1485,55 @@ def test_f1_a_later_action_names_the_state_the_earlier_one_made(monkeypatch):
 
 
 def test_f1_two_sibling_actions_at_once_take_effect_once(monkeypatch):
+    """M2: two actions on the two held rows of one game, each in its own
+    session, queued on the lobby's row (the database shows each queued
+    before the next step; no fixed pause). Exactly one takes effect, and
+    the COMPLETE change (each player's XP and gold, each ledger row, the
+    claim, the game's rows, both held rows) equals that of the same action
+    alone on a lobby of the same shape. Each action answers within the
+    unit's deadline, also when the lobby's row is held past both bounds."""
+    async def fixture(env, pair):
+        lob, qa, qb = await siblings(env, 2)
+        # Two Credits need a later game (Credit pays only where Accept
+        # cannot apply); the mixed pairs leave the gate open, so the game
+        # is Accept's and Credit is refused either way.
+        if pair == (credit, credit):
+            await later_for(env, lob)
+        return lob, qa, qb
+
     async def body(env):
-        for first, second in ((credit, credit), (credit, accept), (accept, credit)):
-            lob, qa, qb = await siblings(env, 2)
-            # Two Credits need a later game (Credit pays only where Accept
-            # cannot apply); the mixed pairs leave the gate open, so the game
-            # is Accept's and Credit is refused either way.
-            if (first, second) == (credit, credit):
-                await later_for(env, lob)
-            start = await paid(env, lob)
-            a, b = await _pair_rows(env, lob, (first, qa), (second, qb))
-            ok = [x for x in (a, b) if x.status == 200]
-            assert len(ok) <= 1, ("F1 at most one takes effect", first.__name__, second.__name__, a, b)
-            got = await claims(env, lob)
-            assert len(got) == len(ok), ("F1 one claim per effect", got, a, b)
-            if not ok:
-                assert await paid(env, lob) == start
-            n = await game_rows(env, lob, 2)
-            assert n == (1 if got and got[0][1] == "accept" else 0), ("F1 game rows", n, got)
-            ledger = (await paid(env, lob))[1]
-            refs = {r[3] for r in ledger} - {r[3] for r in start[1]}
-            assert len(refs) <= 1, ("F1 one payment's references", refs)
+        bound = main._QAPPLY_DEADLINE_S
+        for pair in ((credit, credit), (credit, accept), (accept, credit)):
+            names = tuple(f.__name__ for f in pair)
+            lob, qa, qb = await fixture(env, pair)
+            start = await _m2_state(env, lob, (qa, qb))
+            (a, ta), (b, tb) = await _pair_rows(env, lob, (pair[0], qa), (pair[1], qb))
+            print("M2 pair", names, a.status, "%.3f s" % ta, b.status, "%.3f s" % tb)
+            assert ta < bound and tb < bound, ("M2 each action within the deadline", names, ta, tb)
+            ok = [i for i, x in enumerate((a, b)) if x.status == 200]
+            assert len(ok) == 1, ("M2 exactly one takes effect", names, a, b)
+            loser = (a, b)[1 - ok[0]]
+            assert loser.status == 409 or (loser.status, loser.body) == (503, T["busy"]), ("M2 the other", names, loser)
+            pair_delta = _m2_delta(start, await _m2_state(env, lob, (qa, qb)))
+            # The same action alone, on the row in the same position of a
+            # lobby of the same shape.
+            lob1, q1a, q1b = await fixture(env, pair)
+            start1 = await _m2_state(env, lob1, (q1a, q1b))
+            alone = await pair[ok[0]](env, (q1a, q1b)[ok[0]])
+            assert alone.status == 200, ("M2 the action alone", names, alone)
+            alone_delta = _m2_delta(start1, await _m2_state(env, lob1, (q1a, q1b)))
+            assert pair_delta == alone_delta, ("M2 the pair's change is one action's", names, pair_delta, alone_delta)
+        # The lobby's row held past both bounds: each action answers busy
+        # within the deadline and nothing changes.
+        lob, qa, qb = await fixture(env, (credit, credit))
+        start = await _m2_state(env, lob, (qa, qb))
+        before = await tables(env)
+        (a, ta), (b, tb) = await _pair_rows(env, lob, (credit, qa), (credit, qb), release=False)
+        print("M2 held", a.status, "%.3f s" % ta, b.status, "%.3f s" % tb)
+        assert ta < bound and tb < bound, ("M2 each action within the deadline while held", ta, tb)
+        assert (a.status, a.body) == (b.status, b.body) == (503, T["busy"]), (a, b)
+        assert _m2_delta(start, await _m2_state(env, lob, (qa, qb)))["ledger"] == []
+        assert await tables(env) == before
     run_env(monkeypatch, body)
 
 
