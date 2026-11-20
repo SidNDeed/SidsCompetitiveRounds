@@ -62387,7 +62387,9 @@ async def ovt_lobby_start(req: _LobbyStartReq, request: Request,
 # in one query can disagree by microseconds against a 75-SECOND threshold.
 # That is the trade taken deliberately: a deterministic staleness miss for a
 # boundary case that resolves itself on the next poll.
-FFA_LOBBY_MEMBER_FRESH_SQL = "last_polled > clock_timestamp() - INTERVAL '75 seconds'"
+# One definition for every mode: the FFA name is an alias of the lobby one
+# (LOBBY_MEMBER_FRESH_SQL), which the shared leave core reads for every mode.
+FFA_LOBBY_MEMBER_FRESH_SQL = LOBBY_MEMBER_FRESH_SQL
 
 
 async def _ffa_live_lobby_members(db: AsyncSession, lobby_id):
