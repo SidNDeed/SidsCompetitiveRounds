@@ -2247,3 +2247,47 @@ def test_m1_a_repeat_on_one_held_row_names_what_the_earlier_action_did(monkeypat
             await refused("421, accept", q, accept, T["held_credited"])
             await refused("421, credit", q, credit, T["held_credited"])
     run_env(monkeypatch, body)
+
+
+# ── F5 (Addendum 4): a lobby made before the 168 bound is never applied ───
+
+def test_f5_both_routes_reach_the_one_shared_bound_check():
+    """D2: the bound stands in _qapply_held, which both routes call."""
+    tree = _tree()
+    funcs = {n.name: n for n in tree.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
+
+    def calls(fn, name):
+        return sum(1 for c in ast.walk(funcs[fn]) if isinstance(c, ast.Call)
+                   and isinstance(c.func, ast.Name) and c.func.id == name)
+    for route in ("admin_accept_quarantine", "admin_credit_quarantine"):
+        assert calls(route, "_qapply_held") == 1, route
+    src = ast.unparse(funcs["_qapply_held"])
+    assert "_QAPPLY_SQL_LOBBY_BEFORE_168" in src and "settled_by_hand" in src
+    assert main._QAPPLY_LOBBY_SETTLED_BEFORE == _dt.datetime(2026, 7, 31, tzinfo=_dt.timezone.utc)
+
+
+def test_f5_a_lobby_made_before_the_168_bound_is_refused_by_both_routes(monkeypatch):
+    bound = main._QAPPLY_LOBBY_SETTLED_BEFORE
+
+    async def body(env):
+        for name, act in (("accept", accept), ("credit", credit)):
+            lob, q = await closed_held(env)
+            if name == "credit":
+                await later_for(env, lob)
+            await env.conn.execute("UPDATE ffa_lobbies SET created_at = $2 WHERE id = $1",
+                                   lob.lid, bound - _dt.timedelta(seconds=1))
+            before = (await tables(env), await paid(env, lob), await _f5_claims(env.conn))
+            ans = await act(env, q)
+            assert (ans.status, ans.body) == (410, T["settled_by_hand"]), (name, ans)
+            assert (await tables(env), await paid(env, lob), await _f5_claims(env.conn)) == before, name
+            assert await status_of(env, q) == "pending", name
+            # Discard of such a row works as before.
+            assert (await discard(env, q)).status == 200, name
+            # A lobby made AT the instant passes this rule.
+            lob, q = await closed_held(env)
+            if name == "credit":
+                await later_for(env, lob)
+            await env.conn.execute("UPDATE ffa_lobbies SET created_at = $2 WHERE id = $1", lob.lid, bound)
+            ans = await act(env, q)
+            assert ans.status == 200, (name, "at the instant", ans)
+    run_env(monkeypatch, body)
