@@ -241,7 +241,7 @@
           ],
           "main",
           "admin_list_quarantine",
-          "fd078a327a76a8832e1ac3bd7631599e969189d7"
+          "256ee927df7b936d436ec140aa8d9f78412e8b8c"
         ],
         [
           "/api/v1/admin/quarantine/triage",
@@ -268,7 +268,7 @@
           ],
           "main",
           "admin_accept_quarantine",
-          "8352e5abe0bc3d71570e99af7f1294de488fbf28"
+          "b877591a694b835a3c10da753714dacfcf55dfae"
         ],
         [
           "/api/v1/admin/quarantine/{qid}/credit",
@@ -277,7 +277,7 @@
           ],
           "main",
           "admin_credit_quarantine",
-          "e4106616ba7661b4e83dee1738ff35760a3c2c02"
+          "9f23135acfa3ab9af3f2ef357dbbcfbc04eb9294"
         ],
         [
           "/api/v1/admin/quarantine/{qid}/discard",
@@ -529,7 +529,7 @@
           ],
           "main",
           "submit_ffa_match",
-          "044b764e28a32f8d68cd439f11282407f3c7c479"
+          "67fb18e6ab81db9bb8659b4ad85f8cb1d0e6240e"
         ],
         [
           "/api/v1/h2h/{steam_id}/{opponent_steam_id}",
@@ -592,7 +592,7 @@
           ],
           "main",
           "internal_quarantine_digest",
-          "2432fa8d9f4140893083d1ff708c34691ff6127a"
+          "f6a57dcf2183e5adde230dcfb537c1b4e3fce374"
         ],
         [
           "/api/v1/internal/recent-flags",
@@ -4121,7 +4121,7 @@
       [
         "main",
         "lifespan",
-        "773a0cb095d76648853c3c1343129708532bb104"
+        "06a064bf0db5e95d62054059a16bf4f8d837cae3"
       ]
     ]
   },
