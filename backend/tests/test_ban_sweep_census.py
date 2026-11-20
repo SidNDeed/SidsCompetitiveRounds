@@ -433,6 +433,8 @@ def _stub_names_patched_into_main(tree) -> set:
 STANDIN_DROPS_OK = {
     ("test_ban_sweep_live.py", "without_banned_ok"):
         "the S2 mutant: drops banned_ok on purpose to show that the exit then refuses",
+    ("test_qapply_pg.py", "_session_check_raises"):
+        "A14-SES: raises if called at all; the test asserts the session check never runs under the replay",
 }
 
 _TREES = {}

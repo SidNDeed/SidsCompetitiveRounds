@@ -61,6 +61,7 @@ TABLE_CLASSES = {
                        "refunds it); the account's own wager on another's lobby settles by a game it is not in"),
     "ffa_card_offers": (LEFT, "card offers of past FFA games; match history"),
     "ffa_g3_seats": (LEFT, "an admin enrolment flag read only with a queue seat, which the ban deletes"),
+    "ffa_game_claims": (NO_LINK, "one claim per FFA game applied or credited from a held report: lobby, game number, kind and held row; no column names an account"),
     "ffa_kept_epochs": (NO_LINK, "per-lobby epoch chain"),
     "ffa_lobbies": (LIVE, "an open or live FFA lobby the account is in (the status census)"),
     "ffa_match_cards": (LEFT, _HIST),

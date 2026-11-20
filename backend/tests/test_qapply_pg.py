@@ -744,10 +744,16 @@ def _raiser(what):
     return f
 
 
+async def _session_check_raises(request, steam_id, db, **_kw):
+    """The session check's stand-in under the replay: a named def, so the ban
+    sweep census judges its binding (listed in STANDIN_DROPS_OK)."""
+    raise RuntimeError("the session check ran under the replay")
+
+
 def test_a14_ses_the_session_check_does_not_run_under_the_replay(monkeypatch):
     async def body(env):
         lob, qid = await closed_held(env)
-        monkeypatch.setattr(main, "_check_steam_session", _raiser("the session check"))
+        monkeypatch.setattr(main, "_check_steam_session", _session_check_raises)
         ans = await accept(env, qid)
         assert ans.status == 200, ("A14-SES", ans)
     run_env(monkeypatch, body)
@@ -810,7 +816,7 @@ def test_m1_network_and_journal_leave_the_replay_unset_and_both_set_is_refused(m
         assert seen and all(v is None for v in seen), ("M1 network: replay unset", seen)
         await close(env, lob)
         qid = await held(env, lob, 2)
-        monkeypatch.setattr(main, "_check_steam_session", _raiser("the session check"))
+        monkeypatch.setattr(main, "_check_steam_session", _session_check_raises)
         monkeypatch.setattr(main, "_ffa_settle_due_windows_for_report", _raiser("the due windows settle"))
         seen.clear()
         assert (await accept(env, qid)).status == 200, "M1 accept"

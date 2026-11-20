@@ -254,6 +254,12 @@ MULTI_COMMIT_LISTED = {
         "submit_ffa_match in journal mode, which reads the ban under the lock itself (the walk "
         "sees that recursion as its entry state), and the write after its 4xx only marks that "
         "report superseded, which moves no result, rating, gold or other player's game"),
+    ("POST", "/api/v1/admin/quarantine/{qid}/accept"): (
+        "the walk follows submit_ffa_match's settle of the lobby's due windows "
+        "(_ffa_settle_due_windows_for_report), which runs only when neither the journal mode nor "
+        "the held-report replay is set; the route runs submit_ffa_match inside _qapply_run, which "
+        "sets the replay, so that settle does not run and the route's writes are the body's one "
+        "commit, which reads the ban under the lock as on the report route"),
 }
 # Helpers whose paths that drop the lock or commit end in a value every caller
 # returns at once; the walk cannot tie that value to the caller's test, so it
@@ -798,6 +804,8 @@ INSERT_CORE_SITES = {
     ("main", "<module>", "_settle_team_report", "ref"): (1, "the ladder hook sites tuple; no call"),
     ("main", "_ffa_settle_report", "submit_ffa_match", "call"): (
         1, "the FFA report journal: the janitor and the report route's due windows"),
+    ("main", "admin_accept_quarantine", "submit_ffa_match", "call"): (
+        1, "the held-report Accept (QAPPLY-1): the stored body runs through the report route's body under _qapply_run"),
     ("main", "<module>", "submit_ffa_match", "ref"): (
         6, "route-table, ladder-hook, writer and gate lists and code-object checks; no call"),
     ("main", "<module>", "submit_match", "ref"): (1, "the ladder hook sites tuple; no call"),
