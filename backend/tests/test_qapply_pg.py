@@ -1740,8 +1740,10 @@ def _f4_spies(monkeypatch, names, fail=None):
 
 
 def _f4_cache(monkeypatch, cache, schedule_age, filled_age):
-    import time as _time
-    now = _time.monotonic()
+    # The clock main reads: the harness sets main.time to a proxy whose
+    # monotonic() is its own frozen value (cf_asm.Env), so stamps taken from
+    # the process clock would read as about a million seconds old.
+    now = main.time.monotonic()
     monkeypatch.setattr(main, "_service_player_uuid_cache", cache)
     monkeypatch.setattr(main, "_service_uuid_cache_monotonic",
                         0.0 if schedule_age is None else now - schedule_age)
