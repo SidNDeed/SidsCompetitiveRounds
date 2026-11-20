@@ -5358,10 +5358,10 @@ async def cmd_rank(ctx, member: discord.Member = None):
     if br > 0: series_lines += f"\nBest Streak: **{br}W** 🔥"
     embed.add_field(name="🏆  Ranked Series", value=series_lines, inline=True)
 
-    # Current ranked streak — not a server field; recompute from recent match
-    # history exactly like the client's CalcStreak (NativeUI.cs:6681):
-    # newest-first consecutive same-result among ranked entries.
-    cur = await _current_streak(steam_id, ranked=True)
+    # Current ranked streak in GAMES, signed: the server's full-history walk
+    # (current_ranked_game_streak), which leaves voided games out. The bot
+    # walks no match list of its own: that list carries voided games unmarked.
+    cur = _streak_field(s, "current_ranked_game_streak")
     embed.add_field(name="📈  Current Streak", value=(streak_str(cur) or "—"), inline=True)
 
     # Sweeps (ranked 5-0s)
@@ -5414,32 +5414,12 @@ async def _maybe_defer(ctx):
         pass  # already deferred / prefix edge — never block the command
 
 
-def _calc_streak(entries, ranked=None):
-    """Mirror the client's CalcStreak (NativeUI.cs:6681): walk a newest-first
-    match list, count consecutive same-result games. +N = win streak,
-    -N = loss streak. ranked=True filters to ranked entries, False to casual,
-    None counts all modes."""
-    if not isinstance(entries, list) or not entries:
-        return 0
-    if ranked is not None:
-        entries = [m for m in entries if isinstance(m, dict) and bool(m.get("is_ranked")) == ranked]
-    if not entries:
-        return 0
-    first = bool(entries[0].get("won"))
-    c = 0
-    for m in entries:
-        if bool(m.get("won")) == first:
-            c += 1
-        else:
-            break
-    return c if first else -c
-
-
-async def _current_streak(steam_id, ranked=None):
-    """Current win/loss streak from the 50 most recent matches (the /matches
-    endpoint returns newest-first — ORDER BY m.ended_at DESC, main.py:2652)."""
-    hist = await api_get(f"/players/{steam_id}/matches?limit=50")
-    return _calc_streak(hist, ranked)
+def _streak_field(s, key):
+    """A signed streak field of a /players/{steam} answer as an int (0 when
+    absent or not a number). Every streak the bot shows is a field the api
+    computes; a voided series or game is left out there (one definition)."""
+    v = s.get(key) if isinstance(s, dict) else None
+    return v if isinstance(v, int) and not isinstance(v, bool) else 0
 
 
 def _top_cards_lines(s, limit=5):
@@ -7376,7 +7356,6 @@ async def cmd_mystats(ctx, member: discord.Member = None):
     await _maybe_defer(ctx)
     s = await api_get(f"/players/{steam_id}")
     if not s: await ctx.send("❌ Could not fetch stats."); return
-    hist = await api_get(f"/players/{steam_id}/matches?limit=50")
     rank = s.get("rank_name") or get_rank_name(s["rating"])
     embed = discord.Embed(title=f"{rank_emoji(rank)}  {_escape_md(s['display_name'])}  —  My Stats", color=0x9B59B6)
     # v1.34.1: surface the Discord @display name (opt-out honored — the API
@@ -7403,7 +7382,8 @@ async def cmd_mystats(ctx, member: discord.Member = None):
         inline=False,
     )
 
-    # Records box — total + ranked + casual, with live streaks from history.
+    # Records box — total + ranked + casual, with the server's current streaks
+    # (signed, in games: current_ranked_game_streak, current_casual_streak).
     tw, tl, tt = s.get("wins", 0), s.get("losses", 0), s.get("total_matches", 0)
     twr = f"{tw/tt*100:.1f}%" if tt > 0 else "—"
     rw, rl = s.get("ranked_series_wins", 0), s.get("ranked_series_losses", 0)
@@ -7412,8 +7392,8 @@ async def cmd_mystats(ctx, member: discord.Member = None):
     cw, cl = s.get("casual_wins", 0), s.get("casual_losses", 0)
     ct = cw + cl
     cwr = f"{cw/ct*100:.1f}%" if ct > 0 else "—"
-    r_streak = streak_str(_calc_streak(hist, ranked=True))
-    c_streak = streak_str(_calc_streak(hist, ranked=False))
+    r_streak = streak_str(_streak_field(s, "current_ranked_game_streak"))
+    c_streak = streak_str(_streak_field(s, "current_casual_streak"))
     rec_lines = [
         f"Total: **{tt}** — **{tw}**W / **{tl}**L ({twr})",
         f"Ranked series: **{rw}**W / **{rl}**L ({rwr})" + (f"  ·  {r_streak}" if r_streak else ""),
@@ -18927,7 +18907,7 @@ def _modlog_error(status, body):
         return MODLOG_AMBIGUOUS
     if status in (400, 422):
         return ("The moderator log refused that request (%s). Trying again as it is will not help."
-                % _escape_md(str(detail or "bad request"))[:200])
+                % _escape_md(_modlog_cut(str(detail or "bad request"), 200)))
     if status == 429 or status >= 500:
         return ("The moderator log failed on the server (status %d). Trying again in a minute may help."
                 % int(status))
@@ -18945,8 +18925,26 @@ def _modlog_ts(iso):
 
 
 def _modlog_cut(text, n):
+    """`text`, raw (not yet escaped), shortened to at most `n` characters,
+    the cut marked with "…". It adds nothing else, and every caller escapes
+    its result: cut first, then escape (_escape_md's rule), so no escape pair
+    is cut in half. Text already escaped is cut by _modlog_fit instead."""
     text = str(text or "")
     return text if len(text) <= n else text[:max(0, n - 1)] + "…"
+
+
+MODLOG_ID_UNKNOWN = "unknown id"
+
+
+def _modlog_id(value):
+    """The player's Steam id as the header prints it inside a code span:
+    the value when it is 1 to 20 ASCII digits, MODLOG_ID_UNKNOWN otherwise.
+    A code span ends at a backtick in its text and shows a backslash as
+    typed, so no escape makes a value literal there; digits are literal
+    anywhere. The internal read answers with the 17 digits the bot asked
+    with, or, asked by a name, the players row's steam_id as it is stored."""
+    s = str(value) if value is not None else ""
+    return s if re.fullmatch(r"[0-9]{1,20}", s) else MODLOG_ID_UNKNOWN
 
 
 def _modlog_fit(text, n):
@@ -18965,8 +18963,10 @@ def _modlog_fit(text, n):
 MODLOG_TOTALS_MAX = 400
 # A record carried in by a migration from another table's own data names that
 # table in its details' carried_from (the api's modlog.CARRIED_FROM). The
-# mark stands right after the kind of action, ahead of every text a row's
-# budget can shorten.
+# mark stands right after the kind of action, ahead of the moderator, the
+# reason and the sentence, so a row's budget shortens those first; a budget
+# smaller than the time, the kind and the mark cuts the mark as well (and
+# never inside the kind's bold pair).
 MODLOG_CARRIED = {"flagged_matches": " (carried in from the flag's review data, not written at the review)"}
 MODLOG_CARRIED_OTHER = " (carried in from stored data, not written at the time)"
 
@@ -18999,7 +18999,7 @@ def _modlog_render(body, *, page, sort, action_idx, search):
     if (not isinstance(total, int) or isinstance(total, bool) or not isinstance(counts, list)
             or not isinstance(who, dict)):
         raise ValueError("shape")
-    sid = str(who.get("steam_id") or "")
+    sid = _modlog_id(who.get("steam_id"))
     name = _escape_md(_modlog_cut(who.get("name") or "unknown name", 40))
     filt = []
     if action_idx is not None:
@@ -19027,18 +19027,27 @@ def _modlog_render(body, *, page, sort, action_idx, search):
     for r in rows:
         if not isinstance(r, dict) or not isinstance(r.get("key"), str):
             raise ValueError("row")
-        line = "%s **%s**%s by %s" % (_modlog_ts(r.get("at")),
-                                      _escape_md(_modlog_cut(r.get("action_label"), 40)),
-                                      _modlog_carried(r),
-                                      _escape_md(_modlog_cut(r.get("actor_name") or r.get("actor"), 40)))
+        lead = _modlog_ts(r.get("at"))
+        bold = "**%s**" % _escape_md(_modlog_cut(r.get("action_label"), 40))
+        line = "%s %s%s by %s" % (lead, bold, _modlog_carried(r),
+                                  _escape_md(_modlog_cut(r.get("actor_name") or r.get("actor"), 40)))
         if r.get("reason"):
             line += " — reason: " + _escape_md(_modlog_cut(r.get("reason"), 256))
         line += " — " + _escape_md(_modlog_cut(r.get("sentence"), 600))
-        lines.append(_modlog_fit(line, budget))
+        shown = _modlog_fit(line, budget)
+        kept = len(line) if shown == line else len(shown) - 1
+        if len(lead) + 1 < kept < len(lead) + 1 + len(bold):
+            # The cut fell inside the kind's own bold pair: it falls before
+            # the pair's opening mark instead, so no bold is left open. The
+            # cut kept more than the time and the space, so this is shorter.
+            shown = lead + " …"
+        lines.append(shown)
     # The budget keeps the page inside the limit while the header stays
     # within its own bounds (a 40-character name, a 64-character search);
-    # this cut stands so no page passes the limit even outside them.
-    return _modlog_cut("\n".join([head, totals] + lines), MODLOG_MSG_MAX)
+    # this cut stands so no page passes the limit even outside them. The
+    # page is escaped by now, so it is cut by _modlog_fit, which never ends
+    # inside an escape pair.
+    return _modlog_fit("\n".join([head, totals] + lines), MODLOG_MSG_MAX)
 
 
 def _modlog_view(tok):

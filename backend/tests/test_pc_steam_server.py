@@ -997,261 +997,1364 @@ def test_the_release_train_runs_a_batch_that_adds_no_route(monkeypatch):
         del rt.BATCHES["_broken"]
 
 
-# ── the ABSENT json marker: a batch whose change is a key GOING AWAY ──────
+# ── the operating train's gates, driven with stubs (TRAIN-PARITY-1) ──────
+#
+# Every test below imports the release train placed at scripts/deploy/ of the
+# tree it runs in and drives its functions; nothing leaves the machine. The
+# world below stands in for every step that would: the controller lease, the
+# plays, the local git mutators, the pushes, the migrations, the box probes.
+# REPO is pointed at the test's temporary folder BEFORE a batch is selected,
+# so every state file a phase writes lands there.
 
-ABSENT_BATCH = "bug392-merge"   # the first batch of that shape, and of the no-migration shape
+import contextlib  # noqa: E402
+import json  # noqa: E402
+import re  # noqa: E402
+import subprocess  # noqa: E402
+from datetime import datetime, timedelta, timezone  # noqa: E402
+
+ABSENT_BATCH = "mscl"   # an entry with no migration and a skipped bot: the no-sql shape
+JSON_BATCH = "bug392-server"   # an entry whose build discriminator is a json marker
+NEWEST_THREE = ("mscl", "ban-cap", "qdig")   # the three newest entries when this item was written
+PRECURSOR_SHA = "1" * 40
+MERGE_SHA = "2" * 40
+FORK_URL = "https://example.invalid/a-fork/a-repository.git"
+_OLD = (True, False, True, ["marker at the old value"])
+_NEW = (True, True, False, ["marker at the new value"])
+_UNKNOWN = (True, False, False, ["one marker old and one new"])
+_DOWN = (False, False, True, ["control answered 503"])
+_TRAILER = "\n\nCo-Authored-By: A Test <test@example.invalid>"
+_DROP = object()
 
 
-def _absent_marker(rt):
-    """The single json marker of the ABSENT batch, bound."""
-    rt.select_batch(ABSENT_BATCH)
-    assert len(rt.JSON_MARKERS) == 1, rt.JSON_MARKERS
-    return rt.JSON_MARKERS[0]
+def _rt_done(kw, stdout, stderr="", rc=0):
+    """A finished process as subprocess.run hands it back: text when the caller asked for text, bytes
+    otherwise, standard output and standard error kept apart."""
+    text = kw.get("text") or kw.get("universal_newlines") or kw.get("encoding")
+    conv = (lambda v: v) if text else (lambda v: v.encode("utf-8"))
+    return SimpleNamespace(returncode=rc, stdout=conv(stdout), stderr=conv(stderr))
 
 
-def test_an_ABSENT_json_marker_reads_a_missing_key_as_the_NEW_build(monkeypatch):
-    """The reading runs backwards for this batch, and the control is what makes it a reading.
+def _rt_minted(rt, stamp="20261118_112001", label=None):
+    """The name the snapshot wrapper mints: cc_, the label with every character
+    outside [a-zA-Z0-9_-] made `_`, two underscores, the host's local stamp."""
+    label = rt.SNAPSHOT_LABEL if label is None else label
+    return "cc_%s__%s" % (re.sub(r"[^a-zA-Z0-9_-]", "_", label), stamp)
 
-    Every marker before this one said "the key at this value is the new build", so an absent key meant OLD. This
-    batch's whole server change is that the new build STOPS emitting `involuntary_leave_cause`, so the key gone is
-    NEW -- and absence on its own is satisfied by a wrong path, an error body, or a box serving nothing at all.
-    Hence the control: `ffa_involuntary_cause`, true on BOTH builds. A reading where the control does not hold is
-    neither build, so the train stops instead of calling an unreadable box new."""
+
+def _rt_utc(hours_ago=0.0):
+    return (datetime.now(timezone.utc) - timedelta(hours=hours_ago)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _rt_fresh(rt, hours_ago=1.0, **over):
+    """A snapshot record that stands: the minted form, recorded by the tool's own UTC clock."""
+    st = {"snapshot": _rt_minted(rt), "snapshot_recorded_at": _rt_utc(hours_ago)}
+    st.update(over)
+    return st
+
+
+def _rt_bind(monkeypatch, rt, name, where):
+    """Select `name` with every state file under `where`."""
+    monkeypatch.setattr(rt, "REPO", str(where / "repo"))
+    monkeypatch.setattr(rt, "BUILD_CHECK_WAIT_S", 0, raising=False)
+    rt.select_batch(name)
+    assert rt.STATE_PATH.startswith(str(where))
+    return rt.STATE_PATH
+
+
+def _rt_files(where):
+    return sorted(str(p) for p in Path(where).rglob("*") if p.is_file())
+
+
+def _rt_pair(rt, sha):
+    """The two deploys of one sha, in the order the train must make them: the primary's selector first."""
+    return [("deploy", rt.PRIMARY_SELECTOR, sha), ("deploy", rt.STANDBY_SELECTOR, sha)]
+
+
+def test_the_two_box_selectors_are_two_distinct_names():
+    """The pair every deploy assert is built from: two non-empty strings, and not the same one twice."""
     rt, _src = _release_train()
-    m = _absent_marker(rt)
-    assert m["key"] == "involuntary_leave_cause" and m["expect"] is rt.ABSENT
-    assert m["control_key"] == "ffa_involuntary_cause" and m["control_expect"] is True
-    monkeypatch.setattr(rt, "http_code", lambda host, path, **kw: "200")
+    p, s = rt.PRIMARY_SELECTOR, rt.STANDBY_SELECTOR
+    assert isinstance(p, str) and isinstance(s, str) and p and s and p != s
 
-    new_build = {"version": "1.40.3", "min_version": "1.40.2", "ffa_involuntary_cause": True}
-    old_build = dict(new_build, involuntary_leave_cause=True)
-    inert = {"version": "1.40.3", "ffa_involuntary_cause": False}   # control at the wrong value
-    no_control = {"version": "1.40.3"}                              # right-looking body, control gone
-    for body, want, why in (
-            (new_build, (True, False), "alias gone, control true: the NEW build"),
-            (old_build, (False, True), "alias present at any value: the OLD build"),
-            (dict(old_build, involuntary_leave_cause=False), (False, True),
-             "present-but-false is still present, so still OLD"),
-            (inert, (False, False), "control false: not a verdict about the build"),
-            (no_control, (False, False), "control absent: the body is not the one we asked for"),
-            ({}, (False, False), "did not parse: unknown, exactly as for a forward marker"),
-    ):
+
+def _rt_default_serve(host, sha):
+    return _NEW if sha == MERGE_SHA else _OLD
+
+
+class _RtWorld:
+    """Everything the train would ask of another machine, answered here and
+    recorded in order. A box serves what `serve(host, the sha its last deploy
+    carried)` says; a commit whose message is the merge message makes HEAD the
+    merge, any other commit the precursor."""
+
+    def __init__(self, rt):
+        self.rt = rt
+        self.calls = []
+        self.deployed = {}
+        self.head = "0" * 40
+        self.branch_tip = rt.REVIEWED_TIP or "e" * 40
+        self.second_parent = rt.REVIEWED_TIP or "e" * 40
+        self.push_urls = [getattr(rt, "ORIGIN_PUSH_URL", "the module states no push address")]
+        self.push_sequence = []
+        self.push_address_fails = False
+        self.snapshot_out = None
+        self.serve = _rt_default_serve
+        self.raise_on = {}
+        self.http = {}
+
+    def kinds(self, *wanted):
+        return [c for c in self.calls if c[0] in wanted]
+
+    def run(self, cmd, check=True, want_rc=False, **kw):
+        c = list(cmd)
+        self.calls.append(("run",) + tuple(c[:4]))
+        out = None
+        if c[:2] == ["git", "rev-parse"]:
+            ref = c[2]
+            out = {self.rt.BRANCH: self.branch_tip, "HEAD": self.head,
+                   "HEAD^2": self.second_parent}.get(ref, "b" * 40 if ":" in ref else None)
+        elif c[:3] == ["git", "--no-optional-locks", "status"]:
+            out = ""
+        elif c[:3] == ["python", "-m", "pyflakes"]:
+            out = ""
+        if out is None:
+            raise AssertionError("a command the stubbed train should not issue: %r" % (c,))
+        return (out, 0) if want_rc else out
+
+    def push_address(self, kw):
+        """`git remote get-url --push --all origin` as the process call answers it: one line per destination
+        on standard output, return code 2 when the world says the question fails."""
+        self.calls.append(("push-address",))
+        urls = self.push_sequence.pop(0) if self.push_sequence else self.push_urls
+        return _rt_done(kw, "".join(u + "\n" for u in urls), "", 2 if self.push_address_fails else 0)
+
+    def zap(self, playbook, limit=None, extra=None, **kw):
+        if playbook == "snapshot-scr.yml":
+            self.calls.append(("snapshot",))
+            if self.snapshot_out is not None:
+                return self.snapshot_out
+            return ("TASK [snapshot] ok: %s\nPLAY RECAP box : ok=2 changed=1 unreachable=0 failed=0"
+                    % _rt_minted(self.rt))
+        sha = extra.split("scr_deploy_ref=")[1].split()[0]
+        self.calls.append(("deploy", limit, sha))
+        if self.raise_on.get("deploy"):
+            raise self.raise_on["deploy"]
+        self.deployed[self.rt.PRIMARY if limit == self.rt.PRIMARY_SELECTOR else self.rt.STANDBY] = sha
+        return "PLAY RECAP box : ok=9 changed=2 unreachable=0 failed=0"
+
+    def git_child(self, lease, argv):
+        self.calls.append(("git",) + tuple(argv[:3]))
+        if argv[:2] == ["git", "commit"]:
+            self.head = MERGE_SHA if argv[3].startswith(self.rt.MERGE_MESSAGE) else PRECURSOR_SHA
+        return ""
+
+    def blocking_child(self, lease, step, argv, kind, timeout=None):
+        self.calls.append((kind, step))
+        if self.raise_on.get(kind):
+            raise self.raise_on[kind]
+        return ("Container comp-rounds-bot  Started" if kind == "bot" else "main -> main"), 0
+
+    def migrate_child(self, lease, f):
+        self.calls.append(("migrate", f))
+        if self.raise_on.get("migrate"):
+            raise self.raise_on["migrate"]
+        return "BEGIN\nCOMMIT"
+
+    def code_state(self, host):
+        self.calls.append(("read", host))
+        return self.serve(host, self.deployed.get(host))
+
+
+def _rt_world(monkeypatch, rt):
+    w = _RtWorld(rt)
+    for name in ("run", "zap", "git_child", "blocking_child", "migrate_child", "code_state"):
+        monkeypatch.setattr(rt, name, getattr(w, name))
+    monkeypatch.setattr(rt, "controller_lease_session",
+                        lambda what, **kw: contextlib.nullcontext("lease"))
+    monkeypatch.setattr(rt, "derive_trailer_suffix", lambda branch: _TRAILER)
+    monkeypatch.setattr(rt, "train_token_write", lambda phase: None)
+    monkeypatch.setattr(rt, "train_token_release", lambda: None)
+    for name in ("assert_control", "assert_route_probes", "assert_health_keys"):
+        monkeypatch.setattr(rt, name, lambda *a, **kw: None)
+    monkeypatch.setattr(rt, "assert_edge_runs_new_code", lambda: None)
+    monkeypatch.setattr(rt, "assert_positive_signals", lambda: None)
+    monkeypatch.setattr(rt, "http_code", lambda host, path, **kw: w.http.get(path, "200"))
+    monkeypatch.setattr(rt, "schema_state", lambda host: (
+        list(rt.EXPECT_TABLES), ["%s.%s" % p for p in rt.EXPECT_COLUMNS]))
+    monkeypatch.setattr(rt, "index_state", lambda host: list(rt.EXPECT_INDEXES))
+    monkeypatch.setattr(rt, "sql", lambda host, query: "0")
+    monkeypatch.setattr(rt, "_bot_witness", lambda **kw: w.calls.append(("witness",)))
+    import subprocess as _sp
+    inner = _sp.run
+
+    def cat_file(cmd, *a, **kw):
+        # the precursor asks `git cat-file -e <branch>:<file>` directly
+        if isinstance(cmd, (list, tuple)) and list(cmd[:3]) == ["git", "cat-file", "-e"]:
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        if isinstance(cmd, (list, tuple)) and list(cmd[:5]) == ["git", "remote", "get-url", "--push", "--all"]:
+            return w.push_address(kw)
+        return inner(cmd, *a, **kw)
+    monkeypatch.setattr(_sp, "run", cat_file)
+    return w
+
+
+GO, PLAN = SimpleNamespace(go=True), SimpleNamespace(go=False)
+
+
+# ── slice 1: deploy truth ─────────────────────────────────────────────────
+
+
+def test_a_batch_with_no_migration_skips_three_phases_and_moves_the_negative_control(monkeypatch, capsys,
+                                                                                       tmp_path):
+    """A batch carrying no sql is legal; its skips are printed, and its negative control moves to the code phase.
+
+    With no schema moving there is no precursor, so the precursor deploy -- the one moment the train saw its
+    discriminator answer OLD -- never happens. Without that reading the code phase's postcondition is a check
+    never seen to fail. So for such a batch both boxes are read before the merge and before any deploy, every
+    reading that is not OLD stops the train with nothing merged, and the OLD reading is recorded."""
+    rt, _src = _release_train()
+    _rt_bind(monkeypatch, rt, ABSENT_BATCH, tmp_path)
+    w = _rt_world(monkeypatch, rt)
+    assert rt.ALL_SQL == [] and rt.SCHEMA_SQL == rt.I18N_SQL == rt.BACKFILL_SQL == []
+    assert rt.BOT_SKIP_REASON and not rt.DEPLOY_BOT
+
+    # the skip half: the precursor and its deploy print their skip and record nothing;
+    # the schema phase applies nothing and records its postcondition
+    st = _rt_fresh(rt)
+    rt.phase_precursor(GO, st)
+    rt.phase_deploy_precursor(GO, st)
+    out = capsys.readouterr().out
+    assert "precursor skipped" in out and "deploy-precursor skipped" in out, out
+    assert "precursor_sha" not in st
+    rt.phase_schema(GO, st)
+    assert st["schema_done"] is True
+    assert w.kinds("deploy", "git", "push", "migrate", "snapshot") == []
+
+    # the plan names the control, both boxes and the reading, BEFORE the merge it guards
+    rt.phase_code(PLAN, dict(st))
+    out = capsys.readouterr().out
+    assert "negative control" in out and rt.PRIMARY in out and rt.STANDBY in out and "OLD" in out, out
+    assert out.index("negative control") < out.index("git merge --no-ff --no-commit %s" % rt.BRANCH), out
+
+    # under --go it runs on both boxes before anything is merged, and stops on every reading that is not OLD
+    for verdict, fragment in ((_NEW, "it already runs the new build"),
+                              (_UNKNOWN, "the state is UNKNOWN"),
+                              (_DOWN, "is not 200 before the code deploy")):
+        w.serve = lambda host, sha, _v=verdict: _v
+        del w.calls[:]
+        trial = dict(st)
+        with pytest.raises(rt.Fail) as exc:
+            rt.phase_code(GO, trial)
+        assert fragment in str(exc.value), (verdict, str(exc.value))
+        assert w.kinds("git", "push", "deploy") == [], w.calls
+        assert "pre_code_old_build" not in trial and "code_sha" not in trial
+
+    # the OLD reading passes and is recorded; the merge and the deploy follow it
+    w.serve = _rt_default_serve
+    del w.calls[:]
+    rt.phase_code(GO, st)
+    assert st["pre_code_old_build"] is True and st["code_deployed"] is True
+    first_git = w.calls.index(w.kinds("git")[0])
+    assert w.calls[:2] == [("read", rt.PRIMARY), ("read", rt.STANDBY)], w.calls[:4]
+    assert first_git > 1
+    assert rt.load_state()["pre_code_old_build"] is True
+
+    # the bot phase records its skip with the reason, and verify accepts that disposition
+    rt.phase_i18n(GO, st)
+    rt.phase_bot(GO, st)
+    assert st["bot_deployed"] is False and st["bot_skipped"] == rt.BOT_SKIP_REASON
+    assert w.kinds("bot") == []
+    rt.phase_verify(GO, st)
+    assert st["verified"] is True
+
+
+def test_r10_m2_a_box_that_does_not_serve_the_new_build_stops_the_next_box_play(monkeypatch, tmp_path):
+    """A primary that reports no failure and still serves the OLD build stops the standby's deploy.
+
+    A play that reports failed=0 and a control route that answers 200 are both true of a container whose
+    restart changed nothing. The build used to be read only after BOTH boxes had been deployed, so the box
+    serving the routed reads was replaced too. Each box is now read alone, before the next box's play: the
+    code phase asks for the NEW build, the precursor deploy for the OLD one."""
+    rt, _src = _release_train()
+    for i, (after, says) in enumerate(((_OLD, "it serves the OLD build"),
+                                       (_UNKNOWN, "it reads as neither build"),
+                                       (_DOWN, "the control route is not 200"))):
+        _rt_bind(monkeypatch, rt, ABSENT_BATCH, tmp_path / ("code%d" % i))
+        w = _rt_world(monkeypatch, rt)
+        w.head = MERGE_SHA
+        w.serve = (lambda host, sha, _a=after:
+                   _a if (host == rt.PRIMARY and sha == MERGE_SHA) else _rt_default_serve(host, sha))
+        st = _rt_fresh(rt, schema_done=True, pre_code_old_build=True, code_sha=MERGE_SHA)
+        with pytest.raises(rt.Fail) as exc:
+            rt.phase_code(GO, st)
+        assert says in str(exc.value) and "no further box is deployed" in str(exc.value), str(exc.value)
+        assert w.kinds("deploy") == _rt_pair(rt, MERGE_SHA)[:1], w.calls
+        assert "code_deployed" not in st
+
+    # the precursor deploy: a primary that serves the NEW build after a files-only deploy
+    _rt_bind(monkeypatch, rt, "ban-cap", tmp_path / "precursor")
+    w = _rt_world(monkeypatch, rt)
+    w.serve = lambda host, sha: _NEW if (host == rt.PRIMARY and sha == PRECURSOR_SHA) else _OLD
+    with pytest.raises(rt.Fail) as exc:
+        rt.phase_deploy_precursor(GO, _rt_fresh(rt, precursor_sha=PRECURSOR_SHA))
+    assert "it serves the NEW build" in str(exc.value), str(exc.value)
+    assert w.kinds("deploy") == _rt_pair(rt, PRECURSOR_SHA)[:1], w.calls
+
+    # the inert twins: boxes that serve what they should are both deployed, primary first
+    w.serve = _rt_default_serve
+    del w.calls[:]
+    rt.phase_deploy_precursor(GO, _rt_fresh(rt, precursor_sha=PRECURSOR_SHA))
+    assert w.kinds("deploy") == _rt_pair(rt, PRECURSOR_SHA)
+    _rt_bind(monkeypatch, rt, ABSENT_BATCH, tmp_path / "twin")
+    w = _rt_world(monkeypatch, rt)
+    w.head = MERGE_SHA
+    st = _rt_fresh(rt, schema_done=True, pre_code_old_build=True, code_sha=MERGE_SHA)
+    rt.phase_code(GO, st)
+    assert st["code_deployed"] is True
+    assert w.kinds("deploy") == _rt_pair(rt, MERGE_SHA)
+
+
+def test_r10_m3_an_attempt_that_does_not_finish_leaves_a_word_no_gate_accepts(monkeypatch, tmp_path, capsys):
+    """An earlier run's success word does not stand over an attempt that stopped half way.
+
+    A re-run of a phase that died after its first mutating step left the previous run's True in the state
+    file, and the next phase's gate then ran behind a deploy (or migration) that had not finished. Each
+    phase that writes a success word (schema, code, i18n, bot, verify) now withdraws it, on disk, when a
+    --go attempt starts, and writes it back only after its postcondition. Every arm reads the REAL state
+    file back, as a later process would."""
+    rt, _src = _release_train()
+
+    def earlier(name, sub, **recorded):
+        _rt_bind(monkeypatch, rt, name, tmp_path / sub)
+        w = _rt_world(monkeypatch, rt)
+        rt.save_state(_rt_fresh(rt, **recorded))
+        return w, rt.load_state()
+
+    # schema: the migration does not finish; the code phase then refuses
+    w, st = earlier("qdig", "schema", schema_done=True)
+    w.raise_on["migrate"] = rt.Fail("the migrate wrapper did not answer within its bound")
+    with pytest.raises(rt.Fail):
+        rt.phase_schema(GO, st)
+    assert "schema_done" not in rt.load_state()
+    with pytest.raises(rt.Fail) as exc:
+        rt.phase_code(GO, rt.load_state())
+    assert "schema phase has not passed" in str(exc.value)
+
+    # code: the deploy does not finish; the recorded merge stays, the success word goes, i18n refuses
+    w, st = earlier(ABSENT_BATCH, "code", schema_done=True, pre_code_old_build=True,
+                    code_sha=MERGE_SHA, code_deployed=True)
+    w.head = MERGE_SHA
+    w.raise_on["deploy"] = rt.Fail("the deploy play did not answer within 1800 s")
+    with pytest.raises(rt.Fail):
+        rt.phase_code(GO, st)
+    on_disk = rt.load_state()
+    assert "code_deployed" not in on_disk and on_disk["code_sha"] == MERGE_SHA
+    with pytest.raises(rt.Fail) as exc:
+        rt.phase_i18n(GO, on_disk)
+    assert "code SHA is not live" in str(exc.value)
+
+    # i18n: a file does not apply; the bot phase then refuses
+    w, st = earlier("ban-cap", "i18n", schema_done=True, code_sha=MERGE_SHA, code_deployed=True,
+                    i18n_done=True)
+    w.raise_on["migrate"] = rt.Fail("migration 418 reported an error")
+    with pytest.raises(rt.Fail):
+        rt.phase_i18n(GO, st)
+    assert "i18n_done" not in rt.load_state()
+    with pytest.raises(rt.Fail) as exc:
+        rt.phase_bot(GO, rt.load_state())
+    assert "i18n phase has not passed" in str(exc.value)
+
+    # bot: the deploy does not finish; verify then refuses
+    w, st = earlier("ban-cap", "bot", schema_done=True, code_sha=MERGE_SHA, code_deployed=True,
+                    i18n_done=True, bot_deployed=True, bot_deployed_at=_rt_utc(30))
+    w.raise_on["bot"] = rt.Fail("deploy-bot did not answer within 900 s")
+    with pytest.raises(rt.Fail):
+        rt.phase_bot(GO, st)
+    assert not {"bot_deployed", "bot_deployed_at", "bot_skipped"} & set(rt.load_state())
+    with pytest.raises(rt.Fail) as exc:
+        rt.phase_verify(GO, rt.load_state())
+    assert "the state records no bot deploy" in str(exc.value)
+
+    # verify: a probe fails; the earlier `verified` does not stand
+    w, st = earlier("ban-cap", "verify", schema_done=True, code_sha=MERGE_SHA, code_deployed=True,
+                    i18n_done=True, bot_deployed=True, verified=True)
+    w.deployed = {rt.PRIMARY: MERGE_SHA, rt.STANDBY: MERGE_SHA}
+    w.http[rt.SMOKE_ROUTE] = "503"
+    with pytest.raises(rt.Fail):
+        rt.phase_verify(GO, st)
+    assert "verified" not in rt.load_state()
+
+
+def test_a_dry_run_writes_no_state_file(monkeypatch, tmp_path, capsys):
+    """A dry run writes nothing: `plan`, and `run` without --go, from the first phase or from verify.
+
+    The verify phase wrote `verified` at its end whether or not --go was given, so `plan --from verify`
+    after the code phase recorded a verification of a rollout whose i18n and bot phases had never run.
+    The boxes here already serve the new build, so every read-only probe a dry verify makes passes and
+    the phase reaches its end: the only thing standing between it and the file is the --go check."""
+    rt, _src = _release_train()
+    for name in NEWEST_THREE:
+        where = tmp_path / name
+        path = _rt_bind(monkeypatch, rt, name, where)
+        w = _rt_world(monkeypatch, rt)
+        w.serve = lambda host, sha: _NEW
+        argvs = (["plan"], ["run"], ["plan", "--from", "verify"], ["run", "--only", "verify"])
+        for argv in argvs:
+            monkeypatch.setattr(rt.sys, "argv", ["release_train.py"] + argv + ["--batch", name])
+            assert rt.main() == 0, capsys.readouterr().out
+            assert _rt_files(where) == [], (name, argv)
+        assert w.kinds("deploy", "git", "push", "migrate", "bot", "snapshot", "witness") == [], w.calls
+        # a state an earlier --go run left is read, and no dry run rewrites it
+        w.head = MERGE_SHA
+        os.makedirs(os.path.dirname(path))
+        rt.save_state(_rt_fresh(rt, schema_done=True, code_sha=MERGE_SHA, code_deployed=True))
+        before = Path(path).read_bytes()
+        for argv in argvs:
+            monkeypatch.setattr(rt.sys, "argv", ["release_train.py"] + argv + ["--batch", name])
+            assert rt.main() == 0, capsys.readouterr().out
+            assert Path(path).read_bytes() == before, (name, argv)
+            assert _rt_files(where) == [path], (name, argv)
+
+
+def test_verify_recomputes_the_bot_policy_from_the_selected_batch(monkeypatch, tmp_path):
+    """`bot_skipped` in the state says what SOME earlier run did, never what this batch requires.
+
+    The state file outlives the run that wrote it and an entry can change between them, so a batch that
+    requires the bot could reach verify on an old truthy `bot_skipped` and record `verified` with no bot
+    deployed. The policy is worked out again from the SELECTED batch: a batch that deploys the bot needs
+    the deploy recorded, a batch that skips it needs the skip recorded under its own reason. A refusal
+    comes before any probe, and writes nothing."""
+    rt, _src = _release_train()
+    refused = (("ban-cap", {"bot_deployed": False, "bot_skipped": "an earlier entry skipped the bot"},
+                "this batch deploys the bot"),
+               ("ban-cap", {}, "this batch deploys the bot"),
+               (ABSENT_BATCH, {"bot_deployed": True}, "this batch skips the bot"),
+               (ABSENT_BATCH, {"bot_deployed": False, "bot_skipped": "another reason"},
+                "this batch skips the bot"))
+    for i, (name, recorded, says) in enumerate(refused):
+        path = _rt_bind(monkeypatch, rt, name, tmp_path / ("refused%d" % i))
+        w = _rt_world(monkeypatch, rt)
+        w.serve = lambda host, sha: _NEW
+        st = _rt_fresh(rt, code_deployed=True, i18n_done=True, **recorded)
+        with pytest.raises(rt.Fail) as exc:
+            rt.phase_verify(GO, st)
+        assert says in str(exc.value), (name, recorded, str(exc.value))
+        assert "verified" not in st and not os.path.exists(path)
+        assert w.calls == [], w.calls
+
+    # the inert twins: each batch's own disposition is accepted
+    for name in (ABSENT_BATCH, "ban-cap"):
+        path = _rt_bind(monkeypatch, rt, name, tmp_path / ("twin-" + name))
+        w = _rt_world(monkeypatch, rt)
+        w.serve = lambda host, sha: _NEW
+        recorded = ({"bot_deployed": True, "bot_deployed_at": _rt_utc(0.1)} if rt.DEPLOY_BOT
+                    else {"bot_deployed": False, "bot_skipped": rt.BOT_SKIP_REASON})
+        st = _rt_fresh(rt, code_deployed=True, i18n_done=True, **recorded)
+        rt.phase_verify(GO, st)
+        assert st["verified"] is True and rt.load_state()["verified"] is True
+
+
+def test_every_json_marker_is_validated_even_when_the_batch_also_adds_a_route(monkeypatch):
+    """Validation returned on `new_routes` before it read the json markers, and the reading never read them.
+
+    A route batch carrying a json marker that could not fail was accepted as dead configuration. An entry is
+    reviewed as a whole: its json markers are validated whether or not it adds a route, and a batch that
+    carries both is READ on both -- NEW only when the routes and the markers both say new, OLD only when
+    both say old, unknown otherwise, on each box and through the edge."""
+    rt, _src = _release_train()
+    entry = dict(rt.BATCHES[JSON_BATCH])
+    m = entry["json_markers"][0]
+    route = "/api/v1/a-route-neither-build-serves"
+
+    for marker, says in ((dict(m, expect=None), "expects None"),
+                         (dict(m, why=""), "carries no `why`"),
+                         (dict(m, path=rt.CONTROL_ROUTE), "is read on the control route")):
+        rt.BATCHES["_broken"] = dict(entry, new_routes=[route], json_markers=[marker])
+        try:
+            with pytest.raises(rt.Fail) as exc:
+                rt.select_batch("_broken")
+            assert says in str(exc.value), (marker, str(exc.value))
+        finally:
+            del rt.BATCHES["_broken"]
+
+    rt.BATCHES["_both"] = dict(entry, new_routes=[route])
+    rt.select_batch("_both")
+    assert rt.NEW_ROUTES == [route] and rt.JSON_MARKERS == [m]
+    old_body = {"version": "1.41.0"}                 # the route answers; the key is not there
+    new_body = dict(old_body, **{m["key"]: m["expect"]})
+    for code, body, want in (("200", new_body, (True, False)),
+                             ("404", old_body, (False, True)),
+                             ("200", old_body, (False, False)),
+                             ("404", new_body, (False, False))):
+        monkeypatch.setattr(rt, "http_code",
+                            lambda host, path, _c=code, **kw: _c if path == route else "200")
         monkeypatch.setattr(rt, "route_json", lambda host, path, _b=body: _b)
         for host in (rt.PRIMARY, rt.STANDBY):
             ok, present, absent, readings = rt.code_state(host)
-            assert ok, host
-            assert (present, absent) == want, (host, body, why)
-            assert not (present and absent), why          # nothing is ever both
-            if not body:
-                assert readings == ["%s did not answer JSON" % m["path"]], readings
-                continue
-            # the reading names what it saw: "(absent)" or the value, for the
-            # key AND for the control, so a failure says which half failed
-            got = body.get(m["key"], "(absent)")
-            ctl = body.get(m["control_key"], "(absent)")
-            assert readings == ["%s %s=%s (want (absent); control %s=%s want True)"
-                                % (m["path"], m["key"],
-                                   "(absent)" if got == "(absent)" else repr(got),
-                                   m["control_key"],
-                                   "(absent)" if ctl == "(absent)" else repr(ctl))], readings
-
-    # ...and the same semantics through the edge, which is the path players traverse
-    monkeypatch.setattr(rt, "route_json", lambda host, path, _b=new_build: _b)
-    rt.assert_edge_runs_new_code()                     # the only reading that passes
-    for body in (old_build, inert, no_control, {}):
-        monkeypatch.setattr(rt, "route_json", lambda host, path, _b=body: _b)
-        with pytest.raises(rt.Fail):
+            assert ok and (present, absent) == want, (code, body, readings)
+            assert any(m["key"] in r for r in readings), readings
+        if want == (True, False):
             rt.assert_edge_runs_new_code()
+        else:
+            with pytest.raises(rt.Fail):
+                rt.assert_edge_runs_new_code()
 
 
-def test_the_train_refuses_an_ABSENT_marker_that_carries_no_control():
-    """An ABSENT marker without a control is a check that cannot fail, and the table refuses it (#342).
+# ── slice 2: the rollback point ───────────────────────────────────────────
 
-    The older rejection -- `expect: None` -- has to survive alongside it: None is what a body carries for a key set
-    to null, so it could never be the way to say "not there"."""
+
+def test_the_code_phase_refuses_a_train_with_no_recorded_snapshot(monkeypatch, tmp_path, capsys):
+    """The rollback point is a prerequisite of the code deploy, for every batch, and `--from code` skips phase 0.
+
+    A train resumed at the code phase never reaches phase 0, so it could merge, push and deploy to both boxes
+    with nothing to roll back to. The gate is asked before ANY command runs, including the read-only ones, so
+    a refusal leaves the tree, the remote, the boxes and the state file exactly as they were. It is asked of a
+    batch with migrations too: the snapshot is the rollback point for the CODE."""
     rt, _src = _release_train()
-    m = _absent_marker(rt)
-    entry = dict(rt.BATCHES[ABSENT_BATCH])
+    for name in (ABSENT_BATCH, "qdig"):
+        where = tmp_path / name
+        _rt_bind(monkeypatch, rt, name, where)
+        w = _rt_world(monkeypatch, rt)
+        st = {"schema_done": True}
+        with pytest.raises(rt.Fail) as exc:
+            rt.phase_code(GO, st)
+        assert "no rollback point" in str(exc.value) and "no snapshot is recorded" in str(exc.value)
+        assert w.calls == [] and st == {"schema_done": True} and _rt_files(where) == []
+        capsys.readouterr()
+        rt.phase_code(PLAN, {"schema_done": True})
+        out = capsys.readouterr().out
+        assert "no snapshot is recorded for this train" in out and "refuses" in out, out
 
-    def refuse(marker, why, says):
-        # The refusal is named, not merely raised: with any Fail accepted, a
-        # check removed from the table could stay green on a DIFFERENT
-        # refusal further down, and its control would redden nothing (B10).
-        entry["json_markers"] = [marker]
+
+def test_the_recorded_snapshot_binds_to_this_train_its_label_its_age_and_the_listing(monkeypatch, tmp_path):
+    """A recorded name is a rollback point only for this batch's label, and only while it is young.
+
+    The gate asked only whether a string was truthy, so a name taken under another batch's label, or one
+    taken last week, let a deploy proceed with nothing current to roll back to. The record now carries the
+    tool's own UTC time beside the name, and the age is read from THAT: the stamp inside the name is the
+    snapshot host's local wall clock (Pacific time), so it is checked for form and never for age. A record
+    without the time is too old. (The listing half -- does the snapshot still exist -- is not ported: the
+    age bound stands in for the wrapper's keep-10 prune.) Phase 0 replaces a record that does not stand with
+    a fresh snapshot and keeps the old name in the state."""
+    rt, _src = _release_train()
+    _rt_bind(monkeypatch, rt, ABSENT_BATCH, tmp_path / "gate")
+    base = {"schema_done": True, "pre_code_old_build": True}
+    refused = (
+        ({"snapshot": _rt_minted(rt, label="pre-ban-cap"), "snapshot_recorded_at": _rt_utc(1)},
+         "is not the form the wrapper mints for label"),
+        ({"snapshot": _rt_minted(rt)}, "carries no UTC time of its own"),
+        (_rt_fresh(rt, hours_ago=25), "past the 24 h bound"),
+        (_rt_fresh(rt, hours_ago=-2), "lies in the future"),
+        ({"snapshot": _rt_minted(rt, stamp="2026111_112001"), "snapshot_recorded_at": _rt_utc(1)},
+         "is not the form the wrapper mints for label"),
+        ({"snapshot": _rt_minted(rt), "snapshot_recorded_at": "2026-11-18 11:20:01"},
+         "is not a UTC time this tool wrote"),
+        # the minted shape, but its stamp is no calendar date and time (month 13, hour 25): recorded, not printed
+        ({"snapshot": _rt_minted(rt, stamp="20261345_256161"), "snapshot_recorded_at": _rt_utc(1)},
+         "is not the form the wrapper mints for label"),
+    )
+    for record, says in refused:
+        w = _rt_world(monkeypatch, rt)
+        st = dict(base, **record)
+        with pytest.raises(rt.Fail) as exc:
+            rt.phase_code(GO, st)
+        assert "no rollback point" in str(exc.value) and says in str(exc.value), (record, str(exc.value))
+        assert w.calls == [], w.calls
+
+    # the name's stamp is never read for age: one years old and one ahead of the UTC clock both stand
+    ahead = (datetime.now(timezone.utc) + timedelta(hours=8)).strftime("%Y%m%d_%H%M%S")
+    for i, stamp in enumerate(("20200101_000000", ahead)):
+        _rt_bind(monkeypatch, rt, ABSENT_BATCH, tmp_path / ("stands%d" % i))
+        w = _rt_world(monkeypatch, rt)
+        st = dict(base, snapshot=_rt_minted(rt, stamp=stamp), snapshot_recorded_at=_rt_utc(23))
+        rt.phase_code(GO, st)
+        assert st["code_deployed"] is True
+    assert rt.SNAPSHOT_MAX_AGE_HOURS == 24
+
+    # phase 0: a record that does not stand is replaced, and both names stay in the state
+    _rt_bind(monkeypatch, rt, ABSENT_BATCH, tmp_path / "phase0")
+    w = _rt_world(monkeypatch, rt)
+    old = _rt_minted(rt, stamp="20261116_090000")
+    old_at = _rt_utc(30)
+    st = {"snapshot": old, "snapshot_recorded_at": old_at}
+    rt.phase_snapshot(GO, st)
+    assert w.kinds("snapshot") == [("snapshot",)]
+    assert st["snapshot"] == _rt_minted(rt) and st["snapshot_recorded_at"] != old_at
+    assert st["snapshots_superseded"] == [{"name": old, "recorded_at": old_at}]
+    assert rt.load_state() == st
+    # ...and one that stands is not taken again
+    w = _rt_world(monkeypatch, rt)
+    rt.phase_snapshot(GO, _rt_fresh(rt))
+    assert w.kinds("snapshot") == []
+
+
+def test_a_snapshot_name_is_the_exact_form_the_wrapper_mints(monkeypatch, tmp_path):
+    """`cc_` plus anything is a SHAPE, and a shape is not a name.
+
+    The wrapper builds one form: `cc_`, the label with every character outside [a-zA-Z0-9_-] made `_`, the
+    underscore its `echo` newline becomes, a second underscore, and an eight-digit, `_`, six-digit stamp.
+    Phase 0 took the LAST `cc_` token of the play's output, so a name minted for another label, a token glued
+    into a longer one, or a stamp no calendar has could become the train's rollback point. Only the exact form
+    for this batch's label is recorded, as a whole token, and only when the output names exactly one."""
+    rt, _src = _release_train()
+    recap = "\nPLAY RECAP box : ok=2 changed=1 unreachable=0 failed=0"
+    _rt_bind(monkeypatch, rt, ABSENT_BATCH, tmp_path / "refused")
+    good = _rt_minted(rt)
+    label = rt.SNAPSHOT_LABEL
+    refused = (("ok: %s created" % _rt_minted(rt, label="pre-ban-cap"), "another batch's label"),
+               ("ok: cc_%s_20261118_112001 created" % label, "one underscore before the stamp"),
+               ("ok: %s1 created" % good, "a seventh digit glued to the stamp"),
+               ("ok: x%s created" % good, "the form inside a longer token"),
+               ("ok: %s created" % _rt_minted(rt, stamp="20261345_256161"), "a stamp no calendar has"),
+               ("ok: %s and %s" % (good, _rt_minted(rt, stamp="20261118_112002")), "two names of the form"))
+    for out, why in refused:
+        w = _rt_world(monkeypatch, rt)
+        w.snapshot_out = out + recap
+        st = {}
+        with pytest.raises(rt.Fail):
+            rt.phase_snapshot(GO, st)
+        assert st == {} and _rt_files(tmp_path / "refused") == [], why
+
+    # the exact form is recorded, with the tool's own UTC time beside it
+    w = _rt_world(monkeypatch, rt)
+    w.snapshot_out = "TASK ok: %s\nmsg: snapshot %s created%s" % (good, good, recap)
+    before = datetime.now(timezone.utc).replace(microsecond=0)
+    st = {}
+    rt.phase_snapshot(GO, st)
+    at = datetime.strptime(st["snapshot_recorded_at"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+    assert st["snapshot"] == good and before <= at <= datetime.now(timezone.utc)
+    assert rt.load_state() == st
+
+    # a label with characters the wrapper replaces mints the replaced form
+    rt.BATCHES["_odd"] = dict(rt.BATCHES[ABSENT_BATCH], snapshot_label="pre.x y")
+    _rt_bind(monkeypatch, rt, "_odd", tmp_path / "odd")
+    w = _rt_world(monkeypatch, rt)
+    w.snapshot_out = "ok: cc_pre.x y__20261118_112001" + recap
+    with pytest.raises(rt.Fail):
+        rt.phase_snapshot(GO, {})
+    w.snapshot_out = "ok: cc_pre_x_y__20261118_112001" + recap
+    st = {}
+    rt.phase_snapshot(GO, st)
+    assert st["snapshot"] == "cc_pre_x_y__20261118_112001"
+
+
+# ── slice 2, addition 1: a rollback point before every phase that changes a server ──
+
+_A1_SITES = (   # (phase, an entry in which that phase changes a server, the change the world records)
+    ("deploy-precursor", "qdig", "deploy"),
+    ("schema", "qdig", "migrate"),
+    ("code", "qdig", "deploy"),
+    ("i18n", "ban-cap", "migrate"),
+    ("bot", "ban-cap", "bot"),
+)
+_A1_IDLE = (    # (phase, an entry in which that phase changes nothing, the state it leaves as today)
+    ("deploy-precursor", "mscl", {}),
+    ("schema", "ban-cap", {"schema_done": True}),
+    ("i18n", "qdig", {"i18n_done": True}),
+    ("bot", "mscl", {"bot_deployed": False}),
+)
+_A1_GATES = {   # what each phase's own earlier gate asks of the state, so only the rollback point is missing
+    "deploy-precursor": {"precursor_sha": PRECURSOR_SHA},
+    "schema": {},
+    "code": {"schema_done": True},
+    "i18n": {"code_deployed": True},
+    "bot": {"i18n_done": True},
+}
+_A1_PROBLEMS = ("none recorded", "past the bound", "no UTC time")
+_A1_DONE = {"schema": "schema_done", "code": "code_deployed", "i18n": "i18n_done", "bot": "bot_deployed"}
+
+
+def _a1_phase(rt, phase):
+    return dict(rt.PHASES)[phase]
+
+
+def _a1_state(rt, phase, problem):
+    st = dict(_A1_GATES[phase])
+    if problem == "past the bound":
+        st.update(_rt_fresh(rt, hours_ago=rt.SNAPSHOT_MAX_AGE_HOURS + 1))
+    elif problem == "no UTC time":
+        st["snapshot"] = _rt_minted(rt)
+    return st
+
+
+@pytest.mark.parametrize("problem", _A1_PROBLEMS)
+@pytest.mark.parametrize("phase,name,_kind", _A1_SITES)
+def test_a1_each_phase_that_changes_a_server_refuses_without_a_rollback_point(
+        monkeypatch, tmp_path, phase, name, _kind, problem):
+    """Under --go each of the five phases refuses when the recorded snapshot does not stand.
+
+    A resumed run (`--from`, `--only`) never passes phase 0, so the phase asks itself: before its first
+    command, and before `attempt_starts`, so the state file is left byte-equal. The refusal names the
+    problem and says to resume at this phase."""
+    rt, _src = _release_train()
+    path = _rt_bind(monkeypatch, rt, name, tmp_path)
+    w = _rt_world(monkeypatch, rt)
+    st = _a1_state(rt, phase, problem)
+    if phase in _A1_DONE:
+        # a word an earlier attempt left: withdrawn by `attempt_starts`, so it stays only if the refusal comes first
+        st[_A1_DONE[phase]] = True
+    rt.save_state(st)
+    before = Path(path).read_bytes()
+    with pytest.raises(rt.Fail) as exc:
+        _a1_phase(rt, phase)(GO, rt.load_state())
+    msg = str(exc.value)
+    assert "no rollback point stands" in msg and msg.endswith("then resume at %s" % phase), msg
+    assert w.calls == [], w.calls
+    assert Path(path).read_bytes() == before
+
+
+@pytest.mark.parametrize("phase,name,_kind", _A1_SITES)
+def test_a1_a_dry_run_notes_the_missing_rollback_point_and_writes_nothing(
+        monkeypatch, tmp_path, capsys, phase, name, _kind):
+    """Without --go each of the five phases prints the plan note and goes on; nothing is written."""
+    rt, _src = _release_train()
+    path = _rt_bind(monkeypatch, rt, name, tmp_path)
+    w = _rt_world(monkeypatch, rt)
+    _a1_phase(rt, phase)(PLAN, _a1_state(rt, phase, "none recorded"))
+    out = capsys.readouterr().out
+    assert ("[plan only] no snapshot is recorded for this train: under --go this phase refuses "
+            "until the snapshot phase records a fresh one") in out, out
+    assert not Path(path).exists() and _rt_files(tmp_path) == []
+    assert w.kinds("deploy", "migrate", "bot", "git", "push") == [], w.calls
+
+
+@pytest.mark.parametrize("name", NEWEST_THREE)
+def test_a1_a_resumed_train_passes_each_phase_with_a_standing_rollback_point(monkeypatch, tmp_path, capsys,
+                                                                               name):
+    """Phase by phase, each its own `run --go --only <phase>`, with the record aged to just inside the bound.
+
+    Every phase that changes a server in this entry names the rollback point and makes its change; every
+    phase that changes nothing names none. The order of the whole train is the one a full run takes."""
+    rt, _src = _release_train()
+    path = _rt_bind(monkeypatch, rt, name, tmp_path)
+    w = _rt_world(monkeypatch, rt)
+    sites = {p: k for p, n, k in _A1_SITES}
+    changes = {"deploy-precursor": bool(rt.ALL_SQL), "schema": bool(rt.SCHEMA_SQL), "code": True,
+               "i18n": bool(rt.POST_CODE_SQL + rt.I18N_SQL + rt.BACKFILL_SQL), "bot": rt.DEPLOY_BOT}
+    for phase, _fn in rt.PHASES:
+        if phase in sites and Path(path).exists():
+            st = json.loads(Path(path).read_text(encoding="utf-8"))
+            st["snapshot_recorded_at"] = _rt_utc(rt.SNAPSHOT_MAX_AGE_HOURS - 1)
+            rt.save_state(st)
+        seen = len(w.calls)
+        monkeypatch.setattr(rt.sys, "argv", ["release_train.py", "run", "--go", "--batch", name, "--only", phase])
+        rc = rt.main()
+        out = capsys.readouterr().out
+        assert rc == 0, (phase, out)
+        if phase in sites and changes[phase]:
+            assert "rollback point: %s (recorded " % _rt_minted(rt) in out, (phase, out)
+            assert [c for c in w.calls[seen:] if c[0] == sites[phase]], (phase, w.calls[seen:])
+        else:
+            assert "rollback point: " not in out, (phase, out)
+    st = json.loads(Path(path).read_text(encoding="utf-8"))
+    assert st["verified"] is True and st["code_deployed"] is True and st["snapshot"] == _rt_minted(rt)
+
+
+@pytest.mark.parametrize("phase,name,after", _A1_IDLE)
+def test_a1_a_phase_that_changes_nothing_asks_nothing(monkeypatch, tmp_path, capsys, phase, name, after):
+    """A phase with nothing to change in this entry asks nothing and behaves as today, its done key included."""
+    rt, _src = _release_train()
+    _rt_bind(monkeypatch, rt, name, tmp_path)
+    w = _rt_world(monkeypatch, rt)
+    st = dict(_A1_GATES[phase])
+    _a1_phase(rt, phase)(GO, st)
+    out = capsys.readouterr().out
+    assert "rollback point: " not in out, out
+    for key, value in after.items():
+        assert st.get(key) is value, (key, st)
+    assert w.kinds("deploy", "migrate", "bot") == [], w.calls
+
+
+# ── slice 4: the small ones ───────────────────────────────────────────────
+
+
+def test_the_train_refuses_to_run_when_no_batch_is_named(monkeypatch, capsys):
+    """`--batch` is required: an unnamed batch selected one nobody chose.
+
+    `--batch` carried a default, so `plan`, `check` and `run --go` typed without it drove whichever train the
+    default named. The documented commands omitted the flag too, so following the docstring was the way to hit
+    it. There is no default now, the module arrives bound to no batch at all, and the refusal comes before
+    anything is selected, read or probed."""
+    rt, src = _release_train()
+    real_select = rt.select_batch          # kept for the twin, past the refusal stubs below
+    # the module arrives pointed at nothing: an import-time selection is the
+    # same default wearing a different hat
+    assert rt.BATCH_NAME is None and rt.BRANCH is None and rt.STATE_PATH is None
+    assert "DEFAULT_BATCH" not in src
+    # No command may leave this test, whatever main() decides: a train that
+    # selected a batch anyway would otherwise probe live boxes from a unit test.
+    monkeypatch.setattr(rt, "run", lambda cmd, **kw: _raise_no_command(cmd))
+
+    for action in ("plan", "check", "run"):
+        monkeypatch.setattr(sys, "argv", ["release_train.py", action])
+        assert rt.main() == 1
+        out = capsys.readouterr().out
+        assert "--batch is required" in out, out
+        for name in rt.BATCHES:
+            assert name in out, (name, out)
+
+    # and it refuses BEFORE it selects, reads the state file or probes anything
+    monkeypatch.setattr(rt, "select_batch",
+                        lambda name: pytest.fail("selected %r with no --batch" % name))
+    monkeypatch.setattr(rt, "load_state", lambda: pytest.fail("read a state file"))
+    monkeypatch.setattr(rt, "run", lambda cmd, **kw: pytest.fail("ran %r" % (cmd,)))
+    monkeypatch.setattr(sys, "argv", ["release_train.py", "check"])
+    assert rt.main() == 1
+    capsys.readouterr()
+
+    # every command this file tells an operator to type names a batch
+    typed = [l for l in src.splitlines()
+             if "release_train.py" in l and "python" in l and "--batch" not in l]
+    assert typed == [], typed
+
+    # the inert twin: a NAMED batch still binds
+    real_select(ABSENT_BATCH)
+    assert rt.BATCH_NAME == ABSENT_BATCH and rt.BRANCH == rt.BATCHES[ABSENT_BATCH]["branch"]
+
+
+def test_every_lan_probe_the_check_makes_carries_the_version_header(monkeypatch, capsys):
+    """`check` printed the mod-version body from an unheadered curl.
+
+    Every other LAN probe carries the version header; this one went out bare, so wherever the gate is armed
+    it read the gate's refusal on both builds -- a line that can never disagree with itself."""
+    rt, _src = _release_train()
+    rt.select_batch(ABSENT_BATCH)
+    cmds = []
+
+    def run(cmd, **kw):
+        cmds.append(list(cmd))
+        if cmd[0] == "curl":
+            return "200" if "-w" in cmd else "{}"
+        if cmd[0] == "ssh":
+            return ""
+        return "0"
+    monkeypatch.setattr(rt, "run", run)
+    import subprocess as _sp
+    inner = _sp.run
+
+    def process(cmd, *a, **kw):
+        if isinstance(cmd, (list, tuple)) and cmd and cmd[0] == "curl":
+            cmds.append(list(cmd))
+            return _rt_done(kw, "200")
+        return inner(cmd, *a, **kw)
+    monkeypatch.setattr(_sp, "run", process)
+    rt.phase_check(PLAN, {})
+    lan = [c for c in cmds if c[0] == "curl"
+           and any("//%s:" % h in c[-1] for h in (rt.PRIMARY, rt.STANDBY))]
+    for host in (rt.PRIMARY, rt.STANDBY):
+        assert any(c[-1] == "http://%s:8443/api/v1/mod-version" % host for c in lan), (host, lan)
+    for c in lan:
+        assert "X-Mod-Version: " + rt.MOD_VERSION_HEADER in c, c
+
+
+def test_a_control_holds_only_when_the_body_carries_its_type(monkeypatch):
+    """`1 == True` and `3 == 3.0` in Python; JSON carries them as different values.
+
+    A reading compared with == accepted a body of the wrong type as the expected value, so a wrong body, an
+    error page that happens to carry the key, or another serialiser read as the new build. The defect is the
+    OPERATION, so every reading with an expected value is compared at its type: the health markers on a box
+    and through the edge, the role values the health check waits for, and the json markers."""
+    rt, _src = _release_train()
+    monkeypatch.setattr(rt, "http_code", lambda host, path, **kw: "200")
+    monkeypatch.setattr(rt, "HEALTH_ROLE_WAIT_S", -1)
+    monkeypatch.setattr(rt.time, "sleep", lambda s: pytest.fail("the health check waited"))
+
+    def body_for(host, **over):
+        out = {}
+        for key, roles in rt.health_expectations():
+            out[key] = roles[host] if roles and roles.get(host) is not None else "present"
+        out.update(over)
+        return out
+
+    def same_value_other_type(v):
+        return float(v) if not isinstance(v, bool) else int(v)
+
+    for name in (TRAIN_BATCH, ABSENT_BATCH):
+        rt.select_batch(name)
+        key, roles = [(k, r) for k, r in rt.code_markers() if isinstance(r[rt.PRIMARY], int)][0]
+        wrongs = [same_value_other_type(roles[rt.PRIMARY])]
+        if roles[rt.PRIMARY] == 1:
+            wrongs.append(True)
+        for wrong in wrongs:
+            assert wrong == roles[rt.PRIMARY]          # the value Python's == would accept
+            body = body_for(rt.PRIMARY, **{key: wrong})
+            monkeypatch.setattr(rt, "health_json", lambda host, _b=body: _b)
+            present, absent, readings = rt.marker_state(rt.PRIMARY)
+            assert not present, (name, key, wrong, readings)
+            with pytest.raises(rt.Fail):
+                rt.assert_health_keys((rt.PRIMARY,))
+            if (key, roles[rt.PRIMARY]) in rt.edge_markers():
+                with pytest.raises(rt.Fail):
+                    rt.assert_edge_runs_new_code()
+        # the inert twin: the expected values at their own types read as the new build
+        body = body_for(rt.PRIMARY)
+        monkeypatch.setattr(rt, "health_json", lambda host, _b=body: _b)
+        assert rt.marker_state(rt.PRIMARY)[0] is True
+        rt.assert_health_keys((rt.PRIMARY,))
+
+    rt.select_batch(JSON_BATCH)
+    m = rt.JSON_MARKERS[0]
+    assert m["expect"] is True
+    monkeypatch.setattr(rt, "route_json", lambda host, path: {m["key"]: 1})
+    present, absent, readings = rt.json_marker_state(rt.PRIMARY)
+    assert (present, absent) == (False, False), readings
+    with pytest.raises(rt.Fail):
+        rt.assert_edge_runs_new_code()
+    monkeypatch.setattr(rt, "route_json", lambda host, path: {m["key"]: True})
+    assert rt.json_marker_state(rt.PRIMARY)[:2] == (True, False)
+    rt.assert_edge_runs_new_code()
+
+
+def test_the_push_url_gate_asks_git_where_a_push_would_really_go(monkeypatch, tmp_path):
+    """Before every push, git is asked where a push to `origin` would really go.
+
+    The configured literals are not where `git push` writes: `pushurl` adds destinations and
+    `pushInsteadOf` rewrites them at push time. `git remote get-url --push --all origin` is the verb that
+    expands both, and every destination it names must be the module's expected push address. The repository
+    is public, so a push is a publication: a wrong answer refuses before the precursor commit is made."""
+    rt, _src = _release_train()
+    url = getattr(rt, "ORIGIN_PUSH_URL", "the module states no push address")
+    for i, (answer, why) in enumerate((([FORK_URL], "another repository"),
+                                       ([url, FORK_URL], "two destinations, one of them right"),
+                                       ([], "no destination at all"))):
+        _rt_bind(monkeypatch, rt, "ban-cap", tmp_path / ("refused%d" % i))
+        w = _rt_world(monkeypatch, rt)
+        w.push_urls = answer
+        st = _rt_fresh(rt)
+        with pytest.raises(rt.Fail) as exc:
+            rt.phase_precursor(GO, st)
+        assert "nothing is pushed" in str(exc.value), (why, str(exc.value))
+        assert w.kinds("git", "push") == [] and "precursor_sha" not in st, why
+
+    # the inert twin: the right address once; it is asked again right before the push
+    _rt_bind(monkeypatch, rt, "ban-cap", tmp_path / "twin")
+    w = _rt_world(monkeypatch, rt)
+    st = _rt_fresh(rt)
+    rt.phase_precursor(GO, st)
+    assert st["precursor_sha"] == PRECURSOR_SHA
+    push = w.calls.index(("push", "git push origin"))
+    assert w.calls[push - 1] == ("push-address",), w.calls[push - 3:push + 1]
+    assert url.startswith("https://%s/" % rt.ORIGIN_HOST) and url.endswith("/SidsCompetitiveRounds.git")
+
+
+def test_the_merge_is_authenticated_and_the_remote_checked_before_the_push(monkeypatch, tmp_path):
+    """The code phase asks the push address before the merge AND again before the push.
+
+    Asked first, a wrong destination leaves main exactly as it was: no checkout, no merge, no commit. Asked
+    again immediately before the push, a destination that changed in between (a hook, a second process)
+    refuses the push itself: the merge is local, nothing is published, nothing is deployed."""
+    rt, _src = _release_train()
+    url = getattr(rt, "ORIGIN_PUSH_URL", "the module states no push address")
+    _rt_bind(monkeypatch, rt, ABSENT_BATCH, tmp_path / "before")
+    w = _rt_world(monkeypatch, rt)
+    w.push_urls = [FORK_URL]
+    st = _rt_fresh(rt, schema_done=True, pre_code_old_build=True)
+    with pytest.raises(rt.Fail) as exc:
+        rt.phase_code(GO, st)
+    assert "nothing is pushed" in str(exc.value)
+    assert w.kinds("git", "push", "deploy") == [] and "code_sha" not in st
+
+    _rt_bind(monkeypatch, rt, ABSENT_BATCH, tmp_path / "between")
+    w = _rt_world(monkeypatch, rt)
+    w.push_sequence = [[url], [FORK_URL]]
+    st = _rt_fresh(rt, schema_done=True, pre_code_old_build=True)
+    with pytest.raises(rt.Fail) as exc:
+        rt.phase_code(GO, st)
+    assert "nothing is pushed" in str(exc.value)
+    assert w.kinds("git") and w.kinds("push", "deploy") == [] and "code_sha" not in st
+
+    # the inert twin
+    _rt_bind(monkeypatch, rt, ABSENT_BATCH, tmp_path / "twin")
+    w = _rt_world(monkeypatch, rt)
+    st = _rt_fresh(rt, schema_done=True, pre_code_old_build=True)
+    rt.phase_code(GO, st)
+    push = w.calls.index(("push", "git push origin"))
+    assert w.calls[push - 1] == ("push-address",)
+    assert w.kinds("push-address") == [("push-address",)] * 2
+    assert w.kinds("deploy") == _rt_pair(rt, MERGE_SHA)
+
+
+def test_the_remote_gate_names_the_repository_and_reads_only_what_succeeded(monkeypatch, tmp_path, capsys):
+    """A command that failed is no answer, and the refusal prints no address.
+
+    A failed command's standard output can still hold the very address being asked about; a gate that read it
+    would pass on a question git never answered. The expected address is the module's own constant, the
+    command's return code has to be 0, and neither the expected nor the answered address appears in the
+    refusal or in anything printed."""
+    rt, _src = _release_train()
+    url = getattr(rt, "ORIGIN_PUSH_URL", "the module states no push address")
+    for i, (fails, answer, says) in enumerate(((True, [url], "did not succeed"),
+                                               (False, [FORK_URL], "differ from"))):
+        _rt_bind(monkeypatch, rt, "ban-cap", tmp_path / ("case%d" % i))
+        w = _rt_world(monkeypatch, rt)
+        w.push_address_fails, w.push_urls = fails, answer
+        capsys.readouterr()
+        with pytest.raises(rt.Fail) as exc:
+            rt.phase_precursor(GO, _rt_fresh(rt))
+        said = str(exc.value) + capsys.readouterr().out
+        assert says in str(exc.value), str(exc.value)
+        assert url not in said and FORK_URL not in said
+        assert w.kinds("git", "push") == []
+
+
+_PUSH_E = "https://example.invalid/the-expected-owner/the-expected-repository.git"
+_PUSH_DIFFER1 = "1 destination(s) that differ"
+_PUSH_CASES = [
+    # (id, standard output with {e} the expected address and {x} another, standard error, return code,
+    #  what the process call raises, the refusal's words or None for a pass)
+    ("E", "{e}\n", "", 0, None, None),
+    ("E-without-a-final-line-end", "{e}", "", 0, None, None),
+    ("E-E", "{e}\n{e}\n", "", 0, None, None),
+    ("E-and-a-warning-on-standard-error", "{e}\n", "warning: a notice git printed\n", 0, None, None),
+    ("E-blank-E", "{e}\n\n{e}\n", "", 0, None, _PUSH_DIFFER1),
+    ("one-blank-line", "\n", "", 0, None, _PUSH_DIFFER1),
+    ("blank-before-E", " {e}\n", "", 0, None, _PUSH_DIFFER1),
+    ("blank-after-E", "{e} \n", "", 0, None, _PUSH_DIFFER1),
+    ("E-then-blank-before-E", "{e}\n {e}\n", "", 0, None, _PUSH_DIFFER1),
+    ("X", "{x}\n", "", 0, None, _PUSH_DIFFER1),
+    ("E-X", "{e}\n{x}\n", "", 0, None, _PUSH_DIFFER1),
+    ("X-E", "{x}\n{e}\n", "", 0, None, _PUSH_DIFFER1),
+    ("X-X", "{x}\n{x}\n", "", 0, None, "2 destination(s) that differ"),
+    ("E-phrase1-E", "{e}\nhttps://example.invalid/post-quantum/a-repository.git\n{e}\n", "", 0, None,
+     _PUSH_DIFFER1),
+    ("E-phrase2-E", "{e}\nhttps://example.invalid/store now, decrypt later/a-repository.git\n{e}\n", "", 0,
+     None, _PUSH_DIFFER1),
+    ("E-phrase3-E", "{e}\nhttps://example.invalid/openssh.com/pq/a-repository.git\n{e}\n", "", 0, None,
+     _PUSH_DIFFER1),
+    ("E-stars-E", "{e}\n**\n{e}\n", "", 0, None, _PUSH_DIFFER1),
+    ("empty", "", "", 0, None, "names no destination"),
+    ("rc2-with-E", "{e}\n", "", 2, None, "did not succeed"),
+    ("timeout", "{e}\n", "", 0, subprocess.TimeoutExpired(["git"], 60), "did not succeed"),
+    ("could-not-start", "", "", 0, FileNotFoundError(2, "no such program"), "did not succeed"),
+]
+
+
+@pytest.mark.parametrize("stdout,stderr,rc,raises,says",
+                         [pytest.param(*c[1:], id=c[0]) for c in _PUSH_CASES])
+def test_the_push_address_check_compares_git_standard_output_line_for_line(monkeypatch, capsys, stdout, stderr,
+                                                                           rc, raises, says):
+    """The check reads git's standard output alone and every line of it must be the expected address.
+
+    The process call is answered here (standard output, standard error, return code), so whatever the check
+    does to the answer is inside the test. Nothing is removed from the answer, nothing is stripped, nothing
+    is joined to it; one final line end is not a line. A blank line, an address with blanks around it, a
+    line that holds a phrase of the ssh notice, another address beside the expected one or alone: each is a
+    line that differs. An empty answer names no destination. A return code that is not 0, a timeout and a
+    program that cannot start did not succeed. Standard error is no part of the answer. A refusal names no
+    address."""
+    import subprocess as _sp
+    rt, _src = _release_train()
+    monkeypatch.setattr(rt, "ORIGIN_PUSH_URL", _PUSH_E)
+    out = stdout.format(e=_PUSH_E, x=FORK_URL)
+    asked = []
+
+    def process(cmd, *a, **kw):
+        asked.append(list(cmd))
+        if raises is not None:
+            raise raises
+        return _rt_done(kw, out, stderr, rc)
+    monkeypatch.setattr(_sp, "run", process)
+    capsys.readouterr()
+    if says is None:
+        rt.assert_push_address()
+    else:
+        with pytest.raises(rt.Fail) as exc:
+            rt.assert_push_address()
+        msg = str(exc.value)
+        assert says in msg and "nothing is pushed" in msg, msg
+        said = msg + capsys.readouterr().out
+        for line in out.split("\n"):
+            assert not line.strip() or line.strip() not in said, (line, said)
+    assert asked == [["git", "remote", "get-url", "--push", "--all", "origin"]], asked
+
+
+def test_the_status_code_is_curls_standard_output_alone(monkeypatch, tmp_path):
+    """The status code a box answers is curl's standard output, and nothing curl writes to standard error.
+
+    A route batch's build is read from the code its routes answer: 404 is the old build. A notice on standard
+    error joined to that code made `404` read as another code, and so as the NEW build, in the per-box check a
+    deploy waits on. The code is read alone and as it stands; a return code that is not 0 is a Fail."""
+    import subprocess as _sp
+    rt, _src = _release_train()
+    name = next(n for n, e in rt.BATCHES.items() if e.get("new_routes") and not e.get("json_markers"))
+    _rt_bind(monkeypatch, rt, name, tmp_path)
+    route = rt.NEW_ROUTES[0]
+    note = "Warning: a notice curl printed\n"
+    answers = {r: ("404", note, 0) for r in rt.NEW_ROUTES}
+
+    def process(cmd, *a, **kw):
+        assert cmd[0] == "curl" and "-w" in cmd, cmd
+        return _rt_done(kw, *answers.get(cmd[-1].split(":8443", 1)[1], ("200", "", 0)))
+    monkeypatch.setattr(_sp, "run", process)
+    assert rt.http_code(rt.PRIMARY, route) == "404"
+    ok, present, absent, readings = rt.code_state(rt.PRIMARY)
+    assert (ok, present, absent) == (True, False, True), readings
+    with pytest.raises(rt.Fail) as exc:
+        rt.assert_box_build(rt.PRIMARY, "new", "a" * 40)
+    assert "it serves the OLD build" in str(exc.value)
+    answers[route] = ("200", "", 0)
+    assert rt.http_code(rt.PRIMARY, route) == "200"
+    answers[route] = ("000", "curl: (7) Failed to connect\n", 7)
+    with pytest.raises(rt.Fail) as exc:
+        rt.http_code(rt.PRIMARY, route)
+    assert "command failed (rc=7)" in str(exc.value)
+
+
+class _RtJobChild:
+    """A contained child as the job primitive hands it back: its two streams kept apart, unless the caller
+    sent standard error into standard output."""
+
+    def __init__(self, stdout, stderr, merged):
+        self.returncode = 0
+        self._streams = (stdout + stderr, None) if merged else (stdout, stderr)
+
+    def communicate(self, timeout=None):
+        return self._streams
+
+
+def test_the_snapshot_name_is_read_from_the_plays_standard_output_alone(monkeypatch, tmp_path):
+    """The snapshot phase counts the names in the play's standard output, with no line of it removed.
+
+    The child is answered at the job primitive, so what the train does to the play's output is inside the
+    test. A second name on a line that also holds a phrase of the ssh notice is still a second name, and the
+    phase refuses. A name that only standard error prints is no name; another name that only standard error
+    prints does not count against the one standard output names."""
+    import subprocess as _sp
+    rt, _src = _release_train()
+    recap = "PLAY RECAP box : ok=2 changed=1 unreachable=0 failed=0\n"
+    notice = "** WARNING: connection is not using a post-quantum key exchange algorithm.\n"
+    cases = (
+        ("the minted name; the ssh notice on standard error",
+         "TASK [snapshot] ok: created {new}\n" + recap, notice, None),
+        ("a second name on a line that holds a phrase of the ssh notice",
+         "TASK [snapshot] ok: created {new}\npruned {old} (post-quantum)\n" + recap, "", "different names"),
+        ("the name only on standard error", recap, "created {new}\n", "printed no name"),
+        ("another name only on standard error", "TASK [snapshot] ok: created {new}\n" + recap,
+         "pruned {old}\n", None),
+    )
+    for i, (why, stdout, stderr, says) in enumerate(cases):
+        _rt_bind(monkeypatch, rt, "ban-cap", tmp_path / ("case%d" % i))
+        names = dict(new=_rt_minted(rt, "20261118_112001"), old=_rt_minted(rt, "20261117_030000"))
+        spawned = []
+
+        def job_spawn(argv, job_name=None, before_resume=None, _o=stdout.format(**names),
+                      _e=stderr.format(**names), **kw):
+            spawned.append(kw.get("stderr"))
+            return _RtJobChild(_o, _e, kw.get("stderr") == _sp.STDOUT)
+        monkeypatch.setattr(rt, "job_spawn", job_spawn)
+        monkeypatch.setattr(rt, "job_end", lambda p, why="": {"empty": True})
+        monkeypatch.setattr(rt, "child_ended", lambda *a, **kw: None)
+        st = {}
+        if says is None:
+            rt.phase_snapshot(GO, st)
+            assert st["snapshot"] == names["new"], (why, st)
+        else:
+            with pytest.raises(rt.Fail) as exc:
+                rt.phase_snapshot(GO, st)
+            assert says in str(exc.value), (why, str(exc.value))
+            assert "snapshot" not in st, why
+        assert len(spawned) == 1, why
+
+
+def test_the_train_refuses_a_precursor_subject_that_describes_no_commit():
+    """The files-only subject and the sql files stand or fall together (#302), as a refusal with a sentence.
+
+    A batch with sql needs a subject for the files-only commit; a missing one was a KeyError deep in
+    selection. A batch with no sql commits nothing in the precursor phase, so it names no subject, or only
+    the sentence that states the skip; a commit subject there describes a commit nothing makes."""
+    rt, _src = _release_train()
+
+    def refused(base, change, says):
+        entry = dict(rt.BATCHES[base])
+        for k, v in change.items():
+            if v is _DROP:
+                entry.pop(k, None)
+            else:
+                entry[k] = v
         rt.BATCHES["_broken"] = entry
         try:
             with pytest.raises(rt.Fail) as exc:
                 rt.select_batch("_broken")
-            assert says in str(exc.value), (why, str(exc.value))
+            assert says in str(exc.value), (change, str(exc.value))
         finally:
             del rt.BATCHES["_broken"]
 
-    no_key = {k: v for k, v in m.items() if k != "control_key"}
-    no_val = {k: v for k, v in m.items() if k != "control_expect"}
-    refuse(no_key, "absence with no control field named", "carries no `control_key`")
-    refuse(no_val, "a control field with no value to hold it to",
-           "carries no `control_expect`")
-    refuse(dict(m, control_key=m["key"]), "the marker as its own control: gone AND present",
-           "as its own control")
-    refuse(dict(m, control_expect=rt.ABSENT),
-           "a control that is itself an absence proves nothing",
-           "the ABSENT sentinel as a value")
-    refuse(dict(m, expect=None),
-           "None, which an absent key would satisfy -- the older rule stands",
-           "expects None")
-    refuse(dict(m, why=""), "no `why`: a probe nobody wrote down is not reviewable",
-           "carries no `why`")
-    refuse(dict(m, path=rt.CONTROL_ROUTE), "read on the control route, so a down box reads as old",
-           "is read on the control route")
-
-    # and the marker as it actually ships is accepted
-    rt.select_batch(ABSENT_BATCH)
+    refused(ABSENT_BATCH, {"precursor_message": "Migration 999 precursor (files only)"},
+            "the precursor phase commits nothing")
+    refused("ban-cap", {"precursor_message": _DROP}, "names no precursor_message")
+    refused("ban-cap", {"precursor_message": "   "}, "names no precursor_message")
+    refused("ban-cap", {"precursor_message": rt.BATCHES[ABSENT_BATCH]["precursor_message"]},
+            "says it has none")
+    # the inert twins: the entries as they ship, including one with an empty subject and no sql
+    for name in (ABSENT_BATCH, "ban-cap", "qdig", "rehearsal-four"):
+        rt.select_batch(name)
 
 
-def test_a_batch_with_no_migration_skips_three_phases_and_moves_the_negative_control(monkeypatch, capsys):
-    """A batch carrying no sql at all is legal, and every skip is printed with its reason and recorded.
+# ── KEEP-C: what the operating train already does, re-pointed at it ──────
 
-    The #477 two-SHA order exists so a new api never boots against an old schema; with no schema moving there is no
-    first SHA. The phases that went with it carried something that is NOT optional, though: the precursor deploy was
-    the one moment the train SAW its discriminator answer `old`. Without that reading the code phase's postcondition
-    is a check that has never been seen to fail. So the reading moves to the START of the code phase, before the
-    merge and before any deploy, and it stops the train when it does not hold."""
+
+def test_the_code_phase_takes_the_branch_only_at_its_reviewed_tip(monkeypatch, tmp_path):
+    """The tip half of the provenance binding: the branch must be the pinned sha, and the merge must carry it.
+
+    A branch name is a mutable ref. The entry pins the full sha the review certified; the code phase (and the
+    precursor) refuse a branch at any other tip and an entry with no pin, and a merge whose second parent is
+    not that sha is recorded nowhere and deployed nowhere. (The main half -- `main_expected` and a clean tree
+    -- is TRAIN-PARITY-2's.)"""
     rt, _src = _release_train()
-    rt.select_batch(ABSENT_BATCH)
-    _seat(monkeypatch, rt)
-    _attested(monkeypatch, rt)
-    assert rt.ALL_SQL == [] and rt.SCHEMA_SQL == rt.I18N_SQL == rt.BACKFILL_SQL == []
-    assert rt.PRECURSOR_MESSAGE is None          # optional for this shape, and absent
-    assert rt.BOT_SKIP_REASON and not rt.DEPLOY_BOT
+    _rt_bind(monkeypatch, rt, ABSENT_BATCH, tmp_path / "moved")
+    w = _rt_world(monkeypatch, rt)
+    w.branch_tip = "f" * 40
+    st = _rt_fresh(rt, schema_done=True, pre_code_old_build=True)
+    with pytest.raises(rt.Fail) as exc:
+        rt.phase_code(GO, st)
+    assert "the review certified %s" % rt.REVIEWED_TIP in str(exc.value)
+    assert w.kinds("git", "push", "deploy") == []
 
-    args, st = SimpleNamespace(go=False), {}
-    for phase, key in ((rt.phase_precursor, "precursor_skipped"),
-                       (rt.phase_deploy_precursor, "deploy_precursor_skipped"),
-                       (rt.phase_schema, "schema_skipped")):
-        phase(args, st)
-        out = capsys.readouterr().out
-        assert "SKIPPED" in out and rt.NO_MIGRATION_REASON in out, (phase, out)
-        assert st[key] == rt.NO_MIGRATION_REASON        # recorded, not merely printed
-    assert "precursor_sha" not in st and "schema_done" not in st
+    _rt_bind(monkeypatch, rt, ABSENT_BATCH, tmp_path / "parent")
+    w = _rt_world(monkeypatch, rt)
+    w.second_parent = "f" * 40
+    st = _rt_fresh(rt, schema_done=True, pre_code_old_build=True)
+    with pytest.raises(rt.Fail) as exc:
+        rt.phase_code(GO, st)
+    assert "second parent" in str(exc.value) and "NOT deployed" in str(exc.value)
+    assert "code_sha" not in st and w.kinds("deploy") == []
 
-    # The provenance binding is this phase's own gate and has its own test; it
-    # is replaced here by a recorder so this one stays about the skipped
-    # phases and the relocated control -- and so that the ORDER can be read:
-    # the binding is consulted before the merge it guards.
-    provenance = []
-    monkeypatch.setattr(rt, "assert_reviewed_provenance",
-                        lambda st_: provenance.append("checked") or print("  provenance: checked"))
-    snapshotted = _snap()
-    _snapshot_is_listed(monkeypatch, rt)
-    # The universal clean gate is the first thing this phase runs now, so `run`
-    # has to answer it even in the plan arm; everything else reaching the stub
-    # is a command the plan should not have issued.
-    monkeypatch.setattr(rt, "run", lambda cmd, **kw:
-                        "" if list(cmd)[:3] == ["git", "status", "--porcelain"]
-                        else _raise_no_command(cmd))
+    rt.BATCHES["_unpinned"] = {k: v for k, v in rt.BATCHES[ABSENT_BATCH].items() if k != "reviewed_tip"}
+    _rt_bind(monkeypatch, rt, "_unpinned", tmp_path / "unpinned")
+    w = _rt_world(monkeypatch, rt)
+    with pytest.raises(rt.Fail) as exc:
+        rt.phase_code(GO, _rt_fresh(rt, schema_done=True, pre_code_old_build=True))
+    assert "NO reviewed_tip pinned" in str(exc.value) and w.kinds("git", "push", "deploy") == []
 
-    # the plan says where the control went, and names the reading it will take
-    rt.phase_code(args, st)
-    out = capsys.readouterr().out
-    assert "negative control" in out, out
-    assert rt.PRIMARY in out and rt.STANDBY in out and "OLD" in out, out
-    # ...and it is stated BEFORE the merge it guards, not after it
-    assert out.index("negative control") < out.index("git merge --no-ff --no-commit"), out
-    assert "git merge --no-ff --no-commit %s" % rt.BRANCH in out, out
-    # the plan says the snapshot is a prerequisite, and the binding was read
-    # before the merge line rather than after it
-    assert "no snapshot binds to this train yet" in out, out
-    assert provenance == ["checked"] and out.index("provenance") < out.index("git merge"), out
+    _rt_bind(monkeypatch, rt, "ban-cap", tmp_path / "precursor")
+    w = _rt_world(monkeypatch, rt)
+    w.branch_tip = "f" * 40
+    with pytest.raises(rt.Fail) as exc:
+        rt.phase_precursor(GO, _rt_fresh(rt))
+    assert "the review certified" in str(exc.value) and w.kinds("git", "push") == []
 
-    # under --go the control RUNS, on both boxes, before anything is merged --
-    # and it stops the train on every reading that is not OLD.
-    #
-    # `run` is replaced FIRST and throughout. It raises Fail on any non-zero
-    # command, so a phase that failed to stop here would reach `git checkout
-    # main`, fail it (main is checked out in another worktree) and satisfy
-    # pytest.raises(Fail) with the wrong exception -- a check that cannot fail
-    # (#342). A command reaching this stub is a Sentinel, never a Fail, and the
-    # message of each stop is read so the three are not one error found three
-    # ways.
-    class Sentinel(Exception):
-        pass
+    # the inert twin
+    _rt_bind(monkeypatch, rt, ABSENT_BATCH, tmp_path / "twin")
+    w = _rt_world(monkeypatch, rt)
+    st = _rt_fresh(rt, schema_done=True, pre_code_old_build=True)
+    rt.phase_code(GO, st)
+    assert st["code_sha"] == MERGE_SHA and st["code_deployed"] is True
 
-    def no_commands(cmd, **kw):
-        # ...except the universal clean gate, which opens the phase and is
-        # answered CLEAN here: this test is about the relocated control, and a
-        # phase that stopped at the gate would never reach it.
-        if list(cmd)[:3] == ["git", "status", "--porcelain"]:
-            return ""
-        raise Sentinel(" ".join(cmd) if isinstance(cmd, list) else cmd)
 
-    args = SimpleNamespace(go=True)
-    monkeypatch.setattr(rt, "save_state", lambda st_: None)
-    monkeypatch.setattr(rt, "run", no_commands)
-    for verdict, fragment in (((True, True, False, ["new"]), "it already runs the new build"),
-                              ((True, False, False, ["neither"]), "the state is UNKNOWN"),
-                              ((False, False, True, ["down"]), "is not 200 before the code deploy")):
-        monkeypatch.setattr(rt, "code_state", lambda host, _v=verdict: _v)
+def test_the_reviewed_tip_is_a_full_object_id_when_the_entry_is_selected(monkeypatch, capsys):
+    """The tip half of the anchors' shape: `reviewed_tip` is a full 40-hex id, asked when the entry is selected.
+
+    An abbreviation resolves against whatever objects this checkout holds; a full id names one commit. The
+    shape is asked at selection, before any git command, and the tip is printed whole."""
+    rt, _src = _release_train()
+    full = rt.BATCHES[ABSENT_BATCH]["reviewed_tip"]
+    for tip in (full[:7], full.upper(), full + "0", "main"):
+        rt.BATCHES["_tip"] = dict(rt.BATCHES[ABSENT_BATCH], reviewed_tip=tip)
         with pytest.raises(rt.Fail) as exc:
-            rt.phase_code(args, dict(snapshotted))
-        assert fragment in str(exc.value), (verdict, str(exc.value))
-
-    # the OLD reading passes it and is RECORDED; the sentinel proves nothing
-    # ran before that point -- the first git command is where it lands
-    monkeypatch.setattr(rt, "code_state", lambda host: (True, False, True, ["alias present"]))
-    st = dict(snapshotted)
-    with pytest.raises(Sentinel) as exc:
-        rt.phase_code(args, st)
-    # nothing before the merge but the clean read and the control
-    assert str(exc.value).startswith("git checkout main")
-    assert st["pre_code_old_build"] is True
-
-    # the bot phase skips with its reason, and the verify phase no longer reads
-    # that skip as "the bot phase never ran" -- which stopped every skip_bot
-    # train one phase from the end
-    st = {}
-    rt.phase_bot(SimpleNamespace(go=True), st)
-    assert st["bot_deployed"] is False and st["bot_skipped"] == rt.BOT_SKIP_REASON
-    assert rt.BOT_SKIP_REASON in capsys.readouterr().out
-    monkeypatch.setattr(rt, "assert_control", lambda host: None)
-    monkeypatch.setattr(rt, "assert_health_keys", lambda hosts: None)
-    monkeypatch.setattr(rt, "assert_positive_signals", lambda: None)
-    monkeypatch.setattr(rt, "http_code", lambda host, path, **kw: "200")
-    monkeypatch.setattr(rt, "code_state", lambda host: (True, True, False, ["alias absent"]))
-    monkeypatch.setattr(rt, "assert_edge_runs_new_code", lambda: None)
-    monkeypatch.setattr(rt, "schema_state", lambda host: ([], []))
-    monkeypatch.setattr(rt, "index_state", lambda host: [])
-    witnessed = []
-    monkeypatch.setattr(rt, "_bot_witness", lambda **kw: witnessed.append(kw))
-    # The phase now ends by asking both boxes which commit their deployed clone
-    # is on, so the state has to carry one; that question has its own test with
-    # its own reddening arm and is recorded rather than probed here.
-    asked = []
-    st["code_sha"] = MERGE_FULL
-    _code_sha_authenticated(monkeypatch, rt)
-    monkeypatch.setattr(rt, "assert_boxes_are_on", lambda sha, values=None: asked.append(sha))
-    rt.phase_verify(SimpleNamespace(go=True), st)
-    assert st["verified"] is True
-    assert asked == [MERGE_FULL], asked
-    assert witnessed == []      # a bot this train never touched is not witnessed
-    assert "NOT witnessed" in capsys.readouterr().out
+            rt.select_batch("_tip")
+        assert "FULL 40-hex" in str(exc.value), tip
+    rt.select_batch(ABSENT_BATCH)
+    assert rt.REVIEWED_TIP == full
+    monkeypatch.setattr(rt, "run", lambda cmd, **kw: full)
+    assert rt.assert_reviewed_tip("code") == full
+    assert full in capsys.readouterr().out
 
 
-def test_the_train_refuses_a_precursor_subject_that_describes_no_commit():
-    """The files-only subject and the sql files stand or fall together (#302)."""
+def test_the_recorded_code_sha_is_an_object_id_and_that_id_is_what_deploys(monkeypatch, tmp_path):
+    """The recorded merge deploys only when HEAD is exactly it, and the playbook is handed that id.
+
+    `code_sha` is read from a state file that outlives the run. A value that is not the commit HEAD is on --
+    a revision name such as `main`, or another commit -- is refused before the boot gate and before any
+    deploy, because the boot gate must read the deployed tree; the id that passes is the one each box's
+    play is pinned to."""
     rt, _src = _release_train()
-    for broken, why in (({"precursor_message": "Migration 999 precursor (files only)"},
-                         "a subject for a commit the precursor phase will skip"),
-                        ({"schema_sql": ["324_ffa_departure_cause.sql"]},
-                         "sql with no subject to commit it under")):
-        entry = dict(rt.BATCHES[ABSENT_BATCH])
-        entry.update(broken)
-        rt.BATCHES["_broken"] = entry
-        try:
-            with pytest.raises(rt.Fail):
-                rt.select_batch("_broken")
-        finally:
-            del rt.BATCHES["_broken"]
-        assert why
+    for i, recorded in enumerate(("main", "f" * 40)):
+        _rt_bind(monkeypatch, rt, ABSENT_BATCH, tmp_path / ("refused%d" % i))
+        w = _rt_world(monkeypatch, rt)
+        w.head = MERGE_SHA
+        with pytest.raises(rt.Fail) as exc:
+            rt.phase_code(GO, _rt_fresh(rt, schema_done=True, pre_code_old_build=True, code_sha=recorded))
+        assert "is not CODE_SHA" in str(exc.value), str(exc.value)
+        assert w.kinds("deploy") == []
+    _rt_bind(monkeypatch, rt, ABSENT_BATCH, tmp_path / "twin")
+    w = _rt_world(monkeypatch, rt)
+    w.head = MERGE_SHA
+    st = _rt_fresh(rt, schema_done=True, pre_code_old_build=True, code_sha=MERGE_SHA)
+    rt.phase_code(GO, st)
+    assert w.kinds("deploy") == _rt_pair(rt, MERGE_SHA)
+    assert w.kinds("git") == []      # a recorded merge is not merged again
+
+
+# ── the newest entries, end to end ────────────────────────────────────
+
+
+def test_the_three_newest_entries_run_end_to_end_under_the_train(monkeypatch, tmp_path, capsys):
+    """The three newest entries, each driven from `run --go` through every phase with the world stubbed.
+
+    Each batch shape is here: no sql and a skipped bot; sql applied after the code and a deployed bot; a
+    schema migration and a deployed bot. Every gate the train has must let each of them through when the
+    boxes do what they should, and the order of what would leave the machine is the order the two-SHA
+    rule requires."""
+    rt, _src = _release_train()
+    for name in NEWEST_THREE:
+        assert name in rt.BATCHES, name
+        where = tmp_path / name
+        path = _rt_bind(monkeypatch, rt, name, where)
+        w = _rt_world(monkeypatch, rt)
+        monkeypatch.setattr(rt.sys, "argv", ["release_train.py", "run", "--go", "--batch", name])
+        assert rt.main() == 0, capsys.readouterr().out
+        capsys.readouterr()
+        st = json.loads(Path(path).read_text(encoding="utf-8"))
+        assert st["verified"] is True and st["code_deployed"] is True and st["code_sha"] == MERGE_SHA
+        assert st["snapshot"] == _rt_minted(rt)
+        assert w.calls.index(("snapshot",)) < w.calls.index(w.kinds("git")[0])
+        merge_pair = _rt_pair(rt, MERGE_SHA)
+        if rt.ALL_SQL:
+            pre_pair = _rt_pair(rt, PRECURSOR_SHA)
+            assert w.kinds("deploy") == pre_pair + merge_pair, w.kinds("deploy")
+            assert len(w.kinds("push")) == 2 and st["precursor_sha"] == PRECURSOR_SHA
+        else:
+            assert w.kinds("deploy") == merge_pair and len(w.kinds("push")) == 1
+        assert [c[1] for c in w.kinds("migrate")] == rt.SCHEMA_SQL + rt.POST_CODE_SQL + rt.I18N_SQL + rt.BACKFILL_SQL
+        if rt.DEPLOY_BOT:
+            assert len(w.kinds("bot")) == 1 and st["bot_deployed"] is True
+            assert w.calls.index(w.kinds("bot")[0]) > w.calls.index(merge_pair[-1])
+        else:
+            assert w.kinds("bot") == [] and st["bot_skipped"] == rt.BOT_SKIP_REASON
+
+
+def test_every_typed_marker_expectation_has_the_type_the_api_serves():
+    """Markers are now compared at their type, so each entry's expected value must have the type the api serves.
+
+    For every entry, every per-role health value and every json marker whose key today's api still answers
+    is checked against the type of today's answer: the health check's model, and the mod-version body. A
+    mismatch here is an entry the new comparison would refuse on a box that is right."""
+    rt, _src = _release_train()
+
+    class _Up:
+        async def execute(self, *a, **k):
+            return None
+    served = {"/api/v1/health": _run(main.health_check(db=_Up())).model_dump(),
+              "/api/v1/mod-version": _run(main.get_mod_version())}
+    assert isinstance(served["/api/v1/mod-version"], dict)
+    checked = 0
+    for name in rt.BATCHES:
+        rt.select_batch(name)
+        health = served["/api/v1/health"]
+        for key, roles in rt.health_expectations():
+            if roles is None or key not in health or health[key] is None:
+                continue
+            for want in roles.values():
+                if want is not None:
+                    assert type(want) is type(health[key]), (name, key, want, health[key])
+                    checked += 1
+        for m in rt.JSON_MARKERS:
+            body = served.get(m["path"])
+            if body is None or body.get(m["key"]) is None:
+                continue
+            assert type(m["expect"]) is type(body[m["key"]]), (name, m["key"], m["expect"])
+            checked += 1
+    assert checked > 100, checked
 
 
 # ── round 2: the findings the cold review raised on the first pin ────────
@@ -1779,22 +2882,6 @@ def _attesting_run(rt, asked=None, **kw):
     return _run
 
 
-def _with_rc(fn, rc=0):
-    """A `rt.run` stub written before R9-M1, answering `(text, rc)` when the train asks for a status."""
-    def _run(cmd, **kwargs):
-        text = fn(cmd, **kwargs)
-        return (text, rc) if kwargs.get("with_rc") else text
-    return _run
-
-
-def _nonce_of(cmd):
-    """The token the train minted for this invocation, read out of the command it sent."""
-    import re as _re
-    joined = " ".join(cmd) if isinstance(cmd, list) else cmd
-    found = _re.search(r"-e scr_nonce=([0-9a-f]{32})", joined)
-    return found.group(1) if found else NONCE
-
-
 def _listing(name=None, stamp="2026-09-22 03:00:01", zone="", rc=0, agree=True,
              endpoint=None, box_id=SEAT_BOX_ID, fingerprints=None, identity=...,
              responder=SEAT_PLAY_HOST):
@@ -1814,135 +2901,6 @@ def _listing(name=None, stamp="2026-09-22 03:00:01", zone="", rc=0, agree=True,
         [identity[1], identity[1]] if identity else [])
     return {"raw": body, "rc": rc, "identity": identity, "responder": responder,
             "agree": agree, "fingerprints": list(fps)}
-
-
-def _listing_raw(body, rc=0, endpoint=None, box_id=SEAT_BOX_ID, agree=True,
-                 fingerprints=None, identity=..., responder=SEAT_PLAY_HOST):
-    """A listing whose BODY is given verbatim -- for the arms about parsing it."""
-    if identity is ...:
-        identity = (endpoint if endpoint is not None else OTHER_TOKEN, box_id)
-    fps = fingerprints if fingerprints is not None else (
-        [identity[1], identity[1]] if identity else [])
-    return {"raw": body, "rc": rc, "identity": identity, "responder": responder,
-            "agree": agree, "fingerprints": list(fps)}
-
-
-def _code_sha_authenticated(monkeypatch, rt):
-    """Let a phase past the persisted-SHA door without a git command.
-
-    The door is a git question with its own test and its own reddening arms
-    (R8-L4/L5): the recorded id is an object this repository holds, it is a
-    merge of the two bound shas in that order, it carries their tree, and the
-    reviewed tip is reachable from it. Stubbed here for the same reason
-    `_attested` is -- a test about what phase 7 asks the BOXES is not a second
-    test of how it decides the recorded id is the reviewed merge."""
-    monkeypatch.setattr(rt, "authenticated_code_sha", lambda raw, how: raw)
-    monkeypatch.setattr(rt, "_git_auth_succeeds", lambda args, **kw: True)
-    monkeypatch.setattr(rt, "_commit_sha", lambda rev, **kw: rev)
-
-
-def _fresh_process(rt, *keys):
-    """Forget what this process captured of the seat, as a NEW process would.
-
-    The seat is read once per process and answered from that first reading ever
-    after (R8-H2), so a test that moves an environment variable mid-test is
-    describing a second RUN, not a second question inside one run. Nothing in
-    the train may do this -- `_read_live_seat` refuses a key it has already
-    captured -- which is why the test does it explicitly and says so."""
-    for key in keys:
-        rt._SEAT_SNAPSHOT.pop(key, None)
-
-
-def _play_out(name, host=SEAT_PLAY_HOST, failed=0):
-    """The imported snapshot play's OWN output, between the two facts sections."""
-    return ("TASK [take the snapshot] ***\nchanged: [%s]\n%s"
-            % (host, ("snapshot: %s" % name) if name else ""))
-
-
-def _attesting_deploy(rt, calls, out="changed=2 failed=0", boxes=None, shas=None,
-                      probes=None, gate=True, gated=None, probed=None):
-    """A `run_attested` stub answering the way one deploy invocation does.
-
-    Which box answers is decided by the CALL ORDER, not by the selector string,
-    so a test that moves a selector value still gets the primary's box first.
-    The endpoint comes back as the CLASS the train now records (R8-H5).
-
-    R9-M2. `_deploy_both` now probes BOTH boxes read-only before either play,
-    and each play carries the identity gate. A probe (no play) is answered from
-    `probes` -- by default the primary's box, then the standby's, in that
-    order, repeating -- and is recorded in `probed`, never in `calls`, so
-    `calls` stays what it always was: the plays that RAN. With `gate` (the
-    default) a play whose box is not the pair it was `expect`ed to be does what
-    the box's own gate does: the process ends before the imported play,
-    recorded in `gated`, never in `calls`. `gate=False` turns that off, which
-    is how an arm reaches the after-play comparison behind it."""
-    boxes = boxes or [(rt.PRIMARY, PRIMARY_BOX_ID), (rt.STANDBY, STANDBY_BOX_ID)]
-    probes = probes or [(rt.PRIMARY, PRIMARY_BOX_ID), (rt.STANDBY, STANDBY_BOX_ID)]
-    count = {"probes": 0}
-
-    def _answer(addr, box_id, ref):
-        facts = _facts_body(addr=addr, box_id=box_id, sha=ref)
-        token = rt.endpoint_class(addr)
-        return ({(rt.FACTS_MARK, rt.BEFORE): facts, (rt.FACTS_MARK, rt.AFTER): facts,
-                 "fingerprints": [box_id, box_id], "endpoints": [token, token], "rc": 0},
-                (token, box_id))
-
-    def _stub(limit, values=None, play=None, extra=None, listing=False, st=None,
-              status_keys=(), who="", timeout=1800, expect=None):
-        if play is None:
-            addr, box_id = probes[count["probes"] % len(probes)]
-            count["probes"] += 1
-            if probed is not None:
-                probed.append(limit)
-            sections, identity = _answer(addr, box_id, OTHER_FULL)
-            return "", sections, identity, SEAT_PLAY_HOST
-        addr, box_id = boxes[min(len(calls), len(boxes) - 1)]
-        if gate and expect is not None and (rt.endpoint_class(addr), box_id) != tuple(expect):
-            if gated is not None:
-                gated.append((play, limit, extra))
-            rt.refuse_attestation(st, status_keys,
-                                  "%s: the ansible-playbook process this operation ran exited "
-                                  "rc=2 -- the identity gate refused the box before the "
-                                  "imported play" % who)
-        calls.append((play, limit, extra))
-        ref = None
-        if "scr_deploy_ref=" in (extra or ""):
-            ref = (extra or "").split("scr_deploy_ref=")[1].split()[0]
-        if shas is not None:
-            ref = shas[min(len(calls) - 1, len(shas) - 1)]
-        sections, identity = _answer(addr, box_id, ref)
-        return out, sections, identity, SEAT_PLAY_HOST
-
-    return _stub
-
-
-def _phase_zero(monkeypatch, rt, name, before=None, after=None, host=SEAT_PLAY_HOST,
-                out=None, calls=None):
-    """Phase 0's whole world: the attestation and the ONE attested operation.
-
-    The container answers `before` on the way in and `after` on the way out,
-    because that DIFFERENCE is the only thing that tells a snapshot this play
-    took from one the container was already holding -- an old snapshot of this
-    batch's own label satisfies the name grammar, the listing and the binding
-    predicate exactly, and the round before stamped it with the moment of
-    recording and called it fresh.
-
-    Both listings and the play are ONE call now (R8-M1), so this stubs the one
-    function that runs it."""
-    _attested(monkeypatch, rt)
-    state = {"minted": False}
-    before_l = before if before is not None else _listing(None)
-    after_l = (after if after is not None else (_listing(name) if name else before_l))
-
-    def operation(values=None, play=None, extra=None, st=None, status_keys=(), who=""):
-        state["minted"] = True
-        if calls is not None:
-            calls.append(((play,), {"limit": rt.snapshot_target(values), "extra": extra}))
-        return (out if out is not None else _play_out(name, host=host)), before_l, after_l
-
-    monkeypatch.setattr(rt, "snapshot_operation", operation)
-    monkeypatch.setattr(rt, "snapshot_listing", lambda values=None: before_l)
-    return state
 
 
 def _snapshot_is_listed(monkeypatch, rt, name=None, stamp=None):
@@ -2070,364 +3028,6 @@ def test_the_code_phase_binds_the_deploy_to_the_shas_that_were_reviewed(monkeypa
     rt.select_batch(ABSENT_BATCH)
 
 
-def test_a_control_holds_only_when_the_body_carries_its_type(monkeypatch):
-    """M1: `1 == True` in Python, and a control that accepts a different type is not reading this body.
-
-    JSON carries `1`, `1.0`, `"true"` and `true` as four different things; Python's == flattens the first
-    three into the fourth for a control written as `True`. The control exists to prove the body IS the one
-    being asked for, so a wrong body, an error page that happens to carry the key, or an older serialiser
-    satisfied it -- and the absence beside it was then read as the new build. The defect is the OPERATION,
-    not the line it was found on, so every reading a batch declares an expected value for is compared the
-    same way: the ABSENT control, the forward marker, and the health markers, on a box and through the edge."""
-    rt, _src = _release_train()
-    monkeypatch.setattr(rt, "http_code", lambda host, path, **kw: "200")
-
-    assert rt.reading_matches(True, True) is True
-    for got in (1, 1.0, "true", "True", [1]):
-        assert rt.reading_matches(got, True) is False, got
-    assert rt.reading_matches(False, False) is True and rt.reading_matches(0, False) is False
-    assert rt.reading_matches(True, 1) is False          # and the other direction
-    assert rt.reading_matches("v4.14", "v4.14") is True and rt.reading_matches(3, 3) is True
-    assert rt.reading_matches(rt._MISSING, True) is False
-
-    m = _absent_marker(rt)
-    for ctl, want, why in ((1, (False, False), "JSON 1 is not the boolean the control names"),
-                           (1.0, (False, False), "nor is a float"),
-                           ("true", (False, False), "nor the string"),
-                           (True, (True, False), "the boolean itself: the control holds")):
-        body = {"version": "1.40.3", m["control_key"]: ctl}       # the alias is absent in all four
-        monkeypatch.setattr(rt, "route_json", lambda host, path, _b=body: _b)
-        for host in (rt.PRIMARY, rt.STANDBY):
-            assert rt.code_state(host)[1:3] == want, (host, ctl, why)
-        if want == (True, False):
-            rt.assert_edge_runs_new_code()                        # the inert twin, through the edge
-        else:
-            with pytest.raises(rt.Fail) as exc:
-                rt.assert_edge_runs_new_code()
-            assert "control" in str(exc.value), why
-
-    # the FORWARD marker, on the batch that shipped with one
-    rt.select_batch("bug392-server")
-    fwd = rt.JSON_MARKERS[0]
-    assert fwd["expect"] is True
-    for got, want in ((1, (False, False)), ("true", (False, False)), (True, (True, False))):
-        monkeypatch.setattr(rt, "route_json", lambda host, path, _b={fwd["key"]: got}: _b)
-        assert rt.code_state(rt.PRIMARY)[1:3] == want, got
-
-    # and the health markers, the third surface the same comparison is made on
-    rt.select_batch("rejoin-phase-a")
-    assert rt.CODE_MARKERS == ["ffa_hold_fences"]
-    for got, want in ((True, (False, True)), (1, (True, False))):
-        monkeypatch.setattr(rt, "health_json", lambda host, _b={"ffa_hold_fences": got}: _b)
-        assert rt.code_state(rt.PRIMARY)[1:3] == want, got
-    rt.select_batch(ABSENT_BATCH)
-
-
-def test_verify_recomputes_the_bot_policy_from_the_selected_batch(monkeypatch, capsys):
-    """M2: `bot_skipped` in the state says what SOME earlier run did, never what this batch requires.
-
-    The state file outlives the run that wrote it and an entry can change between them, so a batch that now
-    requires the bot could resume at verify onto an old truthy `bot_skipped`, deploy no bot, witness no bot
-    and still save `verified`. The policy is therefore recomputed from the SELECTED batch: a batch without
-    skip_bot treats a recorded skip as a contradiction and prints the reading it refused; a batch with
-    skip_bot requires the recorded skip, with its own reason, because the phase that prints the reason is
-    what proves the phase ran at all."""
-    rt, _src = _release_train()
-    asked = []
-    for name, stub in (("assert_control", lambda host: None),
-                       ("assert_health_keys", lambda hosts: None),
-                       ("assert_positive_signals", lambda: None),
-                       ("http_code", lambda host, path, **kw: "200"),
-                       ("code_state", lambda host: (True, True, False, ["alias absent"])),
-                       ("assert_edge_runs_new_code", lambda: None),
-                       ("schema_state", lambda host: ([], [])),
-                       ("index_state", lambda host: []),
-                       # The phase ends by asking both boxes which commit their
-                       # deployed clone is on. That has its own test with its
-                       # own reddening arm; what this one is about is the bot
-                       # policy, so the states that pass carry the sha and the
-                       # probe is recorded rather than made.
-                       ("assert_boxes_are_on", lambda sha, values=None: asked.append(sha)),
-                       ("save_state", lambda st_: None)):
-        monkeypatch.setattr(rt, name, stub)
-    # ...and the persisted SHA goes through the same git door a fresh merge
-    # does before any of that (R8-L4/L5), which is also somebody else's test.
-    _code_sha_authenticated(monkeypatch, rt)
-    witnessed = []
-    monkeypatch.setattr(rt, "_bot_witness", lambda **kw: witnessed.append(kw))
-    go = SimpleNamespace(go=True)
-
-    # a batch that does NOT declare skip_bot, resumed onto a state that records one
-    rt.BATCHES["_no_skip"] = {k: v for k, v in rt.BATCHES[ABSENT_BATCH].items() if k != "skip_bot"}
-    try:
-        rt.select_batch("_no_skip")
-        assert rt.DEPLOY_BOT and rt.BOT_SKIP_REASON is None
-        stale = "a reason some earlier run of some other batch wrote down"
-        st = {"bot_skipped": stale, "bot_deployed": False}
-        with pytest.raises(rt.Fail) as exc:
-            rt.phase_verify(go, st)
-        assert stale in str(exc.value)                # the reading it refused is printed
-        # R9-M3: a refused verify leaves the attempt sentinel, never a success
-        assert st.get("verified") == rt.ATTEMPTED and witnessed == []
-        # ...and this is not the old "bot phase has not run" stop wearing a new
-        # message: an empty state still stops, with that one
-        st = {}
-        with pytest.raises(rt.Fail) as exc:
-            rt.phase_verify(go, st)
-        assert "bot phase has not passed" in str(exc.value)
-        assert st.get("verified") == rt.ATTEMPTED
-        # R9-M5 (B6): the non-skip arm accepts only the exact True a witnessed
-        # deploy writes. REFUSED and ATTEMPTED are truthy words, and a truth
-        # test read either as a deployed bot.
-        for word in ("REFUSED", rt.ATTEMPTED, "yes", 1):
-            st = {"bot_deployed": word, "code_sha": MERGE_FULL}
-            with pytest.raises(rt.Fail) as exc:
-                rt.phase_verify(go, st)
-            assert "bot phase has not passed" in str(exc.value), (word, str(exc.value))
-            assert st.get("verified") == rt.ATTEMPTED and witnessed == [], word
-        # the inert twin for this arm: the bot really was deployed, so it is
-        # witnessed -- and witnessed BEFORE the arm passes, ahead of every
-        # other reading this phase makes (B6)
-        order = []
-        monkeypatch.setattr(rt, "_bot_witness",
-                            lambda **kw: witnessed.append(kw) or order.append("witness"))
-        monkeypatch.setattr(rt, "assert_control", lambda host: order.append("control"))
-        st = {"bot_deployed": True, "code_sha": MERGE_FULL}
-        rt.phase_verify(go, st)
-        assert st["verified"] is True and len(witnessed) == 1
-        assert order and order[0] == "witness", order
-        assert asked == [MERGE_FULL], asked
-        # R9-L5: the success word travels with the GO run that earned it
-        assert st["verified_evidence"]["code_sha"] == MERGE_FULL, st
-        assert st["verified_evidence"]["mode"] == "GO" and rt.verified_is_backed(st), st
-    finally:
-        del rt.BATCHES["_no_skip"]
-
-    # the batch as it ships: the skip is declared AND recorded -> passes, no witness
-    rt.select_batch(ABSENT_BATCH)
-    witnessed[:] = []
-    capsys.readouterr()
-    st = {"bot_deployed": False, "bot_skipped": rt.BOT_SKIP_REASON, "code_sha": MERGE_FULL}
-    asked[:] = []
-    rt.phase_verify(go, st)
-    assert st["verified"] is True and witnessed == []
-    assert asked == [MERGE_FULL], asked
-    assert "NOT witnessed" in capsys.readouterr().out
-    # a skip batch whose bot phase never ran at all is refused: the reason is
-    # written down by the phase, so its absence means the phase did not run
-    st = {}
-    with pytest.raises(rt.Fail) as exc:
-        rt.phase_verify(go, st)
-    assert "must have RUN" in str(exc.value) and st.get("verified") == rt.ATTEMPTED
-    # ...as is a skip recorded under a different reason than this entry gives
-    st = {"bot_skipped": "some other batch's reason"}
-    with pytest.raises(rt.Fail) as exc:
-        rt.phase_verify(go, st)
-    assert "not made under this batch's policy" in str(exc.value)
-    assert st.get("verified") == rt.ATTEMPTED
-
-
-def test_the_code_phase_refuses_a_train_with_no_recorded_snapshot(monkeypatch):
-    """M3: the rollback point is a prerequisite of the deploy, for every batch, and `--from code` skips phase 0.
-
-    Phase 0 takes the PVE snapshot and records the cc_* name the wrapper minted. A train resumed at the
-    code phase -- which is exactly what a rerun after any earlier stop does -- never reaches phase 0, so the
-    round-1 train could merge, push and deploy to both boxes with nothing to roll back to. The gate is asked
-    before ANY command runs, including the read-only ones, so a refusal leaves the tree and the boxes exactly
-    as they were. It is asked of a batch with migrations too: the snapshot is the rollback point for the CODE."""
-    rt, _src = _release_train()
-    rt.select_batch(ABSENT_BATCH)
-    _seat(monkeypatch, rt)
-    _attested(monkeypatch, rt)
-    log = []
-
-    def record(cmd, **kw):
-        log.append(" ".join(cmd) if isinstance(cmd, list) else cmd)
-        raise _NoCommand(log[-1])
-
-    monkeypatch.setattr(rt, "run", record)
-    monkeypatch.setattr(rt, "save_state", lambda st_: None)
-    monkeypatch.setattr(rt, "code_state", lambda host: (True, False, True, ["alias present"]))
-
-    # both resume shapes land in this phase the same way, and both refuse
-    for args in (SimpleNamespace(go=True, start="code", only=None),
-                 SimpleNamespace(go=True, start=None, only="code")):
-        log[:] = []
-        with pytest.raises(rt.Fail) as exc:
-            rt.phase_code(args, {})
-        assert "snapshot" in str(exc.value) and "rollback point" in str(exc.value)
-        assert log == []                     # not one command ran, read-only or otherwise
-    # a batch WITH migrations is asked the same question
-    rt.select_batch("rejoin-phase-a")
-    log[:] = []
-    with pytest.raises(rt.Fail) as exc:
-        rt.phase_code(SimpleNamespace(go=True, start="code", only=None), {"schema_done": True})
-    assert "snapshot" in str(exc.value) and log == []
-    rt.select_batch(ABSENT_BATCH)
-    # and phase 0 is still first for a run that starts at the beginning: the
-    # gate is for the runs that do not
-    assert [p for p, _fn in rt.PHASES][0] == "snapshot"
-
-    # inert twin: with a snapshot recorded that BINDS to this train the phase
-    # proceeds -- to the clean gate, then the provenance check
-    stub, log2 = _fake_git(rt, {"990cd43": REVIEWED_FULL, "8820463": MAIN_FULL,
-                                rt.BRANCH: REVIEWED_FULL, "main": MAIN_FULL},
-                           trees={REVIEWED_FULL: REVIEWED_TREE})
-    monkeypatch.setattr(rt, "run", stub)
-    _snapshot_is_listed(monkeypatch, rt)
-    with pytest.raises(_NoCommand) as exc:
-        rt.phase_code(SimpleNamespace(go=True, start=None, only="code"), _snap())
-    assert log2[0] == "git status --porcelain", log2
-    assert log2[1].startswith("git %s rev-parse --verify" % NO_REPLACE), log2
-    assert str(exc.value).startswith("git checkout main"), log2
-
-
-def test_the_ABSENT_sentinel_is_value_unequal_to_its_own_spelling(monkeypatch):
-    """L1: subclassing str kept the sentinel identity-distinct and left it value-EQUAL to the plain string.
-
-    Every active dispatch used `is`, so nothing misread today -- but a sentinel that compares equal to a
-    string a body could legitimately carry is a trap set for the first `==` anyone writes, and the type
-    exists precisely so that cannot happen. It is now a final sentinel: equal to itself and to nothing else,
-    printed by repr wherever a line describes it."""
-    rt, _src = _release_train()
-    assert not isinstance(rt.ABSENT, str)
-    assert ("ABSENT" == rt.ABSENT) is False and (rt.ABSENT == "ABSENT") is False
-    assert ("ABSENT" != rt.ABSENT) is True and (rt.ABSENT != "ABSENT") is True
-    assert rt.ABSENT == rt.ABSENT and rt.ABSENT is rt.ABSENT
-    assert repr(rt.ABSENT) == "ABSENT" and "%r" % (rt.ABSENT,) == "ABSENT"
-    other = type(rt.ABSENT)()                      # a second instance is not this value either
-    assert other is not rt.ABSENT and (other == rt.ABSENT) is False
-
-    m = _absent_marker(rt)
-    assert "ABSENT" in rt.marker_words(m) and "ABSENT" in rt.discriminator_words()
-
-    # a body whose alias key holds the STRING "ABSENT" has the key PRESENT, so
-    # it is the OLD build -- on a box and through the edge
-    monkeypatch.setattr(rt, "http_code", lambda host, path, **kw: "200")
-    spelled = {m["control_key"]: True, m["key"]: "ABSENT"}
-    monkeypatch.setattr(rt, "route_json", lambda host, path, _b=spelled: _b)
-    for host in (rt.PRIMARY, rt.STANDBY):
-        assert rt.code_state(host)[1:3] == (False, True), host
-    with pytest.raises(rt.Fail) as exc:
-        rt.assert_edge_runs_new_code()
-    assert "still reports" in str(exc.value)
-    # inert twin: the key really gone, control held -> the NEW build
-    monkeypatch.setattr(rt, "route_json", lambda host, path, _b={m["control_key"]: True}: _b)
-    assert rt.code_state(rt.PRIMARY)[1:3] == (True, False)
-    rt.assert_edge_runs_new_code()
-
-
-def test_every_json_marker_is_validated_even_when_the_batch_also_adds_a_route():
-    """L2: validation returned on `new_routes` before it read the json markers at all.
-
-    A route batch carrying a marker with no control -- a check that cannot fail -- was accepted as dead
-    configuration, and it would stay accepted until the day the route list emptied or the precedence
-    changed, at which point the unreviewed marker becomes the discriminator. An entry is reviewed as a
-    whole; nothing in it is exempt because something else outranks it today. The precedence itself is
-    unchanged: a route batch is still judged on its routes."""
-    rt, _src = _release_train()
-    m = _absent_marker(rt)
-    route = "/api/v1/a-route-neither-build-serves"
-
-    def routed(marker):
-        return dict(rt.BATCHES[ABSENT_BATCH], new_routes=[route],
-                    smoke_route="/api/v1/mod-version", json_markers=[marker])
-
-    for broken, why in ((dict((k, v) for k, v in m.items() if k != "control_key"),
-                         "an ABSENT marker naming no control field"),
-                        (dict((k, v) for k, v in m.items() if k != "control_expect"),
-                         "a control field with no value to hold it to"),
-                        (dict(m, control_key=m["key"]), "the marker as its own control"),
-                        (dict(m, control_expect=rt.ABSENT), "a control that is itself an absence"),
-                        (dict(m, expect=None), "expect None, which an absent key satisfies"),
-                        (dict(m, why=""), "a probe nobody wrote down"),
-                        (dict(m, path=rt.CONTROL_ROUTE), "read on the control route")):
-        rt.BATCHES["_routed"] = routed(broken)
-        try:
-            with pytest.raises(rt.Fail) as exc:
-                rt.select_batch("_routed")
-            assert "json marker" in str(exc.value), why
-        finally:
-            del rt.BATCHES["_routed"]
-
-    # inert twin: the same route batch with a COMPLETE marker is accepted, and
-    # the route is still what this batch is judged on
-    rt.BATCHES["_routed"] = routed(dict(m))
-    try:
-        rt.select_batch("_routed")
-        assert rt.NEW_ROUTES == [route] and rt.discriminator_words() == route
-    finally:
-        del rt.BATCHES["_routed"]
-    rt.select_batch(ABSENT_BATCH)
-
-
-def test_every_lan_probe_the_check_makes_carries_the_version_header(monkeypatch, capsys):
-    """L3: the entry claimed every LAN probe carries the version header; one of them went out bare.
-
-    `check` printed the mod-version body from an unheadered curl, so the sentence was a claim the code did
-    not keep -- and an operator could read that line as evidence the gate had been traversed. The probe now
-    carries the header like every other one, which is the half of the choice that makes the sentence true
-    rather than the half that narrows it. An unheadered read answers 426 wherever the gate is armed, and a
-    426 on both builds is a line that can never disagree with itself."""
-    rt, _src = _release_train()
-    rt.select_batch(ABSENT_BATCH)
-    cmds = []
-
-    def fake_run(cmd, **kw):
-        cmds.append(list(cmd) if isinstance(cmd, list) else [cmd])
-        return ""
-
-    monkeypatch.setattr(rt, "run", fake_run)
-    rt.phase_check(SimpleNamespace(go=False), {})
-    out = capsys.readouterr().out
-
-    curls = [c for c in cmds if c and c[0] == "curl"]
-    assert len(curls) >= 4, cmds                 # mod-version, control, marker, health, per box
-    want = "X-Mod-Version: " + rt.MOD_VERSION_HEADER
-    for c in curls:
-        assert want in c, c                      # every one of them, with no exception
-    assert [c for c in curls if any("/api/v1/mod-version" in a for a in c)], curls
-    # and the binding is stated beside the tips it is about
-    assert "990cd43" in out and "8820463" in out, out
-
-
-def test_the_batch_comment_states_only_what_the_code_and_the_pin_can_be_held_to():
-    """L3, the prose half: a comment on a batch entry is a claim, and an operator reads it as evidence.
-
-    The entry asserted an exact GO time nothing in the pin carries. The date and the report path are what
-    can be held to, so that is what it says now. The skip_bot reason is a claim about the deploy range, and
-    the range is named by the entry as of this round -- so it is checked against the repo instead of
-    believed (#302)."""
-    import re
-    import subprocess
-    rt, src = _release_train()
-    start = src.index('"%s": {' % ABSENT_BATCH)
-    entry_src = src[start:src.index('"state_path"', start)]
-    # flattened: these sentences are wrapped across comment lines, and a claim
-    # is a claim whichever column it breaks at
-    flat = " ".join(entry_src.replace("#", " ").split())
-    assert not re.search(r"\d{1,2}:\d{2}\s*Z", flat), flat
-    # The report's own name is quoted WITHOUT its extension: a dotted token
-    # whose final label is a two-letter country code is a hostname shape, and a
-    # census that had to decide this one from context would be a census with a
-    # judgement call in it.
-    assert "Codex GO on 2026-09-22" in flat and "CODEX-BUG392-MERGE-R1-REPORT" in flat
-    assert "Every LAN probe this train makes carries it" in flat
-
-    entry = rt.BATCHES[ABSENT_BATCH]
-    p = subprocess.run(["git", "diff", "--name-only",
-                        "%s..%s" % (entry["main_expected"], entry["reviewed_tip"]),
-                        "--", "backend/"], cwd=str(REPO), capture_output=True, text=True)
-    if p.returncode != 0:
-        pytest.skip("this clone does not carry the reviewed range")
-    touched = sorted(l.strip() for l in p.stdout.splitlines() if l.strip())
-    assert touched, "an empty range would make the claim below unfalsifiable"
-    outside = [f for f in touched
-               if f != "backend/api/main.py" and not f.startswith("backend/tests/")]
-    assert outside == [], outside                       # the reason says there are none
-    assert "backend/discord_bot.py" not in touched      # ...and names this one in particular
-
-
 # ── round 3: what the second cold review raised on the c32a1f5 pin ───────
 #
 # Same shape as the round-2 block above: one test per finding number, each with
@@ -2548,135 +3148,6 @@ def test_the_code_phase_refuses_a_dirty_tree_and_a_merge_that_is_not_the_reviewe
     assert deployed == []
 
 
-def test_the_recorded_snapshot_binds_to_this_train_its_label_its_age_and_the_listing(monkeypatch):
-    """R2-M1: a rollback point protects ONE deploy, and the gate asked only whether a string was truthy.
-
-    Phase 0 wrote down the bare cc_* name the wrapper minted and phase_code asked `if st.get("snapshot")`.
-    A name copied out of another train's state file, one taken under a different batch's label, one taken
-    last week, or one the wrapper's keep-10 prune has already removed all satisfied that -- and each one
-    is a deploy that proceeds with nothing to roll back to. The record now carries the four facts that
-    make it answerable, and the fifth question -- does it still exist -- is read from the wrapper's own
-    listing at the moment it is asked, never from the state file that claims it."""
-    rt, _src = _release_train()
-    rt.select_batch(ABSENT_BATCH)
-    _seat(monkeypatch, rt)
-    _attested(monkeypatch, rt)
-    go = SimpleNamespace(go=True)
-    monkeypatch.setattr(rt, "save_state", lambda st_: None)
-    _snapshot_is_listed(monkeypatch, rt)
-    log = []
-
-    def record(cmd, **kw):
-        log.append(" ".join(cmd) if isinstance(cmd, list) else cmd)
-        raise _NoCommand(log[-1])
-
-    monkeypatch.setattr(rt, "run", record)
-
-    def refuses(st, *must_name):
-        log[:] = []
-        with pytest.raises(rt.Fail) as exc:
-            rt.phase_code(go, st)
-        for text in must_name:
-            assert text in str(exc.value), (text, str(exc.value))
-        assert log == []            # the four state questions cost no command at all
-        return str(exc.value)
-
-    from datetime import datetime, timedelta, timezone
-    # the round-2 shape: a bare name, which answers none of the four
-    refuses({"snapshot": "cc_pre-bug392-merge__20260922_030000"}, "bare str", "rollback point")
-    # ...and no record at all, which is where round 2 started
-    refuses({}, "no snapshot is recorded")
-    # another train wrote it
-    refuses(_snap(batch="sept14-gacha"), "sept14-gacha", ABSENT_BATCH)
-    # another label: the name would stand for a different box's protection
-    refuses(_snap(label="pre-sept12-gacha"), "pre-sept12-gacha", "pre-bug392-merge")
-    # a name the wrapper did not mint for this label -- one label being a prefix
-    # of another is exactly how this would pass unnoticed
-    refuses(_snap(name="cc_pre-bug392-merge-2__20260922_030000"), "cc_pre-bug392-merge_")
-    # a field the record cannot do without
-    refuses(_snap(created_utc=""), "missing")
-    # older than the window: a picture of a box that has moved since. The
-    # window is measured from the listing taken BEFORE the play -- the moment
-    # this train saw the container WITHOUT this name -- rather than from the
-    # moment the record was written, so that is the field this arm moves.
-    refuses(_snap(minted=_minted(before=(datetime.now(timezone.utc) - timedelta(hours=25))
-                                 .isoformat(timespec="seconds"))), "24 hours")
-    # and a timestamp from the future, whose age cannot be judged at all
-    refuses(_snap(created_utc=(datetime.now(timezone.utc) + timedelta(hours=2))
-                  .isoformat(timespec="seconds")), "in the future")
-    refuses(_snap(created_utc="last tuesday"), "not a timestamp")
-
-    # the fifth question: recorded, bound and fresh -- and pruned away since.
-    # Asked after the clean gate, so it is the second thing this phase does.
-    stub, log2 = _fake_git(rt, {"990cd43": REVIEWED_FULL, "8820463": MAIN_FULL,
-                                rt.BRANCH: REVIEWED_FULL, "main": MAIN_FULL},
-                           trees={REVIEWED_FULL: REVIEWED_TREE})
-    monkeypatch.setattr(rt, "run", stub)
-    for listing, why, says, names in (
-            # an earlier snapshot OF THIS BATCH is still there and the recorded
-            # one is not: the refusal names what it found, so it can be acted
-            # on without a second lookup
-            (_listing("cc_pre-bug392-merge__20260921_154805", "2026-09-21 15:48:05"),
-             "pruned away since it was recorded", "is not in the container's snapshot listing",
-             ["cc_pre-bug392-merge__20260921_154805"]),
-            # ...and another batch's snapshot is not one of this batch's names,
-            # so the count says none rather than vouching for a stranger
-            (_listing("cc_pre-bug392-server__20260921_154805", "2026-09-21 15:48:05"),
-             "only another batch's snapshot is listed",
-             "carries 0 name(s) of the form this batch's snapshots take", []),
-            ("", "the wrapper answered nothing at all",
-             "no process exit status at all", [])):
-        monkeypatch.setattr(rt, "snapshot_listing", lambda values=None, _l=listing: _l)
-        log2[:] = []
-        with pytest.raises(rt.Fail) as exc:
-            rt.phase_code(go, _snap())
-        assert says in str(exc.value), (why, str(exc.value))
-        # it prints what it DID find, so the refusal can be acted on without a
-        # second lookup
-        for found in names:
-            assert found in str(exc.value), (why, str(exc.value))
-        assert log2 == ["git status --porcelain"], log2      # nothing past the clean gate
-
-    # inert twin: bound, fresh and listed -> the phase proceeds to the binding
-    # and on to the merge (the negative control is already recorded here, so
-    # this arm stays about the snapshot)
-    _snapshot_is_listed(monkeypatch, rt)
-    log2[:] = []
-    with pytest.raises(_NoCommand) as exc:
-        rt.phase_code(go, dict(_snap(), pre_code_old_build=True))
-    assert str(exc.value).startswith("git checkout main"), log2
-    assert log2[0] == "git status --porcelain", log2
-
-    # phase 0: a record that does not bind is NOT a reason to skip taking one,
-    # and the record it writes carries all four facts
-    taken = []
-    fresh = "cc_pre-bug392-merge__20260922_031500"
-    _phase_zero(monkeypatch, rt, fresh, calls=taken)
-    st = _snap(batch="sept14-gacha")
-    rt.phase_snapshot(SimpleNamespace(go=True), st)
-    assert taken, "a record that does not bind must not skip the phase"
-    assert st["snapshot"]["batch"] == ABSENT_BATCH
-    assert st["snapshot"]["label"] == "pre-bug392-merge"
-    assert st["snapshot"]["name"] == fresh
-    assert rt.snapshot_record_problem(st) is None
-    # a play that minted some other label is not recorded at all
-    taken[:] = []
-    _phase_zero(monkeypatch, rt, fresh, calls=taken,
-                out=_play_out("cc_pre-sept12-gacha__20260922_031500"))
-    with pytest.raises(rt.Fail) as exc:
-        rt.phase_snapshot(SimpleNamespace(go=True), {})
-    assert "cc_pre-bug392-merge_" in str(exc.value)
-    # inert twin: a record that DOES bind skips, and takes nothing
-    taken[:] = []
-    bound = _snap()
-    before = dict(bound["snapshot"])
-    _phase_zero(monkeypatch, rt, bound["snapshot"]["name"], calls=taken,
-                before=_listing(bound["snapshot"]["name"]))
-    rt.phase_snapshot(SimpleNamespace(go=True), bound)
-    assert taken == []                      # no play ran
-    assert bound["snapshot"] == before      # and the record was left alone
-
-
 def test_the_code_phase_accepts_main_at_its_own_merge_and_refuses_it_anywhere_else(monkeypatch):
     """R2-M2: once the merge lands main IS the merge, and the prescribed resume demanded main_expected.
 
@@ -2749,661 +3220,6 @@ def test_the_code_phase_accepts_main_at_its_own_merge_and_refuses_it_anywhere_el
     assert deployed == []
 
 
-def _bound_refs(rt, **over):
-    """The refs a repository holds when the branch and main are where the review left them."""
-    refs = {rt.BRANCH: REVIEWED_FULL, "main": MAIN_FULL}
-    refs.update(over)
-    return refs
-
-
-def _deploy_recorder(monkeypatch, rt):
-    """Let the REAL _deploy_both run and record the playbook command it composes.
-
-    Stubbing _deploy_both would hide the one line this is about: the value the
-    playbook is handed. The play itself is asserted, never executed."""
-    calls = []
-    # The per-box selector attestation has its own test with its own reddening
-    # arms; this recorder is about the VALUE the playbook is handed.
-    _attested(monkeypatch, rt)
-
-    monkeypatch.setattr(rt, "run_attested", _attesting_deploy(rt, calls))
-    monkeypatch.setattr(rt, "assert_control", lambda host: None)
-    monkeypatch.setattr(rt, "assert_route_probes", lambda hosts: None)
-    monkeypatch.setattr(rt, "assert_health_keys", lambda hosts: None)
-    monkeypatch.setattr(rt, "assert_edge_runs_new_code", lambda: None)
-    monkeypatch.setattr(rt, "code_state", lambda host: (True, True, False, ["alias absent"]))
-    return calls
-
-
-def test_the_recorded_code_sha_is_an_object_id_and_that_id_is_what_deploys(monkeypatch, capsys):
-    """R3-H1: the state file's code_sha was authenticated locally and then handed to the playbook as text.
-
-    Every revision syntax git accepts resolves locally to whatever it names at that moment. `code_sha`
-    set to `main` therefore passed the parents-and-tree check while main sat on the reviewed merge, and
-    the playbook was handed the four letters `main`, which resolve AGAIN on the other side of the push --
-    so a main that advanced between the check and the deploy put unreviewed content on both boxes, and
-    the build marker still read NEW because the box really was running a new build. A deploy is pinned to
-    an object or it is not pinned: the shape is asked of the raw string before any git command can
-    resolve it, and the id git resolves is what travels from there."""
-    rt, _src = _release_train()
-    rt.select_batch(ABSENT_BATCH)
-    _seat(monkeypatch, rt)
-    _attested(monkeypatch, rt)
-    go = SimpleNamespace(go=True)
-    monkeypatch.setattr(rt, "save_state", lambda st_: None)
-    _snapshot_is_listed(monkeypatch, rt)
-
-    # (a) a NAME where an object id belongs, refused before any git command at
-    # all -- the stub raises on every command it is handed, so reaching one is
-    # the failure, not a different error
-    def no_commands(cmd, **kw):
-        raise _NoCommand(" ".join(cmd) if isinstance(cmd, list) else cmd)
-
-    monkeypatch.setattr(rt, "run", no_commands)
-    for raw, why in (("main", "a branch name"), ("HEAD", "a symbolic ref"),
-                     ("990cd43", "an abbreviation"), (REVIEWED_FULL.upper(), "upper case"),
-                     (" %s" % MERGE_FULL, "an id with a stray space"),
-                     (None, "a null"), (12, "a number")):
-        st = dict(_snap(), code_sha=raw, pre_code_old_build=True)
-        with pytest.raises(rt.Fail) as exc:
-            rt.phase_code(go, st)
-        assert "not a 40-character object id" in str(exc.value), (why, str(exc.value))
-        assert repr(raw) in str(exc.value), (why, str(exc.value))   # the raw value is quoted
-    # ...and in the plan arm too: a state file carrying a name is a broken
-    # train whether or not this run is the one that would deploy it
-    with pytest.raises(rt.Fail) as exc:
-        rt.phase_code(SimpleNamespace(go=False), dict(_snap(), code_sha="main"))
-    assert "not a 40-character object id" in str(exc.value)
-
-    # (b) the right shape, an object this repository does not hold: the id that
-    # travels has to be one git resolved, and nothing resolved
-    stub, log = _fake_git(rt, _bound_refs(rt, main=MERGE_FULL), unknown=(MERGE_FULL,))
-    monkeypatch.setattr(rt, "run", stub)
-    with pytest.raises(rt.Fail) as exc:
-        rt.phase_code(go, dict(_snap(), code_sha=MERGE_FULL, pre_code_old_build=True))
-    assert "does not name a commit in this repository" in str(exc.value), str(exc.value)
-
-    # (c) inert twin: a full object id, the reviewed merge, main sitting on it
-    # -> it deploys, and the command line the playbook gets carries exactly it
-    calls = _deploy_recorder(monkeypatch, rt)
-    stub, log = _fake_git(rt, _bound_refs(rt, main=MERGE_FULL),
-                          {MERGE_FULL: [MAIN_FULL, REVIEWED_FULL]},
-                          {REVIEWED_FULL: REVIEWED_TREE, MERGE_FULL: REVIEWED_TREE})
-    monkeypatch.setattr(rt, "run", stub)
-    capsys.readouterr()
-    st = dict(_snap(), code_sha=MERGE_FULL, pre_code_old_build=True)
-    rt.phase_code(go, st)
-    # The two per-box selectors come from the SEAT, in deploy order, through
-    # the one grammar door -- not from a literal in the train.
-    assert [c[1] for c in calls] == [rt.checked_target(k) for k in rt.DEPLOY_LIMIT_KEYS], calls
-    assert [c[1] for c in calls] == [SEAT_PRIMARY_LIMIT, SEAT_STANDBY_LIMIT], calls
-    for _pb, _limit, extra in calls:
-        assert extra == "-e scr_deploy_ref=%s" % MERGE_FULL, calls
-    out = capsys.readouterr().out
-    # printed beside what it was reviewed as, so a transcript says all three
-    assert "CODE_SHA = %s" % MERGE_FULL in out, out
-    assert "990cd43" in out and "8820463" in out, out
-
-    # (d) and the last door: the playbook is handed an id by construction, so a
-    # caller that found a way to pass a name is refused at the deploy itself
-    # ...including a 40-hex id carrying a trailing newline. Python's `$` also
-    # matches immediately before a final newline, so `_FULL_SHA.match` accepted
-    # one: the value read out of a file or pasted from a line passed every
-    # shape check in the chain while not being the canonical id any of them
-    # meant. `\Z` is the whole string and nothing else.
-    for name in ("main", "990cd43", "", MERGE_FULL + "\n", "\n" + MERGE_FULL):
-        with pytest.raises(rt.Fail) as exc:
-            rt._deploy_both(name)
-        assert "40-character object id" in str(exc.value), name
-    assert rt._FULL_SHA.match(MERGE_FULL) and not rt._FULL_SHA.match(MERGE_FULL + "\n")
-
-
-def test_authenticating_git_runs_without_replacements_and_the_remote_must_hold_the_merge(monkeypatch):
-    """R3-H2: a local refs/replace/ ref answers every read with a different object under the same id.
-
-    Parents, tree and content all come back from the substitute, so a wrong sha with a replacement
-    exposing the expected parents and the expected tree passed every check -- and the remote, which has
-    no such ref, holds the wrong sha's real content, which is what the boxes fetch. Two spellings of one
-    instruction (the option and the environment variable) turn the replacement off for every command
-    whose answer is an authentication. And because the boxes fetch from the REMOTE and not from this
-    checkout, the remote's main is read before the first deploy command and has to BE the merge."""
-    rt, _src = _release_train()
-    rt.select_batch(ABSENT_BATCH)
-    _seat(monkeypatch, rt)
-    _attested(monkeypatch, rt)
-    go = SimpleNamespace(go=True)
-    monkeypatch.setattr(rt, "save_state", lambda st_: None)
-    _snapshot_is_listed(monkeypatch, rt)
-    auth_verbs = ("rev-parse", "rev-list", "merge-base", "merge-tree", "ls-remote", "cat-file")
-
-    def assert_every_authentication_disabled_replacement(stub, log):
-        seen = 0
-        for cmd, env in zip(log, stub.envs):
-            parts = cmd.split()
-            if parts[0] != "git":
-                continue
-            verb = parts[2] if len(parts) > 2 and parts[1] == NO_REPLACE else parts[1]
-            if verb not in auth_verbs:
-                continue
-            seen += 1
-            assert parts[1] == NO_REPLACE, cmd
-            assert (env or {}).get("GIT_NO_REPLACE_OBJECTS") == "1", (cmd, env)
-        assert seen >= 3, log        # the check itself has to have had something to check
-        return seen
-
-    # (a) the replacement: WITHOUT the flag this sha shows the expected parents
-    # and the reviewed tree; with it, its real ones. The train must see the real
-    # ones and refuse, printing the id it was told and the ids it required.
-    stub, log = _fake_git(rt, _bound_refs(rt, main=MERGE_FULL),
-                          parents={MERGE_FULL: [OTHER_FULL, REVIEWED_FULL]},
-                          trees={REVIEWED_FULL: REVIEWED_TREE, MERGE_FULL: OTHER_TREE},
-                          replaced={MERGE_FULL: ([MAIN_FULL, REVIEWED_FULL], REVIEWED_TREE)})
-    monkeypatch.setattr(rt, "run", stub)
-    deployed = []
-    monkeypatch.setattr(rt, "_deploy_both", lambda sha, extra=None, st=None, **_kw: deployed.append(sha))
-    monkeypatch.setattr(rt, "code_state", lambda host: (True, False, True, ["alias present"]))
-    with pytest.raises(rt.Fail) as exc:
-        rt.phase_code(go, dict(_snap(), code_sha=MERGE_FULL, pre_code_old_build=True))
-    assert MERGE_FULL in str(exc.value) and MAIN_FULL in str(exc.value), str(exc.value)
-    assert OTHER_FULL in str(exc.value), str(exc.value)
-    assert deployed == []
-    assert_every_authentication_disabled_replacement(stub, log)
-
-    # (b) the remote is where the boxes fetch from: a remote main that is not
-    # the authenticated merge is refused BEFORE the first deploy command
-    good_parents = {MERGE_FULL: [MAIN_FULL, REVIEWED_FULL]}
-    good_trees = {REVIEWED_FULL: REVIEWED_TREE, MERGE_FULL: REVIEWED_TREE}
-    for remote, why in ((OTHER_FULL, "the remote moved on"), ("", "the remote named no main")):
-        stub, log = _fake_git(rt, _bound_refs(rt, main=MERGE_FULL), good_parents, good_trees,
-                              remote_main=remote)
-        monkeypatch.setattr(rt, "run", stub)
-        deployed[:] = []
-        with pytest.raises(rt.Fail) as exc:
-            rt.phase_code(go, dict(_snap(), code_sha=MERGE_FULL, pre_code_old_build=True))
-        assert "remote" in str(exc.value) and MERGE_FULL in str(exc.value), (why, str(exc.value))
-        assert deployed == [], why
-
-    # (c) inert twin: no replacement, and a remote sitting on the merge
-    stub, log = _fake_git(rt, _bound_refs(rt, main=MERGE_FULL), good_parents, good_trees,
-                          remote_main=MERGE_FULL)
-    monkeypatch.setattr(rt, "run", stub)
-    monkeypatch.setattr(rt, "code_state", lambda host: (True, True, False, ["alias absent"]))
-    monkeypatch.setattr(rt, "assert_route_probes", lambda hosts: None)
-    monkeypatch.setattr(rt, "assert_health_keys", lambda hosts: None)
-    monkeypatch.setattr(rt, "assert_edge_runs_new_code", lambda: None)
-    deployed[:] = []
-    rt.phase_code(go, dict(_snap(), code_sha=MERGE_FULL, pre_code_old_build=True))
-    assert deployed == [MERGE_FULL]
-    assert_every_authentication_disabled_replacement(stub, log)
-    assert [c for c in log if "ls-remote" in c], log      # and it really was asked
-
-
-def _printed_capture(rt, capsys, listing):
-    """(dropped, the capture's lines) -- what `capture_snapshot_listing` PRINTED, between its two
-    fixed lines. B11 (round 11): the capture is printed and never written, so the transcript is
-    where a test reads it."""
-    capsys.readouterr()
-    dropped = rt.capture_snapshot_listing(listing)
-    out = capsys.readouterr().out
-    assert out.count(rt.CAPTURE_OPEN) == 1 and out.count(rt.CAPTURE_CLOSE) == 1, out
-    body = out.split(rt.CAPTURE_OPEN, 1)[1].split(rt.CAPTURE_CLOSE, 1)[0]
-    return dropped, [l for l in body.splitlines() if l.strip()]
-
-
-def test_the_captured_listing_is_built_from_records_and_everything_else_is_dropped(monkeypatch,
-                                                                                   capsys):
-    """R4-H3: a capture that STRIPS what it recognises is a promise about every string that will ever exist.
-
-    The round before this one tokenised the names the seat knows by value and the shapes it was told
-    about -- a per-host header, a collision warning, an address, a dotted name -- and then read its own
-    output back looking for the same shapes. An unknown single-label name, an IPv6 literal, or a name
-    sitting inside a token no rule described walked through both halves untouched: `taken on secretbox`
-    is not a header, not a warning, not an address and not dotted, so it was written into the bundle.
-
-    So nothing of the wrapper's answer is copied at all. The answer is parsed into records whose every
-    field is a fixed word from the train or a value that matched a grammar there -- a cc_ name, a
-    timestamp, a status word, an exit code -- and those records are what is printed. Everything else is
-    dropped and counted, and the count is the only trace it leaves."""
-    rt, _src = _release_train()
-    rt.select_batch(ABSENT_BATCH)
-    _seat(monkeypatch, rt)
-    body = (" `-> cc_pre-bug392-merge__20260922_030000 2026-09-22 03:00:01     auto snapshot\n"
-            "[WARNING]: Found both group and host with same name: a-group\n"
-            "taken on secretbox\n"
-            "asked of a-controller\n"
-            "  `-> current                    You are here!")
-
-    dropped, lines = _printed_capture(rt, capsys, _listing_raw(body))
-    written = "\n".join(lines)
-    # (a) what the gate reads survives, as a record
-    assert "SNAPSHOT name=cc_pre-bug392-merge__20260922_030000 taken=2026-09-22 03:00:01" in written
-    assert "SECTION phase=BEFORE rc=0" in written
-    assert "GATE names=1 usable=yes" in written
-    # (b) the reddening arm of the round before: a body line that is not a
-    # header, not a warning, not an address and not dotted. It is ABSENT, and
-    # the only thing it left behind is a number.
-    assert "secretbox" not in written, written
-    for leak in ("a-machine", "a-group", "a-controller", "WARNING", "You are here"):
-        assert leak not in written, (leak, written)
-    assert dropped == 4 and "DROPPED 4" in written, (dropped, written)
-    # (c) a line that DOES parse as a record, carrying an extra token: the
-    # record is printed and the extra token is not
-    _d2, lines2 = _printed_capture(rt, capsys, _listing_raw(
-        " `-> cc_pre-bug392-merge__20260922_030002 2026-09-22 03:00:02  on a-node.example\n"
-        "  `-> current                    You are here!"))
-    written2 = "\n".join(lines2)
-    assert ("SNAPSHOT name=cc_pre-bug392-merge__20260922_030002 taken=2026-09-22 03:00:02 "
-            "zone=none") in written2
-    assert "a-node" not in written2 and "example" not in written2, written2
-    # (c2) the machine's own statement is printed as a CLASS and the
-    # address is dropped on the floor -- R8-H5 turns it into one at the
-    # moment it is read, and this line is the second answer to the same
-    # question. Handed a raw address on purpose: a fixture that hands it
-    # a token already makes this check one that cannot fail.
-    _d4, lines4 = _printed_capture(rt, capsys, _listing_raw(
-        body, identity=(SEAT_BOX_ENDPOINT, SEAT_BOX_ID)))
-    written4 = "\n".join(lines4)
-    assert "BOX endpoint=OTHER fingerprint=MATCH" in written4, written4
-    assert SEAT_BOX_ENDPOINT not in written4, written4
-    # (d) every line printed is a header line the train spells out or a record
-    # in the grammar -- the check that makes the rest a form and not a habit
-    for line in lines:
-        assert line in rt.CAPTURE_HEADER or rt.record_line_re().match(line), line
-    # ...and it can fail: a composer that appended the wrapper's own prose
-    # refuses instead of printing it, and prints NOTHING of the capture
-    monkeypatch.setattr(rt, "listing_records",
-                        lambda listing: (["taken on secretbox"], 0))
-    capsys.readouterr()
-    with pytest.raises(rt.Fail) as exc:
-        rt.capture_snapshot_listing(_listing_raw(body))
-    assert "not one of the record forms" in str(exc.value)
-    out = capsys.readouterr().out
-    assert rt.CAPTURE_OPEN not in out and "secretbox" not in out, out
-
-
-def test_the_capture_prints_records_and_writes_no_file(monkeypatch, capsys, tmp_path):
-    """B11 (round 11), after R7-L4, R7-L1, R4-L5, R6-L2 and R8-L1: the capture writes NOTHING.
-
-    The frozen bar says this train writes nothing outside its state file and its printed plan. The
-    capture was a FILE, and four rounds bounded that write in turn -- a destination that was an
-    argument, then one place, then the final path and not its parent, then the descriptor's link
-    count, then a fresh name and a rename -- and each bound left the next window, because the write
-    itself was the thing the clause forbids. There is no file now: the records are composed in memory
-    and printed between two fixed lines, which is the printed plan.
-
-    So the arms of those rounds -- a symlinked destination, a hard link planted before the rename, a
-    link count nobody can read -- have nothing left to aim at, and the one assertion that replaces
-    them is stronger than all of them: during a capture, nothing is created, opened for writing,
-    renamed, linked or made into a directory, anywhere."""
-    import builtins
-    import shutil
-    import tempfile
-    rt, _src = _release_train()
-    rt.select_batch(ABSENT_BATCH)
-    _seat(monkeypatch, rt)
-    state_dir = tmp_path / "state"
-    state_dir.mkdir()
-    (state_dir / "train-state.json").write_text("{}", encoding="utf-8")
-    fresh = tmp_path / "never-written" / "state"
-    monkeypatch.setattr(rt, "STATE_PATH", str(fresh / "state.json"))
-    listing = _listing("cc_pre-bug392-merge__20260922_030000")
-
-    def _tree():
-        return sorted((str(p.relative_to(tmp_path)), p.stat().st_size if p.is_file() else -1)
-                      for p in tmp_path.rglob("*"))
-
-    # Every primitive that can put bytes or a name on a disk, spied for the
-    # length of the capture. A call to any of them is a write this train
-    # does not make any more; the file-tree comparison below is the second
-    # witness, for a write through a primitive this list does not name.
-    writes = []
-    real_open = builtins.open
-
-    def _open(file, mode="r", *a, **kw):
-        if any(c in str(mode) for c in "wax+"):
-            writes.append(("open", str(mode)))
-        return real_open(file, mode, *a, **kw)
-
-    def _spy(name):
-        def _refuse(*a, **kw):
-            writes.append((name, None))
-            raise AssertionError("the capture called %s" % name)
-        return _refuse
-
-    before = _tree()
-    capsys.readouterr()
-    with monkeypatch.context() as m:
-        m.setattr(builtins, "open", _open)
-        for mod, name in ((rt.os, "open"), (rt.os, "replace"), (rt.os, "rename"),
-                          (rt.os, "link"), (rt.os, "symlink"), (rt.os, "makedirs"),
-                          (rt.os, "mkdir"), (tempfile, "mkstemp"), (tempfile, "mkdtemp"),
-                          (tempfile, "NamedTemporaryFile"), (shutil, "copyfile"),
-                          (shutil, "move")):
-            m.setattr(mod, name, _spy("%s.%s" % (mod.__name__, name)))
-        dropped = rt.capture_snapshot_listing(listing)
-    out = capsys.readouterr().out
-    assert writes == [], writes
-    assert _tree() == before, (before, _tree())
-    assert not fresh.exists(), "a capture must not even create the state directory"
-    # ...and what it did instead: the records, printed between the two lines
-    assert out.count(rt.CAPTURE_OPEN) == 1 and out.count(rt.CAPTURE_CLOSE) == 1, out
-    body = out.split(rt.CAPTURE_OPEN, 1)[1].split(rt.CAPTURE_CLOSE, 1)[0]
-    assert "SNAPSHOT name=cc_pre-bug392-merge__20260922_030000" in body, body
-    # the one line dropped is pct's closing `current` entry: it is read as the
-    # completeness marker (R10-M1) and, like every line that is not a
-    # snapshot, it is not copied
-    assert "GATE names=1 usable=yes" in body and dropped == 1, (dropped, body)
-    # the machinery the file needed is gone, not merely unused
-    for gone in ("capture_path", "capture_destination", "link_count", "_hard_linked"):
-        assert not hasattr(rt, gone), gone
-    # the flag cannot carry a destination: it takes no value at all
-    assert "--capture-listing" in _src
-    flag = _src[_src.index('"--capture-listing"'):]
-    assert 'action="store_true"' in flag[:400], flag[:400]
-    assert "metavar" not in flag[:400], flag[:400]
-
-    # ...and the record the machine's own identity leaves in it. The endpoint
-    # here is one this train does NOT declare, and an endpoint it does not
-    # declare is a machine address or a machine name like any other: the fixed
-    # word goes in its place and the fingerprint -- a digest -- carries the
-    # identity. This is what the round-8 scan found by RUNNING: the listing is
-    # asked of the virtualisation host, so the address the capture actually
-    # wrote was a fourth machine's, under a grammar that admitted any dotted
-    # quad.
-    _d, lines = _printed_capture(rt, capsys, listing)
-    written = "\n".join(lines)
-    assert "BOX endpoint=OTHER fingerprint=MATCH" in written, written
-    assert SEAT_BOX_ENDPOINT not in written, written
-    # R8-H4: the FINGERPRINT is not printed either. It is minted at first boot
-    # and is the same for the life of that installation, so a line carrying
-    # one identifies the installation exactly as a machine name does. It is
-    # compared in memory and the VERDICT is what is printed.
-    assert SEAT_BOX_ID not in written, written
-    # ...and an ADDRESS this train does not declare is set aside the same way.
-    # The address is RFC 5737 documentation space, which cannot be any
-    # machine's.
-    undeclared = _listing(None, endpoint=rt.endpoint_token("203.0.113.219"))
-    _d, lines = _printed_capture(rt, capsys, undeclared)
-    written = "\n".join(lines)
-    assert "BOX endpoint=OTHER fingerprint=MATCH" in written, written
-    assert "203.0.113.219" not in written, written
-    # inert twin: an endpoint it DOES declare is printed as its class, because
-    # a record that cannot say which box answered says nothing
-    declared = _listing(None, endpoint=rt.endpoint_token(rt.PRIMARY))
-    _d, lines = _printed_capture(rt, capsys, declared)
-    assert "BOX endpoint=PRIMARY fingerprint=MATCH" in "\n".join(lines), lines
-    # ...and a reading whose fingerprints did not both come back says MISSING,
-    # which is not MATCH: "no comparison" is not "they agreed"
-    one = _listing(None, fingerprints=[SEAT_BOX_ID])
-    _d, lines = _printed_capture(rt, capsys, one)
-    assert "fingerprint=MISSING" in "\n".join(lines), lines
-    moved = _listing(None, fingerprints=[SEAT_BOX_ID, "f" * 64])
-    _d, lines = _printed_capture(rt, capsys, moved)
-    written = "\n".join(lines)
-    assert "fingerprint=MISMATCH" in written, written
-    assert "f" * 64 not in written, written
-    # ...and the grammar itself admits the classes and nothing else
-    form = rt.record_line_re()
-    assert form.match("BOX endpoint=STANDBY fingerprint=MATCH")
-    assert form.match("BOX endpoint=OTHER fingerprint=MISSING")
-    assert not form.match("BOX endpoint=203.0.113.219 fingerprint=MATCH")
-    assert not form.match("BOX endpoint=OTHER fingerprint=%s" % SEAT_BOX_ID)
-    # ...and nothing anywhere under the test's directory moved across all of it
-    assert _tree() == before, (before, _tree())
-    assert not fresh.exists()
-
-
-def test_a_listed_snapshot_matches_only_as_a_whole_token(monkeypatch):
-    """R3-M1: the parse pulled `cc_*` out of the MIDDLE of a token, so a longer name answered for a shorter one.
-
-    `re.findall(r"cc_[A-Za-z0-9_.:-]+")` reads `cc_pre-bug392-merge__T` out of `old-cc_pre-bug392-merge__T`,
-    which is a different snapshot -- so the gate that exists to prove the rollback point still exists
-    passed on a listing that proves it does not. Whole tokens on both ends, and ONE grammar for the
-    listing and for the play's own output, so the name recorded and the name looked for cannot be two
-    different readings. R11-M1 (round 12): the play's own output is read as whole tokens
-    (`minted_names`), and a listing by pct's NAME FIELD (`cc_names`) -- a token found anywhere in a
-    listing includes every description."""
-    rt, _src = _release_train()
-    rt.select_batch(ABSENT_BATCH)
-    _seat(monkeypatch, rt)
-    _attested(monkeypatch, rt)
-    name = _snap()["snapshot"]["name"]
-    assert rt.minted_names("old-%s" % name) == []
-    assert rt.minted_names("%s.bak" % name) == []      # a suffix is not the minted form either
-    assert rt.minted_names("'%s'," % name) == [name]        # quoting is not a prefix
-    assert rt.cc_names(" `-> old-%s 2026-09-22 03:00:01  auto" % name) == []
-    assert rt.cc_names(" `-> %s.bak 2026-09-22 03:00:01  auto" % name) == []
-    assert rt.cc_names(" `-> %s 2026-09-22 03:00:01  auto" % name) == [name]
-    assert rt.cc_names("'%s'," % name) == []       # a bare token is no pct entry
-
-    go = SimpleNamespace(go=True)
-    monkeypatch.setattr(rt, "save_state", lambda st_: None)
-    stub, log = _fake_git(rt, _bound_refs(rt), trees={REVIEWED_FULL: REVIEWED_TREE})
-    monkeypatch.setattr(rt, "run", stub)
-    # the embedded name: the recorded snapshot is NOT there, and the phase says so
-    monkeypatch.setattr(rt, "snapshot_listing",
-                        lambda values=None: _listing("old-%s" % name))
-    with pytest.raises(rt.Fail) as exc:
-        rt.phase_code(go, _snap())
-    assert "is not in the container's snapshot listing" in str(exc.value), str(exc.value)
-    assert log == ["git status --porcelain"], log
-
-    # inert twin: the exact token, and the phase walks on to the merge
-    _snapshot_is_listed(monkeypatch, rt)
-    with pytest.raises(_NoCommand) as exc:
-        rt.phase_code(go, dict(_snap(), pre_code_old_build=True))
-    assert str(exc.value).startswith("git checkout main")
-
-    # the play's own output is read under the same grammar, so an embedded
-    # name is not recorded as the snapshot this train took either
-    _phase_zero(monkeypatch, rt, name, out=_play_out("old-%s" % name))
-    with pytest.raises(rt.Fail) as exc:
-        rt.phase_snapshot(SimpleNamespace(go=True), {})
-    assert "reported no cc_pre-bug392-merge__* snapshot name" in str(exc.value), str(exc.value)
-
-
-def test_phase_zero_takes_a_fresh_snapshot_when_the_recorded_one_is_no_longer_listed(monkeypatch, capsys):
-    """R3-M2: two predicates for one question left the prescribed recovery skipping itself.
-
-    Phase 0 asked the four metadata questions and phase 4 asked those plus the listing. A snapshot that
-    was pruned after a primary-only deploy therefore failed phase 4 -- which prints `--only snapshot` as
-    the way out -- while phase 0 skipped on the metadata alone, so the prescribed command did nothing
-    and the split fleet had nothing that could move it. One predicate, asked cheapest-first."""
-    rt, _src = _release_train()
-    rt.select_batch(ABSENT_BATCH)
-    _seat(monkeypatch, rt)
-    _attested(monkeypatch, rt)
-    monkeypatch.setattr(rt, "save_state", lambda st_: None)
-    name = _snap()["snapshot"]["name"]
-    fresh = "cc_pre-bug392-merge__20260922_031500"
-    taken = []
-
-    # metadata-valid, pruned away since: the record does not bind any more, and
-    # THIS phase is the one that replaces it
-    _phase_zero(monkeypatch, rt, fresh, calls=taken,
-                before=_listing("cc_pre-bug392-server__1"),
-                after=_listing(fresh))
-    st = _snap()
-    assert rt.snapshot_record_problem(st) is None       # the cheap half still says yes
-    assert "is not in the container's snapshot listing" in rt.snapshot_binding_problem(st)
-    rt.phase_snapshot(SimpleNamespace(go=True), st)
-    assert taken, "a recorded snapshot that is no longer listed must not skip phase 0"
-    assert st["snapshot"]["name"] == fresh
-    out = capsys.readouterr().out
-    assert "it does not bind to this train" in out and "not in the container's" in out, out
-
-    # inert twin: still listed -> skipped, nothing taken, and the reason printed
-    taken[:] = []
-    _snapshot_is_listed(monkeypatch, rt, name=name)
-    bound = _snap()
-    before = dict(bound["snapshot"])
-    rt.phase_snapshot(SimpleNamespace(go=True), bound)
-    assert taken == [] and bound["snapshot"] == before
-    out = capsys.readouterr().out
-    assert "present in the wrapper's listing" in out and "skips" in out, out
-
-    # and the two phases agree about the SAME record: phase 4 refuses the
-    # pruned one and phase 0 replaces it, which is what makes the refusal's own
-    # prescription (`--only snapshot`) do something
-    monkeypatch.setattr(rt, "snapshot_listing",
-                        lambda values=None: _listing("cc_pre-bug392-server__1"))
-    stub, log = _fake_git(rt, _bound_refs(rt), trees={REVIEWED_FULL: REVIEWED_TREE})
-    monkeypatch.setattr(rt, "run", stub)
-    with pytest.raises(rt.Fail) as exc:
-        rt.phase_code(SimpleNamespace(go=True), _snap())
-    assert "is not in the container's snapshot listing" in str(exc.value)
-    assert "--only snapshot" in str(exc.value)
-    assert "snapshot_binding(st)" in _src
-
-
-def test_a_zone_less_listing_time_is_unknown_and_never_read_as_UTC(monkeypatch, capsys):
-    """R4-L1: a wall clock with no zone is not a moment, and reading it as UTC made an old snapshot young.
-
-    The round before this one measured freshness from the timestamp the listing prints and labelled it
-    UTC. The wrapper prints no zone. On a container running ahead of this seat, a snapshot really thirty
-    hours old arrives with a wall-clock reading that lands nineteen or twenty hours back -- inside the
-    window -- so the gate whose whole job is to catch a stale rollback point passes on one, and only a
-    reading that came out in the FUTURE fell back. An unknown reading is now unknown: freshness falls
-    back to the recording clock, which the metadata gate has already judged, and the transcript says
-    which clock answered and why. A listing that does state a zone is still used."""
-    rt, _src = _release_train()
-    rt.select_batch(ABSENT_BATCH)
-    _seat(monkeypatch, rt)
-    _attested(monkeypatch, rt)
-    from datetime import datetime, timedelta, timezone
-    name = _snap()["snapshot"]["name"]
-    old = (datetime.now(timezone.utc) - timedelta(hours=30)).strftime("%Y-%m-%d %H:%M:%S")
-    st = _snap()
-    assert rt.snapshot_record_problem(st) is None
-
-    # (a) the reddening arm of the defect: a zone-less reading thirty hours back
-    # is NOT an age. It falls back and says so, naming the missing zone.
-    monkeypatch.setattr(rt, "snapshot_listing",
-                        lambda values=None: _listing(name, old))
-    problem, how = rt.snapshot_listing_problem(st)
-    assert problem is None, problem
-    assert "names no zone" in how and "judged from the listing this train took BEFORE the play" in how, how
-    moment, why_not = rt.listed_snapshot_time(rt.snapshot_listing(), name)
-    assert moment is None and "names no zone" in why_not
-
-    # (b) ...and with a zone, the container's own clock decides, in both
-    # directions: thirty hours old is refused, minutes old passes and says so
-    monkeypatch.setattr(rt, "snapshot_listing",
-                        lambda values=None: _listing(name, old, zone="+00:00"))
-    problem, how = rt.snapshot_listing_problem(st)
-    assert problem and "the container's own listing says" in problem, problem
-    assert "24 hours" in problem and how is None
-    for zone in ("+00:00", "Z", "UTC", "+0000"):
-        now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
-        monkeypatch.setattr(rt, "snapshot_listing",
-                            lambda values=None, _z=zone, _n=now: _listing(name, _n, zone=_z))
-        problem, how = rt.snapshot_listing_problem(st)
-        assert problem is None, (zone, problem)
-        assert "the container's own listing says" in how, (zone, how)
-
-    # (c) no timestamp at all, and a zoned timestamp that reads ahead of this
-    # clock, both fall back to the recording clock and SAY so. Each is a WHOLE
-    # listing -- it ends with pct's closing `current` entry, as every listing
-    # the gate accepts must (R10-M1) -- so the arm is about the clock alone.
-    ahead = (datetime.now(timezone.utc) + timedelta(hours=5)).strftime("%Y-%m-%d %H:%M:%S")
-    closer = "\n  `-> current                   You are here!"
-    for text, said in ((" `-> %s   auto snapshot" % name, "prints no timestamp"),
-                       (" `-> %s %s +00:00  auto" % (name, ahead), "names no zone")):
-        monkeypatch.setattr(rt, "snapshot_listing",
-                            lambda values=None, _t=text: _listing_raw(_t + closer))
-        problem, how = rt.snapshot_listing_problem(st)
-        assert problem is None, problem
-        assert "judged from the listing this train took BEFORE the play" in how, how
-    assert said            # both arms ran
-
-    # (c2) a zone token needs its boundary at END OF TOKEN. Without one the
-    # regex found `Z` at the front of `Zebra` and `UTC` at the front of
-    # `UTCdescription`, so a wall clock with an ordinary word after it read as a
-    # zoned moment -- and a container running ahead of this seat then made an
-    # expired rollback point look fresh. A boundary spelt as "not one of
-    # [A-Za-z0-9_]" only moved the hole: that is an ASCII denial, so `Zebra`
-    # stopped being a zone while any word whose next character is outside ASCII
-    # still was one. The boundary is where the TOKEN ends, which is not a
-    # question about alphabets at all.
-    for word in ("Zebra", "UTCdescription", "GMTplus",
-                 # the Unicode continuations the ASCII denial admitted
-                 u"Zébra", u"UTCédescription", u"GMT中"):
-        text = " `-> %s %s %s  auto" % (name, old, word)
-        monkeypatch.setattr(rt, "snapshot_listing",
-                            lambda values=None, _t=text: _listing_raw(_t + closer))
-        moment, why_not = rt.listed_snapshot_time(rt.snapshot_listing(), name)
-        assert moment is None and "names no zone" in why_not, word
-        problem, how = rt.snapshot_listing_problem(st)
-        assert problem is None, (word, problem)
-        assert "judged from the listing this train took BEFORE the play" in how, (word, how)
-    # ...and the bare token, which IS a zone, still is one
-    text = " `-> %s %s Z  auto" % (name, old)
-    monkeypatch.setattr(rt, "snapshot_listing",
-                        lambda values=None, _t=text: _listing_raw(_t + closer))
-    moment, why_not = rt.listed_snapshot_time(rt.snapshot_listing(), name)
-    assert moment is not None and why_not is None, (moment, why_not)
-
-    # (d) the phase that SKIPS on this predicate prints the same sentence the
-    # phase that refuses on it prints: "fresh" is a different claim depending on
-    # which clock answered, and a plan that does not say which implies the one
-    # that was not read
-    _snapshot_is_listed(monkeypatch, rt, name=name)
-    capsys.readouterr()
-    rt.phase_snapshot(SimpleNamespace(go=True), _snap())
-    out = capsys.readouterr().out
-    assert "freshness:" in out and "names no zone" in out, out
-
-
-def test_the_listing_counts_only_the_answer_of_the_one_machine_that_answered(monkeypatch):
-    """R3-L2: every block of the group's answer was read as one pile, so any member could vouch for the rollback point.
-
-    Ansible answers per host. The rollback point sits on the machine the snapshot play targets, and a
-    name found in another member's answer is another machine's snapshot -- the gate would pass while the
-    box this train is about to deploy to has nothing to roll back to. One responding machine is the
-    expected shape; none, several, or one that exited non-zero are all "could not tell", which is not
-    yes."""
-    rt, _src = _release_train()
-    rt.select_batch(ABSENT_BATCH)
-    _seat(monkeypatch, rt)
-    name = _snap()["snapshot"]["name"]
-
-    # R8-M1 moved the answer one level up: the listing is a TASK of the
-    # attested playbook, so "how many machines answered" is the playbook's own
-    # RECAP rather than a count of header shapes in somebody else's output. Two
-    # members answering is two recap rows, and it is refused before a single
-    # name is read.
-    two = (_recap(host="machine-a") + "\nmachine-b                 : ok=3    changed=1    "
-           "unreachable=0    failed=0")
-    monkeypatch.setattr(rt, "run", _attesting_run(rt, listing=True, name=name, recap=two))
-    with pytest.raises(rt.Fail) as exc:
-        rt.snapshot_listing()
-    assert "recap names 2 machines" in str(exc.value), str(exc.value)
-    # ...and a recap that names NONE is the same answer, not an empty listing
-    monkeypatch.setattr(rt, "run", _attesting_run(rt, listing=True, name=name,
-                                                  recap="PLAY RECAP ***"))
-    with pytest.raises(rt.Fail) as exc:
-        rt.snapshot_listing()
-    assert "recap names 0 machines" in str(exc.value), str(exc.value)
-
-    # a machine that answered non-zero printed something that is not a listing
-    names, problem = rt.listed_snapshot_names(_listing(name, rc=2))
-    assert names == [] and "rc=2" in problem, problem
-    # ...and a listing carrying no process status at all is not an empty
-    # listing, it is no answer: the status is the process's (R9-M1), and a
-    # listing handed on without one never came through the one door that
-    # reads it
-    names, problem = rt.listed_snapshot_names({"raw": "", "rc": None})
-    assert names == [] and "no process exit status at all" in problem, problem
-    # ...and the two readings of one read-only question disagreeing means the
-    # listing is a picture of two moments
-    names, problem = rt.listed_snapshot_names(_listing(name, agree=False))
-    assert names == [] and "picture of two moments" in problem, problem
-
-    # inert twin: one machine, rc=0, and its own answer is what is read
-    names, problem = rt.listed_snapshot_names(_listing(name))
-    assert names == [name] and problem is None
-
-
 def test_the_two_provenance_anchors_are_object_ids_and_the_transcript_prints_them_whole(
         monkeypatch, capsys):
     """R4-H1: `reviewed_tip` and `main_expected` were seven-hex revision NAMES, resolved at run time.
@@ -3466,410 +3282,6 @@ def test_the_two_provenance_anchors_are_object_ids_and_the_transcript_prints_the
     out = capsys.readouterr().out
     assert REVIEWED_FULL in out and MAIN_FULL in out, out
     assert REVIEWED_FULL[:7] + " " not in out, "an abbreviation is still printed somewhere"
-
-
-def test_the_snapshot_play_and_the_snapshot_listing_are_aimed_at_one_target(monkeypatch, capsys):
-    """R4-M1: the play chose its own machine and the listing was asked of a separately configured group.
-
-    The snapshot phase ran `snapshot-scr.yml` with no --limit, so the play's own hosts: line decided
-    which container was snapshotted, while the gate that proves the rollback point still exists asked a
-    group the seat configures. Nothing compared the two. A group that holds a different machine -- or a
-    pattern that selects several -- therefore answers rc=0 with a listing of somebody else's snapshots,
-    and the deploy proceeds believing it has a rollback point on the box it is about to change.
-
-    One value, declared once, consumed by both, checked against a NAME grammar before it reaches a
-    command line and quoted for the remote shell when it does."""
-    rt, _src = _release_train()
-    rt.select_batch(ABSENT_BATCH)
-    _seat(monkeypatch, rt)
-    _attested(monkeypatch, rt)
-    assert set(rt.SNAPSHOT_TARGET_KEYS.values()) == {"pve_group"}
-    assert rt.snapshot_target() == "a-group"
-
-    # (a) the reddening arm for the defect itself: the two consumers configured
-    # from different keys -- refused before any command, by the value both of
-    # them have to come from
-    monkeypatch.setitem(rt.SNAPSHOT_TARGET_KEYS, "listing", "controller")
-    monkeypatch.setattr(rt, "run", lambda cmd, **kw: _raise_no_command(cmd))
-    with pytest.raises(rt.Fail) as exc:
-        rt.snapshot_listing()
-    assert "different keys" in str(exc.value)
-    with pytest.raises(rt.Fail):
-        rt.phase_snapshot(SimpleNamespace(go=True), {})
-    monkeypatch.setitem(rt.SNAPSHOT_TARGET_KEYS, "listing", "pve_group")
-
-    # (b) a target that is not a plain name never reaches a command line, in
-    # either consumer
-    for bad in ("a-group; rm -rf /", "a-group:another", "a group", "*", "$(hostname)",
-                "a-group,other", "!a-group", "a-group&other", "a-grou?"):
-        # Each of these is a differently CONFIGURED seat, which is a different
-        # run: the seat is read once per process and answered from that first
-        # reading ever after (R8-H2).
-        _fresh_process(rt, "pve_group")
-        monkeypatch.setenv("SCR_TRAIN_PVE_GROUP", bad)
-        with pytest.raises(rt.Fail) as exc:
-            rt.snapshot_listing()
-        assert "not a plain name" in str(exc.value), bad
-    # ...and the three ansible reserves, which a character class cannot catch:
-    # they are spelt exactly like group names and they mean every host, every
-    # ungrouped host, and the controller. `--limit all` aims the snapshot play
-    # -- whose wrapper prunes to the last ten -- at the whole inventory, so an
-    # earlier round blessing `all` as "a NAME; the grammar is not a policy" was
-    # blessing the one pattern the grammar was written to keep out.
-    for reserved in ("all", "ALL", "ungrouped", "localhost"):
-        _fresh_process(rt, "pve_group")
-        monkeypatch.setenv("SCR_TRAIN_PVE_GROUP", reserved)
-        with pytest.raises(rt.Fail) as exc:
-            rt.snapshot_listing()
-        assert "ansible reserves" in str(exc.value), reserved
-        with pytest.raises(rt.Fail):
-            rt.phase_snapshot(SimpleNamespace(go=True), {})
-    _fresh_process(rt, "pve_group")
-    monkeypatch.setenv("SCR_TRAIN_PVE_GROUP", "a-group")
-
-    # (c) inert twin: both consumers carry THE SAME value, the play as an
-    # argument and the listing quoted into the remote command
-    asked = []
-
-    monkeypatch.setattr(rt, "run", _attesting_run(rt, asked, listing=True,
-                                                  name="cc_other__1"))
-    rt.snapshot_listing()
-    assert asked and "--limit a-group" in asked[-1], asked
-    assert "ansible-playbook" in asked[-1], asked
-
-    played = []
-    minted = "cc_pre-bug392-merge__20260922_031500"
-    monkeypatch.setattr(rt, "save_state", lambda st_: None)
-    _phase_zero(monkeypatch, rt, minted, calls=played,
-                before=_listing("cc_other__1"),
-                after=_listing(minted),
-                out=_play_out(minted))
-    st = {}
-    rt.phase_snapshot(SimpleNamespace(go=True), st)
-    assert played and played[0][0][0] == "snapshot-scr.yml"
-    assert played[0][1]["limit"] == rt.snapshot_target() == "a-group", played
-    assert st["snapshot"]["name"] == minted
-
-    # ...and the plan line says so without naming the machine
-    capsys.readouterr()
-    rt.phase_snapshot(SimpleNamespace(go=False), {})
-    out = capsys.readouterr().out
-    assert "--limit %s" % rt.HOST_TOKEN in out and "a-group" not in out, out
-
-
-def test_a_machine_that_did_not_answer_the_listing_is_still_one_of_the_machines(monkeypatch):
-    """R4-L2: an UNREACHABLE host left no block behind, so the group looked like one healthy responder.
-
-    Ansible prints `host | UNREACHABLE! => {...}` for a machine it could not reach -- no rc, a different
-    header shape -- and the parser recognised only the rc-bearing one. The intended host being down
-    therefore did not reduce the count of answers: a second group member's rc=0 listing was read as the
-    one and only answer, and its snapshots vouched for a rollback point the intended machine does not
-    hold. A block that did not answer is still a block."""
-    rt, _src = _release_train()
-    rt.select_batch(ABSENT_BATCH)
-    _seat(monkeypatch, rt)
-    name = _snap()["snapshot"]["name"]
-
-    # R8-M1: the recap row is where this is settled now, and it carries the
-    # two counters that say a machine did not answer. A group whose intended
-    # machine was unreachable and whose second member answered reads as
-    # `unreachable=1` on the row, which is a refusal -- and the second member's
-    # own answer never becomes "the" answer, because the playbook is refused
-    # before any section of it is parsed.
-    for kw, says in (({"unreachable": 1}, "unreachable=1 failed=0"),
-                     ({"failed": 1}, "unreachable=0 failed=1")):
-        monkeypatch.setattr(rt, "run", _attesting_run(
-            rt, listing=True, name=name, recap=_recap(**kw)))
-        with pytest.raises(rt.Fail) as exc:
-            rt.snapshot_listing()
-        assert says in str(exc.value), (kw, str(exc.value))
-        assert "did not answer is not a machine that answered" in str(exc.value)
-
-    # ...and the whole gate refuses on it, rather than reporting the rollback
-    # point as present
-    monkeypatch.setattr(rt, "run", _attesting_run(
-        rt, listing=True, name=name, recap=_recap(unreachable=1)))
-    with pytest.raises(rt.Fail) as exc:
-        rt.snapshot_listing_problem(_snap())
-    assert "unreachable=1" in str(exc.value), str(exc.value)
-
-    # ...and a SECOND member's listing section is a duplicated section, which
-    # is the same refusal from the other direction: two machines cannot both
-    # answer inside one marked pair
-    monkeypatch.setattr(rt, "run", _attesting_run(rt, sections=[
-        _facts_section(BEFORE_P), _list_section(BEFORE_P, name),
-        _list_section(BEFORE_P, "cc_pre-bug392-server__1"),
-        _list_section(AFTER_P, name), _facts_section(AFTER_P)]))
-    with pytest.raises(rt.Fail) as exc:
-        rt.snapshot_listing()
-    assert "more than once" in str(exc.value), str(exc.value)
-
-    # inert twin: one machine, one recap row, and it answered
-    monkeypatch.setattr(rt, "run", _attesting_run(rt, listing=True, name=name))
-    listing = rt.snapshot_listing()
-    names, problem = rt.listed_snapshot_names(listing)
-    assert names == [name] and problem is None
-
-
-def test_the_remote_gate_names_the_repository_and_reads_only_what_succeeded(monkeypatch):
-    """R4-L3: `ls-remote` ran with check=False on the combined streams, and nothing said which remote.
-
-    Two holes in one gate. A command that FAILED could still have printed something that parses as a
-    ref -- a warning quoting one, a partial answer before the connection dropped -- and stderr is where
-    git puts everything that is not an answer, so the gate read one out of the noise. And `origin` is
-    whatever this checkout calls origin: a seat pointed at a fork or a mirror passes the comparison
-    perfectly while the boxes fetch from somewhere else. The batch pins the host and the repository, the
-    seat holds the whole URL, the command has to have exited 0, and its answer is read from stdout."""
-    rt, _src = _release_train()
-    rt.select_batch(ABSENT_BATCH)
-    _seat(monkeypatch, rt)
-    _attested(monkeypatch, rt)
-    assert rt.ORIGIN_EXPECTED["host"] == "github.com"
-    assert rt.ORIGIN_EXPECTED["path_suffix"] == "/SidsCompetitiveRounds.git"
-    good = {rt.BRANCH: REVIEWED_FULL, "main": MERGE_FULL}
-    parents = {MERGE_FULL: [MAIN_FULL, REVIEWED_FULL]}
-    trees = {REVIEWED_FULL: REVIEWED_TREE, MERGE_FULL: REVIEWED_TREE}
-    go = SimpleNamespace(go=True)
-    deployed = []
-    monkeypatch.setattr(rt, "save_state", lambda st_: None)
-    monkeypatch.setattr(rt, "_deploy_both", lambda sha, extra=None, st=None, **_kw: deployed.append(sha))
-    monkeypatch.setattr(rt, "code_state", lambda host: (True, True, False, ["alias absent"]))
-    monkeypatch.setattr(rt, "assert_route_probes", lambda hosts: None)
-    monkeypatch.setattr(rt, "assert_health_keys", lambda hosts: None)
-    monkeypatch.setattr(rt, "assert_edge_runs_new_code", lambda: None)
-    _snapshot_is_listed(monkeypatch, rt)
-    st = lambda: dict(_snap(), code_sha=MERGE_FULL, pre_code_old_build=True)
-
-    def refuses(says, **over):
-        stub, log = _fake_git(rt, good, parents, trees,
-                              **dict({"remote_main": MERGE_FULL}, **over))
-        monkeypatch.setattr(rt, "run", stub)
-        deployed[:] = []
-        with pytest.raises(rt.Fail) as exc:
-            rt.phase_code(go, st())
-        assert says in str(exc.value), (says, str(exc.value))
-        assert deployed == [], says
-        return str(exc.value)
-
-    # (a) origin is not the URL this seat is configured with -- and neither URL
-    # is printed, because this message goes into a transcript
-    msg = refuses("not the remote this seat is configured with",
-                  origin="https://github.com/ACCOUNT/SomethingElse.git")
-    assert "SomethingElse" not in msg and ORIGIN_URL not in msg, msg
-    # (b) ...and a seat configured with a URL that is not the pinned repository.
-    # A different seat is a different RUN: the seat is read once per process and
-    # answered from that reading ever after (R8-H2), so this arm forgets the
-    # captured value the way starting the train again would.
-    _fresh_process(rt, "origin_url")
-    monkeypatch.setenv("SCR_TRAIN_ORIGIN_URL", "https://example.invalid/x/other.git")
-    refuses("is not github.com/SidsCompetitiveRounds.git",
-            origin="https://example.invalid/x/other.git")
-    _fresh_process(rt, "origin_url")
-    monkeypatch.setenv("SCR_TRAIN_ORIGIN_URL", ORIGIN_URL)
-    # (c) a command that did not succeed is not an answer, however well its
-    # output parses
-    refuses("did not succeed", remote_rc=128,
-            remote_stderr="%s\trefs/heads/main" % MERGE_FULL)
-    # (d) ...and a matching ref on STDERR of a successful command is not one
-    # either: the gate reads stdout
-    refuses("the remote named no refs/heads/main", remote_main="",
-            remote_stderr="%s\trefs/heads/main" % MERGE_FULL)
-
-    # inert twin: the pinned repository, a command that succeeded, and the
-    # merge on stdout
-    stub, log = _fake_git(rt, good, parents, trees, remote_main=MERGE_FULL)
-    monkeypatch.setattr(rt, "run", stub)
-    deployed[:] = []
-    rt.phase_code(go, st())
-    assert deployed == [MERGE_FULL]
-    assert [c for c in log if "remote get-url origin" in c], log
-    assert [c for c in log if "ls-remote" in c], log
-
-
-def test_every_git_subprocess_the_train_spawns_disables_object_replacement(monkeypatch):
-    """R4-L4: the sweep covered the commands that REPORT and left the commands that WRITE.
-
-    `--no-replace-objects` and the environment variable were on the reads whose answer is an
-    authentication. But a replacement changes what a command BUILDS as well as what it reports: the
-    checkout, the merge and the commit read the objects they are made from, and `rev-parse HEAD`
-    reports the result. One door for every git subprocess, so the environment cannot be forgotten by a
-    caller, and the option stays on top of it for the authenticating ones."""
-    rt, _src = _release_train()
-    rt.select_batch(ABSENT_BATCH)
-    _seat(monkeypatch, rt)
-    _attested(monkeypatch, rt)
-    good = {rt.BRANCH: REVIEWED_FULL, "main": MAIN_FULL}
-    trees = {REVIEWED_FULL: REVIEWED_TREE, MERGE_FULL: REVIEWED_TREE}
-    stub, log = _fake_git(rt, dict(good), {MERGE_FULL: [MAIN_FULL, REVIEWED_FULL]}, trees,
-                          remote_main=MERGE_FULL)
-    writing = ("checkout", "merge", "commit", "push")
-
-    def recorder(cmd, **kw):
-        # The writing half of the phase, which the read-only stub refuses: it is
-        # recorded here with its environment and answered, so the phase runs to
-        # the end and every command it spawned can be judged.
-        if isinstance(cmd, list) and cmd[0] == "git" and cmd[1] in writing:
-            log.append(" ".join(cmd))
-            stub.envs.append(kw.get("env"))
-            return ""
-        if isinstance(cmd, list) and cmd[1:] == ["rev-parse", "HEAD"]:
-            log.append(" ".join(cmd))
-            stub.envs.append(kw.get("env"))
-            good["main"] = MERGE_FULL       # git merge moved it, as the real one does
-            return MERGE_FULL
-        return stub(cmd, **kw)
-
-    monkeypatch.setattr(rt, "run", recorder)
-    monkeypatch.setattr(rt, "save_state", lambda st_: None)
-    monkeypatch.setattr(rt, "_deploy_both", lambda sha, extra=None, st=None, **_kw: None)
-    monkeypatch.setattr(rt, "code_state", lambda host: (True, True, False, ["alias absent"]))
-    monkeypatch.setattr(rt, "assert_route_probes", lambda hosts: None)
-    monkeypatch.setattr(rt, "assert_health_keys", lambda hosts: None)
-    monkeypatch.setattr(rt, "assert_edge_runs_new_code", lambda: None)
-    _snapshot_is_listed(monkeypatch, rt)
-    rt.phase_code(SimpleNamespace(go=True), dict(_snap(), pre_code_old_build=True))
-
-    # the writing half really ran, and so did the reading half
-    for verb in writing + ("rev-parse", "status", "rev-list", "ls-remote"):
-        assert [c for c in log if c.split()[1:] and verb in c.split()], (verb, log)
-    # EVERY git subprocess carried the environment, and every authenticating one
-    # carried the option as well
-    seen = 0
-    for cmd, env in zip(log, stub.envs):
-        parts = cmd.split()
-        if parts[0] != "git":
-            continue
-        seen += 1
-        assert (env or {}).get("GIT_NO_REPLACE_OBJECTS") == "1", (cmd, env)
-        verb = parts[2] if parts[1] == NO_REPLACE else parts[1]
-        if verb in ("rev-parse", "rev-list", "merge-base", "merge-tree", "ls-remote", "cat-file"):
-            if parts[1:] == ["rev-parse", "HEAD"]:
-                continue        # reads this repo's own HEAD back, not an authentication
-            assert parts[1] == NO_REPLACE, cmd
-    assert seen >= 8, log
-
-
-def test_the_mergeability_check_writes_its_objects_where_they_are_deleted(monkeypatch, tmp_path):
-    """R7-L4 (R3-L3): the frozen rule says this train writes nothing outside its state file.
-
-    Two clauses were false as written, and the round before answered the row by conceding them in the
-    notes rather than by making the code meet them. This is the second: `git merge-tree --write-tree`
-    synthesizes the merge result and WRITES the trees into an object store, and the store it was given
-    was this repository's -- unreferenced objects, collected eventually, but written by a run without
-    --go. A rule a tool cannot keep is not a rule, so the objects now go to a temporary directory that
-    is removed whatever the call does, with the repository's own store handed back as a read-only
-    alternate so both sides can still be READ.
-
-    (The first clause is the listing capture, which now writes only inside the state directory; its own
-    test is `test_the_capture_writes_only_where_it_was_told_it_may`.)"""
-    import tempfile as _tempfile
-    rt, _src = _release_train()
-    rt.select_batch(ABSENT_BATCH)
-    doc = rt.__doc__
-    assert "merge-tree --write-tree" in doc, doc
-    assert "GIT_OBJECT_DIRECTORY" in doc, doc
-    assert "receives no objects" in doc, doc
-    # the sentence the caveat used to qualify is still there, unqualified now
-    assert "no ref moves, nothing is committed, pushed, deployed or migrated" in doc, doc
-
-    # ...and the code does it. The environment of the merge-tree call is
-    # captured from the REAL expected_merge_tree, through the real git() door.
-    seen = {}
-    objects = str(tmp_path / "objects")
-
-    def _run(cmd, **kw):
-        joined = " ".join(cmd) if isinstance(cmd, list) else cmd
-        if "--is-ancestor" in joined:
-            raise rt.Fail("not an ancestor")          # force the merging branch
-        if "--git-path" in joined:
-            return objects
-        if "merge-tree" in joined:
-            seen["env"] = kw.get("env") or {}
-            seen["dir"] = (kw.get("env") or {}).get("GIT_OBJECT_DIRECTORY")
-            seen["existed"] = os.path.isdir(seen["dir"] or "")
-            return "c" * 40
-        raise _NoCommand(joined)
-
-    monkeypatch.setattr(rt, "run", _run)
-    tree, how = rt.expected_merge_tree(MAIN_FULL, REVIEWED_FULL)
-    assert tree == "c" * 40
-    # (a) the objects were aimed somewhere else, and that somewhere EXISTED
-    # while the command ran -- a variable pointing at nothing would have sent
-    # them back to the default store
-    assert seen["dir"] and seen["existed"], seen
-    assert os.path.abspath(seen["dir"]) != os.path.abspath(objects), seen
-    # (b) ...with the repository's own store readable, or the merge could not
-    # have read either side
-    assert seen["env"].get("GIT_ALTERNATE_OBJECT_DIRECTORIES") == objects, seen
-    # (c) ...and the replacement door is still shut on the same command
-    assert seen["env"].get("GIT_NO_REPLACE_OBJECTS") == "1", seen
-    # (d) the temporary directory is GONE afterwards: "deleted after it" is the
-    # claim, and a directory still on disk is that claim being false
-    assert not os.path.exists(seen["dir"]), seen["dir"]
-    assert "received no objects" in how, how
-
-    # (e) ...and it is deleted on the FAILING path too, which is the one an
-    # author forgets
-    def _broken(cmd, **kw):
-        joined = " ".join(cmd) if isinstance(cmd, list) else cmd
-        if "--is-ancestor" in joined:
-            raise rt.Fail("not an ancestor")
-        if "--git-path" in joined:
-            return objects
-        raise rt.Fail("the merge could not be made")
-
-    monkeypatch.setattr(rt, "run", _broken)
-    before = set(os.listdir(_tempfile.gettempdir()))
-    with pytest.raises(rt.Fail):
-        rt.expected_merge_tree(MAIN_FULL, REVIEWED_FULL)
-    left = [d for d in set(os.listdir(_tempfile.gettempdir())) - before
-            if d.startswith("scr-train-mergetree-")]
-    assert left == [], left
-
-
-def test_the_train_refuses_to_run_when_no_batch_is_named(monkeypatch, capsys):
-    """R2-L1: an unnamed batch selected one that had already shipped, and that entry is UNBOUND.
-
-    `--batch` carried a default, so `plan`, `check` and `run --go` typed without it drove a train nobody
-    chose -- an entry written before the provenance binding existed, whose own plan line says UNBOUND and
-    whose branch is whatever that mutable ref names today. The documented commands omitted the flag too,
-    so following the docstring was the way to hit it. There is no default now, the module arrives bound
-    to no batch at all, and the refusal comes before anything is selected, read or probed."""
-    rt, src = _release_train()
-    real_select = rt.select_batch          # kept for the twin, past the refusal stubs below
-    # the module arrives pointed at nothing: an import-time selection is the
-    # same default wearing a different hat
-    assert rt.BATCH_NAME is None and rt.BRANCH is None and rt.STATE_PATH is None
-    assert "DEFAULT_BATCH" not in src
-    # No command may leave this test, whatever main() decides: a train that
-    # selected a batch anyway would otherwise probe live boxes from a unit test.
-    monkeypatch.setattr(rt, "run", lambda cmd, **kw: _raise_no_command(cmd))
-
-    for action in ("plan", "check", "run"):
-        monkeypatch.setattr(sys, "argv", ["release_train.py", action])
-        assert rt.main() == 1
-        out = capsys.readouterr().out
-        assert "--batch is required" in out, out
-        for name in rt.BATCHES:
-            assert name in out, (name, out)
-
-    # and it refuses BEFORE it selects, reads the state file or probes anything
-    monkeypatch.setattr(rt, "select_batch",
-                        lambda name: pytest.fail("selected %r with no --batch" % name))
-    monkeypatch.setattr(rt, "load_state", lambda: pytest.fail("read a state file"))
-    monkeypatch.setattr(rt, "run", lambda cmd, **kw: pytest.fail("ran %r" % (cmd,)))
-    monkeypatch.setattr(sys, "argv", ["release_train.py", "check"])
-    assert rt.main() == 1
-    capsys.readouterr()
-
-    # every command this file tells an operator to type names a batch
-    typed = [l for l in src.splitlines()
-             if "release_train.py" in l and "python" in l and "--batch" not in l]
-    assert typed == [], typed
-
-    # the inert twin: a NAMED batch still binds and still runs
-    real_select(ABSENT_BATCH)
-    assert rt.BATCH_NAME == ABSENT_BATCH and rt.BRANCH == "claude/bug392-merge"
 
 
 def test_health_reports_both_steam_words_and_the_render_loop_runs_on_both_roles():
@@ -4937,518 +4349,6 @@ def test_the_gates_forget_a_closed_loop_when_the_next_loop_takes_its_own():
         gates.clear()
 
 
-def _merging_git(rt, **kw):
-    """(`run` stub, log) that also lets the WRITING half of the code phase run.
-
-    `_fake_git` answers the read-only gates and raises on anything else, which
-    is what most of these tests want. This one additionally accepts the
-    checkout, the merge, the commit, `rev-parse HEAD` and the push, and records
-    them in the same log -- so the ORDER of the writing commands against the
-    gates can be read. Nothing is executed and nothing touches a network."""
-    inner, log = _fake_git(rt, **kw)
-
-    def _run(cmd, **kw2):
-        argv = [c for c in cmd if c != NO_REPLACE] if isinstance(cmd, list) else cmd
-        head = argv[:2] if isinstance(argv, list) else []
-        if head in (["git", "checkout"], ["git", "commit"], ["git", "push"]) or (
-                head == ["git", "merge"]):
-            log.append(" ".join(cmd))
-            return ""
-        if argv[:3] == ["git", "rev-parse", "HEAD"]:
-            log.append(" ".join(cmd))
-            return MERGE_FULL
-        return inner(cmd, **kw2)
-
-    _run.envs = inner.envs
-    return _run, log
-
-
-def test_the_two_per_box_deploy_limits_are_seat_values_checked_by_one_grammar(monkeypatch, capsys):
-    """R5-H1: the deploy play's two `--limit` selectors were literals in the train.
-
-    They name inventory groups -- the same class as the snapshot target, which was moved to the seat two
-    rounds ago for exactly this reason -- so they travelled into the train file, into every transcript
-    printed from it, into the tests, and into every review bundle built out of those. The scan that was
-    supposed to catch that kept a hand-written list of needles and the list did not name them, so the
-    bundle reported zero inventory identifiers while carrying two.
-
-    They are seat values now, read through the same door as the controller and the snapshot target,
-    checked by the same grammar before they can reach a command line, handed to the play as quoted
-    arguments, and named in deploy ORDER so the authoritative box is never left behind the box that
-    serves the routed reads."""
-    rt, _src = _release_train()
-    rt.select_batch(ABSENT_BATCH)
-    _seat(monkeypatch, rt)
-    assert rt.DEPLOY_LIMIT_KEYS == ("primary_limit", "standby_limit")
-    for key in rt.DEPLOY_LIMIT_KEYS:
-        assert key in rt.IDENTIFIERS
-
-    calls = []
-    attested = []
-    _attested(monkeypatch, rt, seen=attested)
-    monkeypatch.setattr(rt, "run_attested", _attesting_deploy(rt, calls))
-    monkeypatch.setattr(rt, "assert_control", lambda host: None)
-
-    # (a) the values the play is handed are the SEAT's, and moving the seat
-    # moves them -- which a literal could not do. The PHASE attests before its
-    # first mutation, and the deploy is held to that attestation: it never
-    # re-attests, which would replace the answer it is compared against with
-    # whatever the selectors resolve to now (R9-M2).
-    rt.attest_deploy_selectors()
-    rt._deploy_both(MERGE_FULL)
-    assert len(attested) == 1, attested
-    assert [c[1] for c in calls] == [SEAT_PRIMARY_LIMIT, SEAT_STANDBY_LIMIT], calls
-    calls[:] = []
-    # A moved seat is a new RUN: the seat is read once per process and answered
-    # from that first reading ever after (R8-H2), so each arm below forgets the
-    # captured value the way starting the train again would.
-    _fresh_process(rt, "primary_limit")
-    monkeypatch.setenv("SCR_TRAIN_PRIMARY_LIMIT", "other-primary")
-    rt._deploy_both(MERGE_FULL)
-    assert [c[1] for c in calls] == ["other-primary", SEAT_STANDBY_LIMIT], calls
-    _fresh_process(rt, "primary_limit")
-    monkeypatch.setenv("SCR_TRAIN_PRIMARY_LIMIT", SEAT_PRIMARY_LIMIT)
-
-    # (b) the reddening arm: a seat that has not been told refuses and names
-    # the key to set -- and it refuses before EITHER box is deployed to, not
-    # after the primary has already changed. The four bound values are one
-    # read, taken at the top of the step, so a key the seat cannot answer for
-    # stops the step rather than the second half of it.
-    calls[:] = []
-    _fresh_process(rt, "standby_limit")
-    monkeypatch.delenv("SCR_TRAIN_STANDBY_LIMIT")
-    with pytest.raises(rt.Fail) as exc:
-        rt._deploy_both(MERGE_FULL)
-    assert "SCR_TRAIN_STANDBY_LIMIT" in str(exc.value), str(exc.value)
-    assert calls == [], calls
-    _fresh_process(rt, "standby_limit")
-    monkeypatch.setenv("SCR_TRAIN_STANDBY_LIMIT", SEAT_STANDBY_LIMIT)
-
-    # (c) ...and they go through the ONE grammar door, so a pattern or one of
-    # ansible's reserved names is refused here exactly as it is for the
-    # snapshot target
-    for bad, says in (("a:b", "not a plain name"), ("*", "not a plain name"),
-                      ("all", "ansible reserves"), ("localhost", "ansible reserves")):
-        calls[:] = []
-        _fresh_process(rt, "primary_limit")
-        monkeypatch.setenv("SCR_TRAIN_PRIMARY_LIMIT", bad)
-        with pytest.raises(rt.Fail) as exc:
-            rt._deploy_both(MERGE_FULL)
-        assert says in str(exc.value), (bad, str(exc.value))
-        assert calls == [], (bad, calls)
-    _fresh_process(rt, "primary_limit")
-    monkeypatch.setenv("SCR_TRAIN_PRIMARY_LIMIT", SEAT_PRIMARY_LIMIT)
-
-    # (d) inert twin: the transcript of a deploy prints the neutral token, not
-    # the selector -- a review bundle is built out of these transcripts
-    capsys.readouterr()
-    rt._deploy_both(MERGE_FULL)
-    out = capsys.readouterr().out
-    assert rt.HOST_TOKEN in out, out
-    assert SEAT_PRIMARY_LIMIT not in out and SEAT_STANDBY_LIMIT not in out, out
-
-
-def test_a_snapshot_name_is_the_exact_form_the_wrapper_mints(monkeypatch, tmp_path, capsys):
-    """R5-H2 and R5-M2: `cc_` plus anything is a SHAPE, and a shape is not a name.
-
-    The wrapper builds one form. Its source is `LABEL=$(echo "$ARG" | tr -c 'a-zA-Z0-9_-' '_' |
-    cut -c1-40)` and then `NAME="cc_${LABEL}_$(date +%Y%m%d_%H%M%S)"` -- and because `echo` puts a
-    newline after the label and `tr` turns that newline into an underscore, the label always ends in one
-    and the minted name always carries TWO of them before the stamp. The stamp is eight digits, an
-    underscore, six digits.
-
-    Two defects rested on the wider shape. The capture treated every `cc_[A-Za-z0-9_.:-]+` token as safe
-    and copied it verbatim, so a line carrying `cc_<an identifier>__<digits>` was written into the
-    review bundle as a valid record. And the binding predicate tested a PREFIX, so `cc_<label>_fake`
-    -- an old or unrelated snapshot the play happened to print -- satisfied the rollback prerequisite
-    and was recorded with a fresh timestamp. One compiled pattern now answers for the extractor, the
-    capture's record line and the binding predicate, so the capture can only ever write a name the
-    state would bind."""
-    rt, _src = _release_train()
-    rt.select_batch(ABSENT_BATCH)
-    _seat(monkeypatch, rt)
-    _attested(monkeypatch, rt)
-    monkeypatch.setattr(rt, "STATE_PATH", str(tmp_path / "state.json"))
-    real = "cc_pre-bug392-merge__20260922_030000"
-
-    # (a) one pattern for all three consumers
-    assert rt.cc_name_pattern() in rt.record_line_re().pattern
-    assert rt.cc_name_re().pattern.lstrip("^").startswith("cc_")
-
-    # (b) the reddening arm: every near-miss is not a name, in the extractor
-    # and in the binding predicate alike
-    for near in ("cc_pre-bug392-merge_fake",
-                 "cc_pre-bug392-merge__fake",
-                 "cc_pre-bug392-merge__2026092_030000",      # seven digits
-                 "cc_pre-bug392-merge__20260922_03000",      # five digits
-                 "cc_pre-bug392-merge__20260922-030000",     # wrong separator
-                 "cc_pre-bug392-merge_20260922_030000",      # one underscore
-                 "cc_pre-bug392-merge-2__20260922_030000",   # a different label
-                 "cc_pre-bug392-server__20260922_030000",    # another batch
-                 # a hostile token carrying an identifier where the label goes.
-                 # The fixture stands in for a real machine or group name: the
-                 # literal one may not be written into a tracked file.
-                 "cc_a-machine__20260922_030000",
-                 # R6-M2: the stamp is eight ASCII digits, an underscore and
-                 # six more. `\\d` is UNICODE-wide in Python, so every one of
-                 # these satisfied it -- Devanagari, Arabic-Indic and
-                 # fullwidth digits are digits to `\\d` and are not what the
-                 # wrapper's `date +%Y%m%d_%H%M%S` can ever emit.
-                 u"cc_pre-bug392-merge__२०२००९२२_030000",
-                 u"cc_pre-bug392-merge__2026092٢_030000",
-                 u"cc_pre-bug392-merge__20260922_03000٠"):
-        assert rt.cc_names("  `-> %s 2026-09-22 03:00:01" % near) == [], near
-        assert rt._snapshot_name_binds(near) is False, near
-    # ...said of the grammar itself as well as of its verdicts, so a widening
-    # cannot be reintroduced somewhere the fixtures above do not reach
-    assert "\\d" not in rt._CC_STAMP and "[0-9]" in rt._CC_STAMP, rt._CC_STAMP
-    assert "\\d" not in rt._LISTED_AT.pattern, rt._LISTED_AT.pattern
-    assert "\\d" not in rt.record_line_re().pattern, rt.record_line_re().pattern
-
-    # (c) the same tokens reaching the CAPTURE leave a count and nothing else
-    # (the listing ends with pct's closing `current` entry, as every whole
-    # listing does -- R10-M1 -- and that line is dropped and counted too)
-    body = (" `-> cc_a-machine__20260922_030000 2026-09-22 03:00:01  auto\n"
-            " `-> cc_pre-bug392-merge_fake 2026-09-22 03:00:02  auto\n"
-            " `-> %s 2026-09-22 03:00:03  auto\n"
-            "  `-> current                   You are here!" % real)
-    dropped, lines = _printed_capture(rt, capsys, _listing_raw(body))
-    written = "\n".join(lines)
-    assert "a-machine" not in written, written
-    assert "_fake" not in written, written
-    assert dropped == 3 and "DROPPED 3" in written, (dropped, written)
-
-    # (d) inert twin: the real minted form is a record, it binds, and the gate
-    # reads it
-    assert rt.cc_names(" `-> %s 2026-09-22 03:00:03  auto" % real) == [real]
-    assert rt._snapshot_name_binds(real) is True
-    assert "SNAPSHOT name=%s taken=2026-09-22 03:00:03 zone=none" % real in written
-    assert "GATE names=1 usable=yes" in written
-
-    # (e) and the play that mints one of the near-misses is not recorded as
-    # having taken this train's rollback point
-    monkeypatch.setattr(rt, "save_state", lambda st_: None)
-    _phase_zero(monkeypatch, rt, real, out=_play_out("cc_pre-bug392-merge_fake"))
-    with pytest.raises(rt.Fail) as exc:
-        rt.phase_snapshot(SimpleNamespace(go=True), {})
-    assert "reported no cc_pre-bug392-merge__* snapshot name" in str(exc.value), str(exc.value)
-
-    # (f) R6-M2, the reddening arm the grammar cannot reach: an EXACT name of
-    # this batch's own label that the container was ALREADY holding. It passes
-    # the pattern, the extractor, the listing and the binding predicate --
-    # every question above says yes -- and the round before stamped it with the
-    # current moment and recorded it as this train's fresh rollback point. A
-    # play that took nothing reports failed=0 and prints the name it found.
-    _phase_zero(monkeypatch, rt, real, before=_listing(real),
-                after=_listing(real), out=_play_out(real))
-    st = {}
-    with pytest.raises(rt.Fail) as exc:
-        rt.phase_snapshot(SimpleNamespace(go=True), st)
-    assert "ALREADY in the container's listing" in str(exc.value), str(exc.value)
-    assert "not restamped" in str(exc.value), str(exc.value)
-    assert st == {}, st
-
-    # (g) ...and a play whose name the container does not hold afterwards is
-    # not recorded either: a name in a play's output is a claim, and the
-    # listing is the fact
-    _phase_zero(monkeypatch, rt, real, before=_listing(None),
-                after=_listing(None), out=_play_out(real))
-    with pytest.raises(rt.Fail) as exc:
-        rt.phase_snapshot(SimpleNamespace(go=True), {})
-    assert "does not hold it" in str(exc.value), str(exc.value)
-
-    # (h) inert twin: a name minted BETWEEN the two listings -- absent before,
-    # present after -- is recorded, with the provenance that says so, and the
-    # freshness the later gates read comes from the before-listing rather than
-    # from the moment the record was written
-    _phase_zero(monkeypatch, rt, real)
-    st = {}
-    rt.phase_snapshot(SimpleNamespace(go=True), st)
-    assert st["snapshot"]["name"] == real
-    assert st["snapshot"]["minted"]["absent_before"] is True
-    assert st["snapshot"]["minted"]["listed_after"] is True
-    assert st["snapshot"]["minted"]["before_count"] == 0
-    assert st["snapshot"]["minted"]["after_count"] == 1
-    assert rt.snapshot_record_problem(st) is None
-    # and a record whose minting moment is outside the window is refused, which
-    # is what makes the provenance the thing the age is measured from
-    stale = dict(st["snapshot"])
-    import datetime as _dt
-    stale["minted"] = dict(stale["minted"],
-                           before_utc=(_dt.datetime.now(_dt.timezone.utc)
-                                       - _dt.timedelta(hours=25)).isoformat(timespec="seconds"))
-    assert "24 hours" in rt.snapshot_record_problem({"snapshot": stale})
-
-
-def test_the_recorded_snapshot_binds_the_machine_it_was_taken_for(monkeypatch):
-    """R5-M1: the record bound this train, this batch, this label and this moment -- never a machine.
-
-    Every one of those four questions holds just as well for a snapshot sitting on a box the seat no
-    longer names. The controller and the target were re-read on every resume, so a seat repointed
-    between phase 0 and phase 4 -- a corrected inventory, an environment override, an edit to the seat
-    file -- let a same-named snapshot on a DIFFERENT container satisfy the rollback prerequisite, and
-    the deploy proceeded with nothing to roll back to.
-
-    Phase 0 records the sha256 of each bound seat value, never the value, plus one of the seat file. The
-    listing gate and the rollback prerequisite re-read them and refuse, naming the key and the phase."""
-    rt, _src = _release_train()
-    rt.select_batch(ABSENT_BATCH)
-    _seat(monkeypatch, rt)
-    _attested(monkeypatch, rt)
-    assert rt.SEAT_BINDING_KEYS == ("controller", "pve_group", "primary_limit",
-                                    "standby_limit", "play_dir")
-
-    # (a) what phase 0 writes is digests, and the values are not in it -- plus
-    # the digest of the host the PLAY's own recap named, which is the identity
-    # the selector digests cannot carry: a selector is a name for a set
-    # somebody else maintains, and an unchanged name can be remapped from one
-    # machine to another without this seat touching anything.
-    listed = []
-    fresh = "cc_pre-bug392-merge__20260922_031500"
-    monkeypatch.setattr(rt, "save_state", lambda st_: None)
-    _phase_zero(monkeypatch, rt, fresh)
-    st = {}
-    rt.phase_snapshot(SimpleNamespace(go=True), st)
-    recorded = st["snapshot"]["seat"]
-    assert set(recorded) == set(rt.SEAT_BINDING_KEYS) | {"conf", "box", "responder_label"}
-    for value in (SEAT_CONTROLLER, SEAT_PVE_GROUP, SEAT_PRIMARY_LIMIT, SEAT_STANDBY_LIMIT,
-                  SEAT_PLAY_HOST):
-        assert value not in repr(recorded), value
-    assert recorded == _seat_digests(), recorded
-    # R7-M1: the identity is what the BOX said about itself -- its endpoint and
-    # the sha256 of its own machine-id -- and the label the play's recap
-    # printed is kept as a digest for the log. A label is a name somebody else
-    # maintains; six rounds recorded and compared exactly that.
-    # R8-H5: the endpoint is recorded as its CLASS. The address the box
-    # reported is a machine address like any other and a state file -- which
-    # `check` prints -- is not a place for one.
-    assert recorded["box"] == {"addr": OTHER_TOKEN, "id": SEAT_BOX_ID}, recorded
-    assert SEAT_BOX_ENDPOINT not in repr(recorded), recorded
-    assert len(recorded["box"]["id"]) == 64
-
-    # (a2) R6-M1: the values the play was HANDED and the values that were
-    # DIGESTED are one read. A seat that answers differently on every read
-    # makes the difference visible: while the phase read the seat again to
-    # record it, the digest it wrote down was of a value nothing had ever run
-    # under, and every later gate then compared against that.
-    drift = {"n": 0}
-    real_require = rt.require_identifier
-
-    def drifting(key):
-        if key == "pve_group":
-            drift["n"] += 1
-            return "a-group-%d" % drift["n"]
-        return real_require(key)
-
-    monkeypatch.setattr(rt, "require_identifier", drifting)
-    played = []
-    _phase_zero(monkeypatch, rt, fresh, calls=played)
-    st2 = {}
-    rt.phase_snapshot(SimpleNamespace(go=True), st2)
-    handed = played[0][1]["limit"]
-    import hashlib as _h
-    assert st2["snapshot"]["seat"]["pve_group"] == _h.sha256(handed.encode("utf-8")).hexdigest(), (
-        handed, drift)
-    assert drift["n"] == 1, drift        # read once, used twice
-    monkeypatch.setattr(rt, "require_identifier", real_require)
-
-    # (a3) ...and the machine the play answered from is what a listing is
-    # compared against. A listing whose answering block names a different host
-    # is another box's snapshot list, and it is refused before any name in it
-    # is trusted -- the selector has not changed, it resolves elsewhere.
-    moved = dict(st["snapshot"])
-
-    # the reddening arms, and the one the round before could not have: the
-    # LABEL is held CONSTANT and the machine underneath it changes. An alias
-    # repointed at another installation answers under the same name, so a gate
-    # that compares the name cannot see it at all.
-    relabelled = _listing(fresh, responder="b-machine")
-    other_box = _listing(fresh, box_id="f" * 64)
-    other_where = _listing(fresh, endpoint=rt.PRIMARY_TOKEN)
-
-    said = rt.responder_problem(moved, other_box)
-    assert said and "boot fingerprint differs" in said, said
-    assert SEAT_BOX_ID not in said and "f" * 64 not in said, said
-    said = rt.responder_problem(moved, other_where)
-    assert said and "different endpoint" in said, said
-    assert SEAT_BOX_ENDPOINT not in said, said
-    monkeypatch.setattr(rt, "snapshot_listing", lambda values=None: other_box)
-    problem, _how = rt.snapshot_listing_problem({"snapshot": moved})
-    assert problem and "boot fingerprint differs" in problem, problem
-
-    # ...and the INERT TWIN that says the comparison is about machines and not
-    # about names: the label changes and both facts hold -- an alias rename is
-    # not an identity change, and this passes.
-    assert rt.responder_problem(moved, relabelled) is None,         "a renamed alias over the same installation is not a different machine"
-    same = _listing(fresh)
-    assert rt.responder_problem(moved, same) is None
-    # ...and a record that carries no box identity at all is unbound, never
-    # bound -- including one carrying only the old label digest
-    for gone in ("box",):
-        no_box = dict(moved, seat={k: v for k, v in moved["seat"].items() if k != gone})
-        assert "does not say WHICH MACHINE" in rt.responder_problem(no_box, same), gone
-    # ...and a listing whose machine stated nothing is not a match either
-    silent = _listing(fresh, identity=None)
-    assert "did not state its own identity" in rt.responder_problem(moved, silent)
-
-    # (b) the reddening arm: the seat is repointed and the new target's listing
-    # carries a snapshot of the SAME NAME. It is refused, before any listing
-    # call is made at all, naming the key and the phase.
-    bound = _snap()
-    monkeypatch.setattr(rt, "snapshot_listing",
-                        lambda values=None: listed.append("asked") or
-                        _listing(bound["snapshot"]["name"]))
-    for key, env in (("pve_group", "SCR_TRAIN_PVE_GROUP"),
-                     ("controller", "SCR_TRAIN_CONTROLLER"),
-                     ("primary_limit", "SCR_TRAIN_PRIMARY_LIMIT"),
-                     ("standby_limit", "SCR_TRAIN_STANDBY_LIMIT")):
-        was = rt.identifier(key)
-        # A repointed seat is a LATER run reading a changed file or
-        # environment, never a second read inside one run (R8-H2). Each arm
-        # moves ONE key and puts it back, so the arm after it is not reading a
-        # seat three keys of which have already moved.
-        _fresh_process(rt, key)
-        monkeypatch.setenv(env, "b-" + was)
-        listed[:] = []
-        problem, how = rt.snapshot_listing_problem(bound)
-        assert problem and repr(key) in problem, (key, problem)
-        assert "the listing gate" in problem, (key, problem)
-        assert listed == [], (key, "the listing was asked before the seat was checked")
-        assert was not in problem and ("b-" + was) not in problem, problem
-        # ...and the phase-4 prerequisite refuses on the same record
-        problem = rt.snapshot_record_problem(bound)
-        assert problem and repr(key) in problem and "the rollback prerequisite" in problem
-        with pytest.raises(rt.Fail) as exc:
-            rt.phase_code(SimpleNamespace(go=True), dict(bound))
-        assert repr(key) in str(exc.value), (key, str(exc.value))
-        assert listed == [], key
-        # ...and back, so the arm after this one moves ONE key rather than
-        # reading a seat every earlier arm has already left moved
-        _fresh_process(rt, key)
-        monkeypatch.setenv(env, was)
-        assert rt.identifier(key) == was
-
-    # (c) a record written before this binding existed is UNBOUND, never bound
-    old_shape = _snap()
-    del old_shape["snapshot"]["seat"]
-    problem = rt.snapshot_record_problem(old_shape)
-    assert problem and "no seat binding" in problem, problem
-    problem, _how = rt.snapshot_listing_problem(old_shape)
-    assert problem and "no seat binding" in problem, problem
-    assert listed == [], "an unbound record must not reach the listing either"
-
-    # (d) inert twin: an untouched seat -- the record binds, the listing is
-    # asked, and the gate passes
-    listed[:] = []
-    assert rt.snapshot_record_problem(bound) is None
-    problem, how = rt.snapshot_listing_problem(bound)
-    assert problem is None, problem
-    assert listed == ["asked"], listed
-
-
-def test_the_merge_is_authenticated_and_the_remote_checked_before_the_push(monkeypatch, capsys):
-    """R5-L3: a fresh run pushed in the same breath as the merge, ahead of every gate that could refuse it.
-
-    The push was the fourth entry of a list the phase ran straight through, so the remote was written to
-    before anything had asked whether the merge just made is the reviewed content and before anything
-    had asked whether `origin` is the repository the boxes clone. Every refusal that exists to stop a
-    bad deploy landed after the one step that cannot be taken back.
-
-    And `origin` has two URLs. `remote.origin.pushurl`, when it is set, is where a push goes, so a check
-    that reads only the fetch URL proves the merge was authenticated against one repository while the
-    push landed in another."""
-    rt, _src = _release_train()
-    rt.select_batch(ABSENT_BATCH)
-    _seat(monkeypatch, rt)
-    _attested(monkeypatch, rt)
-    go = SimpleNamespace(go=True)
-    monkeypatch.setattr(rt, "save_state", lambda st_: None)
-    monkeypatch.setattr(rt, "code_state", lambda host: (True, True, False, ["alias absent"]))
-    monkeypatch.setattr(rt, "assert_route_probes", lambda hosts: None)
-    monkeypatch.setattr(rt, "assert_health_keys", lambda hosts: None)
-    monkeypatch.setattr(rt, "assert_edge_runs_new_code", lambda: None)
-    deployed = []
-    monkeypatch.setattr(rt, "_deploy_both", lambda sha, extra=None, st=None, **_kw: deployed.append(sha))
-    _snapshot_is_listed(monkeypatch, rt)
-    refs = {rt.BRANCH: REVIEWED_FULL, "main": MAIN_FULL}
-    parents = {MERGE_FULL: [MAIN_FULL, REVIEWED_FULL]}
-    trees = {REVIEWED_FULL: REVIEWED_TREE, MERGE_FULL: REVIEWED_TREE}
-
-    def fresh_state():
-        return dict(_snap(), pre_code_old_build=True)
-
-    # (a) the reddening arm: a second push URL. The phase refuses, and the push
-    # is not among the commands that ran.
-    stub, log = _merging_git(rt, refs=dict(refs), parents=parents, trees=trees,
-                             remote_main=MERGE_FULL,
-                             pushurl="https://github.com/ACCOUNT/Elsewhere.git")
-    monkeypatch.setattr(rt, "run", stub)
-    deployed[:] = []
-    with pytest.raises(rt.Fail) as exc:
-        rt.phase_code(go, fresh_state())
-    assert "not the remote this seat is configured with" in str(exc.value), str(exc.value)
-    assert "Elsewhere" not in str(exc.value), str(exc.value)
-    assert not [c for c in log if c.startswith("git push")], log
-    assert deployed == [], deployed
-
-    # (a2) R6-L3: `origin` may carry SEVERAL push URLs and git writes to every
-    # one of them. `--get` answers with the LAST value, so a repository
-    # configured with an unintended destination FIRST and the expected one last
-    # passed the check exactly -- the gate read the value it was hoping for --
-    # and `git push origin main` then wrote to both. Every configured value is
-    # read, and this arm is the ordering that used to slip through.
-    stub, log = _merging_git(rt, refs=dict(refs), parents=parents, trees=trees,
-                             remote_main=MERGE_FULL,
-                             pushurl=["https://github.com/ACCOUNT/Elsewhere.git", ORIGIN_URL])
-    monkeypatch.setattr(rt, "run", stub)
-    deployed[:] = []
-    with pytest.raises(rt.Fail) as exc:
-        rt.phase_code(go, fresh_state())
-    assert "not the remote this seat is configured with" in str(exc.value), str(exc.value)
-    assert "Elsewhere" not in str(exc.value), str(exc.value)
-    assert not [c for c in log if c.startswith("git push")], log
-    assert deployed == [], deployed
-    # ...and the command that was used to read them is the multi-valued one
-    assert [c for c in log if "--get-all remote.origin.pushurl" in c], log
-
-    # (b) ...and a merge whose TREE is not the reviewed content refuses before
-    # the push as well, which is the ordering this finding is about
-    stub, log = _merging_git(rt, refs=dict(refs), parents=parents,
-                             trees={REVIEWED_FULL: REVIEWED_TREE, MERGE_FULL: OTHER_TREE},
-                             remote_main=MERGE_FULL)
-    monkeypatch.setattr(rt, "run", stub)
-    with pytest.raises(rt.Fail):
-        rt.phase_code(go, fresh_state())
-    assert not [c for c in log if c.startswith("git push")], log
-
-    # (c) inert twin: no pushurl, the reviewed tree, the pinned remote -- the
-    # push IS reached, and it comes after the commit, after the authentication
-    # read and after the remote check
-    stub, log = _merging_git(rt, refs=dict(refs), parents=parents, trees=trees,
-                             remote_main=MERGE_FULL)
-    monkeypatch.setattr(rt, "run", stub)
-    deployed[:] = []
-    rt.phase_code(go, fresh_state())
-    assert deployed == [MERGE_FULL], deployed
-    push = [i for i, c in enumerate(log) if c.startswith("git push")]
-    assert len(push) == 1, log
-    commit = [i for i, c in enumerate(log) if c.startswith("git commit")]
-    parents_read = [i for i, c in enumerate(log) if "rev-list" in c]
-    get_url = [i for i, c in enumerate(log) if "remote get-url origin" in c]
-    config = [i for i, c in enumerate(log) if "remote.origin.pushurl" in c]
-    assert commit and parents_read and get_url and config
-    assert push[0] > commit[0], log
-    assert push[0] > parents_read[0], log
-    assert push[0] > get_url[0] and push[0] > config[0], log
-
-    # (d) and the plan arm says the same order without running any of it
-    capsys.readouterr()
-    rt.phase_code(SimpleNamespace(go=False), fresh_state())
-    joined = capsys.readouterr().out
-    assert "then authenticate the merge and check the remote" in joined, joined
-    assert joined.index("git commit") < joined.index("git push origin main"), joined
-
-
 def test_every_line_this_train_prints_goes_through_one_redaction_door(monkeypatch, capsys,
                                                                      tmp_path):
     """R7-H2 (R6-H2, R5-H1): the door was there, and it was asking the wrong question twice over.
@@ -5817,489 +4717,6 @@ def test_no_exception_leaves_this_train_except_through_the_door(monkeypatch, cap
     assert rt.run(raw, quiet=True) == "fine"
 
 
-def test_the_push_url_gate_asks_git_where_a_push_would_really_go(monkeypatch):
-    """R7-L2 (R6-L3): every configured literal can equal the pinned URL and the push still land elsewhere.
-
-    The gate read `remote.origin.url` and `remote.origin.pushurl` out of the configuration. Those are
-    the values somebody wrote down; they are not where `git push` writes. `url.<base>.pushInsteadOf`
-    rewrites a destination at push time, and no reading of the raw keys can see it. So git is asked,
-    with the verb whose whole job is to expand that rewriting -- and the enumeration has to have
-    SUCCEEDED, because a command that failed answers with nothing and nothing is not "no other
-    destination"."""
-    rt, _src = _release_train()
-    rt.select_batch(ABSENT_BATCH)
-    _seat(monkeypatch, rt)
-
-    def answering(effective, rc=0):
-        def _run(cmd, **kw):
-            joined = " ".join(cmd) if isinstance(cmd, list) else cmd
-            if "get-url --push --all" in joined:
-                if rc:
-                    raise rt.Fail("command failed (rc=%d):\nfatal: no such remote" % rc)
-                return "\n".join(effective)
-            if "remote get-url origin" in joined:
-                return ORIGIN_URL
-            if "config --get-all" in joined:
-                return ORIGIN_URL if joined.endswith("remote.origin.url") else ""
-            raise _NoCommand(joined)
-        return _run
-
-    # (a) inert twin: one effective destination, and it is the pinned one
-    monkeypatch.setattr(rt, "run", answering([ORIGIN_URL]))
-    rt.assert_origin_is_the_expected_remote()
-
-    # (b) the reddening arm the raw keys cannot see: every literal equals the
-    # pinned URL and the effective push destination is somewhere else
-    monkeypatch.setattr(rt, "run", answering(["https://example.invalid/elsewhere.git"]))
-    with pytest.raises(rt.Fail) as exc:
-        rt.assert_origin_is_the_expected_remote()
-    assert "1 destination(s)" in str(exc.value), str(exc.value)
-    assert "expands the push-time rewriting" in str(exc.value), str(exc.value)
-
-    # (c) two destinations, the pinned one among them: git writes to every one
-    monkeypatch.setattr(rt, "run",
-                        answering(["https://example.invalid/elsewhere.git", ORIGIN_URL]))
-    with pytest.raises(rt.Fail) as exc:
-        rt.assert_origin_is_the_expected_remote()
-    assert "2 destination(s)" in str(exc.value), str(exc.value)
-
-    # (d) the enumeration did not succeed: an empty answer is NOT an empty set
-    monkeypatch.setattr(rt, "run", answering([], rc=128))
-    with pytest.raises(rt.Fail) as exc:
-        rt.assert_origin_is_the_expected_remote()
-    assert "did not succeed" in str(exc.value), str(exc.value)
-    assert "an unknown destination is not an empty one" in str(exc.value), str(exc.value)
-
-    # ...and no URL is printed in any of those refusals: they go into a
-    # transcript a review bundle is built from
-    for arm, rc in ((["https://example.invalid/elsewhere.git"], 0), ([], 128)):
-        monkeypatch.setattr(rt, "run", answering(arm, rc=rc))
-        with pytest.raises(rt.Fail) as exc:
-            rt.assert_origin_is_the_expected_remote()
-        assert ORIGIN_URL not in str(exc.value), str(exc.value)
-        assert "example.invalid" not in str(exc.value), str(exc.value)
-
-
-def test_each_per_box_selector_is_attested_to_its_box_before_anything_is_mutated(monkeypatch):
-    """R7-M2, R7-L3 and R4-L3 (R6-M3): a key NAME is not evidence about a machine, and neither is a second probe.
-
-    `primary_limit` and `standby_limit` were read, grammar-checked and handed to the play in that order,
-    and nothing anywhere asked which box each one actually resolves to. With the two values swapped the
-    standby is deployed first and the primary second: both plays report failed=0, both boxes end on the
-    new build, and the ordering that exists so the authoritative box is never left behind the box
-    serving the routed reads (#266) is inverted with nothing reporting it.
-
-    Attesting the selectors fixed half of it. The other half is that the attestation and the plays were
-    two INDEPENDENT resolutions of the inventory: correct at both probes and swapped in between, the
-    standby is deployed first, the still-old primary passes the liveness check in the middle, and both
-    final probes pass. So each play comes back with the box's own statement of who it is, in the same
-    ssh invocation, and the PRIMARY's is checked before the standby's play is started.
-
-    And the attestation happens before ANY mutation on every path -- `--from code` and a phase 0 that
-    skipped on a valid snapshot included -- which is asserted from a recorded call SEQUENCE rather than
-    from where a line sits in a function."""
-    rt, _src = _release_train()
-    rt.select_batch(ABSENT_BATCH)
-    _seat(monkeypatch, rt)
-    asked = []
-
-    def answering(addresses, fingerprints=None, second_fact="", recap=None, plays=None):
-        """A controller answering the ONE attested playbook for `addresses[limit]`.
-
-        Both the selector and the token are read OUT OF THE COMMAND. The
-        selector, because `--limit <value>` is the only thing in the invocation
-        that says which key is being asked; the token, because the train mints
-        a fresh one per invocation and the answer has to echo THAT one -- a
-        fixture answering with a constant would make the binding unobservable
-        and the arm that removes it would redden nothing (#342).
-
-        `plays` maps a selector to the (address, fingerprint) its DEPLOY
-        invocations resolve to, when that differs from what its probes resolve
-        to -- the inventory moving between the read-only probe and the play.
-        The status is the process's (R9-M1): an unreachable host is 4, a gate
-        that refused is 2."""
-        fingerprints = fingerprints or {SEAT_PRIMARY_LIMIT: PRIMARY_BOX_ID,
-                                        SEAT_STANDBY_LIMIT: STANDBY_BOX_ID}
-        import re as _re
-
-        def _answer(cmd, **kw):
-            joined = " ".join(cmd) if isinstance(cmd, list) else cmd
-            asked.append(joined)
-            found = _re.search(r"-e scr_nonce=([0-9a-f]{32})", joined)
-            nonce = found.group(1) if found else NONCE
-            for limit, addr in addresses.items():
-                if "--limit %s " % limit not in joined + " ":
-                    continue
-                if addr is None:
-                    return _attested_out(nonce=nonce, recap=_recap(unreachable=1)), 4
-                box_id = fingerprints[limit]
-                ref = _re.search(r"scr_deploy_ref=([0-9a-f]{40})", joined)
-                if ref and plays is not None and limit in plays:
-                    # the inventory as the PLAY resolves it, which an arm moves
-                    # away from what the probes saw
-                    addr, box_id = plays[limit]
-                # R9-M2: the gate, as the box runs it -- sha256 of the token
-                # and its own fingerprint against the digest the train sent,
-                # and its own address against the one it sent
-                gate = _re.search(r"-e scr_expect_id=([0-9a-f]{64}) -e scr_expect_addr=(\S+)",
-                                  joined)
-                middle = ""
-                if gate:
-                    mine = hashlib.sha256(("%s:%s" % (nonce, box_id)).encode("ascii")).hexdigest()
-                    if gate.group(1) != mine or gate.group(2) != addr:
-                        return (('        "SCR-FACTS-BEGIN BEFORE %s",\n%s\n'
-                                 '        "SCR-FACTS-END BEFORE %s"\n'
-                                 'fatal: [%s]: FAILED! => {"stdout": "SCR-GATE %s REFUSED"}\n%s'
-                                 % (nonce, _facts_body(addr, box_id), nonce, SEAT_PLAY_HOST,
-                                    nonce, _recap(failed=1))), 2)
-                    middle = '        "SCR-GATE %s PASSED"' % nonce
-                # A deploy invocation carries the id it pinned, and the box
-                # states the commit its clone is on: the fake answers with the
-                # id it was handed, so the arm that moves them apart is the
-                # one that reddens.
-                body = (_facts_body(addr, box_id,
-                                    sha=ref.group(1) if ref else OTHER_FULL) + second_fact)
-                sections = [
-                    '        "SCR-FACTS-BEGIN %s %s",\n%s\n        "SCR-FACTS-END %s %s"'
-                    % (phase, nonce, body, phase, nonce) for phase in (BEFORE_P, AFTER_P)]
-                if middle:
-                    sections.insert(1, middle)
-                return _attested_out(sections=sections, recap=recap), 0
-            raise _NoCommand(joined)
-
-        def _run(cmd, **kw):
-            text, rc = _answer(cmd, **kw)
-            return (text, rc) if kw.get("with_rc") else text
-        return _run
-
-    straight = {SEAT_PRIMARY_LIMIT: rt.PRIMARY, SEAT_STANDBY_LIMIT: rt.STANDBY}
-
-    # (a) inert twin: each selector resolves to the box its key names. Both are
-    # probed, the primary's first, nothing refuses, and the pair each one
-    # resolved to is what comes back -- and is left where a later phase can ask
-    # whether this run attested at all.
-    monkeypatch.setattr(rt, "run", answering(straight))
-    asked[:] = []
-    attested = rt.attest_deploy_selectors()
-    assert len(asked) == 2, asked
-    assert SEAT_PRIMARY_LIMIT in asked[0] and SEAT_STANDBY_LIMIT in asked[1], asked
-    assert all("ansible-playbook" in a for a in asked), asked
-    # ...and each invocation minted its OWN token: the token is what binds a
-    # marked section to the process that asked for it, so a constant one would
-    # let one invocation's answer be replayed as another's
-    import re as _re2
-    tokens = [_re2.search(r"-e scr_nonce=([0-9a-f]{32})", a).group(1) for a in asked]
-    assert len(set(tokens)) == 2, tokens
-    # What is kept is the endpoint CLASS, never the address (R8-H5)
-    assert attested == {"primary_limit": (rt.PRIMARY_TOKEN, PRIMARY_BOX_ID),
-                        "standby_limit": (rt.STANDBY_TOKEN, STANDBY_BOX_ID)}, attested
-    assert rt._ATTESTED == attested
-    for a in asked:
-        assert rt.PRIMARY not in a and rt.STANDBY not in a, a
-
-    # (b) the reddening arm: the two values are SWAPPED. Each one is a valid
-    # group name, each resolves to exactly one machine, each machine is
-    # healthy -- and the deploy order is inverted. Refused on the FIRST key,
-    # naming the key and never the value or the address it found.
-    monkeypatch.setattr(rt, "run",
-                        answering({SEAT_PRIMARY_LIMIT: rt.STANDBY,
-                                   SEAT_STANDBY_LIMIT: rt.PRIMARY}))
-    asked[:] = []
-    with pytest.raises(rt.Fail) as exc:
-        rt.attest_deploy_selectors()
-    assert "SCR_TRAIN_PRIMARY_LIMIT" in str(exc.value), str(exc.value)
-    assert SEAT_PRIMARY_LIMIT not in str(exc.value), str(exc.value)
-    assert rt.STANDBY not in str(exc.value), str(exc.value)
-    assert "an endpoint this train does not declare" in str(exc.value), str(exc.value)
-    assert len(asked) == 1, "it stops at the first selector that is not its box"
-
-    # (b2) ...and two selectors, two addresses, ONE installation: a box
-    # deployed to twice leaves the other on the old build with every probe
-    # passing, and only the fingerprint can say so
-    monkeypatch.setattr(rt, "run", answering(
-        straight, fingerprints={SEAT_PRIMARY_LIMIT: PRIMARY_BOX_ID,
-                                SEAT_STANDBY_LIMIT: PRIMARY_BOX_ID}))
-    with pytest.raises(rt.Fail) as exc:
-        rt.attest_deploy_selectors()
-    assert "SAME installation" in str(exc.value), str(exc.value)
-
-    # (c) a selector that resolves to more than one machine, one whose machine
-    # did not answer, and one whose machine stated no identity at all: none of
-    # them can be attested
-    monkeypatch.setattr(rt, "run", answering(
-        straight, second_fact='\n        "SCR-BOX-ADDR %s",' % rt.PRIMARY))
-    with pytest.raises(rt.Fail) as exc:
-        rt.attest_deploy_selectors()
-    assert "ONE machine stating its own identity" in str(exc.value), str(exc.value)
-    monkeypatch.setattr(rt, "run", answering({SEAT_PRIMARY_LIMIT: None,
-                                              SEAT_STANDBY_LIMIT: rt.STANDBY}))
-    with pytest.raises(rt.Fail) as exc:
-        rt.attest_deploy_selectors()
-    # the PROCESS said so first (ansible exits 4 on an unreachable host) and
-    # nothing of the answer was read (R9-M1)
-    assert "exited rc=4" in str(exc.value), str(exc.value)
-    # ...and a recap that reports the host unreachable is still refused on its
-    # own when the process status says nothing (the recap is the second door)
-    monkeypatch.setattr(rt, "run", _with_rc(
-        lambda cmd, **kw: _attested_out(nonce=_nonce_of(cmd), recap=_recap(unreachable=1))))
-    with pytest.raises(rt.Fail) as exc:
-        rt.attest_deploy_selectors()
-    assert "unreachable=1" in str(exc.value), str(exc.value)
-    # ...and a recap naming a second machine, which is the shape a group with
-    # one healthy member and one intended-but-silent member takes
-    monkeypatch.setattr(rt, "run", answering(
-        straight, recap=_recap() + "\nb-machine                 : ok=3    changed=1    "
-                                   "unreachable=0    failed=0"))
-    with pytest.raises(rt.Fail) as exc:
-        rt.attest_deploy_selectors()
-    assert "recap names 2 machines" in str(exc.value), str(exc.value)
-    # ...and an answer carrying no marked section at all
-    monkeypatch.setattr(rt, "run", _with_rc(
-        lambda cmd, **kw: "%s | SUCCESS => {}" % SEAT_PLAY_HOST))
-    with pytest.raises(rt.Fail) as exc:
-        rt.attest_deploy_selectors()
-    assert "sections are [none]" in str(exc.value), str(exc.value)
-    # ...and one whose sections carry ANOTHER invocation's token: the answer
-    # parses perfectly and was not produced by this process
-    monkeypatch.setattr(rt, "run", _with_rc(lambda cmd, **kw: _attested_out(nonce=OTHER_NONCE)))
-    with pytest.raises(rt.Fail) as exc:
-        rt.attest_deploy_selectors()
-    assert "a token this invocation did not mint" in str(exc.value), str(exc.value)
-
-    # (d) ...and the two selectors have to be DIFFERENT groups: one value in
-    # both keys deploys to one box twice and to the other not at all
-    _fresh_process(rt, "standby_limit")
-    monkeypatch.setenv("SCR_TRAIN_STANDBY_LIMIT", SEAT_PRIMARY_LIMIT)
-    asked[:] = []
-    with pytest.raises(rt.Fail) as exc:
-        rt.attest_deploy_selectors()
-    assert "SAME inventory selector" in str(exc.value), str(exc.value)
-    assert asked == [], "it refuses before it probes anything"
-    _fresh_process(rt, "standby_limit")
-    monkeypatch.setenv("SCR_TRAIN_STANDBY_LIMIT", SEAT_STANDBY_LIMIT)
-
-    # (e) R9-M2, identity BEFORE mutation, on ONE fake controller: the phase
-    # attests with the inventory straight, and then a selector is remapped.
-    # The deploy is held to the PHASE's attestation (it never re-attests, which
-    # would attest the remap afresh) and it probes both boxes read-only before
-    # either play, so every remap below is refused with ZERO deploy
-    # invocations -- the primary is not touched.
-    monkeypatch.setattr(rt, "assert_control", lambda host: None)
-    monkeypatch.setattr(rt, "run", answering(straight))
-    rt.attest_deploy_selectors()
-    for remap, fps, says in (
-            # the standby's selector now resolves to the primary's box
-            ({SEAT_PRIMARY_LIMIT: rt.PRIMARY, SEAT_STANDBY_LIMIT: rt.PRIMARY}, None,
-             "SCR_TRAIN_STANDBY_LIMIT"),
-            # the primary's selector now resolves to the standby's box
-            ({SEAT_PRIMARY_LIMIT: rt.STANDBY, SEAT_STANDBY_LIMIT: rt.STANDBY}, None,
-             "SCR_TRAIN_PRIMARY_LIMIT"),
-            # same address, another installation behind it
-            (straight, {SEAT_PRIMARY_LIMIT: "f" * 64, SEAT_STANDBY_LIMIT: STANDBY_BOX_ID},
-             "boot fingerprint differs")):
-        monkeypatch.setattr(rt, "run", answering(remap, fingerprints=fps))
-        asked[:] = []
-        with pytest.raises(rt.Fail) as exc:
-            rt._deploy_both(MERGE_FULL)
-        assert says in str(exc.value), (says, str(exc.value))
-        assert [a for a in asked if "scr_deploy_ref" in a] == [], \
-            "no deploy play may have been started (%s)" % says
-        assert asked, "the refusal came from a read-only probe, not from nothing"
-    # ...and nothing re-attested along the way: the pairs the phase proved are
-    # the pairs still held
-    assert rt._ATTESTED == {"primary_limit": (rt.PRIMARY_TOKEN, PRIMARY_BOX_ID),
-                            "standby_limit": (rt.STANDBY_TOKEN, STANDBY_BOX_ID)}, rt._ATTESTED
-
-    # (e2) R9-M2, the window a separate probe cannot close: straight at both
-    # probes, and the PRIMARY's play resolves to the standby's box. The play
-    # carries the identity gate, the box's own gate refuses before the import,
-    # the process exits non-zero, and the standby's play is never started.
-    monkeypatch.setattr(rt, "run", answering(
-        straight, plays={SEAT_PRIMARY_LIMIT: (rt.STANDBY, STANDBY_BOX_ID)}))
-    asked[:] = []
-    with pytest.raises(rt.Fail) as exc:
-        rt._deploy_both(MERGE_FULL)
-    assert "exited rc=2" in str(exc.value), str(exc.value)
-    deploys = [a for a in asked if "scr_deploy_ref" in a]
-    assert len(deploys) == 1 and "--limit %s " % SEAT_PRIMARY_LIMIT in deploys[0] + " ", deploys
-    assert "scr_expect_id=" in deploys[0] and "scr_expect_addr=%s" % rt.PRIMARY in deploys[0]
-    # ...the gate carries a salted DIGEST, never the fingerprint it compares
-    assert PRIMARY_BOX_ID not in deploys[0], deploys[0]
-
-    # inert twin for these arms: both attested, both probed, both gated plays
-    # passed, primary first
-    monkeypatch.setattr(rt, "run", answering(straight))
-    asked[:] = []
-    rt._deploy_both(MERGE_FULL)
-    deploys = [a for a in asked if "scr_deploy_ref=%s" % MERGE_FULL in a]
-    assert len(deploys) == 2, deploys
-    assert "--limit %s " % SEAT_PRIMARY_LIMIT in deploys[0] + " ", deploys
-    assert "--limit %s " % SEAT_STANDBY_LIMIT in deploys[1] + " ", deploys
-    # the two read-only probes came first, one per box, before either play
-    first_deploy = asked.index(deploys[0])
-    assert first_deploy == 2 and all("scr_deploy_ref" not in a for a in asked[:2]), asked
-    played = []
-    # From here the ATTESTATION is stubbed and only the PLAYS go through the
-    # fake: these arms are about what a play comes back with, and an
-    # attestation running on the same stub would consume its answers.
-    _attested(monkeypatch, rt)
-    rt.attest_deploy_selectors()
-
-    # (f) R7-M2 / R9-M2: the inventory is correct at BOTH probes and swaps
-    # before the plays. Every round before R9 passed this, and round 9 caught
-    # it only AFTER the primary's play had run. The play now carries the
-    # identity gate: the box that is not the attested one refuses before the
-    # imported play, so no play RAN and the standby's was never started.
-    played[:] = []
-    gated = []
-    monkeypatch.setattr(rt, "run_attested", _attesting_deploy(
-        rt, played, boxes=[(rt.STANDBY, STANDBY_BOX_ID), (rt.PRIMARY, PRIMARY_BOX_ID)],
-        gated=gated))
-    with pytest.raises(rt.Fail) as exc:
-        rt._deploy_both(MERGE_FULL)
-    assert "SCR_TRAIN_PRIMARY_LIMIT" in str(exc.value), str(exc.value)
-    assert "identity gate" in str(exc.value), str(exc.value)
-    assert played == [] and len(gated) == 1, (played, gated)
-    # (f2) ...and behind the gate the after-play comparison still stands on its
-    # own: with the gate taken away the box's statement after the play is
-    # compared, for the PRIMARY, before the standby's play is started
-    played[:] = []
-    monkeypatch.setattr(rt, "run_attested", _attesting_deploy(
-        rt, played, boxes=[(rt.STANDBY, STANDBY_BOX_ID), (rt.PRIMARY, PRIMARY_BOX_ID)],
-        gate=False))
-    with pytest.raises(rt.Fail) as exc:
-        rt._deploy_both(MERGE_FULL)
-    assert "SCR_TRAIN_PRIMARY_LIMIT" in str(exc.value), str(exc.value)
-    assert "boot fingerprint differs" in str(exc.value), str(exc.value)
-    assert len(played) == 1, "the standby's play must never have been started"
-    # ...and the address half of the pair, with the fingerprint held
-    played[:] = []
-    monkeypatch.setattr(rt, "run_attested", _attesting_deploy(
-        rt, played, boxes=[(SEAT_BOX_ENDPOINT, PRIMARY_BOX_ID), (rt.STANDBY, STANDBY_BOX_ID)],
-        gate=False))
-    with pytest.raises(rt.Fail) as exc:
-        rt._deploy_both(MERGE_FULL)
-    assert "different endpoint" in str(exc.value), str(exc.value)
-    assert len(played) == 1, played
-
-    # (g) R4-L3: the box states which COMMIT the clone it deploys from is on,
-    # and it has to be the id this train deployed. A play reporting failed=0
-    # and a marker reading new are not that.
-    played[:] = []
-    monkeypatch.setattr(rt, "run_attested",
-                        _attesting_deploy(rt, played, shas=[REVIEWED_FULL]))
-    with pytest.raises(rt.Fail) as exc:
-        rt._deploy_both(MERGE_FULL)
-    assert "checked out at %s and this train deployed %s" % (REVIEWED_FULL, MERGE_FULL) \
-        in str(exc.value), str(exc.value)
-    assert [c[1] for c in played] == [SEAT_PRIMARY_LIMIT], played
-    # ...and a play that reported no such line at all is not a pass either
-    played[:] = []
-    monkeypatch.setattr(rt, "run_attested", _attesting_deploy(rt, played, shas=[None]))
-    with pytest.raises(rt.Fail) as exc:
-        rt._deploy_both(MERGE_FULL)
-    assert "exactly one 40-character object id" in str(exc.value), str(exc.value)
-
-    # (h) ...and phase 7 asks the same question of both boxes, in that order,
-    # before it records the rollout as verified
-    probes = []
-    monkeypatch.setattr(rt, "probe_box",
-                        lambda key, values=None: probes.append(key) or
-                        (rt.PRIMARY_TOKEN if len(probes) < 2 else rt.STANDBY_TOKEN,
-                         PRIMARY_BOX_ID if len(probes) < 2 else STANDBY_BOX_ID,
-                         MERGE_FULL if len(probes) < 2 else REVIEWED_FULL))
-    with pytest.raises(rt.Fail) as exc:
-        rt.assert_boxes_are_on(MERGE_FULL)
-    assert "rollout is not complete on this box" in str(exc.value), str(exc.value)
-    assert probes == ["primary_limit", "standby_limit"], probes
-    probes[:] = []
-    monkeypatch.setattr(rt, "probe_box",
-                        lambda key, values=None: probes.append(key) or
-                        (rt.PRIMARY_TOKEN if len(probes) < 2 else rt.STANDBY_TOKEN,
-                         PRIMARY_BOX_ID if len(probes) < 2 else STANDBY_BOX_ID, MERGE_FULL))
-    rt.assert_boxes_are_on(MERGE_FULL)             # inert twin
-    assert probes == ["primary_limit", "standby_limit"], probes
-    # ...and R8-L4: two probes that answer from ONE installation are not two
-    # boxes agreeing, whatever commit they name
-    probes[:] = []
-    monkeypatch.setattr(rt, "probe_box",
-                        lambda key, values=None: probes.append(key) or
-                        (rt.PRIMARY_TOKEN if len(probes) < 2 else rt.STANDBY_TOKEN,
-                         PRIMARY_BOX_ID, MERGE_FULL))
-    with pytest.raises(rt.Fail) as exc:
-        rt.assert_boxes_are_on(MERGE_FULL)
-    assert "SAME installation" in str(exc.value), str(exc.value)
-    assert PRIMARY_BOX_ID not in str(exc.value), str(exc.value)
-    # ...and two probes that answer at one endpoint class are not two boxes either
-    probes[:] = []
-    monkeypatch.setattr(rt, "probe_box",
-                        lambda key, values=None: probes.append(key) or
-                        (rt.PRIMARY_TOKEN,
-                         PRIMARY_BOX_ID if len(probes) < 2 else STANDBY_BOX_ID, MERGE_FULL))
-    with pytest.raises(rt.Fail) as exc:
-        rt.assert_boxes_are_on(MERGE_FULL)
-    assert "same endpoint class" in str(exc.value), str(exc.value)
-
-    # (i) R7-L3: attested before ANY mutation, on every path, proved by the
-    # ORDER OF THE CALLS rather than by where a line sits. A phase 0 that SKIPS
-    # on a valid snapshot, and a code phase resumed with `--from code`, are the
-    # two paths that reached the merge, the commit and the push with the
-    # question still unasked.
-    sequence = []
-
-    def _attesting(values=None):
-        sequence.append("attest")
-        rt._ATTESTED.clear()
-        rt._ATTESTED.update({"primary_limit": (rt.PRIMARY_TOKEN, PRIMARY_BOX_ID),
-                             "standby_limit": (rt.STANDBY_TOKEN, STANDBY_BOX_ID)})
-        return dict(rt._ATTESTED)
-
-    monkeypatch.setattr(rt, "attest_deploy_selectors", _attesting)
-    _snapshot_is_listed(monkeypatch, rt)
-    monkeypatch.setattr(rt, "snapshot_operation",
-                        lambda **k: sequence.append("play") or ("failed=0", None, None))
-    monkeypatch.setattr(rt, "save_state", lambda st_: None)
-    rt.phase_snapshot(SimpleNamespace(go=True), _snap())
-    assert sequence == ["attest"], ("this phase 0 skipped -- and still attested", sequence)
-
-    sequence[:] = []
-    rt._ATTESTED.clear()
-    stub, _log = _merging_git(rt, refs={rt.BRANCH: REVIEWED_FULL, "main": MAIN_FULL},
-                              parents={MERGE_FULL: [MAIN_FULL, REVIEWED_FULL]},
-                              trees={REVIEWED_FULL: REVIEWED_TREE, MERGE_FULL: REVIEWED_TREE},
-                              remote_main=MERGE_FULL)
-
-    def _recorded(cmd, **kw):
-        out = stub(cmd, **kw)
-        joined = (" ".join(cmd) if isinstance(cmd, list) else cmd) + " "
-        for verb in ("checkout", "merge", "commit", "push"):
-            if " %s " % verb in joined:
-                sequence.append(verb)
-        return out
-
-    monkeypatch.setattr(rt, "run", _recorded)
-    monkeypatch.setattr(rt, "code_state", lambda host: (True, True, False, ["alias absent"]))
-    monkeypatch.setattr(rt, "_deploy_both", lambda sha, extra=None, st=None, **_kw: sequence.append("deploy"))
-    monkeypatch.setattr(rt, "assert_route_probes", lambda hosts: None)
-    monkeypatch.setattr(rt, "assert_health_keys", lambda hosts: None)
-    monkeypatch.setattr(rt, "assert_edge_runs_new_code", lambda: None)
-    rt.phase_code(SimpleNamespace(go=True), dict(_snap(), pre_code_old_build=True))
-    assert "attest" in sequence, sequence
-    for mutation in ("checkout", "merge", "commit", "push", "deploy"):
-        assert mutation in sequence, (mutation, sequence)
-        assert sequence.index("attest") < sequence.index(mutation), (mutation, sequence)
-
-    # ...and it is the STATE that is asked, not the line: a run whose
-    # attestation answered nothing cannot reach the merge
-    sequence[:] = []
-    rt._ATTESTED.clear()
-    monkeypatch.setattr(rt, "attest_deploy_selectors", lambda values=None: None)
-    with pytest.raises(rt.Fail) as exc:
-        rt.phase_code(SimpleNamespace(go=True), dict(_snap(), pre_code_old_build=True))
-    assert "before this run had proved which machine" in str(exc.value), str(exc.value)
-    assert "merge" not in sequence and "push" not in sequence, sequence
-
-
 # ── round 9: the method change, and the findings the round-8 review raised ──
 #
 # The pin no longer carries a transcript of a live run. What it carries is a
@@ -6310,12 +4727,6 @@ def test_each_per_box_selector_is_attested_to_its_box_before_anything_is_mutated
 # human-written files -- and the findings below are still fixed by number.
 
 
-def _recording(rt):
-    """Arm the recorder and leave it armed for the duration of one test."""
-    rt.recording(True)
-    return rt
-
-
 def _cli(monkeypatch, rt, *args):
     """Run the train's own entry point the way a shell does.
 
@@ -6323,280 +4734,6 @@ def _cli(monkeypatch, rt, *args):
     wants the WHOLE path, parser included, has to hand it one the same way."""
     monkeypatch.setattr(rt.sys, "argv", ["release_train.py"] + list(args))
     return rt._main()
-
-
-def test_the_review_summary_is_a_schema_document_and_carries_no_free_text(monkeypatch):
-    """R8 method change (A1/A2, and H4 with it): the pin is made of documents, not transcripts.
-
-    Five rounds closed a named identifier path and the round after found a sibling of it, and the
-    round-8 fix for M1 minted a new identifier class of its own. Scrubbing an unbounded set of
-    free-text transcripts with a deny-list cannot be shown complete -- the proof obligation is
-    "no member of an open set appears", and a deny-list answers a different question.
-
-    So the artifact changes. Every value a review round reads is an enum token, an object id, an
-    integer, a UTC instant, or one of the identifiers this file already declares. There is no string
-    type, so there is nothing for an identifier to travel inside: a play's tail, an exception message
-    and a label a box reported each have a CLASS in the document and no text anywhere.
-
-    And because a document checked only by the program that wrote it is checked by nothing, the
-    renderer refuses to emit one the grammar forbids, and a second implementation in the pin asks the
-    same question again of the files that arrive there."""
-    import json
-    import re as _re
-    rt, _src = _release_train()
-    rt.select_batch(ABSENT_BATCH)
-    _seat(monkeypatch, rt)
-    _recording(rt)
-    monkeypatch.setattr(rt, "_commit_sha", lambda rev, **kw: {
-        rt.BRANCH: REVIEWED_FULL, "main": MAIN_FULL}.get(rev, MERGE_FULL))
-
-    # (a) what the phases record is what the documents are made of -- the same
-    # functions a real run drives, noting the class of what they just printed
-    rt.record_one("plan", outcome="COMPLETED", refused_at="NONE", exit_code=0)
-    rt.record("plan_phases", name="SNAPSHOT", disposition="SKIPPED", reason="NO_MIGRATION")
-    rt.record_one("snapshot", dropped=4, names=1, usable="YES", endpoint="PRIMARY",
-                  fingerprint="MATCH", listing_rc=0, readings_agree="YES")
-    docs = rt.summary_documents()
-    assert [d["artifact"] for d in docs] == list(rt.SUMMARY_ARTIFACTS), docs
-    for doc in docs:
-        assert doc["schema"] == rt.SUMMARY_SCHEMA and doc["version"] == rt.SUMMARY_VERSION
-        assert rt.summary_problem(doc) is None, doc
-        # the key set is ENUMERATED: every document carries exactly its
-        # artifact's keys, and a key this run never reached is present as the
-        # fixed word UNRECORDED rather than absent
-        want = (set(rt.SUMMARY_HEAD) | set(rt.SUMMARY_SINGLES[doc["artifact"]])
-                | set(rt.SUMMARY_ROWS[doc["artifact"]]))
-        assert set(doc) == want, (doc["artifact"], set(doc) ^ want)
-    plan = docs[0]
-    assert plan["outcome"] == "COMPLETED" and plan["provenance"] == rt.UNRECORDED, plan
-    assert plan["phases"] == [{"name": "SNAPSHOT", "disposition": "SKIPPED",
-                               "reason": "NO_MIGRATION"}], plan
-
-    # (b) the value types, asked of every shape a free string can take. Each of
-    # these is a value an earlier round's transcript carried verbatim -- and the
-    # last four are the ones a SHAPE-based enum admitted: an upper-cased machine
-    # or group name is an upper-case word, and the vocabulary is a closed list
-    for bad in ("a-machine | CHANGED | rc=0 >>", "ok: [a-machine]", "/a-dir/a-person/zap",
-                "an-inventory-group", "192.0.2.17", "a" * 64, "Not An Enum", "mixedCase",
-                "included: playbooks/deploy.yml for a-machine", "",
-                "AN_INVENTORY_GROUP", "A_MACHINE", "SCR_TRAIN_CONTROLLER", "PRIMARY_LIMIT"):
-        assert rt.summary_scalar_problem(bad), bad
-    for good in (0, 7, 4200, "PRIMARY", "NO_MIGRATION", "NONE", REVIEWED_FULL,
-                 REVIEWED_FULL[:7], "2026-09-22T03:00:01+00:00",
-                 rt.PRIMARY, rt.STANDBY, rt.EDGE_HOST, rt.UNRECORDED,
-                 # the words this file defines are derived, not retyped: every
-                 # phase and every batch is a member
-                 "DEPLOY_PRECURSOR", "I18N", "VERIFY", rt.batch_token(ABSENT_BATCH)):
-        assert rt.summary_scalar_problem(good) is None, good
-    # ...and a boolean is not an integer here: `True` renders as `true`, which
-    # is a word, and the whole grammar is that a word is a vocabulary member
-    assert rt.summary_scalar_problem(True), "a boolean is not a value type"
-    # ...and a key is TYPED: a number where a word is required, and a word where
-    # a number is, are each refused although both are members of SOME type
-    assert rt.summary_scalar_problem(7, rt.SUMMARY_SINGLES["PLAN"]["outcome"])
-    assert rt.summary_scalar_problem("YES", rt.SUMMARY_SINGLES["SNAPSHOT"]["dropped"])
-    assert rt.summary_scalar_problem("YES", rt.SUMMARY_SINGLES["PLAN"]["outcome"]) is None
-
-    # (c) the reddening arms: the renderer REFUSES rather than emitting a
-    # document the schema forbids -- an unknown key carrying a perfectly good
-    # value, a key of the wrong form, a free string, an upper-case word outside
-    # the vocabulary, a value of the wrong type, a planted fingerprint, an
-    # unknown key inside a row, and a row that is not an object
-    for section, field, value, says in (
-            ("plan", "note", "PRESENT", "is not a key this schema defines"),
-            ("plan", "Note", "PRESENT", "is not a key this schema defines"),
-            ("plan", "outcome", "the play said a-machine", "not a value of its type"),
-            ("plan", "outcome", "AN_INVENTORY_GROUP", "not a value of its type"),
-            ("plan", "outcome", 7, "not a value of its type"),
-            ("snapshot", "dropped", "YES", "not a value of its type"),
-            ("snapshot", "fingerprint", "c" * 64, "not a value of its type")):
-        rt.recording(True)
-        rt.record_one(section, **{field: value})
-        with pytest.raises(rt.Fail) as exc:
-            rt.summary_documents()
-        assert "refusing to render" in str(exc.value), (field, str(exc.value))
-        assert says in str(exc.value), (field, str(exc.value))
-    rt.recording(True)
-    rt.record("plan_phases", name="CODE", disposition="RAN", note="PRESENT")
-    with pytest.raises(rt.Fail) as exc:
-        rt.summary_documents()
-    assert "not a key this schema defines for that section" in str(exc.value), str(exc.value)
-    rt.recording(True)
-    rt.record("plan_phases", name="CODE", disposition="RAN")
-    rt._RECORDED["plan_phases"].append("not an object")
-    with pytest.raises(rt.Fail) as exc:
-        rt.summary_documents()
-    assert "is not an object" in str(exc.value), str(exc.value)
-    # ...and a MISSING key: a document that lost one -- a truncated render, a
-    # hand edit -- is refused by name, at the top level and inside a row
-    rt.recording(True)
-    rt.record("plan_phases", name="CODE", disposition="RAN")
-    whole = rt.summary_documents()
-    for doc in whole:
-        assert rt.summary_problem(doc) is None, doc
-    cut = dict(whole[0])
-    del cut["outcome"]
-    assert "is missing the key 'outcome'" in (rt.summary_problem(cut) or ""), cut
-    cut = dict(whole[0], phases=[{"name": "CODE", "disposition": "RAN"}])
-    assert "is missing the key 'reason'" in (rt.summary_problem(cut) or ""), cut
-    extra = dict(whole[0], note="PRESENT")
-    assert "is not a key this schema defines" in (rt.summary_problem(extra) or ""), extra
-
-    # (d) H4: a machine fingerprint is a persistent machine identifier -- minted
-    # at first boot, the same for the life of that installation -- and it never
-    # reaches a document. What reaches one is the VERDICT of comparing two
-    # readings, and "no comparison" is not "they agreed".
-    assert rt.fingerprint_verdict([SEAT_BOX_ID, SEAT_BOX_ID]) == "MATCH"
-    assert rt.fingerprint_verdict([SEAT_BOX_ID, "f" * 64]) == "MISMATCH"
-    assert rt.fingerprint_verdict([SEAT_BOX_ID]) == "MISSING"
-    assert rt.fingerprint_verdict([]) == "MISSING"
-    assert rt.fingerprint_verdict([SEAT_BOX_ID, None]) == "MISSING"
-    rt.recording(True)
-    rt.record_one("snapshot", fingerprint=rt.fingerprint_verdict([SEAT_BOX_ID, SEAT_BOX_ID]))
-    rendered = json.dumps(rt.summary_documents())
-    assert SEAT_BOX_ID not in rendered and "MATCH" in rendered, rendered
-    assert _re.search(r"[0-9a-f]{64}", rendered) is None, rendered
-
-    # (e) inert twin: the document a real `check` renders passes its own
-    # renderer AND carries the state as classes rather than as the state file
-    rt.recording(True)
-    st = dict(_snap(), code_sha=MERGE_FULL, verified=True)
-    summary = rt.state_summary(st)
-    rt.record_one("check", **summary)
-    docs = rt.summary_documents()
-    check = [d for d in docs if d["artifact"] == "CHECK"][0]
-    assert check["snapshot_fingerprint"] == "RECORDED", check
-    assert SEAT_BOX_ID not in json.dumps(check), check
-    assert check["snapshot_name"] == "PRESENT" and check["code_sha"] == MERGE_FULL, check
-    rt.recording(False)
-
-
-def test_the_summary_is_emitted_between_two_fences_and_nothing_else_writes(monkeypatch, capsys,
-                                                                           tmp_path):
-    """A2/L2: `review-summary` produces the documents on the way out of the same read-only path.
-
-    It is not a second implementation of the phases: it runs `check`, captures the listing, walks the
-    phase list in plan mode, and prints what the recorder collected. A summary that came from its own
-    copy of the logic would be a document about a program nobody runs.
-
-    It writes nothing of its own. The documents go to STDOUT between two fixed fences, and since
-    round 11 the captured listing goes there too, between its own two lines: the one sentence the
-    frozen bar's B11 asks about -- what this train writes -- is the state file and the printed plan,
-    and a review-summary does not even write the state file (its save is stubbed here only so the
-    directory comparison below is the witness, not the stub)."""
-    import json
-    rt, _src = _release_train()
-    rt.select_batch(ABSENT_BATCH)
-    _seat(monkeypatch, rt)
-    state_dir = tmp_path / "state"
-    state_dir.mkdir()
-    # `select_batch` re-derives STATE_PATH from the batch entry, and `_main`
-    # calls it -- so the destination is pinned through the one function that
-    # answers it rather than through the global it is computed from.
-    monkeypatch.setattr(rt, "STATE_PATH", str(state_dir / "train-state.json"))
-    monkeypatch.setattr(rt, "load_state", lambda: dict(_snap()))
-    monkeypatch.setattr(rt, "save_state", lambda st_: None)
-    monkeypatch.setattr(rt, "phase_check", lambda args, st: rt.record_one(
-        "check", **rt.state_summary(st)))
-    monkeypatch.setattr(rt, "snapshot_listing",
-                        lambda values=None: _listing(_snap()["snapshot"]["name"]))
-    monkeypatch.setattr(rt, "assert_provenance_up_front", lambda args, st: None)
-    for name, _fn in rt.PHASES:
-        pass
-    monkeypatch.setattr(rt, "PHASES", [("snapshot", lambda args, st: None),
-                                       ("code", lambda args, st: None)])
-    before = sorted(p.name for p in state_dir.iterdir())
-    capsys.readouterr()
-    rc = _cli(monkeypatch, rt, "--batch", ABSENT_BATCH, "review-summary")
-    out = capsys.readouterr().out
-    assert rc == 0, out
-    assert rt.SUMMARY_OPEN in out and rt.SUMMARY_CLOSE in out, out
-    body = out.split(rt.SUMMARY_OPEN, 1)[1].split(rt.SUMMARY_CLOSE, 1)[0]
-    docs = json.loads(body)
-    assert [d["artifact"] for d in docs] == list(rt.SUMMARY_ARTIFACTS), docs
-    for doc in docs:
-        assert rt.summary_problem(doc) is None, doc
-    # the phases it walked are in the PLAN document, as tokens
-    plan = [d for d in docs if d["artifact"] == "PLAN"][0]
-    assert {row["name"] for row in plan["phases"]} == {"SNAPSHOT", "CODE"}, plan
-    # ...and it left NOTHING behind: the captured listing is in the
-    # transcript, between its own two lines, and not in a file (B11, round 11)
-    after = sorted(p.name for p in state_dir.iterdir())
-    assert after == before, (before, after, out)
-    assert out.count(rt.CAPTURE_OPEN) == 1 and out.count(rt.CAPTURE_CLOSE) == 1, out
-    assert out.index(rt.CAPTURE_CLOSE) < out.index(rt.SUMMARY_OPEN), out
-    # ...and a review-summary is never a run: it forces the dry arm
-    assert "DRY RUN" in out, out
-
-
-def test_the_seat_is_captured_on_first_read_and_cannot_be_read_again(monkeypatch):
-    """R8-H2: the first read won for the door and lost for the caller, which is the same defect inside out.
-
-    The capture existed so the door substitutes what the command was BUILT from. But `identifier()`
-    re-read the environment and the seat file on every call and returned the later value while keeping
-    the earlier one, so a seat edited between two phases gave the door one string and the command
-    another -- and the identifier the transcript was supposed to lose is exactly the one it kept.
-
-    There is no second read to lose to now. `_read_live_seat` is the only place either source is
-    touched and it REFUSES for a key already captured, so a path that reaches around `identifier()`
-    cannot reopen the question either."""
-    rt, src = _release_train()
-    rt.select_batch(ABSENT_BATCH)
-    _seat(monkeypatch, rt)
-
-    # (a) the capture answers, and the live sources are not consulted at all
-    first = rt.identifier("controller")
-    assert first == SEAT_CONTROLLER
-    monkeypatch.setenv("SCR_TRAIN_CONTROLLER", "a-different-controller")
-    assert rt.identifier("controller") == first, "the capture answers, not the environment"
-    assert rt.seat_values()["controller"] == first
-    assert rt.require_identifier("controller") == first
-
-    # (b) the reddening arm: the ONE reader refuses outright for a captured key
-    with pytest.raises(rt.Fail) as exc:
-        rt._read_live_seat("controller")
-    assert "read ONCE" in str(exc.value), str(exc.value)
-    assert "controller" in str(exc.value), str(exc.value)
-    assert SEAT_CONTROLLER not in str(exc.value), str(exc.value)
-    assert "a-different-controller" not in str(exc.value), str(exc.value)
-
-    # ...and it is the only reader: nothing else in the file reaches either
-    # source for a seat key, which is what makes the refusal above a rule
-    # rather than one function's habit
-    # R9-M4: the file is opened in ONE place, as bytes, and every key is
-    # parsed out of that one read
-    for source in ("os.environ.get(IDENTIFIERS", "open(TRAIN_CONF", "doc.get(key)"):
-        assert src.count(source) == 1, (source, src.count(source))
-
-    # (b2) ...and the capture answers the CAPTURE, never the value it was
-    # handed. `setdefault` then read back: the two are the same on a first
-    # capture and different on every path that reached here twice, and the
-    # one that must travel is the one the door knows. Asked of `_captured`
-    # directly, because the refusal above is what stops `identifier()`
-    # reaching it twice -- a guard being unreachable is not a reason to
-    # leave the thing behind it unexercised.
-    assert rt._captured("controller", "a-later-controller") == first
-    assert rt._SEAT_SNAPSHOT["controller"] == first
-    assert rt.redact("reached a-later-controller") == "reached a-later-controller"
-
-    # (c) inert twin: a key nobody has read yet still reads
-    _fresh_process(rt, "pve_group")
-    monkeypatch.setenv("SCR_TRAIN_PVE_GROUP", "a-second-group")
-    assert rt._read_live_seat("pve_group") == "a-second-group"
-    assert rt.identifier("pve_group") == "a-second-group"
-
-    # (d) ...and a ONE-CHARACTER host label is learned like any other. The
-    # shape a label had to match demanded two characters, so a machine called
-    # `a` announced itself in every line of a play's output and the door had
-    # nothing to substitute.
-    rt._LEARNED_HOSTS.clear()
-    rt.learn_hosts("ok: [a]\nchanged: [b]\nchanged: [ab]\n"
-                   "c                  : ok=9    changed=3    unreachable=0    failed=0")
-    assert {"a", "b", "ab", "c"} <= set(rt._LEARNED_HOSTS), rt._LEARNED_HOSTS
-    said = rt.redact("included: playbooks/deploy.yml for a")
-    assert said == "included: playbooks/deploy.yml for %s" % rt.HOST_TOKEN, said
-    # inert twin: a word that is not a learned label is not touched
-    assert "for zzz" in rt.redact("included: playbooks/deploy.yml for zzz")
 
 
 def test_the_door_exists_before_anything_that_can_fail_and_has_no_path_around_it(monkeypatch,
@@ -6708,216 +4845,6 @@ def test_the_door_exists_before_anything_that_can_fail_and_has_no_path_around_it
                              None)
     assert errs == [rt.BOOTSTRAP_LINE + "\n"], errs
     assert SEAT_CONTROLLER not in "".join(errs), errs
-
-
-def test_one_ansible_process_carries_the_facts_and_the_play_they_attest(monkeypatch, tmp_path):
-    """R8-M1/M2: the attestation and the play it attests were two resolutions of the inventory.
-
-    Each was correct on its own. The probe asked a selector which machine it resolves to; the play ran
-    under the same selector text; and nothing at all joined the two, because a selector is a name for a
-    set somebody else maintains and it is resolved afresh by every process that uses it. Correct at
-    both probes and remapped in between, the standby is deployed first, the still-old primary passes
-    the liveness check in the middle, and both final markers read new.
-
-    So there is one process. One `ansible-playbook`, one `--limit`, one inventory resolution: a facts
-    play, the ZAP play by `import_playbook`, the facts play again -- and for the snapshot, the listing
-    before and after as tasks of the same playbook. The facts are bound to the play by a token minted
-    for the invocation and passed as an extra variable, so an answer that came from anywhere else says
-    so, and the playbook is fed to the controller for that invocation only: written by the same shell
-    that runs it and removed by the same shell afterwards, so nothing is installed anywhere."""
-    import json
-    import re as _re
-    import base64 as _b64
-    rt, src = _release_train()
-    rt.select_batch(ABSENT_BATCH)
-    _seat(monkeypatch, rt)
-
-    # (a) the playbook the train composes: three plays, the middle one an
-    # import of the ZAP play at the seat's own playbook directory
-    book = json.loads(rt.attested_playbook(play_path="/srv/a-play-dir/playbooks/x.yml",
-                                           listing=True))
-    assert [p.get("name") or p.get("import_playbook") for p in book] == [
-        "scr identity before", "/srv/a-play-dir/playbooks/x.yml", "scr identity after"], book
-    assert all(p.get("gather_facts") is False for p in book if "hosts" in p), book
-    # the token is rendered from the extra variable, never written in
-    rendered = json.dumps(book)
-    assert "{{ scr_nonce }}" in rendered, rendered
-    assert _re.search(r"[0-9a-f]{32}", rendered) is None, "no token is baked into the playbook"
-    # ...and the listing is a TASK of it, so the names read back and the
-    # container the play wrote into cannot be two different containers
-    assert rendered.count("SCR-LIST-BEGIN") == 2 and rendered.count("SCR-LIST-END") == 2
-    assert "list-snapshots" in rendered, rendered
-    # a playbook with no play to import is still two facts plays
-    assert len(json.loads(rt.attested_playbook(play_path=None, listing=False))) == 2
-
-    # (b) it travels base64-encoded through a PIPE the controller's shell makes
-    # (R11-L2: no temporary file, no removal), and the line this train PRINTS
-    # about it carries neither the controller nor the selector
-    asked = []
-    monkeypatch.setattr(rt, "run", _attesting_run(rt, asked, addr=rt.PRIMARY))
-    printed = []
-    monkeypatch.setattr(rt, "print", lambda *a, **k: printed.append(
-        " ".join(str(x) for x in a)))
-    rt.run_attested(SEAT_PRIMARY_LIMIT, play=None)
-    sent = asked[-1]
-    assert "ansible-playbook <(printf %s " in sent and " | base64 -d) --limit " in sent, sent
-    assert "mktemp" not in sent and "rm -f" not in sent, sent
-    # ...and when there IS a play, the playbook this run actually sends is
-    # the one that imports it. Decoded out of the command, because the
-    # composition being right is a different fact from this run passing it
-    # the play: the wiring is what makes the facts and the work one
-    # process.
-    import base64 as _b64
-    rt.run_attested(SEAT_PRIMARY_LIMIT, play="deploy-scr-backend.yml")
-    blob = _re.search(r"printf %s '?([A-Za-z0-9+/=]+)'?", asked[-1])
-    assert blob, asked[-1]
-    book_sent = json.loads(_b64.b64decode(blob.group(1)).decode("utf-8"))
-    assert [p.get("import_playbook") for p in book_sent if "import_playbook" in p] \
-        == ["%s/deploy-scr-backend.yml" % SEAT_PLAY_DIR], book_sent
-    assert len(book_sent) == 3, book_sent
-    assert "base64 -d" in sent, sent
-    blob = _re.search(r"printf %s '?([A-Za-z0-9+/=]+)'? \|", sent).group(1)
-    assert json.loads(_b64.b64decode(blob).decode("utf-8")), "the blob IS the playbook"
-    said = "\n".join(printed)
-    assert SEAT_CONTROLLER not in said and SEAT_PRIMARY_LIMIT not in said, said
-    assert rt.HOST_TOKEN in said, said
-    monkeypatch.undo()
-    _seat(monkeypatch, rt)
-
-    # (c) the reddening arms, one per way an answer can fail to be ONE
-    # machine's account of ONE moment. Each of these parses perfectly and each
-    # of them is refused.
-    facts_b, facts_a = _facts_section(BEFORE_P), _facts_section(AFTER_P)
-    for sections, says in (
-            ([facts_b], "sections are [SCR-FACTS/BEFORE]"),
-            ([facts_a], "sections are [SCR-FACTS/AFTER]"),
-            ([facts_b, facts_b, facts_a], "more than once"),
-            ([facts_a, facts_b], "sections are [SCR-FACTS/AFTER SCR-FACTS/BEFORE]"),
-            ([facts_b, _facts_section(AFTER_P, OTHER_NONCE)],
-             "a token this invocation did not mint"),
-            ([], "sections are [none]")):
-        monkeypatch.setattr(rt, "run", _attesting_run(rt, sections=sections))
-        with pytest.raises(rt.Fail) as exc:
-            rt.run_attested(SEAT_PRIMARY_LIMIT, who="the probe")
-        assert says in str(exc.value), (says, str(exc.value))
-        assert "Nothing has been recorded" in str(exc.value), str(exc.value)
-
-    # ...and the one the label cannot see: the inventory LABEL is held constant
-    # across the two facts blocks and the machine underneath it changes
-    monkeypatch.setattr(rt, "run", _attesting_run(rt, addr=rt.PRIMARY, after_id="f" * 64))
-    with pytest.raises(rt.Fail) as exc:
-        rt.run_attested(SEAT_PRIMARY_LIMIT, values=rt.seat_values(), who="the probe")
-    assert "boot fingerprint or the endpoint class moved across the operation" in str(exc.value)
-    assert "f" * 64 not in str(exc.value), str(exc.value)
-    # ...and the same with the FINGERPRINT held and the endpoint class moved,
-    # which is the half a fingerprint comparison alone cannot see. Asked of the
-    # SNAPSHOT target, because a per-box deploy selector has a declared answer
-    # and is refused one question earlier -- at capture, for reporting an
-    # endpoint this train does not declare for that key.
-    monkeypatch.setattr(rt, "run", _attesting_run(rt, addr=rt.PRIMARY,
-                                                  after_addr=rt.EDGE_HOST))
-    with pytest.raises(rt.Fail) as exc:
-        rt.run_attested(rt.snapshot_target(), who="the probe")
-    assert "moved across the operation" in str(exc.value), str(exc.value)
-    # ...and an endpoint this train does not declare for that key
-    monkeypatch.setattr(rt, "run", _attesting_run(rt, addr="198.51.100.9"))
-    with pytest.raises(rt.Fail) as exc:
-        rt.run_attested(SEAT_PRIMARY_LIMIT, values=rt.seat_values(), who="the probe")
-    assert "an endpoint this train does not declare" in str(exc.value), str(exc.value)
-    assert "198.51.100.9" not in str(exc.value), str(exc.value)
-
-    # (d) R8-M2: a status this operation could have left standing is REPLACED
-    # with REFUSED rather than left as an earlier success. The play reported
-    # failed=0 and the facts did not come back; "it succeeded" is the one thing
-    # the record may not say.
-    saved = []
-    monkeypatch.setattr(rt, "save_state", lambda st_: saved.append(dict(st_)))
-    monkeypatch.setattr(rt, "run", _attesting_run(rt, sections=[facts_b]))
-    st = {"code_deployed": True, "snapshot": {"name": "cc_x__1"}}
-    with pytest.raises(rt.Fail):
-        rt.run_attested(SEAT_PRIMARY_LIMIT, st=st, status_keys=("code_deployed",),
-                        who="the deploy")
-    assert st["code_deployed"] == "REFUSED", st
-    assert saved and saved[-1]["code_deployed"] == "REFUSED", saved
-
-    # (d2) ...and the READERS of that word. REFUSED is a non-empty string: a
-    # truth test reads it as a success, and a reader that expects a record
-    # crashes on it. The phase that runs this batch's post-code files is gated
-    # on the code being live, and a refused deploy must stop it; the summary
-    # the transcript carries must say REFUSED, not YES and not a traceback.
-    sql_calls = []
-    monkeypatch.setattr(rt, "sql", lambda host, q: sql_calls.append(q) or "")
-    monkeypatch.setattr(rt, "ssh", lambda host, cmd, **kw: sql_calls.append(cmd) or "")
-    refused = {"code_deployed": "REFUSED", "snapshot": "REFUSED"}
-    with pytest.raises(rt.Fail) as exc:
-        rt.phase_i18n(SimpleNamespace(go=True), dict(refused))
-    assert "is not live on both boxes" in str(exc.value), str(exc.value)
-    assert sql_calls == [], sql_calls
-    summary = rt.state_summary(dict(refused))
-    assert summary["code_deployed"] == "REFUSED" and summary["snapshot"] == "REFUSED", summary
-    assert summary["snapshot_batch"] == "MISSING", summary
-    for doc in (rt.state_summary({}), summary):
-        assert all(rt.summary_scalar_problem(v, rt.SUMMARY_SINGLES["CHECK"].get(k)) is None
-                   for k, v in doc.items()), doc
-    # ...the twin: the value a success writes passes the same gate
-    rt.phase_i18n(SimpleNamespace(go=True), {"code_deployed": True})
-    assert rt.state_summary({"code_deployed": True})["code_deployed"] == "YES"
-
-    # (d3) R9, found by running: the ORDER the composed playbook emits. The
-    # facts bracket the operation -- first before it, LAST after it -- with
-    # the imported play between the halves, and the parser requires exactly
-    # that. The after-play used to state its facts before reading the
-    # listing, so every live listing was refused as out of order while every
-    # fixture, composing the parser's order, passed.
-    design = [(rt.FACTS_MARK, rt.BEFORE), (rt.LIST_MARK, rt.BEFORE), None,
-              (rt.LIST_MARK, rt.AFTER), (rt.FACTS_MARK, rt.AFTER)]
-    play_at = "/srv/a-play-dir/playbooks/x.yml"
-    assert rt.composed_order(rt.attested_playbook(play_path=play_at, listing=True)) \
-        == design
-    assert rt.composed_order(rt.attested_playbook(play_path=None, listing=True)) \
-        == [s for s in design if s]
-    assert rt.composed_order(rt.attested_playbook(play_path=play_at, listing=False)) \
-        == [design[0], None, design[4]]
-    # ...read a second way: the playbook the train actually SENT, decoded by
-    # this module's own reader rather than by `composed_order`
-    asked = []
-    monkeypatch.setattr(rt, "run", _attesting_run(rt, asked, addr=rt.PRIMARY, listing=True))
-    rt.run_attested(SEAT_PRIMARY_LIMIT, play="snapshot-scr.yml", listing=True,
-                    who="the snapshot")
-    assert _order_sent(asked[-1]) == design, _order_sent(asked[-1])
-    # ...and a composition that would emit another order is refused BEFORE
-    # anything is spawned: the controller is asked nothing at all
-    honest = rt.attested_playbook
-
-    def _facts_first_after(play_path=None, listing=False, gate=False):
-        composed = json.loads(honest(play_path=play_path, listing=listing, gate=gate))
-        last = composed[-1]["tasks"]
-        composed[-1]["tasks"] = ([t for t in last if "facts" in t["name"]]
-                                 + [t for t in last if "facts" not in t["name"]])
-        return json.dumps(composed)
-
-    for playbook in (_facts_first_after,
-                     lambda play_path=None, listing=False, gate=False: json.dumps(
-                         [json.loads(honest(play_path, listing, gate))[i] for i in (1, 0, 2)])):
-        monkeypatch.setattr(rt, "attested_playbook", playbook)
-        asked.clear()
-        with pytest.raises(rt.Fail) as exc:
-            rt.run_attested(SEAT_PRIMARY_LIMIT, play="snapshot-scr.yml", listing=True,
-                            who="the snapshot")
-        assert "Nothing has run" in str(exc.value), str(exc.value)
-        assert asked == [], asked
-    monkeypatch.setattr(rt, "attested_playbook", honest)
-
-    # (e) the inert twin: an honest answer, and what comes back is the box's
-    # own statement as CLASSES with the fingerprints kept for a verdict
-    monkeypatch.setattr(rt, "run", _attesting_run(rt, addr=rt.PRIMARY, sha=MERGE_FULL))
-    play_out, sections, identity, host = rt.run_attested(
-        SEAT_PRIMARY_LIMIT, values=rt.seat_values(), who="the probe")
-    assert identity == (rt.PRIMARY_TOKEN, SEAT_BOX_ID), identity
-    assert sections["endpoints"] == [rt.PRIMARY_TOKEN, rt.PRIMARY_TOKEN]
-    assert rt.fingerprint_verdict(sections["fingerprints"]) == "MATCH"
-    assert host == SEAT_PLAY_HOST
-    assert rt.box_sha(sections[(rt.FACTS_MARK, rt.AFTER)], "the probe") == MERGE_FULL
 
 
 def test_a_dry_run_records_no_state_and_a_resumed_sha_is_authenticated(monkeypatch, capsys,
@@ -7077,1077 +5004,7 @@ def test_the_binding_question_is_asked_before_phase_zero_can_mint_anything(monke
     rt.recording(False)
 
 
-# ── round 10: the findings the round-9 review raised, each by number ──
-#
-# R9-M1 the listing's status, R9-M2 identity and the new build before the next
-# box, R9-M3 the attempt sentinel, R9-M4 one read of the seat file, R9-M5 the
-# exact success word at every gate, R9-L5 the stale `verified`. Every value
-# handed to the train below is a fixture: the synthetic seat, the RFC 5737
-# address family, and a state file under the test's own temporary directory.
-
-_OLD_BUILD = (True, False, True, ["alias present"])
-_NEW_BUILD = (True, True, False, ["alias absent"])
-_TIMED_OUT = ("the command did not answer within 1800s and was killed. Nothing it may have "
-              "done has been recorded.")
-
-
-def _no_command(cmd, **kw):
-    """`rt.run` for a test in which no command may be spawned at all."""
-    _raise_no_command(cmd)
-
-
-def _state_under(monkeypatch, rt, path):
-    """Point the train's state file at `path`, and keep it there across `select_batch`.
-
-    `_main` selects the batch again, and selecting a batch derives STATE_PATH
-    from the entry -- the operating seat's own state file. A test that drives
-    the entry point must not be able to reach that file."""
-    real = rt.select_batch
-
-    def _select(name):
-        real(name)
-        rt.STATE_PATH = str(path)
-
-    monkeypatch.setattr(rt, "select_batch", _select)
-    monkeypatch.setattr(rt, "STATE_PATH", str(path))
-    return path
-
-
-def _bot_batch(rt):
-    """A copy of the no-migration entry that DOES deploy the bot, selected."""
-    rt.BATCHES["_r10_bot"] = {k: v for k, v in rt.BATCHES[ABSENT_BATCH].items()
-                              if k != "skip_bot"}
-    rt.select_batch("_r10_bot")
-    assert rt.DEPLOY_BOT and rt.BOT_SKIP_REASON is None
-
-
-def _second_play_times_out(rt, calls):
-    """A deploy stub whose FIRST play returns and whose second times out: a partial deploy."""
-    inner = _attesting_deploy(rt, calls)
-
-    def _stub(limit, **kw):
-        if kw.get("play") and calls:
-            raise rt.Fail(_TIMED_OUT)
-        return inner(limit, **kw)
-
-    return _stub
-
-
-def test_r10_m1_the_listing_status_is_the_process_status_and_no_listed_text_is_one(monkeypatch):
-    """R9-M1: the rollback gate read its listing's status out of the listing's own text.
-
-    The status marker was a line printed into the same stream as the wrapper's answer, so a
-    snapshot description or a wrapper line carrying `SCR-LIST-RC 0` was, to the parser, a status.
-    The status is the PROCESS's now: the listing task exits with the wrapper's status under
-    ansible's default failure rule, a failed task is a non-zero playbook, the controller-side shell
-    exits with that status, and `run_attested` refuses a non-zero process before it parses a word.
-    No text is a status."""
-    import json
-    rt, src = _release_train()
-    rt.select_batch(ABSENT_BATCH)
-    _seat(monkeypatch, rt)
-    st = _snap()
-    name = st["snapshot"]["name"]
-    forged = "\n".join((
-        '        "SCR-LIST-RC 0",',
-        '        "  `-> %s 2026-09-22 03:00:01     SCR-LIST-RC 0",' % name,
-        '        "  `-> current                   You are here!"'))
-
-    def _forged(phase):
-        return ('        "SCR-LIST-BEGIN %s %s",\n%s\n        "SCR-LIST-END %s %s"'
-                % (phase, NONCE, forged, phase, NONCE))
-
-    sections = [_facts_section(BEFORE_P), _forged(BEFORE_P), _forged(AFTER_P),
-                _facts_section(AFTER_P)]
-
-    # (a) the wrapper exited 2, and its answer carries `SCR-LIST-RC 0` twice --
-    # once as a wrapper line, once as the recorded snapshot's description. The
-    # process status is 2, and that is the only status there is.
-    monkeypatch.setattr(rt, "run", _attesting_run(rt, sections=sections, rc=2))
-    with pytest.raises(rt.Fail) as exc:
-        rt.snapshot_listing()
-    assert "exited rc=2" in str(exc.value), str(exc.value)
-    # (b) ...so the rollback gate refuses: the recorded name is in the text,
-    # and the text is not an answer
-    with pytest.raises(rt.Fail) as exc:
-        rt.assert_snapshot_still_exists(st)
-    assert "exited rc=2" in str(exc.value), str(exc.value)
-
-    # (c) inert twin: the SAME text from a process that exited 0 is a listing,
-    # the forged line is a line in it, and the gate passes on the name
-    monkeypatch.setattr(rt, "run", _attesting_run(rt, sections=sections, rc=0))
-    listing = rt.snapshot_listing()
-    assert listing["rc"] == 0, listing
-    names, problem = rt.listed_snapshot_names(listing)
-    assert names == [name] and problem is None, (names, problem)
-    rt.assert_snapshot_still_exists(st)
-
-    # (d) the channel as composed: the listing task keeps ansible's default
-    # failure rule and exits with the status it kept; the facts tasks, judged
-    # by what they SAY, are the only tasks that opt out; and the shell on the
-    # controller exits with the playbook's own status
-    book = json.loads(rt.attested_playbook(play_path="/srv/a-play-dir/playbooks/x.yml",
-                                           listing=True))
-    tasks = [t for p in book for t in (p.get("tasks") or ())]
-    listing_tasks = [t for t in tasks if "list-snapshots" in (t.get("shell") or "")]
-    assert len(listing_tasks) == 2, listing_tasks
-    for task in listing_tasks:
-        assert "failed_when" not in task and "ignore_errors" not in task, task
-        assert "__scr_list_rc=$?" in task["shell"], task["shell"]
-        assert task["shell"].rstrip().endswith("exit $__scr_list_rc"), task["shell"]
-    facts_tasks = [t for t in tasks if "SCR-FACTS-BEGIN" in (t.get("shell") or "")]
-    assert len(facts_tasks) == 2 and all(t.get("failed_when") is False for t in facts_tasks)
-    asked = []
-    monkeypatch.setattr(rt, "run", _attesting_run(rt, asked, listing=True, name=name))
-    rt.snapshot_listing()
-    # R11-L2 (round 12): nothing runs after ansible-playbook -- no removal of a
-    # temporary playbook, because there is none -- so the controller's shell
-    # exits with the playbook's own status. Said of the command's END: any
-    # command appended after the invocation fails this.
-    import re as _re
-    assert _re.search(r"&& ansible-playbook <\(printf %s '?[A-Za-z0-9+/=]+'? \| base64 -d\) "
-                      r"--limit \S+ -e scr_nonce=[0-9a-f]{32}(?: -e \S+)*\Z", asked[-1]), \
-        asked[-1]
-    # ...and no status marker is left in the train for any text to imitate
-    assert "SCR-LIST-RC" not in src
-
-
-def test_r11_m1_a_listing_is_accepted_only_on_status_zero_and_pcts_closing_entry(monkeypatch,
-                                                                                   capsys):
-    """R10-M1: a zero status says the wrapper did not fail -- not that it printed a whole listing.
-
-    The rollback prerequisite accepted a listing on its process status alone, and the process
-    status is only as good as a wrapper this seat cannot read. So the gate asks for a second,
-    POSITIVE signal as well, and takes it from the listing tool itself: `pct listsnapshot` builds
-    the whole list before it prints, and prints the container's running state -- `current`, "You
-    are here!", the one entry with no snapshot time -- after every snapshot. A listing cut short
-    is missing its last line. Neither signal alone is an answer: the entry under a non-zero
-    status is text in an answer that failed, and a zero status without it is an answer nothing
-    says is whole."""
-    rt, src = _release_train()
-    rt.select_batch(ABSENT_BATCH)
-    _seat(monkeypatch, rt)
-    st = _snap()
-    name = st["snapshot"]["name"]
-    snap_line = '        "  `-> %s 2026-09-22 03:00:01     auto snapshot",' % name
-    closer = '        "   `-> current                   You are here!"'
-
-    def _section(phase, *lines):
-        return ('        "SCR-LIST-BEGIN %s %s",\n%s\n        "SCR-LIST-END %s %s"'
-                % (phase, NONCE, "\n".join(lines), phase, NONCE))
-
-    def _answer(before, after, rc=0):
-        monkeypatch.setattr(rt, "run", _attesting_run(rt, sections=[
-            _facts_section(BEFORE_P), before, after, _facts_section(AFTER_P)], rc=rc))
-
-    def whole(phase):
-        return _section(phase, snap_line, closer)
-
-    def headless(phase):
-        return _section(phase, snap_line.rstrip(","))
-
-    # (a) the entry is there and the status is not 0: refused, by the status,
-    # through the real parser and through the gate alike
-    _answer(whole(BEFORE_P), whole(AFTER_P), rc=2)
-    with pytest.raises(rt.Fail) as exc:
-        rt.assert_snapshot_still_exists(st)
-    assert "exited rc=2" in str(exc.value), str(exc.value)
-    names, problem = rt.listed_snapshot_names(_listing(name, rc=2))
-    assert names == [] and "exited rc=2" in problem, (names, problem)
-
-    # (b) the status is 0 and the entry is NOT there: refused, although the
-    # recorded name is in the text and a status-only gate would pass on it
-    _answer(headless(BEFORE_P), headless(AFTER_P))
-    listing = rt.snapshot_listing()
-    assert listing["rc"] == 0 and listing["agree"] is True, listing
-    assert rt.cc_names(listing["raw"]) == [name], listing["raw"]
-    names, problem = rt.listed_snapshot_names(listing)
-    assert names == [] and "does not END with" in problem, (names, problem)
-    with pytest.raises(rt.Fail) as exc:
-        rt.assert_snapshot_still_exists(st)
-    assert "does not END with" in str(exc.value), str(exc.value)
-    assert "Nothing has been merged, pushed or deployed" in str(exc.value), str(exc.value)
-    _d, lines = _printed_capture(rt, capsys, listing)
-    assert "GATE names=0 usable=no" in lines, lines
-
-    # (c) inert twin: status 0 AND the entry as the last line -- accepted,
-    # with the entry as ansible's debug renders it (quoted, indented a level)
-    _answer(whole(BEFORE_P), whole(AFTER_P))
-    listing = rt.snapshot_listing()
-    names, problem = rt.listed_snapshot_names(listing)
-    assert names == [name] and problem is None, (names, problem)
-    rt.assert_snapshot_still_exists(st)
-    _d, lines = _printed_capture(rt, capsys, listing)
-    assert "GATE names=1 usable=yes" in lines, lines
-
-    # (d) the entry is there with a line AFTER it -- a listing cut short on a
-    # rolled-back history looks exactly like this, and so does one with a line
-    # appended: refused, and the refusal says which case it cannot tell apart
-    later = '        "  `-> cc_pre-bug392-merge__20260922_040000 2026-09-22 04:00:00     auto"'
-    _answer(_section(BEFORE_P, snap_line, closer + ",", later),
-            _section(AFTER_P, snap_line, closer + ",", later))
-    names, problem = rt.listed_snapshot_names(rt.snapshot_listing())
-    assert names == [] and "does not END with" in problem, (names, problem)
-    assert "rolled back onto an older branch" in problem, problem
-
-    # (e) the last line CONTAINS the entry's words and is not the entry: a
-    # snapshot whose description spells it, and the entry with text after it
-    for last in ('        "  `-> %s 2026-09-22 03:00:01     `-> current  You are here!"' % name,
-                 '        "   `-> current                   You are here! (appended)"'):
-        _answer(_section(BEFORE_P, snap_line, last), _section(AFTER_P, snap_line, last))
-        names, problem = rt.listed_snapshot_names(rt.snapshot_listing())
-        assert names == [] and "does not END with" in problem, (last, names, problem)
-
-    # (f) the SECOND reading cut short: the two readings carry the same names
-    # and the same status, and only one of them is whole -- a picture of two
-    # moments, refused as one
-    _answer(whole(BEFORE_P), headless(AFTER_P))
-    listing = rt.snapshot_listing()
-    assert listing["agree"] is False, listing
-    with pytest.raises(rt.Fail) as exc:
-        rt.assert_snapshot_still_exists(st)
-    assert "picture of two moments" in str(exc.value), str(exc.value)
-
-    # (g) the marker is the tool's, said of the pattern itself: anchored at
-    # both ends of one whole line, and the one entry pct cannot give a
-    # snapshot's name
-    assert rt._LISTING_CLOSER.pattern.startswith("\\A`->"), rt._LISTING_CLOSER.pattern
-    assert rt._LISTING_CLOSER.pattern.endswith("You are here!\\Z"), rt._LISTING_CLOSER.pattern
-    assert rt.listing_complete("  `-> current   You are here!") is True
-    assert rt.listing_complete("") is False and rt.listing_complete(None) is False
-
-
-def test_r11_m1_the_listing_is_read_in_the_yaml_form_the_controller_prints(monkeypatch, capsys):
-    """Found by running: the controller prints a listed `stdout_lines` as YAML, not JSON.
-
-    Every fixture above renders ansible's debug list as JSON -- `"<line>",` -- and the first
-    live run of the round-11 gate refused a listing that was whole and ENDED with pct's closing
-    entry: this controller prints each line as a YAML item, `- '<line>'`, and the item marker of
-    the closing section marker is left as a bare `-` at the end of the body. The shape below is
-    the live one with synthetic names: an empty remainder after the opening marker, the tree
-    indented one column per level, the closing entry last, then that bare marker. The gate
-    reads it whole; the same shape cut short, or with a line after the entry, is refused."""
-    rt, _src = _release_train()
-    rt.select_batch(ABSENT_BATCH)
-    _seat(monkeypatch, rt)
-    st = _snap()
-    name = st["snapshot"]["name"]
-    older = "cc_auto__20260920_030000"
-    tree = ["  - '`-> %s 2026-09-20 03:00:00     auto snapshot: auto'" % older,
-            "  - ' `-> %s 2026-09-22 03:00:01     auto snapshot: pre-bug392-merge'" % name]
-    closer = "  - '  `-> current                                   You are here!'"
-
-    def _section(phase, *lines):
-        return ("  - SCR-LIST-BEGIN %s %s\n%s\n  - SCR-LIST-END %s %s"
-                % (phase, NONCE, "\n".join(lines), phase, NONCE))
-
-    def _answer(*lines):
-        monkeypatch.setattr(rt, "run", _attesting_run(rt, sections=[
-            _facts_section(BEFORE_P), _section(BEFORE_P, *lines), _section(AFTER_P, *lines),
-            _facts_section(AFTER_P)]))
-
-    # (a) the live shape, whole: every line of the body normalised, the closing
-    # entry the last of them, and the gate reads the answer
-    _answer(*(tree + [closer]))
-    listing = rt.snapshot_listing()
-    assert listing["rc"] == 0 and listing["agree"] is True, listing
-    kept = rt._listing_lines(listing["raw"])
-    assert kept[-1] == "`-> current                                   You are here!", kept
-    assert rt.listing_complete(listing["raw"]) is True, kept
-    names, problem = rt.listed_snapshot_names(listing)
-    assert names == [name] and problem is None, (names, problem)
-    rt.assert_snapshot_still_exists(st)
-    _d, lines = _printed_capture(rt, capsys, listing)
-    assert "GATE names=1 usable=yes" in lines, lines
-
-    # (b) the same shape cut short -- no closing entry: refused
-    _answer(*tree)
-    names, problem = rt.listed_snapshot_names(rt.snapshot_listing())
-    assert names == [] and "does not END with" in problem, (names, problem)
-
-    # (c) the entry with a later item after it: refused, and named
-    _answer(*(tree + [closer, "  - '`-> cc_auto__20260923_030000 2026-09-23 03:00:00     "
-                              "auto snapshot: auto'"]))
-    names, problem = rt.listed_snapshot_names(rt.snapshot_listing())
-    assert names == [] and "rolled back onto an older branch" in problem, (names, problem)
-
-    # (d) ONE item marker comes off, never two: a nested item is not the entry
-    assert rt.listing_complete("  - - '`-> current   You are here!'") is False
-    assert rt.listing_complete("  - '`-> current   You are here!'\n  -") is True
-    assert rt._listing_lines("  -\n-\n  - ''") == []
-
-
-def test_r12_m1_a_name_only_in_a_description_is_not_a_listed_snapshot(monkeypatch, capsys):
-    """R11-M1: a snapshot is named by pct's NAME FIELD, never by a token anywhere in the listing.
-
-    pct prints one entry per snapshot -- "`->", the name, the moment it was taken, the first line
-    of the description -- and a description is free text whoever takes a snapshot writes. The
-    listing was read as whole tokens ANYWHERE, so once the rollback point was deleted, another
-    snapshot whose description carried its name made the gate report it listed and the deploy
-    walk on. Every reader of the listing now takes the name field: the gate's names, the moment
-    beside a name, and the capture's records. Failure direction: refusal -- a recorded name
-    that survives only in a description is not listed, and nothing is merged or deployed."""
-    rt, _src = _release_train()
-    rt.select_batch(ABSENT_BATCH)
-    _seat(monkeypatch, rt)
-    st = _snap()
-    name = st["snapshot"]["name"]
-    other = "cc_auto__20260920_030000"
-    closer = "  - '  `-> current                                   You are here!'"
-    # another snapshot, whose description carries the recorded name and a zoned moment
-    described = ("  - '`-> %s 2026-09-20 03:00:00     copy of %s 2026-09-22 03:00:01Z'"
-                 % (other, name))
-    named = "  - ' `-> %s 2026-09-22 03:00:01     auto snapshot: pre-bug392-merge'" % name
-
-    def _section(phase, *lines):
-        return ("  - SCR-LIST-BEGIN %s %s\n%s\n  - SCR-LIST-END %s %s"
-                % (phase, NONCE, "\n".join(lines), phase, NONCE))
-
-    def _answer(*lines):
-        monkeypatch.setattr(rt, "run", _attesting_run(rt, sections=[
-            _facts_section(BEFORE_P), _section(BEFORE_P, *lines), _section(AFTER_P, *lines),
-            _facts_section(AFTER_P)]))
-
-    # (a) REFUSED: the rollback point is gone and another snapshot's description names it --
-    # read through the controller's own YAML form by the real parser
-    _answer(described, closer)
-    listing = rt.snapshot_listing()
-    assert listing["rc"] == 0 and rt.listing_complete(listing["raw"]), listing
-    names, problem = rt.listed_snapshot_names(listing)
-    assert names == [] and problem is None, (names, problem)
-    with pytest.raises(rt.Fail) as exc:
-        rt.assert_snapshot_still_exists(st)
-    assert "is not in the container's snapshot listing" in str(exc.value), str(exc.value)
-    # ...the moment beside it is not read out of the other snapshot's description either
-    taken, why = rt.listed_snapshot_time(listing, name)
-    assert taken is None and why == "the listing carries no line for it", (taken, why)
-    # ...and the capture writes no record of it: that line is dropped and counted
-    _d, lines = _printed_capture(rt, capsys, listing)
-    written = "\n".join(lines)
-    assert "SNAPSHOT name=%s" % name not in written, written
-    assert "GATE names=0 usable=yes" in written, written
-
-    # (b) ACCEPTED: the same listing with the name in a name field
-    _answer(described, named, closer)
-    listing = rt.snapshot_listing()
-    names, problem = rt.listed_snapshot_names(listing)
-    assert names == [name] and problem is None, (names, problem)
-    rt.assert_snapshot_still_exists(st)
-    taken, why = rt.listed_snapshot_time(listing, name)
-    assert taken is None and "names no zone" in why, (taken, why)
-    _d, lines = _printed_capture(rt, capsys, listing)
-    written = "\n".join(lines)
-    assert "SNAPSHOT name=%s taken=2026-09-22 03:00:01 zone=none" % name in written, written
-    assert "GATE names=1 usable=yes" in written, written
-
-    # (c) the zone: pct's time field is 23 wide and the description follows it, so a
-    # description that BEGINS with a zone word is not the zone of the moment beside it...
-    for word in ("UTC nightly", "Z", "+02:00 local"):
-        zoned = _listing_raw("  `-> %s 2026-09-22 03:00:01     %s\n"
-                             "  `-> current                   You are here!" % (name, word))
-        taken, why = rt.listed_snapshot_time(zoned, name)
-        assert taken is None and "names no zone" in why, (word, taken, why)
-    # ...while a zone the timestamp itself states is read
-    zoned = _listing_raw("  `-> %s 2026-09-22 03:00:01 UTC     auto snapshot\n"
-                         "  `-> current                   You are here!" % name)
-    taken, why = rt.listed_snapshot_time(zoned, name)
-    assert taken is not None and why is None, (taken, why)
-
-    # (d) a deleted rollback point whose name is only in a description REFUSES DEPLOYMENT: the
-    # code phase stops before any ref moves, and its inert twin walks on to the merge
-    _attested(monkeypatch, rt)
-    go = SimpleNamespace(go=True)
-    monkeypatch.setattr(rt, "save_state", lambda st_: None)
-    stub, log = _fake_git(rt, _bound_refs(rt), trees={REVIEWED_FULL: REVIEWED_TREE})
-    monkeypatch.setattr(rt, "run", stub)
-    monkeypatch.setattr(rt, "snapshot_listing", lambda values=None: _listing_raw(
-        "  `-> %s 2026-09-20 03:00:00     copy of %s\n"
-        "  `-> current                   You are here!" % (other, name)))
-    with pytest.raises(rt.Fail) as exc:
-        rt.phase_code(go, _snap())
-    assert "is not in the container's snapshot listing" in str(exc.value), str(exc.value)
-    assert log == ["git status --porcelain"], log
-    _snapshot_is_listed(monkeypatch, rt)
-    with pytest.raises(_NoCommand) as exc:
-        rt.phase_code(go, dict(_snap(), pre_code_old_build=True))
-    assert str(exc.value).startswith("git checkout main")
-
-
-def _posix_bash():
-    """A bash with process substitution: Git's own on Windows (never the WSL launcher on the
-    PATH), the system's elsewhere. None when there is none."""
-    import os as _os
-    import shutil as _sh
-    if _os.name == "nt":
-        git = _sh.which("git")
-        if not git:
-            return None
-        # git.exe sits in cmd/, bin/ or mingw64/bin/ of the installation, and the
-        # shell in usr/bin/ of its root: walk up until that root is found
-        here = _os.path.dirname(_os.path.realpath(git))
-        for _level in range(4):
-            cand = _os.path.join(here, "usr", "bin", "bash.exe")
-            if _os.path.isfile(cand):
-                return cand
-            here = _os.path.dirname(here)
-        return None
-    return _sh.which("bash")
-
-
-def test_r12_l2_the_playbook_reaches_the_controller_as_a_pipe_and_no_file_is_written(
-        monkeypatch, tmp_path):
-    """R11-L2: every attested run -- the real listing capture's included -- wrote its composed
-    playbook to a temporary file on the controller.
-
-    The command decoded the playbook into `$(mktemp)`, ran ansible-playbook on it and removed it.
-    The shell now decodes it into a PIPE (process substitution) that ansible-playbook reads in
-    place of a file, so nothing is created and nothing is removed. Asserted on the command
-    `snapshot_listing` composes, and by RUNNING that exact command in a real POSIX shell whose
-    `ansible-playbook` is a shell function reporting what it was handed: whether that is a
-    regular file, how many entries the scratch temp directory holds while it runs, and the
-    playbook it read. The live proof on the controller is the read-only `check
-    --capture-listing` at the pin tip; this observes the shell's half on this seat."""
-    import os
-    import re as _re
-    import subprocess
-    rt, _src = _release_train()
-    rt.select_batch(ABSENT_BATCH)
-    _seat(monkeypatch, rt)
-    name = _snap()["snapshot"]["name"]
-    inner = []
-    answer = _attesting_run(rt, listing=True, name=name)
-
-    def _run(cmd, **kw):
-        inner.append(cmd[-1])
-        return answer(cmd, **kw)
-
-    monkeypatch.setattr(rt, "run", _run)
-    listing = rt.snapshot_listing()
-    assert rt.listed_snapshot_names(listing) == ([name], None)
-    sent = inner[-1]
-    # (a) the command: no temporary file, no removal, and ansible-playbook is the LAST
-    # command, so the status the shell exits with is the playbook's own
-    assert "mktemp" not in sent and "rm -f" not in sent and "__scr_rc" not in sent, sent
-    shape = _re.search(r"&& ansible-playbook <\(printf %s '?([A-Za-z0-9+/=]+)'? \| base64 -d\) "
-                       r"--limit \S+ -e scr_nonce=[0-9a-f]{32}(?: -e \S+)*\Z", sent)
-    assert shape, sent
-    blob = shape.group(1)
-    # (b) the command, RUN
-    bash = _posix_bash()
-    if bash is None:
-        pytest.skip("no POSIX bash with process substitution on this machine")
-    home = tmp_path / "home"
-    venv = home / "zap" / ".venv" / "bin"
-    venv.mkdir(parents=True)
-    tmpdir = tmp_path / "tmp"
-    tmpdir.mkdir()
-    (venv / "activate").write_bytes(
-        b'ansible-playbook() {\n'
-        b'  if [ -f "$1" ]; then echo "SCR-L2 REGULAR"; else echo "SCR-L2 NOT-REGULAR"; fi\n'
-        b'  echo "SCR-L2 TMP $(ls -A "$TMPDIR" | wc -l)"\n'
-        b'  echo "SCR-L2 BOOK $(cat "$1" | base64 | tr -d \'\\n\')"\n'
-        b'  return "${SCR_L2_RC:-0}"\n'
-        b'}\n')
-    env = dict(os.environ, HOME=home.as_posix(), TMPDIR=tmpdir.as_posix())
-    for rc in (0, 5):
-        env["SCR_L2_RC"] = str(rc)
-        done = subprocess.run([bash, "-c", sent], env=env, capture_output=True, timeout=120)
-        out = done.stdout.decode("utf-8", "replace")
-        assert done.returncode == rc, (rc, done.returncode, out, done.stderr)
-        assert "SCR-L2 NOT-REGULAR" in out and "SCR-L2 REGULAR" not in out, out
-        assert _re.search(r"SCR-L2 TMP\s+0\s", out), out
-        read = _re.search(r"SCR-L2 BOOK (\S+)", out)
-        assert read and read.group(1) == blob, (out, blob)
-    # ...and nothing was left anywhere under the scratch tree
-    assert sorted(p.relative_to(tmp_path).as_posix() for p in tmp_path.rglob("*")) == [
-        "home", "home/zap", "home/zap/.venv", "home/zap/.venv/bin",
-        "home/zap/.venv/bin/activate", "tmp"]
-
-
-def test_r10_m2_a_box_that_does_not_serve_the_new_build_stops_the_next_box_play(monkeypatch):
-    """R9-M2: what the primary SERVES was asked only after both plays had run.
-
-    A clone at the deployed id and a liveness 200 are both true of a container whose restart did
-    nothing, and the round before asked the semantic question only after the standby had been
-    deployed too -- so the ordering that keeps the authoritative box ahead of the box serving the
-    routed reads (#266) held for the clones and not for the code. Each box is now asked, alone,
-    before the next box's play is started: the code phase asks for the NEW build, the precursor
-    phase for the OLD one. (The remapped-selector arms, which refuse with zero plays, are (e),
-    (e2) and (f) of the per-box attestation test.)"""
-    rt, _src = _release_train()
-    rt.select_batch(ABSENT_BATCH)
-    _seat(monkeypatch, rt)
-    _attested(monkeypatch, rt)
-    rt.attest_deploy_selectors()
-    for name, stub in (("assert_control", lambda host: None),
-                       ("assert_route_probes", lambda hosts: None),
-                       ("assert_health_keys", lambda hosts: None),
-                       ("assert_edge_runs_new_code", lambda: None),
-                       ("save_state", lambda st_: None),
-                       ("run", _no_command)):
-        monkeypatch.setattr(rt, name, stub)
-
-    # (a) the primary's play returned, its clone is at the id and its control
-    # answers -- and it still serves the OLD build (a restart that did
-    # nothing), or neither build, or its control is down. The standby's play
-    # is never started.
-    for reading, says in ((_OLD_BUILD, "still serving the OLD build"),
-                          ((True, False, False, ["alias unknown"]), "neither build"),
-                          ((False, False, False, []), "is not 200")):
-        calls = []
-        monkeypatch.setattr(rt, "run_attested", _attesting_deploy(rt, calls))
-        monkeypatch.setattr(rt, "code_state", lambda host, _r=reading: _r)
-        with pytest.raises(rt.Fail) as exc:
-            rt._deploy_both(MERGE_FULL, after_box=rt.assert_box_runs_new)
-        assert says in str(exc.value), (says, str(exc.value))
-        assert "other box has not been deployed to" in str(exc.value), str(exc.value)
-        assert [c[1] for c in calls] == [SEAT_PRIMARY_LIMIT], (says, calls)
-
-    # (b) inert twin: the primary serves the new build, so the standby is
-    # deployed after it, and each box was asked once, in that order
-    calls, asked = [], []
-    monkeypatch.setattr(rt, "run_attested", _attesting_deploy(rt, calls))
-    monkeypatch.setattr(rt, "code_state", lambda host: asked.append(host) or _NEW_BUILD)
-    rt._deploy_both(MERGE_FULL, after_box=rt.assert_box_runs_new)
-    assert [c[1] for c in calls] == [SEAT_PRIMARY_LIMIT, SEAT_STANDBY_LIMIT], calls
-    assert asked == [rt.PRIMARY, rt.STANDBY], asked
-
-    # (c) the code phase hands its deploy that question: a resumed code phase
-    # whose primary does not serve the new build stops before the standby's
-    # play and leaves its attempt sentinel (R9-M3), never a success
-    _snapshot_is_listed(monkeypatch, rt)
-    monkeypatch.setattr(rt, "assert_clean_tree", lambda *a, **k: None)
-    monkeypatch.setattr(rt, "assert_reviewed_provenance", lambda st_: MERGE_FULL)
-    monkeypatch.setattr(rt, "assert_remote_main_is", lambda sha: None)
-    calls = []
-    monkeypatch.setattr(rt, "run_attested", _attesting_deploy(rt, calls))
-    monkeypatch.setattr(rt, "code_state", lambda host: _OLD_BUILD)
-    st = dict(_snap(), pre_code_old_build=True, code_sha=MERGE_FULL, code_deployed=True)
-    with pytest.raises(rt.Fail) as exc:
-        rt.phase_code(SimpleNamespace(go=True), st)
-    assert "still serving the OLD build" in str(exc.value), str(exc.value)
-    assert [c[1] for c in calls] == [SEAT_PRIMARY_LIMIT], calls
-    assert st["code_deployed"] == rt.ATTEMPTED, st.get("code_deployed")
-    # ...inert twin: the same resume with the new build live on each box
-    calls = []
-    monkeypatch.setattr(rt, "run_attested", _attesting_deploy(rt, calls))
-    monkeypatch.setattr(rt, "code_state", lambda host: _NEW_BUILD)
-    st = dict(_snap(), pre_code_old_build=True, code_sha=MERGE_FULL)
-    rt.phase_code(SimpleNamespace(go=True), st)
-    assert [c[1] for c in calls] == [SEAT_PRIMARY_LIMIT, SEAT_STANDBY_LIMIT], calls
-    assert st["code_deployed"] is True, st.get("code_deployed")
-
-    # (d) the precursor phase asks each box the opposite question: a FILES-ONLY
-    # deploy that left the primary serving the NEW build carried code, and the
-    # standby's play is never started
-    monkeypatch.setattr(rt, "ALL_SQL", ["a-file.sql"])
-    calls = []
-    monkeypatch.setattr(rt, "run_attested", _attesting_deploy(rt, calls))
-    monkeypatch.setattr(rt, "code_state", lambda host: _NEW_BUILD)
-    st = {"precursor_sha": MERGE_FULL}
-    with pytest.raises(rt.Fail) as exc:
-        rt.phase_deploy_precursor(SimpleNamespace(go=True), st)
-    assert "does not read as the OLD build after a FILES-ONLY deploy" in str(exc.value)
-    assert "other box has not been deployed to" in str(exc.value), str(exc.value)
-    assert [c[1] for c in calls] == [SEAT_PRIMARY_LIMIT], calls
-    assert st["precursor_deployed"] == rt.ATTEMPTED, st
-    # ...inert twin: both boxes still on the old build, one after the other
-    calls = []
-    monkeypatch.setattr(rt, "run_attested", _attesting_deploy(rt, calls))
-    monkeypatch.setattr(rt, "code_state", lambda host: _OLD_BUILD)
-    st = {"precursor_sha": MERGE_FULL}
-    rt.phase_deploy_precursor(SimpleNamespace(go=True), st)
-    assert [c[1] for c in calls] == [SEAT_PRIMARY_LIMIT, SEAT_STANDBY_LIMIT], calls
-    assert st["precursor_deployed"] is True, st
-
-
-def test_r10_m3_an_attempt_that_does_not_finish_leaves_a_word_no_gate_accepts(monkeypatch,
-                                                                             tmp_path, capsys):
-    """R9-M3: a success an earlier attempt recorded stood over an attempt that did not finish.
-
-    `REFUSED` replaced a standing True only on the paths that went through the attestation
-    refusal. A timeout, an exception, or a postcondition that failed after a play had returned
-    raised straight past it, so the earlier run's True was still in the state file, and `--from
-    i18n` then ran the batch's files behind a deploy that had stopped half way. Every mutating
-    phase now persists its attempt sentinel before its first mutating command and writes the exact
-    True only after its postcondition. Each arm uses a REAL state file under the test's temporary
-    directory: the word checked is what a later process reads back."""
-    rt, _src = _release_train()
-    rt.select_batch(ABSENT_BATCH)
-    _seat(monkeypatch, rt)
-    _state_under(monkeypatch, rt, tmp_path / "train-state.json")
-    _attested(monkeypatch, rt)
-    _snapshot_is_listed(monkeypatch, rt)
-    for name, stub in (("assert_control", lambda host: None),
-                       ("assert_route_probes", lambda hosts: None),
-                       ("assert_health_keys", lambda hosts: None),
-                       ("assert_edge_runs_new_code", lambda: None),
-                       ("assert_clean_tree", lambda *a, **k: None),
-                       ("assert_reviewed_provenance", lambda st_: MERGE_FULL),
-                       ("assert_remote_main_is", lambda sha: None),
-                       ("assert_provenance_up_front", lambda args, st_: None),
-                       ("check_migration", lambda f, out: None),
-                       ("sql", lambda host, query: "1"),
-                       ("run", _no_command)):
-        monkeypatch.setattr(rt, name, stub)
-    go = SimpleNamespace(go=True)
-
-    # (a) the code phase. An earlier attempt's True is in the file; this
-    # attempt deploys the primary and times out on the standby -- a PARTIAL
-    # deploy. The file reads ATTEMPTED, and `--from i18n` refuses.
-    rt.save_state(dict(_snap(), pre_code_old_build=True, code_sha=MERGE_FULL,
-                       code_deployed=True))
-    calls = []
-    monkeypatch.setattr(rt, "run_attested", _second_play_times_out(rt, calls))
-    monkeypatch.setattr(rt, "code_state", lambda host: _NEW_BUILD)
-    with pytest.raises(rt.Fail) as exc:
-        rt.phase_code(go, rt.load_state())
-    assert "did not answer within" in str(exc.value), str(exc.value)
-    assert [c[1] for c in calls] == [SEAT_PRIMARY_LIMIT], calls
-    assert rt.load_state()["code_deployed"] == rt.ATTEMPTED, rt.load_state()
-    capsys.readouterr()
-    rc = _cli(monkeypatch, rt, "--batch", ABSENT_BATCH, "run", "--go", "--from", "i18n")
-    out = capsys.readouterr().out
-    assert rc == 1, out
-    assert "GATE FAILED in phase 'i18n'" in out, out
-    assert "code SHA is not live on both boxes" in out, out
-    assert "i18n_done" not in rt.load_state(), rt.load_state()
-    # ...inert twin: the attempt that FINISHES writes the exact True, and the
-    # same `--from i18n` passes that gate
-    calls = []
-    monkeypatch.setattr(rt, "run_attested", _attesting_deploy(rt, calls))
-    rt.phase_code(go, rt.load_state())
-    assert rt.load_state()["code_deployed"] is True, rt.load_state()
-    ran = []
-    monkeypatch.setattr(rt, "PHASES", [(n, (lambda args, st_, _n=n: ran.append(_n))
-                                        if n == "verify" else f) for n, f in rt.PHASES])
-    rc = _cli(monkeypatch, rt, "--batch", ABSENT_BATCH, "run", "--go", "--from", "i18n")
-    out = capsys.readouterr().out
-    assert rc == 0, out
-    assert rt.load_state()["i18n_done"] is True and ran == ["verify"], (rt.load_state(), ran)
-
-    # (b) the precursor deploy: the standby's play times out after the
-    # primary's. The file reads ATTEMPTED and the schema phase refuses to apply
-    # migrations read from files nothing has proved are on the boxes.
-    monkeypatch.setattr(rt, "ALL_SQL", ["a-file.sql"])
-    monkeypatch.setattr(rt, "SCHEMA_SQL", ["a-file.sql"])
-    monkeypatch.setattr(rt, "schema_state", lambda host: ([], []))
-    migrated = []
-    monkeypatch.setattr(rt, "ssh", lambda host, verb: migrated.append(verb) or "")
-    rt.save_state({"precursor_sha": MERGE_FULL, "precursor_deployed": True})
-    calls = []
-    monkeypatch.setattr(rt, "run_attested", _second_play_times_out(rt, calls))
-    monkeypatch.setattr(rt, "code_state", lambda host: _OLD_BUILD)
-    with pytest.raises(rt.Fail) as exc:
-        rt.phase_deploy_precursor(go, rt.load_state())
-    assert "did not answer within" in str(exc.value), str(exc.value)
-    assert [c[1] for c in calls] == [SEAT_PRIMARY_LIMIT], calls
-    assert rt.load_state()["precursor_deployed"] == rt.ATTEMPTED, rt.load_state()
-    with pytest.raises(rt.Fail) as exc:
-        rt.phase_schema(go, rt.load_state())
-    assert "precursor deploy has not passed" in str(exc.value), str(exc.value)
-    assert rt.ATTEMPTED in str(exc.value) and migrated == [], (str(exc.value), migrated)
-
-    # (c) the schema phase: a migration times out. The file reads ATTEMPTED
-    # and the code phase refuses to boot the new api against that schema.
-    def _migrate_times_out(host, verb):
-        migrated.append(verb)
-        raise rt.Fail(_TIMED_OUT)
-
-    monkeypatch.setattr(rt, "ssh", _migrate_times_out)
-    rt.save_state(dict(_snap(), precursor_deployed=True, schema_done=True))
-    with pytest.raises(rt.Fail) as exc:
-        rt.phase_schema(go, rt.load_state())
-    assert migrated == ["migrate:a-file.sql"], migrated
-    assert rt.load_state()["schema_done"] == rt.ATTEMPTED, rt.load_state()
-    with pytest.raises(rt.Fail) as exc:
-        rt.phase_code(go, rt.load_state())
-    assert "schema phase has not passed" in str(exc.value), str(exc.value)
-
-    # (d) the i18n phase, in a batch that deploys the bot: a migration times
-    # out. The file reads ATTEMPTED and the bot phase refuses.
-    _bot_batch(rt)
-    monkeypatch.setattr(rt, "POST_CODE_SQL", ["a-file.sql"])
-    migrated[:] = []
-    rt.save_state({"code_deployed": True, "i18n_done": True})
-    with pytest.raises(rt.Fail) as exc:
-        rt.phase_i18n(go, rt.load_state())
-    assert migrated == ["migrate:a-file.sql"], migrated
-    assert rt.load_state()["i18n_done"] == rt.ATTEMPTED, rt.load_state()
-    deployed = []
-    monkeypatch.setattr(rt, "ssh", lambda host, verb: deployed.append(verb) or "Started")
-    with pytest.raises(rt.Fail) as exc:
-        rt.phase_bot(go, rt.load_state())
-    assert "i18n phase has not passed" in str(exc.value) and deployed == [], str(exc.value)
-
-    # (e) the bot phase: the deploy verb answered and the witness never saw a
-    # steady bot. The file reads ATTEMPTED, and verify refuses -- and leaves
-    # its OWN sentinel where an earlier verify's backed True stood.
-    def _unwitnessed(**kw):
-        raise rt.Fail("the bot was not witnessed Up over two steady samples")
-
-    monkeypatch.setattr(rt, "_bot_witness", _unwitnessed)
-    rt.save_state({"code_deployed": True, "i18n_done": True, "bot_deployed": True,
-                   "code_sha": MERGE_FULL, "verified": True,
-                   "verified_evidence": {"code_sha": MERGE_FULL, "mode": "GO",
-                                         "at": "2026-09-22T03:00:00+00:00"}})
-    with pytest.raises(rt.Fail) as exc:
-        rt.phase_bot(go, rt.load_state())
-    assert deployed == ["deploy-bot"], deployed
-    assert rt.load_state()["bot_deployed"] == rt.ATTEMPTED, rt.load_state()
-    with pytest.raises(rt.Fail) as exc:
-        rt.phase_verify(go, rt.load_state())
-    assert "bot phase has not passed" in str(exc.value), str(exc.value)
-    assert rt.load_state()["verified"] == rt.ATTEMPTED, rt.load_state()
-
-
-def test_r10_m4_the_seat_file_is_read_once_and_a_replacement_cannot_make_a_hybrid(monkeypatch,
-                                                                                  tmp_path):
-    """R9-M4: every seat key re-opened the seat file, and its digest was a third read.
-
-    An atomic replacement between two of those reads handed one process a controller from one
-    version of the file and a selector from the next, and the digest recorded beside them matched
-    neither. The file is read ONCE, as bytes; the digest is the digest of those bytes; every key is
-    parsed out of them. Here the file is REPLACED on disk the moment the first read has taken its
-    bytes, and every value and the digest must still be the first version's."""
-    import builtins
-    import hashlib
-    import io
-    import json
-    rt, _src = _release_train()
-    rt.select_batch(ABSENT_BATCH)
-    for env in rt.IDENTIFIERS.values():
-        monkeypatch.delenv(env, raising=False)
-    first = {"controller": SEAT_CONTROLLER, "pve_group": SEAT_PVE_GROUP,
-             "origin_url": ORIGIN_URL, "primary_limit": SEAT_PRIMARY_LIMIT,
-             "standby_limit": SEAT_STANDBY_LIMIT, "play_dir": SEAT_PLAY_DIR}
-    second = {"controller": "a-different-controller", "pve_group": "a-group-2",
-              "origin_url": ORIGIN_URL, "primary_limit": "a-second-group",
-              "standby_limit": "a-node", "play_dir": "/srv/a-play-dir/elsewhere"}
-    assert set(first) == set(rt.IDENTIFIERS), sorted(rt.IDENTIFIERS)
-    first_bytes = json.dumps(first).encode("utf-8")
-    second_bytes = json.dumps(second).encode("utf-8")
-    conf = tmp_path / "train.conf.json"
-    conf.write_bytes(first_bytes)
-    monkeypatch.setattr(rt, "TRAIN_CONF", str(conf))
-    rt._SEAT_SNAPSHOT.clear()
-    rt._SEAT_FILE.clear()
-    opens = []
-    real_open = builtins.open
-
-    def _counting_open(file, *args, **kw):
-        if isinstance(file, (str, os.PathLike)) and os.path.abspath(str(file)) == str(conf):
-            opens.append(args[0] if args else kw.get("mode", "r"))
-            if len(opens) == 1:
-                with real_open(file, "rb") as fh:
-                    data = fh.read()
-                conf.write_bytes(second_bytes)     # replaced right after the first read
-                return io.BytesIO(data)
-        return real_open(file, *args, **kw)
-
-    monkeypatch.setattr(builtins, "open", _counting_open)
-    values = {key: rt.require_identifier(key) for key in rt.IDENTIFIERS}
-    digests = rt.seat_binding_digests(rt.seat_values())
-    monkeypatch.setattr(builtins, "open", real_open)
-    # (a) one open, as bytes
-    assert opens == ["rb"], opens
-    # (b) no hybrid: every value is the first version's, and so is the digest
-    assert values == first, sorted(k for k in first if values.get(k) != first[k])
-    assert digests["conf"] == hashlib.sha256(first_bytes).hexdigest()
-    assert digests["conf"] != hashlib.sha256(second_bytes).hexdigest()
-    # (c) negative control for the fixture itself: the replacement really is on
-    # disk, so a SECOND read -- a new process's -- sees the other version
-    assert conf.read_bytes() == second_bytes
-    rt._SEAT_FILE.clear()
-    rt._SEAT_SNAPSHOT.pop("controller")
-    assert rt.require_identifier("controller") == second["controller"]
-    assert rt.seat_file_digest() == hashlib.sha256(second_bytes).hexdigest()
-
-
-# Where each status key is READ, per function. Every read is `<read> is True`,
-# `<read> is not True` or `_status_word(<read>)` -- nothing takes a truth value
-# of one. Pinned, so a new read anywhere is a change this test makes somebody
-# look at (#432: the defect is a class, and a class is swept, not grepped for
-# the one line a finding named).
-_GATE_READS = {
-    "verified_is_backed": {"verified": 1},
-    "repair_state": {"verified": 1},
-    "state_summary": {"verified": 2, "code_deployed": 1, "pre_code_old_build": 1,
-                      "precursor_deployed": 1, "i18n_done": 1, "bot_deployed": 1,
-                      "schema_done": 1},
-    "phase_schema": {"precursor_deployed": 2},
-    "phase_code": {"schema_done": 2, "pre_code_old_build": 1},
-    "phase_i18n": {"code_deployed": 1},
-    "phase_bot": {"i18n_done": 2, "code_deployed": 2},
-    "phase_verify": {"bot_deployed": 2},
-}
-
-
-def _gate_reads(src, keys):
-    """(reads per function, reads in any other form, non-literal reads of `st`) -- by AST."""
-    import ast
-    tree = ast.parse(src)
-    parent = {}
-    for node in ast.walk(tree):
-        for child in ast.iter_child_nodes(node):
-            parent[child] = node
-
-    def function_of(node):
-        while node in parent:
-            node = parent[node]
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                return node.name
-        return "<module>"
-
-    def literal(node):
-        return node.value if isinstance(node, ast.Constant) and isinstance(node.value, str) \
-            else None
-
-    counts, other, dynamic = {}, [], []
-    for node in ast.walk(tree):
-        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
-                and node.func.attr == "get" and node.args):
-            key, target = literal(node.args[0]), node.func.value
-        elif isinstance(node, ast.Subscript) and isinstance(node.ctx, ast.Load):
-            key, target = literal(node.slice), node.value
-        else:
-            continue
-        if key is None:
-            if isinstance(target, ast.Name) and target.id == "st":
-                dynamic.append((function_of(node), node.lineno))
-            continue
-        if key not in keys:
-            continue
-        fn = function_of(node)
-        counts.setdefault(fn, {}).setdefault(key, 0)
-        counts[fn][key] += 1
-        up = parent.get(node)
-        exact = (isinstance(up, ast.Compare) and up.left is node and len(up.ops) == 1
-                 and isinstance(up.ops[0], (ast.Is, ast.IsNot))
-                 and isinstance(up.comparators[0], ast.Constant)
-                 and up.comparators[0].value is True)
-        worded = (isinstance(up, ast.Call) and isinstance(up.func, ast.Name)
-                  and up.func.id == "_status_word" and len(up.args) == 1
-                  and up.args[0] is node)
-        if not (exact or worded):
-            other.append((fn, key, node.lineno))
-    return counts, other, dynamic
-
-
-def test_r10_m5_every_gate_accepts_only_the_exact_success_word(monkeypatch):
-    """R9-M5: the gates read their predecessors' statuses as truth values.
-
-    `REFUSED` and `ATTEMPTED` are non-empty words, so a truth test read either as the phase
-    having passed. Every gate reading a status accepts only the exact True its predecessor's
-    postcondition writes. The class is swept by AST with a count per function, and each gate has a
-    control: `REFUSED` (and the sentinel, and any other truthy value) is refused; the exact True
-    passes that gate."""
-    rt, src = _release_train()
-
-    # (a) the sweep, over the train's own source
-    counts, other, dynamic = _gate_reads(src, set(rt.GATE_KEYS))
-    assert other == [], other
-    assert dynamic == [], dynamic
-    assert counts == _GATE_READS, counts
-    assert sum(sum(v.values()) for v in counts.values()) == 22
-    # ...and its negative control: a truth test planted in a function IS found
-    planted = ("def phase_x(st):\n    if not st.get('code_deployed'):\n        pass\n"
-               "    return st['bot_deployed'] and st.get(k)\n")
-    _c, found, dyn = _gate_reads(planted, set(rt.GATE_KEYS))
-    assert found == [("phase_x", "code_deployed", 2), ("phase_x", "bot_deployed", 4)], found
-    assert dyn == [("phase_x", 4)], dyn
-
-    rt.select_batch(ABSENT_BATCH)
-    _seat(monkeypatch, rt)
-    _attested(monkeypatch, rt)
-    _snapshot_is_listed(monkeypatch, rt)
-    for name, stub in (("save_state", lambda st_: None),
-                       ("assert_clean_tree", lambda *a, **k: None),
-                       ("assert_reviewed_provenance", lambda st_: MERGE_FULL),
-                       ("check_migration", lambda f, out: None),
-                       ("schema_state", lambda host: ([], [])),
-                       ("index_state", lambda host: []),
-                       ("sql", lambda host, query: "1"),
-                       ("run", _no_command)):
-        monkeypatch.setattr(rt, name, stub)
-    go = SimpleNamespace(go=True)
-    words = ("REFUSED", rt.ATTEMPTED, "yes", 1)
-
-    # (b) the precursor gate, in the schema phase of a migration batch
-    monkeypatch.setattr(rt, "ALL_SQL", ["a-file.sql"])
-    monkeypatch.setattr(rt, "SCHEMA_SQL", ["a-file.sql"])
-    for attr in ("EXPECT_TABLES", "EXPECT_COLUMNS", "EXPECT_INDEXES"):
-        monkeypatch.setattr(rt, attr, [])
-    migrated = []
-    monkeypatch.setattr(rt, "ssh", lambda host, verb: migrated.append(verb) or "")
-    for word in words:
-        st = {"precursor_deployed": word}
-        with pytest.raises(rt.Fail) as exc:
-            rt.phase_schema(go, st)
-        assert "precursor deploy has not passed" in str(exc.value), (word, str(exc.value))
-        assert migrated == [] and "schema_done" not in st, (word, migrated, st)
-    st = {"precursor_deployed": True}
-    rt.phase_schema(go, st)                                  # inert twin
-    assert migrated == ["migrate:a-file.sql"] and st["schema_done"] is True, (migrated, st)
-
-    # (c) the schema gate, in the code phase of a migration batch
-    for word in words:
-        st = dict(_snap(), schema_done=word)
-        with pytest.raises(rt.Fail) as exc:
-            rt.phase_code(go, st)
-        assert "schema phase has not passed" in str(exc.value), (word, str(exc.value))
-        assert "code_deployed" not in st, (word, st)
-    # inert twin: the exact True passes this gate, and the phase goes on to
-    # its first command -- the checkout, which this test's `run` refuses
-    with pytest.raises(_NoCommand) as exc:
-        rt.phase_code(go, dict(_snap(), schema_done=True))
-    assert "checkout" in str(exc.value), str(exc.value)
-
-    # (d) the old-build control, in the code phase of a no-migration batch:
-    # anything but the exact True re-reads both boxes before any command
-    rt.select_batch(ABSENT_BATCH)
-    assert not rt.ALL_SQL
-    reads = []
-    monkeypatch.setattr(rt, "code_state", lambda host: reads.append(host) or _NEW_BUILD)
-    for word in words:
-        reads[:] = []
-        with pytest.raises(rt.Fail) as exc:
-            rt.phase_code(go, dict(_snap(), pre_code_old_build=word))
-        assert "does not read as the OLD build BEFORE" in str(exc.value), (word, str(exc.value))
-        assert reads == [rt.PRIMARY], (word, reads)
-    reads[:] = []
-    with pytest.raises(_NoCommand):                          # inert twin
-        rt.phase_code(go, dict(_snap(), pre_code_old_build=True))
-    assert reads == [], reads
-
-    # (e) the code gate, in the i18n phase
-    for word in words:
-        st = {"code_deployed": word}
-        with pytest.raises(rt.Fail) as exc:
-            rt.phase_i18n(go, st)
-        assert "code SHA is not live on both boxes" in str(exc.value), (word, str(exc.value))
-        assert "i18n_done" not in st, (word, st)
-    st = {"code_deployed": True}
-    rt.phase_i18n(go, st)                                    # inert twin
-    assert st["i18n_done"] is True, st
-
-    # (f) both gates of the bot phase, in a batch that deploys the bot
-    _bot_batch(rt)
-    deployed = []
-    monkeypatch.setattr(rt, "ssh", lambda host, verb: deployed.append(verb) or "Started")
-    monkeypatch.setattr(rt, "_bot_witness", lambda **kw: None)
-    for word in words:
-        for st, says in (({"i18n_done": word, "code_deployed": True},
-                          "i18n phase has not passed"),
-                         ({"i18n_done": True, "code_deployed": word},
-                          "the code phase has not passed")):
-            with pytest.raises(rt.Fail) as exc:
-                rt.phase_bot(go, st)
-            assert says in str(exc.value), (word, says, str(exc.value))
-            assert deployed == [] and "bot_deployed" not in st, (word, deployed, st)
-    st = {"i18n_done": True, "code_deployed": True}
-    rt.phase_bot(go, st)                                     # inert twin
-    assert deployed == ["deploy-bot"] and st["bot_deployed"] is True, (deployed, st)
-
-    # (g) the bot gate, in verify (its twin -- a witnessed True passes, and is
-    # witnessed first -- is the verify-policy test's, which drives the phase)
-    for word in words:
-        st = {"bot_deployed": word, "code_sha": MERGE_FULL}
-        with pytest.raises(rt.Fail) as exc:
-            rt.phase_verify(go, st)
-        assert "bot phase has not passed" in str(exc.value), (word, str(exc.value))
-        assert st["verified"] == rt.ATTEMPTED, (word, st)
-
-    # (h) and the summary: every status renders YES only for the exact True
-    fields = {"precursor_deployed": "deploy_precursor", "schema_done": "schema_phase",
-              "pre_code_old_build": "pre_code_old_build", "code_deployed": "code_deployed",
-              "i18n_done": "i18n", "bot_deployed": "bot", "verified": "verified"}
-    assert set(fields) == set(rt.GATE_KEYS), rt.GATE_KEYS
-    for key, field in fields.items():
-        for word, want in (("REFUSED", "REFUSED"), (rt.ATTEMPTED, rt.ATTEMPTED), ("yes", "NO"),
-                           (1, "NO"), (False, "NO"), (None, "NO")):
-            got = rt.state_summary({key: word})[field]
-            assert got == want, (key, word, got)
-        got = rt.state_summary({key: True})[field]
-        assert got == ("UNBACKED" if key == "verified" else "YES"), (key, got)
-
-
-def test_r10_l5_repair_state_clears_an_unbacked_verified_and_a_dry_run_cannot_write_one(
-        monkeypatch, tmp_path, capsys):
-    """R9-L5: the state file still carried the `verified` a round-8 dry run had written.
-
-    R8-L5 stopped dry runs writing, and nothing removed the word the old one left behind. The
-    train's own state handling removes it now: `repair-state` clears a `verified` that no GO verify
-    of the recorded code SHA backs, writes WHY beside the removal, and -- like every action of this
-    train -- without `--go` it says what it would do and writes nothing. It is local: no probe, no
-    ssh, no git. And a dry run still cannot write the word again."""
-    import json
-    rt, _src = _release_train()
-    rt.select_batch(ABSENT_BATCH)
-    _seat(monkeypatch, rt)
-    state = _state_under(monkeypatch, rt, tmp_path / "train-state.json")
-    monkeypatch.setattr(rt, "run", _no_command)
-    state.write_text('{"verified": true}', encoding="utf-8")   # the shape the old dry run left
-    was = state.read_bytes()
-    assert rt.state_summary(json.loads(was))["verified"] == "UNBACKED"
-
-    # (a) without --go: says what it would clear, writes nothing
-    capsys.readouterr()
-    rc = _cli(monkeypatch, rt, "--batch", ABSENT_BATCH, "repair-state")
-    out = capsys.readouterr().out
-    assert rc == 0 and "[dry run] would clear verified" in out, out
-    assert state.read_bytes() == was, "a dry repair wrote the state file"
-
-    # (b) with --go: the word is gone and the reason is written beside it
-    rc = _cli(monkeypatch, rt, "--batch", ABSENT_BATCH, "repair-state", "--go")
-    out = capsys.readouterr().out
-    doc = json.loads(state.read_text(encoding="utf-8"))
-    assert rc == 0 and "cleared verified" in out, out
-    assert "verified" not in doc, doc
-    assert [(r["key"], r["was"]) for r in doc["repairs"]] == [("verified", "YES")], doc
-    assert doc["repairs"][0]["reason"] == rt.UNBACKED_VERIFIED_REASON, doc
-    assert rt.state_summary(doc)["verified"] == "NO" and rt.state_summary(doc)["repairs"] == 1
-
-    # (c) a second run finds nothing to repair and writes nothing
-    after = state.read_bytes()
-    rc = _cli(monkeypatch, rt, "--batch", ABSENT_BATCH, "repair-state", "--go")
-    out = capsys.readouterr().out
-    assert rc == 0 and "nothing to repair" in out, out
-    assert state.read_bytes() == after
-
-    # (d) inert twin: a `verified` a GO verify of the recorded SHA wrote is kept
-    backed = {"verified": True, "code_sha": MERGE_FULL,
-              "verified_evidence": {"code_sha": MERGE_FULL, "mode": "GO",
-                                    "at": "2026-09-22T03:00:00+00:00"}}
-    state.write_text(json.dumps(backed), encoding="utf-8")
-    rc = _cli(monkeypatch, rt, "--batch", ABSENT_BATCH, "repair-state", "--go")
-    assert rc == 0 and json.loads(state.read_text(encoding="utf-8")) == backed
-    assert rt.state_summary(backed)["verified"] == "YES"
-    # ...and evidence for ANOTHER sha, or from a non-GO run, does not back it
-    for evidence in ({"code_sha": REVIEWED_FULL, "mode": "GO"},
-                     {"code_sha": MERGE_FULL, "mode": "PLAN"}):
-        assert not rt.verified_is_backed(dict(backed, verified_evidence=evidence)), evidence
-
-    # (e) a dry run can never write it again: `plan --from verify` over a
-    # state that carries none leaves the file byte-identical
-    state.write_text(json.dumps({"code_sha": MERGE_FULL, "bot_skipped": rt.BOT_SKIP_REASON}),
-                     encoding="utf-8")
-    was = state.read_bytes()
-    # A dry verify still READS the boxes; those reads are stubbed here, so the
-    # `run` that refuses every command proves the plan spawned nothing else.
-    for name, stub in (("assert_provenance_up_front", lambda args, st_: None),
-                       ("assert_control", lambda host: None),
-                       ("assert_health_keys", lambda hosts: None),
-                       ("assert_positive_signals", lambda: None),
-                       ("http_code", lambda host, path, **kw: "200"),
-                       ("code_state", lambda host: _NEW_BUILD),
-                       ("assert_edge_runs_new_code", lambda: None)):
-        monkeypatch.setattr(rt, name, stub)
-    rc = _cli(monkeypatch, rt, "--batch", ABSENT_BATCH, "plan", "--from", "verify")
-    out = capsys.readouterr().out
-    assert rc == 0, out
-    assert state.read_bytes() == was, "a dry run wrote the state file"
-    assert "[dry run] nothing is recorded" in out, out
+# ── the module's network guard ─────────────────────────────────────────
 
 
 def test_r10_no_unit_test_spawns_a_network_program(_no_network_program):
@@ -8164,90 +5021,3 @@ def test_r10_no_unit_test_spawns_a_network_program(_no_network_program):
     done = subprocess.run([_sys.executable, "--version"], capture_output=True)
     assert done.returncode == 0 and _no_network_program == []
 
-
-def test_r10_m2_the_identity_gate_runs_in_the_play_process_and_must_say_it_passed(monkeypatch):
-    """R9-M2: the box a deploy play reached was compared with its attestation after the play had run.
-
-    The gate is a task of the SAME playbook, on the same host, ahead of the imported play, in a
-    play that is any_errors_fatal: the box hashes its own machine-id with this invocation's token and
-    compares the result with the digest the train computed from the ATTESTED fingerprint, and it
-    compares the address it was reached at with the declared one. The train then requires the gate's
-    own PASSED line carrying this invocation's token -- a positive signal, never the absence of a
-    refusal. What travels is the salted digest, never the fingerprint."""
-    import hashlib
-    import json
-    rt, _src = _release_train()
-    rt.select_batch(ABSENT_BATCH)
-    _seat(monkeypatch, rt)
-    expect = (rt.PRIMARY_TOKEN, PRIMARY_BOX_ID)
-    play_path = "/srv/a-play-dir/playbooks/x.yml"
-
-    # (a) the composition: the gate is a task of the play before the import,
-    # keeps the default failure rule, and that play is any_errors_fatal
-    book = rt.attested_playbook(play_path=play_path, gate=True)
-    assert rt.composed_gate(book)
-    plays = json.loads(book)
-    assert plays[0].get("any_errors_fatal") is True and "import_playbook" in plays[1], plays
-    gate = [t for t in plays[0]["tasks"] if rt.GATE_MARK in (t.get("shell") or "")]
-    assert len(gate) == 1 and "failed_when" not in gate[0] and "ignore_errors" not in gate[0]
-    shell = gate[0]["shell"]
-    assert shell.count("exit 3") == 2, shell
-    assert "{{ scr_expect_id }}" in shell and "{{ scr_expect_addr }}" in shell, shell
-    assert shell.rstrip().endswith('PASSED"'), shell
-    # ...and every way of weakening it fails the check `run_attested` asks of
-    # the composed playbook before it spawns anything
-    assert not rt.composed_gate(rt.attested_playbook(play_path=play_path, gate=False))
-
-    def _not_fatal(p):
-        p[0].pop("any_errors_fatal")
-
-    def _tolerant(p):
-        for t in p[0]["tasks"]:
-            if rt.GATE_MARK in (t.get("shell") or ""):
-                t["failed_when"] = False
-
-    def _import_first(p):
-        p.insert(0, p.pop(1))
-
-    for weaken in (_not_fatal, _tolerant, _import_first):
-        weak = json.loads(book)
-        weaken(weak)
-        assert not rt.composed_gate(json.dumps(weak)), weaken.__name__
-
-    # (b) what travels: a digest salted with this invocation's token
-    want = hashlib.sha256(("%s:%s" % (NONCE, PRIMARY_BOX_ID)).encode("ascii")).hexdigest()
-    assert rt.expected_identity_digest(NONCE, PRIMARY_BOX_ID) == want
-    asked = []
-    monkeypatch.setattr(rt, "run", _attesting_run(rt, asked, addr=rt.PRIMARY,
-                                                  box_id=PRIMARY_BOX_ID))
-    rt.run_attested(SEAT_PRIMARY_LIMIT, play="x.yml", expect=expect,
-                    who="SCR_TRAIN_PRIMARY_LIMIT")
-    sent = asked[-1]
-    digest = rt.expected_identity_digest(_nonce_of(sent), PRIMARY_BOX_ID)
-    assert "-e scr_expect_id=%s" % digest in sent, sent
-    assert "-e scr_expect_addr=%s" % rt.PRIMARY in sent, sent
-    assert PRIMARY_BOX_ID not in sent, "the fingerprint itself never travels"
-
-    # (c) the answer must carry the gate's own PASSED line: a gate that printed
-    # nothing, at process status 0, is refused
-    monkeypatch.setattr(rt, "run", _attesting_run(rt, addr=rt.PRIMARY, box_id=PRIMARY_BOX_ID,
-                                                  gate="SILENT"))
-    with pytest.raises(rt.Fail) as exc:
-        rt.run_attested(SEAT_PRIMARY_LIMIT, play="x.yml", expect=expect,
-                        who="SCR_TRAIN_PRIMARY_LIMIT")
-    assert "0 PASSED" in str(exc.value), str(exc.value)
-    # ...a box that is not the attested one: its gate refuses and the process
-    # exits non-zero before the import
-    monkeypatch.setattr(rt, "run", _attesting_run(rt, addr=rt.PRIMARY, box_id=STANDBY_BOX_ID))
-    with pytest.raises(rt.Fail) as exc:
-        rt.run_attested(SEAT_PRIMARY_LIMIT, play="x.yml", expect=expect,
-                        who="SCR_TRAIN_PRIMARY_LIMIT")
-    assert "exited rc=2" in str(exc.value), str(exc.value)
-    # ...and an attested pair that is not a declared endpoint class and a
-    # fingerprint cannot be gated at all, so nothing is spawned
-    monkeypatch.setattr(rt, "run", _no_command)
-    for bad in ((rt.PRIMARY_TOKEN, "not-a-fingerprint"), ("OTHER", PRIMARY_BOX_ID)):
-        with pytest.raises(rt.Fail) as exc:
-            rt.run_attested(SEAT_PRIMARY_LIMIT, play="x.yml", expect=bad,
-                            who="SCR_TRAIN_PRIMARY_LIMIT")
-        assert "no gate could be composed" in str(exc.value), (bad, str(exc.value))

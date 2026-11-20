@@ -1816,12 +1816,17 @@ def test_the_helper_closure_stays_affordable():
     # router and EVIDENCE_ROOT), and +2 the route does run, the admin_evidence
     # health word and its route tuple (the four report endpoints held as
     # values, not walked). Inside 596, so the bound stays.
-    # ban sweep (bans part 2a), on the moderator log tip e3c8b2a2: the worst is
-    # GET /api/v1/health at 597 (596 at e3c8b2a2): +1 by name, the
-    # _BAN_SWEEP_BUILD health word's constant, which the route runs. The
-    # bound moves to 626, ~5% over the measurement, for that reason and no
-    # other.
-    assert code_worst <= 626, f"worst code closure {code_worst} of {total}"
+    # voided-streak lane on the moderator log stack (2026-11-18), the merge
+    # of e3c8b2a2: 597 measured at GET /api/v1/health (596 at e3c8b2a2, the
+    # same walk over that tree): +1 by name, main._VOIDED_STREAK_BUILD, the
+    # lane's build marker, which the health route reads in both arms. The
+    # bound moves to 597, the measured value, for that reason and no other.
+    # ban sweep (bans part 2a), merged onto main 234ea0f8: 598 measured at
+    # GET /api/v1/health (597 on main 234ea0f8): +1 by name,
+    # main._BAN_SWEEP_BUILD, the lane's build marker, which the health route
+    # reads in both arms. The bound moves to 598, the measured value, for that
+    # reason and no other.
+    assert code_worst <= 598, f"worst code closure {code_worst} of {total}"
 
     # Imports are counted separately rather than folded in or waved through.
     # They roughly triple the closure -- measured 69 / 119 / 308 -- and that is
