@@ -1700,7 +1700,19 @@ def test_the_helper_closure_stays_affordable():
     # steep stretch (177, 184, 203, 203 and 212 at positions 382 to 386 on
     # main). The bound moves to 225, ~5% over the measurement, for that
     # reason and no other.
-    assert code_p90 <= 225, f"p90 code closure {code_p90} of {total}"
+    # The stack of QAPPLY-1, the ban sweep and the bot text lane
+    # (claude/stack-1120, 2026-11-20): 228 measured at POST
+    # /api/v1/pc/trades/accept, rank 396 of 440 routes (216 on main 234ea0f8;
+    # 224 at QAPPLY-1's tip and at the ban sweep's, 216 at the bot text
+    # lane's, each the same walk over that tree). Neither lane alone moves the
+    # rank past 224: QAPPLY-1 adds one route (the credit route, 440 routes)
+    # and the ban sweep raises closures below the rank above it (on main the
+    # two moderator log reads measure 213 and 216 and GET
+    # /api/v1/broadcast/target 219; at the ban sweep's tip 221, 224 and 227;
+    # here 221, 224 and 230), so with both the rank position lands on the
+    # trades routes at 228. The bound moves to 239, ~5% over the measurement,
+    # for that reason and no other.
+    assert code_p90 <= 239, f"p90 code closure {code_p90} of {total}"
     # Player Cards v4.13 (2026-09-15): measured 20 / 64 / 278 on e894c45 and
     # 20 / 64 / 282 on the v4.13 fold, the worst both times POST
     # /api/v1/pc/packs/open. What it gained are bindings that route runs: the
@@ -1844,7 +1856,15 @@ def test_the_helper_closure_stays_affordable():
     # moves to 598, the measured value, for that reason and no other.
     # The stack, at its merge of the bot text lane: the 627 above stays (it
     # holds all three lanes' measurements) until the closing item.
-    assert code_worst <= 627, f"worst code closure {code_worst} of {total}"
+    # The stack of QAPPLY-1, the ban sweep and the bot text lane
+    # (claude/stack-1120, 2026-11-20), its closing item: 600 measured at GET
+    # /api/v1/health (597 on main 234ea0f8, the same walk over that tree):
+    # +3 by name, main._QAPPLY_BUILD, main._BAN_SWEEP_BUILD and
+    # main._BOT_TEXT_BUILD, the three lanes' build markers, which the health
+    # route reads in both arms; no other code binding of that closure is new.
+    # The bound moves to 600, the measured value, for that reason and no
+    # other.
+    assert code_worst <= 600, f"worst code closure {code_worst} of {total}"
 
     # Imports are counted separately rather than folded in or waved through.
     # They roughly triple the closure -- measured 69 / 119 / 308 -- and that is
