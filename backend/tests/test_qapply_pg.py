@@ -689,9 +689,23 @@ def test_a12_concurrent_accept_credit_and_network_report_record_once_without_lon
             await asyncio.sleep(0.8)
             await s.rollback()
         c, a, n = await asyncio.wait_for(asyncio.gather(*tasks), 30)
-        assert max(started.values()) < 10.0, ("A12 no long wait", started)
-        assert {c.status, a.status} <= {200, 409}, ("A12 answers", c, a)
-        assert a.status == 200 and c.status == 409, ("A12 accept applies, credit refused", a, c)
+        print("A12 times", {k: round(v, 3) for k, v in sorted(started.items())}, "answers", c.status, a.status,
+              n.status)
+        # F3: each action ends within its deadline, the report within its
+        # bound; a lock wait ends at the lock bound. The third session holds
+        # the held row about 2.4 s after Credit asks for it, past the lock
+        # bound, so Credit answers busy once its wait has reached the bound,
+        # never on first contact; Accept, queued 0.8 s later, waits under
+        # the bound and applies the game.
+        lock_bound = main._QAPPLY_LOCK_TIMEOUT_MS / 1000.0
+        assert started["credit"] < main._QAPPLY_DEADLINE_S and started["accept"] < main._QAPPLY_DEADLINE_S, (
+            "A12 no action waits past its deadline", started)
+        assert started["network"] < F3_REPORT_BOUND_S, ("A12 the report waits within its bound", started)
+        assert c.status in (409, 503) and a.status == 200, ("A12 accept applies, credit does not", c, a)
+        for name, x in (("credit", c), ("accept", a)):
+            if x.status == 503:
+                assert x.body == T["busy"], (name, x)
+                assert started[name] >= lock_bound, ("A12 busy only at the bound", name, started)
         assert n.status != 200 or n.body, ("A12 network answered", n)
         assert await game_rows(env, lob, 2) == 1, "A12 recorded once"
         assert await env.conn.fetchval("SELECT count(*) FROM match_report_quarantine WHERE group_id = $1",
