@@ -27,7 +27,11 @@ The bound (R6a, R6b):
 - C2: a lease start naming the player is refused (409 subject_busy) while
   the deletion, past its drain, holds the identity key.
 - C3: the clock past the deadline between the work and the commit: 503
-  account_cleanup_contended, nothing written.
+  account_cleanup_contended, nothing written. Two checks stand there: the
+  deadline read before the commit, and (since round 2's HIGH 1) the
+  commit's own hold, which reads the clock before it flushes, arms and
+  commits. Each refuses with the other off; with both off the deletion
+  commits late.
 - R6a: a wait for a held pool key ends at the deadline (the attempt's
   lock_timeout): 503 within the budget, nothing written; without the
   lock_timeout the wait outlasts the deadline.
@@ -630,17 +634,33 @@ def test_c2_control_without_the_identity_key_the_lease_is_not_refused_busy(monke
 
 # -- C3 ---------------------------------------------------------------------------------------
 
-async def _past_the_deadline(env, *, check_off):
+async def _past_the_deadline(env, *, read_off, arming_off):
     """The deletion of P parked after its last statement (the case scrub);
-    the clock then moves past the attempt's deadline. check_off: the mutant,
-    the deadline read made false (main._deletion_past)."""
+    the clock then moves past the attempt's deadline. Two checks stand
+    between that point and a COMMIT: the route's deadline read before its
+    commit (main._deletion_past), and the commit's own hold, which reads the
+    clock before it flushes, arms and commits (the session's commit as
+    main._deletion_arm_every_statement installs it). read_off: the mutant,
+    the deadline read made false. arming_off: the mutant, the arming made to
+    install nothing on the session and to return a no-op undo (what it
+    returns for a session without execute), so the session's own commit
+    runs. Each switch that is on asserts that its replacement was called."""
     _arm(env)
     (p,) = await env.players(1)
     skew = {"s": 0.0}
     real = time.monotonic
     env.mp.setattr(main, "_deletion_clock", lambda: real() + skew["s"])
-    if check_off:
-        env.mp.setattr(main, "_deletion_past", lambda deadline: False)
+    reads, armings = [], []
+    if read_off:
+        def no_read(deadline):
+            reads.append(deadline)
+            return False
+        env.mp.setattr(main, "_deletion_past", no_read)
+    if arming_off:
+        def no_arming(db, deadline):
+            armings.append(deadline)
+            return lambda: None
+        env.mp.setattr(main, "_deletion_arm_every_statement", no_arming)
     at = _parks(env)
     spot = at(main._DELETE_CASE_SCRUB_SQL[:40], "after")
     td = asyncio.create_task(_delete(env, p))
@@ -650,21 +670,56 @@ async def _past_the_deadline(env, *, check_off):
     row = await env.conn.fetchrow("SELECT steam_id, deleted_at FROM players WHERE id = $1", p.id)
     kept = await env.conn.fetchval(
         "SELECT COUNT(*) FROM deleted_steam_ids WHERE steam_id_hash = $1", main._hash_steam_id(p.sid))
+    assert reads or not read_off, "the mutant did not apply"
+    assert armings or not arming_off, "the mutant did not apply"
     return p, a, row, kept
 
 
 def test_c3_no_commit_after_the_deadline(monkeypatch):
     async def body(env):
-        p, a, row, kept = await _past_the_deadline(env, check_off=False)
+        p, a, row, kept = await _past_the_deadline(env, read_off=False, arming_off=False)
         assert (a.status, a.body) == (503, main._DELETION_REFUSAL), a
         assert row["steam_id"] == p.sid and row["deleted_at"] is None, dict(row)
         assert kept == 0, kept
     case(monkeypatch, body, prefix="mdpl")
 
 
-def test_c3_control_without_the_deadline_read_the_deletion_commits_late(monkeypatch):
+def test_c3_the_commit_s_own_hold_refuses_without_the_deadline_read(monkeypatch, capsys):
+    """The deadline read made false, the arming on: the commit's own hold
+    reads the clock and raises the signal, so the bound prints that the
+    attempt reached its deadline and answers 503, with nothing written."""
     async def body(env):
-        p, a, row, kept = await _past_the_deadline(env, check_off=True)
+        capsys.readouterr()
+        p, a, row, kept = await _past_the_deadline(env, read_off=True, arming_off=False)
+        out = capsys.readouterr().out
+        assert (a.status, a.body) == (503, main._DELETION_REFUSAL), a
+        assert row["steam_id"] == p.sid and row["deleted_at"] is None, dict(row)
+        assert kept == 0, kept
+        assert "deletion attempt 1 reached its deadline" in out, out[-2000:]
+    case(monkeypatch, body, prefix="mdpl")
+
+
+def test_c3_the_deadline_read_refuses_without_the_arming(monkeypatch, capsys):
+    """The arming off, the deadline read on: the read refuses by itself
+    before the commit, 503 with nothing written, and the bound receives no
+    signal, so it prints no deadline line."""
+    async def body(env):
+        capsys.readouterr()
+        p, a, row, kept = await _past_the_deadline(env, read_off=False, arming_off=True)
+        out = capsys.readouterr().out
+        assert (a.status, a.body) == (503, main._DELETION_REFUSAL), a
+        assert row["steam_id"] == p.sid and row["deleted_at"] is None, dict(row)
+        assert kept == 0, kept
+        assert "reached its deadline" not in out, out[-2000:]
+    case(monkeypatch, body, prefix="mdpl")
+
+
+def test_c3_control_without_the_read_and_the_arming_the_deletion_commits_late(monkeypatch):
+    """C3's control: the deadline read made false and the arming off. No
+    check stands between the parked point and the session's own COMMIT, so
+    the deletion commits past its deadline: the scene can commit late."""
+    async def body(env):
+        p, a, row, kept = await _past_the_deadline(env, read_off=True, arming_off=True)
         assert a.status == 200 and a["status"] == "anonymized", a
         assert row["steam_id"] != p.sid and row["deleted_at"] is not None, dict(row)
         assert kept == 1, kept
