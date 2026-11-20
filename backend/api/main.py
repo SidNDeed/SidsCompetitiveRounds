@@ -69537,15 +69537,13 @@ async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSe
         # mid-game — always leaves the row behind.
         raise HTTPException(404, "Lobby not found")
     # QAPPLY-1 (F1): under the replay, the game's claim is the first check
-    # below the lobby lock, read for the game the report names (a report
-    # that names none would be the lobby's next game): a game that a Credit
-    # paid from a sibling held row is refused as credited, and one an Accept
-    # applied as recorded, before any check that a later write to the lobby
-    # moves (the game number, the gate's pace anchor, the game limit).
+    # below the lobby lock, read for the game the report is of
+    # (_qapply_game_of): a game that a Credit paid from a sibling held row is
+    # refused as credited, and one an Accept applied as recorded, before any
+    # check that a later write to the lobby moves (the game number, the
+    # gate's pace anchor, the game limit).
     if _qapply is not None:
-        _claim_no = _ffa_named_game_number(report.photon_room_id)
-        _claim = await _qapply_claim_of(
-            db, lobby_uuid, _expected_game if _claim_no is None else _claim_no)
+        _claim = await _qapply_claim_of(db, lobby_uuid, _qapply_game_of(report, _expected_game))
         if _claim is not None:
             raise _QapplyRefused(409, _QAPPLY_TEXTS[
                 "game_credited" if _claim == "credit" else "recorded"], {})
@@ -75342,6 +75340,14 @@ def _qapply_out_of_time(ex: BaseException) -> bool:
     return _evc_reason(ex).endswith((" 55P03", " 57014"))
 
 
+def _qapply_game_of(report, expected: int) -> int:
+    """The game a held report is of, for its claim: the number it names
+    (_ffa_named_game_number, the one derivation), else the lobby's next
+    game, which is the number the body records a report naming none as."""
+    named = _ffa_named_game_number(report.photon_room_id)
+    return expected if named is None else named
+
+
 async def _qapply_claim_of(db, lobby_uuid, game: int):
     """The kind of the claim on one game ('accept', 'credit'), or None."""
     return (await db.execute(text(_QAPPLY_SQL_CLAIM_READ), {
@@ -75482,7 +75488,7 @@ async def _qapply_verdict(db, row, body) -> dict:
             "room": room, "lid": str(row["group_id"]),
             "g": named if named is not None else 0})).scalar():
         return no("recorded")
-    claim = await _qapply_claim_of(db, row["group_id"], expected if named is None else named)
+    claim = await _qapply_claim_of(db, row["group_id"], _qapply_game_of(report, expected))
     if claim is not None:
         return no("game_credited" if claim == "credit" else "recorded")
     if lobby["readmit_v1"]:
