@@ -2074,13 +2074,16 @@ def test_f5_every_later_file_that_credits_a_held_row_writes_its_claim(tmp_path):
 
 
 async def _f5_row(c, room, *, lobby=None, no_lobby=False, status="credited"):
-    """One covered held row (FFA, status credited) whose body names `room`."""
+    """One covered held row (FFA, status credited) whose body names `room`.
+    The room column stays empty: the seed reads the body alone, and the
+    partial unique index uq_quarantine_room (mode, room) would refuse the
+    second row of one game (the case of two covered rows of one game)."""
     qid = uuid.uuid4()
     body = {} if room is None else {"photon_room_id": room}
     await c.execute(
         "INSERT INTO match_report_quarantine (id, mode, reason, http_status, group_id, photon_room_id,"
-        "  payload, status) VALUES ($1, 'ffa', 'lobby_completed', 409, $2, $3, $4::jsonb, $5)",
-        qid, None if no_lobby else (lobby or uuid.uuid4()), room, json.dumps(body), status)
+        "  payload, status) VALUES ($1, 'ffa', 'lobby_completed', 409, $2, NULL, $3::jsonb, $4)",
+        qid, None if no_lobby else (lobby or uuid.uuid4()), json.dumps(body), status)
     return qid
 
 
