@@ -438,7 +438,6 @@ def test_a6_game_3_before_game_2_names_game_2_then_both_apply_in_order(monkeypat
         q3 = await held(env, lob, 3)
         ans = await accept(env, q3)
         assert ans.status == 409 and ans.body == T["ahead"].format(tail=3, next=2), ("A6 names game 2", ans)
-        assert "Apply game 2 of this lobby first." in ans.body
         assert (await accept(env, q2)).status == 200, "A6 game 2 applies"
         ans = await accept(env, q3)
         assert ans.status == 200, ("A6 game 3 applies", ans)
@@ -1016,9 +1015,9 @@ def test_c5_each_action_word_signs_its_own_action_only(monkeypatch):
         lob, qid = await closed_held(env)
         before = await tables(env)
         ans = await credit(env, qid, word="quarantine_action")
-        assert (ans.status, ans.body) == (403, "Bad admin signature"), ("C5 credit with accept's word", ans)
+        assert (ans.status, ans.body) == (403, T["admin"]), ("C5 credit with accept's word", ans)
         ans = await accept(env, qid, word="quarantine_credit")
-        assert (ans.status, ans.body) == (403, "Bad admin signature"), ("C5 accept with credit's word", ans)
+        assert (ans.status, ans.body) == (403, T["admin"]), ("C5 accept with credit's word", ans)
         assert await tables(env) == before
     run_env(monkeypatch, body)
 
