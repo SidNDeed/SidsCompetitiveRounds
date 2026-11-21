@@ -901,6 +901,8 @@ async def on_ready():
     asyncio.create_task(backfill_discord_usernames())
     # One-shot mirror of the last few #scr-releases posts (v1.33 Home tab).
     asyncio.create_task(backfill_release_posts())
+    # LFP-PING-1 R5: each role ping's [PING] state line, once per process.
+    asyncio.create_task(_ping_startup_lines())
     print(f"Bot ready: {bot.user} (guilds: {len(bot.guilds)}, chat={CHAT_CHANNEL_ID}, admin={ADMIN_CHANNEL_ID})")
     # Discord card render parity: the art evidence's boot witness, before the
     # Discord fix's witness so the lines that test pins around [BOT-READY]
@@ -15594,6 +15596,311 @@ async def _ack_lfp_pings(ping_ids, undeliverable=False):
         print(f"[LFP] ack error: {ex}")
 
 
+# ── Role pings: did they notify anyone? (LFP-PING-1) ──────────────────────────
+# The bot's two role pings, the LFP ping below and the Gambler ping
+# (poll_gambler_pings), share these helpers. Discord notifies a role's members
+# only when the role is mentionable or the bot holds the Mention Everyone
+# permission (its Allowed Mentions Object), and the message Discord returns
+# lists in mention_roles the roles it mentioned. Before this nothing read
+# either, so a ping that notified nobody looked like any other post.
+#
+# Each post prints ONE line in a closed grammar (tests/test_lfp_ping_signal.py
+# holds it by full match), and once per process after ready the same line per
+# kind with id=startup (R5):
+#   [PING] kind=<lfp|gambler> id=<startup|ID|invalid>
+#          role=<found|duplicate|normalised|absent|ambiguous> mentioned=<0-5>
+#          deliverable=<yes|no|unknown> listed=<0-5> delivered=<yes|no|unsent>
+# ID is 1 to 64 of 0-9, a-f and the dash (an lfp_pings id, a series uuid); any
+# other id prints as the word invalid. mentioned is how many roles the post
+# names: 1 for found and normalised, 2 to PING_ROLES_MAX for duplicate (several
+# roles carry the exact name), 0 for absent and ambiguous. listed is how many of
+# them the role mentions of Discord's answer hold, and delivered is yes only
+# when it holds every one. delivered=unsent, with listed=0, is the startup
+# line's alone: nothing was sent. A failure of the check itself prints a line
+# whose first word is [PING-CHECK], never a [PING] line outside the grammar.
+PING_WARN_EVERY_S = 24 * 60 * 60
+PING_ROLES_MAX = 5              # the most roles one ping mentions when several carry the exact name
+_PING_STARTUP = object()        # the id of the startup line, never an api value
+_PING_ID_RE = re.compile(r"[0-9a-f-]{1,64}")
+_PING_WORDS = {
+    "kind": ("lfp", "gambler"),
+    "role": ("found", "duplicate", "normalised", "absent", "ambiguous"),
+    "deliverable": ("yes", "no", "unknown"),
+    "delivered": ("yes", "no", "unsent"),
+}
+# How many roles a post names under each role word: (at least, at most).
+_PING_MENTIONS = {"found": (1, 1), "normalised": (1, 1), "duplicate": (2, PING_ROLES_MAX),
+                  "absent": (0, 0), "ambiguous": (0, 0)}
+_PING_KIND_SHOWN = {
+    "lfp": "Ranked Looking For Player ping (the in-game LFP button)",
+    "gambler": "Gambler ping (a bet opened)",
+}
+# Discord's own words for the permission (MENTION_EVERYONE in the api); a
+# zero-width space after each at sign, so the warning can never mention.
+_PING_PERMISSION = "Mention @\N{ZERO WIDTH SPACE}everyone, @\N{ZERO WIDTH SPACE}here, and All Roles"
+_ping_warned_at: dict = {}      # kind -> time.monotonic() of the last warning Discord accepted
+_ping_startup_done = False
+
+
+def _ping_role_norm(text) -> str:
+    """A role name's normalised form (R1): casefolded, then only its letters
+    (str.isalpha: the Unicode letters) and digits (str.isdecimal: the Unicode
+    decimal digits) kept."""
+    folded = str(text or "").casefold()
+    return "".join(ch for ch in folded if ch.isalpha() or ch.isdecimal())
+
+
+def _ping_role_matches(roles, configured):
+    """(exact, loose): the roles named exactly `configured`, and the roles
+    whose normalised name equals the configured name's normalised form."""
+    named = [r for r in (roles or ()) if isinstance(getattr(r, "name", None), str)]
+    exact = [r for r in named if r.name == configured]
+    want = _ping_role_norm(configured)
+    loose = [r for r in named if want and _ping_role_norm(r.name) == want]
+    return exact, loose
+
+
+def _ping_role_resolve(roles, configured):
+    """The ONE role resolution both role pings use (R1): (the roles to
+    mention, word). The one role named exactly `configured` is "found". When
+    several roles carry exactly that name the ping mentions each of them, at
+    most PING_ROLES_MAX, the oldest (lowest id) first, and the word is
+    "duplicate": main pinged the first it found, and an empty twin of the
+    role is one of the faults this check exists to report, so the warning
+    names how many carry the name (the integrator's ruling, 21 Nov 2026).
+    With no exact name, the one role whose normalised name equals the
+    configured name's is "normalised"; two or more such roles are
+    "ambiguous" and count as not found: the bot never guesses between
+    different names. No role at all is "absent". Not found is no role."""
+    exact, loose = _ping_role_matches(roles, configured)
+    if len(exact) == 1:
+        return exact, "found"
+    if len(exact) > 1:
+        return sorted(exact, key=lambda r: r.id)[:PING_ROLES_MAX], "duplicate"
+    if len(loose) == 1:
+        return loose, "normalised"
+    if len(loose) > 1:
+        return [], "ambiguous"
+    return [], "absent"
+
+
+def _ping_deliverable(roles, channel) -> str:
+    """R2, read before the send: "yes" when every role to mention is
+    mentionable, or when the bot's own member holds Mention Everyone in
+    `channel` by channel.permissions_for (which applies the channel's
+    overwrites). "unknown" when there is no channel or no member object to
+    ask: never a yes. Otherwise "no". With no role to mention it reports the
+    permission alone."""
+    if roles and all(getattr(r, "mentionable", None) is True for r in roles):
+        return "yes"
+    guild = getattr(channel, "guild", None) if channel is not None else None
+    me = getattr(guild, "me", None) if guild is not None else None
+    if me is None:
+        return "unknown"
+    try:
+        perms = channel.permissions_for(me)
+    except Exception:
+        return "unknown"
+    return "yes" if getattr(perms, "mention_everyone", False) is True else "no"
+
+
+def _ping_delivered(roles, message):
+    """R3, read after the send: (listed, word). listed is how many of the
+    mentioned roles are among the role mentions of the message Discord
+    returned: discord.py builds Message.role_mentions from that payload's
+    mention_roles. Its raw_role_mentions is a pattern over the content the
+    bot wrote and is never read here (a list parsed from our own text proves
+    nothing). The word is "yes" only when roles were mentioned and the answer
+    lists every one of them."""
+    if not roles or message is None:
+        return 0, "no"
+    answered = {getattr(r, "id", None) for r in (getattr(message, "role_mentions", None) or ())}
+    listed = sum(1 for r in roles if r.id in answered)
+    return listed, ("yes" if listed == len(roles) else "no")
+
+
+def _ping_line(kind, ping_id, role_word, mentioned, deliverable, listed, delivered) -> str:
+    """The one [PING] line (R4, R5) in the grammar above. A word outside its
+    set, a count outside its range or fields that disagree raise, so the
+    caller logs a [PING-CHECK] failure instead of printing a line outside
+    the grammar."""
+    for field, value in (("kind", kind), ("role", role_word), ("deliverable", deliverable),
+                         ("delivered", delivered)):
+        if value not in _PING_WORDS[field]:
+            raise ValueError(field)
+    least, most = _PING_MENTIONS[role_word]
+    if type(mentioned) is not int or not least <= mentioned <= most:
+        raise ValueError("mentioned")
+    if type(listed) is not int or not 0 <= listed <= mentioned:
+        raise ValueError("listed")
+    if ping_id is _PING_STARTUP:
+        shown = "startup"
+    else:
+        shown = str(ping_id)
+        if not _PING_ID_RE.fullmatch(shown):
+            shown = "invalid"
+    if (shown == "startup") != (delivered == "unsent"):
+        raise ValueError("delivered")
+    if delivered == "unsent":
+        if listed:
+            raise ValueError("listed")
+    elif (delivered == "yes") != (mentioned > 0 and listed == mentioned):
+        raise ValueError("delivered")
+    return (f"[PING] kind={kind} id={shown} role={role_word} mentioned={mentioned} "
+            f"deliverable={deliverable} listed={listed} delivered={delivered}")
+
+
+def _ping_warning_text(kind, configured, roles, role_word, deliverable, delivered, channel, message) -> str:
+    """The admin warning (R4) in plain words: which ping (its kind and a link
+    to the post), what is wrong, and the one Discord setting that mends each
+    fault. A role not found is the whole story (nothing was mentioned);
+    otherwise several roles of the exact name is one finding, and a role the
+    bot may not mention, or else Discord's answer that does not list every
+    role, is another. Nothing a player typed is shown; each name passes the
+    name helper once."""
+    what = _PING_KIND_SHOWN[kind]
+    link = getattr(message, "jump_url", None) or "(no link)"
+    where = getattr(channel, "mention", None) or "its channel"
+    cfg = _escape_md(configured, 100)
+    exact, loose = _ping_role_matches(getattr(getattr(channel, "guild", None), "roles", None), configured)
+    lines = [f"⚠️ **A role ping needs a change in Discord's settings.** It is the {what}, "
+             f"posted at {link}."]
+    if not roles:
+        # The role was not found (absent, or ambiguous): the post named it as plain text.
+        if role_word == "ambiguous":
+            lines.append(f"**Cause: the role was not found.** {len(loose)} roles match the name **{cfg}** with "
+                         "spaces and capitals ignored and none has exactly that name, so the bot picked none and "
+                         "named the role as plain text: the ping notified nobody.")
+        else:
+            lines.append(f"**Cause: the role was not found.** No role in this server is named **{cfg}**, "
+                         "not even with spaces and capitals ignored, so the post named the role as plain text: "
+                         "the ping notified nobody.")
+        lines.append(f"**Fix:** Server Settings → Roles: give exactly one role the name **{cfg}**.")
+    else:
+        role = roles[0]
+        shown = _escape_md(role.name, 100)
+        several = len(roles) > 1
+        if role_word == "duplicate":
+            # Several roles carry exactly the configured name: the post mentioned each, at most PING_ROLES_MAX
+            # (the oldest). The count is of the roles that carry the name, never fewer than were mentioned.
+            count = max(len(exact), len(roles))
+            if count > len(roles):
+                lines.append(f"**Cause: {count} roles have the same name.** Each is named **{shown}**, and the "
+                             f"post mentioned the {len(roles)} oldest of them (one ping mentions at most "
+                             f"{PING_ROLES_MAX}).")
+            else:
+                lines.append(f"**Cause: {count} roles have the same name.** Each is named **{shown}**, and the "
+                             "post mentioned every one of them.")
+            lines.append(f"**Fix:** Server Settings → Roles: rename or remove the extra roles, so that one role "
+                         f"alone is named **{shown}**.")
+        if deliverable == "no":
+            # A role is not mentionable and the bot lacks the permission there: by Discord's rule its
+            # members are not notified, whatever Discord's answer lists.
+            if several:
+                lines.append(f"**Cause: the bot may not mention every role.** Not every role named **{shown}** "
+                             f"is mentionable, and the bot lacks the permission {_PING_PERMISSION} in {where}, "
+                             "so Discord does not notify the members of those roles.")
+            else:
+                lines.append(f"**Cause: the bot may not mention the role.** The role **{shown}** is not "
+                             f"mentionable, and the bot lacks the permission {_PING_PERMISSION} in {where}, "
+                             "so Discord notifies none of its members.")
+            stays = "The roles stay" if several else "The role stays"
+            lines.append(f"**Fix:** {where} → Edit Channel → Permissions: add the bot and allow "
+                         f"{_PING_PERMISSION}. {stays} closed to members.")
+        elif delivered != "yes":
+            # The bot's check said yes (or could not tell), and Discord's answer does not list every role.
+            unsure = " (the bot could not read its own permissions there)" if deliverable == "unknown" else ""
+            if several:
+                lines.append(f"**Cause: Discord did not mention every role.** The post went out, but Discord's "
+                             f"answer does not list every role named **{shown}** among the roles it "
+                             f"mentioned{unsure}.")
+            else:
+                lines.append(f"**Cause: Discord did not mention the role.** The post went out, but Discord's "
+                             f"answer does not list **{shown}** among the roles it mentioned{unsure}.")
+            lines.append(f"**Fix:** {where} → Edit Channel → Permissions: add the bot and allow "
+                         f"{_PING_PERMISSION}.")
+    lines.append("At most one such warning per kind of ping a day; each post's state is in the bot log "
+                 "(its [PING] line).")
+    return "\n".join(lines)
+
+
+async def _ping_warn(kind, configured, roles, role_word, deliverable, delivered, channel, message) -> bool:
+    """R4: the admin warning, at most one per kind per PING_WARN_EVERY_S, in
+    the channel the bot already posts its admin alerts to (ADMIN_CHANNEL_ID,
+    #scr-admin). The bound is set only when Discord accepted the warning, so
+    a failed warning is tried again at the next ping that owes one.
+    True when a warning was sent."""
+    now = time.monotonic()
+    last = _ping_warned_at.get(kind)
+    if last is not None and now - last < PING_WARN_EVERY_S:
+        return False
+    if not ADMIN_CHANNEL_ID:
+        return False
+    admin = bot.get_channel(ADMIN_CHANNEL_ID) or await bot.fetch_channel(ADMIN_CHANNEL_ID)
+    if admin is None:
+        return False
+    text = _ping_warning_text(kind, configured, roles, role_word, deliverable, delivered, channel, message)
+    await admin.send(text, allowed_mentions=discord.AllowedMentions.none(), suppress_embeds=True)
+    _ping_warned_at[kind] = now
+    print(f"[PING-WARN] kind={kind} warning posted to the admin channel")
+    return True
+
+
+def _ping_warning_owed(role_word, deliverable, delivered) -> bool:
+    """R4, as the integrator ruled on 21 Nov 2026: a warning is owed when the
+    role was not found (absent, ambiguous), when several roles carry its exact
+    name (duplicate), when the check before the send says the ping cannot
+    notify (deliverable no: Discord's documented rule, whatever its answer
+    lists, since its documentation does not say that mention_roles leaves out
+    a role that notified nobody), or when Discord's answer does not list
+    every mentioned role (delivered not yes)."""
+    return role_word in ("absent", "ambiguous", "duplicate") or deliverable == "no" or delivered != "yes"
+
+
+async def _ping_after_send(kind, ping_id, configured, roles, role_word, deliverable, channel, message):
+    """After Discord accepted a role ping: R3's reading of its answer, the
+    post's one [PING] line, and the warning when one is owed. Never raises:
+    the post is already counted as posted, and nothing here may move its ack
+    (R6)."""
+    try:
+        listed, delivered = _ping_delivered(roles, message)
+        print(_ping_line(kind, ping_id, role_word, len(roles), deliverable, listed, delivered), flush=True)
+        if _ping_warning_owed(role_word, deliverable, delivered):
+            await _ping_warn(kind, configured, roles, role_word, deliverable, delivered, channel, message)
+    except Exception as ex:
+        print(f"[PING-CHECK] kind={kind} check after the post failed: {type(ex).__name__}")
+
+
+async def _ping_startup_lines():
+    """R5: once per process, after ready, the [PING] line of each kind with
+    id=startup: the role the next ping would name and whether Discord would
+    let it notify, shown before the first ping. Log only; no warning."""
+    global _ping_startup_done
+    if _ping_startup_done:
+        return
+    _ping_startup_done = True
+    for kind, channel_id, configured in (("lfp", QUEUE_BEACON_CHANNEL_ID, LFP_ROLE_NAME),
+                                         ("gambler", LIVE_BETS_CHANNEL_ID, GAMBLER_ROLE_NAME)):
+        try:
+            channel = None
+            if not channel_id:
+                print(f"[PING-CHECK] kind={kind} startup: no channel configured")
+            else:
+                channel = bot.get_channel(channel_id)
+                if channel is None:
+                    try:
+                        channel = await bot.fetch_channel(channel_id)
+                    except Exception as ex:
+                        print(f"[PING-CHECK] kind={kind} startup: channel {channel_id} "
+                              f"unavailable: {type(ex).__name__}")
+            guild = getattr(channel, "guild", None)
+            ping_roles, role_word = _ping_role_resolve(guild.roles if guild is not None else (), configured)
+            print(_ping_line(kind, _PING_STARTUP, role_word, len(ping_roles), _ping_deliverable(ping_roles, channel),
+                             0, "unsent"), flush=True)
+        except Exception as ex:
+            print(f"[PING-CHECK] kind={kind} startup check failed: {type(ex).__name__}")
+
+
 @tasks.loop(seconds=30)
 async def poll_lfp_pings():
     """Own fully-guarded loop (learning #129)."""
@@ -15633,8 +15940,12 @@ async def poll_lfp_pings():
                         # server's expires_at filter self-heals stale rows.
                         print(f"[LFP] channel {QUEUE_BEACON_CHANNEL_ID} unavailable: {ex}")
                         break
-            role = discord.utils.get(channel.guild.roles, name=LFP_ROLE_NAME) if channel.guild else None
-            mention = role.mention if role else f"@{LFP_ROLE_NAME}"
+            # LFP-PING-1: the one resolution both role pings use (R1: each role
+            # of the exact name, at most PING_ROLES_MAX), and whether Discord
+            # would let the ping notify, read before the send (R2).
+            ping_roles, role_word = _ping_role_resolve(channel.guild.roles if channel.guild else (), LFP_ROLE_NAME)
+            deliverable = _ping_deliverable(ping_roles, channel)
+            mention = " ".join(r.mention for r in ping_roles) if ping_roles else f"@{LFP_ROLE_NAME}"
             display_name = ping.get("display_name") or ping.get("steam_id") or "Player"
             message = (ping.get("message") or "").strip()
             expires_unix = int(ping.get("expires_unix") or 0)
@@ -15652,18 +15963,20 @@ async def poll_lfp_pings():
             if message:
                 content += f"\n> {_lfp_render_message(message, channel.guild)}"
             content += f"\nExpires <t:{expires_unix}:R>"
+            sent = None
             try:
                 # allowed_mentions is the real anti-injection gate: ONLY the
-                # LFP role pings; the requester's <@id> renders clickable
+                # LFP role pings (each role of its exact name, R1); the
+                # requester's <@id> renders clickable
                 # without pinging; injected mention text in the message is
                 # inert. suppress_embeds keeps any link-shaped text that
                 # survives the server-side sanitizer from unfurling a rich
                 # embed under the trusted bot account.
-                await channel.send(
+                sent = await channel.send(
                     content[:2000],
                     suppress_embeds=True,
                     allowed_mentions=discord.AllowedMentions(
-                        everyone=False, roles=[role] if role else False, users=False),
+                        everyone=False, roles=list(ping_roles) if ping_roles else False, users=False),
                 )
                 _lfp_seen_ids.add(ping_id)
                 posted.append(ping_id)
@@ -15675,6 +15988,11 @@ async def poll_lfp_pings():
             except Exception as ex:
                 # Transient (rate limit / gateway blip) — no ack, retried.
                 print(f"[LFP] post failed for ping {ping_id}: {ex}")
+            if sent is not None:
+                # R3 and R4 (LFP-PING-1), after the post is counted as posted:
+                # what Discord's answer says; nothing here moves the ack (R6).
+                await _ping_after_send("lfp", ping_id, LFP_ROLE_NAME, ping_roles, role_word, deliverable,
+                                       channel, sent)
             await asyncio.sleep(0.2)
         if len(_lfp_seen_ids) > 2000:
             # Overflow prune must RETAIN this tick's ids: an unconditional
@@ -17814,7 +18132,10 @@ async def poll_gambler_pings():
         if channel is None:
             continue
         guild = getattr(channel, "guild", None)
-        role = discord.utils.get(guild.roles, name=GAMBLER_ROLE_NAME) if guild else None
+        # LFP-PING-1: the same resolution (R1) and before-send check (R2) as
+        # the LFP ping.
+        ping_roles, role_word = _ping_role_resolve(guild.roles if guild else (), GAMBLER_ROLE_NAME)
+        deliverable = _ping_deliverable(ping_roles, channel)
         # Escape player-authored names (#261 / Codex tournament-batch r1
         # find 6: a player literally named "<@&ROLE_ID>" in a message sent
         # with roles=True pings that arbitrary role).
@@ -17822,7 +18143,7 @@ async def poll_gambler_pings():
                       or s.get("p1_display_name"), "Player 1")
         p2 = _md_name(s.get("p2_name") or s.get("player2_name")
                       or s.get("p2_display_name"), "Player 2")
-        mention = role.mention if role else f"@{GAMBLER_ROLE_NAME}"
+        mention = " ".join(r.mention for r in ping_roles) if ping_roles else f"@{GAMBLER_ROLE_NAME}"
         # Tournament differentiation (Sid, Aug 14): the ping itself says it's
         # a bracket fixture. Contract naming first, feed's own as fallback.
         _t_flag = bool(s.get("tournament", s.get("is_tournament", False)))
@@ -17832,17 +18153,23 @@ async def poll_gambler_pings():
             body = f"{mention} 🎲 Bets are open — {_tag}: **{p1}** vs **{p2}**! Place yours below."
         else:
             body = f"{mention} 🎲 Bets are open — **{p1}** vs **{p2}**! Place yours below."
+        sent = None
         try:
-            # ONLY the resolved Gambler role may ping — never everyone/users,
-            # and never a role smuggled in via a display name (r1 find 6).
-            await channel.send(
+            # ONLY the resolved Gambler role (each role of its exact name, R1)
+            # may ping — never everyone/users, and never a role smuggled in
+            # via a display name (r1 find 6).
+            sent = await channel.send(
                 body,
                 allowed_mentions=discord.AllowedMentions(
                     everyone=False, users=False,
-                    roles=[role] if role else False),
+                    roles=list(ping_roles) if ping_roles else False),
             )
         except Exception as e:
             print(f"[GAMBLER] ping failed for {sid}: {e}")
+        if sent is not None:
+            # R3 and R4 (LFP-PING-1): what Discord's answer says, after the send.
+            await _ping_after_send("gambler", sid, GAMBLER_ROLE_NAME, ping_roles, role_word, deliverable,
+                                   channel, sent)
     # Drop ids once the series is GONE, not merely because betting is locked.
     # Bets lock for the duration of each game and re-open between games, so
     # pruning against open_now made the bot forget a live series at every game

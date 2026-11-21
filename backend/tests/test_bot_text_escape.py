@@ -2112,7 +2112,9 @@ KEY_CLASSES = {
 KEYS = {k: c for c, ks in KEY_CLASSES.items() for k in ks.split()}
 
 # Discord's own names and the bot's stored copies (sources 2 and 3), by the
-# attribute read: ".attr".
+# attribute read: ".attr". .jump_url (LFP-PING-1, the role ping warning's
+# link) is a message's address, which discord.py composes from the guild, the
+# channel and the message ids alone.
 ATTR_CLASSES = {
     "name": """
         .display_name .global_name .labels .name .name_a .name_b .names .p1_name
@@ -2120,7 +2122,7 @@ ATTR_CLASSES = {
     "free": """
         .content""",
     "system": """
-        .amount .cards_val .emojis .entries .hidden_inactive .id .lobby_id .mention
+        .amount .cards_val .emojis .entries .hidden_inactive .id .jump_url .lobby_id .mention
         .mode .page .pages .rec_val .series_id .shape .status .text .total_pages .total_players
         .tournament_tag .utc .values""",
 }
@@ -2390,6 +2392,13 @@ CENSUS_MUTANTS = [
      '                                MAIL_SUBJECT_SHOWN_MAX)',
      'subj = (t.get("subject") or "(no subject)").strip()',
      "'subject' reaches a md slot raw at _ask_which_mail"),
+    # LFP-PING-1: the role ping warning (an admin alert) shows the role's
+    # Discord name through the name helper once.
+    ("role ping warning role name, none", "shown = _escape_md(role.name, 100)", "shown = role.name",
+     "'.name' reaches a md slot raw at _ping_warning_text"),
+    ("role ping warning role name, twice", "shown = _escape_md(role.name, 100)",
+     "shown = _escape_md(_escape_md(role.name, 100), 100)",
+     "'.name' reaches a md slot through name + name at _ping_warning_text"),
 ]
 
 
