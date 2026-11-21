@@ -3552,7 +3552,7 @@ def test_r11_rules_bound_sites_are_observed(monkeypatch):
     import test_ffa_readmit_pg as R
 
     def row_refused(mp):
-        # S-prefix site main:67748: a live hold whose readmission row is
+        # S-prefix site main:67837: a live hold whose readmission row is
         # already refused (its row through PostgreSQL, the claim through
         # the route)
         async def body(env):
@@ -3566,7 +3566,7 @@ def test_r11_rules_bound_sites_are_observed(monkeypatch):
         R.run_env(mp, body)
 
     def queue_elsewhere(mp):
-        # main:67764: the caller's own queue row ready to join another
+        # main:67853: the caller's own queue row ready to join another
         # lobby, its lease this lobby's
         async def body(env):
             lob = await R._held(env)
