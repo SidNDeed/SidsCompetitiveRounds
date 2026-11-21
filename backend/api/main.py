@@ -16870,6 +16870,17 @@ async def toggle_ranked(steam_id: str, request: Request, enabled: bool = Query(.
     sync and the first server contact a fresh install makes, so carrying the
     name here is what stops a new player being registered under their raw
     Steam ID."""
+    # MDPL-GATE-REREAD-1 (b): P's identity key, SHARED, the request's first
+    # statement: before the session check (whose arming backfill can write
+    # P's players row) and before the player read. delete_player_data takes
+    # this key EXCLUSIVE before it reads or writes anything of P's and holds
+    # it to its commit; this request holds no row lock and no other key when
+    # it asks. So a deletion either commits before the read below or waits
+    # for this request's commit. A committed deletion has rewritten P's
+    # steam_id, so the read finds no row; the read by id after it refuses the
+    # row a read by steam_id can still find with deleted_at set (a purged
+    # id's [Deleted User] row).
+    await db.execute(text("SELECT pg_advisory_xact_lock_shared(hashtext(CAST(:sid AS text)))"), {"sid": steam_id})
     await _check_steam_session(request, steam_id, db)
     if not _verify_action_sig(f"toggle-ranked:{steam_id}:{str(enabled).lower()}", sig):
         raise HTTPException(status_code=403, detail="Invalid signature")
@@ -16887,8 +16898,18 @@ async def toggle_ranked(steam_id: str, request: Request, enabled: bool = Query(.
         # name here, which is how first-launch players ended up displayed as
         # raw ids; newer ones carry it. get_or_create_player cleans it either
         # way and falls back to the steam_id only when there is nothing real.
+        # MDPL-GATE-REREAD-1 (b): it still creates the player of a Steam id
+        # never seen before (a fresh install's first contact), under the key
+        # taken above. For a purged id get_or_create_player stores a
+        # [Deleted User] row with deleted_at set; the read by id refuses it
+        # 404 and the request stores nothing. The new row's GlickoRating is
+        # pending at that read and stays pending (a text() read sends no
+        # flush): it is flushed where it was before, at _mark_mod_seen's
+        # first savepoint or at the commit.
         player = await get_or_create_player(db, steam_id, display_name)
+        await _reread_player_or_404(db, player.id)
     else:
+        await _reread_player_or_404(db, player.id)
         # Heal a row that was created nameless by an older client, and follow a
         # Steam rename. Never clears an existing name (#_clean_display_name).
         _clean = _clean_display_name(display_name, steam_id)
@@ -23294,10 +23315,18 @@ async def generate_link_code(
         print(f"[LINK] link-code refused (no valid session) steam_id={steam_id}")
         raise HTTPException(status_code=401, detail="session_required")
 
+    # MDPL-GATE-REREAD-1 (b): P's identity key, SHARED, after the session
+    # check (one read of steam_sessions: no lock, and it stays ahead of the
+    # player lookup for the reason above) and before the read; the read by
+    # id follows the read. The request holds no row lock and no other key
+    # when it asks for the key, which delete_player_data takes EXCLUSIVE
+    # before it deletes P's link codes and tombstones P's row.
+    await db.execute(text("SELECT pg_advisory_xact_lock_shared(hashtext(CAST(:sid AS text)))"), {"sid": steam_id})
     result = await db.execute(select(Player).where(Player.steam_id == steam_id))
     player = result.scalar_one_or_none()
     if not player:
         raise HTTPException(status_code=404, detail="Player not found")
+    await _reread_player_or_404(db, player.id)
 
     # Delete any existing codes for this player
     await db.execute(text("DELETE FROM link_codes WHERE player_id = :pid"), {"pid": player.id})
@@ -48804,6 +48833,10 @@ async def _achievement_global_pcts(db: AsyncSession) -> dict[str, float]:
 @app.post("/api/v1/achievements/unlock", tags=["Achievements"])
 async def unlock_achievement(req: AchievementUnlockRequest, request: Request, db: AsyncSession = Depends(get_db)):
     """Unlock an achievement for a player. Idempotent — re-unlocking is a no-op."""
+    # MDPL-GATE-REREAD-1 (b): P's identity key, SHARED, first, as in
+    # toggle_ranked: before the session check and the player read, with no
+    # row lock and no other key held; the read by id follows the read.
+    await db.execute(text("SELECT pg_advisory_xact_lock_shared(hashtext(CAST(:sid AS text)))"), {"sid": req.steam_id})
     await _check_steam_session(request, req.steam_id, db)
     if req.achievement_key not in ACHIEVEMENT_DEFS:
         raise HTTPException(status_code=400, detail=f"Unknown achievement: {req.achievement_key}")
@@ -48820,6 +48853,7 @@ async def unlock_achievement(req: AchievementUnlockRequest, request: Request, db
     player = player.scalar_one_or_none()
     if not player:
         raise HTTPException(status_code=404, detail="Player not found")
+    await _reread_player_or_404(db, player.id)
     await _mark_mod_seen(db, player, stamp_version=True)
 
     # Check if already unlocked
@@ -50914,7 +50948,17 @@ async def _reread_player_or_404(db: AsyncSession, player_id) -> None:
     session stays pending, to be flushed where it was before (lesson 1294).
     At each of its callers nothing is pending here:
     test_mdpl_gate_reread_pg.py records the session's new, dirty and deleted
-    sets at every call."""
+    sets at every call.
+
+    (b): toggle_ranked, unlock_achievement, admin_grant_achievement and
+    generate_link_code take the player's identity key SHARED before their
+    read by steam_id and call this directly after that read. A deletion that
+    committed first leaves no row under the raw id; this refuses the row a
+    read by steam_id can still find with deleted_at set (a purged id's
+    [Deleted User] row). Nothing is pending at those calls but one: after
+    toggle_ranked's get_or_create_player created a row, that row's
+    GlickoRating is pending and stays pending (test_mdpl_gate_reread_b_pg.py
+    records both)."""
     found = (await db.execute(text(_PLAYER_REREAD_SQL),
                               {"pid": str(player_id)})).mappings().first()
     if found is None or found["deleted_at"] is not None:
@@ -52031,9 +52075,16 @@ async def admin_grant_achievement(req: _AdminGrantAchReq, db: AsyncSession = Dep
     await _require_admin(db, req.admin_steam_id, "grant_achievement", req.target_steam_id, req.hmac_signature)
     if req.achievement_key not in ACHIEVEMENT_DEFS:
         raise HTTPException(400, f"Unknown achievement: {req.achievement_key}")
+    # MDPL-GATE-REREAD-1 (b): the target's identity key, SHARED, after the
+    # admin check (reads of the roster and of the admin's ban: no lock) and
+    # before the target read, with no row lock and no other key held; the
+    # read by id follows the read. The admin's own key is not taken.
+    await db.execute(text("SELECT pg_advisory_xact_lock_shared(hashtext(CAST(:sid AS text)))"),
+                     {"sid": req.target_steam_id})
     target = (await db.execute(select(Player).where(Player.steam_id == req.target_steam_id))).scalar_one_or_none()
     if target is None:
         raise HTTPException(404, "Target player not found")
+    await _reread_player_or_404(db, target.id)
     await _assert_no_service_subject(db, affected_player_ids=[target.id])
     existing = (await db.execute(
         select(PlayerAchievement).where(
