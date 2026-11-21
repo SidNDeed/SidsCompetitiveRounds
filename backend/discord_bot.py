@@ -15618,8 +15618,13 @@ async def _ack_lfp_pings(ping_ids, undeliverable=False):
 # when it holds every one. delivered=unsent, with listed=0, is the startup
 # line's alone: nothing was sent. A failure of the check itself prints a line
 # whose first word is [PING-CHECK], never a [PING] line outside the grammar.
+# The warning runs as its own task, so no admin I/O delays an ack or the next
+# post, and the first ping of each kind waits for its startup line, at most
+# PING_STARTUP_WAIT_S (the first review round, 21 Nov 2026).
 PING_WARN_EVERY_S = 24 * 60 * 60
 PING_ROLES_MAX = 5              # the most roles one ping mentions when several carry the exact name
+PING_STARTUP_WAIT_S = 10        # the most the first ping of a kind waits for its startup line, once per process
+PING_STARTUP_STEP_S = 0.5       # how often that wait looks
 _PING_STARTUP = object()        # the id of the startup line, never an api value
 _PING_ID_RE = re.compile(r"[0-9a-f-]{1,64}")
 _PING_WORDS = {
@@ -15638,16 +15643,30 @@ _PING_KIND_SHOWN = {
 # Discord's own words for the permission (MENTION_EVERYONE in the api); a
 # zero-width space after each at sign, so the warning can never mention.
 _PING_PERMISSION = "Mention @\N{ZERO WIDTH SPACE}everyone, @\N{ZERO WIDTH SPACE}here, and All Roles"
-_ping_warned_at: dict = {}      # kind -> time.monotonic() of the last warning Discord accepted
+_ping_warned_at: dict = {}      # kind -> time.monotonic() read when Discord accepted the last warning
+_ping_warn_tasks: dict = {}     # kind -> the warning task in flight: its strong reference until it ends
 _ping_startup_done = False
+_ping_startup_settled: set = set()   # the kinds whose startup line, or its [PING-CHECK] line, has printed
+_ping_startup_waited: set = set()    # the kinds whose first ping has waited for it (once per process)
+
+
+def _ping_log(line) -> None:
+    """Prints one line of the ping check, contained: a print that fails
+    (stdout closed or full) ends here, so no logging failure reaches either
+    poller, the LFP ack or the next Gambler post."""
+    try:
+        print(line, flush=True)
+    except Exception:
+        pass
 
 
 def _ping_role_norm(text) -> str:
     """A role name's normalised form (R1): casefolded, then only its letters
-    (str.isalpha: the Unicode letters) and digits (str.isdecimal: the Unicode
-    decimal digits) kept."""
+    (str.isalpha: the Unicode letters) and digits (str.isdigit: every Unicode
+    digit, the superscript two U+00B2 among them, so a name that ends in it
+    never reads as the name without it) kept."""
     folded = str(text or "").casefold()
-    return "".join(ch for ch in folded if ch.isalpha() or ch.isdecimal())
+    return "".join(ch for ch in folded if ch.isalpha() or ch.isdigit())
 
 
 def _ping_role_matches(roles, configured):
@@ -15656,6 +15675,9 @@ def _ping_role_matches(roles, configured):
     named = [r for r in (roles or ()) if isinstance(getattr(r, "name", None), str)]
     exact = [r for r in named if r.name == configured]
     want = _ping_role_norm(configured)
+    # An empty normalised form (a name of marks alone, such as "!!!") names
+    # nothing, so it matches nothing: a match on nothing would be a guess
+    # (R1). The exact name above still finds a role so named.
     loose = [r for r in named if want and _ping_role_norm(r.name) == want]
     return exact, loose
 
@@ -15688,9 +15710,13 @@ def _ping_deliverable(roles, channel) -> str:
     """R2, read before the send: "yes" when every role to mention is
     mentionable, or when the bot's own member holds Mention Everyone in
     `channel` by channel.permissions_for (which applies the channel's
-    overwrites). "unknown" when there is no channel or no member object to
-    ask: never a yes. Otherwise "no". With no role to mention it reports the
-    permission alone."""
+    overwrites). A mentionable role notifies whatever the bot's member is,
+    so the first arm needs no member object and answers yes without one;
+    "unknown" (never a yes) belongs to the permission arm alone: no channel
+    or no member object to ask. Otherwise "no". With no role to mention it
+    reports the permission alone."""
+    # R2's first arm reads no member object: a mentionable role notifies
+    # whatever the bot's member is.
     if roles and all(getattr(r, "mentionable", None) is True for r in roles):
         return "yes"
     guild = getattr(channel, "guild", None) if channel is not None else None
@@ -15827,23 +15853,55 @@ def _ping_warning_text(kind, configured, roles, role_word, deliverable, delivere
 async def _ping_warn(kind, configured, roles, role_word, deliverable, delivered, channel, message) -> bool:
     """R4: the admin warning, at most one per kind per PING_WARN_EVERY_S, in
     the channel the bot already posts its admin alerts to (ADMIN_CHANNEL_ID,
-    #scr-admin). The bound is set only when Discord accepted the warning, so
+    #scr-admin). It runs as its own task (_ping_warn_start), never inside a
+    poller, and contains every exception it meets. The bound is set only when
+    Discord accepted the warning, to the time read after that acceptance, so
     a failed warning is tried again at the next ping that owes one.
     True when a warning was sent."""
-    now = time.monotonic()
-    last = _ping_warned_at.get(kind)
-    if last is not None and now - last < PING_WARN_EVERY_S:
+    try:
+        now = time.monotonic()
+        last = _ping_warned_at.get(kind)
+        if last is not None and now - last < PING_WARN_EVERY_S:
+            return False
+        if not ADMIN_CHANNEL_ID:
+            return False
+        admin = bot.get_channel(ADMIN_CHANNEL_ID) or await bot.fetch_channel(ADMIN_CHANNEL_ID)
+        if admin is None:
+            return False
+        text = _ping_warning_text(kind, configured, roles, role_word, deliverable, delivered, channel, message)
+        await admin.send(text, allowed_mentions=discord.AllowedMentions.none(), suppress_embeds=True)
+        # The bound's time is read here, after Discord accepted the warning.
+        _ping_warned_at[kind] = time.monotonic()
+        _ping_log(f"[PING-WARN] kind={kind} warning posted to the admin channel")
+        return True
+    except Exception as ex:
+        _ping_log(f"[PING-CHECK] kind={kind} warning failed: {type(ex).__name__}")
         return False
-    if not ADMIN_CHANNEL_ID:
+
+
+def _ping_warn_start(kind, configured, roles, role_word, deliverable, delivered, channel, message) -> bool:
+    """R4 and R6: the warning as its own task, so no admin I/O stands
+    between a post and its ack, nor before the next post at either site. At
+    most one warning per kind is in flight: one owed while another runs is
+    skipped, not queued; the running one sets the bound when Discord accepts
+    it, and a failed one leaves it unset, so the next ping that owes one
+    tries again. The task is held in _ping_warn_tasks, a strong reference,
+    until it ends. True when a task was started."""
+    running = _ping_warn_tasks.get(kind)
+    if running is not None and not running.done():
         return False
-    admin = bot.get_channel(ADMIN_CHANNEL_ID) or await bot.fetch_channel(ADMIN_CHANNEL_ID)
-    if admin is None:
-        return False
-    text = _ping_warning_text(kind, configured, roles, role_word, deliverable, delivered, channel, message)
-    await admin.send(text, allowed_mentions=discord.AllowedMentions.none(), suppress_embeds=True)
-    _ping_warned_at[kind] = now
-    print(f"[PING-WARN] kind={kind} warning posted to the admin channel")
+    task = asyncio.create_task(
+        _ping_warn(kind, configured, roles, role_word, deliverable, delivered, channel, message))
+    _ping_warn_tasks[kind] = task
+    task.add_done_callback(_ping_warn_done)
     return True
+
+
+def _ping_warn_done(task) -> None:
+    """A warning task's end: its strong reference is let go."""
+    for kind, held in list(_ping_warn_tasks.items()):
+        if held is task:
+            del _ping_warn_tasks[kind]
 
 
 def _ping_warning_owed(role_word, deliverable, delivered) -> bool:
@@ -15859,22 +15917,28 @@ def _ping_warning_owed(role_word, deliverable, delivered) -> bool:
 
 async def _ping_after_send(kind, ping_id, configured, roles, role_word, deliverable, channel, message):
     """After Discord accepted a role ping: R3's reading of its answer, the
-    post's one [PING] line, and the warning when one is owed. Never raises:
-    the post is already counted as posted, and nothing here may move its ack
-    (R6)."""
+    post's one [PING] line, and, when a warning is owed, its task started.
+    It awaits nothing, so no admin I/O stands between the post and its ack or
+    before the next post; it stays a coroutine so that both sites call it as
+    before. Never raises: the post is already counted as posted, and nothing
+    here may move its ack (R6); every line it prints is contained."""
     try:
         listed, delivered = _ping_delivered(roles, message)
-        print(_ping_line(kind, ping_id, role_word, len(roles), deliverable, listed, delivered), flush=True)
+        _ping_log(_ping_line(kind, ping_id, role_word, len(roles), deliverable, listed, delivered))
         if _ping_warning_owed(role_word, deliverable, delivered):
-            await _ping_warn(kind, configured, roles, role_word, deliverable, delivered, channel, message)
+            _ping_warn_start(kind, configured, roles, role_word, deliverable, delivered, channel, message)
     except Exception as ex:
-        print(f"[PING-CHECK] kind={kind} check after the post failed: {type(ex).__name__}")
+        _ping_log(f"[PING-CHECK] kind={kind} check after the post failed: {type(ex).__name__}")
 
 
 async def _ping_startup_lines():
     """R5: once per process, after ready, the [PING] line of each kind with
     id=startup: the role the next ping would name and whether Discord would
-    let it notify, shown before the first ping. Log only; no warning."""
+    let it notify. Log only; no warning. A kind is settled once its line, or
+    its [PING-CHECK] line, has printed: the first ping of that kind waits for
+    that (_ping_startup_wait). on_ready runs again on a new READY (a
+    reconnect that opens a new session), not on RESUMED; the guard keeps
+    this to one run per process."""
     global _ping_startup_done
     if _ping_startup_done:
         return
@@ -15884,21 +15948,44 @@ async def _ping_startup_lines():
         try:
             channel = None
             if not channel_id:
-                print(f"[PING-CHECK] kind={kind} startup: no channel configured")
+                _ping_log(f"[PING-CHECK] kind={kind} startup: no channel configured")
             else:
                 channel = bot.get_channel(channel_id)
                 if channel is None:
                     try:
                         channel = await bot.fetch_channel(channel_id)
                     except Exception as ex:
-                        print(f"[PING-CHECK] kind={kind} startup: channel {channel_id} "
-                              f"unavailable: {type(ex).__name__}")
+                        _ping_log(f"[PING-CHECK] kind={kind} startup: channel {channel_id} "
+                                  f"unavailable: {type(ex).__name__}")
             guild = getattr(channel, "guild", None)
             ping_roles, role_word = _ping_role_resolve(guild.roles if guild is not None else (), configured)
-            print(_ping_line(kind, _PING_STARTUP, role_word, len(ping_roles), _ping_deliverable(ping_roles, channel),
-                             0, "unsent"), flush=True)
+            _ping_log(_ping_line(kind, _PING_STARTUP, role_word, len(ping_roles),
+                                 _ping_deliverable(ping_roles, channel), 0, "unsent"))
         except Exception as ex:
-            print(f"[PING-CHECK] kind={kind} startup check failed: {type(ex).__name__}")
+            _ping_log(f"[PING-CHECK] kind={kind} startup check failed: {type(ex).__name__}")
+        finally:
+            _ping_startup_settled.add(kind)
+
+
+async def _ping_startup_wait(kind) -> None:
+    """R5: the first ping of a kind in this process posts only after that
+    kind's startup line, or its [PING-CHECK] line, has printed, waiting at
+    most PING_STARTUP_WAIT_S by the bot's monotonic clock. When the bound
+    passes first, it prints "[PING-CHECK] kind=<kind> startup line not
+    printed within 10 s: the ping posts without it" and the ping posts all
+    the same: a ping is never held longer than the bound, and never dropped.
+    Once per kind per process: no later ping of that kind waits."""
+    if kind in _ping_startup_waited:
+        return
+    _ping_startup_waited.add(kind)
+    deadline = time.monotonic() + PING_STARTUP_WAIT_S
+    while kind not in _ping_startup_settled:
+        left = deadline - time.monotonic()
+        if left <= 0:
+            _ping_log(f"[PING-CHECK] kind={kind} startup line not printed within {PING_STARTUP_WAIT_S} s: "
+                      "the ping posts without it")
+            return
+        await asyncio.sleep(min(PING_STARTUP_STEP_S, left))
 
 
 @tasks.loop(seconds=30)
@@ -15940,6 +16027,9 @@ async def poll_lfp_pings():
                         # server's expires_at filter self-heals stale rows.
                         print(f"[LFP] channel {QUEUE_BEACON_CHANNEL_ID} unavailable: {ex}")
                         break
+            # LFP-PING-1 R5: the process's first LFP ping waits for the lfp
+            # startup line, at most PING_STARTUP_WAIT_S, then posts all the same.
+            await _ping_startup_wait("lfp")
             # LFP-PING-1: the one resolution both role pings use (R1: each role
             # of the exact name, at most PING_ROLES_MAX), and whether Discord
             # would let the ping notify, read before the send (R2).
@@ -18131,6 +18221,9 @@ async def poll_gambler_pings():
         _gambler_pinged.add(sid)
         if channel is None:
             continue
+        # LFP-PING-1 R5: the process's first Gambler ping waits for the gambler
+        # startup line, at most PING_STARTUP_WAIT_S, then posts all the same.
+        await _ping_startup_wait("gambler")
         guild = getattr(channel, "guild", None)
         # LFP-PING-1: the same resolution (R1) and before-send check (R2) as
         # the LFP ping.

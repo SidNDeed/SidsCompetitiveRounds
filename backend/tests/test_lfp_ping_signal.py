@@ -18,17 +18,24 @@ the Gambler ping, poll_gambler_pings) now:
      lists (listed) and whether it lists every one (delivered), from that
      answer and never from the bot's own text;
   R4 print one [PING] line per post in a closed grammar, and post one admin
-     warning per kind per 24 hours when one is owed: the role absent,
-     ambiguous or duplicate, deliverable no, or delivered not yes;
-  R5 print the same line per kind with id=startup once after ready;
-  R6 change nothing else: the content, the allowed mentions and the ack;
+     warning per kind per 24 hours (counted from the time Discord accepted
+     the last one) when one is owed: the role absent, ambiguous or
+     duplicate, deliverable no, or delivered not yes;
+  R5 print the same line per kind with id=startup once after ready, and
+     hold the first ping of a kind until its line has printed, at most
+     PING_STARTUP_WAIT_S, never dropping it;
+  R6 change nothing else: the content, the allowed mentions and the ack,
+     which no warning I/O (the warning is its own task) and no failing
+     print delays or stops;
   R7 ping no other role.
 
 discord_bot.py builds the bot at import, so, as in test_bot_text_escape.py,
 what runs here is lifted out of its AST and run against fakes: no network,
 no database. Each requirement is one check function. MUTANTS holds at least
-one source edit per requirement that must turn its check red, and the
-control (a comment-only edit) leaves every check green. An edit is made in
+one source edit per requirement that must turn its check red (FAILS_AT
+names, for the mutants of the first review round, the assertion each must
+fail first), and the control (a comment-only edit) leaves every check
+green. An edit is made in
 the source of the one top-level statement it falls in, which is parsed again
 and stands in place of the shipped statement (mutate, below).
 """
@@ -47,12 +54,13 @@ TEXT = open(SRC, encoding="utf-8").read()
 BASE_TREE = ast.parse(TEXT)
 
 HELPER_PARTS = ("_TEXT_BREAKS", "_TEXT_URL", "_TEXT_LINE_MARK", "_TEXT_ALWAYS")
-FUNCS = ("_ping_role_norm", "_ping_role_matches", "_ping_role_resolve", "_ping_deliverable",
-         "_ping_delivered", "_ping_line", "_ping_warning_text", "_ping_warn", "_ping_warning_owed",
-         "_ping_after_send", "_ping_startup_lines", "poll_lfp_pings", "poll_gambler_pings",
-         "_escape_md", "_escape_text", "_md_name", "_lfp_render_message")
-ASSIGNS = ("PING_WARN_EVERY_S", "PING_ROLES_MAX", "_PING_STARTUP", "_PING_ID_RE", "_PING_WORDS", "_PING_MENTIONS",
-           "_PING_KIND_SHOWN", "_PING_PERMISSION", "_ping_warned_at", "_ping_startup_done",
+FUNCS = ("_ping_log", "_ping_role_norm", "_ping_role_matches", "_ping_role_resolve", "_ping_deliverable",
+         "_ping_delivered", "_ping_line", "_ping_warning_text", "_ping_warn", "_ping_warn_start", "_ping_warn_done",
+         "_ping_warning_owed", "_ping_after_send", "_ping_startup_lines", "_ping_startup_wait", "poll_lfp_pings",
+         "poll_gambler_pings", "_escape_md", "_escape_text", "_md_name", "_lfp_render_message")
+ASSIGNS = ("PING_WARN_EVERY_S", "PING_ROLES_MAX", "PING_STARTUP_WAIT_S", "PING_STARTUP_STEP_S", "_PING_STARTUP",
+           "_PING_ID_RE", "_PING_WORDS", "_PING_MENTIONS", "_PING_KIND_SHOWN", "_PING_PERMISSION", "_ping_warned_at",
+           "_ping_warn_tasks", "_ping_startup_done", "_ping_startup_settled", "_ping_startup_waited",
            "_LFP_EMOJI_TOKEN") + HELPER_PARTS
 
 # The [PING] line, whole. id=startup goes with delivered=unsent and listed=0;
@@ -232,39 +240,82 @@ def discord_lists_written(channel, content, kw):
     return [r for r in channel.guild.roles if r.mention in (content or "") and r in allowed]
 
 
+class Unreadable:
+    """An answer whose role mentions cannot be read: the check after the post
+    fails, so the check's own fallback line runs."""
+
+    def __init__(self, channel, content, mid):
+        self.id, self.channel, self.content = mid, channel, content
+        self.jump_url = "https://discord.com/channels/%d/%d/%d" % (channel.guild.id, channel.id, mid)
+
+    @property
+    def role_mentions(self):
+        raise RuntimeError("the answer cannot be read")
+
+
+def discord_unreadable(channel, content, kw):
+    """No list: Channel.send answers with an Unreadable message."""
+    return None
+
+
 class Channel:
     """A text channel. `answer` gives the roles Discord's answer lists (its
     rule by default). With `flip` the bot's permission here changes right
-    after each post, so a check read after the send reads another answer."""
+    after each post, so a check read after the send reads another answer. A
+    send first lets the loop run its other tasks once (the request), then is
+    accepted and noted in `events`."""
 
-    def __init__(self, cid, guild, mention_everyone=False, answer=discord_rule, flip=False):
+    def __init__(self, cid, guild, mention_everyone=False, answer=discord_rule, flip=False, events=None):
         self.id, self.guild = cid, guild
         self.mention = "<#%d>" % cid
         self.mention_everyone = mention_everyone
         self.answer, self.flip = answer, flip
         self.sent, self.asked = [], []
+        self.events = [] if events is None else events
 
     def permissions_for(self, member):
         self.asked.append(member)
         return Perms(self.mention_everyone)
 
     async def send(self, content=None, **kw):
+        await asyncio.sleep(0)
         self.sent.append((content, kw))
-        msg = Message(self, content, self.answer(self, content, kw), 5000 + len(self.sent))
+        self.events.append("post %d" % self.id)
+        listed, mid = self.answer(self, content, kw), 5000 + len(self.sent)
+        msg = Unreadable(self, content, mid) if listed is None else Message(self, content, listed, mid)
         if self.flip:
             self.mention_everyone = not self.mention_everyone
         return msg
 
 
 class AdminChannel:
-    def __init__(self, fails=0):
-        self.sent, self.fails = [], fails
+    """The admin channel. Its first `fails` sends are refused; each send moves
+    the bot's clock by `delay` seconds before Discord accepts it."""
+
+    def __init__(self, fails=0, events=None, clock=None, delay=0.0):
+        self.sent, self.fails, self.clock, self.delay = [], fails, clock, delay
+        self.events = [] if events is None else events
 
     async def send(self, content=None, **kw):
         if self.fails:
             self.fails -= 1
             raise RuntimeError("the admin channel refused the post")
+        if self.clock is not None:
+            self.clock[0] += self.delay
         self.sent.append((content, kw))
+
+
+class BlockingAdmin(AdminChannel):
+    """An admin channel whose send waits until `release`, an asyncio.Event the
+    test makes inside its running loop, is set (M1)."""
+
+    release = None
+
+    async def send(self, content=None, **kw):
+        self.events.append("admin-start")
+        await self.release.wait()
+        self.events.append("admin-done")
+        await AdminChannel.send(self, content, **kw)
 
 
 class NotFound(Exception):
@@ -297,20 +348,25 @@ DISCORD = types.SimpleNamespace(AllowedMentions=AllowedMentions, Forbidden=Forbi
 
 
 class Bot:
-    def __init__(self, channels):
-        self.channels = dict(channels)
+    """The client as the two loops read it. A channel id in `slow` is not in
+    the cache, and its FIRST fetch (the startup line's, M2) waits until
+    `release`, an asyncio.Event made inside the running loop, is set; every
+    later fetch answers at once."""
+
+    def __init__(self, channels, slow=()):
+        self.channels, self.slow, self.release, self.fetched = dict(channels), set(slow), None, []
 
     def get_channel(self, cid):
-        return self.channels.get(cid)
+        return None if cid in self.slow else self.channels.get(cid)
 
     async def fetch_channel(self, cid):
+        first = cid in self.slow and cid not in self.fetched
+        self.fetched.append(cid)
+        if first:
+            await self.release.wait()
         if cid in self.channels:
             return self.channels[cid]
         raise NotFound("unknown channel")
-
-
-async def _sleep(*a, **k):
-    return None
 
 
 QUEUE, BETS, ADMIN = 10, 20, 77
@@ -320,6 +376,7 @@ PING = {"ping_id": 41, "discord_id": "123456789012345678", "display_name": "Type
         "message": "typed words", "expires_unix": 1763700000, "modes": "1v1", "expires_minutes": 60}
 SID = "3f2a9c1e-0000-4000-8000-00000000abcd"
 SERIES = {"series_id": SID, "p1_name": "Pat*One", "p2_name": "Quinn_Two", "bets_locked": False}
+SERIES_2 = dict(SERIES, series_id="3f2a9c1e-0000-4000-8000-00000000abce")
 SITES = ("lfp", "gambler")
 # main's text for the two posts (the role at id 1 and id 12, the fakes above)
 EXPECTED_LFP = ("<@&1> \N{LEFT-POINTING MAGNIFYING GLASS} **Typed\\*Name** (<@123456789012345678>) "
@@ -333,17 +390,25 @@ def open_roles():
 
 class World:
     """One server: a guild with `roles`, the queue channel, the bets channel
-    and the admin channel, and the lifted bot code over them."""
+    and the admin channel, and the lifted bot code over them. The bot's clock
+    moves in its asyncio.sleep, by the seconds asked, and in an admin send
+    (`admin_delay`); each printed line keeps the clock's reading (`stamps`).
+    `events` is the order in which posts were accepted, the LFP ack ran and a
+    blocking admin send began and ended. By default both startup lines have
+    printed, as after ready; `startup_printed=False` starts before them. A
+    print of a line that begins with `print_fails` raises."""
 
     def __init__(self, tree=BASE_TREE, roles=(), me=True, mention_everyone=False, answer=discord_rule, flip=False,
-                 admin_fails=0, queue_id=QUEUE, lfp_name=LFP_NAME, gambler_name=GAMBLER_NAME):
-        self.guild = Guild(roles, Member(not mention_everyone) if me else None)
-        self.queue = Channel(QUEUE, self.guild, mention_everyone, answer, flip)
-        self.bets = Channel(BETS, self.guild, mention_everyone, answer, flip)
-        self.admin = AdminChannel(admin_fails)
-        self.bot = Bot({QUEUE: self.queue, BETS: self.bets, ADMIN: self.admin})
-        self.log, self.acks, self.seen, self.clock = [], [], set(), [1000.0]
+                 admin_fails=0, queue_id=QUEUE, lfp_name=LFP_NAME, gambler_name=GAMBLER_NAME, admin_blocks=False,
+                 admin_delay=0.0, slow=(), startup_printed=True, print_fails=None):
+        self.log, self.stamps, self.events, self.acks, self.seen, self.clock = [], [], [], [], set(), [1000.0]
         self.pings, self.series = [], []
+        self.guild = Guild(roles, Member(not mention_everyone) if me else None)
+        self.queue = Channel(QUEUE, self.guild, mention_everyone, answer, flip, self.events)
+        self.bets = Channel(BETS, self.guild, mention_everyone, answer, flip, self.events)
+        self.admin = (BlockingAdmin if admin_blocks else AdminChannel)(admin_fails, self.events, self.clock,
+                                                                        admin_delay)
+        self.bot = Bot({QUEUE: self.queue, BETS: self.bets, ADMIN: self.admin}, slow)
 
         async def api_get(path, timeout=8.0):
             if path == "/internal/lfp-pings":
@@ -354,28 +419,60 @@ class World:
 
         async def ack(ids, undeliverable=False):
             self.acks.append((list(ids), bool(undeliverable)))
+            self.events.append("ack")
 
         async def noop(*a, **k):
             return None
 
+        async def sleep(seconds=0, *a, **k):
+            self.clock[0] += seconds
+            await asyncio.sleep(0)
+
+        def say(*a, **k):
+            line = " ".join(str(x) for x in a)
+            if print_fails is not None and line.startswith(print_fails):
+                raise OSError(32, "Broken pipe")
+            self.log.append(line)
+            self.stamps.append(self.clock[0])
+
         self.ns = lift(tree, {
             "discord": DISCORD, "bot": self.bot, "api_get": api_get, "_ack_lfp_pings": ack,
-            "_lfp_seen_ids": self.seen, "asyncio": types.SimpleNamespace(sleep=_sleep),
-            "time": types.SimpleNamespace(monotonic=lambda: self.clock[0]),
-            "print": lambda *a, **k: self.log.append(" ".join(str(x) for x in a)),
+            "_lfp_seen_ids": self.seen, "asyncio": types.SimpleNamespace(sleep=sleep, create_task=asyncio.create_task),
+            "time": types.SimpleNamespace(monotonic=lambda: self.clock[0]), "print": say,
             "QUEUE_BEACON_CHANNEL_ID": queue_id, "LIVE_BETS_CHANNEL_ID": BETS, "ADMIN_CHANNEL_ID": ADMIN,
             "LFP_ROLE_NAME": lfp_name, "GAMBLER_ROLE_NAME": gambler_name,
             "_gambler_signup_checked": True, "_gambler_seeded": True, "_gambler_pinged": set(),
             "_ensure_gambler_signup_message": noop,
         })
+        if startup_printed:
+            self.ns["_ping_startup_settled"].update(SITES)
+
+    async def settle(self):
+        """Waits for every other task the run started (the warnings): the bot's
+        loop runs on, where asyncio.run would cancel them."""
+        while True:
+            rest = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
+            if not rest:
+                return
+            await asyncio.gather(*rest)
+
+    def _run(self, name):
+        async def go():
+            await self.ns[name]()
+            await self.settle()
+        asyncio.run(go())
+
+    def poll(self, site):
+        """The site's poll, as a coroutine, for a test that drives the loop."""
+        return self.ns["poll_lfp_pings" if site == "lfp" else "poll_gambler_pings"]()
 
     def lfp(self, *pings):
         self.pings = list(pings or (PING,))
-        asyncio.run(self.ns["poll_lfp_pings"]())
+        self._run("poll_lfp_pings")
 
     def gambler(self, *series):
         self.series = list(series or (SERIES,))
-        asyncio.run(self.ns["poll_gambler_pings"]())
+        self._run("poll_gambler_pings")
 
     def run(self, site):
         (self.lfp if site == "lfp" else self.gambler)()
@@ -384,7 +481,7 @@ class World:
         return self.queue if site == "lfp" else self.bets
 
     def startup(self):
-        asyncio.run(self.ns["_ping_startup_lines"]())
+        self._run("_ping_startup_lines")
 
     def lines(self):
         out = [ln for ln in self.log if ln.startswith("[PING]")]
@@ -438,6 +535,14 @@ def check_r1(tree):
     assert resolve([fold], "Stra\u00dfe Crew") == ([fold], "normalised")         # casefold, not lower
     two = Role(6, "TEAM-2")
     assert resolve([Role(7, "Team 3"), two], "Team 2") == ([two], "normalised")  # digits stay
+    # every digit stays, not only the decimal ones (L2): a lone role named Gambler with a superscript two
+    assert resolve([Role(33, GAMBLER_NAME + "\N{SUPERSCRIPT TWO}")], GAMBLER_NAME) == ([], "absent"), \
+        "L2: a role named Gambler with a superscript two resolved for Gambler"
+    # an empty normalised form names nothing and matches nothing (L3, not a defect: a match on nothing would be a
+    # guess); the exact name still finds a role so named
+    assert resolve([Role(31, "???")], "!!!") == ([], "absent"), "L3: an empty normalised form matched another"
+    marks = Role(32, "!!!")
+    assert resolve([Role(31, "???"), marks], "!!!") == ([marks], "found")
     assert resolve([Role(3, "LookingForPlayer"), Role(8, GAMBLER_NAME)], LFP_NAME) == ([], "absent")
     assert resolve([], LFP_NAME) == ([], "absent") and resolve(None, LFP_NAME) == ([], "absent")
     assert resolve([loose, Role(9, "ranked looking for player")], LFP_NAME) == ([], "ambiguous")
@@ -506,6 +611,11 @@ def check_r2(tree):
     assert deliverable([closed], c) == "yes" and c.asked == [c.guild.me]       # the bot's member, this channel
     assert deliverable([closed], chan(True, False)) == "no"                    # guild level says yes, channel no
     assert deliverable([closed], chan(False, True)) == "unknown"               # no member object: never a yes
+    # M5, not a defect: a mentionable role notifies whatever the bot's member is, so R2's first arm answers yes
+    # with no member object; "unknown" belongs to the permission arm alone
+    assert deliverable([open_role], chan(False, False)) == "yes" and \
+        deliverable([open_role, open_twin], chan(False, False)) == "yes", \
+        "M5: mentionable roles with no member object did not read yes"
     assert deliverable([], chan(True, True)) == "yes" and deliverable([], chan(True, False)) == "no"
     assert deliverable([closed], None) == "unknown"
     # several roles: yes only when every one is mentionable, or by the permission
@@ -529,6 +639,9 @@ def check_r2(tree):
         w = World(tree, roles=[Role(1, LFP_NAME), Role(12, GAMBLER_NAME)], me=False, mention_everyone=True)
         w.run(site)
         assert one(w.lines(), site).endswith(" mentioned=1 deliverable=unknown listed=1 delivered=yes"), w.lines()
+        w = World(tree, roles=open_roles(), me=False)                          # M5: mentionable, no member object
+        w.run(site)
+        assert one(w.lines(), site).endswith(" mentioned=1 deliverable=yes listed=1 delivered=yes"), w.lines()
         # two roles of the exact name, one of them not mentionable, and the bot lacks the permission
         w = World(tree, roles=[Role(1, LFP_NAME, True), Role(11, LFP_NAME), Role(12, GAMBLER_NAME, True),
                                Role(13, GAMBLER_NAME)])
@@ -641,10 +754,21 @@ def check_r4(tree):
     assert len(w.admin.sent) == 3 and "Gambler ping" in w.warnings()[2]
     for typed in ("Pat", "Quinn"):
         assert typed not in w.warnings()[2], typed
+    # the bound counts from the time Discord accepted the warning, read after the send (M4): a send that takes ten
+    # minutes of the bot's clock moves the bound by ten minutes
+    w = World(tree, roles=[], admin_delay=600.0)
+    w.lfp()
+    accepted = w.stamps[w.log.index("[PING-WARN] kind=lfp warning posted to the admin channel")]
+    w.clock[0] = accepted - 600.0 + every + 1           # a day and a second after the send began
+    w.lfp(dict(PING, ping_id=42))
+    assert len(w.admin.sent) == 1, "M4: the bound ran from before Discord accepted the warning"
+    w.clock[0] = accepted + every                       # a day after Discord accepted it
+    w.lfp(dict(PING, ping_id=43))
+    assert len(w.admin.sent) == 2
     # a warning Discord refused starts no bound: the next post that owes one warns
     w = World(tree, roles=[], admin_fails=1)
     w.lfp()
-    assert w.admin.sent == [] and any(ln.startswith("[PING-CHECK] kind=lfp ") for ln in w.log), w.log
+    assert w.admin.sent == [] and "[PING-CHECK] kind=lfp warning failed: RuntimeError" in w.log, w.log
     w.lfp(dict(PING, ping_id=42))
     assert len(w.admin.sent) == 1
     # the role ambiguous: two normalised matches and no exact name
@@ -724,6 +848,40 @@ def check_r4(tree):
 
 # -- R5: the startup line --------------------------------------------------------------------------
 
+def _startup_race(tree, site, release_after):
+    """M2: one ping is pending at `site` while the startup line's fetch of
+    that site's channel (not in the cache) waits. The fetch is let go once the
+    bot's clock has run `release_after` seconds since the poll began (None:
+    only after the poll has ended). Answers the World, the clock when the poll
+    began, and the log index of the ping's own [PING] line."""
+    w = World(tree, roles=open_roles(), slow=(QUEUE if site == "lfp" else BETS,), startup_printed=False)
+    w.pings, w.series = [PING], [SERIES]
+    began = w.clock[0]
+
+    async def go():
+        w.bot.release = asyncio.Event()
+        startup = asyncio.ensure_future(w.ns["_ping_startup_lines"]())     # on_ready's task
+        await asyncio.sleep(0)                                             # it reaches its fetch
+        poll = asyncio.ensure_future(w.poll(site))
+        for _ in range(400):
+            if poll.done():
+                break
+            if release_after is not None and w.clock[0] - began >= release_after:
+                w.bot.release.set()
+            await asyncio.sleep(0)
+        assert poll.done(), "M2: the %s ping was held past the bound" % site
+        poll.result()
+        w.bot.release.set()
+        await startup
+        await w.settle()
+
+    asyncio.run(go())
+    pid = "41" if site == "lfp" else SID
+    posts = [i for i, ln in enumerate(w.log) if ln.startswith("[PING] kind=%s id=%s " % (site, pid))]
+    assert len(posts) == 1, "M2: the %s ping was dropped" % site
+    return w, began, posts[0]
+
+
 def check_r5(tree):
     ready = one([n for n in tree.body if isinstance(n, ast.AsyncFunctionDef) and n.name == "on_ready"], "on_ready")
     stmts = [ast.unparse(s) for s in ready.body]
@@ -738,7 +896,7 @@ def check_r5(tree):
         "[PING] kind=lfp id=startup role=normalised mentioned=1 deliverable=no listed=0 delivered=unsent",
         "[PING] kind=gambler id=startup role=found mentioned=1 deliverable=yes listed=0 delivered=unsent"]
     assert w.queue.sent == [] and w.bets.sent == [] and w.admin.sent == []
-    w.startup()                                     # on_ready fires again on a resume: nothing more
+    w.startup()                                     # on_ready runs again on a new READY: nothing more
     assert len(w.lines()) == 2
     # a channel the bot cannot reach still gets its line, which says it cannot tell
     absent = "[PING] kind=lfp id=startup role=absent mentioned=0 deliverable=unknown listed=0 delivered=unsent"
@@ -750,9 +908,66 @@ def check_r5(tree):
     w.startup()
     assert w.lines()[0] == absent
     assert "[PING-CHECK] kind=lfp startup: no channel configured" in w.log
+    # the first ping of a kind waits for that kind's startup line (M2), at most the bound, and is never dropped
+    bound = World(tree).ns["PING_STARTUP_WAIT_S"]
+    assert 0 < bound <= 15
+    for site in SITES:
+        first = "[PING] kind=%s id=startup " % site
+        # the startup line prints 2 s after the poll began: the ping waits for it
+        w, began, post = _startup_race(tree, site, 2.0)
+        starts = [i for i, ln in enumerate(w.log) if ln.startswith(first)]
+        assert len(starts) == 1 and starts[0] < post, "M2: the %s ping posted before its startup line" % site
+        assert 2.0 <= w.stamps[post] - began <= bound and not any(" not printed " in ln for ln in w.log), w.log
+        # it does not print inside the bound: the ping posts when the bound passes, after a line that says the
+        # startup line had not printed, held no longer than the bound; the startup line prints later, once
+        w, began, post = _startup_race(tree, site, None)
+        late = "[PING-CHECK] kind=%s startup line not printed within %d s: the ping posts without it" % (site, bound)
+        assert w.log.count(late) == 1 and w.log.index(late) < post, \
+            "M2: no line said the %s startup line had not printed" % site
+        assert w.stamps[post] - began == bound, "M2: the %s ping was held %r s" % (site, w.stamps[post] - began)
+        starts = [i for i, ln in enumerate(w.log) if ln.startswith(first)]
+        assert len(starts) == 1 and starts[0] > post, w.log
+        if site == "lfp":
+            assert w.acks == [([41], False), ([], True)], w.acks
+        else:
+            assert len(w.bets.sent) == 1 and SID in w.ns["_gambler_pinged"]
 
 
 # -- R6: nothing else moves -------------------------------------------------------------------------
+
+def _warning_held(tree, site):
+    """M1: the admin channel's send blocks until released, and two posts at
+    `site` each owe a warning (no role carries the name). The poll ends, its
+    next post and the LFP ack made, while that send is blocked; the warning
+    completes after the release; the second, owed while the first was in
+    flight, is skipped, not queued. Answers the World."""
+    w = World(tree, roles=[], admin_blocks=True)
+    w.pings, w.series = [PING, dict(PING, ping_id=42)], [SERIES, SERIES_2]
+    post = "post %d" % w.channel(site).id
+    order = [post, "admin-start", post] + (["ack", "ack"] if site == "lfp" else [])
+
+    async def go():
+        w.admin.release = asyncio.Event()
+        poll = asyncio.ensure_future(w.poll(site))
+        for _ in range(100):
+            if poll.done():
+                break
+            await asyncio.sleep(0)
+        assert poll.done(), "M1: the %s poll waits for the admin channel" % site
+        poll.result()
+        assert w.events == order, "M1: at %s the posts, the ack and the warning ran as %r" % (site, w.events)
+        held = w.ns["_ping_warn_tasks"].get(site)
+        assert held is not None and not held.done() and w.admin.sent == [], \
+            "M1: the %s warning is not held while its send is blocked" % site
+        w.admin.release.set()
+        await w.settle()
+        assert w.events == order + ["admin-done"] and len(w.admin.sent) == 1, \
+            "M1: the %s warning did not complete once, after the release: %r" % (site, w.events)
+        assert w.ns["_ping_warn_tasks"] == {}, "M1: the %s warning's reference outlived it" % site
+
+    asyncio.run(go())
+    return w
+
 
 def check_r6(tree):
     w = World(tree, roles=open_roles())
@@ -782,6 +997,24 @@ def check_r6(tree):
     w = World(tree, roles=[], admin_fails=5)
     w.gambler()
     assert len(w.bets.sent) == 1 and SID in w.ns["_gambler_pinged"]
+    # the warning is its own task (M1): while the admin channel's send is blocked, the next post at each site and
+    # the LFP ack go out; the warning completes after the release; a second one owed meanwhile is skipped
+    for site in SITES:
+        w = _warning_held(tree, site)
+        assert "[PING-WARN] kind=%s warning posted to the admin channel" % site in w.log, w.log
+    # no failing print stops anything (L1): every line of the ping check fails to print, and Discord's answer
+    # cannot be read, so the check's own fallback line runs
+    for site in SITES:
+        w = World(tree, roles=open_roles(), answer=discord_unreadable, print_fails="[PING")
+        try:
+            if site == "lfp":
+                w.lfp(PING, dict(PING, ping_id=42))
+            else:
+                w.gambler(SERIES, SERIES_2)
+        except Exception as ex:
+            raise AssertionError("L1: a logging failure reached the %s poller: %r" % (site, ex))
+        assert len(w.channel(site).sent) == 2, "L1: a logging failure stopped the next %s post" % site
+        assert site == "gambler" or w.acks[0] == ([41, 42], False), "L1: a logging failure stopped the LFP ack"
 
 
 # -- R7: no other role is pinged ------------------------------------------------------------------
@@ -800,12 +1033,18 @@ def check_r7(tree):
             widened.append((fn, ast.unparse(roles[0]) if roles else "(the default: every role)"))
     assert sorted(widened) == [("poll_gambler_pings", "list(ping_roles) if ping_roles else False"),
                                ("poll_lfp_pings", "list(ping_roles) if ping_roles else False")], widened
+    # no role but the resolved one is mentioned by the content and the allowed mentions together (L5): the casual
+    # roles are mentionable, so any of them written and allowed would ping its members
     casual = [Role(3, "LookingForPlayer", True), Role(14, "Looking For Player", True)]
-    w = World(tree, roles=open_roles() + casual)
-    w.lfp()
-    content, kw = one(w.queue.sent, "lfp posts")
-    assert kw["allowed_mentions"].roles == [w.guild.roles[0]]
-    assert all(r.mention not in content for r in casual)
+    for site in SITES:
+        w = World(tree, roles=open_roles() + casual)
+        w.run(site)
+        content, kw = one(w.channel(site).sent, site)
+        named = [r.id for r in discord_lists_written(w.channel(site), content, kw)]
+        assert named == [1 if site == "lfp" else 12], \
+            "L5: the %s post mentions %r, not its resolved role alone" % (site, named)
+        assert kw["allowed_mentions"].roles == [w.guild.roles[0 if site == "lfp" else 1]]
+        assert all(r.mention not in content for r in casual)
 
 
 CHECKS = {"R1": check_r1, "R2": check_r2, "R3": check_r3, "R4": check_r4, "R5": check_r5, "R6": check_r6,
@@ -836,6 +1075,11 @@ MUTANTS = [
      "sorted(exact, key=lambda r: r.id)[:PING_ROLES_MAX]", "sorted(exact, key=lambda r: r.id)"),
     ("R1", "the roles in the server's order, not the oldest first",
      "sorted(exact, key=lambda r: r.id)[:PING_ROLES_MAX]", "exact[:PING_ROLES_MAX]"),
+    ("R1", "isdecimal in place of isdigit (L2: the superscript two dropped)",
+     "if ch.isalpha() or ch.isdigit())", "if ch.isalpha() or ch.isdecimal())"),
+    ("R1", "an empty normalised form matched (L3's reading, not a defect)",
+     "loose = [r for r in named if want and _ping_role_norm(r.name) == want]",
+     "loose = [r for r in named if _ping_role_norm(r.name) == want]"),
     ("R2", "no member object read as a yes",
      '    if me is None:\n        return "unknown"\n', '    if me is None:\n        return "yes"\n'),
     ("R2", "the guild-level permission in place of the channel's",
@@ -847,6 +1091,15 @@ MUTANTS = [
     ("R2", "one mentionable role taken for all of them",
      'if roles and all(getattr(r, "mentionable", None) is True for r in roles):',
      'if roles and any(getattr(r, "mentionable", None) is True for r in roles):'),
+    ("R2", "no member object read as unknown for mentionable roles (M5's reading, not a defect)",
+     '    if roles and all(getattr(r, "mentionable", None) is True for r in roles):\n        return "yes"\n'
+     '    guild = getattr(channel, "guild", None) if channel is not None else None\n'
+     '    me = getattr(guild, "me", None) if guild is not None else None\n'
+     '    if me is None:\n        return "unknown"\n',
+     '    guild = getattr(channel, "guild", None) if channel is not None else None\n'
+     '    me = getattr(guild, "me", None) if guild is not None else None\n'
+     '    if me is None:\n        return "unknown"\n'
+     '    if roles and all(getattr(r, "mentionable", None) is True for r in roles):\n        return "yes"\n'),
     ("R3", "raw_role_mentions, a pattern over the bot's own text",
      'answered = {getattr(r, "id", None) for r in (getattr(message, "role_mentions", None) or ())}',
      "answered = set(message.raw_role_mentions)"),
@@ -870,7 +1123,9 @@ MUTANTS = [
     ("R4", "the warning counts the roles mentioned, not the roles that carry the name",
      "count = max(len(exact), len(roles))", "count = len(roles)"),
     ("R4", "the 24-hour bound dropped",
-     "    if last is not None and now - last < PING_WARN_EVERY_S:\n        return False\n", ""),
+     "        if last is not None and now - last < PING_WARN_EVERY_S:\n            return False\n", ""),
+    ("R4", "the bound's time read before the awaits (M4)",
+     "        _ping_warned_at[kind] = time.monotonic()\n", "        _ping_warned_at[kind] = now\n"),
     ("R4", "the post's own text, a player's name and message, in the warning",
      '    lines.append("At most one such warning',
      '    lines.append(str(getattr(message, "content", "")))\n    lines.append("At most one such warning'),
@@ -885,25 +1140,61 @@ MUTANTS = [
      "    asyncio.create_task(_ping_startup_lines())\n", ""),
     ("R5", "the startup lines printed on every ready",
      "    if _ping_startup_done:\n        return\n", ""),
+    ("R5", "no wait for the startup line (M2)",
+     "    while kind not in _ping_startup_settled:\n", "    while False:\n"),
+    ("R5", "an unbounded wait for the startup line (M2)",
+     "        left = deadline - time.monotonic()\n        if left <= 0:\n"
+     "            _ping_log(f\"[PING-CHECK] kind={kind} startup line not printed within {PING_STARTUP_WAIT_S} s: \"\n"
+     "                      \"the ping posts without it\")\n            return\n"
+     "        await asyncio.sleep(min(PING_STARTUP_STEP_S, left))\n",
+     "        await asyncio.sleep(PING_STARTUP_STEP_S)\n"),
+    ("R5", "the Gambler ping dropped when its startup line had not printed (M2)",
+     "        await _ping_startup_wait(\"gambler\")\n",
+     "        if \"gambler\" not in _ping_startup_settled:\n            await _ping_startup_wait(\"gambler\")\n"
+     "            continue\n"),
     ("R6", "a post that cannot notify held back",
      "                sent = await channel.send(\n                    content[:2000],\n",
      "                if deliverable == \"no\":\n                    raise RuntimeError(\"held back\")\n"
      "                sent = await channel.send(\n                    content[:2000],\n"),
-    ("R6", "the warning sent before the ack",
-     "                _lfp_seen_ids.add(ping_id)\n                posted.append(ping_id)\n"
-     "                print(f\"[LFP] posted ping {ping_id} for {display_name}\")\n",
-     "                await _ping_warn(\"lfp\", LFP_ROLE_NAME, ping_roles, role_word, deliverable, \"no\", channel, "
-     "sent)\n"
-     "                _lfp_seen_ids.add(ping_id)\n                posted.append(ping_id)\n"
-     "                print(f\"[LFP] posted ping {ping_id} for {display_name}\")\n"),
+    ("R6", "the warning awaited in line (M1; the reviewed build's form)",
+     "            _ping_warn_start(kind, configured, roles, role_word, deliverable, delivered, channel, message)\n",
+     "            await _ping_warn(kind, configured, roles, role_word, deliverable, delivered, channel, message)\n"),
+    ("R6", "a second warning of a kind started while one is in flight (M1)",
+     "    if running is not None and not running.done():\n        return False\n", ""),
+    ("R6", "the bare print in the after-send fallback (L1)",
+     '        _ping_log(f"[PING-CHECK] kind={kind} check after the post failed: {type(ex).__name__}")',
+     '        print(f"[PING-CHECK] kind={kind} check after the post failed: {type(ex).__name__}")'),
     ("R6", "the LFP post allows every role",
      "everyone=False, roles=list(ping_roles) if ping_roles else False, users=False),",
      "everyone=False, roles=True, users=False),"),
-    ("R7", "the casual role pinged beside the ranked one",
+    ("R7", "the allowed mentions widened to the casual role, its mention not written",
      "everyone=False, roles=list(ping_roles) if ping_roles else False, users=False),",
      "everyone=False, roles=list(ping_roles) + [r for r in channel.guild.roles "
      "if _ping_role_norm(r.name) == \"lookingforplayer\"] or False, users=False),"),
+    ("R7", "the casual role pinged beside the ranked one, in the content and in the allowed mentions (L5)",
+     '            mention = " ".join(r.mention for r in ping_roles) if ping_roles else f"@{LFP_ROLE_NAME}"\n',
+     '            ping_roles = list(ping_roles) + [r for r in channel.guild.roles '
+     'if _ping_role_norm(r.name) == "lookingforplayer"]\n'
+     '            mention = " ".join(r.mention for r in ping_roles) if ping_roles else f"@{LFP_ROLE_NAME}"\n'),
 ]
+
+# The assertion each mutant of the first review round (codex-r1, 21 Nov 2026) must fail first, by the start of
+# its message: a mutant that turns its check red at another assertion has not shown what it was written to show.
+FAILS_AT = {
+    "isdecimal in place of isdigit (L2: the superscript two dropped)": "L2: ",
+    "an empty normalised form matched (L3's reading, not a defect)": "L3: ",
+    "no member object read as unknown for mentionable roles (M5's reading, not a defect)": "M5: ",
+    "the bound's time read before the awaits (M4)": "M4: ",
+    "no wait for the startup line (M2)": "M2: the lfp ping posted before its startup line",
+    "an unbounded wait for the startup line (M2)": "M2: the lfp ping was held past the bound",
+    "the Gambler ping dropped when its startup line had not printed (M2)": "M2: the gambler ping was dropped",
+    "the warning awaited in line (M1; the reviewed build's form)": "M1: the lfp poll waits for the admin channel",
+    "a second warning of a kind started while one is in flight (M1)":
+        "M1: at lfp the posts, the ack and the warning ran as",
+    "the bare print in the after-send fallback (L1)": "L1: a logging failure stopped the next lfp post",
+    "the casual role pinged beside the ranked one, in the content and in the allowed mentions (L5)":
+        "L5: the lfp post mentions",
+}
 
 
 @pytest.mark.parametrize("req,what,old,new", MUTANTS, ids=["%s: %s" % (m[0], m[1]) for m in MUTANTS])
@@ -912,13 +1203,16 @@ def test_each_mutant_turns_its_requirement_red(req, what, old, new):
     assert [ast.dump(n) for n in edited] != [ast.dump(shipped)], "the edit changes no code: %s" % what
     try:
         CHECKS[req](tree)
-    except AssertionError:
+    except AssertionError as ex:
+        want = FAILS_AT.get(what)
+        assert want is None or str(ex).startswith(want), "%s turned %s red elsewhere: %s" % (what, req, ex)
         return
     raise AssertionError("the mutant left %s green: %s" % (req, what))
 
 
 def test_every_requirement_has_a_mutant():
     assert sorted({m[0] for m in MUTANTS}) == sorted(CHECKS)
+    assert set(FAILS_AT) <= {m[1] for m in MUTANTS}
 
 
 def test_control_a_comment_only_edit_keeps_every_requirement_green():
