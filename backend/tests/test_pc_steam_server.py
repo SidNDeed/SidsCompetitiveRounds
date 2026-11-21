@@ -1023,7 +1023,16 @@ _NEW = (True, True, False, ["marker at the new value"])
 _UNKNOWN = (True, False, False, ["one marker old and one new"])
 _DOWN = (False, False, True, ["control answered 503"])
 _TRAILER = "\n\nCo-Authored-By: A Test <test@example.invalid>"
+UNKNOWN_COMMIT_SHA = "f" * 40   # HEAD after a commit whose message is not a text the train derives
 _DROP = object()
+
+
+def _rt_committed_text(message):
+    """The whole text a commit of the train must hand git: the derived message, the trailer after it, the last
+    line completed as `git commit -m` completes it. Written here and not read from the train, so a train that
+    drops or changes any part of it makes a commit that no check recognises."""
+    text = message + _TRAILER
+    return text if text.endswith("\n") else text + "\n"
 
 
 def _rt_done(kw, stdout, stderr="", rc=0):
@@ -1090,6 +1099,7 @@ class _RtWorld:
     def __init__(self, rt):
         self.rt = rt
         self.calls = []
+        self.commits = []
         self.deployed = {}
         self.head = "0" * 40
         self.branch_tip = rt.REVIEWED_TIP or "e" * 40
@@ -1145,7 +1155,20 @@ class _RtWorld:
     def git_child(self, lease, argv):
         self.calls.append(("git",) + tuple(argv[:3]))
         if argv[:2] == ["git", "commit"]:
-            self.head = MERGE_SHA if argv[3].startswith(self.rt.MERGE_MESSAGE) else PRECURSOR_SHA
+            # CMDLINE-1: both commits hand git their message in a file (`git commit -F PATH`), read here at the
+            # call. The message must be the WHOLE text the phase derived; any other form or text moves HEAD to a
+            # sha no check expects, and is recorded in self.commits.
+            text = None
+            if len(argv) == 4 and argv[2] == "-F":
+                with open(argv[3], encoding="utf-8", newline="") as fh:
+                    text = fh.read()
+            self.commits.append((tuple(argv[2:]), text))
+            if text == _rt_committed_text(self.rt.MERGE_MESSAGE):
+                self.head = MERGE_SHA
+            elif text == _rt_committed_text(self.rt.PRECURSOR_MESSAGE):
+                self.head = PRECURSOR_SHA
+            else:
+                self.head = UNKNOWN_COMMIT_SHA
         return ""
 
     def blocking_child(self, lease, step, argv, kind, timeout=None):
