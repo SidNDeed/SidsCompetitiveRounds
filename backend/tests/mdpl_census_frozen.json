@@ -35,17 +35,25 @@
    "fallback": "READ",
    "held": [
     "chat_mutes",
+    "ffa_bets",
     "ffa_lobbies",
     "ffa_queue",
     "i18n_portal_sessions",
+    "lobby_bets",
     "lobby_invites",
+    "match_seat_holds",
     "moderation_cases",
     "ovt_lobbies",
     "ovt_queue",
+    "ovt_series",
+    "players",
+    "queue_leases",
     "ranked_queue",
     "steam_sessions",
+    "team_bets",
     "team_lobbies",
-    "team_queue"
+    "team_queue",
+    "team_series"
    ],
    "keys": [
     "_identity_lock_many | SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text))) | 0"
@@ -185,6 +193,7 @@
    "class": "READ",
    "entries": [
     "_ffa_readmit_janitor",
+    "admin_accept_quarantine",
     "block_player",
     "cancel_lobby_bet",
     "chat_moderate_bridge_unmute",
@@ -353,7 +362,7 @@
    "phases": []
   },
   "_complete_team_series_with_ratings | SELECT 1 FROM players WHERE id = :pid FOR NO KEY UPDATE | 0": {
-   "class": "READ",
+   "class": "KEY",
    "entries": [
     "admin_resolve_team_series",
     "team_series_report_dc"
@@ -369,14 +378,17 @@
     "team_queue",
     "team_series"
    ],
-   "keys": [],
+   "judged": "READ",
+   "keys": [
+    "_ban_lock_and_gate | SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text))) | 0"
+   ],
    "phases": [
     "A"
    ],
-   "why": "phase A: it settles, reverses or cleans up a series, match or lobby that P plays in or hosts, holding that game's rows (its held tables) when it writes each party's players row, P's among them, and the deletion of P, holding P's players row from its first write, later waits on rows of the same tables when it cancels P's open series and lobbies and deletes P's queue rows, leases, seat holds and report rows, so a circle is possible while P's own game settles; bound (iii); scene: test_a_peer_that_began_to_wait_first_is_not_the_one_postgresql_ends"
+   "why": "key = the whole roster's on one of the function's two callers alone: admin_resolve_team_series runs _ban_lock_and_gate over the four members before its series row lock, but team_series_report_dc runs it over the named leaver and the reporter alone and reads the other members' bans under the series row lock (the integrator's item TEAM-DC-REPORT-ROSTER-KEY-1 would have it key the whole roster before that lock); row = each member's players row, so on the report path when the member is P the key is not P's, and the site is judged at its class without the key, READ: phase A: it settles, reverses or cleans up a series, match or lobby that P plays in or hosts, holding that game's rows (its held tables) when it writes each party's players row, P's among them, and the deletion of P, holding P's players row from its first write, later waits on rows of the same tables when it cancels P's open series and lobbies and deletes P's queue rows, leases, seat holds and report rows, so a circle is possible while P's own game settles; bound (iii); scene: test_a_peer_that_began_to_wait_first_is_not_the_one_postgresql_ends"
   },
   "_complete_team_series_with_ratings | UPDATE players SET gold_earned=COALESCE(gold_earned,0)+:g, team_gold_ear | 0": {
-   "class": "READ",
+   "class": "KEY",
    "entries": [
     "admin_resolve_team_series",
     "team_series_report_dc"
@@ -392,14 +404,17 @@
     "team_queue",
     "team_series"
    ],
-   "keys": [],
+   "judged": "READ",
+   "keys": [
+    "_ban_lock_and_gate | SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text))) | 0"
+   ],
    "phases": [
     "A"
    ],
-   "why": "phase A: it settles, reverses or cleans up a series, match or lobby that P plays in or hosts, holding that game's rows (its held tables) when it writes each party's players row, P's among them, and the deletion of P, holding P's players row from its first write, later waits on rows of the same tables when it cancels P's open series and lobbies and deletes P's queue rows, leases, seat holds and report rows, so a circle is possible while P's own game settles; bound (iii); scene: test_a_peer_that_began_to_wait_first_is_not_the_one_postgresql_ends"
+   "why": "key = the whole roster's on one of the function's two callers alone: admin_resolve_team_series runs _ban_lock_and_gate over the four members before its series row lock, but team_series_report_dc runs it over the named leaver and the reporter alone and reads the other members' bans under the series row lock (the integrator's item TEAM-DC-REPORT-ROSTER-KEY-1 would have it key the whole roster before that lock); row = each member's players row, so on the report path when the member is P the key is not P's, and the site is judged at its class without the key, READ: phase A: it settles, reverses or cleans up a series, match or lobby that P plays in or hosts, holding that game's rows (its held tables) when it writes each party's players row, P's among them, and the deletion of P, holding P's players row from its first write, later waits on rows of the same tables when it cancels P's open series and lobbies and deletes P's queue rows, leases, seat holds and report rows, so a circle is possible while P's own game settles; bound (iii); scene: test_a_peer_that_began_to_wait_first_is_not_the_one_postgresql_ends"
   },
   "_complete_team_series_with_ratings | UPDATE players SET gold_earned=COALESCE(gold_earned,0)+:p WHERE id=:pid | 0": {
-   "class": "READ",
+   "class": "KEY",
    "entries": [
     "admin_resolve_team_series",
     "team_series_report_dc"
@@ -415,11 +430,14 @@
     "team_queue",
     "team_series"
    ],
-   "keys": [],
+   "judged": "READ",
+   "keys": [
+    "_ban_lock_and_gate | SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text))) | 0"
+   ],
    "phases": [
     "A"
    ],
-   "why": "phase A: it settles, reverses or cleans up a series, match or lobby that P plays in or hosts, holding that game's rows (its held tables) when it writes each party's players row, P's among them, and the deletion of P, holding P's players row from its first write, later waits on rows of the same tables when it cancels P's open series and lobbies and deletes P's queue rows, leases, seat holds and report rows, so a circle is possible while P's own game settles; bound (iii); scene: test_a_peer_that_began_to_wait_first_is_not_the_one_postgresql_ends"
+   "why": "key = never the bettor's: the function's two callers key the roster, all of it (admin_resolve_team_series) or the leaver and the reporter (team_series_report_dc), and a roster member cannot bet on its own match; row = the bettor's players row, so when the bettor is P the key is not P's, and the site is judged at its class without the key, READ: phase A: it settles, reverses or cleans up a series, match or lobby that P plays in or hosts, holding that game's rows (its held tables) when it writes each party's players row, P's among them, and the deletion of P, holding P's players row from its first write, later waits on rows of the same tables when it cancels P's open series and lobbies and deletes P's queue rows, leases, seat holds and report rows, so a circle is possible while P's own game settles; bound (iii); scene: test_a_peer_that_began_to_wait_first_is_not_the_one_postgresql_ends"
   },
   "_complete_team_series_with_ratings | UPDATE team_series SET status='completed', winner_team=:wt, completed_at | 1": {
    "class": "CLEAR",
@@ -436,10 +454,14 @@
    "class": "READ",
    "entries": [
     "_ffa_readmit_janitor",
+    "admin_accept_quarantine",
+    "admin_ban",
+    "admin_moderation_case_act",
     "admin_resolve_team_series",
     "admin_reverse_team_series",
     "ffa_queue_leave",
     "ffa_queue_poll",
+    "internal_moderation_case_act",
     "queue_cleanup_loop",
     "submit_ffa_match",
     "submit_match",
@@ -458,7 +480,9 @@
     "moderation_cases",
     "pending_dms"
    ],
-   "keys": [],
+   "keys": [
+    "_identity_lock_many | SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text))) | 0"
+   ],
    "phases": [
     "B"
    ],
@@ -468,10 +492,14 @@
    "class": "READ",
    "entries": [
     "_ffa_readmit_janitor",
+    "admin_accept_quarantine",
+    "admin_ban",
+    "admin_moderation_case_act",
     "admin_resolve_team_series",
     "admin_reverse_team_series",
     "ffa_queue_leave",
     "ffa_queue_poll",
+    "internal_moderation_case_act",
     "queue_cleanup_loop",
     "submit_ffa_match",
     "submit_match",
@@ -485,6 +513,7 @@
    ],
    "fallback": "READ",
    "held": [
+    "chat_mutes",
     "ffa_assembly_seats",
     "ffa_bets",
     "ffa_lobbies",
@@ -492,6 +521,7 @@
     "ffa_report_journal",
     "ffa_report_windows",
     "ffa_seat_readmissions",
+    "i18n_portal_sessions",
     "lobby_bets",
     "lobby_invites",
     "mail_censor_hits",
@@ -509,12 +539,16 @@
     "players",
     "queue_leases",
     "ranked_queue",
+    "steam_sessions",
     "team_bets",
     "team_lobbies",
     "team_queue",
     "team_series"
    ],
-   "keys": [],
+   "keys": [
+    "_ban_lock_and_gate | SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text))) | 0",
+    "_identity_lock_many | SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text))) | 0"
+   ],
    "phases": [
     "A",
     "B"
@@ -549,6 +583,7 @@
    "class": "CLEAR",
    "entries": [
     "_ffa_readmit_janitor",
+    "admin_accept_quarantine",
     "submit_ffa_match"
    ],
    "fallback": "CLEAR",
@@ -560,6 +595,7 @@
    "class": "CLEAR",
    "entries": [
     "_ffa_readmit_janitor",
+    "admin_accept_quarantine",
     "submit_ffa_match"
    ],
    "fallback": "CLEAR",
@@ -571,6 +607,7 @@
    "class": "CLEAR",
    "entries": [
     "_ffa_readmit_janitor",
+    "admin_accept_quarantine",
     "admin_resolve_team_series",
     "i18n_review",
     "submit_ffa_match",
@@ -587,6 +624,7 @@
    "class": "CLEAR",
    "entries": [
     "_ffa_readmit_janitor",
+    "admin_accept_quarantine",
     "admin_resolve_team_series",
     "i18n_review",
     "submit_ffa_match",
@@ -603,6 +641,7 @@
    "class": "READ",
    "entries": [
     "_ffa_readmit_janitor",
+    "admin_accept_quarantine",
     "admin_resolve_team_series",
     "i18n_review",
     "submit_ffa_match",
@@ -633,7 +672,9 @@
     "team_queue",
     "team_series"
    ],
-   "keys": [],
+   "keys": [
+    "_ban_lock_and_gate | SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text))) | 0"
+   ],
    "phases": [
     "A"
    ],
@@ -643,6 +684,7 @@
    "class": "CLEAR",
    "entries": [
     "_ffa_readmit_janitor",
+    "admin_accept_quarantine",
     "admin_grant_achievement",
     "admin_resolve_team_series",
     "i18n_review",
@@ -776,16 +818,28 @@
    "keys": [],
    "phases": []
   },
-  "_lobby_leave_impl | UPDATE {?d:lobbies} SET host_player_id=:h WHERE id=:lid | 0": {
-   "class": "CLEAR",
+  "_lobby_seat_left_core | UPDATE {?t:ffa_lobbies|ovt_lobbies|team_lobbies} SET host_player_id = :h | 0": {
+   "class": "KEY",
    "entries": [
+    "admin_ban",
+    "admin_moderation_case_act",
+    "ffa_queue_leave",
+    "internal_moderation_case_act",
     "ovt_lobby_leave",
     "team_lobby_leave"
    ],
-   "fallback": "CLEAR",
-   "held": [],
-   "keys": [],
-   "phases": []
+   "fallback": "READ",
+   "held": [
+    "moderation_cases"
+   ],
+   "judged": "READ",
+   "keys": [
+    "_identity_lock_many | SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text))) | 0"
+   ],
+   "phases": [
+    "B"
+   ],
+   "why": "key = the actor's and the subject's: a ban and a moderation case's act lock those two identities (_identity_lock_many through _mail_lock_identities) before the case row and the ban core; row = the lobby's new host's players row (host_player_id, a foreign key: FOR KEY SHARE on a remaining member's row), so when the new host is P the key is not P's, and the site is judged at its class without the key, READ: phase B, after P's tombstone the host update waits for the deletion while the route's transaction holds the case's row, and the deletion afterwards updates the cases that name P, so a circle is possible when the host of P's lobby is banned and the host passes to P during P's deletion; the route also holds the lobby's row (its caller's lock: the ban core's FOR NO KEY UPDATE at main.py:51692, and the leave entries' FOR UPDATE through _lock_queue_group_for_player, :19019, from _lobby_leave_impl :62007 and ffa_queue_leave :64398; lines at 6fe44c5d), and that pair makes no circle: the deletion takes P's lobby rows before its tombstone and without a wait (take-or-yield: a held one ends the attempt), so the host update's key share waits only once the deletion already holds P's lobbies; the three leave entries hold the lobby's row alone; whichever of the two takes the lobby first, the stored host is not left on the deleted account: the deletion passes the host on when it finds P stored (:47646-47648, :47681-47683), and a route that waited reads the members after P's queue row is gone; bound (iii); scene: test_a_route_holding_the_player_s_inbox_row_after_the_tombstone_and_a_deletion_both_finish"
   },
   "_lobby_start_common | UPDATE {?d:lobbies} SET host_player_id=:h WHERE id=:lid | 0": {
    "class": "KEY",
@@ -1138,6 +1192,7 @@
    "entries": [
     "_ffa_readmit_janitor",
     "_pc_reconcile_earned_packs",
+    "admin_accept_quarantine",
     "admin_resolve_team_series",
     "submit_ffa_match",
     "submit_match",
@@ -1455,10 +1510,91 @@
    "keys": [],
    "phases": []
   },
+  "_qapply_credit | GoldTransaction(...) | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "admin_credit_quarantine"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "_qapply_credit | SELECT 1 FROM players WHERE id = :pid FOR NO KEY UPDATE | 0": {
+   "class": "READ",
+   "entries": [
+    "admin_credit_quarantine"
+   ],
+   "fallback": "READ",
+   "held": [
+    "ffa_lobbies"
+   ],
+   "keys": [],
+   "phases": [
+    "A"
+   ],
+   "why": "OWED under STACK-SEAM-1, not covered: neither the credit route (POST /api/v1/admin/quarantine/{qid}/credit), which calls this function, nor the function takes the credited player's identity key or reads the player's row again by id before this statement. At this tip the route answers an admin's request alone; before any control that reaches the route ships, the route takes each credited player's identity key, reads the row again by id and makes the ban read."
+  },
+  "_qapply_credit | UPDATE match_report_quarantine SET status = 'credited', reviewed_at = NO | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "admin_credit_quarantine"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "_qapply_credit | UPDATE players SET gold_earned = COALESCE(gold_earned, 0) + CAST(:g AS i | 0": {
+   "class": "READ",
+   "entries": [
+    "admin_credit_quarantine"
+   ],
+   "fallback": "READ",
+   "held": [
+    "ffa_lobbies",
+    "players"
+   ],
+   "keys": [],
+   "phases": [
+    "A"
+   ],
+   "why": "OWED under STACK-SEAM-1, not covered: neither the credit route (POST /api/v1/admin/quarantine/{qid}/credit), which calls this function, nor the function takes the credited player's identity key or reads the player's row again by id before this statement. At this tip the route answers an admin's request alone; before any control that reaches the route ships, the route takes each credited player's identity key, reads the row again by id and makes the ban read."
+  },
+  "_qapply_credit | UPDATE players SET total_xp = COALESCE(total_xp, 0) + CAST(:xp AS intege | 0": {
+   "class": "READ",
+   "entries": [
+    "admin_credit_quarantine"
+   ],
+   "fallback": "READ",
+   "held": [
+    "ffa_lobbies",
+    "players"
+   ],
+   "keys": [],
+   "phases": [
+    "A"
+   ],
+   "why": "OWED under STACK-SEAM-1, not covered: neither the credit route (POST /api/v1/admin/quarantine/{qid}/credit), which calls this function, nor the function takes the credited player's identity key or reads the player's row again by id before this statement. At this tip the route answers an admin's request alone; before any control that reaches the route ships, the route takes each credited player's identity key, reads the row again by id and makes the ban read."
+  },
+  "_qapply_finish | UPDATE match_report_quarantine SET status = 'accepted', reviewed_at = NO | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "_ffa_readmit_janitor",
+    "admin_accept_quarantine",
+    "submit_ffa_match"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
   "_quarantine_report | INSERT INTO match_report_quarantine (mode, reason, http_status, group_id | 0": {
    "class": "CLEAR",
    "entries": [
     "_ffa_readmit_janitor",
+    "admin_accept_quarantine",
+    "admin_credit_quarantine",
     "submit_ffa_match",
     "submit_team_match"
    ],
@@ -1471,6 +1607,8 @@
    "class": "CLEAR",
    "entries": [
     "_ffa_readmit_janitor",
+    "admin_accept_quarantine",
+    "admin_credit_quarantine",
     "submit_ffa_match",
     "submit_team_match"
    ],
@@ -1483,6 +1621,8 @@
    "class": "CLEAR",
    "entries": [
     "_ffa_readmit_janitor",
+    "admin_accept_quarantine",
+    "admin_credit_quarantine",
     "submit_ffa_match",
     "submit_team_match"
    ],
@@ -1521,8 +1661,11 @@
   "_reconcile_team_series_bets | GoldTransaction(...) | 0": {
    "class": "READ",
    "entries": [
+    "admin_ban",
+    "admin_moderation_case_act",
     "admin_resolve_team_series",
     "admin_reverse_team_series",
+    "internal_moderation_case_act",
     "queue_cleanup_loop",
     "team_lobby_start",
     "team_queue_cleanup_loop",
@@ -1548,8 +1691,11 @@
   "_reconcile_team_series_bets | SELECT 1 FROM players WHERE id = :pid FOR NO KEY UPDATE | 0": {
    "class": "READ",
    "entries": [
+    "admin_ban",
+    "admin_moderation_case_act",
     "admin_resolve_team_series",
     "admin_reverse_team_series",
+    "internal_moderation_case_act",
     "queue_cleanup_loop",
     "team_lobby_start",
     "team_queue_cleanup_loop",
@@ -1559,9 +1705,11 @@
    ],
    "fallback": "READ",
    "held": [
+    "chat_mutes",
     "ffa_bets",
     "ffa_lobbies",
     "ffa_queue",
+    "i18n_portal_sessions",
     "lobby_bets",
     "lobby_invites",
     "mail_censor_hits",
@@ -1577,12 +1725,14 @@
     "players",
     "queue_leases",
     "ranked_queue",
+    "steam_sessions",
     "team_bets",
     "team_lobbies",
     "team_queue",
     "team_series"
    ],
    "keys": [
+    "_ban_lock_and_gate | SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text))) | 0",
     "_identity_lock_many | SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text))) | 0"
    ],
    "phases": [
@@ -1594,8 +1744,11 @@
   "_reconcile_team_series_bets | UPDATE players SET gold_earned = COALESCE(gold_earned,0) + :p WHERE id = | 0": {
    "class": "READ",
    "entries": [
+    "admin_ban",
+    "admin_moderation_case_act",
     "admin_resolve_team_series",
     "admin_reverse_team_series",
+    "internal_moderation_case_act",
     "queue_cleanup_loop",
     "team_lobby_start",
     "team_queue_cleanup_loop",
@@ -1605,9 +1758,11 @@
    ],
    "fallback": "READ",
    "held": [
+    "chat_mutes",
     "ffa_bets",
     "ffa_lobbies",
     "ffa_queue",
+    "i18n_portal_sessions",
     "lobby_bets",
     "lobby_invites",
     "mail_censor_hits",
@@ -1623,12 +1778,14 @@
     "players",
     "queue_leases",
     "ranked_queue",
+    "steam_sessions",
     "team_bets",
     "team_lobbies",
     "team_queue",
     "team_series"
    ],
    "keys": [
+    "_ban_lock_and_gate | SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text))) | 0",
     "_identity_lock_many | SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text))) | 0"
    ],
    "phases": [
@@ -1683,6 +1840,9 @@
    "class": "READ",
    "entries": [
     "_ffa_readmit_janitor",
+    "admin_accept_quarantine",
+    "admin_ban",
+    "admin_moderation_case_act",
     "admin_resolve_team_series",
     "admin_reverse_series",
     "admin_reverse_team_series",
@@ -1695,6 +1855,7 @@
     "ffa_queue_leave",
     "ffa_queue_poll",
     "get_active_series",
+    "internal_moderation_case_act",
     "ovt_lobby_leave",
     "queue_cleanup_loop",
     "submit_ffa_match",
@@ -1713,7 +1874,9 @@
     "moderation_cases",
     "pending_dms"
    ],
-   "keys": [],
+   "keys": [
+    "_identity_lock_many | SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text))) | 0"
+   ],
    "phases": [
     "B"
    ],
@@ -1723,6 +1886,9 @@
    "class": "READ",
    "entries": [
     "_ffa_readmit_janitor",
+    "admin_accept_quarantine",
+    "admin_ban",
+    "admin_moderation_case_act",
     "admin_resolve_team_series",
     "admin_reverse_series",
     "admin_reverse_team_series",
@@ -1735,6 +1901,7 @@
     "ffa_queue_leave",
     "ffa_queue_poll",
     "get_active_series",
+    "internal_moderation_case_act",
     "ovt_lobby_leave",
     "queue_cleanup_loop",
     "submit_ffa_match",
@@ -1748,6 +1915,7 @@
    ],
    "fallback": "READ",
    "held": [
+    "chat_mutes",
     "ffa_assembly_seats",
     "ffa_bets",
     "ffa_lobbies",
@@ -1755,6 +1923,7 @@
     "ffa_report_journal",
     "ffa_report_windows",
     "ffa_seat_readmissions",
+    "i18n_portal_sessions",
     "lobby_bets",
     "lobby_invites",
     "mail_censor_hits",
@@ -1770,12 +1939,15 @@
     "players",
     "queue_leases",
     "ranked_queue",
+    "steam_sessions",
     "team_bets",
     "team_lobbies",
     "team_queue",
     "team_series"
    ],
    "keys": [
+    "_ban_lock_and_gate | SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text))) | 0",
+    "_identity_lock_many | SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text))) | 0",
     "cancel_lobby_bet | SELECT pg_advisory_xact_lock(hashtext(:sid)) | 0"
    ],
    "phases": [
@@ -1855,8 +2027,12 @@
    "class": "READ",
    "entries": [
     "_ffa_readmit_janitor",
+    "admin_accept_quarantine",
+    "admin_ban",
+    "admin_moderation_case_act",
     "ffa_queue_leave",
     "ffa_queue_poll",
+    "internal_moderation_case_act",
     "queue_cleanup_loop",
     "submit_ffa_match"
    ],
@@ -1867,7 +2043,9 @@
     "moderation_cases",
     "pending_dms"
    ],
-   "keys": [],
+   "keys": [
+    "_identity_lock_many | SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text))) | 0"
+   ],
    "phases": [
     "B"
    ],
@@ -1877,13 +2055,18 @@
    "class": "READ",
    "entries": [
     "_ffa_readmit_janitor",
+    "admin_accept_quarantine",
+    "admin_ban",
+    "admin_moderation_case_act",
     "ffa_queue_leave",
     "ffa_queue_poll",
+    "internal_moderation_case_act",
     "queue_cleanup_loop",
     "submit_ffa_match"
    ],
    "fallback": "READ",
    "held": [
+    "chat_mutes",
     "ffa_assembly_seats",
     "ffa_bets",
     "ffa_lobbies",
@@ -1891,6 +2074,7 @@
     "ffa_report_journal",
     "ffa_report_windows",
     "ffa_seat_readmissions",
+    "i18n_portal_sessions",
     "lobby_bets",
     "lobby_invites",
     "mail_censor_hits",
@@ -1906,12 +2090,15 @@
     "players",
     "queue_leases",
     "ranked_queue",
+    "steam_sessions",
     "team_bets",
     "team_lobbies",
     "team_queue",
     "team_series"
    ],
-   "keys": [],
+   "keys": [
+    "_identity_lock_many | SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text))) | 0"
+   ],
    "phases": [
     "A",
     "B"
@@ -1922,13 +2109,18 @@
    "class": "READ",
    "entries": [
     "_ffa_readmit_janitor",
+    "admin_accept_quarantine",
+    "admin_ban",
+    "admin_moderation_case_act",
     "ffa_queue_leave",
     "ffa_queue_poll",
+    "internal_moderation_case_act",
     "queue_cleanup_loop",
     "submit_ffa_match"
    ],
    "fallback": "READ",
    "held": [
+    "chat_mutes",
     "ffa_assembly_seats",
     "ffa_bets",
     "ffa_lobbies",
@@ -1936,6 +2128,7 @@
     "ffa_report_journal",
     "ffa_report_windows",
     "ffa_seat_readmissions",
+    "i18n_portal_sessions",
     "lobby_bets",
     "lobby_invites",
     "mail_censor_hits",
@@ -1951,12 +2144,15 @@
     "players",
     "queue_leases",
     "ranked_queue",
+    "steam_sessions",
     "team_bets",
     "team_lobbies",
     "team_queue",
     "team_series"
    ],
-   "keys": [],
+   "keys": [
+    "_identity_lock_many | SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text))) | 0"
+   ],
    "phases": [
     "A",
     "B"
@@ -2301,16 +2497,6 @@
    "keys": [],
    "phases": []
   },
-  "admin_accept_quarantine | UPDATE match_report_quarantine SET status='accepted', reviewed_at=NOW(), | 0": {
-   "class": "CLEAR",
-   "entries": [
-    "admin_accept_quarantine"
-   ],
-   "fallback": "CLEAR",
-   "held": [],
-   "keys": [],
-   "phases": []
-  },
   "admin_discard_quarantine | UPDATE match_report_quarantine SET status='discarded', reviewed_at=NOW() | 0": {
    "class": "CLEAR",
    "entries": [
@@ -2362,7 +2548,8 @@
    "phases": []
   },
   "admin_grant_achievement | UPDATE players SET gold_earned = COALESCE(gold_earned,0) + :amt WHERE id | 0": {
-   "class": "UPGRADE",
+   "class": "KEY",
+   "covers": "key = the target's: admin_grant_achievement keys req.target_steam_id (shared) after the admin check and before the target read; row = the target it then reads by that steam_id and again by id, whose gold it credits, so when the row is P's the key is P's",
    "entries": [
     "admin_grant_achievement"
    ],
@@ -2370,7 +2557,9 @@
    "held": [
     "players"
    ],
-   "keys": [],
+   "keys": [
+    "admin_grant_achievement | SELECT pg_advisory_xact_lock_shared(hashtext(CAST(:sid AS text))) | 0"
+   ],
    "phases": [
     "A"
    ]
@@ -2597,7 +2786,8 @@
    "phases": []
   },
   "booster_grant | UPDATE players SET gold_earned = COALESCE(gold_earned,0) + :amt WHERE id | 0": {
-   "class": "UPGRADE",
+   "class": "KEY",
+   "covers": "key = the booster's: booster_grant runs _ban_lock_and_gate over the steam_id of the player it read by discord_id, before the update; row = that player, read again by id directly after the gate, whose gold it credits, so when the row is P's the key is P's",
    "entries": [
     "booster_grant"
    ],
@@ -2605,7 +2795,9 @@
    "held": [
     "players"
    ],
-   "keys": [],
+   "keys": [
+    "_ban_lock_and_gate | SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text))) | 0"
+   ],
    "phases": [
     "A"
    ]
@@ -2684,16 +2876,6 @@
    "class": "CLEAR",
    "entries": [
     "ffa_queue_join"
-   ],
-   "fallback": "CLEAR",
-   "held": [],
-   "keys": [],
-   "phases": []
-  },
-  "ffa_queue_leave | UPDATE ffa_lobbies SET host_player_id=:h WHERE id=:lid | 0": {
-   "class": "CLEAR",
-   "entries": [
-    "ffa_queue_leave"
    ],
    "fallback": "CLEAR",
    "held": [],
@@ -2817,7 +2999,8 @@
    "phases": []
   },
   "link_discord | ORM player.discord_display_name = | 0": {
-   "class": "READ",
+   "class": "KEY",
+   "covers": "key = the code's player's: link_discord runs _ban_lock_and_gate over the steam_id of the player the code names (read by id), before the release of the Discord id from any other holder and before this store; row = that player, read again by id directly after the gate, so when the row is P's the key is P's",
    "entries": [
     "link_discord"
    ],
@@ -2825,15 +3008,17 @@
    "held": [
     "players"
    ],
-   "keys": [],
+   "keys": [
+    "_ban_lock_and_gate | SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text))) | 0"
+   ],
    "phases": [
     "A",
     "B"
-   ],
-   "why": "phase A: the route releases the Discord id from the player X who held it (existing_player.discord_id = None, a key write: UPDATE on X's row, flushed before it reads the linking player) and then writes the linking player's row. When that player is P, the deletion of P holds P's row, and when it meanwhile makes X the host of a lobby P hosted (host_player_id, a foreign key: KEY SHARE on X's row) it waits for X's row while the route waits for P's: a circle is possible; bound (iii): the deletion's wait ends at the cap and its attempt runs again; scene: test_a_peer_that_began_to_wait_first_is_not_the_one_postgresql_ends. Phase B: the reader also reads the case scrub's write of reporter_id as a foreign key check; it sets reporter_id to NULL or to the value it had, which PostgreSQL does not check, so phase B adds no circle."
+   ]
   },
   "link_discord | ORM player.discord_id = | 0": {
-   "class": "READ",
+   "class": "KEY",
+   "covers": "key = the code's player's: link_discord runs _ban_lock_and_gate over the steam_id of the player the code names (read by id), before the release of the Discord id from any other holder and before this store; row = that player, read again by id directly after the gate, so when the row is P's the key is P's",
    "entries": [
     "link_discord"
    ],
@@ -2841,15 +3026,17 @@
    "held": [
     "players"
    ],
-   "keys": [],
+   "keys": [
+    "_ban_lock_and_gate | SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text))) | 0"
+   ],
    "phases": [
     "A",
     "B"
-   ],
-   "why": "phase A: the route releases the Discord id from the player X who held it (existing_player.discord_id = None, a key write: UPDATE on X's row, flushed before it reads the linking player) and then writes the linking player's row. When that player is P, the deletion of P holds P's row, and when it meanwhile makes X the host of a lobby P hosted (host_player_id, a foreign key: KEY SHARE on X's row) it waits for X's row while the route waits for P's: a circle is possible; bound (iii): the deletion's wait ends at the cap and its attempt runs again; scene: test_a_peer_that_began_to_wait_first_is_not_the_one_postgresql_ends. Phase B: the reader also reads the case scrub's write of reporter_id as a foreign key check; it sets reporter_id to NULL or to the value it had, which PostgreSQL does not check, so phase B adds no circle."
+   ]
   },
   "link_discord | ORM player.discord_username = | 0": {
-   "class": "READ",
+   "class": "KEY",
+   "covers": "key = the code's player's: link_discord runs _ban_lock_and_gate over the steam_id of the player the code names (read by id), before the release of the Discord id from any other holder and before this store; row = that player, read again by id directly after the gate, so when the row is P's the key is P's",
    "entries": [
     "link_discord"
    ],
@@ -2857,12 +3044,13 @@
    "held": [
     "players"
    ],
-   "keys": [],
+   "keys": [
+    "_ban_lock_and_gate | SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text))) | 0"
+   ],
    "phases": [
     "A",
     "B"
-   ],
-   "why": "phase A: the route releases the Discord id from the player X who held it (existing_player.discord_id = None, a key write: UPDATE on X's row, flushed before it reads the linking player) and then writes the linking player's row. When that player is P, the deletion of P holds P's row, and when it meanwhile makes X the host of a lobby P hosted (host_player_id, a foreign key: KEY SHARE on X's row) it waits for X's row while the route waits for P's: a circle is possible; bound (iii): the deletion's wait ends at the cap and its attempt runs again; scene: test_a_peer_that_began_to_wait_first_is_not_the_one_postgresql_ends. Phase B: the reader also reads the case scrub's write of reporter_id as a foreign key check; it sets reporter_id to NULL or to the value it had, which PostgreSQL does not check, so phase B adds no circle."
+   ]
   },
   "mail_block_add | INSERT INTO mail_blocks (blocker_id, blocked_id) VALUES (:me, :t) ON CON | 0": {
    "class": "CLEAR",
@@ -3369,7 +3557,8 @@
    "phases": []
   },
   "place_ffa_bet | UPDATE players SET gold_spent = COALESCE(gold_spent,0) + :amt WHERE id = | 0": {
-   "class": "READ",
+   "class": "KEY",
+   "covers": "key = the bettor's: place_ffa_bet runs _ban_lock_and_gate over the request's steam_id (place_discord_ffa_bet passes its linked player's) before it reads the bettor; row = the bettor, read by that steam_id after the gate, whose gold it charges, so when the row is P's the key is P's",
    "entries": [
     "place_discord_ffa_bet",
     "place_ffa_bet"
@@ -3378,11 +3567,12 @@
    "held": [
     "ffa_lobbies"
    ],
-   "keys": [],
+   "keys": [
+    "_ban_lock_and_gate | SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text))) | 0"
+   ],
    "phases": [
     "A"
-   ],
-   "why": "no circle: it charges the bettor's players row only after refusing a bettor who plays in the game (member_ids, read under its lock on the lobby row), while the deletion of P waits only on lobby and series rows of games P plays in or hosts; READ because the census does not read that refusal"
+   ]
   },
   "place_lobby_bet | GoldTransaction(...) | 0": {
    "class": "CLEAR",
@@ -3419,7 +3609,7 @@
     "team_lobbies"
    ],
    "keys": [
-    "place_lobby_bet | SELECT pg_advisory_xact_lock(hashtext(:sid)) | 0"
+    "_ban_lock_and_gate | SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text))) | 0"
    ],
    "phases": [
     "A"
@@ -3448,7 +3638,8 @@
    "phases": []
   },
   "place_team_bet | UPDATE players SET gold_spent = COALESCE(gold_spent, 0) + :amt WHERE id  | 0": {
-   "class": "READ",
+   "class": "KEY",
+   "covers": "key = the bettor's: place_team_bet runs _ban_lock_and_gate over the request's steam_id (place_discord_team_bet passes its linked player's) before it reads the bettor; row = the bettor, read by that steam_id after the gate, whose gold it charges, so when the row is P's the key is P's",
    "entries": [
     "place_discord_team_bet",
     "place_team_bet"
@@ -3457,11 +3648,12 @@
    "held": [
     "team_series"
    ],
-   "keys": [],
+   "keys": [
+    "_ban_lock_and_gate | SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text))) | 0"
+   ],
    "phases": [
     "A"
-   ],
-   "why": "no circle: it charges the bettor's players row only after refusing a bettor who plays in the game ('Cannot bet on your own match'; a series' members are fixed at its formation), while the deletion of P waits only on lobby and series rows of games P plays in or hosts; READ because the census does not read that refusal"
+   ]
   },
   "presence_ping | WITH ok AS ( SELECT EXISTS ( SELECT 1 FROM steam_sessions ss WHERE ss.to | 0": {
    "class": "READ",
@@ -3883,6 +4075,7 @@
    "class": "CLEAR",
    "entries": [
     "_ffa_readmit_janitor",
+    "admin_accept_quarantine",
     "submit_ffa_match"
    ],
    "fallback": "CLEAR",
@@ -3894,6 +4087,7 @@
    "class": "CLEAR",
    "entries": [
     "_ffa_readmit_janitor",
+    "admin_accept_quarantine",
     "submit_ffa_match"
    ],
    "fallback": "CLEAR",
@@ -3905,6 +4099,7 @@
    "class": "CLEAR",
    "entries": [
     "_ffa_readmit_janitor",
+    "admin_accept_quarantine",
     "submit_ffa_match"
    ],
    "fallback": "CLEAR",
@@ -3916,6 +4111,7 @@
    "class": "CLEAR",
    "entries": [
     "_ffa_readmit_janitor",
+    "admin_accept_quarantine",
     "submit_ffa_match"
    ],
    "fallback": "CLEAR",
@@ -3927,6 +4123,7 @@
    "class": "CLEAR",
    "entries": [
     "_ffa_readmit_janitor",
+    "admin_accept_quarantine",
     "submit_ffa_match"
    ],
    "fallback": "CLEAR",
@@ -3938,6 +4135,7 @@
    "class": "CLEAR",
    "entries": [
     "_ffa_readmit_janitor",
+    "admin_accept_quarantine",
     "submit_ffa_match"
    ],
    "fallback": "CLEAR",
@@ -3949,6 +4147,7 @@
    "class": "CLEAR",
    "entries": [
     "_ffa_readmit_janitor",
+    "admin_accept_quarantine",
     "submit_ffa_match"
    ],
    "fallback": "CLEAR",
@@ -3960,6 +4159,7 @@
    "class": "CLEAR",
    "entries": [
     "_ffa_readmit_janitor",
+    "admin_accept_quarantine",
     "submit_ffa_match"
    ],
    "fallback": "CLEAR",
@@ -3971,6 +4171,7 @@
    "class": "READ",
    "entries": [
     "_ffa_readmit_janitor",
+    "admin_accept_quarantine",
     "submit_ffa_match"
    ],
    "fallback": "READ",
@@ -3995,6 +4196,7 @@
    "class": "READ",
    "entries": [
     "_ffa_readmit_janitor",
+    "admin_accept_quarantine",
     "submit_ffa_match"
    ],
    "fallback": "READ",
@@ -4019,6 +4221,7 @@
    "class": "READ",
    "entries": [
     "_ffa_readmit_janitor",
+    "admin_accept_quarantine",
     "submit_ffa_match"
    ],
    "fallback": "READ",
@@ -4480,6 +4683,7 @@
    "class": "CLEAR",
    "entries": [
     "_ffa_readmit_janitor",
+    "admin_accept_quarantine",
     "submit_ffa_match",
     "submit_match",
     "submit_team_match"
@@ -4493,6 +4697,7 @@
    "class": "CLEAR",
    "entries": [
     "_ffa_readmit_janitor",
+    "admin_accept_quarantine",
     "submit_ffa_match",
     "submit_match",
     "submit_team_match"
@@ -4506,6 +4711,7 @@
    "class": "CLEAR",
    "entries": [
     "_ffa_readmit_janitor",
+    "admin_accept_quarantine",
     "submit_ffa_match",
     "submit_match",
     "submit_team_match"
@@ -4519,6 +4725,7 @@
    "class": "READ",
    "entries": [
     "_ffa_readmit_janitor",
+    "admin_accept_quarantine",
     "submit_ffa_match",
     "submit_match",
     "submit_team_match"
@@ -4553,6 +4760,7 @@
    "class": "READ",
    "entries": [
     "_ffa_readmit_janitor",
+    "admin_accept_quarantine",
     "submit_ffa_match",
     "submit_match",
     "submit_team_match"
@@ -4614,7 +4822,8 @@
    "phases": []
   },
   "toggle_ranked | ORM player.display_name = | 0": {
-   "class": "UPGRADE",
+   "class": "KEY",
+   "covers": "key = the player's own: toggle_ranked keys the request's steam_id (shared) as its first statement, before the session check and the player read; row = the player it then reads by that steam_id and again by id, whose name it sets, so when the row is P's the key is P's",
    "entries": [
     "toggle_ranked"
    ],
@@ -4622,13 +4831,16 @@
    "held": [
     "players"
    ],
-   "keys": [],
+   "keys": [
+    "toggle_ranked | SELECT pg_advisory_xact_lock_shared(hashtext(CAST(:sid AS text))) | 0"
+   ],
    "phases": [
     "A"
    ]
   },
   "toggle_ranked | ORM player.ranked_enabled = | 0": {
-   "class": "UPGRADE",
+   "class": "KEY",
+   "covers": "key = the player's own: toggle_ranked keys the request's steam_id (shared) as its first statement, before the session check and the player read; row = the player it then reads (or creates) by that steam_id and reads again by id, whose ranked flag it sets, so when the row is P's the key is P's",
    "entries": [
     "toggle_ranked"
    ],
@@ -4636,7 +4848,9 @@
    "held": [
     "players"
    ],
-   "keys": [],
+   "keys": [
+    "toggle_ranked | SELECT pg_advisory_xact_lock_shared(hashtext(CAST(:sid AS text))) | 0"
+   ],
    "phases": [
     "A"
    ]
@@ -4818,7 +5032,8 @@
    "phases": []
   },
   "unlock_achievement | UPDATE players SET gold_earned = COALESCE(gold_earned,0) + :amt WHERE id | 0": {
-   "class": "UPGRADE",
+   "class": "KEY",
+   "covers": "key = the player's own: unlock_achievement keys the request's steam_id (shared) as its first statement, before the session check and the player read; row = the player it then reads by that steam_id and again by id, whose gold it credits, so when the row is P's the key is P's",
    "entries": [
     "unlock_achievement"
    ],
@@ -4826,7 +5041,9 @@
    "held": [
     "players"
    ],
-   "keys": [],
+   "keys": [
+    "unlock_achievement | SELECT pg_advisory_xact_lock_shared(hashtext(CAST(:sid AS text))) | 0"
+   ],
    "phases": [
     "A"
    ]
