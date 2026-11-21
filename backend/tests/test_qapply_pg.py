@@ -1069,7 +1069,10 @@ def test_c6_credit_pays_no_seat_that_did_not_play(arm, mode, monkeypatch):
     the moderator log entry's `players` holds it; the three other seats are
     paid, each by _ffa_game_awards asked for three live seats with the beaten
     count over those three, and the answer, the players rows and the ledger
-    carry exactly what the product's function returned. The control runs the
+    carry exactly what the product's function returned. Today's pay loop
+    asks twice per seat, for the XP and again with the XP before for the
+    gold parts; that is a shape, not a pin: the scene reads the asks and
+    does not count them. The control runs the
     same scene with _ffa_leave_decision wrapped to take seat 3 out of the set
     the arm names: seat 3 is then paid, so each arm's assertion can fail."""
     async def body(env):
@@ -1128,18 +1131,21 @@ def test_c6_credit_pays_no_seat_that_did_not_play(arm, mode, monkeypatch):
         place = {s: 1 + sorted(live, key=lambda x: (-results[x][0], -results[x][1])).index(s) for s in live}
         asks = [kw for kw, _out in seen]
         assert asks and all(kw["n_live"] == len(live) for kw in asks), ("C6 one live seat fewer", asks)
-        assert sorted((kw["place"], kw["beaten"]) for kw in asks) == sorted(
-            (place[s], sum(1 for x in live if place[x] > place[s])) for s in live for _ in range(2)), (
+        assert {(kw["place"], kw["beaten"]) for kw in asks} == {
+            (place[s], sum(1 for x in live if place[x] > place[s])) for s in live}, (
             "C6 the beaten counts over the live seats", asks)
         by_place = {}
         for kw, out in seen:
             by_place.setdefault(kw["place"], []).append(out)
         for s in live:
-            first, second = by_place[place[s]]
+            outs = by_place.get(place[s], [])
+            assert outs, ("C6 the seat was asked", s, place[s])
+            xp = outs[0]["xp"]
+            assert all(o["xp"] == xp for o in outs), ("C6 every ask of one seat gives one xp", s, outs)
             pid = lob.pids[lob.sids.index(s)]
-            assert (got[s]["xp"], got[s]["gold"]) == (first["xp"], second["gold"]), ("C6 the product's sum", s)
-            assert after[pid][0] - before[pid][0] == first["xp"], ("C6 XP delta", s)
-            assert after[pid][1] - before[pid][1] == second["gold"] == sum(
+            assert (got[s]["xp"], got[s]["gold"]) == (xp, outs[-1]["gold"]), ("C6 the product's sum", s)
+            assert after[pid][0] - before[pid][0] == xp, ("C6 XP delta", s)
+            assert after[pid][1] - before[pid][1] == outs[-1]["gold"] == sum(
                 v for p, _k, v in ledger if p == pid), ("C6 gold delta = ledger", s)
     run_env(monkeypatch, body)
 
