@@ -50564,8 +50564,8 @@ async def _is_admin(db: AsyncSession, steam_id: str) -> bool:
 
 
 async def _is_admin_roster(db: AsyncSession, steam_id: str) -> bool:
-    """On the admin roster (admin_users), the ban not read. Only _is_admin and
-    _require_admin_roster call it; see the latter for the one route that may."""
+    """On the admin roster (admin_users), the ban not read. Only _is_admin, _require_admin_roster and
+    _mail_lock_admin(roster=True) call it; see _require_admin_roster for the one route that may."""
     if not steam_id:
         return False
     r = await db.execute(select(AdminUser).where(AdminUser.steam_id == steam_id))
@@ -50701,9 +50701,9 @@ async def _require_admin_roster(db: AsyncSession, admin_steam_id: str, action: s
     it as it did before bans part 2a: admin_mail_broadcast, whose sender gates
     (_mail_sender_gates) answer an actively banned sender 403 "banned", after
     the idempotency replay (a retry of a broadcast that already went out gets
-    its stored answer). A banned admin still broadcasts nothing new: the
-    sender gates refuse before any write. test_ban_sweep_admin_pairs.py
-    holds the callers to that route and the gate to its place."""
+    its stored answer); its re-proof under the lock is the roster alone too,
+    _mail_lock_admin(roster=True). The sender gates refuse before any write.
+    test_ban_sweep_admin_pairs.py holds both to that route, the gate in place."""
     if not await _is_admin_roster(db, admin_steam_id):
         raise HTTPException(403, "Not an admin")
     if not _verify_admin_hmac(admin_steam_id, action, target, signature):
@@ -84623,18 +84623,18 @@ def _mail_actor_live_or_raise(rows: dict, steam_id: str) -> None:
 
 
 async def _mail_lock_admin(db: AsyncSession, admin_steam_id: str, *others: str,
-                           missing: dict | None = None, optional=(), handles: dict | None = None) -> dict:
+                           missing: dict | None = None, optional=(), handles: dict | None = None, roster: bool = False) -> dict:
     """The admin routes' entry into the lattice: lock the admin and every
-    other identity written, re-read them, and re-prove the admin grant under
-    the lock (_require_admin ran before the lock; the i18n grant route
-    re-proves the same way). The admin's authority is admin_users membership
-    (review r2): the admin's players row is locked when it exists and skipped
-    when it does not; a route that needs that row for itself (a broadcast's
-    sender) checks the returned row. Returns the re-read rows."""
+    other identity written, re-read them, and re-prove the grant under the
+    lock with _is_admin (on admin_users, review r2, and under no active ban,
+    BAN-R10). roster=True proves the roster alone (_is_admin_roster): only
+    admin_mail_broadcast hands it, whose sender gates answer the admin's ban
+    after the replay (_require_admin_roster). The admin's players row is
+    locked when it exists and skipped when it does not. Returns the rows."""
     rows = await _mail_lock_identities(db, admin_steam_id, *others, missing=missing,
                                        optional={str(admin_steam_id), *(str(s) for s in optional)},
                                        handles=handles)
-    if not await _is_admin(db, admin_steam_id):
+    if not (await _is_admin_roster(db, admin_steam_id) if roster else await _is_admin(db, admin_steam_id)):
         raise HTTPException(status_code=403, detail="Not an admin")
     return rows
 
@@ -86076,8 +86076,8 @@ async def admin_mail_broadcast(req: _AdminMailBroadcastReq, db: AsyncSession = D
     key = _mail_parse_key(req.idempotency_key)
     fp = _mail_request_fp("broadcast", subject=req.subject, body=req.body)
     mfp = _mail_request_message_fp("broadcast", subject=req.subject, body=req.body)
-    # The roster check alone: the acting admin's ban is the sender gates'
-    # (below, after the replay), answered "banned" (_require_admin_roster).
+    # The roster check alone, here and under the lock (roster=True below): the acting
+    # admin's ban is the sender gates' (after the replay), answered "banned".
     await _require_admin_roster(db, req.admin_steam_id, "mail_broadcast", str(key), req.hmac_signature)
     if req.actor_steam_id and req.actor_steam_id != req.admin_steam_id:
         raise HTTPException(status_code=400, detail="actor_mismatch")
@@ -86085,7 +86085,7 @@ async def admin_mail_broadcast(req: _AdminMailBroadcastReq, db: AsyncSession = D
     # (the lattice). A broadcast is a message and needs its sender row
     # (mail_messages.sender_id) — the one privileged route where admin_users
     # membership alone is not enough; the re-read decides, under the lock.
-    rows = await _mail_lock_admin(db, req.admin_steam_id)
+    rows = await _mail_lock_admin(db, req.admin_steam_id, roster=True)
     me_row = rows.get(req.admin_steam_id)
     if me_row is None or me_row.get("deleted_at") is not None:
         raise HTTPException(status_code=404, detail="admin_player_unknown")

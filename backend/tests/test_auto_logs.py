@@ -7743,9 +7743,18 @@ def test_the_durability_barrier_is_charged_to_the_marked_span(logdir, verified,
         "the blob's directory barrier is no longer inside the function the "
         "section's write hop calls")
 
+    import concurrent.futures
+    import threading
     opened = {}
     stalled = []
     flush_began = []
+    # The stall is a wait on this event, bounded by `stall`: an arm whose
+    # handler waits the stall out (the mutant) waits exactly as long as the
+    # old `time.sleep(stall)` made it, and an arm answered by the ceiling has
+    # the stall released at its answer (`_attempt`).
+    release = threading.Event()
+    WORK_END_CAP_S = 30.0
+    ABSENT = object()
 
     def rec_open(path, flags, mode=0o666):
         fd = os.open(str(path), flags, mode)
@@ -7767,14 +7776,24 @@ def test_the_durability_barrier_is_charged_to_the_marked_span(logdir, verified,
         if opened.get(fd, "").endswith(".log.gz"):
             stalled.append(opened[fd])
             flush_began.append(time.monotonic())
-            time.sleep(stall)
+            release.wait(stall)
 
     def _attempt(db, handler=None):
         """What the HANDLER took, not what the loop took to drain.
 
         A stalled flush leaves a worker thread running after the handler has
         answered, and nothing takes a thread back once it has picked the
-        work up. Round 7's hops ran on the loop's default executor, which
+        work up. So, for the arm's duration, the case records the future of
+        every call put on the module's two pools (an instance attribute over
+        each pool's `submit`, taken off again in the `finally`); the stall is
+        RELEASED when the handler has answered, and the arm waits (at most
+        WORK_END_CAP_S) until those calls have ended -- the write's directory
+        flush and the cleanup that waited for the write's lock -- before it
+        puts `os` back and returns. Those calls then run under this case's
+        own patches; left parked, they woke seconds after the case had
+        returned and ran under a later case's (AL1). The release comes after
+        the clock has stopped, so it changes no timing below. Round 7's hops
+        ran on the loop's default executor, which
         `asyncio.run` waits for on its way to closing the loop, so timing the
         run measured that teardown and reported a deadline as missed on a
         request that met it; since round 8 they run on the module's volume
@@ -7803,12 +7822,37 @@ def test_the_durability_barrier_is_charged_to_the_marked_span(logdir, verified,
             seen["took"] = time.monotonic() - (
                 flush_began[-1] if flush_began else started)
 
+        submitted = []
+        pools = (auto_logs._VOLUME_POOL, auto_logs._CPU_POOL)
+        priors = []
+
+        def recording(real_submit):
+            def submit(fn, /, *args, **kwargs):
+                fut = real_submit(fn, *args, **kwargs)
+                submitted.append(fut)
+                return fut
+            return submit
+
         real_os = auto_logs.os
         auto_logs.os = _OsProxy(open=rec_open, fsync=slow_fsync)
         try:
+            for pool in pools:
+                priors.append((pool, vars(pool).get("submit", ABSENT)))
+                pool.submit = recording(pool.submit)
             _run(call())
         finally:
+            for pool, prior in reversed(priors):
+                if prior is ABSENT:
+                    vars(pool).pop("submit", None)
+                else:
+                    pool.submit = prior
+            release.set()
+            _done, left = concurrent.futures.wait(submitted, timeout=WORK_END_CAP_S)
             auto_logs.os = real_os
+            release.clear()
+        assert not left, (
+            "the arm's pool work had not ended %.0fs after its stall was "
+            "released: %d call(s) still running" % (WORK_END_CAP_S, len(left)))
         return seen["refused"], seen["took"]
 
     # LIVE: a flush that does not return inside T ends the span.

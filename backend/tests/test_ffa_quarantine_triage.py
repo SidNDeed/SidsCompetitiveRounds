@@ -498,17 +498,43 @@ def _app():
     return app
 
 
+# The routes' read budget (main._TRIAGE_READ_BUDGET_S, 1.0 s: no read starts
+# once t0 + the budget has passed) as the harness sets it for a test whose
+# subject is not the budget. The handle's _admit reads the module value at
+# every call, so the monkeypatch reaches every read of the request.
+WIDE_READ_BUDGET_S = 30.0
+
+
 class Env:
     """database.py's own engines redirected to the lane database, a fresh
-    schema, and a seeding engine of its own."""
+    schema, and a seeding engine of its own.
 
-    def __init__(self, monkeypatch):
+    A test whose subject is not the read budget needs its routes to get past
+    that wall-clock bound to reach its premise, so Env sets the budget to
+    WIDE_READ_BUDGET_S for it. A test whose subject is the budget passes
+    product_read_budget=True and keeps the product's value: K2c and K21 (the
+    budget is part of how a route releases its locks within 5.5 s, and their
+    verdict already reads a case (i) route that did not answer 200 as NO
+    VERDICT), K6c and K20 (they label a read the budget stopped). The
+    server-side bounds _triage_read_txn sets (statement_timeout 2 s,
+    lock_timeout 1 s, idle_in_transaction_session_timeout 1 s) are literals
+    of its statement, which no test can widen: a read transaction one of
+    them ends makes the route answer 503 "ended early", and a test that
+    needs a 200 reports that answer as NO VERDICT (_reached). One case stays
+    a plain assertion: a count that V2 or D1 runs in its own savepoint and
+    that the 2 s bound cancels leaves the route answering 200 without that
+    count, and the test's own assertion on the count reads it."""
+
+    def __init__(self, monkeypatch, product_read_budget=False):
         self.mp = monkeypatch
         self._seats = None
+        self.product_read_budget = product_read_budget
 
     async def __aenter__(self):
         self.url = make_url(require_pg())
         await _clean_slate(self.url)
+        if not self.product_read_budget:
+            self.mp.setattr(main, "_TRIAGE_READ_BUDGET_S", WIDE_READ_BUDGET_S)
         self.mp.setattr(main, "ADMIN_HMAC_SECRET", ADMIN_SECRET)
         self.mp.setattr(main, "MATCH_HMAC_SECRET", "")
         self.mp.setenv("API_SECRET_KEY", INTERNAL_KEY)
@@ -644,7 +670,39 @@ class Env:
                                      headers={"X-Internal-Key": INTERNAL_KEY})
 
 
+TRIAGE_ENDED_EARLY = re.compile(r"the view's read transaction ended early \((\w+)\); reopen the view")
+
+
+def _reached(resp, premise="the route answers 200"):
+    """NO VERDICT (a failure, never a pass) when the route answered 503
+    because its read transaction ended early: one of the server-side bounds
+    _triage_read_txn sets, or a lost connection, ended it before the test's
+    premise was reached. Any other answer is left to the caller's own
+    assertions."""
+    if resp.status_code == 503:
+        try:
+            body = resp.json()
+        except ValueError:
+            body = None
+        detail = body.get("detail") if isinstance(body, dict) else None
+        if isinstance(detail, str) and TRIAGE_ENDED_EARLY.fullmatch(detail):
+            pytest.fail(f"NO VERDICT (not a pass): premise not reached ({premise}): a server-side bound of"
+                        f" the read transaction, which this test does not test, or a lost connection ended"
+                        f" it early: {detail}")
+    return resp
+
+
+def _plant_reached(n, at, resp):
+    """NO VERDICT (a failure, never a pass) when the route stopped before the
+    handle read a test plants at: the test's premise was not reached. The
+    route's answer, which names why it stopped, is in the message."""
+    if n < at:
+        pytest.fail(f"NO VERDICT (not a pass): premise not reached (the planted read {at}): the route made"
+                    f" {n} handle read(s) and answered {resp.status_code}: {resp.text[:300]}")
+
+
 def ok(resp):
+    _reached(resp)
     assert resp.status_code == 200, (resp.status_code, resp.text[:2000])
     return resp.json()
 
@@ -892,9 +950,12 @@ def test_pg_k2_a_capture_commits_while_the_route_is_open(route, monkeypatch, cap
                                    "no database blocker observed; dispatch delay recorded")
     _k2c_record("K2-RECORD " + json.dumps(state, sort_keys=True), [], capsys)
     held = state["held"]
+    if held is None:
+        _reached(response, "the route reaches its quarantine read")
     assert held is not None, ("FIX2 M5 capture premise", "the route never reached its quarantine read", state)
     assert held[0] == "committed", ("FIX2 M5 capture during route", state)
     assert held[1] <= 2.0, ("FIX2 M5 capture two-second bound", state)
+    _reached(response)
     assert response.status_code == 200, (response.status_code, response.text[:500], state)
     assert outcome == "recorded", (outcome, state)
 
@@ -931,11 +992,24 @@ class _Thread(threading.Thread):
             self.done_at = time.monotonic()
 
 
-async def _observe(url, pid_box, t0_box, cap_s=45.0, timing=None):
+def _k2c_wait_ready(event, thread, cap_s=30.0):
+    """Wait at most cap_s for a worker's ready signal; False when it did not
+    come (the worker ended first, or the cap passed)."""
+    deadline = time.monotonic() + cap_s
+    while not event.wait(0.05):
+        if not thread.is_alive() or time.monotonic() >= deadline:
+            return event.is_set()
+    return True
+
+
+async def _observe(url, pid_box, t0_box, cap_s=45.0, timing=None, ready=None):
     """The lock observer: samples pg_locks every 50 ms on its own connection,
     each sample stamped with time.monotonic() -- the clock t0 is taken on --
     both when its query starts (tick) and when it returns (at). It stops
-    only after a sample that STARTED at or past t0 + 12 s (or at its cap)."""
+    only after a sample that STARTED at or past t0 + 12 s (or at its cap).
+    It sets `ready` once its first sample is taken: the case calls the route
+    only after that, so the observer's connection setup and its first query
+    are never inside the window the verdict reads."""
     conn = await _pg(url)
     samples = []
     if timing is not None:
@@ -962,6 +1036,8 @@ async def _observe(url, pid_box, t0_box, cap_s=45.0, timing=None):
                 "state": act["state"] if act else None,
                 "waiting": sorted({(r["pid"], names[r["relation"]], r["mode"]) for r in rows if not r["granted"]}),
             })
+            if ready is not None and not ready.is_set():
+                ready.set()   # the first sample is taken
             t0 = t0_box.get("t0")
             if (t0 is not None and tick >= t0 + K2C_WATCH_S) or tick - start > cap_s:
                 break
@@ -1056,13 +1132,25 @@ async def _hold_capture_key(url, group, t0_box, ready, release_s, timing, wait_c
         await connection.close()
 
 
-async def _alter(url, timing=None):
+K2C_ALTER_GO_CAP_S = 60.0    # the ALTER thread's wait for the trigger's go, from its connection
+
+
+async def _alter(url, timing, ready, go, cancel):
+    """The ALTER: its connection is opened and `ready` set before the case
+    calls the route; the statement is issued when the trigger sets `go`. It
+    returns None, issuing nothing, when `cancel` is set first (the route
+    ended without reaching the trigger) or when no go came within
+    K2C_ALTER_GO_CAP_S of its connection."""
     connection = await _pg(url)
+    timing["alter_connected"] = time.monotonic()
     try:
+        ready.set()
+        while not go.is_set():
+            if cancel.is_set() or time.monotonic() - timing["alter_connected"] >= K2C_ALTER_GO_CAP_S:
+                return None
+            await asyncio.sleep(0.002)
         await connection.execute("ALTER TABLE match_report_quarantine ADD COLUMN k2c_probe integer")
-        completed = time.monotonic()
-        if timing is not None:
-            timing["alter_done"] = completed
+        completed = timing["alter_done"] = time.monotonic()
         return completed
     finally:
         await connection.close()
@@ -1342,7 +1430,7 @@ async def _k2c_case(case, route, monkeypatch, capsys, capture_key_until=None, ou
     detail = []
     ended = []
     sent = []
-    async with Env(monkeypatch) as env:
+    async with Env(monkeypatch, product_read_budget=True) as env:
         fx = await _k2c_fixture(env)
         detail.append(await _warm_route(env, route, fx["l1"]))
         capsys.readouterr()      # what the untimed call printed is not this case's
@@ -1370,8 +1458,21 @@ async def _k2c_case(case, route, monkeypatch, capsys, capture_key_until=None, ou
             assert capture_ready.wait(30), "NO VERDICT: capture preparation did not complete"
             assert box.get("capture_prepared") is not None, (
                 "NO VERDICT: capture preparation failed", box.get("capture_error"), box.get("capture_phases"))
-            threads["observer"] = _Thread("k2c-observer", lambda: _observe(url, pid_box, t0_box, timing=box))
+            # Every connection a thread of this case uses is open before the
+            # route is called, so no connection setup falls inside the timed
+            # window: the capture's (prepared above), the observer's (its
+            # first sample taken), case (iv)'s holder's and K21's key holder's
+            # (their locks taken), the ALTER's (open, waiting for the
+            # trigger's go). The route's own connection is the case engine's
+            # one pooled connection, opened by the SHOW above. A signal that
+            # does not come is NO VERDICT, never a pass.
+            observer_ready = threading.Event()
+            threads["observer"] = _Thread("k2c-observer", lambda: _observe(url, pid_box, t0_box, timing=box,
+                                                                           ready=observer_ready))
             threads["observer"].start()
+            assert _k2c_wait_ready(observer_ready, threads["observer"]), (
+                "NO VERDICT: the lock observer took no first sample before the request",
+                repr(threads["observer"].error))
             if case == "iv":
                 ready = threading.Event()
                 threads["holder"] = _Thread("k2c-holder", lambda: _hold_staggered(url, base_box, ready))
@@ -1383,7 +1484,12 @@ async def _k2c_case(case, route, monkeypatch, capsys, capture_key_until=None, ou
                     url, fx["capture_kw"]["group_id"], t0_box, key_ready, capture_key_until, box))
                 threads["key"].start()
                 assert key_ready.wait(15), "the K21 holder never took the capture's advisory key"
-            threads["alter"] = _Thread("k2c-alter", lambda: _alter(url, box))
+            alter_ready, alter_go, alter_cancel = threading.Event(), threading.Event(), threading.Event()
+            threads["alter"] = _Thread("k2c-alter", lambda: _alter(url, box, alter_ready, alter_go, alter_cancel))
+            threads["alter"].start()
+            assert _k2c_wait_ready(alter_ready, threads["alter"]), (
+                "NO VERDICT: the ALTER's connection was not open before the request",
+                repr(threads["alter"].error))
             orig_ended = main._triage_ended_early
 
             def ended_early(exc):
@@ -1410,7 +1516,8 @@ async def _k2c_case(case, route, monkeypatch, capsys, capture_key_until=None, ou
                 box["trigger"] = time.monotonic()
                 box["route_pid"] = pid_box.get("pid")
                 base_box["base"] = box["trigger"]
-                threads["alter"].start()
+                box["alter_standing_at_trigger"] = alter_ready.is_set() and threads["alter"].is_alive()
+                alter_go.set()
                 time.sleep(0.15)
                 box["capture_dispatch"] = time.monotonic()
                 capture_go.set()
@@ -1474,6 +1581,7 @@ async def _k2c_case(case, route, monkeypatch, capsys, capture_key_until=None, ou
                 box["status"] = resp.status_code
                 detail.append(f"response {resp.status_code}: {resp.text[:160]}")
             box["route_end"] = time.monotonic()
+            alter_cancel.set()     # an ALTER the trigger never released issues nothing
             for name in ("alter", "capture", "holder", "key", "observer"):
                 th = threads.get(name)
                 if th is not None and th.ident is not None:
@@ -1595,6 +1703,8 @@ async def _k2c_case(case, route, monkeypatch, capsys, capture_key_until=None, ou
                        holder_commit_s=stage_record["holder_commit_s"])
     verdict, line = _k2c_verdict(case, route, box)
     _k2c_record(line, detail, capsys)
+    if box.get("alter_standing_at_trigger") is False:
+        return "NO_VERDICT", "the ALTER's connection was not standing at the trigger; " + line
     return verdict, line
 
 
@@ -1906,7 +2016,7 @@ def test_pg_k6b_a_tailless_key_leaves_d_distance_and_c2_undefined(monkeypatch):
 
 def test_pg_k6c_a_201_row_lobby_is_read_whole_or_labelled_partial(monkeypatch):
     async def body():
-        async with Env(monkeypatch) as env:
+        async with Env(monkeypatch, product_read_budget=True) as env:
             ids = await env.seats()
             lid = await env.lobby(games_played=45)
             mids = [uuid.uuid4() for _ in range(201)]
@@ -1980,7 +2090,7 @@ def test_pg_k20_pt3_makes_no_lobby_wide_statement_unless_every_comparison_ran(ca
     unread = case.endswith("steam-map-unread")
 
     async def body():
-        async with Env(monkeypatch) as env:
+        async with Env(monkeypatch, product_read_budget=True) as env:
             ids = await env.seats()
             lid = await env.lobby(games_played=n)
             if n:
@@ -2352,6 +2462,8 @@ def test_pg_k15_no_statement_runs_after_the_commit(monkeypatch):
             rs = [await env.v1(), await env.v2("ffa", w["lid"]), await env.d1()]
             return rs, before, await env.checksums(TEN), database.post_commit_seal_stats["refused"]
     rs, before, after, refused = run(body())
+    for r in rs:
+        _reached(r)
     assert [r.status_code for r in rs] == [200, 200, 200], [r.text[:300] for r in rs]
     assert refused == 0
     assert before == after
@@ -2612,8 +2724,9 @@ def _k22_run(monkeypatch, kind, route, where):
 @pytest.mark.parametrize("kind,route", K22_CASES)
 def test_pg_k22_a_gap_the_idle_bound_ends_answers_503_never_500(kind, route, monkeypatch):
     whole, resp, n = _k22_run(monkeypatch, kind, route, "in")
+    _reached(whole, "the unplanted call answers 200")
     assert whole.status_code == 200, whole.text[:500]
-    assert n >= K22_AT[route], f"the plant was not reached: {n} read(s)"
+    _plant_reached(n, K22_AT[route], resp)
     assert resp.status_code != 500, resp.text[:500]
     assert resp.status_code == 503, (resp.status_code, resp.text[:500])
     detail = resp.json()["detail"]
@@ -2623,7 +2736,9 @@ def test_pg_k22_a_gap_the_idle_bound_ends_answers_503_never_500(kind, route, mon
 @pytest.mark.parametrize("kind,route", K22_CASES)
 def test_pg_k22_twin_the_same_gap_after_the_commit_answers_200(kind, route, monkeypatch):
     whole, resp, n = _k22_run(monkeypatch, kind, route, "after")
+    _reached(whole, "the unplanted call answers 200")
     assert whole.status_code == 200, whole.text[:500]
+    _reached(resp, "the route reaches its COMMIT, after which the gap runs")
     assert n == 1, f"the gap ran {n} time(s)"
     assert resp.status_code == 200, (resp.status_code, resp.text[:500])
 
@@ -2795,7 +2910,8 @@ def _k23_route(monkeypatch, route, make):
     return run(body())
 
 
-def _k23_503(resp, ops, state):
+def _k23_503(resp, ops, state, at):
+    _plant_reached(ops["n"], at, resp)
     assert ops["raised"] == 1, ops
     assert resp.status_code != 500, resp.text[:500]
     assert resp.status_code == 503, (resp.status_code, resp.text[:500])
@@ -2806,14 +2922,14 @@ def _k23_503(resp, ops, state):
 def test_pg_k23_every_captured_shape_answers_503(shape, route, monkeypatch):
     make, state = K23_SHAPES[shape]
     resp, ops = _k23_route(monkeypatch, route, make)
-    _k23_503(resp, ops, state)
+    _k23_503(resp, ops, state, K22_AT[route])
 
 
 @pytest.mark.parametrize("branch", list(K23_BRANCHES))
 def test_pg_k23_each_classifier_branch_alone_answers_503(branch, monkeypatch):
     make, state = K23_BRANCHES[branch]
     resp, ops = _k23_route(monkeypatch, "V1", make)
-    _k23_503(resp, ops, state)
+    _k23_503(resp, ops, state, K22_AT["V1"])
 
 
 def test_pg_k23_a_lost_connection_outranks_a_cancelled_count(monkeypatch):
@@ -2844,6 +2960,9 @@ def test_pg_k23_a_lost_connection_outranks_a_cancelled_count(monkeypatch):
             monkeypatch.setattr(main, "_quarantine_later_rated_count", count)
             return await env.v2("ffa", w["lid"]), calls
     resp, calls = run(body())
+    if calls["n"] == 0:
+        pytest.fail(f"NO VERDICT (not a pass): premise not reached (V2's first later-rated count): the route"
+                    f" answered {resp.status_code} before it: {resp.text[:300]}")
     assert calls["n"] >= 1, calls
     assert resp.status_code == 503, (resp.status_code, resp.text[:500])
     assert resp.json()["detail"] == "the view's read transaction ended early (08003); reopen the view"
@@ -2877,6 +2996,7 @@ def test_pg_k23_twin_an_unrelated_error_leaves_the_route_as_before(error, route,
             monkeypatch.setattr(main, "_triage_read_txn", txn)
             return await _k22_call(env, route, w), ops, left
     resp, ops, left = run(body())
+    _plant_reached(ops["n"], K22_AT[route], resp)
     assert ops["n"] >= K22_AT[route], ops
     assert resp.status_code == 500, (resp.status_code, resp.text[:500])
     want = ValueError if error == "ValueError" else sa_exc.IntegrityError
@@ -2891,6 +3011,11 @@ def test_pg_k23_twin_an_unrelated_error_leaves_the_route_as_before(error, route,
 @pytest.mark.parametrize("route", K22_ROUTES)
 def test_pg_c1_collection_is_off_from_statement_1_to_the_commit_and_restored_after(route, monkeypatch):
     seen = {"reads": [], "build": []}
+    # The hold's own timer (_TRIAGE_GC_HOLD_MAX_S, 10 s; acquire reads the
+    # module value when it takes the hold) is the next test's subject, not
+    # this one's: set wide, so a slow request cannot end the hold before its
+    # COMMIT. The read budget is wide through Env.
+    monkeypatch.setattr(main, "_TRIAGE_GC_HOLD_MAX_S", 60.0)
 
     async def body():
         async with Env(monkeypatch) as env:
@@ -2921,6 +3046,8 @@ def test_pg_c1_collection_is_off_from_statement_1_to_the_commit_and_restored_aft
 
     assert gc.isenabled()
     first, after_first, second, after_second = run(body())
+    _reached(first)
+    _reached(second)
     assert first.status_code == 200 and second.status_code == 200, (first.text[:300], second.text[:300])
     assert seen["reads"] and not any(seen["reads"]), seen
     assert seen["build"] == [True, False], seen

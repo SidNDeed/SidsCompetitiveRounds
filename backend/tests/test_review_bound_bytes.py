@@ -13,8 +13,10 @@ Bound and tested here:
              off, build_no_bytecode.py after the code copy): what covers the
              modules imported before review_boot (review_boot, main.py);
   entry      the api entry point in a fresh process: the repository modules
-             run before review_boot are main, database and flag_evidence,
-             none is a closure module, and install() recorded nothing;
+             run before review_boot are main, database, flag_evidence and
+             identity_order (one pure function, no repository import, no
+             closure module), none is a closure module, and install()
+             recorded nothing;
   caches     a header-valid cache whose code differs from its source, beside
              the source, under PYTHONPYCACHEPREFIX and at an optimisation
              level, carrying a WITNESS that fires when it executes: with
@@ -164,8 +166,9 @@ def test_m2_the_api_entry_point_runs_no_closure_module_before_review_boot():
     """The api process (uvicorn main:app imports the app module by name with
     the app directory on sys.path) in a fresh interpreter: at the FIRST lookup
     of review_boot, asked for by main.py, the repository modules already run
-    are exactly main, database and flag_evidence, and no module in the table
-    is a closure module by name or by file; install() then recorded nothing
+    are exactly main, database, flag_evidence and identity_order (one pure
+    function, no repository import, no closure module), and no module in the
+    table is a closure module by name or by file; install() then recorded nothing
     and put the source-only finder first. The modules uvicorn itself imports
     before the app are third-party and are not in this measurement."""
     env = dict(os.environ, PYTHONDONTWRITEBYTECODE="1")
@@ -173,7 +176,8 @@ def test_m2_the_api_entry_point_runs_no_closure_module_before_review_boot():
                          timeout=300, env=env)
     assert out.returncode == 0, out.stderr
     assert out.stdout.splitlines() == ["prior none", "finder_first True", "by main.py",
-                                       "repository database,flag_evidence,main", "closure none"]
+                                       "repository database,flag_evidence,identity_order,main",
+                                       "closure none"]
 
 
 # -- in this process ---------------------------------------------------------------------

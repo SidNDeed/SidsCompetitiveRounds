@@ -28,6 +28,7 @@ registered, derived from 386's own text (an earlier wording of the grace, as
 "two full points"). Source-reading only:
 no database, no game, no dotnet; test_migration_reruns.py runs 396.
 """
+import ast
 import hashlib
 import importlib.util
 import json
@@ -35,6 +36,8 @@ import os
 import re
 import sys
 from pathlib import Path
+
+import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import test_faq_client_ladder as ladder  # noqa: E402  (its readers and catalogue parser)
@@ -229,14 +232,80 @@ def _ids_in(text):
     return set(re.findall(r"'([0-9a-f]{16})'", text))
 
 
+# The functions that apply the grace rule to a game's seats, each computing
+# `unrated = excluded | graced` exactly once: the two paths that rate or pay
+# a game. A third copy anywhere in main.py fails the count below, so a person
+# reads it and names it here.
+UNRATED_FUNCTIONS = {
+    "submit_ffa_match": "the report route: settles a game's report, rates it and pays its game XP and Gold",
+    "_qapply_credit": "the Credit action of a held report (QAPPLY-1): pays a quarantined report's game XP "
+                      "and Gold by the same decision",
+}
+UNRATED_LINE = "    unrated = excluded | graced\n"
+
+
+def _function_body(src, name):
+    """The text of the top-level function `name`, from its def to the next
+    top-level def, class or decorator (the span the route's test reads)."""
+    starts = [m.start() for m in re.finditer(r"^(?:async def|def) %s\(" % re.escape(name), src, re.M)]
+    assert len(starts) == 1, (name, len(starts))
+    nxt = re.compile(r"^(?:@|async def |def |class )", re.M).search(src, starts[0] + 10)
+    return src[starts[0]:nxt.start() if nxt else len(src)]
+
+
+def _graced_lines(body):
+    return [line.strip() for line in body.split("\n")
+            if re.search(r"\bgraced\b", line) and not line.strip().startswith("#")]
+
+
+def _unrated_problems(src):
+    """Each function of UNRATED_FUNCTIONS computes `unrated` this way exactly
+    once inside its own span, and main.py holds the line nowhere else."""
+    out = [("span", fn, _function_body(src, fn).count(UNRATED_LINE))
+           for fn in UNRATED_FUNCTIONS if _function_body(src, fn).count(UNRATED_LINE) != 1]
+    if src.count(UNRATED_LINE) != len(UNRATED_FUNCTIONS):
+        out.append(("file", src.count(UNRATED_LINE), len(UNRATED_FUNCTIONS)))
+    return out
+
+
+def _decision_call(body, fn):
+    calls = [n for n in ast.walk(ast.parse(body)) if isinstance(n, ast.Call)
+             and isinstance(n.func, ast.Name) and n.func.id == "_ffa_leave_decision"]
+    assert len(calls) == 1, (fn, len(calls))
+    return {k.arg: ast.unparse(k.value) for k in calls[0].keywords}
+
+
+GRACE_ARGUMENTS = {"grace_half": "_ffa_leave_grace_half_points(FFA_POINTS_TO_WIN_ROUND)",
+                   "points_to_win_round": "FFA_POINTS_TO_WIN_ROUND"}
+
+
+def _credit_grace_problems(src):
+    """The Credit action reads the grace set as the route does: its code
+    lines naming `graced` are the decision that returns it and the line that
+    joins it to `unrated`, and its decision takes the route's threshold
+    arguments, both the pinned text."""
+    out = []
+    lines = _graced_lines(_function_body(src, "_qapply_credit"))
+    if lines != ["ghosts, graced, _log = _ffa_leave_decision(", "unrated = excluded | graced"]:
+        out.append(("graced_lines", lines))
+    credit = _decision_call(_function_body(src, "_qapply_credit"), "_qapply_credit")
+    route = _decision_call(_function_body(src, "submit_ffa_match"), "submit_ffa_match")
+    for arg, want in GRACE_ARGUMENTS.items():
+        if credit.get(arg) != want or route.get(arg) != want:
+            out.append(("threshold", arg, credit.get(arg), route.get(arg)))
+    return out
+
+
 def test_the_rule_the_sites_state_is_the_rule_the_server_applies():
     """The threshold the sites state is the one the server computes, in the
     unit the client reports: FFA_LEAVE_GRACE_FULL_POINTS full points of
     FFA_POINTS_TO_WIN_ROUND half points each, and the client's own
-    FfaMode.PointsToWinRound is the server's. A graced seat joins `unrated`,
-    which the rating and the game XP and Gold read, while the achievement
-    candidates are every reported seat outside `excluded`, which grace does
-    not enter: what "can still be earned" says."""
+    FfaMode.PointsToWinRound is the server's. A graced seat joins `unrated`
+    on both paths that rate or pay a game, the report route and the Credit
+    action of a held report (UNRATED_FUNCTIONS); `unrated` is what the
+    route's rating and both paths' game XP and Gold read. The route's
+    achievement candidates are every reported seat outside `excluded`, which
+    grace does not enter: what "can still be earned" says."""
     main = ladder._read(MAIN)
     full = re.findall(r"^FFA_LEAVE_GRACE_FULL_POINTS = (\d+)$", main, re.M)
     per = re.findall(r"^FFA_POINTS_TO_WIN_ROUND = (\d+)$", main, re.M)
@@ -251,7 +320,7 @@ def test_the_rule_the_sites_state_is_the_rule_the_server_applies():
     phrase = "%s half points in total, whether or not any became" % THRESHOLD_WORDS[threshold]
     for site, (_path, _decl, rule) in SITES.items():
         assert " ".join(rule.split()).count(phrase) == 1, (site, phrase)
-    assert main.count("    unrated = excluded | graced\n") == 1
+    assert _unrated_problems(main) == [], _unrated_problems(main)
     assert len(re.findall(r"_ach_players = sorted\(\s*\(p for p in report\.players "
                           r"if p\.steam_id not in excluded\)", main)) == 1
 
@@ -273,6 +342,164 @@ def test_the_grace_set_is_read_only_by_unrated_and_the_reasons():
         '| ({"grace"} if p.steam_id in graced else set())',
         "unrated = excluded | graced",
     ], lines
+
+
+def test_the_credit_action_reads_the_grace_set_as_the_route_does():
+    """The Credit action of a held report (_qapply_credit, QAPPLY-1) applies
+    the rule the sites state by the route's own decision: inside its span the
+    code lines naming `graced` are exactly two, the decision that returns it
+    and `unrated = excluded | graced`, and the decision is
+    _ffa_leave_decision with the route's grace_half and points_to_win_round
+    arguments. Its read_absent is True and the route's is `not _rdm_on`; the
+    two are the same call wherever the Credit action decides, because it
+    refuses a readmission lobby (409) before its decision and
+    `_asm_readmit_on` is that lobby's readmit_v1 flag alone, so the route's
+    switch is True for every lobby the Credit action decides on
+    (_readmit_problems checks each step)."""
+    problems = _credit_grace_problems(ladder._read(MAIN))
+    assert problems == [], problems
+
+
+def _in_span(src, fn, old, new):
+    body = _function_body(src, fn)
+    assert body.count(old) == 1, (fn, old)
+    return src.replace(body, body.replace(old, new), 1)
+
+
+def _control_source(name):
+    src = ladder._read(MAIN)
+    if name == "line_out_of_credit":
+        return _in_span(src, "_qapply_credit", UNRATED_LINE, "    unrated = excluded\n")
+    if name == "third_copy":
+        return src + "\n\ndef _planted_third(excluded, graced):\n" + UNRATED_LINE + "    return unrated\n"
+    if name == "credit_threshold":
+        return _in_span(src, "_qapply_credit", "_ffa_leave_grace_half_points(FFA_POINTS_TO_WIN_ROUND)",
+                        "_ffa_leave_grace_half_points(FFA_POINTS_TO_WIN_ROUND + 1)")
+    if name == "credit_reads_graced_again":
+        return _in_span(src, "_qapply_credit", UNRATED_LINE, UNRATED_LINE + "    _seen = len(graced)\n")
+    assert name == "as_it_stands", name
+    return src
+
+
+@pytest.mark.parametrize("name,want", [
+    ("line_out_of_credit", ("span", "file", "graced_lines")),
+    ("third_copy", ("file",)),
+    ("credit_threshold", ("threshold",)),
+    ("credit_reads_graced_again", ("graced_lines",)),
+    ("as_it_stands", ()),
+])
+def test_control_the_two_paths_pins_read_changed_source(name, want):
+    """Each control changes main.py's text in memory, never a file: the
+    count by span, the count over the file and the Credit action's reading
+    of the grace set each report it by its own word; the text as it stands
+    is clean."""
+    src = _control_source(name)
+    words = sorted({p[0] for p in _unrated_problems(src) + _credit_grace_problems(src)})
+    assert words == sorted(want), (name, words, _unrated_problems(src), _credit_grace_problems(src))
+
+
+def _fn_node(src, name):
+    node = ast.parse(_function_body(src, name)).body[0]
+    assert isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == name, name
+    return node
+
+
+def _readmit_problems(src):
+    """Why the Credit action's read_absent=True and the route's
+    read_absent=not _rdm_on might NOT be the same call, each by a word:
+    the two keywords; the route's one binding of _rdm_on from
+    `await _asm_readmit_on(db, lobby)`; _asm_readmit_on's one return, the
+    lobby's readmit_v1 flag; and, in _qapply_credit, an
+    `if lobby.get('readmit_v1'):` raising _QapplyRefused as a top-level
+    statement before the one holding the decision, with `lobby` not bound
+    again from it to the decision."""
+    out = []
+    if _decision_call(_function_body(src, "_qapply_credit"), "_qapply_credit").get("read_absent") != "True":
+        out.append(("credit_read_absent",))
+    if _decision_call(_function_body(src, "submit_ffa_match"), "submit_ffa_match").get("read_absent") \
+            != "not _rdm_on":
+        out.append(("route_switch",))
+    route = _fn_node(src, "submit_ffa_match")
+    binds = [n for n in ast.walk(route) if isinstance(n, ast.Assign)
+             and any(isinstance(t, ast.Name) and t.id == "_rdm_on" for t in n.targets)]
+    stores = [n for n in ast.walk(route) if isinstance(n, ast.Name) and n.id == "_rdm_on"
+              and isinstance(n.ctx, (ast.Store, ast.Del))]
+    if len(binds) != 1 or len(stores) != 1 or ast.unparse(binds[0].value) != "await _asm_readmit_on(db, lobby)":
+        out.append(("route_binding", [ast.unparse(b) for b in binds]))
+    rets = [n for n in ast.walk(_fn_node(src, "_asm_readmit_on")) if isinstance(n, ast.Return)]
+    if len(rets) != 1 or ast.unparse(rets[0].value) != "bool(lobby is not None and lobby.get('readmit_v1'))":
+        out.append(("readmit_flag", [ast.unparse(r) for r in rets]))
+    credit = _fn_node(src, "_qapply_credit")
+
+    def refuses(st):
+        return (isinstance(st, ast.If) and ast.unparse(st.test) == "lobby.get('readmit_v1')"
+                and any(isinstance(b, ast.Raise) and isinstance(b.exc, ast.Call)
+                        and isinstance(b.exc.func, ast.Name) and b.exc.func.id == "_QapplyRefused"
+                        for b in st.body))
+
+    def decides(st):
+        return any(isinstance(c, ast.Call) and isinstance(c.func, ast.Name) and c.func.id == "_ffa_leave_decision"
+                   for c in ast.walk(st))
+    ref = [i for i, st in enumerate(credit.body) if refuses(st)]
+    dec = [i for i, st in enumerate(credit.body) if decides(st)]
+    if len(ref) != 1 or len(dec) != 1 or ref[0] > dec[0]:
+        out.append(("refusal", ref, dec))
+    else:
+        between = credit.body[ref[0] + 1:dec[0] + 1]
+        if any(isinstance(n, ast.Name) and n.id == "lobby" and isinstance(n.ctx, (ast.Store, ast.Del))
+               for st in between for n in ast.walk(st)):
+            out.append(("lobby_rebound",))
+    return out
+
+
+def test_the_credit_action_decides_only_where_the_routes_absent_switch_is_on():
+    """The checked statement behind the two read_absent keywords: wherever
+    the Credit action reaches its decision the lobby is no readmission lobby,
+    and for that lobby the route's `not _rdm_on` is True, so the two calls
+    are the same call."""
+    problems = _readmit_problems(ladder._read(MAIN))
+    assert problems == [], problems
+
+
+_REFUSAL = '    if lobby.get("readmit_v1"):\n        raise _QapplyRefused(409, _QAPPLY_TEXTS["readmit"], {})\n'
+_CREDIT_DECISION_END = "points_to_win_round=FFA_POINTS_TO_WIN_ROUND, read_absent=True)\n"
+
+
+def _readmit_control_source(name):
+    src = ladder._read(MAIN)
+    if name == "refusal_out":
+        return _in_span(src, "_qapply_credit", _REFUSAL, "")
+    if name == "refusal_below_decision":
+        src = _in_span(src, "_qapply_credit", _REFUSAL, "")
+        return _in_span(src, "_qapply_credit", _CREDIT_DECISION_END, _CREDIT_DECISION_END + _REFUSAL)
+    if name == "credit_read_absent_false":
+        return _in_span(src, "_qapply_credit", _CREDIT_DECISION_END,
+                        _CREDIT_DECISION_END.replace("read_absent=True", "read_absent=False"))
+    if name == "route_switch_true":
+        return _in_span(src, "submit_ffa_match", "read_absent=not _rdm_on)", "read_absent=True)")
+    if name == "flag_reads_another_key":
+        return _in_span(src, "_asm_readmit_on", 'lobby.get("readmit_v1")', 'lobby.get("assembly_v1")')
+    if name == "lobby_bound_again":
+        return _in_span(src, "_qapply_credit", _REFUSAL, _REFUSAL + "    lobby = dict(lobby)\n")
+    assert name == "as_it_stands", name
+    return src
+
+
+@pytest.mark.parametrize("name,want", [
+    ("refusal_out", ("refusal",)),
+    ("refusal_below_decision", ("refusal",)),
+    ("credit_read_absent_false", ("credit_read_absent",)),
+    ("route_switch_true", ("route_switch",)),
+    ("flag_reads_another_key", ("readmit_flag",)),
+    ("lobby_bound_again", ("lobby_rebound",)),
+    ("as_it_stands", ()),
+])
+def test_control_the_read_absent_pins_read_changed_source(name, want):
+    """Each control changes main.py's text in memory, never a file, and is
+    reported by its own word; the text as it stands is clean."""
+    src = _readmit_control_source(name)
+    words = sorted({p[0] for p in _readmit_problems(src)})
+    assert words == sorted(want), (name, words, _readmit_problems(src))
 
 
 def test_each_site_states_the_rule_exactly_once():

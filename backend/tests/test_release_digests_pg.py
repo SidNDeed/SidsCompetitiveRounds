@@ -3,8 +3,10 @@
 Through `main.app` (its whole middleware chain: the rate limiter, the
 maintenance and version gates, the replica write gate, then each route's admin
 check and insert) with the session dependency pointed at a throwaway schema
-holding `admin_users` (built from the model) and the two registries (their
-CREATE TABLE statements read verbatim from migrations 368 and 372):
+holding `admin_users` and `player_bans` (both built from the model: the
+routes' admin check, _require_admin through _is_admin, reads player_bans
+since bans part 2a) and the two registries (their CREATE TABLE statements
+read verbatim from migrations 368 and 372):
 
   P1  a run registers the release row and the 17 game-file rows a fixture DLL
       and a fixture install produce, and each stored row holds exactly what
@@ -16,7 +18,10 @@ CREATE TABLE statements read verbatim from migrations 368 and 372):
       that is not an admin, is refused at its first row (exit 1) and inserts
       nothing: the routes' admin check is live, not stubbed;
   P4  the --emit-sql file, applied to a fresh schema as one script, holds the
-      same rows as the api path, and applied again inserts nothing.
+      same rows as the api path, and applied again inserts nothing;
+  P7  a roster admin under an active ban is refused 403 "Not an admin" at its
+      first row and inserts nothing; with the ban lifted the same admin
+      registers every row.
 
 RELEASE_DIGESTS_TEST_PG_DSN names a database whose name carries
 `release_digests` (the module creates and drops schemas there), written
@@ -77,7 +82,8 @@ def _ddl():
     import models
     from sqlalchemy.dialects import postgresql
     from sqlalchemy.schema import CreateTable
-    out = [str(CreateTable(models.AdminUser.__table__).compile(dialect=postgresql.dialect()))]
+    out = [str(CreateTable(t.__table__).compile(dialect=postgresql.dialect()))
+           for t in (models.AdminUser, models.PlayerBan)]
     for fname, table in REGISTRIES:
         with open(os.path.join(SQL_DIR, fname), encoding="utf-8") as f:
             found = re.findall(r"CREATE TABLE IF NOT EXISTS %s \(.*?\n\);" % table, f.read(), re.S)
@@ -158,6 +164,25 @@ class Rig:
             await conn.execute(text('SET search_path TO "%s"' % self.name))
             await conn.execute(text("INSERT INTO admin_users (steam_id, granted_at) VALUES (:s, now())"),
                                {"s": steam_id})
+            await conn.commit()
+
+    async def add_ban(self, steam_id, by):
+        """An active ban on steam_id (open, ending in an hour), written by the admin `by`."""
+        from sqlalchemy import text
+        async with self.seed.connect() as conn:
+            await conn.execute(text('SET search_path TO "%s"' % self.name))
+            await conn.execute(text("INSERT INTO player_bans (id, steam_id, reason, banned_by_steam_id, banned_at, "
+                                    "expires_at) VALUES (gen_random_uuid(), :s, 'rig ban', :b, now(), "
+                                    "now() + make_interval(hours => 1))"), {"s": steam_id, "b": by})
+            await conn.commit()
+
+    async def lift_bans(self, steam_id, by):
+        """Every open ban on steam_id closed now, as the unban route closes one."""
+        from sqlalchemy import text
+        async with self.seed.connect() as conn:
+            await conn.execute(text('SET search_path TO "%s"' % self.name))
+            await conn.execute(text("UPDATE player_bans SET unbanned_at = now(), unbanned_by_steam_id = :b "
+                                    "WHERE steam_id = :s AND unbanned_at IS NULL"), {"s": steam_id, "b": by})
             await conn.commit()
 
     async def script(self, sql, schema):
@@ -255,6 +280,33 @@ def test_p3_an_unverified_signature_or_a_non_admin_inserts_nothing(rig, release)
     assert code == rrd.EXIT_SERVER and len(calls) == 2, out
     assert "HTTP 403" in out and "Not an admin" in out
     assert rig.registries() == ([], [])
+
+
+def test_p7_a_banned_roster_admin_is_refused_and_registers_once_the_ban_is_lifted(rig, release):
+    """On the rig's own database: the admin is on the roster and under an active ban, so _is_admin refuses
+    and the first row is answered 403 "Not an admin" with nothing inserted; the ban lifted, the same admin
+    and the same inputs register every row (the control inside the test)."""
+    argv, expected = release
+    admin, banner = _steam_id(), _steam_id()
+    rig.run(rig.add_admin(admin))
+    rig.run(rig.add_admin(banner))
+    rig.run(rig.add_ban(admin, banner))
+    env = {"ADMIN_HMAC_SECRET": rig.secret, "SCR_API_BASE": "http://t"}
+    calls = []
+
+    def counted(url, headers):
+        calls.append(url)
+        return rig.transport(url, headers)
+
+    code, out = _run(argv + ["--admin", admin], env, counted)
+    assert code == rrd.EXIT_SERVER and len(calls) == 1, out
+    assert "HTTP 403" in out and "Not an admin" in out, out
+    assert rig.registries() == ([], [])
+    rig.run(rig.lift_bans(admin, banner))
+    code, out = _run(argv + ["--admin", admin], env, counted)
+    assert code == rrd.EXIT_OK, out
+    assert "DONE     18 rows: 18 inserted, 0 already registered." in out
+    assert rig.registries() == expected
 
 
 def test_p4_the_emitted_migration_holds_the_api_rows_and_reruns_to_nothing(rig, release, tmp_path):
