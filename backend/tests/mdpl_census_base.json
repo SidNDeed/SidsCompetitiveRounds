@@ -9,18 +9,27 @@
     "internal_moderation_case_act"
    ],
    "held": [
+    "?",
     "chat_mutes",
+    "ffa_bets",
     "ffa_lobbies",
     "ffa_queue",
     "i18n_portal_sessions",
+    "lobby_bets",
     "lobby_invites",
+    "match_seat_holds",
     "moderation_cases",
     "ovt_lobbies",
     "ovt_queue",
+    "ovt_series",
+    "players",
+    "queue_leases",
     "ranked_queue",
     "steam_sessions",
+    "team_bets",
     "team_lobbies",
-    "team_queue"
+    "team_queue",
+    "team_series"
    ],
    "keys": [
     "_identity_lock_many | SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text))) | 0"
@@ -59,6 +68,7 @@
     "ffa_queue_leave"
    ],
    "held": [
+    "?",
     "mail_inbox_rev",
     "mail_recipients"
    ],
@@ -75,6 +85,7 @@
     "ffa_queue_poll"
    ],
    "held": [
+    "?",
     "mail_inbox_rev",
     "mail_recipients"
    ],
@@ -90,6 +101,7 @@
     "ffa_queue_poll"
    ],
    "held": [
+    "?",
     "mail_inbox_rev",
     "mail_recipients"
    ],
@@ -107,10 +119,13 @@
     "team_lobby_start"
    ],
    "held": [
+    "?",
     "mail_inbox_rev",
     "mail_recipients"
    ],
-   "keys": [],
+   "keys": [
+    "_identity_lock_many | SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text))) | 0"
+   ],
    "phases": [
     "B"
    ]
@@ -124,10 +139,13 @@
     "team_lobby_start"
    ],
    "held": [
+    "?",
     "mail_inbox_rev",
     "mail_recipients"
    ],
-   "keys": [],
+   "keys": [
+    "_identity_lock_many | SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text))) | 0"
+   ],
    "phases": [
     "B"
    ]
@@ -136,6 +154,7 @@
    "class": "READ",
    "entries": [
     "_ffa_readmit_janitor",
+    "admin_accept_quarantine",
     "block_player",
     "cancel_lobby_bet",
     "chat_moderate_bridge_unmute",
@@ -282,7 +301,7 @@
    "phases": []
   },
   "_complete_team_series_with_ratings | SELECT 1 FROM players WHERE id = :pid FOR NO KEY UPDATE | 0": {
-   "class": "READ",
+   "class": "KEY",
    "entries": [
     "admin_resolve_team_series",
     "team_series_report_dc"
@@ -297,13 +316,15 @@
     "team_queue",
     "team_series"
    ],
-   "keys": [],
+   "keys": [
+    "_ban_lock_and_gate | SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text))) | 0"
+   ],
    "phases": [
     "A"
    ]
   },
   "_complete_team_series_with_ratings | UPDATE players SET gold_earned=COALESCE(gold_earned,0)+:g, team_gold_ear | 0": {
-   "class": "READ",
+   "class": "KEY",
    "entries": [
     "admin_resolve_team_series",
     "team_series_report_dc"
@@ -318,13 +339,15 @@
     "team_queue",
     "team_series"
    ],
-   "keys": [],
+   "keys": [
+    "_ban_lock_and_gate | SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text))) | 0"
+   ],
    "phases": [
     "A"
    ]
   },
   "_complete_team_series_with_ratings | UPDATE players SET gold_earned=COALESCE(gold_earned,0)+:p WHERE id=:pid | 0": {
-   "class": "READ",
+   "class": "KEY",
    "entries": [
     "admin_resolve_team_series",
     "team_series_report_dc"
@@ -339,7 +362,9 @@
     "team_queue",
     "team_series"
    ],
-   "keys": [],
+   "keys": [
+    "_ban_lock_and_gate | SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text))) | 0"
+   ],
    "phases": [
     "A"
    ]
@@ -348,10 +373,14 @@
    "class": "READ",
    "entries": [
     "_ffa_readmit_janitor",
+    "admin_accept_quarantine",
+    "admin_ban",
+    "admin_moderation_case_act",
     "admin_resolve_team_series",
     "admin_reverse_team_series",
     "ffa_queue_leave",
     "ffa_queue_poll",
+    "internal_moderation_case_act",
     "queue_cleanup_loop",
     "submit_ffa_match",
     "submit_match",
@@ -364,11 +393,15 @@
     "team_series_state"
    ],
    "held": [
+    "?",
     "mail_inbox_rev",
     "mail_messages",
-    "mail_recipients"
+    "mail_recipients",
+    "moderation_cases"
    ],
-   "keys": [],
+   "keys": [
+    "_identity_lock_many | SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text))) | 0"
+   ],
    "phases": [
     "B"
    ]
@@ -377,10 +410,14 @@
    "class": "READ",
    "entries": [
     "_ffa_readmit_janitor",
+    "admin_accept_quarantine",
+    "admin_ban",
+    "admin_moderation_case_act",
     "admin_resolve_team_series",
     "admin_reverse_team_series",
     "ffa_queue_leave",
     "ffa_queue_poll",
+    "internal_moderation_case_act",
     "queue_cleanup_loop",
     "submit_ffa_match",
     "submit_match",
@@ -393,6 +430,8 @@
     "team_series_state"
    ],
    "held": [
+    "?",
+    "chat_mutes",
     "ffa_assembly_seats",
     "ffa_bets",
     "ffa_lobbies",
@@ -400,6 +439,7 @@
     "ffa_report_journal",
     "ffa_report_windows",
     "ffa_seat_readmissions",
+    "i18n_portal_sessions",
     "lobby_bets",
     "lobby_invites",
     "mail_censor_hits",
@@ -408,18 +448,23 @@
     "mail_recipients",
     "mail_send_receipts",
     "match_seat_holds",
+    "moderation_cases",
     "ovt_lobbies",
     "ovt_queue",
     "ovt_series",
     "players",
     "queue_leases",
     "ranked_queue",
+    "steam_sessions",
     "team_bets",
     "team_lobbies",
     "team_queue",
     "team_series"
    ],
-   "keys": [],
+   "keys": [
+    "_ban_lock_and_gate | SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text))) | 0",
+    "_identity_lock_many | SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text))) | 0"
+   ],
    "phases": [
     "A",
     "B"
@@ -460,6 +505,7 @@
    "class": "CLEAR",
    "entries": [
     "_ffa_readmit_janitor",
+    "admin_accept_quarantine",
     "submit_ffa_match"
    ],
    "held": [],
@@ -470,6 +516,7 @@
    "class": "CLEAR",
    "entries": [
     "_ffa_readmit_janitor",
+    "admin_accept_quarantine",
     "submit_ffa_match"
    ],
    "held": [],
@@ -480,6 +527,7 @@
    "class": "CLEAR",
    "entries": [
     "_ffa_readmit_janitor",
+    "admin_accept_quarantine",
     "submit_ffa_match"
    ],
    "held": [],
@@ -490,6 +538,7 @@
    "class": "CLEAR",
    "entries": [
     "_ffa_readmit_janitor",
+    "admin_accept_quarantine",
     "admin_resolve_team_series",
     "i18n_review",
     "submit_ffa_match",
@@ -505,6 +554,7 @@
    "class": "CLEAR",
    "entries": [
     "_ffa_readmit_janitor",
+    "admin_accept_quarantine",
     "admin_resolve_team_series",
     "i18n_review",
     "submit_ffa_match",
@@ -520,6 +570,7 @@
    "class": "READ",
    "entries": [
     "_ffa_readmit_janitor",
+    "admin_accept_quarantine",
     "admin_resolve_team_series",
     "i18n_review",
     "submit_ffa_match",
@@ -547,7 +598,9 @@
     "team_queue",
     "team_series"
    ],
-   "keys": [],
+   "keys": [
+    "_ban_lock_and_gate | SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text))) | 0"
+   ],
    "phases": [
     "A"
    ]
@@ -556,6 +609,7 @@
    "class": "CLEAR",
    "entries": [
     "_ffa_readmit_janitor",
+    "admin_accept_quarantine",
     "admin_grant_achievement",
     "admin_resolve_team_series",
     "i18n_review",
@@ -592,10 +646,13 @@
     "team_series_continuation"
    ],
    "held": [
+    "?",
     "mail_inbox_rev",
     "mail_recipients"
    ],
-   "keys": [],
+   "keys": [
+    "_identity_lock_many | SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text))) | 0"
+   ],
    "phases": [
     "B"
    ]
@@ -624,6 +681,7 @@
     "team_series_continuation"
    ],
    "held": [
+    "?",
     "ffa_assembly_seats",
     "ffa_bets",
     "ffa_lobbies",
@@ -913,6 +971,7 @@
    "entries": [
     "_ffa_readmit_janitor",
     "_pc_reconcile_earned_packs",
+    "admin_accept_quarantine",
     "admin_resolve_team_series",
     "submit_ffa_match",
     "submit_match",
@@ -1165,10 +1224,62 @@
    "keys": [],
    "phases": []
   },
+  "_qapply_credit | GoldTransaction(...) | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "admin_credit_quarantine"
+   ],
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "_qapply_credit | SELECT 1 FROM players WHERE id = :pid FOR NO KEY UPDATE | 0": {
+   "class": "READ",
+   "entries": [
+    "admin_credit_quarantine"
+   ],
+   "held": [
+    "ffa_lobbies"
+   ],
+   "keys": [],
+   "phases": [
+    "A"
+   ]
+  },
+  "_qapply_credit | UPDATE players SET gold_earned = COALESCE(gold_earned, 0) + CAST(:g AS i | 0": {
+   "class": "READ",
+   "entries": [
+    "admin_credit_quarantine"
+   ],
+   "held": [
+    "ffa_lobbies",
+    "players"
+   ],
+   "keys": [],
+   "phases": [
+    "A"
+   ]
+  },
+  "_qapply_credit | UPDATE players SET total_xp = COALESCE(total_xp, 0) + CAST(:xp AS intege | 0": {
+   "class": "READ",
+   "entries": [
+    "admin_credit_quarantine"
+   ],
+   "held": [
+    "ffa_lobbies",
+    "players"
+   ],
+   "keys": [],
+   "phases": [
+    "A"
+   ]
+  },
   "_quarantine_report | INSERT INTO match_report_quarantine (mode, reason, http_status, group_id | 0": {
    "class": "CLEAR",
    "entries": [
     "_ffa_readmit_janitor",
+    "admin_accept_quarantine",
+    "admin_credit_quarantine",
     "submit_ffa_match",
     "submit_team_match"
    ],
@@ -1180,6 +1291,8 @@
    "class": "CLEAR",
    "entries": [
     "_ffa_readmit_janitor",
+    "admin_accept_quarantine",
+    "admin_credit_quarantine",
     "submit_ffa_match",
     "submit_team_match"
    ],
@@ -1191,6 +1304,8 @@
    "class": "CLEAR",
    "entries": [
     "_ffa_readmit_janitor",
+    "admin_accept_quarantine",
+    "admin_credit_quarantine",
     "submit_ffa_match",
     "submit_team_match"
    ],
@@ -1215,6 +1330,7 @@
     "ffa_readmit_offer"
    ],
    "held": [
+    "?",
     "mail_inbox_rev",
     "mail_recipients"
    ],
@@ -1226,8 +1342,11 @@
   "_reconcile_team_series_bets | GoldTransaction(...) | 0": {
    "class": "READ",
    "entries": [
+    "admin_ban",
+    "admin_moderation_case_act",
     "admin_resolve_team_series",
     "admin_reverse_team_series",
+    "internal_moderation_case_act",
     "queue_cleanup_loop",
     "team_lobby_start",
     "team_queue_cleanup_loop",
@@ -1236,9 +1355,11 @@
     "team_series_state"
    ],
    "held": [
+    "?",
     "mail_inbox_rev",
     "mail_messages",
-    "mail_recipients"
+    "mail_recipients",
+    "moderation_cases"
    ],
    "keys": [
     "_identity_lock_many | SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text))) | 0"
@@ -1250,8 +1371,11 @@
   "_reconcile_team_series_bets | SELECT 1 FROM players WHERE id = :pid FOR NO KEY UPDATE | 0": {
    "class": "READ",
    "entries": [
+    "admin_ban",
+    "admin_moderation_case_act",
     "admin_resolve_team_series",
     "admin_reverse_team_series",
+    "internal_moderation_case_act",
     "queue_cleanup_loop",
     "team_lobby_start",
     "team_queue_cleanup_loop",
@@ -1260,9 +1384,12 @@
     "team_series_state"
    ],
    "held": [
+    "?",
+    "chat_mutes",
     "ffa_bets",
     "ffa_lobbies",
     "ffa_queue",
+    "i18n_portal_sessions",
     "lobby_bets",
     "lobby_invites",
     "mail_censor_hits",
@@ -1270,18 +1397,21 @@
     "mail_messages",
     "mail_recipients",
     "mail_send_receipts",
+    "moderation_cases",
     "ovt_lobbies",
     "ovt_queue",
     "ovt_series",
     "players",
     "queue_leases",
     "ranked_queue",
+    "steam_sessions",
     "team_bets",
     "team_lobbies",
     "team_queue",
     "team_series"
    ],
    "keys": [
+    "_ban_lock_and_gate | SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text))) | 0",
     "_identity_lock_many | SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text))) | 0"
    ],
    "phases": [
@@ -1292,8 +1422,11 @@
   "_reconcile_team_series_bets | UPDATE players SET gold_earned = COALESCE(gold_earned,0) + :p WHERE id = | 0": {
    "class": "READ",
    "entries": [
+    "admin_ban",
+    "admin_moderation_case_act",
     "admin_resolve_team_series",
     "admin_reverse_team_series",
+    "internal_moderation_case_act",
     "queue_cleanup_loop",
     "team_lobby_start",
     "team_queue_cleanup_loop",
@@ -1302,9 +1435,12 @@
     "team_series_state"
    ],
    "held": [
+    "?",
+    "chat_mutes",
     "ffa_bets",
     "ffa_lobbies",
     "ffa_queue",
+    "i18n_portal_sessions",
     "lobby_bets",
     "lobby_invites",
     "mail_censor_hits",
@@ -1312,18 +1448,21 @@
     "mail_messages",
     "mail_recipients",
     "mail_send_receipts",
+    "moderation_cases",
     "ovt_lobbies",
     "ovt_queue",
     "ovt_series",
     "players",
     "queue_leases",
     "ranked_queue",
+    "steam_sessions",
     "team_bets",
     "team_lobbies",
     "team_queue",
     "team_series"
    ],
    "keys": [
+    "_ban_lock_and_gate | SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text))) | 0",
     "_identity_lock_many | SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text))) | 0"
    ],
    "phases": [
@@ -1373,6 +1512,9 @@
    "class": "READ",
    "entries": [
     "_ffa_readmit_janitor",
+    "admin_accept_quarantine",
+    "admin_ban",
+    "admin_moderation_case_act",
     "admin_resolve_team_series",
     "admin_reverse_series",
     "admin_reverse_team_series",
@@ -1385,6 +1527,7 @@
     "ffa_queue_leave",
     "ffa_queue_poll",
     "get_active_series",
+    "internal_moderation_case_act",
     "ovt_lobby_leave",
     "queue_cleanup_loop",
     "submit_ffa_match",
@@ -1396,11 +1539,15 @@
     "team_series_state"
    ],
    "held": [
+    "?",
     "mail_inbox_rev",
     "mail_messages",
-    "mail_recipients"
+    "mail_recipients",
+    "moderation_cases"
    ],
-   "keys": [],
+   "keys": [
+    "_identity_lock_many | SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text))) | 0"
+   ],
    "phases": [
     "B"
    ]
@@ -1409,6 +1556,9 @@
    "class": "READ",
    "entries": [
     "_ffa_readmit_janitor",
+    "admin_accept_quarantine",
+    "admin_ban",
+    "admin_moderation_case_act",
     "admin_resolve_team_series",
     "admin_reverse_series",
     "admin_reverse_team_series",
@@ -1421,6 +1571,7 @@
     "ffa_queue_leave",
     "ffa_queue_poll",
     "get_active_series",
+    "internal_moderation_case_act",
     "ovt_lobby_leave",
     "queue_cleanup_loop",
     "submit_ffa_match",
@@ -1432,6 +1583,8 @@
     "team_series_state"
    ],
    "held": [
+    "?",
+    "chat_mutes",
     "ffa_assembly_seats",
     "ffa_bets",
     "ffa_lobbies",
@@ -1439,6 +1592,7 @@
     "ffa_report_journal",
     "ffa_report_windows",
     "ffa_seat_readmissions",
+    "i18n_portal_sessions",
     "lobby_bets",
     "lobby_invites",
     "mail_censor_hits",
@@ -1446,18 +1600,23 @@
     "mail_messages",
     "mail_recipients",
     "mail_send_receipts",
+    "match_seat_holds",
+    "moderation_cases",
     "ovt_lobbies",
     "ovt_queue",
     "ovt_series",
     "players",
     "queue_leases",
     "ranked_queue",
+    "steam_sessions",
     "team_bets",
     "team_lobbies",
     "team_queue",
     "team_series"
    ],
    "keys": [
+    "_ban_lock_and_gate | SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text))) | 0",
+    "_identity_lock_many | SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text))) | 0",
     "cancel_lobby_bet | SELECT pg_advisory_xact_lock(hashtext(:sid)) | 0"
    ],
    "phases": [
@@ -1517,17 +1676,25 @@
    "class": "READ",
    "entries": [
     "_ffa_readmit_janitor",
+    "admin_accept_quarantine",
+    "admin_ban",
+    "admin_moderation_case_act",
     "ffa_queue_leave",
     "ffa_queue_poll",
+    "internal_moderation_case_act",
     "queue_cleanup_loop",
     "submit_ffa_match"
    ],
    "held": [
+    "?",
     "mail_inbox_rev",
     "mail_messages",
-    "mail_recipients"
+    "mail_recipients",
+    "moderation_cases"
    ],
-   "keys": [],
+   "keys": [
+    "_identity_lock_many | SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text))) | 0"
+   ],
    "phases": [
     "B"
    ]
@@ -1536,12 +1703,18 @@
    "class": "READ",
    "entries": [
     "_ffa_readmit_janitor",
+    "admin_accept_quarantine",
+    "admin_ban",
+    "admin_moderation_case_act",
     "ffa_queue_leave",
     "ffa_queue_poll",
+    "internal_moderation_case_act",
     "queue_cleanup_loop",
     "submit_ffa_match"
    ],
    "held": [
+    "?",
+    "chat_mutes",
     "ffa_assembly_seats",
     "ffa_bets",
     "ffa_lobbies",
@@ -1549,6 +1722,7 @@
     "ffa_report_journal",
     "ffa_report_windows",
     "ffa_seat_readmissions",
+    "i18n_portal_sessions",
     "lobby_bets",
     "lobby_invites",
     "mail_censor_hits",
@@ -1556,18 +1730,22 @@
     "mail_messages",
     "mail_recipients",
     "mail_send_receipts",
+    "moderation_cases",
     "ovt_lobbies",
     "ovt_queue",
     "ovt_series",
     "players",
     "queue_leases",
     "ranked_queue",
+    "steam_sessions",
     "team_bets",
     "team_lobbies",
     "team_queue",
     "team_series"
    ],
-   "keys": [],
+   "keys": [
+    "_identity_lock_many | SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text))) | 0"
+   ],
    "phases": [
     "A",
     "B"
@@ -1577,12 +1755,18 @@
    "class": "READ",
    "entries": [
     "_ffa_readmit_janitor",
+    "admin_accept_quarantine",
+    "admin_ban",
+    "admin_moderation_case_act",
     "ffa_queue_leave",
     "ffa_queue_poll",
+    "internal_moderation_case_act",
     "queue_cleanup_loop",
     "submit_ffa_match"
    ],
    "held": [
+    "?",
+    "chat_mutes",
     "ffa_assembly_seats",
     "ffa_bets",
     "ffa_lobbies",
@@ -1590,6 +1774,7 @@
     "ffa_report_journal",
     "ffa_report_windows",
     "ffa_seat_readmissions",
+    "i18n_portal_sessions",
     "lobby_bets",
     "lobby_invites",
     "mail_censor_hits",
@@ -1597,18 +1782,22 @@
     "mail_messages",
     "mail_recipients",
     "mail_send_receipts",
+    "moderation_cases",
     "ovt_lobbies",
     "ovt_queue",
     "ovt_series",
     "players",
     "queue_leases",
     "ranked_queue",
+    "steam_sessions",
     "team_bets",
     "team_lobbies",
     "team_queue",
     "team_series"
    ],
-   "keys": [],
+   "keys": [
+    "_identity_lock_many | SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text))) | 0"
+   ],
    "phases": [
     "A",
     "B"
@@ -1907,14 +2096,16 @@
    "phases": []
   },
   "admin_grant_achievement | UPDATE players SET gold_earned = COALESCE(gold_earned,0) + :amt WHERE id | 0": {
-   "class": "UPGRADE",
+   "class": "KEY",
    "entries": [
     "admin_grant_achievement"
    ],
    "held": [
     "players"
    ],
-   "keys": [],
+   "keys": [
+    "admin_grant_achievement | SELECT pg_advisory_xact_lock_shared(hashtext(CAST(:sid AS text))) | 0"
+   ],
    "phases": [
     "A"
    ]
@@ -2114,14 +2305,16 @@
    "phases": []
   },
   "booster_grant | UPDATE players SET gold_earned = COALESCE(gold_earned,0) + :amt WHERE id | 0": {
-   "class": "UPGRADE",
+   "class": "KEY",
    "entries": [
     "booster_grant"
    ],
    "held": [
     "players"
    ],
-   "keys": [],
+   "keys": [
+    "_ban_lock_and_gate | SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text))) | 0"
+   ],
    "phases": [
     "A"
    ]
@@ -2546,7 +2739,7 @@
    "phases": []
   },
   "place_ffa_bet | UPDATE players SET gold_spent = COALESCE(gold_spent,0) + :amt WHERE id = | 0": {
-   "class": "READ",
+   "class": "KEY",
    "entries": [
     "place_discord_ffa_bet",
     "place_ffa_bet"
@@ -2554,7 +2747,9 @@
    "held": [
     "ffa_lobbies"
    ],
-   "keys": [],
+   "keys": [
+    "_ban_lock_and_gate | SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text))) | 0"
+   ],
    "phases": [
     "A"
    ]
@@ -2590,7 +2785,7 @@
     "team_lobbies"
    ],
    "keys": [
-    "place_lobby_bet | SELECT pg_advisory_xact_lock(hashtext(:sid)) | 0"
+    "_ban_lock_and_gate | SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text))) | 0"
    ],
    "phases": [
     "A"
@@ -2617,7 +2812,7 @@
    "phases": []
   },
   "place_team_bet | UPDATE players SET gold_spent = COALESCE(gold_spent, 0) + :amt WHERE id  | 0": {
-   "class": "READ",
+   "class": "KEY",
    "entries": [
     "place_discord_team_bet",
     "place_team_bet"
@@ -2625,7 +2820,9 @@
    "held": [
     "team_series"
    ],
-   "keys": [],
+   "keys": [
+    "_ban_lock_and_gate | SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text))) | 0"
+   ],
    "phases": [
     "A"
    ]
@@ -2935,6 +3132,7 @@
    "class": "CLEAR",
    "entries": [
     "_ffa_readmit_janitor",
+    "admin_accept_quarantine",
     "submit_ffa_match"
    ],
    "held": [],
@@ -2945,6 +3143,7 @@
    "class": "CLEAR",
    "entries": [
     "_ffa_readmit_janitor",
+    "admin_accept_quarantine",
     "submit_ffa_match"
    ],
    "held": [],
@@ -2955,6 +3154,7 @@
    "class": "CLEAR",
    "entries": [
     "_ffa_readmit_janitor",
+    "admin_accept_quarantine",
     "submit_ffa_match"
    ],
    "held": [],
@@ -2965,6 +3165,7 @@
    "class": "CLEAR",
    "entries": [
     "_ffa_readmit_janitor",
+    "admin_accept_quarantine",
     "submit_ffa_match"
    ],
    "held": [],
@@ -2975,6 +3176,7 @@
    "class": "CLEAR",
    "entries": [
     "_ffa_readmit_janitor",
+    "admin_accept_quarantine",
     "submit_ffa_match"
    ],
    "held": [],
@@ -2985,6 +3187,7 @@
    "class": "CLEAR",
    "entries": [
     "_ffa_readmit_janitor",
+    "admin_accept_quarantine",
     "submit_ffa_match"
    ],
    "held": [],
@@ -2995,6 +3198,7 @@
    "class": "CLEAR",
    "entries": [
     "_ffa_readmit_janitor",
+    "admin_accept_quarantine",
     "submit_ffa_match"
    ],
    "held": [],
@@ -3005,6 +3209,7 @@
    "class": "CLEAR",
    "entries": [
     "_ffa_readmit_janitor",
+    "admin_accept_quarantine",
     "submit_ffa_match"
    ],
    "held": [],
@@ -3015,6 +3220,7 @@
    "class": "READ",
    "entries": [
     "_ffa_readmit_janitor",
+    "admin_accept_quarantine",
     "submit_ffa_match"
    ],
    "held": [
@@ -3037,6 +3243,7 @@
    "class": "READ",
    "entries": [
     "_ffa_readmit_janitor",
+    "admin_accept_quarantine",
     "submit_ffa_match"
    ],
    "held": [
@@ -3059,6 +3266,7 @@
    "class": "READ",
    "entries": [
     "_ffa_readmit_janitor",
+    "admin_accept_quarantine",
     "submit_ffa_match"
    ],
    "held": [
@@ -3347,14 +3555,16 @@
    "phases": []
   },
   "unlock_achievement | UPDATE players SET gold_earned = COALESCE(gold_earned,0) + :amt WHERE id | 0": {
-   "class": "UPGRADE",
+   "class": "KEY",
    "entries": [
     "unlock_achievement"
    ],
    "held": [
     "players"
    ],
-   "keys": [],
+   "keys": [
+    "unlock_achievement | SELECT pg_advisory_xact_lock_shared(hashtext(CAST(:sid AS text))) | 0"
+   ],
    "phases": [
     "A"
    ]
@@ -3436,6 +3646,7 @@
   ]
  },
  "unread": [
+  "_ban_void_apply | text(_cancel)",
   "_discord_fix_probe | text(_DISCORD_FIX_PROBE)",
   "_report_rows | text(sql)"
  ]
