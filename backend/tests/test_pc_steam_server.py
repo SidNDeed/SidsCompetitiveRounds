@@ -5051,3 +5051,372 @@ def test_r10_no_unit_test_spawns_a_network_program(_no_network_program):
     done = subprocess.run([_sys.executable, "--version"], capture_output=True)
     assert done.returncode == 0 and _no_network_program == []
 
+
+# ── CMDLINE-1: both commits take their message from a file ────────────────
+# 21 Nov 2026: a 52,440-character merge message on `git commit -m` passed the Windows command-line bound and
+# stopped the code phase after its merge was staged. Both commits now hand git a file (`git commit -F PATH`);
+# the checks below pin the names, the lists, the measure, where the run measures, the file's life under the
+# lease, and both phases on a real repository.
+
+
+def _cmdline_sql_batch(monkeypatch, rt, where):
+    """Bind the newest entry that carries sql (so its precursor commits), every state file under `where`."""
+    for name in list(NEWEST_THREE) + list(reversed(list(rt.BATCHES))):
+        path = _rt_bind(monkeypatch, rt, name, where)
+        if rt.ALL_SQL and rt.REVIEWED_TIP:
+            return name, path
+    pytest.skip("no entry of the train carries sql and a reviewed tip")
+
+
+def _cmdline_units(text):
+    return len(text.encode("utf-16-le", "surrogatepass")) // 2
+
+
+def test_cmdline_each_message_file_name_is_its_own_and_the_plan_name_is_the_longest(tmp_path):
+    """message_file_path gives a new name at every call (two calls of one process differ), the commit's kind in
+    it, beside the base it is given; message_file_plan_name, what a plan prints in its place, is longer in UTF-16
+    units than the longest real name (a ten-digit process id, the largest a DWORD holds, and the twelve hex
+    digits of the random part), so a plan never measures a shorter command line than the run."""
+    rt, _src = _release_train()
+    base = str(tmp_path / ("state-%s.json" % "\U0001F600"))
+    assert rt.message_file_path(base).startswith(base + ".merge-message."), rt.message_file_path(base)
+    for kind in ("merge-message", "precursor-message"):
+        a, b = rt.message_file_path(base, kind), rt.message_file_path(base, kind)
+        assert a != b, (a, b)
+        worst = "%s.%s.%d.%s.txt" % (base, kind, 4294967295, "f" * 12)
+        for p in (a, b):
+            assert p.startswith("%s.%s.%d." % (base, kind, os.getpid())) and p.endswith(".txt"), p
+            assert _cmdline_units(p) <= _cmdline_units(worst), (p, worst)
+        plan = rt.message_file_plan_name(base, kind)
+        assert plan.startswith(base + "." + kind + "."), plan
+        assert _cmdline_units(plan) > _cmdline_units(worst), (plan, worst)
+        assert (rt.cmdline_units(["git", "commit", "-F", plan])
+                > rt.cmdline_units(["git", "commit", "-F", worst]))
+
+
+def _cmdline_commit_m_sites(src):
+    """Every list or tuple literal of `src` in which the constant "commit" is directly followed by a constant
+    that hands git its message on the command line (-m, -mTEXT, --message)."""
+    import ast
+    sites = []
+    for node in ast.walk(ast.parse(src)):
+        if isinstance(node, (ast.List, ast.Tuple)):
+            vals = [e.value if isinstance(e, ast.Constant) else None for e in node.elts]
+            for x, y in zip(vals, vals[1:]):
+                if x == "commit" and isinstance(y, str) and (y.startswith("-m") or y.startswith("--message")):
+                    sites.append(node.lineno)
+    return sites
+
+
+def test_cmdline_the_two_command_lists_are_exact_and_no_commit_puts_its_message_on_the_line(monkeypatch,
+                                                                                              tmp_path):
+    """precursor_cmds and code_cmds, the one builder each phase runs and the run measures, give exactly these
+    lists; and no list in the train's text hands `git commit` a message on the command line."""
+    rt, src = _release_train()
+    _cmdline_sql_batch(monkeypatch, rt, tmp_path)
+    files = rt.precursor_files()
+    assert files == rt.ALL_SQL + ([rt.ROLLBACK_SQL] if rt.ROLLBACK_SQL and rt.ROLLBACK_SQL not in rt.ALL_SQL
+                                  else [])
+    p = str(tmp_path / "the-message-file.txt")
+    assert rt.precursor_cmds(files, p) == [
+        ["git", "checkout", "main"],
+        ["git", "pull", "--ff-only"],
+        ["git", "checkout", rt.BRANCH, "--"] + ["backend/sql/" + f for f in files],
+        ["git", "commit", "-F", p],
+        ["git", "push", "origin", "main"],
+    ]
+    assert rt.code_cmds(p) == [
+        ["git", "checkout", "main"],
+        ["git", "merge", "--no-ff", "--no-commit", rt.BRANCH],
+        ["git", "commit", "-F", p],
+        ["git", "push", "origin", "main"],
+    ]
+    assert not re.search(r"""["']commit["']\s*,\s*["']-m""", src)
+    assert _cmdline_commit_m_sites(src) == []
+    # the census's own control: it finds a planted list, and it reads the train's commit lists at all
+    assert _cmdline_commit_m_sites('x = ["git", "commit", "-m", msg]\ny = ("commit", "--message=a")\n') == [1, 2]
+    assert src.count('["git", "commit", "-F", msg_path]') == 2
+
+
+def test_cmdline_the_measure_is_utf16_units_and_a_line_over_the_bound_is_refused_naming_its_phase():
+    """cmdline_units measures what CreateProcessW measures: the UTF-16 units of the line subprocess builds (N
+    characters outside the basic plane count 2N, an argument with a space is quoted). assert_cmdlines_fit lets
+    a line of exactly CMDLINE_MAX units through, refuses one unit more, and the refusal names the phase."""
+    rt, _src = _release_train()
+    face = "\U0001F600"
+    bound = rt.CMDLINE_MAX
+    assert 0 < bound < 32767
+    assert rt.cmdline_units(["git", "x" * 10]) == 14
+    assert rt.cmdline_units(["git", "a b"]) == 9
+    for n in (1, 7, 1000):
+        assert rt.cmdline_units(["git", face * n]) == 4 + 2 * n, n
+    rt.assert_cmdlines_fit([["git", "status"], ["git", "x" * (bound - 4)]], "phase 4")
+    with pytest.raises(rt.Fail) as exc:
+        rt.assert_cmdlines_fit([["git", "status"], ["git", "x" * (bound - 3)]], "phase 4")
+    assert str(exc.value).startswith("phase 4: ") and " %d UTF-16 units" % (bound + 1) in str(exc.value)
+    m = (bound - 4) // 2 + 1         # 4 + 2m units over the bound, 4 + m characters well under it
+    assert 4 + m < bound < 4 + 2 * m
+    with pytest.raises(rt.Fail) as exc:
+        rt.assert_cmdlines_fit([["git", face * m]], "phase 1")
+    assert str(exc.value).startswith("phase 1: "), str(exc.value)[:200]
+
+
+def test_cmdline_the_run_measures_both_lists_in_main_before_its_token_and_before_any_phase(monkeypatch, tmp_path,
+                                                                                            capsys):
+    """main() calls assert_run_cmdlines_fit once, unconditionally, before its first train_token_write, before
+    the phase loop and before any lease; and a run whose phase-1 checkout list is over the bound stops there:
+    return code 1, no token written, no lease opened, no state written, no message file, no git command."""
+    import ast
+    import copy
+    rt, src = _release_train()
+    fn = next(n for n in ast.parse(src).body if isinstance(n, ast.FunctionDef) and n.name == "main")
+
+    def calls(name):
+        return sorted(n.lineno for n in ast.walk(fn) if isinstance(n, ast.Call)
+                      and isinstance(n.func, ast.Name) and n.func.id == name)
+    fit, token, lease = calls("assert_run_cmdlines_fit"), calls("train_token_write"), calls("controller_lease_session")
+    loop = [n.lineno for n in ast.walk(fn) if isinstance(n, ast.For)
+            and isinstance(n.iter, ast.Name) and n.iter.id == "PHASES"]
+    assert len(fit) == 1 and token and len(loop) == 1, (fit, token, loop)
+    assert fit[0] < token[0] and fit[0] < loop[0] and all(fit[0] < x for x in lease), (fit, token, loop, lease)
+    top = [s for s in fn.body if s.lineno <= fit[0] <= s.end_lineno]
+    assert len(top) == 1 and isinstance(top[0], ast.Try), ast.dump(top[0])[:200]
+    assert [s for s in top[0].body if isinstance(s, ast.Expr) and isinstance(s.value, ast.Call)
+            and getattr(s.value.func, "id", None) == "assert_run_cmdlines_fit"], ast.dump(top[0])[:300]
+
+    name, _path = _cmdline_sql_batch(monkeypatch, rt, tmp_path)
+    entry = copy.deepcopy(rt.BATCHES[name])
+    entry["schema_sql"] = ["%04d_a_migration_with_a_long_name_for_this_check.sql" % i for i in range(700)]
+    monkeypatch.setitem(rt.BATCHES, "cmdline-long", entry)
+    w = _rt_world(monkeypatch, rt)
+    events = []
+    real_save, real_write = rt.save_state, rt.write_message_file
+    monkeypatch.setattr(rt, "train_token_write", lambda phase: events.append(("token", phase)))
+    monkeypatch.setattr(rt, "controller_lease_session",
+                        lambda what, **kw: events.append(("lease", what)) or contextlib.nullcontext("lease"))
+    monkeypatch.setattr(rt, "save_state", lambda st: events.append(("save",)) or real_save(st))
+    monkeypatch.setattr(rt, "write_message_file", lambda p, t: events.append(("write", p)) or real_write(p, t))
+    monkeypatch.setattr(rt.sys, "argv", ["release_train.py", "run", "--go", "--batch", "cmdline-long",
+                                         "--from", "precursor"])
+    assert rt.main() == 1
+    out = capsys.readouterr().out
+    assert "phase 1, asked before the run: the command `git checkout %s ...`" % rt.BRANCH in out, out[-600:]
+    assert "Stopped before any phase ran and before a train token was written." in out, out[-600:]
+    assert events == [] and w.calls == [] and _rt_files(tmp_path) == [], (events, w.calls, _rt_files(tmp_path))
+    # the control: the same entry from the code phase is not measured for phase 1, so the run passes the
+    # measure and writes its token (the code phase then refuses for its own reason)
+    monkeypatch.setattr(rt.sys, "argv", ["release_train.py", "run", "--go", "--batch", "cmdline-long",
+                                         "--from", "code"])
+    assert rt.main() == 1
+    out = capsys.readouterr().out
+    assert events[:2] == [("token", "start"), ("token", "code")], events
+    assert "schema phase has not passed" in out, out[-600:]
+
+
+def _cmdline_lease_world(monkeypatch, rt):
+    """The stubbed world, with the lease's opening and closing, each message file written and each read-back
+    recorded in its call list."""
+    w = _rt_world(monkeypatch, rt)
+
+    @contextlib.contextmanager
+    def lease(what, **kw):
+        w.calls.append(("lease-open",))
+        try:
+            yield "lease"
+        finally:
+            w.calls.append(("lease-close",))
+    real_write, real_check = rt.write_message_file, rt.assert_message_file
+
+    def write(path, text):
+        w.calls.append(("write", path))
+        return real_write(path, text)
+
+    def check(path, text):
+        w.calls.append(("read-back", path))
+        return real_check(path, text)
+    monkeypatch.setattr(rt, "controller_lease_session", lease)
+    monkeypatch.setattr(rt, "write_message_file", write)
+    monkeypatch.setattr(rt, "assert_message_file", check)
+    return w
+
+
+def _cmdline_lease_span(w):
+    span = w.calls[w.calls.index(("lease-open",)):w.calls.index(("lease-close",)) + 1]
+    return [c for c in span if c[0] != "push-address"]
+
+
+@pytest.mark.parametrize("phase", ["precursor", "code"])
+def test_cmdline_the_message_file_is_written_under_the_lease_and_read_back_at_the_commit(monkeypatch, tmp_path,
+                                                                                         phase):
+    """Each phase writes its message file under the lease, before its first git command, to a name of its own
+    beside the state file; reads it back at the commit; and git is handed that file holding the WHOLE text the
+    phase derived. A file changed between the write and the commit refuses: no commit, no push, no sha
+    recorded."""
+    rt, _src = _release_train()
+    _cmdline_sql_batch(monkeypatch, rt, tmp_path)
+    w = _cmdline_lease_world(monkeypatch, rt)
+    kind, message = (("precursor-message", rt.PRECURSOR_MESSAGE) if phase == "precursor"
+                     else ("merge-message", rt.MERGE_MESSAGE))
+    run_phase = rt.phase_precursor if phase == "precursor" else rt.phase_code
+    st = _rt_fresh(rt, schema_done=True)
+    run_phase(GO, st)
+    written = [c[1] for c in w.calls if c[0] == "write"]
+    assert len(written) == 1 and written[0].startswith(rt.STATE_PATH + "." + kind + "."), written
+    path = written[0]
+    if phase == "precursor":
+        middle = [("git", "git", "checkout", "main"), ("git", "git", "pull", "--ff-only"),
+                  ("git", "git", "checkout", rt.BRANCH)]
+    else:
+        middle = [("git", "git", "checkout", "main"), ("git", "git", "merge", "--no-ff")]
+    # the write reads its file back once (write_message_file), and the phase again at the commit
+    assert _cmdline_lease_span(w) == ([("lease-open",), ("write", path), ("read-back", path)] + middle
+                                      + [("read-back", path), ("git", "git", "commit", "-F"),
+                                         ("push", "git push origin"), ("lease-close",)]), w.calls
+    assert w.commits == [(("-F", path), _rt_committed_text(message))], w.commits
+    assert st["precursor_sha" if phase == "precursor" else "code_sha"] == (
+        PRECURSOR_SHA if phase == "precursor" else MERGE_SHA)
+
+    # the same phase again, the file changed after the write and before the commit
+    w2 = _cmdline_lease_world(monkeypatch, rt)
+    inner = w2.git_child
+    trigger = ["git", "checkout", rt.BRANCH] if phase == "precursor" else ["git", "merge", "--no-ff"]
+
+    def change(lease, argv):
+        if argv[:3] == trigger:
+            with open([c[1] for c in w2.calls if c[0] == "write"][0], "a", encoding="utf-8") as fh:
+                fh.write("x")
+        return inner(lease, argv)
+    monkeypatch.setattr(rt, "git_child", change)
+    st2 = _rt_fresh(rt, schema_done=True)
+    with pytest.raises(rt.Fail) as exc:
+        run_phase(GO, st2)
+    assert "does not read back as written" in str(exc.value), str(exc.value)[:300]
+    assert w2.commits == [] and w2.kinds("push", "deploy") == [], w2.calls
+    assert "precursor_sha" not in st2 and "code_sha" not in st2
+
+
+def _cmdline_git(repo, *argv, stdin=None):
+    p = subprocess.run(["git"] + list(argv), cwd=str(repo), capture_output=True, input=stdin)
+    assert p.returncode == 0, (argv, p.stderr.decode("utf-8", "replace")[-500:])
+    return p.stdout
+
+
+def _cmdline_scratch(monkeypatch, rt, tmp_path):
+    """A scratch repository for the commit phases, bound to the newest entry with sql: a bare origin beside it,
+    main with one commit pushed, the entry's branch carrying its sql files and a code change in two commits that
+    carry the trailer, main checked out, a pre-commit hook installed after the setup (its marker counts the
+    commits made from here on). Every child of the train runs here and nowhere else: the lease is a null context,
+    git children and pushes run in the scratch repository, pyflakes answers nothing, and the deploy raises
+    ns.Deployed with the sha it was handed."""
+    _cmdline_sql_batch(monkeypatch, rt, tmp_path)
+    repo, origin = Path(rt.REPO), tmp_path / "origin.git"
+    assert repo == tmp_path / "repo"
+    _cmdline_git(tmp_path, "init", "-q", "--bare", "-b", "main", str(origin))
+    repo.mkdir()
+    _cmdline_git(repo, "init", "-q", "-b", "main")
+    for k, v in (("user.name", "t"), ("user.email", "t@example.invalid"), ("core.autocrlf", "false"),
+                 ("commit.gpgsign", "false"), ("commit.cleanup", "default"), ("core.hooksPath", ".git/hooks")):
+        _cmdline_git(repo, "config", k, v)
+    url = origin.as_posix()
+    _cmdline_git(repo, "remote", "add", "origin", url)
+    (repo / "README").write_text("root\n")
+    _cmdline_git(repo, "add", "README")
+    _cmdline_git(repo, "commit", "-q", "-m", "root")
+    _cmdline_git(repo, "push", "-q", "-u", "origin", "main")
+    root = _cmdline_git(repo, "rev-parse", "HEAD").decode().strip()
+    _cmdline_git(repo, "checkout", "-q", "-b", rt.BRANCH)
+    (repo / "backend" / "sql").mkdir(parents=True)
+    for f in rt.precursor_files():
+        (repo / "backend" / "sql" / f).write_text("-- %s\n" % f)
+    _cmdline_git(repo, "add", "backend")
+    _cmdline_git(repo, "commit", "-q", "-m", "the sql" + _TRAILER)
+    (repo / "code.txt").write_text("new\n")
+    _cmdline_git(repo, "add", "code.txt")
+    _cmdline_git(repo, "commit", "-q", "-m", "the code" + _TRAILER)
+    tip = _cmdline_git(repo, "rev-parse", "HEAD").decode().strip()
+    _cmdline_git(repo, "checkout", "-q", "main")
+    marker = tmp_path / "hook-ran.txt"
+    hook = repo / ".git" / "hooks" / "pre-commit"
+    hook.parent.mkdir(parents=True, exist_ok=True)
+    with open(hook, "w", newline="\n") as fh:
+        fh.write("#!/bin/sh\necho ran >> '%s'\n" % marker.as_posix())
+    monkeypatch.setattr(rt, "REVIEWED_TIP", tip)
+    monkeypatch.setattr(rt, "ORIGIN_PUSH_URL", url)
+    monkeypatch.setattr(rt, "controller_lease_session", lambda what, **kw: contextlib.nullcontext("lease"))
+    ns = SimpleNamespace(repo=repo, origin=origin, root=root, tip=tip, marker=marker, pushes=[])
+
+    def child(lease, step, argv, kind, timeout=None):
+        assert kind in ("git", "push"), kind
+        if kind == "push":
+            ns.pushes.append(list(argv))
+        p = subprocess.run(argv, cwd=rt.REPO, capture_output=True, text=True, encoding="utf-8", errors="replace")
+        return (p.stdout or "") + (p.stderr or ""), p.returncode
+    monkeypatch.setattr(rt, "blocking_child", child)
+    real_run = rt.run
+    monkeypatch.setattr(rt, "run", lambda cmd, *a, **kw: "" if list(cmd[:3]) == ["python", "-m", "pyflakes"]
+                        else real_run(cmd, *a, **kw))
+
+    class Deployed(Exception):
+        pass
+
+    def no_deploy(sha, **kw):
+        raise Deployed(sha)
+    monkeypatch.setattr(rt, "_deploy_both", no_deploy)
+    ns.Deployed = Deployed
+    ns.git = lambda *argv, **kw: _cmdline_git(repo, *argv, **kw)
+    ns.head = lambda ref: _cmdline_git(repo, "rev-parse", ref).decode().strip()
+    ns.origin_main = lambda: _cmdline_git(origin, "rev-parse", "main").decode().strip()
+    ns.parents = lambda rev: _cmdline_git(repo, "rev-list", "--parents", "-n", "1", rev).decode().split()[1:]
+    ns.stored = lambda rev: _cmdline_git(repo, "cat-file", "commit", rev).split(b"\n\n", 1)[1]
+    ns.cleanup = lambda text: _cmdline_git(repo, "stripspace", stdin=text.encode("utf-8"))
+    ns.marker_lines = lambda: marker.read_text().split() if marker.exists() else []
+    ns.reset_marker = lambda: marker.unlink() if marker.exists() else None
+
+    def merge_head():
+        p = subprocess.run(["git", "rev-parse", "-q", "--verify", "MERGE_HEAD"], cwd=str(repo), capture_output=True)
+        return p.stdout.decode().strip() if p.returncode == 0 else None
+    ns.merge_head = merge_head
+    return ns
+
+
+def test_cmdline_both_phases_commit_from_their_files_on_a_scratch_repository(monkeypatch, tmp_path, capsys):
+    """Phase 1 and phase 4 run their own commands with real git on a scratch repository (a bare origin beside
+    it, the lane's commits carrying the trailer, a pre-commit hook standing), the merge message made longer
+    than the command-line bound: each stored message is byte for byte git's own cleanup of the text the phase
+    derived, the parents are the wanted commits by identity, the merge's tree is the reviewed tip's, origin's
+    main is each new commit, and the hook ran once per commit."""
+    rt, _src = _release_train()
+    ns = _cmdline_scratch(monkeypatch, rt, tmp_path)
+    long_merge = rt.MERGE_MESSAGE + "\n\n" + "\n".join("line %05d of a merge message past the bound" % i
+                                                        for i in range(1000))
+    assert _cmdline_units(long_merge) > rt.CMDLINE_MAX
+    monkeypatch.setattr(rt, "MERGE_MESSAGE", long_merge)
+
+    st = _rt_fresh(rt)
+    rt.phase_precursor(GO, st)
+    pre = st["precursor_sha"]
+    assert pre == ns.head("HEAD") == ns.head("refs/remotes/origin/main") == ns.origin_main()
+    assert ns.parents(pre) == [ns.root]
+    assert ns.stored(pre) == ns.cleanup(_rt_committed_text(rt.PRECURSOR_MESSAGE))
+    assert ns.stored(pre).endswith(_TRAILER.strip().encode("utf-8") + b"\n")
+    assert sorted(ns.git("diff", "--name-only", ns.root, pre).decode().split()) == sorted(
+        "backend/sql/" + f for f in rt.precursor_files())
+    assert ns.marker_lines() == ["ran"]
+
+    st["schema_done"] = True
+    with pytest.raises(ns.Deployed):
+        rt.phase_code(GO, st)
+    code = st["code_sha"]
+    assert code == ns.head("HEAD") == ns.origin_main()
+    assert ns.parents(code) == [pre, ns.tip]
+    assert ns.head(code + "^{tree}") == ns.head(ns.tip + "^{tree}")
+    assert ns.stored(code) == ns.cleanup(_rt_committed_text(long_merge))
+    assert len(ns.stored(code)) > rt.CMDLINE_MAX
+    assert ns.marker_lines() == ["ran", "ran"]
+    assert ns.pushes == [["git", "push", "origin", "main"]] * 2
+    state = Path(rt.STATE_PATH).name
+    kinds = sorted(p.name[len(state) + 1:].split(".")[0] for p in Path(rt.STATE_PATH).parent.iterdir()
+                   if p.name.startswith(state + "."))
+    assert kinds == ["merge-message", "precursor-message"], kinds
+    capsys.readouterr()
+
