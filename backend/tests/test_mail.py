@@ -3652,3 +3652,68 @@ def test_a_mail_send_writes_one_receipt_and_one_spam_check_and_an_invite_neither
     finish = inspect.getsource(main._mail_finish_send)
     for once in ("_mail_write_message(", "_mail_write_receipt(", "_mail_spam_check(", "_mail_rate_or_raise("):
         assert finish.count(once) == 1, once
+
+
+def _ban_gate_lines(capsys):
+    return [ln for ln in capsys.readouterr().out.splitlines() if "[BAN-GATE]" in ln]
+
+
+def test_the_lock_helper_proves_the_whole_grant_by_default_and_the_roster_alone_when_asked(capsys):
+    """_mail_lock_admin's re-proof under the lock. Its default form is the
+    whole proof (_is_admin): an actively banned roster admin is refused 403
+    "Not an admin" with one [BAN-GATE] line. roster=True (the broadcast's form)
+    proves the roster alone: the same admin gets the re-read rows back and
+    none of its statements reads player_bans. Under no ban both forms return;
+    an account not on the roster is refused by both."""
+    db, ids = _world()
+    db.add_player(ADMIN_SID)
+    db.admins.add(ADMIN_SID)
+    db.bans[ADMIN_SID] = "spam"
+    capsys.readouterr()
+    exc = _raises(main._mail_lock_admin(db, ADMIN_SID))
+    assert (exc.status_code, exc.detail) == (403, "Not an admin")
+    assert _ban_gate_lines(capsys) == ["[BAN-GATE] refused route=-"]
+    before = len(db.statements)
+    rows = _run(main._mail_lock_admin(db, ADMIN_SID, roster=True))
+    assert rows.get(ADMIN_SID) is not None
+    assert [s for s in db.statements[before:] if "player_bans" in s] == []
+    assert _ban_gate_lines(capsys) == []
+    del db.bans[ADMIN_SID]
+    assert _run(main._mail_lock_admin(db, ADMIN_SID)).get(ADMIN_SID) is not None
+    assert _run(main._mail_lock_admin(db, ADMIN_SID, roster=True)).get(ADMIN_SID) is not None
+    for kw in ({}, {"roster": True}):
+        exc = _raises(main._mail_lock_admin(db, A_SID, **kw))
+        assert (exc.status_code, exc.detail) == (403, "Not an admin"), kw
+    assert _ban_gate_lines(capsys) == []
+
+
+def test_the_bulk_grant_routes_refuse_an_admin_banned_while_waiting_for_the_lock(capsys):
+    """The bulk grant routes keep the whole proof under the lock: a roster
+    admin who passes _require_admin and is banned while the route waits for
+    the identity lock is refused 403 "Not an admin" by the lock helper's
+    re-proof, with the [BAN-GATE] line, and nothing is granted, revoked or
+    audited."""
+    db, ids = _world()
+    db.add_player(ADMIN_SID)
+    db.admins.add(ADMIN_SID)
+    db.bulk_grants[C_SID] = (40, NOW + timedelta(days=7))
+
+    def banned_under_lock(sid):
+        if sid == ADMIN_SID:
+            db.bans[ADMIN_SID] = "spam"
+    with _admin_secret():
+        for make in (lambda: main.admin_mail_bulk_grant(main._AdminMailBulkGrantReq(
+                         admin_steam_id=ADMIN_SID, hmac_signature=_sign(ADMIN_SID, "mail_bulk_grant", A_SID),
+                         steam_id=A_SID, max_recipients=40, days=7), db),
+                     lambda: main.admin_mail_bulk_grant_revoke(
+                         C_SID, ADMIN_SID, _sign(ADMIN_SID, "mail_bulk_grant_revoke", C_SID), db)):
+            db.bans.pop(ADMIN_SID, None)
+            db.on_identity_lock = banned_under_lock
+            capsys.readouterr()
+            exc = _raises(make())
+            assert (exc.status_code, exc.detail) == (403, "Not an admin")
+            assert _ban_gate_lines(capsys) == ["[BAN-GATE] refused route=-"]
+            assert ("identity", ADMIN_SID) in db.locks
+    db.on_identity_lock = None
+    assert A_SID not in db.bulk_grants and db.bulk_grants[C_SID][0] == 40
+    assert not db.admin_actions
